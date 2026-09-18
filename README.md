@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <div align="left" style="background:#0A0D12;color:#E7EBF0;padding:36px 40px 44px;border:1px solid #1E2733;border-radius:14px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:15px;line-height:1.8">
 
 <img src="assets/verthys-hero.svg" alt="Verthys — 私密数据管理器" style="width:100%;height:auto;border-radius:10px;display:block;margin:0 0 6px 0"/>
@@ -318,3 +319,6 @@ ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
 </div>
 
 </div>
+=======
+# Verthys
+>>>>>>> c6ba26a814220d32222af14509b35f1e4a38895b
