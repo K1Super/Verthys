@@ -113,6 +113,9 @@ impl ScanRecord for VerthysSummaryEntry {
  * 第 11.4 项：预取命令 + 长期任务控制                                   *
  * ------------------------------------------------------------------ */
 
+/// 预取结果（第 11.4 项）：记录批次 + 是否遍历结束 + worker 报告的 record_count（第 2.7 项）
+pub type PrefetchReply<T> = Result<(Vec<T>, bool, usize), String>;
+
 /// 预取任务命令（第 11.4 项）
 ///
 /// 通过 mpsc 通道发送给长期预取任务。每条 Fetch 命令携带 oneshot 回复通道，
@@ -126,7 +129,7 @@ pub enum PrefetchCommand<T: ScanRecord> {
         /// 批量大小（传递给 worker scan_fetch/scan_summary_fetch 的 id 参数）
         batch_size: u64,
         /// 回复通道（oneshot，任务处理完成后发送结果）
-        reply: oneshot::Sender<Result<(Vec<T>, bool, usize), String>>,
+        reply: oneshot::Sender<PrefetchReply<T>>,
     },
 }
 
@@ -448,7 +451,7 @@ pub struct ScanPipelineState<T: ScanRecord> {
     /// 长期预取任务句柄（第 11.4 项）
     pub prefetch_task: Option<PrefetchTaskHandle<T>>,
     /// 待接收的预取结果（第 11.4 项：scan_next 时 await 此 receiver）
-    pub pending_reply: Option<oneshot::Receiver<Result<(Vec<T>, bool, usize), String>>>,
+    pub pending_reply: Option<oneshot::Receiver<PrefetchReply<T>>>,
     /// 第 2.4 项：ScanSession 状态机
     pub session_state: ScanSessionState,
 }

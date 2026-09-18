@@ -44,7 +44,7 @@ pub fn c_error_to_verthys(code: i32, context: &str) -> VerthysError {
         c_error_codes::VERTHYS_C_ERR_LOCKED => VerthysError::VerthysLocked,
         c_error_codes::VERTHYS_C_ERR_AUTH => VerthysError::InvalidPassword,
         c_error_codes::VERTHYS_C_ERR_IO => {
-            VerthysError::Io(std::io::Error::new(std::io::ErrorKind::Other, context))
+            VerthysError::Io(std::io::Error::other(context))
         }
         c_error_codes::VERTHYS_C_ERR_CORRUPT => VerthysError::IntegrityCheckFailed,
         c_error_codes::VERTHYS_C_ERR_FULL => VerthysError::VerthysFull,

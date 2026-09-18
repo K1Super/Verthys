@@ -71,6 +71,37 @@ pub fn install(log_sender: LogSender) {
     upgrade(log_sender);
 }
 
+/// ===== panic payload 脱敏（P2-6 修复，2026-09-19） =====
+///
+/// panic payload 可能携带敏感上下文（expect/unwrap 的字符串、越界索引
+/// 关联数据、调试格式化的密钥材料）。三路输出（日志管道/
+/// OutputDebugStringW/stderr）均存在被本机攻击者或日志读者捕获的
+/// 泄露面。策略：
+///   1. 截断至 256 字符（char 边界安全截断，防大块敏感数据倾倒）
+///   2. 过滤控制字符（防日志注入伪造条目、防二进制密钥字节直出）
+///   3. 保留 panic 位置与 backtrace（排障核心，不含用户数据）
+const PANIC_PAYLOAD_MAX_CHARS: usize = 256;
+
+fn sanitize_panic_payload(raw: &str) -> String {
+    let filtered: String = raw
+        .chars()
+        .map(|c| {
+            // 可见 ASCII 与常规空白保留；其余（控制字符/DEL/奇异 Unicode）替换
+            if (c.is_ascii_graphic() || c == ' ' || c == '\t') && c != '\u{7f}' {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    if filtered.chars().count() > PANIC_PAYLOAD_MAX_CHARS {
+        let head: String = filtered.chars().take(PANIC_PAYLOAD_MAX_CHARS).collect();
+        format!("{}...[truncated]", head)
+    } else {
+        filtered
+    }
+}
+
 /// 最小化 panic 处理器（不依赖日志系统）
 ///
 /// 仅输出到 OutputDebugString（Windows）或 stderr（其他平台）。
@@ -83,6 +114,7 @@ fn minimal_panic_handler(info: &std::panic::PanicHookInfo<'_>) {
     } else {
         "Box<dyn Any> panic payload".to_string()
     };
+    let msg = sanitize_panic_payload(&msg);
 
     let location = info.location().map(|l| {
         format!("{}:{}:{}", l.file(), l.line(), l.column())
@@ -121,6 +153,7 @@ fn full_panic_handler(info: &std::panic::PanicHookInfo<'_>, sender: &LogSender) 
     } else {
         "Box<dyn Any> panic payload".to_string()
     };
+    let msg = sanitize_panic_payload(&msg);
 
     let location = info.location().map(|l| {
         format!("{}:{}:{}", l.file(), l.line(), l.column())
@@ -151,7 +184,6 @@ fn full_panic_handler(info: &std::panic::PanicHookInfo<'_>, sender: &LogSender) 
 }
 
 /// ===== OutputDebugStringW 封装（Windows） =====
-
 #[cfg(windows)]
 fn output_debug_string(msg: &str) {
     use std::os::windows::ffi::OsStrExt;
@@ -188,5 +220,29 @@ mod tests {
     fn test_minimal_panic_handler_format() {
         // 仅验证 handler 函数可被引用（实际触发 panic 测试在集成测试中）
         let _ = minimal_panic_handler as fn(&std::panic::PanicHookInfo<'_>);
+    }
+
+    #[test]
+    fn test_sanitize_truncates_long_payload() {
+        let raw = "A".repeat(1024);
+        let out = sanitize_panic_payload(&raw);
+        assert!(out.chars().count() < 1024);
+        assert!(out.ends_with("...[truncated]"));
+        assert!(out.starts_with(&"A".repeat(256)));
+    }
+
+    #[test]
+    fn test_sanitize_strips_control_chars() {
+        // 换行（日志注入）、NUL、DEL、二进制字节应被替换；保留可见 ASCII 与空格
+        let raw = "ok\r\nvalue\u{0}\u{7f}\u{1}tail";
+        let out = sanitize_panic_payload(raw);
+        assert!(out.starts_with("ok??value???tail"), "got: {out}");
+        assert!(!out.contains('\r') && !out.contains('\n'));
+    }
+
+    #[test]
+    fn test_sanitize_keeps_normal_message() {
+        let raw = "index out of bounds: the len is 3 but the index is 7";
+        assert_eq!(sanitize_panic_payload(raw), raw);
     }
 }

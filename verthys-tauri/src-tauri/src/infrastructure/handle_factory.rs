@@ -103,10 +103,10 @@ pub fn validate_no_inherited_handles() -> Result<(), String> {
         };
 
         let mut flags = 0u32;
-        if unsafe { GetHandleInformation(handle, &mut flags) }.is_ok() {
-            if (flags & HANDLE_FLAG_INHERIT) != 0 {
-                return Err(format!("进程安全自检不通过：{} 被设置为可继承句柄，违反资源隔离规范", desc));
-            }
+        if unsafe { GetHandleInformation(handle, &mut flags) }.is_ok()
+            && (flags & HANDLE_FLAG_INHERIT) != 0
+        {
+            return Err(format!("进程安全自检不通过：{} 被设置为可继承句柄，违反资源隔离规范", desc));
         }
     }
 

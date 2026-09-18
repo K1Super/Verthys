@@ -47,7 +47,7 @@ pub const STDERR_DIAG_MAX_LEN: usize = 2048;
 ///
 /// 字段严格对齐 verthys.h 中 VerthysUnlockProgress 公共结构：
 ///   - stage：VerthysUnlockStage 枚举值（1=读超级块 2=Argon2开始 3=Argon2完成
-///            4=缓存检查 5=索引解密 6=B+树完成 7=摘要完成 8=Merkle完成）
+///     4=缓存检查 5=索引解密 6=B+树完成 7=摘要完成 8=Merkle完成）
 ///   - percent：0~100 累计进度百分比
 ///   - elapsed_ms：自解锁开始累计耗时（毫秒）
 ///   - message：UTF-8 阶段描述（供前端直接展示）

@@ -283,11 +283,9 @@ pub async fn verthys_scan_open(
     let (prefetch_task, pending_reply) = if !exhausted {
         let handle =
             PrefetchTaskHandle::<VerthysRecordEntry>::spawn(app.clone(), shm_name.clone());
-        let reply_rx = handle.send_fetch(batch_size).await.map_err(|e| {
-            // 发送失败：shutdown 任务后返回错误
-            let _ = handle;
-            e
-        })?;
+        // 发送失败：向上传播错误，handle 随函数提前返回被 Drop
+        // 自动取消预取任务（cancel + 关闭命令通道，见 PrefetchTaskHandle::drop）
+        let reply_rx = handle.send_fetch(batch_size).await?;
         (Some(handle), Some(reply_rx))
     } else {
         (None, None)

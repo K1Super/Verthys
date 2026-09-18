@@ -239,14 +239,18 @@ int verthys_pepper_load_from_os(void)
         pepper_lock_memory();
         g_pepper_source = VERTHYS_PEPPER_SOURCE_OS;
         g_pepper_initialized = 1;
-        /* 持久化到 OS 存储 */
-        if (verthys_pepper_save_to_os() != 0) {
-            /* ★ §4.2：持久化失败回退到编译内嵌胡椒——兜底来源是确定性的
-             * （COMPILED），其来源随容器创建写入 flags[5] 并在解锁时校验
-             * 一致性，不会出现"随机胡椒丢失后静默漂移"的不可诊断锁库。 */
+        /* 持久化到 OS 存储（P1-1 修复：重试一次抗瞬时故障，
+         * 仍失败置来源错误态——禁止静默降级到编译内嵌胡椒。
+         * 内存中的随机胡椒即被清零丢弃，避免"高熵胡椒未持久化
+         * 却被零熵常量替换"的安全性浪费；上层以 VERTHYS_ERR_
+         * PEPPER_SOURCE 明确报错，用户修复环境后重试即可。） */
+        if (verthys_pepper_save_to_os() != 0 &&
+            verthys_pepper_save_to_os() != 0) {
             verthys_secure_zero(g_pepper, sizeof(g_pepper));
-            memcpy(g_pepper, VERTHYS_PEPPER_COMPILED, VERTHYS_KEY_BYTES);
-            g_pepper_source = VERTHYS_PEPPER_SOURCE_COMPILED;
+            g_pepper_source = VERTHYS_PEPPER_SOURCE_NONE;
+            g_pepper_initialized = 0;
+            g_pepper_source_error = 1;
+            return VERTHYS_PEPPER_LOAD_SOURCE_ERR;
         }
         return VERTHYS_PEPPER_LOAD_OK;
     }

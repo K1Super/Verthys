@@ -53,6 +53,13 @@ mod windows_impl {
     /// 摘要扫描默认共享内存大小 4MB（元数据体积极小，4MB 足够上万条）
     pub const SHM_SUMMARY_DEFAULT_SIZE: usize = 4 * 1024 * 1024;
 
+    /// 摘要记录元组（writer 侧构造 → SHM 传输）：
+    /// (lid, rtype, name, data_size, physical_offset, merkle_leaf, created_time)
+    ///
+    /// worker.rs 的 fetch_summary_into_shm 与本模块 write_summary_records 共用，
+    /// 避免复杂元组类型在多处重复书写（clippy::type_complexity）。
+    pub type SummaryRecord = (u64, u8, String, u64, u64, [u8; 32], u64);
+
     /*
      * 头部布局（64 字节）：
      *   [0..4]   magic: u32
@@ -237,14 +244,16 @@ mod windows_impl {
         ///
         /// ★ Phase 2G：摘要记录元组增加 created_time 字段
         /// 元组：(lid, rtype, name, data_size, physical_offset, merkle_leaf, created_time)
+        ///
         /// 与全量 write_records 的区别：
         ///   - 写入 SHM_SUMMARY_MAGIC 而非 SHM_MAGIC（reader 据此区分解析路径）
         ///   - 每条 80 字节索引条目（含 data_size/physical_offset/merkle_leaf/created_time，无 data_offset）
         ///   - total_data_bytes 恒为 0（无数据块传输）
+        ///
         /// 返回写入的记录数，或在数据超出缓冲区时返回错误
         pub fn write_summary_records(
             &mut self,
-            records: &[(u64, u8, String, u64, u64, [u8; 32], u64)],
+            records: &[SummaryRecord],
             exhausted: bool,
         ) -> Result<usize, &'static str> {
             let entry_table_size = records.len() * SHM_SUMMARY_ENTRY_SIZE;

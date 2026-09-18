@@ -30,11 +30,6 @@
 #                      layer5_sandbox/          — Mitigation Policy
 #                      layer6_closure/          — 闭环防御能力验证（7 项攻击路径）
 #
-# ★ §1.4 V2 退役：V2 专属源（btree/datablock/merkle/transaction/garbage/
-#   recovery/superblock(V2)/watcher/mountwatch/warmcache(V2)/v2_lifecycle/
-#   migration）随删除清单移除，V3 为唯一容器格式。
-# ★ 模块化重构（2026-09-15）：runtime/anti_debug（v1，死代码——生产
-#   路径零调用，anti_debug_v2 为唯一检测器）随重构删除清单移除。
 #
 # 构建策略：
 #   - verthys_core_obj：OBJECT 库，源码编译一次
@@ -54,6 +49,16 @@ endif()
 #   + 插桩核心对象库 + 语料种子生成器。默认 OFF——插桩重编译核心
 #   全量源码，仅模糊测试专项构建开启（scripts/build_core.fuzz.ps1）。
 option(VERTHYS_ENABLE_FUZZ "Build libFuzzer fuzz targets (WP-10)" OFF)
+
+# ★ P2-5 修复（2026-09-19）：DLL 诊断输出编译门（-DVERTHYS_DIAG=ON）
+#   生产构建（默认 OFF）：VERTHYS_DIAG_LOG 为空操作，Release DLL 对
+#   调试器/DebugView 完全静默，消除运行时行为指纹泄露面。
+#   诊断构建（ON）：诊断经 OutputDebugStringA 输出，供开发环境捕获。
+#   注意：Event Log（job_isolation.c）为产品正式排查通道，不受本门控制。
+option(VERTHYS_DIAG "Enable DLL diagnostic output via OutputDebugStringA" OFF)
+if(VERTHYS_DIAG)
+    add_compile_definitions(VERTHYS_DIAG)
+endif()
 
 # ---------- 分层源文件 ----------
 # ★ 模块化重构（C 层模块化与接口隔离标准规范）：

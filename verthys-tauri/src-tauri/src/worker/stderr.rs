@@ -196,7 +196,7 @@ mod tests {
     async fn test_drain_stderr_eof() {
         // 创建一个会立即 EOF 的 stderr（使用已关闭的管道）
         // 这里用一个简单的 echo 管道测试
-        let (mut rx, tx) = tokio::io::duplex(64);
+        let (rx, tx) = tokio::io::duplex(64);
         drop(tx); // 关闭写端，触发 EOF
 
         // 由于 drain_stderr 需要 ChildStderr，这里用管道模拟

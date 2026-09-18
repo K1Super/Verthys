@@ -99,6 +99,7 @@ pub struct BruteForceGuard {
     config: BruteForceConfig,
 }
 
+#[derive(Default)]
 struct BruteForceState {
     /// 连续失败次数（成功解锁后重置为 0）
     consecutive_failures: u32,
@@ -115,20 +116,6 @@ struct BruteForceState {
     purge_triggered_at: Option<Instant>,
     /// SECURITY.md 第 4 项：上次 record_failure / record_success 调用时间（速率限制）
     last_record_time: Option<Instant>,
-}
-
-impl Default for BruteForceState {
-    fn default() -> Self {
-        BruteForceState {
-            consecutive_failures: 0,
-            total_failures: 0,
-            lock_until: None,
-            purge_triggered: false,
-            last_purge_total: 0,
-            purge_triggered_at: None,
-            last_record_time: None,
-        }
-    }
 }
 
 /* ==================================================================== *

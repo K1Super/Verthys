@@ -73,6 +73,7 @@ pub(crate) fn probe_global_key_inproc(
                 "[worker] probe_global_key: 读取记录失败 rc={:08X}，前端按 id 自取",
                 e
             );
+            let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
             (Some(true), Some(lid), None)
         }
     }
@@ -98,12 +99,12 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 /* ★ 企业级根治方案：解锁成功后进程内探测全局主密钥记录，
                  * 结果内联到响应三字段，消除前端 IPC 链路与 v1 假阴性死锁。 */
                 let (has_gmk, gmk_id, gmk_record) = probe_global_key_inproc(worker);
-                return Response {
+                Response {
                     has_global_key: has_gmk,
                     global_key_id: gmk_id,
                     global_key_record: gmk_record,
                     ..Response::ok("unlock")
-                };
+                }
             } else {
                 /* ★ 企业级修复（D-STATE-RECOVERY）：级联 INVALID 状态恢复
                  *

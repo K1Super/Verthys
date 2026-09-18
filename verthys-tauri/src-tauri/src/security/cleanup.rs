@@ -109,8 +109,7 @@ pub fn sanitize_log_message(msg: &str) -> String {
     let s = replace_sids(&s);
     let s = replace_ips(&s);
     let s = replace_emails(&s);
-    let s = replace_hex_ids(&s);
-    s
+    replace_hex_ids(&s)
 }
 
 /// 替换 %USERPROFILE% 路径为 <USER>（兼容正斜杠写法）
@@ -811,13 +810,12 @@ mod win_impl {
         let mut count: usize = 0;
         for file in files {
             let lower = file.to_lowercase();
-            if lower.ends_with(".verthys_tmp")
+            if (lower.ends_with(".verthys_tmp")
                 || lower.ends_with(".verthys_cache")
-                || lower.ends_with(".verthys_lock")
+                || lower.ends_with(".verthys_lock"))
+                && secure_delete_file(&file, DeleteMode::Standard).is_ok()
             {
-                if secure_delete_file(&file, DeleteMode::Standard).is_ok() {
-                    count += 1;
-                }
+                count += 1;
             }
         }
         Ok(count)

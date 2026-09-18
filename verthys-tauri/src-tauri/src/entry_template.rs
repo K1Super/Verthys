@@ -39,8 +39,6 @@
  * 不依赖具体业务控制器（controller），避免入口层与业务逻辑耦合。
  */
 
-#![allow(dead_code)]
-
 use crate::infrastructure::app_paths::AppPaths;
 use crate::infrastructure::console_handler;
 use crate::infrastructure::log_pipe::{LogDaemon, LogEntry, LogLevel};
@@ -150,7 +148,7 @@ fn run_main_ui(ctx: Context) -> VerthysResult<()> {
 fn run_secure_worker(ctx: Context) -> VerthysResult<()> {
     // 子进程启动后必须自检句柄继承标志，防止父进程意外传递可继承句柄。
     crate::infrastructure::handle_factory::validate_no_inherited_handles()
-        .map_err(|e| crate::util::error::VerthysError::Internal(e))?;
+        .map_err(crate::util::error::VerthysError::Internal)?;
 
     ctx.log_sender().info("entry", "安全Worker进程启动完成");
     Ok(())

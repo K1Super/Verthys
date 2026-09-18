@@ -31,9 +31,14 @@
  *   - 应用失败不阻断启动（旧版 Windows 兼容）
  *   - 实际状态由 defense_closure_check 在 DLL 侧查询
  */
-#![allow(non_snake_case, non_camel_case_types, dead_code)]
+/* Win32 命名镜像声明：本模块的类型/常量/枚举刻意与 winnt.h 同名
+ * （BOOL/DWORD/HMODULE、ProcessDEPPolicy 等），便于与 Microsoft 官方文档
+ * 对照审计。clippy::upper_case_acronyms / clippy::enum_variant_names 在此
+ * 属误报，模块级豁免。 */
+#![allow(non_snake_case, non_camel_case_types, dead_code, clippy::upper_case_acronyms, clippy::enum_variant_names)]
 
-use std::os::raw::{c_int, c_void};
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_int, c_void};
 
 /* ---------- Win32 类型和常量 ---------- */
 
@@ -131,9 +136,9 @@ static mut ACTIVE_ATTRS: u32 = 0;
 /* ---------- FFI 函数声明 ---------- */
 
 extern "system" {
-    fn GetModuleHandleA(lpModuleName: *const u8) -> HMODULE;
-    fn GetProcAddress(hModule: HMODULE, lpProcName: *const u8) -> Option<unsafe extern "system" fn() -> isize>;
-    fn LoadLibraryA(lpLibFileName: *const u8) -> HMODULE;
+    fn GetModuleHandleA(lpModuleName: *const c_char) -> HMODULE;
+    fn GetProcAddress(hModule: HMODULE, lpProcName: *const c_char) -> Option<unsafe extern "system" fn() -> isize>;
+    fn LoadLibraryA(lpLibFileName: *const c_char) -> HMODULE;
 }
 
 /// SetProcessMitigationPolicy 函数指针类型
@@ -154,11 +159,13 @@ type SetDefaultDllDirectoriesFn = unsafe extern "system" fn(
 ///
 /// 使用 GetProcAddress 动态解析，避免依赖 windows-sys 完整 feature。
 /// 返回 None 表示函数不可用（旧版 Windows）。
-unsafe fn resolve_kernel32_proc(name: &[u8]) -> Option<unsafe extern "system" fn() -> isize> {
-    let h = GetModuleHandleA(b"kernel32.dll\0".as_ptr());
+unsafe fn resolve_kernel32_proc(name: &CStr) -> Option<unsafe extern "system" fn() -> isize> {
+    // C 字符串字面量（c"..."）自带 NUL 终止，杜绝手工拼 \0 的遗漏风险
+    let kernel32 = c"kernel32.dll";
+    let h = GetModuleHandleA(kernel32.as_ptr());
     if h.is_null() {
         // kernel32 不在已加载模块中，尝试主动加载
-        let h2 = LoadLibraryA(b"kernel32.dll\0".as_ptr());
+        let h2 = LoadLibraryA(kernel32.as_ptr());
         if h2.is_null() {
             return None;
         }
@@ -171,7 +178,7 @@ unsafe fn resolve_kernel32_proc(name: &[u8]) -> Option<unsafe extern "system" fn
 ///
 /// 返回 true 成功，false 失败（旧版 Windows 不支持）。
 unsafe fn apply_win32k_syscall_disable() -> bool {
-    let raw = match resolve_kernel32_proc(b"SetProcessMitigationPolicy\0") {
+    let raw = match resolve_kernel32_proc(c"SetProcessMitigationPolicy") {
         Some(p) => p,
         None => return false,
     };
@@ -189,7 +196,7 @@ unsafe fn apply_win32k_syscall_disable() -> bool {
 ///
 /// 返回 true 成功，false 失败。
 unsafe fn apply_child_process_disable() -> bool {
-    let raw = match resolve_kernel32_proc(b"SetProcessMitigationPolicy\0") {
+    let raw = match resolve_kernel32_proc(c"SetProcessMitigationPolicy") {
         Some(p) => p,
         None => return false,
     };
@@ -207,7 +214,7 @@ unsafe fn apply_child_process_disable() -> bool {
 ///
 /// 返回 true 成功，false 失败（Win8 以下不支持）。
 unsafe fn apply_image_prefer_system32() -> bool {
-    let raw = match resolve_kernel32_proc(b"SetDefaultDllDirectories\0") {
+    let raw = match resolve_kernel32_proc(c"SetDefaultDllDirectories") {
         Some(p) => p,
         None => return false,
     };
@@ -220,7 +227,7 @@ unsafe fn apply_image_prefer_system32() -> bool {
 ///
 /// 返回 true 成功，false 失败。
 unsafe fn apply_image_load_policy() -> bool {
-    let raw = match resolve_kernel32_proc(b"SetProcessMitigationPolicy\0") {
+    let raw = match resolve_kernel32_proc(c"SetProcessMitigationPolicy") {
         Some(p) => p,
         None => return false,
     };
@@ -315,17 +322,17 @@ pub fn apply_process_sandbox() -> u32 {
 unsafe fn preload_win32k_dependencies() {
     // 仅使用模块名（不带路径），从 System32 加载
     // 这些 DLL 都是 Windows 系统组件，加载它们不会引入安全风险
-    let dlls: &[&[u8]] = &[
-        b"user32.dll\0",
-        b"shlwapi.dll\0",
-        b"shell32.dll\0",
-        b"wintrust.dll\0",
-        b"crypt32.dll\0",
-        b"advapi32.dll\0",
+    let dlls = [
+        c"user32.dll",
+        c"shlwapi.dll",
+        c"shell32.dll",
+        c"wintrust.dll",
+        c"crypt32.dll",
+        c"advapi32.dll",
     ];
 
     let mut loaded_count: u32 = 0;
-    for dll in dlls {
+    for dll in &dlls {
         // LoadLibraryA 增加引用计数，DLL 驻留至进程退出
         // 即使 FreeLibrary，DllMain 已运行过，mitigation 不会影响
         let h = LoadLibraryA(dll.as_ptr());

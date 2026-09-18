@@ -20,6 +20,7 @@
 #include "verthys_internal.h"
 #include "memory_guard.h"
 #include "emergency.h"
+#include "verthys_diag.h"
 /* V3 扫描游标（LSM 快照迭代器 + Extent 解密）。
  * verthys_v3_lifecycle.h 传递包含 verthys_lsm.h（scan_open/next/close）/
  * verthys_extent.h（extent_get / extent_index_find）/ VerthysContextV3 全套接口。 */
@@ -448,7 +449,7 @@ VerthysResult Verthys_ScanOpen(VerthysHandle handle,
                  "List rendering should use Verthys_ScanSummaryOpen instead. "
                  "count=%llu",
                  (unsigned long long)ctx->diag_scan_open_count);
-        OutputDebugStringA(_warn);
+        VERTHYS_DIAG_LOG(_warn);
     }
 #endif
 

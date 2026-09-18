@@ -69,9 +69,7 @@ pub(super) fn resolve_logical_path(
         .map_err(|e| format!("配置目录解析失败: {}", e))?;
 
     if !canonical.starts_with(&config_canonical) {
-        return Err(format!(
-            "路径不在白名单基目录内（安全拒绝）"
-        ));
+        return Err("路径不在白名单基目录内（安全拒绝）".to_string());
     }
 
     Ok(canonical)

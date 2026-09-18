@@ -72,12 +72,11 @@ impl VerthysSessionGuard {
     /// # 错误
     /// 文件锁获取失败返回 Err，verthys_unlock 应据此回滚。
     pub fn new(verthys_path: &str, session_id: &str) -> Result<Self, String> {
-        let file_lock = VerthysFileLock::lock_exclusive(verthys_path).map_err(|e| {
+        let file_lock = VerthysFileLock::lock_exclusive(verthys_path).inspect_err(|_| {
             log::error!(
                 "[VerthysSessionGuard] 获取文件锁失败: {}",
                 crate::util::path::sanitize_path(verthys_path)
             );
-            e
         })?;
 
         log::info!(

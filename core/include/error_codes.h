@@ -11,7 +11,8 @@
  *   - 头文件中定义所有公开函数原型及错误码常量，供 Rust FFI 绑定使用
  *
  * CI 红线：
- *   - C 源文件不得包含 printf / fprintf / OutputDebugString
+ *   - C 源文件不得直接调用 printf / fprintf / OutputDebugString*
+ *     （诊断一律经 verthys_diag.h 的 VERTHYS_DIAG_LOG 编译门）
  *   - C 函数返回值必须为本文件定义的错误码常量
  */
 #ifndef VERTHYS_ERROR_CODES_H

@@ -284,6 +284,14 @@ VerthysResult verthys_v3_create_new(VerthysContextV3 *ctx3,
     if (verthys_pepper_init() != 0 || verthys_pepper_source_error()) {
         return VERTHYS_ERR_PEPPER_SOURCE;
     }
+    /* ★ P1-1 修复（2026-09-19）：新建容器禁止零熵胡椒来源。
+     * COMPILED 常量随源码公开（熵=0），仅允许作为既有容器的解锁兼容
+     * 来源（unlock 路径保留 init 优先级 3）。新建容器要求高熵来源
+     * （INJECTED / OS 托管 / SHAMIR 重建），CNG 不可用环境下创建被
+     * 明确拒绝（VERTHYS_ERR_PEPPER_SOURCE），不静默降级。 */
+    if (verthys_pepper_get_source() == VERTHYS_PEPPER_SOURCE_COMPILED) {
+        return VERTHYS_ERR_PEPPER_SOURCE;
+    }
     r = verthys_cng_km_init(ctx3->km);
     if (r != VERTHYS_OK) return r;
 

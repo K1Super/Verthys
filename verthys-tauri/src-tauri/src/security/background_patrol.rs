@@ -760,6 +760,10 @@ impl Drop for BackgroundPatrol {
  *  连续重启失败 3 次后强制触发应急熔断（直接销毁 Worker 会话）。            *
  * ====================================================================== */
 
+// 说明：看门狗线程所需的全局安全上下文（应用句柄、巡检状态、基线管理器、
+// 停止标志、心跳、安装目录、持久化、重启计数），每个参数为独立的安全
+// 监控职责，打包会掩盖熔断链路的数据流，故豁免参数数量检查。
+#[allow(clippy::too_many_arguments)]
 fn watchdog_loop(
     app: AppHandle,
     state: Arc<Mutex<PatrolState>>,
@@ -1147,8 +1151,10 @@ fn enumerate_loaded_module_paths() -> Vec<(String, String)> {
         Err(_) => return result,
     };
 
-    let mut me = MODULEENTRY32W::default();
-    me.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+    let mut me = MODULEENTRY32W {
+        dwSize: std::mem::size_of::<MODULEENTRY32W>() as u32,
+        ..Default::default()
+    };
 
     let mut ok = unsafe { Module32FirstW(snapshot, &mut me) }.is_ok();
     while ok {
@@ -1364,9 +1370,8 @@ fn apply_process_mitigation_policies() {
             flags: u32,
         }
 
-        let mut image_load_policy = ProcessImageLoadPolicy::default();
         // NoRemoteMgmtImages=1 | PreferSystem32Images=4 = 0x5
-        image_load_policy.flags = 0x5;
+        let image_load_policy = ProcessImageLoadPolicy { flags: 0x5 };
 
         let result = SetProcessMitigationPolicy(
             PROCESS_IMAGE_LOAD_POLICY,
@@ -1397,9 +1402,8 @@ fn apply_process_mitigation_policies() {
             flags: u32,
         }
 
-        let mut sig_policy = ProcessSignaturePolicy::default();
         // AuditMicrosoftSignedOnly = bit 3 = 0x8（审计模式，记录但不阻断）
-        sig_policy.flags = 0x8;
+        let sig_policy = ProcessSignaturePolicy { flags: 0x8 };
 
         let result = SetProcessMitigationPolicy(
             PROCESS_SIGNATURE_POLICY,
@@ -1453,8 +1457,10 @@ fn get_system_idle_secs() -> u64 {
     }
 
     unsafe {
-        let mut lii = LastInputInfo::default();
-        lii.cb_size = std::mem::size_of::<LastInputInfo>() as u32;
+        let mut lii = LastInputInfo {
+            cb_size: std::mem::size_of::<LastInputInfo>() as u32,
+            ..Default::default()
+        };
 
         if GetLastInputInfo(&mut lii) == 0 {
             return 0; // 获取失败，视为活跃
@@ -1588,21 +1594,21 @@ mod tests {
         };
 
         // 第一次：计数 1，不触发
-        let triggered = state.record(&[module.clone()]);
+        let triggered = state.record(std::slice::from_ref(&module));
         assert!(triggered.is_empty());
         assert_eq!(state.patrol_count, 1);
 
         // 第二次：计数 2，不触发
-        let triggered = state.record(&[module.clone()]);
+        let triggered = state.record(std::slice::from_ref(&module));
         assert!(triggered.is_empty());
 
         // 第三次：计数 3，触发
-        let triggered = state.record(&[module.clone()]);
+        let triggered = state.record(std::slice::from_ref(&module));
         assert_eq!(triggered.len(), 1);
         assert_eq!(triggered[0].name, "evil.dll");
 
         // 第四次：已触发过，不再触发
-        let triggered = state.record(&[module.clone()]);
+        let triggered = state.record(std::slice::from_ref(&module));
         assert!(triggered.is_empty());
     }
 
@@ -1616,14 +1622,14 @@ mod tests {
         };
 
         // 出现两次
-        state.record(&[module.clone()]);
-        state.record(&[module.clone()]);
+        state.record(std::slice::from_ref(&module));
+        state.record(std::slice::from_ref(&module));
 
         // 中断（未出现）
         state.record(&[]);
 
         // 再次出现：计数应从 1 重新开始
-        let triggered = state.record(&[module.clone()]);
+        let triggered = state.record(std::slice::from_ref(&module));
         assert!(triggered.is_empty());
     }
 
@@ -1672,9 +1678,9 @@ mod tests {
     fn test_generate_random_u64() {
         let r1 = generate_random_u64();
         let r2 = generate_random_u64();
-        // 极低概率相同，主要用于验证函数不 panic
-        assert!(r1 <= u64::MAX);
-        assert!(r2 <= u64::MAX);
+        // 随机 u64 无可靠不变式可断言（全域合法、两值相等是极低概率事件），
+        // 本用例意图即验证函数不 panic
+        let _ = (r1, r2);
     }
 
     #[test]

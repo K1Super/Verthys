@@ -56,6 +56,11 @@ impl SecuredString {
     }
 
     /// 从 &str 构造（拷贝一份，原引用不变）
+    // 说明：保留 from_str 命名——该构造与 From<&str>/From<&String> 实现配套，
+    // 全库约 20 处调用点（含安全敏感的记录构造路径），且语义为"安全拷贝构造"
+    // 而非 std FromStr 的 fallible 解析，实现该 trait 反而会误导调用方；
+    // 重命名将波及大量调用点，得不偿失，故定点豁免。
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         Self(Zeroizing::new(s.to_string()))
     }
@@ -199,7 +204,7 @@ mod tests {
         // Deref<Target=str> 让 &s 可直接作为 &str
         let r: &str = &s;
         assert_eq!(r, "world");
-        assert_eq!(s.starts_with("wor"), true);
+        assert!(s.starts_with("wor"));
         assert_eq!(s.to_uppercase(), "WORLD");
     }
 

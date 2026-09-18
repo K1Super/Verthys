@@ -221,7 +221,7 @@ const B64_TABLE: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub(crate) fn base64_encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= input.len() {
         let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
@@ -250,7 +250,7 @@ pub(crate) fn base64_encode(input: &[u8]) -> String {
 
 pub(crate) fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
     let cleaned: Vec<u8> = input.bytes().filter(|&b| b != b'\n' && b != b'\r' && b != b' ').collect();
-    if cleaned.len() % 4 != 0 {
+    if !cleaned.len().is_multiple_of(4) {
         return Err("invalid base64 length");
     }
     let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);

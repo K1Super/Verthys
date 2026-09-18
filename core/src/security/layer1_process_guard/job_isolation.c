@@ -16,6 +16,7 @@
  */
 #include "job_isolation.h"
 #include "verthys_internal.h"
+#include "verthys_diag.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -37,7 +38,8 @@ static int    s_init_result = 0;        /* 0=未初始化, 正数=成功, 负数
 
 /*
  * 统一诊断输出函数。
- * - 始终通过 OutputDebugStringA 输出，供开发环境（调试器/DebugView）捕获
+ * - OutputDebugStringA 经 VERTHYS_DIAG_LOG 编译门（P2-5）：仅诊断构建输出，
+ *   生产构建对调试器/DebugView 静默
  * - 同时写入 Windows 事件日志（Event Log），供正式发布版本远程排查
  * - 记录每一步的 Win32 错误码（GetLastError）
  * - 废弃 fprintf(stderr) —— 服务进程通常无控制台窗口
@@ -52,8 +54,8 @@ static void job_diag(const char *msg, DWORD gle)
         return;
     }
 
-    /* 1. OutputDebugStringA：供开发环境（调试器/DebugView）捕获 */
-    OutputDebugStringA(buf);
+    /* 1. 调试器/DebugView 通道：仅诊断构建（VERTHYS_DIAG=ON）输出 */
+    VERTHYS_DIAG_LOG(buf);
 
     /* 2. Event Log：供正式发布版本远程排查 */
     HANDLE hLog = RegisterEventSourceW(NULL, L"Verthys");

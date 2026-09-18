@@ -188,9 +188,9 @@ pub fn is_valid_shm_name(name: &str) -> bool {
         return false;
     }
     name.bytes().all(|b| {
-        (b'a'..=b'z').contains(&b)
-            || (b'A'..=b'Z').contains(&b)
-            || (b'0'..=b'9').contains(&b)
+        b.is_ascii_lowercase()
+            || b.is_ascii_uppercase()
+            || b.is_ascii_digit()
             || b == b'_'
             || b == b'-'
     })

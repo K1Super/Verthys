@@ -45,6 +45,10 @@ use super::stderr::{snapshot_stderr, StderrRing};
 ///
 /// 持有子进程的所有句柄，通过 mpsc 接收请求，串行处理。
 /// 所有管道 I/O 使用 tokio 异步 API，不阻塞任何线程。
+// 说明：参数为 worker 子进程 IPC 的完整句柄/状态清单（管道所有权、进程句柄、
+// 存活标志等），每个参数在安全审计中具有独立语义，强行打包成结构体会降低
+// 管道所有权转移的可审计性，故保留显式参数列表并豁免参数数量检查。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn actor_loop(
     mut child: Child,
     mut stdin: ChildStdin,
@@ -149,6 +153,9 @@ pub(crate) async fn actor_loop(
 ///   触发 FFI 调用 emit progress 时，进度行会混入 stdout。
 ///   handle_send 必须跳过 op="unlock_progress" 行，
 ///   只返回真正的最终响应，否则响应解析失败。
+// 说明：IPC 管道操作所需的完整上下文（句柄/超时/存活标志），参数语义独立，
+// 保留显式列表以保证可审计性，豁免参数数量检查。
+#[allow(clippy::too_many_arguments)]
 async fn handle_send(
     stdin: &mut ChildStdin,
     stdout: &mut BufReader<ChildStdout>,
@@ -264,6 +271,9 @@ async fn handle_send(
 ///     多条 {"op":"unlock_progress",...} 进度行
 ///   - C 函数返回后写入最终 {"op":"unlock",...} 终止行
 ///   - 本函数识别进度行并推送 progress_tx，遇到终止行返回
+// 说明：同 handle_send——进度流式 IPC 的完整上下文清单，参数语义独立，
+// 保留显式列表以保证可审计性，豁免参数数量检查。
+#[allow(clippy::too_many_arguments)]
 async fn handle_streaming_unlock_send(
     stdin: &mut ChildStdin,
     stdout: &mut BufReader<ChildStdout>,

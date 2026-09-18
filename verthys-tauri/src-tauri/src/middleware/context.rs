@@ -47,7 +47,7 @@ impl ProcessMode {
     ///
     /// 支持的值：ui / worker / inspector
     /// 默认（未指定 --mode）：MainUi
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "worker" | "secure_worker" => ProcessMode::SecureWorker,
             "inspector" => ProcessMode::Inspector,
@@ -112,10 +112,11 @@ impl Default for StartupConfig {
 }
 
 /// 日志级别（强类型，替代字符串配置）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LogLevel {
     Trace,
     Debug,
+    #[default]
     Info,
     Warn,
     Error,
@@ -124,7 +125,7 @@ pub enum LogLevel {
 
 impl LogLevel {
     /// 从字符串解析日志级别
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "trace" => LogLevel::Trace,
             "debug" => LogLevel::Debug,
@@ -145,12 +146,6 @@ impl LogLevel {
             LogLevel::Error => log::LevelFilter::Error,
             LogLevel::Fatal => log::LevelFilter::Error, // log crate 无 Fatal，归入 Error
         }
-    }
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        LogLevel::Info
     }
 }
 
@@ -275,7 +270,7 @@ pub fn parse_config(args: &[String]) -> VerthysResult<StartupConfig> {
             "--mode" => {
                 i += 1;
                 if i < args.len() {
-                    config.mode = ProcessMode::from_str(&args[i]);
+                    config.mode = ProcessMode::parse_str(&args[i]);
                 }
             }
             "--data-dir" => {
@@ -307,7 +302,7 @@ pub fn parse_config(args: &[String]) -> VerthysResult<StartupConfig> {
             "--log-level" => {
                 i += 1;
                 if i < args.len() {
-                    config.log_level = LogLevel::from_str(&args[i]);
+                    config.log_level = LogLevel::parse_str(&args[i]);
                 }
             }
             "--debug" => {
@@ -459,11 +454,11 @@ mod tests {
 
     #[test]
     fn test_process_mode_from_str() {
-        assert_eq!(ProcessMode::from_str("ui"), ProcessMode::MainUi);
-        assert_eq!(ProcessMode::from_str("worker"), ProcessMode::SecureWorker);
-        assert_eq!(ProcessMode::from_str("WORKER"), ProcessMode::SecureWorker);
-        assert_eq!(ProcessMode::from_str("inspector"), ProcessMode::Inspector);
-        assert_eq!(ProcessMode::from_str("unknown"), ProcessMode::MainUi);
+        assert_eq!(ProcessMode::parse_str("ui"), ProcessMode::MainUi);
+        assert_eq!(ProcessMode::parse_str("worker"), ProcessMode::SecureWorker);
+        assert_eq!(ProcessMode::parse_str("WORKER"), ProcessMode::SecureWorker);
+        assert_eq!(ProcessMode::parse_str("inspector"), ProcessMode::Inspector);
+        assert_eq!(ProcessMode::parse_str("unknown"), ProcessMode::MainUi);
     }
 
     #[test]
@@ -475,13 +470,13 @@ mod tests {
 
     #[test]
     fn test_log_level_from_str() {
-        assert_eq!(LogLevel::from_str("trace"), LogLevel::Trace);
-        assert_eq!(LogLevel::from_str("debug"), LogLevel::Debug);
-        assert_eq!(LogLevel::from_str("info"), LogLevel::Info);
-        assert_eq!(LogLevel::from_str("warn"), LogLevel::Warn);
-        assert_eq!(LogLevel::from_str("error"), LogLevel::Error);
-        assert_eq!(LogLevel::from_str("fatal"), LogLevel::Fatal);
-        assert_eq!(LogLevel::from_str("unknown"), LogLevel::Info);
+        assert_eq!(LogLevel::parse_str("trace"), LogLevel::Trace);
+        assert_eq!(LogLevel::parse_str("debug"), LogLevel::Debug);
+        assert_eq!(LogLevel::parse_str("info"), LogLevel::Info);
+        assert_eq!(LogLevel::parse_str("warn"), LogLevel::Warn);
+        assert_eq!(LogLevel::parse_str("error"), LogLevel::Error);
+        assert_eq!(LogLevel::parse_str("fatal"), LogLevel::Fatal);
+        assert_eq!(LogLevel::parse_str("unknown"), LogLevel::Info);
     }
 
     #[test]

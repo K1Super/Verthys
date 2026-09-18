@@ -460,7 +460,7 @@ fn test_write_permission_with_lease(dir: &Path) -> Result<(), String> {
 
                 // 第 3.6 项：立即删除锁文件（不留痕迹）
                 drop(file);
-                if let Err(_) = std::fs::remove_file(&lease_path) {
+                if std::fs::remove_file(&lease_path).is_err() {
                     log::warn!(
                         "[preflight] 租约文件删除失败（可能残留）: {}",
                         sanitize_path(&lease_path.to_string_lossy())

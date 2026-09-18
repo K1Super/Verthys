@@ -72,9 +72,10 @@ const INIT_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 /// ```
 ///
 /// 第 1.2 项：init/destroy 必须获取 tokio::sync::Mutex 检查状态转移。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum WorkerLifecycleState {
     /// 未初始化（首次或 destroy 后）
+    #[default]
     Uninitialized,
     /// 初始化中（spawn + ready 信号等待）
     Initializing,
@@ -115,12 +116,6 @@ impl WorkerLifecycleState {
             } => *recovery_attempts,
             _ => 0,
         }
-    }
-}
-
-impl Default for WorkerLifecycleState {
-    fn default() -> Self {
-        WorkerLifecycleState::Uninitialized
     }
 }
 

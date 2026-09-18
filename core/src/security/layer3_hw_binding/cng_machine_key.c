@@ -37,6 +37,7 @@
  */
 #include "cng_machine_key.h"
 #include "verthys_internal.h"
+#include "verthys_diag.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -75,18 +76,16 @@ static const WCHAR K_KEY_NAME[] = L"Verthys_GMK_Wrap_Key_v1";
 
 /* ---------- 诊断日志 ---------- */
 
-/* [CNG-DBG] 诊断日志开关：
- *   1 = 启用（默认，便于排查 CNG 密钥初始化问题）
- *   0 = 关闭（生产环境可关闭以减少日志噪音）
- *   日志通过 OutputDebugStringA 输出，可在 DebugView 或调试器中查看。 */
-#define CNG_DBG_LOG 1
-
-#if CNG_DBG_LOG
+/* [CNG-DBG] 诊断日志（P2-5 修复）：
+ *   由 VERTHYS_DIAG 编译门统一控制（cmake -DVERTHYS_DIAG=ON），
+ *   生产构建默认关闭（宏为空操作），DLL 对调试器/DebugView 静默。
+ *   诊断构建开启时经 VERTHYS_DIAG_LOG（OutputDebugStringA）输出。 */
+#ifdef VERTHYS_DIAG
 #define CNG_DBG(fmt, ...) do { \
     char _cng_buf[256]; \
     _snprintf_s(_cng_buf, sizeof(_cng_buf), _TRUNCATE, \
                 "[CNG-DBG] " fmt "\n", ##__VA_ARGS__); \
-    OutputDebugStringA(_cng_buf); \
+    VERTHYS_DIAG_LOG(_cng_buf); \
 } while (0)
 #else
 #define CNG_DBG(fmt, ...) ((void)0)

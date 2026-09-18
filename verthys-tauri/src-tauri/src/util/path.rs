@@ -164,10 +164,8 @@ pub fn validate_path_input(path: &str) -> Result<(), PathValidationError> {
     }
 
     // 8. Windows 保留设备名
-    if cfg!(windows) {
-        if is_reserved_device_name(path) {
-            return Err(PathValidationError::ReservedDeviceName);
-        }
+    if cfg!(windows) && is_reserved_device_name(path) {
+        return Err(PathValidationError::ReservedDeviceName);
     }
 
     Ok(())
@@ -188,8 +186,7 @@ fn is_reserved_device_name(path: &str) -> bool {
     }
 
     // 检查 COM1-9
-    if stem_upper.starts_with("COM") {
-        let suffix = &stem_upper[3..];
+    if let Some(suffix) = stem_upper.strip_prefix("COM") {
         if !suffix.is_empty()
             && suffix.len() <= 2
             && suffix.chars().all(|c| c.is_ascii_digit())
@@ -199,8 +196,7 @@ fn is_reserved_device_name(path: &str) -> bool {
     }
 
     // 检查 LPT1-9
-    if stem_upper.starts_with("LPT") {
-        let suffix = &stem_upper[3..];
+    if let Some(suffix) = stem_upper.strip_prefix("LPT") {
         if !suffix.is_empty()
             && suffix.len() <= 2
             && suffix.chars().all(|c| c.is_ascii_digit())

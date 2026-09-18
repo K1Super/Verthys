@@ -96,11 +96,12 @@ impl From<RecordId> for u64 {
 ///
 /// 替代字符串状态（"none"/"ready"/"broken"），提供类型安全。
 /// 前端通过枚举变体进行差异化处理。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "bindings/")]
 pub enum InitStatus {
     /// 未初始化（全新用户，无 .verthys 文件）
+    #[default]
     None,
     /// 初始化中（worker 正在创建/派生密钥）
     Initializing,
@@ -121,12 +122,6 @@ impl InitStatus {
             InitStatus::Broken => "broken",
             InitStatus::Maintenance => "maintenance",
         }
-    }
-}
-
-impl Default for InitStatus {
-    fn default() -> Self {
-        InitStatus::None
     }
 }
 

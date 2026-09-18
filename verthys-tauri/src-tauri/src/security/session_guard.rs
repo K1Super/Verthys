@@ -256,12 +256,12 @@ mod win_backend {
             let reg_name = b"WTSRegisterSessionNotification\0";
             let reg_proc = GetProcAddress(lib, reg_name.as_ptr());
             let reg: Option<WTSRegisterSessionNotification_t> =
-                if reg_proc.is_null() { None } else { Some(std::mem::transmute(reg_proc)) };
+                if reg_proc.is_null() { None } else { Some(std::mem::transmute::<*const u8, WTSRegisterSessionNotification_t>(reg_proc)) };
 
             let unreg_name = b"WTSUnRegisterSessionNotification\0";
             let unreg_proc = GetProcAddress(lib, unreg_name.as_ptr());
             let unreg: Option<WTSUnRegisterSessionNotification_t> =
-                if unreg_proc.is_null() { None } else { Some(std::mem::transmute(unreg_proc)) };
+                if unreg_proc.is_null() { None } else { Some(std::mem::transmute::<*const u8, WTSUnRegisterSessionNotification_t>(unreg_proc)) };
 
             (reg, unreg)
         }
@@ -347,11 +347,11 @@ mod win_backend {
             }
             WM_POWERBROADCAST => {
                 // SECURITY.md 第 5 项：从实例数据读取高安全标志（非全局变量）
-                if data.high_security.load(Ordering::SeqCst) {
-                    if wparam as u32 == PBT_APMSUSPEND {
-                        if let Ok(tx) = data.event_tx.lock() {
-                            let _ = tx.send(SessionEvent::PowerSuspend);
-                        }
+                if data.high_security.load(Ordering::SeqCst)
+                    && wparam as u32 == PBT_APMSUSPEND
+                {
+                    if let Ok(tx) = data.event_tx.lock() {
+                        let _ = tx.send(SessionEvent::PowerSuspend);
                     }
                 }
                 1 /* TRUE — 确认电源广播 */
@@ -398,7 +398,7 @@ mod win_backend {
             }
 
             // SECURITY.md 第 5 项：设置实例数据到 GWLP_USERDATA
-            let ptr = Arc::as_ptr(instance_data) as *const WindowInstanceData as isize;
+            let ptr = Arc::as_ptr(instance_data) as isize;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr);
 
             // 注册 WTS 会话通知

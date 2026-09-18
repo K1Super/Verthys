@@ -1,0 +1,119 @@
+# .github/workflows/rust-frontend.yml
+# ★ P2-4 修复（2026-09-19）：Rust / 前端 CI 质量门
+#
+# 覆盖（对应 core.yml 注释中"由本工作流承接"的承诺）：
+#   1. Rust 单元测试（src-tauri 296 项 + verthys-worker 编译验证）
+#   2. cargo clippy 静态检查（--all-targets -D warnings，零告警门）
+#   3. 前端 TypeScript 类型检查（vue-tsc --noEmit）
+#   4. 前端生产构建（vite build，验证打包链完整性）
+#
+# ★ 素材前置（2026-09-19 隔离实证）：tauri 编译期强制要求
+#   resources（verthys.dll）与 externalBin（binaries/verthys-worker-*.exe）
+#   存在，缺失即 "resource path ... doesn't exist" 编译失败。
+#   二者均为 gitignore 的构建产物，故本工作流先从源码构建并就位：
+#   - C 核心 DLL：Ninja Release 构建（仅满足编译期依赖，不做 .vsec 注入——
+#     发布级 DLL 由 core.yml 的 build_core.release.ps1 产出并上传工件）
+#   - worker：cargo build --release 后复制至 binaries/
+#   dist/ 在 dev profile 下不参与编译（cfg=dev 走 devUrl），无需前置。
+#
+# 门禁语义：任一步失败即红，禁止合入。
+name: rust-frontend-check
+
+on:
+  push:
+    paths: ["verthys-tauri/**", ".github/workflows/rust-frontend.yml"]
+  pull_request:
+    paths: ["verthys-tauri/**", ".github/workflows/rust-frontend.yml"]
+
+jobs:
+  rust-and-frontend:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: verthys-tauri/package-lock.json
+
+      - name: Verify vendored dependency hashes (supply-chain gate)
+        shell: pwsh
+        run: |
+          & ".\ci\verify_vendor_hashes.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "vendor hash gate failed" }
+
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build core DLL (Release, Ninja)
+        shell: pwsh
+        run: |
+          cmake -S . -B build_ci -G Ninja -DCMAKE_BUILD_TYPE=Release
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
+          cmake --build build_ci
+          if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
+
+      - name: Stage packaging assets (verthys.dll + verthys-worker.exe)
+        shell: pwsh
+        run: |
+          # 就位 tauri 编译期硬依赖：resources(verthys.dll) + externalBin(worker)
+          $dll = Get-ChildItem -Path build_ci -Recurse -Filter verthys.dll |
+                 Select-Object -First 1
+          if (-not $dll) { throw "verthys.dll not found under build_ci" }
+          Copy-Item $dll.FullName "verthys-tauri/src-tauri/verthys.dll" -Force
+          Write-Host "staged verthys.dll <- $($dll.FullName)"
+
+          cargo build --release --manifest-path verthys-tauri/verthys-worker/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "worker release build failed" }
+          Copy-Item "verthys-tauri/verthys-worker/target/release/verthys-worker.exe" `
+            "verthys-tauri/src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe" -Force
+          Write-Host "staged verthys-worker.exe"
+
+      - name: Rust tests (src-tauri)
+        run: |
+          cargo test --manifest-path verthys-tauri/src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "src-tauri tests failed" }
+        shell: pwsh
+
+      - name: Rust tests (verthys-worker)
+        run: |
+          cargo test --manifest-path verthys-tauri/verthys-worker/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "worker tests failed" }
+        shell: pwsh
+
+      - name: Clippy gate (zero warnings, all targets)
+        run: |
+          cargo clippy --manifest-path verthys-tauri/src-tauri/Cargo.toml --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "src-tauri clippy failed" }
+          cargo clippy --manifest-path verthys-tauri/verthys-worker/Cargo.toml --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "worker clippy failed" }
+        shell: pwsh
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: verthys-tauri
+
+      - name: Frontend type check (vue-tsc)
+        run: |
+          npx vue-tsc --noEmit
+          if ($LASTEXITCODE -ne 0) { throw "vue-tsc type check failed" }
+        shell: pwsh
+        working-directory: verthys-tauri
+
+      - name: Frontend production build
+        run: |
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw "vite build failed" }
+        shell: pwsh
+        working-directory: verthys-tauri

@@ -1,8 +1,0 @@
-{
-  "name": "verthys",
-  "version-string": "3.2.6",
-  "dependencies": [
-    "libsodium"
-  ],
-  "builtin-baseline": "0000000000000000000000000000000000000000"
-}

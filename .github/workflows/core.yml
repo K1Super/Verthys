@@ -8,15 +8,15 @@
 #   3. 构建 Release（含 §6.3 .vsec 完整性基准注入）
 #   4. dumpbin 导出面清单与 ci/export_baseline.txt 比对（P0-A 白名单回归门）
 #
-# Rust 测试与类型检查、前端 security-test.ts 由上层仓库工作流
-# （或本工作流扩展 job）承接；本文件聚焦 core DLL 质量门。
+# Rust 测试与类型检查、前端 security-test.ts 由 rust-frontend.yml 承接；
+# 本文件聚焦 core DLL 质量门 + vendored 依赖供应链门。
 name: core-build-test
 
 on:
   push:
-    paths: ["core/**", "cmake/**", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml"]
+    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml"]
   pull_request:
-    paths: ["core/**", "cmake/**", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml"]
+    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml"]
 
 jobs:
   build-and-test:
@@ -25,6 +25,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify vendored dependency hashes (supply-chain gate)
+        shell: pwsh
+        run: |
+          & ".\ci\verify_vendor_hashes.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "vendor hash gate failed" }
 
       - name: Setup MSVC (x64)
         uses: ilammy/msvc-dev-cmd@v1

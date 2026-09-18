@@ -67,6 +67,7 @@ pub(crate) struct SessionInner {
     /// Actor 请求通道（封装在 StdMutex<Option> 中）
     /// - Some(Sender)：Actor 存活，可发送请求
     /// - None：Actor 已退出或正在关闭，拒绝新请求
+    ///
     /// 通过 take() 取出并 drop 即可关闭通道，触发 Actor 主循环退出。
     /// 使用 std::sync::Mutex 因为持有时间极短（仅 clone/take），不跨 await。
     request_tx: StdMutex<Option<mpsc::Sender<ActorRequest>>>,
@@ -329,9 +330,8 @@ impl WorkerSession {
                         };
                     }
                     progress = progress_rx.recv() => {
-                        match progress {
-                            Some(p) => progress_cb(&p),
-                            None => {}
+                        if let Some(p) = progress {
+                            progress_cb(&p);
                         }
                     }
                 }

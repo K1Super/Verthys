@@ -172,7 +172,7 @@ impl SecuredBuffer {
 ///   - 第 3 项：仅 trim_end 空格和 null 字符，保留前导字符
 ///   - 第 4 项：两步 IOCTL 动态分配缓冲区（先查询所需大小再分配）
 ///   - 第 5 项：使用 HMAC-SHA256(salt, serial) 替代纯 SHA-256，
-///              盐值由调用方传入（DPAPI 加密存储于应用配置目录）
+///     盐值由调用方传入（DPAPI 加密存储于应用配置目录）
 ///
 /// 流程：
 ///   1. 盘符 → 卷设备句柄 → IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS → 物理磁盘号
@@ -695,10 +695,7 @@ impl ShadowSleep {
 
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
-        let deadline = match inner.shadow_deadline {
-            Some(d) => d,
-            None => return None, // 未处于影子休眠
-        };
+        let deadline = inner.shadow_deadline?; // 未处于影子休眠
 
         // 超时检查：超时则自动零化
         if Instant::now() > deadline {

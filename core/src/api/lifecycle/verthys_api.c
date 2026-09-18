@@ -157,6 +157,8 @@ static void verthys_emergency_lock_all(void)
 #include <errno.h>
 #include <time.h>
 
+#include "verthys_diag.h"
+
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
@@ -178,9 +180,9 @@ VerthysResult Verthys_Init(VerthysHandle *out_handle)
 #ifdef _WIN32
     g_has_avx2 = verthys_check_avx2_support();
     if (g_has_avx2) {
-        OutputDebugStringA("[VERTHYS] AVX2 detected: crypto operations will use AVX2-accelerated paths");
+        VERTHYS_DIAG_LOG("[VERTHYS] AVX2 detected: crypto operations will use AVX2-accelerated paths");
     } else {
-        OutputDebugStringA("[VERTHYS] AVX2 not detected: falling back to SSE4.2/generic paths (libsodium handles runtime selection)");
+        VERTHYS_DIAG_LOG("[VERTHYS] AVX2 not detected: falling back to SSE4.2/generic paths (libsodium handles runtime selection)");
     }
 #else
     g_has_avx2 = 0;  /* 非 Windows 平台暂不支持 AVX2 检测 */

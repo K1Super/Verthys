@@ -89,10 +89,8 @@ fn parse_mode_from_args(args: &[String]) -> verthys_tauri_lib::middleware::conte
 
     let mut i = 1; // 跳过程序名
     while i < args.len() {
-        if args[i] == "--mode" {
-            if i + 1 < args.len() {
-                return ProcessMode::from_str(&args[i + 1]);
-            }
+        if args[i] == "--mode" && i + 1 < args.len() {
+            return ProcessMode::parse_str(&args[i + 1]);
         }
         i += 1;
     }

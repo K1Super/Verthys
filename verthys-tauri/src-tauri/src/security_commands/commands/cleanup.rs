@@ -30,7 +30,7 @@ pub async fn security_cleanup_recent(
     state: State<'_, SecurityState>,
 ) -> Result<(), String> {
     // 第 13.2.3 项：spawn_blocking 执行阻塞式 I/O
-    let result = tokio::task::spawn_blocking(|| clear_recent_records())
+    let result = tokio::task::spawn_blocking(clear_recent_records)
         .await
         .map_err(|e| format!("清理任务执行失败: {}", e))?;
 

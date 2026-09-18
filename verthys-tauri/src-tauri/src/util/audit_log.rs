@@ -311,7 +311,7 @@ fn read_last_hmac(log_path: &Path) -> Option<String> {
     }
 
     let content = std::fs::read_to_string(log_path).ok()?;
-    let last_line = content.lines().filter(|l| !l.trim().is_empty()).last()?;
+    let last_line = content.lines().rfind(|l| !l.trim().is_empty())?;
     let entry: AuditLogEntry = serde_json::from_str(last_line).ok()?;
     Some(entry.hmac)
 }
@@ -413,7 +413,7 @@ mod tests {
                 "user",
                 AuditResult::Success,
             )
-            .with_detail(&format!("derive #{}", i));
+            .with_detail(format!("derive #{}", i));
             append_audit(&log_path, hmac_key, event).unwrap();
         }
 

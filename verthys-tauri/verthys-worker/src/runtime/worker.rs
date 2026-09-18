@@ -195,6 +195,7 @@ impl Worker {
     /// Verthys_Flush 语义：
     ///   - v2：commit 未完成事务（add_record 已 commit 时为 no-op），不清零密钥、不改 state
     ///   - v1：dirty 标记则写回（保持兼容）
+    ///
     /// 安全性：不改变 worker 状态（始终保持 UNLOCKED），不清零密钥，不重新加载索引
     pub(crate) fn call_flush(&self) -> u32 {
         unsafe {
@@ -580,10 +581,9 @@ impl Worker {
 
             // 从 C 深拷贝收集到 Rust 临时 Vec（摘要元组：无数据块）
             // ★ Phase 2G：元组增加 created_time 字段
-            let mut result: Vec<(u64, u8, String, u64, u64, [u8; 32], u64)> =
+            let mut result: Vec<scan_shm::SummaryRecord> =
                 Vec::with_capacity(out_count as usize);
-            for i in 0..out_count as usize {
-                let rec = &records[i];
+            for rec in records.iter_mut().take(out_count as usize) {
                 let name = if !rec.name.is_null() && rec.name_len > 0 {
                     let slice = std::slice::from_raw_parts(rec.name, rec.name_len as usize);
                     String::from_utf8_lossy(slice).into_owned()
@@ -601,7 +601,7 @@ impl Worker {
                 ));
 
                 // 释放 C 深拷贝（name 被安全擦除并释放，merkle_leaf 擦除）
-                free_fn(&mut records[i] as *mut VerthysSummaryRecordC);
+                free_fn(rec as *mut VerthysSummaryRecordC);
             }
 
             let exhausted = out_count == 0;

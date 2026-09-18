@@ -42,7 +42,7 @@
 pub fn fill_random_bytes(buf: &mut [u8]) {
     // getrandom 失败时无法安全降级，直接填零（安全失败）
     // 调用方应检查返回值并决定是否重试或报错
-    if let Err(_) = getrandom::getrandom(buf) {
+    if getrandom::getrandom(buf).is_err() {
         // 极端情况：系统 CSPRNG 不可用，填零（不泄露旧数据）
         // 注意：填零不能提供随机覆写效果，但优于保留原数据
         for byte in buf.iter_mut() {

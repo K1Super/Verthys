@@ -145,7 +145,7 @@ fn newest_mtime(dir: &Path) -> Option<std::time::SystemTime> {
                     stack.push(path);
                 } else if let Ok(meta) = entry.metadata() {
                     if let Ok(mtime) = meta.modified() {
-                        if newest.map_or(true, |n| mtime > n) {
+                        if newest.is_none_or(|n| mtime > n) {
                             newest = Some(mtime);
                         }
                     }
@@ -194,8 +194,8 @@ fn verify_bundle_assets() {
                 let msg = format!(
                     "❌ 打包素材过期：src-tauri/verthys.dll（{}…）与最新构建产物（{}…）哈希不一致！\n\
                      修复：Copy-Item build/core/Release/verthys.dll verthys-tauri/src-tauri/verthys.dll",
-                    &h_staged.chars().take(16).collect::<String>(),
-                    &h_latest.chars().take(16).collect::<String>()
+                    h_staged.chars().take(16).collect::<String>(),
+                    h_latest.chars().take(16).collect::<String>()
                 );
                 if is_release {
                     panic!("{}", msg);
@@ -264,8 +264,8 @@ fn verify_bundle_assets() {
                      与 verthys-worker/target/release/verthys-worker.exe（{}…）哈希不一致！\n\
                      修复：Copy-Item verthys-tauri/verthys-worker/target/release/verthys-worker.exe \n\
                      verthys-tauri/src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe",
-                    &h_staged.chars().take(16).collect::<String>(),
-                    &h_release.chars().take(16).collect::<String>()
+                    h_staged.chars().take(16).collect::<String>(),
+                    h_release.chars().take(16).collect::<String>()
                 );
                 if is_release {
                     panic!("{}", msg);

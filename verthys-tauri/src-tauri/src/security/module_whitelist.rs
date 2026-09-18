@@ -152,7 +152,7 @@ pub fn add_trusted_path(path: &str) {
         Ok(g) => g,
         Err(_) => return,
     };
-    if !guard.iter().any(|p| *p == realized) {
+    if !guard.contains(&realized) {
         guard.push(realized);
     }
 }
@@ -192,7 +192,7 @@ pub fn import_trusted_paths(paths: &[String]) {
     };
     for path in paths {
         let realized = realize_path(path);
-        if !realized.is_empty() && !guard.iter().any(|p| *p == realized) {
+        if !realized.is_empty() && !guard.contains(&realized) {
             guard.push(realized);
         }
     }
@@ -425,7 +425,7 @@ mod win_impl {
     /// verify_sigs 控制是否执行 Authenticode 签名验证（规则 f）：
     ///   - true：完整巡检，用于前端主动巡检命令（security_module_patrol）
     ///   - false：轻量巡检，仅路径白名单匹配，跳过 WinVerifyTrust 以降低 CPU 开销，
-    ///            用于后台巡检线程（background_patrol）每 30s 高频调用
+    ///     用于后台巡检线程（background_patrol）每 30s 高频调用
     pub(super) fn scan_modules(install_dir: &str, verify_sigs: bool) -> Vec<UnknownModule> {
         let mut unknown: Vec<UnknownModule> = Vec::new();
 
@@ -459,8 +459,10 @@ mod win_impl {
         };
 
         // 模块枚举：MODULEENTRY32W.dwSize 必须先设置
-        let mut me = MODULEENTRY32W::default();
-        me.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+        let mut me = MODULEENTRY32W {
+            dwSize: std::mem::size_of::<MODULEENTRY32W>() as u32,
+            ..Default::default()
+        };
 
         // Module32FirstW / Module32NextW 返回 Err 表示无更多模块
         let mut ok = unsafe { Module32FirstW(snapshot, &mut me) }.is_ok();

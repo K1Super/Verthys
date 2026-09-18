@@ -35,7 +35,7 @@ const MODULE_INFO_PREFIX: &str = "verthys/module/";
 
 thread_local! {
     /// GMK 内存持有（Zeroizing 保证清零）
-    pub(crate) static GMK: RefCell<Option<zeroize::Zeroizing<[u8; 32]>>> = RefCell::new(None);
+    pub(crate) static GMK: RefCell<Option<zeroize::Zeroizing<[u8; 32]>>> = const { RefCell::new(None) };
 }
 
 /* ------------------------------------------------------------------ *

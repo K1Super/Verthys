@@ -310,9 +310,11 @@ impl VerthysFileLock {
                 return Err(format!("CreateFileW 失败: {}", last_error_str()));
             }
 
-            let mut overlapped: Overlapped = Default::default();
-            overlapped.offset_low = SENTINEL_OFFSET;
-            overlapped.offset_high = 0;
+            let mut overlapped: Overlapped = Overlapped {
+                offset_low: SENTINEL_OFFSET,
+                offset_high: 0,
+                ..Default::default()
+            };
 
             let ok = LockFileEx(
                 handle,
@@ -360,9 +362,11 @@ impl VerthysFileLock {
                 return Err(format!("CreateFileW 失败: {}", last_error_str()));
             }
 
-            let mut overlapped: Overlapped = Default::default();
-            overlapped.offset_low = SENTINEL_OFFSET;
-            overlapped.offset_high = 0;
+            let mut overlapped: Overlapped = Overlapped {
+                offset_low: SENTINEL_OFFSET,
+                offset_high: 0,
+                ..Default::default()
+            };
 
             let ok = LockFileEx(
                 handle,
@@ -402,9 +406,11 @@ impl VerthysFileLock {
         }
 
         unsafe {
-            let mut overlapped: Overlapped = Default::default();
-            overlapped.offset_low = SENTINEL_OFFSET;
-            overlapped.offset_high = 0;
+            let mut overlapped: Overlapped = Overlapped {
+                offset_low: SENTINEL_OFFSET,
+                offset_high: 0,
+                ..Default::default()
+            };
 
             let ok = LockFileEx(
                 self.handle,
@@ -458,9 +464,11 @@ impl Drop for VerthysFileLock {
                     err
                 );
                 // 备用：尝试 UnlockFileEx（某些情况下行为不同）
-                let mut overlapped: Overlapped = Default::default();
-                overlapped.offset_low = SENTINEL_OFFSET;
-                overlapped.offset_high = 0;
+                let mut overlapped: Overlapped = Overlapped {
+                    offset_low: SENTINEL_OFFSET,
+                    offset_high: 0,
+                    ..Default::default()
+                };
                 let retry_ok = UnlockFileEx(self.handle, 0, 1, 0, &mut overlapped);
                 if retry_ok == 0 {
                     log::error!(
@@ -788,7 +796,7 @@ mod tests {
         // SYSTEM SID
         let sid2 = SidToken::from_string("S-1-5-18").unwrap();
         assert!(!sid2.data.is_empty());
-        assert_eq!(sid2.data.len(), 8 + 4 * 1); // 1 sub-authority
+        assert_eq!(sid2.data.len(), 8 + 4); // 1 sub-authority
     }
 
     #[cfg(target_os = "windows")]

@@ -80,6 +80,7 @@ pub fn run(dll_path: &str) -> i32 {
             Ok(l) => l,
             Err(e) => {
                 diag!("[worker] stdin 读取错误: {}", e);
+                let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
                 break;
             }
         };
@@ -88,10 +89,9 @@ pub fn run(dll_path: &str) -> i32 {
         }
 
         // 跳过 UTF-8 BOM (EF BB BF)，某些父进程可能在首次写入时附加 BOM
-        let line = if line.starts_with('\u{FEFF}') {
-            line[3..].to_string()
-        } else {
-            line
+        let line = match line.strip_prefix('\u{FEFF}') {
+            Some(stripped) => stripped.to_string(),
+            None => line,
         };
 
         let req: Request = match serde_json::from_str(&line) {
@@ -108,6 +108,7 @@ pub fn run(dll_path: &str) -> i32 {
                 let mut lock = stdout.lock();
                 if let Err(e) = writeln!(lock, "{}", json) {
                     diag!("[worker] 写响应失败(parse): {}", e);
+                    let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
                 }
                 let _ = lock.flush();
                 continue;
@@ -138,10 +139,12 @@ pub fn run(dll_path: &str) -> i32 {
         let mut lock = stdout.lock();
         if let Err(e) = writeln!(lock, "{}", json) {
             diag!("[worker] 写响应失败: {}", e);
+            let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
             break;
         }
         if let Err(e) = lock.flush() {
             diag!("[worker] flush 失败: {}", e);
+            let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
             break;
         }
         drop(lock);

@@ -226,7 +226,7 @@ pub fn detect_pe_architecture(path: &str) -> Result<PeArch, String> {
     }
     let e_lfanew = u32::from_le_bytes([dos[60], dos[61], dos[62], dos[63]]) as u64;
     // e_lfanew 合法范围：>= 64（DOS 头之后），<= 0x1000（PE 头不会离 DOS 头太远）
-    if e_lfanew < 64 || e_lfanew > 0x1000 {
+    if !(64..=0x1000).contains(&e_lfanew) {
         return Err(format!("invalid e_lfanew: 0x{:X}", e_lfanew));
     }
 
@@ -345,7 +345,7 @@ pub fn parse_pe_imports(path: &str) -> Result<Vec<String>, String> {
         return Err("not a PE/DOS image (missing MZ signature)".into());
     }
     let e_lfanew = u32::from_le_bytes([dos[60], dos[61], dos[62], dos[63]]) as u64;
-    if e_lfanew < 64 || e_lfanew > 0x1000 {
+    if !(64..=0x1000).contains(&e_lfanew) {
         return Err(format!("invalid e_lfanew: 0x{:X}", e_lfanew));
     }
 
@@ -518,17 +518,17 @@ pub fn parse_pe_imports(path: &str) -> Result<Vec<String>, String> {
 fn find_dll_in_search_paths(dll_name: &str, exe_dir: &std::path::Path) -> Option<String> {
     // 1. exe 同级目录
     if exe_dir.join(dll_name).exists() {
-        return Some(format!("exe_dir"));
+        return Some("exe_dir".to_string());
     }
 
     // 2. System32 / 3. Windows 目录
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     let system32 = std::path::Path::new(&system_root).join("System32");
     if system32.join(dll_name).exists() {
-        return Some(format!("System32"));
+        return Some("System32".to_string());
     }
     if std::path::Path::new(&system_root).join(dll_name).exists() {
-        return Some(format!("Windows"));
+        return Some("Windows".to_string());
     }
 
     // 4. PATH 环境变量
@@ -538,7 +538,7 @@ fn find_dll_in_search_paths(dll_name: &str, exe_dir: &std::path::Path) -> Option
                 continue;
             }
             if std::path::Path::new(dir).join(dll_name).exists() {
-                return Some(format!("PATH"));
+                return Some("PATH".to_string());
             }
         }
     }
@@ -656,7 +656,7 @@ pub fn resolve_worker_path(app: &tauri::AppHandle) -> Result<String, String> {
 
     // 2. Tauri 资源目录
     let resource_candidates = [
-        format!("binaries/verthys-worker"),
+        "binaries/verthys-worker".to_string(),
         "verthys-worker".to_string(),
     ];
     for rel in &resource_candidates {
