@@ -1,0 +1,419 @@
+/**
+ * components.css — 全局复用组件类
+ *
+ *   全局CSS拆分第二份：跨模块共享的通用组件样式
+ *   所有色值引用 tokens.css 中的 CSS 变量，消除重复硬编码
+ */
+
+/* ===== 全局复用：重新生成按钮（gen-btn）=====
+ * 源自密码工具的密码生成器，全局统一图标与样式
+ * 各模块按场景可用 inline style 覆盖 svg 尺寸 */
+.gen-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px;
+  border: 1px solid var(--border-glass); border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-muted);
+  cursor: pointer; transition: all var(--dur-fast); flex-shrink: 0;
+}
+.gen-btn svg { width: 14px; height: 14px; transition: transform 0.5s var(--ease); }
+.gen-btn:hover {
+  color: var(--accent);
+  border-color: var(--border-hover);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+/* 旋转动效仅限「重新生成/生成」类按钮：追加 .gen-btn--spin 修饰符触发 */
+.gen-btn--spin:hover svg { transform: rotate(180deg); }
+.gen-btn--spin:active svg { transform: rotate(360deg); transition: transform 0.6s var(--ease); }
+
+/* ===== 全局复用：复制成功提示（clip-toast）=====
+ * 源自账户模块，统一所有复制提示样式
+ * 用法：<div class="clip-toast glass"><span class="toast-dot"></span>已复制</div> */
+.clip-toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 20px; font-size: 12px;
+  color: var(--accent); font-family: var(--font);
+  z-index: 999;
+}
+.toast-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  animation: dot-blink 1s infinite;
+}
+
+/* ===== 全局复用：错误提示（error-toast）— 顶部红色弹窗，与 clip-toast 同结构 =====
+ * 用法：<div class="error-toast glass"><span class="toast-dot"></span>错误信息</div>
+ * 配合 transition name="err-toast" 使用 */
+.error-toast {
+  position: fixed !important; top: 24px; left: 50%; transform: translate(-50%, 0);
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 20px; font-size: 12px;
+  color: var(--danger); font-family: var(--font);
+  z-index: 100000;
+  pointer-events: none;
+}
+.error-toast .toast-dot {
+  background: var(--danger);
+  box-shadow: 0 0 6px var(--danger);
+}
+.err-toast-enter-active, .err-toast-leave-active { transition: opacity 0.3s var(--ease), transform 0.3s var(--ease) !important; }
+.err-toast-enter-from, .err-toast-leave-to { opacity: 0; transform: translate(-50%, -10px); }
+
+/* ===== 玻璃质感卡片 ===== */
+/* ★ 性能根治：.glass 被模块视图大量卡片复用（文件库/相册网格可达数十张），
+ * 每张卡的 backdrop-filter 都要在 60fps 动态深空背景上逐帧重采样 —
+ * N 张卡 = N 个全时模糊区域，GPU 合成器过载（模块视图卡顿主因）。
+ * 去实时毛玻璃 → 底色不透明度 0.75→0.88 补偿景深压暗视觉等效 */
+.glass {
+  background: rgba(14, 18, 28, 0.88);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius);
+  box-shadow:
+    0 8px 32px rgba(var(--black-rgb), 0.4),
+    0 0 1px rgba(var(--white-rgb), 0.05),
+    inset 0 1px 0 rgba(var(--white-rgb), 0.04);
+  transition: all var(--dur) var(--ease);
+}
+.glass:hover {
+  border-color: var(--border-hover);
+  box-shadow:
+    0 12px 40px rgba(var(--black-rgb), 0.5),
+    0 0 1px rgba(var(--accent-rgb), 0.15),
+    inset 0 1px 0 rgba(var(--white-rgb), 0.06);
+}
+
+/* ===== 故障文字特效 ===== */
+.glitch-text {
+  position: relative;
+  display: inline-block;
+}
+.glitch-text::before,
+.glitch-text::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.glitch-text::before {
+  color: var(--accent);
+  z-index: -1;
+  animation: glitch-anim-1 4s infinite steps(1);
+}
+.glitch-text::after {
+  color: var(--accent-red);
+  z-index: -2;
+  animation: glitch-anim-2 4s infinite steps(1);
+}
+
+/* ===== 通用按钮：低透明→悬浮高亮 ===== */
+.btn {
+  padding: 8px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  /* ★ 性能根治：按钮数量多（工具栏+卡片内），逐个 backdrop-filter
+   * 在动态背景上全时重采样 → 去实时毛玻璃，底色加深补偿 */
+  background: rgba(var(--bg-tertiary-rgb), 0.62);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--dur-fast) var(--ease);
+  font-family: var(--font);
+  letter-spacing: 0.5px;
+}
+.btn:hover {
+  border-color: var(--border-hover);
+  background: rgba(var(--accent-rgb), 0.08);
+  color: var(--text-primary);
+  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.1);
+}
+.btn:active {
+  transform: scale(0.97);
+}
+.btn-primary {
+  background: linear-gradient(135deg, rgba(var(--accent-dim-rgb), 0.4), rgba(var(--accent-rgb), 0.3));
+  border-color: rgba(var(--accent-rgb), 0.3);
+  color: var(--accent);
+  font-weight: 500;
+}
+.btn-primary:hover {
+  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.3), rgba(var(--accent-purple-rgb), 0.3));
+  border-color: var(--accent);
+  color: #fff;
+  box-shadow: 0 0 20px rgba(var(--accent-rgb), 0.2);
+}
+.btn-danger {
+  border-color: rgba(var(--accent-red-rgb), 0.15);
+  color: var(--accent-red);
+}
+.btn-danger:hover {
+  background: rgba(var(--accent-red-rgb), 0.08);
+  border-color: var(--accent-red);
+  box-shadow: 0 0 12px rgba(var(--accent-red-rgb), 0.1);
+}
+
+/* ===== 通用输入框 ===== */
+.input {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--black-rgb), 0.25);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font);
+  outline: none;
+  /* ★ 精确属性过渡（禁 transition: all — 防御性根治：任何几何/
+   * transform 类属性永不进过渡链，文字渲染路径恒定） */
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+.input:focus {
+  border-color: var(--accent);
+  background: rgba(var(--black-rgb), 0.4);
+  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.08);
+}
+.input::placeholder {
+  color: var(--text-muted);
+}
+
+/* ===== 通用弹窗内部元素样式（kv-* = key verify）=====
+ * 统一 MainView 模块密钥登录弹窗与 SecurityCenter 密钥编辑弹窗的内部视觉
+ * 外壳（遮罩层 + 弹窗底板）由 CosmicOverlay.vue 提供
+ * 内部元素（标题/描述/输入/按钮等）使用以下全局类
+ */
+.kv-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+  letter-spacing: 1px;
+}
+.kv-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+.kv-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--warning);
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid rgba(var(--warning-rgb), 0.2);
+  border-radius: 6px;
+  background: rgba(var(--warning-rgb), 0.05);
+  font-family: var(--font);
+  line-height: 1.5;
+}
+.kv-warn svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  opacity: 0.8;
+}
+/* ★ 待启用流程提示条（密钥设置成功后自动开启保护），与 kv-warn 同构、青色信息色 */
+.kv-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--accent);
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid rgba(0, 212, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(0, 212, 255, 0.05);
+  font-family: var(--font);
+  line-height: 1.5;
+}
+.kv-info svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  opacity: 0.8;
+}
+.kv-input {
+  width: 100%;
+  background: rgba(var(--black-rgb), 0.3);
+  border: 1px solid rgba(var(--white-rgb), 0.1);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+  /* ★ 精确属性过渡（禁 transition: all — 同 .input 防御性根治） */
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+  min-width: 0;
+}
+.kv-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.1);
+}
+.kv-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+.kv-actions-center {
+  justify-content: center;
+}
+.kv-cancel {
+  padding: 6px 16px;
+  font-size: 12px;
+}
+.kv-confirm {
+  padding: 6px 16px;
+  font-size: 12px;
+}
+
+/* ===== 通用对话框：从虚化凝聚成型 ===== */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  /* ★ 性能根治：全屏 backdrop-filter 每帧全屏重采样 → 去实时毛玻璃，
+   * 底色加深补偿视觉 */
+  background: rgba(var(--black-rgb), 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: overlay-in var(--dur) var(--ease);
+}
+.dialog {
+  /* ★ 性能根治：去实时毛玻璃（弹窗叠在动态深空背景上逐帧重采样），
+   * 底色不透明度补偿 */
+  background: rgba(14, 18, 28, 0.92);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius);
+  padding: 28px;
+  min-width: 380px;
+  max-width: 90vw;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow:
+    0 16px 48px rgba(var(--black-rgb), 0.6),
+    0 0 1px rgba(var(--accent-rgb), 0.1),
+    inset 0 1px 0 rgba(var(--white-rgb), 0.05);
+  animation: dialog-in var(--dur) var(--ease);
+}
+.dialog-title {
+  font-size: 15px;
+  margin-bottom: 20px;
+  color: var(--accent);
+  letter-spacing: 1px;
+  font-weight: 500;
+}
+
+/* ===== 全局复用：量子悬浮提示（cosmic-tip）=====
+ * 非传统气泡：玻璃面板 + 量子粒子汇聚上升 + 底部发光能量线
+ * 无尖角箭头，文字从虚化凝聚渐晰
+ * 用法：v-tip="'提示文字'" 或 v-tip="动态变量"
+ */
+.cosmic-tip {
+  /* ★ 性能根治：去实时毛玻璃（悬停出现即触发背景重采样），
+   * 底色 0.88→0.94 补偿 */
+  background: rgba(14, 18, 28, 0.94);
+  border: 1px solid rgba(var(--accent-rgb), 0.18);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  box-shadow:
+    0 8px 24px rgba(var(--black-rgb), 0.55),
+    0 0 1px rgba(var(--accent-rgb), 0.25),
+    inset 0 1px 0 rgba(var(--white-rgb), 0.05);
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--text-primary);
+  letter-spacing: 0.5px;
+  max-width: 240px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* 默认隐藏态 */
+  transform: translate(0, 10px) scale(0.94);
+  filter: blur(8px);
+  transition:
+    opacity 0.3s var(--ease),
+    transform 0.4s var(--ease),
+    filter 0.4s var(--ease);
+}
+
+/* 内部光晕背景（量子粒子汇聚场） */
+.cosmic-tip .ct-glow {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  background:
+    radial-gradient(
+      ellipse 80% 50% at 50% 100%,
+      rgba(var(--accent-rgb), 0.22) 0%,
+      rgba(var(--accent-purple-rgb), 0.10) 40%,
+      transparent 75%
+    );
+  opacity: 0;
+  transition: opacity 0.4s var(--ease);
+}
+
+/* 内部文本 */
+.cosmic-tip .ct-text {
+  position: relative;
+  z-index: 2;
+  display: inline-block;
+  text-shadow: 0 0 8px rgba(var(--accent-rgb), 0.3);
+}
+
+/* 底部发光能量线（取代尖角箭头） */
+.cosmic-tip .ct-line {
+  position: absolute;
+  left: 50%;
+  bottom: -1px;
+  width: 64%;
+  height: 1px;
+  transform: translateX(-50%);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(var(--accent-rgb), 0.45) 25%,
+    rgba(var(--white-rgb), 0.95) 50%,
+    rgba(var(--accent-purple-rgb), 0.45) 75%,
+    transparent 100%
+  );
+  box-shadow:
+    0 0 6px rgba(var(--accent-rgb), 0.55),
+    0 0 12px rgba(var(--accent-rgb), 0.3),
+    0 0 18px rgba(var(--accent-purple-rgb), 0.2);
+  opacity: 0;
+  transition: opacity 0.4s var(--ease) 0.1s, width 0.5s var(--ease) 0.1s;
+}
+
+/* 显示态：粒子已汇聚，玻璃面板凝聚成型 */
+.cosmic-tip.ct-show {
+  transform: translate(0, 0) scale(1);
+  filter: blur(0);
+  animation: ct-rise 0.42s var(--ease);
+}
+.cosmic-tip.ct-show .ct-glow {
+  opacity: 1;
+  animation: ct-glow-pulse 2.4s ease-in-out infinite;
+}
+.cosmic-tip.ct-show .ct-line {
+  opacity: 1;
+  width: 72%;
+}
+
+/* 隐藏态：能量消散，回落 */
+.cosmic-tip.ct-hide {
+  transform: translate(0, 4px) scale(0.96);
+  filter: blur(4px);
+}

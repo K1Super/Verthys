@@ -1,0 +1,152 @@
+/*
+ * verthys_crypto_cng.h — CNG 内核态 AEAD 封装（V3 主密码学路径）
+ *
+ * 设计依据：docs/TARGET_ARCHITECTURE_V5.md §4.2
+ *   密钥原始字节经 BCryptGenerateSymmetricKey 导入内核后，用户态仅持有
+ *   BCRYPT_KEY_HANDLE 句柄值；AES-256-GCM 运算由 BCryptEncrypt/BCryptDecrypt
+ *   在内核态完成。完整 Dump 进程内存只能拿到无映射意义的句柄 ID。
+ *
+ * 与 key_separation（安全层三权分立）的关系：
+ *   本模块是 L0 密码学层的通用 CNG AEAD 封装（单上下文、可多实例、
+ *   内部 nonce 单调计数器），keymanager_cng 在其上构建 V3 密钥组生命周期。
+ *   GCM 内核母本（open_aes_gcm_provider / init_gcm_auth_info / AEAD 流程）
+ *   迁移自 key_separation.c，语义保持一致。
+ *
+ * 算法参数：AES-256-GCM（CNG 原生）
+ *   - 密钥：32 字节
+ *   - Nonce：12 字节（NIST SP 800-38D），封装层内部 96 位单调计数器生成
+ *   - 认证标签：16 字节
+ *   - 密文布局：[ciphertext || tag]
+ *
+ * nonce 管理（红线级）：
+ *   - 加密侧 nonce 由封装层内部计数器原子递增生成并经 nonce_out 回传，
+ *     调用方持久化（V3：随超级块分区表；过渡期：ctx 内存）
+ *   - 计数器可经 verthys_cng_aead_restore_nonce_counter 从持久化值恢复
+ *     （解锁 S3 阶段，WP-2 接线），恢复值须取 max(盘面值, WAL 重放值)
+ *     + 安全裕量（方案 R-5）
+ *   - 解密侧 nonce 由调用方传入（与加密时一致）
+ *
+ * 域分离：V3 域分离标签（"verthys/...-v3"）由上层 HKDF/包装路径承担，
+ *   本层 AAD 由调用方显式传入。
+ */
+#ifndef VERTHYS_CRYPTO_CNG_H
+#define VERTHYS_CRYPTO_CNG_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include "verthys.h"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <bcrypt.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---------- AES-256-GCM 参数 ---------- */
+#define VERTHYS_CNG_KEY_BYTES     32u   /* AES-256 密钥长度 */
+#define VERTHYS_CNG_NONCE_BYTES   12u   /* GCM 标准 Nonce 长度 */
+#define VERTHYS_CNG_TAG_BYTES     16u   /* GCM 认证标签长度 */
+#define VERTHYS_CNG_KEY_ID_BYTES  16u   /* 密钥标识符长度（非敏感，诊断/轮换追踪） */
+
+/* 内核态 AEAD 上下文——用户态仅持句柄 */
+typedef struct VerthysCngAead {
+    BCRYPT_ALG_HANDLE   alg;            /* BCRYPT_AES_ALGORITHM + CHAIN_MODE_GCM（模块共享提供者） */
+    BCRYPT_KEY_HANDLE   key;            /* 内核态密钥句柄（不可导出，NULL=未导入） */
+    uint64_t            nonce_counter;  /* 单调递增 nonce 计数器（Interlocked 原子递增） */
+    uint8_t             key_id[VERTHYS_CNG_KEY_ID_BYTES]; /* 密钥标识符（非敏感） */
+    int                 imported;       /* 1=key 已导入内核 */
+} VerthysCngAead;
+
+/*
+ * 预创建共享 AES-GCM 算法提供者（UNLOCK_OPTIMIZATION §6.2）。
+ * Verthys_Init 时机调用一次，避免解锁关键路径重复打开；幂等。
+ * 返回 VERTHYS_OK 或 VERTHYS_ERR_CNG_UNAVAILABLE。
+ */
+VerthysResult verthys_cng_init_once(void);
+
+/* 关闭共享算法提供者（Deinit 时机；已导入句柄须先行销毁）。幂等。 */
+void verthys_cng_global_deinit(void);
+
+/*
+ * 初始化 AEAD 上下文（未导入任何密钥的干净状态）。
+ * ★ 契约（K-2 红线）：
+ *   1. 栈上分配的 VerthysCngAead 必须先经本函数（或整体置零）初始化，方可
+ *      调用 import_key——未初始化内存中的垃圾句柄值会被误判为 "已导入"
+ *      而触发 BCryptDestroyKey 野句柄调用（0xC0000005）。
+ *   2. init 仅做内存消毒，不执行内核句柄销毁（垃圾值与合法句柄不可区分）；
+ *      已导入上下文须先 destroy 再 init，否则内核句柄泄露。
+ */
+VerthysResult verthys_cng_aead_init(VerthysCngAead *aead);
+
+/*
+ * 导入密钥到 CNG 内核态。
+ * ★ 红线（方案 §3.6/E-5）：本函数是唯一允许密钥明文出现在用户态栈帧的
+ *   函数——短暂、立即清零；调用后密钥字节只存在于内核地址空间。
+ *   入参 key 在函数内部被 SecureZeroMemory（const 契约同 key_separation_install）。
+ * key_id：16 字节非敏感标识符（诊断/轮换追踪），可为 NULL（置零）。
+ * 前置条件：上下文已经 verthys_cng_aead_init / 整体置零初始化。
+ * 重复导入：仅当 imported 标志置位时销毁旧句柄再导入新句柄（句柄不泄露，
+ * 且不对未初始化内存中的垃圾句柄值执行销毁）。
+ */
+__declspec(noinline) VerthysResult verthys_cng_aead_import_key(
+    VerthysCngAead *aead,
+    const uint8_t key[VERTHYS_CNG_KEY_BYTES],
+    const uint8_t key_id[VERTHYS_CNG_KEY_ID_BYTES]
+);
+
+/*
+ * 内核态加密：明文在用户态缓冲，GCM 运算在内核态完成。
+ *   ciphertext 布局 [ct || tag]，容量 >= plaintext_len + 16，实际长度经
+ *   *ciphertext_len 回传；nonce 由内部计数器生成并写入 nonce_out（12B，
+ *   调用方持久化）。空明文（0 字节）合法，输出仅 16 字节标签。
+ *   nonce_counter 溢出（2^64 加密次数，理论边界）返回 VERTHYS_ERR_INTERNAL。
+ */
+__declspec(noinline) VerthysResult verthys_cng_aead_encrypt(
+    VerthysCngAead *aead,
+    const uint8_t *plaintext, size_t plaintext_len,
+    const uint8_t *aad, size_t aad_len,
+    uint8_t *ciphertext, size_t *ciphertext_len,  /* [ct‖tag] */
+    uint8_t *nonce_out /* 12B */
+);
+
+/*
+ * 内核态解密：标签在内核态校验，认证失败返回 VERTHYS_ERR_AUTH
+ *   且输出缓冲被清零。ciphertext_len >= 16（空明文合法）。
+ */
+__declspec(noinline) VerthysResult verthys_cng_aead_decrypt(
+    const VerthysCngAead *aead,
+    const uint8_t *ciphertext, size_t ciphertext_len,
+    const uint8_t *aad, size_t aad_len,
+    const uint8_t *nonce, /* 12B */
+    uint8_t *plaintext, size_t *plaintext_len
+);
+
+/* 销毁：BCryptDestroyKey 使句柄失效，内核态密钥材料不可恢复。幂等。 */
+void verthys_cng_aead_destroy(VerthysCngAead *aead);
+
+/* 当前 nonce 计数器值（未导入返回 0） */
+uint64_t verthys_cng_aead_nonce_counter(const VerthysCngAead *aead);
+
+/*
+ * 恢复 nonce 计数器（解锁 S3：从超级块/WAL 持久化值继续，
+ * 严禁回退——调用方保证传入值 >= 历史已用最大值 + 安全裕量）。
+ * 仅 imported 状态可恢复；恢复值小于当前值返回 VERTHYS_ERR_INVALID（防回退）。
+ */
+VerthysResult verthys_cng_aead_restore_nonce_counter(VerthysCngAead *aead,
+                                                 uint64_t counter);
+
+/* 查询导入状态（1=已导入内核，0=未导入） */
+int verthys_cng_aead_is_imported(const VerthysCngAead *aead);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* VERTHYS_CRYPTO_CNG_H */

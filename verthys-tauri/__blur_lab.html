@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>引力井模糊实验室 — 验证窗口同构复现</title>
+<!-- 直接引用项目真实样式文件（非拷贝），被测对象即交付物本身 -->
+<link rel="stylesheet" href="/src/styles/tokens.css">
+<link rel="stylesheet" href="/src/styles/security/float-field.css">
+<link rel="stylesheet" href="/src/styles/security/form-inputs.css">
+<link rel="stylesheet" href="/src/styles/security/cosmic-submit.css">
+<style>
+  html, body { margin: 0; }
+  body {
+    min-height: 100vh;
+    background: radial-gradient(ellipse at 50% 20%, #0a0e18 0%, #04060b 70%);
+    display: flex;
+    justify-content: center;
+    padding-top: 48px;
+    box-sizing: border-box;
+  }
+</style>
+</head>
+<body>
+
+  <!-- 与 VerifyView 完全同构的悬浮场结构 -->
+  <div class="ff-field ff-field--stable" style="width: 330px;">
+
+    <div class="ff-node ff-node--title">
+      <div class="ff-overline">KEY · VERIFY</div>
+      <div class="ff-title">身份验证</div>
+    </div>
+
+    <div class="ff-node ff-node--body" id="row1-node">
+      <div class="form-row" id="row1">
+        <label class="form-label">访问密钥</label>
+        <div class="pw-row" id="pwrow1">
+          <input class="sc-input" id="input1" type="text" value="access-key-123" />
+          <button class="pw-toggle" type="button" tabindex="-1">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="ff-node ff-node--body">
+      <div class="form-row">
+        <label class="form-label">密钥口令</label>
+        <div class="pw-row">
+          <input class="sc-input" type="text" placeholder="请输入密钥口令" />
+          <button class="pw-toggle" type="button" tabindex="-1">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="ff-node ff-node--action">
+      <button class="cosmic-submit cs-compact">
+        <span class="cs-label">确认</span>
+        <span class="cs-rail" aria-hidden="true">
+          <i class="cs-rail-base"></i>
+          <i class="cs-rail-charge"></i>
+        </span>
+      </button>
+    </div>
+
+  </div>
+
+  <!-- 取证辅助：禁止页面滚动/缩放干扰采样 -->
+  <script>
+    document.addEventListener("keydown", (e) => e.preventDefault());
+  </script>
+</body>
+</html>

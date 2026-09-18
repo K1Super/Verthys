@@ -1,0 +1,170 @@
+/* ============================================================
+   management.css — 管理主界面容器 + 设备不匹配 + 修改密钥弹窗
+   分区内容样式已迁移至 section-field.css（引力谱系 · 无底板体系）：
+     - detail 三区（sf-zone）与会话谱线（sf-meridian）见 section-field.css
+     - 安全防护内部组件（∞双环/轨道滑块/蜂窝/护盾）见 dashboard.css
+   本文件保留：security-center / view-management / mgmt-detail 容器、
+     view-device-mismatch + dm-*、修改密钥弹窗 ck-*
+   ============================================================ */
+
+/* ===== 顶层容器 ===== */
+.security-center {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ===== 初始化弹窗（复用 CosmicBackdrop/CosmicDialog，与验证视图同尺寸同风格） ===== */
+.view-init {
+  /* 容器仅为占位，实际布局由 CosmicBackdrop/CosmicDialog 负责 */
+}
+
+/* ===== 管理主界面 ===== */
+.view-management {
+  position: relative; /* mgmt-x 离场元素 absolute inset:0 的定位锚 — 无此锚则相对
+                          .security-center（含 padding），离场瞬间尺寸突变 → 引擎
+                          ResizeObserver 布局跳变（返回量子面板时频闪的根源） */
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  animation: mgmt-in 0.5s var(--ease);
+}
+@keyframes mgmt-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ===== 分区详情容器：收窄占局 + 制造可点击空白 =====
+ * 占局收窄（引力谱系 · 无底板分区体系，样式见 section-field.css）：
+ *   - 会话谱线（sf-meridian）与分区（sf-zone）限宽 max-width 居中，两侧留出空白带
+ *   - 两者之间 gap 留白；内容不足视口时下方自然留白
+ * 这些空白区域由 ManagementView.onDetailBlankClick 几何判定识别
+ * （sf-meridian / sf-zone 包围盒之外），点击即返回引导区 */
+.mgmt-detail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding-bottom: 16px;
+}
+
+/* 会话谱线与分区：同宽限宽居中（占局收窄，两侧空白可点击返回） */
+.mgmt-detail > .sf-meridian,
+.mgmt-detail > .sf-zone {
+  width: 100%;
+  max-width: 880px;
+}
+
+/* ===== 设备机器码不匹配视图（引力悬浮场体系 — 无卡片底板） =====
+ * 容器仅承担居中占位；视觉全部由 LevitationField + ff-node 悬浮节点
+ * 承载（float-field.css）。dm-* 仅保留排印与警示语义。 */
+.view-device-mismatch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 40px;
+}
+/* 警示图标：薄环容场（去填充盒 — 1px 警示环 + 透明内场） */
+.dm-icon-wrap {
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 107, 107, 0.22);
+  background: transparent;
+  color: rgba(255, 107, 107, 0.88);
+}
+.dm-icon-wrap svg { width: 34px; height: 34px; }
+.dm-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.75;
+  text-align: center;
+  margin-bottom: 20px;
+}
+.dm-desc code {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  padding: 2px 8px;
+  background: rgba(0, 212, 255, 0.08);
+  border-radius: 4px;
+}
+/* 提示语：轨道分隔排印（顶部 hairline 渐隐 — 去提示盒） */
+.dm-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.75;
+  text-align: center;
+  padding: 16px 6px 0;
+  border-top: 1px solid rgba(205, 224, 244, 0.09);
+  margin-bottom: 26px;
+}
+/* 返回按钮：幽灵描边（悬浮场锚点 — 悬停充能/按压沉降，平滑缓动） */
+.dm-back {
+  display: block;
+  margin: 0 auto;
+  padding: 10px 40px;
+  font-size: 12px;
+  font-family: var(--font);
+  letter-spacing: 3px;
+  text-indent: 3px;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid rgba(205, 224, 244, 0.16);
+  border-radius: 8px;
+  cursor: pointer;
+  transition:
+    border-color 0.35s var(--ease),
+    background 0.35s var(--ease),
+    transform 0.4s var(--ease);
+}
+.dm-back:hover {
+  border-color: rgba(0, 212, 255, 0.38);
+  background: rgba(0, 212, 255, 0.05);
+}
+.dm-back:active {
+  transform: translateY(1px) scale(0.985);
+}
+
+/* ===== 修改全局密钥弹窗（特定布局：分组+字段；通用样式由全局 kv-* 提供） ===== */
+.ck-desc-strong strong { color: rgba(255, 107, 107, 0.9); }
+.ck-section {
+  padding: 16px;
+  margin-bottom: 16px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+.ck-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 12px;
+  letter-spacing: 0.5px;
+}
+.ck-field { margin-bottom: 12px; }
+.ck-field:last-child { margin-bottom: 0; }
+.ck-field label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  letter-spacing: 0.5px;
+}
+.ck-file-row { display: flex; gap: 8px; }
+.ck-file-row .kv-input { flex: 1; }
+.ck-browse { white-space: nowrap; }

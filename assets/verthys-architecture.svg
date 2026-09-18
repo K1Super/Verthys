@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="830" viewBox="0 0 1600 830" font-family="ui-monospace,'Cascadia Code','JetBrains Mono',Consolas,monospace">
+  <rect width="1600" height="830" fill="#0A0D12"/>
+
+  <text x="80" y="60" font-size="20" fill="#D9A94E" letter-spacing="3">§ 02 · SYSTEM LAYERING</text>
+  <text x="80" y="102" font-family="Georgia,'Palatino Linotype','Times New Roman',serif" font-size="42" fill="#E7EBF0">系统分层</text>
+  <text x="1520" y="94" text-anchor="end" font-size="18" fill="#5D6B80">四层单向依赖 · 密钥只存在于 L2</text>
+
+  <line x1="120" y1="150" x2="120" y2="790" stroke="#1E2733" stroke-width="1.5"/>
+
+  <!-- L4 -->
+  <text x="80" y="218" font-size="26" fill="#D9A94E">L4</text>
+  <rect x="180" y="150" width="1240" height="120" rx="10" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
+  <text x="210" y="190" font-size="24" fill="#E7EBF0">UI 交互层</text>
+  <text x="1390" y="186" text-anchor="end" font-size="19" fill="#5D6B80">Tauri 2.11 · Vue 3</text>
+  <text x="210" y="230" font-family="-apple-system,'Segoe UI','Microsoft YaHei',sans-serif" font-size="20" fill="#8B94A3">纯渲染与交互 · 口令、密钥不出前端 · 仅经 invoke 命令调用</text>
+  <rect x="1190" y="212" width="210" height="34" rx="17" fill="none" stroke="#2A3442" stroke-width="1.5"/>
+  <text x="1295" y="234" text-anchor="middle" font-size="16" fill="#64748B" letter-spacing="1">ZERO KEY CONTACT</text>
+
+  <line x1="800" y1="274" x2="800" y2="322" stroke="#2A3442" stroke-width="2"/>
+  <path d="M792 320 L800 330 L808 320 Z" fill="#2A3442"/>
+  <text x="830" y="304" font-size="17" fill="#5D6B80">Tauri IPC · invoke + Channel</text>
+
+  <!-- L3 -->
+  <text x="80" y="398" font-size="26" fill="#D9A94E">L3</text>
+  <rect x="180" y="330" width="1240" height="120" rx="10" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
+  <text x="210" y="370" font-size="24" fill="#E7EBF0">应用调度层</text>
+  <text x="1390" y="366" text-anchor="end" font-size="19" fill="#5D6B80">Rust 控制器 · verthys-worker 子进程</text>
+  <text x="210" y="410" font-family="-apple-system,'Segoe UI','Microsoft YaHei',sans-serif" font-size="20" fill="#8B94A3">进程编排 · 会话策略 · 安全命令 · 子进程隔离 · 零密钥接触</text>
+  <rect x="1190" y="392" width="210" height="34" rx="17" fill="none" stroke="#2A3442" stroke-width="1.5"/>
+  <text x="1295" y="414" text-anchor="middle" font-size="16" fill="#64748B" letter-spacing="1">ZERO KEY CONTACT</text>
+
+  <line x1="800" y1="454" x2="800" y2="502" stroke="#2A3442" stroke-width="2"/>
+  <path d="M792 500 L800 510 L808 500 Z" fill="#2A3442"/>
+  <text x="830" y="484" font-size="17" fill="#5D6B80">stdin/stdout JSON-lines · 命名共享内存零拷贝</text>
+
+  <!-- L2 -->
+  <text x="80" y="578" font-size="26" fill="#D9A94E">L2</text>
+  <rect x="180" y="510" width="1240" height="120" rx="10" fill="#161309" stroke="#8A6D2F" stroke-width="1.5"/>
+  <text x="210" y="550" font-size="24" fill="#E7EBF0">核心 DLL 层</text>
+  <text x="1390" y="546" text-anchor="end" font-size="19" fill="#5D6B80">C11 · verthys.dll</text>
+  <text x="210" y="586" font-size="18" fill="#A8B2C0">api / crypto / container / index / transaction / security</text>
+  <text x="210" y="614" font-family="-apple-system,'Segoe UI','Microsoft YaHei',sans-serif" font-size="17" fill="#8B94A3">对外黑盒 · 导出面由 .def 白名单管控 · 唯一密钥持有者</text>
+  <rect x="1190" y="554" width="210" height="34" rx="17" fill="#D9A94E"/>
+  <text x="1295" y="576" text-anchor="middle" font-size="16" fill="#0A0D12" letter-spacing="1">SOLE KEY HOLDER</text>
+
+  <line x1="800" y1="634" x2="800" y2="662" stroke="#2A3442" stroke-width="2"/>
+  <path d="M792 660 L800 670 L808 660 Z" fill="#2A3442"/>
+  <text x="830" y="652" font-size="17" fill="#5D6B80">原子写 / RoW / 分区 AEAD</text>
+
+  <!-- L1 -->
+  <text x="80" y="738" font-size="26" fill="#D9A94E">L1</text>
+  <rect x="180" y="670" width="1240" height="120" rx="10" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
+  <text x="210" y="710" font-size="24" fill="#E7EBF0">持久化层</text>
+  <text x="1390" y="706" text-anchor="end" font-size="19" fill="#5D6B80">.verthys 容器</text>
+  <text x="210" y="750" font-family="-apple-system,'Segoe UI','Microsoft YaHei',sans-serif" font-size="20" fill="#8B94A3">超级块三副本法定人数 · WAL 环形双区 · Extent 内容寻址去重 · .idx_cache 温缓存</text>
+  <rect x="1190" y="732" width="210" height="34" rx="17" fill="none" stroke="#2A3442" stroke-width="1.5"/>
+  <text x="1295" y="754" text-anchor="middle" font-size="16" fill="#5D6B80" letter-spacing="1">AT REST</text>
+
+  <line x1="80" y1="806" x2="1520" y2="806" stroke="#1E2733" stroke-width="1.5"/>
+  <text x="80" y="810" font-size="17" fill="#64748B">单向依赖：上层只调用下层公开接口，密钥材料不跨层流动</text>
+</svg>

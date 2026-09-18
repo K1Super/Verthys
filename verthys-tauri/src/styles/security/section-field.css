@@ -1,0 +1,568 @@
+/* ============================================================
+   section-field.css — 引力谱系 · 无底板分区体系（detail 三区共用）
+   ============================================================
+   设计哲学（打破传统卡片布局）：
+     - 零底板 / 零边框 / 零阴影 — 内容直接悬浮于宇宙背景之上
+     - 信息组织不靠卡片边界，靠「能量主线」：一条微光垂线贯穿每区，
+       内容如轨道体般锚定于主线右侧
+     - 排版建立编辑式层级：幽灵序号（极细等宽）· 坐标标签（mono 大写
+       宽字距）· 标题 · 摘要，替代「标题栏 + 列表」传统结构
+
+   命名空间 sf-*（spectrum field）：
+     .sf-zone      分区根（无底板，主线 + 左轨留位）
+     .sf-head      谱系坐标头（幽灵序号 + 坐标 + 标题 + 摘要）
+     .sf-meridian  会话谱线（顶栏：状态脉动 + 端子，水平丝线收尾）
+     .sf-terminal  接线端子（无底色文字动作，hover 能量丝点亮）
+     .sf-node      图标节点（透明圆环，hover 亮起）
+     .sf-orbit     轨道条目（模块行 = 能量丝上的轨道体）
+     .sf-toggle    能级跃迁开关（节点沿能级轨道滑移，非盒子开关）
+     .sf-anchor    奇点锚定布局（星座 SVG + 数据 + 端子纵列）
+
+   配套：useGlobalIdleScheduler 档位类（idle-governance.css）；
+   状态色语义与量子面板/引导区一致（active 青绿 / set 青 / empty 琥珀 / off 灰）
+   ============================================================ */
+
+/* ============================================================
+   分区根 — 无底板 · 能量主线
+   ============================================================ */
+.sf-zone {
+  position: relative;
+  width: 100%;
+  padding: 10px 6px 18px 44px;
+  /* 无 background / border / box-shadow —— 内容即全部 */
+}
+/* 垂直能量主线：渐变微光丝（透明 → 青 → 紫 → 青绿 → 透明），段式呼吸 */
+.sf-zone::before {
+  content: "";
+  position: absolute;
+  left: 16px;
+  top: 14px;
+  bottom: 6px;
+  width: 1px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(0, 212, 255, 0.34) 10%,
+    rgba(139, 92, 246, 0.26) 52%,
+    rgba(0, 255, 170, 0.22) 88%,
+    transparent
+  );
+}
+/* 主线节点刻度：三枚微光驻点（锚位标记，非闭合圆环） */
+.sf-zone::after {
+  content: "";
+  position: absolute;
+  left: 13.5px;
+  top: 14px;
+  bottom: 6px;
+  width: 6px;
+  background-image: radial-gradient(circle, rgba(0, 212, 255, 0.55) 0.9px, transparent 1.4px);
+  background-size: 6px 33.3%;
+  background-position: center 12%, center 50%, center 88%;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+
+/* ============================================================
+   谱系坐标头 — 幽灵序号 + 坐标 + 标题 + 摘要
+   ============================================================ */
+.sf-head {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 20px;
+}
+/* 幽灵序号：超大极细等宽数字，低透明度衬于标题后方 */
+.sf-ghost {
+  position: absolute;
+  left: -34px;
+  top: -22px;
+  font-family: var(--font-mono);
+  font-size: 62px;
+  font-weight: 200;
+  line-height: 1;
+  letter-spacing: 2px;
+  color: rgba(0, 212, 255, 0.07);
+  pointer-events: none;
+  user-select: none;
+}
+/* 坐标标签：mono 大写宽字距 + 前导能量短线 */
+.sf-coord {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: rgba(0, 212, 255, 0.72);
+}
+.sf-coord::before {
+  content: "";
+  width: 18px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(0, 212, 255, 0.7));
+}
+.sf-title {
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 0.28em;
+  color: var(--text-primary);
+}
+.sf-digest {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  max-width: 560px;
+  line-height: 1.7;
+}
+
+/* ============================================================
+   会话谱线（顶栏）— 水平丝线收尾，无卡片
+   ============================================================ */
+.sf-meridian {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  width: 100%;
+  padding: 4px 6px 16px;
+}
+/* 水平能量丝线（替代卡片底边）：渐变微光，右端渐隐 */
+.sf-meridian::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(0, 212, 255, 0.22) 8%,
+    rgba(139, 92, 246, 0.16) 55%,
+    transparent
+  );
+  pointer-events: none;
+}
+.sf-meridian-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+/* 状态脉动点：青绿呼吸（就绪）/ 琥珀静止（未就绪） */
+.sf-pulse {
+  position: relative;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 170, 0, 0.85);
+}
+.sf-pulse.on {
+  background: rgba(0, 255, 190, 0.9);
+  box-shadow: 0 0 6px rgba(0, 255, 190, 0.5);
+  animation: sf-breath 2.8s ease-in-out infinite;
+}
+@keyframes sf-breath {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+.sf-meridian-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.sf-meridian-title {
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.sf-meridian-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ============================================================
+   接线端子 — 无底色文字动作（hover 能量丝点亮）
+   ============================================================ */
+.sf-terminal {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 2px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  position: relative;
+  transition: color 0.32s var(--ease);
+}
+/* 端子记号：前导能量短线，hover 亮起延伸 */
+.sf-terminal::before {
+  content: "";
+  width: 14px;
+  height: 1px;
+  background: rgba(148, 160, 178, 0.4);
+  transition: width 0.32s var(--ease), background 0.32s var(--ease);
+}
+/* 底部能量丝：hover 从左点亮 */
+.sf-terminal::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  width: calc(100% - 4px);
+  height: 1px;
+  background: linear-gradient(90deg, rgba(0, 212, 255, 0.75), rgba(0, 255, 170, 0.4));
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 0.38s var(--ease);
+}
+.sf-terminal:hover:not(:disabled) {
+  color: var(--accent);
+}
+.sf-terminal:hover:not(:disabled)::before {
+  width: 22px;
+  background: rgba(0, 212, 255, 0.8);
+}
+.sf-terminal:hover:not(:disabled)::after {
+  transform: scaleX(1);
+}
+.sf-terminal:disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+}
+.sf-terminal svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+/* 危险域端子（立即锁定）：琥珀系 */
+.sf-terminal--warn { color: rgba(255, 178, 88, 0.8); }
+.sf-terminal--warn::before { background: rgba(255, 170, 0, 0.45); }
+.sf-terminal--warn::after {
+  background: linear-gradient(90deg, rgba(255, 170, 0, 0.7), rgba(255, 120, 80, 0.4));
+}
+.sf-terminal--warn:hover:not(:disabled) { color: #ffb056; }
+.sf-terminal--warn:hover:not(:disabled)::before { background: rgba(255, 170, 0, 0.9); }
+
+/* 端子纵列（GlobalKey 动作区）：带描述微文 */
+.sf-terminal-col {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.sf-terminal-block {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  position: relative;
+  transition: opacity 0.3s var(--ease);
+}
+.sf-terminal-block .sf-tb-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  color: var(--text-primary);
+  transition: color 0.32s var(--ease);
+}
+.sf-terminal-block .sf-tb-label::before {
+  content: "";
+  width: 16px;
+  height: 1px;
+  background: rgba(0, 212, 255, 0.5);
+  transition: width 0.32s var(--ease), background 0.32s var(--ease);
+}
+.sf-terminal-block .sf-tb-desc {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  padding-left: 25px;
+}
+.sf-terminal-block::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -6px;
+  width: 100%;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(0, 212, 255, 0.6), transparent 70%);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 0.38s var(--ease);
+}
+.sf-terminal-block:hover:not(:disabled) .sf-tb-label { color: var(--accent); }
+.sf-terminal-block:hover:not(:disabled) .sf-tb-label::before {
+  width: 26px;
+  background: rgba(0, 212, 255, 0.9);
+}
+.sf-terminal-block:hover:not(:disabled)::after { transform: scaleX(1); }
+.sf-terminal-block:disabled { opacity: 0.32; cursor: not-allowed; }
+.sf-terminal-block svg { width: 14px; height: 14px; flex: none; }
+
+/* ============================================================
+   图标节点 — 透明圆环，hover 亮起
+   ============================================================ */
+.sf-node {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.3s var(--ease), border-color 0.3s var(--ease);
+}
+.sf-node svg { width: 14px; height: 14px; }
+.sf-node:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: rgba(0, 212, 255, 0.38);
+}
+.sf-node:disabled {
+  opacity: 0.28;
+  cursor: not-allowed;
+}
+
+/* ============================================================
+   轨道条目 — 模块行 = 能量丝上的轨道体（无行底色）
+   ============================================================ */
+.sf-formation {
+  display: flex;
+  flex-direction: column;
+}
+.sf-orbit {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 4px 14px 0;
+  cursor: default;
+}
+/* 轨道丝线：条目底部微光水平丝（装饰性能量丝，非卡片边框） */
+.sf-orbit::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(148, 160, 178, 0.16) 12%,
+    rgba(148, 160, 178, 0.16) 82%,
+    transparent
+  );
+  transition: background 0.4s var(--ease);
+  pointer-events: none;
+}
+.sf-orbit:hover::after {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(0, 212, 255, 0.4) 18%,
+    rgba(0, 255, 170, 0.25) 78%,
+    transparent
+  );
+}
+.sf-orbit:last-child::after { background: none; }
+/* 模块索引：等宽两位数（轨道序号） */
+.sf-orbit-idx {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--text-muted);
+  transition: color 0.3s var(--ease);
+  flex: none;
+}
+.sf-orbit:hover .sf-orbit-idx { color: rgba(0, 212, 255, 0.85); }
+.sf-orbit-name {
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  color: var(--text-primary);
+  flex: none;
+}
+/* 状态光谱刻度：短竖标 + mono 状态文 */
+.sf-orbit-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--text-muted);
+}
+.sf-state-tick {
+  width: 2px;
+  height: 12px;
+  border-radius: 1px;
+  background: rgba(148, 160, 178, 0.5);
+  transition: background 0.4s var(--ease), box-shadow 0.4s var(--ease);
+}
+/* 状态色语义（与量子面板/引导区一致） */
+.sf-orbit.state-active .sf-state-tick {
+  background: #00ffaa;
+  box-shadow: 0 0 5px rgba(0, 255, 170, 0.55);
+}
+.sf-orbit.state-active .sf-orbit-state { color: rgba(0, 255, 170, 0.85); }
+.sf-orbit.state-set .sf-state-tick {
+  background: #00d4ff;
+  box-shadow: 0 0 5px rgba(0, 212, 255, 0.5);
+}
+.sf-orbit.state-set .sf-orbit-state { color: rgba(0, 212, 255, 0.85); }
+.sf-orbit.state-empty .sf-state-tick { background: #ffaa00; }
+.sf-orbit.state-empty .sf-orbit-state { color: rgba(255, 170, 0, 0.85); }
+.sf-orbit.state-off .sf-state-tick { background: rgba(148, 160, 178, 0.5); }
+
+.sf-orbit-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+/* ============================================================
+   能级跃迁开关 — 节点沿能级轨道滑移（非盒子开关）
+   ============================================================ */
+.sf-toggle {
+  position: relative;
+  display: inline-block;
+  width: 38px;
+  height: 20px;
+  cursor: pointer;
+  user-select: none;
+}
+.sf-toggle.disabled { opacity: 0.38; cursor: not-allowed; }
+.sf-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+/* 能级轨道：水平微光线（非盒子） */
+.sf-toggle-track {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  top: 9px;
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(148, 160, 178, 0.28);
+  transition: background 0.4s var(--ease);
+}
+/* 跃迁节点：能级间滑移的量子点 */
+.sf-toggle-node {
+  position: absolute;
+  left: 0;
+  top: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(148, 160, 178, 0.75);
+  transition:
+    transform 0.42s cubic-bezier(0.34, 1.4, 0.44, 1),
+    background 0.4s var(--ease),
+    box-shadow 0.4s var(--ease);
+}
+/* 激活：轨道充能渐变 + 节点跃迁至高能级（青色辉点） */
+.sf-toggle input:checked ~ .sf-toggle-track {
+  background: linear-gradient(90deg, rgba(0, 212, 255, 0.15), rgba(0, 212, 255, 0.65));
+}
+.sf-toggle input:checked ~ .sf-toggle-node {
+  transform: translateX(20px);
+  background: #00d4ff;
+  box-shadow: 0 0 7px rgba(0, 212, 255, 0.6);
+}
+
+/* ============================================================
+   奇点锚定布局 — 星座 SVG + 数据 + 端子纵列（不对称双栏）
+   ============================================================ */
+.sf-anchor {
+  display: flex;
+  align-items: center;
+  gap: 44px;
+  flex-wrap: wrap;
+}
+/* 星座画布：奇点 + 开放弧 + 设备系链 */
+.sf-anchor-svg {
+  flex: none;
+  width: 208px;
+  height: 168px;
+  overflow: visible;
+}
+.sf-singularity-arc {
+  fill: none;
+  stroke-linecap: round;
+  stroke-width: 2;
+}
+.sf-anchor-info {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-width: 0;
+  flex: 1;
+}
+/* 数据基准（设备机器码）：mono 分段显示 */
+.sf-datum {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.sf-datum-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.sf-datum-segments {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.sf-datum-seg {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.22em;
+  color: rgba(0, 212, 255, 0.88);
+}
+/* 分段间隔符：微光中点 */
+.sf-datum-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: rgba(0, 212, 255, 0.4);
+}
+
+/* ============================================================
+   双星系统（SecurityDashboard）— 无底板根，内部定制组件保留
+   ============================================================ */
+.sf-zone--binary {
+  padding-bottom: 8px;
+}

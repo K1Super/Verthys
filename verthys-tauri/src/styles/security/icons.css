@@ -1,0 +1,50 @@
+/* ============================================================
+   icons.css — 安全视图共享排印体系（v5：引力悬浮场适配）
+   ★ v5 变更（无底板悬浮弹窗重构）：
+     - .sc-dialog / .sc-dialog--auto 已删（卡片式弹窗底板连同
+       CosmicDialog 一起被 LevitationField 悬浮场体系替代 —
+       尺寸/布局由 float-field.css .ff-field 承载）
+     - .sc-title 已删（场域命名由 float-field.css .ff-overline +
+       .ff-title 轨道基准线体系承载）
+     - .vd-compact 已删（紧凑间距由悬浮场排印自然承载）
+   保留：
+     - .view-unlock / .view-verify / .view-init 视图容器基础
+     - .sc-desc / .sc-repair-alert 共享排印（悬浮场内覆写见
+       float-field.css）
+   ============================================================ */
+
+/* ===== 视图容器基础（三视图共享 — 布局占位，不承载弹窗尺寸） ===== */
+.view-unlock, .view-verify, .view-init {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ===== 共享描述与告警（悬浮场内样式经 float-field.css .ff-field 覆写） ===== */
+.sc-desc {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 20px;
+  line-height: 1.6;
+}
+
+/* ★ 企业级方案：修复失败告警（repair_fail_count >= 3 时显示） */
+.sc-repair-alert {
+  text-align: center;
+  font-size: 11px;
+  color: #ffb347;
+  background: rgba(255, 179, 71, 0.08);
+  border: 1px solid rgba(255, 179, 71, 0.25);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 16px;
+  line-height: 1.5;
+  animation: sc-alert-pulse 2.4s ease-in-out infinite;
+}
+@keyframes sc-alert-pulse {
+  0%, 100% { border-color: rgba(255, 179, 71, 0.25); }
+  50% { border-color: rgba(255, 179, 71, 0.55); }
+}

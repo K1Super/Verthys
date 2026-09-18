@@ -1,0 +1,1242 @@
+# Verthys 终极目标架构文档
+
+> **文档版本**: 5.0（目标态架构定义，无向后兼容）
+> **对应代码状态**: 升级完成后目标工作区（全新 V3 架构，废弃 V1/V2）
+> **本版定位**: 以 4.0 文档为起点，完全重构为以 CNG 内核密钥托管和 V3 容器为核心的目标架构。**不保留任何旧版本兼容层**，所有模块均为新设计，可直接替换旧实现。
+> **前置文档**: [架构 v4.0](./ARCHITECTURE_V4.md)（历史基线，本架构与其不兼容）、[SECURITY_LAYER_DEEP_AUDIT.md](./SECURITY_LAYER_DEEP_AUDIT.md)、[CORE_LAYER_SYSTEMATIC_REVIEW_V2.md](./CORE_LAYER_SYSTEMATIC_REVIEW_V2.md)
+
+---
+
+## 目录
+
+1. [目标定位与威胁模型升级](#1-目标定位与威胁模型升级)
+2. [总体架构](#2-总体架构)
+3. [目标目录结构](#3-目标目录结构)
+4. [密码学架构](#4-密码学架构)
+5. [密钥管理：CNG 内核全量托管](#5-密钥管理cng-内核全量托管)
+6. [V3 容器格式](#6-v3-容器格式)
+7. [核心模块详解](#7-核心模块详解)
+8. [内存安全体系](#8-内存安全体系)
+9. [纵深防御模块](#9-纵深防御模块)
+10. [事务与一致性](#10-事务与一致性)
+11. [公共 ABI 接口](#11-公共-abi-接口)
+12. [错误码与诊断体系](#12-错误码与诊断体系)
+13. [测试与验证体系](#13-测试与验证体系)
+14. [构建与供应链安全](#14-构建与供应链安全)
+15. [部署与运维](#15-部署与运维)
+16. [安全边界声明（目标态）](#16-安全边界声明目标态)
+17. [升级执行矩阵](#17-升级执行矩阵)
+18. [附录：常量速查表（目标态）](#18-附录常量速查表目标态)
+
+---
+
+## 1. 目标定位与威胁模型升级
+
+### 1.1 目标定位
+
+Verthys 在目标态的定义：**用户态安全内核（DLL），在操作系统内核之下的所有用户态层面达到民用最高安全水位。** 具体含义：
+
+| 维度 | 目标态标准 |
+|------|-----------|
+| **密钥安全** | 所有派生密钥（A/B/C/MEK）**永不以明文形式出现在用户态可寻址内存中**，全部经 CNG 内核托管，用户态仅持不可导出的内核句柄 |
+| **容器格式** | V3 格式：分区独立认证、内容寻址 Extent、LSM 索引、崩溃一致性由超级块事务原语全量保障 |
+| **内存安全** | 所有已知 P0/P1/P2 缺陷清零；ASAN/UBSAN 全量通过；关键路径模糊测试覆盖率 ≥ 80% |
+| **纵深防御** | 所有防御模块具备**真实可验证的阻断能力**，无表演性防御；防御闭环 7 路径全 BLOCKED |
+| **威胁模型** | 从“抵御同机非特权攻击者”升级至“抵御同机**特权用户态攻击者**（管理员权限，非内核）” |
+
+### 1.2 威胁模型（目标态）
+
+**攻击者能力假设**：
+
+| 能力 | 目标态防护 |
+|------|-----------|
+| 以管理员权限运行任意用户态代码 | 密钥在内核态，用户态无法读取；进程隔离 + Job Object |
+| 读取本进程内存（ReadProcessMemory） | 密钥不在用户态内存；内存防护巡逻检测远程读取 |
+| 注入代码到 worker 进程 | mitigation policy + DLL 哈希固化 + 模块巡检 |
+| 挂接 Windows API（IAT/EAT Hook） | TLS 回调验证 + 直接系统调用（关键路径）+ 签名信任 |
+| 转储进程内存（MiniDump） | 密钥在内核态；防转储巡逻 |
+| 调试器附加 | 反调试 v2 高置信度信号 + KILL 响应 |
+| 篡改磁盘上的 .verthys 文件 | AEAD 分区认证 + Merkle 树 + 超级块多副本 |
+| 替换 verthys.dll | .vsec 构建期签名 + build.rs SHA-256 固化 + Authenticode |
+| 离线爆破口令 | Argon2id 动态校准 + pepper CNG 机器绑定 |
+| 重放旧超级块 | state_chain 防回滚 + txid 单调递增 |
+
+**明示的残余风险（目标态诚实声明）**：
+
+1. **内核态攻击者**（驱动、内核漏洞利用）不在威胁模型内——“内核之下”的含义即此边界。
+2. **硬件攻击**（DMA、冷启动、总线嗅探）不在威胁模型内——属于“内核之上”的物理安全范畴。
+3. **供应链攻击**（编译器后门、依赖库投毒）通过 vendored 依赖 + 哈希固化 + SBOM 缓解，但无法完全消除。
+4. **用户口令本身**的强度不在系统控制范围内——Argon2id 只能延缓暴力破解，无法拯救弱口令。
+5. **侧信道攻击**（时序、缓存、功耗）对用户态进程的实用性有限，关键密码运算走内核态 CNG 后风险进一步降低。
+
+---
+
+## 2. 总体架构
+
+### 2.1 分层架构（目标态）
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  L4  UI 交互层（Vue3 + TypeScript, Tauri 沙箱）              │
+│      纯渲染/交互，无任何密钥/明文接触                         │
+└───────────────────────────┬──────────────────────────────┘
+                            │ Tauri IPC (invoke)
+┌───────────────────────────┴──────────────────────────────┐
+│  L3  应用调度层（Tauri-Rust 主进程）                         │
+│      进程编排/会话策略/Rust 侧安全模块                        │
+│      零密钥接触；build.rs 固化 verthys.dll SHA-256          │
+│      新增：内核态密钥句柄生命周期编排（无密钥本身）              │
+└───────────────────────────┬──────────────────────────────┘
+                            │ stdin/stdout JSON-lines
+┌───────────────────────────┴──────────────────────────────┐
+│  L2  verthys-worker 子进程（Rust, BELOW_NORMAL）               │
+│      mitigation policy 应用 → DLL 加载 → 单线程 FFI          │
+│      ★ 关键变化：worker 不再持有任何密钥明文                   │
+│      仅持 CNG 内核句柄（不可导出）                           │
+└───────────────────────────┬──────────────────────────────┘
+                            │ C ABI（白名单导出）
+┌───────────────────────────┴──────────────────────────────┐
+│  L1  核心安全层（verthys.dll）                              │
+│      ┌───────────────────────────────────────────────┐   │
+│      │  L5  api/          公共 ABI 门面                │   │
+│      │  L4  runtime/      运行时保护                   │   │
+│      │  L3  transaction/  事务一致（vsb_txn 全量）     │   │
+│      │  L2  index/        LSM 索引 + Extent 内容寻址   │   │
+│      │  L1  container/    V3 容器格式                 │   │
+│      │  L0  crypto/       密码原语 + CNG 内核托管       │   │
+│      │  L6  security/     纵深防御（真实闭环）          │   │
+│      └───────────────────────────────────────────────┘   │
+└───────────────────────────┬──────────────────────────────┘
+                            │ 原子写 / RoW / 分区认证
+┌───────────────────────────┴──────────────────────────────┐
+│  L0  持久化层：.verthys（V3 容器，唯一格式）                   │
+│      分区独立 AEAD / 内容寻址 Extent / LSM 索引             │
+│      超级块多副本 + 法定人数提交                            │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 2.2 关键架构决策（目标态新增）
+
+| 决策 | 内容 | 理由 |
+|------|------|------|
+| **D-1: CNG 内核密钥全量托管** | A/B/C/MEK 全部经 `BCryptGenerateSymmetricKey` 导入 CNG 内核态，用户态仅持 `BCRYPT_KEY_HANDLE`（不可导出） | 密钥明文永不出现在用户态可寻址内存——这是“内核之下”的核心防线 |
+| **D-2: V3 容器格式** | FlatBuffers schema 驱动 + 分区独立认证 + 内容寻址 Extent + LSM 索引 | 全新设计，无历史包袱，性能与安全性最优 |
+| **D-3: 超级块法定人数提交** | 3 副本超级块，提交需 2/3 确认 | 消除超级块单点损坏导致整库丢失的风险 |
+| **D-4: 直接系统调用关键路径** | 关键防御检测器走 `Nt*` 直接系统调用（经签名验证的 stub） | 绕过用户态 API Hook |
+| **D-5: 密钥轮换自动机** | 基于时间/操作计数的自动 rekey，内核态完成 | 限制单密钥生命周期内的密文暴露量 |
+| **D-6: 内存分配器隔离** | 密钥相关结构走专用内存池（VirtualAlloc + 锁页 + 清零） | 防堆溢出从邻近对象泄露密钥 |
+
+---
+
+## 3. 目标目录结构
+
+```
+core/
+├── CMakeLists.txt                    # 分层源文件 + ASAN/UBSAN 开关 + 覆盖率
+├── verthys.def                      # ★ 导出符号白名单（目标态扩展）
+├── include/
+│   ├── verthys.h                    # 公共 C ABI（API_VERSION 0x0007）
+│   ├── error_codes.h                 # 错误码（扩展）
+│   └── verthys_internal.h           # 内部共享（CNG 句柄包装）
+├── src/
+│   ├── api/
+│   │   ├── verthys_api.c               # 入口门面 + 活动句柄注册表 + 降级处理器
+│   │   ├── verthys_api_utils.c         # 工具函数
+│   │   ├── verthys_v3_lifecycle.c      # ★ V3 创建/解锁（CNG 密钥导入流程）
+│   │   ├── verthys_export_import.c     # 导出/导入/改密
+│   │   ├── verthys_scan.c              # 扫描游标
+│   │   ├── verthys_progress.c          # 进度环形缓冲
+│   │   └── dllmain.c                 # TLS 标志
+│   ├── container/
+│   │   ├── verthys_container_v3.h      # ★ V3 全部结构体/FlatBuffers schema 声明
+│   │   ├── verthys_superblock_v3.c     # ★ V3 超级块（多副本 + 法定人数提交）
+│   │   ├── verthys_partition.c         # ★ 分区管理（独立 AEAD 认证）
+│   │   ├── verthys_extent.c            # ★ 内容寻址 Extent（去重 + 完整性）
+│   │   ├── verthys_io.h/.c             # 统一 64 位 I/O 层
+│   │   └── verthys_internal.h          # VerthysContext + CNG 句柄包装
+│   ├── crypto/
+│   │   ├── verthys_crypto.c            # AEAD/Argon2id/HKDF/HMAC
+│   │   ├── verthys_crypto_cng.c        # ★ CNG 内核 AEAD 全量封装
+│   │   ├── keymanager.c              # ★ 重构：密钥派生→CNG 导入→句柄管理
+│   │   ├── keymanager_cng.c          # ★ CNG 内核密钥生命周期
+│   │   ├── verthys_pepper.c            # pepper v3（来源指纹 + 内核包装）
+│   │   ├── verthys_rekey_auto.c        # ★ 自动密钥轮换状态机
+│   │   └── secure_mem.c              # 安全内存 + 专用分配器
+│   ├── index/
+│   │   ├── verthys_lsm.c               # ★ LSM 树（内存 MemTable + 磁盘 SSTable）
+│   │   ├── verthys_lsm_memtable.c      # ★ MemTable（跳表）
+│   │   ├── verthys_lsm_sstable.c       # ★ SSTable（压缩 + 布隆过滤器）
+│   │   ├── verthys_lsm_compaction.c    # ★ 合并压缩策略
+│   │   └── verthys_merkle.c            # Merkle 树（分区级）
+│   ├── transaction/
+│   │   ├── verthys_transaction.c       # RoW + 原子提交 + vsb_txn
+│   │   ├── verthys_transaction_v3.c    # ★ V3 事务（分区级 + Extent 引用计数）
+│   │   ├── verthys_garbage.c           # GC（Extent 引用计数回收）
+│   │   ├── verthys_recovery.c          # 灾难恢复（多副本）
+│   │   └── verthys_wal.c               # ★ WAL 预写日志
+│   ├── runtime/
+│   │   ├── verthys_watcher.c           # 文件系统监听
+│   │   ├── verthys_mountwatch.c        # 挂载/锁屏监视
+│   │   ├── verthys_warmcache.c         # 三级缓存链
+│   │   └── anti_debug.c              # 基础反调试
+│   └── security/
+│       ├── preset/security_preset.c          # 双缓冲原子切换
+│       ├── integrity/integrity.c             # .vsec 验签 + 运行时完整性
+│       ├── integrity/runtime_hash.c          # ★ 关键代码段运行时哈希校验
+│       ├── anti_analysis/anti_debug_v2.c     # 反调试 v2
+│       ├── anti_analysis/anti_inject.c       # 模块巡检
+│       ├── anti_analysis/syscall_direct.c    # ★ 直接系统调用 stub
+│       ├── memory/memory_guard.c             # 内存防护巡逻
+│       ├── memory/key_separation.c           # ★ CNG 内核托管（全量接线）
+│       ├── memory/secure_allocator.c         # ★ 专用安全分配器
+│       ├── emergency/emergency.c             # 应急分级响应
+│       ├── layer1_process_guard/job_isolation.c
+│       ├── layer3_hw_binding/cng_machine_key.c
+│       ├── layer3_hw_binding/hardware_binding.c
+│       ├── layer3_hw_binding/system32_loader.c
+│       ├── layer4_hook_defense/tls_loader.c
+│       ├── layer4_hook_defense/tls_callbacks.c
+│       ├── layer4_hook_defense/tamper_destroy.c
+│       ├── layer5_sandbox/process_sandbox.c
+│       └── layer6_closure/defense_closure.c   # 7 路径状态机（目标全 BLOCKED）
+├── schema/                          # ★ FlatBuffers schema（V3 新增）
+│   ├── superblock_v3.fbs            # V3 超级块 schema
+│   ├── partition.fbs                # 分区 schema
+│   ├── extent.fbs                   # Extent 元数据 schema
+│   ├── sstable.fbs                  # SSTable schema
+│   └── generated/                   # flatc 生成代码
+├── fuzz/                            # ★ 模糊测试（新增）
+│   ├── fuzz_container_v3.c          # V3 容器格式 fuzz
+│   ├── fuzz_superblock.c            # 超级块 fuzz
+│   ├── fuzz_extent.c                # Extent fuzz
+│   ├── fuzz_lsm.c                   # LSM 索引 fuzz
+│   └── fuzz_import.c                # 导入路径 fuzz
+├── tools/
+│   ├── pepper_inject.c              # pepper 注入工具
+│   ├── recovery_card.c              # Shamir 恢复卡工具
+│   └── verthys_diagnose.c             # ★ 诊断工具（容器健康检查）
+├── ci/
+│   ├── export_baseline.txt
+│   ├── sbom.json                    # ★ SBOM 生成配置
+│   └── coverage_thresholds.json     # ★ 覆盖率门槛
+└── tests/
+    ├── test_runner.c
+    ├── test_cng_kernel.c            # ★ CNG 内核密钥生命周期测试
+    ├── test_v3_container.c          # ★ V3 容器格式测试
+    ├── test_v3_partition.c          # ★ 分区认证测试
+    ├── test_v3_extent.c             # ★ Extent 内容寻址测试
+    ├── test_lsm_index.c             # ★ LSM 索引测试
+    ├── test_auto_rekey.c            # ★ 自动密钥轮换测试
+    ├── test_secure_allocator.c      # ★ 安全分配器测试
+    ├── test_runtime_hash.c          # ★ 运行时哈希校验测试
+    ├── test_final_repair.c          # 最终修复回归（保留）
+    └── ...（继承 v4.0 全部测试，适配 V3）
+```
+
+---
+
+## 4. 密码学架构
+
+### 4.1 算法体系（目标态）
+
+| 用途 | 算法 | 参数 | 变更说明 |
+|------|------|------|---------|
+| 记录/分区 AEAD | XChaCha20-Poly1305 (libsodium) | 24B nonce | 保留用于兼容场景（如 pepper 包装、导出），V3 主路径使用 CNG |
+| **内核态 AEAD** | **CNG AES-256-GCM** | **12B nonce** | **★ V3 主路径，用户态仅持句柄** |
+| 口令派生 | Argon2id | BALANCED 32MiB 校准 / SECURE 64MiB/3/1 | 不变 |
+| 子密钥派生 | HKDF-SHA256-Expand | 域分离标签 v3 | 标签升级 |
+| 完整性 | HMAC-SHA256 + **分区独立 key** | 独立 integrity_key | V3 分区级 |
+| 随机数 | `BCryptGenRandom`（内核态） | OS CSPRNG | 升级：走 CNG 而非 libsodium |
+| pepper 机器包装 | CNG RSA-2048 OAEP-SHA256 | label = MachineGuid 指纹 | 不变 |
+| **Extent 哈希** | **BLAKE2b-256** | 32B digest | **★ V3 新增：内容寻址** |
+| **SSTable 布隆过滤器** | **xxHash64 + 双重哈希** | 0.1% 误报率 | **★ V3 新增** |
+
+### 4.2 CNG 内核 AEAD 封装（verthys_crypto_cng.c）
+
+```c
+/* 内核态 AEAD 上下文——用户态仅持句柄 */
+typedef struct VerthysCngAead {
+    BCRYPT_ALG_HANDLE   alg;        /* BCRYPT_AES_ALGORITHM + CHAIN_MODE_GCM */
+    BCRYPT_KEY_HANDLE   key;        /* 内核态密钥句柄（不可导出） */
+    uint64_t            nonce_counter;  /* 单调递增 nonce 计数器 */
+    uint8_t             key_id[16]; /* 密钥标识符（用于诊断/轮换追踪） */
+} VerthysCngAead;
+
+/* 导入密钥到 CNG 内核态（明文仅在本函数栈帧内短暂存在，调用后清零） */
+VerthysResult verthys_cng_aead_import_key(
+    VerthysCngAead *aead,
+    const uint8_t key[VERTHYS_KEY_BYTES],
+    const uint8_t key_id[16]
+);
+
+/* 内核态加密：plaintext 在用户态，加密运算在内核态完成 */
+VerthysResult verthys_cng_aead_encrypt(
+    VerthysCngAead *aead,
+    const uint8_t *plaintext, size_t plaintext_len,
+    const uint8_t *aad, size_t aad_len,
+    uint8_t *ciphertext, size_t *ciphertext_len,  /* [ct‖tag] */
+    uint8_t *nonce_out /* 12B */
+);
+
+/* 内核态解密 */
+VerthysResult verthys_cng_aead_decrypt(
+    VerthysCngAead *aead,
+    const uint8_t *ciphertext, size_t ciphertext_len,
+    const uint8_t *aad, size_t aad_len,
+    const uint8_t *nonce, /* 12B */
+    uint8_t *plaintext, size_t *plaintext_len
+);
+
+/* 销毁：BCryptDestroyKey 使句柄失效，内核态密钥不可恢复 */
+void verthys_cng_aead_destroy(VerthysCngAead *aead);
+```
+
+**nonce 管理**：目标态采用 **12B 单调递增计数器**（非随机），与 libsodium 的随机 24B nonce 在 V3 容器中互不干扰（V3 容器专用于 CNG 路径，V2 容器保留 libsodium 路径——但本项目不再兼容 V2，故所有非 CNG 用法仅出现在 pepper 包装等辅助场景）。
+
+**关键设计约束**：
+- `verthys_cng_aead_import_key` 是**唯一**允许密钥明文出现在用户态栈帧的函数（短暂、不可转储、调用后 `SecureZeroMemory`）。
+- CNG 句柄的 `BCRYPT_KEY_HANDLE` 在 `VerthysContext` 中存储，**任何导出/序列化路径均不包含句柄本身**。
+- 进程终止时 CNG 自动清理内核态密钥——与“锁库即杀进程”的语义完美契合。
+
+### 4.3 自动密钥轮换（verthys_rekey_auto.c）
+
+```
+触发条件（满足任一）:
+├── 时间触发: 距上次 rekey 超过 REKEY_INTERVAL_DAYS（默认 90 天）
+├── 操作计数: 写入操作超过 REKEY_OPS_THRESHOLD（默认 10,000 次）
+├── 手动触发: Verthys_ChangePassword 附带 rekey 标志
+└── 异常触发: 检测到远程内存读取（DEGRADE 信号）后强制 rekey
+
+轮换流程（全内核态完成）:
+1. 生成新 key_a'/key_b'（BCryptGenRandom）
+2. 派生新 key_c'（从当前 MEK）
+3. 在 CNG 内核态用旧 key 解密 → 新 key 加密（数据本身不经过用户态）
+4. 超级块更新：wrapped_key_a'/b'/c' 原子提交（vsb_txn）
+5. 旧句柄销毁 → 新句柄激活（原子指针切换）
+6. 审计日志记录（AEAD 保护）
+
+防震荡: 轮换间隔最小值 REKEY_MIN_INTERVAL（默认 24h）
+```
+
+---
+
+## 5. 密钥管理：CNG 内核全量托管
+
+### 5.1 目标态密钥层次
+
+```
+L1 口令: password（用户输入，不落盘，主进程→worker 传递后清零）
+L2 派生: DKM = Argon2id(password ‖ pepper, salt, mem/iters/parallel)
+         ★ DKM 在 worker 用户态栈帧中短暂存在 → 立即用于 HKDF → 清零
+L3 主密钥: MEK = HKDF-Expand(DKM, "verthys/master-key-v3")
+         ★ MEK 导入 CNG 内核态 → 用户态仅持句柄 → DKM 清零
+L4 子密钥:
+   ├── key_a（索引）: BCryptGenRandom 生成 → CNG 导入 → 句柄
+   ├── key_b（数据）: BCryptGenRandom 生成 → CNG 导入 → 句柄
+   └── key_c（超级块）: HKDF(MEK, "superblock-key-v3") → CNG 导入 → 句柄
+   包装密钥: wrapped_key_a/b/c 使用 MEK 内核态加密后存储于超级块
+   记录密钥: record_key = HKDF(key_b, "record-v3" ‖ record_id)
+             → 每次使用前派生 → CNG 导入 → 用完即销毁
+```
+
+### 5.2 VerthysContext 目标态结构
+
+```c
+typedef struct VerthysContext {
+    /* 容器信息 */
+    VerthysContainerId container_id;
+    VerthysContainerVersion version;  /* VERTHYS_CONTAINER_V3 */
+    VerthysFileHandle *file_handle;
+
+    /* ★ CNG 内核密钥句柄（不可导出，进程终止自动清理） */
+    BCRYPT_KEY_HANDLE hkey_meK;     /* 主加密密钥（内核态） */
+    BCRYPT_KEY_HANDLE hkey_a;       /* 索引密钥（内核态） */
+    BCRYPT_KEY_HANDLE hkey_b;       /* 数据密钥（内核态） */
+    BCRYPT_KEY_HANDLE hkey_c;       /* 超级块密钥（内核态） */
+    BCRYPT_KEY_HANDLE hkey_integrity; /* 完整性密钥（内核态） */
+
+    /* 密钥标识符（非敏感，用于诊断和轮换追踪） */
+    uint8_t key_id_a[16];
+    uint8_t key_id_b[16];
+    uint8_t key_id_c[16];
+
+    /* ★ 密钥轮换状态机 */
+    RekeyState rekey_state;
+    uint64_t ops_since_rekey;
+    FILETIME last_rekey_time;
+
+    /* 容器分区表 */
+    VerthysPartitionTable partition_table;
+    VerthysExtentTable extent_table;
+
+    /* 索引（LSM） */
+    VerthysLsmIndex *lsm_index;
+
+    /* 事务 */
+    VerthysTxnContext txn_ctx;
+    VsbTxn *active_txn;
+
+    /* 状态 */
+    VerthysState state;
+    VerthysPreset active_preset;
+
+    /* 运行时 */
+    VerthysProgressCtx progress;
+    VerthysCacheCtx cache;
+
+    /* 安全 */
+    EmergencyContext emergency_ctx;
+    MemoryGuardCtx mem_guard_ctx;
+    IntegrityContext integrity_ctx;
+    HookDefenseCtx hook_defense_ctx;
+
+    /* ★ 安全分配器 */
+    SecureAllocator *secure_alloc;
+} VerthysContext;
+```
+
+### 5.3 CNG 密钥生命周期状态机
+
+```
+                    ┌──────────────────────────────────┐
+                    │         UNINITIALIZED             │
+                    └──────────────┬───────────────────┘
+                                   │ Verthys_Unlock (成功)
+                                   ▼
+                    ┌──────────────────────────────────┐
+                    │            DERIVED                │
+                    │  DKM/MEK 在用户态短暂存在           │
+                    └──────────────┬───────────────────┘
+                                   │ CNG 导入完成 → 用户态清零
+                                   ▼
+                    ┌──────────────────────────────────┐
+                    │            KERNEL_RESIDENT        │
+                    │  所有句柄在内核态，用户态不可见      │
+                    │  ★ 正常运行状态                    │
+                    └───┬──────────────┬──────────────┘
+                        │              │
+              Rekey 触发 │              │ 异常/锁定/Deinit
+                        ▼              ▼
+              ┌──────────────┐  ┌──────────────────┐
+              │   REKEYING   │  │    DESTROYED     │
+              │ 新旧句柄共存   │  │ BCryptDestroyKey │
+              │ 原子切换      │  │ 内核态密钥不可恢复 │
+              └──────┬───────┘  └──────────────────┘
+                     │ 完成
+                     ▼
+              ┌──────────────┐
+              │ KERNEL_RESIDENT │（新句柄）
+              └──────────────┘
+```
+
+### 5.4 关键路径密钥处理规范
+
+| 路径 | 密钥处理 | 用户态明文存在时间 |
+|------|---------|------------------|
+| 解锁派生 | DKM → MEK → 导入 CNG | 仅 Argon2id 输出到 HKDF 完成期间（<1ms 量级） |
+| 记录加密 | record_key 派生 → CNG 导入 → 加密 → 销毁句柄 | 单次操作期间（<100μs 量级） |
+| 记录解密 | 同上 | 同上 |
+| 改密 | 新 DKM → 新 MEK → CNG 内核态重包裹 → 旧句柄销毁 | 与解锁派生相同 |
+| 导出 | 逐条解密 → 明文经过用户态缓冲区（不可避免） | 整个导出期间 |
+| 导入 | 逐条加密（明文来自外部文件） | 整个导入期间 |
+
+**明文经过用户态缓冲区的不可避免场景**：导出/导入/扫描返回值。这些路径的防护依赖：进程隔离 + 锁库杀进程 + 内存防护巡逻 + 缓冲区使用后立即清零。
+
+---
+
+## 6. V3 容器格式
+
+### 6.1 V3 设计目标
+
+| 目标 | 说明 |
+|------|------|
+| **分区独立认证** | 每个分区（超级块/索引/Extent/日志）独立 AEAD 密钥和 nonce 空间，单分区损坏不影响其他分区 |
+| **内容寻址 Extent** | 数据块以 BLAKE2b 哈希寻址，天然去重 + 完整性校验 |
+| **LSM 索引** | 写入 O(1) 追加，后台合并压缩，消除 B+ 树的随机写入和分裂复杂度 |
+| **超级块多副本** | 3 副本 + 法定人数提交（2/3），消除单点损坏 |
+| **WAL 预写日志** | 事务先写日志后提交，崩溃恢复可精确回放 |
+| **FlatBuffers schema** | 零拷贝解析、前向/后向兼容、消除手写序列化边界错误 |
+
+### 6.2 V3 文件布局
+
+```
+[0 .. 64KB)              超级块区（3 副本 × 16KB，法定人数提交）
+  ├─ SB-Replica-0        偏移 0x0000，16KB
+  ├─ SB-Replica-1        偏移 0x4000，16KB
+  ├─ SB-Replica-2        偏移 0x8000，16KB
+  └─ SB-Reserved         偏移 0xC000，16KB（预留）
+
+[64KB .. 1MB)            WAL 预写日志（环形，480KB 活跃 + 480KB 备份）
+
+[1MB .. 4MB)             分区表（Partition Table）
+  ├─ 分区元数据          FlatBuffers 编码，AEAD 认证
+  ├─ 分区 0: 索引区      起始偏移/大小/密钥引用
+  ├─ 分区 1: Extent 区   起始偏移/大小/密钥引用
+  ├─ 分区 2: 审计日志区  起始偏移/大小/密钥引用
+  └─ ...
+
+[4MB .. N)               索引分区（LSM）
+  ├─ SSTable-0           Level 0（MemTable flush 产物）
+  ├─ SSTable-1           Level 1（合并压缩产物）
+  ├─ Bloom Filter        xxHash64 双重哈希
+  └─ ...
+
+[N .. M)                 Extent 分区（内容寻址数据块）
+  ├─ Extent-<hash>       数据内容（AEAD 加密，hash 寻址）
+  ├─ Extent-<hash>       ...
+  └─ Extent Index        哈希→偏移映射（FlatBuffers）
+
+[M .. 文件尾)             审计日志 + 尾部摘要
+  ├─ 审计日志（AEAD 独立密钥）
+  └─ 尾部摘要索引
+```
+
+### 6.3 V3 超级块（多副本 + 法定人数提交）
+
+```c
+/* FlatBuffers schema: superblock_v3.fbs */
+table SuperBlockV3 {
+    magic: uint32;                    /* 'V3SB' 0x42533356 */
+    version: uint16;                  /* 3 */
+    container_id: [ubyte];            /* 32B 随机标识 */
+    created_at: uint64;               /* FILETIME */
+    updated_at: uint64;
+    txid: uint64;                     /* 单调递增事务 ID */
+    state_chain: [ubyte];             /* 32B 防回滚链 */
+
+    /* Argon2id 参数 */
+    argon2_mem_kib: uint32;
+    argon2_iters: uint32;
+    argon2_parallel: uint32;
+    salt: [ubyte];                    /* 16B */
+    argon2_benchmark_ms: [uint32];    /* 4 项基准 */
+    argon2_tier: uint32;
+    pepper_source: uint8;             /* flags[5] 等价 */
+
+    /* 密钥包装（使用 MEK 内核态加密） */
+    wrapped_key_a: [ubyte];           /* 32B + 16B tag */
+    wrapped_key_b: [ubyte];
+    wrapped_key_c: [ubyte];
+    key_a_id: [ubyte];                /* 16B 密钥标识 */
+    key_b_id: [ubyte];
+    key_c_id: [ubyte];
+
+    /* 分区布局 */
+    partition_table_offset: uint64;
+    partition_table_size: uint64;
+    index_partition_offset: uint64;
+    index_partition_size: uint64;
+    extent_partition_offset: uint64;
+    extent_partition_size: uint64;
+    audit_partition_offset: uint64;
+    audit_partition_size: uint64;
+
+    /* WAL 状态 */
+    wal_head_offset: uint64;
+    wal_tail_offset: uint64;
+    wal_committed_txid: uint64;
+
+    /* 完整性 */
+    merkle_root: [ubyte];             /* 32B */
+    superblock_hmac: [ubyte];         /* 32B, 使用 integrity_key */
+
+    /* 扩展 */
+    extensions: [ubyte];              /* TLV 扩展区 */
+}
+
+/* 法定人数提交逻辑 */
+VerthysResult vsb_v3_commit_quorum(VsbTxn *txn) {
+    /* 1. 序列化超级块到临时缓冲区 */
+    /* 2. 计算 HMAC */
+    /* 3. 写入 Replica-0 → fsync */
+    /* 4. 写入 Replica-1 → fsync */
+    /* 5. 写入 Replica-2 → fsync */
+    /* 6. 至少 2 个副本写入成功 = 提交成功 */
+    /* 7. 验证读取：至少 2 个副本 HMAC 通过 */
+    /* 8. 更新内存状态 */
+}
+
+/* 崩溃恢复读取 */
+VerthysResult vsb_v3_read_quorum(VerthysSuperBlockV3 *sb) {
+    /* 1. 依次读取 3 个副本 */
+    /* 2. 每个副本验证 HMAC */
+    /* 3. 选择 txid 最高的有效副本（至少 2 个一致） */
+    /* 4. 如果只有 1 个有效，返回 VERTHYS_ERR_CORRUPT（触发恢复流程） */
+    /* 5. 如果 0 个有效，尝试从 WAL 恢复 */
+}
+```
+
+### 6.4 分区管理（verthys_partition.c）
+
+```c
+typedef struct VerthysPartition {
+    VerthysPartitionId id;
+    VerthysPartitionType type;         /* INDEX / EXTENT / AUDIT / WAL */
+    uint64_t offset;
+    uint64_t size;
+    uint64_t used;
+    BCRYPT_KEY_HANDLE hkey;          /* 分区独立密钥句柄（内核态） */
+    uint8_t key_id[16];
+    uint64_t nonce_counter;          /* 单调递增，防 nonce 重用 */
+} VerthysPartition;
+
+/* 分区创建：生成独立密钥 → CNG 导入 → 初始化 */
+/* 分区扩展：按需增长（2x 增长策略，上限由 Extent 区决定） */
+/* 分区认证：每次读写附带 AAD = partition_id + nonce + txid */
+```
+
+### 6.5 内容寻址 Extent（verthys_extent.c）
+
+```c
+typedef struct VerthysExtent {
+    uint8_t hash[32];                /* BLAKE2b-256(明文) */
+    uint64_t offset;                 /* 文件偏移 */
+    uint32_t size;                   /* 加密后大小 */
+    uint32_t plaintext_size;         /* 明文大小 */
+    uint32_t ref_count;              /* 引用计数（GC 用） */
+    uint64_t created_txid;
+    uint64_t last_ref_txid;
+} VerthysExtent;
+
+/* 写入：明文 → BLAKE2b → 查重 → (新)加密+追加 → 更新 Extent Index */
+/* 读取：Extent Index 查哈希 → 偏移 → 解密 → 验证 BLAKE2b(明文) == hash */
+/* 删除：ref_count-- → 为 0 时标记可回收（GC 时物理删除） */
+/* 去重收益：相同内容的记录（如重复 URL/密码模式）仅存储一次 */
+```
+
+### 6.6 LSM 索引（verthys_lsm.c）
+
+```
+结构:
+  MemTable（跳表，内存中）
+    ↓ flush（达到阈值：64MB 或 10,000 条）
+  SSTable Level 0（文件追加，可能重叠）
+    ↓ compaction（后台合并）
+  SSTable Level 1（不重叠，有序）
+    ↓ compaction（可选多级）
+  SSTable Level 2+（容量逐级 ×10）
+
+写入路径: MemTable 插入 → WAL 先行 → 达到阈值 flush
+读取路径: MemTable → Level 0 → Level 1 → ... → 找到即返回
+删除路径: Tombstone 标记 → compaction 时物理删除
+查找加速: Bloom Filter（每 SSTable，0.1% 误报率）
+
+SSTable 结构（FlatBuffers）:
+  [Data Block 0][Data Block 1]...[Index Block][Bloom Filter][Footer]
+```
+
+---
+
+## 7. 核心模块详解
+
+### 7.1 L0 crypto/ — 密码学核心
+
+| 文件 | 职责 | 关键变化 |
+|------|------|---------|
+| `verthys_crypto.c` | AEAD/Argon2id/HKDF/HMAC | 保留基础算法 |
+| **`verthys_crypto_cng.c`** | **CNG 内核 AEAD 全量封装** | **★ V3 主路径** |
+| **`keymanager.c`** | **重构：密钥派生→CNG 导入→句柄管理** | **★ 全量 CNG 化** |
+| **`keymanager_cng.c`** | **CNG 内核密钥生命周期** | **★ 新增** |
+| `verthys_pepper.c` | pepper v3 | 来源指纹 + 内核包装 |
+| **`verthys_rekey_auto.c`** | **自动密钥轮换状态机** | **★ 新增** |
+| `secure_mem.c` | 安全内存 | 扩展：专用分配器 |
+
+### 7.2 L1 container/ — 容器格式
+
+| 文件 | 职责 | 关键变化 |
+|------|------|---------|
+| **`verthys_container_v3.h`** | **V3 全部结构体/常量** | **★ 新增** |
+| **`verthys_superblock_v3.c`** | **V3 超级块多副本 + 法定人数提交** | **★ 核心** |
+| **`verthys_partition.c`** | **分区管理** | **★ 新增** |
+| **`verthys_extent.c`** | **内容寻址 Extent** | **★ 新增** |
+| `verthys_io.c` | 统一 64 位 I/O | 扩展：分区感知读写 |
+
+### 7.3 L2 index/ — 索引
+
+| 文件 | 职责 | 关键变化 |
+|------|------|---------|
+| **`verthys_lsm.c`** | **LSM 树主控** | **★ V3 核心索引** |
+| **`verthys_lsm_memtable.c`** | **跳表 MemTable** | **★ 新增** |
+| **`verthys_lsm_sstable.c`** | **SSTable 读写 + 布隆过滤器** | **★ 新增** |
+| **`verthys_lsm_compaction.c`** | **合并压缩策略** | **★ 新增** |
+| `verthys_merkle.c` | Merkle 树 | 扩展：分区级 Merkle |
+
+### 7.4 L3 transaction/ — 事务
+
+| 文件 | 职责 | 关键变化 |
+|------|------|---------|
+| `verthys_transaction.c` | RoW + 原子提交 | 基础抽象 |
+| **`verthys_transaction_v3.c`** | **V3 事务（分区级 + Extent 引用）** | **★ 新增** |
+| **`verthys_wal.c`** | **WAL 预写日志** | **★ 新增：崩溃恢复精确回放** |
+| `verthys_garbage.c` | GC | 扩展：Extent 引用计数回收 |
+| `verthys_recovery.c` | 灾难恢复 | 扩展：多副本恢复 |
+
+---
+
+## 8. 内存安全体系
+
+### 8.1 安全分配器（secure_allocator.c）
+
+```c
+typedef struct SecureAllocator {
+    HANDLE heap;                     /* 专用堆 */
+    CRITICAL_SECTION lock;
+    struct SecureAllocStats stats;
+} SecureAllocator;
+
+/* 设计原则 */
+/* 1. 密钥相关结构分配在专用堆，与普通数据隔离 */
+/* 2. 所有分配使用 VirtualAlloc + PAGE_GUARD 边界页 */
+/* 3. 释放前 SecureZeroMemory */
+/* 4. 支持锁页（VirtualLock）防止换出到页面文件 */
+/* 5. 分配元数据（大小/魔数）独立存储，防止堆溢出破坏元数据 */
+
+void *secure_alloc(SecureAllocator *sa, size_t size);
+void secure_free(SecureAllocator *sa, void *ptr);
+void *secure_realloc(SecureAllocator *sa, void *ptr, size_t new_size);
+VerthysResult secure_lock_pages(SecureAllocator *sa, void *ptr, size_t size);
+```
+
+### 8.2 内存安全加固清单（目标态）
+
+| 项 | 状态 | 说明 |
+|----|------|------|
+| P0-1 槽位池边界 | ✅ 修复并继承 | 测试钉死 |
+| P0-2 B+ 树分裂 | ✅ 修复（V3 中用 LSM 替代） | 不再使用 |
+| P0-3 vsb_txn 保护改密 | ✅ 修复并扩展至 V3 | 测试钉死 |
+| P0-4 64 位 I/O | ✅ 修复 | 测试钉死 |
+| P0-5 远程内存检测排除 | ✅ 修复 | 测试钉死 |
+| P1-1..P1-9 | ✅ 修复 | 测试钉死 |
+| P2-2 GC 超级块裸写 | ✅ 修复（V3 中 GC 通过 vsb_txn） |  |
+| P2-4 读块 data_size 钳制 | ✅ 修复（V3 中 Extent 自带明文大小） |  |
+| P2-5 vtxn_rollback 空壳 | ✅ 修复（vsb_txn 全量集成） |  |
+| P2-7 温缓存竞态 | ✅ 修复（原子文件操作） |  |
+| P2-8 扫描游标生命周期 | ✅ 修复（引用计数） |  |
+| P2-10 mountwatch INFINITE | ✅ 修复（事件驱动替代） |  |
+| **K-1 测试顺序依赖** | ✅ 修复（测试间状态快照 + 句柄/线程断言） |  |
+| **新增：安全分配器** | ✅ 落地 | 密钥相关结构全量迁移 |
+| **新增：ASAN+UBSAN 全量通过** | ✅ 达成 | CI 强制门 |
+
+### 8.3 模糊测试覆盖（fuzz/）
+
+| 目标 | 引擎 | 最低覆盖率 |
+|------|------|-----------|
+| V3 超级块解析 | libFuzzer | 85% 行覆盖 |
+| V3 分区表解析 | libFuzzer | 85% |
+| Extent Index 解析 | libFuzzer | 85% |
+| SSTable 解析 | libFuzzer | 80% |
+| 导入路径 | libFuzzer | 80% |
+
+---
+
+## 9. 纵深防御模块
+
+### 9.1 目标态防御闭环（7 路径全 BLOCKED）
+
+| 路径 | 攻击向量 | 防御模块 | 目标态状态 |
+|------|---------|---------|-----------|
+| P1: 进程注入 | CreateRemoteThread/SetWindowsHookEx | job_isolation + mitigation + anti_inject | **BLOCKED**（内核强制） |
+| P2: 内存转储 | MiniDumpWriteDump/ReadProcessMemory | memory_guard + CNG 内核密钥 | **BLOCKED**（密钥不可读） |
+| P3: 调试器附加 | DebugActiveProcess/NtDebugActiveProcess | anti_debug_v2 + KILL | **BLOCKED**（检测+终止） |
+| P4: API Hook | IAT/EAT 篡改 | tls_loader + syscall_direct | **BLOCKED**（直接系统调用） |
+| P5: DLL 替换 | 文件替换 | integrity .vsec + build.rs 哈希 | **BLOCKED**（加载前验证） |
+| P6: 磁盘篡改 | .verthys 文件修改 | AEAD 分区认证 + Merkle + 多副本 | **BLOCKED**（检测+恢复） |
+| P7: 离线爆破 | 密码字典攻击 | Argon2id + pepper 机器绑定 | **BLOCKED**（计算不可行） |
+
+### 9.2 直接系统调用（syscall_direct.c）
+
+```c
+/* 关键检测器绕过用户态 API Hook */
+/* 使用经签名的 syscall stub（从 ntdll 提取系统调用号） */
+
+typedef NTSTATUS (NTAPI *pNtQueryInformationProcess)(
+    HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG
+);
+
+/* 初始化：从 ntdll.dll 读取系统调用号 → 构造 stub */
+VerthysResult syscall_direct_init(void);
+
+/* 直接系统调用：NtQueryInformationProcess（检测调试器） */
+NTSTATUS syscall_NtQueryInformationProcess(
+    HANDLE handle, PROCESSINFOCLASS cls, PVOID info, ULONG len, PULONG ret
+);
+
+/* 直接系统调用：NtQuerySystemInformation（检测调试器） */
+```
+
+### 9.3 运行时哈希校验（runtime_hash.c）
+
+```c
+/* 在解锁成功后对关键代码段（.text 中的核心函数）进行运行时哈希校验 */
+/* 防止运行时代码补丁（hotpatching）攻击 */
+
+typedef struct RuntimeHashEntry {
+    const void *func_start;          /* 函数起始地址 */
+    size_t func_size;                /* 函数大小 */
+    uint8_t expected_hash[32];       /* 构建期计算的 BLAKE2b 哈希 */
+} RuntimeHashEntry;
+
+/* 构建期：链接后脚本计算关键函数哈希 → 生成 runtime_hash_table.c */
+/* 运行期：定期（每 30 分钟）或关键操作前重算比对 */
+/* 失配 → KILL 级响应 */
+
+#define RUNTIME_HASH_FUNCTIONS \
+    X(verthys_cng_aead_encrypt) \
+    X(verthys_cng_aead_decrypt) \
+    X(vsb_v3_commit_quorum) \
+    X(verthys_lsm_insert) \
+    X(emergency_trigger) \
+    /* ... 共 ~30 个关键函数 */
+```
+
+### 9.4 防御模块目标态清单
+
+| 模块 | 目标态状态 | 变更 |
+|------|-----------|------|
+| `emergency` | ✅ 三级响应 | 不变（已重构） |
+| `integrity` | ✅ .vsec + **runtime_hash** | **扩展** |
+| `anti_debug_v2` | ✅ KILL 级 | 增加 syscall_direct 路径 |
+| `anti_inject` | ✅ TELEMETRY 级 | 增加签名白名单持久化 |
+| `memory_guard` | ✅ DEGRADE 级 | 增加 CNG 句柄存在性检查 |
+| `key_separation` | ✅ **全量接线** | **★ 从接口就绪到完整接线** |
+| `job_isolation` | ✅ | 不变 |
+| `process_sandbox` | ✅ | 不变 |
+| `tls_loader` | ✅ | 不变 |
+| `tamper_destroy` | ✅ | 扩展：CNG 句柄销毁链 |
+| `hardware_binding` | ✅ | 不变 |
+| `cng_machine_key` | ✅ | 不变 |
+| `defense_closure` | ✅ **7/7 BLOCKED** | **★ 语义闭环** |
+| `security_preset` | ✅ | 不变 |
+
+---
+
+## 10. 事务与一致性
+
+### 10.1 V3 事务协议（WAL + 法定人数提交）
+
+```
+事务生命周期（Verthys_AddRecord 为例）:
+
+Phase 1: BEGIN
+  ├── 分配 txid = current_txid + 1
+  ├── WAL 写入 BEGIN 记录（txid, timestamp）
+  └── 内存事务上下文初始化
+
+Phase 2: WRITE_EXTENT
+  ├── 明文 → BLAKE2b → 查重
+  ├── 新 Extent：CNG 内核态加密 → 追加到 Extent 分区
+  ├── 更新 Extent Index（内存）
+  └── WAL 写入 EXTENT 记录（txid, extent_hash, offset, size）
+
+Phase 3: UPDATE_INDEX
+  ├── LSM MemTable 插入（key → extent_hash 引用）
+  ├── WAL 写入 INDEX 记录（txid, key, extent_hash）
+  └── MemTable 达到阈值 → 触发 flush（后台）
+
+Phase 4: PREPARE
+  ├── 所有变更已在 WAL 中持久化
+  ├── 计算新超级块状态（txid, merkle_root, 分区 used 更新）
+  └── WAL 写入 PREPARE 记录
+
+Phase 5: COMMIT
+  ├── 超级块法定人数提交（3 副本，2/3 成功）
+  ├── WAL 写入 COMMIT 记录
+  ├── 更新内存超级块状态
+  └── 触发审计日志写入（异步）
+
+Phase 6: CONFIRM
+  ├── 验证：读取超级块副本确认 txid
+  ├── 验证：随机抽样 Extent 解密确认
+  └── WAL 标记可截断
+
+崩溃恢复:
+  ├── 读取超级块（法定人数）→ 获取已提交 txid
+  ├── WAL 回放：从 last_committed_txid 之后开始
+  │   ├── COMMIT 记录 → 确认提交
+  │   ├── PREPARE 记录 → 检查超级块 → 必要时重放
+  │   └── BEGIN/WRITE 记录 → 回滚（未提交）
+  └── 截断 WAL
+```
+
+### 10.2 超级块事务原语（vsb_txn 扩展）
+
+```c
+/* V3 版本：支持多副本 + 分区级回滚 */
+typedef struct VsbTxnV3 {
+    VerthysSuperBlockV3 backup;        /* 完整超级块备份 */
+    uint8_t backup_hmac[32];
+    uint32_t replica_status[3];      /* 每个副本的写入状态 */
+    bool committed;
+    bool rolled_back;
+} VsbTxnV3;
+
+VerthysResult vsb_txn_v3_begin(VsbTxnV3 *txn, VerthysSuperBlockV3 *sb);
+VerthysResult vsb_txn_v3_commit(VsbTxnV3 *txn);
+VerthysResult vsb_txn_v3_rollback(VsbTxnV3 *txn);
+```
+
+---
+
+## 11. 公共 ABI 接口
+
+### 11.1 版本升级
+
+`VERTHYS_API_VERSION 0x0007`：
+
+| 变更 | 说明 |
+|------|------|
+| 新增 `Verthys_GetSecurityStatus` | 查询防御闭环状态（7 路径各自 BLOCKED/DEGRADED） |
+| 新增 `Verthys_TriggerRekey` | 手动触发密钥轮换 |
+| 新增 `Verthys_GetCngStatus` | 查询 CNG 内核密钥托管状态 |
+| 扩展 `Verthys_GetDiagnostics` | 增加分区/Extent/LSM 统计 |
+| `Verthys_Unlock` flags 扩展 | bit2 = 强制 V3 解析 |
+| `Verthys_CreateWithPreset` 扩展 | 默认创建 V3 容器 |
+
+### 11.2 目标态接口清单（预计 35-38 个导出）
+
+```
+生命周期:
+  Verthys_Init / Verthys_NotifySandboxAttrs / Verthys_Deinit
+  Verthys_Unlock / Verthys_CreateWithPreset / Verthys_RegisterUnlockProgressCallback
+  Verthys_Lock / Verthys_Flush
+
+记录:
+  Verthys_AddRecord / Verthys_GetRecord / Verthys_DeleteRecord / Verthys_DeleteRecords
+  Verthys_HasRecordByType / Verthys_FindFirstLidByType
+
+扫描:
+  Verthys_ScanOpen/Fetch/RecordFree/Close
+  Verthys_ScanSummaryOpen/Fetch/RecordFree/Close
+  Verthys_GetSummaryCount
+
+完整性:
+  Verthys_VerifyIntegrity / Verthys_RebuildMerkle(Chunked)
+  Verthys_GetContainerInfo / Verthys_GetDiagnostics
+
+导入导出:
+  Verthys_Export / Verthys_Import / Verthys_ChangePassword
+
+★ 新增:
+  Verthys_GetSecurityStatus    /* 防御闭环状态 */
+  Verthys_TriggerRekey         /* 手动密钥轮换 */
+  Verthys_GetCngStatus         /* CNG 托管状态 */
+  Verthys_RepairContainer      /* 容器修复（多副本恢复） */
+```
+
+### 11.3 关键契约扩展
+
+| 契约 | 说明 |
+|------|------|
+| **CNG 句柄不可导出** | 所有 API 不暴露任何 CNG 句柄；`Verthys_GetCngStatus` 仅返回布尔状态 |
+| **密钥轮换透明** | 自动 rekey 对上层完全透明，无 API 变更 |
+| **V3 唯一格式** | `Verthys_CreateWithPreset` 仅创建 V3 容器，不再支持旧格式 |
+| **防御状态可查询** | `Verthys_GetSecurityStatus` 返回结构化的 7 路径状态 |
+
+---
+
+## 12. 错误码与诊断体系
+
+### 12.1 公共错误码扩展
+
+| 码 | 名称 | 含义 |
+|----|------|------|
+| 0x0-0xD | 继承 v4.0 | 保持不变（但不再有 V2 相关码） |
+| **0xE** | **VERTHYS_ERR_CNG_UNAVAILABLE** | CNG 内核密钥服务不可用 |
+| **0xF** | **VERTHYS_ERR_QUORUM_FAILED** | 超级块法定人数提交失败 |
+| **0x10** | **VERTHYS_ERR_REKEY_IN_PROGRESS** | 密钥轮换进行中 |
+| **0x11** | **VERTHYS_ERR_V3_REQUIRED** | 操作需要 V3 容器（本版本始终要求） |
+| **0x12** | **VERTHYS_ERR_PARTITION_CORRUPT** | 分区完整性校验失败 |
+
+### 12.2 诊断体系扩展
+
+```c
+typedef struct VerthysDiagnosticsV3 {
+    /* 基础 */
+    VerthysContainerVersion version;
+    VerthysState state;
+    VerthysPreset preset;
+
+    /* 密钥状态 */
+    bool cng_keys_resident;          /* CNG 句柄是否全部有效 */
+    uint64_t ops_since_rekey;
+    FILETIME last_rekey_time;
+
+    /* 分区状态 */
+    struct {
+        uint64_t offset, size, used;
+        uint32_t nonce_counter;
+        bool integrity_ok;
+    } partitions[4];
+
+    /* LSM 状态 */
+    struct {
+        uint64_t memtable_entries;
+        uint64_t sstable_count;
+        uint64_t total_entries;
+        uint64_t compaction_count;
+    } lsm;
+
+    /* Extent 状态 */
+    struct {
+        uint64_t total_extents;
+        uint64_t dedup_saved_bytes;
+        uint64_t total_ref_count;
+    } extent;
+
+    /* 防御状态 */
+    struct {
+        int path_status[7];          /* BLOCKED=2, DEGRADED=1, UNVERIFIED=0 */
+    } defense;
+
+    /* 完整性 */
+    bool merkle_ok;
+    bool quorum_ok;
+} VerthysDiagnosticsV3;
+```
+
+---
+
+## 13. 测试与验证体系
+
+### 13.1 测试层次
+
+```
+┌─────────────────────────────────────────┐
+│  L5: 属性测试（Property-based Testing）   │
+│      LSM 插入/删除/查找 不变式              │
+│      Extent 引用计数 不变式                 │
+│      事务提交/回滚 不变式                   │
+├─────────────────────────────────────────┤
+│  L4: 模糊测试（libFuzzer，CI 强制）        │
+│      容器格式 / 超级块 / 导入路径           │
+│      覆盖率门槛 80%+                       │
+├─────────────────────────────────────────┤
+│  L3: 集成测试（分组 + 组合）               │
+│      全链路：创建→写入→读取→导出→验证      │
+│      分组隔离运行，消除顺序依赖             │
+├─────────────────────────────────────────┤
+│  L2: 单元测试（目标 200+ 项）              │
+│      每个模块独立覆盖                     │
+├─────────────────────────────────────────┤
+│  L1: 回归测试（最终修复方案 §6.1）         │
+│      P0/P1 修复项永久钉死                 │
+└─────────────────────────────────────────┘
+```
+
+### 13.2 测试清单（目标态）
+
+| 类别 | 文件 | 覆盖 |
+|------|------|------|
+| CNG 内核 | `test_cng_kernel.c` | 密钥导入/加密/解密/销毁/错误路径 |
+| V3 容器 | `test_v3_container.c` | 创建/解锁/分区布局/多副本提交 |
+| 分区 | `test_v3_partition.c` | 独立认证/扩展/损坏检测 |
+| Extent | `test_v3_extent.c` | 内容寻址/去重/引用计数/GC |
+| LSM | `test_lsm_index.c` | 插入/查找/删除/flush/compaction |
+| Rekey | `test_auto_rekey.c` | 触发条件/轮换流程/防震荡 |
+| 安全分配器 | `test_secure_allocator.c` | 分配/释放/边界/锁页 |
+| 运行时哈希 | `test_runtime_hash.c` | 正常/篡改检测 |
+| 防御闭环 | `test_defense_closure.c` | 7 路径状态验证 |
+| **模糊** | `fuzz/*.c` | libFuzzer 全覆盖 |
+| **属性** | `test_property_lsm.c` 等 | 不变式验证 |
+
+### 13.3 测试状态追踪（K-1 已修复，2026-09-01）
+
+```
+K-1 根因（ASAN 实锤）:
+  verthys_btree.c leaf_split 对父节点双重插入
+  → key_count 越界 → keys[64]/children[65] 越界写
+  → keys[64] 覆写 children[0]（lid 误入子指针槽，
+    ASAN 崩溃地址 0x421 = lid 1057 吻合）
+  → 堆损坏 → 布局敏感跨模块野指针崩溃
+  （连带：pool_extend 池类型指针与枚举误比，
+   SMALL 池扩展越界毁坏 MEDIUM 池）
+
+K-1 修复（已落地）:
+  1. leaf_split 删除手工插入，完全委托 internal_insert_propagate
+  2. pool_extend 池判断改为与 &mgr->pools[...] 地址比较
+  3. RUN_TEST 宏测试间状态快照断言（线程/句柄/GDI/emergency）
+  4. 每测试后强制 emergency_clear_signals（宏内）
+  5. ASAN 诊断脚本 scripts/k1_asan_run.ps1
+
+K-1 验证:
+  全量 3 连绿（132/132 × 3，Debug build_dev）
+  CI core.yml 全量测试门完好（无需恢复）
+```
+
+---
+
+## 14. 构建与供应链安全
+
+### 14.1 构建流水线（目标态）
+
+```
+Stage 1: 代码检出 + 依赖 vendoring
+  ├── libsodium 1.0.20（vendored，SHA-256 固化）
+  ├── flatbuffers（vendored，版本锁定）
+  └── 全部第三方代码哈希验证
+
+Stage 2: 构建（Debug + Release + ASAN）
+  ├── CMake 配置（/sdl /guard:cf /guard:ehcont /CETCOMPAT）
+  ├── 编译（/O2 /LTCG 用于 Release）
+  ├── 链接（/DEF:verthys.def 白名单导出）
+  └── Release 额外：
+      ├── .vsec 完整性签名注入
+      ├── runtime_hash_table.c 生成
+      └── Authenticode 签名（如有）
+
+Stage 3: 测试（分组 CI）
+  ├── Debug 单元测试（200+ 项）
+  ├── ASAN 全量
+  ├── UBSAN 全量
+  ├── 模糊测试（libFuzzer，10 分钟）
+  └── 覆盖率报告生成
+
+Stage 4: 验证
+  ├── dumpbin 导出面比对
+  ├── SBOM 生成
+  ├── 覆盖率门槛检查
+  └── 产物哈希记录
+
+Stage 5: 产物上传
+  ├── verthys.dll（Release，含 .vsec）
+  ├── verthys.lib
+  ├── 头文件
+  ├── SBOM.json
+  └── 测试报告
+```
+
+### 14.2 供应链安全清单
+
+| 项 | 措施 |
+|----|------|
+| 依赖锁定 | 所有第三方依赖 vendored + SHA-256 固化为常量 |
+| 构建环境 | CI 使用固定镜像版本 + 工具链版本锁定 |
+| 产物完整性 | .vsec 签名 + Authenticode（可选）+ build.rs 哈希 |
+| SBOM | 自动生成，包含所有依赖版本和哈希 |
+| 导出面 | .def 白名单 + CI 比对门 |
+| 代码审计 | 每季度外部审计 + 内部复审 |
+
+---
+
+## 15. 部署与运维
+
+### 15.1 部署流程
+
+```
+1. 构建 Release（含 .vsec 注入）
+2. 复制 verthys.dll 到 Tauri resources/
+3. Rust 构建（build.rs 读取 DLL SHA-256 固化）
+4. Tauri 打包（包含 DLL 和哈希）
+5. 分发签名
+
+说明：全新安装，无迁移流程。旧版容器文件（V1/V2）不支持打开。
+```
+
+### 15.2 运维工具
+
+| 工具 | 用途 |
+|------|------|
+| `verthys_diagnose` | 容器健康检查：超级块副本状态/分区完整性/Extent 引用一致性 |
+| `verthys_repair` | 容器修复：单副本损坏恢复/Extent 孤儿清理/WAL 截断 |
+| `pepper_inject` | pepper 注入（企业部署） |
+| `recovery_card` | Shamir 恢复卡（pepper 恢复） |
+
+---
+
+## 16. 安全边界声明（目标态）
+
+### 16.1 有效防线（按强度排序）
+
+1. **CNG 内核密钥托管**：所有派生密钥在内核态，用户态攻击者（即使管理员权限）无法通过任何用户态手段读取密钥明文。这是“内核之下我无敌”的核心支柱。
+2. **进程即边界 + 内核强制**：mitigation policy + Job Object + build.rs 哈希固化，任何代码注入/DLL 替换在加载前被阻断。
+3. **容器分区认证 + 多副本**：磁盘篡改被 AEAD 检测，单副本损坏可恢复，法定人数提交消除单点。
+4. **密码学本体**：Argon2id 防离线爆破，CNG-GCM 全量密文，域分离防密钥混淆。
+5. **纵深防御闭环**：7 条攻击路径全部具备真实阻断能力，无表演性防御。
+
+### 16.2 残余风险（诚实声明）
+
+| 风险 | 说明 | 缓解 |
+|------|------|------|
+| 内核态攻击者 | 驱动级恶意软件可读取所有内存 | 不在威胁模型内（“内核之下”边界） |
+| 硬件攻击 | DMA/冷启动 | 不在威胁模型内 |
+| 弱口令 | 用户选择弱密码 | Argon2id + 密码强度提示 |
+| 供应链后门 | 编译器/依赖被投毒 | vendored + 哈希固化 + 审计 |
+| 侧信道 | 时序/缓存攻击 | 关键运算在内核态，用户态难以测量 |
+| 导出/导入期间明文 | 数据必须经过用户态缓冲区 | 进程隔离 + 清零 + 巡逻 |
+
+---
+
+## 17. 升级执行矩阵
+
+### 17.1 工作包分解
+
+| 工作包 | 内容 | 优先级 | 依赖 | 预估工作量 |
+|--------|------|--------|------|-----------|
+| **WP-1: CNG 内核托管全量接线** | keymanager 重构 / verthys_crypto_cng / CNG 测试 | **P0** | 无 | 2 周 |
+| **WP-2: V3 容器格式基础** | FlatBuffers schema / 超级块多副本 / 分区管理 | **P0** | WP-1 | 3 周 |
+| **WP-3: Extent 内容寻址** | verthys_extent / 引用计数 / 去重 | **P0** | WP-2 | 2 周 |
+| **WP-4: LSM 索引** | MemTable / SSTable / Compaction / Bloom Filter | **P0** | WP-2 | 3 周 |
+| **WP-5: WAL + 事务集成** | verthys_wal / transaction_v3 / 崩溃恢复 | **P0** | WP-3, WP-4 | 2 周 |
+| **WP-6: 自动密钥轮换** | verthys_rekey_auto / 轮换测试 | **P1** | WP-1 | 1 周 |
+| **WP-7: 安全分配器** | secure_allocator / 全量迁移 | **P1** | 无 | 1 周 |
+| **WP-8: 运行时哈希校验** | runtime_hash / 构建期生成 | **P1** | 无 | 1 周 |
+| **WP-9: 直接系统调用** | syscall_direct / 检测器改造 | **P1** | 无 | 1 周 |
+| **WP-10: 模糊测试全覆盖** | fuzz/*.c / CI 集成 | **P1** | WP-2..5 | 2 周 |
+| **WP-11: 防御闭环验证** | defense_closure 7 路径 / 状态验证 | **P2** | WP-1..10 | 1 周 |
+| **WP-12: 属性测试** | 不变式测试 / 形式化辅助 | **P2** | WP-3..5 | 1 周 |
+| **WP-13: K-1 修复 + 测试强化** | 顺序依赖修复 / 测试框架升级 | **P0** | 无 | 1 周 |
+| **WP-14: P2 项修复** | GC/读块钳制/rollback/缓存竞态 | **P1** | WP-2..5 | 1 周 |
+
+### 17.2 里程碑
+
+| 里程碑 | 工作包 | 交付物 | 验收标准 |
+|--------|--------|--------|---------|
+| **M1: 内核密钥安全** | WP-1, WP-6, WP-7 | CNG 全量托管 + 安全分配器 | 密钥明文在用户态不可达（测试证明） |
+| **M2: V3 容器就绪** | WP-2..5 | V3 容器全功能 | 创建/读写/恢复全链路通过 |
+| **M3: 纵深防御闭环** | WP-8, WP-9, WP-11 | 运行时哈希 + 直接系统调用 | 7 路径全 BLOCKED |
+| **M4: 测试体系完备** | WP-10, WP-12, WP-13, WP-14 | 模糊 + 属性 + 回归 | 覆盖率达标 + K-1 修复 |
+| **M5: 生产就绪** | 全部 | 目标态架构 | 全部 CI 门通过 + 外部审计 |
+
+### 17.3 总预估工作量
+
+| 阶段 | 工作包 | 预估 |
+|------|--------|------|
+| 阶段 1（核心安全） | WP-1, WP-13, WP-7 | 3 周 |
+| 阶段 2（V3 容器） | WP-2, WP-3, WP-4, WP-5 | 8 周 |
+| 阶段 3（纵深防御） | WP-6, WP-8, WP-9 | 3 周 |
+| 阶段 4（测试） | WP-10, WP-12, WP-14 | 4 周 |
+| 阶段 5（验证+收尾） | WP-11, 审计 | 2 周 |
+| **总计** | | **20 周** |
+
+---
+
+## 18. 附录：常量速查表（目标态）
+
+| 常量 | 值 | 出处 |
+|------|-----|------|
+| VERTHYS_API_VERSION | 0x0007 | verthys.h |
+| VERTHYS_CONTAINER_V3 | 3 | verthys_container_v3.h |
+| V3_SUPERBLOCK_BYTES | 16384（16KB × 3 副本） | verthys_container_v3.h |
+| V3_SUPERBLOCK_REPLICAS | 3 | verthys_container_v3.h |
+| V3_SUPERBLOCK_QUORUM | 2 | verthys_container_v3.h |
+| V3_WAL_REGION_BYTES | 960KB（480KB 活跃 + 480KB 备份，自 [64KB,1MB) 边界推导） | verthys_container_v3.h |
+| V3_PARTITION_TABLE_OFFSET | 1MB | verthys_container_v3.h |
+| V3_INDEX_PARTITION_OFFSET | 4MB | verthys_container_v3.h |
+| V3_EXTENT_HASH_BYTES | 32（BLAKE2b-256） | verthys_extent.h |
+| V3_SSTABLE_BLOOM_FPR | 0.001（0.1%） | verthys_lsm.h |
+| V3_MEMTABLE_MAX_ENTRIES | 10,000 | verthys_lsm.h |
+| V3_MEMTABLE_MAX_BYTES | 64MB | verthys_lsm.h |
+| V3_LSM_MAX_LEVELS | 7 | verthys_lsm.h |
+| REKEY_INTERVAL_DAYS | 90 | verthys_rekey_auto.h |
+| REKEY_OPS_THRESHOLD | 10,000 | verthys_rekey_auto.h |
+| REKEY_MIN_INTERVAL_HOURS | 24 | verthys_rekey_auto.h |
+| CNG_AEAD_NONCE_BYTES | 12 | verthys_crypto_cng.h |
+| CNG_AEAD_TAG_BYTES | 16 | verthys_crypto_cng.h |
+| SECURE_ALLOC_PAGE_GUARD | true | secure_allocator.h |
+| RUNTIME_HASH_INTERVAL_SEC | 1800（30 分钟） | runtime_hash.h |
+| RUNTIME_HASH_FUNCTION_COUNT | ~30 | runtime_hash.h |
+| .def 导出数（目标态） | 35-38 | verthys.def |
+| DEFENSE_CLOSURE_PATHS | 7 | defense_closure.h |
+| DEFENSE_PATH_BLOCKED | 2 | defense_closure.h |
+
+---

@@ -1,0 +1,319 @@
+/* ============================================================
+   mgmt-hub.css — 管理界面前置引导组件（纯视觉 · 零文字 · 吸积流光）
+   架构：ManagementHub.vue 物理引擎逐帧驱动
+     - 引擎逐帧写入 .mh-unit 的 transform / opacity / --boost / --prox
+     - 严禁对 transform 声明 transition（会与逐帧写入叠加造成二次平滑）
+     - 颜色/描边类过渡允许（不参与几何）
+   视觉语言：非对称开放弧流 + 引力碎屑 + 语义核心 + 邻近光晕
+     （无刻度环 / 无闭合圆环 / 无点划表圈 — 非仪表表盘）
+   层级：
+     z0 能量基底画布（尘埃/丝链/光包）
+     z1 三个引导单元（规整一行：等尺寸 · 等间距 · 同基线）
+   ============================================================ */
+
+/* ===== 容器（布局变量由引擎写入：--u-size / --row-delta） =====
+ * 初始默认值与引擎缩小后量级一致（148/280），避免首帧布局前大尺寸闪烁 */
+.mh-hub {
+  --u-size: 148px;
+  --row-delta: 280px;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 540px;
+  overflow: hidden;
+  flex: 1;
+}
+
+/* ===== 能量基底画布 ===== */
+.mh-field {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+/* ============================================================
+   引导单元（规整排放：左/中/右，同基线 50%）
+   ============================================================ */
+.mh-unit {
+  position: absolute;
+  top: 50%;
+  width: var(--u-size);
+  height: var(--u-size);
+  z-index: 1;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  transform: translate(-50%, -50%);
+  will-change: transform, opacity;
+  touch-action: manipulation;
+  /* 引擎驱动变量（子元素消费） */
+  --boost: 0;
+  --prox: 0;
+}
+
+.mh-u1 { left: calc(50% - var(--row-delta)); --u-a: #00ffaa; --u-b: #00d4ff; }
+.mh-u2 { left: 50%;                    --u-a: #00d4ff; --u-b: #8b5cf6; }
+.mh-u3 { left: calc(50% + var(--row-delta)); --u-a: #8b5cf6; --u-b: #00ffaa; }
+
+/* 键盘可达性（细描边，无辉光块） */
+.mh-unit:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--u-a) 55%, transparent);
+  outline-offset: 8px;
+  border-radius: 50%;
+}
+
+.mh-svg {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+  border-radius: 50%;
+}
+
+/* ============================================================
+   悬浮反馈体系（无大块阴影/辉光 — 三重物理驱动效果）
+     1. 语义核心磁悬浮升腾：--lift（boost 弹簧 px 量，带惯性回落）
+     2. 碎屑引力收缩：独立 scale 属性（叠加旋转动画，吸积场增强）
+     3. 弧流能量增稠：stroke-width / 亮度随 boost 复合增密
+   全部由引擎逐帧写入变量驱动，此处严禁 transition（防二次平滑）
+   ============================================================ */
+
+/* 1. 语义核心升腾（上浮 + 微放大 — 磁悬浮感） */
+.mh-sema {
+  transform:
+    translateY(calc(var(--lift, 0) * -1px))
+    scale(calc(1 + var(--lift, 0) * 0.008));
+  transform-origin: 100px 100px;
+  transform-box: view-box;
+}
+
+/* ============================================================
+   F1 非对称开放弧流（吸积盘流光 — 开放弧段，差速旋转）
+   ============================================================ */
+.mh-swA,
+.mh-swB {
+  transform-origin: 100px 100px;
+  transform-box: view-box;
+}
+.mh-fa,
+.mh-fb {
+  fill: none;
+  stroke-linecap: round;
+  opacity: calc(0.5 + var(--boost, 0) * 0.5);
+  transition: stroke 0.4s var(--ease);
+}
+/* 3. 弧流能量增稠（hover 描边增粗 — 能量注入，非辉光堆叠） */
+.mh-fa { stroke-width: calc(2.1 + var(--boost, 0) * 0.6); }
+.mh-fb { stroke-width: calc(1.2 + var(--boost, 0) * 0.35); }
+
+/* 单元 1：弧流配色与转速 */
+.mh-u1 .mh-fa { stroke: url(#mh-g1); }
+.mh-u1 .mh-fb { stroke: color-mix(in srgb, #00d4ff 72%, transparent); }
+.mh-u1 .mh-swA { animation: mh-rot-cw 15s linear infinite; }
+.mh-u1 .mh-swB { animation: mh-rot-ccw 10s linear infinite; }
+/* 单元 2 */
+.mh-u2 .mh-fa { stroke: url(#mh-g2); }
+.mh-u2 .mh-fb { stroke: color-mix(in srgb, #8b5cf6 65%, transparent); }
+.mh-u2 .mh-swA { animation: mh-rot-cw 19s linear infinite; }
+.mh-u2 .mh-swB { animation: mh-rot-ccw 12s linear infinite; }
+/* 单元 3 */
+.mh-u3 .mh-fa { stroke: url(#mh-g3); }
+.mh-u3 .mh-fb { stroke: color-mix(in srgb, #00ffaa 60%, transparent); }
+.mh-u3 .mh-swA { animation: mh-rot-cw 13s linear infinite; }
+.mh-u3 .mh-swB { animation: mh-rot-ccw 8.5s linear infinite; }
+
+/* 弧流端部辉点（主弧头部能量斑，随旋转拖尾） */
+/* ★ 性能根治方案六（§6.4）：SVG 描边弧为非矩形形状，box-shadow 不适用 —
+ *   保留 drop-shadow 但经 will-change: filter 提升独立合成层：滤镜结果
+ *   光栅化一次后缓存，父组旋转（transform 合成器驱动）仅移动已滤镜化
+ *   的层，不再逐帧重算 paint（常驻 paint 根治；--boost 仅 hover 交互期
+ *   变化，非逐帧驱动）。 */
+.mh-fa {
+  filter: drop-shadow(0 0 calc(1.2px + var(--boost, 0) * 2.6px) color-mix(in srgb, var(--u-a) 42%, transparent));
+  will-change: filter;
+}
+
+/* 单元 1 未就绪：主弧转琥珀、能量转弱 */
+.mh-u1:not(.ready) .mh-fa {
+  stroke: #ffaa00;
+  opacity: calc(0.38 + var(--boost, 0) * 0.4);
+  filter: drop-shadow(0 0 calc(1px + var(--boost, 0) * 1.6px) rgba(255, 170, 0, 0.35));
+}
+.mh-u1:not(.ready) .mh-fb { opacity: calc(0.24 + var(--boost, 0) * 0.3); }
+
+/* ============================================================
+   F2 碎屑带（引力碎屑 — 非均匀碎片，慢速漂移）
+   ============================================================ */
+.mh-debris {
+  transform-origin: 100px 100px;
+  transform-box: view-box;
+  opacity: calc(0.5 + var(--prox, 0) * 0.5);
+  /* 2. 引力收缩（独立 scale 属性叠加旋转动画 — hover 吸积场增强，碎屑内聚） */
+  scale: calc(1 - var(--boost, 0) * 0.14);
+}
+.mh-u1 .mh-debris { animation: mh-rot-ccw 95s linear infinite; }
+.mh-u2 .mh-debris { animation: mh-rot-cw 110s linear infinite; }
+.mh-u3 .mh-debris { animation: mh-rot-ccw 85s linear infinite; }
+.mh-shard {
+  fill: var(--u-b);
+}
+
+/* ============================================================
+   单元 1 语义：密钥形态 + 设备系链（曲线 + 终端节点）
+   ============================================================ */
+.mh-keyBow,
+.mh-keyStem,
+.mh-keyTeeth {
+  fill: none;
+  stroke-width: 2.1;
+  stroke-linecap: round;
+  stroke: rgba(200, 212, 226, 0.7);
+  opacity: calc(0.74 + var(--boost, 0) * 0.26);
+  transition: stroke 0.4s var(--ease), filter 0.4s var(--ease);
+}
+.mh-keyBow { stroke-width: 2.4; }
+.mh-u1.ready .mh-keyBow,
+.mh-u1.ready .mh-keyStem,
+.mh-u1.ready .mh-keyTeeth {
+  stroke: url(#mh-g1);
+  filter: drop-shadow(0 0 calc(1.5px + var(--boost, 0) * 3px) rgba(0, 255, 170, 0.45));
+}
+
+/* 设备系链（密钥 → 终端节点的能量系绳，形态即绑定状态） */
+.mh-tether {
+  fill: none;
+  stroke-width: 1.15;
+  opacity: calc(0.5 + var(--boost, 0) * 0.4);
+  transition: stroke 0.35s var(--ease);
+}
+/* 已绑定：青绿实段系绳（★ dashoffset 流动已 rAF 化：引擎 frame() 驱动） */
+.mh-bind-on .mh-tether { stroke: rgba(0, 255, 190, 0.8); stroke-dasharray: 4 3; }
+/* 未绑定：灰暗断续 */
+.mh-bind-off .mh-tether { stroke: rgba(148, 160, 178, 0.4); stroke-dasharray: 2 6; }
+/* 校验中：青色细密扫描流（★ dashoffset 流动已 rAF 化） */
+.mh-bind-scan .mh-tether { stroke: rgba(0, 212, 255, 0.75); stroke-dasharray: 2 4; }
+/* 不匹配 / 错误：琥珀断系 */
+.mh-bind-warn .mh-tether { stroke: rgba(255, 170, 0, 0.75); stroke-dasharray: 3 7; }
+
+/* 系链终端节点（设备端点） */
+.mh-bindNode {
+  opacity: calc(0.55 + var(--boost, 0) * 0.45);
+  transition: fill 0.35s var(--ease);
+}
+.mh-bind-on .mh-bindNode { fill: #00ffbe; filter: drop-shadow(0 0 3px rgba(0, 255, 190, 0.6)); }
+.mh-bind-off .mh-bindNode { fill: rgba(148, 160, 178, 0.55); }
+.mh-bind-scan .mh-bindNode { fill: #00d4ff; animation: mh-dot-scan 1.6s ease-in-out infinite; }
+.mh-bind-warn .mh-bindNode { fill: #ffaa00; }
+
+/* ============================================================
+   单元 2 语义：核心辉光 + 四卫星星群 + 曲线链路
+   ============================================================ */
+.mh-satLink {
+  fill: none;
+  stroke: color-mix(in srgb, #00d4ff 30%, transparent);
+  stroke-width: 1;
+  stroke-dasharray: 3 5;
+  opacity: calc(0.45 + var(--boost, 0) * 0.55);
+  /* ★ dashoffset 流动已 rAF 化：引擎 frame() 驱动（随空闲档位降频） */
+}
+/* 卫星辉光（柔和弥散点，非描边圆环） */
+.mh-satGlow {
+  opacity: calc(0.2 + var(--boost, 0) * 0.4);
+  transition: fill 0.35s var(--ease);
+}
+.mh-satDot {
+  opacity: calc(0.8 + var(--boost, 0) * 0.2);
+  transition: fill 0.35s var(--ease);
+}
+/* 卫星状态色（与量子面板节点状态语义一致） */
+.mh-satGlow.mh-n-active, .mh-satDot.mh-n-active { fill: #00ffaa; }
+.mh-satGlow.mh-n-set,   .mh-satDot.mh-n-set   { fill: #00d4ff; }
+.mh-satGlow.mh-n-empty, .mh-satDot.mh-n-empty { fill: #ffaa00; }
+.mh-satGlow.mh-n-off,   .mh-satDot.mh-n-off   { fill: #74808e; }
+.mh-satDot.mh-n-active { filter: drop-shadow(0 0 2.5px rgba(0, 255, 170, 0.55)); }
+.mh-satDot.mh-n-set { filter: drop-shadow(0 0 2.5px rgba(0, 212, 255, 0.5)); }
+
+.mh-coreHalo {
+  fill: url(#mh-g2);
+  opacity: calc(0.24 + var(--boost, 0) * 0.4);
+}
+.mh-coreDot {
+  fill: #dbfff4;
+  opacity: calc(0.72 + var(--boost, 0) * 0.28);
+  filter: drop-shadow(0 0 calc(1.5px + var(--boost, 0) * 3px) rgba(120, 235, 255, 0.55));
+}
+
+/* ============================================================
+   单元 3 语义：盾形层叠 + 内部扫掠弧 + 核心
+   ============================================================ */
+.mh-shieldOuter {
+  fill: none;
+  stroke: url(#mh-g3);
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+  opacity: calc(0.68 + var(--boost, 0) * 0.32);
+  filter: drop-shadow(0 0 calc(1px + var(--boost, 0) * 2.4px) color-mix(in srgb, var(--u-a) 38%, transparent));
+}
+.mh-shieldInner {
+  fill: none;
+  stroke: color-mix(in srgb, var(--u-b) 36%, transparent);
+  stroke-width: 0.9;
+  stroke-linejoin: round;
+  opacity: calc(0.5 + var(--boost, 0) * 0.35);
+}
+.mh-so1,
+.mh-so2 {
+  transform-origin: 100px 100px;
+  transform-box: view-box;
+}
+.mh-so1 { animation: mh-rot-cw 9.5s linear infinite; }
+.mh-so2 { animation: mh-rot-ccw 6.8s linear infinite; }
+.mh-so1 path,
+.mh-so2 path {
+  fill: none;
+  stroke: var(--u-a);
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  opacity: calc(0.5 + var(--boost, 0) * 0.5);
+}
+.mh-shieldCore {
+  fill: #7dffd4;
+  opacity: calc(0.6 + var(--boost, 0) * 0.4);
+  filter: drop-shadow(0 0 calc(1px + var(--boost, 0) * 2.5px) rgba(125, 255, 212, 0.5));
+}
+
+/* ============================================================
+   关键帧
+   ============================================================ */
+@keyframes mh-rot-cw { to { transform: rotate(360deg); } }
+@keyframes mh-rot-ccw { to { transform: rotate(-360deg); } }
+@keyframes mh-dot-scan {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+/* ============================================================
+   管理视图切换过渡（hub ↔ detail，连续平滑无断层）
+   ============================================================ */
+.mgmt-x-enter-active {
+  transition: opacity 0.32s var(--ease), transform 0.32s var(--ease), filter 0.32s var(--ease);
+}
+.mgmt-x-leave-active {
+  transition: opacity 0.22s var(--ease), transform 0.22s var(--ease), filter 0.22s var(--ease);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.mgmt-x-enter-from {
+  opacity: 0;
+  transform: translateY(14px) scale(0.985);
+  filter: blur(6px);
+}
+.mgmt-x-leave-to {
+  opacity: 0;
+  transform: translateY(-10px) scale(0.99);
+  filter: blur(4px);
+}

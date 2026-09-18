@@ -1,0 +1,15 @@
+[package]
+name = "verthys-ci-ast"
+version = "2.6.1"
+edition = "2021"
+description = "CI 第二级：AST 深度分析工具 — \"CI静态校验双引擎实现策略\"第二级"
+
+[dependencies]
+syn = { version = "2", features = ["full", "parsing", "visit", "extra-traits"] }
+walkdir = "2"
+regex = "1"
+quote = "1"
+
+[[bin]]
+name = "verthys-ci-ast"
+path = "src/main.rs"

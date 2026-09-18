@@ -1,0 +1,84 @@
+// core/schema/sstable.fbs — V3 LSM SSTable + Manifest schema
+//
+// 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.6（LSM 索引）
+// 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-4
+//
+// SSTable 磁盘布局（容器文件内一段连续区域，append-only）：
+//
+//   [Data Block 0][Data Block 1]...[Data Block N-1][Index Block][Bloom Filter][Footer][Trailer]
+//
+//   - Data Block / Index Block / Footer 均为分区 AEAD 帧（WP-2 帧惯例）：
+//       [u32 ct_len][AEAD 密文 ct_len 字节（含 16B tag）][12B nonce]
+//     AEAD 密钥 = Index 分区密钥，AAD = partition_id ‖ txid（verthys_partition_encrypt）。
+//   - Data Block 明文 = 条目记录序列（verthys_lsm_internal.h entry codec 编码：
+//     定长头 + 变长 name），按 lid 升序。
+//   - Index Block 明文 = SSTableIndexV3（每块 first_key/offset/frame_len/entry_count，
+//     支持二分定位）。
+//   - Bloom Filter = 明文位图（xxHash64 双重哈希，FPR 0.1%）；完整性由 Footer 内
+//     BLAKE2b-256(bloom bits) 锚定（位图被篡改 → 假阴性 → 查找漏数据，必须认证）。
+//   - Footer 明文 = SSTableFooterV3（FB schema）。
+//   - Trailer（明文 24B，定位锚）= [u64 footer 帧偏移][u64 created_txid][u32 magic 'V3SS'][u32 保留]。
+//
+// Manifest（LSM 元数据，Index 分区内固定帧区整帧覆写）：
+//   [u32 magic 'V3LM'][u32 ct_len][AEAD 密文][12B nonce]
+//   明文 = LSMManifestV3：全部在册 SSTable 的层级/区间/偏移 + next_seq 分配器 +
+//   数据区追加游标。
+//
+// nonce 计数器快照约定（红线级，区别于 WP-3 extent 的"保存前值"）：
+//   LSMManifestV3.nonce_counter 持久化"保存后值"——序列化时取
+//   verthys_cng_aead_nonce_counter(part) + 1（save 加密恰好消耗一个 nonce，单写者
+//   纪律下无并发增量），重载 restore 后下一次加密绝不复用 save 帧自身的 nonce。
+
+table SSTableBlockIndexV3 {
+    first_key: uint64;      // 本数据块最小 lid（块内升序）
+    offset: uint64;         // 数据块帧起始（容器绝对偏移）
+    frame_len: uint32;      // 帧字节数（8B 头 + ct_len + 12B nonce）
+    entry_count: uint32;    // 块内条目数（含墓碑）
+}
+
+table SSTableIndexV3 {
+    magic: uint32;          // 'V3SI' 0x49533356
+    version: uint16;        // 3
+    blocks: [SSTableBlockIndexV3];  // 按 first_key 升序（二分查找）
+}
+
+table SSTableFooterV3 {
+    magic: uint32;          // 'V3SS' 0x53533356
+    version: uint16;        // 3
+    seq: uint64;            // SSTable 序号（Manifest 分配，L0 新旧排序依据）
+    level: uint8;           // 所属层级（0..V3_LSM_MAX_LEVELS-1）
+    entry_count: uint32;    // 条目总数（含墓碑）
+    tombstone_count: uint32;// 墓碑数
+    min_key: uint64;        // 键域 [min_key, max_key]
+    max_key: uint64;
+    created_txid: uint64;   // flush/compaction 事务 ID
+    index_block_offset: uint64; // Index Block 帧起始（容器绝对偏移）
+    bloom_offset: uint64;   // Bloom 位图起始（容器绝对偏移）
+    bloom_bytes: uint32;    // 位图字节数
+    bloom_hash_count: uint8;// 双重哈希迭代次数 k
+    bloom_hash: [ubyte];    // 32B BLAKE2b-256(bloom bits)——位图完整性锚定
+}
+
+table LSMTableMetaV3 {
+    seq: uint64;            // SSTable 序号
+    level: uint8;           // 层级
+    offset: uint64;         // SSTable 区域起始（容器绝对偏移，Trailer 结尾）
+    size: uint32;           // 区域字节数
+    entry_count: uint32;    // 条目数（含墓碑）
+    tombstone_count: uint32;
+    min_key: uint64;        // 键域（层级内区间快速排除）
+    max_key: uint64;
+    created_txid: uint64;
+}
+
+table LSMManifestV3 {
+    magic: uint32;          // 'V3LM' 0x4D4C3356
+    version: uint16;        // 3
+    txid: uint64;           // 快照事务 ID
+    next_seq: uint64;       // SSTable 序号分配器
+    next_data_offset: uint64; // SSTable 数据区追加游标（region 内相对偏移）
+    nonce_counter: uint64;  // 分区 nonce 计数器快照（★保存后值约定，防复用）
+    tables: [LSMTableMetaV3]; // 全部在册 SSTable（≤ VERTHYS_LSM_MAX_TABLES）
+}
+
+root_type LSMManifestV3;

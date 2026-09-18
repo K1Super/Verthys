@@ -1,0 +1,64 @@
+// core/schema/superblock_v3.fbs — V3 超级块 schema（多副本 + 法定人数提交）
+//
+// 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.3（字段逐项对齐）
+// 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-2
+//
+// 认证语义（红线级）：
+//   - superblock_hmac 字段：HMAC-SHA256(integrity_key, 序列化 buffer)，
+//     其中 superblock_hmac 向量自身在计算/校验时被原地置零（MAC 自排除
+//     标准模式）；序列化时先以全零向量构建 → 计算 HMAC → 原地写回 32B。
+//   - 副本区帧布局（16KB 槽位）：
+//       [u32 frame_magic 'V3RP'][u32 payload_len][flatbuffer ...][零填充]
+//   - 每字段向量长度在解析侧按期望长度严格校验（safe_read 纪律）。
+
+table SuperBlockV3 {
+    magic: uint32;                    // 'V3SB' 0x42533356
+    version: uint16;                  // 3
+    container_id: [ubyte];            // 32B 随机标识
+    created_at: uint64;               // FILETIME
+    updated_at: uint64;
+    txid: uint64;                     // 单调递增事务 ID
+    state_chain: [ubyte];             // 32B 防回滚链
+
+    // Argon2id 参数
+    argon2_mem_kib: uint32;
+    argon2_iters: uint32;
+    argon2_parallel: uint32;
+    salt: [ubyte];                    // 16B
+    argon2_benchmark_ms: [uint32];    // 4 项基准
+    argon2_tier: uint32;
+    pepper_source: uint8;             // flags[5] 等价
+
+    // 密钥包装（使用 MEK 内核态加密）
+    // ★ WP-5：[12B nonce || 32B ct || 16B tag] = 60B（CNG wrapped 布局）
+    wrapped_key_a: [ubyte];           // 12B nonce + 32B + 16B tag = 60B
+    wrapped_key_b: [ubyte];
+    wrapped_key_c: [ubyte];
+    key_a_id: [ubyte];                // 16B 密钥标识
+    key_b_id: [ubyte];
+    key_c_id: [ubyte];
+
+    // 分区布局
+    partition_table_offset: uint64;
+    partition_table_size: uint64;
+    index_partition_offset: uint64;
+    index_partition_size: uint64;
+    extent_partition_offset: uint64;
+    extent_partition_size: uint64;
+    audit_partition_offset: uint64;
+    audit_partition_size: uint64;
+
+    // WAL 状态
+    wal_head_offset: uint64;
+    wal_tail_offset: uint64;
+    wal_committed_txid: uint64;
+
+    // 完整性
+    merkle_root: [ubyte];             // 32B
+    superblock_hmac: [ubyte];         // 32B, integrity_key（自排除零化模式）
+
+    // 扩展
+    extensions: [ubyte];              // TLV 扩展区
+}
+
+root_type SuperBlockV3;

@@ -1,0 +1,39 @@
+// core/schema/extent.fbs — V3 内容寻址 Extent 索引 schema
+//
+// 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.5（内容寻址 Extent）/ §6.2（Extent 分区）
+// 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-3
+//
+// 持久化语义：
+//   - Extent 索引整体经 Extent 分区 AEAD 密钥加密落盘（帧布局见
+//     verthys_extent.h），帧内为 ExtentIndexV3 的 FlatBuffers 编码；
+//   - Extent 数据块 = [密文 || 16B tag]，追加写入 Extent 分区数据区，
+//     AAD = partition_id(4B LE) ‖ hash(32B)（verthys_extent.c 组装）；
+//   - hash = BLAKE2b-256(明文)（verthys_generichash，E-3 零新依赖）；
+//   - nonce（12B）：CNG 封装层内部计数器生成，随条目持久化（解密必需）；
+//   - nonce_counter（E-7）：分区 nonce 计数器快照，加载后经 restore 防回退；
+//   - ref_count：引用计数，0 = GC 可回收（物理删除由 verthys_garbage.c 承担）。
+//
+// 去重侧信道声明（v5.0 已定）：相同明文 → 相同哈希 → 去重命中可被观测；
+// 对密码管理器场景可接受（相同内容仅存储一次的收益 > 存在性侧信道风险）。
+
+table ExtentEntryV3 {
+    hash: [ubyte];            // 32B BLAKE2b-256(明文)——内容寻址键
+    nonce: [ubyte];           // 12B 数据块 AEAD nonce
+    offset: uint64;           // 数据区相对偏移（Extent 分区内，索引区之后）
+    size: uint32;             // 密文长度（含 16B tag）
+    plaintext_size: uint32;   // 明文长度
+    ref_count: uint32;        // 引用计数（0 = GC 可回收）
+    created_txid: uint64;     // 创建事务 ID
+    last_ref_txid: uint64;    // 最近引用变动事务 ID
+}
+
+table ExtentIndexV3 {
+    magic: uint32;            // 'V3EX' 0x58453356
+    version: uint16;          // 3
+    txid: uint64;             // 索引快照事务 ID
+    next_offset: uint64;      // 数据区追加写游标（相对偏移）
+    nonce_counter: uint64;    // 分区 nonce 计数器快照（E-7 防回退）
+    entries: [ExtentEntryV3]; // 索引条目（≤ VERTHYS_EXTENT_INDEX_MAX）
+}
+
+root_type ExtentIndexV3;

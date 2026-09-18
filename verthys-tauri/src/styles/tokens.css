@@ -1,0 +1,114 @@
+/**
+ * tokens.css — 设计令牌 + 全局重置 + 基础元素
+ *
+ *   全局CSS拆分第一份：设计令牌（CSS变量）+ reset + 滚动条
+ *   所有重复rgba色值替换为RGB三元组变量，消除硬编码
+ */
+
+/* ===== 设计令牌：暗调沉浸赛博风 ===== */
+:root {
+  /* 基底：压低亮度，沉浸统一 */
+  --bg-base: #06080d;
+  --bg-primary: rgba(8, 10, 16, 0.82);
+  --bg-secondary: rgba(14, 18, 28, 0.75);
+  --bg-tertiary: rgba(20, 26, 40, 0.7);
+
+  /* RGB 三元组：供 rgba(var(--xxx-rgb), alpha) 动态组合，消除重复色值 */
+  --accent-rgb: 0, 212, 255;
+  --accent-dim-rgb: 0, 106, 133;
+  --accent-purple-rgb: 139, 92, 246;
+  --accent-red-rgb: 255, 46, 99;
+  --black-rgb: 0, 0, 0;
+  --white-rgb: 255, 255, 255;
+  --bg-tertiary-rgb: 20, 26, 40;
+  --warning-rgb: 255, 184, 108;
+  --success-rgb: 46, 213, 115;
+  --danger-rgb: 255, 71, 87;
+
+  /* 点缀色：低饱和赛博RGB偏色 */
+  --accent: #00d4ff;
+  --accent-dim: #006a85;
+  --accent-glow: rgba(var(--accent-rgb), 0.15);
+  --accent-purple: #8b5cf6;
+  --accent-red: #ff2e63;
+
+  /* 文字：高通透白色，低对比 */
+  --text-primary: #d4dae4;
+  --text-secondary: #6c7689;
+  --text-muted: #3d4452;
+
+  /* 边框：细高光 */
+  --border: rgba(var(--accent-rgb), 0.08);
+  --border-hover: rgba(var(--accent-rgb), 0.25);
+  --border-glass: rgba(var(--white-rgb), 0.06);
+
+  /* 状态色 */
+  --danger: #ff4757;
+  --success: #2ed573;
+  --warning: #ffa502;
+
+  /* 圆角 */
+  --radius: 12px;
+  --radius-sm: 6px;
+
+  /* 字体 */
+  --font: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "Consolas", monospace;
+
+  /* 动效时长 */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 0.2s;
+  --dur: 0.4s;
+  --dur-slow: 0.8s;
+
+  /* 页面专属动效时长（App.vue 双缓冲层引用 — 与渡越序列引擎对齐，
+   * 总时长唯一权威源 = constants.ts ENTER_T_MS（5s）：
+   * 交接点 = 包络 x=0.62（3100ms 峰驻末端·消散起点）→ 包络归零
+   * 5000ms，materialize 时长 = 消散段等长（1.9s）——「星系落定 =
+   * 界面清晰」同步收束；离场快于交接，让位星系正渡主体） */
+  --dur-sweep: 1.7s;
+  --dur-page-enter: 1.9s;
+  --dur-page-leave: 0.45s;
+}
+
+/* ===== 全局重置 ===== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font);
+  color: var(--text-primary);
+  background: transparent;
+}
+
+#app {
+  position: relative;
+  z-index: 1;
+}
+
+/* ===== 滚动条：极简隐形 ===== */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(var(--accent-rgb), 0.1);
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--accent-rgb), 0.2);
+}

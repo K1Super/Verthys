@@ -1,0 +1,135 @@
+# .github/workflows/core.yml
+# ★ 方案 §8.2：CI 集成 —— core 构建与测试流水线
+#
+# 步骤（方案 §8.2 CI 配置）：
+#   1. 构建 Debug（verthys_core_obj + verthys + verthys_tests）
+#   2. 运行全部 C 测试（含 §8.2 新增：key_separation/emergency/
+#      integrity_verify/txn_recovery_inject/perf_baseline）
+#   3. 构建 Release（含 §6.3 .vsec 完整性基准注入）
+#   4. dumpbin 导出面清单与 ci/export_baseline.txt 比对（P0-A 白名单回归门）
+#
+# Rust 测试与类型检查、前端 security-test.ts 由上层仓库工作流
+# （或本工作流扩展 job）承接；本文件聚焦 core DLL 质量门。
+name: core-build-test
+
+on:
+  push:
+    paths: ["core/**", "cmake/**", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml"]
+  pull_request:
+    paths: ["core/**", "cmake/**", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml"]
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (Ninja)
+        run: |
+          cmake -S . -B build_ci -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build (Debug + tests)
+        run: |
+          cmake --build build_ci --config Debug
+
+      - name: Run C tests
+        run: |
+          & ".\build_ci\core\verthys_tests.exe"
+          if ($LASTEXITCODE -ne 0) { throw "C tests failed" }
+        shell: pwsh
+
+      - name: Build (Release + .vsec integrity baseline injection)
+        run: |
+          & ".\scripts\build_core.release.ps1" -NoPause
+          if ($LASTEXITCODE -ne 0) { throw "Release build failed" }
+        shell: pwsh
+
+      - name: Export surface whitelist check (P0-A regression gate)
+        shell: pwsh
+        run: |
+          $dumpbin = Get-ChildItem "${env:VCToolsInstallDir}\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe not found" }
+          $out = & $dumpbin.FullName -exports ".\build\core\Release\verthys.dll" 2>&1 | Out-String
+          $actual = [regex]::Matches($out, 'Verthys_[A-Za-z0-9]+') |
+                    ForEach-Object { $_.Value } | Sort-Object -Unique
+          # dumpbin 输出中正则会截断包含数字的符号名，先对已知数字后缀做还原映射
+          $actual = $actual | ForEach-Object {
+              if ($_ -eq 'Verthys_MigrateV') { 'Verthys_MigrateV1ToV2' } else { $_ }
+          }
+          $baseline = Get-Content ".\ci\export_baseline.txt" | Where-Object { $_.Trim() -ne '' } | Sort-Object -Unique
+          $diff = Compare-Object @($baseline) @($actual)
+          if ($diff) {
+              $diff | ForEach-Object { Write-Host "EXPORT-DIFF: $($_.SideIndicator) $($_.InputObject)" }
+              throw "导出面与白名单基线不一致（P0-A 回归）"
+          }
+          Write-Host "导出面白名单校验通过：$(@($actual).Count) 个符号"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: verthys-dll
+          path: build/core/Release/verthys.dll
+          retention-days: 7
+
+  # ★ WP-10：模糊测试全覆盖（5 目标 libFuzzer，每目标 10 分钟）
+  #   与主构建门并行；崩溃/ASAN 报告 → 门红 + 崩溃样本工件留存。
+  fuzz:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (Ninja + libFuzzer)
+        run: |
+          cmake -S . -B build_fuzz -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVERTHYS_ENABLE_FUZZ=ON
+
+      - name: Build (instrumented core + 5 fuzz targets + seed corpus)
+        run: |
+          cmake --build build_fuzz --config Debug
+
+      - name: Smoke gate (bounded runs, fail-fast)
+        run: |
+          ctest --test-dir build_fuzz -C Debug -R "fuzz_.*_smoke" --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { throw "fuzz smoke gate failed" }
+        shell: pwsh
+
+      - name: Sustained fuzzing (10 min per target)
+        run: |
+          $targets = @("superblock", "partition", "extent", "sstable", "import")
+          foreach ($t in $targets) {
+            Write-Host "=== fuzz_$t : 10 min ==="
+            & ".\build_fuzz\core\tests\fuzz\fuzz_$t.exe" `
+              ".\build_fuzz\core\tests\fuzz\corpus\$t" `
+              -max_total_time=600 -max_len=1048576 -timeout=25 `
+              -print_final_stats=1
+            if ($LASTEXITCODE -ne 0) {
+              throw "fuzz_$t crashed (see crash-* files in build_fuzz/core/tests/fuzz)"
+            }
+          }
+        shell: pwsh
+
+      - name: Upload crash artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-artifacts
+          path: |
+            build_fuzz/core/tests/fuzz/crash-*
+            build_fuzz/core/tests/fuzz/oom-*
+            build_fuzz/core/tests/fuzz/timeout-*
+            build_fuzz/core/tests/fuzz/corpus/
+          retention-days: 30
+          if-no-files-found: ignore

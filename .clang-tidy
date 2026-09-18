@@ -1,0 +1,223 @@
+# =============================================================================
+# .clang-tidy — Verthys 静态检测左移配置
+#
+# ★ P0 缺陷1企业级方案 — 静态检测左移
+#
+# 目标：在 CI/本地构建阶段拦截内部栈/堆指针对外裸露、Use-After-Free、
+#       缓存借用指针逃逸等内存安全缺陷，将运行时崩溃左移至编译期阻断。
+#
+# 适用范围：core/src 下全部 C 源文件（DLL 安全核心）。
+#           HeaderFilterRegex 仅校验项目自有头文件，不检查第三方库。
+#
+# 启用方式（CMake 集成）：
+#   cmake -S . -B build_ninja -G Ninja -DCMAKE_BUILD_TYPE=Release \
+#         -DVERTHYS_ENABLE_CLANG_TIDY=ON
+#   或直接：clang-tidy -p build_ninja core/src/api/verthys_api.c
+# =============================================================================
+---
+# 仅校验项目自有头文件，跳过 third_party / 系统库 / MSVC 头
+HeaderFilterRegex: 'core/(src|include)/.*\.h$'
+
+# 仅对项目源文件生效，第三方代码（libsodium 等）不检查
+HeaderFilter: 'core/(src|include)/.*\.h$'
+
+Checks:
+  # --------------------------------------------------------------------------
+  # 一、Use-After-Free 与悬挂指针检测（缺陷1核心拦截）
+  # --------------------------------------------------------------------------
+  - 'bugprone-use-after-free'           # 释放后使用：直接拦截 UAF 模式
+  - 'bugprone-dangling-handle'          # 悬挂句柄/引用：拦截返回栈对象指针
+  - 'bugprone-use-after-move'           # 移动后使用（C++ 互操作时）
+  - 'clang-analyzer-core.UAF'           # 静态分析器 UAF 检测
+  - 'clang-analyzer-core.CallAndMessage' # 调用未初始化/已释放指针
+  - 'clang-analyzer-cplusplus.NewDeleteLeaks'
+  - 'bugprone-sized-deallocation'       # 不匹配的 delete 大小
+
+  # --------------------------------------------------------------------------
+  # 二、内部指针对外裸露检测（缺陷1架构级拦截）
+  # --------------------------------------------------------------------------
+  - 'cppcoreguidelines-owning-memory'   # 所有权语义：裸指针不应跨边界泄漏
+  - 'cppcoreguidelines-pro-bounds-pointer-arithmetic' # 指针运算暴露内部布局
+  - 'bugprone-narrowing-conversions'    # 窄化转换导致指针偏移错误
+  - 'bugprone-sizeof-expression'        # sizeof 异常（指针/数组混淆）
+  - 'bugprone-misplaced-widening-cast'
+  - 'clang-analyzer-core.NullDereference' # 空指针解引用
+  - 'clang-analyzer-core.DivideZero'
+  - 'clang-analyzer-core.StackAddressEscape' # ★ 栈地址逃逸：返回栈变量指针
+
+  # --------------------------------------------------------------------------
+  # 三、内存分配/释放配对检测（UAF 根因：不匹配的分配器）
+  # --------------------------------------------------------------------------
+  - 'clang-analyzer-unix.Malloc'        # malloc/free 配对、重复释放、泄漏
+  - 'clang-analyzer-unix.MallocSizeof'  # malloc(sizeof(错误类型))
+  - 'clang-analyzer-unix.MismatchedDeallocator'
+  - 'bugprone-multiple-statement-macro'
+  - 'bugprone-assert-side-effect'
+
+  # --------------------------------------------------------------------------
+  # 四、并发安全检测（写操作缓存失效竞态）
+  # --------------------------------------------------------------------------
+  - 'bugprone-incorrect-roundings'
+  - 'clang-analyzer-core.uninitialized.ArraySubscript'
+  - 'clang-analyzer-core.uninitialized.Assign'
+  - 'clang-analyzer-core.uninitialized.Branch'
+  - 'clang-analyzer-core.uninitialized.CapturedBlockVariable'
+
+  # --------------------------------------------------------------------------
+  # 五、安全编码规范强制（缺陷3：TOCTOU、原子操作）
+  # --------------------------------------------------------------------------
+  - 'bugprone-assert-side-effect'
+  - 'bugprone-bool-pointer-implicit-conversion'
+  - 'bugprone-copy-constructor-init'
+  - 'bugprone-dynamic-static-initializers'
+  - 'bugprone-fold-init-type'
+  - 'bugprone-forwarding-reference-overload'
+  - 'bugprone-inaccurate-erase'
+  - 'bugprone-incorrect-roundings'
+  - 'bugprone-integer-division'
+  - 'bugprone-misplaced-operator-in-strlen-in-alloc'
+  - 'bugprone-misplaced-pointer-arithmetic-in-alloc'
+  - 'bugprone-misplaced-widening-cast'
+  - 'bugprone-move-const-arg'
+  - 'bugprone-multiple-statement-macro'
+  - 'bugprone-string-constructor'
+  - 'bugprone-suspicious-enum-usage'
+  - 'bugprone-suspicious-memset-usage'  # memset 误用（敏感数据清零相关）
+  - 'bugprone-suspicious-missing-comma'
+  - 'bugprone-suspicious-semicolon'
+  - 'bugprone-suspicious-string-compare'
+  - 'bugprone-swapped-arguments'
+  - 'bugprone-terminating-continue'
+  - 'bugprone-throw-keyword-missing'
+  - 'bugprone-too-small-loop-variable'
+  - 'bugprone-undefined-memory-manipulation'
+  - 'bugprone-unused-raii'
+  - 'bugprone-unused-return-value'
+  - 'bugprone-virtual-near-miss'
+
+  # --------------------------------------------------------------------------
+  # 六、性能与可维护性（缺陷2：性能埋点辅助）
+  # --------------------------------------------------------------------------
+  - 'performance-faster-string-find'
+  - 'performance-for-range-copy'
+  - 'performance-implicit-conversion-in-loop'
+  - 'performance-inefficient-algorithm'
+  - 'performance-inefficient-string-concatenation'
+  - 'performance-inefficient-vector-operation'
+  - 'performance-move-const-arg'
+  - 'performance-no-automatic-move'
+  - 'performance-noexcept-move-constructor'
+  - 'performance-trivially-destructible'
+  - 'performance-type-promotion-in-math-fn'
+  - 'performance-unnecessary-copy-initialization'
+  - 'performance-unnecessary-value-param'
+
+  # --------------------------------------------------------------------------
+  # 七、现代 C 用法与可读性
+  # --------------------------------------------------------------------------
+  - 'modernize-deprecated-headers'
+  - 'modernize-loop-convert'
+  - 'modernize-make-unique'
+  - 'modernize-pass-by-value'
+  - 'modernize-redundant-void-arg'
+  - 'modernize-replace-auto-ptr'
+  - 'modernize-replace-random-shuffle'
+  - 'modernize-return-braced-init-list'
+  - 'modernize-shrink-to-fit'
+  - 'modernize-unary-static-assert'
+  - 'modernize-use-bool-literals'
+  - 'modernize-use-default-member-init'
+  - 'modernize-use-emplace'
+  - 'modernize-use-equals-default'
+  - 'modernize-use-equals-delete'
+  - 'modernize-use-noexcept'
+  - 'modernize-use-nullptr'
+  - 'modernize-use-override'
+  - 'modernize-use-transparent-functors'
+  - 'modernize-use-using'
+
+  # --------------------------------------------------------------------------
+  # 八、可读性（不阻断，仅提示）
+  # --------------------------------------------------------------------------
+  - 'readability-braces-around-statements'
+  - 'readability-const-return-type'
+  - 'readability-container-size-empty'
+  - 'readability-delete-null-pointer'
+  - 'readability-else-after-return'
+  - 'readability-function-size'
+  - 'readability-identifier-naming'
+  - 'readability-inconsistent-declaration-parameter-name'
+  - 'readability-misleading-indentation'
+  - 'readability-non-const-parameter'
+  - 'readability-qualified-auto'
+  - 'readability-redundant-control-flow'
+  - 'readability-redundant-string-cstr'
+  - 'readability-redundant-string-init'
+  - 'readability-simplify-boolean-expr'
+  - 'readability-static-definition-in-anonymous-namespace'
+  - 'readability-string-compare'
+  - 'readability-uniqueptr-delete-release'
+  - 'readability-uppercase-literal-suffix'
+  - 'readability-redundant-preprocessor'
+  - 'readability-isolate-declaration'
+
+  # --------------------------------------------------------------------------
+  # 显式禁用（C 代码不适用 / 噪音过大）
+  # --------------------------------------------------------------------------
+  - '-cppcoreguidelines-pro-bounds-constant-array-index' # C 代码大量使用数组下标
+  - '-cppcoreguidelines-pro-bounds-array-to-pointer-decay' # C ABI 必须衰变
+  - '-cppcoreguidelines-avoid-magic-numbers'  # 加密常量数值众多
+  - '-cppcoreguidelines-avoid-c-arrays'        # C 代码核心数据结构
+  - '-cppcoreguidelines-avoid-non-const-global-variables' # DLL 全局状态必需
+  - '-cppcoreguidelines-no-malloc'              # C 代码主用 malloc/free
+  - '-cppcoreguidelines-special-member-functions' # C 无特殊成员函数
+  - '-cppcoreguidelines-pro-type-cstyle-cast'  # C 代码必须用 C 风格转换
+  - '-cppcoreguidelines-pro-type-reinterpret-cast'
+  - '-cppcoreguidelines-slicing'                # C 无继承
+  - '-modernize-use-trailing-return-type'       # C 不支持
+  - '-modernize-use-using'                      # C 无 typedef 替代
+  - '-readability-magic-numbers'                # 加密代码数值常量众多
+  - '-readability-identifier-length'            # 短变量名在密码学中常见
+  - '-readability-function-cognitive-complexity' # 加密逻辑复杂度高
+  - '-bugprone-easily-swappable-parameters'     # C ABI 参数类型相近
+  - '-bugprone-reserved-identifier'             # 系统头文件冲突
+  - '-altera-*'           # FPGA 专用，不适用
+  - '-concurrency-*'      # C 无 std::thread（用 SRWLock，已有 clang-analyzer 覆盖）
+  - '-mpi-*'              # 不使用 MPI
+  - '-zircon-*'           # Zircon OS 专用
+  - '-llvmlibc-*'         # LLVM libc 专用
+  - '-google-*'           # Google 代码风格，不适用
+  - '-fuchsia-*'          # Fuchsia OS 专用
+  - '-objc-*'             # Objective-C 专用
+  - '-darwin-*'           # 部分 Darwin 专用规则噪音大
+  - '-hicpp-*'            # 与 cppcoreguidelines 重叠
+
+# 警告即错误：UAF/指针裸露/StackAddressEscape 三类必须阻断构建
+WarningsAsErrors: 'bugprone-use-after-free,clang-analyzer-core.UAF,clang-analyzer-core.StackAddressEscape,clang-analyzer-core.CallAndMessage,clang-analyzer-unix.Malloc,bugprone-dangling-handle'
+
+CheckOptions:
+  - key:   readability-function-size.LineThreshold
+    value: '200'
+  - key:   readability-function-size.StatementThreshold
+    value: '100'
+  - key:   readability-function-size.BranchThreshold
+    value: '30'
+  - key:   readability-identifier-naming.FunctionCase
+    value: 'lower_case'
+  - key:   readability-identifier-naming.VariableCase
+    value: 'lower_case'
+  - key:   readability-identifier-naming.StructCase
+    value: 'CamelCase'
+  - key:   readability-identifier-naming.EnumCase
+    value: 'CamelCase'
+  - key:   readability-identifier-naming.EnumConstantCase
+    value: 'UPPER_CASE'
+  - key:   readability-identifier-naming.MacroDefinitionCase
+    value: 'UPPER_CASE'
+  - key:   readability-identifier-naming.ParameterCase
+    value: 'lower_case'
+  - key:   performance-unnecessary-value-param.AllowedTypes
+    value: 'VerthysRecord;VerthysDiagnostics'
+  - key:   bugprone-use-after-free.StrictMode
+    value: '1'
+...

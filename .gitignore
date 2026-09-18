@@ -1,0 +1,47 @@
+# Build output
+build/
+build_dev/
+build_*/
+out/
+cmake-build-*/
+
+# Rust build output
+target/
+
+# App runtime data (WebView cache, local databases)
+verthys-tauri/appdata/
+
+# Build/test logs and one-off diagnostics
+*.log
+*.err
+*.out
+*.tmp
+test_out.txt
+tmp_*.ps1
+malware_hashes.txt
+
+# vcpkg
+vcpkg_installed/
+
+# IDE
+.vs/
+.vscode/
+.trae/
+*.user
+
+# Compiled
+*.dll
+*.exe
+*.lib
+*.obj
+*.pdb
+*.exp
+*.ilk
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+*.idx_cache
+

@@ -1,0 +1,46 @@
+[package]
+name = "verthys-worker"
+version = "2.6.1"
+edition = "2021"
+
+[[bin]]
+name = "verthys-worker"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libloading = "0.8"
+# 加密库
+sha2 = "0.10"
+hkdf = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["simple"] }
+aes-gcm = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+# Windows API（共享内存、内存锁定、预读）
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+# ★ 修复 LNK1181: 无法打开输入文件 "windows.0.52.0.lib"
+# 根因：dev profile 默认启用 incremental compilation，与 raw-dylib 导入库
+# 生成存在竞态——增量编译复用缓存 metadata 时，build script 的
+# rustc-link-search 输出未生效，导致 link.exe 找不到 windows.0.52.0.lib
+# （由 windows-link 0.2.1 → windows_x86_64_msvc 0.52.6 提供的预编译导入库）。
+# 禁用增量编译后，每次全量编译都会正确执行 build script 并输出链接路径。
+# 此修复是规范机制：无论通过 CLI / 脚本 / IDE 调用 cargo 均生效。
+[profile.dev]
+incremental = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

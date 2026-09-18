@@ -1,0 +1,40 @@
+; verthys.def — DLL 导出定义
+; ★ 方案 §7（P0-A 治理后）：本文件是 DLL 导出符号的唯一白名单。
+;   verthys.h 的 VERTHYS_API 宏不再携带 dllexport 语义，
+;   未列入本文件的内部接口一律不可达。
+;   Verthys_HasRecordByType / Verthys_FindFirstLidByType 为运行中 worker
+;   实际消费的接口（verthys-worker/src/runtime/worker.rs:729,748），依
+;   "关联模块最高标准同步"条款补录进白名单。
+;   Verthys_GetSecurityStatus（★ WP-11，v5.0 §11.2 目标态导出清单成员）：
+;   防御闭环 7 路径状态查询。
+LIBRARY verthys
+EXPORTS
+    Verthys_Init
+    Verthys_NotifySandboxAttrs
+    Verthys_Deinit
+    Verthys_Unlock
+    Verthys_CreateWithPreset
+    Verthys_RegisterUnlockProgressCallback
+    Verthys_Lock
+    Verthys_AddRecord
+    Verthys_GetRecord
+    Verthys_DeleteRecord
+    Verthys_DeleteRecords
+    Verthys_Export
+    Verthys_Import
+    Verthys_ChangePassword
+    Verthys_ScanOpen
+    Verthys_ScanFetch
+    Verthys_ScanRecordFree
+    Verthys_ScanClose
+    Verthys_ScanSummaryOpen
+    Verthys_ScanSummaryFetch
+    Verthys_ScanSummaryRecordFree
+    Verthys_GetSummaryCount
+    Verthys_HasRecordByType
+    Verthys_FindFirstLidByType
+    Verthys_Flush
+    Verthys_GetContainerInfo
+    Verthys_VerifyIntegrity
+    Verthys_GetDiagnostics
+    Verthys_GetSecurityStatus

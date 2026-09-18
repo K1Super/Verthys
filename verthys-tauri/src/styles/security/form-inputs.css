@@ -1,0 +1,114 @@
+/* ============================================================
+   form-inputs.css — 通用表单元素
+   来源：SecurityCenter.vue 原 <style scoped> L2272-L2370
+   用于：解锁/初始化/验证视图的表单输入控件
+   ============================================================ */
+
+/* ===== 通用表单元素 ===== */
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.form-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  letter-spacing: 1px;
+  font-family: var(--font);
+}
+.sc-input {
+  flex: 1;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font);
+  outline: none;
+  /* ★ 精确属性过渡（禁用 transition: all — 聚焦仅动画声明的
+   * 三个绘制属性，杜绝任何意外属性（含几何/filter 类）被卷入
+   * 过渡链触发额外重绘/重栅格化） */
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+  min-width: 0;
+}
+.sc-input:focus {
+  border-color: var(--accent);
+  background: rgba(0, 0, 0, 0.45);
+  box-shadow: 0 0 12px rgba(0, 212, 255, 0.1);
+}
+.path-row, .pw-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.pw-row {
+  position: relative;
+}
+.pw-row .sc-input {
+  flex: 1;
+  padding-right: 36px;
+}
+/* 密码切换按钮 — 无背景框，仅图标，定位在文本框内部右侧 */
+.pw-toggle {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  transition: color var(--dur-fast) var(--ease);
+}
+.pw-toggle:hover {
+  color: var(--accent);
+}
+.pw-toggle svg { width: 16px; height: 16px; }
+.sc-browse {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sc-browse svg { width: 13px; height: 13px; }
+/* 紧凑型图标按钮 — 用于路径选择行，仅图标无文字 */
+.sc-browse-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text-muted);
+  cursor: pointer;
+  /* ★ 精确属性过渡（同 .sc-input — 禁 transition: all） */
+  transition:
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+  padding: 0;
+}
+.sc-browse-icon:hover {
+  color: var(--accent);
+  border-color: var(--border-hover);
+  background: rgba(0, 212, 255, 0.06);
+}
+.sc-browse-icon:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.sc-browse-icon svg { width: 15px; height: 15px; }

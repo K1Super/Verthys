@@ -1,0 +1,59 @@
+name: CI
+
+on: [push, pull_request]
+
+env:
+  CTEST_OUTPUT_ON_FAILURE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-ninja-clang:
+    name: Ubuntu (ninja, clang)
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Prepare
+        run: |
+          sudo apt update
+          sudo apt install ninja-build
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build and run tests
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          scripts/test.sh
+
+  ubuntu-make-gcc:
+    name: Ubuntu (make, gcc)
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build and run tests
+        env:
+          CC: gcc
+          CXX: g++
+        run: |
+          scripts/initbuild.sh make
+          scripts/test.sh
+
+  macos:
+    name: macOS
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build and run tests
+        run: |
+          scripts/test.sh
+
+  windows:
+    name: Windows
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build and run tests
+        run: |
+          cmake .
+          cmake --build . --config Release
+          ctest -VV

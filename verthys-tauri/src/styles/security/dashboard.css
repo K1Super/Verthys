@@ -1,0 +1,1058 @@
+/* ============================================================
+   dashboard.css — 安全防护 · 双星系统（引力谱系 · 无底板）
+   包含：
+     - .security-dashboard 容器 + 环境氛围层（performance/balanced/secure）
+     - .bs-field       双星引力场（扫掠弧星体 + 质心 + 齿轮入口）
+     - .bs-track       预设谱轨（裸能量丝线 + 菱形锚点 + 渡越体）
+     - .bs-spectra     特性谱线折叠面板（grid 行高过渡，无重排卡顿）
+     - .cap-board      安全能力状态栏（核心防护清单 · 双列错位端子排）
+     - .def-board      防御闭环端子排诊断（WP-11 · 7 攻击路径 × 四态语义色）
+     - .flow-rail      数据流转轨道（磁盘→内存 · 电路走线 + 数据包流 + 运行状态）
+     - .kd-* 密钥编辑弹窗特定布局
+     - .derive-* / .custom-derive-area / .result-* 自定义派生区域
+     - .param-grid 参数网格
+     - .sc-toast Toast 提示
+   设计约束：零卡片底板/边框/阴影 — 组件直接悬浮于宇宙背景；
+   开放弧 + 能量丝线语言与引导区（mgmt-hub）/分区体系（section-field）同源
+
+   引力测线性能架构（极其平滑 · 零阴影零光晕 · 反模板化）：
+     - .bs-track 为容器查询锚点（container-type: inline-size）+ pointer
+       拖拽宿主；游标天平以 translateX(calc(var(--pos) * 1cqw)) 位移、
+       潮汐亮层以 clip-path inset(var(--posw)) 点亮 — 零 layout
+     - 拖拽期间组件 DOM 直写 --pos/--posw（连续浮点，绕过整数步进与
+       Vue patch），游标逐帧直跟指针；双星数值 120ms 节流联动
+     - 游标摆锤 --tilt 由欠阻尼弹簧积分驱动（复合衰减曲线），
+       速度感应倾侧 + 静止自然回正
+     - 落位缓动 cubic-bezier(0.22, 1.32, 0.28, 1)（过冲 = 挡位落榫）
+     - 测线段零 box-shadow/drop-shadow/光晕：测绘残段双层数值化
+       点亮 + 端桩/基准桩/游标天平的纯几何语言
+   ============================================================ */
+
+.security-dashboard {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  overflow: hidden;
+}
+
+/* 环境氛围层 — 随模式切换的色彩倾向（纯径向渐变，无卡片形态无滤镜） */
+.ambience-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transition: background 0.8s var(--ease);
+  z-index: 0;
+}
+/* 性能模式：冷白/银灰 */
+.ambience-performance .ambience-glow {
+  background:
+    radial-gradient(ellipse at 30% 18%, rgba(200, 220, 240, 0.07), transparent 58%),
+    radial-gradient(ellipse at 72% 82%, rgba(180, 200, 220, 0.05), transparent 50%);
+}
+.ambience-performance {
+  --dashboard-accent: rgba(0, 255, 200, 0.8);
+}
+/* 平衡模式：青紫温润 */
+.ambience-balanced .ambience-glow {
+  background:
+    radial-gradient(ellipse at 50% 26%, rgba(0, 212, 255, 0.07), transparent 55%),
+    radial-gradient(ellipse at 50% 74%, rgba(139, 92, 246, 0.05), transparent 50%);
+}
+.ambience-balanced {
+  --dashboard-accent: rgba(0, 212, 255, 0.9);
+}
+/* 安全模式：深空红棕/极暗黑金 */
+.ambience-secure .ambience-glow {
+  background:
+    radial-gradient(ellipse at 30% 18%, rgba(80, 30, 20, 0.22), transparent 58%),
+    radial-gradient(ellipse at 72% 82%, rgba(60, 40, 10, 0.16), transparent 50%);
+}
+.ambience-secure {
+  --dashboard-accent: rgba(255, 140, 60, 0.9);
+}
+
+/* ============================================================
+   1. 双星引力场 — 开销星 ↔ 质心 ↔ 覆盖星
+   ============================================================ */
+.bs-field {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(16px, 4vw, 44px);
+  padding: 8px 0 4px;
+}
+.bs-star {
+  position: relative;
+  width: 156px;
+  height: 156px;
+  flex: none;
+}
+.bs-star-svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+/* 氛围弧差速旋转（开放弧，非闭合圆环） */
+.bs-ambient-a,
+.bs-ambient-b {
+  transform-origin: 70px 70px;
+  transform-box: view-box;
+}
+.bs-star-left .bs-ambient-a { animation: bs-rot-cw 17s linear infinite; }
+.bs-star-left .bs-ambient-b { animation: bs-rot-ccw 11s linear infinite; }
+.bs-star-right .bs-ambient-a { animation: bs-rot-ccw 14s linear infinite; }
+.bs-star-right .bs-ambient-b { animation: bs-rot-cw 9s linear infinite; }
+
+/* 能量扫掠弧：弧长 = 数值（dasharray/dashoffset 由 props 驱动，顶点起顺时针） */
+.bs-sweep {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: 70px 70px;
+  transform-box: view-box;
+  transition: stroke-dashoffset 0.6s var(--ease);
+  filter: drop-shadow(0 0 3px rgba(0, 212, 255, 0.3));
+}
+.bs-sweep-left { stroke: url(#bs-grad-left); }
+.bs-sweep-right { stroke: url(#bs-grad-right); }
+/* 弧端能量点 */
+.bs-sweep-dot { transition: transform 0.6s var(--ease); }
+.bs-dot-left {
+  fill: #7dffd4;
+  filter: drop-shadow(0 0 3px rgba(0, 255, 200, 0.7));
+}
+.bs-dot-right {
+  fill: #e3d0ff;
+  filter: drop-shadow(0 0 3px rgba(139, 92, 246, 0.7));
+}
+/* 星心信息（mono 数值 + 坐标标签） */
+.bs-star-info {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  pointer-events: none;
+}
+.bs-star-value {
+  font-family: var(--font-mono);
+  font-size: 23px;
+  font-weight: 200;
+  color: var(--text-primary);
+  letter-spacing: 1px;
+}
+.bs-star-unit {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.55;
+  margin-left: 2px;
+}
+.bs-star-label {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* 质心：垂直丝线 + 菱形界标 + 综合评分 + 齿轮入口 */
+.bs-barycenter {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  min-width: 96px;
+}
+.bs-bc-filament {
+  width: 1px;
+  height: 26px;
+  background: linear-gradient(180deg, transparent, rgba(0, 212, 255, 0.4));
+}
+.bs-bc-node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 12px 16px;
+}
+/* 菱形界标（旋转 45° 细描边方块，非闭合圆环） */
+.bs-bc-node::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 56px;
+  height: 56px;
+  transform: translate(-50%, -50%) rotate(45deg);
+  border: 1px solid rgba(0, 212, 255, 0.18);
+  pointer-events: none;
+  transition: border-color 0.5s var(--ease);
+}
+.ambience-secure .bs-bc-node::before { border-color: rgba(255, 140, 60, 0.22); }
+.ambience-performance .bs-bc-node::before { border-color: rgba(200, 220, 240, 0.22); }
+.bs-bc-value {
+  font-family: var(--font-mono);
+  font-size: 25px;
+  font-weight: 200;
+  color: var(--text-primary);
+  text-shadow: 0 0 14px rgba(0, 212, 255, 0.35);
+}
+.bs-bc-unit {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  opacity: 0.55;
+  margin-left: 2px;
+}
+.bs-bc-label {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+/* 齿轮入口（透明圆环节点，open 态旋转 90°） */
+.bs-gear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    color 0.35s var(--ease),
+    border-color 0.35s var(--ease),
+    transform 0.35s var(--ease);
+}
+.bs-gear-icon { width: 14px; height: 14px; }
+.bs-gear:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: rgba(0, 212, 255, 0.35);
+}
+.bs-gear.active { color: #b794f6; }
+.bs-gear.open {
+  transform: rotate(90deg);
+  color: #b794f6;
+  border-color: rgba(183, 148, 246, 0.35);
+}
+.bs-gear:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* ============================================================
+   2. 引力测线 — 非均匀测绘残段 + 游标天平（零阴影零光晕）
+   视觉语言：大地测量残迹（非滑轨非胶囊）——
+     暗层残段 = 休眠刻度；潮汐亮层 clip 随 --posw 连续点亮 = 能量进程
+     端桩左高右低非对称；基准桩错落桩高；游标天平速度感应摆锤
+   落位缓动：cubic-bezier(0.22, 1.32, 0.28, 1)（末端过冲 = 磁性
+   挡位落榫感，非标准缓动）；摆锤回正为欠阻尼弹簧积分曲线
+   ============================================================ */
+.bs-track-zone {
+  position: relative;
+  z-index: 1;
+  padding: 10px 26px 30px;
+}
+/* pointer 拖拽宿主 + 容器查询锚点：游标以 1cqw 换算宽度位移（纯合成器） */
+.bs-track {
+  position: relative;
+  height: 76px;
+  container-type: inline-size;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* 测绘残段：两层同源 SVG 刻度（暗层休眠 / 亮层点亮）
+ * 亮层 currentColor + clip-path inset 随 --posw 连续推移 */
+.bs-survey {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+.bs-survey--lit {
+  color: var(--dashboard-accent, var(--accent));
+  clip-path: inset(0 calc(100% - var(--posw, 50%)) 0 0);
+  transition: clip-path 0.5s cubic-bezier(0.22, 1.32, 0.28, 1);
+  will-change: clip-path;
+}
+.is-dragging .bs-survey--lit { transition: none; }
+/* 端桩：左高右低非对称测绘终端（基线 y=48 → bottom 28px） */
+.bs-post {
+  position: absolute;
+  bottom: 28px;
+  width: 2px;
+  background: rgba(148, 160, 178, 0.5);
+  pointer-events: none;
+}
+.bs-post--origin { left: 0; height: 22px; }
+.bs-post--term { right: 0; height: 11px; background: rgba(148, 160, 178, 0.36); }
+/* 基准桩锚点：错落桩高（9/14/7px）的立桩 + 基线下方 mono 标签
+ * 纯视觉元素：pointer-events 穿透 — 按下/点击由测线宿主统一处理，
+ * 保证在锚点上可直接按下拖拽（点击吸附由释放位移判定） */
+.bs-anchor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 26px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 2;
+}
+.bs-anchor-stela {
+  position: absolute;
+  bottom: 28px;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: rgba(148, 160, 178, 0.5);
+  transition:
+    height 0.4s cubic-bezier(0.3, 1.28, 0.32, 1),
+    background 0.35s var(--ease);
+}
+.bs-anchor-0 .bs-anchor-stela { height: 9px; }
+.bs-anchor-1 .bs-anchor-stela { height: 14px; }
+.bs-anchor-2 .bs-anchor-stela { height: 7px; }
+.bs-anchor-text {
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  transition: color 0.3s var(--ease);
+}
+/* 邻近桩（磁性吸附：桩体拔高 + 亮色，挡位咬合感） */
+.bs-anchor.near .bs-anchor-stela {
+  height: 19px;
+  background: rgba(0, 212, 255, 0.9);
+}
+.bs-anchor.near .bs-anchor-text { color: rgba(0, 212, 255, 0.85); }
+/* 当前激活桩（accent 实色，回落至常态桩高 — 驻留态克制） */
+.bs-anchor.current .bs-anchor-stela {
+  background: var(--dashboard-accent, var(--accent));
+}
+.bs-anchor.current .bs-anchor-text { color: var(--accent); }
+/* 游标天平：速度感应摆锤
+ * translateX(cqw) + rotate(--tilt)（弹簧积分驱动，欠阻尼回正）；
+ * transform-origin 82% — 摆锤支点偏下，倾侧如悬锤受力 */
+.bs-caliper {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  z-index: 3;
+  pointer-events: none;
+  color: var(--dashboard-accent, var(--accent));
+  transform: translateX(calc(var(--pos, 50) * 1cqw)) rotate(var(--tilt, 0deg));
+  transform-origin: 50% 82%;
+  transition: transform 0.5s cubic-bezier(0.22, 1.32, 0.28, 1);
+  will-change: transform;
+}
+.is-dragging .bs-caliper { transition: none; }
+/* 悬线：非均匀停靠点慢漂（0/37/71/100 非整分位关键帧 — 摆锤余摆，
+ * 拒绝对称往复；拖拽时静止交给倾角物理） */
+.bs-caliper-line {
+  position: absolute;
+  top: 15px;
+  bottom: 11px;
+  left: -0.5px;
+  width: 1px;
+  background: currentColor;
+  opacity: 0.92;
+  transform-origin: 50% 0;
+  animation: bs-sway 9.5s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+}
+.is-dragging .bs-caliper-line { animation: none; }
+@keyframes bs-sway {
+  0% { transform: rotate(0deg); }
+  37% { transform: rotate(0.7deg); }
+  71% { transform: rotate(-0.4deg); }
+  100% { transform: rotate(0deg); }
+}
+/* 基线横臂：仅在游标右侧延展（非对称，测量脚） */
+.bs-caliper-bar {
+  position: absolute;
+  top: 47px;
+  left: 0;
+  width: 11px;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.85;
+}
+/* 配重微点：顶端左侧偏置（与底端右向横臂构成天平力矩隐喻） */
+.bs-caliper-weight {
+  position: absolute;
+  top: 13px;
+  left: -5px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.9;
+}
+/* 原生 range input：仅键盘可达（pointer-events 穿透，鼠标拖拽由测线接管） */
+.bs-range-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  pointer-events: none;
+  margin: 0;
+}
+.bs-range-input:focus-visible {
+  outline: 1px solid rgba(0, 212, 255, 0.4);
+  outline-offset: -3px;
+}
+
+/* ============================================================
+   3. 特性谱线 — 自定义模板折叠面板（grid 行高过渡，无重排卡顿）
+   ============================================================ */
+.bs-spectra {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.45s var(--ease);
+}
+.bs-spectra.open { grid-template-rows: 1fr; }
+.bs-spectra-panel {
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 0;
+  opacity: 0;
+  transform: translateY(-10px);
+  transition:
+    opacity 0.35s var(--ease),
+    transform 0.45s var(--ease),
+    padding 0.45s var(--ease);
+}
+.bs-spectra.open .bs-spectra-panel {
+  opacity: 1;
+  transform: translateY(0);
+  padding-top: 4px;
+}
+.bs-spectra-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.bs-spectra-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: #b794f6;
+}
+.bs-spectra-title::before {
+  content: "";
+  display: inline-block;
+  width: 16px;
+  height: 1px;
+  margin-right: 10px;
+  vertical-align: middle;
+  background: rgba(183, 148, 246, 0.6);
+}
+.bs-spectra-hint {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.bs-spectra-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 2px 30px;
+}
+/* 单条特性谱线：标签 ——— 光谱线 ——— ON/OFF */
+.bs-spectral {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+.bs-spec-label {
+  flex: none;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+  transition: color 0.3s var(--ease);
+}
+.bs-spec-line {
+  flex: 1;
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(148, 160, 178, 0.16);
+  transition: background 0.4s var(--ease), box-shadow 0.4s var(--ease);
+}
+.bs-spec-state {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: rgba(148, 160, 178, 0.55);
+  transition: color 0.3s var(--ease);
+}
+/* 亮谱 = 启用（青→紫能量谱线） */
+.bs-spectral.on .bs-spec-line {
+  background: linear-gradient(90deg,
+    rgba(0, 255, 200, 0.55),
+    rgba(0, 212, 255, 0.8),
+    rgba(139, 92, 246, 0.55));
+  box-shadow: 0 0 6px rgba(0, 212, 255, 0.35);
+}
+.bs-spectral.on .bs-spec-label { color: var(--text-primary); }
+.bs-spectral.on .bs-spec-state { color: rgba(0, 212, 255, 0.9); }
+.bs-spectral:hover .bs-spec-label { color: var(--accent); }
+.bs-spectra-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 24px;
+  padding-top: 4px;
+}
+
+/* ============================================================
+   4. 安全能力状态栏 — 核心防护清单（双列错位端子排 · 零阴影零光晕）
+   视觉语言：接线端子排清单 —— 圆点状态位 + 功能名 + 【核心】标签 +
+   虚线引出线；双列错位排布（第二列整体下沉，非均匀布局）；
+   圆点错相呼吸（延迟按质数序列，杜绝机械同步）
+   ============================================================ */
+.cap-board {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 2px 4px;
+}
+.cap-head {
+  display: flex;
+  align-items: baseline;
+  gap: 11px;
+}
+/* 空心菱形徽记 */
+.cap-glyph {
+  width: 6px;
+  height: 6px;
+  border: 1px solid rgba(183, 148, 246, 0.75);
+  transform: rotate(45deg);
+  align-self: center;
+}
+.cap-title {
+  font-size: 11px;
+  letter-spacing: 0.3em;
+  color: var(--text-secondary);
+}
+.cap-sub {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.24em;
+  color: rgba(148, 160, 178, 0.5);
+}
+.cap-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: rgba(0, 212, 255, 0.8);
+}
+/* 双列清单：按列流向（前 3 项左列，后 3 项右列下沉错位） */
+.cap-ledger {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(3, auto);
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 46px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.cap-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  cursor: default;
+}
+/* 第二列整体下沉 — 端子排错位（可控不规则偏差） */
+.cap-item:nth-child(n + 4) {
+  transform: translateY(13px);
+}
+/* 圆点状态位：错相呼吸（质数序列延迟） */
+.cap-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--dashboard-accent, var(--accent));
+  animation: cap-breath 3.2s ease-in-out infinite;
+}
+.cap-item:nth-child(2n) .cap-dot { animation-delay: 1.3s; }
+.cap-item:nth-child(3n) .cap-dot { animation-delay: 2.3s; }
+.cap-item:nth-child(5n) .cap-dot { animation-delay: 0.7s; }
+@keyframes cap-breath {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+.cap-name {
+  flex: none;
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  color: var(--text-secondary);
+}
+/* 【核心】标签：全角括号直接排版（非描边胶囊） */
+.cap-tag {
+  flex: none;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: rgba(183, 148, 246, 0.85);
+}
+/* 虚线引出线（虚步长非均匀质感，尾部细刻度） */
+.cap-lead {
+  flex: 1;
+  min-width: 12px;
+  height: 1px;
+  position: relative;
+  background: repeating-linear-gradient(90deg,
+    rgba(148, 160, 178, 0.26) 0 3px,
+    transparent 3px 9px);
+}
+.cap-lead::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: -2px;
+  width: 1px;
+  height: 5px;
+  background: rgba(148, 160, 178, 0.3);
+}
+.cap-item:nth-child(even) .cap-lead { opacity: 0.65; }
+
+/* ============================================================
+   5. 防御闭环 — WP-11 攻击路径阻断状态（端子排诊断 · 四态语义色）
+   视觉语言：延续 cap-board 端子排（圆点状态位 + 名称 + 状态标签 +
+   虚线引出线），双列 4+3 错位排布；四态圆点形态语义区分：
+     blocked   = 实心 accent 呼吸（防线在位运转）
+     degraded  = 半透明琥珀（防护降级，部分失效）
+     failed    = 实心 danger 静止（防线击穿，警示）
+     unchecked = 虚线空心灰（该路径校验尚未执行）
+   底部总体态势行（方形状态位 + mono 计数明细，失败>降级>全阻断）
+   ============================================================ */
+.def-board {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 2px 4px;
+}
+.def-head {
+  display: flex;
+  align-items: baseline;
+  gap: 11px;
+}
+/* 空心圆环徽记（闭环语义，区别于 cap 菱形） */
+.def-glyph {
+  width: 7px;
+  height: 7px;
+  border: 1px solid rgba(0, 212, 255, 0.7);
+  border-radius: 50%;
+  align-self: center;
+}
+.def-title {
+  font-size: 11px;
+  letter-spacing: 0.3em;
+  color: var(--text-secondary);
+}
+.def-sub {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.24em;
+  color: rgba(148, 160, 178, 0.5);
+}
+/* 计数态色：ok/pending=青绿 · degraded=琥珀 · breach=红 */
+.def-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: rgba(0, 212, 255, 0.8);
+}
+.def-count--degraded { color: rgba(255, 165, 2, 0.9); }
+.def-count--breach { color: var(--danger); }
+/* 双列清单：按列流向（前 4 项左列，后 3 项右列下沉错位） */
+.def-ledger {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(4, auto);
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 46px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.def-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  cursor: default;
+}
+/* 第二列整体下沉 — 端子排错位（与 cap-board 同族可控偏差） */
+.def-item:nth-child(n + 5) {
+  transform: translateY(13px);
+}
+/* 圆点状态位：四态形态语义（见区段头注释） */
+.def-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+}
+.def-item--blocked .def-dot {
+  background: var(--dashboard-accent, var(--accent));
+  animation: def-breath 3.2s ease-in-out infinite;
+}
+.def-item--degraded .def-dot {
+  background: rgba(255, 165, 2, 0.5);
+  border: 1px solid rgba(255, 165, 2, 0.8);
+}
+.def-item--failed .def-dot {
+  background: var(--danger);
+}
+.def-item--unchecked .def-dot {
+  background: transparent;
+  border: 1px dashed rgba(148, 160, 178, 0.55);
+}
+/* 阻断态错相呼吸（质数序列延迟，杜绝机械同步） */
+.def-item:nth-child(2n) .def-dot { animation-delay: 1.3s; }
+.def-item:nth-child(3n) .def-dot { animation-delay: 2.3s; }
+.def-item:nth-child(5n) .def-dot { animation-delay: 0.7s; }
+@keyframes def-breath {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+.def-name {
+  flex: none;
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  color: var(--text-secondary);
+}
+/* 状态标签：四态语义色（对齐 def-dot） */
+.def-tag {
+  flex: none;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: rgba(148, 160, 178, 0.6);
+}
+.def-item--blocked .def-tag { color: rgba(0, 212, 255, 0.85); }
+.def-item--degraded .def-tag { color: rgba(255, 165, 2, 0.9); }
+.def-item--failed .def-tag { color: var(--danger); }
+/* 虚线引出线（与 cap-lead 同族质感） */
+.def-lead {
+  flex: 1;
+  min-width: 12px;
+  height: 1px;
+  position: relative;
+  background: repeating-linear-gradient(90deg,
+    rgba(148, 160, 178, 0.26) 0 3px,
+    transparent 3px 9px);
+}
+.def-lead::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: -2px;
+  width: 1px;
+  height: 5px;
+  background: rgba(148, 160, 178, 0.3);
+}
+.def-item:nth-child(even) .def-lead { opacity: 0.65; }
+/* 总体态势行：方形状态位 + 态势文字 + mono 计数明细 */
+.def-stance {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 4px;
+}
+.def-stance-mark {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  align-self: center;
+  background: rgba(148, 160, 178, 0.55);
+}
+.def-stance--ok .def-stance-mark { background: var(--dashboard-accent, var(--accent)); }
+.def-stance--degraded .def-stance-mark { background: rgba(255, 165, 2, 0.85); }
+.def-stance--breach .def-stance-mark { background: var(--danger); }
+.def-stance-text {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: rgba(148, 160, 178, 0.75);
+}
+.def-stance--ok .def-stance-text { color: rgba(0, 212, 255, 0.9); }
+.def-stance--degraded .def-stance-text { color: rgba(255, 165, 2, 0.9); }
+.def-stance--breach .def-stance-text { color: var(--danger); }
+.def-stance-detail {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  color: rgba(148, 160, 178, 0.55);
+}
+
+/* ============================================================
+   6. 数据流转轨道 — 磁盘 → 内存（电路走线 + 站点 + 数据包流）
+   视觉语言：PCB 电路走线 —— 横段 + 斜向抬升（高差 28/60/36/56 非
+   对称），站点环（走线穿环而过），双层非均匀 dash 数据包差速流动；
+   轨道下方运行状态行（方形状态位 + mono 文字，随模式切换语义与速度）
+   ============================================================ */
+.flow-rail {
+  position: relative;
+  z-index: 1;
+  padding: 0 4px;
+  /* 数据包流速（模式驱动：性能快 / 平衡中 / 安全慢） */
+  --flow-dur: 8s;
+}
+.flow--performance { --flow-dur: 4.5s; }
+.flow--secure { --flow-dur: 13s; }
+.flow-stage {
+  position: relative;
+  height: 90px;
+}
+.flow-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+/* 主走线 */
+.flow-wire {
+  fill: none;
+  stroke: rgba(148, 160, 178, 0.3);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+/* 数据包流：非均匀 dash（14/38/6/52 — 无重复节奏感）沿走线流动 */
+.flow-packets {
+  fill: none;
+  stroke: var(--dashboard-accent, var(--accent));
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  stroke-dasharray: 14 38 6 52;
+  animation: flow-run var(--flow-dur) linear infinite;
+  transition: stroke 0.6s var(--ease);
+  will-change: stroke-dashoffset;
+}
+/* 远层：灰弱反向慢速 — 空间纵深（与近层差速） */
+.flow-packets--far {
+  stroke: rgba(148, 160, 178, 0.38);
+  stroke-width: 1;
+  stroke-dasharray: 5 74 9 41;
+  animation-duration: calc(var(--flow-dur) * 1.6);
+  animation-direction: reverse;
+  opacity: 0.55;
+}
+@keyframes flow-run {
+  to { stroke-dashoffset: -220; }
+}
+/* 站点节点：细环（走线穿环而过） */
+.flow-node {
+  fill: none;
+  stroke: rgba(148, 160, 178, 0.55);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  transition: stroke 0.6s var(--ease);
+}
+/* 端点（磁盘/内存）：accent 环 + 实心核 */
+.flow-node--end {
+  stroke: var(--dashboard-accent, var(--accent));
+  stroke-width: 1.5;
+}
+/* 站点实心核：中继灰弱 / 端点 accent */
+.flow-node-core {
+  fill: rgba(148, 160, 178, 0.45);
+  transition: fill 0.6s var(--ease);
+}
+.flow-node-core--end {
+  fill: var(--dashboard-accent, var(--accent));
+}
+/* 站点标签（HTML 层：随节点高差错落，避免 SVG 拉伸变形） */
+.flow-label {
+  position: absolute;
+  transform: translateX(-50%);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.flow-label--end {
+  color: var(--text-secondary);
+}
+/* 运行状态行：方形状态位 + mono 文字 */
+.flow-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  padding-left: 2px;
+}
+.flow-status-mark {
+  flex: none;
+  width: 4px;
+  height: 4px;
+  background: var(--dashboard-accent, var(--accent));
+  animation: cap-breath 2.6s ease-in-out infinite;
+}
+.flow-status-text {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  color: var(--text-muted);
+}
+
+/* 氛围弧旋转关键帧 */
+@keyframes bs-rot-cw { to { transform: rotate(360deg); } }
+@keyframes bs-rot-ccw { to { transform: rotate(-360deg); } }
+
+/* ===== 密钥编辑弹窗（特定布局：输入行+随机按钮；通用样式由全局 kv-* 提供） ===== */
+.kd-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.kd-input-row .kv-input { flex: 1; }
+/* 原密钥验证行（修改/关闭保护时） */
+.kd-old-key-row {
+  margin-bottom: 14px;
+}
+.kd-old-key-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  font-family: var(--font);
+}
+.kd-random {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+}
+.kd-random svg { width: 13px; height: 13px; }
+
+/* 密钥警告 */
+.derive-warn {
+  margin-top: 8px;
+  padding: 6px 10px;
+  font-size: 10px;
+  color: #ffb86c;
+  background: rgba(255, 184, 108, 0.06);
+  border: 1px solid rgba(255, 184, 108, 0.2);
+  border-radius: 6px;
+  font-family: var(--font);
+  line-height: 1.5;
+}
+
+.custom-derive-area { margin-top: 16px; }
+.derive-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 12px 0; }
+.derive-title { font-size: 12px; color: var(--text-muted); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 10px; }
+.derive-form { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.derive-field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 120px; }
+.derive-label { font-size: 10px; color: var(--text-muted); letter-spacing: 0.5px; }
+.derive-input, .derive-select {
+  background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
+  padding: 6px 10px; color: var(--text-primary); font-size: 12px; font-family: var(--font);
+  outline: none; transition: border-color 0.2s;
+}
+.derive-input:focus, .derive-select:focus { border-color: var(--accent); }
+.derive-select { cursor: pointer; }
+.derive-btn { padding: 6px 16px; font-size: 12px; white-space: nowrap; }
+.derive-result { margin-top: 12px; }
+.result-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.result-code {
+  flex: 1; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px; padding: 8px 10px; font-family: var(--font-mono); font-size: 11px;
+  color: var(--accent); word-break: break-all; max-height: 60px; overflow-y: auto;
+}
+
+/* 参数网格 */
+.param-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+.param-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: var(--radius-sm);
+}
+.param-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+}
+.param-value {
+  font-size: 12px;
+  color: var(--text-primary);
+  font-family: var(--font);
+}
+
+/* Toast */
+.sc-toast {
+  position: fixed;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 20px;
+  font-size: 12px;
+  color: var(--text-primary);
+  z-index: 5000;
+  animation: toast-in 0.3s var(--ease);
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+.toast-enter-active, .toast-leave-active {
+  transition: all 0.3s var(--ease);
+}
+.toast-enter-from, .toast-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(10px);
+}

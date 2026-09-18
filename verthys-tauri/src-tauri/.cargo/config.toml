@@ -1,0 +1,61 @@
+# .cargo/config.toml
+#
+# ★ 修复：serde_json build.rs 设置的 fast_arithmetic cfg 在并行编译时偶尔丢失
+#   （build script 输出缓存竞态），导致 Chunk 类型未定义（E0425/E0433）。
+#   通过 rustflags 显式设置，确保 100% 可靠。
+#
+# ★ 修复：indexmap 1.9.3 的 build.rs 通过 autocfg 探测 std 支持来设置 has_std cfg。
+#   在 Tauri 构建脚本上下文中 autocfg 探测偶尔失败，导致 has_std 未被设置，
+#   indexmap 的 IndexMap 使用 no_std 定义（IndexMap<K, V, S> 无默认泛型参数），
+#   致使 schemars 0.8.22 的 IndexMap<K, V> 编译失败（E0107: 缺少第 3 个泛型参数）。
+#   通过 rustflags 全局设置 --cfg=has_std，确保 Windows 桌面环境下 std 始终可用。
+#   has_std 不含值，无嵌入双引号，不会触发 Windows 命令行解析问题。
+#
+#   格式注意：使用 --cfg=fast_arithmetic=64（值不带嵌入双引号），
+#   Rust cfg 系统会将 =64 解析为字符串 "64"，与 #[cfg(fast_arithmetic = "64")] 匹配。
+#   避免了旧配置中 fast_arithmetic="64" 嵌入双引号导致的 Windows 命令行解析问题。
+#
+# 原配置问题历史：
+#   - 旧 rustflags = ['--cfg=fast_arithmetic="64"', '--cfg=has_std'] 的嵌入双引号
+#     导致 cargo build.rs hash 不匹配（Windows 命令行解析），引发连锁编译错误
+#   - 移除 rustflags 后，serde_json build.rs 自动设置的 cfg 在并行编译时偶尔丢失
+#   - 同时移除 has_std 后，indexmap 1.9.3 的 autocfg 探测在构建上下文中失败，
+#     导致 schemars 0.8.22 编译失败（E0107）
+#   - 当前方案：保留 has_std（无值 cfg，无双引号问题），同时使用 =64 格式的 fast_arithmetic
+#
+# ★ 修复：windows-targets 0.52.6 有两种链接模式：
+#   - windows_raw_dylib 启用：使用 #[link(kind = "raw-dylib")]，编译器自动生成导入库
+#   - windows_raw_dylib 未启用：使用 #[link(name = "windows.0.52.0")]，需要预编译 .lib 文件
+#   但 windows-targets 0.52.6 的 crate 包不包含预编译 .lib 文件（lib/ 目录为空），
+#   且 Rust 1.96 不会自动设置 windows_raw_dylib cfg。
+#   缓存失效后重新编译会导致 LNK1181: 无法打开输入文件"windows.0.52.0.lib"。
+#   通过 rustflags 全局设置 --cfg=windows_raw_dylib，使用 raw-dylib 模式（Rust 1.71+ 稳定），
+#   编译器自动生成导入库，无需预编译 .lib 文件。
+#
+# ★ 修复：tauri-runtime-wry / tauri-build 的 build.rs 通过 cargo:rustc-cfg=desktop 设置
+#   desktop cfg（target_os != ios && target_os != android 时为 true）。
+#   在 Windows 并行编译时 build script 的 stdout 输出偶尔丢失（output 文件 0 字节），
+#   导致 desktop cfg 未设置，tauri-runtime-wry 中 #[cfg(desktop)] 门控的 webview 字段
+#   初始化被跳过，引发 E0063: missing field `webview` in NewWindowOpener。
+#   通过 rustflags 全局设置 --cfg=desktop，确保 Windows 桌面环境下始终为 true。
+#   注意：仅适用于桌面目标（Windows/Linux/macOS），移动端构建需移除此 cfg。
+# ★ 修复 E0599: no method named `start` found for struct `proc_macro2::Span`
+#   根因：proc-macro2 1.0.106 的 Span::start()（src/wrapper.rs:441）被
+#   `#[cfg(span_locations)]` 门控。该 cfg 由 build.rs 在
+#   `semver_exempt || feature=span-locations` 时输出，但存在双重不可靠性：
+#     a) Cargo resolver v2 不会将 host [build-dependencies] 的 feature 统一到
+#        proc-macro 编译上下文——tauri-macros 2.6.3 作为 proc-macro crate 编译时
+#        使用的 proc-macro2 实例可能缺少 span_locations cfg；
+#     b) Windows 并行编译时 build script stdout 偶尔丢失（output 文件 0 字节），
+#        即使 feature 已统一，cfg 也可能不被设置。
+#   旧方案 patches/proc-macro2 本地补丁无条件输出 cfg，但其 build.rs 的
+#   compile_probe_stable 会 spawn rustc 子进程探测，在沙箱/CI 中间歇性失败或挂起。
+#   永久方案：rustflags 全局强制 --cfg=span_locations。rustflags 对所有编译上下文
+#   生效（含 proc-macro crate 的 host 编译），绕过 feature 不统一与 build script
+#   stdout 丢失双重不可靠性。Span::start() 走 `#[cfg(not(proc_macro_span_location))]`
+#   dummy fallback（LineColumn { line: 0, column: 0 }），tauri-macros 仅用于
+#   syn::Error 诊断，dummy 值完全满足需求且无 nightly-feature 依赖，最稳健。
+#   build.rs 行 31 已无条件输出 cargo:rustc-check-cfg=cfg(span_locations)（rustc>=80），
+#   故强制该 cfg 不会触发 unexpected_cfgs 警告。
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ['--cfg=fast_arithmetic="64"', '--cfg=has_std', '--cfg=windows_raw_dylib', '--cfg=desktop', '--cfg=span_locations']

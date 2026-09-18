@@ -1,0 +1,9 @@
+# NOTE: rustflags 已恢复。
+# ★ 修复：serde_json build.rs 设置的 fast_arithmetic cfg 在并行编译时偶尔丢失
+#   （build script 输出缓存竞态），导致 Chunk 类型未定义（E0425/E0433）。
+#   通过 rustflags 显式设置，确保 100% 可靠。
+#
+# 格式说明：使用 --cfg=fast_arithmetic="64"（TOML 单引号字面量，保留双引号），
+#   Rust cfg 系统将 "64" 解析为字符串，与 #[cfg(fast_arithmetic = "64")] 匹配。
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ['--cfg=fast_arithmetic="64"']

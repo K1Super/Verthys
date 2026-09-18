@@ -1,0 +1,41 @@
+// core/schema/partition.fbs — V3 分区表 schema（分区独立认证）
+//
+// 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.2（分区表区）/ §6.4（分区管理）
+// 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-2
+//
+// 持久化语义：
+//   - 分区表整体经 AEAD 加密落盘（帧布局见 verthys_partition.h），
+//     帧内为PartitionTableV3 的 FlatBuffers 编码；
+//   - 每分区密钥以 wrapped 形式持久化（wrapped_key = 32B 密钥 + 16B tag，
+//     由 wrapping key（key_a 语境）CNG 内核态加密），wrap_nonce 12B；
+//   - nonce_counter（E-7）持久化于分区元数据，加载后经 restore 防回退；
+//   - 分区数据读写 AAD = partition_id ‖ nonce ‖ txid（verthys_partition.c 组装）。
+
+enum PartitionTypeV3 : ubyte {
+    INDEX = 0,
+    EXTENT = 1,
+    AUDIT = 2,
+    WAL = 3
+}
+
+table PartitionEntryV3 {
+    id: uint32;                       // 分区标识
+    type: PartitionTypeV3;            // INDEX / EXTENT / AUDIT / WAL
+    offset: uint64;                   // 起始偏移
+    size: uint64;                     // 容量
+    used: uint64;                     // 已用字节
+    key_id: [ubyte];                  // 16B 密钥标识（非敏感）
+    nonce_counter: uint64;            // 单调 nonce 计数器（E-7 持久化）
+    created_txid: uint64;             // 创建事务 ID
+    wrapped_key: [ubyte];             // 48B：32B 密钥 + 16B tag
+    wrap_nonce: [ubyte];              // 12B：包装时 AEAD nonce
+}
+
+table PartitionTableV3 {
+    magic: uint32;                    // 'V3PT' 0x54503356
+    version: uint16;                  // 3
+    txid: uint64;                     // 表快照事务 ID
+    entries: [PartitionEntryV3];      // 分区条目（≤ VERTHYS_PARTITION_MAX）
+}
+
+root_type PartitionTableV3;

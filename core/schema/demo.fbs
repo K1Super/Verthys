@@ -1,0 +1,13 @@
+// core/schema/demo.fbs — WP-0 工具链验证 schema
+//
+// 目的：跑通 flatcc codegen（schema → generated/*.h）→ 链接 flatccrt →
+// builder/verifier/reader 编解码闭环（V3_UPGRADE_PLAYBOOK WP-0 验收项）。
+// V3 业务 schema（superblock_v3/partition/extent/sstable）由 WP-2..4 落地。
+
+table ToolchainDemo {
+    magic: uint32;      // 格式魔数
+    counter: uint64;    // 单调计数器（nonce 语义样板）
+    payload: [ubyte];   // 负载数据（Extent 内容语义样板）
+}
+
+root_type ToolchainDemo;

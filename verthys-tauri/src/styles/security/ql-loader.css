@@ -1,0 +1,89 @@
+/* ============================================================
+   ql-loader.css — 脉冲星磁层辐射加载动画（v3 全新体系）
+   用于：解锁/初始化/验证视图加载状态（QuantumCoreLoader 组件）
+
+   v3 根除清单（与前两代彻底切割）：
+     v1 同心环七层量子模板 / v2 倾斜椭圆轨道 dash 差速流 — 全部零残留。
+     本版零轨道、零圆环、零 dash 巡行、零旋转 transform、零 CSS keyframes。
+
+   v3 体系（脉冲星灯塔 — 几何全部由组件 rAF 逐帧重算，CSS 只承载视觉）：
+     - 辐射束对：南北锥形射流（路径 d 逐帧重算）— 填充极淡青色 +
+       描边细线（零渐变、零 filter）
+     - 磁轴偶极：斜置双极线 + 极点（静态骨架）
+     - 脉冲核：致密核 + 外壳（rAF 驱动双周期复合脉冲亮度）
+     - 磁层驻波：4 道弧（路径逐帧重算 — 束掠过弹性舒张）
+     - 掠射微尘：8 粒（位置逐帧重算 — 束掠过邻近点亮）
+   ============================================================ */
+
+.ql-loader {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  margin: 10px auto 4px;
+}
+.ql-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* ===== 辐射束对（南北锥形射流 — d 由 rAF 重算） =====
+ * 填充极淡（束体半透明）+ 描边发丝亮线（束缘）；南束偏紫 —
+ * 双束色相/透明度差化 */
+.ql-beam {
+  stroke-linejoin: round;
+}
+.ql-beam-n {
+  fill: rgba(0, 212, 255, 0.07);
+  stroke: rgba(0, 212, 255, 0.45);
+  stroke-width: 0.7;
+}
+.ql-beam-s {
+  fill: rgba(139, 92, 246, 0.06);
+  stroke: rgba(139, 92, 246, 0.4);
+  stroke-width: 0.7;
+}
+
+/* ===== 磁轴偶极（静态骨架 — 斜置 24°） ===== */
+.ql-dipole {
+  stroke: rgba(205, 224, 244, 0.3);
+  stroke-width: 0.7;
+  stroke-linecap: round;
+  stroke-dasharray: 3 4; /* 轴线虚线 — 骨架感非实体 */
+}
+.ql-pole {
+  fill: rgba(205, 224, 244, 0.5);
+}
+.ql-pole-n {
+  fill: rgba(0, 212, 255, 0.65);
+}
+.ql-pole-s {
+  fill: rgba(139, 92, 246, 0.65);
+}
+
+/* ===== 脉冲核（亮度由 rAF 驱动 — 双周期复合脉冲） ===== */
+.ql-pulsar-core {
+  fill: #d7e4f0;
+}
+.ql-pulsar-shell {
+  fill: none;
+  stroke: rgba(205, 224, 244, 0.5);
+  stroke-width: 0.8;
+}
+
+/* ===== 磁层驻波（d 由 rAF 重算 — 束掠过弹性舒张） ===== */
+.ql-standing {
+  fill: none;
+  stroke-width: 0.9;
+  stroke-linecap: round;
+}
+.ql-standing-1 { stroke: rgba(0, 212, 255, 0.5); }
+.ql-standing-2 { stroke: rgba(205, 224, 244, 0.45); }
+.ql-standing-3 { stroke: rgba(139, 92, 246, 0.5); }
+.ql-standing-4 { stroke: rgba(0, 212, 255, 0.4); }
+
+/* ===== 掠射微尘（cx/cy 由 rAF 重算 — 束掠过邻近点亮） ===== */
+.ql-mote {
+  fill: rgba(205, 224, 244, 0.9);
+}

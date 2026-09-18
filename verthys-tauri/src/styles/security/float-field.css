@@ -1,0 +1,328 @@
+/* ============================================================
+   float-field.css — 悬浮场（无底板悬浮弹窗体系 · 静态版）
+   ============================================================
+   设计：去除卡片式弹窗底板 — 遮罩即空间，组件即天体。
+   卡片职能由"场"承接：
+     分组   → 轨道基准线（标题两侧 hairline）+ 中轴对齐
+     可读性 → 中心衰减渐晕（径向暗化，无边缘无形状感知）
+     层级   → 节点入场深度差化（一次性入射动画）
+
+   ★ 静态化根治（视差/漂移体系全量清算）：
+     原指针视差 + 斥力场物理引擎（useLevitationField）与失重漂移
+     无限动画（.ff-drift / ff-levitate）已彻底删除 — 弹窗内容
+     静态驻留：零指针监听、零 rAF 循环、零每帧样式写入、
+     零持续位移动画（文字动态模糊根源连根拔除）。
+
+   入场变量（静态 — 规则承载）：
+     --ff-ex/--ff-ey/--ff-ez/--ff-er  节点入射矢量（角色差化）
+     --ff-i       级联序号（:nth-child 自动分配 — 仅入场动画消费）
+   ============================================================ */
+
+/* ===== 场容器：透视舞台 + 中心衰减渐晕 =====
+ * perspective 860px 建立堆叠上下文 → ::before z-index:-1 恒沉于
+ * 节点之下、浮于遮罩之上；渐晕无边界无形状（纯径向衰减 —
+ * 非"隐形卡片"：各方向衰减速率不同且无任何收边） */
+.ff-field {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  max-width: 92vw;
+  perspective: 860px;
+  perspective-origin: 50% 40%;
+  color: var(--text-primary);
+}
+.ff-field::before {
+  content: "";
+  position: absolute;
+  inset: -36px -30px;
+  background: radial-gradient(
+    ellipse 58% 54% at 50% 44%,
+    rgba(3, 6, 13, 0.52),
+    rgba(3, 6, 13, 0.2) 56%,
+    transparent 76%
+  );
+  pointer-events: none;
+  z-index: -1;
+}
+/* 模块内嵌模式（无全屏遮罩场景）：渐晕收敛适配模块底景 */
+.ff-field--inline::before {
+  inset: -30px -26px;
+  background: radial-gradient(
+    ellipse 56% 52% at 50% 44%,
+    rgba(3, 6, 13, 0.4),
+    rgba(3, 6, 13, 0.14) 58%,
+    transparent 78%
+  );
+}
+/* 尺寸稳定模式（Init/Verify/Unlock）：表单态↔加载态切换高度零抖动 */
+.ff-field--stable {
+  min-height: 384px;
+  justify-content: center;
+}
+
+/* ===== 出场层：深空定位入射（一次性 — 终态静态驻留） =====
+ * 复合缓动（overshoot-free 指数族末端）+ 逐节点差化时长/延迟；
+ * 入射矢量（--ff-ex/ey/ez/er）由角色规则承载 — 非统一缩放淡入。
+ * ★ 零 filter：入场不使用 blur（深度感由 translateZ + opacity 承载）
+ * — 模糊滤镜会使出现中的文字"模糊→清晰"跳变，全局禁用；
+ * --ff-i 仅在挂载瞬间有效（一次性动画），后续清单变化不影响已
+ * 完成动画 → v-if 切换零重播零跳变
+ * ★ 动画结束零跳变（弹窗内容"突然右下移动"根治）：
+ * fill: both + 基态显式 identity 3D transform — 终态关键帧
+ * translate3d(0,0,0) 永久保持（非回退 none），元素合成层恒定，
+ * 杜绝"动画结束 → 合成层释放 → 文本重栅格化"在 Windows DPI
+ * 缩放（125%/150%）下的一次性亚像素跳变
+ * （与 animations.css .brand-char 根治方案同源同款） */
+.ff-node {
+  /* 基态 = 终态（显式非 none — 渲染模式终身恒定） */
+  transform: translate3d(0, 0, 0);
+  animation: ff-emerge
+    calc(0.82s + var(--ff-i, 0) * 0.05s)
+    cubic-bezier(0.16, 1, 0.3, 1)
+    calc(110ms + var(--ff-i, 0) * 85ms)
+    both;
+}
+@keyframes ff-emerge {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--ff-ex, 0px), var(--ff-ey, 24px), var(--ff-ez, -60px))
+      rotate(var(--ff-er, 0deg));
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+}
+
+/* 级联序号自动分配（直接子节点 — 仅入场级联视觉顺序） */
+.ff-field > .ff-node:nth-child(1) { --ff-i: 0; }
+.ff-field > .ff-node:nth-child(2) { --ff-i: 1; }
+.ff-field > .ff-node:nth-child(3) { --ff-i: 2; }
+.ff-field > .ff-node:nth-child(4) { --ff-i: 3; }
+.ff-field > .ff-node:nth-child(5) { --ff-i: 4; }
+.ff-field > .ff-node:nth-child(6) { --ff-i: 5; }
+.ff-field > .ff-node:nth-child(7) { --ff-i: 6; }
+.ff-field > .ff-node:nth-child(8) { --ff-i: 7; }
+
+/* 角色入射物理（矢量差化 — 拒绝整齐划一的统一入射） */
+.ff-node--brand {
+  --ff-ex: 7px;
+  --ff-ey: 38px;
+  --ff-ez: -120px;
+  --ff-er: -1.4deg;
+  margin-bottom: 16px;
+}
+.ff-node--title {
+  --ff-ex: -12px;
+  --ff-ey: 20px;
+  --ff-ez: -64px;
+  --ff-er: 0.9deg;
+  margin-bottom: 14px;
+}
+.ff-node--body {
+  --ff-ex: 9px;
+  --ff-ey: 16px;
+  --ff-ez: -44px;
+  --ff-er: -0.4deg;
+}
+.ff-node--action {
+  --ff-ex: -7px;
+  --ff-ey: 30px;
+  --ff-ez: -96px;
+  --ff-er: 0deg;
+  margin-top: 14px;
+}
+/* 同类节点奇偶交替入射方向（可控不规则偏差） */
+.ff-field > .ff-node--body:nth-child(even) {
+  --ff-ex: -10px;
+  --ff-er: 0.5deg;
+}
+
+/* ===== 场域排印：协议谱号 + 场域命名（轨道基准线） ===== */
+.ff-overline {
+  text-align: center;
+  font-size: 9px;
+  letter-spacing: 4px;
+  text-indent: 4px;
+  color: var(--text-muted);
+  margin-bottom: 9px;
+  font-family: var(--font);
+}
+.ff-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 4px;
+  text-indent: 4px;
+  color: var(--text-primary);
+}
+/* 轨道基准线：等宽对称（文字严格居中 — 与上方品牌字/谱号同轴对齐）；
+ * 不对称性由亮度梯度承载（左淡右亮 — 视觉非对称、几何对称）；
+ * 端点外渐隐无硬边界 */
+.ff-title::before {
+  content: "";
+  width: 62px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(205, 224, 244, 0.2));
+}
+.ff-title::after {
+  content: "";
+  width: 62px;
+  height: 1px;
+  background: linear-gradient(270deg, transparent, rgba(205, 224, 244, 0.34));
+}
+/* 警示变体（设备拦截）：轨道线转警示谱（同构对称 — 仅换色相） */
+.ff-title--alert::before {
+  background: linear-gradient(90deg, transparent, rgba(255, 107, 107, 0.24));
+}
+.ff-title--alert::after {
+  background: linear-gradient(270deg, transparent, rgba(255, 107, 107, 0.36));
+}
+
+/* ===== 场内描述 / 告警（悬浮化重铸 — 去盒化） ===== */
+.ff-field .sc-desc {
+  letter-spacing: 1.2px;
+  margin-bottom: 22px;
+}
+/* 修复告警：去告警盒 → 左缘警示刻线（脉冲呼吸仅作用于刻线） */
+.ff-field .sc-repair-alert {
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-left: 2px solid rgba(255, 179, 71, 0.5);
+  border-radius: 0;
+  padding: 3px 0 3px 12px;
+  margin-bottom: 18px;
+}
+
+/* ===== 光谱底轨输入体系（去盒化 — 表单悬浮于场中） =====
+ * 输入框：透明背景 + 底部静态 hairline 轨道；
+ * 聚焦：轨道交由 .pw-row/.path-row::after 光谱轨（青→紫渐变，
+ * 从中心 scaleX 展开 — 物理延展感非渐显模板）
+ *
+ * ★ 引力井沉降动画彻底移除（「点击文本框 → 文字/文本框/点击样式
+ *   突然模糊又清晰」终极根治）：
+ *   病根链 = .form-row 承载全部行内文字 + 处于 .ff-field
+ *   perspective: 860px 的 3D 渲染上下文内 + 聚焦触发 transform
+ *   沉降过渡（0→2px）→ 过渡期间该合成层按透视矩阵逐帧重采样
+ *   （Windows DPI 125%/150% 下 2px = 2.5/3 物理像素，恒为非整数
+ *   偏移）→ 文字纹理双线性采样模糊；过渡结束层稳定重栅格化
+ *   → 恢复清晰。每次聚焦/失焦双次 churn。
+ *   根治 = 文字承载层全生命周期零 transform（连基态 identity
+ *   translate3d 一并移除 — 该层根本不进 3D 上下文，恒定主绘
+ *   制路径 ClearType 渲染）；聚焦反馈全部走零重栅格化通道：
+ *   光谱轨 ::after scaleX（合成器）、标签 color / 底线
+ *   border-color（小区域 paint）— 视觉层级完整保留，仅去掉
+ *   2px 位移动效（分辨率不可感知的牺牲换文字恒定锐利）。 */
+/* 高特异性（.form-row 层级）— 压制 PasswordInput scoped 表单样式 */
+.ff-field .form-row .form-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10.5px;
+  letter-spacing: 2.5px;
+  transition: color 0.4s var(--ease);
+}
+/* 标注式标签：文字 + 延伸 hairline（天文图注记语法） */
+.ff-field .form-row .form-label::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(205, 224, 244, 0.16), transparent 85%);
+}
+.ff-field .form-row:focus-within .form-label {
+  color: rgba(212, 218, 228, 0.85);
+}
+
+/* 底轨输入（高特异性压制共享 form-inputs.css 盒式样式） */
+.ff-field .pw-row .sc-input,
+.ff-field .path-row .sc-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(205, 224, 244, 0.15);
+  border-radius: 0;
+  padding: 8px 2px 9px;
+  box-shadow: none;
+  letter-spacing: 0.6px;
+  transition: border-color 0.4s var(--ease);
+}
+.ff-field .pw-row .sc-input:focus,
+.ff-field .path-row .sc-input:focus {
+  background: transparent;
+  border-bottom-color: rgba(0, 212, 255, 0.32);
+  box-shadow: none;
+}
+.ff-field .sc-input::placeholder {
+  color: rgba(122, 140, 165, 0.34);
+  letter-spacing: 0.6px;
+}
+
+/* 光谱轨：聚焦时从中心展开（复合延展缓动） */
+.ff-field .pw-row,
+.ff-field .path-row {
+  position: relative;
+}
+.ff-field .pw-row::after,
+.ff-field .path-row::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 3%,
+    rgba(0, 212, 255, 0.62) 30%,
+    rgba(139, 92, 246, 0.48) 68%,
+    transparent 97%
+  );
+  transform: scaleX(0.22);
+  opacity: 0;
+  transition:
+    transform 0.55s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.35s ease;
+  pointer-events: none;
+}
+.ff-field .pw-row:focus-within::after,
+.ff-field .path-row:focus-within::after {
+  transform: scaleX(1);
+  opacity: 1;
+}
+
+/* 浏览按钮：去盒化幽灵图标（悬浮场内无框按钮） */
+.ff-field .path-row .sc-browse-icon {
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-muted);
+  transition:
+    color 0.3s var(--ease),
+    background 0.3s var(--ease),
+    transform 0.35s var(--ease);
+}
+.ff-field .path-row .sc-browse-icon:hover {
+  background: rgba(0, 212, 255, 0.06);
+  border: none;
+  color: var(--accent);
+}
+.ff-field .path-row .sc-browse-icon:active {
+  transform: scale(0.92);
+}
+
+/* ===== 无障碍：减少动态 → 全场静止 ===== */
+@media (prefers-reduced-motion: reduce) {
+  .ff-node {
+    animation: none;
+  }
+  .ff-field .pw-row::after,
+  .ff-field .path-row::after {
+    transition: none;
+  }
+}

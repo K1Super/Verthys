@@ -1,0 +1,313 @@
+/* ============================================================
+   cosmic-submit.css — 引力锚点按钮（v4.1 · 悬浮伸展收敛）
+   用于：解锁/初始化/验证视图提交按钮（CosmicSubmit 组件）
+
+   v4.1 变更（悬浮伸展收敛 — 本版主题）：
+     v4 的悬浮充能将势能线与充能轨同时铺满整钮（scaleX(1)），
+     悬停轨道过长 — v4.1 引入悬浮伸展终点唯一权威源：
+       1. --cs-reach-hover: 0.86 — 悬停/焦点充能终点自全宽收敛
+          至 86%（自中心对称收敛，两侧各留 7% 呼吸位），轨道
+          锚定于标注场内、不铺满整钮
+       2. 按下压陷量等比派生：--cs-base-press / --cs-charge-press
+          改为相对悬浮终点的收缩比（calc 派生）— 压陷深度随
+          终点等比缩放，不因终点收敛而稀释（若沿用 v4 绝对值，
+          势能线 0.86→0.80 的按下反馈将弱到不可感知）
+       3. loading 全轨不受收敛约束：光包巡行以完整轨道为跑道，
+          收敛会复现 v3「光包越出静线」的断层（保持 scaleX(1)）
+     悬浮/焦点/按下三态仍由同一变量派生 — 单一参数全局联动，
+     后续调长只需改 --cs-reach-hover 一处。
+
+   v4 变更（轨道联动）：
+     v3 的静默 hairline 轨为恒宽静态线（悬停仅亮度微变），与
+     充能轨「自中心展开」的高级效果互不关联；v4 将势能线纳入
+     同一套交互物理，三层轨道联动一体：
+       1. 待机呼吸：势能线微幅 opacity 呼吸（非对称相位 7.4s，
+          与光包巡行 1.7s 互质 — 免机械同步）— 锚点恒有生命感
+       2. 悬浮联动：势能线先行全宽铺展（0.6s 引力缓动），充能
+          光谱随后充入（0.65s + 50ms 迟滞）— 轨道先行、能量
+          跟进的分层纵深；两侧对称伸展（origin center + scaleX，
+          GPU 合成通道，零布局参与）
+       3. 按下联动：势能线与充能轨同步收缩（0.22s 快曲线 —
+          快按下慢回弹的引力压陷物理）
+       4. loading 全轨：势能线慢速全宽充能转青，光包沿完整轨道
+          巡行（v3 中光包越出 34% 静线的断层已根治）
+       5. 禁用休眠：呼吸冻结于当前相位（animation-play-state）
+       6. 呼吸仅作用于 opacity 通道，与 transform 伸展通道正交
+          — 互不抢占，杜绝状态冲突
+
+   v3 体系（保留 — 引力锚点 · 与悬浮场光谱底轨输入同构语法）：
+     - 纯净锚点：无背景无边框无圆角 — 标注悬浮于场中，
+       按钮即轨道上的一枚引力锚
+     - 光谱能量轨（三层）：静默势能线（宽 34% 居中）+
+       充能轨（青→紫光谱渐变，悬停自中心展开）+
+       光包巡行轨（loading：亮段沿轨非对称差速巡行）
+     - 交互物理：悬停充能（轨道延展 + 标注升亮上浮）/
+       按下引力压陷（标注下沉 + 轨道收缩）/ 禁用休眠（沉降
+       调暗）/ 键盘焦点 = 充能等价 — 全部平滑复合缓动
+
+   空闲治理：待机呼吸为氛围装饰类（未豁免 — idle 自动暂停），
+   光包巡行保持豁免（idle-governance.css 指示器清单）。
+   ============================================================ */
+
+.cosmic-submit {
+  position: relative;
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 13px 18px 17px;
+  /* 纯净锚点：零背景零边框零圆角（悬浮场内无盒语法） */
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--text-primary);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 5px;
+  text-indent: 5px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  /* 轨道势能参数（v4.1 — 宽度即势能：待机收敛 / 悬浮伸展 / 按下压陷）
+   * --cs-reach-hover 为悬浮伸展终点唯一权威源：悬停/焦点/按下
+   * 三态全部由此派生；--cs-*-press 为相对终点的收缩比（压陷
+   * 深度随终点等比缩放），--cs-base-rest 仅待机收敛（compact
+   * 模式单独覆写为 0.4） */
+  --cs-base-rest: 0.34;
+  --cs-reach-hover: 0.86;
+  --cs-base-press: 0.8;
+  --cs-charge-press: 0.62;
+  /* 交互物理过渡（复合缓动 — 无弹性回弹） */
+  transition: opacity 0.4s var(--ease);
+}
+
+/* ===== 标注（引力锚点本体） ===== */
+.cs-label {
+  display: block;
+  text-align: center;
+  color: rgba(215, 224, 238, 0.88);
+  transition:
+    color 0.4s var(--ease),
+    transform 0.45s cubic-bezier(0.22, 1, 0.36, 1),
+    text-shadow 0.4s var(--ease);
+  will-change: transform;
+}
+
+/* ===== 光谱能量轨（三层） ===== */
+.cs-rail {
+  position: relative;
+  display: block;
+  height: 1px;
+  margin-top: 11px;
+  pointer-events: none;
+}
+/* 静默势能线（v4 动态化）：全宽盒子 + transform 驱动宽度 —
+   待机呼吸 / 悬浮铺展 / 按下收缩 / loading 全轨，四态一轨；
+   呼吸仅走 opacity 通道（与 transform 伸展正交，无状态抢占） */
+.cs-rail-base {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: rgba(205, 224, 244, 0.18);
+  transform: scaleX(var(--cs-base-rest));
+  transform-origin: center;
+  transition:
+    transform 0.6s var(--ease),
+    background 0.4s var(--ease);
+  will-change: transform;
+  animation: cs-base-breath 7.4s ease-in-out infinite;
+}
+/* 非对称相位呼吸 — 免钟摆式机械节奏（42%/67% 偏相；7.4s 与
+   光包 1.7s 互质，多轨道并行无整齐划一同步） */
+@keyframes cs-base-breath {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  42% {
+    opacity: 0.72;
+  }
+  67% {
+    opacity: 0.88;
+  }
+}
+/* 充能轨：青→紫光谱渐变 — 静默时收敛于中心，悬停自中心展开
+   （+50ms 迟滞：势能线先行铺轨，光谱能量随后充入 — 分层纵深） */
+.cs-rail-charge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 2%,
+    rgba(0, 212, 255, 0.68) 30%,
+    rgba(139, 92, 246, 0.52) 68%,
+    transparent 98%
+  );
+  transform: scaleX(0.14);
+  opacity: 0;
+  transition:
+    transform 0.65s cubic-bezier(0.22, 1, 0.36, 1) 0.05s,
+    opacity 0.3s ease 0.05s;
+  will-change: transform;
+}
+
+/* ===== 交互物理 ===== */
+/* 悬停 = 充能：充能轨自中心展开至悬浮终点（86%）+ 势能线先行
+   铺展 + 标注升亮上浮（三层差速联动 — 单一悬浮，三重纵深响应） */
+.cosmic-submit:hover:not(:disabled) .cs-rail-charge {
+  transform: scaleX(var(--cs-reach-hover));
+  opacity: 1;
+}
+.cosmic-submit:hover:not(:disabled) .cs-label {
+  color: rgba(235, 242, 252, 0.98);
+  transform: translateY(-1px);
+}
+.cosmic-submit:hover:not(:disabled) .cs-rail-base {
+  transform: scaleX(var(--cs-reach-hover));
+  background: rgba(205, 224, 244, 0.26);
+}
+/* 键盘焦点 = 充能等价（无鼠标依赖的可达性 — 势能线同样联动铺展） */
+.cosmic-submit:focus-visible {
+  outline: none;
+}
+.cosmic-submit:focus-visible .cs-rail-charge {
+  transform: scaleX(var(--cs-reach-hover));
+  opacity: 1;
+}
+.cosmic-submit:focus-visible .cs-rail-base {
+  transform: scaleX(var(--cs-reach-hover));
+}
+.cosmic-submit:focus-visible .cs-label {
+  color: rgba(235, 242, 252, 0.98);
+}
+/* 按下 = 引力压陷：标注下沉 2px + 势能线/充能轨同步收缩
+   （快按下慢回弹 — 能量注入锚点；收缩量以悬浮终点为基准等比
+   派生 — calc 相对计比，压陷深度不随终点收敛而稀释） */
+.cosmic-submit:active:not(:disabled) .cs-label {
+  transform: translateY(2px);
+  color: rgba(180, 200, 226, 0.92);
+  transition:
+    color 0.18s ease,
+    transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.cosmic-submit:active:not(:disabled) .cs-rail-charge {
+  transform: scaleX(calc(var(--cs-reach-hover) * var(--cs-charge-press)));
+  transition:
+    transform 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.2s ease;
+}
+.cosmic-submit:active:not(:disabled) .cs-rail-base {
+  transform: scaleX(calc(var(--cs-reach-hover) * var(--cs-base-press)));
+  transition:
+    transform 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    background 0.2s ease;
+}
+
+/* ===== loading：光包巡行（数据注入锚点） ===== */
+.cosmic-submit:disabled {
+  cursor: default;
+}
+/* loading 态（cs-loading）：标注沉降调暗 + 势能线慢速仪式化
+   全轨充能转青 — 光包沿完整轨道巡行（越线断层根治）。
+   ★ 保持 scaleX(1) 全轨：光包巡行以完整轨道为跑道，不受
+   --cs-reach-hover 收敛约束（收敛会复现 v3 光包越线断层） */
+.cosmic-submit.cs-loading .cs-label {
+  color: rgba(160, 178, 202, 0.66);
+  transform: translateY(1px);
+}
+.cosmic-submit.cs-loading .cs-rail-base {
+  transform: scaleX(1);
+  background: rgba(0, 212, 255, 0.16);
+  transition:
+    transform 0.8s var(--ease),
+    background 0.5s var(--ease);
+}
+/* loading 不参与禁用调暗（更高特异性压过下方 :disabled 休眠） */
+.cosmic-submit.cs-loading:disabled {
+  opacity: 1;
+}
+/* 光包：亮段沿轨非对称差速巡行 — 加速穿越 / 滑行 / 边缘消散 */
+.cs-rail-packet {
+  position: absolute;
+  top: -0.5px;
+  left: 0;
+  width: 17%;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(120, 235, 255, 0.95) 45%,
+    rgba(0, 212, 255, 0.85) 70%,
+    transparent
+  );
+  animation: cs-packet-run 1.7s cubic-bezier(0.45, 0, 0.28, 1) infinite;
+  will-change: transform, opacity;
+}
+@keyframes cs-packet-run {
+  0% {
+    transform: translateX(-130%) scaleX(0.55);
+    opacity: 0;
+  }
+  14% {
+    opacity: 1;
+  }
+  38% {
+    transform: translateX(320%) scaleX(1.15);
+  }
+  62% {
+    transform: translateX(520%) scaleX(0.92);
+  }
+  84% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(640%) scaleX(0.5);
+    opacity: 0;
+  }
+}
+
+/* ===== 禁用休眠（非 loading 的真禁用：表单未完成） =====
+ * 沉降 + 调暗 + 轨道近乎熄灭；呼吸冻结于当前相位（休眠静止）；
+ * 光包不挂载（v-if=loading）零成本 */
+.cosmic-submit:disabled {
+  opacity: 0.52;
+}
+.cosmic-submit:disabled:not(.cs-loading) .cs-rail-base {
+  background: rgba(205, 224, 244, 0.09);
+  animation-play-state: paused;
+}
+
+/* ===== 紧凑模式：收敛纵向呼吸（适配「确认」短标签密集场） =====
+ * 势能线待机宽度同步收敛（40% — 与短线标注成比例） */
+.cs-compact {
+  padding: 10px 18px 14px;
+  margin-top: 4px;
+  --cs-base-rest: 0.4;
+}
+.cs-compact .cs-rail {
+  margin-top: 9px;
+}
+
+/* ===== 无障碍：减少动态 → 静态等价呈现 ===== */
+@media (prefers-reduced-motion: reduce) {
+  .cs-rail-packet {
+    animation: none;
+    left: 41.5%;
+    transform: none;
+    opacity: 1;
+  }
+  .cs-label,
+  .cs-rail-base,
+  .cosmic-submit .cs-rail-charge {
+    transition: none;
+  }
+  /* 待机呼吸静止 — 势能线驻留当前宽度 */
+  .cs-rail-base {
+    animation: none;
+  }
+}

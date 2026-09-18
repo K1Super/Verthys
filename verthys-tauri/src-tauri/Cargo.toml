@@ -1,0 +1,199 @@
+# ==============================================================================
+# @file Cargo.toml
+# @brief Verthys 主应用包（Tauri 前端 + 核心库）的依赖与构建配置
+#
+# 本文件定义 Verthys 桌面应用的包元数据、特性开关、依赖版本及构建优化。
+# 所有依赖版本经过严格锁定，确保构建可复现性与 ABI 兼容性。
+# ==============================================================================
+#
+# 一、包概述
+# ==============================================================================
+# - 名称：verthys-tauri
+# - 版本：2.6.1
+# - 描述：Verthys 私密数据管理器
+# - 版本号遵循语义化版本规范，与 Tauri 生态版本对齐。
+#
+# 二、库类型
+# ==============================================================================
+# 生成三种库格式：
+#   - staticlib：用于静态链接（C/C++ 集成）
+#   - cdylib：动态链接库（Tauri 启动时加载）
+#   - rlib：Rust 静态库（单元测试与内部依赖）
+# 此配置保证在不同构建场景下的灵活性。
+#
+# 三、特性开关（features）
+# ==============================================================================
+# - portable_mode（默认关闭）：启用后，应用数据目录重定向至可执行文件同级
+#   `<exe_dir>/data`，不再写入 `%LOCALAPPDATA%`，实现便携式部署。
+#   【安全约束】此特性在编译期固化，严禁通过环境变量或运行时参数动态切换，
+#   防止权限降级或数据目录劫持。若需覆盖数据目录，仅接受受信命令行参数
+#   `--data-dir`，并由入口层进行严格路径校验。
+#
+# 四、依赖管理策略
+# ==============================================================================
+# 1. 版本锁定：
+#    - 所有直接依赖显式指定版本号（`=x.y.z`），避免语义化版本自动升级引入
+#      不兼容变更，确保构建确定性。
+#    - Tauri 生态依赖（tauri, tauri-build, tauri-macros, tauri-utils）版本
+#      相互锁定，保证 API 一致性。
+#
+# 2. 安全敏感依赖：
+#    - zeroize：用于敏感数据（密码、密钥）的内存自动清零，防止残留。
+#    - subtle：提供常量时间比较函数，抵御侧信道时序攻击。
+#    - hmac / pbkdf2：实现 HMAC-SHA256 消息认证与 PBKDF2 密钥派生。
+#    - getrandom：系统级密码学安全随机数生成器（CSPRNG）。
+#    - base64：标准 Base64 编解码，替代手工实现。
+#
+# 3. 资源完整性校验：
+#    - sha2 + walkdir（构建依赖）：编译时计算前端资源（dist 目录）的 SHA-256
+#      哈希清单，嵌入二进制供运行时校验。
+#
+# 4. 跨平台 API 绑定：
+#    - windows = "0.58"：仅 Windows 平台使用的 Win32 API 绑定，启用
+#      必要的 feature（进程管理、文件系统、加密、系统信息、UI 等）。
+#
+# 5. 异步运行时：
+#    - tokio：提供异步运行时，支持 IPC 与后台任务。
+#    - tokio-util：提供 CancellationToken，用于优雅取消异步操作。
+#
+# 五、构建优化（release profile）
+# ==============================================================================
+# - opt-level = 3：最高优化级别。
+# - lto = true：启用链接时优化，缩减二进制体积并提升运行时性能。
+# - codegen-units = 1：单代码生成单元，最大化优化效果（但增加编译时间）。
+# - panic = "abort"：panic 时直接终止进程，避免异常展开带来的额外开销与
+#   安全隐患（防止 unwind 过程中泄露敏感数据）。
+# - strip = true：移除调试符号，减小最终二进制体积。
+#
+# 六、依赖补丁（[patch.crates-io]）
+# ==============================================================================
+# 1. keyboard-types：修复 0.7.0 版本中 bitflags! 宏内 `derive(serde::Serialize)`
+#    路径语法问题，通过本地补丁提供修正。
+# 2. proc-macro2：修复 1.0.106 版本在 tauri-macros 2.6.3 编译时因 resolver v2
+#    导致的 `Span::start()` 方法不可用问题（E0599）。本地补丁无条件启用
+#    `span-locations` cfg，确保宏正常展开。
+# 补丁路径相对于项目根目录下的 `patches/` 目录，在构建时自动应用。
+#
+# ==============================================================================
+# 维护说明
+# ==============================================================================
+# - 升级依赖时，务必验证所有补丁是否仍需保留，并测试完整构建与功能。
+# - 新增 feature 时需同步更新本注释，说明其用途与安全影响。
+# - 任何版本号变更应同步更新文档，确保团队对版本一致性有共识。
+# ==============================================================================
+
+[package]
+name = "verthys-tauri"
+version = "2.6.1"
+description = "Verthys 私密数据管理器"
+authors = ["Verthys"]
+edition = "2021"
+
+[lib]
+name = "verthys_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+# 便携模式：数据目录重定向至 <exe_dir>/data，编译期固化，不可运行时切换。
+portable_mode = []
+
+[build-dependencies]
+# 构建时依赖：锁定版本以确保与 tauri-build 2.6.3 兼容
+tauri-build = { version = "=2.6.3", features = [] }
+# proc-macro2 需启用 span-locations 特性以支持 tauri-macros 的 Span::start()
+proc-macro2 = { version = "=1.0.106", features = ["span-locations"] }
+# 资源哈希生成（构建时计算 dist 目录 SHA-256）
+sha2 = "0.10"
+walkdir = "2"
+
+[dependencies]
+# Tauri 核心及插件（版本锁定）
+tauri = { version = "=2.11.5", features = [] }
+tauri-plugin-opener = "=2.5.4"
+tauri-plugin-dialog = "=2.7.1"
+tauri-plugin-process = "=2.3.1"
+serde = { version = "1", features = ["derive"] }
+# serde_json 1.0.151 修复了与 Rust 1.96+ 的兼容性问题（Chunk 类型引用）
+serde_json = "=1.0.151"
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+sha2 = "0.10"
+# ★ P0-1 x-path 请求头百分号解码（HTTP 头 ASCII 限制，中文路径经 encodeURIComponent 编码传输）
+# 已在 tauri 依赖树中，显式声明复用已编译版本（零额外编译成本）
+percent-encoding = "2"
+# Windows API 绑定（仅 Windows 平台使用）
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Dwm",
+    "Win32_System_DataExchange",
+    "Win32_System_Ole",
+    "Win32_System_Memory",
+    "Win32_Security_Cryptography",
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Pipes",
+    "Win32_System_Console",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_System_Power",
+    "Win32_System_Registry",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Storage_InstallableFileSystems",
+    "Win32_System_JobObjects",
+] }
+# 锁定 proc-macro2 以启用 span-locations 特性
+proc-macro2 = { version = "=1.0.106", features = ["span-locations"] }
+# 异步日志管道
+crossbeam-channel = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+
+# ===== 安全与加密依赖（阶段 1 引入） =====
+zeroize = { version = "1.4", features = ["alloc"] }   # 敏感内存自动清零
+subtle = "2.5"                                       # 常量时间比较
+hmac = "0.12"                                        # HMAC-SHA256 消息认证
+pbkdf2 = { version = "0.12", features = ["simple"] } # PBKDF2 密钥派生
+getrandom = "0.2"                                    # 系统 CSPRNG
+base64 = "0.22"                                      # Base64 编解码
+tokio-util = { version = "0.7", features = ["rt"] }  # CancellationToken
+regex = "1.10"                                       # shm_name 白名单校验
+ts-rs = { version = "10", features = ["chrono-impl", "no-serde-warnings"] } # TypeScript 绑定生成
+
+# ★ 修复 LNK1181: 无法打开输入文件 "windows.x.xx.x.lib"
+# 根因：dev profile 默认启用 incremental compilation，与 raw-dylib 导入库
+# 生成存在竞态——增量编译复用缓存 metadata 时，build script 的
+# rustc-link-search 输出未生效，导致 link.exe 找不到 windows-link 提供的
+# 预编译导入库（windows 0.58 → windows-link → windows_x86_64_msvc）。
+# 禁用增量编译后，每次全量编译都会正确执行 build script 并输出链接路径。
+# 覆盖场景：npx tauri dev / cargo check / cargo build（debug）。
+[profile.dev]
+incremental = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# 本地补丁：解决上游依赖的兼容性问题
+[patch.crates-io]
+keyboard-types = { path = "../keyboard-types-patched" }
+# proc-macro2 补丁已移除：改用 .cargo/config.toml rustflags 全局强制 --cfg=span_locations
+# （详见 .cargo/config.toml 注释）。本地 patches/proc-macro2 目录保留但不再生效。
+
+# ★ Comprehensive_optimization：照片导入流水线 WAL 持久层单元测试依赖
+#   verthys_wal.rs 的断点续传 / 压缩 / 续传去重测试需临时目录隔离 WAL 文件
+[dev-dependencies]
+tempfile = "3"

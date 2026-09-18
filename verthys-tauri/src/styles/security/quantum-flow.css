@@ -1,0 +1,267 @@
+/* ============================================================
+   quantum-flow.css — 量子能量导流通道（复用进度条）
+   设计哲学：
+     - 量子为核心主题，能量沿通道导流，节点对应代码关键节点
+     - 淡雅美学：低饱和度青/紫/粉，禁止浓厚原色
+     - 顶级动态：粒子流、节点脉动、能量呼吸、扫光
+     - 防跳变：固定高度槽位，加载/隐藏零抖动
+   用于：解锁/验证/初始化等关键节点的真实进度反馈
+   ============================================================ */
+
+/* ===== 容器槽位（固定高度，消除切换跳变） =====
+   ★ 有 loader 时默认 160px（引力吸积加载 96px + margin 14px + 导流通道 ~46px + 间距）
+   ★ min-height 必须在此处定义（quantum-flow.css 内），禁止在组件 scoped style 中覆盖
+     原因：Vite 会将 <style scoped> 中 @import 内容与自定义样式拆分到不同 CSS chunk，
+     使用不同 data-v 属性，导致自定义 min-height 无法匹配元素 */
+.qf-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  /* 有 loader 时：160px（容纳引力吸积加载 + 导流通道） */
+  min-height: 160px;
+  padding: 4px 0;
+  gap: 10px;
+}
+
+/* ===== 量子能量导流通道主体 =====
+   横向短通道 + 上下加厚 + 淡雅配色
+   宽度 180px（短），高度 10px（厚），贴合"长度短、高度上下高" */
+.qf-channel {
+  position: relative;
+  width: 180px;
+  height: 10px;
+  border-radius: 6px;
+  /* 通道底色：极淡深空灰，不抢眼 */
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(0, 0, 0, 0.15));
+  /* 极淡描边：量子全息感 */
+  border: 1px solid rgba(0, 212, 255, 0.1);
+  /* ★ 性能根治方案五（偏差 D-P5 留痕）：原 qf-breathe 动画 box-shadow
+   *   （每帧 paint）。双伪元素 opacity 替代被 overflow:hidden 裁剪阻断
+   *   （外发光 -20px 越界）；且呼吸幅度仅 alpha 0.04→0.08（感知阈值
+   *   边缘）。冻结为静态中间值——消除逐帧 paint，视觉偏差低于感知。 */
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.3),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.03),
+    0 0 8px rgba(0, 212, 255, 0.06);
+  overflow: hidden;
+}
+
+/* ===== 能量填充（进度推进） =====
+   淡雅青紫渐变，低饱和度，禁止浓厚 */
+.qf-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 6px;
+  /* 三段淡雅渐变：青 → 紫 → 粉（极低饱和度） */
+  background: linear-gradient(
+    90deg,
+    rgba(0, 212, 255, 0.55) 0%,
+    rgba(139, 92, 246, 0.45) 50%,
+    rgba(255, 110, 180, 0.35) 100%
+  );
+  /* 顶部高光：能量流光泽 */
+  box-shadow:
+    0 0 8px rgba(0, 212, 255, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  transition: width 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  overflow: hidden;
+}
+
+/* ===== 能量流粒子（填充内流动） =====
+   微光点沿填充方向流动，营造量子能量导流感
+   使用单独子元素 .qf-stream 避免与能量沉积 ::after 冲突 */
+.qf-stream {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 24px;
+  height: 1px;
+  margin-top: -0.5px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.5),
+    transparent
+  );
+  animation: qf-stream-flow 1.8s linear infinite;
+  pointer-events: none;
+}
+.qf-stream-2 {
+  width: 16px;
+  opacity: 0.6;
+  animation-delay: 0.9s;
+}
+
+@keyframes qf-stream-flow {
+  0% { transform: translateX(-100%); opacity: 0; }
+  20% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { transform: translateX(180px); opacity: 0; }
+}
+
+/* ===== 通道扫光（顶部光带掠过） ===== */
+.qf-channel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -40%;
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(0, 212, 255, 0.18),
+    rgba(139, 92, 246, 0.12),
+    transparent
+  );
+  animation: qf-sweep 3.5s ease-in-out infinite;
+  z-index: 2;
+  pointer-events: none;
+}
+
+@keyframes qf-sweep {
+  0% { left: -40%; }
+  100% { left: 100%; }
+}
+
+/* ===== 关键节点光点已移除（用户要求：进度条上方不要阶段的点样式） =====
+   原 .qf-markers / .qf-marker / .qf-marker.reached / @keyframes qf-marker-pulse
+   均已删除，进度条仅保留导流通道 + 能量填充 + 提示词 */
+
+/* ===== 精简提示词 =====
+   单行短文字，淡青色，字间距宽松，高级感 */
+.qf-text {
+  font-size: 11px;
+  color: rgba(200, 225, 245, 0.7);
+  text-align: center;
+  letter-spacing: 1.5px;
+  text-shadow: 0 0 6px rgba(0, 212, 255, 0.2);
+  min-height: 14px;
+  line-height: 1;
+  transition: opacity 0.3s ease;
+  /* 极淡渐入 */
+  animation: qf-text-fade 0.4s ease-out;
+}
+
+@keyframes qf-text-fade {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 0.7; transform: translateY(0); }
+}
+
+/* ===== 元信息（百分比/耗时，默认隐藏） =====
+   仅在 showMeta=true 时显示（非解锁/验证场景） */
+.qf-meta {
+  display: flex;
+  justify-content: space-between;
+  width: 180px;
+  font-size: 9px;
+  color: rgba(160, 185, 210, 0.5);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.5px;
+  margin-top: -2px;
+}
+
+.qf-percent {
+  color: rgba(0, 212, 255, 0.65);
+}
+
+.qf-elapsed {
+  color: rgba(139, 92, 246, 0.55);
+}
+
+/* ===== 通道两端能量端口（导流入/导流出口） =====
+   通道左右两端的能量端口装饰，增强导流感 */
+.qf-port {
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 20px;          /* ★ 方案五：固定为峰值高度 */
+  margin-top: -10px;
+  border-radius: 1px;
+  z-index: 1;
+  pointer-events: none;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+
+.qf-port-in {
+  left: -3px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(0, 212, 255, 0.3),
+    transparent
+  );
+  animation: qf-port-pulse 2.5s ease-in-out infinite;
+}
+
+.qf-port-out {
+  right: -3px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(139, 92, 246, 0.3),
+    transparent
+  );
+  animation: qf-port-pulse 2.5s ease-in-out infinite 1.25s;
+}
+
+/* ★ 性能根治方案五：height+margin-top（每帧 layout）→ scaleY（合成器）。
+ *   端口为无内容装饰条，scaleY 中心缩放与原 height 变化视觉等同。 */
+@keyframes qf-port-pulse {
+  0%, 100% { opacity: 0.4; transform: scaleY(0.7); }
+  50% { opacity: 0.8; transform: scaleY(1); }
+}
+
+/* ===== 通道下方能量沉积（进度前端微光） =====
+   进度填充前端有极淡的能量沉积光晕 */
+.qf-fill::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: -2px;
+  width: 8px;
+  height: 100%;
+  background: radial-gradient(
+    ellipse at left,
+    rgba(255, 255, 255, 0.4),
+    transparent 70%
+  );
+  border-radius: 6px;
+  opacity: 0.8;
+}
+
+/* ===== 紧凑模式（compact） =====
+   用于空间受限场景，缩小通道尺寸 */
+.qf-slot.compact .qf-channel,
+.qf-slot.compact .qf-meta {
+  width: 150px;
+}
+
+.qf-slot.compact .qf-channel {
+  height: 8px;
+}
+
+/* ===== 无提示词模式 ===== */
+.qf-slot.no-text .qf-text {
+  display: none;
+}
+
+/* ===== 无加载动画模式（仅导流通道，缩小槽位） =====
+   showLoader=false 时使用，不影响有 loader 的默认 230px */
+.qf-slot.no-loader {
+  min-height: 78px;
+}
+.qf-slot.no-loader.no-text {
+  min-height: 52px;
+}
+
+/* ===== 紧凑 + 无加载动画模式 ===== */
+.qf-slot.compact.no-loader {
+  min-height: 60px;
+}

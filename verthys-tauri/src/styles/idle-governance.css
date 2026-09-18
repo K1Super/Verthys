@@ -1,0 +1,126 @@
+/*
+ * idle-governance.css — 全局空闲 CSS 动画治理（R1 根治）
+ * =============================================================================
+ * 配套：useGlobalIdleScheduler（唯一权威源）在 App.vue 根节点挂载
+ *   .idle-active / .idle-settling / .idle-idle / .idle-deep-idle
+ *   .glass-calm（deep-idle）/.reduce-motion（无障碍偏好）
+ *
+ * 语义分类（方案 4.1/4.3，全项目 100 处 infinite 动画按此归类）：
+ *   氛围装饰 anim-ambient  → idle 及以下暂停（默认：全部未豁免元素）
+ *   状态指示 anim-status    → idle 及以下暂停；工作进行中的指示器（加载旋转/
+ *                             Toast 点）经豁免清单在 idle 保持运转，语义不失真
+ *   交互动画 anim-interactive → 仅 deep-idle 暂停（元素加 .anim-interactive 豁免）
+ *
+ * 实现说明：
+ *   采用「通配暂停 + 语义豁免」落地分类语义 — 通配规则等效于为全部 100 处
+ *   动画元素标注 anim-ambient/anim-status（两类在 idle 行为一致：暂停），
+ *   豁免清单以样式表集中承载元素语义标注，覆盖动态渲染/v-for 场景零遗漏，
+ *   且新增动画默认纳入治理（默认即安全）。
+ *   不使用 animation-duration 降频（避免相位跳变）。
+ * ============================================================================= */
+
+/* ===== 1. idle / deep-idle：全部氛围与状态动画暂停 ===== */
+.idle-idle *,
+.idle-idle *::before,
+.idle-idle *::after,
+.idle-deep-idle *,
+.idle-deep-idle *::before,
+.idle-deep-idle *::after {
+  animation-play-state: paused !important;
+}
+
+/* ===== 2. idle：交互动画豁免（仅 deep-idle 暂停，方案 anim-interactive） ===== */
+.idle-idle .anim-interactive,
+.idle-idle .anim-interactive::before,
+.idle-idle .anim-interactive::after {
+  animation-play-state: running !important;
+}
+
+/* ===== 3. idle：工作进行中指示器豁免（方案 anim-status「保持语义」分支）
+ *   加载/处理旋转指示器在空闲保持运转，避免「卡死」误读；
+ *   deep-idle（>60s 无交互）时由通配规则统一暂停（方案：全部暂停）。 ===== */
+.idle-idle :is(
+  /* 脉冲星磁层辐射加载器（rAF 驱动 — CSS 仅视觉层，无动画需豁免；
+     列名仅备注，实际持续运转由组件 rAF 保证） */
+  /* 提交按钮光包巡行（引力锚点 loading 指示） */
+  .cs-rail-packet,
+  /* Toast 活动指示点 */
+  .toast-dot
+) {
+  animation-play-state: running !important;
+}
+
+/* ===== 4. 无障碍：prefers-reduced-motion 全部动画静止 ===== */
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after {
+  animation: none !important;
+}
+
+/* ===== 5. glass-calm：deep-idle 毛玻璃降载（R3，方案第六章） =====
+ *   背景 1fps 基本静止，移除 backdrop-filter 全屏重采样，
+ *   等效半透明底色视觉无差异；交互立即恢复（class 单帧移除）。 */
+.glass-calm .main-view {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: rgba(20, 20, 30, 0.65);
+}
+
+/* ===== 6. 帧预算降级治理（性能根治方案 §7 — FrameBudgetMonitor） =====
+ *   类由 core/frame-budget.ts 挂载到 document.body（与空闲治理类并存叠加）：
+ *   body.reduced-motion（降级 ≥2，§7.3「中度」档）：
+ *     - CSS 动画 → 核心：氛围装饰暂停，交互动画（anim-interactive）与
+ *       工作进行中状态指示器豁免（语义不失真 — 与 idle 治理同一豁免清单）；
+ *     - backdrop-filter → 减少：剩余小面积模糊点（qd-node-core /
+ *       photo-select-mark）移除。
+ *   body.minimal-motion（降级 =3，「重度」档，恒与 reduced-motion 并存）：
+ *     - CSS 动画 → 最少（reduced-motion 的暂停规则继续生效）；
+ *     - backdrop-filter → 移除：全量 none。
+ *   降级是平滑的：用户感知到粒子密度降低而非卡顿（粒子密度经
+ *   setDrawRange 由监控器直接驱动，不经 CSS）。 ===== */
+
+/* 6.1 降级 ≥2：全部动画暂停（后接豁免 — 「通配暂停 + 语义豁免」同款落地） */
+body.reduced-motion *,
+body.reduced-motion *::before,
+body.reduced-motion *::after {
+  animation-play-state: paused !important;
+}
+
+/* 6.2 降级 ≥2：交互动画豁免（「核心」保留集） */
+body.reduced-motion .anim-interactive,
+body.reduced-motion .anim-interactive::before,
+body.reduced-motion .anim-interactive::after {
+  animation-play-state: running !important;
+}
+
+/* 6.3 降级 ≥2：工作进行中指示器豁免（加载/处理语义不失真） */
+body.reduced-motion :is(
+  .cs-rail-packet,
+  .toast-dot
+) {
+  animation-play-state: running !important;
+}
+
+/* 6.4 降级 ≥2：backdrop-filter「减少」档（剩余小面积模糊点移除） */
+body.reduced-motion :is(
+  .qd-node-core,
+  .photo-select-mark
+) {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* 6.5 空闲治理优先于降级豁免：idle 及以下时交互动画同样静止
+ *   （降级豁免不得反向击穿空闲暂停 — 特异性压制） */
+body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot),
+body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot)::before,
+body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot)::after {
+  animation-play-state: paused !important;
+}
+
+/* 6.6 降级 =3：backdrop-filter「移除」档（全量）— minimal-motion 恒与
+ *   reduced-motion 并存，动画侧由 6.1-6.3 继续承载（「最少」集） */
+body.minimal-motion * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
