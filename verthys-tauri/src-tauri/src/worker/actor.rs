@@ -1,15 +1,15 @@
 //! worker/actor.rs — Actor 主循环与请求处理
 //!
-//! ★ 第 10.1 项：异步 Actor 消灭锁与阻塞
+//! 异步 Actor 消灭锁与阻塞
 //!   - Actor 通过 tokio::sync::mpsc<Request> 接收请求（每请求携带 oneshot 回复通道）
 //!   - tokio::select! 同时等待：新请求 / stdout 可读 / 超时 / stderr 可读
 //!   - 所有管道操作单任务内串行，无锁（死锁根本不可能发生）
 //!
-//! ★ 第 10.2 项：异步超时替代轮询循环
+//! 异步超时替代轮询循环
 //!   - tokio::time::timeout 包裹 read_line()
 //!   - 进度感知超时用 select! 循环每条进度行重置超时
 //!
-//! ★ 第 10.4 项：流式响应处理
+//! 流式响应处理
 //!   - 内部 handle_streaming_unlock_send 处理解锁进度流
 //!
 //! 本模块对外提供：
@@ -37,8 +37,8 @@ use super::stderr::{snapshot_stderr, StderrRing};
 /* ------------------------------------------------------------------ *
  * Actor 主循环                                                        *
  *                                                                    *
- * ★ 第 10.1 项：单任务内串行处理所有管道操作，无锁。                  *
- * ★ 第 10.5 项：独立 drain_stderr 任务持续异步读取 stderr。           *
+ * 单任务内串行处理所有管道操作，无锁。                  *
+ * 独立 drain_stderr 任务持续异步读取 stderr。           *
  * ------------------------------------------------------------------ */
 
 /// Actor 主循环
@@ -61,7 +61,7 @@ pub(crate) async fn actor_loop(
 ) {
     log::info!("[actor] PID={} Actor 任务启动", pid);
 
-    // ★ 第 10.5 项：启动 stderr 持续排空任务
+    // 启动 stderr 持续排空任务
     //    独立 tokio::task，BufReader 行缓冲全量写入日志
     //    即使子进程疯狂输出，管道永远不会满，IPC 通信不会被后台日志卡死
     let stderr_ring_for_task = stderr_ring.clone();
@@ -145,10 +145,10 @@ pub(crate) async fn actor_loop(
 
 /// 处理普通 IPC 请求
 ///
-/// ★ 第 10.2 项：tokio::time::timeout 包裹 read_line()，
+/// tokio::time::timeout 包裹 read_line()，
 ///   替代 PeekNamedPipe + thread::sleep(50ms) 轮询。
-/// ★ 第 10.3 项：只读诊断，不清空句柄。
-/// ★ 企业级修复（D-PROGRESS-SKIP）：跳过进度行，防止协议污染
+/// 只读诊断，不清空句柄。
+/// ★ 企业级修复：跳过进度行，防止协议污染
 ///   当 worker 的进度回调已注册（前一次 unlock 注册）且当前非流式请求
 ///   触发 FFI 调用 emit progress 时，进度行会混入 stdout。
 ///   handle_send 必须跳过 op="unlock_progress" 行，
@@ -263,8 +263,8 @@ async fn handle_send(
 
 /// 处理解锁流式进度请求
 ///
-/// ★ 第 10.4 项：进度行解析、推送与日志格式化。
-/// ★ 第 10.2 项：进度感知超时，每收到一条进度行重置 deadline。
+/// 进度行解析、推送与日志格式化。
+/// 进度感知超时，每收到一条进度行重置 deadline。
 ///
 /// 协议：
 ///   - worker 在 call_unlock 阻塞期间，由 C 回调向 stdout 写入

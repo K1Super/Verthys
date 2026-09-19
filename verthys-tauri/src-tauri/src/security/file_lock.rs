@@ -1,7 +1,7 @@
 /*
- * file_lock.rs — 独占锁与防并发 + 私有目录 ACL 隔离（SECURITY.md 企业级重写版）
+ * file_lock.rs — 独占锁与防并发 + 私有目录 ACL 隔离
  *
- * SECURITY.md 修复要点：
+ * 修复要点：
  *   1. 修正 ACL 策略：移除 Everyone Deny All 致命缺陷，改用仅允许 ACE 重置 DACL
  *   2. VerthysFileLock 手动实现 Send/Sync，确保 Windows 下编译通过
  *   3. Drop 中引入错误日志与备用解锁逻辑
@@ -186,7 +186,7 @@ const GRANT_ACCESS: u32 = 1;
 #[cfg(target_os = "windows")]
 const TRUSTEE_IS_SID: u32 = 0;
 
-/// SECURITY.md 第 1 项：哨兵字节偏移量（2GB，超出任何合理 verthys 文件大小）
+/// 哨兵字节偏移量（2GB，超出任何合理 verthys 文件大小）
 #[cfg(target_os = "windows")]
 const SENTINEL_OFFSET: u32 = 0x7FFF_FFFF;
 
@@ -208,7 +208,7 @@ fn last_error_str() -> String {
 }
 
 /* ==================================================================== *
- *  SECURITY.md 第 4 项：安全 SID 包装类型                               *
+ *  安全 SID 包装类型                               *
  *                                                                        *
  *  消除 Vec<u8> 指针强转隐患，提供类型安全的 PSID 访问。                *
  *  SidToken 持有连续内存，as_ptr() 返回 *const u8 供 Windows API 使用。 *
@@ -259,7 +259,7 @@ impl SidToken {
 }
 
 /* ==================================================================== *
- *  SECURITY.md 第 2 项：VerthysFileLock — Send/Sync + Drop 日志           *
+ *  VerthysFileLock — Send/Sync + Drop 日志           *
  *                                                                        *
  *  Windows 文件句柄（HANDLE = isize）本质上线程安全：                    *
  *  - LockFileEx/UnlockFile 对同一句柄的调用是原子操作                    *
@@ -269,11 +269,11 @@ impl SidToken {
 pub struct VerthysFileLock {
     #[cfg(target_os = "windows")]
     handle: isize,
-    /// SECURITY.md 第 5 项：锁类型记录（用于锁升级状态机）
+    /// 锁类型记录（用于锁升级状态机）
     lock_type: LockType,
 }
 
-/// SECURITY.md 第 5 项：锁类型枚举
+/// 锁类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockType {
     /// 共享锁（多读，排斥写）
@@ -282,7 +282,7 @@ pub enum LockType {
     Exclusive,
 }
 
-// SECURITY.md 第 2 项：手动实现 Send/Sync
+// 手动实现 Send/Sync
 // Windows HANDLE 本质是 isize，LockFileEx/UnlockFile/CloseHandle 均线程安全。
 // VerthysFileLock 仅持有一个 HANDLE 和一个 Copy 枚举，无内部可变性。
 unsafe impl Send for VerthysFileLock {}
@@ -395,7 +395,7 @@ impl VerthysFileLock {
         }
     }
 
-    /// SECURITY.md 第 5 项：原子锁升级（共享→独占）
+    /// 原子锁升级（共享→独占）
     ///
     /// 在已持有共享锁的同一句柄上请求独占锁，无需先释放共享锁。
     /// Windows LockFileEx 支持在同一句柄上叠加锁请求。
@@ -443,7 +443,7 @@ impl VerthysFileLock {
     }
 }
 
-/// SECURITY.md 第 3 项：Drop 中引入错误日志与备用解锁逻辑
+/// Drop 中引入错误日志与备用解锁逻辑
 ///
 /// 修复原实现完全忽略解锁和句柄关闭错误的问题：
 /// - UnlockFile 失败时记录包含 GetLastError() 的错误日志
@@ -527,7 +527,7 @@ impl Drop for VerthysFileLock {
 }
 
 /* ==================================================================== *
- *  SECURITY.md 第 1 项：修正 ACL 策略                                    *
+ *  修正 ACL 策略                                    *
  *                                                                        *
  *  致命缺陷修复：移除 Everyone Deny All 条目                             *
  *                                                                        *
@@ -558,7 +558,7 @@ pub fn harden_private_dir(dir: &str) -> Result<(), String> {
         let admin_sid = SidToken::from_string("S-1-5-32-544")?;
         let system_sid = SidToken::from_string("S-1-5-18")?;
 
-        /* SECURITY.md 第 1 项：备份当前 DACL（用于失败回滚） */
+        /* 备份当前 DACL（用于失败回滚） */
         let wide_dir = to_wide(dir);
         let mut old_dacl: *mut u8 = ptr::null_mut();
         let mut old_sd: *mut u8 = ptr::null_mut();
@@ -582,7 +582,7 @@ pub fn harden_private_dir(dir: &str) -> Result<(), String> {
             );
         }
 
-        /* 3. SECURITY.md 第 1 项：构建仅包含允许 ACE 的 DACL（3 条规则）
+        /* 3. 构建仅包含允许 ACE 的 DACL（3 条规则）
          *    严禁使用 Everyone Deny All —— 拒绝优先于允许会导致目录死锁 */
         let mut ea: [ExplicitAccessW; 3] = Default::default();
 
@@ -619,7 +619,7 @@ pub fn harden_private_dir(dir: &str) -> Result<(), String> {
         ea[2].trustee.trustee_form = TRUSTEE_IS_SID;
         ea[2].trustee.ptstr_name = system_sid.as_ptr() as *const u16;
 
-        /* SECURITY.md 第 1 项关键修复：
+        /* 关键修复：
          * 不再创建 Everyone Deny All 条目！
          * SetNamedSecurityInfoW 设置 DACL_SECURITY_INFORMATION 会替换整个 DACL，
          * 未在 ACL 中列出的主体隐式被拒绝（空白拒绝），无需显式 Deny 条目。 */
@@ -648,7 +648,7 @@ pub fn harden_private_dir(dir: &str) -> Result<(), String> {
         if info_status != 0 {
             let err_msg = format!("SetNamedSecurityInfoW 失败: error={}", info_status);
 
-            /* SECURITY.md 第 1 项：失败时尝试回滚到备份 DACL */
+            /* 失败时尝试回滚到备份 DACL */
             if has_backup {
                 log::warn!(
                     "[file_lock] ACL 加固失败，尝试回滚到原始 DACL..."
@@ -685,7 +685,7 @@ pub fn harden_private_dir(dir: &str) -> Result<(), String> {
             let _ = LocalFree(old_sd as isize);
         }
 
-        /* SECURITY.md 第 6 项：审计日志 */
+        /* 审计日志 */
         log::info!(
             "[file_lock] 目录 ACL 加固成功: hash={:016x}, \
              ACEs=[user:FULL, admins:READ+EXEC, system:READ+EXEC], \
@@ -706,7 +706,7 @@ pub fn harden_private_dir(_dir: &str) -> Result<(), String> {
  *                        SID 获取辅助函数                               *
  * ==================================================================== */
 
-/// SECURITY.md 第 4 项：获取当前用户 SID 原始指针
+/// 获取当前用户 SID 原始指针
 ///
 /// 返回的指针指向进程内分配的内存，调用方应立即复制到 SidToken 中。
 #[cfg(target_os = "windows")]
@@ -755,7 +755,7 @@ unsafe fn get_current_user_sid_ptr() -> Result<*const u8, String> {
     Ok(sid_ptr)
 }
 
-/// SECURITY.md 第 6 项：路径哈希（审计日志用，不泄露明文路径）
+/// 路径哈希（审计日志用，不泄露明文路径）
 fn path_hash(path: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

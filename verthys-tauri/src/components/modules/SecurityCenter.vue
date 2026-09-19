@@ -241,7 +241,7 @@ const { deviceCheckResult, deviceFingerprintShort, checkDevice, refreshDeviceFin
 const postVerifyAnim = ref(false);
 
 /* ===== 视图模式（五态严格互斥） =====
- * ★ 企业级根治方案：移除 "loading" 态。worker 解锁成功后进程内即时完成
+ * ★ 企业级根治：移除 "loading" 态。worker 解锁成功后进程内即时完成
  *   全局密钥记录探测，结果内联到 unlock 响应，前端零异步扫描阶段。
  *   解锁完成即确定 hasGlobalKeyRecord，直接进入 init 或 verify，无中间态。 */
 const { viewMode } = useViewMode({
@@ -380,7 +380,7 @@ const {
   loadPresetConfig,
 } = usePreset({ showError, showToast, resetSession });
 
-/* ===== 防御闭环状态（WP-11 消费出口：verthys 就绪即拉取 + 60s 轮询） ===== */
+/* ===== 防御闭环状态（消费出口：verthys 就绪即拉取 + 60s 轮询） ===== */
 const { defensePaths, defenseMeta } = useDefenseStatus();
 
 /* ===== 返回重新选择（锁定当前 verthys，回到解锁视图） ===== */
@@ -411,7 +411,7 @@ const goBackToUnlock = async () => {
       unlockProgressMsg.value = message;
       unlockProgressElapsed.value = Date.now() - lockStart;
     });
-    // ★ 方案 6.2.4：返回解锁页时也检查脏数据状态
+    // ★ 返回解锁页时也检查脏数据状态
     if (isCacheDirty()) {
       showError("部分数据可能未保存，请检查最近操作");
     }
@@ -426,7 +426,7 @@ const goBackToUnlock = async () => {
 /* ===== 立即锁定 ===== */
 const onLockAll = async () => {
   await lockAll();
-  // ★ 方案 6.2.4：lockAll 完成后检查脏数据状态
+  // ★ lockAll 完成后检查脏数据状态
   //    40s 超时或 22s waitForFlush 超时可能标记 cacheDirty
   if (isCacheDirty()) {
     showError("部分数据可能未保存，请检查最近操作");

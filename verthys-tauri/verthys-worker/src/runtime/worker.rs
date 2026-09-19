@@ -40,7 +40,7 @@ impl Worker {
     pub(crate) fn new(dll_path: &str) -> Result<Self, String> {
         init_diag!("[worker] 开始加载 DLL: {}", dll_path);
         /*
-         * Windows 加密 Worker 最终完整版安全方案 — 五、进程无菌沙盒
+         * Windows 加密 Worker 最终完整版安全设计 — 进程无菌沙盒
          *
          * 必须在加载 verthys.dll 之前应用进程级 mitigation policy：
          *   1. WIN32K_SYSTEM_CALL_DISABLE：免疫所有窗口注入
@@ -118,13 +118,13 @@ impl Worker {
         unsafe {
             let lib = &self._lib;
 
-            /* ★ 方案5：在 Verthys_Unlock 之前注册进度回调
+            /* ★ 在 Verthys_Unlock 之前注册进度回调
              *
              * unlock_progress_cb 在 C DLL 各阶段被同步调用，向 stdout 写入
              * {"ok":true,"op":"unlock_progress",...} 进度行。父进程
              * send_json_with_unlock_progress 识别进度行并转发前端。
              *
-             * 兼容性：若 DLL 未导出 Verthys_RegisterUnlockProgressCallback（旧版本），
+             * 兼容性：若 DLL 未导出 Verthys_RegisterUnlockProgressCallback（旧 DLL），
              * 静默跳过注册，解锁仍正常执行（仅无进度反馈）。 */
             if let Ok(register_fn) = lib.get::<VerthysRegisterUnlockProgressFn>(
                 b"Verthys_RegisterUnlockProgressCallback\0",
@@ -145,7 +145,7 @@ impl Worker {
                 Err(_) => return 0xFFFFFFFF,
             };
             let pw_bytes = password.as_bytes();
-            /* ★ 方案九：透传 flags 参数（预热状态位域）给 C 层 Verthys_Unlock */
+            /* ★ 透传 flags 参数（预热状态位域）给 C 层 Verthys_Unlock */
             func(
                 self.handle,
                 path_c.as_ptr(),
@@ -156,7 +156,7 @@ impl Worker {
         }
     }
 
-    /// 显式创建新 verthys（v2，可选预设）
+    /// 显式创建新 verthys（V3，可选预设）
     /// preset: 0=BALANCED, 1=SECURE
     pub(crate) fn call_create_with_preset(&self, path: &str, password: &str, preset: u32) -> u32 {
         unsafe {
@@ -192,9 +192,9 @@ impl Worker {
     /// ★ 企业级根治：调用 Verthys_Flush 显式刷盘
     ///
     /// 替代旧 verthys_flush 的 lock+unlock 模式（有 worker 卡在 LOCKED 状态的风险）。
-    /// Verthys_Flush 语义：
-    ///   - v2：commit 未完成事务（add_record 已 commit 时为 no-op），不清零密钥、不改 state
-    ///   - v1：dirty 标记则写回（保持兼容）
+    /// Verthys_Flush 语义（V3-only）：
+    ///   - MemTable 强制 flush（冻结落盘 L0 SSTable → Manifest 原子提交 → WAL 复位）
+    ///   - 空 MemTable 为 no-op，不清零密钥、不改 state
     ///
     /// 安全性：不改变 worker 状态（始终保持 UNLOCKED），不清零密钥，不重新加载索引
     pub(crate) fn call_flush(&self) -> u32 {
@@ -419,7 +419,7 @@ impl Worker {
     }
 
     /// 紧急熔断吊销：擦除存储进程侧 SHM 缓冲区 + 关闭游标 + 标记句柄无效
-    /// 按方案要求：安全模块通知存储进程立即吊销所有活跃游标，
+    /// 安全模块通知存储进程立即吊销所有活跃游标，
     /// 吊销动作包括擦除缓冲区、关闭游标、标记句柄无效
     #[cfg(windows)]
     fn revoke_scan_cursor(&mut self) {
@@ -471,7 +471,7 @@ impl Worker {
     pub(crate) fn call_scan_close(&mut self) -> u32 { 0xFFFFFFFF }
 
     /* ================================================================ *
-     * 摘要扫描（Phase 2B：轻量元数据，不读数据块）                       *
+     * 摘要扫描（轻量元数据，不读数据块）                       *
      *                                                                  *
      * 与全量扫描的区别：                                                *
      *   - 复用 VerthysScanCursor 游标结构（Open 逻辑相同）               *
@@ -563,7 +563,7 @@ impl Worker {
                 data_size: 0,
                 physical_offset: 0,
                 merkle_leaf: [0u8; 32],
-                created_time: 0,  /* ★ Phase 2G */
+                created_time: 0,
                 slot_state: 0,    /* ★ 企业级根治：与 C 端对齐 */
             }).collect();
             let mut lids: Vec<u64> = vec![0u64; mc];
@@ -580,7 +580,7 @@ impl Worker {
             }
 
             // 从 C 深拷贝收集到 Rust 临时 Vec（摘要元组：无数据块）
-            // ★ Phase 2G：元组增加 created_time 字段
+            // ★ 元组增加 created_time 字段
             let mut result: Vec<scan_shm::SummaryRecord> =
                 Vec::with_capacity(out_count as usize);
             for rec in records.iter_mut().take(out_count as usize) {
@@ -645,7 +645,7 @@ impl Worker {
         }
     }
 
-    /// 批量删除记录（单次事务，落实 upgrade.md "批量删除必须合并为单次 flush"）
+    /// 批量删除记录（单次事务，合并为单次 flush）
     /// v2 格式下 N 条删除仅触发一次 vtxn_commit（一次重加密 + 一次全局 HMAC 更新）
     pub(crate) fn call_delete_records(&self, ids: &[u64]) -> u32 {
         if ids.is_empty() {
@@ -661,7 +661,7 @@ impl Worker {
         }
     }
 
-    /// ★ Phase 2I：获取已加载的轻量摘要记录数
+    /// ★ 获取已加载的轻量摘要记录数
     /// 返回解锁时从 summary_index_off 加载的摘要记录数（0=无摘要索引）
     pub(crate) fn call_get_summary_count(&self) -> (u32, u64) {
         let mut count: u64 = 0;
@@ -676,7 +676,7 @@ impl Worker {
         }
     }
 
-    /// ★ 企业级方案：轻量级记录类型存在性检查
+    /// ★ 企业级：轻量级记录类型存在性检查
     /// 仅遍历 B+ 树索引节点检查 type 字段，不读数据块，典型 < 100ms
     /// 返回 (rc, found)：rc=0 成功（found=0/1），rc!=0 失败
     pub(crate) fn call_has_record_by_type(&self, rtype: u8) -> (u32, bool) {
@@ -692,11 +692,11 @@ impl Worker {
         }
     }
 
-    /// ★ 企业级根治方案：进程内查找指定类型的首条记录 lid
+    /// ★ 企业级根治：进程内查找指定类型的首条记录 lid
     /// 返回 (rc, found, lid)：rc=0 成功（found=0/1），rc!=0 失败
     /// 与 call_has_record_by_type 的关键差异：
     ///   1. 同时返回 lid，省去二次 find_lid IPC 往返
-    ///   2. v1 容器走线性扫描，绝不返回 FORMAT 错误（根治假阴性）
+    ///   2. V3-only：fmt!=V3 时 C 层返回 FORMAT（无旧格式兼容分支）
     pub(crate) fn call_find_first_lid_by_type(&self, rtype: u8) -> (u32, bool, u64) {
         let mut found: u8 = 0;
         let mut lid: u64 = 0;
@@ -768,7 +768,7 @@ impl Worker {
     }
 
     /* ================================================================ *
-     * ★ WP-11（P2-3 观测出口）：防御闭环 7 路径状态实时查询               *
+     * ★ 防御闭环 7 路径状态实时查询               *
      *                                                                *
      * FFI 调用 Verthys_GetSecurityStatus（RUNTIME 级实时复检，非 BOOT     *
      * 缓存快照）。防御状态为进程级事实：worker 启动即持有 handle，      *

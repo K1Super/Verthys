@@ -1,7 +1,7 @@
 /*
  * cache/composition/verthys-flush.ts — Verthys 统一冲刷队列服务（对外 API 绑定层）
  *
- * ★ verthys-flush 重构方案（verthys-flush-refactor-fix.md §三）落地：
+ * ★ 重构落地：
  *   全部冲刷队列逻辑已抽取到 cache/domain/verthys-flush-service.ts（VerthysFlushService
  *   领域类），本文件仅做服务实例化与对外 API 绑定，签名与旧版逐一对应，
  *   所有消费方（global-verthys.ts / module-auth.ts / keyManager.ts / verthys-cache.ts）
@@ -48,7 +48,7 @@ export const flushVerthysNow = service.flushVerthysNow.bind(service);
 export const flushQueueStatus = service.flushQueueStatus.bind(service);
 export const isCacheTimersCancelled = service.isCacheTimersCancelled.bind(service);
 
-/* ★ 共享删除过滤集合（单一权威源，见文件头兼容性说明）：
+/* ★ 共享删除过滤集合（单一权威源，兼容性说明附于文件头）：
  *   VerthysCacheDomain 通过 verthys-cache.ts 注入同一实例，
  *   确保冲刷队列与缓存扫描的过滤视图完全一致。 */
 export const pendingDeletionIds = service.pendingDeletionIds;

@@ -1,9 +1,9 @@
 /*
  * emergency.c — 应急兜底与连锁响应机制实现
  *
- * ★ 方案 §6.1（P0-3 根治）：应急响应模型分级实现。
- *
- * 原模型缺陷（security 层深度审计 §4）：
+ * ★ 应急响应模型分级实现。
+
+ * 原模型缺陷：
  *   - 信号终身累积，任意两个不同信号位即 TerminateProcess；
  *   - 唯一重置函数 emergency_clear_signals 无调用点；
  *   - 多个结构性可误报的检测器接在不可逆响应上 → 自毁放大器。
@@ -41,10 +41,10 @@
 /* 看门狗事件名缓冲最大长度（宽字符） */
 #define EMERG_EVENT_NAME_MAX  64
 
-/* ★ §6.1.4：信号滑动窗口时长（毫秒） */
+/* 信号滑动窗口时长（毫秒） */
 #define EMERG_WINDOW_MS  (10u * 60u * 1000u)
 
-/* ★ §6.1.4：信号窗口历史槽位数 */
+/* 信号窗口历史槽位数 */
 #define EMERG_HISTORY_SLOTS 8u
 
 /* ---------- 模块状态 ---------- */
@@ -254,7 +254,7 @@ void emergency_report(EmergencyLevel level, EmergencySignal signal)
 
     /*
      * KILL 级快速路径：高置信度信号无需窗口判定，
-     * 直接进入终止性响应（闩锁防重入，见 emergency_trigger）。
+     * 直接进入终止性响应（闩锁防重入，同 emergency_trigger）。
      */
     if (level >= EMERG_LEVEL_KILL) {
         emergency_trigger();
@@ -384,7 +384,7 @@ void emergency_trigger(void)
     memory_guard_emergency_purge();
 
     /*
-     * 销毁 CNG 内核密钥句柄（A/B/C 三权分立密钥，方案 4.1 接线后为
+     * 销毁 CNG 内核密钥句柄（A/B/C 三权分立密钥，
      * 唯一密钥存放位置；内核释放密钥材料，用户态无任何路径可达）。
      */
     key_separation_purge_all();

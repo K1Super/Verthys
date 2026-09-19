@@ -7,7 +7,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* ★ WP-13（K-1）：状态快照实现 — Windows API 收敛于本翻译单元 */
+/* 状态快照实现 — Windows API 收敛于本翻译单元 */
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -111,7 +111,7 @@ TEST(mem_failed_unlock_bad_format);
 TEST(mem_deinit_from_unlocked);
 TEST(mem_deinit_from_locked);
 TEST(mem_deinit_from_uninit);
-/* ★ P0 缺陷1企业级方案 — UAF 回归测试（8 项） */
+/* ★ UAF 回归测试（8 项） */
 TEST(mem_uaf_getrecord_populates_borrow_cache);
 TEST(mem_uaf_addrecord_invalidates_cache);
 TEST(mem_uaf_deleterecord_invalidates_cache);
@@ -136,26 +136,26 @@ TEST(fuzz_bit_flip_index);
 TEST(fuzz_bit_flip_data_block);
 TEST(fuzz_extended_file);
 
-/* test_key_separation.c — ★ 方案 §8.2：CNG 内核托管密钥（3 项） */
+/* test_key_separation.c — ★ CNG 内核托管密钥（3 项） */
 TEST(keysep_aead_roundtrip);
 TEST(keysep_commit_sleep_enforced);
 TEST(keysep_purge_invalidates);
 
-/* test_emergency.c — ★ 方案 §8.2：应急响应分级（3 项） */
+/* test_emergency.c — ★ 应急响应分级（3 项） */
 TEST(emergency_telemetry_no_trigger);
 TEST(emergency_degrade_requires_window_threshold);
 TEST(emergency_handler_swap_and_null);
 
-/* test_integrity_verify.c — ★ 方案 §8.2：构建期签名验签（2 项） */
+/* test_integrity_verify.c — ★ 构建期签名验签（2 项） */
 TEST(integrity_verify_unconfigured_passes);
 TEST(integrity_init_idempotent);
 
-/* test_txn_recovery_inject.c — ★ 方案 §8.2：事务半写/损坏故障注入（3 项） */
+/* test_txn_recovery_inject.c — ★ 事务半写/损坏故障注入（3 项） */
 TEST(inject_sb_ciphertext_bitflip_rejected);
 TEST(inject_taillog_overwrite_still_unlockable);
 TEST(inject_bad_magic_rejected);
 
-/* test_perf_prefetch.c — ★ P0 缺陷2企业级方案：性能回归测试（8 项） */
+/* test_perf_prefetch.c — ★ 性能回归测试（8 项） */
 TEST(perf_balanced_enables_warm_cache);
 TEST(perf_secure_disables_warm_cache);
 TEST(perf_warm_cache_hit_on_second_unlock);
@@ -166,7 +166,7 @@ TEST(perf_no_cache_cold_start);
 TEST(perf_argon2_drift_metrics_collected);
 TEST(perf_baseline_unlock_write_read);
 
-/* test_final_repair.c — ★ 最终修复方案 §6.1 回归测试（12 项） */
+/* test_final_repair.c — ★ 回归测试（12 项） */
 TEST(repair_pool_extend_boundary);
 TEST(repair_lsm_large_insert);
 TEST(repair_changepw_fail_rollback);
@@ -179,11 +179,11 @@ TEST(repair_export_too_many);
 TEST(repair_name_len_clamp);
 TEST(repair_thread_shutdown_cycles);
 
-/* test_flatcc_demo.c — ★ WP-0 验收：vendored flatcc 工具链全链路（demo schema） */
+/* test_flatcc_demo.c — ★ 验收：vendored flatcc 工具链全链路（demo schema） */
 TEST(flatcc_demo_roundtrip);
 TEST(flatcc_demo_tamper_rejected);
 
-/* test_cng_kernel.c — ★ WP-1 验收：CNG 内核托管全量接线 */
+/* test_cng_kernel.c — ★ 验收：CNG 内核托管全量接线 */
 TEST(cng_aead_roundtrip);
 TEST(cng_aead_init_contract);
 TEST(cng_aead_empty_plaintext);
@@ -200,7 +200,7 @@ TEST(km_reimport_replaces_handles);
 TEST(km_null_params_rejected);
 TEST(km_global_handle_tracking);
 
-/* test_secure_allocator.c — ★ WP-7 验收：安全分配器 + 全局内存预算记账 */
+/* test_secure_allocator.c — ★ 验收：安全分配器 + 全局内存预算记账 */
 TEST(sec_alloc_basic_roundtrip);
 TEST(sec_alloc_guard_pages);
 TEST(sec_alloc_locked);
@@ -208,7 +208,7 @@ TEST(sec_alloc_budget_reject_and_reclaim);
 TEST(sec_alloc_error_paths);
 TEST(sec_alloc_destroy_releases_all);
 
-/* test_v3_container.c — ★ WP-2 验收：V3 超级块（多副本 + 法定人数 + 事务） */
+/* test_v3_container.c — ★ 验收：V3 超级块（多副本 + 法定人数 + 事务） */
 TEST(v3sb_init_new_defaults);
 TEST(v3sb_init_rejects_null);
 TEST(v3sb_serialize_parse_roundtrip);
@@ -230,7 +230,7 @@ TEST(v3sb_quorum_txid_majority_wins);
 TEST(v3sb_commit_fail_injection);
 TEST(v3sb_txn_commit_rollback);
 
-/* test_v3_partition.c — ★ WP-2 验收：V3 分区管理（独立 AEAD 密钥 + 分区表持久化） */
+/* test_v3_partition.c — ★ 验收：V3 分区管理（独立 AEAD 密钥 + 分区表持久化） */
 TEST(v3part_create_defaults);
 TEST(v3part_create_rejects_invalid);
 TEST(v3part_encrypt_decrypt_roundtrip);
@@ -247,7 +247,7 @@ TEST(v3part_table_load_tamper_rejected);
 TEST(v3part_table_load_empty_region_rejected);
 TEST(v3part_table_save_rejects_invalid);
 
-/* test_v3_lsm.c — ★ WP-4 验收：V3 LSM 索引（MemTable + SSTable + Compaction） */
+/* test_v3_lsm.c — ★ 验收：V3 LSM 索引（MemTable + SSTable + Compaction） */
 TEST(v3lsm_open_close_roundtrip);
 TEST(v3lsm_put_get_roundtrip);
 TEST(v3lsm_put_overwrite);
@@ -262,7 +262,7 @@ TEST(v3lsm_manifest_tamper_rejected);
 TEST(v3lsm_get_notfound_and_invalid);
 TEST(v3lsm_null_params_rejected);
 
-/* test_v3_extent.c — ★ WP-3 验收：V3 内容寻址 Extent（去重 + 完整性） */
+/* test_v3_extent.c — ★ 验收：V3 内容寻址 Extent（去重 + 完整性） */
 TEST(v3ext_hash_basics);
 TEST(v3ext_index_init_and_find);
 TEST(v3ext_put_get_roundtrip);
@@ -280,7 +280,7 @@ TEST(v3ext_index_tamper_rejected);
 TEST(v3ext_index_load_empty_region_rejected);
 TEST(v3ext_null_params_rejected);
 
-/* test_v3_lifecycle.c — ★ WP-5 验收：V3 生命周期全链路 + 流水线 + 温缓存 + WAL 崩溃恢复 */
+/* test_v3_lifecycle.c — ★ 验收：V3 生命周期全链路 + 流水线 + 温缓存 + WAL 崩溃恢复 */
 TEST(v3life_full_chain_roundtrip);
 TEST(v3life_cp_old_password_rejected);
 TEST(v3life_container_info_v3);
@@ -298,8 +298,8 @@ TEST(arekey_degrade_force_persist);
 TEST(arekey_crash_orphan_frame);
 TEST(arekey_crash_after_commit);
 
-/* test_v3_property.c — ★ V3 升级 WP-12：属性测试（自研 harness：
- * 随机序列 + 不变式断言，种子可复现）+ 缺陷②/②b 定向回归 */
+/* test_v3_property.c — ★ 属性测试（自研 harness：
+ * 随机序列 + 不变式断言，种子可复现）+ 回滚耐久定向回归 */
 TEST(prop_lsm_insert_find_delete);
 TEST(prop_extent_refcount_conservation);
 TEST(prop_txn_commit_rollback_consistency);
@@ -307,9 +307,18 @@ TEST(prop_txn_crash_no_resurrection);
 TEST(prop_txn_rollback_delete_restores_original);
 TEST(prop_txn_crash_discard_delete_restores_original);
 
-/* test_auto_rekey.c — ★ V3 升级 WP-6：自动密钥轮换（见 test_v3_lifecycle 组） */
+/* test_auto_rekey.c — ★ 自动密钥轮换（并入 test_v3_lifecycle 组） */
 
-/* test_runtime_hash.c — ★ V3 升级 WP-8：运行时函数级哈希校验（.rhat 真表） */
+/* test_pepper_v3.c — ★ 胡椒持久化格式与密钥槽闭环 */
+TEST(pepper_v3_first_seal_roundtrip);
+TEST(pepper_v3_cipher_tamper_rejected);
+TEST(pepper_v3_fingerprint_tamper_rejected);
+TEST(pepper_v3_level_forgery_rejected);
+TEST(pepper_v3_foreign_size_rejected);
+TEST(pepper_v3_bad_magic_rejected);
+TEST(pepper_v3_inject_bypasses_os);
+
+/* test_runtime_hash.c — ★ 运行时函数级哈希校验（.rhat 真表） */
 TEST(rhat_table_configured);
 TEST(rhat_real_table_scan_clean);
 TEST(rhat_lookup_covered);
@@ -317,7 +326,7 @@ TEST(rhat_virtualprotect_patch_detected);
 TEST(rhat_overlay_install_detect_clear);
 TEST(rhat_verify_periodic_clean_state);
 
-/* test_syscall_direct.c — ★ V3 升级 WP-9：直接系统调用传输
+/* test_syscall_direct.c — ★ 直接系统调用传输
  * （SSN 排序法提取 + W^X stub + 降级；激活/降级两态均须过） */
 TEST(scd_init_idempotent);
 TEST(scd_process_query_matches_ntdll);
@@ -325,13 +334,13 @@ TEST(scd_system_query_basic_info);
 TEST(scd_error_code_passthrough);
 TEST(scd_detector_wiring_clean);
 
-/* test_defense_closure.c — ★ V3 升级 WP-11：防御闭环 7 路径状态查询
- * （M3 里程碑验收信号：解锁态 7/7 BLOCKED 运行时验证） */
+/* test_defense_closure.c — ★ 防御闭环 7 路径状态查询
+ * （解锁态 7/7 BLOCKED 运行时验证） */
 TEST(dcl_status_invalid_params);
 TEST(dcl_boot_check_no_failed_paths);
 TEST(dcl_all_seven_blocked_when_unlocked);
 
-/* ★ 最终修复方案 §6.2：argv 过滤器——`verthys_tests.exe <子串>` 仅运行
+/* ★ argv 过滤器——`verthys_tests.exe <子串>` 仅运行
  * 名称含该子串的测试（故障定位用；无参数时全量运行，行为不变） */
 static int g_filter_active = 0;
 static char g_filter[128] = {0};
@@ -344,7 +353,7 @@ int test_filter_match(const char *test_name)
     return strstr(test_name, g_filter) != NULL;
 }
 
-/* ★ §6.2 扩展：argv[2..] 作为额外 OR 过滤器（多组联合运行） */
+/* ★ 扩展：argv[2..] 作为额外 OR 过滤器（多组联合运行） */
 int test_filter_match_extra(const char *test_name)
 {
     if (!g_filter_active) return 1;
@@ -362,13 +371,13 @@ static void test_filter_save(int argc, char **argv)
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 测试文件沙箱（2026-09-19 根治：测试残留文件统一管理与自动清除）
+ * ★ 测试文件沙箱（测试残留文件统一管理与自动清除）
  *
  * 问题：各测试用相对路径创建临时文件（test_*.verthys / *.idx_cache /
  * WAL / manifest 等），测试进程的 CWD 决定落盘位置——从项目根直接运行
  * verthys_tests.exe 时，残留文件散落源码树根目录。
  *
- * 方案：main() 入口将 CWD 切换到构建树内专属沙箱目录
+ * 做法：main() 入口将 CWD 切换到构建树内专属沙箱目录
  *   <exe_dir>\test_scratch_<pid>
  * 全部测试的相对路径文件统一收口于此；正常退出时递归删除沙箱。
  * 硬崩溃（清理无法执行）时沙箱残留于 git-ignored 构建树内供事后取证，
@@ -457,9 +466,9 @@ static void scratch_setup(void)
 }
 
 /* ------------------------------------------------------------------ *
- * ★ WP-13（K-1）：测试间状态快照实现
+ * ★ 测试间状态快照实现
  *
- * 采集维度（手册 §5 WP-13 步骤1 全量落地）：
+ * 采集维度：
  *   - 线程数  ：CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD) 枚举本 PID
  *   - 句柄数  ：GetProcessHandleCount（内核句柄）
  *   - GDI 句柄：GetGuiResources（GR_GDIOBJECTS）
@@ -556,7 +565,7 @@ int main(int argc, char **argv)
         printf("=== filter: '%s' ===\n", g_filter);
     }
     /*
-     * 入口文件单一职责（  第 1 节）
+     * 入口文件单一职责
      *
      * 本入口仅涉及 3 项允许职责：
      *   1. 环境初始化 — verthys_crypto_init() 初始化密码库运行时
@@ -572,7 +581,7 @@ int main(int argc, char **argv)
         TEST_FATAL("verthys_crypto_init failed\n");
     }
 
-    /* ★ WP-8：rhat 组置于全量首组——真表等价性（构建期文件哈希 ≡ 运行期
+    /* ★ rhat 组置于全量首组——真表等价性（构建期文件哈希 ≡ 运行期
      * 内存哈希）若断裂，此处先出显式 CHECK 失败，早于任何 Verthys_Unlock
      * 解锁路径的 KILL 应急（进程存活，诊断信息完整）。 */
     RUN_TEST(rhat_table_configured);
@@ -583,7 +592,7 @@ int main(int argc, char **argv)
     RUN_TEST(rhat_verify_periodic_clean_state);
     test_state_checkpoint("runtime_hash");
 
-    /* ★ WP-9：直接系统调用传输组——紧随 rhat 组：传输正确性是后续
+    /* ★ 直接系统调用传输组——紧随 rhat 组：传输正确性是后续
      * 全部检测器（anti_debug/memory_guard）行为的底层前提。 */
     RUN_TEST(scd_init_idempotent);
     RUN_TEST(scd_process_query_matches_ntdll);
@@ -592,7 +601,7 @@ int main(int argc, char **argv)
     RUN_TEST(scd_detector_wiring_clean);
     test_state_checkpoint("syscall_direct");
 
-    /* ★ V3 升级 WP-11：防御闭环 7 路径状态查询（7/7 BLOCKED 运行时验证） */
+    /* ★ 防御闭环 7 路径状态查询（7/7 BLOCKED 运行时验证） */
     RUN_TEST(dcl_status_invalid_params);
     RUN_TEST(dcl_boot_check_no_failed_paths);
     RUN_TEST(dcl_all_seven_blocked_when_unlocked);
@@ -628,6 +637,16 @@ int main(int argc, char **argv)
     RUN_TEST(record_key_id_and_dek_sensitive);
     RUN_TEST(record_key_rejects_null);
     test_state_checkpoint("keymanager");
+
+    /* ★ 胡椒持久化格式与密钥槽闭环（含存储路径覆盖隔离） */
+    RUN_TEST(pepper_v3_first_seal_roundtrip);
+    RUN_TEST(pepper_v3_cipher_tamper_rejected);
+    RUN_TEST(pepper_v3_fingerprint_tamper_rejected);
+    RUN_TEST(pepper_v3_level_forgery_rejected);
+    RUN_TEST(pepper_v3_foreign_size_rejected);
+    RUN_TEST(pepper_v3_bad_magic_rejected);
+    RUN_TEST(pepper_v3_inject_bypasses_os);
+    test_state_checkpoint("pepper_v3");
 
     RUN_TEST(format_roundtrip_single);
     RUN_TEST(format_roundtrip_empty);
@@ -690,7 +709,7 @@ int main(int argc, char **argv)
     RUN_TEST(mem_deinit_from_locked);
     RUN_TEST(mem_deinit_from_uninit);
 
-    /* ★ P0 缺陷1企业级方案 — UAF 回归测试（查询→修改→旧指针失效） */
+    /* ★ UAF 回归测试（查询→修改→旧指针失效） */
     RUN_TEST(mem_uaf_getrecord_populates_borrow_cache);
     RUN_TEST(mem_uaf_addrecord_invalidates_cache);
     RUN_TEST(mem_uaf_deleterecord_invalidates_cache);
@@ -717,7 +736,7 @@ int main(int argc, char **argv)
     RUN_TEST(fuzz_extended_file);
     test_state_checkpoint("format_fuzz");
 
-    /* ★ P0 缺陷2企业级方案 — 性能回归测试（缓存命中/损坏/慢IO/温启动） */
+    /* ★ 性能回归测试（缓存命中/损坏/慢IO/温启动） */
     RUN_TEST(perf_balanced_enables_warm_cache);
     RUN_TEST(perf_secure_disables_warm_cache);
     RUN_TEST(perf_warm_cache_hit_on_second_unlock);
@@ -729,30 +748,30 @@ int main(int argc, char **argv)
     RUN_TEST(perf_baseline_unlock_write_read);
     test_state_checkpoint("perf");
 
-    /* ★ 方案 §8.2：CNG 内核托管密钥测试 */
+    /* ★CNG 内核托管密钥测试 */
     RUN_TEST(keysep_aead_roundtrip);
     RUN_TEST(keysep_commit_sleep_enforced);
     RUN_TEST(keysep_purge_invalidates);
     test_state_checkpoint("key_separation");
 
-    /* ★ 方案 §8.2：应急响应分级测试 */
+    /* ★应急响应分级测试 */
     RUN_TEST(emergency_telemetry_no_trigger);
     RUN_TEST(emergency_degrade_requires_window_threshold);
     RUN_TEST(emergency_handler_swap_and_null);
     test_state_checkpoint("emergency");
 
-    /* ★ 方案 §8.2：构建期签名验签测试 */
+    /* ★构建期签名验签测试 */
     RUN_TEST(integrity_verify_unconfigured_passes);
     RUN_TEST(integrity_init_idempotent);
     test_state_checkpoint("integrity");
 
-    /* ★ 方案 §8.2：事务半写/损坏故障注入测试 */
+    /* ★事务半写/损坏故障注入测试 */
     RUN_TEST(inject_sb_ciphertext_bitflip_rejected);
     RUN_TEST(inject_taillog_overwrite_still_unlockable);
     RUN_TEST(inject_bad_magic_rejected);
     test_state_checkpoint("txn_inject");
 
-    /* ★ 最终修复方案 §6.1 回归测试（12 项） */
+    /* ★ 回归测试（12 项） */
     RUN_TEST(repair_pool_extend_boundary);
     RUN_TEST(repair_lsm_large_insert);
     RUN_TEST(repair_changepw_fail_rollback);
@@ -766,12 +785,12 @@ int main(int argc, char **argv)
     RUN_TEST(repair_thread_shutdown_cycles);
     test_state_checkpoint("final_repair");
 
-    /* ★ WP-0 验收：vendored flatcc 工具链（schema codegen + flatccrt 编解码闭环） */
+    /* ★ 验收：vendored flatcc 工具链（schema codegen + flatccrt 编解码闭环） */
     RUN_TEST(flatcc_demo_roundtrip);
     RUN_TEST(flatcc_demo_tamper_rejected);
     test_state_checkpoint("flatcc_demo");
 
-    /* ★ WP-1 验收：CNG 内核托管（AEAD 封装层 + 密钥组生命周期） */
+    /* ★ 验收：CNG 内核托管（AEAD 封装层 + 密钥组生命周期） */
     RUN_TEST(cng_aead_roundtrip);
     RUN_TEST(cng_aead_init_contract);
     RUN_TEST(cng_aead_empty_plaintext);
@@ -789,7 +808,7 @@ int main(int argc, char **argv)
     RUN_TEST(km_global_handle_tracking);
     test_state_checkpoint("cng_kernel");
 
-    /* ★ WP-7 验收：安全分配器（隔离堆 + PAGE_GUARD 边界页 + 锁页 + 预算记账） */
+    /* ★ 验收：安全分配器（隔离堆 + PAGE_GUARD 边界页 + 锁页 + 预算记账） */
     RUN_TEST(sec_alloc_basic_roundtrip);
     RUN_TEST(sec_alloc_guard_pages);
     RUN_TEST(sec_alloc_locked);
@@ -798,7 +817,7 @@ int main(int argc, char **argv)
     RUN_TEST(sec_alloc_destroy_releases_all);
     test_state_checkpoint("secure_allocator");
 
-    /* ★ WP-2 验收：V3 超级块（flatcc 序列化 + HMAC + 三副本法定人数 + 事务） */
+    /* ★ 验收：V3 超级块（flatcc 序列化 + HMAC + 三副本法定人数 + 事务） */
     RUN_TEST(v3sb_init_new_defaults);
     RUN_TEST(v3sb_init_rejects_null);
     RUN_TEST(v3sb_serialize_parse_roundtrip);
@@ -821,7 +840,7 @@ int main(int argc, char **argv)
     RUN_TEST(v3sb_txn_commit_rollback);
     test_state_checkpoint("v3_superblock");
 
-    /* ★ WP-2 验收：V3 分区管理（独立 AEAD 密钥 + nonce 防回退 + 分区表持久化） */
+    /* ★ 验收：V3 分区管理（独立 AEAD 密钥 + nonce 防回退 + 分区表持久化） */
     RUN_TEST(v3part_create_defaults);
     RUN_TEST(v3part_create_rejects_invalid);
     RUN_TEST(v3part_encrypt_decrypt_roundtrip);
@@ -839,8 +858,8 @@ int main(int argc, char **argv)
     RUN_TEST(v3part_table_save_rejects_invalid);
     test_state_checkpoint("v3_partition");
 
-    /* ★ WP-3 验收：V3 内容寻址 Extent（去重 + 引用计数 + GC 标记 +
-     * 双重完整性 + 索引持久化 + E-7 防回退） */
+    /* ★ 验收：V3 内容寻址 Extent（去重 + 引用计数 + GC 标记 +
+     * 双重完整性 + 索引持久化 + nonce 防回退） */
     RUN_TEST(v3ext_hash_basics);
     RUN_TEST(v3ext_index_init_and_find);
     RUN_TEST(v3ext_put_get_roundtrip);
@@ -859,7 +878,7 @@ int main(int argc, char **argv)
     RUN_TEST(v3ext_null_params_rejected);
     test_state_checkpoint("v3_extent");
 
-    /* ★ WP-4 验收：V3 LSM 索引（MemTable 跳表 + SSTable + Bloom +
+    /* ★ 验收：V3 LSM 索引（MemTable 跳表 + SSTable + Bloom +
      * WAL 崩溃恢复 + Manifest 原子提交 + 分级 Compaction） */
     RUN_TEST(v3lsm_open_close_roundtrip);
     RUN_TEST(v3lsm_put_get_roundtrip);
@@ -876,7 +895,7 @@ int main(int argc, char **argv)
     RUN_TEST(v3lsm_null_params_rejected);
     test_state_checkpoint("v3_lsm");
 
-    /* ★ WP-5 验收：V3 生命周期全链路（创建→写→读→删→改密→导出→导入重开）
+    /* ★ 验收：V3 生命周期全链路（创建→写→读→删→改密→导出→导入重开）
      * + 解锁流水线（fail_mask 逐阶段注入 / MINIMAL_FIRST 渐进式）
      * + 温缓存（命中/未命中/篡改回退）+ WAL 崩溃恢复矩阵（三分支回放规则） */
     RUN_TEST(v3life_full_chain_roundtrip);
@@ -897,7 +916,7 @@ int main(int argc, char **argv)
     RUN_TEST(arekey_crash_after_commit);
     test_state_checkpoint("v3_lifecycle");
 
-    /* ★ WP-12 验收：属性测试（LSM/Extent/事务三大不变式族 + 回滚耐久性回归） */
+    /* ★ 验收：属性测试（LSM/Extent/事务三大不变式族 + 回滚耐久性回归） */
     RUN_TEST(prop_lsm_insert_find_delete);
     RUN_TEST(prop_extent_refcount_conservation);
     RUN_TEST(prop_txn_commit_rollback_consistency);

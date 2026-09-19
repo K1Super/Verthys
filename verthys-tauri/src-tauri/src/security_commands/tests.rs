@@ -1,7 +1,6 @@
 /*
  * tests.rs — 安全命令模块集成测试
  *
- *    "优化.md" 第十三章 — 单元测试
  *
  * 职责：
  *   验证 SecurityResult 构造、auth_token 生成/存储/消费、
@@ -86,7 +85,7 @@ fn test_brute_force_persisted_state_serde() {
 
 #[test]
 fn test_brute_force_export_import_roundtrip() {
-    // SECURITY.md 第 4 项：测试中禁用速率限制
+    // 测试中禁用速率限制
     let guard = BruteForceGuard::with_config(BruteForceConfig {
         rate_limit_ms: 0,
         ..Default::default()
@@ -128,7 +127,7 @@ fn test_shadow_sleep_status_real_txid() {
     // 进入影子休眠
     shadow.enter_shadow_sleep(vec![1, 2, 3], 12345, 30);
     assert!(shadow.is_in_shadow_sleep());
-    // 第 13.2.8 项：返回真实 txid（非 0）
+    // 返回真实 txid（非 0）
     assert_eq!(shadow.current_txid(), 12345);
 
     // 恢复后 txid 归零

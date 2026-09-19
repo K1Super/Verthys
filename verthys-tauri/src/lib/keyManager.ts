@@ -97,7 +97,7 @@ export {
   isFlushing,
 } from "../cache/composition/verthys-cache";
 
-/* ===== Phase 2E 两层缓存 API（摘要常驻 + 全量按需 LRU-50） ===== */
+/* ===== 两层缓存 API（摘要常驻 + 全量按需 LRU-50） ===== */
 export {
   ensureSummaryScan,
   getSummaryIdsByType,
@@ -116,12 +116,11 @@ export {
   /* ★ 性能修复：批量获取多条记录 dataB64（扫描缓存优先 + 并行 IPC 回退）。
    *   供 4 个业务模块列表加载使用，替代旧 summary 路径对每条记录串行 getFullRecord
    *   （N 条 = N 次串行 IPC，与后台 ensureRecordScan 抢同一常驻 worker → 30s）。
-   *   新方案总耗时 < 2.5s。 */
+   *   新实现总耗时 < 2.5s。 */
   getRecordsDataB64Batch,
   clearAllVerthysCaches,
 } from "../cache/composition/verthys-cache";
-/* ★ 后台任务 API 直连 core 层再导出（verthys-cache 组合根 §二.2 单向化：
- *   start/stop 不再经 verthys-cache 转发，下游导入路径保持不变） */
+/* ★ 后台任务 API 直连 core 层再导出（单向化，下游导入路径保持不变） */
 export { startBackgroundTasks, stopBackgroundTasks } from "../core/background-tasks";
 export type { SummaryRecord } from "../lib/verthys";
 
@@ -172,15 +171,15 @@ export {
 } from "../key/module-auth";
 
 /* ================================================================== *
- * ★ 白皮书 V2.0 架构优化（阶段 6.1）再导出                            *
+ * ★ 架构优化再导出                                       *
  *                                                                    *
- * 落实白皮书 2.2 / 3.2 / 4.2 / 4.4：将新增的基础库 API 通过 keyManager *
- * 门面统一再导出，供 Vue 组件与上层模块使用，保持单一导入入口。        *
+ * 将新增的基础库 API 通过 keyManager 门面统一再导出，供 Vue 组件与     *
+ * 上层模块使用，保持单一导入入口。                                    *
  * ================================================================== */
 
 /* ===== VerthysResult 结构化错误契约 API =====
  *
- * 落实白皮书 2.2 方案一：所有公共函数返回 Promise<VerthysResult<T>>。
+ * 所有公共函数返回 Promise<VerthysResult<T>>。
  * Vue 组件通过 result.ok / result.code 处理错误，提供精确 UI 提示。
  */
 export {
@@ -201,7 +200,7 @@ export type { DeviceBindingResult } from "../types/key_manager";
 
 /* ===== CacheCoordinator 缓存协调器（单例）=====
  *
- * 落实白皮书 3.2 方案二：业务代码通过 cacheCoordinator.addRecord /
+ * 业务代码通过 cacheCoordinator.addRecord /
  * removeRecord / updateRecord 同步三层缓存（摘要/扫描/全量），
  * 消除手动调用 5 个分散缓存函数的遗漏风险。
  */
@@ -210,7 +209,7 @@ export type { RecordUpdate } from "../cache/coordination/cache-coordinator";
 
 /* ===== 统一日志工具（环境感知）=====
  *
- * 落实白皮书 2.2 方案五 / 4.3：所有业务模块使用 createLogger(moduleName)
+ * 所有业务模块使用 createLogger(moduleName)
  * 替换原生 console，开发环境输出 debug/info/warn/error，
  * 生产环境仅输出 error，避免污染控制台与影响性能。
  */
@@ -219,7 +218,7 @@ export type { Logger } from "../utils/logger";
 
 /* ===== 统一冲刷队列服务（延迟持久化）=====
  *
- * 落实白皮书 4.2：global-verthys.ts 与 module-auth.ts 共享此服务，
+ * global-verthys.ts 与 module-auth.ts 共享此服务，
  * enqueueFlush 入队后立即返回（不阻塞 UI），flushVerthysNow 强制同步
  * 落盘（关键路径专用，含超时保护）。
  */
@@ -234,20 +233,20 @@ export {
 
 /* ===== 全局后台任务管理（async 停止）=====
  *
- * 落实白皮书 4.4：startBackgroundTasks 启动后台巡检任务，
+ * startBackgroundTasks 启动后台巡检任务，
  * stopBackgroundTasks 为 async，等待所有任务实际终止后再返回，
  * 防止 resetKeyManagerState 后旧任务访问已释放缓存。
  *
  * 注意：startBackgroundTasks / stopBackgroundTasks 现直连
- *   "../core/background-tasks" 再导出（verthys-cache 组合根 §二.2 单向化，
- *   不再经 verthys-cache 转发），此处仅补导 isBackgroundTasksRunning，
+ *   "../core/background-tasks" 再导出（单向化，不再经 verthys-cache 转发），
+ *   此处仅补导 isBackgroundTasksRunning，
  *   避免重复导出冲突。
  */
 export { isBackgroundTasksRunning } from "../core/background-tasks";
 
 /* ===== 设备绑定独立 API =====
  *
- * 落实白皮书 2.2 方案三：从 initGlobalKey 中解耦，由调用方显式控制。
+ * 从 initGlobalKey 中解耦，由调用方显式控制。
  * SecurityCenter.vue 在 initGlobalKey 成功后调用 bindDevice(false)，
  * 失败仅 Toast 提示不阻塞主流程；force=true 覆盖旧绑定。
  */
@@ -255,7 +254,7 @@ export { bindDevice } from "../key/global-verthys";
 
 /* ===== 错误码 i18n 翻译工具 =====
  *
- * 落实白皮书 9.2：将 VerthysResult 错误码翻译为用户可读中文消息，
+ * 将 VerthysResult 错误码翻译为用户可读中文消息，
  * 供所有 Vue 组件复用，避免在每个组件中重复 switch/case。
  */
 export { translateVerthysError } from "../utils/verthys-error-i18n";

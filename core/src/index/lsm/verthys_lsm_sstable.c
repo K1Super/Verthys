@@ -1,9 +1,6 @@
 /*
  * verthys_lsm_sstable.c — LSM SSTable：写入/查找/迭代 + Bloom Filter
  *
- * 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.6
- * 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-4
- *
  * 磁盘布局（schema/sstable.fbs；容器文件内一段连续 append-only 区域）：
  *   [Data Block 0..N-1][Index Block][Bloom Filter][Footer][Trailer 24B]
  *
@@ -849,7 +846,7 @@ static VerthysResult scan_block(const uint8_t *pt, size_t pt_len, uint64_t lid,
     return VERTHYS_ERR_NOTFOUND;
 }
 
-/* ★ WP-5（UNLOCK_OPTIMIZATION §7/§9）：单表全量预热——ensure_* 链
+/* 单表全量预热——ensure_* 链
  * 顺序强制加载（Footer → Bloom → Index Block），后续 get 零元数据 IO。
  * 幂等：各 ensure_* 自带缓存命中即返。 */
 VerthysResult verthys_lsm_sstable_preheat(FILE *f, VerthysPartition *part,

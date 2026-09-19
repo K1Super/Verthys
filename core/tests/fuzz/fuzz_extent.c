@@ -1,7 +1,5 @@
 /*
- * fuzz_extent.c — V3 Extent 索引明文帧模糊测试目标（WP-10 目标 3/5）
- *
- * 设计依据：docs/V3_UPGRADE_PLAYBOOK.md WP-10
+ * fuzz_extent.c — V3 Extent 索引明文帧模糊测试目标
  *
  * 测试面：verthys_extent_index_parse_unverified —— Extent 索引帧 AEAD
  * 解密后的明文解析（flatcc verifier → magic/version → 条目数上限 →

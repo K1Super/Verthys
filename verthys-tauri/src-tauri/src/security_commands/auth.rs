@@ -15,14 +15,14 @@
 use super::state::SecurityState;
 
 /* ====================================================================== *
- *  第 13.2.5 项：权限令牌（抗重放保护）                                   *
+ *  权限令牌（抗重放保护）                                   *
  *                                                                        *
  *  敏感操作（record_success / clear_purge / set_high_security）要求      *
  *  携带一次性 auth_token。令牌由 security_generate_auth_token 生成，     *
  *  验证后立即消费（一次性使用），防止重放攻击。                           *
  * ====================================================================== */
 
-/// 第 13.2.5 项：生成一次性权限令牌（32 字节 hex = 64 字符）
+/// 生成一次性权限令牌（32 字节 hex = 64 字符）
 pub(super) fn generate_auth_token() -> String {
     #[cfg(target_os = "windows")]
     {
@@ -63,7 +63,7 @@ pub(super) fn generate_auth_token() -> String {
     hash.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// 第 13.2.5 项：存储权限令牌
+/// 存储权限令牌
 pub(super) fn store_auth_token(state: &SecurityState, token: String) {
     if let Ok(mut tokens) = state.auth_tokens.lock() {
         tokens.push(token);
@@ -74,7 +74,7 @@ pub(super) fn store_auth_token(state: &SecurityState, token: String) {
     }
 }
 
-/// 第 13.2.5 项：验证并消费权限令牌（一次性使用）
+/// 验证并消费权限令牌（一次性使用）
 ///
 /// 返回 true=令牌有效且已消费，false=令牌无效或不存在
 pub(super) fn verify_and_consume_auth_token(state: &SecurityState, token: Option<&str>) -> bool {

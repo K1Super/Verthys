@@ -1,7 +1,7 @@
 /*
  * util/random.rs — 密码学安全随机字节生成工具
  *
- *    "" 阶段 1 util 增强
+ *
  *
  * 架构定位：工具层（util）纯函数模块
  *   - 不依赖任何上层模块（controller / service / repository）

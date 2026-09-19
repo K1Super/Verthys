@@ -28,7 +28,7 @@ use crate::security_commands::responses::{
 use crate::security_commands::state::{lock_brute_force_or_recover, SecurityState};
 
 /* ====================================================================== *
- *  1. 暴力拦截命令（第 13.2.2 / 13.2.4 / 13.2.5 / 13.2.7 项）             *
+ *  1. 暴力拦截命令             *
  * ====================================================================== */
 
 /// 检查当前是否允许尝试解锁
@@ -37,7 +37,7 @@ pub fn security_brute_check(
     app: tauri::AppHandle,
     state: State<SecurityState>,
 ) -> Result<BruteForceCheckResponse, String> {
-    // 第 13.2.2 项：首次访问时从持久化加载状态
+    // 首次访问时从持久化加载状态
     ensure_brute_force_loaded(&app, &state);
 
     let guard = lock_brute_force_or_recover(&state)?;
@@ -55,17 +55,17 @@ pub fn security_brute_record_failure(
     app: tauri::AppHandle,
     state: State<SecurityState>,
 ) -> Result<BruteForceCheckResponse, String> {
-    // 第 13.2.2 项：首次访问时从持久化加载状态
+    // 首次访问时从持久化加载状态
     ensure_brute_force_loaded(&app, &state);
 
     let response = {
         let guard = lock_brute_force_or_recover(&state)?;
         let result = guard.record_failure();
 
-        // 第 13.2.2 项：状态变更后持久化
+        // 状态变更后持久化
         persist_brute_force_state(&app, &guard);
 
-        // 第 13.2.7 项：审计日志
+        // 审计日志
         let (audit_result, audit_detail) = match &result {
             AttemptResult::Failure => (AuditResult::Failure, None),
             AttemptResult::FailureLocked(secs) => (
@@ -77,12 +77,12 @@ pub fn security_brute_record_failure(
                 Some("BRUTE_FORCE_PURGE: 触发索引清空 + 完整性校验".into()),
             ),
             AttemptResult::Success => (AuditResult::Success, None),
-            // SECURITY.md 第 4 项：速率限制
+            // 速率限制
             AttemptResult::RateLimited => (
                 AuditResult::Denied,
                 Some("RATE_LIMITED: record_failure 调用速率超限".into()),
             ),
-            // SECURITY.md 第 2 项：锁定/Purge 期间冻结
+            // 锁定/Purge 期间冻结
             AttemptResult::Frozen(secs) => (
                 AuditResult::Denied,
                 Some(format!("FROZEN: 记录接口冻结 (剩余 {} 秒)", secs)),
@@ -103,7 +103,7 @@ pub fn security_brute_record_failure(
                 BruteForceCheckResponse::Locked { remaining_secs: secs }
             }
             AttemptResult::FailurePurgeRequired => BruteForceCheckResponse::PurgeRequired,
-            // SECURITY.md 第 4 项：速率限制 — 返回当前状态
+            // 速率限制 — 返回当前状态
             AttemptResult::RateLimited => match guard.check() {
                 BruteForceCheck::Allow => BruteForceCheckResponse::Allow,
                 BruteForceCheck::Locked(s) => {
@@ -111,7 +111,7 @@ pub fn security_brute_record_failure(
                 }
                 BruteForceCheck::PurgeRequired => BruteForceCheckResponse::PurgeRequired,
             },
-            // SECURITY.md 第 2 项：冻结 — secs>0 表示锁定中，secs=0 表示 PurgeRequired
+            // 冻结 — secs>0 表示锁定中，secs=0 表示 PurgeRequired
             AttemptResult::Frozen(secs) => {
                 if secs > 0 {
                     BruteForceCheckResponse::Locked { remaining_secs: secs }
@@ -125,7 +125,7 @@ pub fn security_brute_record_failure(
     Ok(response)
 }
 
-/// 第 13.2.5 项：生成一次性权限令牌
+/// 生成一次性权限令牌
 ///
 /// 前置条件：金库已解锁（KeyLifecycle 处于 Unlocked 状态）。
 /// 令牌为一次性使用，验证后立即消费。
@@ -135,7 +135,7 @@ pub fn security_generate_auth_token(
     state: State<SecurityState>,
     app_state: State<'_, crate::state::AppState>,
 ) -> Result<AuthTokenResult, String> {
-    // 第 13.2.5 项：检查金库是否已解锁
+    // 检查金库是否已解锁
     let key_state = app_state.key_lifecycle.current_state();
     if key_state != crate::state::KeyLifecycleState::Unlocked {
         write_security_audit(
@@ -175,7 +175,7 @@ pub fn security_generate_auth_token(
     })
 }
 
-/// 第 13.2.5 项：记录一次解锁成功（重置连续失败计数）
+/// 记录一次解锁成功（重置连续失败计数）
 ///
 /// 要求：
 ///   1. 携带有效的 auth_token（一次性消费）
@@ -187,7 +187,7 @@ pub fn security_brute_record_success(
     app_state: State<'_, crate::state::AppState>,
     auth_token: Option<String>,
 ) -> Result<SecurityResult, String> {
-    // 第 13.2.5 项：验证 auth_token（一次性消费）
+    // 验证 auth_token（一次性消费）
     if !verify_and_consume_auth_token(&state, auth_token.as_deref()) {
         write_security_audit(
             &app,
@@ -203,7 +203,7 @@ pub fn security_brute_record_success(
         ));
     }
 
-    // 第 13.2.5 项：检查金库是否确实已解锁
+    // 检查金库是否确实已解锁
     let key_state = app_state.key_lifecycle.current_state();
     if key_state != crate::state::KeyLifecycleState::Unlocked {
         write_security_audit(
@@ -223,13 +223,13 @@ pub fn security_brute_record_success(
         ));
     }
 
-    // 第 13.2.2 项：首次访问时从持久化加载状态
+    // 首次访问时从持久化加载状态
     ensure_brute_force_loaded(&app, &state);
 
     {
         let guard = lock_brute_force_or_recover(&state)?;
         guard.record_success();
-        // 第 13.2.2 项：状态变更后持久化
+        // 状态变更后持久化
         persist_brute_force_state(&app, &guard);
     }
 
@@ -245,7 +245,7 @@ pub fn security_brute_record_success(
     Ok(SecurityResult::success("解锁成功，失败计数已重置"))
 }
 
-/// 第 13.2.5 项：清除熔断状态（PurgeRequired 处理完成后调用）
+/// 清除熔断状态（PurgeRequired 处理完成后调用）
 ///
 /// 要求：携带有效的 auth_token（一次性消费）
 #[tauri::command]
@@ -254,7 +254,7 @@ pub fn security_brute_clear_purge(
     state: State<SecurityState>,
     auth_token: Option<String>,
 ) -> Result<SecurityResult, String> {
-    // 第 13.2.5 项：验证 auth_token
+    // 验证 auth_token
     if !verify_and_consume_auth_token(&state, auth_token.as_deref()) {
         write_security_audit(
             &app,
@@ -294,7 +294,7 @@ pub fn security_brute_status(
     app: tauri::AppHandle,
     state: State<SecurityState>,
 ) -> Result<BruteForceStatus, String> {
-    // 第 13.2.2 项：首次访问时从持久化加载状态
+    // 首次访问时从持久化加载状态
     ensure_brute_force_loaded(&app, &state);
 
     let guard = lock_brute_force_or_recover(&state)?;

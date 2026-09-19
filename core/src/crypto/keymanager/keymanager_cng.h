@@ -1,18 +1,13 @@
 /*
  * keymanager_cng.h — V3 密钥组 CNG 内核托管生命周期（内部模块，不导出）
  *
- * 设计依据：
- *   - docs/TARGET_ARCHITECTURE_V5.md §5（CNG 内核全量托管）+ §5.3（生命周期状态机）
- *   - docs/UNLOCK_OPTIMIZATION.md §6.1（批量导入）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-1
- *
  * 职责：
  *   1. V3 密钥组（MEK + A/B/C）批量导入：MEK 明文仅在其导入函数栈帧内
  *      短暂存在；A/B/C 以 wrapped 形态（MEK 内核态加密）进入，解包过程
- *      在内核态完成——解包输出缓冲栈上分配 + 立即清零（方案 E-5）；
+ *      在内核态完成——解包输出缓冲栈上分配 + 立即清零；
  *   2. 句柄生命周期状态机：UNINITIALIZED → KERNEL_RESIDENT →
  *      (REKEYING → KERNEL_RESIDENT)* → DESTROYED；
- *   3. 句柄总数预算：≤ VERTHYS_CNG_MAX_HANDLES（性能架构 §4.4）。
+ *   3. 句柄总数预算：≤ VERTHYS_CNG_MAX_HANDLES。
  *
  * wrapped 子密钥存储格式（V3 超级块承载，域分离标签 v3）：
  *   [12B nonce || 32B ciphertext || 16B tag] = 60 字节
@@ -29,7 +24,7 @@
 extern "C" {
 #endif
 
-/* V3 密钥角色（v5.0 §5.1 目标态密钥层次） */
+/* V3 密钥角色（密钥层次） */
 typedef enum {
     VERTHYS_CNG_KEY_MEK = 0,   /* L3 主加密密钥（wrapped 解包的密钥源） */
     VERTHYS_CNG_KEY_A,         /* L4 索引密钥 */
@@ -38,16 +33,16 @@ typedef enum {
     VERTHYS_CNG_KEY_COUNT
 } VerthysCngKeyRole;
 
-/* 生命周期状态机（v5.0 §5.3） */
+/* 生命周期状态机 */
 typedef enum {
     VERTHYS_CNG_KM_UNINITIALIZED  = 0,  /* init 后，未导入任何密钥 */
     VERTHYS_CNG_KM_DERIVED        = 1,  /* DKM/MEK 在用户态短暂存在（导入中） */
     VERTHYS_CNG_KM_KERNEL_RESIDENT = 2, /* 全部句柄内核态驻留（正常运行） */
-    VERTHYS_CNG_KM_REKEYING       = 3,  /* 新旧句柄共存，原子切换中（WP-6） */
+    VERTHYS_CNG_KM_REKEYING       = 3,  /* 新旧句柄共存，原子切换中 */
     VERTHYS_CNG_KM_DESTROYED      = 4   /* BCryptDestroyKey 完成，不可恢复 */
 } VerthysCngKmState;
 
-/* 句柄总数上限（性能架构 §4.4：CNG 句柄预算） */
+/* 句柄总数上限（CNG 句柄预算） */
 #define VERTHYS_CNG_MAX_HANDLES 16
 
 /* wrapped 子密钥序列化长度（12B nonce + 32B ct + 16B tag） */
@@ -67,7 +62,7 @@ typedef struct VerthysCngKeyManager {
 VerthysResult verthys_cng_km_init(VerthysCngKeyManager *km);
 
 /*
- * 批量导入 V3 密钥组（UNLOCK_OPTIMIZATION §6.1 流程）：
+ * 批量导入 V3 密钥组：
  *   1. 导入 MEK（仅此一步密钥明文在用户态栈帧，导入后立即清零）；
  *   2. 用 MEK 内核句柄解包 wrapped_a/b/c（解密在内核态完成）；
  *   3. 解包输出（栈上 32B）立即导入对应角色 → 清零。
@@ -89,7 +84,7 @@ __declspec(noinline) VerthysResult verthys_cng_km_import_batch(
 );
 
 /*
- * ★ WP-5（verthys_v3_lifecycle 创建路径）：MEK 内核句柄包装子密钥。
+ * verthys_v3_lifecycle 创建路径：MEK 内核句柄包装子密钥。
  * 用 MEK 角色上下文（须已导入）对 32B 子密钥明文做内核态加密，产出
  * wrapped 布局 [12B nonce || 32B ct || 16B tag]（60B，与 import_batch
  * 的解包格式互逆），AAD 角色绑定（域分离同 import 路径）。
@@ -104,7 +99,7 @@ __declspec(noinline) VerthysResult verthys_cng_km_wrap_key(
 );
 
 /*
- * ★ WP-5（verthys_v3_lifecycle 创建路径）：生成 V3 密钥组 wrapped 形态。
+ * verthys_v3_lifecycle 创建路径：生成 V3 密钥组 wrapped 形态。
  * 流程：A/B/C 各 32B 随机（用户态栈帧瞬态）→ MEK 临时导入内核 →
  * 逐角色 wrap（内核态加密，AAD 角色绑定）→ 临时 MEK 句柄销毁 →
  * 状态归还 UNINITIALIZED。产出与 import_batch 互逆：调用方持久化
@@ -123,7 +118,7 @@ VerthysResult verthys_cng_km_generate_keyset(
 );
 
 /*
- * 获取指定角色的内核态 AEAD 上下文（调用点接线用，WP-5）。
+ * 获取指定角色的内核态 AEAD 上下文（调用点接线用）。
  * 返回 NULL：参数非法或该角色未导入。
  * 返回的指针生命周期与 km 一致；KERNEL_RESIDENT 态下线程安全
  * （AEAD 运算并发安全，nonce 计数器原子递增）。
@@ -131,7 +126,7 @@ VerthysResult verthys_cng_km_generate_keyset(
 VerthysCngAead *verthys_cng_km_get(VerthysCngKeyManager *km, VerthysCngKeyRole role);
 
 /*
- * ★ WP-5（ChangePassword V3）：旧口令派生 MEK 的包裹验证。
+ * ChangePassword V3：旧口令派生 MEK 的包裹验证。
  * 临时导入 candidate MEK（唯一句柄，用后即毁）→ 对 wrapped_probe
  * （60B，调用方通常传超级块 wrapped_key_a）执行内核态解包试探：
  * AEAD 认证通过 = 该 MEK 即当前口令派生（VERTHYS_OK）；认证失败 =
@@ -143,9 +138,9 @@ VerthysResult verthys_cng_km_verify_mek(
     const uint8_t *wrapped_probe, uint32_t wrapped_probe_len);
 
 /*
- * ★ WP-5（ChangePassword V3）：密钥组重包裹（口令变更）。
+ * ChangePassword V3：密钥组重包裹（口令变更）。
  * 前置：km 处于 KERNEL_RESIDENT（旧 MEK + A/B/C 内核驻留）。
- * 流程（单栈帧，A/B/C 明文仅瞬态，红线 E-5）：
+ * 流程（单栈帧，A/B/C 明文仅瞬态）：
  *   对 role ∈ {A,B,C}：
  *     1. km 内旧 MEK 句柄解包 wrapped_role（超级块现值）→ 栈上 32B；
  *     2. 新 MEK 临时句柄（本函数内导入/销毁）重新加密 → new_wrapped_out；
@@ -166,7 +161,7 @@ VerthysResult verthys_cng_km_rekey(
     uint8_t *new_wrapped_c_out, uint32_t new_wrapped_c_cap);
 
 /*
- * ★ WP-5（ChangePassword V3）：MEK 句柄轮换（超级块提交成功后收尾）。
+ * ChangePassword V3：MEK 句柄轮换（超级块提交成功后收尾）。
  * 前置：KERNEL_RESIDENT。销毁旧 MEK 句柄 → 导入 new_mek（计数严格
  * 配对）→ new_mek 清零。A/B/C 句柄不动（明文未变，仅 wrapped 形态
  * 随口令更新）。失败：CNG 导入失败时 MEK 角色空缺（运行态仅 A/B/C
@@ -177,13 +172,13 @@ VerthysResult verthys_cng_km_rotate_mek(
     const uint8_t new_mek[VERTHYS_CNG_KEY_BYTES]);
 
 /*
- * ★ WP-6（自动密钥轮换）：A/B/C 句柄原位切换（超级块提交成功后收尾）。
+ * 自动密钥轮换：A/B/C 句柄原位切换（超级块提交成功后收尾）。
  * 前置：KERNEL_RESIDENT。new_a/b/c 为调用方已 init + import 的全新
  * 上下文（verthys_rekey_auto_rotate 产物）。消耗语义（调用方在任意
  * 返回路径均不得再 destroy 这三个结构）：
  *   - 成功：三个上下文按值移交 km->keys[A/B/C]（调用方栈结构置零），
  *     km->keys[] 槽位地址不变——wal/txn 借用的 VerthysCngAead 指针
- *     续期有效（v5.0 "原子指针切换句柄"的落地形态）；nonce 计数器
+ *     续期有效（原子切换句柄的落地形态）；nonce 计数器
  *     随结构移交（wrap/table 帧已消耗的值不回退）；
  *   - 失败（参数/状态非法）：三个上下文由本函数销毁，km 零变更。
  * MEK 句柄不动（轮换非改密）。handle_count / 进程级总量严格配对
@@ -195,11 +190,11 @@ __declspec(noinline) VerthysResult verthys_cng_km_rotate_abc(
     VerthysCngAead *new_b,
     VerthysCngAead *new_c);
 
-/* ★ 方案 §6.2/防御闭环判据：是否有任一密钥已导入内核（1=是） */
+/* 防御闭环判据：是否有任一密钥已导入内核（1=是） */
 int verthys_cng_km_any_installed(const VerthysCngKeyManager *km);
 
 /*
- * ★ WP-1 验收：进程级 CNG 内核句柄总量（本模块全部 VerthysCngKeyManager
+ * 进程级 CNG 内核句柄总量（本模块全部 VerthysCngKeyManager
  * 实例的活跃句柄之和，原子维护）。defense_closure MEM_DUMP 判据的 V3 分支：
  * > 0 即密钥组已进入内核托管 → 可置 BLOCKED。模块级全局状态与 ctx 解耦，
  * 支持防御闭环在无句柄上下文时查询。

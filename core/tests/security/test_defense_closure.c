@@ -1,7 +1,7 @@
 /*
- * test_defense_closure.c — ★ V3 升级 WP-11：防御闭环状态查询
+ * test_defense_closure.c — 防御闭环状态查询
  *
- * 覆盖（M3 里程碑验收信号"defense_closure 7/7 BLOCKED（运行时验证）"）：
+ * 覆盖（defense_closure 7/7 BLOCKED 运行时验证）：
  *   - Verthys_GetSecurityStatus 参数校验（NULL 句柄 / NULL 出参）
  *   - BOOT 语义回归：Verthys_Init 成功 ⟹ 复检无 FAILED 路径
  *     （任一 FAILED 会使 Verthys_Init 本身拒绝启动）
@@ -11,10 +11,10 @@
  *   - 实时性（活复检而非缓存）：Verthys_Lock 销毁 CNG 密钥组后，
  *     MEM_DUMP 回落至解锁前基线
  *
- * 判据依据（v5.0 §11.3"防御状态可查询"+ 手册 WP-11 卡片）：
+ * 判据依据（防御状态可查询）：
  *   P1 挂起绕过=反调试就绪；P2 内存 Dump=密钥 CNG 托管；P3 休眠取证=
- *   密钥托管+锁页（WP-11 判据重构）；P4 API Hook=TLS 标志+完整性+
- *   直接系统调用（WP-9 落地）；P5 DLL 劫持=Sys32 优先+镜像策略；
+ *   密钥托管+锁页；P4 API Hook=TLS 标志+完整性+
+ *   直接系统调用；P5 DLL 劫持=Sys32 优先+镜像策略；
  *   P6 进程读取=Job 隔离；P7 跨设备=机器密钥+硬件指纹。
  */
 #include "verthys_test.h"

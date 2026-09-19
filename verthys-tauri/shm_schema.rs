@@ -1,8 +1,6 @@
 /*
  * shm_schema.rs — 共享内存 (SHM) 协议契约（worker ↔ 主进程同源定义）
  *
- *    "" 第 14.1 项 / 第 14.4 项
- *
  * ★ 同源定义策略（替代 bindgen 解析 C 头文件）：
  *   经源码核验，verthys-worker 为 Rust crate（非 C 源码），主进程与 worker 均为 Rust。
  *   采用 `include!()` 宏方式使两 crate 共享同一份源文件，达到与 bindgen 同等的
@@ -12,7 +10,7 @@
  *   - worker：`shm_schema.rs` 通过 `include!` 引入本文件
  *   - 修改本文件后，两 crate 同步重编译，根治版本分化
  *
- * 编译期校验（第 14.4 项）：
+ * 编译期校验：
  *   - `const_assert_eq!(SHM_HEADER_SIZE, size_of::<ShmHeader>())`
  *   - `const_assert_eq!(SHM_ENTRY_SIZE, size_of::<ShmEntry>())`
  *   - `const_assert_eq!(SHM_SUMMARY_ENTRY_SIZE, size_of::<ShmSummaryEntry>())`
@@ -43,7 +41,7 @@
  *   [24..32] physical_offset: u64
  *   [32..40] name_offset: u64
  *   [40..72] merkle_leaf: [u8; 32]
- *   [72..80] created_time: u64  ★ Phase 2G
+ *   [72..80] created_time: u64
  *
  * CI 红线：
  *   - 严禁在本文件中引入任何外部 crate（保持 include! 上下文纯净）
@@ -161,7 +159,7 @@ pub struct ShmSummaryEntry {
     pub created_time: u64,
 }
 
-// ===== 编译期布局校验（第 14.4 项）=====
+// ===== 编译期布局校验 =====
 // 任何修改 ShmHeader / ShmEntry / ShmSummaryEntry 布局的行为，
 // 若未同步更新 SHM_HEADER_SIZE / SHM_ENTRY_SIZE / SHM_SUMMARY_ENTRY_SIZE，
 // 将在此处触发编译错误，根治版本分化。
@@ -171,7 +169,7 @@ const _: () = {
     const_assert_eq(SHM_SUMMARY_ENTRY_SIZE, size_of::<ShmSummaryEntry>());
 };
 
-// ===== SHM 名称校验白名单（第 2.6 项）=====
+// ===== SHM 名称校验白名单 =====
 /// SHM 名称合法字符集：字母、数字、下划线、连字符
 ///
 /// worker 创建共享内存时使用 `verthys_scan_<random_hex>` 格式，
@@ -196,7 +194,7 @@ pub fn is_valid_shm_name(name: &str) -> bool {
     })
 }
 
-// ===== 头部字段运行时校验（第 14.4 项）=====
+// ===== 头部字段运行时校验 =====
 /// 运行时校验头部 entry_size 字段
 ///
 /// worker 在头部 reserved 区可写入 entry_size（用于运行时布局一致性校验）。

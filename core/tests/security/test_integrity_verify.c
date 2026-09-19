@@ -1,5 +1,5 @@
 /*
- * test_integrity_verify.c — 方案 §6.3 配套测试：构建期签名验签
+ * test_integrity_verify.c — 配套测试：构建期签名验签
  *
  * 覆盖：
  *   - 开发/测试构建（.vsec 全零未配置）：integrity_verify_startup 空操作通过

@@ -1,9 +1,8 @@
 /*
  * defense_closure.c — 闭环防御能力验证状态机实现
  *
- * ★ 方案 §6.4/§3.1：随模块集精简而重写，状态语义诚实化。
- *
- * 原实现缺陷（security 层深度审计 §5.7）：BLOCKED 的判定是"模块 init 成功"
+
+ * 原实现缺陷：BLOCKED 的判定是"模块 init 成功"
  * 而非"攻击路径被阻断"——例如 check_mem_dump 的 BLOCKED 只说明
  * key_drift/working_set 定时器启动（注册表为空，什么都没保护）。
  *
@@ -12,18 +11,18 @@
  *   1. SUSPEND_BYPASS   — 反调试模块就绪（入口检测 + Init 校验）
  *   2. MEM_DUMP         — 密钥已进入 CNG 内核托管（key_separation 三权分立
  *                          或 V3 keymanager_cng 密钥组，任一成立即 BLOCKED）
- *   3. HIBERNATION      — ★ WP-11 判据重构：密钥 CNG 内核托管（与 MEM_DUMP
+ *   3. HIBERNATION      — 判据重构：密钥 CNG 内核托管（与 MEM_DUMP
  *                          同源判据——休眠取证窃取的是用户态页内密钥，
  *                          密钥不落地则 hiberfil.sys 无密钥可取）+
  *                          memory_guard 注册区锁页（在用数据防换出）
  *   4. IAT_INLINE_HOOK  — TLS 回调标志已验证 + 完整性模块就绪 +
- *                          ★ WP-11 判据升级（WP-9 落地）：直接系统调用激活，
+ *                          判据升级（直接系统调用激活），
  *                          检测器 NT 查询绕开可被用户态 Hook 的 ntdll 导出
  *   5. DLL_HIJACK       — System32 优先加载 + 沙盒镜像加载策略生效
  *   6. PROCESS_READ     — 双层 Job Object 隔离已建立
  *   7. CROSS_DEVICE     — CNG 机器密钥可用 + 硬件绑定指纹就绪
  *
- * ★ WP-11：check 全程持 SRWLOCK 串行化——BOOT（Verthys_Init）与 RUNTIME
+ * check 全程持 SRWLOCK 串行化——BOOT（Verthys_Init）与 RUNTIME
  *   （Verthys_GetSecurityStatus）可能并发到达，静态报告缓存 s_last_report
  *   的写读必须互斥。
  */
@@ -48,17 +47,17 @@
 /* Layer 5: 进程无菌沙盒 */
 #include "process_sandbox.h"
 
-/* 完整性模块（基准验签，方案 §6.3） */
+/* 完整性模块（基准验签） */
 #include "integrity.h"
 
 /* 反调试模块（SUSPEND_BYPASS 判据） */
 #include "anti_debug_v2.h"
 
-/* ★ WP-11：HIBERNATION 判据——memory_guard 注册区锁页（显式包含，
+/* HIBERNATION 判据——memory_guard 注册区锁页（显式包含，
  * 此前经传递包含隐式依赖） */
 #include "memory_guard.h"
 
-/* ★ WP-11：P4 判据升级——直接系统调用激活状态（WP-9 落地收口） */
+/* P4 判据升级——直接系统调用激活状态（落地收口） */
 #include "syscall_direct.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -73,7 +72,7 @@
 static int                s_initialized   = 0;
 static DefenseStatusReport s_last_report;
 static int                s_has_check     = 0;
-/* ★ WP-11：校验串行化锁——静态初始化（SRWLOCK_INIT），无需析构 */
+/* 校验串行化锁——静态初始化（SRWLOCK_INIT），无需析构 */
 static SRWLOCK            s_check_lock    = SRWLOCK_INIT;
 
 /* ---------- 各攻击路径状态检查 ---------- */
@@ -97,23 +96,23 @@ static DefenseState check_suspend_bypass(void)
 static DefenseState check_mem_dump(void)
 {
     if (key_separation_init() != 0) return DEFENSE_STATE_FAILED;
-    /* V2 三权分立托管 或 V3 密钥组 CNG 内核托管（WP-1），任一成立即 BLOCKED */
+    /* V2 三权分立托管 或 V3 密钥组 CNG 内核托管，任一成立即 BLOCKED */
     if (key_separation_any_installed()) return DEFENSE_STATE_BLOCKED;
     if (verthys_cng_km_global_handle_total() > 0) return DEFENSE_STATE_BLOCKED;
-    /* 方案 4.1 接线完成前置位：密钥在用户态，防 Dump 降级 */
+    /* 接线完成前置位：密钥在用户态，防 Dump 降级 */
     return DEFENSE_STATE_DEGRADED;
 }
 
 /*
  * 3. 休眠文件取证
- *    ★ WP-11 判据重构（目标态 7/7 BLOCKED 收口）：
+ *    判定重构（目标态 7/7 BLOCKED 收口）：
  *    休眠取证窃取的是"进程用户态地址空间中的密钥"。判据与 MEM_DUMP
  *    同源——密钥已 CNG 内核托管（key_separation 三权分立 或 V3
  *    keymanager_cng 密钥组）⟹ worker 用户态页无密钥可供 hiberfil.sys
  *    取证；叠加 memory_guard 注册区锁页（在用数据防换出），两者齐备
  *    即 BLOCKED。
  *    原实现（工作集驱逐体系删除后恒 DEGRADED）的前置残余——"密钥在
- *    用户态"——已由 WP-1 CNG 托管接线实质消除。
+ *    用户态"——已由 CNG 托管接线实质消除。
  */
 static DefenseState check_hibernation(void)
 {
@@ -129,9 +128,8 @@ static DefenseState check_hibernation(void)
 /*
  * 4. IAT Hook / Inline Hook
  *    依赖：TLS 回调标志已验证（tls_loader_init 已在 Verthys_Init 执行）
- *          + 完整性模块就绪（构建期基准验签，方案 §6.3）
- *          + ★ WP-11 判据升级（WP-9 落地）：直接系统调用激活——
- *            反调试/内存防护检测器的 NT 查询经自建 stub 页直达内核，
+ *          + 完整性模块就绪（构建期基准验签）
+ *          + 判据升级（直接系统调用激活）：反调试/内存防护检测器的 NT 查询经自建 stub 页直达内核，
  *            ntdll 导出入口的用户态 Inline Hook 无法再致盲检测器。
  *            stub 未激活（SSN 提取失败降级回 GetProcAddress）时，
  *            检测器查询重新暴露于可 Hook 路径，诚实降级。
@@ -185,7 +183,7 @@ static DefenseState check_process_read(void)
 /*
  * 7. 跨设备迁移解密
  *    依赖：cng_machine_key（CNG 机器密钥 + RSA-OAEP 包装 pepper）+
- *          hardware_binding（MachineGuid 指纹，方案 §4.4）
+ *          hardware_binding（MachineGuid 指纹）
  */
 static DefenseState check_cross_device(void)
 {
@@ -258,7 +256,7 @@ int defense_closure_check(DefenseCheckMode mode,
     DefenseStatusReport local;
     memset(&local, 0, sizeof(local));
 
-    /* ★ WP-11：全程持排他锁——BOOT（Verthys_Init）与 RUNTIME
+    /* 全程持排他锁——BOOT（Verthys_Init）与 RUNTIME
      * （Verthys_GetSecurityStatus）并发调用时，s_last_report 写读互斥；
      * 各 check_* 仅读已初始化模块的稳定状态，锁内无回调重入。 */
     AcquireSRWLockExclusive(&s_check_lock);

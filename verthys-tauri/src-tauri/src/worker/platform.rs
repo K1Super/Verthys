@@ -8,7 +8,7 @@
 //! 修复：创建 Job Object 并设置 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 标志，
 //!   将 worker 子进程分配到 Job Object。父进程退出时内核自动关闭 Job Object 句柄，
 //!   触发 KILL_ON_JOB_CLOSE → 内核级强杀所有 Job 内进程。
-//!   这是 Windows 上"父进程死亡则子进程必死"的标准企业级方案，覆盖所有退出路径
+//!   这是 Windows 上"父进程死亡则子进程必死"的标准企业级做法，覆盖所有退出路径
 //!   （正常退出、异常退出、TerminateProcess、任务管理器强杀）。
 //!
 //! 本模块对外提供：

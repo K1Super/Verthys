@@ -1,7 +1,7 @@
 /*
  * runtime_hash.c — 运行时函数级哈希校验实现（内部模块，不导出）
  *
- * ★ V3 升级 WP-8（v5.0 §9.3）：防运行时代码补丁。设计全文见 runtime_hash.h。
+ * V3 升级：防运行时代码补丁。设计全文位于 runtime_hash.h。
  *
  * 关键实现纪律：
  *   - 重定位掩码双侧归一：构建期（rhash_gen，文件视角）与本文件（内存
@@ -94,7 +94,7 @@ static int spot_cmp(const void *a, const void *b)
  *   放弃本次扫描。
  * 容量说明：x64 .rdata 的 vtable/RTTI 指针普遍携带 DIR64 重定位，总数
  *   可达数万，远超任何固定上限——必须动态增长（倍增 realloc），
- *   否则"缓冲不足 → 放弃扫描"会让校验静默失效（审计红线）。
+ *   否则"缓冲不足 → 放弃扫描"会让校验静默失效（红线）。
  *   .reloc 目录天然按页升序；仍以 qsort 兜底防御异常映像。
  */
 static int collect_reloc_spots(const BYTE *base, const IMAGE_NT_HEADERS *nt,

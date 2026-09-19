@@ -5,11 +5,6 @@
  * 模块复用。所有函数已移除 static 限定符以便跨翻译单元调用，声明见
  * verthys_api_utils.h。
  *
- * ★ §1.4 V2 退役：v1 记录表助手（records_*）与 V2 blob 读取器
- *   （read_v2_superblock_only / read_v2_unlock_blob）随删除清单移除；
- *   detect_format 收敛为 V3-only（'V3RP' magic，其余一律 NONE）；
- *   ctx_zero_sensitive 收敛为 V3 敏感材料销毁（CNG 内核密钥组 +
- *   GetRecord 借用缓存），V1/V2 结构释放逻辑全部移除。
  */
 #include "verthys_api_utils.h"
 
@@ -17,7 +12,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
-#include <time.h>   /* ★ 缺陷 6：Verthys_VerifyIntegrity 使用 time() 记录校验时间戳 */
+#include <time.h>   /* Verthys_VerifyIntegrity 使用 time() 记录校验时间戳 */
 
 #ifdef _WIN32
 #include <windows.h>
@@ -28,7 +23,7 @@
 #include <unistd.h> /* ftruncate, fileno */
 #endif
 
-/* ---------- 暴力破解退避（project.md 5.3）---------- */
+/* ---------- 暴力破解退避 ---------- */
 #define VERTHYS_BACKOFF_MAX_SECS 3600u
 
 uint64_t verthys_monotonic_ms(void)
@@ -75,7 +70,7 @@ uint64_t verthys_get_u64le(const uint8_t *p)
 
 /* ---------- 文件 I/O 辅助 ---------- */
 /*
- * DEF-015 修复：读取文件体积上限管控
+ * 读取文件体积上限管控
  *
  * 原实现未限制读取最大文件体积，恶意超大文件可直接耗尽进程内存触发 DoS。
  * 新增全局可配置最大读取上限 VERTHYS_READ_FILE_MAX_BYTES（4GB），
@@ -103,7 +98,7 @@ int read_file(const char *path, uint8_t **out_buf, size_t *out_size)
 #endif
     if (sz < 0) { fclose(f); return -1; }
 
-    /* DEF-015：体积上限校验，超限拒绝读取防 DoS */
+    /* 体积上限校验，超限拒绝读取防 DoS */
     if ((uint64_t)sz > (uint64_t)VERTHYS_READ_FILE_MAX_BYTES) { fclose(f); return -1; }
 
 #ifdef _WIN32
@@ -131,7 +126,7 @@ int write_file(const char *path, const uint8_t *buf, size_t size)
     if (size > 0 && fwrite(buf, 1, size, f) != size) { fclose(f); return -1; }
     fflush(f);
 #ifdef _WIN32
-    /* ★ 企业级数据持久化修复：write_file 后强制 fsync，确保物理落盘
+    /* 修复：write_file 后强制 fsync，确保物理落盘
      *
      * 原缺陷：仅 fwrite + fclose，数据停留在 OS page cache，未真正写入物理磁盘。
      * 容器导出/迁移中间文件依赖此函数落盘，未 fsync 导致进程异常终止
@@ -175,23 +170,19 @@ void ctx_free_getrecord_cache(struct VerthysContext *ctx)
 
 /* 清除上下文中的所有敏感材料（V3-only），不动 file_path
  *
- * ★ §1.4 V2 退役：V1/V2 字段（master_key/dek/salt/records/key_a/b/c/
- *   mount_salt/txn/merkle/dblock_mgr/btree/superblock/watcher/
- *   mount_watcher/summary_records 等）随删除清单移除，本函数收敛为
- *   V3 敏感材料销毁收口。
  *
  * 前置条件：调用方（Lock/紧急熔断/Deinit）已先行收口 V3 子系统并
  * 销毁 v3 实例（verthys_v3_ctx_subsystems_close / verthys_v3_ctx_destroy
  * ——后台预热线程汇合后内核句柄方可安全销毁，杜绝 BCrypt 句柄 UAF）。
  *
  * 暴力破解退避记账（failed_attempts/last_failed_tick）跨 Lock 周期
- * 保留（project.md 5.3：锁定状态仍需维持指数退避），不在清零范围。 */
+ * 保留（锁定状态仍需维持指数退避），不在清零范围。 */
 void ctx_zero_sensitive(struct VerthysContext *ctx)
 {
     /* 释放 GetRecord 借用指针缓存（明文数据/名称安全清零 + 释放） */
     ctx_free_getrecord_cache(ctx);
 
-    /* ★ V3 升级 WP-1：销毁 CNG 内核密钥组（BCryptDestroyKey，
+    /* 销毁 CNG 内核密钥组（BCryptDestroyKey，
      * 内核态密钥材料不可恢复——Lock/Deinit/紧急熔断统一收口路径） */
     verthys_cng_km_destroy_all(&ctx->cng_keys);
 
@@ -202,14 +193,11 @@ void ctx_zero_sensitive(struct VerthysContext *ctx)
 /* ---------- 格式检测（V3-only）----------
  * 读取文件头判断格式：V3 超级块首副本帧头 magic "V3RP" (0x56 0x33 0x52 0x50)。
  *
- * §1.4 V2 退役：V1（"VERT" 0x0001）/ V2（"VERT" 0x0002）/ 未知头一律
- * VERTHYS_FMT_NONE——Unlock 格式门禁据此返回 VERTHYS_ERR_FORMAT
- * （"V3 不读 V2 文件"，旧容器经 Verthys_Export 侧外部工具转换后导入）。
  */
 VerthysContainerVersion detect_format(const uint8_t *buf, size_t size)
 {
     if (buf == NULL || size < 8) return VERTHYS_FMT_NONE;
-    /* ★ V3 升级 WP-5：V3 超级块首副本帧头 magic 'V3RP'（帧惯例
+    /* V3 超级块首副本帧头 magic 'V3RP'（帧惯例
      * [u32 magic][u32 payload_len]，verthys_container_v3.h）。本函数仅做
      * 格式路由，帧结构/法定人数深度校验归解锁流水线 S0-S3。 */
     if (buf[0] == 0x56 && buf[1] == 0x33 && buf[2] == 0x52 && buf[3] == 0x50) {

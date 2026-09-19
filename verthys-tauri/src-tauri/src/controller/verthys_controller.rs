@@ -17,7 +17,7 @@
  * - 解锁与锁定：解锁时验证密码，建立会话守卫（自动管理文件锁）；锁定
  *   时先持久化落盘再销毁 worker，确保数据不丢失。
  * - 记录管理：支持单条增删改查、批量枚举（含流式分页）、批量删除。
- * - 防御闭环状态查询：透传 worker 的安全路径阻断/降级状态（WP-11）。
+ * - 防御闭环状态查询：透传 worker 的安全路径阻断/降级状态。
  * - 导入导出与密码修改：支持完整容器导入导出及主密码变更。
  *
  * =============================================================================
@@ -316,7 +316,6 @@ fn append_alert(detail: &str, repair_alert: &str) -> String {
 /// 预热 .verthys 文件索引区到 OS 页缓存，并生成预热令牌。
 ///
 /// 用户选择文件后调用，后台以 FILE_FLAG_SEQUENTIAL_SCAN 预读索引区
-/// （v2 容器）和持久化缓存文件，将磁盘 IO 与用户输入密码的时间重叠。
 /// 预热成功后生成 30 秒有效的一次性令牌，解锁时需携带以启用零拷贝路径。
 /// 预热失败仅记录日志，不阻塞后续解锁（降级磁盘读取）。
 ///
@@ -374,7 +373,6 @@ pub async fn verthys_preheat(
 
 /// 实际执行预热的同步函数，在 blocking 线程中运行。
 ///
-/// 支持 v1 和 v2 容器，v1 仅预读头部，v2 预读索引区及缓存文件。
 /// 索引区大小上限 64MB，防止恶意文件触发过大 IO。
 /// 所有失败返回 Err，以便上层正确设置 prefetch_done 标志。
 fn verthys_preheat_blocking(verthys_path: &str) -> Result<(), String> {
@@ -594,7 +592,7 @@ fn preheat_cache_file(verthys_path: &str) {
 ///
 /// 密码在发送后立即擦除，不驻留内存。
 /// 解锁失败时文件锁自动释放（RAII）。
-/// 支持 v1/v2 两种容器格式。
+/// 仅支持 V3 容器格式。
 #[tauri::command]
 pub async fn verthys_unlock(
     app: tauri::AppHandle,
@@ -875,7 +873,7 @@ pub async fn verthys_unlock(
 ///
 /// 流程：
 /// 1. 前置校验：目标文件不存在，密码复杂度合格。
-/// 2. 调用 worker create_with_preset（支持 BALANCED/SECURE），创建 v2 容器。
+/// 2. 调用 worker create_with_preset（支持 BALANCED/SECURE），创建 V3 容器。
 /// 3. 获取独占文件锁。
 /// 4. 发送 lock 指令持久化空 verthys。
 /// 5. 再次 unlock 重新打开，保持会话。
@@ -1191,7 +1189,7 @@ pub async fn verthys_lock(
 // ===== 刷新（Verthys_Flush） =====
 
 /// 刷盘：调用 Verthys_Flush 提交未完成事务，保持 worker 会话不中断。
-/// v2 的 add_record 已通过 vtxn_commit 即时落盘，此函数主要用于：
+/// V3 的 add_record 已通过 vtxn_commit 即时落盘，此函数主要用于：
 ///   - 提交 pending 事务（若有）
 ///   - 清除 dirty 标志
 ///   - 触发异步缓存写入
@@ -1385,7 +1383,7 @@ fn verify_disk_persist_blocking(
         }
     }
 
-    // 5. V3 超级块副本帧头校验（verthys_container_v3.h §6.2 布局契约）
+    // 5. V3 超级块副本帧头校验（verthys_container_v3.h 布局契约）
     //    磁盘偏移 0 = Replica-0 槽位，帧头 8 字节：[u32 'V3RP'][u32 payload_len]
     //    'V3RP' = 0x50523356（LE: 56 33 52 50）；payload_len ∈ (0, 16KB - 8]
     let mut header = [0u8; 128];
@@ -1665,7 +1663,6 @@ pub async fn verthys_get_summary_count(
 }
 
 /// 轻量级检查是否存在指定类型的记录（只扫描摘要索引，不读数据块）。
-/// 典型耗时 <100ms（v2 容器），用于启动阶段快速判断。
 #[tauri::command]
 pub async fn verthys_has_record_by_type(
     state: State<'_, AppState>,
@@ -1764,7 +1761,7 @@ pub async fn verthys_change_password(
 
 // ===== 防御闭环状态查询 =====
 
-/// 查询防御闭环实时状态（WP-11）。
+/// 查询防御闭环实时状态。
 ///
 /// 透传 worker 的 security_status op，返回 7 条攻击路径的阻断/降级/失败
 /// 计数与关键路径全阻断标志。防御状态为进程级事实，锁定态亦可查询。

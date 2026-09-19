@@ -11,7 +11,7 @@
  */
 pub mod verthys_repository;
 pub mod verthys_state;
-/// ★ Comprehensive_optimization：照片导入 Write-Ahead Log（断点续传持久层）
+/// 照片导入 Write-Ahead Log（断点续传持久层）
 ///
 /// 追加式 JSON-lines 日志 + 已提交哈希集合 + 检查点 + 启动恢复 + fsync + 压缩。
 /// 由 verthys_batch_controller 调用，AppState 持有 ImportSession 贯穿导入生命周期。

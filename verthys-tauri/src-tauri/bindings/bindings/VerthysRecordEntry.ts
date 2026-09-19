@@ -4,9 +4,9 @@ import type { SecuredString } from "./SecuredString";
 /**
  * 批量枚举返回的单条记录（与 worker RecordEntry 对齐）
  *
- * 第 8.7 项：Base64 字段附 original_size:u64（原始字节数，base64 解码后长度）
+ * Base64 字段附 original_size:u64（原始字节数，base64 解码后长度）
  *
- * 第 11.1 项：name / data 改为 SecuredString（Zeroizing<String>）：
+ * name / data 改为 SecuredString（Zeroizing<String>）：
  *   - Drop 时自动 zeroize 堆内存，消除 secure_zero_records 中 ptr::write_bytes
  *     对 String 的 UB 覆写
  *   - 透明 serde（序列化为普通 JSON 字符串），前端契约无感
@@ -14,19 +14,19 @@ import type { SecuredString } from "./SecuredString";
  */
 export type VerthysRecordEntry = { id: number, 
 /**
- * 记录类型（阶段 8 迁移至 RecordType newtype）
+ * 记录类型（后续迁移至 RecordType newtype）
  */
 rtype: number, 
 /**
- * 第 11.1 项：记录名称（SecuredString，Drop 时零化擦除）
+ * 记录名称（SecuredString，Drop 时零化擦除）
  */
 name: SecuredString, 
 /**
- * 第 11.1 项：Base64 编码的记录数据（SecuredString，Drop 时零化擦除）
+ * Base64 编码的记录数据（SecuredString，Drop 时零化擦除）
  */
 data: SecuredString, 
 /**
- * 第 8.7 项：原始数据大小（字节，base64 解码后长度）
+ * 原始数据大小（字节，base64 解码后长度）
  *
  * 前端据此预分配解码缓冲区，避免 base64 解码后才知道大小。
  * 向后兼容：旧响应无此字段时为 None，前端按 data.len() * 3 / 4 估算。

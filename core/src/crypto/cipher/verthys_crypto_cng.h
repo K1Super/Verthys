@@ -1,7 +1,6 @@
 /*
  * verthys_crypto_cng.h — CNG 内核态 AEAD 封装（V3 主密码学路径）
  *
- * 设计依据：docs/TARGET_ARCHITECTURE_V5.md §4.2
  *   密钥原始字节经 BCryptGenerateSymmetricKey 导入内核后，用户态仅持有
  *   BCRYPT_KEY_HANDLE 句柄值；AES-256-GCM 运算由 BCryptEncrypt/BCryptDecrypt
  *   在内核态完成。完整 Dump 进程内存只能拿到无映射意义的句柄 ID。
@@ -22,8 +21,8 @@
  *   - 加密侧 nonce 由封装层内部计数器原子递增生成并经 nonce_out 回传，
  *     调用方持久化（V3：随超级块分区表；过渡期：ctx 内存）
  *   - 计数器可经 verthys_cng_aead_restore_nonce_counter 从持久化值恢复
- *     （解锁 S3 阶段，WP-2 接线），恢复值须取 max(盘面值, WAL 重放值)
- *     + 安全裕量（方案 R-5）
+ *     （解锁 S3 阶段），恢复值须取 max(盘面值, WAL 重放值)
+ *     + 安全裕量
  *   - 解密侧 nonce 由调用方传入（与加密时一致）
  *
  * 域分离：V3 域分离标签（"verthys/...-v3"）由上层 HKDF/包装路径承担，
@@ -65,7 +64,7 @@ typedef struct VerthysCngAead {
 } VerthysCngAead;
 
 /*
- * 预创建共享 AES-GCM 算法提供者（UNLOCK_OPTIMIZATION §6.2）。
+ * 预创建共享 AES-GCM 算法提供者。
  * Verthys_Init 时机调用一次，避免解锁关键路径重复打开；幂等。
  * 返回 VERTHYS_OK 或 VERTHYS_ERR_CNG_UNAVAILABLE。
  */
@@ -76,7 +75,7 @@ void verthys_cng_global_deinit(void);
 
 /*
  * 初始化 AEAD 上下文（未导入任何密钥的干净状态）。
- * ★ 契约（K-2 红线）：
+ * ★ 契约：
  *   1. 栈上分配的 VerthysCngAead 必须先经本函数（或整体置零）初始化，方可
  *      调用 import_key——未初始化内存中的垃圾句柄值会被误判为 "已导入"
  *      而触发 BCryptDestroyKey 野句柄调用（0xC0000005）。
@@ -87,7 +86,7 @@ VerthysResult verthys_cng_aead_init(VerthysCngAead *aead);
 
 /*
  * 导入密钥到 CNG 内核态。
- * ★ 红线（方案 §3.6/E-5）：本函数是唯一允许密钥明文出现在用户态栈帧的
+ * ★ 红线：本函数是唯一允许密钥明文出现在用户态栈帧的
  *   函数——短暂、立即清零；调用后密钥字节只存在于内核地址空间。
  *   入参 key 在函数内部被 SecureZeroMemory（const 契约同 key_separation_install）。
  * key_id：16 字节非敏感标识符（诊断/轮换追踪），可为 NULL（置零）。

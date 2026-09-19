@@ -1,7 +1,7 @@
 /*
- * test_secure_allocator.c — WP-7 验收：安全分配器 + 全局内存预算记账
+ * test_secure_allocator.c — 验收：安全分配器 + 全局内存预算记账
  *
- * 覆盖（PLAYBOOK WP-7 验收：分配/释放/边界页触发/锁页/预算上限拒绝）：
+ * 覆盖（分配/释放/边界页触发/锁页/预算上限拒绝）：
  *   1. 基础分配/释放 roundtrip（页对齐、数据读写、统计一致性、用量回落）
  *   2. 边界页触发（SEH 捕获：前后 PAGE_GUARD 页访问均引发 ACCESS_VIOLATION）
  *   3. 锁页（VirtualLock 成功路径：lock_failures==0；引用计数验证）

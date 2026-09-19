@@ -1,12 +1,7 @@
 /*
  * verthys_container_v3.h — V3 容器格式：常量布局 + 超级块内存态 + 事务原语
  *
- * 设计依据：
- *   - docs/TARGET_ARCHITECTURE_V5.md §6.2（文件布局）/ §6.3（超级块）/
- *     §10.2（vsb_txn 扩展）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-2
- *
- * 文件布局（§6.2）：
+ * 文件布局：
  *   [0x00000 .. 0x10000)   超级块区（3 副本 × 16KB + 16KB 预留）
  *   [0x10000 .. 0x100000)  WAL 预写日志（环形，480KB 活跃 + 480KB 备份）
  *   [0x100000 .. 0x400000) 分区表（FlatBuffers + AEAD）
@@ -23,11 +18,11 @@
  *   - 解析全程 safe_read 纪律：flatcc verifier 结构校验 + 向量长度
  *     逐项严格校验（拒绝长度漂移），杜绝手写边界错误。
  *
- * 法定人数语义（§6.3）：
+ * 法定人数语义：
  *   - 写：3 副本逐一写入 + fsync（_commit），≥2 成功 = 提交成功；
  *   - 读：3 副本逐一 HMAC 验证，取 txid 最高且 ≥2 副本一致者；
  *     仅 1 有效 → VERTHYS_ERR_QUORUM_FAILED（触发恢复）；
- *     0 有效 → VERTHYS_ERR_CORRUPT（WAL 恢复兜底，WP-5）。
+ *     0 有效 → VERTHYS_ERR_CORRUPT（WAL 恢复兜底）。
  */
 #ifndef VERTHYS_CONTAINER_V3_H
 #define VERTHYS_CONTAINER_V3_H
@@ -42,7 +37,7 @@
 extern "C" {
 #endif
 
-/* ---------- V3 布局常量（§6.2） ---------- */
+/* ---------- V3 布局常量 ---------- */
 
 #define VERTHYS_V3_SB_MAGIC               UINT32_C(0x42533356) /* 'V3SB' */
 #define VERTHYS_V3_VERSION                3u
@@ -52,7 +47,7 @@ extern "C" {
 #define VERTHYS_V3_STATE_CHAIN_BYTES      32u
 #define VERTHYS_V3_SALT_BYTES             16u
 #define VERTHYS_V3_BENCHMARK_ITEMS        4u
-/* ★ WP-5：wrapped 布局统一为 CNG 内核态包装格式（keymanager_cng）：
+/* wrapped 布局统一为 CNG 内核态包装格式（keymanager_cng）：
  * [12B nonce || 32B 密文 || 16B tag] = 60B（与 VERTHYS_CNG_WRAPPED_BYTES
  * 一致；nonce 必须随密文持久化，import_batch 解包与 wrap_key 互逆）。 */
 #define VERTHYS_V3_WRAPPED_KEY_BYTES      60u
@@ -91,18 +86,18 @@ static inline uint64_t vsb_v3_replica_offset(unsigned idx)
     return (uint64_t)idx * 0x4000u;
 }
 
-/* WAL 区（§6.2：[0x10000, 0x100000) = 960KB，双 480KB 半区）。
- * ★ 区域容量由布局边界推导（单一事实源，防漂移红线）：§6.2 原文
+/* WAL 区（[0x10000, 0x100000) = 960KB，双 480KB 半区）。
+ * ★ 区域容量由布局边界推导（单一事实源，防漂移红线）：原设计描述
  * "512KB 活跃 + 512KB 备份"与其自身边界 [64KB,1MB)=960KB 矛盾
  * （64KB + 1MB 越界至 1MB+64KB，verthys_wal_reset 整区清零将覆写
  * 分区表区首帧——api_full_roundtrip 解锁 S4 magic=0 回归根因）；
- * 分区表 1MB 偏移为 §18 速查表交叉引用的承重常量，以结构边界为准。 */
+ * 分区表 1MB 偏移为跨区引用的承重常量，以结构边界为准。 */
 #define VERTHYS_V3_WAL_REGION_OFFSET      UINT64_C(0x10000)  /* 64KB */
 #define VERTHYS_V3_WAL_REGION_END         UINT64_C(0x100000) /* 1MB */
 #define VERTHYS_V3_WAL_REGION_BYTES       (VERTHYS_V3_WAL_REGION_END - \
                                          VERTHYS_V3_WAL_REGION_OFFSET)  /* 960KB */
 
-/* 分区表区（§6.2：1MB 起，3MB 容量，至 4MB） */
+/* 分区表区（1MB 起，3MB 容量，至 4MB） */
 #define VERTHYS_V3_PARTITION_TABLE_OFFSET UINT64_C(0x100000) /* 1MB */
 #define VERTHYS_V3_PARTITION_TABLE_BYTES  (3u * 1024u * 1024u)
 #define VERTHYS_V3_PARTITION_TABLE_END    UINT64_C(0x400000) /* 4MB */
@@ -117,7 +112,7 @@ static inline uint64_t vsb_v3_replica_offset(unsigned idx)
 #define VERTHYS_V3_DEFAULT_EXTENT_PARTITION_BYTES  (16u * 1024u * 1024u)
 #define VERTHYS_V3_DEFAULT_AUDIT_PARTITION_BYTES   (1u * 1024u * 1024u)
 
-/* ---------- 超级块内存态（§6.3 字段逐项） ---------- */
+/* ---------- 超级块内存态（字段逐项） ---------- */
 
 typedef struct VerthysSuperBlockV3 {
     uint32_t magic;
@@ -173,7 +168,7 @@ typedef struct VerthysSuperBlockV3 {
  * 初始化新超级块（内存态默认值）：
  *   magic/version、container_id 随机、created_at/updated_at 当前 FILETIME、
  *   txid=0、state_chain 全零（首次提交时由 HMAC 链起算）、分区布局按
- *   §6.2 默认常量、其余字段清零。调用方随后填充 Argon2id/密钥包装等。
+ *   默认常量、其余字段清零。调用方随后填充 Argon2id/密钥包装等。
  */
 VerthysResult vsb_v3_init_new(VerthysSuperBlockV3 *sb);
 
@@ -211,7 +206,7 @@ VerthysResult vsb_v3_parse(uint8_t *buf, size_t len,
                          VerthysSuperBlockV3 *out);
 
 /*
- * ★ WP-5（UNLOCK_OPTIMIZATION §8 流水线 S1）：结构化无校验解析。
+ * 结构化无校验解析（解锁流水线 S1）。
  * 仅 verifier 结构校验 + 逐字段读入，跳过 HMAC 验证。
  * 用途：S1 阶段提取 salt / Argon2id 参数 / container_id / wrapped 密钥
  *（此时 integrity_key 尚未派生，依赖 S2 Argon2id）。
@@ -225,7 +220,7 @@ VerthysResult vsb_v3_parse_unverified(uint8_t *buf, size_t len,
 
 /*
  * 写入单个副本槽位：帧头（magic + payload_len）+ 载荷 + 零填充至 16KB，
- * 随后 fflush + _commit 物理落盘（fsync 语义，§6.3 提交步骤 3-5）。
+ * 随后 fflush + _commit 物理落盘（fsync 语义，法定人数提交步骤）。
  */
 VerthysResult vsb_v3_write_replica(FILE *f, unsigned replica_idx,
                                  const uint8_t *payload, size_t payload_len);
@@ -238,7 +233,7 @@ VerthysResult vsb_v3_write_replica(FILE *f, unsigned replica_idx,
 VerthysResult vsb_v3_read_replica(FILE *f, unsigned replica_idx,
                                 uint8_t *out_frame, size_t *out_payload_len);
 
-/* ---------- 法定人数提交 / 读取（§6.3） ---------- */
+/* ---------- 法定人数提交 / 读取 ---------- */
 
 /*
  * 法定人数提交（3 副本逐一写入 + fsync，≥2 成功 = 提交成功）：
@@ -264,7 +259,7 @@ VerthysResult vsb_v3_commit_quorum(FILE *f, VerthysSuperBlockV3 *sb,
  *   1. 依次读取 3 副本，逐一 HMAC + verifier 验证；
  *   2. 有效副本按 txid 分组，取 ≥2 副本一致中的最高 txid → *out；
  *   3. 仅 1 副本有效 → VERTHYS_ERR_QUORUM_FAILED（触发恢复流程）；
- *   4. 0 副本有效 → VERTHYS_ERR_CORRUPT（WAL 恢复兜底，WP-5）；
+ *   4. 0 副本有效 → VERTHYS_ERR_CORRUPT（WAL 恢复兜底）；
  * valid_mask_out（可 NULL）：bit i=1 表示副本 i HMAC+结构有效。
  */
 VerthysResult vsb_v3_read_quorum(FILE *f,
@@ -272,7 +267,7 @@ VerthysResult vsb_v3_read_quorum(FILE *f,
                                VerthysSuperBlockV3 *out,
                                uint32_t *valid_mask_out);
 
-/* ---------- 超级块事务原语 VsbTxnV3（§10.2） ---------- */
+/* ---------- 超级块事务原语 VsbTxnV3 ---------- */
 
 typedef struct VsbTxnV3 {
     VerthysSuperBlockV3 backup;         /* begin 时的完整超级块备份 */
@@ -290,7 +285,7 @@ typedef struct VsbTxnV3 {
 __declspec(noinline) VerthysResult vsb_txn_v3_begin(VsbTxnV3 *txn, const VerthysSuperBlockV3 *sb);
 
 /*
- * 提交事务：对可变超级块 sb 执行法定人数提交（§6.3 全流程），
+ * 提交事务：对可变超级块 sb 执行法定人数提交（全流程），
  * replica_status 记录于事务上下文；成功置 committed。
  */
 __declspec(noinline) VerthysResult vsb_txn_v3_commit(VsbTxnV3 *txn, VerthysSuperBlockV3 *sb,
@@ -299,7 +294,7 @@ __declspec(noinline) VerthysResult vsb_txn_v3_commit(VsbTxnV3 *txn, VerthysSuper
 
 /*
  * 回滚事务：将备份恢复到 sb（内存态），置 rolled_back。
- * 磁盘半写副本由后续提交/读侧法定人数 + HMAC 兜底（§6.3）。
+ * 磁盘半写副本由后续提交/读侧法定人数 + HMAC 兜底。
  */
 __declspec(noinline) VerthysResult vsb_txn_v3_rollback(VsbTxnV3 *txn, VerthysSuperBlockV3 *sb);
 

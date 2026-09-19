@@ -1,8 +1,7 @@
 /*
  * cache/composition/verthys-cache.ts — Verthys 缓存层（对外 API 绑定层 / 组合根）
  *
- * ★ verthys-cache 组合根增强方案（§二）落地：在 verthys-cache 并发重构
- *   （verthys-cache-refactor-concurrency-fix.md §三.4）基础上实施五项改进：
+ * ★ 组合根增强设计落地：在并发重构基础上实施五项改进：
  *   1. 延迟初始化：domain 的创建与依赖装配收拢进 initVerthysCache()，
  *      由应用启动流程（app/bootstrap.ts）显式调用，模块加载零副作用，
  *      杜绝"模块求值期依赖未就绪"的初始化时序隐患
@@ -16,7 +15,7 @@
  *   5. 封装性增强：快照提供者注册经 domain.registerSnapshotProvider()
  *      内部封装，组合根不直接触碰领域内部方法
  *
- * 五大缓存职责说明（与旧版一致，详见 verthys-cache-domain.ts 头注）：
+ * 五大缓存职责说明（与旧版一致，职责划分同 verthys-cache-domain.ts 头注）：
  *   1. 模块数据缓存（跨路由/模块切换持久化，消除"先空后有"闪烁）
  *   2. 模块独立密钥会话缓存（明文，lockAll 时清零，Uint8Array 可零填充）
  *   3. 共享记录扫描缓存（LRU-5000 + 64KB 大体积管控，消除多模块重复扫描）
@@ -33,7 +32,7 @@
  *   - 经 domain.registerSnapshotProvider() 注册快照提供者：flush 删除
  *     校验经 LRU peek 读取扫描缓存快照
  *
- * ★ 模块依赖关系（白皮书 4.2/4.4，方案 §二.2 单向化后）：
+ * ★ 模块依赖关系（单向化后）：
  *   verthys-cache.ts → verthys-flush.ts（共享删除集合 + re-export flush API，单向）
  *   verthys-cache.ts → verthys-cache-domain.ts（组合根装配领域类，单向）
  *   verthys-cache.ts → core/background-tasks.ts（仅导入 stopBackgroundTasks 钩子）
@@ -72,13 +71,13 @@ import {
   committedDeletionIds,
 } from "./verthys-flush";
 // ★ 仅注入停止钩子（clearAllVerthysCaches 前置等待后台任务终止）；
-//   startBackgroundTasks 不再由本文件导入或转发（方案 §二.2）
+//   startBackgroundTasks 不再由本文件导入或转发
 import { stopBackgroundTasks } from "../../core/background-tasks";
 import { createLogger } from "../../utils/logger";
 
 const log = createLogger("verthys-cache");
 
-// ★ re-export flush 队列 API（白皮书 4.2：统一冲刷队列服务）
+// ★ re-export flush 队列 API（统一冲刷队列服务）
 export {
   persistVerthys,
   deleteAndPersist,
@@ -141,7 +140,7 @@ export function initVerthysCache(): void {
     getRecord: verthysGetRecord,
   };
 
-  // ★ 接口隔离（方案 §二.4）：领域层仅依赖 moduleKeyReady 读写，
+  // ★ 接口隔离：领域层仅依赖 moduleKeyReady 读写，
   //   以最小接口适配，不暴露完整 KeyState（Vue 响应式状态与实现解耦）
   const keyStateForCache: KeyStateForCache = {
     moduleKeyReady: keyState.moduleKeyReady,
@@ -157,7 +156,7 @@ export function initVerthysCache(): void {
     stopBackgroundTasks,
   });
 
-  // ★ 白皮书 4.2 + 方案 §二.5：注册快照提供者（领域内部封装），
+  // ★ 注册快照提供者（领域内部封装），
   //    供 verthys-flush 的 deleteAndPersist 进行 ID 复用校验。
   //    经 LRU peek 只读访问 recordScanCache（不扰动 recency），
   //    避免 verthys-flush ↔ verthys-cache 循环导入。
@@ -166,7 +165,7 @@ export function initVerthysCache(): void {
   log.info("VerthysCache 组合根初始化完成（领域实例装配 + 快照提供者注册）");
 }
 
-/** 确保领域实例已初始化（fail-fast 守卫，方案 §二.1） */
+/** 确保领域实例已初始化（fail-fast 守卫） */
 function ensureDomain(): VerthysCacheDomain {
   if (!domain) {
     throw new Error("VerthysCache 尚未初始化，请先调用 initVerthysCache()（MainView.onBeforeMount 挂载流程已接入）");
@@ -177,7 +176,7 @@ function ensureDomain(): VerthysCacheDomain {
 /* ------------------------------------------------------------------ *
  * 对外 API 绑定（签名与旧版逐一对应）                                  *
  *                                                                    *
- * ★ 方案 §二.3：全部导出改为显式包装函数并标注返回类型，               *
+ * ★ 全部导出改为显式包装函数并标注返回类型，                       *
  *   彻底避免 .bind 绑定造成的泛型擦除与重载签名类型推断丢失；         *
  *   每次调用经 ensureDomain() 守卫，未初始化 fail-fast。              *
  * ------------------------------------------------------------------ */
@@ -199,7 +198,7 @@ export function clearModuleCache(key?: string): void {
   ensureDomain().clearModuleCache(key);
 }
 
-/* === 2. 模块独立密钥会话缓存（方案 7.1/7.2） === */
+/* === 2. 模块独立密钥会话缓存 === */
 
 /** 缓存模块独立密钥到会话（验证成功后调用；Uint8Array 存储 + 闲置 15min 自动销毁） */
 export function cacheModuleKey(moduleId: ModuleId, key: string): void {
@@ -260,7 +259,7 @@ export function getRecordsDataB64Batch(ids: number[]): Promise<Map<number, strin
 
 /* === 4. 摘要缓存（第一层：常驻，无淘汰） === */
 
-/** 确保摘要缓存覆盖全部记录（Phase 2E：解锁后 1-2 秒内完成） */
+/** 确保摘要缓存覆盖全部记录（解锁后 1-2 秒内完成） */
 export function ensureSummaryScan(): Promise<void> {
   return ensureDomain().ensureSummaryScan();
 }

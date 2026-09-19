@@ -1,13 +1,6 @@
 /*
  * memory_guard.h — 内存防转储与防交换（内部模块，不导出）
  *
- * 用户需求（二.2 内存防转储与防交换）：
- *   - 锁定敏感物理页：VirtualLock 将密钥表、路径索引、解密头部缓存
- *     强制常驻物理内存，禁止 OS 交换至磁盘页面文件。
- *   - 拦截远程内存读取：检测 Cheat Engine、Process Hacker 等跨进程
- *     内存读取行为，发现后立即触发锁屏并零化全部密钥分区。
- *   - 内存零化强制执行：SecureZeroMemory 多轮覆写（0x00→0xFF→0x00），
- *     不依赖 GC 延迟释放。监听锁屏/睡眠/用户切换事件触发。
  */
 #ifndef VERTHYS_MEMORY_GUARD_H
 #define VERTHYS_MEMORY_GUARD_H
@@ -57,7 +50,7 @@ int memory_guard_check_remote_read(void);
 /*
  * 触发紧急内存零化。
  * 对所有已注册的敏感内存区域执行多轮覆写清零。
- * 应急响应时调用（见 emergency.h）。
+ * 应急响应时调用（同 emergency.h）。
  */
 void memory_guard_emergency_purge(void);
 
@@ -76,7 +69,7 @@ int memory_guard_register(void *ptr, size_t len, const char *name);
 int memory_guard_unregister(void *ptr);
 
 /*
- * ★ 方案 §6.2.3：防转储低频巡逻（解锁成功时启动）。
+ * 防转储低频巡逻（解锁成功时启动）。
  * 每 ≥60 秒执行一次 memory_guard_check_remote_read（一次性定时器链，
  * 事件外零唤醒），检测到非信任进程句柄 → DEGRADE 级上报。
  * 性能模式（anti_dump=0）下启动调用为空操作。幂等：已运行返回 0。
@@ -85,7 +78,7 @@ int memory_guard_unregister(void *ptr);
 int memory_guard_patrol_start(void);
 
 /*
- * ★ 方案 §6.2.3：停止巡逻（锁定/销毁句柄时调用）。幂等。
+ * 停止巡逻（锁定/销毁句柄时调用）。幂等。
  */
 void memory_guard_patrol_stop(void);
 

@@ -1,9 +1,6 @@
 /*
  * verthys_scan.c — 游标式批量数据扫描底层实现模块（V3-only）
  *
- * ★ §1.4 V2 退役重写：数据通路统一为 LSM 全量快照迭代器 + Extent
- * 内核态按需解密（原 v2 B+ 树叶子链表遍历路径随 §1.4 删除清单退役）。
- *
  * 三段式标准游标调用范式：打开游标 Open → 循环批量拉取 Fetch →
  * 关闭释放 Close。彻底规避单条记录循环查询带来的 LSM 重复查找开销，
  * 大幅提升大批量列表遍历性能。
@@ -430,7 +427,7 @@ VerthysResult Verthys_ScanOpen(VerthysHandle handle,
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
     /* V3-only：非 V3 容器一律拒绝（VERTHYS_ERR_V3_REQUIRED 语义由
-     * §1.4 删除清单自然实现——V1/V2 路径已退役） */
+     * 删除清单自然实现——V1/V2 路径已退役） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
 
     /* 全局应急安全机制触发时拒绝创建游标 */
@@ -566,7 +563,6 @@ VerthysResult Verthys_ScanSummaryOpen(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* V3-only：非 V3 容器一律拒绝（§1.4 V2 退役） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
 
     if (emergency_is_triggered()) {
@@ -650,7 +646,6 @@ VerthysResult Verthys_HasRecordByType(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* V3-only：非 V3 容器一律拒绝（§1.4 V2 退役） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
 
     if (ctx->v3 == NULL || !ctx->v3->subsystems_open) {
@@ -700,7 +695,6 @@ VerthysResult Verthys_FindFirstLidByType(VerthysHandle handle,
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* V3-only：非 V3 容器一律拒绝（§1.4 V2 退役） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
 
     if (ctx->v3 == NULL || !ctx->v3->subsystems_open) {

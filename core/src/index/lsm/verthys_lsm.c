@@ -1,9 +1,6 @@
 /*
  * verthys_lsm.c — V3 LSM 索引主模块：生命周期 / WAL / Manifest / 数据路径
  *
- * 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.6
- * 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-4
- *
  * LSM 区域布局（region_offset 基准）：
  *   [Manifest 帧区 1MB][WAL 区 68MB][SSTable 数据区 append-only]
  *
@@ -17,14 +14,14 @@
  *
  * Manifest（LSM 元数据，帧区整帧覆写）：
  *   - 明文 = LSMManifestV3（schema/sstable.fbs）；
- *   - nonce 快照采用"保存后值"约定（区别于 WP-3 extent 的保存前值）：
+ *   - nonce 快照采用"保存后值"约定（区别于 extent 的保存前值）：
  *     序列化时取分区计数器 + 1 = 保存帧自身消耗的计数器值；重载
  *     restore 后下一次加密绝不复用保存帧 nonce（红线级防重用）；
  *   - open 重放后计数器下限推定：max(当前值, 盘面快照 + WAL 重放帧数
  *     + 安全裕量)——WAL 帧在保存后各自消耗一个 nonce，撕裂帧亦可能
- *     已消耗，裕量覆盖（方案 R-5 精神）。
+ *     已消耗，裕量覆盖。
  *
- * 并发纪律（PLAYBOOK WP-4 红线）：
+ * 并发纪律：
  *   - put/delete/flush/compact/open/close 持 SRWLOCK 独占（单写者）；
  *   - get 持独占而非共享：SSTable 元数据惰性加载（Footer/Bloom/块索引）
  *     会修改 Manifest 内存态，SRWLOCK 共享模式下并发惰性初始化存在
@@ -47,7 +44,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* nonce 恢复安全裕量（方案 R-5：覆盖撕裂帧已消耗但不可数的 nonce） */
+/* nonce 恢复安全裕量（覆盖撕裂帧已消耗但不可数的 nonce） */
 #define VERTHYS_LSM_NONCE_RESTORE_MARGIN 64u
 
 /* 后台线程空闲采样/轮询间隔 */
@@ -88,8 +85,8 @@ static void put_u64le(uint8_t *p, uint64_t v)
 /* ================== Manifest 持久化 ================== */
 
 /*
- * ★ WP-5（温缓存）：Manifest FlatBuffer 明文序列化（帧写入共用路径）。
- * nonce 快照 = 当前计数器 + 1（保存后值约定，见 manifest_save 注释）。
+ * Manifest FlatBuffer 明文序列化（帧写入共用路径）。
+ * nonce 快照 = 当前计数器 + 1（保存后值约定，同 manifest_save 注释）。
  * 产物为 flatcc 对齐缓冲——调用方须 flatcc_builder_aligned_free 归还。
  */
 static VerthysResult manifest_serialize_pt(const VerthysLsmManifest *m,
@@ -219,7 +216,7 @@ int manifest_insert_sorted(VerthysLsmManifest *m,
 }
 
 /*
- * ★ WP-10（模糊测试）：Manifest 明文帧纯缓冲解析（对齐 vsb_v3_parse_unverified
+ * Manifest 明文帧纯缓冲解析（对齐 vsb_v3_parse_unverified
  * 分层模式）：flatcc verifier → magic/version → 字段提取 → 逐表元数据边界
  * 校验（level < MAX_LEVELS、size 非零、min_key ≤ max_key）→ 有序重建 m
  * （含 nonce_snapshot 回填）。不含 CNG restore——计数器回推依赖分区句柄，
@@ -309,7 +306,7 @@ VerthysResult verthys_lsm_manifest_parse_unverified(const uint8_t *pt, size_t pt
 }
 
 /*
- * ★ WP-5（温缓存）：Manifest 明文帧解析 + nonce 计数器 restore
+ * Manifest 明文帧解析 + nonce 计数器 restore
  * （快照 > 当前值才前推，防回退语义保留）。失败时 *m 清零。
  */
 static VerthysResult manifest_parse_pt(const uint8_t *pt, size_t pt_len,
@@ -636,10 +633,10 @@ static DWORD WINAPI bg_thread_main(LPVOID param)
     return 0;
 }
 
-/* ================== 温启动缓存（★ WP-5，UNLOCK_OPTIMIZATION §7） ================== */
+/* ================== 温启动缓存 ================== */
 
 /*
- * 编码契约见 verthys_lsm.h（温缓存表记录段）。权威性设计：Manifest 始终
+ * 编码契约位于 verthys_lsm.h（温缓存表记录段）。权威性设计：Manifest 始终
  * 从盘面帧加载，缓存段仅承载惰性缓存内容（Footer 字段 + Bloom 位图 +
  * 块索引）——缓存过期（seq 不匹配）静默跳过，无覆写/误读风险。
  */
@@ -975,10 +972,10 @@ static VerthysResult lsm_open_internal(VerthysLsm *lsm, FILE *f, VerthysPartitio
     r = wal_replay(lsm, &wal_frames);
     if (r != VERTHYS_OK) goto fail;
 
-    /* ---- max-lid 初值合并（★ WP-5 API 接线：LID 分配基准） ----
+    /* ---- max-lid 初值合并（API 接线：LID 分配基准） ----
      * Manifest 各表 max_key（覆盖 SSTable 全部历史版本）∪ 当前
      * MemTable 尾值（温缓存播种 + WAL 重放产物，insert 已推高表内
-     * max_lid）。语义见 verthys_lsm_internal.h：本字段单调不回退。 */
+     * max_lid）。语义同 verthys_lsm_internal.h：本字段单调不回退。 */
     for (size_t i = 0; i < lsm->manifest.count; i++) {
         if (lsm->manifest.tables[i].max_key > lsm->max_lid) {
             lsm->max_lid = lsm->manifest.tables[i].max_key;
@@ -1000,7 +997,7 @@ static VerthysResult lsm_open_internal(VerthysLsm *lsm, FILE *f, VerthysPartitio
         }
     }
 
-    /* ---- WP-5 修订：不再"重放后达阈值立即 flush" ----
+    /* ---- 修订：不再"重放后达阈值立即 flush" ----
      * 原行为会将崩溃会话遗留的未提交条目（LSM WAL 重放产物）持久化
      * 进 SSTable，令 transaction_v3 崩溃恢复的 MemTable 过滤重建
      * （verthys_lsm_rebuild_excluding）失效——未提交数据永久可见
@@ -1094,7 +1091,7 @@ VerthysResult verthys_lsm_close(VerthysLsm *lsm)
     return r;
 }
 
-/* ================== 生命周期（堆分配，★ WP-5） ================== */
+/* ================== 生命周期（堆分配） ================== */
 
 /* 结构体对外不透明（verthys_lsm_internal.h），经本对函数管理堆生命周期 */
 VerthysLsm *verthys_lsm_create(void)
@@ -1112,7 +1109,7 @@ void verthys_lsm_destroy(VerthysLsm *lsm)
 }
 
 /*
- * ★ WP-5（v3_lifecycle 失败路径）：中止式关闭——不 flush、不存 Manifest、
+ * v3_lifecycle 失败路径：中止式关闭——不 flush、不存 Manifest、
  * 不复位 WAL。盘面 LSM WAL 帧保持原样：下次 open 重放回 MemTable 后由
  * 事务层 recover 裁决（丢弃组剔除 / 重放组收尾）。
  * 红线：解锁失败路径若 flush，未提交条目（open 重放产物）将落入 SSTable
@@ -1181,7 +1178,7 @@ static VerthysResult verthys_lsm_put_internal(VerthysLsm *lsm, uint64_t txid,
     if (r == VERTHYS_OK) {
         r = verthys_lsm_memtable_insert(lsm->memtable, &clean);
         if (r == VERTHYS_OK) {
-            /* ★ WP-5（API 接线）：LID 永不复用——单调推高，回滚/剔除不回退 */
+            /* API 接线：LID 永不复用——单调推高，回滚/剔除不回退 */
             if (e->lid > lsm->max_lid) lsm->max_lid = e->lid;
             if (!lsm->suppress_flush &&
                     verthys_lsm_memtable_needs_flush(lsm->memtable)) {
@@ -1239,7 +1236,7 @@ VerthysResult verthys_lsm_get(VerthysLsm *lsm, uint64_t lid,
     }
 
     /* 2. SSTable：L0 新→旧 → L1..（tables 已按 level 升序/seq 降序）。
-     * ★ WP-12 属性 1 修复：out == NULL 探测形态（存在性检查，公共 API
+     * out == NULL 探测形态修复（存在性检查，公共 API
      *   delete/delete_many 在用）此前依赖 out->tombstone 判墓碑——探测
      *   形态无落点，SSTable 命中墓碑被误报 OK（MemTable 分支无此问题：
      *   墓碑先行判定不依赖 out）。修复：本地落点 + 名字暂存，探测与
@@ -1302,7 +1299,7 @@ VerthysResult verthys_lsm_delete(VerthysLsm *lsm, uint64_t txid, uint64_t lid)
     return verthys_lsm_put_internal(lsm, txid, &tomb, 1);   /* 墓碑内部通道 */
 }
 
-/* ================== WP-5 事务层配合接口 ================== */
+/* ================== 事务层配合接口 ================== */
 
 void verthys_lsm_set_flush_suppress(VerthysLsm *lsm, int suppress)
 {
@@ -1324,8 +1321,8 @@ uint64_t verthys_lsm_wal_cursor(const VerthysLsm *lsm)
 
 /*
  * MemTable 过滤重放重建内核（rollback_txid / rebuild_excluding 共用，
- * ★ WP-12 缺陷②/②b 修复）：
- *
+ * 回滚重建：重放式取代过滤式剔除）。
+
  * 为什么重放而非过滤式剔除（缺陷根因）：丢弃组的 DELETE 墓碑在
  * MemTable 中已按新者胜覆写原始条目——过滤式剔除墓碑后，被覆写的
  * 原始条目无从找回（已提交数据丢失，红线级）。WAL 先行 + flush 复位
@@ -1455,7 +1452,7 @@ VerthysResult verthys_lsm_compact(VerthysLsm *lsm)
     return r;
 }
 
-/* ---------- 温启动缓存公开门面（★ WP-5，UNLOCK_OPTIMIZATION §7） ---------- */
+/* ---------- 温启动缓存公开门面 ---------- */
 
 VerthysResult verthys_lsm_export_warm(VerthysLsm *lsm,
                                   uint8_t **out_tables_pt, size_t *out_tables_len,
@@ -1610,7 +1607,7 @@ uint64_t verthys_lsm_max_lid(const VerthysLsm *lsm)
     return v;
 }
 
-/* ================== 全量扫描迭代器（★ WP-5 接线：API 层 Scan/摘要/计数） ================== */
+/* ================== 全量扫描迭代器（API 层 Scan/摘要/计数 接线） ================== */
 
 /*
  * SSTable 扫描源：在册表元数据深拷贝 + 顺序块迭代器。

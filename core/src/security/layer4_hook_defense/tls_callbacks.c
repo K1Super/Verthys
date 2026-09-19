@@ -1,9 +1,6 @@
 /*
  * tls_callbacks.c — TLS 回调注册（仅写入 TLS_INIT_MARKER）
  *
- * 用户需求（四、Hook/注入对抗 — 4. TLS 回调仅写入 TLS_INIT_MARKER）：
- *   TLS 回调在 LoaderLock 持有期间执行，禁止调用任何加载器 API。
- *   本回调仅设置 g_tls_init_marker 标志，不执行任何其他操作。
  *
  *   完整 IAT 校验逻辑在 tls_loader_init()（DLL_PROCESS_ATTACH 中）执行。
  *

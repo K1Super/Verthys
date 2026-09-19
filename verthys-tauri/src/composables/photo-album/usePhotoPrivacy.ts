@@ -32,7 +32,7 @@ export interface UsePhotoPrivacyOptions {
 export function usePhotoPrivacy(isTauri: boolean) {
   /* ===== 隐私模式 ===== */
   const privacyMode = ref(false);
-  /** 第 7.4 项：隐私模式会话令牌（启用时由后端返回，关闭时需传入验证） */
+  /** 隐私模式会话令牌（启用时由后端返回，关闭时需传入验证） */
   let privacySessionToken: string | null = null;
 
   const togglePrivacy = async () => {

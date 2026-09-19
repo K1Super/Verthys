@@ -1,12 +1,7 @@
 /*
  * verthys_unlock_pipeline.h — V3 解锁流水线调度器（S0-S6）
  *
- * 设计依据：
- *   - docs/UNLOCK_OPTIMIZATION.md §8（流水线调度器）/ §9（渐进式解锁）/
- *     §14.2（常量）/ §11.2（数据结构）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-5
- *
- * 阶段语义（§8.1 / §14.1 状态机）：
+ * 阶段语义（状态机）：
  *   S0 前置检查      主线程   参数/状态机/emergency 门控/pepper 快速失败
  *   S1 超级块读取    IO 线程  3 副本并行读取（50ms 预算）+ 无校验结构化
  *                            解析（vsb_v3_parse_unverified——salt/Argon2
@@ -26,13 +21,13 @@
  *                            事务崩溃恢复（verthys_txn_v3_recover）
  *   S6 最终校验      主线程   子系统就绪标志 + 计时汇总
  *
- * 渐进式解锁（§9，flags & VERTHYS_UNLOCK_FLAG_MINIMAL_FIRST）：
+ * 渐进式解锁（flags & VERTHYS_UNLOCK_FLAG_MINIMAL_FIRST）：
  *   S0-S4 完成即达 OPERATIONAL_MINIMAL（超块验证 + 密钥导入 + 分区表），
  *   S5 仅做最小可操作部分（WAL/LSM 惰性 open/Extent/恢复），全量索引
  *   预热（verthys_lsm_preheat_full）转后台线程，立即返回
  *   VERTHYS_ERR_PARTIAL_UNLOCK。
  *
- * 超时预算（§14.2）：总预算 VERTHYS_UNLOCK_TIMEOUT_MS = 10s；任一阶段
+ * 超时预算：总预算 VERTHYS_UNLOCK_TIMEOUT_MS = 10s；任一阶段
  * 未在预算内完成 → VERTHYS_ERR_TIMEOUT（无部分写入副作用，可安全重试）。
  *
  * 故障注入：fail_mask bit i = 阶段 i 强制失败（仅测试使用，生产传 0）。
@@ -48,7 +43,7 @@
 extern "C" {
 #endif
 
-/* ---------- 常量（UNLOCK_OPTIMIZATION §14.2） ---------- */
+/* ---------- 常量 ---------- */
 
 #define VERTHYS_UNLOCK_TIMEOUT_MS          10000u  /* 解锁总超时 */
 #define VERTHYS_SB_READ_TIMEOUT_MS         50u     /* 超级块读取（并行 3 副本） */
@@ -59,7 +54,7 @@ extern "C" {
 #define VERTHYS_WARMCACHE_MAX_BYTES        (32u * 1024u * 1024u) /* 32MB */
 #define VERTHYS_WARMCACHE_HMAC_BYTES       32u
 
-/* ---------- 阶段标识（§11.2） ---------- */
+/* ---------- 阶段标识 ---------- */
 
 typedef enum UnlockStage {
     UNLOCK_STAGE_S0 = 0,      /* 前置检查 */
@@ -105,7 +100,7 @@ struct VerthysContextV3;
  * 返回：VERTHYS_OK / VERTHYS_ERR_PARTIAL_UNLOCK（MINIMAL_FIRST 且后台预热已
  * 排程）/ 各阶段错误透传 / VERTHYS_ERR_TIMEOUT（总预算耗尽）。
  *
- * 失败路径资源纪律（§11.3）：任一阶段失败 → 已导入 CNG 句柄销毁、
+ * 失败路径资源纪律：任一阶段失败 → 已导入 CNG 句柄销毁、
  * MEK/integrity_key 清零、已打开子系统关闭，ctx 回到可重试初态。
  */
 __declspec(noinline) VerthysResult verthys_unlock_pipeline_run(struct VerthysContextV3 *ctx,

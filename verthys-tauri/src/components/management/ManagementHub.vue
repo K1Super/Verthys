@@ -606,7 +606,7 @@ function frame(gateDt: number): void {
   ctx.globalCompositeOperation = 'source-over';
 
   /* ---- ★ SVG 丝线 dashoffset rAF 驱动（原 CSS infinite 动画迁移） ----
-     状态语义流动随全局空闲档位自动降频（方案 4.4）；
+     状态语义流动随全局空闲档位自动降频；
      相位由 elapsed 累积时间计算，跳帧不产生相位跳变。 */
   const tetherOwner = unitEls[0];
   if (tetherEl && tetherOwner) {

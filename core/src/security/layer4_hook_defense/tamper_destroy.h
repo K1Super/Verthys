@@ -1,9 +1,9 @@
 /*
  * tamper_destroy.h — 篡改联动销毁策略（内部模块，不导出）
  *
- * ★ 方案 §6.4：销毁链简化。
- *
- * 原实现缺陷（security 层深度审计 §5.5/P2-4）：
+ * ★ 销毁链简化。
+
+ * 原实现缺陷：
  *   - 清零注册密钥页后调用 key_drift_force_migrate（已被删除），
  *     会把零页复制到新分配——制造新分配、无安全意义；
  *   - emergency_trigger() 内部 TerminateProcess 之后的
@@ -12,7 +12,7 @@
  *
  * 简化后的销毁链（每一步真实可达）：
  *   1. key_separation_purge_all() —— 销毁 CNG 内核密钥句柄
- *      （方案 4.1 接线后这是唯一密钥存放位置，内核释放密钥材料）；
+ *      （唯一密钥存放位置，内核释放密钥材料）；
  *   2. emergency_trigger() —— 内存绝育（memory_guard 注册区清零）
  *      + 匿名故障码上报看门狗 + TerminateProcess。
  */

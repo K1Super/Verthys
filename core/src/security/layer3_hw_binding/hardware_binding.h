@@ -1,9 +1,9 @@
 /*
  * hardware_binding.h — 机器实例指纹绑定（内部模块，不导出）
  *
- * ★ 方案 §4.4（P1-G 治理）：弃用 CPUID/SMBIOS/UEFI 变量，改用 MachineGuid。
- *
- * 原实现缺陷（security 层深度审计 §5.3）：
+ * ★ 弃用 CPUID/SMBIOS/UEFI 变量，改用 MachineGuid。
+
+ * 原实现缺陷：
  *   - CPUID leaf 1 是 family/model/stepping + feature flags，同型号所有
  *     CPU 完全相同，不构成任何唯一性（"硬件绑定"名不符实）；
  *   - SMBIOS UUID 在大量主板/虚拟机上为全 0/全 FF，此时绑定退化为静态盐；
@@ -30,7 +30,7 @@
 typedef enum {
     HW_BIND_UEFI_SECUREBOOT = 0,  /* （已弃用取值，保留枚举 ABI） */
     HW_BIND_BIOS_FALLBACK   = 1,  /* （已弃用取值，保留枚举 ABI） */
-    HW_BIND_MACHINE_GUID    = 2,  /* ★ §4.4：MachineGuid 指纹（唯一生效模式） */
+    HW_BIND_MACHINE_GUID    = 2,  /* MachineGuid 指纹（唯一生效模式） */
 } HwBindMode;
 
 /*

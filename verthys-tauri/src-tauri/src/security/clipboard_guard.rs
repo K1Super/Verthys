@@ -1,7 +1,7 @@
 /*
- * clipboard_guard.rs — 剪贴板保护升级模块（SECURITY.md 企业级重写版）
+ * clipboard_guard.rs — 剪贴板保护升级模块
  *
- * SECURITY.md 修复要点：
+ * 修复要点：
  *   1. 分离写入与清空策略，使用延迟清空模式
  *      - SetClipboardData 后绝不清空，敏感内容正常驻留供用户粘贴
  *      - 清空仅在以下条件触发：30 秒自动过期、高安全模式下检测到外部
@@ -68,7 +68,7 @@ const OPEN_RETRIES: usize = 3;
 const RETRY_INTERVAL_MS: u64 = 50;
 
 /* ==================================================================== *
- *  SECURITY.md 第 4 项：统一状态枚举与锁保护                               *
+ *  统一状态枚举与锁保护                               *
  *                                                                        *
  *  用单一 Mutex<ClipboardStateData> 替换所有松散原子变量。                *
  *  所有状态读取和修改都在获取锁后原子完成，消除瞬时不一致窗口。            *
@@ -99,7 +99,7 @@ struct ClipboardStateData {
     monitoring: bool,
 }
 
-/// SECURITY.md 第 4 项：全局统一剪贴板状态（替代所有松散原子变量）
+/// 全局统一剪贴板状态（替代所有松散原子变量）
 static CLIPBOARD_STATE: Mutex<ClipboardStateData> = Mutex::new(ClipboardStateData {
     stage: ClipboardStage::Idle,
     last_seq: 0,
@@ -108,7 +108,7 @@ static CLIPBOARD_STATE: Mutex<ClipboardStateData> = Mutex::new(ClipboardStateDat
     monitoring: false,
 });
 
-/// SECURITY.md 第 3 项：窗口过程仅设置此标志，消息循环中异步处理
+/// 窗口过程仅设置此标志，消息循环中异步处理
 static PENDING_UPDATE: AtomicBool = AtomicBool::new(false);
 
 /// 剪贴板写入串行化锁（跨线程互斥访问剪贴板物理 API）
@@ -251,7 +251,7 @@ fn now_ms() -> u64 {
 }
 
 /* ==================================================================== *
- *  SECURITY.md 第 3 项：窗口过程仅标记事件                                *
+ *  窗口过程仅标记事件                                *
  *                                                                        *
  *  clipboard_window_proc 中不再直接调用任何剪贴板 API。                   *
  *  收到 WM_CLIPBOARDUPDATE / WM_DESTROYCLIPBOARD 时，仅设置 PENDING_UPDATE *
@@ -267,7 +267,7 @@ unsafe extern "system" fn clipboard_window_proc(
 ) -> isize {
     match msg {
         WM_CLIPBOARDUPDATE | WM_DESTROYCLIPBOARD => {
-            // SECURITY.md 第 3 项：仅设置标志，不在窗口过程中执行任何剪贴板操作
+            // 仅设置标志，不在窗口过程中执行任何剪贴板操作
             PENDING_UPDATE.store(true, Ordering::SeqCst);
             0
         }
@@ -277,7 +277,7 @@ unsafe extern "system" fn clipboard_window_proc(
 }
 
 /* ==================================================================== *
- *  SECURITY.md 第 2 项 + 第 3 项：异步处理待处理的剪贴板事件              *
+ *  异步处理待处理的剪贴板事件              *
  *                                                                        *
  *  在消息循环上下文中调用（非窗口过程），安全地执行剪贴板检查和处理。      *
  *  外部 SetClipboardData（序列号递增）而非读取才是正确的触发条件。        *
@@ -287,7 +287,7 @@ fn process_clipboard_update() {
     // 获取当前序列号（不需要打开剪贴板）
     let current = unsafe { GetClipboardSequenceNumber() };
 
-    // SECURITY.md 第 4 项：在锁内原子地读取状态并决定操作
+    // 在锁内原子地读取状态并决定操作
     let action = {
         let mut state = lock_state();
 
@@ -300,7 +300,7 @@ fn process_clipboard_update() {
             ClipboardStage::SensitivePresent => {
                 if current > state.last_seq {
                     // 序列号递增 = 外部调用了 SetClipboardData（写入，非读取）
-                    // SECURITY.md 第 2 项：这才是正确的触发条件
+                    // 这才是正确的触发条件
                     if state.high_security {
                         // 高安全模式：立即清空
                         log::warn!(
@@ -355,7 +355,7 @@ enum ClearAction {
     ClearAndReset,
 }
 
-/// SECURITY.md 第 5 项：轮询敏感内容自动过期（30 秒后清空）
+/// 轮询敏感内容自动过期（30 秒后清空）
 #[cfg(target_os = "windows")]
 fn check_sensitive_expire() {
     let action = {
@@ -398,7 +398,7 @@ fn check_sensitive_expire() {
 }
 
 /* ==================================================================== *
- *  SECURITY.md 第 2 项：统一剪贴板清空入口（公共接口）                    *
+ *  统一剪贴板清空入口（公共接口）                    *
  *                                                                        *
  *  所有剪贴板清空操作均通过此入口，包括：                                 *
  *    - mod.rs 的 clear_clipboard() 向后兼容封装                          *
@@ -409,7 +409,7 @@ fn check_sensitive_expire() {
  *  移除"写入随机数据再清空"的无意义逻辑。                                 *
  * ==================================================================== */
 
-/// SECURITY.md 第 2 项：统一剪贴板清空入口
+/// 统一剪贴板清空入口
 ///
 /// 直接调用 EmptyClipboard 并广播 WM_DESTROYCLIPBOARD，
 /// 强制系统清除云剪贴板缓存。
@@ -426,7 +426,7 @@ pub fn clear() -> Result<(), String> {
 }
 
 /* ==================================================================== *
- *  SECURITY.md 第 5 项：内部清空实现                                      *
+ *  内部清空实现                                      *
  *                                                                        *
  *  直接调用 EmptyClipboard 并广播 WM_DESTROYCLIPBOARD。                   *
  *  移除"写入随机数据再清空"的无意义逻辑。                                 *
@@ -465,7 +465,7 @@ fn do_clear_internal() -> Result<(), String> {
             return Err(last_err);
         }
 
-        // SECURITY.md 第 5 项：直接 EmptyClipboard，放弃无意义的垃圾覆写
+        // 直接 EmptyClipboard，放弃无意义的垃圾覆写
         let empty_ok = EmptyClipboard().is_ok();
 
         // 广播 WM_DESTROYCLIPBOARD，强制系统清除云剪贴板缓存
@@ -536,17 +536,17 @@ fn create_listener_window() -> Result<isize, String> {
 }
 
 /* ==================================================================== *
- *  SECURITY.md 第 3 项 + 第 6 项：监听线程消息循环                        *
+ *  监听线程消息循环                        *
  *                                                                        *
- *  - 线程启动时调用 OleInitialize（第 6 项）                              *
- *  - 排干窗口消息后检查 PENDING_UPDATE 标志，异步处理（第 3 项）          *
- *  - 轮询敏感内容过期（第 1 项延迟清空）                                  *
- *  - 线程退出前调用 OleUninitialize（第 6 项）                            *
+ *  - 线程启动时调用 OleInitialize                              *
+ *  - 排干窗口消息后检查 PENDING_UPDATE 标志，异步处理          *
+ *  - 轮询敏感内容过期（延迟清空）                                  *
+ *  - 线程退出前调用 OleUninitialize                            *
  * ==================================================================== */
 #[cfg(target_os = "windows")]
 fn run_clipboard_message_loop(_hwnd: isize) {
     unsafe {
-        // SECURITY.md 第 6 项：OLE 初始化（监听线程）
+        // OLE 初始化（监听线程）
         let ole_result = OleInitialize(None);
         if ole_result.is_err() {
             log::warn!(
@@ -575,20 +575,20 @@ fn run_clipboard_message_loop(_hwnd: isize) {
                 }
             }
 
-            // 3. SECURITY.md 第 3 项：异步处理待处理的剪贴板事件
+            // 3. 异步处理待处理的剪贴板事件
             //    （不在窗口过程中执行，避免重入和死锁）
             if PENDING_UPDATE.swap(false, Ordering::SeqCst) {
                 process_clipboard_update();
             }
 
-            // 4. SECURITY.md 第 1 项：轮询敏感内容自动过期
+            // 4. 轮询敏感内容自动过期
             check_sensitive_expire();
 
             // 5. 阻塞式小睡，避免空转烧 CPU
             Sleep(POLL_INTERVAL_MS as u32);
         }
 
-        // SECURITY.md 第 6 项：线程退出前 OLE 反初始化
+        // 线程退出前 OLE 反初始化
         OleUninitialize();
     }
 }
@@ -609,17 +609,17 @@ impl ClipboardGuard {
         }
     }
 
-    /* ---------------- SECURITY.md 第 1 项：延迟清空写入 ---------------- */
+    /* ---------------- 延迟清空写入 ---------------- */
     /// 写入敏感内容（延迟清空模式）：
     ///
-    /// SECURITY.md 第 1 项：SetClipboardData 后绝不清空。
+    /// SetClipboardData 后绝不清空。
     /// 敏感内容正常驻留剪贴板中，供用户粘贴。
     /// 清空动作仅在以下条件触发时执行：
     ///   - 30 秒自动过期（check_sensitive_expire 轮询）
     ///   - 高安全模式下检测到外部 SetClipboardData（process_clipboard_update）
     ///   - 显式调用 clear / transactional_clear
     ///
-    /// SECURITY.md 第 5 项：写入时通过 CF_PRIVATEFIRST 标记，
+    /// 写入时通过 CF_PRIVATEFIRST 标记，
     /// 从源头防止进入剪贴板历史记录。
     #[cfg(target_os = "windows")]
     #[allow(dead_code)]
@@ -634,7 +634,7 @@ impl ClipboardGuard {
         utf16.push(0u16);
         let size = utf16.len() * 2; // 字节数
 
-        // SECURITY.md 第 4 项：原子设置 Writing 阶段 + 过期时间
+        // 原子设置 Writing 阶段 + 过期时间
         {
             let mut state = lock_state();
             state.stage = ClipboardStage::Writing;
@@ -682,7 +682,7 @@ impl ClipboardGuard {
                         //    SetClipboardData 接管内存所有权，不可 GlobalFree
                         match SetClipboardData(CF_UNICODETEXT, HANDLE(h_mem_raw as *mut _)) {
                             Ok(_) => {
-                                // SECURITY.md 第 5 项：写入 CF_PRIVATEFIRST 标记，
+                                // 写入 CF_PRIVATEFIRST 标记，
                                 // 防止进入剪贴板历史记录（best-effort）
                                 let h_priv = GlobalAlloc(GMEM_MOVEABLE_RAW, 1);
                                 if h_priv != 0 {
@@ -699,7 +699,7 @@ impl ClipboardGuard {
 
                                 let _ = CloseClipboard();
 
-                                // SECURITY.md 第 1 项：绝不清空！敏感内容驻留供用户粘贴
+                                // 绝不清空！敏感内容驻留供用户粘贴
                                 log::info!(
                                     "[clipboard_guard] write_sensitive: 写入 {} 字符，\
                                      延迟清空模式（{} 秒后自动清空 / 外部写入触发清空）",
@@ -723,7 +723,7 @@ impl ClipboardGuard {
             *w = 0;
         }
 
-        // SECURITY.md 第 4 项：原子更新状态
+        // 原子更新状态
         {
             let mut state = lock_state();
             match &result {
@@ -747,10 +747,10 @@ impl ClipboardGuard {
         Err("clipboard_guard: 非 Windows 平台不支持".into())
     }
 
-    /* ---------------- 第 7.3 项：事务式剪贴板安全清空 ---------------- */
-    /// 第 7.3 项 + SECURITY.md 第 5 项：事务式剪贴板安全清空
+    /* ---------------- 事务式剪贴板安全清空 ---------------- */
+    /// 事务式剪贴板安全清空
     ///
-    /// SECURITY.md 第 5 项修正：移除垃圾覆写轮次，改为直接 EmptyClipboard。
+    /// 移除垃圾覆写轮次，改为直接 EmptyClipboard。
     /// 事务性体现在 OpenClipboard 重试 + 最终广播 WM_DESTROYCLIPBOARD。
     ///
     /// 完整事务序列：
@@ -760,7 +760,7 @@ impl ClipboardGuard {
     ///   4. CloseClipboard
     ///
     /// 重试机制：OpenClipboard 失败（剪贴板被占用）时等待 50ms 重试，最多 3 次。
-    /// 全部失败返回 Err（第 7.7 项：不再静默返回 Ok）。
+    /// 全部失败返回 Err（不再静默返回 Ok）。
     #[cfg(target_os = "windows")]
     pub fn transactional_clear() -> Result<(), String> {
         // 标记为 Writing 以忽略清空操作自身产生的通知
@@ -771,7 +771,7 @@ impl ClipboardGuard {
 
         let result = do_clear_internal();
 
-        // SECURITY.md 第 4 项：原子更新状态
+        // 原子更新状态
         let mut state = lock_state();
         state.stage = ClipboardStage::Idle;
         state.last_seq = unsafe { GetClipboardSequenceNumber() };
@@ -788,16 +788,16 @@ impl ClipboardGuard {
         Err("clipboard_guard: 非 Windows 平台不支持".into())
     }
 
-    /* ---------------- SECURITY.md 第 6 项：启动监听 ---------------- */
+    /* ---------------- 启动监听 ---------------- */
     /// 启动剪贴板格式监听器（AddClipboardFormatListener）+ 监听线程。
     ///
-    /// SECURITY.md 第 6 项：
+    /// 
     ///   - 调用 OleInitialize 并检查返回值
     ///   - AddClipboardFormatListener 失败做细化处理（重试 / 降级轮询）
     ///   - 监听线程在退出前调用 OleUninitialize
     #[cfg(target_os = "windows")]
     pub fn start_monitoring(&mut self) -> Result<(), String> {
-        // SECURITY.md 第 6 项：OLE 初始化与剪贴板能力检查
+        // OLE 初始化与剪贴板能力检查
         unsafe {
             let ole_result = OleInitialize(None);
             if ole_result.is_err() {
@@ -811,7 +811,7 @@ impl ClipboardGuard {
         let hwnd = create_listener_window()?;
 
         // 注册现代剪贴板格式监听器（非旧式 SetClipboardViewer 链）
-        // SECURITY.md 第 6 项：AddClipboardFormatListener 失败细化处理
+        // AddClipboardFormatListener 失败细化处理
         let listener_result = unsafe { AddClipboardFormatListener(HWND(hwnd as *mut _)) };
         if let Err(e) = listener_result {
             unsafe {
@@ -853,7 +853,7 @@ impl ClipboardGuard {
             self.hwnd = hwnd;
         }
 
-        // SECURITY.md 第 4 项：原子重置监听状态基线
+        // 原子重置监听状态基线
         {
             let mut state = lock_state();
             state.stage = ClipboardStage::Idle;
@@ -888,7 +888,7 @@ impl ClipboardGuard {
     /* ---------------- 停止监听 ---------------- */
     #[cfg(target_os = "windows")]
     pub fn stop_monitoring(&mut self) {
-        // SECURITY.md 第 4 项：原子设置 monitoring=false
+        // 原子设置 monitoring=false
         {
             let mut state = lock_state();
             if !state.monitoring {
@@ -957,7 +957,7 @@ impl ClipboardGuard {
 
     /* ---------------- 高安全模式开关 ---------------- */
     /// 启用 / 禁用「外部写入即清空」行为。
-    /// SECURITY.md 第 4 项：高安全标志仅作为状态字段，不再依赖全局原子变量。
+    /// 高安全标志仅作为状态字段，不再依赖全局原子变量。
     pub fn set_high_security_mode(&mut self, enabled: bool) {
         let mut state = lock_state();
         state.high_security = enabled;

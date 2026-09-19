@@ -1,15 +1,8 @@
 /*
- * session_guard.rs — 智能会话自动锁屏（SECURITY.md 企业级重写版）
+ * session_guard.rs — 智能会话自动锁屏
  *
- * 用户需求（六.2 智能会话自动锁屏）：
- *   不依赖简单的"3分钟无操作"定时器。程序监听操作系统底层的
- *   "工作站锁屏"事件（Win+L / 笔记本合盖 ACPI 事件）。
- *   - 系统未锁屏 → 程序永不自动退出或销毁密钥（允许过夜常驻）
- *   - 捕获到系统锁屏、切换账户或远程桌面会话断开 → 立即销毁全部
- *     解密密钥并卸载 Verthys 句柄
- *   - 高安全模式：额外启用显示器关闭（系统睡眠）作为触发信号
  *
- * SECURITY.md 企业级重写要点：
+ * 重写要点：
  *   1. 使用 mpsc 消息通道替代全局裸指针，回调异步化
  *      - 窗口过程仅发送 SessionEvent 到通道，立即返回
  *      - 独立工作线程接收事件并安全执行用户回调
@@ -68,7 +61,7 @@ const WATCHDOG_CHECK_SECS: u64 = 5;
 const MAX_RESTART_ATTEMPTS: u32 = 3;
 
 /* ==================================================================== *
- *  SECURITY.md 第 1 项：mpsc 消息通道事件类型                            *
+ *  mpsc 消息通道事件类型                            *
  *                                                                        *
  *  窗口过程仅发送事件到通道，工作线程接收后执行用户回调。                  *
  *  完全消除全局裸指针和 UAF 风险。                                       *
@@ -88,7 +81,7 @@ enum SessionEvent {
 }
 
 /* ==================================================================== *
- *  SECURITY.md 第 2 项 + 第 5 项：窗口实例数据（替代全局变量）            *
+ *  窗口实例数据（替代全局变量）            *
  *                                                                        *
  *  每个窗口实例拥有独立的 WindowInstanceData，通过 GWLP_USERDATA 存储      *
  *  在窗口上。包含事件发送器和高安全模式标志。                              *
@@ -97,7 +90,7 @@ enum SessionEvent {
 
 /// 窗口实例数据（存储在 GWLP_USERDATA 上）
 ///
-/// SECURITY.md 第 5 项：high_security 为 Arc<AtomicBool>，
+/// high_security 为 Arc<AtomicBool>，
 /// 由 SessionGuard 和窗口过程共享，不使用全局变量。
 struct WindowInstanceData {
     /// 事件发送器（Mutex 包装以满足 Sync 要求）
@@ -107,7 +100,7 @@ struct WindowInstanceData {
 }
 
 /* ==================================================================== *
- *  SECURITY.md 第 4 项：平台抽象层                                        *
+ *  平台抽象层                                        *
  *                                                                        *
  *  定义 SessionGuardBackend trait，Windows 实现基于隐藏窗口，             *
  *  非 Windows 平台返回错误但不阻止应用启动。                              *
@@ -268,12 +261,12 @@ mod win_backend {
     }
 
     /* ==================================================================== *
-     *  SECURITY.md 第 2 项：窗口类注册（Once，仅注册一次，允许多实例）       *
+     *  窗口类注册（Once，仅注册一次，允许多实例）       *
      * ==================================================================== */
 
     static CLASS_REGISTERED: std::sync::Once = std::sync::Once::new();
 
-    /// SECURITY.md 第 2 项：注册窗口类（进程级仅一次）
+    /// 注册窗口类（进程级仅一次）
     ///
     /// 使用 std::sync::Once 保证窗口类仅注册一次，允许多个 SessionGuard 实例。
     /// 不再在 Drop 中 UnregisterClassW — 类随进程退出自动清理，
@@ -307,7 +300,7 @@ mod win_backend {
     }
 
     /* ==================================================================== *
-     *  SECURITY.md 第 1 项 + 第 3 项 + 第 5 项：窗口过程                     *
+     *  窗口过程                     *
      *                                                                        *
      *  仅发送事件到 mpsc 通道，立即返回。                                    *
      *  不调用任何剪贴板 API、不执行用户回调、不阻塞消息循环。                *
@@ -320,7 +313,7 @@ mod win_backend {
         wparam: usize,
         lparam: isize,
     ) -> isize {
-        // SECURITY.md 第 5 项：从 GWLP_USERDATA 获取实例数据（非全局变量）
+        // 从 GWLP_USERDATA 获取实例数据（非全局变量）
         let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WindowInstanceData;
         if ptr.is_null() {
             // 窗口创建期间 GWLP_USERDATA 尚未设置，走默认处理
@@ -338,7 +331,7 @@ mod win_backend {
                     _ => None,
                 };
                 if let Some(ev) = event {
-                    // SECURITY.md 第 1 项：仅发送事件到通道，不执行回调
+                    // 仅发送事件到通道，不执行回调
                     if let Ok(tx) = data.event_tx.lock() {
                         let _ = tx.send(ev);
                     }
@@ -346,7 +339,7 @@ mod win_backend {
                 0
             }
             WM_POWERBROADCAST => {
-                // SECURITY.md 第 5 项：从实例数据读取高安全标志（非全局变量）
+                // 从实例数据读取高安全标志（非全局变量）
                 if data.high_security.load(Ordering::SeqCst)
                     && wparam as u32 == PBT_APMSUSPEND
                 {
@@ -370,7 +363,7 @@ mod win_backend {
 
     /// 创建隐藏窗口并注册 WTS 会话通知
     ///
-    /// SECURITY.md 第 2 项：窗口类通过 Once 仅注册一次。
+    /// 窗口类通过 Once 仅注册一次。
     /// 实例数据通过 GWLP_USERDATA 存储在窗口上。
     fn create_guard_window(
         instance_data: &Arc<WindowInstanceData>,
@@ -397,7 +390,7 @@ mod win_backend {
                 ));
             }
 
-            // SECURITY.md 第 5 项：设置实例数据到 GWLP_USERDATA
+            // 设置实例数据到 GWLP_USERDATA
             let ptr = Arc::as_ptr(instance_data) as isize;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr);
 
@@ -429,7 +422,7 @@ mod win_backend {
                 let mut msg: Msg = Default::default();
                 let has_msg = PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE);
                 if has_msg != 0 {
-                    // SECURITY.md 第 2 项：检测 WM_QUIT（窗口被外部销毁）
+                    // 检测 WM_QUIT（窗口被外部销毁）
                     if msg.message == WM_QUIT {
                         log::warn!(
                             "[session_guard] 收到 WM_QUIT，窗口可能已被外部销毁，消息循环退出"
@@ -544,7 +537,7 @@ mod win_backend {
             }
         }
 
-        /// SECURITY.md 第 6 项：看门狗重启消息循环线程
+        /// 看门狗重启消息循环线程
         fn restart(&self) -> Result<(), String> {
             let count = self.restart_count.fetch_add(1, Ordering::SeqCst);
             if count >= MAX_RESTART_ATTEMPTS {
@@ -644,7 +637,7 @@ mod win_backend {
     }
 
     /* ==================================================================== *
-     *  SECURITY.md 第 3 项 + 第 6 项：工作线程（回调执行 + 看门狗）          *
+     *  工作线程（回调执行 + 看门狗）          *
      *                                                                        *
      *  接收 mpsc 事件并执行用户回调（catch_unwind 防止 panic 跨 FFI）。      *
      *  使用 recv_timeout 充当看门狗：定期检查消息循环线程存活状态。           *
@@ -663,7 +656,7 @@ mod win_backend {
         loop {
             match receiver.recv_timeout(Duration::from_secs(WATCHDOG_CHECK_SECS)) {
                 Ok(event) => {
-                    // SECURITY.md 第 3 项：catch_unwind 防止 panic 跨 FFI
+                    // catch_unwind 防止 panic 跨 FFI
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         match event {
                             SessionEvent::Lock => on_lock(),
@@ -695,7 +688,7 @@ mod win_backend {
                     if stop_flag.load(Ordering::SeqCst) {
                         break;
                     }
-                    // SECURITY.md 第 6 项：看门狗检查消息循环线程
+                    // 看门狗检查消息循环线程
                     if !message_loop_state.is_alive() {
                         if let Err(e) = message_loop_state.restart() {
                             log::error!(
@@ -854,7 +847,7 @@ mod win_backend {
 /* ==================================================================== *
  *  非 Windows 平台后端（降级策略）                                       *
  *                                                                        *
- *  SECURITY.md 第 4 项：非 Windows 平台返回错误但不阻止应用启动。         *
+ *  非 Windows 平台返回错误但不阻止应用启动。         *
  * ==================================================================== */
 
 #[cfg(not(target_os = "windows"))]
@@ -898,13 +891,13 @@ mod noop_backend {
 
 /// 智能会话自动锁屏守卫
 ///
-/// SECURITY.md 企业级重写：
-/// - mpsc 通道替代全局裸指针（第 1 项）
-/// - RAII 窗口封装，无全局状态（第 2 项）
-/// - catch_unwind 防止 panic 跨 FFI（第 3 项）
-/// - 平台抽象层 + 降级策略（第 4 项）
-/// - 实例级高安全标志（第 5 项）
-/// - 看门狗自动恢复（第 6 项）
+/// 设计要点：
+/// - mpsc 通道替代全局裸指针
+/// - RAII 窗口封装，无全局状态
+/// - catch_unwind 防止 panic 跨 FFI
+/// - 平台抽象层 + 降级策略
+/// - 实例级高安全标志
+/// - 看门狗自动恢复
 pub struct SessionGuard {
     backend: Backend,
     #[allow(dead_code)]
@@ -946,7 +939,7 @@ impl SessionGuard {
         }
     }
 
-    /// SECURITY.md 第 5 项：设置高安全模式（实例级，非全局）
+    /// 设置高安全模式（实例级，非全局）
     pub fn set_high_security_mode(&mut self, enabled: bool) {
         self.high_security_mode = enabled;
         self.backend.set_high_security(enabled);

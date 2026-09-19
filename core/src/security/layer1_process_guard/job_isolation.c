@@ -3,16 +3,16 @@
  *
  * 严格遵守 Windows 10/11 平台规范，禁止降级。
  *
- * 实现要点（对应规格 7 部分）：
- *   一、放弃 PROTECT_FROM_CLOSE + DuplicateHandle（已彻底移除）
- *   二、DACL 白名单策略（默认拒绝 + 显式允许，无 Deny ACE）
+ * 实现要点：
+ *   放弃 PROTECT_FROM_CLOSE + DuplicateHandle（已彻底移除）
+ *   DACL 白名单策略（默认拒绝 + 显式允许，无 Deny ACE）
  *       - ALLOW SYSTEM：JOB_OBJECT_ALL_ACCESS
  *       - ALLOW 当前进程用户 SID：JOB_OBJECT_ALL_ACCESS | JOB_OBJECT_ASSIGN_PROCESS
- *   三、完全移除 JobObjectSecurityLimitInformation（Windows 8+ 已废弃）
- *   四、资源释放采用 TerminateJobObject（非 DuplicateHandle）
- *   五、严格 5 步嵌套挂载流程，任一步失败触发立即回滚
- *   六、InitOnceExecuteOnce 并发安全 + OutputDebugStringA/Event Log 诊断
- *   七、DACL 阻断所有非 SYSTEM/非自身访问（含 SeDebugPrivilege 攻击者）
+ *   完全移除 JobObjectSecurityLimitInformation（Windows 8+ 已废弃）
+ *   资源释放采用 TerminateJobObject（非 DuplicateHandle）
+ *   严格 5 步嵌套挂载流程，任一步失败触发立即回滚
+ *   InitOnceExecuteOnce 并发安全 + OutputDebugStringA/Event Log 诊断
+ *   DACL 阻断所有非 SYSTEM/非自身访问（含 SeDebugPrivilege 攻击者）
  */
 #include "job_isolation.h"
 #include "verthys_internal.h"
@@ -34,11 +34,11 @@ static int    s_active = 0;             /* 0=未激活, 1=已激活 */
 static INIT_ONCE s_init_once = INIT_ONCE_STATIC_INIT;
 static int    s_init_result = 0;        /* 0=未初始化, 正数=成功, 负数=失败错误码 */
 
-/* ---------- 诊断：OutputDebugStringA + Event Log（规格第六部分） ---------- */
+/* ---------- 诊断：OutputDebugStringA + Event Log ---------- */
 
 /*
  * 统一诊断输出函数。
- * - OutputDebugStringA 经 VERTHYS_DIAG_LOG 编译门（P2-5）：仅诊断构建输出，
+ * - OutputDebugStringA 经 VERTHYS_DIAG_LOG 编译门：仅诊断构建输出，
  *   生产构建对调试器/DebugView 静默
  * - 同时写入 Windows 事件日志（Event Log），供正式发布版本远程排查
  * - 记录每一步的 Win32 错误码（GetLastError）
@@ -68,7 +68,7 @@ static void job_diag(const char *msg, DWORD gle)
     }
 }
 
-/* ---------- DACL 构建：白名单策略（规格第二、七部分） ---------- */
+/* ---------- DACL 构建：白名单策略 ---------- */
 
 /*
  * 构建白名单安全描述符。
@@ -81,7 +81,7 @@ static void job_diag(const char *msg, DWORD gle)
  *   当前进程的访问令牌中必然包含 Everyone SID（S-1-1-0），内核在权限检查时
  *   遇到显式拒绝项会直接返回 ACCESS_DENIED，导致后续 AssignProcessToJobObject 失败。
  *
- * 安全保证（规格第七部分）：
+ * 安全保证：
  *   未在列表中的任何主体（含 Administrators/Everyone）系统默认授予无任何访问权限，
  *   甚至没有 READ_CONTROL 或 SYNCHRONIZE。即便攻击者获得 SeDebugPrivilege/
  *   SeTcbPrivilege，SRM 仍严格执行 DACL，攻击者无法获得有效句柄。
@@ -189,17 +189,17 @@ static int build_whitelist_security(SECURITY_ATTRIBUTES *sa,
     return 0;
 }
 
-/* ---------- 5 步严格挂载流程的各步实现（规格第五部分） ---------- */
+/* ---------- 5 步严格挂载流程的各步实现 ---------- */
 
 /*
  * 步骤 1：创建内层 Job，立即设置 JOB_OBJECT_LIMIT_BREAKAWAY_OK。
  *
- * 嵌套依赖前提（规格第一部分）：
+ * 嵌套依赖前提：
  *   内层 Job 必须设置 BREAKAWAY_OK，否则后续"进程 → 外层 Job"会被内核拒绝
  *   并返回 ERROR_ACCESS_DENIED。
  *
  * DACL 白名单已应用，仅 SYSTEM 和当前用户可访问。
- * 不设置 JobObjectSecurityLimitInformation（规格第三部分：Windows 8+ 已废弃）。
+ * 不设置 JobObjectSecurityLimitInformation（Windows 8+ 已废弃）。
  */
 static int step1_create_inner_job(void)
 {
@@ -244,7 +244,7 @@ static int step1_create_inner_job(void)
  * 步骤 2：调用 AssignProcessToJobObject(内层, GetCurrentProcess())，
  * 将当前进程挂入内层 Job。
  *
- * 必须先于"挂入外层 Job"执行（规格第一部分：顺序不可颠倒）。
+ * 必须先于"挂入外层 Job"执行（顺序不可颠倒）。
  */
 static int step2_assign_to_inner(void)
 {
@@ -260,12 +260,12 @@ static int step2_assign_to_inner(void)
 /*
  * 步骤 3：创建外层 Job，设置 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK。
  *
- * 嵌套依赖前提（规格第一部分）：
+ * 嵌套依赖前提：
  *   外层 Job 必须设置 BREAKAWAY_OK，否则内核拒绝嵌套挂入。
  *   KILL_ON_JOB_CLOSE 保证外层句柄关闭时强制终止所有子进程。
  *
- * 不设置 PROTECT_FROM_CLOSE（规格第一部分：已证明无效）。
- * 不设置 PROTECT_FROM_CLOSE 的副本触发机制（规格第四部分：DuplicateHandle 无效）。
+ * 不设置 PROTECT_FROM_CLOSE（已证明无效）。
+ * 不设置 PROTECT_FROM_CLOSE 的副本触发机制（DuplicateHandle 无效）。
  */
 static int step3_create_outer_job(void)
 {
@@ -351,7 +351,7 @@ static void step5_rollback(void)
     }
 }
 
-/* ---------- InitOnceExecuteOnce 回调（规格第六部分：并发安全） ---------- */
+/* ---------- InitOnceExecuteOnce 回调（并发安全） ---------- */
 
 /*
  * InitOnceExecuteOnce 回调函数，保证全局仅执行一次初始化。
@@ -458,7 +458,7 @@ int job_isolation_is_active(void)
 /*
  * 主动断开 Job 隔离链路（仅 tamper_destroy 应急销毁路径调用）。
  *
- * 资源释放流程（规格第四部分）：
+ * 资源释放流程：
  *   1. TerminateJobObject(外层, 退出码) —— 瞬间终止 Job 层级内所有进程
  *   2. CloseHandle(内层) —— 释放内层句柄
  *   3. CloseHandle(外层) —— 释放外层句柄（不设置 PROTECT_FROM_CLOSE，可直接关闭）

@@ -1,16 +1,6 @@
 /*
  * memory_guard.c — 内存防转储与防交换实现（内部模块，不导出）
  *
- * 用户需求（二.2 内存防转储与防交换）：
- *   - 锁定敏感物理页：VirtualLock 将密钥表、路径索引、解密头部缓存
- *     强制常驻物理内存，禁止 OS 交换至磁盘页面文件。
- *   - 拦截远程内存读取：遍历系统句柄表（NtQuerySystemInformation
- *     SystemExtendedHandleInformation=64），筛选指向当前进程且访问掩码
- *     含 PROCESS_VM_READ / PROCESS_ALL_ACCESS 的句柄，并辅以可疑进程名
- *     （Cheat Engine / Process Hacker / HxD / WinDbg）检测。
- *   - 安全多轮覆写零化：0x00 → 0xFF → 0x00 三轮，volatile 指针写入 +
- *     MemoryBarrier，编译器不可优化消除，不依赖 GC / 延迟释放。
- *   - 紧急内存零化：遍历全部已注册敏感区域逐个清零并解锁。
  *
  * 设计要点：
  *   - NtQuerySystemInformation 通过 GetModuleHandleW(L"ntdll.dll") +
@@ -26,7 +16,7 @@
 #include "verthys_internal.h"    /* verthys_secure_zero / verthys_lock_memory / verthys_unlock_memory */
 #include "security_preset.h"   /* security_get_config */
 #include "emergency.h"         /* emergency_report / EMERG_SIG_REMOTE_MEM_READ */
-/* ★ WP-9：NtQueryInformationProcess / NtQuerySystemInformation 改走
+/* NtQueryInformationProcess / NtQuerySystemInformation 改走
  * 直接系统调用包装（stub 优先 / GetProcAddress 回退），绕过用户态
  * API Hook——防转储扫描是攻击者最优先 Hook 的路径之一。 */
 #include "syscall_direct.h"
@@ -97,7 +87,7 @@ typedef struct {
 static MemoryRegion s_regions[MG_MAX_REGIONS];
 static int s_initialized = 0;
 
-/* ★ 方案 P2-1：注册表并发保护（register/unregister/purge 可能来自不同线程） */
+/* 注册表并发保护（register/unregister/purge 可能来自不同线程） */
 static CRITICAL_SECTION s_regions_cs;
 static int s_regions_cs_init = 0;
 
@@ -109,14 +99,14 @@ static void regions_cs_ensure(void)
     }
 }
 
-/* ---------- 父进程识别（方案 §6.2.3：排除同信任链句柄） ---------- */
+/* ---------- 父进程识别（排除同信任链句柄） ---------- */
 
 /*
  * 获取当前进程的父进程 PID（InheritedFromUniqueProcessId）。
  * 用途：Tauri 主进程对 worker 子进程天然持有 PROCESS_ALL_ACCESS 句柄
  * （spawn/等待/终止所必需），防转储扫描必须排除父进程，否则每次
  * 扫描必然误报。获取失败返回 0（不排除）。
- * ★ WP-9：经 syscall_direct 包装（直接 stub / 降级回退），防父进程
+ * 经 syscall_direct 包装（直接 stub / 降级回退），防父进程
  * 识别被 API Hook 短路（返回 0 → 父进程句柄被误报为威胁）。
  */
 static DWORD get_parent_pid(void)
@@ -185,7 +175,7 @@ static int check_suspicious_process_names(void)
  *   out_buf      : 输出缓冲区指针（调用方负责清零并 HeapFree）
  *   out_count    : 输出条目数
  * 返回 0 成功；非 0 = 查询失败（调用方退化为仅进程名检测）。
- * ★ WP-9：NtQuerySystemInformation 经 syscall_direct 包装（直接 stub /
+ * NtQuerySystemInformation 经 syscall_direct 包装（直接 stub /
  * 降级回退）——句柄表扫描是转储类工具的先行拦截目标，Hook 该入口
  * 即可让防转储检测失明，直接系统调用使其不可被用户态 Hook。
  */
@@ -308,7 +298,7 @@ void memory_guard_secure_zero(void *ptr, size_t len)
     if (ptr == NULL || len == 0) return;
 
     /*
-     * ★ 方案 P2-G：单轮覆写（0x00）。
+     * ★ 单轮覆写（0x00）。
      * 原实现的三轮覆写（0x00→0xFF→0x00）是磁盘擦除的民俗移植——
      * 对易失性内存单轮覆盖已足够，多轮只增加成本无安全增益。
      * volatile 限定指针确保编译器不优化掉写入。
@@ -332,7 +322,7 @@ int memory_guard_check_remote_read(void)
     /*
      * 主检测：遍历系统句柄表，查找非信任进程持有指向本进程的
      * PROCESS_VM_READ / PROCESS_ALL_ACCESS 句柄。
-     * ★ 方案 §6.2.3（P0-5 修复）：信任链排除——系统进程（0/4）、
+     * 信任链排除——系统进程（0/4）、
      * 自身、父进程（Tauri 主进程对 worker 持有 PROCESS_ALL_ACCESS
      * 句柄属正常架构，必须排除，否则每次扫描必然误报）。
      */
@@ -431,7 +421,7 @@ int memory_guard_check_remote_read(void)
     }
 
     if (detected) {
-        /* ★ 方案 §6.1：中置信度信号 → DEGRADE（窗口内重复达阈值才锁库） */
+        /* 中置信度信号 → DEGRADE（窗口内重复达阈值才锁库） */
         emergency_report(EMERG_LEVEL_DEGRADE, EMERG_SIG_REMOTE_MEM_READ);
     }
 
@@ -529,7 +519,7 @@ int memory_guard_unregister(void *ptr)
 }
 
 /* ===================================================================== *
- *              防转储低频巡逻（方案 §6.2.3）                              *
+ *              防转储低频巡逻                              *
  * ===================================================================== *
  * 一次性定时器链（≥60s 间隔）：每次唤醒执行一次句柄表扫描后重排下一次。
  * 空闲期零唤醒成本（相对旧的 1s 周期定时器体系）；性能模式不启动。

@@ -1,22 +1,21 @@
 /*
  * anti_debug_v2.c — 反调试检测模块实现
  *
- * ★ 方案 §6.2.1（P1-O 治理）：检测器修复（缺陷依据见头注）。
- *
+
  * 检测层（全部为本进程内高置信度信号，无系统级进程扫描）：
  *   1. IsDebuggerPresent（PEB.BeingDebugged）
  *   2. NtQueryInformationProcess 三重探测
  *      （ProcessDebugPort / ProcessDebugFlags / ProcessDebugObjectHandle）
  *   3. 硬件断点检测（GetThreadContext 检查 DR0-DR3 寄存器）
  *
- * 响应层（方案 §6.1 分级模型）：
+ * 响应层（分级模型）：
  *   - 任一命中 → emergency_report(EMERG_LEVEL_KILL, ...)：调试器确认属于
  *     高置信度信号（软件探测与 DR 寄存器无法被正常执行流置位）。
  *   - 惩罚模式：检测到威胁后激活，KDF 迭代提升（延迟惩罚语义保留，
  *     与比特反转"行为误导"彻底切割）。
  *   - 高安全模式（anti_debug_aggressive=1）：检测即本模块直接退出。
  *
- * 调用时机（方案 §6.2.1）：Verthys_Init、Verthys_ChangePassword、Verthys_Export
+ * 调用时机：Verthys_Init、Verthys_ChangePassword、Verthys_Export
  * 各一次——高频路径零开销。
  */
 #include "anti_debug_v2.h"
@@ -24,7 +23,7 @@
 #include "verthys_crypto.h"      /* verthys_crypto_init */
 #include "security_preset.h"   /* security_get_config */
 #include "emergency.h"         /* emergency_report */
-/* ★ WP-9：NtQueryInformationProcess 改走直接系统调用包装
+/* NtQueryInformationProcess 改走直接系统调用包装
  * （stub 优先 / GetProcAddress 回退），绕过用户态 API Hook。 */
 #include "syscall_direct.h"
 
@@ -58,7 +57,7 @@ static int check_software_debugger(void)
     }
 
     /* 2. NtQueryInformationProcess：三种调试器探测
-     * ★ WP-9：经 syscall_direct 包装——优先直接 stub（绕过
+     * 经 syscall_direct 包装——优先直接 stub（绕过
      * 用户态 Hook），降级时回退 GetProcAddress（行为与旧版一致）；
      * 包装内部彻底失联返回非 SUCCESS，各探测按"无信号"跳过。 */
     HANDLE proc = GetCurrentProcess();
@@ -118,7 +117,7 @@ static int check_hardware_breakpoints(void)
         detected = 1;
     }
 
-    /* 上下文含寄存器敏感信息，用毕清零（单轮覆写足够，方案 P2-G） */
+    /* 上下文含寄存器敏感信息，用毕清零（单轮覆写足够） */
     verthys_secure_zero(&ctx, sizeof(ctx));
     return detected;
 }
@@ -141,7 +140,7 @@ int anti_debug_v2_init(void)
     /* 读取安全配置（决定是否启用激进策略与 KDF 迭代轮次） */
     s_config = security_get_config();
 
-    /* ★ WP-9：直接系统调用传输就绪（stub 提取或 GetProcAddress 降级） */
+    /* 直接系统调用传输就绪（stub 提取或 GetProcAddress 降级） */
     (void)syscall_direct_init();
 
     s_initialized = 1;
@@ -179,7 +178,7 @@ DebugThreatLevel anti_debug_v2_check(void)
         s_punish_mode = 1;
     }
 
-    /* ★ 方案 §6.1：调试器确认 = 高置信度信号 → KILL 级上报 */
+    /* 调试器确认 = 高置信度信号 → KILL 级上报 */
     if (hw_bp) {
         emergency_report(EMERG_LEVEL_KILL, EMERG_SIG_HARDWARE_BP);
     }
@@ -217,7 +216,7 @@ uint32_t anti_debug_v2_get_kdf_iters(void)
 
 void anti_debug_v2_emergency_exit(void)
 {
-    /* 清零本模块内部状态（单轮覆写足够，方案 P2-G：废除多轮民俗） */
+    /* 清零本模块内部状态（单轮覆写足够，废除多轮民俗） */
     verthys_secure_zero(&s_initialized, sizeof(s_initialized));
     verthys_secure_zero(&s_punish_mode, sizeof(s_punish_mode));
     verthys_secure_zero(&s_config, sizeof(s_config));

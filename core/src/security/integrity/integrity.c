@@ -1,18 +1,12 @@
 /*
  * integrity.c — 惰性关键段完整性校验 + 分散式校验锚点实现
  *
- * 用户需求（一.1 关键段完整性校验）：
- *   - 惰性关键段自校验：仅在程序入口校验核心解密引擎模块（DLL）.text 段 +
- *     主 EXE 头部关键区段（前 1MB）。其余 UI/图标/语言包不参与启动校验，达成秒开。
- *   - 分散式校验锚点：将剩余完整性校验逻辑打散，埋入“打开设置页”“切换目录树”
- *     “导出文件”“导入文件”“修改密码”“解锁”等功能入口。攻击者无法通过单点
- *     内存补丁绕过全部校验——每个锚点覆盖不同区段。
  *
- * 技术方案：
+ * 技术要点：
  *   - HMAC-SHA256（libsodium 经 verthys_crypto.h 封装）计算各区段摘要
  *   - 每个锚点拥有独立 32 字节基准哈希（post-build 工具经 integrity_set_baseline 注入）
  *   - 基准全零 = 未配置 = 跳过校验（返回 0=通过），避免开发期阻断
- *   - 校验失败（哈希不匹配）返回非零，调用方据此触发应急流程（见 emergency.h）
+ *   - 校验失败（哈希不匹配）返回非零，调用方据此触发应急流程（同 emergency.h）
  *   - 计算用临时哈希缓冲区用毕立即 verthys_secure_zero 清零，避免内存残留
  *
  * 区段覆盖（分散式，无单点）：
@@ -33,7 +27,7 @@
 #include "integrity.h"
 #include "verthys_crypto.h"
 #include "verthys_internal.h"  /* verthys_secure_zero */
-#include "emergency.h"       /* ★ §6.3：验签失败 KILL 级上报 */
+#include "emergency.h"       /* 验签失败 KILL 级上报 */
 #include <sodium.h>          /* crypto_auth_hmacsha256_state（流式 HMAC） */
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -45,7 +39,7 @@
 
 /* ---------- 常量 ---------- */
 
-/* 主 EXE 头部校验区段大小：1 MiB（project.md 3.4 / integrity.h 要求） */
+/* 主 EXE 头部校验区段大小：1 MiB（integrity.h 要求） */
 #define INTEGRITY_EXE_HEAD_BYTES  (1024u * 1024u)
 
 /* ANCHOR_UNLOCK 抽样参数：固定步长抽取 NUM_SAMPLES 个 SAMPLE_BYTES 字节块 */
@@ -475,7 +469,7 @@ int integrity_check_anchor(IntegrityAnchor anchor)
 }
 
 /* ===================================================================== *
- *        ★ 方案 §6.3：构建期签名 + 一次性验签（.vsec 机制）实现          *
+ *        ★ 构建期签名 + 一次性验签（.vsec 机制）实现          *
  * ===================================================================== *
  *
  * .vsec 节布局（128 字节，只读节，由构建脚本在链接后补丁）：
@@ -484,7 +478,7 @@ int integrity_check_anchor(IntegrityAnchor anchor)
  *   [6..7]   flags   = 0（预留）
  *   [8..39]  HMAC(.text 文件内容)
  *   [40..71] HMAC(.rdata 文件内容)
- *   [72..103] HMAC(.rhat 文件内容)（★ V3 WP-8：运行时哈希表防文件级篡改）
+ *   [72..103] HMAC(.rhat 文件内容)（运行时哈希表防文件级篡改）
  *   [104..127] 保留全零
  *
  * 全零节 = 未配置（开发构建）→ 验签跳过。构建脚本以相同域密钥补丁本节。
@@ -631,7 +625,7 @@ int integrity_verify_startup(void)
         return 0; /* 未配置（全零占位）或魔法不符：跳过 */
     }
 
-    /* 3. 重算 .text / .rdata（★ V3 WP-8 v2：+ .rhat）文件内容 HMAC */
+    /* 3. 重算 .text / .rdata（v2：+ .rhat）文件内容 HMAC */
     uint8_t text_mac[VERTHYS_HMAC_BYTES];
     uint8_t rdata_mac[VERTHYS_HMAC_BYTES];
     uint8_t rhat_mac[VERTHYS_HMAC_BYTES];

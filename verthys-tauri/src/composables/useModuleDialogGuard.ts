@@ -5,7 +5,7 @@
  *   根因：各模块弹窗使用 <Teleport to="body">，脱离组件 DOM 树。
  *   cross-fade 切换模块时，旧模块的弹窗仍残留在 body 中，覆盖新模块内容。
  *
- * 方案：ModuleStage provide currentModule，各模块 inject 并 watch。
+ * 做法：ModuleStage provide currentModule，各模块 inject 并 watch。
  *   当 currentModule !== 自身模块 id 时，同步（flush:'sync'）关闭所有弹窗。
  *   同步触发确保弹窗在切换瞬间立即关闭，杜绝残留覆盖。
  *

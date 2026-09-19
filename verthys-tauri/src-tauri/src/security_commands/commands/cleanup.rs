@@ -1,7 +1,6 @@
 /*
  * commands/cleanup.rs — 痕迹清理命令
  *
- *    "" 第十三章 — 13.2.1 / 13.2.3 / 13.2.7 项
  *
  * 职责：
  *   痕迹清理 Tauri 命令实现（async + spawn_blocking）：
@@ -20,16 +19,16 @@ use crate::security_commands::path_resolver::{resolve_logical_path, LOGICAL_TEMP
 use crate::security_commands::state::SecurityState;
 
 /* ====================================================================== *
- *  4. 痕迹清理命令（第 13.2.1 / 13.2.3 / 13.2.7 项）                      *
+ *  4. 痕迹清理命令                      *
  * ====================================================================== */
 
-/// 第 13.2.3 项：清空系统最近使用记录（async + spawn_blocking）
+/// 清空系统最近使用记录（async + spawn_blocking）
 #[tauri::command]
 pub async fn security_cleanup_recent(
     app: tauri::AppHandle,
     state: State<'_, SecurityState>,
 ) -> Result<(), String> {
-    // 第 13.2.3 项：spawn_blocking 执行阻塞式 I/O
+    // spawn_blocking 执行阻塞式 I/O
     let result = tokio::task::spawn_blocking(clear_recent_records)
         .await
         .map_err(|e| format!("清理任务执行失败: {}", e))?;
@@ -60,11 +59,11 @@ pub async fn security_cleanup_recent(
     Ok(())
 }
 
-/// 第 13.2.1 / 13.2.3 项：安全删除文件
+/// 安全删除文件
 ///
-/// 第 13.2.1 项：path 参数改为 logical_id（"verthys_dir"/"temp_dir"/"data_dir"），
+/// path 参数改为 logical_id（"verthys_dir"/"temp_dir"/"data_dir"），
 ///               由后端从受信上下文解析实际路径。
-/// 第 13.2.3 项：使用 spawn_blocking 执行 Gutmann/Simple 覆写（可能耗时数秒）。
+/// 使用 spawn_blocking 执行 Gutmann/Simple 覆写（可能耗时数秒）。
 ///
 /// mode: "gutmann"=35-pass(Gutmann 标准), "simple"=3-pass(随机覆写)
 /// file_name: 相对于逻辑目录的文件名（不允许包含 .. 或绝对路径）
@@ -76,10 +75,10 @@ pub async fn security_secure_delete(
     file_name: String,
     mode: String,
 ) -> Result<(), String> {
-    // 第 13.2.1 项：解析逻辑路径
+    // 解析逻辑路径
     let base_dir = resolve_logical_path(&app, &logical_id)?;
 
-    // 第 13.2.1 项：校验 file_name 不包含目录遍历
+    // 校验 file_name 不包含目录遍历
     if file_name.contains("..") || file_name.contains('\\') && file_name.contains(':') {
         return Err("文件名包含非法字符（禁止目录遍历）".into());
     }
@@ -94,14 +93,14 @@ pub async fn security_secure_delete(
     let target_path = base_dir.join(&file_name);
     let target_str = target_path.to_string_lossy().to_string();
 
-    // 第 13.2.1 项：最终路径必须在白名单基目录内
+    // 最终路径必须在白名单基目录内
     let canonical = std::fs::canonicalize(&target_path)
         .map_err(|e| format!("目标文件不存在或路径解析失败: {}", e))?;
     if !canonical.starts_with(&base_dir) {
         return Err("目标路径不在白名单基目录内（安全拒绝）".into());
     }
 
-    // SECURITY.md 第 1 项：彻底移除 Gutmann 35 遍覆写模式
+    // 彻底移除 Gutmann 35 遍覆写模式
     // 仅提供 Standard（1 遍全零覆写）和 SSD（覆写 + TRIM）模式
     let delete_mode = match mode.as_str() {
         "ssd" => DeleteMode::Ssd,
@@ -109,7 +108,7 @@ pub async fn security_secure_delete(
     };
 
     let path_for_task = target_str.clone();
-    // 第 13.2.3 项：spawn_blocking 执行安全删除（1 遍覆写 + 可选 TRIM）
+    // spawn_blocking 执行安全删除（1 遍覆写 + 可选 TRIM）
     let result = tokio::task::spawn_blocking(move || {
         secure_delete_file(&path_for_task, delete_mode)
     })
@@ -142,20 +141,20 @@ pub async fn security_secure_delete(
     Ok(())
 }
 
-/// 第 13.2.1 / 13.2.3 项：清理崩溃残留临时文件
+/// 清理崩溃残留临时文件
 ///
-/// 第 13.2.1 项：不再接收前端传入的 temp_dir，改用 app_config_dir/tmp。
-/// 第 13.2.3 项：使用 spawn_blocking 执行文件系统扫描和清理。
+/// 不再接收前端传入的 temp_dir，改用 app_config_dir/tmp。
+/// 使用 spawn_blocking 执行文件系统扫描和清理。
 #[tauri::command]
 pub async fn security_cleanup_crash_residue(
     app: tauri::AppHandle,
     state: State<'_, SecurityState>,
 ) -> Result<usize, String> {
-    // 第 13.2.1 项：从受信上下文获取临时目录
+    // 从受信上下文获取临时目录
     let temp_dir = resolve_logical_path(&app, LOGICAL_TEMP_DIR)?;
     let temp_dir_str = temp_dir.to_string_lossy().to_string();
 
-    // 第 13.2.3 项：spawn_blocking 执行清理
+    // spawn_blocking 执行清理
     let result = tokio::task::spawn_blocking(move || {
         cleanup_crash_residue(&temp_dir_str)
     })

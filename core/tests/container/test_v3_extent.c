@@ -1,7 +1,7 @@
 /*
- * test_v3_extent.c — WP-3 验收：V3 内容寻址 Extent（去重 + 完整性）
+ * test_v3_extent.c — V3 内容寻址 Extent 验收（去重 + 完整性）
  *
- * 覆盖（PLAYBOOK WP-3 步骤 + 验收标准：寻址/去重/引用计数/GC 标记/
+ * 覆盖（验收标准：寻址/去重/引用计数/GC 标记/
  * 损坏检测）：
  *   1. 内容寻址哈希：确定性、区分性、空数据、参数校验
  *   2. 索引生命周期：init 默认值、find 未命中、参数校验
@@ -19,7 +19,7 @@
  *  11. 错误分区密钥读取 → AUTH（分区密钥隔离）
  *  12. 索引持久化 roundtrip：save → 分区重载（wrapped 解包重导入）→
  *      load → 条目/游标/数据完整恢复、nonce 计数器 restore
- *  13. E-7 防回退：分区计数器高于索引快照 → load 拒绝
+ *  13. 防回退：分区计数器高于索引快照 → load 拒绝
  *  14. 索引帧篡改：密文翻转 → AUTH；magic/ct_len 破坏 → FORMAT
  *  15. 空索引区 load → FORMAT
  *  16. 全 API NULL 参数校验
@@ -680,7 +680,7 @@ TEST(v3ext_index_save_load_roundtrip)
     return 0;
 }
 
-/* ---------- 13. E-7 nonce 防回退 ---------- */
+/* ---------- 13. nonce 防回退 ---------- */
 
 TEST(v3ext_index_load_nonce_rollback_rejected)
 {

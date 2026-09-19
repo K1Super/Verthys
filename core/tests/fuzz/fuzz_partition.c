@@ -1,7 +1,5 @@
 /*
- * fuzz_partition.c — V3 分区表明文帧模糊测试目标（WP-10 目标 2/5）
- *
- * 设计依据：docs/V3_UPGRADE_PLAYBOOK.md WP-10
+ * fuzz_partition.c — V3 分区表明文帧模糊测试目标
  *
  * 测试面：verthys_partition_table_parse_unverified —— 分区表帧 AEAD 解密
  * 后的明文解析（flatcc verifier → magic/version/txid → 条目数上限 →

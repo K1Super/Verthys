@@ -1,5 +1,5 @@
 /*
- * test_init.c — Phase 1.3 追踪弹：验证 Init/Deinit 行为
+ * test_init.c — 追踪弹：验证 Init/Deinit 行为
  *
  * 这是端到端验证构建链路的第一个测试（RED→GREEN）。
  * 仅通过 verthys.h 公共接口验证，不触碰内部结构。

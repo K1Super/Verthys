@@ -7,7 +7,7 @@
  *   - 仅依赖 std::sync（Mutex）与 std::time（Instant）
  *   - 通过 AppState 持有，控制器通过 AppState 访问
  *
- * 第 5.7 项 — 密钥状态机：
+ *  密钥状态机：
  *   AppState 维护密钥生命周期状态（NoKey / Locked / Unlocked）：
  *     - NoKey:    初始状态，未派生任何密钥
  *     - Locked:   已派生 GMK 但未验证（或已锁定），worker 内存无可用 GMK
@@ -21,12 +21,12 @@
  *
  *   状态不匹配返回 ErrorCode::KeyStateMismatch，防止非法操作序列。
  *
- * 第 5.3 项 — verify_global_key 入口失败计数器：
+ *  verify_global_key 入口失败计数器：
  *   - 基于 Instant（monotonic clock），不受系统时间篡改影响
  *   - 连续失败 5 次触发指数冷却：2^(failures - 5) 秒（2s/4s/8s/16s/32s 上限 60s）
  *   - 冷却期内拒绝 verify_global_key 请求，返回 ErrorCode::RateLimited
  *   - 成功验证重置计数器
- *   - 与 brute_force.rs 联动（阶段 7）：阶段 7 将本计数器状态持久化到 DPAPI，
+ *   - 与 brute_force.rs 联动：本计数器状态持久化到 DPAPI，
  *     并与 BruteForceGuard 共享失败计数（连续 10 次触发界面锁定，累计 20 次清空索引）
  *
  * CI 红线：
@@ -39,10 +39,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /* ------------------------------------------------------------------ *
- * 第 5.7 项：密钥生命周期状态枚举                                     *
+ * 密钥生命周期状态枚举                                     *
  * ------------------------------------------------------------------ */
 
-/// 密钥生命周期状态（第 5.7 项）
+/// 密钥生命周期状态
 ///
 /// 表示 worker 子进程中全局主密钥 GMK 的当前状态。
 /// 所有密钥操作必须匹配当前状态，否则返回 KeyStateMismatch。
@@ -85,10 +85,10 @@ impl std::fmt::Display for KeyLifecycleState {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 5.3 项：指数冷却失败计数器                                       *
+ * 指数冷却失败计数器                                       *
  * ------------------------------------------------------------------ */
 
-/// 触发冷却的连续失败次数阈值（第 5.3 项：超 5 次指数冷却）
+/// 触发冷却的连续失败次数阈值（超 5 次指数冷却）
 const COOLDOWN_THRESHOLD: u32 = 5;
 
 /// 冷却时间上限（60 秒，防止指数膨胀过长阻塞用户）
@@ -97,7 +97,7 @@ const COOLDOWN_MAX_SECS: u64 = 60;
 /// 冷却时间基数（2 秒，指数底数）
 const COOLDOWN_BASE_SECS: u64 = 2;
 
-/// 计算指数冷却时长（第 5.3 项）
+/// 计算指数冷却时长
 ///
 /// 公式：cooldown = min(COOLDOWN_BASE_SECS * 2^(excess - 1), COOLDOWN_MAX_SECS)
 ///
@@ -126,7 +126,7 @@ fn compute_cooldown(excess_failures: u32) -> Duration {
  * KeyLifecycle — 密钥生命周期状态机 + 失败计数器                      *
  * ------------------------------------------------------------------ */
 
-/// 密钥生命周期状态机（第 5.7 项 + 第 5.3 项）
+/// 密钥生命周期状态机
 ///
 /// 持有当前密钥状态 + verify_global_key 失败计数器 + 冷却截止时间。
 /// 通过 AppState 持有，控制器通过 AppState::lock_key_lifecycle() 访问。
@@ -135,7 +135,7 @@ fn compute_cooldown(excess_failures: u32) -> Duration {
 ///   - inner: Mutex 保护，短暂持锁（状态检查 + 转移原子完成）
 ///   - 冷却时间基于 Instant（monotonic clock），不受系统时间篡改影响
 ///
-/// 中毒处理（第 11.5 项）：
+/// 中毒处理：
 ///   Mutex 中毒时 into_inner() 取出废弃，重置为默认状态（NoKey + 零计数），
 ///   记录严重告警。由 AppState::lock_key_lifecycle() 统一处理。
 pub struct KeyLifecycle {
@@ -161,7 +161,7 @@ impl Default for KeyLifecycleInner {
     }
 }
 
-/// verify 操作的预检查结果（第 5.3 项）
+/// verify 操作的预检查结果
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyCheckResult {
     /// 允许尝试验证
@@ -170,7 +170,7 @@ pub enum VerifyCheckResult {
     Cooldown(u64),
 }
 
-/// verify 操作的结果反馈（第 5.3 项）
+/// verify 操作的结果反馈
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyAttemptResult {
     /// 验证成功（状态已转移为 Unlocked，计数器已重置）
@@ -189,14 +189,14 @@ impl KeyLifecycle {
         }
     }
 
-    /// 获取当前密钥状态（第 5.7 项）
+    /// 获取当前密钥状态
     pub fn current_state(&self) -> KeyLifecycleState {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.state
     }
 
     /* ----------------------------------------------------------------
-     * 第 5.7 项：状态转移方法                                          *
+     * 状态转移方法                                          *
      *                                                                *
      * 每个方法持锁期间完成：检查当前状态 → 转移到新状态。               *
      * 状态不匹配返回 Err(错误消息)，调用方映射到 ErrorCode。           *
@@ -240,7 +240,7 @@ impl KeyLifecycle {
         match inner.state {
             KeyLifecycleState::Locked => {
                 inner.state = KeyLifecycleState::Unlocked;
-                // 验证成功重置失败计数（第 5.3 项）
+                // 验证成功重置失败计数
                 inner.consecutive_failures = 0;
                 inner.cooldown_until = None;
                 Ok(())
@@ -322,10 +322,10 @@ impl KeyLifecycle {
     }
 
     /* ----------------------------------------------------------------
-     * 第 5.3 项：verify_global_key 失败计数器 + 指数冷却               *
+     * verify_global_key 失败计数器 + 指数冷却               *
      * ---------------------------------------------------------------- */
 
-    /// 预检查是否允许尝试 verify_global_key（第 5.3 项）
+    /// 预检查是否允许尝试 verify_global_key
     ///
     /// 在调用 worker 验证前检查：
     ///   1. 当前状态必须为 Locked（否则由 transition 方法拒绝）
@@ -349,7 +349,7 @@ impl KeyLifecycle {
         VerifyCheckResult::Allow
     }
 
-    /// 记录 verify_global_key 成功（第 5.3 项）
+    /// 记录 verify_global_key 成功
     ///
     /// 重置失败计数器 + 转移状态为 Unlocked。
     /// 调用方在 worker 验证成功后调用。
@@ -358,7 +358,7 @@ impl KeyLifecycle {
         self.transition_to_unlocked()
     }
 
-    /// 记录 verify_global_key 失败（第 5.3 项）
+    /// 记录 verify_global_key 失败
     ///
     /// 递增失败计数，超阈值触发指数冷却。
     /// 调用方在 worker 验证失败后调用。

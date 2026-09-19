@@ -5,7 +5,7 @@
  * 本头不属于公共 ABI：条目编解码、MemTable 跳表、Bloom、SSTable 读写、
  * Manifest 内存态等跨翻译单元细节在此声明。
  *
- * 帧惯例（对齐 WP-2 分区表帧 / WP-3 索引帧）：
+ * 帧惯例：
  *   [u32 magic][u32 ct_len][AEAD 密文 ct_len 字节（含 16B tag）][12B nonce]
  *   ct_len ≥ 16（空明文合法）。
  *
@@ -94,14 +94,14 @@ VerthysResult verthys_lsm_memtable_insert(VerthysLsmMemTable *mt, const VerthysL
 /* 查找：返回借用指针（mt 持有所有权；未命中返回 NULL） */
 const VerthysLsmEntry *verthys_lsm_memtable_find(const VerthysLsmMemTable *mt, uint64_t lid);
 
-/* 阈值判定：条目数 ≥ 10,000 或字节 ≥ 64MB（性能架构 §10） */
+/* 阈值判定：条目数 ≥ 10,000 或字节 ≥ 64MB */
 int verthys_lsm_memtable_needs_flush(const VerthysLsmMemTable *mt);
 
 size_t verthys_lsm_memtable_entry_count(const VerthysLsmMemTable *mt);
 size_t verthys_lsm_memtable_bytes(const VerthysLsmMemTable *mt);
 
 /*
- * ★ WP-5（API 接线）：本表当前最大 lid（O(1) 字段读；插入单调推高，
+ * API 接线：本表当前最大 lid（O(1) 字段读；插入单调推高，
  * 重建后随内容收缩）。上层 VerthysLsm.max_lid 承担"永不复用"单调性。
  */
 uint64_t verthys_lsm_memtable_max_lid(const VerthysLsmMemTable *mt);
@@ -258,7 +258,7 @@ VerthysResult verthys_lsm_sstable_find(FILE *f, VerthysPartition *part,
 void verthys_lsm_sstable_meta_release(VerthysLsmTableMeta *meta);
 
 /*
- * ★ WP-5（UNLOCK_OPTIMIZATION §7/§9）：单表全量预热——强制加载
+ * 单表全量预热——强制加载
  * Footer + Bloom 位图 + Index Block（ensure_* 链的公开内部门面，
  * verthys_lsm_preheat_full 逐表调用）。幂等（缓存已在时 no-op）。
  */
@@ -305,7 +305,7 @@ VerthysResult verthys_lsm_manifest_load(FILE *f, uint64_t region_offset,
                                     VerthysLsmManifest *m);
 
 /*
- * Manifest 明文帧解析（★ WP-10 模糊测试；对齐 vsb_v3_parse_unverified
+ * Manifest 明文帧解析（对齐 vsb_v3_parse_unverified
  * 分层模式）：flatcc verifier → magic/version → 字段提取 → 逐表元数据
  * 边界校验（level < MAX_LEVELS、size 非零、min_key ≤ max_key）→ 有序
  * 重建 m。不含 nonce 计数器 restore（生产路径由 manifest_load 在解析
@@ -336,12 +336,12 @@ struct VerthysLsm {
     VerthysLsmMemTable *memtable;   /* 活跃表 */
     VerthysLsmManifest manifest;
     uint64_t wal_cursor;          /* WAL 追加游标（相对 WAL 区） */
-    /* ★ WP-5 事务层配合：事务进行中抑制 MemTable 阈值自动 flush——
+    /* 事务层配合：事务进行中抑制 MemTable 阈值自动 flush——
      * 未提交条目绝不进入 SSTable（否则运行时回滚/崩溃回滚均无法撤销）。
      * 事务提交边界由 transaction_v3 解除抑制并按需 flush。 */
     int suppress_flush;
     /*
-     * ★ WP-5（API 接线）：全局最大已见 lid（put/delete 单调推高，open
+     * API 接线：全局最大已见 lid（put/delete 单调推高，open
      * 时由 Manifest 各表 max_key + MemTable 尾值合并初始化）。
      * 红线语义：LID 永不复用——rollback/purge 重建 MemTable 后本字段
      * 不回退，AddRecord 分配 max_lid+1 保证跨事务唯一性。

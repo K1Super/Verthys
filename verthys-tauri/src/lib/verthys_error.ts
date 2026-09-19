@@ -91,7 +91,7 @@ export function wrapAsVerthysError(e: unknown): VerthysError {
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 白皮书 V2.0 结构化错误契约                                       *
+ * ★ 结构化错误契约                                                   *
  *                                                                    *
  * 在保留现有 VerthysError/VerthysErrorKind（底层 IPC 异常）基础上，新增    *
  * VerthysErrorCode 业务错误码 + VerthysResult<T> 判别联合，使所有公共      *
@@ -231,12 +231,12 @@ export function defaultCodeFromKind(kind: VerthysErrorKind): VerthysErrorCode {
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 方案十：用户友好型错误文案映射（解决 D-011）                      *
+ * ★ 用户友好型错误文案映射                      *
  *                                                                    *
  * 在 lib/verthys_error.ts 维护错误码→用户文案映射表，替换底层技术报错。  *
  * 每条文案附带下一步操作指引，降低用户咨询量。                         *
  *                                                                    *
- * 示例映射规则（OPTIMIZATION.md 方案十）：                            *
+ * 示例映射规则：                            *
  *   | 原始技术报错           | 面向用户提示文案     |                *
  *   | worker_init 失败       | 安全核心启动异常     |                *
  *   | superblock 校验错误    | 加密文件已损坏       |                *
@@ -258,7 +258,7 @@ export interface VerthysUserErrorText {
   guidance: string;
 }
 
-/** 错误码→用户文案映射表（方案十核心） */
+/** 错误码→用户文案映射表（核心实现） */
 const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
   // ===== 通用 =====
   [VerthysErrorCode.E_VERTHYS_NOT_READY]: {
@@ -402,7 +402,7 @@ const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
 };
 
 /**
- * 将 VerthysErrorCode 转换为用户友好文案（方案十）
+ * 将 VerthysErrorCode 转换为用户友好文案
  *
  * @param code VerthysErrorCode 业务错误码
  * @param originalMessage 可选的原始错误信息（用于日志，不展示给用户）

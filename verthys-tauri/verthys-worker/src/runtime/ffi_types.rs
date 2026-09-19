@@ -62,7 +62,7 @@ pub(crate) type VerthysChangePasswordFn = unsafe extern "C" fn(
     usize,
 ) -> u32;
 
-/* ★ 方案5：解锁进度回调 FFI 绑定（与 verthys.h 中 VerthysUnlockProgress /
+/* ★ 解锁进度回调 FFI 绑定（与 verthys.h 中 VerthysUnlockProgress /
  * VerthysUnlockProgressCallback / Verthys_RegisterUnlockProgressCallback 严格对齐）
  *
  * 流式进度协议（与 migrate_progress 一致）：
@@ -113,9 +113,9 @@ pub(crate) type VerthysScanFetchFn = unsafe extern "C" fn(
 pub(crate) type VerthysScanRecordFreeFn = unsafe extern "C" fn(*mut VerthysRecordC) -> u32;
 pub(crate) type VerthysScanCloseFn = unsafe extern "C" fn(VerthysScanCursorPtr) -> u32;
 
-/* 摘要扫描函数指针类型（Phase 2B：轻量元数据扫描，不读数据块） */
+/* 摘要扫描函数指针类型（轻量元数据扫描，不读数据块） */
 /// repr(C) 摘要记录结构（与 C 端 VerthysSummaryRecord 对齐）
-/// ★ Phase 2G：新增 created_time 字段
+/// ★ 新增 created_time 字段
 #[repr(C)]
 pub(crate) struct VerthysSummaryRecordC {
     pub(crate) lid: u64,
@@ -125,7 +125,7 @@ pub(crate) struct VerthysSummaryRecordC {
     pub(crate) data_size: u64,
     pub(crate) physical_offset: u64,
     pub(crate) merkle_leaf: [u8; 32],
-    pub(crate) created_time: u64,  /* ★ Phase 2G：创建时间戳 */
+    pub(crate) created_time: u64,  /* ★ 创建时间戳 */
     pub(crate) slot_state: u8,     /* ★ 企业级根治：与 C 端 VerthysSummaryRecord 严格对齐 */
     // #[repr(C)] 自动追加 7 字节尾部填充 → sizeof = 88，与 C 端一致
     //
@@ -153,12 +153,11 @@ pub(crate) type VerthysScanSummaryFetchFn = unsafe extern "C" fn(
     *mut u64,                    /* out_count */
 ) -> u32;
 pub(crate) type VerthysScanSummaryRecordFreeFn = unsafe extern "C" fn(*mut VerthysSummaryRecordC) -> u32;
-/// ★ Phase 2I：轻量摘要记录数查询
-/// E-8：Verthys_RebuildMerkle / Verthys_RebuildMerkleChunked 已随 V2 容器退役
+/// ★ 轻量摘要记录数查询
 /// 移出导出白名单（ci/export_baseline.txt），对应 FFI 类型一并删除
 pub(crate) type VerthysGetSummaryCountFn = unsafe extern "C" fn(VerthysHandle, *mut u64) -> u32;
 
-/* ★ WP-11（P2-3 观测出口）：防御闭环状态查询 FFI 绑定
+/* ★ 防御闭环状态查询 FFI 绑定
  * 与 verthys.h VerthysSecurityStatus 严格对齐（C enum 为 int = 4 字节）：
  *   [u32 path_state; 7][u32 blocked][u32 degraded][u32 failed]
  *   [u8 all_critical_blocked][u8 has_degraded][u8 reserved; 6] = 48B / align 4 */
@@ -176,28 +175,15 @@ pub(crate) struct VerthysSecurityStatusC {
 
 pub(crate) type VerthysGetSecurityStatusFn =
     unsafe extern "C" fn(VerthysHandle, *mut VerthysSecurityStatusC) -> u32;
-/* ★ 企业级方案：轻量级记录类型存在性检查 FFI 绑定
+/* ★ 企业级：轻量级记录类型存在性检查 FFI 绑定
  *   与 verthys.h 中 Verthys_HasRecordByType 严格对齐
  *   签名：VerthysResult Verthys_HasRecordByType(VerthysHandle, uint8_t rtype, uint8_t *out_found)
  *   仅遍历索引节点检查 type 字段，不读数据块，典型 < 100ms */
 pub(crate) type VerthysHasRecordByTypeFn = unsafe extern "C" fn(VerthysHandle, u8, *mut u8) -> u32;
-/* ★ 企业级根治方案：进程内类型记录首条 lid 查找 FFI 绑定
+/* ★ 企业级根治：进程内类型记录首条 lid 查找 FFI 绑定
  *   与 verthys.h 中 Verthys_FindFirstLidByType 严格对齐
  *   签名：VerthysResult Verthys_FindFirstLidByType(VerthysHandle, uint8_t rtype,
  *                                              uint8_t *out_found, uint64_t *out_lid)
  *   v2 走 B+树叶子链表遍历，v1 走线性扫描，绝不返回 FORMAT 错误（根治 v1 假阴性）
  *   用于解锁成功后进程内探测全局主密钥记录，消除解锁后 3~4 次 IPC 往返 */
 pub(crate) type VerthysFindFirstLidByTypeFn = unsafe extern "C" fn(VerthysHandle, u8, *mut u8, *mut u64) -> u32;
-
-/* ================================================================ *
- * ★ E-8（V2 退役收口）：以下 FFI 绑定已删除                          *
- *                                                                  *
- * Verthys_RebuildMerkle / Verthys_RebuildMerkleChunked（Phase 2J / 项8  *
- * 分片重建）与 Verthys_MigrateV1ToV2（阶段8 V1→V2 迁移）均已随 V2    *
- * 容器退役移出 verthys.dll 导出白名单（29 符号，见                 *
- * ci/export_baseline.txt），worker 对应 call_* 方法改为直接返回     *
- * VERTHYS_ERR_UNSUPPORTED，不再保留死 FFI 类型：                      *
- *   - VerthysRebuildMerkleFn / VerthysRebuildMerkleChunkedFn            *
- *   - VerthysMigrateFn / VerthysMigrationCallbackC                      *
- *   - VerthysMigrationProgressC（migrate 进度结构）                   *
- * ================================================================ */

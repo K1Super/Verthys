@@ -1,9 +1,6 @@
 /*
  * verthys_partition.c — V3 分区管理实现
  *
- * 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.4 / §6.2
- * 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-2
- *
  * 复用资产：
  *   - verthys_crypto_cng.c（CNG 内核 AEAD：import/encrypt/decrypt/restore）
  *   - verthys_io.c（vio_pread64/vio_pwrite64 统一 64 位偏移 I/O）
@@ -12,7 +9,7 @@
  * 密钥生命周期纪律（红线级）：
  *   create：随机密钥 → 先包装持久化（wrapping key 内核态加密）→ 再
  *   import（import 内部 SecureZeroMemory 清零明文密钥）——用户态明文
- *   窗口仅限本函数栈帧（方案 §3.6/E-5 同源红线）。
+ *   窗口仅限本函数栈帧。
  *   load：解包 → import（清零）→ restore nonce 计数器。
  */
 /*
@@ -56,7 +53,7 @@ static void put_u64le(uint8_t *p, uint64_t v)
     for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (i * 8));
 }
 
-/* 分区数据 AAD：partition_id(4LE) ‖ txid(8LE)（见 verthys_partition.h 注记） */
+/* 分区数据 AAD：partition_id(4LE) ‖ txid(8LE)（同 verthys_partition.h 注记） */
 #define VERTHYS_PARTITION_DATA_AAD_BYTES 12u
 
 static void build_data_aad(uint8_t aad[VERTHYS_PARTITION_DATA_AAD_BYTES],
@@ -189,7 +186,7 @@ VerthysResult verthys_partition_load(VerthysPartition *p,
         return r;
     }
 
-    /* 3. nonce 计数器恢复（E-7 防回退） */
+    /* 3. nonce 计数器恢复（防回退） */
     r = verthys_cng_aead_restore_nonce_counter(&p->aead, nonce_counter);
     if (r != VERTHYS_OK) {
         verthys_secure_zero(key, sizeof(key));
@@ -373,7 +370,7 @@ static VerthysResult table_serialize(const VerthysPartitionTable *t,
                 (PartitionTypeV3_enum_t)p->type,
                 p->offset, p->size, p->used,
                 key_id_ref,
-                verthys_cng_aead_nonce_counter(&p->aead),  /* E-7 持久化 */
+                verthys_cng_aead_nonce_counter(&p->aead),  /* 持久化 */
                 p->created_txid,
                 wrapped_ref, wrap_nonce_ref);
             if (entry == 0) {
@@ -606,12 +603,11 @@ VerthysResult verthys_partition_table_load(FILE *f, uint64_t region_offset,
     if (r == VERTHYS_OK && pt_len == 0) r = VERTHYS_ERR_FORMAT;
 
     /*
-     * ★ WP-5 接线修复（E-7 防回退，红线级）：table_aead 跨会话重导入后
+     * table_aead 跨会话重导入后
      * 计数器归零——若不按帧 nonce 恢复下限，本会话首次 table_save 将
      * 复用历史 nonce（同密钥 GCM nonce 重用）。帧 nonce 为 12B 大端
      * 计数器（verthys_crypto_cng encode_nonce 约定，高 4 字节恒零）。
-     * 恢复值小于当前值（同会话重载场景）时 restore 拒绝，属正常忽略。
-     */
+     * 恢复值小于当前值（同会话重载场景）时 restore 拒绝，属正常忽略。 */
     if (r == VERTHYS_OK) {
         uint64_t frame_counter =
             ((uint64_t)nonce[4] << 56) | ((uint64_t)nonce[5] << 48) |
@@ -629,7 +625,7 @@ VerthysResult verthys_partition_table_load(FILE *f, uint64_t region_offset,
         return (r == VERTHYS_ERR_LOCKED) ? VERTHYS_ERR_LOCKED : VERTHYS_ERR_AUTH;
     }
 
-    /* 4. 明文帧解析（★ WP-10 提取：verifier + 字段边界 + 材料提取，
+    /* 4. 明文帧解析（提取：verifier + 字段边界 + 材料提取，
      *     与 fuzz/早期流水线共享同一解析路径，杜绝两份逻辑漂移） */
     {
         uint64_t table_txid = 0;

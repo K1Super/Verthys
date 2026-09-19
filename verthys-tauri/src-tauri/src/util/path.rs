@@ -1,22 +1,22 @@
 /*
  * util/path.rs — 路径处理工具
  *
- *    "" 第 3.8 项 / 第 3.1 项 / 第 6.1 项
+ *
  *
  * 架构定位：工具层（util）纯函数模块
  *   - 不依赖任何上层模块（controller / service / repository）
  *   - 不持有状态、不执行需要权限的 I/O（canonicalize_strict 除外，需 FS 读）
  *   - 仅对外暴露路径标准化、脱敏、校验接口
  *
- * 第 3.8 项 — 输入硬校验：
+ * 输入硬校验：
  *   validate_path_input 拒绝空字节/控制字符/超 MAX_PATH/相对路径/../~，
  *   不通过返回 Err，调用方据此返回 INVALID_PATH 不执行 FS 操作。
  *
- * 第 3.1 项 — 白名单基目录：
+ * 白名单基目录：
  *   is_within_whitelist 校验 canonicalize 后的路径是否以白名单基目录为前缀，
  *   阻断目录遍历攻击。
  *
- * 第 6.1 项 — canonicalize 全解析：
+ * canonicalize 全解析：
  *   canonicalize_strict 解析符号链接 + 规范化路径，返回绝对路径。
  *
  * CI 红线：本文件不得包含任何 println!/eprintln!/log::* 调用。
@@ -47,12 +47,12 @@ pub fn sanitize_path(path: &str) -> String {
     normalized
 }
 
-// ===== 第 3.8 项：路径输入硬校验 =====
+// ===== 路径输入硬校验 =====
 
 /// Windows MAX_PATH 限制（260 字符，含终止符）
 ///
 /// 长路径需 `\\?\` 前缀，本常量用于校验未带前缀的路径长度。
-/// 第 3.8 项：超过 MAX_PATH 的路径直接拒绝。
+/// 超过 MAX_PATH 的路径直接拒绝。
 pub const MAX_PATH: usize = 260;
 
 /// 路径输入校验错误
@@ -93,7 +93,7 @@ impl std::fmt::Display for PathValidationError {
 
 impl std::error::Error for PathValidationError {}
 
-/// 第 3.8 项：路径输入硬校验
+/// 路径输入硬校验
 ///
 /// 在任何 FS 操作之前调用，拒绝以下非法路径：
 ///   - 空字符串
@@ -208,9 +208,9 @@ fn is_reserved_device_name(path: &str) -> bool {
     false
 }
 
-// ===== 第 6.1 项 / 第 3.1 项：canonicalize 全解析 + 白名单校验 =====
+// ===== canonicalize 全解析 + 白名单校验 =====
 
-/// 第 6.1 项：canonicalize 全解析
+/// canonicalize 全解析
 ///
 /// 调用 std::fs::canonicalize 解析符号链接 + 规范化路径，
 /// 返回绝对路径（Windows 上带 `\\?\` 前缀）。
@@ -232,7 +232,7 @@ pub fn canonicalize_strict(path: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-/// 第 3.1 项：白名单前缀校验
+/// 白名单前缀校验
 ///
 /// 校验 canonicalize 后的路径是否以白名单中的任一基目录为前缀。
 /// 用于阻断目录遍历攻击（如 /etc/passwd 不在白名单内则拒绝）。

@@ -1,14 +1,14 @@
 /*
  * verthys_crypto_cng.c — CNG 内核态 AEAD 封装实现（V3 主密码学路径）
  *
- * GCM 内核母本迁移自 security/memory/key_separation.c（方案要求"直接改造
- * 迁移而非重写"），差异点：
+ * GCM 内核母本迁移自 security/memory/key_separation.c（直接改造
+ * 迁移而非重写），差异点：
  *   1. 单实例上下文（VerthysCngAead）替代模块级三角色槽位数组——可多实例，
  *      由 keymanager_cng 组合出 V3 密钥组；
  *   2. nonce 由封装层内部计数器原子生成（InterlockedIncrement64，
  *      多线程加密下 nonce 唯一性有硬保证），并经 nonce_out 回传持久化；
  *   3. 返回值统一 VerthysResult 错误码（含 VERTHYS_ERR_CNG_UNAVAILABLE 显式
- *      上报 CNG 不可用，方案 R-3 三级降级链的顶层错误信号）；
+ *      上报 CNG 不可用，三级降级链的顶层错误信号）；
  *   4. 空明文（0 字节）合法（V3 分区元数据等小对象）。
  *
  * 线程安全：BCryptEncrypt/BCryptDecrypt 本身线程安全；nonce_counter 经
@@ -19,7 +19,7 @@
 
 #include <string.h>
 
-/* ---------- 模块共享算法提供者（UNLOCK_OPTIMIZATION §6.2 预创建） ---------- */
+/* ---------- 模块共享算法提供者（预创建） ---------- */
 
 static BCRYPT_ALG_HANDLE s_shared_alg = NULL;
 static volatile LONG s_alg_refs = 0;  /* 引用计数（init/deinit 配对） */
@@ -122,7 +122,7 @@ VerthysResult verthys_cng_aead_init(VerthysCngAead *aead)
     if (aead == NULL) return VERTHYS_ERR_INVALID;
 
     /*
-     * ★ K-2 红线：init 仅做内存消毒，绝不感知内核句柄——未初始化内存中
+     * ★ 红线：init 仅做内存消毒，绝不感知内核句柄——未初始化内存中
      *   的垃圾字段（imported/key 任意组合）无法与合法句柄区分，对垃圾值
      *   调用 BCryptDestroyKey 即 0xC0000005。已导入上下文须先 destroy
      *   再 init（契约见头文件）。
@@ -145,7 +145,7 @@ VerthysResult verthys_cng_aead_import_key(
 
     /*
      * 重复导入：仅当 imported 标志置位时销毁旧句柄，避免内核句柄泄露。
-     * ★ K-2 防御守卫：imported=0 时 key 必为无效值（未初始化垃圾或 NULL），
+     * ★ 防御守卫：imported=0 时 key 必为无效值（未初始化垃圾或 NULL），
      *   绝不对其调用 BCryptDestroyKey（野句柄 → 0xC0000005）。
      */
     if (aead->imported && aead->key != NULL) {
@@ -176,7 +176,7 @@ VerthysResult verthys_cng_aead_import_key(
     }
 
     /*
-     * ★ 红线（§3.6/E-5）：密钥明文仅允许在本函数栈帧内短暂存在。
+     * ★ 红线：密钥明文仅允许在本函数栈帧内短暂存在。
      * 内核已持有独立副本，立即清零调用方传入的用户态副本。
      * const 契约同 key_separation_install。
      */

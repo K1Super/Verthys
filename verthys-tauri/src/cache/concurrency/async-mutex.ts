@@ -1,9 +1,9 @@
 /*
  * cache/concurrency/async-mutex.ts — 异步互斥锁（FIFO 公平锁）
  *
- * ★ verthys-cache 并发重构（verthys-cache-refactor-concurrency-fix.md §3.1）：
+ * ★ 并发重构：
  *   为 VerthysCacheDomain 提供临界区保护原语，避免并发扫描 / 删除标记操作
- *   互相踩踏（白皮书 4.2 缓存层竞态根治的底层构件）。
+ *   互相踩踏（缓存层竞态根治的底层构件）。
  *
  * 设计要点：
  *   1. FIFO 公平：acquire() 按调用顺序排队，先到先得，杜绝饥饿

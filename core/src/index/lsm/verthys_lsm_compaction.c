@@ -1,9 +1,6 @@
 /*
  * verthys_lsm_compaction.c — LSM Compaction：分级合并策略
  *
- * 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.6
- * 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-4
- *
  * 策略（leveled）：
  *   1. 自 L0 起首个超限层级（L0 表数 ≥ 触发值 4；L≥1 字节超容量，
  *      L1 基数 64MB 逐级 ×10）；

@@ -1,14 +1,6 @@
 /*
  * anti_inject.h — 深度防注入与模块认证（内部模块，不导出）
  *
- * 用户需求（二.3 深度防注入与模块认证）：
- *   - 入口基因修复：程序入口点立即调用 SetDllDirectoryW(L"") 与
- *     SetSearchPathMode(BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE)，
- *     彻底移除当前工作目录在 DLL 搜索顺序中的优先级。
- *   - 运行时远程线程/APC/窗口钩子拦截：拦截远程线程注入、APC 注入、
- *     SetWindowsHookEx 全局钩子注入。
- *   - 模块白名单实时巡检：遍历已加载模块列表，发现未信任签名或路径
- *     不在安装目录/系统目录下的未知第三方 DLL → 暂停 Verthys 解密句柄。
  */
 #ifndef VERTHYS_ANTI_INJECT_H
 #define VERTHYS_ANTI_INJECT_H

@@ -1,8 +1,7 @@
 /*
  * cache/domain/verthys-cache-domain.ts — Verthys 缓存领域（VerthysCacheDomain）
  *
- * ★ verthys-cache 并发重构方案（verthys-cache-refactor-concurrency-fix.md §三 +
- *   修正附录）核心实现：将缓存逻辑封装为可注入、可测试的领域类，
+ * ★ 并发重构核心实现：将缓存逻辑封装为可注入、可测试的领域类，
  *   对外 API 由 cache/composition/verthys-cache.ts 绑定导出（签名与旧版逐一对应）。
  *
  * 五大缓存
@@ -13,7 +12,7 @@
  *   4. 摘要缓存 summaryCache（第一层：常驻内存，永久存在，无淘汰）
  *   5. 全量记录缓存 fullRecordCache（第二层：LRU-50，按需加载，永不截断）
  *
- * ★ 方案根治的六项缺陷（方案 §一 逐条对应）：
+ * ★ 根治的六项缺陷（逐条对应）：
  *   1. 并发竞态：clearRecordScanCache 与进行中扫描的竞态 → 代际令牌
  *      （Generation Token）使旧扫描自动失效，非阻塞清除立即生效
  *   2. 数据一致性：getFullRecord 写缓存前未复查待删集合 → 写入前获取
@@ -27,10 +26,10 @@
  *      令牌 + 路径，不一致立即 invalidateActiveScanToken 终止扫描
  *   6. AsyncMutex 使用错误：acquire() 返回释放函数，调用方在 finally 中释放
  *
- * ★ 修正附录（§一）落实：maxScannedId 仅由 mergeScanEntry 维护，
+ * ★ 修正附录落实：maxScannedId 仅由 mergeScanEntry 维护，
  *   runRecordScan 的 finally 不再用缓存键重算覆盖（LRU 淘汰会使重算值
  *   偏小 → 增量扫描从错误 ID 开始 → 大量重复扫描甚至循环）。
- *   computeMaxScannedId 方法按附录要求删除。invalidateScannedRecord 在
+ *   computeMaxScannedId 方法已删除。invalidateScannedRecord 在
  *   删除当前最大 ID 时仍需重算（现网 ID 复用缺陷修复，语义不同，保留）。
  *
  * ★ 集成说明（关联项目顶级适配）：
@@ -47,7 +46,7 @@
  *   - 快照提供者注册经 registerSnapshotProvider() 内部封装：绑定层只触发
  *     注册，不直接触碰 getScanSnapshot 内部方法（封装性）
  *
- * ★ 评审修复（verthys-cache-domain 评审 §一/§二）：
+ * ★ 评审修复：
  *   1. clearAllVerthysCaches 补充 clearModuleKeyCache（明文密钥零填充，
  *      lockAll 统一清空入口安全闭环，置于各缓存清空之首）
  *   2. addFullRecord 的 dataSize 回退估算改用 estimateBase64Size
@@ -114,7 +113,7 @@ export interface VerthysCacheApi {
 }
 
 /**
- * ★ KeyState 最小接口（接口隔离原则，方案 §二.4）。
+ * ★ KeyState 最小接口（接口隔离原则）。
  *
  * 领域层对 UI 状态的唯一依赖：moduleKeyReady 的读写（缓存密钥时置 true、
  * 移除/清零时置 false）。以结构化类型表达 `{ value: Record<ModuleId, boolean> }`，
@@ -143,7 +142,7 @@ export interface VerthysCacheDomainDeps {
   shouldAbortBackgroundWork: () => boolean;
   /**
    * clearAllVerthysCaches 前置钩子：await 后台任务完全终止后再清空缓存
-   * （白皮书 2.2.2，杜绝"旧后台任务访问已释放缓存"竞态）。
+   * （杜绝"旧后台任务访问已释放缓存"竞态）。
    * 绑定层注入 core/background-tasks 的 stopBackgroundTasks
    * （经钩子注入保持 domain → core 依赖单向，不引入循环导入）。
    */
@@ -158,7 +157,7 @@ export type VerthysCacheEventMap = {
   "summary-cleared": [];
 }
 
-/** 扫描令牌：代际 + 取消标志（方案 §二 核心机制） */
+/** 扫描令牌：代际 + 取消标志（并发扫描失效核心机制） */
 interface ScanToken {
   generation: number;
   cancelled: boolean;
@@ -168,26 +167,26 @@ interface ScanToken {
  * 常量（与旧版一致）                                                  *
  * ------------------------------------------------------------------ */
 
-/** 记录扫描缓存 LRU 容量（方案 7.3：超限移除最久未使用记录，防内存溢出） */
+/** 记录扫描缓存 LRU 容量（超限移除最久未使用记录，防内存溢出） */
 const RECORD_CACHE_LRU_THRESHOLD = 5000;
 /** 大体积 dataB64 管控阈值：超出仅缓存 id/type/name，dataB64 置空 */
 const DATAB64_CACHE_MAX_BYTES = 64 * 1024;
-/** 全量记录缓存 LRU 容量（improve.md "改造二" 规定：50 条） */
+/** 全量记录缓存 LRU 容量（50 条） */
 const FULL_RECORD_CACHE_CAPACITY = 50;
-/** 扫描批大小（upgrade.md "以每批 200 条为单位逐步填充缓存"，渐进式渲染） */
+/** 扫描批大小（每批 200 条，渐进式渲染） */
 const SCAN_BATCH_SIZE = 200;
 /** 摘要早停扫描迭代上限：100 批 × 200 条 = 20,000 条，防后端异常导致无限循环 */
 const EARLY_STOP_MAX_BATCHES = 100;
-/** 模块密钥闲置超时：15 分钟（方案 7.2，不依赖手动锁屏清空） */
+/** 模块密钥闲置超时：15 分钟（不依赖手动锁屏清空） */
 const MODULE_KEY_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 
 export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> {
   // === 缓存存储 ===
   /** 模块数据缓存（跨路由/模块切换持久化，消除"先空后有"闪烁） */
   private moduleDataCache = new Map<string, { data: unknown; recordId: number | null }>();
-  /** 模块独立密钥会话缓存（方案 7.1：Uint8Array 存储，可安全零填充） */
+  /** 模块独立密钥会话缓存（Uint8Array 存储，可安全零填充） */
   private moduleKeyCache = new Map<ModuleId, Uint8Array>();
-  /** 方案 7.2：每模块独立的闲置超时计时器 */
+  /** 每模块独立的闲置超时计时器 */
   private moduleKeyTimers = new Map<ModuleId, ReturnType<typeof setTimeout>>();
   /** 记录扫描缓存（LRU-5000，淘汰时同步移除类型索引） */
   private recordScanCache: LRUCache<number, ScannedRecord>;
@@ -210,7 +209,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   private summaryScanVerthysPath: string | null = null;
   private maxSummaryId = 0;
 
-  // === 并发控制（方案 §二：AsyncMutex） ===
+  // === 并发控制（AsyncMutex） ===
   private scanMutex = new AsyncMutex();
   private summaryScanMutex = new AsyncMutex();
   /** 保护 pendingDeletionIds 相关的"检查-写入"原子段 */
@@ -307,11 +306,11 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   }
 
   /* ==================== 2. 模块独立密钥会话缓存 ==================== */
-  /* 方案 7.1：密钥以 Uint8Array 存储，清空时零填充覆写内存，            *
- *   杜绝 V8 字符串 intern 导致明文残留堆内存。                           *
-   * 方案 7.2：闲置 15 分钟自动销毁，每次访问重置计时器。                  */
+  /* 密钥以 Uint8Array 存储，清空时零填充覆写内存，                   *
+   *   杜绝 V8 字符串 intern 导致明文残留堆内存。                        *
+   *   闲置 15 分钟自动销毁，每次访问重置计时器。                        */
 
-  /** 方案 7.2：重置指定模块的闲置计时器（每次访问调用） */
+  /** 重置指定模块的闲置计时器（每次访问调用） */
   private resetModuleKeyTimer(moduleId: ModuleId): void {
     const existing = this.moduleKeyTimers.get(moduleId);
     if (existing) clearTimeout(existing);
@@ -322,7 +321,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     this.moduleKeyTimers.set(moduleId, timer);
   }
 
-  /** 方案 7.1：安全零填充 Uint8Array（覆写内存：0 → 0xFF → 0） */
+  /** 安全零填充 Uint8Array（覆写内存：0 → 0xFF → 0） */
   private secureZeroBytes(bytes: Uint8Array): void {
     bytes.fill(0);
     bytes.fill(0xFF);
@@ -331,12 +330,12 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
 
   /** 缓存模块独立密钥到会话（验证成功后调用） */
   cacheModuleKey(moduleId: ModuleId, key: string): void {
-    // 方案 7.1：将字符串密钥转换为 Uint8Array 存储
+    // 将字符串密钥转换为 Uint8Array 存储
     const keyBytes = this.keyTextEncoder.encode(key);
     this.moduleKeyCache.set(moduleId, keyBytes);
     // 原子地设置 moduleKeyReady=true（原缺陷修复：遗漏会导致重复验证弹窗）
     this.keyState.moduleKeyReady.value[moduleId] = true;
-    // 方案 7.2：启动/重置闲置计时器
+    // 启动/重置闲置计时器
     this.resetModuleKeyTimer(moduleId);
   }
 
@@ -344,15 +343,15 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   fetchModuleKey(moduleId: ModuleId): string | null {
     const keyBytes = this.moduleKeyCache.get(moduleId);
     if (!keyBytes) return null;
-    // 方案 7.2：访问时重置闲置计时器
+    // 访问时重置闲置计时器
     this.resetModuleKeyTimer(moduleId);
-    // 方案 7.1：Uint8Array → 字符串（瞬时转换，用后即弃）
+    // Uint8Array → 字符串（瞬时转换，用后即弃）
     return this.keyTextDecoder.decode(keyBytes);
   }
 
   /** 移除指定模块的会话密钥缓存（登出模块/闲置超时时调用） */
   removeModuleKey(moduleId: ModuleId): void {
-    // 方案 7.1：安全零填充后删除
+    // 安全零填充后删除
     const keyBytes = this.moduleKeyCache.get(moduleId);
     if (keyBytes) {
       this.secureZeroBytes(keyBytes);
@@ -360,7 +359,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     this.moduleKeyCache.delete(moduleId);
     // 原子地设置 moduleKeyReady=false（超时后状态与缓存同步清除）
     this.keyState.moduleKeyReady.value[moduleId] = false;
-    // 方案 7.2：清除闲置计时器
+    // 清除闲置计时器
     const timer = this.moduleKeyTimers.get(moduleId);
     if (timer) {
       clearTimeout(timer);
@@ -370,7 +369,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
 
   /** 清零全部模块密钥缓存（lockAll 时调用） */
   clearModuleKeyCache(): void {
-    // 方案 7.1：逐个安全零填充所有密钥字节
+    // 逐个安全零填充所有密钥字节
     for (const keyBytes of this.moduleKeyCache.values()) {
       this.secureZeroBytes(keyBytes);
     }
@@ -380,7 +379,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     for (const moduleId of MODULE_IDS) {
       this.keyState.moduleKeyReady.value[moduleId] = false;
     }
-    // 方案 7.2：清除所有闲置计时器
+    // 清除所有闲置计时器
     for (const timer of this.moduleKeyTimers.values()) {
       clearTimeout(timer);
     }
@@ -471,7 +470,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       if (this.scanInProgress) return this.scanInProgress;
 
       const scanPromise = this.runRecordScan();
-      // ★ 修复（方案 §四.3）：finally 无条件清空，保证扫描结束后能重新触发
+      // ★ 修复：finally 无条件清空，保证扫描结束后能重新触发
       wrapped = scanPromise.finally(() => {
         this.scanInProgress = null;
       });
@@ -523,7 +522,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       //     残留资源由后继 scan_open 的自动顶替或 worker 销毁兜底释放。
       if (this.activeScanToken === token) {
         await this.verthysApi.scanClose().catch(() => {});
-        // ★ 修正附录（§一）：maxScannedId 由 mergeScanEntry 维护，
+        // ★ maxScannedId 由 mergeScanEntry 维护，
         //   此处不基于缓存键重算覆盖（LRU 淘汰会使重算值偏小）。
         this.scanVerthysPath = null;
         this.activeScanToken = null;
@@ -569,15 +568,15 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
         this.invalidateScanIfCurrent(token);
         return;
       }
-      // 方案 3.4：过滤待删除 ID（磁盘存在也不写入前端缓存，根治回填复活）
+      // 过滤待删除 ID（磁盘存在也不写入前端缓存，根治回填复活）
       if (this.pendingDeletionIds.has(r.id)) continue;
-      // 方案三.2：内存优先合并（不覆盖已有缓存，仅补充缺失项）
+      // 内存优先合并（不覆盖已有缓存，仅补充缺失项）
       this.mergeScanEntry(r.id, r.type, r.name, r.dataB64);
     }
   }
 
   /**
-   * 方案三.2：内存优先合并 — 磁盘扫描不覆盖已有缓存条目。
+   * 内存优先合并 — 磁盘扫描不覆盖已有缓存条目。
    *
    * 内存缓存是权威数据源，磁盘仅为持久化备份。仅补充缓存中缺失的记录；
    * 已有条目仅同步索引（防止类型变更后索引不一致），不覆盖数据。
@@ -595,7 +594,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   }
 
   /**
-   * 方案 7.3：将记录写入缓存（无条件覆盖；用户主动 add/edit 后同步用）。
+   * 将记录写入缓存（无条件覆盖；用户主动 add/edit 后同步用）。
    * 含大体积 dataB64 管控 + LRU 淘汰（淘汰回调同步移除类型索引）。
    */
   private setScanCacheEntry(id: number, type: number, name: string, dataB64: string): void {
@@ -608,7 +607,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     }
     this.recordScanCache.set(id, { id, type, name, dataB64: safeDataB64 });
     this.addToIndex(id, type);
-    // ★ maxScannedId 唯一维护点（修正附录 §一）：仅单调递增，
+    // ★ maxScannedId 唯一维护点：仅单调递增，
     //   不做基于缓存键的重算覆盖（invalidateScannedRecord 的定向重算除外）
     if (id > this.maxScannedId) this.maxScannedId = id;
   }
@@ -622,7 +621,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
 
   /** 从扫描缓存中获取单条记录数据（无 IPC 调用；LRU 访问触碰） */
   getRecordFromScan(id: number): ScannedRecord | null {
-    // 方案 3.4：待删除 ID 不返回（磁盘存在也不写入前端缓存）
+    // 待删除 ID 不返回（磁盘存在也不写入前端缓存）
     if (this.pendingDeletionIds.has(id)) return null;
     // LRU get：命中即移到末尾（标记为最近使用）
     return this.recordScanCache.get(id) ?? null;
@@ -667,14 +666,14 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   /**
    * 将新增记录同步到扫描缓存（添加记录后调用）。
    * 避免新记录 ID <= maxScannedId 时 ensureRecordScan 增量扫描遗漏。
-   * 方案 7.3：统一经 setScanCacheEntry 写入（LRU + 大体积管控）。
+   * 统一经 setScanCacheEntry 写入（LRU + 大体积管控）。
    */
   addRecordToScan(id: number, type: number, name: string, dataB64: string): void {
     this.setScanCacheEntry(id, type, name, dataB64);
   }
 
   /**
-   * 非阻塞清除扫描缓存（方案 §四.4）。
+   * 非阻塞清除扫描缓存。
    *
    * 立即使当前扫描失效（代际令牌），清空缓存与索引并允许新扫描立即启动，
    * 不等待旧扫描结束。旧扫描在每个批次合并前校验令牌与路径，
@@ -778,7 +777,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   }
 
   /**
-   * 确保摘要缓存覆盖全部记录（Phase 2E：解锁后 1-2 秒内完成）。
+   * 确保摘要缓存覆盖全部记录（解锁后 1-2 秒内完成）。
    *
    * 仅扫描元数据（lid/type/name/data_size/physical_offset/merkle_leaf/
    * created_time），不解密数据块，列表渲染 + 搜索 + 删除完全基于它。
@@ -801,7 +800,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       if (this.summaryScanInProgress) return this.summaryScanInProgress;
 
       const scanPromise = this.runSummaryScan();
-      // ★ 修复（方案 §四.3）：finally 无条件清空，保证扫描结束后能重新触发
+      // ★ 修复：finally 无条件清空，保证扫描结束后能重新触发
       wrapped = scanPromise.finally(() => {
         this.summaryScanInProgress = null;
       });
@@ -838,9 +837,9 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       }
     } catch {
       // 摘要扫描失败（v1 格式 / 熔断）→ 静默返回，不触发任何全量扫描
-      // （回退策略详见 ensureSummaryScan 头注释）
+      // （回退策略同 ensureSummaryScan 头注释）
     } finally {
-      // ★ 评审 #3/#5 落实（属主保护收尾，语义同 runRecordScan 的 finally）：
+      // ★ 属主保护收尾（语义同 runRecordScan 的 finally）：
       //   activeSummaryScanToken === token（游标所有权在本扫描）→ 关闭摘要
       //   游标并清理状态引用；已被后继 scan_summary_open 顶替或被
       //   clearSummaryCache 清理 → 不关不清（防误杀后继游标，资源由
@@ -889,7 +888,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 全量摘要扫描需 2-3s。使用场景：findGlobalKeyRecord 仅需找到
    * TYPE_GLOBAL_KEY 的 LID，无需等待列表渲染就绪。
    *
-   * ★ 方案 §一.3 根治（游标资源竞争）：底层 worker 每类游标仅支持单个
+   * ★ 游标资源竞争根治：底层 worker 每类游标仅支持单个
    *   ScanState，本方法与 ensureSummaryScan 经 summaryScanMutex 互斥，
    *   且在打开游标前先等待进行中的全量摘要扫描完成并复查缓存，
    *   杜绝同时打开多个摘要游标。
@@ -1045,7 +1044,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 与 getRecordFromScan 的区别：不受 64KB 管控限制，永远返回完整 dataB64；
    * LRU-50 容量；解密失败的记录不缓存；同 ID 并发请求复用同一 IPC Promise。
    *
-   * ★ 方案 §四.1 锁粒度优化：仅在"写入缓存前"获取 deletionMutex 做
+   * ★ 锁粒度优化：仅在"写入缓存前"获取 deletionMutex 做
    *   检查-写入原子段，避免长时间持锁阻塞删除标记操作。
    */
   async getFullRecord(id: number): Promise<ScannedRecord | null> {
@@ -1096,7 +1095,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   }
 
   /**
-   * 预加载多条记录（Phase 2E 后台任务二：被动补齐机制）。
+   * 预加载多条记录（被动补齐机制）。
    *
    * 低优先级：串行加载，每条之间让出主线程；会话结束（lockAll 触发
    * shouldAbortBackgroundWork）立即停止；单条失败不影响后续。
@@ -1155,7 +1154,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       dataSize: dataSize ?? estimateBase64Size(dataB64),
       physicalOffset: 0,
       merkleLeaf: "",
-      createdTime: Math.floor(Date.now() / 1000),  /* Phase 2G：创建时间戳 */
+      createdTime: Math.floor(Date.now() / 1000),  /* 创建时间戳 */
     };
     this.setSummaryCacheEntry(summary);
   }
@@ -1256,7 +1255,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     // 杜绝「旧后台任务访问已释放缓存」的竞态
     await this.stopBackgroundTasksHook();
     // ★ 评审 #1 落实：首先清零明文密钥（Uint8Array 安全零填充），
-    //   lockAll 统一清空入口的安全闭环（方案 7.1：明文密钥不残留内存）
+    //   lockAll 统一清空入口的安全闭环（明文密钥不残留内存）
     this.clearModuleKeyCache();
     this.clearSummaryCache();
     this.clearFullRecordCache();

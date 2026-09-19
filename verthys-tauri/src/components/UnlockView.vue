@@ -404,8 +404,8 @@ onBeforeUnmount(() => {
 }
 .spectra-tick {
   /* 基础形态（几何/光谱色/transform 基线/will-change 合成层锁定）与
-   * 驻留动效（spectra-breathe 呼吸 / spectra-jitter 微跳）见全局
-   * animations.css 共享体系；此处仅声明充能入场（时序编排为本组件专属） */
+   * 驻留动效（spectra-breathe 呼吸 / spectra-jitter 微跳）由全局
+   * animations.css 共享体系定义；此处仅声明充能入场（时序编排为本组件专属） */
   animation: tick-charge 0.9s cubic-bezier(0.22, 1, 0.36, 1) var(--cd, 0ms) backwards;
 }
 @keyframes tick-charge {

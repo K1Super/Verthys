@@ -2,8 +2,9 @@
  * keymanager.c — 四级密钥体系实现
  *
  * 实现要点：
- *   - 胡椒托管：通过 verthys_pepper 模块统一管理生命周期（Comprehensive_optimization
- *     第八部分 一.2），支持 OS 密钥存储托管 + Shamir 恢复卡 + 编译内嵌兜底。
+ *   - 胡椒托管：通过 verthys_pepper 模块统一管理生命周期（统一接
+ *     口封装，避免密钥材料散落多处），支持 OS 密钥存储托管 + Shamir
+ *     恢复卡 + 编译内嵌兜底。
  *   - L2 派生密钥材料：Argon2id(password || pepper, salt) → 32B（瞬时变量，
  *     用后 verthys_secure_zero 擦除）
  *   - L3 MEK：HKDF-Expand(L2, "verthys/master-key-v1") → 32B
@@ -14,7 +15,7 @@
  */
 #include "keymanager.h"
 #include "verthys_internal.h"  /* verthys_secure_zero */
-#include "verthys_pepper.h"    /* ★ 胡椒托管框架（Comprehensive_optimization 一.2） */
+#include "verthys_pepper.h"    /* 胡椒托管框架 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +35,7 @@ int keymanager_derive_master(uint8_t master_key[VERTHYS_KEY_BYTES],
     /* ★ 胡椒托管框架：从 verthys_pepper 模块获取当前生效的胡椒
      *（优先级：注入 > OS 托管(CNG/TPM) > 编译内嵌兜底）
      * 胡椒模块在 Verthys_Init 时初始化，此处保证已就绪。 */
-    /* 返回码约定：0 成功 / -1 通用失败 / -2 pepper 来源错误（方案 §4.2），
+    /* 返回码约定：0 成功 / -1 通用失败 / -2 pepper 来源错误，
      * 上层据此映射 VERTHYS_ERR_PEPPER_SOURCE（区别于密码错误）。 */
     if (verthys_pepper_init() != 0) {
         if (verthys_pepper_source_error()) return -2;
@@ -85,7 +86,7 @@ int keymanager_derive_master_ex(uint8_t master_key[VERTHYS_KEY_BYTES],
     if (parallel < 1u || parallel > 64u) return -1;
 
     /* ★ 胡椒托管框架：与 keymanager_derive_master 共用 */
-    /* 返回码约定：0 成功 / -1 通用失败 / -2 pepper 来源错误（方案 §4.2），
+    /* 返回码约定：0 成功 / -1 通用失败 / -2 pepper 来源错误，
      * 上层据此映射 VERTHYS_ERR_PEPPER_SOURCE（区别于密码错误）。 */
     if (verthys_pepper_init() != 0) {
         if (verthys_pepper_source_error()) return -2;
@@ -117,7 +118,7 @@ int keymanager_derive_master_export(uint8_t master_key[VERTHYS_KEY_BYTES],
     if (master_key == NULL || salt == NULL) return -1;
     if (password == NULL && pw_len != 0) return -1;
 
-    /* L2：Argon2id(password, salt) → 派生密钥材料（无胡椒，project.md 5.3） */
+    /* L2：Argon2id(password, salt) → 派生密钥材料（无胡椒） */
     uint8_t dkm[VERTHYS_KEY_BYTES];
     if (verthys_argon2id_derive_raw(dkm, password, pw_len, salt) != 0) {
         return -1;
@@ -214,7 +215,7 @@ int keymanager_derive_record_key(uint8_t record_key[VERTHYS_KEY_BYTES],
 }
 
 /* ===================================================================== *
- *                     三密钥分立实现（v2 容器方案）                      *
+ *                     三密钥分立实现                                     *
  * ===================================================================== */
 
 /* 三密钥域分离标签 */
@@ -275,7 +276,7 @@ void keymanager_generate_mount_salt(uint8_t mount_salt[VERTHYS_KEY_BYTES])
 }
 
 /* ===================================================================== *
- * ★ V3 升级 WP-5（UNLOCK_OPTIMIZATION §8 流水线 S2）：V3 域分离派生实现  *
+ * V3 域分离派生实现（解锁流水线 S2）                                     *
  * ===================================================================== */
 
 /* V3 域分离标签（与 V1/V2 严格隔离） */

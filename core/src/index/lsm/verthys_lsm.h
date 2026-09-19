@@ -1,14 +1,9 @@
 /*
  * verthys_lsm.h — V3 LSM 索引（MemTable 跳表 + 分级 SSTable + 后台 Compaction）
  *
- * 设计依据：
- *   - docs/TARGET_ARCHITECTURE_V5.md §6.6（LSM 索引）
- *   - docs/PERFORMANCE_ARCHITECTURE.md §10（阈值/上限常量）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-4
- *
  * 结构：
  *   MemTable（跳表，内存）
- *     ↓ flush（阈值：10,000 条 / 64MB——性能架构 §10）
+ *     ↓ flush（阈值：10,000 条 / 64MB）
  *   SSTable Level 0（可能重叠，seq 新旧排序）
  *     ↓ compaction（后台线程 BELOW_NORMAL，空闲触发 CPU<30%，单次 ≤64MB）
  *   SSTable Level 1+（层内不重叠，容量逐级 ×10，基数 64MB）
@@ -23,7 +18,7 @@
  *   Data/Index/Footer = 分区 AEAD 帧；Bloom 位图明文存储、完整性由
  *   Footer 内 BLAKE2b-256 锚定；Trailer = 明文定位锚。
  *
- * 并发纪律（PLAYBOOK WP-4 红线）：
+ * 并发纪律：
  *   - MemTable 单写者（FFI 单线程）：put/delete/flush/compact 持 SRWLOCK 独占；
  *   - 读者快照：get 持 SRWLOCK 共享，读取期间视图稳定；
  *   - compaction 后台线程与提交互斥：同一 SRWLOCK 独占模式。
@@ -33,7 +28,7 @@
  *
  * nonce 纪律：全部帧（WAL/SSTable/Manifest）经 Index 分区 AEAD 计数器
  * 生成 nonce（唯一性硬保证）；Manifest 持久化"保存后值"快照（区别于
- * WP-3 extent 的保存前值），重载 restore 后绝不复用帧自身 nonce。
+ * extent 的保存前值），重载 restore 后绝不复用帧自身 nonce。
  *
  * 线程安全性：公开 API 全部线程安全（内部 SRWLOCK）；单写者纪律由
  * 锁串行化保证。本模块不拥有 FILE 句柄与分区（借用，调用方管理生命周期）。
@@ -51,11 +46,11 @@
 extern "C" {
 #endif
 
-/* ---------- 常量（性能架构 §10 / v5.0 §6.6） ---------- */
+/* ---------- 常量 ---------- */
 
 #define VERTHYS_LSM_VERSION                  3u
 
-/* MemTable 阈值（性能架构 §10） */
+/* MemTable 阈值 */
 #define VERTHYS_LSM_MEMTABLE_MAX_ENTRIES     10000u  /* 条目上限（触发 flush） */
 #define VERTHYS_LSM_MEMTABLE_MAX_BYTES       (64u * 1024u * 1024u) /* 字节上限 */
 
@@ -84,7 +79,7 @@ extern "C" {
 
 /*
  * LSM 索引条目（内存态）。
- * 键 = lid（全局唯一逻辑记录 ID）；内容寻址哈希定位 Extent 数据块（WP-3）。
+ * 键 = lid（全局唯一逻辑记录 ID）；内容寻址哈希定位 Extent 数据块。
  * name 为借用指针：put 时借用调用方缓冲（内部拷贝）；get 时拷入调用方
  * name_buf（避免跨 SSTable 生命周期借用）。
  */
@@ -103,26 +98,26 @@ typedef struct VerthysLsmEntry {
     uint64_t created_time;    /* 创建 Unix 时间戳（前端排序） */
 } VerthysLsmEntry;
 
-/* LSM 树（不透明；内部结构见 verthys_lsm_internal.h） */
+/* LSM 树（不透明；内部结构位于 verthys_lsm_internal.h） */
 typedef struct VerthysLsm VerthysLsm;
 
 /* ---------- 生命周期 ---------- */
 
 /*
- * ★ WP-5（verthys_v3_lifecycle 接线）：堆分配 + 零初始化 LSM 上下文。
+ * verthys_v3_lifecycle 接线：堆分配 + 零初始化 LSM 上下文。
  * 结构体对翻译单元外不透明，调用方（VerthysContextV3.lsm）经本对函数
  * 管理生命周期。返回 NULL = 内存耗尽。
  */
 VerthysLsm *verthys_lsm_create(void);
 
 /*
- * ★ WP-5：close（后台线程汇合 + flush + Manifest 保存 + 内存全释放）
+ * 关闭：close（后台线程汇合 + flush + Manifest 保存 + 内存全释放）
  * + 安全清零 + free。幂等（NULL 直接返回）。
  */
 void verthys_lsm_destroy(VerthysLsm *lsm);
 
 /*
- * ★ WP-5（v3_lifecycle 失败路径）：中止式关闭——不 flush、不存 Manifest、
+ * v3_lifecycle 失败路径：中止式关闭——不 flush、不存 Manifest、
  * 不复位 WAL（盘面 LSM WAL 帧原样保留，下次 open 重放后由事务层 recover
  * 裁决）。解锁失败重试路径专用：未提交 MemTable 条目（open 重放产物）
  * 落入 SSTable 将不可剔除（rebuild_excluding 仅 MemTable），为红线级数据泄漏。
@@ -145,7 +140,7 @@ void verthys_lsm_destroy_abort(VerthysLsm *lsm);
  *
  * 行为：Manifest 加载（区域为空 → 初始化并保存首帧，nonce 快照为
  * 保存后值）；WAL 重放（崩溃恢复：撕裂尾部帧静默截断）。重放条目
- * 留在 MemTable（WP-5 修订：不自动 flush——未提交条目须保持可剔除，
+ * 留在 MemTable（修订：不自动 flush——未提交条目须保持可剔除，
  * 由事务层 recover() 裁决后统一 flush；阈值触发移交 put 路径）；
  * bg=1 时启动后台线程。
  *
@@ -226,7 +221,7 @@ __declspec(noinline) VerthysResult verthys_lsm_compact(VerthysLsm *lsm);
 /* 是否存在超限层级（L0 表数 ≥ 触发值，或 L≥1 字节超容量 ×10 逐级） */
 int verthys_lsm_needs_compaction(const VerthysLsm *lsm);
 
-/* ---------- WP-5 事务层配合接口 ---------- */
+/* ---------- 事务层配合接口 ---------- */
 
 /*
  * 抑制/恢复 MemTable 阈值自动 flush。
@@ -246,7 +241,7 @@ uint64_t verthys_lsm_wal_cursor(const VerthysLsm *lsm);
  *   2. MemTable 重放重建：自偏移 0 重放（止于断链点）并剔除
  *      created_txid == txid 残留帧（防御纵深）。
  *
- * ★ WP-12 缺陷②修复（重放式重建取代过滤式剔除）：事务 DELETE 墓碑
+ * 回滚重建（重放式重建取代过滤式剔除）：事务 DELETE 墓碑
  * 在 MemTable 已按新者胜覆写原始条目，过滤式剔除墓碑将连带丢失被
  * 覆写的原始条目（已提交数据丢失，红线级）；WAL 保有全部历史帧
  * （WAL 先行 + flush 复位不变式），重放跳过本事务帧即完整复原。
@@ -262,13 +257,13 @@ VerthysResult verthys_lsm_rollback_txid(VerthysLsm *lsm, uint64_t txid,
                                     uint64_t wal_cursor_base);
 
 /*
- * 过滤重放重建（transaction_v3 崩溃恢复丢弃组清理，★ WP-12 缺陷②b）：
+ * 过滤重放重建（transaction_v3 崩溃恢复丢弃组清理）：
  * MemTable 自 LSM WAL 偏移 0 重放重建，exclude_txids 命中帧（丢弃组
  * 写入/墓碑）不入表；不截断 WAL（恢复路径中已提交/未提交帧交错，
  * 截断即丢已提交数据；恢复末尾统一 flush 使 WAL 复位；全帧皆属丢弃
  * 组时由 rollback_txid(base=0) 截断）。
  *
- * ★ 缺陷②b 修复（与缺陷②同型根因）：丢弃组墓碑在 MemTable 已覆写
+ * 修复说明（与上方同型根因）：丢弃组墓碑在 MemTable 已覆写
  * 原始条目，过滤式剔除（旧 purge_txid）将同时丢失墓碑与被覆写条目
  * （已提交数据丢失，红线级）；重放跳过丢弃组帧即完整复原原始条目。
  *
@@ -278,7 +273,7 @@ VerthysResult verthys_lsm_rebuild_excluding(VerthysLsm *lsm,
                                         const uint64_t *exclude_txids,
                                         size_t exclude_count);
 
-/* ---------- 温启动缓存接口（★ WP-5，UNLOCK_OPTIMIZATION §7） ---------- */
+/* ---------- 温启动缓存接口（★ 全量预热） ---------- */
 
 /*
  * 温缓存表记录段编码（export_warm 产出 / open_warm 消费；warmcache_v3
@@ -358,7 +353,7 @@ VerthysResult verthys_lsm_preheat_full(VerthysLsm *lsm);
 /* Manifest 在册 SSTable 总数 */
 size_t verthys_lsm_table_count(const VerthysLsm *lsm);
 
-/* ---------- 全量扫描迭代器（★ WP-5 接线：API 层 Scan/摘要/计数） ---------- */
+/* ---------- 全量扫描迭代器（API 层 Scan/摘要/计数 接线） ---------- */
 
 /*
  * 全量快照迭代器（lid 升序；跨层归并去重——同 lid 取最新版本；墓碑跳过）：
@@ -415,7 +410,7 @@ uint64_t verthys_lsm_level_bytes(const VerthysLsm *lsm, unsigned level);
 size_t verthys_lsm_memtable_count(const VerthysLsm *lsm);
 
 /*
- * ★ WP-5（API 接线）：全局最大已见 lid（LID 顺序分配基准）。
+ * 全局最大已见 lid（LID 顺序分配基准）。
  * put/delete 单调推高；open 时由 Manifest max_key ∪ MemTable 尾值
  * 合并初始化；rollback/purge 重建 MemTable 后不回退（LID 永不复用，
  * 红线语义——避免与孤儿 Extent / 已写 WAL 帧的旧键产生关联混淆）。

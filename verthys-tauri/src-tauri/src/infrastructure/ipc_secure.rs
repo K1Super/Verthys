@@ -2,11 +2,11 @@
  * @file infrastructure/ipc_secure.rs
  * @brief 主进程 ↔ Worker 加密认证安全IPC信道实现
  *
- * 对应架构规范两项强制安全需求：
- * 1. 会话密钥+HMAC-SHA256消息签名+单调Nonce滑动窗口抗重放（ 5.2）
+ * 两项强制安全需求：
+ * 1. 会话密钥+HMAC-SHA256消息签名+单调Nonce滑动窗口抗重放
  *    修复原明文JSON管道传输可被篡改、注入恶意指令的漏洞；
  *    会话密钥由CSPRNG生成，仅通过子进程命令行传递，进程级隔离；
- * 2. Worker关键操作响应强制附加HMAC校验（ 5.6）
+ * 2. Worker关键操作响应强制附加HMAC校验
  *    主进程校验签名通过后才解析载荷，避免不可信响应直接透传上层。
  *
  * 强制执行CI安全红线（未满足禁止合并）：
@@ -239,7 +239,7 @@ impl IpcSecureChannel {
         SignedMessage::decode_payload(&envelope.payload)
     }
 
-    /// 兼容过渡方案：自动识别是否为签名信封，未签名消息直接透传（仅过渡期使用）
+    /// 兼容过渡形态：自动识别是否为签名信封，未签名消息直接透传（仅过渡期使用）
     /// 注意：透传分支无任何认证保护，版本全量升级后应删除该兜底逻辑
     pub fn verify_or_passthrough(&self, json: &str) -> Result<String, String> {
         match serde_json::from_str::<SignedMessage>(json) {

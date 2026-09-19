@@ -1,11 +1,11 @@
 /*
- * rhash_gen.c — 构建期 .rhat 运行时哈希表生成器（V3 升级 WP-8）
+ * rhash_gen.c — 构建期 .rhat 运行时哈希表生成器（V3 升级）
  *
  * 用法：rhash_gen --patch <binary> [--map <mapfile>]
  *   <binary>  链接完成的 PE（verthys.dll / verthys_tests.exe）
  *   <mapfile> 链接器 map（缺省 = <binary> 同目录同名 .map，/MAP 产物）
  *
- * 流程（v5.0 §9.3 构建期步骤）：
+ * 流程（构建期步骤）：
  *   1. 解析 PE：节表（RVA↔文件偏移换算）、.pdata（函数精确边界）、
  *      .reloc（重定位槽位——掩码归一化的文件视角）；
  *   2. 解析 map "Publics by Value"：符号名 → RVA（Rva+Base 列为首选
@@ -22,7 +22,7 @@
  *      （无展开信息的叶子函数）→ 回退"同节下一符号起点"。
  *
  * 退出码：0 成功；1 失败（X 符号缺失/边界异常/节缺失 → 构建 fail-fast，
- * 禁静默降级——§3 完整落地红线）。
+ * 禁静默降级）。
  *
  * 校验门（构建期硬失败条件）：
  *   - 任一 X 符号在 map 缺失 / RVA 双路推导不一致；

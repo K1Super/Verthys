@@ -3,7 +3,7 @@
  *
  * 根据预设填充 SecurityConfig 结构体，各子系统读取配置决定行为。
  *
- * ★ 方案 P1-L 治理：双缓冲 + 指针原子交换。
+ * ★ 双缓冲 + 指针原子交换。
  * 原缺陷：security_preset_switch 先清零再重填单一实例——清零与重填之间
  * 存在窗口，并发读者读到"全零配置"（所有防护开关瞬时为 0）。
  * 现实现：配置存储双缓冲，switch 在非活跃缓冲上填充完成后，以
@@ -29,34 +29,34 @@ static void fill_balanced(SecurityConfig *c)
 {
     c->preset = SEC_PRESET_BALANCED;
 
-    /* 一、静态本体防护 */
+    /* 静态本体防护 */
     c->lazy_integrity       = 1;
     c->distributed_anchors  = 1;
     c->resource_encrypt     = 1;
 
-    /* 二、运行时动态防护 */
+    /* 运行时动态防护 */
     c->anti_debug           = 1;
     c->anti_debug_aggressive= 0;  /* 平衡模式使用延迟惩罚，不立即退出 */
     c->memory_lock          = 1;
     c->anti_dump            = 1;
     c->anti_inject          = 1;
 
-    /* 四、行为风控 */
+    /* 行为风控 */
     c->file_exclusive_lock  = 1;
     c->usb_guard            = 1;
     c->usb_shadow_sleep_min = 30;  /* 30分钟影子休眠 */
 
-    /* 五、痕迹清理 */
+    /* 痕迹清理 */
     c->trace_cleanup        = 1;
     c->log_encrypted        = 1;
 
-    /* 六、会话安全 */
+    /* 会话安全 */
     c->session_lock_on_system_lock = 1;
     c->session_lock_on_display_off = 0;  /* 仅高安全模式 */
     c->export_reauth               = 0;  /* 仅高安全模式 */
     c->remote_control_block        = 0;  /* 仅高安全模式 */
 
-    /* 九、应急响应 */
+    /* 应急响应 */
     c->emergency_circuit    = 1;
 
     /* KDF 迭代轮次 */
@@ -134,7 +134,7 @@ int security_preset_init(SecurityPreset preset)
 
 int security_preset_switch(SecurityPreset preset)
 {
-    /* ★ P1-L 治理（二版修正）：非活跃缓冲"先清零后填充" → 原子切换。
+    /* 双缓冲治理（二版修正）：非活跃缓冲"先清零后填充" → 原子切换。
      * 不得在切换后清零旧活跃缓冲——已捕获旧指针的并发读者仍可能读取，
      * 立即清零会重引全零窗口。非活跃缓冲无读者，切换前清零 + 填充
      * 覆盖全部字段，切换瞬间起读者只见新快照。 */

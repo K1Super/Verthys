@@ -4,7 +4,7 @@
  * 职责：
  *   1. 窗口最小化、最大化/还原、关闭按钮逻辑
  *   2. 关闭流程：后端隐藏窗口 + 前端异步清理 + exit(0)
- *   3. 窗口拖动：data-tauri-drag-region 的增强备用方案
+ *   3. 窗口拖动：data-tauri-drag-region 的增强备用路径
  *
  * ★ 企业级关闭响应优化（根治"关闭按钮延迟数秒"）：
  *
@@ -14,7 +14,7 @@
  *     hide() 的 IPC 消息被排队，窗口实际隐藏延迟数秒。
  *     用户点击关闭按钮后看到窗口迟迟不消失，体验极差。
  *
- *   新方案架构（窗口隐藏下沉至 Rust 后端，零 IPC 延迟）：
+ *   新实现架构（窗口隐藏下沉至 Rust 后端，零 IPC 延迟）：
  *     1. 用户点击关闭按钮 / Alt+F4 → window.close() → 触发后端 CloseRequested
  *     2. 后端 on_window_event 直接调用 window.hide()（Rust 原生 Win32 调用，微秒级）
  *        + api.prevent_close()（阻止 WebView 销毁，保留 JS 引擎供 lockAll 执行）
@@ -138,7 +138,7 @@ export function useWindowControls() {
     } catch { /* */ }
   };
 
-  /* ===== 窗口拖动：data-tauri-drag-region 的增强备用方案 =====
+  /* ===== 窗口拖动：data-tauri-drag-region 的增强备用路径 =====
    * 预加载窗口模块，避免 mousedown 事件中异步导入导致错过拖动时机
    */
   let startDraggingFn: (() => Promise<void>) | null = null;

@@ -1,18 +1,18 @@
 /*
  * syscall_direct.h — 直接系统调用 stub（内部模块，不导出）
  *
- * ★ V3 升级 WP-9（v5.0 §9.2 / 手册 §5 WP-9）：关键防御检测器绕过
+ * ★ 关键防御检测器绕过
  *   用户态 API Hook（IAT/EAT/Inline）。P4（API Hook）路径的目标态
  *   判据之一：检测器查询不再经过可被用户态 Hook 拦截的 ntdll 导出。
  *
- * 覆盖范围（手册 WP-9 卡片明确限定，仅检测器实际使用的两个入口）：
+ * 覆盖范围（仅检测器实际使用的两个入口）：
  *   - NtQueryInformationProcess — anti_debug_v2（KILL 级调试器三重探测）
  *                                + memory_guard（父进程识别）
  *   - NtQuerySystemInformation  — memory_guard（系统句柄表防转储扫描）
  *   扩展新入口：在 .c 的 SYSCALL_TARGET 表追加一行即可（SSN 提取与
  *   stub 生成均为表驱动），无需改动提取/构建逻辑。
  *
- * SSN 提取（排序法，v5.0 §9.2"从 ntdll 提取系统调用号"）：
+ * SSN 提取（排序法，"从 ntdll 提取系统调用号"）：
  *   1. 解析 ntdll 导出表，收集全部 Zw* 存根的（RVA, SSN）对——
  *      未被 Hook 的存根特征：`4C 8B D1`（mov r10,rcx）+ `B8 imm32`
  *      （mov eax,SSN），SSN 即 +4 偏移的 32 位立即数；
@@ -35,7 +35,7 @@
  *     登记，若查询到 Strict CFG 且登记失败 → 激活放弃并降级
  *     （不冒 fast-fail 崩溃风险）。
  *
- * 优雅降级（手册 WP-9："提取失败优雅降级回 GetProcAddress 路径"）：
+ * 优雅降级（"提取失败优雅降级回 GetProcAddress 路径"）：
  *   - 任一环节失败（导出表异常 / 一致性校验失败 / stub 页不可得 /
  *     Strict CFG 登记失败）→ 本模块标记未激活；
  *   - 包装函数内部回退 GetProcAddress 解析的 ntdll 导出（行为与

@@ -187,7 +187,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
 
       fullBytes.fill(0);
 
-      // 第 7.4 项：隐私模式已启用时无需重复调用（避免生成新令牌覆盖旧令牌）
+      // 隐私模式已启用时无需重复调用（避免生成新令牌覆盖旧令牌）
       // 防截屏保护在隐私模式启用时已覆盖所有窗口，viewer 覆盖层不影响其生效
     } catch (e) {
       console.error("预览失败:", e);
@@ -209,7 +209,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
     viewerDragging.value = false;
     window.removeEventListener("mousemove", onWindowMouseMove);
     window.removeEventListener("mouseup", onWindowMouseUp);
-    // 第 7.4 项：关闭 viewer 时不再自动关闭隐私模式
+    // 关闭 viewer 时不再自动关闭隐私模式
     // 隐私模式由用户通过 togglePrivacy 按钮显式控制，viewer 关闭不应影响其状态
   };
 

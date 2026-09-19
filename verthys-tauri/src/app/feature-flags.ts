@@ -1,7 +1,7 @@
 /*
- * app/feature-flags.ts — 性能优化项独立回滚开关（性能根治方案 §9.2）
+ * app/feature-flags.ts — 性能优化项独立回滚开关
  * =============================================================================
- * 【定位】性能根治方案五项优化的独立回滚体系：每项优化可经 flag 单独
+ * 【定位】性能根治设计五项优化的独立回滚体系：每项优化可经 flag 单独
  * 切换，发现问题时精确回滚单项，不影响其余优化项。
  *
  * 【回滚语义（按优化项的实际作用层）】
@@ -18,17 +18,17 @@
  *   示例：localStorage.setItem("Verthys:perf-flags", '{"opaqueCanvas":false}')
  * ========================================================================== */
 
-/** 性能优化项回滚开关（字段名 = 方案 §9.2 权威定义，禁止更名） */
+/** 性能优化项回滚开关（字段名为权威启用标记，禁止更名） */
 export interface PerfFlags {
-  /** 粒子 GPU 实例化（轨道参数预烘焙 + 顶点着色器内求值 — §2） */
+  /** 粒子 GPU 实例化（轨道参数预烘焙 + 顶点着色器内求值） */
   instancedMesh: boolean;
-  /** CosmicBackground CSS 合成器动画（163 元素 JS 驱动 → CSS keyframes — §3） */
+  /** CosmicBackground CSS 合成器动画（163 元素 JS 驱动 → CSS keyframes） */
   cssAnimations: boolean;
-  /** backdrop-filter 精确治理（大面积 → 半透明纯色 + 渐变 — §4） */
+  /** backdrop-filter 精确治理（大面积 → 半透明纯色 + 渐变） */
   backdropOptimized: boolean;
-  /** 不透明画布（alpha:false 快速合成路径 — §5，运行时开关） */
+  /** 不透明画布（alpha:false 快速合成路径，运行时开关） */
   opaqueCanvas: boolean;
-  /** CSS 动画合成器友好替代（box-shadow/height/drop-shadow 治理 — §6） */
+  /** CSS 动画合成器友好替代（box-shadow/height/drop-shadow 治理） */
   cssAnimAlternatives: boolean;
 }
 

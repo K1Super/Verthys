@@ -1,21 +1,21 @@
 /*
  * util/sandbox.rs — 路径沙箱白名单校验模块
  *
- *    "" 第 3.1 项 / 第 6.1 项 / 第 3.8 项
+ *
  *
  * 架构定位：工具层（util）路径安全模块
  *   - 不依赖任何上层模块（controller / service / repository）
  *   - 依赖 util::path（validate_path_input / canonicalize_strict / is_within_whitelist）
  *   - 提供 PathSandbox 白名单容器 + resolve_and_validate 高层接口
  *
- * 第 3.1 项 — 白名单基目录集合：
+ * 白名单基目录集合：
  *   定义安全基目录集合（用户数据/应用配置/管理员指定卷），
  *   所有文件操作必须 canonicalize 后以白名单为前缀，阻断目录遍历。
  *
- * 第 6.1 项 — canonicalize 全解析：
+ * canonicalize 全解析：
  *   resolve_and_validate 内部调用 canonicalize_strict 解析符号链接 + 规范化路径。
  *
- * 第 3.8 项 — 输入硬校验：
+ * 输入硬校验：
  *   resolve_and_validate 先调 validate_path_input 拒绝非法路径，再做 FS 操作。
  *
  * 设计原则：

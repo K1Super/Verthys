@@ -1,8 +1,8 @@
 /*
- * test_auto_rekey.c — ★ WP-6 验收：自动密钥轮换（触发 / 防震荡 / 崩溃一致性）
+ * test_auto_rekey.c — 自动密钥轮换验收（触发 / 防震荡 / 崩溃一致性）
  *
- * PLAYBOOK WP-6 验收标准全覆盖：
- *   1. 三种触发（v5.0 §4.3）：
+ * 验收标准全覆盖：
+ *   1. 三种触发：
  *      a. TIME  —— 距上次轮换 ≥ 90 天（白盒 TLV 注入，时钟回拨仅推迟）；
  *      b. OPS   —— 写事务增量 ≥ 10,000（txid 单调计数代理，边界 9999/10000）；
  *      c. DEGRADE —— 强制标志持久化（note_degrade 落盘 → 下次解锁兑现）。
@@ -19,7 +19,7 @@
  * maybe_rotate / note_degrade 全链路（含 vsb_txn 法定人数提交与
  * verthys_cng_km_rotate_abc 原位句柄切换）。
  *
- * 借用句柄续期验证（v5.0 "原子指针切换句柄"）：轮换后同会话 AddRecord
+ * 借用句柄续期验证（原子指针切换句柄）：轮换后同会话 AddRecord
  * 成功——wal/txn 借用的 VerthysCngAead 指针（&km->keys[role]）经原位
  * 替换后指向新句柄，零重接线。
  */
@@ -27,7 +27,7 @@
 #include "verthys.h"
 #include "verthys_internal.h"          /* VerthysContext / VerthysState */
 #include "verthys_v3_lifecycle.h"       /* VerthysContextV3 / preset TLV */
-#include "verthys_rekey_auto.h"         /* ★ WP-6 被测模块 */
+#include "verthys_rekey_auto.h"         /* 被测模块 */
 #include "verthys_container_v3.h"       /* VERTHYS_V3_PARTITION_TABLE_OFFSET */
 #include "keymanager_cng.h"           /* verthys_cng_km_get / handle_count */
 #include "verthys_partition.h"          /* verthys_partition_table_save */

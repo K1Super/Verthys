@@ -1,7 +1,7 @@
 /*
- * test_v3_lsm.c — WP-4 验收：V3 LSM 索引（MemTable + SSTable + Compaction）
+ * test_v3_lsm.c — V3 LSM 索引验收（MemTable + SSTable + Compaction）
  *
- * 覆盖（PLAYBOOK WP-4 步骤 + 验收标准）：
+ * 覆盖（验收标准）：
  *   1. 生命周期：空区域 open 初始化 Manifest → 统计全 0 → close 幂等
  *   2. put/get roundtrip：全字段逐项校验 + 变长名称 roundtrip +
  *      name_len_out 回传
@@ -606,7 +606,7 @@ TEST(v3lsm_null_params_rejected)
     return 0;
 }
 /* ---------- 14. 大规模插入 + 全量查找 ----------
- * PLAYBOOK WP-4 验收：>=50,000 条插入 + 全量 find（复用
+ * 验收：>=50,000 条插入 + 全量 find（复用
  * repair_btree_large_insert 模式）。乱序键（Fisher-Yates 洗牌）覆盖
  * 跳表/多表 flush/compaction 归并/Bloom/块索引全路径。
  */

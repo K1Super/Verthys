@@ -1,8 +1,6 @@
 /*
  * verthys_pepper.c — 胡椒安全托管框架实现
  *
- * ★ Comprehensive_optimization 第八部分 一.2：胡椒的安全托管框架
- *
  * 实现要点：
  *   - 胡椒内存受 VirtualLock 保护，防止换页泄露
  *   - OS 托管：CNG 机器密钥 RSA-OAEP 加密后持久化到 %APPDATA%
@@ -50,40 +48,68 @@ static const uint8_t VERTHYS_PEPPER_COMPILED[VERTHYS_KEY_BYTES] = {
  * ===================================================================== */
 static int g_pepper_initialized = 0;
 static int g_pepper_locked = 0;              /* 内存是否已 VirtualLock */
-static int g_pepper_source_error = 0;        /* ★ §4.2：来源失败标志（禁止兜底回退） */
+static int g_pepper_source_error = 0;        /* 来源失败标志（禁止兜底回退） */
 static uint8_t g_pepper[VERTHYS_KEY_BYTES];    /* 当前生效的胡椒（受保护内存） */
 static VerthysPepperSource g_pepper_source = VERTHYS_PEPPER_SOURCE_NONE;
 
-#define VERTHYS_PEPPER_FILE_VERSION  0x0002u
-#define VERTHYS_PEPPER_FILE_V1_BYTES (4 + 2 + 2 + CMK_OAEP_LABEL_BYTES + CMK_RSA_CIPHER_BYTES)
-#define VERTHYS_PEPPER_FILE_BYTES    (4 + 2 + 2 + 8 + CMK_OAEP_LABEL_BYTES + CMK_RSA_CIPHER_BYTES)
+/* 存储路径覆盖（空串 = 使用默认 %APPDATA% 路径）。
+ * 只被测试 exe 使用（对象直链的内部符号）；不在 DLL 导出清单中，
+ * 发布面零变化。 */
+static char g_storage_override[520];
+
+void verthys_pepper_set_storage_path_override(const char *path)
+{
+    if (path == NULL || path[0] == '\0') {
+        g_storage_override[0] = '\0';
+        return;
+    }
+    snprintf(g_storage_override, sizeof(g_storage_override), "%s", path);
+}
+
+#define VERTHYS_PEPPER_FILE_VERSION  0x0003u
+#define VERTHYS_PEPPER_FILE_BYTES    308u
 #define VERTHYS_PEPPER_FP_BYTES      8u
+
+/* V3 头部字段偏移（字节） */
+#define VERTHYS_PEPPER_OFF_MAGIC        0
+#define VERTHYS_PEPPER_OFF_VERSION      4
+#define VERTHYS_PEPPER_OFF_SOURCE       6
+#define VERTHYS_PEPPER_OFF_KEY_LEVEL    8
+#define VERTHYS_PEPPER_OFF_KEY_PROVIDER 9
+#define VERTHYS_PEPPER_OFF_RESERVED     10
+#define VERTHYS_PEPPER_OFF_FP           12
+#define VERTHYS_PEPPER_OFF_LABEL        20
+#define VERTHYS_PEPPER_OFF_CIPHER       52
 
 /* verthys_pepper_load_from_os 返回码 */
 #define VERTHYS_PEPPER_LOAD_OK          0    /* 成功 */
 #define VERTHYS_PEPPER_LOAD_UNAVAILABLE (-1) /* 来源不可用（无文件/CNG 不可用）→ 允许兜底 */
 #define VERTHYS_PEPPER_LOAD_SOURCE_ERR  (-2) /* 来源失败（文件存在但解不开/指纹不符）→ 禁止兜底 */
 
-/* ---------- 来源指纹计算（方案 §4.2） ---------- */
+/* ---------- 来源指纹计算 ---------- */
 
 /*
- * source_fingerprint = HMAC-SHA256(domain_key, label || cipher) 前 8 字节。
- * 域分离密钥为固定常量（完整性用途，非秘密）——指纹用于自检/交叉验证，
- * 防篡改本身由 CNG 机器密钥解包（认证失败即拒绝）保障。
+ * fingerprint = HMAC-SHA256(域分离密钥, meta || label || cipher) 前 8 字节。
+ * meta = version(2) || source_type(2) || key_level(1) || key_provider(1) ||
+ *        reserved(2)，头部与载荷共同绑定，任一字段篡改即指纹失配。
+ * 域分离密钥为固定常量（完整性用途，非秘密）——防篡改本身由 CNG
+ * 持久化密钥解包（认证失败即拒绝）保障。
  */
-static int pepper_file_fingerprint(const uint8_t *label, const uint8_t *cipher,
-                                   uint8_t out_fp[VERTHYS_PEPPER_FP_BYTES])
+int pepper_file_fingerprint(const uint8_t meta[8],
+                            const uint8_t *label, const uint8_t *cipher,
+                            uint8_t out_fp[VERTHYS_PEPPER_FP_BYTES])
 {
     static const uint8_t K_FP_DOMAIN_KEY[VERTHYS_KEY_BYTES] = {
         'v', 'e', 'r', 't', 'h', 'y', 's', '/', 'p', 'e', 'p', 'p', 'e', 'r', '-',
-        'f', 'p', '-', 'v', '1', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        'f', 'p', '-', 'v', '3', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     };
     uint8_t mac[VERTHYS_HMAC_BYTES];
 
-    /* 拼接 label||cipher 到连续缓冲后单次 HMAC */
-    uint8_t material[CMK_OAEP_LABEL_BYTES + CMK_RSA_CIPHER_BYTES];
-    memcpy(material, label, CMK_OAEP_LABEL_BYTES);
-    memcpy(material + CMK_OAEP_LABEL_BYTES, cipher, CMK_RSA_CIPHER_BYTES);
+    /* 拼接 meta||label||cipher 到连续缓冲后单次 HMAC */
+    uint8_t material[8 + CMK_OAEP_LABEL_BYTES + CMK_RSA_CIPHER_BYTES];
+    memcpy(material, meta, 8);
+    memcpy(material + 8, label, CMK_OAEP_LABEL_BYTES);
+    memcpy(material + 8 + CMK_OAEP_LABEL_BYTES, cipher, CMK_RSA_CIPHER_BYTES);
 
     int rc = verthys_hmac_sha256(mac, K_FP_DOMAIN_KEY,
                                material, sizeof(material));
@@ -98,15 +124,15 @@ static int pepper_file_fingerprint(const uint8_t *label, const uint8_t *cipher,
 
 /* OS 托管胡椒持久化文件魔数与版本 */
 #define VERTHYS_PEPPER_FILE_MAGIC    0x50505656u  /* "VVPP" 小端 */
-/*
- * ★ 方案 §4.2（P0-B 根治）：v2 头部新增 source_type 与 source_fingerprint。
- *   v2 布局（304B）：magic(4) + version(2) + source_type(2) +
- *                   fingerprint(8) + label(32) + cipher(256)
+/* V3 布局（308B）：magic(4) + version(2) + source_type(2) +
+ *                key_level(1) + key_provider(1) + reserved(2) +
+ *                fingerprint(8) + label(32) + cipher(256)
  *   - source_type：生成时的胡椒来源（VerthysPepperSource 取值）
- *   - source_fingerprint：HMAC-SHA256(domain_key, label||cipher) 前 8 字节，
- *     与机器密钥解包结果交叉验证，检测文件损坏/篡改/错拿
- *   v1（296B）：magic + version=1 + reserved(2) + label + cipher；
- *   v1 文件解包成功后自动升级为 v2（补写指纹，方案 §9 pepper 迁移）。
+ *   - key_level / key_provider：实际封装所用密钥的级别与 KSP
+ *     （CmkKeyLevel / CmkKeyProvider 取值），加载时据此直达解包，
+ *     密钥级别不再随运行权限上下文漂移
+ *   - fingerprint：HMAC-SHA256(域分离密钥, meta||label||cipher) 前 8 字节，
+ *     头部与载荷共同绑定，检测文件损坏/篡改/错拿
  */
 /* ===================================================================== *
  *                GF(2^8) 运算（Shamir 秘密共享）                        *
@@ -194,6 +220,13 @@ static void pepper_unlock_memory(void)
 static int pepper_get_storage_path(char *out_path, size_t path_cap)
 {
 #ifdef _WIN32
+    /* 测试隔离：覆盖路径非空时直达（不创建目录，目录由调用方保证存在） */
+    if (g_storage_override[0] != '\0') {
+        int n = snprintf(out_path, path_cap, "%s", g_storage_override);
+        if (n < 0 || (size_t)n >= path_cap) return -1;
+        return 0;
+    }
+
     char appdata[MAX_PATH];
     if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata) != S_OK) {
         return -1;
@@ -209,6 +242,11 @@ static int pepper_get_storage_path(char *out_path, size_t path_cap)
     if (n < 0 || (size_t)n >= path_cap) return -1;
     return 0;
 #else
+    if (g_storage_override[0] != '\0') {
+        int n = snprintf(out_path, path_cap, "%s", g_storage_override);
+        if (n < 0 || (size_t)n >= path_cap) return -1;
+        return 0;
+    }
     const char *home = getenv("HOME");
     if (home == NULL) return -1;
     int n = snprintf(out_path, path_cap, "%s/.verthys/pepper.bin", home);
@@ -227,6 +265,9 @@ int verthys_pepper_load_from_os(void)
         return VERTHYS_PEPPER_LOAD_OK;
     }
 #ifdef _WIN32
+    /* CNG 槽位就绪（幂等；seal/unwrap 前必须 init） */
+    (void)cng_machine_key_init();
+
     char path[MAX_PATH];
     if (pepper_get_storage_path(path, sizeof(path)) != 0) {
         return VERTHYS_PEPPER_LOAD_UNAVAILABLE;
@@ -239,7 +280,7 @@ int verthys_pepper_load_from_os(void)
         pepper_lock_memory();
         g_pepper_source = VERTHYS_PEPPER_SOURCE_OS;
         g_pepper_initialized = 1;
-        /* 持久化到 OS 存储（P1-1 修复：重试一次抗瞬时故障，
+        /* 持久化到 OS 存储（重试一次抗瞬时故障，
          * 仍失败置来源错误态——禁止静默降级到编译内嵌胡椒。
          * 内存中的随机胡椒即被清零丢弃，避免"高熵胡椒未持久化
          * 却被零熵常量替换"的安全性浪费；上层以 VERTHYS_ERR_
@@ -258,63 +299,64 @@ int verthys_pepper_load_from_os(void)
     uint8_t buf[VERTHYS_PEPPER_FILE_BYTES];
     size_t rd = fread(buf, 1, sizeof(buf), f);
     fclose(f);
-    int is_v1 = (rd == VERTHYS_PEPPER_FILE_V1_BYTES);
-    int is_v2 = (rd == VERTHYS_PEPPER_FILE_BYTES);
-    if (!is_v1 && !is_v2) {
+    if (rd != VERTHYS_PEPPER_FILE_BYTES) {
+        /* 尺寸门：只接受 V3 完整尺寸，历史格式与截断文件一律来源错误 */
         verthys_secure_zero(buf, sizeof(buf));
         return VERTHYS_PEPPER_LOAD_SOURCE_ERR;
     }
 
     /* 校验魔数与版本 */
-    uint32_t magic = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
-                     ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+    uint32_t magic = (uint32_t)buf[VERTHYS_PEPPER_OFF_MAGIC] |
+                     ((uint32_t)buf[VERTHYS_PEPPER_OFF_MAGIC + 1] << 8) |
+                     ((uint32_t)buf[VERTHYS_PEPPER_OFF_MAGIC + 2] << 16) |
+                     ((uint32_t)buf[VERTHYS_PEPPER_OFF_MAGIC + 3] << 24);
     if (magic != VERTHYS_PEPPER_FILE_MAGIC) {
         verthys_secure_zero(buf, sizeof(buf));
         return VERTHYS_PEPPER_LOAD_SOURCE_ERR;
     }
-    uint16_t ver = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
-    if (is_v1 && ver != 0x0001u) {
-        verthys_secure_zero(buf, sizeof(buf));
-        return VERTHYS_PEPPER_LOAD_SOURCE_ERR;
-    }
-    if (is_v2 && ver != VERTHYS_PEPPER_FILE_VERSION) {
+    uint16_t ver = (uint16_t)buf[VERTHYS_PEPPER_OFF_VERSION] |
+                   ((uint16_t)buf[VERTHYS_PEPPER_OFF_VERSION + 1] << 8);
+    if (ver != VERTHYS_PEPPER_FILE_VERSION) {
         verthys_secure_zero(buf, sizeof(buf));
         return VERTHYS_PEPPER_LOAD_SOURCE_ERR;
     }
 
-    /* 提取 label / cipher（v1 无 source_type/fingerprint 字段） */
-    const uint8_t *label;
-    const uint8_t *cipher;
-    if (is_v2) {
-        /* ★ §4.2：先验指纹 HMAC(label||cipher)，与机器密钥解包交叉验证 */
-        const uint8_t *fp_stored = buf + 8;
-        label  = buf + 8 + VERTHYS_PEPPER_FP_BYTES;
-        cipher = label + CMK_OAEP_LABEL_BYTES;
+    /* 枚举域校验：级别/KSP 必须为已知取值（先于指纹校验，属结构合法门） */
+    int key_level = (int)buf[VERTHYS_PEPPER_OFF_KEY_LEVEL];
+    int key_provider = (int)buf[VERTHYS_PEPPER_OFF_KEY_PROVIDER];
+    if ((key_level != CMK_KEY_LEVEL_USER && key_level != CMK_KEY_LEVEL_MACHINE) ||
+        (key_provider != CMK_PROVIDER_PLATFORM_KSP &&
+         key_provider != CMK_PROVIDER_SOFTWARE_KSP)) {
+        verthys_secure_zero(buf, sizeof(buf));
+        return VERTHYS_PEPPER_LOAD_SOURCE_ERR;
+    }
 
-        uint8_t fp_calc[VERTHYS_PEPPER_FP_BYTES];
-        if (pepper_file_fingerprint(label, cipher, fp_calc) != 0 ||
-            memcmp(fp_stored, fp_calc, VERTHYS_PEPPER_FP_BYTES) != 0) {
-            verthys_secure_zero(fp_calc, sizeof(fp_calc));
-            verthys_secure_zero(buf, sizeof(buf));
-            return VERTHYS_PEPPER_LOAD_SOURCE_ERR;
-        }
+    const uint8_t *label  = buf + VERTHYS_PEPPER_OFF_LABEL;
+    const uint8_t *cipher = buf + VERTHYS_PEPPER_OFF_CIPHER;
+
+    /* 先验指纹：HMAC(meta||label||cipher) 前 8 字节，与解包交叉验证 */
+    uint8_t fp_calc[VERTHYS_PEPPER_FP_BYTES];
+    if (pepper_file_fingerprint(buf + VERTHYS_PEPPER_OFF_VERSION,
+                                label, cipher, fp_calc) != 0 ||
+        memcmp(buf + VERTHYS_PEPPER_OFF_FP, fp_calc, VERTHYS_PEPPER_FP_BYTES) != 0) {
         verthys_secure_zero(fp_calc, sizeof(fp_calc));
-    } else {
-        label  = buf + 8;
-        cipher = buf + 8 + CMK_OAEP_LABEL_BYTES;
+        verthys_secure_zero(buf, sizeof(buf));
+        return VERTHYS_PEPPER_LOAD_SOURCE_ERR;
     }
+    verthys_secure_zero(fp_calc, sizeof(fp_calc));
 
     /*
-     * CNG 解密：校验 system_instance label 一致性（防跨设备迁移）。
-     * ★ §4.2：文件存在但解包失败（机器密钥丢失/被重建/硬件指纹变更）
-     * → 来源错误，禁止静默兜底（原 P0-B 缺陷的根治点）。
-     */
+     * CNG 直连解包：按文件记录的级别+KSP 定位密钥，校验
+     * system_instance label 一致性（防跨设备迁移）。
+     * 文件存在但解包失败（密钥丢失/被重建/硬件标识变更）
+     * → 来源错误，禁止静默兜底；不跨级别回退。 */
     if (!cng_machine_key_is_available()) {
         verthys_secure_zero(buf, sizeof(buf));
         return VERTHYS_PEPPER_LOAD_SOURCE_ERR;
     }
     uint8_t pepper[VERTHYS_KEY_BYTES];
-    if (cng_machine_key_unwrap(cipher, pepper, label) != 0) {
+    if (cng_machine_key_unwrap_known(cipher, pepper, label,
+                                     key_level, key_provider) != 0) {
         verthys_secure_zero(buf, sizeof(buf));
         verthys_secure_zero(pepper, sizeof(pepper));
         return VERTHYS_PEPPER_LOAD_SOURCE_ERR;
@@ -327,11 +369,6 @@ int verthys_pepper_load_from_os(void)
     g_pepper_source = VERTHYS_PEPPER_SOURCE_OS;
     g_pepper_initialized = 1;
     g_pepper_source_error = 0;
-
-    /* v1 → v2 原地升级：补写 source_type + 指纹（best-effort，失败不阻断） */
-    if (is_v1) {
-        (void)verthys_pepper_save_to_os();
-    }
     return VERTHYS_PEPPER_LOAD_OK;
 #else
     /* 非 Windows 平台：OS 托管不可用，回退 */
@@ -343,6 +380,7 @@ int verthys_pepper_save_to_os(void)
 {
 #ifdef _WIN32
     if (!g_pepper_initialized) return -1;
+    (void)cng_machine_key_init();
     if (!cng_machine_key_is_available()) return -1;
 
     char path[MAX_PATH];
@@ -355,32 +393,41 @@ int verthys_pepper_save_to_os(void)
         memset(label, 0, sizeof(label));
     }
 
-    /* CNG 加密胡椒 */
+    /* CNG 按策略序封装胡椒，级别/KSP 随头部持久化（加载直达） */
     uint8_t cipher[CMK_RSA_CIPHER_BYTES];
-    if (cng_machine_key_wrap(g_pepper, cipher, label) != 0) {
+    int seal_level = CMK_KEY_LEVEL_UNKNOWN;
+    int seal_provider = CMK_PROVIDER_UNKNOWN;
+    if (cng_machine_key_seal(g_pepper, cipher, label,
+                             &seal_level, &seal_provider) != 0) {
         return -1;
     }
 
-    /* ★ §4.2：计算来源指纹 HMAC(label||cipher) 前 8 字节 */
+    /* 序列化到文件（V3 布局，308B） */
+    uint8_t buf[VERTHYS_PEPPER_FILE_BYTES];
+    memset(buf, 0, sizeof(buf));
+    buf[VERTHYS_PEPPER_OFF_MAGIC]     = (uint8_t)(VERTHYS_PEPPER_FILE_MAGIC & 0xFF);
+    buf[VERTHYS_PEPPER_OFF_MAGIC + 1] = (uint8_t)((VERTHYS_PEPPER_FILE_MAGIC >> 8) & 0xFF);
+    buf[VERTHYS_PEPPER_OFF_MAGIC + 2] = (uint8_t)((VERTHYS_PEPPER_FILE_MAGIC >> 16) & 0xFF);
+    buf[VERTHYS_PEPPER_OFF_MAGIC + 3] = (uint8_t)((VERTHYS_PEPPER_FILE_MAGIC >> 24) & 0xFF);
+    buf[VERTHYS_PEPPER_OFF_VERSION]     = (uint8_t)(VERTHYS_PEPPER_FILE_VERSION & 0xFF);
+    buf[VERTHYS_PEPPER_OFF_VERSION + 1] = (uint8_t)((VERTHYS_PEPPER_FILE_VERSION >> 8) & 0xFF);
+    buf[VERTHYS_PEPPER_OFF_SOURCE]     = (uint8_t)((uint32_t)g_pepper_source & 0xFF);
+    buf[VERTHYS_PEPPER_OFF_SOURCE + 1] = 0;  /* source_type 高字节保留 */
+    buf[VERTHYS_PEPPER_OFF_KEY_LEVEL]    = (uint8_t)seal_level;
+    buf[VERTHYS_PEPPER_OFF_KEY_PROVIDER] = (uint8_t)seal_provider;
+    /* VERTHYS_PEPPER_OFF_RESERVED 两字节已由 memset 置零 */
+    memcpy(buf + VERTHYS_PEPPER_OFF_LABEL, label, CMK_OAEP_LABEL_BYTES);
+    memcpy(buf + VERTHYS_PEPPER_OFF_CIPHER, cipher, CMK_RSA_CIPHER_BYTES);
+
+    /* 计算指纹 HMAC(meta||label||cipher) 前 8 字节（meta 已落位） */
     uint8_t fp[VERTHYS_PEPPER_FP_BYTES];
-    if (pepper_file_fingerprint(label, cipher, fp) != 0) {
+    if (pepper_file_fingerprint(buf + VERTHYS_PEPPER_OFF_VERSION,
+                                label, cipher, fp) != 0) {
+        verthys_secure_zero(buf, sizeof(buf));
         verthys_secure_zero(cipher, sizeof(cipher));
         return -1;
     }
-
-    /* 序列化到文件（v2 布局，304B） */
-    uint8_t buf[VERTHYS_PEPPER_FILE_BYTES];
-    buf[0] = (uint8_t)(VERTHYS_PEPPER_FILE_MAGIC & 0xFF);
-    buf[1] = (uint8_t)((VERTHYS_PEPPER_FILE_MAGIC >> 8) & 0xFF);
-    buf[2] = (uint8_t)((VERTHYS_PEPPER_FILE_MAGIC >> 16) & 0xFF);
-    buf[3] = (uint8_t)((VERTHYS_PEPPER_FILE_MAGIC >> 24) & 0xFF);
-    buf[4] = (uint8_t)(VERTHYS_PEPPER_FILE_VERSION & 0xFF);
-    buf[5] = (uint8_t)((VERTHYS_PEPPER_FILE_VERSION >> 8) & 0xFF);
-    buf[6] = (uint8_t)((uint32_t)g_pepper_source & 0xFF);   /* source_type */
-    buf[7] = 0;                                             /* 高字节保留 */
-    memcpy(buf + 8, fp, VERTHYS_PEPPER_FP_BYTES);             /* fingerprint */
-    memcpy(buf + 8 + VERTHYS_PEPPER_FP_BYTES, label, CMK_OAEP_LABEL_BYTES);
-    memcpy(buf + 8 + VERTHYS_PEPPER_FP_BYTES + CMK_OAEP_LABEL_BYTES, cipher, CMK_RSA_CIPHER_BYTES);
+    memcpy(buf + VERTHYS_PEPPER_OFF_FP, fp, VERTHYS_PEPPER_FP_BYTES);
     verthys_secure_zero(fp, sizeof(fp));
 
     /* 原子写入：临时文件 + rename */
@@ -474,7 +521,7 @@ int verthys_pepper_init(void)
         return 0;
     }
     if (rc == VERTHYS_PEPPER_LOAD_SOURCE_ERR) {
-        /* ★ 方案 §4.2（P0-B 根治）：来源失败禁止静默兜底。
+        /* 来源失败禁止静默兜底。
          * 原缺陷：解包失败静默回退编译内嵌常量 → 解锁以错误 pepper 派生
          * MEK → key_a/b 解包失败 → 用户看到"密码错误"，无从诊断。
          * 现行为：置来源错误标志（verthys_pepper_source_error 查询），
@@ -622,7 +669,7 @@ VerthysPepperSource verthys_pepper_get_source(void)
     return g_pepper_source;
 }
 
-/* ★ 方案 §4.2：来源错误状态查询（见 verthys_pepper.h 契约） */
+/* 来源错误状态查询（契约同 verthys_pepper.h） */
 int verthys_pepper_source_error(void)
 {
     return g_pepper_source_error ? 1 : 0;

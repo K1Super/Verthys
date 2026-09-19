@@ -1,7 +1,6 @@
 /*
  * anti_inject.c — 深度防注入与模块认证实现
  *
- * 用户需求（二.3 深度防注入与模块认证）：
  *   1. 入口基因修复（anti_inject_harden_search_path）：
  *      - SetDllDirectoryW(L"") 移除当前工作目录在 DLL 搜索顺序中的优先级
  *      - SetSearchPathMode(BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE) 强制安全搜索
@@ -233,8 +232,7 @@ static int safe_read_memory(const void *addr, void *buf, size_t len)
     }
 }
 
-/*
- * ★ 方案 §6.2.2（P1-N 修复）：目录前缀匹配（带分隔符边界）。
+/* 目录前缀匹配（带分隔符边界）。
  *
  * 原缺陷：_wcsnicmp(path, dir, wcslen(dir)) 无分隔符边界——
  * "C:\Windows\System32Malware\evil.dll" 也能通过 System32 前缀检查。
@@ -698,7 +696,7 @@ int anti_inject_check_window_hook(void)
  * ===================================================================== */
 
 /*
- * 遍历当前进程已加载模块，验证模块信任（方案 §6.2.2 信任模型）：
+ * 遍历当前进程已加载模块，验证模块信任：
  *   a) 有效 Authenticode 签名（WinVerifyTrust）→ 信任（签名优先）；
  *   b) 无签名但位于 System32 / SysWOW64 / 安装目录 / 白名单路径 →
  *      按位置信任（系统目录模块使用目录签名/catalog，非内嵌 Authenticode）；
@@ -706,8 +704,8 @@ int anti_inject_check_window_hook(void)
  *
  * 与原实现的差异：
  *   - 签名优先于位置：第三方合法签名 DLL 不再因安装目录外而误报；
- *   - 目录前缀匹配带分隔符边界（dir_prefix_matches，P1-N 修复）；
- *   - 威胁上报统一为 TELEMETRY 级（低置信度启发式，方案 §6.1）。
+ *   - 目录前缀匹配带分隔符边界（dir_prefix_matches）；
+ *   - 威胁上报统一为 TELEMETRY 级（低置信度启发式）。
  */
 int anti_inject_check_modules(void)
 {

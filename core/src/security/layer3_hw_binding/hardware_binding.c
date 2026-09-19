@@ -1,7 +1,7 @@
 /*
  * hardware_binding.c — MachineGuid 机器实例指纹实现
  *
- * ★ 方案 §4.4（P1-G 治理）：弃用 CPUID/SMBIOS/UEFI 路径（缺陷依据见头注）。
+ * ★ 弃用 CPUID/SMBIOS/UEFI 路径（缺陷依据同头注）。
  *
  * 指纹构造：
  *   1. RegGetValueW 读取 HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid

@@ -14,7 +14,7 @@ export default defineConfig(async ({ command }) => ({
           obfuscatorPlugin({
             // 仅对 JS 产物应用混淆，不影响 CSS/HTML
             include: ["**/*.js", "**/*.mjs"],
-            // ★ 性能审计 P0-2 修订：安全责任由 Rust/C 层承担（core/ 六层防护：
+            // ★ 性能审计修订：安全责任由 Rust/C 层承担（core/ 六层防护：
             //   anti_debug_v2 / anti_inject / integrity / tamper_destroy 等），
             //   前端混淆仅保留静态不可执行期保护（标识符重命名 + 压缩）。
             // 移除的高开销运行时选项及其代价：

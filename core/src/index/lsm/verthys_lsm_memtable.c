@@ -1,9 +1,6 @@
 /*
  * verthys_lsm_memtable.c — LSM MemTable：跳表 + 条目编解码
  *
- * 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.6 / PERFORMANCE_ARCHITECTURE §10
- * 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-4
- *
  * 跳表：概率均衡（p=1/4，最大塔高 16），插入/查找 O(log n)。
  * 单写者纪律：本翻译单元不加锁——并发由 VerthysLsm 的 SRWLOCK 串行化
  * （put/delete 独占，get 共享只读）。
@@ -144,7 +141,7 @@ struct VerthysLsmMemTable {
     int frozen;
     uint32_t rng;               /* 塔高随机源（xorshift32，单写者） */
     /*
-     * ★ WP-5（API 接线）：本表当前最大 lid（O(1) 维护，插入时单调推高）。
+     * API 接线：本表当前最大 lid（O(1) 维护，插入时单调推高）。
      * 语义：仅反映本表内容——重建（rollback/purge）后随新表内容收缩。
      * "LID 永不复用"的单调性由上层 VerthysLsm.max_lid 承担（内存态不回退），
      * 本字段仅为 open/重放后初值合并提供 O(1) 数据源。

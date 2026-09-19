@@ -2,38 +2,30 @@
  * cng_machine_key.c — CNG 机器密钥防导出加固实现
  *
  * 实现要点：
- *   1. NCryptOpenStorageProvider（Platform → Software 回退链，见下）
- *   2. NCryptCreatePersistedKey(RSA, NCRYPT_MACHINE_KEY_FLAG)
+ *   1. NCryptOpenStorageProvider（平台安全边界 → 软件 KSP 两个 Provider）
+ *   2. NCryptCreatePersistedKey(RSA)（仅在 seal 期、容器确实缺失时）
  *   3. NCryptSetProperty(NCRYPT_EXPORT_POLICY, 0) —— 禁用导出
- *   4. NCryptSetProperty(Security Descriminator) —— 仅 SYSTEM 可访问
+ *   4. NCryptSetProperty(Security Descriptor) —— 机器级容器仅 SYSTEM 可访问
  *   5. NCryptEncrypt / NCryptDecrypt（OAEP padding）
  *
  * 链接：ncrypt.lib
  *
- * ★ WP-11 修复：Provider 回退链（生产级可用性）。
- *   原实现硬编码 MS_PLATFORM_KEY_STORAGE_PROVIDER——该 Provider 的
- *   持久化密钥依赖平台安全能力（TPM/虚拟安全平台），在无 TPM 的
- *   物理机与 VM 上 NCryptCreatePersistedKey 恒返回 NTE_BAD_KEYSET，
- *   导致跨设备防御路径（defense_closure P7）永久 DEGRADED、pepper
- *   包装静默失效。
- *   修复：按强度降序尝试两个 Provider——
- *     1) MS_PLATFORM_KEY_STORAGE_PROVIDER —— TPM 支撑时密钥材料
- *        由平台安全边界保护（最强）
- *     2) MS_KEY_STORAGE_PROVIDER（Software KSP）—— 密钥材料由
- *        CNG 密钥隔离服务（KeyIso，SYSTEM 隔离进程）托管，持久化
- *        于用户/机器密钥容器，满足 v5.0 §5"内核托管不可导出"契约
- *   每个 Provider 内部再按 机器级 → 用户级 回退。
+ * 密钥槽位（4 槽）：
+ *   单键全局态替换为槽位表，槽序即封装策略序——
+ *     0) 平台安全边界 KSP · 用户级（TPM 支撑时绑定最强，优先）
+ *     1) 软件 KSP · 用户级（常规桌面默认落点）
+ *     2) 平台安全边界 KSP · 机器级（兜底：SYSTEM 上下文、无用户配置档）
+ *     3) 软件 KSP · 机器级（兜底）
+ *   策略意义：初始化与封装优先用户级，机器级仅在用户级不可用（SYSTEM
+ *   上下文）时兜底，密钥级别不再随调用方运行权限上下漂移。
  *
  * 优雅降级策略：
- *   机器级密钥要求 SYSTEM 权限，普通用户进程无法创建。
- *   为避免阻塞 Verthys_Init，本模块采用回退链全部耗尽后降级：
- *     1) 机器级密钥（NCRYPT_MACHINE_KEY_FLAG）—— 最强绑定，需 SYSTEM
- *     2) 用户级密钥（无 flag）—— 用户密钥容器，绑定当前用户
- *     3) 优雅降级 —— 密钥不可用但 Verthys_Init 继续，defense_closure
- *        通过 cng_machine_key_is_available() 报告 DEGRADED 状态
+ *   各槽位逐级尝试后全部失败时降级为不可用，不阻塞 Verthys_Init；
+ *   调用方应通过 cng_machine_key_is_available() 查询实际可用性。
  *
- *   s_initialized     —— 已执行过 init（幂等保护）
- *   s_key_available   —— 密钥实际可用（wrap/unwrap 可调用）
+ *   s_initialized —— 已执行过 init（幂等保护）
+ *   CmkSlot.key_open / prov_open —— 槽位容器 / provider 实际可打开
+ *   CmkSlot.create_blocked —— 本进程内创建尝试已失败（不再重试）
  */
 #include "cng_machine_key.h"
 #include "verthys_internal.h"
@@ -47,7 +39,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* 机器密钥名称 */
+/* 密钥容器名称（用户级与机器级同名，由打开级别旗标区分作用域） */
 static const WCHAR K_KEY_NAME[] = L"Verthys_GMK_Wrap_Key_v1";
 
 /* NCRYPT 常量辅助 */
@@ -55,12 +47,17 @@ static const WCHAR K_KEY_NAME[] = L"Verthys_GMK_Wrap_Key_v1";
 #define NCRYPT_MACHINE_KEY_FLAG 0x00000020
 #endif
 
-/* ★ 方案 4.3（P0-1 修复）：仅当密钥确实不存在时才允许创建。
+/* ★ 仅当容器确实不存在时才允许创建。
  * NTE_BAD_KEYSET (0x80090029) = 密钥容器不存在；其他 OpenKey 失败
  * （权限不足、TPM 忙、profile 未加载等瞬时/环境性错误）一律不得重建，
- * 否则会静默销毁既有持久化密钥，导致此前被其包装的 pepper 永久无法解包。 */
+ * 否则会静默销毁既有持久化密钥，导致此前被其包装的胡椒永久无法解包。 */
 #ifndef NTE_BAD_KEYSET
 #define NTE_BAD_KEYSET ((SECURITY_STATUS)0x80090029L)
+#endif
+
+/* NTE_EXISTS：创建时容器已被并行创建（竞态） */
+#ifndef NTE_EXISTS
+#define NTE_EXISTS ((SECURITY_STATUS)0x8009000FL)
 #endif
 
 /* AT_KEYEXCHANGE 在 WIN32_LEAN_AND_MEAN 下未被 windows.h 自动包含，
@@ -76,7 +73,7 @@ static const WCHAR K_KEY_NAME[] = L"Verthys_GMK_Wrap_Key_v1";
 
 /* ---------- 诊断日志 ---------- */
 
-/* [CNG-DBG] 诊断日志（P2-5 修复）：
+/* [CNG-DBG] 诊断日志：
  *   由 VERTHYS_DIAG 编译门统一控制（cmake -DVERTHYS_DIAG=ON），
  *   生产构建默认关闭（宏为空操作），DLL 对调试器/DebugView 静默。
  *   诊断构建开启时经 VERTHYS_DIAG_LOG（OutputDebugStringA）输出。 */
@@ -104,12 +101,34 @@ static const char *cng_status_name(SECURITY_STATUS st)
     }
 }
 
-/* ---------- 模块状态 ---------- */
+/* ---------- 模块状态：4 槽位表 ---------- */
 
-static NCRYPT_PROV_HANDLE s_hProvider = 0;
-static NCRYPT_KEY_HANDLE  s_hKey = 0;
-static int s_initialized = 0;       /* init 已执行（幂等保护） */
-static int s_key_available = 0;     /* 密钥实际可用（wrap/unwrap 可调用） */
+typedef struct {
+    LPCWSTR          provider;       /* KSP 全名 */
+    int              provider_id;    /* CmkKeyProvider 取值 */
+    int              level_id;       /* CmkKeyLevel 取值 */
+    NCRYPT_PROV_HANDLE hProv;
+    NCRYPT_KEY_HANDLE  hKey;
+    int              prov_open;      /* provider 可打开 */
+    int              key_open;       /* 密钥容器可打开 */
+    int              create_blocked; /* 本进程内创建失败（不可重试） */
+} CmkSlot;
+
+/* 槽序 = 封装策略序：用户级优先（同级别内平台安全边界优先），机器级兜底 */
+static CmkSlot s_slots[4] = {
+    { MS_PLATFORM_KEY_STORAGE_PROVIDER, CMK_PROVIDER_PLATFORM_KSP, CMK_KEY_LEVEL_USER,    0, 0, 0, 0, 0 },
+    { MS_KEY_STORAGE_PROVIDER,          CMK_PROVIDER_SOFTWARE_KSP, CMK_KEY_LEVEL_USER,    0, 0, 0, 0, 0 },
+    { MS_PLATFORM_KEY_STORAGE_PROVIDER, CMK_PROVIDER_PLATFORM_KSP, CMK_KEY_LEVEL_MACHINE, 0, 0, 0, 0, 0 },
+    { MS_KEY_STORAGE_PROVIDER,          CMK_PROVIDER_SOFTWARE_KSP, CMK_KEY_LEVEL_MACHINE, 0, 0, 0, 0, 0 },
+};
+
+static int s_initialized = 0;        /* init 已执行（幂等保护） */
+
+/* 槽位对应的打开级别旗标 */
+static DWORD slot_level_flag(const CmkSlot *s)
+{
+    return (s->level_id == CMK_KEY_LEVEL_MACHINE) ? NCRYPT_MACHINE_KEY_FLAG : 0;
+}
 
 /* ---------- DACL 构建：仅 SYSTEM ---------- */
 
@@ -177,207 +196,129 @@ static int set_system_only_dacl(NCRYPT_HANDLE hObject)
     return 0;
 }
 
-/* ---------- 内部：尝试以指定 flag 打开或创建密钥 ----------
+/* ---------- 槽位创建（仅容器缺失时，加固规则） ---------- */
+
+/*
+ * 在槽位 Provider 内创建 RSA 密钥容器。
  *
- * hProv    —— 已打开的存储 Provider 句柄（由调用方管理生命周期）
- * flags:
- *   NCRYPT_MACHINE_KEY_FLAG —— 机器级密钥（需 SYSTEM 权限）
- *   0                        —— 用户级密钥（绑定当前用户）
- *
- * 返回 0 成功，非 0 失败。
- * 成功时 s_hKey 已指向打开/创建的密钥句柄。
+ * 加固规则：
+ *   1. 创建不携带 NCRYPT_OVERWRITE_KEY_FLAG —— 若竞态下容器已被并行
+ *      创建，返回 NTE_EXISTS 并重开一次，绝不覆盖。
+ *   2. 2048-bit 密钥长度。
+ *   3. 导出策略置 0（完全禁用导出）。
+ *   4. 机器级容器应用 only-SYSTEM DACL；用户级不应用（否则用户自身
+ *      也无权访问）。
+ *   5. Finalize 持久化，任一步失败删除刚建容器。
  */
-static int try_open_or_create_key(NCRYPT_PROV_HANDLE hProv, DWORD flags,
-                                  const char *level_name)
+static int slot_create_key(CmkSlot *s)
 {
     SECURITY_STATUS st;
 
-    /* 1. 尝试打开已存在的密钥 */
-    CNG_DBG("NCryptOpenKey(name=%ls, %s) ...", K_KEY_NAME, level_name);
-    st = NCryptOpenKey(hProv, &s_hKey, K_KEY_NAME,
-                       AT_KEYEXCHANGE, flags);
-    CNG_DBG("NCryptOpenKey status=0x%08X (%s)", st, cng_status_name(st));
-
-    if (st == ERROR_SUCCESS) {
-        return 0;  /* 密钥已存在，直接使用 */
-    }
-
-    /*
-     * ★ 方案 4.3（P0-1 根治）：创建路径仅由 NTE_BAD_KEYSET 触发。
-     *
-     * 原缺陷：任何 OpenKey 失败都以 NCRYPT_OVERWRITE_KEY_FLAG 重建持久化密钥，
-     * 瞬时性错误（keyset 权限抖动 / TPM 忙 / profile 未加载）也会删除既有密钥，
-     * 此前被其 RSA 包装的 pepper 永久无法解包 → OS 托管金库全部无法解锁。
-     *
-     * 修复：仅 NTE_BAD_KEYSET（密钥确实不存在）进入创建分支；
-     * 其他错误原样上报，由上层优雅降级（defense_closure 报 DEGRADED）。
-     * 且创建不再携带 NCRYPT_OVERWRITE_KEY_FLAG —— 若竞态下密钥已被并行创建，
-     * 返回 NTE_EXISTS 并判定为"已存在可打开"重试一次打开，绝不覆盖。
-     */
-    if (st != NTE_BAD_KEYSET) {
-        CNG_DBG("NCryptOpenKey failed with non-BAD_KEYSET status 0x%08X — refuse to rebuild", st);
-        s_hKey = 0;
-        return -1;
-    }
-
-    /* 2. 密钥确实不存在，创建持久化密钥（无 OVERWRITE 语义） */
-    CNG_DBG("NCryptCreatePersistedKey(RSA, %ls) ...", K_KEY_NAME);
+    CNG_DBG("NCryptCreatePersistedKey(RSA, %s)", s->provider);
     st = NCryptCreatePersistedKey(
-        hProv, &s_hKey, NCRYPT_RSA_ALGORITHM,
+        s->hProv, &s->hKey, NCRYPT_RSA_ALGORITHM,
         K_KEY_NAME, AT_KEYEXCHANGE,
-        flags);
-    if (st == (SECURITY_STATUS)0x8009000FL /* NTE_EXISTS：竞态下已被并行创建 */) {
+        slot_level_flag(s));
+    if (st == NTE_EXISTS) {
         CNG_DBG("NCryptCreatePersistedKey NTE_EXISTS — key was created concurrently, retry open");
-        st = NCryptOpenKey(hProv, &s_hKey, K_KEY_NAME,
-                           AT_KEYEXCHANGE, flags);
+        st = NCryptOpenKey(s->hProv, &s->hKey, K_KEY_NAME,
+                           AT_KEYEXCHANGE, slot_level_flag(s));
         if (st == ERROR_SUCCESS) {
+            s->key_open = 1;
             return 0;
         }
         CNG_DBG("NCryptOpenKey(retry after NTE_EXISTS) status=0x%08X (%s)", st, cng_status_name(st));
-        s_hKey = 0;
+        s->hKey = 0;
         return -1;
     }
     CNG_DBG("NCryptCreatePersistedKey status=0x%08X (%s)", st, cng_status_name(st));
 
     if (st != ERROR_SUCCESS) {
-        s_hKey = 0;
+        s->hKey = 0;
         return -1;
     }
 
-    /* 3. 设置 2048-bit 密钥长度 */
+    /* 设置 2048-bit 密钥长度 */
     DWORD keyLength = 2048;
-    st = NCryptSetProperty(s_hKey, NCRYPT_LENGTH_PROPERTY,
+    st = NCryptSetProperty(s->hKey, NCRYPT_LENGTH_PROPERTY,
                            (PBYTE)&keyLength, sizeof(keyLength), 0);
     if (st != ERROR_SUCCESS) {
         CNG_DBG("NCryptSetProperty(LENGTH) failed: 0x%08X", st);
-        NCryptDeleteKey(s_hKey, 0);
-        s_hKey = 0;
+        NCryptDeleteKey(s->hKey, 0);
+        s->hKey = 0;
         return -2;
     }
 
-    /* 4. 禁用导出策略（NCRYPT_EXPORT_POLICY = 0 表示完全禁用导出） */
+    /* 禁用导出策略（NCRYPT_EXPORT_POLICY = 0 表示完全禁用导出） */
     DWORD exportPolicy = 0;
-    NCryptSetProperty(s_hKey, NCRYPT_EXPORT_POLICY_PROPERTY,
+    NCryptSetProperty(s->hKey, NCRYPT_EXPORT_POLICY_PROPERTY,
                       (PBYTE)&exportPolicy, sizeof(exportPolicy), 0);
 
-    /* 5. 仅机器级密钥应用 only-SYSTEM DACL
-     *    用户级密钥不能应用 only-SYSTEM ACL，否则用户自己也无权访问 */
-    if (flags & NCRYPT_MACHINE_KEY_FLAG) {
-        set_system_only_dacl(s_hKey);
+    /* 仅机器级容器应用 only-SYSTEM DACL */
+    if (slot_level_flag(s) & NCRYPT_MACHINE_KEY_FLAG) {
+        set_system_only_dacl(s->hKey);
     }
 
-    /* 6. Finalize 持久化 */
-    st = NCryptFinalizeKey(s_hKey, 0);
+    /* Finalize 持久化 */
+    st = NCryptFinalizeKey(s->hKey, 0);
     if (st != ERROR_SUCCESS) {
         CNG_DBG("NCryptFinalizeKey failed: 0x%08X (%s)", st, cng_status_name(st));
-        NCryptDeleteKey(s_hKey, 0);
-        s_hKey = 0;
+        NCryptDeleteKey(s->hKey, 0);
+        s->hKey = 0;
         return -3;
     }
 
-    CNG_DBG("%s 密钥创建并持久化成功", level_name);
+    s->key_open = 1;
     return 0;
 }
 
-/* ---------- 公共接口 ---------- */
+/* ---------- 槽位打开（仅 Open，绝不 Create） ---------- */
 
-/*
- * ★ WP-11：Provider 回退链初始化。
- *
- * 依次尝试（前序成功即止）：
- *   1. MS_PLATFORM_KEY_STORAGE_PROVIDER（TPM/平台安全支撑，最强）
- *      a. 机器级（需 SYSTEM）  b. 用户级
- *   2. MS_KEY_STORAGE_PROVIDER（Software KSP，KeyIso 内核隔离托管）
- *      a. 机器级（需 SYSTEM）  b. 用户级
- *
- * 全部失败 → 优雅降级（s_key_available=0，init 仍返回 0），
- * defense_closure P7（CROSS_DEVICE）据此报 DEGRADED。
- * 任一成功 → s_hProvider/s_hKey 指向该级句柄，进程生命周期内持有。
- */
-int cng_machine_key_init(void)
+/* 打开槽位 provider 与密钥容器；失败仅置位标记，不阻塞其他槽位 */
+static void slot_open(CmkSlot *s)
 {
-    if (s_initialized) return 0;
-
-    static const struct {
-        LPCWSTR     provider;
-        const char *label;
-    } chain[] = {
-        { MS_PLATFORM_KEY_STORAGE_PROVIDER, "platform-KSP" },
-        { MS_KEY_STORAGE_PROVIDER,          "software-KSP" },
-    };
-    const size_t chain_len = sizeof(chain) / sizeof(chain[0]);
-
-    s_key_available = 0;
-
-    for (size_t p = 0; p < chain_len && !s_key_available; p++) {
-        NCRYPT_PROV_HANDLE hProv = 0;
-        SECURITY_STATUS st = NCryptOpenStorageProvider(&hProv,
-                                                       chain[p].provider, 0);
-        if (st != ERROR_SUCCESS) {
-            CNG_DBG("NCryptOpenStorageProvider(%s) failed: 0x%08X (%s) — try next",
-                    chain[p].label, st, cng_status_name(st));
-            continue;
-        }
-
-        /* 机器级优先（最强绑定，需 SYSTEM 权限） */
-        if (try_open_or_create_key(hProv, NCRYPT_MACHINE_KEY_FLAG,
-                                   chain[p].label) == 0) {
-            s_hProvider     = hProv;
-            s_key_available = 1;
-            s_initialized   = 1;
-            return 0;
-        }
-
-        /* 机器级失败，回退用户级 */
-        CNG_DBG("%s machine-level failed, falling back to user-level",
-                chain[p].label);
-        if (try_open_or_create_key(hProv, 0, chain[p].label) == 0) {
-            s_hProvider     = hProv;
-            s_key_available = 1;
-            s_initialized   = 1;
-            return 0;
-        }
-
-        /* 本 Provider 两级均失败 → 关闭句柄，尝试下一 Provider
-         * ncrypt.dll 不导出 NCryptCloseStorageProvider（仅头文件声明），
-         * NCryptFreeObject 是关闭 provider 句柄的正确 API */
-        CNG_DBG("%s both levels failed — try next provider", chain[p].label);
-        NCryptFreeObject(hProv);
+    SECURITY_STATUS st = NCryptOpenStorageProvider(&s->hProv, s->provider, 0);
+    if (st != ERROR_SUCCESS) {
+        CNG_DBG("NCryptOpenStorageProvider(%s) failed: 0x%08X (%s)",
+                s->provider, st, cng_status_name(st));
+        return;
     }
+    s->prov_open = 1;
 
-    /* 回退链全部耗尽 —— 优雅降级：密钥不可用但 Verthys_Init 继续，
-     * cross-device 绑定降级为 DEGRADED（defense_closure 经
-     * cng_machine_key_is_available() 查询） */
-    CNG_DBG("all providers failed —— degrade gracefully");
-    s_hProvider   = 0;
-    s_hKey        = 0;
-    s_initialized = 1;
-    s_key_available = 0;
-    return 0;
+    st = NCryptOpenKey(s->hProv, &s->hKey, K_KEY_NAME,
+                       AT_KEYEXCHANGE, slot_level_flag(s));
+    if (st == ERROR_SUCCESS) {
+        s->key_open = 1;
+    }
 }
 
-int cng_machine_key_is_available(void)
+/* 按级别 + KSP 定位槽位；未命中返回 NULL */
+static CmkSlot *find_slot(int key_level, int key_provider)
 {
-    return s_key_available;
+    for (int i = 0; i < 4; i++) {
+        if (s_slots[i].level_id == key_level &&
+            s_slots[i].provider_id == key_provider) {
+            return &s_slots[i];
+        }
+    }
+    return NULL;
 }
 
-int cng_machine_key_wrap(const uint8_t salt[CMK_GMK_SALT_BYTES],
-                          uint8_t cipher[CMK_RSA_CIPHER_BYTES],
-                          const uint8_t label[CMK_OAEP_LABEL_BYTES])
-{
-    if (!s_initialized) return -1;
-    if (!s_key_available) return -2;  /* 优雅降级：密钥不可用 */
+/* ---------- OAEP 包装/解包（槽位句柄） ---------- */
 
-    /* 构建 BCRYPT_OAEP_PADDING_INFO */
+static int wrap_via_slot(CmkSlot *s,
+                         const uint8_t salt[CMK_GMK_SALT_BYTES],
+                         uint8_t cipher[CMK_RSA_CIPHER_BYTES],
+                         const uint8_t label[CMK_OAEP_LABEL_BYTES])
+{
     BCRYPT_OAEP_PADDING_INFO paddingInfo;
     paddingInfo.pszAlgId = BCRYPT_SHA256_ALGORITHM;
     paddingInfo.pbLabel = (PUCHAR)label;
     paddingInfo.cbLabel = CMK_OAEP_LABEL_BYTES;
 
-    /* NCryptEncrypt */
     DWORD cbResult = 0;
     SECURITY_STATUS st = NCryptEncrypt(
-        s_hKey,
+        s->hKey,
         (PBYTE)salt, CMK_GMK_SALT_BYTES,
         &paddingInfo,
         cipher, CMK_RSA_CIPHER_BYTES,
@@ -386,18 +327,14 @@ int cng_machine_key_wrap(const uint8_t salt[CMK_GMK_SALT_BYTES],
     if (st != ERROR_SUCCESS || cbResult != CMK_RSA_CIPHER_BYTES) {
         return -3;
     }
-
-    /* 加密后立即清零临时盐值缓冲（不修改调用方原始数据） */
     return 0;
 }
 
-int cng_machine_key_unwrap(const uint8_t cipher[CMK_RSA_CIPHER_BYTES],
-                            uint8_t salt[CMK_GMK_SALT_BYTES],
-                            const uint8_t label[CMK_OAEP_LABEL_BYTES])
+static int unwrap_via_slot(CmkSlot *s,
+                           const uint8_t cipher[CMK_RSA_CIPHER_BYTES],
+                           uint8_t salt[CMK_GMK_SALT_BYTES],
+                           const uint8_t label[CMK_OAEP_LABEL_BYTES])
 {
-    if (!s_initialized) return -1;
-    if (!s_key_available) return -2;  /* 优雅降级：密钥不可用 */
-
     BCRYPT_OAEP_PADDING_INFO paddingInfo;
     paddingInfo.pszAlgId = BCRYPT_SHA256_ALGORITHM;
     paddingInfo.pbLabel = (PUCHAR)label;
@@ -405,33 +342,148 @@ int cng_machine_key_unwrap(const uint8_t cipher[CMK_RSA_CIPHER_BYTES],
 
     DWORD cbResult = 0;
     SECURITY_STATUS st = NCryptDecrypt(
-        s_hKey,
+        s->hKey,
         (PBYTE)cipher, CMK_RSA_CIPHER_BYTES,
         &paddingInfo,
         salt, CMK_GMK_SALT_BYTES,
         &cbResult,
         NCRYPT_PAD_OAEP_FLAG);
     if (st != ERROR_SUCCESS || cbResult != CMK_GMK_SALT_BYTES) {
-        /* 机器不匹配 / OAEP label 不一致 → 解密失败 */
+        /* 密钥不匹配 / OAEP label 不一致 → 解密失败 */
         return -3;
     }
     return 0;
 }
 
+/* ---------- 公共接口 ---------- */
+
+int cng_machine_key_init(void)
+{
+    if (s_initialized) return 0;
+
+    for (int i = 0; i < 4; i++) {
+        s_slots[i].hProv = 0;
+        s_slots[i].hKey  = 0;
+        s_slots[i].prov_open = 0;
+        s_slots[i].key_open = 0;
+        s_slots[i].create_blocked = 0;
+        slot_open(&s_slots[i]);
+    }
+
+    /* 全部容器不可用（首启）→ 按策略序创建首个用户级密钥；
+     * 机器级绝不隐式创建（隐式创建会把封装级别拖进运行权限上下文） */
+    int any_key = 0;
+    for (int i = 0; i < 4; i++) {
+        if (s_slots[i].key_open) { any_key = 1; break; }
+    }
+    if (!any_key) {
+        for (int i = 0; i < 4; i++) {
+            CmkSlot *s = &s_slots[i];
+            if (!s->prov_open) continue;
+            SECURITY_STATUS st = NCryptOpenKey(s->hProv, &s->hKey, K_KEY_NAME,
+                                               AT_KEYEXCHANGE, slot_level_flag(s));
+            if (st == NTE_BAD_KEYSET) {
+                if (slot_create_key(s) == 0) break;
+                s->create_blocked = 1;
+                CNG_DBG("slot %d create failed — try next", i);
+            } else if (st == ERROR_SUCCESS) {
+                s->key_open = 1;
+                break;
+            }
+            /* 其他错误：不创建，换下一槽 */
+        }
+    }
+
+    s_initialized = 1;
+    return 0;
+}
+
+int cng_machine_key_is_available(void)
+{
+    if (!s_initialized) return 0;
+    for (int i = 0; i < 4; i++) {
+        if (s_slots[i].prov_open) return 1;
+    }
+    return 0;
+}
+
+int cng_machine_key_seal(const uint8_t salt[CMK_GMK_SALT_BYTES],
+                         uint8_t cipher[CMK_RSA_CIPHER_BYTES],
+                         const uint8_t label[CMK_OAEP_LABEL_BYTES],
+                         int *out_level, int *out_provider)
+{
+    if (!s_initialized) return -1;
+
+    for (int i = 0; i < 4; i++) {
+        CmkSlot *s = &s_slots[i];
+        if (!s->prov_open || s->create_blocked) continue;
+
+        if (!s->key_open) {
+            SECURITY_STATUS st = NCryptOpenKey(s->hProv, &s->hKey, K_KEY_NAME,
+                                               AT_KEYEXCHANGE, slot_level_flag(s));
+            if (st == NTE_BAD_KEYSET) {
+                if (slot_create_key(s) != 0) {
+                    s->create_blocked = 1;
+                    continue;
+                }
+            } else if (st == ERROR_SUCCESS) {
+                s->key_open = 1;
+            } else {
+                /* 非缺失类错误：不创建，换下一槽 */
+                continue;
+            }
+        }
+
+        if (wrap_via_slot(s, salt, cipher, label) != 0) {
+            continue;
+        }
+        if (out_level)    *out_level    = s->level_id;
+        if (out_provider) *out_provider = s->provider_id;
+        return 0;
+    }
+    return -4;
+}
+
+int cng_machine_key_unwrap_known(const uint8_t cipher[CMK_RSA_CIPHER_BYTES],
+                                 uint8_t salt[CMK_GMK_SALT_BYTES],
+                                 const uint8_t label[CMK_OAEP_LABEL_BYTES],
+                                 int key_level, int key_provider)
+{
+    if (!s_initialized) return -1;
+
+    CmkSlot *s = find_slot(key_level, key_provider);
+    if (s == NULL || !s->prov_open) return -2;
+
+    /* 仅打开，绝不创建：容器缺失原样报错（不跨级回退） */
+    if (!s->key_open) {
+        SECURITY_STATUS st = NCryptOpenKey(s->hProv, &s->hKey, K_KEY_NAME,
+                                           AT_KEYEXCHANGE, slot_level_flag(s));
+        if (st != ERROR_SUCCESS) return -2;
+        s->key_open = 1;
+    }
+
+    return unwrap_via_slot(s, cipher, salt, label);
+}
+
 void cng_machine_key_destroy(void)
 {
-    if (s_hKey) {
+    for (int i = 0; i < 4; i++) {
+        CmkSlot *s = &s_slots[i];
         /* 注意：仅销毁句柄，不删除持久化密钥
          * （持久化密钥用于下次会话恢复）
          * 仅在应急销毁时调用 NCryptDeleteKey */
-        NCryptFreeObject(s_hKey);
-        s_hKey = 0;
-    }
-    if (s_hProvider) {
-        /* ncrypt.dll 不导出 NCryptCloseStorageProvider，使用 NCryptFreeObject */
-        NCryptFreeObject(s_hProvider);
-        s_hProvider = 0;
+        if (s->hKey) {
+            NCryptFreeObject(s->hKey);
+            s->hKey = 0;
+        }
+        if (s->hProv) {
+            /* ncrypt.dll 不导出 NCryptCloseStorageProvider，使用 NCryptFreeObject */
+            NCryptFreeObject(s->hProv);
+            s->hProv = 0;
+        }
+        s->prov_open = 0;
+        s->key_open = 0;
+        s->create_blocked = 0;
     }
     s_initialized = 0;
-    s_key_available = 0;
 }

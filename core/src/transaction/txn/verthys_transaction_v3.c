@@ -1,18 +1,18 @@
 /*
- * verthys_transaction_v3.c — V3 六 Phase 事务实现
+ * verthys_transaction_v3.c — V3 六阶段事务实现
  *
- * 设计契约见 verthys_transaction_v3.h 文件头。实现要点：
+ * 设计契约位于 verthys_transaction_v3.h 文件头。实现要点：
  *   - 全部子系统（FILE/WAL/超块/LSM/Extent/分区表）均为借用引用，
  *     本模块零拥有权（integrity_key 拷贝除外，deinit 清零）；
  *   - 单写者纪律：非线程安全，FFI 单线程事务流水线串行化；
- *   - COMMIT 原子性 = WAL（§10.1 回放）+ 超级块法定人数（§6.3）：
+ *   - COMMIT 原子性 = WAL（崩溃恢复回放）+ 超级块法定人数：
  *     法定人数成功后的任何失败等价于该点崩溃，恢复路径按
  *     PREPARE-only 组重放收尾（confirm 幂等补存兜底）；
  *   - merkle_root 口径（V3 过渡实现，见头注）：BLAKE2b-256(全部
  *     Extent 哈希按索引序拼接 ‖ u64le(next_offset))。
  *
  * wal_committed_txid 水位语义（关键决策，防"已提交未收尾"组被
- * §10.1 规则 3 误跳过）：
+ * 回放规则误跳过）：
  *   - 正常路径 COMMIT 不推进该水位（若在法定人数写入中一并推进，
  *     崩溃于"法定人数后、Extent 索引/分区表落盘前"的组将命中
  *     规则 3 被跳过——索引快照停留在提交前，已提交数据不可达）；
@@ -44,7 +44,7 @@ static void txn_put_u64le(uint8_t *p, uint64_t v)
     }
 }
 
-/* 当前 FILETIME（超块 updated_at 口径，§6.3） */
+/* 当前 FILETIME（超块 updated_at 口径） */
 static uint64_t txn_now_filetime(void)
 {
     FILETIME ft;
@@ -122,7 +122,7 @@ static VerthysResult txn_ledger_record(VerthysTxnV3 *t,
  *   net > 0 → 释放 net 次引用（verthys_extent_release，下限 0；
  *             本事务新建块归 ref=0，GC 可回收——盘面追加块为孤儿）；
  *   net < 0 → 归还 |net| 次引用（删除时释放的引用还原）。
- * 净额为零的哈希无账目（见 txn_ledger_record 聚合）。
+ * 净额为零的哈希无账目（txn_ledger_record 聚合）。
  */
 static void txn_ledger_apply_rollback(VerthysTxnV3 *t)
 {
@@ -187,7 +187,7 @@ void verthys_txn_v3_deinit(VerthysTxnV3 *t)
     verthys_secure_zero(t, sizeof(*t));
 }
 
-/* ================== Phase 1 BEGIN ================== */
+/* ================== BEGIN ================== */
 
 VerthysResult verthys_txn_v3_begin(VerthysTxnV3 *t)
 {
@@ -222,7 +222,7 @@ VerthysResult verthys_txn_v3_begin(VerthysTxnV3 *t)
     return VERTHYS_OK;
 }
 
-/* ================== Phase 2 WRITE_EXTENT ================== */
+/* ================== WRITE_EXTENT ================== */
 
 VerthysResult verthys_txn_v3_write_extent(VerthysTxnV3 *t,
                                       const uint8_t *pt, size_t pt_len,
@@ -261,7 +261,7 @@ VerthysResult verthys_txn_v3_write_extent(VerthysTxnV3 *t,
 
     r = verthys_wal_append(t->wal, &rec);
     if (r != VERTHYS_OK) return r;        /* 数据块已落盘：恢复时为孤儿或
-                                           由组回放/丢弃裁决（§10.1） */
+                                           由组回放/丢弃裁决 */
 
     if (hash_out != NULL) {
         memcpy(hash_out, hash, VERTHYS_EXTENT_HASH_BYTES);
@@ -273,7 +273,7 @@ VerthysResult verthys_txn_v3_write_extent(VerthysTxnV3 *t,
     return VERTHYS_OK;
 }
 
-/* ================== Phase 3 UPDATE_INDEX / DELETE ================== */
+/* ================== UPDATE_INDEX / DELETE ================== */
 
 VerthysResult verthys_txn_v3_update_index(VerthysTxnV3 *t, const VerthysLsmEntry *e)
 {
@@ -344,7 +344,7 @@ VerthysResult verthys_txn_v3_delete(VerthysTxnV3 *t, uint64_t lid)
     return VERTHYS_OK;
 }
 
-/* ================== Phase 4 PREPARE ================== */
+/* ================== PREPARE ================== */
 
 /* merkle_root 过渡口径：BLAKE2b-256(哈希按索引序拼接 ‖ u64le(next_offset)) */
 static VerthysResult txn_compute_merkle_root(const VerthysExtentIndex *idx,
@@ -410,7 +410,7 @@ VerthysResult verthys_txn_v3_prepare(VerthysTxnV3 *t)
     return VERTHYS_OK;
 }
 
-/* ================== Phase 5 COMMIT ================== */
+/* ================== COMMIT ================== */
 
 VerthysResult verthys_txn_v3_commit(VerthysTxnV3 *t)
 {
@@ -421,7 +421,7 @@ VerthysResult verthys_txn_v3_commit(VerthysTxnV3 *t)
     if (t == NULL) return VERTHYS_ERR_INVALID;
     if (t->state != VERTHYS_TXN_V3_PREPARED) return VERTHYS_ERR_INVALID;
 
-    /* ---- 0. Extent 分区扩展决策（§6.4 2x 策略；须在超块候选写入前，
+    /* ---- 0. Extent 分区扩展决策（2x 扩区策略；须在超块候选写入前，
      *        使 sb->extent_partition_size 与分区表一致持久） ---- */
     need = (uint64_t)VERTHYS_EXTENT_INDEX_REGION_BYTES + t->ext_idx->next_offset;
     if (need > t->extent_part->size) {
@@ -464,7 +464,7 @@ VerthysResult verthys_txn_v3_commit(VerthysTxnV3 *t)
     if (r != VERTHYS_OK) return r;
     t->persist_done = 1;
 
-    /* ---- 5. WAL COMMIT 记录（法定人数成功之后落笔，§10.1 规则 4 锚点） ---- */
+    /* ---- 5. WAL COMMIT 记录（法定人数成功之后落笔，回放规则锚点） ---- */
     {
         VerthysWalRecord rec;
         memset(&rec, 0, sizeof(rec));
@@ -485,7 +485,7 @@ VerthysResult verthys_txn_v3_commit(VerthysTxnV3 *t)
     return VERTHYS_OK;
 }
 
-/* ================== Phase 6 CONFIRM ================== */
+/* ================== CONFIRM ================== */
 
 VerthysResult verthys_txn_v3_confirm(VerthysTxnV3 *t)
 {
@@ -548,7 +548,7 @@ VerthysResult verthys_txn_v3_rollback(VerthysTxnV3 *t)
 
     /* 1. LSM 精确撤销：WAL 截断至 BEGIN 快照 + MemTable 重放重建
      *    （flush 抑制纪律保证条目仅在 MemTable 与 LSM WAL 尾部；
-     *    本事务墓碑覆写的原始条目经重放复原，★ WP-12 缺陷②）。 */
+     *    本事务墓碑覆写的原始条目经重放复原）。 */
     r = verthys_lsm_rollback_txid(t->lsm, t->txid, t->lsm_wal_base);
     if (r != VERTHYS_OK) {
         /* 撤销失败（IO/游标回绕）：状态保持，调用方可重试；
@@ -561,7 +561,7 @@ VerthysResult verthys_txn_v3_rollback(VerthysTxnV3 *t)
     txn_ledger_apply_rollback(t);
     txn_ledger_clear(t);
 
-    /* 3. 事务 WAL 复位（★ WP-12 属性测试发现的复活窗口修复）：
+    /* 3. 事务 WAL 复位（属性测试发现的复活窗口修复）：
      *    回滚组的 BEGIN/EXTENT/INDEX 帧若残留 WAL，且 begin 复用
      *    txid = sb->txid + 1 —— 后续同 txid 组 COMMIT 后、CONFIRM
      *    复位前崩溃，重放按"txid 变更才开新组"合并两组，废弃记录
@@ -594,7 +594,7 @@ typedef struct TxnRecoverCtx {
     uint64_t last_discard_txid;
 } TxnRecoverCtx;
 
-/* 重放组回调：EXTENT 幂等重注册 + INDEX 重放 LSM（§10.1 redrive） */
+/* 重放组回调：EXTENT 幂等重注册 + INDEX 重放 LSM（redrive） */
 static VerthysResult txn_recover_replay_cb(void *user, const VerthysWalRecord *rec)
 {
     TxnRecoverCtx *c = (TxnRecoverCtx *)user;
@@ -713,9 +713,9 @@ VerthysResult verthys_txn_v3_recover(VerthysTxnV3 *t,
                             txn_recover_discard_cb, &c,
                             NULL, &replayed, &discarded);
     if (r == VERTHYS_OK && c.discard_count > 0) {
-        /* 丢弃组（未提交）过滤重放重建（★ WP-12 缺陷②b）：跳过丢弃组
+        /* 丢弃组（未提交）过滤重放重建：跳过丢弃组
          * 帧，被其墓碑覆写的已提交原始条目经重放复原（过滤式剔除将
-         * 连同墓碑一起丢失被覆写条目 → 已提交数据丢失，红线级）。 */
+         * 连同墓碑一起丢失被覆写条目 → 已提交数据丢失）。 */
         r = verthys_lsm_rebuild_excluding(t->lsm, c.discard_txids,
                                         c.discard_count);
     }

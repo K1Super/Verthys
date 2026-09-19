@@ -1,12 +1,6 @@
 /*
  * verthys_wal.h — V3 事务 WAL（环形 480KB×2 预写日志）
  *
- * 设计依据：
- *   - docs/TARGET_ARCHITECTURE_V5.md §6.2（WAL 区布局）/ §10.1（事务协议与
- *     崩溃恢复回放规则）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-5（WAL 环形双半区；记录类型
- *     BEGIN/EXTENT/INDEX/PREPARE/COMMIT；恢复按 v5.0 §10.1 回放规则）
- *
  * 区域布局（容器绝对偏移 VERTHYS_V3_WAL_REGION_OFFSET = 0x10000 起，共
  * 960KB = VERTHYS_V3_WAL_REGION_END - OFFSET，容量自容器布局边界推导）：
  *   [半区 0：480KB][半区 1：480KB]
@@ -19,17 +13,17 @@
  *     新活跃半区写入递增 half_seq 头后从头追加；
  *   - half_seq 单调递增 → 崩溃后打开时据此判定活跃半区；
  *     撕裂的新半区头（换区瞬间崩溃）→ 回退旧半区为活跃，
- *     进行中的未提交事务自然回滚（§10.1 回放规则兜底）；
+ *     进行中的未提交事务自然回滚（崩溃恢复回放规则兜底）；
  *   - verthys_wal_reset（CONFIRM 后截断）：双半区清零重建，seq 续接。
  *
- * 帧布局（复用 verthys_lsm_frame_write/read_decrypt，WP-4 帧惯例）：
+ * 帧布局（复用 verthys_lsm_frame_write/read_decrypt 帧惯例）：
  *   [u32 magic 'V3WA'][u32 ct_len][AEAD 密文 ct_len 字节（含 16B tag）][12B nonce]
  *   AEAD 密钥 = C 角色密钥语境（V2 惯例延续：C 密钥用于超级块与事务日志；
  *   V3 中 C 角色 VerthysCngAead 上下文由本模块独占推进 nonce 计数器）。
  *   域分离 AAD = "verthys/wal-txn-v3"（与 LSM WAL "verthys/lsm-wal-v3"
  *   严格隔离）。
  *
- * 记录明文布局（手工小端编码，与 WP-4 LSM WAL 条目编码惯例一致）：
+ * 记录明文布局（手工小端编码，与 LSM WAL 条目编码惯例一致）：
  *   公共头：[u8 type][u64le txid]
  *   BEGIN  (1)：+ u64le timestamp
  *   EXTENT (2)：+ hash[32] + u64le offset + u32le size + u32le plaintext_size
@@ -41,7 +35,7 @@
  *               + u64le audit_used（超级块候选状态快照）
  *   COMMIT (5)：+ u64le timestamp
  *
- * 崩溃恢复回放规则（v5.0 §10.1，verthys_wal_replay）：
+ * 崩溃恢复回放规则（verthys_wal_replay）：
  *   1. 双半区顺序扫描（低 seq 半区在前，帧序拼接）；
  *      撕裂尾部帧/解密失败帧静默截断（计数上报）；
  *   2. 记录按 txid 分组（单写者顺序事务，组天然连续）；
@@ -56,10 +50,10 @@
  *      回滚丢弃（Extent 追加块成为孤儿，由 GC 回收；内存索引不动）。
  *
  * nonce 纪律（红线级）：打开时扫描全部有效帧的 nonce 计数器，恢复至
- * max(盘面计数) + 安全裕量（防回退，E-7/R-5）。
+ * max(盘面计数) + 安全裕量（防回退）。
  *
  * 线程安全性：本模块非线程安全——单写者纪律（FFI 单线程事务流水线），
- * 与 WP-2/WP-3 模块一致；并发由上层事务层（WP-5）串行化。
+ * 并发由上层事务层串行化。
  * 本模块不拥有 FILE 句柄与 AEAD 上下文（借用，调用方管理生命周期）。
  */
 #ifndef VERTHYS_WAL_H
@@ -89,23 +83,23 @@ extern "C" {
 #define VERTHYS_WAL_HALF_MAGIC          UINT32_C(0x48573356)    /* 'V3WH' */
 #define VERTHYS_WAL_VERSION             3u
 #define VERTHYS_WAL_HALF_HEADER_BYTES   24u
-#define VERTHYS_WAL_NONCE_RESTORE_MARGIN 64u  /* nonce 恢复安全裕量（R-5） */
+#define VERTHYS_WAL_NONCE_RESTORE_MARGIN 64u  /* nonce 恢复安全裕量 */
 #define VERTHYS_WAL_MAX_RECORD_BYTES    8192u /* 明文记录编码容量上限 */
 
 /* 域分离标签（与 LSM WAL / 分区表 / 超级块严格隔离） */
 #define VERTHYS_WAL_AAD                 "verthys/wal-txn-v3"
 
-/* ---------- 记录类型（§10.1 六 Phase 映射） ---------- */
+/* ---------- 记录类型（事务阶段映射） ---------- */
 
 typedef enum {
-    VERTHYS_WAL_REC_BEGIN   = 1,  /* Phase 1：事务开始 */
-    VERTHYS_WAL_REC_EXTENT  = 2,  /* Phase 2：Extent 写入 */
-    VERTHYS_WAL_REC_INDEX   = 3,  /* Phase 3：LSM 索引更新 */
-    VERTHYS_WAL_REC_PREPARE = 4,  /* Phase 4：全部变更已持久化，超级块候选态 */
-    VERTHYS_WAL_REC_COMMIT  = 5,  /* Phase 5：法定人数提交成功 */
+    VERTHYS_WAL_REC_BEGIN   = 1,  /* 事务开始 */
+    VERTHYS_WAL_REC_EXTENT  = 2,  /* Extent 写入 */
+    VERTHYS_WAL_REC_INDEX   = 3,  /* LSM 索引更新 */
+    VERTHYS_WAL_REC_PREPARE = 4,  /* 全部变更已持久化，超级块候选态 */
+    VERTHYS_WAL_REC_COMMIT  = 5,  /* 法定人数提交成功 */
 } VerthysWalRecType;
 
-/* EXTENT 记录载荷（Phase 2 重放信息） */
+/* EXTENT 记录载荷（重放信息） */
 typedef struct VerthysWalExtentPayload {
     uint8_t  hash[32];          /* BLAKE2b-256 内容寻址哈希 */
     uint64_t offset;            /* Extent 分区数据区相对偏移 */
@@ -114,7 +108,7 @@ typedef struct VerthysWalExtentPayload {
     uint8_t  nonce[12];         /* 数据块 AEAD nonce（重注册必需） */
 } VerthysWalExtentPayload;
 
-/* PREPARE 记录载荷（Phase 4 超级块候选状态快照） */
+/* PREPARE 记录载荷（超级块候选状态快照） */
 typedef struct VerthysWalPreparePayload {
     uint8_t  merkle_root[32];   /* 新 Merkle 根 */
     uint64_t extent_used;       /* Extent 分区已用字节 */
@@ -143,18 +137,18 @@ typedef struct VerthysWalRecord {
     } u;
 } VerthysWalRecord;
 
-/* WAL 上下文（不透明；内部结构见 verthys_wal.c） */
+/* WAL 上下文（不透明；内部结构位于 verthys_wal.c） */
 typedef struct VerthysWal VerthysWal;
 
 /*
- * ★ WP-5（verthys_v3_lifecycle 接线）：堆分配 + 零初始化 WAL 上下文。
+ * verthys_v3_lifecycle 接线：堆分配 + 零初始化 WAL 上下文。
  * 结构体对翻译单元外不透明，调用方（VerthysContextV3.wal）经本对函数
  * 管理生命周期。返回 NULL = 内存耗尽。
  */
 VerthysWal *verthys_wal_create(void);
 
 /*
- * ★ WP-5：close（内存态安全清零）+ free。幂等（NULL 直接返回）。
+ * 销毁：close（内存态安全清零）+ free。幂等（NULL 直接返回）。
  * 不触碰盘面（与 verthys_wal_close 语义一致）。
  */
 void verthys_wal_destroy(VerthysWal *w);
@@ -198,7 +192,7 @@ VerthysResult verthys_wal_close(VerthysWal *w);
  */
 __declspec(noinline) VerthysResult verthys_wal_append(VerthysWal *w, const VerthysWalRecord *rec);
 
-/* ---------- 崩溃恢复回放（v5.0 §10.1） ---------- */
+/* ---------- 崩溃恢复回放 ---------- */
 
 /*
  * 回放回调：按原始记录序投递需重放（redrive）的记录。
@@ -209,7 +203,7 @@ typedef VerthysResult (*VerthysWalReplayFn)(void *user, const VerthysWalRecord *
 
 /*
  * 崩溃恢复回放：
- *   双半区顺序扫描 → 按 txid 分组 → 按 §10.1 规则分类（见文件头）→
+ *   双半区顺序扫描 → 按 txid 分组 → 按回放规则分类（见文件头）→
  *   需重放的事务组经 fn 逐记录投递（升 txid、组内原始序）。
  *
  * [in]  w               WAL 上下文（须已 open）
@@ -233,7 +227,7 @@ VerthysResult verthys_wal_replay(VerthysWal *w, uint64_t committed_txid,
                              uint64_t *out_discarded);
 
 /*
- * 扩展回放（事务层恢复用）：与 verthys_wal_replay 相同的 §10.1 分类规则，
+ * 扩展回放（事务层恢复用）：与 verthys_wal_replay 相同的回放分类规则，
  * 但被丢弃（回滚/已提交跳过）的组经 fn_discard 逐记录投递——上层事务层
  * 据此清理内存态（如 LSM MemTable 中未提交事务的条目）。
  * fn_discard 可为 NULL（等同 verthys_wal_replay）；fn_replay 在存在重放组时
@@ -248,7 +242,7 @@ __declspec(noinline) VerthysResult verthys_wal_replay_ex(VerthysWal *w, uint64_t
                                 uint64_t *out_discarded);
 
 /*
- * 截断复位（Phase 6 CONFIRM 后调用）：
+ * 截断复位（CONFIRM 后调用）：
  * 双半区清零 → 半区 0 写入 seq+1 头 → fsync。之后盘面无任何可回放记录。
  */
 VerthysResult verthys_wal_reset(VerthysWal *w);
@@ -268,11 +262,11 @@ unsigned verthys_wal_active_half(const VerthysWal *w);
 uint64_t verthys_wal_cursor(const VerthysWal *w);
 
 /* 活跃半区首帧绝对偏移（= 区域偏移 + 活跃半区 × 512KB + 半区头）。
- * 超级块 wal_head_offset 候选值（Phase 5 COMMIT 写入）。未 open 返回 0。 */
+ * 超级块 wal_head_offset 候选值（COMMIT 写入）。未 open 返回 0。 */
 uint64_t verthys_wal_head_offset(const VerthysWal *w);
 
 /* 活跃半区追加游标绝对偏移（= 区域偏移 + 活跃半区 × 512KB + cursor）。
- * 超级块 wal_tail_offset 候选值（Phase 5 COMMIT 写入）。未 open 返回 0。 */
+ * 超级块 wal_tail_offset 候选值（COMMIT 写入）。未 open 返回 0。 */
 uint64_t verthys_wal_tail_offset(const VerthysWal *w);
 
 #ifdef __cplusplus

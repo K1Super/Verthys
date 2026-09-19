@@ -1,20 +1,20 @@
-# ci/vendor_hashes.txt - vendored 第三方依赖完整性清单（WP-0）
+# ci/vendor_hashes.txt - vendored 第三方依赖完整性清单
 # 用途：CI/本地校验 vendored 源码未被篡改（供应链完整性）
 # 校验：./ci/verify_vendor_hashes.ps1（逐文件 SHA-256 比对 + 与 git 跟踪集双向核对）
 # 再生成：依赖升级后重新生成本清单：
 #   $files = git ls-files third_party/flatcc third_party/libsodium third_party/xxhash
 #   foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash, ($f -replace '/','\') } | Out-File ci\vendor_hashes.txt
 #
-# [flatcc] vendored @ commit a2515daa948c1ae42ba95b3a904363169dff147c (0.6.4-pre)
+# [flatcc] vendored @ commit a2515daa948c1ae42ba95b3a904363169dff147c
 # 用途：V3 容器 FlatBuffers 编解码运行时（flatccrt，链入 verthys.dll）
 #       + schema codegen 编译器（flatcc_cli -> flatc.exe，构建宿主工具）
 #
-# [xxhash] vendored 单头（v0.8.2）
+# [xxhash] vendored 单头
 # 用途：XXH64 非密码学哈希，容器/索引块校验和
 #
-# [libsodium] vendored @ commit 93a7d0d41fe2e32409b5d00386946f491750b7de (1.0.20)
+# [libsodium] vendored @ commit 93a7d0d41fe2e32409b5d00386946f491750b7de
 # 用途：Argon2id/XChaCha20-Poly1305/随机数等全部密码学原语，静态链入 verthys.dll
-#       （2026-09-19 P0-1 修复：由无 .gitmodules 的 gitlink 扁平化为普通文件入库）
+#       （由无 .gitmodules 的 gitlink 扁平化为普通文件入库）
 D10F2BE7BFA979431583CAD8374C411C1A3748295160E074FC5A085090CE0E76  third_party\flatcc\.github\dependabot.yml
 1BC00DFECEC87D1D7D15E59B6AAD08C7599E5D97BD9056F942866C13F3BCBA8D  third_party\flatcc\.github\workflows\ci.yml
 C8679CF65C9BDEC18CFF68D36835BAAB6974FA04C1476CC8B700F63DBAFC0206  third_party\flatcc\.github\workflows\weekly.yml

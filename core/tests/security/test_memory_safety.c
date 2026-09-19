@@ -1,18 +1,17 @@
 /*
- * test_memory_safety.c — 内存安全测试（Phase 1.11）
+ * test_memory_safety.c — 内存安全测试
  *
- * 验证 project.md 6 内存安全环节（§1.4 V2 退役后 V3 语义）：
+ * 验证内存安全环节：
  *   - Lock 后密钥不可达（CNG 内核句柄全部销毁 + VerthysContextV3 归零）
  *   - Lock 后记录明文释放（LSM/Extent 上下文随 v3 实例销毁）
  *   - Lock 后 file_path 保留（供重新解锁）
  *   - 失败的 Unlock 不污染上下文（状态不变、无密钥残留）
  *   - Deinit 从各状态安全退出
  *
- * ★ P0 缺陷1企业级方案 — UAF 回归测试（查询→修改→旧指针失效）
+ * UAF 回归测试（查询→修改→旧指针失效）
  *   - GetRecord 填充借用缓存（last_getrecord_data != NULL，out.data 借用之）
  *   - 全部 6 个写操作（Add/Delete/DeleteRecords/Import/ChangePassword/Flush）
  *     调用后缓存立即失效（last_getrecord_data == NULL），消除 UAF 窗口
- *     （原第 7 项 RebuildMerkle 随 §1.4 V2 退役删除）
  *   - 二次 GetRecord 返回全新借用指针（单次有效原则）
  *
  * 通过 verthys_internal.h 直接检查 VerthysContext 内部字段。
@@ -247,14 +246,14 @@ TEST(mem_deinit_from_uninit)
 }
 
 /* ====================================================================== *
- * ★ P0 缺陷1企业级方案 — UAF 回归测试
+ * UAF 回归测试
  *
  * 验证场景：查询 → 修改 → 旧借用指针失效（防止 Use-After-Free）
  *
  * 原缺陷：查询接口对外暴露内部缓存裸指针，写入操作未失效缓存，GC 回收
  * 旧数据块后外部指针变野指针，引发 UAF。
  *
- * 根治方案：所有写操作入口统一调用 ctx_free_getrecord_cache(ctx)，
+ * 根治方式：所有写操作入口统一调用 ctx_free_getrecord_cache(ctx)，
  * 写操作提交前强制清空历史查询缓存。
  *
  * 测试策略（白盒）：

@@ -6,7 +6,7 @@
 #   执行之前，try/catch 与 Read-Host 暂停完全失效。保存后请确认文件头
 #   3 字节为 EF BB BF。
 #
-# 背景（2026-09-19 根因修复）：
+# 背景（根因修复）：
 #   项目目录从 Desktop\Project\ValtCore 迁移至 Desktop\Verthys 后，随目录
 #   携带的 build/ 与 build_dev/ 中 CMakeCache.txt 仍记录旧绝对路径：
 #     CMAKE_HOME_DIRECTORY:INTERNAL=c:/Users/.../ValtCore

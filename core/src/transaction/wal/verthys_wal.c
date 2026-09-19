@@ -1,9 +1,9 @@
 /*
- * verthys_wal.c — V3 事务 WAL 实现（环形 512KB×2 + §10.1 回放）
+ * verthys_wal.c — V3 事务 WAL 实现（环形 512KB×2 回放）
  *
- * 设计契约见 verthys_wal.h 文件头。实现要点：
+ * 设计契约位于 verthys_wal.h 文件头。实现要点：
  *   - 帧读写复用 verthys_lsm_frame_write / verthys_lsm_frame_read_decrypt
- *     （WP-4 帧惯例：[magic][ct_len][ct||tag][nonce]）；
+ *     （帧惯例：[magic][ct_len][ct||tag][nonce]）；
  *   - 打开即全量解密校验扫描（撕裂尾部精确定位，游标绝不落在撕裂帧之后，
  *     保证后续追加记录在回放中可达）；
  *   - 回放按"低 seq 半区在前"拼接帧序，组缓冲存明文 heap 拷贝（内存
@@ -241,7 +241,7 @@ static VerthysResult wal_write_half_header(VerthysWal *w, unsigned half,
 
 /*
  * 帧遍历：自半区头后逐帧解密校验，明文交 fn（可为 NULL = 仅结构扫描）。
- * 终止条件（§10.1 撕裂静默截断）：
+ * 终止条件（撕裂静默截断）：
  *   - 帧头 magic 不符（空白/垃圾）-> 正常结束（不计撕裂）；
  *   - ct_len 越界 / 解密认证失败 / 记录解码失败 -> 撕裂计数 +1 并停止。
  * out_frames/out_torn/out_cursor/out_max_nonce 可为 NULL。
@@ -340,7 +340,7 @@ static VerthysResult wal_foreach_frame(VerthysWal *w, unsigned half,
 
 /* ---------- 生命周期 ---------- */
 
-/* ★ WP-5（verthys_v3_lifecycle 接线）：结构体对外不透明，经本对函数管理堆生命周期 */
+/* verthys_v3_lifecycle 接线：结构体对外不透明，经本对函数管理堆生命周期 */
 VerthysWal *verthys_wal_create(void)
 {
     VerthysWal *w = (VerthysWal *)calloc(1, sizeof(*w));
@@ -426,7 +426,7 @@ VerthysResult verthys_wal_open(VerthysWal *w, FILE *f, uint64_t region_offset,
     w->active_half = active;
     w->opened = 1;
 
-    /* nonce 计数器恢复（红线：防回退，E-7/R-5 裕量） */
+    /* nonce 计数器恢复（红线：防回退，保留裕量） */
     max_nonce = (nonces[0] > nonces[1]) ? nonces[0] : nonces[1];
     if (max_nonce > 0) {
         target = max_nonce + VERTHYS_WAL_NONCE_RESTORE_MARGIN;
@@ -501,7 +501,7 @@ VerthysResult verthys_wal_append(VerthysWal *w, const VerthysWalRecord *rec)
     return VERTHYS_OK;
 }
 
-/* ---------- 回放（§10.1） ---------- */
+/* ---------- 回放 ---------- */
 
 /* 事务组缓冲：存帧明文 heap 拷贝（内存 <= 区域字节数） */
 typedef struct WalGroupBuf {
@@ -594,7 +594,7 @@ static VerthysResult wal_group_deliver(WalGroupBuf *g, VerthysWalReplayFn fn,
     return r;
 }
 
-/* §10.1 组分类终结：redrive -> 逐记录解码投递；否则丢弃（可选投递） */
+/* 组分类终结：redrive -> 逐记录解码投递；否则丢弃（可选投递） */
 static VerthysResult wal_group_finalize(WalReplayCtx *c)
 {
     VerthysResult r = VERTHYS_OK;

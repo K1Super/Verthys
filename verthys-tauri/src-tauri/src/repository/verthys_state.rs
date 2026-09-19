@@ -1,5 +1,5 @@
 /*
- * repository/verthys_state.rs — 状态文件持久化（企业级方案）
+ * repository/verthys_state.rs — 状态文件持久化（企业级实现）
  *
  * 原设计缺陷：
  *   状态文件存放在 app_config_dir/.verthys_state，与 .verthys 文件分离。
@@ -35,19 +35,19 @@ pub struct VerthysState {
     /// 已绑定的设备机器码（SHA-256 hex），首次初始化全局密钥时绑定
     #[serde(default)]
     pub device_fingerprint: String,
-    /// 第 4.3 项：DPAPI 加密的设备组件数据（base64）
+    /// DPAPI 加密的设备组件数据（base64）
     ///
     /// 存储 DeviceComponents 经 DPAPI CryptProtectData 加密后的密文（base64）。
     /// DPAPI 密封使状态文件离机失效（无法在其他机器解密）。
     /// 空字符串表示旧版状态文件（使用 device_fingerprint 明文哈希向后兼容）。
     #[serde(default)]
     pub device_binding_blob: String,
-    /// ★ 企业级方案：连续修复失败计数器
+    /// ★ 企业级：连续修复失败计数器
     /// 每次主动修复失败递增，成功时清零。
     /// 连续失败 3 次触发前端告警（通过 verthys_init_status 返回 detail）。
     #[serde(default)]
     pub repair_fail_count: u32,
-    /// ★ 企业级方案：容器唯一标识强绑定
+    /// ★ 企业级：容器唯一标识强绑定
     ///
     /// 存储 .verthys 文件超级块明文头中的 container_id（16 字节，hex 编码 32 字符）。
     /// 启动时 verthys_init_status 比对此字段与 .verthys 实际 container_id，
@@ -61,7 +61,7 @@ pub struct VerthysState {
 
 impl VerthysState {
     pub fn new(verthys_path: &str) -> Self {
-        // ★ 企业级方案：从 .verthys 明文头读取 container_id（16 字节 @ offset 10）
+        // ★ 企业级：从 .verthys 明文头读取 container_id（16 字节 @ offset 10）
         // 与 magic 校验同源，均位于超级块前 128 字节明文区，无需解锁即可读取。
         // 读取失败（文件不存在 / 过短 / 非 v2）时留空，向后兼容旧状态文件。
         let container_id = read_container_id_from_header(verthys_path).unwrap_or_default();
@@ -129,7 +129,7 @@ fn write_last_verthys_path(app: &tauri::AppHandle, verthys_path: &str) -> Result
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 企业级方案：旧版状态文件迁移                                       *
+ * ★ 企业级：旧版状态文件迁移                                       *
  *                                                                    *
  * 旧版状态文件存放在 app_config_dir/.verthys_state（与 .verthys 分离）。   *
  * 新版改为 .verthys 同级目录（<verthys_path>.state）+ 路径指针。           *
@@ -218,7 +218,7 @@ fn try_migrate_from_legacy_state(app: &tauri::AppHandle) -> Option<VerthysState>
 
     // 8. 写入新状态文件（<verthys_path>.state）
     //    保留旧版状态文件的 ready/device_fingerprint 字段，重置 repair_fail_count
-    //    ★ 企业级方案：捕获当前 .verthys 的 container_id 实现强绑定
+    //    ★ 企业级：捕获当前 .verthys 的 container_id 实现强绑定
     let new_state = VerthysState {
         magic: STATE_MAGIC.into(),
         ready: legacy_state.ready,
@@ -288,7 +288,7 @@ pub fn validate_verthys_magic(verthys_path: &str) -> bool {
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 企业级方案：容器唯一标识强绑定                                      *
+ * ★ 企业级：容器唯一标识强绑定                                      *
  *                                                                    *
  * v2 超级块明文头布局（前 128 字节明文区，无需解锁即可读取）：          *
  *   字节 0-3:    magic "VERT"                                        *
@@ -312,10 +312,6 @@ const VERTHYS_CONTAINER_ID_BYTES: usize = 16;
 /// 返回 hex 编码的 32 字符字符串（小写），读取失败返回 None。
 /// 仅读取超级块前 26 字节明文区，不接触密钥、不解密任何数据。
 ///
-/// 兼容性：
-///   - v2 容器：读取 offset 10 的 16 字节 container_id
-///   - v1 容器：v1 头部布局不同，返回 None（状态文件留空，不触发比对）
-///   - 非 verthys 文件：返回 None
 pub fn read_container_id_from_header(verthys_path: &str) -> Option<String> {
     use std::io::Read;
 
@@ -498,7 +494,7 @@ pub fn delete_state_file(app: &tauri::AppHandle) {
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 企业级方案：主动修复                                              *
+ * ★ 企业级：主动修复                                              *
  *                                                                    *
  * 在 verthys_init_status 中调用，启动阶段主动修复状态文件：             *
  *   - 状态文件不存在但 .verthys 存在且 magic 合法 → 重建状态文件        *

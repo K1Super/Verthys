@@ -1,24 +1,20 @@
 /*
- * verthys_transaction_v3.h — V3 六 Phase 事务（WAL + 法定人数提交）
+ * verthys_transaction_v3.h — V3 六阶段事务（WAL + 法定人数提交）
  *
- * 设计依据：
- *   - docs/TARGET_ARCHITECTURE_V5.md §10.1（V3 事务协议）/ §10.2（vsb_txn）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-5
- *
- * 六 Phase 协议（§10.1，单写者纪律）：
- *   Phase 1 BEGIN         txid = sb->txid + 1；WAL BEGIN 记录；
+ * 六阶段协议（单写者纪律）：
+ *   BEGIN         txid = sb->txid + 1；WAL BEGIN 记录；
  *                         LSM flush 抑制开启（未提交条目不入 SSTable）
- *   Phase 2 WRITE_EXTENT  verthys_extent_put（内容寻址 + CNG 加密追加）
+ *   WRITE_EXTENT  verthys_extent_put（内容寻址 + CNG 加密追加）
  *                         + WAL EXTENT 记录（含 nonce，重放重注册必需）
- *   Phase 3 UPDATE_INDEX  verthys_lsm_put / delete + WAL INDEX 记录
- *   Phase 4 PREPARE       计算超级块候选快照（merkle_root / 分区 used）
+ *   UPDATE_INDEX  verthys_lsm_put / delete + WAL INDEX 记录
+ *   PREPARE       计算超级块候选快照（merkle_root / 分区 used）
  *                         + WAL PREPARE 记录
- *   Phase 5 COMMIT        超级块法定人数提交（≥2/3 副本）→ Extent 索引
+ *   COMMIT        超级块法定人数提交（≥2/3 副本）→ Extent 索引
  *                         持久化 → 分区表持久化 → WAL COMMIT 记录
- *   Phase 6 CONFIRM       法定人数读回验证 txid + Extent 抽样解密验证
+ *   CONFIRM       法定人数读回验证 txid + Extent 抽样解密验证
  *                         + WAL 截断复位 + 解除 flush 抑制
  *
- * 崩溃窗口语义（与 verthys_wal.h §10.1 回放规则一一对应）：
+ * 崩溃窗口语义（与 verthys_wal.h 回放规则一一对应）：
  *   - COMMIT 前崩溃（含 PREPARE 后）：组无 COMMIT 记录且 sb_txid < txid
  *     → 恢复回滚（LSM MemTable 剔除 + Extent 追加块成孤儿交 GC）；
  *   - 超块法定人数提交后、Extent 索引/分区表落盘前崩溃：sb_txid ≥ txid
@@ -27,12 +23,11 @@
  *   - WAL COMMIT 记录撕裂：同上（COMMIT 在法定人数成功后落笔）。
  *
  * 运行时回滚（verthys_txn_v3_rollback）：仅限 PREPARE 前后、COMMIT 前调用；
- * 依赖 flush 抑制纪律（Phase 1 开启），LSM 条目仅存在于 MemTable 与
+ * 依赖 flush 抑制纪律（BEGIN 阶段开启），LSM 条目仅存在于 MemTable 与
  * LSM WAL 尾部，经 verthys_lsm_rollback_txid 精确撤销。
  *
  * merkle_root 计算口径（V3 过渡实现）：BLAKE2b-256(全部 Extent 哈希按
- * 索引序拼接 ‖ u64le(next_offset))——确定性由重放重建同序索引保证；
- * 专用 Merkle 模块（分级树）归后续 WP，本口径不参与读取路径校验。
+ * 索引序拼接 ‖ u64le(next_offset))——确定性由重放重建同序索引保证。
  *
  * 线程安全性：非线程安全——单写者纪律（FFI 单线程事务流水线）。
  * 本模块不拥有任何子系统（FILE/WAL/LSM/Extent/分区均为借用）。
@@ -58,7 +53,7 @@ extern "C" {
 
 typedef enum {
     VERTHYS_TXN_V3_IDLE      = 0,   /* init 后 / confirm 后 */
-    VERTHYS_TXN_V3_ACTIVE    = 1,   /* BEGIN 完成（Phase 2/3 进行中） */
+    VERTHYS_TXN_V3_ACTIVE    = 1,   /* BEGIN 完成（写入阶段进行中） */
     VERTHYS_TXN_V3_PREPARED  = 2,   /* PREPARE 完成（COMMIT 待执行） */
     VERTHYS_TXN_V3_COMMITTED = 3,   /* COMMIT 完成（CONFIRM 待执行） */
     VERTHYS_TXN_V3_CONFIRMED = 4,   /* CONFIRM 完成（终态） */
@@ -86,16 +81,16 @@ typedef struct VerthysTxnV3 {
     uint64_t              txid;            /* 本事务 ID（BEGIN 分配） */
     VerthysTxnV3State       state;
     uint64_t              lsm_wal_base;    /* BEGIN 时 LSM WAL 游标快照 */
-    size_t                extent_ops;      /* Phase 2 记录数 */
-    size_t                index_ops;       /* Phase 3 记录数 */
+    size_t                extent_ops;      /* Extent 写入记录数 */
+    size_t                index_ops;       /* 索引更新记录数 */
     int                   has_prepare;     /* PREPARE 快照有效标志 */
-    VerthysWalPreparePayload prepare;        /* Phase 4 候选快照 */
+    VerthysWalPreparePayload prepare;        /* 候选快照 */
     int                   persist_done;    /* COMMIT 步骤 3/4 成功标志
                                               （CONFIRM 幂等补存依据） */
 
     /*
      * Extent 引用变动账本（回滚精确还原）：
-     * Phase 2 写入记 +1（新块创建与去重命中同价），Phase 3 删除对现值
+     * 写入阶段记 +1（新块创建与去重命中同价），删除阶段对现值
      * 记 -1；同哈希净额聚合。回滚按净额反向调整（净额为零 = 无操作，
      * 精确覆盖"本事务先写后删同一内容"的复合场景——顺序施加逆操作会
      * 因 ref_count 下限截断出偏差）。COMMIT 成功即弃置（已提交不可
@@ -123,17 +118,17 @@ VerthysResult verthys_txn_v3_init(VerthysTxnV3 *t, FILE *f, VerthysWal *wal,
 /* 安全清零（密钥擦除）；幂等（NULL 直接返回）。不触碰借用子系统。 */
 void verthys_txn_v3_deinit(VerthysTxnV3 *t);
 
-/* ---------- 六 Phase ---------- */
+/* ---------- 六阶段事务 ---------- */
 
 /*
- * Phase 1 BEGIN：txid = sb->txid + 1；WAL BEGIN；LSM flush 抑制开启；
+ * BEGIN：txid = sb->txid + 1；WAL BEGIN；LSM flush 抑制开启；
  * 快照 LSM WAL 游标（回滚截断基准）。
  * 前置：state == IDLE。
  */
 __declspec(noinline) VerthysResult verthys_txn_v3_begin(VerthysTxnV3 *t);
 
 /*
- * Phase 2 WRITE_EXTENT：verthys_extent_put（查重/加密/追加/fsync）
+ * WRITE_EXTENT：verthys_extent_put（查重/加密/追加/fsync）
  * + WAL EXTENT 记录（哈希/偏移/尺寸/nonce 全量）。
  * 前置：state == ACTIVE。hash_out/stored 可为 NULL（语义同 extent_put）。
  */
@@ -143,28 +138,28 @@ VerthysResult verthys_txn_v3_write_extent(VerthysTxnV3 *t,
                                       int *stored);
 
 /*
- * Phase 3 UPDATE_INDEX：verthys_lsm_put + WAL INDEX 记录。
+ * UPDATE_INDEX：verthys_lsm_put + WAL INDEX 记录。
  * e->created_txid 由本函数统一置为事务 txid（调用方无须设置）；
  * e->tombstone 强制清零（删除走 verthys_txn_v3_delete）。
  */
 VerthysResult verthys_txn_v3_update_index(VerthysTxnV3 *t, const VerthysLsmEntry *e);
 
 /*
- * Phase 3 DELETE：查找现值 → Extent 引用释放（ref_count--）→
+ * DELETE：查找现值 → Extent 引用释放（ref_count--）→
  * verthys_lsm_delete（墓碑）+ WAL INDEX 记录（墓碑条目）。
  * 键不存在亦写墓碑（LSM 幂等语义）。
  */
 VerthysResult verthys_txn_v3_delete(VerthysTxnV3 *t, uint64_t lid);
 
 /*
- * Phase 4 PREPARE：计算候选快照（merkle_root / extent_used / index_used /
+ * PREPARE：计算候选快照（merkle_root / extent_used / index_used /
  * audit_used，取自当前分区表条目）+ WAL PREPARE。
  * 前置：state == ACTIVE。
  */
 VerthysResult verthys_txn_v3_prepare(VerthysTxnV3 *t);
 
 /*
- * Phase 5 COMMIT（原子性由 WAL + 法定人数语义保证）：
+ * COMMIT（原子性由 WAL + 法定人数语义保证）：
  *   1. 超块候选字段写入（txid / updated_at / wal 状态 / merkle_root）；
  *   2. 法定人数提交（vsb_txn_v3 备份保护，失败内存回滚）；
  *   3. Extent 索引持久化（帧覆写 + fsync）；
@@ -178,7 +173,7 @@ VerthysResult verthys_txn_v3_prepare(VerthysTxnV3 *t);
 __declspec(noinline) VerthysResult verthys_txn_v3_commit(VerthysTxnV3 *t);
 
 /*
- * Phase 6 CONFIRM：
+ * CONFIRM：
  *   1. 法定人数读回验证 sb.txid == 事务 txid；
  *   2. Extent 随机抽样解密 + 内容哈希校验（1 条，无条目则跳过）；
  *   3. WAL 截断复位（reset）。
@@ -197,7 +192,7 @@ __declspec(noinline) VerthysResult verthys_txn_v3_rollback(VerthysTxnV3 *t);
 /* ---------- 崩溃恢复（open 后、首个事务前调用一次） ---------- */
 
 /*
- * 崩溃恢复（v5.0 §10.1）：
+ * 崩溃恢复：
  *   1. verthys_wal_replay_ex：重放组（COMMIT 在场 / PREPARE-only 且
  *      sb_txid ≥ txid）逐记录重应用——EXTENT 重注册（缺则补、
  *      命中则 ref_count++，方向安全：只多不少）、INDEX 重放 LSM；

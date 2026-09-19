@@ -1,6 +1,6 @@
 <!--
   ManagementView.vue — 管理主界面入口视图（薄容器）
-  来源：SecurityCenter.vue 原 L224-L667 → P5 拆分为 6 个管理子组件
+  由 SecurityCenter.vue 拆分为 6 个管理子组件
 
   职责：
     1. 量子态势面板（mgmtView=dashboard）：委托 QuantumDashboard 渲染
@@ -197,7 +197,7 @@ const props = defineProps<{
   customFeatures: Record<string, boolean>;
   /** 自定义面板展开状态 */
   customPanelOpen: boolean;
-  /** 防御闭环路径状态列表（WP-11：7 攻击路径 × 4 态） */
+  /** 防御闭环路径状态列表（7 攻击路径 × 4 态） */
   defensePaths: DefensePathView[];
   /** 防御闭环汇总态势（计数 + 全阻断标志 + 总体态势） */
   defenseMeta: DefenseMetaView;
@@ -267,14 +267,14 @@ const enterHubSection = (section: "globalKey" | "moduleKeys" | "security") => {
 };
 
 /* ============================================================
- * 分区详情「点击空白处返回引导区」— 几何命中判定（企业级健壮方案）
+ * 分区详情「点击空白处返回引导区」— 几何命中判定（企业级健壮设计）
  * ============================================================
- * 旧方案（e.target === e.currentTarget）的结构性缺陷：
+ * 旧实现（e.target === e.currentTarget）的结构性缺陷：
  *   判定依赖点击落点的 DOM 归属 —— 分区根元素透明铺满、祖先容器
  *   padding、高度链塌陷等任何一种布局状况都会让空白点击落在
  *   非容器元素上，判定永不成立。
  *
- * 本方案三层门控，均与布局结构无关：
+ * 本实现三层门控，均与布局结构无关：
  *   0. 弹窗层豁免：命中元素位于 .cosmic-backdrop 弹窗层内 → 归弹窗交互域
  *      （CosmicBackdrop 为 inline fixed 非 Teleport，DOM 上仍是 shell 后代，
  *       不豁免会导致点遮罩关弹窗的同时误触返回引导）

@@ -11,7 +11,7 @@
  * 1. 入口层校验完成的--data-dir可信命令行参数
  * 2. portable_mode编译特性开启，指向程序同级data目录
  * 3. Windows系统API读取LocalAppData公共目录，拼接应用唯一标识文件夹
- * 4. 程序同级data目录兜底，用于只读存储介质降级方案并输出告警日志
+ * 4. 程序同级data目录兜底，用于只读存储介质降级路径并输出告警日志
  *
  * 附属路径规则：
  * 日志目录固定为数据根目录/logs，日志文件携带进程名称；Windows全量绝对路径统一追加\\?\长路径前缀突破MAX_PATH限制。
@@ -44,7 +44,7 @@ pub enum PathSource {
     PortableFeature,
     /// 通过系统Shell接口获取的用户本地应用数据目录
     KnownFolder,
-    /// 可执行文件同级data目录兜底降级方案
+    /// 可执行文件同级data目录兜底降级路径
     ExeDirFallback,
 }
 

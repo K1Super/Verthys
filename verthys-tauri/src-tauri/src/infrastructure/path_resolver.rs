@@ -166,7 +166,7 @@ pub fn check_dll_dependencies(_dll_path: &str) -> Result<(), String> {
  *     - 退出码为 0（加载器失败，非应用退出码）                       *
  *   表现为"安全子进程就绪超时"，误导排查方向。                       *
  *                                                                    *
- * 方案：                                                             *
+ * 做法：                                                             *
  *   在 spawn 子进程之前，通过解析 PE 头的 Machine 字段主动校验       *
  *   worker exe 与 DLL 架构一致且为 x86_64（与主进程一致），          *
  *   不匹配时立即返回明确错误，避免进入静默加载器失败路径。           *
@@ -305,7 +305,7 @@ pub fn verify_binary_architecture(worker_exe: &str, dll_path: &str) -> Result<()
  *   DLL 在搜索路径中不可达（如应用级 DLL 未随包发布、系统级 DLL     *
  *   在精简版 Windows 中缺失）。                                      *
  *                                                                    *
- * 方案：                                                             *
+ * 做法：                                                             *
  *   解析 PE Import Directory Table，提取所有被导入的 DLL 名称，      *
  *   按 Windows 加载器搜索顺序逐一确认可访问：                        *
  *     1. exe 同级目录（应用级 DLL，如 verthys.dll）                 *

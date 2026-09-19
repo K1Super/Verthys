@@ -1,7 +1,7 @@
 /*
  * verthys_pepper.h — 胡椒安全托管框架（内部模块，不导出）
  *
- * ★ Comprehensive_optimization 第八部分 一.2：胡椒的安全托管框架
+ * ★ 胡椒的安全托管框架
  *
  * 设计目标：
  *   胡椒的生命周期管理统一接口，解决"依赖外部实现，存在丢失则
@@ -11,8 +11,8 @@
  *   1. 注入胡椒：Verthys_Init 时由调度层通过 verthys_pepper_inject() 注入，
  *      胡椒由操作系统密钥存储（TPM/CNG/Keychain）保护，DLL 通过安全
  *      通道获取。最高优先级，企业部署首选。
- *   2. OS 托管胡椒：verthys_pepper_load_from_os() 从 CNG 持久化机器密钥
- *      读取（TPM 绑定），首次使用时自动生成并持久化。
+ *   2. OS 托管胡椒：verthys_pepper_load_from_os() 从 CNG 持久化密钥
+ *      读取（用户级优先、机器级兜底），首次使用时自动生成并持久化。
  *   3. 编译内嵌胡椒：keymanager.c 中的 static 常量，作为兜底默认值，
  *      保证零配置开箱即用（向后兼容）。
  *
@@ -82,13 +82,14 @@ const uint8_t *verthys_pepper_get(void);
 void verthys_pepper_deinit(void);
 
 /* ===================================================================== *
- *                  OS 托管胡椒（CNG 持久化机器密钥）                     *
+ *                  OS 托管胡椒（CNG 持久化密钥）                        *
  * ===================================================================== */
 
 /*
  * 从 OS 密钥存储加载胡椒。
- * Windows：使用 CNG 持久化机器密钥（TPM 绑定，layer3_hw_binding 模块）。
- *   - 首次调用：生成随机胡椒，用 CNG 机器密钥加密后持久化到 %APPDATA%
+ * Windows：使用 CNG 持久化密钥（layer3_hw_binding 模块，4 槽位；
+ *   用户级优先、机器级兜底，文件头记录封装级别，加载直达解包）。
+ *   - 首次调用：生成随机胡椒，用 CNG 密钥加密后持久化到 %APPDATA%
  *   - 后续调用：从持久化存储读取并解密
  *
  * 返回 0 成功，非 0 失败（OS 不支持或密钥不可用）。
@@ -102,6 +103,22 @@ int verthys_pepper_load_from_os(void);
  * 返回 0 成功，非 0 失败。
  */
 int verthys_pepper_save_to_os(void);
+
+/*
+ * 设置胡椒存储路径覆盖（测试隔离用，内部符号）。
+ * path 为 NULL 或空串时恢复默认 %APPDATA% 路径。
+ * 该函数不在 DLL 导出清单中，发布面无变化。
+ */
+void verthys_pepper_set_storage_path_override(const char *path);
+
+/*
+ * 计算胡椒持久化文件指纹（内部符号，测试构造样本用）。
+ *   meta: 8 字节头部（version||source_type||key_level||key_provider||reserved）
+ *   返回 0 成功，非 0 失败。
+ */
+int pepper_file_fingerprint(const uint8_t meta[8],
+                            const uint8_t *label, const uint8_t *cipher,
+                            uint8_t out_fp[8]);
 
 /* ===================================================================== *
  *             胡椒恢复卡（Shamir 秘密共享分片）                          *
@@ -166,8 +183,7 @@ typedef enum {
 /* 查询当前胡椒来源（诊断用，不暴露胡椒值） */
 VerthysPepperSource verthys_pepper_get_source(void);
 
-/*
- * ★ 方案 §4.2（P0-B 根治）：查询 pepper 来源错误状态。
+/* 查询 pepper 来源错误状态。
  * 返回 1 = 最近一次 verthys_pepper_init 中 OS 托管 pepper 解包失败
  * （文件存在但机器密钥解不开 / 指纹不匹配），pepper 处于不可用态。
  * 此时容器解锁应返回 VERTHYS_ERR_PEPPER_SOURCE（而非 AUTH/INTERNAL），

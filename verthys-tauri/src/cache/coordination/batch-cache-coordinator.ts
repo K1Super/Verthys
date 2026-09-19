@@ -1,11 +1,11 @@
 /*
  * cache/coordination/batch-cache-coordinator.ts — 插件化批量缓存协调器（导入流水线专用）
  *
- * ★ batch-cache-coordinator 重构方案（batch-cache-coordinator-refactor-fix.md）落地：
+ * ★ 重构设计落地：
  *   插件化写入器 + 背压控制 + 可靠重试 + 事件可观测 + AbortSignal 可取消 +
  *   依赖注入可测试的生产级批量缓存协调器。
  *
- * ★ 方案根治的十项缺陷（方案 §一 逐条对应）：
+ * ★ 根治的十项缺陷（逐条对应）：
  *   1. 缓存层硬编码 → CacheLayerWriter 插件接口，新增/替换缓存层零侵入
  *   2. 缺乏背压控制 → 高/低水位线 + backpressure 事件，上游可暂停/恢复
  *   3. 错误处理粗放 → 失败批次回灌缓冲区前端（不丢数据）+ 逐层重试
@@ -13,7 +13,7 @@
  *   5. 可观测性差 → flush:start/flush:success/flush:error/backpressure/
  *      session:start/end/abort 全事件通知
  *   6. Base64 大小估算不精确 → estimateBase64Size 处理填充字符
- *      （共享实现见 cache/shared/base64-size.ts）
+ *      （共享实现位于 cache/shared/base64-size.ts）
  *   7. createdTime 语义不准确 → BufferedRecord.createdTime? 可传入
  *      原始 EXIF 时间，未传时回退入队时间
  *   8. performance.now() 兼容性风险 → 统一使用 Date.now()
@@ -26,17 +26,17 @@
  *     （无 events 包、无 polyfill），以零依赖 TypedEventEmitter 等价替代，
  *     事件名与监听器参数由事件表静态类型化
  *
- * ★ 生产级对齐说明（方案设计目标的落实，非语义变更）：
- *   - abort() 重置背压标志并广播 backpressure=false：方案原文未复位，
+ * ★ 生产级对齐说明（非语义变更）：
+ *   - abort() 重置背压标志并广播 backpressure=false：原始设计未复位，
  *     残留 backpressure=true 会使上游永久暂停（活性缺陷）
  *   - 自动触发（阈值/定时）经 tryFlush()：刷新进行中时静默跳过
      （缓冲区保留，下个周期/下条记录再次触发），避免把并发跳过
- *     误报为 error 级日志噪音；手动 flush() 保持方案契约——并发调用抛错
+ *     误报为 error 级日志噪音；手动 flush() 保持既有契约——并发调用抛错
  *   - 中止/重试耗尽的层按失败处理：批次统一走失败路径回灌缓冲区，
  *     flushed 统计仅在全部层成功时计入（与字段语义"本次刷新写入的
  *     记录数"一致），杜绝"未写入却计数"的遥测失真
  *
- * ★ 评审修复（batch-cache-coordinator 评审 §一/§二）：
+ * ★ 评审修复：
  *   1. 自动 begin() 不再重置 totalFlushed：begin(resetStats=true) 显式
  *      控制，addRecord 自动启用会话时传 false，导入中途时序异常不丢累计
  *   2. flushInProgress 重置移至整个 flush 流程最末（return 置于 try 内、
@@ -77,7 +77,7 @@ const log = createLogger("batch-cache-coordinator");
 /* ==================== 类型定义 ==================== */
 
 /**
- * 缓存层写入器接口（插件化扩展点，方案 §一.1 根治）。
+ * 缓存层写入器接口（插件化扩展点）。
  * 新增/替换缓存层只需实现本接口并注入构造函数，无需修改协调器内部。
  */
 export interface CacheLayerWriter {
@@ -333,7 +333,7 @@ export class BatchCacheCoordinator extends TypedEventEmitter<BatchCacheCoordinat
    *
    * 可靠性设计：
    *   - 逐层串行写入（保持写顺序），单层失败按 maxRetries 线性重试
-   *   - 任一层最终失败或被中止 → 按中止来源分流（评审 #3）：
+   *   - 任一层最终失败或被中止 → 按中止来源分流：
    *     · 外部 signal 中止 / 重试耗尽 → 批次整体回灌缓冲区前端（不丢数据，
    *       已写入层为无条件覆盖写，回灌重试幂等）→ 广播 flush:error
    *     · 内部 abortController 中止（abort() 触发）→ 批次按指令丢弃
@@ -399,7 +399,7 @@ export class BatchCacheCoordinator extends TypedEventEmitter<BatchCacheCoordinat
 
       const elapsedMs = Date.now() - startAt;
       const ok = failedLayers.length === 0 && !aborted;
-      // ★ 评审 #3：区分中止来源——内部中止（abort()）时缓冲区已被清空、
+      // ★ 区分中止来源——内部中止（abort()）时缓冲区已被清空、
       //   会话已终止，在途批次必须丢弃（回灌会让"应丢弃"数据复活）
       const discardedByAbort = !ok && this.abortController?.signal.aborted === true;
 

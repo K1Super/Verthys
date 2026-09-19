@@ -7,14 +7,10 @@
  *   - Verthys_Import()        ：导入合并到当前加密库
  *   - Verthys_ChangePassword()：修改主密码
  *
- * ★ §1.4 V2 退役：V1/V2 分支随删除清单整体退役，三 API 均 V3-only
- *   （非 V3 容器返回 VERTHYS_ERR_FORMAT——"V3 不读 V2 文件"目标语义）。
- *   v1 交换格式的读写器（verthys_format.c 的流式写入 + 头部/元数据/记录
- *   解密链）为跨设备迁移契约保留（偏差留痕见 V3_UPGRADE_PLAYBOOK）。
  *
- * ★ V3 升级 WP-5：三个 API 的 V3 实现（PLAYBOOK 验收项）：
+ * ★ 三个 API 的 V3 实现：
  *   - Export      ：LSM 快照迭代器两遍式收集（精确容量）+ Extent 内核态
- *                   按需解密流式写入（内存峰值与记录数解耦，迁移自 v2 流式方案）；
+ *                   按需解密流式写入（内存峰值与记录数解耦，迁移自 v2 流式实现）；
  *   - Import      ：单事务批量（BEGIN → 逐条 WRITE_EXTENT + UPDATE_INDEX →
  *                   PREPARE/COMMIT/CONFIRM 收口，磁盘写入量 O(1) 重写）；
  *   - ChangePassword：VsbTxnV3 超级块事务保护 + CNG 密钥组重包裹（A/B/C
@@ -29,8 +25,8 @@
 #include "verthys_format.h"            /* v1 交换格式读写器（跨设备契约） */
 #include "verthys_crypto.h"
 #include "keymanager.h"
-#include "anti_debug_v2.h"   /* ★ 方案 §6.2.1：高危入口反调试检测 */
-#include "runtime_hash.h"   /* ★ WP-8：写路径周期运行时函数哈希校验 */
+#include "anti_debug_v2.h"   /* 高危入口反调试检测 */
+#include "runtime_hash.h"   /* 写路径周期运行时函数哈希校验 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -46,7 +42,7 @@
 
 /* 8. 导出（v1 交换格式，跨设备兼容） */
 /*
- * ★ DEF-006 修复（V3 迁移）：流式分片写入
+ * 流式分片写入修复（V3 迁移）
  *
  * 元数据快照（name/type/尺寸 + Extent 寻址字段）单遍收集，数据块明文
  * 不预载——get_data 回调逐条从 Extent 分区解密，release 回调清零释放。
@@ -143,20 +139,19 @@ VerthysResult Verthys_Export(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* ★ §1.4 V2 退役：V3-only（非 V3 容器一律拒绝） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
 
-    /* ★ 方案 §6.2.1：导出属高危入口，执行反调试检测（命中即 KILL 上报） */
+    /* 导出属高危入口，执行反调试检测（命中即 KILL 上报） */
     if (anti_debug_v2_check() != DBG_THREAT_NONE) {
         return VERTHYS_ERR_INTERNAL;
     }
 
-    /* ★ DEF-011 修复：递归互斥锁保护，防止并发重入 */
+    /* 递归互斥锁保护，防止并发重入 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
 
-    /* 导出始终使用 v1 交换格式（project.md 5.3：独立派生密钥，跨设备迁移） */
+    /* 导出始终使用 v1 交换格式（独立派生密钥，跨设备迁移） */
     verthys_random_bytes(salt, sizeof salt);
     if (keymanager_derive_master_export(mek, (const uint8_t *)password,
                                         password_len, salt) != 0) {
@@ -171,7 +166,7 @@ VerthysResult Verthys_Export(VerthysHandle handle,
     /* V3 路径 — LSM 快照迭代 + Extent 内核态按需解密流式写入。
      *
      * 容量控制（两遍式）：第一遍迭代器计数（含 65535 容量硬顶判定——
-     * v1 导出格式 u16 计数，超出整体拒绝 P1-8 迁移），第二遍精确分配收集。
+     * v1 导出格式 u16 计数，超出整体拒绝），第二遍精确分配收集。
      * estimate_records 为估算值（同 lid 多版本未 compaction 时偏高），
      * 不用作容量依据——两遍迭代保证数组精确、无截断风险。
      *
@@ -226,7 +221,7 @@ VerthysResult Verthys_Export(VerthysHandle handle,
         return rc;
     }
 
-    /* v1 导出格式容量硬顶（P1-8 迁移：拒绝而非静默截断） */
+    /* v1 导出格式容量硬顶（拒绝而非静默截断） */
     if (total > 65535) {
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
@@ -370,9 +365,9 @@ VerthysResult Verthys_Export(VerthysHandle handle,
 
 /* 9. 导入（v1 交换格式文件，合并到当前加密库） */
 /*
- * ★ DEF-005 修复（V3 迁移）：单事务批量合并——BEGIN → 逐条
- * verthys_v3_add_record_in_txn（Phase 2 WRITE_EXTENT 内容寻址去重 +
- * Phase 3 UPDATE_INDEX，LID 顺序分配）→ PREPARE/COMMIT/CONFIRM 收口
+ * 单事务批量合并修复（V3 迁移）——BEGIN → 逐条
+ * verthys_v3_add_record_in_txn（WRITE_EXTENT 内容寻址去重 +
+ * UPDATE_INDEX，LID 顺序分配）→ PREPARE/COMMIT/CONFIRM 收口
  * （verthys_v3_txn_finish）。磁盘写入量与条目数解耦（法定人数提交 +
  * 索引/分区表覆写各一次）；任一条目失败 → verthys_v3_txn_abort 整体回滚
  * （MemTable/WAL 精确撤销 + Extent 引用还原），导入原子性。
@@ -417,7 +412,7 @@ static VerthysResult verthys_api_v3_import(struct VerthysContext *ctx,
         }
     }
 
-    /* Phase 4-6：PREPARE → COMMIT → CONFIRM（COMMIT 后不可回滚，
+    /* PREPARE → COMMIT → CONFIRM（COMMIT 后不可回滚，
      * confirm 失败由下次 open 的崩溃恢复幂等收尾——错误直接上抛） */
     return verthys_v3_txn_finish(v);
 }
@@ -443,17 +438,16 @@ VerthysResult Verthys_Import(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* ★ §1.4 V2 退役：V3-only（非 V3 容器一律拒绝） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
 
-    /* ★ DEF-011 修复：递归互斥锁保护 */
+    /* 递归互斥锁保护 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
 
-    /* ★ P0 缺陷1根治：写操作入口统一失效查询缓存，防止 UAF */
+    /* 写操作入口统一失效查询缓存，防止 UAF */
     ctx_free_getrecord_cache(ctx);
-    /* ★ V3 升级 WP-8：写路径周期运行时哈希校验（30min 门控） */
+    /* 写路径周期运行时哈希校验（30min 门控） */
     runtime_hash_verify_periodic();
 
     /* 导入文件始终是 v1 交换格式（与 Export 输出对称） */
@@ -514,7 +508,7 @@ VerthysResult Verthys_Import(VerthysHandle handle,
     verthys_secure_zero(mek, sizeof mek);
     verthys_secure_zero(dek, sizeof dek);
 
-    /* 单事务批量导入（六 Phase 收口，原子性由 abort 路径保证） */
+    /* 单事务批量导入（六阶段收口，原子性由 abort 路径保证） */
     import_rc = verthys_api_v3_import(ctx, fmt_recs, count);
 
     vfmt_free_records(fmt_recs, count);
@@ -526,7 +520,7 @@ VerthysResult Verthys_Import(VerthysHandle handle,
 
 /* 10. 修改主密码（V3-only） */
 /*
- * ★ V3 升级 WP-5：重派生 + 重包裹 + 法定人数原子提交。
+ * 重派生 + 重包裹 + 法定人数原子提交。
  *
  * v1/v2 时代的"派生候选 MEK + memcmp 驻留密钥"验证范式对 V3 不适用
  * （密钥全部 CNG 内核态驻留，用户态无 MEK 可比）：旧口令验证走
@@ -548,26 +542,25 @@ VerthysResult Verthys_ChangePassword(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* ★ §1.4 V2 退役：V3-only（非 V3 容器一律拒绝） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
 
-    /* ★ 方案 §6.2.1：改密属高危入口，执行反调试检测（命中即 KILL 上报） */
+    /* 改密属高危入口，执行反调试检测（命中即 KILL 上报） */
     if (anti_debug_v2_check() != DBG_THREAT_NONE) {
         return VERTHYS_ERR_INTERNAL;
     }
 
-    /* ★ DEF-011 修复：递归互斥锁保护，防止并发重入 */
+    /* 递归互斥锁保护，防止并发重入 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) {
         AcquireSRWLockExclusive(ctx->api_mutex);
     }
 #endif
 
-    /* ★ P0 缺陷1根治：写操作入口统一失效查询缓存，防止 UAF
+    /* 写操作入口统一失效查询缓存，防止 UAF
      * 改密操作会重新加密超级块（KEK+DEK 双层结构），旧密钥下解密的数据
      * 缓存必须立即失效，否则上层持有的旧借用指针将指向已释放的明文数据。 */
     ctx_free_getrecord_cache(ctx);
-    /* ★ V3 升级 WP-8：写路径周期运行时哈希校验（30min 门控） */
+    /* 写路径周期运行时哈希校验（30min 门控） */
     runtime_hash_verify_periodic();
 
     rc = (ctx->v3 == NULL)

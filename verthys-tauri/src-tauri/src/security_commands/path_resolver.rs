@@ -16,7 +16,7 @@
 use tauri::Manager;
 
 /* ====================================================================== *
- *  第 13.2.1 项：路径白名单解析                                           *
+ *  路径白名单解析                                           *
  *                                                                        *
  *  文件系统命令不再接收前端传入的路径，改为逻辑标识符：                    *
  *    "verthys_dir"  → app_config_dir（.verthys 文件所在目录）                 *
@@ -25,12 +25,12 @@ use tauri::Manager;
  *  install_dir 从 current_exe().parent() 获取，不信任前端输入。            *
  * ====================================================================== */
 
-/// 第 13.2.1 项：逻辑路径标识符
+/// 逻辑路径标识符
 pub(super) const LOGICAL_VERTHYS_DIR: &str = "verthys_dir";
 pub(super) const LOGICAL_TEMP_DIR: &str = "temp_dir";
 pub(super) const LOGICAL_DATA_DIR: &str = "data_dir";
 
-/// 第 13.2.1 项：将逻辑标识符解析为实际路径
+/// 将逻辑标识符解析为实际路径
 ///
 /// 返回 Ok(canonical_path) 表示路径合法且在白名单内。
 /// 返回 Err(msg) 表示标识符无效或路径不在白名单内。
@@ -75,7 +75,7 @@ pub(super) fn resolve_logical_path(
     Ok(canonical)
 }
 
-/// 第 13.2.1 项：获取应用安装目录（从 current_exe 推导，不信任前端）
+/// 获取应用安装目录（从 current_exe 推导，不信任前端）
 pub(super) fn get_install_dir() -> Result<String, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("获取当前可执行文件路径失败: {}", e))?;

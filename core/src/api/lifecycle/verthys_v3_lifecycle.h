@@ -1,12 +1,6 @@
 /*
  * verthys_v3_lifecycle.h — V3 容器生命周期（创建/打开/锁定）+ 运行时上下文
  *
- * 设计依据：
- *   - docs/TARGET_ARCHITECTURE_V5.md §5（密钥层次）/ §6.2（文件布局）/
- *     §6.3（超级块法定人数）/ §10.1（事务协议）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-5
- *   - docs/UNLOCK_OPTIMIZATION.md §8（解锁流水线）/ §9（渐进式解锁）
- *
  * VerthysContextV3 与 VerthysContext 的关系：
  *   - VerthysContext（verthys_internal.h）为 API 层统一句柄体；V3 容器打开后
  *     其 v3 指针指向本结构的堆实例（Init 分配 / Deinit 释放）；
@@ -60,7 +54,7 @@ typedef struct VerthysContextV3 {
     VerthysTxnV3           txn;                   /* 事务上下文（值嵌入） */
     int                  subsystems_open;       /* 1 = S5 已完成（子系统可用） */
 
-    /* === 解锁流水线状态（UNLOCK_OPTIMIZATION §8/§9/§10） === */
+    /* === 解锁流水线状态 === */
     UnlockPipelineResult pipeline;              /* 最近一次流水线结果（诊断） */
     uint32_t             unlock_flags;          /* 本次 Unlock flags 快照 */
     int                  preheated;             /* 1 = 索引完全预热（OPERATIONAL_FULL） */
@@ -95,7 +89,7 @@ VerthysContextV3 *verthys_v3_ctx_create(VerthysCngKeyManager *km,
 void verthys_v3_ctx_destroy(VerthysContextV3 *ctx3);
 
 /*
- * 关闭全部子系统并回到可重试初态（§11.3 失败路径资源纪律）：
+ * 关闭全部子系统并回到可重试初态（失败路径资源纪律）：
  *   txn deinit → WAL close → LSM close → 分区表 destroy（内核句柄）→
  *   km destroy_all → integrity_key 清零 → subsystems_open=0。
  * 已打开的后台预热线程先汇合。幂等。
@@ -105,7 +99,7 @@ void verthys_v3_ctx_subsystems_close(VerthysContextV3 *ctx3);
 /* ---------- 容器生命周期 ---------- */
 
 /*
- * 创建 V3 容器（系统唯一合法新建入口，Playbook WP-5）：
+ * 创建 V3 容器（系统唯一合法新建入口）：
  *   1. Argon2id 三档校准（迁移自 v2 lifecycle：目标 1s 预算跑分
  *      mem/iters/parallel，基准值记入 sb.argon2_benchmark_ms）；
  *   2. 密钥组生成：MEK/A/B/C 随机（A/B/C 由 MEK 内核态加密 wrap）；
@@ -142,7 +136,7 @@ __declspec(noinline) VerthysResult verthys_v3_open_existing(VerthysContextV3 *ct
  *   1. 等待后台预热线程退出（MINIMAL_FIRST 场景）；
  *   2. 事务 CONFIRM 收尾（若 COMMITTED 态）或回滚（ACTIVE/PREPARED 态）；
  *   3. LSM close（MemTable flush + Manifest 保存 + WAL 复位）；
- *   4. 温缓存写入（§7.2 时机 1：Lock 同步写；preset=SECURE 跳过）；
+ *   4. 温缓存写入（Lock 同步写；preset=SECURE 跳过）；
  *   5. subsystems_close（WAL/分区表/CNG 句柄全量销毁 + 密钥清零）。
  */
 VerthysResult verthys_v3_lock(VerthysContextV3 *ctx3);
@@ -158,13 +152,13 @@ int verthys_v3_detect(FILE *f);
 /* 温缓存是否被预设禁用（SECURE=1 → 禁用；迁移自 v2 vwarm_is_disabled_by_preset） */
 int verthys_v3_warmcache_disabled_by_preset(VerthysPreset preset);
 
-/* ---------- V3 单调用事务收口（★ WP-5：API 编排层共享，export/import 复用） ---------- */
+/* ---------- V3 单调用事务收口（API 编排层共享，export/import 复用） ---------- */
 
 /*
- * V3 单调用事务收口：Phase 4-6 统一推进（PREPARE → COMMIT → CONFIRM）。
+ * V3 单调用事务收口：统一推进（PREPARE → COMMIT → CONFIRM）。
  * 返回 VERTHYS_OK = CONFIRM 完成（终态 CONFIRMED）；非 0 = 透传错误码。
  * COMMIT 后失败（confirm 失败）：数据已持久（法定人数语义），不可回滚，
- * 由下次 open 的 §10.1 崩溃恢复路径幂等收尾——错误直接上抛。
+ * 由下次 open 的崩溃恢复路径幂等收尾——错误直接上抛。
  */
 VerthysResult verthys_v3_txn_finish(VerthysContextV3 *ctx3);
 
@@ -176,7 +170,7 @@ VerthysResult verthys_v3_txn_finish(VerthysContextV3 *ctx3);
 void verthys_v3_txn_abort(VerthysContextV3 *ctx3);
 
 /*
- * V3 单记录事务内写入（★ WP-5：AddRecord / Import 共用的 Phase 2+3 骨架）：
+ * V3 单记录事务内写入（AddRecord / Import 共用的事务写骨架）：
  *   WRITE_EXTENT（内容寻址去重，hash 回传供索引关联）→ 权威尺寸回查
  *   （verthys_extent_index_find）→ LID = max_lid + 1 顺序分配（LID 永不复用，
  *   红线语义）→ UPDATE_INDEX（created_txid 由事务层统一绑定当前事务）。
@@ -193,7 +187,7 @@ VerthysResult verthys_v3_add_record_in_txn(VerthysContextV3 *ctx3,
                                        uint64_t *out_lid);
 
 /*
- * 修改主密码（V3，★ WP-5：ChangePassword 分支）：
+ * 修改主密码（V3，ChangePassword 分支）：
  *   1. 旧口令验证：V3 域分离派生（超块参数，与解锁 S2 同函数同参数）→
  *      verthys_cng_km_verify_mek 对 wrapped_key_a 内核态解包试探（AEAD
  *      认证即口令正确；密钥仅瞬态，全程无驻留比对）；
@@ -220,7 +214,7 @@ VerthysResult verthys_v3_change_password(VerthysContextV3 *ctx3,
                                       const char *old_pw, size_t old_len,
                                       const char *new_pw, size_t new_len);
 
-/* ---------- 预设 TLV 扩展区（超级块 extensions，★ WP-5） ---------- */
+/* ---------- 预设 TLV 扩展区（超级块 extensions） ---------- */
 
 /*
  * TLV 布局：[u8 tag][u8 len][len × value]，顺序拼接至 extensions_len。

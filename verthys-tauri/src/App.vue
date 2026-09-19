@@ -80,9 +80,9 @@ onMounted(() => {
     window.setTimeout(prefetchMainView, 300);
   }
 
-  /* ★ 帧预算监控启动（性能根治方案 §7 — 根组件生命周期驱动启停）：
+  /* ★ 帧预算监控启动（根组件生命周期驱动启停）：
    * rAF 帧间隔采样 → P95 评估 → 迟滞降级/自愈（粒子密度 + CSS 治理类）；
-   * 采样守卫（仅 active 档 + 暖机窗口 + 巨帧丢弃）见 core/frame-budget.ts */
+   * 采样守卫（仅 active 档 + 暖机窗口 + 巨帧丢弃）位于 core/frame-budget.ts */
   frameBudgetMonitor.start();
 });
 onBeforeUnmount(() => {

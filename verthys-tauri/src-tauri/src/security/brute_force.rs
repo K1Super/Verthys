@@ -1,8 +1,8 @@
 /*
- * brute_force.rs — 登录暴力拦截（熔断机制）（SECURITY.md 企业级重写版）
+ * brute_force.rs — 登录暴力拦截（熔断机制）
  *
- * SECURITY.md 修复要点：
- *   1. 持久化加密状态，与设备身份绑定（第 13.2.2 项已实现 DPAPI 持久化）
+ * 修复要点：
+ *   1. 持久化加密状态，与设备身份绑定（通过 DPAPI 持久化）
  *   2. 锁定期间完全冻结记录接口 — record_failure 在锁定或 PurgeRequired 状态下
  *      直接返回当前状态，不递增任何计数
  *   3. 累计失败计数不可逆 — total_failures 永不因 clear_purge 或 record_success
@@ -32,10 +32,10 @@ const DEFAULT_RATE_LIMIT_MS: u64 = 1000;
 const DEFAULT_PURGE_AUTO_CLEAR_SECS: u64 = 24 * 60 * 60;
 
 /* ==================================================================== *
- *  SECURITY.md 第 5 项：可配置策略对象                                    *
+ *  可配置策略对象                                    *
  * ==================================================================== */
 
-/// 暴力拦截配置策略（SECURITY.md 第 5 项：可配置阈值与多级响应）
+/// 暴力拦截配置策略（可配置阈值与多级响应）
 #[derive(Debug, Clone)]
 pub struct BruteForceConfig {
     /// 连续失败阈值（触发界面锁定）
@@ -66,10 +66,10 @@ impl Default for BruteForceConfig {
 }
 
 /* ==================================================================== *
- *  持久化状态结构（第 13.2.2 项）                                         *
+ * 持久化状态结构                                                         *
  * ==================================================================== */
 
-/// 第 13.2.2 项：暴力拦截持久化状态（DPAPI 加密存储）
+/// 暴力拦截持久化状态（DPAPI 加密存储）
 ///
 /// 用于跨进程重启后恢复暴力拦截状态，防止攻击者通过重启重置失败计数。
 /// lock_until (Instant) 转换为 lock_remaining_secs (u64) 以支持序列化。
@@ -83,7 +83,7 @@ pub struct BruteForcePersistedState {
     pub lock_remaining_secs: u64,
     /// 是否已触发清空索引
     pub purge_triggered: bool,
-    /// SECURITY.md 第 3 项：上次 purge 触发时的 total_failures 值
+    /// 上次 purge 触发时的 total_failures 值
     /// （用于实现"需额外 PURGE_THRESHOLD 次失败才会再次触发"）
     #[serde(default)]
     pub last_purge_total: u32,
@@ -103,18 +103,18 @@ pub struct BruteForceGuard {
 struct BruteForceState {
     /// 连续失败次数（成功解锁后重置为 0）
     consecutive_failures: u32,
-    /// SECURITY.md 第 3 项：累计失败次数（永不重置，只增不减）
+    /// 累计失败次数（永不重置，只增不减）
     total_failures: u32,
     /// 锁定截止时间（None=未锁定，Some=锁定至该时刻）
     lock_until: Option<Instant>,
     /// 是否已触发清空索引（避免重复触发）
     purge_triggered: bool,
-    /// SECURITY.md 第 3 项：上次 purge 触发时的 total_failures 值
+    /// 上次 purge 触发时的 total_failures 值
     /// 下次 purge 需要 total_failures - last_purge_total >= purge_threshold
     last_purge_total: u32,
-    /// SECURITY.md 第 3 项：purge 触发时间（用于 24 小时自动解除）
+    /// purge 触发时间（用于 24 小时自动解除）
     purge_triggered_at: Option<Instant>,
-    /// SECURITY.md 第 4 项：上次 record_failure / record_success 调用时间（速率限制）
+    /// 上次 record_failure / record_success 调用时间（速率限制）
     last_record_time: Option<Instant>,
 }
 
@@ -145,9 +145,9 @@ pub enum AttemptResult {
     FailureLocked(u64),
     /// 尝试失败并触发清空索引
     FailurePurgeRequired,
-    /// SECURITY.md 第 4 项：调用速率超限（拒绝记录，计数不变）
+    /// 调用速率超限（拒绝记录，计数不变）
     RateLimited,
-    /// SECURITY.md 第 2 项：锁定期间或 PurgeRequired 状态下拒绝记录
+    /// 锁定期间或 PurgeRequired 状态下拒绝记录
     Frozen(u64),
 }
 
@@ -193,7 +193,7 @@ impl BruteForceGuard {
         }
     }
 
-    /// SECURITY.md 第 5 项：使用自定义配置创建
+    /// 使用自定义配置创建
     #[allow(dead_code)]
     pub fn with_config(config: BruteForceConfig) -> Self {
         BruteForceGuard {
@@ -204,7 +204,7 @@ impl BruteForceGuard {
 
     /// 检查当前是否允许尝试解锁
     ///
-    /// SECURITY.md 第 5 项：purge 状态在 purge_auto_clear_secs 后自动解除
+    /// purge 状态在 purge_auto_clear_secs 后自动解除
     /// （但 total_failures 保留，last_purge_total 不变）
     pub fn check(&self) -> BruteForceCheck {
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -220,7 +220,7 @@ impl BruteForceGuard {
             state.lock_until = None;
         }
 
-        /* SECURITY.md 第 5 项：检查 purge 是否已过自动解除窗口 */
+        /* 检查 purge 是否已过自动解除窗口 */
         if state.purge_triggered {
             if let Some(triggered_at) = state.purge_triggered_at {
                 if self.config.purge_auto_clear_secs > 0 {
@@ -247,7 +247,7 @@ impl BruteForceGuard {
         BruteForceCheck::Allow
     }
 
-    /// SECURITY.md 第 4 项：检查速率限制
+    /// 检查速率限制
     ///
     /// 返回 true 表示通过（可以记录），false 表示被限流。
     fn check_rate_limit(state: &mut BruteForceState, rate_limit_ms: u64) -> bool {
@@ -266,12 +266,12 @@ impl BruteForceGuard {
 
     /// 记录一次解锁成功
     ///
-    /// SECURITY.md 第 3 项：total_failures 不重置（累计计数不可逆）
-    /// SECURITY.md 第 4 项：速率限制
+    /// total_failures 不重置（累计计数不可逆）
+    /// 速率限制
     pub fn record_success(&self) {
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
-        /* SECURITY.md 第 4 项：速率限制 */
+        /* 速率限制 */
         if !Self::check_rate_limit(&mut state, self.config.rate_limit_ms) {
             log::warn!("[brute_force] record_success 被速率限制拒绝");
             return;
@@ -279,28 +279,28 @@ impl BruteForceGuard {
 
         state.consecutive_failures = 0;
         state.lock_until = None;
-        /* SECURITY.md 第 3 项：total_failures 不重置（累计计数不可逆） */
+        /* total_failures 不重置（累计计数不可逆） */
     }
 
     /// 记录一次解锁失败，返回触发的动作
     ///
-    /// SECURITY.md 第 2 项：锁定期间完全冻结记录接口
+    /// 锁定期间完全冻结记录接口
     ///   - 若处于锁定状态，返回 Frozen(remaining_secs)，不递增任何计数
     ///   - 若处于 PurgeRequired 状态，返回 Frozen(0)，不递增任何计数
     ///
-    /// SECURITY.md 第 3 项：累计失败计数不可逆
+    /// 累计失败计数不可逆
     ///   - total_failures 只增不减
     ///   - purge 触发后需额外 PURGE_THRESHOLD 次失败才会再次触发
     ///
-    /// SECURITY.md 第 4 项：速率限制
+    /// 速率限制
     ///   - 每秒最多一次调用，超限返回 RateLimited
     ///
-    /// SECURITY.md 第 5 项：锁定时间随机化
+    /// 锁定时间随机化
     ///   - 实际锁定时长 = lock_duration_secs ± lock_jitter_secs
     pub fn record_failure(&self) -> AttemptResult {
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
-        /* SECURITY.md 第 2 项：锁定期间完全冻结 */
+        /* 锁定期间完全冻结 */
         if let Some(until) = state.lock_until {
             let now = Instant::now();
             if now < until {
@@ -318,7 +318,7 @@ impl BruteForceGuard {
             state.lock_until = None;
         }
 
-        /* SECURITY.md 第 2 项：PurgeRequired 状态下完全冻结 */
+        /* PurgeRequired 状态下完全冻结 */
         if state.purge_triggered {
             log::warn!(
                 "[brute_force] 第 2 项：PurgeRequired 状态下 record_failure 被冻结，\
@@ -329,7 +329,7 @@ impl BruteForceGuard {
             return AttemptResult::Frozen(0);
         }
 
-        /* SECURITY.md 第 4 项：速率限制 */
+        /* 速率限制 */
         if !Self::check_rate_limit(&mut state, self.config.rate_limit_ms) {
             log::warn!(
                 "[brute_force] 第 4 项：record_failure 被速率限制拒绝（间隔 < {}ms）",
@@ -341,14 +341,14 @@ impl BruteForceGuard {
         state.consecutive_failures += 1;
         state.total_failures += 1;
 
-        /* SECURITY.md 第 3 项：累计阈值检查
+        /* 累计阈值检查
          * purge 仅在 total_failures - last_purge_total >= purge_threshold 时触发
          * 这确保 clear_purge 后需要额外 purge_threshold 次失败才会再次触发 */
         let failures_since_last_purge = state.total_failures - state.last_purge_total;
         if failures_since_last_purge >= self.config.purge_threshold {
             state.purge_triggered = true;
             state.purge_triggered_at = Some(Instant::now());
-            /* SECURITY.md 第 3 项：更新 last_purge_total 为当前 total_failures，
+            /* 更新 last_purge_total 为当前 total_failures，
              * 确保 clear_purge 后需要额外 purge_threshold 次失败才会再次触发 */
             state.last_purge_total = state.total_failures;
             state.consecutive_failures = 0;
@@ -363,7 +363,7 @@ impl BruteForceGuard {
 
         /* 连续失败阈值检查：触发界面锁定 */
         if state.consecutive_failures >= self.config.lock_threshold {
-            /* SECURITY.md 第 5 项：锁定时间随机化 */
+            /* 锁定时间随机化 */
             let jitter = random_jitter(self.config.lock_jitter_secs);
             let actual_lock_secs = self.config.lock_duration_secs + jitter
                 - self.config.lock_jitter_secs; /* [duration - jitter, duration + jitter] */
@@ -384,7 +384,7 @@ impl BruteForceGuard {
 
     /// 清除熔断状态（PurgeRequired 处理完成后调用）
     ///
-    /// SECURITY.md 第 3 项：累计失败计数不可逆
+    /// 累计失败计数不可逆
     ///   - 清除 purge_triggered、consecutive_failures、lock_until
     ///   - **不重置** total_failures（累计计数永久保留）
     ///   - **不重置** last_purge_total（确保下次 purge 需额外 PURGE_THRESHOLD 次失败）
@@ -396,7 +396,7 @@ impl BruteForceGuard {
         state.purge_triggered_at = None;
         state.consecutive_failures = 0;
         state.lock_until = None;
-        /* SECURITY.md 第 3 项：total_failures 和 last_purge_total 不重置 */
+        /* total_failures 和 last_purge_total 不重置 */
 
         log::info!(
             "[brute_force] 第 3 项：clear_purge 已清除熔断状态（total_failures={} 保留，\
@@ -407,10 +407,10 @@ impl BruteForceGuard {
     }
 
     /* ------------------------------------------------------------------ *
-     * 第 13.2.2 项：DPAPI 持久化支持                                      *
+     * DPAPI 持久化支持                                      *
      * ------------------------------------------------------------------ */
 
-    /// 第 13.2.2 项：导出暴力拦截状态（用于 DPAPI 持久化）
+    /// 导出暴力拦截状态（用于 DPAPI 持久化）
     pub fn export_state(&self) -> BruteForcePersistedState {
         let state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -434,7 +434,7 @@ impl BruteForceGuard {
         }
     }
 
-    /// 第 13.2.2 项：导入暴力拦截状态（从 DPAPI 解密后恢复）
+    /// 导入暴力拦截状态（从 DPAPI 解密后恢复）
     pub fn import_state(&self, persisted: &BruteForcePersistedState) {
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -492,7 +492,7 @@ impl BruteForceGuard {
         0
     }
 
-    /// SECURITY.md 第 5 项：获取当前配置（只读）
+    /// 获取当前配置（只读）
     #[allow(dead_code)]
     pub fn config(&self) -> &BruteForceConfig {
         &self.config
@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_frozen_during_lock() {
-        /* SECURITY.md 第 2 项：锁定期间完全冻结记录接口 */
+        /* 锁定期间完全冻结记录接口 */
         let guard = test_guard();
         for _ in 0..10 {
             guard.record_failure();
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_frozen_during_purge() {
-        /* SECURITY.md 第 2 项：PurgeRequired 状态下完全冻结记录接口 */
+        /* PurgeRequired 状态下完全冻结记录接口 */
         let guard = test_guard();
         /* 触发 purge（20 次失败） */
         for _ in 0..10 {
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_total_failures_not_reset_by_clear_purge() {
-        /* SECURITY.md 第 3 项：累计失败计数不可逆 */
+        /* 累计失败计数不可逆 */
         let guard = test_guard();
         for _ in 0..10 {
             guard.record_failure();
@@ -625,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_purge_requires_additional_threshold_after_clear() {
-        /* SECURITY.md 第 3 项：clear_purge 后需额外 PURGE_THRESHOLD 次失败才会再次触发 */
+        /* clear_purge 后需额外 PURGE_THRESHOLD 次失败才会再次触发 */
         let guard = test_guard();
         /* 第一次触发 purge（20 次） */
         for _ in 0..10 {
@@ -655,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiting() {
-        /* SECURITY.md 第 4 项：调用速率限制 */
+        /* 调用速率限制 */
         let config = BruteForceConfig {
             rate_limit_ms: 500, /* 500ms 间隔便于测试 */
             ..Default::default()

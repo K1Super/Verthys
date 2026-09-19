@@ -1,13 +1,7 @@
 /*
  * verthys_format.h — .verthys 交换格式读写（内部模块，不导出，V3-only）
  *
- * ★ §1.4 V2 退役：本模块的容器职责已退役，仅保留"交换格式"职责——
- *   V3 Export/Import（verthys_export_import.c）以本格式作为跨设备迁移的
- *   导出信封（V3 容器数据 → 交换格式 → 目标设备 V3 Import）。
- *   V1→V2 迁移专用接口（vfmt_record_iter_* / vfmt_migrate_v1_to_v2 /
- *   vfmt_detect_v1_format / vfmt_decrypt_records_ft）随删除清单移除。
- *
- * 交换格式文件结构（project.md 4.1，小端序）：
+ * 交换格式文件结构（小端序）：
  *   ┌──────────────┬──────────┬──────────┬──────────┬──────────┐
  *   │ 文件头(56B)  │ 元数据区 │ 索引区   │ 数据块区 │ 文件MAC  │
  *   │ 明文         │ MEK加密  │ DEK加密  │ DEK加密  │ HMAC     │
@@ -42,7 +36,7 @@
  * 文件 MAC（32 字节，HMAC-SHA256）：
  *   HMAC-SHA256(DEK, blob[0 .. mac_offset-1])
  *
- * 深模块（codebase-design）：接口隐藏全部字节布局与 AEAD 细节。
+ * 深模块：接口隐藏全部字节布局与 AEAD 细节。
  */
 #ifndef VERTHYS_FORMAT_H
 #define VERTHYS_FORMAT_H
@@ -90,8 +84,6 @@ typedef struct {
  * salt/MEK/DEK 由调用方提供（调用方负责 keymanager 派生）。
  * out_blob 为 heap 分配，调用方 free()。
  *
- * ★ §1.4 V2 退役：仅供单元测试（交换格式读写路径正确性验证）；
- *   生产导出一律走 vfmt_write_streaming（V3 Export 流式信封）。
  */
 int vfmt_write(const uint8_t salt[VERTHYS_SALT_BYTES],
                uint32_t argon2_mem_kib, uint32_t argon2_iters, uint32_t argon2_parallel,
@@ -100,11 +92,11 @@ int vfmt_write(const uint8_t salt[VERTHYS_SALT_BYTES],
                const VerthysFmtRecord *records, uint16_t record_count,
                uint8_t **out_blob, size_t *out_size);
 
-/* ---------- ★ DEF-006 修复：流式写入（Comprehensive_optimization.md 4.2.3）----------
+/* ---------- 流式写入修复：分片写，避免大库导出 OOM ----------
  *
  * 原实现 vfmt_write 一次性分配 blob_size 连续内存，万级照片库导出直接 OOM。
  *
- * 流式方案：
+ * 流式处理：
  *   - records 数组仅含元数据（name/type/data_size），data 指针可为 NULL
  *   - 通过 get_data 回调按需获取每条记录的明文数据（一次一条，用完即释放）
  *   - 固定 16KB 文件 I/O 缓冲区，分段写入

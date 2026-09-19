@@ -1,14 +1,14 @@
 /*
- * test_v3_lifecycle.c — ★ WP-5 验收：V3 生命周期全链路 + 解锁流水线 + 温缓存 + WAL 崩溃恢复
+ * test_v3_lifecycle.c — V3 生命周期验收：全链路 + 解锁流水线 + 温缓存 + WAL 崩溃恢复
  *
- * PLAYBOOK WP-5 验收标准全覆盖：
+ * 验收标准全覆盖：
  *   1. V3 全链路（创建→写→读→删→改密→导出→重开）——公共 API 垂直切片，
  *      含导出/导入合并语义（墓碑不导出、导入 LID 重分配）；
- *   2. 解锁流水线：fail_mask 逐阶段注入（S0-S6 位序，UNLOCK_OPTIMIZATION §8）
- *      + MINIMAL_FIRST 渐进式解锁（§9：PARTIAL_UNLOCK 返回 + 数据可操作）；
- *   3. 温缓存（§7）：命中（HMAC+txid 双校验通过）/ 未命中（缓存文件缺失）/
+ *   2. 解锁流水线：fail_mask 逐阶段注入（S0-S6 位序）
+ *      + MINIMAL_FIRST 渐进式解锁（PARTIAL_UNLOCK 返回 + 数据可操作）；
+ *   3. 温缓存：命中（HMAC+txid 双校验通过）/ 未命中（缓存文件缺失）/
  *      损坏回退（载荷篡改 → HMAC 拒绝 → 冷启动，数据无损）；
- *   4. WAL 崩溃注入矩阵（v5.0 §10.1 回放规则三分支）：
+ *   4. WAL 崩溃注入矩阵（回放规则三分支）：
  *      a. 未提交组（BEGIN/EXTENT/INDEX 后崩溃，无 PREPARE/COMMIT）
  *         → 恢复丢弃（记录不可见，已提交数据不受影响，LID 不复用）；
  *      b. COMMIT 已落笔、CONFIRM 未执行（运行态半途崩溃）
@@ -20,7 +20,7 @@
  * 崩溃模拟原理（白盒注入）：verthys_v3_ctx_destroy 为中止式收口——内存态
  * 全灭（密钥清零/内核句柄销毁/MemTable 丢弃），盘面 WAL 半写痕迹原样
  * 保留，与真实进程崩溃的盘面状态等价；重开经解锁流水线 S5 的
- * verthys_txn_v3_recover 按 §10.1 规则幂等裁决。拆除后 VerthysContext 复位
+ * verthys_txn_v3_recover 按回放规则幂等裁决。拆除后 VerthysContext 复位
  * LOCKED 态（等价应急 DEGRADE 残留实例语义），Verthys_Deinit 安全收口。
  */
 #include "verthys_test.h"
@@ -115,7 +115,7 @@ static int v3life_make_locked(const char *path, const char *pw, size_t pw_len,
     return 0;
 }
 
-/* ================== 1. V3 全链路（PLAYBOOK 验收主链） ================== */
+/* ================== 1. V3 全链路（验收主链） ================== */
 
 /*
  * 创建(BALANCED 三档校准) → 写×2 → 读 → 删 → 改密 → 锁 → 新口令重开 →
@@ -139,7 +139,7 @@ TEST(v3life_full_chain_roundtrip)
     CHECK_EQ(Verthys_CreateWithPreset(h, V3L_VERTHYS, V3L_PW, V3L_PW_LEN,
                                     VERTHYS_PRESET_BALANCED), VERTHYS_OK);
 
-    /* 写：六 Phase 单调用事务，LID 顺序分配（max_lid + 1，不复用） */
+    /* 写：六阶段单调用事务，LID 顺序分配（max_lid + 1，不复用） */
     CHECK_EQ(Verthys_AddRecord(h, &r1, &id1), VERTHYS_OK);
     CHECK_EQ(Verthys_AddRecord(h, &r2, &id2), VERTHYS_OK);
     CHECK(id1 > 0);
@@ -225,7 +225,7 @@ TEST(v3life_cp_old_password_rejected)
     return 0;
 }
 
-/* ================== 1b. WP-5 收尾：GetContainerInfo / VerifyIntegrity V3 ================== */
+/* ================== 1b. 收尾：GetContainerInfo / VerifyIntegrity V3 ================== */
 
 /*
  * GetContainerInfo V3 分支（超级块/LSM/分区表现值直读）：
@@ -514,10 +514,10 @@ TEST(v3life_scan_family_v3)
 /* ================== 2. 解锁流水线（fail_mask / MINIMAL_FIRST） ================== */
 
 /*
- * fail_mask 逐阶段注入（§8：bit i = 阶段 i 强制失败）：
+ * fail_mask 逐阶段注入（bit i = 阶段 i 强制失败）：
  *   - 整体返回 INTERNAL（注入语义约定）；
  *   - 阶段结果记录命中（S1-S6；S0 失败先于结果记录，仅验证返回值）；
- *   - §11.3 失败路径资源纪律：subsystems_open == 0（可重试初态）。
+ *   - 失败路径资源纪律：subsystems_open == 0（可重试初态）。
  * 每轮独立句柄 + 手工装配 VerthysContextV3（镜像 verthys_api_v3_unlock
  * 编排：ctx_create → pipeline_run → destroy + fclose）。
  */
@@ -574,7 +574,7 @@ TEST(v3life_pipeline_fail_mask_stages)
 }
 
 /*
- * MINIMAL_FIRST 渐进式解锁（§9）：
+ * MINIMAL_FIRST 渐进式解锁：
  *   - 返回 PARTIAL_UNLOCK（后台预热线程已排程；线程创建失败兜底 OK）；
  *   - 最小可操作态数据立即可读（S5 最小部分 + Extent 按需解密）；
  *   - Lock 汇合后台线程后正常收口（无悬挂线程/句柄）。
@@ -612,7 +612,7 @@ TEST(v3life_unlock_minimal_first)
 /* ================== 3. 温缓存（命中 / 缺失 / 损坏回退） ================== */
 
 /*
- * 温缓存三态（§7）：
+ * 温缓存三态：
  *   a. 命中：Lock 同步写缓存 → 带 ALLOW_CACHE 解锁 → hits ≥ 1 + 数据完整；
  *   b. 缺失：缓存文件删除 → ALLOW_CACHE 解锁 → miss（冷启动）+ 数据完整；
  *   c. 损坏：缓存载荷篡改 → HMAC 拒绝 → miss 回退冷启动 + 数据完整
@@ -693,12 +693,12 @@ TEST(v3life_warmcache_hit_miss_tamper)
     return 0;
 }
 
-/* ================== 4. WAL 崩溃注入矩阵（v5.0 §10.1） ================== */
+/* ================== 4. WAL 崩溃注入矩阵 ================== */
 
 /*
  * 分支 a：未提交组丢弃。
- * 崩溃窗口 = Phase 3 后（WAL 含 BEGIN/EXTENT/INDEX，无 PREPARE/COMMIT，
- * 超块 txid 未推进）→ §10.1 规则 6：整组回滚，记录不可见；
+ * 崩溃窗口 = 索引更新后（WAL 含 BEGIN/EXTENT/INDEX，无 PREPARE/COMMIT，
+ * 超块 txid 未推进）→ 整组回滚，记录不可见；
  * 已提交数据不受影响；后续写入 LID 不复用（单调红线）。
  */
 TEST(v3life_crash_uncommitted_discarded)
@@ -715,7 +715,7 @@ TEST(v3life_crash_uncommitted_discarded)
     CHECK_EQ(v3life_make_locked(V3L_VERTHYS, V3L_PW, V3L_PW_LEN,
                                 VERTHYS_PRESET_PERFORMANCE, 1, ids), 0);
 
-    /* 解锁 → 驱动事务至崩溃窗口（Phase 3 完成后） */
+    /* 解锁 → 驱动事务至崩溃窗口（索引更新完成后） */
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
     CHECK_EQ(Verthys_Unlock(h, V3L_VERTHYS, V3L_PW, V3L_PW_LEN, 0), VERTHYS_OK);
     ctx = (struct VerthysContext *)h;
@@ -757,8 +757,8 @@ TEST(v3life_crash_uncommitted_discarded)
 
 /*
  * 分支 b：COMMIT 已落笔、CONFIRM 未执行。
- * 崩溃窗口 = Phase 5 完成后（法定人数已持久 + WAL COMMIT 记录在场）→
- * §10.1 规则 4：整组重放（幂等收尾：超块补 wal_committed_txid +
+ * 崩溃窗口 = COMMIT 完成后（法定人数已持久 + WAL COMMIT 记录在场）→
+ * 整组重放（幂等收尾：超块补 wal_committed_txid +
  * MemTable flush）→ 记录可见，数据完整。
  */
 TEST(v3life_crash_committed_replayed)
@@ -781,7 +781,7 @@ TEST(v3life_crash_committed_replayed)
     v3 = ctx->v3;
     CHECK(v3 != NULL && v3->subsystems_open == 1);
 
-    /* 六 Phase 推进至 COMMITTED（PREPARE → COMMIT；不做 CONFIRM） */
+    /* 六阶段推进至 COMMITTED（PREPARE → COMMIT；不做 CONFIRM） */
     CHECK_EQ(verthys_txn_v3_begin(&v3->txn), VERTHYS_OK);
     CHECK_EQ(verthys_v3_add_record_in_txn(v3, (uint8_t)cr.type,
                                         cr.name, cr.name_len,
@@ -814,8 +814,8 @@ TEST(v3life_crash_committed_replayed)
 
 /*
  * 分支 c：PREPARE-only + sb_txid ≥ txid（法定人数后、落盘前崩溃）。
- * 崩溃窗口 = Phase 5 步骤 2 之后（超块法定人数已含 txid；Extent 索引 /
- * 分区表 / WAL COMMIT 均未落盘）→ §10.1 规则 5：整组重放收尾
+ * 崩溃窗口 = 法定人数提交后、落盘前（超块法定人数已含 txid；Extent 索引 /
+ * 分区表 / WAL COMMIT 均未落盘）→ 整组重放收尾
  * （EXTENT 按 WAL 记录补注册含 nonce + 索引重放 + 索引/分区表补存 +
  * 超块补 wal_committed_txid）→ 记录可见，数据完整可解密。
  *
@@ -852,7 +852,7 @@ TEST(v3life_crash_prepare_only_replayed)
     CHECK_EQ(verthys_txn_v3_prepare(&v3->txn), VERTHYS_OK);
     CHECK(v3->txn.has_prepare == 1);
 
-    /* 复刻 Phase 5 步骤 1-2：超块候选字段 + 法定人数提交（此后即崩溃） */
+    /* 复刻法定人数提交前两步：超块候选字段 + 法定人数提交（此后即崩溃） */
     {
         VsbTxnV3 vtxn;
         CHECK_EQ(vsb_txn_v3_begin(&vtxn, &v3->sb), VERTHYS_OK);

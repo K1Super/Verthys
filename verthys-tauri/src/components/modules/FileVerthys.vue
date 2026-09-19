@@ -384,7 +384,7 @@ const startImport = async () => {
       : `${fileName}（${fi + 1}/${list.length}）`;
 
     try {
-      // 1. 读取全部文件字节（★ P2-7：二进制 IPC 直传 Uint8Array）
+      // 1. 读取全部文件字节（二进制 IPC 直传 Uint8Array）
       const fileBytes = await readUserFile(filePath);
       const fileSize = fileBytes.length;
       const fileMime = getMimeFromName(fileName);
@@ -431,7 +431,7 @@ const startImport = async () => {
       const metaB64 = bytesToBase64(new TextEncoder().encode(JSON.stringify(meta)));
       const metaId = await verthysAddRecord(TYPE_FILEVERTHYS_META, `meta_${fileName}`, metaB64);
       if (metaId !== null) {
-        // ★ Phase 2E：同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
+        // ★ 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
         addFullRecord(metaId, TYPE_FILEVERTHYS_META, `meta_${fileName}`, metaB64, metaB64.length);
       }
 
@@ -603,7 +603,7 @@ const confirmDelete = async () => {
     }
     if (f.metaId) idsToDelete.push(f.metaId);
     // 立即失效所有缓存（同步，杜绝删除复活）
-    // ★ Phase 2E：同时失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容
+    // ★ 同时失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容
     for (const rid of idsToDelete) {
       invalidateSummaryRecord(rid);
       invalidateFullRecord(rid);
@@ -702,12 +702,12 @@ const loadFiles = async () => {
   const newItems: FileEntry[] = [];
 
   // ★ 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
-  //    原方案：ensureSummaryScanSafe + for 循环串行 getFullRecord（meta + 内层 chunk
+  //    原实现：ensureSummaryScanSafe + for 循环串行 getFullRecord（meta + 内层 chunk
   //            双层串行 IPC，N 个文件 × M 个 chunk → N×M 次 IPC，与后台扫描抢 worker → 30s）
-  //    新方案：ensureRecordScanSafe + getRecordsDataB64Batch（meta 批量 + chunk 批量，
+  //    新实现：ensureRecordScanSafe + getRecordsDataB64Batch（meta 批量 + chunk 批量，
   //            扫描缓存命中零 IPC，未命中并行回退），总耗时 < 2.5s。
   await ensureRecordScanSafe();
-  // ★ Phase 2E：从扫描缓存取 ID 列表
+  // ★ 从扫描缓存取 ID 列表
   let metaIds = getRecordIdsByType(TYPE_FILEVERTHYS_META);
   // ★ 企业级根治：旧类型 0x05 回退扫描（迁移失败的兜底）
   //
@@ -777,7 +777,7 @@ const loadFiles = async () => {
               if (!migratePersistOk) {
                 showError("文件数据迁移已执行但持久化失败，重启后可能需重新迁移。请勿关闭应用并重试");
               }
-              // ★ Phase 2E：迁移涉及批量增删，清空所有缓存确保一致性
+              // ★ 迁移涉及批量增删，清空所有缓存确保一致性
               clearRecordScanCache();   // 清空旧扫描缓存
               clearSummaryCache();      // 清空摘要缓存
               clearFullRecordCache();   // 清空全量记录缓存

@@ -1,11 +1,8 @@
 /*
- * fuzz_import.c — v1 交换格式（导入信封）头部模糊测试目标（WP-10 目标 5/5）
- *
- * 设计依据：docs/V3_UPGRADE_PLAYBOOK.md WP-10
+ * fuzz_import.c — v1 交换格式（导入信封）头部模糊测试目标
  *
  * 测试面：vfmt_parse_header —— Verthys_Import 消费跨设备迁移文件的第一道
- * 解析边界（魔数/版本/算法 ID → meta_offset/mac_offset 边界校验（P1-1
- * 无回绕形式）→ salt 提取）。该函数直接消费攻击者完全可控的文件字节
+ * 解析边界（魔数/版本/算法 ID → meta_offset/mac_offset 边界校验（无回绕形式）→ salt 提取）。该函数直接消费攻击者完全可控的文件字节
  * （导入文件可来自不可信来源），是全部 5 个目标中唯一"未经加密认证
  * 前置"的明文解析面——内存安全完全依赖自身边界纪律。
  *

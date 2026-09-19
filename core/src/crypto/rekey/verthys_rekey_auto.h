@@ -1,12 +1,7 @@
 /*
  * verthys_rekey_auto.h — 自动密钥轮换状态机（内部模块，不导出）
  *
- * 设计依据：
- *   - docs/TARGET_ARCHITECTURE_V5.md §4.3（触发条件/轮换流程/防震荡）
- *     + §5.1（密钥层次）+ §5.3（生命周期状态机 REKEYING 态）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-6（复用 rewrap 的 vsb_txn 保护模式）
- *
- * 轮换语义（v5.0 §4.3 适配 V3 落地架构）：
+ * 轮换语义（适配 V3 落地架构）：
  *   - MEK 口令派生不变（轮换非改密，integrity_key / salt / 温缓存
  *     HMAC 语境全部不变）；轮换对象 = L4 子密钥组 A/B/C：
  *       1. 新 key_a'/b'/c' 随机生成（BCryptGenRandom 语境，
@@ -14,15 +9,15 @@
  *       2. 新 wrapped 形态经 MEK 内核态加密（verthys_cng_km_wrap_key，
  *          与解锁 S3 import_batch 互逆）；
  *       3. CNG 内核态"旧解密 → 新加密"重包装：分区密钥明文仅在本
- *          函数栈帧瞬态（E-5 红线），分区密钥本身不变 → Extent/LSM/
- *          审计分区数据零重写（v5.0 §4.3 步骤 3 的"数据"在 V3 落地
+ *          函数栈帧瞬态（红线），分区密钥本身不变 → Extent/LSM/
+ *          审计分区数据零重写（"数据"在 V3 落地
  *          架构中即 key_a 保护域——分区表帧 + 分区密钥包装形态）；
  *       4. 超级块 VsbTxnV3 法定人数原子提交（wrapped_a/b/c + key_id
  *          + 分区表槽位 + TLV 轮换状态；复用 change_password 的
  *          vsb_txn 保护模式）；
  *       5. 旧句柄销毁 → 新句柄原位激活（verthys_cng_km_rotate_abc，
  *          km->keys[] 原位替换——wal/txn 借用的 VerthysCngAead 指针
- *          续期有效，即 v5.0"原子指针切换句柄"落地形态）。
+ *          续期有效，即原子指针切换句柄落地形态）。
  *
  * 崩溃一致性（跨结构原子性，ping-pong 槽位协议）：
  *   分区表帧（key_a' 重包装）与超级块（key_a' wrapped 形态）分属两个
@@ -38,7 +33,7 @@
  *     - 提交中撕裂（1-2 副本新）：读侧法定人数取 ≥2 一致者，两个
  *       版本各自自洽（对应各自的完整分区表帧）。
  *
- * DEGRADE 强制触发（v5.0 §4.3 异常触发）：
+ * DEGRADE 强制触发（异常触发）：
  *   应急 DEGRADE 处理器（verthys_api.c verthys_emergency_lock_all）在
  *   清钥前调用 verthys_rekey_auto_note_degrade 将强制轮换标志持久化
  *   于超级块 TLV（tag 0x02 flags bit0）——DEGRADE 后进程内解锁被
@@ -67,7 +62,7 @@
 extern "C" {
 #endif
 
-/* ---------- 策略常量（v5.0 §4.3） ---------- */
+/* ---------- 策略常量 ---------- */
 
 #define VERTHYS_REKEY_INTERVAL_DAYS        90u    /* 时间触发阈值 */
 #define VERTHYS_REKEY_OPS_THRESHOLD       10000u /* 写事务触发阈值（txid 增量） */
@@ -116,7 +111,7 @@ typedef enum VerthysRekeyTrigger {
 uint32_t verthys_rekey_auto_check(const VerthysContextV3 *ctx3);
 
 /*
- * 执行密钥轮换（★ WP-6 核心）。
+ * 执行密钥轮换（核心）。
  *   force：1 = 旁路 24h 防震荡（DEGRADE / 手动场景）；0 = 遵守防震荡。
  *   out_rotated（可 NULL）：1 = 已完成轮换；0 = 防震荡拒绝（非错误）。
  * 前置：subsystems_open + km KERNEL_RESIDENT + 事务终态
@@ -152,7 +147,7 @@ VerthysResult verthys_rekey_auto_note_degrade(VerthysContextV3 *ctx3);
 /* ---------- TLV 状态读写（rotate 内部复用 + 测试白盒注入） ---------- */
 
 /*
- * 读 TLV 轮换状态（缺省值语义见 verthys_rekey_auto_check）。
+ * 读 TLV 轮换状态（缺省值语义同 verthys_rekey_auto_check）。
  * sb 非法结构（TLV 头截断/长度越界）按缺省处理——超级块整体已经
  * 法定人数 + HMAC 认证，本层不再重复拒绝。
  */

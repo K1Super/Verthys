@@ -1,12 +1,12 @@
 /*
- * test_v3_partition.c — WP-2 验收：V3 分区管理（独立 AEAD 密钥 + 分区表持久化）
+ * test_v3_partition.c — V3 分区管理验收（独立 AEAD 密钥 + 分区表持久化）
  *
- * 覆盖（PLAYBOOK WP-2 步骤 + 验收标准）：
+ * 覆盖（验收标准）：
  *   1. 分区创建（随机密钥 → wrapping 包装 → CNG 内核导入）+ 字段登记
  *   2. 分区数据 AEAD：加解密 roundtrip、AAD 绑定（txid）、篡改拒绝、
  *      分区密钥隔离、空明文
  *   3. 分区扩展（2x 策略 + min_bytes 线性补足）
- *   4. 分区加载：wrapped 解包重导入 + nonce 计数器恢复（E-7 防回退，
+ *   4. 分区加载：wrapped 解包重导入 + nonce 计数器恢复（防回退，
  *      加载后 nonce 严格不回退）、错误 wrapping key 拒绝、参数校验
  *   5. 分区表：init/add（重复 id / 容量上限）/find/destroy
  *   6. 分区表持久化：save/load roundtrip（条目字段 + nonce 计数器 +
@@ -329,7 +329,7 @@ TEST(v3part_grow_strategy)
 
 TEST(v3part_load_nonce_no_reuse)
 {
-    /* 持久化形态重载：nonce 计数器恢复，历史 nonce 不得复用（E-7） */
+    /* 持久化形态重载：nonce 计数器恢复，历史 nonce 不得复用（防回退） */
     VerthysCngAead wrap;
     VerthysPartition p, reloaded;
     uint8_t wk[V3P_KEY_BYTES];
@@ -556,7 +556,7 @@ static int v3p_build_saved_table(VerthysPartitionTable *t,
                                    1024 * 1024, 5, wrap) != VERTHYS_OK) return -1;
         if (verthys_partition_table_add(t, &p) != VERTHYS_OK) return -1;
     }
-    /* 推进各表项计数器并留密文（经表项句柄加密，E-7 持久化口径一致） */
+    /* 推进各表项计数器并留密文（经表项句柄加密，持久化口径一致） */
     for (i = 0; i < 3; i++) {
         ct_lens[i] = 64 + VERTHYS_PARTITION_TAG_BYTES;
         if (verthys_partition_encrypt(&t->entries[i], 9, pt, sizeof(pt),
@@ -610,7 +610,7 @@ TEST(v3part_table_save_load_roundtrip)
         CHECK(found.type == (VerthysPartitionType)i);
         CHECK(found.offset == 0x400000u + (uint64_t)i * 0x1000000u);
         CHECK(found.created_txid == 5);
-        /* nonce 计数器按保存时值恢复（E-7） */
+        /* nonce 计数器按保存时值恢复 */
         CHECK(verthys_partition_nonce_counter(&found) == counters[i]);
         /* 重载密钥可解保存前密文（txid=9 AAD 绑定一致） */
         outlen = sizeof(out);

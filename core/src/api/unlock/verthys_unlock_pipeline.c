@@ -1,20 +1,14 @@
 /*
  * verthys_unlock_pipeline.c — V3 解锁流水线调度器实现（S0-S6）
  *
- * 设计依据：
- *   - docs/UNLOCK_OPTIMIZATION.md §8（流水线调度器）/ §9（渐进式解锁）/
- *     §14.2（常量）/ §11.3（错误处理规范）
- *   - docs/TARGET_ARCHITECTURE_V5.md §5（密钥层次）/ §6.3（法定人数）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-5
- *
- * 调度模型（§8.3 依赖关系矩阵的关键路径实现）：
+ * 调度模型（依赖关系矩阵的关键路径实现）：
  *   S1（IO 线程）与 S2（CPU 线程）并行——S2 经 S1 早期结果
  *   （vsb_v3_parse_unverified 产物：salt / Argon2 参数）唤醒后进入
  *   Argon2id 派生（~1s CPU 密集），S2 派生期间主线程空闲等待；
  *   S3-S6 依赖链严格串行（S3 等 S2、S4 等 S1+S3、S5 等 S4、S6 等 S5），
  *   于主线程顺序执行。两线程模型已覆盖全部可并行度：S4 无法与 S3
  *   重叠（分区表加载依赖 S3 导入的 A 角色密钥语境），S5/S6 依次依赖
- *   前序产物，并行化无收益（§8.2 调度器伪代码的线程池形态与本模型
+ *   前序产物，并行化无收益（线程池形态与本模型
  *   在关键路径上等价）。
  *
  * FILE* 并发纪律：vio_pread64（_fseeki64 + fread）在同一 FILE* 上非
@@ -29,7 +23,7 @@
  *   - integrity_key：S3 派生 → HMAC 验证 + ctx3 驻留（Lock/Deinit
  *     由 verthys_v3_ctx_subsystems_close 清零）。
  *
- * 超时预算（§14.2）：总预算 VERTHYS_UNLOCK_TIMEOUT_MS=10s（QPC 单调），
+ * 超时预算：总预算 VERTHYS_UNLOCK_TIMEOUT_MS=10s（QPC 单调），
  * 各等待点以剩余预算驱动（SleepConditionVariableCS 超时值）；阶段间
  * 检查总截止——超时返回 VERTHYS_ERR_TIMEOUT，S5 前无任何盘面写入
  * 副作用（S5 的 open 路径仅读 + Manifest 空区初始化），可安全重试。
@@ -220,7 +214,7 @@ static DWORD WINAPI upl_stage_s1(LPVOID param)
         goto done;
     }
 
-    /* 3 副本读取 + 无校验结构化解析（§5.1：50ms 预算，逐副本截止检查） */
+    /* 3 副本读取 + 无校验结构化解析（50ms 预算，逐副本截止检查） */
     for (unsigned i = 0; i < VERTHYS_V3_SB_REPLICA_COUNT; i++) {
         size_t plen = 0;
         p->frame_len[i] = 0;
@@ -426,7 +420,7 @@ static VerthysResult upl_stage_s3(UnlockPipelineState *p)
          * 成因——a) 口令错误（派生 integrity_key 全错）；b) 口令正确但
          * 超块密文/HMAC 被篡改。以 wrapped_key_a 内核态解包探针判别
          *（verthys_cng_km_verify_mek：AEAD 认证通过即口令正确）：
-         *   探针 OK   → 口令正确 → 真损坏 → CORRUPT（§6.3 0 有效语义）；
+         *   探针 OK   → 口令正确 → 真损坏 → CORRUPT（0 有效语义）；
          *   探针 AUTH → 口令错误 → AUTH（用户应重试密码而非被告知损坏）。
          * 探针内部 import 消耗 p->mek（const 契约清零），仅在本次失败
          * 路径执行——后续 goto fail 仅再清零（幂等），无二次使用。
@@ -443,7 +437,7 @@ static VerthysResult upl_stage_s3(UnlockPipelineState *p)
         goto fail_zero_ik;
     }
 
-    /* 3. 法定人数裁决：txid 分组取 ≥2 一致中的最高 txid（§6.3） */
+    /* 3. 法定人数裁决：txid 分组取 ≥2 一致中的最高 txid */
     for (unsigned i = 0; i < VERTHYS_V3_SB_REPLICA_COUNT; i++) {
         if (!hmac_valid[i]) continue;
         unsigned agree = 0;
@@ -461,7 +455,7 @@ static VerthysResult upl_stage_s3(UnlockPipelineState *p)
         goto fail_zero_ik;
     }
 
-    /* 4. pepper 来源一致性（迁移自 v2：记录非 0 时校验；漂移 →
+    /* 4. pepper 来源一致性（迁移自旧版：记录非 0 时校验；漂移 →
      *    PEPPER_SOURCE 而非 AUTH，杜绝"来源漂移误报密码错误"） */
     if (verified[chosen].pepper_source != 0 &&
         (uint8_t)verthys_pepper_get_source() != verified[chosen].pepper_source) {
@@ -534,8 +528,8 @@ static VerthysResult upl_stage_s4(UnlockPipelineState *p)
         goto done;
     }
 
-    /* 表帧 AEAD 与密钥包装共用 A 角色语境（WP-2 分区模块约定）；
-     * table_load 内部完成帧 nonce 计数器恢复（E-7 防回退） */
+    /* 表帧 AEAD 与密钥包装共用 A 角色语境（分区模块约定）；
+     * table_load 内部完成帧 nonce 计数器恢复（防回退） */
     r = verthys_partition_table_load(ctx3->f, ctx3->sb.partition_table_offset,
                                    key_a, key_a, &ctx3->ptable);
     p->res.stages[UNLOCK_STAGE_S4].sub_steps = (uint32_t)ctx3->ptable.count;
@@ -548,7 +542,7 @@ done:
 
 /* ---------- S5：索引预热 + 崩溃恢复（主线程，等 S4） ---------- */
 
-/* 后台预热线程（MINIMAL_FIRST；§9.3 index_preheat_background） */
+/* 后台预热线程（MINIMAL_FIRST；index_preheat_background） */
 static DWORD WINAPI upl_bg_preheat_thread(LPVOID param)
 {
     VerthysContextV3 *ctx3 = (VerthysContextV3 *)param;
@@ -717,7 +711,7 @@ static VerthysResult upl_stage_s6(UnlockPipelineState *p)
     }
 
     /*
-     * 渐进式解锁分叉（§9.3）：
+     * 渐进式解锁分叉：
      *   MINIMAL_FIRST —— OPERATIONAL_MINIMAL 已达成（S0-S5 最小可操作
      *   部分），全量索引预热转后台线程，立即返回 PARTIAL_UNLOCK；
      *   默认路径 —— 同步 verthys_lsm_preheat_full（幂等），返回 VERTHYS_OK。
@@ -911,7 +905,7 @@ VerthysResult verthys_unlock_pipeline_run(struct VerthysContextV3 *ctx3,
         }
     } while (0);
 
-    /* ---------- 汇合 + 失败路径资源纪律（§11.3） ---------- */
+    /* ---------- 汇合 + 失败路径资源纪律 ---------- */
 
     /* 线程汇合（Argon2id 不可中断：超时路径同样等待返回，杜绝悬挂线程
      * 触碰本函数栈上状态；正常路径两线程均已 done） */

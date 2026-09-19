@@ -1,7 +1,7 @@
 /*
  * utils/promise_utils.ts — Promise 工具函数
  *
- * ★ 方案六：分级超时熔断（软 15s 提示 / 硬 35s 降级 / 连续 3 次熔断锁定）
+ * ★ 分级超时熔断（软 15s 提示 / 硬 35s 降级 / 连续 3 次熔断锁定）
  *
  *   withGradedTimeout 替代原固定 35s 单一超时阈值：
  *     - 软超时（softMs）：触发 onSoftTimeout 回调（前端提示用户耐心等待），
@@ -32,7 +32,7 @@ import {
  *
  * 实现选型：
  *   - MessageChannel：浏览器中最快的宏任务调度（无 4ms 最小钳制），
- *     Vue 3 的 nextTick 在不支持 Promise 时也使用此方案。
+ *     Vue 3 的 nextTick 在不支持 Promise 时也使用此做法。
  *   - setTimeout(0)：备选，但嵌套调用后有 ~4ms 最小钳制（HTML5 规范）。
  *   - queueMicrotask：不适用——微任务在下一个宏任务前全部执行完，
  *     不会让出给 rAF / UI 渲染。
@@ -100,7 +100,7 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label = "操作"
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 方案六：熔断器状态管理                                            *
+ * ★ 熔断器状态管理                                                      *
  *                                                                    *
  * 状态结构（JSON 持久化于 localStorage）：                            *
  *   {                                                                 *
@@ -176,7 +176,7 @@ export function resetCircuitBreaker(): void {
 }
 
 /**
- * 分级超时 Promise 包装（方案六核心）
+ * 分级超时 Promise 包装（软/硬双级超时 + 熔断核心）
  *
  * @param promise       被包装的 Promise（如 verthysUnlock）
  * @param softMs        软超时阈值（ms），触发 onSoftTimeout 但不拒绝

@@ -1,7 +1,7 @@
 /*
- * background_patrol.rs — 后台模块巡检线程（SECURITY.md 企业级重写版）
+ * background_patrol.rs — 后台模块巡检线程
  *
- * SECURITY.md 修复要点（第 429-483 项）：
+ * 修复要点：
  *   1. 动态频率 + 无窗口随机巡检（10~40 秒随机抖动 + 系统空闲时间结合）
  *      - 消除固定 30 秒周期的规律性，攻击者无法在巡检间隙规避
  *      - 系统空闲时降低频率（省 CPU），活跃时提高频率（覆盖攻击窗口）
@@ -46,9 +46,9 @@ use crate::util::crypto::{dpapi_protect, dpapi_unprotect, pbkdf2_derive_default}
  *  常量                                                                   *
  * ====================================================================== */
 
-/// SECURITY.md 第 459 项：动态频率下限（秒）
+/// 动态频率下限（秒）
 const PATROL_MIN_INTERVAL_SECS: u64 = 10;
-/// SECURITY.md 第 459 项：动态频率上限（秒）
+/// 动态频率上限（秒）
 const PATROL_MAX_INTERVAL_SECS: u64 = 40;
 /// 系统空闲超过此阈值（秒）时降低巡检频率（空闲倍率 2x）
 const IDLE_THRESHOLD_SECS: u64 = 300; // 5 分钟
@@ -113,7 +113,7 @@ struct EmergencyPayload {
 }
 
 /* ====================================================================== *
- *  SECURITY.md 第 467-469 项：巡检状态持久化                               *
+ *  巡检状态持久化                               *
  *                                                                        *
  *  将连续检测计数、触发历史、巡检总次数以 HMAC 保护的加密文件存储。        *
  *  DPAPI 加密（机器绑定），HMAC 链式防篡改。                               *
@@ -453,7 +453,7 @@ impl PatrolState {
 }
 
 /* ====================================================================== *
- *  SECURITY.md 第 463-465 项：哈希基线管理                                 *
+ *  哈希基线管理                                 *
  *                                                                        *
  *  系统目录模块哈希基线在后台线程惰性构建，避免阻塞巡检启动。               *
  *  基线构建完成后缓存于 Arc<RwLock<Option<HashBaseline>>>。                *
@@ -650,7 +650,7 @@ impl BackgroundPatrol {
         let state = Arc::new(Mutex::new(initial_state));
         let baseline_manager = Arc::new(HashBaselineManager::new());
 
-        // SECURITY.md 第 479-481 项：进程完整性监控
+        // 进程完整性监控
         apply_process_mitigation_policies();
 
         let ctx = PatrolContext {
@@ -672,7 +672,7 @@ impl BackgroundPatrol {
             })
             .expect("spawn verthys-module-patrol thread");
 
-        // SECURITY.md 第 471-473 项：启动看门狗线程
+        // 启动看门狗线程
         let watchdog_stop = stop_flag.clone();
         let watchdog_heartbeat = heartbeat.clone();
         let watchdog_restart_count = restart_count.clone();
@@ -754,7 +754,7 @@ impl Drop for BackgroundPatrol {
 }
 
 /* ====================================================================== *
- *  SECURITY.md 第 471-473 项：看门狗主循环                                 *
+ *  看门狗主循环                                 *
  *                                                                        *
  *  每 5 秒检查巡检线程心跳，发现线程退出立即重启。                         *
  *  连续重启失败 3 次后强制触发应急熔断（直接销毁 Worker 会话）。            *
@@ -835,7 +835,7 @@ fn watchdog_loop(
                     )),
                 );
 
-                // SECURITY.md 第 471-473 项：强制触发应急熔断
+                // 强制触发应急熔断
                 execute_backend_circuit_breaker(&app, "watchdog_restart_failure");
 
                 // 重置计数，避免无限告警
@@ -909,14 +909,14 @@ fn patrol_loop(ctx: PatrolContext) {
         sanitize_path(&ctx.install_dir)
     );
 
-    // SECURITY.md 第 463-465 项：在后台构建哈希基线
+    // 在后台构建哈希基线
     ctx.baseline_manager.try_build_async();
 
     while !ctx.stop_flag.load(Ordering::SeqCst) {
         // 更新心跳
         ctx.heartbeat.store(now_ms(), Ordering::SeqCst);
 
-        // SECURITY.md 第 471-473 项：catch_unwind 包裹单次巡检
+        // catch_unwind 包裹单次巡检
         let patrol_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             run_one_patrol(&ctx);
         }));
@@ -937,7 +937,7 @@ fn patrol_loop(ctx: PatrolContext) {
         // 更新心跳（巡检完成后）
         ctx.heartbeat.store(now_ms(), Ordering::SeqCst);
 
-        // SECURITY.md 第 459 项：动态频率计算
+        // 动态频率计算
         let sleep_secs = compute_dynamic_interval();
         log::debug!(
             "[background_patrol] 下次巡检间隔: {}s",
@@ -957,7 +957,7 @@ fn patrol_loop(ctx: PatrolContext) {
 }
 
 /* ====================================================================== *
- *  SECURITY.md 第 459 项：动态频率计算                                     *
+ *  动态频率计算                                     *
  *                                                                        *
  *  基于随机抖动（10~40 秒）且与系统空闲时间结合的动态巡检。                 *
  *  - 系统活跃（空闲 < 30s）：使用最小间隔 10-15s（高频巡检）              *
@@ -1014,7 +1014,7 @@ fn run_one_patrol(ctx: &PatrolContext) {
     // 轻量扫描：仅路径白名单匹配
     let unknowns = module_whitelist::patrol_modules_paths_only(&ctx.install_dir);
 
-    // SECURITY.md 第 463-465 项：哈希基线验证
+    // 哈希基线验证
     // 对系统目录下的模块进行哈希匹配，检测被替换的 DLL
     let mut all_threats: Vec<UnknownModule> = unknowns;
 
@@ -1062,7 +1062,7 @@ fn run_one_patrol(ctx: &PatrolContext) {
         st.record(&all_threats)
     };
 
-    // SECURITY.md 第 467-469 项：持久化状态
+    // 持久化状态
     // ★ 空闲治理 R5：状态指纹比对跳过 — 安全关键状态（counts/triggered/
     //   install_dir/baseline_version）未变化时跳过序列化 + DPAPI 加密 +
     //   临时文件写入 + rename 的完整持久化链路；每 FORCE_PERSIST_INTERVAL
@@ -1093,7 +1093,7 @@ fn run_one_patrol(ctx: &PatrolContext) {
     }
 }
 
-/// SECURITY.md 第 463-465 项：检查系统目录模块的哈希基线违规
+/// 检查系统目录模块的哈希基线违规
 ///
 /// 枚举当前进程已加载的系统目录模块，对每个模块计算 SHA-256 并与基线比较。
 /// 哈希不匹配的模块视为威胁（可能被替换）。
@@ -1181,7 +1181,7 @@ fn enumerate_loaded_module_paths() -> Vec<(String, String)> {
 }
 
 /* ====================================================================== *
- *  SECURITY.md 第 475-477 项：独立应急响应通道                              *
+ *  独立应急响应通道                              *
  *                                                                        *
  *  当连续检测到威胁时，BackgroundPatrol 直接通过 AppState::set_session(None)*
  *  强制销毁 Worker，并通过文件锁和共享标志阻止任何新建会话。                 *
@@ -1220,7 +1220,7 @@ fn trigger_emergency_signal(ctx: &PatrolContext, module: &UnknownModule) {
         )),
     );
 
-    // SECURITY.md 第 475-477 项：后端独立应急响应（先于前端执行）
+    // 后端独立应急响应（先于前端执行）
     let circuit_breaker_executed = execute_backend_circuit_breaker(
         &ctx.app,
         &format!("dll_injection:{}", module.name),
@@ -1263,7 +1263,7 @@ fn trigger_emergency_signal(ctx: &PatrolContext, module: &UnknownModule) {
     }
 }
 
-/// SECURITY.md 第 475-477 项：执行后端强制熔断
+/// 执行后端强制熔断
 ///
 /// 直接通过 AppState::set_session(None) 销毁 Worker 会话。
 /// 子进程退出即销毁所有密钥与句柄。
@@ -1331,7 +1331,7 @@ fn write_patrol_audit(
 }
 
 /* ====================================================================== *
- *  SECURITY.md 第 479-481 项：进程完整性监控                               *
+ *  进程完整性监控                               *
  *                                                                        *
  *  使用 SetProcessMitigationPolicy 启用进程缓解策略：                       *
  *  - ProcessSignaturePolicy：限制仅加载 Microsoft 签名的 DLL              *

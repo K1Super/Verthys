@@ -110,7 +110,7 @@
       <!-- 非阻塞加载：无底板居中展示，加载完成自动消失 -->
       <CosmicLoading :show="photosLoading && photos.length === 0" text="正在解密加载照片…" />
 
-      <!-- ★ 虚拟滚动容器（落实 upgrade.md "相册列表强制采用虚拟滚动"）：
+      <!-- ★ 虚拟滚动容器（相册列表强制采用虚拟滚动）：
            绝对定位网格，仅渲染可视区域 + buffer 行对应的项目。
            上万照片也只渲染数十 DOM 节点，消除 Vue 响应式 diff 与全量布局开销。
            容器高度 = 总行数 × 行高，撑开滚动条；每个 masonry-item 用 translate3d 精确定位。 -->

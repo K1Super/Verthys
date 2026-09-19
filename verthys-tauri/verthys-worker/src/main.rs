@@ -6,13 +6,6 @@
  *   - 业务逻辑（DLL 加载、IPC 主循环）下沉至 runtime.rs
  *   - 日志基础设施（diag!/init_diag!）下沉至 log.rs
  *
- * 规范引用（ 第 1 节 — 入口文件单一职责约束）：
- *   6 项允许职责中本入口涉及：
- *     1. 环境初始化（panic hook + 异常过滤安装）
- *     2. 参数解析（dll_path）
- *     3. 控制器派发（调用 runtime::run）
- *   红线遵守：无业务逻辑、无 IO、无直接输出（eprintln!/println!/log::*!）
- *             所有诊断输出通过 log.rs 的 init_diag!/diag! 宏（日志基础设施层）
  */
 
 mod log;

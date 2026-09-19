@@ -12,7 +12,7 @@
 #include "verthys_format.h"
 #include "verthys_internal.h"  /* verthys_secure_zero */
 
-#include <sodium.h>  /* ★ DEF-006：crypto_auth_hmacsha256_* 增量 HMAC */
+#include <sodium.h>  /* crypto_auth_hmacsha256_* 增量 HMAC */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>   /* FILE, fopen, fwrite, fclose, fseek, fflush */
@@ -77,7 +77,7 @@ int vfmt_write(const uint8_t salt[VERTHYS_SALT_BYTES],
                const VerthysFmtRecord *records, uint16_t record_count,
                uint8_t **out_blob, size_t *out_size)
 {
-    /* ★ P1-2：blob 提升至函数顶部声明——早期 goto fail 路径（blob 分配前）
+    /* blob 提升至函数顶部声明——早期 goto fail 路径（blob 分配前）
      * 需要可见性；NULL 守卫保证分配前跳转安全。 */
     uint8_t *blob = NULL;
 
@@ -259,7 +259,7 @@ int vfmt_write(const uint8_t salt[VERTHYS_SALT_BYTES],
     return 0;
 
 fail:
-    /* ★ 最终修复方案 P1-2：失败路径必须释放整容器镜像 blob——
+    /* 失败路径必须释放整容器镜像 blob——
      * 原实现仅释放 block_nonces，每次失败导出泄漏 MB 级含 wrapped DEK
      * 密文的堆块（且从未 zero，密文材料残留于 freed 堆）。 */
     if (blob) {
@@ -274,7 +274,7 @@ fail:
 }
 
 /* ===================================================================== *
- *          ★ DEF-006 修复：流式写入（Comprehensive_optimization.md 4.2.3）  *
+ *          流式写入：分片写，避免大库导出 OOM  *
  *                                                                     *
  *  核心改进：                                                          *
  *  1. 不分配 blob_size 连续内存，直接写文件                            *
@@ -474,7 +474,7 @@ int vfmt_write_streaming(const uint8_t salt[VERTHYS_SALT_BYTES],
     verthys_secure_zero(index_region, index_region_size);
     free(index_region);
 
-    /* ---- 9. 流式加密并写入数据块（★ DEF-006 核心：一次一条记录）----
+    /* ---- 9. 流式加密并写入数据块（一次一条记录）----
      *
      * 通过 get_data 回调按需获取明文数据：
      *   1. 回调分配并返回单条记录的明文
@@ -630,7 +630,7 @@ int vfmt_parse_header(const uint8_t *blob, size_t size, VerthysFmtMeta *out_meta
     uint64_t mac_offset  = get_u64le(blob + 16);
 
     /* 边界校验
-     * ★ 最终修复方案 P1-1：回绕安全形式。原 `mac_offset + 32 > size`
+     * 回绕安全形式。原 `mac_offset + 32 > size`
      * 在 mac_offset ≈ UINT64_MAX 时加法回绕为小值而通过校验，
      * 后续按 mac_offset 做 HMAC/遍历导致巨量 OOB 读（恶意 v1 文件可投递）。
      * 无回绕形式：先保证 size 足够，再做减法比较。 */

@@ -1,6 +1,6 @@
 /*
- * test_crypto.c — Phase 1.5：XChaCha20-Poly1305 AEAD 原语测试
- * 通过 verthys_crypto 内部接口验证行为（内部测试缝，符合 codebase-design）。
+ * test_crypto.c — XChaCha20-Poly1305 AEAD 原语测试
+ * 通过 verthys_crypto 内部接口验证行为（内部测试缝，符合深模块设计）。
  */
 #include "verthys_test.h"
 #include "verthys_crypto.h"

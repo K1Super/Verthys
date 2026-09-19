@@ -1,13 +1,9 @@
 /*
- * verthys_rekey_auto.c — 自动密钥轮换状态机实现（★ WP-6）
- *
- * 设计依据：
- *   - docs/TARGET_ARCHITECTURE_V5.md §4.3 / §5.1 / §5.3
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-6（复用 rewrap 的 vsb_txn 保护模式）
+ * verthys_rekey_auto.c — 自动密钥轮换状态机实现
  *
  * 轮换流程（单写者纪律，与 change_password 同序）：
  *   守卫（终态/驻留/防震荡）→ 新密钥生成（双副本：wrap 与 import 各
- *   消耗一份，E-5 红线）→ 分区密钥内核态重包装 → 备用槽位分区表帧
+ *   消耗一份，红线）→ 分区密钥内核态重包装 → 备用槽位分区表帧
  *   落盘（fsync）→ VsbTxnV3 法定人数提交 → 原位句柄切换（借用指针
  *   wal/txn 续期有效）→ 内存态分区表同步。
  *
@@ -16,7 +12,7 @@
  *     （sb 仍指旧槽位，下次轮换覆写），内存 sb 经 vsb_txn_rollback
  *     完整恢复；
  *   - 提交后句柄切换失败（理论不可达——仅结构拷贝）：盘面已持新
- *     语境，按 change_password 5.3 同语义上抛，下次解锁重建全组。
+ *     语境，按 change_password 同语义上抛，下次解锁重建全组。
  */
 #include "verthys_rekey_auto.h"
 #include "keymanager_cng.h"
@@ -235,7 +231,7 @@ VerthysResult verthys_rekey_auto_rotate(VerthysContextV3 *ctx3, int force,
                   ? VERTHYS_V3_PARTITION_TABLE_OFFSET + UINT64_C(0x100000)
                   : VERTHYS_V3_PARTITION_TABLE_OFFSET;
 
-    /* ---- 1. 新密钥材料（双副本：wrap 与 import 各消耗一份，E-5） ---- */
+    /* ---- 1. 新密钥材料（双副本：wrap 与 import 各消耗一份） ---- */
     verthys_random_bytes(ka_wrap, sizeof(ka_wrap));
     verthys_random_bytes(kb_wrap, sizeof(kb_wrap));
     verthys_random_bytes(kc_wrap, sizeof(kc_wrap));

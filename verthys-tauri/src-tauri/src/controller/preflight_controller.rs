@@ -1,28 +1,28 @@
 /*
- * controller/preflight_controller.rs — 路径预检控制器（第 3.1-3.9 项重写版）
+ * controller/preflight_controller.rs — 路径预检控制器
  *
  *
  * 包含命令：
  *   - verthys_preflight: 路径预检（企业级安全版）
  *
- * 第 3.1-3.9 项企业级预检方案：
- *   3.1 白名单基目录集合：canonicalize 父目录后必须以白名单为前缀；删黑名单。
+ * 企业级预检：
+ *   1. 白名单基目录集合：canonicalize 父目录后必须以白名单为前缀；删黑名单。
  *        白名单动态构建：用户目录（Profile/Documents/AppData）+ EXE 目录 + 非系统盘根。
- *   3.2 先校验后操作：输入校验 → 解析父目录绝对路径 → 白名单检查（拒绝则不任何 FS 操作）
+ *   2. 先校验后操作：输入校验 → 解析父目录绝对路径 → 白名单检查（拒绝则不任何 FS 操作）
  *        → 才创建目录；失败回滚仅当本次新建。
- *   3.3 原子化租约：目标父目录创建随机命名独占锁文件并保持打开作为租约凭据，
+ *   3. 原子化租约：目标父目录创建随机命名独占锁文件并保持打开作为租约凭据，
  *        整个会话内完成消除 TOCTOU（写权限测试即租约创建）。
- *   3.4 错误信息脱敏：PreflightResult 仅返回错误码 + 无路径提示；
+ *   4. 错误信息脱敏：PreflightResult 仅返回错误码 + 无路径提示；
  *        详细路径经 sanitize_path 仅写入后端日志。
- *   3.5 磁盘空间检查错误分离：get_disk_space_mb 失败返回 DISK_SPACE_UNKNOWN（非 0 误判）；
+ *   5. 磁盘空间检查错误分离：get_disk_space_mb 失败返回 DISK_SPACE_UNKNOWN（非 0 误判）；
  *        阈值外置常量 DISK_SPACE_MIN_MB。
- *   3.6 随机文件名 + 重试：写权限测试用 CSPRNG 随机十六进制文件名 + 立即删除
+ *   6. 随机文件名 + 重试：写权限测试用 CSPRNG 随机十六进制文件名 + 立即删除
  *        + 重试（占用等 50ms × 3）。
- *   3.7 统一平台安全策略：动态获取用户数据目录作白名单基；条件编译 Windows 限
+ *   7. 统一平台安全策略：动态获取用户数据目录作白名单基；条件编译 Windows 限
  *        CSIDL_WINDOWS 等区域，Unix 屏蔽 /etc /boot；用 canonicalize 规范化。
- *   3.8 输入校验第一道防线：拒绝空字节/控制字符/超 MAX_PATH/相对路径/../~；
+ *   8. 输入校验第一道防线：拒绝空字节/控制字符/超 MAX_PATH/相对路径/../~；
  *        不通过返回 INVALID_PATH 不执行 FS 操作（util/path::validate_path_input）。
- *   3.9 异步化与并发控制：spawn_blocking + 5s 超时返回 TEMPORARY_FAILURE；
+ *   9. 异步化与并发控制：spawn_blocking + 5s 超时返回 TEMPORARY_FAILURE；
  *        Semaphore 限制并发预检数（避免磁盘 I/O 雪崩）。
  *
  * 依赖方向：controller → controller::types / controller::api_error /
@@ -40,17 +40,17 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 /* ------------------------------------------------------------------ *
- * 第 3.9 项：并发控制信号量                                            *
+ * 并发控制信号量                                            *
  *                                                                    *
  * 使用 OnceLock 持有全局 Semaphore，限制同时执行的预检数量。           *
  * 预检涉及磁盘 I/O（canonicalize/create_dir/写测试/磁盘空间查询），    *
  * 高并发下不加限制会导致磁盘 I/O 雪崩，影响 UI 响应。                   *
  * ------------------------------------------------------------------ */
 
-/// 第 3.9 项：并发预检上限（同时执行的 verthys_preflight 数量）
+/// 并发预检上限（同时执行的 verthys_preflight 数量）
 const PREFLIGHT_MAX_CONCURRENCY: usize = 4;
 
-/// 第 3.9 项：全局并发信号量（OnceLock 懒初始化）
+/// 全局并发信号量（OnceLock 懒初始化）
 static PREFLIGHT_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
 
 /// 获取预检并发信号量
@@ -59,29 +59,29 @@ fn preflight_semaphore() -> &'static Semaphore {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 3.5 / 3.9 项：超时与阈值常量                                      *
+ * 超时与阈值常量                                      *
  * ------------------------------------------------------------------ */
 
-/// 第 3.9 项：预检总超时（5s，对应 TimeoutConfig.preflight）
+/// 预检总超时（5s，对应 TimeoutConfig.preflight）
 const PREFLIGHT_TIMEOUT: Duration = TIMEOUT_CONFIG.preflight;
 
-/// 第 3.5 项：磁盘空间最小阈值（MB，外置配置）
+/// 磁盘空间最小阈值（MB，外置配置）
 ///
 /// 低于此值返回 DISK_SPACE_INSUFFICIENT。
-/// 阈值外置便于不同部署环境调整（阶段 8 可改为按分区配置）。
+/// 阈值外置便于不同部署环境调整。
 const DISK_SPACE_MIN_MB: u64 = 200;
 
-/// 第 3.6 项：写权限测试重试次数（临时文件被占用时重试）
+/// 写权限测试重试次数（临时文件被占用时重试）
 const WRITE_TEST_RETRIES: usize = 3;
 
-/// 第 3.6 项：写权限测试重试间隔
+/// 写权限测试重试间隔
 const WRITE_TEST_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /* ------------------------------------------------------------------ *
- * 第 3.4 项：错误结果构造辅助（脱敏，仅错误码 + 无路径提示）            *
+ * 错误结果构造辅助（脱敏，仅错误码 + 无路径提示）            *
  * ------------------------------------------------------------------ */
 
-/// 第 3.4 项：构造失败结果（脱敏）
+/// 构造失败结果（脱敏）
 ///
 /// 仅返回错误码 + 用户可读的无路径提示，不泄露文件系统布局。
 /// 详细路径经 sanitize_path 写入后端日志（调用方负责）。
@@ -97,7 +97,7 @@ fn make_error_result(code: ErrorCode, dir_created: bool) -> PreflightResult {
     }
 }
 
-/// 第 3.4 项：构造系统保护目录拒绝结果（脱敏）
+/// 构造系统保护目录拒绝结果（脱敏）
 fn make_system_protected_result(dir_created: bool) -> PreflightResult {
     let code = ErrorCode::PermissionDenied;
     PreflightResult {
@@ -112,14 +112,14 @@ fn make_system_protected_result(dir_created: bool) -> PreflightResult {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 3.1 / 3.7 项：白名单基目录集合构建                                *
+ * 白名单基目录集合构建                                *
  *                                                                    *
  * 动态获取当前平台的用户目录 + 非系统盘根作为白名单基。                 *
  * 白名单基目录自身也 canonicalize，避免被符号链接绕过。                *
  * 不存在的目录跳过（首次运行时用户目录可能未创建）。                   *
  * ------------------------------------------------------------------ */
 
-/// 第 3.1 / 3.7 项：构建安全白名单基目录集合
+/// 构建安全白名单基目录集合
 ///
 /// Windows 白名单来源：
 ///   1. FOLDERID_Profile（C:\Users\<user>）— 用户主目录
@@ -197,7 +197,7 @@ fn build_safe_whitelist() -> Vec<PathBuf> {
     bases
 }
 
-/// 第 3.7 项：Windows 用户目录获取（SHGetKnownFolderPath）
+/// Windows 用户目录获取（SHGetKnownFolderPath）
 #[cfg(windows)]
 fn get_windows_user_dirs() -> Vec<PathBuf> {
     use windows::Win32::UI::Shell::{
@@ -231,7 +231,7 @@ fn get_windows_user_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// 第 3.7 项：获取所有固定本地卷根目录
+/// 获取所有固定本地卷根目录
 ///
 /// 枚举所有逻辑驱动器，筛选出固定驱动器（DRIVE_FIXED=3）。
 /// 所有固定盘根加入白名单（包括系统盘 C:\），
@@ -281,13 +281,13 @@ fn get_all_fixed_drive_roots() -> Vec<PathBuf> {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 3.7 项：系统保护目录检查（条件编译，防御纵深）                     *
+ * 系统保护目录检查（条件编译，防御纵深）                     *
  *                                                                    *
- * 白名单是主要防线（3.1），系统目录检查是二次防御。                     *
+ * 白名单是主要防线，系统目录检查是二次防御。                     *
  * 即使白名单意外包含系统路径，此处仍拒绝。                              *
  * ------------------------------------------------------------------ */
 
-/// 第 3.7 项：检查路径是否位于系统保护目录
+/// 检查路径是否位于系统保护目录
 ///
 /// 条件编译：
 ///   - Windows: 检查 CSIDL_WINDOWS / Program Files / ProgramData 等
@@ -338,10 +338,10 @@ fn is_system_protected_dir(canonical: &Path) -> bool {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 3.1 项：白名单前缀校验                                            *
+ * 白名单前缀校验                                            *
  * ------------------------------------------------------------------ */
 
-/// 第 3.1 项：校验 canonicalize 后的路径是否以白名单基目录为前缀
+/// 校验 canonicalize 后的路径是否以白名单基目录为前缀
 ///
 /// 精确匹配或为子路径（path 以 base + 分隔符开头）。
 /// 路径与白名单基目录均经 canonicalize，防止符号链接绕过。
@@ -365,14 +365,14 @@ fn is_within_whitelist(path: &Path, whitelist: &[PathBuf]) -> bool {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 3.2 项：解析父目录（canonicalize 父目录或最长存在祖先）            *
+ * 解析父目录（canonicalize 父目录或最长存在祖先）            *
  *                                                                    *
  * 若父目录不存在（首次运行），canonicalize 会失败。                    *
  * 此时向上回溯找到最长的已存在祖先，canonicalize 后校验白名单。         *
  * 由于 validate_path_input 已拒绝 .. 段，不存在的尾部路径不会逃逸。     *
  * ------------------------------------------------------------------ */
 
-/// 第 3.2 项：解析父目录用于白名单校验
+/// 解析父目录用于白名单校验
 ///
 /// 返回 (canonical_ancestor, parent_path)：
 ///   - canonical_ancestor: 父目录或其最长已存在祖先的 canonicalize 路径
@@ -407,14 +407,14 @@ fn resolve_parent_for_whitelist(parent: &Path) -> Result<PathBuf, String> {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 3.3 / 3.6 项：原子化租约 — 随机命名独占锁文件写权限测试             *
+ * 原子化租约 — 随机命名独占锁文件写权限测试             *
  *                                                                    *
  * 创建随机命名文件并保持打开（租约凭据），证明目录可写。                *
  * 随机文件名避免并发冲突；重试机制应对临时占用。                        *
  * 测试完成后立即删除锁文件。                                            *
  * ------------------------------------------------------------------ */
 
-/// 第 3.3 / 3.6 项：原子化租约写权限测试
+/// 原子化租约写权限测试
 ///
 /// 在目标目录创建随机命名的独占锁文件，验证目录可写性。
 /// 流程：
@@ -434,11 +434,11 @@ fn test_write_permission_with_lease(dir: &Path) -> Result<(), String> {
     let mut last_err = String::new();
 
     for attempt in 0..WRITE_TEST_RETRIES {
-        // 第 3.6 项：随机文件名（32 字符十六进制，CSPRNG）
+        // 随机文件名（32 字符十六进制，CSPRNG）
         let random_name = format!(".verthys_lease_{}.tmp", random_hex(16));
         let lease_path = dir.join(&random_name);
 
-        // 第 3.3 项：独占创建（CREATE_NEW 语义：文件已存在则失败）
+        // 独占创建（CREATE_NEW 语义：文件已存在则失败）
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -458,7 +458,7 @@ fn test_write_permission_with_lease(dir: &Path) -> Result<(), String> {
                     let _ = file.sync_all();
                 }
 
-                // 第 3.6 项：立即删除锁文件（不留痕迹）
+                // 立即删除锁文件（不留痕迹）
                 drop(file);
                 if std::fs::remove_file(&lease_path).is_err() {
                     log::warn!(
@@ -474,7 +474,7 @@ fn test_write_permission_with_lease(dir: &Path) -> Result<(), String> {
             Err(e) => {
                 last_err = format!("目录不可写: {}", e);
                 if attempt + 1 < WRITE_TEST_RETRIES {
-                    // 第 3.6 项：等待 50ms 后重试（文件被占用时的退避）
+                    // 等待 50ms 后重试（文件被占用时的退避）
                     std::thread::sleep(WRITE_TEST_RETRY_INTERVAL);
                 } else {
                     // 最后一次重试失败，last_err 已设置
@@ -491,10 +491,10 @@ fn test_write_permission_with_lease(dir: &Path) -> Result<(), String> {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 3.5 项：磁盘空间检查（错误分离）                                  *
+ * 磁盘空间检查（错误分离）                                  *
  * ------------------------------------------------------------------ */
 
-/// 第 3.5 项：磁盘空间检查结果
+/// 磁盘空间检查结果
 enum DiskSpaceStatus {
     /// 剩余空间充足（MB）
     Ok(u64),
@@ -504,7 +504,7 @@ enum DiskSpaceStatus {
     Unknown,
 }
 
-/// 第 3.5 项：检查磁盘空间（区分不足与未知）
+/// 检查磁盘空间（区分不足与未知）
 fn check_disk_space(path: &Path) -> DiskSpaceStatus {
     use crate::util::disk::get_disk_space_mb;
     match get_disk_space_mb(path) {
@@ -515,32 +515,32 @@ fn check_disk_space(path: &Path) -> DiskSpaceStatus {
                 DiskSpaceStatus::Ok(mb)
             }
         }
-        None => DiskSpaceStatus::Unknown, // 第 3.5 项：失败返回 Unknown，非 0 误判
+        None => DiskSpaceStatus::Unknown, // 失败返回 Unknown，非 0 误判
     }
 }
 
 /* ------------------------------------------------------------------ *
- * 第 3.1-3.9 项：预检核心逻辑（spawn_blocking 内执行）                 *
+ * 预检核心逻辑（spawn_blocking 内执行）                 *
  *                                                                    *
  * 所有阻塞式 FS 操作集中在此函数，由 spawn_blocking 调度至阻塞线程池。  *
  * ------------------------------------------------------------------ */
 
-/// 第 3.1-3.9 项：预检核心逻辑（阻塞线程内执行）
+/// 预检核心逻辑（阻塞线程内执行）
 ///
-/// 执行顺序（第 3.2 项：先校验后操作）：
-///   1. 第 3.8 项：输入硬校验（不执行 FS 操作）
+/// 执行顺序（先校验后操作）：
+///   1. 输入硬校验（不执行 FS 操作）
 ///   2. 解析父目录绝对路径
-///   3. 第 3.1 项：白名单前缀校验（拒绝则不任何 FS 操作）
-///   4. 第 3.7 项：系统保护目录二次防御
+///   3. 白名单前缀校验（拒绝则不执行任何 FS 操作）
+///   4. 系统保护目录二次防御
 ///   5. 白名单通过后才执行目录创建（仅当不存在时）
-///   6. 第 3.5 项：磁盘空间检查（错误分离）
-///   7. 第 3.3 / 3.6 项：原子化租约写权限测试
+///   6. 磁盘空间检查（错误分离）
+///   7. 原子化租约写权限测试
 ///   8. 检查目标文件是否已存在
-///   9. 失败时回滚本次新建目录（第 3.2 项）
+///   9. 失败时回滚本次新建目录
 fn do_preflight_blocking(verthys_path: String) -> PreflightResult {
     let path = Path::new(&verthys_path);
 
-    // 1. 第 3.8 项：输入硬校验（第一道防线，不执行任何 FS 操作）
+    // 1. 输入硬校验（第一道防线，不执行任何 FS 操作）
     if let Err(e) = validate_path_input(&verthys_path) {
         log::warn!("[preflight] 第 3.8 项：路径输入校验失败: {}", e);
         return make_error_result(ErrorCode::InvalidPath, false);
@@ -555,10 +555,10 @@ fn do_preflight_blocking(verthys_path: String) -> PreflightResult {
         }
     };
 
-    // 记录是否本次新建了目录（第 3.2 项：失败回滚用）
+    // 记录是否本次新建了目录（失败回滚用）
     let mut dir_created_by_us = false;
 
-    // 3. 第 3.1 项：白名单前缀校验（先校验后操作，不产生副作用）
+    // 3. 白名单前缀校验（先校验后操作，不产生副作用）
     let whitelist = build_safe_whitelist();
     let canonical_ancestor = match resolve_parent_for_whitelist(parent) {
         Ok(canon) => canon,
@@ -580,7 +580,7 @@ fn do_preflight_blocking(verthys_path: String) -> PreflightResult {
         return make_error_result(ErrorCode::PermissionDenied, false);
     }
 
-    // 4. 第 3.7 项：系统保护目录二次防御（defense-in-depth）
+    // 4. 系统保护目录二次防御（defense-in-depth）
     if is_system_protected_dir(&canonical_ancestor) {
         log::warn!(
             "[preflight] 第 3.7 项：系统保护目录拒绝 [{}]",
@@ -589,7 +589,7 @@ fn do_preflight_blocking(verthys_path: String) -> PreflightResult {
         return make_system_protected_result(false);
     }
 
-    // 5. 白名单通过后才执行目录创建（第 3.2 项：先校验后操作）
+    // 5. 白名单通过后才执行目录创建（先校验后操作）
     if !parent.exists() {
         match std::fs::create_dir_all(parent) {
             Ok(_) => {
@@ -625,7 +625,7 @@ fn do_preflight_blocking(verthys_path: String) -> PreflightResult {
         }
     };
 
-    // 6. 第 3.5 项：磁盘空间检查（错误分离）
+    // 6. 磁盘空间检查（错误分离）
     let disk_space_status = check_disk_space(&canonical_parent);
     let disk_space_mb = match disk_space_status {
         DiskSpaceStatus::Ok(mb) => mb,
@@ -647,7 +647,7 @@ fn do_preflight_blocking(verthys_path: String) -> PreflightResult {
         }
     };
 
-    // 7. 第 3.3 / 3.6 项：原子化租约写权限测试
+    // 7. 原子化租约写权限测试
     if let Err(e) = test_write_permission_with_lease(&canonical_parent) {
         log::warn!(
             "[preflight] 第 3.3 项：租约写权限测试失败: {} [{}]",
@@ -674,7 +674,7 @@ fn do_preflight_blocking(verthys_path: String) -> PreflightResult {
     }
 }
 
-/// 第 3.2 项：回滚本次新建的目录
+/// 回滚本次新建的目录
 ///
 /// 仅当目录由本次调用创建时才删除，避免误删用户数据。
 /// 删除失败仅记录日志，不阻塞主流程（目录为空时删除应成功）。
@@ -692,35 +692,35 @@ fn rollback_created_dir(parent: &Path, dir_created_by_us: bool) {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 3.1-3.9 项：verthys_preflight 命令入口                              *
+ * verthys_preflight 命令入口                              *
  * ------------------------------------------------------------------ */
 
-/// 路径预检（企业级安全版）：第 3.1-3.9 项全量方案
+/// 路径预检（企业级安全版）：全量做法
 ///
 /// 九重安全校验：
-///   1. 第 3.8 项：输入硬校验（空字节/控制字符/超长/相对路径/.. /~）
-///   2. 第 3.2 项：解析父目录绝对路径（先校验后操作）
-///   3. 第 3.1 项：白名单基目录前缀校验（canonicalize + 前缀匹配）
-///   4. 第 3.7 项：系统保护目录二次防御（条件编译）
-///   5. 第 3.2 项：白名单通过后才递归创建目录 + 失败回滚
-///   6. 第 3.5 项：磁盘空间检查（DISK_SPACE_INSUFFICIENT / DISK_SPACE_UNKNOWN 分离）
-///   7. 第 3.3 项：原子化租约写权限测试（随机命名锁文件，消除 TOCTOU）
-///   8. 第 3.6 项：写测试随机文件名 + 50ms×3 重试
-///   9. 第 3.4 项：错误信息脱敏（仅错误码 + 无路径提示）
+///   1. 输入硬校验（空字节/控制字符/超长/相对路径/.. /~）
+///   2. 解析父目录绝对路径（先校验后操作）
+///   3. 白名单基目录前缀校验（canonicalize + 前缀匹配）
+///   4. 系统保护目录二次防御（条件编译）
+///   5. 白名单通过后才递归创建目录 + 失败回滚
+///   6. 磁盘空间检查（DISK_SPACE_INSUFFICIENT / DISK_SPACE_UNKNOWN 分离）
+///   7. 原子化租约写权限测试（随机命名锁文件，消除 TOCTOU）
+///   8. 写测试随机文件名 + 50ms×3 重试
+///   9. 错误信息脱敏（仅错误码 + 无路径提示）
 ///
-/// 第 3.9 项：异步化与并发控制
+/// 异步化与并发控制
 ///   - spawn_blocking 将阻塞式 FS 操作调度至阻塞线程池
 ///   - 5s 超时返回 TEMPORARY_FAILURE
 ///   - Semaphore 限制并发预检数（PREFLIGHT_MAX_CONCURRENCY=4）
 #[tauri::command]
 pub async fn verthys_preflight(verthys_path: String) -> Result<PreflightResult, String> {
-    // 第 3.9 项：获取并发信号量（限制同时执行的预检数量）
+    // 获取并发信号量（限制同时执行的预检数量）
     let _permit = preflight_semaphore()
         .acquire()
         .await
         .map_err(|e| format!("并发信号量获取失败: {}", e))?;
 
-    // 第 3.9 项：spawn_blocking + 5s 超时
+    // spawn_blocking + 5s 超时
     let result = tokio::time::timeout(
         PREFLIGHT_TIMEOUT,
         tokio::task::spawn_blocking(move || do_preflight_blocking(verthys_path)),
@@ -737,7 +737,7 @@ pub async fn verthys_preflight(verthys_path: String) -> Result<PreflightResult, 
                 Ok(make_error_result(ErrorCode::TemporaryFailure, false))
             }
         },
-        // 第 3.9 项：超时
+        // 超时
         Err(_) => {
             log::warn!(
                 "[preflight] 第 3.9 项：预检超时（{}s），返回 TEMPORARY_FAILURE",

@@ -42,7 +42,7 @@ if ($Clean -and (Test-Path $buildDir)) {
     Remove-Item -Recurse -Force $buildDir
 }
 
-# ★ 陈旧缓存自愈（根因修复 2026-09-19）：项目目录迁移/重命名后，
+# ★ 陈旧缓存自愈（根因修复）：项目目录迁移/重命名后，
 # build_dev/CMakeCache.txt 记录的绝对路径（CMAKE_HOME_DIRECTORY）失效，
 # CMake 报 "CMakeCache.txt directory ... is different than the directory
 # ... where CMakeCache.txt was created" 并拒绝配置。此处检测到不一致时

@@ -15,7 +15,7 @@ import type { ModuleId } from "../types/key_manager";
 
 /** 序列化模块密钥验证器记录为 base64
  *
- * ★ 白皮书 3.2 方案三：版本化
+ * ★ 版本化
  *   确保 version 字段存在（旧调用方可能不传），默认写入 MODULE_KEY_RECORD_VERSION。
  */
 export function serializeModuleKeyRecord(rec: ModuleKeyRecord): string {
@@ -31,7 +31,7 @@ export function serializeModuleKeyRecord(rec: ModuleKeyRecord): string {
 
 /** 反序列化模块密钥验证器记录
  *
- * ★ 白皮书 3.2 方案三：版本化向后兼容
+ * ★ 版本化向后兼容
  *   旧记录无 version 字段 → 反序列化时视为 v0。
  */
 export function deserializeModuleKeyRecord(b64: string): ModuleKeyRecord | null {

@@ -1,14 +1,14 @@
 /*
  * util/secured_string.rs — 零化擦除的安全字符串包装
  *
- *    "" 第 11.1 项
+ *
  *
  * 架构定位：工具层（util）零依赖纯类型模块
  *   - 不依赖任何上层模块（controller / service / repository）
  *   - 仅依赖 zeroize crate 与 serde crate
  *   - 提供 Drop 时自动擦除堆内存的 String 包装类型
  *
- * 第 11.1 项 — 安全擦除：
+ * 安全擦除：
  *   原 state.rs 中 secure_zero_records 用 ptr::write_bytes 覆写 String 内部缓冲，
  *   属于未定义行为（UB）：String 的堆布局由分配器管理，直接覆写后 Drop 会
  *   向分配器报告错误的布局/长度，可能触发 double-free / heap corruption。
@@ -39,7 +39,7 @@ use zeroize::{Zeroize, Zeroizing};
 ///   - 序列化/反序列化透明（作为普通 JSON 字符串），前端契约无感
 ///   - `Deref<Target=str>` 兼容现有 `as_str()` / `len()` / `is_empty()` / `as_bytes()` / `as_ptr()` 调用
 ///   - Drop 时自动 zeroize 堆内存（String::zeroize 先 volatile 写零再 clear，无 UB）
-///   - 实现 `Zeroize` trait 供泛型 `ScanRecord: Zeroize` 约束使用（第 11.3 项）
+///   - 实现 `Zeroize` trait 供泛型 `ScanRecord: Zeroize` 约束使用
 ///
 /// 用于 VerthysRecordEntry.name / data 与 VerthysSummaryEntry.name / merkle_leaf 字段，
 /// 替代裸 String，消除 secure_zero_records 中 ptr::write_bytes 对 String 的 UB 覆写。
@@ -173,7 +173,7 @@ impl<'de> Deserialize<'de> for SecuredString {
     }
 }
 
-// ===== 第 11.3 项：Zeroize trait 实现（供泛型 ScanRecord: Zeroize 约束）=====
+// ===== Zeroize trait 实现（供泛型 ScanRecord: Zeroize 约束）=====
 
 impl Zeroize for SecuredString {
     fn zeroize(&mut self) {

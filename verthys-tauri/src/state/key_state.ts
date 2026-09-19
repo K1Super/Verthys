@@ -29,7 +29,7 @@ export interface KeyState {
   globalKeyReady: Ref<boolean>;
   /** verthys 中存在全局密钥记录 */
   hasGlobalKeyRecord: Ref<boolean>;
-  /** ★ 企业级根治方案：全局密钥记录加载标志（恒 false，保留供防御性检查）
+  /** ★ 企业级根治：全局密钥记录加载标志（恒 false，保留供防御性检查）
    *
    * 原设计：快速试探未命中时设为 true，后台异步扫描完成后设为 false，
    * UI 据此显示"加载中"状态。
@@ -58,7 +58,7 @@ export interface KeyState {
    *
    * 用途：
    *   1. 模块组件据此判断 moduleKeyEnabled 是否为"已确认的真实状态"还是"安全默认值"
-   *   2. SecurityCenter 开关操作据此与后台加载做乐观并发控制（修复6）
+   *   2. SecurityCenter 开关操作据此与后台加载做乐观并发控制
    *      —— 后台加载期间若用户切换开关，版本号变化导致后台加载丢弃结果，
    *         杜绝"后台加载用旧 verthys 状态覆盖用户刚切换的开关"全局回滚缺陷 */
   moduleKeyStatusLoading: Ref<boolean>;
@@ -81,7 +81,7 @@ export interface KeyState {
   storedVerthysPath: Ref<string>;
   /** 最近一次初始化失败的错误信息 */
   lastInitError: Ref<string>;
-  /** ★ 企业级方案：初始化状态详情（含修复失败告警等可观测信息）
+  /** ★ 企业级：初始化状态详情（含修复失败告警等可观测信息）
    *
    * verthys_init_status 返回的 detail 字段，由 SecurityCenter 显示给用户。
    * 当 repair_fail_count >= 3 时携带"状态文件写入异常"告警，

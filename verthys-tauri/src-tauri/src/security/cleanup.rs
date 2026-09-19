@@ -1,21 +1,7 @@
 /*
- * security/cleanup.rs — 程序痕迹、缓存与卸载残留防护（SECURITY.md 企业级重写版）
+ * security/cleanup.rs — 程序痕迹、缓存与卸载残留防护
  *
- * 用户需求（五、程序痕迹、缓存与卸载残留防护）：
- *   1. 系统最近记录清理：清除 Recent 文件夹、JumpList（AutomaticDestinations /
- *      CustomDestinations），并通过 SHAddToRecentDocs(0, NULL) 通知 Shell 清空。
- *   2. 安全文件删除：覆写 + 重命名 + 删除
- *   3. 崩溃残留清理：遍历临时目录下的 .verthys_tmp / .verthys_cache / .verthys_lock
- *      文件，对每个执行安全删除，返回清理文件数。
- *   4. 日志匿名化：脱敏路径、IP、SID、邮箱等敏感信息。
  *
- * SECURITY.md 修复要点：
- *   1. 彻底移除 Gutmann 模式 — 35 遍覆写在现代 SSD 上无效且损害寿命。
- *      仅提供 Standard（1 遍全零覆写）和 SSD（覆写 + TRIM 指令）模式。
- *   2. 覆写前检查文件是否稀疏 — 稀疏区域仅写零，设总覆写时间上限（30 秒）。
- *   3. 临时目录固定为应用内部路径 — cleanup_crash_residue 仅接受逻辑标识符。
- *   4. 使用 Zeroizing<Vec<u8>> 替代手动清零 — Drop 时自动 zeroize。
- *   5. 增强日志匿名化为结构化脱敏管线 — IP/邮箱/SID/路径正则替换。
  *
  * 设计要点：
  *   - 全部 Windows API 调用置于 #[cfg(target_os="windows")]，非 Windows 空实现。
@@ -24,12 +10,12 @@
  */
 
 /* ================================================================== *
- * DeleteMode：安全删除模式（SECURITY.md 第 1 项 — 移除 Gutmann）       *
+ * DeleteMode：安全删除模式（移除 Gutmann）       *
  * ================================================================== */
 
 /// 安全删除模式
 ///
-/// SECURITY.md 第 1 项：彻底移除 Gutmann 35 遍覆写模式
+/// 彻底移除 Gutmann 35 遍覆写模式
 ///   - Standard：HDD 1 遍全零覆写（满足常规安全需求）
 ///   - SSD：1 遍全零覆写 + FSCTL_FILE_LEVEL_TRIM 通知 FTL 标记物理页无效
 ///
@@ -59,10 +45,10 @@ pub fn clear_recent_records() -> Result<(), String> {
 
 /// 安全删除文件（覆写 + 重命名 + 删除）
 ///
-/// SECURITY.md 修复要点：
-///   - 第 1 项：仅 1 遍全零覆写，移除 Gutmann 35 遍
-///   - 第 2 项：稀疏文件检测 + 30 秒总时间上限
-///   - 第 4 项：使用 Zeroizing<Vec<u8>> 缓冲区
+/// 修复要点：
+///   - 仅 1 遍全零覆写，移除 Gutmann 35 遍
+///   - 稀疏文件检测 + 30 秒总时间上限
+///   - 使用 Zeroizing<Vec<u8>> 缓冲区
 #[cfg(target_os = "windows")]
 pub fn secure_delete_file(path: &str, mode: DeleteMode) -> Result<(), String> {
     win_impl::secure_delete_file(path, mode)
@@ -75,7 +61,7 @@ pub fn secure_delete_file(_path: &str, _mode: DeleteMode) -> Result<(), String> 
 
 /// 清理崩溃残留临时文件（.verthys_tmp / .verthys_cache / .verthys_lock）
 ///
-/// SECURITY.md 第 3 项：temp_dir 由后端从受信上下文解析（逻辑标识符），
+/// temp_dir 由后端从受信上下文解析（逻辑标识符），
 /// 前端不可直接传入路径字符串。
 #[cfg(target_os = "windows")]
 pub fn cleanup_crash_residue(temp_dir: &str) -> Result<usize, String> {
@@ -88,12 +74,12 @@ pub fn cleanup_crash_residue(_temp_dir: &str) -> Result<usize, String> {
 }
 
 /* ================================================================== *
- * 日志匿名化（SECURITY.md 第 5 项 — 结构化脱敏管线）                   *
+ * 日志匿名化（结构化脱敏管线）                   *
  * ================================================================== */
 
 /// 匿名化日志消息：结构化脱敏管线
 ///
-/// SECURITY.md 第 5 项：增强日志匿名化
+/// 增强日志匿名化
 ///   1. 替换 %USERPROFILE% 路径（含正斜杠变体）为 <USER>
 ///   2. 替换含 ".verthys" 的文件名为 <VERTHYS>
 ///   3. 替换容器 ID（长度 >= 8 的连续十六进制串）为 <CONTAINER_ID>
@@ -158,7 +144,7 @@ fn replace_verthys_filenames(s: &str) -> String {
     out
 }
 
-/// SECURITY.md 第 5 项：替换卷 GUID 路径为 <VOLUME_GUID>
+/// 替换卷 GUID 路径为 <VOLUME_GUID>
 /// 匹配 \\\\?\\Volume{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx} 格式
 fn replace_volume_guids(s: &str) -> String {
     // 简化实现：检测 Volume{ 前缀并替换到 }
@@ -181,7 +167,7 @@ fn replace_volume_guids(s: &str) -> String {
     out
 }
 
-/// SECURITY.md 第 5 项：替换 Windows SID 为 <SID>
+/// 替换 Windows SID 为 <SID>
 /// 匹配 S-1-5-21-... 格式（S-数字-数字-...）
 fn replace_sids(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -230,7 +216,7 @@ fn replace_sids(s: &str) -> String {
     out
 }
 
-/// SECURITY.md 第 5 项：替换 IP 地址为 <IP>
+/// 替换 IP 地址为 <IP>
 /// 匹配 IPv4（x.x.x.x）格式
 fn replace_ips(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -292,7 +278,7 @@ fn try_match_ipv4(chars: &[char], start: usize) -> Option<(usize, bool)> {
     Some((i, true))
 }
 
-/// SECURITY.md 第 5 项：替换邮箱地址为 <EMAIL>
+/// 替换邮箱地址为 <EMAIL>
 /// 匹配 xxx@xxx.xxx 格式
 fn replace_emails(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -343,7 +329,7 @@ fn try_match_email(chars: &[char], start: usize) -> Option<usize> {
     Some(i)
 }
 
-/// SECURITY.md 第 5 项：替换容器 ID（长度 >= 8 的连续十六进制串）为 <CONTAINER_ID>
+/// 替换容器 ID（长度 >= 8 的连续十六进制串）为 <CONTAINER_ID>
 ///
 /// 阈值降至 8 字符（4 字节），覆盖更多标识符
 fn replace_hex_ids(s: &str) -> String {
@@ -373,7 +359,7 @@ fn replace_hex_ids(s: &str) -> String {
 }
 
 /* ================================================================== *
- * Windows 平台实现（SECURITY.md 企业级重写）                           *
+ * Windows 平台实现                           *
  * ================================================================== */
 
 #[cfg(target_os = "windows")]
@@ -406,7 +392,7 @@ mod win_impl {
     /// 覆写缓冲区大小：1 MiB（兼顾内存占用与大文件吞吐）
     const CHUNK_SIZE: usize = 1024 * 1024;
 
-    /// SECURITY.md 第 2 项：总覆写时间上限（30 秒）
+    /// 总覆写时间上限（30 秒）
     /// 超时后记录告警并强制终止覆写，立即执行重命名和删除
     const OVERWRITE_TIMEOUT_SECS: u64 = 30;
 
@@ -494,7 +480,7 @@ mod win_impl {
     }
 
     /// 生成随机十六进制文件名（byte_len 字节 → 2*byte_len hex 字符）
-    /// SECURITY.md 第 4 项：使用 Zeroizing 包装敏感缓冲区
+    /// 使用 Zeroizing 包装敏感缓冲区
     fn random_hex_name(byte_len: usize) -> Result<String, String> {
         let mut bytes = Zeroizing::new(vec![0u8; byte_len]);
         generate_random_bytes(&mut bytes);
@@ -581,11 +567,11 @@ mod win_impl {
 
     /* -------------------- 2. secure_delete_file -------------------- */
 
-    /// SECURITY.md 企业级安全删除文件：
+    /// 安全删除文件：
     ///   1. CreateFileW 打开
-    ///   2. SECURITY.md 第 2 项：检查稀疏文件 + 30 秒时间上限
-    ///   3. SECURITY.md 第 1 项：1 遍全零覆写（Standard/SSD 模式）
-    ///   4. SECURITY.md 第 1 项：SSD 模式额外发送 TRIM 指令
+    ///   2. 检查稀疏文件 + 30 秒时间上限
+    ///   3. 1 遍全零覆写（Standard/SSD 模式）
+    ///   4. SSD 模式额外发送 TRIM 指令
     ///   5. 重命名 + 删除
     pub(super) fn secure_delete_file(path: &str, mode: DeleteMode) -> Result<(), String> {
         let path_w = to_wide(path);
@@ -603,7 +589,7 @@ mod win_impl {
         }
         .map_err(|e| format!("CreateFileW 打开文件失败 ({}): {}", path, e))?;
 
-        // 获取文件信息（SECURITY.md 第 2 项：稀疏文件检测）
+        // 获取文件信息（稀疏文件检测）
         let mut file_info: BY_HANDLE_FILE_INFORMATION = Default::default();
         let info_result = unsafe { GetFileInformationByHandle(handle, &mut file_info) };
 
@@ -620,7 +606,7 @@ mod win_impl {
         }
         let file_size = size as u64;
 
-        // SECURITY.md 第 2 项：稀疏文件检测
+        // 稀疏文件检测
         // nFileSizeHigh/Low 是逻辑大小，nCompressedFileSize（通过 GetCompressedFileSize）
         // 或 GetFileInformationByHandle 的 nFileSizeHigh/Low 与实际分配大小比较
         // 若文件为稀疏文件，逻辑大小可能远大于物理分配，覆写会导致疯狂分配物理块
@@ -633,16 +619,16 @@ mod win_impl {
             );
         }
 
-        // SECURITY.md 第 4 项：使用 Zeroizing<Vec<u8>> 缓冲区
+        // 使用 Zeroizing<Vec<u8>> 缓冲区
         let mut buf = Zeroizing::new(vec![0u8; CHUNK_SIZE]);
 
-        // SECURITY.md 第 2 项：30 秒总覆写时间上限
+        // 30 秒总覆写时间上限
         let deadline = Instant::now() + Duration::from_secs(OVERWRITE_TIMEOUT_SECS);
 
         // 执行覆写
         let overwrite_res = do_overwrite(handle, file_size, mode, &mut buf, &deadline, is_sparse);
 
-        // SECURITY.md 第 1 项：SSD 模式发送 TRIM 指令
+        // SSD 模式发送 TRIM 指令
         if mode == DeleteMode::Ssd && overwrite_res.is_ok() {
             if let Err(e) = send_trim_command(handle, file_size) {
                 // TRIM 失败不阻塞删除流程，仅记录告警
@@ -685,7 +671,7 @@ mod win_impl {
         Ok(())
     }
 
-    /// SECURITY.md 第 2 项：检测文件是否为稀疏文件
+    /// 检测文件是否为稀疏文件
     ///
     /// 通过 BY_HANDLE_FILE_INFORMATION 的 dwFileAttributes 检查 FILE_ATTRIBUTE_SPARSE_FILE 标志
     fn is_sparse_file(info: &BY_HANDLE_FILE_INFORMATION) -> bool {
@@ -693,9 +679,9 @@ mod win_impl {
         (info.dwFileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) != 0
     }
 
-    /// SECURITY.md 第 1 项：执行 1 遍全零覆写
+    /// 执行 1 遍全零覆写
     ///
-    /// SECURITY.md 第 2 项：稀疏文件仅覆写已分配区域，设 30 秒时间上限
+    /// 稀疏文件仅覆写已分配区域，设 30 秒时间上限
     fn do_overwrite(
         handle: windows::Win32::Foundation::HANDLE,
         file_size: u64,
@@ -710,7 +696,7 @@ mod win_impl {
 
         let mut remaining = file_size;
         while remaining > 0 {
-            // SECURITY.md 第 2 项：检查时间上限
+            // 检查时间上限
             if Instant::now() >= *deadline {
                 log::warn!(
                     "[secure_delete] SECURITY.md 第 2 项：覆写超过 {} 秒上限，强制终止",
@@ -722,7 +708,7 @@ mod win_impl {
             let to_write = std::cmp::min(remaining as usize, buf.len());
             let chunk = &mut buf[..to_write];
 
-            // SECURITY.md 第 1 项：全零覆写（Standard 和 SSD 模式均使用）
+            // 全零覆写（Standard 和 SSD 模式均使用）
             for x in chunk.iter_mut() {
                 *x = 0x00;
             }
@@ -748,7 +734,7 @@ mod win_impl {
             }
             remaining -= to_write as u64;
 
-            // SECURITY.md 第 2 项：稀疏文件 — 跳过未分配区域（仅覆写已分配部分）
+            // 稀疏文件 — 跳过未分配区域（仅覆写已分配部分）
             // 实际上对于稀疏文件，我们仍然遍历逻辑大小但仅写零，
             // 操作系统会按需分配物理块。此处简化处理，时间上限会保护免受死循环。
             if is_sparse && remaining > 0 {
@@ -766,7 +752,7 @@ mod win_impl {
         Ok(())
     }
 
-    /// SECURITY.md 第 1 项：发送 TRIM 指令（FSCTL_FILE_LEVEL_TRIM）
+    /// 发送 TRIM 指令（FSCTL_FILE_LEVEL_TRIM）
     ///
     /// 通知文件系统对应物理页可被标记为无效，利用固件的安全擦除能力。
     /// 仅在 SSD 模式下调用，HDD 模式不发送 TRIM。
@@ -803,7 +789,7 @@ mod win_impl {
     /// 清理崩溃残留：遍历 temp_dir 下的 .verthys_tmp / .verthys_cache / .verthys_lock
     /// 文件，对每个执行 Standard 安全删除，返回成功清理的文件数。
     ///
-    /// SECURITY.md 第 3 项：temp_dir 由后端从受信上下文解析（逻辑标识符），
+    /// temp_dir 由后端从受信上下文解析（逻辑标识符），
     /// 前端不可直接传入路径字符串。
     pub(super) fn cleanup_crash_residue(temp_dir: &str) -> Result<usize, String> {
         let files = list_files_in_dir(temp_dir)?;

@@ -1,7 +1,7 @@
 /*
  * responses.rs — 安全命令响应类型定义
  *
- *    "" 第十三章 — 企业级解决方案
+ *
  *
  * 职责：
  *   集中定义所有安全命令返回给前端的响应类型，保留全部
@@ -47,7 +47,7 @@ pub struct UnknownModuleInfo {
     pub reason: String,
 }
 
-/// 影子休眠状态（第 13.2.8 项：返回真实 txid）
+/// 影子休眠状态（返回真实 txid）
 #[derive(serde::Serialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct ShadowSleepStatus {
@@ -56,7 +56,7 @@ pub struct ShadowSleepStatus {
     pub txid: u64,
 }
 
-/// 第 13.2.5 项：敏感操作结构化结果
+/// 敏感操作结构化结果
 #[derive(serde::Serialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct SecurityResult {
@@ -88,7 +88,7 @@ impl SecurityResult {
     }
 }
 
-/// 第 13.2.5 项：权限令牌生成结果
+/// 权限令牌生成结果
 #[derive(serde::Serialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct AuthTokenResult {

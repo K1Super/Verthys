@@ -1,14 +1,14 @@
 /*
  * util/base64.rs — Base64 编解码工具
  *
- *    "" 阶段 1 util 增强 / 第 13.6 项
+ *
  *
  * 架构定位：工具层（util）纯函数模块
  *   - 不依赖任何上层模块（controller / service / repository）
  *   - 不持有状态、不执行 I/O、不输出日志
  *   - 仅对外暴露确定性的编解码接口
  *
- * 第 13.6 项 — 改用标准 base64 crate：
+ * 改用标准 base64 crate：
  *   原自编实现存在以下隐患：
  *     - 无 URL-safe 字母表支持
  *     - 无流式编解码接口

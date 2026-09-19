@@ -1,9 +1,9 @@
 /*
  * cache/shared/base64-size.ts — Base64 原始字节大小精确估算（单一权威源）
  *
- * ★ cache-coordinator 重构方案 + batch-cache-coordinator 重构方案共同修正项：
+ * ★ cache-coordinator 重构实现 + batch-cache-coordinator 重构实现共同修正项：
  *   旧实现 `Math.floor(dataB64.length * 3 / 4)` 未处理 Base64 填充字符 `=`，
- *   末尾为 `==` 时估算偏大。两方案各自定义了相同修正函数，此处收敛为
+ *   末尾为 `==` 时估算偏大。两套实现各自定义了相同修正函数，此处收敛为
  *   共享模块（DRY），供两个协调器统一引用。
  *
  * 精确公式（标准 padded base64，长度恒为 4 的倍数）：

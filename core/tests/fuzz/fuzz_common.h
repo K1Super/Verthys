@@ -1,5 +1,5 @@
 /*
- * fuzz_common.h — fuzz 目标共享初始化（WP-10）
+ * fuzz_common.h — fuzz 目标共享初始化
  *
  * MSVC Debug CRT 陷阱：堆完整性断言 / _ASSERTE 默认弹模态对话框等待
  * 人工点击（中止/重试/忽略）——libFuzzer/ctest/CI 无人工介入 → 进程

@@ -4,8 +4,6 @@
  * 收录从 verthys_api.c 抽离的纯工具/辅助函数原型、宏与全局变量声明，
  * 供 verthys_api.c 及其他内部翻译单元复用。
  *
- * ★ §1.4 V2 退役：v1 记录表助手（records_*）与 V2 blob 读取器
- *   （read_v2_superblock_only / read_v2_unlock_blob）随删除清单移除。
  */
 #ifndef VERTHYS_API_UTILS_H
 #define VERTHYS_API_UTILS_H
@@ -21,7 +19,7 @@
 /* ---------- 全局变量（自 verthys_api.c 迁移） ---------- */
 extern int g_has_avx2;
 
-/* ---------- 暴力破解退避（project.md 5.3）---------- */
+/* ---------- 暴力破解退避 ---------- */
 uint64_t verthys_monotonic_ms(void);
 uint64_t verthys_backoff_remaining_ms(const struct VerthysContext *ctx);
 void verthys_backoff_record_failure(struct VerthysContext *ctx);
@@ -45,7 +43,6 @@ void ctx_zero_sensitive(struct VerthysContext *ctx);
 
 /* ---------- 格式检测（V3-only）----------
  * 读取文件头 8 字节判断格式：V3 超级块首副本帧头 magic "V3RP"。
- * §1.4 V2 退役：V1/V2/未知头一律 VERTHYS_FMT_NONE（Unlock 门禁据此
  * 返回 VERTHYS_ERR_FORMAT——"V3 不读 V2 文件"）。 */
 VerthysContainerVersion detect_format(const uint8_t *buf, size_t size);
 

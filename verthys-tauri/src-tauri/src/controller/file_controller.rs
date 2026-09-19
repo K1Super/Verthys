@@ -229,7 +229,7 @@ fn sandbox_error_to_code(err: &SandboxError) -> ErrorCode {
 
 // ===== 流式读取实现 =====
 
-/// 同步读取文件并返回原始字节（★ P2-7 二进制 IPC：去 base64 化）。
+/// 同步读取文件并返回原始字节（二进制 IPC：去 base64 化）。
 ///
 /// 内部执行路径校验、大小检查、分块读取，错误通过 Result 返回。
 /// 所有错误消息已脱敏，仅用于日志。
@@ -300,7 +300,7 @@ fn read_file_blocking(path: &str, whitelist: &[String]) -> Result<Vec<u8>, Strin
 /// 流程：
 /// - 获取全局写互斥锁。
 /// - 沙箱校验目标路径（若目标不存在，则校验父目录）。
-/// - 检查原始字节大小（★ P2-7 二进制 IPC：去 base64 化）。
+/// - 检查原始字节大小（二进制 IPC：去 base64 化）。
 /// - 生成临时文件（同目录，随机后缀）。
 /// - 写入数据，fsync 刷盘。
 /// - rename 原子替换。
@@ -347,7 +347,7 @@ fn write_file_blocking(path: &str, data: &[u8], whitelist: &[String]) -> Result<
         }
     };
 
-    // 大小检查（★ P2-7：原始字节直传，无需 Base64 解码）
+    // 大小检查（原始字节直传，无需 Base64 解码）
     let data_size = data.len() as u64;
 
     if data_size > FILE_SIZE_LIMIT {
@@ -418,7 +418,7 @@ fn write_file_blocking(path: &str, data: &[u8], whitelist: &[String]) -> Result<
 
 // ===== Tauri 命令 =====
 
-/// 读取文件并返回原始二进制内容（★ P2-7 二进制 IPC：去 base64 化）。
+/// 读取文件并返回原始二进制内容（二进制 IPC：去 base64 化）。
 ///
 /// 用于前端导入照片等场景。受沙箱、大小限制、超时控制，
 /// 所有错误已脱敏，仅返回通用错误码。
@@ -507,10 +507,10 @@ pub async fn read_file_bytes(
     }
 }
 
-/// ★ P0-1：从 `x-path` 请求头解码目标路径（百分号解码，中文路径兼容）。
+/// 从 `x-path` 请求头解码目标路径（百分号解码，中文路径兼容）。
 ///
 /// HTTP 头值仅允许可见 ASCII，前端对路径整体 `encodeURIComponent` 编码后传输
-/// （中文/空格/`#`/`%` 等全部转 `%XX`）。解码核心见 [`decode_percent_path`]。
+/// （中文/空格/`#`/`%` 等全部转 `%XX`）。解码核心为 [`decode_percent_path`]。
 fn decode_x_path_header(request: &Request<'_>) -> Result<String, String> {
     let raw = request
         .headers()
@@ -526,7 +526,7 @@ fn decode_x_path_header(request: &Request<'_>) -> Result<String, String> {
     decode_percent_path(raw)
 }
 
-/// ★ P0-1：严格百分号解码（纯函数，供单元测试覆盖）。
+/// 严格百分号解码（纯函数，供单元测试覆盖）。
 ///
 ///   1. `%` 后必须紧跟两位十六进制数字（畸形序列如 `%ZZ` 直接拒绝，不留原样）
 ///   2. 解码字节流必须是合法 UTF-8
@@ -570,13 +570,13 @@ fn decode_percent_path(raw: &str) -> Result<String, String> {
     Ok(decoded.into_owned())
 }
 
-/// 将原始二进制数据原子写入文件（★ P2-7 二进制 IPC：去 base64 化）。
+/// 将原始二进制数据原子写入文件（二进制 IPC：去 base64 化）。
 ///
 /// 用于前端导出加密文件。保证写入原子性，防止写入过程中断导致文件损坏。
 /// 受沙箱、大小限制、超时和写入互斥控制。
 ///
 /// 二进制传输协议（Tauri v2 raw IPC）：
-///   - 路径经 `x-path` 请求头传递（★ P0-1：前端 `encodeURIComponent` 百分号编码，
+///   - 路径经 `x-path` 请求头传递（前端 `encodeURIComponent` 百分号编码，
 ///     兼容中文/空格/特殊字符路径；raw body 与 JSON args 互斥）
 ///   - 文件字节经请求体直传（`InvokeBody::Raw`），零 base64 编解码
 #[tauri::command]
@@ -584,7 +584,7 @@ pub async fn write_file_bytes(
     app: tauri::AppHandle,
     request: Request<'_>,
 ) -> Result<(), String> {
-    // ★ P0-1：x-path 头百分号解码（前端 encodeURIComponent 编码，兼容中文路径）
+    // x-path 头百分号解码（前端 encodeURIComponent 编码，兼容中文路径）
     let path = decode_x_path_header(&request)?;
     log::info!("[write_file_bytes] 开始写入: {}", sanitize_path(&path));
 
@@ -687,7 +687,7 @@ pub async fn write_file_bytes(
 //   NotInWhitelist → PermissionDenied，前端 chooseParseFile catch 块
 //   仅显示"读取文件失败"，用户看到"无法导入本地文件"。
 //
-// 根治方案：
+// 根治方式：
 //   用户通过原生文件对话框显式选择的文件已获得用户明确授权，
 //   白名单校验不再适用。新增 read_user_file / write_user_file 命令：
 //   - 跳过白名单校验（用户已通过对话框授权）
@@ -891,7 +891,7 @@ fn write_user_file_blocking(path: &str, data: &[u8]) -> Result<u64, String> {
         return Err(ErrorCode::PermissionDenied.default_message().to_string());
     }
 
-    // 4. 大小检查（★ P2-7：原始字节直传，无需 Base64 解码）
+    // 4. 大小检查（原始字节直传，无需 Base64 解码）
     let data_size = data.len() as u64;
 
     if data_size > USER_FILE_SIZE_LIMIT {
@@ -960,7 +960,7 @@ fn write_user_file_blocking(path: &str, data: &[u8]) -> Result<u64, String> {
     Ok(data_size)
 }
 
-/// 读取用户通过对话框显式选择的文件并返回原始二进制内容（★ P2-7 二进制 IPC）。
+/// 读取用户通过对话框显式选择的文件并返回原始二进制内容（二进制 IPC）。
 ///
 /// ★ 企业级根治：用户通过 Tauri 文件对话框 open() 选择的文件已获得用户明确授权，
 ///   白名单校验不再适用（用户可能选择 D:\、E:\、网络位置等非 home_dir 路径）。
@@ -1044,13 +1044,13 @@ pub async fn read_user_file(
     }
 }
 
-/// 将原始二进制数据原子写入用户通过对话框选择的位置（★ P2-7 二进制 IPC）。
+/// 将原始二进制数据原子写入用户通过对话框选择的位置（二进制 IPC）。
 ///
 /// ★ 企业级根治：与 read_user_file 配套，用于导出功能写入用户选择的保存位置。
 ///   安全策略与 read_user_file 一致（跳过白名单 + 拒绝系统关键目录 + 其他安全检查）。
 ///
 /// 二进制传输协议（Tauri v2 raw IPC）：
-///   - 路径经 `x-path` 请求头传递（★ P0-1：前端 `encodeURIComponent` 百分号编码，
+///   - 路径经 `x-path` 请求头传递（前端 `encodeURIComponent` 百分号编码，
 ///     兼容中文/空格/特殊字符路径；raw body 与 JSON args 互斥）
 ///   - 文件字节经请求体直传（`InvokeBody::Raw`），零 base64 编解码
 #[tauri::command]
@@ -1058,7 +1058,7 @@ pub async fn write_user_file(
     app: tauri::AppHandle,
     request: Request<'_>,
 ) -> Result<(), String> {
-    // ★ P0-1：x-path 头百分号解码（前端 encodeURIComponent 编码，兼容中文路径）
+    // x-path 头百分号解码（前端 encodeURIComponent 编码，兼容中文路径）
     let path = decode_x_path_header(&request)?;
     log::info!("[write_user_file] 开始写入用户选择位置: {}", sanitize_path(&path));
 
@@ -1159,7 +1159,7 @@ mod tests {
         assert_eq!(FILE_SIZE_LIMIT, 50 * 1024 * 1024);
     }
 
-    /* ===== ★ P0-1 x-path 百分号解码测试（中文/空格/特殊字符/畸形编码） ===== */
+    /* ===== x-path 百分号解码测试（中文/空格/特殊字符/畸形编码） ===== */
 
     #[test]
     fn test_decode_percent_path_chinese() {
@@ -1262,7 +1262,7 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let whitelist = vec![temp_dir.to_string_lossy().to_string()];
 
-        // ★ P2-7 二进制 IPC：无效路径（空串）必须被拒绝
+        // 二进制 IPC：无效路径（空串）必须被拒绝
         let result = write_file_blocking("", b"binary data", &whitelist);
         assert!(result.is_err());
     }
@@ -1277,7 +1277,7 @@ mod tests {
         let test_file = test_dir.join("atomic_test.txt");
         let path_str = test_file.to_string_lossy().to_string();
 
-        // ★ P2-7 二进制 IPC：原始字节直传（无 base64 编解码）
+        // 二进制 IPC：原始字节直传（无 base64 编解码）
         let test_data = b"Hello, Verthys atomic write!";
 
         let result = write_file_blocking(&path_str, test_data, &whitelist);

@@ -1,10 +1,6 @@
 /*
  * key_separation.c — 三权分立密钥 CNG 内核托管实现
  *
- * 用户需求（核心安全升级：用 CNG 彻底取代用户态 XOR 掩码）：
- *   密钥原始字节自始至终不进入用户态内存，用户态仅持有 BCRYPT_KEY_HANDLE
- *   句柄值。即使完整 Dump 进程内存，拿到的只是 0x00000000ABCD1234 这样的
- *   句柄 ID，在内核地址空间之外无任何映射意义。
  *
  * CNG 内核托管实现要点：
  *   1. 共享算法提供者：BCryptOpenAlgorithmProvider(BCRYPT_AES_ALGORITHM) +

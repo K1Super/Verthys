@@ -1,5 +1,5 @@
 /**
- * useDefenseStatus.ts — 防御闭环状态 Composable（WP-11 消费出口）
+ * useDefenseStatus.ts — 防御闭环状态 Composable（消费出口）
  *
  * 数据链路（四层全链路）：
  *   前端 verthysGetSecurityStatus()

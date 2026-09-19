@@ -1,13 +1,6 @@
 /*
  * process_sandbox.c — 进程无菌沙盒实现（四项 mitigation policy）
  *
- * 用户需求（五、进程无菌沙盒 — 1. 双进程解耦架构）：
- *   加密 Worker（纯无菌沙盒）应用以下 mitigation policy：
- *     1. WIN32K_SYSTEM_CALL_DISABLE：免疫所有窗口注入（ProcessSystemCallDisableInformation）
- *     2. PROCESS_CREATION_DISABLED：绝杀进程镂空、子进程注入（ProcessChildProcessInformation）
- *     3. IMAGE_LOAD_PREFER_SYSTEM32：防本地 DLL 劫持（SetDefaultDllDirectories）
- *     4. IMAGE_LOAD_NO_REMOTE：防反射注入、内存 PE 加载（ProcessImageLoadPolicy.NoRemoteImages）
- *     5. IMAGE_LOAD_NO_LOW_LABEL：禁止低完整性镜像加载（ProcessImageLoadPolicy.NoLowMandatoryLabelImages）
  *
  * 技术要点：
  *   - ProcessSystemCallDisableInformation（Win10 1709+，RS3）

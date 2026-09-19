@@ -55,7 +55,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
         }
         /* 其他错误静默 */
       }
-      // ★ Phase 2E：同时失效两层缓存（摘要 + 全量），杜绝删除复活
+      // ★ 同时失效两层缓存（摘要 + 全量），杜绝删除复活
       //    invalidateSummaryRecord：从 summaryCache + 类型索引移除（列表不再显示）
       //    invalidateFullRecord：从 fullRecordCache 安全覆写移除（dataB64 清零）
       //    同时保留旧 invalidateScannedRecord 兼容（recordScanCache 回退路径）
@@ -72,7 +72,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
             }
             /* 其他错误静默 */
           }
-          // ★ Phase 2E：chunk 记录同样失效两层缓存
+          // ★ chunk 记录同样失效两层缓存
           invalidateSummaryRecord(cid);
           invalidateFullRecord(cid);
           invalidateScannedRecord(cid);
@@ -128,7 +128,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
 
   /** 顶部删除按钮：切换选择模式 / 确认删除选中
    *
-   * ★ 落实 upgrade.md "批量删除必须合并为单次 flush"：
+   * ★ 批量删除必须合并为单次 flush：
    *   旧实现循环逐张 onDelete(id) → 每张 verthysDeleteRecord + persistVerthys = 2N 次 IPC + N 次事务提交（IO 风暴）
    *   新实现收集全部 metaId + chunkIds 一次性 deleteAndPersistBatch → 1 次 IPC + 1 次事务提交（恒定 IO）
    *   无论删除多少张照片，磁盘写入量恒定，仅与索引区大小相关。
@@ -166,7 +166,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
     }
 
     if (isTauri && allRecordIds.length > 0) {
-      // ★ 单次 IPC + 单次事务提交（落实 upgrade.md 批量删除合并单次 flush）
+      // ★ 单次 IPC + 单次事务提交（批量删除合并单次 flush）
       //    deleteAndPersistBatch 内部：全部 ID 加入 pendingDeletionIds →
       //    verthysDeleteRecords(ids) 一次 IPC → worker 单次 vtxn_commit →
       //    防抖调度单次 flush（300ms 窗口）
@@ -193,7 +193,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
         console.warn("[onDeleteBtn] deleteAndPersistBatch 失败", e);
         showError("删除失败，请重试");
       }
-      // ★ Phase 2E：失效两层缓存（摘要 + 全量 + 扫描回退），杜绝删除复活
+      // ★ 失效两层缓存（摘要 + 全量 + 扫描回退），杜绝删除复活
       for (const rid of allRecordIds) {
         invalidateSummaryRecord(rid);
         invalidateFullRecord(rid);

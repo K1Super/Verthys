@@ -244,9 +244,9 @@ const loadAccounts = async () => {
   const legacyRecords: { id: number; fields: AccountFields }[] = [];
 
   // ★ 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
-  //    原方案：ensureSummaryScanSafe + for 循环串行 getFullRecord（N 条 = N 次串行 IPC，
+  //    原实现：ensureSummaryScanSafe + for 循环串行 getFullRecord（N 条 = N 次串行 IPC，
   //            100 条 ≈ 7.5s，300 条 ≈ 22s，与后台 ensureRecordScan 抢同一常驻 worker → 30s）
-  //    新方案：ensureRecordScanSafe（后台 startBackgroundTasks 已扫描则瞬时增量返回）
+  //    新实现：ensureRecordScanSafe（后台 startBackgroundTasks 已扫描则瞬时增量返回）
   //            + getRecordsDataB64Batch（扫描缓存命中零 IPC，未命中/大体积并行 IPC 回退）
   //            总耗时 < 2.5s。内存优先合并保证用户并发编辑不丢失。
   await ensureRecordScanSafe();
@@ -545,11 +545,11 @@ const onSave = async () => {
       throw e;
     }
     if (newRid !== null) {
-      // ★ Phase 2E：同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
+      // ★ 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
       addFullRecord(newRid, TYPE_ACCOUNT, recordName, dataB64, dataB64.length);
       if (oldRid !== undefined) {
         try { await verthysDeleteRecord(oldRid); } catch { /* 旧记录删除失败不阻断 */ }
-        // ★ Phase 2E：失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容
+        // ★ 失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容
         invalidateSummaryRecord(oldRid);
         invalidateFullRecord(oldRid);
         invalidateScannedRecord(oldRid);
@@ -580,7 +580,7 @@ const onSave = async () => {
       throw e;
     }
     if (newRid !== null) {
-      // ★ Phase 2E：同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
+      // ★ 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
       addFullRecord(newRid, TYPE_ACCOUNT, recordName, dataB64, dataB64.length);
       // ★ 项2：shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
       pushShallowItems(accounts, [{
@@ -618,7 +618,7 @@ const confirmDelete = async () => {
   setModuleCache("accounts", accounts.value);
   // 立即失效扫描缓存（同步，杜绝删除复活）
   if (rid !== undefined) {
-    // ★ Phase 2E：失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容，杜绝删除复活
+    // ★ 失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容，杜绝删除复活
     invalidateSummaryRecord(rid);
     invalidateFullRecord(rid);
     invalidateScannedRecord(rid);

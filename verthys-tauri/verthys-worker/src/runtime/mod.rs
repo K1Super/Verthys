@@ -6,11 +6,11 @@
  *   - 主循环：stdin 读取 → handle_request 派发 → stdout 输出
  *   - 入口文件 main.rs 仅负责 arg 解析 + panic hook 安装 + 调用 run()
  *
- * 规范引用（ 第 1 节）：
+ * 分层约束：
  *   - 入口文件单一职责：业务逻辑下沉至本模块
  *   - 分层依赖：entry → controller(runtime) → service → repository → util
  *
- * 模块拆分（详见各子模块文件头注释）：
+ * 模块拆分：
  *   - protocol      : Request / RecordEntry / Response / base64 编解码
  *   - ffi_types     : C ABI 结构体与函数指针类型（与 verthys.h 对齐）
  *   - scan_shm      : 共享内存传输层（Windows 专用）+ 非 windows 空壳

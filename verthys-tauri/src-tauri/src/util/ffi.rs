@@ -1,7 +1,7 @@
 /*
  * util/ffi.rs — Rust FFI 桥接层模板
  *
- *    "C/Rust混合编程边界治理规范"
+ *    
  *
  * 职责：
  *   - 使用 extern "C" 块声明 C 函数
@@ -72,7 +72,7 @@ pub fn check_c(rv: i32, context: &str) -> VerthysResult<()> {
  * FFI 外部函数声明模板                                                *
  *                                                                    *
  * 实际项目中，以下 extern 块应声明 core/include/verthys.h 中定义     *
- * 的所有公共 C ABI 函数。此处仅展示模式，实际绑定见 worker.rs。      *
+ * 的所有公共 C ABI 函数。此处仅展示模式，实际绑定位于 worker.rs。      *
  * ------------------------------------------------------------------ */
 
 /*

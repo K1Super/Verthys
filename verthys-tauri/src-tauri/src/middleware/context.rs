@@ -1,8 +1,8 @@
 /*
  * middleware/context.rs — 进程级上下文容器
  *
- *    "入口文件单一职责约束"第3条
- *             "标准化日志分层输出规范"第3条"注入式传递"
+ *    "入口文件单一职责约束"
+ *             "标准化日志分层输出规范"（注入式传递）
  *
  * 设计原则：
  *   - Context 在入口层创建，持有日志管道发送端、全局配置等横切关注点
@@ -10,12 +10,12 @@
  *   - 日志管道发送端不得设计为全局静态变量
  *   - Context 持有本进程私有资源的所有权，Drop 时自动释放
  *
- * 第 12.7 项：parse_config 返回强类型 Config
+ * parse_config 返回强类型 Config
  *   - 包含日志级别、路径、进程模式、资源限制等
  *   - entry_main 依 Config 创建 Context
  *   - 便于单元测试，传入内存配置而无需触碰环境变量或文件系统
  *
- * 第 15.7 项：严禁读取用户可控环境变量改变关键路径
+ * 严禁读取用户可控环境变量改变关键路径
  *   - parse_config 仅从命令行参数解析配置
  *   - 不读取 VERTHYS_PATH / WORKER_PATH / VERTHYS_SANDBOX_REDIRECT 等环境变量
  *   - 必须依赖的路径信息通过命令行参数、配置文件或编译期资源注入
@@ -75,10 +75,10 @@ impl std::fmt::Display for ProcessMode {
     }
 }
 
-/// 第 12.7 项：强类型启动配置
+/// 强类型启动配置
 ///
 /// 解析自命令行参数，包含进程运行所需的所有配置项。
-/// 严禁读取环境变量（第 15.7 项）。
+/// 严禁读取环境变量。
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
     /// 进程运行模式
@@ -151,8 +151,8 @@ impl LogLevel {
 
 /// 兼容旧接口：上下文配置（键值对形式）
 ///
-/// 第 12.7 项：保留 ContextConfig 作为 StartupConfig 的兼容包装，
-/// 阶段 8 收尾时统一迁移至 StartupConfig。
+/// 保留 ContextConfig 作为 StartupConfig 的兼容包装，
+/// 后续统一迁移至 StartupConfig。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ContextConfig {
     /// 加密库路径
@@ -243,7 +243,7 @@ pub struct ContextBundle {
     pub resources: Vec<Box<dyn std::any::Any>>,
 }
 
-/// 第 12.7 项：从命令行参数解析强类型 StartupConfig
+/// 从命令行参数解析强类型 StartupConfig
 ///
 /// 支持的参数：
 ///   --mode <ui|worker|inspector>    进程运行模式（默认 ui）
@@ -255,7 +255,7 @@ pub struct ContextBundle {
 ///   --log-capacity <n>              日志管道容量（默认 4096）
 ///   -h, --help                      显示帮助
 ///
-/// 第 15.7 项：严禁读取环境变量
+/// 严禁读取环境变量
 ///   - 不读取 VERTHYS_PATH / WORKER_PATH / VERTHYS_SANDBOX_REDIRECT 等环境变量
 ///   - 所有路径必须通过命令行参数或编译期资源注入
 ///
@@ -277,7 +277,7 @@ pub fn parse_config(args: &[String]) -> VerthysResult<StartupConfig> {
                 i += 1;
                 if i < args.len() {
                     let path = std::path::PathBuf::from(&args[i]);
-                    // 第 15.3 项：--data-dir 必须为绝对路径（受信参数校验）
+                    // --data-dir 必须为绝对路径（受信参数校验）
                     if !path.is_absolute() {
                         return Err(VerthysError::InvalidArgument(format!(
                             "--data-dir 必须为绝对路径，收到: {}",
@@ -340,9 +340,9 @@ pub fn parse_config(args: &[String]) -> VerthysResult<StartupConfig> {
 
 /// 兼容旧接口：parse_config_legacy 返回 ContextConfig
 ///
-/// 第 12.7 项：保留以兼容现有调用点。
+/// 保留以兼容现有调用点。
 /// 内部调用 parse_config 后转换为 ContextConfig。
-/// 阶段 8 收尾时统一迁移至 parse_config，删除此方法。
+/// 后续统一迁移至 parse_config，删除此方法。
 pub fn parse_config_legacy(args: &[String]) -> VerthysResult<ContextConfig> {
     let startup = parse_config(args)?;
     Ok(ContextConfig::from_startup(&startup))

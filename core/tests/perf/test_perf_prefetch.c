@@ -1,14 +1,14 @@
 /*
- * test_perf_prefetch.c — 缺陷2 性能回归测试（P0 缺陷2 企业级方案）
+ * test_perf_prefetch.c — 性能回归测试（缓存预读设计）
  *
- * 验证 project.md 缺陷2 企业级方案：缓存命中跳过索引并行预读 → 架构性能退化
+ * 验证企业级缓存设计：缓存命中时跳过索引并行预读 → 避免架构性能退化
  *
  * 原缺陷本质：
  *   仅缓存头部不匹配时启动磁盘索引预读线程，缓存头校验通过但缓存文件实际
  *   损坏/txid不匹配（假阳性）时，退化为单线程串行磁盘IO，Argon2id 密钥哈希
  *   计算期间 CPU 空转、IO 无预热，容器解锁耗时成倍增加。
  *
- * 企业级根治方案验证点：
+ * 根治设计验证点：
  *   1. 架构修正：索引预读线程无条件后台启动（不论 cache_header_match 是否为 1）
  *      - 缓存命中成功：丢弃预读数据（IO 被 CPU 时间掩盖，零额外耗时）
  *      - 缓存命中失败（假阳性/损坏）：直接复用预读 IO 结果，消除串行磁盘读取
@@ -195,13 +195,13 @@ TEST(perf_warm_cache_hit_on_second_unlock)
 /* ====================================================================== *
  * 测试4：缓存文件损坏场景（假阳性 → 回退到磁盘直读 + 线程B预读）
  *
- * ★ 这是缺陷2 企业级方案的核心回归点：
- *
+ * ★ 这是缓存预读设计的核心回归点：
+
  * 原缺陷：缓存头部匹配（cache_header_match=1）时不启动线程B，若缓存数据
- *   实际损坏（txid 不匹配/密文损坏），回退到 Phase 2I 文件直读时无预读
+ *   实际损坏（txid 不匹配/密文损坏），回退到索引文件直读时无预读
  *   数据可用，退化为单线程串行磁盘 IO。
  *
- * 企业级方案：线程B 无条件后台启动，缓存命中失败时直接复用预读 IO 结果。
+ * 企业级：线程B 无条件后台启动，缓存命中失败时直接复用预读 IO 结果。
  *
  * 验证步骤：
  *   1. 构建容器 + 生成缓存
@@ -245,7 +245,7 @@ TEST(perf_corrupt_cache_falls_back_to_disk)
 
     /* 步骤4：解锁应仍成功（缓存假阳性 → 回退到磁盘直读 + 线程B预读）
      *
-     * ★ 这是缺陷2企业级方案的关键验证点：
+     * ★ 这是缓存预读设计的关键验证点：
      *   - 缓存头部匹配（container_id 一致）→ 尝试加载缓存
      *   - 缓存密文损坏 → AEAD 解密失败 → 缓存失效
      *   - 线程B 已在 Argon2id 期间并行预读索引区 → 直接复用预读数据
@@ -348,20 +348,20 @@ TEST(perf_diagnostics_metrics_complete)
     (void)diag.unlock_read_ms;                /* IO 读取耗时（可能 <1ms 截断为 0） */
     (void)diag.unlock_index_load_ms;          /* 索引加载耗时（缓存命中时 ≈0ms） */
 
-    /* 验证方案八扩展指标字段存在（即使为 0 也应可读，不应崩溃） */
+    /* 验证可观测性扩展指标字段存在（即使为 0 也应可读，不应崩溃） */
     (void)diag.cache_load_ms;                 /* 持久化缓存加载耗时 */
     (void)diag.disk_bytes_read;               /* 磁盘实际读取字节数 */
     (void)diag.page_cache_hit_ratio;          /* 页缓存命中率 */
     (void)diag.preheat_status;                /* 预热状态枚举 */
     (void)diag.lock_wait_ms;                  /* 读写锁等待耗时 */
 
-    /* 验证方案七 Argon2id 漂移监控指标 */
+    /* 验证 Argon2id 漂移监控指标 */
     (void)diag.argon2_baseline_ms;
     (void)diag.argon2_last_derive_ms;
     (void)diag.argon2_drift_count;
     (void)diag.argon2_auto_degraded;
 
-    /* 验证方案二 索引内存映射失败告警指标 */
+    /* 验证索引内存映射失败告警指标 */
     (void)diag.idx_mmap_fallback_count;
 
     printf("  [PERF] total=%llums derive=%llums read=%llums index=%llums cache_load=%llums disk=%lluB\n",
@@ -420,7 +420,7 @@ TEST(perf_no_cache_cold_start)
 }
 
 /* ====================================================================== *
- * 测试8：Argon2id 漂移监控指标验证（方案七回归）
+ * 测试8：Argon2id 漂移监控指标验证
  *
  * 验证 Argon2id 派生耗时指标被正确采集，支撑自适应漂移监控告警。
  * ====================================================================== */
@@ -441,7 +441,7 @@ TEST(perf_argon2_drift_metrics_collected)
     CHECK(diag.argon2_last_derive_ms > 0);
 
     /* 漂移计数：测试环境可能因系统负载/调试构建导致漂移，仅验证字段可读
-     * （漂移检测是方案七的自适应监控能力，drift_count > 0 表示检测生效） */
+     * （漂移检测是自适应监控能力，drift_count > 0 表示检测生效） */
     (void)diag.argon2_drift_count;  /* 字段可读即通过 */
 
     /* 自动降级标志：连续 3 次漂移才触发降级，单次解锁不应触发 */

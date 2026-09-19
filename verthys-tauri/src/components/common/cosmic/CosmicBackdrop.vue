@@ -3,7 +3,7 @@
   ★ 反大众化重构（与 CosmicBackground/HomeAtlas 同源引力视觉语法）：
     - 根除：正中心 conic 光晕环（刻板圆环+辉光泛滥）、对称闪烁星点、
       同轨迹模板流星
-    - 星云：预烘焙贴图（P1-6）× 4，色板收敛深空冷调（青/紫/银/金），
+    - 星云：预烘焙贴图 × 4，色板收敛深空冷调（青/紫/银/金），
       非对称多相位漂移（周期边界恒连续）
     - 星点：复合谐波闪烁（多相位非等距关键帧 — 拒绝 0/50/100 对称模板），
       无辉光 shadow（纯暗点）
@@ -16,7 +16,7 @@
 -->
 <template>
   <div class="cosmic-backdrop" :class="{ fixed }" :style="nebulaTexVars" @click.self="onBackdropClick">
-    <!-- 动态星云背景层（★ P1-6：blur 烘焙进贴图，运行时零实时滤镜） -->
+    <!-- 动态星云背景层（blur 烘焙进贴图，运行时零实时滤镜） -->
     <div class="cosmic-bg">
       <div class="cb-nebula cb-nebula-1"></div>
       <div class="cb-nebula cb-nebula-2"></div>
@@ -55,7 +55,7 @@ const emit = defineEmits<{ (e: "backdrop"): void }>();
 const onBackdropClick = () => emit("backdrop");
 
 /* ============================================================================
- * ★ P1-6 预渲染贴图：SVG 位图（渐变 + feGaussianBlur 烘焙）
+ * ★ 预渲染贴图：SVG 位图（渐变 + feGaussianBlur 烘焙）
  * ============================================================================
  * 与 CosmicBackground 同手法：浏览器将 data-URI SVG 背景图栅格化一次并缓存
  * 为纹理，运行时不再执行实时重栅格化（星云 drift 动画只驱动

@@ -3,7 +3,7 @@
  *
  * - verthys_secure_zero：基于 SecureZeroMemory，编译器不可优化消除
  * - verthys_lock_memory / verthys_unlock_memory：VirtualLock/VirtualUnlock，
- *   防止密钥所在内存页被换页到磁盘（project.md 内存保护要求）
+ *   防止密钥所在内存页被换页到磁盘（内存保护要求）
  */
 #include "verthys_internal.h"
 

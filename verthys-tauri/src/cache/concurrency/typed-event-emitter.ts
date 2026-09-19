@@ -2,11 +2,10 @@
  * cache/concurrency/typed-event-emitter.ts — 零依赖类型化事件发射器
  *
  * ★ 构建约束说明（重要）：
- *   方案（verthys-cache-refactor-concurrency-fix.md §3.3）中 VerthysCacheDomain
- *   继承 Node 的 EventEmitter（import { EventEmitter } from 'events'）。
+ *   原设计中 VerthysCacheDomain 继承 Node 的 EventEmitter（import { EventEmitter } from 'events'）。
  *   本项目为 Vite 浏览器构建（verthys-tauri），依赖中无 `events` 包亦无 Node
  *   polyfill（vite.config.ts 无 alias/polyfill 配置），Node 内置模块在
- *   浏览器 bundle 中无法解析。故按方案意图提供本零依赖等价实现：
+ *   浏览器 bundle 中无法解析。故提供本零依赖等价实现：
  *     - on / once / off / emit / removeAllListeners API 与 EventEmitter 对齐
  *     - 事件名与监听器参数由泛型事件表静态约束（比 Node 版更类型安全）
  *

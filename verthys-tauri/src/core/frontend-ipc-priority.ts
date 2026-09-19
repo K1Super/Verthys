@@ -1,7 +1,7 @@
 /*
  * core/frontend-ipc-priority.ts — 前端 IPC 优先级门控
  *
- * ★ 模块加载性能根治方案：消除 worker 单线程串行 FIFO 队头阻塞
+ * ★ 模块加载性能根治设计：消除 worker 单线程串行 FIFO 队头阻塞
  *
  * 问题根因：
  *   worker 是单例常驻进程，Actor 单消费者 + mpsc FIFO 队列（容量 32），无优先级、无抢占。
@@ -9,7 +9,7 @@
  *   的 IPC 请求与前端模块加载请求（getRecordsDataB64Batch → verthysGetRecord）
  *   共用同一 worker 通道。后台任务独占 worker 时前端请求排队等待 → 30s 卡顿。
  *
- * 解决方案：
+ * 处理方式：
  *   1. markFrontendIpcActive()：前端关键 IPC 调用入口处标记「前端活跃」时间戳
  *   2. isFrontendIpcBusy()：检查距上次前端活跃是否在防抖窗口内（800ms）
  *   3. yieldIfFrontendBusy()：后台任务在每个 IPC 调用前调用，

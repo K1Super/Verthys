@@ -7,13 +7,13 @@
  *   3. 模块登出（logoutModule）
  *   4. 模块密钥保护开关（setModuleKeyEnabled）
  *
- * ★ 白皮书 3.2 架构优化（V2.0）：
- *   - 方案一：统一错误契约 — 所有公共函数返回 Promise<VerthysResult<T>>
- *   - 方案二：CacheCoordinator — 缓存操作由单一协调器管理，消除遗漏风险
- *   - 方案三：版本化 + 自愈 — findModuleKeyRecord 返回 version 最大者，发现多条记录触发后台清理
- *   - 方案四：增量状态加载 — loadModuleKeyStatus 使用摘要缓存，O(N) → O(1)
- *   - 方案五：会话状态原子化 — cacheModuleKey/removeModuleKey 内部原子更新 moduleKeyReady
- *   - 方案六：延迟冲刷 — setModuleKey/setModuleKeyEnabled 使用 flushVerthysAsync(false)
+ * ★ 架构优化目标：
+ *   - 统一错误契约 — 所有公共函数返回 Promise<VerthysResult<T>>
+ *   - CacheCoordinator — 缓存操作由单一协调器管理，消除遗漏风险
+ *   - 版本化 + 自愈 — findModuleKeyRecord 返回 version 最大者，发现多条记录触发后台清理
+ *   - 增量状态加载 — loadModuleKeyStatus 使用摘要缓存，O(N) → O(1)
+ *   - 会话状态原子化 — cacheModuleKey/removeModuleKey 内部原子更新 moduleKeyReady
+ *   - 延迟冲刷 — setModuleKey/setModuleKeyEnabled 使用 flushVerthysAsync(false)
  */
 import {
   verthysAddRecord, verthysDeleteRecord,
@@ -76,7 +76,7 @@ let moduleKeyStatusVersion = 0;
 /* ------------------------------------------------------------------ *
  * verthys 记录查找（版本化 + 自愈清理）                                  *
  *                                                                    *
- * ★ 白皮书 3.2 方案三：                                               *
+ * ★ 版本化 + 自愈清理：
  *   findModuleKeyRecord 收集全部同 moduleId 的记录，                 *
  *   返回 version 最大者（即使删除失败导致新旧记录共存，也能正确返回   *
  *   最新记录）。发现多条记录时触发后台自愈清理。                      *
@@ -109,7 +109,7 @@ async function findModuleRecord<T>(
 /**
  * 在 verthys 中查找指定模块的密钥验证器记录
  *
- * ★ 白皮书 3.2 方案三：版本化 + 自愈清理
+ * ★ 版本化 + 自愈清理
  *
  * 行为：
  *   1. 查找全部同 moduleId 的记录
@@ -254,7 +254,7 @@ async function findModuleKeyConfigRecord(
 /**
  * 扫描 verthys 中所有模块密钥记录与开关配置，更新 hasModuleKeyRecord 和 moduleKeyEnabled
  *
- * ★ 白皮书 3.2 方案四：增量状态加载
+ * ★ 增量状态加载
  *   不再全量扫描，而是利用摘要缓存 getSummaryIdsByType 快速获取 ID 列表，
  *   然后逐个 verthysGetRecord 获取数据（模块记录极少，仅常数次 IPC）。
  *   若摘要未就绪，回退到原有扫描。将 O(N) 降为 O(1)。
@@ -262,9 +262,9 @@ async function findModuleKeyConfigRecord(
  * @returns VerthysResult<void>
  */
 export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
-  // ★ 企业级根治修复6：捕获启动版本号，用于完成后并发校验
+  // ★ 捕获启动版本号，用于完成后并发校验
   const startVersion = moduleKeyStatusVersion;
-  // ★ 企业级根治修复4：标记后台加载进行中（供模块组件/SecurityCenter 守卫）
+  // ★ 标记后台加载进行中（供模块组件/SecurityCenter 守卫）
   keyState.moduleKeyStatusLoading.value = true;
   try {
     const status: Record<ModuleId, boolean> = { photo: false, accounts: false, certs: false, fileverthys: false };
@@ -421,9 +421,9 @@ async function loadModuleKeyStatusFallback(
 /**
  * 设置模块密钥保护开关（持久化到 verthys）。
  *
- * ★ 白皮书 3.2 方案一：返回 VerthysResult<void>
- * ★ 白皮书 3.2 方案二：通过 CacheCoordinator 统一同步缓存
- * ★ 白皮书 3.2 方案六：使用 flushVerthysAsync(false) 延迟冲刷
+ * ★ 返回 VerthysResult<void>
+ * ★ 通过 CacheCoordinator 统一同步缓存
+ * ★ 使用 flushVerthysAsync(false) 延迟冲刷
  *
  * 写入顺序：先添加新记录，成功后再删除旧记录（先添后删）。
  *
@@ -447,7 +447,7 @@ export async function setModuleKeyEnabled(moduleId: ModuleId, enabled: boolean):
     return err(VerthysErrorCode.E_MODULE_CONFIG_SAVE_FAILED, "写入 verthys 失败");
   }
 
-  // ★ 白皮书 3.2 方案二：通过 CacheCoordinator 统一同步缓存（消除手动调用遗漏风险）
+  // ★ 通过 CacheCoordinator 统一同步缓存（消除手动调用遗漏风险）
   cacheCoordinator.addRecord({
     id, type: TYPE_MODULE_KEY_CONFIG, name, dataB64, dataSize: dataB64.length,
   });
@@ -474,7 +474,7 @@ export async function setModuleKeyEnabled(moduleId: ModuleId, enabled: boolean):
   }
 
   // 更新状态（数据已确认落盘）
-  // ★ 企业级根治修复6：递增版本号，使进行中的 loadModuleKeyStatus 丢弃其旧结果
+  // ★ 递增版本号，使进行中的 loadModuleKeyStatus 丢弃其旧结果
   //   杜绝后台加载用旧 verthys 状态覆盖用户刚切换的开关（"开关直接影响全局"根因）
   moduleKeyStatusVersion++;
   keyState.moduleKeyEnabled.value = { ...keyState.moduleKeyEnabled.value, [moduleId]: enabled };
@@ -506,10 +506,10 @@ export function generateModuleKey(): string {
 /**
  * 设置模块独立密钥（首次设置或修改）
  *
- * ★ 白皮书 3.2 方案一：返回 VerthysResult<void>
- * ★ 白皮书 3.2 方案二：通过 CacheCoordinator 统一同步缓存
- * ★ 白皮书 3.2 方案三：版本递增（每次 setModuleKey 递增 version）
- * ★ 白皮书 3.2 方案六：使用 flushVerthysAsync(false) 延迟冲刷
+ * ★ 返回 VerthysResult<void>
+ * ★ 通过 CacheCoordinator 统一同步缓存
+ * ★ 版本递增（每次 setModuleKey 递增 version）
+ * ★ 使用 flushVerthysAsync(false) 延迟冲刷
  *
  * 写入顺序：先添加新记录（带递增 version），成功后再删除旧记录。
  *
@@ -531,7 +531,7 @@ export async function setModuleKey(moduleId: ModuleId, key: string): Promise<Ver
 
   // 2. 查找旧记录（用于版本号递增 + 后续删除）
   const existing = await findModuleKeyRecord(moduleId);
-  // ★ 白皮书 3.2 方案三：版本递增
+  // ★ 版本递增
   const newVersion = (existing?.rec.version ?? 0) + 1;
 
   // 3. 构造记录（带 version）
@@ -549,7 +549,7 @@ export async function setModuleKey(moduleId: ModuleId, key: string): Promise<Ver
     return err(VerthysErrorCode.E_MODULE_KEY_SET_FAILED, "写入 verthys 失败");
   }
 
-  // ★ 白皮书 3.2 方案二：通过 CacheCoordinator 统一同步缓存
+  // ★ 通过 CacheCoordinator 统一同步缓存
   cacheCoordinator.addRecord({
     id, type: TYPE_MODULE_KEY, name, dataB64, dataSize: dataB64.length,
   });
@@ -575,7 +575,7 @@ export async function setModuleKey(moduleId: ModuleId, key: string): Promise<Ver
   }
 
   // 6. 更新状态（数据已确认落盘）
-  // ★ 企业级根治修复6：递增版本号，使进行中的 loadModuleKeyStatus 丢弃其旧结果
+  // ★ 递增版本号，使进行中的 loadModuleKeyStatus 丢弃其旧结果
   //   杜绝后台加载用旧 verthys 状态覆盖用户刚设置的模块密钥记录状态
   moduleKeyStatusVersion++;
   keyState.hasModuleKeyRecord.value = { ...keyState.hasModuleKeyRecord.value, [moduleId]: true };
@@ -586,8 +586,8 @@ export async function setModuleKey(moduleId: ModuleId, key: string): Promise<Ver
 /**
  * 验证模块独立密钥（模块登录时调用）
  *
- * ★ 白皮书 3.2 方案一：返回 VerthysResult<void>
- * ★ 白皮书 3.2 方案五：cacheModuleKey 内部原子地设置 moduleKeyReady=true
+ * ★ 返回 VerthysResult<void>
+ * ★ cacheModuleKey 内部原子地设置 moduleKeyReady=true
  *
  * @returns VerthysResult<void>
  */
@@ -610,7 +610,7 @@ export async function verifyModuleKey(moduleId: ModuleId, key: string): Promise<
     return errFromUnknown(e, VerthysErrorCode.E_MODULE_VERIFY_FAILED);
   }
 
-  // ★ 白皮书 3.2 方案五：cacheModuleKey 内部原子地设置 moduleKeyReady=true
+  // ★ cacheModuleKey 内部原子地设置 moduleKeyReady=true
   //   消除「先缓存密钥后置状态」的不一致窗口
   cacheModuleKey(moduleId, key);
   touchSession();
@@ -640,7 +640,7 @@ export function isModuleReady(moduleId: ModuleId): boolean {
 /**
  * 登出模块（清除会话密钥缓存，不影响持久化记录）
  *
- * ★ 白皮书 3.2 方案五：会话状态原子化
+ * ★ 会话状态原子化
  *   removeModuleKey 内部原子地同时清空密钥字节 + 置 moduleKeyReady=false，
  *   消除「先清缓存再置状态」的不一致窗口。
  */

@@ -36,14 +36,14 @@ pub(crate) struct Request {
     pub(crate) bin_password: String,
     #[serde(default)]
     pub(crate) module_id: String,
-    // v2 预设选择（create_with_preset 操作）
+    // 安全预设选择（create_with_preset 操作）
     // 0 = BALANCED（日常推荐），1 = SECURE（涉密/合规）
     #[serde(default)]
     pub(crate) preset: u32,
-    // 批量删除 ID 列表（delete_records 操作，落实 upgrade.md 批量删除合并单次 flush）
+    // 批量删除 ID 列表（delete_records 操作，合并为单次 flush）
     #[serde(default)]
     pub(crate) ids: Vec<u64>,
-    // ★ 方案九：unlock 操作的 flags 位域（预热状态透传）
+    // ★ unlock 操作的 flags 位域（预热状态透传）
     // 0x01 = 索引区已预热，0x02 = 允许加载持久化缓存
     #[serde(default)]
     pub(crate) flags: u32,
@@ -58,7 +58,7 @@ pub(crate) struct RecordEntry {
     pub(crate) data: String, // base64
 }
 
-/* ★ WP-11（P2-3 观测出口）：防御闭环状态报告（与 verthys.h
+/* ★ 防御闭环状态报告（与 verthys.h
  * VerthysSecurityStatus 字段一一对应；path_state 下标 = VerthysDefensePath，
  * 值域 = VerthysDefenseState：0=未校验 1=已阻断 2=降级 3=失败） */
 #[derive(Serialize)]
@@ -101,7 +101,7 @@ pub(crate) struct Response {
     /// 共享内存中本次返回的记录数
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) record_count: Option<u64>,
-    /* ★ 企业级根治方案：解锁响应内联全局主密钥探测结果
+    /* ★ 企业级根治：解锁响应内联全局主密钥探测结果
      *   将原本解锁后 3~4 次 IPC 往返（has_record → find_lid → get_record）
      *   下沉到 worker 解锁成功分支进程内完成，直接内联到 unlock 响应。
      *   消除前端 probe 链路竞态与 v1 容器假阴性导致的 loading 死锁。 */
@@ -114,7 +114,7 @@ pub(crate) struct Response {
     /// 全局主密钥记录数据 base64（仅 unlock 操作且 has_global_key=true 时返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) global_key_record: Option<String>,
-    /// ★ WP-11（P2-3 观测出口）：防御闭环 7 路径状态（仅 security_status 操作返回）
+    /// ★ 防御闭环 7 路径状态（仅 security_status 操作返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) security_status: Option<SecurityStatusReport>,
 }
@@ -141,20 +141,20 @@ impl Response {
         }
     }
     pub(crate) fn err(op: &str, code: u32) -> Self {
-        // ★ E-8 错误码统一化（反 Oracle 设计，与 verthys.h VerthysResult 契约对齐）：
+        // ★ 错误码统一化（反 Oracle 设计，与 verthys.h VerthysResult 契约对齐）：
         //   认证/格式/IO/损坏/内部异常统一映射为 AUTH，防止通过错误码区分
         //   "密码错误"还是"文件篡改"等信息泄露。
-        //   功能性状态码按 C 层契约透传，供上层做流程决策（v1 既有 + V3 扩展）：
+        //   功能性状态码按 C 层契约透传，供上层做流程决策（v1 既有 + 扩展）：
         //   - INVALID/NOTFOUND/EXISTS/LOCKED/RATE：v1 既有功能码
-        //   - SNAPSHOT(0x0B)：扫描游标快照过期，需重建游标（WP-3）
+        //   - SNAPSHOT(0x0B)：扫描游标快照过期，需重建游标
         //   - PEPPER_SOURCE(0x0C)：OS 托管 pepper 源变更，C 层显式区别于 AUTH，
-        //     上层应提示"安全源已变更"而非引导重试密码（方案 4.2）
-        //   - EXPORT_TOO_MANY(0x0D)：导出超 v1 容量上限（P1-8）
-        //   - CNG_UNAVAILABLE(0x0E)：CNG 内核态密码服务不可用（WP-1）
-        //   - RESOURCE_LIMIT(0x0F)：内存预算耗尽，可回收后重试（WP-7）
-        //   - QUORUM_FAILED(0x10)：超级块法定人数不满足，须触发 WAL 恢复（WP-2）
-        //   - PARTIAL_UNLOCK(0x11)：渐进式解锁最小可操作状态（WP-5）
-        //   - TIMEOUT(0x12)：解锁流水线预算超时，可安全重试（WP-5）
+        //     上层应提示"安全源已变更"而非引导重试密码
+        //   - EXPORT_TOO_MANY(0x0D)：导出超 v1 容量上限
+        //   - CNG_UNAVAILABLE(0x0E)：CNG 内核态密码服务不可用
+        //   - RESOURCE_LIMIT(0x0F)：内存预算耗尽，可回收后重试
+        //   - QUORUM_FAILED(0x10)：超级块法定人数不满足，须触发 WAL 恢复
+        //   - PARTIAL_UNLOCK(0x11)：渐进式解锁最小可操作状态
+        //   - TIMEOUT(0x12)：解锁流水线预算超时，可安全重试
         //   - UNSUPPORTED(0x13)：当前容器格式不支持该操作（退役 op 显式拒绝）
         const VERTHYS_ERR_AUTH: u32 = 0x00000002;
         const VERTHYS_ERR_INVALID: u32 = 0x00000001;

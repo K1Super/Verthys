@@ -33,9 +33,9 @@ extern int g_tests_failed;
 } while (0)
 
 /* ------------------------------------------------------------------ *
- * ★ WP-13（K-1）：测试间状态快照 — 测试前后对比线程数/句柄数/
+ * 测试间状态快照 — 测试前后对比线程数/句柄数/
  * emergency 信号，差异非零即打印，用于定位测试间累积状态泄漏源
- * （K-1 怀疑：后台线程/句柄/紧急信号窗口跨测试残留 + 布局敏感野指针）。
+ * （怀疑：后台线程/句柄/紧急信号窗口跨测试残留 + 布局敏感野指针）。
  * 实现位于 test_runner.c（Windows API 不侵入各测试翻译单元）。
  * ------------------------------------------------------------------ */
 typedef struct TestStateSnapshot {
@@ -77,9 +77,9 @@ int test_filter_match(const char *test_name);
         fflush(stdout); \
         g_tests_failed++; \
     } \
-    /* ★ WP-13 步骤2：每测试后强制清零 emergency 信号窗口，阻断跨测试累积 */ \
+    /* ★ 步骤2：每测试后强制清零 emergency 信号窗口，阻断跨测试累积 */ \
     emergency_clear_signals(); \
-    /* ★ WP-13 步骤1：测试间状态快照断言（差异非零打印） */ \
+    /* ★ 步骤1：测试间状态快照断言（差异非零打印） */ \
     test_state_capture(&_snap_after); \
     test_state_report_diff(#name, &_snap_before, &_snap_after); \
 } while (0)
@@ -87,7 +87,7 @@ int test_filter_match(const char *test_name);
 /* ------------------------------------------------------------------ *
  * 测试框架输出封装（入口文件零直接 printf）                            *
  *                                                                    *
- * 规范引用（ 第 1 节）：                                       *
+ * 框架约定（入口输出规范）：                                       *
  *   入口文件禁止出现 printf/fprintf/OutputDebugString 等直接输出      *
  *   test_runner.c（入口）通过以下宏调用测试框架输出，实现分层解耦     *
  * ------------------------------------------------------------------ */

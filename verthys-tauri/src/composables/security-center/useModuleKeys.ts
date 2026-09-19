@@ -27,7 +27,7 @@
  *     由 SecurityCenter 顶层持有，含 toast 反馈；未来可提取为 useClipboard）
  *   - 乐观更新策略：UI 立即响应，后台 setModuleKeyEnabled 持久化失败时回滚
  *
- * ★ 白皮书 V2.0 阶段 7.2：
+ * ★ 返回契约：
  *   - setModuleKeyEnabled 返回 VerthysResult<void>
  *   - verifyModuleKey 返回 VerthysResult<void>
  *   - setModuleKey 返回 VerthysResult<void>
@@ -129,7 +129,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
 
   /* ===== 切换模块密钥保护开关（乐观更新 — 立即响应，后台持久化） =====
    *
-   * ★ 白皮书 V2.0 阶段 7.2：setModuleKeyEnabled 返回 VerthysResult<void>
+   * ★ setModuleKeyEnabled 返回 VerthysResult<void>
    *
    * 流程：
    *   1. 全局密钥未就绪 → 直接返回（防御性守卫）
@@ -178,12 +178,12 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
 
   /* ===== 关闭密钥保护验证弹窗 — 确认 =====
    *
-   * ★ 白皮书 V2.0 阶段 7.2：
+   * ★ 返回契约：
    *   - verifyModuleKey 返回 VerthysResult<void>
    *   - setModuleKeyEnabled 返回 VerthysResult<void>
    *
    * 流程：
-   *   1. 验证原独立密钥 → 失败则提示错误（保持弹窗开启）
+   *   1. 验证模块密钥（verifyModuleKey）验证原独立密钥 → 失败则提示错误（保持弹窗开启）
    *   2. 验证通过 → 关闭保护（乐观更新 UI + 后台持久化，失败回滚）
    */
   const onConfirmDisableVerify = async () => {
@@ -260,12 +260,12 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
 
   /* ===== 确认保存密钥（修改时需先验证原密钥） =====
    *
-   * ★ 白皮书 V2.0 阶段 7.2：
+   * ★ 返回契约：
    *   - verifyModuleKey 返回 VerthysResult<void>
    *   - setModuleKey 返回 VerthysResult<void>
    *
    * 流程：
-   *   1. 修改模式（hasModuleKey=true）→ 先验证原独立密钥
+ *   1. 修改模式（hasModuleKey=true）→ 先验证原独立密钥
    *   2. 验证通过（或生成模式）→ 保存新密钥
    *   3. 成功 → 关闭弹窗 + 清空表单 + toast 反馈
    *   4. ★ 待启用流程（pendingEnableModuleId 命中）→ 自动开启该模块密钥保护

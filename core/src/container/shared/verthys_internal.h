@@ -2,21 +2,9 @@
  * verthys_internal.h — DLL 内部共享头（不导出，不暴露给外部）
  *
  * 定义 VerthysContext 内部结构、内部状态、内部工具函数原型。
- * 外部仅见 verthys.h 的不透明句柄；此头仅供 src/ 内部使用。
+ * 外部仅通过 verthys.h 的不透明句柄；此头仅供 src/ 内部使用。
  *
- * ★ V3 架构（§1.4 V2 退役后唯一支持的容器格式）：
- *   - CNG 内核托管密钥组（MEK/A/B/C 句柄化，用户态零密钥数组）
- *   - 法定人数三副本超级块（FlatBuffers 帧 + state_chain 防回滚）
- *   - LSM 索引（MemTable 跳表 + SSTable + 分级 Compaction）
- *   - Extent 内容寻址数据区（BLAKE2b 去重 + AEAD）
- *   - 六 Phase 事务（WAL 环形双缓冲 + CONFIRM 收口）
- *   - V3 温启动缓存（'V3IC'，HMAC + txid 双校验）
  *
- * ★ §1.4 V2 退役（V3_UPGRADE_PLAYBOOK）：V1/V2 字段（salt/dek/
- *   key_a/b/c/master_key、records 数组、superblock、btree、dblock_mgr、
- *   merkle、txn、watcher、mount_watcher、summary_records 等）随删除清单
- *   整体摘除。V3 权威数据源全部位于 VerthysContextV3（api/verthys_v3_lifecycle.h），
- *   本结构仅保留 API 层编排状态、诊断指标与安全治理字段。
  */
 #ifndef VERTHYS_INTERNAL_H
 #define VERTHYS_INTERNAL_H
@@ -38,7 +26,6 @@ typedef enum {
 } VerthysState;
 
 /* 容器格式版本（运行时检测）。
- * §1.4 V2 退役：V3 为唯一合法容器格式——V1/V2 枚举随删除清单移除，
  * Unlock 格式门禁对非 V3 头一律 VERTHYS_ERR_FORMAT（"V3 不读 V2 文件"）。 */
 typedef enum {
     VERTHYS_FMT_NONE = 0,  /* 未挂载容器（Init 零态）或未知/非法格式 */
@@ -48,13 +35,13 @@ typedef enum {
 /* 前向声明：V3 运行时上下文（api/verthys_v3_lifecycle.h） */
 struct VerthysContextV3;
 
-/* ★ V3 升级 WP-7：安全分配器（v5.0 §5.2 VerthysContext 目标态字段）
+/* ★ 安全分配器（VerthysContext 密钥相关字段）
  * 密钥相关结构专用隔离堆：VirtualAlloc 区段 + PAGE_GUARD 边界页 +
- * VirtualLock 锁页 + 释放前清零；全局预算记账（性能架构 §4.1）。
+ * VirtualLock 锁页 + 释放前清零；全局预算记账。
  * Verthys_Init 创建 / Verthys_Deinit 销毁。 */
 typedef struct SecureAllocator SecureAllocator;
 
-/* ★ P1-9：记录名称长度上限（API 边界钳制，杜绝 uint16 截断导致的
+/* ★ 记录名称长度上限（API 边界钳制，杜绝 uint16 截断导致的
  * 密钥派生/索引存储分裂） */
 #define VERTHYS_NAME_MAX_BYTES 4096u
 
@@ -72,24 +59,23 @@ struct VerthysContext {
     /* 文件路径（heap 副本，Lock 时写回） */
     char *file_path;
 
-    /* 容器格式版本（运行时检测；§1.4 退役后仅 VERTHYS_FMT_V3 合法） */
     VerthysContainerVersion fmt_version;
 
-    /* ★ V3 升级 WP-5：V3 运行时上下文（堆实例）。
+    /* ★ V3 运行时上下文（堆实例）。
      * fmt_version == VERTHYS_FMT_V3 时非 NULL；Init 分配 / Deinit 释放
      * （verthys_v3_ctx_create / verthys_v3_ctx_destroy）。
      * 容器 Lock/再解锁后本指针更换堆实例——借用方（扫描游标等）经
      * 实例身份锚点检测失效。 */
     struct VerthysContextV3 *v3;
 
-    /* ★ V3 升级 WP-1：CNG 内核托管密钥组（v5.0 §5.2 目标态）
+    /* ★ CNG 内核托管密钥组（目标态密钥层次）
      * MEK/A/B/C 全部经 BCryptGenerateSymmetricKey 导入内核，用户态仅持
      * BCRYPT_KEY_HANDLE 句柄（不可导出）。经 verthys_cng_km_* 接口访问；
      * Lock/Deinit/紧急熔断 → verthys_cng_km_destroy_all（内核态密钥
      * 不可恢复）。 */
     VerthysCngKeyManager cng_keys;    /* CNG 内核密钥组 + 生命周期状态机 */
 
-    /* ★ V3 升级 WP-7：密钥相关结构专用隔离堆（v5.0 §5.2）。
+    /* ★ 密钥相关结构专用隔离堆（目标态）。
      * Init 创建 / Deinit 销毁。 */
     SecureAllocator *secure_alloc;
 
@@ -105,7 +91,7 @@ struct VerthysContext {
     uint64_t last_fullscan_time;    /* 上次全量校验时间戳 */
     uint64_t incremental_count;     /* 自上次全量校验以来的增量提交次数 */
 
-    /* 暴力破解退避（project.md 5.3：指数退避，2^k 秒，最长 1 小时）
+    /* 暴力破解退避（指数退避，2^k 秒，最长 1 小时）
      * 基于单调时钟（GetTickCount64），不受系统时间篡改影响。 */
     uint32_t failed_attempts;   /* 连续失败次数 */
     uint64_t last_failed_tick;  /* 最近一次失败时的单调毫秒计数，0=无失败 */
@@ -118,8 +104,7 @@ struct VerthysContext {
     uint8_t *last_getrecord_name;   /* 上次 GetRecord 返回的名称（heap） */
     size_t   last_getrecord_name_len;
 
-    /* ★ Comprehensive_optimization 第八部分 四.1：读写锁（SRWLock）
-     * ★ 方案三：细粒度读写锁 — 读共享锁 / 写独占锁，锁域隔离
+    /* ★ 读写锁（SRWLock）：细粒度读写锁 — 读共享锁 / 写独占锁，锁域隔离
      *
      *   共享读锁（AcquireSRWLockShared，并发放行）：
      *     - Verthys_GetDiagnostics   — 诊断指标读取（非敏感数据）
@@ -140,15 +125,15 @@ struct VerthysContext {
      *           Verthys_Deinit 时直接释放（SRWLOCK 无需 Delete）。 */
 #ifdef _WIN32
     SRWLOCK *api_mutex;          /* 读写锁（heap 分配，SRWLOCK） */
-    /* ★ 方案六：进度回调无锁环形缓冲区（异步解耦）
+    /* ★ 进度回调无锁环形缓冲区（异步解耦）
      *   verthys_emit_unlock_progress 写入环形缓冲区（O(1) <1μs），
      *   独立低优先级消费线程读取并调用 unlock_progress_cb。
-     *   主解锁链路零阻塞，彻底杜绝回调阻塞（D-010 修复）。
+     *   主解锁链路零阻塞。
      *   NULL = 未注册回调或非 Windows 平台（verthys_emit_unlock_progress 为空操作）。 */
     void *progress_ring;         /* VerthysProgressRing*（opaque，定义在 verthys_api.c） */
 #endif
 
-    /* ★ Comprehensive_optimization 第八部分 八.1/八.3：诊断指标 + 性能遥测
+    /* ★ 诊断指标 + 性能遥测
      *
      * 解锁耗时分解：每次 Verthys_Unlock 时采集，Verthys_GetDiagnostics
      * 返回给安全中心展示。计数器在事务提交/回滚/扫描时递增，供性能
@@ -169,7 +154,7 @@ struct VerthysContext {
     uint64_t diag_scan_open_count;        /* 扫描游标打开次数 */
     uint64_t diag_scan_snapshot_stale;    /* 快照过期次数 */
 
-    /* ★ 方案5：解锁进度回调（API 版本 0x0004）
+    /* ★ 解锁进度回调（API 版本 0x0004）
      *
      * 由 Verthys_RegisterUnlockProgressCallback 注册，在解锁流水线
      * 各阶段经环形缓冲区异步调用。回调函数指针与 user_data 透传，
@@ -183,7 +168,7 @@ struct VerthysContext {
     void                       *unlock_progress_user_data;  /* 透传用户数据 */
     uint64_t                    unlock_progress_start_ms;   /* 本次解锁起始时间戳（单调时钟） */
 
-    /* ★ 方案九（API 版本 0x0005）：预热状态跨层透传
+    /* ★ 预热状态跨层透传（API 版本 0x0005）
      *
      * 由 Verthys_Unlock 的 flags 参数设置，记录上层调度层的预热状态，
      * 供解锁流水线选择预热线程参数。
@@ -192,7 +177,7 @@ struct VerthysContext {
     uint32_t unlock_flags;           /* 本次解锁的 flags 位域（VERTHYS_UNLOCK_FLAG_*） */
     int      prefetch_done;          /* 索引区是否已预热（flags & 0x01），1=是 0=否 */
 
-    /* ★ 方案八：可观测性指标扩展（5 项新增指标）
+    /* ★ 可观测性指标扩展（5 项新增指标）
      *
      * 在解锁路径埋点采集，Verthys_GetDiagnostics 输出。 */
     uint64_t diag_page_cache_hit_ratio;   /* 页缓存命中率（百分比，0~100） */
@@ -201,13 +186,13 @@ struct VerthysContext {
     uint64_t diag_disk_bytes_read;        /* 本次解锁磁盘实际读取字节数 */
     uint32_t diag_preheat_status;         /* 预热状态枚举（0=未预热/1=预热中/2=预热完成/3=预热失败） */
 
-    /* ★ 方案二：索引内存映射失败告警计数（跨多次解锁累计）
+    /* ★ 索引内存映射失败告警计数（跨多次解锁累计）
      *
      * 预热完成但映射失败回退同步读取时递增，上报
      * idx_mmap_fallback_count 字段（环境异常的运维可观测性闭环）。 */
     uint32_t diag_idx_mmap_fallback_count;  /* 索引内存映射失败回退次数（累计） */
 
-    /* ★ 方案七：自适应 Argon2id 运行时漂移监控
+    /* ★ 自适应 Argon2id 运行时漂移监控
      *
      * 基准值从容器参数读取（创建时跑分记录）。
      * 每次解锁记录 Argon2id 派生耗时，与基准比较：
@@ -237,7 +222,7 @@ int  verthys_lock_memory(void *ptr, size_t len);
 int  verthys_unlock_memory(void *ptr, size_t len);
 
 /* ================================================================== *
- * ★ Comprehensive_optimization 第八部分 八.2：安全内存清零编译期强化     *
+ * ★ 安全内存清零编译期强化     *
  *                                                                    *
  * VERTHYS_SECURE_FREE(ptr, size) 统一管理敏感堆内存的释放：              *
  *   1. verthys_secure_zero 擦除内容（SecureZeroMemory，编译器不可优化）  *

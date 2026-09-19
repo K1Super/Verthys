@@ -1,13 +1,6 @@
 /*
  * defense.rs — Worker 进程级防御策略应用
  *
- * 用户需求（五、进程无菌沙盒 — 1. 双进程解耦架构）：
- *   加密 Worker（纯无菌沙盒）必须应用以下四项 mitigation policy：
- *     1. WIN32K_SYSTEM_CALL_DISABLE：免疫所有窗口注入
- *     2. PROCESS_CREATION_DISABLED：绝杀进程镂空、子进程注入
- *     3. IMAGE_LOAD_PREFER_SYSTEM32：防本地 DLL 劫持
- *     4. IMAGE_LOAD_NO_REMOTE：防反射注入、内存 PE 加载
- *
  * 调用时机：
  *   必须在 Worker 进程启动早期、加载 verthys.dll 之前调用。
  *   原因：
@@ -272,7 +265,7 @@ pub fn apply_process_sandbox() -> u32 {
         //   （例如 verthys.dll 依赖 USER32.dll），USER32.dll 的 DllMain 会失败，
         //   导致 verthys.dll 加载失败（ERROR_DLL_INIT_FAILED = 1114）。
         //
-        // 解决方案：
+        // 处理方式：
         //   在应用 Win32k 禁用之前，预先加载 verthys.dll 依赖的所有 Win32k-using DLL，
         //   让它们的 DllMain 在 mitigation 生效前完成初始化。后续加载 verthys.dll 时，
         //   这些依赖 DLL 已驻留内存，DllMain 不会再次运行，避开 mitigation 冲突。

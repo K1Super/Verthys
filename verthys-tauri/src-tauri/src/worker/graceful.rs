@@ -1,11 +1,11 @@
 //! worker/graceful.rs — 优雅退出与诊断
 //!
-//! ★ 第 10.6 项：优雅退出与强制终止结合
+//! 优雅退出与强制终止结合
 //!   - stdin 发 {"op":"shutdown"} 命令
 //!   - 等待 1 秒让子进程自行清理
 //!   - 超时 child.kill() + await
 //!
-//! ★ 第 10.3 项：只读诊断，惰性清理
+//! 只读诊断，惰性清理
 //!   - 子进程退出/管道断裂时，Actor 仅记录退出状态 + stderr 尾部构造错误
 //!   - stdin/stdout/stderr 句柄保持原样至 Actor 销毁
 //!
@@ -46,7 +46,7 @@ pub(crate) fn reject_request_after_exit(req: ActorRequest, pid: u32) {
 /* ------------------------------------------------------------------ *
  * 优雅退出                                                            *
  *                                                                    *
- * ★ 第 10.6 项：stdin 发 {"op":"shutdown"} 等 1s；                    *
+ * stdin 发 {"op":"shutdown"} 等 1s；                    *
  *   超时 child.kill() + await。                                       *
  * ------------------------------------------------------------------ */
 pub(crate) async fn perform_graceful_shutdown(
@@ -149,7 +149,7 @@ pub(crate) async fn mark_child_dead_if_needed(
 
 /// 诊断子进程退出：只读，不清空句柄
 ///
-/// ★ 第 10.3 项：只读诊断，惰性清理。
+/// 只读诊断，惰性清理。
 /// 仅读取退出状态 + stderr 环形缓冲区快照构造错误信息。
 /// stdin/stdout/stderr 句柄保持原样至 Actor 销毁。
 pub(crate) async fn diagnose_exit(

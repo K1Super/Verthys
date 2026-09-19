@@ -2,7 +2,7 @@
  * verthys_crypto.h — 密码学原语封装（内部，不导出）
  *
  * 基于 libsodium。仅暴露项目所需原语，隐藏 libsodium 细节。
- * 算法（project.md 3.1）：
+ * 算法：
  *   - 对称加解密：XChaCha20-Poly1305（256位密钥/192位nonce/16字节MAC）
  *   - 密钥派生：Argon2id（64MiB/3次/并行1）
  *   - HKDF/HMAC-SHA256（主密钥派生与全文件 MAC）
@@ -23,14 +23,14 @@ int verthys_crypto_init(void);
 #define VERTHYS_AEAD_MAC_BYTES   16u   /* Poly1305 认证标签 */
 #define VERTHYS_SALT_BYTES       16u   /* Argon2id 盐 */
 #define VERTHYS_HMAC_BYTES       32u   /* HMAC-SHA256 全文件 MAC */
-#define VERTHYS_ARGON2_MEM_KIB   65536u  /* 64 MiB（project.md 要求，SECURE 预设） */
+#define VERTHYS_ARGON2_MEM_KIB   65536u  /* 64 MiB（SECURE 预设） */
 #define VERTHYS_ARGON2_ITERS     3u
 #define VERTHYS_ARGON2_PARALLEL  1u
 
-/* ★ 企业级优化（方案4）：自适应 Argon2id 预设参数
+/* ★ 自适应 Argon2id 预设参数
  *
  *   BALANCED：32MiB / 2 iters / 1 parallel（单次派生 ~1.5s）
- *             超 OWASP 2023 推荐（19MiB/2/1），日常推荐预设
+ *             日常推荐预设
  *   SECURE  ：64MiB / 3 iters / 1 parallel（单次派生 6-15s）
  *             涉密/合规场景，沿用 VERTHYS_ARGON2_MEM_KIB/ITERS/PARALLEL
  *
@@ -39,7 +39,7 @@ int verthys_crypto_init(void);
 #define VERTHYS_ARGON2_BALANCED_MEM_KIB   32768u  /* 32 MiB */
 #define VERTHYS_ARGON2_BALANCED_ITERS     2u
 #define VERTHYS_ARGON2_BALANCED_PARALLEL  1u
-/* ★ 方案 §4.5：BALANCED 动态校准参数 */
+/* BALANCED 动态校准参数 */
 #define VERTHYS_ARGON2_CALIBRATE_TARGET_MS 1200u  /* 创建期目标派生耗时 */
 #define VERTHYS_ARGON2_BALANCED_ITERS_MAX   3u    /* 迭代上限（32MiB×3 ≈ 2.2s，守住 1~2s 预算） */
 
@@ -72,10 +72,10 @@ int verthys_aead_decrypt(const uint8_t *key,
 
 /* ---------- Argon2id 密钥派生 ----------
  * password||pepper 作为口令输入，salt 作为盐。
- * 参数：64MiB / 3 次 / 并行 1（project.md 3.1/3.2）。
+ * 参数：64MiB / 3 次 / 并行 1。
  * 输出 32 字节派生密钥材料。
  *
- * ★ Comprehensive_optimization 第八部分一.1：本函数为兼容封装，
+ * 本函数为兼容封装，
  *   内部委托 verthys_argon2id_derive_ex 并传入默认硬编码参数。
  *   新代码应直接调用 verthys_argon2id_derive_ex，由调用方从超级块
  *   获取实际 Argon2id 参数后传入，彻底解耦代码与固定强度。
@@ -87,22 +87,22 @@ int verthys_argon2id_derive(uint8_t out[VERTHYS_KEY_BYTES],
 
 /* ---------- Argon2id 密钥派生（无胡椒） ----------
  * 仅用 password 作为口令输入，salt 作为盐。用于导出/导入文件
- *（project.md 5.3：导出密码不混入应用级胡椒，保证分包独立解密）。
+ *（导出密码不混入应用级胡椒，保证分包独立解密）。
  *
- * ★ 本函数为兼容封装，内部委托 verthys_argon2id_derive_ex（pepper=NULL）。
+ * 本函数为兼容封装，内部委托 verthys_argon2id_derive_ex（pepper=NULL）。
  */
 int verthys_argon2id_derive_raw(uint8_t out[VERTHYS_KEY_BYTES],
                               const uint8_t *password, size_t pw_len,
                               const uint8_t salt[VERTHYS_SALT_BYTES]);
 
 /* ================================================================== *
- * ★ 方案 §4.5：Argon2id 动态校准（创建期跑分选参）                     *
+ * Argon2id 动态校准（创建期跑分选参）
  * ================================================================== *
  * 以 mem_kib 固定、迭代次数为变量的两次探测（初始测量 + 换算确认），
  * 选择使单次派生耗时最接近 target_ms 的迭代次数，钳制在
  * [min_iters, max_iters]。选参结果由调用方写入超级块（解锁时按参数派生，
- * 与方案七基准监控共用存储）。SECURE 预设不使用本函数（合规确定性要求，
- * 参数固定 64MiB/3/1，见执行状态文档偏差留痕）。
+ * 与基准监控共用存储）。SECURE 预设不使用本函数（合规确定性要求，
+ * 参数固定 64MiB/3/1）。
  *
  * 返回 0 成功（out_iters 写入选定迭代数），非 0 失败。
  */
@@ -115,7 +115,7 @@ int verthys_argon2_calibrate(const uint8_t *password, size_t pw_len,
                            uint32_t *out_iters);
 
 /* ================================================================== *
- * ★ Comprehensive_optimization 第八部分 一.1：完全参数化的密钥派生接口  *
+ * 完全参数化的密钥派生接口
  *                                                                    *
  * 设计目标：                                                          *
  *   Argon2id 参数（内存、迭代、并行度）不再硬编码于代码常量，          *
@@ -149,7 +149,7 @@ int verthys_argon2id_derive_ex(uint8_t out[VERTHYS_KEY_BYTES],
                              uint32_t parallel);
 
 /* ================================================================== *
- * ★ Comprehensive_optimization 第八部分 一.3：独立完整性密钥派生       *
+ * 独立完整性密钥派生
  *                                                                    *
  * 引入独立完整性密钥，与 DEK 完全隔离：                                *
  *   integrity_key = HKDF-SHA256(master_key, "verthys/integrity-key") *
@@ -182,8 +182,8 @@ __declspec(noinline) int verthys_hmac_sha256(uint8_t out[VERTHYS_HMAC_BYTES],
                       const uint8_t key[VERTHYS_KEY_BYTES],
                       const uint8_t *data, size_t data_len);
 
-/* ---------- BLAKE2b-256 通用哈希（V3 内容寻址，WP-3 / E-3） ----------
- * libsodium crypto_generichash（BLAKE2b-256，无密钥模式），零新依赖。
+/* ---------- BLAKE2b-256 通用哈希（V3 内容寻址） ----------
+ * libsodium crypto_generichash（BLAKE2b-256，无密钥模式）。
  * out：32 字节 digest；data 可为 NULL（仅当 data_len==0）。
  * 返回 0 成功，非 0 失败。
  */

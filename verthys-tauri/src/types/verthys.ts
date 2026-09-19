@@ -15,7 +15,7 @@ export interface VerthysResponse {
   error?: string;
   /** 批量枚举记录列表（仅 enumerate_records 操作返回） */
   records?: VerthysRecordEntry[];
-  /** 摘要扫描记录列表（仅 scan_summary_open / scan_summary_next 操作返回，Phase 2C） */
+  /** 摘要扫描记录列表（仅 scan_summary_open / scan_summary_next 操作返回） */
   summary_records?: VerthysSummaryEntry[];
   /** 游标是否已遍历结束（scan_open / scan_next 返回） */
   exhausted?: boolean;
@@ -25,7 +25,7 @@ export interface VerthysResponse {
   shm_size?: number;
   /** 共享内存中本次返回的记录数 */
   record_count?: number;
-  /* ★ 企业级根治方案：解锁响应内联全局主密钥探测结果
+  /* ★ 企业级根治：解锁响应内联全局主密钥探测结果
    *   worker 解锁成功后进程内一次性完成 has_record + find_lid + get_record，
    *   结果内联到 unlock 响应三字段，彻底消除前端 IPC 链路与 v1 假阴性死锁。
    *
@@ -40,14 +40,14 @@ export interface VerthysResponse {
   global_key_id?: number;
   /** 全局主密钥记录数据 base64（仅 unlock 操作且 has_global_key=true 时返回） */
   global_key_record?: string;
-  /* ★ WP-11（P2-3）：防御闭环状态报告（仅 security_status 操作返回）
+  /* ★ 防御闭环状态报告（仅 security_status 操作返回）
    *
    * 与后端 Rust controller::types::SecurityStatusReport 严格对齐
    * （字段名保持 snake_case）。防御状态为进程级事实，锁定态亦可查询。 */
   security_status?: SecurityStatusReport;
-  /* ★ Comprehensive_optimization：异步批处理流水线 — 批量导入字段
+  /* ★ 异步批处理流水线 — 批量导入字段
    *
-   * 落实「N 次加密，1 次 IPC 传输」：verthys_add_records_batch 单次 IPC 写入 N 条记录，
+   * 「N 次加密，1 次 IPC 传输」：verthys_add_records_batch 单次 IPC 写入 N 条记录，
    * 返回分配的 verthys ID 列表 + 失败索引 + 检查点信息。WAL 保证断点续传幂等。
    *
    * 字段语义（仅 verthys_add_records_batch / verthys_import_begin / verthys_import_checkpoint 返回）：
@@ -70,7 +70,7 @@ export interface VerthysResponse {
 }
 
 /**
- * ★ 方案5：解锁进度信息
+ * ★ 解锁进度信息
  *
  * 与后端 Rust worker::UnlockProgress 严格对齐（字段名保持 snake_case）。
  * 解锁期间通过 Tauri Channel 流式推送，在解锁各阶段触发：
@@ -97,7 +97,7 @@ export interface UnlockProgress {
 }
 
 /**
- * ★ WP-11（P2-3）：防御闭环状态报告
+ * ★ 防御闭环状态报告
  *
  * 与后端 Rust controller::types::SecurityStatusReport 严格对齐
  * （字段名保持 snake_case）。Verthys_GetSecurityStatus 的结构化输出。
@@ -153,12 +153,12 @@ export interface EnumerateBatch {
   total_pushed: number;
 }
 
-/** 摘要扫描返回的单条记录（Phase 2C：轻量元数据，不含数据块）
+/** 摘要扫描返回的单条记录（轻量元数据，不含数据块）
  *
  * 与 VerthysRecordEntry 的区别：
  *   - 无 data 字段（不解密数据块，解锁后 1-2 秒内完成列表渲染）
  *   - 新增 data_size / physical_offset / merkle_leaf（供按需加载定位 + 完整性校验）
- *   - ★ Phase 2G：新增 created_time（创建时间戳，列表展示用）
+ *   - ★ 新增 created_time（创建时间戳，列表展示用）
  *
  * 与后端 Rust VerthysSummaryEntry 严格对齐（字段名保持 snake_case）
  */
@@ -172,7 +172,7 @@ export interface VerthysSummaryEntry {
   physical_offset: number;
   /** Merkle 叶子哈希 base64（完整性校验码，后台巡检用） */
   merkle_leaf: string;
-  /** ★ Phase 2G：创建时间戳（Unix 秒，列表展示用） */
+  /** ★ 创建时间戳（Unix 秒，列表展示用） */
   created_time: number;
 }
 
@@ -195,13 +195,13 @@ export interface RecordEntry {
   name: string;
 }
 
-/** 路径预检结果（第 3.4 项：错误码脱敏，dir 字段已废弃不再透传） */
+/** 路径预检结果（错误码脱敏，dir 字段已废弃不再透传） */
 export interface PreflightResult {
   ok: boolean;
   error: string | null;
-  /** 第 3.4 项：标准化错误码（INVALID_PATH/PERMISSION_DENIED/DISK_SPACE_INSUFFICIENT/DISK_SPACE_UNKNOWN/TEMPORARY_FAILURE） */
+  /** 标准化错误码（INVALID_PATH/PERMISSION_DENIED/DISK_SPACE_INSUFFICIENT/DISK_SPACE_UNKNOWN/TEMPORARY_FAILURE） */
   error_code?: string | null;
-  /** @deprecated 第 8.3 项：dir 字段已删除，后端不再透传路径，保留仅为类型兼容 */
+  /** @deprecated dir 字段已删除，后端不再透传路径，保留仅为类型兼容 */
   dir: string;
   is_system_protected: boolean;
   file_exists: boolean;
@@ -221,7 +221,7 @@ export interface InitStatusResult {
   detail: string;
 }
 
-/** 第 4.6 项：设备绑定校验结果（结构化返回） */
+/** 设备绑定校验结果（结构化返回） */
 export interface DeviceBindingResult {
   /** 绑定状态（match/mismatch/unbound/partial_match/error） */
   status: "match" | "mismatch" | "unbound" | "partial_match" | "error";
@@ -229,11 +229,11 @@ export interface DeviceBindingResult {
   detail: string;
   /** 错误码（status=error 时有值） */
   error_code?: string | null;
-  /** 第 4.5 项：匹配度百分比（0-100） */
+  /** 匹配度百分比（0-100） */
   match_score?: number | null;
 }
 
-/** 第 7.2/7.3/7.5 项：剪贴板清空结果（结构化返回） */
+/** 剪贴板清空结果（结构化返回） */
 export interface ClipboardResult {
   /** 操作是否成功（true=剪贴板已安全擦除） */
   ok: boolean;
@@ -249,13 +249,13 @@ export interface PrivacyModeResult {
   ok: boolean;
   /** 隐私模式当前状态（true=已启用，false=已关闭） */
   enabled: boolean;
-  /** 第 7.2 项：是否处于部分保护状态（防截屏已启用但剪贴板监听失败） */
+  /** 是否处于部分保护状态（防截屏已启用但剪贴板监听失败） */
   partial_protection: boolean;
   /** 用户可读描述 */
   detail: string;
   /** 错误码（CLIPBOARD_MONITOR_FAILED/RATE_LIMITED/PERMISSION_DENIED/TEMPORARY_FAILURE/INTERNAL） */
   error_code?: string | null;
-  /** 第 7.4 项：会话令牌（仅 enabled=true 时返回，关闭时需作为 authToken 传入） */
+  /** 会话令牌（仅 enabled=true 时返回，关闭时需作为 authToken 传入） */
   session_token?: string | null;
 }
 

@@ -74,6 +74,8 @@
 | ../CONTRIBUTING.md | 贡献指南 | P1 |
 | ROADMAP.md | 路线图 | P2 |
 | ARCHITECTURE_DECISIONS.md | ADR 索引 | P2 |
+| IMPL_PEPPER_V3_KEYSET.md | pepper 持久化 V3 与密钥槽架构实施规格（含验收结果） | P2 |
+| IMPL_PROGRESS.md | 实施进度与变更记录（中断恢复入口） | P2 |
 
 ## 维护约定（摘自查单第 4 节）
 

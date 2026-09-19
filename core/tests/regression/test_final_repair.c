@@ -1,22 +1,13 @@
 /*
- * test_final_repair.c — 《最终顶级修复方案》§6.1 全量回归测试
+ * test_final_repair.c — 全量回归测试
  *
- * 覆盖矩阵（§1.4 V2 退役后等价收敛，12 项与方案 §6.1 表对应）：
- *   P0-1 pool_extend 上界 / P0-2 LSM 大批量插入（原 B+ 树分裂传播，
- *   等价 V3 路径 = MemTable 跳表 + SSTable flush 往返 + 墓碑遮蔽）/
- *   P0-3 改密失败回滚 / P0-4 64 位文件偏移 / P1-1 mac_offset 回绕 /
- *   P1-2 vfmt_write 失败清理 / P1-3 records 容量回绕（V1 记录表随
- *   §1.4 删除清单退役，以编译期删除为验收）/ P1-4 vsb_txn_v3 回滚
- *   （原 V2 vsb_txn 等价 V3 原语）/ P1-5 tail log 检查 /
- *   P1-8 导出截断显式化 / P1-9 name_len 钳制 / P1-7 线程启停
- *   （P1-6 死代码删除无运行时行为，以编译期删除为验收）
  */
 #include "verthys_test.h"
 #include "verthys.h"
 #include "verthys_internal.h"
 #include "verthys_io.h"
 #include "verthys_format.h"
-#include "verthys_container_v3.h"   /* VsbTxnV3 / vsb_v3_*（P1-4 等价原语） */
+#include "verthys_container_v3.h"   /* VsbTxnV3 / vsb_v3_*（vsb_txn 等价原语） */
 #include "verthys_v3_lifecycle.h"    /* VerthysContextV3（改密回滚 V3 白盒） */
 #include "verthys_lsm.h"             /* verthys_lsm_put（导出上限/大批量 V3 白盒注入） */
 
@@ -25,7 +16,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#include <winioctl.h>   /* FSCTL_SET_SPARSE（P0-4 稀疏文件测试） */
+#include <winioctl.h>   /* FSCTL_SET_SPARSE（稀疏文件测试） */
 #endif
 
 /* 测试内本地小端序写入（与实现层各自独立，避免耦合静态函数） */
@@ -44,7 +35,7 @@ static void tput_u64le(uint8_t *p, uint64_t v) {
 static void fr_cleanup(void) { remove(FR_VERTHYS); }
 
 /* ------------------------------------------------------------------ *
- * P0-1：池扩展上界——先占 MEDIUM 槽 0，再压满 SMALL 池（64 条）触发
+ * 池扩展上界——先占 MEDIUM 槽 0，再压满 SMALL 池（64 条）触发
  * 扩展路径；修复前扩展零写会覆盖 MEDIUM 槽 0 的数据。
  * ------------------------------------------------------------------ */
 TEST(repair_pool_extend_boundary)
@@ -98,7 +89,7 @@ TEST(repair_pool_extend_boundary)
 }
 
 /* ------------------------------------------------------------------ *
- * P0-2：LSM 索引 5000 条插入 → 全量扫描 → 强制 flush（SSTable 序列化
+ * LSM 索引 5000 条插入 → 全量扫描 → 强制 flush（SSTable 序列化
  * 往返）→ 再全量扫描 → 删除半数（墓碑遮蔽）→ 扫描/点查校验。
  * （原 B+ 树内部分裂丢失子树用例随 verthys_btree 删除退役；等价 V3
  * 路径 = MemTable 跳表批量插入 + L0 SSTable 落盘往返 + 新旧版本遮蔽。
@@ -214,7 +205,7 @@ TEST(repair_lsm_large_insert)
 }
 
 /* ------------------------------------------------------------------ *
- * P0-3：改密落盘失败（超块区字节锁注入）→ 超级块盐值回滚，
+ * 改密落盘失败（超块区字节锁注入）→ 超级块盐值回滚，
  * 后续解锁仍用旧口令成功（修复前：内存盐值残留新值，后续提交锁库）。
  * ------------------------------------------------------------------ */
 TEST(repair_changepw_fail_rollback)
@@ -231,8 +222,6 @@ TEST(repair_changepw_fail_rollback)
     CHECK_EQ(Verthys_AddRecord(h, &r, &id), VERTHYS_OK);
     CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
 
-    /* 记录改密前的超级块盐值（V3 权威源：ctx->v3->sb——§1.4 V2 退役
-     * 后单路访问，不再按 fmt_version 分流） */
     struct VerthysContext *ctx = (struct VerthysContext *)h;
     uint8_t salt_before[VERTHYS_V3_SALT_BYTES];
     CHECK_EQ(Verthys_Unlock(h, FR_VERTHYS, "old-pw", 6, 0), VERTHYS_OK);
@@ -266,7 +255,7 @@ TEST(repair_changepw_fail_rollback)
     }
 #endif
 
-    /* ★ 核心断言：内存超级块盐值必须恢复为旧值（P0-3 修复点） */
+    /* ★ 核心断言：内存超级块盐值必须恢复为旧值（回滚修复点） */
     CHECK(memcmp(ctx->v3->sb.salt, salt_before, sizeof salt_before) == 0);
 
     /* 旧口令仍可解锁（会话内提交不会落盘毒化状态） */
@@ -281,7 +270,7 @@ TEST(repair_changepw_fail_rollback)
 }
 
 /* ------------------------------------------------------------------ *
- * P0-4：64 位文件偏移——稀疏文件 2GB+ 偏移读写往返。
+ * 64 位文件偏移——稀疏文件 2GB+ 偏移读写往返。
  * ------------------------------------------------------------------ */
 TEST(repair_large_file_offset)
 {
@@ -317,7 +306,7 @@ TEST(repair_large_file_offset)
 }
 
 /* ------------------------------------------------------------------ *
- * P1-1：恶意 v1 头 mac_offset 整数回绕 → 解析必须拒绝。
+ * 恶意 v1 头 mac_offset 整数回绕 → 解析必须拒绝。
  * ------------------------------------------------------------------ */
 TEST(repair_v1_mac_offset_overflow)
 {
@@ -343,7 +332,7 @@ TEST(repair_v1_mac_offset_overflow)
 }
 
 /* ------------------------------------------------------------------ *
- * P1-2：vfmt_write 失败路径清理——重复失败不崩溃（泄漏由 ASAN CI 甄别）。
+ * vfmt_write 失败路径清理——重复失败不崩溃（泄漏由 ASAN CI 甄别）。
  * ------------------------------------------------------------------ */
 TEST(repair_vfmt_write_fail_cleanup)
 {
@@ -374,14 +363,14 @@ TEST(repair_vfmt_write_fail_cleanup)
 }
 
 /* ------------------------------------------------------------------ *
- * P1-3：records 容量回绕——V1 内存记录表（records_ensure_capacity 的
- * 32768 翻倍截断悬垂）随 §1.4 删除清单退役：V3 记录账本 = LSM 索引
+ * records 容量回绕——V1 内存记录表（records_ensure_capacity 的
+ * 32768 翻倍截断悬垂）随删除清单退役：V3 记录账本 = LSM 索引
  * （MemTable 跳表动态分配，无数组容量语义），回绕缺陷类别整体消除。
- * 以编译期删除为验收（同 P1-6 死代码删除）。
+ * 以编译期删除为验收（同死代码删除）。
  * ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ *
- * P1-4：vsb_txn_v3 原语——begin/mutate/rollback 恢复，commit 保留
+ * vsb_txn_v3 原语——begin/mutate/rollback 恢复，commit 保留
  * （V3 三副本法定人数提交 + 终态后不可复用语义，原 V2 vsb_txn 等价）。
  * ------------------------------------------------------------------ */
 TEST(repair_vsb_txn_v3_rollback)
@@ -432,7 +421,7 @@ TEST(repair_vsb_txn_v3_rollback)
 }
 
 /* ------------------------------------------------------------------ *
- * P1-5：提交路径 tail log/bitmap 检查接入后的成功路径回归。
+ * 提交路径 tail log/bitmap 检查接入后的成功路径回归。
  * ------------------------------------------------------------------ */
 TEST(repair_tail_log_commit_regression)
 {
@@ -456,7 +445,7 @@ TEST(repair_tail_log_commit_regression)
 }
 
 /* ------------------------------------------------------------------ *
- * P1-8：导出条数超交换格式容量上限 → VERTHYS_ERR_EXPORT_TOO_MANY（不再静默截断）。
+ * 导出条数超交换格式容量上限 → VERTHYS_ERR_EXPORT_TOO_MANY（不再静默截断）。
  * 直接向索引注入 70000 条（绕开逐条事务的耗时），触发导出上限分支：
  *   V3：LSM 索引（verthys_lsm_put——WAL 先行 + MemTable，阈值自动
  *   flush 落 L0 SSTable，墓碑为 0 全部可数）；导出第一遍快照迭代
@@ -502,7 +491,7 @@ TEST(repair_export_too_many)
 }
 
 /* ------------------------------------------------------------------ *
- * P1-9：name_len 超限在 API 边界拒绝。
+ * name_len 超限在 API 边界拒绝。
  * ------------------------------------------------------------------ */
 TEST(repair_name_len_clamp)
 {
@@ -530,7 +519,7 @@ TEST(repair_name_len_clamp)
 }
 
 /* ------------------------------------------------------------------ *
- * P1-7：watcher / progress 线程高频启停回归（修复后停机无限等待，
+ * watcher / progress 线程高频启停回归（修复后停机无限等待，
  * 不再有超时后的悬垂释放窗口）。
  * ------------------------------------------------------------------ */
 TEST(repair_thread_shutdown_cycles)

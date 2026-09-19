@@ -1,14 +1,6 @@
 /*
  * process_sandbox.h — 进程无菌沙盒（内部模块，不导出）
  *
- * 用户需求（五、进程无菌沙盒 — 1. 双进程解耦架构）：
- *   - 加密 Worker（纯无菌沙盒）：
- *     1. WIN32K_SYSTEM_CALL_DISABLE：免疫所有窗口注入
- *     2. PROCESS_CREATION_DISABLED：绝杀进程镂空、子进程注入
- *     3. IMAGE_LOAD_PREFER_SYSTEM32：防本地 DLL 劫持
- *     4. IMAGE_LOAD_NO_REMOTE：防反射注入、内存 PE 加载
- *   - 前台辅助进程：承担 UI、日志、系统调用、工具调用，全程无明文密钥，
- *     通过单向 IPC 通信
  *
  * 设计原理：
  *   Windows 10 1709+ 提供 ProcessSystemCallDisableInformation，

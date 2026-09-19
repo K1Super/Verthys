@@ -23,7 +23,7 @@ export {
   TYPE_MODULE_KEY_CONFIG,
 } from "./record_types";
 
-/* ★ 白皮书 3.2 方案三：模块密钥记录版本化常量 */
+/* ★ 模块密钥记录版本化常量 */
 
 /** 模块密钥记录当前版本号（每次 setModuleKey 写入此值）
  *
@@ -71,7 +71,7 @@ export const VERTHYS_DEFAULT_PASSWORD = "VERTHYS_DEFAULT_PASSWORD_v1";
 export const INIT_TIMEOUT_MS = 30 * 1000;
 export const CREATE_TIMEOUT_MS = 120 * 1000;
 
-/* ★ 方案六：分级超时熔断常量（前端调度层）
+/* ★ 分级超时熔断常量（前端调度层）
  *
  * 替代原固定 35s 单一超时阈值，区分可容忍的计算缓慢与不可容忍的 IO 卡死：
  *   - 软超时 15s：Argon2id 派生耗时过长，前端提示「密钥计算较慢，请耐心等待」继续执行

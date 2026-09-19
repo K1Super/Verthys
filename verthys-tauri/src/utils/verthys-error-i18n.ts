@@ -1,7 +1,7 @@
 /*
  * utils/verthys-error-i18n.ts — Verthys 错误码国际化翻译工具
  *
- * 落实白皮书 9.2：将 VerthysResult 错误码翻译为用户可读中文消息。
+ * 将 VerthysResult 错误码翻译为用户可读中文消息。
  *
  * 设计原则：
  *   1. 单一映射表：所有 VerthysErrorCode → 中文消息映射集中于此文件

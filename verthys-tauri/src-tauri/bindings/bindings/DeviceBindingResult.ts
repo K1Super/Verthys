@@ -2,7 +2,7 @@
 import type { DeviceBindingStatus } from "./DeviceBindingStatus";
 
 /**
- * 第 4.6 项：设备绑定校验结果（结构化返回）
+ * 设备绑定校验结果（结构化返回）
  *
  * 替代魔术字符串，提供类型安全的设备绑定结果。
  * status 为状态枚举，detail 为用户可读描述，error_code 供前端差异化处理。
@@ -21,6 +21,6 @@ detail: string,
  */
 error_code?: string, 
 /**
- * 第 4.5 项：匹配度百分比（0-100，status=match/partial_match 时有值）
+ * 匹配度百分比（0-100，status=match/partial_match 时有值）
  */
 match_score?: number, };

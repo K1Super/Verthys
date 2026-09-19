@@ -1,9 +1,9 @@
 /*
- * syscall_direct.h — 见同名头文件（设计规格与红线均在头注）。
+ * syscall_direct.h — 设计规格与红线均位于同名头文件。
  *
  * 实现结构（自顶向下）：
  *   1. 模块状态与目标表（表驱动：两条 Zw/Nt 目标）
- *   2. ntdll 导出表防御性解析（边界纪律照 §1.1 超级块反序列化样板）
+ *   2. ntdll 导出表防御性解析（边界纪律照文件头超级块反序列化样板）
  *   3. SSN 排序法提取（RVA 升序 + 仿射一致性 + 双锚点插值互证）
  *   4. stub 页构建（W^X：RW 写入 → RX 收紧；Strict CFG 检测）
  *   5. 公共包装（stub 优先 / GetProcAddress 回退 / NOT_IMPLEMENTED 兜底）
@@ -19,7 +19,7 @@
  * ===================================================================== */
 
 /*
- * 直接系统调用目标（手册 WP-9：仅检测器实际使用的两个入口）。
+ * 直接系统调用目标（仅检测器实际使用的两个入口）。
  *   zw_name — SSN 提取用（Zw 存根与 Nt 共享实现，读 Zw 导出 RVA）
  *   nt_name — GetProcAddress 回退解析名
  * 扩展新入口：本表追加一行（提取与 stub 生成均按表长循环，无需他处改动）。
@@ -119,7 +119,7 @@ static int collect_zw_entries(const BYTE *base, ScdZwEntry **out_entries,
         out_target_rva[t] = 0;
     }
 
-    /* ---- PE 头防御性校验（边界纪律照 §1.1 超级块反序列化样板） ---- */
+    /* ---- PE 头防御性校验（边界纪律照文件头超级块反序列化样板） ---- */
     if (base == NULL) return -1;
     const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return -1;
@@ -221,7 +221,7 @@ static int collect_zw_entries(const BYTE *base, ScdZwEntry **out_entries,
  * ===================================================================== */
 
 /*
- * 排序法提取（头注 §SSN 提取 1-4 步）。
+ * 排序法提取（文件头 SSN 提取步骤）。
  *   entries 已按 RVA 升序。位次（sorted position）语义：
  *   SSN[pos] = SSN[anchor] + (pos - anchor_pos)。
  *
@@ -352,7 +352,7 @@ static int build_stub_page(const uint32_t ssns[SCD_TARGET_COUNT])
 }
 
 /*
- * Strict CFG 检测（头注 §stub 构建：Strict 模式下动态内存默认非法
+ * Strict CFG 检测（文件头 stub 构建：Strict 模式下动态内存默认非法
  * 间接调用目标，激活将冒 fast-fail 风险 → 拒绝激活并降级）。
  * 返回 1 = 安全可激活（非 Strict 或策略查询失败按非 Strict 处理，
  *   查询失败仅存在于极老系统，彼时 Strict 模式尚不存在）；
@@ -437,7 +437,7 @@ static BOOL WINAPI scd_init_once(PINIT_ONCE once, PVOID param, PVOID *ctx)
 degrade_free:
     free(entries);
 degrade:
-    /* 手册 WP-9：TELEMETRY 留痕（低置信度基础设施异常，无处置） */
+    /* TELEMETRY 留痕（低置信度基础设施异常，无处置） */
     emergency_report(EMERG_LEVEL_TELEMETRY, EMERG_SIG_SYSCALL_EXTRACT_FAIL);
     return TRUE;
 }

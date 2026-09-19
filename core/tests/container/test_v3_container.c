@@ -1,8 +1,8 @@
 /*
- * test_v3_container.c — WP-2 验收：V3 超级块（多副本法定人数）
+ * test_v3_container.c — V3 超级块验收（多副本法定人数）
  *
- * 覆盖（PLAYBOOK WP-2 步骤 + 验收标准）：
- *   1. 初始化默认值（§6.2 布局常量逐项）
+ * 覆盖（验收标准）：
+ *   1. 初始化默认值（布局常量逐项）
  *   2. 序列化/反序列化 roundtrip（含 TLV 扩展区）+ HMAC 幂等校验
  *   3. HMAC 认证：载荷篡改拒绝、错误 integrity_key 拒绝、
  *      垃圾/截断/根偏移损坏全拒绝（safe_read 纪律）
@@ -120,7 +120,7 @@ TEST(v3sb_init_new_defaults)
     CHECK(sb.created_at != 0);
     CHECK(sb.updated_at == sb.created_at);
 
-    /* §6.2 分区布局默认值逐项 */
+    /* 分区布局默认值逐项 */
     CHECK(sb.partition_table_offset == VERTHYS_V3_PARTITION_TABLE_OFFSET);
     CHECK(sb.partition_table_size == VERTHYS_V3_PARTITION_TABLE_BYTES);
     CHECK(sb.index_partition_offset == VERTHYS_V3_INDEX_PARTITION_OFFSET);
@@ -547,7 +547,7 @@ TEST(v3sb_quorum_two_replicas_corrupt)
 
 TEST(v3sb_quorum_three_replicas_corrupt)
 {
-    /* 三副本损坏：0 有效 → CORRUPT（WAL 恢复兜底，WP-5） */
+    /* 三副本损坏：0 有效 → CORRUPT（WAL 恢复兜底） */
     VerthysSuperBlockV3 sb, out;
     uint8_t key[VERTHYS_KEY_BYTES];
     uint32_t valid_mask = 0xFF;
@@ -720,7 +720,7 @@ TEST(v3sb_commit_fail_injection)
     return 0;
 }
 
-/* ---------- 7. VsbTxnV3 事务原语（§10.2） ---------- */
+/* ---------- 7. VsbTxnV3 事务原语 ---------- */
 
 TEST(v3sb_txn_commit_rollback)
 {

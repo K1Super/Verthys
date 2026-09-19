@@ -25,7 +25,7 @@
  *        导出验证弹窗两件套（取消 / 确认：选密钥文件 → 验证 → 另存为导出）
  *      - resetInitVerifyForm：复位初始化/验证表单（供 goBackToUnlock 调用）
  *
- * ★ 企业级根治方案（已内联，零行为变更）：
+ * ★ 企业级根治（已内联，零行为变更）：
  *   - 静默返回 → 明确错误反馈（browseBin / onInitKey / onVerify 三处守卫拆分）
  *   - 客户端密码长度前置校验（TextEncoder UTF-8 字节长度，与后端严格一致）
  *   - 验证后 400ms 短动画（移除原 2s sleep，成功路径立即反馈）
@@ -164,7 +164,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
 
   /* ===== 初始化全局密钥 ===== */
   /**
-   * ★ 白皮书 V2.0 阶段 7.2 + 2.2 方案三：
+   * ★ 设计约束：
    *   - initGlobalKey 返回 VerthysResult<void>
    *   - 设备绑定解耦：成功后显式调用 bindDevice(false)
    *     失败仅 Toast 提示，不阻塞主流程
@@ -213,7 +213,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
         binFileName.value = '';
         binBytes.value = null;
         options.showToast('全局安全密钥已初始化');
-        // ★ 白皮书 2.2 方案三：设备绑定解耦，由 UI 显式调用
+        // ★ 设备绑定解耦，由 UI 显式调用
         //    失败仅提示不阻塞主流程，用户可在设置中重新绑定
         const bindResult = await bindDevice(false);
         if (!bindResult.ok) {
@@ -232,7 +232,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
 
   /* ===== 验证全局密钥 ===== */
   /**
-   * ★ 白皮书 V2.0 阶段 7.2：verifyGlobalKey 返回 VerthysResult<void>
+   * ★ verifyGlobalKey 返回 VerthysResult<void>
    */
   const onVerify = async () => {
     // 显式防重复：processing 期间拒绝再次触发
@@ -352,7 +352,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
 
   /** 确认修改全局密钥
    *
-   * ★ 白皮书 V2.0 阶段 7.2：changeGlobalKey 返回 VerthysResult<void>
+   * ★ changeGlobalKey 返回 VerthysResult<void>
    *   细分错误码：旧密钥错误 vs 落盘失败，提供精确 UI 提示
    */
   const onConfirmChangeKey = async () => {

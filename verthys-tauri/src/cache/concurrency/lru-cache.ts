@@ -1,7 +1,7 @@
 /*
  * cache/concurrency/lru-cache.ts — 泛型 LRU 缓存（Map 插入顺序实现）
  *
- * ★ verthys-cache 并发重构（verthys-cache-refactor-concurrency-fix.md §3.2）：
+ * ★ 并发重构：
  *   为 VerthysCacheDomain 提供带淘汰回调的 LRU 容器，替代散落在
  *   verthys-cache.ts 中的两处手写 delete+re-set 逻辑（recordScanCache 5000 /
  *   fullRecordCache 50），收敛为单一权威实现。
@@ -11,7 +11,7 @@
  *   2. set 超容量即淘汰队首（最久未使用），并触发 onEvict 回调
  *   3. onEvict 双用途：
  *      - recordScanCache：淘汰时同步移除类型索引，杜绝索引悬挂 ID
- *      - fullRecordCache：淘汰时安全覆写 dataB64（缩短明文暴露窗口，方案 7.1 同源思想）
+ *      - fullRecordCache：淘汰时安全覆写 dataB64（缩短明文暴露窗口，与密钥零填充同源思想）
  *   4. clear() 同样逐条触发 onEvict（与手写版 clearFullRecordCache 的
  *      「清空前安全覆写」语义一致）
  *   5. peek(key)：只读不触碰 recency——供删除快照提供者使用，

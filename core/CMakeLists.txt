@@ -1,9 +1,9 @@
 # core/CMakeLists.txt — 核心安全 DLL 与测试
 #
-# 深模块（codebase-design）：所有加密/格式/内存/反逆向逻辑封闭在此，
+# 深模块设计：所有加密/格式/内存/反逆向逻辑封闭在此，
 # 对外仅通过 include/verthys.h 的 C ABI 函数暴露（.def 白名单导出）。
 #
-# 模块化组织（C 层模块化与接口隔离标准规范）：
+# 模块化组织：
 #   include/        公共接口区（唯一对外契约，自包含）
 #   src/            实现区（子域 → 功能组件，组件实现 + 私有头同目录）
 #   tests/          测试区（按被测子域镜像组织）
@@ -14,11 +14,11 @@
 # 业务分层（依赖方向 L5→L0 单向，无循环）：
 #
 #   L5  api/           公共 C ABI（lifecycle/unlock/scan/transfer/progress/shared）
-#   L3  transaction/   事务一致（wal/txn — V3 六 Phase + WAL 环形双区）
+#   L3  transaction/   事务一致（wal/txn — 六 Phase + WAL 环形双区）
 #   L2  index/         索引数据（lsm 四件套 + warmcache）
 #   L1  container/     容器格式（format/superblock/partition/extent/io/shared）
 #   L0  crypto/        密码学原语（cipher/keymanager/pepper/rekey）
-#   L6  security/      深度安全防护（方案 §6.4 精简后的模块集）
+#   L6  security/      深度安全防护（精简后的模块集）
 #                      preset/       — 三档安全预设
 #                      integrity/    — 完整性校验（构建期基准验签）
 #                      anti_analysis/— 反调试 + 反注入
@@ -37,20 +37,20 @@
 #   - verthys_tests：测试 exe，链接对象 + 测试源（直接调用实现，不走 DLL 边界）
 # .def 文件在链接器层面强制最小接口，确保内部符号不泄露。
 
-# ★ 最终修复方案 §6.2：ASAN 构建开关（-DVERTHYS_ENABLE_ASAN=ON）
+# ASAN 构建开关（-DVERTHYS_ENABLE_ASAN=ON）
 option(VERTHYS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 if(VERTHYS_ENABLE_ASAN AND MSVC)
     add_compile_options(/fsanitize=address)
     add_link_options(/fsanitize=address)
 endif()
 
-# ★ V3 升级 WP-10：模糊测试构建开关（-DVERTHYS_ENABLE_FUZZ=ON）
+# 模糊测试构建开关（-DVERTHYS_ENABLE_FUZZ=ON）
 #   5 个 libFuzzer 目标（superblock/partition/extent/sstable/import）
 #   + 插桩核心对象库 + 语料种子生成器。默认 OFF——插桩重编译核心
 #   全量源码，仅模糊测试专项构建开启（scripts/build_core.fuzz.ps1）。
-option(VERTHYS_ENABLE_FUZZ "Build libFuzzer fuzz targets (WP-10)" OFF)
+option(VERTHYS_ENABLE_FUZZ "Build libFuzzer fuzz targets" OFF)
 
-# ★ P2-5 修复（2026-09-19）：DLL 诊断输出编译门（-DVERTHYS_DIAG=ON）
+# DLL 诊断输出编译门（-DVERTHYS_DIAG=ON）
 #   生产构建（默认 OFF）：VERTHYS_DIAG_LOG 为空操作，Release DLL 对
 #   调试器/DebugView 完全静默，消除运行时行为指纹泄露面。
 #   诊断构建（ON）：诊断经 OutputDebugStringA 输出，供开发环境捕获。
@@ -61,7 +61,6 @@ if(VERTHYS_DIAG)
 endif()
 
 # ---------- 分层源文件 ----------
-# ★ 模块化重构（C 层模块化与接口隔离标准规范）：
 #   src/ 各子域内按功能组件拆分子目录（组件实现 + 私有头同目录），
 #   模块内子目录不再平铺源文件；公共接口唯一保留 include/verthys.h。
 set(VERTHYS_CORE_SOURCES
@@ -70,50 +69,50 @@ set(VERTHYS_CORE_SOURCES
     src/crypto/cipher/secure_mem.c
     src/crypto/keymanager/keymanager.c
     src/crypto/pepper/verthys_pepper.c
-    # ★ V3 升级 WP-1：CNG 内核态 AEAD 封装 + 密钥组生命周期（V3 主路径）
+    # CNG 内核态 AEAD 封装 + 密钥组生命周期（V3 主路径）
     src/crypto/cipher/verthys_crypto_cng.c
     src/crypto/keymanager/keymanager_cng.c
-    # ★ V3 升级 WP-6：自动密钥轮换状态机（90 天/10k ops/DEGRADE 触发）
+    # 自动密钥轮换状态机（90 天/10k ops/DEGRADE 触发）
     src/crypto/rekey/verthys_rekey_auto.c
-    # L1 container/ — 容器格式与交换信封（§1.4 V2 退役：V2 超级块已删）
+    # L1 container/ — 容器格式与交换信封
     src/container/format/verthys_format.c
     src/container/io/verthys_io.c
-    # ★ V3 升级 WP-2：V3 超级块（多副本法定人数）+ 分区管理
+    # V3 超级块（多副本法定人数）+ 分区管理
     src/container/superblock/verthys_superblock_v3.c
     src/container/partition/verthys_partition.c
-    # ★ V3 升级 WP-3：内容寻址 Extent（去重 + 完整性）
+    # 内容寻址 Extent（去重 + 完整性）
     src/container/extent/verthys_extent.c
-    # L2 index/ — 索引与数据管理（§1.4 V2 退役：btree/datablock/merkle 已删）
-    # ★ V3 升级 WP-4：LSM 索引（MemTable 跳表 + SSTable + Compaction）
+    # L2 index/ — 索引与数据管理
+    # LSM 索引（MemTable 跳表 + SSTable + Compaction）
     src/index/lsm/verthys_lsm.c
     src/index/lsm/verthys_lsm_memtable.c
     src/index/lsm/verthys_lsm_sstable.c
     src/index/lsm/verthys_lsm_compaction.c
-    # ★ V3 升级 WP-5：温启动缓存 V3（'V3IC'，HMAC+txid 双校验）
+    # 温启动缓存 V3（'V3IC'，HMAC+txid 双校验）
     src/index/warmcache/verthys_warmcache_v3.c
-    # L3 transaction/ — 事务与一致性（§1.4 V2 退役：transaction/garbage/recovery 已删）
-    # ★ V3 升级 WP-5：事务 WAL（环形 512KB×2）+ transaction_v3（六 Phase）
+    # L3 transaction/ — 事务与一致性
+    # 事务 WAL（环形 512KB×2）+ transaction_v3（六 Phase）
     src/transaction/wal/verthys_wal.c
     src/transaction/txn/verthys_transaction_v3.c
-    # ★ 模块化重构：runtime/anti_debug（v1）为死代码——生产路径零调用
+    # runtime/anti_debug 为死代码——生产路径零调用
     #   （anti_debug_v2 为唯一生产检测器），随重构删除清单移除。
     # L6 security/ — 深度安全防护（按功能 + 防御层级分子目录组织）
     #   preset/ — 三档安全预设
     src/security/preset/security_preset.c
     #   integrity/ — 完整性校验（构建期基准验签）
     src/security/integrity/integrity.c
-    # ★ V3 升级 WP-8：运行时函数级哈希校验（.rhat 表，防内存补丁）
+    # 运行时函数级哈希校验（.rhat 表，防内存补丁）
     src/security/integrity/runtime_hash.c
     #   anti_analysis/ — 反调试 + 反注入
     src/security/anti_analysis/anti_debug_v2.c
     src/security/anti_analysis/anti_inject.c
-    # ★ V3 升级 WP-9：直接系统调用（SSN 排序法提取 + W^X stub 页 +
+    # 直接系统调用（SSN 排序法提取 + W^X stub 页 +
     #   优雅降级；anti_debug_v2 / memory_guard 检测器唯一 NT 查询传输）
     src/security/anti_analysis/syscall_direct.c
     #   memory/ — 内存防护 + 三权分立密钥
     src/security/memory/memory_guard.c
     src/security/memory/key_separation.c
-    # ★ V3 升级 WP-7：密钥相关结构专用安全分配器 + 全局内存预算记账
+    # 密钥相关结构专用安全分配器 + 全局内存预算记账
     src/security/memory/secure_allocator.c
     #   emergency/ — 应急分级响应
     src/security/emergency/emergency.c
@@ -131,11 +130,11 @@ set(VERTHYS_CORE_SOURCES
     src/security/layer5_sandbox/process_sandbox.c
     #   layer6_closure/ — Layer 6: 闭环防御能力验证
     src/security/layer6_closure/defense_closure.c
-    # L5 api/ — 公共 C ABI（瘦门面 + 拆分模块；§1.4 V2 退役：v2_lifecycle/migration 已删）
+    # L5 api/ — 公共 C ABI（瘦门面 + 拆分模块）
     src/api/lifecycle/verthys_api.c
     src/api/shared/verthys_api_utils.c
     src/api/progress/verthys_progress.c
-    # ★ V3 升级 WP-5：V3 生命周期 + 解锁流水线（S0-S6）
+    # V3 生命周期 + 解锁流水线（S0-S6）
     src/api/lifecycle/verthys_v3_lifecycle.c
     src/api/unlock/verthys_unlock_pipeline.c
     src/api/transfer/verthys_export_import.c
@@ -143,14 +142,14 @@ set(VERTHYS_CORE_SOURCES
     src/api/lifecycle/dllmain.c
 )
 
-# ★ WP-10：相对路径 → 绝对路径一次性转换。相对源路径按使用处的
+# 相对路径 → 绝对路径一次性转换。相对源路径按使用处的
 # CMAKE_CURRENT_SOURCE_DIR 解析（非定义处）——tests/fuzz 复用本清单
 # 时（verthys_core_fuzz_obj 插桩重编译）基准错位会报"Cannot find source
 # file"；本目录内 add_library(verthys_core_obj) 用绝对路径行为不变。
 list(TRANSFORM VERTHYS_CORE_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 
 # 所有子目录加入 include 路径（扁平 include 兼容，如 #include "verthys_crypto.h"）
-# ★ 模块化重构：目录表随组件拆分更新——新增组件目录即在此登记；
+# 目录表随组件拆分更新——新增组件目录即在此登记；
 #   源代码 #include "xxx.h" 全部保持扁平形式零改动。
 set(VERTHYS_SRC_SUBDIRS
     src/crypto/cipher
@@ -185,19 +184,19 @@ set(VERTHYS_SRC_SUBDIRS
     src/security/layer5_sandbox
     src/security/layer6_closure
 )
-# ★ WP-10：同 VERTHYS_CORE_SOURCES——子目录作用域（tests/fuzz）复用时
+# 同 VERTHYS_CORE_SOURCES——子目录作用域（tests/fuzz）复用时
 # 相对基准错位，一次性转绝对路径。
 list(TRANSFORM VERTHYS_SRC_SUBDIRS PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 
-# ★ WP-0：schema codegen 自定义命令（flatc -a：reader/builder/verifier 全量）
+# schema codegen 自定义命令（flatc -a：reader/builder/verifier 全量）
 #   core/schema/*.fbs → core/schema/generated/
 #   flatcc_generate 目标保证 schema 变更时自动重新生成（依赖 vendored flatcc_cli）
 set(VERTHYS_SCHEMA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/schema)
 set(VERTHYS_SCHEMA_GEN_DIR ${VERTHYS_SCHEMA_DIR}/generated)
 file(MAKE_DIRECTORY ${VERTHYS_SCHEMA_GEN_DIR})
-# ★ WP-2：superblock_v3 / partition 业务 schema 加入 codegen
-# ★ WP-3：extent（内容寻址索引）schema 加入 codegen
-# ★ WP-4：sstable（SSTable Footer/Index Block + LSM Manifest）schema 加入 codegen
+# superblock_v3 / partition 业务 schema 加入 codegen
+# extent（内容寻址索引）schema 加入 codegen
+# sstable（SSTable Footer/Index Block + LSM Manifest）schema 加入 codegen
 set(VERTHYS_SCHEMA_FILES
     ${VERTHYS_SCHEMA_DIR}/demo.fbs
     ${VERTHYS_SCHEMA_DIR}/superblock_v3.fbs
@@ -229,18 +228,18 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E make_directory ${VERTHYS_SCHEMA_GEN_DIR}
     COMMAND $<TARGET_FILE:flatcc_cli> -a -o ${VERTHYS_SCHEMA_GEN_DIR} ${VERTHYS_SCHEMA_FILES}
     DEPENDS flatcc_cli ${VERTHYS_SCHEMA_FILES}
-    COMMENT "[WP-0] flatcc codegen: ${VERTHYS_SCHEMA_FILES} -> schema/generated/"
+    COMMENT "[schema] flatcc codegen: ${VERTHYS_SCHEMA_FILES} -> schema/generated/"
     VERBATIM
 )
 add_custom_target(flatcc_generate DEPENDS ${VERTHYS_SCHEMA_GEN_FILES})
 
 # 对象库：编译一次，供 DLL 与测试共用
 add_library(verthys_core_obj OBJECT ${VERTHYS_CORE_SOURCES})
-# ★ WP-4：LSM 源文件直接 include flatcc 生成头（sstable_builder.h 等）→
+# LSM 源文件直接 include flatcc 生成头（sstable_builder.h 等）→
 #   编译前必须完成 schema codegen（此前仅 verthys_tests 声明该依赖，
 #   verthys_core_obj 先于 verthys_tests 构建时生成头尚不存在 → C1083）
 add_dependencies(verthys_core_obj flatcc_generate)
-# ★ 方案 §7（P0-A 治理）：不再定义 VERTHYS_EXPORTS —— VERTHYS_API 为空宏，
+# 不再定义 VERTHYS_EXPORTS —— VERTHYS_API 为空宏，
 #   导出面唯一由 /DEF:verthys.def 白名单决定（见 verthys.h 宏注释）。
 # /FS：允许多个 cl.exe 进程并发写入同一 .PDB 文件（并行编译必需）
 target_compile_options(verthys_core_obj PRIVATE /FS)
@@ -249,10 +248,10 @@ target_include_directories(verthys_core_obj
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${VERTHYS_SRC_SUBDIRS}
             ${VERTHYS_SCHEMA_GEN_DIR}
-            ${VERTHYS_XXHASH_INCLUDE_DIR}   # ★ WP-4：LSM Bloom Filter（xxHash64 双重哈希）
+            ${VERTHYS_XXHASH_INCLUDE_DIR}   # LSM Bloom Filter（xxHash64 双重哈希）
 )
-# ★ WP-0：V3 容器 FlatBuffers 运行时（flatccrt）链入核心；
-#   schema 生成头（schema/generated/）供 V3 容器层（WP-2+）消费
+# V3 容器 FlatBuffers 运行时（flatccrt）链入核心；
+#   schema 生成头（schema/generated/）供 V3 容器层消费
 target_link_libraries(verthys_core_obj PRIVATE flatccrt libsodium)
 if(WIN32)
     # user32: 窗口/消息 API（反调试、窗口钩子检测）
@@ -290,9 +289,9 @@ target_link_options(verthys_core PRIVATE
 verthys_apply_hardening(verthys_core)
 
 # ===================================================================== *
-# ★ V3 升级 WP-8：rhash_gen 构建期 .rhat 补丁工具 + POST_BUILD 接线
+# rhash_gen 构建期 .rhat 补丁工具 + POST_BUILD 接线
 #
-# 闭环（v5.0 §9.3 构建期→运行期）：
+# 闭环（构建期→运行期）：
 #   1. 链接器 /MAP 产出 map 文件（符号名 → RVA）；
 #   2. POST_BUILD 运行 rhash_gen：解析 map + .pdata（函数精确边界）+
 #      .reloc（重定位槽位），对 X 清单 32 个关键函数计算
@@ -321,15 +320,15 @@ target_link_options(verthys_core PRIVATE
 add_dependencies(verthys_core rhash_gen)
 add_custom_command(TARGET verthys_core POST_BUILD
     COMMAND $<TARGET_FILE:rhash_gen> --patch $<TARGET_FILE:verthys_core>
-    COMMENT "[WP-8] rhash_gen: verthys.dll .rhat 运行时哈希表补丁"
+    COMMENT "[rhash] rhash_gen: verthys.dll .rhat 运行时哈希表补丁"
     VERBATIM
 )
 
-# 测试（★ WP-10：enable_testing 上提至根 CMakeLists.txt——构建根需生成
+# 测试（enable_testing 上提至根 CMakeLists.txt——构建根需生成
 # CTestTestfile.cmake 供 ctest --test-dir <build_root> 发现测试）
 add_subdirectory(tests)
 
-# ★ WP-10：模糊测试子树（默认 OFF；开启时插桩核心 + 5 目标 + 语料种子）
+# 模糊测试子树（默认 OFF；开启时插桩核心 + 5 目标 + 语料种子）
 if(VERTHYS_ENABLE_FUZZ)
     add_subdirectory(tests/fuzz)
 endif()

@@ -1,5 +1,5 @@
 /*
- * test_flatcc_demo.c — WP-0 验收：vendored flatcc 工具链全链路验证
+ * test_flatcc_demo.c — 验收：vendored flatcc 工具链全链路验证
  *
  * 链路：core/schema/demo.fbs
  *   → flatcc_cli（vendored 编译器，构建期 -a 生成 reader/builder/verifier）

@@ -62,7 +62,7 @@ pub fn delete_record(ctx: &Context, lid: u64) -> VerthysResult<()> {
 /// 枚举所有记录
 ///
 /// 使用游标批量扫描（双缓冲流水线预取）
-/// 实际实现见 lib.rs 中的 verthys_scan_open / verthys_scan_next / verthys_scan_close
+/// 实际实现位于 lib.rs 中的 verthys_scan_open / verthys_scan_next / verthys_scan_close
 pub fn enumerate_records(ctx: &Context) -> VerthysResult<Vec<(u64, String, u32)>> {
     let _ = ctx;
 

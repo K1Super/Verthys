@@ -1,7 +1,7 @@
 /*
  * keymanager.h — 四级密钥体系（内部模块，不导出）
  *
- * 层次（project.md 3.2）：
+ * 层次：
  *   L1 主密码        ：用户输入的口令
  *   L2 派生密钥材料  ：Argon2id(password || pepper, salt) → 32B（瞬时，用后即擦）
  *   L3 主密钥 MEK    ：HKDF-Expand(L2, "verthys/master-key-v1") → 32B
@@ -74,7 +74,7 @@ int keymanager_derive_master_ex(uint8_t master_key[VERTHYS_KEY_BYTES],
 
 /* ---------- L3：主密钥派生（无胡椒，用于导出/导入文件） ----------
  * 与 keymanager_derive_master 相同，但不混入胡椒。
- * project.md 5.3：导出密码不混入应用级胡椒，保证分包可独立解密。
+ * 导出密码不混入应用级胡椒，保证分包可独立解密。
  */
 int keymanager_derive_master_export(uint8_t master_key[VERTHYS_KEY_BYTES],
                                     const uint8_t *password, size_t pw_len,
@@ -124,7 +124,7 @@ int keymanager_derive_record_key(uint8_t record_key[VERTHYS_KEY_BYTES],
                                  const uint8_t *record_id, size_t id_len);
 
 /* ===================================================================== *
- *                     三密钥分立（v2 容器方案）                          *
+ *                     三密钥分立                                       *
  * ===================================================================== *
  * 从 MEK 派生三个独立用途密钥：
  *   A 密钥（索引密钥）：仅解密索引区，权限为"读+写偏移"，由扫描模块持有
@@ -161,9 +161,9 @@ int keymanager_derive_three_keys(uint8_t key_a[VERTHYS_KEY_BYTES],
 void keymanager_generate_mount_salt(uint8_t mount_salt[VERTHYS_KEY_BYTES]);
 
 /* ===================================================================== *
- * ★ V3 升级 WP-5（UNLOCK_OPTIMIZATION §8 流水线 S2）：V3 域分离派生     *
+ * V3 域分离派生（解锁流水线 S2）                                        *
  * ===================================================================== *
- * V3 密钥层次（v5.0 §5，与 V1/V2 标签严格隔离）：
+ * V3 密钥层次（与 V1/V2 标签严格隔离）：
  *   DKM  = Argon2id(password ‖ pepper, salt, 参数来自超级块) → 32B 瞬时
  *   MEK  = HKDF-Expand(DKM, "verthys/master-key-v3") → 32B
  *   integrity_key = HKDF-Expand(MEK, "verthys/integrity-key-v3") → 32B

@@ -207,7 +207,7 @@ pub fn perform_setup_preflight(app: &tauri::AppHandle) -> Result<SetupCache, Wor
 /// 内部错误分类已在 `WorkerInitError` 中定义。
 ///
 /// # 参数
-/// - `_dll_path`：忽略（前端仍传递但强制后端解析，符合第 1.7 项）。
+/// - `_dll_path`：忽略（前端仍传递但强制后端解析）。
 /// - 其他参数由 Tauri 自动注入。
 ///
 /// # 返回
@@ -216,7 +216,7 @@ pub fn perform_setup_preflight(app: &tauri::AppHandle) -> Result<SetupCache, Wor
 pub async fn worker_init(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    _dll_path: String, // 第 1.7 项：忽略前端传入，强制后端解析
+    _dll_path: String, // 忽略前端传入，强制后端解析
 ) -> Result<VerthysResponse, String> {
     // 并发锁防重：仅第一个请求执行，其他等待或拒绝
     if !state.try_acquire_init_lock() {

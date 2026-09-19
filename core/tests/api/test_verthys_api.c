@@ -147,7 +147,7 @@ TEST(api_wrong_password)
     /* 错误密码解锁 → AUTH（第 1 次失败，触发 2^1=2s 冷却） */
     CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "WRONG!!", 7, 0), VERTHYS_ERR_AUTH);
 
-    /* 冷却窗口内立即重试 → RATE（project.md 5.3 指数退避） */
+    /* 冷却窗口内立即重试 → RATE（指数退避） */
     CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "correct", 7, 0), VERTHYS_ERR_RATE);
 
     /* 等待 2.1 秒让冷却窗口过期 */
@@ -162,7 +162,7 @@ TEST(api_wrong_password)
     return 0;
 }
 
-/* 暴力破解指数退避：连续失败后等待时间指数增长（project.md 5.3） */
+/* 暴力破解指数退避：连续失败后等待时间指数增长 */
 TEST(api_rate_limit_exponential)
 {
     cleanup_tmp();
@@ -382,7 +382,7 @@ TEST(api_create_with_preset_balanced)
     /* 文件不存在 → 创建新 verthys（BALANCED 预设） */
     CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS_CP, "pw", 2, VERTHYS_PRESET_BALANCED), VERTHYS_OK);
 
-    /* 白盒校验：preset 字段正确（★ V3：新建一律 V3，Playbook WP-5） */
+    /* 白盒校验：preset 字段正确（★ V3：新建一律 V3） */
     struct VerthysContext *ctx = (struct VerthysContext *)h;
     CHECK_EQ(ctx->preset, VERTHYS_PRESET_BALANCED);
     CHECK_EQ(ctx->warm_cache_enabled, 1);  /* BALANCED 启用温启动缓存 */
@@ -420,7 +420,7 @@ TEST(api_create_with_preset_secure)
     /* 创建新 verthys（SECURE 预设） */
     CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS_CP, "pw", 2, VERTHYS_PRESET_SECURE), VERTHYS_OK);
 
-    /* 白盒校验：preset 字段正确（★ V3：新建一律 V3，Playbook WP-5） */
+    /* 白盒校验：preset 字段正确（★ V3：新建一律 V3） */
     struct VerthysContext *ctx = (struct VerthysContext *)h;
     CHECK_EQ(ctx->preset, VERTHYS_PRESET_SECURE);
     CHECK_EQ(ctx->warm_cache_enabled, 0);  /* SECURE 禁用温启动缓存 */

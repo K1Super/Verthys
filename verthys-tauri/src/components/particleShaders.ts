@@ -1,7 +1,7 @@
 /*
  * particleShaders.ts — 粒子层自定义着色器材质工厂（幕布 / 轨道）
  *
- * ★ v2 架构迁移：onBeforeCompile 注入 → 完整自定义 ShaderMaterial
+ * ★ 迁移到完整自定义 ShaderMaterial
  *   旧实现向 THREE.PointsMaterial 的内部 chunk（common/color_vertex/
  *   begin_vertex）做字符串替换注入 — 与 three 内部着色器模板强耦合，
  *   版本升级即脆弱。现以完整顶点/片元着色器字符串显式声明全部

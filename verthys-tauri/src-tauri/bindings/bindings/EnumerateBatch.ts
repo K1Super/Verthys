@@ -3,13 +3,13 @@ import type { ApiError } from "./ApiError";
 import type { VerthysRecordEntry } from "./VerthysRecordEntry";
 
 /**
- * ★ 项5：枚举记录流式分页批次（Tauri Channel 推送载荷）
+ * 枚举记录流式分页批次（Tauri Channel 推送载荷）
  *
  * verthys_enumerate_records_stream 命令循环调用 worker enumerate_records，
  * 每批返回通过 on_batch Channel 推送到前端。前端收到一批即渲染一批，
  * 用户感知为渐进式加载而非"瞬间冻结后爆发"，单批处理时间 < 5ms。
  *
- * 第 8.6 项：增加 error: Option<ApiError> 字段
+ * 增加 error: Option<ApiError> 字段
  * 批次失败时通过此字段返回错误信息，前端据此决定是否停止循环。
  */
 export type EnumerateBatch = { 
@@ -34,6 +34,6 @@ exhausted: boolean,
  */
 total_pushed: number, 
 /**
- * 第 8.6 项：批次错误信息（失败时前端据此停止循环）
+ * 批次错误信息（失败时前端据此停止循环）
  */
 error?: ApiError, };

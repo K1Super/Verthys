@@ -1,20 +1,6 @@
 /*
- * module_whitelist.rs — 模块白名单实时巡检（SECURITY.md 企业级重写版）
+ * module_whitelist.rs — 模块白名单实时巡检
  *
- * 用户需求（二.3 模块白名单实时巡检 + 三、最小攻击面）：
- *   - 程序主循环中以较低频次遍历当前进程加载的模块列表。若发现未被信任签名、
- *     或路径不在安装目录及系统目录下的未知第三方 DLL，立即弹窗提示风险并暂停
- *     Verthys 解密句柄。
- *
- * SECURITY.md 修复要点：
- *   1. 强制路径真实化：在所有路径比较前调用 GetLongPathNameW 解析短文件名（8.3）
- *      和符号链接/目录挂载点，消除白名单前缀检查被绕过的风险
- *   2. 签名验证启用吊销检查：WTD_REVOKE_WHOLECHAIN 替代 WTD_REVOKE_NONE，
- *      同时引入签名验证结果缓存（以文件路径为键，TTL 1 小时），避免重复网络开销
- *   3. 白名单持久化：export_trusted_paths / import_trusted_paths 供
- *      security_commands.rs 层进行 DPAPI 加密持久化，形成不可篡改的安全基线
- *   4. 巡检触发自动熔断与审计由 background_patrol.rs 统一处理
- *   5. 模块枚举保留 CreateToolhelp32Snapshot（已覆盖 32+64 位模块）
  *
  * 安全策略：
  *   - Windows 文件系统大小写不敏感，路径比较统一转小写
@@ -46,7 +32,7 @@ pub struct UnknownModule {
 static TRUSTED_PATHS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /* ====================================================================== *
- *  SECURITY.md 第 1 项：路径真实化（GetLongPathNameW）                     *
+ *  路径真实化（GetLongPathNameW）                     *
  *                                                                        *
  *  放弃纯字符串 normalize_path，改为调用 Windows 原生 GetLongPathNameW     *
  *  解析短文件名（8.3 格式）和符号链接/目录挂载点，确保白名单前缀匹配       *
@@ -63,7 +49,7 @@ extern "system" {
     ) -> u32;
 }
 
-/// SECURITY.md 第 1 项：路径真实化
+/// 路径真实化
 ///
 /// 调用 GetLongPathNameW 解析短文件名（8.3）和符号链接/挂载点，
 /// 然后进行规范化（剥离 \\?\ 前缀、统一反斜杠、转小写、去尾部分隔符）。
@@ -138,10 +124,10 @@ fn normalize_string_path(_path: &str) -> String {
 
 /// 添加受信任路径到白名单（幂等：重复添加不会产生重复项）
 ///
-/// SECURITY.md 第 1 项：路径经 GetLongPathNameW 真实化后存储，
+/// 路径经 GetLongPathNameW 真实化后存储，
 /// 确保短文件名/符号链接无法绕过白名单前缀匹配。
 ///
-/// SECURITY.md 第 3 项：调用方需在命令层验证权限（auth_token），
+/// 调用方需在命令层验证权限（auth_token），
 /// 此函数仅负责路径真实化与存储。
 pub fn add_trusted_path(path: &str) {
     let realized = realize_path(path);
@@ -165,14 +151,14 @@ pub fn clear_trusted_paths() {
 }
 
 /* ====================================================================== *
- *  SECURITY.md 第 3 项：白名单持久化接口                                   *
+ *  白名单持久化接口                                   *
  *                                                                        *
  *  export_trusted_paths / import_trusted_paths 供 security_commands.rs    *
  *  层进行 DPAPI 加密持久化，形成不可篡改的安全基线。                       *
  *  应用启动时加载，所有增删记录均以审计日志记录。                          *
  * ====================================================================== */
 
-/// SECURITY.md 第 3 项：导出受信任路径白名单（用于 DPAPI 加密持久化）
+/// 导出受信任路径白名单（用于 DPAPI 加密持久化）
 pub fn export_trusted_paths() -> Vec<String> {
     match TRUSTED_PATHS.lock() {
         Ok(g) => g.iter().cloned().collect(),
@@ -180,7 +166,7 @@ pub fn export_trusted_paths() -> Vec<String> {
     }
 }
 
-/// SECURITY.md 第 3 项：导入受信任路径白名单（从 DPAPI 解密后恢复）
+/// 导入受信任路径白名单（从 DPAPI 解密后恢复）
 ///
 /// 合并持久化的路径到当前白名单（幂等：不产生重复项）。
 /// 每条路径经 realize_path 真实化后存储。
@@ -220,7 +206,7 @@ mod win_impl {
 
     use super::{realize_path, UnknownModule, TRUSTED_PATHS};
 
-    /* ---------------- SECURITY.md 第 2 项：签名验证结果缓存 ----------------
+    /* ---------------- 签名验证结果缓存 ----------------
      * 以文件路径为键，缓存 WinVerifyTrust 结果（含吊销检查），TTL 1 小时。
      * 首次验证需联网检查吊销，成功后缓存，后续巡检直接使用缓存结果，
      * 避免重复网络开销和离线阻断。
@@ -293,7 +279,7 @@ mod win_impl {
 
     // WinVerifyTrust 常量（来自 wintrust.h）
     const WTD_UI_NONE: u32 = 2;
-    /// SECURITY.md 第 2 项：启用整条证书链的吊销检查
+    /// 启用整条证书链的吊销检查
     /// WTD_REVOKE_NONE = 0（旧值，已废弃）
     /// WTD_REVOKE_WHOLECHAIN = 2（检查整条链的吊销状态）
     const WTD_REVOKE_WHOLECHAIN: u32 = 2;
@@ -537,7 +523,7 @@ mod win_impl {
 
     /* ---------------- Authenticode 数字签名验证 ---------------- */
 
-    /// SECURITY.md 第 2 项：验证模块的 Authenticode 数字签名（含吊销检查 + 缓存）
+    /// 验证模块的 Authenticode 数字签名（含吊销检查 + 缓存）
     ///
     /// 通过 WinVerifyTrust + WINTRUST_ACTION_GENERIC_VERIFY_V2 验证：
     ///   - WTD_UI_NONE：不显示 UI（服务/后台进程友好）
@@ -545,7 +531,7 @@ mod win_impl {
     ///   - WTD_STATEACTION_VERIFY → 验证 → WTD_STATEACTION_CLOSE：必须配对调用
     ///     以释放验证状态数据，避免 wintrust 资源泄漏
     ///
-    /// SECURITY.md 第 2 项：签名验证结果缓存
+    /// 签名验证结果缓存
     ///   - 以文件路径（realize_path 真实化后）为键，缓存 TTL 1 小时
     ///   - 首次验证需联网检查吊销，成功后缓存
     ///   - 后续巡检直接使用缓存结果，避免重复网络开销
@@ -556,7 +542,7 @@ mod win_impl {
             return false;
         }
 
-        // SECURITY.md 第 2 项：检查缓存
+        // 检查缓存
         let cache_key = realize_path(module_path);
         if let Ok(cache) = sig_cache().lock() {
             if let Some((result, timestamp)) = cache.get(&cache_key) {
@@ -569,7 +555,7 @@ mod win_impl {
         // 执行实际验证（含吊销检查）
         let result = verify_signature_uncached(module_path);
 
-        // SECURITY.md 第 2 项：更新缓存
+        // 更新缓存
         if let Ok(mut cache) = sig_cache().lock() {
             cache.insert(cache_key, (result, Instant::now()));
         }
@@ -596,7 +582,7 @@ mod win_impl {
             p_policy_callback_data: ptr::null_mut(),
             p_sip_client_data: ptr::null_mut(),
             dw_ui_choice: WTD_UI_NONE,
-            // SECURITY.md 第 2 项：启用整条证书链的吊销检查
+            // 启用整条证书链的吊销检查
             fdw_revocation_checks: WTD_REVOKE_WHOLECHAIN,
             dw_union_choice: WTD_CHOICE_FILE,
             p_file: &mut file_info,
@@ -668,7 +654,7 @@ pub fn verify_signature(module_path: &str) -> bool {
 }
 
 /* ====================================================================== *
- *  SECURITY.md 第 463-465 项：系统目录模块哈希基线库                       *
+ *  系统目录模块哈希基线库                       *
  *                                                                        *
  *  对 System32、SysWOW64、WinSxS 等系统目录下的模块，预计算所有合法微软   *
  *  DLL 的 SHA-256 哈希集合，在巡检时对哈希进行匹配。任何不在基线库中的    *
@@ -679,12 +665,12 @@ pub fn verify_signature(module_path: &str) -> bool {
 
 /// 系统目录模块哈希基线（路径 → SHA-256 hex）
 ///
-/// SECURITY.md 第 463-465 项：杜绝位置信任。
+/// 杜绝位置信任。
 /// 预计算系统目录下所有合法微软 DLL 的 SHA-256 哈希，
 /// 巡检时对系统目录模块的哈希进行匹配，被替换的 DLL 即便在系统目录下也被检出。
 pub type HashBaseline = std::collections::HashMap<String, String>;
 
-/// SECURITY.md 第 463-465 项：计算文件的 SHA-256 哈希（hex 编码）
+/// 计算文件的 SHA-256 哈希（hex 编码）
 ///
 /// 读取文件内容并计算 SHA-256，返回 64 字符 hex 字符串。
 /// 文件不存在 / 读取失败 / 过大（> 256MB，防 DoS）时返回 None。
@@ -719,7 +705,7 @@ pub fn compute_file_hash(_path: &str) -> Option<String> {
     None
 }
 
-/// SECURITY.md 第 463-465 项：构建系统目录模块哈希基线
+/// 构建系统目录模块哈希基线
 ///
 /// 枚举 System32、SysWOW64 目录下的所有 .dll/.sys 文件，计算 SHA-256 哈希，
 /// 返回"规范化路径 → SHA-256 hex"映射表。
@@ -759,7 +745,7 @@ pub fn build_system_baseline() -> HashBaseline {
     HashBaseline::new()
 }
 
-/// SECURITY.md 第 463-465 项：验证模块哈希是否匹配基线
+/// 验证模块哈希是否匹配基线
 ///
 /// 返回值：
 ///   - `Ok(true)`：哈希匹配，模块合法
@@ -803,7 +789,7 @@ pub fn verify_module_against_baseline(
     Err(())
 }
 
-/// SECURITY.md 第 463-465 项：枚举目录下所有 .dll/.sys 文件并计算哈希
+/// 枚举目录下所有 .dll/.sys 文件并计算哈希
 ///
 /// 递归遍历目录（深度 1，仅直接子文件），对每个 .dll/.sys 文件
 /// 计算 SHA-256 并加入基线。

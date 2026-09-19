@@ -1,7 +1,7 @@
 /*
  * utils/logger.ts — 环境感知日志工具
  *
- * 落实白皮书 2.2 方案五、4.3 统一日志工具：
+ * 统一日志工具：
  *   - 根据 import.meta.env.MODE 控制日志级别
  *   - 开发环境（MODE=development）：输出 debug/info/warn/error
  *   - 生产环境（MODE=production）：仅输出 error（避免污染控制台、影响 Tauri 后端性能）

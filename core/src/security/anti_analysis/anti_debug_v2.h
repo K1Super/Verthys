@@ -1,9 +1,8 @@
 /*
  * anti_debug_v2.h — 反调试检测（内部模块，不导出）
  *
- * ★ 方案 §6.2.1（P1-O 治理）：检测器修复。
- *
- * 原实现缺陷（security 层深度审计 §5.8）：
+
+ * 原实现缺陷：
  *   1. 进程名黑名单（windbg/ida/ProcessHacker 等全系统扫描）——开发机上
  *      常驻无关工具即命中，产生永久惩罚 + 应急信号累积，结构性误报。
  *   2. should_corrupt_data 的 0.5% 比特反转"行为误导"——任何触碰真实
@@ -13,8 +12,7 @@
  *   - IsDebuggerPresent（PEB.BeingDebugged）
  *   - NtQueryInformationProcess 三重探测（DebugPort/DebugFlags/DebugObject）
  *   - 硬件断点 DR0-DR3（GetThreadContext）
- * 响应：任一命中 → EMERG_LEVEL_KILL（调试器确认属于高置信度信号，
- * 符合方案 §6.1.3 的信号源分配）；punish 模式仅保留 KDF 迭代提升语义。
+ * 响应：任一命中 → EMERG_LEVEL_KILL（调试器确认属于高置信度信号）；punish 模式仅保留 KDF 迭代提升语义。
  */
 #ifndef VERTHYS_ANTI_DEBUG_V2_H
 #define VERTHYS_ANTI_DEBUG_V2_H
@@ -32,7 +30,7 @@ typedef enum {
 /*
  * 初始化反调试模块（幂等）。
  * 确保密码库与安全配置就绪；NtQueryInformationProcess 经
- * syscall_direct（★ WP-9 直接系统调用，stub 优先 / 降级回退）传输。
+ * syscall_direct（直接系统调用，stub 优先 / 降级回退）传输。
  */
 int anti_debug_v2_init(void);
 

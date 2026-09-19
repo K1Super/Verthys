@@ -3,7 +3,7 @@
  *
  * 设计原则（codebase-design 深模块）：
  *   - 前端仅能调用预定义的受限 Tauri 指令，无法自定义调用 DLL 底层接口
- *   - ★ P2-7 文件二进制数据经 Tauri v2 raw IPC（ArrayBuffer 请求体 +
+ *   - ★ 文件二进制数据经 Tauri v2 raw IPC（ArrayBuffer 请求体 +
  *     tauri::ipc::Response 响应）直传，零 base64 编解码；账号序列化等
  *     小体量数据仍走 base64 in JSON 协议
  *   - 前端不含任何加密、密钥、文件读写逻辑，完全无安全权重
@@ -331,7 +331,7 @@ export async function verthysPreheat(verthysPath: string): Promise<boolean> {
 
 /** 解锁已有加密库（worker 内调用 Verthys_Unlock）
  *
- * ★ 方案5：新增 onProgress 可选回调，流式接收解锁进度
+ * ★ 新增 onProgress 可选回调，流式接收解锁进度
  * - worker 在解锁期间推送多条 unlock_progress 进度行
  * - 每条进度行通过 Tauri Channel 转发到前端 onProgress 回调
  * - 后端进度感知超时（60s 无进度才判定挂起），无需前端 Promise.race 兜底
@@ -373,7 +373,7 @@ export async function verthysUnlock(
   }
 
   try {
-    /* ★ 企业级根治方案：返回完整 VerthysResponse，含 worker 进程内探测的
+    /* ★ 企业级根治：返回完整 VerthysResponse，含 worker 进程内探测的
      * has_global_key/global_key_id/global_key_record 三字段。
      * 调用方 initUnlock 直接消费，消除解锁后 probe IPC 链。 */
     const resp = await ipc<VerthysResponse>("verthys_unlock", {
@@ -473,7 +473,7 @@ export async function verthysAddRecord(
  *   - verthysImportCheckpoint：查询当前检查点状态                     *
  *   - verthysWalRecover：扫描遗留 WAL（续传去重，不创建会话）         *
  *                                                                  *
- * 落实「N 次加密，1 次 IPC 传输」：前端 Worker 池并行加密 N 条记录  *
+ * 「N 次加密，1 次 IPC 传输」：前端 Worker 池并行加密 N 条记录  *
  * 后，单次 IPC 调用 verthysAddRecordsBatch 写入。WAL 保证断点续传幂等。*
  * ================================================================== */
 
@@ -506,7 +506,7 @@ export async function verthysImportBegin(
 /**
  * 批量写入 N 条已加密记录（WAL pending → worker add_record 串行 → WAL committed → 检查点）。
  *
- * 落实「N 次加密，1 次 IPC 传输」：前端 Worker 池并行加密 N 条记录后，单次 IPC 写入。
+ * 「N 次加密，1 次 IPC 传输」：前端 Worker 池并行加密 N 条记录后，单次 IPC 写入。
  * 后端串行调用 worker add_record，每条伴随 WAL pending/committed，每批次结束写检查点。
  * 通过 onProgress Channel 流式推送进度，前端在 requestAnimationFrame 内绘制进度条。
  *
@@ -754,7 +754,7 @@ export async function verthysScanClose(): Promise<boolean> {
 }
 
 /* ------------------------------------------------------------------ *
- * 摘要扫描（Phase 2D：轻量元数据，不读数据块）                        *
+ * 摘要扫描（轻量元数据，不读数据块）                        *
  *                                                                    *
  * 与全量扫描的区别：                                                  *
  *   - 仅返回 lid/type/name/data_size/physical_offset/merkle_leaf     *
@@ -774,7 +774,7 @@ export async function verthysScanClose(): Promise<boolean> {
  * ------------------------------------------------------------------ */
 
 /** 摘要记录（前端简化类型，供 verthys-cache.ts 两层缓存使用）
- * ★ Phase 2G：新增 createdTime（创建时间戳，列表展示用）
+ * ★ 新增 createdTime（创建时间戳，列表展示用）
  */
 export interface SummaryRecord {
   id: number;
@@ -847,7 +847,7 @@ export async function verthysDeleteRecord(id: number): Promise<boolean> {
   return r.ok;
 }
 
-/** 批量删除记录（单次事务，落实 upgrade.md "批量删除必须合并为单次 flush"）
+/** 批量删除记录（单次事务，合并为单次 flush）
  *  将整个 ID 列表传给 Rust 层，单次 verthys_flush 一次性移除所有条目，
  *  只做一次重加密和一次全局 HMAC 更新 */
 export async function verthysDeleteRecords(ids: number[]): Promise<boolean> {
@@ -855,11 +855,11 @@ export async function verthysDeleteRecords(ids: number[]): Promise<boolean> {
   return r.ok;
 }
 
-/** ★ Phase 2I：获取已加载的轻量摘要记录数
+/** ★ 获取已加载的轻量摘要记录数
  *  返回解锁时从 summary_index_off 加载的摘要记录数。
  *  >0 表示摘要索引可用，前端可直接渲染列表无需 B+ 树扫描。
  *
- *  ★ 企业级方案修复：worker 返回 ok=false 时抛出异常而非返回 0
+ *  ★ 企业级修复：worker 返回 ok=false 时抛出异常而非返回 0
  *    原 bug：worker 失败时返回 0，调用方误判"verthys 为空"→ UI 显示"初始化密钥"
  *    修复：worker 失败时抛异常，调用方 catch 后走"计数未知"路径，继续第一批扫描
  */
@@ -874,10 +874,10 @@ export async function verthysGetSummaryCount(): Promise<number> {
   return r.record_count ?? 0;
 }
 
-/** ★ 企业级方案：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）
+/** ★ 企业级：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）
  *
  *  C 层 Verthys_HasRecordByType 直接遍历 B+ 树叶子节点检查 type 字段，
- *  不分配 name 堆内存，不访问数据区块，典型耗时 < 100ms（v2 容器）。
+ *  不分配 name 堆内存，不访问数据区块，典型耗时 < 100ms。
  *
  *  用于启动阶段快速判断是否有全局密钥记录，消除"猜超时"设计缺陷。
  *
@@ -927,7 +927,7 @@ export async function verthysChangePassword(
 }
 
 /* ------------------------------------------------------------------ *
- * ★ WP-11（P2-3）：防御闭环状态查询                                   *
+ * ★ 防御闭环状态查询                                                  *
  *                                                                    *
  * verthysGetSecurityStatus 透传 worker 的 security_status op，          *
  * 返回 7 条攻击路径的阻断/降级/失败状态。                              *
@@ -935,7 +935,7 @@ export async function verthysChangePassword(
  * ------------------------------------------------------------------ */
 
 /**
- * 查询防御闭环实时状态（WP-11）
+ * 查询防御闭环实时状态
  *
  * 调用链：前端 → verthys_security_status → worker security_status
  *   → FFI Verthys_GetSecurityStatus → SecurityStatusReport
@@ -1058,9 +1058,9 @@ export async function verthysReconcileKeyPresence(hasGlobalKey: boolean): Promis
 }
 
 /**
- * ★ 第 7 章全量改造：设置隐私模式（防截屏 + 剪贴板保护联动）
+ * ★ 设置隐私模式（防截屏 + 剪贴板保护联动）
  *
- * 第 7.4 项：关闭隐私模式（enabled=false）要求 auth_token 授权。
+ * 关闭隐私模式（enabled=false）要求 auth_token 授权。
  * auth_token 为用户主密码，由前端在用户确认关闭后传入。
  * 未提供 auth_token 时后端返回 PERMISSION_DENIED 错误码。
  *
@@ -1082,7 +1082,7 @@ export async function setPrivacyMode(
 }
 
 /**
- * ★ 第 7.3 项：事务式安全清空剪贴板（多次覆写 + 重试）
+ * ★ 事务式安全清空剪贴板（多次覆写 + 重试）
  *
  * 完整事务序列：OpenClipboard → EmptyClipboard → 3 轮随机覆写 → 最终清空。
  * 剪贴板被占用时自动重试（50ms × 3）。
@@ -1099,7 +1099,7 @@ export async function clearClipboard(): Promise<ClipboardResult> {
 }
 
 /**
- * ★ 第 7.4 项：启动时恢复持久化的隐私模式状态
+ * ★ 启动时恢复持久化的隐私模式状态
  *
  * 从 DPAPI 加密的状态文件加载隐私模式状态，自动恢复防截屏 + 剪贴板监听。
  * 应在应用启动后（setup 阶段）调用。
@@ -1113,7 +1113,7 @@ export async function restorePrivacyMode(): Promise<PrivacyModeResult> {
   return await ipc<PrivacyModeResult>("restore_privacy_mode");
 }
 
-/** 读取文件字节（★ P2-7 二进制 IPC：返回原始 Uint8Array，去 base64 化）
+/** 读取文件字节（二进制 IPC：返回原始 Uint8Array，去 base64 化）
  *
  *  后端返回 tauri::ipc::Response → invoke 直接收到 ArrayBuffer，
  *  内存峰值 ×1（原 base64 路径 ×2.66：Rust b64 串 + JSON 串 + 前端解码）。
@@ -1129,10 +1129,10 @@ export async function readFileBytes(path: string): Promise<Uint8Array> {
   return new Uint8Array(buf);
 }
 
-/** 写入原始字节到文件（★ P2-7 二进制 IPC：raw body 直传，去 base64 化）
+/** 写入原始字节到文件（二进制 IPC：raw body 直传，去 base64 化）
  *
  *  字节经请求体直传（Tauri v2 raw IPC），目标路径经 x-path 请求头传递。
- *  ★ P0-1：路径经 encodeURIComponent 百分号编码 — HTTP 头仅允许可见 ASCII，
+ *  ★ 路径经 encodeURIComponent 百分号编码 — HTTP 头仅允许可见 ASCII，
  *  中文用户名路径（如 C:\Users\张三\）必须编码传输，Rust 端严格解码。
  *
  *  ⚠ 白名单限制：同 readFileBytes，仅允许白名单路径。
@@ -1147,7 +1147,7 @@ export async function writeFileBytes(path: string, data: Uint8Array): Promise<vo
   }
 }
 
-/** ★ 企业级根治：读取用户通过对话框显式选择的文件字节（★ P2-7 二进制 IPC）
+/** ★ 读取用户通过对话框显式选择的文件字节（二进制 IPC）
  *
  *  返回原始 Uint8Array（后端 tauri::ipc::Response 二进制通道）。
  *
@@ -1172,11 +1172,11 @@ export async function readUserFile(path: string): Promise<Uint8Array> {
   return new Uint8Array(buf);
 }
 
-/** ★ 企业级根治：写入原始字节到用户通过对话框选择的位置（★ P2-7 二进制 IPC）
+/** ★ 写入原始字节到用户通过对话框选择的位置（二进制 IPC）
  *
  *  字节经请求体直传（Tauri v2 raw IPC），目标路径经 x-path 请求头传递，
  *  消除 base64 编码 1.33× 内存放大与编解码 CPU 开销。
- *  ★ P0-1：路径经 encodeURIComponent 百分号编码 — HTTP 头仅允许可见 ASCII，
+ *  ★ 路径经 encodeURIComponent 百分号编码 — HTTP 头仅允许可见 ASCII，
  *  中文用户名路径（如 C:\Users\张三\）必须编码传输，Rust 端严格解码。
  *
  *  与 writeFileBytes 的区别：跳过沙箱白名单校验（用户已通过 Tauri dialog

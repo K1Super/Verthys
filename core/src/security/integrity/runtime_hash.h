@@ -1,7 +1,7 @@
 /*
  * runtime_hash.h — 运行时函数级哈希校验（内部模块，不导出）
  *
- * ★ V3 升级 WP-8（v5.0 §9.3）：防运行时代码补丁（hotpatching）攻击。
+ * V3 升级：防运行时代码补丁（hotpatching）攻击。
  *   与 .vsec 全节校验互补（函数粒度 vs 节粒度）：
  *   - .vsec：启动时从磁盘重算 .text/.rdata 文件内容 HMAC —— 防分发篡改；
  *   - .rhat：解锁成功后 + 每 30 分钟重算关键函数【内存映像】哈希
@@ -10,13 +10,13 @@
  * 机制（构建期 → 运行期闭环）：
  *   1. 构建期（rhash_gen 工具，core/tools/rhash_gen.c）：链接完成后解析
  *      map 文件（符号名 → RVA）与 .pdata（精确函数边界）与 .reloc（重定位
- *      表），对 X 清单每个关键函数计算 BLAKE2b-256（v5.0 规格：libsodium
+ *      表），对 X 清单每个关键函数计算 BLAKE2b-256（libsodium
  *      crypto_generichash；域标签前缀做域分离），直接补丁 DLL/EXE 的
  *      .rhat 只读节（复用 .vsec 的"构建后补丁"模式——避免两遍链接）。
  *   2. 运行期（本文件 scan）：解析自身内存映像的 .reloc，对每条表项
  *      复制函数字节并掩码重定位槽位（与构建期归一化方式逐字节一致，
  *      杜绝 ASLR 重定位导致的跨启动误报——.vsec 同类教训，见
- *      integrity.h §6.3 注），重算 BLAKE2b 与表内基准比对。
+ *      integrity.h 完整性设计注记），重算 BLAKE2b 与表内基准比对。
  *   3. 失配 = 进程内存被篡改（高置信度）→ KILL 级应急响应
  *      （EMERG_SIG_PROCESS_TAMPER；.vsec 文件篡改走 INTEGRITY_FAIL，
  *      两者信号语义区分）。
@@ -41,7 +41,7 @@
  *     u8  hash[32]  BLAKE2b-256(标签 ‖ 掩码后函数字节)
  *
  * 表自身防篡改：.rhat 节纳入 .vsec v2 校验范围（HMAC 第三槽，
- * integrity.c §6.3 扩展）——攻击者文件级改表 = 分发篡改 = 启动拒绝。
+ * integrity 完整性模块扩展）——攻击者文件级改表 = 分发篡改 = 启动拒绝。
  */
 #ifndef VERTHYS_RUNTIME_HASH_H
 #define VERTHYS_RUNTIME_HASH_H
@@ -61,7 +61,7 @@ extern "C" {
 /* 表容量上限（X 清单 ≤ 此值；节大小 = 头 16B + 48B × 此值） */
 #define VERTHYS_RUNTIME_HASH_MAX 40u
 
-/* 周期重算间隔（v5.0 §9.3：每 30 分钟） */
+/* 周期重算间隔（每 30 分钟） */
 #define VERTHYS_RUNTIME_HASH_INTERVAL_MS (30u * 60u * 1000u)
 
 /* 单函数字节数上限（超限 = 构建期工具报错，防静态缓冲溢出） */
@@ -75,8 +75,8 @@ extern "C" {
 #define VERTHYS_RHAT_VERSION 1u
 
 /*
- * ★ 关键函数清单（v5.0 §9.3 X-macro，~30 个）
- * 约束（红线）：
+ * 关键函数清单（X-macro，~30 个）
+ * 约束：
  *   - 仅限非 static 外部符号（map "Publics by Value" 可见）；
  *   - 增删条目 = 构建期 rhash_gen 与运行期两侧同步（同一宏展开）；
  *   - 清单必须全命中：任一符号构建期缺失 → 构建失败（禁静默降级）；
@@ -85,7 +85,7 @@ extern "C" {
  *     map 缺符号即 rhash_gen 报错暴露；且内联副本不受 .rhat 保护，
  *     noinline 是"被哈希代码体 = 实际执行代码体"的语义前提）。
  * 覆盖面：加解密主路径 / 密钥组生命周期 / 轮换 / 超块事务 / 分区表 /
- * WAL / 六 Phase 事务 / LSM / 解锁流水线 / 应急 / 完整性 / 本模块自身。
+ * WAL / 六阶段事务 / LSM / 解锁流水线 / 应急 / 完整性 / 本模块自身。
  */
 #define VERTHYS_RUNTIME_HASH_FUNCS(X) \
     X(verthys_cng_aead_encrypt) \
@@ -165,12 +165,12 @@ int runtime_hash_configured(void);
  * 生产校验入口：scan + 失配 → KILL 级应急响应
  * （emergency_report(EMERG_LEVEL_KILL, EMERG_SIG_PROCESS_TAMPER)，
  *  进程终止由应急模块执行，本函数不返回错误——进程不再继续运行）。
- * 接线：Verthys_Unlock 成功后（v5.0 §9.3"解锁成功后"）。
+ * 接线：Verthys_Unlock 成功后。
  */
 void runtime_hash_verify(void);
 
 /*
- * 周期重算（时间门控，v5.0 §9.3"每 30 分钟"）：
+ * 周期重算（时间门控，每 30 分钟）：
  *   距上次全量扫描 < 30 分钟 → 直接返回（单次 GetTickCount64 开销）；
  *   到期 → 全量 verify。接线于写路径 API 入口（Add/Delete/Import/
  *   ChangePassword/Flush——均持 api_mutex 串行化）。

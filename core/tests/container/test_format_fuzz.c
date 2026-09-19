@@ -1,7 +1,7 @@
 /*
- * test_format_fuzz.c — 文件格式变异 / 篡改检测测试（Phase 1.11）
+ * test_format_fuzz.c — 文件格式变异 / 篡改检测测试
  *
- * 验证 project.md 4.2 安全特性：
+ * 验证安全特性：
  *   - 防篡改体系：任何篡改均导致校验失败
  *   - 零明文结构：除文件头外全部加密或认证
  *
@@ -168,13 +168,13 @@ TEST(fuzz_bit_flip_version)
     size_t size = 0;
     CHECK_EQ(read_file_to_buf(TMP_VERTHYS, &buf, &size), 0);
 
-    /* ★ V3 适配（§6.3 法定人数语义）：V2 版本号位于文件头 +4（parse_header
+    /* ★ V3 适配（法定人数语义）：V2 版本号位于文件头 +4（parse_header
      * 早期拒绝 → FORMAT）；V3 无明文文件头，超块版本在 FlatBuffers 载荷
      * 内部（偏移随 schema 演化，不可稳定定位）。等价的头部字段变异 =
      * 三副本帧头 payload_len LSB（+4/+0x4004/+0x8004）各翻一位：帧结构
      * 仍合法（verifier 容忍尾部字节），但 HMAC 计算域随长度漂移 → 3 副本
      * 全败 → 口令正确探针判真损坏 → 拒绝（CORRUPT）。单副本翻转会被
-     * 2/3 多数派票决出局、解锁照常成功——那是 §6.3 设计容错而非缺陷。 */
+     * 2/3 多数派票决出局、解锁照常成功——那是法定人数设计容错而非缺陷。 */
     for (unsigned rep = 0; rep < VERTHYS_V3_SB_REPLICA_COUNT; rep++) {
         buf[(size_t)(rep * 0x4000u) + 4u] ^= 0x01;
     }

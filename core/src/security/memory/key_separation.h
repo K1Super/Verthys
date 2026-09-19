@@ -1,12 +1,8 @@
 /*
  * key_separation.h — 三权分立密钥 CNG 内核托管（内部模块，不导出）
  *
- * 用户需求（核心安全升级：用 CNG 彻底取代用户态 XOR 掩码）：
- *   XOR 掩码方案的风险：攻击者若能 Dump 进程内存，读取到三份 XOR 掩码与三个
- *   堆页，只需简单异或即可还原原始密钥。这仅能抵御冷启动攻击，对内存读取攻击
- *   几乎无效。
  *
- *   CNG 托管方案的优势：密钥原始字节自始至终不进入用户态内存，用户态仅持有
+ *   CNG 托管设计的优势：密钥原始字节自始至终不进入用户态内存，用户态仅持有
  *   BCRYPT_KEY_HANDLE 句柄值。即使完整 Dump 进程内存，拿到的只是
  *   0x00000000ABCD1234 这样的句柄 ID，在内核地址空间之外无任何映射意义。
  *
@@ -81,16 +77,16 @@ int key_separation_install(KeyRole role, const uint8_t key[KEYSEP_KEY_BYTES]);
  *   out_key: 输出 32 字节明文密钥（写入调用方栈缓冲区）
  * 返回 0 成功，非 0 失败（密钥未安装 / C 角色休眠 / 导出失败）。
  *
- * ★ 方案 4.1 过渡期声明（security 层深度审计 §5.1）：
+ * ★ 过渡期声明：
  *   本接口使密钥字节返回用户态，与"CNG 内核托管"承诺相悖。
- *   当前仓库中无任何调用点；4.1 全量接线（V3 容器密文迁移）时删除。
+ *   当前仓库中无任何调用点；全量接线（V3 容器密文迁移）时删除。
  *   新代码一律使用 key_separation_aead_*。
  * 调用方（如存在）使用后必须立即 key_separation_release(out_key) 清零。
  */
 int key_separation_acquire(KeyRole role, uint8_t out_key[KEYSEP_KEY_BYTES]);
 
 /*
- * ★ 方案 §6.2/防御闭环判据：查询是否有任一角色已安装内核密钥。
+ * 防御闭环判据：查询是否有任一角色已安装内核密钥。
  * 返回 1 = 至少一个角色已安装；0 = 全部未安装。
  * defense_closure 的 MEM_DUMP 路径据此区分 BLOCKED/DEGRADED。
  */

@@ -8,13 +8,13 @@
  *   - 依赖 util::random（CSPRNG 令牌生成）
  *   - 提供 VerthysSessionGuard RAII + PreheatToken 一次性凭证
  *
- * 第 16.2 项 — VerthysSessionGuard RAII：
+ * VerthysSessionGuard RAII：
  *   原 verthys_unlock / verthys_lock 手工 file_lock 移入移出，异常路径可能遗漏释放。
  *   新设计：VerthysSessionGuard 构造时获取文件锁 + 记录会话路径，
  *   Drop 时自动释放文件锁。AppState 持 Option<VerthysSessionGuard>，
  *   命令通过 with_session 访问。
  *
- * 第 16.3 项 — PreheatToken 一次性凭证：
+ * PreheatToken 一次性凭证：
  *   原 prefetch_done: AtomicBool 可被前端无凭据重复触发，安全意义不足。
  *   新设计：verthys_preheat 返回随机签名令牌（32 字节 CSPRNG），
  *   verthys_unlock 必须携带令牌才启用零拷贝路径。令牌一次性消费 + 超时失效。
@@ -36,10 +36,10 @@ use std::time::{Duration, Instant};
 const PREHEAT_TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /* ------------------------------------------------------------------ *
- * 第 16.2 项：VerthysSessionGuard — RAII 会话守卫                        *
+ * VerthysSessionGuard — RAII 会话守卫                        *
  * ------------------------------------------------------------------ */
 
-/// Verthys 会话 RAII 守卫（第 16.2 项）
+/// Verthys 会话 RAII 守卫
 ///
 /// 构造时获取 .verthys 文件独占锁，记录会话路径与 ID。
 /// Drop 时自动释放文件锁，确保异常路径不遗漏。
@@ -129,10 +129,10 @@ impl Drop for VerthysSessionGuard {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 16.3 项：PreheatToken — 一次性预热凭证                             *
+ * PreheatToken — 一次性预热凭证                             *
  * ------------------------------------------------------------------ */
 
-/// 预热令牌（第 16.3 项）
+/// 预热令牌
 ///
 /// verthys_preheat 成功后生成，包含 32 字节 CSPRNG 随机签名。
 /// verthys_unlock 必须携带匹配的令牌才启用零拷贝路径。
@@ -231,7 +231,7 @@ impl std::fmt::Debug for PreheatToken {
  * PreheatTokenStore — Mutex 保护的令牌存储                              *
  * ------------------------------------------------------------------ */
 
-/// 预热令牌存储（第 16.3 项）
+/// 预热令牌存储
 ///
 /// Mutex 保护的 Option<PreheatToken>，支持：
 ///   - store: 存储新令牌（替换旧令牌）

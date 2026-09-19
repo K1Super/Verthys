@@ -1,7 +1,7 @@
 /**
  * useQuantumField.ts — 量子态势面板 Canvas 物理场引擎
  *
- * ★ 全新引擎：替代原 CSS 动画 + 简单 lerp 视差方案
+ * ★ 全新引擎：替代原 CSS 动画 + 简单 lerp 视差设计
  *
  * =============================================================================
  * 设计规范对照（交互逻辑 / 动态运动 / 渲染性能 / 反AI大众化）
@@ -254,7 +254,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
    * 基准 → 物理时间连续），本引擎不再维护私有空闲判定与全局交互监听。 */
   const { level: idleLevel } = useGlobalIdleScheduler();
 
-  /* ---------- ★ P2-5 监听器统一 AbortController 管理 ----------
+  /* ---------- ★ 监听器统一 AbortController 管理 ----------
    * init() 时创建，全部 addEventListener（面板级 + 全局交互 + 子元素 hover）
    * 经 signal 注册；destroy() 一次 abort() 移除全部，无逐项 removeEventListener
    * 的遗漏风险，子元素监听器不再依赖 GC 回收。 */
@@ -505,7 +505,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
   }
 
   /** 绑定节点 hover（P1 优先级：抑制视差 + 弹簧缩放 + 连线增益）
-   * ★ P2-5：经 AbortController signal 注册，destroy 时统一移除 */
+   * ★ 经 AbortController signal 注册，destroy 时统一移除 */
   function bindNodeHover(el: HTMLElement, idx: number): void {
     const signal = listenerAbort?.signal;
     el.addEventListener('pointerenter', () => {
@@ -849,7 +849,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
     stop();
     resizeObserver?.disconnect();
     resizeObserver = null;
-    /* ★ P2-5：一次 abort 移除全部监听器（面板级 + 全局交互 + 子元素 hover），
+    /* ★ 一次 abort 移除全部监听器（面板级 + 全局交互 + 子元素 hover），
        替代逐项 removeEventListener，子元素监听器不再依赖 GC 回收 */
     listenerAbort?.abort();
     listenerAbort = null;
@@ -882,7 +882,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
     buildPools();
     applySize();
 
-    /* ★ P2-5：本生命周期全部监听器经 AbortController signal 注册，
+    /* ★ 本生命周期全部监听器经 AbortController signal 注册，
        destroy() 一次 abort() 统一移除（重复 init 时重建 controller） */
     listenerAbort?.abort();
     listenerAbort = new AbortController();
@@ -905,7 +905,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
     // 就绪状态弹簧同步
     coreReadySpring.target = options.coreReady.value ? 1 : 0;
 
-    /* ★ P1-1：入场编排按满帧渲染 — 面板挂载即交互（resetIdle），
+    /* ★ 入场编排按满帧渲染 — 面板挂载即交互（resetIdle），
        确保错峰入场编排全程 60fps 不降档。 */
     const { resetIdle } = useGlobalIdleScheduler();
     resetIdle();

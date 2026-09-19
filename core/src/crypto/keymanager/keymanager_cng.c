@@ -1,10 +1,10 @@
 /*
  * keymanager_cng.c — V3 密钥组 CNG 内核托管生命周期实现
  *
- * 批量导入流程（UNLOCK_OPTIMIZATION §6.1）：
+ * 批量导入流程：
  *   MEK 明文（用户态栈帧唯一暴露点）→ BCryptGenerateSymmetricKey 导入内核
  *   → 立即清零 → 用 MEK 内核句柄逐角色解包 wrapped 子密钥（解密在内核态，
- *   解包输出为栈上 32B + 立即导入 + 立即清零，方案 E-5）→ KERNEL_RESIDENT。
+ *   解包输出为栈上 32B + 立即导入 + 立即清零）→ KERNEL_RESIDENT。
  *
  * 失败原子性：任一步失败 → 销毁本次已导入的全部句柄 → 状态回 UNINITIALIZED，
  * 不留半导入态（与 vsb_txn 回滚语义对齐）。
@@ -15,12 +15,12 @@
 
 #include <string.h>
 
-/* ---------- 进程级句柄总量（defense_closure MEM_DUMP 判据，WP-1） ----------
+/* ---------- 进程级句柄总量（defense_closure MEM_DUMP 判据） ----------
  * 全部 VerthysCngKeyManager 实例的活跃内核句柄之和，Interlocked 原子维护。
  * > 0 ⇒ 密钥组已进入 CNG 内核托管（V3 目标态）。 */
 static volatile LONG s_kernel_handle_total = 0;
 
-/* ---------- V3 域分离标签（与 V2 标签严格隔离，方案红线） ---------- */
+/* ---------- V3 域分离标签（与 V2 标签严格隔离） ---------- */
 
 /* wrapped 子密钥 AAD 前缀："verthys/wrap-v3"（16 字节数组：15 字符 + NUL 填充） */
 static const uint8_t WRAP_AAD_PREFIX[16] = {
@@ -73,7 +73,7 @@ static VerthysResult import_wrapped_role(VerthysCngKeyManager *km,
                                        const uint8_t *wrapped,
                                        uint32_t wrapped_len)
 {
-    /* ★ 红线（E-5）：解包输出缓冲栈上分配 + 导入后立即清零 */
+    /* ★ 红线：解包输出缓冲栈上分配 + 导入后立即清零 */
     uint8_t key_material[VERTHYS_CNG_KEY_BYTES];
     size_t  key_len = sizeof(key_material);
     uint8_t aad[17];
@@ -101,7 +101,7 @@ static VerthysResult import_wrapped_role(VerthysCngKeyManager *km,
         return VERTHYS_ERR_CORRUPT;
     }
 
-    /* 导入内核（import 内部清零 key_material，const 契约见 verthys_crypto_cng.h） */
+    /* 导入内核（import 内部清零 key_material，const 契约同 verthys_crypto_cng.h） */
     r = verthys_cng_aead_import_key(&km->keys[role], key_material,
                                   ROLE_KEY_ID[role]);
     verthys_secure_zero(key_material, sizeof(key_material));
@@ -151,7 +151,7 @@ VerthysResult verthys_cng_km_import_batch(
     }
     km->state = VERTHYS_CNG_KM_DERIVED;
 
-    /* 句柄预算校验（性能架构 §4.4：4 把密钥 ≤ 16 上限） */
+    /* 句柄预算校验（4 把密钥 ≤ 16 上限） */
     if (VERTHYS_CNG_KEY_COUNT > VERTHYS_CNG_MAX_HANDLES) {
         km->state = VERTHYS_CNG_KM_UNINITIALIZED;
         return VERTHYS_ERR_INTERNAL;
@@ -244,10 +244,10 @@ VerthysCngAead *verthys_cng_km_get(VerthysCngKeyManager *km, VerthysCngKeyRole r
 }
 
 /*
- * ★ WP-5（ChangePassword V3）：旧口令派生 MEK 的包裹验证。
+ * ChangePassword V3：旧口令派生 MEK 的包裹验证。
  * candidate MEK 临时导入（唯一句柄，用后即毁）→ 对 wrapped_probe 做内核态
  * 解包试探：AEAD 认证通过 = 口令正确；AUTH 失败 = 口令错误。
- * 解包输出为栈上 32B 瞬态，验证后清零（红线 E-5）。
+ * 解包输出为栈上 32B 瞬态，验证后清零。
  * import_key 的 const 契约：mek 入参在导入完成后被清零。
  */
 VerthysResult verthys_cng_km_verify_mek(
@@ -295,10 +295,10 @@ VerthysResult verthys_cng_km_verify_mek(
 }
 
 /*
- * ★ WP-5（ChangePassword V3）：单角色重包裹（rekey 内部步骤）。
+ * ChangePassword V3：单角色重包裹（rekey 内部步骤）。
  * 旧 MEK（km 驻留句柄）解包 wrapped（超级块现值）→ 栈上 32B 瞬态 →
  * 新 MEK 临时句柄（new_mek_aead）内核态加密 → new_wrapped_out。
- * 明文在函数返回前清零（红线 E-5）。
+ * 明文在函数返回前清零。
  */
 static VerthysResult rekey_one_role(VerthysCngKeyManager *km,
                                   VerthysCngAead *new_mek_aead,
@@ -504,7 +504,7 @@ VerthysResult verthys_cng_km_generate_keyset(
     uint8_t *wrapped_b_out, uint32_t wrapped_b_cap,
     uint8_t *wrapped_c_out, uint32_t wrapped_c_cap)
 {
-    /* A/B/C 明文仅本栈帧瞬态（wrap 后由 wrap_key 清零，红线 E-5） */
+    /* A/B/C 明文仅本栈帧瞬态（wrap 后由 wrap_key 清零，红线） */
     uint8_t key_a[VERTHYS_CNG_KEY_BYTES];
     uint8_t key_b[VERTHYS_CNG_KEY_BYTES];
     uint8_t key_c[VERTHYS_CNG_KEY_BYTES];

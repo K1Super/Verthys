@@ -37,7 +37,7 @@ mod windows_impl {
     /// 默认共享内存大小 8MB
     pub const SHM_DEFAULT_SIZE: usize = 8 * 1024 * 1024;
 
-    /* ===== 摘要扫描专用常量（Phase 2B：轻量元数据，无数据块）===== */
+    /* ===== 摘要扫描专用常量（轻量元数据，无数据块）===== */
     /// 摘要扫描共享内存魔数 "VSUM"（区别于全量扫描 VSMM，reader 据此选择解析路径）
     pub const SHM_SUMMARY_MAGIC: u32 = 0x5653554D;
     /// 每条摘要记录索引 80 字节（8 字节对齐）：
@@ -48,7 +48,7 @@ mod windows_impl {
     ///   [24..32] physical_offset: u64
     ///   [32..40] name_offset: u64
     ///   [40..72] merkle_leaf: [u8; 32]
-    ///   [72..80] created_time: u64  ★ Phase 2G
+    ///   [72..80] created_time: u64
     pub const SHM_SUMMARY_ENTRY_SIZE: usize = 80;
     /// 摘要扫描默认共享内存大小 4MB（元数据体积极小，4MB 足够上万条）
     pub const SHM_SUMMARY_DEFAULT_SIZE: usize = 4 * 1024 * 1024;
@@ -161,7 +161,7 @@ mod windows_impl {
         }
 
         /// 共享内存覆写擦除：随机字节覆写（防残留数据被恶意读取）
-        /// 按方案要求：每次传输完成后发送方立即将数据区全部写为随机字节
+        /// 每次传输完成后发送方立即将数据区全部写为随机字节
         pub fn wipe(&mut self) {
             unsafe {
                 let slice = std::slice::from_raw_parts_mut(self.ptr, self.size);
@@ -240,9 +240,9 @@ mod windows_impl {
             Ok(records.len())
         }
 
-        /// 将摘要记录写入共享内存缓冲区（Phase 2B：轻量元数据，无数据块）
+        /// 将摘要记录写入共享内存缓冲区（轻量元数据，无数据块）
         ///
-        /// ★ Phase 2G：摘要记录元组增加 created_time 字段
+        /// ★ 摘要记录元组增加 created_time 字段
         /// 元组：(lid, rtype, name, data_size, physical_offset, merkle_leaf, created_time)
         ///
         /// 与全量 write_records 的区别：
@@ -302,7 +302,7 @@ mod windows_impl {
                         entry_ptr.add(40),
                         32,
                     );
-                    // ★ Phase 2G：created_time 写入偏移 72
+                    // ★ created_time 写入偏移 72
                     *((entry_ptr.add(72)) as *mut u64) = *created_time;
                 }
                 if !name.is_empty() {

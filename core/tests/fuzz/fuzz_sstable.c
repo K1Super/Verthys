@@ -1,7 +1,5 @@
 /*
- * fuzz_sstable.c — V3 LSM SSTable/Manifest 明文帧模糊测试目标（WP-10 目标 4/5）
- *
- * 设计依据：docs/V3_UPGRADE_PLAYBOOK.md WP-10
+ * fuzz_sstable.c — V3 LSM SSTable/Manifest 明文帧模糊测试目标
  *
  * 测试面（SSTable 子系统的两个明文输入面，单目标全覆盖）：
  *   1. verthys_lsm_manifest_parse_unverified —— Manifest 帧 AEAD 解密后的

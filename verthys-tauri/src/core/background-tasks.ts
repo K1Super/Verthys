@@ -1,7 +1,7 @@
 /*
  * core/background-tasks.ts — 全局后台任务管理
  *
- * ★ 白皮书 4.4：将 backgroundTasks 的启动/停止抽象到独立模块，
+ * ★ 将 backgroundTasks 的启动/停止抽象到独立模块，
  *   供 global-verthys.ts 与 module-auth.ts 及未来组件共享使用。
  *
  * 核心改进（相对 verthys-cache.ts 旧实现）：
@@ -23,8 +23,7 @@
  *   - background-tasks.ts → lib/verthys.ts（verthysGetRecord）
  *   - background-tasks.ts → utils/logger.ts（日志）
  *   - cache/composition/verthys-cache.ts（组合根）→ 本模块：仅注入 stopBackgroundTasks 钩子
- *     （verthys-cache 组合根 §二.2 单向化：start/stop 不再经 verthys-cache 转发，
- *     消费方直接从本模块导入）
+ *     （单向化：start/stop 不再经 verthys-cache 转发，消费方直接从本模块导入）
  *
  * ★ ES Module 循环依赖安全性：
  *   残余双向边（verthys-cache ↔ background-tasks）：本模块仅运行时（函数调用时）
@@ -74,7 +73,7 @@ const BACKGROUND_START_DELAY_MS = 12000;
 /* ------------------------------------------------------------------ *
  * 后台任务状态与取消控制器                                              *
  *                                                                    *
- * ★ 白皮书 2.2.2：stopBackgroundTasks 改为 async，等待所有任务完全终止 *
+ * ★ stopBackgroundTasks 改为 async，等待所有任务完全终止           *
  *   旧实现 stopBackgroundTasks 为同步函数，仅设置取消标志不等待任务实际 *
  *   终止。重置后立即创建新会话，旧后台任务可能仍在运行，访问已释放的    *
  *   缓存或监听器，引发竞态。                                          *
@@ -108,14 +107,13 @@ let allTasksCompletion: Promise<void> = Promise.resolve();
  * ------------------------------------------------------------------ */
 
 /**
- * ★ Phase 2E：解锁后启动三条低优先级后台任务。
+ * ★ 解锁后启动三条低优先级后台任务。
  *
- * 落实 improve.md「三、极速解锁加载流程」：
- *   "解锁完成的同时，系统启动三条低优先级后台任务。
- *    第一条悄悄解析完整数据索引，为后续可能的全量搜索和导出建立高速缓存。
- *    第二条预加载当前屏幕可见区域内的几条记录对应的完整数据块，
+ * 目标：解锁完成的同时，系统启动三条低优先级后台任务。
+ *   第一条悄悄解析完整数据索引，为后续可能的全量搜索和导出建立高速缓存。
+ *   第二条预加载当前屏幕可见区域内的几条记录对应的完整数据块，
  *    让用户很可能点开的就是已缓存好的内容。
- *    第三条基于轻量索引的校验码进行全盘完整性巡检，完全不打扰前台操作。"
+ *    第三条基于轻量索引的校验码进行全盘完整性巡检，完全不打扰前台操作。
  *
  * 任务一：解析完整数据索引
  *   - 复用 ensureRecordScan（旧 recordScanCache）
@@ -250,7 +248,7 @@ export async function startBackgroundTasks(): Promise<void> {
 }
 
 /**
- * ★ 白皮书 2.2.2：停止后台任务并等待所有任务完全终止。
+ * ★ 停止后台任务并等待所有任务完全终止。
  *
  * 旧实现为同步函数，仅设置取消标志不等待任务实际终止。
  * 重置后立即创建新会话，旧后台任务可能仍在运行，访问已释放的缓存或监听器，引发竞态。
@@ -341,10 +339,9 @@ function collectVisibleRecordIds(perType: number): number[] {
 }
 
 /**
- * ★ Phase 2E 任务三：完整性巡检（基于 merkle_leaf）。
+ * ★ 任务三：完整性巡检（基于 merkle_leaf）。
  *
- * 落实 improve.md「三、极速解锁加载流程」中第三条后台任务：
- *   "第三条基于轻量索引的校验码进行全盘完整性巡检，完全不打扰前台操作。"
+ *   "基于轻量索引的校验码进行全盘完整性巡检，完全不打扰前台操作"。
  *
  * 实现：
  *   - 遍历 summaryCache 中所有记录
@@ -354,7 +351,7 @@ function collectVisibleRecordIds(perType: number): number[] {
  *
  * 注意：当前阶段仅做"在场性 + 可读性"巡检（验证记录可被读取）。
  * 完整 merkle 哈希校验需要后端提供 merkle 计算接口，
- * 留待 Phase 2G+ 扩展（B+ 树序列化版本化后）。
+ * 留待后续扩展（B+ 树序列化版本化后）。
  *
  * @param controller 取消控制器，cancelled=true 时立即退出
  */

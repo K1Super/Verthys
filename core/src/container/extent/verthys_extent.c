@@ -1,11 +1,8 @@
 /*
  * verthys_extent.c — V3 内容寻址 Extent 实现
  *
- * 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.5 / §6.2
- * 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-3
- *
  * 复用资产：
- *   - verthys_crypto.c verthys_generichash（libsodium BLAKE2b-256，E-3 零依赖）
+ *   - verthys_crypto.c verthys_generichash（libsodium BLAKE2b-256）
  *   - verthys_crypto_cng.c（CNG 内核 AEAD：加密/解密/nonce 计数器）
  *   - verthys_partition.h（Extent 分区：独立密钥上下文 VerthysPartition）
  *   - verthys_io.c（vio_pread64/vio_pwrite64 统一 64 位偏移 I/O）
@@ -58,7 +55,7 @@ static void build_data_aad(uint8_t aad[VERTHYS_EXTENT_DATA_AAD_BYTES],
 }
 
 /* 索引内按哈希定位条目（线性扫描；命中返回下标，未命中返回 SIZE_MAX）。
- * 条目上限 4096，O(n) 查找的常数远小于哈希计算本身，LSM 层（WP-4）
+ * 条目上限 4096，O(n) 查找的常数远小于哈希计算本身，LSM 层
  * 建立 hash→offset 内存映射后由上层接管热路径。 */
 static size_t index_find_slot(const VerthysExtentIndex *idx,
                               const uint8_t hash[VERTHYS_EXTENT_HASH_BYTES])
@@ -337,7 +334,7 @@ VerthysResult verthys_extent_gc_eligible(const VerthysExtentIndex *idx,
 
 /*
  * flatcc 序列化索引（返回 flatcc_builder_aligned_free 归属的对齐缓冲）。
- * 帧明文 = ExtentIndexV3 FlatBuffers；nonce_counter 取分区当前计数器（E-7）。
+ * 帧明文 = ExtentIndexV3 FlatBuffers；nonce_counter 取分区当前计数器。
  */
 static VerthysResult index_serialize(const VerthysExtentIndex *idx,
                                    const VerthysPartition *part,
@@ -356,10 +353,10 @@ static VerthysResult index_serialize(const VerthysExtentIndex *idx,
         if (ExtentIndexV3_version_add(&builder, VERTHYS_EXTENT_INDEX_VERSION) != 0) break;
         if (ExtentIndexV3_txid_add(&builder, idx->txid) != 0) break;
         if (ExtentIndexV3_next_offset_add(&builder, idx->next_offset) != 0) break;
-        /* 保存后值约定（与 WP-4 LSM Manifest 一致）：索引帧在序列化
+        /* 保存后值约定（与 LSM Manifest 一致）：索引帧在序列化
          * 完成后由 save 路径加密，恰消耗 1 个 nonce（计数器 +1）。
          * 此前保存前值，重载 restore 回退到帧自身 nonce，下次
-         * 加密重用该 nonce（AEAD 红线违规，E-7）。 */
+         * 加密重用该 nonce（AEAD 红线违规）。 */
         if (ExtentIndexV3_nonce_counter_add(
                 &builder,
                 verthys_cng_aead_nonce_counter(&part->aead) + 1u) != 0) break;
@@ -638,7 +635,7 @@ VerthysResult verthys_extent_index_load(FILE *f, uint64_t region_offset,
         return VERTHYS_ERR_FORMAT;
     }
 
-    /* 4. 明文帧解析（★ WP-10 提取：verifier + 字段边界 + 一致性校验，
+    /* 4. 明文帧解析（提取：verifier + 字段边界 + 一致性校验，
      *     与 fuzz 共享同一解析路径，杜绝两份逻辑漂移） */
     {
         uint64_t nonce_counter = 0;
@@ -650,7 +647,7 @@ VerthysResult verthys_extent_index_load(FILE *f, uint64_t region_offset,
             return r;
         }
 
-        /* 5. 分区 nonce 计数器 restore（E-7 防回退：低于当前值即拒绝） */
+        /* 5. 分区 nonce 计数器 restore（防回退：低于当前值即拒绝） */
         r = verthys_cng_aead_restore_nonce_counter(&part->aead, nonce_counter);
         if (r != VERTHYS_OK) {
             verthys_secure_zero(pt, ct_len);

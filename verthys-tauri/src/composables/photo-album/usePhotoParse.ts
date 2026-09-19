@@ -240,7 +240,7 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         // ★ 企业级根治：使用 readUserFile 而非 readFileBytes
         //   用户通过对话框显式选择的文件已获授权，不应受沙箱白名单限制
         //   原缺陷：readFileBytes 白名单仅含 home_dir，D:\ 等路径被拒
-        //   ★ P2-7：二进制 IPC 直传 Uint8Array（去 base64 化）
+        //   二进制 IPC 直传 Uint8Array（去 base64 化）
         parseFileData.value = await readUserFile(path);
         parseFileName.value = path.split(/[\\/]/).pop() || "unknown.venc";
         await finishLoading(emitter);

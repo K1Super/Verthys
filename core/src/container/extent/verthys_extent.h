@@ -1,13 +1,9 @@
 /*
  * verthys_extent.h — V3 内容寻址 Extent（去重 + 完整性）
  *
- * 设计依据：
- *   - docs/TARGET_ARCHITECTURE_V5.md §6.5（内容寻址 Extent）/ §6.2（Extent 分区）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-3
- *
  * 复用资产：
- *   - verthys_generichash（libsodium BLAKE2b-256，E-3 零新依赖）
- *   - WP-2 分区管理（Extent 分区：独立 CNG 内核 AEAD 密钥）
+ *   - verthys_generichash（libsodium BLAKE2b-256）
+ *   - 分区管理（Extent 分区：独立 CNG 内核 AEAD 密钥）
  *
  * 内容寻址语义（红线级）：
  *   - 写入：明文 → BLAKE2b-256 → 索引查重 → 命中则 ref_count++（零重写）；
@@ -15,22 +11,22 @@
  *   - 读取：索引查哈希 → 读密文 → 内核态解密 → 验证 BLAKE2b(明文) == hash
  *     （双重完整性：AEAD 认证 + 内容哈希校验，任一失败即拒绝）；
  *   - 释放：ref_count-- → 0 = GC 可回收标记（物理删除由 verthys_garbage.c
- *     承担，v5.0 §7.2；本模块只标记不回收）；
- *   - 去重防侧信道：相同明文同哈希——密码管理器场景可接受（v5.0 已定）。
+ *     承担；本模块只标记不回收）；
+ *   - 去重防侧信道：相同明文同哈希——密码管理器场景可接受。
  *
  * Extent 分区布局（分区偏移基准）：
  *   [0 .. VERTHYS_EXTENT_INDEX_REGION_BYTES)   索引帧区（固定 1MB）
  *   [VERTHYS_EXTENT_INDEX_REGION_BYTES ..)     数据区（append-only，
  *                                             条目 offset 为数据区相对偏移）
  *
- * 索引帧布局（与分区表帧同构，WP-2 惯例）：
+ * 索引帧布局（与分区表帧同构）：
  *   [u32 magic 'V3EX'][u32 ct_len][AEAD 密文 ct_len 字节（含 16B tag）]
  *   [12B nonce]
  *   明文为 ExtentIndexV3 FlatBuffers（schema/extent.fbs），
  *   AEAD 密钥 = Extent 分区密钥（AAD 域分离 "verthys/extent-index-v3"）。
  *
  * 线程安全性：本模块非线程安全——单写者纪律（FFI 单线程事务流水线），
- * 与 WP-2 分区模块一致；并发由上层事务层（WP-5）串行化。
+ * 并发由上层事务层串行化。
  */
 #ifndef VERTHYS_EXTENT_H
 #define VERTHYS_EXTENT_H
@@ -56,7 +52,7 @@ extern "C" {
 #define VERTHYS_EXTENT_INDEX_REGION_BYTES    (1u * 1024u * 1024u) /* 索引帧区 */
 #define VERTHYS_EXTENT_INDEX_MAX             4096u /* 条目上限（索引帧区容量内） */
 
-/* 索引帧 AEAD 域分离标签（V3，v5.0 §4.2 风格） */
+/* 索引帧 AEAD 域分离标签 */
 #define VERTHYS_EXTENT_INDEX_AAD   "verthys/extent-index-v3"
 
 /* ---------- 类型 ---------- */
@@ -148,7 +144,7 @@ VerthysResult verthys_extent_index_find(const VerthysExtentIndex *idx,
  * VERTHYS_ERR_RESOURCE_LIMIT（索引满）/ VERTHYS_ERR_IO / VERTHYS_ERR_INTERNAL。
  *
  * 注意：分区容量（part->size）不约束追加写——分区扩展（2x 策略）由
- * 上层事务层在索引持久化前统一决策（WP-5）；本函数只推进 used/next_offset。
+ * 上层事务层在索引持久化前统一决策；本函数只推进 used/next_offset。
  */
 VerthysResult verthys_extent_put(FILE *f, VerthysPartition *part,
                              VerthysExtentIndex *idx, uint64_t txid,
@@ -207,7 +203,7 @@ VerthysResult verthys_extent_gc_eligible(const VerthysExtentIndex *idx,
 
 /*
  * 索引持久化：flatcc 序列化 → Extent 分区密钥 AEAD 加密（域分离 AAD）→
- * 索引帧区整帧覆写 + fsync。帧内含分区 nonce 计数器快照（E-7，
+ * 索引帧区整帧覆写 + fsync。帧内含分区 nonce 计数器快照（
  * 保存后值约定：快照 = 序列化时计数器 + 1（索引帧加密恰消耗 1 个
  * nonce），重载 restore 后绝不复用帧自身 nonce）。
  *
@@ -225,7 +221,7 @@ VerthysResult verthys_extent_index_save(FILE *f, uint64_t region_offset,
 
 /*
  * 索引加载：帧读取 → AEAD 解密验证 → flatcc verifier + 字段校验 →
- * 内存态重建 + 分区 nonce 计数器 restore（E-7 防回退；快照值小于当前
+ * 内存态重建 + 分区 nonce 计数器 restore（防回退；快照值小于当前
  * 值时拒绝，保证 nonce 不复用）。
  *
  * [in]  f              容器文件（须非 NULL）
@@ -241,7 +237,7 @@ VerthysResult verthys_extent_index_load(FILE *f, uint64_t region_offset,
                                     VerthysPartition *part,
                                     VerthysExtentIndex *idx);
 
-/* ---------- 解析层（★ WP-10 模糊测试；纯验证+提取，无 CNG/IO 依赖） ---------- */
+/* ---------- 解析层（模糊测试；纯验证+提取，无 CNG/IO 依赖） ---------- */
 
 /*
  * Extent 索引明文帧解析（对齐 vsb_v3_parse_unverified 分层模式）：

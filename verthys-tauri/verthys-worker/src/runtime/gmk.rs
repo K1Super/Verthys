@@ -25,7 +25,7 @@ use super::protocol::{Request, Response, base64_encode, base64_decode};
  * ------------------------------------------------------------------ */
 
 /// 验证器明文常量（32 字节，AES-GCM 加密后 = 48 字节含 tag）
-/// v2：品牌重塑（ValtCore→Verthys，8→7 字符）后以版本号+尾下划线补齐定长 32 字节
+/// 以版本标识 + 尾下划线补齐定长 32 字节
 const VERIFIER_PLAIN: &[u8; 32] = b"VERTHYS_GLOBAL_KEY_VERIFIER_v2__";
 /// 验证器 AES-GCM 附加数据
 #[allow(dead_code)]

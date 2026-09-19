@@ -6,14 +6,14 @@
  *
  * 包含：
  *   - AppState: 主进程会话状态（worker IPC session + scan_state + init_lock）
- *   - ScanPipelineState<T>: 泛型双缓冲游标扫描状态（第 11.3 项）
- *   - LockedBuffer<T>: VirtualLock RAII 守卫（第 11.2 项）
- *   - PrefetchTaskHandle<T>: 长期预取任务控制（第 11.4 项）
+ *   - ScanPipelineState<T>: 泛型双缓冲游标扫描状态
+ *   - LockedBuffer<T>: VirtualLock RAII 守卫
+ *   - PrefetchTaskHandle<T>: 长期预取任务控制
  *   - InitLockGuard: 初始化锁 RAII 守卫
  *   - cleanup_scan_on_failure / cleanup_summary_scan_on_failure: 熔断清理
- *   - spawn_lock_monitor: 锁持有时间监控（第 11.7 项）
+ *   - spawn_lock_monitor: 锁持有时间监控
  *
- * 第 11.5 项 — 锁中毒处理：
+ * 锁中毒处理：
  *   原：所有 Mutex/RwLock 的 lock()/read()/write() 用 unwrap_or_else(|e| e.into_inner())
  *   吞中毒——中毒时直接取出数据继续使用，可能操作不一致状态。
  *
@@ -21,11 +21,11 @@
  *   通知 worker 关闭游标。通过 lock_scan_state/lock_scan_summary_state/
  *   lock_verthys_file/read_session/write_session 方法统一处理。
  *
- * 第 11.6 项 — wait_io_complete 改 Notify：
+ * wait_io_complete 改 Notify：
  *   原：100ms 轮询 pending_io_count，延迟高且浪费 CPU。
  *   新：tokio::sync::Notify，end_io 调 notify_one，wait_io_complete 调 notified().await。
  *
- * 第 11.7 项 — 锁持有时间监控：
+ * 锁持有时间监控：
  *   AtomicU64 记录 scan_state/scan_summary_state 锁获取时间戳。
  *   后台任务每 5s 检查，持有超 30s 告警 + try_lock 强制重置。
  *
@@ -73,13 +73,13 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 /* ------------------------------------------------------------------ *
- * 第 11.7 项：TimedMutexGuard — 带时间戳的锁守卫                       *
+ * TimedMutexGuard — 带时间戳的锁守卫                       *
  *                                                                    *
  * 包装 MutexGuard，构造时记录时间戳，Drop 时清除时间戳。               *
  * 后台任务通过时间戳检测锁持有时间，超 30s 告警 + 强制重置。            *
  * ------------------------------------------------------------------ */
 
-/// 带时间戳的 Mutex 守卫（第 11.7 项）
+/// 带时间戳的 Mutex 守卫
 ///
 /// 通过 `AppState::lock_scan_state` / `lock_scan_summary_state` 创建。
 /// 构造时在 `timestamp` 字段记录当前 Unix 毫秒时间戳，Drop 时清零。
@@ -136,62 +136,62 @@ fn now_ms() -> u64 {
 /// 字段可见性：
 ///   - `init_lock` / `prefetch_done`：pub（AtomicBool，无中毒风险，直接访问）
 ///   - `session` / `scan_state` / `scan_summary_state` / `verthys_file_lock`：
-///     私有（通过锁中毒恢复方法访问，第 11.5 项）
+///     私有（通过锁中毒恢复方法访问
 ///   - `pending_io_count` / `io_notify` / `*_lock_acquired_ms`：
 ///     私有（通过 begin_io/end_io/wait_io_complete 等方法访问）
 pub struct AppState {
     /// Worker 会话（RwLock 允许多读并发 send，写独占 set_session）
     ///
-    /// 第 11.5 项：通过 read_session()/write_session() 访问，中毒时重置为 None。
+    /// 通过 read_session()/write_session() 访问，中毒时重置为 None。
     session: RwLock<Option<WorkerSession>>,
     /// 并发锁防重：初始化流程进行中拒绝并发请求
     pub init_lock: AtomicBool,
-    /// 全量扫描状态（第 11.3 项：泛型 ScanPipelineState<VerthysRecordEntry>）
+    /// 全量扫描状态（泛型 ScanPipelineState<VerthysRecordEntry>）
     ///
-    /// 第 11.5 项：通过 lock_scan_state() 访问，中毒时重置为 None + 通知 worker。
-    /// 第 11.7 项：lock_scan_state() 记录时间戳到 scan_lock_acquired_ms。
+    /// 通过 lock_scan_state() 访问，中毒时重置为 None + 通知 worker。
+    /// lock_scan_state() 记录时间戳到 scan_lock_acquired_ms。
     scan_state: Mutex<Option<ScanPipelineState<VerthysRecordEntry>>>,
     /// 摘要扫描状态（与 scan_state 对称）
     scan_summary_state: Mutex<Option<ScanPipelineState<VerthysSummaryEntry>>>,
     /// .verthys 文件跨进程独占锁
     ///
-    /// 第 11.5 项：通过 lock_verthys_file() 访问，中毒时重置为 None。
+    /// 通过 lock_verthys_file() 访问，中毒时重置为 None。
     verthys_file_lock: Mutex<Option<VerthysFileLock>>,
     /// Worker IO 操作计数器（verthys_flush 屏障）
     pending_io_count: AtomicU64,
-    /// 第 11.6 项：IO 完成通知（替代 100ms 轮询）
+    /// IO 完成通知（替代 100ms 轮询）
     ///
     /// end_io 调 notify_one，wait_io_complete 调 notified().await。
     io_notify: Notify,
     /// 索引区预热完成标志
     pub prefetch_done: AtomicBool,
-    /// 第 11.7 项：scan_state 锁获取时间戳（Unix 毫秒，0 = 未持有）
+    /// scan_state 锁获取时间戳（Unix 毫秒，0 = 未持有）
     scan_lock_acquired_ms: AtomicU64,
-    /// 第 11.7 项：scan_summary_state 锁获取时间戳
+    /// scan_summary_state 锁获取时间戳
     scan_summary_lock_acquired_ms: AtomicU64,
-    /// 第 1.2 项：Worker 生命周期状态机（tokio::sync::Mutex + watch channel）
+    /// Worker 生命周期状态机（tokio::sync::Mutex + watch channel）
     ///
     /// worker_controller 的 init/destroy 通过此句柄检查状态转移，
     /// 消除并发竞态。健康检查器每 10s 检查 Ready 状态的子进程存活。
     pub worker_lifecycle: WorkerLifecycleHandle,
-    /// 第 16.3 项：预热令牌存储（PreheatToken 一次性凭证）
+    /// 预热令牌存储（PreheatToken 一次性凭证）
     ///
     /// verthys_preheat 生成令牌，verthys_unlock 验证并消费令牌才启用零拷贝。
     /// 令牌 30s 超时失效 + 一次性消费，防止前端无凭据重复触发。
     pub preheat_token_store: PreheatTokenStore,
-    /// 第 16.2 项：Verthys 会话 RAII 守卫
+    /// Verthys 会话 RAII 守卫
     ///
     /// verthys_unlock 成功后创建（Some），verthys_lock 时销毁（None）。
     /// Drop 自动释放文件锁，确保异常路径不遗漏。
     verthys_session: Mutex<Option<VerthysSessionGuard>>,
-    /// 第 5.7 项 + 第 5.3 项：密钥生命周期状态机 + 指数冷却失败计数器
+    /// 密钥生命周期状态机 + 指数冷却失败计数器
     ///
     /// 维护 GMK 状态（NoKey/Locked/Unlocked）与 verify_global_key 失败计数。
     /// derive_global_key 仅 NoKey，verify_global_key 仅 Locked，clear_global_key Unlocked→Locked。
     /// verify 连续失败 5 次触发指数冷却（2s/4s/8s/16s/32s 上限 60s）。
-    /// 阶段 7 将与 BruteForceGate 联动（DPAPI 持久化 + 界面锁定 + 索引清空）。
+    /// 将与 BruteForceGate 联动（DPAPI 持久化 + 界面锁定 + 索引清空）。
     pub key_lifecycle: KeyLifecycle,
-    /// ★ Comprehensive_optimization：照片导入会话状态（WAL + 去重哈希集 + 批次计数器）
+    /// 照片导入会话状态（WAL + 去重哈希集 + 批次计数器）
     ///
     /// verthys_import_begin 创建，verthys_add_records_batch 期间追加 WAL + 串行 worker 插入，
     /// verthys_import_end 关闭。单 verthys 同一时刻仅一个活跃会话（Mutex 串行化保证）。
@@ -221,13 +221,13 @@ impl AppState {
     }
 
     /* ----------------------------------------------------------------
-     * 第 11.5 项：锁中毒恢复方法                                      *
+     * 锁中毒恢复方法                                      *
      *                                                                *
      * 所有 Mutex/RwLock 的 lock/read/write 统一通过这些方法访问。      *
      * 中毒时：into_inner() 取出 → 废弃（重置 None）→ 告警 → 通知 worker*
      * ---------------------------------------------------------------- */
 
-    /// 锁定 scan_state（第 11.5 项 + 第 11.7 项）
+    /// 锁定 scan_state
     ///
     /// 中毒处理：into_inner() 取出废弃数据 → 重置为 None → 严重告警 →
     /// 通知 worker 关闭游标（best-effort）。
@@ -252,7 +252,7 @@ impl AppState {
                 g
             }
         };
-        // 第 11.7 项：记录锁获取时间戳
+        // 记录锁获取时间戳
         self.scan_lock_acquired_ms
             .store(now_ms(), Ordering::SeqCst);
         TimedMutexGuard {
@@ -261,7 +261,7 @@ impl AppState {
         }
     }
 
-    /// 锁定 scan_summary_state（第 11.5 项 + 第 11.7 项）
+    /// 锁定 scan_summary_state
     ///
     /// 与 lock_scan_state 对称，操作 scan_summary_state。
     pub fn lock_scan_summary_state(
@@ -288,7 +288,7 @@ impl AppState {
         }
     }
 
-    /// 锁定 verthys_file_lock（第 11.5 项）
+    /// 锁定 verthys_file_lock
     ///
     /// 中毒处理：into_inner() 取出废弃 → 重置为 None → 告警。
     /// 无时间戳监控（文件锁持有时间短，不涉及死锁风险）。
@@ -309,7 +309,7 @@ impl AppState {
         }
     }
 
-    /// 读取 session（第 11.5 项：RwLock read 中毒恢复）
+    /// 读取 session（RwLock read 中毒恢复）
     ///
     /// 中毒时：RwLockReadGuard 不支持 DerefMut，无法在此重置数据。
     /// 仅记录告警并返回只读守卫。数据重置将在下次 write_session() 中毒处理时执行。
@@ -327,7 +327,7 @@ impl AppState {
         }
     }
 
-    /// 写入 session（第 11.5 项：RwLock write 中毒恢复）
+    /// 写入 session（RwLock write 中毒恢复）
     fn write_session(&self) -> std::sync::RwLockWriteGuard<'_, Option<WorkerSession>> {
         match self.session.write() {
             Ok(g) => g,
@@ -359,12 +359,12 @@ impl AppState {
     }
 
     /* ----------------------------------------------------------------
-     * 第 11.6 项：Worker IO 屏障（Notify 替代轮询）                    *
+     * Worker IO 屏障（Notify 替代轮询）                    *
      *                                                                *
      * begin_io / end_io 配对调用，包裹 verthys_flush 等 IO 操作。         *
      * wait_io_complete 在 verthys_lock 销毁 worker 前调用。               *
      *                                                                *
-     * 第 11.6 项变更：                                                *
+     * 变更：                                                *
      *   原：wait_io_complete 用 100ms 轮询 pending_io_count             *
      *   新：end_io 调 io_notify.notify_one()，                         *
      *       wait_io_complete 调 io_notify.notified().await             *
@@ -377,7 +377,7 @@ impl AppState {
 
     /// 标记 IO 操作结束（verthys_flush 出口调用，无论成功失败）
     ///
-    /// 第 11.6 项：fetch_sub 后调 notify_one() 唤醒 wait_io_complete。
+    /// fetch_sub 后调 notify_one() 唤醒 wait_io_complete。
     pub fn end_io(&self) {
         self.pending_io_count.fetch_sub(1, Ordering::SeqCst);
         // 唤醒等待 IO 完成的调用方
@@ -389,11 +389,11 @@ impl AppState {
         self.pending_io_count.load(Ordering::SeqCst)
     }
 
-    /// 等待所有 IO 操作完成（第 11.6 项：Notify 替代 100ms 轮询）
+    /// 等待所有 IO 操作完成（Notify 替代 100ms 轮询）
     ///
     /// verthys_lock 销毁 worker 前调用，防止持久化中途销毁 worker。
     ///
-    /// 第 11.6 项变更：
+    /// 变更：
     ///   原：while + sleep(100ms) 轮询，最坏 100ms 延迟
     ///   新：io_notify.notified().await + timeout，事件驱动零延迟
     ///
@@ -427,7 +427,7 @@ impl AppState {
                 return false;
             }
 
-            // 等待通知或超时（第 11.6 项：Notify 替代 sleep）
+            // 等待通知或超时（Notify 替代 sleep）
             let remaining = deadline - now;
             let _ = tokio::time::timeout(remaining, self.io_notify.notified()).await;
             // 收到通知或超时后循环回检查计数
@@ -437,7 +437,7 @@ impl AppState {
     /* ----------------------------------------------------------------
      * Worker 通信方法                                                 *
      *                                                                *
-     * 第 11.5 项：所有 read()/write() 改用 read_session()/write_session()*
+     * 所有 read()/write() 改用 read_session()/write_session()*
      * ---------------------------------------------------------------- */
 
     /// 发送 JSON 请求到 worker，返回响应 JSON（默认 15s 超时）
@@ -520,7 +520,7 @@ impl AppState {
         guard.is_some()
     }
 
-    /// 第 1.4 项：检查 worker 子进程是否存活
+    /// 检查 worker 子进程是否存活
     ///
     /// 健康检查器每 10s 调用，Ready 状态下检查子进程存活。
     /// session 不存在或 is_alive() 返回 false 均视为不存活。
@@ -530,10 +530,10 @@ impl AppState {
     }
 
     /* ----------------------------------------------------------------
-     * 第 16.2 项：VerthysSessionGuard 访问方法                           *
+     * VerthysSessionGuard 访问方法                           *
      * ---------------------------------------------------------------- */
 
-    /// 锁定 verthys_session（第 16.2 项：RAII 会话守卫访问）
+    /// 锁定 verthys_session（RAII 会话守卫访问）
     ///
     /// 中毒处理：into_inner() 取出废弃 → 重置为 None → 告警。
     pub fn lock_verthys_session(&self) -> std::sync::MutexGuard<'_, Option<VerthysSessionGuard>> {
@@ -551,13 +551,13 @@ impl AppState {
         }
     }
 
-    /// 检查 verthys 会话是否活跃（第 16.2 项）
+    /// 检查 verthys 会话是否活跃
     pub fn has_verthys_session(&self) -> bool {
         let guard = self.lock_verthys_session();
         guard.is_some()
     }
 
-    /// 获取当前会话绑定的 verthys 路径（第 16.2 项）
+    /// 获取当前会话绑定的 verthys 路径
     ///
     /// 返回 None 表示未解锁或会话已关闭。
     pub fn verthys_session_path(&self) -> Option<String> {
@@ -566,7 +566,7 @@ impl AppState {
     }
 
     /* ----------------------------------------------------------------
-     * ★ Comprehensive_optimization：照片导入会话（WAL）访问方法       *
+     * 照片导入会话（WAL）访问方法       *
      *                                                                *
      * verthys_import_begin 创建 ImportSession 存入 import_session，    *
      * verthys_add_records_batch 期间追加 WAL + 串行 worker 插入，      *
@@ -574,7 +574,7 @@ impl AppState {
      * 中毒处理：into_inner() 取出废弃 → 重置为 None → 告警。         *
      * ---------------------------------------------------------------- */
 
-    /// 锁定 import_session（★ Comprehensive_optimization：WAL 导入会话访问）
+    /// 锁定 import_session（WAL 导入会话访问）
     ///
     /// 中毒处理：into_inner() 取出废弃会话（WalWriter Drop 关闭文件句柄，
     /// 已 committed 的哈希在磁盘 WAL 中持久化，下次 begin 可恢复）→
@@ -605,10 +605,10 @@ impl AppState {
     }
 
     /* ----------------------------------------------------------------
-     * 第 11.7 项：锁持有时间监控                                      *
+     * 锁持有时间监控                                      *
      * ---------------------------------------------------------------- */
 
-    /// 检查锁持有时间戳，超 30s 告警 + try_lock 强制重置（第 11.7 项）
+    /// 检查锁持有时间戳，超 30s 告警 + try_lock 强制重置
     ///
     /// 由后台任务每 5s 调用一次。检查 scan_state / scan_summary_state
     /// 的锁获取时间戳，如果持有超 30s（疑似死锁），尝试 try_lock 强制重置。
@@ -669,7 +669,7 @@ impl AppState {
         }
     }
 
-    /// 启动锁持有时间监控后台任务（第 11.7 项）
+    /// 启动锁持有时间监控后台任务
     ///
     /// 每 5s 调用 check_lock_timestamps，检测 scan_state / scan_summary_state
     /// 是否被持有超 30s（疑似死锁）。超时则告警 + try_lock 强制重置。
@@ -677,7 +677,7 @@ impl AppState {
     /// 应在应用启动时（lib.rs setup）调用，传入 shutdown CancellationToken
     /// 以便应用退出时停止监控。
     pub fn spawn_lock_monitor(app: tauri::AppHandle, shutdown: CancellationToken) {
-        // 第 11.7 项：使用 tauri::async_runtime::spawn 而非 tokio::spawn。
+        // 使用 tauri::async_runtime::spawn 而非 tokio::spawn。
         //
         // 原因：此函数由 lib.rs 的 setup 回调调用，setup 运行在 Tauri 事件循环
         // 主线程而非 Tokio 运行时上下文内。直接调用 tokio::spawn 会触发
@@ -735,8 +735,8 @@ impl<'a> Drop for InitLockGuard<'a> {
 
 /// 全量扫描熔断清理：停止预取 + 擦除缓冲 + 通知 worker 关闭游标
 ///
-/// 第 11.4 项：cancel + 短超时等待退出（替代 handle.abort() + handle.await）
-/// 第 11.3 项：委托到泛型 cleanup_pipeline_on_failure
+/// cancel + 短超时等待退出（替代 handle.abort() + handle.await）
+/// 委托到泛型 cleanup_pipeline_on_failure
 pub async fn cleanup_scan_on_failure(state: &AppState) {
     cleanup_pipeline_on_failure::<VerthysRecordEntry>(
         &state.scan_state,
@@ -831,7 +831,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_io_complete_notify() {
-        // 第 11.6 项：begin_io 后 wait_io_complete 应等待，
+        // begin_io 后 wait_io_complete 应等待，
         // end_io 通知后应立即返回 true
         let state = std::sync::Arc::new(AppState::new());
         state.begin_io();
@@ -867,7 +867,7 @@ mod tests {
 
     #[test]
     fn test_lock_scan_state_timestamp() {
-        // 第 11.7 项：锁定时记录时间戳，释放时清零
+        // 锁定时记录时间戳，释放时清零
         let state = AppState::new();
 
         assert_eq!(state.scan_lock_acquired_ms.load(Ordering::SeqCst), 0);
@@ -940,7 +940,7 @@ mod tests {
 
     #[test]
     fn test_lock_verthys_file() {
-        // 第 11.5 项：verthys_file_lock 中毒恢复
+        // verthys_file_lock 中毒恢复
         let state = AppState::new();
 
         {

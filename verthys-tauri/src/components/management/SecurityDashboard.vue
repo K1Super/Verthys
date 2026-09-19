@@ -11,7 +11,7 @@
                   grid 行高过渡无重排
     4. cap-board  安全能力状态栏：双列错位端子排清单（圆点状态位 +
                   功能名称 + 【核心】标签 + 虚线引出线，错相呼吸）
-    5. def-board  防御闭环：WP-11 七攻击路径端子排诊断（四态语义色
+    5. def-board  防御闭环：七攻击路径端子排诊断（四态语义色
                   圆点 + 状态标签 + 虚线引出线）+ 总体态势行
     6. flow-rail  数据流转轨道：磁盘→内存电路走线（横段 + 斜向抬升
                   非对称高差，站点环 + 双层非均匀 dash 数据包差速流动），
@@ -288,7 +288,7 @@
         </ul>
       </div>
 
-      <!-- ===== 5. 防御闭环（WP-11 · 7 攻击路径实时阻断状态 · 端子排诊断） ===== -->
+      <!-- ===== 5. 防御闭环（7 攻击路径实时阻断状态 · 端子排诊断） ===== -->
       <div class="def-board">
         <div class="def-head">
           <span class="def-glyph" aria-hidden="true"></span>
@@ -413,7 +413,7 @@ const props = defineProps<{
   customFeatures: Record<string, boolean>;
   /** 自定义面板展开状态 */
   customPanelOpen: boolean;
-  /** 防御闭环路径状态列表（WP-11：7 攻击路径 × 4 态端子排） */
+  /** 防御闭环路径状态列表（7 攻击路径 × 4 态端子排） */
   defensePaths: DefensePathView[];
   /** 防御闭环汇总态势（计数 + 全阻断标志 + 总体态势行） */
   defenseMeta: DefenseMetaView;

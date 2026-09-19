@@ -16,10 +16,10 @@ use crate::util::audit_log::{append_audit, AuditEvent, AuditEventType, AuditResu
 use super::state::SecurityState;
 
 /* ====================================================================== *
- *  第 13.2.7 项：审计日志辅助                                             *
+ *  审计日志辅助                                             *
  * ====================================================================== */
 
-/// 第 13.2.7 项：获取审计日志文件路径
+/// 获取审计日志文件路径
 fn get_audit_log_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     match app.path().app_config_dir() {
         Ok(dir) => Some(dir.join("audit.log")),
@@ -30,7 +30,7 @@ fn get_audit_log_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     }
 }
 
-/// 第 13.2.7 项：获取审计日志 HMAC 密钥（设备指纹派生）
+/// 获取审计日志 HMAC 密钥（设备指纹派生）
 fn get_audit_hmac_key() -> Option<[u8; 32]> {
     use crate::infrastructure::device_fingerprint::get_device_fingerprint;
     use crate::util::crypto::pbkdf2_derive_default;
@@ -53,7 +53,7 @@ fn get_audit_hmac_key() -> Option<[u8; 32]> {
     }
 }
 
-/// 第 13.2.7 项：写入安全命令审计事件
+/// 写入安全命令审计事件
 pub(super) fn write_security_audit(
     app: &tauri::AppHandle,
     state: &SecurityState,

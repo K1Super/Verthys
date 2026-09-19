@@ -1,14 +1,6 @@
 /*
  * secure_allocator.h — 密钥相关结构专用安全分配器 + 全局内存预算记账
  *
- * 设计依据：
- *   - docs/PERFORMANCE_ARCHITECTURE.md §4.1（内存预算：512MB 硬上限，
- *     80% 触发回收，95% 拒绝新操作返回 VERTHYS_ERR_RESOURCE_LIMIT）
- *   - docs/PERFORMANCE_ARCHITECTURE.md §4.2（安全分配器：VirtualAlloc 区段
- *     + PAGE_GUARD 边界页 + VirtualLock 锁页 + 释放前清零 + 元数据独立存储）
- *   - docs/TARGET_ARCHITECTURE_V5.md §5.2（VerthysContext 挂 SecureAllocator*）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-7
- *
  * 威胁模型（安全设计规则）：
  *   1. 堆相邻溢出读写：密钥材料不在普通堆上与业务数据混布——每次分配
  *      独立 VirtualAlloc 区段，前后各一页 PAGE_NOACCESS 边界页，
@@ -40,9 +32,9 @@
 extern "C" {
 #endif
 
-/* ---------- 全局内存预算（性能架构 §4.1） ---------- */
+/* ---------- 全局内存预算 ---------- */
 
-/* DLL 内部总内存硬上限默认值：512MB（可配置，见 budget_init） */
+/* DLL 内部总内存硬上限默认值：512MB（可配置，设于 budget_init） */
 #define SECURE_ALLOC_DEFAULT_BUDGET_BYTES ((size_t)512u * 1024u * 1024u)
 
 /* 预算阈值（百分比）：

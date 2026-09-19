@@ -46,7 +46,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD dwReason, LPVOID lpvReserved)
         DisableThreadLibraryCalls(hinstDLL);
 
         /*
-         * ★ 方案 §6.4：原 inline_crc_init 随 inline_crc 模块删除；
+         * 原 inline_crc_init 随 inline_crc 模块删除；
          * TLS 回调（tls_callbacks.c）已在此前的加载阶段置位
          * g_tls_init_marker，无其他加载锁内工作。
          */

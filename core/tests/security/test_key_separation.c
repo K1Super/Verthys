@@ -1,7 +1,7 @@
 /*
- * test_key_separation.c — 方案 4.1/§6.2 配套测试：CNG 内核托管密钥
+ * test_key_separation.c — 配套测试：CNG 内核托管密钥
  *
- * 覆盖（方案 §8.2 新增测试清单）：
+ * 覆盖：
  *   - init/install/aead 往返（AES-256-GCM 内核态运算）
  *   - C 角色（超级块密钥）休眠强制：激活前 AEAD 拒绝
  *   - install 消费密钥缓冲（明文即刻清零契约）

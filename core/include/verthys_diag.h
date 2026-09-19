@@ -1,9 +1,9 @@
 #ifndef VERTHYS_DIAG_H
 #define VERTHYS_DIAG_H
 /*
- * verthys_diag.h — DLL 诊断输出统一编译门（P2-5 修复，2026-09-19）
+ * verthys_diag.h — DLL 诊断输出统一编译门
  *
- * 规格（error_codes.h 治理条款延续）：C 源文件不得直接调用
+ * 规格（诊断输出规范延续）：C 源文件不得直接调用
  * printf / fprintf / OutputDebugString*；诊断一律经 VERTHYS_DIAG_LOG。
  *
  * 语义：
@@ -13,7 +13,7 @@
  *     供开发环境（调试器/DebugView）捕获。
  *
  * 注意：Event Log（RegisterEventSourceW）为产品正式排查通道，
- * 不受本门控制（见 job_isolation.c）。
+ * 不受本门控制（同 job_isolation.c）。
  */
 #ifdef VERTHYS_DIAG
 #  if defined(_WIN32)

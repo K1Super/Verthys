@@ -51,7 +51,7 @@ export function usePhotoData() {
     return false;
   };
 
-  /* ===== 虚拟滚动（落实 upgrade.md "相册列表强制采用虚拟滚动"） =====
+  /* ===== 虚拟滚动（相册列表强制采用虚拟滚动） =====
    *
    * 布局模型：绝对定位网格
    *   - 列数响应式：>1200px → 4 列，>800px → 3 列，否则 2 列（与原 grid 媒体查询一致）
@@ -166,7 +166,7 @@ export function usePhotoData() {
     }
   };
 
-  /* ===== 按需解密（落实 upgrade.md "完整元数据与缩略图严格按需加载"） =====
+  /* ===== 按需解密（完整元数据与缩略图严格按需加载） =====
    *
    * 架构：两阶段加载
    *   阶段1（loadPhotos）：从 recordScanCache 获取 id 列表，创建占位项（仅 id/metaId，
@@ -245,8 +245,8 @@ export function usePhotoData() {
     for (const vid of toDecrypt) decryptingMetaIds.add(vid);
 
     // ★ 性能修复：批量预取所有待解密照片的 meta dataB64（扫描缓存优先，并行 IPC 回退）
-    //   原方案：并发池内每条 decryptPhotoMeta 各自 getFullRecord → 4 路串行 IPC 抢 worker
-    //   新方案：一次批量预取（命中缓存零 IPC），并发池直接消费预取结果，仅做 CPU 解密
+    //   原实现：并发池内每条 decryptPhotoMeta 各自 getFullRecord → 4 路串行 IPC 抢 worker
+    //   新实现：一次批量预取（命中缓存零 IPC），并发池直接消费预取结果，仅做 CPU 解密
     const metaB64Map = await getRecordsDataB64Batch(toDecrypt);
 
     const CONCURRENCY = 4;
@@ -315,15 +315,15 @@ export function usePhotoData() {
 
     try {
       // ★ 性能修复：改走 recordScanCache（落实 2.5s 预算 + 为按需解密预填扫描缓存）
-      //    原方案：ensureSummaryScanSafe 仅返回元数据 ID，按需解密仍需逐条 getFullRecord IPC，
+      //    原实现：ensureSummaryScanSafe 仅返回元数据 ID，按需解密仍需逐条 getFullRecord IPC，
       //            与后台 ensureRecordScan 抢同一常驻 worker → 滚动解密卡顿。
-      //    新方案：ensureRecordScanSafe 一次扫描缓存全部 dataB64（≤64KB 命中零 IPC，
+      //    新实现：ensureRecordScanSafe 一次扫描缓存全部 dataB64（≤64KB 命中零 IPC，
       //            >64KB 并行回退），ensureVisiblePhotosDecrypted 批量预取直接命中缓存。
       //    后台 startBackgroundTasks 已扫描则此处瞬时增量返回（startId=maxScannedId+1）。
       await ensureRecordScanSafe();
       const photoIds = getRecordIdsByType(TYPE_PHOTO_META);
 
-      // ★ 落实 upgrade.md "前端相册列表初始渲染仅使用此轻量数据，瞬间即可呈现完整列表"：
+      // ★ 前端相册列表初始渲染仅使用此轻量数据，瞬间即可呈现完整列表：
       //   阶段1 — 创建占位项（仅 id/metaId，thumb 为空），立即 push 渲染列表骨架。
       //   虚拟滚动仅渲染可视区占位，上万照片也瞬间呈现完整列表。
       //   阶段2 — 由 watch(visiblePhotos) → ensureVisiblePhotosDecrypted 按需解密可视区缩略图。
@@ -345,7 +345,7 @@ export function usePhotoData() {
         pushShallowItems(photos, newEntries);
         photosLoading.value = false;
       }
-      // ★ 不在此处全量解密，由 watch(visiblePhotos) 按需解密可视区（落实 upgrade.md "按需加载"）
+      // ★ 不在此处全量解密，由 watch(visiblePhotos) 按需解密可视区
     } finally {
       photosLoading.value = false;
       // 更新缓存（含新增照片）

@@ -1,7 +1,7 @@
 /*
  * util/audit_log.rs — HMAC 链式防篡改审计日志
  *
- *    "" 第 5.8 项 / 第 6.6 项 / 第 7.6 项 / 第 9.8 项 / 第 13.7 项 / 第 16.5 项
+ *
  *
  * 架构定位：工具层（util）审计日志模块
  *   - 不依赖任何上层模块（controller / service / repository）
@@ -17,12 +17,12 @@
  *   - 不含敏感数据：密码/密钥/明文内容不写入审计日志
  *
  * 审计事件覆盖范围：
- *   - 第 5.8 项：密钥操作（派生/验证/清空）
- *   - 第 6.6 项：文件读写操作
- *   - 第 7.6 项：剪贴板模式变更/清空/监听事件
- *   - 第 9.8 项：状态文件创建/修改/修复/删除
- *   - 第 13.7 项：安全命令执行
- *   - 第 16.5 项：verthys 解锁/锁定/container_id 不匹配
+ *   - 密钥操作（派生/验证/清空）
+ *   - 文件读写操作
+ *   - 剪贴板模式变更/清空/监听事件
+ *   - 状态文件创建/修改/修复/删除
+ *   - 安全命令执行
+ *   - verthys 解锁/锁定/container_id 不匹配
  *
  * CI 红线：
  *   - 本文件不输出 log::* 调用（审计日志独立于应用日志）
@@ -44,46 +44,46 @@ use sha2::{Digest, Sha256};
 /// 前端不直接消费此枚举，仅用于后端日志记录。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AuditEventType {
-    // 密钥操作（第 5.8 项）
+    // 密钥操作
     KeyDerive,
     KeyVerify,
     KeyClear,
-    // 文件操作（第 6.6 项）
+    // 文件操作
     FileRead,
     FileWrite,
     FileDelete,
-    // 剪贴板操作（第 7.6 项）
+    // 剪贴板操作
     ClipboardClear,
     ClipboardModeChange,
     ClipboardMonitorEvent,
-    // 状态文件操作（第 9.8 项）
+    // 状态文件操作
     StateCreate,
     StateModify,
     StateRepair,
     StateDelete,
-    // 安全命令（第 13.7 项）
+    // 安全命令
     SecurityCommand,
     SecureDelete,
     HardenPrivateDir,
     CleanupCrashResidue,
-    // Verthys 操作（第 16.5 项）
+    // Verthys 操作
     VerthysUnlock,
     VerthysLock,
     ContainerIdMismatch,
-    // 设备绑定（第 4.4 项）
+    // 设备绑定
     DeviceBind,
     DeviceUnbind,
     DeviceRebind,
-    // 爆破防护（第 5.3 项）
+    // 爆破防护
     BruteForceLockout,
     BruteForceReset,
-    // 扫描操作（第 2.7 项）
+    // 扫描操作
     ScanOpen,
     ScanNext,
     ScanClose,
     ScanAbort,
     ScanCircuitBreaker,
-    // 后台巡检（SECURITY.md 第 429-483 项：企业级巡检改进）
+    // 后台巡检（企业级巡检改进）
     /// 巡检测到威胁（未知模块连续达到阈值）
     PatrolThreat,
     /// 巡检触发应急熔断（直接销毁 worker 会话）

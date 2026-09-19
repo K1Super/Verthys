@@ -1,7 +1,7 @@
 /*
- * core/frame-budget.ts — 帧预算监控与自愈机制（性能根治方案 §7）
+ * core/frame-budget.ts — 帧预算监控与自愈机制
  * =============================================================================
- * 【设计原则（§7.1）】不强制降低帧率。所有优化目标都是将每帧 CPU/GPU
+ * 【设计原则】不强制降低帧率。所有优化目标都是将每帧 CPU/GPU
  * 工作降到预算内（60fps ≈ 16.67ms/帧），仅在硬件确实不足时平滑降级 —
  * 用户感知到的是粒子密度降低而非卡顿。
  *
@@ -12,7 +12,7 @@
  *   - 迟滞：连续 30 次评估超预算 → 降一档；连续 60 次评估低于预算
  *     70% → 升一档（自愈）。中间带计数归零 — 防止在阈值附近抖动。
  *
- * 【降级档位（§7.3 权威表）】
+ * 【降级档位】
  *   级别 | 粒子密度 | CSS 动画     | backdrop-filter
  *   0    | 100%     | 全部         | 保留
  *   1    | 80%      | 全部         | 保留
@@ -38,7 +38,7 @@
 
 import { useGlobalIdleScheduler } from "../composables/useGlobalIdleScheduler";
 
-/** 帧指标快照（§7.2 FrameMetrics — gpuTimeMs 为 WebGL timer query 预留位） */
+/** 帧指标快照（gpuTimeMs 为 WebGL timer query 预留位） */
 export interface FrameMetrics {
   /** 主线程 JS 时间（帧间隔代理测量，ms） */
   jsTimeMs: number;
@@ -51,7 +51,7 @@ export interface FrameMetrics {
 /** 降级档位总数（0 完整 / 1 轻度 / 2 中度 / 3 重度） */
 export const DEGRADATION_MAX_LEVEL = 3;
 
-/** 各档位粒子密度（§7.3 权威表：1 / 0.8 / 0.5 / 0.2） */
+/** 各档位粒子密度（1 / 0.8 / 0.5 / 0.2） */
 const DENSITY_BY_LEVEL: readonly number[] = [1, 0.8, 0.5, 0.2];
 
 /** 滑窗帧数（60 帧 ≈ 1s @60fps） */
@@ -148,7 +148,7 @@ export class FrameBudgetMonitor {
   };
 
   /**
-   * 记录一帧（§7.2 recordFrame — 滑窗入队 + 评估）。
+   * 记录一帧（滑窗入队 + 评估）。
    * 亦开放给外部采样源（如测试注入合成帧序列）。
    */
   recordFrame(totalTimeMs: number): void {
@@ -159,7 +159,7 @@ export class FrameBudgetMonitor {
     this.evaluate();
   }
 
-  /** 滑窗 P95 评估 + 迟滞跃迁决策（§7.2 evaluate） */
+  /** 滑窗 P95 评估 + 迟滞跃迁决策 */
   private evaluate(): void {
     /* 暖机守卫：滑窗未满不决策（启动峰值不触发降级） */
     if (this.frameTimes.length < SAMPLE_WINDOW) return;
@@ -196,7 +196,7 @@ export class FrameBudgetMonitor {
     return sorted[Math.max(idx, 0)];
   }
 
-  /** 平滑降级一档（§7.2 degrade — 逐步减少工作，而非骤降帧率） */
+  /** 平滑降级一档（逐步减少工作，而非骤降帧率） */
   private degrade(): void {
     this.consecutiveOverBudget = 0;
     if (this.degradationLevel >= DEGRADATION_MAX_LEVEL) return;
@@ -204,7 +204,7 @@ export class FrameBudgetMonitor {
     this.applyLevel("degrade");
   }
 
-  /** 自愈升级一档（§7.2 upgrade — 逐步恢复） */
+  /** 自愈升级一档（逐步恢复） */
   private upgrade(): void {
     this.consecutiveUnderBudget = 0;
     if (this.degradationLevel <= 0) return;
@@ -219,8 +219,8 @@ export class FrameBudgetMonitor {
     /* 1) 粒子密度（控制器未注册时跳过 — 容错，不阻断其余通道） */
     this.particleController?.setDensity(DENSITY_BY_LEVEL[level]);
 
-    /* 2) CSS 治理类（§7.2 权威类名 — reduced-motion ≥2 / minimal-motion =3；
-     *    样式由 idle-governance.css §6 承载） */
+    /* 2) CSS 治理类（权威类名 — reduced-motion ≥2 / minimal-motion =3；
+     *    样式由 idle-governance.css 承载） */
     document.body.classList.toggle("reduced-motion", level >= 2);
     document.body.classList.toggle("minimal-motion", level >= 3);
 

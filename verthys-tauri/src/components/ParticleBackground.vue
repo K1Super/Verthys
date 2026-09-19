@@ -13,7 +13,7 @@
     <!-- 底层：深色基底 + 径向渐变 + 噪点 -->
     <div class="layer-base"></div>
 
-    <!-- 星云云团（★ P1-6：blur(80px) 烘焙进 SVG 贴图，运行时零实时滤镜） -->
+    <!-- 星云云团（blur(80px) 烘焙进 SVG 贴图，运行时零实时滤镜） -->
     <div class="nebula nebula-1"></div>
     <div class="nebula nebula-2"></div>
     <div class="nebula nebula-3"></div>
@@ -82,7 +82,7 @@
  *     驱动：逆渡镜像掠翼 + 抬升，正渡原掠翼 + 俯冲，重叠期连续穿轴
  *
  * 保留架构：自适应抗锯齿（DPR≥1.5 关 MSAA）/ 统一帧门控（60/30/5/1fps）/
- * 失焦 deep-idle / P1-6 贴图烘焙 / P2 全部资源清理（v2 升级为显式登记制）
+ * 失焦 deep-idle / 贴图烘焙 / 全部资源清理（v2 升级为显式登记制）
  */
 import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import * as THREE from "three";
@@ -115,7 +115,7 @@ const props = defineProps<{
 }>();
 
 /* ============================================================================
- * ★ P1-6 预渲染贴图：SVG 位图（渐变 + feGaussianBlur 烘焙）
+ * ★ 预渲染贴图：SVG 位图（渐变 + feGaussianBlur 烘焙）
  * ============================================================================
  * 与 CosmicBackground 同手法：浏览器将 data-URI SVG 背景图栅格化一次并缓存
  * 为纹理，运行时不再执行 3×blur(80px) 实时重栅格化（星云 drift 动画只驱动
@@ -179,12 +179,12 @@ const trackGpu = <T extends GpuDisposable>(d: T): T => {
   return d;
 };
 
-/* ★ P2-3：监听器清理收敛为闭包变量（移除 `(el as any)._cleanup` DOM 挂载模式） */
+/* ★ 监听器清理收敛为闭包变量（移除 `(el as any)._cleanup` DOM 挂载模式） */
 let cleanupListeners: (() => void) | null = null;
 
 /* ===== ★ 渡越序列引擎（独立模块 — 唯一权威源，零 THREE 依赖） =====
  * intro 逆渡 / enter 正渡双序列包络 + 符号缠绕积分 + 幕布位移积分 +
- * 相机微颤合成（含 v2 微颤终止修复 — 见模块头注） */
+ * 相机微颤合成（含微颤终止修复 — 同模块头注） */
 const engine = useTransitionEngine();
 
 /* ===== 共享着色器 uniform（引擎 → GPU 单向桥，每帧由引擎结果落地） ===== */
@@ -225,7 +225,7 @@ let mouseX = 0;
 let mouseY = 0;
 let smoothMouseX = 0;
 let smoothMouseY = 0;
-/** 当前相位（v2：初始自 props.phase 同步 — onMounted，见下方守卫注释） */
+/** 当前相位（初始自 props.phase 同步 — onMounted，守卫说明附于下方） */
 let currentPhase: "ambient" | "warping" | "galaxy" = "ambient";
 let cameraZ = 880;
 let cameraFov = 60;
@@ -239,7 +239,7 @@ let phaseZ = 880;
 let camBaseX = 0;
 let camBaseY = 0;
 
-/* ===== ★ 统一空闲调度接入（第二轮方案第三章） =====
+/* ===== ★ 统一空闲调度接入 =====
  * 帧率档位（60/30/5/1fps）由全局唯一权威源 useGlobalIdleScheduler 驱动，
  * 本组件不再维护私有门控状态；转场/尺寸变化经 resetIdle 强制 active。 */
 const { level: idleLevel, resetIdle } = useGlobalIdleScheduler();
@@ -250,7 +250,7 @@ onMounted(() => {
   const w = el.clientWidth;
   const h = el.clientHeight;
 
-  /* ★ v2 相位初始同步：currentPhase 自 props.phase 初始化（旧实现硬编码
+  /* ★ 相位初始同步：currentPhase 自 props.phase 初始化（旧实现硬编码
    * "ambient" — 若父组件挂载时 phase 已非 ambient，相位基线/相机 Z 全错），
    * 相位基线 Z 与相机 Z 随之就位；后续变化由 watch 承接 */
   currentPhase = props.phase ?? "ambient";
@@ -263,16 +263,16 @@ onMounted(() => {
 
   // ★ 自适应抗锯齿：DPR ≥ 1.5 时高密度像素下 MSAA 边缘增益不可感知，关闭以省 GPU
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  /* ★ 性能根治方案四：不透明画布——alpha:false 走不透明快速合成路径，
+  /* ★ 不透明画布——alpha:false 走不透明快速合成路径，
    *   深空底色与原透明透出桌面时的视觉一致；透明窗口仅为圆角/边缘保留。
-   *   ★ 方案 §9.2 回滚开关：perfFlags.opaqueCanvas = false 时回退
+   *   ★ 回滚开关：perfFlags.opaqueCanvas = false 时回退
    *   alpha:true + 透明清屏色（alpha 合成路径）。 */
   const opaqueCanvas = perfFlags.opaqueCanvas;
   renderer = new THREE.WebGLRenderer({ alpha: !opaqueCanvas, antialias: dpr < 1.5, powerPreference: "high-performance" });
   renderer.setSize(w, h);
   renderer.setPixelRatio(dpr);
   if (opaqueCanvas) {
-    renderer.setClearColor(0x0a0e1a, 1.0); // ★ 方案四：深空色（不透明）
+    renderer.setClearColor(0x0a0e1a, 1.0); // ★ 深空色（不透明）
   } else {
     renderer.setClearColor(0x000000, 0.0); // 回滚路径：透明画布
   }
@@ -281,7 +281,7 @@ onMounted(() => {
   /* 点尺寸透视衰减标尺（等效 three 内部 scale=height×0.5 × size×pixelRatio） */
   uScaleUniform.value = h * 0.5 * renderer.getPixelRatio();
   /* ★ 启动频闪根治：canvas 延迟挂载 — 全部层构建完成后先预编译着色器
-   * 并暖机渲染一帧再挂载（见下方 buildOrbitLayer 全部完成处）。
+   * 并暖机渲染一帧再挂载（衔接下方 buildOrbitLayer 全部完成处）。
    * 旧序（频闪根因）：canvas 先挂载（透明空帧）→ 首帧 render 时同步
    * 编译多个材质的着色器程序（WebView2 下卡顿数十至数百毫秒）→
    * 多层粒子因编译完成先后不同逐帧浮现 = 启动频闪一下。 */
@@ -537,12 +537,12 @@ onMounted(() => {
   trackGpu(distantStars.material as THREE.Material);
   for (const m of orbitMembers) trackGpu(m.points.material as THREE.Material);
 
-  /* ===== ★ 帧预算降级接入（性能根治方案 §7）：粒子密度通道 =====
+  /* ===== ★ 帧预算降级接入（粒子密度通道） =====
    * 监控器持有 ParticleDensityController 契约（依赖倒置 — 不感知 THREE），
    * 本组件以 setDrawRange 落地（语义 = InstancedMesh.count 尾部截断；
    * 各层粒子均匀随机分布，尾部截断无视觉偏置）。
    * 轨道层本体与残影共享 geometry — 单次 setDrawRange 全成员一致生效。
-   * 注册即应用当前档位密度（晚注册不漏降级）；卸载时注销（见 onBeforeUnmount）。 */
+   * 注册即应用当前档位密度（晚注册不漏降级）；卸载时注销（onBeforeUnmount）。 */
   const densityGeometries: { geometry: THREE.BufferGeometry; baseCount: number }[] = [
     { geometry: distantStars.geometry, baseCount: CURTAIN_LAYER.count },
     { geometry: galaxyLayer.body.points.geometry, baseCount: GALAXY_LAYER.count },
@@ -574,7 +574,7 @@ onMounted(() => {
    * 符号缠绕积分与历史缓冲）。转场经 watch(phase) → resetIdle 强制满帧。
    * 页面隐藏/失焦：调度器置 deep-idle + rAF 天然停帧。 */
   const ENGINE_DT_CLAMP = 0.08;
-  /* ★ 方案一：幕布漂移基准角（rotation 改时间绝对式：f(t) 与帧率解耦，
+  /* ★ 幕布漂移基准角（rotation 改时间绝对式：f(t) 与帧率解耦，
    *   降档跳帧零累计误差；基准取挂载时初值） */
   const curtainDriftBase = curtain.points.rotation.z;
   const renderFrame = (gateDt: number) => {
@@ -582,7 +582,7 @@ onMounted(() => {
     const dt = Math.min(gateDt, ENGINE_DT_CLAMP);
 
     /* --- 1. ★ 渡越序列引擎单步（时钟无条件推进 + 双序列 C2 包络 +
-     *     符号缠绕/幕布位移积分 — 详见 useTransitionEngine 模块头注；
+     *     符号缠绕/幕布位移积分 — 与 useTransitionEngine 模块头注一致；
      *     v2 微颤终止修复：效果由 introDone/introAlive 门控，时钟绝不
      *     冻结 → 打断后微颤 0.5s 内平滑消失零残留） --- */
     const t = engine.update(dt);
@@ -602,7 +602,7 @@ onMounted(() => {
     /* --- 1b. ★ 符号缠绕积分 → 各轨道层 uSwirl：
      *     本体（uLag=0）写当前积分，残影按 t-lag 插值取历史积分 →
      *     真实弧形拖尾（正逆渡越均呈弧形）
-     * ★ 方案一 静态相快速径：渡越未激活（warpEnv=0 且 envSmooth 收敛）
+     * 静态相快速径：渡越未激活（warpEnv=0 且 envSmooth 收敛）
      *   时 swirl 积分恒定——跳过 8 元素循环与历史插值求值（30fps 下
      *   每帧节省 8 次超越函数求值）；渡越激活时全量执行。 --- */
     const transitionActive = engine.warpEnv > 0.0005 || Math.abs(envSmooth) > 0.0005;
@@ -623,7 +623,7 @@ onMounted(() => {
     /* --- 2. 阻尼副本（滤除包络直传）：envSmooth = 场强度（幅度分量），
      *     dirSmooth = 符号方向（方向分量）— 相机幅度/方向两类分量分离，
      *     重叠换向期各自连续
-     * ★ 方案一 静态相：渡越未激活时包络恒 0，平滑无变化——跳过写 --- */
+     * 静态相：渡越未激活时包络恒 0，平滑无变化——跳过写 --- */
     if (transitionActive) {
       envSmooth += (engine.warpEnv - envSmooth) * kEnv;
       dirSmooth += (engine.dirW - dirSmooth) * kEnv;
@@ -672,7 +672,7 @@ onMounted(() => {
     // 银河盘本体：渡越尺寸增幅 + 色调偏冷青（加性混合自然过渡）
     // 基线 5.0/1.0（v4 静息亮度二次提升 — 峰值 6.2/1.0 恒定；历史：
     // v2 4.0/0.95 仍偏暗，旧 2.2/0.7 在 880 距离下仅 ~1.25px）
-    /* ★ 方案一 静态相：envSmooth 已收敛（<0.0005）时 env 联动 uniform
+    /* ★ 静态相：envSmooth 已收敛（<0.0005）时 env 联动 uniform
      *   恒为基线值——跳过写（值已在收敛期写入基线）；渡越期全量写。 */
     if (transitionActive) {
       const u = galaxyLayer.body.uniforms;
@@ -742,7 +742,7 @@ onMounted(() => {
   };
   window.addEventListener("resize", handleResize);
 
-  /* ★ P2-3：监听器清理收敛为闭包变量（替代原 `(el as any)._cleanup` DOM 挂载，
+  /* ★ 监听器清理收敛为闭包变量（替代原 `(el as any)._cleanup` DOM 挂载，
      不再绕过 Vue 类型系统，onBeforeUnmount 直接调用）。
      失焦/隐藏暂停已由全局调度器（deep-idle）+ rAF 天然停帧承接，无本组件监听。 */
   cleanupListeners = () => {
@@ -774,7 +774,7 @@ onBeforeUnmount(() => {
   cleanupListeners?.();
   cleanupListeners = null;
 
-  /* ★ 帧预算监控注销（§7）：控制器引用的 geometry 随下方登记制释放 —
+  /* ★ 帧预算监控注销：控制器引用的 geometry 随下方登记制释放 —
    * 先解除监控器持有，杜绝降级回调触达已释放资源 */
   frameBudgetMonitor.setParticleController(null);
 
@@ -836,7 +836,7 @@ onBeforeUnmount(() => {
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-/* 星云云团（★ P1-6：blur(80px) 烘焙进贴图，运行时零实时滤镜） */
+/* 星云云团（blur(80px) 烘焙进贴图，运行时零实时滤镜） */
 .nebula {
   position: absolute;
   border-radius: 50%;
@@ -879,10 +879,10 @@ onBeforeUnmount(() => {
 .layer-particles {
   position: absolute;
   inset: 0;
-  z-index: 1; /* 不透明画布层（★ 方案四） */
+  z-index: 1; /* 不透明画布层 */
 }
 
-/* ★ 方案四：深空径向渐变叠加——原透明画布下 layer-base 的背景深度，
+/* ★ 深空径向渐变叠加——原透明画布下 layer-base 的背景深度，
  *   移到不透明画布之上（pointer-events 穿透，纯合成层） */
 .layer-particles::after {
   content: "";
@@ -895,7 +895,7 @@ onBeforeUnmount(() => {
     radial-gradient(ellipse at 50% 50%, rgba(0, 20, 35, 0.07) 0%, transparent 70%);
 }
 
-/* ★ 方案四：星云云团移到不透明画布之上——mix-blend-mode: screen 使
+/* ★ 星云云团移到不透明画布之上——mix-blend-mode: screen 使
  *   亮色云团在深空底上的视觉与原先（画布 alpha 透出）等效；
  *   z-index 高于画布，漂移动画不变（transform 合成器驱动） */
 .nebula {

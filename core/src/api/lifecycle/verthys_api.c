@@ -1,16 +1,6 @@
 /*
  * verthys_api.c — 公共 C ABI 导出函数实现（瘦门面，V3-only）
  *
- * 本文件仅保留公共 API 入口函数（Verthys_Init/Unlock/Lock/...），内部实现已拆分至：
- *   - verthys_api_utils.c   共享底层工具（文件 I/O、字符串、退避、格式检测、AVX2 等）
- *   - verthys_progress.c    进度回调环形缓冲区 + 异步消费线程
- *   - verthys_v3_lifecycle.c V3 容器创建/打开/事务收口/改密
- *   - verthys_export_import.c 导出/导入/改密（V3-only）
- *
- * ★ §1.4 V2 退役（V3_UPGRADE_PLAYBOOK）：V1/V2 代码路径随删除清单整体
- *   退役。目标语义"V3 不读 V2 文件"由 Unlock 的格式门禁实现——检测头
- *   非 V3 即 VERTHYS_ERR_FORMAT，容器内全部数据通路走 V3 编排
- *   （CNG 内核托管密钥组 + LSM 索引 + 六 Phase 事务 + 法定人数超级块）。
  *
  * 状态机：
  *   UNINIT  ──Unlock──→ UNLOCKED
@@ -28,14 +18,12 @@
 /* 拆分后的内部模块头 */
 #include "verthys_api_utils.h"      /* 共享底层工具 */
 #include "verthys_progress.h"       /* 进度回调环形缓冲区 */
-/* ★ V3 升级 WP-5：V3 容器生命周期 + 运行时上下文（传递包含
+/* ★ V3：V3 容器生命周期 + 运行时上下文（传递包含
  * transaction_v3 / lsm / extent / wal / partition 全套接口；
- * 本文件 V3 分支直接编排六 Phase 事务）。
- * §1.4 V2 退役：v2_lifecycle / btree / datablock / transaction /
- * merkle / warmcache / garbage / recovery / superblock(V2) / format(v1)
+ * 本文件 V3 分支直接编排六阶段事务）。
  * 头文件随删除清单整体摘除（本翻译单元零 V2 符号依赖）。 */
 #include "verthys_v3_lifecycle.h"
-#include "verthys_rekey_auto.h"      /* ★ WP-6：DEGRADE 强制轮换标志持久化 */
+#include "verthys_rekey_auto.h"      /* DEGRADE 强制轮换标志持久化 */
 
 /* 项目头 */
 #include "verthys_crypto.h"
@@ -43,7 +31,7 @@
 #include "verthys_pepper.h"
 #include "anti_debug_v2.h"
 #include "tls_loader.h"
-#include "secure_allocator.h"   /* ★ WP-7：ctx 隔离堆生命周期 */
+#include "secure_allocator.h"   /* ctx 隔离堆生命周期 */
 #include "job_isolation.h"
 #include "cng_machine_key.h"
 #include "system32_loader.h"
@@ -53,10 +41,10 @@
 #include "anti_inject.h"
 #include "memory_guard.h"
 #include "integrity.h"
-#include "runtime_hash.h"      /* ★ WP-8：解锁后 + 周期运行时函数哈希校验 */
+#include "runtime_hash.h"      /* 解锁后 + 周期运行时函数哈希校验 */
 
 /* ================================================================== *
- * ★ 方案 §6.1：活动句柄注册表 —— 应急 DEGRADE 处理器的寻址基础。
+ * ★活动句柄注册表 —— 应急 DEGRADE 处理器的寻址基础。
  *
  * 应急体系是进程级全局模块，不持有任何 VerthysHandle；降级处理器需要
  * 找到全部已初始化句柄以执行"清密钥 + 锁定"。注册表在 Verthys_Init
@@ -99,7 +87,7 @@ static void verthys_ctx_registry_remove(struct VerthysContext *ctx)
 }
 
 /*
- * ★ 方案 §6.1：应急 DEGRADE 降级处理器（emergency_set_degrade_handler 注入）。
+ * ★应急 DEGRADE 降级处理器（emergency_set_degrade_handler 注入）。
  *
  * 语义：对全部已解锁句柄执行"密钥与明文立即清零 + 状态置 LOCKED"，
  * 进程保持存活。不执行任何磁盘写入（与 Verthys_Lock 的差异：跳过事务
@@ -107,7 +95,7 @@ static void verthys_ctx_registry_remove(struct VerthysContext *ctx)
  * 未完成事务由下次解锁的 WAL 崩溃恢复路径接管，数据安全
  * 由事务日志与法定人数超级块保障）。恢复方式：用户正常 Verthys_Unlock。
  *
- * ★ WP-6 唯一例外：清钥前 verthys_rekey_auto_note_degrade 持久化强制
+ * ★ 唯一例外：清钥前 verthys_rekey_auto_note_degrade 持久化强制
  * 轮换标志（超级块 TLV 非敏感 HMAC 元数据，~ms 级 3 副本写）——
  * 旧 wrapped 形态可能已随内存泄露继续暴露，标志必须落盘方能在下次
  * 解锁兑现强制轮换；失败静默（轮换属纵深防御层，降级锁库语义不受
@@ -129,9 +117,9 @@ static void verthys_emergency_lock_all(void)
 #endif
         if (ctx->state == VERTHYS_STATE_UNLOCKED) {
             if (ctx->v3 != NULL) {
-                /* ★ WP-6：DEGRADE 强制轮换标志持久化（清钥前，best-effort） */
+                /* ★DEGRADE 强制轮换标志持久化（清钥前，best-effort） */
                 (void)verthys_rekey_auto_note_degrade(ctx->v3);
-                /* ★ V3 升级 WP-5：V3 容器密钥清除（DEGRADE 红线——内核态句柄
+                /* ★ V3：V3 容器密钥清除（DEGRADE 红线——内核态句柄
                  * 销毁 + 驻留密钥清零 + LSM 中止式关闭不落盘）。后台预热线程
                  * 经 subsystems_close 内部汇合（线程持 ptable 内核句柄解密，
                  * 先销毁句柄将引发线程内 BCrypt 句柄 UAF——汇合是唯一安全序）。 */
@@ -193,9 +181,9 @@ VerthysResult Verthys_Init(VerthysHandle *out_handle)
     }
 
     /*
-     * DLM-001 修复：TLS 标志验证从 DllMain 移至此处
+     * TLS 标志验证从 DllMain 移至此处
      *（tls_loader_init 在 LoaderLock 释放后调用，避免加载锁死锁）。
-     * ★ 方案 §6.4：IAT 校验与 15s 种子定时器已删除，
+     * ★IAT 校验与 15s 种子定时器已删除，
      *   本调用现仅验证 TLS 回调标志（加载路径完整性）。
      */
     if (tls_loader_init() != 0) {
@@ -212,17 +200,12 @@ VerthysResult Verthys_Init(VerthysHandle *out_handle)
     }
 
     /*
-     * Windows 加密 Worker 安全方案 — 防御闭环初始化（方案 §3.1 目标架构）
+     * Windows 加密 Worker 安全设计 — 防御闭环初始化
      *
      * 加载顺序：
      *   1. TLS 回调（已在 DLL 加载时触发）→ 设置 g_tls_init_marker
      *   2. DllMain(DLL_PROCESS_ATTACH)（已在 DLL 加载时触发）→ DisableThreadLibraryCalls
      *   3. 此处 Verthys_Init → 防御模块 init + 闭环验证
-     *
-     * ★ 方案 §6.4：stack_guard / key_drift / working_set / timer_queue_guard
-     *   已删除（死代码或与 CNG 托管架构冲突），初始化序列同步精简。
-     * ★ 方案 §6.1：注册 DEGRADE 降级处理器——应急体系触发"清密钥+锁库"
-     *   时回调 ctx 全局锁定路径（进程存活，可经正常解锁恢复）。
      *
      * 失败处理：
      *   - 关键防御模块 init 失败 → 立即返回 VERTHYS_ERR_INTERNAL，Worker 拒绝启动
@@ -264,10 +247,7 @@ VerthysResult Verthys_Init(VerthysHandle *out_handle)
     struct VerthysContext *ctx = (struct VerthysContext *)calloc(1, sizeof(struct VerthysContext));
     if (ctx == NULL) return VERTHYS_ERR_INTERNAL;
     ctx->state = VERTHYS_STATE_UNINIT;
-    /* §1.4 V2 退役：fmt_version 不再预置 V1——calloc 零值 = "未挂载容器"，
-     * 仅 Unlock/Create 成功后置 VERTHYS_FMT_V3（V3-only 唯一合法格式）。 */
-
-    /* ★ Comprehensive_optimization 第八部分 四.1：分配并初始化 SRWLOCK 读写锁
+    /* ★ 分配并初始化 SRWLOCK 读写锁
      * 读操作以共享模式进入，写操作以独占模式进入，允许多个读取并发执行。
      * SRWLOCK 零初始化即可使用，无需 InitializeCriticalSection。 */
 #ifdef _WIN32
@@ -280,15 +260,15 @@ VerthysResult Verthys_Init(VerthysHandle *out_handle)
     InitializeSRWLock(ctx->api_mutex);
 #endif
 
-    /* ★ Comprehensive_optimization 第八部分 一.2：初始化胡椒托管框架
+    /* ★ 初始化胡椒托管框架
      * 按优先级加载胡椒：注入 > OS 托管(CNG/TPM) > 编译内嵌兜底。
      * 胡椒内存受 VirtualLock 保护，Deinit 时安全清零。
      * 失败不阻塞 Init（keymanager_derive_master 会再次尝试懒加载）。 */
     verthys_pepper_init();
 
-    /* ★ V3 升级 WP-7：密钥相关结构专用安全分配器（v5.0 §5.2）。
+    /* 密钥相关结构专用安全分配器。
      * 隔离堆 + PAGE_GUARD 边界页 + VirtualLock 锁页 + 释放前清零；
-     * 全局预算记账（性能架构 §4.1：512MB 上限，80% 回收 / 95% 拒绝）。
+     * 全局预算记账（512MB 上限，80% 回收 / 95% 拒绝）。
      * 创建失败按资源上限处理（安全内存不可用则拒绝启动）。 */
     ctx->secure_alloc = secure_allocator_create();
     if (ctx->secure_alloc == NULL) {
@@ -300,16 +280,16 @@ VerthysResult Verthys_Init(VerthysHandle *out_handle)
     secure_allocator_budget_init(SECURE_ALLOC_DEFAULT_BUDGET_BYTES,
                                  NULL, NULL);
 
-    /* ★ 方案 §6.1：注册应急 DEGRADE 降级处理器。
+    /* ★注册应急 DEGRADE 降级处理器。
      * 应急体系判定降级（如中置信度远程内存读取、窗口内重复信号）时，
      * 回调 verthys_emergency_lock_all：清空全部句柄密钥并锁定容器，
      * 进程保持存活，用户重新解锁即可恢复。 */
     emergency_set_degrade_handler(verthys_emergency_lock_all);
 
-    /* ★ 方案 §6.1：登记活动句柄（应急 DEGRADE 处理器寻址基础） */
+    /* ★登记活动句柄（应急 DEGRADE 处理器寻址基础） */
     verthys_ctx_registry_add(ctx);
 
-    *out_handle = (VerthysHandle)ctx;  /* ★ 缺陷 12：显式 cast（VerthysHandleImpl* ← VerthysContext*） */
+    *out_handle = (VerthysHandle)ctx;  /* 显式 cast（VerthysHandleImpl* ← VerthysContext*） */
     return VERTHYS_OK;
 }
 
@@ -340,12 +320,12 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
     if (handle == NULL) return VERTHYS_ERR_INVALID;
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
 
-    /* ★ 方案 §6.1：先从活动句柄注册表注销（应急处理器不再寻址本句柄） */
+    /* ★先从活动句柄注册表注销（应急处理器不再寻址本句柄） */
     verthys_ctx_registry_remove(ctx);
-    /* ★ 方案 §6.2.3：停止防转储低频巡逻 */
+    /* ★ 停止防转储低频巡逻 */
     memory_guard_patrol_stop();
 
-    /* ★ V3 升级 WP-5：V3 上下文收口（先于 ctx_zero_sensitive——后者销毁
+    /* ★ V3：V3 上下文收口（先于 ctx_zero_sensitive——后者销毁
      * CNG 密钥组，而 verthys_v3_lock 需密钥在位完成事务收尾/LSM flush/温缓存）。
      *
      * UNLOCKED 态走完整锁定路径（数据完整性收尾 + 温缓存写入 + 子系统
@@ -369,21 +349,21 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
     free(ctx->file_path);
     ctx->file_path = NULL;
 
-    /* ★ V3 升级 WP-7：销毁安全分配器——全部活跃区段清零 + 解锁 +
+    /* ★销毁安全分配器——全部活跃区段清零 + 解锁 +
      * 归还内核（区段级销毁先于 ctx 清零，密钥材料零残留）。 */
     if (ctx->secure_alloc != NULL) {
         secure_allocator_destroy(ctx->secure_alloc);
         ctx->secure_alloc = NULL;
     }
 
-    /* ★ Comprehensive_optimization 第八部分 四.1：销毁 SRWLOCK 读写锁
+    /* ★ 销毁 SRWLOCK 读写锁
      * SRWLOCK 无需 DeleteCriticalSection，直接释放堆内存即可。 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) {
         free(ctx->api_mutex);
         ctx->api_mutex = NULL;
     }
-    /* ★ 方案六：销毁进度回调环形缓冲区 + 停止消费线程
+    /* ★ 销毁进度回调环形缓冲区 + 停止消费线程
      *   等待消费线程最多 3 秒退出，确保残留进度条目消费完毕 */
     if (ctx->progress_ring != NULL) {
         verthys_progress_ring_destroy((VerthysProgressRing *)ctx->progress_ring);
@@ -395,12 +375,12 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
     free(ctx);
     return VERTHYS_OK;
 }
-/* ★ 方案5/方案六：注册解锁进度回调（公共 API，对应 verthys.h 声明）
+/* ★ 注册解锁进度回调（公共 API，对应 verthys.h 声明）
  *
  * 注册后对当前句柄的所有后续 Verthys_Unlock / Verthys_CreateWithPreset 调用生效。
  * 传 NULL callback 可取消进度通知。
  *
- * ★ 方案六改造：首次注册时创建无锁环形缓冲区 + 启动独立消费线程，
+ * ★ 首次注册时创建无锁环形缓冲区 + 启动独立消费线程，
  *   verthys_emit_unlock_progress 写入缓冲区（O(1) <1μs），
  *   消费线程异步调用回调，主解锁链路零阻塞。
  *   重复注册时仅更新回调指针（消费线程读取新值）。
@@ -437,9 +417,9 @@ VerthysResult Verthys_RegisterUnlockProgressCallback(VerthysHandle handle,
 }
 
 /* ================================================================== *
- * ★ V3 升级 WP-5：V3 分发辅助段                                        *
+ * ★ V3：V3 分发辅助段                                        *
  *                                                                    *
- * 编排层级：本段为 V3 容器的 API 层业务封装，六 Phase 事务语义     *
+ * 编排层级：本段为 V3 容器的 API 层业务封装，六阶段事务语义     *
  * 由 transaction_v3 模块承担，本段只做：                           *
  *   1. 进度回调适配（流水线 S0-S6 → 公共 VerthysUnlockStage 映射）；    *
  *   2. 单调用事务骨架（BEGIN→…→CONFIRM 全链 + 失败回滚收口）；         *
@@ -480,7 +460,7 @@ static void verthys_api_v3_progress_cb(uint32_t stage, uint32_t percent, void *u
 }
 
 /*
- * ★ V3 升级 WP-5：V3 残留上下文清理（Unlock / Create 入口统一收口）。
+ * ★ V3：V3 残留上下文清理（Unlock / Create 入口统一收口）。
  *
  * 残留来源：应急 DEGRADE（subsystems_close 后 state=LOCKED，堆实例与
  * 文件句柄仍挂在 ctx->v3）。本函数在装配新 V3 上下文前销毁残留实例
@@ -553,11 +533,11 @@ static VerthysResult verthys_api_v3_unlock(struct VerthysContext *ctx,
     if (f == NULL) return VERTHYS_ERR_IO;
 #endif
 
-    /* ★ 结构尺寸下限（§6.2 布局刚性）：V3 固定布局区（超块 64KB +
+    /* ★ 结构尺寸下限：V3 固定布局区（超块 64KB +
      * WAL 960KB + 分区表 3MB = 4MB）为容器必备结构，文件小于该下限
      * 即不可能为合法 V3 容器。detect_format 仅校验首帧头 8 字节——
      * 截断文件（如 fuzz_truncated_header 的 56 字节样本）会携带合法
-     * 帧头进入流水线，S1 三副本读取全败后按 §6.3 "0 有效"语义返回
+     * 帧头进入流水线，S1 三副本读取全败后按 "0 有效"语义返回
      * CORRUPT；但"从未具备固定布局结构"属格式非法而非内容损坏，
      * 应在进入流水线前以 FORMAT 拒绝（与 v2 读侧截断语义对齐）。 */
     {
@@ -602,7 +582,7 @@ static VerthysResult verthys_api_v3_unlock(struct VerthysContext *ctx,
         return rc;
     }
 
-    /* 失败路径（§11.3 可重试初态）：ctx3 销毁（内含密钥清零 + 子系统
+    /* 失败路径可重试初态：ctx3 销毁（内含密钥清零 + 子系统
      * abort 式关闭）后关闭文件句柄（借用引用，本函数拥有） */
     if (rc == VERTHYS_ERR_AUTH) verthys_backoff_record_failure(ctx);
     verthys_v3_ctx_destroy(v3);
@@ -612,7 +592,7 @@ static VerthysResult verthys_api_v3_unlock(struct VerthysContext *ctx,
 
 /*
  * V3 创建编排（Verthys_CreateWithPreset 目标；系统唯一合法新建入口，
- * Playbook WP-5：新建一律 V3，V2 仅开旧容器直至删除清单执行）：
+ * 新建一律 V3，V2 仅开旧容器直至删除清单执行）：
  *   1. CreateFileA(CREATE_NEW) 原子创建（TOCTOU 防护，与 v2 惯例一致）；
  *   2. 装配 VerthysContextV3 → verthys_v3_create_new（三档校准 + 密钥组生成
  *      + 法定人数提交 + 分区创建 + 子系统空态初始化）；
@@ -680,7 +660,7 @@ static VerthysResult verthys_api_v3_create(struct VerthysContext *ctx,
         return VERTHYS_ERR_INTERNAL;
     }
 
-    /* 进度契约（方案5：CreateWithPreset 亦受注册回调约束）：
+    /* 进度契约（CreateWithPreset 亦受注册回调约束）：
      * create_new 为整体调用（内部 Argon2id 校准约占时长），编排层
      * 发射起 / 终两级；阶段细分归流水线（unlock 路径）。 */
     ctx->unlock_progress_start_ms = verthys_monotonic_ms();
@@ -712,7 +692,7 @@ static VerthysResult verthys_api_v3_create(struct VerthysContext *ctx,
 
 /*
  * V3 单调用事务收口 / 失败收口：公共实现已上移至 verthys_v3_lifecycle
- *（verthys_v3_txn_finish / verthys_v3_txn_abort，★ WP-5：export/import 复用）。
+ *（verthys_v3_txn_finish / verthys_v3_txn_abort，★export/import 复用）。
  */
 
 /*
@@ -758,20 +738,20 @@ static VerthysResult verthys_api_v3_count_records(VerthysContextV3 *v,
 }
 
 /* ================================================================== *
- * ★ V3 升级 WP-5：V3 CRUD 编排（api_mutex 已由公共入口独占持有）       *
+ * ★ V3：V3 CRUD 编排（api_mutex 已由公共入口独占持有）       *
  *                                                                    *
  * 单调用事务骨架：BEGIN → WRITE_EXTENT → UPDATE_INDEX → PREPARE →    *
  * COMMIT → CONFIRM，失败路径按事务状态机精确收口（rollback / confirm *
- * 兜底，见 verthys_v3_txn_abort）。尺寸/哈希等 Extent 布局知识经       *
+ * 兜底（verthys_v3_txn_abort）。尺寸/哈希等 Extent 布局知识经       *
  * verthys_extent_index_find 权威回查——本层不复述密文布局（高内聚）。    *
  * ================================================================== */
 
 /*
  * 新增记录（V3）：单调用事务骨架——BEGIN → verthys_v3_add_record_in_txn
- *（Phase 2 WRITE_EXTENT + Phase 3 UPDATE_INDEX，LID = max_lid + 1 顺序
+ *（WRITE_EXTENT + UPDATE_INDEX，LID = max_lid + 1 顺序
  * 分配，LID 永不复用红线语义；数据经内容寻址去重，同明文零重写）→
  * PREPARE → COMMIT → CONFIRM。单记录写入逻辑与 Import 批量路径共用
- *（verthys_v3_add_record_in_txn，★ WP-5）。
+ *（verthys_v3_add_record_in_txn，★）。
  */
 static VerthysResult verthys_api_v3_add(struct VerthysContext *ctx,
                                     const VerthysRecord *record,
@@ -795,7 +775,7 @@ static VerthysResult verthys_api_v3_add(struct VerthysContext *ctx,
         return rc;
     }
 
-    /* Phase 4-6：PREPARE → COMMIT → CONFIRM（COMMIT 后不可回滚，
+    /* PREPARE → COMMIT → CONFIRM（COMMIT 后不可回滚，
      * confirm 失败由下次 open 的崩溃恢复幂等收尾——错误直接上抛） */
     rc = verthys_v3_txn_finish(v);
     if (rc != VERTHYS_OK) return rc;
@@ -887,7 +867,7 @@ static VerthysResult verthys_api_v3_get(struct VerthysContext *ctx,
  * 删除记录（V3）：先探测存在性（API 契约 NOTFOUND；LSM 墓碑本身幂等），
  * 单事务 DELETE（现值 Extent 引用释放 + 墓碑写入 + WAL INDEX 记录）。
  * 同事务内重复删除同一 LID 安全（第二次查找命中墓碑 → NOTFOUND 容忍，
- * 不重复释放引用，见 verthys_txn_v3_delete）。
+ * 不重复释放引用（verthys_txn_v3_delete）。
  */
 static VerthysResult verthys_api_v3_delete(struct VerthysContext *ctx, uint64_t id)
 {
@@ -958,20 +938,20 @@ VerthysResult Verthys_Unlock(VerthysHandle handle,
     if (ctx->state == VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_INVALID;
     if (verthys_backoff_remaining_ms(ctx) > 0) return VERTHYS_ERR_RATE;
 
-    /* ★ 方案 §4.2：pepper 来源已确定失败时快速失败（跳过 Argon2id 重计算），
+    /* ★ pepper 来源已确定失败时快速失败（跳过 Argon2id 重计算），
      * 前端得到 VERTHYS_ERR_PEPPER_SOURCE → 提示"保险库安全源已变更"。 */
     if (verthys_pepper_source_error()) return VERTHYS_ERR_PEPPER_SOURCE;
 
-    /* ★ 方案 §6.3：分发二进制一次性验签（构建期 .vsec 签名比对）。
+    /* ★ 分发二进制一次性验签（构建期 .vsec 签名比对）。
      * 未配置（开发构建）时为空操作；验签失败 = 二进制被篡改（高置信度）
      * → KILL 级上报已发出，此处返回 VERTHYS_ERR_CORRUPT 拒绝解锁。 */
     if (integrity_verify_startup() != 0) return VERTHYS_ERR_CORRUPT;
 
-    /* ★ 方案5：记录本次解锁起始时间戳（单调时钟），供进度回调计算 elapsed_ms
+    /* ★ 记录本次解锁起始时间戳（单调时钟），供进度回调计算 elapsed_ms
      * 即使未注册回调也无开销（仅一次 64 位赋值） */
     ctx->unlock_progress_start_ms = verthys_monotonic_ms();
 
-    /* ★ 方案九（API 版本 0x0005）：解析 flags 位域，设置预热状态
+    /* ★（API 版本 0x0005）：解析 flags 位域，设置预热状态
      * 上层 Rust 调度层通过 flags 透传预热完成状态，C 层据此选择最优读取路径：
      *   - prefetch_done=1：索引区已在 OS 页缓存中，可走内存映射零拷贝路径
      *   - prefetch_done=0：未预热，走原有磁盘同步读取路径（向下兼容）
@@ -980,8 +960,8 @@ VerthysResult Verthys_Unlock(VerthysHandle handle,
     ctx->prefetch_done = (flags & VERTHYS_UNLOCK_FLAG_INDEX_PREHEATED) ? 1 : 0;
     ctx->diag_preheat_status = ctx->prefetch_done ? 2 : 0;  /* 2=预热完成, 0=未预热 */
 
-    /* ★ DEF-011 修复：递归互斥锁保护，防止并发重入
-     * ★ 方案八：埋点采集读写锁等待耗时（diag_lock_wait_ms） */
+    /* ★ 递归互斥锁保护，防止并发重入
+     * ★ 埋点采集读写锁等待耗时（diag_lock_wait_ms） */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) {
         uint64_t _lock_wait_start = verthys_monotonic_ms();
@@ -990,9 +970,6 @@ VerthysResult Verthys_Unlock(VerthysHandle handle,
     }
 #endif
 
-    /* ★ §1.4 V2 退役：格式门禁 — 仅预读 128 字节检测头判别格式。
-     * 解锁操作绝不创建新文件（那是 Verthys_CreateWithPreset 的职责），
-     * 本函数不存在任何 fallthrough 写路径。 */
     VerthysContainerVersion fmt;
 
     {
@@ -1017,7 +994,7 @@ VerthysResult Verthys_Unlock(VerthysHandle handle,
     }
 
     /* 非 V3 容器（V1/V2 旧格式或未知格式）→ FORMAT 拒绝。
-     * "V3 不读 V2 文件"目标语义（Playbook §1.4）：V1/V2 打开路径已随
+     * "V3 不读 V2 文件"目标语义：V1/V2 打开路径已随
      * 删除清单退役，旧容器经 Verthys_Export 侧外部工具转换后导入。 */
     if (fmt != VERTHYS_FMT_V3) {
 #ifdef _WIN32
@@ -1026,7 +1003,7 @@ VerthysResult Verthys_Unlock(VerthysHandle handle,
         return VERTHYS_ERR_FORMAT;
     }
 
-    /* ★ V3 升级 WP-5：V3 解锁编排 — 流水线 S0-S6（api_mutex 已持，
+    /* ★ V3：V3 解锁编排 — 流水线 S0-S6（api_mutex 已持，
      * 由 verthys_api_v3_unlock 路径负责释放）。检测头之外零冗余 I/O：
      * 流水线 S1 线程自读 3 副本法定人数裁决。 */
     {
@@ -1035,7 +1012,7 @@ VerthysResult Verthys_Unlock(VerthysHandle handle,
         /* 解锁成功（含渐进式 PARTIAL_UNLOCK——最小可操作态）触发
          * 进程级安全钩子：应急信号窗口复位 + 模块巡检 + 防转储巡逻。 */
         if (rc == VERTHYS_OK || rc == VERTHYS_ERR_PARTIAL_UNLOCK) {
-            /* ★ V3 升级 WP-8（v5.0 §9.3"解锁成功后"）：运行时函数级哈希
+            /* ★ V3：运行时函数级哈希
              * 全量校验（.rhat 真表，防内存补丁注入跳转）。失配 = 进程
              * 内存被篡改（高置信度）→ KILL 级应急（进程终止，绝不带着
              * 已解锁密钥继续运行）。置于信号复位之前：篡改态不做任何
@@ -1059,11 +1036,9 @@ VerthysResult Verthys_Unlock(VerthysHandle handle,
 
 /* 3a. 显式创建新加密库（V3，可选预设） */
 /*
- * ★ V3 升级 WP-5（Playbook：新建一律 V3）：
+ * ★ V3 新建（新建一律走 V3 路径）：
  * 本接口为系统唯一合法新建入口，新建容器全部走 V3 编排
- * （CNG 内核托管密钥组 + LSM 索引 + 六 Phase 事务 + 法定人数超级块）。
- * §1.4 V2 退役后 V1/V2 打开路径已删除——旧容器不再被本系统读取
- * （"V3 不读 V2 文件"目标语义，Unlock 格式门禁拒绝）。
+ * （CNG 内核托管密钥组 + LSM 索引 + 六阶段事务 + 法定人数超级块）。
  */
 VerthysResult Verthys_CreateWithPreset(VerthysHandle handle,
                                     const char *verthys_path,
@@ -1083,7 +1058,7 @@ VerthysResult Verthys_CreateWithPreset(VerthysHandle handle,
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state == VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_INVALID;
 
-    /* ★ P0 缺陷3：此 fopen("rb") 仅作 UX 快速失败（避免无谓进入 Argon2id 派生），
+    /* ★ 此 fopen("rb") 仅作 UX 快速失败（避免无谓进入 Argon2id 派生），
      * 真正的 TOCTOU 防护由 verthys_api_v3_create 内的 CreateFileA(CREATE_NEW) 原子创建保障。
      * 即使此处检查通过后恶意进程抢占创建同名文件，原子创建仍会返回 ERROR_FILE_EXISTS。 */
     FILE *probe = fopen(verthys_path, "rb");
@@ -1114,7 +1089,7 @@ VerthysResult Verthys_Lock(VerthysHandle handle)
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
     if (ctx->file_path == NULL) return VERTHYS_ERR_INVALID;
 
-    /* ★ V3 升级 WP-5：V3 锁定路径。
+    /* ★ V3：V3 锁定路径。
      *
      * verthys_v3_lock 全权承担：
      *   1. 后台预热线程汇合（渐进式解锁场景）；
@@ -1151,9 +1126,6 @@ VerthysResult Verthys_Lock(VerthysHandle handle)
         return rc;
     }
 
-    /* §1.4 V2 退役：UNLOCKED 态容器必为 V3（Unlock 格式门禁唯一放行格式，
-     * CreateWithPreset 亦仅产 V3）。非 V3 到达此处 = 状态机违规，
-     * 防御性拒绝（理论不可达）。 */
     return VERTHYS_ERR_INTERNAL;
 }
 
@@ -1166,7 +1138,7 @@ VerthysResult Verthys_AddRecord(VerthysHandle handle,
     if (record->name == NULL && record->name_len != 0) return VERTHYS_ERR_INVALID;
     if (record->data == NULL && record->data_len != 0) return VERTHYS_ERR_INVALID;
     /*
-     * ★ 最终修复方案 P1-9：名称长度在 API 边界钳制。
+     * ★ 名称长度在 API 边界钳制。
      * 索引条目 name_len 为 uint16 存储（verthys_transaction.c 截断赋值），
      * 超 4096 字节的名称会导致"块以全名派生记录密钥、索引以截断名存储"
      * 的密钥/索引分裂 → 重载后记录不可解。上限取 4096（产品语义内
@@ -1177,27 +1149,26 @@ VerthysResult Verthys_AddRecord(VerthysHandle handle,
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* ★ DEF-011 修复：递归互斥锁保护 */
+    /* ★ 递归互斥锁保护 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
 
-    /* ★ P0 缺陷1根治：写操作入口统一失效查询缓存，防止 UAF
+    /* 写操作入口统一失效查询缓存，防止 UAF
      * 所有写入操作（增/删/改/导入/改密/刷盘）在持锁后立即清空 getrecord_cache，
      * 消除外部借用指针在 GC 回收旧数据块后变为野指针的 UAF 窗口。
-     * 企业级方案：统一收口缓存销毁，写入事务提交前强制清空历史查询缓存。 */
+     * 统一收口缓存销毁，写入事务提交前强制清空历史查询缓存。 */
     ctx_free_getrecord_cache(ctx);
 
-    /* ★ V3 升级 WP-8（v5.0 §9.3"每 30 分钟"）：写路径周期重算关键函数
+    /* ★ V3 写路径周期重算关键函数
      * 运行时哈希（时间门控，距上次全量 <30min 直接返回；首调立即全量）。 */
     runtime_hash_verify_periodic();
 
-    /* ★ V3 升级 WP-5：V3 新增走六 Phase 事务编排（api_mutex 已持有） */
+    /* ★ V3：V3 新增走六阶段事务编排（api_mutex 已持有） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) {
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
-        /* §1.4 V2 退役：UNLOCKED 态容器必为 V3（防御性拒绝，理论不可达） */
         return VERTHYS_ERR_INTERNAL;
     }
     {
@@ -1219,19 +1190,18 @@ VerthysResult Verthys_GetRecord(VerthysHandle handle,
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* ★ DEF-011 修复：递归互斥锁保护（借用指针缓存受锁保护） */
+    /* ★ 递归互斥锁保护（借用指针缓存受锁保护） */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
 
-    /* ★ V3 升级 WP-5：V3 分发——LSM 索引查找 + Extent 内核态解密；
+    /* ★ V3：V3 分发——LSM 索引查找 + Extent 内核态解密；
      * 深拷贝结果经 ctx 借用指针缓存（契约保持，辅助层内
      * 先失效旧缓存再整体替换） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) {
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
-        /* §1.4 V2 退役：UNLOCKED 态容器必为 V3（防御性拒绝，理论不可达） */
         return VERTHYS_ERR_INTERNAL;
     }
     {
@@ -1251,23 +1221,22 @@ VerthysResult Verthys_DeleteRecord(VerthysHandle handle, uint64_t id)
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* ★ DEF-011 修复：递归互斥锁保护 */
+    /* ★ 递归互斥锁保护 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
 
-    /* ★ P0 缺陷1根治：写操作入口统一失效查询缓存，防止 UAF */
+    /* ★ 写操作入口统一失效查询缓存，防止 UAF */
     ctx_free_getrecord_cache(ctx);
-    /* ★ V3 升级 WP-8：写路径周期运行时哈希校验（30min 门控） */
+    /* ★ V3：写路径周期运行时哈希校验（30min 门控） */
     runtime_hash_verify_periodic();
 
-    /* ★ V3 升级 WP-5：V3 分发——单事务 DELETE（Extent 引用释放 +
+    /* ★ V3：V3 分发——单事务 DELETE（Extent 引用释放 +
      * LSM 墓碑 + WAL INDEX 记录）；NOTFOUND 契约语义由辅助层透传 */
     if (ctx->fmt_version != VERTHYS_FMT_V3) {
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
-        /* §1.4 V2 退役：UNLOCKED 态容器必为 V3（防御性拒绝，理论不可达） */
         return VERTHYS_ERR_INTERNAL;
     }
     {
@@ -1303,24 +1272,23 @@ VerthysResult Verthys_DeleteRecords(VerthysHandle handle, const uint64_t *ids, s
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* ★ DEF-011 修复：递归互斥锁保护 */
+    /* ★ 递归互斥锁保护 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
 
-    /* ★ P0 缺陷1根治：写操作入口统一失效查询缓存，防止 UAF */
+    /* ★ 写操作入口统一失效查询缓存，防止 UAF */
     ctx_free_getrecord_cache(ctx);
-    /* ★ V3 升级 WP-8：写路径周期运行时哈希校验（30min 门控） */
+    /* ★ V3：写路径周期运行时哈希校验（30min 门控） */
     runtime_hash_verify_periodic();
 
-    /* ★ V3 升级 WP-5：V3 分发——单事务批量 DELETE（一次 PREPARE → COMMIT
+    /* ★ V3：V3 分发——单事务批量 DELETE（一次 PREPARE → COMMIT
      * → CONFIRM 收口，磁盘写入量与条目数解耦；
      * 任一 ID 不存在 → 整体 NOTFOUND 零副作用返回） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) {
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
-        /* §1.4 V2 退役：UNLOCKED 态容器必为 V3（防御性拒绝，理论不可达） */
         return VERTHYS_ERR_INTERNAL;
     }
     {
@@ -1332,7 +1300,7 @@ VerthysResult Verthys_DeleteRecords(VerthysHandle handle, const uint64_t *ids, s
     }
 }
 
-/* ★ Phase 2I：获取存活记录总数（V3-only）
+/* ★ 获取存活记录总数（V3-only）
  *
  * V3 语义：LSM 归并快照精确计数（无摘要缓存，现值直读，与
  * GetContainerInfo.record_count 同源同值）。前端可据此直接渲染列表。
@@ -1344,7 +1312,7 @@ VerthysResult Verthys_GetSummaryCount(VerthysHandle handle, uint64_t *out_count)
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* ★ WP-5 收尾：LSM 归并快照精确计数（无摘要缓存，现值直读，与
+    /* ★ 收尾：LSM 归并快照精确计数（无摘要缓存，现值直读，与
      * GetContainerInfo.record_count 同源同值）。索引结构级损坏整体
      * 拒绝，不返回部分计数。 */
     {
@@ -1366,7 +1334,7 @@ VerthysResult Verthys_GetSummaryCount(VerthysHandle handle, uint64_t *out_count)
 }
 
 /* ================================================================== *
- * ★ Comprehensive_optimization 第八部分 八.1：内建诊断接口             *
+ * ★ 内建诊断接口             *
  *                                                                    *
  * 返回结构化性能与状态指标（解锁耗时分解/缓存命中率/GC 触发次数等）， *
  * 供安全中心展示和问题定位。所有指标均为非敏感数据。                  *
@@ -1378,7 +1346,7 @@ VerthysResult Verthys_GetDiagnostics(VerthysHandle handle, VerthysDiagnostics *o
     if (handle == NULL || out_diag == NULL) return VERTHYS_ERR_INVALID;
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
 
-    /* ★ 方案三：读操作使用共享锁（AcquireSRWLockShared），允许多个读取并发执行
+    /* ★ 读操作使用共享锁（AcquireSRWLockShared），允许多个读取并发执行
      *   诊断数据为非敏感指标，可与 GetRecord/GetContainerInfo/VerifyIntegrity/Export 并发 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
@@ -1412,17 +1380,17 @@ VerthysResult Verthys_GetDiagnostics(VerthysHandle handle, VerthysDiagnostics *o
     /* 胡椒来源（诊断，不暴露胡椒值） */
     out_diag->pepper_source         = (uint8_t)verthys_pepper_get_source();
 
-    /* ★ 方案八：可观测性指标扩展（5 项新增指标） */
+    /* ★ 可观测性指标扩展（5 项新增指标） */
     out_diag->lock_wait_ms          = ctx->diag_lock_wait_ms;
     out_diag->cache_load_ms         = ctx->diag_cache_load_ms;
     out_diag->disk_bytes_read       = ctx->diag_disk_bytes_read;
     out_diag->page_cache_hit_ratio  = (uint32_t)ctx->diag_page_cache_hit_ratio;
     out_diag->preheat_status        = ctx->diag_preheat_status;
 
-    /* ★ 方案二：索引内存映射失败告警累计指标（运维可观测性闭环） */
+    /* ★ 索引内存映射失败告警累计指标（运维可观测性闭环） */
     out_diag->idx_mmap_fallback_count = ctx->diag_idx_mmap_fallback_count;
 
-    /* ★ 方案七：自适应 Argon2id 漂移监控指标 */
+    /* ★ 自适应 Argon2id 漂移监控指标 */
     out_diag->argon2_baseline_ms    = ctx->argon2_baseline_ms;
     out_diag->argon2_last_derive_ms = ctx->argon2_last_derive_ms;
     out_diag->argon2_drift_count    = ctx->argon2_drift_count;
@@ -1435,7 +1403,7 @@ VerthysResult Verthys_GetDiagnostics(VerthysHandle handle, VerthysDiagnostics *o
 }
 
 /* ================================================================== *
- * ★ V3 升级 WP-11（v5.0 §11.2/§11.3，API 版本 0x000B）：
+ * ★ V3（API 版本 0x000B）：
  * 防御闭环状态查询
  *
  * 每次调用执行 RUNTIME 级实时复检（defense_closure_check 内部
@@ -1481,7 +1449,7 @@ VerthysResult Verthys_GetSecurityStatus(VerthysHandle handle,
 }
 
 /* ================================================================== *
- * ★ 缺陷 4 修复：Verthys_Flush 显式刷盘接口（Comprehensive_optimization.md 二.4）*
+ * Verthys_Flush 显式刷盘接口
  *                                                                    *
  * 在不锁定的情况下主动将内存中的索引变更刷写到磁盘，                *
  * 保证崩溃恢复一致性。                                               *
@@ -1497,29 +1465,28 @@ VerthysResult Verthys_Flush(VerthysHandle handle)
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* ★ DEF-011 修复：递归互斥锁保护 */
+    /* ★ 递归互斥锁保护 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
 
-    /* ★ P0 缺陷1根治：写操作入口统一失效查询缓存，防止 UAF */
+    /* ★ 写操作入口统一失效查询缓存，防止 UAF */
     ctx_free_getrecord_cache(ctx);
-    /* ★ V3 升级 WP-8：写路径周期运行时哈希校验（30min 门控） */
+    /* ★ V3：写路径周期运行时哈希校验（30min 门控） */
     runtime_hash_verify_periodic();
 
-    /* ★ V3 升级 WP-5：V3 刷盘路径。
+    /* ★ V3：V3 刷盘路径。
      *
      * V3 无长事务（单调用事务以 CONFIRM 收口），Flush 的持久化对象是
      * LSM MemTable 中已提交条目：verthys_lsm_flush 冻结当前表 → 落盘 L0
      * SSTable（fsync）→ Manifest 原子提交（fsync）→ WAL 复位（提交
-     * 边界语义见 verthys_lsm.h）；空 MemTable 幂等 no-op。
+     * 边界语义同 verthys_lsm.h）；空 MemTable 幂等 no-op。
      * 事务状态机保护：ACTIVE 态调用 Flush = 调用方在事务中途触碰
      * 独立入口（API 单调用事务契约下不可达），拒绝并保持现场。 */
     if (ctx->fmt_version != VERTHYS_FMT_V3) {
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
-        /* §1.4 V2 退役：UNLOCKED 态容器必为 V3（防御性拒绝，理论不可达） */
         return VERTHYS_ERR_INTERNAL;
     }
     {
@@ -1557,7 +1524,7 @@ VerthysResult Verthys_Flush(VerthysHandle handle)
 }
 
 /* ================================================================== *
- * ★ 缺陷 5 修复：Verthys_GetContainerInfo 诊断接口                     *
+ * Verthys_GetContainerInfo 诊断接口                     *
  *                                                                    *
  * 获取容器元数据（只读，不暴露密钥），供安全中心/状态指示器使用。    *
  *                                                                    *
@@ -1569,7 +1536,7 @@ VerthysResult Verthys_GetContainerInfo(VerthysHandle handle, VerthysContainerInf
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* ★ 方案三：读操作使用共享锁（AcquireSRWLockShared），允许多个读取并发执行
+    /* ★ 读操作使用共享锁（AcquireSRWLockShared），允许多个读取并发执行
      *   容器元数据为只读访问，可与 GetDiagnostics/VerifyIntegrity/Export 并发 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
@@ -1577,13 +1544,12 @@ VerthysResult Verthys_GetContainerInfo(VerthysHandle handle, VerthysContainerInf
 
     memset(out_info, 0, sizeof(*out_info));
     out_info->api_version = VERTHYS_API_VERSION;
-    /* §1.4 V2 退役：V3 为唯一合法容器格式，版本号固定上报 3 */
     out_info->fmt_version = 3;
     out_info->preset = (uint16_t)ctx->preset;
     out_info->last_fullscan_time = ctx->last_fullscan_time;
     out_info->warm_cache_enabled = (uint8_t)ctx->warm_cache_enabled;
 
-    /* ★ WP-5 收尾：V3 唯一数据通路——超级块/LSM/分区表为权威数据源
+    /* ★ 收尾：V3 唯一数据通路——超级块/LSM/分区表为权威数据源
      * （无 ctx 镜像字段依赖，全部现值直读，杜绝解锁时快照过期）。
      * 就绪断言与 CRUD 同规：UNLOCKED 且 subsystems_open 方可报告。 */
     {
@@ -1640,12 +1606,12 @@ VerthysResult Verthys_GetContainerInfo(VerthysHandle handle, VerthysContainerInf
 }
 
 /* ================================================================== *
- * ★ 缺陷 6 修复：Verthys_VerifyIntegrity 独立完整性校验接口             *
+ * Verthys_VerifyIntegrity 独立完整性校验接口             *
  *                                                                    *
  * 执行全量 Merkle 树校验 + 数据块 AEAD 标签验证，                   *
  * 返回校验结果与损坏 LID 列表。                                      *
  *                                                                    *
- * ★ Comprehensive_optimization 二.2：标准化错误模型                  *
+ * ★ 标准化错误模型                  *
  *   采用"检查类 API 惯例"：                                          *
  *   - 校验操作成功完成 → 返回 VERTHYS_OK（无论是否发现损坏）           *
  *   - 发现损坏记录 → 通过 out_failed_count > 0 表明，out_failed_lids  *
@@ -1670,12 +1636,11 @@ VerthysResult Verthys_VerifyIntegrity(VerthysHandle handle,
 
     uint64_t local_failed_count = 0;
 
-    /* ★ DEF-011 修复：递归互斥锁保护（遍历期间阻止并发写） */
+    /* ★ 递归互斥锁保护（遍历期间阻止并发写） */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
 
-    /* §1.4 V2 退役：UNLOCKED 态容器必为 V3（防御性拒绝，理论不可达） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) {
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
@@ -1683,7 +1648,7 @@ VerthysResult Verthys_VerifyIntegrity(VerthysHandle handle,
         return VERTHYS_ERR_INTERNAL;
     }
 
-    /* ★ WP-5 收尾：V3 唯一数据通路——LSM 快照全量遍历 + 逐条 Extent 双重
+    /* ★ 收尾：V3 唯一数据通路——LSM 快照全量遍历 + 逐条 Extent 双重
      * 完整性验证（AEAD 认证 + BLAKE2b 内容哈希，verthys_extent_get
      * 内建）。语义（检查类 API 惯例）：
      *   - 单条数据损坏（AUTH/CORRUPT/NOTFOUND/长度不符/索引不变量
@@ -1786,7 +1751,7 @@ VerthysResult Verthys_VerifyIntegrity(VerthysHandle handle,
         *out_failed_count = local_failed_count;
     }
 
-    /* ★ Comprehensive_optimization 二.2：检查类 API 惯例
+    /* ★ 检查类 API 惯例
      * 校验操作本身成功完成即返回 VERTHYS_OK；
      * 是否发现损坏由 *out_failed_count > 0 表明（调用方必填此参数）。
      * 不再返回 VERTHYS_ERR_CORRUPT，该错误码保留给读取类接口使用。 */

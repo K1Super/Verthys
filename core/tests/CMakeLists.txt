@@ -31,6 +31,7 @@ add_executable(verthys_tests
     api/test_v3_lifecycle.c
     property/test_v3_property.c
     crypto/test_auto_rekey.c
+    crypto/test_pepper_v3.c
     security/test_runtime_hash.c
     security/test_syscall_direct.c
     security/test_defense_closure.c
@@ -55,7 +56,7 @@ target_include_directories(verthys_tests PRIVATE
 # 测试需在 Debug 可调试：不应用 Release 剥离
 if(MSVC)
     target_compile_options(verthys_tests PRIVATE /utf-8)
-    # v2 容器创建路径栈帧较深（Argon2id + 超级块序列化 + 文件创建），
+    # 创建路径栈帧较深（Argon2id + 超级块序列化 + 文件创建），
     # 增大栈尺寸到 16MB 避免 STATUS_STACK_OVERFLOW
     target_link_options(verthys_tests PRIVATE /STACK:16777216)
 endif()

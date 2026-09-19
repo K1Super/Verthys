@@ -1,10 +1,6 @@
 /*
  * verthys_warmcache_v3.c — V3 温启动缓存（.verthys.idx_cache，'V3IC' 格式）
  *
- * 设计依据：
- *   - docs/UNLOCK_OPTIMIZATION.md §7（温启动缓存 V3 版）/ §14.2（常量）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-5（★index/verthys_warmcache.c 重写）
- *
  * 失败语义（红线）：温缓存为持久化优化，非数据正确性依赖——
  * 读取路径任何失败（不存在/超限/magic 不符/HMAC 不符/解密失败）一律
  * 按未命中处理（*out_hit=0，VERTHYS_OK），调用方（解锁流水线 S5）回退
@@ -22,7 +18,7 @@
 #include "verthys_crypto_cng.h"
 #include "verthys_internal.h"     /* verthys_secure_zero */
 
-/* ---------- Header 字段偏移（160B 定长，与 verthys_warmcache_v3.h §7.1 对齐） ---------- */
+/* ---------- Header 字段偏移（160B 定长，与 verthys_warmcache_v3.h 对齐） ---------- */
 
 #define V3IC_OFF_MAGIC          0u    /* u32le */
 #define V3IC_OFF_VERSION        4u    /* u16le */
@@ -187,7 +183,7 @@ VerthysResult verthys_warmcache_v3_try_load(const char *verthys_path,
     free(wpath);
     if (h == INVALID_HANDLE_VALUE) return VERTHYS_OK;   /* 不存在 = miss */
 
-    /* 容量上限（§14.2）：> 32MB 直接判非法（miss） */
+    /* 容量上限：> 32MB 直接判非法（miss） */
     LARGE_INTEGER fsize;
     uint8_t *buf = NULL;
     uint64_t mt_off = 0, mt_size = 0, sst_off = 0, sst_size = 0;
@@ -380,7 +376,7 @@ VerthysResult verthys_warmcache_v3_save(const char *verthys_path,
         return VERTHYS_ERR_INVALID;
     }
 
-    /* 容量预算（§14.2）：Header + 两段密文（含 16B tag）≤ 32MB */
+    /* 容量预算：Header + 两段密文（含 16B tag）≤ 32MB */
     size_t mt_ct_len = memtable_len ? memtable_len + VERTHYS_CNG_TAG_BYTES : 0;
     size_t sst_ct_len = tables_len ? tables_len + VERTHYS_CNG_TAG_BYTES : 0;
     if ((uint64_t)VERTHYS_V3IC_HEADER_BYTES + mt_ct_len + sst_ct_len >

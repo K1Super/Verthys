@@ -354,9 +354,9 @@ const loadCerts = async () => {
   const legacyRecords: { id: number; fields: Omit<CertEntry, "id"> }[] = [];
 
   // ★ 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
-  //    原方案：ensureSummaryScanSafe + for 循环串行 getFullRecord（N 条 = N 次串行 IPC，
+  //    原实现：ensureSummaryScanSafe + for 循环串行 getFullRecord（N 条 = N 次串行 IPC，
   //            100 条 ≈ 7.5s，300 条 ≈ 22s，与后台 ensureRecordScan 抢同一常驻 worker → 30s）
-  //    新方案：ensureRecordScanSafe（后台 startBackgroundTasks 已扫描则瞬时增量返回）
+  //    新实现：ensureRecordScanSafe（后台 startBackgroundTasks 已扫描则瞬时增量返回）
   //            + getRecordsDataB64Batch（扫描缓存命中零 IPC，未命中/大体积并行 IPC 回退）
   //            总耗时 < 2.5s。内存优先合并保证用户并发编辑不丢失。
   await ensureRecordScanSafe();
@@ -465,7 +465,7 @@ const loadCerts = async () => {
       if (!migratePersistOk) {
         showError("证书数据迁移已执行但持久化失败，重启后可能需重新迁移。请勿关闭应用并重试");
       }
-      // ★ Phase 2J：迁移涉及批量增删，清空三层缓存确保一致性
+      // ★ 迁移涉及批量增删，清空三层缓存确保一致性
       //    旧格式记录已从磁盘删除，但 summaryCache / fullRecordCache 仍持有旧条目；
       //    新格式记录已写入磁盘但未入缓存。清空三层缓存后，下次 ensureSummaryScanSafe()
       //    会从 maxSummaryId=0 重新全量扫描，正确反映磁盘最新状态。
@@ -544,11 +544,11 @@ const onSave = async () => {
       throw e;
     }
     if (newRid !== null) {
-      // ★ Phase 2J：同步两层缓存（摘要 + 全量），确保列表立即显示新记录
+      // ★ 同步两层缓存（摘要 + 全量），确保列表立即显示新记录
       addFullRecord(newRid, TYPE_CERT, recordName, dataB64);
       if (oldRid !== undefined) {
         try { await verthysDeleteRecord(oldRid); } catch { /* 旧记录删除失败不阻断 */ }
-        // ★ Phase 2J：失效两层缓存中的旧记录（杜绝删除复活）
+        // ★ 失效两层缓存中的旧记录（杜绝删除复活）
         invalidateSummaryRecord(oldRid);
         invalidateFullRecord(oldRid);
       }
@@ -572,7 +572,7 @@ const onSave = async () => {
       throw e;
     }
     if (newRid !== null) {
-      // ★ Phase 2J：同步两层缓存（摘要 + 全量）
+      // ★ 同步两层缓存（摘要 + 全量）
       addFullRecord(newRid, TYPE_CERT, recordName, dataB64);
       // ★ 项2：shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
       pushShallowItems(certs, [{ id: Date.now(), recordId: newRid, ...certData }]);
@@ -615,7 +615,7 @@ const confirmDelete = async () => {
   setModuleCache("certs", certs.value);
   // 立即失效两层缓存（同步，杜绝删除复活）
   if (rid !== undefined) {
-    // ★ Phase 2J：同步失效摘要缓存 + 全量缓存 + 旧扫描缓存（三条路径同时清理）
+    // ★ 同步失效摘要缓存 + 全量缓存 + 旧扫描缓存（三条路径同时清理）
     //    确保无论走哪条加载路径（summary / fullRecord / 旧 scan）都不会复活已删除记录
     invalidateSummaryRecord(rid);
     invalidateFullRecord(rid);

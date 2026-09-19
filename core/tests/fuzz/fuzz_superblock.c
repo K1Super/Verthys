@@ -1,7 +1,5 @@
 /*
- * fuzz_superblock.c — V3 超级块明文帧模糊测试目标（WP-10 目标 1/5）
- *
- * 设计依据：docs/V3_UPGRADE_PLAYBOOK.md WP-10
+ * fuzz_superblock.c — V3 超级块明文帧模糊测试目标
  *
  * 测试面：vsb_v3_parse_unverified —— S1 解锁流水线在 integrity_key 派生
  * 之前消费的唯一样本输入面（flatcc verifier → 字段读取 → 向量长度严格

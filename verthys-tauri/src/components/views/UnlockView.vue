@@ -37,7 +37,7 @@
         </div>
       </div>
 
-      <!-- ★ 企业级方案：修复失败告警 — repair_fail_count >= 3 时显示（左缘警示刻线） -->
+      <!-- ★ 企业级：修复失败告警 — repair_fail_count >= 3 时显示（左缘警示刻线） -->
       <div v-if="initDetailRef && initDetailRef.includes('⚠')" class="ff-node ff-node--body">
         <div class="sc-repair-alert">{{ initDetailRef }}</div>
       </div>

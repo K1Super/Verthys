@@ -37,7 +37,7 @@ pub const STDERR_RING_SIZE: usize = 32;
 pub const STDERR_DIAG_MAX_LEN: usize = 2048;
 
 /* ------------------------------------------------------------------ *
- * 方案5：解锁进度数据结构（与 worker runtime.rs 中 unlock_progress_cb
+ * 解锁进度数据结构（与 worker runtime.rs 中 unlock_progress_cb
  *   写入的 JSON 行对齐，与 verthys.h 中 VerthysUnlockProgress 公共结构对齐）
  *
  * 用于 send_json_with_unlock_progress 解析进度行并转发给前端。

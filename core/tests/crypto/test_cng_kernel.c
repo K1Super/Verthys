@@ -1,7 +1,7 @@
 /*
- * test_cng_kernel.c — WP-1 验收：CNG 内核托管全量接线
+ * test_cng_kernel.c — 验收：CNG 内核托管全量接线
  *
- * 覆盖（PLAYBOOK WP-1 步骤 5）：
+ * 覆盖：
  *   1. 导入/加解密 roundtrip（含空明文、AAD 绑定）
  *   2. nonce 单调性 + 唯一性 + 计数器恢复（防回退）
  *   3. 错误路径：篡改密文/标签、错误 AAD、错误密钥、句柄销毁后不可用
@@ -105,7 +105,7 @@ TEST(cng_aead_roundtrip)
     return 0;
 }
 
-/* ---------- K-2 回归：init 契约（野句柄消毒） ---------- */
+/* ---------- init 契约回归（野句柄消毒） ---------- */
 
 TEST(cng_aead_init_contract)
 {
@@ -116,7 +116,7 @@ TEST(cng_aead_init_contract)
 
     verthys_random_bytes(key, sizeof(key));
 
-    /* K-2 根因回归：未初始化栈内存（垃圾句柄模式）经 init 消毒后可安全导入。
+    /* 根因回归：未初始化栈内存（垃圾句柄模式）经 init 消毒后可安全导入。
      * 修复前：import_key 对垃圾 key 字段无条件 BCryptDestroyKey → 0xC0000005 */
     memset(&aead, 0xAA, sizeof(aead));
     CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);

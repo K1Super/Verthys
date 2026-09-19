@@ -1,14 +1,14 @@
 /*
  * middleware/panic_hook.rs — 全局异常处理器
  *
- *    "顶层（入口/主循环）行为规范"
+ *    "顶层（入口/主循环）行为约定"
  *
  * 职责（仅两项）：
  *   1. 构造 JSON 格式的致命错误日志（包含堆栈信息、当前进程ID、发生时间），
  *      通过日志管道发送。
  *   2. 若进程间 IPC 通道仍可用，向父进程或监控进程发送统一错误响应报文。
  *
- * 第 15.5 / 12.4 项：分阶段安装策略
+ * 分阶段安装策略
  *   - install_minimal(): main 函数第一行安装，仅 OutputDebugString + MessageBoxW
  *     不依赖日志系统，确保从进程启动第一微秒起崩溃均可捕获
  *   - upgrade(log_sender): 日志系统就绪后升级为完整 hook
@@ -27,7 +27,7 @@ static PANIC_HOOK_INIT: Once = Once::new();
 /// minimal hook 安装守卫（早于完整 hook）
 static MINIMAL_HOOK_INIT: Once = Once::new();
 
-/// 第 15.5 / 12.4 项：安装最小化 panic hook
+/// 安装最小化 panic hook
 ///
 /// 在 main 函数第一行调用，**先于任何其他代码**。
 ///
@@ -46,7 +46,7 @@ pub fn install_minimal() {
     });
 }
 
-/// 第 15.5 / 12.4 项：升级 panic hook 为完整版本
+/// 升级 panic hook 为完整版本
 ///
 /// 在日志管道就绪后调用（lib.rs run() 内）。
 /// 此方法将 panic hook 替换为完整版本：
@@ -71,7 +71,7 @@ pub fn install(log_sender: LogSender) {
     upgrade(log_sender);
 }
 
-/// ===== panic payload 脱敏（P2-6 修复，2026-09-19） =====
+/// ===== panic payload 脱敏 =====
 ///
 /// panic payload 可能携带敏感上下文（expect/unwrap 的字符串、越界索引
 /// 关联数据、调试格式化的密钥材料）。三路输出（日志管道/

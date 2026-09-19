@@ -1,7 +1,7 @@
 /*
- * test_v3_property.c — ★ WP-12 验收：属性测试（自研 harness，无外部框架）
+ * test_v3_property.c — 属性测试（自研 harness，无外部框架）
  *
- * PLAYBOOK WP-12：随机序列 + 不变式断言，覆盖三大不变式族：
+ * 随机序列 + 不变式断言，覆盖三大不变式族：
  *
  *   1. LSM 插入/删除/查找（"插入后必可找到"）：
  *      随机 put/delete/get/flush/compact 序列 vs 影子模型（lid → 条目/墓碑），
@@ -16,22 +16,22 @@
  *      存活内容抽样解密 roundtrip。
  *
  *   3. 事务 commit/rollback 后超级块与 WAL 一致：
- *      随机白盒六 Phase 事务（add/delete × commit|rollback）vs 模型，
+ *      随机白盒六阶段事务（add/delete × commit|rollback）vs 模型，
  *      断言 sb.txid 当且仅当 commit 推进（内存态 ≡ 法定人数盘面态）、
  *      CONFIRM 后 WAL 帧清零、回滚后 WAL 帧清零且记录不可见、
  *      LID 水位单调（含回滚烧毁 + 墓碑占位）、Extent 引用守恒、
  *      公共 API 可见性 ≡ 模型。
  *
- *   4. 回滚耐久性（复活窗口回归，WP-12 发现缺陷的验收）：
+ *   4. 回滚耐久性（复活窗口回归，属性测试发现缺陷的验收）：
  *      回滚事务 → 同 txid 再提交 → COMMITTED 后崩溃（CONFIRM 前）→
  *      重开恢复：已回滚记录不得复活、已提交记录必须可见、LID 不复用。
  *
- *   5. 定向回归（WP-12 缺陷②/②b 验收，修复前必失败）：
+ *   5. 定向回归（回滚/崩溃丢弃后原始条目复原的验收，修复前必失败）：
  *      事务内 DELETE 墓碑按新者胜覆写 MemTable 原始条目——回滚/崩溃
  *      恢复丢弃该事务时，原始条目必须经重放重建完整复原（过滤式剔除
  *      会连同墓碑一起丢失被覆写条目 = 已提交数据丢失，红线级）。
- *      ② 运行时回滚路径 + Lock/重开持久化复验 + 已提交删除对照组；
- *      ②b PREPARED 崩溃 → 恢复丢弃组路径 + 恢复收尾 WAL 清零。
+ *      运行时回滚路径 + Lock/重开持久化复验 + 已提交删除对照组；
+ *      PREPARED 崩溃 → 恢复丢弃组路径 + 恢复收尾 WAL 清零。
  *
  * 可复现性：固定种子 + PROP_CHECK 失败上下文（种子/步号/操作名）打印。
  * 失败防级联：PROP_CHECK 跳转各测试尾部 prop_fail 清理标签（句柄/
@@ -692,7 +692,7 @@ TEST(prop_txn_commit_rollback_consistency)
         PROP_CHECK(verthys_txn_v3_begin(&v3->txn) == VERTHYS_OK);
         PROP_CHECK(verthys_txn_v3_txid(&v3->txn) == expect_txid + 1);
 
-        /* Phase 2/3：add × n（预算护栏：水位越界即提前收束） */
+        /* 写入与索引更新：add × n（预算护栏：水位越界即提前收束） */
         for (k = 0; k < n_adds && watermark + 1 < P3_MAX_LIDS; k++) {
             uint8_t name[16];
             int nlen;
@@ -716,7 +716,7 @@ TEST(prop_txn_commit_rollback_consistency)
             n_adds_real++;
         }
 
-        /* Phase 3：delete（70% 存活键 / 30% 任意键占位） */
+        /* 删除（70% 存活键 / 30% 任意键占位） */
         if (n_dels > 0) {
             uint64_t lids[P3_MAX_LIDS];
             size_t live_cnt = 0;
@@ -737,7 +737,7 @@ TEST(prop_txn_commit_rollback_consistency)
             PROP_CHECK(verthys_txn_v3_delete(&v3->txn, del_lid) == VERTHYS_OK);
         }
 
-        /* Phase 4-6 或回滚（抛硬币） */
+        /* 收口或回滚（抛硬币） */
         do_commit = (prng_next(&rng) & 1u) != 0u;
         if (do_commit) {
             g_prop_op = "commit";
@@ -850,7 +850,7 @@ prop_fail:
 /* ================== 属性 4：回滚耐久性（复活窗口回归） ================== */
 
 /*
- * WP-12 属性 3 推演发现的缺陷验收（verthys_txn_v3_rollback 现已复位
+ * 属性推演发现的回滚复活缺陷验收（verthys_txn_v3_rollback 现已复位
  * 事务 WAL——修复前该测试必失败）：
  *   1. 回滚事务 T1（txid=N，记录 R2）→ 废弃组帧残留 WAL；
  *   2. 同 txid 事务 T2（begin 复用 txid=N，记录 R3）→ commit →
@@ -927,7 +927,7 @@ TEST(prop_txn_crash_no_resurrection)
     p3_crash_abort(ctx);                        /* COMMITTED 态崩溃 */
     PROP_CHECK(p3_deinit(&h) == VERTHYS_OK);
 
-    /* 重开恢复（§10.1 规则 4：COMMIT 在场组重放收尾） */
+    /* 重开恢复（COMMIT 在场组重放收尾） */
     PROP_CHECK(Verthys_Init(&h) == VERTHYS_OK);
     PROP_CHECK(Verthys_Unlock(h, P3_VERTHYS, P3_PW, P3_PW_LEN, 0) == VERTHYS_OK);
 
@@ -961,10 +961,10 @@ prop_fail:
     return 1;
 }
 
-/* ================== 定向回归：WP-12 缺陷②/②b 验收 ================== */
+/* ================== 定向回归：回滚/崩溃丢弃后原始条目复原 ================== */
 
 /*
- * 缺陷②定向回归（运行时回滚墓碑覆写数据丢失，修复前必失败）：
+ * 定向回归-运行时回滚（回滚墓碑覆写数据丢失，修复前必失败）：
  *   R1 提交后驻留 MemTable（单记录远未达 flush 阈值、未 Lock）→
  *   事务内 DELETE R1（墓碑按新者胜覆写 MemTable 原始条目）→ 回滚。
  *   修复前：回滚走过滤式剔除——墓碑与被覆写的 R1 一同消失
@@ -1055,9 +1055,9 @@ prop_fail:
 }
 
 /*
- * 缺陷②b定向回归（崩溃恢复丢弃组墓碑覆写数据丢失，修复前必失败）：
+ * 定向回归-崩溃恢复（恢复丢弃组墓碑覆写数据丢失，修复前必失败）：
  *   R1 提交后驻留 MemTable → 事务内 DELETE R1 → PREPARE 后崩溃
- *   （WAL 无 COMMIT 记录 → §10.1 规则 6 丢弃该组）→ 重开恢复。
+ *   （WAL 无 COMMIT 记录 → 丢弃该未提交组）→ 重开恢复。
  *   修复前：恢复对丢弃组走过滤式剔除——R1 随墓碑一同消失（已提交
  *   数据丢失，红线级）；修复后：过滤重放重建（排除丢弃组帧）复原 R1。
  */

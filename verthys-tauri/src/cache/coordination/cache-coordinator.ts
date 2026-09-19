@@ -1,24 +1,24 @@
 /*
  * cache/coordination/cache-coordinator.ts — 缓存协调器（事件驱动单例）
  *
- * ★ cache-coordinator 重构方案（cache-coordinator-refactor-fix.md）落地：
+ * ★ cache-coordinator 重构设计落地：
  *   采用观察者模式 + 依赖注入重构，通过领域事件（record:add/record:remove/
  *   record:update）解耦缓存更新逻辑，缓存层实现可注入、可替换、可测试。
  *
- * ★ 方案根治的五项缺陷（方案 §一 逐条对应）：
+ * ★ 根治的五项缺陷（逐条对应）：
  *   1. updateRecord 覆盖 createdTime → 更新前自动从摘要缓存读取旧
  *      createdTime 保留（调用方未显式传入时）
  *   2. RecordUpdate 缺少元数据字段 → 扩展 createdTime?/physicalOffset?/
  *      merkleLeaf?，调用方可传入完整摘要信息，消除占位值失真
  *   3. removeRecord 未同步清理 pendingDeletionIds → 提供 configure() 注入
- *      onRecordDeleted 回调（默认不注入，见下方安全警示）
+ *      onRecordDeleted 回调（默认不注入，安全警示示于下方）
  *   4. dataSize 估算不精确 → estimateBase64Size 处理填充字符
- *      （共享实现见 cache/shared/base64-size.ts）
+ *      （共享实现位于 cache/shared/base64-size.ts）
  *   5. 单例缺少可测试性 → 提供 configure()/resetInstance()
  *
- * ★ onRecordDeleted 安全警示（方案 §一.3 落地须知）：
+ * ★ onRecordDeleted 安全警示：
  *   正常删除路径【禁止】将 onRecordDeleted 接线为"从 pendingDeletionIds
- *   移除 ID"。pendingDeletionIds 是方案 3.4 的防复活保护：deleteAndPersist
+ *   移除 ID"。pendingDeletionIds 是防复活保护：deleteAndPersist
  *   入队即过滤该 ID，直到 flush 磁盘验证成功才由 VerthysFlushService 移除。
  *   若在缓存同步阶段提前移除，磁盘旧数据会被扫描回填 → 删除复活。
  *   该回调仅用于特殊场景（如独立于冲刷队列的显式确认删除）。
@@ -27,13 +27,13 @@
  *   - Node 'events' 的 EventEmitter 在本 Vite 浏览器 bundle 不可解析
  *     （无 events 包、无 polyfill），以零依赖 TypedEventEmitter 等价替代，
  *     事件名与监听器参数由事件表静态类型化（比 Node 版更安全）
- *   - 单例身份稳定性：方案原 configure() 以新实例替换 CacheCoordinator.instance，
+ *   - 单例身份稳定性：原 configure() 以新实例替换 CacheCoordinator.instance，
  *     而模块底部导出的 cacheCoordinator 常量在模块求值时绑定，替换后
  *     消费方持有旧实例（ES live binding 指向导出时的对象）。本实现将
  *     configure()/resetInstance() 改为对既有单例的就地重配置/出厂重置，
- *     保持导出绑定与 getInstance() 返回值永远同一实例（方案 API 与用途
+ *     保持导出绑定与 getInstance() 返回值永远同一实例（原 API 与用途
  *     完整保留，身份漂移缺陷根治）
- *   - 默认处理器保留现网逐层 try/catch 失败包容（方案头注声称
+ *   - 默认处理器保留现网逐层 try/catch 失败包容（原头注声称
  *     "单层缓存失败不影响其他层"，逐层隔离是该承诺的落实）
  *
  * 使用示例：
@@ -197,7 +197,7 @@ function createDefaultHandlers(): Required<CacheHandlers> {
 /**
  * 缓存协调器（事件驱动单例）
  *
- * ★ 白皮书 3.2 方案二：封装统一的记录增删改接口，
+ * ★ 封装统一的记录增删改接口，
  *   内部自动同步所有缓存层，消除业务代码手动调用分散缓存函数的遗漏风险。
  *
  * 特点：
@@ -245,7 +245,7 @@ export class CacheCoordinator extends TypedEventEmitter<CacheCoordinatorEventMap
    *
    * @param handlers 缓存更新处理器（整体替换）
    * @param onRecordDeleted 删除记录时的额外回调（例如独立的删除确认逻辑；
-   *   见类头注安全警示——禁止接线为清除 pendingDeletionIds）
+   *   类头注安全警示——禁止接线为清除 pendingDeletionIds）
    */
   static configure(handlers: CacheHandlers, onRecordDeleted?: (id: number) => void): void {
     CacheCoordinator.getInstance().applyConfiguration(handlers, onRecordDeleted);
@@ -255,7 +255,7 @@ export class CacheCoordinator extends TypedEventEmitter<CacheCoordinatorEventMap
    * 重置单例（测试用）：恢复默认处理器、清除注入回调、
    * 移除全部自定义监听器并重建默认订阅（出厂状态）。
    *
-   * ★ 同样保持单例身份不变（方案原实现将 instance 置 null 会导致
+   * ★ 同样保持单例身份不变（原实现将 instance 置 null 会导致
    *   已导出的 cacheCoordinator 常量与后续 getInstance() 脱钩）。
    */
   static resetInstance(): void {
@@ -319,7 +319,7 @@ export class CacheCoordinator extends TypedEventEmitter<CacheCoordinatorEventMap
   /**
    * 删除记录：发布 record:remove 事件，默认处理器同步失效三层缓存。
    *
-   * ★ pendingDeletionIds 不在此清理（方案 3.4 防复活保护由
+   * ★ pendingDeletionIds 不在此清理（防复活保护由
    *   VerthysFlushService 在磁盘验证成功后管理）。
    */
   removeRecord(id: number): void {
@@ -327,7 +327,7 @@ export class CacheCoordinator extends TypedEventEmitter<CacheCoordinatorEventMap
   }
 
   /**
-   * 更新记录（方案 §一.1 根治：保留原 createdTime）。
+   * 更新记录（保留原 createdTime）。
    *
    * createdTime 未传时自动从摘要缓存读取旧值保留；读取失败或无旧值时
    * 回退默认处理器的时间兜底。先失效旧三层缓存，再写入新记录。
@@ -347,5 +347,5 @@ export class CacheCoordinator extends TypedEventEmitter<CacheCoordinatorEventMap
   }
 }
 
-/** 导出单例便捷实例（业务代码直接使用，无需 getInstance()；身份恒定，见类头注） */
+/** 导出单例便捷实例（业务代码直接使用，无需 getInstance()；身份恒定，同文件头注） */
 export const cacheCoordinator = CacheCoordinator.getInstance();

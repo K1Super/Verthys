@@ -1,5 +1,5 @@
 /*
- * test_syscall_direct.c — ★ V3 升级 WP-9：直接系统调用传输测试
+ * test_syscall_direct.c — 直接系统调用传输测试
  *
  * 验证维度（环境自适应：激活/降级两态均须通过——测试断言的是
  * "传输语义与 ntdll 导出一致"，激活与否取决于运行环境 SSN 提取结果）：
@@ -130,7 +130,7 @@ TEST(scd_detector_wiring_clean)
     CHECK_EQ(anti_debug_v2_is_punish_mode(), 0);
 
     /* memory_guard 句柄表扫描经直接系统调用（干净环境返回 0；
-     * test_memory_safety.c 亦有覆盖，此处从 WP-9 传输视角复验） */
+     * test_memory_safety.c 亦有覆盖，此处从传输视角复验） */
     CHECK_EQ(memory_guard_init(), 0);
     CHECK_EQ(memory_guard_check_remote_read(), 0);
     return 0;

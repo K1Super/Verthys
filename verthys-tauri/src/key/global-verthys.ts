@@ -38,7 +38,7 @@ import {
   enqueueFlush, flushVerthysNow,
   ensureSummaryScan, ensureRecordScan,
 } from "../cache/composition/verthys-cache";
-// ★ 后台任务 API 直连 core 层（verthys-cache 组合根 §二.2 单向化：不再转发 start/stop）
+// ★ 后台任务 API 直连 core 层（单向化：不再转发 start/stop）
 import { startBackgroundTasks, stopBackgroundTasks } from "../core/background-tasks";
 import {
   ok, err, errFromUnknown,
@@ -60,28 +60,15 @@ const log = createLogger("global-verthys");
 /** 在 verthys 中查找全局密钥记录
  *  返回 { id, recordB64 } — 不解析内部结构，由 worker 验证
  *
- *  ★ 性能修复（根治 40s → 3s 延迟）：
  *
  *  原实现调用 ensureRecordScan() 全量解密所有记录（含照片数据块），
  *  仅为查找一条全局密钥记录 → 数千条记录的 verthys 耗时 20-30s。
  *
  *  新实现分两级查找，将关键路径上的数据解密从 O(N) 降至 O(1)：
  *
- *  1. v2 容器（常见路径）— 早停摘要扫描 + 定向 getRecord：
- *     - findLidByTypeEarlyStop(TYPE_GLOBAL_KEY) 逐批扫描摘要，
- *       找到首条匹配即关闭游标返回（全局密钥记录通常在首批，LID 小）
- *     - verthysGetRecord(lid) 仅解密目标记录的数据块（单条 IPC）
- *     总耗时：早停摘要扫描 0.2-0.5s + 单条 getRecord <100ms ≈ 0.5s
- *
- *  2. v1 容器（回退路径）— verthysEnumerateRecords（单次 IPC）：
- *     - v1 容器在 unlock 时已将全部记录解密到内存
- *     - verthysEnumerateRecords 仅做内存→IPC 传输，不触发额外磁盘 I/O
- *     总耗时：v1 内存传输 1-3s
- *
  *  全量扫描（ensureRecordScan）仍由 startBackgroundTasks 后台执行，不阻塞关键路径。
  */
 async function findGlobalKeyRecord(): Promise<{ id: number; recordB64: string } | null> {
-  // ★ 路径 1：v2 容器优先路径 — 早停摘要扫描 + 定向 getRecord
   try {
     const lid = await findLidByTypeEarlyStop(TYPE_GLOBAL_KEY);
     if (lid !== null) {
@@ -111,7 +98,7 @@ async function findGlobalKeyRecord(): Promise<{ id: number; recordB64: string } 
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 企业级根治方案：解锁响应内联探测结果（已废弃前端 probe 链路）       *
+ * ★ 企业级根治：解锁响应内联探测结果（已废弃前端 probe 链路）       *
  *                                                                    *
  * 原缺陷（已根治）：解锁成功后前端需发起 3~4 次 IPC 往返              *
  *   (verthysHasRecordByType → findLidByTypeEarlyStop → verthysGetRecord)  *
@@ -133,7 +120,7 @@ async function findGlobalKeyRecord(): Promise<{ id: number; recordB64: string } 
  * ------------------------------------------------------------------ */
 
 /**
- * ★ 白皮书 2.2 方案二：异步冲刷（不阻塞调用方）
+ * ★ 异步冲刷（不阻塞调用方）
  *
  * 用于非关键路径的延迟持久化：initGlobalKey 调用此方法，
  * 不等待落盘完成，立即返回。落盘失败通过日志记录；
@@ -157,7 +144,7 @@ async function flushVerthysAsync(immediate: boolean): Promise<VerthysResult<void
 /**
  * 重置密钥管理器全部状态（异步原子化版本）
  *
- * ★ 白皮书 2.2 方案二：异步原子化重置生命周期
+ * ★ 异步原子化重置生命周期
  *
  * 清理顺序（严格串行，每步 await 完成）：
  *   1. securitySessionStop() — 解除系统锁屏监听，防止监听器残留
@@ -175,14 +162,14 @@ async function flushVerthysAsync(immediate: boolean): Promise<VerthysResult<void
  *   - 旧实现 stopBackgroundTasks 仅置取消标志 → 旧任务可能仍在运行访问已释放缓存
  */
 async function resetKeyManagerState(): Promise<void> {
-  // 1. 解除系统锁屏监听（旧实现遗漏，白皮书 2.2 方案二核心修复）
+  // 1. 解除系统锁屏监听（旧实现遗漏，异步冲刷核心修复）
   try {
     await withTimeout(securitySessionStop(), 5000, "securitySessionStop");
   } catch (e) {
     log.warn("securitySessionStop 失败（继续清理）", e);
   }
 
-  // 2. 等待后台任务实际终止（白皮书 2.2.2 + 4.4：stopBackgroundTasks 为 async）
+  // 2. 等待后台任务实际终止（stopBackgroundTasks 为 async）
   try {
     await stopBackgroundTasks();
   } catch (e) {
@@ -276,7 +263,7 @@ function pickUnlockChannelText(rawPercent: number): string {
 /**
  * 首次创建加密库（严格遵循「先落地、后状态」原则）
  *
- * ★ 白皮书 2.2 方案一：返回 VerthysResult<void>，携带结构化错误码
+ * ★ 返回 VerthysResult<void>，携带结构化错误码
  *
  * 流程：
  *   1. 路径预检（目录存在性、可写性、系统保护目录）
@@ -450,8 +437,8 @@ export async function initCreate(
 /**
  * 解锁已有加密库（非首次使用）
  *
- * ★ 白皮书 2.2 方案一：返回 VerthysResult<void>
- * ★ 方案5：新增 onProgress 可选回调，流式接收解锁进度供前端展示
+ * ★ 返回 VerthysResult<void>
+ * ★ 新增 onProgress 可选回调，流式接收解锁进度供前端展示
  *
  * @param verthysPath .verthys 文件路径（已有文件）
  * @param preflightResult 调用方已执行的路径预检结果（可选）
@@ -545,11 +532,11 @@ export async function initUnlock(
       return err(VerthysErrorCode.E_WORKER_INIT_FAILED, "安全核心启动失败");
     }
 
-    // 3. verthys_unlock — ★ 企业级根治方案：返回完整 VerthysResponse
+    // 3. verthys_unlock — ★ 企业级根治：返回完整 VerthysResponse
     //
-    // ★ 方案5：后端各阶段进度通过 Channel 流式推送，经 emit 闸门单调递增转发前端
+    // ★ 后端各阶段进度通过 Channel 流式推送，经 emit 闸门单调递增转发前端
     // 后端会推送 10%~100% 的进度（v1 和 v2 路径均已覆盖），映射到 8%~85% 子区间
-    // ★ 方案六：分级超时熔断（软 15s 提示 / 硬 35s 降级 / 连续 3 次熔断锁定）
+    // ★ 分级超时熔断（软 15s 提示 / 硬 35s 降级 / 连续 3 次熔断锁定）
     //   - 软超时 15s：Argon2id 派生耗时过长，前端提示「密钥计算较慢，请耐心等待」继续执行
     //   - 硬超时 35s：整体解锁未完成，触发降级校验，仅保障核心数据可读
     //   - 连续 3 次硬超时自动锁定容器 30 分钟（withGradedTimeout 内部处理）
@@ -613,7 +600,7 @@ export async function initUnlock(
       return err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, "打开加密库失败");
     }
 
-    // 4. 消费进程内探测结果 — ★ 企业级根治方案
+    // 4. 消费进程内探测结果 — ★ 企业级根治
     //
     // worker 解锁成功后已进程内完成 has_record + find_lid + get_record，
     // 结果内联到 unlockResp 三字段。前端零 IPC 往返直接决策 UI 路径：
@@ -655,7 +642,7 @@ export async function initUnlock(
     // globalKeyRecordLoading 永不设置为 true（进程内探测即时完成，无异步确认阶段）
     keyState.globalKeyRecordLoading.value = false;
 
-    // ★ 企业级根治修复4：解锁后关键路径 — 仅填充摘要缓存（模块密钥状态移至后台）
+    // ★ 解锁后关键路径 — 仅填充摘要缓存（模块密钥状态移至后台）
     //
     // 原缺陷（致命回归 + 卡慢）：
     //   1. 早期版本解锁后不调用 loadModuleKeyStatus → moduleKeyEnabled 保持默认值
@@ -663,13 +650,12 @@ export async function initUnlock(
     //   2. 后续修复将 loadModuleKeyStatus 放入关键路径同步 await（10s 超时兜底）
     //      → 阻塞 verthysReady=true → "正在加载密钥配置…时间太久"
     //
-    // 修复4（企业级根治）：
-    //   步骤 A（关键路径）：await ensureSummaryScan() — 填充摘要缓存（v2 容器 0.5-1s）
+    // 当前处理：
+    //   步骤 A（关键路径）：await ensureSummaryScan() — 填充摘要缓存
     //     为模块组件列表渲染提供 O(1) 索引，必须在 verthysReady=true 之前完成
     //   步骤 B（后台非阻塞）：loadModuleKeyStatus() — verthysReady=true 后后台执行
     //     - moduleKeyStatusLoading 标志供模块组件守卫
-    //     - 乐观并发控制（修复6）防止与用户开关操作竞态
-    //     - 正常 v2 容器 <100ms 完成（摘要缓存已就绪，仅常数次 IPC）
+    //     - 乐观并发控制防止与用户开关操作竞态
     //     - 安全权衡：加载窗口内 moduleKeyEnabled 为安全默认 false，模块列表可见但
     //       加密项仍需独立密钥解密；用户刚通过全局密钥认证，风险可接受
     //
@@ -722,7 +708,7 @@ export async function initUnlock(
     //
     // 原缺陷（竞态根因）：
     //   worker 内联 probe 在 Verthys_Unlock 成功后立即调用
-    //   Verthys_FindFirstLidByType(0x10) 搜索全局密钥记录（见 worker runtime.rs
+    //   Verthys_FindFirstLidByType(0x10) 搜索全局密钥记录（同 worker runtime.rs
     //   probe_global_key_inproc）。但类型迁移（migrateRecordTypes）在此之后
     //   才执行——如果 verthys 中存在旧账户记录（type=0x10，与 TYPE_GLOBAL_KEY
     //   冲突），probe 可能命中账户记录而非真正的全局密钥记录，将账户 JSON
@@ -874,7 +860,7 @@ export async function initUnlock(
  * 智能初始化：自动判断创建或解锁
  * 基于路径预检的 file_exists 字段决定调用 initCreate 或 initUnlock
  *
- * ★ 白皮书 2.2 方案一：返回 VerthysResult<void>
+ * ★ 返回 VerthysResult<void>
  */
 export async function initAndUnlock(verthysPath: string): Promise<VerthysResult<void>> {
   try {
@@ -903,9 +889,9 @@ export async function initAndUnlock(verthysPath: string): Promise<VerthysResult<
  * 初始化全局安全密钥（首次设置）
  * GMK 派生在 worker 子进程内完成，前端仅传递参数并持久化 record
  *
- * ★ 白皮书 2.2 方案一：返回 VerthysResult<void>
- * ★ 白皮书 2.2 方案三：移除自动 setDeviceBinding，由调用方显式调用 bindDevice()
- * ★ 白皮书 2.2 方案四：使用 flushVerthysAsync(false) 不阻塞 UI
+ * ★ 返回 VerthysResult<void>
+ * ★ 移除自动 setDeviceBinding，由调用方显式调用 bindDevice()
+ * ★ 使用 flushVerthysAsync(false) 不阻塞 UI
  *
  * @param globalPassword 全局访问密钥
  * @param binBytes .bin 密钥文件原始字节
@@ -967,7 +953,7 @@ export async function initGlobalKey(
   keyState.globalKeyRecordId.value = id;
   resetSessionTimer();
 
-  // ★ 白皮书 2.2 方案三：移除自动 setDeviceBinding
+  // ★ 移除自动 setDeviceBinding
   // 设备绑定由调用方（SecurityCenter.vue）在初始化成功后显式调用 bindDevice()
 
   log.info("全局密钥初始化成功");
@@ -979,8 +965,8 @@ export async function initGlobalKey(
  *
  * 写入顺序：先派生新 GMK + 写入新记录，成功后再删除旧记录（先添后删）。
  *
- * ★ 白皮书 2.2 方案一：返回 VerthysResult<void>
- * ★ 白皮书 2.2 方案四：使用 flushVerthysNow() 强制同步落盘（全局密钥是核心数据）
+ * ★ 返回 VerthysResult<void>
+ * ★ 使用 flushVerthysNow() 强制同步落盘（全局密钥是核心数据）
  *
  * @returns VerthysResult<void>
  */
@@ -1032,7 +1018,7 @@ export async function changeGlobalKey(
     await verthysDeleteRecord(oldRecord.id);
   }
 
-  // ★ 白皮书 2.2 方案四：flushVerthysNow 强制同步落盘（关键路径）
+  // ★ flushVerthysNow 强制同步落盘（关键路径）
   // 全局密钥是核心数据，必须确保落盘成功
   const flushResult = await flushVerthysNow();
   if (!flushResult.ok) {
@@ -1052,7 +1038,7 @@ export async function changeGlobalKey(
  * 验证全局密钥（后续进入时）
  * GMK 验证在 worker 子进程内完成，前端仅传递参数和 record
  *
- * ★ 白皮书 2.2 方案一：返回 VerthysResult<void>
+ * ★ 返回 VerthysResult<void>
  *
  * @returns VerthysResult<void>
  *   - ok：验证成功
@@ -1209,7 +1195,7 @@ export async function verifyGlobalKeyWithBruteForce(
  * ------------------------------------------------------------------ */
 
 /**
- * ★ 白皮书 2.2 方案三：绑定当前设备机器码（独立可控）
+ * ★ 绑定当前设备机器码（独立可控）
  *
  * 从 initGlobalKey 中移除，由调用方决定是否绑定。
  * 绑定失败返回明确错误码，UI 层可展示提示并允许用户重试。
@@ -1240,7 +1226,7 @@ export async function bindDevice(force: boolean = false): Promise<VerthysResult<
 /**
  * 校验当前设备是否与已绑定机器码匹配
  *
- * ★ 白皮书 2.2 方案一：返回 VerthysResult<"match"|"mismatch"|"unbound">
+ * ★ 返回 VerthysResult<"match"|"mismatch"|"unbound">
  *
  * ★ 企业级根治修复：后端 check_device_binding 返回 DeviceBindingResult 结构体
  *   （{status, detail, error_code?, match_score?}），原实现直接把对象当字符串
@@ -1312,7 +1298,7 @@ export async function getDeviceFingerprintShort(): Promise<string> {
  * ------------------------------------------------------------------ */
 
 /**
- * 读取 .bin 文件字节（通过 Tauri 后端读取本地文件，★ P2-7 二进制 IPC 直传）
+ * 读取 .bin 文件字节（通过 Tauri 后端读取本地文件，二进制 IPC 直传）
  */
 export async function readBinFile(path: string): Promise<Uint8Array | null> {
   try {

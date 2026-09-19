@@ -1,5 +1,5 @@
 /*
- * test_txn_recovery_inject.c — 方案 §8.2 配套测试：事务半写/损坏故障注入
+ * test_txn_recovery_inject.c — 配套测试：事务半写/损坏故障注入
  *
  * 以字节级文件手术模拟磁盘半写/损坏场景，验证事务恢复与防回滚链在
  * 异常输入下的行为闭环（不崩溃、错误码语义正确）：
@@ -82,7 +82,7 @@ TEST(inject_sb_ciphertext_bitflip_rejected)
     CHECK(buf != NULL);
     CHECK(len > VERTHYS_V3_SB_REGION_END);
 
-    /* ★ V3（§6.3 法定人数语义）：超级块为 3 副本 FlatBuffers 帧
+    /* ★ V3（法定人数语义）：超级块为 3 副本 FlatBuffers 帧
      * （[0/16K/32K)×16KB，帧头 8B + 载荷 + 零填充）。单副本翻转会被
      * 2/3 多数派票决出局、解锁照常成功——原 V2 单超块语义（翻 2KB 处
      * = 密文区中部）在 V3 落入零填充区更是零效果。等价注入 = 三副本

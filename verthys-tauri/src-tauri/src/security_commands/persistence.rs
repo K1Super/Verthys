@@ -1,13 +1,12 @@
 /*
  * persistence.rs — 安全状态 DPAPI 加密持久化层
  *
- *    "" 第十三章 — 13.2.2 项 / SECURITY.md 第 1 / 3 / 5 项
  *
  * 职责：
- *   1. BruteForceGuard 状态的 DPAPI 加密持久化与加载（第 13.2.2 项）
- *   2. 受信任路径白名单的 DPAPI 加密持久化（SECURITY.md 第 3 项）
- *   3. USB 序列号加盐哈希盐值的 DPAPI 持久化（SECURITY.md 第 5 项）
- *   4. USB 注册表的 DPAPI 加密持久化（SECURITY.md 第 1 项）
+ *   1. BruteForceGuard 状态的 DPAPI 加密持久化与加载
+ *   2. 受信任路径白名单的 DPAPI 加密持久化
+ *   3. USB 序列号加盐哈希盐值的 DPAPI 持久化
+ *   4. USB 注册表的 DPAPI 加密持久化
  *
  *   所有状态文件采用原子写入（先写 .tmp 再 rename），DPAPI 机器绑定，离机失效。
  */
@@ -23,7 +22,7 @@ use crate::security::{
 use super::state::SecurityState;
 
 /* ====================================================================== *
- *  第 13.2.2 项：BruteForceGuard DPAPI 加密持久化                         *
+ *  BruteForceGuard DPAPI 加密持久化                         *
  *                                                                        *
  *  状态文件路径：app_config_dir/.brute_force_state                        *
  *  格式：DPAPI( JSON BruteForcePersistedState )                           *
@@ -31,7 +30,7 @@ use super::state::SecurityState;
  *  每次 record_failure / record_success / clear_purge 后自动持久化。      *
  * ====================================================================== */
 
-/// 第 13.2.2 项：获取暴力拦截状态文件路径
+/// 获取暴力拦截状态文件路径
 fn get_brute_force_state_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     match app.path().app_config_dir() {
         Ok(dir) => Some(dir.join(".brute_force_state")),
@@ -42,7 +41,7 @@ fn get_brute_force_state_file(app: &tauri::AppHandle) -> Option<std::path::PathB
     }
 }
 
-/// 第 13.2.2 项：持久化暴力拦截状态（DPAPI 加密）
+/// 持久化暴力拦截状态（DPAPI 加密）
 pub(super) fn persist_brute_force_state(app: &tauri::AppHandle, guard: &BruteForceGuard) {
     use crate::util::crypto::dpapi_protect;
 
@@ -89,7 +88,7 @@ pub(super) fn persist_brute_force_state(app: &tauri::AppHandle, guard: &BruteFor
     );
 }
 
-/// 第 13.2.2 项：从持久化加载暴力拦截状态（DPAPI 解密）
+/// 从持久化加载暴力拦截状态（DPAPI 解密）
 fn load_brute_force_state(app: &tauri::AppHandle, guard: &BruteForceGuard) {
     use crate::util::crypto::dpapi_unprotect;
 
@@ -133,7 +132,7 @@ fn load_brute_force_state(app: &tauri::AppHandle, guard: &BruteForceGuard) {
     guard.import_state(&persisted);
 }
 
-/// 第 13.2.2 项：确保暴力拦截状态已从持久化加载（首次访问时触发）
+/// 确保暴力拦截状态已从持久化加载（首次访问时触发）
 pub(super) fn ensure_brute_force_loaded(app: &tauri::AppHandle, state: &SecurityState) {
     use std::sync::atomic::Ordering;
 
@@ -151,7 +150,7 @@ pub(super) fn ensure_brute_force_loaded(app: &tauri::AppHandle, state: &Security
 }
 
 /* ====================================================================== *
- *  SECURITY.md 第 3 项：受信任路径白名单 DPAPI 持久化                      *
+ *  受信任路径白名单 DPAPI 持久化                      *
  *                                                                        *
  *  白名单内容加密持久化到状态文件，应用启动时加载，形成不可篡改的安全基线。 *
  *  状态文件路径：app_config_dir/.trusted_paths_state                      *
@@ -168,7 +167,7 @@ fn get_trusted_paths_state_file(app: &tauri::AppHandle) -> Option<std::path::Pat
     }
 }
 
-/// SECURITY.md 第 3 项：持久化受信任路径白名单（DPAPI 加密）
+/// 持久化受信任路径白名单（DPAPI 加密）
 pub(super) fn persist_trusted_paths(app: &tauri::AppHandle) {
     use crate::util::crypto::dpapi_protect;
 
@@ -211,7 +210,7 @@ pub(super) fn persist_trusted_paths(app: &tauri::AppHandle) {
     );
 }
 
-/// SECURITY.md 第 3 项：加载受信任路径白名单（DPAPI 解密）
+/// 加载受信任路径白名单（DPAPI 解密）
 #[allow(dead_code)]
 fn load_trusted_paths(app: &tauri::AppHandle) {
     use crate::util::crypto::dpapi_unprotect;
@@ -249,7 +248,7 @@ fn load_trusted_paths(app: &tauri::AppHandle) {
     log::info!("[trusted_paths] 白名单已从持久化恢复 ({} 条路径)", paths.len());
 }
 
-/// SECURITY.md 第 3 项：首次访问时加载白名单
+/// 首次访问时加载白名单
 #[allow(dead_code)]
 fn ensure_trusted_paths_loaded(app: &tauri::AppHandle, state: &SecurityState) {
     if state.trusted_paths_loaded.swap(true, Ordering::SeqCst) {
@@ -259,7 +258,7 @@ fn ensure_trusted_paths_loaded(app: &tauri::AppHandle, state: &SecurityState) {
 }
 
 /* ====================================================================== *
- *  SECURITY.md 第 5 项：USB 序列号加盐哈希 — 盐值 DPAPI 持久化            *
+ *  USB 序列号加盐哈希 — 盐值 DPAPI 持久化            *
  *                                                                        *
  *  盐值（32 字节 / 256 位）在安装时随机生成，DPAPI 加密存储于应用配置      *
  *  目录。用于 HMAC-SHA256(salt, serial) 计算序列号哈希，即使数据库泄露    *
@@ -272,7 +271,7 @@ fn ensure_trusted_paths_loaded(app: &tauri::AppHandle, state: &SecurityState) {
 /// USB 盐值长度（32 字节 = 256 位）
 const USB_SALT_LEN: usize = 32;
 
-/// SECURITY.md 第 5 项：获取 USB 盐值文件路径
+/// 获取 USB 盐值文件路径
 fn get_usb_salt_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     match app.path().app_config_dir() {
         Ok(dir) => Some(dir.join(".usb_salt")),
@@ -283,7 +282,7 @@ fn get_usb_salt_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     }
 }
 
-/// SECURITY.md 第 5 项：生成密码学安全随机盐值（32 字节）
+/// 生成密码学安全随机盐值（32 字节）
 fn generate_usb_salt() -> Vec<u8> {
     #[cfg(target_os = "windows")]
     {
@@ -320,7 +319,7 @@ fn generate_usb_salt() -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// SECURITY.md 第 5 项：持久化 USB 盐值（DPAPI 加密）
+/// 持久化 USB 盐值（DPAPI 加密）
 fn persist_usb_salt(app: &tauri::AppHandle, salt: &[u8]) {
     use crate::util::crypto::dpapi_protect;
 
@@ -350,7 +349,7 @@ fn persist_usb_salt(app: &tauri::AppHandle, salt: &[u8]) {
     log::info!("[usb_salt] USB 盐值已持久化 ({} 字节)", salt.len());
 }
 
-/// SECURITY.md 第 5 项：加载 USB 盐值（DPAPI 解密）
+/// 加载 USB 盐值（DPAPI 解密）
 fn load_usb_salt(app: &tauri::AppHandle) -> Option<Vec<u8>> {
     use crate::util::crypto::dpapi_unprotect;
 
@@ -385,7 +384,7 @@ fn load_usb_salt(app: &tauri::AppHandle) -> Option<Vec<u8>> {
     Some(salt)
 }
 
-/// SECURITY.md 第 5 项：确保 USB 盐值已加载，返回盐值引用
+/// 确保 USB 盐值已加载，返回盐值引用
 ///
 /// 首次调用时从持久化加载盐值；若不存在则生成新盐值并持久化。
 /// 后续调用直接从内存读取。
@@ -426,7 +425,7 @@ pub(super) fn ensure_usb_salt(app: &tauri::AppHandle, state: &SecurityState) -> 
 }
 
 /* ====================================================================== *
- *  SECURITY.md 第 1 项：USB 注册表 DPAPI 持久化                           *
+ *  USB 注册表 DPAPI 持久化                           *
  *                                                                        *
  *  USB 注册表内容加密持久化到状态文件，应用启动时加载，形成不可篡改的     *
  *  安全基线。废除"首次自动注册"逻辑，仅管理员预先授权的设备可用。        *
@@ -435,7 +434,7 @@ pub(super) fn ensure_usb_salt(app: &tauri::AppHandle, state: &SecurityState) -> 
  *  格式：DPAPI( JSON Vec<(String, String)> )                              *
  * ====================================================================== */
 
-/// SECURITY.md 第 1 项：获取 USB 注册表状态文件路径
+/// 获取 USB 注册表状态文件路径
 fn get_usb_registry_state_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     match app.path().app_config_dir() {
         Ok(dir) => Some(dir.join(".usb_registry_state")),
@@ -446,7 +445,7 @@ fn get_usb_registry_state_file(app: &tauri::AppHandle) -> Option<std::path::Path
     }
 }
 
-/// SECURITY.md 第 1 项：持久化 USB 注册表（DPAPI 加密）
+/// 持久化 USB 注册表（DPAPI 加密）
 pub(super) fn persist_usb_registry(app: &tauri::AppHandle, registry: &UsbRegistry) {
     use crate::util::crypto::dpapi_protect;
 
@@ -489,7 +488,7 @@ pub(super) fn persist_usb_registry(app: &tauri::AppHandle, registry: &UsbRegistr
     );
 }
 
-/// SECURITY.md 第 1 项：加载 USB 注册表（DPAPI 解密）
+/// 加载 USB 注册表（DPAPI 解密）
 fn load_usb_registry(app: &tauri::AppHandle, registry: &mut UsbRegistry) {
     use crate::util::crypto::dpapi_unprotect;
 
@@ -529,7 +528,7 @@ fn load_usb_registry(app: &tauri::AppHandle, registry: &mut UsbRegistry) {
     );
 }
 
-/// SECURITY.md 第 1 项：首次访问时加载 USB 注册表
+/// 首次访问时加载 USB 注册表
 pub(super) fn ensure_usb_registry_loaded(app: &tauri::AppHandle, state: &SecurityState) {
     if state.usb_registry_loaded.swap(true, Ordering::SeqCst) {
         return;

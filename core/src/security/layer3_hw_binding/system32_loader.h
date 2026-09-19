@@ -1,10 +1,6 @@
 /*
  * system32_loader.h — System32 优先加载与 cnghwassist.sys 冲突解决（内部模块，不导出）
  *
- * 用户需求（三、固件与硬件绑定 — 2. System32 优先加载与 cnghwassist.sys 冲突解决）：
- *   - 启用 IMAGE_LOAD_PREFER_SYSTEM32 的同时捕获 STATUS_IMAGE_NOT_FOUND
- *   - 检测硬件辅助驱动缺失时，自动降级为纯软件 CNG 上下文
- *   - 不影响密钥安全性，完全兼容 Win10 低版本
  *
  * 设计原理：
  *   IMAGE_LOAD_PREFER_SYSTEM32 标志强制 LoadLibrary 从 System32 优先加载，

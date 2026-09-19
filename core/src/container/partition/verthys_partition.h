@@ -1,23 +1,18 @@
 /*
  * verthys_partition.h — V3 分区管理：独立 AEAD 密钥 + 分区表持久化
  *
- * 设计依据：
- *   - docs/TARGET_ARCHITECTURE_V5.md §6.2（分区表区布局）/ §6.4（分区管理）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-2
- *
  * 分区语义（红线级）：
  *   - 每分区独立 32B 密钥：创建时随机生成 → CNG 内核导入（用户态零残留：
  *     先包装持久化、后导入，import 清零密钥缓冲）；
  *   - 密钥持久化：wrapped_key = [32B 密钥 + 16B tag]，由 wrapping key
  *     （key_a 语境 VerthysCngAead）CNG 内核态加密，AAD 域分离
  *     "verthys/partition-key-wrap-v3"；
- *   - nonce 计数器（E-7）：持久化于分区元数据，加载后经 restore 防回退；
+ *   - nonce 计数器：持久化于分区元数据，加载后经 restore 防回退；
  *   - 分区数据读写 AAD = partition_id(4B LE) ‖ txid(8B LE)。
- *     实现注记：doc §6.4 要求 AAD = partition_id ‖ nonce ‖ txid——GCM 中
- *     nonce 本身即认证输入（GHASH 吸收 nonce，标签覆盖），显式入 AAD 属
- *     冗余；且 nonce 由封装层内部计数器在调用内原子递增生成的设计使
- *     调用方无法在加密前预知，故 AAD 绑定 partition_id ‖ txid，nonce 的
- *     认证由 GCM 协议原生保证，无安全弱化。
+ *     实现注记：GCM 中 nonce 本身即认证输入（GHASH 吸收 nonce，
+ *     标签覆盖），显式入 AAD 属冗余；且 nonce 由封装层内部计数器在调用内
+ *     原子递增生成的设计使调用方无法在加密前预知，故 AAD 绑定
+ *     partition_id ‖ txid，nonce 的认证由 GCM 协议原生保证，无安全弱化。
  *
  * 分区表持久化帧布局（分区表区 [1MB, 4MB)）：
  *   [u32 magic 'V3PT'][u32 ct_len][AEAD 密文 ct_len 字节（含 16B tag）]
@@ -49,7 +44,7 @@ extern "C" {
 #define VERTHYS_PARTITION_TAG_BYTES        VERTHYS_CNG_TAG_BYTES
 #define VERTHYS_PARTITION_WRAPPED_BYTES    (VERTHYS_PARTITION_KEY_BYTES + \
                                           VERTHYS_PARTITION_TAG_BYTES)
-/* ★ WP-5 接线修复（E-7 防回退）：table_aead（key_a 语境）跨会话重导入后
+/* 接线修复（nonce 防回退）：table_aead（key_a 语境）跨会话重导入后
  * 计数器归零，若不恢复则下次分区表保存将复用 nonce（GCM 红线违例）。
  * table_load 按帧 nonce 计数器下限 + 裕量恢复（覆盖同语境的密钥包装用途）。 */
 #define VERTHYS_PARTITION_NONCE_RESTORE_MARGIN 64u
@@ -63,7 +58,7 @@ typedef enum VerthysPartitionType {
     VERTHYS_PARTITION_WAL = 3,
 } VerthysPartitionType;
 
-/* 域分离标签（V3，v5.0 §4.2 风格） */
+/* 域分离标签 */
 #define VERTHYS_PARTITION_WRAP_AAD   "verthys/partition-key-wrap-v3"
 #define VERTHYS_PARTITION_TABLE_AAD  "verthys/partition-table-v3"
 
@@ -148,12 +143,12 @@ VerthysResult verthys_partition_decrypt(VerthysPartition *p, uint64_t txid,
                                     uint8_t *pt, size_t *pt_len);
 
 /*
- * 分区扩展（§6.4：按需增长，2x 策略）：
+ * 分区扩展（按需增长，2x 策略）：
  * 新容量 = max(size × 2, size + min_bytes)；返回 VERTHYS_OK。
  */
 VerthysResult verthys_partition_grow(VerthysPartition *p, uint64_t min_bytes);
 
-/* 分区当前 nonce 计数器（E-7 持久化口径） */
+/* 分区当前 nonce 计数器（持久化口径） */
 uint64_t verthys_partition_nonce_counter(const VerthysPartition *p);
 
 /* ---------- 分区表 ---------- */
@@ -176,7 +171,7 @@ VerthysResult verthys_partition_table_destroy(VerthysPartitionTable *t);
 /*
  * 分区表持久化（region_offset = 分区表区起始偏移，默认 1MB）：
  * flatcc 序列化 → table AEAD 加密 → 帧写入 + fsync。
- * 条目 nonce_counter 取各分区 aead 当前值（E-7）。
+ * 条目 nonce_counter 取各分区 aead 当前值。
  */
 __declspec(noinline) VerthysResult verthys_partition_table_save(FILE *f, uint64_t region_offset,
                                        const VerthysPartitionTable *t,
@@ -192,7 +187,7 @@ __declspec(noinline) VerthysResult verthys_partition_table_load(FILE *f, uint64_
                                        VerthysCngAead *wrapping_aead,
                                        VerthysPartitionTable *t);
 
-/* ---------- 解析层（★ WP-10 模糊测试；纯验证+提取，无 CNG/IO 依赖） ---------- */
+/* ---------- 解析层（模糊测试；纯验证+提取，无 CNG/IO 依赖） ---------- */
 
 /*
  * 分区表条目原始材料（verifier 通过后的字段提取产物；不含内核态句柄）。
@@ -207,7 +202,7 @@ typedef struct VerthysPartitionEntryRaw {
     uint64_t           size;
     uint64_t           used;
     uint64_t           created_txid;
-    uint64_t           nonce_counter;   /* E-7 持久化口径 */
+    uint64_t           nonce_counter;   /* 持久化口径 */
     uint8_t            key_id[VERTHYS_PARTITION_KEY_ID_BYTES];
     uint8_t            wrapped_key[VERTHYS_PARTITION_WRAPPED_BYTES];
     uint8_t            wrap_nonce[VERTHYS_PARTITION_NONCE_BYTES];

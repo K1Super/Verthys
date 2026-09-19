@@ -1,11 +1,7 @@
 /*
  * verthys_warmcache_v3.h — V3 温启动缓存（.verthys.idx_cache，'V3IC' 格式）
  *
- * 设计依据：
- *   - docs/UNLOCK_OPTIMIZATION.md §7（温启动缓存 V3 版）/ §14.2（常量）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-5（★index/verthys_warmcache.c 重写）
- *
- * 文件格式（§7.1，160B 定长头）：
+ * 文件格式（160B 定长头）：
  *   ┌────────────────────────────────────────────────────┐
  *   │ Header（160B 定长，明文）                           │
  *   │  ├─ magic 'V3IC'（4B）                              │
@@ -41,7 +37,7 @@
  *   密码学独立）。密钥经 verthys_cng_aead_import_key 导入私有上下文，
  *   用毕 destroy + 清零。
  *
- * 双重校验（§7.3 读取路径，红线级）：
+ * 双重校验（读取路径，红线级）：
  *   1. HMAC 校验：cache_hmac = HMAC-SHA256(integrity_key, 整文件)——
  *      损坏/篡改/密钥不符一律 miss（fail → 冷启动路径，不中断解锁）；
  *   2. txid 校验：header.txid == 超级块已提交事务 ID——
@@ -49,13 +45,13 @@
  *      WAL 重放完整重建，语义无损）。表记录段不受门控：seq 键控 +
  *      表区域不可变 + 盘面 Manifest 权威 → 跨过期仍然安全可用。
  *
- * 写入时机（§7.2）：Lock 时同步写（时机 1）；事务提交后异步写
+ * 写入时机：Lock 时同步写（时机 1）；事务提交后异步写
  * （时机 2，10s 防抖）；Compaction 完成后异步写（时机 3）。
  * 原子替换：临时文件 + fsync + MoveFileExW(REPLACE_EXISTING)。
  *
- * 容量上限（§14.2）：文件 > 32MB 直接判格式非法（fail → 冷启动）。
+ * 容量上限：文件 > 32MB 直接判格式非法（fail → 冷启动）。
  *
- * 与 V2 vwarm_* 的关系：V2 模块随 §1.4 删除清单退役；本模块为 V3
+ * 与 V2 vwarm_* 的关系：V2 模块随删除清单退役；本模块为 V3
  * 专属实现，密钥语境（integrity_key 派生）与 V3 流水线对齐，不复用
  * V2 的 cache_key 派生。
  */
@@ -71,7 +67,7 @@
 extern "C" {
 #endif
 
-/* ---------- 常量（UNLOCK_OPTIMIZATION §7.1/§14.2） ---------- */
+/* ---------- 常量 ---------- */
 
 #define VERTHYS_V3IC_MAGIC             UINT32_C(0x43493356) /* 'V3IC' */
 #define VERTHYS_V3IC_VERSION           1u
@@ -95,7 +91,7 @@ extern "C" {
 /* ---------- 读取（解锁 S5 温缓存优先路径） ---------- */
 
 /*
- * 尝试加载温缓存（§7.3）：
+ * 尝试加载温缓存：
  *   1. 文件存在且 ≤ 32MB（超限/不存在 → miss）；
  *   2. Header：magic / container_id 前置校验（不匹配 → miss）；
  *   3. cache_hmac 整文件校验（integrity_key 语境；失败 → miss，

@@ -1,8 +1,8 @@
 /*
  * emergency.h — 应急兜底与连锁响应机制（内部模块，不导出）
  *
- * ★ 方案 §6.1（P0-3 根治）：应急响应模型分级。
- *
+ * ★ 应急响应模型分级。
+
  * 原缺陷：所有信号无差别累积，终身不清零，累计 ≥2 个不同信号位即
  * TerminateProcess —— 任意两个检测器各误报一次即不可逆自毁。
  *
@@ -43,7 +43,7 @@ typedef enum {
     EMERG_SIG_PROCESS_TAMPER   = 0x0080,  /* 进程内存被篡改 */
     EMERG_SIG_DEBUGGER_ACTIVE  = 0x0100,  /* 调试器活跃 */
     EMERG_SIG_HOOK_DETECTED    = 0x0200,  /* API Hook 检测 */
-    /* ★ WP-9：直接系统调用 SSN 提取失败（TELEMETRY 专用——基础设施
+    /* 直接系统调用 SSN 提取失败（TELEMETRY 专用——基础设施
      * 异常留痕，非攻击信号；触发即降级回 GetProcAddress 路径） */
     EMERG_SIG_SYSCALL_EXTRACT_FAIL = 0x0400,
 } EmergencySignal;
@@ -56,7 +56,7 @@ typedef enum {
 #define EMERGENCY_CODE_INTEGRITY_FAIL    0xE0005u
 #define EMERGENCY_CODE_MULTI_THREAT      0xE0006u
 
-/* 降级信号在同一窗口内的触发阈值（方案 §6.1.4：同一信号出现多次才触发） */
+/* 降级信号在同一窗口内的触发阈值（同一信号出现多次才触发） */
 #define EMERG_DEGRADE_THRESHOLD 2u
 
 /*
@@ -66,7 +66,7 @@ typedef enum {
 int emergency_init(void);
 
 /*
- * ★ 方案 §6.1：注册降级处理器（由 API 层在 Verthys_Init 时注入）。
+ * 注册降级处理器（由 API 层在 Verthys_Init 时注入）。
  * DEGRADE 触发时由应急模块调用：处理器应清空全部句柄的密钥与明文缓存
  * 并将容器置为锁定态（进程保持存活）。传 NULL 取消注册。
  * 处理器必须可重入安全（DEGRADE 触发后熔断闩锁已置位，不会重复回调）。
@@ -74,7 +74,7 @@ int emergency_init(void);
 void emergency_set_degrade_handler(void (*handler)(void));
 
 /*
- * ★ 方案 §6.1：分级上报信号。
+ * 分级上报信号。
  *   level     : 响应级别（TELEMETRY / DEGRADE / KILL）
  *   signal    : 检测到的高危信号
  * 行为：
@@ -117,7 +117,7 @@ __declspec(noinline) void emergency_trigger(void);
 void emergency_exit(uint32_t code);
 
 /*
- * 清除信号窗口历史与熔断状态（方案 §6.1.5：接入解锁成功与预设切换）。
+ * 清除信号窗口历史与熔断状态（接入解锁成功与预设切换）。
  * 仅降级态可清除；KILL 触发后进程即将终止，清除无意义。
  */
 void emergency_clear_signals(void);

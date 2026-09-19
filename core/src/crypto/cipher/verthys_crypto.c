@@ -3,7 +3,7 @@
  */
 #include "verthys_crypto.h"
 #include "verthys_internal.h"  /* verthys_secure_zero */
-#include "verthys_api_utils.h" /* verthys_monotonic_ms（§4.5 校准计时） */
+#include "verthys_api_utils.h" /* verthys_monotonic_ms（校准计时） */
 
 #include <sodium.h>
 #include <string.h>   /* memcpy（sodium.h 不保证传递性暴露） */
@@ -72,7 +72,7 @@ int verthys_aead_decrypt(const uint8_t *key,
 }
 
 /* ================================================================== *
- * ★ Comprehensive_optimization 第八部分 一.1：完全参数化的密钥派生接口  *
+ * 完全参数化的密钥派生接口
  *                                                                    *
  * 接收全部 Argon2id 参数，由调用方从超级块获取后传入，               *
  * 彻底解耦代码与固定强度。兼容旧接口（verthys_argon2id_derive /         *
@@ -101,7 +101,7 @@ int verthys_argon2id_derive_ex(uint8_t out[VERTHYS_KEY_BYTES],
     if (iters < 1u) return -1;                            /* 至少 1 次迭代 */
     if (parallel < 1u || parallel > 64u) return -1;       /* 并行度 1..64 */
 
-    /* 拼接 password||pepper 作为 Argon2id 口令输入（project.md 3.2 胡椒方案）
+    /* 拼接 password||pepper 作为 Argon2id 口令输入（pepper 直拼）
      * pepper == NULL 时不混入胡椒（用于导出/导入独立解密场景） */
     uint8_t *combined = NULL;
     size_t combined_len;
@@ -173,7 +173,7 @@ int verthys_argon2id_derive_raw(uint8_t out[VERTHYS_KEY_BYTES],
 }
 
 /* ================================================================== *
- * ★ Comprehensive_optimization 第八部分 一.3：独立完整性密钥派生       *
+ * 独立完整性密钥派生
  *                                                                    *
  * integrity_key = HKDF-SHA256(master_key, "verthys/integrity-key") *
  *                                                                    *
@@ -225,10 +225,10 @@ int verthys_hmac_sha256(uint8_t out[VERTHYS_HMAC_BYTES],
 }
 
 /* ================================================================== *
- * ★ V3 升级（PLAYBOOK WP-3 / E-3）：BLAKE2b-256 通用哈希封装          *
+ * BLAKE2b-256 通用哈希封装
  *                                                                    *
  * 内容寻址（Extent）哈希专用：libsodium crypto_generichash 即         *
- * BLAKE2b-256（32B digest，无密钥模式），零新依赖（E-3）。            *
+ * BLAKE2b-256（32B digest，无密钥模式）。                             *
  * 输出经 Verthys 内部敏感数据处理纪律约束：哈希非密钥材料，无需清零。    *
  * ================================================================== */
 int verthys_generichash(uint8_t out[VERTHYS_GENERICHASH_BYTES],
@@ -246,7 +246,7 @@ int verthys_generichash(uint8_t out[VERTHYS_GENERICHASH_BYTES],
 
 
 /* ================================================================== *
- * ★ 方案 §4.5：Argon2id 动态校准实现                                  *
+ * Argon2id 动态校准实现
  * ================================================================== *
  * 两段式探测（总开销 = 2 次派生）：
  *   1. 初始测量：以 min_iters 派生一次，得 t_probe；
@@ -288,7 +288,7 @@ int verthys_argon2_calibrate(const uint8_t *password, size_t pw_len,
     if (scaled < min_iters) scaled = min_iters;
     if (scaled > max_iters) scaled = max_iters;
 
-    /* 3. 确认测量（换算结果的派生同时充当"方案七"创建基准的一次采样） */
+    /* 3. 确认测量（换算结果的派生同时充当创建基准的一次采样） */
     t0 = verthys_monotonic_ms();
     if (verthys_argon2id_derive_ex(scratch, password, pw_len, salt, pepper,
                                  mem_kib, (uint32_t)scaled, 1u) != 0) {

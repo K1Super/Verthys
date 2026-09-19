@@ -1,24 +1,24 @@
 /*
  * util/crypto.rs — 密码学工具模块
  *
- *    "" 第 4.3 项 / 第 5.6 项 / 第 9.1 项 / 第 13.2 项
+ *
  *
  * 架构定位：工具层（util）密码学纯函数模块
  *   - 不依赖任何上层模块（controller / service / repository）
  *   - 不输出日志（密码学操作不泄露任何信息到日志）
  *   - 所有密钥/明文参数通过引用传入，调用方负责 Zeroize
  *
- * 第 4.3 项 — PBKDF2 派生密钥：
+ * PBKDF2 派生密钥：
  *   pbkdf2_derive 从设备指纹 + 盐值派生密钥，用于状态文件加密绑定。
  *
- * 第 5.6 项 / 第 9.1 项 / 第 13.7 项 — HMAC-SHA256 防篡改：
+ * HMAC-SHA256 防篡改：
  *   hmac_sign / hmac_verify 用于状态文件、审计日志的完整性保护。
  *
- * 第 13.2 项 — DPAPI 密封：
+ * DPAPI 密封：
  *   dpapi_protect / dpapi_unprotect 使用 Windows DPAPI 加密敏感数据，
  *   绑定本机本用户（离机失效）。
  *
- * 第 5.6 项 — 常量时间比较：
+ * 常量时间比较：
  *   ct_eq 使用 subtle crate 进行常量时间比较，防时序攻击。
  *
  * CI 红线：
@@ -30,7 +30,7 @@
 
 use sha2::Sha256;
 
-// ===== 第 5.6 项：常量时间比较 =====
+// ===== 常量时间比较 =====
 
 /// 常量时间比较两个字节切片
 ///
@@ -45,7 +45,7 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-// ===== 第 4.3 项 / 第 9.1 项：HMAC-SHA256 =====
+// ===== HMAC-SHA256 =====
 
 /// HMAC-SHA256 签名
 ///
@@ -95,7 +95,7 @@ pub fn hmac_verify(key: &[u8], message: &[u8], expected_tag: &[u8]) -> bool {
     mac.verify_slice(expected_tag).is_ok()
 }
 
-// ===== 第 4.3 项：PBKDF2 派生密钥 =====
+// ===== PBKDF2 派生密钥 =====
 
 /// PBKDF2 迭代次数（满足当前安全强度要求）
 ///
@@ -110,8 +110,8 @@ pub const PBKDF2_KEY_LEN: usize = 32;
 ///
 /// 从密码/指纹 + 盐值派生固定长度密钥。
 /// 用于：
-///   - 第 4.3 项：设备指纹派生密钥（加密状态文件中的验证令牌）
-///   - 第 9.1 项：状态文件 HMAC 密钥派生
+///   - 设备指纹派生密钥（加密状态文件中的验证令牌）
+///   - 状态文件 HMAC 密钥派生
 ///
 /// 参数：
 ///   - password: 密码/设备指纹（原始字节）
@@ -137,7 +137,7 @@ pub fn pbkdf2_derive_default(
     pbkdf2_derive(password, salt, PBKDF2_ITERATIONS)
 }
 
-// ===== 第 13.2 项：Windows DPAPI 密封 =====
+// ===== Windows DPAPI 密封 =====
 
 // windows-rs 0.58 未导出 LocalFree（仅导出 LocalSize/LocalAlloc 等），
 // DPAPI 使用 LocalAlloc 分配输出缓冲区，需用 LocalFree 释放。

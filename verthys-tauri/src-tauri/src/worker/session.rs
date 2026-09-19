@@ -1,6 +1,6 @@
 //! worker/session.rs — WorkerSession 公共 API（保留兼容签名）
 //!
-//! ★ 项7-Rust + 第 10 章全量重写：WorkerSession 改为异步 Actor 模型
+//! WorkerSession 改为异步 Actor 模型
 //!
 //! 内部通过 Arc<SessionInner> 共享状态：
 //!   - request_tx: mpsc 通道发送请求到 Actor 任务
@@ -19,7 +19,7 @@
 //!   保留 spawn/send_json/send_json_with_timeout/
 //!   send_json_with_unlock_progress/wait_for_ready_signal/pid/elapsed_secs/
 //!   is_alive/kill/Clone/Drop 签名，内部通过 Handle::block_on + block_in_place
-//!   包装为同步返回，使 state.rs（阶段 4）与控制器（阶段 5+）无需立即改签名即可编译。
+//!   包装为同步返回，使 state.rs 与控制器无需立即改签名即可编译。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -43,7 +43,7 @@ use super::stderr::StderrRing;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::CloseHandle;
 
-/// ★ 项7-Rust + 第 10 章全量重写：WorkerSession 改为异步 Actor 模型
+/// WorkerSession 改为异步 Actor 模型
 ///
 /// 内部通过 Arc<SessionInner> 共享状态：
 ///   - request_tx: mpsc 通道发送请求到 Actor 任务
@@ -114,7 +114,7 @@ impl SessionInner {
 impl WorkerSession {
     /// 启动子进程：verthys-worker.exe <dll_path>
     ///
-    /// ★ 第 10.1 项：使用 tokio::process::Command 创建子进程，获取异步句柄。
+    /// 使用 tokio::process::Command 创建子进程，获取异步句柄。
     /// Actor 任务在当前 tokio 运行时中 spawn。
     ///
     /// 必须在 tokio 运行时上下文中调用（通常由 spawn_blocking 包裹）。
@@ -137,12 +137,12 @@ impl WorkerSession {
             // ★ 安全兜底：Actor 任务异常终止时子进程不会成为孤儿
             .kill_on_drop(true);
 
-        // Windows: 不创建控制台窗口 + ★ 项8 后台任务降级
+        // Windows: 不创建控制台窗口 + 后台任务降级
         // ★ BELOW_NORMAL_PRIORITY_CLASS (0x00004000)：
         //   worker 进程承载后台 Merkle 重建 / 全量扫描 / 完整性巡检等长尾任务，
         //   优先级低于 UI 主进程（NORMAL），保证前端 IPC 始终优先获得 CPU 调度。
         //   消除解锁后前 10 秒「后台任务抢占 CPU 导致界面卡顿」问题。
-        //   详见 docs/OPTIMIZATION.md 项8「后台任务降级：消除 CPU 抢占」。
+        //   效果：消除后台任务抢占 CPU 导致的解锁后界面卡顿。
         #[cfg(target_os = "windows")]
         {
             // tokio::process::Command 在 Windows 上有固有的 creation_flags 方法
@@ -224,7 +224,7 @@ impl WorkerSession {
 
     /// 发送 JSON 请求并等待 JSON 响应（自定义超时）
     ///
-    /// ★ 第 10.2 项：使用 tokio::time::timeout 包裹 read_line()，
+    /// 使用 tokio::time::timeout 包裹 read_line()，
     /// 替代 PeekNamedPipe + thread::sleep(50ms) 轮询。
     pub fn send_json_with_timeout(
         &self,
@@ -256,7 +256,7 @@ impl WorkerSession {
     }
 
     /* ---------------------------------------------------------------- *
-     * 方案5：解锁进度流式协议                                          *
+     * 解锁进度流式协议                                          *
      *                                                                  *
      * send_json_with_unlock_progress 专为 Verthys_Unlock 设计：           *
      *   - worker 在 call_unlock 阻塞期间，由 C 回调向 stdout 写入       *
@@ -278,7 +278,7 @@ impl WorkerSession {
     ///
     /// 返回最终 unlock 行的原始 JSON 字符串。
     ///
-    /// ★ 第 10.4 项：内部复用通用 handle_streaming_send<T> 泛型方法。
+    /// 内部复用通用 handle_streaming_send<T> 泛型方法。
     pub fn send_json_with_unlock_progress(
         &self,
         json: &str,
@@ -371,9 +371,9 @@ impl WorkerSession {
         })
     }
 
-    /// 终止子进程（落实 upgrade.md 第119行"1 秒优雅期 + 超时强制 TerminateProcess"）
+    /// 终止子进程（1 秒优雅期 + 超时强制 TerminateProcess）
     ///
-    /// ★ 第 10.6 项：优雅退出与强制终止结合
+    /// 优雅退出与强制终止结合
     /// 流程：
     ///   1. 发送 Shutdown 请求到 Actor
     ///   2. Actor 向 stdin 发 {"op":"shutdown"} 命令
@@ -428,7 +428,7 @@ impl WorkerSession {
 /* ------------------------------------------------------------------ *
  * SessionInner 析构：确保 Actor 任务退出与子进程回收                   *
  *                                                                    *
- * ★ 第 10.6 项：主线程 drop Sender，Actor 侦测通道关闭自动触发退出。  *
+ * 主线程 drop Sender，Actor 侦测通道关闭自动触发退出。  *
  * ------------------------------------------------------------------ */
 impl Drop for SessionInner {
     fn drop(&mut self) {

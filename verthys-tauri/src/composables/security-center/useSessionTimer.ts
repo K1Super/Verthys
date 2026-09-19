@@ -53,7 +53,7 @@ export function useSessionTimer(options: UseSessionTimerOptions) {
   /* ===== ★ 空闲治理 R5：订阅全局空闲档位 =====
    * idle / deep-idle 档暂停 UI 倒计时更新（每秒响应式写入归零）；
    * 恢复 active / settling 瞬间按暂停时长补偿并立即刷新，
-   * 显示值与真实流逝时间严格一致（方案 7.2）。 */
+   * 显示值与真实流逝时间严格一致。 */
   const { level: idleLevel } = useGlobalIdleScheduler();
   let pausedAtMs = 0;
 

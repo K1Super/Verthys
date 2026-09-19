@@ -49,7 +49,7 @@
  * =============================================================================
  * - 保留 run() 函数作为 run_ui() 的兼容别名，以支持旧调用点。
  * - 新增进程模式（Worker / Inspector）通过 --mode 参数区分。
- * - 数据目录解析遵循第 15.1-15.3 项规范，不依赖环境变量修改。
+ * - 数据目录解析不依赖环境变量修改，仅从受信命令行参数获取。
  */
 
 mod worker;
@@ -330,7 +330,7 @@ fn run_main_ui(
          * 根因：旧实现前端 `await getCurrentWindow().hide()` 为 IPC 往返，
          *   后端事件循环繁忙时 hide() 的 IPC 被排队 → 窗口实际隐藏延迟数秒。
          *
-         * 方案：CloseRequested 在 Rust 后端直接处理（零 IPC 延迟）：
+         * 做法：CloseRequested 在 Rust 后端直接处理（零 IPC 延迟）：
          *   1. api.prevent_close() — 阻止默认关闭（窗口销毁会终止 WebView JS 引擎）
          *   2. window.hide() — Rust 原生调用 Win32 ShowWindow(SW_HIDE)，微秒级
          *   3. emit("verthys://cleanup-and-exit") — 通知前端 JS 执行 lockAll 异步清理
@@ -402,7 +402,7 @@ fn run_main_ui(
             verthys_get_record,
             verthys_enumerate_records,
             verthys_enumerate_records_stream,
-            // ★ Comprehensive_optimization：照片导入异步批处理流水线（WAL + 批量 IPC + 检查点）
+            // ★ 照片导入异步批处理流水线（WAL + 批量 IPC + 检查点）
             verthys_import_begin,
             verthys_add_records_batch,
             verthys_import_end,
@@ -423,7 +423,7 @@ fn run_main_ui(
             verthys_export,
             verthys_import,
             verthys_change_password,
-            // ★ WP-11（P2-3）：防御闭环状态查询（7 路径 × 4 状态实时透传）
+            // ★ 防御闭环状态查询（7 路径 × 4 状态实时透传）
             verthys_security_status,
             verthys_derive_global_key,
             verthys_verify_global_key,
@@ -511,7 +511,7 @@ fn run_secure_worker(
 
     log_sender.info("entry", "安全 Worker 进程启动完成，等待 IPC 指令");
 
-    // TODO 阶段 3：接入 WorkerSession Actor 主循环
+    // TODO：接入 WorkerSession Actor 主循环
     loop {
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
@@ -527,7 +527,7 @@ fn run_inspector_proc(
 ) {
     log_sender.info("entry", "定时巡检进程启动");
     loop {
-        // TODO 阶段 7：接入安全巡检逻辑
+        // TODO：接入安全巡检逻辑
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
 }

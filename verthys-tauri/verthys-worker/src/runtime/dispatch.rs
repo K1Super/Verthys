@@ -18,7 +18,7 @@ use crate::runtime::gmk::{
 };
 
 /* ------------------------------------------------------------------ *
- * ★ 企业级根治方案：解锁成功后进程内探测全局主密钥记录                  *
+ * ★ 企业级根治：解锁成功后进程内探测全局主密钥记录                  *
  *                                                                    *
  * 原缺陷：解锁成功后前端需发起 3~4 次 IPC 往返                        *
  *   (verthysHasRecordByType → findLidByTypeEarlyStop → verthysGetRecord) *
@@ -88,15 +88,15 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
     match req.op.as_str() {
         "ping" => Response::ok("ping"),
         "unlock" => {
-            /* ★ 方案九：透传 flags（预热状态位域）给 C 层 Verthys_Unlock */
-            /* ★ E-8（WP-5 渐进式解锁）：VERTHYS_ERR_PARTIAL_UNLOCK 表示容器已进入
+            /* ★ 透传 flags（预热状态位域）给 C 层 Verthys_Unlock */
+            /* ★ VERTHYS_ERR_PARTIAL_UNLOCK 表示容器已进入
              * 最小可操作状态（超级块验证 + 密钥导入 + 分区表加载完成，索引
              * 预热后台进行中），与 verthys_api.c Unlock 成功分支语义一致——
              * 按成功处理，正常执行 GMK 探测并返回。 */
             const VERTHYS_ERR_PARTIAL_UNLOCK: u32 = 0x00000011;
             let r = worker.call_unlock(&req.path, &req.password, req.flags);
             if r == VERTHYS_OK || r == VERTHYS_ERR_PARTIAL_UNLOCK {
-                /* ★ 企业级根治方案：解锁成功后进程内探测全局主密钥记录，
+                /* ★ 企业级根治：解锁成功后进程内探测全局主密钥记录，
                  * 结果内联到响应三字段，消除前端 IPC 链路与 v1 假阴性死锁。 */
                 let (has_gmk, gmk_id, gmk_record) = probe_global_key_inproc(worker);
                 Response {
@@ -334,7 +334,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             let _ = worker.call_scan_close();
             Response::ok("scan_close")
         }
-        // 第 2.1 项：scan_abort — 取消扫描并回滚游标
+        // scan_abort — 取消扫描并回滚游标
         // 主进程在 CancellationToken 触发时发送，语义为"取消并回滚"。
         // 当前 worker 端 call_scan_close 已完成回滚（销毁 SHM + 关闭 C 游标），
         // scan_abort 与 scan_close 调用同一底层方法，但语义独立便于审计与未来扩展
@@ -344,7 +344,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             let _ = worker.call_scan_close();
             Response::ok("scan_abort")
         }
-        // ===== 摘要扫描（Phase 2B：轻量元数据，不读数据块）=====
+        // ===== 摘要扫描（轻量元数据，不读数据块）=====
         "scan_summary_open" => {
             // 打开摘要扫描游标：创建 4MB 共享内存 + Verthys_ScanSummaryOpen + 首批预加载
             // 返回 shm_name 供 Tauri 主进程读取摘要记录（read_shm_summary_records）
@@ -383,7 +383,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             let _ = worker.call_scan_close();
             Response::ok("scan_summary_close")
         }
-        // 第 2.1 项：scan_summary_abort — 取消摘要扫描并回滚游标
+        // scan_summary_abort — 取消摘要扫描并回滚游标
         "scan_summary_abort" => {
             let _ = worker.call_scan_close();
             Response::ok("scan_summary_abort")
@@ -397,7 +397,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
         }
         "delete_records" => {
-            // 批量删除：单次事务内删除全部 ID（落实 upgrade.md 批量删除合并单次 flush）
+            // 批量删除：单次事务内删除全部 ID（合并为单次 flush）
             let r = worker.call_delete_records(&req.ids);
             if r == VERTHYS_OK {
                 Response::ok("delete_records")
@@ -405,7 +405,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("delete_records", r)
             }
         }
-        // ★ Phase 2I：获取已加载的轻量摘要记录数
+        // ★ 获取已加载的轻量摘要记录数
         "get_summary_count" => {
             let (rc, count) = worker.call_get_summary_count();
             if rc == VERTHYS_OK {
@@ -416,7 +416,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("get_summary_count", rc)
             }
         }
-        // ★ 企业级方案：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）
+        // ★ 企业级：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）
         // 典型耗时 < 100ms，用于启动阶段快速判断是否有全局密钥记录
         // 返回 record_count=1（存在）或 record_count=0（不存在）
         "has_record_by_type" => {
@@ -454,7 +454,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("change_password", r)
             }
         }
-        // ★ WP-11（P2-3 观测出口）：防御闭环 7 路径状态实时查询
+        // ★ 防御闭环 7 路径状态实时查询
         // 防御状态为进程级事实：锁定态/未挂载态均可查询（verthys.h 行为契约），
         // 安全中心可在解锁前展示防护水位。
         "security_status" => match worker.call_security_status() {

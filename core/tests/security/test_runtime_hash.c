@@ -1,9 +1,9 @@
 /*
- * test_runtime_hash.c — ★ V3 升级 WP-8 验收：运行时函数级哈希校验
+ * test_runtime_hash.c — 验收：运行时函数级哈希校验
  *
  * 前提（构建接线硬依赖）：verthys_tests.exe 经 CMake POST_BUILD 步骤由
  * rhash_gen 补丁 .rhat 真表（/MAP + /INCREMENTAL:NO + POST_BUILD，
- * 见 core/tests/CMakeLists.txt）。本文件验收四层：
+ * 构建注册于 core/tests/CMakeLists.txt）。本文件验收四层：
  *   1. 表已配置（configured）——POST_BUILD 链路断裂即失败（禁静默降级）；
  *   2. 真表全量通过（scan==0）——构建期文件哈希 ≡ 运行期内存哈希，
  *      含重定位槽位掩码归一的正确性（跨 ASLR 基稳定性的核心验收）；

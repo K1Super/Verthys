@@ -4,7 +4,7 @@
  * 纯工具函数，不依赖任何业务逻辑或错误类型
  * 供 verthys.ts 所有 IPC 接口复用
  *
- * ★ P2-7 二进制 IPC 扩展：
+ * ★ 二进制 IPC 扩展：
  *   - args 支持 ArrayBuffer / Uint8Array（raw body 直传，Tauri v2 raw IPC）
  *   - 新增 options（InvokeOptions.headers）：raw body 与 JSON args 互斥，
  *     附加参数（如目标路径 x-path）经请求头传递

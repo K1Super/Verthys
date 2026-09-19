@@ -19,7 +19,7 @@ import { keyState, setCurrentVerthysPath, loadCustomFeatures, saveSecurityPreset
 import { PRESET_SESSION_TIMEOUT_MS } from "../constants/key_manager_const";
 import type { BruteForceGateResult } from "../types/key_manager";
 import { clearModuleKeyCache, clearModuleCache, clearRecordScanCache, cancelDebouncedFlush, resetFlushChain, waitForFlush, clearAllCacheTimers, setCacheDirty, clearSummaryCache, clearFullRecordCache } from "../cache/composition/verthys-cache";
-// ★ 后台任务 API 直连 core 层（verthys-cache 组合根 §二.2 单向化：不再转发 start/stop）
+// ★ 后台任务 API 直连 core 层（单向化：不再转发 start/stop）
 import { startBackgroundTasks, stopBackgroundTasks } from "../core/background-tasks";
 
 // 导出 securityPresetRef 供 keyManager.ts 再导出
@@ -183,7 +183,7 @@ export async function clearBruteForcePurge(): Promise<void> {
 /* ------------------------------------------------------------------ *
  * lockAll 锁定全部                                                    *
  *                                                                    *
- * ★ 四层根治方案·第四层（全局应用生命周期兜底）— 7 步流程：           *
+ * ★ 四层根治设计·第四层（全局应用生命周期兜底）— 7 步流程：           *
  *                                                                    *
  *   步骤 1：取消防抖定时器（在 waitForFlush 内部完成）                *
  *   步骤 2：阻塞等待全部删除、落盘队列执行完成（waitForFlush 12s）    *
@@ -261,7 +261,7 @@ export async function lockAll(onProgress?: (percent: number, message: string) =>
     new Promise<void>((resolve) => {
       setTimeout(() => {
         console.error(`[lockAll] 总体超时 ${LOCK_ALL_TOTAL_TIMEOUT_MS}ms，强制完成`);
-        // ★ 方案 6.2.4：40s 超时标记缓存脏数据
+        // ★ 40s 超时标记缓存脏数据
         //    部分数据可能未落盘，下次导航/解锁时弹窗提示用户
         setCacheDirty(true);
         resolve();
@@ -331,7 +331,7 @@ async function doLockAll(onProgress?: (percent: number, message: string) => void
   onProgress?.(5, "等待数据落盘");
   try { await waitForFlush(); } catch { /* */ }
 
-  // ★ 方案 6.3：waitForFlush 完成后立即清空所有缓存定时器
+  // ★ waitForFlush 完成后立即清空所有缓存定时器
   clearAllCacheTimers();
 
   // ★ 步骤 3：停止后台任务 + 清空所有内存缓存

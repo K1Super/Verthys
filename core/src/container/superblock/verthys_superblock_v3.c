@@ -2,9 +2,6 @@
  * verthys_superblock_v3.c — V3 超级块：flatcc 序列化 + HMAC 认证 +
  * 三副本法定人数提交/读取 + 事务原语 VsbTxnV3
  *
- * 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.3 / §10.2
- * 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-2
- *
  * 复用资产：
  *   - verthys_io.c（vio_pread64/vio_pwrite64 统一 64 位偏移 I/O）
  *   - verthys_crypto.c（verthys_hmac_sha256 / verthys_random_bytes）
@@ -121,7 +118,7 @@ VerthysResult vsb_v3_init_new(VerthysSuperBlockV3 *sb)
     sb->updated_at = now.QuadPart;
     sb->txid       = 0;
 
-    /* 分区布局默认值（§6.2） */
+    /* 分区布局默认值 */
     sb->partition_table_offset = VERTHYS_V3_PARTITION_TABLE_OFFSET;
     sb->partition_table_size   = VERTHYS_V3_PARTITION_TABLE_BYTES;
     sb->index_partition_offset = VERTHYS_V3_INDEX_PARTITION_OFFSET;
@@ -407,14 +404,14 @@ static VerthysResult vsb_v3_read_fields(uint8_t *buf, size_t len,
 }
 
 /*
- * ★ WP-5（UNLOCK_OPTIMIZATION §8 S1）：结构化无校验解析。
+ * 结构化无校验解析（解锁流水线 S1）。
  * 仅执行 verifier 结构校验 + 逐字段读入，跳过 HMAC 验证。
  * 用途：解锁流水线 S1 阶段提取 salt / Argon2id 参数 / container_id /
  * wrapped 密钥——此时 integrity_key 尚未派生（依赖 S2 Argon2id）。
  * 安全边界：本函数产物仅作为派生输入候选；篡改的 salt/参数会导致
  * 错误 MEK → S3 密钥导入认证失败（VERTHYS_ERR_AUTH）或 S4 法定人数
  * HMAC 验证失败，最终仍被拒绝（认证闭环不被绕过）。
- * ★ WP-10（模糊测试）：失败路径静默（返回码承载语义）——S1 调用方
+ * 模糊测试适配：失败路径静默（返回码承载语义）——S1 调用方
  * （verthys_unlock_pipeline）已带完整上下文记录失败（plen + 帧头 16B
  * 样本）；叶子层去重后本函数成为 fuzz_superblock 的纯边界入口，
  * 每迭代一次 fprintf 的诊断输出会吞掉模糊测试吞吐（10 分钟级运行）。
@@ -497,7 +494,7 @@ VerthysResult vsb_v3_write_replica(FILE *f, unsigned replica_idx,
                      frame, sizeof(frame)) != 0) {
         return VERTHYS_ERR_IO;
     }
-    /* fsync 语义：用户态刷新 + 物理落盘（§6.3 提交步骤） */
+    /* fsync 语义：用户态刷新 + 物理落盘（法定人数提交步骤） */
     if (fflush(f) != 0) return VERTHYS_ERR_IO;
     if (_commit(_fileno(f)) != 0) return VERTHYS_ERR_IO;
     return VERTHYS_OK;
@@ -570,7 +567,7 @@ VerthysResult vsb_v3_commit_quorum_ex(FILE *f, VerthysSuperBlockV3 *sb,
         return VERTHYS_ERR_IO;  /* 法定人数不满足：提交失败 */
     }
 
-    /* 3. 验证读取：≥2 副本 HMAC 通过（§6.3 步骤 7） */
+    /* 3. 验证读取：≥2 副本 HMAC 通过（法定人数提交步骤） */
     {
         VERTHYS_V3_FLATBUF_ALIGN uint8_t frame[VERTHYS_V3_SB_REPLICA_BYTES];
         unsigned verify_ok = 0;
@@ -648,7 +645,7 @@ VerthysResult vsb_v3_read_quorum(FILE *f,
     return VERTHYS_OK;
 }
 
-/* ---------- VsbTxnV3 事务原语（§10.2） ---------- */
+/* ---------- VsbTxnV3 事务原语 ---------- */
 
 VerthysResult vsb_txn_v3_begin(VsbTxnV3 *txn, const VerthysSuperBlockV3 *sb)
 {

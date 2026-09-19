@@ -7,7 +7,7 @@
  *   - 依赖 state::locked_buffer（LockedBuffer RAII）+ state::AppState（worker IPC）
  *   - 提供泛型 ScanPipelineState<T>，消除全量/摘要扫描的代码重复
  *
- * 第 11.3 项 — 泛型 ScanPipelineState<T: ScanRecord>：
+ *  泛型 ScanPipelineState<T: ScanRecord>：
  *   原 state.rs 中 ScanState（全量）与 ScanSummaryState（摘要）字段完全相同，
  *   仅 Vec<VerthysRecordEntry> vs Vec<VerthysSummaryEntry> 类型不同，导致 ~200 行
  *   逐字复制代码。泛型化后，全量与摘要实例化同一套状态机+双缓冲调度器。
@@ -22,7 +22,7 @@
  *     - secure_zero_records / secure_zero_summary_records（由 LockedBuffer Drop 替代）
  *     - virtual_lock_summary_records / virtual_unlock_summary_records（由 LockedBuffer 替代）
  *
- * 第 11.4 项 — 预取改长期 tokio::task + mpsc 控制 + CancellationToken：
+ *  预取改长期 tokio::task + mpsc 控制 + CancellationToken：
  *   原 spawn_prefetch 每批创建新 spawn_blocking 任务，取消用 handle.abort()。
  *   abort 不会等待任务安全退出，可能在 I/O 中途被强制终止，导致共享内存状态不一致。
  *
@@ -34,7 +34,7 @@
  *     - cleanup_scan_on_failure 发送 cancel + 短超时等待 join
  *     - 删除 handle.abort() + handle.await
  *
- * 第 2.4 项 — ScanSession 状态机：
+ *  ScanSession 状态机：
  *   ScanPipelineState 本身即状态机，current_buffer: Option<LockedBuffer<T>>
  *   表示 Active（Some）/ Closed（None）状态。prefetch_task 的存在表示预取活跃。
  *
@@ -56,12 +56,12 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroize;
 
 /* ------------------------------------------------------------------ *
- * 第 11.3 项：ScanRecord trait                                         *
+ * ScanRecord trait                                         *
  *                                                                    *
  * 泛型约束，使 ScanPipelineState<T> 可统一处理全量/摘要记录。          *
  * ------------------------------------------------------------------ */
 
-/// 扫描记录抽象（第 11.3 项）
+/// 扫描记录抽象
 ///
 /// 约束说明：
 ///   - `Zeroize`: LockedBuffer<T> Drop 时调用 `T::zeroize()` 擦除敏感字段
@@ -72,18 +72,18 @@ use zeroize::Zeroize;
 /// 关联常量：
 ///   - `FETCH_OP`: worker fetch 操作名（"scan_fetch" / "scan_summary_fetch"）
 ///   - `CLOSE_OP`: worker close 操作名（"scan_close" / "scan_summary_close"）
-///   - `ABORT_OP`: worker abort 操作名（"scan_abort" / "scan_summary_abort"，第 2.1 项）
+///   - `ABORT_OP`: worker abort 操作名（"scan_abort" / "scan_summary_abort"
 pub trait ScanRecord: Zeroize + VirtualLockable + Clone + Send + 'static {
     /// worker 端 fetch 操作名
     const FETCH_OP: &'static str;
     /// worker 端 close 操作名
     const CLOSE_OP: &'static str;
-    /// 第 2.1 项：worker 端 abort 操作名（取消并回滚游标）
+    /// worker 端 abort 操作名（取消并回滚游标）
     const ABORT_OP: &'static str;
 
     /// 从共享内存读取一批记录
     ///
-    /// 第 2.7 项：返回 `(记录列表, 共享内存是否已耗尽, worker 报告的 record_count)`。
+    /// 返回 `(记录列表, 共享内存是否已耗尽, worker 报告的 record_count)`。
     /// 调用方校验 `records.len() == record_count`，不一致则判定数据损坏熔断。
     /// 共享内存已耗尽表示本批是最后一批，但游标可能未遍历结束（需下一轮 fetch 确认）。
     fn read_from_shm(shm_name: &str) -> Result<(Vec<Self>, bool, usize), String>;
@@ -110,13 +110,13 @@ impl ScanRecord for VerthysSummaryEntry {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 11.4 项：预取命令 + 长期任务控制                                   *
+ * 预取命令 + 长期任务控制                                   *
  * ------------------------------------------------------------------ */
 
-/// 预取结果（第 11.4 项）：记录批次 + 是否遍历结束 + worker 报告的 record_count（第 2.7 项）
+/// 预取结果：记录批次 + 是否遍历结束 + worker 报告的 record_count
 pub type PrefetchReply<T> = Result<(Vec<T>, bool, usize), String>;
 
-/// 预取任务命令（第 11.4 项）
+/// 预取任务命令
 ///
 /// 通过 mpsc 通道发送给长期预取任务。每条 Fetch 命令携带 oneshot 回复通道，
 /// 任务处理完成后通过 reply 发送结果。
@@ -124,7 +124,7 @@ pub type PrefetchReply<T> = Result<(Vec<T>, bool, usize), String>;
 pub enum PrefetchCommand<T: ScanRecord> {
     /// 拉取下一批记录
     ///
-    /// 第 2.7 项：回复结果包含 worker 报告的 record_count，供控制器校验。
+    /// 回复结果包含 worker 报告的 record_count，供控制器校验。
     Fetch {
         /// 批量大小（传递给 worker scan_fetch/scan_summary_fetch 的 id 参数）
         batch_size: u64,
@@ -133,7 +133,7 @@ pub enum PrefetchCommand<T: ScanRecord> {
     },
 }
 
-/// 长期预取任务句柄（第 11.4 项）
+/// 长期预取任务句柄
 ///
 /// 封装 mpsc::Sender（发送命令）+ CancellationToken（取消）+ JoinHandle（等待退出）。
 ///
@@ -155,7 +155,7 @@ pub struct PrefetchTaskHandle<T: ScanRecord> {
 }
 
 impl<T: ScanRecord> PrefetchTaskHandle<T> {
-    /// 创建长期预取任务（第 11.4 项）
+    /// 创建长期预取任务
     ///
     /// 启动一个 tokio::spawn 任务，循环等待 mpsc 命令或取消信号。
     /// 任务在安全点（命令处理间隙）检查取消，不会在 I/O 中途被强制终止。
@@ -178,12 +178,12 @@ impl<T: ScanRecord> PrefetchTaskHandle<T> {
         Self { tx: Some(tx), cancel, join: Some(join) }
     }
 
-    /// 发送 Fetch 命令并返回回复接收器（第 11.4 项）
+    /// 发送 Fetch 命令并返回回复接收器
     ///
     /// 非阻塞：发送命令后立即返回 oneshot::Receiver。
     /// 调用方在合适的时机 `reply.await` 等待结果（双缓冲：当前批返回时下一批已在预取）。
     ///
-    /// 第 2.7 项：回复结果包含 worker 报告的 record_count，供控制器校验。
+    /// 回复结果包含 worker 报告的 record_count，供控制器校验。
     ///
     /// # 错误
     /// 返回 Err 表示任务已关闭（通道断开），调用方应触发熔断清理。
@@ -205,7 +205,7 @@ impl<T: ScanRecord> PrefetchTaskHandle<T> {
         Ok(reply_rx)
     }
 
-    /// 取消任务并等待退出（第 11.4 项）
+    /// 取消任务并等待退出
     ///
     /// 流程：
     ///   1. cancel.cancel() —— 触发取消信号
@@ -269,10 +269,10 @@ impl<T: ScanRecord> Drop for PrefetchTaskHandle<T> {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 11.4 项：长期预取任务实现                                          *
+ * 长期预取任务实现                                          *
  * ------------------------------------------------------------------ */
 
-/// 长期预取任务主循环（第 11.4 项）
+/// 长期预取任务主循环
 ///
 /// 循环等待 mpsc 命令或 CancellationToken 取消。
 /// 每条 Fetch 命令在 spawn_blocking 中执行同步 I/O（send_with_timeout + read_shm），
@@ -354,13 +354,13 @@ async fn prefetch_task<T: ScanRecord>(
     log::debug!("[prefetch_task] 退出 (type={})", type_name);
 }
 
-/// 同步执行预取 I/O（第 11.4 项）
+/// 同步执行预取 I/O
 ///
 /// 在 spawn_blocking 中调用：
 ///   1. 通过 AppState::send_with_timeout 发送 fetch 请求到 worker
 ///   2. 通过 T::read_from_shm 从共享内存读取记录
 ///
-/// 第 2.7 项：返回 worker 报告的 record_count（来自 SHM 头部），
+/// 返回 worker 报告的 record_count（来自 SHM 头部），
 /// 供控制器校验 records.len() == record_count。
 ///
 /// # 错误
@@ -378,7 +378,7 @@ fn do_prefetch_blocking<T: ScanRecord>(
         "op": T::FETCH_OP,
         "id": batch_size,
     });
-    // 第 2.6 项：预取内部二级超时（使用 TimeoutConfig.scan_prefetch）
+    // 预取内部二级超时（使用 TimeoutConfig.scan_prefetch）
     let prefetch_timeout = crate::constants::timeout::DEFAULT.scan_prefetch;
     let resp_json = state.send_with_timeout(&req.to_string(), prefetch_timeout)?;
     let resp: VerthysResponse = serde_json::from_str(&resp_json)
@@ -391,11 +391,11 @@ fn do_prefetch_blocking<T: ScanRecord>(
 }
 
 /* ------------------------------------------------------------------ *
- * 第 11.3 项：ScanPipelineState<T> 泛型状态                             *
- * 第 2.4 项：ScanSessionState 状态机                                    *
+ * ScanPipelineState<T> 泛型状态                             *
+ * ScanSessionState 状态机                                    *
  * ------------------------------------------------------------------ */
 
-/// 扫描会话状态机（第 2.4 项）
+/// 扫描会话状态机
 ///
 /// 所有扫描操作（open/next/close/abort）经此状态机原子状态转移。
 /// 预取失败转 Failed 禁后续 next；close/abort 安全回收转 Closed。
@@ -424,7 +424,7 @@ impl ScanSessionState {
     }
 }
 
-/// 泛型扫描流水线状态（第 11.3 项）
+/// 泛型扫描流水线状态
 ///
 /// 全量扫描（VerthysRecordEntry）与摘要扫描（VerthysSummaryEntry）共用此结构。
 /// 消除原 ScanState + ScanSummaryState 约 200 行重复代码。
@@ -435,7 +435,7 @@ impl ScanSessionState {
 ///   - `exhausted`: 游标是否已遍历结束（true = 无更多数据）
 ///   - `prefetch_task`: 长期预取任务句柄（None = 无预取，如已遍历结束）
 ///   - `pending_reply`: 待接收的预取结果（scan_next 时 await 此 receiver）
-///   - `session_state`: 第 2.4 项 ScanSession 状态机（Active/Failed/Closed）
+///   - `session_state`: ScanSession 状态机（Active/Failed/Closed）
 ///
 /// 双缓冲流水线：
 ///   scan_open  → 首批 → current_buffer，同时发 Fetch → pending_reply
@@ -448,21 +448,21 @@ pub struct ScanPipelineState<T: ScanRecord> {
     pub current_buffer: Option<LockedBuffer<T>>,
     /// 游标是否已遍历结束
     pub exhausted: bool,
-    /// 长期预取任务句柄（第 11.4 项）
+    /// 长期预取任务句柄
     pub prefetch_task: Option<PrefetchTaskHandle<T>>,
-    /// 待接收的预取结果（第 11.4 项：scan_next 时 await 此 receiver）
+    /// 待接收的预取结果（scan_next 时 await 此 receiver）
     pub pending_reply: Option<oneshot::Receiver<PrefetchReply<T>>>,
-    /// 第 2.4 项：ScanSession 状态机
+    /// ScanSession 状态机
     pub session_state: ScanSessionState,
 }
 
 /* ------------------------------------------------------------------ *
- * 第 11.4 项：熔断清理（泛型）                                          *
+ * 熔断清理（泛型）                                          *
  * ------------------------------------------------------------------ */
 
-/// 泛型熔断清理：停止预取 + 擦除缓冲 + 通知 worker 取消游标（第 11.4 项 + 第 2.1 项）
+/// 泛型熔断清理：停止预取 + 擦除缓冲 + 通知 worker 取消游标
 ///
-/// 第 2.1 项变更：熔断时向 worker 发 `ABORT_OP`（scan_abort / scan_summary_abort）
+/// 变更：熔断时向 worker 发 `ABORT_OP`（scan_abort / scan_summary_abort）
 /// 回滚游标，而非 `CLOSE_OP`。语义为"取消并回滚"，便于 worker 端审计与事务回滚。
 ///
 /// 流程：
@@ -502,7 +502,7 @@ pub async fn cleanup_pipeline_on_failure<T: ScanRecord>(
         scan.current_buffer.take();
     }
 
-    // 5. 第 2.1 项：通知 worker 取消游标（发 ABORT_OP 而非 CLOSE_OP）
+    // 5. 通知 worker 取消游标（发 ABORT_OP 而非 CLOSE_OP）
     //    best-effort：worker 可能已在熔断中，发送失败不影响本地资源回收
     let req = serde_json::json!({"op": <T as ScanRecord>::ABORT_OP});
     let _ = state.send_with_timeout(&req.to_string(), Duration::from_secs(5));
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn test_scan_session_state_transitions() {
-        // 第 2.4 项：ScanSessionState 状态机转移
+        // ScanSessionState 状态机转移
         let active = ScanSessionState::Active;
         let failed = ScanSessionState::Failed;
         let closed = ScanSessionState::Closed;

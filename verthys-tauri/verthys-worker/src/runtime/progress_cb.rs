@@ -3,7 +3,7 @@
  * 职责：unlock_progress_cb（unsafe extern "C"）。
  * 依赖：std::io、std::os::raw::c_void、ffi_types 中的进度 C 结构体。
  * 被引用方：worker.rs（在 call_unlock 注册回调时传入）。
- * E-8：migrate_progress_cb 已随 V1→V2 迁移链路退役删除
+ * migrate_progress_cb 已随 V1→V2 迁移链路退役删除
  *   （Verthys_MigrateV1ToV2 移出导出白名单，无注册方）。
  */
 
@@ -12,7 +12,7 @@ use std::os::raw::c_void;
 
 use super::ffi_types::VerthysUnlockProgressC;
 
-/* ★ 方案5：解锁进度回调（C → Rust → stdout JSON 行）
+/* ★ 解锁进度回调（C → Rust → stdout JSON 行）
  *
  * C DLL 在 verthys_v2_open_existing 各阶段调用此回调，回调将进度信息
  * 序列化为 JSON 行写入 stdout，父进程 send_json_with_unlock_progress

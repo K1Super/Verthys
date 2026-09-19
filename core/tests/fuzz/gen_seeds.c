@@ -1,9 +1,8 @@
 /*
- * gen_seeds.c — WP-10 模糊测试语料种子生成器
+ * gen_seeds.c — 模糊测试语料种子生成器
  *
- * 设计依据：docs/V3_UPGRADE_PLAYBOOK.md WP-10（"语料种子用测试生成的
- * 合法容器"）+ R-8（种子须为合法明文帧——libFuzzer 从合法基线出发
- * 才能有效探索解析器的深路径）。
+ * 设计原则（语料种子用测试生成的合法容器；种子须为合法明文帧——
+ * libFuzzer 从合法基线出发才能有效探索解析器的深路径）。
  *
  * 产物（<root>/<target>/<target>_NNN.bin）：
  *   superblock/  合法 SuperBlockV3 FlatBuffer 明文（满字段 + 空扩展两档）

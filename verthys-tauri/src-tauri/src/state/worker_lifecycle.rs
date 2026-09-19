@@ -7,21 +7,21 @@
  *   - 依赖 WorkerSession（is_alive / pid）进行健康检查
  *   - 提供 WorkerLifecycle 状态机 + SetupCache 预检缓存
  *
- * 第 1.2 项 — WorkerLifecycle 状态机：
+ *  WorkerLifecycle 状态机：
  *   AppState 增加 tokio::sync::Mutex<WorkerLifecycle>。
  *   状态：Uninitialized / Initializing / Ready / ShuttingDown / Failed。
  *   init/destroy 必须获取锁检查状态转移；destroy 参与 same lock 消除竞态。
  *
- * 第 1.4 项 — 健康检查器：
+ *  健康检查器：
  *   每 10s 获取状态锁，Ready 时检查 session.is_alive()；
  *   退出则转 Failed + 告警 + 限次自动恢复（3 次）。
  *   健康检查器自身有守护（select shutdown 信号）。
  *
- * 第 1.5 项 — setup 钩子预检缓存：
+ *  setup 钩子预检缓存：
  *   DLL 完整性校验 + 依赖预检结果缓存 AppState；
  *   worker_init 从缓存取，总超时缩至 10-15s。
  *
- * 第 1.6 项 — watch channel 等待：
+ *  watch channel 等待：
  *   init 请求遇 Initializing 不拒绝，tokio::sync::watch 等待 Ready/Failed
  *   （最长 3s），超时返回 STILL_INITIALIZING。
  *
@@ -37,24 +37,24 @@ use std::time::Duration;
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 
-/// 最大自动恢复次数（第 1.4 项）
+/// 最大自动恢复次数
 ///
 /// worker 异常退出后，最多尝试自动恢复 3 次。
 /// 超过则停止恢复，等待用户手动 worker_init。
 const MAX_RECOVERY_ATTEMPTS: u32 = 3;
 
-/// 健康检查间隔（第 1.4 项：每 10s 检查一次）
+/// 健康检查间隔（每 10s 检查一次）
 #[allow(dead_code)]
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
-/// watch channel 等待超时（第 1.6 项：最长 3s）
+/// watch channel 等待超时（最长 3s）
 const INIT_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /* ------------------------------------------------------------------ *
- * 第 1.2 项：WorkerLifecycleState 状态枚举                              *
+ * WorkerLifecycleState 状态枚举                              *
  * ------------------------------------------------------------------ */
 
-/// Worker 生命周期状态（第 1.2 项）
+/// Worker 生命周期状态
 ///
 /// 状态转移图：
 /// ```text
@@ -71,7 +71,7 @@ const INIT_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 ///                  destroy ──► ShuttingDown ──► Uninitialized
 /// ```
 ///
-/// 第 1.2 项：init/destroy 必须获取 tokio::sync::Mutex 检查状态转移。
+/// init/destroy 必须获取 tokio::sync::Mutex 检查状态转移。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum WorkerLifecycleState {
     /// 未初始化（首次或 destroy 后）
@@ -87,7 +87,7 @@ pub enum WorkerLifecycleState {
     Failed {
         /// 失败原因（脱敏，不含路径/密码）
         reason: String,
-        /// 已尝试自动恢复次数（第 1.4 项，超 MAX_RECOVERY_ATTEMPTS 停止）
+        /// 已尝试自动恢复次数（超 MAX_RECOVERY_ATTEMPTS 停止）
         recovery_attempts: u32,
     },
 }
@@ -108,7 +108,7 @@ impl WorkerLifecycleState {
         matches!(self, WorkerLifecycleState::Failed { .. })
     }
 
-    /// 获取恢复次数（第 1.4 项，Failed 状态时有值）
+    /// 获取恢复次数（Failed 状态时有值）
     pub fn recovery_attempts(&self) -> u32 {
         match self {
             WorkerLifecycleState::Failed {
@@ -120,10 +120,10 @@ impl WorkerLifecycleState {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 1.5 项：SetupCache — 预检结果缓存                                 *
+ * SetupCache — 预检结果缓存                                 *
  * ------------------------------------------------------------------ */
 
-/// setup 钩子预检结果缓存（第 1.5 项）
+/// setup 钩子预检结果缓存
 ///
 /// 应用启动时（lib.rs setup）执行 DLL 完整性校验 + 依赖预检，
 /// 结果缓存到此结构。worker_init 从缓存取，跳过重复校验，
@@ -148,19 +148,19 @@ impl SetupCache {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 1.2 项：WorkerLifecycle — 状态机 + 预检缓存                        *
+ * WorkerLifecycle — 状态机 + 预检缓存                        *
  * ------------------------------------------------------------------ */
 
-/// Worker 生命周期状态机（第 1.2 项）
+/// Worker 生命周期状态机
 ///
 /// 通过 `tokio::sync::Mutex<WorkerLifecycle>` 保护，init/destroy 获取锁后
-/// 检查状态转移。watch::Sender 在状态变更时通知等待者（第 1.6 项）。
+/// 检查状态转移。watch::Sender 在状态变更时通知等待者。
 pub struct WorkerLifecycle {
     /// 当前状态
     state: WorkerLifecycleState,
-    /// 第 1.4 项：累计自动恢复次数（跨状态追踪，不随状态重置）
+    /// 累计自动恢复次数（跨状态追踪，不随状态重置）
     recovery_count: u32,
-    /// 第 1.5 项：预检结果缓存（setup 钩子填充）
+    /// 预检结果缓存（setup 钩子填充）
     setup_cache: Option<SetupCache>,
 }
 
@@ -184,7 +184,7 @@ impl WorkerLifecycle {
         self.setup_cache.as_ref()
     }
 
-    /// 存储预检缓存（第 1.5 项）
+    /// 存储预检缓存
     pub fn set_setup_cache(&mut self, cache: SetupCache) {
         self.setup_cache = Some(cache);
     }
@@ -192,7 +192,7 @@ impl WorkerLifecycle {
     /// 转移到 Initializing 状态
     ///
     /// 仅允许从 Uninitialized / Failed 转移。
-    /// 从 Failed 转移时检查恢复次数是否超限（第 1.4 项）。
+    /// 从 Failed 转移时检查恢复次数是否超限。
     /// 返回 Err 表示状态不匹配（如已在 Initializing 或 Ready）。
     pub fn transition_to_initializing(&mut self) -> Result<(), String> {
         match self.state {
@@ -203,7 +203,7 @@ impl WorkerLifecycle {
                 Ok(())
             }
             WorkerLifecycleState::Failed { .. } => {
-                // 第 1.4 项：检查恢复次数
+                // 检查恢复次数
                 if self.recovery_count >= MAX_RECOVERY_ATTEMPTS {
                     return Err(format!(
                         "自动恢复次数超限（{}/{}），请手动重新初始化",
@@ -236,7 +236,7 @@ impl WorkerLifecycle {
 
     /// 转移到 Failed 状态（允许从 Initializing / Ready 转移）
     ///
-    /// 第 1.4 项：recovery_count 由 transition_to_initializing 递增，
+    /// recovery_count 由 transition_to_initializing 递增，
     /// 此处仅记录当前 recovery_count 到 Failed 状态供查询。
     pub fn transition_to_failed(&mut self, reason: impl Into<String>) {
         let reason = reason.into();
@@ -271,12 +271,12 @@ impl WorkerLifecycle {
         self.state = WorkerLifecycleState::Uninitialized;
     }
 
-    /// 获取当前恢复次数（第 1.4 项）
+    /// 获取当前恢复次数
     pub fn recovery_attempts(&self) -> u32 {
         self.recovery_count
     }
 
-    /// 是否可自动恢复（第 1.4 项：恢复次数 < MAX_RECOVERY_ATTEMPTS）
+    /// 是否可自动恢复（恢复次数 < MAX_RECOVERY_ATTEMPTS）
     pub fn can_recover(&self) -> bool {
         matches!(self.state, WorkerLifecycleState::Failed { .. })
             && self.recovery_count < MAX_RECOVERY_ATTEMPTS
@@ -290,10 +290,10 @@ impl Default for WorkerLifecycle {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 1.6 项：WorkerLifecycleHandle — Mutex + watch 组合句柄             *
+ * WorkerLifecycleHandle — Mutex + watch 组合句柄             *
  * ------------------------------------------------------------------ */
 
-/// Worker 生命周期句柄（第 1.2 项 + 第 1.6 项）
+/// Worker 生命周期句柄
 ///
 /// 组合 `tokio::sync::Mutex<WorkerLifecycle>` 与 `watch::Sender`，
 /// 提供原子状态转移 + 等待者通知。
@@ -301,9 +301,9 @@ impl Default for WorkerLifecycle {
 /// AppState 持有此句柄，worker_controller 通过 AppState 访问。
 #[derive(Clone)]
 pub struct WorkerLifecycleHandle {
-    /// 状态机互斥锁（第 1.2 项）
+    /// 状态机互斥锁
     inner: Arc<Mutex<WorkerLifecycle>>,
-    /// 状态变更通知（第 1.6 项：init 遇 Initializing 时 watch 等待）
+    /// 状态变更通知（init 遇 Initializing 时 watch 等待）
     watch_tx: Arc<watch::Sender<WorkerLifecycleState>>,
 }
 
@@ -339,14 +339,14 @@ impl WorkerLifecycleHandle {
         guard.state().clone()
     }
 
-    /// 订阅状态变更（第 1.6 项）
+    /// 订阅状态变更
     ///
     /// 返回 watch::Receiver，调用方可 await 状态变更。
     pub fn subscribe(&self) -> watch::Receiver<WorkerLifecycleState> {
         self.watch_tx.subscribe()
     }
 
-    /// 第 1.6 项：等待状态变为 Ready 或 Failed（最长 INIT_WAIT_TIMEOUT）
+    /// 等待状态变为 Ready 或 Failed（最长 INIT_WAIT_TIMEOUT）
     ///
     /// init 请求遇 Initializing 时调用，超时返回 STILL_INITIALIZING。
     ///
@@ -398,10 +398,10 @@ impl Default for WorkerLifecycleHandle {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 1.4 项：健康检查后台任务                                          *
+ * 健康检查后台任务                                          *
  * ------------------------------------------------------------------ */
 
-/// 启动 worker 健康检查后台任务（第 1.4 项）
+/// 启动 worker 健康检查后台任务
 ///
 /// 每 10s 检查 worker 子进程存活状态：
 ///   - 获取 WorkerLifecycle 锁，Ready 时检查 session.is_alive()
@@ -443,7 +443,7 @@ pub fn spawn_health_checker(
     });
 }
 
-/// 执行一次健康检查（第 1.4 项）
+/// 执行一次健康检查
 #[allow(dead_code)]
 async fn check_worker_health(
     app: &tauri::AppHandle,

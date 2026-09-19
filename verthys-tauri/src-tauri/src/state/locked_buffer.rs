@@ -7,7 +7,7 @@
  *   - 提供 VirtualLockable trait 抽象 + LockedBuffer<T> RAII 守卫
  *   - 不引用上层模块（service / controller），仅被 state / controller::scan 使用
  *
- * 第 11.2 项 — VirtualLock RAII 守卫：
+ * VirtualLock RAII 守卫：
  *   原 state.rs 中 virtual_lock_records / virtual_unlock_records 为自由函数，
  *   无 RAII 保证：调用方可能遗忘 unlock、或 unlock 与 zero 顺序错误（先 unlock
  *   后 zero 导致零化内容被换出到 pagefile）。
@@ -39,14 +39,14 @@ use crate::controller::types::{VerthysRecordEntry, VerthysSummaryEntry};
 use zeroize::Zeroize;
 
 /* ------------------------------------------------------------------ *
- * 第 11.2 项：VirtualLockable trait                                    *
+ * VirtualLockable trait                                    *
  *                                                                    *
  * 抽象"记录中哪些内存区域需要 VirtualLock"。                           *
  * 不同记录类型（VerthysRecordEntry / VerthysSummaryEntry）的敏感字段不同，  *
  * 通过 trait 统一接口，使 LockedBuffer<T> 可泛型工作。                 *
  * ------------------------------------------------------------------ */
 
-/// 可锁定内存区域的记录抽象（第 11.2 项）
+/// 可锁定内存区域的记录抽象
 ///
 /// 返回 `(指针, 长度)` 列表，每个元组对应一个需要 VirtualLock 的敏感字段堆缓冲。
 /// 空字段不返回（VirtualLock 长度 0 无意义且可能失败）。
@@ -91,7 +91,7 @@ impl VirtualLockable for VerthysSummaryEntry {
 }
 
 /* ------------------------------------------------------------------ *
- * 第 11.2 项：LockedBuffer<T> RAII 守卫                                *
+ * LockedBuffer<T> RAII 守卫                                *
  *                                                                    *
  * 拥有 Vec<T>，构造时 VirtualLock 所有敏感区域，Drop 时先擦除后解锁。  *
  *                                                                    *
@@ -106,7 +106,7 @@ impl VirtualLockable for VerthysSummaryEntry {
  *   连同 Vec 一起释放，语义更清晰。                                    *
  * ------------------------------------------------------------------ */
 
-/// VirtualLock RAII 守卫（第 11.2 项）
+/// VirtualLock RAII 守卫
 ///
 /// 拥有 `Vec<T>`，构造时锁定所有敏感区域于物理内存，Drop 时先擦除后解锁。
 ///
@@ -211,7 +211,7 @@ impl<T: VirtualLockable + Zeroize> LockedBuffer<T> {
     }
 }
 
-/// 第 11.2 项：Drop 时强制先擦除后解锁
+/// Drop 时强制先擦除后解锁
 ///
 /// 顺序保证：
 ///   1. 先对每条记录调用 `zeroize()`（此时内存仍被 VirtualLock 锁定，

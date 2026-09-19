@@ -6,7 +6,7 @@
  *   v1 格式不支持游标等原因抛出异常。Vue 组件直接调用 ensureRecordScan()
  *   时若未 try-catch，会导致组件加载函数抛出、UI 白屏或应用崩溃。
  *
- * 方案：
+ * 做法：
  *   ensureRecordScanSafe() 包装 ensureRecordScan()，失败时回退到
  *   scanVerthysRecords 逐条 IPC 扫描（兼容所有场景），将结果写入缓存。
  *   永不抛出异常，调用方无需 try-catch。
@@ -16,7 +16,7 @@
  *      扫描结果通过 addRecordToScan 写入缓存，后续 getRecordIdsByType /
  *      getRecordFromScan 可正常工作
  *
- * ★ Phase 2E：新增 ensureSummaryScanSafe()
+ * ★ 新增 ensureSummaryScanSafe()
  *   包装 ensureSummaryScan()，失败时回退到 ensureRecordScanSafe()
  *   （旧全量扫描兜底）。用于 Vue 组件的列表渲染路径，1-2 秒内完成。
  *
@@ -69,10 +69,9 @@ export async function ensureRecordScanSafe(): Promise<void> {
 }
 
 /**
- * ★ Phase 2E：安全的摘要扫描包装（永不抛出，Vue 组件列表渲染专用）。
+ * ★ 安全的摘要扫描包装（永不抛出，Vue 组件列表渲染专用）。
  *
- * 落实 improve.md "三、极速解锁加载流程"：
- *   "前端拿到轻量元数据后即刻渲染出完整列表"
+ * 目标：前端拿到轻量元数据后即刻渲染出完整列表。
  *
  * 调用链：
  *   1. ensureSummaryScan() — 摘要游标批量扫描（v2，仅元数据，1-2 秒内完成）

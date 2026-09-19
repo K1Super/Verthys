@@ -1,14 +1,6 @@
 /*
  * verthys_v3_lifecycle.c — V3 容器生命周期（创建/打开/锁定）+ 运行时上下文
  *
- * 设计依据：
- *   - docs/TARGET_ARCHITECTURE_V5.md §5（密钥层次）/ §6.2（文件布局）/
- *     §6.3（超级块法定人数）/ §10.1（事务协议）
- *   - docs/V3_UPGRADE_PLAYBOOK.md WP-5（校准/并行流水线/进度回调自
- *     v2_lifecycle 迁移）
- *   - docs/UNLOCK_OPTIMIZATION.md §7.2（温缓存写入时机）/ §8（流水线）/
- *     §9（渐进式解锁）/ §11.3（错误处理规范）
- *
  * 创建路径密钥流（与解锁流水线 S2/S3 严格互逆，红线级一致性）：
  *   salt 随机 → 三档校准选参 → MEK = keymanager_derive_master_v3
  *   （Argon2id(pw‖pepper) + HKDF 域分离，与 S2 同函数同参数）→
@@ -21,7 +13,7 @@
  * 打开路径：verthys_unlock_pipeline_run 全权承担（本文件仅编排薄壳）；
  * 锁定路径：事务收尾 → LSM flush → 温缓存导出/保存 → 子系统销毁。
  *
- * 失败路径资源纪律（§11.3，红线）：
+ * 失败路径资源纪律（红线）：
  *   - 创建任一步失败 → subsystems_close（含 CNG 句柄销毁 + 密钥清零），
  *     半写盘面由读侧法定人数 + HMAC + WAL 重放兜底；
  *   - LSM 中止式关闭（verthys_lsm_destroy_abort）：未提交 MemTable 条目
@@ -35,7 +27,7 @@
 #include "verthys_pepper.h"
 #include "verthys_crypto.h"          /* Argon2 常量 / 校准 */
 #include "verthys_api_utils.h"       /* verthys_monotonic_ms */
-#include "verthys_rekey_auto.h"      /* ★ WP-6：解锁后自动轮换编排 */
+#include "verthys_rekey_auto.h"      /* 解锁后自动轮换编排 */
 
 #include <io.h>                    /* _chsize_s / _fileno / _commit */
 #include <stdlib.h>
@@ -200,7 +192,7 @@ VerthysResult verthys_v3_preset_decode(const uint8_t *extensions, uint32_t len,
 /* ================== 创建 ================== */
 
 /*
- * 三档校准（迁移自 v2 verthys_v2_create_new，方案 §4.5 精神）：
+ * 三档校准（迁移自 v2 verthys_v2_create_new）：
  *   SECURE      固定 64MiB/3/1（合规确定性，不动态校准）
  *   PERFORMANCE 固定 32MiB/1/1（交互优先）
  *   BALANCED/CUSTOM 32MiB 校准，目标 1200ms，迭代 ∈ [1,3]
@@ -284,7 +276,7 @@ VerthysResult verthys_v3_create_new(VerthysContextV3 *ctx3,
     if (verthys_pepper_init() != 0 || verthys_pepper_source_error()) {
         return VERTHYS_ERR_PEPPER_SOURCE;
     }
-    /* ★ P1-1 修复（2026-09-19）：新建容器禁止零熵胡椒来源。
+    /* 修复：新建容器禁止零熵胡椒来源。
      * COMPILED 常量随源码公开（熵=0），仅允许作为既有容器的解锁兼容
      * 来源（unlock 路径保留 init 优先级 3）。新建容器要求高熵来源
      * （INJECTED / OS 托管 / SHAMIR 重建），CNG 不可用环境下创建被
@@ -333,7 +325,7 @@ VerthysResult verthys_v3_create_new(VerthysContextV3 *ctx3,
         r = VERTHYS_ERR_INTERNAL;
         goto fail_zero;
     }
-    /* 基准跑分（方案七迁移）：[0]=创建期派生耗时 [1]=校准耗时 */
+    /* 基准跑分：[0]=创建期派生耗时 [1]=校准耗时 */
     ctx3->sb.argon2_benchmark_ms[0] = derive_ms;
     ctx3->sb.argon2_benchmark_ms[1] = calibrate_ms;
 
@@ -511,7 +503,7 @@ VerthysResult verthys_v3_open_existing(VerthysContextV3 *ctx3,
     r = verthys_unlock_pipeline_run(ctx3, password, pw_len, flags, 0u,
                                   progress_cb, progress_user);
 
-    /* ★ WP-6：解锁成功后自动密钥轮换编排（best-effort 深化，失败吞错
+    /* 解锁成功后自动密钥轮换编排（best-effort 深化，失败吞错
      * ——下次解锁重试）。仅全量解锁路径接线：MINIMAL_FIRST 的后台预热
      * 线程持有 ctx3->f 读姿势，轮换写盘（分区表帧 + 超级块法定人数）
      * 将破坏 FILE* 单写者纪律——顺延至下次非最小解锁（DEGRADE 强制
@@ -555,7 +547,7 @@ VerthysResult verthys_v3_lock(VerthysContextV3 *ctx3)
         break;  /* IDLE / CONFIRMED / ABORTED：无收尾动作 */
     }
 
-    /* 3. 温缓存（§7.2 时机 1：Lock 同步写；SECURE 跳过并清除残留）。
+    /* 3. 温缓存（Lock 同步写；SECURE 跳过并清除残留）。
      *    失败不影响锁定语义（持久化优化，非正确性依赖）。
      *    快照纪律：flush（快照 = 刷盘后空 MemTable）→ export → save。 */
     if (ctx3->lsm != NULL && ctx3->verthys_path != NULL) {
@@ -596,7 +588,7 @@ VerthysResult verthys_v3_lock(VerthysContextV3 *ctx3)
     return r_txn;
 }
 
-/* ================== V3 单调用事务收口（★ WP-5：API 编排层共享） ================== */
+/* ================== V3 单调用事务收口（API 编排层共享） ================== */
 
 VerthysResult verthys_v3_txn_finish(VerthysContextV3 *ctx3)
 {
@@ -628,7 +620,7 @@ void verthys_v3_txn_abort(VerthysContextV3 *ctx3)
     }
 }
 
-/* ================== V3 单记录事务内写入（★ WP-5：AddRecord / Import 共用） ================== */
+/* ================== V3 单记录事务内写入（AddRecord / Import 共用） ================== */
 
 VerthysResult verthys_v3_add_record_in_txn(VerthysContextV3 *ctx3,
                                        uint8_t type,
@@ -649,7 +641,7 @@ VerthysResult verthys_v3_add_record_in_txn(VerthysContextV3 *ctx3,
     if (name_len > VERTHYS_NAME_MAX_BYTES) return VERTHYS_ERR_INVALID;
     if (data == NULL && data_size != 0) return VERTHYS_ERR_INVALID;
 
-    /* Phase 2：Extent 写入（去重命中零重写；hash 回传供索引条目关联） */
+    /* Extent 写入（去重命中零重写；hash 回传供索引条目关联） */
     rc = verthys_txn_v3_write_extent(&ctx3->txn, data, data_size, hash, NULL);
     if (rc != VERTHYS_OK) return rc;
 
@@ -675,7 +667,7 @@ VerthysResult verthys_v3_add_record_in_txn(VerthysContextV3 *ctx3,
     memcpy(e.hash, hash, sizeof(hash));
     e.created_time   = (uint64_t)time(NULL);
 
-    /* Phase 3：UPDATE_INDEX（created_txid 由事务层统一置本事务 txid） */
+    /* UPDATE_INDEX（created_txid 由事务层统一置本事务 txid） */
     rc = verthys_txn_v3_update_index(&ctx3->txn, &e);
     if (rc != VERTHYS_OK) return rc;
 
@@ -683,7 +675,7 @@ VerthysResult verthys_v3_add_record_in_txn(VerthysContextV3 *ctx3,
     return VERTHYS_OK;
 }
 
-/* ================== 修改主密码（V3，★ WP-5：ChangePassword 分支） ================== */
+/* ================== 修改主密码（V3，ChangePassword 分支） ================== */
 
 /*
  * integrity_key 切换收尾（static）：驻留值 + 事务上下文拷贝同步更新。
@@ -797,7 +789,7 @@ VerthysResult verthys_v3_change_password(VerthysContextV3 *ctx3,
     memcpy(new_mek_copy, new_mek, sizeof(new_mek_copy));
 
     /* 3. 密钥组重包裹：A/B/C 明文不变仅换 MEK 包装（km 句柄零变更，
-     *    失败原子性见 keymanager_cng.h；new_mek 原件被内部消耗清零） */
+     *    失败原子性同 keymanager_cng.h；new_mek 原件被内部消耗清零） */
     r = verthys_cng_km_rekey(ctx3->km, new_mek,
                            ctx3->sb.wrapped_key_a,
                            (uint32_t)sizeof(ctx3->sb.wrapped_key_a),
