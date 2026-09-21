@@ -17,11 +17,10 @@
  *
  * 算法选择：AES-256-GCM（CNG 原生支持）。
  *   - 密钥：32 字节（BCRYPT_AES_256_KEY_SIZE）
- *   - Nonce：12 字节（BCRYPT_AUTH_MODE_CHAIN_MODE_GCM IV）
- *   - 认证标签：16 字节（Poly1305 等价强度）
- *   注意：本模块提供的 AEAD 接口使用 AES-GCM；旧调用方仍可通过
- *   key_separation_acquire 导出原始密钥字节用于 XChaCha20-Poly1305，
- *   仅在过渡期保留，新代码应优先使用 key_separation_aead_*。
+ *   本模块仅承担密钥的内核托管与生命周期（安装/休眠/销毁）；AEAD
+ *   运算由 verthys_crypto_cng 的 AEAD 上下文完成（nonce 由内部
+ *   Interlocked 计数器生成，不依赖调用方纪律）。acquire 仅供仍需
+ *   原始密钥字节的过渡调用方使用，应尽快迁移。
  *
  * 角色定义（与旧版保持兼容）：
  *   A 密钥（索引解密）：赋予扫描模块及索引读取模块，仅能解密头部映射表，
@@ -46,8 +45,6 @@ typedef enum {
 
 /* ---------- CNG AES-256-GCM 参数 ---------- */
 #define KEYSEP_KEY_BYTES        32u   /* AES-256 密钥长度 */
-#define KEYSEP_AEAD_NONCE_BYTES 12u   /* GCM 标准 Nonce 长度 */
-#define KEYSEP_AEAD_TAG_BYTES   16u   /* GCM 认证标签长度 */
 
 /*
  * 初始化三权分立密钥模块（CNG 内核托管）。
@@ -67,7 +64,7 @@ int key_separation_init(void);
  * BCRYPT_KEY_HANDLE 句柄。密钥原始字节随即从用户态内存消失。
  *
  * 对 C 角色（KEY_ROLE_COMMIT）：安装后立即进入休眠（active=0），
- * 必须经 key_separation_activate_commit 唤醒后方可参与 AEAD 运算。
+ * 必须经 key_separation_activate_commit 唤醒后方可导出。
  */
 int key_separation_install(KeyRole role, const uint8_t key[KEYSEP_KEY_BYTES]);
 
@@ -80,7 +77,7 @@ int key_separation_install(KeyRole role, const uint8_t key[KEYSEP_KEY_BYTES]);
  * ★ 过渡期声明：
  *   本接口使密钥字节返回用户态，与"CNG 内核托管"承诺相悖。
  *   当前仓库中无任何调用点；全量接线（V3 容器密文迁移）时删除。
- *   新代码一律使用 key_separation_aead_*。
+ *   新的密钥消费方一律使用 verthys_crypto_cng 的 AEAD 上下文。
  * 调用方（如存在）使用后必须立即 key_separation_release(out_key) 清零。
  */
 int key_separation_acquire(KeyRole role, uint8_t out_key[KEYSEP_KEY_BYTES]);
@@ -101,10 +98,10 @@ void key_separation_release(uint8_t key[KEYSEP_KEY_BYTES]);
 /*
  * 激活 C 密钥（超级块提交）。
  * 仅在事务提交时调用，提交完成后调用 key_separation_deactivate_commit()。
- * 非提交期间 C 密钥保持休眠状态（active=0，AEAD 运算拒绝放行）。
+ * 非提交期间 C 密钥保持休眠状态（active=0，acquire 导出拒绝放行）。
  *
  * 与旧版差异：CNG 句柄本身无 PAGE_NOACCESS 等价语义，此处以 active 标志
- * 实现逻辑休眠；BCRYPT_KEY_HANDLE 仍驻留内核，但本模块在 AEAD 路径上
+ * 实现逻辑休眠；BCRYPT_KEY_HANDLE 仍驻留内核，但本模块在 acquire 路径上
  * 强制校验 active 状态，休眠态调用将立即返回失败。
  */
 int key_separation_activate_commit(void);
@@ -124,59 +121,5 @@ int key_separation_deactivate_commit(void);
  * BCryptDestroyKey 即等价于"内核态密钥销毁"。
  */
 void key_separation_purge_all(void);
-
-/* ===================================================================== *
- *                  CNG 内核态 AEAD 接口（推荐使用）                       *
- * ===================================================================== *
- * 直接在内核态完成 AES-256-GCM 加解密，明文/密文经用户态缓冲区传递，
- * 密钥字节永不离开内核。Rust 层通过 FFI 传入 (role, nonce, ad, ct, pt)
- * 即可获得明文，无需导出密钥句柄。
- *
- * 与 verthys_aead_*（XChaCha20-Poly1305）的差异：
- *   - 算法：AES-256-GCM（CNG 原生）vs XChaCha20-Poly1305（libsodium）
- *   - Nonce：12 字节（GCM）vs 24 字节（XChaCha20）
- *   - 标签：16 字节（一致）
- *   - 密文布局：本接口输出/输入 [ciphertext || tag]（与 libsodium 兼容布局）
- *
- * 加密：输出 = plaintext_len + KEYSEP_AEAD_TAG_BYTES
- * 解密：输入 ct_len 必须大于 KEYSEP_AEAD_TAG_BYTES，
- *       输出 pt_len = ct_len - KEYSEP_AEAD_TAG_BYTES
- */
-
-/*
- * AES-256-GCM 加密（内核态运算）。
- *   role     : 密钥用途（决定使用 A/B/C 哪个内核句柄）
- *   nonce    : 12 字节 Nonce（调用方随机生成，严禁重复使用）
- *   ad       : 关联数据（可选，可为 NULL 当 ad_len=0）
- *   ad_len   : 关联数据字节数
- *   plaintext: 明文输入
- *   pt_len   : 明文字节数
- *   ciphertext: 输出缓冲，容量 >= pt_len + KEYSEP_AEAD_TAG_BYTES
- *   ct_len   : 输入时为 ciphertext 缓冲容量，输出时为实际写入字节数
- * 返回 0 成功，非 0 失败（密钥未安装 / C 角色休眠 / 缓冲不足 / 内核错误）。
- */
-int key_separation_aead_encrypt(KeyRole role,
-                                const uint8_t nonce[KEYSEP_AEAD_NONCE_BYTES],
-                                const uint8_t *ad, size_t ad_len,
-                                const uint8_t *plaintext, size_t pt_len,
-                                uint8_t *ciphertext, size_t *ct_len);
-
-/*
- * AES-256-GCM 解密（内核态运算）。
- *   role     : 密钥用途
- *   nonce    : 12 字节 Nonce（须与加密时一致）
- *   ad       : 关联数据（须与加密时一致）
- *   ad_len   : 关联数据字节数
- *   ciphertext: 密文输入（布局 [ciphertext || tag]）
- *   ct_len   : 密文 + 标签总字节数（必须 > KEYSEP_AEAD_TAG_BYTES）
- *   plaintext: 输出缓冲，容量 >= ct_len - KEYSEP_AEAD_TAG_BYTES
- *   pt_len   : 输入时为 plaintext 缓冲容量，输出时为实际写入字节数
- * 返回 0 成功，非 0 失败（认证失败 / 密钥未安装 / C 角色休眠 / 缓冲不足）。
- */
-int key_separation_aead_decrypt(KeyRole role,
-                                const uint8_t nonce[KEYSEP_AEAD_NONCE_BYTES],
-                                const uint8_t *ad, size_t ad_len,
-                                const uint8_t *ciphertext, size_t ct_len,
-                                uint8_t *plaintext, size_t *pt_len);
 
 #endif /* VERTHYS_KEY_SEPARATION_H */

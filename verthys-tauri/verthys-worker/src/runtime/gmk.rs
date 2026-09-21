@@ -82,7 +82,14 @@ pub(crate) fn handle_derive_global_key(req: &Request) -> Response {
     );
 
     // 3. binKey = HKDF-Extract(salt=bin_material, IKM=bin_password_key)
-    let bin_key = Hkdf::<Sha256>::extract(Some(&bin_material), &bin_password_key);
+    //    PRK 拷入 Zeroizing 后立即 volatile 清零 extract 输出缓冲
+    let (mut bin_key_prk, _) = Hkdf::<Sha256>::extract(Some(&bin_material), &bin_password_key);
+    let bin_key = zeroize::Zeroizing::new({
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bin_key_prk[..]);
+        arr
+    });
+    bin_key_prk[..].zeroize();
 
     // 4. globalSalt = random(32)
     let mut global_salt = [0u8; 32];
@@ -90,15 +97,22 @@ pub(crate) fn handle_derive_global_key(req: &Request) -> Response {
 
     // 5. IKM = password || binKey
     let pw_bytes = req.password.as_bytes();
-    let mut ikm = Vec::with_capacity(pw_bytes.len() + bin_key.0.len());
+    let mut ikm = Vec::with_capacity(pw_bytes.len() + bin_key.len());
     ikm.extend_from_slice(pw_bytes);
-    ikm.extend_from_slice(&bin_key.0);
+    ikm.extend_from_slice(&bin_key[..]);
 
     // 6. GMK = HKDF-Extract(salt=global_salt, IKM=password||binKey)
-    let gmk = Hkdf::<Sha256>::extract(Some(&global_salt), &ikm);
+    //    PRK 处理同 binKey：拷入 Zeroizing 后立即清零中间量
+    let (mut gmk_prk, _) = Hkdf::<Sha256>::extract(Some(&global_salt), &ikm);
+    let gmk = zeroize::Zeroizing::new({
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&gmk_prk[..]);
+        arr
+    });
+    gmk_prk[..].zeroize();
 
     // 7. verifier: AES-GCM encrypt known constant
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&gmk.0));
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&gmk[..]));
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -127,8 +141,9 @@ pub(crate) fn handle_derive_global_key(req: &Request) -> Response {
     record.extend_from_slice(&bin_file_hash);
 
     // 10. 内存持有 GMK（Zeroizing 包装，Drop 时自动清零）
+    //     gmk_arr 被 move 进 Zeroizing，所有权转移无残留副本
     let mut gmk_arr = [0u8; 32];
-    gmk_arr.copy_from_slice(&gmk.0);
+    gmk_arr.copy_from_slice(&gmk[..]);
     GMK.with(|g| *g.borrow_mut() = Some(zeroize::Zeroizing::new(gmk_arr)));
 
     // 11. 清零临时敏感变量
@@ -198,17 +213,31 @@ pub(crate) fn handle_verify_global_key(req: &Request) -> Response {
         150_000,
         &mut bin_password_key,
     );
-    let bin_key = Hkdf::<Sha256>::extract(Some(&bin_material), &bin_password_key);
+    // PRK 拷入 Zeroizing 后立即 volatile 清零 extract 输出缓冲
+    let (mut bin_key_prk, _) = Hkdf::<Sha256>::extract(Some(&bin_material), &bin_password_key);
+    let bin_key = zeroize::Zeroizing::new({
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bin_key_prk[..]);
+        arr
+    });
+    bin_key_prk[..].zeroize();
 
     let pw_bytes = req.password.as_bytes();
-    let mut ikm = Vec::with_capacity(pw_bytes.len() + bin_key.0.len());
+    let mut ikm = Vec::with_capacity(pw_bytes.len() + bin_key.len());
     ikm.extend_from_slice(pw_bytes);
-    ikm.extend_from_slice(&bin_key.0);
+    ikm.extend_from_slice(&bin_key[..]);
 
-    let gmk = Hkdf::<Sha256>::extract(Some(global_salt), &ikm);
+    // GMK 处理同 binKey：拷入 Zeroizing 后立即清零中间量
+    let (mut gmk_prk, _) = Hkdf::<Sha256>::extract(Some(global_salt), &ikm);
+    let gmk = zeroize::Zeroizing::new({
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&gmk_prk[..]);
+        arr
+    });
+    gmk_prk[..].zeroize();
 
     // 4. 解密 verifier
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&gmk.0));
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&gmk[..]));
     let nonce = Nonce::from_slice(verifier_nonce);
     match cipher.decrypt(nonce, verifier_ct) {
         Ok(plain) => {
@@ -226,8 +255,9 @@ pub(crate) fn handle_verify_global_key(req: &Request) -> Response {
     }
 
     // 5. 内存持有 GMK
+    //    gmk_arr 被 move 进 Zeroizing，所有权转移无残留副本
     let mut gmk_arr = [0u8; 32];
-    gmk_arr.copy_from_slice(&gmk.0);
+    gmk_arr.copy_from_slice(&gmk[..]);
     GMK.with(|g| *g.borrow_mut() = Some(zeroize::Zeroizing::new(gmk_arr)));
 
     // 6. 清零
@@ -261,8 +291,10 @@ pub(crate) fn handle_derive_module_subkey(req: &Request) -> Response {
                         }
                     }
                 };
-                let mut okm = [0u8; 32];
-                if hk.expand(info.as_bytes(), &mut okm).is_err() {
+                // 子密钥 okm 为敏感中间量：Zeroizing 保证 base64 编码消费后
+                // 响应构造完成即 volatile 清零，不驻留栈外可见副本
+                let mut okm = zeroize::Zeroizing::new([0u8; 32]);
+                if hk.expand(info.as_bytes(), &mut okm[..]).is_err() {
                     return Response {
                         ok: false,
                         op: "derive_module_subkey".into(),
@@ -271,7 +303,7 @@ pub(crate) fn handle_derive_module_subkey(req: &Request) -> Response {
                     };
                 }
                 Response {
-                    data: Some(base64_encode(&okm)),
+                    data: Some(base64_encode(&okm[..])),
                     ..Response::ok("derive_module_subkey")
                 }
             }
@@ -283,4 +315,146 @@ pub(crate) fn handle_derive_module_subkey(req: &Request) -> Response {
 pub(crate) fn handle_clear_global_key() -> Response {
     GMK.with(|g| *g.borrow_mut() = None);
     Response::ok("clear_global_key")
+}
+
+/* ------------------------------------------------------------------ *
+ * 单元测试                                                            *
+ *                                                                    *
+ * GMK 为 thread_local：cargo test 每个测试独占线程，                *
+ * 各测试间的 GMK 状态互不干扰。                                       *
+ * ------------------------------------------------------------------ */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroize::Zeroizing;
+
+    /// 构造派生/验证/子密钥测试请求（record 为 GMK 记录 base64）
+    fn make_request(op: &str, password: &str, bin_password: &str, bin_data: &[u8], record: &str) -> Request {
+        Request {
+            op: op.to_string(),
+            path: String::new(),
+            password: Zeroizing::new(password.to_string()),
+            id: 0,
+            rtype: 0,
+            name: String::new(),
+            data: Zeroizing::new(record.to_string()),
+            old_password: Zeroizing::new(String::new()),
+            new_password: Zeroizing::new(String::new()),
+            bin_data: Zeroizing::new(base64_encode(bin_data)),
+            bin_password: Zeroizing::new(bin_password.to_string()),
+            module_id: String::new(),
+            preset: 0,
+            ids: Vec::new(),
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn test_derive_verify_roundtrip() {
+        let bin_data = b"test bin file content 0123456789abcdef";
+        let derive_req = make_request(
+            "derive_global_key",
+            "master-password-123",
+            "bin-pass-456",
+            bin_data,
+            "",
+        );
+        let derive_resp = handle_derive_global_key(&derive_req);
+        assert!(derive_resp.ok, "derive 应成功: {:?}", derive_resp.error);
+        let record = derive_resp.data.expect("derive 应返回 record base64");
+        assert_eq!(base64_decode(&record).unwrap().len(), 124);
+
+        // 同参数验证必须通过（PRK 拷贝/清零重构后派生路径功能回归）
+        let verify_req = make_request(
+            "verify_global_key",
+            "master-password-123",
+            "bin-pass-456",
+            bin_data,
+            &record,
+        );
+        let verify_resp = handle_verify_global_key(&verify_req);
+        assert!(verify_resp.ok, "同参数 verify 应通过: {:?}", verify_resp.error);
+
+        // 派生后同线程 GMK 可用：子密钥为 32 字节
+        let mut subkey_req = make_request("derive_module_subkey", "", "", b"", "");
+        subkey_req.module_id = "photo-module".into();
+        let subkey_resp = handle_derive_module_subkey(&subkey_req);
+        assert!(subkey_resp.ok, "subkey 应成功: {:?}", subkey_resp.error);
+        let subkey_b64 = subkey_resp.data.expect("subkey 应返回 base64");
+        assert_eq!(base64_decode(&subkey_b64).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn test_verify_wrong_password_rejected() {
+        let bin_data = b"another bin payload";
+        let derive_req = make_request(
+            "derive_global_key",
+            "correct-horse-battery",
+            "bin-pw",
+            bin_data,
+            "",
+        );
+        let derive_resp = handle_derive_global_key(&derive_req);
+        assert!(derive_resp.ok);
+        let record = derive_resp.data.unwrap();
+
+        let verify_req = make_request(
+            "verify_global_key",
+            "wrong-password",
+            "bin-pw",
+            bin_data,
+            &record,
+        );
+        let verify_resp = handle_verify_global_key(&verify_req);
+        assert!(!verify_resp.ok, "错误口令必须被拒绝");
+    }
+
+    #[test]
+    fn test_verify_record_from_other_derive_rejected() {
+        // 不同派生产生的 record（随机 salt/nonce）解密必然失败 → AUTH
+        let derive_a = handle_derive_global_key(&make_request(
+            "derive_global_key", "pw-a", "bin-a", b"bin-a-data", "",
+        ));
+        assert!(derive_a.ok);
+        let record_a = derive_a.data.unwrap();
+
+        handle_derive_global_key(&make_request(
+            "derive_global_key", "pw-b", "bin-b", b"bin-b-data", "",
+        ));
+
+        let verify_req = make_request(
+            "verify_global_key", "pw-b", "bin-b", b"bin-b-data", &record_a,
+        );
+        let verify_resp = handle_verify_global_key(&verify_req);
+        assert!(!verify_resp.ok, "跨派生的 record 必须验证失败");
+    }
+
+    #[test]
+    fn test_subkey_locked_without_gmk() {
+        handle_clear_global_key();
+        let mut req = make_request("derive_module_subkey", "", "", b"", "");
+        req.module_id = "any-module".into();
+        let resp = handle_derive_module_subkey(&req);
+        assert!(!resp.ok, "无 GMK 时子密钥派生必须失败");
+        let err = resp.error.expect("应携带错误码");
+        assert_eq!(err, "ERR_00000007", "锁定态错误码为 LOCKED(0x07)");
+    }
+
+    #[test]
+    fn test_subkey_deterministic_per_module() {
+        handle_derive_global_key(&make_request(
+            "derive_global_key", "determinism-pw", "bin-pw", b"det-bin", "",
+        ));
+
+        let mut req = make_request("derive_module_subkey", "", "", b"", "");
+        req.module_id = "module-x".into();
+        let k1 = handle_derive_module_subkey(&req).data.unwrap();
+        let k2 = handle_derive_module_subkey(&req).data.unwrap();
+        assert_eq!(k1, k2, "同 module_id 子密钥必须确定");
+
+        req.module_id = "module-y".into();
+        let k3 = handle_derive_module_subkey(&req).data.unwrap();
+        assert_ne!(k1, k3, "不同 module_id 子密钥必须不同");
+    }
 }

@@ -57,7 +57,7 @@
   animation: none !important;
 }
 
-/* ===== 5. glass-calm：deep-idle 毛玻璃降载（R3，方案第六章） =====
+/* ===== 5. glass-calm：deep-idle 毛玻璃降载 =====
  *   背景 1fps 基本静止，移除 backdrop-filter 全屏重采样，
  *   等效半透明底色视觉无差异；交互立即恢复（class 单帧移除）。 */
 .glass-calm .main-view {
@@ -66,16 +66,15 @@
   background: rgba(20, 20, 30, 0.65);
 }
 
-/* ===== 6. 帧预算降级治理（性能根治方案 §7 — FrameBudgetMonitor） =====
+/* ===== 6. 帧预算降级治理（FrameBudgetMonitor 档位落地） =====
  *   类由 core/frame-budget.ts 挂载到 document.body（与空闲治理类并存叠加）：
- *   body.reduced-motion（降级 ≥2，§7.3「中度」档）：
+ *   body.reduced-motion（降级 ≥2，「中度」档）：
  *     - CSS 动画 → 核心：氛围装饰暂停，交互动画（anim-interactive）与
  *       工作进行中状态指示器豁免（语义不失真 — 与 idle 治理同一豁免清单）；
- *     - backdrop-filter → 减少：剩余小面积模糊点（qd-node-core /
- *       photo-select-mark）移除。
  *   body.minimal-motion（降级 =3，「重度」档，恒与 reduced-motion 并存）：
  *     - CSS 动画 → 最少（reduced-motion 的暂停规则继续生效）；
- *     - backdrop-filter → 移除：全量 none。
+ *     - backdrop-filter → 全量 none（常态动效已无实时 backdrop-filter，
+ *       此档保留为兜底保险）。
  *   降级是平滑的：用户感知到粒子密度降低而非卡顿（粒子密度经
  *   setDrawRange 由监控器直接驱动，不经 CSS）。 ===== */
 
@@ -101,14 +100,8 @@ body.reduced-motion :is(
   animation-play-state: running !important;
 }
 
-/* 6.4 降级 ≥2：backdrop-filter「减少」档（剩余小面积模糊点移除） */
-body.reduced-motion :is(
-  .qd-node-core,
-  .photo-select-mark
-) {
-  backdrop-filter: none !important;
-  -webkit-backdrop-filter: none !important;
-}
+/* 6.4 降级 ≥2：backdrop-filter「减少」档已无消费者（常态动效无实时
+ * backdrop-filter，此档无对应规则，编号仅保留层级连续性） */
 
 /* 6.5 空闲治理优先于降级豁免：idle 及以下时交互动画同样静止
  *   （降级豁免不得反向击穿空闲暂停 — 特异性压制） */

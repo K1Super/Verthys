@@ -261,6 +261,18 @@
   min-height: 52px;
 }
 
+/* ===== 失败冻结降级 =====
+   由 dimmed 样式标识驱动：失败冻结期间整体降低不透明度与饱和度，
+   让错误提示取得视觉重心（语义：确实走到这一步才失败，系统已给出解释） */
+.qf-slot {
+  transition: opacity 0.35s ease, filter 0.35s ease;
+}
+
+.qf-slot.qf-dimmed {
+  opacity: 0.45;
+  filter: grayscale(0.55) saturate(0.6);
+}
+
 /* ===== 紧凑 + 无加载动画模式 ===== */
 .qf-slot.compact.no-loader {
   min-height: 60px;

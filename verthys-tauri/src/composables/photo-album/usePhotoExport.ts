@@ -15,8 +15,7 @@
  */
 import { ref, watch, type Ref, type ShallowRef } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
-import { verthysGetRecord, bytesToBase64 } from "../../lib/verthys";
+import { verthysGetRecord, bytesToBase64, writeUserFile } from "../../lib/verthys";
 import {
   encryptMeta, encryptChunk, decryptMeta, decryptChunk,
   computeFileHash, bytesToHex, packVencFile, packVencMultiFile,
@@ -64,11 +63,11 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   let tokenCopiedTimer: ReturnType<typeof setTimeout> | undefined;
 
   /* ===== 写入 .venc 文件到磁盘（Tauri 模式） ===== */
-  /** ★ 企业级根治：使用 write_user_file 而非 write_file_bytes
+  /** ★ 企业级根治：走 writeUserFile（Raw body + x-path 头），
+   *   与 write_user_file 命令的真实协议一致；JSON+dataB64 旧写法与命令签名不符必失败。
    *   导出路径由用户通过 save() 对话框显式选择，不应受沙箱白名单限制 */
   const writeVencFile = async (path: string, bytes: Uint8Array): Promise<void> => {
-    const b64 = bytesToBase64(bytes);
-    await invoke("write_user_file", { path, dataB64: b64 });
+    await writeUserFile(path, bytes);
   };
 
   const openExportDialog = () => {

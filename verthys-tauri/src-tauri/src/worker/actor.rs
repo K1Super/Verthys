@@ -182,10 +182,10 @@ async fn handle_send(
             // 总超时
             let stderr_snippet = snapshot_stderr(stderr_ring);
             log::error!(
-                "[worker] IPC 超时（{}s）: PID={} 仍在运行但无响应，请求: {} | stderr: {}",
+                "[worker] IPC 超时（{}s）: PID={} 仍在运行但无响应，请求摘要: {} | stderr: {}",
                 timeout.as_secs(),
                 pid,
-                json,
+                crate::util::log_sanitizer::json_log_summary(json, &["op"]),
                 stderr_snippet
             );
             return Err(format!(
@@ -244,10 +244,10 @@ async fn handle_send(
                 // 本轮读取超时（但总 deadline 可能未到）
                 let stderr_snippet = snapshot_stderr(stderr_ring);
                 log::error!(
-                    "[worker] IPC 超时（{}s）: PID={} 仍在运行但无响应，请求: {} | stderr: {}",
+                    "[worker] IPC 超时（{}s）: PID={} 仍在运行但无响应，请求摘要: {} | stderr: {}",
                     timeout.as_secs(),
                     pid,
-                    json,
+                    crate::util::log_sanitizer::json_log_summary(json, &["op"]),
                     stderr_snippet
                 );
                 return Err(format!(

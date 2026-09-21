@@ -23,6 +23,102 @@ use crate::runtime::protocol::SecurityStatusReport;
 use crate::runtime::gmk::GMK;
 
 /* ------------------------------------------------------------------ *
+ * 扫描临时缓冲 RAII 守卫（Windows）                                    *
+ *                                                                    *
+ * 原实现：写入共享内存成功后手工循环三轮覆写临时缓冲；                  *
+ * 写入失败（? 提前返回）时擦除循环被整体跳过，明文残留。               *
+ *                                                                    *
+ * 守卫化：Drop 时统一三轮覆写（0x00 → 0xFF → 0x00），                  *
+ * 任何提前返回路径（含 ? 传播/panic）均被覆盖。                        *
+ * ------------------------------------------------------------------ */
+
+/// 三轮覆写擦除（len=0 时为空操作，避免对空缓冲取悬垂指针）
+#[cfg(windows)]
+fn overwrite_3rounds(p: *mut u8, len: usize) {
+    if len == 0 {
+        return;
+    }
+    unsafe {
+        std::ptr::write_bytes(p, 0x00, len);
+        std::ptr::write_bytes(p, 0xFF, len);
+        std::ptr::write_bytes(p, 0x00, len);
+    }
+}
+
+/// 全量扫描临时缓冲守卫：(lid, rtype, name, data)
+#[cfg(windows)]
+struct PlainBatchGuard {
+    rows: Vec<(u64, u32, String, Vec<u8>)>,
+}
+
+#[cfg(windows)]
+impl PlainBatchGuard {
+    fn with_capacity(n: usize) -> Self {
+        Self { rows: Vec::with_capacity(n) }
+    }
+
+    fn push(&mut self, row: (u64, u32, String, Vec<u8>)) {
+        self.rows.push(row);
+    }
+
+    /// 只读访问行数据（直传 write_records 的切片签名）
+    fn rows(&self) -> &[(u64, u32, String, Vec<u8>)] {
+        &self.rows
+    }
+
+    /// 立即擦除全部明文行（幂等：覆写后再次调用无害）
+    fn scrub(&mut self) {
+        for (_, _, name, data) in self.rows.iter_mut() {
+            overwrite_3rounds(name.as_mut_ptr(), name.len());
+            overwrite_3rounds(data.as_mut_ptr(), data.len());
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PlainBatchGuard {
+    fn drop(&mut self) {
+        self.scrub();
+    }
+}
+
+/// 摘要扫描临时缓冲守卫：(lid, rtype, name, data_size, physical_offset, merkle_leaf, created_time)
+#[cfg(windows)]
+struct SummaryBatchGuard {
+    rows: Vec<scan_shm::SummaryRecord>,
+}
+
+#[cfg(windows)]
+impl SummaryBatchGuard {
+    fn with_capacity(n: usize) -> Self {
+        Self { rows: Vec::with_capacity(n) }
+    }
+
+    fn push(&mut self, row: scan_shm::SummaryRecord) {
+        self.rows.push(row);
+    }
+
+    fn rows(&self) -> &[scan_shm::SummaryRecord] {
+        &self.rows
+    }
+
+    /// 立即擦除全部摘要行（name 明文 + merkle_leaf 哈希）
+    fn scrub(&mut self) {
+        for (_, _, name, _, _, merkle, _) in self.rows.iter_mut() {
+            overwrite_3rounds(name.as_mut_ptr(), name.len());
+            overwrite_3rounds(merkle.as_mut_ptr(), merkle.len());
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SummaryBatchGuard {
+    fn drop(&mut self) {
+        self.scrub();
+    }
+}
+
+/* ------------------------------------------------------------------ *
  * Worker：持有 DLL + 句柄                                             *
  * ------------------------------------------------------------------ */
 
@@ -375,8 +471,8 @@ impl Worker {
                 return Err(r);
             }
 
-            // 从 C 深拷贝收集到 Rust 临时 Vec
-            let mut result: Vec<(u64, u32, String, Vec<u8>)> = Vec::with_capacity(out_count as usize);
+            // 从 C 深拷贝收集到守卫化临时缓冲（Drop 三轮覆写，含写 SHM 失败的提前返回路径）
+            let mut result = PlainBatchGuard::with_capacity(out_count as usize);
             for i in 0..out_count as usize {
                 let rec = &records[i];
                 let name = if !rec.name.is_null() && rec.name_len > 0 {
@@ -396,24 +492,10 @@ impl Worker {
             let exhausted = out_count == 0;
 
             // 写入共享内存（内部先 3 轮擦除旧数据）
-            let count = shm.write_records(&result, exhausted).map_err(|_| 0xFFFFFFFFu32)?;
+            // 失败时 ? 提前返回 → 守卫 Drop 仍三轮覆写全部明文行
+            let count = shm.write_records(result.rows(), exhausted).map_err(|_| 0xFFFFFFFFu32)?;
 
-            // 安全擦除 Rust 临时缓冲区（3 轮覆写）
-            for (_, _, name, data) in result.iter_mut() {
-                if !name.is_empty() {
-                    let p = name.as_mut_ptr();
-                    std::ptr::write_bytes(p, 0x00, name.len());
-                    std::ptr::write_bytes(p, 0xFF, name.len());
-                    std::ptr::write_bytes(p, 0x00, name.len());
-                }
-                if !data.is_empty() {
-                    let p = data.as_mut_ptr();
-                    std::ptr::write_bytes(p, 0x00, data.len());
-                    std::ptr::write_bytes(p, 0xFF, data.len());
-                    std::ptr::write_bytes(p, 0x00, data.len());
-                }
-            }
-
+            // 成功路径由守卫 Drop 在函数返回时统一擦除
             Ok((count, exhausted))
         }
     }
@@ -579,10 +661,9 @@ impl Worker {
                 return Err(r);
             }
 
-            // 从 C 深拷贝收集到 Rust 临时 Vec（摘要元组：无数据块）
-            // ★ 元组增加 created_time 字段
-            let mut result: Vec<scan_shm::SummaryRecord> =
-                Vec::with_capacity(out_count as usize);
+            // 从 C 深拷贝收集到守卫化临时缓冲（摘要元组：无数据块，含 created_time 字段）
+            // Drop 三轮覆写（name 明文 + merkle_leaf 哈希），含写 SHM 失败的提前返回路径
+            let mut result = SummaryBatchGuard::with_capacity(out_count as usize);
             for rec in records.iter_mut().take(out_count as usize) {
                 let name = if !rec.name.is_null() && rec.name_len > 0 {
                     let slice = std::slice::from_raw_parts(rec.name, rec.name_len as usize);
@@ -607,22 +688,10 @@ impl Worker {
             let exhausted = out_count == 0;
 
             // 写入共享内存（内部先随机覆写旧数据）
-            let count = shm.write_summary_records(&result, exhausted).map_err(|_| 0xFFFFFFFFu32)?;
+            // 失败时 ? 提前返回 → 守卫 Drop 仍三轮覆写全部摘要行
+            let count = shm.write_summary_records(result.rows(), exhausted).map_err(|_| 0xFFFFFFFFu32)?;
 
-            // 安全擦除 Rust 临时缓冲区（3 轮覆写：name 含明文，merkle_leaf 含哈希）
-            for (_, _, name, _, _, merkle, _) in result.iter_mut() {
-                if !name.is_empty() {
-                    let p = name.as_mut_ptr();
-                    std::ptr::write_bytes(p, 0x00, name.len());
-                    std::ptr::write_bytes(p, 0xFF, name.len());
-                    std::ptr::write_bytes(p, 0x00, name.len());
-                }
-                // merkle_leaf 是栈上数组，覆写擦除
-                std::ptr::write_bytes(merkle.as_mut_ptr(), 0x00, 32);
-                std::ptr::write_bytes(merkle.as_mut_ptr(), 0xFF, 32);
-                std::ptr::write_bytes(merkle.as_mut_ptr(), 0x00, 32);
-            }
-
+            // 成功路径由守卫 Drop 在函数返回时统一擦除
             Ok((count, exhausted))
         }
     }
@@ -810,5 +879,89 @@ impl Drop for Worker {
         let _ = self.call_lock();
         let _ = self.call_deinit();
         GMK.with(|g| *g.borrow_mut() = None);
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * 守卫擦除测试（Windows）                                             *
+ *                                                                    *
+ * Drop 擦除无法在释放后观测，改为直接验证 scrub() 覆写效果；          *
+ * Drop → scrub 委托为单行实现，由代码审查保证。                       *
+ * ------------------------------------------------------------------ */
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_batch_guard_scrub_overwrites_name_and_data() {
+        let mut g = PlainBatchGuard::with_capacity(2);
+        g.push((1, 2, "记录名明文".to_string(), b"data-plaintext".to_vec()));
+        g.push((3, 4, String::new(), Vec::new()));
+
+        let (name_ptr, name_len, data_ptr, data_len) = {
+            let r = &g.rows[0];
+            (r.2.as_ptr(), r.2.len(), r.3.as_ptr(), r.3.len())
+        };
+        assert!(name_len > 0 && data_len > 0);
+
+        g.scrub();
+
+        unsafe {
+            let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
+            assert!(name_bytes.iter().all(|&b| b == 0), "name 应被三轮覆写清零");
+            let data_bytes = std::slice::from_raw_parts(data_ptr, data_len);
+            assert!(data_bytes.iter().all(|&b| b == 0), "data 应被三轮覆写清零");
+        }
+
+        // 幂等：scrub 后行数据已被覆写，再次调用不崩溃不改变全零状态
+        g.scrub();
+        unsafe {
+            let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
+            assert!(name_bytes.iter().all(|&b| b == 0));
+        }
+    }
+
+    #[test]
+    fn summary_batch_guard_scrub_overwrites_name_and_merkle() {
+        let mut g = SummaryBatchGuard::with_capacity(1);
+        g.push((
+            7,
+            8,
+            "摘要记录名".to_string(),
+            128,
+            4096,
+            [0xABu8; 32],
+            1_700_000_000,
+        ));
+
+        let (name_ptr, name_len, merkle_ptr) = {
+            let r = &g.rows[0];
+            (r.2.as_ptr(), r.2.len(), r.5.as_ptr())
+        };
+
+        g.scrub();
+
+        unsafe {
+            let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
+            assert!(name_bytes.iter().all(|&b| b == 0), "name 应被三轮覆写清零");
+            let merkle_bytes = std::slice::from_raw_parts(merkle_ptr, 32);
+            assert!(
+                merkle_bytes.iter().all(|&b| b == 0),
+                "merkle_leaf 应被三轮覆写清零"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_batch_guard_rows_pass_through_slice_view() {
+        // rows() 返回的切片必须与写入行数一致（write_records 直传契约）
+        let mut g = PlainBatchGuard::with_capacity(4);
+        assert_eq!(g.rows().len(), 0);
+        g.push((1, 2, "a".to_string(), vec![1u8]));
+        g.push((2, 3, "b".to_string(), vec![2u8, 3u8]));
+        assert_eq!(g.rows().len(), 2);
+        assert_eq!(g.rows()[1].0, 2);
+        assert_eq!(g.rows()[1].3.len(), 2);
     }
 }

@@ -1,222 +1,46 @@
 /* ============================================================
-   path-status.css — 存储位置状态指示器（v4 萤群掠痕主题）
-   ★ v4 灵动重铸（替代 v3 星尘川流 — 匀速直线流星 → 萤群掠痕）：
-     - 根除：匀速线性横渡（linear — 机械感）+ 统一速度曲线 +
-       静态拖尾长度（平贴滑行感）
-     - 重建（萤群掠痕 — 每粒光尘独立生命）：
-       5 粒光尘全参数差化（尺寸/色相/波径高度/振幅/横渡周期/
-       相位/拖尾长/眨眼节律全异），三套独立横渡速度剖面：
-         dash-glide  静滞启程 → 中段急掠 → 滑翔入锁（引力吸入）
-         drift-breathe  近匀速微呼吸漂渡（悠游）
-         dart-flicker  早段疾掠 → 长尾缓滑（一闪即逝）
-       三层运动分离：外层横渡（left % 自适应宽度）+ 内核谐波波径
-       （translateY 非对称多相位）+ 萤光眨闪（core 独立呼吸节律 —
-       萤群生命感）；拖尾随速度剖面伸缩呼吸（scaleX 脉动）
-     - 休眠态（待选择）：深空静默 — 极淡径向底 + 微星原地谐波
-       闪烁，萤群零动画零成本
-     - 锁定刻痕：级联点亮（transition-delay 交错 — 激活瞬间扫描
-       确认），撤销时齐灭
-     - 状态过渡：全部 0.6s 平滑缓动（无断层无闪烁）
+   path-status.css — 存储位置状态指示器（静态形态）
+   ============================================================
+   ★ 形态（全静态 — 无动画、无 transition、无框架驱动）：
+     - 框体为深空静默底 + 玻璃拟态立面（上沿受光高光 + 底部
+       厚度暗缘，纯渐变模拟，零 backdrop-filter）
+     - 选中文态：边框转青、底色泛起微光、三道锁定刻痕直接
+       点亮 — 状态切换即时呈现，无过渡无级联
+     - 全文件零 animation / keyframes / transition — 无逐帧
+       消耗，静态选中即全部语义
    ============================================================ */
 
 .path-status {
-  flex: 1;
+  /* 定宽 260px + 行内自动边距居中 — 与标题组（协议谱号/场域命名）
+   * 共用场中轴；不占满 .path-row（flex 行默认起始对齐会贴左错位） */
+  width: 260px;
+  flex: none;
+  margin-inline: auto;
   position: relative;
   height: 34px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(60, 45, 110, 0.15);
   border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.4);
-  overflow: hidden;
-  transition: border-color 0.6s var(--ease);
-}
-.path-status:not(.active) {
-  border-color: rgba(60, 45, 110, 0.15);
-}
-.path-status.active {
-  border-color: rgba(0, 212, 255, 0.3);
-}
-
-/* ===== 深空静默底 + 微星 ===== */
-.ps-void {
-  position: absolute;
-  inset: 0;
   background:
     radial-gradient(ellipse 70% 100% at 15% 50%, rgba(25, 12, 55, 0.5), transparent 75%),
     radial-gradient(ellipse 60% 100% at 85% 50%, rgba(12, 20, 50, 0.4), transparent 75%),
-    radial-gradient(ellipse 50% 100% at 50% 50%, rgba(15, 8, 35, 0.3), transparent 85%);
-  transition: background 0.6s var(--ease);
+    radial-gradient(ellipse 50% 100% at 50% 50%, rgba(15, 8, 35, 0.3), transparent 85%),
+    rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  /* 玻璃拟态立面：上沿受光高光 + 底部厚度暗缘（静态渐变，一次光栅化） */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.35);
 }
-.path-status.active .ps-void {
+.path-status.active {
+  border-color: rgba(0, 212, 255, 0.3);
   background:
     radial-gradient(ellipse 70% 100% at 15% 50%, rgba(0, 50, 70, 0.4), transparent 75%),
     radial-gradient(ellipse 60% 100% at 85% 50%, rgba(30, 15, 65, 0.35), transparent 75%),
-    radial-gradient(ellipse 50% 100% at 50% 50%, rgba(0, 30, 50, 0.25), transparent 85%);
-}
-/* 微星（原地谐波闪烁，不移动 — 非对称多相位关键帧） */
-.ps-star {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  border-radius: 50%;
-  background: rgba(160, 180, 230, 0.4);
-  top: calc(15% + var(--i) * 13%);
-  left: calc(8% + var(--i) * 16%);
-  animation: ps-star-twinkle calc(3.5s + var(--i) * 0.6s) ease-in-out infinite;
-  animation-delay: calc(var(--i) * -0.8s);
-}
-.path-status.active .ps-star {
-  background: rgba(200, 220, 255, 0.7);
-  animation: ps-star-twinkle-active calc(2s + var(--i) * 0.4s) ease-in-out infinite;
-}
-@keyframes ps-star-twinkle {
-  0%, 100% { opacity: 0.08; transform: scale(0.5); }
-  36%      { opacity: 0.26; }
-  58%      { opacity: 0.3; transform: scale(1); }
-  82%      { opacity: 0.18; }
-}
-@keyframes ps-star-twinkle-active {
-  0%, 100% { opacity: 0.2; transform: scale(0.6); }
-  31%      { opacity: 0.55; }
-  52%      { opacity: 0.7; transform: scale(1.2); }
-  78%      { opacity: 0.4; }
+    radial-gradient(ellipse 50% 100% at 50% 50%, rgba(0, 30, 50, 0.25), transparent 85%),
+    rgba(0, 0, 0, 0.32);
 }
 
-/* ===== 萤群掠痕（激活态 — 5 粒光尘独立生命） =====
- * 三层运动分离：外层 .ps-mote 横渡（速度剖面差化），
- * 内核 .ps-mote-core 谐波波径 + 萤光眨闪（translateY 与 opacity
- * 独立节律），拖尾 ::after 随速度伸缩（scaleX 脉动）。
- * 休眠态 opacity 0 + 零动画；激活挂载横渡，边缘淡入淡出无突现突灭 */
-.ps-stream {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-.ps-mote {
-  position: absolute;
-  left: -8%;
-  opacity: 0;
-  /* 失活过渡：opacity 渐隐 + left 滑翔回位（动画移除后从末帧位置
-   * 平滑回溯 — 无瞬移跳变；激活期动画恒压过 transition 零干扰） */
-  transition:
-    opacity 0.6s var(--ease),
-    left 0.6s var(--ease);
-}
-.path-status.active .ps-mote {
-  animation: var(--fly-name) var(--cross-dur) cubic-bezier(0.45, 0.05, 0.35, 1) var(--cross-delay) infinite;
-}
-.ps-mote-core {
-  position: relative;
-  display: block;
-  width: var(--sz);
-  height: var(--sz);
-  border-radius: 50%;
-  background: var(--mote-c);
-  animation:
-    ps-mote-wobble var(--wob-dur) ease-in-out infinite,
-    ps-mote-blink var(--blink-dur) ease-in-out infinite;
-}
-/* 掠痕拖尾（行进方向后方 — 头亮尾隐；随速度剖面伸缩呼吸） */
-.ps-mote-core::after {
-  content: "";
-  position: absolute;
-  right: 100%;
-  top: 50%;
-  width: var(--tail-w);
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--mote-c));
-  transform-origin: right center;
-  animation: ps-tail-pulse var(--tail-dur) ease-in-out infinite;
-}
-
-/* --- 三套横渡速度剖面（关键帧间距即加速度语言 — 非线性灵动） ---
- * dash-glide：静滞启程 → 中段急掠 → 滑翔入锁（引力吸入语义）
- * drift-breathe：近匀速微呼吸漂渡（悠游 — 与急掠者形成群落反差）
- * dart-flicker：早段疾掠 → 长尾缓滑（一闪即逝的掠影） */
-@keyframes ps-fly-dash-glide {
-  0%   { left: -8%;  opacity: 0; }
-  7%   { opacity: 1; }
-  16%  { left: 4%; }
-  30%  { left: 11%; }
-  52%  { left: 42%; }
-  74%  { left: 66%; opacity: 1; }
-  100% { left: 82%; opacity: 0; }
-}
-@keyframes ps-fly-drift-breathe {
-  0%   { left: -8%;  opacity: 0; }
-  9%   { opacity: 0.9; }
-  26%  { left: 10%; }
-  44%  { left: 26%; opacity: 1; }
-  68%  { left: 52%; }
-  82%  { left: 68%; opacity: 0.85; }
-  100% { left: 82%; opacity: 0; }
-}
-@keyframes ps-fly-dart-flicker {
-  0%   { left: -8%;  opacity: 0; }
-  6%   { opacity: 1; }
-  24%  { left: 30%; }
-  38%  { left: 47%; opacity: 1; }
-  64%  { left: 63%; }
-  100% { left: 82%; opacity: 0; }
-}
-
-/* --- 波径（非对称多相位 — 拒绝 0/50/100 对称摆动） --- */
-@keyframes ps-mote-wobble {
-  0%, 100% { transform: translateY(calc(var(--amp) * -1)); }
-  37%      { transform: translateY(var(--amp)); }
-  68%      { transform: translateY(calc(var(--amp) * -0.35)); }
-}
-/* --- 萤光眨闪（独立呼吸节律 — 萤群生命感；非对称双谷） --- */
-@keyframes ps-mote-blink {
-  0%, 100% { opacity: 1; }
-  31%      { opacity: 0.6; }
-  42%      { opacity: 1; }
-  63%      { opacity: 0.78; }
-  76%      { opacity: 1; }
-}
-/* --- 拖尾伸缩脉动（随速度剖面呼吸 — 掠痕长短变化） --- */
-@keyframes ps-tail-pulse {
-  0%, 100% { transform: scaleX(1); }
-  34%      { transform: scaleX(1.55); }
-  57%      { transform: scaleX(0.72); }
-  81%      { transform: scaleX(1.2); }
-}
-
-/* --- 5 粒全参数差化（剖面/尺寸/色相/波径/周期/相位/拖尾/眨闪全异）---
- * 色相群落：主青 ×2（不同明度）/ 冰晶白 / 紫 / 暖尘（一粒暖色 —
- * 群落有机感，拒绝纯色系均匀分布） */
-.ps-mote-1 {
-  top: 41%; --sz: 3px;   --mote-c: rgba(0, 212, 255, 0.9);
-  --amp: 3px;    --cross-dur: 7.6s;  --cross-delay: 0s;
-  --fly-name: ps-fly-dash-glide;
-  --wob-dur: 2.7s; --blink-dur: 3.4s; --tail-w: 34px; --tail-dur: 2.2s;
-}
-.ps-mote-2 {
-  top: 63%; --sz: 2px;   --mote-c: rgba(205, 224, 244, 0.85);
-  --amp: 4.5px;  --cross-dur: 10.8s; --cross-delay: 3.1s;
-  --fly-name: ps-fly-drift-breathe;
-  --wob-dur: 3.5s; --blink-dur: 2.6s; --tail-w: 24px; --tail-dur: 3.1s;
-}
-.ps-mote-3 {
-  top: 52%; --sz: 2.5px; --mote-c: rgba(139, 92, 246, 0.8);
-  --amp: 2.5px;  --cross-dur: 13.2s; --cross-delay: 6.3s;
-  --fly-name: ps-fly-drift-breathe;
-  --wob-dur: 4.3s; --blink-dur: 4.1s; --tail-w: 28px; --tail-dur: 2.7s;
-}
-.ps-mote-4 {
-  top: 33%; --sz: 1.5px; --mote-c: rgba(0, 212, 255, 0.55);
-  --amp: 5px;    --cross-dur: 6.4s;  --cross-delay: 8.4s;
-  --fly-name: ps-fly-dart-flicker;
-  --wob-dur: 3s;   --blink-dur: 2.2s; --tail-w: 18px; --tail-dur: 1.9s;
-}
-.ps-mote-5 {
-  top: 57%; --sz: 1.8px; --mote-c: rgba(255, 214, 170, 0.6);
-  --amp: 3.8px;  --cross-dur: 11.6s; --cross-delay: 5.2s;
-  --fly-name: ps-fly-dart-flicker;
-  --wob-dur: 3.8s; --blink-dur: 3.7s; --tail-w: 21px; --tail-dur: 2.5s;
-}
-
-/* ===== 锁定刻痕组（级联点亮 — 激活瞬间扫描确认；撤销时齐灭） ===== */
+/* ===== 锁定刻痕组（选中即亮 — 静态确认；撤销即灭） ===== */
 .ps-lock {
   position: absolute;
   top: 0;
@@ -232,21 +56,17 @@
   width: 1px;
   border-radius: 1px;
   background: rgba(140, 130, 190, 0.25);
-  transition: background 0.5s var(--ease), height 0.5s var(--ease);
 }
 .ps-lock-tick-1 { height: 7px; }
 .ps-lock-tick-2 { height: 11px; }
 .ps-lock-tick-3 { height: 5px; }
 .path-status.active .ps-lock-tick-1 {
-  transition-delay: 0.08s;
   background: rgba(0, 212, 255, 0.65); height: 9px;
 }
 .path-status.active .ps-lock-tick-2 {
-  transition-delay: 0.2s;
   background: rgba(205, 224, 244, 0.8); height: 13px;
 }
 .path-status.active .ps-lock-tick-3 {
-  transition-delay: 0.32s;
   background: rgba(139, 92, 246, 0.6); height: 7px;
 }
 

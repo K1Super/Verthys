@@ -213,15 +213,16 @@ const waypoints: WaypointDef[] = RAW_WAYPOINTS.map((w, i) => {
   return { id: i, ...w, x0: +p.x.toFixed(2), y0: +p.y.toFixed(2) };
 });
 
-/* ---------- rAF 差速驱动（统一帧门控：四档降频 / 失焦停帧 / 异常熔断） ---------- */
+/* ---------- 逐帧差速驱动（统一帧门控：四档降频 / 失焦停帧 / 异常熔断） ---------- */
 const svgRef = ref<SVGSVGElement | null>(null);
 const wpGroupRef = ref<SVGGElement | null>(null);
 let wpEls: SVGCircleElement[] = [];
-let elapsed = 0;
+/* 进度墙钟基准：首个许可帧的 wallClock（档位降频时差速进度不减速） */
+let startWall = -1;
 
-const renderFrame = (dt: number) => {
-  elapsed += dt;
-  const t = elapsed;
+const renderFrame = (_frameStep: number, wallClock: number) => {
+  if (startWall < 0) startWall = wallClock;
+  const t = wallClock - startWall;
   for (let i = 0; i < wpEls.length; i++) {
     const w = waypoints[i];
     const o = ORBITS[w.orbit];

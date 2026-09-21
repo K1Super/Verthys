@@ -19,11 +19,15 @@
 /* ---------- 全局变量（自 verthys_api.c 迁移） ---------- */
 extern int g_has_avx2;
 
-/* ---------- 暴力破解退避 ---------- */
+/* ---------- 暴力破解退避 ----------
+ * 进程级聚合记账（模块级原子全局）：任一句柄的解锁口令失败均计入
+ * 同一计数，指数退避（2^k 秒，封顶 VERTHYS_BACKOFF_MAX_SECS）拦截
+ * 同进程内全部句柄的后续解锁尝试。仅 AUTH 失败记账，RATE 早退与
+ * 成功路径不递增；成功解锁由调用方触发 reset 清零。 */
 uint64_t verthys_monotonic_ms(void);
-uint64_t verthys_backoff_remaining_ms(const struct VerthysContext *ctx);
-void verthys_backoff_record_failure(struct VerthysContext *ctx);
-void verthys_backoff_reset(struct VerthysContext *ctx);
+uint64_t verthys_backoff_remaining_ms(void);
+void verthys_backoff_record_failure(void);
+void verthys_backoff_reset(void);
 
 /* ---------- 小端序读取（用于索引区长度前缀） ---------- */
 uint64_t verthys_get_u64le(const uint8_t *p);
@@ -38,7 +42,8 @@ void ctx_free_getrecord_cache(struct VerthysContext *ctx);
 
 /* 清除上下文中的所有敏感材料（CNG 内核密钥组 + 借用缓存），不动 file_path。
  * 前置条件：调用方已先行收口 V3 子系统（verthys_v3_ctx_subsystems_close——
- * 后台线程汇合后内核句柄方可安全销毁）。退避记账跨 Lock 周期保留。 */
+ * 后台线程汇合后内核句柄方可安全销毁）。退避记账为进程级模块全局，
+ * 与上下文生命周期无关。 */
 void ctx_zero_sensitive(struct VerthysContext *ctx);
 
 /* ---------- 格式检测（V3-only）----------

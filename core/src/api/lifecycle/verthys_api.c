@@ -568,7 +568,7 @@ static VerthysResult verthys_api_v3_unlock(struct VerthysContext *ctx,
         ctx->warm_cache_enabled =
             !verthys_v3_warmcache_disabled_by_preset(v3->preset);
         ctx->state = VERTHYS_STATE_UNLOCKED;
-        verthys_backoff_reset(ctx);
+        verthys_backoff_reset();
         /* 诊断映射（GetDiagnostics 的 V3 数据源）：
          * unlock_derive_ms ← 流水线 S2 Argon2id 实测耗时（V2 路径同字段
          * 语义，v2_lifecycle L1249；测试 perf_diagnostics_metrics_complete
@@ -584,7 +584,7 @@ static VerthysResult verthys_api_v3_unlock(struct VerthysContext *ctx,
 
     /* 失败路径可重试初态：ctx3 销毁（内含密钥清零 + 子系统
      * abort 式关闭）后关闭文件句柄（借用引用，本函数拥有） */
-    if (rc == VERTHYS_ERR_AUTH) verthys_backoff_record_failure(ctx);
+    if (rc == VERTHYS_ERR_AUTH) verthys_backoff_record_failure();
     verthys_v3_ctx_destroy(v3);
     fclose(f);
     return rc;
@@ -677,7 +677,6 @@ static VerthysResult verthys_api_v3_create(struct VerthysContext *ctx,
             !verthys_v3_warmcache_disabled_by_preset(preset);
         ctx->v3 = v3;
         ctx->state = VERTHYS_STATE_UNLOCKED;
-        verthys_backoff_reset(ctx);
         verthys_emit_unlock_progress(ctx, VERTHYS_UNLOCK_STAGE_MERKLE_DONE, 100,
                                    "V3 容器创建完成");
         return VERTHYS_OK;
@@ -936,7 +935,7 @@ VerthysResult Verthys_Unlock(VerthysHandle handle,
 
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state == VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_INVALID;
-    if (verthys_backoff_remaining_ms(ctx) > 0) return VERTHYS_ERR_RATE;
+    if (verthys_backoff_remaining_ms() > 0) return VERTHYS_ERR_RATE;
 
     /* ★ pepper 来源已确定失败时快速失败（跳过 Argon2id 重计算），
      * 前端得到 VERTHYS_ERR_PEPPER_SOURCE → 提示"保险库安全源已变更"。 */

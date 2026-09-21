@@ -1,8 +1,6 @@
 /**
  * useQuantumField.ts — 量子态势面板 Canvas 物理场引擎
  *
- * ★ 全新引擎：替代原 CSS 动画 + 简单 lerp 视差设计
- *
  * =============================================================================
  * 设计规范对照（交互逻辑 / 动态运动 / 渲染性能 / 反AI大众化）
  * =============================================================================
@@ -32,13 +30,6 @@
  *   4. 统一帧门控（useFrameGate）：全局空闲四档 60/30/5/1fps，
  *      失焦/隐藏由全局调度器置 deep-idle（rAF 天然停帧）
  *
- * 【反AI大众化】
- *   1. 无标准螺旋/对称放射/刻波纹圆环：轨道为椭圆（独立偏心率+倾角），
- *      吸积盘为不等长弧段组合（90°~200° 各异），节点布局非对称偏移
- *   2. 元素分布非均匀：相位/尺寸/速度/亮度由种子化伪随机分配，可控不规则
- *   3. 运动曲线为二阶弹簧 + 多频复合噪声（非标准 ease 预设）
- *   4. 特效克制：无大范围 blur/色散/辉光堆叠，层次靠运动深度与亮度梯度
- *   5. 力场为高斯衰减的切向漩涡 + 微径向分量（差异化处理，非现成 demo 逻辑）
  */
 
 import { onBeforeUnmount, watch, type Ref } from 'vue';
@@ -247,6 +238,8 @@ export function useQuantumField(options: QuantumFieldOptions) {
   let elapsed = 0;
   let frameCount = 0;
   let avgFrameMs = 16.7;
+  /** 上一帧墙钟（首帧守卫 — 首帧 wStep=0 不推进时间轴，避免跳变） */
+  let lastWallClock = -1;
 
   /* ---------- ★ G-7 统一帧门控（useFrameGate） ----------
    * 帧率档位由全局空闲状态机唯一决定（active 60 / settling 30 /
@@ -475,6 +468,8 @@ export function useQuantumField(options: QuantumFieldOptions) {
     if (valid && !sizeValid) {
       sizeValid = true;
       introTime = 0;
+      /* 冻结期间 frame 早退不更新墙钟，恢复首帧同样需要守卫防跳变 */
+      lastWallClock = -1;
     } else if (!valid) {
       sizeValid = false;
       introTime = -1;
@@ -561,18 +556,20 @@ export function useQuantumField(options: QuantumFieldOptions) {
    * 主循环（物理积分 → DOM 层写入 → Canvas 绘制）
    * ============================================================ */
 
-  function frame(gateDt: number): void {
+  function frame(frameStep: number, wallClock: number): void {
     if (!ctx) return;
     // 尺寸守卫：容器处于过渡/未布局（尺寸无效）时不渲染不推进，续命等待 ResizeObserver
     if (!sizeValid) return;
-    // dt 驱动（帧率无关），门控累积 dt 钳制防长帧物理爆炸
-    const dt = Math.min(gateDt, DT_CLAMP);
-    elapsed += dt;
-    introTime += dt;
+    // 时间分离：漂移/入场相位用墙钟增量（流速恒 1×）；物理弹簧用钳制帧步进
+    const wStep = lastWallClock < 0 ? 0 : Math.max(wallClock - lastWallClock, 0);
+    lastWallClock = wallClock;
+    const dt = Math.min(frameStep, DT_CLAMP);
+    elapsed += wStep;
+    introTime += wStep;
     frameCount++;
 
     // 帧时间 EMA（性能自适应依据）
-    const frameMs = dt * 1000;
+    const frameMs = wStep * 1000;
     avgFrameMs = avgFrameMs * FRAME_EMA + frameMs * (1 - FRAME_EMA);
 
     /* ---- 弹簧积分（全部二阶系统，先积分后消费） ---- */
@@ -838,6 +835,9 @@ export function useQuantumField(options: QuantumFieldOptions) {
   const { start: startGate, stop: stopGate } = useFrameGate(idleLevel, frame);
 
   function start(): void {
+    /* 重启首帧守卫：循环停止期间墙钟持续前进，若沿用旧 lastWallClock
+       会在恢复首帧产生巨大 wStep 跳变（暂停/销毁后重挂均覆盖） */
+    lastWallClock = -1;
     startGate();
   }
 

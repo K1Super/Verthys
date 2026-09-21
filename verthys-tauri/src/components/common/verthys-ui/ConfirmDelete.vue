@@ -505,12 +505,10 @@ const fragments = Array.from({ length: 20 }, (_, i) => {
 }
 .cd-pop-enter-from {
   opacity: 0;
-  filter: blur(20px);
   transform: scale(0.7);
 }
 .cd-pop-leave-to {
   opacity: 0;
-  filter: blur(14px);
   transform: scale(0.85);
 }
 </style>

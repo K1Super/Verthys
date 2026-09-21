@@ -45,6 +45,8 @@ pub mod path_resolver;
 pub mod audit;
 pub mod auth;
 pub mod commands;
+/// 解锁命令的服务端暴力熔断桥接（gate 检查 / 失败计数 / 成功重置）
+pub mod brute_force_bridge;
 
 pub use commands::brute_force::*;
 pub use commands::session::*;

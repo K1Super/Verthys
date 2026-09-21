@@ -1,48 +1,35 @@
 /**
- * useFrameGate — 统一帧门控（所有渲染引擎共用）
+ * useFrameGate — 帧门控注册层（全应用渲染引擎共用的主循环接入接口）
  *
  * =============================================================================
- * 【设计定位】第二轮空闲 CPU 治理：帧率调度的唯一执行层
+ * 【设计定位】统一帧门控：帧率调度的唯一执行层已收归主渲染循环
  *
- * 由 useGlobalIdleScheduler 的空闲档位驱动 rAF 帧率：
- *   active    → 60fps（每帧）
- *   settling  → 30fps（33.3ms）
- *   idle      → 5fps（200ms）
- *   deep-idle → 1fps（1000ms）
+ * 本模块是引擎接入主渲染循环的声明式封装：
+ *   - 不自开 rAF —— start/stop 即向 master-frame-loop 注册 / 注销一个
+ *     throttled 任务（跟随全局空闲档位 60 / 30 / 5 / 1 fps 节流）；
+ *   - 回调签名升级为双时间参数（引擎按需取用，可忽略其一）：
+ *       frameStep —— 距上一许可帧的累积时长（钳制上限 50ms），物理积分专用；
+ *       wallClock —— 真实经过时间（秒，不钳制），进度计算专用；
+ *   - 级联清理：作用域销毁自动注销（onScopeDispose），组件无需手动 stop。
  *
- * 关键设计：
- *   1. dt 连续性：跳过的帧不推进 lastRun → 下一处理帧获得真实累积 dt
- *      （物理时间连续，弹簧/漂移积分按累积 dt 求解，无状态跳变）；
- *      dt 上限 0.5s 防异常长帧（挂起恢复/断点）物理爆炸。
- *   2. 档位切换无尖峰：watch(level) 时重置 lastRun，避免降档瞬间
- *      一次性注入大 dt。
- *   3. 回调异常熔断：单次回调抛错 → 记录并停止本门控（防错误帧循环
- *      刷屏拖垮全局），其余引擎不受影响。
- *   4. rAF 天然暂停：页面隐藏时浏览器停发 rAF → 深空闲自动完全停帧，
- *      无需额外 visibilitychange 处理（状态机已同步 deep-idle）。
+ * 帧步进语义由主循环保证：跳过的帧不推进基准时刻 → 下一许可帧获得
+ * 真实累积 frameStep；钳制上限防挂起恢复后一次性注入超长物理步长。
  *
- * 引擎接入范式（替代各引擎私有降频逻辑）：
- *   const { level, resetIdle } = useGlobalIdleScheduler();
- *   const { start, stop } = useFrameGate(level, (dt) => { ...更新+渲染 });
+ * 引擎接入范式（替代各引擎私有 rAF 循环）：
+ *   const { level } = useGlobalIdleScheduler();
+ *   const { start, stop } = useFrameGate(level, (frameStep, wallClock) => {
+ *     ...物理积分用 frameStep；进度/采样统计用 wallClock...
+ *   });
  *   onMounted(start); onBeforeUnmount(stop);
  * =============================================================================
  */
 
-import { watch, onScopeDispose, type Ref } from "vue";
+import { onScopeDispose, type Ref } from "vue";
 import type { IdleLevel } from "./useGlobalIdleScheduler";
+import { masterFrameLoop } from "../core/master-frame-loop";
 
-type FrameCallback = (dt: number) => void;
-
-/** 各空闲档位的目标帧间隔（毫秒）；active=0 表示每帧执行 */
-const FRAME_INTERVAL_MS: Record<IdleLevel, number> = {
-  active: 0,
-  settling: 1000 / 30,
-  idle: 1000 / 5,
-  "deep-idle": 1000 / 1,
-};
-
-/** dt 上限（秒）：防挂起恢复后一次性注入超长物理步长 */
-const DT_MAX = 0.5;
+/** 帧门控回调：双时间参数（帧步进 / 墙钟），单位均为秒 */
+export type FrameGateCallback = (frameStep: number, wallClock: number) => void;
 
 export interface FrameGate {
   start: () => void;
@@ -50,53 +37,33 @@ export interface FrameGate {
 }
 
 /**
- * 创建统一帧门控驱动的渲染回调。
+ * 创建帧门控驱动的渲染回调（主渲染循环 throttled 任务注册层）。
  *
- * @param level 全局空闲档位（useGlobalIdleScheduler().level）
- * @param callback 每个许可帧调用，入参为真实累积 dt（秒，≤0.5）
+ * @param level 全局空闲档位（useGlobalIdleScheduler().level）——
+ *   节流档位由主循环统一裁决，此处保留引用仅为 API 兼容与语义清晰
+ * @param callback 每个许可帧调用；frameStep 为钳制累积时长（秒），
+ *   wallClock 为真实时间（秒）
  */
 export function useFrameGate(
-  level: Readonly<Ref<IdleLevel>>,
-  callback: FrameCallback,
+  _level: Readonly<Ref<IdleLevel>>,
+  callback: FrameGateCallback,
 ): FrameGate {
-  let rafId = 0;
-  let running = false;
-  let lastRun = performance.now();
-
-  function loop(now: number): void {
-    if (!running) return;
-    rafId = requestAnimationFrame(loop);
-
-    const interval = FRAME_INTERVAL_MS[level.value];
-    if (now - lastRun < interval) return; // 跳帧：不推进 lastRun → dt 自然累积
-
-    const dt = Math.min((now - lastRun) / 1000, DT_MAX);
-    lastRun = now;
-    try {
-      callback(dt);
-    } catch (error) {
-      console.error("[FrameGate] Render callback error:", error);
-      stop();
-    }
-  }
+  let unregister: (() => void) | null = null;
 
   function start(): void {
-    if (running) return;
-    running = true;
-    lastRun = performance.now();
-    rafId = requestAnimationFrame(loop);
+    if (unregister) return;
+    unregister = masterFrameLoop.register(
+      (ctx) => callback(ctx.frameStep, ctx.wallClock),
+      { type: "throttled" },
+    );
   }
 
   function stop(): void {
-    running = false;
-    if (rafId) cancelAnimationFrame(rafId);
-    rafId = 0;
+    if (unregister) {
+      unregister();
+      unregister = null;
+    }
   }
-
-  // 档位切换：重置基准时间，避免降/升档瞬间注入尖峰 dt
-  watch(level, () => {
-    lastRun = performance.now();
-  });
 
   onScopeDispose(stop);
 

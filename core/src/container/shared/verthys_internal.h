@@ -91,11 +91,6 @@ struct VerthysContext {
     uint64_t last_fullscan_time;    /* 上次全量校验时间戳 */
     uint64_t incremental_count;     /* 自上次全量校验以来的增量提交次数 */
 
-    /* 暴力破解退避（指数退避，2^k 秒，最长 1 小时）
-     * 基于单调时钟（GetTickCount64），不受系统时间篡改影响。 */
-    uint32_t failed_attempts;   /* 连续失败次数 */
-    uint64_t last_failed_tick;  /* 最近一次失败时的单调毫秒计数，0=无失败 */
-
     /* GetRecord 借用指针缓存（API 契约：下次调用或 Lock 前有效）
      * V3 路径返回深拷贝数据，缓存在此，下次 GetRecord 或 Lock 时释放。
      * 借用指针语义要求 GetRecord 独占访问（api_mutex 写锁）。 */

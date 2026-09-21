@@ -1,7 +1,7 @@
 # Pepper 持久化 v3 与密钥槽架构 —— 实施文档
 
 > 状态：已实施完成（2026-09-19 全部验收通过）
-> 进度与变更明细：[IMPL_PROGRESS.md](IMPL_PROGRESS.md)
+> 进度与变更明细：[IMPL_PEPPER_V3_PROGRESS.md](IMPL_PEPPER_V3_PROGRESS.md)
 > 代码遵循注释自包含规约：所有实现注释仅描述当前代码可验证的行为，不引用本文档或任何外部编号。
 
 ## 1. 背景与缺陷

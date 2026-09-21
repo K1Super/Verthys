@@ -45,9 +45,22 @@ use zeroize::{Zeroize, Zeroizing};
 /// 替代裸 String，消除 secure_zero_records 中 ptr::write_bytes 对 String 的 UB 覆写。
 ///
 /// 注意：不 derive Hash（Zeroizing<String> 未实现 Hash）。
-#[derive(Debug, Default, Clone, PartialEq, Eq, TS)]
+#[derive(Default, Clone, PartialEq, Eq, TS)]
 #[ts(export, export_to = "bindings/", type = "string")]
 pub struct SecuredString(Zeroizing<String>);
+
+/// Debug 输出只暴露长度占位，绝不输出内容明文
+///
+/// 手动实现替代 derive(Debug)：任何 format!("{:?}", s) / assert_eq!
+/// 失败打印 / 派生 Debug 的外层结构体，均只会看到长度与 <REDACTED>。
+impl std::fmt::Debug for SecuredString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecuredString")
+            .field("len", &self.0.len())
+            .field("content", &"<REDACTED>")
+            .finish()
+    }
+}
 
 impl SecuredString {
     /// 从 String 构造（接管所有权，原 String 应由调用方自行 drop）
@@ -264,5 +277,31 @@ mod tests {
         // zeroize 后内容应被清空
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);
+    }
+
+    #[test]
+    fn test_debug_redacts_content() {
+        let s = SecuredString::from_str("top_secret_password");
+        let dbg = format!("{:?}", s);
+        // Debug 输出绝不包含明文
+        assert!(!dbg.contains("top_secret_password"));
+        assert!(!dbg.contains("password"));
+        // 只暴露长度与占位符
+        assert!(dbg.contains("<REDACTED>"));
+        assert!(dbg.contains("len: 19"));
+    }
+
+    #[test]
+    fn test_debug_in_derived_struct_redacts_content() {
+        #[derive(Debug)]
+        struct Sample {
+            name: SecuredString,
+        }
+        let s = Sample {
+            name: SecuredString::from_str("record_secret_name"),
+        };
+        let dbg = format!("{:?}", s);
+        assert!(!dbg.contains("record_secret_name"));
+        assert!(dbg.contains("<REDACTED>"));
     }
 }

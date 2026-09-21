@@ -753,13 +753,19 @@ VerthysResult verthys_v3_change_password(VerthysContextV3 *ctx3,
                                              ctx3->sb.argon2_mem_kib,
                                              ctx3->sb.argon2_iters,
                                              ctx3->sb.argon2_parallel);
-    if (derive_rc == -2) return VERTHYS_ERR_PEPPER_SOURCE;
-    if (derive_rc != 0) return VERTHYS_ERR_INTERNAL;
+    if (derive_rc == -2) {
+        verthys_secure_zero(old_mek, sizeof(old_mek));
+        return VERTHYS_ERR_PEPPER_SOURCE;
+    }
+    if (derive_rc != 0) {
+        verthys_secure_zero(old_mek, sizeof(old_mek));
+        return VERTHYS_ERR_INTERNAL;
+    }
 
     r = verthys_cng_km_verify_mek(old_mek, ctx3->sb.wrapped_key_a,
                                 (uint32_t)sizeof(ctx3->sb.wrapped_key_a));
-    /* verify_mek 的 import 失败路径不清零入参（import_key 仅成功清零），
-     * 无条件补清覆盖全部分支 */
+    /* import_key 清零契约覆盖成功与失败路径，此处无条件补清为
+     * 纵深防御兜底 */
     verthys_secure_zero(old_mek, sizeof(old_mek));
     if (r == VERTHYS_ERR_AUTH) return VERTHYS_ERR_AUTH;   /* 旧口令错误 */
     if (r != VERTHYS_OK) return r;

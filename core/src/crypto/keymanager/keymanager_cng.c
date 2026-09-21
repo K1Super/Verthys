@@ -277,7 +277,7 @@ VerthysResult verthys_cng_km_verify_mek(
     }
     r = verthys_cng_aead_import_key(&probe, mek, ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK]);
     if (r != VERTHYS_OK) {
-        /* mek 已被 import_key 内部清零（const 契约），无需再清 */
+        /* import_key 清零契约覆盖成功与失败路径，mek 已被消耗，无需再清 */
         verthys_secure_zero(key_material, sizeof(key_material));
         return r;
     }
@@ -394,7 +394,7 @@ VerthysResult verthys_cng_km_rekey(
     r = verthys_cng_aead_import_key(&new_mek_ctx, new_mek,
                                  ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK]);
     if (r != VERTHYS_OK) {
-        /* new_mek 已被 import_key 内部清零（const 契约） */
+        /* import_key 清零契约覆盖成功与失败路径，new_mek 已被消耗 */
         return r;
     }
 
@@ -420,6 +420,7 @@ VerthysResult verthys_cng_km_rotate_mek(
     VerthysCngKeyManager *km,
     const uint8_t new_mek[VERTHYS_CNG_KEY_BYTES])
 {
+    VerthysCngAead candidate;
     VerthysResult r;
 
     if (km == NULL || new_mek == NULL) return VERTHYS_ERR_INVALID;
@@ -428,17 +429,28 @@ VerthysResult verthys_cng_km_rotate_mek(
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* 销毁旧 → 导入新（顺序保证任何时刻 MEK 槽位至多一把句柄；
-     * 导入失败 = MEK 角色空缺，A/B/C 运行态不受影响，错误上抛） */
-    verthys_cng_aead_destroy(&km->keys[VERTHYS_CNG_KEY_MEK]);
-    km->handle_count--;
-    InterlockedDecrement(&s_kernel_handle_total);
-
-    r = verthys_cng_aead_import_key(&km->keys[VERTHYS_CNG_KEY_MEK], new_mek,
-                                 ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK]);
+    /*
+     * 临时槽先行验证：新 MEK 先导入独立上下文，成功后方切换槽位。
+     * 导入失败（CNG 不可用/内核资源不足）→ 旧 MEK 槽原样驻留
+     * （unwrap/verify 语义保持），零变更上抛错误。
+     */
+    r = verthys_cng_aead_init(&candidate);
     if (r != VERTHYS_OK) return r;
-    km->handle_count++;
-    InterlockedIncrement(&s_kernel_handle_total);
+    r = verthys_cng_aead_import_key(&candidate, new_mek,
+                                 ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK]);
+    if (r != VERTHYS_OK) {
+        verthys_cng_aead_destroy(&candidate);   /* 未导入态：幂等清理 */
+        return r;
+    }
+
+    /*
+     * 原子切换：销毁旧句柄 → POD 结构移交（句柄 + nonce 计数器 + key_id）。
+     * 两步之间无可失败操作（纯内存写），不存在"旧已毁新未入"的窗口。
+     * 句柄总量配平：candidate 经直接导入未计入 km/进程级计数，恰与
+     * 旧句柄的销毁相抵（同 rotate_abc 的移交代数），计数零调整。
+     */
+    verthys_cng_aead_destroy(&km->keys[VERTHYS_CNG_KEY_MEK]);
+    km->keys[VERTHYS_CNG_KEY_MEK] = candidate;
     return VERTHYS_OK;
 }
 

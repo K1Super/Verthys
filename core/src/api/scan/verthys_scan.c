@@ -74,6 +74,13 @@ struct VerthysScanCursor {
  * lsm 独占锁推进（vio_pread64 定位互斥），长扫描不阻塞写者。应急熔断：*
  * Fetch 入口 emergency_is_triggered 检测 + 游标结构体托管内存防护     *
  * 管理器（紧急清零后 Fetch 拒绝服务）。                              *
+ *
+ * api_mutex 共享锁纪律：全部游标读路径（Open/Fetch 系列、按类型查找）
+ * 持 ctx->api_mutex 共享锁执行核心读——与写路径（AddRecord 等独占持
+ * api_mutex 后经同一 FILE* 落盘）互斥，杜绝 vio_pread64 的
+ * fseek+fread 非原子对与写者 fseek+fwrite 在共享 FILE* 上交错（定位
+ * 竞争→错位读写）。锁序恒为 api_mutex → lsm 内部锁（与写路径同向，
+ * 单向不逆）；持锁区间内不得调用任何获取 api_mutex 的函数。
  * ------------------------------------------------------------------ */
 
 /*
@@ -435,9 +442,21 @@ VerthysResult Verthys_ScanOpen(VerthysHandle handle,
         return VERTHYS_ERR_LOCKED;
     }
 
+    /* 共享锁覆盖：ctx->v3 实例解引用（并发 Lock 换实例的 TOCTOU）+
+     * LSM 快照打开（内部经 lsm->lock 串行化读同一 FILE*）。锁内
+     * 单出口，与写路径（独占锁）互斥。 */
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
+#endif
+
     /* 统计全量解密扫描调用次数，用于监控不合理调用场景：
-     * 列表渲染优先使用仅元数据的摘要扫描接口 */
+     * 列表渲染优先使用仅元数据的摘要扫描接口（原子递增——
+     * 共享锁允许多个 ScanOpen 并发，计数不丢失） */
+#ifdef _WIN32
+    InterlockedIncrement64((LONG64 *)&ctx->diag_scan_open_count);
+#else
     ctx->diag_scan_open_count++;
+#endif
 #ifdef _WIN32
     {
         char _warn[256];
@@ -451,8 +470,11 @@ VerthysResult Verthys_ScanOpen(VerthysHandle handle,
 #endif
 
     rc = scan_v3_open(ctx, start_lid, batch_size, "scan_cursor", out_cursor);
-    if (rc != VERTHYS_OK) return rc;
-    return VERTHYS_OK;
+
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#endif
+    return rc;
 }
 
 /* ------------------------------------------------------------------ *
@@ -466,6 +488,9 @@ VerthysResult Verthys_ScanFetch(VerthysScanCursor *cursor,
                             uint64_t *out_failed_lids,
                             uint64_t *out_failed_count)
 {
+    VerthysResult rc;
+    struct VerthysContext *ctx;
+
     if (cursor == NULL || out_records == NULL || out_lids == NULL || out_count == NULL) {
         return VERTHYS_ERR_INVALID;
     }
@@ -479,9 +504,23 @@ VerthysResult Verthys_ScanFetch(VerthysScanCursor *cursor,
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* LSM 快照迭代器 + Extent 解密路径（快照隔离由 LSM 结构性保证） */
-    return scan_v3_fetch(cursor, out_records, out_lids, max_count,
-                         out_count, out_failed_lids, out_failed_count);
+    /* 共享锁覆盖核心读路径：Extent 解密（verthys_extent_get 经共享
+     * FILE* 的 vio_pread64）+ LSM 快照推进 + ctx->v3 实例存活性检测
+     * （并发 Lock 换实例的 TOCTOU）。锁内单出口。 */
+    ctx = cursor->v3_ctx;
+#ifdef _WIN32
+    if (ctx != NULL && ctx->api_mutex != NULL) {
+        AcquireSRWLockShared(ctx->api_mutex);
+    }
+#endif
+    rc = scan_v3_fetch(cursor, out_records, out_lids, max_count,
+                       out_count, out_failed_lids, out_failed_count);
+#ifdef _WIN32
+    if (ctx != NULL && ctx->api_mutex != NULL) {
+        ReleaseSRWLockShared(ctx->api_mutex);
+    }
+#endif
+    return rc;
 }
 
 /* ------------------------------------------------------------------ *
@@ -569,10 +608,21 @@ VerthysResult Verthys_ScanSummaryOpen(VerthysHandle handle,
         return VERTHYS_ERR_LOCKED;
     }
 
+    /* 共享锁覆盖：ctx->v3 实例解引用（并发 Lock 换实例的 TOCTOU）+
+     * LSM 快照打开（与 Verthys_ScanOpen 同一纪律，锁内单出口）。 */
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
+#endif
     /* 与全量扫描共用 scan_v3_open 骨架；摘要/全量差异仅在 Fetch 路径
      * ——元数据直读 vs Extent 解密。guard_label 区分内存防护注册标识。 */
-    return scan_v3_open(ctx, start_lid, batch_size,
-                        "scan_summary_cursor", out_cursor);
+    {
+        VerthysResult rc = scan_v3_open(ctx, start_lid, batch_size,
+                                        "scan_summary_cursor", out_cursor);
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#endif
+        return rc;
+    }
 }
 
 /* ------------------------------------------------------------------ *
@@ -596,9 +646,26 @@ VerthysResult Verthys_ScanSummaryFetch(VerthysScanCursor *cursor,
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* LSM 元数据直读路径（无解密开销，快照隔离由 LSM 结构性保证） */
-    return scan_v3_summary_fetch(cursor, out_records, out_lids,
-                                 max_count, out_count);
+    /* 共享锁覆盖核心读路径：LSM 快照推进 + Extent 索引回查（内存表
+     * 遍历，与写路径的 flush/compaction 互斥）+ ctx->v3 实例存活性
+     * 检测。与 Verthys_ScanFetch 同一纪律，锁内单出口。 */
+    {
+        struct VerthysContext *ctx = cursor->v3_ctx;
+        VerthysResult rc;
+#ifdef _WIN32
+        if (ctx != NULL && ctx->api_mutex != NULL) {
+            AcquireSRWLockShared(ctx->api_mutex);
+        }
+#endif
+        rc = scan_v3_summary_fetch(cursor, out_records, out_lids,
+                                   max_count, out_count);
+#ifdef _WIN32
+        if (ctx != NULL && ctx->api_mutex != NULL) {
+            ReleaseSRWLockShared(ctx->api_mutex);
+        }
+#endif
+        return rc;
+    }
 }
 
 /* ------------------------------------------------------------------ *
@@ -657,7 +724,18 @@ VerthysResult Verthys_HasRecordByType(VerthysHandle handle,
         return VERTHYS_ERR_LOCKED;
     }
 
-    return scan_v3_find_by_type(ctx, rtype, out_found, NULL);
+    /* 共享锁覆盖：LSM 快照迭代器打开与推进（内部经 lsm->lock 串行化
+     * 读同一 FILE*）+ ctx->v3 实例解引用。锁内单出口，与写路径互斥。 */
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
+#endif
+    {
+        VerthysResult rc = scan_v3_find_by_type(ctx, rtype, out_found, NULL);
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#endif
+        return rc;
+    }
 }
 
 /* ------------------------------------------------------------------ *
@@ -701,5 +779,16 @@ VerthysResult Verthys_FindFirstLidByType(VerthysHandle handle,
         return VERTHYS_ERR_LOCKED;
     }
 
-    return scan_v3_find_by_type(ctx, rtype, out_found, out_lid);
+    /* 共享锁覆盖：LSM 快照迭代器打开与推进 + ctx->v3 实例解引用
+     * （与 Verthys_HasRecordByType 同一纪律，锁内单出口）。 */
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
+#endif
+    {
+        VerthysResult rc = scan_v3_find_by_type(ctx, rtype, out_found, out_lid);
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#endif
+        return rc;
+    }
 }

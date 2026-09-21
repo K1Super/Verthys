@@ -387,6 +387,7 @@ fn run_main_ui(
         })
         .invoke_handler(tauri::generate_handler![
             diag_info,
+            log_fatal,
             verthys_preflight,
             verthys_init_status,
             worker_init,

@@ -240,6 +240,37 @@ static VerthysResult wal_write_half_header(VerthysWal *w, unsigned half,
 }
 
 /*
+ * 换区清零：目标半区数据区（头之后至半区尾）全零覆写 + fsync。
+ * 双半区环形复用下，第三圈起换入的半区数据区残留上一轮旧帧——
+ * 残留帧在当前密钥语境下仍是合法 AEAD 帧（nonce 帧内记录），重开
+ * 扫描按"自半区头逐帧解、magic 不符才停"会把残留当当前链续上。
+ * 清零先行保证换入半区只有新头与新链；清零成功后崩溃（头未写）：
+ * 头 seq 仍旧值、数据区全零，magic 不符即停，无残留链可解。
+ * 只清被换入的一半；被换出半区数据保持不动（未 flush 事务帧仍
+ * 靠它重放，"旧区转备份（数据保留）"语义）。
+ * 失败直接返回，active_half 不切换（调用方保持旧区仍为活动区，
+ * 可重试换区或继续在旧区尾部之后——单帧超半区已在上游拒绝，
+ * 实际可重试路径为上层整事务重试）。
+ */
+static VerthysResult wal_clear_half_data(VerthysWal *w, unsigned half)
+{
+    uint8_t *zero;
+    const uint64_t data_off =
+        wal_half_base(w, half) + VERTHYS_WAL_HALF_HEADER_BYTES;
+    const size_t data_bytes =
+        (size_t)VERTHYS_WAL_HALF_BYTES - VERTHYS_WAL_HALF_HEADER_BYTES;
+
+    zero = (uint8_t *)calloc(1, data_bytes);
+    if (zero == NULL) return VERTHYS_ERR_INTERNAL;
+    if (vio_pwrite64(w->f, data_off, zero, data_bytes) != 0) {
+        free(zero);
+        return VERTHYS_ERR_IO;
+    }
+    free(zero);
+    return wal_fsync(w->f);
+}
+
+/*
  * 帧遍历：自半区头后逐帧解密校验，明文交 fn（可为 NULL = 仅结构扫描）。
  * 终止条件（撕裂静默截断）：
  *   - 帧头 magic 不符（空白/垃圾）-> 正常结束（不计撕裂）；
@@ -473,9 +504,13 @@ VerthysResult verthys_wal_append(VerthysWal *w, const VerthysWalRecord *rec)
     }
 
     if (w->cursor + frame_len > VERTHYS_WAL_HALF_BYTES) {
-        /* 换区：旧区转备份（数据保留），新区 seq+1 */
+        /* 换区：旧区转备份（数据保留），新区 seq+1。
+         * 清零先行（残留旧帧不可被续链回放，见 wal_clear_half_data），
+         * 失败不切换 active_half（保持旧区活动，上层重试）。 */
         unsigned nh = 1u - w->active_half;
         uint64_t nseq = w->half_seq + 1;
+        r = wal_clear_half_data(w, nh);
+        if (r != VERTHYS_OK) return r;
         r = wal_write_half_header(w, nh, nseq);
         if (r != VERTHYS_OK) return r;
         w->active_half = nh;

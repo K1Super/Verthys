@@ -60,6 +60,19 @@ if(VERTHYS_DIAG)
     add_compile_definitions(VERTHYS_DIAG)
 endif()
 
+# 编译内嵌胡椒开关（-DVERTHYS_ENABLE_COMPILED_PEPPER=ON）
+#   默认 OFF：零熵胡椒常量与回退路径完全从构建移除——常量随源码
+#   公开，任何拿到二进制的人都能还原，走该来源的容器离线爆破
+#   退化为纯口令熵。OS 托管不可用且未注入时 verthys_pepper_init
+#   直接失败（禁止静默降级）。
+#   显式开启仅限受控调试构建（例如在无 CNG 环境验证降级流程），
+#   发布构建禁止携带。
+option(VERTHYS_ENABLE_COMPILED_PEPPER
+       "Compile zero-entropy fallback pepper constant (debug builds only)" OFF)
+if(VERTHYS_ENABLE_COMPILED_PEPPER)
+    add_compile_definitions(VERTHYS_ENABLE_COMPILED_PEPPER)
+endif()
+
 # ---------- 分层源文件 ----------
 #   src/ 各子域内按功能组件拆分子目录（组件实现 + 私有头同目录），
 #   模块内子目录不再平铺源文件；公共接口唯一保留 include/verthys.h。

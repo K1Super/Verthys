@@ -3,7 +3,7 @@
   职责：
     1. 显示初始化状态提示（首次/broken/ready）
     2. 修复失败告警（repair_fail_count >= 3 时显示 ⚠ 提示）
-    3. 存储位置选择器（星尘川流 + 打开/新建按钮）
+    3. 存储位置选择器（静态选中 + 打开/新建按钮）
     4. 确认按钮（解锁/创建）
     5. 脉冲星磁层辐射加载 + 解锁进度实时反馈
 
@@ -46,17 +46,7 @@
         <div class="form-row">
           <div class="path-row">
             <div class="path-status" :class="{ active: verthysPath }">
-              <!-- 深空静默底 + 微星闪烁 -->
-              <div class="ps-void">
-                <span v-for="i in 6" :key="`s${i}`" class="ps-star" :style="{ '--i': i }"></span>
-              </div>
-              <!-- 萤群掠痕（激活态：5 粒光尘三速度剖面差化川渡） -->
-              <div class="ps-stream" aria-hidden="true">
-                <span v-for="m in 5" :key="`m${m}`" class="ps-mote" :class="`ps-mote-${m}`">
-                  <i class="ps-mote-core"></i>
-                </span>
-              </div>
-              <!-- 锁定刻痕组（级联点亮 — 激活瞬间的扫描确认） -->
+              <!-- 锁定刻痕组（静态点亮 — 选中确认） -->
               <div class="ps-lock">
                 <i class="ps-lock-tick ps-lock-tick-1"></i>
                 <i class="ps-lock-tick ps-lock-tick-2"></i>
@@ -118,7 +108,7 @@ import BrandMark from "../common/BrandMark.vue";
 /**
  * UnlockView Props
  */
-defineProps<{
+const props = defineProps<{
   /** 已选 verthys 路径 */
   verthysPath: string;
   /** 解锁处理中标志 */

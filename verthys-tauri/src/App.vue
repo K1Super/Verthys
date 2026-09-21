@@ -44,6 +44,7 @@ const MainView = defineAsyncComponent(() => import("./components/MainView.vue"))
 import { useAppTransition } from "./composables/useAppTransition";
 import { useSecurityGuard } from "./composables/useSecurityGuard";
 import { useGlobalIdleScheduler } from "./composables/useGlobalIdleScheduler";
+import { masterFrameLoop } from "./core/master-frame-loop";
 import { frameBudgetMonitor } from "./core/frame-budget";
 
 /* 页面流转 + 星河阶段编排（v3 双缓冲预挂载：预挂载冻结层 → 交接零成本
@@ -80,12 +81,15 @@ onMounted(() => {
     window.setTimeout(prefetchMainView, 300);
   }
 
-  /* ★ 帧预算监控启动（根组件生命周期驱动启停）：
-   * rAF 帧间隔采样 → P95 评估 → 迟滞降级/自愈（粒子密度 + CSS 治理类）；
-   * 采样守卫（仅 active 档 + 暖机窗口 + 巨帧丢弃）位于 core/frame-budget.ts */
+  /* ★ 全局唯一主渲染循环启动：全应用 rAF 单一入口（帧门控 / 豁免 /
+   * 帧步进-墙钟分离均由主循环统一裁决），所有渲染引擎经注册接口接入。
+   * 帧预算监控随后启动 —— 采样由主循环每执行帧推送任务总耗时，
+   * 决策降频执行（排序与统计不阻塞帧）。 */
+  masterFrameLoop.start();
   frameBudgetMonitor.start();
 });
 onBeforeUnmount(() => {
+  masterFrameLoop.stop();
   frameBudgetMonitor.stop();
   if (onMotionChange) {
     window.matchMedia("(prefers-reduced-motion: reduce)").removeEventListener("change", onMotionChange);
@@ -128,23 +132,21 @@ onBeforeUnmount(() => {
 
 /* ===== MainView materialize（自星系消散的辉光深处浮现成型） =====
  * prewarm 态 = 静态 from 样式（非动画）；解除 prewarm（entered=true）
- * 触发 transition 插值回基线 — 过渡结束 filter/transform 归 none：
- * 零 render surface 残留、MainView 树不进 3D 渲染上下文（文字
- * ClearType 渲染路径恒定 — 与表单模糊根治同一纪律）。
+ * 触发 transition 插值回基线 — 过渡结束 transform 归 none：
+ * MainView 树不进 3D 渲染上下文（文字 ClearType 渲染路径恒定）。
+ * ★ 合成器铁律：过渡目标仅 opacity / transform —— 原 blur(14px)
+ * brightness(1.55) 全屏重采样已移除（交接窗口重绘开销归零），
+ * 柔性由 scale 1.045→1 收敛承担。
  * 时长 --dur-page-enter(1.9s) = 渡越消散段等长（3100→5000ms）：
- * 引擎包络归零时刻「星系落定 = 界面清晰」同步收束。
- * ★ GPU 成本约束：交接窗口全屏 blur 仅此一层（UnlockView 离场
- * 已简化为纯 opacity — 双全屏 blur 叠加根除）。 */
+ * 引擎包络归零时刻「星系落定 = 界面清晰」同步收束。 */
 .main-layer {
   transition: opacity var(--dur-page-enter) var(--ease),
-              filter var(--dur-page-enter) var(--ease),
               transform var(--dur-page-enter) var(--ease);
 }
 .main-layer.prewarm {
   visibility: hidden;
   pointer-events: none;
   opacity: 0;
-  filter: blur(14px) brightness(1.55);
   transform: scale(1.045);
 }
 

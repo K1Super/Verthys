@@ -7,6 +7,9 @@
  *   3. 错误路径：篡改密文/标签、错误 AAD、错误密钥、句柄销毁后不可用
  *   4. keymanager_cng：批量导入（内核态解包）、状态机迁移、
  *      错误 MEK 整体回滚、wrapped 角色绑定、重入替换、句柄计数
+ *   5. 失败路径密钥卫生：导入失败清零调用方缓冲、rotate_mek 失败旧槽
+ *      原样驻留、长度域守卫（size_t→ULONG 截断防护）、共享提供者
+ *      并发 init/deinit 压力（引用计数精确配对）
  */
 #include "verthys_test.h"
 #include "verthys_internal.h"
@@ -15,6 +18,15 @@
 #include "keymanager_cng.h"
 
 #include <string.h>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <process.h>
 
 /* ---------- 测试辅助 ---------- */
 
@@ -646,6 +658,253 @@ TEST(km_reimport_replaces_handles)
 
     verthys_cng_km_destroy_all(&km);
     km_zero_keyset(mek, ka, kb, kc);
+    return 0;
+}
+
+/* ---------- 5. 失败路径密钥卫生 ---------- */
+
+/*
+ * 导入失败的调用方密钥清零契约：import_key 是密钥明文唯一合法驻留点，
+ * 调用方无法区分成败——零化责任一律在 import 内部，契约覆盖全部
+ * 返回路径（key 非 NULL 即清零）。
+ */
+TEST(cng_aead_import_failure_zeroes_key)
+{
+    VerthysCngAead aead;
+    uint8_t key[VERTHYS_CNG_KEY_BYTES], key_copy[VERTHYS_CNG_KEY_BYTES];
+    uint8_t zero[VERTHYS_CNG_KEY_BYTES] = {0};
+
+    verthys_random_bytes(key, sizeof(key));
+
+    /* 内核导入失败（注入）：失败返回后调用方密钥缓冲必须全零 */
+    memcpy(key_copy, key, sizeof(key_copy));
+    CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
+    verthys_cng_test_inject_import_failure();
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL)
+          == VERTHYS_ERR_CNG_UNAVAILABLE);
+    CHECK(memcmp(key_copy, zero, sizeof(zero)) == 0);
+    CHECK(verthys_cng_aead_is_imported(&aead) == 0);
+
+    /* aead == NULL：key 非 NULL 的所有返回路径均清零（契约完备性） */
+    memcpy(key_copy, key, sizeof(key_copy));
+    CHECK(verthys_cng_aead_import_key(NULL, key_copy, NULL)
+          == VERTHYS_ERR_INVALID);
+    CHECK(memcmp(key_copy, zero, sizeof(zero)) == 0);
+
+    /* 注入一次性：后续导入恢复正常 */
+    memcpy(key_copy, key, sizeof(key_copy));
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_is_imported(&aead) == 1);
+    verthys_cng_aead_destroy(&aead);
+    verthys_secure_zero(key, sizeof(key));
+    return 0;
+}
+
+/*
+ * 长度域守卫：明文/密文/AAD 超出 CNG 的 32 位参数域必须显式拒绝，
+ * 不得截断后进入内核调用（截断会导致长度错乱与越界标签写入）。
+ * 边界注入以"容量给足"证明拒绝来自域守卫而非容量判定；
+ * 域内最大值则须穿透域守卫抵达状态判定（不被误拒）。
+ */
+TEST(cng_aead_length_domain_guards)
+{
+    VerthysCngAead aead;
+    uint8_t ct[VERTHYS_CNG_TAG_BYTES], nonce[VERTHYS_CNG_NONCE_BYTES];
+    uint8_t out[8];
+    size_t ctlen, outlen;
+
+    CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);  /* 未导入态 */
+
+    /* 加密侧：明文上限 = ULONG_MAX - 16（密文 = 明文+标签须可表示） */
+    ctlen = (size_t)-1;
+    CHECK(verthys_cng_aead_encrypt(&aead, (const uint8_t *)"x",
+                                 (size_t)0x100000000ull, NULL, 0,
+                                 ct, &ctlen, nonce) == VERTHYS_ERR_INVALID);
+    ctlen = (size_t)-1;
+    CHECK(verthys_cng_aead_encrypt(&aead, (const uint8_t *)"x",
+                                 (size_t)0xFFFFFFFFull, NULL, 0,
+                                 ct, &ctlen, nonce) == VERTHYS_ERR_INVALID);
+    ctlen = (size_t)-1;
+    CHECK(verthys_cng_aead_encrypt(&aead, (const uint8_t *)"x",
+                                 (size_t)0xFFFFFFF0ull, NULL, 0,
+                                 ct, &ctlen, nonce) == VERTHYS_ERR_INVALID);
+
+    /* AAD 超域同样拒绝 */
+    ctlen = (size_t)-1;
+    CHECK(verthys_cng_aead_encrypt(&aead, (const uint8_t *)"x", 1,
+                                 (const uint8_t *)"a",
+                                 (size_t)0x100000000ull,
+                                 ct, &ctlen, nonce) == VERTHYS_ERR_INVALID);
+
+    /* 域内最大明文（ULONG_MAX-16）+ 容量给足：过域守卫与容量判定，
+     * 抵达未导入判定 → LOCKED（证明边界值不被误拒） */
+    ctlen = (size_t)-1;
+    CHECK(verthys_cng_aead_encrypt(&aead, (const uint8_t *)"x",
+                                 (size_t)0xFFFFFFEFull, NULL, 0,
+                                 ct, &ctlen, nonce) == VERTHYS_ERR_LOCKED);
+
+    /* 解密侧：密文上限 = ULONG_MAX（对应加密侧明文上限 ULONG_MAX-16） */
+    outlen = (size_t)-1;
+    CHECK(verthys_cng_aead_decrypt(&aead, ct, (size_t)0x100000000ull,
+                                 NULL, 0, nonce, out, &outlen)
+          == VERTHYS_ERR_INVALID);
+    outlen = (size_t)-1;
+    CHECK(verthys_cng_aead_decrypt(&aead, ct, (size_t)0xFFFFFFFFull,
+                                 NULL, 0, nonce, out, &outlen)
+          == VERTHYS_ERR_LOCKED);
+    return 0;
+}
+
+/*
+ * rotate_mek 失败原子性：新 MEK 导入失败（注入）时旧 MEK 槽必须
+ * 原样驻留——临时槽先验证后切换，失败零变更（unwrap 语义保持）。
+ */
+TEST(km_rotate_mek_failure_keeps_old_slot)
+{
+    VerthysCngKeyManager km;
+    uint8_t mek[VERTHYS_CNG_KEY_BYTES], ka[VERTHYS_CNG_KEY_BYTES],
+            kb[VERTHYS_CNG_KEY_BYTES], kc[VERTHYS_CNG_KEY_BYTES];
+    uint8_t wa[VERTHYS_CNG_WRAPPED_BYTES], wb[VERTHYS_CNG_WRAPPED_BYTES],
+            wc[VERTHYS_CNG_WRAPPED_BYTES];
+    uint8_t new_mek[VERTHYS_CNG_KEY_BYTES], new_mek_copy[VERTHYS_CNG_KEY_BYTES];
+    uint8_t key_material[VERTHYS_CNG_KEY_BYTES];
+    size_t key_len;
+    static const uint8_t wrap_prefix[16] = {
+        'v', 'e', 'r', 't', 'h', 'y', 's',
+        '/', 'w', 'r', 'a', 'p', '-', 'v', '3'
+    };
+    uint8_t aad[17];
+    int base = verthys_cng_km_global_handle_total();
+
+    CHECK(km_build_keyset(mek, ka, kb, kc, wa, wb, wc) == 0);
+    verthys_random_bytes(new_mek, sizeof(new_mek));
+
+    CHECK(verthys_cng_km_init(&km) == VERTHYS_OK);
+    {
+        uint8_t mek_copy[VERTHYS_CNG_KEY_BYTES];
+        memcpy(mek_copy, mek, sizeof(mek_copy));
+        CHECK(verthys_cng_km_import_batch(&km, mek_copy,
+                                        wa, VERTHYS_CNG_WRAPPED_BYTES,
+                                        wb, VERTHYS_CNG_WRAPPED_BYTES,
+                                        wc, VERTHYS_CNG_WRAPPED_BYTES)
+              == VERTHYS_OK);
+    }
+    CHECK(verthys_cng_km_global_handle_total()
+          == base + (int)VERTHYS_CNG_KEY_COUNT);
+
+    /* 新 MEK 导入失败（注入）：旧 MEK 槽必须原样驻留（零变更） */
+    memcpy(new_mek_copy, new_mek, sizeof(new_mek_copy));
+    verthys_cng_test_inject_import_failure();
+    CHECK(verthys_cng_km_rotate_mek(&km, new_mek_copy)
+          == VERTHYS_ERR_CNG_UNAVAILABLE);
+    CHECK(verthys_cng_aead_is_imported(&km.keys[VERTHYS_CNG_KEY_MEK]) == 1);
+    CHECK(verthys_cng_km_global_handle_total()
+          == base + (int)VERTHYS_CNG_KEY_COUNT);
+
+    /* 旧 MEK 槽依旧可用：wrapped_key_a 内核态解包成功且内容一致 */
+    memcpy(aad, wrap_prefix, sizeof(wrap_prefix));
+    aad[16] = (uint8_t)VERTHYS_CNG_KEY_A;
+    key_len = sizeof(key_material);
+    CHECK(verthys_cng_aead_decrypt(&km.keys[VERTHYS_CNG_KEY_MEK],
+                                 wa + VERTHYS_CNG_NONCE_BYTES,
+                                 VERTHYS_CNG_WRAPPED_BYTES
+                                     - VERTHYS_CNG_NONCE_BYTES,
+                                 aad, sizeof(aad), wa,
+                                 key_material, &key_len) == VERTHYS_OK);
+    CHECK(key_len == VERTHYS_CNG_KEY_BYTES);
+    CHECK(memcmp(key_material, ka, VERTHYS_CNG_KEY_BYTES) == 0);
+    verthys_secure_zero(key_material, sizeof(key_material));
+
+    /* 注入恢复后轮换成功：MEK 槽换新，句柄总量配平不变 */
+    memcpy(new_mek_copy, new_mek, sizeof(new_mek_copy));
+    CHECK(verthys_cng_km_rotate_mek(&km, new_mek_copy) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_is_imported(&km.keys[VERTHYS_CNG_KEY_MEK]) == 1);
+    CHECK(verthys_cng_km_global_handle_total()
+          == base + (int)VERTHYS_CNG_KEY_COUNT);
+    verthys_cng_km_destroy_all(&km);
+    CHECK(verthys_cng_km_global_handle_total() == base);
+
+    km_zero_keyset(mek, ka, kb, kc);
+    verthys_secure_zero(new_mek, sizeof(new_mek));
+    return 0;
+}
+
+/*
+ * 共享提供者并发 init/deinit 压力：多线程循环配对调用下，
+ * open 路径必须互斥（无双开句柄泄漏）、引用计数精确归零、
+ * 全部导入成功（无"已认为就绪而句柄被关"竞态）。
+ * 线程内错误仅原子累计，join 后统一断言。
+ */
+#define PCP_THREADS 4
+#define PCP_ROUNDS  2000
+
+typedef struct ProviderStormState {
+    volatile LONG init_fails;    /* init_once 非预期失败累计 */
+    volatile LONG import_fails;  /* 轮内导入失败累计 */
+} ProviderStormState;
+
+static unsigned __stdcall pcp_worker(void *arg)
+{
+    ProviderStormState *st = (ProviderStormState *)arg;
+    VerthysCngAead aead;
+    uint8_t key[VERTHYS_CNG_KEY_BYTES], key_copy[VERTHYS_CNG_KEY_BYTES];
+    unsigned r;
+
+    verthys_random_bytes(key, sizeof(key));
+    for (r = 0; r < PCP_ROUNDS; r++) {
+        memcpy(key_copy, key, sizeof(key_copy));
+        if (verthys_cng_init_once() != VERTHYS_OK) {
+            InterlockedIncrement(&st->init_fails);
+            continue;
+        }
+        if (verthys_cng_aead_init(&aead) != VERTHYS_OK ||
+            verthys_cng_aead_import_key(&aead, key_copy, NULL)
+                != VERTHYS_OK) {
+            InterlockedIncrement(&st->import_fails);
+        } else {
+            verthys_cng_aead_destroy(&aead);
+        }
+        verthys_cng_global_deinit();
+    }
+    verthys_secure_zero(key, sizeof(key));
+    return 0;
+}
+
+TEST(cng_provider_concurrent_init_deinit)
+{
+    ProviderStormState st;
+    HANDLE threads[PCP_THREADS];
+    int i, spawned = 0;
+
+    /* 清零基线：此前测试遗留的未配对引用统一释放（提供者随引用归零
+     * 关闭；此时无任何存活密钥句柄依赖它），风暴从真实零引用起跑 */
+    while (verthys_cng_test_alg_refs() != 0) {
+        verthys_cng_global_deinit();
+    }
+
+    memset(&st, 0, sizeof(st));
+    for (i = 0; i < PCP_THREADS; i++) {
+        threads[i] = (HANDLE)_beginthreadex(NULL, 0, pcp_worker, &st, 0, NULL);
+        if (threads[i] == NULL) break;
+        spawned++;
+    }
+    for (i = 0; i < spawned; i++) {
+        WaitForSingleObject(threads[i], INFINITE);
+        CloseHandle(threads[i]);
+    }
+    CHECK(spawned == PCP_THREADS);
+
+    /* 断言后置：无失败、引用计数精确归零（init/deinit 严格配对，
+     * 提供者已随最后一次 deinit 关闭） */
+    CHECK(st.init_fails == 0);
+    CHECK(st.import_fails == 0);
+    CHECK(verthys_cng_test_alg_refs() == 0);
+
+    /* 风暴后可正常重开（open 失败可重试、关闭后可重开的完整生命周期） */
+    CHECK(verthys_cng_init_once() == VERTHYS_OK);
+    CHECK(verthys_cng_test_alg_refs() == 1);
+    verthys_cng_global_deinit();
+    CHECK(verthys_cng_test_alg_refs() == 0);
     return 0;
 }
 

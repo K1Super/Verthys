@@ -100,6 +100,9 @@ TEST(import_bad_file);
 TEST(import_invalid_params);
 TEST(import_requires_unlock);
 
+/* test_scan_concurrent.c */
+TEST(scan_concurrent_readers_vs_writer);
+
 /* ★ 模块化重构：test_anti_debug.c（v1 反调试，死代码）随 runtime/ 删除清单移除 */
 
 /* test_memory_safety.c */
@@ -137,9 +140,8 @@ TEST(fuzz_bit_flip_data_block);
 TEST(fuzz_extended_file);
 
 /* test_key_separation.c — ★ CNG 内核托管密钥（3 项） */
-TEST(keysep_aead_roundtrip);
+TEST(keysep_install_consumes_and_reports);
 TEST(keysep_commit_sleep_enforced);
-TEST(keysep_purge_invalidates);
 
 /* test_emergency.c — ★ 应急响应分级（3 项） */
 TEST(emergency_telemetry_no_trigger);
@@ -150,10 +152,14 @@ TEST(emergency_handler_swap_and_null);
 TEST(integrity_verify_unconfigured_passes);
 TEST(integrity_init_idempotent);
 
-/* test_txn_recovery_inject.c — ★ 事务半写/损坏故障注入（3 项） */
+/* test_txn_recovery_inject.c — ★ 事务半写/损坏故障注入（4 项） */
 TEST(inject_sb_ciphertext_bitflip_rejected);
 TEST(inject_taillog_overwrite_still_unlockable);
 TEST(inject_bad_magic_rejected);
+TEST(inject_wal_third_round_residual_not_replayed);
+
+/* test_txn_delete_retry.c — ★ DELETE 中途失败的引用完好性（1 项） */
+TEST(txn_delete_failure_keeps_extent_ref);
 
 /* test_perf_prefetch.c — ★ 性能回归测试（8 项） */
 TEST(perf_balanced_enables_warm_cache);
@@ -199,6 +205,10 @@ TEST(km_wrapped_role_binding);
 TEST(km_reimport_replaces_handles);
 TEST(km_null_params_rejected);
 TEST(km_global_handle_tracking);
+TEST(cng_aead_import_failure_zeroes_key);
+TEST(cng_aead_length_domain_guards);
+TEST(km_rotate_mek_failure_keeps_old_slot);
+TEST(cng_provider_concurrent_init_deinit);
 
 /* test_secure_allocator.c — ★ 验收：安全分配器 + 全局内存预算记账 */
 TEST(sec_alloc_basic_roundtrip);
@@ -207,6 +217,9 @@ TEST(sec_alloc_locked);
 TEST(sec_alloc_budget_reject_and_reclaim);
 TEST(sec_alloc_error_paths);
 TEST(sec_alloc_destroy_releases_all);
+
+/* test_backoff_process_wide.c — 暴力破解退避进程级聚合语义 */
+TEST(backoff_process_wide_aggregation);
 
 /* test_v3_container.c — ★ 验收：V3 超级块（多副本 + 法定人数 + 事务） */
 TEST(v3sb_init_new_defaults);
@@ -261,6 +274,10 @@ TEST(v3lsm_compaction_tombstone);
 TEST(v3lsm_manifest_tamper_rejected);
 TEST(v3lsm_get_notfound_and_invalid);
 TEST(v3lsm_null_params_rejected);
+
+/* test_sstable_budget.c — ★ SSTable 写前预算（越界字节不落盘） */
+TEST(sstb_budget_rejects_before_physical_write);
+TEST(sstb_budget_normal_write_unaffected);
 
 /* test_v3_extent.c — ★ 验收：V3 内容寻址 Extent（去重 + 完整性） */
 TEST(v3ext_hash_basics);
@@ -317,6 +334,7 @@ TEST(pepper_v3_level_forgery_rejected);
 TEST(pepper_v3_foreign_size_rejected);
 TEST(pepper_v3_bad_magic_rejected);
 TEST(pepper_v3_inject_bypasses_os);
+TEST(pepper_v3_no_compiled_fallback);
 
 /* test_runtime_hash.c — ★ 运行时函数级哈希校验（.rhat 真表） */
 TEST(rhat_table_configured);
@@ -646,6 +664,7 @@ int main(int argc, char **argv)
     RUN_TEST(pepper_v3_foreign_size_rejected);
     RUN_TEST(pepper_v3_bad_magic_rejected);
     RUN_TEST(pepper_v3_inject_bypasses_os);
+    RUN_TEST(pepper_v3_no_compiled_fallback);
     test_state_checkpoint("pepper_v3");
 
     RUN_TEST(format_roundtrip_single);
@@ -699,6 +718,10 @@ int main(int argc, char **argv)
     RUN_TEST(import_requires_unlock);
     test_state_checkpoint("export_import");
 
+    /* 扫描并发压力测试（读游标 vs 写入竞争） */
+    RUN_TEST(scan_concurrent_readers_vs_writer);
+    test_state_checkpoint("scan_concurrent");
+
     /* 内存安全测试 */
     RUN_TEST(mem_lock_zeroes_keys);
     RUN_TEST(mem_lock_frees_records);
@@ -749,9 +772,8 @@ int main(int argc, char **argv)
     test_state_checkpoint("perf");
 
     /* ★CNG 内核托管密钥测试 */
-    RUN_TEST(keysep_aead_roundtrip);
+    RUN_TEST(keysep_install_consumes_and_reports);
     RUN_TEST(keysep_commit_sleep_enforced);
-    RUN_TEST(keysep_purge_invalidates);
     test_state_checkpoint("key_separation");
 
     /* ★应急响应分级测试 */
@@ -769,7 +791,12 @@ int main(int argc, char **argv)
     RUN_TEST(inject_sb_ciphertext_bitflip_rejected);
     RUN_TEST(inject_taillog_overwrite_still_unlockable);
     RUN_TEST(inject_bad_magic_rejected);
+    RUN_TEST(inject_wal_third_round_residual_not_replayed);
     test_state_checkpoint("txn_inject");
+
+    /* ★ DELETE 中途失败的引用完好性测试 */
+    RUN_TEST(txn_delete_failure_keeps_extent_ref);
+    test_state_checkpoint("txn_delete_retry");
 
     /* ★ 回归测试（12 项） */
     RUN_TEST(repair_pool_extend_boundary);
@@ -806,6 +833,10 @@ int main(int argc, char **argv)
     RUN_TEST(km_reimport_replaces_handles);
     RUN_TEST(km_null_params_rejected);
     RUN_TEST(km_global_handle_tracking);
+    RUN_TEST(cng_aead_import_failure_zeroes_key);
+    RUN_TEST(cng_aead_length_domain_guards);
+    RUN_TEST(km_rotate_mek_failure_keeps_old_slot);
+    RUN_TEST(cng_provider_concurrent_init_deinit);
     test_state_checkpoint("cng_kernel");
 
     /* ★ 验收：安全分配器（隔离堆 + PAGE_GUARD 边界页 + 锁页 + 预算记账） */
@@ -816,6 +847,10 @@ int main(int argc, char **argv)
     RUN_TEST(sec_alloc_error_paths);
     RUN_TEST(sec_alloc_destroy_releases_all);
     test_state_checkpoint("secure_allocator");
+
+    /* 暴力破解退避进程级聚合 */
+    RUN_TEST(backoff_process_wide_aggregation);
+    test_state_checkpoint("backoff_process_wide");
 
     /* ★ 验收：V3 超级块（flatcc 序列化 + HMAC + 三副本法定人数 + 事务） */
     RUN_TEST(v3sb_init_new_defaults);
@@ -894,6 +929,11 @@ int main(int argc, char **argv)
     RUN_TEST(v3lsm_get_notfound_and_invalid);
     RUN_TEST(v3lsm_null_params_rejected);
     test_state_checkpoint("v3_lsm");
+
+    /* ★ SSTable 写前预算（越界字节不落盘 + 正常路径行为不变） */
+    RUN_TEST(sstb_budget_rejects_before_physical_write);
+    RUN_TEST(sstb_budget_normal_write_unaffected);
+    test_state_checkpoint("sstable_budget");
 
     /* ★ 验收：V3 生命周期全链路（创建→写→读→删→改密→导出→导入重开）
      * + 解锁流水线（fail_mask 逐阶段注入 / MINIMAL_FIRST 渐进式）

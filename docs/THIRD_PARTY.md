@@ -81,7 +81,7 @@
   （`BINARY_ARCH_MISMATCH` / `BINARY_LOAD_FAILED` / `INTEGRITY_FAILED`）。
 - 运行时哈希/恶意篡改校验：`core/src/security/integrity/`（runtime_hash.c / integrity.c）与防御闭环
   7 路径（`Verthys_GetSecurityStatus`），详见 `SECURITY_DESIGN.md`。
-- 依赖审查红线：执行刚性约束条款（`docs/执行刚性约束条款.md`）要求第三方依赖安全审查、禁引已知高危组件，
+- 依赖审查红线：工程刚性约束条款（`docs/ENGINEERING_CONSTRAINTS.md`）要求第三方依赖安全审查、禁引已知高危组件，
   详见 `SECURITY_DESIGN.md`。
 
 ## 8. 已知观察（照实记录，未改代码）

@@ -1244,15 +1244,9 @@ export async function securityBruteCheck(): Promise<BruteForceCheckResponse> {
   return await ipc<BruteForceCheckResponse>("security_brute_check");
 }
 
-/** 记录一次解锁失败（返回触发后的状态） */
-export async function securityBruteRecordFailure(): Promise<BruteForceCheckResponse> {
-  return await ipc<BruteForceCheckResponse>("security_brute_record_failure");
-}
-
-/** 记录一次解锁成功（重置连续失败计数） */
-export async function securityBruteRecordSuccess(): Promise<void> {
-  await ipc<void>("security_brute_record_success");
-}
+// 失败计数与成功重置的记录接口已上移服务端口令类命令入口（unlock /
+// verify_global_key）权威执行，前端不再提供记录封装，防止同一失败
+// 被前后端各计一次。此处仅保留查询与清除类纯读操作。
 
 /** 清除熔断状态（PurgeRequired 处理完成后调用） */
 export async function securityBruteClearPurge(): Promise<void> {

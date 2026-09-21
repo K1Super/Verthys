@@ -32,12 +32,10 @@
 @keyframes dialog-in {
   from {
     opacity: 0;
-    filter: blur(12px);
     transform: scale(0.95) translateY(8px);
   }
   to {
     opacity: 1;
-    filter: blur(0);
     transform: scale(1) translateY(0);
   }
 }
@@ -48,17 +46,14 @@
 @keyframes ct-rise {
   0% {
     transform: translate(0, 14px) scale(0.9);
-    filter: blur(12px);
     opacity: 0;
   }
   55% {
     transform: translate(0, -1px) scale(1.02);
-    filter: blur(0);
     opacity: 1;
   }
   100% {
     transform: translate(0, 0) scale(1);
-    filter: blur(0);
     opacity: 1;
   }
 }
@@ -160,8 +155,7 @@ body::after {
  * 幅度参数全部 CSS 变量化（.brand-title 默认 = 引导级原值；
  * .brand-title--compact 覆写 = 主界面 compact 级原值）：
  *   --brand-stroke 镂空描边宽 / --carve-x/--carve-y 雕刻克隆偏移 /
- *   --bs·--bo 入射与过冲缩放 / --bi·--bim 入射与过冲模糊 /
- *   --bb·--bbm 入射与过冲亮度（compact 级恒 1 = 无亮度干预，与原实现一致）
+ *   --bs·--bo 入射与过冲缩放
  * ========================================================================== */
 .brand-title {
   position: relative;
@@ -183,14 +177,10 @@ body::after {
   --carve-y: 4px;
   --bs: 0.42;
   --bo: 1.055;
-  --bi: 16px;
-  --bim: 2px;
-  --bb: 2.1;
-  --bbm: 1.35;
 }
 
 /* compact 级（主界面 — 与引导页同源形态、幅度收敛）：
- * 描边 1.1px / 克隆偏移 (2,3)px / 入射 blur 9px 无亮度 / 过冲 1.045 */
+ * 描边 1.1px / 克隆偏移 (2,3)px / 过冲 1.045 */
 .brand-title--compact {
   line-height: 0.82;
   --brand-stroke: 1.1px;
@@ -198,17 +188,12 @@ body::after {
   --carve-y: 3px;
   --bs: 0.55;
   --bo: 1.045;
-  --bi: 9px;
-  --bim: 1.5px;
-  --bb: 1;
-  --bbm: 1;
 }
 
 /* mini 级（弹窗品牌字 — 弹窗顶部标识，弹窗内最大文字层级）：
  * 字号 24-34px（useBrandTitle mini 级 hash 场 — 高于 sc-title 16px）；
- * 描边 0.8px 发丝 / 克隆偏移 (1,1.5)px 微雕刻 / 过冲 1.03；
- * ★ 入射模糊恒 0（--bi/--bim = 0px）：弹窗文字小字号对 blur 极敏感
- * （"出现模糊→清晰"跳变），入射深度感由位移/缩放单独承载 */
+ * 描边 0.8px 发丝 / 克隆偏移 (1,1.5)px 微雕刻 / 过冲 1.03 / 无入射
+ * 模糊（小字号对模糊敏感 — 入射深度感由位移/缩放单独承载） */
 .brand-title--mini {
   line-height: 0.9;
   margin: 0 auto 12px;
@@ -217,10 +202,6 @@ body::after {
   --carve-y: 1.5px;
   --bs: 0.7;
   --bo: 1.03;
-  --bi: 0px;
-  --bim: 0px;
-  --bb: 1;
-  --bbm: 1;
 }
 /* mini 级雕刻克隆降透明度（小字号下 0.55 过重） */
 .brand-title--mini .brand-char::before {
@@ -235,7 +216,7 @@ body::after {
   transform-origin: center bottom;
   /* 轨道成型：复合关键帧（入射 → 过冲回稳 → 浮动基线落位），逐字差化 */
   animation: brand-assemble var(--dur, 1.1s) cubic-bezier(0.22, 1, 0.36, 1) var(--delay, 0ms) both;
-  will-change: transform, opacity, filter;
+  will-change: transform, opacity;
   /* 基线 = 组装完成态（both 填充结束后回落基线零跳变；显式 transform
    * 替代 none — 合成层恒定，杜绝"动画结束渲染模式突变"类回平跳变） */
   transform: translateY(var(--by, 0px)) rotate(var(--tr, 0deg));
@@ -281,12 +262,11 @@ body::after {
 
 /* 轨道组装：沿逐字入射向量弧线入场 → 轻度过冲 → 浮动基线落位
  * （字号差化排印终态 — 复合曲线拒绝单一标准缓动）；
- * 过冲帧与首末帧的强度经 --bo/--bim/--bbm 变量化，两级场景共用一轨 */
+ * 过冲帧与首末帧的强度经 --bo 变量化，两级场景共用一轨 */
 @keyframes brand-assemble {
   0% {
     opacity: 0;
     transform: translate(var(--dx, 60px), var(--dy, -40px)) rotate(var(--rot, 8deg)) scale(var(--bs, 0.42));
-    filter: blur(var(--bi, 16px)) brightness(var(--bb, 2.1));
   }
   58% {
     opacity: 1;
@@ -296,11 +276,9 @@ body::after {
       translateY(calc(var(--by, 0px) * 0.5))
       rotate(var(--tr, 0deg))
       scale(var(--bo, 1.055));
-    filter: blur(var(--bim, 2px)) brightness(var(--bbm, 1.35));
   }
   100% {
     opacity: 1;
     transform: translateY(var(--by, 0px)) rotate(var(--tr, 0deg)) scale(1);
-    filter: blur(0) brightness(1);
   }
 }

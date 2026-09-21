@@ -56,6 +56,56 @@ use crate::util::path::{normalize_path, sanitize_path};
 use tauri::State;
 use zeroize::Zeroizing;
 
+// ===== 借用式请求构造 =====
+
+// 以下结构体把口令/记录明文以 &str 借用序列化进输出字符串，
+// 不产生 serde_json::Value 的 owned 明文拷贝；序列化结果立即进入
+// Zeroizing 容器，随敏感原件在发送后统一擦除。
+
+/// unlock 请求体（flags=None 时省略字段，与无 flags 的线格式兼容）
+#[derive(serde::Serialize)]
+struct UnlockReq<'a> {
+    op: &'static str,
+    path: &'a str,
+    password: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flags: Option<u32>,
+}
+
+/// create_with_preset 请求体
+#[derive(serde::Serialize)]
+struct CreateWithPresetReq<'a> {
+    op: &'static str,
+    path: &'a str,
+    password: &'a str,
+    preset: u32,
+}
+
+/// export / import 请求体（共用 path + password 两字段结构）
+#[derive(serde::Serialize)]
+struct PathPasswordReq<'a> {
+    op: &'static str,
+    path: &'a str,
+    password: &'a str,
+}
+
+/// change_password 请求体
+#[derive(serde::Serialize)]
+struct ChangePasswordReq<'a> {
+    op: &'static str,
+    old_password: &'a str,
+    new_password: &'a str,
+}
+
+/// add_record 请求体（name 与 data 为用户记录明文，一并借用序列化）
+#[derive(serde::Serialize)]
+struct AddRecordReq<'a> {
+    op: &'static str,
+    rtype: u32,
+    name: &'a str,
+    data: &'a str,
+}
+
 // ===== 审计日志辅助 =====
 
 /// 获取审计日志文件路径，存放于应用配置目录下。
@@ -597,6 +647,7 @@ fn preheat_cache_file(verthys_path: &str) {
 pub async fn verthys_unlock(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    security_state: State<'_, crate::security_commands::SecurityState>,
     verthys_path: String,
     password: String,
     preheat_token: Option<String>,
@@ -604,6 +655,50 @@ pub async fn verthys_unlock(
 ) -> Result<VerthysResponse, String> {
     let password = Zeroizing::new(password);
     log::info!("[verthys_unlock] 开始解锁: path={}", sanitize_path(&verthys_path));
+
+    // 服务端强制暴力熔断闸门：锁定/清空状态下，口令不进入任何
+    // 业务逻辑（不触文件锁、不触 FFI）。计数由后端权威维护，
+    // 不依赖前端行为；前端仅负责查询展示锁定态。
+    use crate::security_commands::brute_force_bridge::{gate_check, UnlockGate};
+    match gate_check(&app, &security_state) {
+        UnlockGate::Allowed => {}
+        UnlockGate::Locked(secs) => {
+            log::warn!(
+                "[verthys_unlock] 暴力熔断锁定中（剩余 {}s），拒绝尝试",
+                secs
+            );
+            write_verthys_audit(
+                &app,
+                AuditEventType::VerthysUnlock,
+                &verthys_path,
+                AuditResult::Denied,
+                Some(format!("BRUTE_FORCE_LOCKOUT: 界面锁定 {} 秒（服务端强制）", secs)),
+            );
+            return Err(format!("尝试次数过多，已锁定 {} 秒，请稍后再试", secs));
+        }
+        UnlockGate::PurgeRequired => {
+            log::warn!("[verthys_unlock] 暴力熔断清空态，拒绝尝试");
+            write_verthys_audit(
+                &app,
+                AuditEventType::VerthysUnlock,
+                &verthys_path,
+                AuditResult::Denied,
+                Some("BRUTE_FORCE_PURGE: 需执行索引清空与完整性校验（服务端强制）".into()),
+            );
+            return Err("失败次数已达上限，需完成安全清理与完整性校验后重试".into());
+        }
+        UnlockGate::Unavailable => {
+            log::error!("[verthys_unlock] 熔断守卫不可用（fail-closed 拒绝）");
+            write_verthys_audit(
+                &app,
+                AuditEventType::VerthysUnlock,
+                &verthys_path,
+                AuditResult::Denied,
+                Some("熔断守卫不可用，fail-closed 拒绝解锁".into()),
+            );
+            return Err("安全模块暂时不可用，请重启应用后重试".into());
+        }
+    }
 
     if !std::path::Path::new(&verthys_path).exists() {
         log::warn!("[verthys_unlock] 文件不存在: {}", sanitize_path(&verthys_path));
@@ -671,15 +766,18 @@ pub async fn verthys_unlock(
     }
     log::info!("[verthys_unlock] flags=0x{:02x}", flags);
 
-    let req = serde_json::json!({
-        "op": "unlock",
-        "path": verthys_path,
-        "password": *password,
-        "flags": flags,
-    });
+    let req_str = Zeroizing::new(serde_json::to_string(&UnlockReq {
+        op: "unlock",
+        path: &verthys_path,
+        password: &password,
+        flags: Some(flags),
+    }).map_err(|e| {
+        log::error!("[verthys_unlock] 请求序列化失败: {}", e);
+        "打开加密库失败".to_string()
+    })?);
 
     let resp_json = {
-        let result = state.send_with_unlock_progress(&req.to_string(), &|progress| {
+        let result = state.send_with_unlock_progress(req_str.as_str(), &|progress| {
             if let Err(e) = on_progress.send(progress.clone()) {
                 log::warn!("[verthys_unlock] 进度推送失败（前端可能已关闭）: {}", e);
             }
@@ -712,11 +810,13 @@ pub async fn verthys_unlock(
         }
     };
 
+    // 发送完成：序列化副本与口令原件统一销毁（Zeroizing 擦除堆缓冲）
+    drop(req_str);
     drop(password);
 
     let resp: VerthysResponse = serde_json::from_str(&resp_json)
         .map_err(|e| {
-            log::error!("[verthys_unlock] 解析响应失败: {} | raw={}", e, resp_json);
+            log::error!("[verthys_unlock] 解析响应失败: {} | raw={}", e, crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"]));
             write_verthys_audit(
                 &app,
                 AuditEventType::VerthysUnlock,
@@ -729,6 +829,20 @@ pub async fn verthys_unlock(
 
     if !resp.ok {
         log::warn!("[verthys_unlock] 解锁失败: {:?}", resp.error);
+
+        // 服务端强制失败计数：仅认证域错误（worker 统一化 AUTH 码）计入。
+        // 口令错误/格式/IO/损坏在 worker 侧已统一映射为 AUTH，语义上
+        // 均属认证域结果；功能性状态码与通信层失败不计，防止非口令
+        // 因素（CNG 不可用、超时等）误锁正常用户。
+        if resp.error.as_deref()
+            == Some(crate::security_commands::brute_force_bridge::AUTH_DOMAIN_ERROR)
+        {
+            crate::security_commands::brute_force_bridge::record_auth_failure(
+                &app,
+                &security_state,
+            );
+        }
+
         write_verthys_audit(
             &app,
             AuditEventType::VerthysUnlock,
@@ -738,6 +852,13 @@ pub async fn verthys_unlock(
         );
     } else {
         log::info!("[verthys_unlock] 解锁成功");
+
+        // 服务端强制成功重置：连续失败计数归零
+        // （解锁响应 ok=true 已确认成功，无需 auth_token 授权）
+        crate::security_commands::brute_force_bridge::record_auth_success(
+            &app,
+            &security_state,
+        );
 
         // ★ 企业级修复：同步 key_lifecycle 状态机与 verthys 生命周期
         //
@@ -934,13 +1055,13 @@ pub async fn verthys_create(
     let create_result: Result<VerthysResponse, String> = (|| {
         log::info!("[verthys_create] 步骤 1/3: create_with_preset（preset={}, 超时={}s）",
                    preset_name, create_timeout.as_secs());
-        let create_req = serde_json::json!({
-            "op": "create_with_preset",
-            "path": verthys_path,
-            "password": *password,
-            "preset": preset_val,
-        });
-        let resp_json = state.send_with_timeout(&create_req.to_string(), create_timeout).map_err(|e| {
+        let create_req = Zeroizing::new(serde_json::to_string(&CreateWithPresetReq {
+            op: "create_with_preset",
+            path: &verthys_path,
+            password: &password,
+            preset: preset_val,
+        }).map_err(|e| format!("创建加密库失败（步骤1序列化失败）: {}", e))?);
+        let resp_json = state.send_with_timeout(create_req.as_str(), create_timeout).map_err(|e| {
             log::error!("[verthys_create] 步骤 1 send 失败（超时 {}s）: {}", create_timeout.as_secs(), e);
             format!("创建加密库失败（步骤1通信失败）: {}", e)
         })?;
@@ -975,12 +1096,13 @@ pub async fn verthys_create(
         log::info!("[verthys_create] 步骤 2/3: lock 成功");
 
         log::info!("[verthys_create] 步骤 3/3: unlock（重新打开, 超时={}s）", lock_unlock_timeout.as_secs());
-        let unlock_req2 = serde_json::json!({
-            "op": "unlock",
-            "path": verthys_path,
-            "password": *password,
-        });
-        let resp_json2 = state.send_with_timeout(&unlock_req2.to_string(), lock_unlock_timeout).map_err(|e| {
+        let unlock_req2 = Zeroizing::new(serde_json::to_string(&UnlockReq {
+            op: "unlock",
+            path: &verthys_path,
+            password: &password,
+            flags: None,
+        }).map_err(|e| format!("创建加密库失败（步骤3序列化失败）: {}", e))?);
+        let resp_json2 = state.send_with_timeout(unlock_req2.as_str(), lock_unlock_timeout).map_err(|e| {
             log::error!("[verthys_create] 步骤 3 send 失败: {}", e);
             format!("创建加密库失败（步骤3通信失败）: {}", e)
         })?;
@@ -1461,13 +1583,24 @@ pub async fn verthys_add_record(
     name: String,
     data_b64: String,
 ) -> Result<VerthysResponse, String> {
-    let req = serde_json::json!({
-        "op": "add_record",
-        "rtype": rtype,
-        "name": name,
-        "data": data_b64,
-    });
-    let resp_json = state.send(&req.to_string())?;
+    // 记录名与数据 base64 均为用户明文，包装进 Zeroizing 统一擦除
+    let name = Zeroizing::new(name);
+    let data_b64 = Zeroizing::new(data_b64);
+
+    let req_str = Zeroizing::new(serde_json::to_string(&AddRecordReq {
+        op: "add_record",
+        rtype,
+        name: &name,
+        data: &data_b64,
+    }).map_err(|e| format!("serialize request: {}", e))?);
+
+    let resp_json = state.send(req_str.as_str())?;
+
+    // 发送完成：序列化副本与记录明文原件统一销毁
+    drop(req_str);
+    drop(data_b64);
+    drop(name);
+
     let resp: VerthysResponse = serde_json::from_str(&resp_json)
         .map_err(|e| format!("parse response: {}", e))?;
     Ok(resp)
@@ -1690,15 +1823,17 @@ pub async fn verthys_export(
 ) -> Result<VerthysResponse, String> {
     let password = Zeroizing::new(password);
 
-    let req = serde_json::json!({
-        "op": "export",
-        "path": export_path,
-        "password": *password,
-    });
-    let req_str = req.to_string();
+    let req_str = Zeroizing::new(serde_json::to_string(&PathPasswordReq {
+        op: "export",
+        path: &export_path,
+        password: &password,
+    }).map_err(|e| format!("serialize request: {}", e))?);
+
+    // 序列化完成即销毁口令原件，仅保留 Zeroizing 序列化副本直至发送
     drop(password);
 
-    let resp_json = state.send(&req_str)?;
+    let resp_json = state.send(req_str.as_str())?;
+    drop(req_str);
     let resp: VerthysResponse = serde_json::from_str(&resp_json)
         .map_err(|e| format!("parse response: {}", e))?;
     Ok(resp)
@@ -1714,15 +1849,17 @@ pub async fn verthys_import(
 ) -> Result<VerthysResponse, String> {
     let password = Zeroizing::new(password);
 
-    let req = serde_json::json!({
-        "op": "import",
-        "path": import_path,
-        "password": *password,
-    });
-    let req_str = req.to_string();
+    let req_str = Zeroizing::new(serde_json::to_string(&PathPasswordReq {
+        op: "import",
+        path: &import_path,
+        password: &password,
+    }).map_err(|e| format!("serialize request: {}", e))?);
+
+    // 序列化完成即销毁口令原件，仅保留 Zeroizing 序列化副本直至发送
     drop(password);
 
-    let resp_json = state.send(&req_str)?;
+    let resp_json = state.send(req_str.as_str())?;
+    drop(req_str);
     let resp: VerthysResponse = serde_json::from_str(&resp_json)
         .map_err(|e| format!("parse response: {}", e))?;
     Ok(resp)
@@ -1744,16 +1881,18 @@ pub async fn verthys_change_password(
         return Err(e);
     }
 
-    let req = serde_json::json!({
-        "op": "change_password",
-        "old_password": *old_password,
-        "new_password": *new_password,
-    });
-    let req_str = req.to_string();
+    let req_str = Zeroizing::new(serde_json::to_string(&ChangePasswordReq {
+        op: "change_password",
+        old_password: &old_password,
+        new_password: &new_password,
+    }).map_err(|e| format!("serialize request: {}", e))?);
+
+    // 序列化完成即销毁两个口令原件，仅保留 Zeroizing 序列化副本直至发送
     drop(old_password);
     drop(new_password);
 
-    let resp_json = state.send(&req_str)?;
+    let resp_json = state.send(req_str.as_str())?;
+    drop(req_str);
     let resp: VerthysResponse = serde_json::from_str(&resp_json)
         .map_err(|e| format!("parse response: {}", e))?;
     Ok(resp)

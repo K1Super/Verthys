@@ -163,6 +163,7 @@ import {
 } from '../../composables/security-center/useQuantumField';
 import { useGlobalIdleScheduler } from '../../composables/useGlobalIdleScheduler';
 import { useFrameGate } from '../../composables/useFrameGate';
+import { createPacketRitual, type PacketRitual } from '../../composables/management/packetRitual';
 
 /**
  * ManagementHub Props
@@ -195,6 +196,37 @@ const FILAMENTS: Array<[number, number, number, number]> = [
   [1, 2, 22, 26],
   [0, 2, -52, 34],
 ];
+
+/* ===== 传播仪式节奏配置（单一数据源） =====
+ * 传播 + 落定 = 720ms 总仪式时长；视图切换由传播完成事件驱动，
+ * 引擎内禁止任何固定延时等待动画。 */
+const RITUAL_DURATION = {
+  /** 光包传播时长（秒） */
+  propagation: 0.62,
+  /** 落定时长（秒，光晕扩散 + 终点锚闪光渐熄） */
+  landing: 0.1,
+  /** 帧步进钳制上限（秒）：仅用于弹簧/衰减等物理积分，绝不参与进度计算 */
+  maxPhysicsStep: 0.05,
+} as const;
+
+/** 无障碍降级：reduced-motion 下跳过传播与落定，直接进入视图切换 */
+const reducedMotion =
+  typeof window !== 'undefined' &&
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/** 传播仪式状态机（纯时间逻辑，见 packetRitual） */
+const ritual: PacketRitual = createPacketRitual({
+  propagationDuration: RITUAL_DURATION.propagation,
+  landingDuration: RITUAL_DURATION.landing,
+  reducedMotion,
+});
+/** 落定逻辑完成帧标志：下一帧领取完成事件并驱动视图切换（双帧约定） */
+let completePending = false;
+/** 爆发传播的终点单元（落定光晕与锚闪光的落点） */
+const burstTargets: number[] = [];
+/** 爆发传播的起点单元（完成事件携带的目标分区） */
+let burstFrom = 0;
 
 /* ===== 碎屑带生成（mulberry32：非均匀半径/角度/尺寸/透明度 — 引力碎屑，拒绝刻度环） ===== */
 interface Shard { x: number; y: number; rot: number; w: number; h: number; op: number; }
@@ -268,15 +300,19 @@ const parallaxX = makeSpring(26, 0.9, 0);
 const parallaxY = makeSpring(26, 0.9, 0);
 
 let ctx: CanvasRenderingContext2D | null = null;
-let elapsed = 0;
+/** 引擎墙钟：未钳制门控 dt 累积（秒），供相位与进度计算，时间流速恒为 1× */
+let clockSec = 0;
 let introTime = 0;
 let frameCount = 0;
 let avgFrameMs = 16.7;
+/** 上一许可帧墙钟（首帧守卫 — 首帧增量为 0） */
+let lastWallClock = -1;
 
-/* ★ G-8 统一帧门控（useFrameGate）：帧率档位由全局空闲状态机唯一决定
-   （active 60 / settling 30 / idle 5 / deep-idle 1 fps），dt 由门控按
-   累积时间供给（物理时间连续）；本引擎不再维护私有空闲判定、
-   visibilitychange 与全局交互监听。 */
+/* ★ G-8 统一帧门控（useFrameGate → 主渲染循环注册层）：帧率档位由
+   全局空闲状态机唯一决定（active 60 / settling 30 / idle 5 /
+   deep-idle 1 fps），帧步进由主循环供给（钳制 50ms），墙钟增量
+   供相位与进度；本引擎不再维护私有空闲判定、visibilitychange
+   与全局交互监听。 */
 const { level: idleLevel, resetIdle } = useGlobalIdleScheduler();
 let hoverN = 0;
 let width = 0;
@@ -321,8 +357,19 @@ let moteActive = MOTE_MAX;
 const filDrifts = FILAMENTS.map((_, k) => makeDrift(3100 + k * 401));
 
 /** 光包池（隧穿传播） */
-interface Packet { active: boolean; t: number; dur: number; fil: number; rev: boolean; strength: number; }
-const PACKETS: Packet[] = Array.from({ length: 14 }, () => ({ active: false, t: 0, dur: 0.9, fil: 0, rev: false, strength: 0.5 }));
+interface Packet {
+  active: boolean;
+  t: number;
+  dur: number;
+  fil: number;
+  rev: boolean;
+  strength: number;
+  /** 爆发包（点击传播仪式，进度由仪式节奏驱动）；false 为自发隧穿包 */
+  burst: boolean;
+}
+const PACKETS: Packet[] = Array.from({ length: 14 }, () => ({
+  active: false, t: 0, dur: 0.9, fil: 0, rev: false, strength: 0.5, burst: false,
+}));
 let nextPacketAt = 1.8;
 
 /** 光点贴图（预渲染径向渐变，一次分配） */
@@ -368,11 +415,17 @@ function onUp(i: number): void {
 }
 
 /* ===== 点击：能量爆发传播 → 进入管理界面 =====
- * 反馈单帧即时（按压形变 + 闪光 + 光包爆发同帧生效），
- * 380ms 编排时延仅为传播仪式，由 mgmt-x 过渡无缝衔接 */
-let enterTimer = 0;
+ * 视图切换由传播完成事件驱动（传播 620ms + 落定 100ms 完整呈现后，
+ * 双帧约定在落定渲染帧的下一帧 emit enter）；无固定延时。
+ * 传播期间重复点击其他引导单元被仪式状态机幂等拒绝。 */
 function activate(i: number): void {
+  if (ritual.phase !== 'idle' || completePending) return;
+  // 关键动画恢复满帧：传播仪式全程 60fps（交互已触发 active，此处兜底）
+  resetIdle();
+
+  burstFrom = i;
   flash[i] = 1;
+  burstTargets.length = 0;
   // 光包定向爆发：i → 其余两单元（走对应丝链）
   for (let k = 0; k < FILAMENTS.length; k++) {
     const [a, b] = FILAMENTS[k];
@@ -381,16 +434,14 @@ function activate(i: number): void {
     if (!p) continue;
     p.active = true;
     p.t = 0;
-    p.dur = 0.72;
+    p.dur = RITUAL_DURATION.propagation;
     p.fil = k;
     p.rev = b === i; // 从 i 端出发
     p.strength = 1;
+    p.burst = true;
+    burstTargets.push(b === i ? a : b);
   }
-  if (enterTimer) clearTimeout(enterTimer);
-  enterTimer = window.setTimeout(() => {
-    enterTimer = 0;
-    emit('enter', SECTIONS[i]);
-  }, 380);
+  ritual.begin();
 }
 
 /* ===== 布局（规整排放：等尺寸 / 等间距 / 同基线，自适应容器） ===== */
@@ -433,7 +484,7 @@ function filPoint(k: number, t: number, out: Float64Array): void {
   const bx = centers[b][0]; const by = centers[b][1];
   let x = ax + (bx - ax) * t;
   let y = ay + (by - ay) * t + sag * Math.sin(Math.PI * t) * (minDim / 560);
-  y += filDrifts[k](elapsed + t * 4) * 2.4;
+  y += filDrifts[k](clockSec + t * 4) * 2.4;
   // 光标磁弯：高斯权重，丝线向光标轻微弯折（差异化力场传播）
   if (cursorOn) {
     const dx = cursorX - x;
@@ -455,19 +506,35 @@ const pt = new Float64Array(2);
 let tetherEl: SVGPathElement | null = null;
 const satLinkEls: SVGPathElement[] = [];
 
-function frame(gateDt: number): void {
+function frame(frameStep: number, wallClock: number): void {
   if (!ctx || !sizeOk) return;
-  // dt 驱动（帧率无关），门控累积 dt 钳制防长帧物理爆炸
-  const dt = Math.min(gateDt, 0.05);
-  elapsed += dt;
-  introTime += dt;
+
+  /* ---- 完成事件帧（双帧约定）：领取一次性完成事件 → 停止 Canvas
+     （保留最后一帧作为静态视觉参与 CSS 离场）→ 驱动视图切换 ---- */
+  if (completePending) {
+    completePending = false;
+    ritual.consumeComplete();
+    stopGate();
+    emit('enter', SECTIONS[burstFrom]);
+    return;
+  }
+
+  /* ---- 时间分离：相位与进度用未钳制墙钟增量（时间流速恒 1×，
+     帧门控只决定采样频率）；钳制后的帧步进仅用于物理积分 ---- */
+  const wStep = lastWallClock < 0 ? 0 : Math.max(wallClock - lastWallClock, 0);
+  lastWallClock = wallClock;
+  clockSec += wStep;
+  const dt = Math.min(frameStep, RITUAL_DURATION.maxPhysicsStep);
+  introTime += wStep;
   frameCount++;
+  // 传播仪式推进（墙钟驱动，帧率无关；到达终点帧 = 落定首帧）
+  const r = ritual.advance(clockSec);
 
   /* ---- 帧率自适应（EMA → 尘埃密度，滞后调节） ----
-     仅 active 档评估：低档位下 dt 为调度间隔（200ms/1000ms），
-     不反映真实渲染成本，据此降密度会在恢复交互后无谓回爬。 */
+     仅 active 档评估：低档位下调度间隔不反映真实渲染成本，
+     据此降密度会在恢复交互后无谓回爬。 */
   if (idleLevel.value === 'active') {
-    avgFrameMs += (gateDt * 1000 - avgFrameMs) * 0.04;
+    avgFrameMs += (wStep * 1000 - avgFrameMs) * 0.04;
     if (frameCount % 90 === 0) {
       if (avgFrameMs > 21 && moteActive > 24) moteActive -= 4;
       else if (avgFrameMs < 15 && moteActive < MOTE_MAX) moteActive += 4;
@@ -532,9 +599,9 @@ function frame(gateDt: number): void {
   const dustIntro = introTime < 1.6 ? phase(introTime, 0.1, 1.1) : 1;
   for (let i = 0; i < moteActive; i++) {
     const m = motes[i];
-    const mx = m.x01 * width + moteDrifts[m.dxi](elapsed) * 16 + px * 6 * m.depth;
-    const my = m.y01 * height + moteDrifts[m.dyi](elapsed) * 12 + py * 6 * m.depth;
-    const breath = 0.72 + 0.28 * Math.sin(elapsed * 0.6 + i * 1.7);
+    const mx = m.x01 * width + moteDrifts[m.dxi](clockSec) * 16 + px * 6 * m.depth;
+    const my = m.y01 * height + moteDrifts[m.dyi](clockSec) * 12 + py * 6 * m.depth;
+    const breath = 0.72 + 0.28 * Math.sin(clockSec * 0.6 + i * 1.7);
     const a = m.alpha * breath * dustIntro;
     if (a <= 0.01) continue;
     ctx.globalAlpha = a;
@@ -572,8 +639,8 @@ function frame(gateDt: number): void {
   }
 
   // 隧穿光包（稀有自发 + 点击爆发）
-  if (elapsed >= nextPacketAt) {
-    nextPacketAt = elapsed + 1.7 + Math.random() * 2.6;
+  if (ritual.phase === 'idle' && clockSec >= nextPacketAt) {
+    nextPacketAt = clockSec + 1.7 + Math.random() * 2.6;
     const p = PACKETS.find((q) => !q.active);
     if (p) {
       p.active = true;
@@ -582,12 +649,20 @@ function frame(gateDt: number): void {
       p.fil = Math.floor(Math.random() * FILAMENTS.length);
       p.rev = Math.random() > 0.5;
       p.strength = 0.4;
+      p.burst = false;
     }
   }
   for (const p of PACKETS) {
     if (!p.active) continue;
-    p.t += dt / p.dur;
-    if (p.t >= 1) { p.active = false; continue; }
+    if (p.burst) {
+      // 爆发包：进度由仪式墙钟直接驱动，任何 dt 钳制都不参与
+      p.t = r.propagation;
+      if (p.t >= 1) continue; // 已到达终点：视觉由落定光晕接管
+    } else {
+      // 自发包：帧步进用未钳制墙钟增量（低档位下时间流速不变）
+      p.t += wStep / p.dur;
+      if (p.t >= 1) { p.active = false; continue; }
+    }
     const tt = p.rev ? 1 - p.t : p.t;
     filPoint(p.fil, tt, pt);
     // 头部光点 + 短尾迹
@@ -602,24 +677,48 @@ function frame(gateDt: number): void {
     }
   }
 
+  // 落定呈现：终点光晕缓出扩散（与传播到达同帧起势，落定完整播完）
+  if (r.landing > 0) {
+    const eased = 1 - Math.pow(1 - r.landing, 3);
+    const rad = 16 + eased * 26;
+    ctx.globalAlpha = 0.5 * (1 - eased);
+    for (let j = 0; j < burstTargets.length; j++) {
+      const cx = centers[burstTargets[j]][0];
+      const cy = centers[burstTargets[j]][1];
+      ctx.drawImage(sprite!, cx - rad, cy - rad, rad * 2, rad * 2);
+    }
+  }
+
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
 
+  /* ---- 到达终点帧：终点单元锚闪光起势（衰减渐熄构成落定收束） ---- */
+  if (ritual.phase === 'landing' && r.landing === 0) {
+    for (let j = 0; j < burstTargets.length; j++) {
+      flash[burstTargets[j]] = 1;
+    }
+  }
+
+  /* ---- 落定逻辑完成帧：本帧已渲染完整落定，下一帧领取完成事件 ---- */
+  if (r.complete) {
+    completePending = true;
+  }
+
   /* ---- ★ SVG 丝线 dashoffset rAF 驱动（原 CSS infinite 动画迁移） ----
      状态语义流动随全局空闲档位自动降频；
-     相位由 elapsed 累积时间计算，跳帧不产生相位跳变。 */
+     相位由墙钟累积时间计算，跳帧不产生相位跳变。 */
   const tetherOwner = unitEls[0];
   if (tetherEl && tetherOwner) {
     let off = 0;
     if (tetherOwner.classList.contains('mh-bind-on')) {
-      off = -14 * ((elapsed / 2.6) % 1);
+      off = -14 * ((clockSec / 2.6) % 1);
     } else if (tetherOwner.classList.contains('mh-bind-scan')) {
-      off = -14 * ((elapsed / 1.1) % 1);
+      off = -14 * ((clockSec / 1.1) % 1);
     }
     tetherEl.style.strokeDashoffset = off.toFixed(2);
   }
   if (satLinkEls.length) {
-    const satOff = -32 * ((elapsed / 5.5) % 1);
+    const satOff = -32 * ((clockSec / 5.5) % 1);
     for (let i = 0; i < satLinkEls.length; i++) {
       satLinkEls[i].style.strokeDashoffset = satOff.toFixed(2);
     }
@@ -671,8 +770,9 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopGate();
-  if (enterTimer) clearTimeout(enterTimer);
-  enterTimer = 0;
+  // 中断清理：传播仪式复位（点击空白返回 / 卸载路径均走此处）
+  ritual.reset();
+  completePending = false;
   resizeObserver?.disconnect();
   resizeObserver = null;
   unitEls.length = 0;

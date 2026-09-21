@@ -40,9 +40,6 @@ const ENV_PEAK_END = 0.62;
 /** 蓄能段平台值 */
 const ENV_CHARGE_LEVEL = 0.42;
 
-/** 残影拖尾历史窗口（秒）— 覆盖最大残影滞后 0.215s（约 3 倍余量） */
-const HIST_WINDOW = 0.7;
-
 /** smootherstep（五次多项式）：端点一阶/二阶导全零 — 段内平滑、边界 C2 匹配 */
 const smootherstep = (u: number): number => u * u * u * (u * (u * 6 - 15) + 10);
 
@@ -68,34 +65,55 @@ const warpEnvelope = (x: number): number => {
   return 1 - smootherstep((x - ENV_PEAK_END) / (1 - ENV_PEAK_END));
 };
 
-/* ===== 积分历史采样器（环形缓冲 + 线性插值 — 缠绕积分共用） =====
- * 单调积分（渡越弧长）采样近 HIST_WINDOW 秒的 (t, v)；
- * 残影拖尾层按 t-lag 插值取历史值 → 弧形拖尾（早于首样本 → 0：运动开始前）。 */
-interface IntegralSample {
-  t: number;
-  v: number;
-}
+/* ===== 积分历史采样器（环形缓冲 + 二分插值 — 缠绕积分共用） =====
+ * 单调积分（渡越弧长）采样近期的 (t, v)；残影拖尾层按 t-lag 插值取
+ * 历史值 → 弧形拖尾（早于最早样本 → 0：运动开始前）。
+ * 时间戳单调递增 → 二分查找 O(log n)；
+ * 预分配 Float32Array 环形覆盖写入 → O(1) 零分配（无每帧 push/shift）。 */
+const HIST_CAPACITY = 64;
 
 const createIntegralHistory = () => {
-  const hist: IntegralSample[] = [];
+  const ts = new Float32Array(HIST_CAPACITY);
+  const vs = new Float32Array(HIST_CAPACITY);
+  let head = -1; // 最新样本物理索引
+  let count = 0;
+
+  /** 最旧样本物理索引（样本未满时为 0） */
+  const oldestIndex = (): number => (head - count + 1 + HIST_CAPACITY) % HIST_CAPACITY;
+
   return {
     push(t: number, v: number): void {
-      hist.push({ t, v });
-      while (hist.length > 2 && hist[0].t < t - HIST_WINDOW) hist.shift();
+      head = (head + 1) % HIST_CAPACITY;
+      ts[head] = t;
+      vs[head] = v;
+      if (count < HIST_CAPACITY) count++;
     },
-    /** 查询 time 时刻的积分值（早于历史首样本 → 0：运动开始前） */
+    /** 查询 time 时刻的积分值（早于最早样本 → 0：运动开始前） */
     at(time: number): number {
-      if (hist.length === 0 || time <= hist[0].t) return 0;
-      for (let i = hist.length - 1; i >= 0; i--) {
-        const s = hist[i];
-        if (s.t <= time) {
-          const n = hist[i + 1];
-          if (!n) return s.v;
-          const span = n.t - s.t;
-          return span <= 0 ? n.v : s.v + (n.v - s.v) * ((time - s.t) / span);
+      if (count === 0) return 0;
+      const oldest = oldestIndex();
+      if (time <= ts[oldest]) return 0;
+
+      /* 虚拟单调序 [0, count) 上二分：定位第一个 t > time 的样本 */
+      let lo = 0;
+      let hi = count;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (ts[(oldest + mid) % HIST_CAPACITY] <= time) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
         }
       }
-      return 0;
+      /* time 不早于全部样本 → 返回最新值 */
+      if (lo >= count) return vs[head];
+
+      /* 相邻两点线性插值（s = 最后一个 ≤ time，n = 第一个 > time） */
+      const idxN = (oldest + lo) % HIST_CAPACITY;
+      const idxS = (oldest + lo - 1 + HIST_CAPACITY) % HIST_CAPACITY;
+      const span = ts[idxN] - ts[idxS];
+      if (span <= 0) return vs[idxN];
+      return vs[idxS] + (vs[idxN] - vs[idxS]) * ((time - ts[idxS]) / span);
     },
   };
 };
@@ -123,12 +141,19 @@ export class TransitionEngine {
   private swirlVal = 0;
   private history = createIntegralHistory();
 
-  /** 推进一帧：时钟推进 + 双序列包络 + 符号积分，返回渲染域时钟（秒） */
-  update(dt: number): number {
-    this.clock += dt;
+  /**
+   * 推进一帧：双时间参数
+   *   - frameStep（钳制帧步进）：物理积分专用（缠绕/幕布位移），低档位
+   *     长间隔被钳制上限保护，不过冲；
+   *   - wallStep（墙钟增量）：进度计算专用（时钟/双序列包络），不钳制 —
+   *     低档位下包络推进与静止漂移速度不随帧率失真。
+   * 时钟无条件推进（绝不冻结 — 微颤残留根治核心），返回渲染域时钟（秒）。
+   */
+  update(frameStep: number, wallStep: number): number {
+    this.clock += wallStep;
     /* 时钟无条件推进（绝不冻结 — v2 微颤残留根治核心） */
-    this.introClock += dt;
-    if (this.enterClock !== null) this.enterClock += dt;
+    this.introClock += wallStep;
+    if (this.enterClock !== null) this.enterClock += wallStep;
 
     let introEnv = 0;
     if (!this.introDone) {
@@ -157,10 +182,11 @@ export class TransitionEngine {
     /* 合成场强度（收缩/噪声/拖尾/FOV/Z 冲程）与符号方向权重（缠绕/相机方向） */
     this.warpEnvVal = Math.min(introEnv + enterEnv, 1);
     this.dirWVal = enterEnv - introEnv;
-    /* uWarpDist 为符号积分（远景幕布跟随序列方向漂移） */
-    this.warpDistVal += this.dirWVal * WARP_SPEED * dt;
-    /* 符号缠绕积分：正渡正向缠绕、逆渡反向倒卷，角度恒连续（积分量） */
-    this.swirlVal += this.dirWVal * dt;
+    /* uWarpDist 为符号积分（远景幕布跟随序列方向漂移）——物理积分用帧步进 */
+    this.warpDistVal += this.dirWVal * WARP_SPEED * frameStep;
+    /* 符号缠绕积分：正渡正向缠绕、逆渡反向倒卷，角度恒连续（积分量）——
+     * 物理积分用帧步进，包络进度用墙钟（低档位下角度与包络不失配） */
+    this.swirlVal += this.dirWVal * frameStep;
     this.history.push(this.clock, this.swirlVal);
     return this.clock;
   }

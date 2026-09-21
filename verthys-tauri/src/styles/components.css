@@ -341,11 +341,9 @@
   text-overflow: ellipsis;
   /* 默认隐藏态 */
   transform: translate(0, 10px) scale(0.94);
-  filter: blur(8px);
   transition:
     opacity 0.3s var(--ease),
-    transform 0.4s var(--ease),
-    filter 0.4s var(--ease);
+    transform 0.4s var(--ease);
 }
 
 /* 内部光晕背景（量子粒子汇聚场） */
@@ -400,7 +398,6 @@
 /* 显示态：粒子已汇聚，玻璃面板凝聚成型 */
 .cosmic-tip.ct-show {
   transform: translate(0, 0) scale(1);
-  filter: blur(0);
   animation: ct-rise 0.42s var(--ease);
 }
 .cosmic-tip.ct-show .ct-glow {
@@ -415,5 +412,4 @@
 /* 隐藏态：能量消散，回落 */
 .cosmic-tip.ct-hide {
   transform: translate(0, 4px) scale(0.96);
-  filter: blur(4px);
 }

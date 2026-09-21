@@ -245,6 +245,19 @@ int verthys_lsm_bloom_may_contain(const VerthysLsmBloom *b, uint64_t key)
 
 /* ================== SSTable 写入 ================== */
 
+/* 写前预算校验：拟写入长度越过数据区软边界即拒绝，杜绝越界字节落盘。
+ * 调用纪律保证 abs_cursor 不越过 data_end_abs；此处防御性复查防下溢。
+ * 返回 0 放行；VERTHYS_ERR_RESOURCE_LIMIT 表示越界。 */
+static VerthysResult sstable_budget_check(uint64_t abs_cursor, size_t write_len,
+                                          uint64_t data_end_abs)
+{
+    if (abs_cursor > data_end_abs) return VERTHYS_ERR_RESOURCE_LIMIT;
+    if (write_len > (size_t)(data_end_abs - abs_cursor)) {
+        return VERTHYS_ERR_RESOURCE_LIMIT;
+    }
+    return VERTHYS_OK;
+}
+
 /* 数据块明文构建器（单块 ≤ 块阈值 + 单条目上限） */
 typedef struct BlockBuilder {
     uint8_t *pt;
@@ -279,17 +292,26 @@ static void blockbuilder_free(BlockBuilder *bb)
     bb->pt = NULL;
 }
 
-/* 当前块落盘（AEAD 帧，AAD 绑定 seq + 块号），记录块索引 */
+/* 当前块落盘（AEAD 帧，AAD 绑定 seq + 块号），记录块索引。
+ * 写前预算：整帧（帧头 + 明文 + tag + 帧尾）须完整落在数据区内，
+ * 越界即拒绝，绝不产生物理写。 */
 static VerthysResult blockbuilder_flush(FILE *f, VerthysPartition *part,
                                       BlockBuilder *bb,
                                       uint64_t seq, uint32_t block_no,
                                       uint64_t *abs_cursor,
+                                      uint64_t data_end_abs,
                                       VerthysLsmBlockIdx *idx_out)
 {
     uint8_t aad[64];
     size_t aad_len = aad_build(aad, VERTHYS_LSM_AAD_SSTABLE, 1, seq, 1, block_no);
     uint32_t frame_len = 0;
     VerthysResult r;
+
+    r = sstable_budget_check(*abs_cursor,
+                             VERTHYS_LSM_FRAME_HEADER_BYTES + bb->len +
+                             VERTHYS_CNG_TAG_BYTES + VERTHYS_LSM_FRAME_TAIL_BYTES,
+                             data_end_abs);
+    if (r != VERTHYS_OK) return r;
 
     r = verthys_lsm_frame_write(f, *abs_cursor, VERTHYS_LSM_BLOCK_MAGIC, &part->aead,
                     aad, aad_len, bb->pt, bb->len, &frame_len);
@@ -333,6 +355,7 @@ VerthysResult verthys_lsm_sstable_write(FILE *f, VerthysPartition *part,
     VerthysLsmBlockIdx *blocks = NULL;
     size_t block_count = 0, block_cap = 0;
     uint64_t start_rel, abs_cursor;
+    uint64_t data_end_abs;
     uint64_t min_key = 0, max_key = 0;
     uint32_t entry_count = 0, tombstone_count = 0;
     uint64_t bloom_off_abs = 0, index_off_abs = 0, footer_off_abs = 0;
@@ -352,6 +375,8 @@ VerthysResult verthys_lsm_sstable_write(FILE *f, VerthysPartition *part,
     start_rel = *rel_cursor;
     if (start_rel >= data_limit) return VERTHYS_ERR_RESOURCE_LIMIT;
     abs_cursor = data_base + start_rel;
+    /* 数据区软边界（绝对偏移）：全部物理写点写前预算的判定基准 */
+    data_end_abs = data_base + data_limit;
 
     if (blockbuilder_init(&bb) != 0) return VERTHYS_ERR_INTERNAL;
     if (verthys_lsm_bloom_init(&bloom, total_hint) != VERTHYS_OK) {
@@ -400,7 +425,7 @@ VerthysResult verthys_lsm_sstable_write(FILE *f, VerthysPartition *part,
                 goto fail;
             }
             r = blockbuilder_flush(f, part, &bb, seq, (uint32_t)block_count,
-                                   &abs_cursor, &blocks[block_count]);
+                                   &abs_cursor, data_end_abs, &blocks[block_count]);
             if (r != VERTHYS_OK) goto fail;
             block_count++;
         }
@@ -412,7 +437,7 @@ VerthysResult verthys_lsm_sstable_write(FILE *f, VerthysPartition *part,
             goto fail;
         }
         r = blockbuilder_flush(f, part, &bb, seq, (uint32_t)block_count,
-                               &abs_cursor, &blocks[block_count]);
+                               &abs_cursor, data_end_abs, &blocks[block_count]);
         if (r != VERTHYS_OK) goto fail;
         block_count++;
     }
@@ -423,6 +448,9 @@ VerthysResult verthys_lsm_sstable_write(FILE *f, VerthysPartition *part,
         goto fail;
     }
     bloom_off_abs = abs_cursor;
+    /* 写前预算：Bloom 位图须完整落在数据区内 */
+    r = sstable_budget_check(bloom_off_abs, bloom.bytes, data_end_abs);
+    if (r != VERTHYS_OK) goto fail;
     if (vio_pwrite64(f, bloom_off_abs, bloom.bits, bloom.bytes) != 0) {
         r = VERTHYS_ERR_IO;
         goto fail;
@@ -476,10 +504,17 @@ VerthysResult verthys_lsm_sstable_write(FILE *f, VerthysPartition *part,
         if (build_ok) {
             aad_len = aad_build(aad, VERTHYS_LSM_AAD_INDEX, 1, seq, 0, 0);
             index_off_abs = abs_cursor;
-            r = verthys_lsm_frame_write(f, index_off_abs, VERTHYS_LSM_INDEX_MAGIC, &part->aead,
-                            aad, aad_len, pt, pt_len, NULL);
-            abs_cursor += VERTHYS_LSM_FRAME_HEADER_BYTES + pt_len +
-                          VERTHYS_CNG_TAG_BYTES + VERTHYS_LSM_FRAME_TAIL_BYTES;
+            /* 写前预算：Index 帧须完整落在数据区内 */
+            r = sstable_budget_check(index_off_abs,
+                                     VERTHYS_LSM_FRAME_HEADER_BYTES + pt_len +
+                                     VERTHYS_CNG_TAG_BYTES + VERTHYS_LSM_FRAME_TAIL_BYTES,
+                                     data_end_abs);
+            if (r == VERTHYS_OK) {
+                r = verthys_lsm_frame_write(f, index_off_abs, VERTHYS_LSM_INDEX_MAGIC, &part->aead,
+                                aad, aad_len, pt, pt_len, NULL);
+                abs_cursor += VERTHYS_LSM_FRAME_HEADER_BYTES + pt_len +
+                              VERTHYS_CNG_TAG_BYTES + VERTHYS_LSM_FRAME_TAIL_BYTES;
+            }
         } else {
             r = VERTHYS_ERR_INTERNAL;
         }
@@ -525,10 +560,17 @@ VerthysResult verthys_lsm_sstable_write(FILE *f, VerthysPartition *part,
         if (build_ok) {
             aad_len = aad_build(aad, VERTHYS_LSM_AAD_FOOTER, 1, seq, 0, 0);
             footer_off_abs = abs_cursor;
-            r = verthys_lsm_frame_write(f, footer_off_abs, VERTHYS_LSM_SSTABLE_MAGIC, &part->aead,
-                            aad, aad_len, pt, pt_len, NULL);
-            abs_cursor += VERTHYS_LSM_FRAME_HEADER_BYTES + pt_len +
-                          VERTHYS_CNG_TAG_BYTES + VERTHYS_LSM_FRAME_TAIL_BYTES;
+            /* 写前预算：Footer 帧须完整落在数据区内 */
+            r = sstable_budget_check(footer_off_abs,
+                                     VERTHYS_LSM_FRAME_HEADER_BYTES + pt_len +
+                                     VERTHYS_CNG_TAG_BYTES + VERTHYS_LSM_FRAME_TAIL_BYTES,
+                                     data_end_abs);
+            if (r == VERTHYS_OK) {
+                r = verthys_lsm_frame_write(f, footer_off_abs, VERTHYS_LSM_SSTABLE_MAGIC, &part->aead,
+                                aad, aad_len, pt, pt_len, NULL);
+                abs_cursor += VERTHYS_LSM_FRAME_HEADER_BYTES + pt_len +
+                              VERTHYS_CNG_TAG_BYTES + VERTHYS_LSM_FRAME_TAIL_BYTES;
+            }
         } else {
             r = VERTHYS_ERR_INTERNAL;
         }
@@ -542,13 +584,19 @@ VerthysResult verthys_lsm_sstable_write(FILE *f, VerthysPartition *part,
     put_u64le(trailer + 8, txid);
     put_u32le(trailer + 16, VERTHYS_LSM_SSTABLE_MAGIC);
     put_u32le(trailer + 20, 0);
+    /* 写前预算：Trailer 须完整落在数据区内 */
+    r = sstable_budget_check(abs_cursor, sizeof(trailer), data_end_abs);
+    if (r != VERTHYS_OK) goto fail;
     if (vio_pwrite64(f, abs_cursor, trailer, sizeof(trailer)) != 0) {
         r = VERTHYS_ERR_IO;
         goto fail;
     }
     abs_cursor += sizeof(trailer);
 
-    /* ---- 容量校验 + 物理落盘（SSTable 须先于 Manifest 引用持久化）---- */
+    /* ---- 容量复核（最终防线）+ 物理落盘 ----
+     * 分工：写前预算已保证每个物理写点不越界；此处总量复核保留为
+     * 第二道防线——即使未来某写点漏接预算，也阻止 meta 填充与
+     * Manifest 引用，不让越界表进入查找路径。 */
     if ((uint64_t)(abs_cursor - (data_base + start_rel)) > data_limit - start_rel) {
         r = VERTHYS_ERR_RESOURCE_LIMIT;
         goto fail;

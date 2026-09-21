@@ -155,6 +155,8 @@ VerthysResult Verthys_Export(VerthysHandle handle,
     verthys_random_bytes(salt, sizeof salt);
     if (keymanager_derive_master_export(mek, (const uint8_t *)password,
                                         password_len, salt) != 0) {
+        /* 派生中途失败可能已写入部分密钥材料，一并清零 */
+        verthys_secure_zero(mek, sizeof mek);
         verthys_secure_zero(salt, sizeof salt);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);

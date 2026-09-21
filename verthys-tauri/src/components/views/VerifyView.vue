@@ -4,14 +4,20 @@
     1. 输入访问密钥（v-model 双向绑定，回车提交）
     2. 选择 .bin 密钥文件（emit browseBin）
     3. 输入密钥口令（v-model 双向绑定，回车提交）
-    4. 量子核心加载动画 + 验证进度实时反馈（阶段描述 + 百分比 + 耗时）
+    4. 量子核心加载动画 + 验证进度反馈（阶段描述 + 平滑视觉进度）
     5. 提交验证（emit verify）
 
   ★ 悬浮场重构：光谱底轨输入（去盒化）+ 标注式标签 + 深空定位入射
   ★ 尺寸稳定模式（ff-field--stable）：表单态↔加载态切换高度零抖动
 
+  呈现层契约：本组件无状态、无判断、无计时。
+    - 进度数值绑定感知层输出的视觉值（visualPercent，0-100 平滑值），
+      不直接绑定后端离散跳变的真实进度
+    - 失败冻结期间接收 dimmed 样式标识，仅做样式降级
+    - 提示词仍为后端 emit 的阶段描述（单一数据源）
+
   Models: verifyPassword / binPassword — 访问密钥 / 密钥口令
-  Props: binFileName / processing / unlockProgressMsg / unlockProgressPercent / unlockProgressElapsed
+  Props: binFileName / processing / unlockProgressMsg / visualPercent / dimmed
   Emits: verify / back / browseBin
 -->
 <template>
@@ -61,12 +67,13 @@
         />
       </div>
 
-      <!-- 量子能量导流通道（按代码关键节点推进进度，精简提示词） -->
+      <!-- 量子能量导流通道（视觉值来自感知层：平滑、软上限、收束补满） -->
       <div class="ff-node ff-node--body">
         <QuantumProgressFlow
           :loading="processing"
-          :percent="unlockProgressPercent"
+          :percent="visualPercent"
           :message="unlockProgressMsg"
+          :dimmed="dimmed"
         />
       </div>
 
@@ -102,12 +109,12 @@ defineProps<{
   binFileName: string;
   /** 验证处理中标志（禁用表单 + 显示加载动画） */
   processing: boolean;
-  /** 验证进度消息（阶段描述） */
+  /** 后端验证阶段提示词（单一数据源，感知层不重写文案） */
   unlockProgressMsg: string;
-  /** 验证进度百分比 */
-  unlockProgressPercent: number;
-  /** 验证进度累计耗时 */
-  unlockProgressElapsed: number;
+  /** 感知层输出的视觉进度（0-100，平滑值，非后端离散跳变值） */
+  visualPercent: number;
+  /** 失败冻结降级标识（进度条降级呈现，错误提示取得视觉重心） */
+  dimmed: boolean;
 }>();
 
 /**

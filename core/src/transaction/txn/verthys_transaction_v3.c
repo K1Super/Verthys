@@ -309,25 +309,46 @@ VerthysResult verthys_txn_v3_delete(VerthysTxnV3 *t, uint64_t lid)
     VerthysLsmEntry cur;
     uint8_t name_buf[VERTHYS_LSM_NAME_MAX_BYTES];
     VerthysWalRecord rec;
+    int had_value;
     VerthysResult r;
 
     if (t == NULL) return VERTHYS_ERR_INVALID;
     if (t->state != VERTHYS_TXN_V3_ACTIVE) return VERTHYS_ERR_INVALID;
 
-    /* 查找现值 → Extent 引用释放（不存在亦写墓碑，LSM 幂等语义） */
+    /*
+     * 顺序纪律（墓碑先行，引用后收）：
+     *   1. 查现值（仅记账用，无副作用）；
+     *   2. LSM 墓碑写入先行——失败即零副作用返回（账本未动、引用未
+     *      释放），调用方 abort/重试均从干净状态出发。若引用先于
+     *      墓碑释放，则失败与回滚之间存在"索引存活但引用已清零"
+     *      的窗口：该状态持久化后被 GC 判定为可回收，物理删除仍
+     *      被引用的数据块；
+     *   3. 账本先于引用释放——若释放失败中途返回，回滚按净额反向
+     *      结算时"多归还一次引用"（ref_count += |net|，而实际只
+     *      记账未释放），计数只多不少（方向安全：空间泄漏换数据
+     *      安全，GC 周期收敛）。反之（释放先记账）会落入少记的
+     *      危险方向。
+     * 不存在亦写墓碑（LSM 幂等语义，与旧序一致）。
+     */
     memset(&cur, 0, sizeof(cur));
     r = verthys_lsm_get(t->lsm, lid, &cur, name_buf, sizeof(name_buf), NULL);
     if (r == VERTHYS_OK) {
-        r = txn_ledger_record(t, cur.hash, -1);
-        if (r != VERTHYS_OK) return r;
-        r = verthys_extent_release(t->ext_idx, cur.hash, t->txid, NULL);
-        if (r != VERTHYS_OK) return r;
-    } else if (r != VERTHYS_ERR_NOTFOUND) {
+        had_value = 1;
+    } else if (r == VERTHYS_ERR_NOTFOUND) {
+        had_value = 0;
+    } else {
         return r;
     }
 
     r = verthys_lsm_delete(t->lsm, t->txid, lid);
     if (r != VERTHYS_OK) return r;
+
+    if (had_value) {
+        r = txn_ledger_record(t, cur.hash, -1);
+        if (r != VERTHYS_OK) return r;
+        r = verthys_extent_release(t->ext_idx, cur.hash, t->txid, NULL);
+        if (r != VERTHYS_OK) return r;
+    }
 
     /* WAL INDEX 记录 = 墓碑条目（与 verthys_lsm_delete 内部构造同形：
      * lid + tombstone + created_txid；重放走 verthys_lsm_delete 等价路径） */

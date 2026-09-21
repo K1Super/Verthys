@@ -220,6 +220,29 @@ TEST(pepper_v3_bad_magic_rejected)
     return 0;
 }
 
+/* OS 托管来源不可用 + 无注入：默认构建必须显式失败，
+ * 不得以零熵编译内嵌常量静默开箱（该常量随源码公开，走此来源的
+ * 容器离线爆破退化为纯口令熵）。构造方式：超长存储路径覆盖迫使
+ * 路径解析失败，等价 OS 托管持久化层不可达。 */
+TEST(pepper_v3_no_compiled_fallback)
+{
+    pp_reset();
+    CHECK(cng_machine_key_init() == 0);
+
+    char long_path[600];
+    memset(long_path, 'A', sizeof(long_path) - 1);
+    long_path[sizeof(long_path) - 1] = '\0';
+    verthys_pepper_set_storage_path_override(long_path);
+
+    CHECK_EQ(verthys_pepper_init(), -1);
+    CHECK(verthys_pepper_get() == NULL);
+    CHECK_EQ(verthys_pepper_get_source(), VERTHYS_PEPPER_SOURCE_NONE);
+    CHECK(verthys_pepper_source_error() == 1);
+
+    pp_reset();
+    return 0;
+}
+
 TEST(pepper_v3_inject_bypasses_os)
 {
     pp_reset();

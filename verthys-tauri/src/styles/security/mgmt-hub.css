@@ -296,24 +296,23 @@
 }
 
 /* ============================================================
-   管理视图切换过渡（hub ↔ detail，连续平滑无断层）
+   管理视图切换过渡（单一 Transition，out-in 严格串行）
+   - 离场动画完成前入场不挂载，离场/入场/挂载不并行争抢
+   - blur 不参与过渡：禁止大面域滤镜在切换期逐帧重绘
+     （离场 Canvas 已停帧、入场首帧挂载与模糊化错峰）
    ============================================================ */
 .mgmt-x-enter-active {
-  transition: opacity 0.32s var(--ease), transform 0.32s var(--ease), filter 0.32s var(--ease);
+  transition: opacity 0.32s var(--ease), transform 0.32s var(--ease);
 }
 .mgmt-x-leave-active {
-  transition: opacity 0.22s var(--ease), transform 0.22s var(--ease), filter 0.22s var(--ease);
-  position: absolute;
-  inset: 0;
+  transition: opacity 0.22s var(--ease), transform 0.22s var(--ease);
   pointer-events: none;
 }
 .mgmt-x-enter-from {
   opacity: 0;
   transform: translateY(14px) scale(0.985);
-  filter: blur(6px);
 }
 .mgmt-x-leave-to {
   opacity: 0;
   transform: translateY(-10px) scale(0.99);
-  filter: blur(4px);
 }

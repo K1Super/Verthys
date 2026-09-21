@@ -172,6 +172,31 @@ const DERIVE_VERIFY_TIMEOUT: Duration = TIMEOUT_CONFIG.derive_verify;
 /// 清零超时（2 秒），轻量内存擦除操作。
 const CLEAR_TIMEOUT: Duration = TIMEOUT_CONFIG.clipboard_op;
 
+// ===== 借用式请求构造 =====
+
+/// derive_global_key 请求体（借用序列化）
+///
+/// 敏感字段全部以 &str 借用传入：serde 直接把引用序列化进输出字符串，
+/// 全程不产生 serde_json::Value 的 owned 明文拷贝；序列化结果立即
+/// 进入 Zeroizing 容器，随各敏感原件在发送后统一擦除。
+#[derive(serde::Serialize)]
+struct DeriveGlobalKeyReq<'a> {
+    op: &'static str,
+    password: &'a str,
+    bin_data: &'a str,
+    bin_password: &'a str,
+}
+
+/// verify_global_key 请求体（借用序列化，策略同 DeriveGlobalKeyReq）
+#[derive(serde::Serialize)]
+struct VerifyGlobalKeyReq<'a> {
+    op: &'static str,
+    password: &'a str,
+    bin_data: &'a str,
+    bin_password: &'a str,
+    data: &'a str,
+}
+
 // ===== 命令：派生 GMK =====
 
 /// 派生全局主密钥（首次设置）
@@ -184,12 +209,62 @@ const CLEAR_TIMEOUT: Duration = TIMEOUT_CONFIG.clipboard_op;
 pub async fn verthys_derive_global_key(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    security_state: State<'_, crate::security_commands::SecurityState>,
     password: String,
     bin_data_b64: String,
     bin_password: String,
 ) -> Result<VerthysResponse, String> {
     let password = Zeroizing::new(password);
     log::info!("[verthys_derive_global_key] 开始派生 GMK");
+
+    // 服务端强制熔断闸门：锁定/清空状态下拒绝一切口令类操作（fail-closed）。
+    // 派生失败本身不计数——NoKey 态是首次设置新秘密，无既有秘密可暴破。
+    use crate::security_commands::brute_force_bridge::{gate_check, UnlockGate};
+    match gate_check(&app, &security_state) {
+        UnlockGate::Allowed => {}
+        UnlockGate::Locked(secs) => {
+            log::warn!(
+                "[verthys_derive_global_key] 暴力熔断锁定中（剩余 {}s），拒绝尝试",
+                secs
+            );
+            write_key_audit(
+                &app,
+                AuditEventType::KeyDerive,
+                AuditResult::Denied,
+                Some(format!("BRUTE_FORCE_LOCKOUT: 界面锁定 {} 秒（服务端强制）", secs)),
+            );
+            return Ok(VerthysResponse::err(
+                "derive_global_key",
+                &format!("尝试次数过多，已锁定 {} 秒，请稍后再试", secs),
+            ));
+        }
+        UnlockGate::PurgeRequired => {
+            log::warn!("[verthys_derive_global_key] 暴力熔断清空态，拒绝尝试");
+            write_key_audit(
+                &app,
+                AuditEventType::KeyDerive,
+                AuditResult::Denied,
+                Some("BRUTE_FORCE_PURGE: 需执行索引清空与完整性校验（服务端强制）".into()),
+            );
+            return Ok(VerthysResponse::err(
+                "derive_global_key",
+                "失败次数已达上限，需完成安全清理与完整性校验后重试",
+            ));
+        }
+        UnlockGate::Unavailable => {
+            log::error!("[verthys_derive_global_key] 熔断守卫不可用（fail-closed 拒绝）");
+            write_key_audit(
+                &app,
+                AuditEventType::KeyDerive,
+                AuditResult::Denied,
+                Some("熔断守卫不可用，fail-closed 拒绝派生".into()),
+            );
+            return Ok(VerthysResponse::err(
+                "derive_global_key",
+                "安全模块暂时不可用，请重启应用后重试",
+            ));
+        }
+    }
 
     let current_state = state.key_lifecycle.current_state();
     if current_state != KeyLifecycleState::NoKey {
@@ -276,18 +351,27 @@ pub async fn verthys_derive_global_key(
         return Ok(VerthysResponse::err("derive_global_key", &e));
     }
 
-    let req = serde_json::json!({
-        "op": "derive_global_key",
-        "password": *password,
-        "bin_data": bin_data_b64,
-        "bin_password": bin_password,
-    });
-    let req_str = req.to_string();
-    drop(req);
-    drop(password);
+    let bin_data_b64 = Zeroizing::new(bin_data_b64);
+    let bin_password = Zeroizing::new(bin_password);
+
+    let req_str = Zeroizing::new(serde_json::to_string(&DeriveGlobalKeyReq {
+        op: "derive_global_key",
+        password: &password,
+        bin_data: &bin_data_b64,
+        bin_password: &bin_password,
+    }).map_err(|e| {
+        log::error!("[verthys_derive_global_key] 请求序列化失败: {}", e);
+        write_key_audit(
+            &app,
+            AuditEventType::KeyDerive,
+            AuditResult::Failure,
+            Some(format!("请求序列化失败: {}", e)),
+        );
+        "派生密钥失败".to_string()
+    })?);
 
     let resp_json = state
-        .send_with_timeout(&req_str, DERIVE_VERIFY_TIMEOUT)
+        .send_with_timeout(req_str.as_str(), DERIVE_VERIFY_TIMEOUT)
         .map_err(|e| {
             log::error!("[verthys_derive_global_key] send 失败: {}", e);
             write_key_audit(
@@ -299,8 +383,14 @@ pub async fn verthys_derive_global_key(
             "派生密钥失败".to_string()
         })?;
 
+    // 发送完成：序列化副本与全部敏感原件在此统一销毁（Zeroizing 擦除堆缓冲）
+    drop(req_str);
+    drop(bin_password);
+    drop(bin_data_b64);
+    drop(password);
+
     let resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
-        log::error!("[verthys_derive_global_key] 解析响应失败: {} | raw={}", e, resp_json);
+        log::error!("[verthys_derive_global_key] 解析响应失败: {} | raw={}", e, crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"]));
         write_key_audit(
             &app,
             AuditEventType::KeyDerive,
@@ -347,6 +437,7 @@ pub async fn verthys_derive_global_key(
 pub async fn verthys_verify_global_key(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    security_state: State<'_, crate::security_commands::SecurityState>,
     password: String,
     bin_data_b64: String,
     bin_password: String,
@@ -354,6 +445,57 @@ pub async fn verthys_verify_global_key(
 ) -> Result<VerthysResponse, String> {
     let password = Zeroizing::new(password);
     log::info!("[verthys_verify_global_key] 开始验证 GMK");
+
+    // 服务端强制熔断闸门：锁定/清空状态下拒绝一切口令类操作（fail-closed）。
+    // 与 unlock 共享同一守卫：两处口令入口的失败计数累加，成功任一即重置。
+    use crate::security_commands::brute_force_bridge::{
+        gate_check, record_auth_failure, record_auth_success, UnlockGate,
+    };
+    match gate_check(&app, &security_state) {
+        UnlockGate::Allowed => {}
+        UnlockGate::Locked(secs) => {
+            log::warn!(
+                "[verthys_verify_global_key] 暴力熔断锁定中（剩余 {}s），拒绝尝试",
+                secs
+            );
+            write_key_audit(
+                &app,
+                AuditEventType::KeyVerify,
+                AuditResult::Denied,
+                Some(format!("BRUTE_FORCE_LOCKOUT: 界面锁定 {} 秒（服务端强制）", secs)),
+            );
+            return Ok(VerthysResponse::err(
+                "verify_global_key",
+                &format!("尝试次数过多，已锁定 {} 秒，请稍后再试", secs),
+            ));
+        }
+        UnlockGate::PurgeRequired => {
+            log::warn!("[verthys_verify_global_key] 暴力熔断清空态，拒绝尝试");
+            write_key_audit(
+                &app,
+                AuditEventType::KeyVerify,
+                AuditResult::Denied,
+                Some("BRUTE_FORCE_PURGE: 需执行索引清空与完整性校验（服务端强制）".into()),
+            );
+            return Ok(VerthysResponse::err(
+                "verify_global_key",
+                "失败次数已达上限，需完成安全清理与完整性校验后重试",
+            ));
+        }
+        UnlockGate::Unavailable => {
+            log::error!("[verthys_verify_global_key] 熔断守卫不可用（fail-closed 拒绝）");
+            write_key_audit(
+                &app,
+                AuditEventType::KeyVerify,
+                AuditResult::Denied,
+                Some("熔断守卫不可用，fail-closed 拒绝验证".into()),
+            );
+            return Ok(VerthysResponse::err(
+                "verify_global_key",
+                "安全模块暂时不可用，请重启应用后重试",
+            ));
+        }
+    }
 
     let current_state = state.key_lifecycle.current_state();
     if current_state != KeyLifecycleState::Locked {
@@ -454,19 +596,29 @@ pub async fn verthys_verify_global_key(
         return Ok(VerthysResponse::err("verify_global_key", &e));
     }
 
-    let req = serde_json::json!({
-        "op": "verify_global_key",
-        "password": *password,
-        "bin_data": bin_data_b64,
-        "bin_password": bin_password,
-        "data": record_b64,
-    });
-    let req_str = req.to_string();
-    drop(req);
-    drop(password);
+    let bin_data_b64 = Zeroizing::new(bin_data_b64);
+    let bin_password = Zeroizing::new(bin_password);
+    let record_b64 = Zeroizing::new(record_b64);
+
+    let req_str = Zeroizing::new(serde_json::to_string(&VerifyGlobalKeyReq {
+        op: "verify_global_key",
+        password: &password,
+        bin_data: &bin_data_b64,
+        bin_password: &bin_password,
+        data: &record_b64,
+    }).map_err(|e| {
+        log::error!("[verthys_verify_global_key] 请求序列化失败: {}", e);
+        write_key_audit(
+            &app,
+            AuditEventType::KeyVerify,
+            AuditResult::Failure,
+            Some(format!("请求序列化失败: {}", e)),
+        );
+        "验证密钥失败".to_string()
+    })?);
 
     let resp_json = state
-        .send_with_timeout(&req_str, DERIVE_VERIFY_TIMEOUT)
+        .send_with_timeout(req_str.as_str(), DERIVE_VERIFY_TIMEOUT)
         .map_err(|e| {
             log::error!("[verthys_verify_global_key] send 失败: {}", e);
             write_key_audit(
@@ -478,8 +630,15 @@ pub async fn verthys_verify_global_key(
             "验证密钥失败".to_string()
         })?;
 
+    // 发送完成：序列化副本与全部敏感原件在此统一销毁（Zeroizing 擦除堆缓冲）
+    drop(req_str);
+    drop(record_b64);
+    drop(bin_password);
+    drop(bin_data_b64);
+    drop(password);
+
     let resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
-        log::error!("[verthys_verify_global_key] 解析响应失败: {} | raw={}", e, resp_json);
+        log::error!("[verthys_verify_global_key] 解析响应失败: {} | raw={}", e, crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"]));
         write_key_audit(
             &app,
             AuditEventType::KeyVerify,
@@ -490,6 +649,9 @@ pub async fn verthys_verify_global_key(
     })?;
 
     if resp.ok {
+        // 口令验证成功即重置熔断计数：无论后续状态转移是否成功，
+        // 正确口令本身已证明非暴破会话。
+        record_auth_success(&app, &security_state);
         if let Err(e) = state.key_lifecycle.record_verify_success() {
             log::error!("[verthys_verify_global_key] 状态转移失败: {}", e);
             write_key_audit(
@@ -503,6 +665,11 @@ pub async fn verthys_verify_global_key(
             write_key_audit(&app, AuditEventType::KeyVerify, AuditResult::Success, None);
         }
     } else {
+        // 服务端权威计数：仅认证域错误码计一次失败。
+        // 通信层失败与功能性状态码不构成暴破证据，不计数。
+        if resp.error.as_deref() == Some(crate::security_commands::brute_force_bridge::AUTH_DOMAIN_ERROR) {
+            record_auth_failure(&app, &security_state);
+        }
         let result = state.key_lifecycle.record_verify_failure();
         match result {
             crate::state::VerifyAttemptResult::FailureCooldown(secs) => {
@@ -604,7 +771,7 @@ pub async fn verthys_derive_subkey(
         })?;
 
     let resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
-        log::error!("[verthys_derive_subkey] 解析响应失败: {} | raw={}", e, resp_json);
+        log::error!("[verthys_derive_subkey] 解析响应失败: {} | raw={}", e, crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"]));
         write_key_audit(
             &app,
             AuditEventType::KeyDerive,
@@ -666,7 +833,7 @@ pub async fn verthys_clear_global_key(
         })?;
 
     let resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
-        log::error!("[verthys_clear_global_key] 解析响应失败: {} | raw={}", e, resp_json);
+        log::error!("[verthys_clear_global_key] 解析响应失败: {} | raw={}", e, crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"]));
         write_key_audit(
             &app,
             AuditEventType::KeyClear,

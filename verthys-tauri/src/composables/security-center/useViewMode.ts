@@ -19,7 +19,7 @@
  * 1. !verthysReady                          → "unlock"          （verthys 未解锁）
  * 2. !hasGlobalKeyRecord                  → "init"            （已解锁但无全局密钥记录）
  * 3. deviceCheckResult === "mismatch"     → "device_mismatch" （设备机器码不匹配拦截）
- * 4. !globalKeyReady || postVerifyAnim    → "verify"          （全局密钥未验证或验证后动画）
+ * 4. !globalKeyReady || postVerifyAnim    → "verify"          （全局密钥未验证或验证收束中）
  * 5. 其他                                  → "management"      （全局密钥已就绪，管理主界面）
  *
  * =============================================================================
@@ -70,7 +70,8 @@ export interface UseViewModeOptions {
   globalKeyReady: Ref<boolean>;
   /** 设备机器码校验结果（SecurityCenter.vue 内部状态） */
   deviceCheckResult: Ref<DeviceCheckResult>;
-  /** 验证后强制动画标志（无论成功/失败都保持 verify 视图 2 秒） */
+  /** 验证收束标志：验证流程与成功收束（补满 100%）期间保持 verify 视图；
+   *  收束完成事件触发后由 onVerify 复位，视图随即切换（时长由感知层决定） */
   postVerifyAnim: Ref<boolean>;
 }
 
@@ -104,7 +105,7 @@ export function useViewMode(options: UseViewModeOptions): {
     if (!options.hasGlobalKeyRecord.value) return 'init';
     // 优先级 3：设备机器码不匹配 → 拦截视图
     if (options.deviceCheckResult.value === 'mismatch') return 'device_mismatch';
-    // 优先级 4：全局密钥未验证或验证后动画 → 验证视图
+    // 优先级 4：全局密钥未验证或验证收束中 → 验证视图
     if (!options.globalKeyReady.value || options.postVerifyAnim.value) return 'verify';
     // 优先级 5：默认 → 管理主界面
     return 'management';

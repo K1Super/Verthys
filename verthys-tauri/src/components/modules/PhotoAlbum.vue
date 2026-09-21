@@ -649,11 +649,11 @@ useModuleDialogGuard("photos", () => {
 .masonry-item:not(.no-anim) .photo-card { animation: photo-reveal 0.65s cubic-bezier(0.22, 1, 0.36, 1) both; }
 .masonry-item.no-anim .photo-card { animation: none; }
 
-/* 高级照片入场动画：从模糊缩放+下移 → 清晰还原，配合逐个动态加载产生行优先瀑布入场效果 */
+/* 高级照片入场动画：从缩放+下移 → 还原，配合逐个动态加载产生行优先瀑布入场效果 */
 @keyframes photo-reveal {
-  0%   { opacity: 0; transform: scale(0.85) translateY(20px); filter: blur(12px) brightness(0.4) saturate(0); }
-  50%  { opacity: 1; filter: blur(3px) brightness(0.8) saturate(0.85); }
-  100% { opacity: 1; transform: scale(1) translateY(0); filter: blur(0) brightness(1) saturate(1); }
+  0%   { opacity: 0; transform: scale(0.85) translateY(20px); }
+  50%  { opacity: 1; transform: scale(0.97) translateY(4px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
 }
 
 .photo-card { position: relative; overflow: hidden; border-radius: var(--radius); transition: transform 0.3s var(--ease), box-shadow 0.3s var(--ease); will-change: transform; transform-style: preserve-3d; }
@@ -669,7 +669,7 @@ useModuleDialogGuard("photos", () => {
 
 /* 选择删除模式 */
 .masonry-item.selected .photo-card { box-shadow: 0 0 0 2px var(--danger), 0 12px 36px rgba(0,0,0,0.5); }
-.photo-select-mark { position: absolute; top: 8px; left: 8px; width: 24px; height: 24px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.4); background: rgba(0,0,0,0.5); backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center; z-index: 3; transition: all 0.2s; }
+.photo-select-mark { position: absolute; top: 8px; left: 8px; width: 24px; height: 24px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.4); background: rgba(0,0,0,0.68); display: flex; align-items: center; justify-content: center; z-index: 3; transition: background 0.2s, border-color 0.2s, color 0.2s, box-shadow 0.2s, opacity 0.2s; }
 .photo-select-mark.checked { border-color: var(--danger); background: var(--danger); color: #fff; box-shadow: 0 0 10px rgba(255,71,87,0.5); }
 .photo-select-mark svg { width: 14px; height: 14px; }
 
@@ -689,7 +689,7 @@ useModuleDialogGuard("photos", () => {
 .viewer-content { max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column; gap: 12px; align-items: center; position: relative; }
 .viewer-image { max-width: 90vw; max-height: 80vh; object-fit: contain; border-radius: var(--radius); box-shadow: 0 0 40px rgba(0,0,0,0.8), 0 0 1px rgba(0,212,255,0.2); transform-origin: center center; transition: transform 0.12s ease-out; animation: photo-in 0.6s var(--ease); user-select: none; -webkit-user-drag: none; }
 .viewer-image.dragging { transition: none; }
-@keyframes photo-in { from { opacity: 0; filter: blur(8px); } to { opacity: 1; filter: blur(0); } }
+@keyframes photo-in { from { opacity: 0; } to { opacity: 1; } }
 .viewer-info { display: flex; align-items: center; gap: 16px; }
 .viewer-name { font-size: 12px; color: var(--text-primary); font-family: var(--font); }
 .viewer-hint { font-size: 10px; color: var(--text-muted); font-family: var(--font); letter-spacing: 1px; }

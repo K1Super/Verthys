@@ -22,6 +22,7 @@
     - showMeta?: boolean            是否显示百分比/耗时（默认 false，解锁/验证不显示）
     - compact?: boolean             紧凑模式（缩小通道尺寸）
     - showLoader?: boolean          是否显示量子核心加载动画（默认 true，复用 QuantumCoreLoader）
+    - dimmed?: boolean              失败冻结降级样式标识（仅样式，无判断逻辑）
 
   Emits: 无
   用法：
@@ -39,6 +40,7 @@
       compact,
       'no-text': !displayText,
       'no-loader': !showLoader,
+      'qf-dimmed': dimmed,
     }"
   >
     <!-- ===== 量子核心加载动画（复用 QuantumCoreLoader 组件，消除重复代码） ===== -->
@@ -107,6 +109,8 @@ interface Props {
   compact?: boolean;
   /** 是否显示量子核心加载动画（默认 true，复用 QuantumCoreLoader 组件） */
   showLoader?: boolean;
+  /** 失败冻结降级标识（样式标识：整体降低不透明度与饱和度） */
+  dimmed?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -116,6 +120,7 @@ const props = withDefaults(defineProps<Props>(), {
   showMeta: false,
   compact: false,
   showLoader: true,
+  dimmed: false,
 });
 
 /* ===== 计算属性 ===== */

@@ -4,7 +4,7 @@
 >
 > Last updated: 2026-09-19 · 维护人：K1Super
 
-本规范整合 `archive/c_layer_coding_spec.md` 并对齐当前代码现状；命名与目录以代码实际符号为准（规范与代码冲突时以代码为事实，差异在文中标注）。提交规范见 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)；刚性底线见 [执行刚性约束条款.md](执行刚性约束条款.md)。
+本规范整合 `archive/c_layer_coding_spec.md` 并对齐当前代码现状；命名与目录以代码实际符号为准（规范与代码冲突时以代码为事实，差异在文中标注）。提交规范见 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)；刚性底线见 [ENGINEERING_CONSTRAINTS.md](ENGINEERING_CONSTRAINTS.md)。
 
 ---
 

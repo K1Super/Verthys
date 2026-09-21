@@ -66,7 +66,7 @@ defineEmits<{
 }
 
 @keyframes dialog-in {
-  from { opacity: 0; filter: blur(12px); transform: scale(0.95); }
-  to { opacity: 1; filter: blur(0); transform: scale(1); }
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
 }
 </style>

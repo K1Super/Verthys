@@ -4,8 +4,9 @@
 # 覆盖（对应 core.yml 注释中"由本工作流承接"的承诺）：
 #   1. Rust 单元测试（src-tauri 296 项 + verthys-worker 编译验证）
 #   2. cargo clippy 静态检查（--all-targets -D warnings，零告警门）
-#   3. 前端 TypeScript 类型检查（vue-tsc --noEmit）
-#   4. 前端生产构建（vite build，验证打包链完整性）
+#   3. 前端单元测试（vitest，验证进度感知层状态机核心路径）
+#   4. 前端 TypeScript 类型检查（vue-tsc --noEmit）
+#   5. 前端生产构建（vite build，验证打包链完整性）
 #
 # ★ 素材前置（2026-09-19 隔离实证）：tauri 编译期强制要求
 #   resources（verthys.dll）与 externalBin（binaries/verthys-worker-*.exe）
@@ -102,6 +103,13 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+        working-directory: verthys-tauri
+
+      - name: Frontend unit tests (vitest)
+        run: |
+          npx vitest run
+          if ($LASTEXITCODE -ne 0) { throw "vitest tests failed" }
+        shell: pwsh
         working-directory: verthys-tauri
 
       - name: Frontend type check (vue-tsc)

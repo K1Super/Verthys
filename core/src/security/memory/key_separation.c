@@ -10,24 +10,16 @@
  *      从此只存在于内核地址空间。
  *   3. 句柄数组隔离：三个角色的 BCRYPT_KEY_HANDLE 存于 s_slots[3] 数组，
  *      VirtualLock 锁定该数组页（仅保护句柄值与状态标志，不保护密钥本体）。
- *   4. 内核态 AEAD：BCryptEncrypt/BCryptDecrypt 携带
- *      BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO（pbNonce/pbAuthData/pbTag），
- *      在内核态完成 AES-256-GCM 运算，密钥字节永不返回用户态。
- *   5. C 密钥休眠：active 标志实现逻辑休眠；CNG 句柄无 PAGE_NOACCESS 等价，
- *      AEAD 路径强制校验 active 状态，休眠态调用立即返回失败。
- *   6. 紧急销毁：BCryptDestroyKey 销毁内核句柄（内核释放密钥材料），
+ *   4. C 密钥休眠：active 标志实现逻辑休眠；CNG 句柄无 PAGE_NOACCESS 等价，
+ *      acquire 路径强制校验 active 状态，休眠态调用立即返回失败。
+ *   5. 紧急销毁：BCryptDestroyKey 销毁内核句柄（内核释放密钥材料），
  *      BCryptCloseAlgorithmProvider 关闭算法提供者。无需多轮覆写用户态堆页。
  *
- * 算法参数：AES-256-GCM
- *   - 密钥：32 字节（BCRYPT_AES_256_KEY_SIZE = 32）
- *   - Nonce：12 字节（NIST SP 800-38D 推荐）
- *   - 认证标签：16 字节（GCM 最大强度）
- *   - 密文布局：[ciphertext || tag]（与 libsodium XChaCha20-Poly1305 兼容布局，
- *     便于上层封装统一处理）
+ * 本模块曾提供外部 nonce 的 AES-256-GCM 内核态运算接口，因 nonce 复用
+ * 防线完全依赖调用方纪律且无生产调用点已整体移除；密钥消费方使用
+ * verthys_crypto_cng 的 AEAD 上下文（内部 Interlocked 计数器生成 nonce）。
  *
- * 注意：本模块非线程安全，调用方（事务提交路径）保证单线程串行访问。
- * 如需多线程访问，需在 s_slots 上加锁——但当前架构中 AEAD 运算均在
- * 单线程事务上下文内完成，无需引入锁开销。
+ * 注意：本模块非线程安全，调用方保证单线程串行访问。
  */
 #include "key_separation.h"
 #include "verthys_internal.h"  /* verthys_secure_zero / verthys_lock_memory / verthys_unlock_memory */
@@ -96,34 +88,6 @@ static int open_aes_gcm_provider(void)
     }
 
     return 0;
-}
-
-/*
- * 初始化 BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO 结构（AES-GCM 专用）。
- *   auth_info : 输出结构（调用方栈分配）
- *   nonce     : 12 字节 Nonce
- *   ad        : 关联数据（可为 NULL）
- *   ad_len    : 关联数据字节数
- *   tag       : 标签缓冲（加密时为输出，解密时为输入）
- *   tag_len   : 标签字节数（必须为 KEYSEP_AEAD_TAG_BYTES）
- */
-static void init_gcm_auth_info(BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO *auth_info,
-                               const uint8_t nonce[KEYSEP_AEAD_NONCE_BYTES],
-                               const uint8_t *ad, size_t ad_len,
-                               uint8_t *tag, size_t tag_len)
-{
-    /* BCRYPT_INIT_AUTH_MODE_INFO 是 bcrypt.h 提供的标准宏，
-     * 将 cbSize 与 dwInfoVersion 设为正确值，其余字段置零。 */
-    BCRYPT_INIT_AUTH_MODE_INFO(*auth_info);
-
-    auth_info->pbNonce      = (PUCHAR)nonce;
-    auth_info->cbNonce      = KEYSEP_AEAD_NONCE_BYTES;
-    auth_info->pbAuthData   = (ad_len > 0) ? (PUCHAR)ad : NULL;
-    auth_info->cbAuthData   = (ULONG)ad_len;
-    auth_info->pbTag        = (tag_len > 0) ? (PUCHAR)tag : NULL;
-    auth_info->cbTag        = (ULONG)tag_len;
-
-    /* pbMacContext / cbMacContext 仅用于分块流式运算，单次调用置 NULL/0 即可。 */
 }
 
 /* ===================================================================== *
@@ -245,8 +209,8 @@ int key_separation_acquire(KeyRole role, uint8_t out_key[KEYSEP_KEY_BYTES])
      * 总长度 = 12 + 32 = 44 字节。
      *
      * 注意：本接口使密钥字节短暂返回用户态，仅供仍使用
-     * XChaCha20-Poly1305 的旧调用方过渡使用。新代码应使用
-     * key_separation_aead_*，密钥字节永不离开内核。
+     * XChaCha20-Poly1305 的旧调用方过渡使用。新的密钥消费方使用
+     * verthys_crypto_cng 的 AEAD 上下文，密钥字节永不离开内核。
      */
     uint8_t blob[KEYSEP_EXPORT_HEADER_BYTES + KEYSEP_KEY_BYTES];
     ULONG blob_len = 0;
@@ -364,141 +328,3 @@ void key_separation_purge_all(void)
     s_initialized = 0;  /* 重置为未初始化，允许后续重新 init */
 }
 
-/* ===================================================================== *
- *                  CNG 内核态 AEAD 接口实现                              *
- * ===================================================================== */
-
-int key_separation_aead_encrypt(KeyRole role,
-                                const uint8_t nonce[KEYSEP_AEAD_NONCE_BYTES],
-                                const uint8_t *ad, size_t ad_len,
-                                const uint8_t *plaintext, size_t pt_len,
-                                uint8_t *ciphertext, size_t *ct_len)
-{
-    if (!s_initialized) return -1;
-    if (role < 0 || role >= KEY_ROLE_COUNT) return -1;
-    if (nonce == NULL || plaintext == NULL || ciphertext == NULL || ct_len == NULL) {
-        return -1;
-    }
-    /* 缓冲容量校验：ciphertext 需容纳 pt_len + 16B 标签 */
-    if (*ct_len < pt_len + KEYSEP_AEAD_TAG_BYTES) return -1;
-    if (ad == NULL && ad_len != 0) return -1;
-
-    KeySlot *slot = &s_slots[role];
-    if (slot->hKey == NULL || !slot->installed) return -1;
-
-    /* C 密钥休眠态拒绝运算 */
-    if (role == KEY_ROLE_COMMIT && !slot->active) return -1;
-
-    /*
-     * 标签写入位置：ciphertext 末尾 16 字节。
-     * 密文布局 [ciphertext || tag] 与 libsodium XChaCha20-Poly1305 兼容，
-     * 便于上层封装统一处理。
-     */
-    uint8_t *tag = ciphertext + pt_len;
-
-    /* 初始化 GCM 认证模式信息 */
-    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO auth_info;
-    init_gcm_auth_info(&auth_info, nonce, ad, ad_len, tag, KEYSEP_AEAD_TAG_BYTES);
-
-    /*
-     * BCryptEncrypt 在内核态完成 AES-256-GCM 运算：
-     *   - 明文从用户态传入，内核读取后加密，密文写回用户态 ciphertext 缓冲
-     *   - 标签写入 auth_info.pbTag（即 ciphertext + pt_len）
-     *   - pbIV=NULL, cbIV=0：GCM 的 Nonce 已在 auth_info 中指定
-     *   - dwFlags=0：不使用 BCRYPT_BLOCK_PADDING（GCM 是流式 AEAD，无需填充）
-     *
-     * 密钥字节全程驻留内核，用户态仅见证明文→密文的转换。
-     */
-    ULONG result_len = 0;
-    NTSTATUS st = BCryptEncrypt(slot->hKey,
-                                (PUCHAR)plaintext,
-                                (ULONG)pt_len,
-                                &auth_info,
-                                NULL,
-                                0,
-                                ciphertext,
-                                (ULONG)pt_len,
-                                &result_len,
-                                0);
-    if (!BCRYPT_SUCCESS(st)) {
-        /* 失败时清零输出缓冲，防止残留半成品密文 */
-        verthys_secure_zero(ciphertext, pt_len + KEYSEP_AEAD_TAG_BYTES);
-        return -1;
-    }
-
-    /* GCM 流式加密：result_len 应等于 pt_len（不含标签） */
-    if (result_len != pt_len) {
-        verthys_secure_zero(ciphertext, pt_len + KEYSEP_AEAD_TAG_BYTES);
-        return -1;
-    }
-
-    *ct_len = pt_len + KEYSEP_AEAD_TAG_BYTES;
-    return 0;
-}
-
-int key_separation_aead_decrypt(KeyRole role,
-                                const uint8_t nonce[KEYSEP_AEAD_NONCE_BYTES],
-                                const uint8_t *ad, size_t ad_len,
-                                const uint8_t *ciphertext, size_t ct_len,
-                                uint8_t *plaintext, size_t *pt_len)
-{
-    if (!s_initialized) return -1;
-    if (role < 0 || role >= KEY_ROLE_COUNT) return -1;
-    if (nonce == NULL || ciphertext == NULL || plaintext == NULL || pt_len == NULL) {
-        return -1;
-    }
-    /* 输入必须大于标签长度（至少有 1 字节密文 + 16 字节标签） */
-    if (ct_len <= KEYSEP_AEAD_TAG_BYTES) return -1;
-    /* 输出缓冲容量校验 */
-    size_t expected_pt_len = ct_len - KEYSEP_AEAD_TAG_BYTES;
-    if (*pt_len < expected_pt_len) return -1;
-    if (ad == NULL && ad_len != 0) return -1;
-
-    KeySlot *slot = &s_slots[role];
-    if (slot->hKey == NULL || !slot->installed) return -1;
-
-    /* C 密钥休眠态拒绝运算 */
-    if (role == KEY_ROLE_COMMIT && !slot->active) return -1;
-
-    /*
-     * 标签读取位置：ciphertext 末尾 16 字节。
-     * CNG 在内核态校验标签，认证失败返回 STATUS_AUTH_TAG_MISMATCH。
-     */
-    const uint8_t *tag = ciphertext + expected_pt_len;
-
-    /* 初始化 GCM 认证模式信息 */
-    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO auth_info;
-    init_gcm_auth_info(&auth_info, nonce, ad, ad_len, (uint8_t *)tag, KEYSEP_AEAD_TAG_BYTES);
-
-    /*
-     * BCryptDecrypt 在内核态完成 AES-256-GCM 运算：
-     *   - 输入 ct_len 字节（密文+标签），但 BCryptDecrypt 的 pbInput 长度
-     *     应为"纯密文长度"（不含标签），标签通过 auth_info.pbTag 传入
-     *   - 内核校验标签通过后写回明文到 plaintext 缓冲
-     *   - 认证失败返回非 0，明文缓冲不写入有效数据
-     */
-    ULONG result_len = 0;
-    NTSTATUS st = BCryptDecrypt(slot->hKey,
-                                (PUCHAR)ciphertext,
-                                (ULONG)expected_pt_len,
-                                &auth_info,
-                                NULL,
-                                0,
-                                plaintext,
-                                (ULONG)expected_pt_len,
-                                &result_len,
-                                0);
-    if (!BCRYPT_SUCCESS(st)) {
-        /* 认证失败或内核错误：清零输出缓冲防止残留 */
-        verthys_secure_zero(plaintext, expected_pt_len);
-        return -1;
-    }
-
-    if (result_len != expected_pt_len) {
-        verthys_secure_zero(plaintext, expected_pt_len);
-        return -1;
-    }
-
-    *pt_len = expected_pt_len;
-    return 0;
-}

@@ -23,10 +23,14 @@
 -->
 <template>
   <div class="view-management" :style="{ pointerEvents: initializing ? 'none' : 'auto' }">
-    <!-- ===== 量子态势面板（进入中枢首屏） ===== -->
-    <Transition name="mgmt-x">
+    <!-- ===== 单一编排控制器：三态视图共用同一 Transition（out-in 严格串行）
+       ===== 离场动画完成前入场不挂载 — 离场 Canvas / 入场挂载 / 模糊重绘
+       ===== 绝不并行争抢主线程与合成器。key 保证三态间过渡触发。 -->
+    <Transition name="mgmt-x" mode="out-in">
+      <!-- 量子态势面板（进入中枢首屏） -->
       <QuantumDashboard
         v-if="mgmtView === 'dashboard'"
+        key="dashboard"
         :global-key-ready="globalKeyReady"
         :module-ids="moduleIds"
         :module-labels="moduleLabels"
@@ -34,12 +38,11 @@
         :module-state-text="moduleStateText"
         @enter-section="enterSection"
       />
-    </Transition>
 
-    <!-- ===== 前置引导区（纯视觉 · 零文字） ===== -->
-    <Transition name="mgmt-x">
+      <!-- 前置引导区（纯视觉 · 零文字）；点击引导单元后由传播完成事件驱动进入 -->
       <ManagementHub
-        v-if="mgmtView === 'hub'"
+        v-else-if="mgmtView === 'hub'"
+        key="hub"
         :global-key-ready="globalKeyReady"
         :device-check-result="deviceCheckResult"
         :module-ids="moduleIds"
@@ -47,11 +50,9 @@
         @enter="enterHubSection"
         @back="mgmtView = 'dashboard'"
       />
-    </Transition>
 
-    <!-- ===== 分区详情视图（单区渲染，避免聚合堆砌） ===== -->
-    <Transition name="mgmt-x">
-      <div v-if="mgmtView === 'detail'" ref="detailRef" class="mgmt-detail">
+      <!-- 分区详情视图（单区渲染，避免聚合堆砌） -->
+      <div v-else-if="mgmtView === 'detail'" key="detail" ref="detailRef" class="mgmt-detail">
         <!-- 顶部状态栏（各区常驻） -->
         <ManagementTopBar
           :global-key-ready="globalKeyReady"

@@ -26,6 +26,7 @@
 #include "verthys_test.h"
 #include "verthys.h"
 #include "verthys_internal.h"          /* VerthysContext / VerthysState */
+#include "verthys_api_utils.h"         /* verthys_backoff_reset（跨测试清退避记账） */
 #include "verthys_v3_lifecycle.h"       /* VerthysContextV3 / 事务共享骨架 */
 #include "verthys_unlock_pipeline.h"   /* verthys_unlock_pipeline_run / UnlockStage */
 #include "verthys_container_v3.h"      /* VsbTxnV3 / vsb_txn_v3_* */
@@ -190,8 +191,8 @@ TEST(v3life_full_chain_roundtrip)
 }
 
 /*
- * 改密后旧口令必须失效：旧口令解锁 → AUTH；新口令（独立句柄，规避
- * 退避冷却跨句柄污染）解锁 → OK 且数据完整。
+ * 改密后旧口令必须失效：旧口令解锁 → AUTH（进程级退避记账随之
+ * 开启，测试内主动清零）；新口令解锁 → OK 且数据完整。
  */
 TEST(v3life_cp_old_password_rejected)
 {
@@ -209,9 +210,11 @@ TEST(v3life_cp_old_password_rejected)
     CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
     Verthys_Deinit(h);
 
-    /* 旧口令 → AUTH（wrapped_key_a 已绑定新口令语境） */
+    /* 旧口令 → AUTH（wrapped_key_a 已绑定新口令语境）；
+     * AUTH 记账为进程级，主动清零避免退避窗口拦截下步验证 */
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
     CHECK_EQ(Verthys_Unlock(h, V3L_VERTHYS, V3L_PW, V3L_PW_LEN, 0), VERTHYS_ERR_AUTH);
+    verthys_backoff_reset();
     Verthys_Deinit(h);
 
     /* 新口令 → OK + 数据完整 */

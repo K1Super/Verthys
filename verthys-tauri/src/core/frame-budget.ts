@@ -6,11 +6,17 @@
  * 用户感知到的是粒子密度降低而非卡顿。
  *
  * 【监控模型】
- *   - 采样：独立 rAF 循环测量帧间隔（主线程停帧 — 无论来自 JS 还是
- *     GPU 合成反压 — 均表现为 rAF 间隔拉长，是帧预算最可信的代理指标）；
- *   - 评估：60 帧滑窗 P95（兼顾稳态与离群帧）；
- *   - 迟滞：连续 30 次评估超预算 → 降一档；连续 60 次评估低于预算
- *     70% → 升一档（自愈）。中间带计数归零 — 防止在阈值附近抖动。
+ *   - 采样：主渲染循环每执行帧记录「任务总耗时」（mustRun + throttled
+ *     实际执行时长，主循环在调用任务前后计时）——独立 rAF 已根除，
+ *     本模块不再持有任何帧调度句柄；
+ *   - 缓冲：固定长度 Float32Array 环形缓冲（60 样本），head 索引覆盖
+ *     写入，O(1) 零分配；
+ *   - 评估：每 60 帧（约 1s @60fps）执行一次 P95 排序与升降级决策
+ *     （统计与决策不阻塞帧）；迟滞阈值以评估周期计数。
+ *
+ * 【预算基准】active 档任务总耗时 P95 预算 6ms（jsTimeMs），恢复线
+ *   为预算 70%（4.2ms）——任务总耗时只含 JS 执行时间，不含 rAF 等待
+ *   与 GPU 合成反压（帧间隔代理测量已废弃）。
  *
  * 【降级档位】
  *   级别 | 粒子密度 | CSS 动画     | backdrop-filter
@@ -28,23 +34,23 @@
  *
  * 【采样守卫（防误判）】
  *   - 仅全局空闲档位为 active 时采样：settling/idle/deep-idle 的有意
- *     降频帧（30/5/1fps）不是性能缺陷，计入会永久误降级；
- *   - 帧间隔 ≥1000ms 丢弃（标签页切换/系统挂起恢复的巨帧）；
+ *     降频执行不是性能缺陷，计入会永久误降级；
+ *   - 任务总耗时 ≥1000ms 丢弃（标签页切换/系统挂起恢复的巨帧）；
  *   - 滑窗未满（启动暖机 <1s）不参与升降级决策 — 启动峰值不触发降级。
  *
  * 【可观测性】档位跃迁 DEV 构建输出日志；getMetrics() 暴露快照
- * （帧样本/P95/当前档位）供诊断面板与测试消费。
+ * （任务耗时均值/P50/P95/P99/当前档位/样本数/draw call）供诊断与测试消费。
  * ========================================================================== */
 
 import { useGlobalIdleScheduler } from "../composables/useGlobalIdleScheduler";
 
-/** 帧指标快照（gpuTimeMs 为 WebGL timer query 预留位） */
+/** 帧指标快照 */
 export interface FrameMetrics {
-  /** 主线程 JS 时间（帧间隔代理测量，ms） */
+  /** 最近一帧任务总耗时（ms） */
   jsTimeMs: number;
-  /** GPU 光栅化时间（timer query 未接入时恒为 0 — 预留位） */
+  /** GPU timer query 预留位（未接入时恒为 0） */
   gpuTimeMs: number;
-  /** 帧总时间（ms） */
+  /** 帧总时间（ms，与 jsTimeMs 同源 —— 任务总耗时语义） */
   totalTimeMs: number;
 }
 
@@ -54,23 +60,26 @@ export const DEGRADATION_MAX_LEVEL = 3;
 /** 各档位粒子密度（1 / 0.8 / 0.5 / 0.2） */
 const DENSITY_BY_LEVEL: readonly number[] = [1, 0.8, 0.5, 0.2];
 
-/** 滑窗帧数（60 帧 ≈ 1s @60fps） */
+/** 环形缓冲容量（帧）—— 约 1s @60fps */
 const SAMPLE_WINDOW = 60;
 
-/** 60fps 帧预算（ms） */
-const BUDGET_MS = 16.67;
+/** 评估周期（帧）—— P95 排序与升降级决策频率（约 1 次/秒 @60fps） */
+const EVAL_PERIOD_FRAMES = 60;
 
-/** 连续超预算评估次数阈值 → 降一档 */
-const OVER_BUDGET_EVALS = 30;
+/** active 档任务总耗时 P95 预算（ms） */
+const BUDGET_P95_MS = 6;
+
+/** 连续超预算评估次数阈值 → 降一档（评估周期 ≈1s） */
+const OVER_BUDGET_EVALS = 2;
 
 /** 连续低预算评估次数阈值 → 升一档（自愈，比降级更保守） */
-const UNDER_BUDGET_EVALS = 60;
+const UNDER_BUDGET_EVALS = 6;
 
 /** 低预算判定比例（P95 < 预算 × 0.7 → 视为余量充足） */
 const RECOVER_RATIO = 0.7;
 
-/** 单帧间隔丢弃上限（ms）— 标签页切换/系统挂起恢复的巨帧不计入 */
-const FRAME_GAP_DISCARD_MS = 1000;
+/** 单帧任务总耗时丢弃上限（ms）— 挂起恢复的巨帧不计入 */
+const TASK_TOTAL_DISCARD_MS = 1000;
 
 /**
  * 粒子密度控制契约。
@@ -90,92 +99,108 @@ export type LevelListener = (level: number) => void;
 /**
  * 帧预算监控器（单例语义：经模块级 frameBudgetMonitor 导出消费）。
  *
- * 并发安全：状态跃迁仅由 rAF 回调驱动（start/stop/注册 API 幂等），
- * 无跨线程共享可变状态。
+ * 并发安全：状态跃迁仅由主渲染循环的 recordFrame 调用驱动
+ * （start/stop/注册 API 幂等），无跨线程共享可变状态。
  */
 export class FrameBudgetMonitor {
-  /** 滑窗帧样本（ms） */
-  private frameTimes: number[] = [];
-  /** 帧预算（ms） */
-  private readonly budgetMs = BUDGET_MS;
+  /** 滑窗环形缓冲（任务总耗时，ms） */
+  private readonly ring = new Float32Array(SAMPLE_WINDOW);
+  /** 环形写头（下一写入索引） */
+  private head = 0;
+  /** 已写入样本数（≤ SAMPLE_WINDOW） */
+  private samples = 0;
+  /** 距下次评估的帧计数 */
+  private evalCountdown = EVAL_PERIOD_FRAMES;
   /** 当前降级档位（0 = 完整） */
   private degradationLevel = 0;
   /** 连续超预算评估计数 */
   private consecutiveOverBudget = 0;
   /** 连续低预算评估计数 */
   private consecutiveUnderBudget = 0;
-  /** rAF 句柄（null = 未启动） */
-  private rafId: number | null = null;
-  /** 上一帧时间戳（performance 基准） */
-  private lastFrameTs = 0;
+  /** 采样启停标志（App.vue 生命周期驱动） */
+  private enabled = false;
+  /** 最近一次记录的任务总耗时（ms） */
+  private lastTaskTotalMs = 0;
+  /** 最近观测到的每执行帧 draw call 数（ParticleBackground 上报） */
+  private drawCalls = 0;
   /** 粒子密度控制器（未注册时粒子通道空转 — 容错） */
   private particleController: ParticleDensityController | null = null;
   /** 档位跃迁监听器集 */
   private readonly listeners = new Set<LevelListener>();
-  /** 全局空闲档位（仅 active 档采样 — 有意降频帧不计入预算评估） */
+  /** 全局空闲档位（仅 active 档采样 — 有意降频执行不计入预算评估） */
   private readonly idleLevel = useGlobalIdleScheduler().level;
 
-  /** 启动监控（幂等：重复启动无副作用） */
+  /** 启用采样（幂等；已停止时 recordFrame 为无操作） */
   start(): void {
-    if (this.rafId !== null) return;
-    this.lastFrameTs = 0;
-    this.rafId = window.requestAnimationFrame(this.tick);
+    this.enabled = true;
   }
 
-  /** 停止监控（幂等；档位与治理类保持现状 — 停止≠复位） */
+  /** 停用采样（幂等；档位与治理类保持现状 — 停止≠复位） */
   stop(): void {
-    if (this.rafId === null) return;
-    window.cancelAnimationFrame(this.rafId);
-    this.rafId = null;
-    this.lastFrameTs = 0;
+    this.enabled = false;
   }
-
-  /** rAF 采样循环：帧间隔测量 → 守卫过滤 → 记录评估 */
-  private readonly tick = (ts: number): void => {
-    this.rafId = window.requestAnimationFrame(this.tick);
-
-    if (this.lastFrameTs === 0) {
-      this.lastFrameTs = ts;
-      return;
-    }
-    const delta = ts - this.lastFrameTs;
-    this.lastFrameTs = ts;
-
-    if (delta <= 0 || delta >= FRAME_GAP_DISCARD_MS) return;
-    if (this.idleLevel.value !== "active") return;
-
-    this.recordFrame(delta);
-  };
 
   /**
-   * 记录一帧（滑窗入队 + 评估）。
+   * 记录一执行帧的任务总耗时（由主渲染循环每执行帧调用）。
+   * O(1) 环形写入 + 降频评估 — 统计/排序/决策不在每帧执行。
    * 亦开放给外部采样源（如测试注入合成帧序列）。
    */
-  recordFrame(totalTimeMs: number): void {
-    this.frameTimes.push(totalTimeMs);
-    if (this.frameTimes.length > SAMPLE_WINDOW) {
-      this.frameTimes.shift();
+  recordFrame(totalTaskMs: number): void {
+    if (!this.enabled) return;
+    /* 巨帧守卫：挂起恢复的一次性异常耗时不计入预算评估 */
+    if (totalTaskMs <= 0 || totalTaskMs >= TASK_TOTAL_DISCARD_MS) return;
+    /* 采样守卫：仅 active 档采样（有意降频帧不是性能缺陷） */
+    if (this.idleLevel.value !== "active") return;
+
+    this.ring[this.head] = totalTaskMs;
+    this.head = (this.head + 1) % SAMPLE_WINDOW;
+    if (this.samples < SAMPLE_WINDOW) this.samples++;
+    this.lastTaskTotalMs = totalTaskMs;
+
+    /* 降频评估：每 EVAL_PERIOD_FRAMES 帧执行一次 P95 排序与决策 */
+    this.evalCountdown--;
+    if (this.evalCountdown <= 0) {
+      this.evalCountdown = EVAL_PERIOD_FRAMES;
+      if (this.samples >= SAMPLE_WINDOW) this.evaluate();
     }
-    this.evaluate();
   }
 
-  /** 滑窗 P95 评估 + 迟滞跃迁决策 */
+  /** 上报每执行帧 draw call 数（ParticleBackground 渲染后采样，无档位守卫） */
+  reportDrawCalls(calls: number): void {
+    this.drawCalls = calls;
+  }
+
+  /** 环形缓冲快照 → 升序数组（仅供评估 / 指标快照消费） */
+  private sortedSamples(): number[] {
+    const out: number[] = [];
+    for (let i = 0; i < this.samples; i++) {
+      out.push(this.ring[(this.head - this.samples + i + SAMPLE_WINDOW) % SAMPLE_WINDOW]);
+    }
+    return out.sort((a, b) => a - b);
+  }
+
+  /** 分位数（升序数组；样本不足时回退可用边界） */
+  private percentile(sorted: number[], q: number): number {
+    if (sorted.length === 0) return 0;
+    const idx = Math.min(sorted.length - 1, Math.ceil(sorted.length * q) - 1);
+    return sorted[Math.max(idx, 0)];
+  }
+
+  /** 滑窗 P95 评估 + 迟滞跃迁决策（每 60 帧调用一次） */
   private evaluate(): void {
-    /* 暖机守卫：滑窗未满不决策（启动峰值不触发降级） */
-    if (this.frameTimes.length < SAMPLE_WINDOW) return;
+    const sorted = this.sortedSamples();
+    const p95 = this.percentile(sorted, 0.95);
 
-    const p95 = this.calculateP95();
-
-    if (p95 > this.budgetMs) {
+    if (p95 > BUDGET_P95_MS) {
       this.consecutiveUnderBudget = 0;
       this.consecutiveOverBudget++;
-      if (this.consecutiveOverBudget > OVER_BUDGET_EVALS) {
+      if (this.consecutiveOverBudget >= OVER_BUDGET_EVALS) {
         this.degrade();
       }
-    } else if (p95 < this.budgetMs * RECOVER_RATIO) {
+    } else if (p95 < BUDGET_P95_MS * RECOVER_RATIO) {
       this.consecutiveOverBudget = 0;
       this.consecutiveUnderBudget++;
-      if (this.consecutiveUnderBudget > UNDER_BUDGET_EVALS) {
+      if (this.consecutiveUnderBudget >= UNDER_BUDGET_EVALS) {
         this.upgrade();
       }
     } else {
@@ -183,17 +208,6 @@ export class FrameBudgetMonitor {
       this.consecutiveOverBudget = 0;
       this.consecutiveUnderBudget = 0;
     }
-  }
-
-  /** 滑窗 P95（升序取 95 分位，含离群帧） */
-  private calculateP95(): number {
-    if (this.frameTimes.length === 0) return 0;
-    const sorted = [...this.frameTimes].sort((a, b) => a - b);
-    const idx = Math.min(
-      sorted.length - 1,
-      Math.ceil(sorted.length * 0.95) - 1,
-    );
-    return sorted[Math.max(idx, 0)];
   }
 
   /** 平滑降级一档（逐步减少工作，而非骤降帧率） */
@@ -227,11 +241,11 @@ export class FrameBudgetMonitor {
     /* 3) 可观测性：DEV 档位跃迁日志 + 监听器通知 */
     if (import.meta.env.DEV) {
       console.info(
-        "[frame-budget] %s → level %d (density %d%%, p95 %sms)",
+        "[frame-budget] %s → level %d (density %d%%, p95 %.2fms)",
         direction,
         level,
         Math.round(DENSITY_BY_LEVEL[level] * 100),
-        this.calculateP95().toFixed(2),
+        this.percentile(this.sortedSamples(), 0.95),
       );
     }
     for (const listener of this.listeners) {
@@ -267,22 +281,34 @@ export class FrameBudgetMonitor {
     return this.degradationLevel;
   }
 
-  /** 指标快照（诊断/测试消费 — 不暴露内部可变数组） */
-  getMetrics(): FrameMetrics & { p95Ms: number; level: number; samples: number } {
-    const p95 = this.calculateP95();
-    const last = this.frameTimes.length > 0
-      ? this.frameTimes[this.frameTimes.length - 1]
-      : 0;
+  /** 指标快照（诊断/测试消费 — 不暴露内部可变状态） */
+  getMetrics(): FrameMetrics & {
+    meanMs: number;
+    p50Ms: number;
+    p95Ms: number;
+    p99Ms: number;
+    level: number;
+    samples: number;
+    drawCalls: number;
+  } {
+    const sorted = this.sortedSamples();
+    const mean =
+      sorted.length > 0 ? sorted.reduce((a, b) => a + b, 0) / sorted.length : 0;
     return {
-      jsTimeMs: last,
-      gpuTimeMs: 0, // WebGL timer query 预留位（未接入）
-      totalTimeMs: last,
-      p95Ms: p95,
+      jsTimeMs: this.lastTaskTotalMs,
+      gpuTimeMs: 0, // GPU timer query 预留位（未接入）
+      totalTimeMs: this.lastTaskTotalMs,
+      meanMs: mean,
+      p50Ms: this.percentile(sorted, 0.5),
+      p95Ms: this.percentile(sorted, 0.95),
+      p99Ms: this.percentile(sorted, 0.99),
       level: this.degradationLevel,
-      samples: this.frameTimes.length,
+      samples: this.samples,
+      drawCalls: this.drawCalls,
     };
   }
 }
 
-/** 全局帧预算监控器（模块级单例 — App.vue 生命周期驱动启停） */
+/** 全局帧预算监控器（模块级单例 — App.vue 生命周期驱动启停，
+ *  采样由主渲染循环每执行帧推送） */
 export const frameBudgetMonitor = new FrameBudgetMonitor();

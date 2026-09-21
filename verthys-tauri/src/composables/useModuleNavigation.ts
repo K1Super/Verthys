@@ -29,6 +29,7 @@ import {
 } from "../cache/composition/verthys-cache";
 import { scheduleGc } from "../utils/gc";
 import { withTimeout } from "../utils/promise_utils";
+import { masterFrameLoop } from "../core/master-frame-loop";
 
 /* ------------------------------------------------------------------ *
  * ★ 安全守卫修复：等待布尔 Ref 变为 false（带超时兜底）
@@ -171,7 +172,14 @@ export function useModuleNavigation() {
   watch(moduleKeyInput, (v) => {
     if (v && moduleKeyVerifyError.value) moduleKeyVerifyError.value = false;
   });
-  let verifyRafId: number | null = null;
+  /* 验证进度节拍器注销函数（主循环 throttled 注册；无注册 = 未运行） */
+  let verifyTickerStop: (() => void) | null = null;
+
+  /** 停止验证进度节拍器（幂等） */
+  const stopVerifyTicker = () => {
+    verifyTickerStop?.();
+    verifyTickerStop = null;
+  };
 
   /* 待登录模块的 ModuleId（用于查询 hasModuleKeyRecordRef） */
   const pendingModuleId = computed<ModuleId>(() => MODULE_ID_MAP[pendingModule.value] || "accounts");
@@ -277,7 +285,8 @@ export function useModuleNavigation() {
   };
 
   /* ===== 模块密钥登录对话框确认/取消 ===== */
-  /* ★ 1.5s 感知时长：rAF 推进进度条至 90%，实际验证完成后跳 100%，保证用户感知
+  /* ★ 1.5s 感知时长：主循环帧节拍推进进度条至 90%，实际验证完成后跳 100%，
+   *   保证用户感知
    * ★ 企业级安全修复（刚性约束）：
    *   - verifyModuleKey 返回 VerthysResult<void> 判别联合对象，必须用 result.ok 判断
    *     旧代码 `const ok = await ...; if (!ok)` 判断对象引用（永远 truthy），
@@ -292,21 +301,23 @@ export function useModuleNavigation() {
     moduleKeyVerifyError.value = false;
     moduleKeyVerifyPercent.value = 0;
     moduleKeyVerifyMsg.value = "正在验证密钥";
+    /* 感知节拍器：throttled 注册 — ratio 达 1 时自注销；进度由墙钟
+     * 计算，档位降频只影响刷新粒度、不影响时长语义 */
     const t0 = performance.now();
-    const tick = () => {
+    stopVerifyTicker();
+    verifyTickerStop = masterFrameLoop.register(() => {
       const elapsed = performance.now() - t0;
       const ratio = Math.min(elapsed / VERIFY_DURATION, 1);
       moduleKeyVerifyPercent.value = Math.round(ratio * 90);
-      if (ratio < 1) verifyRafId = requestAnimationFrame(tick);
-    };
-    verifyRafId = requestAnimationFrame(tick);
+      if (ratio >= 1) stopVerifyTicker();
+    }, { type: "throttled", label: "module-key-verify-ticker" });
 
     /* ★ 企业级感知：无论成功/失败，都保证 1.5s 最小感知时长
      * 错误密码也不能立即返回，必须让用户感知到完整验证过程 */
     const ensureMinDuration = async () => {
       const remaining = VERIFY_DURATION - (performance.now() - t0);
       if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
-      if (verifyRafId !== null) { cancelAnimationFrame(verifyRafId); verifyRafId = null; }
+      stopVerifyTicker();
     };
 
     /* ★ 企业级感知：验证失败统一处理
@@ -348,13 +359,13 @@ export function useModuleNavigation() {
     } catch {
       await handleVerifyError("密钥错误，请重试");
     } finally {
-      if (verifyRafId !== null) { cancelAnimationFrame(verifyRafId); verifyRafId = null; }
+      stopVerifyTicker();
       moduleKeyVerifying.value = false;
     }
   };
 
   const cancelModuleKeyVerify = () => {
-    if (verifyRafId !== null) { cancelAnimationFrame(verifyRafId); verifyRafId = null; }
+    stopVerifyTicker();
     moduleKeyVerifyError.value = false;
     showModuleKeyVerify.value = false;
     pendingModule.value = "";

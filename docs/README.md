@@ -2,9 +2,9 @@
 
 > Verthys 全部工程文档的总索引，按角色（新成员/开发者/发布者/安全审计）分组导航，定位任何主题的唯一入口。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-09-20 · 维护人：K1Super
 
-本目录的组织标准由 [DOCUMENTATION_CHECKLIST.md](DOCUMENTATION_CHECKLIST.md)（文档"目录宪法"）定义；工程刚性底线见 [执行刚性约束条款.md](执行刚性约束条款.md)。历史源稿与交付报告在 [archive/](archive/README.md)，已整合进标准文档，不再直接维护。
+本目录的组织标准由 [DOCUMENTATION_CHECKLIST.md](DOCUMENTATION_CHECKLIST.md)（文档"目录宪法"）定义；工程刚性底线见 [ENGINEERING_CONSTRAINTS.md](ENGINEERING_CONSTRAINTS.md)。历史源稿与交付报告在 [archive/](archive/README.md)，已整合进标准文档，不再直接维护。
 
 ## 快速导航（按角色）
 
@@ -41,6 +41,8 @@
 - 安全设计与信任模型：[SECURITY_DESIGN.md](SECURITY_DESIGN.md)
 - 漏洞上报与安全策略：[../SECURITY.md](../SECURITY.md)
 - 依赖与供应链：[THIRD_PARTY.md](THIRD_PARTY.md)
+- 审计报告与分片发现：[audits/](audits/VERTHYS_FULL_AUDIT_REPORT.md)（全量审计 + shard-A~E 发现 + 缺陷修复工程上游输入）
+- 缺陷修复工程进度：[RemediationPlan/IMPL_PROGRESS.md](RemediationPlan/IMPL_PROGRESS.md)（Wave 分批实施，中断恢复入口）
 
 ### 问题排查
 
@@ -75,7 +77,8 @@
 | ROADMAP.md | 路线图 | P2 |
 | ARCHITECTURE_DECISIONS.md | ADR 索引 | P2 |
 | IMPL_PEPPER_V3_KEYSET.md | pepper 持久化 V3 与密钥槽架构实施规格（含验收结果） | P2 |
-| IMPL_PROGRESS.md | 实施进度与变更记录（中断恢复入口） | P2 |
+| IMPL_PEPPER_V3_PROGRESS.md | pepper 改造实施进度与变更记录 | P2 |
+| RemediationPlan/IMPL_PROGRESS.md | 81 项缺陷修复工程进度（Wave 分批，中断恢复入口） | P2 |
 
 ## 维护约定（摘自查单第 4 节）
 

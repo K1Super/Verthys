@@ -5,18 +5,23 @@
  */
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 /* ------------------------------------------------------------------ *
  * JSON 协议                                                           *
  * ------------------------------------------------------------------ */
 
+/// 口令/记录明文字段统一使用 Zeroizing<String>：
+/// Drop 时自动 volatile 清零堆缓冲，主循环 line 缓冲与请求字段
+/// 的口令明文在处理完成后不驻留内存。
+/// serde 透明：线格式仍为普通 JSON 字符串（zeroize serde feature）。
 #[derive(Deserialize)]
 pub(crate) struct Request {
     pub(crate) op: String,
     #[serde(default)]
     pub(crate) path: String,
     #[serde(default)]
-    pub(crate) password: String,
+    pub(crate) password: Zeroizing<String>,
     #[serde(default)]
     pub(crate) id: u64,
     #[serde(default)]
@@ -24,16 +29,16 @@ pub(crate) struct Request {
     #[serde(default)]
     pub(crate) name: String,
     #[serde(default)]
-    pub(crate) data: String, // base64
+    pub(crate) data: Zeroizing<String>, // base64
     #[serde(default)]
-    pub(crate) old_password: String,
+    pub(crate) old_password: Zeroizing<String>,
     #[serde(default)]
-    pub(crate) new_password: String,
+    pub(crate) new_password: Zeroizing<String>,
     // GMK 派生相关（#2 敏感操作下沉）
     #[serde(default)]
-    pub(crate) bin_data: String, // base64 .bin 文件内容
+    pub(crate) bin_data: Zeroizing<String>, // base64 .bin 文件内容
     #[serde(default)]
-    pub(crate) bin_password: String,
+    pub(crate) bin_password: Zeroizing<String>,
     #[serde(default)]
     pub(crate) module_id: String,
     // 安全预设选择（create_with_preset 操作）

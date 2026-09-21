@@ -398,7 +398,7 @@ static VerthysResult upl_stage_s3(UnlockPipelineState *p)
     /* 1. integrity_key = HKDF-Expand(MEK, "verthys/integrity-key-v3") */
     if (keymanager_derive_integrity_key_v3(integrity_key, p->mek) != 0) {
         r = VERTHYS_ERR_INTERNAL;
-        goto fail;
+        goto fail_zero_ik;   /* 派生中断可能残留部分密钥材料 */
     }
 
     /* 2. 3 候选副本逐一 HMAC 验证（vsb_v3_parse：verifier + 自排除 HMAC） */
@@ -422,8 +422,8 @@ static VerthysResult upl_stage_s3(UnlockPipelineState *p)
          *（verthys_cng_km_verify_mek：AEAD 认证通过即口令正确）：
          *   探针 OK   → 口令正确 → 真损坏 → CORRUPT（0 有效语义）；
          *   探针 AUTH → 口令错误 → AUTH（用户应重试密码而非被告知损坏）。
-         * 探针内部 import 消耗 p->mek（const 契约清零），仅在本次失败
-         * 路径执行——后续 goto fail 仅再清零（幂等），无二次使用。
+         * 探针内部 import 消耗 p->mek（清零契约覆盖成功与失败路径），
+         * 仅在本次失败路径执行——后续 goto fail 仅再清零（幂等），无二次使用。
          * 副本间 wrapped_key_a 同源（同一超块三副本），探 S1 早期候选
          * 一份即可判定。
          */

@@ -1,6 +1,6 @@
 <!--
   ParticleBackground.vue — 偏轴旋涡星系 · 引力坠渡引擎
-  层级：远景幕布星点 + 双臂旋涡银河盘（含核心棒）+ 近景偏置轨道尘埃 + 星云云团
+  层级：远景幕布星点 + 双臂旋涡银河盘（含核心棒）+ 近景偏置轨道尘埃
   转场状态：启动逆渡 3s（intro：镜像弧线 + 反向缠绕，星系倒卷成型）
             → ambient（引导页静旋）→ warping（正渡 5s：缠绕收紧 + 掠翼弧线）
             → galaxy（主界面星系差速流转）
@@ -9,14 +9,9 @@
   鼠标视差（渡越期间按包络压制）+ 噪点纹理
 -->
 <template>
-  <div class="cosmos" :style="nebulaTexVars">
+  <div class="cosmos">
     <!-- 底层：深色基底 + 径向渐变 + 噪点 -->
     <div class="layer-base"></div>
-
-    <!-- 星云云团（blur(80px) 烘焙进 SVG 贴图，运行时零实时滤镜） -->
-    <div class="nebula nebula-1"></div>
-    <div class="nebula nebula-2"></div>
-    <div class="nebula nebula-3"></div>
 
     <!-- Three.js 粒子容器 -->
     <div ref="container" class="layer-particles"></div>
@@ -84,12 +79,21 @@
  * 保留架构：自适应抗锯齿（DPR≥1.5 关 MSAA）/ 统一帧门控（60/30/5/1fps）/
  * 失焦 deep-idle / 贴图烘焙 / 全部资源清理（v2 升级为显式登记制）
  */
-import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
+import { ref, onMounted, onBeforeUnmount, watch } from "vue";
 import * as THREE from "three";
-import { useGlobalIdleScheduler } from "../composables/useGlobalIdleScheduler";
+import { useGlobalIdleScheduler, type IdleLevel } from "../composables/useGlobalIdleScheduler";
 import { useFrameGate } from "../composables/useFrameGate";
 import { useTransitionEngine } from "../composables/useTransitionEngine";
 import { frameBudgetMonitor } from "../core/frame-budget";
+import { masterFrameLoop, type ExemptionToken } from "../core/master-frame-loop";
+import {
+  DENSITY_BY_IDLE,
+  DPR_BY_LEVEL,
+  DPR_SWITCH_DEBOUNCE_MS,
+  MAX_DEVICE_DPR,
+  TRAIL_VISIBLE_BY_LEVEL,
+  TRANSITION_ACTIVE_THRESHOLD,
+} from "../config/frame-gate";
 import { perfFlags } from "../app/feature-flags";
 import {
   CLOSE_BREATH,
@@ -113,54 +117,6 @@ import {
 const props = defineProps<{
   phase?: "ambient" | "warping" | "galaxy";
 }>();
-
-/* ============================================================================
- * ★ 预渲染贴图：SVG 位图（渐变 + feGaussianBlur 烘焙）
- * ============================================================================
- * 与 CosmicBackground 同手法：浏览器将 data-URI SVG 背景图栅格化一次并缓存
- * 为纹理，运行时不再执行 3×blur(80px) 实时重栅格化（星云 drift 动画只驱动
- * transform，纯合成）。视觉参数（渐变 stop / 模糊半径）与原 CSS 逐项对应。
- */
-const svgUrl = (svg: string): string =>
-  `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
-
-const svgStop = (offset: number, color: string): string =>
-  `<stop offset="${offset}" stop-color="${color}"/>`;
-
-/** 径向渐变圆 + 高斯模糊贴图（贴图经 background-size 拉伸等效 ellipse 渐变） */
-function radialBlurTexture(
-  stops: string,
-  cssBlurPx: number,
-  cssElSize: number,
-): string {
-  const S = 320;
-  const sigma = ((cssBlurPx * S) / cssElSize).toFixed(2);
-  return svgUrl(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}">` +
-      `<defs>` +
-      `<radialGradient id="g">${stops}</radialGradient>` +
-      `<filter id="f" x="-40%" y="-40%" width="180%" height="180%">` +
-      `<feGaussianBlur stdDeviation="${sigma}"/></filter>` +
-      `</defs>` +
-      `<circle cx="160" cy="160" r="120" fill="url(#g)" filter="url(#f)"/></svg>`,
-  );
-}
-
-const nebulaTexVars = computed<Record<string, string>>(() => ({
-  /* 3 星云（原 blur(80px) + radial-gradient(ellipse) → 贴图，尺寸取宽换算） */
-  "--tex-pn-1": radialBlurTexture(
-    svgStop(0, "rgba(0,60,100,0.15)") + svgStop(0.7, "rgba(0,60,100,0)"),
-    80, 600,
-  ),
-  "--tex-pn-2": radialBlurTexture(
-    svgStop(0, "rgba(80,30,120,0.12)") + svgStop(0.7, "rgba(80,30,120,0)"),
-    80, 500,
-  ),
-  "--tex-pn-3": radialBlurTexture(
-    svgStop(0, "rgba(0,100,80,0.08)") + svgStop(0.7, "rgba(0,100,80,0)"),
-    80, 400,
-  ),
-}));
 
 const container = ref<HTMLElement | null>(null);
 let renderer: THREE.WebGLRenderer | null = null;
@@ -244,6 +200,27 @@ let camBaseY = 0;
  * 本组件不再维护私有门控状态；转场/尺寸变化经 resetIdle 强制 active。 */
 const { level: idleLevel, resetIdle } = useGlobalIdleScheduler();
 
+/** 设备 DPR 上限值（active 档满配基线 — 组件加载期读取一次） */
+const deviceDpr =
+  typeof window !== "undefined"
+    ? Math.min(window.devicePixelRatio || 1, MAX_DEVICE_DPR)
+    : 1;
+
+/* ===== ★ 帧预算 / 空闲档双密度通道（取更小值生效） =====
+ * 帧预算降级密度（控制器注入）与空闲档密度（DENSITY_BY_IDLE）取 min —
+ * 单一出口 applyDensity 落地 setDrawRange，无部分落地。 */
+let budgetFraction = 1;
+let idleFraction = DENSITY_BY_IDLE[idleLevel.value];
+
+/* ===== ★ DPR 档位切换状态（200ms 防抖 + 豁免优先契约） ===== */
+let dprTimer: number | null = null;
+let pendingDpr: number | null = null;
+
+/* ===== ★ 渡越豁免状态（残影层可见性与 DPR 满配联动锚点） ===== */
+let transitionToken: ExemptionToken | null = null;
+let exemptionActive = false;
+let transitionWasActive = false;
+
 onMounted(() => {
   if (!container.value) return;
   const el = container.value;
@@ -262,15 +239,13 @@ onMounted(() => {
   camera.position.z = cameraZ;
 
   // ★ 自适应抗锯齿：DPR ≥ 1.5 时高密度像素下 MSAA 边缘增益不可感知，关闭以省 GPU
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  /* ★ 不透明画布——alpha:false 走不透明快速合成路径，
-   *   深空底色与原透明透出桌面时的视觉一致；透明窗口仅为圆角/边缘保留。
-   *   ★ 回滚开关：perfFlags.opaqueCanvas = false 时回退
-   *   alpha:true + 透明清屏色（alpha 合成路径）。 */
   const opaqueCanvas = perfFlags.opaqueCanvas;
-  renderer = new THREE.WebGLRenderer({ alpha: !opaqueCanvas, antialias: dpr < 1.5, powerPreference: "high-performance" });
+  renderer = new THREE.WebGLRenderer({ alpha: !opaqueCanvas, antialias: deviceDpr < 1.5, powerPreference: "high-performance" });
   renderer.setSize(w, h);
-  renderer.setPixelRatio(dpr);
+  /* ★ 档位 DPR 自适应初始值：按当前空闲档位解析
+   * （active 满配 / settling 1.5 / idle 与 deep-idle 1.0）——GPU 填充率
+   * 按面积平方下降，低档位降分辨率收益最大 */
+  renderer.setPixelRatio(DPR_BY_LEVEL[idleLevel.value] ?? deviceDpr);
   if (opaqueCanvas) {
     renderer.setClearColor(0x0a0e1a, 1.0); // ★ 深空色（不透明）
   } else {
@@ -280,6 +255,7 @@ onMounted(() => {
    * 透明画布下的背景深度——视觉等效，合成走不透明快速路径 */
   /* 点尺寸透视衰减标尺（等效 three 内部 scale=height×0.5 × size×pixelRatio） */
   uScaleUniform.value = h * 0.5 * renderer.getPixelRatio();
+
   /* ★ 启动频闪根治：canvas 延迟挂载 — 全部层构建完成后先预编译着色器
    * 并暖机渲染一帧再挂载（衔接下方 buildOrbitLayer 全部完成处）。
    * 旧序（频闪根因）：canvas 先挂载（透明空帧）→ 首帧 render 时同步
@@ -542,18 +518,30 @@ onMounted(() => {
    * 本组件以 setDrawRange 落地（语义 = InstancedMesh.count 尾部截断；
    * 各层粒子均匀随机分布，尾部截断无视觉偏置）。
    * 轨道层本体与残影共享 geometry — 单次 setDrawRange 全成员一致生效。
+   * 双通道密度：帧预算降级密度与空闲档密度（idle/deep-idle 80%）取
+   * 更小值 — 单一出口 applyDensity，无部分落地。
    * 注册即应用当前档位密度（晚注册不漏降级）；卸载时注销（onBeforeUnmount）。 */
   const densityGeometries: { geometry: THREE.BufferGeometry; baseCount: number }[] = [
     { geometry: distantStars.geometry, baseCount: CURTAIN_LAYER.count },
     { geometry: galaxyLayer.body.points.geometry, baseCount: GALAXY_LAYER.count },
     { geometry: closeLayer.body.points.geometry, baseCount: CLOSE_LAYER.count },
   ];
+  const applyDensity = (): void => {
+    const fraction = Math.min(idleFraction, budgetFraction);
+    for (const { geometry, baseCount } of densityGeometries) {
+      geometry.setDrawRange(0, Math.max(1, Math.floor(baseCount * fraction)));
+    }
+  };
   frameBudgetMonitor.setParticleController({
     setDensity: (fraction: number): void => {
-      for (const { geometry, baseCount } of densityGeometries) {
-        geometry.setDrawRange(0, Math.max(1, Math.floor(baseCount * fraction)));
-      }
+      budgetFraction = fraction;
+      applyDensity();
     },
+  });
+  /* 空闲档密度联动（档位变化即时生效 — DENSITY_BY_IDLE 为非动画资源策略） */
+  watch(idleLevel, (lv) => {
+    idleFraction = DENSITY_BY_IDLE[lv];
+    applyDensity();
   });
 
   /* ===== 鼠标视差（空闲检测由全局调度器 pointermove 承担，此处仅视差） ===== */
@@ -577,15 +565,71 @@ onMounted(() => {
   /* ★ 幕布漂移基准角（rotation 改时间绝对式：f(t) 与帧率解耦，
    *   降档跳帧零累计误差；基准取挂载时初值） */
   const curtainDriftBase = curtain.points.rotation.z;
-  const renderFrame = (gateDt: number) => {
+  /** 上一许可帧墙钟（首帧守卫 — 首帧 wStep=0 不推进进度时钟） */
+  let lastWallClock = -1;
+  /** draw call 采样累加（每 60 帧上报帧预算监控一次） */
+  let drawCallAccum = 0;
+  let drawCallFrames = 0;
+
+  /* ---- ★ 渡越豁免 / DPR 档位切换（防抖合并 + 豁免优先契约） ---- */
+  const applyDprNow = (target: number): void => {
+    if (!renderer || !camera || !scene || !container.value) return;
+    if (Math.abs(renderer.getPixelRatio() - target) < 0.01) return;
+    /* 像素比与画布尺寸在同一窗口合并执行（setPixelRatio 内部重分配渲染
+     * 缓冲；尺寸未变时无二次帧缓冲重分配） */
+    renderer.setPixelRatio(target);
+    uScaleUniform.value = container.value.clientHeight * 0.5 * target;
+    renderer.render(scene, camera); // 切换后立即渲染一帧，避免空白
+  };
+  const scheduleDpr = (target: number): void => {
+    pendingDpr = target;
+    if (dprTimer !== null) window.clearTimeout(dprTimer);
+    dprTimer = window.setTimeout(() => {
+      dprTimer = null;
+      /* 豁免优先：豁免激活期内未决 DPR 目标被丢弃，不得被应用 */
+      if (exemptionActive) return;
+      pendingDpr = null;
+      applyDprNow(target);
+    }, DPR_SWITCH_DEBOUNCE_MS);
+  };
+  /* 渡越启动沿：豁免申请 + 残影恢复 + DPR 满配同步发生（同一执行帧） */
+  const acquireTransitionExemption = (): void => {
+    const res = masterFrameLoop.requestExemption("particle-transition");
+    if (res.status !== "granted" || !res.token) return; // rejected：接受帧率延迟
+    transitionToken = res.token;
+    exemptionActive = true;
+    if (dprTimer !== null) {
+      window.clearTimeout(dprTimer);
+      dprTimer = null;
+    }
+    pendingDpr = null; // 未决降档值丢弃
+    applyDprNow(deviceDpr); // 直接满配，不等待防抖
+  };
+  /* 渡越结束沿：豁免释放 + 按当前空闲档位重新调度 DPR（200ms 防抖） */
+  const releaseTransitionExemption = (): void => {
+    masterFrameLoop.releaseExemption(transitionToken);
+    transitionToken = null;
+    exemptionActive = false;
+    scheduleDpr(DPR_BY_LEVEL[idleLevel.value] ?? deviceDpr);
+  };
+  /* 空闲档变化 → 重新调度 DPR（豁免激活期不调度降档） */
+  watch(idleLevel, (lv) => {
+    if (exemptionActive) return;
+    scheduleDpr(DPR_BY_LEVEL[lv] ?? deviceDpr);
+  });
+
+  const renderFrame = (frameStep: number, wallClock: number) => {
     if (!renderer || !scene || !camera || !curtain || !galaxyLayer || !closeLayer) return;
-    const dt = Math.min(gateDt, ENGINE_DT_CLAMP);
+    /* 物理积分 dt = 帧步进（主循环已钳制 50ms，此处保留引擎层防御钳制）；
+     * 进度步长 wStep = 墙钟增量（不钳制 — 低档位下时钟/包络不失速） */
+    const dt = Math.min(frameStep, ENGINE_DT_CLAMP);
+    const wStep = lastWallClock < 0 ? 0 : Math.max(wallClock - lastWallClock, 0);
+    lastWallClock = wallClock;
 
     /* --- 1. ★ 渡越序列引擎单步（时钟无条件推进 + 双序列 C2 包络 +
      *     符号缠绕/幕布位移积分 — 与 useTransitionEngine 模块头注一致；
-     *     v2 微颤终止修复：效果由 introDone/introAlive 门控，时钟绝不
-     *     冻结 → 打断后微颤 0.5s 内平滑消失零残留） --- */
-    const t = engine.update(dt);
+     *     时钟进度走墙钟、物理积分走帧步进（双时间参数分离）） --- */
+    const t = engine.update(dt, wStep);
 
     /* --- ★ 渡越进行中强制满帧（档位回落单帧内自愈 — 非每帧调用，
      *     零定时器 churn）：入场窗口（页面交接→包络归零）与主界面
@@ -605,7 +649,21 @@ onMounted(() => {
      * 静态相快速径：渡越未激活（warpEnv=0 且 envSmooth 收敛）
      *   时 swirl 积分恒定——跳过 8 元素循环与历史插值求值（30fps 下
      *   每帧节省 8 次超越函数求值）；渡越激活时全量执行。 --- */
-    const transitionActive = engine.warpEnv > 0.0005 || Math.abs(envSmooth) > 0.0005;
+    const transitionActive =
+      engine.warpEnv > TRANSITION_ACTIVE_THRESHOLD ||
+      Math.abs(envSmooth) > TRANSITION_ACTIVE_THRESHOLD;
+    /* 渡越沿检测：启动沿豁免申请+残影恢复 / 结束沿豁免释放，二者同步 */
+    if (transitionActive && !transitionWasActive) {
+      acquireTransitionExemption();
+    } else if (!transitionActive && transitionWasActive) {
+      releaseTransitionExemption();
+    }
+    transitionWasActive = transitionActive;
+    /* 残影层可见性：静止态隐藏（降 draw call）；渡越期按「豁免优先，
+     * 否则档位允许」提交 — 切换随包络阈值渐近，无闪烁 */
+    const trailsVisible =
+      transitionActive && (exemptionActive || TRAIL_VISIBLE_BY_LEVEL[idleLevel.value]);
+    for (const m of trailMembers) m.points.visible = trailsVisible;
     if (transitionActive) {
       const swirl = engine.swirl;
       for (const m of orbitMembers) {
@@ -703,6 +761,15 @@ onMounted(() => {
     }
 
     renderer.render(scene, camera);
+
+    /* draw call 采样：每 60 执行帧上报一次均值（renderer.info 每帧自动重置） */
+    drawCallAccum += renderer.info.render.calls;
+    drawCallFrames++;
+    if (drawCallFrames >= 60) {
+      frameBudgetMonitor.reportDrawCalls(Math.round(drawCallAccum / drawCallFrames));
+      drawCallAccum = 0;
+      drawCallFrames = 0;
+    }
   };
 
   /* ★ 启动频闪根治（承接 canvas 延迟挂载）：预编译全部着色器程序 +
@@ -719,6 +786,7 @@ onMounted(() => {
   }
   for (const m of trailMembers) {
     m.uniforms.uOpacity.value = m.baseOpacity * TRAIL_RESPONSE.base;
+    m.points.visible = false; // 静止态基线：残影层隐藏（渡越启动沿恢复）
   }
   timeUniform.value = 0;
   renderer.compile(scene, camera);
@@ -773,6 +841,19 @@ watch(
 onBeforeUnmount(() => {
   cleanupListeners?.();
   cleanupListeners = null;
+
+  /* ★ 渡越豁免 / DPR 防抖清理：未释放 token 立即释放（防帧门控泄漏），
+   * 未决 DPR 切换计时器取消 */
+  if (transitionToken) {
+    masterFrameLoop.releaseExemption(transitionToken);
+    transitionToken = null;
+  }
+  exemptionActive = false;
+  if (dprTimer !== null) {
+    window.clearTimeout(dprTimer);
+    dprTimer = null;
+  }
+  pendingDpr = null;
 
   /* ★ 帧预算监控注销：控制器引用的 geometry 随下方登记制释放 —
    * 先解除监控器持有，杜绝降级回调触达已释放资源 */
@@ -836,45 +917,6 @@ onBeforeUnmount(() => {
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-/* 星云云团（blur(80px) 烘焙进贴图，运行时零实时滤镜） */
-.nebula {
-  position: absolute;
-  border-radius: 50%;
-  background: center / 100% 100% no-repeat;
-  pointer-events: none;
-  will-change: transform;
-}
-.nebula-1 {
-  width: 600px; height: 400px;
-  top: 10%; left: -10%;
-  background-image: var(--tex-pn-1);
-  animation: nebula-drift-1 40s ease-in-out infinite;
-}
-.nebula-2 {
-  width: 500px; height: 350px;
-  bottom: 5%; right: -5%;
-  background-image: var(--tex-pn-2);
-  animation: nebula-drift-2 55s ease-in-out infinite;
-}
-.nebula-3 {
-  width: 400px; height: 300px;
-  top: 50%; left: 50%;
-  background-image: var(--tex-pn-3);
-  animation: nebula-drift-3 70s ease-in-out infinite;
-}
-@keyframes nebula-drift-1 {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  50% { transform: translate(60px, -30px) scale(1.1); }
-}
-@keyframes nebula-drift-2 {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  50% { transform: translate(-40px, 40px) scale(0.9); }
-}
-@keyframes nebula-drift-3 {
-  0%, 100% { transform: translate(-50%, -50%) scale(1); }
-  50% { transform: translate(-40%, -55%) scale(1.15); }
-}
-
 /* 粒子容器 */
 .layer-particles {
   position: absolute;
@@ -893,13 +935,5 @@ onBeforeUnmount(() => {
     radial-gradient(ellipse at 25% 45%, rgba(0, 30, 50, 0.14) 0%, transparent 50%),
     radial-gradient(ellipse at 75% 55%, rgba(20, 0, 40, 0.10) 0%, transparent 50%),
     radial-gradient(ellipse at 50% 50%, rgba(0, 20, 35, 0.07) 0%, transparent 70%);
-}
-
-/* ★ 星云云团移到不透明画布之上——mix-blend-mode: screen 使
- *   亮色云团在深空底上的视觉与原先（画布 alpha 透出）等效；
- *   z-index 高于画布，漂移动画不变（transform 合成器驱动） */
-.nebula {
-  z-index: 2;
-  mix-blend-mode: screen;
 }
 </style>

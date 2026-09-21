@@ -16,7 +16,6 @@
         <span class="dock-dust" v-for="i in 10" :key="`dd${i}`" :style="{ '--i': i }"></span>
       </div>
       <div class="dock-drip"></div>
-      <div class="dock-pool"></div>
       <div class="dock-scan"></div>
       <div class="dock-rail"></div>
     </div>
@@ -68,12 +67,12 @@ defineEmits<{
   z-index: 50;
   border-radius: var(--radius);
   isolation: isolate;
-  /* 多层宇宙渐变底板（顶部青光汇聚 / 底部紫光沉淀） */
+  /* 多层宇宙渐变底板（顶部青光汇聚；背景层不得在底边缘残留亮度，
+   * 否则元素边界处形成硬切断层线） */
   background:
-    linear-gradient(180deg, rgba(0, 212, 255, 0.1) 0%, transparent 18%, transparent 82%, rgba(139, 92, 246, 0.08) 100%),
+    linear-gradient(180deg, rgba(0, 212, 255, 0.1) 0%, transparent 18%),
     linear-gradient(180deg, rgba(20, 22, 36, 0.88), rgba(8, 10, 18, 0.94)),
-    radial-gradient(ellipse at 50% 0%, rgba(0, 212, 255, 0.14), transparent 55%),
-    radial-gradient(ellipse at 50% 100%, rgba(139, 92, 246, 0.12), transparent 55%);
+    radial-gradient(ellipse at 50% 0%, rgba(0, 212, 255, 0.14), transparent 55%);
   border: 1px solid transparent;
   background-clip: padding-box;
   box-shadow:
@@ -82,23 +81,21 @@ defineEmits<{
     inset 0 1px 0 rgba(255, 255, 255, 0.06),
     inset 0 -1px 0 rgba(0, 0, 0, 0.3);
   animation: dock-in 0.5s var(--ease) backwards;
-  /* 收起/展开过渡：磁吸式弹射 + 边缘溶解 */
+  /* 收起/展开过渡：磁吸式弹射 */
   transition:
     opacity 0.4s var(--ease),
-    transform 0.55s cubic-bezier(0.34, 1.56, 0.64, 1),
-    filter 0.4s var(--ease);
+    transform 0.55s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 @keyframes dock-in {
-  from { opacity: 0; transform: translateY(-50%) translateX(-20px); filter: blur(8px); }
-  to { opacity: 1; transform: translateY(-50%) translateX(0); filter: blur(0); }
+  from { opacity: 0; transform: translateY(-50%) translateX(-20px); }
+  to { opacity: 1; transform: translateY(-50%) translateX(0); }
 }
 
-/* 收起态：侧向坍缩 + 边缘溶解 + 磁吸入射 */
+/* 收起态：侧向坍缩 + 磁吸入射 */
 .dock.collapsed {
   animation: none;
   opacity: 0;
   transform: translateY(-50%) translateX(-24px) perspective(80px) rotateY(28deg);
-  filter: blur(6px);
   pointer-events: none;
 }
 
@@ -159,8 +156,10 @@ defineEmits<{
 }
 @keyframes dock-beam-fall {
   0%   { transform: translateY(-60%); opacity: 0; }
-  15%  { opacity: 0.95; }
-  85%  { opacity: 0.6; }
+  12%  { opacity: 0.95; }
+  55%  { opacity: 0.5; }
+  /* 亮段在接近底边缘前完全消隐，绝不允许可见亮度接触 dock-fx 底边裁剪 */
+  72%  { opacity: 0; }
   100% { transform: translateY(320%); opacity: 0; }
 }
 
@@ -190,7 +189,9 @@ defineEmits<{
   0%   { transform: translateY(0) scale(0.4); opacity: 0; }
   12%  { opacity: 0.95; transform: scale(1); }
   88%  { opacity: 0.55; }
-  100% { transform: translateY(600px) scale(0.3); opacity: 0; }
+  /* 行程收在 dock 内部：星尘在接近底边缘前消散（100% 时距底边
+   * 仍有余量），全程不触及 dock-fx 底边裁剪 */
+  100% { transform: translateY(270px) scale(0.3); opacity: 0; }
 }
 
 /* 顶部能量滴落 — 光珠凝聚后坠落 */
@@ -211,7 +212,6 @@ defineEmits<{
   height: 5px;
   transform: translateX(-50%);
   background: radial-gradient(ellipse at center, rgba(0, 212, 255, 0.85), transparent 70%);
-  filter: blur(2px);
   animation: drip-gather 3.2s ease-in-out infinite;
 }
 .dock-drip::after {
@@ -240,26 +240,6 @@ defineEmits<{
   100%     { transform: translateX(-50%) translateY(160px); opacity: 0; }
 }
 
-/* 底部光池 — 下坠能量汇聚成辉光潭 */
-.dock-pool {
-  position: absolute;
-  bottom: -8px;
-  left: 50%;
-  width: 88%;
-  height: 32px;
-  transform: translateX(-50%);
-  background: radial-gradient(ellipse at center top,
-    rgba(0, 212, 255, 0.32),
-    rgba(139, 92, 246, 0.16) 45%,
-    transparent 72%);
-  filter: blur(6px);
-  animation: pool-pulse 3s ease-in-out infinite;
-}
-@keyframes pool-pulse {
-  0%, 100% { opacity: 0.5; transform: translateX(-50%) scaleX(1); }
-  50%      { opacity: 0.95; transform: translateX(-50%) scaleX(1.12); }
-}
-
 /* 垂直扫描线 — 自顶向下循环扫描 */
 .dock-scan {
   position: absolute;
@@ -278,7 +258,10 @@ defineEmits<{
 @keyframes dock-scan-move {
   0%   { transform: translateY(-48px); opacity: 0; }
   10%  { opacity: 0.85; }
-  90%  { opacity: 0.7; }
+  30%  { opacity: 0.65; }
+  /* 扫描线在接近底边缘前渐隐归零，消除全宽光带被
+   * dock-fx 底边硬切的断层 */
+  38%  { opacity: 0; }
   100% { transform: translateY(800px); opacity: 0; }
 }
 
@@ -306,14 +289,15 @@ defineEmits<{
   width: 3px;
   height: 24px;
   background: linear-gradient(180deg, transparent, rgba(0, 212, 255, 0.9), transparent);
-  filter: blur(1px);
   animation: rail-flow 2.8s ease-in infinite;
 }
 @keyframes rail-flow {
   0%   { transform: translateY(-24px); opacity: 0; }
   20%  { opacity: 1; }
   80%  { opacity: 0.8; }
-  100% { transform: translateY(600px); opacity: 0; }
+  /* 行程精确收在导轨高度内：终点时光包底边恰达导轨下缘，
+   * 且光包渐变尾端透明 — 亮芯全程不触及 rail 的裁剪边界 */
+  100% { transform: translateY(216px); opacity: 0; }
 }
 
 .dock-item {

@@ -374,6 +374,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import type { DefensePathView, DefenseMetaView } from "../../composables/security-center/useDefenseStatus";
+import { masterFrameLoop } from "../../core/master-frame-loop";
 
 /**
  * SecurityDashboard Props
@@ -518,8 +519,8 @@ watch(
 let tilt = 0;
 /** 角速度 */
 let tiltVel = 0;
-/** 弹簧积分 rAF 句柄 */
-let tiltRaf = 0;
+/** 泵循环激活标志（once 排程无句柄 — 靠标志自停 / 组件卸载断泵） */
+let tiltActive = false;
 /** 上一事件指针横坐标（速度采样） */
 let prevX = 0;
 
@@ -529,23 +530,27 @@ const writeTilt = () => {
 
 /** 弹簧积分循环：刚度 0.16 / 阻尼 0.11（欠阻尼 → 摆锤式回正震荡衰减） */
 const tiltLoop = () => {
+  if (!tiltActive) return;
   tiltVel += -tilt * 0.16 - tiltVel * 0.11;
   tilt = Math.max(-6, Math.min(6, tilt + tiltVel));
   writeTilt();
   if (dragging.value || Math.abs(tilt) > 0.02 || Math.abs(tiltVel) > 0.02) {
-    tiltRaf = requestAnimationFrame(tiltLoop);
+    masterFrameLoop.once(tiltLoop);
   } else {
     tilt = 0;
     tiltVel = 0;
     writeTilt();
-    tiltRaf = 0;
+    tiltActive = false;
   }
 };
 
 /** 速度冲量注入（拖拽位移 → 摆锤角速度） */
 const kickTilt = (dx: number) => {
   tiltVel += Math.max(-1.6, Math.min(1.6, dx * 0.09));
-  if (!tiltRaf) tiltRaf = requestAnimationFrame(tiltLoop);
+  if (!tiltActive) {
+    tiltActive = true;
+    masterFrameLoop.once(tiltLoop);
+  }
 };
 
 /** 由指针横坐标计算连续位置：DOM 直写主视觉 + 摆锤冲量 + 节流联动 model */
@@ -649,6 +654,7 @@ const flowStatusText = computed(() => {
 });
 
 onBeforeUnmount(() => {
-  if (tiltRaf) cancelAnimationFrame(tiltRaf);
+  /* 断泵：已排程的下一帧回调经 tiltActive 守卫直接返回，不再续排 */
+  tiltActive = false;
 });
 </script>

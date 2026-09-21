@@ -73,7 +73,7 @@ ctest --test-dir build_fuzz -C Debug -R fuzz_superblock_smoke --output-on-failur
 
 ## 5. 覆盖率要求
 
-- 要求：核心逻辑单元测试覆盖率 ≥ 80%（`docs/执行刚性约束条款.md` 1.4“生产级标准”）。
+- 要求：核心逻辑单元测试覆盖率 ≥ 80%（`docs/ENGINEERING_CONSTRAINTS.md` 1.4“生产级标准”）。
 - 现状：当前未配置覆盖率采集。全仓仅两个 CMake 开关 `VERTHYS_ENABLE_ASAN`、`VERTHYS_ENABLE_FUZZ`（`core/CMakeLists.txt:45-56`），无 gcov/`--coverage`/代码覆盖率选项，无覆盖率报告产物。
 - 接入建议：新增 CMake 开关（如 `VERTHYS_ENABLE_COVERAGE`）对 `verthys_core_obj` + `verthys_tests` 启用 MSVC `/PROFILE` 或 LLVM source-based coverage，配合覆盖率工具产出报告，并将“core/src 核心逻辑覆盖率 ≥ 80%”接入 CI 质量门。
 

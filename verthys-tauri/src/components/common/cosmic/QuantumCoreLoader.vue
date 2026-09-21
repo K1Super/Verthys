@@ -6,7 +6,7 @@
     构造：脉冲双星系统（lighthouse 灯塔效应）
       1. 磁轴偶极（斜置 24° 双极线 — 脉冲星磁轴几何，静态骨架）
       2. 辐射束对（南北两束锥形射流，束轴垂直于磁轴 — 真实脉冲星
-         物理几何；rAF 逐帧重算束路径端点，束随自转相位扫掠）
+         物理几何；逐帧重算束路径端点，束随自转相位扫掠）
       3. 脉冲核（中心致密核 — 双周期复合脉冲：自转快脉冲 +
          慢谐波长周期，亮度包络非对称）
       4. 磁层驻波（磁轴两侧 4 道等相位驻波弧 — 束扫掠掠过时
@@ -20,8 +20,8 @@
       - 束扫掠周期 2.6s / 驻波相位差化 / 微尘独立布朗漂移
       - 全部亮度经复合包络（基波+2/3 次谐波加权 — 周期边界恒连续）
 
-    性能：rAF 驱动（页面隐藏自动停帧）；仅写 opacity / SVG 属性；
-      requestAnimationFrame 帧率自适应（无固定帧率假设）
+    性能：主循环 throttled 帧任务驱动（页面隐藏自动停帧；空闲档降频）；
+      仅写 opacity / SVG 属性；帧率自适应（无固定帧率假设）
   纯展示组件；固定尺寸槽位（96×96px），loading 切换零抖动。
   Props: loading — 是否显示
 -->
@@ -57,12 +57,13 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
+import { masterFrameLoop, type FrameStep } from "../../../core/master-frame-loop";
 
 /**
  * QuantumCoreLoader — 脉冲星磁层辐射加载动画（v3 全新体系）
  *
  * v1（同心环七层）与 v2（倾斜椭圆 dash 差速流）均被否决 — 本版
- * 彻底更换构造机制：脉冲星灯塔效应，rAF 逐帧驱动 SVG 几何实时重算。
+ * 彻底更换构造机制：脉冲星灯塔效应，主循环帧任务逐帧驱动 SVG 几何实时重算。
  *
  * 几何模型（viewBox 96×96，中心 48,48）：
  *   - 磁轴：斜置 24° 过中心的直线（两极点 ±23 单位距离）
@@ -111,9 +112,10 @@ let beamSEl: SVGPathElement | null = null;
 let coreEl: SVGCircleElement | null = null;
 let shellEl: SVGCircleElement | null = null;
 let standingEls: SVGPathElement[] = [];
-let rafId = 0;
-let t0 = 0;
-let running = false;
+/** 主循环帧任务注销函数（无注册 = 未运行） */
+let unregister: (() => void) | null = null;
+/** 进度墙钟基准（首个许可帧的 real time，秒） */
+let t0Sec = 0;
 
 /* ===== 几何常量 ===== */
 const CX = 48;
@@ -168,11 +170,9 @@ const angDiff = (a: number, b: number): number => {
   return d;
 };
 
-/* ===== 主循环（rAF — 页面隐藏自动停帧） ===== */
-function tick(now: number): void {
-  if (!running) return;
-  rafId = requestAnimationFrame(tick);
-  const t = (now - t0) / 1000;
+/* ===== 帧任务（主循环 throttled 注册 — 页面隐藏自动停帧 / 空闲档降频） ===== */
+function tick(ctx: FrameStep): void {
+  const t = Math.max(ctx.wallClock - t0Sec, 0);
 
   /* 自转相位：匀速 + 非对称谐波修正（速度周期性加减速 — 拒绝匀速旋转） */
   const phase =
@@ -255,14 +255,16 @@ onMounted(() => {
     d.el = svg.querySelectorAll(".ql-mote")[i] as SVGCircleElement | null;
   });
 
-  t0 = performance.now();
-  running = true;
-  rafId = requestAnimationFrame(tick);
+  t0Sec = performance.now() / 1000;
+  unregister = masterFrameLoop.register(tick, {
+    type: "throttled",
+    label: "quantum-core-loader",
+  });
 });
 
 onBeforeUnmount(() => {
-  running = false;
-  if (rafId) cancelAnimationFrame(rafId);
+  unregister?.();
+  unregister = null;
   motes.forEach((d) => (d.el = null));
 });
 </script>

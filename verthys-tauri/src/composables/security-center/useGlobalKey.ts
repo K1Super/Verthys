@@ -28,7 +28,9 @@
  * ★ 企业级根治（已内联，零行为变更）：
  *   - 静默返回 → 明确错误反馈（browseBin / onInitKey / onVerify 三处守卫拆分）
  *   - 客户端密码长度前置校验（TextEncoder UTF-8 字节长度，与后端严格一致）
- *   - 验证后 400ms 短动画（移除原 2s sleep，成功路径立即反馈）
+ *   - 验证进度由感知层（VerifyRhythm）驱动：成功路径等待收束完成事件后
+ *     再切换视图，失败路径按感知层配置的错误最小展示时长保留冻结降级态，
+ *     业务层零动画时长硬编码
  *   - 修改密钥细分错误码（E_GLOBAL_KEY_VERIFY_FAILED / E_GLOBAL_KEY_PERSIST_FAILED）
  *
  * 设计：纯 Composable，所有外部依赖通过参数注入，状态和方法返回给调用方。
@@ -52,6 +54,7 @@ import {
   type UnlockProgress,
 } from '../../lib/verthys';
 import { withFrontendTimeout } from './useUnlockFlow';
+import type { VerifyRhythm } from './useVerifyRhythm';
 
 /**
  * useGlobalKey 选项
@@ -66,6 +69,8 @@ export interface UseGlobalKeyOptions {
   showToast: (msg: string) => void;
   /** 验证后强制动画标志（SecurityCenter 顶层持有，useViewMode 读取，onVerify 写入） */
   postVerifyAnim: Ref<boolean>;
+  /** 验证进度感知层（注入：信号订阅 + 收束完成事件驱动视图切换） */
+  verifyRhythm: VerifyRhythm;
   /** 解锁进度消息（来自 useUnlockFlow，验证视图复用进度条显示） */
   unlockProgressMsg: Ref<string>;
   /** 解锁进度百分比（来自 useUnlockFlow） */
@@ -91,11 +96,12 @@ export interface UseGlobalKeyOptions {
  *   onOpenChangeKeyDialog, onCloseChangeKeyDialog, onConfirmChangeKey,
  *   browseOldBin, browseNewBin, onExportBin, resetInitVerifyForm,
  * } = useGlobalKey({
- *   isTauri, showError, showToast,
- *   postVerifyAnim,
- *   unlockProgressMsg, unlockProgressPercent, unlockProgressElapsed,
- * });
- * ```
+  isTauri, showError, showToast,
+  postVerifyAnim,
+  verifyRhythm,
+  unlockProgressMsg, unlockProgressPercent, unlockProgressElapsed,
+});
+```
  */
 export function useGlobalKey(options: UseGlobalKeyOptions) {
   /* ===== 初始化 / 验证共享状态 ===== */
@@ -233,6 +239,14 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
   /* ===== 验证全局密钥 ===== */
   /**
    * ★ verifyGlobalKey 返回 VerthysResult<void>
+   *
+   * 感知层协作契约（无固定延时，时长全部由感知层配置源决定）：
+   *   - 启动：reset/start 感知层，开启一轮假进度节奏
+   *   - 进行：真实进度推送给感知层，由它吸收平滑为视觉值
+   *   - 成功：seal 指令 → await waitForComplete()（收束完成事件），
+   *     完成后再复位 postVerifyAnim 切视图
+   *   - 失败：halt 指令（冻结 + 降级）→ showError 淡入覆盖 →
+   *     await waitForHaltMin()（错误最小展示时长）
    */
   const onVerify = async () => {
     // 显式防重复：processing 期间拒绝再次触发
@@ -250,16 +264,21 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
     processing.value = true;
     options.postVerifyAnim.value = true;
 
-    // ★ 修复4：重置验证进度状态，与解锁进度条复用同一组响应式变量
+    // 重置真实进度信号状态（解锁进度条与验证共享同一组响应式变量）
     options.unlockProgressMsg.value = '准备验证';
     options.unlockProgressPercent.value = 0;
     options.unlockProgressElapsed.value = 0;
 
-    // ★ 修复4：验证进度回调 — verifyGlobalKey 内部各阶段直接调用
+    // 感知层开启新一轮验证（失败重试场景自 HALTED 复位）
+    options.verifyRhythm.start();
+
+    // ★ 验证进度回调 — verifyGlobalKey 内部各阶段直接调用
     const onVerifyProgress = (p: UnlockProgress) => {
       options.unlockProgressMsg.value = p.message;
       options.unlockProgressPercent.value = p.percent;
       options.unlockProgressElapsed.value = p.elapsed_ms;
+      // 真实进度作为信号推送感知层（0-1），呈现层只消费感知层视觉值
+      options.verifyRhythm.pushRealProgress(p.percent / 100);
     };
 
     let result: VerthysResult<void> | null = null;
@@ -273,27 +292,35 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       errored = true;
       console.error('[onVerify] 异常', e);
     }
-    // ★ 修复5：移除强制 2s sleep — 成功路径立即反馈，失败路径保留 400ms 短动画
-    //   原 2s sleep 在 40s 之上叠加无意义等待，严重恶化用户体验
-    if (!result?.ok) {
-      await new Promise<void>((r) => setTimeout(r, 400));
-    }
-    options.postVerifyAnim.value = false;
-    processing.value = false;
-    // 动画结束后展示结果
+
     if (result?.ok) {
+      // 成功：发出收束指令，等待收束完成事件；视图切换由该事件驱动，
+      // 不猜测动画时长（成功路径必须补满 100% 后才释放视图）
+      options.verifyRhythm.seal();
+      try {
+        await options.verifyRhythm.waitForComplete();
+      } catch (e) {
+        // 收束中途被 halt/reset/销毁：后端已验证成功，不阻塞业务收尾
+        console.warn('[onVerify] 收束等待被中断，按已完成处理', e);
+      }
       verifyPassword.value = '';
       binPassword.value = '';
       binFileName.value = '';
       binBytes.value = null;
       options.showToast('验证成功');
     } else {
+      // 失败：冻结进度 + 视觉降级；错误提示淡入覆盖，取得视觉重心
+      options.verifyRhythm.halt();
       // ★ 结构化错误提示：translateVerthysError 处理 VerthysResult 失败分支
       const msg = result && !result.ok
         ? translateVerthysError(result)
         : (errored ? '验证失败，请重试' : '验证失败');
       options.showError(msg);
+      // 错误最小展示时长（取自感知层配置源，业务层不硬编码毫秒值）
+      await options.verifyRhythm.waitForHaltMin();
     }
+    options.postVerifyAnim.value = false;
+    processing.value = false;
   };
 
   /* ===== 修改全局密钥弹窗：旧/新 .bin 文件选择 ===== */

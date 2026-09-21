@@ -869,7 +869,7 @@ useModuleDialogGuard("verthys", () => {
 /* 卡片网格 */
 .card-grid { flex: 1; overflow-y: auto; overflow-x: hidden; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-content: start; padding-right: 4px; }
 .acct-card { position: relative; padding: 14px 16px 14px 18px; transform-style: preserve-3d; transition: transform 0.3s var(--ease), box-shadow 0.3s var(--ease); animation: card-in 0.5s var(--ease) both; animation-delay: calc(var(--i) * 0.05s); }
-@keyframes card-in { from { opacity: 0; transform: translateY(10px); filter: blur(4px); } to { opacity: 1; transform: translateY(0); filter: blur(0); } }
+@keyframes card-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 .acct-card:hover { box-shadow: 0 12px 36px rgba(0,0,0,0.5), 0 0 16px rgba(0,212,255,0.1); }
 .card-accent { position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; background: linear-gradient(180deg, transparent, var(--accent), transparent); opacity: 0; transition: opacity 0.3s; border-radius: 1px; }
 .acct-card:hover .card-accent { opacity: 1; box-shadow: 0 0 8px rgba(0,212,255,0.4); }
@@ -900,7 +900,7 @@ useModuleDialogGuard("verthys", () => {
 /* 对话框 */
 .dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.74); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .dialog { padding: 28px; min-width: 440px; max-width: 90vw; animation: dialog-in 0.4s var(--ease); }
-@keyframes dialog-in { from { opacity: 0; filter: blur(12px); transform: scale(0.95); } to { opacity: 1; filter: blur(0); transform: scale(1); } }
+@keyframes dialog-in { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
 .dialog-title { font-size: 14px; margin-bottom: 20px; color: var(--accent); letter-spacing: 2px; font-family: var(--font); }
 
 /* 导入文件信息 */

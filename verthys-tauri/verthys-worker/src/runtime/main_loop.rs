@@ -17,6 +17,8 @@
 
 use std::io::{self, BufRead, Write};
 
+use zeroize::Zeroizing;
+
 use crate::log::{diag, init_diag};
 use crate::runtime::worker::Worker;
 use crate::runtime::dispatch::handle_request;
@@ -76,8 +78,11 @@ pub fn run(dll_path: &str) -> i32 {
     }
 
     for line in stdin.lock().lines() {
+        // ★ 口令链零化：line 携带完整请求 JSON（含明文口令），
+        //   包装进 Zeroizing 保证每轮迭代结束时 volatile 清零堆缓冲，
+        //   口令明文不在主循环缓冲中跨请求驻留。
         let line = match line {
-            Ok(l) => l,
+            Ok(l) => Zeroizing::new(l),
             Err(e) => {
                 diag!("[worker] stdin 读取错误: {}", e);
                 let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
@@ -89,8 +94,9 @@ pub fn run(dll_path: &str) -> i32 {
         }
 
         // 跳过 UTF-8 BOM (EF BB BF)，某些父进程可能在首次写入时附加 BOM
+        // 剥离产生的副本同样进入 Zeroizing，原缓冲随即清零
         let line = match line.strip_prefix('\u{FEFF}') {
-            Some(stripped) => stripped.to_string(),
+            Some(stripped) => Zeroizing::new(stripped.to_string()),
             None => line,
         };
 

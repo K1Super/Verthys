@@ -26,6 +26,15 @@
 /* ---------- 暴力破解退避 ---------- */
 #define VERTHYS_BACKOFF_MAX_SECS 3600u
 
+/*
+ * 进程级失败记账：模块级原子全局（跨句柄聚合，杜绝"关闭重开句柄
+ * 即清零计数"的绕过路径）。仅 Unlock 口令校验失败（AUTH）路径记账，
+ * 退避拦截（RATE 早退）不产生新记账。成功解锁经 verthys_backoff_reset
+ * 清零。多线程场景经 Interlocked 原子操作维护，无锁读取。
+ */
+static volatile LONG64 g_brute_failures = 0;   /* 连续失败次数（饱和 32） */
+static volatile LONG64 g_brute_last_fail_ms = 0; /* 最近失败的单调毫秒，0=无 */
+
 uint64_t verthys_monotonic_ms(void)
 {
 #ifdef _WIN32
@@ -37,27 +46,37 @@ uint64_t verthys_monotonic_ms(void)
 #endif
 }
 
-uint64_t verthys_backoff_remaining_ms(const struct VerthysContext *ctx)
+uint64_t verthys_backoff_remaining_ms(void)
 {
-    if (ctx->failed_attempts == 0 || ctx->last_failed_tick == 0) return 0;
-    uint32_t k = ctx->failed_attempts;
-    uint64_t wait_secs = (k >= 12) ? VERTHYS_BACKOFF_MAX_SECS : (1ull << k);
+    LONG64 k = InterlockedCompareExchange64(&g_brute_failures, 0, 0);
+    LONG64 last = InterlockedCompareExchange64(&g_brute_last_fail_ms, 0, 0);
+    uint64_t wait_secs;
+    uint64_t wait_ms;
+    uint64_t elapsed;
+
+    if (k == 0 || last == 0) return 0;
+    wait_secs = (k >= 12) ? VERTHYS_BACKOFF_MAX_SECS : ((uint64_t)1 << k);
     if (wait_secs > VERTHYS_BACKOFF_MAX_SECS) wait_secs = VERTHYS_BACKOFF_MAX_SECS;
-    uint64_t wait_ms = wait_secs * 1000u;
-    uint64_t elapsed = verthys_monotonic_ms() - ctx->last_failed_tick;
+    wait_ms = wait_secs * 1000u;
+    elapsed = verthys_monotonic_ms() - (uint64_t)last;
     return (elapsed >= wait_ms) ? 0 : (wait_ms - elapsed);
 }
 
-void verthys_backoff_record_failure(struct VerthysContext *ctx)
+void verthys_backoff_record_failure(void)
 {
-    if (ctx->failed_attempts < 32) ctx->failed_attempts++;
-    ctx->last_failed_tick = verthys_monotonic_ms();
+    LONG64 k = InterlockedIncrement64(&g_brute_failures);
+    if (k > 32) {
+        /* 饱和封顶：保持 32，防止长期运行计数溢出移位语义 */
+        InterlockedExchange64(&g_brute_failures, 32);
+    }
+    InterlockedExchange64(&g_brute_last_fail_ms,
+                          (LONG64)verthys_monotonic_ms());
 }
 
-void verthys_backoff_reset(struct VerthysContext *ctx)
+void verthys_backoff_reset(void)
 {
-    ctx->failed_attempts = 0;
-    ctx->last_failed_tick = 0;
+    InterlockedExchange64(&g_brute_failures, 0);
+    InterlockedExchange64(&g_brute_last_fail_ms, 0);
 }
 
 /* ---------- 小端序读取（用于索引区长度前缀） ---------- */
@@ -175,8 +194,8 @@ void ctx_free_getrecord_cache(struct VerthysContext *ctx)
  * 销毁 v3 实例（verthys_v3_ctx_subsystems_close / verthys_v3_ctx_destroy
  * ——后台预热线程汇合后内核句柄方可安全销毁，杜绝 BCrypt 句柄 UAF）。
  *
- * 暴力破解退避记账（failed_attempts/last_failed_tick）跨 Lock 周期
- * 保留（锁定状态仍需维持指数退避），不在清零范围。 */
+ * 暴力破解退避记账为进程级模块全局（跨句柄聚合），与本上下文无关，
+ * 亦不在本函数清零范围。 */
 void ctx_zero_sensitive(struct VerthysContext *ctx)
 {
     /* 释放 GetRecord 借用指针缓存（明文数据/名称安全清零 + 释放） */

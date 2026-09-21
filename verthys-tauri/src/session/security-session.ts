@@ -8,7 +8,7 @@
  *   4. lockAll 锁定全部（清零缓存 + worker GMK + 重置状态）
  */
 import {
-  securityBruteCheck, securityBruteRecordFailure, securityBruteRecordSuccess,
+  securityBruteCheck,
   securityBruteClearPurge, securityBruteStatus,
   securitySessionStart, securitySessionStop, securitySessionSetHighSecurity,
   securityGetPresetConfig,
@@ -138,11 +138,11 @@ export async function applySecurityPreset(preset: SecurityPresetCode) {
 /* ------------------------------------------------------------------ *
  * 暴力拦截门禁                                                        *
  *                                                                    *
- * verifyGlobalKeyWithBruteForce 在 verifyGlobalKey 基础上加入：       *
- *   1. 调用前检查暴力拦截状态（Locked/PurgeRequired 直接拒绝）        *
- *   2. 验证成功 → securityBruteRecordSuccess                         *
- *   3. 验证失败 → securityBruteRecordFailure（可能触发锁定/熔断）     *
- *   4. PurgeRequired → 抛出特定错误，SecurityCenter 处理熔断流程      *
+ * 计数与强制由服务端口令类命令入口执行（fail-closed 闸门 + 权威计数），*
+ * 前端仅做纯查询：                                                    *
+ *   1. checkBruteForceGate — 调用前预检，避免锁定态进入长运算流程      *
+ *   2. getBruteForceStatus — UI 展示失败次数/锁定剩余时间             *
+ *   3. clearBruteForcePurge — PurgeRequired 处理完成后清除           *
  * ------------------------------------------------------------------ */
 
 /** 检查当前是否允许尝试解锁（暴力拦截门禁） */

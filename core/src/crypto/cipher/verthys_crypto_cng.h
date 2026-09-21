@@ -66,11 +66,16 @@ typedef struct VerthysCngAead {
 /*
  * 预创建共享 AES-GCM 算法提供者。
  * Verthys_Init 时机调用一次，避免解锁关键路径重复打开；幂等。
- * 返回 VERTHYS_OK 或 VERTHYS_ERR_CNG_UNAVAILABLE。
+ * 并发安全：open/close 与引用计数增减由模块内互斥锁串行化；open 失败
+ * 不改变状态，下次调用可重试。返回 VERTHYS_OK 或 VERTHYS_ERR_CNG_UNAVAILABLE。
  */
 VerthysResult verthys_cng_init_once(void);
 
-/* 关闭共享算法提供者（Deinit 时机；已导入句柄须先行销毁）。幂等。 */
+/*
+ * 释放一次引用；末位引用释放时关闭共享算法提供者。
+ * 须与 init_once 严格配对，且不得与密钥导入并发（关闭前提：已导入
+ * 句柄先行销毁）。幂等（引用已为 0 时空转）。
+ */
 void verthys_cng_global_deinit(void);
 
 /*
@@ -88,7 +93,9 @@ VerthysResult verthys_cng_aead_init(VerthysCngAead *aead);
  * 导入密钥到 CNG 内核态。
  * ★ 红线：本函数是唯一允许密钥明文出现在用户态栈帧的
  *   函数——短暂、立即清零；调用后密钥字节只存在于内核地址空间。
- *   入参 key 在函数内部被 SecureZeroMemory（const 契约同 key_separation_install）。
+ *   ★ 清零契约（const 消耗语义，同 key_separation_install）：key 非 NULL
+ *   的所有返回路径（成功、内核导入失败、提供者不可用、上下文非法）
+ *   均清零调用方缓冲——调用方无法区分成败，零化责任全部在本函数。
  * key_id：16 字节非敏感标识符（诊断/轮换追踪），可为 NULL（置零）。
  * 前置条件：上下文已经 verthys_cng_aead_init / 整体置零初始化。
  * 重复导入：仅当 imported 标志置位时销毁旧句柄再导入新句柄（句柄不泄露，
@@ -105,7 +112,10 @@ __declspec(noinline) VerthysResult verthys_cng_aead_import_key(
  *   ciphertext 布局 [ct || tag]，容量 >= plaintext_len + 16，实际长度经
  *   *ciphertext_len 回传；nonce 由内部计数器生成并写入 nonce_out（12B，
  *   调用方持久化）。空明文（0 字节）合法，输出仅 16 字节标签。
- *   nonce_counter 溢出（2^64 加密次数，理论边界）返回 VERTHYS_ERR_INTERNAL。
+ *   长度域：单条明文上限 = ULONG_MAX - 16、AAD 上限 = ULONG_MAX
+ *   （CNG 32 位参数域），超限返回 VERTHYS_ERR_INVALID，更大场景由
+ *   上层分块。nonce_counter 溢出（2^64 加密次数，理论边界）返回
+ *   VERTHYS_ERR_INTERNAL。
  */
 __declspec(noinline) VerthysResult verthys_cng_aead_encrypt(
     VerthysCngAead *aead,
@@ -118,6 +128,8 @@ __declspec(noinline) VerthysResult verthys_cng_aead_encrypt(
 /*
  * 内核态解密：标签在内核态校验，认证失败返回 VERTHYS_ERR_AUTH
  *   且输出缓冲被清零。ciphertext_len >= 16（空明文合法）。
+ *   长度域：单条密文上限 = ULONG_MAX（对应加密侧明文上限 ULONG_MAX-16）、
+ *   AAD 上限 = ULONG_MAX，超限返回 VERTHYS_ERR_INVALID。
  */
 __declspec(noinline) VerthysResult verthys_cng_aead_decrypt(
     const VerthysCngAead *aead,
@@ -143,6 +155,16 @@ VerthysResult verthys_cng_aead_restore_nonce_counter(VerthysCngAead *aead,
 
 /* 查询导入状态（1=已导入内核，0=未导入） */
 int verthys_cng_aead_is_imported(const VerthysCngAead *aead);
+
+/* ---------- 测试注入（只被测试 exe 使用，对象直链的内部符号；
+ * 不在 DLL 导出清单中，发布面零变化） ---------- */
+
+/* one-shot：令下一次内核密钥导入确定性失败（模拟 BCrypt 调用失败），
+ * 用于验证导入失败路径的调用方密钥清零契约 */
+void verthys_cng_test_inject_import_failure(void);
+
+/* 当前共享提供者引用计数（并发 init/deinit 压力测试的终态断言） */
+LONG verthys_cng_test_alg_refs(void);
 
 #ifdef __cplusplus
 }

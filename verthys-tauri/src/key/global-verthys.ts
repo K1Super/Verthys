@@ -18,7 +18,7 @@ import {
   verthysGetRecord, verthysEnumerateRecords,
   bytesToBase64, readUserFile,
   setDeviceBinding, checkDeviceBinding, getDeviceFingerprint,
-  securityBruteRecordSuccess, securityBruteRecordFailure,
+  securityBruteCheck,
   securitySessionStart, securitySessionStop,
   type PreflightResult, type InitStatusResult,
   type BruteForceCheckResponse,
@@ -530,6 +530,19 @@ export async function initUnlock(
     if (!ok1) {
       await resetKeyManagerState();
       return err(VerthysErrorCode.E_WORKER_INIT_FAILED, "安全核心启动失败");
+    }
+
+    // 2.5 暴力熔断门禁预检（纯查询，不计数）
+    //
+    // 服务端在 unlock 入口已强制熔断（fail-closed）；此处仅提前拦截，
+    // 避免锁定态进入 Argon2id 长运算流程浪费用户等待。查询失败时
+    // 放行，由服务端闸门兜底强制。
+    const unlockGate = await checkBruteForceGate();
+    if (!unlockGate.allowed) {
+      await resetKeyManagerState();
+      return unlockGate.reason === "locked"
+        ? err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, `尝试次数过多，已锁定 ${Math.ceil(unlockGate.remainingSecs ?? 0)} 秒，请稍后再试`)
+        : err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, "失败次数已达上限，需完成安全清理与完整性校验后重试");
     }
 
     // 3. verthys_unlock — ★ 企业级根治：返回完整 VerthysResponse
@@ -1148,6 +1161,11 @@ export async function verifyGlobalKey(
 /**
  * 带暴力拦截门禁的全局密钥验证
  *
+ * ★ 计数职责已上移服务端：verify_global_key 命令在服务端入口强制
+ *   熔断闸门并权威计数（仅认证域错误计失败、成功即重置）。本函数
+ *   不再调用计数接口，仅在验证前预检与验证后查询锁定态映射给 UI，
+ *   避免同一失败被前后端各计一次。
+ *
  * ★ 保留现有 VerifyGlobalKeyResult 判别联合返回类型（已有 reason 机制）
  *   内部调用 verifyGlobalKey（VerthysResult 版本）
  *
@@ -1159,7 +1177,8 @@ export async function verifyGlobalKeyWithBruteForce(
   binPassword: string,
   onProgress?: (progress: UnlockProgress) => void,
 ): Promise<VerifyGlobalKeyResult> {
-  // 1. 暴力拦截门禁检查
+  // 1. 暴力拦截门禁预检（纯查询，不计数）：提前拦截以避免无效的
+  //    验证运算与 UI 等待；强制力由服务端入口闸门保证
   const gate = await checkBruteForceGate();
   if (!gate.allowed) {
     if (gate.reason === "locked") {
@@ -1170,23 +1189,21 @@ export async function verifyGlobalKeyWithBruteForce(
 
   // 2. 实际验证（★ 修复4：透传 onProgress 进度回调）
   const result = await verifyGlobalKey(globalPassword, binBytes, binPassword, onProgress);
-
-  // 3. 记录成功/失败
   if (result.ok) {
-    try { await securityBruteRecordSuccess(); } catch { /* */ }
     return { ok: true };
   }
 
-  // 4. 记录失败，获取触发后的状态
+  // 3. 失败后查询服务端计数结果（纯查询，不计数）：将锁定/清空态
+  //    映射给 UI 展示；查询失败不影响既有错误语义
   try {
-    const r: BruteForceCheckResponse = await securityBruteRecordFailure();
+    const r: BruteForceCheckResponse = await securityBruteCheck();
     if (r.kind === "Locked") {
       return { ok: false, reason: "locked", remainingSecs: r.remaining_secs };
     }
     if (r.kind === "PurgeRequired") {
       return { ok: false, reason: "purge_required" };
     }
-  } catch { /* */ }
+  } catch { /* 查询失败按普通失败处理 */ }
   return { ok: false, reason: "wrong_key" };
 }
 

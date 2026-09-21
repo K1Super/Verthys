@@ -5,13 +5,15 @@
  *   - 胡椒内存受 VirtualLock 保护，防止换页泄露
  *   - OS 托管：CNG 机器密钥 RSA-OAEP 加密后持久化到 %APPDATA%
  *   - Shamir 秘密共享：GF(2^8) 多项式拆分/重建，支持胡椒恢复卡
- *   - 编译内嵌胡椒兜底：保证零配置开箱即用
  *   - 胡椒永不通过函数返回，仅返回借用指针
  *
- * 三层胡椒来源（按优先级降序）：
+ * 胡椒来源（按优先级降序）：
  *   1. 注入胡椒（verthys_pepper_inject）
  *   2. OS 托管胡椒（CNG 持久化机器密钥）
- *   3. 编译内嵌胡椒（keymanager.c static 常量，兜底）
+ *
+ * OS 托管不可用且未注入时直接失败（禁止静默降级）：零熵兜底常量
+ * 已从默认构建移除——常量随源码公开，任何拿到二进制的人都能还原，
+ * 走该来源的容器离线爆破退化为纯口令熵。
  */
 #include "verthys_pepper.h"
 #include "verthys_internal.h"  /* verthys_secure_zero, verthys_lock_memory */
@@ -31,17 +33,20 @@
 #endif
 
 /* ===================================================================== *
- *                编译内嵌胡椒（兜底默认值，与 keymanager.c 一致）         *
+ *                受控调试构建专用：编译内嵌胡椒                            *
  *                                                                    *
- *   当 OS 托管不可用且未注入外部胡椒时，回退到此常量。                   *
- *   保证零配置场景向后兼容，不破坏已存在的 .verthys 文件。                 *
+ *   仅当构建系统显式定义 VERTHYS_ENABLE_COMPILED_PEPPER 时编入。         *
+ *   默认构建（含 Release 与常规测试）不含此常量与回退路径——发布面       *
+ *   二进制中不得存在可预测胡椒。                                        *
  * ===================================================================== */
+#if defined(VERTHYS_ENABLE_COMPILED_PEPPER)
 static const uint8_t VERTHYS_PEPPER_COMPILED[VERTHYS_KEY_BYTES] = {
     0x9c, 0x4d, 0xa2, 0xb8, 0x5f, 0xe1, 0x73, 0x6a,
     0xd7, 0x0c, 0x4b, 0x9e, 0xa8, 0x21, 0xf5, 0x3c,
     0x6e, 0x87, 0x10, 0xd4, 0x2a, 0xb9, 0xc5, 0x7f,
     0xe3, 0x08, 0x91, 0x4d, 0xa6, 0x2c, 0xb7, 0x5e
 };
+#endif
 
 /* ===================================================================== *
  *                        胡椒模块状态                                    *
@@ -531,13 +536,21 @@ int verthys_pepper_init(void)
         return -1;
     }
 
-    /* 优先级 3：编译内嵌胡椒（兜底默认值；来源确定性，随容器记录可校验）*/
+#if defined(VERTHYS_ENABLE_COMPILED_PEPPER)
+    /* 受控调试构建专用兜底：仅显式定义该宏的构建可达 */
     memcpy(g_pepper, VERTHYS_PEPPER_COMPILED, VERTHYS_KEY_BYTES);
     pepper_lock_memory();
     g_pepper_source = VERTHYS_PEPPER_SOURCE_COMPILED;
     g_pepper_source_error = 0;
     g_pepper_initialized = 1;
     return 0;
+#else
+    /* 默认构建：来源不可用即失败，禁止以零熵常量静默开箱。
+     * 置来源错误标志使解锁入口以 PEPPER_SOURCE 报错，用户修复
+     * 环境后重试。 */
+    g_pepper_source_error = 1;
+    return -1;
+#endif
 }
 
 const uint8_t *verthys_pepper_get(void)

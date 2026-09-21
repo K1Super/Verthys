@@ -11,6 +11,7 @@
  */
 #include "verthys_test.h"
 #include "verthys.h"
+#include "verthys_api_utils.h"   /* verthys_backoff_reset（跨测试清退避记账） */
 #include <string.h>
 
 #define TMP_VERTHYS  "test_verthys_tmp.verthys"
@@ -47,6 +48,8 @@ TEST(cp_then_unlock_new)
     /* 旧密码失效 */
     CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
     CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "oldpw", 5, 0), VERTHYS_ERR_AUTH);
+    /* AUTH 记账为进程级，主动清零避免退避窗口污染后续测试 */
+    verthys_backoff_reset();
 
     Verthys_Deinit(h);
     cleanup_all();

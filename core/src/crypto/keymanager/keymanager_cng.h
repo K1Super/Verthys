@@ -162,10 +162,11 @@ VerthysResult verthys_cng_km_rekey(
 
 /*
  * ChangePassword V3：MEK 句柄轮换（超级块提交成功后收尾）。
- * 前置：KERNEL_RESIDENT。销毁旧 MEK 句柄 → 导入 new_mek（计数严格
- * 配对）→ new_mek 清零。A/B/C 句柄不动（明文未变，仅 wrapped 形态
- * 随口令更新）。失败：CNG 导入失败时 MEK 角色空缺（运行态仅 A/B/C
- * 在用，无危害；下次解锁按新口令重建全组）。
+ * 前置：KERNEL_RESIDENT。临时槽先行验证：new_mek 先导入独立上下文，
+ * 成功后销毁旧 MEK 句柄并整体移交（纯内存操作，无中间窗口）；
+ * new_mek 由 import_key 清零契约消耗。A/B/C 句柄不动（明文未变，
+ * 仅 wrapped 形态随口令更新）。失败（导入失败）：旧 MEK 槽原样
+ * 驻留，零变更上抛——unwrap/verify 语义保持。
  */
 VerthysResult verthys_cng_km_rotate_mek(
     VerthysCngKeyManager *km,

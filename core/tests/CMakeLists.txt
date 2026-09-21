@@ -12,6 +12,7 @@ add_executable(verthys_tests
     container/test_verthys_format.c
     api/test_verthys_api.c
     api/test_verthys_export.c
+    api/test_scan_concurrent.c
     security/test_memory_safety.c
     container/test_format_fuzz.c
     perf/test_perf_prefetch.c
@@ -19,15 +20,18 @@ add_executable(verthys_tests
     security/test_emergency.c
     security/test_integrity_verify.c
     transaction/test_txn_recovery_inject.c
+    transaction/test_txn_delete_retry.c
     perf/test_perf_baseline.c
     regression/test_final_repair.c
     schema/test_flatcc_demo.c
     crypto/test_cng_kernel.c
     security/test_secure_allocator.c
+    security/test_backoff_process_wide.c
     container/test_v3_container.c
     container/test_v3_partition.c
     container/test_v3_extent.c
     index/test_v3_lsm.c
+    index/test_sstable_budget.c
     api/test_v3_lifecycle.c
     property/test_v3_property.c
     crypto/test_auto_rekey.c

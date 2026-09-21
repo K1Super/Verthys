@@ -108,6 +108,7 @@
 import { ref, onMounted, onBeforeUnmount } from "vue";
 import { useBrandTitle } from "../composables/useBrandTitle";
 import { useSpectraTicks } from "../composables/useSpectraTicks";
+import { masterFrameLoop } from "../core/master-frame-loop";
 
 const emit = defineEmits<{ (e: "enter"): void }>();
 
@@ -120,8 +121,10 @@ const leaving = ref(false);
  * ★ 鼠标跟随光晕 — 性能根治版：
  *   1. 去响应式：不再经 Vue computed 每帧 patch style（省一轮调度）
  *   2. transform 直写：translate3d 合成器层移动，零 layout/零 paint
- *   3. rAF 阻尼跟随：指数趋近平滑（物理阻尼感），事件仅记录目标值
- *   4. 去实时 blur：径向渐变多段柔边等效 28px 模糊（省每帧 GPU 重采样）
+ *   3. 主循环逐帧排程阻尼跟随（once 泵循环 — 指数趋近平滑，不受
+ *      空闲档位节流；事件仅记录目标值）
+ *   4. 去实时 blur：径向渐变多段柔边替代模糊滤镜（省每帧 GPU 重采样；
+ *      光晕紧凑尺寸，柔边宽度随元素等比收敛）
  *   5. 整数像素量化：消除亚像素抖动
  * ========================================================================== */
 const auraEl = ref<HTMLElement | null>(null);
@@ -129,9 +132,11 @@ let auraTx = 0;   // 当前位置（阻尼插值中）
 let auraTy = 0;
 let auraGx = 0;   // 目标位置（指针最近事件）
 let auraGy = 0;
-let auraRaf = 0;
+/* 泵循环激活标志（once 排程无句柄 — 靠标志自停 / 卸载断泵） */
+let auraActive = false;
 
 const auraFrame = () => {
+  if (!auraActive) return;
   /* 指数阻尼趋近（≈160ms 收敛）— 平滑跟随，静止时自动停帧 */
   auraTx += (auraGx - auraTx) * 0.12;
   auraTy += (auraGy - auraTy) * 0.12;
@@ -147,14 +152,17 @@ const auraFrame = () => {
   if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
     auraTx = auraGx;
     auraTy = auraGy;
-    auraRaf = 0;
+    auraActive = false;
     return;
   }
-  auraRaf = requestAnimationFrame(auraFrame);
+  masterFrameLoop.once(auraFrame);
 };
 
 const kickAura = () => {
-  if (!auraRaf) auraRaf = requestAnimationFrame(auraFrame);
+  if (!auraActive) {
+    auraActive = true;
+    masterFrameLoop.once(auraFrame);
+  }
 };
 
 /* ============================================================================
@@ -174,7 +182,7 @@ const charVariants = useBrandTitle();
  * 自身充能结束时刻 — 起始帧 = 当前帧零跳变 */
 const spectraTicks = useSpectraTicks("intro");
 
-/* 指针事件仅记录目标（中心系坐标），写入与插值全部由 rAF 承担 */
+/* 指针事件仅记录目标（中心系坐标），写入与插值全部由主循环逐帧排程承担 */
 const onMouseMove = (e: MouseEvent) => {
   auraGx = e.clientX - window.innerWidth / 2;
   auraGy = e.clientY - window.innerHeight / 2;
@@ -210,10 +218,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   timers.forEach(t => clearTimeout(t));
   timers = [];
-  if (auraRaf) {
-    cancelAnimationFrame(auraRaf);
-    auraRaf = 0;
-  }
+  /* 断泵：已排程的下一帧回调经 auraActive 守卫直接返回，不再续排 */
+  auraActive = false;
 });
 </script>
 
@@ -229,17 +235,17 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-/* ===== 鼠标跟随光晕（低强度反馈，rAF 阻尼跟随 + transform 直写） ===== */
+/* ===== 鼠标跟随光晕（低强度紧凑反馈，主循环排帧阻尼跟随 + transform 直写） ===== */
 .cursor-aura {
   /* 锚定视口中心，位移全部由 JS translate3d 直写（合成器层零重绘） */
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 460px;
-  height: 460px;
+  width: 240px;
+  height: 240px;
   border-radius: 50%;
-  /* ★ 去实时 blur：多段柔边径向渐变等效 28px 模糊（静态纹理，
-   * GPU 一次光栅化永久复用，移动零重采样） */
+  /* ★ 去实时 blur：多段柔边径向渐变（静态纹理，GPU 一次光栅化
+   * 永久复用，移动零重采样；柔边宽度随元素尺寸等比收敛） */
   background: radial-gradient(
     circle,
     rgba(0, 212, 255, 0.05) 0%,
@@ -378,13 +384,11 @@ onBeforeUnmount(() => {
   0% {
     opacity: 1;
     transform: translateY(var(--by, 0px)) rotate(var(--tr, 0deg)) scale(1);
-    filter: blur(0) brightness(1);
   }
   100% {
     opacity: 0;
     transform: translate(calc(var(--dx, 60px) * 1.7), calc(var(--dy, -40px) * 1.7))
       rotate(calc(var(--rot, 8deg) * -2)) scale(0.5);
-    filter: blur(14px) brightness(1.5);
   }
 }
 

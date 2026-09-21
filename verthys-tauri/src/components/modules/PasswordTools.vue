@@ -532,8 +532,8 @@ watch(keygenBytes, () => generateKey());
   overflow: hidden;
 }
 @keyframes section-in {
-  from { opacity: 0; transform: translateY(10px); filter: blur(4px); }
-  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .gen-section { animation-delay: 0s; }
 .check-section { animation-delay: 0.08s; }

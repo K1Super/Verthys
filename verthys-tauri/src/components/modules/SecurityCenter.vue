@@ -49,8 +49,8 @@
       :bin-file-name="binFileName"
       :processing="processing"
       :unlock-progress-msg="unlockProgressMsg"
-      :unlock-progress-percent="unlockProgressPercent"
-      :unlock-progress-elapsed="unlockProgressElapsed"
+      :visual-percent="verifyRhythm.visualPercent.value"
+      :dimmed="verifyRhythm.dimmed.value"
       @verify="onVerify"
       @back="goBackToUnlock"
       @browse-bin="browseBin"
@@ -175,7 +175,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch } from "vue";
+import { ref, onMounted, onBeforeUnmount, watch, defineAsyncComponent } from "vue";
 import {
   lockAll,
   hasModuleKey, isModuleReady,
@@ -193,13 +193,16 @@ import {
 import ToastOverlay from "../common/feedback/ToastOverlay.vue";
 import KeyEditDialog from "../dialogs/KeyEditDialog.vue";
 import DisableVerifyDialog from "../dialogs/DisableVerifyDialog.vue";
+/* ★ 视图级懒加载：拆分中枢首挂载成本 — 首次进入仅执行 UnlockView
+ * （最常见入口视图，保持同步渲染零等待），其余视图/弹窗按需拉取
+ * （本地分包，切换时微任务级就绪） */
 import UnlockView from "../views/UnlockView.vue";
-import InitKeyView from "../views/InitKeyView.vue";
-import VerifyView from "../views/VerifyView.vue";
-import DeviceMismatchView from "../views/DeviceMismatchView.vue";
-import ManagementView from "../views/ManagementView.vue";
-import ChangeKeyDialog from "../management/ChangeKeyDialog.vue";
-import ExportVerifyDialog from "../management/ExportVerifyDialog.vue";
+const InitKeyView = defineAsyncComponent(() => import("../views/InitKeyView.vue"));
+const VerifyView = defineAsyncComponent(() => import("../views/VerifyView.vue"));
+const DeviceMismatchView = defineAsyncComponent(() => import("../views/DeviceMismatchView.vue"));
+const ManagementView = defineAsyncComponent(() => import("../views/ManagementView.vue"));
+const ChangeKeyDialog = defineAsyncComponent(() => import("../management/ChangeKeyDialog.vue"));
+const ExportVerifyDialog = defineAsyncComponent(() => import("../management/ExportVerifyDialog.vue"));
 import { useErrorToast } from "../../composables/useErrorToast";
 import { useViewMode } from "../../composables/security-center/useViewMode";
 // useDeviceBinding 必须在 useViewMode / useUnlockFlow 之前调用（提供 deviceCheckResult / checkDevice 注入）
@@ -207,6 +210,7 @@ import { useDeviceBinding } from "../../composables/security-center/useDeviceBin
 import { useSessionTimer } from "../../composables/security-center/useSessionTimer";
 import { useUnlockFlow } from "../../composables/security-center/useUnlockFlow";
 import { useGlobalKey } from "../../composables/security-center/useGlobalKey";
+import { useVerifyRhythm } from "../../composables/security-center/useVerifyRhythm";
 import { useModuleKeys } from "../../composables/security-center/useModuleKeys";
 import { usePreset } from "../../composables/security-center/usePreset";
 import { useDefenseStatus } from "../../composables/security-center/useDefenseStatus";
@@ -236,9 +240,14 @@ const initializing = ref(true);
  * ★ 必须在 useViewMode / useUnlockFlow 之前调用（提供 deviceCheckResult / checkDevice 注入） */
 const { deviceCheckResult, deviceFingerprintShort, checkDevice, refreshDeviceFingerprint } = useDeviceBinding({ isTauri });
 
-/* 验证后强制 2s 量子核心动画：无论成功或失败都保持 loading 视图
+/* 验证收束标志：验证流程与成功收束（补满 100%）期间保持验证视图。
+ * 收束完成事件触发后由上层的 onVerify 复位，视图随即切换；
+ * 视图切换由感知层收束完成事件驱动，不依赖固定时长。
  * ★ 移至 useViewMode 调用前定义以避免 TDZ（时序死区） */
 const postVerifyAnim = ref(false);
+
+/* ===== 验证进度感知层（信号层 → 感知层 → 呈现层 的中间层） ===== */
+const verifyRhythm = useVerifyRhythm();
 
 /* ===== 视图模式（五态严格互斥） =====
  * ★ 企业级根治：移除 "loading" 态。worker 解锁成功后进程内即时完成
@@ -273,7 +282,8 @@ const {
 
 /* ===== 全局密钥管理 =====
  * ★ 依赖注入：postVerifyAnim（useViewMode 读取 / onVerify 写入）
- *   + unlockProgress*（来自 useUnlockFlow，验证视图复用进度条显示） */
+ *   + verifyRhythm（验证进度感知层实例）
+ *   + unlockProgress*（来自 useUnlockFlow，作为真实进度信号注入验证复用） */
 const {
   initPassword,
   verifyPassword,
@@ -309,6 +319,7 @@ const {
   showError,
   showToast,
   postVerifyAnim,
+  verifyRhythm,
   unlockProgressMsg,
   unlockProgressPercent,
   unlockProgressElapsed,
@@ -528,6 +539,8 @@ watch(globalKeyReadyRef, (ready) => {
 onBeforeUnmount(() => {
   stopSessionTick();
   if (toastTimer !== null) window.clearTimeout(toastTimer);
+  // 清理感知层动画帧调度（中断策略：取消调度并冻结状态）
+  verifyRhythm.dispose();
   // ★ 清理预启动但未使用的 worker，防止僵尸进程
   //    场景：用户选定文件触发了 preloadWorker，但未点击「确认」就切走模块
   //    若 verthys 已解锁（verthysReadyRef=true），worker 仍在使用中，不销毁

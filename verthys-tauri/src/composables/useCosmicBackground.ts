@@ -2,23 +2,25 @@
  * useCosmicBackground — 宇宙交响曲氛围背景数据与视差逻辑
  *
  * 职责：
- *   1. 鼠标视差追踪（三层深度：远 5px / 中 15px / 近 30px，rAF 缓动）
+ *   1. 鼠标视差追踪（三层深度：远 5px / 中 15px / 近 30px，主循环
+ *      逐帧排程缓动 — once 泵循环，收敛自停）
  *   2. 三层星场数据（远 38 颗 / 中 22 颗 / 近 14 颗）
  *   3. 宇宙尘埃微粒（50 颗缓慢漂移）
  *   4. 星座连线（9 颗主星 + 10 条连线）
  *
  * 从 MainView.vue 抽离，功能 100% 保留。
  *
- * ★ 性能优化（CosmicBackground 统一 rAF 驱动）：
+ * ★ 性能优化（CosmicBackground 统一帧驱动）：
  *   星点/尘埃不再携带 CSS animationDelay / animationDuration，
  *   改为输出数值相位（phase ∈ [0,1) 归一化相位偏移）与周期（dur，秒），
- *   由 CosmicBackground.vue 内的统一 rAF 引擎读取 data-phase / data-dur 驱动，
+ *   由 CosmicBackground.vue 内的统一帧驱动引擎读取 data-phase / data-dur 驱动，
  *   消除 174 个独立 CSS 动画的逐元素动画调度开销。
  */
 
 import { ref, onBeforeUnmount } from "vue";
+import { masterFrameLoop } from "../core/master-frame-loop";
 
-/** 星点条目：style 仅承载几何/颜色；phase/dur 由统一 rAF 引擎消费 */
+/** 星点条目：style 仅承载几何/颜色；phase/dur 由统一帧驱动引擎消费 */
 export interface CosmicStar {
   id: string;
   style: Record<string, string>;
@@ -43,11 +45,12 @@ export interface CosmicDust {
 }
 
 export function useCosmicBackground() {
-  /* ===== 鼠标视差追踪：三层深度（远 5px / 中 15px / 近 30px），rAF 缓动 ===== */
+  /* ===== 鼠标视差追踪：三层深度（远 5px / 中 15px / 近 30px），主循环排程缓动 ===== */
   const parallaxFar = ref<Record<string, string>>({});
   const parallaxMid = ref<Record<string, string>>({});
   const parallaxNear = ref<Record<string, string>>({});
-  let parallaxRaf = 0;
+  /* 泵循环激活标志（once 排程无句柄 — 靠标志自停 / 卸载断泵） */
+  let parallaxActive = false;
   let parallaxTargetX = 0;
   let parallaxTargetY = 0;
   let parallaxCurrentX = 0;
@@ -68,10 +71,14 @@ export function useCosmicBackground() {
     // 归一化到 -1..1（视口坐标系 — main-view 100%×100% 铺满窗口）
     parallaxTargetX = (e.clientX / vw - 0.5) * 2;
     parallaxTargetY = (e.clientY / vh - 0.5) * 2;
-    if (!parallaxRaf) parallaxRaf = requestAnimationFrame(tickParallax);
+    if (!parallaxActive) {
+      parallaxActive = true;
+      masterFrameLoop.once(tickParallax);
+    }
   };
 
   const tickParallax = () => {
+    if (!parallaxActive) return;
     // 缓动追踪目标值（弹性平滑）
     parallaxCurrentX += (parallaxTargetX - parallaxCurrentX) * 0.08;
     parallaxCurrentY += (parallaxTargetY - parallaxCurrentY) * 0.08;
@@ -86,14 +93,15 @@ export function useCosmicBackground() {
     parallaxNear.value = { transform: `translate3d(${nx}px, ${ny}px, 0)` };
     if (Math.abs(parallaxTargetX - parallaxCurrentX) > 0.001 ||
         Math.abs(parallaxTargetY - parallaxCurrentY) > 0.001) {
-      parallaxRaf = requestAnimationFrame(tickParallax);
+      masterFrameLoop.once(tickParallax);
     } else {
-      parallaxRaf = 0;
+      parallaxActive = false;
     }
   };
 
   onBeforeUnmount(() => {
-    if (parallaxRaf) cancelAnimationFrame(parallaxRaf);
+    /* 断泵：已排程的下一帧回调经 parallaxActive 守卫直接返回 */
+    parallaxActive = false;
     window.removeEventListener("resize", onViewportResize);
   });
 

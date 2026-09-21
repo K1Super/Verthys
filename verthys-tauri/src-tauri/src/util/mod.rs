@@ -36,3 +36,5 @@ pub mod audit_log;
 pub mod sandbox;
 /// 零化擦除的安全字符串包装（Zeroizing<String> + 透明 serde）
 pub mod secured_string;
+/// 日志敏感负载脱敏（白名单字段保留，其余值只留类型与规模）
+pub mod log_sanitizer;

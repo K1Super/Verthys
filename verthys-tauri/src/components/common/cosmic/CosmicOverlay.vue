@@ -42,13 +42,13 @@ const onBackdrop = () => {
   transition: opacity 0.3s var(--ease);
 }
 .cosmic-enter-active :deep(.cosmic-dialog) {
-  transition: opacity 0.45s var(--ease), transform 0.45s var(--ease), filter 0.45s var(--ease);
+  transition: opacity 0.45s var(--ease), transform 0.45s var(--ease);
 }
 .cosmic-leave-active {
   transition: opacity 0.2s var(--ease);
 }
 .cosmic-leave-active :deep(.cosmic-dialog) {
-  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease), filter 0.2s var(--ease);
+  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
 }
 .cosmic-enter-from {
   opacity: 0;
@@ -56,7 +56,6 @@ const onBackdrop = () => {
 .cosmic-enter-from :deep(.cosmic-dialog) {
   opacity: 0;
   transform: scale(0.92) translateY(20px);
-  filter: blur(10px);
 }
 .cosmic-leave-to {
   opacity: 0;
@@ -64,6 +63,5 @@ const onBackdrop = () => {
 .cosmic-leave-to :deep(.cosmic-dialog) {
   opacity: 0;
   transform: scale(0.96) translateY(8px);
-  filter: blur(6px);
 }
 </style>
