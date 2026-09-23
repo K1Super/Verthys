@@ -52,6 +52,9 @@
 #define VERTHYS_FMT_BLOCK_ALIGN    16u
 #define VERTHYS_FMT_VERSION        1u
 #define VERTHYS_FMT_ALG_ARGON2ID_XCHACHA20 1u
+/* 记录名业务上限：读写两侧对称校验——超限写入拒绝、解析拒绝，
+ * 保证本模块产出的文件必可被本模块读回 */
+#define VERTHYS_FMT_NAME_MAX_BYTES 4096u
 
 /* ---------- 内存记录（明文） ---------- */
 typedef struct {

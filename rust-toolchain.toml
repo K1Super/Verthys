@@ -1,0 +1,6 @@
+# Rust 工具链钉版：本地与 CI 使用完全相同的编译器版本
+# 升级流程：改 channel → 本地 rustup 同步 → 提交（CI 自动跟随）
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

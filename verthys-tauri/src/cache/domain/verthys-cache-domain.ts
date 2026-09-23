@@ -1,7 +1,7 @@
 /*
  * cache/domain/verthys-cache-domain.ts — Verthys 缓存领域（VerthysCacheDomain）
  *
- * ★ 并发重构核心实现：将缓存逻辑封装为可注入、可测试的领域类，
+ * 并发重构核心实现：将缓存逻辑封装为可注入、可测试的领域类，
  *   对外 API 由 cache/composition/verthys-cache.ts 绑定导出（签名与旧版逐一对应）。
  *
  * 五大缓存
@@ -12,7 +12,7 @@
  *   4. 摘要缓存 summaryCache（第一层：常驻内存，永久存在，无淘汰）
  *   5. 全量记录缓存 fullRecordCache（第二层：LRU-50，按需加载，永不截断）
  *
- * ★ 根治的六项缺陷（逐条对应）：
+ * 根治的六项缺陷（逐条对应）：
  *   1. 并发竞态：clearRecordScanCache 与进行中扫描的竞态 → 代际令牌
  *      （Generation Token）使旧扫描自动失效，非阻塞清除立即生效
  *   2. 数据一致性：getFullRecord 写缓存前未复查待删集合 → 写入前获取
@@ -26,13 +26,13 @@
  *      令牌 + 路径，不一致立即 invalidateActiveScanToken 终止扫描
  *   6. AsyncMutex 使用错误：acquire() 返回释放函数，调用方在 finally 中释放
  *
- * ★ 修正附录落实：maxScannedId 仅由 mergeScanEntry 维护，
+ * 修正附录落实：maxScannedId 仅由 mergeScanEntry 维护，
  *   runRecordScan 的 finally 不再用缓存键重算覆盖（LRU 淘汰会使重算值
  *   偏小 → 增量扫描从错误 ID 开始 → 大量重复扫描甚至循环）。
  *   computeMaxScannedId 方法已删除。invalidateScannedRecord 在
  *   删除当前最大 ID 时仍需重算（现网 ID 复用缺陷修复，语义不同，保留）。
  *
- * ★ 集成说明（关联项目顶级适配）：
+ * 集成说明（关联项目顶级适配）：
  *   - pendingDeletionIds / committedDeletionIds 与 verthys-flush-service 共享
  *     同一 Set 实例（由 verthys-cache.ts 绑定层注入），保持"冲刷队列 ↔ 缓存
  *     扫描过滤"单一权威源，杜绝两套集合漂移导致删除复活
@@ -46,7 +46,7 @@
  *   - 快照提供者注册经 registerSnapshotProvider() 内部封装：绑定层只触发
  *     注册，不直接触碰 getScanSnapshot 内部方法（封装性）
  *
- * ★ 评审修复：
+ * 评审修复：
  *   1. clearAllVerthysCaches 补充 clearModuleKeyCache（明文密钥零填充，
  *      lockAll 统一清空入口安全闭环，置于各缓存清空之首）
  *   2. addFullRecord 的 dataSize 回退估算改用 estimateBase64Size
@@ -67,12 +67,12 @@ import { AsyncMutex } from "../concurrency/async-mutex";
 import { LRUCache } from "../concurrency/lru-cache";
 import { TypedEventEmitter } from "../concurrency/typed-event-emitter";
 import { estimateBase64Size } from "../shared/base64-size";
-// ★ MODULE_IDS：权威模块表（constants 层零依赖，新增模块自动纳入密钥重置）
+// MODULE_IDS：权威模块表（constants 层零依赖，新增模块自动纳入密钥重置）
 import { MODULE_IDS } from "../../constants/key_manager_const";
-// ★ 快照注册通道：经 verthys-flush 绑定层的 setSnapshotProvider 单向注入
+// 快照注册通道：经 verthys-flush 绑定层的 setSnapshotProvider 单向注入
 //   （verthys-flush → verthys-flush-service，无任何指向本文件的回边，无循环依赖）
 import { setSnapshotProvider } from "../composition/verthys-flush";
-// ★ 前端 IPC 优先级门控：关键 IPC 调用标记前端活跃，后台任务据此让出 worker 通道
+// 前端 IPC 优先级门控：关键 IPC 调用标记前端活跃，后台任务据此让出 worker 通道
 //   （该模块零导入，不引入循环依赖）
 import { markFrontendIpcActive } from "../../core/frontend-ipc-priority";
 import { createLogger } from "../../utils/logger";
@@ -113,7 +113,7 @@ export interface VerthysCacheApi {
 }
 
 /**
- * ★ KeyState 最小接口（接口隔离原则）。
+ * KeyState 最小接口（接口隔离原则）。
  *
  * 领域层对 UI 状态的唯一依赖：moduleKeyReady 的读写（缓存密钥时置 true、
  * 移除/清零时置 false）。以结构化类型表达 `{ value: Record<ModuleId, boolean> }`，
@@ -128,11 +128,11 @@ export interface KeyStateForCache {
 /** VerthysCacheDomain 必需注入依赖（组合根 verthys-cache.ts 装配） */
 export interface VerthysCacheDomainDeps {
   /**
-   * ★ 共享待删除 ID 集合（与 VerthysFlushService 同一实例，单一权威源）。
+   * 共享待删除 ID 集合（与 VerthysFlushService 同一实例，单一权威源）。
    * 冲刷队列与缓存扫描的删除过滤据此保持完全一致。
    */
   pendingDeletionIds: Set<number>;
-  /** ★ 共享已提交删除 ID 集合（同上） */
+  /** 共享已提交删除 ID 集合（同上） */
   committedDeletionIds: Set<number>;
   /**
    * 后台预加载中止钩子：返回 true 表示会话已结束（lockAll 触发
@@ -252,7 +252,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     this.recordScanCache = new LRUCache(RECORD_CACHE_LRU_THRESHOLD, (id, rec) => this.onScanEvict(id, rec));
     // fullRecordCache 容量 50，淘汰时安全覆写 dataB64（缩短明文暴露窗口）
     this.fullRecordCache = new LRUCache(FULL_RECORD_CACHE_CAPACITY, (id, rec) => this.onFullRecordEvict(id, rec));
-    // ★ 共享删除集合：注入与 VerthysFlushService 相同实例，保持过滤单一权威源
+    // 共享删除集合：注入与 VerthysFlushService 相同实例，保持过滤单一权威源
     this.pendingDeletionIds = deps.pendingDeletionIds;
     this.committedDeletionIds = deps.committedDeletionIds;
     this.shouldAbortBackgroundWork = deps.shouldAbortBackgroundWork;
@@ -262,7 +262,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   /* ==================== 快照提供（verthys-flush ID 复用防护） ==================== */
 
   /**
-   * ★ 注册快照提供者（封装性：绑定层只触发注册，不直接触碰内部方法）。
+   * 注册快照提供者（封装性：绑定层只触发注册，不直接触碰内部方法）。
    *
    * 组合根 verthys-cache.ts 在 initVerthysCache() 中调用本方法一次；内部经
    * verthys-flush 的 setSnapshotProvider 将 getScanSnapshot 登记为删除校验
@@ -277,7 +277,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 返回记录快照子集（name/type/dataB64），供 VerthysFlushService 的
    * deleteAndPersist 进行 ID 复用校验（经 registerSnapshotProvider 登记）。
    *
-   * ★ 使用 LRU peek（只读不触碰 recency）：删除入队时的快照读取
+   * 使用 LRU peek（只读不触碰 recency）：删除入队时的快照读取
    *   不应扰动正常访问的 LRU 顺序。
    */
   getScanSnapshot(id: number): { name: string; type: number; dataB64: string } | null {
@@ -374,7 +374,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       this.secureZeroBytes(keyBytes);
     }
     this.moduleKeyCache.clear();
-    // ★ 评审 #4 落实：以 MODULE_IDS 权威模块表驱动重置——新增模块自动
+    // 评审 #4 落实：以 MODULE_IDS 权威模块表驱动重置——新增模块自动
     //   纳入覆盖，杜绝硬编码列表遗漏；逐键置 false 保持响应式精确更新
     for (const moduleId of MODULE_IDS) {
       this.keyState.moduleKeyReady.value[moduleId] = false;
@@ -428,7 +428,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   }
 
   /**
-   * ★ 评审 #3/#5：属主保护的扫描自检失效（路径变化 / 批次校验失败时调用）。
+   * 评审 #3/#5：属主保护的扫描自检失效（路径变化 / 批次校验失败时调用）。
    *
    * 仅当 token 仍是当前活动令牌（游标所有权在本扫描）时设置 cancelled 标志：
    *   - 若 clearRecordScanCache 之后后继扫描已注册为 activeScanToken，
@@ -461,7 +461,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    *   （单次 IPC，v1 内存路径），再失败回退 verthysEnumerateRecordsStream。
    */
   async ensureRecordScan(): Promise<void> {
-    // ★ 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
+    // 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
     markFrontendIpcActive();
     const release = await this.scanMutex.acquire();
     let wrapped: Promise<void>;
@@ -470,7 +470,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       if (this.scanInProgress) return this.scanInProgress;
 
       const scanPromise = this.runRecordScan();
-      // ★ 修复：finally 无条件清空，保证扫描结束后能重新触发
+      // 修复：finally 无条件清空，保证扫描结束后能重新触发
       wrapped = scanPromise.finally(() => {
         this.scanInProgress = null;
       });
@@ -510,7 +510,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       // 回退：v1 格式不支持游标扫描（Verthys_ScanOpen 返回 VERTHYS_ERR_INVALID）
       await this.runRecordScanFallback(token, startId);
     } finally {
-      // ★ 评审 #3/#5 落实（属主保护收尾）：
+      // 评审 #3/#5 落实（属主保护收尾）：
       //   - activeScanToken === token：游标所有权仍在本扫描（正常完成，或
       //     因路径变化自检失效但无人顶替）→ 必须 scanClose 释放共享内存/
       //     C 游标/预取任务（无人顶替时不关即泄漏），并清理状态引用，
@@ -522,7 +522,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       //     残留资源由后继 scan_open 的自动顶替或 worker 销毁兜底释放。
       if (this.activeScanToken === token) {
         await this.verthysApi.scanClose().catch(() => {});
-        // ★ maxScannedId 由 mergeScanEntry 维护，
+        // maxScannedId 由 mergeScanEntry 维护，
         //   此处不基于缓存键重算覆盖（LRU 淘汰会使重算值偏小）。
         this.scanVerthysPath = null;
         this.activeScanToken = null;
@@ -564,7 +564,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   private mergeScanBatch(records: ScannedRecord[], token: ScanToken): void {
     for (const r of records) {
       if (!this.isScanTokenValid(token) || this.isPathChanged(this.scanVerthysPath)) {
-        // ★ 评审 #3：属主保护失效（非属主 no-op，防误杀后继扫描）
+        // 评审 #3：属主保护失效（非属主 no-op，防误杀后继扫描）
         this.invalidateScanIfCurrent(token);
         return;
       }
@@ -607,7 +607,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     }
     this.recordScanCache.set(id, { id, type, name, dataB64: safeDataB64 });
     this.addToIndex(id, type);
-    // ★ maxScannedId 唯一维护点：仅单调递增，
+    // maxScannedId 唯一维护点：仅单调递增，
     //   不做基于缓存键的重算覆盖（invalidateScannedRecord 的定向重算除外）
     if (id > this.maxScannedId) this.maxScannedId = id;
   }
@@ -631,7 +631,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 使扫描缓存中的单条记录失效（删除记录后调用）。
    * 删除后该 ID 不会出现在 getRecordIdsByType 的结果中，杜绝"删除复活"。
    *
-   * ★ ID 复用缺陷修复：若被删除的记录 ID 等于当前 maxScannedId，
+   * ID 复用缺陷修复：若被删除的记录 ID 等于当前 maxScannedId，
    * 必须重新遍历缓存计算新的 maxScannedId。否则 verthys 后端复用该 ID
    * 分配新记录时，ensureRecordScan 的增量扫描会从旧 maxScannedId+1 开始，
    * 永远扫描不到复用 ID 的新记录 → 缓存永久缺失数据。
@@ -756,7 +756,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     }
     this.summaryCache.set(rec.id, rec);
     this.addSummaryToIndex(rec.id, rec.type);
-    // ★ maxSummaryId 唯一维护点（与 maxScannedId 同源策略，单调递增）
+    // maxSummaryId 唯一维护点（与 maxScannedId 同源策略，单调递增）
     if (rec.id > this.maxSummaryId) this.maxSummaryId = rec.id;
   }
 
@@ -788,10 +788,10 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 回退策略：摘要扫描失败（v1 格式 / 熔断）时静默返回——summaryCache
    * 保持空，调用方 getSummaryIdsByType 返回空数组，findGlobalKeyRecord
    * 检测到摘要为空时自行回退 verthysEnumerateRecords（v1 内存路径）。
-   * ★ 不回退全量扫描：避免 v1 容器关键路径全量解密（20-30s 延迟）。
+   * 不回退全量扫描：避免 v1 容器关键路径全量解密（20-30s 延迟）。
    */
   async ensureSummaryScan(): Promise<void> {
-    // ★ 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
+    // 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
     markFrontendIpcActive();
     const release = await this.summaryScanMutex.acquire();
     let wrapped: Promise<void>;
@@ -800,7 +800,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       if (this.summaryScanInProgress) return this.summaryScanInProgress;
 
       const scanPromise = this.runSummaryScan();
-      // ★ 修复：finally 无条件清空，保证扫描结束后能重新触发
+      // 修复：finally 无条件清空，保证扫描结束后能重新触发
       wrapped = scanPromise.finally(() => {
         this.summaryScanInProgress = null;
       });
@@ -839,7 +839,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       // 摘要扫描失败（v1 格式 / 熔断）→ 静默返回，不触发任何全量扫描
       // （回退策略同 ensureSummaryScan 头注释）
     } finally {
-      // ★ 属主保护收尾（语义同 runRecordScan 的 finally）：
+      // 属主保护收尾（语义同 runRecordScan 的 finally）：
       //   activeSummaryScanToken === token（游标所有权在本扫描）→ 关闭摘要
       //   游标并清理状态引用；已被后继 scan_summary_open 顶替或被
       //   clearSummaryCache 清理 → 不关不清（防误杀后继游标，资源由
@@ -859,7 +859,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   private mergeSummaryBatch(records: SummaryRecord[], token: ScanToken): void {
     for (const r of records) {
       if (!this.isSummaryScanTokenValid(token) || this.isPathChanged(this.summaryScanVerthysPath)) {
-        // ★ 评审 #3：属主保护失效（非属主 no-op，防误杀后继扫描）
+        // 评审 #3：属主保护失效（非属主 no-op，防误杀后继扫描）
         this.invalidateSummaryScanIfCurrent(token);
         return;
       }
@@ -888,7 +888,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 全量摘要扫描需 2-3s。使用场景：findGlobalKeyRecord 仅需找到
    * TYPE_GLOBAL_KEY 的 LID，无需等待列表渲染就绪。
    *
-   * ★ 游标资源竞争根治：底层 worker 每类游标仅支持单个
+   * 游标资源竞争根治：底层 worker 每类游标仅支持单个
    *   ScanState，本方法与 ensureSummaryScan 经 summaryScanMutex 互斥，
    *   且在打开游标前先等待进行中的全量摘要扫描完成并复查缓存，
    *   杜绝同时打开多个摘要游标。
@@ -1002,7 +1002,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 使摘要缓存中的单条记录失效（删除记录后调用）。
    * 删除后该 ID 不会出现在 getSummaryIdsByType 的结果中，杜绝"删除复活"。
    *
-   * ★ ID 复用缺陷修复：同 invalidateScannedRecord（删除最大 ID 时重算）。
+   * ID 复用缺陷修复：同 invalidateScannedRecord（删除最大 ID 时重算）。
    */
   invalidateSummaryRecord(id: number): void {
     const rec = this.summaryCache.get(id);
@@ -1044,7 +1044,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 与 getRecordFromScan 的区别：不受 64KB 管控限制，永远返回完整 dataB64；
    * LRU-50 容量；解密失败的记录不缓存；同 ID 并发请求复用同一 IPC Promise。
    *
-   * ★ 锁粒度优化：仅在"写入缓存前"获取 deletionMutex 做
+   * 锁粒度优化：仅在"写入缓存前"获取 deletionMutex 做
    *   检查-写入原子段，避免长时间持锁阻塞删除标记操作。
    */
   async getFullRecord(id: number): Promise<ScannedRecord | null> {
@@ -1064,7 +1064,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       try {
         const r = await this.verthysApi.getRecord(id);
         if (!r) return null;
-        // ★ 写入前获取 deletionMutex 原子检查，避免将已删除记录写入缓存
+        // 写入前获取 deletionMutex 原子检查，避免将已删除记录写入缓存
         const release = await this.deletionMutex.acquire();
         try {
           if (this.pendingDeletionIds.has(id)) return null;
@@ -1144,7 +1144,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
 
     // 2. 同步更新摘要缓存（physicalOffset/merkleLeaf 为占位值，
     //    下次 ensureSummaryScan 会从后端读取真实值覆盖）
-    // ★ 评审 #2 落实：dataSize 回退估算改用 estimateBase64Size
+    // 评审 #2 落实：dataSize 回退估算改用 estimateBase64Size
     //   （cache/shared/base64-size.ts 单一权威源，处理填充字符，
     //   与 batch-cache-coordinator / cache-coordinator 保持一致）
     const summary: SummaryRecord = {
@@ -1175,7 +1175,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   /**
    * 标记记录进入待删除状态：加入共享过滤集合并立即移除可能已缓存的全量
    * 记录（防止 getFullRecord 的在途加载在标记完成后写入已删记录）。
-   * ★ 注意：主删除路径由 VerthysFlushService.deleteAndPersist 直接入集合；
+   * 注意：主删除路径由 VerthysFlushService.deleteAndPersist 直接入集合；
    * 本方法供独立使用领域 API 的调用方/测试使用。
    */
   async markForDeletion(id: number): Promise<void> {
@@ -1254,7 +1254,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     // 先 await 后台任务完全终止（注入钩子），再清空缓存，
     // 杜绝「旧后台任务访问已释放缓存」的竞态
     await this.stopBackgroundTasksHook();
-    // ★ 评审 #1 落实：首先清零明文密钥（Uint8Array 安全零填充），
+    // 评审 #1 落实：首先清零明文密钥（Uint8Array 安全零填充），
     //   lockAll 统一清空入口的安全闭环（明文密钥不残留内存）
     this.clearModuleKeyCache();
     this.clearSummaryCache();

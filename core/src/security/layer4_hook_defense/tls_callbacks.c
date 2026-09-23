@@ -54,7 +54,7 @@ static VOID WINAPI tls_callback(PVOID DllHandle, DWORD Reason, PVOID Reserved)
  *   MSVC（_MSC_VER）：手动定义 _tls_index / _tls_used / .CRT$XLB 节
  *   MinGW（else）：CRT（libgcc/libcrt）已自带 _tls_used / _tls_index，
  *                 仅将回调注册到 .CRT$XLB 节，_tls_used 自动引用该节
- *   ★ MinGW 下严禁定义 _tls_index / _tls_used，否则与 CRT 多重定义链接错误
+ *   MinGW 下严禁定义 _tls_index / _tls_used，否则与 CRT 多重定义链接错误
  * ========================================================================== */
 #ifdef _MSC_VER
 ULONG _tls_index = 0;
@@ -132,7 +132,7 @@ IMAGE_TLS_DIRECTORY _tls_used = {
  *   防止 -ffunction-sections / --gc-sections 优化丢弃该符号，
  *   确保链接器保留 .CRT$XLB 节。
  *
- * ★ 不定义 _tls_index / _tls_used：复用 MinGW CRT 自带的，避免多重定义。
+ * 不定义 _tls_index / _tls_used：复用 MinGW CRT 自带的，避免多重定义。
  */
 __attribute__((section(".CRT$XLB"), used))
 PIMAGE_TLS_CALLBACK p_tls_callback = tls_callback;

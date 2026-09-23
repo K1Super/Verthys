@@ -113,8 +113,10 @@ VerthysLsm *verthys_lsm_create(void);
 /*
  * 关闭：close（后台线程汇合 + flush + Manifest 保存 + 内存全释放）
  * + 安全清零 + free。幂等（NULL 直接返回）。
+ * 返回 close 的结果码：非 VERTHYS_OK 即"非干净关闭"（WAL 未复位，
+ * 下次 open 重放重建），调用方据此记录诊断；数据安全由 WAL 兜底。
  */
-void verthys_lsm_destroy(VerthysLsm *lsm);
+VerthysResult verthys_lsm_destroy(VerthysLsm *lsm);
 
 /*
  * v3_lifecycle 失败路径：中止式关闭——不 flush、不存 Manifest、
@@ -155,6 +157,11 @@ VerthysResult verthys_lsm_open(VerthysLsm *lsm, FILE *f, VerthysPartition *part,
 /*
  * 关闭：停止后台线程 → MemTable flush → Manifest 保存 → WAL 复位 →
  * 释放全部内存态（含 SSTable 惰性缓存）。幂等（NULL 直接返回）。
+ *
+ * dirty 语义（契约）：flush 或 Manifest 保存失败时返回对应错误码，
+ * 内存态仍全部释放，但本次关闭必须视为"非干净关闭"——WAL 未复位，
+ * 全部条目仍在 WAL 帧中；下次 open 重放重建（幂等）。调用方不得
+ * 把错误返回当作干净关闭忽略（数据由 WAL 兜底，但语义必须显式）。
  */
 VerthysResult verthys_lsm_close(VerthysLsm *lsm);
 
@@ -273,7 +280,7 @@ VerthysResult verthys_lsm_rebuild_excluding(VerthysLsm *lsm,
                                         const uint64_t *exclude_txids,
                                         size_t exclude_count);
 
-/* ---------- 温启动缓存接口（★ 全量预热） ---------- */
+/* ---------- 温启动缓存接口（全量预热） ---------- */
 
 /*
  * 温缓存表记录段编码（export_warm 产出 / open_warm 消费；warmcache_v3
@@ -293,7 +300,7 @@ VerthysResult verthys_lsm_rebuild_excluding(VerthysLsm *lsm,
  *                     [u32le frame_len][u32le entry_count]
  *      bloom_bytes × bloom 位图]
  *
- * ★ 权威性设计（红线级）：段内不含 Manifest 载荷——温启动的 Manifest
+ * 权威性设计（红线级）：段内不含 Manifest 载荷——温启动的 Manifest
  * 始终从盘面帧加载（单帧读 + 解密 ≈ 亚毫秒，且为唯一权威），缓存仅
  * 承载重建昂贵的惰性缓存内容（Footer 字段 + Bloom 位图 + 块索引）。
  * 由此缓存过期（导出后发生过 flush/compaction）不构成任何覆写/误读

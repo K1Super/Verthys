@@ -9,11 +9,11 @@
  *   本模块是 L0 密码学层的通用 CNG AEAD 封装（单上下文、可多实例、
  *   内部 nonce 单调计数器），keymanager_cng 在其上构建 V3 密钥组生命周期。
  *   GCM 内核母本（open_aes_gcm_provider / init_gcm_auth_info / AEAD 流程）
- *   迁移自 key_separation.c，语义保持一致。
+ *   与 key_separation.c 的实现语义一致。
  *
  * 算法参数：AES-256-GCM（CNG 原生）
  *   - 密钥：32 字节
- *   - Nonce：12 字节（NIST SP 800-38D），封装层内部 96 位单调计数器生成
+ *   - Nonce：12 字节，封装层内部 96 位单调计数器生成
  *   - 认证标签：16 字节
  *   - 密文布局：[ciphertext || tag]
  *
@@ -24,6 +24,13 @@
  *     （解锁 S3 阶段），恢复值须取 max(盘面值, WAL 重放值)
  *     + 安全裕量
  *   - 解密侧 nonce 由调用方传入（与加密时一致）
+ *
+ * nonce 字节布局（公共契约，全仓一致）：
+ *   12 字节 nonce = counter 的 96 位大端编码；counter 为 uint64，
+ *   高 4 字节恒零——即 nonce[0..3] == 0x00，counter 位于 nonce[4..11]
+ *   （大端）。任何修改本布局的提交必须同步修正各 nonce 提取点。
+ *   提取（持久化帧里的 nonce → 计数器）统一经
+ *   verthys_cng_nonce_decode_counter，禁止各调用点自行解码。
  *
  * 域分离：V3 域分离标签（"verthys/...-v3"）由上层 HKDF/包装路径承担，
  *   本层 AAD 由调用方显式传入。
@@ -80,7 +87,7 @@ void verthys_cng_global_deinit(void);
 
 /*
  * 初始化 AEAD 上下文（未导入任何密钥的干净状态）。
- * ★ 契约：
+ * 契约：
  *   1. 栈上分配的 VerthysCngAead 必须先经本函数（或整体置零）初始化，方可
  *      调用 import_key——未初始化内存中的垃圾句柄值会被误判为 "已导入"
  *      而触发 BCryptDestroyKey 野句柄调用（0xC0000005）。
@@ -91,9 +98,9 @@ VerthysResult verthys_cng_aead_init(VerthysCngAead *aead);
 
 /*
  * 导入密钥到 CNG 内核态。
- * ★ 红线：本函数是唯一允许密钥明文出现在用户态栈帧的
+ * 红线：本函数是唯一允许密钥明文出现在用户态栈帧的
  *   函数——短暂、立即清零；调用后密钥字节只存在于内核地址空间。
- *   ★ 清零契约（const 消耗语义，同 key_separation_install）：key 非 NULL
+ *   清零契约（const 消耗语义，同 key_separation_install）：key 非 NULL
  *   的所有返回路径（成功、内核导入失败、提供者不可用、上下文非法）
  *   均清零调用方缓冲——调用方无法区分成败，零化责任全部在本函数。
  * key_id：16 字节非敏感标识符（诊断/轮换追踪），可为 NULL（置零）。
@@ -152,6 +159,14 @@ uint64_t verthys_cng_aead_nonce_counter(const VerthysCngAead *aead);
  */
 VerthysResult verthys_cng_aead_restore_nonce_counter(VerthysCngAead *aead,
                                                  uint64_t counter);
+
+/*
+ * nonce → 计数器解码（encode_nonce 对偶）：nonce[4..11] 大端
+ * 读出 counter（前 4 字节契约恒零，不参与）。供 WAL/事务恢复等
+ * 需从持久化帧 nonce 反推计数下界处使用。
+ */
+uint64_t verthys_cng_nonce_decode_counter(
+    const uint8_t nonce[VERTHYS_CNG_NONCE_BYTES]);
 
 /* 查询导入状态（1=已导入内核，0=未导入） */
 int verthys_cng_aead_is_imported(const VerthysCngAead *aead);

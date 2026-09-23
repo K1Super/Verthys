@@ -897,3 +897,44 @@ TEST(v3ext_null_params_rejected)
     v3e_cleanup();
     return 0;
 }
+
+/* ---------- 写侧口径守卫：明文 + tag 超 u32 拒绝 ---------- */
+
+/*
+ * 条目 size/plaintext_size 为 u32：明文 + tag 之和超 u32 时若只挡
+ * 明文上界，pt_len == UINT32_MAX 会使密文长溢出截断（尺寸字段与
+ * 实际密文不符 → 索引不可恢复）。守卫在分配与落盘之前拒绝，
+ * 且不产生任何条目。
+ */
+TEST(v3ext_put_size_guard_rejects)
+{
+    VerthysCngAead wrap;
+    VerthysPartition part;
+    uint8_t wk[V3E_KEY_BYTES];
+    FILE *f;
+    VerthysExtentIndex idx;
+    uint8_t pt[1] = { 0x5A };
+    uint8_t hash[VERTHYS_EXTENT_HASH_BYTES];
+    int stored = -1;
+
+    CHECK(v3e_setup(&wrap, wk, &part) == 0);
+    f = fopen(V3E_TMP, "wb+");
+    CHECK(f != NULL);
+    CHECK(verthys_extent_index_init(&idx, 5) == VERTHYS_OK);
+
+    /* 上限与截断临界两侧代表值：一律拒绝，无条目、无游标推进 */
+    CHECK(verthys_extent_put(f, &part, &idx, 5, pt, UINT32_MAX,
+                           hash, &stored) == VERTHYS_ERR_INVALID);
+    CHECK(verthys_extent_put(f, &part, &idx, 5, pt,
+                           (size_t)UINT32_MAX - VERTHYS_EXTENT_TAG_BYTES + 1u,
+                           hash, &stored) == VERTHYS_ERR_INVALID);
+    CHECK(idx.count == 0);
+    CHECK(idx.next_offset == 0);
+    CHECK(part.used == 0);
+    CHECK(stored == -1);   /* 拒绝路径不得触碰出参 */
+
+    fclose(f);
+    v3e_teardown(&part, &wrap, wk);
+    v3e_cleanup();
+    return 0;
+}

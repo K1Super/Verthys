@@ -241,13 +241,13 @@ export function useQuantumField(options: QuantumFieldOptions) {
   /** 上一帧墙钟（首帧守卫 — 首帧 wStep=0 不推进时间轴，避免跳变） */
   let lastWallClock = -1;
 
-  /* ---------- ★ G-7 统一帧门控（useFrameGate） ----------
+  /* ---------- G-7 统一帧门控（useFrameGate） ----------
    * 帧率档位由全局空闲状态机唯一决定（active 60 / settling 30 /
    * idle 5 / deep-idle 1 fps）；dt 由门控按累积时间供给（跳帧不推进
    * 基准 → 物理时间连续），本引擎不再维护私有空闲判定与全局交互监听。 */
   const { level: idleLevel } = useGlobalIdleScheduler();
 
-  /* ---------- ★ 监听器统一 AbortController 管理 ----------
+  /* ---------- 监听器统一 AbortController 管理 ----------
    * init() 时创建，全部 addEventListener（面板级 + 全局交互 + 子元素 hover）
    * 经 signal 注册；destroy() 一次 abort() 移除全部，无逐项 removeEventListener
    * 的遗漏风险，子元素监听器不再依赖 GC 回收。 */
@@ -270,11 +270,11 @@ export function useQuantumField(options: QuantumFieldOptions) {
   const parallaxY = makeSpring(34, 0.82);
   // 力场强度（进入 1 / 离开 0，过阻尼无过冲）
   const fieldPower = makeSpring(24, 1.15);
-  // ★ hover 让位仲裁弹簧：P1（节点/核心 hover）期间视差幅度衰减至 50% —
+  // hover 让位仲裁弹簧：P1（节点/核心 hover）期间视差幅度衰减至 50% —
   // 原实现对视差输出乘 0.5/1.0 硬步进，pointerenter 瞬间近层位移
   // 一次跳变最多 11px（"内容突然跳位放大"突兀感主因）→ 弹簧连续过渡
   const hoverSuppress = makeSpring(26, 1.1, 1);
-  // 中心核心 hover（★ 轻过阻尼缓胀：原 k=60 快弹在 ~140ms 内完成
+  // 中心核心 hover（轻过阻尼缓胀：原 k=60 快弹在 ~140ms 内完成
   // 4.5% 缩放，读感为"突然放大"；降刚度后 ~0.4s 平滑膨胀应答）
   const coreHover = makeSpring(24, 1.1);
   // 核心就绪度（色相/能量过渡）
@@ -428,7 +428,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
         width: 1 + arcRand() * 1.6,
       });
     }
-    // 节点 hover 弹簧（与节点等量；★ 降刚度缓胀 — 原 k=70 快弹
+    // 节点 hover 弹簧（与节点等量；降刚度缓胀 — 原 k=70 快弹
     // 120ms 内完成 10% 缩放，与核心同款"突然放大"突兀感）
     options.nodePositions.forEach(() => {
       nodeSprings.push(makeSpring(30, 1.05));
@@ -444,7 +444,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
 
   let resizeObserver: ResizeObserver | null = null;
 
-  /* ★ 性能根治：缓存面板 rect（applySize/ResizeObserver 时刷新）—
+  /* 性能根治：缓存面板 rect（applySize/ResizeObserver 时刷新）—
    * onPointerMove 高频触发，每次 getBoundingClientRect 强制布局读取
    * 会打断渲染流水线（量子面板鼠标卡顿源之一） */
   let panelRect = { left: 0, top: 0, width: 1, height: 1 };
@@ -482,7 +482,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
 
   function onPointerMove(e: PointerEvent): void {
     if (!panelEl) return;
-    /* ★ 用 applySize 缓存的 rect（ResizeObserver 时刷新）— 去高频强制布局读取 */
+    /* 用 applySize 缓存的 rect（ResizeObserver 时刷新）— 去高频强制布局读取 */
     pointerX = e.clientX - panelRect.left;
     pointerY = e.clientY - panelRect.top;
     pointerInside = true;
@@ -500,7 +500,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
   }
 
   /** 绑定节点 hover（P1 优先级：抑制视差 + 弹簧缩放 + 连线增益）
-   * ★ 经 AbortController signal 注册，destroy 时统一移除 */
+   * 经 AbortController signal 注册，destroy 时统一移除 */
   function bindNodeHover(el: HTMLElement, idx: number): void {
     const signal = listenerAbort?.signal;
     el.addEventListener('pointerenter', () => {
@@ -587,7 +587,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
     const introRunning = it < 2.4;
 
     /* ---- 交互优先级仲裁：hover（P1）期间视差幅度衰减至 50%（P2 让位） ----
-       ★ 让位系数由 hoverSuppress 弹簧连续过渡 — 原对输出乘 0.5/1.0
+       让位系数由 hoverSuppress 弹簧连续过渡 — 原对输出乘 0.5/1.0
        硬步进，pointerenter 瞬间产生最多 ~11px 的层位移跳变（突兀主因）；
        入场期间视差幅度随 introPar 渐起（挂载瞬间无大幅位移跳变） */
     hoverSuppress.target = hoverCount.n > 0 ? 0.5 : 1;
@@ -830,7 +830,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
    * 生命周期（启动/暂停/销毁，资源全释放无泄漏）
    * ============================================================ */
 
-  /* ★ G-7：rAF 调度/空闲门控/失焦暂停全部由 useFrameGate 承担，
+  /* G-7：rAF 调度/空闲门控/失焦暂停全部由 useFrameGate 承担，
      start/stop 仅为门控代理（档位与恢复时机全局一致）。 */
   const { start: startGate, stop: stopGate } = useFrameGate(idleLevel, frame);
 
@@ -849,7 +849,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
     stop();
     resizeObserver?.disconnect();
     resizeObserver = null;
-    /* ★ 一次 abort 移除全部监听器（面板级 + 全局交互 + 子元素 hover），
+    /* 一次 abort 移除全部监听器（面板级 + 全局交互 + 子元素 hover），
        替代逐项 removeEventListener，子元素监听器不再依赖 GC 回收 */
     listenerAbort?.abort();
     listenerAbort = null;
@@ -882,14 +882,14 @@ export function useQuantumField(options: QuantumFieldOptions) {
     buildPools();
     applySize();
 
-    /* ★ 本生命周期全部监听器经 AbortController signal 注册，
+    /* 本生命周期全部监听器经 AbortController signal 注册，
        destroy() 一次 abort() 统一移除（重复 init 时重建 controller） */
     listenerAbort?.abort();
     listenerAbort = new AbortController();
     const sig = listenerAbort.signal;
 
     // 事件绑定（passive 提升滚动/指针性能）
-    // ★ G-7：visibilitychange 暂停与全局交互恢复满帧已由全局空闲调度器
+    // G-7：visibilitychange 暂停与全局交互恢复满帧已由全局空闲调度器
     //    （useGlobalIdleScheduler）统一处理，此处仅保留面板级指针事件。
     panelEl.addEventListener('pointermove', onPointerMove, { passive: true, signal: sig });
     panelEl.addEventListener('pointerleave', onPointerLeave, { passive: true, signal: sig });
@@ -905,7 +905,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
     // 就绪状态弹簧同步
     coreReadySpring.target = options.coreReady.value ? 1 : 0;
 
-    /* ★ 入场编排按满帧渲染 — 面板挂载即交互（resetIdle），
+    /* 入场编排按满帧渲染 — 面板挂载即交互（resetIdle），
        确保错峰入场编排全程 60fps 不降档。 */
     const { resetIdle } = useGlobalIdleScheduler();
     resetIdle();

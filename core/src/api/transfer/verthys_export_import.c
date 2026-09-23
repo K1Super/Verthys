@@ -8,9 +8,9 @@
  *   - Verthys_ChangePassword()：修改主密码
  *
  *
- * ★ 三个 API 的 V3 实现：
+ * 三个 API 的 V3 实现：
  *   - Export      ：LSM 快照迭代器两遍式收集（精确容量）+ Extent 内核态
- *                   按需解密流式写入（内存峰值与记录数解耦，迁移自 v2 流式实现）；
+ *                   按需解密流式写入（内存峰值与记录数解耦）；
  *   - Import      ：单事务批量（BEGIN → 逐条 WRITE_EXTENT + UPDATE_INDEX →
  *                   PREPARE/COMMIT/CONFIRM 收口，磁盘写入量 O(1) 重写）；
  *   - ChangePassword：VsbTxnV3 超级块事务保护 + CNG 密钥组重包裹（A/B/C
@@ -39,6 +39,108 @@
 #else
 #include <unistd.h>
 #endif
+
+#ifdef _WIN32
+/*
+ * 导出/导入目标路径纵深防御（C 层，Windows）。
+ *
+ * 背景：worker 端（Rust）已在 CString 层拒绝内嵌 NUL 的路径，但 C 层仍需
+ * 独立校验，杜绝导出/导入被诱导写入或读取系统关键目录 / 符号链接 / 目录穿越
+ * 路径。返回 0=允许，-1=拒绝（调用方映射为 VERTHYS_ERR_INVALID）。
+ */
+
+/* 判断单一路径段是否等于 "." 或 ".."（目录穿越段） */
+static int is_dot_segment(const char *seg, size_t len)
+{
+    if (len == 1 && seg[0] == '.') return 1;
+    if (len == 2 && seg[0] == '.' && seg[1] == '.') return 1;
+    return 0;
+}
+
+/* 检查路径任意位置是否含 '.'/'..' 目录段（'\\' 与 '/' 均视为分隔符） */
+static int path_has_dot_segment(const char *path)
+{
+    const char *p = path;
+    while (*p != '\0') {
+        const char *seg_start = p;
+        while (*p != '\0' && *p != '\\' && *p != '/') p++;
+        if (is_dot_segment(seg_start, (size_t)(p - seg_start))) return 1;
+        if (*p != '\0') p++;  /* 跳过分隔符 */
+    }
+    return 0;
+}
+
+/* 判断规范化路径是否位于给定目录前缀内。分隔符边界：前缀后紧跟的字符
+ * 必须是 '\\'、'/' 或字符串结尾，避免 "C:\\WindowsFoo" 误命中 "C:\\Windows"。 */
+static int path_under_dir(const char *dir, const char *path)
+{
+    size_t dlen = strlen(dir);
+    if (dlen == 0) return 0;
+    if (_strnicmp(path, dir, dlen) != 0) return 0;
+    char next = path[dlen];
+    return (next == '\0' || next == '\\' || next == '/');
+}
+
+/* 探测目标是否为重解析点（符号链接 / 挂载点）。返回 1=是，0=否或不可判定。 */
+static int path_is_reparse_point(const char *path)
+{
+    HANDLE h = CreateFileA(path, 0,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING,
+                           FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                           NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        /* 目标不存在或不可访问：非重解析点，由后续实际打开再裁决 */
+        return 0;
+    }
+    BY_HANDLE_FILE_INFORMATION info;
+    int is_reparse = 0;
+    if (GetFileInformationByHandle(h, &info)) {
+        if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+            is_reparse = 1;
+        }
+    }
+    CloseHandle(h);
+    return is_reparse;
+}
+
+static int verthys_validate_transfer_path(const char *path)
+{
+    char full[MAX_PATH];
+    char win_dir[MAX_PATH];
+    char sys_dir[MAX_PATH];
+    DWORD n;
+
+    if (path == NULL || path[0] == '\0') return -1;
+
+    /* 1. 原始路径目录穿越段复检（在规范化前拦截字面 '.'/'..'） */
+    if (path_has_dot_segment(path)) return -1;
+
+    /* 2. 规范化（折叠相对段与重复分隔符），失败即拒绝 */
+    n = GetFullPathNameA(path, MAX_PATH, full, NULL);
+    if (n == 0 || n >= MAX_PATH) return -1;
+
+    /* 3. 规范化结果再复检目录穿越段（防御性，规范化后理论上不应残留） */
+    if (path_has_dot_segment(full)) return -1;
+
+    /* 4. 系统关键目录前缀黑名单（拿不到黑名单目录即拒绝，宁严勿宽） */
+    if (GetWindowsDirectoryA(win_dir, MAX_PATH) == 0) return -1;
+    if (GetSystemDirectoryA(sys_dir, MAX_PATH) == 0) return -1;
+    if (path_under_dir(win_dir, full)) return -1;
+    if (path_under_dir(sys_dir, full)) return -1;
+
+    /* 5. 重解析点（符号链接 / 挂载点）探测 */
+    if (path_is_reparse_point(full)) return -1;
+
+    return 0;
+}
+#else
+static int verthys_validate_transfer_path(const char *path)
+{
+    (void)path;
+    return 0;  /* 非 Windows：无系统目录 / 重解析点语义，不校验 */
+}
+#endif /* _WIN32 */
 
 /* 8. 导出（v1 交换格式，跨设备兼容） */
 /*
@@ -135,6 +237,11 @@ VerthysResult Verthys_Export(VerthysHandle handle,
 
     if (handle == NULL || export_path == NULL) return VERTHYS_ERR_INVALID;
     if (password == NULL && password_len != 0) return VERTHYS_ERR_INVALID;
+
+    /* 导出路径纵深防御校验（目录穿越 / 系统目录 / 符号链接） */
+    if (verthys_validate_transfer_path(export_path) != 0) {
+        return VERTHYS_ERR_INVALID;
+    }
 
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
@@ -303,7 +410,7 @@ VerthysResult Verthys_Export(VerthysHandle handle,
                     memcpy(fmt_recs[count].name, name_buf, e.name_len);
                 }
                 fmt_recs[count].data_size = e.data_size;
-                fmt_recs[count].data = NULL;   /* ★ 流式：回调按需解密 */
+                fmt_recs[count].data = NULL;   /* 流式：回调按需解密 */
 
                 memcpy(snap[count].hash, e.hash, VERTHYS_EXTENT_HASH_BYTES);
                 snap[count].plaintext_size = e.plaintext_size;
@@ -334,7 +441,7 @@ VerthysResult Verthys_Export(VerthysHandle handle,
     sc.entries = snap;
     sc.count = count;
 
-    /* ★ 流式写入：全程不预载明文，按需 Extent 解密单条记录 */
+    /* 流式写入：全程不预载明文，按需 Extent 解密单条记录 */
     rc = vfmt_write_streaming(salt, v->sb.argon2_mem_kib, v->sb.argon2_iters,
                               v->sb.argon2_parallel, mek, dek,
                               fmt_recs, count,
@@ -436,6 +543,11 @@ VerthysResult Verthys_Import(VerthysHandle handle,
 
     if (handle == NULL || import_path == NULL) return VERTHYS_ERR_INVALID;
     if (password == NULL && password_len != 0) return VERTHYS_ERR_INVALID;
+
+    /* 导入路径纵深防御校验（目录穿越 / 系统目录 / 符号链接） */
+    if (verthys_validate_transfer_path(import_path) != 0) {
+        return VERTHYS_ERR_INVALID;
+    }
 
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
@@ -540,6 +652,10 @@ VerthysResult Verthys_ChangePassword(VerthysHandle handle,
     if (handle == NULL) return VERTHYS_ERR_INVALID;
     if (old_pw == NULL && old_len != 0) return VERTHYS_ERR_INVALID;
     if (new_pw == NULL && new_len != 0) return VERTHYS_ERR_INVALID;
+    /* 空口令策略（禁止）：旧口令按解锁入口同拒；新口令若为空会造出
+     * 空口令容器——解锁入口已拒空口令，改密到空口令即永久锁死，
+     * 此处显式拒绝防自锁。 */
+    if (old_len == 0 || new_len == 0) return VERTHYS_ERR_INVALID;
 
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;

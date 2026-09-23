@@ -11,7 +11,8 @@
  *   6. 副本损坏注入矩阵（0/1/2/3 副本损坏）：
  *      单副本字节翻转自动切换 / 双副本损坏降级（QUORUM_FAILED）/
  *      三副本损坏（CORRUPT，WAL 恢复兜底语义）
- *   7. txid 多数派语义：≥2 一致优先于孤立最高 txid
+ *   7. 多数派语义：一致 = txid 相等 + 内容逐字节相同，≥2 一致优先于
+ *      孤立最高 txid；同 txid 异内容组判不一致（QUORUM_FAILED）
  *   8. 写故障注入（fail_mask）：单副本写失败法定人数维持、双失败提交拒绝
  *   9. VsbTxnV3 事务原语：begin/commit/rollback 终态互斥
  */
@@ -661,6 +662,69 @@ TEST(v3sb_quorum_txid_majority_wins)
 
     flatcc_builder_aligned_free(p7);
     flatcc_builder_aligned_free(p42);
+    verthys_secure_zero(key, sizeof(key));
+    v3c_cleanup();
+    return 0;
+}
+
+TEST(v3sb_quorum_same_txid_divergent_content)
+{
+    /* 同 txid 异内容副本：一致判定须 txid + 完整内容双条件（纵深防御——
+     * 各副本 HMAC 仅证明副本自洽，不证明副本间一致；撕裂写入/非法重放
+     * 可产生同 txid 异内容组，仅按 txid 放行会静默选错副本） */
+    VerthysSuperBlockV3 base, out;
+    uint8_t key[VERTHYS_KEY_BYTES];
+    uint8_t *pa = NULL, *pb = NULL, *pc = NULL;
+    size_t la = 0, lb = 0, lc = 0;
+    FILE *f;
+
+    v3c_cleanup();
+    v3c_new_key(key);
+    CHECK(vsb_v3_init_new(&base) == VERTHYS_OK);
+    v3c_fill(&base);
+    base.txid = 7;
+    CHECK(vsb_v3_serialize(&base, key, &pa, &la) == VERTHYS_OK);   /* 内容 A */
+
+    base.updated_at += 1;
+    CHECK(vsb_v3_serialize(&base, key, &pb, &lb) == VERTHYS_OK);   /* 内容 B（同 txid） */
+    base.container_id[0] ^= 0x01;
+    CHECK(vsb_v3_serialize(&base, key, &pc, &lc) == VERTHYS_OK);   /* 内容 C（同 txid） */
+    /* 还原 A 语义（供场景 1 等值断言） */
+    base.updated_at -= 1;
+    base.container_id[0] ^= 0x01;
+
+    /* 场景 1：A/A/B → 多数派取 A（异内容孤立副本不影响法定人数） */
+    f = fopen(V3C_TMP, "wb+");
+    CHECK(f != NULL);
+    CHECK(vsb_v3_write_replica(f, 0, pa, la) == VERTHYS_OK);
+    CHECK(vsb_v3_write_replica(f, 1, pa, la) == VERTHYS_OK);
+    CHECK(vsb_v3_write_replica(f, 2, pb, lb) == VERTHYS_OK);
+    CHECK(vsb_v3_read_quorum(f, key, &out, NULL) == VERTHYS_OK);
+    CHECK(out.txid == 7);
+    CHECK(vsb_v3_equals(&base, &out) == 1);
+    fclose(f);
+
+    /* 场景 2：A/B/C 同 txid 两两异内容 → 无 ≥2 一致 → QUORUM_FAILED */
+    f = fopen(V3C_TMP, "wb+");
+    CHECK(f != NULL);
+    CHECK(vsb_v3_write_replica(f, 0, pa, la) == VERTHYS_OK);
+    CHECK(vsb_v3_write_replica(f, 1, pb, lb) == VERTHYS_OK);
+    CHECK(vsb_v3_write_replica(f, 2, pc, lc) == VERTHYS_OK);
+    CHECK(vsb_v3_read_quorum(f, key, &out, NULL) == VERTHYS_ERR_QUORUM_FAILED);
+    fclose(f);
+
+    /* 场景 3：A 与 B（同 txid 异内容）+ 空槽 → txid 相同但内容不一致
+     *    不构成法定人数 → QUORUM_FAILED（修复前按 txid 放行返回 OK） */
+    f = fopen(V3C_TMP, "wb+");
+    CHECK(f != NULL);
+    CHECK(vsb_v3_write_replica(f, 0, pa, la) == VERTHYS_OK);
+    CHECK(vsb_v3_write_replica(f, 1, pb, lb) == VERTHYS_OK);
+    CHECK(vsb_v3_read_quorum(f, key, &out, NULL) == VERTHYS_ERR_QUORUM_FAILED);
+    fclose(f);
+
+    flatcc_builder_aligned_free(pa);
+    flatcc_builder_aligned_free(pb);
+    flatcc_builder_aligned_free(pc);
     verthys_secure_zero(key, sizeof(key));
     v3c_cleanup();
     return 0;

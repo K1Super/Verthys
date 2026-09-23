@@ -144,9 +144,13 @@ VerthysResult verthys_partition_decrypt(VerthysPartition *p, uint64_t txid,
 
 /*
  * 分区扩展（按需增长，2x 策略）：
- * 新容量 = max(size × 2, size + min_bytes)；返回 VERTHYS_OK。
+ * 新容量 = min(max(size × 2, size + min_bytes), region_limit - offset)；
+ * region_limit 为该分区区域终点的绝对偏移（extent 分区即其后 audit
+ * 分区起点）。最小需求（size + min_bytes）放不下 → VERTHYS_ERR_RESOURCE_LIMIT
+ * 且内存态不变；2x 目标超出上限则截断于上限。
  */
-VerthysResult verthys_partition_grow(VerthysPartition *p, uint64_t min_bytes);
+VerthysResult verthys_partition_grow(VerthysPartition *p, uint64_t min_bytes,
+                                 uint64_t region_limit);
 
 /* 分区当前 nonce 计数器（持久化口径） */
 uint64_t verthys_partition_nonce_counter(const VerthysPartition *p);

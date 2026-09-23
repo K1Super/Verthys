@@ -4,14 +4,20 @@
     1. 输入访问密钥（v-model 双向绑定）
     2. 选择 .bin 密钥文件（emit browseBin）
     3. 输入密钥口令（v-model 双向绑定）
-    4. 脉冲星磁层辐射加载动画（初始化中，无进度文字）
+    4. 量子能量导流进度（初始化阶段描述 + 平滑视觉进度，与验证视图同款）
     5. 提交初始化（emit init）
 
-  ★ 悬浮场重构：光谱底轨输入（去盒化）+ 标注式标签 + 深空定位入射
-  ★ 尺寸稳定模式（ff-field--stable）：表单态↔加载态切换高度零抖动
+  悬浮场重构：光谱底轨输入（去盒化）+ 标注式标签 + 深空定位入射
+  尺寸稳定模式（ff-field--stable）：表单态↔加载态切换高度零抖动
+
+  呈现层契约：本组件无状态、无判断、无计时。
+    - 进度数值绑定感知层输出的视觉值（visualPercent，0-100 平滑值），
+      不直接绑定后端离散跳变的真实进度
+    - 失败冻结期间接收 dimmed 样式标识，仅做样式降级
+    - 提示词仍为后端 emit 的阶段描述（单一数据源）
 
   Models: initPassword / binPassword — 访问密钥 / 密钥口令
-  Props: binFileName / processing
+  Props: binFileName / processing / unlockProgressMsg / visualPercent / dimmed
   Emits: init / back / browseBin
 -->
 <template>
@@ -59,9 +65,14 @@
         />
       </div>
 
-      <!-- 量子核心加载动画（初始化中，无文字） -->
+      <!-- 量子能量导流通道（视觉值来自感知层：平滑、软上限、收束补满；与验证视图同款复用） -->
       <div class="ff-node ff-node--body">
-        <QuantumCoreLoader :loading="processing" />
+        <QuantumProgressFlow
+          :loading="processing"
+          :percent="visualPercent"
+          :message="unlockProgressMsg"
+          :dimmed="dimmed"
+        />
       </div>
 
       <div v-if="!processing" class="ff-node ff-node--action">
@@ -85,7 +96,7 @@ import CosmicBackdrop from "../common/cosmic/CosmicBackdrop.vue";
 import LevitationField from "../common/cosmic/LevitationField.vue";
 import CosmicSubmit from "../common/cosmic/CosmicSubmit.vue";
 import PasswordInput from "../common/form/PasswordInput.vue";
-import QuantumCoreLoader from "../common/cosmic/QuantumCoreLoader.vue";
+import QuantumProgressFlow from "../common/cosmic/QuantumProgressFlow.vue";
 import BrandMark from "../common/BrandMark.vue";
 
 /**
@@ -96,6 +107,12 @@ defineProps<{
   binFileName: string;
   /** 初始化处理中标志（禁用表单 + 显示加载动画） */
   processing: boolean;
+  /** 后端初始化阶段提示词（单一数据源，与验证视图同构） */
+  unlockProgressMsg: string;
+  /** 感知层输出的视觉进度（0-100，平滑值，非后端离散跳变值） */
+  visualPercent: number;
+  /** 失败冻结降级标识（进度条降级呈现，错误提示取得视觉重心） */
+  dimmed: boolean;
 }>();
 
 /**

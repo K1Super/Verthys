@@ -1,7 +1,7 @@
 /**
  * composables/photo-album/importProgress.ts — 导入进度状态机
  *
- * ★ Comprehensive_optimization：异步批处理流水线 — 进度与 ETA
+ * Comprehensive_optimization：异步批处理流水线 — 进度与 ETA
  *
  * =============================================================================
  * 设计目标

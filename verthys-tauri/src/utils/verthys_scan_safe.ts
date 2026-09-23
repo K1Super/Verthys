@@ -16,7 +16,7 @@
  *      扫描结果通过 addRecordToScan 写入缓存，后续 getRecordIdsByType /
  *      getRecordFromScan 可正常工作
  *
- * ★ 新增 ensureSummaryScanSafe()
+ * 新增 ensureSummaryScanSafe()
  *   包装 ensureSummaryScan()，失败时回退到 ensureRecordScanSafe()
  *   （旧全量扫描兜底）。用于 Vue 组件的列表渲染路径，1-2 秒内完成。
  *
@@ -69,7 +69,7 @@ export async function ensureRecordScanSafe(): Promise<void> {
 }
 
 /**
- * ★ 安全的摘要扫描包装（永不抛出，Vue 组件列表渲染专用）。
+ * 安全的摘要扫描包装（永不抛出，Vue 组件列表渲染专用）。
  *
  * 目标：前端拿到轻量元数据后即刻渲染出完整列表。
  *

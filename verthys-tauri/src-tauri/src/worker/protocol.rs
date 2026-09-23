@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use serde::Deserialize;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::sync::{mpsc, oneshot};
 
 /// 默认 IPC 超时（15 秒）。超时后返回错误，避免前端 30s 挂起。
@@ -35,6 +36,93 @@ pub const STDERR_RING_SIZE: usize = 32;
 
 /// stderr 诊断片段最大长度（截断过长内容，注意 UTF-8 字符边界）。
 pub const STDERR_DIAG_MAX_LEN: usize = 2048;
+
+/// IPC 管道单行字节上限（16MB）
+///
+/// worker 响应（含记录 base64）与进度行远小于此值。
+/// 超限即协议异常（对端被攻破或协议失步），读取方必须断开并报错。
+/// 读取全程经 bounded_read_line，行缓冲增长被约束在上限之内。
+pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// 带限行读取错误
+#[derive(Debug)]
+pub enum BoundedLineError {
+    /// 底层 I/O 错误
+    Io(std::io::Error),
+    /// 单行超过字节上限：该行剩余内容已被丢弃至行尾
+    TooLong { limit: usize },
+}
+
+impl std::fmt::Display for BoundedLineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BoundedLineError::Io(e) => write!(f, "read pipe: {}", e),
+            BoundedLineError::TooLong { limit } => {
+                write!(f, "pipe line exceeds {} bytes", limit)
+            }
+        }
+    }
+}
+
+impl std::error::Error for BoundedLineError {}
+
+/// 带限行读取：单行字节数超过 max 时进入丢弃模式，
+/// 吞掉该行剩余字节后返回 Err(TooLong)，行缓冲增长被约束在 max 以内。
+///
+/// 返回 Ok(Some(n)) 表示读入一行（已去掉行尾 \n/\r\n），n 为行字节数；
+/// Ok(None) 表示 EOF 且本轮无新字节。
+pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut String,
+    max: usize,
+) -> Result<Option<usize>, BoundedLineError> {
+    buf.clear();
+    let mut buffered = 0usize; /* 本行已拷贝字节数 */
+    let mut overflowed = false;
+    loop {
+        let available = reader.fill_buf().await.map_err(BoundedLineError::Io)?;
+        if available.is_empty() {
+            return Ok(if buffered == 0 && !overflowed {
+                None
+            } else {
+                Some(buffered)
+            });
+        }
+        let newline = available.iter().position(|&b| b == b'\n');
+        // 本次消费字节数：到换行（含）或无换行时整块
+        let take = match newline {
+            Some(pos) => pos + 1,
+            None => available.len(),
+        };
+        if !overflowed {
+            let room = max.saturating_sub(buffered);
+            let copy = take.min(room);
+            if copy > 0 {
+                buf.push_str(&String::from_utf8_lossy(&available[..copy]));
+                buffered += copy;
+            }
+            if take > room {
+                overflowed = true;
+            }
+        }
+        reader.consume(take);
+        if newline.is_some() {
+            if overflowed {
+                return Err(BoundedLineError::TooLong { limit: max });
+            }
+            // 去掉行尾换行（\n 或 \r\n）
+            if buf.ends_with('\n') {
+                buf.pop();
+                if buf.ends_with('\r') {
+                    buf.pop();
+                }
+            }
+            // 返回剥离换行后的行字节数（buf 已含精确内容）
+            return Ok(Some(buf.len()));
+        }
+        // 无换行且已超限：继续丢弃本行剩余字节
+    }
+}
 
 /* ------------------------------------------------------------------ *
  * 解锁进度数据结构（与 worker runtime.rs 中 unlock_progress_cb
@@ -220,5 +308,82 @@ mod tests {
 
         // 接收端已 drop，is_closed 应为 true
         assert!(request_tx.is_closed());
+    }
+
+    /* ---- bounded_read_line 带限读取测试（小上限 16 验证契约） ---- */
+
+    fn cursor_reader(data: Vec<u8>) -> tokio::io::BufReader<std::io::Cursor<Vec<u8>>> {
+        tokio::io::BufReader::new(std::io::Cursor::new(data))
+    }
+
+    #[tokio::test]
+    async fn bounded_read_short_lines_and_crlf() {
+        let mut r = cursor_reader(b"ping\nunlock\r\nok".to_vec());
+        let mut buf = String::new();
+        assert_eq!(bounded_read_line(&mut r, &mut buf, 64).await.unwrap(), Some(4));
+        assert_eq!(buf, "ping");
+        assert_eq!(bounded_read_line(&mut r, &mut buf, 64).await.unwrap(), Some(6));
+        assert_eq!(buf, "unlock"); // CRLF 剥离
+        // EOF 前无换行残余按最后一行返回，随后 EOF
+        assert_eq!(bounded_read_line(&mut r, &mut buf, 64).await.unwrap(), Some(2));
+        assert_eq!(buf, "ok");
+        assert_eq!(bounded_read_line(&mut r, &mut buf, 64).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn bounded_read_too_long_discards_rest_of_line() {
+        let mut data = vec![b'A'; 40];
+        data.extend_from_slice(b"\nnext\n");
+        let mut r = cursor_reader(data);
+        let mut buf = String::new();
+        match bounded_read_line(&mut r, &mut buf, 16).await {
+            Err(BoundedLineError::TooLong { limit }) => assert_eq!(limit, 16),
+            other => panic!("应为 TooLong，实为: {:?}", other.map(|x| x.is_some())),
+        }
+        // 超长行已被完整丢弃：下一行必须读到 next
+        assert_eq!(bounded_read_line(&mut r, &mut buf, 16).await.unwrap(), Some(4));
+        assert_eq!(buf, "next");
+    }
+
+    #[tokio::test]
+    async fn bounded_read_stream_window_memory_stable() {
+        // 64 字节 duplex 窗口：读端 fill_buf 每次最多拿到窗口大小，
+        // 超长流被分块丢弃，行缓冲增长被约束在 max 以内
+        let (mut tx, mut rx) = tokio::io::duplex(64);
+        let writer = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let chunk = vec![b'B'; 8192];
+            for _ in 0..4 {
+                tx.write_all(&chunk).await.unwrap();
+            }
+            tx.write_all(b"\nend\n").await.unwrap();
+        });
+        let mut reader = tokio::io::BufReader::new(&mut rx);
+        let mut buf = String::new();
+        match bounded_read_line(&mut reader, &mut buf, 16).await {
+            Err(BoundedLineError::TooLong { .. }) => {}
+            _ => panic!("长流应触发 TooLong，实为其它结果"),
+        }
+        // 行缓冲增长被约束：丢弃模式下 buf 从未超过上限
+        assert!(buf.len() <= 16);
+        bounded_read_line(&mut reader, &mut buf, 16).await.unwrap();
+        assert_eq!(buf, "end");
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_read_exact_limit_boundary() {
+        // max=16：15 字节内容 + \n = 16 字节 → 恰好为行
+        let mut r = cursor_reader(b"0123456789abcde\n".to_vec());
+        let mut buf = String::new();
+        assert_eq!(bounded_read_line(&mut r, &mut buf, 16).await.unwrap(), Some(15));
+        assert_eq!(buf, "0123456789abcde");
+        // 16 字节内容 + \n = 17 字节 → TooLong
+        let mut r2 = cursor_reader(b"0123456789abcdef\n".to_vec());
+        let mut buf2 = String::new();
+        match bounded_read_line(&mut r2, &mut buf2, 16).await {
+            Err(BoundedLineError::TooLong { .. }) => {}
+            _ => panic!("超限一字节应为 TooLong"),
+        }
     }
 }

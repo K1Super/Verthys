@@ -87,16 +87,21 @@ typedef struct {
 static MemoryRegion s_regions[MG_MAX_REGIONS];
 static int s_initialized = 0;
 
-/* 注册表并发保护（register/unregister/purge 可能来自不同线程） */
+/* 注册表并发保护（register/unregister/purge 可能来自不同线程）。
+ * 以一次性初始化原语保证临界区恰初始化一次（杜绝双重检查竞态）。 */
 static CRITICAL_SECTION s_regions_cs;
-static int s_regions_cs_init = 0;
+static INIT_ONCE s_regions_cs_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK regions_cs_init_cb(PINIT_ONCE once, PVOID param, PVOID *ctx)
+{
+    (void)once; (void)param; (void)ctx;
+    InitializeCriticalSection(&s_regions_cs);
+    return TRUE;
+}
 
 static void regions_cs_ensure(void)
 {
-    if (!s_regions_cs_init) {
-        InitializeCriticalSection(&s_regions_cs);
-        s_regions_cs_init = 1;
-    }
+    InitOnceExecuteOnce(&s_regions_cs_once, regions_cs_init_cb, NULL, NULL);
 }
 
 /* ---------- 父进程识别（排除同信任链句柄） ---------- */
@@ -298,7 +303,7 @@ void memory_guard_secure_zero(void *ptr, size_t len)
     if (ptr == NULL || len == 0) return;
 
     /*
-     * ★ 单轮覆写（0x00）。
+     * 单轮覆写（0x00）。
      * 原实现的三轮覆写（0x00→0xFF→0x00）是磁盘擦除的民俗移植——
      * 对易失性内存单轮覆盖已足够，多轮只增加成本无安全增益。
      * volatile 限定指针确保编译器不优化掉写入。
@@ -537,8 +542,13 @@ static VOID CALLBACK patrol_callback(PVOID param, BOOLEAN fired)
     /* 单次扫描（句柄表 + 可疑进程名），命中 → DEGRADE 级上报 */
     (void)memory_guard_check_remote_read();
 
-    /* 重排下一次 60s 一次性定时器 */
+    /* 重排下一次 60s 一次性定时器。旧定时器已 fire（系统终结其关联），
+     * 此处仅回收陈旧的手柄值并置空，防止残存值被误用或泄漏。 */
     if (!s_patrol_stopped && s_patrol_queue != NULL) {
+        if (s_patrol_timer != NULL) {
+            DeleteTimerQueueTimer(s_patrol_queue, s_patrol_timer, NULL);
+            s_patrol_timer = NULL;
+        }
         CreateTimerQueueTimer(&s_patrol_timer, s_patrol_queue, patrol_callback,
                               NULL, 60000, 0,
                               WT_EXECUTEONLYONCE | WT_EXECUTEINTIMERTHREAD);

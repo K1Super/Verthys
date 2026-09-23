@@ -1,7 +1,7 @@
 <!--
   PhotoAlbum.vue — 拾光模块入口文件
 
-  ★ 入口文件单一职责（不可突破红线）：
+  入口文件单一职责（不可突破红线）：
     1. 身份定性：仅作为应用容器装配器、依赖加载调度器、生命周期总管家、安全前置校验闸门。
     2. 不可突破红线：所有业务逻辑、数据处理、接口实现、页面交互必须全部下沉至
        composables/photo-album/ 分层目录，入口零业务侵入。
@@ -67,7 +67,7 @@
       </div>
     </div>
 
-    <!-- ★ 顶部导入进度条复用 QuantumProgressFlow（量子能量导流通道，全局统一进度条组件）
+    <!-- 顶部导入进度条复用 QuantumProgressFlow（量子能量导流通道，全局统一进度条组件）
          EWMA 滑动窗口加权 ETA + requestAnimationFrame 帧对齐 + 速率骤降检测 -->
     <QuantumProgressFlow
       :loading="importing"
@@ -110,7 +110,7 @@
       <!-- 非阻塞加载：无底板居中展示，加载完成自动消失 -->
       <CosmicLoading :show="photosLoading && photos.length === 0" text="正在解密加载照片…" />
 
-      <!-- ★ 虚拟滚动容器（相册列表强制采用虚拟滚动）：
+      <!-- 虚拟滚动容器（相册列表强制采用虚拟滚动）：
            绝对定位网格，仅渲染可视区域 + buffer 行对应的项目。
            上万照片也只渲染数十 DOM 节点，消除 Vue 响应式 diff 与全量布局开销。
            容器高度 = 总行数 × 行高，撑开滚动条；每个 masonry-item 用 translate3d 精确定位。 -->
@@ -301,7 +301,7 @@
     </div>
 
     <!-- 解析对话框（复用子密钥验证窗口 CosmicOverlay + kv-* 样式） -->
-    <!-- ★ 单一 v-if/v-else-if 链：互斥状态机，避免多链导致元素同时显示
+    <!-- 单一 v-if/v-else-if 链：互斥状态机，避免多链导致元素同时显示
          状态：fileLoading → parsing → importingParsed → parsedResults → 初始态 -->
     <CosmicOverlay :show="showParseDialog" width="420px" @close="closeParseDialog">
       <div class="kv-title">解析加密文件</div>
@@ -375,7 +375,7 @@
 
 <script setup lang="ts">
 /**
- * ★ 入口文件单一职责实现
+ * 入口文件单一职责实现
  *
  * 仅做四件事：
  *   1. 装配 composable（applyDependencies）
@@ -394,7 +394,7 @@ import CosmicLoading from "../common/cosmic/CosmicLoading.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 // 大型弹窗组件级懒加载（遵循项目硬约束：大型弹窗使用 defineAsyncComponent）
 const CosmicOverlay = defineAsyncComponent(() => import("../common/cosmic/CosmicOverlay.vue"));
-// ★ 量子能量导流通道进度条（全局统一进度条组件，替代已删除的 QuantumProgressBar）
+// 量子能量导流通道进度条（全局统一进度条组件，替代已删除的 QuantumProgressBar）
 const QuantumProgressFlow = defineAsyncComponent(() => import("../common/cosmic/QuantumProgressFlow.vue"));
 
 /* ===== 分层 composable 装配（依赖加载调度器） ===== */
@@ -439,10 +439,10 @@ const {
 /* ---------- 4. 导入层 ---------- */
 const {
   importing, importProgress, importStatus,
-  /* ★ Comprehensive_optimization：新增耗时与 ETA（供 QuantumProgressFlow 使用） */
+  /* Comprehensive_optimization：新增耗时与 ETA（供 QuantumProgressFlow 使用） */
   importElapsed, importEta,
   onImport,
-  /* ★ Parsed Import：导出 getPipeline 供 usePhotoParse 复用同一流水线实例 */
+  /* Parsed Import：导出 getPipeline 供 usePhotoParse 复用同一流水线实例 */
   getPipeline,
 } = usePhotoImport({
   photos, photoKey, isTauri, ensurePhotoKey, showError,
@@ -463,15 +463,15 @@ const {
 /* ---------- 6. 解析层 ---------- */
 const {
   showParseDialog, parseFileName, parseFileData, parseToken, parsing, parsedPhotos,
-  // ★ 企业级感知：进度条状态（复用中枢初始化窗口进度条样式，非量子动画）
+  // 感知：进度条状态（复用中枢初始化窗口进度条样式，非量子动画）
   fileLoading, fileLoadingPercent, fileLoadingMsg,
   parsingPercent, parsingMsg,
-  /* ★ Parsed Import：对话框内导入进度条状态（复用 QuantumProgressFlow 组件） */
+  /* Parsed Import：对话框内导入进度条状态（复用 QuantumProgressFlow 组件） */
   importingParsed,
   openParseDialog, closeParseDialog, chooseParseFile, doParse, importParsedPhotos,
 } = usePhotoParse({
   photos, photoKey, isTauri, ensurePhotoKey, showError, showToast,
-  /* ★ Parsed Import：复用 usePhotoImport 的流水线实例 + 导入状态 refs
+  /* Parsed Import：复用 usePhotoImport 的流水线实例 + 导入状态 refs
      （对话框内复用 QuantumProgressFlow，导入进度实时反馈，UI 不卡死） */
   getPipeline, importing, importProgress, importStatus, importElapsed, importEta,
 });
@@ -504,13 +504,13 @@ const initLifecycle = () => {
   window.addEventListener("blur", onBlur);
   window.addEventListener("focus", onFocus);
 
-  // ★ 虚拟滚动布局初始化收敛至数据层（initVirtualScroll 内部完成 updateLayout + ResizeObserver 注册）
+  // 虚拟滚动布局初始化收敛至数据层（initVirtualScroll 内部完成 updateLayout + ResizeObserver 注册）
   initVirtualScroll();
 
   // 首批照片入场动画播完后禁用，避免虚拟滚动时新进入可视区项重播动画导致闪烁
   setTimeout(() => { animationDone.value = true; }, 1500);
 
-  // ★ 安全前置校验闸门：模块密钥已由 MainView 登录时缓存到 keyManager 会话，直接读取
+  // 安全前置校验闸门：模块密钥已由 MainView 登录时缓存到 keyManager 会话，直接读取
   if (isTauri) {
     if (isModuleReady("photo") && ensurePhotoKey()) {
       loadPhotos();
@@ -540,10 +540,10 @@ const cleanupLifecycle = () => {
   onScroll.cancel();
   cancelInteraction();
 
-  // ★ 销毁虚拟滚动（释放 ResizeObserver）
+  // 销毁虚拟滚动（释放 ResizeObserver）
   destroyVirtualScroll();
 
-  // ★ 释放查看器 Blob URL
+  // 释放查看器 Blob URL
   cleanupViewer();
 
   // 关闭隐私模式（fire-and-forget，不阻塞卸载）
@@ -554,7 +554,7 @@ const cleanupLifecycle = () => {
     if (ph.blobUrl) URL.revokeObjectURL(ph.blobUrl);
   }
 
-  // ★ 项12：清空照片数组释放引用 + 主动触发 V8 Major GC
+  // 项12：清空照片数组释放引用 + 主动触发 V8 Major GC
   // 数万照片记录在 Vue 响应式系统中持有大量依赖关系，仅清空数组才能让
   // GC 回收整条记录对象图（PhotoEntry + meta + rawBytes + thumb）。
   photos.value = [];
@@ -603,7 +603,7 @@ useModuleDialogGuard("photos", () => {
 .del-top-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; color: var(--text-muted); transition: all 0.2s; }
 .del-top-btn svg { width: 14px; height: 14px; }
 .del-top-btn:hover { color: var(--danger); border-color: rgba(255,71,87,0.3); background: rgba(255,71,87,0.06); }
-.del-top-btn.active { color: var(--danger); border-color: rgba(255,71,87,0.4); background: rgba(255,71,87,0.1); box-shadow: 0 0 8px rgba(255,71,87,0.2); }
+.del-top-btn.active { color: var(--danger); border-color: rgba(255,71,87,0.4); background: rgba(255,71,87,0.1); }
 .plus { font-weight: 300; }
 
 /* 导入进度 */
@@ -625,7 +625,7 @@ useModuleDialogGuard("photos", () => {
 .select-cancel-btn:hover { color: var(--text-primary); }
 .select-delete-btn { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--danger); border-color: rgba(255,71,87,0.3); background: rgba(255,71,87,0.06); }
 .select-delete-btn svg { width: 13px; height: 13px; }
-.select-delete-btn:hover:not(:disabled) { background: rgba(255,71,87,0.12); border-color: rgba(255,71,87,0.5); box-shadow: 0 0 8px rgba(255,71,87,0.2); }
+.select-delete-btn:hover:not(:disabled) { background: rgba(255,71,87,0.12); border-color: rgba(255,71,87,0.5); }
 .select-delete-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* Masonry 瀑布流 — 滚动容器与列布局分离 */
@@ -639,7 +639,7 @@ useModuleDialogGuard("photos", () => {
 .masonry-scroll:hover::-webkit-scrollbar-thumb { background: rgba(var(--accent-rgb), 0.25); border-radius: 4px; }
 .masonry-scroll:hover::-webkit-scrollbar-thumb:hover { background: rgba(var(--accent-rgb), 0.45); }
 /* CSS Grid 行优先布局：照片按行从左至右排列，加载顺序自然正确 */
-/* ★ 虚拟滚动：绝对定位网格容器（不再使用 CSS grid，由 JS 精确计算每项 translate3d 定位）
+/* 虚拟滚动：绝对定位网格容器（不再使用 CSS grid，由 JS 精确计算每项 translate3d 定位）
       列数/行高由 JS computeColumns + itemWidth 计算，响应式断点与原媒体查询一致 */
 .masonry-cols { position: relative; width: 100%; }
 .masonry-item { position: absolute; top: 0; left: 0; cursor: pointer; }

@@ -32,7 +32,7 @@ import { withTimeout } from "../utils/promise_utils";
 import { masterFrameLoop } from "../core/master-frame-loop";
 
 /* ------------------------------------------------------------------ *
- * ★ 安全守卫修复：等待布尔 Ref 变为 false（带超时兜底）
+ * 安全守卫修复：等待布尔 Ref 变为 false（带超时兜底）
  *
  * 用于 switchModule 防御性守卫——解锁关键路径若仍在加载模块密钥状态
  * （moduleKeyStatusLoading=true），切换业务模块前必须等待其完成，
@@ -59,7 +59,7 @@ function waitForFlagFalse(flag: Ref<boolean>, timeoutMs: number): Promise<void> 
   });
 }
 
-/* ★ 安全守卫根治：等待布尔 Ref 变为 true（带超时兜底）
+/* 安全守卫根治：等待布尔 Ref 变为 true（带超时兜底）
  *
  * 用于 switchModule 防御性守卫——模块密钥状态未加载完（moduleKeyStatusLoaded=false）
  * 时，切换业务模块前必须等待 loadModuleKeyStatus 完成（loaded=true），
@@ -141,7 +141,7 @@ export function useModuleNavigation() {
   const onPanelActive = (val: boolean) => { dockCollapsed.value = val; };
   watch(currentModule, (m) => {
     if (m !== "security") { dockCollapsed.value = false; dockHovered.value = false; }
-    // ★ 项12：模块切换后延迟 500ms 触发 V8 Major GC
+    // 项12：模块切换后延迟 500ms 触发 V8 Major GC
     // 旧模块组件已通过 onUnmounted 释放 blobUrl/大对象引用，
     // 延迟 500ms 确保新模块首屏渲染完成后再触发 GC，
     // 避免在切换动画的关键帧中产生 Stop-The-World 暂停造成卡顿。
@@ -149,7 +149,7 @@ export function useModuleNavigation() {
   });
 
   /* 鼠标在导航栏区域时展开 Dock，离开区域时收缩（统一控制，避免 mouseleave 冲突）
-   * ★ 性能根治：workspace 铺满视口 → 直接用视口坐标判定（去 getBoundingClientRect
+   * 性能根治：workspace 铺满视口 → 直接用视口坐标判定（去 getBoundingClientRect
    * 强制布局读取）；值未变化不写响应式 ref（省一次 Vue patch 调度） */
   const onDockEdgeHover = (e: MouseEvent) => {
     if (!dockCollapsed.value) return;
@@ -163,10 +163,10 @@ export function useModuleNavigation() {
   const pendingModule = ref("");
   const moduleKeyInput = ref("");
   const moduleKeyVerifying = ref(false);
-  /* ★ 验证进度条（1.5s 感知时长，复用 QuantumProgressFlow 通道样式，非量子动画） */
+  /* 验证进度条（1.5s 感知时长，复用 QuantumProgressFlow 通道样式，非量子动画） */
   const moduleKeyVerifyPercent = ref(0);
   const moduleKeyVerifyMsg = ref("");
-  /* ★ 企业级感知：验证错误状态标记（触发密码框抖动 + 红色边框，错误密码绝不放行） */
+  /* 感知：验证错误状态标记（触发密码框抖动 + 红色边框，错误密码绝不放行） */
   const moduleKeyVerifyError = ref(false);
   /* 用户重新输入时清除错误状态（红色边框 + 抖动复位） */
   watch(moduleKeyInput, (v) => {
@@ -189,7 +189,7 @@ export function useModuleNavigation() {
   });
 
   /**
-   * ★ 路由前置守卫（完全非阻塞）
+   * 路由前置守卫（完全非阻塞）
    *
    * 导航切换零等待：scheduleBackgroundFlush + ensureRecordScan 全部后台执行，
    * currentModule.value 立即写入，模块从内存缓存即时渲染。
@@ -239,7 +239,7 @@ export function useModuleNavigation() {
       showVerthysNotReadyHint.value = true;
       return;
     }
-    // ★ 安全守卫根治：模块密钥状态未加载完前，不允许进入业务模块
+    // 安全守卫根治：模块密钥状态未加载完前，不允许进入业务模块
     //
     // 原缺陷：用 moduleKeyStatusLoading 等待，但 global-verthys 超时后重置 loading=false，
     // 守卫误判"加载完成"→ 读 isModuleKeyEnabled=false → 放行，绕过密钥验证。
@@ -258,7 +258,7 @@ export function useModuleNavigation() {
         showVerthysNotReadyHint.value = true;
         return;
       }
-      // ★ 安全兜底：超时仍未加载完 → 绝不放行，弹密钥验证框
+      // 安全兜底：超时仍未加载完 → 绝不放行，弹密钥验证框
       if (!moduleKeyStatusLoadedRef.value) {
         pendingModule.value = id;
         moduleKeyInput.value = "";
@@ -285,9 +285,9 @@ export function useModuleNavigation() {
   };
 
   /* ===== 模块密钥登录对话框确认/取消 ===== */
-  /* ★ 1.5s 感知时长：主循环帧节拍推进进度条至 90%，实际验证完成后跳 100%，
+  /* 1.5s 感知时长：主循环帧节拍推进进度条至 90%，实际验证完成后跳 100%，
    *   保证用户感知
-   * ★ 企业级安全修复（刚性约束）：
+   * 安全修复（刚性约束）：
    *   - verifyModuleKey 返回 VerthysResult<void> 判别联合对象，必须用 result.ok 判断
    *     旧代码 `const ok = await ...; if (!ok)` 判断对象引用（永远 truthy），
    *     导致错误密码永远放行 —— 已彻底修复
@@ -312,7 +312,7 @@ export function useModuleNavigation() {
       if (ratio >= 1) stopVerifyTicker();
     }, { type: "throttled", label: "module-key-verify-ticker" });
 
-    /* ★ 企业级感知：无论成功/失败，都保证 1.5s 最小感知时长
+    /* 感知：无论成功/失败，都保证 1.5s 最小感知时长
      * 错误密码也不能立即返回，必须让用户感知到完整验证过程 */
     const ensureMinDuration = async () => {
       const remaining = VERIFY_DURATION - (performance.now() - t0);
@@ -320,7 +320,7 @@ export function useModuleNavigation() {
       stopVerifyTicker();
     };
 
-    /* ★ 企业级感知：验证失败统一处理
+    /* 感知：验证失败统一处理
      * 跑完感知动画 → 标记错误状态 → 顶部红条 → 清空密码 → 保持弹窗开启
      * 绝不消失弹窗，让用户重试 */
     const handleVerifyError = async (msg: string) => {
@@ -339,7 +339,7 @@ export function useModuleNavigation() {
         await handleVerifyError("密钥错误，请重试");
         return;
       }
-      /* ★ 核心安全修复：verifyModuleKey 返回 VerthysResult<void>
+      /* 核心安全修复：verifyModuleKey 返回 VerthysResult<void>
        * 必须用 result.ok 判断成功/失败，旧代码 `if (!ok)` 判断对象引用永远为 false */
       const result = await verifyModuleKey(moduleId, moduleKeyInput.value);
       if (!result.ok) {

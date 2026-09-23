@@ -102,6 +102,13 @@ typedef struct _MY_THREAD_BASIC_INFORMATION {
  *   注：Alertable 状态实际驻留内核 ETHREAD，TEB 中 SameTebFlags 的跳过
  *   初始化标志是用户态可观测的最强 APC/远程线程注入信号。
  * Win32ThreadInfo：指向 W32THREAD 结构，含消息钩子链表头。
+ *
+ * 版本基线说明：以下硬编码偏移以 Windows 10/11 英文零售版的
+ * x64/x86 TEB 布局为快照基线（x64: SameTebFlags@0x17EE、
+ * Win32ThreadInfo@0x078；x86: @0x0FCA / @0x040）。TEB 偏移属
+ * 非官方 ABI，随系统版本演进可能失效。失效降级语义（代码内嵌）：
+ * safe_read_memory 读取失败或布局漂移时该信号静默跳过、不报威胁，
+ * 注入检测交由外部线程计数基线与其他动态防护兜底。
  */
 #if defined(_WIN64)
 #define TEB_SAME_TEB_FLAGS_OFFSET   0x17EEu
@@ -126,8 +133,10 @@ static int s_initialized = 0;
 static wchar_t s_trusted_paths[MAX_TRUSTED_PATHS][MAX_PATH];
 static int s_trusted_path_count = 0;
 
-/* 初始化时记录的基线线程数，用于 APC 注入的线程数异常比较 */
-static int s_baseline_thread_count = 0;
+/* 初始化时记录的"外部线程"基线数（起始地址不在本库自身模块内的线程），
+ * 用于 APC 注入的线程数异常比较。自身模块内线程（preheat / 进度消费等合法
+ * 内部线程）不计入，避免解锁期合法线程增长被误判为注入。 */
+static int s_baseline_external_thread_count = 0;
 
 /* ===================================================================== *
  *                              辅助函数                                  *
@@ -159,6 +168,42 @@ static int address_in_any_module(const void *addr)
         &hMod);
     if (!ok || hMod == NULL) return 0;
     return 1;
+}
+
+/*
+ * 获取本库自身模块（包含本代码的模块）句柄：测试进程为 verthys_tests.exe，
+ * 生产 worker 为 verthys.dll。以 anti_inject_init 地址定位自身模块。
+ */
+static HMODULE get_own_module(void)
+{
+    HMODULE mod = NULL;
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCWSTR)&anti_inject_init, &mod)) {
+        return NULL;
+    }
+    return mod;
+}
+
+/*
+ * 判断线程起始地址是否位于本库自身模块内。
+ * 自身模块内起始的线程（preheat / 进度消费等合法内部线程）不计入可疑增长
+ * 计数；返回 1=在自身模块内，0=不在（含无法定位模块的地址）。
+ */
+int anti_inject_thread_in_own_module(const void *start_addr)
+{
+    HMODULE own = get_own_module();
+    if (own == NULL || start_addr == NULL) return 0;
+
+    HMODULE m = NULL;
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCWSTR)start_addr, &m)) {
+        return 0;
+    }
+    return (m == own) ? 1 : 0;
 }
 
 /*
@@ -355,11 +400,18 @@ static int verify_module_signature(const wchar_t *file_path)
 }
 
 /*
- * 统计当前进程的线程数量。
- * 返回线程数（包含主线程），失败返回 -1。
+ * 统计当前进程的"外部"线程数：起始地址不在本库自身模块（verthys.dll /
+ * 测试 exe）内的线程。自身模块内起始的线程为合法内部线程（preheat / 进度
+ * 消费等），不计入可疑增长。失败返回 -1。
+ *
+ * 与原实现（仅按总数计数）的差异：需逐个查询线程 Win32 起始地址并做模块
+ * 归属判定。原总数计数无法区分内部线程，解锁期合法线程增长会被误判为注入。
  */
-static int count_process_threads(DWORD pid, DWORD *out_main_tid)
+static int count_external_threads(DWORD pid)
 {
+    NtQueryInformationThread_t pNtQuery = get_ntquery_thread();
+    if (pNtQuery == NULL) return -1;
+
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (snapshot == INVALID_HANDLE_VALUE) return -1;
 
@@ -369,11 +421,21 @@ static int count_process_threads(DWORD pid, DWORD *out_main_tid)
 
     if (Thread32First(snapshot, &te)) {
         do {
-            if (te.th32OwnerProcessID == pid) {
+            if (te.th32OwnerProcessID != pid) continue;
+
+            HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION,
+                                        FALSE, te.th32ThreadID);
+            if (hThread == NULL) continue;
+
+            PVOID start_addr = NULL;
+            ULONG ret_len = 0;
+            LONG status = pNtQuery(hThread, MY_THREAD_STARTADDR_INFO_CLASS,
+                                   &start_addr, sizeof(start_addr), &ret_len);
+            CloseHandle(hThread);
+            if (status != MY_STATUS_SUCCESS) continue;
+
+            if (!anti_inject_thread_in_own_module(start_addr)) {
                 count++;
-                if (out_main_tid != NULL && te.th32ThreadID == GetCurrentThreadId()) {
-                    *out_main_tid = te.th32ThreadID;
-                }
             }
         } while (Thread32Next(snapshot, &te));
     }
@@ -517,11 +579,12 @@ int anti_inject_check_apc(void)
 
     CloseHandle(snapshot);
 
-    /* 辅助信号：线程数相比基线显著增加（>2倍） → 疑似注入 */
-    if (s_baseline_thread_count > 0) {
-        DWORD main_tid_dummy = 0;
-        int current = count_process_threads(pid, &main_tid_dummy);
-        if (current > 0 && current >= s_baseline_thread_count * 2) {
+    /* 辅助信号：外部线程数相比基线显著增加（>=2倍） → 疑似注入。
+     * 仅统计起始地址不在本库自身模块内的线程，内部合法线程
+     * （preheat / 进度消费）增长不计入，避免解锁期误报。 */
+    if (s_baseline_external_thread_count > 0) {
+        int current = count_external_threads(pid);
+        if (current > 0 && current >= s_baseline_external_thread_count * 2) {
             threat |= INJECT_THREAT_APC;
         }
     }
@@ -875,10 +938,11 @@ int anti_inject_init(void)
     /* 执行入口基因修复（即使重复调用也是幂等安全的） */
     anti_inject_harden_search_path();
 
-    /* 记录基线线程数（用于 APC 注入的线程数异常比较） */
-    DWORD main_tid = 0;
-    int tc = count_process_threads(GetCurrentProcessId(), &main_tid);
-    s_baseline_thread_count = (tc > 0) ? tc : 0;
+    /* 记录基线外部线程数（起始地址不在本库自身模块内的线程），
+     * 用于 APC 注入的线程数异常比较。自身模块内线程（preheat / 进度消费等）
+     * 不计入，避免解锁期合法内部线程增长超过 2× 被误判为注入。 */
+    int te = count_external_threads(GetCurrentProcessId());
+    s_baseline_external_thread_count = (te > 0) ? te : 0;
 
     s_initialized = 1;
     return 0;

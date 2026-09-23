@@ -10,7 +10,7 @@
  *      - stopSessionTick：停止计时器（供 onBeforeUnmount 调用）
  *      - resetSession：重置剩余时间（锁定后 / 预设切换后调用）
  *
- * ★ 设计说明：
+ * 设计说明：
  *   - 计时器仅用于 UI 显示倒计时，不触发实际锁定（实际超时由 keyManager 守护）
  *   - globalKeyReady 为 true 时倒计时；归零后重置为 getSessionTimeout()（循环显示）
  *   - globalKeyReady 为 false 时不倒计时（未验证，无需显示）
@@ -50,7 +50,7 @@ export function useSessionTimer(options: UseSessionTimerOptions) {
   const sessionRemaining = ref(getSessionTimeout());
   let sessionTick: number | null = null;
 
-  /* ===== ★ 空闲治理 R5：订阅全局空闲档位 =====
+  /* ===== 空闲治理 R5：订阅全局空闲档位 =====
    * idle / deep-idle 档暂停 UI 倒计时更新（每秒响应式写入归零）；
    * 恢复 active / settling 瞬间按暂停时长补偿并立即刷新，
    * 显示值与真实流逝时间严格一致。 */

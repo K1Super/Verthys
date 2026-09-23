@@ -2,11 +2,7 @@
 # 编译级加固：剥离符号、最高优化、栈保护、ASLR、DEP、控制流防护
 # 安全核心 DLL 的加固；Debug 可调试，Release 剥离所有符号/调试信息
 #
-# ★ 方案 §8.1（P2-C 治理）：新增 /sdl（编译期）与 /CETCOMPAT（链接期，
-#   x64，Intel CET 影子栈）。/CETCOMPAT 依赖 /guard:cf（基线已含）；
-#   仅对 x64 目标生效，避免 32 位链接报错。
-#
-# ★ 方案偏差留痕（依"偏差须磁盘证据"条款）：/guard:longjmp 未落地。
+# 偏差留痕（依"偏差须磁盘证据"条款）：/guard:longjmp 未落地。
 #   证据（2026-08-29 实测，MSVC 14.51.36231 + SDK 10.0.26100.0）：
 #     1. /guard:longjmp 强制包含 guardcfw.h，该头文件在 MSVC include 与
 #        Windows SDK 中均不存在 → 单文件编译 C1083 失败（exit=2）；
@@ -16,7 +12,7 @@
 #   故依"禁用不可用特性"条款移除该旗标，其余全部落地。
 
 # 安全基线（所有配置）：栈保护、控制流、UTF-8
-# ★ /wd4996 偏差留痕（依"偏差须磁盘证据"条款）：
+# /wd4996 偏差留痕（依"偏差须磁盘证据"条款）：
 #   /sdl 会将 MSVC 对 ISO C 标准函数（fopen 等，43 处，分布于事务/恢复/
 #   格式等关键 IO 路径）的厂商劝告注解 C4996 升级为错误。fopen 是
 #   ISO C 标准库函数，并非任何标准定义的废弃 API（Annex K 的 fopen_s
@@ -27,7 +23,7 @@ set(VERTHYS_SAFETY_FLAGS
     /GS            # 栈缓冲区溢出检测
     /guard:cf      # 控制流防护
     /guard:ehcont  # 异常连续性防护
-    /sdl           # ★ §8.1：SDL 安全附加检查（初始化引用检查等）
+    /sdl           # SDL 安全附加检查（初始化引用检查等）
     /wd4996        # 抑制 MSVC 对 ISO C 标准函数的厂商劝告升级（见上注）
     /utf-8         # 源码 UTF-8
     /Zc:inline     # COMDAT 折叠
@@ -41,7 +37,7 @@ set(VERTHYS_RELEASE_FLAGS
     /GL            # 全链接优化 LTCG
     /Gy            # 函数级链接
     /Gw            # 全局变量级链接
-    # ★ 阻塞 4 修复：移除全局 /arch:AVX2
+    # 阻塞 4 修复：移除全局 /arch:AVX2
     # 原因：全局 /arch:AVX2 会在非 AVX2 CPU 上触发 SIGILL 崩溃，用户体验不可接受。
     # 改为依赖 libsodium 内部的运行时 CPU 检测（libsodium 自动选择 AVX2/SSE4.2/通用路径）。
     # verthys_api.c 中 verthys_check_avx2_support() 仍保留用于检测并设置 g_has_avx2 全局标志，
@@ -56,7 +52,7 @@ set(VERTHYS_LINK_BASE
     /NXCOMPAT      # DEP
 )
 
-# ★ §8.1：x64 专属链接加固（CET 影子栈）
+# x64 专属链接加固（CET 影子栈）
 set(VERTHYS_LINK_X64
     /CETCOMPAT     # Intel CET 影子栈强制（要求 /guard:cf）
 )

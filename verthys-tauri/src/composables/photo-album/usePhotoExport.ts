@@ -63,7 +63,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   let tokenCopiedTimer: ReturnType<typeof setTimeout> | undefined;
 
   /* ===== 写入 .venc 文件到磁盘（Tauri 模式） ===== */
-  /** ★ 企业级根治：走 writeUserFile（Raw body + x-path 头），
+  /** 修复：走 writeUserFile（Raw body + x-path 头），
    *   与 write_user_file 命令的真实协议一致；JSON+dataB64 旧写法与命令签名不符必失败。
    *   导出路径由用户通过 save() 对话框显式选择，不应受沙箱白名单限制 */
   const writeVencFile = async (path: string, bytes: Uint8Array): Promise<void> => {
@@ -145,7 +145,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
         success = true;
       } catch { /* */ }
     }
-    // ★ 通过 usePhotoToast 统一显示复制成功提示（替代原 copiedToast.value = true）
+    // 通过 usePhotoToast 统一显示复制成功提示（替代原 copiedToast.value = true）
     showCopied();
     // tokenCopied 为按钮 UI 状态（图标切换为对勾），独立于提示
     tokenCopied.value = true;
@@ -175,12 +175,12 @@ export function usePhotoExport(params: UsePhotoExportParams) {
    * 从 verthys 读取单张照片的加密数据（兼容新旧两种格式）
    * - 新格式：chunk 数据内联在 meta 记录的 chunkDataB64 字段中（推荐，避免 ID 漂移）
    * - 旧格式：通过 chunkIds 单独查找 chunk 记录（向后兼容）
-   * ★ 企业级根治：meta 缺失时按需解密回填（重启后占位项 meta=undefined 的场景）
+   * 修复：meta 缺失时按需解密回填（重启后占位项 meta=undefined 的场景）
    */
   const getPhotoVerthysData = async (ph: PhotoEntry): Promise<{ metaB64: string; chunkB64List: string[] }> => {
     const metaB64 = ph.metaId ? (await verthysGetRecord(ph.metaId))?.dataB64 || "" : "";
     const chunkB64List: string[] = [];
-    // ★ 企业级根治：meta 缺失时按需解密（重启后 watch 解密未完成即导出的场景）
+    // 修复：meta 缺失时按需解密（重启后 watch 解密未完成即导出的场景）
     let meta = ph.meta;
     if (!meta && ph.metaId && metaB64) {
       try { meta = await decryptMeta(metaB64, photoKey.value); } catch { /* 解密失败 */ }
@@ -205,7 +205,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     const photoData: VencPhotoData[] = [];
     for (const ph of selected) {
       if (isTauri && ph.metaId) {
-        // ★ 企业级根治：基于 metaId 判断（非 meta），重启后占位项也能导出
+        // 修复：基于 metaId 判断（非 meta），重启后占位项也能导出
         // Tauri 模式：从 verthys 读取（兼容新旧格式 + 按需解密回退）
         const { metaB64, chunkB64List } = await getPhotoVerthysData(ph);
         if (metaB64) photoData.push({ metaB64, chunkB64List });
@@ -248,7 +248,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
       return ph.rawBytes;
     }
 
-    // ★ 企业级根治：meta 缺失时按需解密（重启后 watch 解密未完成即导出的场景）
+    // 修复：meta 缺失时按需解密（重启后 watch 解密未完成即导出的场景）
     let meta = ph.meta;
     if (!meta) {
       if (!ph.metaId) return null;
@@ -421,7 +421,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
         exportStatus.value = `已导出 ${selected.length} 张照片`;
       }
 
-      // ★ 通过 usePhotoToast 统一显示导出完成提示
+      // 通过 usePhotoToast 统一显示导出完成提示
       showExportDone("导出完成", "success");
       setTimeout(() => {
         exporting.value = false;
@@ -477,7 +477,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     }
 
     exportToken.value = token;
-    // ★ 通过 usePhotoToast 统一显示复制成功提示
+    // 通过 usePhotoToast 统一显示复制成功提示
     showCopied();
   };
 

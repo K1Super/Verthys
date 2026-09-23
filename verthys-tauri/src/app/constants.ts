@@ -10,7 +10,7 @@
  * 调整渡越总时长只改此一处，编排相对节奏（包络锚点比例）保持不变 */
 export const ENTER_T_MS = 5000;
 
-/** ★ 双缓冲预挂载点（毫秒，自渡越时钟 0 点）：
+/** 双缓冲预挂载点（毫秒，自渡越时钟 0 点）：
  * = 弹射交接（320ms）+ 逐字弹射动画（620ms）+ 余量（160ms）。
  * MainView 在此时刻挂载进 prewarm 冻结层（visibility:hidden +
  * 动画 paused + pointer-events:none）——组件树构建 / 首次布局 /
@@ -29,7 +29,7 @@ export const TRANSITION = {
   /** 星河从渡越进入流动状态 —
    *  = 包络 x=5/6（消散尾声，星河重组落位） */
   GALAXY_PHASE: Math.round((ENTER_T_MS * 5) / 6),
-  /** ★ MainView 自预挂载起 → 渡越包络归零（氛围苏醒锚点）的等待时长：
+  /** MainView 自预挂载起 → 渡越包络归零（氛围苏醒锚点）的等待时长：
    *  氛围引擎（163 元素满帧驱动）与模块分包预热以此避让渡越尾部 +
    *  materialize 全屏过渡的满帧窗口 —「星系落定后氛围苏醒」语义
    *  精确保持（预挂载提前量已内含：ENTER_T_MS - PREWARM_MOUNT） */

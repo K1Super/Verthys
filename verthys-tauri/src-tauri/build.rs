@@ -11,7 +11,7 @@ fn main() {
     // 计算 dist 目录中所有文件的 SHA-256，生成 resource_hashes.rs
     let dist_dir = PathBuf::from("../dist");
 
-    // ★ 企业级根治修复：release 模式下强制校验 dist/ 存在且包含 index.html
+    // 修复修复：release 模式下强制校验 dist/ 存在且包含 index.html
     //
     // 根因：用户用 `cargo build --release` 直接构建（跳过 `tauri build` 的
     // beforeBuildCommand），若 dist/ 缺失或为空，tauri::generate_context!()
@@ -102,7 +102,7 @@ fn main() {
     let dll_dest = PathBuf::from(&out_dir).join("dll_hash.rs");
     fs::write(&dll_dest, dll_hash_code).expect("写入 dll_hash.rs 失败");
 
-    // ===== 3. 打包素材门禁（企业级：阻断过期素材进入生产包） =====
+    // ===== 3. 打包素材门禁（：阻断过期素材进入生产包） =====
     //
     // 根治"生产包安全核心启动失败"根因：
     //   打包素材（src-tauri/verthys.dll、src-tauri/binaries/verthys-worker-*.exe）

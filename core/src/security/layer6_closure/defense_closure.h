@@ -59,7 +59,7 @@ typedef enum {
 /* 全局防御状态汇总 */
 typedef struct {
     DefenseState path_state[DEFENSE_PATH_COUNT];
-    int          all_critical_blocked;  /* 1=所有关键路径阻断，0=有 FAILED */
+    int          all_critical_blocked;  /* 1=全部 7 条路径 BLOCKED（无 FAILED 且无 DEGRADED），0=非全阻断 */
     int          has_degraded;         /* 1=存在 DEGRADED，0=无 */
     uint32_t     blocked_count;        /* BLOCKED 路径数 */
     uint32_t     degraded_count;       /* DEGRADED 路径数 */

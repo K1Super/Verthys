@@ -1,7 +1,7 @@
 /**
  * workers/photoWorkerPool.ts — 照片加密 Web Worker 池（piscina 等价实现）
  *
- * ★ Comprehensive_optimization：异步批处理流水线 — 传输器阶段（工作线程池）
+ * Comprehensive_optimization：异步批处理流水线 — 传输器阶段（工作线程池）
  *
  * =============================================================================
  * 设计目标
@@ -149,7 +149,7 @@ export class PhotoWorkerPool {
 
   /** 私有构造（单例） */
   private constructor(options: PhotoWorkerPoolOptions = {}) {
-    // ★ 池上限钳制：SSD + AES 混合负载 4 并发即饱和磁盘吞吐，
+    // 池上限钳制：SSD + AES 混合负载 4 并发即饱和磁盘吞吐，
     //   超额 Worker 只贡献常驻 isolate 内存（每 isolate 基线 10~15MB）
     this.poolSize = options.poolSize ?? Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
     this.maxPendingTasks = options.maxPendingTasks ?? this.poolSize * 4;
@@ -167,7 +167,7 @@ export class PhotoWorkerPool {
     return PhotoWorkerPool.instance;
   }
 
-  /** 初始化 Worker 池（★ 按需创建：构造期零 Worker 实例化） */
+  /** 初始化 Worker 池（按需创建：构造期零 Worker 实例化） */
   private initializePool(): void {
     log.info(`Worker 池已配置（按需创建）: maxPool=${this.poolSize}, maxPending=${this.maxPendingTasks}`);
   }
@@ -227,7 +227,7 @@ export class PhotoWorkerPool {
     this.pendingCount--;
 
     if (response.ok) {
-      // ★ 统一处理两种成功响应类型：
+      // 统一处理两种成功响应类型：
       //   PhotoCryptoSuccess（完整加密） / PhotoMetaCryptoSuccess（meta-only 加密）
       //   两者都含 ok: true + id，通过联合类型 resolve
       task.resolve(response);
@@ -296,7 +296,7 @@ export class PhotoWorkerPool {
     // 保留 restartCount / lastCrashAt / terminated 状态
     newSlot.restartCount = slot.restartCount;
     newSlot.lastCrashAt = slot.lastCrashAt;
-    // ★ 按池化（slots 动态增删）安全替换：indexOf 定位，非索引赋值
+    // 按池化（slots 动态增删）安全替换：indexOf 定位，非索引赋值
     const slotIdx = this.slots.indexOf(slot);
     if (slotIdx >= 0) {
       this.slots[slotIdx] = newSlot;
@@ -308,14 +308,14 @@ export class PhotoWorkerPool {
     this.dispatchNextTask();
   }
 
-  /** 分配下一个任务给空闲 Worker（★ 无空闲且未达上限时按需冷启动） */
+  /** 分配下一个任务给空闲 Worker（无空闲且未达上限时按需冷启动） */
   private dispatchNextTask(): void {
     if (this.terminated || this.taskQueue.length === 0) return;
 
     // 查找空闲 Worker
     let idleSlot = this.slots.find((s) => !s.terminated && !s.currentTask);
 
-    // ★ 按需创建：无空闲且未达池上限 → 冷启动新 Worker（<100ms）
+    // 按需创建：无空闲且未达池上限 → 冷启动新 Worker（<100ms）
     if (!idleSlot && this.slots.length < this.poolSize) {
       idleSlot = this.createWorkerSlot(this.slots.length);
       this.slots.push(idleSlot);
@@ -329,7 +329,7 @@ export class PhotoWorkerPool {
     idleSlot.currentTask = task;
     this.markBusy();
 
-    // ★ 根据请求类型决定 transferList：
+    // 根据请求类型决定 transferList：
     //   - PhotoCryptoRequest（完整加密）：fileBytes 是 ArrayBuffer，通过 transferList 零拷贝转让
     //   - PhotoMetaCryptoRequest（meta-only）：无 fileBytes，meta 对象通过结构化克隆传输
     try {
@@ -370,7 +370,7 @@ export class PhotoWorkerPool {
     }, wait);
   }
 
-  /** ★ 空闲回收：全部 Worker 空闲且超阈值 → terminate 一半（下次任务冷启动） */
+  /** 空闲回收：全部 Worker 空闲且超阈值 → terminate 一半（下次任务冷启动） */
   private recycleIdleWorkers(): void {
     if (this.terminated) return;
     const allIdle = this.taskQueue.length === 0 && this.slots.every((s) => !s.currentTask);
@@ -473,7 +473,7 @@ export class PhotoWorkerPool {
   }
 
   /**
-   * ★ Parsed Import：提交 meta-only 加密任务到 Worker 池
+   * Parsed Import：提交 meta-only 加密任务到 Worker 池
    *
    * 线程池替代子进程优化点在 .venc 解析导入场景的复用：
    *   - 解析 .venc 文件后，chunks 已用当前 photoKey 加密（同设备导入），

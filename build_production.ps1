@@ -1,6 +1,6 @@
 ﻿# build_production.ps1 - Verthys 完整生产环境一键构建脚本
 #
-# ★ 编码警告：本文件必须保存为 UTF-8 with BOM 编码！
+# 编码警告：本文件必须保存为 UTF-8 with BOM 编码！
 #   Windows PowerShell 5.1 对无 BOM 文件按 ANSI/GBK 解码，中文注释乱码会
 #   破坏字符串/大括号配对导致解析错误（ParseError），而解析错误发生在任何
 #   代码执行之前，脚本内的 try/catch 与 Read-Host 暂停完全失效——表现为
@@ -44,14 +44,13 @@ $ScriptRoot  = $PSScriptRoot
 $ScriptsDir  = Join-Path $ScriptRoot "scripts"
 $VerthysTauriDir = Join-Path $ScriptRoot "verthys-tauri"
 $WorkerDir   = Join-Path $VerthysTauriDir "verthys-worker"
-# ★ externalBin 基准目录：Tauri v2 将 tauri.conf.json 的 externalBin 路径
+# externalBin 基准目录：Tauri v2 将 tauri.conf.json 的 externalBin 路径
 #   相对该文件所在目录（src-tauri/）解析。副本必须落在 src-tauri\binaries\，
 #   否则 tauri-build 校验报 "resource path doesn't exist"（2026-09-18 修复：
 #   原先误复制到 verthys-tauri\binaries\，历史构建成功仅因 src-tauri\binaries\
 #   存在清理前的暂存副本）。
 $BinariesDir = Join-Path $VerthysTauriDir "src-tauri\binaries"
 $CoreBuildDir = Join-Path $ScriptRoot "build"
-$CoreDllPath = Join-Path $CoreBuildDir "core\Release\verthys.dll"
 $WorkerReleaseExe = Join-Path $WorkerDir "target\release\verthys-worker.exe"
 $WorkerDebugExe   = Join-Path $WorkerDir "target\debug\verthys-worker.exe"
 $WorkerBundledExe = Join-Path $BinariesDir "verthys-worker-x86_64-pc-windows-msvc.exe"
@@ -150,11 +149,47 @@ if ($lockFiles) {
     Write-Step "已清理 cargo 锁文件"
 }
 
-# ========== 加载环境变量 ==========
+# ========== 加载构建环境 ==========
 Write-Stage "阶段 0.5: 加载构建环境"
-. (Join-Path $ScriptsDir "env.load.ps1")
+
+# 探测顺序（CI 机制优先，本地一键脚本兼容）：
+#   1. 外部已注入的 MSVC 工具链环境（ilammy/msvc-dev-cmd 或开发者命令
+#      提示符：VCToolsInstallDir + INCLUDE + LIB + PATH 中的 cl.exe 就绪）
+#      → 直接沿用，配 Ninja 单配置构建，不依赖任何自定义环境变量；
+#   2. 未注入时 fallback 到 env.load.ps1（本地 VS 安装 + 4 个自定义环境
+#      变量的多配置构建路径）。
+$script:msvcInjected = $false
+if (-not [string]::IsNullOrEmpty($env:VCToolsInstallDir) -and
+    -not [string]::IsNullOrEmpty($env:INCLUDE) -and
+    -not [string]::IsNullOrEmpty($env:LIB) -and
+    (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+    $script:msvcInjected = $true
+    $cmakeCmd = Get-Command cmake.exe -ErrorAction SilentlyContinue
+    if (-not $cmakeCmd) {
+        throw "检测到已注入的 MSVC 环境，但 cmake.exe 不在 PATH（注入环境不完整）"
+    }
+    $ninjaCmd = Get-Command ninja.exe -ErrorAction SilentlyContinue
+    if (-not $ninjaCmd) {
+        throw "检测到已注入的 MSVC 环境，但 ninja.exe 不在 PATH（注入路径需要 Ninja 生成器）"
+    }
+    $script:effectiveCmake = $cmakeCmd.Source
+    $script:effectiveGenerator = "Ninja"
+    Write-OK "沿用已注入的 MSVC 工具链环境（Ninja 单配置）"
+} else {
+    . (Join-Path $ScriptsDir "env.load.ps1")
+    $script:effectiveCmake = $VERTHYS_CMAKE_EXE
+    $script:effectiveGenerator = $VERTHYS_VS_GENERATOR
+    Write-OK "MSVC 环境已加载（env.load.ps1 本地路径）"
+}
 . (Join-Path $ScriptsDir "cmake.utils.ps1")
-Write-OK "MSVC 环境已加载"
+
+# C 核心 DLL 产物路径：Ninja 单配置直接输出 build/core/verthys.dll，
+# VS 多配置输出 build/core/Release/verthys.dll（二者随注入模式二选一）。
+$script:actualCoreDll = if ($script:msvcInjected) {
+    Join-Path $CoreBuildDir "core\verthys.dll"
+} else {
+    Join-Path $CoreBuildDir "core\Release\verthys.dll"
+}
 
 # ========== 依赖与补丁校验 ==========
 Write-Stage "阶段 0.6: 依赖与补丁校验"
@@ -166,21 +201,22 @@ if (Test-Path $BuildErrLog) {
 }
 
 # 0.6.2 前端依赖校验
-# 注意：npm 将进度/警告输出到 stderr，PowerShell 会将其包装为 ErrorRecord 对象。
-# 直接管道 `& npm install 2>&1 | ForEach-Object` 在 ErrorActionPreference=Stop 下会触发脚本终止。
-# 因此采用变量捕获模式：先捕获到 $output，再恢复 ErrorActionPreference 后逐行处理。
+# 缺失时用 npm ci 安装：以 package-lock.json 为唯一事实源（与 CI 同解析），
+# 锁文件与 package.json 不同步时直接报错而不会静默漂移；
+# npm 的进度/警告输出到 stderr，PowerShell 会包装为 ErrorRecord，故采用
+# 变量捕获模式（先捕获 $output，恢复 ErrorActionPreference 后逐行处理）。
 if (-not (Test-Path $NodeModulesDir)) {
-    Write-Step "node_modules 缺失，执行 npm install..."
+    Write-Step "node_modules 缺失，执行 npm ci（以 package-lock.json 为准）..."
     Push-Location $VerthysTauriDir
     try {
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
-        $output = & npm install 2>&1
+        $output = & npm ci 2>&1
         $npmExit = $LASTEXITCODE
         $ErrorActionPreference = $prevEAP
         $output | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
         if ($npmExit -ne 0) {
-            Write-Fail "npm install 失败 (exit=$npmExit)"
+            Write-Fail "npm ci 失败 (exit=$npmExit)"
             throw "前端依赖安装失败"
         }
     } finally {
@@ -207,29 +243,35 @@ if (-not (Test-Path $kbPatchCargo) -or -not (Test-Path $kbPatchModRs)) {
 }
 Write-OK "keyboard-types 本地补丁就绪"
 
-# 0.6.4 Rust 依赖锁定校验（确保补丁已写入 Cargo.lock）
-Push-Location $SrcTauriDir
-try {
-    $prevEAP = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $output = & cargo update -p keyboard-types 2>&1
-    $cargoUpdateExit = $LASTEXITCODE
-    $ErrorActionPreference = $prevEAP
-    if ($cargoUpdateExit -ne 0) {
-        Write-Fail "cargo update -p keyboard-types 失败"
-        $output | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
-        throw "补丁锁定更新失败"
-    }
-    Write-OK "Cargo.lock 补丁已确认"
-} finally {
-    Pop-Location
+# 0.6.4 Rust 依赖锁定校验（只读断言，不执行任何会改写锁文件的 cargo 命令）
+# [patch.crates-io] 生效的标志：Cargo.lock 中 keyboard-types 条目不含
+# source 字段（本地 path 补丁无注册表来源）。cargo update/metadata 均会
+# 改写锁文件，故此处只用文本断言验证补丁已落锁，锁文件变更交由依赖
+# 快照门禁与版本控制管理。
+$lockFilePath = Join-Path $SrcTauriDir "Cargo.lock"
+if (-not (Test-Path $lockFilePath)) {
+    Write-Fail "Cargo.lock 不存在: $lockFilePath"
+    throw "Cargo.lock 缺失，无法校验补丁"
 }
+$lockContent = Get-Content $lockFilePath -Raw
+$patchBlock = [regex]::Match($lockContent,
+    '\[\[package\]\](?:(?!\[\[).)*?name = "keyboard-types".*?(?=(\r?\n\[\[package\]\])|$)',
+    [System.Text.RegularExpressions.RegexOptions]::Singleline)
+if (-not $patchBlock.Success) {
+    Write-Fail "Cargo.lock 中无 keyboard-types 条目"
+    throw "补丁锁定校验失败"
+}
+if ($patchBlock.Value -match '(?m)^source\s*=') {
+    Write-Fail "keyboard-types 条目仍指向注册表来源，[patch.crates-io] 未生效"
+    throw "补丁未写入 Cargo.lock"
+}
+Write-OK "Cargo.lock 补丁已确认（本地 path 补丁生效）"
 
 # ========== 阶段 1: 构建 C 核心 DLL ==========
 if (-not $SkipCore) {
     Write-Stage "阶段 1/4: 构建 C 核心安全 DLL（verthys.dll）"
 
-    # ★ 陈旧缓存自愈（根因修复 2026-09-19）：项目目录迁移/重命名后，
+    # 陈旧缓存自愈（根因修复 2026-09-19）：项目目录迁移/重命名后，
     # build/CMakeCache.txt 记录的绝对路径（CMAKE_HOME_DIRECTORY）失效，
     # CMake 报 "CMakeCache.txt directory ... is different than the directory
     # ... where CMakeCache.txt was created" 并拒绝配置。检测到不一致时
@@ -237,30 +279,38 @@ if (-not $SkipCore) {
     Clear-StaleCMakeCache -BuildDir $CoreBuildDir -SourceDir $ScriptRoot
 
     Write-Step "CMake Configure (Release, x64)"
-    & $VERTHYS_CMAKE_EXE -S $ScriptRoot -B $CoreBuildDir -G $VERTHYS_VS_GENERATOR -A x64
+    if ($script:msvcInjected) {
+        & $script:effectiveCmake -S $ScriptRoot -B $CoreBuildDir -G Ninja -DCMAKE_BUILD_TYPE=Release
+    } else {
+        & $script:effectiveCmake -S $ScriptRoot -B $CoreBuildDir -G $script:effectiveGenerator -A x64
+    }
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "CMake 配置失败"
         throw "CMake 配置失败 (exit=$LASTEXITCODE)"
     }
 
     Write-Step "CMake Build (Release, 安全加固: /O2 /GL /GS /guard:cf)"
-    & $VERTHYS_CMAKE_EXE --build $CoreBuildDir --config Release
+    if ($script:msvcInjected) {
+        & $script:effectiveCmake --build $CoreBuildDir
+    } else {
+        & $script:effectiveCmake --build $CoreBuildDir --config Release
+    }
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "CMake 构建失败"
         throw "CMake 构建失败 (exit=$LASTEXITCODE)"
     }
 
-    Assert-FileExists $CoreDllPath "verthys.dll"
+    Assert-FileExists $script:actualCoreDll "verthys.dll"
 } else {
     Write-Stage "阶段 1/4: 跳过 C 核心构建（-SkipCore）"
-    Assert-FileExists $CoreDllPath "verthys.dll (已有)"
+    Assert-FileExists $script:actualCoreDll "verthys.dll (已有)"
 }
 
 # ========== 阶段 2: 构建 verthys-worker ==========
 if (-not $SkipWorker) {
     Write-Stage "阶段 2/4: 构建 verthys-worker 子进程（Rust release）"
 
-    # ★ 纵深防御：禁用增量编译（defense-in-depth）
+    # 纵深防御：禁用增量编译（defense-in-depth）
     # 根因：dev profile 增量编译与 raw-dylib 导入库生成存在竞态，导致
     # LNK1181: 无法打开输入文件 "windows.0.52.0.lib"。
     # Cargo.toml [profile.dev] incremental=false 已是主修复；
@@ -334,7 +384,7 @@ Assert-FileExists $WorkerBundledExe "worker 打包二进制"
 # tauri.conf.json 中 resources: ["verthys.dll"]，Tauri 从 src-tauri/ 目录查找
 # 如果不拷贝，Tauri 构建时会因找不到文件而失败
 $DllTarget = Join-Path $SrcTauriDir "verthys.dll"
-Copy-Item -Path $CoreDllPath -Destination $DllTarget -Force
+Copy-Item -Path $script:actualCoreDll -Destination $DllTarget -Force
 Write-OK "已复制: verthys.dll -> src-tauri/verthys.dll"
 Assert-FileExists $DllTarget "DLL 打包副本"
 
@@ -484,8 +534,8 @@ Write-Stage "构建完成 — 产物校验"
 $allOk = $true
 
 # C 核心 DLL
-if (Test-Path $CoreDllPath) {
-    $info = Get-Item $CoreDllPath
+if (Test-Path $script:actualCoreDll) {
+    $info = Get-Item $script:actualCoreDll
     Write-OK ("verthys.dll: {0} ({1} KB)" -f $info.LastWriteTime, [math]::Round($info.Length / 1KB, 1))
 } else {
     Write-Fail "verthys.dll 缺失"

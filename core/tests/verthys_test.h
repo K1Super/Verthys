@@ -77,9 +77,9 @@ int test_filter_match(const char *test_name);
         fflush(stdout); \
         g_tests_failed++; \
     } \
-    /* ★ 步骤2：每测试后强制清零 emergency 信号窗口，阻断跨测试累积 */ \
+    /* 步骤2：每测试后强制清零 emergency 信号窗口，阻断跨测试累积 */ \
     emergency_clear_signals(); \
-    /* ★ 步骤1：测试间状态快照断言（差异非零打印） */ \
+    /* 步骤1：测试间状态快照断言（差异非零打印） */ \
     test_state_capture(&_snap_after); \
     test_state_report_diff(#name, &_snap_before, &_snap_after); \
 } while (0)

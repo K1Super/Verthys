@@ -1,14 +1,14 @@
 <!--
   HomeView.vue — 主界面默认视图（深空巡天 · 引力星图）
-  ★ 非对称构图（拒绝居中对称模板）：
+  非对称构图（拒绝居中对称模板）：
     左 8%  — 品牌雕刻排印（useBrandTitle compact 级 — 与引导页同源
               hash 参数场，跨场景品牌形态一致）+ 谱线回声 + 静默引导
     右侧   — 引力星图 HomeAtlas（非同心轨道 + 奇点 + 差速航点）
     对角视觉张力：Dock → 品牌 → 星图 → 深空（阅读动线成势）
-  ★ 视差策略：本层内容（品牌/星图）不参与指针视差 — 深度感全部
+  视差策略：本层内容（品牌/星图）不参与指针视差 — 深度感全部
     由 CosmicBackground 三层星场视差承担；内容层恒定静止保证
     品牌文字始终物理像素对齐（零亚像素栅格化 → 恒定锐利）。
-  ★ 入场编排：逐字轨道落位（错峰复合曲线）→ 谱线生长 → 副标淡升
+  入场编排：逐字轨道落位（错峰复合曲线）→ 谱线生长 → 副标淡升
     → 星图同步揭示（HomeAtlas 内部编排）— 一次性 backwards 零跳变。
 -->
 <template>
@@ -70,14 +70,14 @@ import HomeAtlas from "./HomeAtlas.vue";
 import { useBrandTitle } from "../../composables/useBrandTitle";
 import { useSpectraTicks } from "../../composables/useSpectraTicks";
 
-/* ★ 品牌排印 — compact 级（与引导页同源确定性 hash 场，幅度收敛） */
+/* 品牌排印 — compact 级（与引导页同源确定性 hash 场，幅度收敛） */
 const chars = useBrandTitle({ compact: true });
 
-/* ★ 谱线回声参数 — echo 变体（与引导页充能组共享唯一权威源
+/* 谱线回声参数 — echo 变体（与引导页充能组共享唯一权威源
  * useSpectraTicks：光谱色/时序/呼吸/微跳逐线差化） */
 const ticks = useSpectraTicks("echo");
 
-/* ★ 视差策略：品牌区/星图静态锚定（无指针视差）— 深度感由
+/* 视差策略：品牌区/星图静态锚定（无指针视差）— 深度感由
  * CosmicBackground 三层星场视差承担；内容层零位移 = 品牌文字
  * 恒定物理像素对齐 + 零 mousemove 监听（主界面满帧预算全让给背景） */
 </script>
@@ -115,7 +115,7 @@ const ticks = useSpectraTicks("echo");
 }
 
 /* ============================================================================
- * ★ 品牌雕刻排印：全部复用全局共享体系（animations.css
+ * 品牌雕刻排印：全部复用全局共享体系（animations.css
  * .brand-title + .brand-char + brand-assemble — compact 级幅度经
  * .brand-title--compact 变量覆写：描边/克隆偏移/入射强度收敛，
  * 与引导页引导级同源同轨）

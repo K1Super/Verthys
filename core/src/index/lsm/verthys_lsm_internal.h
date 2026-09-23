@@ -79,6 +79,12 @@ typedef struct VerthysLsmMemTable VerthysLsmMemTable;
 VerthysLsmMemTable *verthys_lsm_memtable_create(void);
 void verthys_lsm_memtable_destroy(VerthysLsmMemTable *mt);
 
+/*
+ * 测试白盒：强制后续 memtable_create 分配失败（enabled=1 → create 恒
+ * 返回 NULL）。仅测试 exe 对象直链调用；生产代码无调用点。
+ */
+void verthys_lsm_memtable_test_force_alloc_fail(int enabled);
+
 /* 冻结：置 frozen 标志（文档化单写者纪律；冻结后插入返回 INVALID） */
 void verthys_lsm_memtable_freeze(VerthysLsmMemTable *mt);
 int verthys_lsm_memtable_frozen(const VerthysLsmMemTable *mt);
@@ -283,7 +289,7 @@ void verthys_lsm_sstable_iter_close(VerthysLsmSstIter *si);
 
 /*
  * Manifest 保存：flatcc 序列化（nonce_counter 快照 = 当前计数器 + 1，
- * ★保存后值约定）→ Index 分区密钥 AEAD → 帧区整帧覆写 + fsync。
+ * 保存后值约定）→ Index 分区密钥 AEAD → 帧区整帧覆写 + fsync。
  */
 VerthysResult verthys_lsm_manifest_save(FILE *f, uint64_t region_offset,
                                     const VerthysLsmManifest *m,
@@ -341,6 +347,12 @@ struct VerthysLsm {
      * 事务提交边界由 transaction_v3 解除抑制并按需 flush。 */
     int suppress_flush;
     /*
+     * 只读态：flush 的 MemTable 重建失败（内存耗尽）后置位——此时旧表
+     * 已销毁（条目已全部持久化于新 SSTable），写入一律拒绝（RESOURCE_LIMIT），
+     * 读路径走 SSTable 不受影响；Lock 重开后经 WAL 重放恢复写能力。
+     */
+    int memtable_readonly;
+    /*
      * API 接线：全局最大已见 lid（put/delete 单调推高，open
      * 时由 Manifest 各表 max_key + MemTable 尾值合并初始化）。
      * 红线语义：LID 永不复用——rollback/purge 重建 MemTable 后本字段
@@ -354,6 +366,25 @@ struct VerthysLsm {
 };
 
 /*
+ * 共享锁内联入口：const 视图（只读 API）统一经此取共享锁。
+ * SRWLOCK 为内核同步原语，加锁不修改被锁对象——从 const 对象取
+ * 其锁字段地址须一次强转，收敛于此一处（迁移非 MSVC 工具链时
+ * 复核该强转与 4090 豁免）。
+ */
+#pragma warning(push)
+#pragma warning(disable:4090)
+static inline void lsm_lock_shared(const struct VerthysLsm *lsm)
+{
+    AcquireSRWLockShared((SRWLOCK *)&lsm->lock);
+}
+
+static inline void lsm_unlock_shared(const struct VerthysLsm *lsm)
+{
+    ReleaseSRWLockShared((SRWLOCK *)&lsm->lock);
+}
+#pragma warning(pop)
+
+/*
  * 内部：flush 冻结表（调用方持独占锁）。
  * 流程：sstable_write(L0) → Manifest 追加 → manifest_save → WAL 复位。
  * txid 取 manifest.txid + 1（成功后回写）。
@@ -365,6 +396,12 @@ VerthysResult verthys_lsm_compact_locked(VerthysLsm *lsm);
 
 /* 内部：超限层级判定（无锁读，调用方持任意锁） */
 int verthys_lsm_needs_compaction_locked(const VerthysLsm *lsm);
+
+/* ---------- 测试注入（测试 exe 对象直链的内部符号，非导出面） ---------- */
+
+/* 非零时 verthys_lsm_manifest_save 直接失败（验证 flush/compact
+ * 的 Manifest 提交失败回滚路径） */
+extern int verthys_lsm_test_fail_manifest_save;
 
 #ifdef __cplusplus
 }

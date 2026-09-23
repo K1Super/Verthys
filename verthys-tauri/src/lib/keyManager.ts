@@ -23,7 +23,7 @@ export {
   SESSION_PRESET_MINUTES,
 } from "../constants/key_manager_const";
 
-/* ★ 企业级根治：全部记录类型常量统一从 record_types.ts 再导出
+/* 修复：全部记录类型常量统一从 record_types.ts 再导出
  *   消除各模块本地定义 TYPE_* 的冲突风险（原 TYPE_GLOBAL_KEY==TYPE_ACCOUNT==0x10 等）
  */
 export {
@@ -57,11 +57,11 @@ export const globalKeyRecordLoadingRef = keyState.globalKeyRecordLoading;
 export const moduleKeyReadyRef = keyState.moduleKeyReady;
 export const hasModuleKeyRecordRef = keyState.hasModuleKeyRecord;
 export const moduleKeyEnabledRef = keyState.moduleKeyEnabled;
-/* ★ 安全守卫修复：导出 moduleKeyStatusLoadingRef，供 useModuleNavigation.switchModule
+/* 安全守卫修复：导出 moduleKeyStatusLoadingRef，供 useModuleNavigation.switchModule
  *   防御性守卫消费——解锁关键路径若仍在加载模块密钥状态，切换模块前需等待完成，
  *   杜绝"加载窗口内 moduleKeyEnabled 为默认 false → 守卫误判保护已关闭 → 直接放行"漏洞 */
 export const moduleKeyStatusLoadingRef = keyState.moduleKeyStatusLoading;
-/* ★ 安全守卫根治：导出 moduleKeyStatusLoadedRef，供 useModuleNavigation.switchModule
+/* 安全守卫根治：导出 moduleKeyStatusLoadedRef，供 useModuleNavigation.switchModule
  *   判断模块密钥状态是否已加载完成。仅 loadModuleKeyStatus 真正完成时为 true，
  *   未加载完前守卫拦截业务模块进入，杜绝"超时后默认 false 放行"绕过漏洞。 */
 export const moduleKeyStatusLoadedRef = keyState.moduleKeyStatusLoaded;
@@ -113,14 +113,14 @@ export {
   addFullRecord,
   clearFullRecordCache,
   getFullRecordCacheSize,
-  /* ★ 性能修复：批量获取多条记录 dataB64（扫描缓存优先 + 并行 IPC 回退）。
+  /* 性能修复：批量获取多条记录 dataB64（扫描缓存优先 + 并行 IPC 回退）。
    *   供 4 个业务模块列表加载使用，替代旧 summary 路径对每条记录串行 getFullRecord
    *   （N 条 = N 次串行 IPC，与后台 ensureRecordScan 抢同一常驻 worker → 30s）。
    *   新实现总耗时 < 2.5s。 */
   getRecordsDataB64Batch,
   clearAllVerthysCaches,
 } from "../cache/composition/verthys-cache";
-/* ★ 后台任务 API 直连 core 层再导出（单向化，下游导入路径保持不变） */
+/* 后台任务 API 直连 core 层再导出（单向化，下游导入路径保持不变） */
 export { startBackgroundTasks, stopBackgroundTasks } from "../core/background-tasks";
 export type { SummaryRecord } from "../lib/verthys";
 
@@ -133,6 +133,8 @@ export {
   setSessionTimeout,
   getSessionTimeout,
   applySecurityPreset,
+  restoreSecurityPreset,
+  bumpPresetEpoch,
   checkBruteForceGate,
   getBruteForceStatus,
   clearBruteForcePurge,
@@ -171,7 +173,7 @@ export {
 } from "../key/module-auth";
 
 /* ================================================================== *
- * ★ 架构优化再导出                                       *
+ * 架构优化再导出                                       *
  *                                                                    *
  * 将新增的基础库 API 通过 keyManager 门面统一再导出，供 Vue 组件与     *
  * 上层模块使用，保持单一导入入口。                                    *

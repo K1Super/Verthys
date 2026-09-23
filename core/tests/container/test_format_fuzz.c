@@ -168,8 +168,7 @@ TEST(fuzz_bit_flip_version)
     size_t size = 0;
     CHECK_EQ(read_file_to_buf(TMP_VERTHYS, &buf, &size), 0);
 
-    /* ★ V3 适配（法定人数语义）：V2 版本号位于文件头 +4（parse_header
-     * 早期拒绝 → FORMAT）；V3 无明文文件头，超块版本在 FlatBuffers 载荷
+    /* V3 适配（法定人数语义）：V3 无明文文件头，超块版本在 FlatBuffers 载荷
      * 内部（偏移随 schema 演化，不可稳定定位）。等价的头部字段变异 =
      * 三副本帧头 payload_len LSB（+4/+0x4004/+0x8004）各翻一位：帧结构
      * 仍合法（verifier 容忍尾部字节），但 HMAC 计算域随长度漂移 → 3 副本

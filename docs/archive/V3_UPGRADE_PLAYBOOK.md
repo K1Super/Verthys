@@ -223,7 +223,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 ## 5. 工作包详解
 
-> 每个 WP 按"AI 开发卡"格式：**目标 / 前置 / 触达文件（★新建 ✎修改）/ 复用资产 / 设计约束 / 步骤 / 验收 / 提示词**。提示词可直接作为 AI 会话开场。
+> 每个 WP 按"AI 开发卡"格式：**目标 / 前置 / 触达文件（新建 ✎修改）/ 复用资产 / 设计约束 / 步骤 / 验收 / 提示词**。提示词可直接作为 AI 会话开场。
 
 ***
 
@@ -242,7 +242,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **前置**：无。
 
-**触达文件**：★`tests/verthys_test.h`（RUN\_TEST 宏加测试间快照断言）、★`tests/test_runner.c`（组间 reset + 快照报告）、✎`tests/test_perf_prefetch.c`（嫌疑测试）、✎`tests/test_emergency.c`（确认清理完整）。
+**触达文件**：`tests/verthys_test.h`（RUN\_TEST 宏加测试间快照断言）、`tests/test_runner.c`（组间 reset + 快照报告）、✎`tests/test_perf_prefetch.c`（嫌疑测试）、✎`tests/test_emergency.c`（确认清理完整）。
 
 **已掌握证据（继承自 2026-08-30 排查）**：
 
@@ -274,7 +274,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **目标**：V3 开发的基础设施就绪。
 
-**触达文件**：★`third_party/flatcc/`、★`third_party/xxhash/`、★`schema/*.fbs`、✎`CMakeLists.txt`（flatcc 构建集成 + schema codegen 自定义命令）、★`ci/vendor_hashes.txt`。
+**触达文件**：`third_party/flatcc/`、`third_party/xxhash/`、`schema/*.fbs`、✎`CMakeLists.txt`（flatcc 构建集成 + schema codegen 自定义命令）、`ci/vendor_hashes.txt`。
 
 **结果**：
 
@@ -311,7 +311,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **前置**：WP-13（验收信号可信）。
 
-**触达文件**：★`crypto/verthys_crypto_cng.c/.h`（CNG AEAD 封装）、★`crypto/keymanager_cng.c/.h`（生命周期）、✎`security/memory/key_separation.c`（重构/退役 acquire）、✎`container/verthys_internal.h`（ctx 字段替换为句柄）、✎`crypto/keymanager.c`、✎`api/verthys_v2_lifecycle.c`（解锁 S3 阶段）、✎`transaction/verthys_transaction.h`（txn 密钥字段→句柄）、★`tests/test_cng_kernel.c`。
+**触达文件**：`crypto/verthys_crypto_cng.c/.h`（CNG AEAD 封装）、`crypto/keymanager_cng.c/.h`（生命周期）、✎`security/memory/key_separation.c`（重构/退役 acquire）、✎`container/verthys_internal.h`（ctx 字段替换为句柄）、✎`crypto/keymanager.c`、✎`api/verthys_v2_lifecycle.c`（解锁 S3 阶段）、✎`transaction/verthys_transaction.h`（txn 密钥字段→句柄）、`tests/test_cng_kernel.c`。
 
 **复用资产**：`key_separation.c` 的 BCrypt GCM 全套（open\_aes\_gcm\_provider / init\_gcm\_auth\_info / aead\_encrypt / activate\_commit / purge\_all）——**直接改造迁移**而非重写。
 
@@ -355,7 +355,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **目标**：密钥相关结构走专用隔离堆；全局内存预算记账。
 
-**触达文件**：★`security/memory/secure_allocator.c/.h`、✎`verthys_internal.h`（ctx 挂 `SecureAllocator*`）。
+**触达文件**：`security/memory/secure_allocator.c/.h`、✎`verthys_internal.h`（ctx 挂 `SecureAllocator*`）。
 
 **设计约束**：VirtualAlloc 区段 + `PAGE_GUARD` 边界页 + `VirtualLock` 锁页 + 释放前清零 + 元数据独立存储；记账对接性能架构 §4.1（512MB 硬上限 → 80% 触发回收 → 95% 返回 `VERTHYS_ERR_RESOURCE_LIMIT`）。
 
@@ -377,7 +377,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **前置**：WP-0（flatcc）、WP-1（句柄接口）。
 
-**触达文件**：★`container/verthys_container_v3.h`、★`container/verthys_superblock_v3.c`、★`container/verthys_partition.c`、★`schema/superblock_v3.fbs`、`schema/partition.fbs`、✎`CMakeLists.txt`、★`tests/test_v3_container.c`、★`tests/test_v3_partition.c`。
+**触达文件**：`container/verthys_container_v3.h`、`container/verthys_superblock_v3.c`、`container/verthys_partition.c`、`schema/superblock_v3.fbs`、`schema/partition.fbs`、✎`CMakeLists.txt`、`tests/test_v3_container.c`、`tests/test_v3_partition.c`。
 
 **复用资产**：`verthys_io.c`（全部偏移 I/O）；`vsb_txn` 备份/回滚模式（扩展为 `VsbTxnV3`，v5.0 §10.2）；超级块反序列化的边界纪律（§1.1 样板）；`integrity_key` HMAC 体系。
 
@@ -411,7 +411,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **前置**：WP-2。
 
-**触达文件**：★`container/verthys_extent.c/.h`、★`tests/test_v3_extent.c`、★`schema/extent.fbs`、✎`CMakeLists.txt`、✎`tests/CMakeLists.txt`、✎`tests/test_runner.c`。
+**触达文件**：`container/verthys_extent.c/.h`、`tests/test_v3_extent.c`、`schema/extent.fbs`、✎`CMakeLists.txt`、✎`tests/CMakeLists.txt`、✎`tests/test_runner.c`。
 
 **复用资产**：`crypto_generichash`（libsodium BLAKE2b-256，E-3 零依赖）；CNG AEAD（加密）；WP-2 分区管理（Extent 分区）。
 
@@ -434,7 +434,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **前置**：WP-2。
 
-**触达文件**：★`index/verthys_lsm.c/.h`、★`index/verthys_lsm_memtable.c`（跳表）、★`index/verthys_lsm_sstable.c`、★`index/verthys_lsm_compaction.c`、★`schema/sstable.fbs`、★`tests/test_lsm_index.c`。
+**触达文件**：`index/verthys_lsm.c/.h`、`index/verthys_lsm_memtable.c`（跳表）、`index/verthys_lsm_sstable.c`、`index/verthys_lsm_compaction.c`、`schema/sstable.fbs`、`tests/test_lsm_index.c`。
 
 **设计约束**：
 
@@ -454,7 +454,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **前置**：WP-3、WP-4。
 
-**触达文件**：★`transaction/verthys_wal.c/.h`、★`transaction/verthys_transaction_v3.c`、★`api/verthys_v3_lifecycle.c`（校准/并行流水线/进度回调从 v2\_lifecycle 迁移）、★`api/verthys_unlock_pipeline.c`（S0-S6 调度器，UNLOCK\_OPTIMIZATION §8）、✎`api/verthys_api.c`、✎`container/verthys_superblock_v3.c`（WAL 状态字段）、★`index/verthys_warmcache.c` 重写（V3 缓存格式，UNLOCK\_OPTIMIZATION §7）、✎`verthys.def`（新增导出）、✎`verthys-worker`（E-8）。
+**触达文件**：`transaction/verthys_wal.c/.h`、`transaction/verthys_transaction_v3.c`、`api/verthys_v3_lifecycle.c`（校准/并行流水线/进度回调从 v2\_lifecycle 迁移）、`api/verthys_unlock_pipeline.c`（S0-S6 调度器，UNLOCK\_OPTIMIZATION §8）、✎`api/verthys_api.c`、✎`container/verthys_superblock_v3.c`（WAL 状态字段）、`index/verthys_warmcache.c` 重写（V3 缓存格式，UNLOCK\_OPTIMIZATION §7）、✎`verthys.def`（新增导出）、✎`verthys-worker`（E-8）。
 
 **复用资产**：v2 七步提交的事务语义（映射到 v5.0 §10.1 六 Phase）；进度环形缓冲（原样）；`verthys_argon2_rewrap`（rekey 模式）；摘要索引序列化样板。
 
@@ -488,7 +488,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **前置**：WP-1（+WP-5 落地后接入 V3 超级块）。
 
-**触达文件**：★`crypto/verthys_rekey_auto.c/.h`、★`tests/test_auto_rekey.c`、✎`crypto/keymanager_cng.c/.h`（rotate\_abc）、✎`api/verthys_v3_lifecycle.c`（maybe\_rotate 接线）、✎`api/verthys_api.c`（note\_degrade 接线）、✎`core/CMakeLists.txt` + `tests/CMakeLists.txt` + `tests/test_runner.c`。
+**触达文件**：`crypto/verthys_rekey_auto.c/.h`、`tests/test_auto_rekey.c`、✎`crypto/keymanager_cng.c/.h`（rotate\_abc）、✎`api/verthys_v3_lifecycle.c`（maybe\_rotate 接线）、✎`api/verthys_api.c`（note\_degrade 接线）、✎`core/CMakeLists.txt` + `tests/CMakeLists.txt` + `tests/test_runner.c`。
 
 **设计约束**：触发条件与防震荡照 v5.0 §4.3（90 天 / 10,000 ops / 24h 最小间隔 / DEGRADE 信号强制触发）；轮换在 CNG 内核态完成新旧切换（原子指针切换句柄）；**复用 rewrap（change\_password）的 vsb\_txn 保护模式**（原计划复用点 `verthys_argon2_rewrap` 已随 V2 退役删除，语义由 V3 等价实现承接）。
 
@@ -500,7 +500,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **前置**：无（基座为现有 `.vsec`）。
 
-**触达文件**：★`security/integrity/runtime_hash.c/.h`、✎`build_core.release.ps1`（生成 runtime\_hash\_table.c）、★`tests/test_runtime_hash.c`。
+**触达文件**：`security/integrity/runtime_hash.c/.h`、✎`build_core.release.ps1`（生成 runtime\_hash\_table.c）、`tests/test_runtime_hash.c`。
 
 **设计约束**：构建期对 \~30 个关键函数（v5.0 §9.3 X-macro 清单）计算 BLAKE2b（`crypto_generichash`），生成表；运行期解锁后 + 每 30 分钟重算；失配 = KILL。**注意**：与 `.vsec` 全节校验互补（函数粒度 vs 节粒度）；Windows 下函数地址/大小经符号表（map 文件）或 `Dmlib` 获取——实现取 map 文件解析方案（构建脚本已有 PE 解析基础）。
 
@@ -509,7 +509,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 **执行留痕（2026-09-15，WP-8 完成）**：
 
 * 清单落定为 **X-macro 32 函数**（runtime\_hash.h 单一事实源）：cng\_aead/km、rekey\_auto、vsb\_txn\_v3、partition、wal、txn\_v3 六 Phase、lsm、unlock\_pipeline、v3\_open\_existing、integrity/emergency、runtime\_hash\_scan 自身——构建期**全命中强制**（rhash\_gen 逐符号核对 map，缺失即构建失败，杜绝静默缩表）。
-* 工具链：★`tools/rhash_gen.c` 构建期解析 `/MAP` + `.pdata` + `.reloc`，对 32 函数计算 BLAKE2b-256 后**构建后补丁写入 `.rhat` 节**（复用 `.vsec` 构建后补丁模式）；表项 48B（magic `VRHT`、RVA、大小、哈希），上限 40 项。
+* 工具链：`tools/rhash_gen.c` 构建期解析 `/MAP` + `.pdata` + `.reloc`，对 32 函数计算 BLAKE2b-256 后**构建后补丁写入 `.rhat` 节**（复用 `.vsec` 构建后补丁模式）；表项 48B（magic `VRHT`、RVA、大小、哈希），上限 40 项。
 * ASLR 防误报：运行期 `runtime_hash_scan` 重算比对时对**重定位槽位做双侧掩码归一**（构建期与运行期同规则），排除基址重定位差导致的假阳性；扫描函数 `__declspec(noinline)` 红线（防自吞）。
 * `.rhat` 节纳入 `.vsec` v2 校验**第三槽**（自身完整性受构建期签名保护，防攻击者改表）。
 * 验证：`test_runtime_hash` 全绿（含补丁注入检出用例）；Release 链路 `.vsec + .rhat` 实测通过。**产物因本机恶意软件事件已全部清除（2026-09-15），重装系统后需按 §7 命令复验 Release 全链路。**
@@ -518,7 +518,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 ### WP-9：直接系统调用（P1）✅ 已完成（2026-09-15）
 
-**触达文件**：★`security/anti_analysis/syscall_direct.c/.h`、✎`anti_debug_v2.c`、✎`memory_guard.c`。
+**触达文件**：`security/anti_analysis/syscall_direct.c/.h`、✎`anti_debug_v2.c`、✎`memory_guard.c`。
 
 **设计约束**：从 ntdll `.text` 提取 SSN（排序法或哈希法）→ 构造 stub；仅覆盖检测器实际使用的 NtQueryInformationProcess / NtQuerySystemInformation；提取失败优雅降级回 GetProcAddress 路径（TELEMETRY 记录）。
 
@@ -538,7 +538,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **前置**：WP-2..5。
 
-**触达文件**：★`fuzz/fuzz_container_v3.c` 等 5 个目标、✎CI。
+**触达文件**：`fuzz/fuzz_container_v3.c` 等 5 个目标、✎CI。
 
 **设计约束**：MSVC `/fsanitize=fuzzer`（VS 内置 libFuzzer）；入口 `LLVMFuzzerTestOneInput` 直接调用各解析函数（superblock/partition/extent/sstable/import）；每目标 CI 跑 10 分钟；**语料种子**用测试生成的合法容器。
 
@@ -590,7 +590,7 @@ v5.0 预估 20 周（人工节奏）。AI 驱动开发按工作包粒度推进�
 
 **执行留痕（2026-09-15，WP-12 完成——harness 落地，揪出三项生产缺陷并修复）**：
 
-harness 形态（★`tests/test_v3_property.c`，零外部框架）：固定种子（失败打印种子/步号/操作名可复现）+ `PROP_CHECK` 失败跳转测试尾部清理标签（句柄/临时文件不释放将阻塞后续测试的 `remove()`/`fopen()`，防级联连坐）。六项测试：
+harness 形态（`tests/test_v3_property.c`，零外部框架）：固定种子（失败打印种子/步号/操作名可复现）+ `PROP_CHECK` 失败跳转测试尾部清理标签（句柄/临时文件不释放将阻塞后续测试的 `remove()`/`fopen()`，防级联连坐）。六项测试：
 
 | # | 测试 | 不变式 | 规模 |
 | - | --- | --- | --- |

@@ -125,22 +125,19 @@
 .mh-u3 .mh-swA { animation: mh-rot-cw 13s linear infinite; }
 .mh-u3 .mh-swB { animation: mh-rot-ccw 8.5s linear infinite; }
 
-/* 弧流端部辉点（主弧头部能量斑，随旋转拖尾） */
-/* ★ 性能根治方案六（§6.4）：SVG 描边弧为非矩形形状，box-shadow 不适用 —
- *   保留 drop-shadow 但经 will-change: filter 提升独立合成层：滤镜结果
- *   光栅化一次后缓存，父组旋转（transform 合成器驱动）仅移动已滤镜化
- *   的层，不再逐帧重算 paint（常驻 paint 根治；--boost 仅 hover 交互期
- *   变化，非逐帧驱动）。 */
+/* 弧流端部辉点（主弧头部能量斑，随旋转拖尾）
+ * 辉光半径固定为常驻弱光晕：filter 为重绘属性，若随 --boost 逐帧变化
+ * 会强制整层每帧重栅格化（WebView2 渲染线程风暴源头），故能量增稠
+ * 完全交由合成器友好的 opacity / stroke-width 承载，光晕保持静态。 */
 .mh-fa {
-  filter: drop-shadow(0 0 calc(1.2px + var(--boost, 0) * 2.6px) color-mix(in srgb, var(--u-a) 42%, transparent));
-  will-change: filter;
+  filter: drop-shadow(0 0 1.2px color-mix(in srgb, var(--u-a) 42%, transparent));
 }
 
 /* 单元 1 未就绪：主弧转琥珀、能量转弱 */
 .mh-u1:not(.ready) .mh-fa {
   stroke: #ffaa00;
   opacity: calc(0.38 + var(--boost, 0) * 0.4);
-  filter: drop-shadow(0 0 calc(1px + var(--boost, 0) * 1.6px) rgba(255, 170, 0, 0.35));
+  filter: drop-shadow(0 0 1px rgba(255, 170, 0, 0.35));
 }
 .mh-u1:not(.ready) .mh-fb { opacity: calc(0.24 + var(--boost, 0) * 0.3); }
 
@@ -172,14 +169,15 @@
   stroke-linecap: round;
   stroke: rgba(200, 212, 226, 0.7);
   opacity: calc(0.74 + var(--boost, 0) * 0.26);
-  transition: stroke 0.4s var(--ease), filter 0.4s var(--ease);
+  transition: stroke 0.4s var(--ease);
 }
 .mh-keyBow { stroke-width: 2.4; }
 .mh-u1.ready .mh-keyBow,
 .mh-u1.ready .mh-keyStem,
 .mh-u1.ready .mh-keyTeeth {
   stroke: url(#mh-g1);
-  filter: drop-shadow(0 0 calc(1.5px + var(--boost, 0) * 3px) rgba(0, 255, 170, 0.45));
+  /* 辉光半径固定：随 --boost 逐帧变化会触发整层重栅格化，能量增稠由 opacity 承载 */
+  filter: drop-shadow(0 0 1.5px rgba(0, 255, 170, 0.45));
 }
 
 /* 设备系链（密钥 → 终端节点的能量系绳，形态即绑定状态） */
@@ -189,11 +187,11 @@
   opacity: calc(0.5 + var(--boost, 0) * 0.4);
   transition: stroke 0.35s var(--ease);
 }
-/* 已绑定：青绿实段系绳（★ dashoffset 流动已 rAF 化：引擎 frame() 驱动） */
+/* 已绑定：青绿实段系绳（dashoffset 流动已 rAF 化：引擎 frame() 驱动） */
 .mh-bind-on .mh-tether { stroke: rgba(0, 255, 190, 0.8); stroke-dasharray: 4 3; }
 /* 未绑定：灰暗断续 */
 .mh-bind-off .mh-tether { stroke: rgba(148, 160, 178, 0.4); stroke-dasharray: 2 6; }
-/* 校验中：青色细密扫描流（★ dashoffset 流动已 rAF 化） */
+/* 校验中：青色细密扫描流（dashoffset 流动已 rAF 化） */
 .mh-bind-scan .mh-tether { stroke: rgba(0, 212, 255, 0.75); stroke-dasharray: 2 4; }
 /* 不匹配 / 错误：琥珀断系 */
 .mh-bind-warn .mh-tether { stroke: rgba(255, 170, 0, 0.75); stroke-dasharray: 3 7; }
@@ -217,7 +215,7 @@
   stroke-width: 1;
   stroke-dasharray: 3 5;
   opacity: calc(0.45 + var(--boost, 0) * 0.55);
-  /* ★ dashoffset 流动已 rAF 化：引擎 frame() 驱动（随空闲档位降频） */
+  /* dashoffset 流动已 rAF 化：引擎 frame() 驱动（随空闲档位降频） */
 }
 /* 卫星辉光（柔和弥散点，非描边圆环） */
 .mh-satGlow {
@@ -243,7 +241,7 @@
 .mh-coreDot {
   fill: #dbfff4;
   opacity: calc(0.72 + var(--boost, 0) * 0.28);
-  filter: drop-shadow(0 0 calc(1.5px + var(--boost, 0) * 3px) rgba(120, 235, 255, 0.55));
+  filter: drop-shadow(0 0 1.5px rgba(120, 235, 255, 0.55));
 }
 
 /* ============================================================
@@ -255,7 +253,7 @@
   stroke-width: 1.8;
   stroke-linejoin: round;
   opacity: calc(0.68 + var(--boost, 0) * 0.32);
-  filter: drop-shadow(0 0 calc(1px + var(--boost, 0) * 2.4px) color-mix(in srgb, var(--u-a) 38%, transparent));
+  filter: drop-shadow(0 0 1px color-mix(in srgb, var(--u-a) 38%, transparent));
 }
 .mh-shieldInner {
   fill: none;
@@ -282,7 +280,7 @@
 .mh-shieldCore {
   fill: #7dffd4;
   opacity: calc(0.6 + var(--boost, 0) * 0.4);
-  filter: drop-shadow(0 0 calc(1px + var(--boost, 0) * 2.5px) rgba(125, 255, 212, 0.5));
+  filter: drop-shadow(0 0 1px rgba(125, 255, 212, 0.5));
 }
 
 /* ============================================================

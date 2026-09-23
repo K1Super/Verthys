@@ -25,11 +25,6 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
       <span>修改密钥会导致旧密钥加密的数据无法解密，请谨慎操作</span>
     </div>
-    <!-- 待启用流程提示：开启保护触发的密钥设置 -->
-    <div v-if="pendingEnable" class="kv-info">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-      <span>保存密钥后将自动开启该模块的密钥保护；中途退出则保护保持关闭</span>
-    </div>
     <!-- 修改模式：验证原独立密钥 -->
     <div v-if="hasRecord" class="kd-old-key-row">
       <div class="kd-old-key-label">原独立密钥</div>
@@ -78,8 +73,6 @@ defineProps<{
   hasRecord: boolean;
   /** 密钥保存处理中状态 */
   keyDialogProcessing: boolean;
-  /** 待启用流程：开启保护触发的密钥设置（显示自动开启保护提示条） */
-  pendingEnable?: boolean;
 }>();
 
 /**

@@ -3,11 +3,9 @@
  *
  *
  * 职责：
- *   验证 SecurityResult 构造、auth_token 生成/存储/消费、
- *   BruteForcePersistedState 序列化、BruteForceGuard 导入导出往返、
- *   base64 编解码往返、ShadowSleep 真实 txid。
- *
- *   测试体保持与原 security_commands.rs 中的实现一致（零行为变更）。
+ *   验证 SecurityResult 构造、BruteForcePersistedState 序列化、
+ *   BruteForceGuard 导入导出往返、base64 编解码往返、
+ *   ShadowSleep 真实 txid。
  */
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -15,9 +13,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use crate::security::brute_force::{BruteForceConfig, BruteForceGuard, BruteForcePersistedState};
 use crate::security::usb_guard::ShadowSleep;
 
-use super::auth::{generate_auth_token, store_auth_token, verify_and_consume_auth_token};
 use super::responses::SecurityResult;
-use super::state::SecurityState;
 
 #[test]
 fn test_security_result_success() {
@@ -33,35 +29,6 @@ fn test_security_result_error() {
     assert!(!r.ok);
     assert_eq!(r.error_code.as_deref(), Some("PERMISSION_DENIED"));
     assert_eq!(r.detail, "缺少授权令牌");
-}
-
-#[test]
-fn test_auth_token_generation_uniqueness() {
-    let t1 = generate_auth_token();
-    let t2 = generate_auth_token();
-    assert_ne!(t1, t2, "两次生成的令牌应不同");
-    assert_eq!(t1.len(), 64, "令牌应为 64 字符 hex（32 字节）");
-    assert!(t1.chars().all(|c| c.is_ascii_hexdigit()), "令牌应为 hex 字符");
-}
-
-#[test]
-fn test_auth_token_store_and_consume() {
-    let state = SecurityState::new();
-
-    // 无令牌 → 验证失败
-    assert!(!verify_and_consume_auth_token(&state, None));
-    assert!(!verify_and_consume_auth_token(&state, Some("")));
-    assert!(!verify_and_consume_auth_token(&state, Some("wrong_token")));
-
-    // 存储令牌后验证
-    let token = generate_auth_token();
-    store_auth_token(&state, token.clone());
-
-    // 正确令牌 → 验证通过并消费
-    assert!(verify_and_consume_auth_token(&state, Some(&token)));
-
-    // 二次使用同一令牌 → 拒绝（一次性消费）
-    assert!(!verify_and_consume_auth_token(&state, Some(&token)));
 }
 
 #[test]

@@ -374,3 +374,29 @@ TEST(format_write_rejects_null)
     verthys_secure_zero(dek, sizeof dek);
     return 0;
 }
+
+/* 数据块长字段为 u32：data_size 超界必须写侧拒绝（截断落盘 = 写
+ * 成功读回失败），出参不得被触碰 */
+TEST(format_data_size_guard_rejects)
+{
+    static const uint8_t data[] = "x";
+    uint8_t salt[VERTHYS_SALT_BYTES], mek[VERTHYS_KEY_BYTES], dek[VERTHYS_KEY_BYTES];
+    verthys_random_bytes(salt, sizeof salt);
+    verthys_random_bytes(mek, sizeof mek);
+    verthys_random_bytes(dek, sizeof dek);
+
+    VerthysFmtRecord recs[1];
+    recs[0] = make_record(0x02, "big", data, sizeof(data) - 1);
+    recs[0].data_size = (uint64_t)UINT32_MAX + 1u;
+
+    uint8_t *blob = NULL; size_t sz = 0;
+    CHECK_EQ(vfmt_write(salt, VERTHYS_ARGON2_MEM_KIB, VERTHYS_ARGON2_ITERS,
+                        VERTHYS_ARGON2_PARALLEL, mek, dek, recs, 1, &blob, &sz),
+             -1);
+    CHECK(blob == NULL);   /* 失败路径统一置空出参 */
+    CHECK(sz == 0);
+
+    verthys_secure_zero(mek, sizeof mek);
+    verthys_secure_zero(dek, sizeof dek);
+    return 0;
+}

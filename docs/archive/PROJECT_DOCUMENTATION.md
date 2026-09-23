@@ -46,7 +46,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 | **四层架构** | UI 交互层 / 应用调度层 / 核心安全 DLL / 持久化存储层 |
 | **防逆向** | 编译剥离符号表、内置反调试（本进程内高置信度信号，检测器经直接系统调用防 Hook）、mitigation policy 沙盒、`.vsec` 构建期签名 + `.rhat` 32 函数运行时哈希双重完整性 |
 | **原子化事务** | WAL 先行重放 + 六 Phase 提交（VsbTxnV3 法定人数）+ Extent 内容寻址（BLAKE2b 指纹去重）+ 崩溃恢复矩阵 |
-| **三密钥分立** | 索引密钥（A）/ 数据密钥（B）/ 超级块密钥（C）独立隔离；★ **CNG 内核全量托管**（用户态仅瞬态栈帧）+ 自动轮换（rekey\_auto） |
+| **三密钥分立** | 索引密钥（A）/ 数据密钥（B）/ 超级块密钥（C）独立隔离；**CNG 内核全量托管**（用户态仅瞬态栈帧）+ 自动轮换（rekey\_auto） |
 | **CNG 机器绑定** | pepper 经 CNG 持久化机器密钥（RSA-OAEP）包装，跨设备不可解；来源指纹化、可诊断 |
 | **应急分级响应** | TELEMETRY / DEGRADE / KILL 三级信号模型，检测与响应解耦，杜绝误报自毁 |
 | **民用顶级安全** | 抵御普通本地、远程非特权攻击（威胁模型详见 §17）；防御闭环 7/7 BLOCKED（`Verthys_GetSecurityStatus`） |
@@ -110,15 +110,15 @@ L1  crypto/        密码学原语（cipher/keymanager/pepper/rekey_auto）
 L0  （存储即 V3 容器文件本身，分区认证 + Extent 内容寻址）
 L6  security/      纵深防御（横向，12 个组件目录）：
       preset/               三档安全预设（双缓冲原子切换）
-      integrity/            .vsec 构建期签名验签 + ★ WP-8 runtime_hash（.rhat 32 函数运行时哈希）
-      anti_analysis/        反调试 v2（KILL 级）+ 防注入巡检 + ★ WP-9 syscall_direct（直接系统调用）
+      integrity/            .vsec 构建期签名验签 + WP-8 runtime_hash（.rhat 32 函数运行时哈希）
+      anti_analysis/        反调试 v2（KILL 级）+ 防注入巡检 + WP-9 syscall_direct（直接系统调用）
       memory/               内存防护（防转储巡逻）+ 三权分立 CNG 密钥（WP-1 全量接线）+ 安全分配器
       emergency/            应急分级响应（TELEMETRY/DEGRADE/KILL）
       layer1_process_guard/ 双层 Job Object + 白名单 DACL
       layer3_hw_binding/    CNG 机器密钥 + MachineGuid 指纹 + System32 优先
       layer4_hook_defense/  TLS 标志验证 + 联动销毁（CNG purge + emergency）
       layer5_sandbox/       进程 mitigation policy 位掩码登记
-      layer6_closure/       ★ WP-11 闭环防御验证（7 项攻击路径状态机，7/7 BLOCKED）
+      layer6_closure/       WP-11 闭环防御验证（7 项攻击路径状态机，7/7 BLOCKED）
 ```
 
 **V2 退役删除**（2026-09-15，详见 V3\_UPGRADE\_PLAYBOOK.md §1.4）：`verthys_btree`/`verthys_datablock`/`verthys_migration`/`verthys_v2_lifecycle`/V2 超级块/`verthys_warmcache`(v2)/watcher/mountwatch/runtime 层整体——B+ 树与槽位池由 LSM + Extent 承接，运行时监视由 worker 侧（Rust）承接。
@@ -139,7 +139,7 @@ L6  security/      纵深防御（横向，12 个组件目录）：
 ```
 core/
 ├── CMakeLists.txt              # 源清单（VERTHYS_SRC_SUBDIRS 31 组件目录）+ ASAN 开关
-├── verthys.def                # ★ 导出符号唯一白名单（29 个函数）
+├── verthys.def                # 导出符号唯一白名单（29 个函数）
 ├── include/                    # ── 公共接口区（与私有实现物理隔离）──
 │   ├── verthys.h              # 对外 C ABI 契约（API_VERSION 0x000B）
 │   └── error_codes.h           # C/Rust FFI 错误码对齐
@@ -162,7 +162,7 @@ core/
 │   │   ├── cipher/            # verthys_crypto.c/.h + verthys_crypto_cng.c/.h + secure_mem.c
 │   │   ├── keymanager/        # keymanager.c/.h + keymanager_cng.c/.h（CNG rotate_abc）
 │   │   ├── pepper/            # verthys_pepper.c/.h（v2 来源指纹/Shamir）
-│   │   └── rekey/             # verthys_rekey_auto.c/.h（★ 自动轮换）
+│   │   └── rekey/             # verthys_rekey_auto.c/.h（自动轮换）
 │   ├── index/                  # L3 索引
 │   │   ├── lsm/               # verthys_lsm.c/.h + _internal.h + _memtable/_sstable/_compaction.c
 │   │   └── warmcache/         # verthys_warmcache_v3.c/.h（独占句柄 + 原子替换）
@@ -171,26 +171,26 @@ core/
 │   │   └── txn/               # verthys_transaction_v3.c/.h（六 Phase）
 │   └── security/               # L6 纵深防御（10 组件目录，12 个含根）
 │       ├── preset/            # security_preset.c/.h（双缓冲原子切换）
-│       ├── integrity/         # integrity.c/.h + runtime_hash.c/.h（★ .vsec + .rhat）
-│       ├── anti_analysis/     # anti_debug_v2 + anti_inject + syscall_direct（★ WP-9）
+│       ├── integrity/         # integrity.c/.h + runtime_hash.c/.h（.vsec + .rhat）
+│       ├── anti_analysis/     # anti_debug_v2 + anti_inject + syscall_direct（WP-9）
 │       ├── memory/            # memory_guard + key_separation + secure_allocator
 │       ├── emergency/         # emergency.c/.h（分级响应）
 │       ├── layer1_process_guard/  # job_isolation.c/.h
 │       ├── layer3_hw_binding/     # cng_machine_key + hardware_binding + system32_loader
 │       ├── layer4_hook_defense/    # tls_loader + tls_callbacks + tamper_destroy
 │       ├── layer5_sandbox/         # process_sandbox.c/.h
-│       └── layer6_closure/         # defense_closure.c/.h（★ WP-11）
+│       └── layer6_closure/         # defense_closure.c/.h（WP-11）
 ├── schema/                     # ── FlatBuffers 契约区 ──
 │   ├── superblock_v3.fbs / partition.fbs / extent.fbs / sstable.fbs / demo.fbs
 │   └── generated/             # flatc -a 产物（reader/builder/verifier，构建期再生成）
 ├── tools/                      # ── 构建工具区 ──
-│   └── rhash_gen.c            # ★ .rhat 节生成（/MAP + .pdata + .reloc 解析）
+│   └── rhash_gen.c            # .rhat 节生成（/MAP + .pdata + .reloc 解析）
 ├── examples/                   # ── 示例区 ──
 │   └── ffi/cng_example.c      # CNG 密钥托管 FFI 示例
 └── tests/                      # ── 测试区（镜像 src 子域，35 文件 250 项）──
     ├── test_runner.c          # 入口 + argv 过滤器（子串 + OR 多组）
     ├── api/ container/ crypto/ index/ transaction/
-    ├── property/              # ★ test_v3_property.c（不变式 harness）
+    ├── property/              # test_v3_property.c（不变式 harness）
     ├── regression/ schema/ security/ perf/
     └── fuzz/                  # 5 目标 + gen_seeds（语料生成）
 ```
@@ -235,13 +235,13 @@ core/
 
 | 用途 | 算法 | 参数 |
 |---|---|---|
-| 记录/索引/超级块/缓存 AEAD | ★ V3 主路径：CNG AES-256-GCM（内核托管，12B 单调 nonce，E-7）；交换信封/兼容路径：XChaCha20-Poly1305 (libsodium，24B nonce) | 密文布局 `[ct‖tag]` |
+| 记录/索引/超级块/缓存 AEAD | V3 主路径：CNG AES-256-GCM（内核托管，12B 单调 nonce，E-7）；交换信封/兼容路径：XChaCha20-Poly1305 (libsodium，24B nonce) | 密文布局 `[ct‖tag]` |
 | 口令派生 | Argon2id | BALANCED 32MiB / iters 校准（1..3，目标 ~1.2s）；SECURE 64MiB/3/1（固定） |
 | 子密钥派生 | HKDF-SHA256-Expand | 域分离标签 `verthys/…-v1/v2` |
 | 完整性 | HMAC-SHA256 + BLAKE2b-256（Extent 内容指纹） | integrity_key = HKDF(MEK, "integrity-key") |
 | 随机数 | randombytes_buf | OS CSPRNG |
 | pepper 机器包装 | CNG RSA-2048 OAEP-SHA256 | label = MachineGuid 指纹（自携带于 pepper 文件） |
-| 密钥托管（★ WP-1 已接线） | CNG AES-256-GCM | 12B nonce，`[ct‖tag]` 与 libsodium 布局兼容 |
+| 密钥托管（WP-1 已接线） | CNG AES-256-GCM | 12B nonce，`[ct‖tag]` 与 libsodium 布局兼容 |
 
 ### 5.2 Argon2id 动态校准与自适应再封装（方案 §4.5）
 
@@ -271,11 +271,11 @@ L4 记录密钥：record_key = HKDF-Expand(DEK, "verthys/record-v1" ‖ record_i
 
 **三层来源**（优先级降序）：注入 > OS 托管（CNG/TPM）> 编译内嵌兜底。
 
-**★ v2 文件格式（304B）**：`magic(4) + version(2) + source_type(2) + fingerprint(8) + label(32) + cipher(256)`。
+**v2 文件格式（304B）**：`magic(4) + version(2) + source_type(2) + fingerprint(8) + label(32) + cipher(256)`。
 - `source_fingerprint = HMAC-SHA256(domain_key, label‖cipher)[:8]`，与机器密钥解包交叉验证；
 - v1 文件（296B）解包成功后自动升级为 v2（方案 §9 迁移）。
 
-**★ 来源错误禁兜底（P0-B 根治）**：文件存在但解包失败/指纹不符 → 置 `g_pepper_source_error`，**禁止静默回退编译常量**；解锁路径返回 `VERTHYS_ERR_PEPPER_SOURCE`（区别于"密码错误"）。容器超级块 `flags[5]` 记录创建时来源，解锁时校验一致性。
+**来源错误禁兜底（P0-B 根治）**：文件存在但解包失败/指纹不符 → 置 `g_pepper_source_error`，**禁止静默回退编译常量**；解锁路径返回 `VERTHYS_ERR_PEPPER_SOURCE`（区别于"密码错误"）。容器超级块 `flags[5]` 记录创建时来源，解锁时校验一致性。
 
 **恢复卡**：Shamir GF(2⁸) k-of-n 分片（`verthys_pepper_export/reconstruct_shamir`）。
 
@@ -286,7 +286,7 @@ L4 记录密钥：record_key = HKDF-Expand(DEK, "verthys/record-v1" ‖ record_i
 - **key_c（超级块）**：从 MEK 派生（解决"先有鸡"问题）；改密随 MEK 轮换。
 - 三密钥 CNG 内核托管（§6.4）；所有失败路径 `verthys_secure_zero`（回归测试覆盖）。
 
-### 6.4 CNG 内核托管（key_separation）— ★ 已全量接线（WP-1）
+### 6.4 CNG 内核托管（key_separation）— 已全量接线（WP-1）
 
 `key_separation.c` 提供 AES-256-GCM 内核态 AEAD（`BCryptGenerateSymmetricKey` 导入内核，用户态仅持句柄；C 角色激活/休眠逻辑隔离；`any_installed` 查询供防御闭环 MEM\_DUMP 判据）。V3 全路径采用 12B 单调 nonce 计数器（E-7，分区表持久化）。`keymanager_cng` 的 `rotate_abc` 支撑 rekey\_auto 内核态新旧切换。用户态明文瞬态窗口见 E-5 诚实界定（§17.3）。
 
@@ -330,7 +330,7 @@ V3 温缓存（`index/warmcache/verthys_warmcache_v3.c`）：独占句柄（共�
 - `keymanager/keymanager.c`：四级派生 + DEK 包裹（AD 域分离）+ 记录密钥；`keymanager_cng.c`：CNG 密钥导入/导出/rotate\_abc（rekey\_auto 轮换执行体）。pepper 来源错误 → `VERTHYS_ERR_PEPPER_SOURCE`。
 - `pepper/verthys_pepper.c`：v2 托管框架（§6.2，来源指纹/禁兜底/Shamir/CNG 机器包装）。
 - `cipher/secure_mem.c`：`verthys_secure_zero` / `verthys_lock_memory`。
-- `rekey/verthys_rekey_auto.c`：★ 密钥自动轮换（WP-7）——90 天 / 10,000 ops / 24h 最小间隔 / DEGRADE 信号强制触发；轮换在 CNG 内核态新旧切换（原子指针切换句柄）+ vsb\_txn 法定人数保护。
+- `rekey/verthys_rekey_auto.c`：密钥自动轮换（WP-7）——90 天 / 10,000 ops / 24h 最小间隔 / DEGRADE 信号强制触发；轮换在 CNG 内核态新旧切换（原子指针切换句柄）+ vsb\_txn 法定人数保护。
 
 ### 8.2 L2 container/
 - `superblock/verthys_superblock_v3.c`：V3 超级块（schema 驱动）+ **VsbTxnV3** 事务原语（begin 备份 → commit 丢弃 → rollback 整块恢复 + HMAC，幂等）+ 法定人数（quorum）提交状态机。
@@ -349,7 +349,7 @@ V3 温缓存（`index/warmcache/verthys_warmcache_v3.c`）：独占句柄（共�
 - `wal/verthys_wal.c`：预写日志（帧追加 + cursor + `verthys_wal_reset`）。
 
 ### 8.5 L5 api/
-- `lifecycle/verthys_api.c`：`Verthys_Init`（防御闭环 BOOT 门 + 降级处理器 + 活动句柄注册表）、`Verthys_Unlock`（pepper 快速失败 → `.vsec` 验签 → 解锁流水线 → 成功钩子：`emergency_clear_signals` + 模块巡检 + 防转储巡逻 + **runtime\_hash\_scan**）、`Verthys_Lock`/`Verthys_Deinit`、`Verthys_GetSecurityStatus`（★ WP-11）。
+- `lifecycle/verthys_api.c`：`Verthys_Init`（防御闭环 BOOT 门 + 降级处理器 + 活动句柄注册表）、`Verthys_Unlock`（pepper 快速失败 → `.vsec` 验签 → 解锁流水线 → 成功钩子：`emergency_clear_signals` + 模块巡检 + 防转储巡逻 + **runtime\_hash\_scan**）、`Verthys_Lock`/`Verthys_Deinit`、`Verthys_GetSecurityStatus`（WP-11）。
 - `lifecycle/verthys_v3_lifecycle.c`：V3 创建/解锁（maybe\_rotate 接线 rekey\_auto）、`Verthys_CreateWithPreset`。
 - `unlock/verthys_unlock_pipeline.c`：解锁 S0-S6 流水线（渐进式，回调 8 阶段异步推送）。
 - `transfer/verthys_export_import.c`：`Verthys_ChangePassword`（vsb\_txn 保护）、`Verthys_Export`（>65535 条 `VERTHYS_ERR_EXPORT_TOO_MANY`）、`Verthys_Import`。
@@ -360,7 +360,7 @@ V3 温缓存（`index/warmcache/verthys_warmcache_v3.c`）：独占句柄（共�
 
 ## 9. 安全防护模块（V3 收口后：含 WP-8/9/11）
 
-### 9.1 emergency — 应急分级响应（★ P0-3 根治）
+### 9.1 emergency — 应急分级响应（P0-3 根治）
 
 **三级模型**（检测与响应解耦）：
 
@@ -374,7 +374,7 @@ V3 温缓存（`index/warmcache/verthys_warmcache_v3.c`）：独占句柄（共�
 - `emergency_clear_signals` 接入解锁成功与降级恢复。
 - KILL 路径保留原有序：熔断闩锁 → `memory_guard_emergency_purge` → `key_separation_purge_all` → `select_fault_code`（匿名类别码 0xE0001..0xE0006）→ `TerminateProcess`（不留 dump）。
 
-### 9.2 检测器（★ WP-9：检测器查询经直接系统调用，绕过用户态 Hook）
+### 9.2 检测器（WP-9：检测器查询经直接系统调用，绕过用户态 Hook）
 
 | 检测器 | 修复 | 接线点 | 级别 |
 |---|---|---|---|
@@ -384,7 +384,7 @@ V3 温缓存（`index/warmcache/verthys_warmcache_v3.c`）：独占句柄（共�
 
 **syscall\_direct**（`anti_analysis/syscall_direct.c`，WP-9）：SSN 排序法提取（`4C 8B D1` + `B8 imm32` 特征 + 仿射一致性 + 双侧锚点插值互证）→ W^X stub 页（RW 写入 → 收紧 X，全程无可写可执行页）→ CFG `SetProcessValidCallTargets` 登记；任一环节失败优雅降级回 `GetProcAddress`（TELEMETRY）。覆盖 NtQueryInformationProcess / NtQuerySystemInformation 两入口，表驱动扩展。
 
-### 9.3 integrity — 双重完整性：.vsec 构建期签名 + .rhat 运行时哈希（★ WP-8）
+### 9.3 integrity — 双重完整性：.vsec 构建期签名 + .rhat 运行时哈希（WP-8）
 
 - `.vsec` 只读节（128B）由 Release 构建脚本注入 `.text`/`.rdata` 文件内容 HMAC；`integrity_verify_startup()`（Verthys\_Unlock 入口）从磁盘重算比对——以文件内容为校验对象，免疫 ASLR 重定位；全零节（开发构建）= 跳过；失配 = KILL + `VERTHYS_ERR_CORRUPT`。
 - **`.rhat` 节（WP-8 运行时哈希）**：构建期 `tools/rhash_gen` 解析 `/MAP` + `.pdata` + `.reloc`，对 X-macro 32 关键函数计算 BLAKE2b-256 补丁写入；运行期 `runtime_hash_scan()`（解锁后 + 每 30 分钟）重算比对——**重定位槽位双侧掩码归一**防 ASLR 误报；失配 = KILL；`.rhat` 自身纳入 `.vsec` v2 校验第三槽（防改表）。
@@ -394,14 +394,14 @@ V3 温缓存（`index/warmcache/verthys_warmcache_v3.c`）：独占句柄（共�
 
 | 模块 | 现状 |
 |---|---|
-| `key_separation` | ★ **CNG 内核托管 AEAD 全量接线**（WP-1）：三密钥驻留内核句柄，用户态仅瞬态栈帧（E-5）；`any_installed` 判据支撑 MEM\_DUMP BLOCKED |
+| `key_separation` | **CNG 内核托管 AEAD 全量接线**（WP-1）：三密钥驻留内核句柄，用户态仅瞬态栈帧（E-5）；`any_installed` 判据支撑 MEM\_DUMP BLOCKED |
 | `job_isolation` | 双层 Job（内层 BREAKAWAY\_OK / 外层 KILL\_ON\_JOB\_CLOSE）+ 无 Deny-ACE 白名单 DACL |
 | `process_sandbox` | Rust worker 加载 DLL 前应用四项 mitigation policy，位掩码经 `Verthys_NotifySandboxAttrs` 注入 |
 | `tls_loader` | 仅验证 TLS 回调标志（未置位 = KILL；**不再自愈**）；IAT 基准与种子定时器已删除 |
 | `tamper_destroy` | 两步真实链：`key_separation_purge_all` → `emergency_trigger` |
 | `hardware_binding` | **MachineGuid 指纹**（HMAC-SHA256 域分离）；CPUID/SMBIOS/UEFI 已弃用 |
 | `cng_machine_key` | 仅 `NTE_BAD_KEYSET` 才创建（P0-C）；无 OVERWRITE flag；NTE\_EXISTS 竞态重试打开 |
-| `defense_closure` | ★ **7/7 BLOCKED（运行时验证，WP-11）**：SUSPEND\_BYPASS / MEM\_DUMP / HIBERNATION / IAT\_INLINE\_HOOK / DLL\_HIJACK / PROCESS\_READ / CROSS\_DEVICE 状态机，BLOCKED/DEGRADED/FAILED 语义诚实化；`Verthys_GetSecurityStatus` 导出供 worker/前端查询 |
+| `defense_closure` | **7/7 BLOCKED（运行时验证，WP-11）**：SUSPEND\_BYPASS / MEM\_DUMP / HIBERNATION / IAT\_INLINE\_HOOK / DLL\_HIJACK / PROCESS\_READ / CROSS\_DEVICE 状态机，BLOCKED/DEGRADED/FAILED 语义诚实化；`Verthys_GetSecurityStatus` 导出供 worker/前端查询 |
 | `security_preset` | **双缓冲 + 原子指针切换**（P1-L 治理，无全零窗口） |
 | `memory_guard` | 注册区锁页 + 单轮覆写 + 巡逻定时器（性能模式零启动） |
 | `secure_allocator` | 安全分配器（CNG 密钥路径专用，WP-1 配套） |
@@ -428,7 +428,7 @@ V3 温缓存（`index/warmcache/verthys_warmcache_v3.c`）：独占句柄（共�
 ### 11.2 原子提交与崩溃恢复（V3 六 Phase）
 WAL 帧追加 + fsync（BEGIN→WRITE→PREPARE）→ 超级块 VsbTxnV3 法定人数提交（COMMIT，幂等）→ CONFIRM 后 WAL 帧清零。**MemTable ≡ 重放 [0, wal\_cursor) 不变式**保证任一崩溃点重开后语义完整：PREPARED 崩溃 → 丢弃组按排除重建（`verthys_lsm_rebuild_excluding`，保被墓碑遮蔽的已提交条目）；COMMITTED 后 CONFIRM 前 → 记录必须可见。崩溃注入矩阵测试覆盖（`test_txn_recovery_inject` + 属性测试 4/5/6）。
 
-### 11.3 超级块事务原语（★ VsbTxnV3，法定人数提交）
+### 11.3 超级块事务原语（VsbTxnV3，法定人数提交）
 
 ```c
 VsbTxnV3 txn;
@@ -465,7 +465,7 @@ AEAD tag（逐块认证解密时即时）→ Extent 索引 HMAC + BLAKE2b-256 �
 生命周期：`Verthys_Init` / `Verthys_NotifySandboxAttrs` / `Verthys_Deinit` / `Verthys_Unlock` / `Verthys_CreateWithPreset` / `Verthys_RegisterUnlockProgressCallback` / `Verthys_Lock` / `Verthys_Flush`
 记录：`Verthys_AddRecord`（name\_len ≤ 4096）/ `Verthys_GetRecord` / `Verthys_DeleteRecord` / `Verthys_DeleteRecords` / `Verthys_HasRecordByType` / `Verthys_FindFirstLidByType`
 扫描：`Verthys_ScanOpen/Fetch/RecordFree/Close` / `Verthys_ScanSummaryOpen/Fetch/RecordFree/Close` / `Verthys_GetSummaryCount`
-完整性与诊断：`Verthys_VerifyIntegrity` / `Verthys_GetContainerInfo` / `Verthys_GetDiagnostics` / **`Verthys_GetSecurityStatus`**（★ WP-11）
+完整性与诊断：`Verthys_VerifyIntegrity` / `Verthys_GetContainerInfo` / `Verthys_GetDiagnostics` / **`Verthys_GetSecurityStatus`**（WP-11）
 导入导出：`Verthys_Export` / `Verthys_Import` / `Verthys_ChangePassword`
 
 ### 12.4 关键契约
@@ -491,14 +491,14 @@ AEAD tag（逐块认证解密时即时）→ Extent 索引 HMAC + BLAKE2b-256 �
 | 0x9 | VERTHYS_ERR_CORRUPT | 完整性校验失败（含 `.vsec`/`.rhat` 验签失败） |
 | 0xA | VERTHYS_ERR_RATE | 访问限流 |
 | 0xB | VERTHYS_ERR_SNAPSHOT | 扫描快照过期（WP-5） |
-| **0xC** | **VERTHYS_ERR_PEPPER_SOURCE** | ★ 胡椒来源不可用（提示"安全源已变更"，非密码错误） |
-| **0xD** | **VERTHYS_ERR_EXPORT_TOO_MANY** | ★ 导出超出交换信封 65535 条容量（P1-8） |
-| **0xE** | **VERTHYS_ERR_CNG_UNAVAILABLE** | ★ CNG 内核托管不可用（WP-1：导入失败/内核句柄缺失） |
-| **0xF** | **VERTHYS_ERR_RESOURCE_LIMIT** | ★ 资源上限触顶（WP-7：内存 512MB / 后台线程等） |
-| **0x10** | **VERTHYS_ERR_QUORUM_FAILED** | ★ 超级块法定人数提交失败（WP-2：VsbTxnV3 quorum 未达成） |
-| **0x11** | **VERTHYS_ERR_PARTIAL_UNLOCK** | ★ 部分解锁成功（WP-5：渐进式解锁中途态，按成功分支处理） |
-| **0x12** | **VERTHYS_ERR_TIMEOUT** | ★ 操作超时（WP-5：解锁流水线阶段超时） |
-| **0x13** | **VERTHYS_ERR_UNSUPPORTED** | ★ 不支持的操作（WP-5 接线收口：V2 退役 op 统一语义化拒绝） |
+| **0xC** | **VERTHYS_ERR_PEPPER_SOURCE** | 胡椒来源不可用（提示"安全源已变更"，非密码错误） |
+| **0xD** | **VERTHYS_ERR_EXPORT_TOO_MANY** | 导出超出交换信封 65535 条容量（P1-8） |
+| **0xE** | **VERTHYS_ERR_CNG_UNAVAILABLE** | CNG 内核托管不可用（WP-1：导入失败/内核句柄缺失） |
+| **0xF** | **VERTHYS_ERR_RESOURCE_LIMIT** | 资源上限触顶（WP-7：内存 512MB / 后台线程等） |
+| **0x10** | **VERTHYS_ERR_QUORUM_FAILED** | 超级块法定人数提交失败（WP-2：VsbTxnV3 quorum 未达成） |
+| **0x11** | **VERTHYS_ERR_PARTIAL_UNLOCK** | 部分解锁成功（WP-5：渐进式解锁中途态，按成功分支处理） |
+| **0x12** | **VERTHYS_ERR_TIMEOUT** | 操作超时（WP-5：解锁流水线阶段超时） |
+| **0x13** | **VERTHYS_ERR_UNSUPPORTED** | 不支持的操作（WP-5 接线收口：V2 退役 op 统一语义化拒绝） |
 | 0xFFFFFFFF | VERTHYS_ERR_INTERNAL | 未归类内部异常 |
 
 **worker 侧反 Oracle 统一化（E-8）**：功能码（INVALID/NOTFOUND/EXISTS/LOCKED/RATE/SNAPSHOT/PEPPER\_SOURCE/EXPORT\_TOO\_MANY/CNG\_UNAVAILABLE/RESOURCE\_LIMIT/QUORUM\_FAILED/PARTIAL\_UNLOCK/TIMEOUT/UNSUPPORTED）透传前端；AUTH/FORMAT/IO/CORRUPT/INTERNAL 及未知码统一为 AUTH（防"密码错误 vs 文件篡改"区分泄露）。
@@ -523,15 +523,15 @@ AEAD tag（逐块认证解密时即时）→ Extent 索引 HMAC + BLAKE2b-256 �
 |---|---|---|
 | api/ | test\_init / test\_verthys\_api / test\_v3\_lifecycle / test\_verthys\_export | 生命周期、公共 API 全链路、V3 创建/解锁/扫描家族（v3life\_scan\_family\_v3）、导入导出/改密 |
 | container/ | test\_verthys\_format / test\_format\_fuzz / test\_v3\_container / test\_v3\_partition / test\_v3\_extent | 交换信封往返 + 篡改、V3 容器/分区/Extent 全链路（去重/引用守恒/回绕边界） |
-| crypto/ | test\_crypto / test\_keymanager / test\_cng\_kernel / test\_auto\_rekey | AEAD、四级密钥、★ CNG 内核托管（WP-1）、★ 自动轮换三触发 + 防震荡（WP-7） |
+| crypto/ | test\_crypto / test\_keymanager / test\_cng\_kernel / test\_auto\_rekey | AEAD、四级密钥、CNG 内核托管（WP-1）、自动轮换三触发 + 防震荡（WP-7） |
 | index/ | test\_v3\_lsm | LSM 插入/删除/查找/压实/close→reopen |
 | transaction/ | test\_txn\_recovery\_inject | 六 Phase 崩溃注入矩阵（CONFIRM 前后/回滚后/同 txid 复活） |
-| property/ | ★ test\_v3\_property | 不变式 harness（WP-12：LSM 影子模型 2000 步 / Extent 引用守恒 1200 步 / 事务一致性 48 混合 + 定向回归，揪出缺陷①②②b） |
+| property/ | test\_v3\_property | 不变式 harness（WP-12：LSM 影子模型 2000 步 / Extent 引用守恒 1200 步 / 事务一致性 48 混合 + 定向回归，揪出缺陷①②②b） |
 | regression/ | test\_final\_repair | 最终修复方案 §6.1 回归（P0/P1 全覆盖） |
 | schema/ | test\_flatcc\_demo | flatcc codegen 冒烟（WP-0） |
-| security/ | test\_memory\_safety / test\_key\_separation / test\_emergency / test\_integrity\_verify / test\_secure\_allocator / ★ test\_runtime\_hash / ★ test\_syscall\_direct / ★ test\_defense\_closure | Lock 清零/UAF、CNG 三权分立、应急分级、`.vsec` 验签、安全分配器、★ .rhat 哈希 + 补丁注入检出（WP-8）、★ SSN stub 一致性（WP-9）、★ 7/7 BLOCKED（WP-11） |
+| security/ | test\_memory\_safety / test\_key\_separation / test\_emergency / test\_integrity\_verify / test\_secure\_allocator / test\_runtime\_hash / test\_syscall\_direct / test\_defense\_closure | Lock 清零/UAF、CNG 三权分立、应急分级、`.vsec` 验签、安全分配器、.rhat 哈希 + 补丁注入检出（WP-8）、SSN stub 一致性（WP-9）、7/7 BLOCKED（WP-11） |
 | perf/ | test\_perf\_prefetch / test\_perf\_baseline | 温缓存回归、性能基准（解锁/吞吐） |
-| fuzz/ | fuzz\_superblock / fuzz\_partition / fuzz\_extent / fuzz\_sstable / fuzz\_import + gen\_seeds | ★ WP-10：5 目标 `/fsanitize=fuzzer`，语料 = 测试生成合法容器 |
+| fuzz/ | fuzz\_superblock / fuzz\_partition / fuzz\_extent / fuzz\_sstable / fuzz\_import + gen\_seeds | WP-10：5 目标 `/fsanitize=fuzzer`，语料 = 测试生成合法容器 |
 
 ### 14.4 当前测试状态（如实记录，2026-09-15）
 
@@ -582,7 +582,7 @@ AEAD tag（逐块认证解密时即时）→ Extent 索引 HMAC + BLAKE2b-256 �
 
 ### 17.3 明示的残余风险（诚实声明）
 - 密钥明文**瞬态**经过用户态栈帧（E-5 诚实界定：BCrypt 无法内核句柄→内核句柄导入，解包输出必然短暂落地；规范 = 栈上即清、禁堆分配、禁传递）；CNG 内核托管已全量接线（WP-1），防 Dump 依赖 MEM\_DUMP 判据（`key_separation_any_installed`）。
-- 编译内嵌兜底 pepper 为二进制可提取常量（零配置兜底的既定取舍；企业部署应使用 `verthys_pepper_inject` 注入强 pepper）。
+- 编译内嵌兜底 pepper 为二进制可提取常量（零配置兜底的既定取舍；部署应使用 `verthys_pepper_inject` 注入强 pepper）。
 - 用户态启发式检测（反调试/巡检）对特权攻击者无效——设计上仅作遥测与威慑。
 - MachineGuid 指纹随重装系统改变（绑定语义使然；恢复走授权迁移/pepper 恢复卡）。
 

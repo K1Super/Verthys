@@ -11,7 +11,9 @@
  *   deep-idle >60s     → 1fps，全部暂停，背景低帧率维持
  *
  * 状态切换信号：
- *   - 交互事件（pointermove/pointerdown/keydown/wheel/touchstart）→ 立即 active
+ *   - 指针/触碰类事件（pointermove/pointerdown/wheel/touchstart）→
+ *     两段唤醒：先落 settling（30fps、DPR 1.5），持续活动满 400ms 后升 active
+ *   - 键盘事件（keydown）→ 立即 active（可达性语义要求即时满响应）
  *   - 页面隐藏（visibilitychange → hidden）→ 直接 deep-idle（rAF 天然停帧）
  *   - 窗口失焦（blur）→ deep-idle；重新聚焦（focus）→ active
  *     （保留原各引擎的 blur 暂停行为，收归唯一权威源统一管理）
@@ -38,14 +40,16 @@ const THRESHOLDS = {
   "deep-idle": 60_000,
 } as const;
 
-/** 触发 active 的交互事件集（passive，零阻断） */
-const ACTIVITY_EVENTS: (keyof WindowEventMap)[] = [
+/** 指针/触碰类活动事件（passive，零阻断）— 两段唤醒路径：先 settling 再升温 */
+const POINTER_ACTIVITY_EVENTS: (keyof WindowEventMap)[] = [
   "pointermove",
   "pointerdown",
-  "keydown",
   "wheel",
   "touchstart",
 ];
+
+/** 键盘活动事件（passive，零阻断）— 即时 active 路径 */
+const KEY_ACTIVITY_EVENTS: (keyof WindowEventMap)[] = ["keydown"];
 
 /* ---------- 单例状态 ---------- */
 const level = ref<IdleLevel>("active");
@@ -75,14 +79,26 @@ function scheduleTransitions(): void {
   );
 }
 
-/** 任意用户交互 → 立即 active 并重排跃迁（对外亦作 resetIdle 暴露）
- *  ★ 性能根治：pointermove 每秒可触发数百次 — 若每次都写响应式时间戳
- *  并 clear+set 三个跃迁定时器，高频鼠标移动即定时器 churn 卡顿源。
- *  节流 500ms：档位阈值最小 3s，500ms 内的活动偏差无语义影响；
- *  非 active 状态（失焦恢复/降档唤醒）不节流，保证立即满帧。 */
+/** 活动节流窗口（毫秒）：active 态下高频事件（pointermove 为主）仅每
+ *  500ms 处理一次 — 档位阈值最小 3s，窗口内的活动偏差无语义影响；
+ *  非 active 态不节流（唤醒路径即时落档）。 */
 const ACTIVITY_THROTTLE_MS = 500;
 let lastHandledActivity = 0;
 
+/** 指针类唤醒升温时长（毫秒）：settling 持续活动满此时长后升 active */
+const WAKE_RAMP_MS = 400;
+/** 升温一次性定时器（每次唤醒流程只排一次，句柄供取消） */
+let wakeRampTimer: number | null = null;
+
+/** 取消未决的升温定时器（页面隐藏/窗口失焦/卸载时随迁跃定时器一并清理） */
+function cancelWakeRamp(): void {
+  if (wakeRampTimer !== null) {
+    window.clearTimeout(wakeRampTimer);
+    wakeRampTimer = null;
+  }
+}
+
+/** 键盘类交互 / 聚焦恢复 / 可见性恢复 → 立即 active 并重排跃迁 */
 function onUserActivity(): void {
   const now = performance.now();
   if (level.value === "active" && now - lastHandledActivity < ACTIVITY_THROTTLE_MS) {
@@ -94,6 +110,31 @@ function onUserActivity(): void {
     level.value = "active";
   }
   scheduleTransitions();
+}
+
+/** 指针/触碰类交互 → 两段唤醒：先落 settling，再经一次性定时器于
+ *  WAKE_RAMP_MS 后升 active。交互首毫秒不再直冲满帧，避免唤醒满配与
+ *  用户操作同帧叠加 GPU 尖峰。节流语义与 onUserActivity 共享：
+ *  active 态高频事件每 500ms 处理一次；非 active 态不节流。 */
+function onPointerActivity(): void {
+  const now = performance.now();
+  if (level.value === "active") {
+    if (now - lastHandledActivity < ACTIVITY_THROTTLE_MS) return;
+  }
+  lastHandledActivity = now;
+  lastActivityTime.value = now;
+  if (level.value !== "active" && level.value !== "settling") {
+    level.value = "settling";
+  }
+  scheduleTransitions();
+  if (level.value !== "active" && wakeRampTimer === null) {
+    wakeRampTimer = window.setTimeout(() => {
+      wakeRampTimer = null;
+      if (level.value !== "active") {
+        level.value = "active";
+      }
+    }, WAKE_RAMP_MS);
+  }
 }
 
 /** 强制重置为 active（引擎转场/穿梭等需要立即满帧的场景 — 绕过节流） */
@@ -110,6 +151,7 @@ function forceResetIdle(): void {
 function handleVisibilityChange(): void {
   if (document.hidden) {
     clearTimers();
+    cancelWakeRamp();
     level.value = "deep-idle";
   } else {
     onUserActivity();
@@ -119,6 +161,7 @@ function handleVisibilityChange(): void {
 /** 窗口失焦 → deep-idle（原各引擎 blur 暂停行为收归此处）；聚焦 → active */
 function handleWindowBlur(): void {
   clearTimers();
+  cancelWakeRamp();
   level.value = "deep-idle";
 }
 
@@ -141,7 +184,10 @@ function install(): void {
   if (typeof window === "undefined" || installed) return;
   installed = true;
 
-  ACTIVITY_EVENTS.forEach((e) =>
+  POINTER_ACTIVITY_EVENTS.forEach((e) =>
+    window.addEventListener(e, onPointerActivity, { passive: true }),
+  );
+  KEY_ACTIVITY_EVENTS.forEach((e) =>
     window.addEventListener(e, onUserActivity, { passive: true }),
   );
 
@@ -180,7 +226,9 @@ export function useGlobalIdleScheduler(): GlobalIdleScheduler {
 export function disposeGlobalIdleScheduler(): void {
   if (!installed) return;
   clearTimers();
-  ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, onUserActivity));
+  cancelWakeRamp();
+  POINTER_ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, onPointerActivity));
+  KEY_ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, onUserActivity));
   document.removeEventListener("visibilitychange", handleVisibilityChange);
   window.removeEventListener("blur", handleWindowBlur);
   window.removeEventListener("focus", handleWindowFocus);

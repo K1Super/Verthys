@@ -55,15 +55,6 @@ pub mod state {
     /// 当前状态文件版本号。
     /// 与 magic 分离，允许在不改变 magic 的情况下升级格式。
     pub const STATE_VERSION: u32 = 2;
-
-    /// 旧版 magic 常量（v1 格式）。
-    /// 仅在迁移模块中作为读回退标识，不参与写操作。
-    #[allow(dead_code)]
-    pub const STATE_LEGACY_MAGIC_V1: &str = "VERTHYS_STATE_v1";
-
-    /// 旧版版本号（v1）。
-    #[allow(dead_code)]
-    pub const STATE_LEGACY_VERSION_V1: u32 = 1;
 }
 
 // ===== 共享内存常量 =====
@@ -174,7 +165,7 @@ pub mod timeout {
 // 后续主版本将移除顶层重导出。
 
 #[allow(unused_imports)]
-pub use state::{STATE_MAGIC, STATE_VERSION, STATE_LEGACY_MAGIC_V1, STATE_LEGACY_VERSION_V1};
+pub use state::{STATE_MAGIC, STATE_VERSION};
 #[allow(unused_imports)]
 pub use shm::{
     SHM_MAGIC, SHM_VERSION, SHM_HEADER_SIZE, SHM_ENTRY_SIZE, SHM_DEFAULT_SIZE, SHM_MAX_SIZE,

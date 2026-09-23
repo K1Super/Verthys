@@ -44,7 +44,7 @@ int keymanager_derive_master(uint8_t master_key[VERTHYS_KEY_BYTES],
                              const uint8_t salt[VERTHYS_SALT_BYTES]);
 
 /* ===================================================================== *
- * ★ 企业级优化：完全参数化的主密钥派生                                    *
+ * 优化：完全参数化的主密钥派生                                    *
  *                                                                    *
  * 与 keymanager_derive_master 相同，但 Argon2id 参数由调用方传入，      *
  * 支持从超级块读取实际参数（BALANCED 32MiB/2/1 / SECURE 64MiB/3/1）。   *
@@ -181,7 +181,7 @@ int keymanager_derive_master_v3(uint8_t master_key[VERTHYS_KEY_BYTES],
                                 uint32_t parallel);
 
 /* V3 完整性密钥：HKDF-Expand(MEK, "verthys/integrity-key-v3") → 32B。
- * 与 V2 verthys_derive_integrity_key 标签隔离（域分离，防跨版本混用）。
+ * 与历史完整性密钥派生标签隔离（域分离，防跨版本混用）。
  * 返回 0 成功，非 0 失败。 */
 int keymanager_derive_integrity_key_v3(uint8_t out[VERTHYS_KEY_BYTES],
                                        const uint8_t master_key[VERTHYS_KEY_BYTES]);

@@ -1,6 +1,6 @@
 include(CTest)
 
-# According to the C++ standard ISO/IEC 14882:2024 §6.9.3.1,
+# According to the C++ standard ISO/IEC 14882:2024
 # 'main' with C language linkage is ill-formed.
 # Suppress warning when including C file with main from extern "C"
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")

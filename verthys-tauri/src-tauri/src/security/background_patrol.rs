@@ -68,7 +68,7 @@ const HEARTBEAT_TIMEOUT_SECS: u64 = 15;
 /// 看门狗连续重启失败上限：超过后强制触发应急熔断
 const WATCHDOG_MAX_RESTART_FAILURES: u32 = 3;
 
-/// ★ 空闲治理 R5：状态指纹不变时跳过磁盘持久化的强制兜底周期。
+/// 空闲治理 R5：状态指纹不变时跳过磁盘持久化的强制兜底周期。
 /// patrol_count 每次巡检 +1（不参与指纹），每 N 次巡检强制落盘一次，
 /// 确保计数的漂移丢失上界为 N 次巡检。
 const PATROL_FORCE_PERSIST_INTERVAL: u32 = 64;
@@ -192,8 +192,8 @@ impl PatrolPersistence {
         let plain = dpapi_unprotect(&encrypted).ok()?;
         let entry: PersistentEntry = serde_json::from_slice(&plain).ok()?;
 
-        // HMAC 校验
-        let computed_hmac = compute_hmac(&self.hmac_key, &entry.state_json);
+        // HMAC 校验（计算失败与篡改同为拒绝：降级空状态）
+        let computed_hmac = compute_hmac(&self.hmac_key, &entry.state_json).ok()?;
         if computed_hmac != entry.hmac {
             log::error!(
                 "[background_patrol] 持久化状态 HMAC 校验失败（文件可能被篡改），\
@@ -225,7 +225,13 @@ impl PatrolPersistence {
             }
         };
 
-        let hmac = compute_hmac(&self.hmac_key, &state_json);
+        let hmac = match compute_hmac(&self.hmac_key, &state_json) {
+            Ok(h) => h,
+            Err(e) => {
+                log::warn!("[background_patrol] 计算状态 HMAC 失败，跳过持久化: {}", e);
+                return;
+            }
+        };
         let entry = PersistentEntry {
             state_json,
             hmac,
@@ -284,16 +290,18 @@ fn derive_hmac_key() -> Option<[u8; 32]> {
 }
 
 /// 计算 HMAC-SHA256（hex 编码）
-fn compute_hmac(key: &[u8], data: &str) -> String {
+/// 密钥被后端拒绝时返回 Err（调用方按各自降级语义处置，不 panic）
+fn compute_hmac(key: &[u8], data: &str) -> Result<String, String> {
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length error");
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|_| "HMAC key rejected by backend".to_string())?;
     mac.update(data.as_bytes());
     let result = mac.finalize();
     let bytes = result.into_bytes();
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
-/// ★ 空闲治理 R5：计算巡检状态指纹（SHA-256 前 8 字节）
+/// 空闲治理 R5：计算巡检状态指纹（SHA-256 前 8 字节）
 ///
 /// 指纹覆盖安全关键状态（counts / triggered / install_dir / baseline_version），
 /// 不含 patrol_count（每次巡检 +1，纳入则指纹永不匹配，跳过失效）。
@@ -339,9 +347,9 @@ struct PatrolState {
     patrol_count: u64,
     /// 基线版本标识
     baseline_version: u64,
-    /// ★ 空闲治理 R5：上次实际落盘的状态指纹（不变则跳过磁盘持久化）
+    /// 空闲治理 R5：上次实际落盘的状态指纹（不变则跳过磁盘持久化）
     last_persist_fingerprint: u64,
-    /// ★ 空闲治理 R5：自上次实际落盘以来的巡检次数（周期性强制落盘兜底）
+    /// 空闲治理 R5：自上次实际落盘以来的巡检次数（周期性强制落盘兜底）
     patrols_since_persist: u32,
 }
 
@@ -1063,7 +1071,7 @@ fn run_one_patrol(ctx: &PatrolContext) {
     };
 
     // 持久化状态
-    // ★ 空闲治理 R5：状态指纹比对跳过 — 安全关键状态（counts/triggered/
+    // 空闲治理 R5：状态指纹比对跳过 — 安全关键状态（counts/triggered/
     //   install_dir/baseline_version）未变化时跳过序列化 + DPAPI 加密 +
     //   临时文件写入 + rename 的完整持久化链路；每 FORCE_PERSIST_INTERVAL
     //   次巡检强制落盘一次，patrol_count 漂移丢失上界受控。
@@ -1655,9 +1663,9 @@ mod tests {
     #[test]
     fn test_compute_hmac() {
         let key = [0u8; 32];
-        let hmac1 = compute_hmac(&key, "test data");
-        let hmac2 = compute_hmac(&key, "test data");
-        let hmac3 = compute_hmac(&key, "different data");
+        let hmac1 = compute_hmac(&key, "test data").unwrap();
+        let hmac2 = compute_hmac(&key, "test data").unwrap();
+        let hmac3 = compute_hmac(&key, "different data").unwrap();
 
         assert_eq!(hmac1, hmac2); // 相同输入应产生相同 HMAC
         assert_ne!(hmac1, hmac3); // 不同输入应产生不同 HMAC

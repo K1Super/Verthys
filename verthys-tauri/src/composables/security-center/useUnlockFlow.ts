@@ -154,7 +154,7 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
   const unlockProgressElapsed = ref(0);
 
   /**
-   * 进度完成标志（企业级根治修复）。
+   * 进度完成标志（根治修复）。
    *
    * 目的：阻止 Tauri Channel 残留消息在 Promise resolve 后覆盖最终 UI 状态。
    * 原因：Channel 回调异步，当 initUnlock resolve 时，队列中可能仍有

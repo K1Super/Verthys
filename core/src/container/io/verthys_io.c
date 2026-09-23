@@ -1,7 +1,7 @@
 /*
  * verthys_io.c — 统一 64 位文件偏移 I/O 层实现
  *
- * ★ 统一安全 I/O 层：设计位于 verthys_io.h 头注。
+ * 统一安全 I/O 层：设计位于 verthys_io.h 头注。
  * 实现要点：
  *   - Windows 使用 _fseeki64/_ftelli64（CRT 64 位文件定位）
  *   - POSIX 使用 fseeko/ftello

@@ -216,6 +216,38 @@ TEST(cng_aead_nonce_unique_monotonic)
     return 0;
 }
 
+/* nonce 字节布局解码（与编码对偶的公共提取函数） */
+TEST(cng_aead_nonce_decode_layout)
+{
+    /* 手工构造：counter 位于 nonce[4..11] 大端，前 4 字节契约恒零 */
+    uint8_t n[VERTHYS_CNG_NONCE_BYTES] =
+        { 0, 0, 0, 0, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0 };
+    CHECK(verthys_cng_nonce_decode_counter(n) == 0x123456789ABCDEF0ULL);
+
+    /* encrypt 消费的 nonce 解码必须等于加密后计数器（逐次精确对偶，
+     * 高低位都不丢失——恢复追赶依赖该精度） */
+    VerthysCngAead aead;
+    uint8_t key[VERTHYS_CNG_KEY_BYTES], key_copy[VERTHYS_CNG_KEY_BYTES];
+    uint8_t ct[8 + VERTHYS_CNG_TAG_BYTES], nonce[VERTHYS_CNG_NONCE_BYTES];
+    size_t ctlen = sizeof(ct);
+
+    verthys_random_bytes(key, sizeof(key));
+    memcpy(key_copy, key, sizeof(key_copy));
+    CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    for (unsigned i = 0; i < 8; i++) {
+        ctlen = sizeof(ct);
+        CHECK(verthys_cng_aead_encrypt(&aead, (const uint8_t *)"abc", 3,
+                                     NULL, 0, ct, &ctlen, nonce)
+              == VERTHYS_OK);
+        CHECK(verthys_cng_nonce_decode_counter(nonce)
+              == verthys_cng_aead_nonce_counter(&aead));
+    }
+    verthys_cng_aead_destroy(&aead);
+    verthys_secure_zero(key, sizeof(key));
+    return 0;
+}
+
 TEST(cng_aead_nonce_counter_restore)
 {
     VerthysCngAead aead;

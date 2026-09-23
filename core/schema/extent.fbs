@@ -1,8 +1,5 @@
 // core/schema/extent.fbs — V3 内容寻址 Extent 索引 schema
 //
-// 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.5（内容寻址 Extent）/ §6.2（Extent 分区）
-// 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-3
-//
 // 持久化语义：
 //   - Extent 索引整体经 Extent 分区 AEAD 密钥加密落盘（帧布局见
 //     verthys_extent.h），帧内为 ExtentIndexV3 的 FlatBuffers 编码；

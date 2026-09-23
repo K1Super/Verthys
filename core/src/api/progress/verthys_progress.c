@@ -13,6 +13,7 @@
 
 #include "verthys_progress.h"
 #include "verthys_api_utils.h"
+#include "verthys_diag.h"       /* VERTHYS_DIAG_LOG（消费线程汇合超时诊断） */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -85,25 +86,32 @@ VerthysProgressRing *verthys_progress_ring_create(
 
 /* 停止消费线程并销毁环形缓冲区
  *
- * 在 Verthys_Deinit 时调用。等待消费线程最多 3 秒退出，
- * 确保残留进度条目被消费完毕。 */
+ * 在 Verthys_Deinit 时调用。通知 active=0 后有界等待消费线程退出
+ * （VERTHYS_JOIN_TIMEOUT_MS）。正常路径毫秒级退出；消费者若阻塞于回调
+ * （如 stdout 管道满），有界等待超时放弃：
+ *   - 不得 free(ring)——唤醒后消费者将访问已释放内存（UAF）；
+ *   - ring 与残存线程由进程退出统一回收，不延长 Deinit 阻塞。 */
 void verthys_progress_ring_destroy(VerthysProgressRing *ring)
 {
+    DWORD wr;
+
     if (ring == NULL) return;
 
     /* 通知消费线程退出 */
     InterlockedExchange(&ring->active, 0);
 
-    /*
-     * 等待消费线程退出改为无限期。
-     * 原缺陷：3 秒超时后即 free(ring)，若消费者正阻塞在回调内
-     * （如 stdout 管道满），唤醒后将访问已释放内存（UAF）。
-     * 改为无限等待：消费者循环以 active 标志驱动、每条目间可中断，
-     * 正常路径毫秒级退出；极端阻塞场景宁可挂起 Deinit 也不悬垂释放。
-     */
     if (ring->consumer_thread != NULL) {
-        WaitForSingleObject(ring->consumer_thread, INFINITE);
-        CloseHandle(ring->consumer_thread);
+        wr = verthys_join_thread_bounded(ring->consumer_thread);
+        if (wr == WAIT_OBJECT_0) {
+            /* 已退出：句柄关闭 + ring 释放 */
+            CloseHandle(ring->consumer_thread);
+            free(ring);
+            return;
+        }
+        /* 超时/失败：消费者可能仍在回调内，ring 仍被读取——不 CloseHandle、
+         * 不 free，句柄与内存随进程退出回收（杜绝悬垂释放） */
+        VERTHYS_DIAG_LOG("verthys: progress consumer thread join timeout, leak ring");
+        return;
     }
 
     free(ring);
@@ -139,7 +147,7 @@ void verthys_progress_ring_push(VerthysProgressRing *ring,
     ring->head = next_head;
 }
 
-/* ★ 企业级根治修复：排空进度环形缓冲区
+/* 修复修复：排空进度环形缓冲区
  *
  * 根因：消费者线程在整个会话期间运行（仅在 Verthys_Deinit 销毁），
  * Verthys_Unlock 返回后消费者线程可能仍在处理 ring buffer 中的陈旧心跳消息，

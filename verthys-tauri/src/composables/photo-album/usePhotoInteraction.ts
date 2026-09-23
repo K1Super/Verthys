@@ -17,7 +17,7 @@ import { rafThrottle } from "../../utils/debounce";
 export function usePhotoInteraction() {
   /**
    * 照片卡片鼠标移动：3D 旋转 + 光晕跟随
-   * ★ rafThrottle 节流：同帧多次 mousemove 合并为一次，60fps 上限
+   * rafThrottle 节流：同帧多次 mousemove 合并为一次，60fps 上限
    */
   const onPhotoMove = rafThrottle((e: MouseEvent) => {
     const card = (e.currentTarget as HTMLElement).querySelector(".photo-card") as HTMLElement;

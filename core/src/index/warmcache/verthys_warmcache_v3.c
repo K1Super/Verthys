@@ -68,7 +68,7 @@ static uint64_t v3ic_get_u64le(const uint8_t *p)
 }
 
 /*
- * ★ 确定性 nonce 复现（与 verthys_crypto_cng.c encode_nonce 严格一致）：
+ * 确定性 nonce 复现（与 verthys_crypto_cng.c encode_nonce 严格一致）：
  * 12 字节大端单调计数器。每次保存 kdf_salt 随机 → cache_key 独立 →
  * 计数器从 1 重新起算无跨保存复用风险；读取侧按写入顺序（MemTable 段
  * 在前、SSTable 段在后）确定性重建 nonce(1)/nonce(2)。
@@ -247,13 +247,24 @@ VerthysResult verthys_warmcache_v3_try_load(const char *verthys_path,
     saved_txid = v3ic_get_u64le(buf + V3IC_OFF_TXID);
     memcpy(kdf_salt, buf + V3IC_OFF_KDF_SALT, VERTHYS_V3IC_KDF_SALT_BYTES);
 
-    /* 段边界严格校验（越界 = 结构非法 = miss） */
-    if ((mt_size != 0 &&
-         (mt_off < VERTHYS_V3IC_HEADER_BYTES ||
-          mt_off > file_len || mt_size > file_len - mt_off)) ||
-        (sst_size != 0 &&
-         (sst_off < VERTHYS_V3IC_HEADER_BYTES ||
-          sst_off > file_len || sst_size > file_len - sst_off)) ||
+    /*
+     * 段布局矩形完整校验（HMAC 仅证整文件自洽——纵深防御上段布局
+     * 仍须独立约束，防解码越界；任何非法布局 = miss，回退冷启动）：
+     *   - 空段规范形：mt 空段 = {off=0, size=0}（保存侧约定），
+     *     非规范空段拒绝；
+     *   - 非空段：off ∈ [HEADER, file_len] 且 off + size ≤ file_len；
+     *   - sst_off ∈ [HEADER, file_len] 无条件成立（含空段，保存侧
+     *     恒写 HEADER + mt_ct_len）；
+     *   - 两段互不重叠：mt 尾 ≤ sst 头（保存侧两段首尾相接）。
+     * 全部约束在无符号域内比较（off ≤ file_len 先行判出，
+     * 后续减法/加法无下溢/上溢）。
+     */
+    if ((mt_size == 0 && mt_off != 0) ||
+        (mt_size != 0 &&
+         (mt_off < VERTHYS_V3IC_HEADER_BYTES || mt_off > file_len ||
+          mt_size > file_len - mt_off)) ||
+        sst_off < VERTHYS_V3IC_HEADER_BYTES || sst_off > file_len ||
+        (sst_size != 0 && sst_size > file_len - sst_off) ||
         mt_off + mt_size > sst_off) {
         free(buf);
         return VERTHYS_OK;

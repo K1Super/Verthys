@@ -10,15 +10,20 @@
 
 use crate::log::diag;
 use crate::runtime::worker::Worker;
+use crate::runtime::worker::clamp_enum_count;
 use crate::runtime::protocol::{Request, Response, RecordEntry, base64_encode, base64_decode};
 use crate::runtime::ffi_types::VERTHYS_OK;
 use crate::runtime::gmk::{
-    handle_derive_global_key, handle_verify_global_key, handle_derive_module_subkey,
-    handle_clear_global_key,
+    handle_derive_global_key, handle_derive_and_store_global_key, handle_verify_global_key,
+    handle_derive_module_subkey, handle_clear_global_key,
 };
 
-/* ------------------------------------------------------------------ *
- * ★ 企业级根治：解锁成功后进程内探测全局主密钥记录                  *
+/* 全量枚举遍历上界：与 C 层温缓存单段条目上限同值（100_000），
+ * 全量模式以该值兜底终止，防无限枚举。 */
+const MAX_ENUM_RECORDS: u64 = 100_000;
+
+/* 修复----------------------------------------------------------- *
+ * 根治：解锁成功后进程内探测全局主密钥记录                  *
  *                                                                    *
  * 原缺陷：解锁成功后前端需发起 3~4 次 IPC 往返                        *
  *   (verthysHasRecordByType → findLidByTypeEarlyStop → verthysGetRecord) *
@@ -54,7 +59,7 @@ pub(crate) fn probe_global_key_inproc(
         return (None, None, None);
     }
     if !found {
-        diag!("[worker] probe_global_key: 确认无全局密钥记录（v1/v2 全遍历确认）");
+        diag!("[worker] probe_global_key: 确认无全局密钥记录（进程内类型探测未命中）");
         return (Some(false), None, None);
     }
     diag!("[worker] probe_global_key: 命中全局密钥记录 lid={}", lid);
@@ -88,15 +93,15 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
     match req.op.as_str() {
         "ping" => Response::ok("ping"),
         "unlock" => {
-            /* ★ 透传 flags（预热状态位域）给 C 层 Verthys_Unlock */
-            /* ★ VERTHYS_ERR_PARTIAL_UNLOCK 表示容器已进入
+            /* 透传 flags（预热状态位域）给 C 层 Verthys_Unlock */
+            /* VERTHYS_ERR_PARTIAL_UNLOCK 表示容器已进入
              * 最小可操作状态（超级块验证 + 密钥导入 + 分区表加载完成，索引
              * 预热后台进行中），与 verthys_api.c Unlock 成功分支语义一致——
              * 按成功处理，正常执行 GMK 探测并返回。 */
             const VERTHYS_ERR_PARTIAL_UNLOCK: u32 = 0x00000011;
             let r = worker.call_unlock(&req.path, &req.password, req.flags);
             if r == VERTHYS_OK || r == VERTHYS_ERR_PARTIAL_UNLOCK {
-                /* ★ 企业级根治：解锁成功后进程内探测全局主密钥记录，
+                /* 根治：解锁成功后进程内探测全局主密钥记录，
                  * 结果内联到响应三字段，消除前端 IPC 链路与 v1 假阴性死锁。 */
                 let (has_gmk, gmk_id, gmk_record) = probe_global_key_inproc(worker);
                 Response {
@@ -106,7 +111,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                     ..Response::ok("unlock")
                 }
             } else {
-                /* ★ 企业级修复（D-STATE-RECOVERY）：级联 INVALID 状态恢复
+                /* 修复（D-STATE-RECOVERY）：级联 INVALID 状态恢复
                  *
                  * 场景：前一次解锁因 stdout 死锁导致父进程 60 秒超时退出，
                  * 但 worker 进程仍在运行且 Verthys_Unlock FFI 已成功完成，
@@ -143,13 +148,15 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
         }
         "create_with_preset" => {
-            diag!("[worker] call_create_with_preset: path={} preset={}", req.path, req.preset);
+            // 路径为前端可控字符串：日志只记字节长度与 preset，
+            // 不回显原始内容（防内嵌 NUL/控制符日志注入）
+            diag!("[worker] call_create_with_preset: path_bytes={} preset={}", req.path.len(), req.preset);
             let r = worker.call_create_with_preset(&req.path, &req.password, req.preset);
             diag!("[worker] create_with_preset 返回: {:08X}", r);
             if r == VERTHYS_OK {
                 Response::ok("create_with_preset")
             } else {
-                /* ★ 企业级修复（D-STATE-RECOVERY）：级联 INVALID 状态恢复
+                /* 修复（D-STATE-RECOVERY）：级联 INVALID 状态恢复
                  *
                  * 与 unlock 对称：前一次操作可能将 ctx->state 停留在 UNLOCKED，
                  * 导致 Verthys_CreateWithPreset 命中 `if (ctx->state ==
@@ -182,7 +189,19 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("lock", r)
             }
         }
-        // ★ 企业级根治：Verthys_Flush 显式刷盘
+        // 运行时切换安全预设（贯通前端 → Rust → worker → C 双缓冲切档链路）
+        // 幂等：切到当前档返回 OK；C 层返回 INVALID 时透传错误码。
+        "switch_preset" => {
+            diag!("[worker] call_switch_security_preset: preset={}", req.preset);
+            let r = worker.call_switch_security_preset(req.preset);
+            diag!("[worker] switch_preset 返回: {:08X}", r);
+            if r == VERTHYS_OK {
+                Response::ok("switch_preset")
+            } else {
+                Response::err("switch_preset", r)
+            }
+        }
+        // 根治：Verthys_Flush 显式刷盘
         //   替代旧 verthys_flush 的 lock+unlock 模式。
         //   旧模式缺陷：lock 清零密钥 + state=LOCKED，若 unlock 超时/失败，
         //   worker 永久卡在 LOCKED 状态，所有后续 get_record 返回 VERTHYS_ERR_LOCKED，
@@ -235,10 +254,10 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             // 批量枚举记录：从 start_id 开始顺序读取，连续 5 次 NOTFOUND 停止
             // 整个循环在 worker 子进程内完成，消除 N 次 IPC 往返开销
             //
-            // ★ 项5：分页支持（数据流式传输，消除 JSON 解析阻塞）
+            // 项5：分页支持（数据流式传输，消除 JSON 解析阻塞）
             //   - req.rtype > 0 表示 max_count（本批最多返回条数）
             //   - req.rtype == 0 表示不限制（兼容旧调用，全量枚举）
-            //   - 返回 exhausted=true 表示已遍历完毕（null_streak >= 5 或到达 100_000）
+            //   - 返回 exhausted=true 表示已遍历完毕（null_streak >= 5 或到达 MAX_ENUM_RECORDS）
             //   - 返回 id 字段为本批最后一条记录的 ID（前端据此发起下一批 start_id）
             //   - 返回 record_count 字段为本批实际返回条数
             // 前端可循环调用本 op 实现流式分页加载（每批 50~200 条），
@@ -250,7 +269,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             let mut last_id: u64 = start_id.saturating_sub(1);
             let mut exhausted = false;
 
-            for id in start_id..=100_000 {
+            for id in start_id..=MAX_ENUM_RECORDS {
                 if records.len() >= max_count {
                     // 已达本批上限，停止枚举（未遍历完毕，exhausted=false）
                     break;
@@ -276,13 +295,14 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                     }
                 }
             }
-            // 到达上限 100_000 也视为遍历完毕
-            if last_id >= 100_000 {
+            // 到达上限 MAX_ENUM_RECORDS 也视为遍历完毕
+            if last_id >= MAX_ENUM_RECORDS {
                 exhausted = true;
             }
             // 若未指定 max_count（全量模式）且未触发 null_streak 终止，
-            // 但 records 非空且 last_id < 100_000，说明循环正常结束（理论上不会发生，
-            // 因为 for 循环会一直跑到 100_000），此处兜底标记 exhausted。
+            // 但 records 非空且 last_id < MAX_ENUM_RECORDS，说明循环正常结束
+            //（理论上不会发生，因为 for 循环会一直跑到 MAX_ENUM_RECORDS），
+            // 此处兜底标记 exhausted。
             if max_count == usize::MAX && !exhausted {
                 exhausted = true;
             }
@@ -300,8 +320,9 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
         }
         "scan_open" => {
             // 打开扫描游标：创建共享内存 + 复用 vbtree_scan_all + 首批预加载
+            // 条数值外部可控：双端 clamp（本端 + worker 端），防巨大分配
             let start_lid = if req.id > 0 { req.id } else { 0 };
-            let batch_size = if req.rtype > 0 { req.rtype as u64 } else { 500 };
+            let batch_size = if req.rtype > 0 { clamp_enum_count(req.rtype as u64) } else { 500 };
             match worker.call_scan_open(start_lid, batch_size) {
                 Ok((shm_name, shm_size, count, exhausted)) => Response {
                     ok: true,
@@ -317,7 +338,8 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
         }
         "scan_fetch" => {
             // 批量拉取记录：游标驱动遍历器填充共享内存缓冲区，不重复定位
-            let max_count = if req.id > 0 { req.id } else { 500 };
+            // 条数值外部可控：双端 clamp（本端 + worker 端），防巨大分配
+            let max_count = if req.id > 0 { clamp_enum_count(req.id) } else { 500 };
             match worker.call_scan_fetch(max_count) {
                 Ok((count, exhausted)) => Response {
                     ok: true,
@@ -349,7 +371,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             // 打开摘要扫描游标：创建 4MB 共享内存 + Verthys_ScanSummaryOpen + 首批预加载
             // 返回 shm_name 供 Tauri 主进程读取摘要记录（read_shm_summary_records）
             let start_lid = if req.id > 0 { req.id } else { 0 };
-            let batch_size = if req.rtype > 0 { req.rtype as u64 } else { 1000 };
+            let batch_size = if req.rtype > 0 { clamp_enum_count(req.rtype as u64) } else { 1000 };
             match worker.call_scan_summary_open(start_lid, batch_size) {
                 Ok((shm_name, shm_size, count, exhausted)) => Response {
                     ok: true,
@@ -365,7 +387,8 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
         }
         "scan_summary_fetch" => {
             // 批量拉取摘要记录：游标驱动遍历器填充共享内存缓冲区（72B 条目，无数据块）
-            let max_count = if req.id > 0 { req.id } else { 1000 };
+            // 条数值外部可控：双端 clamp（本端 + worker 端），防巨大分配
+            let max_count = if req.id > 0 { clamp_enum_count(req.id) } else { 1000 };
             match worker.call_scan_summary_fetch(max_count) {
                 Ok((count, exhausted)) => Response {
                     ok: true,
@@ -405,7 +428,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("delete_records", r)
             }
         }
-        // ★ 获取已加载的轻量摘要记录数
+        // 获取已加载的轻量摘要记录数
         "get_summary_count" => {
             let (rc, count) = worker.call_get_summary_count();
             if rc == VERTHYS_OK {
@@ -416,7 +439,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("get_summary_count", rc)
             }
         }
-        // ★ 企业级：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）
+        // ：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）
         // 典型耗时 < 100ms，用于启动阶段快速判断是否有全局密钥记录
         // 返回 record_count=1（存在）或 record_count=0（不存在）
         "has_record_by_type" => {
@@ -454,7 +477,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("change_password", r)
             }
         }
-        // ★ 防御闭环 7 路径状态实时查询
+        // 动态防护 7 路径状态实时查询
         // 防御状态为进程级事实：锁定态/未挂载态均可查询（verthys.h 行为契约），
         // 安全中心可在解锁前展示防护水位。
         "security_status" => match worker.call_security_status() {
@@ -467,6 +490,9 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
         },
         // GMK 派生命令（#2 敏感操作下沉）
         "derive_global_key" => handle_derive_global_key(req),
+        // 派生并持久化（首次初始化专用：存储+读回验证在 worker 进程内
+        // 原子完成，无跨 IPC 中间态窗口）
+        "derive_and_store_global_key" => handle_derive_and_store_global_key(req, worker),
         "verify_global_key" => handle_verify_global_key(req),
         "derive_module_subkey" => handle_derive_module_subkey(req),
         "clear_global_key" => handle_clear_global_key(),

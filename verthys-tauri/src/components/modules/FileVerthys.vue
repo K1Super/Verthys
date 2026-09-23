@@ -22,7 +22,7 @@
         <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
         </svg>
-        <!-- ★ 项3：搜索输入防抖（300ms 尾部触发），连续快速输入仅触发一次过滤 -->
+        <!-- 项3：搜索输入防抖（300ms 尾部触发），连续快速输入仅触发一次过滤 -->
         <input class="search-input" :value="searchKey" @input="onSearchInput" placeholder="搜索文件…" />
       </div>
       <ActionButton
@@ -141,8 +141,8 @@
           </div>
         </div>
         <div class="dialog-actions">
-          <button class="btn" @click="showImportDialog = false">取消</button>
-          <button class="btn btn-primary" @click="startImport">开始加密导入</button>
+          <button class="btn kv-cancel" @click="showImportDialog = false">取消</button>
+          <button class="btn btn-primary kv-confirm" @click="startImport">开始加密导入</button>
         </div>
       </div>
     </div>
@@ -161,8 +161,8 @@
           autofocus
         />
         <div class="dialog-actions">
-          <button class="btn" @click="showKeyDialog = false">取消</button>
-          <button class="btn btn-primary" @click="confirmSaveKey">解密保存</button>
+          <button class="btn kv-cancel" @click="showKeyDialog = false">取消</button>
+          <button class="btn btn-primary kv-confirm" @click="confirmSaveKey">解密保存</button>
         </div>
       </div>
     </div>
@@ -225,7 +225,7 @@ interface FileEntry {
 
 /* ===== 常量 ===== */
 const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB 每块
-/* ★ 企业级根治：TYPE 常量从 record_types.ts 导入，不再本地定义
+/* 修复：TYPE 常量从 record_types.ts 导入，不再本地定义
  *   TYPE_FILEVERTHYS_META (0x08) — 原 TYPE_FILEVERTHYS_META=0x05，与 TYPE_PHOTO_CHUNK 冲突，已改
  *   TYPE_FILEVERTHYS_CHUNK (0x04) — 原 TYPE_FILEVERTHYS_CHUNK=0x04，值不变仅重命名
  */
@@ -237,7 +237,7 @@ const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
 
 /* ===== 文件列表 ===== */
 const searchKey = ref("");
-/* ★ 项2：shallowRef 替代 ref，避免 Vue 对 files 数组内每条记录深度代理
+/* 项2：shallowRef 替代 ref，避免 Vue 对 files 数组内每条记录深度代理
  * （每条记录含 metaId/chunks 等字段，万条记录深度代理开销 200-500ms） */
 const files = shallowRef<FileEntry[]>([]);
 
@@ -246,7 +246,7 @@ const filteredFiles = computed(() => {
   return files.value.filter(f => !k || f.name.toLowerCase().includes(k));
 });
 
-/* ★ 项3：搜索输入防抖（300ms 尾部触发）
+/* 项3：搜索输入防抖（300ms 尾部触发）
  * 原问题：v-model 每次按键触发 filteredFiles computed 重新计算，
  *        连续快速输入时累加造成可感知延迟。
  * 优化后：用户停止输入 300ms 后才更新 searchKey 触发过滤，输入过程零卡顿。 */
@@ -319,7 +319,7 @@ const docPassword = ref("");
 const onImport = async () => {
   if (!isTauri) {
     // 浏览器模式：模拟导入
-    // ★ 项2：shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
+    // 项2：shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
     pushShallowItems(files, [{
       id: Date.now(), name: `demo_doc_${files.value.length + 1}.pdf`,
       size: 1024 * 1024 * (2 + files.value.length), mime: "application/pdf",
@@ -374,7 +374,7 @@ const startImport = async () => {
   const list = pendingFiles.value.slice();
   let successCount = 0;
   let failCount = 0;
-  // ★ 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
+  // 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
   const newItems: FileEntry[] = [];
 
   for (let fi = 0; fi < list.length; fi++) {
@@ -431,7 +431,7 @@ const startImport = async () => {
       const metaB64 = bytesToBase64(new TextEncoder().encode(JSON.stringify(meta)));
       const metaId = await verthysAddRecord(TYPE_FILEVERTHYS_META, `meta_${fileName}`, metaB64);
       if (metaId !== null) {
-        // ★ 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
+        // 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
         addFullRecord(metaId, TYPE_FILEVERTHYS_META, `meta_${fileName}`, metaB64, metaB64.length);
       }
 
@@ -457,14 +457,14 @@ const startImport = async () => {
     }
   }
 
-  // ★ 项2：循环外一次性 pushShallowItems 触发 triggerRef
+  // 项2：循环外一次性 pushShallowItems 触发 triggerRef
   if (newItems.length > 0) {
     pushShallowItems(files, newItems);
   }
 
   // 统一持久化（所有 meta 记录已写入 worker 内存，一次 flush 全部落盘）
   setModuleCache("fileverthys", files.value);
-  // ★ 企业级数据持久化修复：检查 persistVerthys 返回值，根治"导入后重启数据丢失"
+  // 数据持久化修复：检查 persistVerthys 返回值，根治"导入后重启数据丢失"
   //    旧实现仅 await persistVerthys() 不检查返回值，flush 失败时 UI 显示已导入文件但
   //    磁盘未落盘 → 重启后数据丢失。修复：检查返回值，失败时 showError 提示用户。
   if (isTauri) {
@@ -590,11 +590,11 @@ const confirmDelete = async () => {
   // 立即关闭弹窗 + 移除 UI + 更新缓存（同步无缝，消除删除按钮到内容消失的空白间隔）
   showDeleteConfirm.value = false;
   deleteTarget.value = null;
-  // ★ 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
+  // 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
   removeShallowItems(files, x => x.id === f.id);
   setModuleCache("fileverthys", files.value);
   showToast(`已删除 ${f.name}`);
-  // ★ 企业级根治：await deleteAndPersist + await persistVerthys（根治删除后复活）
+  // 修复：await deleteAndPersist + await persistVerthys（根治删除后复活）
   if (isTauri) {
     // 收集所有需要删除的 recordId（旧格式 chunk 记录 + meta 记录）
     const idsToDelete: number[] = [];
@@ -603,13 +603,13 @@ const confirmDelete = async () => {
     }
     if (f.metaId) idsToDelete.push(f.metaId);
     // 立即失效所有缓存（同步，杜绝删除复活）
-    // ★ 同时失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容
+    // 同时失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容
     for (const rid of idsToDelete) {
       invalidateSummaryRecord(rid);
       invalidateFullRecord(rid);
       invalidateScannedRecord(rid);
     }
-    // ★ 企业级根治：await deleteAndPersist + await persistVerthys（根治删除后复活）
+    // 修复：await deleteAndPersist + await persistVerthys（根治删除后复活）
     //
     // 原缺陷：deleteAndPersist(...).catch(() => {}) 火并忘——防抖 flush（300ms）
     //   未执行即返回，应用退出 → 磁盘仍含已删记录 → "删除后复活"。
@@ -626,7 +626,7 @@ const confirmDelete = async () => {
         }
         return true;
       });
-      // ★ 企业级数据持久化修复：检查 persistVerthys 返回值，根治"删除后复活"
+      // 数据持久化修复：检查 persistVerthys 返回值，根治"删除后复活"
       //    persistVerthys 返回 false（非抛异常）时旧 catch 无法捕获 → 静默假成功 →
       //    UI 已移除但磁盘未落盘 → 重启后记录"复活"。
       const persistOk = await persistVerthys(); // 立即落盘（取消防抖，根治删除后复活）
@@ -672,7 +672,7 @@ const showToast = (msg: string) => {
 /* ===== 加载已有文件 ===== */
 const loadFiles = async () => {
   if (!isTauri) {
-    // ★ 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
+    // 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
     replaceShallowArray(files, [
       { id: 1, name: "project_report.pdf", size: 4521984, mime: "application/pdf", totalChunks: 2, encrypted: false },
       { id: 2, name: "financial_data.xlsx", size: 1234567, mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", totalChunks: 1, encrypted: true },
@@ -684,7 +684,7 @@ const loadFiles = async () => {
   const cached = getModuleCache<FileEntry[]>("fileverthys");
   let maxRecordId = 0;
   if (cached.data && cached.data.length > 0) {
-    // ★ 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
+    // 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
     replaceShallowArray(files, cached.data);
     // 计算缓存中最大的 metaId，作为增量扫描起点（参考 PhotoAlbum）
     maxRecordId = cached.data.reduce((max, f) => Math.max(max, f.metaId || 0), 0);
@@ -698,18 +698,18 @@ const loadFiles = async () => {
     files.value.map(f => f.metaId).filter((id): id is number => id !== undefined)
   );
   let hasNewFiles = false;
-  // ★ 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
+  // 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
   const newItems: FileEntry[] = [];
 
-  // ★ 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
+  // 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
   //    原实现：ensureSummaryScanSafe + for 循环串行 getFullRecord（meta + 内层 chunk
   //            双层串行 IPC，N 个文件 × M 个 chunk → N×M 次 IPC，与后台扫描抢 worker → 30s）
   //    新实现：ensureRecordScanSafe + getRecordsDataB64Batch（meta 批量 + chunk 批量，
   //            扫描缓存命中零 IPC，未命中并行回退），总耗时 < 2.5s。
   await ensureRecordScanSafe();
-  // ★ 从扫描缓存取 ID 列表
+  // 从扫描缓存取 ID 列表
   let metaIds = getRecordIdsByType(TYPE_FILEVERTHYS_META);
-  // ★ 企业级根治：旧类型 0x05 回退扫描（迁移失败的兜底）
+  // 修复：旧类型 0x05 回退扫描（迁移失败的兜底）
   //
   // 原缺陷：若 migrateRecordTypes 超时/失败，旧 FileVerthys 元数据仍停留在 0x05
   //   （与 TYPE_PHOTO_CHUNK 冲突的旧值），FileVerthys 仅扫描 TYPE_FILEVERTHYS_META(0x08)
@@ -735,7 +735,7 @@ const loadFiles = async () => {
 
         // 新格式：优先使用内联 chunkDataB64
         if (meta.chunkDataB64 && meta.chunkDataB64.length > 0) {
-          // ★ 项2：收集到 newItems，循环外一次性 pushShallowItems
+          // 项2：收集到 newItems，循环外一次性 pushShallowItems
           newItems.push({
             id: Date.now() + id,
             name: meta.name,
@@ -771,19 +771,19 @@ const loadFiles = async () => {
               for (const cid of meta.chunkIds) {
                 try { await verthysDeleteRecord(cid); } catch { /* */ }
               }
-              // ★ 企业级数据持久化修复：检查迁移落盘返回值，失败时提示用户
+              // 数据持久化修复：检查迁移落盘返回值，失败时提示用户
               let migratePersistOk = false;
               try { migratePersistOk = await persistVerthys(); } catch (e) { console.error("[loadFiles] 迁移 persistVerthys 异常", e); }
               if (!migratePersistOk) {
                 showError("文件数据迁移已执行但持久化失败，重启后可能需重新迁移。请勿关闭应用并重试");
               }
-              // ★ 迁移涉及批量增删，清空所有缓存确保一致性
+              // 迁移涉及批量增删，清空所有缓存确保一致性
               clearRecordScanCache();   // 清空旧扫描缓存
               clearSummaryCache();      // 清空摘要缓存
               clearFullRecordCache();   // 清空全量记录缓存
             }
             const finalMetaId = newMetaId || id;
-            // ★ 项2：收集到 newItems，循环外一次性 pushShallowItems
+            // 项2：收集到 newItems，循环外一次性 pushShallowItems
             newItems.push({
               id: Date.now() + id,
               name: meta.name,
@@ -798,7 +798,7 @@ const loadFiles = async () => {
             hasNewFiles = true;
           } else {
             // 迁移失败：仅使用 chunkIds 读取（部分数据可能丢失）
-            // ★ 项2：收集到 newItems，循环外一次性 pushShallowItems
+            // 项2：收集到 newItems，循环外一次性 pushShallowItems
             newItems.push({
               id: Date.now() + id,
               name: meta.name,
@@ -817,7 +817,7 @@ const loadFiles = async () => {
     }
   }
 
-  // ★ 项2：循环外一次性 pushShallowItems 触发 triggerRef
+  // 项2：循环外一次性 pushShallowItems 触发 triggerRef
   if (newItems.length > 0) {
     pushShallowItems(files, newItems);
   }
@@ -833,11 +833,11 @@ onMounted(() => {
   });
 });
 onUnmounted(() => {
-  /* ★ 项3：取消未触发的防抖调用，防止内存泄漏 */
+  /* 项3：取消未触发的防抖调用，防止内存泄漏 */
   debouncedUpdateSearch.cancel();
 });
 
-/* ★ 企业级修复「页面覆盖」：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
+/* 修复「页面覆盖」：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
 import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
 useModuleDialogGuard("verthys", () => {
   showImportDialog.value = false;

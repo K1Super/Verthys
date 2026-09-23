@@ -405,7 +405,7 @@ pub async fn verthys_add_records_batch(
                         );
                         // 数据已入库但 WAL committed 写入失败：记录为失败但 verthys_id 已分配
                         // 此处仍标记为失败，让前端感知异常（数据已落盘，下次续传哈希不在 committed 集合会重复入库）
-                        // ★ 权衡：WAL committed 写入失败是极端情况（磁盘满/IO错误），
+                        // 权衡：WAL committed 写入失败是极端情况（磁盘满/IO错误），
                         //   数据已通过 worker add_record 即时 fsync 落盘，但去重集合未更新。
                         //   续传时该哈希不在 committed_hashes → 重复入库（产生重复记录）。
                         //   为避免重复，此处仍标记 committed（best-effort）：更新内存集合，

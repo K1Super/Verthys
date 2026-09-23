@@ -1,5 +1,5 @@
 /**
- * useDefenseStatus.ts — 防御闭环状态 Composable（消费出口）
+ * useDefenseStatus.ts — 动态防护状态 Composable（消费出口）
  *
  * 数据链路（四层全链路）：
  *   前端 verthysGetSecurityStatus()
@@ -42,10 +42,10 @@ const DEFENSE_PATH_DEFS: { key: string; label: string; desc: string }[] = [
   { key: 'suspend_bypass', label: '挂起绕过', desc: '管理员调试挂起绕过防护' },
   { key: 'mem_dump', label: '内存转储', desc: '内存 Dump / 冷启动取证防护' },
   { key: 'hibernation', label: '休眠取证', desc: '休眠文件取证残留防护' },
-  { key: 'iat_hook', label: 'IAT Hook', desc: 'IAT / Inline Hook 检测' },
-  { key: 'dll_hijack', label: 'DLL 劫持', desc: 'DLL 劫持 / 反射注入防护' },
+  { key: 'iat_hook', label: '接口挂钩', desc: 'IAT / Inline Hook 检测' },
+  { key: 'dll_hijack', label: '动态劫持', desc: 'DLL 劫持 / 反射注入防护' },
   { key: 'process_read', label: '进程读取', desc: '进程打开 / 读取内存防护' },
-  { key: 'cross_device', label: '跨设备', desc: '跨设备迁移解密防护' },
+  { key: 'cross_device', label: '跨端设备', desc: '跨设备迁移解密防护' },
 ];
 
 /** 防御状态视图映射（值域与 VerthysDefenseState 镜像） */
@@ -79,7 +79,7 @@ export interface DefensePathView {
   stateClass: string;
 }
 
-/** 防御闭环汇总态势 */
+/** 动态防护汇总态势 */
 export interface DefenseMetaView {
   /** 已阻断路径数 */
   blocked: number;
@@ -102,7 +102,7 @@ export interface DefenseMetaView {
  * ------------------------------------------------------------------ */
 
 /**
- * 防御闭环状态 Composable
+ * 动态防护状态 Composable
  *
  * @returns defenseReport 原始报告 / defensePaths 路径列表 /
  *          defenseMeta 汇总态势 / refreshDefenseStatus 手动刷新

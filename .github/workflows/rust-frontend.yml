@@ -1,14 +1,14 @@
 # .github/workflows/rust-frontend.yml
-# ★ P2-4 修复（2026-09-19）：Rust / 前端 CI 质量门
+# P2-4 修复（2026-09-19）：Rust / 前端 CI 质量门
 #
 # 覆盖（对应 core.yml 注释中"由本工作流承接"的承诺）：
-#   1. Rust 单元测试（src-tauri 296 项 + verthys-worker 编译验证）
+#   1. Rust 单元测试（src-tauri 314 项 + verthys-worker 18 项）
 #   2. cargo clippy 静态检查（--all-targets -D warnings，零告警门）
 #   3. 前端单元测试（vitest，验证进度感知层状态机核心路径）
 #   4. 前端 TypeScript 类型检查（vue-tsc --noEmit）
 #   5. 前端生产构建（vite build，验证打包链完整性）
 #
-# ★ 素材前置（2026-09-19 隔离实证）：tauri 编译期强制要求
+# 素材前置（2026-09-19 隔离实证）：tauri 编译期强制要求
 #   resources（verthys.dll）与 externalBin（binaries/verthys-worker-*.exe）
 #   存在，缺失即 "resource path ... doesn't exist" 编译失败。
 #   二者均为 gitignore 的构建产物，故本工作流先从源码构建并就位：
@@ -22,9 +22,9 @@ name: rust-frontend-check
 
 on:
   push:
-    paths: ["verthys-tauri/**", ".github/workflows/rust-frontend.yml"]
+    paths: ["verthys-tauri/**", "dep-versions.txt", ".github/workflows/rust-frontend.yml"]
   pull_request:
-    paths: ["verthys-tauri/**", ".github/workflows/rust-frontend.yml"]
+    paths: ["verthys-tauri/**", "dep-versions.txt", ".github/workflows/rust-frontend.yml"]
 
 jobs:
   rust-and-frontend:
@@ -34,15 +34,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - name: Setup Rust (pinned by rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 20
           cache: npm
           cache-dependency-path: verthys-tauri/package-lock.json
 
@@ -105,6 +103,17 @@ jobs:
         run: npm ci
         working-directory: verthys-tauri
 
+      - name: Dependency snapshot drift gate
+        shell: pwsh
+        run: |
+          & ".\ci\refresh_dep_versions.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "dependency snapshot refresh failed" }
+          git diff --exit-code -- dep-versions.txt
+          if ($LASTEXITCODE -ne 0) {
+            throw "dep-versions.txt 与锁文件漂移：请运行 ci\refresh_dep_versions.ps1 并提交快照"
+          }
+          Write-Host "依赖快照与锁文件一致"
+
       - name: Frontend unit tests (vitest)
         run: |
           npx vitest run
@@ -125,3 +134,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "vite build failed" }
         shell: pwsh
         working-directory: verthys-tauri
+
+  local-script-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (pinned by rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: verthys-tauri/package-lock.json
+
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # 本地一键构建脚本在干净 runner 上的可跑性验证：
+      # 覆盖"注入 MSVC 环境探测 + Ninja 单配置 + npm ci + 无写锁补丁断言"
+      # 全链路（-SkipTauri：不执行 NSIS 打包，组件级验证）。
+      - name: Local one-click build script smoke (-SkipTauri)
+        shell: pwsh
+        run: |
+          & ".\build_production.ps1" -SkipTauri -NoPause
+          if ($LASTEXITCODE -ne 0) { throw "build_production.ps1 -SkipTauri failed" }

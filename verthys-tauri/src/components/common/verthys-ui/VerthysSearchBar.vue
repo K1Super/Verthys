@@ -23,7 +23,7 @@ import { onBeforeUnmount } from "vue";
 import ActionButton from "./ActionButton.vue";
 import { debounce } from "../../../utils/debounce";
 
-/* ★ 项3：搜索输入防抖（300ms 尾部触发）
+/* 项3：搜索输入防抖（300ms 尾部触发）
  * 原问题：v-model 每次按键触发 update:modelValue → 父组件 computed filter
  *        连续快速输入时累加造成可感知延迟（每按键卡顿 50ms）。
  * 优化后：用户停止输入 300ms 后才触发过滤，输入过程零卡顿。 */

@@ -57,6 +57,13 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD dwReason, LPVOID lpvReserved)
          * 根据入参区分模块卸载场景做不同资源回收逻辑
          * lpvReserved != NULL：进程强制终止，操作系统已回收堆内存，不可访问内部资源
          * lpvReserved == NULL：主动调用FreeLibrary卸载模块，可安全执行自定义资源释放
+         *
+         * 加载锁约束核查结论（固化）：本分支实际调用链为
+         *   tls_loader_shutdown（空实现）+ verthys_pepper_deinit
+         *   （VirtualUnlock 内核接口 + 进程内内存清零 + 状态标志赋值，
+         *   无锁获取、无堆分配、无 CRT 依赖）——
+         *   不触发模块递归加载、不依赖加载锁外的任何同步对象，
+         *   故无需推迟到后台线程，保持在 DETACH 内同步执行。
          */
         if (lpvReserved == NULL) {
             tls_loader_shutdown();

@@ -1,7 +1,7 @@
 /*
  * tamper_destroy.c — 篡改联动销毁策略实现
  *
- * ★ 销毁链简化为两步真实可达动作（缺陷依据载于头注）。
+ * 销毁链简化为两步真实可达动作（缺陷依据载于头注）。
  * 原 Nonce/密钥页注册表（零调用点）与 key_drift/working_set/cng_machine_key
  * 销毁调用一并删除——密钥销毁的唯一权威路径是 CNG 内核 purge 与
  * memory_guard 注册区清零，两者分别由本模块与 emergency_trigger 调用。

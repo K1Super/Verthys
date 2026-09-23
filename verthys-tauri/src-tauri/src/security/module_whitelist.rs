@@ -127,7 +127,7 @@ fn normalize_string_path(_path: &str) -> String {
 /// 路径经 GetLongPathNameW 真实化后存储，
 /// 确保短文件名/符号链接无法绕过白名单前缀匹配。
 ///
-/// 调用方需在命令层验证权限（auth_token），
+/// 调用方需在命令层完成会话授权检查，
 /// 此函数仅负责路径真实化与存储。
 pub fn add_trusted_path(path: &str) {
     let realized = realize_path(path);

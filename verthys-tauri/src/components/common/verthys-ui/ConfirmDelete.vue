@@ -445,10 +445,6 @@ const fragments = Array.from({ length: 20 }, (_, i) => {
 .cd-confirm:hover {
   color: #fff;
   border-color: rgba(0, 212, 255, 0.6);
-  box-shadow:
-    0 0 20px rgba(0, 212, 255, 0.3),
-    0 0 40px rgba(139, 92, 246, 0.12),
-    inset 0 0 14px rgba(0, 212, 255, 0.08);
 }
 .cd-confirm:active {
   transform: scale(0.97);

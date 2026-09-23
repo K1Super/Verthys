@@ -318,23 +318,41 @@ TEST(api_add_delete_add_cycle)
     return 0;
 }
 
-/* 空密码应允许（不报错） */
+/* 空口令策略（禁止）：建库/解锁/改密入口对 len==0 显式拒绝。
+ * NULL+0 与 ""+0 同拒；非空口令不受影响（防过度拦截回归）。 */
 TEST(api_empty_password)
 {
     cleanup_tmp();
     VerthysHandle h;
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
-    /* 空密码 + 0 长度 */
-    CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS, "", 0, VERTHYS_PRESET_BALANCED), VERTHYS_OK);
 
-    VerthysRecord r = {VERTHYS_RECORD_ACCOUNT, "x", 1, (const uint8_t *)"y", 1};
-    uint64_t id;
-    CHECK_EQ(Verthys_AddRecord(h, &r, &id), VERTHYS_OK);
+    /* 建库：空口令拒绝（含 NULL 与空串两种形态），文件不得落盘 */
+    CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS, "", 0,
+                                      VERTHYS_PRESET_BALANCED), VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS, NULL, 0,
+                                      VERTHYS_PRESET_BALANCED), VERTHYS_ERR_INVALID);
+    {
+        FILE *probe = fopen(TMP_VERTHYS, "rb");
+        CHECK(probe == NULL);   /* 拒绝路径零落盘 */
+        if (probe != NULL) fclose(probe);
+    }
+
+    /* 正常口令建立容器（后续解锁/改密用例的前提） */
+    CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS, "pw", 2,
+                                      VERTHYS_PRESET_BALANCED), VERTHYS_OK);
+
+    /* 解锁：空口令拒绝，正常口令照常（防过度拦截） */
     CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "", 0, 0), VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, NULL, 0, 0), VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "pw", 2, 0), VERTHYS_OK);
 
-    /* 重新解锁 */
-    CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "", 0, 0), VERTHYS_OK);
-    CHECK_EQ(Verthys_GetRecord(h, id, &r), VERTHYS_OK);
+    /* 改密：旧/新口令为空均拒绝（防造出永不可解锁的容器） */
+    CHECK_EQ(Verthys_ChangePassword(h, "", 0, "npw", 3), VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_ChangePassword(h, "pw", 2, "", 0), VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_ChangePassword(h, NULL, 0, "npw", 3), VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_ChangePassword(h, "pw", 2, NULL, 0), VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_ChangePassword(h, "pw", 2, "npw", 3), VERTHYS_OK);
 
     Verthys_Deinit(h);
     cleanup_tmp();
@@ -382,7 +400,7 @@ TEST(api_create_with_preset_balanced)
     /* 文件不存在 → 创建新 verthys（BALANCED 预设） */
     CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS_CP, "pw", 2, VERTHYS_PRESET_BALANCED), VERTHYS_OK);
 
-    /* 白盒校验：preset 字段正确（★ V3：新建一律 V3） */
+    /* 白盒校验：preset 字段正确（V3：新建一律 V3） */
     struct VerthysContext *ctx = (struct VerthysContext *)h;
     CHECK_EQ(ctx->preset, VERTHYS_PRESET_BALANCED);
     CHECK_EQ(ctx->warm_cache_enabled, 1);  /* BALANCED 启用温启动缓存 */
@@ -420,7 +438,7 @@ TEST(api_create_with_preset_secure)
     /* 创建新 verthys（SECURE 预设） */
     CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS_CP, "pw", 2, VERTHYS_PRESET_SECURE), VERTHYS_OK);
 
-    /* 白盒校验：preset 字段正确（★ V3：新建一律 V3） */
+    /* 白盒校验：preset 字段正确（V3：新建一律 V3） */
     struct VerthysContext *ctx = (struct VerthysContext *)h;
     CHECK_EQ(ctx->preset, VERTHYS_PRESET_SECURE);
     CHECK_EQ(ctx->warm_cache_enabled, 0);  /* SECURE 禁用温启动缓存 */
@@ -481,7 +499,7 @@ TEST(api_create_with_preset_invalid)
     CHECK_EQ(Verthys_CreateWithPreset(NULL, TMP_VERTHYS_CP, "pw", 2, VERTHYS_PRESET_BALANCED), VERTHYS_ERR_INVALID);
     /* NULL 路径 */
     CHECK_EQ(Verthys_CreateWithPreset(h, NULL, "pw", 2, VERTHYS_PRESET_BALANCED), VERTHYS_ERR_INVALID);
-    /* 非法预设值（99, 0xFFFFFFFF）——★ V3：PERFORMANCE(2) 已为合法三档
+    /* 非法预设值（99, 0xFFFFFFFF）——V3：PERFORMANCE(2) 已为合法三档
      * 之一（API 层校验 BALANCED/SECURE/PERFORMANCE），不再属非法域 */
     CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS_CP, "pw", 2, (VerthysPreset)99), VERTHYS_ERR_INVALID);
     CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS_CP, "pw", 2, (VerthysPreset)0xFFFFFFFF), VERTHYS_ERR_INVALID);

@@ -162,6 +162,11 @@ static VerthysResult manifest_serialize_pt(const VerthysLsmManifest *m,
     return VERTHYS_OK;
 }
 
+/* ---------- 测试注入（测试 exe 对象直链的内部符号，非导出面） ----------
+ * 非零时 verthys_lsm_manifest_save 直接失败（不落盘）——用于验证
+ * flush / compact 的 Manifest 提交失败回滚路径。 */
+int verthys_lsm_test_fail_manifest_save = 0;
+
 VerthysResult verthys_lsm_manifest_save(FILE *f, uint64_t region_offset,
                                     const VerthysLsmManifest *m,
                                     VerthysPartition *part)
@@ -170,10 +175,12 @@ VerthysResult verthys_lsm_manifest_save(FILE *f, uint64_t region_offset,
     uint8_t *pt = NULL;
     size_t pt_len = 0;
 
+    if (verthys_lsm_test_fail_manifest_save) return VERTHYS_ERR_IO;
+
     if (f == NULL || part == NULL) return VERTHYS_ERR_INVALID;
     if (!verthys_cng_aead_is_imported(&part->aead)) return VERTHYS_ERR_LOCKED;
 
-    /* ★保存后值约定：序列化快照 = 当前计数器 + 1（保存帧自身消耗值）；
+    /* 保存后值约定：序列化快照 = 当前计数器 + 1（保存帧自身消耗值）；
      * restore 后下一次加密为快照 +1，绝不复用保存帧 nonce。 */
     r = manifest_serialize_pt(m, part, &pt, &pt_len);
     if (r != VERTHYS_OK) return r;
@@ -238,7 +245,7 @@ VerthysResult verthys_lsm_manifest_parse_unverified(const uint8_t *pt, size_t pt
 
     memset(m, 0, sizeof(*m));
 
-    /* ★ r 须先置 OK——内层表循环全部成功时不设置 r，
+    /* r 须先置 OK——内层表循环全部成功时不设置 r，
      * 若未初始化，"if (r != VERTHYS_OK) break" 将读栈残留垃圾值，
      * 导致正常 Manifest 被误判失败（reopen 概率性返回垃圾错误码）。 */
     r = VERTHYS_OK;
@@ -551,17 +558,22 @@ VerthysResult verthys_lsm_flush_locked(VerthysLsm *lsm)
     r = verthys_lsm_manifest_save(lsm->f, lsm->region_offset,
                                 &lsm->manifest, lsm->part);
     if (r != VERTHYS_OK) {
-        /* Manifest 保存失败：从内存态摘除（盘面 Manifest 仍为旧态） */
+        /* Manifest 保存失败：从内存态摘除本 flush 新表（盘面 Manifest
+         * 仍为旧态）。刚插入的 seq 必在册——找不到即内建缺陷，断言中止
+         * 而非无条件 count-- 破坏表数组。 */
+        int found = 0;
         for (size_t i = 0; i < lsm->manifest.count; i++) {
             if (lsm->manifest.tables[i].seq == seq) {
                 memmove(&lsm->manifest.tables[i],
                         &lsm->manifest.tables[i + 1],
                         (lsm->manifest.count - i - 1) *
                         sizeof(lsm->manifest.tables[0]));
+                found = 1;
                 break;
             }
         }
-        lsm->manifest.count--;
+        VERTHYS_INTERNAL_ASSERT(found, VERTHYS_ERR_INTERNAL);
+        if (found) lsm->manifest.count--;
         lsm->manifest.next_seq = seq;
         lsm->manifest.txid = txid - 1;
         lsm->manifest.next_data_offset -= meta.size;
@@ -571,8 +583,14 @@ VerthysResult verthys_lsm_flush_locked(VerthysLsm *lsm)
     /* 新活跃表替换（旧表生命周期至此结束，条目已持久化） */
     fresh = verthys_lsm_memtable_create();
     if (fresh == NULL) {
-        /* 内存耗尽：数据安全（已持久化），仅无法继续接受写入 */
-        return VERTHYS_ERR_INTERNAL;
+        /* 内存耗尽：条目已全部持久化（新 SSTable + Manifest 已提交）。
+         * 销毁旧表（读路径走 SSTable 不受影响）并置只读态——后续写入
+         * 一律拒绝，杜绝"再写已持久化的旧表 → 下次 flush 重复条目"。
+         * WAL 未复位：Lock 重开时重放幂等，写能力恢复。 */
+        verthys_lsm_memtable_destroy(lsm->memtable);
+        lsm->memtable = NULL;
+        lsm->memtable_readonly = 1;
+        return VERTHYS_ERR_RESOURCE_LIMIT;
     }
     verthys_lsm_memtable_destroy(lsm->memtable);
     lsm->memtable = fresh;
@@ -987,8 +1005,13 @@ static VerthysResult lsm_open_internal(VerthysLsm *lsm, FILE *f, VerthysPartitio
     }
 
     /* ---- nonce 计数器下限推定（防 WAL 帧 nonce 重用） ---- */
-    counter_floor = lsm->manifest.nonce_snapshot + wal_frames +
-                    VERTHYS_LSM_NONCE_RESTORE_MARGIN;
+    if (lsm->manifest.nonce_snapshot <=
+        UINT64_MAX - wal_frames - VERTHYS_LSM_NONCE_RESTORE_MARGIN) {
+        counter_floor = lsm->manifest.nonce_snapshot + wal_frames +
+                        VERTHYS_LSM_NONCE_RESTORE_MARGIN;
+    } else {
+        counter_floor = UINT64_MAX;  /* 回绕钳制：加密侧回绕拒绝兜底 */
+    }
     if (counter_floor > verthys_cng_aead_nonce_counter(&part->aead)) {
         r = verthys_cng_aead_restore_nonce_counter(&part->aead, counter_floor);
         if (r != VERTHYS_OK) {
@@ -1100,12 +1123,15 @@ VerthysLsm *verthys_lsm_create(void)
     return lsm;
 }
 
-void verthys_lsm_destroy(VerthysLsm *lsm)
+VerthysResult verthys_lsm_destroy(VerthysLsm *lsm)
 {
-    if (lsm == NULL) return;
-    verthys_lsm_close(lsm);          /* 幂等；close 尾部已 memset 清零 */
+    VerthysResult r;
+
+    if (lsm == NULL) return VERTHYS_OK;
+    r = verthys_lsm_close(lsm);      /* 幂等；close 尾部已 memset 清零 */
     verthys_secure_zero(lsm, sizeof(*lsm));
     free(lsm);
+    return r;                        /* 非 OK = 非干净关闭（WAL 兜底） */
 }
 
 /*
@@ -1174,6 +1200,13 @@ static VerthysResult verthys_lsm_put_internal(VerthysLsm *lsm, uint64_t txid,
     clean.created_txid = txid;
 
     AcquireSRWLockExclusive(&lsm->lock);
+    /* 只读态：MemTable 重建失败后写路径整体拒绝（含墓碑），防写入
+     * 空表或已持久化的旧表；锁内检查（与 flush 置位互斥），恢复需
+     * Lock 重开（WAL 重放重建 MemTable）。 */
+    if (lsm->memtable_readonly) {
+        ReleaseSRWLockExclusive(&lsm->lock);
+        return VERTHYS_ERR_RESOURCE_LIMIT;
+    }
     r = wal_append(lsm, &clean);            /* WAL 先行 */
     if (r == VERTHYS_OK) {
         r = verthys_lsm_memtable_insert(lsm->memtable, &clean);
@@ -1313,9 +1346,9 @@ uint64_t verthys_lsm_wal_cursor(const VerthysLsm *lsm)
 {
     uint64_t cur;
     if (lsm == NULL) return 0;
-    AcquireSRWLockShared((SRWLOCK *)&lsm->lock);   /* const 视图锁访问（C4090 惯例强转） */
+    lsm_lock_shared(lsm);
     cur = lsm->wal_cursor;
-    ReleaseSRWLockShared((SRWLOCK *)&lsm->lock);
+    lsm_unlock_shared(lsm);
     return cur;
 }
 
@@ -1391,7 +1424,7 @@ VerthysResult verthys_lsm_rollback_txid(VerthysLsm *lsm, uint64_t txid,
         lsm->wal_cursor = wal_cursor_base;
     }
 
-    /* 2. MemTable 重放重建（★ 缺陷②修复：过滤式剔除 → 重放式重建）：
+    /* 2. MemTable 重放重建（缺陷②修复：过滤式剔除 → 重放式重建）：
      *    自偏移 0 重放（止于断链点），剔除 created_txid == txid 残留帧
      *    （防御纵深：正常时序下本事务帧已被截断，命中仅发生于历史
      *    txid 复用残留）。本事务墓碑覆写的原始条目经重放完整复原。 */
@@ -1601,9 +1634,9 @@ uint64_t verthys_lsm_max_lid(const VerthysLsm *lsm)
     uint64_t v;
 
     if (lsm == NULL) return 0;
-    AcquireSRWLockShared((SRWLOCK *)&lsm->lock);   /* const 视图锁访问（C4090 惯例强转） */
+    lsm_lock_shared(lsm);
     v = lsm->max_lid;
-    ReleaseSRWLockShared((SRWLOCK *)&lsm->lock);
+    lsm_unlock_shared(lsm);
     return v;
 }
 
@@ -1754,8 +1787,6 @@ VerthysResult verthys_lsm_scan_next(VerthysLsmScanIter *it, VerthysLsmEntry *out
 
     for (;;) {
         const VerthysLsmEntry *w = NULL;
-        int best_is_mem = 0;
-        size_t best_sst = 0;
         uint64_t lid = 0;
         int have = 0;
 
@@ -1772,7 +1803,6 @@ VerthysResult verthys_lsm_scan_next(VerthysLsmScanIter *it, VerthysLsmEntry *out
             w = &it->mem_cur;
             lid = it->mem_cur.lid;
             have = 1;
-            best_is_mem = 1;
         }
         for (size_t i = 0; i < it->sst_count; i++) {
             const VerthysLsmEntry *c = it->sst[i].cur;
@@ -1781,15 +1811,12 @@ VerthysResult verthys_lsm_scan_next(VerthysLsmScanIter *it, VerthysLsmEntry *out
                 w = c;
                 lid = c->lid;
                 have = 1;
-                best_is_mem = 0;
-                best_sst = i;
             }
         }
         if (!have) {
             ReleaseSRWLockExclusive(&it->lsm->lock);
             return VERTHYS_ERR_NOTFOUND;         /* 全源耗尽 */
         }
-        (void)best_is_mem; (void)best_sst;     /* 胜者指针已定，辅助量不消费 */
 
         /* 3. 墓碑遮蔽 → 消费同 lid 全源，继续归并 */
         if (w->tombstone) {
@@ -1869,7 +1896,7 @@ uint64_t verthys_lsm_estimate_records(const VerthysLsm *lsm)
 
     if (lsm == NULL) return 0;
 
-    AcquireSRWLockShared((SRWLOCK *)&lsm->lock);   /* const 视图锁访问（C4090 惯例强转） */
+    lsm_lock_shared(lsm);
     for (size_t i = 0; i < lsm->manifest.count; i++) {
         const VerthysLsmTableMeta *t = &lsm->manifest.tables[i];
         total += (t->entry_count >= t->tombstone_count)
@@ -1877,6 +1904,6 @@ uint64_t verthys_lsm_estimate_records(const VerthysLsm *lsm)
                      : 0;    /* 防御：不变量破坏不致下溢 */
     }
     verthys_lsm_memtable_iterate(lsm->memtable, scan_count_live_cb, &total);
-    ReleaseSRWLockShared((SRWLOCK *)&lsm->lock);
+    lsm_unlock_shared(lsm);
     return total;
 }

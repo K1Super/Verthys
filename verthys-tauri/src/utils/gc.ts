@@ -1,16 +1,14 @@
 /**
  * gc.ts — V8 垃圾回收辅助工具
  *
- * 配合 additionalBrowserArgs 中的 --js-flags="--expose-gc --gc-interval=100" 使用：
- *   1. --expose-gc 暴露原生 gc() 函数到全局（精确触发 Major GC）
- *   2. --gc-interval=100 每 100 次分配自动触发增量标记（降低 Stop-The-World 概率）
- *   3. --max-old-space-size=1024 老生代上限提升到 1GB（避免频繁 Major GC）
- *   4. --optimize-for-size 优化策略倾向减少内存占用
- *
  * 本工具的职责：
  *   - 在 main.ts 启动时调用 installGcHelper()，将原生 gc() 桥接为 window.gc()
  *   - 提供 tryGc() 安全调用入口（dev 环境跳过，避免影响调试）
  *   - 提供 scheduleGc() 延迟调度入口（避免在用户交互的关键路径触发 GC）
+ *
+ * 依赖前提：原生 gc() 仅在 V8 以 --expose-gc 启动时存在。窗口未启用
+ * 该选项时 installGcHelper 不做任何注册，tryGc/scheduleGc 均为安全
+ * no-op；各函数保留完整类型守卫，环境显式启用 gc 时桥接自动生效。
  */
 
 /** V8 原生 gc 函数类型（由 --expose-gc 暴露） */

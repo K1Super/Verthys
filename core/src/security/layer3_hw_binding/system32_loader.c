@@ -43,6 +43,31 @@ static int driver_exists(const wchar_t *driver_name)
     return PathFileExistsW(path) ? 1 : 0;
 }
 
+/* System32 目录前缀匹配（带分隔符边界）。
+ *
+ * 原缺陷：_wcsnicmp(path, dir, wcslen(dir)) 无分隔符边界——
+ * 与 System32 同前缀的旁路目录（如 "C:\Windows\System32Malware\evil.dll"）
+ * 也能通过前缀检查。修复：前缀一致后，path 中紧随前缀的字符必须是路径
+ * 分隔符或字符串结尾。dir 以 GetSystemDirectoryW 结果为准（无尾部
+ * 分隔符），大小写不敏感（_wcsnicmp）。
+ */
+static int system32_dir_prefix(const wchar_t *path)
+{
+    size_t dlen;
+
+    if (path == NULL) return 0;
+    dlen = wcslen(s_system32_dir);
+    if (dlen == 0) return 0;
+    if (_wcsnicmp(path, s_system32_dir, dlen) != 0) return 0;
+    return (path[dlen] == L'\0' || path[dlen] == L'\\' || path[dlen] == L'/');
+}
+
+/* 测试白盒：暴露前缀边界判定（仅 test 对象直链调用，不入 DLL 导出清单） */
+int system32_loader_dir_prefix_test(const wchar_t *path)
+{
+    return system32_dir_prefix(path);
+}
+
 /* ---------- 公共接口 ---------- */
 
 int system32_loader_init(void)
@@ -111,8 +136,7 @@ int system32_loader_load(const wchar_t *dll_name, void **out_handle)
         /* 验证加载位置确实是 System32 */
         wchar_t loaded_path[MAX_PATH] = {0};
         if (GetModuleFileNameW(hMod, loaded_path, MAX_PATH) > 0) {
-            if (_wcsnicmp(loaded_path, s_system32_dir,
-                          wcslen(s_system32_dir)) != 0) {
+            if (!system32_dir_prefix(loaded_path)) {
                 /* 不是从 System32 加载，拒绝 */
                 FreeLibrary(hMod);
                 return -3;

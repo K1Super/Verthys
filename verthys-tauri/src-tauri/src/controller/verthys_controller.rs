@@ -17,7 +17,7 @@
  * - 解锁与锁定：解锁时验证密码，建立会话守卫（自动管理文件锁）；锁定
  *   时先持久化落盘再销毁 worker，确保数据不丢失。
  * - 记录管理：支持单条增删改查、批量枚举（含流式分页）、批量删除。
- * - 防御闭环状态查询：透传 worker 的安全路径阻断/降级状态。
+ * - 动态防护状态查询：透传 worker 的安全路径阻断/降级状态。
  * - 导入导出与密码修改：支持完整容器导入导出及主密码变更。
  *
  * =============================================================================
@@ -43,10 +43,11 @@
  * controller → state / repository / controller::types / util / security / worker
  */
 
+use crate::controller::api_error::ErrorCode;
 use crate::controller::types::{EnumerateBatch, InitStatus, InitStatusResult, VerthysResponse};
 use crate::repository::verthys_state::{
     delete_state_file, read_last_verthys_path, read_state_file, try_repair_state_file,
-    write_state_file_atomic, validate_verthys_magic, verify_container_id_match, VerthysState,
+    write_state_file_atomic, validate_verthys_file, VerthysState,
 };
 use crate::security::file_lock::VerthysFileLock;
 use crate::state::verthys_session::{PreheatToken, VerthysSessionGuard};
@@ -178,6 +179,50 @@ fn write_verthys_audit(
     }
 }
 
+/// 数据域统一容器会话闸门
+///
+/// 记录数据读写命令必须先经本闸门：容器会话未建立（未解锁或已锁定）
+/// 时写入审计 Denied 事件并返回错误文案，命令入口据此直接拒绝而不
+/// 触碰 worker。拒绝以 KeyStateMismatch 错误码呈现，与 C 层 LOCKED
+/// 同域可区分。
+///
+/// 判定依据是容器会话（VerthysSessionGuard 存在），而非全局密钥生命
+/// 周期状态：记录数据由容器密钥加密保护，解锁容器即获得读写权；模块
+/// 密钥等应用层密钥与 GMK 验证状态无关，GMK 授权由密钥命令自身裁决。
+pub(crate) fn require_unlocked(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    cmd: &str,
+) -> Result<(), String> {
+    if state_allows_data_access(state) {
+        return Ok(());
+    }
+    let current = state.key_lifecycle.current_state();
+    log::warn!(
+        "[gate] {} 被容器会话闸门拒绝（生命周期 {}）",
+        cmd,
+        current
+    );
+    write_verthys_audit(
+        app,
+        AuditEventType::SecurityCommand,
+        cmd,
+        AuditResult::Denied,
+        Some(format!(
+            "容器会话未建立，拒绝数据域访问（生命周期 {}）",
+            current
+        )),
+    );
+    Err(ErrorCode::KeyStateMismatch.default_message().to_string())
+}
+
+/// 数据域访问状态判定（纯函数）：仅容器会话存在（已解锁未锁定）时
+/// 允许记录数据读写。与闸门拆分以便无 AppHandle 环境下直接测试状态
+/// 策略。
+fn state_allows_data_access(state: &AppState) -> bool {
+    state.has_verthys_session()
+}
+
 /// 密码复杂度校验：最小长度 8，最大 512，用于创建/修改密码时。
 /// 当前为 BALANCED 预设，未来可扩展为更严格规则。
 fn validate_password_complexity(password: &str) -> Result<(), String> {
@@ -199,9 +244,8 @@ fn validate_password_complexity(password: &str) -> Result<(), String> {
 /// 返回 "none"（全新）、"ready"（可解锁）、"broken"（需清理或修复）。
 ///
 /// 支持主动修复：
-/// - 路径指针存在但状态文件缺失时，校验 .verthys magic 并重建状态。
+/// - 路径指针存在但状态文件缺失时，校验 .verthys 文件格式并重建状态。
 /// - 状态文件 ready=false 但 .verthys 合法时，自动修复为 ready。
-/// - container_id 不匹配时，重建状态文件以匹配当前 verthys。
 ///
 /// 修复失败连续 3 次时，在 detail 中推送告警，提示用户检查磁盘。
 /// 该操作幂等，每次读取最新磁盘状态。
@@ -265,7 +309,7 @@ pub fn verthys_init_status(app: tauri::AppHandle) -> Result<InitStatusResult, St
             };
 
             if !s.ready {
-                if std::path::Path::new(&s.verthys_path).exists() && validate_verthys_magic(&s.verthys_path) {
+                if std::path::Path::new(&s.verthys_path).exists() && validate_verthys_file(&s.verthys_path) {
                     if let Some(repaired) = try_repair_state_file(&app, &s.verthys_path) {
                         log::info!("[init_status] ready=false 主动修复成功: {}", sanitize_path(&s.verthys_path));
                         return Ok(InitStatusResult {
@@ -297,49 +341,6 @@ pub fn verthys_init_status(app: tauri::AppHandle) -> Result<InitStatusResult, St
                     status_enum: Some(InitStatus::Broken),
                     verthys_path: Some(s.verthys_path.clone()),
                     detail: "已清理状态文件".into(),
-                })
-            } else if !verify_container_id_match(&s, &s.verthys_path) {
-                log::warn!(
-                    "[AUDIT][init_status] container_id 不匹配，尝试重建状态文件: {}",
-                    sanitize_path(&s.verthys_path)
-                );
-                write_verthys_audit(
-                    &app,
-                    AuditEventType::ContainerIdMismatch,
-                    &s.verthys_path,
-                    AuditResult::Failure,
-                    Some("状态文件与加密库 container_id 不匹配".into()),
-                );
-                if let Some(repaired) = try_repair_state_file(&app, &s.verthys_path) {
-                    log::info!("[init_status] container_id 不匹配，重建状态文件成功");
-                    write_verthys_audit(
-                        &app,
-                        AuditEventType::StateRepair,
-                        &repaired.verthys_path,
-                        AuditResult::Success,
-                        Some("container_id 不匹配，状态文件已重建".into()),
-                    );
-                    return Ok(InitStatusResult {
-                        status: "ready".into(),
-                        status_enum: Some(InitStatus::Ready),
-                        verthys_path: Some(repaired.verthys_path.clone()),
-                        detail: "状态文件与加密库不匹配，已自动重建".into(),
-                    });
-                }
-                log::warn!("[init_status] container_id 不匹配且重建失败，清理状态文件");
-                write_verthys_audit(
-                    &app,
-                    AuditEventType::StateRepair,
-                    &s.verthys_path,
-                    AuditResult::Failure,
-                    Some("container_id 不匹配且重建失败，清理状态文件".into()),
-                );
-                delete_state_file(&app);
-                Ok(InitStatusResult {
-                    status: "broken".into(),
-                    status_enum: Some(InitStatus::Broken),
-                    verthys_path: Some(s.verthys_path.clone()),
-                    detail: "状态文件与加密库不匹配，已清理，请重新选择".into(),
                 })
             } else {
                 Ok(InitStatusResult {
@@ -786,7 +787,7 @@ pub async fn verthys_unlock(
             Ok(json) => json,
             Err(e) => {
                 log::error!("[verthys_unlock] send 失败: {}", e);
-                /* ★ 企业级修复（D-WORKER-RESET）：超时/通信失败时销毁 worker 子进程
+                /* 修复（D-WORKER-RESET）：超时/通信失败时销毁 worker 子进程
                  *
                  * 场景：unlock 进度死锁或 FFI 调用耗时超过 60 秒空闲超时后，
                  * 父进程放弃等待但 worker 子进程仍在运行。Verthys_Unlock FFI 可能
@@ -854,13 +855,13 @@ pub async fn verthys_unlock(
         log::info!("[verthys_unlock] 解锁成功");
 
         // 服务端强制成功重置：连续失败计数归零
-        // （解锁响应 ok=true 已确认成功，无需 auth_token 授权）
+        //（解锁响应 ok=true 已确认成功，服务端直调桥接层，无需会话授权检查）
         crate::security_commands::brute_force_bridge::record_auth_success(
             &app,
             &security_state,
         );
 
-        // ★ 企业级修复：同步 key_lifecycle 状态机与 verthys 生命周期
+        // 修复：同步 key_lifecycle 状态机与 verthys 生命周期
         //
         // 原缺陷：verthys_unlock 成功后不触碰 key_lifecycle，状态永远停留在
         // 初始值 NoKey。但 verthys_verify_global_key 要求 Locked 状态 →
@@ -883,7 +884,7 @@ pub async fn verthys_unlock(
             log::info!("[verthys_unlock] key_lifecycle → NoKey（无全局密钥记录）");
         }
 
-        // ★ 企业级根治修复：释放共享锁后再创建会话守卫（消除自死锁）
+        // 修复修复：释放共享锁后再创建会话守卫（消除自死锁）
         //
         // 原缺陷（死锁根因）：_read_lock（共享锁，line 634 lock_shared 获取）在
         // 整个函数作用域内存活直到 line 829 返回才 Drop。VerthysSessionGuard::new
@@ -1173,7 +1174,7 @@ pub async fn verthys_create(
     }
     log::info!("[verthys_create] 文件落地校验通过: size={} bytes", file_size);
 
-    // ★ 企业级根治：重置 key_lifecycle 到 NoKey
+    // 修复：重置 key_lifecycle 到 NoKey
     //
     // verthys_create 通过 raw worker IPC 完成 create→lock→unlock，
     // 绕过了 verthys_unlock Tauri 命令的 key_lifecycle 状态管理代码（843-851 行）。
@@ -1272,7 +1273,7 @@ pub async fn verthys_lock(
     let _ = state.wait_io_complete(std::time::Duration::from_secs(10)).await;
 
     state.set_session(None);
-    // ★ 企业级修复：worker 销毁后 GMK 已消失，重置密钥生命周期为 NoKey
+    // 修复：worker 销毁后 GMK 已消失，重置密钥生命周期为 NoKey
     state.key_lifecycle.reset_to_no_key();
 
     if !crate::security::clear_clipboard() {
@@ -1318,11 +1319,16 @@ pub async fn verthys_lock(
 /// 不清零密钥、不改变 worker 状态（始终 UNLOCKED），无 lock+unlock 竞态风险。
 #[tauri::command]
 pub async fn verthys_flush(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     _verthys_path: String,
     _password: String,
 ) -> Result<VerthysResponse, String> {
-    // ★ 企业级根治：直接调用 Verthys_Flush，不再使用 lock+unlock 模式
+    if let Err(msg) = require_unlocked(&app, &state, "flush") {
+        return Ok(VerthysResponse::err("flush", &msg));
+    }
+
+    // 修复：直接调用 Verthys_Flush，不再使用 lock+unlock 模式
     //
     // 【旧实现致命缺陷】
     //   旧实现发送 lock + unlock 两条 IPC 模拟 flush：
@@ -1379,21 +1385,26 @@ pub async fn verthys_flush(
     result
 }
 
-// ===== 磁盘级持久化验证（只读，不经过 worker） =====
+// ===== 磁盘级结构校验（只读，不经过 worker） =====
 
-/// ★ 磁盘级持久化验证：以只读方式校验 .verthys 文件确实已落盘。
+/// 磁盘级结构校验：以只读方式确认 .verthys 文件结构健全。
 ///
-/// 消除"内存可见、磁盘丢失"的假成功：persistVerthys 成功后，回读 worker 内存
-/// 无法检测磁盘是否真正写入（v1 AddRecord 仅写内存）。本命令绕过 worker，
-/// 直接读取磁盘文件，校验 flush 确实将数据写入了磁盘文件。
+/// 定位：doFlush 的磁盘侧兜底校验（绕过 worker 直接读盘，防"内存可见、
+/// 磁盘损坏"的假成功）。结构性损坏才会判失败；落盘新鲜度的内容级确认
+/// 由调用侧记录读回验证承担（见同文件判据退役注记）。
 ///
 /// 验证项（全部只读，不解密、不接触密钥、不修改文件、不改变 worker 状态）：
 ///   1. 文件存在且非空
 ///   2. V3 超级块副本帧头合法（'V3RP' + payload_len 在槽位容量内）
-///   3. ★ mtime 时效性：文件修改时间在 15s 内（核心检测项）
-///      —— 若 flush 未真正写入磁盘，mtime 为上次写入的旧值，远超 15s
-///   4. V3 超级块区边界：文件 ≥ 64KB（VERTHYS_V3_SB_REGION_END）
-///   5. expected_record_count：弱大小合理性检查（无法解密读取实际记录数）
+///   3. V3 超级块区边界：文件 ≥ 64KB（VERTHYS_V3_SB_REGION_END）
+///   4. expected_record_count：弱大小合理性检查（无法解密读取实际记录数）
+///      —— 仅告警不判失败（压缩/对齐/小记录因素）
+///
+/// 判据退役注记：早期以"文件 mtime 在 15s 内"作为落盘新鲜度核心检测项。
+///   V3 下 AddRecord/DeleteRecord 均经 WAL 单调用事务即时落盘（逐帧
+///   _commit），flush 常为 no-op 不推进 mtime——mtime 时效判据会把
+///   "已落盘但队列延迟/时钟回拨"误报为失败，且重试不可自愈。
+///   落盘内容级确认由调用侧（记录读回验证）承担，本命令仅做结构健全校验。
 ///
 /// 安全边界：仅读取文件头部 128 字节 + 元数据，不接触密钥材料，不依赖 worker。
 /// 使用 spawn_blocking 避免阻塞 async runtime，5s 超时兜底。
@@ -1455,10 +1466,10 @@ pub async fn verthys_verify_disk_persist(
     }
 }
 
-/// 磁盘级持久化验证的同步实现（在 blocking 线程中运行）。
+/// 磁盘级结构校验的同步实现（在 blocking 线程中运行）。
 ///
 /// 纯只读文件 I/O，不接触密钥、不解密任何数据。
-/// 返回 Ok(()) 表示磁盘文件结构完整且最近被写入；Err 表示验证失败。
+/// 返回 Ok(()) 表示磁盘文件结构完整；Err 表示结构校验失败。
 fn verify_disk_persist_blocking(
     verthys_path: &str,
     expected_record_count: Option<u64>,
@@ -1472,7 +1483,7 @@ fn verify_disk_persist_blocking(
         return Err("文件不存在".into());
     }
 
-    // 2. 文件元数据：大小 + 修改时间
+    // 2. 文件元数据：仅取大小（mtime 时效判据已退役，见函数头注记）
     let metadata =
         std::fs::metadata(path).map_err(|e| format!("读取元数据失败: {}", e))?;
     let file_size = metadata.len();
@@ -1480,32 +1491,7 @@ fn verify_disk_persist_blocking(
         return Err(format!("文件过小 ({} 字节)", file_size));
     }
 
-    // 3. ★ mtime 时效性检查（核心：检测 flush 是否真正写入磁盘）
-    //    flush 刚成功完成，OS 应已更新文件 mtime。若 flush 未真正写入
-    //    （仅写内存或写入失败被掩盖），mtime 停留在上次写入的旧值。
-    //    15s 窗口覆盖 IPC 往返 + 调度延迟，同时能捕获"flush 未写入"的旧 mtime。
-    let mtime = metadata
-        .modified()
-        .map_err(|e| format!("读取修改时间失败: {}", e))?;
-    let now = std::time::SystemTime::now();
-    match now.duration_since(mtime) {
-        Ok(age) => {
-            const MTIME_MAX_AGE_SECS: u64 = 15;
-            if age.as_secs() > MTIME_MAX_AGE_SECS {
-                return Err(format!(
-                    "文件修改时间过旧 ({}s > {}s)，flush 可能未写入磁盘",
-                    age.as_secs(),
-                    MTIME_MAX_AGE_SECS
-                ));
-            }
-        }
-        Err(_) => {
-            // mtime 在未来（系统时钟回拨）—— 保守视为可疑
-            return Err("文件修改时间异常（在未来）".into());
-        }
-    }
-
-    // 5. V3 超级块副本帧头校验（verthys_container_v3.h 布局契约）
+    // 3. V3 超级块副本帧头校验（verthys_container_v3.h 布局契约）
     //    磁盘偏移 0 = Replica-0 槽位，帧头 8 字节：[u32 'V3RP'][u32 payload_len]
     //    'V3RP' = 0x50523356（LE: 56 33 52 50）；payload_len ∈ (0, 16KB - 8]
     let mut header = [0u8; 128];
@@ -1539,7 +1525,7 @@ fn verify_disk_persist_blocking(
         ));
     }
 
-    // 6. V3 超级块区边界：文件必须完整覆盖 64KB 超级块区
+    // 4. V3 超级块区边界：文件必须完整覆盖 64KB 超级块区
     if file_size < V3_SB_REGION_END {
         return Err(format!(
             "V3 文件过小: {} < {}（超级块区不完整）",
@@ -1547,7 +1533,7 @@ fn verify_disk_persist_blocking(
         ));
     }
 
-    // 7. expected_record_count 弱合理性检查
+    // 5. expected_record_count 弱合理性检查
     //    V3 的记录数存储在加密分区（需 DEK 解密），无法不解密读取实际值。
     //    此处仅做文件大小的弱启发式校验：每条记录至少占用一定字节
     //    （索引条目 + 数据块开销）。文件大小不应显著低于预期。
@@ -1578,11 +1564,17 @@ fn verify_disk_persist_blocking(
 /// 添加单条记录。
 #[tauri::command]
 pub async fn verthys_add_record(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     rtype: u32,
     name: String,
     data_b64: String,
 ) -> Result<VerthysResponse, String> {
+    // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
+    if let Err(msg) = require_unlocked(&app, &state, "add_record") {
+        return Ok(VerthysResponse::err("add_record", &msg));
+    }
+
     // 记录名与数据 base64 均为用户明文，包装进 Zeroizing 统一擦除
     let name = Zeroizing::new(name);
     let data_b64 = Zeroizing::new(data_b64);
@@ -1609,9 +1601,14 @@ pub async fn verthys_add_record(
 /// 按 ID 读取记录。
 #[tauri::command]
 pub async fn verthys_get_record(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: u64,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "get_record") {
+        return Ok(VerthysResponse::err("get_record", &msg));
+    }
+
     let req = serde_json::json!({
         "op": "get_record",
         "id": id,
@@ -1626,9 +1623,14 @@ pub async fn verthys_get_record(
 /// 超时 60 秒，若记录数巨大建议使用流式版本。
 #[tauri::command]
 pub async fn verthys_enumerate_records(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     start_id: u64,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "enumerate_records") {
+        return Ok(VerthysResponse::err("enumerate_records", &msg));
+    }
+
     let req = serde_json::json!({
         "op": "enumerate_records",
         "id": start_id,
@@ -1649,11 +1651,16 @@ pub async fn verthys_enumerate_records(
 /// 返回累计推送总数。
 #[tauri::command]
 pub async fn verthys_enumerate_records_stream(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     start_id: u64,
     batch_size: u64,
     on_batch: tauri::ipc::Channel<EnumerateBatch>,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "enumerate_records_stream") {
+        return Ok(VerthysResponse::err("enumerate_records_stream", &msg));
+    }
+
     let batch = if batch_size == 0 { 200u64 } else { batch_size.min(500) };
     let mut current_id: u64 = if start_id > 0 { start_id } else { 1 };
     let mut total_pushed: u64 = 0;
@@ -1750,9 +1757,14 @@ pub async fn verthys_enumerate_records_stream(
 /// 删除单条记录。
 #[tauri::command]
 pub async fn verthys_delete_record(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: u64,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "delete_record") {
+        return Ok(VerthysResponse::err("delete_record", &msg));
+    }
+
     let req = serde_json::json!({
         "op": "delete_record",
         "id": id,
@@ -1767,9 +1779,15 @@ pub async fn verthys_delete_record(
 /// 无论删除多少条，磁盘写入量恒定（仅一次重加密和 HMAC 更新）。
 #[tauri::command]
 pub async fn verthys_delete_records(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     ids: Vec<u64>,
 ) -> Result<VerthysResponse, String> {
+    // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
+    if let Err(msg) = require_unlocked(&app, &state, "delete_records") {
+        return Ok(VerthysResponse::err("delete_records", &msg));
+    }
+
     log::info!("[verthys_delete_records] 批量删除 {} 条记录", ids.len());
     let req = serde_json::json!({
         "op": "delete_records",
@@ -1784,8 +1802,13 @@ pub async fn verthys_delete_records(
 /// 获取当前已加载的轻量摘要记录数（用于 UI 展示）。
 #[tauri::command]
 pub async fn verthys_get_summary_count(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "get_summary_count") {
+        return Ok(VerthysResponse::err("get_summary_count", &msg));
+    }
+
     let req = serde_json::json!({
         "op": "get_summary_count",
     });
@@ -1798,9 +1821,14 @@ pub async fn verthys_get_summary_count(
 /// 轻量级检查是否存在指定类型的记录（只扫描摘要索引，不读数据块）。
 #[tauri::command]
 pub async fn verthys_has_record_by_type(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     rtype: u32,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "has_record_by_type") {
+        return Ok(VerthysResponse::err("has_record_by_type", &msg));
+    }
+
     let req = serde_json::json!({
         "op": "has_record_by_type",
         "rtype": rtype,
@@ -1817,10 +1845,16 @@ pub async fn verthys_has_record_by_type(
 /// 密码发送后立即擦除。
 #[tauri::command]
 pub async fn verthys_export(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     export_path: String,
     password: String,
 ) -> Result<VerthysResponse, String> {
+    // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
+    if let Err(msg) = require_unlocked(&app, &state, "export") {
+        return Ok(VerthysResponse::err("export", &msg));
+    }
+
     let password = Zeroizing::new(password);
 
     let req_str = Zeroizing::new(serde_json::to_string(&PathPasswordReq {
@@ -1843,10 +1877,15 @@ pub async fn verthys_export(
 /// 密码发送后立即擦除。
 #[tauri::command]
 pub async fn verthys_import(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     import_path: String,
     password: String,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "import") {
+        return Ok(VerthysResponse::err("import", &msg));
+    }
+
     let password = Zeroizing::new(password);
 
     let req_str = Zeroizing::new(serde_json::to_string(&PathPasswordReq {
@@ -1869,10 +1908,15 @@ pub async fn verthys_import(
 /// 两个密码均在使用后立即擦除，新密码需满足复杂度要求。
 #[tauri::command]
 pub async fn verthys_change_password(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     old_password: String,
     new_password: String,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "change_password") {
+        return Ok(VerthysResponse::err("change_password", &msg));
+    }
+
     let old_password = Zeroizing::new(old_password);
     let new_password = Zeroizing::new(new_password);
 
@@ -1898,9 +1942,9 @@ pub async fn verthys_change_password(
     Ok(resp)
 }
 
-// ===== 防御闭环状态查询 =====
+// ===== 动态防护状态查询 =====
 
-/// 查询防御闭环实时状态。
+/// 查询动态防护实时状态。
 ///
 /// 透传 worker 的 security_status op，返回 7 条攻击路径的阻断/降级/失败
 /// 计数与关键路径全阻断标志。防御状态为进程级事实，锁定态亦可查询。
@@ -1915,4 +1959,183 @@ pub async fn verthys_security_status(
     let resp: VerthysResponse = serde_json::from_str(&resp_json)
         .map_err(|e| format!("parse response: {}", e))?;
     Ok(resp)
+}
+
+/* ------------------------------------------------------------------ *
+ * 数据域容器会话闸门测试                                             *
+ *                                                                    *
+ * AppHandle 依赖 tauri::test 运行时，仅测试纯会话判定策略：           *
+ * 无会话拒绝，会话存在放行——闸门代码事实为「判定不通过即写审计并      *
+ * 返回 KeyStateMismatch」，会话判定是该判定的唯一变量。               *
+ * ------------------------------------------------------------------ */
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_access_gate_follows_container_session() {
+        let state = AppState::new();
+        // 无容器会话（未解锁）：拒绝
+        assert!(!state_allows_data_access(&state));
+
+        // 建立容器会话：放行（生命周期保持 NoKey —— 数据域仅依赖
+        // 容器解锁，不依赖全局密钥验证状态）
+        let path = temp_container_path("gate_session");
+        make_v3_container(&path).unwrap();
+        let guard = VerthysSessionGuard::new(path.to_str().unwrap(), "gate-session-test")
+            .expect("会话守卫创建失败");
+        *state.lock_verthys_session() = Some(guard);
+        assert!(state_allows_data_access(&state));
+
+        // 会话销毁（锁定）：拒绝
+        *state.lock_verthys_session() = None;
+        assert!(!state_allows_data_access(&state));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn data_access_gate_message_is_key_state_mismatch() {
+        // 闸门错误文案使用 KeyStateMismatch 的默认消息（文案稳定契约）
+        let msg = ErrorCode::KeyStateMismatch.default_message();
+        assert_eq!(msg, "密钥状态不匹配");
+    }
+
+    /* ------------------------------------------------------------------ *
+     * 磁盘级结构校验回归测试（mtime 时效判据退役后）                     *
+     *                                                                    *
+     * 退役背景：mtime 15s 时效与"未来即失败"判据在 V3 单调用事务         *
+     * （WAL 逐帧 fsync + 超块法定人数即时落盘）下恒误报，已删除。        *
+     * 本组用例锁定两条契约：                                            *
+     *   1. 结构校验与 mtime 无关（裁决依据是帧头/边界/大小）；           *
+     *   2. 结构破坏仍必须被抓出（落盘契约靠内容级读回验证，非时序）。   *
+     * ------------------------------------------------------------------ */
+    use std::fs::OpenOptions;
+    use std::time::{Duration, SystemTime};
+
+    /// 构造最小合法 V3 容器文件：64KB 超级块区 + 'V3RP' 帧头。
+    /// payload_len 取 64（区间 (0, 16KB-8] 内合法值）。
+    fn make_v3_container(path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut buf = vec![0u8; 64 * 1024];
+        buf[0..4].copy_from_slice(&[0x56, 0x33, 0x52, 0x50]); // 'V3RP' LE
+        buf[4..8].copy_from_slice(&64u32.to_le_bytes());
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(&buf)?;
+        Ok(())
+    }
+
+    /// 临时文件路径（进程 id + 用例名隔离，避免并行测试冲突）
+    fn temp_container_path(case: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "verthys_vdp_{}_{}_{}.v3",
+            std::process::id(),
+            case,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ))
+    }
+
+    #[test]
+    fn verify_disk_persist_accepts_valid_v3_container() {
+        let path = temp_container_path("valid");
+        make_v3_container(&path).unwrap();
+        let result = verify_disk_persist_blocking(path.to_str().unwrap(), None);
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Ok(()) => {}
+            Err(e) => panic!("合法 V3 容器应通过结构校验: {}", e),
+        }
+    }
+
+    #[test]
+    fn verify_disk_persist_ignores_stale_and_future_mtime() {
+        let path = temp_container_path("mtime");
+        make_v3_container(&path).unwrap();
+
+        // mtime 陈旧 1 小时：判据退役后必须仍通过
+        let stale = SystemTime::now() - Duration::from_secs(3600);
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(stale))
+            .unwrap();
+        match verify_disk_persist_blocking(path.to_str().unwrap(), None) {
+            Ok(()) => {}
+            Err(e) => panic!("mtime 陈旧不得影响结构校验: {}", e),
+        }
+
+        // mtime 未来 1 小时（系统时钟回拨场景）：同样必须通过
+        let future = SystemTime::now() + Duration::from_secs(3600);
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(future))
+            .unwrap();
+        let result = verify_disk_persist_blocking(path.to_str().unwrap(), None);
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Ok(()) => {}
+            Err(e) => panic!("mtime 未来不得影响结构校验: {}", e),
+        }
+    }
+
+    #[test]
+    fn verify_disk_persist_rejects_non_v3_magic() {
+        let path = temp_container_path("badmagic");
+        {
+            use std::io::Write;
+            let mut buf = vec![0u8; 64 * 1024];
+            buf[4..8].copy_from_slice(&64u32.to_le_bytes()); // 魔数保持全零
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(&buf).unwrap();
+        }
+        let result = verify_disk_persist_blocking(path.to_str().unwrap(), None);
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Err(e) => assert_eq!(e, "非 V3 容器格式"),
+            Ok(()) => panic!("错误魔数必须被拒绝"),
+        }
+    }
+
+    #[test]
+    fn verify_disk_persist_rejects_bad_payload_len() {
+        let path = temp_container_path("badpaylen");
+        {
+            use std::io::Write;
+            let mut buf = vec![0u8; 64 * 1024];
+            buf[0..4].copy_from_slice(&[0x56, 0x33, 0x52, 0x50]);
+            buf[4..8].copy_from_slice(&0u32.to_le_bytes()); // payload_len = 0 非法
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(&buf).unwrap();
+        }
+        let result = verify_disk_persist_blocking(path.to_str().unwrap(), None);
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Err(_) => {}
+            Ok(()) => panic!("payload_len 越界必须被拒绝"),
+        }
+    }
+
+    #[test]
+    fn verify_disk_persist_rejects_truncated_superblock_region() {
+        let path = temp_container_path("trunc");
+        {
+            use std::io::Write;
+            let mut buf = vec![0u8; 40 * 1024]; // < 64KB 超级块区
+            buf[0..4].copy_from_slice(&[0x56, 0x33, 0x52, 0x50]);
+            buf[4..8].copy_from_slice(&64u32.to_le_bytes());
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(&buf).unwrap();
+        }
+        let result = verify_disk_persist_blocking(path.to_str().unwrap(), None);
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Err(_) => {}
+            Ok(()) => panic!("超级块区不完整必须被拒绝"),
+        }
+    }
 }

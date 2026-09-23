@@ -5,7 +5,7 @@
   全局样式已拆分至 styles/ 目录，main.ts 统一引入
 -->
 <template>
-  <!-- ★ 全局空闲状态机根节点：idle-{level} 驱动 CSS 动画治理 / 毛玻璃降载；
+  <!-- 全局空闲状态机根节点：idle-{level} 驱动 CSS 动画治理 / 毛玻璃降载；
        glass-calm（deep-idle）移除 backdrop-filter；reduce-motion 无障碍静止 -->
   <div
     class="app-root"
@@ -23,7 +23,7 @@
         </transition>
       </div>
 
-      <!-- ★ 主界面层（双缓冲预挂载 — 下层，交接帧零成本浮现）：
+      <!-- 主界面层（双缓冲预挂载 — 下层，交接帧零成本浮现）：
            PREWARM_MOUNT（1100ms）挂载进 prewarm 冻结层（隐藏 + 动画
            暂停 + 免交互）；PAGE_HANDOFF（3100ms）解除冻结 → materialize
            过渡启动 + 全部子入场动画从 0 同步播放 -->
@@ -54,7 +54,7 @@ const { entered, mainPrewarmed, phase, onEnter } = useAppTransition();
 /* 全局前端安全拦截（dev 环境自动关闭） */
 useSecurityGuard();
 
-/* ===== ★ 全局空闲状态机（唯一权威源，根节点类绑定） ===== */
+/* ===== 全局空闲状态机（唯一权威源，根节点类绑定） ===== */
 const { level } = useGlobalIdleScheduler();
 const idleLevel = computed(() => level.value);
 
@@ -69,7 +69,7 @@ onMounted(() => {
   onMotionChange = (e: MediaQueryListEvent) => { prefersReducedMotion.value = e.matches; };
   mq.addEventListener("change", onMotionChange);
 
-  /* ★ MainView chunk 空闲预取（双缓冲预挂载前置条件）：
+  /* MainView chunk 空闲预取（双缓冲预挂载前置条件）：
    * MainView 为懒加载 chunk，PREWARM_MOUNT（1100ms）预挂载时才触发
    * "加载+解析"，若未就绪则挂载延后（交接前 2s 余量兜底）。
    * 引导页展示期间的空闲时段后台完成加载与解析，预挂载时刻
@@ -81,7 +81,7 @@ onMounted(() => {
     window.setTimeout(prefetchMainView, 300);
   }
 
-  /* ★ 全局唯一主渲染循环启动：全应用 rAF 单一入口（帧门控 / 豁免 /
+  /* 全局唯一主渲染循环启动：全应用 rAF 单一入口（帧门控 / 豁免 /
    * 帧步进-墙钟分离均由主循环统一裁决），所有渲染引擎经注册接口接入。
    * 帧预算监控随后启动 —— 采样由主循环每执行帧推送任务总耗时，
    * 决策降频执行（排序与统计不阻塞帧）。 */
@@ -104,7 +104,7 @@ onBeforeUnmount(() => {
  * 全局通用类、设计令牌、keyframes 已拆分至 styles/ 目录
  */
 
-/* ★ 空闲状态机根容器：全尺寸包裹，不改变既有布局层级 */
+/* 空闲状态机根容器：全尺寸包裹，不改变既有布局层级 */
 .app-root {
   position: relative;
   width: 100%;
@@ -134,7 +134,7 @@ onBeforeUnmount(() => {
  * prewarm 态 = 静态 from 样式（非动画）；解除 prewarm（entered=true）
  * 触发 transition 插值回基线 — 过渡结束 transform 归 none：
  * MainView 树不进 3D 渲染上下文（文字 ClearType 渲染路径恒定）。
- * ★ 合成器铁律：过渡目标仅 opacity / transform —— 原 blur(14px)
+ * 合成器铁律：过渡目标仅 opacity / transform —— 原 blur(14px)
  * brightness(1.55) 全屏重采样已移除（交接窗口重绘开销归零），
  * 柔性由 scale 1.045→1 收敛承担。
  * 时长 --dur-page-enter(1.9s) = 渡越消散段等长（3100→5000ms）：
@@ -150,7 +150,7 @@ onBeforeUnmount(() => {
   transform: scale(1.045);
 }
 
-/* ★ prewarm 动画冻结：MainView 子树全部 CSS 动画（入场编排/呼吸/
+/* prewarm 动画冻结：MainView 子树全部 CSS 动画（入场编排/呼吸/
  * 微跳）自挂载起 paused（时钟冻结于 t=0，含 delay 期）——预挂载期
  * 不偷跑；解除 prewarm 同帧解冻，与外层 materialize 从 0 同步启动
  * （「整体虚化成型 + 内部元素错峰编排」双层同步的层次感）。

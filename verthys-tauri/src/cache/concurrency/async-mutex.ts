@@ -1,7 +1,7 @@
 /*
  * cache/concurrency/async-mutex.ts — 异步互斥锁（FIFO 公平锁）
  *
- * ★ 并发重构：
+ * 并发重构：
  *   为 VerthysCacheDomain 提供临界区保护原语，避免并发扫描 / 删除标记操作
  *   互相踩踏（缓存层竞态根治的底层构件）。
  *
@@ -18,7 +18,7 @@
  *     release();
  *   }
  *
- * ★ 嵌套警告：同一线性执行流内不可重复 acquire 同一把锁（会自我死锁）。
+ * 嵌套警告：同一线性执行流内不可重复 acquire 同一把锁（会自我死锁）。
  *   VerthysCacheDomain 中各锁分工明确（scanMutex / summaryScanMutex /
  *   deletionMutex 互不嵌套），getFullRecord 仅在写入缓存前的原子检查段
  *   持 deletionMutex，不与 markForDeletion 的持锁段嵌套。

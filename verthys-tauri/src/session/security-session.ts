@@ -11,15 +11,16 @@ import {
   securityBruteCheck,
   securityBruteClearPurge, securityBruteStatus,
   securitySessionStart, securitySessionStop, securitySessionSetHighSecurity,
-  securityGetPresetConfig,
+  securityApplyPreset, securityLoadPresetState,
   verthysClearGlobalKey, verthysLock, verthysLockPersist, workerDestroy,
   type SecurityPresetCode, type BruteForceCheckResponse,
 } from "../lib/verthys";
-import { keyState, setCurrentVerthysPath, loadCustomFeatures, saveSecurityPreset, resetAllState } from "../state/key_state";
-import { PRESET_SESSION_TIMEOUT_MS } from "../constants/key_manager_const";
+import { keyState, setCurrentVerthysPath, loadCustomFeatures, saveSecurityPreset, saveCustomFeatures, loadSecurityPreset, resetAllState } from "../state/key_state";
+import { PRESET_SESSION_TIMEOUT_MS, SECURITY_PRESET_KEY, CUSTOM_FEATURES_KEY } from "../constants/key_manager_const";
+import { withTimeout } from "../utils/promise_utils";
 import type { BruteForceGateResult } from "../types/key_manager";
 import { clearModuleKeyCache, clearModuleCache, clearRecordScanCache, cancelDebouncedFlush, resetFlushChain, waitForFlush, clearAllCacheTimers, setCacheDirty, clearSummaryCache, clearFullRecordCache } from "../cache/composition/verthys-cache";
-// ★ 后台任务 API 直连 core 层（单向化：不再转发 start/stop）
+// 后台任务 API 直连 core 层（单向化：不再转发 start/stop）
 import { startBackgroundTasks, stopBackgroundTasks } from "../core/background-tasks";
 
 // 导出 securityPresetRef 供 keyManager.ts 再导出
@@ -81,9 +82,10 @@ export function getSessionTimeout(): number {
  * 三档安全预设适配                                                    *
  *                                                                    *
  * applySecurityPreset 在初始化成功与用户切换预设时调用：              *
- *   - 更新 securityPresetRef                                          *
- *   - 设置会话空闲超时（按预设档位）                                  *
- *   - 启用/禁用会话守卫的高安全模式（SECURE → 高安全）                *
+ *   - 标准档 0/1/2：先调后端真实切档（security_apply_preset →        *
+ *     worker → C 层双缓冲原子切换），成功后才更新前端状态；           *
+ *     失败抛错（明确错误码），前端状态保持原值                        *
+ *   - CUSTOM 档：组合会话层开关（高安全模式），无 C 层档位            *
  * ------------------------------------------------------------------ */
 
 /**
@@ -91,48 +93,130 @@ export function getSessionTimeout(): number {
  *  在初始化成功后与用户切换预设时调用
  *  @param preset 0=BALANCED, 1=SECURE, 2=PERFORMANCE, 3=CUSTOM
  *  @returns 该预设的配置详情（含各特性开关）
+ *  @throws 后端切档/落盘失败或超时时抛错（调用方以 withTimeout 兜底并提示）
  */
 export async function applySecurityPreset(preset: SecurityPresetCode) {
+  // CUSTOM 档：后端落盘自定义特性（无 C 层档位），会话层开关组合实现
+  if (preset === 3) {
+    const custom = loadCustomFeatures();
+    // 先后端落盘 + 返回权威配置；失败抛错，前端状态不变
+    const config = await securityApplyPreset(3, custom);
+
+    // 会话层开关：高安全模式 = session_lock_on_idle + clip_clear_on_lock
+    const highSec = custom.session_lock_on_idle && custom.clip_clear_on_lock;
+    try {
+      // 3s 超时兜底：后端会话守卫命令阻塞时不得卡死预设应用流程
+      const ok = await withTimeout(
+        securitySessionSetHighSecurity(highSec),
+        3000,
+        "设置高安全模式",
+      );
+      if (!ok) {
+        // 后端返回 ok=false（会话未解锁被拒绝）：可见地报告而非静默吞掉
+        console.warn("[applySecurityPreset] CUSTOM 高安全模式被后端拒绝（会话未解锁）");
+      }
+    } catch (e) {
+      console.warn("[applySecurityPreset] CUSTOM 设置高安全模式失败（非致命）", e);
+    }
+
+    // 后端成功后更新前端状态 + localStorage 缓存（后端为权威）
+    keyState.securityPreset.value = preset;
+    saveSecurityPreset(preset);
+    saveCustomFeatures(custom);
+    return config;
+  }
+
+  // 标准档 0/1/2：先调后端真实切档（含原子落盘），成功后更新前端状态
+  const config = await securityApplyPreset(preset as 0 | 1 | 2);
+
+  // 后端切档成功后同步前端状态与缓存（保持顺序：失败时状态不变）
   keyState.securityPreset.value = preset;
-  // 0. 持久化当前预设代号，使应用重启后保持上次选择而非回退默认
   saveSecurityPreset(preset);
-  // 1. 按预设调整会话空闲超时
   sessionTimeoutMs = PRESET_SESSION_TIMEOUT_MS[preset];
   if (keyState.globalKeyReady.value) {
     resetSessionTimer();
   }
 
-  // 2. CUSTOM 预设：从 localStorage 读取自定义特性，按需启用高安全模式
-  if (preset === 3) {
-    const custom = loadCustomFeatures();
-    // 高安全模式 = session_lock_on_idle + clip_clear_on_lock
-    const highSec = custom.session_lock_on_idle && custom.clip_clear_on_lock;
-    try {
-      await securitySessionSetHighSecurity(highSec);
-    } catch (e) {
-      console.warn("[applySecurityPreset] CUSTOM 设置高安全模式失败（非致命）", e);
-    }
-    // 返回自定义特性配置（包装为 PresetConfig 格式）
-    return {
-      name: "CUSTOM",
-      code: 3,
-      features: custom,
-    };
-  }
-
-  // 3. 标准预设 0/1/2：SECURE 启用高安全模式
+  // 会话层开关（与 C 层档位分离）：SECURE 启用高安全模式。
+  // 失败独立可见报告，不回滚已成功的 C 层切档。
   try {
-    await securitySessionSetHighSecurity(preset === 1);
+    const ok = await withTimeout(
+      securitySessionSetHighSecurity(preset === 1),
+      3000,
+      "设置高安全模式",
+    );
+    if (!ok) {
+      console.warn("[applySecurityPreset] 高安全模式被后端拒绝（会话未解锁）");
+    }
   } catch (e) {
     console.warn("[applySecurityPreset] 设置高安全模式失败（非致命）", e);
   }
-  // 4. 返回预设配置详情
-  try {
-    return await securityGetPresetConfig(preset);
-  } catch (e) {
-    console.warn("[applySecurityPreset] 查询预设配置失败", e);
-    return null;
+
+  return config;
+}
+
+/* ------------------------------------------------------------------ *
+ * 启动恢复链：受信配置为权威，localStorage 仅作迁移来源与缓存        *
+ *                                                                    *
+ *   1. 后端有值 → 真实应用后端档位，同步前端缓存                      *
+ *   2. 后端无值、localStorage 有值 → 迁移：应用并落盘后端，清缓存     *
+ *   3. 两端均无 → 应用默认 BALANCED（落盘后端建立权威副本）           *
+ *                                                                    *
+ * 竞态仲裁：用户显式切换递增 presetEpoch；恢复链在每次 await 后       *
+ * 校验 epoch 未变，变化即丢弃恢复结果（用户的最新选择为最终状态）。   *
+ * ------------------------------------------------------------------ */
+
+/** 预设竞态版本号（单调递增）：用户显式切换时递增 */
+let presetEpoch = 0;
+
+/** 用户显式切换预设入口调用：递增竞态版本，使在途恢复链自弃 */
+export function bumpPresetEpoch(): void {
+  presetEpoch += 1;
+}
+
+/**
+ * 恢复安全预设（全局密钥就绪后调用）
+ *
+ * 后端受信文件为单一事实源；localStorage 仅在前端缓存与
+ * 首次迁移时参与。失败抛错由调用方提示，不静默回退。
+ */
+export async function restoreSecurityPreset(): Promise<void> {
+  const epochAtStart = presetEpoch;
+  const backend = await securityLoadPresetState();
+
+  // 竞态仲裁：读取后端期间用户已显式切换 → 丢弃恢复结果
+  if (presetEpoch !== epochAtStart) {
+    return;
   }
+
+  if (backend && backend.code >= 0 && backend.code <= 3) {
+    // 后端有值：同步 CUSTOM 特性后真实应用
+    if (backend.code === 3 && backend.customFeatures) {
+      saveCustomFeatures(backend.customFeatures);
+    }
+    await applySecurityPreset(backend.code as SecurityPresetCode);
+    return;
+  }
+
+  // 后端无值：迁移 localStorage 旧值（若存在）
+  const hadPreset = localStorage.getItem(SECURITY_PRESET_KEY) != null;
+  const hadCustom = localStorage.getItem(CUSTOM_FEATURES_KEY) != null;
+  if (hadPreset || hadCustom) {
+    const localCode = loadSecurityPreset();
+    await applySecurityPreset(localCode);
+    // 竞态仲裁：应用迁移期间用户已显式切换 → 保留其新缓存，不清理
+    if (presetEpoch !== epochAtStart) {
+      return;
+    }
+    // 迁移完成：清除 localStorage（后端已持有权威副本）
+    localStorage.removeItem(SECURITY_PRESET_KEY);
+    localStorage.removeItem(CUSTOM_FEATURES_KEY);
+    return;
+  }
+
+  // 两端均无：应用默认档并落盘后端，建立权威副本
+  saveSecurityPreset(0);
+  await applySecurityPreset(0);
 }
 
 /* ------------------------------------------------------------------ *
@@ -183,7 +267,7 @@ export async function clearBruteForcePurge(): Promise<void> {
 /* ------------------------------------------------------------------ *
  * lockAll 锁定全部                                                    *
  *                                                                    *
- * ★ 四层根治设计·第四层（全局应用生命周期兜底）— 7 步流程：           *
+ * 四层根治设计·第四层（全局应用生命周期兜底）— 7 步流程：           *
  *                                                                    *
  *   步骤 1：取消防抖定时器（在 waitForFlush 内部完成）                *
  *   步骤 2：阻塞等待全部删除、落盘队列执行完成（waitForFlush 12s）    *
@@ -206,7 +290,7 @@ export async function clearBruteForcePurge(): Promise<void> {
 /** 重入保护标志：防止 session_guard on_lock 回调与用户操作并发触发 lockAll */
 let lockAllInProgress = false;
 
-/** ★ 企业级根治C：当前 lockAll 的 Promise（null 表示无 lockAll 进行中）
+/** 修复C：当前 lockAll 的 Promise（null 表示无 lockAll 进行中）
  *
  * 用于 awaitLockAllIfInProgress：外部代码（doUnlock/initUnlock/goBackToUnlock）
  * 可在执行解锁/创建前等待正在进行的 lockAll 完成，避免：
@@ -243,25 +327,25 @@ function withStepTimeout<T>(promise: Promise<T>, ms: number, label: string): Pro
  *
  * 总体超时：40s 安全网，防止单步卡死导致 lockAll 无限阻塞。
  *
- * ★ 企业级根治C：lockAllPromise 暴露给 awaitLockAllIfInProgress，
+ * 修复C：lockAllPromise 暴露给 awaitLockAllIfInProgress，
  *   使 doUnlock/initUnlock 能等待正在进行的 lockAll 完成后再发起新解锁。
  */
 export async function lockAll(onProgress?: (percent: number, message: string) => void): Promise<void> {
-  // ★ 重入保护：已在进行中则忽略（session_guard 可能并发触发）
+  // 重入保护：已在进行中则忽略（session_guard 可能并发触发）
   if (lockAllInProgress) {
     console.warn("[lockAll] 已在进行中，忽略重入调用");
     return;
   }
   lockAllInProgress = true;
 
-  // ★ 企业级根治C：构建本次 lockAll 的 Promise（含总体超时安全网）
+  // 修复C：构建本次 lockAll 的 Promise（含总体超时安全网）
   //   暴露给 awaitLockAllIfInProgress，使并发解锁请求能等待其完成
   const thisPromise = Promise.race([
     doLockAll(onProgress),
     new Promise<void>((resolve) => {
       setTimeout(() => {
         console.error(`[lockAll] 总体超时 ${LOCK_ALL_TOTAL_TIMEOUT_MS}ms，强制完成`);
-        // ★ 40s 超时标记缓存脏数据
+        // 40s 超时标记缓存脏数据
         //    部分数据可能未落盘，下次导航/解锁时弹窗提示用户
         setCacheDirty(true);
         resolve();
@@ -278,7 +362,7 @@ export async function lockAll(onProgress?: (percent: number, message: string) =>
   }
 }
 
-/** ★ 企业级根治C：等待正在进行的 lockAll 完成
+/** 修复C：等待正在进行的 lockAll 完成
  *
  * 若有 lockAll 正在进行，阻塞等待其完成（最多 40s + 5s 余量）；
  * 若无 lockAll 进行中，立即返回。
@@ -296,7 +380,7 @@ export async function awaitLockAllIfInProgress(): Promise<void> {
   const ongoing = lockAllPromise;
   if (ongoing === null) return;
 
-  // ★ 安全超时兜底：45s（覆盖 lockAll 40s + 5s 余量）
+  // 安全超时兜底：45s（覆盖 lockAll 40s + 5s 余量）
   //   防止 lockAllPromise 因未捕获异常未清空导致永久等待
   await Promise.race([
     ongoing,
@@ -311,7 +395,7 @@ export async function awaitLockAllIfInProgress(): Promise<void> {
 
 /** 7 步流程实际实现
  *
- * ★ 企业级根治：接受 onProgress 回调，每步推送进度
+ * 修复：接受 onProgress 回调，每步推送进度
  *
  * 原缺陷：goBackToUnlock 调用 lockAll() 后进度条停在 0% 无响应，
  *   因为 lockAll 是单个 await，40s 阻塞期间无进度更新。
@@ -327,15 +411,15 @@ async function doLockAll(onProgress?: (percent: number, message: string) => void
   keyState.globalKeyReady.value = false;
   keyState.moduleKeyReady.value = { photo: false, accounts: false, certs: false, fileverthys: false };
 
-  // ★ 步骤 1+2：取消防抖定时器 + 阻塞等待全部删除、落盘队列执行完成
+  // 步骤 1+2：取消防抖定时器 + 阻塞等待全部删除、落盘队列执行完成
   onProgress?.(5, "等待数据落盘");
   try { await waitForFlush(); } catch { /* */ }
 
-  // ★ waitForFlush 完成后立即清空所有缓存定时器
+  // waitForFlush 完成后立即清空所有缓存定时器
   clearAllCacheTimers();
 
-  // ★ 步骤 3：停止后台任务 + 清空所有内存缓存
-  // ★ 企业级根治：stopBackgroundTasks 内部已有 3s 超时，外层 withStepTimeout 5s 兜底
+  // 步骤 3：停止后台任务 + 清空所有内存缓存
+  // 修复：stopBackgroundTasks 内部已有 3s 超时，外层 withStepTimeout 5s 兜底
   //    原缺陷：withStepTimeout 10s 超时过长，用户感知"停止后台任务时间过长"
   //    修复：缩短至 5s（stopBackgroundTasks 3s + 余量），超时后继续后续步骤
   onProgress?.(20, "停止后台任务");
@@ -350,15 +434,15 @@ async function doLockAll(onProgress?: (percent: number, message: string) => void
   onProgress?.(35, "清除内存密钥");
   try { await withStepTimeout(verthysClearGlobalKey(), 8000, "verthysClearGlobalKey"); } catch { /* */ }
 
-  // ★ 步骤 4+5：安全原子落盘 + 等待持久化回执
+  // 步骤 4+5：安全原子落盘 + 等待持久化回执
   onProgress?.(50, "安全落盘");
   try { await withStepTimeout(verthysLockPersist(), 12000, "verthysLockPersist"); } catch { /* */ }
 
-  // ★ 步骤 6：停止 C 消息线程
+  // 步骤 6：停止 C 消息线程
   onProgress?.(70, "停止安全会话");
   try { await withStepTimeout(securitySessionStop(), 5000, "securitySessionStop"); } catch { /* */ }
 
-  // ★ 步骤 7：销毁 worker（企业级根治：verthysLock + workerDestroy 双重销毁）
+  // 步骤 7：销毁 worker（根治：verthysLock + workerDestroy 双重销毁）
   //
   // 原缺陷（"安全核心启动失败"根因）：
   //   doLockAll 步骤 7 仅调用 verthysLock()，后端 verthys_lock 只销毁 VerthysSessionGuard
@@ -387,7 +471,7 @@ async function doLockAll(onProgress?: (percent: number, message: string) => void
 
   onProgress?.(100, "清理完成");
 
-  // ★ 企业级根治修复：步骤 7.5 — 补全状态重置
+  // 修复修复：步骤 7.5 — 补全状态重置
   //
   // 原缺陷：doLockAll 仅重置 verthysReady/globalKeyReady/moduleKeyReady 三个状态，
   // 遗漏 hasModuleKeyRecord/moduleKeyEnabled/hasGlobalKeyRecord/globalKeyRecordB64/

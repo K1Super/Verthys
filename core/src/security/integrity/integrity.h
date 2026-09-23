@@ -27,6 +27,17 @@ typedef enum {
 } IntegrityAnchor;
 
 /*
+ * 校验结果三态。基础设施异常（HMAC 计算失败 / PE 解析失败 / 初始化失败）
+ * 与"哈希不匹配（篡改）"必须可区分：前者是校验未完成，不得当作通过，
+ * 也不得当作篡改报警。
+ */
+typedef enum {
+    INTEGRITY_RESULT_PASS       = 0,  /* 校验完成：基准未配置（跳过）或哈希匹配 */
+    INTEGRITY_RESULT_MISMATCH   = 1,  /* 校验完成：哈希不匹配（检测到篡改） */
+    INTEGRITY_RESULT_INCOMPLETE = 2   /* 校验未完成（基础设施异常） */
+} IntegrityResult;
+
+/*
  * 初始化完整性校验模块。
  * 计算并缓存各锚点的基准哈希值（首次调用时）。
  * 返回 0 成功，非 0 失败。
@@ -36,16 +47,16 @@ int integrity_init(void);
 /*
  * 执行指定锚点的完整性校验。
  *   anchor: 校验锚点 ID
- * 返回 0=通过，非 0=校验失败（检测到篡改）。
- * 失败时应触发应急流程，不直接退出。
+ * 返回 IntegrityResult：PASS=通过（含基准未配置跳过）；MISMATCH=哈希不匹配
+ * （应触发应急流程）；INCOMPLETE=基础设施异常未完成校验（可观测，不当作通过）。
  */
-int integrity_check_anchor(IntegrityAnchor anchor);
+IntegrityResult integrity_check_anchor(IntegrityAnchor anchor);
 
 /*
  * 启动时惰性校验（仅校验 DLL .text + EXE 头部1MB）。
  * 等价于 integrity_check_anchor(ANCHOR_STARTUP)，但独立暴露以便入口点调用。
  */
-int integrity_check_startup(void);
+IntegrityResult integrity_check_startup(void);
 
 /*
  * 设置预置哈希基准值（post-build 工具调用）。
@@ -54,6 +65,29 @@ int integrity_check_startup(void);
  * 全零 = 未配置 = 跳过校验。
  */
 void integrity_set_baseline(IntegrityAnchor anchor, const uint8_t hash[32]);
+
+/*
+ * 查询累计的"校验未完成（基础设施异常）"次数。
+ * 供诊断与测试观测：因异常未完成校验的行为须显式可见而非静默当作通过。
+ */
+long integrity_incomplete_count(void);
+
+/* ---------- 测试白盒（仅 tests 链接使用，生产代码禁调） ---------- */
+
+/*
+ * 强制后续锚点校验走"未完成"态（模拟 HMAC 计算失败），用于单元验证
+ * 三态可区分性。enabled=1 生效，0 恢复。测试 teardown 必须复位。
+ */
+void integrity_test_force_fail(int enabled);
+
+/*
+ * 自身文件验签缓存白盒（仅 tests 使用）：
+ *   - integrity_verify_recompute_count：累计冷路径重算次数——
+ *     缓存回放时计数不动，指纹失效时必增（确定的缓存生效证据）；
+ *   - integrity_verify_cache_reset：清空缓存条目，强制下一轮走冷路径。
+ */
+long integrity_verify_recompute_count(void);
+void integrity_verify_cache_reset(void);
 
 /* ===================================================================== *
  * 构建期签名 + 一次性验签（.vsec 机制）
@@ -71,6 +105,11 @@ void integrity_set_baseline(IntegrityAnchor anchor, const uint8_t hash[32]);
  *   - 以【文件内容】为校验对象（而非内存映像）：与构建期签名的字节源
  *     完全一致，天然免疫 ASLR 基址重定位，杜绝误报（内存中含重定位
  *     写入的绝对地址，节内存哈希跨启动不稳定）；
+ *   - 进程内指纹缓存（解锁热路径）：以自身文件句柄的元数据指纹
+ *     （卷序列号 + 文件索引 + 大小 + 最后写入时间）为键缓存验签结论，
+ *     指纹不变 → 回放结论（零节 I/O）；指纹变化（自更新/篡改）→ 强制
+ *     重算。缓存条目由模块级单飞锁保护，指纹与验签读取同一文件句柄
+ *     （无路径替换竞态）；
  *   - .vsec 全零 = 未配置（开发构建）→ 跳过校验返回 0；
  *   - 校验失败 = 分发二进制被篡改（高置信度）→ KILL 级
  *     EMERG_SIG_INTEGRITY_FAIL 上报，并返回 VERTHYS_ERR_CORRUPT。

@@ -58,15 +58,7 @@ static uint64_t wal_get_u64le(const uint8_t *p)
     return v;
 }
 
-/* nonce 前 8 字节大端承载计数器（verthys_crypto_cng.c encode_nonce 对偶） */
-static uint64_t wal_nonce_counter(const uint8_t nonce[VERTHYS_CNG_NONCE_BYTES])
-{
-    uint64_t v = 0;
-    for (int i = 0; i < 8; i++) {
-        v = (v << 8) | (uint64_t)nonce[i];
-    }
-    return v;
-}
+/* ---------- 小端读写（与 LSM 模块同款惯例） ---------- */
 
 /* Unix 毫秒时间戳（BEGIN/COMMIT 记账，非安全敏感） */
 static uint64_t wal_now_unix_ms(void)
@@ -347,7 +339,7 @@ static VerthysResult wal_foreach_frame(VerthysWal *w, unsigned half,
             torn++;
             break;
         }
-        ctr = wal_nonce_counter(nonce);
+        ctr = verthys_cng_nonce_decode_counter(nonce);
         if (ctr > max_nonce) max_nonce = ctr;
 
         if (fn != NULL) {
@@ -460,7 +452,10 @@ VerthysResult verthys_wal_open(VerthysWal *w, FILE *f, uint64_t region_offset,
     /* nonce 计数器恢复（红线：防回退，保留裕量） */
     max_nonce = (nonces[0] > nonces[1]) ? nonces[0] : nonces[1];
     if (max_nonce > 0) {
-        target = max_nonce + VERTHYS_WAL_NONCE_RESTORE_MARGIN;
+        /* 加裕量防回绕：接近 2^64 钳制上限（加密侧对回绕拒绝） */
+        target = (max_nonce > UINT64_MAX - VERTHYS_WAL_NONCE_RESTORE_MARGIN)
+                     ? UINT64_MAX
+                     : max_nonce + VERTHYS_WAL_NONCE_RESTORE_MARGIN;
         cur_ctr = verthys_cng_aead_nonce_counter(aead);
         if (target > cur_ctr) {
             r = verthys_cng_aead_restore_nonce_counter(aead, target);
@@ -620,7 +615,7 @@ static VerthysResult wal_group_deliver(WalGroupBuf *g, VerthysWalReplayFn fn,
     VerthysResult r = VERTHYS_OK;
 
     for (size_t i = 0; i < g->count; i++) {
-        VerthysWalRecord rec;    /* ~4.2KB 栈记录（name 内联） */
+        VerthysWalRecord rec;    /* 栈记录：name 指向内联缓冲，占用随结构体声明而定 */
         r = wal_decode_record(g->pts[i], g->lens[i], &rec);
         if (r != VERTHYS_OK) break;
         r = fn(user, &rec);
@@ -758,22 +753,30 @@ VerthysResult verthys_wal_replay_ex(VerthysWal *w, uint64_t committed_txid,
 
 VerthysResult verthys_wal_reset(VerthysWal *w)
 {
-    uint8_t *zero;
+    uint8_t dead_hdr[VERTHYS_WAL_HALF_HEADER_BYTES];
     uint64_t nseq;
     VerthysResult r;
 
     if (w == NULL || !w->opened) return VERTHYS_ERR_INVALID;
 
-    zero = (uint8_t *)calloc(1, VERTHYS_WAL_REGION_BYTES);
-    if (zero == NULL) return VERTHYS_ERR_INTERNAL;
-    if (vio_pwrite64(w->f, w->region_offset, zero, VERTHYS_WAL_REGION_BYTES) != 0) {
-        free(zero);
-        return VERTHYS_ERR_IO;
-    }
-    free(zero);
+    /* 截断复位：新链落半区 0。只清半区 0 数据区（复用换区清零机制）
+     * 并将半区 1 头失活，替代全量 960KB 清零——半区 1 数据区不动，
+     * 它未来再被换入时同样会先清零。崩溃序次安全：任一中间点崩溃后
+     * 重开的数据视图均为 reset 前语义或 reset 后语义，无凭空丢失。 */
+    r = wal_clear_half_data(w, 0);
+    if (r != VERTHYS_OK) return r;
 
     nseq = w->half_seq + 1;
     r = wal_write_half_header(w, 0, nseq);
+    if (r != VERTHYS_OK) return r;
+
+    /* 半区 1 头失活（无 magic 即空半区），旧链不再参与重开重放 */
+    memset(dead_hdr, 0, sizeof(dead_hdr));
+    if (vio_pwrite64(w->f, wal_half_base(w, 1), dead_hdr,
+                     sizeof(dead_hdr)) != 0) {
+        return VERTHYS_ERR_IO;
+    }
+    r = wal_fsync(w->f);
     if (r != VERTHYS_OK) return r;
 
     w->active_half = 0;

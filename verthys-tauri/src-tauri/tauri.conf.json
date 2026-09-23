@@ -21,12 +21,11 @@
         "transparent": true,
         "resizable": true,
         "center": true,
-        "devtools": false,
-        "additionalBrowserArgs": "--enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist --js-flags=\"--max-old-space-size=1024 --expose-gc\""
+        "devtools": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; connect-src 'self' http://127.0.0.1:7778 http://localhost:7778"
+      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; connect-src 'self'"
     }
   },
   "bundle": {

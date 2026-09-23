@@ -28,7 +28,7 @@
 | `LICENSE` | 开源/授权声明 | 许可证全文、版权方、商业授权说明 | P0 |
 | `SECURITY.md` | 安全策略（本项目必备） | 受支持版本、漏洞上报渠道与 SLA、禁止公开披露的约定、敏感数据处理边界 | P0 |
 | `CONTRIBUTING.md` | 贡献指南 | 环境准备、分支策略、Commit/PR 规范、代码评审流程、跑测试/构建的命令 | P1 |
-| `.gitignore` / `vcpkg.json` / `CMakeLists.txt` | 工程元数据 | 已存在，不属文档范畴，但 README 需指向 | — |
+| `.gitignore` / `CMakeLists.txt` | 工程元数据 | 已存在，不属文档范畴，但 README 需指向 | — |
 
 ---
 
@@ -59,7 +59,7 @@
 |---|---|---|---|---|
 | `docs/CORE_API.md` | C core 对外接口规范 | 公开头文件/函数签名、参数与返回值语义、错误码、生命周期/内存约定、线程安全 | P0 | 新建 |
 | `docs/TAURI_BRIDGE.md` | 前后端桥接接口 | Tauri command 清单、入参/出参 schema、事件定义、权限与鉴权边界、错误约定 | P0 | 新建 |
-| `docs/THIRD_PARTY.md` | 依赖与供应链 | 第三方库清单、版本（对齐 `vcpkg.json` / `dep-versions.txt` / `third_party/`）、引入理由、升级策略、许可证清单 | P1 | 新建 |
+| `docs/THIRD_PARTY.md` | 依赖与供应链 | 第三方库清单、版本（对齐 `dep-versions.txt` / `third_party/`）、引入理由、升级策略、许可证清单 | P1 | 新建 |
 
 ### 2.4 使用与开发层
 
@@ -102,7 +102,7 @@ docs/
 1. **代码变更同步**：接口/目录/构建/配置/安全边界变更 → 同 PR 更新对应文档。
 2. **新鲜度**：每个文档末尾维护 `Last updated: YYYY-MM-DD`；超过两个版本未更新需复核。
 3. **可验收**：需求与测试文档中的条目必须可被测试或运行命令验证，禁止模糊表述。
-4. **单一事实来源**：版本号、依赖版本以 `vcpkg.json` / `dep-versions.txt` 为准，文档只引用不抄录。
+4. **单一事实来源**：版本号、依赖版本以 `CMakeLists.txt` / `Cargo.toml` / `package.json` / `dep-versions.txt` 为准，文档只引用不抄录。
 5. **评审**：`REQUIREMENTS`、`ARCHITECTURE`、`SECURITY_DESIGN`、`API` 四类文档变更需两人评审。
 
 ---

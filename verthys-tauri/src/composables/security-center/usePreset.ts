@@ -8,8 +8,8 @@
  *   2. 预设应用状态（presetApplying / currentPresetFeatures / presetFeaturesCache）
  *   3. 自定义模板配置（customPanelOpen / customFeatures）
  *   4. 无极轨道滑块状态（orbitSliderPos / orbitAnchors / activeAnchorIdx / orbitDragging）
- *   5. 双环 + 蜂窝计算（cpuOverhead / securityCoverage / overallScore /
- *      presetAmbienceMode / currentModeLabel / ringDashOffset / orbitTrackGradient）
+ *   5. 双环三指标计算（cpuOverhead 后端采样 / securityCoverage 与
+ *      overallScore 真实信号双权重合成，纯函数层 presetMetrics）
  *   6. 特性列表分组（toggleableFeatures / lockedFeatures）
  *   7. 核心函数：
  *      - onOrbitSliderInput / onOrbitSliderRelease：滑块拖拽 + 磁性吸附
@@ -19,7 +19,7 @@
  *      - onApplyPreset：应用三档预设（调用 keyManager.applySecurityPreset）
  *      - loadPresetConfig：加载预设配置（onMounted / 全局密钥就绪后调用）
  *
- * ★ 企业级设计：
+ * 设计：
  *   - keyManager 单例 ref（securityPresetRef / globalKeyReadyRef）直接从 keyManager 导入
  *   - 外部依赖通过参数注入：showError / showToast / resetSession（来自 useSessionTimer）
  *   - 滑块磁性吸附：拖拽时实时更新视觉，松手时吸附到最近锚点并应用预设
@@ -30,10 +30,11 @@
  *      loadPresetConfig 需由 SecurityCenter 在 onMounted / watch(globalKeyReadyRef) 中调用。
  */
 
-import { ref, computed } from 'vue';
+import { ref, computed, watch, onBeforeUnmount, type Ref } from 'vue';
 import {
   securityPresetRef,
   applySecurityPreset,
+  bumpPresetEpoch,
   loadCustomFeatures,
   saveCustomFeatures,
   isLockedFeature,
@@ -44,6 +45,9 @@ import {
   type SecurityPresetCode,
   type PresetFeatures,
 } from '../../lib/verthys';
+import { withTimeout } from '../../utils/promise_utils';
+import type { DefenseMetaView } from './useDefenseStatus';
+import { computeSecurityCoverage, computeOverallScore } from './presetMetrics';
 
 /**
  * usePreset 选项
@@ -56,6 +60,10 @@ export interface UsePresetOptions {
   showToast: (msg: string) => void;
   /** 重置会话计时器（来自 useSessionTimer，预设切换后同步本地超时显示） */
   resetSession: () => void;
+  /** 系统 CPU 占用率（真实采样轮询值；-1 = 尚无基线） */
+  cpuUsage: Ref<number>;
+  /** 动态防护汇总态势（真实运行时报告） */
+  defenseMeta: Ref<DefenseMetaView>;
 }
 
 /**
@@ -83,17 +91,17 @@ export interface UsePresetOptions {
 export function usePreset(options: UsePresetOptions) {
   /* ===== 预设特性列表（与 Rust PresetFeatures 字段对齐） ===== */
   const presetFeatureList: { key: keyof PresetFeatures; label: string; desc: string }[] = [
-    { key: "anti_debug", label: "反调试", desc: "C 层固定启用" },
-    { key: "anti_inject", label: "反注入", desc: "C 层固定启用" },
-    { key: "integrity_check", label: "完整性校验", desc: "C 层固定启用" },
-    { key: "memory_guard", label: "内存保护", desc: "C 层固定启用" },
-    { key: "key_separation", label: "密钥三分离", desc: "C 层固定启用" },
-    { key: "emergency_response", label: "紧急熔断", desc: "C 层固定启用" },
+    { key: "anti_debug", label: "调试检测", desc: "调试器检测与反附加" },
+    { key: "anti_inject", label: "注入拦截", desc: "DLL 注入与搜索顺序加固" },
+    { key: "integrity_check", label: "完整校验", desc: "启动与运行期完整性核验" },
+    { key: "memory_guard", label: "内存保护", desc: "内存锁定与防转储" },
+    { key: "key_separation", label: "密钥分立", desc: "密钥分段隔离存储" },
+    { key: "emergency_response", label: "紧急熔断", desc: "异常事件立即熔断销毁" },
     { key: "session_lock_on_idle", label: "空闲锁定", desc: "会话空闲超时自动锁定" },
     { key: "shadow_sleep", label: "影子休眠", desc: "USB 拔出后索引加密驻留" },
     { key: "module_patrol", label: "模块巡检", desc: "定期扫描已加载模块签名" },
-    { key: "clip_clear_on_lock", label: "剪贴板清理", desc: "锁定时清除剪贴板残留" },
-    { key: "usb_clone_detect", label: "USB 克隆检测", desc: "序列号哈希比对拒绝克隆外设" },
+    { key: "clip_clear_on_lock", label: "剪贴清零", desc: "锁定时清除剪贴板残留" },
+    { key: "usb_clone_detect", label: "克隆检测", desc: "序列号哈希比对拒绝克隆外设" },
     { key: "trace_cleanup", label: "痕迹清理", desc: "退出时清理系统最近记录" },
   ];
 
@@ -120,6 +128,12 @@ export function usePreset(options: UsePresetOptions) {
     { pos: 50, label: '平衡', code: 0 as SecurityPresetCode },
     { pos: 100, label: '安全', code: 1 as SecurityPresetCode },
   ];
+  /* 初始位置对齐后端权威档位：面板重挂载时不闪回中性位，
+   * loadPresetConfig 异步确认后由同一逻辑收敛（两侧同源） */
+  {
+    const anchor = orbitAnchors.find(a => a.code === securityPresetRef.value);
+    if (anchor) orbitSliderPos.value = anchor.pos;
+  }
   /** 最近锚点索引（拖拽时实时计算，用于磁性吸附视觉反馈） */
   const nearestAnchorIdx = computed(() => {
     let min = Infinity, idx = 1;
@@ -134,34 +148,58 @@ export function usePreset(options: UsePresetOptions) {
   /** 拖拽中标志（拖拽时不触发预设切换，松手时吸附） */
   const orbitDragging = ref(false);
 
-  /* ===== 双环 + 蜂窝计算 ===== */
-  /** CPU/IO 开销百分比 — 此消彼长：性能端 15%，安全端 88% */
-  const cpuOverhead = computed(() => {
-    const p = orbitSliderPos.value;
-    return Math.round(15 + (p / 100) * 73);
-  });
-  /** 安全覆盖度百分比 — 性能端 42%，安全端 98% */
-  const securityCoverage = computed(() => {
-    const p = orbitSliderPos.value;
-    return Math.round(42 + (p / 100) * 56);
-  });
-  /** 综合百分比（加权平均） */
-  const overallScore = computed(() => {
-    return Math.round((cpuOverhead.value + securityCoverage.value) / 2);
-  });
-  /** 环境光晕模式 */
+  /* ===== 双环三指标（真实数据合成，无随滑块摆动的模拟公式） ===== */
+  /** CPU/IO 开销 — 后端系统采样真实值（-1 无基线时按 0 占位，2s 内更新） */
+  const cpuOverhead = computed(() => Math.max(0, options.cpuUsage.value));
+  /** 当前档位已启用特性数（后端权威配置快照） */
+  const enabledFeatureCount = computed(() =>
+    Object.values(currentPresetFeatures.value).filter(Boolean).length,
+  );
+  /** 安全覆盖度 — 启用特性占比 × 动态防护已防御占比 双权重合成 */
+  const securityCoverage = computed(() =>
+    computeSecurityCoverage({
+      enabledCount: enabledFeatureCount.value,
+      totalCount: presetFeatureList.length,
+      blocked: options.defenseMeta.value.blocked,
+      degraded: options.defenseMeta.value.degraded,
+      failed: options.defenseMeta.value.failed,
+    }),
+  );
+  /** 综合评分 — 覆盖度与系统负载双权重合成 */
+  const overallScore = computed(() =>
+    computeOverallScore(securityCoverage.value, options.cpuUsage.value),
+  );
+  /* 氛围类迟滞带宽（百分点）：进入带 25/75，退出带 31/69 —
+     滑块在阈值附近往复时消除类切换风暴 */
+  const AMBIENCE_HYSTERESIS = 6;
+  /** 氛围类锁存档位（迟滞退出判定基准，随推算收敛同步更新） */
+  const ambienceLatch = ref<'performance' | 'balanced' | 'secure'>('balanced');
+  /** 环境光晕模式（迟滞收敛：单次推算内跨带跳变直接落位，最多 3 步收敛） */
   const presetAmbienceMode = computed<'performance' | 'balanced' | 'secure'>(() => {
     if (securityPresetRef.value === 3) return 'balanced';
     const p = orbitSliderPos.value;
-    if (p < 25) return 'performance';
-    if (p > 75) return 'secure';
-    return 'balanced';
+    let mode = ambienceLatch.value;
+    for (let step = 0; step < 3; step++) {
+      const next =
+        mode === 'performance'
+          ? p > 25 + AMBIENCE_HYSTERESIS ? 'balanced' : mode
+          : mode === 'secure'
+            ? p < 75 - AMBIENCE_HYSTERESIS ? 'balanced' : mode
+            : p < 25 ? 'performance'
+              : p > 75 ? 'secure'
+                : mode;
+      if (next === mode) break;
+      mode = next;
+    }
+    ambienceLatch.value = mode;
+    return mode;
   });
-  /** 当前模式标签 */
+  /** 当前模式标签 — 以 securityPresetRef（后端权威档位）为单一事实源 */
   const currentModeLabel = computed(() => {
-    if (securityPresetRef.value === 3) return '自定义';
-    const labels = ['平衡', '安全', '性能'];
-    return labels[activeAnchorIdx.value] ?? '平衡';
+    const code = securityPresetRef.value;
+    if (code === 3) return '自定义';
+    const labels: Record<number, string> = { 0: '平衡', 1: '安全', 2: '性能' };
+    return labels[code] ?? '平衡';
   });
 
   /* ===== SVG 环周长 + dashoffset 计算 ===== */
@@ -173,14 +211,21 @@ export function usePreset(options: UsePresetOptions) {
   };
 
   /* ===== 轨道渐变背景 ===== */
-  /** 轨道渐变背景 — 随滑块位置流动 */
-  const orbitTrackGradient = computed(() => ({
-    background: `linear-gradient(90deg,
+/** 渐变色随滑块位置流动；渐变 background 为每帧重绘属性，
+ *  却随拖拽模型同步（120ms 节拍）持续改写 —— 冻结至松手吸附后
+ *  一次性写最新位置（拖拽期视觉可感知差异为间隔渐变，取舍为性能） */
+const gradientPos = ref(orbitSliderPos.value);
+watch(orbitSliderPos, (p) => {
+  if (!orbitDragging.value) gradientPos.value = p;
+});
+/** 轨道渐变背景 — 流动位置取自冻结档位 */
+const orbitTrackGradient = computed(() => ({
+  background: `linear-gradient(90deg,
     rgba(0,255,200,0.25) 0%,
-    rgba(0,212,255,0.35) ${orbitSliderPos.value / 2}%,
-    rgba(139,92,246,0.35) ${50 + orbitSliderPos.value / 2}%,
+    rgba(0,212,255,0.35) ${gradientPos.value / 2}%,
+    rgba(139,92,246,0.35) ${50 + gradientPos.value / 2}%,
     rgba(255,110,180,0.25) 100%)`,
-  }));
+}));
 
   /* ===== 特性列表分组 ===== */
   /** 可切换特性列表（非核心防护） */
@@ -197,7 +242,9 @@ export function usePreset(options: UsePresetOptions) {
   const onOrbitSliderInput = () => {
     orbitDragging.value = true;
   };
-  /** 滑块松手时磁性吸附到最近锚点并应用预设 */
+  /** 滑块松手时磁性吸附到最近锚点：先即时落位到相邻档位（视觉先行，
+   * 游标过渡动画即刻启动），目标档位与当前档不同再异步切档；
+   * 切档失败时回撤到后端权威档位，界面状态恒收敛 */
   const onOrbitSliderRelease = () => {
     if (!orbitDragging.value) return;
     orbitDragging.value = false;
@@ -205,12 +252,11 @@ export function usePreset(options: UsePresetOptions) {
     const anchor = orbitAnchors[idx];
     orbitSliderPos.value = anchor.pos;
     activeAnchorIdx.value = idx;
-    // 应用对应预设
     if (securityPresetRef.value !== anchor.code) {
       onApplyPreset(anchor.code);
     }
   };
-  /** 点击锚点 — 直接吸附并切换 */
+  /** 点击锚点 — 即时落位到锚点后切换（同上：先落位后切换） */
   const snapToAnchor = (idx: number) => {
     if (!globalKeyReadyRef.value || presetApplying.value) return;
     const anchor = orbitAnchors[idx];
@@ -253,9 +299,12 @@ export function usePreset(options: UsePresetOptions) {
   const onApplyCustom = async () => {
     if (presetApplying.value || !globalKeyReadyRef.value) return;
     presetApplying.value = true;
+    // 竞态仲裁：用户显式切换递增版本，使在途恢复链自弃
+    bumpPresetEpoch();
     try {
       saveCustomFeatures(customFeatures.value);
-      const config = await applySecurityPreset(3);
+      // 8s 超时兜底：预设应用链路阻塞时不得无限 pending 卡死按钮
+      const config = await withTimeout(applySecurityPreset(3), 8000, "应用自定义模板");
       if (config) {
         currentPresetFeatures.value = { ...config.features };
       }
@@ -269,18 +318,53 @@ export function usePreset(options: UsePresetOptions) {
     }
   };
 
+  /* ===== 切档状态收口 ===== */
+  /** 切档开始提示延迟计时器（toast 晚于落位动画启动；收口时清理） */
+  let applyToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** 轨道游标与激活锚点对齐后端权威档位（成功同步 / 失败回撤共用） */
+  const syncOrbitFromPresetRef = () => {
+    const code = securityPresetRef.value;
+    if (code === 3) return;
+    const anchor = orbitAnchors.find(a => a.code === code);
+    if (anchor) {
+      orbitSliderPos.value = anchor.pos;
+      activeAnchorIdx.value = orbitAnchors.indexOf(anchor);
+    }
+  };
+
+  onBeforeUnmount(() => {
+    if (applyToastTimer !== null) {
+      clearTimeout(applyToastTimer);
+      applyToastTimer = null;
+    }
+  });
+
   /* ===== 应用三档预设（调用 keyManager.applySecurityPreset） =====
    * 流程：
    *   1. 防重复守卫（presetApplying / globalKeyReady）
    *   2. 应用预设 → 更新特性快照 + 缓存
-   *   3. 同步会话超时显示（applySecurityPreset 内部已调用 setSessionTimeout）
-   *   4. 同步无极轨道滑块位置（非 CUSTOM 预设）
-   *   5. toast 反馈 + CUSTOM 预设自动展开自定义面板 */
+   *   3. 成功后同步轨道位置（与后端权威档位收敛同位），失败回撤原状
+   *   4. 反馈时序：松手时释放处理器已即时落位到相邻档位（视觉先行），
+   *      本函数延迟 220ms 且切换仍在进行中时 toast 提示目标模式，
+   *      完成后 toast 提示切换结果（快速成功只出完成提示） */
   const onApplyPreset = async (code: SecurityPresetCode) => {
     if (presetApplying.value || !globalKeyReadyRef.value) return;
     presetApplying.value = true;
+    // 竞态仲裁：用户显式切换递增版本，使在途恢复链自弃
+    bumpPresetEpoch();
+    const modeNames: Record<number, string> = { 0: '平衡', 1: '安全', 2: '性能', 3: '自定义' };
+    // 开始提示晚于落位动画启动：仅当切换仍在进行中才显示
+    if (applyToastTimer !== null) clearTimeout(applyToastTimer);
+    applyToastTimer = setTimeout(() => {
+      applyToastTimer = null;
+      if (presetApplying.value) {
+        options.showToast(`正在切换至 ${modeNames[code] ?? code} 模式…`);
+      }
+    }, 220);
     try {
-      const config = await applySecurityPreset(code);
+      // 8s 超时兜底：预设应用链路阻塞时不得无限 pending 卡死按钮
+      const config = await withTimeout(applySecurityPreset(code), 8000, "切换安全预设");
       if (config) {
         currentPresetFeatures.value = { ...config.features };
         // 缓存各预设特性快照（用于特性摘要条显示）
@@ -288,29 +372,28 @@ export function usePreset(options: UsePresetOptions) {
       }
       // 同步本地会话超时显示（applySecurityPreset 内部已调用 setSessionTimeout）
       options.resetSession();
-      // 同步无极轨道滑块位置
-      if (code !== 3) {
-        const anchor = orbitAnchors.find(a => a.code === code);
-        if (anchor) {
-          orbitSliderPos.value = anchor.pos;
-          activeAnchorIdx.value = orbitAnchors.indexOf(anchor);
-        }
-      }
-      const modeNames: Record<number, string> = { 0: '平衡', 1: '安全', 2: '性能', 3: '自定义' };
+      // 成功后轨道位置与后端权威档位收敛同位（CUSTOM 保持游标位）
+      syncOrbitFromPresetRef();
       options.showToast(`已切换至 ${modeNames[code] ?? code} 模式`);
       // CUSTOM 预设自动展开自定义面板
       if (code === 3) customPanelOpen.value = true;
     } catch (e) {
       console.error("[onApplyPreset] 切换预设失败", e);
+      // 失败回撤：界面位置回齐后端权威档位（即时落位保持可逆）
+      syncOrbitFromPresetRef();
       options.showError("切换预设失败");
     } finally {
+      if (applyToastTimer !== null) {
+        clearTimeout(applyToastTimer);
+        applyToastTimer = null;
+      }
       presetApplying.value = false;
     }
   };
 
   /* ===== 加载预设配置（onMounted / 全局密钥就绪后调用） =====
    * 预加载所有标准预设的特性快照，用于特性摘要条显示。
-   * ★ 此函数需由 SecurityCenter 在 onMounted / watch(globalKeyReadyRef) 中调用。 */
+   * 此函数需由 SecurityCenter 在 onMounted / watch(globalKeyReadyRef) 中调用。 */
   const loadPresetConfig = async () => {
     try {
       // 预加载 3 个标准预设的特性配置
@@ -330,14 +413,8 @@ export function usePreset(options: UsePresetOptions) {
       if (securityPresetRef.value === 3) {
         currentPresetFeatures.value = { ...customFeatures.value };
       }
-      // 同步无极轨道滑块到当前预设位置
-      if (securityPresetRef.value !== 3) {
-        const anchor = orbitAnchors.find(a => a.code === securityPresetRef.value);
-        if (anchor) {
-          orbitSliderPos.value = anchor.pos;
-          activeAnchorIdx.value = orbitAnchors.indexOf(anchor);
-        }
-      }
+      // 同步无极轨道滑块到当前预设位置（与切档成功/失败共用同一逻辑）
+      syncOrbitFromPresetRef();
     } catch (e) {
       console.warn("[loadPresetConfig] 加载预设配置失败", e);
     }

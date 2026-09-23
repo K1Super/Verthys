@@ -1,4 +1,4 @@
-﻿/*
+/*
  * secure_allocator.c — 密钥相关结构专用安全分配器实现
  *
  * 区段布局（每次分配独立 VirtualAlloc 区段）：
@@ -26,6 +26,7 @@
  * 触发一次，回落重新武装）；≥95% 拒绝新分配（VERTHYS_ERR_RESOURCE_LIMIT）。
  */
 #include "secure_allocator.h"
+#include "verthys_diag.h"  /* VERTHYS_DIAG_LOG（释放失败诊断，生产构建为空操作） */
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -54,7 +55,8 @@ typedef struct SecureRegionMeta {
     void   *region_base;    /* VirtualAlloc 区段基址（前边界页起始） */
     size_t  data_bytes;     /* 数据页字节数（页对齐后） */
     size_t  region_bytes;   /* 整个区段提交字节数（含边界页，记账口径） */
-    uint64_t magic;         /* 条目魔数（防注册表残余误配） */
+    uint64_t magic;         /* 条目代际号（登记时递增赋值，供调试/审计定位；
+                               释放走 data_base 精确匹配，不依赖本字段） */
 } SecureRegionMeta;
 
 struct SecureAllocator {
@@ -193,18 +195,21 @@ static int regions_reserve(SecureAllocator *alloc, size_t need)
     return 0;
 }
 
-/* 释放单个区段（清零 → 解锁 → 归还内核）。返回 0 成功。 */
-static int region_release(SecureRegionMeta *meta)
+/* 释放单个区段（清零 → 解锁 → 归还内核）。
+ * 记账归属语义：清零与解锁完成后区段内容已不可再分配，无论
+ * VirtualFree 是否成功，调用方都必须 budget_unaccount；VirtualFree
+ * 失败仅记诊断（页面已解锁，由进程退出时统一回收）。 */
+static void region_release(SecureRegionMeta *meta)
 {
-    int ok = 1;
-    if (meta == NULL || meta->region_base == NULL) return 0;
+    if (meta == NULL || meta->region_base == NULL) return;
 
     if (meta->data_base != NULL && meta->data_bytes > 0) {
         SecureZeroMemory(meta->data_base, meta->data_bytes);
         VirtualUnlock(meta->data_base, meta->data_bytes);
     }
-    if (!VirtualFree(meta->region_base, 0, MEM_RELEASE)) ok = 0;
-    return ok;
+    if (!VirtualFree(meta->region_base, 0, MEM_RELEASE)) {
+        VERTHYS_DIAG_LOG("verthys: secure_allocator VirtualFree failed (region reclaimed at process exit)");
+    }
 }
 
 void secure_allocator_destroy(SecureAllocator *alloc)
@@ -213,9 +218,8 @@ void secure_allocator_destroy(SecureAllocator *alloc)
 
     AcquireSRWLockExclusive(&alloc->lock);
     for (size_t i = 0; i < alloc->region_count; i++) {
-        if (region_release(&alloc->regions[i])) {
-            budget_unaccount(alloc->regions[i].region_bytes);
-        }
+        region_release(&alloc->regions[i]);
+        budget_unaccount(alloc->regions[i].region_bytes);
     }
     free(alloc->regions);
     alloc->regions      = NULL;

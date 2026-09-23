@@ -34,8 +34,6 @@ pub struct SecurityState {
     /// AddClipboardFormatListener 监听 + 第三方访问垃圾覆写）
     /// pub(crate)：供 lib.rs 的 set_privacy_mode / clear_clipboard 命令访问
     pub(crate) clipboard_guard: Mutex<ClipboardGuard>,
-    /// 一次性权限令牌存储（用于敏感操作授权）
-    pub(super) auth_tokens: Mutex<Vec<String>>,
     /// 暴力拦截状态是否已从持久化加载
     pub(super) brute_force_loaded: std::sync::atomic::AtomicBool,
     /// 受信任路径白名单是否已从持久化加载
@@ -48,6 +46,9 @@ pub struct SecurityState {
     pub(super) usb_salt_loaded: std::sync::atomic::AtomicBool,
     /// USB 注册表是否已从持久化加载
     pub(super) usb_registry_loaded: std::sync::atomic::AtomicBool,
+    /// 后端最近一次成功切档的预设代号（0/1/2；None = 本进程尚未切档）。
+    /// 内存级权威缓存：审计旧档、“切到当前档”幂等提示据此判定。
+    pub(super) last_applied_preset: Mutex<Option<u32>>,
     /// 会话标识（进程级，用于审计日志关联）
     session_id: String,
 }
@@ -67,12 +68,12 @@ impl SecurityState {
             usb_registry: Mutex::new(UsbRegistry::new()),
             shadow_sleep: Mutex::new(ShadowSleep::new()),
             clipboard_guard: Mutex::new(ClipboardGuard::new()),
-            auth_tokens: Mutex::new(Vec::new()),
             brute_force_loaded: std::sync::atomic::AtomicBool::new(false),
             trusted_paths_loaded: std::sync::atomic::AtomicBool::new(false),
             usb_salt: Mutex::new(Vec::new()),
             usb_salt_loaded: std::sync::atomic::AtomicBool::new(false),
             usb_registry_loaded: std::sync::atomic::AtomicBool::new(false),
+            last_applied_preset: Mutex::new(None),
             session_id: format!("pid-{}", std::process::id()),
         }
     }

@@ -99,10 +99,9 @@
 ## 5. 运行时环境变量（运行期）
 
 **结论：代码中不读取任何 `VERTHYS_` 前缀的运行时环境变量**（经对 `core/` 与 `src-tauri/`
-C/Rust 源码的 `getenv` / `std::env::var` 检索确认）。运行时仅有以下事实：
+C/Rust 源码的 `getenv` / `std::env::var` 检索确认），也不对 WebView2 / GPU 参数做任何
+运行时环境变量写出。运行时读取的环境变量仅有以下事实：
 
-- 运行期**写出**（代码 `set_var`，`src/lib.rs`）：`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`
-  = `--enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist`（固定值，启动 WebView2 前设置）。
 - 运行期**读取**的标准系统变量（仅 Windows 相关路径/指纹逻辑，非 VERTHYS_ 前缀）：
   `HOME` / `XDG_DATA_HOME`（非 Windows 路径分支）、`USERPROFILE`、`APPDATA`、`ProgramFiles`、
   `ProgramFiles(x86)`、`HOSTNAME`、`SystemRoot`、`PATH`、`TEMP`（`std::env::temp_dir`）。

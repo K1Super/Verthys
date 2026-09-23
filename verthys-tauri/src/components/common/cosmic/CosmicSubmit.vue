@@ -1,16 +1,16 @@
 <!--
   CosmicSubmit.vue — 引力锚点按钮（悬浮伸展收敛 · 悬浮场体系）
-  ★ 悬浮伸展收敛（样式见 styles/security/cosmic-submit.css）：
+  悬浮伸展收敛（样式见 styles/security/cosmic-submit.css）：
     悬停/焦点充能终点自全宽收敛至 86%（--cs-reach-hover 唯一
     权威源，悬停/焦点/按下三态等比派生）— 悬停轨道锚定于标注
     场内不铺满整钮；loading 全轨巡行不受收敛约束
-  ★ 轨道联动升级（样式见 styles/security/cosmic-submit.css）：
+  轨道联动升级（样式见 styles/security/cosmic-submit.css）：
     - 静默势能线动态化：待机微幅呼吸（非对称相位 7.4s）+ 悬浮
       先行全宽铺展（充能光谱 +50ms 迟滞跟进 — 轨道先行/能量充入
       的分层纵深）+ 按下同步收缩 + loading 全轨充能
     - 呼吸仅作用于 opacity 通道，与 transform 伸展正交 — 无状态
       抢占；idle 由全局空闲治理自动暂停（氛围装饰类，未豁免）
-  ★ 全面重设计（根除卡片式按钮语法 — 与引力悬浮场同源）：
+  全面重设计（根除卡片式按钮语法 — 与引力悬浮场同源）：
     - 根除：深空底板渐变盒、SVG 巡行描边（圆角边框）、loading
       旋转环（border spinner 模板）— 零边框零圆角零底板
     - 重建（引力锚点 — 与光谱底轨输入同构语法）：

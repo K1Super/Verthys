@@ -247,7 +247,7 @@ pub fn canonicalize_strict(path: &str) -> Result<PathBuf, String> {
 ///
 /// CI 红线：本函数不执行任何 I/O，仅做字符串前缀比较。
 ///
-/// ★ 企业级根治修复：trim 尾部分隔符（与 preflight_controller.rs 同步修复）
+/// 修复修复：trim 尾部分隔符（与 preflight_controller.rs 同步修复）
 ///   驱动器根 D:\ canonicalize 后含尾部 \，规范化为 //?/d:/，
 ///   需 trim 尾部 / 后再拼接分隔符，否则 //?/d:// 无法匹配 //?/d:/test。
 pub fn is_within_whitelist(path: &Path, whitelist: &[PathBuf]) -> bool {

@@ -61,7 +61,7 @@
 .err-toast-enter-from, .err-toast-leave-to { opacity: 0; transform: translate(-50%, -10px); }
 
 /* ===== 玻璃质感卡片 ===== */
-/* ★ 性能根治：.glass 被模块视图大量卡片复用（文件库/相册网格可达数十张），
+/* 性能根治：.glass 被模块视图大量卡片复用（文件库/相册网格可达数十张），
  * 每张卡的 backdrop-filter 都要在 60fps 动态深空背景上逐帧重采样 —
  * N 张卡 = N 个全时模糊区域，GPU 合成器过载（模块视图卡顿主因）。
  * 去实时毛玻璃 → 底色不透明度 0.75→0.88 补偿景深压暗视觉等效 */
@@ -111,7 +111,7 @@
   padding: 8px 18px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  /* ★ 性能根治：按钮数量多（工具栏+卡片内），逐个 backdrop-filter
+  /* 性能根治：按钮数量多（工具栏+卡片内），逐个 backdrop-filter
    * 在动态背景上全时重采样 → 去实时毛玻璃，底色加深补偿 */
   background: rgba(var(--bg-tertiary-rgb), 0.62);
   color: var(--text-secondary);
@@ -125,22 +125,141 @@
   border-color: var(--border-hover);
   background: rgba(var(--accent-rgb), 0.08);
   color: var(--text-primary);
-  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.1);
 }
 .btn:active {
   transform: scale(0.97);
 }
+/* ===== 主确认按钮（btn-primary · kv-confirm 复用面）：潮汐注能 =====
+ * 确认保存/确认修改/验证/解密保存等全局复用主按钮的统一视觉。
+ * 与推杆长按钮（解锁/初始化/验证视图提交钮）并列但气质独立：
+ * 推杆为横向光谱轨道，此处为纵向潮汐注能 —— 同一主题两种语法。
+ *   1. 待机体：深舱底色（斜向低饱和青紫渐变，光源偏左上）+
+ *      底部势隙线 —— 势隙线偏居左侧（原点 22% 处，非中心原点），
+ *      缓慢呼吸（仅走 opacity 通道，与 transform 通道正交；5.3s
+ *      非对称相位，与其余周期动效互质，免多元素机械同步）
+ *   2. 悬浮 = 注能：势隙线自左侧原点向右铺展 + 底色增浓 +
+ *      边框提亮；按钮面无罩层升起层（不被任何白色幕布遮挡，
+ *      文字恒为最上层）；全程零阴影（不予任何态叠加投影，
+ *      光标/边框承担状态反馈）
+ *   3. 按下 = 压强回馈：整体下沉 1px + 势隙收缩
+ *      （快压 0.12s / 慢回 0.22s 非对称曲线，顶替旧通用缩放）
+ *   4. 键盘焦点 = 注能等价（无鼠标依赖的可达性等价呈现）
+ *   5. 禁用休眠：沉降调暗 + 势隙呼吸冻结 + 光标
+ *      not-allowed 区分可点击态
+ * 空闲治理：待机呼吸为氛围装饰类（idle 自动暂停，无需登记豁免）。
+ */
 .btn-primary {
-  background: linear-gradient(135deg, rgba(var(--accent-dim-rgb), 0.4), rgba(var(--accent-rgb), 0.3));
-  border-color: rgba(var(--accent-rgb), 0.3);
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(
+    165deg,
+    rgba(var(--accent-rgb), 0.11),
+    rgba(var(--bg-tertiary-rgb), 0.62) 46%,
+    rgba(var(--accent-purple-rgb), 0.06)
+  );
+  border-color: rgba(var(--accent-rgb), 0.24);
   color: var(--accent);
   font-weight: 500;
+  /* 精确属性过渡：按压反馈走位移下沉，几何恒定（伪元素层
+   * 随之整体联动，不会出现层间错拍）；按钮家族零阴影，
+   * 投影属性不参与交互 */
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    transform 0.22s cubic-bezier(0.33, 0, 0.15, 1);
 }
-.btn-primary:hover {
-  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.3), rgba(var(--accent-purple-rgb), 0.3));
-  border-color: var(--accent);
-  color: #fff;
-  box-shadow: 0 0 20px rgba(var(--accent-rgb), 0.2);
+/* 势隙线（三态一轨：待机呼吸 / 悬浮铺展 / 按下收缩）：
+ * 原点偏左（22%）— 铺展自左向右下游行进，非中心对称展开 */
+.btn-primary::before {
+  content: "";
+  position: absolute;
+  left: 15%;
+  right: 24%;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(var(--accent-rgb), 0.28) 34%,
+    rgba(214, 244, 255, 0.6) 71%,
+    transparent
+  );
+  transform: scaleX(0.34);
+  transform-origin: 22% 50%;
+  transition: transform 0.5s cubic-bezier(0.22, 0.9, 0.2, 1);
+  animation: kv-seam-breathe 5.3s ease-in-out infinite;
+  will-change: transform;
+}
+/* 非对称相位呼吸：拐点避开整数比（37%/64%），多按钮同屏
+ * 呼吸互不整齐划一 */
+@keyframes kv-seam-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  37% {
+    opacity: 0.58;
+  }
+  64% {
+    opacity: 0.86;
+  }
+}
+/* 悬浮 = 注能：势隙线自左侧原点铺展（无罩层升起层，
+ * 按钮面不设白色幕布，文字恒为最上层） */
+.btn-primary:hover:not(:disabled) {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  color: #e9f7ff;
+  background: linear-gradient(
+    165deg,
+    rgba(var(--accent-rgb), 0.16),
+    rgba(var(--bg-tertiary-rgb), 0.75) 46%,
+    rgba(var(--accent-purple-rgb), 0.11)
+  );
+  /* 零阴影裁定：顶替 .btn 通配悬浮投影，悬浮态同样无投影 */
+  box-shadow: none;
+}
+.btn-primary:hover:not(:disabled)::before {
+  transform: scaleX(1);
+}
+/* 键盘焦点 = 注能等价：铺展与悬浮一致 */
+.btn-primary:focus-visible {
+  outline: none;
+  border-color: rgba(var(--accent-rgb), 0.55);
+  color: #e9f7ff;
+}
+.btn-primary:focus-visible::before {
+  transform: scaleX(1);
+}
+/* 按下 = 压强回馈：下沉 1px + 势隙收缩。
+ * 快压（0.12s）慢回（0.22s）非对称曲线 */
+.btn-primary:active:not(:disabled) {
+  transform: translateY(1px);
+  border-color: rgba(var(--accent-rgb), 0.38);
+  transition:
+    transform 0.12s cubic-bezier(0.4, 0, 0.6, 1),
+    border-color 0.12s ease;
+}
+.btn-primary:active:not(:disabled)::before {
+  transform: scaleX(0.55);
+  transition: transform 0.2s cubic-bezier(0.55, 0.05, 0.3, 1);
+}
+/* 禁用休眠（表单未完成 / 处理中）：沉降调暗 +
+ * 呼吸冻结于当前相位 + 光标 not-allowed（可点击与不可点击
+ * 光标形态明确区分） */
+.btn-primary:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+.btn-primary:disabled::before {
+  animation-play-state: paused;
+  opacity: 0.5;
+}
+/* 无障碍：减少动态 → 呼吸静止 */
+@media (prefers-reduced-motion: reduce) {
+  .btn-primary::before {
+    animation: none;
+  }
 }
 .btn-danger {
   border-color: rgba(var(--accent-red-rgb), 0.15);
@@ -149,7 +268,6 @@
 .btn-danger:hover {
   background: rgba(var(--accent-red-rgb), 0.08);
   border-color: var(--accent-red);
-  box-shadow: 0 0 12px rgba(var(--accent-red-rgb), 0.1);
 }
 
 /* ===== 通用输入框 ===== */
@@ -162,7 +280,7 @@
   font-size: 13px;
   font-family: var(--font);
   outline: none;
-  /* ★ 精确属性过渡（禁 transition: all — 防御性根治：任何几何/
+  /* 精确属性过渡（禁 transition: all — 防御性根治：任何几何/
    * transform 类属性永不进过渡链，文字渲染路径恒定） */
   transition:
     border-color var(--dur-fast) var(--ease),
@@ -217,28 +335,6 @@
   margin-top: 1px;
   opacity: 0.8;
 }
-/* ★ 待启用流程提示条（密钥设置成功后自动开启保护），与 kv-warn 同构、青色信息色 */
-.kv-info {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--accent);
-  margin-bottom: 12px;
-  padding: 8px 10px;
-  border: 1px solid rgba(0, 212, 255, 0.2);
-  border-radius: 6px;
-  background: rgba(0, 212, 255, 0.05);
-  font-family: var(--font);
-  line-height: 1.5;
-}
-.kv-info svg {
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-  margin-top: 1px;
-  opacity: 0.8;
-}
 .kv-input {
   width: 100%;
   background: rgba(var(--black-rgb), 0.3);
@@ -248,7 +344,7 @@
   color: var(--text-primary);
   font-size: 13px;
   outline: none;
-  /* ★ 精确属性过渡（禁 transition: all — 同 .input 防御性根治） */
+  /* 精确属性过渡（禁 transition: all — 同 .input 防御性根治） */
   transition:
     border-color var(--dur-fast) var(--ease),
     background-color var(--dur-fast) var(--ease),
@@ -268,10 +364,81 @@
 .kv-actions-center {
   justify-content: center;
 }
+/* ===== 次确认按钮（kv-cancel）：静谧退潮风 =====
+ * 确认/取消搭档中的退让侧：与主确认钮（潮汐注能）同材质语言、
+ * 能量克制 —— 深舱底无主色倾注，仅底部偏左一脉疏引线：
+ *   1. 悬浮：疏引线自左侧原点铺展 + 文字微亮，单一弱线索
+ *      暗示「离开」而非「执行」
+ *   2. 按下：下沉 1px + 疏引线收缩（快压慢回非对称曲线）
+ *   3. 键盘焦点 = 悬浮等价；禁用沉降调暗 */
 .kv-cancel {
+  position: relative;
+  overflow: hidden;
   padding: 6px 16px;
   font-size: 12px;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    transform 0.22s cubic-bezier(0.33, 0, 0.15, 1);
 }
+/* 疏引线：偏左短段落 + 左原点生长（非对称 — 底部右段留白） */
+.kv-cancel::before {
+  content: "";
+  position: absolute;
+  left: 22%;
+  right: 30%;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(197, 214, 236, 0.32) 40%,
+    rgba(var(--white-rgb), 0.42) 78%,
+    transparent
+  );
+  transform: scaleX(0.3);
+  transform-origin: 16% 50%;
+  opacity: 0;
+  transition:
+    transform 0.45s cubic-bezier(0.22, 0.9, 0.2, 1),
+    opacity 0.3s ease;
+}
+.kv-cancel:hover:not(:disabled) {
+  border-color: var(--border-hover);
+  background: rgba(var(--accent-rgb), 0.08);
+  color: var(--text-primary);
+  /* 零阴影裁定：顶替 .btn 通配悬浮投影 */
+  box-shadow: none;
+}
+.kv-cancel:hover:not(:disabled)::before,
+.kv-cancel:focus-visible::before {
+  opacity: 1;
+  transform: scaleX(1);
+}
+.kv-cancel:focus-visible {
+  outline: none;
+  border-color: var(--border-hover);
+}
+.kv-cancel:active:not(:disabled) {
+  transform: translateY(1px);
+  transition: transform 0.12s cubic-bezier(0.4, 0, 0.6, 1);
+}
+.kv-cancel:active:not(:disabled)::before {
+  transform: scaleX(0.62);
+  transition: transform 0.2s cubic-bezier(0.55, 0.05, 0.3, 1);
+}
+.kv-cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kv-cancel::before {
+    transition: none;
+  }
+}
+/* 主确认钮的紧凑规格修饰（密钥类弹窗 12px 小号体位）——
+ * 注能动效全部继承 btn-primary，此处仅收敛内距 */
 .kv-confirm {
   padding: 6px 16px;
   font-size: 12px;
@@ -281,7 +448,7 @@
 .dialog-overlay {
   position: fixed;
   inset: 0;
-  /* ★ 性能根治：全屏 backdrop-filter 每帧全屏重采样 → 去实时毛玻璃，
+  /* 性能根治：全屏 backdrop-filter 每帧全屏重采样 → 去实时毛玻璃，
    * 底色加深补偿视觉 */
   background: rgba(var(--black-rgb), 0.72);
   display: flex;
@@ -291,7 +458,7 @@
   animation: overlay-in var(--dur) var(--ease);
 }
 .dialog {
-  /* ★ 性能根治：去实时毛玻璃（弹窗叠在动态深空背景上逐帧重采样），
+  /* 性能根治：去实时毛玻璃（弹窗叠在动态深空背景上逐帧重采样），
    * 底色不透明度补偿 */
   background: rgba(14, 18, 28, 0.92);
   border: 1px solid var(--border-glass);
@@ -321,7 +488,7 @@
  * 用法：v-tip="'提示文字'" 或 v-tip="动态变量"
  */
 .cosmic-tip {
-  /* ★ 性能根治：去实时毛玻璃（悬停出现即触发背景重采样），
+  /* 性能根治：去实时毛玻璃（悬停出现即触发背景重采样），
    * 底色 0.88→0.94 补偿 */
   background: rgba(14, 18, 28, 0.94);
   border: 1px solid rgba(var(--accent-rgb), 0.18);

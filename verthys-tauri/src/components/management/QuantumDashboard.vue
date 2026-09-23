@@ -1,7 +1,7 @@
 <!--
   QuantumDashboard.vue — 量子态势面板（进入中枢首屏）
 
-  ★ 全新架构：Canvas 物理场引擎（useQuantumField）+ 精简交互 DOM 层
+  全新架构：Canvas 物理场引擎（useQuantumField）+ 精简交互 DOM 层
 
   分层结构：
     canvas（qd-field-canvas）  — 物理场渲染：引力尘埃 / 数据碎片 / 能量连线 /
@@ -97,7 +97,7 @@ defineEmits<{
 }>();
 
 /* 4 个模块节点位置（百分比，0-100 坐标系）
- * ★ 非对称布局：手工设计的可控不规则偏差（±4.5%），
+ * 非对称布局：手工设计的可控不规则偏差（±4.5%），
  *   打破正交对称但保持构图张力（反AI大众化：拒绝完全均匀分布） */
 const moduleNodePos = [
   { x: 54.5, y: 13.5 },  // photo — 偏右上

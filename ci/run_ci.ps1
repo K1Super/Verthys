@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     CI 统一执行入口
 
@@ -33,10 +33,23 @@ $exitCode = 0
 if (-not $Level2Only) {
     Write-Host ""
     Write-Host "[第一级] 快速正则过滤..."
-    $pythonExe = if (Get-Command python3 -ErrorAction SilentlyContinue) { "python3" } else { "python" }
+    # 探测可实际运行的 Python：Windows 上 python3 常为商店存根（Get-Command
+    # 命中但执行失败），Get-Command 存在性不可信，须实测 --version 退出码
+    $pythonExe = $null
+    foreach ($cand in @("python", "python3")) {
+        try {
+            $cmd = Get-Command $cand -ErrorAction Stop
+            if ($null -ne $cmd) {
+                & $cmd.Source --version 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) { $pythonExe = $cmd.Source; break }
+            }
+        } catch { }
+    }
     $scanScript = Join-Path $PSScriptRoot "regex_scan.py"
 
-    if (Test-Path $scanScript) {
+    if ($null -eq $pythonExe) {
+        Write-Host "[第一级] Python 不可用（python/python3 均无法执行），跳过"
+    } elseif (Test-Path $scanScript) {
         Push-Location $projectRoot
         & $pythonExe $scanScript
         $level1Exit = $LASTEXITCODE
@@ -62,9 +75,16 @@ if (-not $Level1Only) {
         if (-not $SkipBuild) {
             Write-Host "[第二级] 编译 AST 分析工具..."
             Push-Location $astProject
+            # cargo 的进度/下载信息走 stderr，EAP=Stop 下会包装为终止错误，
+            # 编译期间临时降级为 Continue，恢复后按退出码判定
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
             & cargo build --release 2>&1 | ForEach-Object { Write-Host $_ }
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "[第二级] 编译失败"
+            $buildExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEAP
+            if ($buildExit -ne 0) {
+                Write-Host "[第二级] 编译失败 (exit=$buildExit)"
+                Pop-Location
                 exit 1
             }
             Pop-Location
@@ -73,7 +93,13 @@ if (-not $Level1Only) {
         $astBinary = Join-Path $astProject "target\release\verthys-ci-ast.exe"
         if (Test-Path $astBinary) {
             Push-Location $projectRoot
-            & $astBinary
+            # 存量豁免基线：与基线重合的违规跳过，新增违规仍阻断
+            $baselinePath = Join-Path $PSScriptRoot "ast_baseline.txt"
+            if (Test-Path $baselinePath) {
+                & $astBinary --baseline $baselinePath
+            } else {
+                & $astBinary
+            }
             $level2Exit = $LASTEXITCODE
             Pop-Location
 

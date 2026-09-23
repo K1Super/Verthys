@@ -1,12 +1,5 @@
 # .github/workflows/core.yml
-# ★ 方案 §8.2：CI 集成 —— core 构建与测试流水线
-#
-# 步骤（方案 §8.2 CI 配置）：
-#   1. 构建 Debug（verthys_core_obj + verthys + verthys_tests）
-#   2. 运行全部 C 测试（含 §8.2 新增：key_separation/emergency/
-#      integrity_verify/txn_recovery_inject/perf_baseline）
-#   3. 构建 Release（含 §6.3 .vsec 完整性基准注入）
-#   4. dumpbin 导出面清单与 ci/export_baseline.txt 比对（P0-A 白名单回归门）
+# core 构建与测试流水线
 #
 # Rust 测试与类型检查、前端 security-test.ts 由 rust-frontend.yml 承接；
 # 本文件聚焦 core DLL 质量门 + vendored 依赖供应链门。
@@ -14,11 +7,64 @@ name: core-build-test
 
 on:
   push:
-    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml"]
+    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml", "verthys-tauri/src-tauri/src/**", "verthys-tauri/verthys-worker/src/**"]
   pull_request:
-    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml"]
+    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml", "verthys-tauri/src-tauri/src/**", "verthys-tauri/verthys-worker/src/**"]
 
 jobs:
+  ast-redline:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (pinned by rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+
+      - name: AST red-line gate (level 2, baseline-exempted)
+        shell: pwsh
+        run: |
+          & ".\ci\run_ci.ps1" -Level2Only
+          if ($LASTEXITCODE -ne 0) { throw "AST red-line violations (new violations are blocking)" }
+
+  clang-tidy:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Find clang-tidy
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:VCToolsInstallDir}\..\..\..\Tools\Llvm\x64\bin\clang-tidy.exe",
+            "${env:ProgramFiles}\LLVM\bin\clang-tidy.exe",
+            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin\clang-tidy.exe",
+            "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\clang-tidy.exe"
+          )
+          $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $found) {
+            # 兜底：winget/choco 安装 LLVM 后重试
+            choco install llvm -y --no-progress
+            $found = "C:\Program Files\LLVM\bin\clang-tidy.exe"
+          }
+          Add-Content $env:GITHUB_PATH (Split-Path $found)
+          Write-Host "clang-tidy: $found"
+
+      - name: Configure (Ninja + clang-tidy gate)
+        run: |
+          cmake -S . -B build_tidy -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVERTHYS_ENABLE_CLANG_TIDY=ON
+
+      - name: Build under clang-tidy (WarningsAsErrors: UAF/StackAddressEscape/Malloc)
+        run: |
+          cmake --build build_tidy --config Debug
   build-and-test:
     runs-on: windows-latest
     timeout-minutes: 45
@@ -84,7 +130,6 @@ jobs:
           path: build/core/Release/verthys.dll
           retention-days: 7
 
-  # ★ WP-10：模糊测试全覆盖（5 目标 libFuzzer，每目标 10 分钟）
   #   与主构建门并行；崩溃/ASAN 报告 → 门红 + 崩溃样本工件留存。
   fuzz:
     runs-on: windows-latest

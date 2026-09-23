@@ -3,9 +3,9 @@
  *
  *
  * 包含命令：
- *   - verthys_preflight: 路径预检（企业级安全版）
+ *   - verthys_preflight: 路径预检（安全版）
  *
- * 企业级预检：
+ * 预检：
  *   1. 白名单基目录集合：canonicalize 父目录后必须以白名单为前缀；删黑名单。
  *        白名单动态构建：用户目录（Profile/Documents/AppData）+ EXE 目录 + 非系统盘根。
  *   2. 先校验后操作：输入校验 → 解析父目录绝对路径 → 白名单检查（拒绝则不任何 FS 操作）
@@ -346,7 +346,7 @@ fn is_system_protected_dir(canonical: &Path) -> bool {
 /// 精确匹配或为子路径（path 以 base + 分隔符开头）。
 /// 路径与白名单基目录均经 canonicalize，防止符号链接绕过。
 ///
-/// ★ 企业级根治修复：trim 尾部分隔符
+/// 修复修复：trim 尾部分隔符
 ///   根因：Windows 驱动器根目录（如 D:\）canonicalize 后为 \\?\D:\，
 ///   规范化为 //?/d:/（含尾部 /）。原 format!("{}/", base_str) 产生
 ///   //?/d://（双斜杠），无法匹配 //?/d:/test，导致 D 盘路径被误拒。
@@ -695,7 +695,7 @@ fn rollback_created_dir(parent: &Path, dir_created_by_us: bool) {
  * verthys_preflight 命令入口                              *
  * ------------------------------------------------------------------ */
 
-/// 路径预检（企业级安全版）：全量做法
+/// 路径预检（安全版）：全量做法
 ///
 /// 九重安全校验：
 ///   1. 输入硬校验（空字节/控制字符/超长/相对路径/.. /~）

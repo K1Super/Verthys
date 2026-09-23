@@ -37,8 +37,10 @@ pub(crate) type VerthysCreateWithPresetFn = unsafe extern "C" fn(
     usize,
     u32, /* VerthysPreset */
 ) -> u32;
+/// 运行时切换安全预设（双缓冲原子发布，立即生效）
+pub(crate) type VerthysSwitchSecurityPresetFn = unsafe extern "C" fn(VerthysHandle, u32) -> u32;
 pub(crate) type VerthysLockFn = unsafe extern "C" fn(VerthysHandle) -> u32;
-/// ★ 企业级根治：Verthys_Flush 显式刷盘接口
+/// 修复：Verthys_Flush 显式刷盘接口
 ///   签名与 Verthys_Lock 相同：接收 handle，返回 VerthysResult(u32)
 ///   v2：commit 未完成事务（add_record 已 commit 时为 no-op），不清零密钥、不改 state
 ///   v1：dirty 标记则写回（保持兼容）
@@ -62,7 +64,7 @@ pub(crate) type VerthysChangePasswordFn = unsafe extern "C" fn(
     usize,
 ) -> u32;
 
-/* ★ 解锁进度回调 FFI 绑定（与 verthys.h 中 VerthysUnlockProgress /
+/* 解锁进度回调 FFI 绑定（与 verthys.h 中 VerthysUnlockProgress /
  * VerthysUnlockProgressCallback / Verthys_RegisterUnlockProgressCallback 严格对齐）
  *
  * 流式进度协议（与 migrate_progress 一致）：
@@ -107,7 +109,7 @@ pub(crate) type VerthysScanFetchFn = unsafe extern "C" fn(
     *mut u64,               /* out_lids */
     u64,                    /* max_count */
     *mut u64,               /* out_count */
-    *mut u64,               /* out_failed_lids  — ★ 企业级根治：与 C 端 verthys.h:574-580 严格对齐 */
+    *mut u64,               /* out_failed_lids  — 修复：与 C 端 verthys.h:574-580 严格对齐 */
     *mut u64,               /* out_failed_count — 原缺陷：缺这 2 参数，C 从栈读垃圾值→0xC0000005 */
 ) -> u32;
 pub(crate) type VerthysScanRecordFreeFn = unsafe extern "C" fn(*mut VerthysRecordC) -> u32;
@@ -115,7 +117,7 @@ pub(crate) type VerthysScanCloseFn = unsafe extern "C" fn(VerthysScanCursorPtr) 
 
 /* 摘要扫描函数指针类型（轻量元数据扫描，不读数据块） */
 /// repr(C) 摘要记录结构（与 C 端 VerthysSummaryRecord 对齐）
-/// ★ 新增 created_time 字段
+/// 新增 created_time 字段
 #[repr(C)]
 pub(crate) struct VerthysSummaryRecordC {
     pub(crate) lid: u64,
@@ -125,8 +127,8 @@ pub(crate) struct VerthysSummaryRecordC {
     pub(crate) data_size: u64,
     pub(crate) physical_offset: u64,
     pub(crate) merkle_leaf: [u8; 32],
-    pub(crate) created_time: u64,  /* ★ 创建时间戳 */
-    pub(crate) slot_state: u8,     /* ★ 企业级根治：与 C 端 VerthysSummaryRecord 严格对齐 */
+    pub(crate) created_time: u64,  /* 创建时间戳 */
+    pub(crate) slot_state: u8,     /* 修复：与 C 端 VerthysSummaryRecord 严格对齐 */
     // #[repr(C)] 自动追加 7 字节尾部填充 → sizeof = 88，与 C 端一致
     //
     // 原缺陷（worker 崩溃 0xC0000005，导致"无法验证全局密钥"）：
@@ -153,11 +155,11 @@ pub(crate) type VerthysScanSummaryFetchFn = unsafe extern "C" fn(
     *mut u64,                    /* out_count */
 ) -> u32;
 pub(crate) type VerthysScanSummaryRecordFreeFn = unsafe extern "C" fn(*mut VerthysSummaryRecordC) -> u32;
-/// ★ 轻量摘要记录数查询
+/// 轻量摘要记录数查询
 /// 移出导出白名单（ci/export_baseline.txt），对应 FFI 类型一并删除
 pub(crate) type VerthysGetSummaryCountFn = unsafe extern "C" fn(VerthysHandle, *mut u64) -> u32;
 
-/* ★ 防御闭环状态查询 FFI 绑定
+/* 动态防护状态查询 FFI 绑定
  * 与 verthys.h VerthysSecurityStatus 严格对齐（C enum 为 int = 4 字节）：
  *   [u32 path_state; 7][u32 blocked][u32 degraded][u32 failed]
  *   [u8 all_critical_blocked][u8 has_degraded][u8 reserved; 6] = 48B / align 4 */
@@ -175,15 +177,16 @@ pub(crate) struct VerthysSecurityStatusC {
 
 pub(crate) type VerthysGetSecurityStatusFn =
     unsafe extern "C" fn(VerthysHandle, *mut VerthysSecurityStatusC) -> u32;
-/* ★ 企业级：轻量级记录类型存在性检查 FFI 绑定
+/*   轻量级记录类型存在性检查 FFI 绑定
  *   与 verthys.h 中 Verthys_HasRecordByType 严格对齐
  *   签名：VerthysResult Verthys_HasRecordByType(VerthysHandle, uint8_t rtype, uint8_t *out_found)
  *   仅遍历索引节点检查 type 字段，不读数据块，典型 < 100ms */
 pub(crate) type VerthysHasRecordByTypeFn = unsafe extern "C" fn(VerthysHandle, u8, *mut u8) -> u32;
-/* ★ 企业级根治：进程内类型记录首条 lid 查找 FFI 绑定
+/*   进程内类型记录首条 lid 查找 FFI 绑定
  *   与 verthys.h 中 Verthys_FindFirstLidByType 严格对齐
  *   签名：VerthysResult Verthys_FindFirstLidByType(VerthysHandle, uint8_t rtype,
  *                                              uint8_t *out_found, uint64_t *out_lid)
- *   v2 走 B+树叶子链表遍历，v1 走线性扫描，绝不返回 FORMAT 错误（根治 v1 假阴性）
+ *   V3-only：容器格式非 V3 时返回 FORMAT；V3 容器内未找到返回 OK + found=0
+ *   （不报 FORMAT，避免前端 probe 抛异常）
  *   用于解锁成功后进程内探测全局主密钥记录，消除解锁后 3~4 次 IPC 往返 */
 pub(crate) type VerthysFindFirstLidByTypeFn = unsafe extern "C" fn(VerthysHandle, u8, *mut u8, *mut u64) -> u32;

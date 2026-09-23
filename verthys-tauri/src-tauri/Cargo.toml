@@ -119,7 +119,7 @@ serde_json = "=1.0.151"
 tokio = { version = "1", features = ["full"] }
 log = "0.4"
 sha2 = "0.10"
-# ★ P0-1 x-path 请求头百分号解码（HTTP 头 ASCII 限制，中文路径经 encodeURIComponent 编码传输）
+# P0-1 x-path 请求头百分号解码（HTTP 头 ASCII 限制，中文路径经 encodeURIComponent 编码传输）
 # 已在 tauri 依赖树中，显式声明复用已编译版本（零额外编译成本）
 percent-encoding = "2"
 # Windows API 绑定（仅 Windows 平台使用）
@@ -170,7 +170,7 @@ tokio-util = { version = "0.7", features = ["rt"] }  # CancellationToken
 regex = "1.10"                                       # shm_name 白名单校验
 ts-rs = { version = "10", features = ["chrono-impl", "no-serde-warnings"] } # TypeScript 绑定生成
 
-# ★ 修复 LNK1181: 无法打开输入文件 "windows.x.xx.x.lib"
+# 修复 LNK1181: 无法打开输入文件 "windows.x.xx.x.lib"
 # 根因：dev profile 默认启用 incremental compilation，与 raw-dylib 导入库
 # 生成存在竞态——增量编译复用缓存 metadata 时，build script 的
 # rustc-link-search 输出未生效，导致 link.exe 找不到 windows-link 提供的
@@ -193,7 +193,7 @@ keyboard-types = { path = "../keyboard-types-patched" }
 # proc-macro2 补丁已移除：改用 .cargo/config.toml rustflags 全局强制 --cfg=span_locations
 # （详见 .cargo/config.toml 注释）。本地 patches/proc-macro2 目录保留但不再生效。
 
-# ★ Comprehensive_optimization：照片导入流水线 WAL 持久层单元测试依赖
+# Comprehensive_optimization：照片导入流水线 WAL 持久层单元测试依赖
 #   verthys_wal.rs 的断点续传 / 压缩 / 续传去重测试需临时目录隔离 WAL 文件
 [dev-dependencies]
 tempfile = "3"

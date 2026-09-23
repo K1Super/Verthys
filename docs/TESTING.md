@@ -2,9 +2,9 @@
 
 > 测试分层、全量/单项跑法、覆盖率现状与要求、关键场景用例与 Rust 侧测试。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-09-22 · 维护人：K1Super
 
-C 核心测试为单一聚合可执行文件 `verthys_tests`（`core/tests/CMakeLists.txt:7-37` 编译 37 个源文件），注册为 1 个 ctest 测试项（`core/tests/CMakeLists.txt:80`），内含 250 个 `TEST()` 用例（`test_runner.c` 中 250 个 `TEST` 声明与 250 个 `RUN_TEST` 一一对应）。模糊测试在 `-DVERTHYS_ENABLE_FUZZ=ON` 时额外注册 5 个冒烟测试项。
+C 核心测试为单一聚合可执行文件 `verthys_tests`（`core/tests/CMakeLists.txt:7-47` 编译 39 个源文件），注册为 1 个 ctest 测试项（`core/tests/CMakeLists.txt:90`），内含 296 个 `TEST()` 用例（`test_runner.c` 中 296 个 `RUN_TEST` 与之一一对应）。模糊测试在 `-DVERTHYS_ENABLE_FUZZ=ON` 时额外注册 5 个冒烟测试项。
 
 ## 1. 测试分层（按 `core/tests/` 实际目录）
 
@@ -25,7 +25,7 @@ C 核心测试为单一聚合可执行文件 `verthys_tests`（`core/tests/CMake
 ## 2. 如何跑全部测试
 
 ```powershell
-# 生产构建目录（Release），单一聚合测试 verthys_tests（250 用例）
+# 生产构建目录（Release），单一聚合测试 verthys_tests（296 用例）
 ctest --test-dir build -C Release --output-on-failure
 
 # 或直接运行测试 exe（Release 配置，输出以 "=== Summary: N passed, M failed ===" 结尾）
@@ -35,7 +35,7 @@ ctest --test-dir build -C Release --output-on-failure
 powershell -ExecutionPolicy Bypass -File .\scripts\build_core.dev.ps1 -Clean -NoPause
 ```
 
-CI（`.github/workflows/core.yml:42-45`）直接运行 `.\build_ci\core\verthys_tests.exe`（Ninja 布局）、退出码非 0 判失败。
+CI（`.github/workflows/core.yml:93-97`）直接运行 `.\build_ci\core\verthys_tests.exe`（Ninja 布局）、退出码非 0 判失败。
 
 ### 模糊测试冒烟门
 
@@ -48,7 +48,7 @@ ctest -C Debug --test-dir build_fuzz -R "fuzz_.*_smoke" --output-on-failure --no
 
 ## 3. 单项测试运行法
 
-`verthys_tests.exe` 支持 argv 子串过滤器（`core/tests/test_runner.c:333-355`）：第一个参数为子串，`argv[2..]` 为额外 OR 过滤器；无参数全量运行。
+`verthys_tests.exe` 支持 argv 子串过滤器（`core/tests/test_runner.c:400-428`）：第一个参数为子串，`argv[2..]` 为额外 OR 过滤器；无参数全量运行。
 
 ```powershell
 # 只运行名称含 "aead" 的用例
@@ -99,7 +99,7 @@ cargo test
 主应用 Rust 单元测试含 `verthys_wal.rs` 断点续传/压缩/续传去重（需 `[dev-dependencies] tempfile`，`src-tauri/Cargo.toml:196-199`）。
 
 ```powershell
-# verthys-worker：可编译，当前未定义 Rust 单元测试（无 tests/ 目录、源码无 #[test]/#[cfg(test)]）
+# verthys-worker：18 个测试用例（#[cfg(test)] mod tests，分布于 runtime/gmk、main_loop、scan_shm、worker）
 Set-Location .\verthys-tauri\verthys-worker
 cargo test
 ```

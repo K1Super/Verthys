@@ -5,13 +5,13 @@
     1. bs-field   双星引力场：开销星（扫掠弧=CPU/IO）↔ 质心（综合评分+齿轮）
                   ↔ 覆盖星（扫掠弧=安全覆盖），氛围弧差速旋转
     2. bs-track   引力测线：非均匀测绘残段刻度（暗层休眠/潮汐亮层连续
-                  点亮=能量进程）+ 端桩（左高右低非对称）+ 基准桩锚点
-                  （错落桩高）+ 游标天平（速度感应摆锤，欠阻尼弹簧）
+                  点亮=能量进程）+ 基准桩锚点（错落桩高，端点锚兼作
+                  左高右低终点桩）+ 游标天平（速度感应摆锤，欠阻尼弹簧）
     3. bs-spectra 特性谱线：折叠面板内每特性一条光谱线（亮谱=启用），
                   grid 行高过渡无重排
-    4. cap-board  安全能力状态栏：双列错位端子排清单（圆点状态位 +
-                  功能名称 + 【核心】标签 + 虚线引出线，错相呼吸）
-    5. def-board  防御闭环：七攻击路径端子排诊断（四态语义色
+    4. cap-board  安全防护栏：双列错位端子排清单（圆点状态位 +
+                  功能名称 + 【核心】标签 + 虚线引出线）
+    5. def-board  动态防护：七攻击路径端子排诊断（四态语义色
                   圆点 + 状态标签 + 虚线引出线）+ 总体态势行
     6. flow-rail  数据流转轨道：磁盘→内存电路走线（横段 + 斜向抬升
                   非对称高差，站点环 + 双层非均匀 dash 数据包差速流动），
@@ -21,8 +21,8 @@
     1. 双星引力场（左星 CPU/IO + 质心综合评分 + 右星 安全覆盖 + 齿轮入口）
     2. 引力测线滑块（三基准桩磁性吸附 + 潮汐亮层 + 游标天平）
     3. 特性谱线自定义面板（toggleableFeatures + 恢复默认/保存并应用）
-    4. 安全能力状态栏（lockedFeatures 清单：圆点 + 名称 + 【核心】）
-    5. 防御闭环状态（defensePaths：7 攻击路径 × 4 态 + defenseMeta 态势）
+    4. 安全防护栏（lockedFeatures 清单：圆点 + 名称 + 【核心】）
+    5. 动态防护状态（defensePaths：7 攻击路径 × 4 态 + defenseMeta 态势）
     6. 数据流转轨道（磁盘→内存走线 + 站点 + 运行状态文字）
 
   Props: globalKeyReady / securityPresetCode / presetApplying / presetAmbienceMode /
@@ -154,9 +154,9 @@
 
       <!-- ===== 2. 引力测线（非均匀测绘残段 + 游标天平） ===== -->
       <div class="bs-track-zone">
-        <!-- 连续浮点 pointer 驱动：--pos(0-100) / --posw(%) DOM 直写
+        <!-- 连续浮点 pointer 驱动：--pos(0-100) 游标、--posw(%) 亮层 DOM 直写
              （绕过整数步进与 Vue patch，逐帧直跟指针）；
-             刻度以 SVG 授权坐标绘制，亮层 clip 随 --posw 连续点亮 -->
+             刻度以 SVG 授权坐标绘制，亮层 clip 随 --posw 量化档位点亮 -->
         <div
           ref="trackEl"
           class="bs-track"
@@ -191,11 +191,7 @@
               vector-effect="non-scaling-stroke"
             />
           </svg>
-          <!-- 端桩（左高右低非对称测绘终端） -->
-          <span class="bs-post bs-post--origin" aria-hidden="true"></span>
-          <span class="bs-post bs-post--term" aria-hidden="true"></span>
-
-          <!-- 基准桩锚点（三档磁性吸附，错落桩高）
+          <!-- 基准桩锚点（三档磁性吸附，端点锚兼作左高右低终点桩）
                纯视觉元素：不挂 pointer 事件 — 按下/点击统一由测线宿主
                处理（保证在锚点上可直接按下拖拽，点击吸附由释放位移判定） -->
           <div
@@ -264,20 +260,21 @@
         </div>
       </div>
 
-      <!-- ===== 4. 安全能力状态栏（核心防护清单 · 双列错位端子排） ===== -->
+      <!-- ===== 4. 安全防护栏（核心防护清单 · 双列错位端子排）
+           圆点状态位由后端权威配置快照驱动：当前档位实际启用的能力
+           亮起，缺失降档的能力呈灰态 —— 不做恒等伪装计数 ===== -->
       <div class="cap-board">
         <div class="cap-head">
           <span class="cap-glyph" aria-hidden="true"></span>
-          <span class="cap-title">安全能力状态</span>
-          <span class="cap-sub">CORE ACTIVE</span>
-          <span class="cap-count">{{ lockedFeatures.length }}/{{ lockedFeatures.length }}</span>
+          <span class="cap-title">安全防护</span>
+          <span class="cap-count">{{ capActiveCount }}/{{ lockedFeatures.length }}</span>
         </div>
         <ul class="cap-ledger">
           <li
             v-for="(feat, i) in lockedFeatures"
             :key="feat.key"
             class="cap-item"
-            :class="`cap-item-${i}`"
+            :class="[`cap-item-${i}`, { off: !capFeatOn(feat.key) }]"
             v-tip="feat.desc"
           >
             <span class="cap-dot" aria-hidden="true"></span>
@@ -288,12 +285,11 @@
         </ul>
       </div>
 
-      <!-- ===== 5. 防御闭环（7 攻击路径实时阻断状态 · 端子排诊断） ===== -->
+      <!-- ===== 5. 动态防护（7 攻击路径实时阻断状态 · 端子排诊断） ===== -->
       <div class="def-board">
         <div class="def-head">
           <span class="def-glyph" aria-hidden="true"></span>
-          <span class="def-title">防御闭环</span>
-          <span class="def-sub">WP-11 · RUNTIME</span>
+          <span class="def-title">动态防护</span>
           <span class="def-count" :class="`def-count--${defenseMeta.stance}`">
             {{ defenseMeta.blocked }}/{{ defensePaths.length }}
           </span>
@@ -410,13 +406,15 @@ const props = defineProps<{
   toggleableFeatures: Array<{ key: string; label: string; desc: string }>;
   /** 锁定特性列表（星冕核心防护，不可切换） */
   lockedFeatures: Array<{ key: string; label: string; desc: string }>;
+  /** 已应用预设特性开关快照（后端权威配置 —— 能力状态栏真实状态源） */
+  presetFeatures: Record<string, boolean>;
   /** 自定义特性配置（谱线开关状态） */
   customFeatures: Record<string, boolean>;
   /** 自定义面板展开状态 */
   customPanelOpen: boolean;
-  /** 防御闭环路径状态列表（7 攻击路径 × 4 态端子排） */
+  /** 动态防护路径状态列表（7 攻击路径 × 4 态端子排） */
   defensePaths: DefensePathView[];
-  /** 防御闭环汇总态势（计数 + 全阻断标志 + 总体态势行） */
+  /** 动态防护汇总态势（计数 + 全阻断标志 + 总体态势行） */
   defenseMeta: DefenseMetaView;
 }>();
 
@@ -447,11 +445,25 @@ const emit = defineEmits<{
 }>();
 
 /* ============================================================
-   引力测线架构（极其平滑 · 反模板化设计）
+   安全防护栏真实状态（后端权威配置快照驱动）
+   核心能力在部分档位会按 C 层口径降档关闭（如性能档的反调试/
+   完整性校验/内存保护），圆点如实灰态 —— 禁止恒等伪装计数
+   ============================================================ */
+
+/** 判定核心能力在当前档位的真实启用态（应用配置为权威，缺省视为启用） */
+const capFeatOn = (key: string): boolean => props.presetFeatures[key] !== false;
+/** 当前档位真实启用的核心能力数 */
+const capActiveCount = computed(() =>
+  props.lockedFeatures.filter((f) => capFeatOn(f.key)).length,
+);
+
+/* ============================================================
+   引力测线架构
    1. 连续浮点 pointer 驱动：抛弃原生 range 整数步进（step=1 导致
       1% 跳变），pointermove 按测线宽度计算连续浮点位置
    2. DOM 直写：拖拽期间 --pos/--posw 直接写测线元素 style，
-      完全绕过 Vue 响应式 —— 游标与潮汐亮层逐帧直跟指针，零组件
+      完全绕过 Vue 响应式 —— 游标逐帧直跟指针，潮汐亮层按 2% 量化
+      档位 + 30Hz 抽帧推进（收敛逐帧重栅格化），零组件
       patch；测线元素不绑定 Vue style，重渲染永不覆盖直写值
    3. 游标天平摆锤物理：拖拽速度注入欠阻尼弹簧（刚度/阻尼双系数
       积分 → 复合衰减曲线，非标准缓动），游标随运摆倾侧、静止后
@@ -472,10 +484,13 @@ const trackEl = ref<HTMLElement | null>(null);
 let latestPos = orbitSliderPos.value;
 /** 上次节流写 model 的时间戳 */
 let lastModelSync = 0;
-/** 按下时的位置（0-100）与测线像素宽度（点击/拖拽判定） */
+/** 按下时的位置（0-100）与测线像素宽度（点击/拖拽判定；宽度按下时缓存，
+ * 拖拽期间不再读布局 — 消除 pointermove 路径的同步 layout） */
 let downPos = 0;
 let downWidth = 1;
-/** 按下时命中的锚点索引（-1 = 空白处；点击吸附判定用） */
+/** 测线左缘像素（按下时缓存，move 期间零布局读取） */
+let downLeft = 0;
+/** 命中锚点索引（-1 = 空白处；点击吸附判定用） */
 let downHitIdx = -1;
 
 /** 测绘残段刻度 — 确定性非均匀分布（间距/高度/明度按错位乘法序列起伏，
@@ -496,20 +511,46 @@ const surveyTicks = (() => {
   return arr;
 })();
 
-/** 位置写入测线 DOM：--pos(0-100) 供游标 cqw 位移，--posw(%) 供亮层 clip */
+/** 位置写入测线 DOM：--pos（0-100 全精度）供游标 cqw 位移 */
 const writePosToDom = (pos: number) => {
   const el = trackEl.value;
   if (!el) return;
   el.style.setProperty("--pos", pos.toFixed(3));
-  el.style.setProperty("--posw", `${pos.toFixed(2)}%`);
+};
+
+/** 亮层 --posw 量化步进（百分点）：clip-path 推进最多取 50 档，
+ *  收敛拖拽期逐帧整层重栅格化频次 */
+const LIT_QUANT_STEP = 2;
+/** 拖拽期亮层写入最小间隔（毫秒，约 30Hz 抽帧）；非拖拽路径不降频 */
+const LIT_WRITE_INTERVAL_MS = 1000 / 30;
+/** 上次亮层写入的量化档位与时间戳（同档去重 / 抽帧判定） */
+let lastLitQuant = -1;
+let lastLitWriteAt = 0;
+
+/** 亮层位置写入：量化到 2% 档位（同档不重复写），拖拽路径按 30Hz 抽帧，
+ *  非拖拽路径（吸附/锚点/键盘/预设同步）即时写入 */
+const writeLitPos = (pos: number, draggingNow: boolean) => {
+  const el = trackEl.value;
+  if (!el) return;
+  const quant = Math.round(Math.min(100, Math.max(0, pos)) / LIT_QUANT_STEP) * LIT_QUANT_STEP;
+  if (quant === lastLitQuant) return;
+  const now = performance.now();
+  if (draggingNow && now - lastLitWriteAt < LIT_WRITE_INTERVAL_MS) return;
+  lastLitQuant = quant;
+  lastLitWriteAt = now;
+  el.style.setProperty("--posw", `${quant.toFixed(2)}%`);
 };
 
 /* 非拖拽路径统一驱动：model 变化（松手吸附/锚点点击/键盘/预设同步）
- * → 写入 DOM；拖拽期间跳过（直写优先，避免节流值回跳覆盖最新指针位置） */
+ * → 写入 DOM（游标全精度 + 亮层量化即时写入）；拖拽期间跳过
+ * （直写优先，避免节流值回跳覆盖最新指针位置） */
 watch(
   orbitSliderPos,
   (pos) => {
-    if (!dragging.value) writePosToDom(pos);
+    if (!dragging.value) {
+      writePosToDom(pos);
+      writeLitPos(pos, false);
+    }
   },
   { immediate: true },
 );
@@ -528,9 +569,16 @@ const writeTilt = () => {
   trackEl.value?.style.setProperty("--tilt", `${tilt.toFixed(3)}deg`);
 };
 
-/** 弹簧积分循环：刚度 0.16 / 阻尼 0.11（欠阻尼 → 摆锤式回正震荡衰减） */
+/** 弹簧积分循环：刚度 0.16 / 阻尼 0.11（欠阻尼 → 摆锤式回正震荡衰减）
+ * 拖拽期间作为位置写入门控：--pos 逐帧全精度直跟指针、--posw 量化后
+ * 按 30Hz 抽帧写入（pointermove 高频事件不再同步直写 DOM，消除逐事件
+ * 重栅格化与同步 layout，收敛亮层逐帧整层重栅格化频次） */
 const tiltLoop = () => {
   if (!tiltActive) return;
+  if (dragging.value) {
+    writePosToDom(latestPos);
+    writeLitPos(latestPos, true);
+  }
   tiltVel += -tilt * 0.16 - tiltVel * 0.11;
   tilt = Math.max(-6, Math.min(6, tilt + tiltVel));
   writeTilt();
@@ -553,14 +601,11 @@ const kickTilt = (dx: number) => {
   }
 };
 
-/** 由指针横坐标计算连续位置：DOM 直写主视觉 + 摆锤冲量 + 节流联动 model */
+/** 由指针横坐标计算连续位置：仅更新数值与摆锤冲量 + 节流联动 model；
+ * DOM 写入由 tiltLoop 在渲染帧内合并执行（不再在 pointermove 事件中同步直写） */
 const updateFromPointer = (clientX: number) => {
-  const el = trackEl.value;
-  if (!el) return;
-  const rect = el.getBoundingClientRect();
-  const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  const ratio = Math.min(1, Math.max(0, (clientX - downLeft) / downWidth));
   latestPos = ratio * 100;
-  writePosToDom(latestPos);
   kickTilt(clientX - prevX);
   prevX = clientX;
   // 节流写 model：联动双星数值/环境渐变/邻近锚点（120ms，视觉无感）
@@ -582,14 +627,19 @@ const onTrackPointerDown = (e: PointerEvent) => {
   prevX = e.clientX;
   const el = trackEl.value;
   if (el) {
+    // 按下时一次性读取布局并缓存 — 拖拽期间 updateFromPointer 零布局
     const rect = el.getBoundingClientRect();
+    downLeft = rect.left;
     downWidth = rect.width || 1;
-    downPos = Math.min(1, Math.max(0, (e.clientX - rect.left) / downWidth)) * 100;
+    downPos = Math.min(1, Math.max(0, (e.clientX - downLeft) / downWidth)) * 100;
     // 命中判定：按下点距某锚点 < 13px（锚点热区，含桩体与标签）
     downHitIdx = props.orbitAnchors.findIndex(
       (a) => (Math.abs(downPos - a.pos) / 100) * downWidth < 13,
     );
   }
+  // 按下即启动帧内写入门控（位置合并到首个渲染帧）
+  tiltActive = true;
+  masterFrameLoop.once(tiltLoop);
   updateFromPointer(e.clientX);
   emit("orbitSliderInput");
 };

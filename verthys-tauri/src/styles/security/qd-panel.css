@@ -7,7 +7,7 @@
      - .qd-layer 视差层容器（mid/near，引擎逐帧写入 transform）
      - .qd-core-cluster 中心量子核心（文字簇，引擎弹簧缩放）
      - .qd-module-node 模块轨道节点（图标+标签+状态色，引擎弹簧缩放）
-   ★ 交互元素（节点/核心/视差层）的 transform 全部由引擎弹簧
+   交互元素（节点/核心/视差层）的 transform 全部由引擎弹簧
      逐帧内联写入，此处严禁声明 transform transition/hover 缩放
      （CSS transition 会与逐帧写入叠加造成二次平滑与滞后卡顿）
    ============================================================ */

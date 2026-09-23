@@ -12,8 +12,9 @@
  *            使用 spawn_blocking，Mutex 仅保护快速状态读写。
  *   4. 锁中毒自愈：获取锁时检测中毒，into_inner() 取出后废弃，
  *            重置为新实例并记录严重告警。
- *   5. 命令权限分级与抗重放：敏感操作（record_success/clear_purge/
- *            set_high_security）要求携带一次性 auth_token，且检查 KeyLifecycle。
+ *   5. 命令权限分级：敏感操作（record_success/clear_purge/
+ *            set_high_security / 白名单变更 / USB 注册）要求已解锁会话，
+ *            由 auth::require_session_authorized 按密钥生命周期统一裁决。
  *   6. 使用 base64 crate 替换自编 Base64 实现。
  *   7. 统一结构化审计日志：每个安全命令执行时记录审计事件。
  *   8. 修复会话守卫与影子休眠：session_start 要求真实 HWND，
@@ -23,7 +24,8 @@
  *   - state：安全全局状态 + 锁中毒自愈
  *   - responses：响应类型定义（含 #[derive(serde::Serialize, TS)]）
  *   - persistence：DPAPI 加密状态持久化层
- *   - auth：一次性权限令牌
+ *   - auth：会话授权裁决
+ *   - preset_persistence：安全预设受信持久化（单一事实源）
  *   - audit：结构化审计日志
  *   - path_resolver：路径白名单解析
  *   - commands：Tauri 命令分组
@@ -34,8 +36,8 @@
  *       5. file_lock：harden_private_dir
  *       6. usb：read_serial / register_device / check_clone /
  *          shadow_sleep / try_recover / purge / shadow_status
- *       7. preset：get_preset_config
- *       8. auth：generate_auth_token
+ *       7. preset：get_preset_config / apply_preset / load_preset_state
+ *       8. auth：require_session_authorized
  */
 
 pub mod state;
@@ -44,6 +46,8 @@ pub mod responses;
 pub mod path_resolver;
 pub mod audit;
 pub mod auth;
+/// 安全预设受信持久化（单一事实源，与状态文件同域）
+pub mod preset_persistence;
 pub mod commands;
 /// 解锁命令的服务端暴力熔断桥接（gate 检查 / 失败计数 / 成功重置）
 pub mod brute_force_bridge;
@@ -55,6 +59,7 @@ pub use commands::cleanup::*;
 pub use commands::file_lock::*;
 pub use commands::usb::*;
 pub use commands::preset::*;
+pub use commands::system_metrics::*;
 
 pub use state::SecurityState;
 

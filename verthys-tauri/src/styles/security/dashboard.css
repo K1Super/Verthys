@@ -5,8 +5,8 @@
      - .bs-field       双星引力场（扫掠弧星体 + 质心 + 齿轮入口）
      - .bs-track       预设谱轨（裸能量丝线 + 菱形锚点 + 渡越体）
      - .bs-spectra     特性谱线折叠面板（grid 行高过渡，无重排卡顿）
-     - .cap-board      安全能力状态栏（核心防护清单 · 双列错位端子排）
-     - .def-board      防御闭环端子排诊断（WP-11 · 7 攻击路径 × 四态语义色）
+     - .cap-board      安全防护栏（核心防护清单 · 双列错位端子排）
+     - .def-board      动态防护端子排诊断（WP-11 · 7 攻击路径 × 四态语义色）
      - .flow-rail      数据流转轨道（磁盘→内存 · 电路走线 + 数据包流 + 运行状态）
      - .kd-* 密钥编辑弹窗特定布局
      - .derive-* / .custom-derive-area / .result-* 自定义派生区域
@@ -19,8 +19,9 @@
      - .bs-track 为容器查询锚点（container-type: inline-size）+ pointer
        拖拽宿主；游标天平以 translateX(calc(var(--pos) * 1cqw)) 位移、
        潮汐亮层以 clip-path inset(var(--posw)) 点亮 — 零 layout
-     - 拖拽期间组件 DOM 直写 --pos/--posw（连续浮点，绕过整数步进与
-       Vue patch），游标逐帧直跟指针；双星数值 120ms 节流联动
+     - 拖拽期间组件 DOM 直写 --pos/--posw（绕过整数步进与 Vue patch），
+       游标逐帧直跟指针、亮层按 2% 量化档位 + 30Hz 抽帧推进；
+       双星数值 120ms 节流联动
      - 游标摆锤 --tilt 由欠阻尼弹簧积分驱动（复合衰减曲线），
        速度感应倾侧 + 静止自然回正
      - 落位缓动 cubic-bezier(0.22, 1.32, 0.28, 1)（过冲 = 挡位落榫）
@@ -71,6 +72,9 @@
 .ambience-secure {
   --dashboard-accent: rgba(255, 140, 60, 0.9);
 }
+/* 拖拽期间氛围过渡冻结：类切换退化为瞬时静态切换（松手吸附后
+ * 恢复 0.8s 渐变），抑制拖拽逐帧触发 background 过渡重绘 */
+.is-dragging .ambience-glow { transition: none; }
 
 /* ============================================================
    1. 双星引力场 — 开销星 ↔ 质心 ↔ 覆盖星
@@ -121,6 +125,11 @@
 .bs-sweep-right { stroke: url(#bs-grad-right); }
 /* 弧端能量点 */
 .bs-sweep-dot { transition: transform 0.6s var(--ease); }
+/* 拖拽期冻结扫掠弧与能量点过渡：dashoffset 过渡叠加 drop-shadow 滤镜
+   为每帧重绘路径，模型同步（120ms 节拍）会不断重触发 0.6s 过渡形成
+   连续重绘带；冻结后拖拽路径仅剩合成器属性写入 */
+.is-dragging .bs-sweep,
+.is-dragging .bs-sweep-dot { transition: none; }
 .bs-dot-left {
   fill: #7dffd4;
   filter: drop-shadow(0 0 3px rgba(0, 255, 200, 0.7));
@@ -288,21 +297,11 @@
 .bs-survey--lit {
   color: var(--dashboard-accent, var(--accent));
   clip-path: inset(0 calc(100% - var(--posw, 50%)) 0 0);
-  transition: clip-path 0.5s cubic-bezier(0.22, 1.32, 0.28, 1);
-  will-change: clip-path;
+  transition: clip-path 0.4s cubic-bezier(0.22, 1.32, 0.28, 1);
 }
 .is-dragging .bs-survey--lit { transition: none; }
-/* 端桩：左高右低非对称测绘终端（基线 y=48 → bottom 28px） */
-.bs-post {
-  position: absolute;
-  bottom: 28px;
-  width: 2px;
-  background: rgba(148, 160, 178, 0.5);
-  pointer-events: none;
-}
-.bs-post--origin { left: 0; height: 22px; }
-.bs-post--term { right: 0; height: 11px; background: rgba(148, 160, 178, 0.36); }
-/* 基准桩锚点：错落桩高（9/14/7px）的立桩 + 基线下方 mono 标签
+/* 基准桩锚点：错落桩高（端点 22/11·中间 14px）的立桩 + 基线下方 mono 标签
+ * 端点锚兼作左高右低终点桩（无重复端桩双立杆，端点与测线基准同一几何）；
  * 纯视觉元素：pointer-events 穿透 — 按下/点击由测线宿主统一处理，
  * 保证在锚点上可直接按下拖拽（点击吸附由释放位移判定） */
 .bs-anchor {
@@ -326,9 +325,12 @@
     height 0.4s cubic-bezier(0.3, 1.28, 0.32, 1),
     background 0.35s var(--ease);
 }
-.bs-anchor-0 .bs-anchor-stela { height: 9px; }
+.bs-anchor-0 .bs-anchor-stela { height: 22px; }
 .bs-anchor-1 .bs-anchor-stela { height: 14px; }
-.bs-anchor-2 .bs-anchor-stela { height: 7px; }
+.bs-anchor-2 .bs-anchor-stela {
+  height: 11px;
+  background: rgba(148, 160, 178, 0.36);
+}
 .bs-anchor-text {
   position: absolute;
   bottom: 2px;
@@ -346,6 +348,9 @@
   height: 19px;
   background: rgba(0, 212, 255, 0.9);
 }
+/* 端点锚不参与邻近拔高：保持终点桩固定高度，邻近仅亮色 */
+.bs-anchor-0.near .bs-anchor-stela { height: 22px; }
+.bs-anchor-2.near .bs-anchor-stela { height: 11px; }
 .bs-anchor.near .bs-anchor-text { color: rgba(0, 212, 255, 0.85); }
 /* 当前激活桩（accent 实色，回落至常态桩高 — 驻留态克制） */
 .bs-anchor.current .bs-anchor-stela {
@@ -539,10 +544,10 @@
 }
 
 /* ============================================================
-   4. 安全能力状态栏 — 核心防护清单（双列错位端子排 · 零阴影零光晕）
+   4. 安全防护栏 — 核心防护清单（双列错位端子排 · 零阴影零光晕）
    视觉语言：接线端子排清单 —— 圆点状态位 + 功能名 + 【核心】标签 +
    虚线引出线；双列错位排布（第二列整体下沉，非均匀布局）；
-   圆点错相呼吸（延迟按质数序列，杜绝机械同步）
+   圆点静态实心（状态以颜色区分，无呼吸动画）
    ============================================================ */
 .cap-board {
   position: relative;
@@ -569,12 +574,6 @@
   font-size: 11px;
   letter-spacing: 0.3em;
   color: var(--text-secondary);
-}
-.cap-sub {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.24em;
-  color: rgba(148, 160, 178, 0.5);
 }
 .cap-count {
   margin-left: auto;
@@ -605,21 +604,13 @@
 .cap-item:nth-child(n + 4) {
   transform: translateY(13px);
 }
-/* 圆点状态位：错相呼吸（质数序列延迟） */
+/* 圆点状态位：静态实心（无呼吸动画，状态以颜色与形态区分） */
 .cap-dot {
   flex: none;
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: var(--dashboard-accent, var(--accent));
-  animation: cap-breath 3.2s ease-in-out infinite;
-}
-.cap-item:nth-child(2n) .cap-dot { animation-delay: 1.3s; }
-.cap-item:nth-child(3n) .cap-dot { animation-delay: 2.3s; }
-.cap-item:nth-child(5n) .cap-dot { animation-delay: 0.7s; }
-@keyframes cap-breath {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 1; }
 }
 .cap-name {
   flex: none;
@@ -654,12 +645,19 @@
   background: rgba(148, 160, 178, 0.3);
 }
 .cap-item:nth-child(even) .cap-lead { opacity: 0.65; }
+/* 降档关闭态：圆点灰态静息 + 名称降色 + 核心标签弱化（真实状态如实呈现） */
+.cap-item.off .cap-dot {
+  background: rgba(148, 160, 178, 0.5);
+  animation: none;
+  opacity: 0.45;
+}
+.cap-item.off .cap-name { color: rgba(148, 160, 178, 0.62); }
+.cap-item.off .cap-tag { opacity: 0.35; }
 
 /* ============================================================
-   5. 防御闭环 — WP-11 攻击路径阻断状态（端子排诊断 · 四态语义色）
    视觉语言：延续 cap-board 端子排（圆点状态位 + 名称 + 状态标签 +
    虚线引出线），双列 4+3 错位排布；四态圆点形态语义区分：
-     blocked   = 实心 accent 呼吸（防线在位运转）
+     blocked   = 实心 accent 静止（防线在位）
      degraded  = 半透明琥珀（防护降级，部分失效）
      failed    = 实心 danger 静止（防线击穿，警示）
      unchecked = 虚线空心灰（该路径校验尚未执行）
@@ -690,12 +688,6 @@
   font-size: 11px;
   letter-spacing: 0.3em;
   color: var(--text-secondary);
-}
-.def-sub {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.24em;
-  color: rgba(148, 160, 178, 0.5);
 }
 /* 计数态色：ok/pending=青绿 · degraded=琥珀 · breach=红 */
 .def-count {
@@ -738,7 +730,6 @@
 }
 .def-item--blocked .def-dot {
   background: var(--dashboard-accent, var(--accent));
-  animation: def-breath 3.2s ease-in-out infinite;
 }
 .def-item--degraded .def-dot {
   background: rgba(255, 165, 2, 0.5);
@@ -748,16 +739,7 @@
   background: var(--danger);
 }
 .def-item--unchecked .def-dot {
-  background: transparent;
   border: 1px dashed rgba(148, 160, 178, 0.55);
-}
-/* 阻断态错相呼吸（质数序列延迟，杜绝机械同步） */
-.def-item:nth-child(2n) .def-dot { animation-delay: 1.3s; }
-.def-item:nth-child(3n) .def-dot { animation-delay: 2.3s; }
-.def-item:nth-child(5n) .def-dot { animation-delay: 0.7s; }
-@keyframes def-breath {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 1; }
 }
 .def-name {
   flex: none;
@@ -870,7 +852,6 @@
   stroke-dasharray: 14 38 6 52;
   animation: flow-run var(--flow-dur) linear infinite;
   transition: stroke 0.6s var(--ease);
-  will-change: stroke-dashoffset;
 }
 /* 远层：灰弱反向慢速 — 空间纵深（与近层差速） */
 .flow-packets--far {
@@ -909,15 +890,15 @@
 .flow-label {
   position: absolute;
   transform: translateX(-50%);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.18em;
-  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
   white-space: nowrap;
   pointer-events: none;
 }
 .flow-label--end {
-  color: var(--text-secondary);
+  color: var(--text-primary);
 }
 /* 运行状态行：方形状态位 + mono 文字 */
 .flow-status {
@@ -934,11 +915,16 @@
   background: var(--dashboard-accent, var(--accent));
   animation: cap-breath 2.6s ease-in-out infinite;
 }
+/* 运行状态行状态位呼吸（仅此元素保留使用该关键帧） */
+@keyframes cap-breath {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
 .flow-status-text {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.22em;
-  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
 }
 
 /* 氛围弧旋转关键帧 */

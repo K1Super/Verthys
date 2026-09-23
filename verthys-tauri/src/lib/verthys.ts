@@ -3,7 +3,7 @@
  *
  * 设计原则（codebase-design 深模块）：
  *   - 前端仅能调用预定义的受限 Tauri 指令，无法自定义调用 DLL 底层接口
- *   - ★ 文件二进制数据经 Tauri v2 raw IPC（ArrayBuffer 请求体 +
+ *   - 文件二进制数据经 Tauri v2 raw IPC（ArrayBuffer 请求体 +
  *     tauri::ipc::Response 响应）直传，零 base64 编解码；账号序列化等
  *     小体量数据仍走 base64 in JSON 协议
  *   - 前端不含任何加密、密钥、文件读写逻辑，完全无安全权重
@@ -27,7 +27,7 @@ import { wrapAsVerthysError, ipcFailed } from "./verthys_error";
 import { serializeToJsonB64, deserializeFromJsonB64 } from "../utils/json_codec";
 import { withTimeout } from "../utils/promise_utils";
 import { Channel } from "@tauri-apps/api/core";
-// ★ 前端 IPC 优先级门控：关键 IPC 调用标记前端活跃，后台任务据此让出 worker 通道
+// 前端 IPC 优先级门控：关键 IPC 调用标记前端活跃，后台任务据此让出 worker 通道
 import { markFrontendIpcActive } from "../core/frontend-ipc-priority";
 
 import type {
@@ -46,6 +46,7 @@ import type {
   ShadowSleepStatus,
   SecurityPresetCode,
   PresetConfig,
+  PresetFeatures,
   SecurityStatusReport,
   UnlockProgress,
   ClipboardResult,
@@ -175,7 +176,7 @@ export async function workerDestroy(): Promise<boolean> {
     const r = await ipc<VerthysResponse>("worker_destroy");
     return r.ok;
   } finally {
-    // ★ 企业级根治：无论 worker_destroy 成功/失败/超时，都作废预启动缓存
+    // 修复：无论 worker_destroy 成功/失败/超时，都作废预启动缓存
     //   原缺陷：invalidateWorkerPreload 在 await 之后，若 IPC 超时/异常则永不执行
     //   → workerReadyPromise 残留指向已销毁 worker → 下次 ensureWorkerReady 复用死 worker
     invalidateWorkerPreload();
@@ -186,7 +187,7 @@ export async function workerDestroy(): Promise<boolean> {
  * Worker 预启动（memoized）                                           *
  *                                                                    *
  * worker_init 的全部工作（路径探测、运行库检查、DLL 完整性校验、       *
- * 沙箱子进程创建、6 层防御闭环）不依赖具体 .verthys 文件内容，            *
+ * 沙箱子进程创建、6 层动态防护）不依赖具体 .verthys 文件内容，            *
  * 仅与安全环境准备有关。因此可在用户选定文件后立即后台预启动，          *
  * 与用户浏览路径、点击「确认」按钮的时间完全重叠。                      *
  *                                                                    *
@@ -199,7 +200,7 @@ export async function workerDestroy(): Promise<boolean> {
 /** 当前 worker_init 的 memoized Promise（null 表示无预启动进行中/已完成） */
 let workerReadyPromise: Promise<boolean> | null = null;
 
-/** ★ 企业级根治：worker 是否已被使用（unlock/create 成功过）
+/** 修复：worker 是否已被使用（unlock/create 成功过）
  *
  * 用于 ensureCleanWorkerState 区分两种 workerReadyPromise !== null 场景：
  *   - workerHasBeenUsed=false：worker 仅预启动，尚未解锁 → 预启动有效，复用
@@ -238,7 +239,7 @@ export function invalidateWorkerPreload(): void {
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 企业级根治：确保解锁前 worker 处于干净状态                         *
+ * 修复：确保解锁前 worker 处于干净状态                         *
  *                                                                    *
  * 根治"回退重选 verthys 卡死"和"安全核心启动失败"根因：                   *
  *   用户回退 → goBackToUnlock → lockAll → doLockAll 同步置            *
@@ -259,7 +260,7 @@ export function invalidateWorkerPreload(): void {
  *   被彻底清理，消除"状态仍为 Ready"导致的 worker_init 失败。          *
  * ------------------------------------------------------------------ */
 export async function ensureCleanWorkerState(): Promise<void> {
-  // ★ 企业级根治：无条件销毁 worker，消除"状态仍为 Ready"导致的 worker_init 失败
+  // 修复：无条件销毁 worker，消除"状态仍为 Ready"导致的 worker_init 失败
   //
   // 原实现仅在 workerReadyPromise !== null && workerHasBeenUsed 时销毁，
   // 但 lockAll 的 verthysLock()/workerDestroy() 会在 finally 中调用
@@ -305,7 +306,7 @@ export async function verthysCreate(
 ): Promise<boolean> {
   const r = await ipc<VerthysResponse>("verthys_create", { verthysPath, password, preset });
   if (r.ok) {
-    // ★ 企业级根治B：标记 worker 已被使用（create 内部会 unlock 重开）
+    // 修复B：标记 worker 已被使用（create 内部会 unlock 重开）
     // ensureCleanWorkerState 据此判断：下次解锁前若 workerHasBeenUsed=true
     // 且预启动缓存残留 → 强制销毁旧 worker，防止复用被 lockAll 销毁中的死 worker
     workerHasBeenUsed = true;
@@ -313,7 +314,7 @@ export async function verthysCreate(
   return r.ok;
 }
 
-/** ★ 第一层：选择即预热 — 用户选择 .verthys 文件后立即后台预读索引区到 OS 页缓存
+/** 第一层：选择即预热 — 用户选择 .verthys 文件后立即后台预读索引区到 OS 页缓存
  *  fire-and-forget：返回 true 表示预热已启动（不等待完成）
  *  安全边界：纯文件 I/O，不加载 DLL、不接触密钥、不解密任何数据
  *
@@ -331,7 +332,7 @@ export async function verthysPreheat(verthysPath: string): Promise<boolean> {
 
 /** 解锁已有加密库（worker 内调用 Verthys_Unlock）
  *
- * ★ 新增 onProgress 可选回调，流式接收解锁进度
+ * 新增 onProgress 可选回调，流式接收解锁进度
  * - worker 在解锁期间推送多条 unlock_progress 进度行
  * - 每条进度行通过 Tauri Channel 转发到前端 onProgress 回调
  * - 后端进度感知超时（60s 无进度才判定挂起），无需前端 Promise.race 兜底
@@ -349,7 +350,7 @@ export async function verthysUnlock(
   // 创建 Tauri Channel 用于流式接收进度
   const channel = new Channel<UnlockProgress>();
 
-  /* ★ 企业级根治修复：阻止 Promise resolve 后的 Channel 残留进度消息
+  /* 修复修复：阻止 Promise resolve 后的 Channel 残留进度消息
    *
    * 根因：Tauri Channel 的 onmessage 是异步处理的。当 verthys_unlock 命令返回
    * （Promise resolve）时，Channel 队列中可能仍有未消费的进度消息（如 Argon2id
@@ -373,7 +374,7 @@ export async function verthysUnlock(
   }
 
   try {
-    /* ★ 企业级根治：返回完整 VerthysResponse，含 worker 进程内探测的
+    /* 修复：返回完整 VerthysResponse，含 worker 进程内探测的
      * has_global_key/global_key_id/global_key_record 三字段。
      * 调用方 initUnlock 直接消费，消除解锁后 probe IPC 链。 */
     const resp = await ipc<VerthysResponse>("verthys_unlock", {
@@ -382,14 +383,14 @@ export async function verthysUnlock(
       onProgress: channel,
     });
     if (resp.ok) {
-      // ★ 企业级根治B：标记 worker 已被使用（unlock 成功）
+      // 修复B：标记 worker 已被使用（unlock 成功）
       // ensureCleanWorkerState 据此判断：下次解锁前若 workerHasBeenUsed=true
       // 且预启动缓存残留 → 强制销毁旧 worker，防止复用被 lockAll 销毁中的死 worker
       workerHasBeenUsed = true;
     }
     return resp;
   } finally {
-    /* ★ 关键：Promise resolve/reject 后立即置位，阻止后续 Channel 残留消息
+    /* 关键：Promise resolve/reject 后立即置位，阻止后续 Channel 残留消息
      * 覆盖 UI 状态。finally 块在 return/throw 前执行，确保标志及时生效。 */
     completed = true;
   }
@@ -403,7 +404,7 @@ export async function verthysLockPersist(): Promise<boolean> {
 
 /** 销毁 worker 并清理资源（剪贴板+文件锁）— 7步流程步骤7
  *  注意：verthys_lock 会销毁 worker 子进程，因此同步作废预启动缓存
- *  ★ 企业级根治：invalidateWorkerPreload 移至 finally 块，
+ *  修复：invalidateWorkerPreload 移至 finally 块，
  *    确保 IPC 超时/异常时也作废缓存（根治 workerReadyPromise 残留指向死 worker） */
 export async function verthysLock(): Promise<boolean> {
   try {
@@ -421,7 +422,7 @@ export async function verthysFlush(verthysPath: string, password: string): Promi
   return r.ok;
 }
 
-/** ★ 磁盘级持久化验证（只读，绕过 worker 内存，直接校验磁盘文件）
+/** 磁盘级持久化验证（只读，绕过 worker 内存，直接校验磁盘文件）
  *
  *  消除"内存可见、磁盘丢失"的假成功：persistVerthys 成功后回读 worker 内存
  *  无法检测磁盘是否真正写入（v1 AddRecord 仅写内存）。本命令绕过 worker，
@@ -464,7 +465,7 @@ export async function verthysAddRecord(
 }
 
 /* ================================================================== *
- * ★ Comprehensive_optimization：照片导入异步批处理流水线 IPC 封装      *
+ * Comprehensive_optimization：照片导入异步批处理流水线 IPC 封装      *
  *                                                                  *
  * 五个命令对应后端 controller::verthys_batch_controller：             *
  *   - verthysImportBegin：创建导入会话（WAL + 续传去重哈希集）         *
@@ -524,7 +525,7 @@ export async function verthysAddRecordsBatch(
     channel.onmessage = onProgress;
   }
 
-  // ★ 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
+  // 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
   markFrontendIpcActive();
 
   const r = await ipc<VerthysResponse>("verthys_add_records_batch", {
@@ -636,7 +637,7 @@ export async function verthysGetRecord(
 export async function verthysEnumerateRecords(
   startId: number = 1
 ): Promise<{ id: number; type: number; name: string; dataB64: string }[]> {
-  // ★ 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
+  // 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
   markFrontendIpcActive();
   const r = await ipc<VerthysResponse>("verthys_enumerate_records", { startId });
   if (!r.ok || !r.records) return [];
@@ -649,7 +650,7 @@ export async function verthysEnumerateRecords(
 }
 
 /**
- * ★ 项5：流式枚举记录（Tauri Channel 分页推送）
+ * 项5：流式枚举记录（Tauri Channel 分页推送）
  *
  * 替代一次性 verthysEnumerateRecords（数千条记录 JSON.parse 阻塞主线程 100ms+）。
  * 后端循环调用 worker enumerate_records（每批 batchSize 条），
@@ -714,7 +715,7 @@ export async function verthysScanOpen(
   startId: number = 0,
   batchSize: number = 1000
 ): Promise<{ records: { id: number; type: number; name: string; dataB64: string }[]; exhausted: boolean }> {
-  // ★ 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
+  // 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
   markFrontendIpcActive();
   const r = await ipc<VerthysResponse>("verthys_scan_open", { startId, batchSize });
   if (!r.ok) {
@@ -774,7 +775,7 @@ export async function verthysScanClose(): Promise<boolean> {
  * ------------------------------------------------------------------ */
 
 /** 摘要记录（前端简化类型，供 verthys-cache.ts 两层缓存使用）
- * ★ 新增 createdTime（创建时间戳，列表展示用）
+ * 新增 createdTime（创建时间戳，列表展示用）
  */
 export interface SummaryRecord {
   id: number;
@@ -796,7 +797,7 @@ export async function verthysScanSummaryOpen(
   startId: number = 0,
   batchSize: number = 1000
 ): Promise<{ records: SummaryRecord[]; exhausted: boolean }> {
-  // ★ 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
+  // 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
   markFrontendIpcActive();
   const r = await ipc<VerthysResponse>("verthys_scan_summary_open", { startId, batchSize });
   if (!r.ok) {
@@ -855,11 +856,11 @@ export async function verthysDeleteRecords(ids: number[]): Promise<boolean> {
   return r.ok;
 }
 
-/** ★ 获取已加载的轻量摘要记录数
+/** 获取已加载的轻量摘要记录数
  *  返回解锁时从 summary_index_off 加载的摘要记录数。
  *  >0 表示摘要索引可用，前端可直接渲染列表无需 B+ 树扫描。
  *
- *  ★ 企业级修复：worker 返回 ok=false 时抛出异常而非返回 0
+ *  修复：worker 返回 ok=false 时抛出异常而非返回 0
  *    原 bug：worker 失败时返回 0，调用方误判"verthys 为空"→ UI 显示"初始化密钥"
  *    修复：worker 失败时抛异常，调用方 catch 后走"计数未知"路径，继续第一批扫描
  */
@@ -874,7 +875,7 @@ export async function verthysGetSummaryCount(): Promise<number> {
   return r.record_count ?? 0;
 }
 
-/** ★ 企业级：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）
+/** ：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）
  *
  *  C 层 Verthys_HasRecordByType 直接遍历 B+ 树叶子节点检查 type 字段，
  *  不分配 name 堆内存，不访问数据区块，典型耗时 < 100ms。
@@ -927,7 +928,7 @@ export async function verthysChangePassword(
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 防御闭环状态查询                                                  *
+ * 动态防护状态查询                                                  *
  *                                                                    *
  * verthysGetSecurityStatus 透传 worker 的 security_status op，          *
  * 返回 7 条攻击路径的阻断/降级/失败状态。                              *
@@ -935,7 +936,7 @@ export async function verthysChangePassword(
  * ------------------------------------------------------------------ */
 
 /**
- * 查询防御闭环实时状态
+ * 查询动态防护实时状态
  *
  * 调用链：前端 → verthys_security_status → worker security_status
  *   → FFI Verthys_GetSecurityStatus → SecurityStatusReport
@@ -958,6 +959,16 @@ export async function verthysGetSecurityStatus(): Promise<SecurityStatusReport> 
   return r.security_status;
 }
 
+/** 系统运行指标快照（CPU 占用率真实差分采样；无基线时 cpu_usage=null） */
+export interface SystemSnapshot {
+  cpu_usage: number | null;
+}
+
+/** 查询系统运行指标（安全防护面板「CPU / IO 开销」的真实数据源） */
+export async function verthysGetSystemSnapshot(): Promise<SystemSnapshot> {
+  return await ipc<SystemSnapshot>("verthys_system_snapshot");
+}
+
 /* ------------------------------------------------------------------ *
  * GMK 派生 IPC 封装（#2 敏感操作下沉）                                *
  *                                                                    *
@@ -967,7 +978,7 @@ export async function verthysGetSecurityStatus(): Promise<SecurityStatusReport> 
 
 /** 派生全局主密钥 GMK（首次设置）
  *
- * ★ 企业级修复：失败时抛出 Error（含后端错误消息），而非返回 null。
+ * 修复：失败时抛出 Error（含后端错误消息），而非返回 null。
  *
  * 原缺陷：返回 null 丢失后端 VerthysResponse.error 中的具体错误信息
  * （状态不匹配 / 密码长度不足 / bin 数据校验失败等）。调用方
@@ -997,9 +1008,38 @@ export async function verthysDeriveGlobalKey(
   return r.data;
 }
 
+/** 派生并持久化全局密钥（首次初始化专用，敏感操作下沉）
+ *
+ * worker 进程内原子完成「派生 → 收敛残留记录 → 写入 → 读回逐字节
+ * 验证」，响应内联返回记录 lid 与 recordB64。存储不经 add_record
+ * 命令——派生、落盘与读回验证在同一 worker 调用内原子完成，不产生
+ * 派生存放跨两次 IPC 的中间态窗口。
+ *
+ * 失败（派生失败/写失败/读回不一致）由 worker 内部统一补偿：
+ * 清 GMK + 回收半成品记录，前端仅需按错误引导用户重试。
+ *
+ * @returns { id, recordB64 } — recordB64 已确认落盘且读回一致
+ * @throws Error 后端返回 ok=false 时抛出，message 为后端错误描述
+ */
+export async function verthysDeriveAndStoreGlobalKey(
+  password: string,
+  binDataB64: string,
+  binPassword: string
+): Promise<{ id: number; recordB64: string }> {
+  const r = await ipc<VerthysResponse>("verthys_derive_and_store_global_key", {
+    password,
+    binDataB64,
+    binPassword,
+  });
+  if (!r.ok || r.id == null || !r.data) {
+    throw new Error(r.error || "派生并持久化全局密钥失败");
+  }
+  return { id: r.id, recordB64: r.data };
+}
+
 /** 验证全局密钥（后续进入时）
  *
- * ★ 企业级修复：失败时抛出 Error（含后端错误消息），而非返回 false。
+ * 修复：失败时抛出 Error（含后端错误消息），而非返回 false。
  *
  * 原缺陷：返回 false 丢失后端 VerthysResponse.error 中的具体错误信息
  * （状态不匹配 / 冷却中 / 密码长度不足 / bin 数据校验失败等）。
@@ -1037,7 +1077,18 @@ export async function verthysClearGlobalKey(): Promise<boolean> {
   return r.ok;
 }
 
-/** ★ 企业级根治：协调全局密钥存在状态（修正 probe 竞态导致的前后端状态不同步）
+/** 幂等强制复位全局密钥状态（失败补偿链最终兜底）
+ *
+ * 后端强制：GMK 清零（best-effort）+ 状态机任何状态回 NoKey。
+ * 供前端补偿动作（clear/reconcile）连续失败后调用，保证不残留
+ * 中间态死锁；任何状态下调用均幂等成功。
+ */
+export async function verthysResetGlobalKeyState(): Promise<boolean> {
+  const r = await ipc<VerthysResponse>("verthys_reset_global_key_state");
+  return r.ok;
+}
+
+/** 修复：协调全局密钥存在状态（修正 probe 竞态导致的前后端状态不同步）
  *
  * 场景：
  *   verthys_unlock 时 worker 进程内 probe 通过 find_first_lid_by_type(0x10)
@@ -1058,7 +1109,7 @@ export async function verthysReconcileKeyPresence(hasGlobalKey: boolean): Promis
 }
 
 /**
- * ★ 设置隐私模式（防截屏 + 剪贴板保护联动）
+ * 设置隐私模式（防截屏 + 剪贴板保护联动）
  *
  * 关闭隐私模式（enabled=false）要求 auth_token 授权。
  * auth_token 为用户主密码，由前端在用户确认关闭后传入。
@@ -1082,7 +1133,7 @@ export async function setPrivacyMode(
 }
 
 /**
- * ★ 事务式安全清空剪贴板（多次覆写 + 重试）
+ * 事务式安全清空剪贴板（多次覆写 + 重试）
  *
  * 完整事务序列：OpenClipboard → EmptyClipboard → 3 轮随机覆写 → 最终清空。
  * 剪贴板被占用时自动重试（50ms × 3）。
@@ -1099,7 +1150,7 @@ export async function clearClipboard(): Promise<ClipboardResult> {
 }
 
 /**
- * ★ 启动时恢复持久化的隐私模式状态
+ * 启动时恢复持久化的隐私模式状态
  *
  * 从 DPAPI 加密的状态文件加载隐私模式状态，自动恢复防截屏 + 剪贴板监听。
  * 应在应用启动后（setup 阶段）调用。
@@ -1132,7 +1183,7 @@ export async function readFileBytes(path: string): Promise<Uint8Array> {
 /** 写入原始字节到文件（二进制 IPC：raw body 直传，去 base64 化）
  *
  *  字节经请求体直传（Tauri v2 raw IPC），目标路径经 x-path 请求头传递。
- *  ★ 路径经 encodeURIComponent 百分号编码 — HTTP 头仅允许可见 ASCII，
+ *  路径经 encodeURIComponent 百分号编码 — HTTP 头仅允许可见 ASCII，
  *  中文用户名路径（如 C:\Users\张三\）必须编码传输，Rust 端严格解码。
  *
  *  ⚠ 白名单限制：同 readFileBytes，仅允许白名单路径。
@@ -1147,7 +1198,7 @@ export async function writeFileBytes(path: string, data: Uint8Array): Promise<vo
   }
 }
 
-/** ★ 读取用户通过对话框显式选择的文件字节（二进制 IPC）
+/** 读取用户通过对话框显式选择的文件字节（二进制 IPC）
  *
  *  返回原始 Uint8Array（后端 tauri::ipc::Response 二进制通道）。
  *
@@ -1172,11 +1223,11 @@ export async function readUserFile(path: string): Promise<Uint8Array> {
   return new Uint8Array(buf);
 }
 
-/** ★ 写入原始字节到用户通过对话框选择的位置（二进制 IPC）
+/** 写入原始字节到用户通过对话框选择的位置（二进制 IPC）
  *
  *  字节经请求体直传（Tauri v2 raw IPC），目标路径经 x-path 请求头传递，
  *  消除 base64 编码 1.33× 内存放大与编解码 CPU 开销。
- *  ★ 路径经 encodeURIComponent 百分号编码 — HTTP 头仅允许可见 ASCII，
+ *  路径经 encodeURIComponent 百分号编码 — HTTP 头仅允许可见 ASCII，
  *  中文用户名路径（如 C:\Users\张三\）必须编码传输，Rust 端严格解码。
  *
  *  与 writeFileBytes 的区别：跳过沙箱白名单校验（用户已通过 Tauri dialog
@@ -1212,7 +1263,7 @@ export async function setDeviceBinding(): Promise<void> {
 /**
  * 校验当前设备机器码是否匹配（返回结构化结果）
  *
- * ★ 企业级根治修复：原实现错误声明返回纯字符串 "match"|"mismatch"|"unbound"，
+ * 修复修复：原实现错误声明返回纯字符串 "match"|"mismatch"|"unbound"，
  *   但后端 #[tauri::command] check_device_binding 返回的是 DeviceBindingResult
  *   结构体（JSON 对象：{status, detail, error_code?, match_score?}），导致前端
  *   拿到对象后与字符串比较永远不等 → device_mismatch 拦截视图永久失效 +
@@ -1270,9 +1321,12 @@ export async function securitySessionStop(): Promise<void> {
   await ipc<void>("security_session_stop");
 }
 
-/** 设置高安全模式（启用电源挂起监听 + 更激进的锁屏策略） */
-export async function securitySessionSetHighSecurity(enabled: boolean): Promise<void> {
-  await ipc<void>("security_session_set_high_security", { enabled });
+/** 设置高安全模式（启用电源挂起监听 + 更激进的锁屏策略）
+ *  后端以 SecurityResult 包装返回：授权拒绝（会话未解锁）时 ok=false，
+ *  此处不抛错，将 ok 透传给调用方以便可见地报告失败。 */
+export async function securitySessionSetHighSecurity(enabled: boolean): Promise<boolean> {
+  const r = await ipc<{ ok: boolean }>("security_session_set_high_security", { enabled });
+  return r.ok === true;
 }
 
 /* -------------------- 3. 模块巡检 -------------------- */
@@ -1376,4 +1430,27 @@ export async function securityUsbShadowStatus(): Promise<ShadowSleepStatus> {
  *  preset: 0=BALANCED, 1=SECURE, 2=PERFORMANCE */
 export async function securityGetPresetConfig(preset: SecurityPresetCode): Promise<PresetConfig> {
   return await ipc<PresetConfig>("security_get_preset_config", { preset });
+}
+
+/** 运行时切换安全预设：后端会话授权 → 原子落盘受信文件 → worker →
+ *  C 层双缓冲切档（0/1/2 档），成功后返回新档真实配置；失败抛错（明确错误码）。
+ *  CUSTOM(3) 无 C 层档位：仅落盘自定义特性并返回其配置，会话层开关由调用方组合。 */
+export async function securityApplyPreset(
+  code: 0 | 1 | 2 | 3,
+  features?: PresetFeatures,
+): Promise<PresetConfig> {
+  return await ipc<PresetConfig>("security_apply_preset", { code, features });
+}
+
+/** 受信持久化的预设状态（后端权威副本）
+ *  code: 0=BALANCED, 1=SECURE, 2=PERFORMANCE, 3=CUSTOM
+ *  customFeatures: 仅 code=3 时存在 */
+export interface PresetPersistState {
+  code: number;
+  customFeatures?: PresetFeatures | null;
+}
+
+/** 读取受信持久化的预设状态；无配置（全新用户/未落盘）返回 null */
+export async function securityLoadPresetState(): Promise<PresetPersistState | null> {
+  return await ipc<PresetPersistState | null>("security_load_preset_state");
 }

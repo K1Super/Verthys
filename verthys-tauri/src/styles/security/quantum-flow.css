@@ -9,8 +9,8 @@
    ============================================================ */
 
 /* ===== 容器槽位（固定高度，消除切换跳变） =====
-   ★ 有 loader 时默认 160px（引力吸积加载 96px + margin 14px + 导流通道 ~46px + 间距）
-   ★ min-height 必须在此处定义（quantum-flow.css 内），禁止在组件 scoped style 中覆盖
+   有 loader 时默认 160px（引力吸积加载 96px + margin 14px + 导流通道 ~46px + 间距）
+   min-height 必须在此处定义（quantum-flow.css 内），禁止在组件 scoped style 中覆盖
      原因：Vite 会将 <style scoped> 中 @import 内容与自定义样式拆分到不同 CSS chunk，
      使用不同 data-v 属性，导致自定义 min-height 无法匹配元素 */
 .qf-slot {
@@ -38,10 +38,6 @@
     linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(0, 0, 0, 0.15));
   /* 极淡描边：量子全息感 */
   border: 1px solid rgba(0, 212, 255, 0.1);
-  /* ★ 性能根治方案五（偏差 D-P5 留痕）：原 qf-breathe 动画 box-shadow
-   *   （每帧 paint）。双伪元素 opacity 替代被 overflow:hidden 裁剪阻断
-   *   （外发光 -20px 越界）；且呼吸幅度仅 alpha 0.04→0.08（感知阈值
-   *   边缘）。冻结为静态中间值——消除逐帧 paint，视觉偏差低于感知。 */
   box-shadow:
     inset 0 1px 2px rgba(0, 0, 0, 0.3),
     inset 0 -1px 1px rgba(255, 255, 255, 0.03),
@@ -180,7 +176,7 @@
   position: absolute;
   top: 50%;
   width: 2px;
-  height: 20px;          /* ★ 方案五：固定为峰值高度 */
+  height: 20px;
   margin-top: -10px;
   border-radius: 1px;
   z-index: 1;
@@ -211,8 +207,6 @@
   animation: qf-port-pulse 2.5s ease-in-out infinite 1.25s;
 }
 
-/* ★ 性能根治方案五：height+margin-top（每帧 layout）→ scaleY（合成器）。
- *   端口为无内容装饰条，scaleY 中心缩放与原 height 变化视觉等同。 */
 @keyframes qf-port-pulse {
   0%, 100% { opacity: 0.4; transform: scaleY(0.7); }
   50% { opacity: 0.8; transform: scaleY(1); }

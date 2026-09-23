@@ -29,7 +29,7 @@ export interface KeyState {
   globalKeyReady: Ref<boolean>;
   /** verthys 中存在全局密钥记录 */
   hasGlobalKeyRecord: Ref<boolean>;
-  /** ★ 企业级根治：全局密钥记录加载标志（恒 false，保留供防御性检查）
+  /** 修复：全局密钥记录加载标志（恒 false，保留供防御性检查）
    *
    * 原设计：快速试探未命中时设为 true，后台异步扫描完成后设为 false，
    * UI 据此显示"加载中"状态。
@@ -38,7 +38,7 @@ export interface KeyState {
    * 结果内联到 unlock 响应，前端零异步扫描阶段。此标志恒为 false，
    * 保留定义供 resetAllState 防御性重置与未来扩展使用。 */
   globalKeyRecordLoading: Ref<boolean>;
-  /** ★ 修复2：全局密钥记录缓存（避免 verifyGlobalKey 重复扫描 40s）
+  /** 修复2：全局密钥记录缓存（避免 verifyGlobalKey 重复扫描 40s）
    *
    * initUnlock 找到全局密钥记录后，将 recordB64 和 id 缓存到此。
    * verifyGlobalKey 优先读取缓存，跳过重复的 findGlobalKeyRecord 扫描。
@@ -51,7 +51,7 @@ export interface KeyState {
   hasModuleKeyRecord: Ref<Record<ModuleId, boolean>>;
   /** 各模块密钥保护开关 */
   moduleKeyEnabled: Ref<Record<ModuleId, boolean>>;
-  /** ★ 企业级根治：模块密钥状态后台加载标志（修复4）
+  /** 修复：模块密钥状态后台加载标志（修复4）
    *
    * initUnlock 将 loadModuleKeyStatus 移至后台非阻塞执行（根治"正在加载密钥配置…"卡慢）。
    * 此标志在解锁后置 true，后台加载完成/被并发修改丢弃后置 false。
@@ -62,7 +62,7 @@ export interface KeyState {
    *      —— 后台加载期间若用户切换开关，版本号变化导致后台加载丢弃结果，
    *         杜绝"后台加载用旧 verthys 状态覆盖用户刚切换的开关"全局回滚缺陷 */
   moduleKeyStatusLoading: Ref<boolean>;
-  /** ★ 安全守卫根治：模块密钥状态已加载完成标志
+  /** 安全守卫根治：模块密钥状态已加载完成标志
    *
    * 区分"未加载"（loaded=false，状态不确定，守卫必须等待/拦截）与
    * "已加载但无配置"（loaded=true + enabled=false，确实不需要验证，放行）。
@@ -81,7 +81,7 @@ export interface KeyState {
   storedVerthysPath: Ref<string>;
   /** 最近一次初始化失败的错误信息 */
   lastInitError: Ref<string>;
-  /** ★ 企业级：初始化状态详情（含修复失败告警等可观测信息）
+  /** ：初始化状态详情（含修复失败告警等可观测信息）
    *
    * verthys_init_status 返回的 detail 字段，由 SecurityCenter 显示给用户。
    * 当 repair_fail_count >= 3 时携带"状态文件写入异常"告警，
@@ -98,7 +98,7 @@ export const keyState: KeyState = {
   globalKeyRecordId: ref(0),
   moduleKeyReady: ref({ photo: false, accounts: false, certs: false, fileverthys: false }),
   hasModuleKeyRecord: ref({ photo: false, accounts: false, certs: false, fileverthys: false }),
-  // ★ 企业级根治修复：moduleKeyEnabled 默认 false（安全默认）
+  // 修复修复：moduleKeyEnabled 默认 false（安全默认）
   //
   // 原缺陷：默认 true 意味着"保护开关开启"=所有模块需密钥验证。
   // 当 loadModuleKeyStatus 失败/未调用时，全部模块显示为已开启保护，
@@ -108,9 +108,9 @@ export const keyState: KeyState = {
   // 仅当 verthys 中存在 TYPE_MODULE_KEY_CONFIG 记录且 enabled=true 时才开启。
   // 这确保"未被用户显式配置的模块"不会自动启用密钥验证。
   moduleKeyEnabled: ref({ photo: false, accounts: false, certs: false, fileverthys: false }),
-  // ★ 企业级根治修复4：模块密钥状态后台加载标志（初始 false，解锁后置 true）
+  // 修复修复4：模块密钥状态后台加载标志（初始 false，解锁后置 true）
   moduleKeyStatusLoading: ref(false),
-  // ★ 安全守卫根治：模块密钥状态已加载完成标志（初始 false，loadModuleKeyStatus 完成时置 true）
+  // 安全守卫根治：模块密钥状态已加载完成标志（初始 false，loadModuleKeyStatus 完成时置 true）
   moduleKeyStatusLoaded: ref(false),
   securityPreset: ref<SecurityPresetCode>(loadSecurityPreset()),
   initStatus: ref("none"),
@@ -154,12 +154,12 @@ export function resetAllState(): void {
   _currentVerthysPath = "";
   // moduleKeyCache is in cache/composition/verthys-cache.ts, cleared via clearModuleCache there
   keyState.moduleKeyReady.value = { photo: false, accounts: false, certs: false, fileverthys: false };
-  // ★ 企业级根治修复：重置为安全默认 false（与初始化默认一致）
+  // 修复修复：重置为安全默认 false（与初始化默认一致）
   keyState.moduleKeyEnabled.value = { photo: false, accounts: false, certs: false, fileverthys: false };
   keyState.hasModuleKeyRecord.value = { photo: false, accounts: false, certs: false, fileverthys: false };
-  // ★ 企业级根治修复4：重置后台加载标志
+  // 修复修复4：重置后台加载标志
   keyState.moduleKeyStatusLoading.value = false;
-  // ★ 安全守卫根治：重置已加载标志
+  // 安全守卫根治：重置已加载标志
   keyState.moduleKeyStatusLoaded.value = false;
 }
 

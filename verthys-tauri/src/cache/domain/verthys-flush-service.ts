@@ -1,11 +1,11 @@
 /*
  * cache/domain/verthys-flush-service.ts — Verthys 统一冲刷队列服务（领域类）
  *
- * ★ 重构核心实现。
+ * 重构核心实现。
  *   原 verthys-flush.ts 的模块级散落状态全部收拢为本类私有字段，
  *   对外 API 由 cache/composition/verthys-flush.ts 绑定导出（签名与旧版逐一对应）。
  *
- * ★ 本实现根治的九项缺陷（逐条对应）：
+ * 本实现根治的九项缺陷（逐条对应）：
  *   1. globalOpVersion 声明未参与校验、纯 flush 也递增 → 整体移除
  *      （时序隔离由「快照校验 + 队列代际」承担，杜绝误弃合法删除）
  *   2. cacheTimersCancelled 布尔标志竞态窗口 → trackedSetTimeout 捕获
@@ -23,7 +23,7 @@
  *   8. scheduleBackgroundFlush 缺乏节流 → 已有 flush 待执行时直接返回
  *   9. 状态变量散落 → 全部收拢为本类私有状态，可注入、可测试
  *
- * ★ 评审修复：
+ * 评审修复：
  *   删除失败时 pendingDeletionIds 未清理（严重缺陷）→ deleteAndPersist /
  *   deleteAndPersistBatch 的删除执行统一容错：返回 false 或抛出异常
  *   （verthysDeleteRecords/verthysDeleteRecord 会抛 VERTHYS_WRITE_BLOCKED 等）
@@ -117,7 +117,7 @@ export class VerthysFlushService {
   /**
    * 待删除 ID 过滤集合（根治磁盘回填复活）。
    *
-   * ★ 共享单一权威源：verthys-flush.ts 绑定层将本集合注入 VerthysCacheDomain，
+   * 共享单一权威源：verthys-flush.ts 绑定层将本集合注入 VerthysCacheDomain，
    *   扫描/读取路径据此过滤，磁盘存在也不写入前端缓存，直到 flush 成功后清除。
    * 生命周期：
    *   - flush 成功后仅移除已提交删除的 ID（committedDeletionIds）
@@ -156,7 +156,7 @@ export class VerthysFlushService {
   /**
    * 受追踪的 setTimeout。
    *
-   * ★ 回调执行时校验「注册时的定时器代际」而非共享布尔。
+   * 回调执行时校验「注册时的定时器代际」而非共享布尔。
    *   旧实现的竞态窗口：clearAllCacheTimers 置 cancelled=true 后，新合法操作
    *   立即重置为 false，此时已在任务队列中尚未执行的旧回调会意外执行。
    *   代际 token 在注册瞬间捕获，回调触发时 token !== this.generation 即丢弃，
@@ -186,7 +186,7 @@ export class VerthysFlushService {
    * 递增代际使所有已注册回调失效；清空全部 pending 定时器，
    * 杜绝后台残留任务篡改缓存（如超时回调在 worker 销毁后仍触发 IPC）。
    *
-   * ★ 同步更新 pendingFlushWorkRef，
+   * 同步更新 pendingFlushWorkRef，
    *   清空防抖后 UI「保存中」指示器不再显示错误状态。
    */
   clearAllCacheTimers(): void {
@@ -289,12 +289,12 @@ export class VerthysFlushService {
   /**
    * 删除记录并持久化（防抖合并 flush）。
    *
-   * ★ ID 复用防护：可选传入 recordId，入队时记录该 ID 的
+   * ID 复用防护：可选传入 recordId，入队时记录该 ID 的
    *   name+type+dataB64 快照。执行 delete 前校验缓存中该 ID 的记录是否与
    *   快照一致，若不一致（verthys 后端复用 ID 分配给新记录），丢弃旧删除，
    *   防止"旧删除覆盖后续新增/修改的同 ID 记录"。
    *
-   * ★ 校验语义（与现网删除调用链时序严格对齐）：
+   * 校验语义（与现网删除调用链时序严格对齐）：
    *   UI 删除流程（AccountVerthys.vue 等）在调用 deleteAndPersist 之前已执行
    *   invalidateScannedRecord(rid)，故入队时快照可能为 null（无校验依据，
    *   直接执行）；队列执行时 current 为 null 同样可能（该删除流程自身移除了
@@ -335,7 +335,7 @@ export class VerthysFlushService {
       if (gen !== this.queueGeneration) return true;
       if (recordId !== undefined) {
         const current = this.getSnapshot(recordId);
-        // ★ ID 复用校验：仅当执行时缓存中同 ID 记录存在且元数据与快照不一致
+        // ID 复用校验：仅当执行时缓存中同 ID 记录存在且元数据与快照不一致
         //   才判定为复用（语义与方法头注释一致）
         if (current !== null && snapshotName !== undefined) {
           if (
@@ -349,7 +349,7 @@ export class VerthysFlushService {
           }
         }
       }
-      // ★ 评审修复：删除执行统一容错——返回 false 或抛出异常均视为
+      // 评审修复：删除执行统一容错——返回 false 或抛出异常均视为
       //   "删除未发生"，立即解除该 ID 的过滤屏蔽（避免记录仍在磁盘却被
       //   pendingDeletionIds 永久屏蔽 → 界面隐形丢失）；异常路径解除后
       //   重新抛出，保持调用方现有异常契约（UI catch 提示用户）
@@ -402,7 +402,7 @@ export class VerthysFlushService {
    * verthys 事务内一次性从索引区移除所有对应条目，只做一次重加密和一次全局
    * HMAC 更新。无论删除多少张照片，磁盘写入量恒定，仅与索引区大小相关。
    *
-   * ★ 入队时逐 ID 捕获快照，执行时逐 ID 校验——
+   * 入队时逐 ID 捕获快照，执行时逐 ID 校验——
    *   「入队时有快照 && 执行时缓存中存在同 ID 记录 && 元数据不一致」的 ID
    *   判定为已被复用，从删除列表中剔除（并移出待删过滤集合），仅对
    *   未被复用的 ID 执行单次批量删除 IPC。校验语义与 deleteAndPersist 一致。
@@ -434,7 +434,7 @@ export class VerthysFlushService {
       for (const id of idsCopy) {
         const oldSnap = snapshots.get(id);
         const current = this.getSnapshot(id);
-        // ★ 逐 ID 快照校验（语义同 deleteAndPersist：仅 current 存在且
+        // 逐 ID 快照校验（语义同 deleteAndPersist：仅 current 存在且
         //   入队快照存在时不一致才判定复用）
         if (oldSnap && current) {
           if (
@@ -450,7 +450,7 @@ export class VerthysFlushService {
         validIds.push(id);
       }
       if (validIds.length === 0) return true;
-      // ★ 评审修复：批量删除执行统一容错——返回 false 或抛出异常均视为
+      // 评审修复：批量删除执行统一容错——返回 false 或抛出异常均视为
       //   "删除未发生"，立即解除全部 attempted IDs（validIds，已剔除复用
       //   跳过项，其标记已单独移除）的过滤屏蔽；异常路径解除后重新抛出，
       //   保持调用方现有异常契约
@@ -596,7 +596,7 @@ export class VerthysFlushService {
    *
    * 用于应用退出、lockAll、密码变更等必须同步落盘的场景。
    *
-   * ★ 超时后调用 handleFlushTimeout 重置队列——
+   * 超时后调用 handleFlushTimeout 重置队列——
    *   旧实现超时后 flushChain 可能仍卡住，后续操作追加到未完成的队列上
    *   导致永久阻塞；重置后新操作立即可入队，持久化能力恢复。
    *
@@ -636,7 +636,7 @@ export class VerthysFlushService {
    * 等待所有 pending 操作完成（应用退出前调用，保证数据落盘）。
    * 取消防抖定时器并立即入队 flush，确保待删除记录全部落盘后再 lockAll。
    *
-   * ★ 22s 超时兜底流程：
+   * 22s 超时兜底流程：
    *   1. handleFlushTimeout 重置队列 + 执行一次无重试紧急原子 flush
    *   2. 标记缓存脏数据（cacheDirty=true），导航守卫弹窗提示用户
    *   3. 保留未提交的 pendingDeletionIds（防止磁盘回填旧数据，直到新会话初始化）
@@ -689,7 +689,7 @@ export class VerthysFlushService {
    * 紧急无重试原子 flush（超时兜底）。
    * 不走 doFlush 重试逻辑，单次 verthysFlush 尽可能写入磁盘。
    *
-   * ★ 仅在 verthysFlush 返回 true（磁盘已实际写入）时
+   * 仅在 verthysFlush 返回 true（磁盘已实际写入）时
    *   才从 pendingDeletionIds 移除已提交删除的 ID；返回 false 或抛异常时
    *   保留全部删除标记，杜绝「队列中仍有未执行删除却提前解除过滤保护 →
    *   磁盘旧数据回填复活」。
@@ -724,7 +724,7 @@ export class VerthysFlushService {
    * 切断前一会话残留的 pending doFlush 链，避免在新会话中触发对已销毁
    * worker 的 IPC 调用。
    *
-   * ★ queueGeneration++ 使旧任务全部失效——旧任务完成时
+   * queueGeneration++ 使旧任务全部失效——旧任务完成时
    *   因代际不匹配不再递减计数器（负数缺陷根治）；旧任务遗留的
    *   pendingDeletionIds 一并清空（旧任务已全部失效，"删除屏蔽"随之解除）。
    *
@@ -750,7 +750,7 @@ export class VerthysFlushService {
    *
    * 立即入队 flush，但不等待完成；flush 在后台异步执行，导航切换立即返回。
    *
-   * ★ 节流保护——已有 flush 待执行（pendingFlushCount>0
+   * 节流保护——已有 flush 待执行（pendingFlushCount>0
    *   或防抖窗口待触发）时直接返回，杜绝频繁调用导致 flush 任务重复入队堆积。
    */
   scheduleBackgroundFlush(): void {

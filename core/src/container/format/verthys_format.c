@@ -112,6 +112,10 @@ int vfmt_write(const uint8_t salt[VERTHYS_SALT_BYTES],
     /* 索引明文大小 = 2(计数) + sum(条目) */
     size_t idx_pt_fixed = 2;
     for (uint16_t i = 0; i < record_count; i++) {
+        if (records[i].name_len > VERTHYS_FMT_NAME_MAX_BYTES) goto fail;
+        /* 数据块长字段为 u32：写侧拒绝不可无损存放的 data_size（截断
+         * 会产出块长与密文实际长度不符的损坏帧，读回即失败） */
+        if (records[i].data_size > UINT32_MAX) goto fail;
         idx_pt_fixed += INDEX_ENTRY_FIXED_BYTES + records[i].name_len;
     }
     size_t idx_pt_padded = align_up(idx_pt_fixed, VERTHYS_FMT_BLOCK_ALIGN);
@@ -336,6 +340,9 @@ int vfmt_write_streaming(const uint8_t salt[VERTHYS_SALT_BYTES],
     /* 索引明文大小 = 2(计数) + sum(条目) */
     size_t idx_pt_fixed = 2;
     for (uint16_t i = 0; i < record_count; i++) {
+        if (records[i].name_len > VERTHYS_FMT_NAME_MAX_BYTES) goto stream_fail;
+        /* 数据块长字段为 u32：写侧拒绝超界 data_size（同一次性写路径） */
+        if (records[i].data_size > UINT32_MAX) goto stream_fail;
         idx_pt_fixed += INDEX_ENTRY_FIXED_BYTES + records[i].name_len;
     }
     size_t idx_pt_padded = align_up(idx_pt_fixed, VERTHYS_FMT_BLOCK_ALIGN);
@@ -553,7 +560,7 @@ int vfmt_write_streaming(const uint8_t salt[VERTHYS_SALT_BYTES],
         verthys_secure_zero(ct, ct_len);
         free(ct);
 
-        /* ★ 分段写入文件并更新增量 HMAC（16KB 缓冲区由 fwrite 内部管理） */
+        /* 分段写入文件并更新增量 HMAC（16KB 缓冲区由 fwrite 内部管理） */
         if (stream_write_and_hmac(f, &hmac_state, blk, blk_total) != 0) {
             verthys_secure_zero(blk, blk_total);
             free(blk);
@@ -753,6 +760,7 @@ int vfmt_decrypt_records(const uint8_t *blob, size_t size,
         /* 边界检查 */
         if (off + 2 > idx_pt_len) goto parse_fail;
         uint16_t name_len = get_u16le(idx_pt + off); off += 2;
+        if (name_len > VERTHYS_FMT_NAME_MAX_BYTES) goto parse_fail;
         if (off + name_len + 1 + 8 + 8 + VERTHYS_AEAD_NONCE_BYTES > idx_pt_len) goto parse_fail;
 
         records[i].name_len = name_len;

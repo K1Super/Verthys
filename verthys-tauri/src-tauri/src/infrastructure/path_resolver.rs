@@ -58,7 +58,7 @@ pub fn verify_dll_integrity(dll_path: &str) -> Result<(), String> {
     let actual = format!("{:x}", hasher.finalize());
 
     if actual != expected {
-        // ★ 企业级根治：dev 环境哈希不匹配强制阻断（根治 worker 0xC0000005 崩溃）
+        // 修复：dev 环境哈希不匹配强制阻断（根治 worker 0xC0000005 崩溃）
         //
         // 原缺陷：哈希不匹配仅 warn 不阻断（return Ok），导致过期 DLL 被加载。
         //   典型场景：path_resolver 因路径深度错误回退到 target/debug/verthys.dll
@@ -156,7 +156,7 @@ pub fn check_dll_dependencies(_dll_path: &str) -> Result<(), String> {
 }
 
 /* ------------------------------------------------------------------ *
- * PE 架构校验（企业级前置门禁）                                       *
+ * PE 架构校验（前置门禁）                                       *
  *                                                                    *
  * 背景：                                                             *
  *   verthys-worker.exe 若为 32-bit（x86）而 verthys.dll 为 64-bit，   *
@@ -250,7 +250,7 @@ pub fn detect_pe_architecture(path: &str) -> Result<PeArch, String> {
 
 /// 校验 worker exe 与 verthys.dll 架构一致且为 x86_64
 ///
-/// 企业级安全前置门禁：在 spawn 子进程之前，确认 worker 二进制与
+/// 安全前置门禁：在 spawn 子进程之前，确认 worker 二进制与
 /// verthys.dll 架构匹配（均为 x86_64），避免 32-bit worker 加载
 /// 64-bit DLL 导致的静默加载器失败。
 ///
@@ -296,7 +296,7 @@ pub fn verify_binary_architecture(worker_exe: &str, dll_path: &str) -> Result<()
 }
 
 /* ------------------------------------------------------------------ *
- * PE 导入表解析（企业级依赖预检）                                     *
+ * PE 导入表解析（依赖预检）                                     *
  *                                                                    *
  * 背景：                                                             *
  *   check_dll_dependencies 仅校验 VC++ 运行库是否存在于 System32，   *
@@ -546,7 +546,7 @@ fn find_dll_in_search_paths(dll_name: &str, exe_dir: &std::path::Path) -> Option
     None
 }
 
-/// 校验 worker exe 与 verthys.dll 的全部导入依赖可访问（企业级预检）
+/// 校验 worker exe 与 verthys.dll 的全部导入依赖可访问（预检）
 ///
 /// 在 spawn 子进程之前，解析两个 PE 文件的导入表，对每个被导入的
 /// DLL 按 Windows 加载器搜索顺序确认可访问。缺失任一依赖将导致
@@ -723,7 +723,7 @@ pub fn resolve_worker_path(app: &tauri::AppHandle) -> Result<String, String> {
 ///
 /// 路径匹配成功后将通过 `sanitize_path` 脱敏后记录日志。
 ///
-/// ★ 企业级根治：dev-env 相对路径深度修正（根治 worker 0xC0000005 崩溃）
+/// 修复：dev-env 相对路径深度修正（根治 worker 0xC0000005 崩溃）
 ///
 /// 原缺陷：原路径 `../../../build/core/Release/verthys.dll` 仅上溯 3 级，
 ///   从 `verthys-tauri/src-tauri/target/{debug,release}` 出发落到
@@ -751,7 +751,7 @@ pub fn resolve_dll_path(app: &tauri::AppHandle) -> Result<String, String> {
                 || exe_dir_str.ends_with("\\target\\release");
 
             if is_dev {
-                // ★ 企业级根治：4 级上溯抵达仓库根 Verthys/build/core/Release/
+                // 修复：4 级上溯抵达仓库根 Verthys/build/core/Release/
                 //   exe_dir = Verthys/verthys-tauri/src-tauri/target/{debug,release}
                 //   ../../../../ → Verthys/  → build/core/Release/verthys.dll ✓
                 //   （原 ../../../ 仅到 verthys-tauri/，build/ 不在此层 → 回退到过期 DLL）

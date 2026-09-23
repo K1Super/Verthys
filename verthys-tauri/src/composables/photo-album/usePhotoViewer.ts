@@ -88,7 +88,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
       return;
     }
 
-    // ★ 企业级根治：meta 缺失时按需解密回退
+    // 修复：meta 缺失时按需解密回退
     //    场景：重启后 loadPhotos 创建占位项（loaded=false, meta=undefined），
     //    若用户在 watch(visiblePhotos)→ensureVisiblePhotosDecrypted 完成前点击照片，
     //    ph.meta 为 undefined。此处直接调用 decryptPhotoMeta 按需解密，
@@ -333,7 +333,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
   /**
    * 组件卸载时清理：释放查看器 Blob URL（防止内存泄漏）
    *
-   * ★ 入口文件 onUnmounted 调用，将资源清理收敛至查看器层（单一职责）。
+   * 入口文件 onUnmounted 调用，将资源清理收敛至查看器层（单一职责）。
    *   viewerBlobUrl 为非响应式 let（闭包变量），通过 cleanup 方法访问最新值。
    */
   const cleanup = () => {

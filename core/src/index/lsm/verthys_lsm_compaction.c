@@ -69,6 +69,23 @@ typedef struct CompactionInputs {
     uint64_t total_bytes;
 } CompactionInputs;
 
+/*
+ * Manifest 影子事务（compact 提交边界）：
+ *   - tables：数组浅拷贝（惰性缓存指针与内存 Manifest 共享）；
+ *   - 备份必须在摘除输入表 / 释放其缓存之前——此后 abort 恢复的
+ *     数组仍持有未释放的输入表，其缓存可继续服务 get/scan；
+ *   - removed_idx/removed_n：被摘除表索引，commit（save 成功后）
+ *     依此释放在备份副本上的惰性缓存；
+ *   - abort 只恢复数组与元数据，绝不释放输入表资源。
+ */
+typedef struct ManifestShadowTxn {
+    VerthysLsmTableMeta tables[VERTHYS_LSM_MAX_TABLES];
+    size_t count;
+    uint64_t txid, next_seq, next_data_offset;
+    size_t removed_idx[VERTHYS_LSM_MAX_TABLES];
+    size_t removed_n;
+} ManifestShadowTxn;
+
 static void inputs_add(CompactionInputs *in, const VerthysLsmManifest *m, size_t i)
 {
     const VerthysLsmTableMeta *t = &m->tables[i];
@@ -314,10 +331,8 @@ VerthysResult verthys_lsm_compact_locked(VerthysLsm *lsm)
     VerthysLsmTableMeta meta;
     int wrote_table = 0;
     int have_output = 0;
-    /* Manifest 中间态备份（提交失败回滚；输入缓存已释放 → 拷贝安全） */
-    VerthysLsmTableMeta backup_tables[VERTHYS_LSM_MAX_TABLES];
-    size_t backup_count;
-    uint64_t backup_txid, backup_next_seq, backup_next_data_offset;
+    /* Manifest 影子事务（见结构注释：先备份后摘除，save 失败可完整回滚） */
+    ManifestShadowTxn txn;
     uint64_t data_limit;
 
     if (lsm == NULL) return VERTHYS_ERR_INVALID;
@@ -401,19 +416,19 @@ VerthysResult verthys_lsm_compact_locked(VerthysLsm *lsm)
         wrote_table = 1;
     }
 
-    /* ---- 5. Manifest 内存态提交（中间态备份）---- */
-    for (size_t i = 0; i < in.n; i++) {
-        verthys_lsm_sstable_meta_release(&lsm->manifest.tables[in.idx[i]]);
-    }
+    /* ---- 5. Manifest 影子事务：先备份中间态（输入表缓存未释放、
+     * 拷贝共享指针仍有效）再摘除输入表。 ---- */
+    txn.count = lsm->manifest.count;
+    memcpy(txn.tables, lsm->manifest.tables,
+           txn.count * sizeof(txn.tables[0]));
+    txn.txid = lsm->manifest.txid;
+    txn.next_seq = lsm->manifest.next_seq;
+    txn.next_data_offset = lsm->manifest.next_data_offset;
+    memcpy(txn.removed_idx, in.idx, in.n * sizeof(in.idx[0]));
+    txn.removed_n = in.n;
+
+    /* 内存态应用：只动数组与元数据，不触碰被摘除表资源 */
     manifest_remove_inputs(&lsm->manifest, &in);
-
-    memcpy(backup_tables, lsm->manifest.tables,
-           lsm->manifest.count * sizeof(backup_tables[0]));
-    backup_count = lsm->manifest.count;
-    backup_txid = lsm->manifest.txid;
-    backup_next_seq = lsm->manifest.next_seq;
-    backup_next_data_offset = lsm->manifest.next_data_offset;
-
     lsm->manifest.txid = txid;
     if (wrote_table) {
         /* 摘除 ≥1 表 → 插入必有余量（容量不可能失败） */
@@ -430,6 +445,12 @@ VerthysResult verthys_lsm_compact_locked(VerthysLsm *lsm)
                                 &lsm->manifest, lsm->part);
     if (r != VERTHYS_OK) goto fail_rollback;
 
+    /* ---- 7. 提交：盘面已引用新表集合，被摘除输入表的
+     * 惰性缓存至此使命完成，统一释放（经备份副本指针）。 ---- */
+    for (size_t i = 0; i < txn.removed_n; i++) {
+        verthys_lsm_sstable_meta_release(&txn.tables[txn.removed_idx[i]]);
+    }
+
     /* ---- 收尾：关闭迭代器 ---- */
     for (size_t i = 0; i < opened; i++) {
         verthys_lsm_sstable_iter_close(srcs[i].si);
@@ -438,13 +459,15 @@ VerthysResult verthys_lsm_compact_locked(VerthysLsm *lsm)
     return VERTHYS_OK;
 
 fail_rollback:
-    /* 恢复中间态：盘面 Manifest 仍引用旧表 → 数据零丢失，新表沦为脏区 */
-    memcpy(lsm->manifest.tables, backup_tables,
-           backup_count * sizeof(backup_tables[0]));
-    lsm->manifest.count = backup_count;
-    lsm->manifest.txid = backup_txid;
-    lsm->manifest.next_seq = backup_next_seq;
-    lsm->manifest.next_data_offset = backup_next_data_offset;
+    /* abort：恢复备份。输入表回归数组且其惰性缓存未被释放（save 前
+     * 零释放）——当前进程 get/scan 立即可达；盘面 Manifest 仍引用
+     * 旧表集合，新表数据区由游标回退覆写回收（沦为脏区）。 */
+    memcpy(lsm->manifest.tables, txn.tables,
+           txn.count * sizeof(lsm->manifest.tables[0]));
+    lsm->manifest.count = txn.count;
+    lsm->manifest.txid = txn.txid;
+    lsm->manifest.next_seq = txn.next_seq;
+    lsm->manifest.next_data_offset = txn.next_data_offset;
 
 fail_iter:
     for (size_t i = 0; i < opened; i++) {

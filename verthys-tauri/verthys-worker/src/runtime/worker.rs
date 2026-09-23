@@ -13,7 +13,7 @@
 use libloading::{Library, Symbol};
 use std::os::raw::c_char;
 
-use crate::log::init_diag;
+use crate::log::{diag, init_diag};
 use crate::runtime::ffi_types::*;
 use crate::runtime::format_os_error;
 #[cfg(windows)]
@@ -122,6 +122,36 @@ impl Drop for SummaryBatchGuard {
  * Worker：持有 DLL + 句柄                                             *
  * ------------------------------------------------------------------ */
 
+/// 批量枚举单批条数硬上限
+///
+/// 游标批量扫描（全量/摘要）按 max_count 预分配记录数组与 lid 数组，
+/// 前端可控的 id 字段直达此处；无上限时超大 id 直接触发巨大分配。
+/// 上限值按单批内存预算选取（5000 × 全量记录结构 ≈ 数百 KB 级），
+/// 与本进程单请求内存宽度匹配。调用点须始终经 clamp_enum_count，
+/// 超限请求被静默截断（截断语义对游标无害：后续批次继续拉取）。
+pub(crate) const MAX_ENUM_COUNT: u64 = 5000;
+
+/// 将外部可控的批量条数限制到硬上限以内
+pub(crate) fn clamp_enum_count(v: u64) -> u64 {
+    v.min(MAX_ENUM_COUNT)
+}
+
+/// 统一 FFI 调用收口：所有对 C 导出函数的调用必须经此函数
+///
+/// Rust panic 展开穿过 extern "C" 边界属于未定义行为。
+/// catch_unwind 捕获 panic 后：置位进程级标记（主循环检测后安全退出）
+/// 并返回 Err，调用方转换为 0xFFFFFFFF 失败码——panic 绝不展开进 C。
+pub(crate) fn ffi_call<R, F: FnOnce() -> R>(invoke: F) -> Result<R, ()> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(invoke)) {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            crate::log::mark_panic_flag();
+            init_diag!("[worker] FFI 调用捕获到 panic（已阻断跨边界展开，返回失败码）");
+            Err(())
+        }
+    }
+}
+
 pub(crate) struct Worker {
     _lib: Library,
     handle: VerthysHandle,
@@ -186,7 +216,7 @@ impl Worker {
                     init_diag!("[worker] 获取 Verthys_NotifySandboxAttrs 符号失败: {}", e);
                     format!("get Verthys_NotifySandboxAttrs: {}", e)
                 })?;
-            let notify_r = notify_sandbox(sandbox_attrs);
+            let notify_r = ffi_call(|| { notify_sandbox(sandbox_attrs) }).unwrap_or(0xFFFFFFFF);
             if notify_r != VERTHYS_OK {
                 init_diag!("[worker] Verthys_NotifySandboxAttrs 失败: code={:08X}", notify_r);
                 return Err(format!("Verthys_NotifySandboxAttrs failed: {:08X}", notify_r));
@@ -199,13 +229,13 @@ impl Worker {
                     format!("get Verthys_Init: {}", e)
                 })?;
             let mut handle: VerthysHandle = std::ptr::null_mut();
-            init_diag!("[worker] 调用 Verthys_Init（含 anti_debug_check + 六层防御闭环初始化）");
-            let r = init(&mut handle);
+            init_diag!("[worker] 调用 Verthys_Init（含 anti_debug_check + 六层动态防护初始化）");
+            let r = ffi_call(|| { init(&mut handle) }).unwrap_or(0xFFFFFFFF);
             if r != VERTHYS_OK || handle.is_null() {
                 init_diag!("[worker] Verthys_Init 失败: code={:08X}, handle_null={}", r, handle.is_null());
                 return Err(format!("Verthys_Init failed: {:08X}", r));
             }
-            init_diag!("[worker] Verthys_Init 成功（六层防御闭环已就绪），进入主循环");
+            init_diag!("[worker] Verthys_Init 成功（六层动态防护已就绪），进入主循环");
             Ok(Worker { _lib: lib, handle, scan_cursor: None, #[cfg(windows)] scan_shm: None })
         }
     }
@@ -214,7 +244,7 @@ impl Worker {
         unsafe {
             let lib = &self._lib;
 
-            /* ★ 在 Verthys_Unlock 之前注册进度回调
+            /* 在 Verthys_Unlock 之前注册进度回调
              *
              * unlock_progress_cb 在 C DLL 各阶段被同步调用，向 stdout 写入
              * {"ok":true,"op":"unlock_progress",...} 进度行。父进程
@@ -225,11 +255,13 @@ impl Worker {
             if let Ok(register_fn) = lib.get::<VerthysRegisterUnlockProgressFn>(
                 b"Verthys_RegisterUnlockProgressCallback\0",
             ) {
-                register_fn(
-                    self.handle,
-                    Some(unlock_progress_cb),
-                    std::ptr::null_mut(),
-                );
+                let _ = ffi_call(|| {
+                    register_fn(
+                        self.handle,
+                        Some(unlock_progress_cb),
+                        std::ptr::null_mut(),
+                    )
+                });
             }
 
             let func: Symbol<VerthysUnlockFn> = match lib.get(b"Verthys_Unlock") {
@@ -241,14 +273,17 @@ impl Worker {
                 Err(_) => return 0xFFFFFFFF,
             };
             let pw_bytes = password.as_bytes();
-            /* ★ 透传 flags 参数（预热状态位域）给 C 层 Verthys_Unlock */
-            func(
-                self.handle,
-                path_c.as_ptr(),
-                pw_bytes.as_ptr() as *const c_char,
-                pw_bytes.len(),
-                flags,
-            )
+            /* 透传 flags 参数（预热状态位域）给 C 层 Verthys_Unlock */
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    path_c.as_ptr(),
+                    pw_bytes.as_ptr() as *const c_char,
+                    pw_bytes.len(),
+                    flags,
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
         }
     }
 
@@ -262,15 +297,25 @@ impl Worker {
                     Ok(f) => f,
                     Err(_) => return 0xFFFFFFFF,
                 };
-            let path_c = std::ffi::CString::new(path).unwrap();
+            let path_c = match std::ffi::CString::new(path) {
+                Ok(c) => c,
+                Err(_) => {
+                    // 嵌入 NUL 的路径：日志只记字节长度，不回显原始内容（防日志注入）
+                    diag!("[worker] create_with_preset: 路径含内嵌 NUL，length={}", path.len());
+                    return 0xFFFFFFFF;
+                }
+            };
             let pw_bytes = password.as_bytes();
-            func(
-                self.handle,
-                path_c.as_ptr(),
-                pw_bytes.as_ptr() as *const c_char,
-                pw_bytes.len(),
-                preset,
-            )
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    path_c.as_ptr(),
+                    pw_bytes.as_ptr() as *const c_char,
+                    pw_bytes.len(),
+                    preset,
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
         }
     }
 
@@ -281,11 +326,27 @@ impl Worker {
                 Ok(f) => f,
                 Err(_) => return 0xFFFFFFFF,
             };
-            func(self.handle)
+            ffi_call(|| { func(self.handle) }).unwrap_or(0xFFFFFFFF)
         }
     }
 
-    /// ★ 企业级根治：调用 Verthys_Flush 显式刷盘
+    /// 运行时切换安全预设档位（0=BALANCED / 1=SECURE / 2=PERFORMANCE）
+    ///
+    /// 双缓冲原子发布，切换立即生效；重复切到当前档为幂等 no-op。
+    /// 失败回退：DLL 导出缺失（旧版核心）返回 0xFFFFFFFF，由上层可见报告。
+    pub(crate) fn call_switch_security_preset(&self, preset: u32) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysSwitchSecurityPresetFn> =
+                match lib.get(b"Verthys_SwitchSecurityPreset") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            ffi_call(|| { func(self.handle, preset) }).unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    /// 修复：调用 Verthys_Flush 显式刷盘
     ///
     /// 替代旧 verthys_flush 的 lock+unlock 模式（有 worker 卡在 LOCKED 状态的风险）。
     /// Verthys_Flush 语义（V3-only）：
@@ -300,7 +361,7 @@ impl Worker {
                 Ok(f) => f,
                 Err(_) => return 0xFFFFFFFF,
             };
-            func(self.handle)
+            ffi_call(|| { func(self.handle) }).unwrap_or(0xFFFFFFFF)
         }
     }
 
@@ -311,7 +372,7 @@ impl Worker {
                 Ok(f) => f,
                 Err(_) => return 0xFFFFFFFF,
             };
-            func(self.handle)
+            ffi_call(|| { func(self.handle) }).unwrap_or(0xFFFFFFFF)
         }
     }
 
@@ -322,7 +383,14 @@ impl Worker {
                 Ok(f) => f,
                 Err(_) => return Err(0xFFFFFFFF),
             };
-            let name_c = std::ffi::CString::new(name).unwrap();
+            let name_c = match std::ffi::CString::new(name) {
+                Ok(c) => c,
+                Err(_) => {
+                    // 嵌入 NUL 的记录名：日志只记字节长度，不回显原始内容（防日志注入）
+                    diag!("[worker] add_record: 名称含内嵌 NUL，length={}", name.len());
+                    return Err(0xFFFFFFFF);
+                }
+            };
             let rec = VerthysRecordC {
                 rtype,
                 name: name_c.as_ptr(),
@@ -331,7 +399,7 @@ impl Worker {
                 data_len: data.len(),
             };
             let mut id: u64 = 0;
-            let r = func(self.handle, &rec, &mut id);
+            let r = ffi_call(|| { func(self.handle, &rec, &mut id) }).unwrap_or(0xFFFFFFFF);
             if r == VERTHYS_OK {
                 Ok(id)
             } else {
@@ -354,7 +422,7 @@ impl Worker {
                 data: std::ptr::null(),
                 data_len: 0,
             };
-            let r = func(self.handle, id, &mut rec);
+            let r = ffi_call(|| { func(self.handle, id, &mut rec) }).unwrap_or(0xFFFFFFFF);
             if r != VERTHYS_OK {
                 return Err(r);
             }
@@ -399,7 +467,8 @@ impl Worker {
                 Err(_) => { shm.destroy(); return Err(0xFFFFFFFF); }
             };
             let mut cursor: VerthysScanCursorPtr = std::ptr::null_mut();
-            let r = func(self.handle, start_lid, batch_size, &mut cursor);
+            // 传 C 前同样 clamp：batch_size 进入游标状态，保持与预分配上限一致
+            let r = ffi_call(|| { func(self.handle, start_lid, clamp_enum_count(batch_size), &mut cursor) }).unwrap_or(0xFFFFFFFF);
             if r != VERTHYS_OK {
                 shm.destroy();
                 return Err(r);
@@ -449,19 +518,20 @@ impl Worker {
                 Err(_) => return Err(0xFFFFFFFF),
             };
 
-            let mc = max_count as usize;
+            // 上限截断后以同一值驱动预分配与 FFI：两者尺寸必须一致，
+            // C 端按传入条数写入 out_count 条，缓冲过小即溢出
+            let mc = clamp_enum_count(max_count) as usize;
             let mut records: Vec<VerthysRecordC> = (0..mc).map(|_| VerthysRecordC {
                 rtype: 0, name: std::ptr::null(), name_len: 0,
                 data: std::ptr::null(), data_len: 0,
             }).collect();
             let mut lids: Vec<u64> = vec![0u64; mc];
             let mut out_count: u64 = 0;
-
-            /* ★ 企业级根治：传递 out_failed_lids=NULL, out_failed_count=NULL
+            /* 根治：传递 out_failed_lids=NULL, out_failed_count=NULL
              *   与 C 端 Verthys_ScanFetch 7 参数签名严格对齐（verthys.h:574-580）
              *   原缺陷：FFI 仅传 5 参数，C 从栈读取垃圾值作为 out_failed_count，
              *   执行 *out_failed_count=0 向垃圾地址写入 → 0xC0000005 崩溃 */
-            let r = func(cursor, records.as_mut_ptr(), lids.as_mut_ptr(), max_count, &mut out_count, std::ptr::null_mut(), std::ptr::null_mut());
+            let r = ffi_call(|| { func(cursor, records.as_mut_ptr(), lids.as_mut_ptr(), mc as u64, &mut out_count, std::ptr::null_mut(), std::ptr::null_mut()) }).unwrap_or(0xFFFFFFFF);
             if r != VERTHYS_OK {
                 // 紧急熔断吊销：ScanFetch 返回 LOCKED 表示 emergency_is_triggered
                 // 或游标已被标记 invalidated，立即销毁 SHM 缓冲区 + 关闭游标
@@ -486,7 +556,7 @@ impl Worker {
                 result.push((lids[i], rec.rtype, name, data));
 
                 // 释放 C 深拷贝（含安全擦除）
-                free_fn(&mut records[i] as *mut VerthysRecordC);
+                let _ = ffi_call(|| { free_fn(&mut records[i] as *mut VerthysRecordC) }).unwrap_or(0xFFFFFFFF);
             }
 
             let exhausted = out_count == 0;
@@ -515,7 +585,7 @@ impl Worker {
                 let lib = &self._lib;
                 if let Ok(func) = lib.get(b"Verthys_ScanClose") {
                     let func: Symbol<VerthysScanCloseFn> = func;
-                    func(cursor);
+                    let _ = ffi_call(|| { func(cursor) });
                 }
             }
         }
@@ -539,7 +609,7 @@ impl Worker {
                 Ok(f) => f,
                 Err(_) => return 0xFFFFFFFF,
             };
-            func(cursor)
+            ffi_call(|| { func(cursor) }).unwrap_or(0xFFFFFFFF)
         }
     }
 
@@ -585,7 +655,8 @@ impl Worker {
                 Err(_) => { shm.destroy(); return Err(0xFFFFFFFF); }
             };
             let mut cursor: VerthysScanCursorPtr = std::ptr::null_mut();
-            let r = func(self.handle, start_lid, batch_size, &mut cursor);
+            // 传 C 前同样 clamp：与全量扫描同纪律
+            let r = ffi_call(|| { func(self.handle, start_lid, clamp_enum_count(batch_size), &mut cursor) }).unwrap_or(0xFFFFFFFF);
             if r != VERTHYS_OK {
                 shm.destroy();
                 return Err(r);
@@ -636,7 +707,8 @@ impl Worker {
                     Err(_) => return Err(0xFFFFFFFF),
                 };
 
-            let mc = max_count as usize;
+            // 上限截断后以同一值驱动预分配与 FFI（与全量扫描同纪律）
+            let mc = clamp_enum_count(max_count) as usize;
             let mut records: Vec<VerthysSummaryRecordC> = (0..mc).map(|_| VerthysSummaryRecordC {
                 lid: 0,
                 rtype: 0,
@@ -646,12 +718,12 @@ impl Worker {
                 physical_offset: 0,
                 merkle_leaf: [0u8; 32],
                 created_time: 0,
-                slot_state: 0,    /* ★ 企业级根治：与 C 端对齐 */
+                slot_state: 0,    /* 根治：与 C 端对齐 */
             }).collect();
             let mut lids: Vec<u64> = vec![0u64; mc];
             let mut out_count: u64 = 0;
 
-            let r = func(cursor, records.as_mut_ptr(), lids.as_mut_ptr(), max_count, &mut out_count);
+            let r = ffi_call(|| { func(cursor, records.as_mut_ptr(), lids.as_mut_ptr(), mc as u64, &mut out_count) }).unwrap_or(0xFFFFFFFF);
             if r != VERTHYS_OK {
                 // 紧急熔断吊销：ScanSummaryFetch 返回 LOCKED 表示 emergency_is_triggered
                 // 或游标已被标记 invalidated，立即销毁 SHM 缓冲区 + 关闭游标
@@ -682,7 +754,7 @@ impl Worker {
                 ));
 
                 // 释放 C 深拷贝（name 被安全擦除并释放，merkle_leaf 擦除）
-                free_fn(rec as *mut VerthysSummaryRecordC);
+                let _ = ffi_call(|| { free_fn(rec as *mut VerthysSummaryRecordC) }).unwrap_or(0xFFFFFFFF);
             }
 
             let exhausted = out_count == 0;
@@ -710,12 +782,13 @@ impl Worker {
                 Ok(f) => f,
                 Err(_) => return 0xFFFFFFFF,
             };
-            func(self.handle, id)
+            ffi_call(|| { func(self.handle, id) }).unwrap_or(0xFFFFFFFF)
         }
     }
 
     /// 批量删除记录（单次事务，合并为单次 flush）
-    /// v2 格式下 N 条删除仅触发一次 vtxn_commit（一次重加密 + 一次全局 HMAC 更新）
+    /// C 层在单事务内逐条删除，最后一次收口（一次 PREPARE → COMMIT → CONFIRM），
+    /// 磁盘写入量与条目数解耦；任一 ID 不存在则整体回滚为 NOTFOUND。
     pub(crate) fn call_delete_records(&self, ids: &[u64]) -> u32 {
         if ids.is_empty() {
             return 0; /* VERTHYS_OK */
@@ -726,11 +799,11 @@ impl Worker {
                 Ok(f) => f,
                 Err(_) => return 0xFFFFFFFF,
             };
-            func(self.handle, ids.as_ptr(), ids.len())
+            ffi_call(|| { func(self.handle, ids.as_ptr(), ids.len()) }).unwrap_or(0xFFFFFFFF)
         }
     }
 
-    /// ★ 获取已加载的轻量摘要记录数
+    /// 获取已加载的轻量摘要记录数
     /// 返回解锁时从 summary_index_off 加载的摘要记录数（0=无摘要索引）
     pub(crate) fn call_get_summary_count(&self) -> (u32, u64) {
         let mut count: u64 = 0;
@@ -740,12 +813,12 @@ impl Worker {
                 Ok(f) => f,
                 Err(_) => return (0xFFFFFFFF, 0),
             };
-            let rc = func(self.handle, &mut count as *mut u64);
+            let rc = ffi_call(|| { func(self.handle, &mut count as *mut u64) }).unwrap_or(0xFFFFFFFF);
             (rc, count)
         }
     }
 
-    /// ★ 企业级：轻量级记录类型存在性检查
+    /// ：轻量级记录类型存在性检查
     /// 仅遍历 B+ 树索引节点检查 type 字段，不读数据块，典型 < 100ms
     /// 返回 (rc, found)：rc=0 成功（found=0/1），rc!=0 失败
     pub(crate) fn call_has_record_by_type(&self, rtype: u8) -> (u32, bool) {
@@ -756,12 +829,12 @@ impl Worker {
                 Ok(f) => f,
                 Err(_) => return (0xFFFFFFFF, false),
             };
-            let rc = func(self.handle, rtype, &mut found as *mut u8);
+            let rc = ffi_call(|| { func(self.handle, rtype, &mut found as *mut u8) }).unwrap_or(0xFFFFFFFF);
             (rc, found != 0)
         }
     }
 
-    /// ★ 企业级根治：进程内查找指定类型的首条记录 lid
+    /// 进程内查找指定类型的首条记录 lid
     /// 返回 (rc, found, lid)：rc=0 成功（found=0/1），rc!=0 失败
     /// 与 call_has_record_by_type 的关键差异：
     ///   1. 同时返回 lid，省去二次 find_lid IPC 往返
@@ -776,7 +849,7 @@ impl Worker {
                     Ok(f) => f,
                     Err(_) => return (0xFFFFFFFF, false, 0),
                 };
-            let rc = func(self.handle, rtype, &mut found as *mut u8, &mut lid as *mut u64);
+            let rc = ffi_call(|| { func(self.handle, rtype, &mut found as *mut u8, &mut lid as *mut u64) }).unwrap_or(0xFFFFFFFF);
             (rc, found != 0, lid)
         }
     }
@@ -788,14 +861,24 @@ impl Worker {
                 Ok(f) => f,
                 Err(_) => return 0xFFFFFFFF,
             };
-            let path_c = std::ffi::CString::new(path).unwrap();
+            let path_c = match std::ffi::CString::new(path) {
+                Ok(c) => c,
+                Err(_) => {
+                    // 嵌入 NUL 的路径：日志只记字节长度，不回显原始内容（防日志注入）
+                    diag!("[worker] export: 路径含内嵌 NUL，length={}", path.len());
+                    return 0xFFFFFFFF;
+                }
+            };
             let pw_bytes = password.as_bytes();
-            func(
-                self.handle,
-                path_c.as_ptr(),
-                pw_bytes.as_ptr() as *const c_char,
-                pw_bytes.len(),
-            )
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    path_c.as_ptr(),
+                    pw_bytes.as_ptr() as *const c_char,
+                    pw_bytes.len(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
         }
     }
 
@@ -806,14 +889,24 @@ impl Worker {
                 Ok(f) => f,
                 Err(_) => return 0xFFFFFFFF,
             };
-            let path_c = std::ffi::CString::new(path).unwrap();
+            let path_c = match std::ffi::CString::new(path) {
+                Ok(c) => c,
+                Err(_) => {
+                    // 嵌入 NUL 的路径：日志只记字节长度，不回显原始内容（防日志注入）
+                    diag!("[worker] import: 路径含内嵌 NUL，length={}", path.len());
+                    return 0xFFFFFFFF;
+                }
+            };
             let pw_bytes = password.as_bytes();
-            func(
-                self.handle,
-                path_c.as_ptr(),
-                pw_bytes.as_ptr() as *const c_char,
-                pw_bytes.len(),
-            )
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    path_c.as_ptr(),
+                    pw_bytes.as_ptr() as *const c_char,
+                    pw_bytes.len(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
         }
     }
 
@@ -826,25 +919,28 @@ impl Worker {
             };
             let old_bytes = old_pw.as_bytes();
             let new_bytes = new_pw.as_bytes();
-            func(
-                self.handle,
-                old_bytes.as_ptr() as *const c_char,
-                old_bytes.len(),
-                new_bytes.as_ptr() as *const c_char,
-                new_bytes.len(),
-            )
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    old_bytes.as_ptr() as *const c_char,
+                    old_bytes.len(),
+                    new_bytes.as_ptr() as *const c_char,
+                    new_bytes.len(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
         }
     }
 
     /* ================================================================ *
-     * ★ 防御闭环 7 路径状态实时查询               *
+     * 动态防护 7 路径状态实时查询               *
      *                                                                *
      * FFI 调用 Verthys_GetSecurityStatus（RUNTIME 级实时复检，非 BOOT     *
      * 缓存快照）。防御状态为进程级事实：worker 启动即持有 handle，      *
      * 锁定态/未挂载态均可查询（verthys.h 行为契约）。                  *
      * ================================================================ */
 
-    /// 查询防御闭环状态。Err(错误码)：INVALID（参数异常）/ INTERNAL（复检管线异常）
+    /// 查询动态防护状态。Err(错误码)：INVALID（参数异常）/ INTERNAL（复检管线异常）
     pub(crate) fn call_security_status(&self) -> Result<SecurityStatusReport, u32> {
         /* C 契约：reserved 必须置零传递（zeroed 全量置零，满足契约） */
         let mut st: VerthysSecurityStatusC = unsafe { std::mem::zeroed() };
@@ -855,7 +951,7 @@ impl Worker {
                     Ok(f) => f,
                     Err(_) => return Err(0xFFFFFFFF),
                 };
-            let rc = func(self.handle, &mut st as *mut VerthysSecurityStatusC);
+            let rc = ffi_call(|| { func(self.handle, &mut st as *mut VerthysSecurityStatusC) }).unwrap_or(0xFFFFFFFF);
             if rc != VERTHYS_OK {
                 return Err(rc);
             }
@@ -892,6 +988,39 @@ impl Drop for Worker {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_enum_count_caps_huge_values() {
+        // 恶意超大 id（1e8）必须被截断到硬上限，防巨大分配
+        assert_eq!(clamp_enum_count(100_000_000), MAX_ENUM_COUNT);
+        assert_eq!(clamp_enum_count(MAX_ENUM_COUNT + 1), MAX_ENUM_COUNT);
+    }
+
+    #[test]
+    fn clamp_enum_count_preserves_small_values() {
+        assert_eq!(clamp_enum_count(0), 0);
+        assert_eq!(clamp_enum_count(1), 1);
+        assert_eq!(clamp_enum_count(500), 500);
+        assert_eq!(clamp_enum_count(MAX_ENUM_COUNT), MAX_ENUM_COUNT);
+    }
+
+    #[test]
+    fn ffi_call_captures_panic_and_returns_err() {
+        // 人为 panic：断言不向外传播，而是返回 Err + 置位进程级标记，
+        // 调用方据此返回失败码——panic 绝不展开跨 FFI 边界
+        let result = ffi_call(|| -> u32 { panic!("人为注入 panic"); });
+        assert!(result.is_err(), "panic 应被 ffi_call 捕获并转为 Err");
+        assert!(
+            crate::log::panic_flag_is_set(),
+            "捕获 panic 后应置位进程级标记"
+        );
+    }
+
+    #[test]
+    fn ffi_call_passes_through_normal_return() {
+        let result = ffi_call(|| -> u32 { 0x22 });
+        assert_eq!(result, Ok(0x22));
+    }
 
     #[test]
     fn plain_batch_guard_scrub_overwrites_name_and_data() {

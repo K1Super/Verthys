@@ -36,6 +36,9 @@
       v-model:bin-password="binPassword"
       :bin-file-name="binFileName"
       :processing="processing"
+      :unlock-progress-msg="unlockProgressMsg"
+      :visual-percent="verifyRhythm.visualPercent.value"
+      :dimmed="verifyRhythm.dimmed.value"
       @init="onInitKey"
       @back="goBackToUnlock"
       @browse-bin="browseBin"
@@ -94,6 +97,7 @@
       :orbit-track-gradient="orbitTrackGradient"
       :toggleable-features="toggleableFeatures"
       :locked-features="lockedFeatures"
+      :preset-features="currentPresetFeatures"
       :custom-features="customFeatures"
       :custom-panel-open="customPanelOpen"
       :defense-paths="defensePaths"
@@ -122,7 +126,6 @@
       :module-label="moduleLabels[editingModuleId]"
       :has-record="hasModuleKeyRecordRef[editingModuleId]"
       :key-dialog-processing="keyDialogProcessing"
-      :pending-enable="pendingEnableModuleId === editingModuleId"
       v-model:editing-key-value="editingKeyValue"
       v-model:editing-old-key-value="editingOldKeyValue"
       @close="onCloseKeyDialog"
@@ -183,7 +186,7 @@ import {
   initStatusRef, initDetailRef,
   hasModuleKeyRecordRef, moduleKeyReadyRef, moduleKeyEnabledRef,
   MODULE_IDS, MODULE_LABELS,
-  securityPresetRef, applySecurityPreset,
+  securityPresetRef, restoreSecurityPreset,
   checkInitStatus,
 } from "../../lib/keyManager";
 import {
@@ -193,7 +196,7 @@ import {
 import ToastOverlay from "../common/feedback/ToastOverlay.vue";
 import KeyEditDialog from "../dialogs/KeyEditDialog.vue";
 import DisableVerifyDialog from "../dialogs/DisableVerifyDialog.vue";
-/* ★ 视图级懒加载：拆分中枢首挂载成本 — 首次进入仅执行 UnlockView
+/* 视图级懒加载：拆分中枢首挂载成本 — 首次进入仅执行 UnlockView
  * （最常见入口视图，保持同步渲染零等待），其余视图/弹窗按需拉取
  * （本地分包，切换时微任务级就绪） */
 import UnlockView from "../views/UnlockView.vue";
@@ -214,6 +217,7 @@ import { useVerifyRhythm } from "../../composables/security-center/useVerifyRhyt
 import { useModuleKeys } from "../../composables/security-center/useModuleKeys";
 import { usePreset } from "../../composables/security-center/usePreset";
 import { useDefenseStatus } from "../../composables/security-center/useDefenseStatus";
+import { useSystemMetrics } from "../../composables/security-center/useSystemMetrics";
 import { isCacheDirty } from "../../cache/composition/verthys-cache";
 
 const emit = defineEmits<{ (e: "back"): void; (e: "panel-active", val: boolean): void }>();
@@ -224,7 +228,7 @@ const { errorMsg, showError } = useErrorToast();
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 /* ===== Toast（成功提示，2.5s 自动消失）
- * ★ 提前至 useUnlockFlow 调用前定义以避免 TDZ（showToast 被 useUnlockFlow 注入使用） */
+ * 提前至 useUnlockFlow 调用前定义以避免 TDZ（showToast 被 useUnlockFlow 注入使用） */
 const toast = ref("");
 let toastTimer: number | null = null;
 const showToast = (msg: string) => {
@@ -237,20 +241,20 @@ const showToast = (msg: string) => {
 const initializing = ref(true);
 
 /* ===== 设备机器码校验 =====
- * ★ 必须在 useViewMode / useUnlockFlow 之前调用（提供 deviceCheckResult / checkDevice 注入） */
+ * 必须在 useViewMode / useUnlockFlow 之前调用（提供 deviceCheckResult / checkDevice 注入） */
 const { deviceCheckResult, deviceFingerprintShort, checkDevice, refreshDeviceFingerprint } = useDeviceBinding({ isTauri });
 
 /* 验证收束标志：验证流程与成功收束（补满 100%）期间保持验证视图。
  * 收束完成事件触发后由上层的 onVerify 复位，视图随即切换；
  * 视图切换由感知层收束完成事件驱动，不依赖固定时长。
- * ★ 移至 useViewMode 调用前定义以避免 TDZ（时序死区） */
+ * 移至 useViewMode 调用前定义以避免 TDZ（时序死区） */
 const postVerifyAnim = ref(false);
 
 /* ===== 验证进度感知层（信号层 → 感知层 → 呈现层 的中间层） ===== */
 const verifyRhythm = useVerifyRhythm();
 
 /* ===== 视图模式（五态严格互斥） =====
- * ★ 企业级根治：移除 "loading" 态。worker 解锁成功后进程内即时完成
+ * 修复：移除 "loading" 态。worker 解锁成功后进程内即时完成
  *   全局密钥记录探测，结果内联到 unlock 响应，前端零异步扫描阶段。
  *   解锁完成即确定 hasGlobalKeyRecord，直接进入 init 或 verify，无中间态。 */
 const { viewMode } = useViewMode({
@@ -281,7 +285,7 @@ const {
 });
 
 /* ===== 全局密钥管理 =====
- * ★ 依赖注入：postVerifyAnim（useViewMode 读取 / onVerify 写入）
+ * 依赖注入：postVerifyAnim（useViewMode 读取 / onVerify 写入）
  *   + verifyRhythm（验证进度感知层实例）
  *   + unlockProgress*（来自 useUnlockFlow，作为真实进度信号注入验证复用） */
 const {
@@ -363,9 +367,17 @@ const {
   onLogoutModule,
 } = useModuleKeys({ showError, showToast, onCopyText });
 
+/* ===== 动态防护状态（消费出口：verthys 就绪即拉取 + 60s 轮询） =====
+ * 先于 usePreset 装配：defenseMeta 作为真实信号注入预设指标合成 */
+const { defensePaths, defenseMeta } = useDefenseStatus();
+
+/* ===== 系统运行指标（CPU 占用率真实采样，2s 轮询） ===== */
+const { cpuUsage } = useSystemMetrics();
+
 /* ===== 安全防护预设 ===== */
 const {
   presetApplying,
+  currentPresetFeatures,
   customPanelOpen,
   customFeatures,
   orbitSliderPos,
@@ -389,15 +401,12 @@ const {
   onResetCustom,
   onApplyCustom,
   loadPresetConfig,
-} = usePreset({ showError, showToast, resetSession });
-
-/* ===== 防御闭环状态（消费出口：verthys 就绪即拉取 + 60s 轮询） ===== */
-const { defensePaths, defenseMeta } = useDefenseStatus();
+} = usePreset({ showError, showToast, resetSession, cpuUsage, defenseMeta });
 
 /* ===== 返回重新选择（锁定当前 verthys，回到解锁视图） ===== */
 const goBackToUnlock = async () => {
   if (processing.value || unlocking.value) return;
-  // ★ 企业级根治E：锁定 UI，防止 lockAll 期间用户重选 verthys 触发 doUnlock
+  // 修复E：锁定 UI，防止 lockAll 期间用户重选 verthys 触发 doUnlock
   //
   // 根治"回退重选 verthys 卡死"根因：
   //   lockAll 异步执行（最多 40s），期间 doLockAll 同步置 verthysReady=false
@@ -422,7 +431,7 @@ const goBackToUnlock = async () => {
       unlockProgressMsg.value = message;
       unlockProgressElapsed.value = Date.now() - lockStart;
     });
-    // ★ 返回解锁页时也检查脏数据状态
+    // 返回解锁页时也检查脏数据状态
     if (isCacheDirty()) {
       showError("部分数据可能未保存，请检查最近操作");
     }
@@ -437,7 +446,7 @@ const goBackToUnlock = async () => {
 /* ===== 立即锁定 ===== */
 const onLockAll = async () => {
   await lockAll();
-  // ★ lockAll 完成后检查脏数据状态
+  // lockAll 完成后检查脏数据状态
   //    40s 超时或 22s waitForFlush 超时可能标记 cacheDirty
   if (isCacheDirty()) {
     showError("部分数据可能未保存，请检查最近操作");
@@ -462,7 +471,7 @@ onMounted(() => {
   //   - 应用关闭（MainView.onClose）
   initializing.value = false;
 
-  // ★ 企业级根治修复：挂载即刷新设备机器码短显示
+  // 修复修复：挂载即刷新设备机器码短显示
   //
   // 根因：deviceFingerprintShort 唯一填充点是 checkDevice()，而它仅在
   // doUnlock 成功且已有全局密钥记录时被调用。以下场景管理界面机器码空白：
@@ -474,17 +483,11 @@ onMounted(() => {
   void refreshDeviceFingerprint();
 
   startSessionTick();
-  // 若挂载时已解锁（跨模块切回本组件），恢复持久化预设的运行时状态并刷新显示；
-  // 未解锁时仅加载预设显示快照（securityPresetRef 已在模块加载时从 localStorage 恢复）
-  if (globalKeyReadyRef.value) {
-    applySecurityPreset(securityPresetRef.value)
-      .then(() => loadPresetConfig())
-      .catch((e) => console.warn("[onMounted] 恢复安全预设失败", e));
-  } else {
-    loadPresetConfig();
-  }
+  // 预设恢复统一收敛到下方 watch(globalKeyReadyRef, { immediate }) 单通道：
+  //   - 挂载时已解锁 → immediate 立即恢复（避免与 watch 就绪回调双触发重复落盘）
+  //   - 挂载时未解锁 → onChange 在解锁瞬间恢复；解锁前仅展示 localStorage 快照
 
-  // ★ 企业级修复：启动时自动查询初始化状态，填充上次使用的 verthys 路径
+  // 修复：启动时自动查询初始化状态，填充上次使用的 verthys 路径
   //
   // 原问题：checkInitStatus 从未被调用，导致：
   //   - initStatusRef 始终为 "none"（初始值）
@@ -506,12 +509,12 @@ onMounted(() => {
           // 自动填充上次使用的 verthys 路径
           verthysPath.value = result.verthys_path;
           pendingIsCreate.value = false;
-          // ★ 第一层：选择即预热 — 自动填充路径后也触发预热
+          // 第一层：选择即预热 — 自动填充路径后也触发预热
           //   与 openExistingVerthys 行为一致，用户点击确认时索引区已进页缓存
           void verthysPreheat(result.verthys_path).catch((e) => {
             console.warn("[onMounted] 预热失败（不影响后续解锁）:", e);
           });
-          // ★ 第二层：选择即预启动 Worker 子进程
+          // 第二层：选择即预启动 Worker 子进程
           void preloadWorker().catch((e) => {
             console.warn("[onMounted] worker 预启动失败:", e);
           });
@@ -523,25 +526,26 @@ onMounted(() => {
   }
 });
 
-// 监听全局密钥就绪状态：解锁后恢复持久化预设的运行时状态（会话超时 / 高安全模式）并刷新显示
+// 监听全局密钥就绪状态：解锁后以后端受信配置为权威恢复预设（迁移/落盘/真实切档）
+// immediate：挂载时已解锁立即恢复（onMounted 不再单独触发，避免双写重复落盘）
 watch(globalKeyReadyRef, (ready) => {
   if (!ready) return;
-  // ★ 兜底：进入管理界面前确保机器码短显示已就绪
+  // 兜底：进入管理界面前确保机器码短显示已就绪
   //   （覆盖 onMounted 刷新失败/未完成的时序窗口，如初始化密钥后立即进入）
   if (!deviceFingerprintShort.value) {
     void refreshDeviceFingerprint();
   }
-  applySecurityPreset(securityPresetRef.value)
+  restoreSecurityPreset()
     .then(() => loadPresetConfig())
     .catch((e) => console.warn("[globalKeyReady] 恢复安全预设失败", e));
-});
+}, { immediate: true });
 
 onBeforeUnmount(() => {
   stopSessionTick();
   if (toastTimer !== null) window.clearTimeout(toastTimer);
   // 清理感知层动画帧调度（中断策略：取消调度并冻结状态）
   verifyRhythm.dispose();
-  // ★ 清理预启动但未使用的 worker，防止僵尸进程
+  // 清理预启动但未使用的 worker，防止僵尸进程
   //    场景：用户选定文件触发了 preloadWorker，但未点击「确认」就切走模块
   //    若 verthys 已解锁（verthysReadyRef=true），worker 仍在使用中，不销毁
   //    workerDestroy 内部会作废预启动缓存，防止后续复用已失效会话

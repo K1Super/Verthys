@@ -12,7 +12,7 @@
     4. 内部流转：dashboard → hub → detail（section）→ hub → dashboard；
        面板模块节点点击直达 moduleKeys 分区；hub 点击空白处返回 dashboard，
        detail 点击空白处返回 hub（无返回按钮/图标）
-    5. panel-active 状态同步给父组件（自动隐藏导航栏）
+    5. panel-active 状态同步给父组件（管理三态均收起导航坞，悬浮才展开）
 
   Props: 从 SecurityCenter 顶层 Composable 注入的只读状态 + 函数（透传至子组件）
   defineModel: orbitSliderPos（透传至 SecurityDashboard）
@@ -106,6 +106,7 @@
           :orbit-track-gradient="orbitTrackGradient"
           :toggleable-features="toggleableFeatures"
           :locked-features="lockedFeatures"
+          :preset-features="presetFeatures"
           :custom-features="customFeatures"
           :custom-panel-open="customPanelOpen"
           :defense-paths="defensePaths"
@@ -194,13 +195,15 @@ const props = defineProps<{
   toggleableFeatures: Array<{ key: string; label: string; desc: string }>;
   /** 锁定特性列表 */
   lockedFeatures: Array<{ key: string; label: string; desc: string }>;
+  /** 已应用预设特性开关快照（后端权威配置，能力状态栏真实状态源） */
+  presetFeatures: Record<string, boolean>;
   /** 自定义特性配置 */
   customFeatures: Record<string, boolean>;
   /** 自定义面板展开状态 */
   customPanelOpen: boolean;
-  /** 防御闭环路径状态列表（7 攻击路径 × 4 态） */
+  /** 动态防护路径状态列表（7 攻击路径 × 4 态） */
   defensePaths: DefensePathView[];
-  /** 防御闭环汇总态势（计数 + 全阻断标志 + 总体态势） */
+  /** 动态防护汇总态势（计数 + 全阻断标志 + 总体态势） */
   defenseMeta: DefenseMetaView;
 }>();
 
@@ -242,9 +245,9 @@ const emit = defineEmits<{
 }>();
 
 /* ===== 内部状态：管理视图三态流转 =====
- * ★ mgmtView：dashboard（量子面板）→ hub（无文字前置引导）→ detail（分区详情）
+ *   mgmtView：dashboard（量子面板）→ hub（无文字前置引导）→ detail（分区详情）
  *   activeSection：detail 内当前分区（单区渲染，避免聚合堆砌）
- *   panel-active 状态通过 watch 同步给父组件 */
+ *   panel-active 状态通过 watch 同步给父组件（三态均收起导航坞） */
 const mgmtView = ref<"dashboard" | "hub" | "detail">("dashboard");
 const activeSection = ref<"globalKey" | "moduleKeys" | "security">("globalKey");
 
@@ -268,7 +271,7 @@ const enterHubSection = (section: "globalKey" | "moduleKeys" | "security") => {
 };
 
 /* ============================================================
- * 分区详情「点击空白处返回引导区」— 几何命中判定（企业级健壮设计）
+ * 分区详情「点击空白处返回引导区」— 几何命中判定（健壮设计）
  * ============================================================
  * 旧实现（e.target === e.currentTarget）的结构性缺陷：
  *   判定依赖点击落点的 DOM 归属 —— 分区根元素透明铺满、祖先容器
@@ -340,6 +343,8 @@ const onDetailBlankClick = (e: MouseEvent) => {
 onMounted(() => document.addEventListener("click", onDetailBlankClick, true));
 onBeforeUnmount(() => document.removeEventListener("click", onDetailBlankClick, true));
 
-/* 面板激活状态同步给父组件（用于自动隐藏导航栏；仅量子面板态视为面板激活） */
-watch(mgmtView, (v) => emit("panel-active", v === "dashboard"), { immediate: true });
+/* 面板激活状态同步给父组件（收起导航坞）：管理三态均视为面板激活，
+ * 导航坞悬浮 Dock 区域才展开 —— 与首屏量子面板行为一致，
+ * 避免进入引导区/分区详情后导航坞常驻弹出 */
+watch(mgmtView, () => emit("panel-active", true), { immediate: true });
 </script>

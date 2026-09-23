@@ -14,7 +14,7 @@ export default defineConfig(async ({ command }) => ({
           obfuscatorPlugin({
             // 仅对 JS 产物应用混淆，不影响 CSS/HTML
             include: ["**/*.js", "**/*.mjs"],
-            // ★ 性能审计修订：安全责任由 Rust/C 层承担（core/ 六层防护：
+            // 性能审计修订：安全责任由 Rust/C 层承担（core/ 六层防护：
             //   anti_debug_v2 / anti_inject / integrity / tamper_destroy 等），
             //   前端混淆仅保留静态不可执行期保护（标识符重命名 + 压缩）。
             // 移除的高开销运行时选项及其代价：
@@ -69,7 +69,7 @@ export default defineConfig(async ({ command }) => ({
           // Vue runtime 独立分包：拆分后主包仅保留首屏组件 + 启动逻辑，
           // Vue 运行时由浏览器并行加载，加速首屏渲染。
           "vue-vendor": ["vue"],
-          // ★ 项13：加密库独立分包（@noble 全家桶 + hash-wasm）
+          // 项13：加密库独立分包（@noble 全家桶 + hash-wasm）
           // 密码学库体积较大（~200KB）且仅 PasswordTools/PhotoAlbum 等业务模块使用，
           // 拆分后主包不含加密代码，首屏加载更快；同时加密库版本稳定，
           // 业务改动不会触发该 chunk 失效，提升浏览器缓存命中率。
@@ -78,7 +78,7 @@ export default defineConfig(async ({ command }) => ({
             "@noble/ciphers",
             "hash-wasm",
           ],
-          // ★ 项13：Three.js 独立分包（仅 PhotoAlbum 相册模块使用）
+          // 项13：Three.js 独立分包（仅 PhotoAlbum 相册模块使用）
           // Three.js 体积约 600KB（gzip 后 ~150KB），是项目中最大的单一依赖。
           // 拆分后仅在用户进入"拾光"模块时按需加载，首屏无需下载，
           // 主包体积减少 60%+，首屏 TTI 显著降低。

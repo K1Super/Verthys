@@ -396,6 +396,7 @@ name = "verthys-worker"
 version = "2.6.1"
 dependencies = [
  "aes-gcm",
+ "getrandom",
  "hkdf",
  "libloading",
  "pbkdf2",

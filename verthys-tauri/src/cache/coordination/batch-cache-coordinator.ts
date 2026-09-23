@@ -1,11 +1,11 @@
 /*
  * cache/coordination/batch-cache-coordinator.ts — 插件化批量缓存协调器（导入流水线专用）
  *
- * ★ 重构设计落地：
+ * 重构设计落地：
  *   插件化写入器 + 背压控制 + 可靠重试 + 事件可观测 + AbortSignal 可取消 +
  *   依赖注入可测试的生产级批量缓存协调器。
  *
- * ★ 根治的十项缺陷（逐条对应）：
+ * 根治的十项缺陷（逐条对应）：
  *   1. 缓存层硬编码 → CacheLayerWriter 插件接口，新增/替换缓存层零侵入
  *   2. 缺乏背压控制 → 高/低水位线 + backpressure 事件，上游可暂停/恢复
  *   3. 错误处理粗放 → 失败批次回灌缓冲区前端（不丢数据）+ 逐层重试
@@ -21,12 +21,12 @@
  *      end() 检查 active、abort() 紧急停止
  *   10. 缺乏依赖注入 → 构造函数注入配置与写入器，单元测试可 mock
  *
- * ★ 构建约束与设计对齐（与 verthys-cache-domain 重构同源决策）：
+ * 构建约束与设计对齐（与 verthys-cache-domain 重构同源决策）：
  *   - Node 'events' 的 EventEmitter 在本 Vite 浏览器 bundle 不可解析
  *     （无 events 包、无 polyfill），以零依赖 TypedEventEmitter 等价替代，
  *     事件名与监听器参数由事件表静态类型化
  *
- * ★ 生产级对齐说明（非语义变更）：
+ * 生产级对齐说明（非语义变更）：
  *   - abort() 重置背压标志并广播 backpressure=false：原始设计未复位，
  *     残留 backpressure=true 会使上游永久暂停（活性缺陷）
  *   - 自动触发（阈值/定时）经 tryFlush()：刷新进行中时静默跳过
@@ -36,7 +36,7 @@
  *     flushed 统计仅在全部层成功时计入（与字段语义"本次刷新写入的
  *     记录数"一致），杜绝"未写入却计数"的遥测失真
  *
- * ★ 评审修复：
+ * 评审修复：
  *   1. 自动 begin() 不再重置 totalFlushed：begin(resetStats=true) 显式
  *      控制，addRecord 自动启用会话时传 false，导入中途时序异常不丢累计
  *   2. flushInProgress 重置移至整个 flush 流程最末（return 置于 try 内、
@@ -239,7 +239,7 @@ export class BatchCacheCoordinator extends TypedEventEmitter<BatchCacheCoordinat
   /**
    * 会话级中止控制器（评审 #3；begin 时新建）：abort() 触发其信号，
    * 在途 flush 的检查点据此提前终止写器循环。
-   * ★ abort 后有意保留已中止的控制器（不置 null）：在途 flush 收尾时
+   * abort 后有意保留已中止的控制器（不置 null）：在途 flush 收尾时
    *   需读取该信号区分"内部中止→丢弃批次"与"外部中止→回灌批次"；
    *   下一次 begin() 会创建全新控制器。
    */
@@ -302,7 +302,7 @@ export class BatchCacheCoordinator extends TypedEventEmitter<BatchCacheCoordinat
   }): void {
     if (!this.active) {
       log.warn("批量缓存会话未开始，addRecord 自动启用会话（保留累计统计）");
-      this.begin(false); // ★ 评审 #1：自动 begin 不重置 totalFlushed
+      this.begin(false); // 评审 #1：自动 begin 不重置 totalFlushed
     }
 
     this.buffer.push({
@@ -399,7 +399,7 @@ export class BatchCacheCoordinator extends TypedEventEmitter<BatchCacheCoordinat
 
       const elapsedMs = Date.now() - startAt;
       const ok = failedLayers.length === 0 && !aborted;
-      // ★ 区分中止来源——内部中止（abort()）时缓冲区已被清空、
+      // 区分中止来源——内部中止（abort()）时缓冲区已被清空、
       //   会话已终止，在途批次必须丢弃（回灌会让"应丢弃"数据复活）
       const discardedByAbort = !ok && this.abortController?.signal.aborted === true;
 
@@ -411,7 +411,7 @@ export class BatchCacheCoordinator extends TypedEventEmitter<BatchCacheCoordinat
       } else {
         // 失败/外部中止：批次数据回灌缓冲区前端（保持入队顺序）
         this.buffer.unshift(...batch);
-        // ★ 评审 #4：回灌后补做背压触发检查（缓冲区可能已越过高水位线）
+        // 评审 #4：回灌后补做背压触发检查（缓冲区可能已越过高水位线）
         if (!this.backpressure && this.buffer.length >= this.config.highWaterMark) {
           this.backpressure = true;
           this.emit("backpressure", true);
@@ -434,7 +434,7 @@ export class BatchCacheCoordinator extends TypedEventEmitter<BatchCacheCoordinat
         retries,
       };
     } finally {
-      // ★ 评审 #2：整个流程（写器循环 + 事件广播 + 缓冲区回灌）结束后才复位
+      // 评审 #2：整个流程（写器循环 + 事件广播 + 缓冲区回灌）结束后才复位
       //   ——return 求值完成后 finally 才执行，emit 期间监听器重入调用将被
       //   正确拒绝/跳过；异常路径同样保证复位（标志不泄漏）。
       this.flushInProgress = false;
@@ -445,7 +445,7 @@ export class BatchCacheCoordinator extends TypedEventEmitter<BatchCacheCoordinat
    * 结束会话（刷新剩余缓冲）。
    * 幂等防护：未活跃会话直接返回空统计（不产生日志噪音、不重复刷新）。
    *
-   * ★ 评审 #5：仅在最终 flush 全部成功时才结束会话——失败时保持 active
+   * 评审 #5：仅在最终 flush 全部成功时才结束会话——失败时保持 active
    *   原状（缓冲区仍持有回灌数据；若 abort 中途终止则 active 已为 false，
    *   不被本方法复活），由调用方决定重试 end() 或 abort() 放弃。
    *   flush 失败路径内部已广播 flush:error，此处不重复发射。
@@ -474,14 +474,14 @@ export class BatchCacheCoordinator extends TypedEventEmitter<BatchCacheCoordinat
   /**
    * 紧急停止（丢弃缓冲并终止）。
    *
-   * ★ 评审 #3：触发内部中止信号——正在执行的 flush 在下一个检查点提前
+   * 评审 #3：触发内部中止信号——正在执行的 flush 在下一个检查点提前
    *   终止写器循环，其持有的在途批次按"会话已终止"丢弃（不回灌复活）。
-   * ★ 背压复位：广播 backpressure=false，防止上游在会话终止后
+   * 背压复位：广播 backpressure=false，防止上游在会话终止后
    *   因残留背压状态永久暂停（活性保障）。
    */
   abort(): void {
     this.stopFlushTimer();
-    this.abortController?.abort(); // ★ 中断正在进行的 flush（在途批次将被丢弃）
+    this.abortController?.abort(); // 中断正在进行的 flush（在途批次将被丢弃）
     this.buffer = [];
     this.active = false;
     if (this.backpressure) {

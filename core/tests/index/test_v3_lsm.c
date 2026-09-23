@@ -17,6 +17,9 @@
  *  11. Manifest 帧篡改 → open 拒绝（AUTH）
  *  12. 查找边界：未存在键 NOTFOUND、name 容量不足 INVALID
  *  13. 全 API NULL 参数校验
+ *  14. 大批量插入/查找 + compact 表数不增
+ *  15. flush 提交失败（Manifest 保存注入）→ 内存态完整回滚、重试成功
+ *  16. compact 提交失败（Manifest 保存注入）→ 输入表回归可读、重试成功
  */
 #include "verthys_test.h"
 #include "verthys_lsm.h"
@@ -278,7 +281,141 @@ TEST(v3lsm_flush_to_sstable)
     return 0;
 }
 
-/* ---------- 6. 重启持久化 ---------- */
+/* ---------- 6. flush 重建失败 → 只读态 ---------- */
+
+/*
+ * 内存耗尽注入：flush 已把条目持久化（SSTable + Manifest 已提交）后
+ * 新 MemTable 分配失败——旧表销毁 + 只读态（RESOURCE_LIMIT）；本会话
+ * 写路径（put/delete 墓碑）一律拒绝（杜绝"再写已持久化旧表 → 下次
+ * flush 重复条目"）；读路径走 SSTable 不受影响。close 后重开：WAL 帧
+ * （未复位）重放恢复写能力，全链数据一致。
+ */
+TEST(v3lsm_flush_rebuild_fail_readonly)
+{
+    VerthysCngAead wrap;
+    uint8_t wk[V3L_KEY_BYTES];
+    VerthysPartition part;
+    FILE *f = NULL;
+    VerthysLsm lsm;
+    VerthysLsmEntry in[3], out, extra;
+    uint8_t name_buf[64];
+    uint64_t lids[3] = { 101, 202, 303 };
+    VerthysResult r;
+
+    CHECK(v3l_setup(&wrap, wk, &part, &f) == 0);
+    CHECK(verthys_lsm_open(&lsm, f, &part, V3L_REGION_OFFSET, V3L_REGION_SIZE, 0)
+          == VERTHYS_OK);
+    char names[3][32];
+    for (int i = 0; i < 3; i++) {
+        sprintf_s(names[i], sizeof(names[i]), "ro-entry-%d", i);
+        v3l_make_entry(&in[i], lids[i], names[i], 1, (uint8_t)(20 + i));
+        CHECK(verthys_lsm_put(&lsm, 1, &in[i]) == VERTHYS_OK);
+    }
+
+    /* 注入分配失败 → flush 在"新表重建"处失败（条目已持久化） */
+    verthys_lsm_memtable_test_force_alloc_fail(1);
+    r = verthys_lsm_flush(&lsm);
+    verthys_lsm_memtable_test_force_alloc_fail(0);   /* 先复位再断言 */
+
+    CHECK_EQ(r, VERTHYS_ERR_RESOURCE_LIMIT);
+    CHECK_EQ(verthys_lsm_table_count(&lsm), 1);       /* SSTable 已持久化 */
+    CHECK_EQ(verthys_lsm_memtable_count(&lsm), 0);    /* 旧表已销毁 */
+
+    /* 只读态：写路径（put 与墓碑 delete）整体拒绝，表计数不再增长 */
+    v3l_make_entry(&extra, 404, "blocked", 2, 66);
+    CHECK_EQ(verthys_lsm_put(&lsm, 2, &extra), VERTHYS_ERR_RESOURCE_LIMIT);
+    CHECK_EQ(verthys_lsm_delete(&lsm, 2, lids[0]), VERTHYS_ERR_RESOURCE_LIMIT);
+    CHECK_EQ(verthys_lsm_table_count(&lsm), 1);       /* 无重复 flush */
+    CHECK_EQ(verthys_lsm_memtable_count(&lsm), 0);
+
+    /* 读路径不受只读态影响（SSTable 直读） */
+    for (int i = 0; i < 3; i++) {
+        memset(&out, 0, sizeof(out));
+        CHECK_EQ(verthys_lsm_get(&lsm, lids[i], &out, name_buf,
+                                 sizeof(name_buf), NULL), VERTHYS_OK);
+        CHECK(v3l_entry_equals(&in[i], &out));
+    }
+
+    /* close 正常收口（flush 对 NULL MemTable 为 no-op） */
+    CHECK_EQ(verthys_lsm_close(&lsm), VERTHYS_OK);
+
+    /* 重开：WAL 帧重放重建 MemTable，写能力恢复且数据一致 */
+    CHECK_EQ(verthys_lsm_open(&lsm, f, &part, V3L_REGION_OFFSET,
+                              V3L_REGION_SIZE, 0), VERTHYS_OK);
+    for (int i = 0; i < 3; i++) {
+        memset(&out, 0, sizeof(out));
+        CHECK_EQ(verthys_lsm_get(&lsm, lids[i], &out, name_buf,
+                                 sizeof(name_buf), NULL), VERTHYS_OK);
+        CHECK(v3l_entry_equals(&in[i], &out));
+    }
+    v3l_make_entry(&extra, 404, "post-reopen", 2, 77);
+    CHECK_EQ(verthys_lsm_put(&lsm, 2, &extra), VERTHYS_OK);
+    memset(&out, 0, sizeof(out));
+    CHECK_EQ(verthys_lsm_get(&lsm, 404, &out, name_buf,
+                             sizeof(name_buf), NULL), VERTHYS_OK);
+    CHECK(v3l_entry_equals(&extra, &out));
+
+    CHECK_EQ(verthys_lsm_close(&lsm), VERTHYS_OK);
+    v3l_teardown(&part, &wrap, wk, f);
+    return 0;
+}
+
+/* ---------- 7. close 失败 dirty 语义（重开完整重建） ---------- */
+
+/*
+ * close 的 flush 失败注入（MemTable 重建失败）：close 返回错误码且
+ * 内存态全部释放——调用方须视作"非干净关闭"。重开后全部条目经
+ * Manifest（本次已提交的 SSTable）+ WAL（未复位帧）完整重建，读写
+ * 能力不受影响。契约要点：错误返回 ≠ 数据丢失，而是"必须 reopen"。
+ */
+TEST(v3lsm_close_failure_reopens_complete)
+{
+    VerthysCngAead wrap;
+    uint8_t wk[V3L_KEY_BYTES];
+    VerthysPartition part;
+    FILE *f = NULL;
+    VerthysLsm lsm;
+    VerthysLsmEntry in[3], out, extra;
+    uint8_t name_buf[64];
+    uint64_t lids[3] = { 501, 502, 503 };
+    VerthysResult r;
+
+    CHECK(v3l_setup(&wrap, wk, &part, &f) == 0);
+    CHECK(verthys_lsm_open(&lsm, f, &part, V3L_REGION_OFFSET, V3L_REGION_SIZE, 0)
+          == VERTHYS_OK);
+    char names[3][32];
+    for (int i = 0; i < 3; i++) {
+        sprintf_s(names[i], sizeof(names[i]), "dirty-entry-%d", i);
+        v3l_make_entry(&in[i], lids[i], names[i], 1, (uint8_t)(30 + i));
+        CHECK(verthys_lsm_put(&lsm, 1, &in[i]) == VERTHYS_OK);
+    }
+
+    /* close 的 flush 失败注入：条目经 SSTable 持久化后新表重建失败 */
+    verthys_lsm_memtable_test_force_alloc_fail(1);
+    r = verthys_lsm_close(&lsm);
+    verthys_lsm_memtable_test_force_alloc_fail(0);   /* 先复位再断言 */
+
+    CHECK_EQ(r, VERTHYS_ERR_RESOURCE_LIMIT);          /* 非干净关闭显式化 */
+    CHECK(lsm.memtable == NULL);                      /* 内存态已释放 */
+
+    /* 重开：Manifest + WAL 重放完整重建，读写全链正常 */
+    CHECK_EQ(verthys_lsm_open(&lsm, f, &part, V3L_REGION_OFFSET,
+                              V3L_REGION_SIZE, 0), VERTHYS_OK);
+    for (int i = 0; i < 3; i++) {
+        memset(&out, 0, sizeof(out));
+        CHECK_EQ(verthys_lsm_get(&lsm, lids[i], &out, name_buf,
+                                 sizeof(name_buf), NULL), VERTHYS_OK);
+        CHECK(v3l_entry_equals(&in[i], &out));
+    }
+    v3l_make_entry(&extra, 504, "after-dirty-close", 2, 88);
+    CHECK_EQ(verthys_lsm_put(&lsm, 2, &extra), VERTHYS_OK);
+    CHECK_EQ(verthys_lsm_close(&lsm), VERTHYS_OK);    /* 本次干净收口 */
+
+    v3l_teardown(&part, &wrap, wk, f);
+    return 0;
+}
+
+/* ---------- 8. 重启持久化 ---------- */
 
 TEST(v3lsm_reopen_persistence)
 {
@@ -690,6 +827,129 @@ TEST(v3lsm_large_insert_find)
     CHECK(verthys_lsm_close(&lsm) == VERTHYS_OK);
     free(lids);
     free(names);
+    v3l_teardown(&part, &wrap, wk, f);
+    return 0;
+}
+
+/* ---------- 15. flush 提交失败回滚 ---------- */
+
+/*
+ * Manifest 保存注入失败：flush 提交点失败 → 内存态完整回滚
+ * （新表未注册、MemTable 保留、游标回退），旧数据持续可读；
+ * 复位后重试 flush 成功（回退的游标使失败轮落盘数据成为脏区，
+ * 被成功轮覆写回收）。
+ */
+TEST(v3lsm_flush_manifest_save_fail_rollback)
+{
+    VerthysCngAead wrap;
+    uint8_t wk[V3L_KEY_BYTES];
+    VerthysPartition part;
+    FILE *f = NULL;
+    VerthysLsm lsm;
+    VerthysLsmEntry in[3], out;
+    uint8_t name_buf[64];
+    uint64_t lids[3] = { 41, 42, 43 };
+    VerthysResult r;
+
+    CHECK(v3l_setup(&wrap, wk, &part, &f) == 0);
+    CHECK(verthys_lsm_open(&lsm, f, &part, V3L_REGION_OFFSET, V3L_REGION_SIZE, 0)
+          == VERTHYS_OK);
+    char names[3][32];
+    for (int i = 0; i < 3; i++) {
+        sprintf_s(names[i], sizeof(names[i]), "sfail-entry-%d", i);
+        v3l_make_entry(&in[i], lids[i], names[i], 1, (uint8_t)(50 + i));
+        CHECK(verthys_lsm_put(&lsm, 1, &in[i]) == VERTHYS_OK);
+    }
+
+    verthys_lsm_test_fail_manifest_save = 1;
+    r = verthys_lsm_flush(&lsm);
+    verthys_lsm_test_fail_manifest_save = 0;   /* 先复位再断言 */
+
+    CHECK_EQ(r, VERTHYS_ERR_IO);
+    CHECK_EQ(verthys_lsm_table_count(&lsm), 0);       /* 回滚：无新表注册 */
+    CHECK_EQ(verthys_lsm_memtable_count(&lsm), 3);    /* MemTable 未被换出 */
+    for (int i = 0; i < 3; i++) {
+        memset(&out, 0, sizeof(out));
+        CHECK_EQ(verthys_lsm_get(&lsm, lids[i], &out, name_buf,
+                                 sizeof(name_buf), NULL), VERTHYS_OK);
+        CHECK(v3l_entry_equals(&in[i], &out));
+    }
+
+    /* 复位后正常提交（游标已回退：失败轮落盘区被本轮覆写回收） */
+    CHECK_EQ(verthys_lsm_flush(&lsm), VERTHYS_OK);
+    CHECK_EQ(verthys_lsm_table_count(&lsm), 1);
+    CHECK_EQ(verthys_lsm_memtable_count(&lsm), 0);
+    for (int i = 0; i < 3; i++) {
+        memset(&out, 0, sizeof(out));
+        CHECK_EQ(verthys_lsm_get(&lsm, lids[i], &out, name_buf,
+                                 sizeof(name_buf), NULL), VERTHYS_OK);
+        CHECK(v3l_entry_equals(&in[i], &out));
+    }
+
+    CHECK_EQ(verthys_lsm_close(&lsm), VERTHYS_OK);
+    v3l_teardown(&part, &wrap, wk, f);
+    return 0;
+}
+
+/* ---------- 16. compact 提交失败回滚 ---------- */
+
+/*
+ * Manifest 保存注入失败：compact 提交点失败 → 影子事务 abort：
+ * 4 个输入表回归数组且惰性缓存未释放，当前进程 get 立即可达
+ * （不因 compaction 失败丢失输入表）；复位后重试成功归并。
+ */
+TEST(v3lsm_compact_manifest_save_fail_rollback)
+{
+    VerthysCngAead wrap;
+    uint8_t wk[V3L_KEY_BYTES];
+    VerthysPartition part;
+    FILE *f = NULL;
+    VerthysLsm lsm;
+    VerthysLsmEntry in[4], out;
+    uint8_t name_buf[64];
+    uint64_t lids[4] = { 101, 102, 103, 104 };
+    VerthysResult r;
+
+    CHECK(v3l_setup(&wrap, wk, &part, &f) == 0);
+    CHECK(verthys_lsm_open(&lsm, f, &part, V3L_REGION_OFFSET, V3L_REGION_SIZE, 0)
+          == VERTHYS_OK);
+
+    char names[4][32];
+    for (int i = 0; i < 4; i++) {
+        sprintf_s(names[i], sizeof(names[i]), "cfail-table-%d", i);
+        v3l_make_entry(&in[i], lids[i], names[i], 1, (uint8_t)(60 + i));
+        CHECK(verthys_lsm_put(&lsm, 1, &in[i]) == VERTHYS_OK);
+        CHECK(verthys_lsm_flush(&lsm) == VERTHYS_OK);
+    }
+    CHECK_EQ(verthys_lsm_level_table_count(&lsm, 0), 4);
+
+    verthys_lsm_test_fail_manifest_save = 1;
+    r = verthys_lsm_compact(&lsm);
+    verthys_lsm_test_fail_manifest_save = 0;   /* 先复位再断言 */
+
+    CHECK_EQ(r, VERTHYS_ERR_IO);
+    /* 回滚后输入表集合原样归位（新表未注册、无 L1 表） */
+    CHECK_EQ(verthys_lsm_level_table_count(&lsm, 0), 4);
+    CHECK_EQ(verthys_lsm_level_table_count(&lsm, 1), 0);
+    for (int i = 0; i < 4; i++) {
+        memset(&out, 0, sizeof(out));
+        CHECK_EQ(verthys_lsm_get(&lsm, lids[i], &out, name_buf,
+                                 sizeof(name_buf), NULL), VERTHYS_OK);
+        CHECK(v3l_entry_equals(&in[i], &out));
+    }
+
+    /* 复位后重试归并成功且全键命中（脏区由新表覆写回收） */
+    CHECK_EQ(verthys_lsm_compact(&lsm), VERTHYS_OK);
+    CHECK_EQ(verthys_lsm_level_table_count(&lsm, 0), 0);
+    CHECK_EQ(verthys_lsm_level_table_count(&lsm, 1), 1);
+    for (int i = 0; i < 4; i++) {
+        memset(&out, 0, sizeof(out));
+        CHECK_EQ(verthys_lsm_get(&lsm, lids[i], &out, name_buf,
+                                 sizeof(name_buf), NULL), VERTHYS_OK);
+        CHECK(v3l_entry_equals(&in[i], &out));
+    }
+
+    CHECK_EQ(verthys_lsm_close(&lsm), VERTHYS_OK);
     v3l_teardown(&part, &wrap, wk, f);
     return 0;
 }

@@ -108,7 +108,7 @@ use middleware::context::ProcessMode;
 use middleware::panic_hook;
 
 /* ------------------------------------------------------------------ *
- * 关闭流程硬超时（企业级数据安全优先，根治"退出后数据丢失"）            *
+ * 关闭流程硬超时（数据安全优先，根治"退出后数据丢失"）            *
  * ------------------------------------------------------------------ *
  * 45000ms 覆盖 lockAll 内部 40s 安全网 + 5s 余量，确保：
  *   1. waitForFlush（22s）：pending 删除/写入全部落盘（v1 唯一持久化路径）
@@ -296,7 +296,6 @@ fn run_process(mode: ProcessMode) {
 
 /// 主 UI 进程运行逻辑：启动 Tauri 应用并注册命令。
 ///
-/// 在 Tauri 应用启动前设置 WebView2 硬件加速环境变量；
 /// 通过 `app.run` 事件循环处理 `ExitRequested` 事件，
 /// 确保在运行时仍存活时安全销毁 WorkerSession，避免孤儿进程。
 ///
@@ -309,15 +308,6 @@ fn run_main_ui(
     _guard: ProcessGuard,
     _log_daemon: LogDaemon,
 ) {
-    // 设置 WebView2 硬件加速参数（在 WebView2 实例启动前生效）
-    #[cfg(windows)]
-    {
-        std::env::set_var(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist",
-        );
-    }
-
     // 构建 Tauri 应用
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -325,7 +315,7 @@ fn run_main_ui(
         .plugin(tauri_plugin_process::init())
         .manage(AppState::new())
         .manage(security_commands::SecurityState::new())
-        /* ===== ★ 企业级关闭响应优化：窗口级事件处理器 =====
+        /* ===== 关闭响应优化：窗口级事件处理器 =====
          *
          * 根因：旧实现前端 `await getCurrentWindow().hide()` 为 IPC 往返，
          *   后端事件循环繁忙时 hide() 的 IPC 被排队 → 窗口实际隐藏延迟数秒。
@@ -386,7 +376,6 @@ fn run_main_ui(
             }
         })
         .invoke_handler(tauri::generate_handler![
-            diag_info,
             log_fatal,
             verthys_preflight,
             verthys_init_status,
@@ -403,7 +392,7 @@ fn run_main_ui(
             verthys_get_record,
             verthys_enumerate_records,
             verthys_enumerate_records_stream,
-            // ★ 照片导入异步批处理流水线（WAL + 批量 IPC + 检查点）
+            // 照片导入异步批处理流水线（WAL + 批量 IPC + 检查点）
             verthys_import_begin,
             verthys_add_records_batch,
             verthys_import_end,
@@ -412,11 +401,9 @@ fn run_main_ui(
             verthys_scan_open,
             verthys_scan_next,
             verthys_scan_close,
-            verthys_scan_abort,
             verthys_scan_summary_open,
             verthys_scan_summary_next,
             verthys_scan_summary_close,
-            verthys_scan_summary_abort,
             verthys_delete_record,
             verthys_delete_records,
             verthys_get_summary_count,
@@ -424,13 +411,16 @@ fn run_main_ui(
             verthys_export,
             verthys_import,
             verthys_change_password,
-            // ★ 防御闭环状态查询（7 路径 × 4 状态实时透传）
+            // 防御闭环状态查询（7 路径 × 4 状态实时透传）
             verthys_security_status,
+            // 系统运行指标采样（CPU 占用率真实差分，安全防护面板数据源）
+            security_commands::verthys_system_snapshot,
             verthys_derive_global_key,
+            verthys_derive_and_store_global_key,
             verthys_verify_global_key,
-            verthys_derive_subkey,
             verthys_clear_global_key,
             verthys_reconcile_key_presence,
+            verthys_reset_global_key_state,
             set_privacy_mode,
             clear_clipboard,
             restore_privacy_mode,
@@ -464,7 +454,8 @@ fn run_main_ui(
             security_commands::security_usb_purge,
             security_commands::security_usb_shadow_status,
             security_commands::security_get_preset_config,
-            security_commands::security_generate_auth_token,
+            security_commands::security_apply_preset,
+            security_commands::security_load_preset_state,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

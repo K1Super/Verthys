@@ -91,7 +91,7 @@ export function wrapAsVerthysError(e: unknown): VerthysError {
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 结构化错误契约                                                   *
+ * 结构化错误契约                                                   *
  *                                                                    *
  * 在保留现有 VerthysError/VerthysErrorKind（底层 IPC 异常）基础上，新增    *
  * VerthysErrorCode 业务错误码 + VerthysResult<T> 判别联合，使所有公共      *
@@ -231,7 +231,7 @@ export function defaultCodeFromKind(kind: VerthysErrorKind): VerthysErrorCode {
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 用户友好型错误文案映射                      *
+ * 用户友好型错误文案映射                      *
  *                                                                    *
  * 在 lib/verthys_error.ts 维护错误码→用户文案映射表，替换底层技术报错。  *
  * 每条文案附带下一步操作指引，降低用户咨询量。                         *

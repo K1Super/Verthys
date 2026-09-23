@@ -79,6 +79,15 @@ void verthys_backoff_reset(void)
     InterlockedExchange64(&g_brute_last_fail_ms, 0);
 }
 
+/* ---------- 工作线程有界汇合 ---------- */
+#ifdef _WIN32
+DWORD verthys_join_thread_bounded(HANDLE thread)
+{
+    if (thread == NULL) return WAIT_FAILED;
+    return WaitForSingleObject(thread, VERTHYS_JOIN_TIMEOUT_MS);
+}
+#endif
+
 /* ---------- 小端序读取（用于索引区长度前缀） ---------- */
 uint64_t verthys_get_u64le(const uint8_t *p)
 {
@@ -151,7 +160,7 @@ int write_file(const char *path, const uint8_t *buf, size_t size)
      * 容器导出/迁移中间文件依赖此函数落盘，未 fsync 导致进程异常终止
      * 或系统繁忙时数据丢失风险极高。
      *
-     * 企业级"数据不丢"刚性要求：所有持久化写入必须 fsync 物理落盘，
+     * "数据不丢"刚性要求：所有持久化写入必须 fsync 物理落盘，
      * 不能依赖 OS 异步刷盘的"最终一致性"——那是数据丢失的温床。
      * _commit 等同 FlushFileBuffers，强制将文件所有缓冲数据写入磁盘。 */
     _commit(_fileno(f));

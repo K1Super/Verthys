@@ -11,7 +11,7 @@
     <div v-if="!hasModuleKeyRecord" class="kv-warn">
       该模块尚未设置独立密钥，请先初始化
     </div>
-    <!-- ★ 验证态：密码框区域替换为进度条通道（非量子动画），原窗口内原位显示 -->
+    <!-- 验证态：密码框区域替换为进度条通道（非量子动画），原窗口内原位显示 -->
     <QuantumProgressFlow
       v-if="moduleKeyVerifying"
       :loading="moduleKeyVerifying"
@@ -53,7 +53,7 @@ defineProps<{
   moduleKeyVerifying: boolean;
   moduleKeyVerifyPercent: number;
   moduleKeyVerifyMsg: string;
-  /** ★ 企业级感知：验证错误状态（触发密码框抖动 + 红色边框） */
+  /** 感知：验证错误状态（触发密码框抖动 + 红色边框） */
   moduleKeyVerifyError: boolean;
 }>();
 
@@ -65,7 +65,7 @@ defineEmits<{
 </script>
 
 <style scoped>
-/* ★ 企业级感知：密码框错误状态（红色边框 + 抖动动画）
+/* 感知：密码框错误状态（红色边框 + 抖动动画）
  * 错误密码绝不放行，必须给用户明确的视觉反馈 */
 .kv-input-error {
   border-color: rgba(255, 80, 100, 0.85) !important;

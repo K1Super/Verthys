@@ -82,7 +82,7 @@ pub(crate) struct SessionInner {
     started_at: Instant,
     /// 子进程存活标志（Actor 更新，is_alive() 读取）
     child_alive: Arc<AtomicBool>,
-    /// ★ 企业级根治：Windows Job Object 句柄（KILL_ON_JOB_CLOSE）
+    /// 修复：Windows Job Object 句柄（KILL_ON_JOB_CLOSE）
     ///   父进程退出时内核自动关闭此句柄 → 自动终止 Job 内所有子进程
     ///   None 表示 Job Object 创建失败，回退到 kill_on_drop 兜底
     #[cfg(target_os = "windows")]
@@ -134,11 +134,11 @@ impl WorkerSession {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            // ★ 安全兜底：Actor 任务异常终止时子进程不会成为孤儿
+            // 安全兜底：Actor 任务异常终止时子进程不会成为孤儿
             .kill_on_drop(true);
 
         // Windows: 不创建控制台窗口 + 后台任务降级
-        // ★ BELOW_NORMAL_PRIORITY_CLASS (0x00004000)：
+        // BELOW_NORMAL_PRIORITY_CLASS (0x00004000)：
         //   worker 进程承载后台 Merkle 重建 / 全量扫描 / 完整性巡检等长尾任务，
         //   优先级低于 UI 主进程（NORMAL），保证前端 IPC 始终优先获得 CPU 调度。
         //   消除解锁后前 10 秒「后台任务抢占 CPU 导致界面卡顿」问题。
@@ -306,7 +306,7 @@ impl WorkerSession {
             loop {
                 tokio::select! {
                     result = &mut reply_rx => {
-                        /* ★ 企业级根治修复：drain progress_rx 残留进度消息
+                        /* 修复修复：drain progress_rx 残留进度消息
                          *
                          * 根因：tokio::select! 的公平性导致 reply_rx（最终响应）可能
                          * 在 progress_rx 中所有进度消息被处理完之前被选中。此时
@@ -476,7 +476,7 @@ impl Drop for SessionInner {
         //    若 Actor 未能正常退出（超时/panic），kill_on_drop(true) 仍会回收子进程
         self.child_alive.store(false, Ordering::SeqCst);
 
-        // ★ 企业级根治：显式关闭 Job Object 句柄
+        // 修复：显式关闭 Job Object 句柄
         //   KILL_ON_JOB_CLOSE 在句柄关闭时自动终止 Job 内子进程（双保险）
         //   即使 Drop 链正常执行也释放内核资源，杜绝句柄泄漏
         #[cfg(target_os = "windows")]
@@ -494,7 +494,7 @@ impl Drop for SessionInner {
 
 /// 在 tokio 运行时上下文中同步驱动 async future
 ///
-/// ★ 公共 API 兼容策略：sync 方法内部通过 Handle::block_on + block_in_place 包装。
+/// 公共 API 兼容策略：sync 方法内部通过 Handle::block_on + block_in_place 包装。
 ///
 /// 策略：
 ///   - 若当前线程在 tokio 运行时上下文中（Handle::try_current 成功）：

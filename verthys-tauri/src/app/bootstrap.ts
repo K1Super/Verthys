@@ -22,7 +22,7 @@ import { vTip } from "../directives/vTip";
  * 接收上下文参数（注入式传递），创建应用实例并挂载中间件。
  * 入口层调用此函数后，控制权完全移交至此处。
  *
- * ★ 缓存层组合根初始化（initVerthysCache）由 MainView.onBeforeMount 承担
+ * 缓存层组合根初始化（initVerthysCache）由 MainView.onBeforeMount 承担
  *   （v3 懒加载架构修复）：本文件属静态入口图（index chunk），静态导入
  *   verthys-cache 会将 keyManager→verthys→crypto 整个业务层（~77KB）拖入
  *   主包，破坏「引导页轻首屏 + MainView 业务层异步分包」架构。

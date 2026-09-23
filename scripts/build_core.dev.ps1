@@ -1,6 +1,6 @@
 ﻿# scripts/build_core.dev.ps1 - 核心安全 DLL 开发环境构建（Debug + 测试）
 #
-# ★ 编码警告：本文件必须保存为 UTF-8 with BOM 编码！
+# 编码警告：本文件必须保存为 UTF-8 with BOM 编码！
 #   Windows PowerShell 5.1 对无 BOM 文件按 ANSI/GBK 解码，中文注释乱码会
 #   破坏字符串配对导致解析错误（ParseError），而解析错误发生在任何代码
 #   执行之前，try/catch 与暂停完全失效——表现为窗口一闪而过且无任何
@@ -42,7 +42,7 @@ if ($Clean -and (Test-Path $buildDir)) {
     Remove-Item -Recurse -Force $buildDir
 }
 
-# ★ 陈旧缓存自愈（根因修复）：项目目录迁移/重命名后，
+# 陈旧缓存自愈（根因修复）：项目目录迁移/重命名后，
 # build_dev/CMakeCache.txt 记录的绝对路径（CMAKE_HOME_DIRECTORY）失效，
 # CMake 报 "CMakeCache.txt directory ... is different than the directory
 # ... where CMakeCache.txt was created" 并拒绝配置。此处检测到不一致时

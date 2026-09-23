@@ -55,7 +55,7 @@ TEST(mem_lock_zeroes_keys)
     uint64_t id;
     CHECK_EQ(Verthys_AddRecord(h, &r, &id), VERTHYS_OK);
 
-    /* Lock 前 sanity（★ V3：密钥全程 CNG 内核态驻留，用户态零密钥数组——
+    /* Lock 前 sanity（V3：密钥全程 CNG 内核态驻留，用户态零密钥数组——
      * KERNEL_RESIDENT 红线的白盒判据 = 四角色句柄全部在位 + 状态机
      * 处于 KERNEL_RESIDENT） */
     struct VerthysContext *ctx = (struct VerthysContext *)h;
@@ -323,7 +323,7 @@ TEST(mem_uaf_addrecord_invalidates_cache)
     CHECK_EQ(Verthys_GetRecord(h, id1, &out), VERTHYS_OK);
     CHECK(ctx->last_getrecord_data != NULL);
     CHECK(out.data == ctx->last_getrecord_data);
-    /* ★ 断言语义修正：UAF 防护的真实判据是"失效先于复用"——由上方
+    /* 断言语义修正：UAF 防护的真实判据是"失效先于复用"——由上方
      * ctx->last_getrecord_data == NULL 断言保证；二次 GetRecord 的地址
      * 是否复用旧块由分配器决定（同尺寸先释放后分配可能返回同一地址），
      * 不构成借用语义的一部分。改为校验新借用指针承载正确数据。 */

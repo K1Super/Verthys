@@ -270,7 +270,17 @@ impl KeyLifecycle {
         // NoKey / Locked 状态保持不变（幂等）
     }
 
-    /// ★ 企业级根治：协调密钥存在状态（reconciliation）
+    /// 幂等强制复位（失败补偿链最终兜底）：任何状态 → NoKey，
+    /// 失败计数与冷却清零。前端补偿动作连续失败后调用，确保不残留
+    /// 中间态；任何状态下调用均幂等成功。
+    pub fn force_reset_no_key(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.state = KeyLifecycleState::NoKey;
+        inner.consecutive_failures = 0;
+        inner.cooldown_until = None;
+    }
+
+    /// 修复：协调密钥存在状态（reconciliation）
     ///
     /// 用于修正 worker 进程内 probe 与前端迁移后重新校验之间的状态不同步。
     ///

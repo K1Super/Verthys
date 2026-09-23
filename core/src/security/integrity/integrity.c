@@ -5,8 +5,8 @@
  * 技术要点：
  *   - HMAC-SHA256（libsodium 经 verthys_crypto.h 封装）计算各区段摘要
  *   - 每个锚点拥有独立 32 字节基准哈希（post-build 工具经 integrity_set_baseline 注入）
- *   - 基准全零 = 未配置 = 跳过校验（返回 0=通过），避免开发期阻断
- *   - 校验失败（哈希不匹配）返回非零，调用方据此触发应急流程（同 emergency.h）
+ *   - 基准全零 = 未配置 = 跳过校验（PASS），避免开发期阻断
+ *   - 校验失败（哈希不匹配）返回 MISMATCH，调用方据此触发应急流程（同 emergency.h）
  *   - 计算用临时哈希缓冲区用毕立即 verthys_secure_zero 清零，避免内存残留
  *
  * 区段覆盖（分散式，无单点）：
@@ -21,8 +21,9 @@
  * 安全策略：
  *   - 域分离密钥为非秘密固定常量（仅完整性用途，与机密性无关）
  *   - 与 anti_debug.c 的 check_integrity() 使用不同域标签，避免跨模块哈希碰撞
- *   - PE 解析失败 / HMAC 计算失败时返回 0（不阻断），仅哈希不匹配返回非零
- *     —— 与 anti_debug.c 一致，避免基础设施异常导致误报
+ *   - PE 解析失败 / HMAC 计算失败 → INCOMPLETE（未完成，计数观测、不当作通过）；
+ *     仅哈希不匹配 → MISMATCH（报警）。两者区分，避免基础设施异常被静默当作
+ *     通过，也避免把异常误判为篡改报警。
  */
 #include "integrity.h"
 #include "verthys_crypto.h"
@@ -36,6 +37,8 @@
 #include <windows.h>
 #include <string.h>
 #include <stdio.h>
+#include <io.h>              /* _open_osfhandle / _close / _fdopen */
+#include <fcntl.h>           /* _O_RDONLY */
 
 /* ---------- 常量 ---------- */
 
@@ -69,6 +72,19 @@ static uint8_t s_baseline[ANCHOR_COUNT][VERTHYS_HMAC_BYTES];
 
 static int s_initialized = 0;
 
+/* 累计"校验未完成（基础设施异常）"次数（Interlocked 维护，诊断/测试观测） */
+static volatile LONG s_incomplete_count = 0;
+
+/* 测试注入标志：1 = 强制 HMAC 计算路径走未完成态（模拟基础异常） */
+static volatile LONG s_test_force_fail = 0;
+
+/* 基础设施异常统一收口：计数 + 返回 INCOMPLETE */
+static IntegrityResult integrity_mark_incomplete(void)
+{
+    InterlockedIncrement(&s_incomplete_count);
+    return INTEGRITY_RESULT_INCOMPLETE;
+}
+
 /* ---------- 辅助函数 ---------- */
 
 /* 判断指定锚点的基准是否为全零（未配置）。 */
@@ -80,38 +96,40 @@ static int baseline_is_zero(IntegrityAnchor anchor)
 
 /*
  * 将计算出的哈希与指定锚点基准比对。
- *   返回 0=通过（未配置或匹配），1=校验失败（哈希不匹配）。
+ *   返回 PASS=通过（未配置或匹配），MISMATCH=哈希不匹配。
  * 注意：本函数不负责清零 computed 缓冲，由调用方用毕 verthys_secure_zero。
  */
-static int verify_against_baseline(IntegrityAnchor anchor,
-                                   const uint8_t computed[VERTHYS_HMAC_BYTES])
+static IntegrityResult verify_against_baseline(IntegrityAnchor anchor,
+                                               const uint8_t computed[VERTHYS_HMAC_BYTES])
 {
     if (baseline_is_zero(anchor)) {
-        return 0;  /* 未配置，跳过 = 通过 */
+        return INTEGRITY_RESULT_PASS;  /* 未配置，跳过 = 通过 */
     }
-    return (memcmp(s_baseline[anchor], computed, VERTHYS_HMAC_BYTES) != 0) ? 1 : 0;
+    return (memcmp(s_baseline[anchor], computed, VERTHYS_HMAC_BYTES) != 0)
+           ? INTEGRITY_RESULT_MISMATCH : INTEGRITY_RESULT_PASS;
 }
 
 /*
  * 计算 data[0..len) 的 HMAC-SHA256 并与指定锚点基准比对。
- *   返回 0=通过，1=校验失败；HMAC 计算失败时返回 0（不阻断，与 anti_debug.c 一致）。
- * 临时哈希缓冲用毕立即清零。
+ *   返回 PASS/MISMATCH；HMAC 计算失败或数据为空 → INCOMPLETE（计数观测，
+ *   不当作通过）。临时哈希缓冲用毕立即清零。
  */
-static int hash_and_verify(IntegrityAnchor anchor,
-                           const uint8_t *data, size_t len)
+static IntegrityResult hash_and_verify(IntegrityAnchor anchor,
+                                       const uint8_t *data, size_t len)
 {
     uint8_t hash[VERTHYS_HMAC_BYTES];
 
     if (data == NULL || len == 0) {
-        return 0;  /* 无数据可校验，不阻断 */
+        return integrity_mark_incomplete();  /* 无数据可校验：未完成 */
     }
 
-    if (verthys_hmac_sha256(hash, s_integrity_key, data, len) != 0) {
+    if (s_test_force_fail ||
+        verthys_hmac_sha256(hash, s_integrity_key, data, len) != 0) {
         verthys_secure_zero(hash, sizeof hash);
-        return 0;  /* HMAC 计算失败，不阻断 */
+        return integrity_mark_incomplete();  /* HMAC 计算失败：未完成 */
     }
 
-    int result = verify_against_baseline(anchor, hash);
+    IntegrityResult result = verify_against_baseline(anchor, hash);
     verthys_secure_zero(hash, sizeof hash);
     return result;
 }
@@ -201,44 +219,46 @@ static const IMAGE_NT_HEADERS *get_nt_headers(HMODULE hMod, const BYTE **out_bas
  * EXE 前 1MB 区段以 SizeOfImage 为上界钳制，避免读越界。
  * 中间哈希 h1/h2 在合并后立即清零。
  */
-static int check_anchor_startup(void)
+static IntegrityResult check_anchor_startup(void)
 {
     HMODULE self = get_self_module();
     HMODULE exe  = get_exe_module();
-    if (self == NULL || exe == NULL) return 0;
+    if (self == NULL || exe == NULL) return integrity_mark_incomplete();
 
     /* DLL .text 段 */
     size_t text_size = 0;
     const BYTE *text = find_section(self, ".text", &text_size);
-    if (text == NULL || text_size == 0) return 0;
+    if (text == NULL || text_size == 0) return integrity_mark_incomplete();
 
     /* EXE 前 1MB（钳制到 SizeOfImage） */
     const BYTE *exe_base = NULL;
     const IMAGE_NT_HEADERS *nt = get_nt_headers(exe, &exe_base);
-    if (nt == NULL || exe_base == NULL) return 0;
+    if (nt == NULL || exe_base == NULL) return integrity_mark_incomplete();
     DWORD image_size = nt->OptionalHeader.SizeOfImage;
     size_t exe_head = INTEGRITY_EXE_HEAD_BYTES;
     if (image_size != 0 && exe_head > image_size) {
         exe_head = image_size;
     }
-    if (exe_head == 0) return 0;
+    if (exe_head == 0) return integrity_mark_incomplete();
 
     uint8_t h1[VERTHYS_HMAC_BYTES];
     uint8_t h2[VERTHYS_HMAC_BYTES];
     uint8_t combined[2 * VERTHYS_HMAC_BYTES];
     uint8_t final_hash[VERTHYS_HMAC_BYTES];
-    int result = 0;
+    IntegrityResult result;
 
     /* h1 = HMAC(DLL .text) */
-    if (verthys_hmac_sha256(h1, s_integrity_key, text, text_size) != 0) {
+    if (s_test_force_fail ||
+        verthys_hmac_sha256(h1, s_integrity_key, text, text_size) != 0) {
         verthys_secure_zero(h1, sizeof h1);
-        return 0;  /* 计算失败，不阻断 */
+        return integrity_mark_incomplete();
     }
     /* h2 = HMAC(EXE 前 1MB) */
-    if (verthys_hmac_sha256(h2, s_integrity_key, exe_base, exe_head) != 0) {
+    if (s_test_force_fail ||
+        verthys_hmac_sha256(h2, s_integrity_key, exe_base, exe_head) != 0) {
         verthys_secure_zero(h1, sizeof h1);
         verthys_secure_zero(h2, sizeof h2);
-        return 0;  /* 计算失败，不阻断 */
+        return integrity_mark_incomplete();
     }
 
     /* 合并 h1||h2，合并后立即清零中间哈希 */
@@ -248,11 +268,12 @@ static int check_anchor_startup(void)
     verthys_secure_zero(h2, sizeof h2);
 
     /* final = HMAC(combined) */
-    if (verthys_hmac_sha256(final_hash, s_integrity_key,
+    if (s_test_force_fail ||
+        verthys_hmac_sha256(final_hash, s_integrity_key,
                           combined, sizeof combined) != 0) {
         verthys_secure_zero(combined, sizeof combined);
         verthys_secure_zero(final_hash, sizeof final_hash);
-        return 0;  /* 计算失败，不阻断 */
+        return integrity_mark_incomplete();
     }
     verthys_secure_zero(combined, sizeof combined);
 
@@ -264,14 +285,14 @@ static int check_anchor_startup(void)
 /*
  * ANCHOR_OPEN_SETTINGS：DLL .rdata 段。
  */
-static int check_anchor_open_settings(void)
+static IntegrityResult check_anchor_open_settings(void)
 {
     HMODULE self = get_self_module();
-    if (self == NULL) return 0;
+    if (self == NULL) return integrity_mark_incomplete();
 
     size_t rdata_size = 0;
     const BYTE *rdata = find_section(self, ".rdata", &rdata_size);
-    if (rdata == NULL || rdata_size == 0) return 0;
+    if (rdata == NULL || rdata_size == 0) return integrity_mark_incomplete();
 
     return hash_and_verify(ANCHOR_OPEN_SETTINGS, rdata, rdata_size);
 }
@@ -279,17 +300,17 @@ static int check_anchor_open_settings(void)
 /*
  * ANCHOR_SWITCH_TREE：DLL .text 后半段。
  */
-static int check_anchor_switch_tree(void)
+static IntegrityResult check_anchor_switch_tree(void)
 {
     HMODULE self = get_self_module();
-    if (self == NULL) return 0;
+    if (self == NULL) return integrity_mark_incomplete();
 
     size_t text_size = 0;
     const BYTE *text = find_section(self, ".text", &text_size);
-    if (text == NULL || text_size == 0) return 0;
+    if (text == NULL || text_size == 0) return integrity_mark_incomplete();
 
     size_t half = text_size / 2;
-    if (half == 0) return 0;
+    if (half == 0) return integrity_mark_incomplete();
 
     /* 后半段：[text+half, text+text_size) */
     return hash_and_verify(ANCHOR_SWITCH_TREE, text + half, text_size - half);
@@ -300,17 +321,17 @@ static int check_anchor_switch_tree(void)
  * 校验 SizeOfHeaders 区块，涵盖 DOS 头、NT 头、区段表与数据目录数组
  *（含入口点地址、导入/导出/资源等目录描述符）。
  */
-static int check_anchor_export_file(void)
+static IntegrityResult check_anchor_export_file(void)
 {
     HMODULE exe = get_exe_module();
-    if (exe == NULL) return 0;
+    if (exe == NULL) return integrity_mark_incomplete();
 
     const BYTE *base = NULL;
     const IMAGE_NT_HEADERS *nt = get_nt_headers(exe, &base);
-    if (nt == NULL || base == NULL) return 0;
+    if (nt == NULL || base == NULL) return integrity_mark_incomplete();
 
     DWORD headers_size = nt->OptionalHeader.SizeOfHeaders;
-    if (headers_size == 0) return 0;
+    if (headers_size == 0) return integrity_mark_incomplete();
 
     return hash_and_verify(ANCHOR_EXPORT_FILE, base, headers_size);
 }
@@ -320,18 +341,20 @@ static int check_anchor_export_file(void)
  * 通过 IMAGE_DIRECTORY_ENTRY_EXPORT 定位导出目录区段并计算 HMAC。
  *（DLL 暴露内部接口，导出表是注入/Hook 攻击的高价值目标。）
  */
-static int check_anchor_import_file(void)
+static IntegrityResult check_anchor_import_file(void)
 {
     HMODULE self = get_self_module();
-    if (self == NULL) return 0;
+    if (self == NULL) return integrity_mark_incomplete();
 
     const BYTE *base = NULL;
     const IMAGE_NT_HEADERS *nt = get_nt_headers(self, &base);
-    if (nt == NULL || base == NULL) return 0;
+    if (nt == NULL || base == NULL) return integrity_mark_incomplete();
 
     const IMAGE_DATA_DIRECTORY *exp_dir =
         &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-    if (exp_dir->VirtualAddress == 0 || exp_dir->Size == 0) return 0;
+    if (exp_dir->VirtualAddress == 0 || exp_dir->Size == 0) {
+        return integrity_mark_incomplete();
+    }
 
     const BYTE *export_data = base + exp_dir->VirtualAddress;
     DWORD export_size = exp_dir->Size;
@@ -342,17 +365,17 @@ static int check_anchor_import_file(void)
 /*
  * ANCHOR_CHANGE_PASSWORD：DLL .text 前半段。
  */
-static int check_anchor_change_password(void)
+static IntegrityResult check_anchor_change_password(void)
 {
     HMODULE self = get_self_module();
-    if (self == NULL) return 0;
+    if (self == NULL) return integrity_mark_incomplete();
 
     size_t text_size = 0;
     const BYTE *text = find_section(self, ".text", &text_size);
-    if (text == NULL || text_size == 0) return 0;
+    if (text == NULL || text_size == 0) return integrity_mark_incomplete();
 
     size_t half = text_size / 2;
-    if (half == 0) return 0;
+    if (half == 0) return integrity_mark_incomplete();
 
     /* 前半段：[text, text+half) */
     return hash_and_verify(ANCHOR_CHANGE_PASSWORD, text, half);
@@ -364,14 +387,14 @@ static int check_anchor_change_password(void)
  * 拼接后计算 HMAC。低开销、覆盖面广，适合高频“解锁”路径。
  * .text 过小时直接全段校验。
  */
-static int check_anchor_unlock(void)
+static IntegrityResult check_anchor_unlock(void)
 {
     HMODULE exe = get_exe_module();
-    if (exe == NULL) return 0;
+    if (exe == NULL) return integrity_mark_incomplete();
 
     size_t text_size = 0;
     const BYTE *text = find_section(exe, ".text", &text_size);
-    if (text == NULL || text_size == 0) return 0;
+    if (text == NULL || text_size == 0) return integrity_mark_incomplete();
 
     /* .text 不足抽样总量时直接全段校验 */
     if (text_size < (size_t)(UNLOCK_SAMPLE_COUNT * UNLOCK_SAMPLE_BYTES)) {
@@ -393,8 +416,8 @@ static int check_anchor_unlock(void)
                UNLOCK_SAMPLE_BYTES);
     }
 
-    int result = hash_and_verify(ANCHOR_UNLOCK,
-                                 sample_buf, sizeof sample_buf);
+    IntegrityResult result = hash_and_verify(ANCHOR_UNLOCK,
+                                             sample_buf, sizeof sample_buf);
     verthys_secure_zero(sample_buf, sizeof sample_buf);
     return result;
 }
@@ -432,21 +455,31 @@ void integrity_set_baseline(IntegrityAnchor anchor, const uint8_t hash[32])
     memcpy(s_baseline[anchor], hash, VERTHYS_HMAC_BYTES);
 }
 
-int integrity_check_startup(void)
+long integrity_incomplete_count(void)
+{
+    return (long)InterlockedExchangeAdd(&s_incomplete_count, 0);
+}
+
+void integrity_test_force_fail(int enabled)
+{
+    InterlockedExchange(&s_test_force_fail, enabled ? 1 : 0);
+}
+
+IntegrityResult integrity_check_startup(void)
 {
     if (!s_initialized) {
-        if (integrity_init() != 0) return 0;  /* 初始化失败，不阻断 */
+        if (integrity_init() != 0) return integrity_mark_incomplete();
     }
     return check_anchor_startup();
 }
 
-int integrity_check_anchor(IntegrityAnchor anchor)
+IntegrityResult integrity_check_anchor(IntegrityAnchor anchor)
 {
     if (!s_initialized) {
-        if (integrity_init() != 0) return 0;  /* 初始化失败，不阻断 */
+        if (integrity_init() != 0) return integrity_mark_incomplete();
     }
 
-    if (anchor < 0 || anchor >= ANCHOR_COUNT) return 0;
+    if (anchor < 0 || anchor >= ANCHOR_COUNT) return integrity_mark_incomplete();
 
     switch (anchor) {
         case ANCHOR_STARTUP:
@@ -464,12 +497,12 @@ int integrity_check_anchor(IntegrityAnchor anchor)
         case ANCHOR_UNLOCK:
             return check_anchor_unlock();
         default:
-            return 0;  /* 未知锚点，不阻断 */
+            return integrity_mark_incomplete();  /* 未知锚点：未完成 */
     }
 }
 
 /* ===================================================================== *
- *        ★ 构建期签名 + 一次性验签（.vsec 机制）实现          *
+ *        构建期签名 + 一次性验签（.vsec 机制）实现          *
  * ===================================================================== *
  *
  * .vsec 节布局（128 字节，只读节，由构建脚本在链接后补丁）：
@@ -576,31 +609,99 @@ static int vsec_hash_file_region(FILE *f, long raw_ptr, DWORD raw_size,
     return 0;
 }
 
-int integrity_verify_startup(void)
+/* ---------- 自身文件验签缓存（解锁热路径） ---------- */
+
+/*
+ * 指纹键：自身磁盘文件的卷序列号 + 文件索引 + 大小 + 最后写入时间。
+ * 卷序列号与文件索引是替换型改动的硬指纹（rename 替换必变）；大小
+ * 捕获追加/截断；最后写入时间捕获 in-place 改写（对抗者精确复位
+ * 元数据的场景超出本层防御范围，由锚点校验与应急闭环纵深兜底）。
+ */
+typedef struct IvVerifyCache {
+    int      valid;
+    int      result;
+    DWORD    volume_serial;
+    uint64_t file_index;
+    uint64_t file_size;
+    uint64_t mtime_ft;
+} IvVerifyCache;
+
+static IvVerifyCache g_iv_cache;
+static SRWLOCK        g_iv_cache_lock = SRWLOCK_INIT;
+/* 冷路径重算次数（Interlocked；测试白盒观测缓存回放/失效） */
+static volatile LONG  g_iv_recompute_count = 0;
+
+static uint64_t iv_info_index(const BY_HANDLE_FILE_INFORMATION *info)
 {
-    /* 常量时间引用 .vsec（防止 /OPT:REF 剪除只读节） */
-    volatile const uint8_t *blob_ref = g_vsec_blob;
-    (void)blob_ref;
+    return ((uint64_t)info->nFileIndexHigh << 32) | info->nFileIndexLow;
+}
 
-    /* 1. 定位自身 DLL 文件路径 */
-    HMODULE hSelf = NULL;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            (LPCWSTR)&integrity_verify_startup, &hSelf) ||
-        hSelf == NULL) {
-        return 0;  /* 无法定位自身模块：不阻断（基础设施异常不误报原则） */
+static uint64_t iv_info_size(const BY_HANDLE_FILE_INFORMATION *info)
+{
+    return ((uint64_t)info->nFileSizeHigh << 32) | info->nFileSizeLow;
+}
+
+static uint64_t iv_info_mtime(const BY_HANDLE_FILE_INFORMATION *info)
+{
+    ULARGE_INTEGER u;
+    u.LowPart  = info->ftLastWriteTime.dwLowDateTime;
+    u.HighPart = info->ftLastWriteTime.dwHighDateTime;
+    return u.QuadPart;
+}
+
+/* 调用方须已持 g_iv_cache_lock（共享或独占） */
+static int iv_cache_match(const BY_HANDLE_FILE_INFORMATION *info)
+{
+    if (!g_iv_cache.valid) return 0;
+    return g_iv_cache.volume_serial == info->dwVolumeSerialNumber &&
+           g_iv_cache.file_index    == iv_info_index(info) &&
+           g_iv_cache.file_size     == iv_info_size(info) &&
+           g_iv_cache.mtime_ft      == iv_info_mtime(info);
+}
+
+/* 调用方须已持独占锁 */
+static void iv_cache_store(const BY_HANDLE_FILE_INFORMATION *info, int result)
+{
+    g_iv_cache.valid         = 1;
+    g_iv_cache.result        = result;
+    g_iv_cache.volume_serial = info->dwVolumeSerialNumber;
+    g_iv_cache.file_index    = iv_info_index(info);
+    g_iv_cache.file_size     = iv_info_size(info);
+    g_iv_cache.mtime_ft      = iv_info_mtime(info);
+}
+
+long integrity_verify_recompute_count(void)
+{
+    return (long)g_iv_recompute_count;
+}
+
+void integrity_verify_cache_reset(void)
+{
+    AcquireSRWLockExclusive(&g_iv_cache_lock);
+    g_iv_cache.valid = 0;
+    ReleaseSRWLockExclusive(&g_iv_cache_lock);
+}
+
+/*
+ * 对自身文件句柄执行完整 .vsec 验签（.vsec 基准读取 + 节重算 +
+ * 常量时间比对）。句柄所有权转移给内部 FILE*（fclose 关闭），一切
+ * 出口均释放文件，调用方不得再 CloseHandle。验签与指纹同源于一个
+ * 文件对象：指纹对象与验签对象严格同一，无路径替换竞态。
+ */
+static int iv_verify_file(HANDLE hfile)
+{
+    int fd = _open_osfhandle((intptr_t)hfile, _O_RDONLY);
+    if (fd == -1) {
+        CloseHandle(hfile);   /* 移交失败：本地关闭 */
+        return 0;             /* 基础设施异常不误报原则 */
     }
-    wchar_t self_path[MAX_PATH];
-    if (GetModuleFileNameW(hSelf, self_path, MAX_PATH) == 0) {
-        return 0;
+    FILE *f = _fdopen(fd, "rb");
+    if (f == NULL) {
+        _close(fd);           /* 关闭底层句柄 */
+        return 0;             /* 基础设施异常不误报原则 */
     }
 
-    /* 2. 读取 .vsec 基准（从文件读取，保持与签名阶段同一字节源） */
-    FILE *f = NULL;
-    if (_wfopen_s(&f, self_path, L"rb") != 0 || f == NULL) {
-        return 0;  /* 文件打开失败：不阻断 */
-    }
-
+    /* 1. 读取 .vsec 基准（与签名阶段同一字节源） */
     long vsec_ptr = 0; DWORD vsec_size = 0;
     uint8_t baseline[VSEC_BLOB_BYTES];
     memset(baseline, 0, sizeof(baseline));
@@ -625,7 +726,7 @@ int integrity_verify_startup(void)
         return 0; /* 未配置（全零占位）或魔法不符：跳过 */
     }
 
-    /* 3. 重算 .text / .rdata（v2：+ .rhat）文件内容 HMAC */
+    /* 2. 重算 .text / .rdata（v2：+ .rhat）文件内容 HMAC */
     uint8_t text_mac[VERTHYS_HMAC_BYTES];
     uint8_t rdata_mac[VERTHYS_HMAC_BYTES];
     uint8_t rhat_mac[VERTHYS_HMAC_BYTES];
@@ -649,7 +750,7 @@ int integrity_verify_startup(void)
         return 0; /* 节解析失败：基础设施异常不误报 */
     }
 
-    /* 4. 常量时间比对（v2：追加 .rhat 槽） */
+    /* 3. 常量时间比对（v2：追加 .rhat 槽） */
     uint8_t diff = 0;
     for (size_t i = 0; i < VERTHYS_HMAC_BYTES; i++) {
         diff |= (uint8_t)(text_mac[i] ^ baseline[VSEC_TEXT_HMAC_OFF + i]);
@@ -669,4 +770,73 @@ int integrity_verify_startup(void)
         return (int)VERTHYS_ERR_CORRUPT;
     }
     return 0;
+}
+
+int integrity_verify_startup(void)
+{
+    /* 常量时间引用 .vsec（防止 /OPT:REF 剪除只读节） */
+    volatile const uint8_t *blob_ref = g_vsec_blob;
+    (void)blob_ref;
+
+    /* 1. 定位自身模块文件路径 */
+    HMODULE hSelf = NULL;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)&integrity_verify_startup, &hSelf) ||
+        hSelf == NULL) {
+        return 0;  /* 无法定位自身模块：不阻断（基础设施异常不误报原则） */
+    }
+    wchar_t self_path[MAX_PATH];
+    if (GetModuleFileNameW(hSelf, self_path, MAX_PATH) == 0) {
+        return 0;
+    }
+
+    /* 2. 自身文件句柄 + 指纹（GetFileInformationByHandle 内核元数据，
+     *    便宜且可靠；三向共享打开防互斥锁死） */
+    HANDLE hf = CreateFileW(self_path, GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf == INVALID_HANDLE_VALUE) {
+        return 0;  /* 文件打开失败：不阻断 */
+    }
+    BY_HANDLE_FILE_INFORMATION info;
+    int have_info = GetFileInformationByHandle(hf, &info) ? 1 : 0;
+
+    /* 3. 快路径：指纹命中 → 回放上次验签结论（零节 I/O）。
+     *    共享锁只读，不阻塞并发解锁。 */
+    {
+        int hit = 0;
+        int rc = 0;
+        if (have_info) {
+            AcquireSRWLockShared(&g_iv_cache_lock);
+            hit = iv_cache_match(&info);
+            if (hit) rc = g_iv_cache.result;
+            ReleaseSRWLockShared(&g_iv_cache_lock);
+        }
+        if (hit) {
+            CloseHandle(hf);
+            return rc;
+        }
+    }
+
+    /* 4. 冷路径：模块级单飞锁独占重算；双检拦截并发对手先完成的重算。
+     *    验签与指纹同源于本句柄（iv_verify_file 转移所有权）。 */
+    {
+        int hit = 0;
+        int rc = 0;
+        AcquireSRWLockExclusive(&g_iv_cache_lock);
+        if (have_info) {
+            hit = iv_cache_match(&info);
+            if (hit) rc = g_iv_cache.result;
+        }
+        if (!hit) {
+            InterlockedIncrement(&g_iv_recompute_count);
+            rc = iv_verify_file(hf);
+            hf = INVALID_HANDLE_VALUE;
+            if (have_info) iv_cache_store(&info, rc);
+        }
+        ReleaseSRWLockExclusive(&g_iv_cache_lock);
+        if (hf != INVALID_HANDLE_VALUE) CloseHandle(hf);
+        return rc;
+    }
 }

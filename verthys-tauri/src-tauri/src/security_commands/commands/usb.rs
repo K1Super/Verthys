@@ -5,7 +5,7 @@
  * 职责：
  *   USB 安全 Tauri 命令实现：
  *     - security_usb_read_serial：读取 USB 设备序列号（加盐 HMAC-SHA256）
- *     - security_usb_register_device：注册已知 USB 设备（需 auth_token + 容量限制）
+ *     - security_usb_register_device：注册已知 USB 设备（需已解锁会话 + 容量限制）
  *     - security_usb_check_clone：检测克隆外设
  *     - security_usb_shadow_sleep：进入影子休眠（加密索引驻留内存）
  *     - security_usb_try_recover：尝试从影子休眠恢复加密索引
@@ -20,7 +20,7 @@ use crate::security::usb_guard::{read_device_serial, CloneCheckResult};
 use crate::util::audit_log::{AuditEventType, AuditResult};
 
 use crate::security_commands::audit::write_security_audit;
-use crate::security_commands::auth::verify_and_consume_auth_token;
+use crate::security_commands::auth::require_session_authorized;
 use crate::security_commands::persistence::{
     ensure_usb_registry_loaded, ensure_usb_salt, persist_usb_registry,
 };
@@ -79,30 +79,30 @@ pub fn security_usb_read_serial(
 
 /// 注册已知 USB 设备（卷标 + 序列号哈希）
 ///
-/// 需要管理员授权（auth_token）
-/// 注册表容量限制（100 条），超限拒绝
-/// 注册后自动 DPAPI 加密持久化，形成不可篡改的安全基线
+/// 授权：需已解锁的会话（密钥生命周期为 Locked 或 Unlocked）。
+/// 注册表容量限制（100 条），超限拒绝；注册后自动 DPAPI 加密
+/// 持久化，形成不可篡改的安全基线。
 #[tauri::command]
 pub fn security_usb_register_device(
     app: tauri::AppHandle,
     state: State<SecurityState>,
+    app_state: State<'_, crate::state::AppState>,
     volume_label: String,
     serial_hash: String,
-    auth_token: Option<String>,
 ) -> Result<SecurityResult, String> {
-    // 验证 auth_token（注册设备需管理员授权）
-    if !verify_and_consume_auth_token(&state, auth_token.as_deref()) {
+    // 授权检查：注册设备需已解锁的会话
+    if let Err(msg) = require_session_authorized(&app_state) {
         write_security_audit(
             &app,
             &state,
             AuditEventType::DeviceBind,
             AuditResult::Denied,
             Some(&volume_label),
-            Some("PERMISSION_DENIED: register_device 缺少有效 auth_token".into()),
+            Some(format!("PERMISSION_DENIED: register_device {}", msg)),
         );
         return Ok(SecurityResult::error(
             "PERMISSION_DENIED",
-            "注册 USB 设备需要有效授权令牌",
+            "注册 USB 设备需要已解锁的会话",
         ));
     }
 

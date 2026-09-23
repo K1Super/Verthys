@@ -1,8 +1,6 @@
 # =============================================================================
 # .clang-tidy — Verthys 静态检测左移配置
 #
-# ★ P0 缺陷1企业级方案 — 静态检测左移
-#
 # 目标：在 CI/本地构建阶段拦截内部栈/堆指针对外裸露、Use-After-Free、
 #       缓存借用指针逃逸等内存安全缺陷，将运行时崩溃左移至编译期阻断。
 #
@@ -10,9 +8,13 @@
 #           HeaderFilterRegex 仅校验项目自有头文件，不检查第三方库。
 #
 # 启用方式（CMake 集成）：
-#   cmake -S . -B build_ninja -G Ninja -DCMAKE_BUILD_TYPE=Release \
+#   cmake -S . -B build_ci -G Ninja -DCMAKE_BUILD_TYPE=Release \
 #         -DVERTHYS_ENABLE_CLANG_TIDY=ON
-#   或直接：clang-tidy -p build_ninja core/src/api/verthys_api.c
+#   或直接：clang-tidy -p build_ci core/src/api/verthys_api.c
+#
+# 存量告警过渡策略：首次启用若出现存量告警，登记到仓库根
+#   ci/clang_tidy_baseline.txt（格式：check 名 + 文件 + 行号），
+#   新代码零告警；豁免项限期清理，清理一条删除一条。
 # =============================================================================
 ---
 # 仅校验项目自有头文件，跳过 third_party / 系统库 / MSVC 头
@@ -43,7 +45,7 @@ Checks:
   - 'bugprone-misplaced-widening-cast'
   - 'clang-analyzer-core.NullDereference' # 空指针解引用
   - 'clang-analyzer-core.DivideZero'
-  - 'clang-analyzer-core.StackAddressEscape' # ★ 栈地址逃逸：返回栈变量指针
+  - 'clang-analyzer-core.StackAddressEscape' # 栈地址逃逸：返回栈变量指针
 
   # --------------------------------------------------------------------------
   # 三、内存分配/释放配对检测（UAF 根因：不匹配的分配器）

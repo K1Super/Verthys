@@ -7,15 +7,16 @@
  *   会话守卫 Tauri 命令实现：
  *     - security_session_start：启动会话守卫（必须获取主窗口 HWND，失败不静默）
  *     - security_session_stop：停止会话守卫
- *     - security_session_set_high_security：设置高安全模式（需 auth_token）
+ *     - security_session_set_high_security：设置高安全模式（需已解锁会话）
  */
 
 use tauri::{Manager, State};
 
+use crate::state::AppState;
 use crate::util::audit_log::{AuditEventType, AuditResult};
 
 use crate::security_commands::audit::write_security_audit;
-use crate::security_commands::auth::verify_and_consume_auth_token;
+use crate::security_commands::auth::require_session_authorized;
 use crate::security_commands::responses::SecurityResult;
 use crate::security_commands::state::{lock_session_guard_or_recover, SecurityState};
 
@@ -96,30 +97,28 @@ pub fn security_session_stop(
 
 /// 设置高安全模式（启用电源挂起监听 + 更激进的锁屏策略）
 ///
-/// 要求：携带有效的 auth_token（一次性消费），防止前端恶意关闭安全防护
+/// 授权：当前会话必须已解锁容器且存在主密钥记录（密钥生命周期
+/// 为 Locked 或 Unlocked），防止未建立会话的进程操纵防护级别。
+/// 高安全标志为进程内原子写，命令持锁时间与执行时长均可忽略。
 #[tauri::command]
 pub fn security_session_set_high_security(
     app: tauri::AppHandle,
     state: State<SecurityState>,
+    app_state: State<'_, AppState>,
     enabled: bool,
-    auth_token: Option<String>,
 ) -> Result<SecurityResult, String> {
-    // 验证 auth_token
-    if !verify_and_consume_auth_token(&state, auth_token.as_deref()) {
+    if let Err(msg) = require_session_authorized(&app_state) {
         write_security_audit(
             &app,
             &state,
             AuditEventType::SecurityCommand,
             AuditResult::Denied,
             None,
-            Some(format!(
-                "PERMISSION_DENIED: set_high_security({}) 缺少有效 auth_token",
-                enabled
-            )),
+            Some(format!("PERMISSION_DENIED: set_high_security({}) {}", enabled, msg)),
         );
         return Ok(SecurityResult::error(
             "PERMISSION_DENIED",
-            "设置高安全模式需要有效授权令牌",
+            "设置高安全模式需要已解锁的会话",
         ));
     }
 

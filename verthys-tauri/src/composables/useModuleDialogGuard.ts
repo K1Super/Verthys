@@ -1,7 +1,7 @@
 /**
  * useModuleDialogGuard — 模块弹窗清理守卫
  *
- * 企业级根治「页面覆盖」问题：
+ * 根治「页面覆盖」问题：
  *   根因：各模块弹窗使用 <Teleport to="body">，脱离组件 DOM 树。
  *   cross-fade 切换模块时，旧模块的弹窗仍残留在 body 中，覆盖新模块内容。
  *

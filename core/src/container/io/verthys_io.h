@@ -1,7 +1,7 @@
 /*
  * verthys_io.h — 统一 64 位文件偏移 I/O 层（内部模块，不导出）
  *
- * ★ 统一安全 I/O 层。
+ * 统一安全 I/O 层。
 
  * 背景：Windows x64 的 long 为 32 位，`fseek(f, (long)offset, ...)` 与
  * `ftell` 在 >2GB 文件上溢出/取负——容器超过 2GB 后所有索引/数据/日志

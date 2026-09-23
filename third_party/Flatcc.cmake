@@ -101,5 +101,5 @@ endif()
 # ---------- vendored xxHash（单头文件，XXH_INLINE_ALL 消费方定义） ----------
 # third_party/xxhash/xxhash.h — v0.8.3（tag e626a72bc2321cd320e953a0ccf1584cad60f363）
 # SHA-256: 17973C0DC49D9854CA26CAA191F0E12F7A424B68858D9A78DE3860D959D85E4B
-# 用法：#define XXH_INLINE_ALL 后 #include "xxhash.h"（LSM Bloom Filter，WP-4）
+# 用法：#define XXH_INLINE_ALL 后 #include "xxhash.h"（LSM Bloom Filter）
 set(VERTHYS_XXHASH_INCLUDE_DIR ${CMAKE_CURRENT_LIST_DIR}/xxhash CACHE INTERNAL "vendored xxHash include dir")

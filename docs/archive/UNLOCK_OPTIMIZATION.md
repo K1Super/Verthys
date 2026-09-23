@@ -734,7 +734,7 @@ Verthys_Unlock(password, flags) → VERTHYS_OK
 /* Verthys_Unlock flags 扩展 */
 #define VERTHYS_UNLOCK_FLAG_INDEX_PREHEATED  (1 << 0)  /* 已完全预热 */
 #define VERTHYS_UNLOCK_FLAG_ALLOW_CACHE      (1 << 1)  /* 允许持久化缓存 */
-#define VERTHYS_UNLOCK_FLAG_MINIMAL_FIRST    (1 << 2)  /* ★ 新增：先最小可用，后台预热 */
+#define VERTHYS_UNLOCK_FLAG_MINIMAL_FIRST    (1 << 2)  /* 新增：先最小可用，后台预热 */
 
 /* 新的返回码 */
 #define VERTHYS_ERR_PARTIAL_UNLOCK           (0x13)  /* 可操作但索引未完全预热 */
@@ -898,9 +898,9 @@ static bool is_system_under_pressure(void) {
 ```
 core/src/api/
 ├── verthys_api.c              # 修改：Verthys_Unlock 重构为流水线调用
-├── verthys_unlock_pipeline.c  # ★ 新增：解锁流水线调度器
-├── verthys_unlock_stages.c    # ★ 新增：各阶段实现（S0-S6）
-└── verthys_unlock_timing.c    # ★ 新增：耗时采集与统计
+├── verthys_unlock_pipeline.c  # 新增：解锁流水线调度器
+├── verthys_unlock_stages.c    # 新增：各阶段实现（S0-S6）
+└── verthys_unlock_timing.c    # 新增：耗时采集与统计
 
 core/src/container/
 ├── verthys_superblock_v3.c    # 修改：并行副本读取
@@ -908,7 +908,7 @@ core/src/container/
 
 core/src/index/
 ├── verthys_lsm.c              # 修改：懒加载 + 温缓存集成
-└── verthys_warmcache.c        # ★ 新增：温启动缓存读写
+└── verthys_warmcache.c        # 新增：温启动缓存读写
 
 core/src/crypto/
 └── verthys_crypto.c           # 修改：Argon2id 校准 v3

@@ -22,7 +22,7 @@ import HomeView from "./HomeView.vue";
 import { MODULE_DIALOG_GUARD_KEY } from "../../composables/useModuleDialogGuard";
 import { TRANSITION } from "../../app/constants";
 
-/* ★ 模块加载兜底提示（预热未完成时点击模块可达）：
+/* 模块加载兜底提示（预热未完成时点击模块可达）：
  * 「深空对接」— 双层反向旋转叠加出偏心轨迹光点（非标准圆环旋转），
  * 纯 transform 动画无 filter；delay 250ms — chunk 就绪快时不闪现 */
 const ModuleLoading = defineComponent({
@@ -65,12 +65,12 @@ defineEmits<{
   (e: "panel-active", val: boolean): void;
 }>();
 
-/* ★ 企业级修复「页面覆盖」：provide currentModule 响应式引用
+/* 修复「页面覆盖」：provide currentModule 响应式引用
  *   各模块通过 useModuleDialogGuard inject 并 watch，
  *   切换模块时同步关闭旧模块的所有 Teleport 弹窗，杜绝残留覆盖 */
 provide(MODULE_DIALOG_GUARD_KEY, toRef(props, "currentModule"));
 
-/* ★ 首次点击模块延迟根治：挂载后空闲期预热全部分包
+/* 首次点击模块延迟根治：挂载后空闲期预热全部分包
  *
  * 根因：6 个模块均为懒加载，首次点击某模块时才拉取其完整分包图
  *   （中枢分包最大），加载/解析/执行全部落在点击后的 UI 线程，
@@ -135,7 +135,7 @@ onMounted(() => {
 }
 
 /* 模块切换过渡（cross-fade：新旧组件同时存在，无 out-in 死等） */
-/* ★ 企业级修复：z-index 层级确保新模块覆盖旧模块，杜绝视觉覆盖 */
+/* 修复：z-index 层级确保新模块覆盖旧模块，杜绝视觉覆盖 */
 .module-switch-enter-active {
   transition: opacity 0.35s var(--ease), transform 0.35s var(--ease);
   position: relative;

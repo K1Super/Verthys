@@ -149,9 +149,21 @@ struct VerthysLsmMemTable {
     uint64_t max_lid;
 };
 
+/* 测试白盒：强制后续 memtable_create 返回 NULL（分配失败注入；
+ * 仅 verthys_tests.exe 对象直链调用，不在 DLL 导出清单中） */
+static int s_test_force_alloc_fail = 0;
+
+void verthys_lsm_memtable_test_force_alloc_fail(int enabled)
+{
+    s_test_force_alloc_fail = enabled ? 1 : 0;
+}
+
 VerthysLsmMemTable *verthys_lsm_memtable_create(void)
 {
-    VerthysLsmMemTable *mt = (VerthysLsmMemTable *)calloc(1, sizeof(*mt));
+    VerthysLsmMemTable *mt;
+
+    if (s_test_force_alloc_fail) return NULL;
+    mt = (VerthysLsmMemTable *)calloc(1, sizeof(*mt));
     if (mt == NULL) return NULL;
 
     /* 哨兵节点：塔高 MAX_HEIGHT，lid 语义无效（查找以比较结果走向） */

@@ -21,7 +21,7 @@
 import "./styles/tokens.css";
 import "./styles/components.css";
 import "./styles/animations.css";
-// ★ 空闲 CSS 动画治理（idle-*/glass-calm/reduce-motion 根类规则，置于最后覆盖）
+// 空闲 CSS 动画治理（idle-*/glass-calm/reduce-motion 根类规则，置于最后覆盖）
 import "./styles/idle-governance.css";
 
 import { validateConfig } from "./app/config";

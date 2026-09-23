@@ -420,7 +420,100 @@ TEST(arekey_crash_orphan_frame)
     return 0;
 }
 
-/* ================== 5. 崩溃窗口 b：提交后（重开闭环） ================== */
+/* ================== 5. 轮换在途互斥（REKEYING 态） ================== */
+
+/*
+ * 在途守卫：km 已处于 REKEYING（另一轮换在准备期）→ rotate 入口被
+ * 状态守卫拒绝（CNG_UNAVAILABLE），rotated=0、盘面零变更。状态恢复后
+ * 轮换可正常执行——守卫拒绝不粘滞、不破坏运行态。
+ */
+TEST(arekey_inflight_guard_rejects)
+{
+    VerthysHandle h;
+    struct VerthysContext *ctx;
+    VerthysContextV3 *v3;
+    uint64_t id = 0;
+    int rotated = -1;
+    VerthysResult r;
+
+    CHECK_EQ(arekey_make_locked(AREKEY_VERTHYS, &id), 0);
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_Unlock(h, AREKEY_VERTHYS, AREKEY_PW, AREKEY_PW_LEN, 0),
+             VERTHYS_OK);
+    ctx = (struct VerthysContext *)h;
+    v3 = ctx->v3;
+    CHECK(v3 != NULL && v3->subsystems_open == 1);
+    CHECK(verthys_cng_km_state(v3->km) == VERTHYS_CNG_KM_KERNEL_RESIDENT);
+
+    /* 白盒注入在途态（模拟另一轮换准备期中） */
+    v3->km->state = VERTHYS_CNG_KM_REKEYING;
+    r = verthys_rekey_auto_rotate(v3, 1, &rotated);
+    v3->km->state = VERTHYS_CNG_KM_KERNEL_RESIDENT;   /* 先恢复再断言 */
+
+    CHECK_EQ(r, VERTHYS_ERR_CNG_UNAVAILABLE);          /* 在途：入口拒绝 */
+    CHECK_EQ(rotated, 0);                              /* 零副作用 */
+    CHECK(verthys_cng_km_state(v3->km) == VERTHYS_CNG_KM_KERNEL_RESIDENT);
+
+    /* 状态恢复后轮换照常执行（守卫不粘滞） */
+    CHECK_EQ(verthys_rekey_auto_rotate(v3, 1, &rotated), VERTHYS_OK);
+    CHECK_EQ(rotated, 1);
+
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    Verthys_Deinit(h);
+    arekey_cleanup();
+    return 0;
+}
+
+/*
+ * 准备期失败状态恢复：白盒破坏分区 wrapped 长度（重包装阶段前置检查
+ * 拒绝）→ rotate 在已入态 REKEYING 的中途失败（INTERNAL）。断言返回后
+ * km 状态恢复 KERNEL_RESIDENT（不被失败粘滞），rotated=0、旧密钥组零
+ * 变更，复原破坏字段后轮换与数据读写全链正常。
+ */
+TEST(arekey_prep_failure_restores_state)
+{
+    VerthysHandle h;
+    struct VerthysContext *ctx;
+    VerthysContextV3 *v3;
+    VerthysRecord out;
+    uint64_t id = 0;
+    int rotated = -1;
+    size_t saved_len;
+    VerthysResult r;
+
+    CHECK_EQ(arekey_make_locked(AREKEY_VERTHYS, &id), 0);
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_Unlock(h, AREKEY_VERTHYS, AREKEY_PW, AREKEY_PW_LEN, 0),
+             VERTHYS_OK);
+    ctx = (struct VerthysContext *)h;
+    v3 = ctx->v3;
+    CHECK(v3 != NULL && v3->subsystems_open == 1);
+    CHECK(v3->ptable.count >= 1);
+
+    /* 白盒破坏：wrapped 长度错值 → 重包装第一步即 INTERNAL（已入态） */
+    saved_len = v3->ptable.entries[0].wrapped_key_len;
+    v3->ptable.entries[0].wrapped_key_len = 0;
+    r = verthys_rekey_auto_rotate(v3, 1, &rotated);
+    v3->ptable.entries[0].wrapped_key_len = saved_len;   /* 先复原再断言 */
+
+    CHECK_EQ(r, VERTHYS_ERR_INTERNAL);
+    CHECK_EQ(rotated, 0);
+    CHECK(verthys_cng_km_state(v3->km) == VERTHYS_CNG_KM_KERNEL_RESIDENT);
+
+    /* 复原后：旧密钥组可用（数据可读），轮换照常执行 */
+    CHECK_EQ(Verthys_GetRecord(h, id, &out), VERTHYS_OK);
+    CHECK(memcmp(out.data, "data-0", 6) == 0);
+    CHECK_EQ(verthys_rekey_auto_rotate(v3, 1, &rotated), VERTHYS_OK);
+    CHECK_EQ(rotated, 1);
+    CHECK(verthys_cng_km_state(v3->km) == VERTHYS_CNG_KM_KERNEL_RESIDENT);
+
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    Verthys_Deinit(h);
+    arekey_cleanup();
+    return 0;
+}
+
+/* ================== 6. 崩溃窗口 b：提交后（重开闭环） ================== */
 
 /*
  * 法定人数提交成功后立即崩溃（句柄切换为内存态，盘面已完成）：

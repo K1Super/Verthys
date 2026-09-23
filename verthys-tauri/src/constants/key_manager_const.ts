@@ -7,7 +7,7 @@ import type { ModuleId } from "../types/key_manager";
 
 /* Verthys 记录类型
  *
- * ★ 企业级根治：TYPE 常量统一到 constants/record_types.ts（单一真相源）
+ * 修复：TYPE 常量统一到 constants/record_types.ts（单一真相源）
  *
  * 原缺陷：TYPE_GLOBAL_KEY=0x10 与 AccountVerthys.vue 局部定义的 TYPE_ACCOUNT=0x10
  * 值相同，导致全局密钥记录与账户记录互相误识，引发设置遗忘/密钥验证无效/
@@ -23,7 +23,7 @@ export {
   TYPE_MODULE_KEY_CONFIG,
 } from "./record_types";
 
-/* ★ 模块密钥记录版本化常量 */
+/* 模块密钥记录版本化常量 */
 
 /** 模块密钥记录当前版本号（每次 setModuleKey 写入此值）
  *
@@ -71,14 +71,14 @@ export const VERTHYS_DEFAULT_PASSWORD = "VERTHYS_DEFAULT_PASSWORD_v1";
 export const INIT_TIMEOUT_MS = 30 * 1000;
 export const CREATE_TIMEOUT_MS = 120 * 1000;
 
-/* ★ 分级超时熔断常量（前端调度层）
+/* 分级超时熔断常量（前端调度层）
  *
  * 替代原固定 35s 单一超时阈值，区分可容忍的计算缓慢与不可容忍的 IO 卡死：
  *   - 软超时 15s：Argon2id 派生耗时过长，前端提示「密钥计算较慢，请耐心等待」继续执行
  *   - 硬超时 120s：整体解锁未完成，触发降级校验，仅保障核心数据可读
  *   - 熔断阈值 3：连续 3 次硬超时自动锁定容器，引导用户使用备份密钥恢复
  *
- * ★ 企业级根治修复（硬超时 35s → 120s）：
+ * 修复修复（硬超时 35s → 120s）：
  *   原硬超时 35s 对 SECURE 预设（Argon2id 64MiB/3/1）在大 verthys 或低端 CPU 上
  *   不足以完成解锁（Argon2id 6~15s + B+树解密 + 摘要加载可能 20~40s），
  *   导致正常解锁被误判为超时失败。

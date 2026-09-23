@@ -7,7 +7,7 @@
     4. 确认按钮（解锁/创建）
     5. 脉冲星磁层辐射加载 + 解锁进度实时反馈
 
-  ★ 悬浮场重构（替代卡片式 CosmicDialog）：
+  悬浮场重构（替代卡片式 CosmicDialog）：
     - 零底板：UI 组件直接悬浮于遮罩之上（LevitationField 透视舞台）
     - 节点协议：ff-node（深空定位入射 — 一次性，终态静态驻留；
       指针视差/斥力/漂移体系已彻底移除，弹窗静态）
@@ -37,7 +37,7 @@
         </div>
       </div>
 
-      <!-- ★ 企业级：修复失败告警 — repair_fail_count >= 3 时显示（左缘警示刻线） -->
+      <!-- ：修复失败告警 — repair_fail_count >= 3 时显示（左缘警示刻线） -->
       <div v-if="initDetailRef && initDetailRef.includes('⚠')" class="ff-node ff-node--body">
         <div class="sc-repair-alert">{{ initDetailRef }}</div>
       </div>
@@ -68,7 +68,7 @@
       </div>
 
       <!-- 确认按钮（轨道巡行提交 — 悬浮场锚点）
-           ★ 布局零位移根治：按钮常驻（未选路径时 disabled）—
+           布局零位移根治：按钮常驻（未选路径时 disabled）—
            checkInitStatus 异步自动填充 verthysPath 时仅切换可用态，
            节点不再突然挂载（原 v-if="!unlocking && verthysPath" 会使
            内容高度 +50px → justify-content: center 重新分布 →

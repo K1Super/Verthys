@@ -1,8 +1,8 @@
 <!--
   BrandMark.vue — 弹窗品牌字（VERTHYS mini 级雕刻排印）
-  ★ 职责：安全弹窗（安全存储初始化/身份验证/初始化安全密钥）顶部的
+  职责：安全弹窗（安全存储初始化/身份验证/初始化安全密钥）顶部的
     品牌标识 — 替代已删除的三个顶部图标（IconCore/IconShield/IconCrystal）。
-  ★ 复用体系（零新样式语言）：
+  复用体系（零新样式语言）：
     - 参数：useBrandTitle({ mini: true }) — 同一确定性 hash 场的第三级
       幅度（intro 引导页 / compact 主界面 / mini 弹窗），品牌形态跨场景同源
     - 样式：全局共享 .brand-title--mini + .brand-char + brand-assemble

@@ -59,7 +59,6 @@ defineEmits<{ (e: "click", ev: MouseEvent): void }>();
 .action-danger:hover:not(:disabled) {
   background: rgba(255, 46, 99, 0.08);
   border-color: var(--accent-red);
-  box-shadow: 0 0 12px rgba(255, 46, 99, 0.1);
 }
 
 /* 加号图标 */

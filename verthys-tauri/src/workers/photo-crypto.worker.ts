@@ -1,7 +1,7 @@
 /**
  * workers/photo-crypto.worker.ts — 照片加密 Web Worker
  *
- * ★ Comprehensive_optimization：异步批处理流水线 — 传输器阶段（Web Worker 池）
+ * Comprehensive_optimization：异步批处理流水线 — 传输器阶段（Web Worker 池）
  *
  * =============================================================================
  * 职责
@@ -102,7 +102,7 @@ export interface PhotoCryptoFailure {
 }
 
 /* ------------------------------------------------------------------ *
- * ★ Parsed Import：meta-only 加密消息类型                             *
+ * Parsed Import：meta-only 加密消息类型                             *
  *                                                                    *
  * 解析 .venc 文件后，chunks 已用当前 photoKey 加密（同设备导入场景），  *
  * 仅需重新加密元数据（meta 在 doParse 阶段被解密用于预览）。            *
@@ -284,7 +284,7 @@ async function processPhoto(
 }
 
 /* ------------------------------------------------------------------ *
- * ★ Parsed Import：meta-only 加密（复用 encryptMeta，不重复加密 chunks）*
+ * Parsed Import：meta-only 加密（复用 encryptMeta，不重复加密 chunks）*
  * ------------------------------------------------------------------ */
 
 /**

@@ -6,7 +6,8 @@
  *   1. IsDebuggerPresent（PEB.BeingDebugged）
  *   2. NtQueryInformationProcess 三重探测
  *      （ProcessDebugPort / ProcessDebugFlags / ProcessDebugObjectHandle）
- *   3. 硬件断点检测（GetThreadContext 检查 DR0-DR3 寄存器）
+ *   3. 硬件断点检测（GetThreadContext 检查 DR0-DR3 寄存器——
+ *      调用瞬间的入口点快照检查，非持续监控）
  *
  * 响应层（分级模型）：
  *   - 任一命中 → emergency_report(EMERG_LEVEL_KILL, ...)：调试器确认属于
@@ -98,6 +99,9 @@ static int check_software_debugger(void)
 /* 检查当前线程上下文的 DR0-DR3 寄存器是否被显式设置（非零）。
  * DR0-DR3 是硬件断点地址寄存器，正常进程全为零；
  * 任一非零 = 调试器设置了硬件断点 → 高置信度入侵信号。
+ * 语义边界：本函数为调用瞬间的"入口点瞬时快照检查"（当前线程
+ * 调试寄存器），非持续监控——检查通过后调试器仍可事后设置
+ * 断点，该窗口风险由锚点校验与运行时哈希检测纵深兜底。
  * 返回 1=检测到硬件断点，0=未检测到。 */
 static int check_hardware_breakpoints(void)
 {

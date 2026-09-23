@@ -3,7 +3,7 @@
  *
  * 职责：统一管理模块内所有用户可见的瞬时提示（错误/成功/导出完成）。
  *
- * 设计动机（企业级根治 Toast 分裂问题）：
+ * 设计动机（根治 Toast 分裂问题）：
  *   旧实现中 usePhotoImport / usePhotoExport / usePhotoViewer / usePhotoParse / usePhotoDelete
  *   各自独立调用 useErrorToast()，由于 useErrorToast 非单例，每次调用创建独立的 errorMsg ref。
  *   结果：composable A 调用 showError 仅更新 A 的 errorMsg，但模板渲染的是 PhotoAlbum.vue

@@ -1,6 +1,6 @@
 ﻿# scripts/build_core.release.ps1 - 核心安全 DLL 生产环境构建（Release，无测试，供 Tauri 打包消费）
 #
-# ★ 编码警告：本文件必须保存为 UTF-8 with BOM 编码！
+# 编码警告：本文件必须保存为 UTF-8 with BOM 编码！
 #   Windows PowerShell 5.1 对无 BOM 文件按 ANSI/GBK 解码，中文注释乱码会
 #   破坏字符串配对导致解析错误（ParseError），而解析错误发生在任何代码
 #   执行之前，try/catch 与暂停完全失效——表现为窗口一闪而过且无任何
@@ -43,7 +43,7 @@ if ($Clean -and (Test-Path $buildDir)) {
     Remove-Item -Recurse -Force $buildDir
 }
 
-# ★ 陈旧缓存自愈（根因修复）：项目目录迁移/重命名后，
+# 陈旧缓存自愈（根因修复）：项目目录迁移/重命名后，
 # build/CMakeCache.txt 记录的绝对路径（CMAKE_HOME_DIRECTORY）失效，
 # CMake 报 "CMakeCache.txt directory ... is different than the directory
 # ... where CMakeCache.txt was created" 并拒绝配置。此处检测到不一致时
@@ -67,12 +67,12 @@ if (-not (Test-Path $dllPath)) {
 }
 
 
-# ========== ★ .vsec 完整性基准注入 ==========
+# ========== .vsec 完整性基准注入 ==========
 # 链接完成后解析 PE，计算 .text / .rdata / .rhat 节的文件内容 HMAC-SHA256
 # （域密钥与 core/src/security/integrity/integrity.c 中 K_VSEC_DOMAIN_KEY
 #   逐字节一致），写入 DLL 的 .vsec 只读节。运行时 integrity_verify_startup
 # 从磁盘重算比对（文件内容为校验对象，天然免疫 ASLR 重定位）。
-# ★ .rhat（运行时函数哈希表，rhash_gen POST_BUILD 已在 cmake --build
+# .rhat（运行时函数哈希表，rhash_gen POST_BUILD 已在 cmake --build
 #   阶段补丁）纳入第三槽——表文件级篡改 = 启动拒绝（构建期文件哈希被
 #   改写即可绕过运行期校验的攻击面被 .vsec 封死）。
 # 注意：Authenticode 签名（若有）必须在本步骤【之后】进行。

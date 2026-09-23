@@ -85,5 +85,5 @@
 1. 接口/目录/构建/配置/安全边界变更 → 同 PR 更新对应文档。
 2. 每文档末尾 `Last updated` 超过两个版本未更新需复核。
 3. 需求与测试条目必须可被测试或运行命令验证。
-4. 版本号、依赖版本以 `vcpkg.json` / `dep-versions.txt` 为准，文档只引用不抄录。
+4. 版本号、依赖版本以 `CMakeLists.txt` / `Cargo.toml` / `package.json` / `dep-versions.txt` 为准，文档只引用不抄录。
 5. `REQUIREMENTS`、`ARCHITECTURE`、`SECURITY_DESIGN`、`CORE_API`（API 类）变更需两人评审。

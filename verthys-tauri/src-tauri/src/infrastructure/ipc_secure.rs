@@ -64,18 +64,27 @@ impl SignedMessage {
 
     /// 按照规范拼接签名原文：小端8字节nonce + Base64载荷字符串
     /// 使用共享会话密钥计算HMAC-SHA256并转为十六进制
-    fn compute_hmac(session_key: &[u8], nonce: u64, payload_b64: &str) -> String {
+    /// 失败（密钥被后端拒绝）不 panic：上抛 Err 由调用方处置
+    fn compute_hmac(session_key: &[u8], nonce: u64, payload_b64: &str) -> Result<String, String> {
         let mut signing_data = Vec::with_capacity(8 + payload_b64.len());
         signing_data.extend_from_slice(&nonce.to_le_bytes());
         signing_data.extend_from_slice(payload_b64.as_bytes());
 
-        let hmac_tag = hmac_sign(session_key, &signing_data);
-        hex::encode(hmac_tag)
+        let hmac_tag = hmac_sign(session_key, &signing_data)?;
+        Ok(hex::encode(hmac_tag))
     }
 
     /// 常量时间校验HMAC签名，抵御侧信道计时攻击
+    /// 签名计算基础异常与"签名不匹配"同为拒绝（fail-closed），
+    /// 仅日志区分原因，绝不因计算失败放行载荷
     fn verify_hmac(&self, session_key: &[u8]) -> bool {
-        let expected_tag = Self::compute_hmac(session_key, self.nonce, &self.payload);
+        let expected_tag = match Self::compute_hmac(session_key, self.nonce, &self.payload) {
+            Ok(tag) => tag,
+            Err(e) => {
+                log::error!("[ipc_secure] HMAC计算基础异常，拒绝载荷: {}", e);
+                return false;
+            }
+        };
         ct_eq(expected_tag.as_bytes(), self.hmac.as_bytes())
     }
 }
@@ -202,7 +211,7 @@ impl IpcSecureChannel {
     pub fn sign_request(&self, json: &str) -> Result<String, String> {
         let nonce = self.send_nonce.fetch_add(1, Ordering::SeqCst);
         let payload_b64 = SignedMessage::encode_payload(json);
-        let hmac_tag = SignedMessage::compute_hmac(&self.session_key, nonce, &payload_b64);
+        let hmac_tag = SignedMessage::compute_hmac(&self.session_key, nonce, &payload_b64)?;
 
         let envelope = SignedMessage {
             payload: payload_b64,
@@ -313,7 +322,7 @@ mod tests {
         let resp_env = SignedMessage {
             payload: SignedMessage::encode_payload(resp_json),
             nonce: 1,
-            hmac: SignedMessage::compute_hmac(&worker_channel.session_key, 1, &SignedMessage::encode_payload(resp_json)),
+            hmac: SignedMessage::compute_hmac(&worker_channel.session_key, 1, &SignedMessage::encode_payload(resp_json)).unwrap(),
         };
         let resp_str = serde_json::to_string(&resp_env).unwrap();
 
@@ -330,7 +339,7 @@ mod tests {
         let env = SignedMessage {
             payload: SignedMessage::encode_payload(raw_json),
             nonce: 1,
-            hmac: SignedMessage::compute_hmac(&key, 1, &SignedMessage::encode_payload(raw_json)),
+            hmac: SignedMessage::compute_hmac(&key, 1, &SignedMessage::encode_payload(raw_json)).unwrap(),
         };
         let mut json_str = serde_json::to_string(&env).unwrap();
 
@@ -352,7 +361,7 @@ mod tests {
         let env = SignedMessage {
             payload: SignedMessage::encode_payload(r#"{}"#),
             nonce: 1,
-            hmac: SignedMessage::compute_hmac(&key, 1, &SignedMessage::encode_payload(r#"{}"#)),
+            hmac: SignedMessage::compute_hmac(&key, 1, &SignedMessage::encode_payload(r#"{}"#)).unwrap(),
         };
         let msg_str = serde_json::to_string(&env).unwrap();
 

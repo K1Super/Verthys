@@ -1,7 +1,7 @@
 /*
  * key/type-migration.ts — Verthys 记录类型冲突迁移引擎
  *
- * ★★★ 企业级根治：TYPE 常量冲突数据迁移 ★★★
+ * 修复：TYPE 常量冲突数据迁移 
  *
  * 背景：
  *   原 TYPE_GLOBAL_KEY (0x10) 与 TYPE_ACCOUNT (0x10) 值相同，导致已存储的
@@ -77,7 +77,7 @@ export interface MigrationResult {
  * AccountFields 结构：{ platform, username, password, note, ... }
  * 全局密钥记录为二进制格式，JSON.parse 必然失败。
  *
- * ★ 企业级根治：导出供 initUnlock 校验缓存的全局密钥记录
+ * 修复：导出供 initUnlock 校验缓存的全局密钥记录
  *
  * 用途：worker 内联 probe 在迁移前搜 0x10 记录，可能误拾旧账户记录（同为 0x10）
  * 并将其作为 global_key_record 缓存。迁移后需用本函数嗅探缓存值——若为账户记录
@@ -192,7 +192,7 @@ const FILEVERTHYS_META_MAX_SIZE = 65536;
  * 扫描所有 type=0x10 和 type=0x05 的记录，通过内容嗅探确定正确类型，
  * 需要迁移的记录以"先添后删"方式重写为新类型。
  *
- * ★ 企业级根治：摘要预过滤 + 单条超时（根治"正在加载密钥配置"卡死）
+ * 修复：摘要预过滤 + 单条超时（根治"正在加载密钥配置"卡死）
  *
  * 原缺陷：
  *   迁移对每条 0x10/0x05 记录调用 getFullRecord（完整解密数据块）。
@@ -218,7 +218,7 @@ export async function migrateRecordTypes(): Promise<MigrationResult> {
   const result: MigrationResult = { migrated: 0, skipped: 0, errors: 0 };
 
   // 1. 收集需要检查的记录 ID（type=0x10 和 type=0x05）
-  //    ★ 不再内部调用 ensureSummaryScan——调用方 initUnlock 已在迁移前调用
+  //    不再内部调用 ensureSummaryScan——调用方 initUnlock 已在迁移前调用
   let type10Ids: number[] = [];
   let type05Ids: number[] = [];
   try {
@@ -237,7 +237,7 @@ export async function migrateRecordTypes(): Promise<MigrationResult> {
   log.info(`类型迁移开始：0x10 记录 ${type10Ids.length} 条，0x05 记录 ${type05Ids.length} 条`);
 
   // 2. 迁移 0x10 记录（区分全局密钥 vs 旧账户）
-  //    ★ 摘要预过滤：name="global-key" 的记录是全局密钥，无需迁移，跳过 getFullRecord
+  //    摘要预过滤：name="global-key" 的记录是全局密钥，无需迁移，跳过 getFullRecord
   for (const id of type10Ids) {
     try {
       // 预过滤：从摘要缓存读取 name（纯索引，不解密数据块）
@@ -293,7 +293,7 @@ export async function migrateRecordTypes(): Promise<MigrationResult> {
   }
 
   // 3. 迁移 0x05 记录（区分照片块 vs 旧 FileVerthys 元数据）
-  //    ★ 摘要预过滤：dataSize > 64KB 的记录不可能是 FileVerthys 元数据（JSON），
+  //    摘要预过滤：dataSize > 64KB 的记录不可能是 FileVerthys 元数据（JSON），
   //      跳过 getFullRecord 避免解密大体积照片密文
   for (const id of type05Ids) {
     try {

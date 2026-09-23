@@ -1,7 +1,7 @@
 /**
  * photo-album/usePhotoImport.ts — 拾光模块导入层 composable
  *
- * ★ Comprehensive_optimization：异步批处理流水线重构
+ * Comprehensive_optimization：异步批处理流水线重构
  *
  * 职责：管理照片导入（加密入库）逻辑。
  * - Tauri 模式：使用三阶段异步流水线（生产者 → 传输器 → 消费者）
@@ -131,7 +131,7 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           importStatus.value = `完成：导入 ${result.imported.length} 张，去重跳过 ${result.skipped} 张`;
         }
 
-        // ★ 企业级根治：持久化到磁盘 + 返回值检查
+        // 修复：持久化到磁盘 + 返回值检查
         let persistOk = false;
         try {
           persistOk = await persistVerthys();
@@ -199,7 +199,7 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           console.error("[importPhotos] 导入失败", e);
           showError("导入失败，请重试");
         }
-        // ★ P0：每处理完一张后 yieldToMain，避免串行 await 阻塞主线程
+        // P0：每处理完一张后 yieldToMain，避免串行 await 阻塞主线程
         await yieldToMain();
       }
 
@@ -221,7 +221,7 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
     importElapsed,
     importEta,
     onImport,
-    /* ★ Parsed Import：导出流水线获取函数，供 usePhotoParse 复用同一实例
+    /* Parsed Import：导出流水线获取函数，供 usePhotoParse 复用同一实例
        （共享进度状态机，已通过 watch 绑定到 importing/importProgress/importStatus refs） */
     getPipeline,
   };

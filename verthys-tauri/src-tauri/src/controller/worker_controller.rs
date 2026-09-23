@@ -242,7 +242,7 @@ pub async fn worker_init(
     // 确保锁在函数退出时释放
     let _guard = InitLockGuard { state: &state };
 
-    // ★ 企业级根治：启动新 worker 前杀死所有残留孤儿 verthys-worker 进程
+    // 修复：启动新 worker 前杀死所有残留孤儿 verthys-worker 进程
     //   根因：上次应用异常退出（强杀/崩溃）遗留的孤儿 worker 持有 verthys 文件锁/
     //   共享内存/状态文件锁 → 状态文件损坏 → 新 worker 启动后 scan 操作崩溃。
     //   在初始化锁保护下执行，确保仅一次清理。
@@ -503,7 +503,7 @@ pub async fn worker_destroy(state: State<'_, AppState>) -> Result<VerthysRespons
         state.set_session(None);
     }
 
-    // ★ 企业级修复：worker 销毁后 GMK 已从内存消失，重置密钥生命周期为 NoKey
+    // 修复：worker 销毁后 GMK 已从内存消失，重置密钥生命周期为 NoKey
     //
     // 原缺陷：worker_destroy 仅销毁子进程会话，不触碰 key_lifecycle 状态机。
     // 若销毁前状态为 Locked/Unlocked，销毁后状态仍残留。后续若不经过

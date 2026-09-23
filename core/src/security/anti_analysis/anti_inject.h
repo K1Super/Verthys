@@ -73,4 +73,11 @@ int anti_inject_check_all(void);
  */
 int anti_inject_add_trusted_path(const char *path);
 
+/*
+ * 判断线程起始地址是否位于本库自身模块（verthys.dll / 测试 exe）内。
+ * 自身模块内起始的线程（preheat / 进度消费等合法内部线程）不计入 APC
+ * 线程增长检测的可疑计数。返回 1=在自身模块内，0=不在。
+ */
+int anti_inject_thread_in_own_module(const void *start_addr);
+
 #endif /* VERTHYS_ANTI_INJECT_H */

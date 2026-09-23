@@ -72,7 +72,7 @@
  * 性能收益：上万记录也只渲染数十 DOM 节点（可视区 + buffer ≈ 6 行 × 4 列 = 24 项），
  *           彻底消除 Vue 响应式 diff 与浏览器布局/绘制开销，滚动如丝般顺滑。
  *
- * ★ 泛型组件（Vue 3.3+ generic）：slot 的 item 类型由 items prop 推断，
+ * 泛型组件（Vue 3.3+ generic）：slot 的 item 类型由 items prop 推断，
  *   父组件 <template #default="{ item }"> 中 item 自动获得具体类型（如 AccountEntry），
  *   消除 'unknown' 类型错误，保留完整类型安全。
  */

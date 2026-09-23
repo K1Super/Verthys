@@ -54,7 +54,7 @@
       <div class="qf-port qf-port-out"></div>
 
       <!-- 能量填充（进度推进） -->
-      <div class="qf-fill" :style="{ width: (percent || 0) + '%' }">
+      <div class="qf-fill" :style="{ width: safePercent + '%' }">
         <!-- 能量流粒子（填充内流动） -->
         <div class="qf-stream"></div>
         <div class="qf-stream qf-stream-2"></div>
@@ -66,7 +66,7 @@
 
     <!-- 元信息（百分比/耗时，默认隐藏） -->
     <div v-if="showMeta" class="qf-meta">
-      <span class="qf-percent">{{ percent || 0 }}%</span>
+      <span class="qf-percent">{{ safePercent }}%</span>
       <span class="qf-elapsed">{{ ((elapsed || 0) / 1000).toFixed(1) }}s</span>
     </div>
   </div>
@@ -83,7 +83,7 @@
  *   - 通过 <QuantumCoreLoader> 组件化复用，单一数据源
  *   - 本组件作为全局进度条复用基准（替代已删除的 QuantumProgressBar）
  *
- * 提示词策略（企业级根治）：
+ * 提示词策略（根治）：
  *   - 后端 emit 的 message 作为单一数据源（global-verthys.ts 中精简映射）
  *   - 前端直接显示 message prop，不再维护预设映射表
  *   - 消除前端预设阈值与后端实际 emit percent 不一致导致的提示词提前/滞后
@@ -128,24 +128,35 @@ const props = withDefaults(defineProps<Props>(), {
 /**
  * 当前显示的提示词
  *
- * 企业级根治：直接使用后端 emit 的 message（单一数据源）
+ * 根治：直接使用后端 emit 的 message（单一数据源）
  * 后端在 global-verthys.ts 中已统一为精简高级文案：
  *   - initCreate: 校验路径/启动安全核心/创建加密库/检查密钥记录/加载摘要/加载密钥配置/创建完成
- *   - initUnlock: 校验路径/启动安全核心/检测格式/升级加密库/解锁加密库/读取索引/派生密钥/
- *                 校验完整性/解密数据/重建索引/生成摘要/校验完成/加载密钥配置/解锁完成
+ *   - initUnlock: 前端阶段（校验路径/启动安全核心/解锁加密库/密钥运算中/
+ *                 加载密钥配置/解锁完成）+ C 层通道映射（读取加密头/派生密钥/
+ *                 映射索引/解密数据/重建索引/生成摘要/校验完成）
  *   - verifyGlobalKey: 定位密钥记录/扫描密钥记录/验证量子签名/激活安全会话/验证完成
  */
 const displayText = computed<string>(() => props.message || '');
+
+/**
+ * 表现层钳制防御：percent 收束至 0..100，NaN/Infinity/负值按 0 处理。
+ * 上游信号均已各自钳制，此层兜底保证异常输入不会造成宽度溢出。
+ */
+const safePercent = computed<number>(() => {
+  const p = Number(props.percent) || 0;
+  if (!Number.isFinite(p)) return 0;
+  return Math.min(100, Math.max(0, p));
+});
 </script>
 
 <style scoped>
 /* ============================================================
    quantum-flow.css — 量子能量导流通道进度条（scoped 引入）
-   ★ min-height 已在 quantum-flow.css 中定义，禁止在此覆盖
+   min-height 已在 quantum-flow.css 中定义，禁止在此覆盖
      原因：Vite 会将 <style scoped> 中 @import 内容与自定义样式拆分到
      不同 CSS chunk，使用不同 data-v 属性，导致自定义 min-height 无法
      匹配元素（data-v 不一致），量子加载动画被压缩
-   ★ ql-loader.css 由 QuantumCoreLoader 组件自行 scoped 引入管理
+   ql-loader.css 由 QuantumCoreLoader 组件自行 scoped 引入管理
      （本组件不直接渲染 .ql-loader 元素，通过 <QuantumCoreLoader> 复用）
    ============================================================ */
 @import '../../../styles/security/quantum-flow.css';

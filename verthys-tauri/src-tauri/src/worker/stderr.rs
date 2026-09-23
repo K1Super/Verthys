@@ -12,10 +12,12 @@
 
 use std::sync::{Arc, Mutex as StdMutex};
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
 use tokio::process::ChildStderr;
 
-use super::protocol::STDERR_RING_SIZE;
+use super::protocol::{
+    bounded_read_line, BoundedLineError, MAX_LINE_BYTES, STDERR_RING_SIZE,
+};
 
 /* ------------------------------------------------------------------ *
  * stderr 环形缓冲区                                                   *
@@ -69,14 +71,13 @@ pub(crate) async fn drain_stderr(
     let mut line = String::new();
 
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => {
+        match bounded_read_line(&mut reader, &mut line, MAX_LINE_BYTES).await {
+            Ok(None) => {
                 // EOF — stderr 管道关闭
                 log::debug!("[worker:stderr] PID={} stderr EOF", pid);
                 break;
             }
-            Ok(_) => {
+            Ok(Some(_)) => {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
                     // 全量写入日志（info 级别：worker 的 stderr 包含关键诊断信息）
@@ -88,7 +89,16 @@ pub(crate) async fn drain_stderr(
                     }
                 }
             }
-            Err(e) => {
+            Err(BoundedLineError::TooLong { limit }) => {
+                // 超长行（异常输出）不阻断 stderr 排空：
+                // 该行剩余已被丢弃，记录警告后继续读取下一行
+                log::warn!(
+                    "[worker:stderr] PID={} 单行超过 {} 字节上限，已丢弃",
+                    pid,
+                    limit
+                );
+            }
+            Err(BoundedLineError::Io(e)) => {
                 log::warn!("[worker:stderr] PID={} read error: {}", pid, e);
                 break;
             }
@@ -206,8 +216,8 @@ mod tests {
         // 读取直到 EOF
         let mut reader = BufReader::new(rx);
         let mut line = String::new();
-        let n = reader.read_line(&mut line).await.unwrap();
-        assert_eq!(n, 0, "EOF 应返回 0");
+        let outcome = bounded_read_line(&mut reader, &mut line, 64).await.unwrap();
+        assert!(outcome.is_none(), "EOF 应返回 None");
         assert!(line.is_empty());
     }
 }

@@ -26,7 +26,8 @@
 #include "keymanager.h"            /* keymanager_derive_master_v3 */
 #include "verthys_pepper.h"
 #include "verthys_crypto.h"          /* Argon2 常量 / 校准 */
-#include "verthys_api_utils.h"       /* verthys_monotonic_ms */
+#include "verthys_api_utils.h"       /* verthys_monotonic_ms / verthys_join_thread_bounded */
+#include "verthys_diag.h"            /* VERTHYS_DIAG_LOG（线程汇合超时诊断） */
 #include "verthys_rekey_auto.h"      /* 解锁后自动轮换编排 */
 
 #include <io.h>                    /* _chsize_s / _fileno / _commit */
@@ -42,7 +43,7 @@
 #endif
 #include <windows.h>
 
-/* ---------- Argon2id 三档（迁移自 v2，基准档位编码与 v2 flags[4] 一致） ---------- */
+/* ---------- Argon2id 三档编码（tier 值随超级块 argon2_tier 字段持久化） ---------- */
 
 #define VERTHYS_V3_ARGON2_TIER_SECURE       0u
 #define VERTHYS_V3_ARGON2_TIER_BALANCED     1u
@@ -84,17 +85,36 @@ VerthysContextV3 *verthys_v3_ctx_create(VerthysCngKeyManager *km,
     return ctx3;
 }
 
+/*
+ * 后台预热线程有界汇合（Destroy/Lock 共用）。
+ * 以 VERTHYS_JOIN_TIMEOUT_MS 为上限等待；超时/失败仅记诊断并继续收口，
+ * 不延长生命周期阻塞。当前预热阻塞点为 LSM 文件读，不可取消（未实现
+ * CancelSynchronousIo）：超时放弃等待后，残存线程可能在本函数返回后继续
+ * 触碰已销毁子系统——此处接受该窗口，残存线程及其引用由进程退出统一回收。
+ */
+static void v3_join_preheat_thread(VerthysContextV3 *ctx3)
+{
+    DWORD wr;
+
+    if (ctx3->bg_preheat_thread == NULL) return;
+
+    wr = verthys_join_thread_bounded(ctx3->bg_preheat_thread);
+    if (wr == WAIT_TIMEOUT) {
+        VERTHYS_DIAG_LOG("verthys: bg preheat thread join timeout (abandon wait)");
+    } else if (wr == WAIT_FAILED) {
+        VERTHYS_DIAG_LOG("verthys: bg preheat thread join failed (abandon wait)");
+    }
+    CloseHandle(ctx3->bg_preheat_thread);
+    ctx3->bg_preheat_thread = NULL;
+}
+
 void verthys_v3_ctx_subsystems_close(VerthysContextV3 *ctx3)
 {
     if (ctx3 == NULL) return;
 
     /* 0. 后台预热线程汇合（MINIMAL_FIRST 场景；线程只读 lsm，
-     *    汇合后销毁子系统安全） */
-    if (ctx3->bg_preheat_thread != NULL) {
-        WaitForSingleObject(ctx3->bg_preheat_thread, INFINITE);
-        CloseHandle(ctx3->bg_preheat_thread);
-        ctx3->bg_preheat_thread = NULL;
-    }
+     *    有界等待，超时放弃等待继续收口） */
+    v3_join_preheat_thread(ctx3);
     InterlockedExchange(&ctx3->bg_preheat_running, 0);
 
     /* 1. 事务上下文（integrity_key 拷贝清零；借用子系统不触碰） */
@@ -192,7 +212,7 @@ VerthysResult verthys_v3_preset_decode(const uint8_t *extensions, uint32_t len,
 /* ================== 创建 ================== */
 
 /*
- * 三档校准（迁移自 v2 verthys_v2_create_new）：
+ * 三档校准：
  *   SECURE      固定 64MiB/3/1（合规确定性，不动态校准）
  *   PERFORMANCE 固定 32MiB/1/1（交互优先）
  *   BALANCED/CUSTOM 32MiB 校准，目标 1200ms，迭代 ∈ [1,3]
@@ -287,7 +307,7 @@ VerthysResult verthys_v3_create_new(VerthysContextV3 *ctx3,
     r = verthys_cng_km_init(ctx3->km);
     if (r != VERTHYS_OK) return r;
 
-    /* ---- 2. Argon2id 三档校准（迁移自 v2） ---- */
+    /* ---- 2. Argon2id 三档校准 ---- */
     verthys_random_bytes(salt, sizeof(salt));
     t_derive = verthys_monotonic_ms();
     v3_argon2_choose_params(preset, password, pw_len, salt,
@@ -524,12 +544,8 @@ VerthysResult verthys_v3_lock(VerthysContextV3 *ctx3)
     if (ctx3 == NULL) return VERTHYS_ERR_INVALID;
     if (!ctx3->subsystems_open) return VERTHYS_ERR_LOCKED;
 
-    /* 1. 后台预热线程汇合（MINIMAL_FIRST 场景） */
-    if (ctx3->bg_preheat_thread != NULL) {
-        WaitForSingleObject(ctx3->bg_preheat_thread, INFINITE);
-        CloseHandle(ctx3->bg_preheat_thread);
-        ctx3->bg_preheat_thread = NULL;
-    }
+    /* 1. 后台预热线程汇合（MINIMAL_FIRST 场景；有界等待，超时放弃继续） */
+    v3_join_preheat_thread(ctx3);
     InterlockedExchange(&ctx3->bg_preheat_running, 0);
     ctx3->minimal_mode = 0;
 
@@ -578,8 +594,16 @@ VerthysResult verthys_v3_lock(VerthysContextV3 *ctx3)
         }
     }
 
-    /* 4. LSM 正常关闭（flush no-op——步骤 3 已刷；Manifest 终态保存） */
-    verthys_lsm_destroy(ctx3->lsm);
+    /* 4. LSM 正常关闭（flush no-op——步骤 3 已刷；Manifest 终态保存）。
+     * dirty 语义：返回非 OK 时锁定继续（密钥必须无条件清除），WAL 未
+     * 复位即"非干净关闭"——下次解锁 open 重放重建，数据安全；此处仅
+     * 记录诊断，不为失败阻断锁定。 */
+    {
+        VerthysResult r_lsm = verthys_lsm_destroy(ctx3->lsm);
+        if (r_lsm != VERTHYS_OK) {
+            VERTHYS_DIAG_LOG("verthys: lsm close dirty during lock (wal replay on next open)");
+        }
+    }
     ctx3->lsm = NULL;
 
     /* 5. 其余子系统销毁 + 密钥全量清零（幂等收口） */

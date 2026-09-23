@@ -88,15 +88,6 @@ impl SecurityResult {
     }
 }
 
-/// 权限令牌生成结果
-#[derive(serde::Serialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub struct AuthTokenResult {
-    pub ok: bool,
-    pub token: Option<String>,
-    pub detail: String,
-}
-
 /// 三档安全预设配置（前端展示用）
 #[derive(serde::Serialize, TS)]
 #[ts(export, export_to = "bindings/")]
@@ -109,7 +100,7 @@ pub struct PresetConfig {
     pub features: PresetFeatures,
 }
 
-#[derive(serde::Serialize, TS)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct PresetFeatures {
     pub anti_debug: bool,

@@ -10,7 +10,7 @@
  *
  * 从 MainView.vue 抽离，功能 100% 保留。
  *
- * ★ 性能优化（CosmicBackground 统一帧驱动）：
+ * 性能优化（CosmicBackground 统一帧驱动）：
  *   星点/尘埃不再携带 CSS animationDelay / animationDuration，
  *   改为输出数值相位（phase ∈ [0,1) 归一化相位偏移）与周期（dur，秒），
  *   由 CosmicBackground.vue 内的统一帧驱动引擎读取 data-phase / data-dur 驱动，
@@ -40,7 +40,7 @@ export interface CosmicDust {
   vx: number;
   /** 漂移向量 y（px/周期 — 上扬分量） */
   vy: number;
-  /** ★ X 向侧摆幅度（CSS 合成器动画用） */
+  /** X 向侧摆幅度（CSS 合成器动画用） */
   swx: number;
 }
 
@@ -56,7 +56,7 @@ export function useCosmicBackground() {
   let parallaxCurrentX = 0;
   let parallaxCurrentY = 0;
 
-  /* ★ 性能根治：main-view 铺满视口 → 用缓存的视口尺寸归一化，
+  /* 性能根治：main-view 铺满视口 → 用缓存的视口尺寸归一化，
    * 去掉每次 mousemove 的 getBoundingClientRect 强制布局读取
    * （布局读取会打断渲染流水线，高频移动 = 每帧强制 reflow） */
   let vw = window.innerWidth;
@@ -176,7 +176,7 @@ export function useCosmicBackground() {
       dur: 20 + Math.random() * 30,
       vx: +(dir * speed * Math.cos(elev)).toFixed(1),
       vy: +(-speed * Math.sin(elev)).toFixed(1),
-      /* ★ 侧摆幅度（0.12×|vx|，CSS dust-anim 的 X 向摆动项） */
+      /* 侧摆幅度（0.12×|vx|，CSS dust-anim 的 X 向摆动项） */
       swx: +(Math.abs(dir * speed * Math.cos(elev)) * 0.12).toFixed(2),
     };
   });

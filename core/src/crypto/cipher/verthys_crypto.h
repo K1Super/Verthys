@@ -27,7 +27,7 @@ int verthys_crypto_init(void);
 #define VERTHYS_ARGON2_ITERS     3u
 #define VERTHYS_ARGON2_PARALLEL  1u
 
-/* ★ 自适应 Argon2id 预设参数
+/* 自适应 Argon2id 预设参数
  *
  *   BALANCED：32MiB / 2 iters / 1 parallel（单次派生 ~1.5s）
  *             日常推荐预设
@@ -50,7 +50,9 @@ int verthys_crypto_init(void);
 #define VERTHYS_ARGON2_PARALLEL_MIN       1u
 #define VERTHYS_ARGON2_PARALLEL_MAX       64u
 
-/* ---------- 随机数（OS CSPRNG，每次独立） ---------- */
+/* ---------- 随机数（OS CSPRNG，每次独立） ----------
+ * libsodium randombytes 语义：熵源失败时不返回（进程级 abort），
+ * 无部分写入，故本函数保持 void 签名——调用方无需处理 RNG 失败。 */
 __declspec(noinline) void verthys_random_bytes(uint8_t *buf, size_t len);
 
 /* ---------- AEAD: XChaCha20-Poly1305 ----------
@@ -147,27 +149,6 @@ int verthys_argon2id_derive_ex(uint8_t out[VERTHYS_KEY_BYTES],
                              uint32_t mem_kib,
                              uint32_t iters,
                              uint32_t parallel);
-
-/* ================================================================== *
- * 独立完整性密钥派生
- *                                                                    *
- * 引入独立完整性密钥，与 DEK 完全隔离：                                *
- *   integrity_key = HKDF-SHA256(master_key, "verthys/integrity-key") *
- *                                                                    *
- * 用途：HMAC 计算（超级块偏移量 MAC、状态链、累积写入 HMAC 等），      *
- * 即使 DEK 泄露也不影响历史文件完整性验证。                            *
- *                                                                    *
- * 参数：                                                              *
- *   out         : 输出 32 字节完整性密钥                              *
- *   master_key  : 主密钥（Argon2id 派生输出或已解包的 MEK）           *
- *                                                                    *
- * 返回 0 成功，非 0 失败。                                            *
- * ================================================================== */
-int verthys_derive_integrity_key(uint8_t out[VERTHYS_KEY_BYTES],
-                               const uint8_t master_key[VERTHYS_KEY_BYTES]);
-
-/* 完整性密钥 HKDF 域分离标签 */
-#define VERTHYS_INTEGRITY_KEY_INFO  "verthys/integrity-key"
 
 /* ---------- HKDF-SHA256-Expand ----------
  * 从 PRK（如 Argon2id 输出）派生固定用途子密钥。

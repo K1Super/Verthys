@@ -1,7 +1,7 @@
 /*
  * tls_loader.c — TLS 加载标志验证实现
  *
- * ★ IAT 基准校验与 15s 混淆种子定时器已删除（缺陷依据同头注）。
+ * IAT 基准校验与 15s 混淆种子定时器已删除（缺陷依据同头注）。
  *
  * 本文件仅保留一项职责：验证 TLS 回调（tls_callbacks.c，.CRT$XLB 注册）
  * 确实在 DLL_PROCESS_ATTACH 阶段执行并置位 g_tls_init_marker。

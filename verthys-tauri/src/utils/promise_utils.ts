@@ -1,7 +1,7 @@
 /*
  * utils/promise_utils.ts — Promise 工具函数
  *
- * ★ 分级超时熔断（软 15s 提示 / 硬 35s 降级 / 连续 3 次熔断锁定）
+ * 分级超时熔断（软 15s 提示 / 硬 35s 降级 / 连续 3 次熔断锁定）
  *
  *   withGradedTimeout 替代原固定 35s 单一超时阈值：
  *     - 软超时（softMs）：触发 onSoftTimeout 回调（前端提示用户耐心等待），
@@ -11,7 +11,7 @@
  *     - 熔断保护：连续 3 次硬超时自动锁定容器 30 分钟，引导用户使用备份密钥恢复。
  *       熔断状态持久化于 localStorage，跨进程重启仍生效。
  *
- * ★ Comprehensive_optimization：yieldToMain — 主线程让出（浏览器等价 setImmediate）
+ * Comprehensive_optimization：yieldToMain — 主线程让出（浏览器等价 setImmediate）
  *
  *   在数据处理循环中，每处理完一批数据后调用 yieldToMain()，让出主线程，
  *   保证 requestAnimationFrame 回调能得到执行机会，避免 UI 冻结。
@@ -24,7 +24,7 @@ import {
 } from "../constants/key_manager_const";
 
 /* ------------------------------------------------------------------ *
- * ★ Comprehensive_optimization：yieldToMain — 主线程让出              *
+ * Comprehensive_optimization：yieldToMain — 主线程让出              *
  * ------------------------------------------------------------------ *
  *
  * 浏览器中等价 Node.js 的 setImmediate：将控制权交还给事件循环，
@@ -100,7 +100,7 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label = "操作"
 }
 
 /* ------------------------------------------------------------------ *
- * ★ 熔断器状态管理                                                      *
+ * 熔断器状态管理                                                      *
  *                                                                    *
  * 状态结构（JSON 持久化于 localStorage）：                            *
  *   {                                                                 *
@@ -222,7 +222,7 @@ export function withGradedTimeout<T>(
     /* 硬超时定时器：拒绝 Promise，递增熔断计数 */
     const hardTimer = setTimeout(() => {
       clearTimeout(softTimer);
-      /* ★ 熔断计数：连续硬超时达到阈值则锁定容器 */
+      /* 熔断计数：连续硬超时达到阈值则锁定容器 */
       const state = loadCircuitBreakerState();
       state.consecutiveHardTimeouts += 1;
       if (state.consecutiveHardTimeouts >= CIRCUIT_BREAKER_THRESHOLD) {
@@ -244,7 +244,7 @@ export function withGradedTimeout<T>(
       (v) => {
         clearTimeout(softTimer);
         clearTimeout(hardTimer);
-        /* ★ 解锁成功：重置熔断计数（softTimerFired 不影响重置） */
+        /* 解锁成功：重置熔断计数（softTimerFired 不影响重置） */
         resetCircuitBreaker();
         resolve(v);
       },

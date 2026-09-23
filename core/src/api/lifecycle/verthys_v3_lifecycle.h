@@ -100,7 +100,7 @@ void verthys_v3_ctx_subsystems_close(VerthysContextV3 *ctx3);
 
 /*
  * 创建 V3 容器（系统唯一合法新建入口）：
- *   1. Argon2id 三档校准（迁移自 v2 lifecycle：目标 1s 预算跑分
+ *   1. Argon2id 三档校准（目标 1s 预算跑分
  *      mem/iters/parallel，基准值记入 sb.argon2_benchmark_ms）；
  *   2. 密钥组生成：MEK/A/B/C 随机（A/B/C 由 MEK 内核态加密 wrap）；
  *   3. vsb_v3_init_new + 字段填充（salt/参数/密钥包装/分区布局默认值）；
@@ -118,7 +118,7 @@ VerthysResult verthys_v3_create_new(VerthysContextV3 *ctx3,
 /*
  * 打开（解锁）V3 容器：verthys_unlock_pipeline_run 全权承担
  * （S0-S6 + 渐进式解锁 + 总超时）。本函数为流水线的编排薄壳：
- *   - 密码错误退避（连续失败指数退避，迁移自 v2）由上层 Verthys_Unlock
+ *   - 密码错误退避（连续失败指数退避）由上层 Verthys_Unlock
  *     统一处理，本层不感知；
  *   - 返回值透传流水线结果（VERTHYS_OK / PARTIAL_UNLOCK / 各阶段错误 /
  *     TIMEOUT）。
@@ -144,12 +144,12 @@ VerthysResult verthys_v3_lock(VerthysContextV3 *ctx3);
 /*
  * V3 格式探测（Verthys_Unlock 分发用）：
  * 读取文件首 8 字节，帧头 magic == 'V3RP' 且 payload_len 合法 → 1；
- * 否则 0（非 V3 容器，走 V2/V1 路径）。f 为已打开文件（只读探测，
+ * 否则 0（非 V3 容器）。f 为已打开文件（只读探测，
  * 探测后由调用方 fseek 复位）。
  */
 int verthys_v3_detect(FILE *f);
 
-/* 温缓存是否被预设禁用（SECURE=1 → 禁用；迁移自 v2 vwarm_is_disabled_by_preset） */
+/* 温缓存是否被预设禁用（SECURE=1 → 禁用） */
 int verthys_v3_warmcache_disabled_by_preset(VerthysPreset preset);
 
 /* ---------- V3 单调用事务收口（API 编排层共享，export/import 复用） ---------- */

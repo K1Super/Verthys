@@ -17,6 +17,8 @@ hkdf = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["simple"] }
 aes-gcm = "0.10"
 rand = "0.8"
+# CSPRNG（共享内存随机名与擦除填充；Windows 走 BCryptGenRandom 家族）
+getrandom = "0.2"
 zeroize = { version = "1", features = ["zeroize_derive", "serde"] }
 # Windows API（共享内存、内存锁定、预读）
 [target.'cfg(windows)'.dependencies]
@@ -28,7 +30,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
 ] }
 
-# ★ 修复 LNK1181: 无法打开输入文件 "windows.0.52.0.lib"
+# 修复 LNK1181: 无法打开输入文件 "windows.0.52.0.lib"
 # 根因：dev profile 默认启用 incremental compilation，与 raw-dylib 导入库
 # 生成存在竞态——增量编译复用缓存 metadata 时，build script 的
 # rustc-link-search 输出未生效，导致 link.exe 找不到 windows.0.52.0.lib

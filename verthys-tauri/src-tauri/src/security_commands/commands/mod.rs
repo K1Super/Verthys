@@ -12,7 +12,7 @@
  *   6. USB 安全（usb_guard）：read_serial / register_device / check_clone /
  *      shadow_sleep / try_recover / purge / shadow_status
  *   7. 三档预设查询（preset）：get_preset_config
- *   8. 权限令牌（auth）：generate_auth_token
+ *   8. 会话授权（auth）：require_session_authorized
  */
 
 pub mod brute_force;
@@ -22,3 +22,4 @@ pub mod cleanup;
 pub mod file_lock;
 pub mod usb;
 pub mod preset;
+pub mod system_metrics;

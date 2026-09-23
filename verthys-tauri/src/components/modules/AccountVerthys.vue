@@ -186,7 +186,7 @@ import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
 
-/* ★ 企业级根治：顶部错误提示弹窗（.error-toast，2.5s 自动消失） */
+/* 修复：顶部错误提示弹窗（.error-toast，2.5s 自动消失） */
 const { errorMsg, showError } = useErrorToast();
 
 /**
@@ -199,7 +199,7 @@ const { errorMsg, showError } = useErrorToast();
  *   彻底避免整体替换模式（add 新 + delete 旧 + flush）的并发竞态
  *   导致数据丢失/恢复问题。
  *
- * ★ 企业级根治：TYPE_ACCOUNT 从 record_types.ts 导入（值 0x02），
+ * 修复：TYPE_ACCOUNT 从 record_types.ts 导入（值 0x02），
  *   不再本地定义。原本地定义 0x10 与 TYPE_GLOBAL_KEY 冲突，已根除。
  */
 
@@ -216,7 +216,7 @@ interface AccountEntry {
 }
 
 const searchKey = ref("");
-/* ★ 项2：shallowRef 替代 ref，避免 Vue 对 accounts 数组内每条记录深度代理
+/* 项2：shallowRef 替代 ref，避免 Vue 对 accounts 数组内每条记录深度代理
  * （每条记录含 fields.password/dataB64 等敏感字段，万条记录深度代理开销 200-500ms）
  * 代价：直接修改元素属性（如 acc.pwdVisible = true）不触发更新，必须用 updateShallowItem */
 const accounts = shallowRef<AccountEntry[]>([]);
@@ -226,7 +226,7 @@ const loadAccounts = async () => {
   const cached = getModuleCache<AccountEntry[]>("accounts");
   let maxRecordId = 0;
   if (cached.data && cached.data.length > 0) {
-    // ★ 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
+    // 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
     replaceShallowArray(accounts, cached.data);
     // 计算缓存中最大的 recordId，作为增量扫描起点（参考 PhotoAlbum）
     maxRecordId = cached.data.reduce((max, a) => Math.max(max, a.recordId || 0), 0);
@@ -243,7 +243,7 @@ const loadAccounts = async () => {
   let listFields: AccountFields[] | null = null;
   const legacyRecords: { id: number; fields: AccountFields }[] = [];
 
-  // ★ 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
+  // 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
   //    原实现：ensureSummaryScanSafe + for 循环串行 getFullRecord（N 条 = N 次串行 IPC，
   //            100 条 ≈ 7.5s，300 条 ≈ 22s，与后台 ensureRecordScan 抢同一常驻 worker → 30s）
   //    新实现：ensureRecordScanSafe（后台 startBackgroundTasks 已扫描则瞬时增量返回）
@@ -295,7 +295,7 @@ const loadAccounts = async () => {
       }
     }
 
-    // ★ 企业级根治：扫描 TYPE_ACCOUNT_OLD (0x10) 旧账户记录（迁移失败的兜底）
+    // 修复：扫描 TYPE_ACCOUNT_OLD (0x10) 旧账户记录（迁移失败的兜底）
     //
     // 原缺陷：若 initUnlock 中的 migrateRecordTypes 超时/失败，旧账户记录仍停留在
     //   0x10（与 TYPE_GLOBAL_KEY 冲突的旧值），AccountVerthys 仅扫描 TYPE_ACCOUNT(0x02)
@@ -324,7 +324,7 @@ const loadAccounts = async () => {
     let nextMemId = accounts.value.length > 0
       ? Math.max(...accounts.value.map(a => a.id)) + 1
       : 1;
-    // ★ 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
+    // 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
     const newItems: AccountEntry[] = [];
     for (const { id, fields } of found) {
       newItems.push({
@@ -367,7 +367,7 @@ const loadAccounts = async () => {
           displayPwd: fields.encrypted ? "已加密" : "••••••••••",
         });
       }
-      // ★ 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
+      // 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
       replaceShallowArray(accounts, migrated);
       if (listRecordId !== null) {
         try { await verthysDeleteRecord(listRecordId); } catch { /* */ }
@@ -375,7 +375,7 @@ const loadAccounts = async () => {
       for (const lr of legacyRecords) {
         try { await verthysDeleteRecord(lr.id); } catch { /* */ }
       }
-      // ★ 企业级数据持久化修复：检查迁移落盘返回值，失败时提示用户
+      // 数据持久化修复：检查迁移落盘返回值，失败时提示用户
       let migratePersistOk = false;
       try { migratePersistOk = await persistVerthys(); } catch (e) { console.error("[loadAccounts] 迁移 persistVerthys 异常", e); }
       if (!migratePersistOk) {
@@ -383,11 +383,11 @@ const loadAccounts = async () => {
       }
       clearRecordScanCache(); // 迁移涉及批量增删，清空 scan cache 确保一致性
     } else {
-      // ★ 项2：shallowRef 清空需用 clearShallowArray 触发 triggerRef
+      // 项2：shallowRef 清空需用 clearShallowArray 触发 triggerRef
       clearShallowArray(accounts);
     }
   } else {
-    // ★ 项2：shallowRef 清空需用 clearShallowArray 触发 triggerRef
+    // 项2：shallowRef 清空需用 clearShallowArray 触发 triggerRef
     clearShallowArray(accounts);
   }
 
@@ -421,7 +421,7 @@ const togglePwd = (acc: AccountEntry) => {
       showKeyDialog.value = true;
       return;
     }
-    // ★ 项2：shallowRef 下直接修改属性不触发更新，必须 updateShallowItem
+    // 项2：shallowRef 下直接修改属性不触发更新，必须 updateShallowItem
     const idx = accounts.value.findIndex(a => a.id === acc.id);
     if (idx >= 0) {
       updateShallowItem(accounts, idx, {
@@ -431,7 +431,7 @@ const togglePwd = (acc: AccountEntry) => {
       });
     }
   } else {
-    // ★ 项2：shallowRef 下直接修改属性不触发更新，必须 updateShallowItem
+    // 项2：shallowRef 下直接修改属性不触发更新，必须 updateShallowItem
     const idx = accounts.value.findIndex(a => a.id === acc.id);
     if (idx >= 0) {
       updateShallowItem(accounts, idx, {
@@ -453,7 +453,7 @@ const confirmKey = async () => {
   if (!keyTarget.value || !keyInput.value) return;
   try {
     const plain = await decryptPasswordField(keyTarget.value.fields.password, keyInput.value);
-    // ★ 项2：shallowRef 下通过 id 找索引后 updateShallowItem，避免直接修改 keyTarget.value 属性
+    // 项2：shallowRef 下通过 id 找索引后 updateShallowItem，避免直接修改 keyTarget.value 属性
     const targetId = keyTarget.value.id;
     const idx = accounts.value.findIndex(a => a.id === targetId);
     if (idx >= 0) {
@@ -545,18 +545,18 @@ const onSave = async () => {
       throw e;
     }
     if (newRid !== null) {
-      // ★ 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
+      // 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
       addFullRecord(newRid, TYPE_ACCOUNT, recordName, dataB64, dataB64.length);
       if (oldRid !== undefined) {
         try { await verthysDeleteRecord(oldRid); } catch { /* 旧记录删除失败不阻断 */ }
-        // ★ 失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容
+        // 失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容
         invalidateSummaryRecord(oldRid);
         invalidateFullRecord(oldRid);
         invalidateScannedRecord(oldRid);
       }
       const idx = accounts.value.findIndex(a => a.id === editing.value!.id);
       if (idx >= 0) {
-        // ★ 项2：shallowRef 下整体替换元素需用 updateShallowItem 触发 triggerRef
+        // 项2：shallowRef 下整体替换元素需用 updateShallowItem 触发 triggerRef
         updateShallowItem(accounts, idx, {
           recordId: newRid,
           fields,
@@ -580,9 +580,9 @@ const onSave = async () => {
       throw e;
     }
     if (newRid !== null) {
-      // ★ 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
+      // 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
       addFullRecord(newRid, TYPE_ACCOUNT, recordName, dataB64, dataB64.length);
-      // ★ 项2：shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
+      // 项2：shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
       pushShallowItems(accounts, [{
         id: Date.now(),
         recordId: newRid,
@@ -613,16 +613,16 @@ const confirmDelete = async () => {
   // 立即关闭弹窗 + 移除 UI + 更新缓存（同步无缝，消除删除按钮到内容消失的空白间隔）
   showDeleteConfirm.value = false;
   deleteTargetId.value = null;
-  // ★ 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
+  // 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
   removeShallowItems(accounts, a => a.id === id);
   setModuleCache("accounts", accounts.value);
   // 立即失效扫描缓存（同步，杜绝删除复活）
   if (rid !== undefined) {
-    // ★ 失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容，杜绝删除复活
+    // 失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容，杜绝删除复活
     invalidateSummaryRecord(rid);
     invalidateFullRecord(rid);
     invalidateScannedRecord(rid);
-    // ★ 企业级根治：await deleteAndPersist + await persistVerthys（根治删除后复活）
+    // 修复：await deleteAndPersist + await persistVerthys（根治删除后复活）
     //
     // 原缺陷：deleteAndPersist(...).catch(() => {}) 火并忘——
     //   deleteAndPersist 仅将删除 IPC 入队 flushChain + 防抖调度 flush（300ms）。
@@ -638,7 +638,7 @@ const confirmDelete = async () => {
     //   UI 已同步移除（无缝删除），await 不阻塞 UI 渲染。
     try {
       await deleteAndPersist(() => verthysDeleteRecord(rid), rid);
-      // ★ 企业级数据持久化修复：检查 persistVerthys 返回值，根治"删除后复活"
+      // 数据持久化修复：检查 persistVerthys 返回值，根治"删除后复活"
       //    persistVerthys 返回 false（非抛异常）时旧 catch 无法捕获 → 静默假成功 →
       //    UI 已移除但磁盘未落盘 → 重启后记录"复活"。
       //    修复：检查返回值，失败时 showError 提示用户记录可能未真正删除。
@@ -656,7 +656,7 @@ const confirmDelete = async () => {
   }
 };
 
-/* ★ 企业级修复「页面覆盖」：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
+/* 修复「页面覆盖」：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
 import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
 useModuleDialogGuard("accounts", () => {
   showDialog.value = false;

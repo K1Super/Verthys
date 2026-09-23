@@ -50,4 +50,11 @@ SysLoaderMode system32_loader_get_mode(void);
  */
 int system32_loader_load(const wchar_t *dll_name, void **out_handle);
 
+/*
+ * 测试白盒：System32 目录前缀边界判定（带分隔符边界）。
+ * 仅被测试 exe 对象直链调用；不在 DLL 导出清单中，发布面零变化。
+ * 前置：system32_loader_init 已成功（s_system32_dir 就位）。
+ */
+int system32_loader_dir_prefix_test(const wchar_t *path);
+
 #endif /* VERTHYS_SYSTEM32_LOADER_H */

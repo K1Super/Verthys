@@ -20,14 +20,14 @@
  *      - onShowModuleKey：查看/复制模块密钥（需该模块已登录）
  *      - onLogoutModule：登出模块（清除会话密钥缓存）
  *
- * ★ 企业级设计：
+ * 设计：
  *   - keyManager 单例 ref（moduleKeyEnabledRef / hasModuleKeyRecordRef / moduleKeyReadyRef /
  *     globalKeyReadyRef）直接从 keyManager 导入，与 SecurityCenter.vue 原实现一致
  *   - 外部依赖通过参数注入：showError / showToast / onCopyText（剪贴板工具，
  *     由 SecurityCenter 顶层持有，含 toast 反馈；未来可提取为 useClipboard）
  *   - 乐观更新策略：UI 立即响应，后台 setModuleKeyEnabled 持久化失败时回滚
  *
- * ★ 返回契约：
+ * 返回契约：
  *   - setModuleKeyEnabled 返回 VerthysResult<void>
  *   - verifyModuleKey 返回 VerthysResult<void>
  *   - setModuleKey 返回 VerthysResult<void>
@@ -115,7 +115,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
   const keyDialogProcessing = ref(false);
 
   /* ===== 待启用模块（前置密钥校验流程状态） =====
-   * ★ 企业级根治：开启模块保护前必须先设置该模块独立密钥。
+   * 修复：开启模块保护前必须先设置该模块独立密钥。
    *   未设置密钥时点击开关 → 拉起密钥设置弹窗并记录 pendingEnableModuleId；
    *   密钥设置成功 → 自动开启该模块保护（持久化，失败回滚）；
    *   中途退出（取消/遮罩关闭）→ 保护保持关闭，checkbox 回滚为关闭态。 */
@@ -129,18 +129,18 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
 
   /* ===== 切换模块密钥保护开关（乐观更新 — 立即响应，后台持久化） =====
    *
-   * ★ setModuleKeyEnabled 返回 VerthysResult<void>
+   * setModuleKeyEnabled 返回 VerthysResult<void>
    *
    * 流程：
    *   1. 全局密钥未就绪 → 直接返回（防御性守卫）
-   *   2. ★ 前置密钥校验：开启保护但该模块尚未设置密钥 →
+   *   2. 前置密钥校验：开启保护但该模块尚未设置密钥 →
    *      恢复 checkbox 关闭态 + 拉起密钥设置弹窗（pending 待启用流程）
    *   3. 关闭保护且模块已有密钥 → 强制恢复 checkbox 开启 + 打开验证弹窗（等待确认）
    *   4. 开启保护（已有密钥）/ 关闭无密钥模块 → 乐观更新 UI + 后台持久化（失败回滚）
    */
   const onToggleModuleKeyEnabled = async (mid: ModuleId, enabled: boolean) => {
     if (!globalKeyReadyRef.value) return;
-    // ★ 前置密钥校验：开启保护前必须先设置该模块独立密钥
+    // 前置密钥校验：开启保护前必须先设置该模块独立密钥
     if (enabled && !hasModuleKey(mid)) {
       // 恢复 checkbox 关闭状态（密钥未设置前不改变保护状态）
       moduleKeyEnabledRef.value = { ...moduleKeyEnabledRef.value, [mid]: false };
@@ -178,7 +178,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
 
   /* ===== 关闭密钥保护验证弹窗 — 确认 =====
    *
-   * ★ 返回契约：
+   * 返回契约：
    *   - verifyModuleKey 返回 VerthysResult<void>
    *   - setModuleKeyEnabled 返回 VerthysResult<void>
    *
@@ -228,7 +228,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
   /** 打开密钥编辑弹窗 */
   const onOpenKeyDialog = (mid: ModuleId) => {
     if (!globalKeyReadyRef.value || !moduleKeyEnabledRef.value[mid]) return;
-    // ★ 防御性边界：若存在进行中的待启用流程且切换到其他模块编辑，中止该流程
+    // 防御性边界：若存在进行中的待启用流程且切换到其他模块编辑，中止该流程
     //   （保护保持关闭，checkbox 回滚为关闭态，避免悬空的 pending 状态）
     if (pendingEnableModuleId.value !== null && pendingEnableModuleId.value !== mid) {
       moduleKeyEnabledRef.value = { ...moduleKeyEnabledRef.value, [pendingEnableModuleId.value]: false };
@@ -241,7 +241,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
   };
 
   /** 关闭密钥编辑弹窗
-   * ★ 中途退出处理：若处于「待启用」流程（开启保护触发的密钥设置），
+   * 中途退出处理：若处于「待启用」流程（开启保护触发的密钥设置），
    *   中止流程 → 保护保持关闭，checkbox 回滚为关闭态（UI 与状态一致） */
   const onCloseKeyDialog = () => {
     if (pendingEnableModuleId.value !== null) {
@@ -260,7 +260,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
 
   /* ===== 确认保存密钥（修改时需先验证原密钥） =====
    *
-   * ★ 返回契约：
+   * 返回契约：
    *   - verifyModuleKey 返回 VerthysResult<void>
    *   - setModuleKey 返回 VerthysResult<void>
    *
@@ -268,7 +268,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
  *   1. 修改模式（hasModuleKey=true）→ 先验证原独立密钥
    *   2. 验证通过（或生成模式）→ 保存新密钥
    *   3. 成功 → 关闭弹窗 + 清空表单 + toast 反馈
-   *   4. ★ 待启用流程（pendingEnableModuleId 命中）→ 自动开启该模块密钥保护
+   *   4. 待启用流程（pendingEnableModuleId 命中）→ 自动开启该模块密钥保护
    *      （乐观更新 UI + 后台持久化，持久化失败回滚为关闭态）
    */
   const onConfirmKeyDialog = async () => {
@@ -295,7 +295,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
       // 验证通过（或生成模式）→ 保存新密钥
       const result = await setModuleKey(mid, editingKeyValue.value);
       if (result.ok) {
-        // ★ 待启用流程判定：密钥设置成功 → 自动开启该模块密钥保护
+        // 待启用流程判定：密钥设置成功 → 自动开启该模块密钥保护
         const pendingEnable = pendingEnableModuleId.value === mid;
         pendingEnableModuleId.value = null;
         showKeyDialog.value = false;

@@ -6,7 +6,7 @@
  *   2. 关闭流程：后端隐藏窗口 + 前端异步清理 + exit(0)
  *   3. 窗口拖动：data-tauri-drag-region 的增强备用路径
  *
- * ★ 企业级关闭响应优化（根治"关闭按钮延迟数秒"）：
+ * 关闭响应优化（根治"关闭按钮延迟数秒"）：
  *
  *   旧实现根因：
  *     前端 `await getCurrentWindow().hide()` 为 IPC 往返调用。
@@ -77,10 +77,10 @@ async function exitWithFallback(): Promise<void> {
  *      verthysLockPersist 原子落盘 → securitySessionStop → verthysLock 销毁 worker）
  *   3. lockAll 完成（或异常）后 exit(0)
  *
- * ★ 后端 45s 超时兜底确保进程必然退出（防 worker 卡死导致僵尸进程）。
+ * 后端 45s 超时兜底确保进程必然退出（防 worker 卡死导致僵尸进程）。
  *   窗口已由后端在 CloseRequested 时隐藏（Rust 原生调用，微秒级），用户无感知。
  *
- * ★ 数据安全铁律：lockAll 内部 40s 安全网确保 v1 容器 waitForFlush（22s）
+ * 数据安全铁律：lockAll 内部 40s 安全网确保 v1 容器 waitForFlush（22s）
  *   + verthysLockPersist（12s）完整执行后再销毁 worker，防止数据丢失。
  */
 async function performCleanupAndExit(): Promise<void> {
@@ -95,8 +95,8 @@ async function performCleanupAndExit(): Promise<void> {
   }
 
   // 3. verthys 已初始化 → lockAll 异步清理（数据落盘 + 销毁 worker）
-  //    ★ 窗口已由后端在 CloseRequested 时隐藏（零 IPC 延迟），此处无需再隐藏
-  //    ★ lockAll 内部 40s 安全网 + 后端 45s 超时兜底，双保险确保进程退出
+  //    窗口已由后端在 CloseRequested 时隐藏（零 IPC 延迟），此处无需再隐藏
+  //    lockAll 内部 40s 安全网 + 后端 45s 超时兜底，双保险确保进程退出
   try {
     await lockAll();
   } catch { /* lockAll 内部已吞错，此处兜底 */ }
@@ -124,7 +124,7 @@ export function useWindowControls() {
   /**
    * 关闭按钮点击：调用 window.close() 触发后端 CloseRequested 事件。
    *
-   * ★ 后端 on_window_event 处理器在 CloseRequested 时：
+   * 后端 on_window_event 处理器在 CloseRequested 时：
    *   1. api.prevent_close() — 阻止默认关闭
    *   2. window.hide() — Rust 原生调用，微秒级隐藏窗口（零 IPC 延迟）
    *   3. emit("verthys://cleanup-and-exit") — 通知前端执行 lockAll
@@ -160,7 +160,7 @@ export function useWindowControls() {
       const win = getCurrentWindow();
       startDraggingFn = () => win.startDragging();
 
-      // ★ 监听后端 emit 的 "verthys://cleanup-and-exit" 事件
+      // 监听后端 emit 的 "verthys://cleanup-and-exit" 事件
       //   后端在 CloseRequested 时已隐藏窗口（Rust 原生调用，微秒级），
       //   前端收到此事件后执行 lockAll 异步清理 + exit(0)
       listen("verthys://cleanup-and-exit", () => {

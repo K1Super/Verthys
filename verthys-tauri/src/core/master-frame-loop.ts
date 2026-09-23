@@ -19,7 +19,9 @@
  *     强制释放兜底（正常路径由使用者主动释放）。
  *   - 每帧任务总耗时测量 → 帧预算监控消费（统计与决策在监控内部
  *     降频执行，不阻塞帧）。
- *   - 错误熔断：任务连续抛错 10 次自动注销，避免错误帧循环刷屏。
+ *   - 错误熔断：常驻任务连续抛错 10 次自动注销；once 任务连续抛错
+ *     10 次进入短暂熔断冷却，冷却结束自动恢复执行资格，
+ *     避免错误任务每帧重复执行刷屏。
  *
  * 页面隐藏时浏览器停发 rAF —— 主循环天然完全停帧，无需自行轮询。
  */
@@ -95,6 +97,9 @@ const browserHost: LoopHost = {
 /** 任务连续抛错上限：达到后自动注销（防错误帧循环刷屏） */
 const MAX_TASK_ERRORS = 10;
 
+/** once 任务熔断冷却时长（ms）：连续抛错达上限后暂停执行，冷却结束恢复 */
+const ONCE_BREAK_COOLDOWN_MS = 1000;
+
 /** mustRun 常驻任务数量上限（超出时拒绝注册） */
 const MUST_RUN_LIMIT = 2;
 
@@ -104,8 +109,13 @@ export class MasterFrameLoop {
   private readonly mustTasks = new Map<number, TaskEntry>();
   /** throttled 任务表（按空闲档位节流） */
   private readonly throttleTasks = new Map<number, TaskEntry>();
-  /** 一次性排帧队列（事件驱动的单帧写入 —— 每 rAF 帧执行，不受档位节流） */
+  /** 一次性排帧队列（每 rAF 帧执行，不受档位节流；排空取帧快照，
+   * 排空期间新排入者顺延至下一帧 —— once 任务无法在同帧内自我延续） */
   private readonly onceQueue: FrameTask[] = [];
+  /** once 任务连续抛错计数（跨帧累计，成功执行后清零） */
+  private readonly onceErrorCounts = new WeakMap<FrameTask, number>();
+  /** once 任务熔断冷却截止帧时刻（ms；冷却期内跳过执行） */
+  private readonly onceBrokenUntil = new WeakMap<FrameTask, number>();
   /** 已授予豁免（按 token id 索引；释放幂等） */
   private readonly granted = new Map<number, ExemptionToken>();
   /** degraded 豁免计数（混合时取最严格帧率） */
@@ -164,7 +174,8 @@ export class MasterFrameLoop {
     };
   }
 
-  /** 下一 rAF 帧执行一次（事件驱动的单帧写入——不受空闲档位节流） */
+  /** 排入下一 rAF 帧执行一次（不受空闲档位节流；当前帧排空开始后新排入者
+   * 顺延至下一帧，任务在同帧内无法自我延续） */
   once(task: FrameTask): void {
     this.onceQueue.push(task);
   }
@@ -240,6 +251,39 @@ export class MasterFrameLoop {
     }
   }
 
+  /**
+   * 执行单个 once 任务（帧快照批次内逐任务调用，每帧至多一次）。
+   * 错误熔断：同一任务函数连续抛错达上限后进入冷却期暂停执行，
+   * 冷却结束自动恢复执行资格 —— 防止异常任务每帧重复执行刷屏，
+   * 又不造成永久失效（冷却期内新排入亦跳过，冷却后照常执行）。
+   */
+  private runOnceTask(task: FrameTask, ctx: FrameStep, frameTsMs: number): void {
+    const brokenUntil = this.onceBrokenUntil.get(task);
+    if (brokenUntil !== undefined) {
+      if (brokenUntil > frameTsMs) return;
+      this.onceBrokenUntil.delete(task);
+      this.onceErrorCounts.delete(task);
+    }
+    try {
+      task(ctx);
+      this.onceErrorCounts.delete(task);
+    } catch (error) {
+      const next = (this.onceErrorCounts.get(task) ?? 0) + 1;
+      const name = task.name || "anonymous";
+      if (next >= MAX_TASK_ERRORS) {
+        this.onceErrorCounts.delete(task);
+        this.onceBrokenUntil.set(task, frameTsMs + ONCE_BREAK_COOLDOWN_MS);
+        console.error(
+          `[master-frame-loop] once 任务连续抛错 ${MAX_TASK_ERRORS} 次，进入 ${ONCE_BREAK_COOLDOWN_MS}ms 熔断冷却：${name}`,
+          error,
+        );
+      } else {
+        this.onceErrorCounts.set(task, next);
+        console.error(`[master-frame-loop] once 任务执行异常：${name}`, error);
+      }
+    }
+  }
+
   private nowSec(): number {
     return this.host.nowMs() / 1000;
   }
@@ -271,9 +315,10 @@ export class MasterFrameLoop {
       this.lastMustTs = now;
       const ctx: FrameStep = { frameStep: frameStepMust, wallClock: now };
       for (const entry of this.mustTasks.values()) this.runTask(entry, ctx);
-      while (this.onceQueue.length > 0) {
-        const task = this.onceQueue.shift();
-        if (task) this.runTask({ task, label: "once", errors: 0 }, ctx);
+      /* 帧快照排空：仅执行本帧开始前已排入的任务，排空期间新排入者
+       * 留待下一帧 —— 从契约上禁止 once 任务同帧自我延续（防同帧自旋） */
+      for (const task of this.onceQueue.splice(0)) {
+        this.runOnceTask(task, ctx, tsMs);
       }
     }
 

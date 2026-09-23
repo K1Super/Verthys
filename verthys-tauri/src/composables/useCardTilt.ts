@@ -1,12 +1,12 @@
 /**
  * useCardTilt — 卡片 3D 视差倾斜 + 光泽追踪
  *
- * ★ 项3：mousemove 事件用主循环排帧节流（合并同帧多次调用，60fps 上限）
+ * 项3：mousemove 事件用主循环排帧节流（合并同帧多次调用，60fps 上限）
  * 原问题：mousemove 每秒触发 60~120 次，每次都执行 getBoundingClientRect + style 写入，
  *        连续移动鼠标时主线程 JS 执行时间远超 16.6ms（60fps 一帧预算）。
  * 优化后：同一帧内多次 mousemove 仅执行最后一次，视差计算开销降低 90%。
  *
- * ★ 关键修复：event.currentTarget 在事件分发结束后被浏览器置空，
+ * 关键修复：event.currentTarget 在事件分发结束后被浏览器置空，
  *   排帧回调延迟到下一帧执行时 currentTarget 已为 null。
  *   必须在同步阶段（事件触发时）立即捕获 card 元素和坐标，排帧回调仅负责延迟写入。
  *
@@ -22,7 +22,7 @@ export function useCardTilt() {
   let scheduled = false;
   let pending: { card: HTMLElement; px: number; py: number } | null = null;
 
-  /* ★ 主循环排帧节流：同步阶段捕获 card + 坐标，排帧回调仅延迟样式写入
+  /* 主循环排帧节流：同步阶段捕获 card + 坐标，排帧回调仅延迟样式写入
    * 同一帧内多次 mousemove 仅保留最后一次的坐标 */
   const onCardMove = (e: MouseEvent) => {
     const card = e.currentTarget as HTMLElement | null;

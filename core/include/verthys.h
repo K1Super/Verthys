@@ -38,7 +38,7 @@
  *   bit 0 (0x01)：索引区已完成预热，C 层可直接 CreateFileMapping
  *                 零拷贝读取索引区，跳过磁盘同步 IO
  *   bit 1 (0x02)：允许加载本地持久化缓存（.verthys.idx_cache）
- *   bit 2 (0x04)：★ V3（API 版本 0x0009）渐进式
+ *   bit 2 (0x04)：V3（API 版本 0x0009）渐进式
  *                 解锁——最小可操作优先：S0-S4（超块/密钥/分区表）完成后
  *                 立即返回 VERTHYS_ERR_PARTIAL_UNLOCK，索引预热转后台线程
  * ================================================================== */
@@ -52,7 +52,7 @@
  * Windows平台x64架构虽统一ABI，但显式指定__cdecl调用约定可保障跨编译器、
  * 跨语言FFI调用时栈布局一致性，避免栈失衡问题。
  *
- * ★ 导出面唯一由 verthys.def 白名单管控。
+ * 导出面唯一由 verthys.def 白名单管控。
  *
  * 原缺陷：VERTHYS_EXPORTS 使本头文件内所有 VERTHYS_API 声明展开为
  * __declspec(dllexport)，/DEF: 仅追加导出而非白名单——实际导出面 =
@@ -133,7 +133,7 @@ typedef enum {
     VERTHYS_ERR_CORRUPT  = 0x00000009u,  /* 数据区块完整性校验失败，文件存在损坏，区别于常规认证错误 */
     VERTHYS_ERR_RATE     = 0x0000000Au,  /* 操作触发访问限流，用于暴力破解访问频次管控 */
     VERTHYS_ERR_SNAPSHOT = 0x0000000Bu,  /* 扫描游标快照版本过期，容器已发生并发事务修改，需重新创建游标 */
-    /* ★ 胡椒来源不可用（API 版本 0x0006）：
+    /* 胡椒来源不可用（API 版本 0x0006）：
      * OS 托管 pepper 解包失败、或容器记录的 pepper 来源与
      * 当前生效来源不一致时返回——区别于 VERTHYS_ERR_AUTH（密码错误），
      * 上层应提示"保险库安全源已变更，可能由于系统硬件或安全策略改变"，
@@ -141,39 +141,39 @@ typedef enum {
      * 注：原拟 0x0000000B 与既有 VERTHYS_ERR_SNAPSHOT 冲突，
      *     依 ABI 向后兼容原则顺延至 0x0C。 */
     VERTHYS_ERR_PEPPER_SOURCE = 0x0000000Cu,
-    /* ★ 导出记录数超限（API 版本 0x0006 扩展）：
+    /* 导出记录数超限（API 版本 0x0006 扩展）：
      * 导出记录数超出 v1 导出格式容量上限（65535），导出被拒绝。
      * 原行为：静默截断并返回 VERTHYS_OK——导出不完整且用户不知情。 */
     VERTHYS_ERR_EXPORT_TOO_MANY = 0x0000000Du,
-    /* ★ V3 升级（API 版本 0x0007 扩展）：
+    /* V3 升级（API 版本 0x0007 扩展）：
      * CNG 内核态密码服务不可用（BCrypt 算法提供者打开/密钥导入失败）。
      * 上层按 cng_machine_key 三级降级链处理；此码为降级链耗尽后的
      * 显式顶层错误，区别于 VERTHYS_ERR_INTERNAL 的未归类内部异常。
      * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
     VERTHYS_ERR_CNG_UNAVAILABLE = 0x0000000Eu,
-    /* ★ V3 升级（API 版本 0x0007 扩展）：
+    /* V3 升级（API 版本 0x0007 扩展）：
      * 全局内存预算耗尽（用量达到硬上限 512MB 的 95%）时新操作被拒绝，
      * 避免 OOM。区别于 VERTHYS_ERR_INTERNAL：调用方可触发内存回收后重试。
      * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
     VERTHYS_ERR_RESOURCE_LIMIT = 0x0000000Fu,
-    /* ★ V3 升级（API 版本 0x0008 扩展）：
+    /* V3 升级（API 版本 0x0008 扩展）：
      * 超级块法定人数不满足——3 副本中 HMAC 有效副本 < 2（仅 1 副本有效），
      * 容器一致性无法由法定人数保证，须触发恢复流程（WAL 回放）。
      * 区别于 VERTHYS_ERR_CORRUPT（0 有效副本，全量损坏）。
      * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
     VERTHYS_ERR_QUORUM_FAILED = 0x00000010u,
-    /* ★ V3 升级（API 版本 0x0009 扩展）：
+    /* V3 升级（API 版本 0x0009 扩展）：
      * 渐进式解锁——容器已进入最小可操作状态（超级块验证 + 密钥导入 +
      * 分区表加载完成），但索引尚未完全预热（后台预热进行中）。
      * 上层可正常发起读写（LSM 按需加载 SSTable），或等待预热完成回调。
      * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
     VERTHYS_ERR_PARTIAL_UNLOCK = 0x00000011u,
-    /* ★ V3 升级（API 版本 0x0009 扩展）：
+    /* V3 升级（API 版本 0x0009 扩展）：
      * 解锁流水线总超时（预算 10s）——S0-S6 任一阶段未在预算内完成。
      * 区别于 VERTHYS_ERR_INTERNAL：调用方可安全重试（无部分写入副作用，
      * 事务原子性由 WAL + 法定人数保证）。 */
     VERTHYS_ERR_TIMEOUT = 0x00000012u,
-    /* ★ V3 升级接线收口（API 版本 0x000A 扩展）：
+    /* V3 升级接线收口（API 版本 0x000A 扩展）：
      * 当前容器格式不支持该操作——V3 容器在关联功能尚未迁移至 V3 专属
      * 实现（如改密：依赖 CNG 内核态密钥轮换原语）时显式拒绝，
      * 区别于 INTERNAL（未归类异常）与 INVALID（参数非法）。
@@ -260,7 +260,7 @@ typedef struct {
  * 采集解锁耗时拆解、缓存命中统计、GC回收、事务提交、扫描游标运行等运行指标，
  * 支撑性能排查、运行状态可视化展示。胡椒来源仅做分类标记，不输出原始敏感值。
  *
- * ★ 可观测性指标增强（API 版本 0x0005），新增 5 项指标：
+ * 可观测性指标增强（API 版本 0x0005），新增 5 项指标：
  *   - 页缓存命中率（通过文件句柄信息/高精度计时器估算）
  *   - 读写锁平均等待耗时
  *   - 持久化缓存加载耗时
@@ -298,7 +298,7 @@ typedef struct {
     /* === 预留扩展字段（保持原有 8 字节对齐） === */
     uint8_t  reserved[7];
 
-    /* === ★ 可观测性指标扩展（5 项新增指标） === */
+    /* === 可观测性指标扩展（5 项新增指标） === */
     /* 读写锁平均等待耗时（毫秒）— 采集 AcquireSRWLockShared/Exclusive 的排队耗时 */
     uint64_t lock_wait_ms;          /* 读写锁平均等待耗时（毫秒） */
     /* 持久化缓存加载耗时（毫秒）— .verthys.idx_cache 加载全流程耗时 */
@@ -310,7 +310,7 @@ typedef struct {
     /* 预热状态枚举（0=未预热 /1=预热中 /2=预热完成 /3=预热失败） */
     uint32_t preheat_status;        /* 预热状态枚举 */
 
-    /* === ★ 自适应 Argon2id 漂移监控指标 === */
+    /* === 自适应 Argon2id 漂移监控指标 === */
     /* 基准派生耗时（毫秒）— 容器创建时跑分记录，存入超级块 flags 字段 */
     uint32_t argon2_baseline_ms;    /* 基准派生耗时（毫秒，0=未建立基准） */
     /* 最近一次 Argon2id 派生耗时（毫秒）— 运行时实时采集 */
@@ -320,7 +320,7 @@ typedef struct {
     /* 自动降级标志（0=正常, 1=已降级）— 连续 3 次漂移后置 1 */
     uint32_t argon2_auto_degraded;  /* 自动降级标志 */
 
-    /* === ★ 索引内存映射失败告警指标 ===
+    /* === 索引内存映射失败告警指标 ===
      * 累计索引区内存映射失败回退 fread 的次数（跨多次解锁累计）。
      * 每次 prefetch_done=1 但 CreateFileMapping/MapViewOfFile 失败时递增。
      * 通过 Verthys_GetDiagnostics 上报安全中心，运维可据此排查：
@@ -354,7 +354,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_Init(VerthysHandle *out_handle);
  * 通知 DLL 当前 worker 进程已应用的沙盒属性位掩码（保留接口）
  *
  * worker 在加载本 DLL 后、调用 Verthys_Init 之前调用：位掩码与
- * process_sandbox 模块的 SANDBOX_ATTR_* 对齐，防御闭环验证据此
+ * process_sandbox 模块的 SANDBOX_ATTR_* 对齐，动态防护验证据此
  * 识别已生效的内核 mitigation policy。
  *
  * 线程安全：MT-Safe（Init 前单线程调用）
@@ -370,7 +370,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_Deinit(VerthysHandle handle);
  * 行为规则：文件不存在直接返回IO错误，不会自动创建容器；仅校验解密已有文件，
  * 新建容器必须调用专用创建接口。解锁成功后句柄进入可读写就绪状态。
  *
- * ★ API 版本 0x0005：新增 flags 参数，透传上层预热状态。
+ * API 版本 0x0005：新增 flags 参数，透传上层预热状态。
  *   - VERTHYS_UNLOCK_FLAG_INDEX_PREHEATED (0x01)：索引区已预热，C 层走内存映射零拷贝路径
  *   - VERTHYS_UNLOCK_FLAG_ALLOW_CACHE (0x02)：允许加载持久化缓存
  *   - flags=0 时行为与旧版完全一致（磁盘同步读取），保证向下兼容
@@ -415,7 +415,7 @@ typedef enum {
     VERTHYS_UNLOCK_STAGE_BTREE_DONE       = 6,  /* B+ 树构建完成（85%） */
     VERTHYS_UNLOCK_STAGE_SUMMARY_DONE     = 7,  /* 摘要索引加载完成（95%） */
     VERTHYS_UNLOCK_STAGE_MERKLE_DONE      = 8,  /* Merkle 树创建完成（100%） */
-    /* ★ 索引内存映射失败告警事件阶段（不推进百分比，仅推送告警通知）
+    /* 索引内存映射失败告警事件阶段（不推进百分比，仅推送告警通知）
      * 索引区内存映射失败回退 fread 时触发，前端可据此展示降级提示。
      * 此阶段为告警性质，不改变主解锁流程，仅通过进度回调异步推送。 */
     VERTHYS_UNLOCK_STAGE_INDEX_MMAP_FALLBACK = 9,  /* 索引内存映射失败回退告警 */
@@ -487,6 +487,23 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_CreateWithPreset(VerthysHandle ha
                                     VerthysPreset preset);
 
 /*
+ * 运行时切换安全预设档位（BALANCED / SECURE / PERFORMANCE）
+ *
+ * 切换立即生效：双缓冲原子发布新配置快照，各防护子系统下一次读取
+ * 运行时配置时进入新档行为。幂等：切到当前档返回成功。
+ * 不涉及容器状态与密钥材料，仅变更进程级运行时防护配置；
+ * CUSTOM 档由应用层逐项配置，非本接口合法入参。
+ *
+ * 返回值：
+ *   VERTHYS_OK          — 切换成功
+ *   VERTHYS_ERR_INVALID — handle 为 NULL 或 preset 非法
+ *
+ * 线程安全：MT-Safe（双缓冲 + 原子指针交换，读者无锁）
+ */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_SwitchSecurityPreset(VerthysHandle handle,
+                                                                    VerthysPreset preset);
+
+/*
  * 锁定容器，清空内存中所有密钥与明文数据，句柄退回锁定不可操作状态
  * 耗时较重的碎片整理、全量校验均后置为后台异步任务，本接口仅执行缓存刷盘与敏感内存清零，不阻塞调用线程。
  *
@@ -515,7 +532,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_AddRecord(VerthysHandle handle,
 
 /* 按ID读取完整记录数据，返回结构体指针为内部借用内存
  *
- * ★ API 契约加固：指针生命周期契约
+ * API 契约加固：指针生命周期契约
  *
  * 1. 所有权模型
  *    out_record->data 与 out_record->name 为【内部借用指针】，指向上下文
@@ -680,7 +697,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ScanSummaryRecordFree(VerthysSumm
 VERTHYS_API VerthysResult Verthys_GetSummaryCount(VerthysHandle handle, uint64_t *out_count);
 
 /* ================================================================== *
- * ★ 企业级设计：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）     *
+ * 设计：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）     *
  *                                                                    *
  * 用途：快速判断 verthys 中是否存在指定类型的记录（如 TYPE_GLOBAL_KEY），  *
  * 用于启动阶段决定 UI 路径（"初始化密钥" vs "身份验证"）。              *
@@ -707,7 +724,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_HasRecordByType(VerthysHandle han
                                               uint8_t *out_found);
 
 /* ================================================================== *
- * ★ 企业级根治：按类型查找首条记录的逻辑 ID（lid）                    *
+ * 修复：按类型查找首条记录的逻辑 ID（lid）                    *
  *                                                                    *
  * 与 Verthys_HasRecordByType 的区别：                                   *
  *   - 同时返回 found 标志与匹配记录的 lid（单次遍历完成）             *
@@ -751,8 +768,8 @@ VERTHYS_API VerthysResult Verthys_GetDiagnostics(VerthysHandle handle,
                                   VerthysDiagnostics *out_diag);
 
 /* ================================================================== *
- * ★ V3 升级（API 版本 0x000B）：
- * 防御闭环状态查询接口
+ * V3 升级（API 版本 0x000B）：
+ * 动态防护状态查询接口
  *
  * 防御攻击路径枚举（7 项）。
  * 值域与内部 DefensePath 镜像对齐（编译期契约锁定，同 verthys_api.c）。
@@ -777,7 +794,7 @@ typedef enum {
 } VerthysDefenseState;
 
 /*
- * 防御闭环状态报告（API 版本 0x000B）
+ * 动态防护状态报告（API 版本 0x000B）
  *
  * 所有字段均为非敏感运行时状态元数据，不含密钥、句柄或模块内部地址。
  */
@@ -787,13 +804,13 @@ typedef struct {
     uint32_t blocked_count;          /* BLOCKED 路径数 */
     uint32_t degraded_count;         /* DEGRADED 路径数 */
     uint32_t failed_count;           /* FAILED 路径数 */
-    uint8_t  all_critical_blocked;   /* 1 = 无 FAILED 路径（整体可运行） */
+    uint8_t  all_critical_blocked;   /* 1 = 全部 7 条路径 BLOCKED（无 FAILED 且无 DEGRADED） */
     uint8_t  has_degraded;           /* 1 = 存在 DEGRADED 路径 */
     uint8_t  reserved[6];            /* 预留对齐（调用方必须置零传递，回填后忽略） */
 } VerthysSecurityStatus;
 
 /*
- * 查询防御闭环状态（7 攻击路径实时复检）
+ * 查询动态防护状态（7 攻击路径实时复检）
  *
  * 行为契约：
  *   - 每次调用执行 RUNTIME 级实时复检（非上次 BOOT 校验的缓存快照），

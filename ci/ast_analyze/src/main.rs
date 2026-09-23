@@ -22,6 +22,7 @@ use std::process::ExitCode;
 
 use regex::Regex;
 use syn::{visit::Visit, ItemFn, File as SynFile};
+use syn::spanned::Spanned;
 use walkdir::WalkDir;
 
 /* ------------------------------------------------------------------ *
@@ -222,7 +223,7 @@ impl<'ast> Visit<'ast> for SwallowVisitor {
             // 检查是否是 Err(_) 模式
             if pat_str.contains("Err") && pat_str.contains("_") {
                 // 检查 match body 是否为空或返回默认值
-                let body_str = match &arm.body {
+                let body_str = match arm.body.as_ref() {
                     syn::Expr::Block(b) => {
                         b.block.stmts.is_empty()
                     }
@@ -341,16 +342,36 @@ impl DependencyAnalyzer {
  * ------------------------------------------------------------------ */
 
 fn main() -> ExitCode {
+    // 命令行：--baseline <path> 读存量豁免基线；--write-baseline <path>
+    // 把当前全部 ERROR 级违规写入基线文件（首次启用或重设基线时使用）。
+    let args: Vec<String> = std::env::args().collect();
+    let mut baseline_path: Option<String> = None;
+    let mut write_baseline_path: Option<String> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--baseline" if i + 1 < args.len() => {
+                baseline_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--write-baseline" if i + 1 < args.len() => {
+                write_baseline_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
     let project_root = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."));
 
     let rust_src = project_root.join(RUST_SRC_DIR);
     let c_src = project_root.join(C_SRC_DIR);
 
-    println!("=" .repeat(60));
+    println!("{}", "=".repeat(60));
     println!("CI 第二级：AST 深度分析");
     println!("   ");
-    println!("=" .repeat(60));
+    println!("{}", "=".repeat(60));
 
     let mut all_violations = Vec::new();
 
@@ -438,14 +459,52 @@ fn main() -> ExitCode {
         }
     }
 
+    // 基线初始化/重设：写入当前全部 ERROR 级违规后成功退出
+    if let Some(p) = &write_baseline_path {
+        let mut body =
+            String::from("# AST 红线基线：由 --write-baseline 生成（存量豁免，新增违规不受豁免）\n");
+        for v in all_violations.iter().filter(|v| v.severity == "ERROR") {
+            body.push_str(&format!("{}|{}|{}\n", v.category, v.file, v.line));
+        }
+        if let Err(e) = std::fs::write(p, body) {
+            eprintln!("写入基线失败: {e}");
+            return ExitCode::from(2);
+        }
+        let err_count = all_violations.iter().filter(|v| v.severity == "ERROR").count();
+        println!("基线已写入 {}：{} 条 ERROR", p, err_count);
+        return ExitCode::SUCCESS;
+    }
+
+    // 存量豁免过渡：与基线完全重合（类别/文件/行号）的违规跳过，
+    // 同一位置外的任何新违规仍阻断构建
+    let baseline: HashSet<String> = match &baseline_path {
+        Some(p) => std::fs::read_to_string(p)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(|l| l.trim().to_string())
+            .collect(),
+        None => HashSet::new(),
+    };
+    let mut remaining = Vec::new();
+    let mut exempted: usize = 0;
+    for v in all_violations {
+        let key = format!("{}|{}|{}", v.category, v.file, v.line);
+        if baseline.contains(&key) {
+            exempted += 1;
+        } else {
+            remaining.push(v);
+        }
+    }
+
     // 输出结果
-    let errors: Vec<_> = all_violations.iter().filter(|v| v.severity == "ERROR").collect();
-    let warns: Vec<_> = all_violations.iter().filter(|v| v.severity == "WARN").collect();
+    let errors: Vec<_> = remaining.iter().filter(|v| v.severity == "ERROR").collect();
+    let warns: Vec<_> = remaining.iter().filter(|v| v.severity == "WARN").collect();
 
-    if !all_violations.is_empty() {
-        println!("\n发现 {} 个违规（{} 错误, {} 警告）：\n", all_violations.len(), errors.len(), warns.len());
+    if !remaining.is_empty() {
+        println!("\n发现 {} 个违规（{} 错误, {} 警告）：\n", remaining.len(), errors.len(), warns.len());
 
-        for v in &all_violations {
+        for v in &remaining {
             println!(
                 "[{}] {} {}:{} - {}",
                 v.severity, v.category, v.file, v.line, v.message
@@ -453,7 +512,11 @@ fn main() -> ExitCode {
         }
     }
 
-    println!("\n{}" .repeat(60));
+    if exempted > 0 {
+        println!("\n基线豁免 {} 条存量违规（新增违规仍阻断）。", exempted);
+    }
+
+    println!("\n{}", "=".repeat(60));
     println!(
         "第二级扫描完成：{} 错误, {} 警告",
         errors.len(),

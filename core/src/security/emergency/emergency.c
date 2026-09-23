@@ -1,7 +1,7 @@
 /*
  * emergency.c — 应急兜底与连锁响应机制实现
  *
- * ★ 应急响应模型分级实现。
+ * 应急响应模型分级实现。
 
  * 原模型缺陷：
  *   - 信号终身累积，任意两个不同信号位即 TerminateProcess；
@@ -27,6 +27,8 @@
 #include "memory_guard.h"
 #include "key_separation.h"
 #include "security_preset.h"
+#include "verthys_crypto.h"     /* verthys_random_bytes（事件名随机后缀） */
+#include "verthys_internal.h"  /* verthys_secure_zero */
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -35,8 +37,11 @@
 
 /* ---------- 常量 ---------- */
 
-/* 看门狗事件名前缀（拼接 PID 保证多实例唯一） */
+/* 看门狗事件名：前缀 + PID + 随机后缀（防同用户进程预占/监听命名事件） */
 #define EMERG_WATCHDOG_EVENT_PREFIX_W  L"Verthys_Emergency_"
+
+/* 事件名随机后缀字节数（hex 编码后双倍宽字符） */
+#define EMERG_EVENT_RAND_BYTES  8u
 
 /* 看门狗事件名缓冲最大长度（宽字符） */
 #define EMERG_EVENT_NAME_MAX  64
@@ -90,15 +95,21 @@ static ULONGLONG emerg_now_ms(void)
 }
 
 /*
- * 构建看门狗事件名：L"Verthys_Emergency_<PID>"。
- * 手动拼接前缀与 PID 数字，避免依赖 swprintf 的可移植性差异。
+ * 构建看门狗事件名：L"Verthys_Emergency_<PID>_<16 hex 随机后缀>"。
+ * 手动拼接前缀、PID 十进制与随机后缀十六进制，避免依赖 swprintf
+ * 的可移植性差异。随机后缀（CSPRNG 8 字节）杜绝同用户恶意进程
+ * 预占（event squatting）或监听该命名事件；后缀仅影响名字形态，
+ * 事件语义（创建/SetEvent）不变。
  */
 static void build_event_name(wchar_t *buf, size_t cap)
 {
     static const wchar_t prefix[] = EMERG_WATCHDOG_EVENT_PREFIX_W;
+    static const wchar_t hex_chars[] = L"0123456789abcdef";
+    uint8_t rnd[EMERG_EVENT_RAND_BYTES];
     DWORD pid = GetCurrentProcessId();
     size_t i = 0;
     size_t j;
+    int k;
 
     /* 复制前缀 */
     for (j = 0; prefix[j] != L'\0' && i + 1 < cap; j++) {
@@ -115,10 +126,19 @@ static void build_event_name(wchar_t *buf, size_t cap)
             tmp[n++] = (wchar_t)(L'0' + (pid % 10));
             pid /= 10;
         }
-        for (int k = n - 1; k >= 0 && i + 1 < cap; k--) {
-            buf[i++] = tmp[k];
+        for (int k2 = n - 1; k2 >= 0 && i + 1 < cap; k2--) {
+            buf[i++] = tmp[k2];
         }
     }
+
+    /* 分隔符 + 随机后缀（hex 编码） */
+    if (i + 1 < cap) buf[i++] = L'_';
+    verthys_random_bytes(rnd, sizeof(rnd));
+    for (k = 0; k < (int)sizeof(rnd) && i + 1 < cap; k++) {
+        if (i + 1 < cap) buf[i++] = hex_chars[rnd[k] >> 4];
+        if (i + 1 < cap) buf[i++] = hex_chars[rnd[k] & 0x0F];
+    }
+    verthys_secure_zero(rnd, sizeof(rnd));
 
     buf[i] = L'\0';
 }
@@ -211,9 +231,10 @@ int emergency_init(void)
 
     /*
      * 创建看门狗事件对象（命名、手动复位、初始未触发）。
-     * 跨进程可见：看门狗进程经 WaitForSingleObject 监控此事件，
-     * emergency_exit 时 SetEvent 通知其捕获退出码。
-     * 创建失败不视为致命：emergency_exit 仍可通过 TerminateProcess 终止进程，
+     * 事件名含 CSPRNG 随机后缀：同用户恶意进程无法预占或监听；
+     * 跨进程可见语义保留——看门狗进程经继承的事件名或进程间约定
+     * 的传递渠道可 WaitForSingleObject 监控。创建失败不视为致命：
+     * emergency_exit 仍可通过 TerminateProcess 终止进程，
      * 仅丢失看门狗通知通道。
      */
     if (s_watchdog_event == NULL) {

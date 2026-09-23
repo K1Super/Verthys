@@ -242,7 +242,7 @@ mod windows_impl {
 
         /// 将摘要记录写入共享内存缓冲区（轻量元数据，无数据块）
         ///
-        /// ★ 摘要记录元组增加 created_time 字段
+        /// 摘要记录元组增加 created_time 字段
         /// 元组：(lid, rtype, name, data_size, physical_offset, merkle_leaf, created_time)
         ///
         /// 与全量 write_records 的区别：
@@ -302,7 +302,7 @@ mod windows_impl {
                         entry_ptr.add(40),
                         32,
                     );
-                    // ★ created_time 写入偏移 72
+                    // created_time 写入偏移 72
                     *((entry_ptr.add(72)) as *mut u64) = *created_time;
                 }
                 if !name.is_empty() {
@@ -335,45 +335,33 @@ mod windows_impl {
     }
 
     /// 生成 16 字符随机十六进制名称（不可猜测）
-    fn random_hex_name() -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0)
-            ^ (std::process::id() as u64).rotate_left(17);
-        let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+    ///
+    /// 熵源为操作系统 CSPRNG（Windows 经 getrandom 走 BCryptGenRandom 家族）。
+    /// 名称不可预测性决定同用户进程对共享内存段的探测难度，
+    /// 墙钟/进程号派生种子可被重现，此处禁止。
+    /// pub(super)：供本模块测试直接验证随机性契约。
+    pub(super) fn random_hex_name() -> String {
+        let mut raw = [0u8; 8]; /* 8 字节熵 → 16 字符十六进制 */
+        fill_random_bytes(&mut raw);
         let mut hex = String::with_capacity(16);
-        for _ in 0..16 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let nibble = ((state >> 56) & 0xF) as u8;
-            let c = if nibble < 10 {
-                b'0' + nibble
-            } else {
-                b'a' + nibble - 10
-            };
-            hex.push(c as char);
+        for b in &raw {
+            hex.push_str(&format!("{:02x}", b));
         }
         hex
     }
 
     /// 生成随机字节填充缓冲区（用于共享内存覆写擦除）
-    /// 使用 xorshift64* PRNG，避免依赖系统 RNG 的性能开销
-    fn fill_random_bytes(buf: &mut [u8]) {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let mut state = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0)
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        // 避免 state=0 退化
-        if state == 0 { state = 0xDEADBEEFCAFEBABE; }
-        for byte in buf.iter_mut() {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            *byte = (state >> 56) as u8;
+    ///
+    /// 直接取操作系统 CSPRNG（BCryptGenRandom 家族），逐字节 xorshift
+    /// 的 64 位状态空间与墙钟种子不满足密码学安全要求。
+    /// CSPRNG 不可用（极罕见）时整体填零——不泄露旧数据，
+    /// 且擦除后立即解锁/取消映射，失败方向保守。
+    /// pub(super)：供本模块测试直接验证随机性契约。
+    pub(super) fn fill_random_bytes(buf: &mut [u8]) {
+        if getrandom::getrandom(buf).is_err() {
+            for byte in buf.iter_mut() {
+                *byte = 0;
+            }
         }
     }
 
@@ -481,3 +469,40 @@ mod windows_impl {
 #[cfg(not(windows))]
 #[allow(dead_code)]
 pub(crate) struct ScanShm;
+
+/* ------------------------------------------------------------------ *
+ * CSPRNG 路径测试（Windows）                                          *
+ *                                                                    *
+ * 随机名为共享内存段的探测难度关键：名称必须不可预测。                *
+ * 擦除填充不可全零（残余明文风险）；两次调用不可重复。                *
+ * ------------------------------------------------------------------ */
+#[cfg(all(test, windows))]
+mod tests {
+    use super::windows_impl::{fill_random_bytes, random_hex_name};
+
+    #[test]
+    fn random_name_is_hex_and_unique() {
+        // 线程随机源（wasi 等特例无关）：批量生成 64 个名称，
+        // 断言全部 16 字符十六进制且两两不同（碰撞概率可忽略）。
+        let names: Vec<String> = (0..64).map(|_| random_hex_name()).collect();
+        for n in &names {
+            assert_eq!(n.len(), 16);
+            assert!(n.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 64, "随机名出现碰撞（CSPRNG 失效或仍为 PRNG）");
+    }
+
+    #[test]
+    fn fill_random_overwrites_and_differs() {
+        let mut a = [0x5Au8; 128];
+        let mut b = [0x5Au8; 128];
+        fill_random_bytes(&mut a);
+        fill_random_bytes(&mut b);
+        assert!(!a.iter().all(|&x| x == 0), "CSPRNG 不可用导致全零");
+        // 两次输出逐字节必需有差异（128 字节全同概率 2^-1024）
+        assert_ne!(&a[..], &b[..], "两次 CSPRNG 输出完全一致（熵源失效）");
+    }
+}

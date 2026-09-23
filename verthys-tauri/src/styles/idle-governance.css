@@ -5,12 +5,6 @@
  *   .idle-active / .idle-settling / .idle-idle / .idle-deep-idle
  *   .glass-calm（deep-idle）/.reduce-motion（无障碍偏好）
  *
- * 语义分类（方案 4.1/4.3，全项目 100 处 infinite 动画按此归类）：
- *   氛围装饰 anim-ambient  → idle 及以下暂停（默认：全部未豁免元素）
- *   状态指示 anim-status    → idle 及以下暂停；工作进行中的指示器（加载旋转/
- *                             Toast 点）经豁免清单在 idle 保持运转，语义不失真
- *   交互动画 anim-interactive → 仅 deep-idle 暂停（元素加 .anim-interactive 豁免）
- *
  * 实现说明：
  *   采用「通配暂停 + 语义豁免」落地分类语义 — 通配规则等效于为全部 100 处
  *   动画元素标注 anim-ambient/anim-status（两类在 idle 行为一致：暂停），
@@ -29,16 +23,16 @@
   animation-play-state: paused !important;
 }
 
-/* ===== 2. idle：交互动画豁免（仅 deep-idle 暂停，方案 anim-interactive） ===== */
+/* ===== 2. idle：交互动画豁免 ===== */
 .idle-idle .anim-interactive,
 .idle-idle .anim-interactive::before,
 .idle-idle .anim-interactive::after {
   animation-play-state: running !important;
 }
 
-/* ===== 3. idle：工作进行中指示器豁免（方案 anim-status「保持语义」分支）
+/* ===== 3. idle：工作进行中指示器豁免
  *   加载/处理旋转指示器在空闲保持运转，避免「卡死」误读；
- *   deep-idle（>60s 无交互）时由通配规则统一暂停（方案：全部暂停）。 ===== */
+ *   deep-idle（>60s 无交互）时由通配规则统一暂停。 ===== */
 .idle-idle :is(
   /* 脉冲星磁层辐射加载器（rAF 驱动 — CSS 仅视觉层，无动画需豁免；
      列名仅备注，实际持续运转由组件 rAF 保证） */

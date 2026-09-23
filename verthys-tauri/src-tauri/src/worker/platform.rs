@@ -1,6 +1,6 @@
 //! worker/platform.rs — 平台特定代码（Windows Job Object 与孤儿进程清理）
 //!
-//! ★ 企业级根治：Windows Job Object — 绑定子进程生命周期到父进程
+//! 修复：Windows Job Object — 绑定子进程生命周期到父进程
 //!
 //! 根因：应用退出（含异常退出/强杀）后 worker 子进程仍存活，累积为孤儿进程。
 //!   孤儿 worker 持有 verthys 文件锁/共享内存/状态文件锁 → 状态文件损坏 → 后续启动异常。
@@ -8,7 +8,7 @@
 //! 修复：创建 Job Object 并设置 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 标志，
 //!   将 worker 子进程分配到 Job Object。父进程退出时内核自动关闭 Job Object 句柄，
 //!   触发 KILL_ON_JOB_CLOSE → 内核级强杀所有 Job 内进程。
-//!   这是 Windows 上"父进程死亡则子进程必死"的标准企业级做法，覆盖所有退出路径
+//!   这是 Windows 上"父进程死亡则子进程必死"的标准做法，覆盖所有退出路径
 //!   （正常退出、异常退出、TerminateProcess、任务管理器强杀）。
 //!
 //! 本模块对外提供：
@@ -107,7 +107,7 @@ pub(crate) fn assign_child_to_job_object(pid: u32) -> Option<JobHandle> {
     Some(JobHandle(job))
 }
 
-/// 企业级根治：杀死所有残留的孤儿 verthys-worker 进程。
+/// 根治：杀死所有残留的孤儿 verthys-worker 进程。
 ///
 /// 在 worker_init 启动新 worker 之前调用，清理上次异常退出遗留的孤儿进程。
 /// 使用 Toolhelp32 枚举进程，按名称匹配 "verthys-worker.exe" 并 TerminateProcess。

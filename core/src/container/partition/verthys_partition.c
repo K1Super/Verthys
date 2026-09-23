@@ -255,9 +255,20 @@ VerthysResult verthys_partition_decrypt(VerthysPartition *p, uint64_t txid,
                                   nonce, pt, pt_len);
 }
 
-VerthysResult verthys_partition_grow(VerthysPartition *p, uint64_t min_bytes)
+VerthysResult verthys_partition_grow(VerthysPartition *p, uint64_t min_bytes,
+                                     uint64_t region_limit)
 {
     if (p == NULL || min_bytes == 0) return VERTHYS_ERR_INVALID;
+
+    /* 区域硬上限（该分区区域终点绝对偏移，如其后 audit 分区起点）：
+     * 容量不得越过其后分区区域，否则分区写会自重叠破坏布局。
+     * 最小需求 size + min_bytes 放不下 → 拒绝且内存态不变
+     * （调用方不得误以为 need 已满足后越界写入）。 */
+    if (region_limit <= p->offset) return VERTHYS_ERR_RESOURCE_LIMIT;
+    uint64_t cap = region_limit - p->offset;
+    if (p->size >= cap || min_bytes > cap - p->size) {
+        return VERTHYS_ERR_RESOURCE_LIMIT;
+    }
 
     /* 2x 增长策略；不足 min_bytes 时线性补足 */
     uint64_t doubled = p->size * 2;
@@ -266,6 +277,7 @@ VerthysResult verthys_partition_grow(VerthysPartition *p, uint64_t min_bytes)
     if (linear < p->size) linear = UINT64_MAX;    /* 溢出守卫 */
 
     uint64_t target = (doubled >= linear) ? doubled : linear;
+    if (target > cap) target = cap;  /* 2x 目标越界：截断于区域上限 */
     p->size = target;
     return VERTHYS_OK;
 }

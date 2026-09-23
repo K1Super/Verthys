@@ -340,42 +340,53 @@ int runtime_hash_test_install(const void *addr, size_t len)
     if (addr == NULL || len == 0 || len > VERTHYS_RUNTIME_HASH_MAX_FUNC_BYTES) {
         return -1;
     }
-    if (s_overlay_count >= VERTHYS_RUNTIME_HASH_MAX) return -1;
 
-    /* 自基线：以当前内存内容计算掩码哈希作为基准 */
-    if (!s_crypto_ready) {
-        if (verthys_crypto_init() != 0) return -1;
-        s_crypto_ready = 1;
+    /* 与 verify 路径同锁：进入 s_scanning 单飞区，串行化 s_hbuf 共享掩码
+     * 缓冲与 s_overlay 表的写入，杜绝与并发 scan 的双写撕裂 */
+    if (InterlockedCompareExchange(&s_scanning, 1, 0) != 0) {
+        return -1;  /* 已有扫描在途：调用方稍后重试 */
     }
-    HMODULE hSelf = NULL;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            (LPCWSTR)&runtime_hash_scan, &hSelf) ||
-        hSelf == NULL) {
-        return -1;
-    }
-    const BYTE *base = (const BYTE *)hSelf;
-    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return -1;
-    const IMAGE_NT_HEADERS *nt =
-        (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return -1;
 
-    RhSpot *spots = NULL;
-    size_t spot_count = 0;
     int rc = -1;
-    if (collect_reloc_spots(base, nt, &spots, &spot_count) == 0) {
-        OverlayEntry *o = &s_overlay[s_overlay_count];
-        if (masked_hash(base, spots, spot_count,
-                        (const uint8_t *)addr, len, o->hash) == 0) {
-            o->addr  = (const uint8_t *)addr;
-            o->len   = len;
-            o->valid = 1;
-            s_overlay_count++;
-            rc = 0;
+    do {
+        if (s_overlay_count >= VERTHYS_RUNTIME_HASH_MAX) break;
+
+        /* 自基线：以当前内存内容计算掩码哈希作为基准 */
+        if (!s_crypto_ready) {
+            if (verthys_crypto_init() != 0) break;
+            s_crypto_ready = 1;
         }
-    }
-    free(spots);
+        HMODULE hSelf = NULL;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                  GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                (LPCWSTR)&runtime_hash_scan, &hSelf) ||
+            hSelf == NULL) {
+            break;
+        }
+        const BYTE *base = (const BYTE *)hSelf;
+        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) break;
+        const IMAGE_NT_HEADERS *nt =
+            (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) break;
+
+        RhSpot *spots = NULL;
+        size_t spot_count = 0;
+        if (collect_reloc_spots(base, nt, &spots, &spot_count) == 0) {
+            OverlayEntry *o = &s_overlay[s_overlay_count];
+            if (masked_hash(base, spots, spot_count,
+                            (const uint8_t *)addr, len, o->hash) == 0) {
+                o->addr  = (const uint8_t *)addr;
+                o->len   = len;
+                o->valid = 1;
+                s_overlay_count++;
+                rc = 0;
+            }
+        }
+        free(spots);
+    } while (0);
+
+    InterlockedExchange(&s_scanning, 0);
     return rc;
 }
 
@@ -424,10 +435,16 @@ int runtime_hash_lookup(const void *func,
 
 void runtime_hash_test_clear(void)
 {
+    /* 与 verify 路径同锁：s_overlay 表写入须串行化于 s_scanning 单飞区，
+     * 防与并发 scan 的 overlay 读取产生撕裂 */
+    if (InterlockedCompareExchange(&s_scanning, 1, 0) != 0) {
+        return;  /* 已有扫描在途：跳过本次清空（单线程 teardown 不会触发） */
+    }
     for (int i = 0; i < s_overlay_count; i++) {
         s_overlay[i].valid = 0;
         s_overlay[i].addr  = NULL;
         s_overlay[i].len   = 0;
     }
     s_overlay_count = 0;
+    InterlockedExchange(&s_scanning, 0);
 }

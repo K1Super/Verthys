@@ -27,7 +27,7 @@
  *   │      消费；不含 Manifest——盘面帧为唯一权威）         │
  *   └────────────────────────────────────────────────────┘
  *
- * ★ AEAD 密钥设计（红线级，防 GCM nonce 跨保存复用）：
+ * AEAD 密钥设计（红线级，防 GCM nonce 跨保存复用）：
  *   cache_key = HKDF-SHA256-Expand(integrity_key,
  *               "verthys/warmcache-aead-v3" ‖ kdf_salt)
  *   kdf_salt 每次保存随机生成 → 每次保存独立密钥 → 内部计数器 nonce
@@ -41,7 +41,7 @@
  *   1. HMAC 校验：cache_hmac = HMAC-SHA256(integrity_key, 整文件)——
  *      损坏/篡改/密钥不符一律 miss（fail → 冷启动路径，不中断解锁）；
  *   2. txid 校验：header.txid == 超级块已提交事务 ID——
- *      ★ 仅门控 MemTable 快照段（过期快照可能缺已提交数据，跳过；
+ *      仅门控 MemTable 快照段（过期快照可能缺已提交数据，跳过；
  *      WAL 重放完整重建，语义无损）。表记录段不受门控：seq 键控 +
  *      表区域不可变 + 盘面 Manifest 权威 → 跨过期仍然安全可用。
  *
@@ -51,9 +51,8 @@
  *
  * 容量上限：文件 > 32MB 直接判格式非法（fail → 冷启动）。
  *
- * 与 V2 vwarm_* 的关系：V2 模块随删除清单退役；本模块为 V3
- * 专属实现，密钥语境（integrity_key 派生）与 V3 流水线对齐，不复用
- * V2 的 cache_key 派生。
+ * 密钥语境：integrity_key 派生与 V3 解锁流水线对齐；缓存键派生
+ * 由本模块独占实现，无跨版本缓存键复用。
  */
 #ifndef VERTHYS_WARMCACHE_V3_H
 #define VERTHYS_WARMCACHE_V3_H
@@ -98,7 +97,9 @@ extern "C" {
  *      冷启动兜底，绝不中断解锁流程）；
  *   4. txid 门控（见文件头）：不匹配 → 表记录段照常解密返回，
  *      MemTable 快照段置 NULL/0；
- *   5. 两段 AEAD 解密（派生缓存密钥；AAD 域分离）。
+ *   5. 段布局矩形校验（空段规范形 + 两段 off/size 全约束 + 互不
+ *      重叠，非法 → miss）后两段 AEAD 解密（派生缓存密钥；
+ *      AAD 域分离）。
  *
  * [out] out_tables_pt     表记录段明文（heap，调用方 zero + free；
  *                         hit=0 时 NULL）

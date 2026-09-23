@@ -50,6 +50,12 @@ static const uint8_t VERTHYS_PEPPER_COMPILED[VERTHYS_KEY_BYTES] = {
 
 /* ===================================================================== *
  *                        胡椒模块状态                                    *
+ *                                                                    *
+ * MT 纪律：全部 g_pepper 状态仅在单线程生命周期窗口内变更——           *
+ * 注入/加载/保存在解锁前语义期（宿主进程持有 API 互斥串行执行），       *
+ * 解锁后的读取为只读快照语义（get 仅返回借用指针，不修改状态）。        *
+ * 胡椒内存受 VirtualLock 保护；任何并发变更需求须先补 SRW 保护          *
+ * 再放开此纪律（当前无并发修改路径）。                                 *
  * ===================================================================== */
 static int g_pepper_initialized = 0;
 static int g_pepper_locked = 0;              /* 内存是否已 VirtualLock */
@@ -394,8 +400,9 @@ int verthys_pepper_save_to_os(void)
     /* 获取 system_instance 标识作为 OAEP label（绑定机器） */
     uint8_t label[CMK_OAEP_LABEL_BYTES];
     if (hardware_binding_get_hash(label) != 0) {
-        /* 获取失败：用全零 label（降级，但仍 CNG 加密） */
-        memset(label, 0, sizeof(label));
+        /* 标识不可得 → 保存失败：零 label 落盘会让标识恢复后的
+         * 加载侧解包失配（等价来源错误），拒绝写入而非静默降级 */
+        return -1;
     }
 
     /* CNG 按策略序封装胡椒，级别/KSP 随头部持久化（加载直达） */
@@ -504,7 +511,7 @@ int verthys_pepper_inject(const uint8_t pepper[VERTHYS_KEY_BYTES])
     memcpy(g_pepper, pepper, VERTHYS_KEY_BYTES);
     pepper_lock_memory();
     g_pepper_source = VERTHYS_PEPPER_SOURCE_INJECTED;
-    g_pepper_source_error = 0;  /* ★ 审查修正：注入解除历史来源错误态 */
+    g_pepper_source_error = 0;  /* 审查修正：注入解除历史来源错误态 */
     g_pepper_initialized = 1;
     return 0;
 }
@@ -669,7 +676,7 @@ int verthys_pepper_reconstruct_shamir(const VerthysPepperShard *shards,
     verthys_secure_zero(pepper, sizeof(pepper));
     pepper_lock_memory();
     g_pepper_source = VERTHYS_PEPPER_SOURCE_SHAMIR;
-    g_pepper_source_error = 0;  /* ★ 审查修正：重建解除历史来源错误态 */
+    g_pepper_source_error = 0;  /* 审查修正：重建解除历史来源错误态 */
     g_pepper_initialized = 1;
     return 0;
 }

@@ -47,7 +47,7 @@ static const WCHAR K_KEY_NAME[] = L"Verthys_GMK_Wrap_Key_v1";
 #define NCRYPT_MACHINE_KEY_FLAG 0x00000020
 #endif
 
-/* ★ 仅当容器确实不存在时才允许创建。
+/* 仅当容器确实不存在时才允许创建。
  * NTE_BAD_KEYSET (0x80090029) = 密钥容器不存在；其他 OpenKey 失败
  * （权限不足、TPM 忙、profile 未加载等瞬时/环境性错误）一律不得重建，
  * 否则会静默销毁既有持久化密钥，导致此前被其包装的胡椒永久无法解包。 */

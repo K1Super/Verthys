@@ -3,8 +3,6 @@
  * 职责：unlock_progress_cb（unsafe extern "C"）。
  * 依赖：std::io、std::os::raw::c_void、ffi_types 中的进度 C 结构体。
  * 被引用方：worker.rs（在 call_unlock 注册回调时传入）。
- * migrate_progress_cb 已随 V1→V2 迁移链路退役删除
- *   （Verthys_MigrateV1ToV2 移出导出白名单，无注册方）。
  */
 
 use std::io::{self, Write};
@@ -12,9 +10,9 @@ use std::os::raw::c_void;
 
 use super::ffi_types::VerthysUnlockProgressC;
 
-/* ★ 解锁进度回调（C → Rust → stdout JSON 行）
+/* 解锁进度回调（C → Rust → stdout JSON 行）
  *
- * C DLL 在 verthys_v2_open_existing 各阶段调用此回调，回调将进度信息
+ * C DLL 在 verthys_v3_open_existing 各阶段调用此回调，回调将进度信息
  * 序列化为 JSON 行写入 stdout，父进程 send_json_with_unlock_progress
  * 识别 op="unlock_progress" 行并转发给前端。
  *
@@ -30,6 +28,22 @@ pub(crate) unsafe extern "C" fn unlock_progress_cb(
     progress: *const VerthysUnlockProgressC,
     _user_data: *mut c_void,
 ) {
+    /* FFI 边界纪律：Rust panic 不得展开穿过 extern "C" 边界（未定义行为）。
+     * 回调体整体包 catch_unwind：panic 转为致命日志 + 进程级标记，
+     * 主循环检测标记后走安全退出，绝不 unwind 进 C。 */
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unlock_progress_cb_inner(progress);
+    }));
+    if result.is_err() {
+        crate::log::mark_panic_flag();
+        crate::log::init_diag!(
+            "[worker] unlock_progress_cb 内部 panic 已捕获（绝不让其展开跨 FFI 边界）"
+        );
+    }
+}
+
+/// 回调逻辑主体（被 catch_unwind 包裹，内容不变）
+unsafe fn unlock_progress_cb_inner(progress: *const VerthysUnlockProgressC) {
     if progress.is_null() {
         return;
     }

@@ -74,7 +74,7 @@ int key_separation_install(KeyRole role, const uint8_t key[KEYSEP_KEY_BYTES]);
  *   out_key: 输出 32 字节明文密钥（写入调用方栈缓冲区）
  * 返回 0 成功，非 0 失败（密钥未安装 / C 角色休眠 / 导出失败）。
  *
- * ★ 过渡期声明：
+ * 过渡期声明：
  *   本接口使密钥字节返回用户态，与"CNG 内核托管"承诺相悖。
  *   当前仓库中无任何调用点；全量接线（V3 容器密文迁移）时删除。
  *   新的密钥消费方一律使用 verthys_crypto_cng 的 AEAD 上下文。
@@ -83,7 +83,7 @@ int key_separation_install(KeyRole role, const uint8_t key[KEYSEP_KEY_BYTES]);
 int key_separation_acquire(KeyRole role, uint8_t out_key[KEYSEP_KEY_BYTES]);
 
 /*
- * 防御闭环判据：查询是否有任一角色已安装内核密钥。
+ * 动态防护判据：查询是否有任一角色已安装内核密钥。
  * 返回 1 = 至少一个角色已安装；0 = 全部未安装。
  * defense_closure 的 MEM_DUMP 路径据此区分 BLOCKED/DEGRADED。
  */

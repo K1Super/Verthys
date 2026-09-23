@@ -31,7 +31,8 @@
 /* Layer 1: 进程不可触碰化 */
 #include "job_isolation.h"
 
-/* 密钥托管状态（MEM_DUMP 判据：V2 key_separation + V3 keymanager_cng 双分支） */
+/* 密钥托管状态（MEM_DUMP 判据：key_separation 三权分立 +
+ * keymanager_cng CNG 内核托管双分支） */
 #include "key_separation.h"
 #include "keymanager_cng.h"
 
@@ -96,7 +97,8 @@ static DefenseState check_suspend_bypass(void)
 static DefenseState check_mem_dump(void)
 {
     if (key_separation_init() != 0) return DEFENSE_STATE_FAILED;
-    /* V2 三权分立托管 或 V3 密钥组 CNG 内核托管，任一成立即 BLOCKED */
+    /* key_separation 三权分立托管 或 keymanager_cng CNG 内核托管，
+     * 任一成立即 BLOCKED */
     if (key_separation_any_installed()) return DEFENSE_STATE_BLOCKED;
     if (verthys_cng_km_global_handle_total() > 0) return DEFENSE_STATE_BLOCKED;
     /* 接线完成前置位：密钥在用户态，防 Dump 降级 */
@@ -225,7 +227,13 @@ static void aggregate_report(DefenseStatusReport *report)
         }
     }
 
-    report->all_critical_blocked = (report->failed_count == 0) ? 1 : 0;
+    /* all_critical_blocked 语义：全部 7 条关键路径均 BLOCKED 才算全阻断。
+     * 旧实现仅判 failed_count==0，会把"存在 DEGRADED"误报为全阻断；
+     * 此处收紧为三条件齐备（无 FAILED、无 DEGRADED、且 BLOCKED 满 7 条）。 */
+    report->all_critical_blocked =
+        (report->failed_count   == 0 &&
+         report->degraded_count == 0 &&
+         report->blocked_count  == DEFENSE_PATH_COUNT) ? 1 : 0;
 }
 
 /* ===================================================================== *

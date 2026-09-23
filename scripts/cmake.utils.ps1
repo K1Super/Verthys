@@ -1,6 +1,6 @@
 ﻿# scripts/cmake.utils.ps1 - CMake 构建缓存健康度工具（陈旧缓存自动检测与自愈）
 #
-# ★ 编码警告：本文件必须保存为 UTF-8 with BOM 编码！
+# 编码警告：本文件必须保存为 UTF-8 with BOM 编码！
 #   Windows PowerShell 5.1 对无 BOM 文件按 ANSI/GBK 解码，中文注释乱码会
 #   破坏字符串配对导致解析错误（ParseError），而解析错误发生在任何代码
 #   执行之前，try/catch 与 Read-Host 暂停完全失效。保存后请确认文件头
@@ -36,7 +36,7 @@ function Clear-StaleCMakeCache {
     if (-not (Test-Path -LiteralPath $cacheFile)) { return }
 
     # 解析缓存中的两条权威路径记录（CMake 启动校验的正是这两项）
-    # ★ 必须用 ReadAllLines 急切读取：ReadLines 返回惰性枚举，break 跳出后
+    # 必须用 ReadAllLines 急切读取：ReadLines 返回惰性枚举，break 跳出后
     # 迭代器不释放文件句柄（PowerShell foreach 不会对中断的枚举确定性
     # Dispose），句柄滞留在本进程内 → 随后 Remove-Item 删除构建目录时报
     # "being used by another process"（自锁，实测复现）。ReadAllLines 读
@@ -75,7 +75,7 @@ function Clear-StaleCMakeCache {
     }
     Write-Host "  当前源目录:         $normSource" -ForegroundColor Yellow
     Write-Host "  清理构建目录:       $normBuildDir（随后全量重建）" -ForegroundColor Yellow
-    # ★ 有界重试：CMakeCache.txt 可能被正在退出的残留 cmake 进程或杀软/索引
+    # 有界重试：CMakeCache.txt 可能被正在退出的残留 cmake 进程或杀软/索引
     # 服务瞬时占用（实测出现过：进程已不存在但句柄延迟释放）。此类锁通常
     # 1-2 秒内释放，盲目 fail 会把可自愈的场景变成硬失败，故重试 3 次。
     $removed = $false

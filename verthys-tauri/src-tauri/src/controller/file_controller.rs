@@ -53,7 +53,7 @@ use tauri::Manager;
 /// 允许读取/写入的最大文件大小（50MB），防止内存耗尽。
 const FILE_SIZE_LIMIT: u64 = 50 * 1024 * 1024;
 
-/// ★ 用户授权文件操作的最大文件大小（2GB）。
+/// 用户授权文件操作的最大文件大小（2GB）。
 ///
 /// 用户通过对话框显式选择的文件（如含几千张加密照片的 .venc 打包文件）
 /// 可能达到数百 MB 甚至 GB 级。50MB 的白名单限制会误拒合法的大文件。
@@ -67,7 +67,7 @@ const READ_CHUNK_SIZE: usize = 64 * 1024;
 /// 文件操作超时（10 秒），源自全局 IPC 超时配置。
 const FILE_OP_TIMEOUT: Duration = TIMEOUT_CONFIG.ipc;
 
-/// ★ 用户授权文件操作超时（120 秒）。
+/// 用户授权文件操作超时（120 秒）。
 ///
 /// 大文件（数百 MB ~ 2GB）的读取/写入需要更长时间，
 /// 10 秒超时会误杀合法的大文件传输。此超时仅用于 read_user_file /
@@ -191,7 +191,7 @@ fn build_whitelist(app: &tauri::AppHandle) -> Vec<String> {
         }
     }
 
-    // ★ 企业级修复：扩展白名单至用户主目录与桌面
+    // 修复：扩展白名单至用户主目录与桌面
     //
     // 原缺陷：白名单仅含 app_data/app_config/Documents/Pictures/Downloads，
     // 不含 Desktop 及用户主目录。用户通过 Tauri 文件对话框选择的 .bin 密钥文件
@@ -677,7 +677,7 @@ pub async fn write_file_bytes(
 
 // ===== 用户授权文件操作（跳过白名单，拒绝系统关键目录） =====
 //
-// ★ 企业级根治：拾光解析功能无法导入本地文件
+// 修复：拾光解析功能无法导入本地文件
 //
 // 原缺陷：
 //   read_file_bytes / write_file_bytes 强制执行沙箱白名单校验，
@@ -962,7 +962,7 @@ fn write_user_file_blocking(path: &str, data: &[u8]) -> Result<u64, String> {
 
 /// 读取用户通过对话框显式选择的文件并返回原始二进制内容（二进制 IPC）。
 ///
-/// ★ 企业级根治：用户通过 Tauri 文件对话框 open() 选择的文件已获得用户明确授权，
+/// 修复：用户通过 Tauri 文件对话框 open() 选择的文件已获得用户明确授权，
 ///   白名单校验不再适用（用户可能选择 D:\、E:\、网络位置等非 home_dir 路径）。
 ///   本命令跳过白名单校验，但仍保留：
 ///   - validate_path_input 字符级校验（防路径注入、目录遍历、保留设备名）
@@ -1046,7 +1046,7 @@ pub async fn read_user_file(
 
 /// 将原始二进制数据原子写入用户通过对话框选择的位置（二进制 IPC）。
 ///
-/// ★ 企业级根治：与 read_user_file 配套，用于导出功能写入用户选择的保存位置。
+/// 修复：与 read_user_file 配套，用于导出功能写入用户选择的保存位置。
 ///   安全策略与 read_user_file 一致（跳过白名单 + 拒绝系统关键目录 + 其他安全检查）。
 ///
 /// 二进制传输协议（Tauri v2 raw IPC）：

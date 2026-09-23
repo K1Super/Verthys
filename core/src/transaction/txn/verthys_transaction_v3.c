@@ -446,7 +446,10 @@ VerthysResult verthys_txn_v3_commit(VerthysTxnV3 *t)
      *        使 sb->extent_partition_size 与分区表一致持久） ---- */
     need = (uint64_t)VERTHYS_EXTENT_INDEX_REGION_BYTES + t->ext_idx->next_offset;
     if (need > t->extent_part->size) {
-        r = verthys_partition_grow(t->extent_part, need - t->extent_part->size);
+        /* region_limit = audit 分区起点：extent 容量不得与其后的
+         * audit 区重叠（越界即拒绝，need 为上界实际无法满足） */
+        r = verthys_partition_grow(t->extent_part, need - t->extent_part->size,
+                                   t->sb->audit_partition_offset);
         if (r != VERTHYS_OK) return r;
         t->sb->extent_partition_size = t->extent_part->size;
     }
@@ -609,6 +612,9 @@ typedef struct TxnRecoverCtx {
     VerthysTxnV3 *t;
     uint64_t committed_txid;    /* 超块已提交确认水位（规则 3 组勿剔除） */
     int has_replay;             /* 存在重放组 */
+    /* WAL EXTENT 帧所见最大 nonce 计数器（重放组与丢弃组都计入——
+     * 密文已落盘即 nonce 已消耗）；收尾据此推分区计数器下限 */
+    uint64_t max_extent_nonce;
     /* 未提交（规则 6）丢弃组 txid 收集：组内 txid 连续，变更即新组 */
     uint64_t *discard_txids;
     size_t   discard_count, discard_cap;
@@ -628,6 +634,9 @@ static VerthysResult txn_recover_replay_cb(void *user, const VerthysWalRecord *r
         break;                                  /* 簿记记录：无副作用 */
 
     case VERTHYS_WAL_REC_EXTENT: {
+        /* 帧 nonce 已消耗（密文在盘），迭代取最大计数器供收尾追赶 */
+        uint64_t n = verthys_cng_nonce_decode_counter(rec->u.extent.nonce);
+        if (n > c->max_extent_nonce) c->max_extent_nonce = n;
         size_t slot = txn_extent_find_slot(t->ext_idx, rec->u.extent.hash);
         if (slot != SIZE_MAX) {
             /* 命中 → ref_count++（方向安全：只多不少；崩溃点晚于索引
@@ -692,6 +701,13 @@ static VerthysResult txn_recover_discard_cb(void *user, const VerthysWalRecord *
 {
     TxnRecoverCtx *c = (TxnRecoverCtx *)user;
 
+    /* 丢弃组 EXTENT 帧密文同样已落盘（nonce 已消耗），与重放组
+     * 同口径计入追赶下界——其孤儿块后续亦不得复用 nonce */
+    if (rec->type == VERTHYS_WAL_REC_EXTENT) {
+        uint64_t n = verthys_cng_nonce_decode_counter(rec->u.extent.nonce);
+        if (n > c->max_extent_nonce) c->max_extent_nonce = n;
+    }
+
     if (rec->txid == 0 || rec->txid <= c->committed_txid) {
         return VERTHYS_OK;                /* 已提交确认水位内：合法数据 */
     }
@@ -733,6 +749,32 @@ VerthysResult verthys_txn_v3_recover(VerthysTxnV3 *t,
                             txn_recover_replay_cb, &c,
                             txn_recover_discard_cb, &c,
                             NULL, &replayed, &discarded);
+    if (r == VERTHYS_OK && c.max_extent_nonce > 0) {
+        /* Extent 分区 nonce 追赶：WAL 全量 EXTENT 帧（重放组与丢弃组）
+         * 的密文均已落盘，其 nonce 已消耗、后续加密不得复用。以最大
+         * 帧计数器 + 裕量推下限（restore 防回退），一旦推进立即固化
+         * 索引帧——防本收敛点与持久化点之间再崩溃导致回退。 */
+        uint64_t persisted =
+            verthys_cng_aead_nonce_counter(&t->extent_part->aead);
+        uint64_t floor = persisted;
+        /* 加裕量防回绕：接近 2^64 时钳到上限（加密侧对回绕拒绝，
+         * 任何更小值都有复用风险） */
+        uint64_t candidate =
+            (c.max_extent_nonce > UINT64_MAX - VERTHYS_WAL_NONCE_RESTORE_MARGIN)
+                ? UINT64_MAX
+                : c.max_extent_nonce + VERTHYS_WAL_NONCE_RESTORE_MARGIN;
+        if (candidate > floor) floor = candidate;
+        if (floor > persisted) {
+            if (verthys_cng_aead_restore_nonce_counter(&t->extent_part->aead,
+                                                       floor) != VERTHYS_OK) {
+                r = VERTHYS_ERR_INTERNAL;
+            } else {
+                t->ext_idx->txid = t->sb->txid;
+                r = verthys_extent_index_save(t->f, t->extent_part->offset,
+                                            t->ext_idx, t->extent_part);
+            }
+        }
+    }
     if (r == VERTHYS_OK && c.discard_count > 0) {
         /* 丢弃组（未提交）过滤重放重建：跳过丢弃组
          * 帧，被其墓碑覆写的已提交原始条目经重放复原（过滤式剔除将

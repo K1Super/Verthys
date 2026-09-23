@@ -1,7 +1,7 @@
 /*
  * cache/concurrency/lru-cache.ts — 泛型 LRU 缓存（Map 插入顺序实现）
  *
- * ★ 并发重构：
+ * 并发重构：
  *   为 VerthysCacheDomain 提供带淘汰回调的 LRU 容器，替代散落在
  *   verthys-cache.ts 中的两处手写 delete+re-set 逻辑（recordScanCache 5000 /
  *   fullRecordCache 50），收敛为单一权威实现。

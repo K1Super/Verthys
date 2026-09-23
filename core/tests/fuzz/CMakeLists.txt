@@ -1,9 +1,9 @@
-# core/tests/fuzz/CMakeLists.txt — ★ WP-10 模糊测试基础设施
+# core/tests/fuzz/CMakeLists.txt
 #
 # 进入条件：VERTHYS_ENABLE_FUZZ=ON（core/CMakeLists.txt 门控）。
 # 工具链：MSVC /fsanitize=address /fsanitize=fuzzer（两个独立开关）。
 #
-# ★ 勘误（2026-09-15，WP-10h 验证发现）：本文件早期版本仅用
+# 勘误：本文件早期版本仅用
 #   /fsanitize=fuzzer 并注释"隐含 ASAN"——该假设错误。MSVC 的
 #   fuzzer 开关只嵌入 clang_rt.fuzzer + libsancov（覆盖率反馈），
 #   不含内存安全插桩。实测症状：fuzz_partition.exe 导入表无
@@ -13,7 +13,7 @@
 #   编译器在对象内嵌入 /DEFAULTLIB:clang_rt.fuzzer +
 #   clang_rt.asan_dynamic-x86_64，链接期自动引入 ASAN 动态运行库
 #   （本文件已负责将 DLL 随行拷贝至目标目录）。
-#   ★ 注意：本工具链（MSVC 19.51）不接受逗号组合形式
+#   注意：本工具链（MSVC 19.51）不接受逗号组合形式
 #   /fsanitize=address,fuzzer（实测 D9002 整项忽略 → fuzzer 运行库
 #   未链接 → LNK2019 main 缺失）——必须写成两个独立选项。
 #
@@ -24,8 +24,7 @@
 #   libFuzzer 退化为随机字节生成器（对深结构解析器接近零发现率）。
 #
 #   gen_seeds —— 非插桩工具（链 verthys_core_obj），按生产序列化路径
-#   镜像生成合法明文帧语料（PLAYBOOK WP-10："语料种子用测试生成的
-#   合法容器"）。
+#   镜像生成合法明文帧语料
 #
 # 互斥约束：MSVC ASAN 与 /GL（LTCG）互斥 → fuzz 对象库不套用
 #   VERTHYS_RELEASE_FLAGS，仅保留 VERTHYS_SAFETY_FLAGS + VERTHYS_LINK_BASE。
@@ -92,7 +91,7 @@ target_include_directories(gen_seeds PRIVATE
 # 构建即生成语料（幂等覆写；退出码非 0 = 构建失败——禁静默降级）
 add_custom_command(TARGET gen_seeds POST_BUILD
     COMMAND $<TARGET_FILE:gen_seeds> ${VERTHYS_FUZZ_CORPUS_DIR}
-    COMMENT "[WP-10] gen_seeds: 生成语料种子 -> ${VERTHYS_FUZZ_CORPUS_DIR}"
+    COMMENT "gen_seeds: 生成语料种子 -> ${VERTHYS_FUZZ_CORPUS_DIR}"
     VERBATIM
 )
 
@@ -139,7 +138,7 @@ foreach(VERTHYS_FUZZ_TGT superblock partition extent sstable import)
     add_custom_command(TARGET fuzz_${VERTHYS_FUZZ_TGT} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${VERTHYS_FUZZ_ASAN_DLL} $<TARGET_FILE_DIR:fuzz_${VERTHYS_FUZZ_TGT}>
-            COMMENT "[WP-10] ASAN 运行库随行: fuzz_${VERTHYS_FUZZ_TGT}"
+            COMMENT "ASAN 运行库随行: fuzz_${VERTHYS_FUZZ_TGT}"
             VERBATIM
         )
     # 冒烟门（ctest；-runs 有界，秒级；崩溃/ASAN 报告 → 非零退出 → 门红）

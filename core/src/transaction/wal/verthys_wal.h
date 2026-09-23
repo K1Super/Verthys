@@ -18,8 +18,8 @@
  *
  * 帧布局（复用 verthys_lsm_frame_write/read_decrypt 帧惯例）：
  *   [u32 magic 'V3WA'][u32 ct_len][AEAD 密文 ct_len 字节（含 16B tag）][12B nonce]
- *   AEAD 密钥 = C 角色密钥语境（V2 惯例延续：C 密钥用于超级块与事务日志；
- *   V3 中 C 角色 VerthysCngAead 上下文由本模块独占推进 nonce 计数器）。
+ *   AEAD 密钥 = C 角色密钥语境（C 角色密钥用于超级块与事务日志；
+ *   C 角色 VerthysCngAead 上下文由本模块独占推进 nonce 计数器）。
  *   域分离 AAD = "verthys/wal-txn-v3"（与 LSM WAL "verthys/lsm-wal-v3"
  *   严格隔离）。
  *
@@ -83,7 +83,10 @@ extern "C" {
 #define VERTHYS_WAL_HALF_MAGIC          UINT32_C(0x48573356)    /* 'V3WH' */
 #define VERTHYS_WAL_VERSION             3u
 #define VERTHYS_WAL_HALF_HEADER_BYTES   24u
-#define VERTHYS_WAL_NONCE_RESTORE_MARGIN 64u  /* nonce 恢复安全裕量 */
+/* nonce 恢复安全裕量：扫描所得最大计数器之上的额外推进余量，
+ * 覆盖崩溃点前后仍在途的加密推进；256 为保守上界（远大于单事务
+ * 全量帧数与并发 flush 开销之和），整数常量避免运行时计算开销 */
+#define VERTHYS_WAL_NONCE_RESTORE_MARGIN 256u
 #define VERTHYS_WAL_MAX_RECORD_BYTES    8192u /* 明文记录编码容量上限 */
 
 /* 域分离标签（与 LSM WAL / 分区表 / 超级块严格隔离） */

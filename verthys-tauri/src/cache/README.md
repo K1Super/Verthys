@@ -62,5 +62,4 @@ coordination ──→ composition/verthys-cache（业务侧消费门面）
    flush 磁盘验证成功才解除。
 3. **单游标后端**：Rust `verthys_scan_open` 自动顶替旧游标；扫描令牌失效
    按"属主保护"收尾（见 verthys-cache-domain 头注评审修复 3+5）。
-4. **明文密钥零填充**：模块密钥以 Uint8Array 存储并在清除时安全覆写
-   （方案 7.1/7.2），`clearAllVerthysCaches` 首项清零密钥。
+4. **明文密钥零填充**：模块密钥以 Uint8Array 存储并在清除时安全覆写，`clearAllVerthysCaches` 首项清零密钥。

@@ -95,7 +95,7 @@ int verthys_argon2id_derive_ex(uint8_t out[VERTHYS_KEY_BYTES],
     if (out == NULL || salt == NULL) return -1;
     if (password == NULL && pw_len != 0) return -1;
 
-    /* ★ 参数合理性校验：防止恶意/损坏的超级块触发超大内存分配（DoS 防护） */
+    /* 参数合理性校验：防止恶意/损坏的超级块触发超大内存分配（DoS 防护） */
     if (mem_kib < 8u) return -1;                          /* Argon2id 最小 8 KiB */
     if (mem_kib > (4u * 1024u * 1024u)) return -1;        /* 上限 4 GiB */
     if (iters < 1u) return -1;                            /* 至少 1 次迭代 */
@@ -109,6 +109,8 @@ int verthys_argon2id_derive_ex(uint8_t out[VERTHYS_KEY_BYTES],
     size_t pwd_len;
 
     if (pepper != NULL) {
+        /* 长度加法溢出守卫：pw_len + KEY 字节不得回绕（防越界 malloc） */
+        if (pw_len > SIZE_MAX - VERTHYS_KEY_BYTES) return -1;
         combined_len = pw_len + VERTHYS_KEY_BYTES;
         combined = (uint8_t *)malloc(combined_len);
         if (combined == NULL) return -1;
@@ -152,7 +154,7 @@ int verthys_argon2id_derive(uint8_t out[VERTHYS_KEY_BYTES],
                           const uint8_t salt[VERTHYS_SALT_BYTES],
                           const uint8_t pepper[VERTHYS_KEY_BYTES])
 {
-    /* ★ 兼容封装：委托 verthys_argon2id_derive_ex 并传入默认硬编码参数
+    /* 兼容封装：委托 verthys_argon2id_derive_ex 并传入默认硬编码参数
      *（VERTHYS_ARGON2_MEM_KIB / VERTHYS_ARGON2_ITERS / VERTHYS_ARGON2_PARALLEL）
      * 新代码应直接调用 verthys_argon2id_derive_ex，从超级块读取实际参数。 */
     return verthys_argon2id_derive_ex(out, password, pw_len, salt, pepper,
@@ -165,33 +167,11 @@ int verthys_argon2id_derive_raw(uint8_t out[VERTHYS_KEY_BYTES],
                               const uint8_t *password, size_t pw_len,
                               const uint8_t salt[VERTHYS_SALT_BYTES])
 {
-    /* ★ 兼容封装：委托 verthys_argon2id_derive_ex，pepper=NULL（不混入胡椒） */
+    /* 兼容封装：委托 verthys_argon2id_derive_ex，pepper=NULL（不混入胡椒） */
     return verthys_argon2id_derive_ex(out, password, pw_len, salt, NULL,
                                     VERTHYS_ARGON2_MEM_KIB,
                                     VERTHYS_ARGON2_ITERS,
                                     VERTHYS_ARGON2_PARALLEL);
-}
-
-/* ================================================================== *
- * 独立完整性密钥派生
- *                                                                    *
- * integrity_key = HKDF-SHA256(master_key, "verthys/integrity-key") *
- *                                                                    *
- * 与 DEK 完全隔离：即使 DEK 泄露，历史文件的 HMAC 完整性验证          *
- * 仍然有效（integrity_key 由 master_key 派生，独立于数据加密密钥）。   *
- *                                                                    *
- * 用途：                                                              *
- *   - 超级块偏移量 MAC（offset_mac）                                  *
- *   - 状态链防回滚哈希（state_chain）                                 *
- *   - 累积写入 HMAC（write_hmac）                                     *
- *   - 尾部日志哈希指针（tail_log_head_hash）                          *
- * ================================================================== */
-int verthys_derive_integrity_key(uint8_t out[VERTHYS_KEY_BYTES],
-                               const uint8_t master_key[VERTHYS_KEY_BYTES])
-{
-    static const char info[] = VERTHYS_INTEGRITY_KEY_INFO;
-    return verthys_hkdf_expand(out, master_key,
-                             (const uint8_t *)info, sizeof(info) - 1);
 }
 
 int verthys_hkdf_expand(uint8_t out[VERTHYS_KEY_BYTES],

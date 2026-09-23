@@ -56,8 +56,12 @@ function reportFatal(source: string, message: string, stack: string): void {
   } else {
     // 生产环境：通过 Tauri IPC 投递至后端日志管道
     invoke("log_fatal", { entry: JSON.stringify(entry) }).catch(() => {
-      // IPC 不可用时降级为 console（仅致命错误）
+      // IPC 不可用时降级为 console（仅致命错误）：
+      // 行内 directive 向混淆器声明本段为豁免区——保留 console 表达式，
+      // 否则 disableConsoleOutput 会把这条最终观测手段一并移除。
+      /* javascript-obfuscator:disable */
       console.error("[FATAL-IPC-FAIL]", entry);
+      /* javascript-obfuscator:enable */
     });
   }
 }

@@ -8,7 +8,9 @@
  *
  * 覆盖：注册/注销、mustRun 上限拒绝、空闲档节流间隔、整帧跳过后
  * frameStep 累积与钳制、豁免授予与释放、页面隐藏拒绝、引用计数、
- * 超时强制释放、错误熔断、once 低档位逐帧执行、任务耗时上报。
+ * 超时强制释放、常驻任务错误熔断、once 低档位逐帧执行、
+ * once 帧快照排空（同帧自重排仅每帧一次、新排入顺延下一帧）、
+ * once 错误熔断冷却、任务耗时上报。
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { MasterFrameLoop, type LoopHost } from "./master-frame-loop";
@@ -254,6 +256,64 @@ describe("MasterFrameLoop", () => {
     loop.start();
     advance(50);
     expect(calls).toBe(2);
+    loop.stop();
+  });
+
+  it("once 同帧自重排任务仅每帧执行一次（帧快照排空）", () => {
+    const { host, advance } = makeHost();
+    const loop = new MasterFrameLoop(host);
+    loop.start();
+    let calls = 0;
+    /* 模拟拖拽态无条件自重排（同帧排空旧语义下此结构会无限自旋） */
+    const selfRequeue = () => {
+      calls++;
+      loop.once(selfRequeue);
+    };
+    loop.once(selfRequeue);
+    for (let i = 0; i < 6; i++) advance(50);
+    expect(calls).toBe(6);
+    loop.stop();
+  });
+
+  it("排空期间新排入的 once 任务顺延至下一帧执行（帧快照边界）", () => {
+    const { host, advance } = makeHost();
+    const loop = new MasterFrameLoop(host);
+    loop.start();
+    const order: string[] = [];
+    loop.once(() => {
+      order.push("a");
+      loop.once(() => {
+        order.push("b");
+      });
+    });
+    advance(50);
+    expect(order).toEqual(["a"]);
+    advance(50);
+    expect(order).toEqual(["a", "b"]);
+    loop.stop();
+  });
+
+  it("once 任务连续抛错 10 次熔断停止执行；冷却结束后新排入恢复", () => {
+    const { host, advance } = makeHost();
+    const loop = new MasterFrameLoop(host);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    loop.start();
+    let calls = 0;
+    const failing = () => {
+      calls++;
+      loop.once(failing); // 自重排（抛错前）：异常任务宁可链断也不每帧执行
+      throw new Error("boom");
+    };
+    loop.once(failing);
+    for (let i = 0; i < 10; i++) advance(50); // t=50..500：连续抛错 10 次
+    expect(calls).toBe(10);
+    for (let i = 0; i < 10; i++) advance(50); // 熔断期（至 t=1000）：不再执行
+    expect(calls).toBe(10);
+    for (let i = 0; i < 10; i++) advance(50); // t=1050..1500：冷却窗度过
+    loop.once(failing);
+    advance(50); // t=1550：冷却已结束 → 恢复执行，计数重新累计
+    expect(calls).toBe(11);
+    expect(error).toHaveBeenCalledTimes(11); // 9 异常 + 1 熔断 + 1 恢复后异常
     loop.stop();
   });
 });

@@ -56,18 +56,22 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 ///   - key: HMAC 密钥（通常为 PBKDF2 派生的设备指纹密钥）
 ///   - message: 待签名的消息
 ///
-/// 返回：32 字节 HMAC 标签
-pub fn hmac_sign(key: &[u8], message: &[u8]) -> [u8; 32] {
+/// 返回：
+///   - Ok: 32 字节 HMAC 标签
+///   - Err: 后端拒绝密钥（当前实现接受任意长度密钥，此分支为
+///     API 契约的防御性传播，不吞错、不 panic）
+pub fn hmac_sign(key: &[u8], message: &[u8]) -> Result<[u8; 32], String> {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<Sha256>;
 
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length error");
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|_| "HMAC key rejected by backend".to_string())?;
     mac.update(message);
     let result = mac.finalize();
     let bytes = result.into_bytes();
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
-    out
+    Ok(out)
 }
 
 /// HMAC-SHA256 验证（常量时间比较）
@@ -306,7 +310,7 @@ pub fn dpapi_unprotect(_ciphertext: &[u8]) -> Result<Vec<u8>, String> {
 /// 用于状态文件、审计日志的完整性与机密性双重保护。
 pub fn seal(plaintext: &[u8], hmac_key: &[u8]) -> Result<(Vec<u8>, [u8; 32]), String> {
     let ciphertext = dpapi_protect(plaintext, Some("Verthys sealed data"))?;
-    let tag = hmac_sign(hmac_key, &ciphertext);
+    let tag = hmac_sign(hmac_key, &ciphertext)?;
     Ok((ciphertext, tag))
 }
 
@@ -339,7 +343,7 @@ mod tests {
     fn test_hmac_sign_verify() {
         let key = b"test_key_1234567890";
         let msg = b"test message";
-        let tag = hmac_sign(key, msg);
+        let tag = hmac_sign(key, msg).unwrap();
         assert_eq!(tag.len(), 32);
         assert!(hmac_verify(key, msg, &tag));
         assert!(!hmac_verify(key, b"tampered", &tag));

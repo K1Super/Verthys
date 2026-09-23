@@ -117,7 +117,7 @@ typedef struct UnlockPipelineState {
     int                 s2_done;
 
     /* S1 产物（S1 线程写 → cv_s1 屏障 → S2/S3 主线程读）。
-     * ★ 对齐红线：载荷起点（frames[i]+8 帧头偏移）传入 flatcc verifier，
+     * 对齐红线：载荷起点（frames[i]+8 帧头偏移）传入 flatcc verifier，
      * u64 字段按物理地址 8 字节对齐校验 —— 本数组在结构体内偏移不受
      * 自然对齐保证（uint8_t 按 1 对齐），必须显式 8 对齐声明。 */
     VERTHYS_V3_FLATBUF_ALIGN
@@ -455,7 +455,7 @@ static VerthysResult upl_stage_s3(UnlockPipelineState *p)
         goto fail_zero_ik;
     }
 
-    /* 4. pepper 来源一致性（迁移自旧版：记录非 0 时校验；漂移 →
+    /* 4. pepper 来源一致性（记录非 0 时校验；漂移 →
      *    PEPPER_SOURCE 而非 AUTH，杜绝"来源漂移误报密码错误"） */
     if (verified[chosen].pepper_source != 0 &&
         (uint8_t)verthys_pepper_get_source() != verified[chosen].pepper_source) {

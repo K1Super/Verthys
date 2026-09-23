@@ -433,8 +433,7 @@ VerthysResult Verthys_ScanOpen(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* V3-only：非 V3 容器一律拒绝（VERTHYS_ERR_V3_REQUIRED 语义由
-     * 删除清单自然实现——V1/V2 路径已退役） */
+    /* V3-only：非 V3 容器一律拒绝（全系统仅注册 V3 链接路径） */
     if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
 
     /* 全局应急安全机制触发时拒绝创建游标 */

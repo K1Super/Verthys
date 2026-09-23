@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use zeroize::Zeroize;
 
 use super::protocol::{Request, Response, base64_encode, base64_decode};
+use crate::runtime::worker::Worker;
 
 /* ------------------------------------------------------------------ *
  * GMK 全局主密钥状态（会话级，worker 内存中持有）                     *
@@ -49,7 +50,11 @@ thread_local! {
 /// 输入：password + bin_data + bin_password
 /// 输出：record(base64) = salt(32) + nonce(12) + verifierCt(48) + binHash(32)
 /// 副作用：GMK 存入 thread_local 内存
-pub(crate) fn handle_derive_global_key(req: &Request) -> Response {
+/// 派生 GMK 核心：完整派生链（binKey → GMK → verifier → 124B record）。
+/// 成功时 GMK 驻留 thread_local 并返回记录字节；失败返回已构造的
+/// 错误响应（op 由调用方指定），GMK 不驻留。
+/// handle_derive_global_key 与 handle_derive_and_store_global_key 共用。
+fn derive_gmk_core(req: &Request, op: &str) -> Result<Vec<u8>, Box<Response>> {
     use aes_gcm::aead::{Aead, KeyInit};
     use aes_gcm::{Aes256Gcm, Key, Nonce};
     use hkdf::Hkdf;
@@ -60,12 +65,12 @@ pub(crate) fn handle_derive_global_key(req: &Request) -> Response {
     let bin_data = match base64_decode(&req.bin_data) {
         Ok(d) => d,
         Err(_) => {
-            return Response {
+            return Err(Box::new(Response {
                 ok: false,
-                op: "derive_global_key".into(),
+                op: op.into(),
                 error: Some("base64 decode bin_data failed".into()),
-                ..Response::ok("derive_global_key")
-            }
+                ..Response::ok(op)
+            }))
         }
     };
 
@@ -121,12 +126,12 @@ pub(crate) fn handle_derive_global_key(req: &Request) -> Response {
         Err(_) => {
             bin_password_key.zeroize();
             ikm.zeroize();
-            return Response {
+            return Err(Box::new(Response {
                 ok: false,
-                op: "derive_global_key".into(),
+                op: op.into(),
                 error: Some("AES-GCM encrypt verifier failed".into()),
-                ..Response::ok("derive_global_key")
-            };
+                ..Response::ok(op)
+            }));
         }
     };
 
@@ -150,9 +155,92 @@ pub(crate) fn handle_derive_global_key(req: &Request) -> Response {
     bin_password_key.zeroize();
     ikm.zeroize();
 
-    Response {
-        data: Some(base64_encode(&record)),
-        ..Response::ok("derive_global_key")
+    Ok(record)
+}
+
+/// 派生全局主密钥 GMK（不持久化：仅驻留 worker 内存）
+/// 输出：record(base64) = salt(32) + nonce(12) + verifierCt(48) + binHash(32)
+pub(crate) fn handle_derive_global_key(req: &Request) -> Response {
+    match derive_gmk_core(req, "derive_global_key") {
+        Ok(record) => Response {
+            data: Some(base64_encode(&record)),
+            ..Response::ok("derive_global_key")
+        },
+        Err(resp) => *resp,
+    }
+}
+
+/// 派生并持久化全局密钥（首次初始化专用，敏感操作下沉）
+///
+/// 时序：派生 GMK → 收敛残留 global-key 记录 → 写入新记录 →
+/// 读回逐字节验证。全部在 worker 进程内完成；派生、落盘与读回
+/// 验证同一调用原子完成，不产生跨 IPC 的中间态窗口。
+/// 失败统一补偿：清 GMK + 尽力回收半成品记录；成功返回 id + recordB64。
+pub(crate) fn handle_derive_and_store_global_key(req: &Request, worker: &Worker) -> Response {
+    use crate::runtime::ffi_types::VERTHYS_OK;
+
+    const TYPE_GLOBAL_KEY: u8 = 0x10;
+    const GLOBAL_KEY_NAME: &str = "global-key";
+
+    let record = match derive_gmk_core(req, "derive_and_store_global_key") {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    // 失败统一补偿：清 GMK + 尽力回收半成品记录（幂等，可重复调用）
+    let mut written_id: Option<u64> = None;
+    let cleanup = |written: &mut Option<u64>| {
+        GMK.with(|g| *g.borrow_mut() = None);
+        if let Some(id) = written.take() {
+            let _ = worker.call_delete_record(id);
+        }
+    };
+
+    // 1. 收敛残留：历史中断可能遗留多条 global-key 记录，先清后写保证单条
+    loop {
+        let (rc, found, lid) = worker.call_find_first_lid_by_type(TYPE_GLOBAL_KEY);
+        if rc != VERTHYS_OK {
+            cleanup(&mut written_id);
+            return Response::err("derive_and_store_global_key", rc);
+        }
+        if !found {
+            break;
+        }
+        let del_rc = worker.call_delete_record(lid);
+        if del_rc != VERTHYS_OK {
+            cleanup(&mut written_id);
+            return Response::err("derive_and_store_global_key", del_rc);
+        }
+    }
+
+    // 2. 写入新记录（V3 单调用事务：WAL 逐帧 _commit + 超块法定人数即时落盘）
+    let id = match worker.call_add_record(TYPE_GLOBAL_KEY as u32, GLOBAL_KEY_NAME, &record) {
+        Ok(id) => id,
+        Err(code) => {
+            cleanup(&mut written_id);
+            return Response::err("derive_and_store_global_key", code);
+        }
+    };
+    written_id = Some(id);
+
+    // 3. 内容级读回验证：GetRecord 读回必须与写入逐字节一致
+    match worker.call_get_record(id) {
+        Ok((_rtype, _name, data)) if data == record => Response {
+            ok: true,
+            op: "derive_and_store_global_key".into(),
+            id: Some(id),
+            data: Some(base64_encode(&record)),
+            ..Response::ok("derive_and_store_global_key")
+        },
+        Ok(_) => {
+            // 读回不一致（编码契约破坏或存储异常）：回收半成品并清零
+            cleanup(&mut written_id);
+            Response::err("derive_and_store_global_key", 0x02)
+        }
+        Err(code) => {
+            cleanup(&mut written_id);
+            Response::err("derive_and_store_global_key", code)
+        }
     }
 }
 

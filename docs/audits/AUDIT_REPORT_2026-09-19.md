@@ -93,7 +93,7 @@ L6  security/      反分析/内存防护/进程隔离/硬件绑定/Hook 防御/
 - **触发条件**：零配置场景（无 `verthys_pepper_inject`、CNG 机器密钥不可用或 pepper.bin 持久化失败）。
 - **影响**：兜底模式下 pepper 熵 = 0（常量随源码公开，任何攻击者可得），pepper 对弱口令的加固增益完全失效；此时安全强度退化为纯 Argon2id(password, salt)。设计上已处理一致性（来源写入容器 flags 并解锁校验，不会锁库，源码注释明确），属**有意的可诊断权衡**，而非静默漂移缺陷。
 - **修复建议**：
-  1. 首选：取消编译内嵌兜底，改为"首次运行强制生成随机 pepper 并持久化"（保留注入通道供企业分发），持久化失败即失败并明确报错，不降级；
+  1. 首选：取消编译内嵌兜底，改为"首次运行强制生成随机 pepper 并持久化"（保留注入通道供分发），持久化失败即失败并明确报错，不降级；
   2. 或维持现状但将风险文档化于 `SECURITY_DESIGN.md`（当前该文件未见此风险说明），并在前端对"编译内嵌胡椒来源"显式向用户提示低安全档。
 - **验证方式**：删除 `%APPDATA%\Verthys\pepper.bin` 与 CNG 机器密钥后创建容器，观察来源标志与用户提示；回归：现有 250 项测试 + pepper 来源相关用例。
 
@@ -257,14 +257,14 @@ L6  security/      反分析/内存防护/进程隔离/硬件绑定/Hook 防御/
 
 ---
 
-## 9. 可执行验证命令与预期结果（本机已实测部分标 ★）
+## 9. 可执行验证命令与预期结果（本机已实测部分标 ）
 
 ```powershell
-# ★ 测试套件（已实测通过）
+# 测试套件（已实测通过）
 .\build\core\tests\Release\verthys_tests.exe
 # 预期: === Summary: 250 passed, 0 failed ===  exit 0
 
-# ★ P0-1 证据（已实测）
+# P0-1 证据（已实测）
 git ls-tree HEAD third_party/libsodium
 # 预期: 160000 commit 93a7d0d…（gitlink）
 git ls-files third_party/libsodium

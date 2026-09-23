@@ -1,8 +1,5 @@
 // core/schema/superblock_v3.fbs — V3 超级块 schema（多副本 + 法定人数提交）
 //
-// 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.3（字段逐项对齐）
-// 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-2
-//
 // 认证语义（红线级）：
 //   - superblock_hmac 字段：HMAC-SHA256(integrity_key, 序列化 buffer)，
 //     其中 superblock_hmac 向量自身在计算/校验时被原地置零（MAC 自排除
@@ -30,7 +27,7 @@ table SuperBlockV3 {
     pepper_source: uint8;             // flags[5] 等价
 
     // 密钥包装（使用 MEK 内核态加密）
-    // ★ WP-5：[12B nonce || 32B ct || 16B tag] = 60B（CNG wrapped 布局）
+    // [12B nonce || 32B ct || 16B tag] = 60B（CNG wrapped 布局）
     wrapped_key_a: [ubyte];           // 12B nonce + 32B + 16B tag = 60B
     wrapped_key_b: [ubyte];
     wrapped_key_c: [ubyte];

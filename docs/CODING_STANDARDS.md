@@ -122,4 +122,4 @@
 
 - 提交信息、分支策略、PR 流程、代码评审要求见 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)。
 - 文档同步是完成定义（DoD）的一部分：接口/目录/构建/配置/安全边界变更须同 PR 更新对应文档（`DOCUMENTATION_CHECKLIST.md` §4）。
-- 单一事实来源：版本号以 `CMakeLists.txt`/`Cargo.toml`/`tauri.conf.json` 为准，依赖版本以 `vcpkg.json`/`dep-versions.txt` 为准，文档只引用不抄录。
+- 单一事实来源：版本号以 `CMakeLists.txt`/`Cargo.toml`/`tauri.conf.json` 为准，依赖版本以 `Cargo.toml`/`package.json`/`dep-versions.txt` 为准，文档只引用不抄录。

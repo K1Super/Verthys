@@ -41,7 +41,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
   /* ===== 删除 ===== */
   const onDelete = async (id: number) => {
     const ph = photos.value.find(p => p.id === id);
-    // ★ 企业级根治：删除判断基于 metaId（始终存在）而非 meta（可能未解密）
+    // 修复：删除判断基于 metaId（始终存在）而非 meta（可能未解密）
     //    旧实现 if (ph?.meta && isTauri) 在重启后 meta 未解密时跳过整个 verthys 删除，
     //    导致：UI 移除了照片，但 verthys 记录仍在磁盘 → 重启后"删除的照片复活"。
     //    修复：Tauri 模式下只要有 metaId 就执行 verthys 删除 + 缓存失效；
@@ -55,7 +55,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
         }
         /* 其他错误静默 */
       }
-      // ★ 同时失效两层缓存（摘要 + 全量），杜绝删除复活
+      // 同时失效两层缓存（摘要 + 全量），杜绝删除复活
       //    invalidateSummaryRecord：从 summaryCache + 类型索引移除（列表不再显示）
       //    invalidateFullRecord：从 fullRecordCache 安全覆写移除（dataB64 清零）
       //    同时保留旧 invalidateScannedRecord 兼容（recordScanCache 回退路径）
@@ -72,7 +72,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
             }
             /* 其他错误静默 */
           }
-          // ★ chunk 记录同样失效两层缓存
+          // chunk 记录同样失效两层缓存
           invalidateSummaryRecord(cid);
           invalidateFullRecord(cid);
           invalidateScannedRecord(cid);
@@ -81,11 +81,11 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
     }
     // 浏览器模式：释放 Blob URL
     if (ph?.blobUrl) URL.revokeObjectURL(ph.blobUrl);
-    // ★ 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
+    // 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
     removeShallowItems(photos, p => p.id === id);
     // 更新缓存
     setModuleCache("photos", photos.value);
-    // ★ 企业级根治：持久化删除操作到磁盘 + 返回值检查
+    // 修复：持久化删除操作到磁盘 + 返回值检查
     //    旧实现仅 try/catch 吞掉异常，忽略 persistVerthys 返回的 false（flush 失败），
     //    导致删除操作未落盘 → 重启后"删除的照片复活"。
     //    修复：检查返回值，失败时提示用户。
@@ -128,13 +128,13 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
 
   /** 顶部删除按钮：切换选择模式 / 确认删除选中
    *
-   * ★ 批量删除必须合并为单次 flush：
+   * 批量删除必须合并为单次 flush：
    *   旧实现循环逐张 onDelete(id) → 每张 verthysDeleteRecord + persistVerthys = 2N 次 IPC + N 次事务提交（IO 风暴）
    *   新实现收集全部 metaId + chunkIds 一次性 deleteAndPersistBatch → 1 次 IPC + 1 次事务提交（恒定 IO）
    *   无论删除多少张照片，磁盘写入量恒定，仅与索引区大小相关。
    */
   const onDeleteBtn = async () => {
-    // ★ 企业级感知：无照片时不进入框选模式，直接给出响应提示
+    // 感知：无照片时不进入框选模式，直接给出响应提示
     //    避免空状态下点击删除按钮无反馈，用户无法感知
     if (photos.value.length === 0) {
       showError("暂无照片可删除");
@@ -153,7 +153,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
       return;
     }
 
-    // ★ 批量删除：收集全部待删除照片 + 对应记录 ID（metaId + 旧格式 chunkIds）
+    // 批量删除：收集全部待删除照片 + 对应记录 ID（metaId + 旧格式 chunkIds）
     const ids = Array.from(selectedPhotoIds.value);
     const photosToRemove = photos.value.filter(p => ids.includes(p.id));
     const allRecordIds: number[] = [];
@@ -166,13 +166,13 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
     }
 
     if (isTauri && allRecordIds.length > 0) {
-      // ★ 单次 IPC + 单次事务提交（批量删除合并单次 flush）
+      // 单次 IPC + 单次事务提交（批量删除合并单次 flush）
       //    deleteAndPersistBatch 内部：全部 ID 加入 pendingDeletionIds →
       //    verthysDeleteRecords(ids) 一次 IPC → worker 单次 vtxn_commit →
       //    防抖调度单次 flush（300ms 窗口）
       try {
         await deleteAndPersistBatch(allRecordIds);
-        // ★ 企业级根治：await persistVerthys 强制立即落盘（根治删除后复活）+ 返回值检查
+        // 修复：await persistVerthys 强制立即落盘（根治删除后复活）+ 返回值检查
         //
         // 原缺陷：deleteAndPersistBatch 仅防抖调度 flush（300ms），不等待落盘
         //   即返回。应用退出 → 防抖 flush 未执行 → 磁盘仍含已删照片 → "删除后复活"。
@@ -180,7 +180,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
         // 修复：await persistVerthys 取消防抖定时器，立即 doFlush 落盘。
         //   persistVerthys 内部 cancelDebouncedFlush + flushChain.then(doFlush)，
         //   确保磁盘写入完成才返回。UI 已同步移除（无缝删除），await 不阻塞渲染。
-        //   ★ 新增：检查返回值，失败时提示用户删除可能未落盘。
+        //   新增：检查返回值，失败时提示用户删除可能未落盘。
         const persistOk = await persistVerthys();
         if (!persistOk) {
           showError("删除操作持久化失败，重启后照片可能恢复。请重试或重新删除。");
@@ -193,7 +193,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
         console.warn("[onDeleteBtn] deleteAndPersistBatch 失败", e);
         showError("删除失败，请重试");
       }
-      // ★ 失效两层缓存（摘要 + 全量 + 扫描回退），杜绝删除复活
+      // 失效两层缓存（摘要 + 全量 + 扫描回退），杜绝删除复活
       for (const rid of allRecordIds) {
         invalidateSummaryRecord(rid);
         invalidateFullRecord(rid);
@@ -201,17 +201,17 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
       }
     }
 
-    // ★ 浏览器模式：释放 Blob URL；统一回收（含 Tauri 模式）
+    // 浏览器模式：释放 Blob URL；统一回收（含 Tauri 模式）
     for (const ph of photosToRemove) {
       if (ph.blobUrl) URL.revokeObjectURL(ph.blobUrl);
     }
-    // ★ 删除按钮完毕的瞬间移除对应内容，消除内容实际删除之间的空白间隔，做到无缝衔接
+    // 删除按钮完毕的瞬间移除对应内容，消除内容实际删除之间的空白间隔，做到无缝衔接
     const removedIdSet = new Set(ids);
-    // ★ 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
+    // 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
     removeShallowItems(photos, p => removedIdSet.has(p.id));
     // 更新缓存
     setModuleCache("photos", photos.value);
-    // ★ 企业级根治：persistVerthys 已在上方 await 调用（取消防抖，立即落盘）
+    // 修复：persistVerthys 已在上方 await 调用（取消防抖，立即落盘）
 
     showToast(`已删除 ${ids.length} 张照片`);
     selectedPhotoIds.value = new Set();

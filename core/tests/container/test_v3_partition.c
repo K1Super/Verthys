@@ -284,8 +284,8 @@ TEST(v3part_null_params_rejected)
     CHECK(verthys_partition_decrypt(&p, 1, nonce, ct, VERTHYS_PARTITION_TAG_BYTES - 1,
                                   out, &outlen) == VERTHYS_ERR_INVALID);
 
-    CHECK(verthys_partition_grow(NULL, 1) == VERTHYS_ERR_INVALID);
-    CHECK(verthys_partition_grow(&p, 0) == VERTHYS_ERR_INVALID);
+    CHECK(verthys_partition_grow(NULL, 1, 0x1000000ull) == VERTHYS_ERR_INVALID);
+    CHECK(verthys_partition_grow(&p, 0, 0x1000000ull) == VERTHYS_ERR_INVALID);
     CHECK(verthys_partition_nonce_counter(NULL) == 0);
     CHECK(verthys_partition_destroy(NULL) == VERTHYS_OK);  /* 幂等 */
 
@@ -308,16 +308,24 @@ TEST(v3part_grow_strategy)
                                  0x400000u, 1024, 1, &wrap) == VERTHYS_OK);
 
     /* 2x 策略：1024 → 2048 */
-    CHECK(verthys_partition_grow(&p, 1) == VERTHYS_OK);
+    CHECK(verthys_partition_grow(&p, 1, 0x800000u) == VERTHYS_OK);
     CHECK(p.size == 2048);
 
     /* min_bytes 超过 2x：线性补足 2048+5000=7048 */
-    CHECK(verthys_partition_grow(&p, 5000) == VERTHYS_OK);
+    CHECK(verthys_partition_grow(&p, 5000, 0x800000u) == VERTHYS_OK);
     CHECK(p.size == 7048);
 
     /* 2x 再次占优：7048 → 14096 */
-    CHECK(verthys_partition_grow(&p, 100) == VERTHYS_OK);
+    CHECK(verthys_partition_grow(&p, 100, 0x800000u) == VERTHYS_OK);
     CHECK(p.size == 14096);
+
+    /* 区域上限（offset 0x400000，limit 0x404000，cap 16KB）：
+     * 最小需求越界 → 拒绝且内存态不变 */
+    CHECK(verthys_partition_grow(&p, 100000, 0x404000u) == VERTHYS_ERR_RESOURCE_LIMIT);
+    CHECK(p.size == 14096);
+    /* 需求合法但 2x 目标(28192)越界 16KB cap → 截断于上限 */
+    CHECK(verthys_partition_grow(&p, 1, 0x404000u) == VERTHYS_OK);
+    CHECK(p.size == 16384);
 
     CHECK(verthys_partition_destroy(&p) == VERTHYS_OK);
     verthys_cng_aead_destroy(&wrap);

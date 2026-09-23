@@ -25,7 +25,7 @@
  *        导出验证弹窗两件套（取消 / 确认：选密钥文件 → 验证 → 另存为导出）
  *      - resetInitVerifyForm：复位初始化/验证表单（供 goBackToUnlock 调用）
  *
- * ★ 企业级根治（已内联，零行为变更）：
+ * 修复（已内联，零行为变更）：
  *   - 静默返回 → 明确错误反馈（browseBin / onInitKey / onVerify 三处守卫拆分）
  *   - 客户端密码长度前置校验（TextEncoder UTF-8 字节长度，与后端严格一致）
  *   - 验证进度由感知层（VerifyRhythm）驱动：成功路径等待收束完成事件后
@@ -151,7 +151,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
         binBytes.value = await readUserFile(selected as string);
       }
     } catch (e) {
-      // ★ 企业级修复：不再静默吞错（消除"按钮完全无反应"根因）
+      // 修复：不再静默吞错（消除"按钮完全无反应"根因）
       //
       // 原缺陷：catch { /* */ } 静默吞掉 readUserFile 沙箱校验失败等错误。
       // binFileName 在 readUserFile 之前已设置，但 binBytes 因异常未设置。
@@ -170,7 +170,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
 
   /* ===== 初始化全局密钥 ===== */
   /**
-   * ★ 设计约束：
+   * 设计约束：
    *   - initGlobalKey 返回 VerthysResult<void>
    *   - 设备绑定解耦：成功后显式调用 bindDevice(false)
    *     失败仅 Toast 提示，不阻塞主流程
@@ -178,7 +178,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
   const onInitKey = async () => {
     // 显式防重复：processing 期间拒绝再次触发
     if (processing.value) return;
-    // ★ 企业级修复：静默返回改为明确错误反馈
+    // 修复：静默返回改为明确错误反馈
     //
     // 原缺陷：守卫 `if (!initPassword || !binBytes || !binPassword || processing) return`
     // 在 binBytes 为 null 时静默返回。按钮 :disabled 用 !binFileName 判断，
@@ -193,7 +193,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       binFileName.value = '';
       return;
     }
-    // ★ 企业级根治：客户端密码长度前置校验
+    // 修复：客户端密码长度前置校验
     //
     // 原缺陷：后端 validate_password_complexity 要求 ≥8 字节，但错误提示被
     // "禁止输出错误的具体信息"约束刻意模糊为"初始化失败"。用户不知 8 位下限，
@@ -208,37 +208,70 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       return;
     }
     processing.value = true;
+
+    // 进度接入（与验证视图同构复用同一感知层）：
+    //   信号层 = initGlobalKey 的阶段 emit（真实进度）；
+    //   感知层 = verifyRhythm（平滑吸收，视图切换由收束事件驱动）；
+    //   呈现层 = InitKeyView 的 QuantumProgressFlow（绑定视觉值）。
+    options.unlockProgressMsg.value = '准备初始化';
+    options.unlockProgressPercent.value = 0;
+    options.unlockProgressElapsed.value = 0;
+    options.verifyRhythm.start();
+
+    const onInitProgress = (p: UnlockProgress) => {
+      options.unlockProgressMsg.value = p.message;
+      options.unlockProgressPercent.value = p.percent;
+      options.unlockProgressElapsed.value = p.elapsed_ms;
+      options.verifyRhythm.pushRealProgress(p.percent / 100);
+    };
+
+    let result: VerthysResult<void> | null = null;
+    let errored = false;
     try {
-      const result = await withFrontendTimeout(
-        initGlobalKey(initPassword.value, binBytes.value!, binPassword.value),
+      result = await withFrontendTimeout(
+        initGlobalKey(initPassword.value, binBytes.value!, binPassword.value, onInitProgress),
         '初始化全局密钥',
       );
-      if (result.ok) {
-        initPassword.value = '';
-        binPassword.value = '';
-        binFileName.value = '';
-        binBytes.value = null;
-        options.showToast('全局安全密钥已初始化');
-        // ★ 设备绑定解耦，由 UI 显式调用
-        //    失败仅提示不阻塞主流程，用户可在设置中重新绑定
-        const bindResult = await bindDevice(false);
-        if (!bindResult.ok) {
-          options.showError('设备绑定失败，可在设置中重新绑定');
-        }
-      } else {
-        options.showError(translateVerthysError(result));
-      }
     } catch (e) {
+      errored = true;
       console.error('[onInitKey] 异常', e);
-      options.showError('初始化失败');
-    } finally {
-      processing.value = false;
     }
+
+    if (result?.ok) {
+      // 成功：收束补满 100% 后释放视图（与验证成功路径同构）
+      options.verifyRhythm.seal();
+      try {
+        await options.verifyRhythm.waitForComplete();
+      } catch (e) {
+        console.warn('[onInitKey] 收束等待被中断，按已完成处理', e);
+      }
+      initPassword.value = '';
+      binPassword.value = '';
+      binFileName.value = '';
+      binBytes.value = null;
+      options.showToast('全局安全密钥已初始化');
+      // 设备绑定解耦，由 UI 显式调用
+      //    失败仅提示不阻塞主流程，用户可在设置中重新绑定
+      const bindResult = await bindDevice(false);
+      if (!bindResult.ok) {
+        options.showError('设备绑定失败，可在设置中重新绑定');
+      }
+    } else {
+      // 失败：冻结进度 + 视觉降级；错误提示淡入覆盖，取得视觉重心
+      options.verifyRhythm.halt();
+      const msg = result && !result.ok
+        ? translateVerthysError(result)
+        : (errored ? '初始化失败，请重试' : '初始化失败');
+      options.showError(msg);
+      // 错误最小展示时长（取自感知层配置源，业务层不硬编码毫秒值）
+      await options.verifyRhythm.waitForHaltMin();
+    }
+    processing.value = false;
   };
 
   /* ===== 验证全局密钥 ===== */
   /**
-   * ★ verifyGlobalKey 返回 VerthysResult<void>
+   * verifyGlobalKey 返回 VerthysResult<void>
    *
    * 感知层协作契约（无固定延时，时长全部由感知层配置源决定）：
    *   - 启动：reset/start 感知层，开启一轮假进度节奏
@@ -251,7 +284,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
   const onVerify = async () => {
     // 显式防重复：processing 期间拒绝再次触发
     if (processing.value) return;
-    // ★ 企业级修复：静默返回改为明确错误反馈（同 onInitKey 逻辑）
+    // 修复：静默返回改为明确错误反馈（同 onInitKey 逻辑）
     //
     // 原缺陷：binBytes 为 null 时静默返回，用户看到"验证按钮完全无反应"。
     // 修复：binBytes 为 null 时显示错误提示并重置 binFileName。
@@ -272,7 +305,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
     // 感知层开启新一轮验证（失败重试场景自 HALTED 复位）
     options.verifyRhythm.start();
 
-    // ★ 验证进度回调 — verifyGlobalKey 内部各阶段直接调用
+    // 验证进度回调 — verifyGlobalKey 内部各阶段直接调用
     const onVerifyProgress = (p: UnlockProgress) => {
       options.unlockProgressMsg.value = p.message;
       options.unlockProgressPercent.value = p.percent;
@@ -311,7 +344,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
     } else {
       // 失败：冻结进度 + 视觉降级；错误提示淡入覆盖，取得视觉重心
       options.verifyRhythm.halt();
-      // ★ 结构化错误提示：translateVerthysError 处理 VerthysResult 失败分支
+      // 结构化错误提示：translateVerthysError 处理 VerthysResult 失败分支
       const msg = result && !result.ok
         ? translateVerthysError(result)
         : (errored ? '验证失败，请重试' : '验证失败');
@@ -379,7 +412,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
 
   /** 确认修改全局密钥
    *
-   * ★ changeGlobalKey 返回 VerthysResult<void>
+   * changeGlobalKey 返回 VerthysResult<void>
    *   细分错误码：旧密钥错误 vs 落盘失败，提供精确 UI 提示
    */
   const onConfirmChangeKey = async () => {
@@ -394,7 +427,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
         '修改全局密钥',
       );
       if (!result.ok) {
-        // ★ 细分错误码：旧密钥错误 vs 落盘失败
+        // 细分错误码：旧密钥错误 vs 落盘失败
         if (result.code === VerthysErrorCode.E_GLOBAL_KEY_VERIFY_FAILED) {
           options.showError('旧密钥验证失败，请检查');
         } else if (result.code === VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED) {
@@ -417,7 +450,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
   };
 
   /* ===== 导出密钥文件验证弹窗状态 =====
-   * ★ 企业级根治：导出密钥文件属高敏感操作，必须先验证全局密钥。
+   * 修复：导出密钥文件属高敏感操作，必须先验证全局密钥。
    *   弹窗仅采集双要素凭据（访问密钥 + 密钥口令）— 密钥文件在确认后
    *   的导出流程中选择，验证与导出合一（文件一次选择，验证三要素
    *   完整不降级：访问密钥 + 密钥文件 + 密钥口令）。 */

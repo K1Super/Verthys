@@ -2,10 +2,10 @@
  * verthys_rekey_auto.c — 自动密钥轮换状态机实现
  *
  * 轮换流程（单写者纪律，与 change_password 同序）：
- *   守卫（终态/驻留/防震荡）→ 新密钥生成（双副本：wrap 与 import 各
- *   消耗一份，红线）→ 分区密钥内核态重包装 → 备用槽位分区表帧
- *   落盘（fsync）→ VsbTxnV3 法定人数提交 → 原位句柄切换（借用指针
- *   wal/txn 续期有效）→ 内存态分区表同步。
+ *   守卫（终态/驻留/防震荡）→ 入态 REKEYING 在途互斥 → 新密钥生成
+ *   （双副本：wrap 与 import 各消耗一份，红线）→ 分区密钥内核态重包装 →
+ *   备用槽位分区表帧落盘（fsync）→ VsbTxnV3 法定人数提交 → 恢复常态
+ *   后原位句柄切换（借用指针 wal/txn 续期有效）→ 内存态分区表同步。
  *
  * 失败原子性：
  *   - 提交前任何失败：km 句柄零变更，盘面仅可能残留备用槽位孤儿帧
@@ -213,15 +213,25 @@ VerthysResult verthys_rekey_auto_rotate(VerthysContextV3 *ctx3, int force,
         return VERTHYS_ERR_CNG_UNAVAILABLE;
     }
 
+    /*
+     * 轮换在途互斥：入态 REKEYING 独占准备期（重包装 + 落盘 + 提交）。
+     * 第二个轮换入口命中上方状态守卫被拒（L3 单写者下为纵深防御，
+     * 防御应急/回调路径重入）；km 级重入（import_batch / generate_keyset）
+     * 亦按状态机拒入。所有出口必须恢复 KERNEL_RESIDENT：成功路径由
+     * rotate_abc 的状态迁移收尾（其守卫接受 REKEYING，切换成功即恢复
+     * 常态），失败路径在收口标签恢复。
+     */
+    ctx3->km->state = VERTHYS_CNG_KM_REKEYING;
+
     r = rekey_txn_terminal_guard(ctx3);
-    if (r != VERTHYS_OK) return r;
+    if (r != VERTHYS_OK) goto fail_state;   /* 状态未污染：恢复后上抛 */
 
     /* 防震荡：距上次轮换 < 24h 且非强制 → 拒绝（非错误） */
     verthys_rekey_auto_state_get(&ctx3->sb, &rs);
     now_ft = rekey_now_ft();
     if (!force && now_ft >= rs.last_rekey_ft &&
         now_ft - rs.last_rekey_ft < min_ft) {
-        return VERTHYS_OK;
+        goto fail_state;   /* 恢复在途态后以 VERTHYS_OK 返回 */
     }
 
     /* 备用槽位（ping-pong：默认 1MB ↔ 2MB，帧容量 ≤ 8 条目 ≈ 1KB，
@@ -351,7 +361,9 @@ VerthysResult verthys_rekey_auto_rotate(VerthysContextV3 *ctx3, int force,
     }
     committed = 1;
 
-    /* ---- 5. 原位句柄切换（借用指针 wal/txn 续期有效） ---- */
+    /* ---- 5. 原位句柄切换（借用指针 wal/txn 续期有效）。
+     *         rotate_abc 为状态迁移操作：接受 REKEYING 在途态，切换
+     *         成功即恢复 KERNEL_RESIDENT（切换内无可失败操作） ---- */
     r = verthys_cng_km_rotate_abc(ctx3->km, &new_a, &new_b, &new_c);
     if (r != VERTHYS_OK) goto fail_committed;
 
@@ -376,12 +388,24 @@ VerthysResult verthys_rekey_auto_rotate(VerthysContextV3 *ctx3, int force,
     verthys_secure_zero(id_a, sizeof(id_a));
     verthys_secure_zero(id_b, sizeof(id_b));
     verthys_secure_zero(id_c, sizeof(id_c));
+    verthys_secure_zero(new_wa, sizeof(new_wa));
+    verthys_secure_zero(new_wb, sizeof(new_wb));
+    verthys_secure_zero(new_wc, sizeof(new_wc));
     if (out_rotated != NULL) *out_rotated = 1;
     return VERTHYS_OK;
 
+fail_state:
+    /* 守卫生效后的提早出口（事务终态异常 / 防震荡窗口）：
+     * 未触碰任何密钥材料，仅恢复在途态后按原语义返回 */
+    ctx3->km->state = VERTHYS_CNG_KM_KERNEL_RESIDENT;
+    return r;
+
 fail_committed:
-    /* 提交后失败：盘面已持新语境（回滚不可行），按 change_password
-     * 5.3 同语义上抛；下次解锁按盘面重建全组，无数据影响 */
+    /* 提交后句柄切换失败：盘面已持新语境（回滚不可行），按
+     * change_password 同语义上抛；下次解锁按盘面重建全组，无数据
+     * 影响。在途态就地恢复（旧句柄未动），防止 REKEYING 残留阻塞
+     * 下次解锁的批量导入。 */
+    ctx3->km->state = VERTHYS_CNG_KM_KERNEL_RESIDENT;
     verthys_secure_zero(ka_wrap, sizeof(ka_wrap));
     verthys_secure_zero(kb_wrap, sizeof(kb_wrap));
     verthys_secure_zero(kc_wrap, sizeof(kc_wrap));
@@ -391,6 +415,9 @@ fail_committed:
     verthys_secure_zero(id_a, sizeof(id_a));
     verthys_secure_zero(id_b, sizeof(id_b));
     verthys_secure_zero(id_c, sizeof(id_c));
+    verthys_secure_zero(new_wa, sizeof(new_wa));
+    verthys_secure_zero(new_wb, sizeof(new_wb));
+    verthys_secure_zero(new_wc, sizeof(new_wc));
     return r;
 
 fail_ctx:
@@ -400,6 +427,8 @@ fail_ctx:
         verthys_cng_aead_destroy(&new_c);
     }
 fail_zero:
+    /* 准备期失败：旧密钥组原样驻留（零变更），恢复在途态 */
+    ctx3->km->state = VERTHYS_CNG_KM_KERNEL_RESIDENT;
     verthys_secure_zero(ka_wrap, sizeof(ka_wrap));
     verthys_secure_zero(kb_wrap, sizeof(kb_wrap));
     verthys_secure_zero(kc_wrap, sizeof(kc_wrap));
@@ -409,6 +438,9 @@ fail_zero:
     verthys_secure_zero(id_a, sizeof(id_a));
     verthys_secure_zero(id_b, sizeof(id_b));
     verthys_secure_zero(id_c, sizeof(id_c));
+    verthys_secure_zero(new_wa, sizeof(new_wa));
+    verthys_secure_zero(new_wb, sizeof(new_wb));
+    verthys_secure_zero(new_wc, sizeof(new_wc));
     return r;
 }
 

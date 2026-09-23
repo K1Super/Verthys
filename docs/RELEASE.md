@@ -10,13 +10,11 @@
 
 遵循语义化版本 SemVer：`MAJOR.MINOR.PATCH`。当前 2.6.1 在四处元数据一致：`CMakeLists.txt`（`project(VERSION 2.6.1)`）、`verthys-tauri/package.json`、`verthys-tauri/src-tauri/Cargo.toml`、`verthys-tauri/src-tauri/tauri.conf.json` 均为 `2.6.1`。
 
-> 口径矛盾点：`vcpkg.json` 的 `version-string` 为 `3.2.6`，与产品版本 2.6.1 不一致；且本构建不使用 vcpkg（依赖为 vendored `third_party/`）。升级版本时需澄清该字段含义或同步修正。
-
 ## 2. 发版检查清单（逐项可验收）
 
 1. 代码冻结：合并窗口关闭，`docs/` 与代码同 PR 同步更新（见 [DOCUMENTATION_CHECKLIST.md](DOCUMENTATION_CHECKLIST.md) 第 4 节）。
 2. 全量构建：`powershell -ExecutionPolicy Bypass -File build_production.ps1 -Clean -NoPause` 全绿（`build_production.ps1:22`）。
-3. 测试全绿：`ctest --test-dir build -C Release --output-on-failure`，`verthys_tests` 聚合测试内含 250 个用例全部通过（实际测试数见 [TESTING.md](TESTING.md)）；必要时运行 fuzz 冒烟门。
+3. 测试全绿：`ctest --test-dir build -C Release --output-on-failure`，`verthys_tests` 聚合测试内含 296 个用例全部通过（实际测试数见 [TESTING.md](TESTING.md)）；必要时运行 fuzz 冒烟门。
 4. 前端类型检查：`npx vue-tsc --noEmit` 通过（打包脚本阶段 4 已含，`build_production.ps1:398`）。
 5. Rust 检查：`cargo check` 通过（`build_production.ps1:417`）；`npm run tauri build` 成功产出 NSIS 包。
 6. 产物哈希校验：阶段 3.3 的 `Get-FileSha256` 副本比对无哈希漂移（`build_production.ps1:365-391`）。

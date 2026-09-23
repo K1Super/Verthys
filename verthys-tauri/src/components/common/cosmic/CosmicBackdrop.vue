@@ -1,6 +1,6 @@
 <!--
   CosmicBackdrop.vue — 通用宇宙主题背景层（深空巡天场 v2）
-  ★ 反大众化重构（与 CosmicBackground/HomeAtlas 同源引力视觉语法）：
+  反大众化重构（与 CosmicBackground/HomeAtlas 同源引力视觉语法）：
     - 根除：正中心 conic 光晕环（刻板圆环+辉光泛滥）、对称闪烁星点、
       同轨迹模板流星
     - 星云：预烘焙贴图 × 4，色板收敛深空冷调（青/紫/银/金），
@@ -55,12 +55,12 @@ const emit = defineEmits<{ (e: "backdrop"): void }>();
 const onBackdropClick = () => emit("backdrop");
 
 /* ============================================================================
- * ★ 预渲染贴图：SVG 位图（渐变 + feGaussianBlur 烘焙）
+ * 预渲染贴图：SVG 位图（渐变 + feGaussianBlur 烘焙）
  * ============================================================================
  * 与 CosmicBackground 同手法：浏览器将 data-URI SVG 背景图栅格化一次并缓存
  * 为纹理，运行时不再执行实时重栅格化（星云 drift 动画只驱动
  * transform/opacity，纯合成）。
- * ★ v2 色板收敛：粉 (255,110,180) → 金 (255,217,160)、薄荷 (0,255,200) →
+ * v2 色板收敛：粉 (255,110,180) → 金 (255,217,160)、薄荷 (0,255,200) →
  *   银 (205,224,244) — 与品牌谱线/引力星图同源深空冷调四色体系。
  */
 const svgUrl = (svg: string): string =>
@@ -131,7 +131,7 @@ const stars = Array.from({ length: 26 }, (_, i) => ({
   display: flex;
   align-items: center;
   justify-content: center;
-  /* ★ 性能根治：全屏 backdrop-filter 叠在 60fps WebGL 粒子画布上 =
+  /* 性能根治：全屏 backdrop-filter 叠在 60fps WebGL 粒子画布上 =
    * 合成器每帧对整个视口做 14px 模糊重采样（GPU 击穿主因）。
    * 去实时毛玻璃 → 遮罩底色加深补偿（背后本就是弥散星空，
    * 0.86 暗化层的视觉等效模糊后的景深压暗）；遮罩自身的

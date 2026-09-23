@@ -22,7 +22,7 @@
  *   - 剪贴板模式变更/清空/监听事件
  *   - 状态文件创建/修改/修复/删除
  *   - 安全命令执行
- *   - verthys 解锁/锁定/container_id 不匹配
+ *   - verthys 解锁/锁定
  *
  * CI 红线：
  *   - 本文件不输出 log::* 调用（审计日志独立于应用日志）
@@ -69,6 +69,9 @@ pub enum AuditEventType {
     // Verthys 操作
     VerthysUnlock,
     VerthysLock,
+    /// 历史审计数据反序列化兼容位：旧版本曾写入该事件，现版本已无产生路径。
+    /// 保留变体使旧日志文件的反序列化与 HMAC 链验证可字节级复原，
+    /// 删除会导致含该事件的历史行链验证误报篡改。不得用于写入新事件。
     ContainerIdMismatch,
     // 设备绑定
     DeviceBind,
@@ -83,7 +86,7 @@ pub enum AuditEventType {
     ScanClose,
     ScanAbort,
     ScanCircuitBreaker,
-    // 后台巡检（企业级巡检改进）
+    // 后台巡检（巡检改进）
     /// 巡检测到威胁（未知模块连续达到阈值）
     PatrolThreat,
     /// 巡检触发应急熔断（直接销毁 worker 会话）
@@ -271,7 +274,7 @@ pub fn append_audit(log_path: &Path, hmac_key: &[u8], event: AuditEvent) -> Resu
     let mut hmac_input = Vec::with_capacity(event_json.len() + prev_hmac.len());
     hmac_input.extend_from_slice(event_json.as_bytes());
     hmac_input.extend_from_slice(prev_hmac.as_bytes());
-    let hmac = crate::util::crypto::hmac_sign(hmac_key, &hmac_input);
+    let hmac = crate::util::crypto::hmac_sign(hmac_key, &hmac_input)?;
     let hmac_hex: String = hmac.iter().map(|b| format!("{:02x}", b)).collect();
 
     // 4. 构造日志条目
@@ -352,7 +355,8 @@ pub fn verify_audit_chain(log_path: &Path, hmac_key: &[u8]) -> Result<(), usize>
         let mut hmac_input = Vec::with_capacity(event_json.len() + entry.prev_hmac.len());
         hmac_input.extend_from_slice(event_json.as_bytes());
         hmac_input.extend_from_slice(entry.prev_hmac.as_bytes());
-        let expected_hmac = crate::util::crypto::hmac_sign(hmac_key, &hmac_input);
+        let expected_hmac =
+            crate::util::crypto::hmac_sign(hmac_key, &hmac_input).map_err(|_| line_no)?;
         let expected_hex: String = expected_hmac.iter().map(|b| format!("{:02x}", b)).collect();
 
         if !crate::util::crypto::ct_eq(entry.hmac.as_bytes(), expected_hex.as_bytes()) {

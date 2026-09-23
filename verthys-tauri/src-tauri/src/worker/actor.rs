@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -29,8 +29,8 @@ use super::graceful::{
     diagnose_exit, mark_child_dead_if_needed, perform_graceful_shutdown, reject_request_after_exit,
 };
 use super::protocol::{
-    ActorRequest, UnlockProgress, STDERR_DRAIN_FINAL_TIMEOUT, UNLOCK_PROGRESS_IDLE_TIMEOUT,
-    UNLOCK_PROGRESS_OP,
+    bounded_read_line, ActorRequest, BoundedLineError, UnlockProgress, MAX_LINE_BYTES,
+    STDERR_DRAIN_FINAL_TIMEOUT, UNLOCK_PROGRESS_IDLE_TIMEOUT, UNLOCK_PROGRESS_OP,
 };
 use super::stderr::{snapshot_stderr, StderrRing};
 
@@ -148,7 +148,7 @@ pub(crate) async fn actor_loop(
 /// tokio::time::timeout 包裹 read_line()，
 ///   替代 PeekNamedPipe + thread::sleep(50ms) 轮询。
 /// 只读诊断，不清空句柄。
-/// ★ 企业级修复：跳过进度行，防止协议污染
+/// 修复：跳过进度行，防止协议污染
 ///   当 worker 的进度回调已注册（前一次 unlock 注册）且当前非流式请求
 ///   触发 FFI 调用 emit progress 时，进度行会混入 stdout。
 ///   handle_send 必须跳过 op="unlock_progress" 行，
@@ -172,7 +172,7 @@ async fn handle_send(
         return Err(format!("write stdin: {}", e));
     }
 
-    // ★ 企业级修复：使用 deadline 循环读取，跳过进度行
+    // 修复：使用 deadline 循环读取，跳过进度行
     // 总超时不变（deadline 固定），每行读取使用剩余时间
     let deadline = Instant::now() + timeout;
 
@@ -197,16 +197,20 @@ async fn handle_send(
         }
 
         let mut line = String::new();
-        let read_result = tokio::time::timeout(remaining, stdout.read_line(&mut line)).await;
+        let read_result = tokio::time::timeout(
+            remaining,
+            bounded_read_line(&mut *stdout, &mut line, MAX_LINE_BYTES),
+        )
+        .await;
 
         match read_result {
-            Ok(Ok(0)) => {
+            Ok(Ok(None)) => {
                 // EOF — 子进程已退出
                 mark_child_dead_if_needed(child, child_alive, pid).await;
                 let diag = diagnose_exit(child, pid, stderr_ring).await;
                 return Err(format!("worker 管道关闭: {}", diag));
             }
-            Ok(Ok(_n)) => {
+            Ok(Ok(Some(_n))) => {
                 let trimmed = line.trim().to_string();
                 if trimmed.is_empty() {
                     mark_child_dead_if_needed(child, child_alive, pid).await;
@@ -214,7 +218,7 @@ async fn handle_send(
                     return Err(format!("worker 返回空行: {}", diag));
                 }
 
-                // ★ 企业级修复：跳过进度行（unlock_progress）
+                // 修复：跳过进度行（unlock_progress）
                 // 这些行由 C 层进度消费线程异步写入 stdout，不是当前请求的最终响应。
                 // 解析 JSON 提取 op 字段，若为进度行则继续读取下一行。
                 let is_progress_line = serde_json::from_str::<serde_json::Value>(&trimmed)
@@ -236,7 +240,18 @@ async fn handle_send(
 
                 return Ok(trimmed);
             }
-            Ok(Err(e)) => {
+            Ok(Err(BoundedLineError::TooLong { limit })) => {
+                // 协议异常：worker 输出单行超过上限。标记子进程死亡，
+                // 不向调用方回显任何行内容（防行内数据注入错误消息）。
+                mark_child_dead_if_needed(child, child_alive, pid).await;
+                log::error!(
+                    "[worker] 输出单行超过上限（{} 字节），协议断开: PID={}",
+                    limit,
+                    pid
+                );
+                return Err(format!("worker 输出单行超过 {} 字节上限，协议断开", limit));
+            }
+            Ok(Err(BoundedLineError::Io(e))) => {
                 mark_child_dead_if_needed(child, child_alive, pid).await;
                 return Err(format!("read stdout: {}", e));
             }
@@ -299,16 +314,20 @@ async fn handle_streaming_unlock_send(
         let remaining = deadline.saturating_duration_since(Instant::now());
 
         let mut line = String::new();
-        let read_result = tokio::time::timeout(remaining, stdout.read_line(&mut line)).await;
+        let read_result = tokio::time::timeout(
+            remaining,
+            bounded_read_line(&mut *stdout, &mut line, MAX_LINE_BYTES),
+        )
+        .await;
 
         match read_result {
-            Ok(Ok(0)) => {
+            Ok(Ok(None)) => {
                 // EOF — 子进程已退出
                 mark_child_dead_if_needed(child, child_alive, pid).await;
                 let diag = diagnose_exit(child, pid, stderr_ring).await;
                 return Err(format!("解锁期间 worker 管道关闭: {}", diag));
             }
-            Ok(Ok(_)) => {
+            Ok(Ok(Some(_))) => {
                 let trimmed = line.trim().to_string();
                 if trimmed.is_empty() {
                     // 空行，继续
@@ -357,7 +376,17 @@ async fn handle_streaming_unlock_send(
                     return Ok(trimmed);
                 }
             }
-            Ok(Err(e)) => {
+            Ok(Err(BoundedLineError::TooLong { limit })) => {
+                // 协议异常：解锁流中 worker 输出单行超过上限
+                mark_child_dead_if_needed(child, child_alive, pid).await;
+                log::error!(
+                    "[worker] 解锁流输出单行超过上限（{} 字节），协议断开: PID={}",
+                    limit,
+                    pid
+                );
+                return Err(format!("worker 输出单行超过 {} 字节上限，协议断开", limit));
+            }
+            Ok(Err(BoundedLineError::Io(e))) => {
                 mark_child_dead_if_needed(child, child_alive, pid).await;
                 return Err(format!("read stdout: {}", e));
             }
@@ -414,8 +443,13 @@ async fn handle_wait_ready(
         }
 
         let mut line = String::new();
-        match tokio::time::timeout(remaining, stdout.read_line(&mut line)).await {
-            Ok(Ok(0)) => {
+        match tokio::time::timeout(
+            remaining,
+            bounded_read_line(&mut *stdout, &mut line, MAX_LINE_BYTES),
+        )
+        .await
+        {
+            Ok(Ok(None)) => {
                 // EOF — 子进程已退出
                 let diag = diagnose_exit(child, pid, stderr_ring).await;
                 log::error!("[worker] 就绪检测：子进程已崩溃: {}", diag);
@@ -424,7 +458,7 @@ async fn handle_wait_ready(
                     diag
                 ));
             }
-            Ok(Ok(_)) => {
+            Ok(Ok(Some(_))) => {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
                     log::info!("[worker] 收到就绪信号: {}", trimmed);
@@ -432,7 +466,14 @@ async fn handle_wait_ready(
                 }
                 // 空行，继续读取
             }
-            Ok(Err(e)) => {
+            Ok(Err(BoundedLineError::TooLong { limit })) => {
+                // 协议异常：就绪阶段 worker 输出单行超过上限
+                return Err(format!(
+                    "worker 就绪检测失败: 输出单行超过 {} 字节上限",
+                    limit
+                ));
+            }
+            Ok(Err(BoundedLineError::Io(e))) => {
                 return Err(format!("worker 就绪检测失败: read stdout: {}", e));
             }
             Err(_) => {

@@ -1,4 +1,4 @@
-# Verthys Dev Launcher
+﻿# Verthys Dev Launcher
 # Clean residual processes, verify dependencies, then start Tauri dev mode
 # Usage: .\dev.ps1
 
@@ -30,31 +30,40 @@ Write-Host ""
 # Step 0: Load MSVC build environment (root-cause fix for vswhom LNK2019)
 # 根因：build_dev.ps1 原未加载 MSVC 环境 → cl.exe 不在 PATH → cc crate 无法编译
 # vswhom-sys 的 vswhom.cpp（C++ 源） → 链接时 LNK2019:
-# vswhom_find_visual_studio_and_windows_sdk 未解析。build_production.ps1:144 已加载
-# env.load.ps1，build_dev.ps1 必须对齐，确保 npx tauri dev → cargo run 时 cc crate
-# 能找到 cl.exe（CC/CXX 均指向 cl.exe），vswhom.cpp 正确编译产出符号。
-# env.load.ps1 还设置 INCLUDE/LIB/PATH，覆盖 cc crate 的 MSVC 自动探测（vswhere/
-# 注册表探测在并行/沙箱环境中间歇性失败）。
+# vswhom_find_visual_studio_and_windows_sdk 未解析。
+#
+# 探测顺序（与 build_production.ps1 一致）：
+#   1. 外部已注入 MSVC 工具链环境（VCToolsInstallDir + INCLUDE + LIB +
+#      PATH 中的 cl.exe 就绪）→ 直接沿用；
+#   2. 否则 dot-source env.load.ps1（本地 VS 安装 + 4 个自定义环境变量，
+#      同时设置 INCLUDE/LIB/PATH 与 CC/CXX，覆盖 cc crate 的 MSVC 自动探测）。
 Write-Host "[0/5] Loading MSVC build environment..." -ForegroundColor Yellow
-$envLoadScript = Join-Path $PSScriptRoot "scripts\env.load.ps1"
-if (-not (Test-Path $envLoadScript)) {
-    Write-Host "  !! env.load.ps1 not found: $envLoadScript" -ForegroundColor Red
-    Write-Host "     vswhom-sys 将因 cl.exe 缺失而链接失败（LNK2019）" -ForegroundColor Red
-    exit 1
+if (-not [string]::IsNullOrEmpty($env:VCToolsInstallDir) -and
+    -not [string]::IsNullOrEmpty($env:INCLUDE) -and
+    -not [string]::IsNullOrEmpty($env:LIB) -and
+    (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+    Write-Host "  检测到已注入的 MSVC 工具链环境，直接沿用" -ForegroundColor Green
+} else {
+    $envLoadScript = Join-Path $PSScriptRoot "scripts\env.load.ps1"
+    if (-not (Test-Path $envLoadScript)) {
+        Write-Host "  !! env.load.ps1 not found: $envLoadScript" -ForegroundColor Red
+        Write-Host "     vswhom-sys 将因 cl.exe 缺失而链接失败（LNK2019）" -ForegroundColor Red
+        exit 1
+    }
+    # env.load.ps1 内部设置 EAP=Stop + Set-StrictMode -Version 3.0，dot-source 会污染当前
+    # 作用域。保存本脚本 EAP（SilentlyContinue），加载后恢复；StrictMode 重置为 Off
+    # （本脚本原无严格模式，避免后续 Get-Process/Get-NetTCPConnection 等误报未定义变量）。
+    $prevEAP = $ErrorActionPreference
+    . $envLoadScript
+    $ErrorActionPreference = $prevEAP
+    Set-StrictMode -Off
 }
-# env.load.ps1 内部设置 EAP=Stop + Set-StrictMode -Version 3.0，dot-source 会污染当前
-# 作用域。保存本脚本 EAP（SilentlyContinue），加载后恢复；StrictMode 重置为 Off
-# （本脚本原无严格模式，避免后续 Get-Process/Get-NetTCPConnection 等误报未定义变量）。
-$prevEAP = $ErrorActionPreference
-. $envLoadScript
-$ErrorActionPreference = $prevEAP
-Set-StrictMode -Off
-# 校验 cl.exe 确实可用（env.load 已设 CC/CXX，但 PATH 优先级需确认）
+# 校验 cl.exe 确实可用（两条路径最终都必须让 cl.exe 进入 PATH）
 $clCheck = Get-Command cl.exe -ErrorAction SilentlyContinue
 if ($clCheck) {
     Write-Host "  cl.exe available: $($clCheck.Source)" -ForegroundColor Green
 } else {
-    Write-Host "  !! cl.exe still not in PATH after env.load" -ForegroundColor Red
+    Write-Host "  !! cl.exe still not in PATH" -ForegroundColor Red
     Write-Host "     vswhom-sys LNK2019 将复发" -ForegroundColor Red
     exit 1
 }
@@ -119,13 +128,13 @@ if (Test-Path $buildErrLog) {
     Write-Host "  -> Cleaned stale build_err.log" -ForegroundColor DarkYellow
 }
 
-# 3.2 Check node_modules
+# 3.2 Check node_modules（缺失时 npm ci，以 package-lock.json 为唯一事实源）
 if (-not (Test-Path $nodeModulesDir)) {
-    Write-Host "  -> node_modules missing, running npm install..." -ForegroundColor DarkYellow
+    Write-Host "  -> node_modules missing, running npm ci..." -ForegroundColor DarkYellow
     Set-Location $projectDir
-    & npm install 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    & npm ci 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  !! npm install failed" -ForegroundColor Red
+        Write-Host "  !! npm ci failed" -ForegroundColor Red
         exit 1
     }
     Write-Host "  Dependencies installed" -ForegroundColor Green
@@ -147,11 +156,17 @@ if (-not (Test-Path $kbPatchCargo) -or -not (Test-Path $kbPatchModRs)) {
 }
 Write-Host "  keyboard-types patch OK" -ForegroundColor Green
 
-# 3.4 Ensure Cargo.lock patch is applied
-Set-Location $srcTauriDir
-& cargo update -p keyboard-types 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "  !! cargo update -p keyboard-types failed" -ForegroundColor Red
+# 3.4 Ensure Cargo.lock patch is applied（只读断言，不写锁文件）
+# [patch.crates-io] 生效标志：keyboard-types 条目无 source 字段（本地 path
+# 补丁无注册表来源）。不执行 cargo update（会改写锁文件）。
+$kbLockPath = Join-Path $srcTauriDir "Cargo.lock"
+$kbLockContent = Get-Content $kbLockPath -Raw
+$kbPatchBlock = [regex]::Match($kbLockContent,
+    '\[\[package\]\](?:(?!\[\[).)*?name = "keyboard-types".*?(?=(\r?\n\[\[package\]\])|$)',
+    [System.Text.RegularExpressions.RegexOptions]::Singleline)
+$patchConfirmed = $kbPatchBlock.Success -and $kbPatchBlock.Value -notmatch '(?m)^source\s*='
+if (-not $patchConfirmed) {
+    Write-Host "  !! keyboard-types patch not applied in Cargo.lock" -ForegroundColor Red
     exit 1
 }
 Write-Host "  Cargo.lock patch confirmed" -ForegroundColor Green

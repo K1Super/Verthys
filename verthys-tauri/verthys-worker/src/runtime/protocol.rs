@@ -48,7 +48,7 @@ pub(crate) struct Request {
     // 批量删除 ID 列表（delete_records 操作，合并为单次 flush）
     #[serde(default)]
     pub(crate) ids: Vec<u64>,
-    // ★ unlock 操作的 flags 位域（预热状态透传）
+    // unlock 操作的 flags 位域（预热状态透传）
     // 0x01 = 索引区已预热，0x02 = 允许加载持久化缓存
     #[serde(default)]
     pub(crate) flags: u32,
@@ -63,7 +63,7 @@ pub(crate) struct RecordEntry {
     pub(crate) data: String, // base64
 }
 
-/* ★ 防御闭环状态报告（与 verthys.h
+/* 防御闭环状态报告（与 verthys.h
  * VerthysSecurityStatus 字段一一对应；path_state 下标 = VerthysDefensePath，
  * 值域 = VerthysDefenseState：0=未校验 1=已阻断 2=降级 3=失败） */
 #[derive(Serialize)]
@@ -106,7 +106,7 @@ pub(crate) struct Response {
     /// 共享内存中本次返回的记录数
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) record_count: Option<u64>,
-    /* ★ 企业级根治：解锁响应内联全局主密钥探测结果
+    /* 修复：解锁响应内联全局主密钥探测结果
      *   将原本解锁后 3~4 次 IPC 往返（has_record → find_lid → get_record）
      *   下沉到 worker 解锁成功分支进程内完成，直接内联到 unlock 响应。
      *   消除前端 probe 链路竞态与 v1 容器假阴性导致的 loading 死锁。 */
@@ -119,7 +119,7 @@ pub(crate) struct Response {
     /// 全局主密钥记录数据 base64（仅 unlock 操作且 has_global_key=true 时返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) global_key_record: Option<String>,
-    /// ★ 防御闭环 7 路径状态（仅 security_status 操作返回）
+    /// 防御闭环 7 路径状态（仅 security_status 操作返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) security_status: Option<SecurityStatusReport>,
 }
@@ -146,7 +146,7 @@ impl Response {
         }
     }
     pub(crate) fn err(op: &str, code: u32) -> Self {
-        // ★ 错误码统一化（反 Oracle 设计，与 verthys.h VerthysResult 契约对齐）：
+        // 错误码统一化（反 Oracle 设计，与 verthys.h VerthysResult 契约对齐）：
         //   认证/格式/IO/损坏/内部异常统一映射为 AUTH，防止通过错误码区分
         //   "密码错误"还是"文件篡改"等信息泄露。
         //   功能性状态码按 C 层契约透传，供上层做流程决策（v1 既有 + 扩展）：
@@ -293,4 +293,42 @@ pub(crate) fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
         i += 4;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{base64_decode, base64_encode};
+
+    // 全局密钥读回验证依赖的编码契约：decode(encode(x)) == x 且
+    // encode 为无换行标准字母表——AddRecord 写入的 record base64 与
+    // GetRecord 读回重编码结果必须逐字节相等，否则落盘读回验证恒失败。
+    #[test]
+    fn base64_roundtrip_idempotent() {
+        let samples: &[&[u8]] = &[
+            b"",
+            b"a",
+            b"ab",
+            b"abc",
+            b"abcd",
+            &[0u8, 1, 2, 3, 4, 5, 6, 7],
+            &[0xFFu8; 10],
+            &[0u8; 124], // 全局密钥 record 长度
+        ];
+        for s in samples {
+            let enc = base64_encode(s);
+            assert!(!enc.contains('\n'), "输出不得含换行");
+            let dec = base64_decode(&enc).expect("decode(encode(x)) 必须成功");
+            assert_eq!(dec.as_slice(), *s, "roundtrip 字节相等");
+            assert_eq!(base64_encode(&dec), enc, "encode 幂等：重编码逐字节相等");
+        }
+    }
+
+    // 传输层容错：decode 宽容 CR/LF/空格（SHM/管道拼接场景）
+    #[test]
+    fn base64_decode_tolerates_whitespace() {
+        let enc = base64_encode(&[0xABu8; 13]);
+        let with_crlf = format!("{}\r\n{}", &enc[..8], &enc[8..]);
+        let dec = base64_decode(&with_crlf).expect("CR/LF 容错");
+        assert_eq!(dec, vec![0xABu8; 13]);
+    }
 }

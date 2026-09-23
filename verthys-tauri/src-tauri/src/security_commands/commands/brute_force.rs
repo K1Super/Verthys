@@ -6,9 +6,8 @@
  *   暴力拦截 Tauri 命令实现：
  *     - security_brute_check：检查当前是否允许尝试解锁
  *     - security_brute_record_failure：记录一次解锁失败
- *     - security_generate_auth_token：生成一次性权限令牌（要求金库已解锁）
- *     - security_brute_record_success：记录一次解锁成功（需 auth_token）
- *     - security_brute_clear_purge：清除熔断状态（需 auth_token）
+ *     - security_brute_record_success：记录一次解锁成功（需金库已解锁）
+ *     - security_brute_clear_purge：清除熔断状态（需金库已解锁）
  *     - security_brute_status：获取暴力拦截状态快照
  */
 
@@ -18,12 +17,9 @@ use crate::security::brute_force::{AttemptResult, BruteForceCheck};
 use crate::util::audit_log::{AuditEventType, AuditResult};
 
 use crate::security_commands::audit::write_security_audit;
-use crate::security_commands::auth::{
-    generate_auth_token, store_auth_token, verify_and_consume_auth_token,
-};
 use crate::security_commands::persistence::{ensure_brute_force_loaded, persist_brute_force_state};
 use crate::security_commands::responses::{
-    AuthTokenResult, BruteForceCheckResponse, BruteForceStatus, SecurityResult,
+    BruteForceCheckResponse, BruteForceStatus, SecurityResult,
 };
 use crate::security_commands::state::{lock_brute_force_or_recover, SecurityState};
 
@@ -125,84 +121,16 @@ pub fn security_brute_record_failure(
     Ok(response)
 }
 
-/// 生成一次性权限令牌
-///
-/// 前置条件：金库已解锁（KeyLifecycle 处于 Unlocked 状态）。
-/// 令牌为一次性使用，验证后立即消费。
-#[tauri::command]
-pub fn security_generate_auth_token(
-    app: tauri::AppHandle,
-    state: State<SecurityState>,
-    app_state: State<'_, crate::state::AppState>,
-) -> Result<AuthTokenResult, String> {
-    // 检查金库是否已解锁
-    let key_state = app_state.key_lifecycle.current_state();
-    if key_state != crate::state::KeyLifecycleState::Unlocked {
-        write_security_audit(
-            &app,
-            &state,
-            AuditEventType::SecurityCommand,
-            AuditResult::Denied,
-            None,
-            Some(format!(
-                "PERMISSION_DENIED: 生成权限令牌要求金库已解锁，当前状态: {}",
-                key_state.as_str()
-            )),
-        );
-        return Ok(AuthTokenResult {
-            ok: false,
-            token: None,
-            detail: "生成权限令牌要求金库已解锁".into(),
-        });
-    }
-
-    let token = generate_auth_token();
-    store_auth_token(&state, token.clone());
-
-    write_security_audit(
-        &app,
-        &state,
-        AuditEventType::SecurityCommand,
-        AuditResult::Success,
-        None,
-        Some("生成权限令牌（一次性）".into()),
-    );
-
-    Ok(AuthTokenResult {
-        ok: true,
-        token: Some(token),
-        detail: "权限令牌已生成".into(),
-    })
-}
-
 /// 记录一次解锁成功（重置连续失败计数）
 ///
-/// 要求：
-///   1. 携带有效的 auth_token（一次性消费）
-///   2. 金库处于 Unlocked 状态（防止前端无凭据调用重置计数）
+/// 授权：金库必须处于 Unlocked 状态——只有真正完成主密码验证的
+/// 会话才有资格重置计数，防止前端无凭据调用伪造解锁成功记录。
 #[tauri::command]
 pub fn security_brute_record_success(
     app: tauri::AppHandle,
     state: State<SecurityState>,
     app_state: State<'_, crate::state::AppState>,
-    auth_token: Option<String>,
 ) -> Result<SecurityResult, String> {
-    // 验证 auth_token（一次性消费）
-    if !verify_and_consume_auth_token(&state, auth_token.as_deref()) {
-        write_security_audit(
-            &app,
-            &state,
-            AuditEventType::BruteForceReset,
-            AuditResult::Denied,
-            None,
-            Some("PERMISSION_DENIED: record_success 缺少有效 auth_token".into()),
-        );
-        return Ok(SecurityResult::error(
-            "PERMISSION_DENIED",
-            "记录解锁成功需要有效授权令牌",
-        ));
-    }
-
     // 检查金库是否确实已解锁
     let key_state = app_state.key_lifecycle.current_state();
     if key_state != crate::state::KeyLifecycleState::Unlocked {
@@ -247,26 +175,32 @@ pub fn security_brute_record_success(
 
 /// 清除熔断状态（PurgeRequired 处理完成后调用）
 ///
-/// 要求：携带有效的 auth_token（一次性消费）
+/// 授权：金库必须处于 Unlocked 状态。清除熔断会重置连续失败计数，
+/// 若未经验证即可清除，攻击者可反复触发熔断后立即清除以绕过退避。
+/// 未验证场景的安全清理流程需另行提供凭证证明，不在本命令放行。
 #[tauri::command]
 pub fn security_brute_clear_purge(
     app: tauri::AppHandle,
     state: State<SecurityState>,
-    auth_token: Option<String>,
+    app_state: State<'_, crate::state::AppState>,
 ) -> Result<SecurityResult, String> {
-    // 验证 auth_token
-    if !verify_and_consume_auth_token(&state, auth_token.as_deref()) {
+    // 授权检查：仅完成主密码验证的会话可清除熔断
+    let key_state = app_state.key_lifecycle.current_state();
+    if key_state != crate::state::KeyLifecycleState::Unlocked {
         write_security_audit(
             &app,
             &state,
             AuditEventType::SecurityCommand,
             AuditResult::Denied,
             None,
-            Some("PERMISSION_DENIED: clear_purge 缺少有效 auth_token".into()),
+            Some(format!(
+                "PERMISSION_DENIED: clear_purge 要求金库已解锁，当前: {}",
+                key_state.as_str()
+            )),
         );
         return Ok(SecurityResult::error(
             "PERMISSION_DENIED",
-            "清除熔断状态需要有效授权令牌",
+            "清除熔断状态需要已解锁的会话",
         ));
     }
 

@@ -1,7 +1,7 @@
 /*
  * cache/composition/verthys-cache.ts — Verthys 缓存层（对外 API 绑定层 / 组合根）
  *
- * ★ 组合根增强设计落地：在并发重构基础上实施五项改进：
+ * 组合根增强设计落地：在并发重构基础上实施五项改进：
  *   1. 延迟初始化：domain 的创建与依赖装配收拢进 initVerthysCache()，
  *      由应用启动流程（app/bootstrap.ts）显式调用，模块加载零副作用，
  *      杜绝"模块求值期依赖未就绪"的初始化时序隐患
@@ -22,7 +22,7 @@
  *   4. 摘要缓存 summaryCache（第一层：常驻内存，永久存在）
  *   5. 全量记录缓存 fullRecordCache（第二层：LRU-50，按需加载，永不截断）
  *
- * ★ 组合根装配关系（initVerthysCache 内完成，仅此一处）：
+ * 组合根装配关系（initVerthysCache 内完成，仅此一处）：
  *   - 注入 VerthysCacheApi 适配器（lib/verthys 真实 IPC → 领域接口，依赖倒置）
  *   - 注入 KeyStateForCache 适配（keyState.moduleKeyReady 最小接口）
  *   - 注入与 verthys-flush-service 共享的 pendingDeletionIds / committedDeletionIds
@@ -32,19 +32,19 @@
  *   - 经 domain.registerSnapshotProvider() 注册快照提供者：flush 删除
  *     校验经 LRU peek 读取扫描缓存快照
  *
- * ★ 模块依赖关系（单向化后）：
+ * 模块依赖关系（单向化后）：
  *   verthys-cache.ts → verthys-flush.ts（共享删除集合 + re-export flush API，单向）
  *   verthys-cache.ts → verthys-cache-domain.ts（组合根装配领域类，单向）
  *   verthys-cache.ts → core/background-tasks.ts（仅导入 stopBackgroundTasks 钩子）
  *   background-tasks.ts → verthys-cache.ts（ensureRecordScan/prefetchFullRecords
  *     等访问器，仅运行时调用）
- *   ★ 残余双向边（verthys-cache ↔ background-tasks）安全性：双方均仅在
+ *   残余双向边（verthys-cache ↔ background-tasks）安全性：双方均仅在
  *     运行时（函数调用时）访问对方导出，无模块求值期访问；ES Module
  *     live binding + 本文件"加载零副作用 + 调用前已初始化"保证安全。
  *     公共 API 面已消除循环：start/stop 由 background-tasks 自行导出，
  *     消费方直接导入，不再经本文件转发。
  *
- * ★ 初始化契约：
+ * 初始化契约：
  *   - initVerthysCache() 幂等，由 MainView.onBeforeMount 调用（v3 懒加载
  *     架构修复：bootstrap 静态导入会将业务层拖入 index 主包 — 已迁出；
  *     父先于子挂载时序保证先于全部子组件消费方）；
@@ -70,14 +70,14 @@ import {
   pendingDeletionIds,
   committedDeletionIds,
 } from "./verthys-flush";
-// ★ 仅注入停止钩子（clearAllVerthysCaches 前置等待后台任务终止）；
+// 仅注入停止钩子（clearAllVerthysCaches 前置等待后台任务终止）；
 //   startBackgroundTasks 不再由本文件导入或转发
 import { stopBackgroundTasks } from "../../core/background-tasks";
 import { createLogger } from "../../utils/logger";
 
 const log = createLogger("verthys-cache");
 
-// ★ re-export flush 队列 API（统一冲刷队列服务）
+// re-export flush 队列 API（统一冲刷队列服务）
 export {
   persistVerthys,
   deleteAndPersist,
@@ -140,14 +140,14 @@ export function initVerthysCache(): void {
     getRecord: verthysGetRecord,
   };
 
-  // ★ 接口隔离：领域层仅依赖 moduleKeyReady 读写，
+  // 接口隔离：领域层仅依赖 moduleKeyReady 读写，
   //   以最小接口适配，不暴露完整 KeyState（Vue 响应式状态与实现解耦）
   const keyStateForCache: KeyStateForCache = {
     moduleKeyReady: keyState.moduleKeyReady,
   };
 
   domain = new VerthysCacheDomain(verthysApi, keyStateForCache, getCurrentVerthysPath, {
-    // ★ 共享删除过滤集合（与 VerthysFlushService 同一实例，单一权威源）
+    // 共享删除过滤集合（与 VerthysFlushService 同一实例，单一权威源）
     pendingDeletionIds,
     committedDeletionIds,
     // 后台预加载中止钩子（lockAll / resetFlushChain 触发）
@@ -156,7 +156,7 @@ export function initVerthysCache(): void {
     stopBackgroundTasks,
   });
 
-  // ★ 注册快照提供者（领域内部封装），
+  // 注册快照提供者（领域内部封装），
   //    供 verthys-flush 的 deleteAndPersist 进行 ID 复用校验。
   //    经 LRU peek 只读访问 recordScanCache（不扰动 recency），
   //    避免 verthys-flush ↔ verthys-cache 循环导入。
@@ -176,7 +176,7 @@ function ensureDomain(): VerthysCacheDomain {
 /* ------------------------------------------------------------------ *
  * 对外 API 绑定（签名与旧版逐一对应）                                  *
  *                                                                    *
- * ★ 全部导出改为显式包装函数并标注返回类型，                       *
+ * 全部导出改为显式包装函数并标注返回类型，                       *
  *   彻底避免 .bind 绑定造成的泛型擦除与重载签名类型推断丢失；         *
  *   每次调用经 ensureDomain() 守卫，未初始化 fail-fast。              *
  * ------------------------------------------------------------------ */

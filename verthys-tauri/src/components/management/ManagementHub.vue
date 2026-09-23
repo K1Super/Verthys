@@ -308,7 +308,7 @@ let avgFrameMs = 16.7;
 /** 上一许可帧墙钟（首帧守卫 — 首帧增量为 0） */
 let lastWallClock = -1;
 
-/* ★ G-8 统一帧门控（useFrameGate → 主渲染循环注册层）：帧率档位由
+/* G-8 统一帧门控（useFrameGate → 主渲染循环注册层）：帧率档位由
    全局空闲状态机唯一决定（active 60 / settling 30 / idle 5 /
    deep-idle 1 fps），帧步进由主循环供给（钳制 50ms），墙钟增量
    供相位与进度；本引擎不再维护私有空闲判定、visibilitychange
@@ -375,15 +375,17 @@ let nextPacketAt = 1.8;
 /** 光点贴图（预渲染径向渐变，一次分配） */
 let sprite: HTMLCanvasElement | null = null;
 
-/* ===== 指针交互（单帧响应：直写目标，rAF 帧内积分消费） ===== */
+/* ===== 指针交互（单帧响应：直写目标，rAF 帧内积分消费）
+ * 面板左缘/顶缘在 layout() 里一次性缓存：pointermove 事件路径零布局读取，
+ * 避免与 frame() 逐帧 CSS 变量写入叠加触发同步样式重算（WebView2 卡死源）。 */
+let panelLeft = 0;
+let panelTop = 0;
 function onPointerMove(e: PointerEvent): void {
-  const r = panelRef.value?.getBoundingClientRect();
-  if (!r) return;
-  cursorX = e.clientX - r.left;
-  cursorY = e.clientY - r.top;
+  cursorX = e.clientX - panelLeft;
+  cursorY = e.clientY - panelTop;
   cursorOn = true;
-  parallaxX.target = ((cursorX / Math.max(r.width, 1)) - 0.5) * 2;
-  parallaxY.target = ((cursorY / Math.max(r.height, 1)) - 0.5) * 2;
+  parallaxX.target = ((cursorX / Math.max(width, 1)) - 0.5) * 2;
+  parallaxY.target = ((cursorY / Math.max(height, 1)) - 0.5) * 2;
 }
 
 function onPointerLeave(): void {
@@ -455,6 +457,8 @@ function layout(): void {
   minDim = Math.min(width, height) || 1;
   dpr = Math.min(window.devicePixelRatio || 1, 2);
   sizeOk = width >= 10 && height >= 10;
+  panelLeft = rect.left;
+  panelTop = rect.top;
 
   /* 单元占局缩小（~75%）：尺寸上限 196→148、下限 148→112、宽度占比
    * 0.24→0.18 —— 单元更精巧，单元间/四周留白增大，空白点击返回
@@ -502,7 +506,7 @@ function filPoint(k: number, t: number, out: Float64Array): void {
 const unitEls: Array<HTMLElement | null> = [];
 const pt = new Float64Array(2);
 
-/* ★ SVG 丝线元素缓存（dashoffset rAF 驱动；onMounted 收集一次） */
+/* SVG 丝线元素缓存（dashoffset rAF 驱动；onMounted 收集一次） */
 let tetherEl: SVGPathElement | null = null;
 const satLinkEls: SVGPathElement[] = [];
 
@@ -704,7 +708,7 @@ function frame(frameStep: number, wallClock: number): void {
     completePending = true;
   }
 
-  /* ---- ★ SVG 丝线 dashoffset rAF 驱动（原 CSS infinite 动画迁移） ----
+  /* ---- SVG 丝线 dashoffset rAF 驱动（原 CSS infinite 动画迁移） ----
      状态语义流动随全局空闲档位自动降频；
      相位由墙钟累积时间计算，跳帧不产生相位跳变。 */
   const tetherOwner = unitEls[0];
@@ -725,7 +729,7 @@ function frame(frameStep: number, wallClock: number): void {
   }
 }
 
-/* ★ G-8：rAF 调度/空闲门控/失焦暂停全部由 useFrameGate 承担，
+/* G-8：rAF 调度/空闲门控/失焦暂停全部由 useFrameGate 承担，
    档位与恢复时机与全局各引擎一致。 */
 const { start: startGate, stop: stopGate } = useFrameGate(idleLevel, frame);
 
@@ -752,7 +756,7 @@ onMounted(() => {
   unitEls.length = 0;
   unitEls.push(u1Ref.value, u2Ref.value, u3Ref.value);
 
-  /* ★ SVG 丝线缓存（dashoffset rAF 驱动元素，一次收集） */
+  /* SVG 丝线缓存（dashoffset rAF 驱动元素，一次收集） */
   tetherEl = u1Ref.value?.querySelector('.mh-tether') ?? null;
   satLinkEls.length = 0;
   u2Ref.value?.querySelectorAll('.mh-satLink').forEach((el) => {
@@ -762,7 +766,7 @@ onMounted(() => {
   layout();
   resizeObserver = new ResizeObserver(layout);
   resizeObserver.observe(panelRef.value!);
-  /* ★ 入场编排按满帧渲染：挂载即交互（resetIdle），
+  /* 入场编排按满帧渲染：挂载即交互（resetIdle），
      错峰入场全程 60fps 不降档 */
   resetIdle();
   startGate();

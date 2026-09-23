@@ -32,7 +32,7 @@ int keymanager_derive_master(uint8_t master_key[VERTHYS_KEY_BYTES],
     if (master_key == NULL || salt == NULL) return -1;
     if (password == NULL && pw_len != 0) return -1;
 
-    /* ★ 胡椒托管框架：从 verthys_pepper 模块获取当前生效的胡椒
+    /* 胡椒托管框架：从 verthys_pepper 模块获取当前生效的胡椒
      *（优先级：注入 > OS 托管(CNG/TPM) > 编译内嵌兜底）
      * 胡椒模块在 Verthys_Init 时初始化，此处保证已就绪。 */
     /* 返回码约定：0 成功 / -1 通用失败 / -2 pepper 来源错误，
@@ -59,7 +59,7 @@ int keymanager_derive_master(uint8_t master_key[VERTHYS_KEY_BYTES],
     return rc;
 }
 
-/* ★ 企业级优化：完全参数化的主密钥派生
+/* 优化：完全参数化的主密钥派生
  *
  * 与 keymanager_derive_master 相同，但 Argon2id 参数由调用方传入，
  * 支持从超级块读取实际参数（BALANCED 32MiB/2/1 / SECURE 64MiB/3/1）。
@@ -85,7 +85,7 @@ int keymanager_derive_master_ex(uint8_t master_key[VERTHYS_KEY_BYTES],
     if (iters < 1u) return -1;
     if (parallel < 1u || parallel > 64u) return -1;
 
-    /* ★ 胡椒托管框架：与 keymanager_derive_master 共用 */
+    /* 胡椒托管框架：与 keymanager_derive_master 共用 */
     /* 返回码约定：0 成功 / -1 通用失败 / -2 pepper 来源错误，
      * 上层据此映射 VERTHYS_ERR_PEPPER_SOURCE（区别于密码错误）。 */
     if (verthys_pepper_init() != 0) {
@@ -279,7 +279,7 @@ void keymanager_generate_mount_salt(uint8_t mount_salt[VERTHYS_KEY_BYTES])
  * V3 域分离派生实现（解锁流水线 S2）                                     *
  * ===================================================================== */
 
-/* V3 域分离标签（与 V1/V2 严格隔离） */
+/* V3 域分离标签 */
 static const char INFO_MASTER_KEY_V3[]     = "verthys/master-key-v3";
 static const char INFO_INTEGRITY_KEY_V3[]  = "verthys/integrity-key-v3";
 

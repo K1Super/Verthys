@@ -76,6 +76,5 @@ const { onMinimize, onToggleMax, onClose, onDragRegionMouseDown } = useWindowCon
   color: #fff;
   background: rgba(255, 46, 99, 0.5);
   border-color: rgba(255, 46, 99, 0.4);
-  box-shadow: 0 0 10px rgba(255, 46, 99, 0.2);
 }
 </style>

@@ -1,7 +1,7 @@
 /*
  * syscall_direct.h — 直接系统调用 stub（内部模块，不导出）
  *
- * ★ 关键防御检测器绕过
+ * 关键防御检测器绕过
  *   用户态 API Hook（IAT/EAT/Inline）。P4（API Hook）路径的目标态
  *   判据之一：检测器查询不再经过可被用户态 Hook 拦截的 ntdll 导出。
  *

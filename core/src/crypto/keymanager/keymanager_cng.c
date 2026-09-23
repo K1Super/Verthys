@@ -73,7 +73,7 @@ static VerthysResult import_wrapped_role(VerthysCngKeyManager *km,
                                        const uint8_t *wrapped,
                                        uint32_t wrapped_len)
 {
-    /* ★ 红线：解包输出缓冲栈上分配 + 导入后立即清零 */
+    /* 红线：解包输出缓冲栈上分配 + 导入后立即清零 */
     uint8_t key_material[VERTHYS_CNG_KEY_BYTES];
     size_t  key_len = sizeof(key_material);
     uint8_t aad[17];
@@ -235,10 +235,15 @@ VerthysResult verthys_cng_km_wrap_key(
     return VERTHYS_OK;
 }
 
+/*
+ * REKEYING 语义为新旧句柄共存：在途期旧句柄仍驻留可读，轮换内部的
+ * 重包装步骤按此依赖放行；仅 UNINITIALIZED / DERIVED / DESTROYED 拒绝。
+ */
 VerthysCngAead *verthys_cng_km_get(VerthysCngKeyManager *km, VerthysCngKeyRole role)
 {
     if (km == NULL || role < 0 || role >= VERTHYS_CNG_KEY_COUNT) return NULL;
-    if (km->state != VERTHYS_CNG_KM_KERNEL_RESIDENT) return NULL;
+    if (km->state != VERTHYS_CNG_KM_KERNEL_RESIDENT &&
+        km->state != VERTHYS_CNG_KM_REKEYING) return NULL;
     if (!verthys_cng_aead_is_imported(&km->keys[role])) return NULL;
     return &km->keys[role];
 }
@@ -466,7 +471,8 @@ VerthysResult verthys_cng_km_rotate_abc(
     if (km == NULL || new_a == NULL || new_b == NULL || new_c == NULL) {
         return VERTHYS_ERR_INVALID;
     }
-    if (km->state != VERTHYS_CNG_KM_KERNEL_RESIDENT) {
+    if (km->state != VERTHYS_CNG_KM_KERNEL_RESIDENT &&
+        km->state != VERTHYS_CNG_KM_REKEYING) {
         verthys_cng_aead_destroy(new_a);   /* 消耗语义：失败同样接管 */
         verthys_cng_aead_destroy(new_b);
         verthys_cng_aead_destroy(new_c);
@@ -506,6 +512,11 @@ VerthysResult verthys_cng_km_rotate_abc(
      *    未曾计入——此处在 km/全局两侧补记，维持"总量 = 实际句柄数"） */
     km->handle_count += 3;
     InterlockedAdd(&s_kernel_handle_total, 3);
+
+    /* 4. 轮换终态化：切换完成即恢复常态（本函数为 REKEYING 的状态
+     *    收尾点；切换内无可失败操作，失败出口在守卫处已恢复调用方
+     *    所期望的零变更语义） */
+    km->state = VERTHYS_CNG_KM_KERNEL_RESIDENT;
     return VERTHYS_OK;
 }
 

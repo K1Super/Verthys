@@ -2933,7 +2933,6 @@ where
                         // sheet). If a default namespace has been declared,
                         // such selectors will represent only elements in the
                         // default namespace.
-                        // -- Selectors § 6.1.1
                         // So we'll have this act the same as the
                         // QNamePrefix::ImplicitAnyNamespace case.
                         None => {},

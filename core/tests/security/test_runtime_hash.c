@@ -21,6 +21,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <stdint.h>             /* uintptr_t（_beginthreadex 返回值的句柄强转） */
 #include <string.h>
 #include <stdlib.h>
 
@@ -142,5 +143,145 @@ TEST(rhat_verify_periodic_clean_state)
     runtime_hash_verify();                  /* 全量（无失配 → 无应急） */
     runtime_hash_verify_periodic();         /* 首调：立即全量 */
     runtime_hash_verify_periodic();         /* 窗口内：时间门控直接返回 */
+    return 0;
+}
+
+/* ===================================================================== *
+ *  7. overlay 并发安装 + 扫描单飞互斥                                   *
+ * ===================================================================== */
+
+/* 并发段目标：8 个行为各异的私有点函数（编译期防 ICF 合并），
+ * 内容恒定——scan 对任一已安装条目的期望失配恒为 0。 */
+static int rhat_conc_t0(int x) { volatile int v = x * 3 + 11;  return v; }
+static int rhat_conc_t1(int x) { volatile int v = x * 5 + 17;  return v; }
+static int rhat_conc_t2(int x) { volatile int v = x * 7 + 23;  return v; }
+static int rhat_conc_t3(int x) { volatile int v = x * 11 + 29; return v; }
+static int rhat_conc_t4(int x) { volatile int v = x * 13 + 31; return v; }
+static int rhat_conc_t5(int x) { volatile int v = x * 17 + 37; return v; }
+static int rhat_conc_t6(int x) { volatile int v = x * 19 + 41; return v; }
+static int rhat_conc_t7(int x) { volatile int v = x * 23 + 43; return v; }
+
+#define RH_CONC_TARGETS  8u
+#define RH_CONC_SPAN     32u   /* 覆盖函数体（超出即读同节相邻字节，无碍） */
+#define RH_CONC_NEED     3u    /* 单安装线程最低成功次数（成功后提前退出） */
+#define RH_CONC_MAX_TRY  400   /* 单安装线程尝试上限（防扫描长窗口饿死） */
+#define RH_CONC_SCANS    150   /* 扫描线程周期数 */
+
+/*
+ * 跨线程共享状态：错误仅原子累计（多线程下禁用 CHECK 立即返回），
+ * 安装返回码三分：0=成功、-1=单飞忙碌（调用方重试语义，合法）、
+ * 其余=未预期错误。扫描恒期望 0 失配（锁纪律下表不撕裂）。
+ */
+typedef struct RhConcState {
+    volatile LONG scan_errs;    /* 扫描非零失配次数（撕裂/误报证据） */
+    volatile LONG install_ok;   /* 安装成功次数 */
+    volatile LONG install_busy; /* 安装返回 -1 次数（单飞竞争） */
+    volatile LONG install_err;  /* 安装异常返回次数 */
+} RhConcState;
+
+static const unsigned char *rh_conc_target_addr(unsigned i)
+{
+    static const unsigned char *targets[RH_CONC_TARGETS] = {
+        (const unsigned char *)&rhat_conc_t0, (const unsigned char *)&rhat_conc_t1,
+        (const unsigned char *)&rhat_conc_t2, (const unsigned char *)&rhat_conc_t3,
+        (const unsigned char *)&rhat_conc_t4, (const unsigned char *)&rhat_conc_t5,
+        (const unsigned char *)&rhat_conc_t6, (const unsigned char *)&rhat_conc_t7,
+    };
+    return targets[i % RH_CONC_TARGETS];
+}
+
+/* 安装线程：循环安装轮换目标（与扫描线程竞争 s_hbuf / s_overlay 共享区）。
+ * 扫描单次耗时长（重定位收集 + 排序），失败尝试开销极小——纯固定次数
+ * 尝试会全部落入同一段扫描独占窗口（饿死）。改为"成功计数 + 尝试上限 +
+ * 交替短让出"：长窗口内等待，扫描排空间隙即获锁。 */
+static unsigned __stdcall rh_conc_installer(void *arg)
+{
+    RhConcState *st = (RhConcState *)arg;
+    unsigned i;
+    LONG got = 0;
+
+    for (i = 0; i < RH_CONC_MAX_TRY; i++) {
+        int rc = runtime_hash_test_install(rh_conc_target_addr(i), RH_CONC_SPAN);
+        if (rc == 0) {
+            InterlockedIncrement(&st->install_ok);
+            if (InterlockedIncrement(&got) >= (LONG)RH_CONC_NEED) break;
+        } else if (rc < 0) {
+            InterlockedIncrement(&st->install_busy);
+        } else {
+            InterlockedIncrement(&st->install_err);
+        }
+        Sleep((i & 1u) ? 1 : 0);   /* 交替 0/1ms 让出，给扫描留排空窗口 */
+    }
+    return 0;
+}
+
+/* 扫描线程：循环全量扫描断言零失配（并发安装不得致表撕裂） */
+static unsigned __stdcall rh_conc_scanner(void *arg)
+{
+    RhConcState *st = (RhConcState *)arg;
+    unsigned i;
+
+    for (i = 0; i < RH_CONC_SCANS; i++) {
+        int mm = runtime_hash_scan();
+        if (mm != 0) InterlockedIncrement(&st->scan_errs);
+        Sleep(0);
+    }
+    return 0;
+}
+
+/*
+ * 主测试：串行预装 8 条自基线 → 两安装线程 + 一扫描线程并发 →
+ * join → 表清空 → 统一断言（先完成全部操作与清理，再判定）。
+ * 绿态：扫描零失配、安装仅 0/-1、至少一次成功；红态（无单飞锁）：
+ * s_hbuf 双写撕裂使存储基线失真，扫描间歇性非零失配（概率性，多轮缓解）。
+ */
+TEST(rhat_overlay_concurrent_install_scan)
+{
+    RhConcState st;
+    HANDLE threads[3];
+    DWORD wr;
+    int pre_fail = 0;
+    int final_mm = 0;
+    int post_mm = 0;
+    unsigned i;
+
+    memset(&st, 0, sizeof(st));
+
+    for (i = 0; i < RH_CONC_TARGETS; i++) {
+        if (runtime_hash_test_install(rh_conc_target_addr(i), RH_CONC_SPAN) != 0) {
+            pre_fail = 1;
+        }
+    }
+
+    threads[0] = (HANDLE)(uintptr_t)_beginthreadex(NULL, 0, rh_conc_installer, &st, 0, NULL);
+    threads[1] = (HANDLE)(uintptr_t)_beginthreadex(NULL, 0, rh_conc_installer, &st, 0, NULL);
+    threads[2] = (HANDLE)(uintptr_t)_beginthreadex(NULL, 0, rh_conc_scanner, &st, 0, NULL);
+    if (threads[0] == NULL || threads[1] == NULL || threads[2] == NULL) {
+        /* 收口：关闭已创建句柄并清表（线程未创建即无残存） */
+        for (i = 0; i < 3; i++) {
+            if (threads[i] != NULL) CloseHandle(threads[i]);
+        }
+        runtime_hash_test_clear();
+        printf("  [FAIL] thread creation failed\n");
+        return 1;
+    }
+
+    wr = WaitForMultipleObjects(3, threads, TRUE, INFINITE);
+    CloseHandle(threads[0]);
+    CloseHandle(threads[1]);
+    CloseHandle(threads[2]);
+
+    final_mm = runtime_hash_scan();
+    runtime_hash_test_clear();
+    post_mm = runtime_hash_scan();
+
+    /* ---- 收口后统一断言 ---- */
+    CHECK_EQ(pre_fail, 0);
+    CHECK_EQ(wr, WAIT_OBJECT_0);
+    CHECK_EQ((long)st.install_err, 0);
+    CHECK((long)st.install_ok >= (long)RH_CONC_NEED);   /* 并发下安装可达 */
+    CHECK_EQ((long)st.scan_errs, 0);
+    CHECK_EQ(final_mm, 0);
+    CHECK_EQ(post_mm, 0);
     return 0;
 }

@@ -6,6 +6,8 @@ description = "CI 第二级：AST 深度分析工具 — \"CI静态校验双引�
 
 [dependencies]
 syn = { version = "2", features = ["full", "parsing", "visit", "extra-traits"] }
+# span-locations 提供 Span::start/end 行号定位（违规报告需要）
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 walkdir = "2"
 regex = "1"
 quote = "1"

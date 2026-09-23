@@ -620,7 +620,11 @@ VerthysResult vsb_v3_read_quorum(FILE *f,
 
     if (valid_count == 0) return VERTHYS_ERR_CORRUPT;
 
-    /* 2. txid 分组：取 ≥2 一致中的最高 txid */
+    /* 2. 分组：取 ≥2 副本一致中的最高 txid。一致 = txid 相等且解析
+     *    内容逐字节相同——各副本 HMAC 只保证单副本自洽，不保证副本间
+     *    一致；同 txid 异内容（撕裂写入/非法重放）仅按 txid 放行会
+     *    静默选错，须整体比对兜底（parse 已 memset 定长结构，padding
+     *    确定为零，memcmp 无废弃位噪声） */
     {
         int chosen = -1;
         uint64_t chosen_txid = 0;
@@ -628,7 +632,10 @@ VerthysResult vsb_v3_read_quorum(FILE *f,
             if (!valid[i]) continue;
             unsigned agree = 0;
             for (unsigned j = 0; j < VERTHYS_V3_SB_REPLICA_COUNT; j++) {
-                if (valid[j] && parsed[j].txid == parsed[i].txid) agree++;
+                if (!valid[j]) continue;
+                if (parsed[j].txid != parsed[i].txid) continue;
+                if (memcmp(&parsed[j], &parsed[i], sizeof(parsed[j])) != 0) continue;
+                agree++;
             }
             if (agree >= 2 && (chosen < 0 || parsed[i].txid > chosen_txid)) {
                 chosen = (int)i;

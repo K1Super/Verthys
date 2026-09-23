@@ -15,7 +15,7 @@
  * 语义约定：
  *   - 计数与 DPAPI 持久化、审计行为与 security_brute_record_failure /
  *     security_brute_record_success 命令完全一致（同一守卫、同一持久化层），
- *     区别仅在调用方为服务端自身，无需 auth_token 授权。
+ *     区别仅在调用方为服务端自身，无需会话授权检查。
  *   - 桥接层不做二次决策：record_failure 的 RateLimited/Frozen 语义
  *     由守卫内部消化，仅透传审计。
  */
@@ -125,7 +125,7 @@ pub(crate) fn record_auth_failure(app: &AppHandle, state: &SecurityState) {
 /// 记录一次服务端观察到的口令验证成功：重置连续失败计数。
 ///
 /// 调用前提：响应 ok=true（服务端已在响应中确认成功，
-/// 无需 auth_token 授权——与前端命令版的授权要求不同）。
+/// 无需会话授权检查——与前端命令版的授权要求不同）。
 pub(crate) fn record_auth_success(app: &AppHandle, state: &SecurityState) {
     ensure_brute_force_loaded(app, state);
 

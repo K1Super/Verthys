@@ -338,16 +338,6 @@ pub fn parse_config(args: &[String]) -> VerthysResult<StartupConfig> {
     Ok(config)
 }
 
-/// 兼容旧接口：parse_config_legacy 返回 ContextConfig
-///
-/// 保留以兼容现有调用点。
-/// 内部调用 parse_config 后转换为 ContextConfig。
-/// 后续统一迁移至 parse_config，删除此方法。
-pub fn parse_config_legacy(args: &[String]) -> VerthysResult<ContextConfig> {
-    let startup = parse_config(args)?;
-    Ok(ContextConfig::from_startup(&startup))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

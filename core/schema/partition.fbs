@@ -1,8 +1,5 @@
 // core/schema/partition.fbs — V3 分区表 schema（分区独立认证）
 //
-// 设计依据：docs/TARGET_ARCHITECTURE_V5.md §6.2（分区表区）/ §6.4（分区管理）
-// 落地依据：docs/V3_UPGRADE_PLAYBOOK.md WP-2
-//
 // 持久化语义：
 //   - 分区表整体经 AEAD 加密落盘（帧布局见 verthys_partition.h），
 //     帧内为PartitionTableV3 的 FlatBuffers 编码；

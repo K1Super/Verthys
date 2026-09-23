@@ -1,7 +1,7 @@
 /**
  * composables/photo-album/importPipeline.ts — 照片导入三阶段异步流水线
  *
- * ★ Comprehensive_optimization：异步批处理流水线 — 核心编排器
+ * Comprehensive_optimization：异步批处理流水线 — 核心编排器
  *
  * =============================================================================
  * 架构：三阶段完全解耦流水线
@@ -241,7 +241,7 @@ export class ImportPipeline {
             `elapsed=${batchElapsed.toFixed(1)}ms`,
         );
 
-        // ★ 让出主线程：IPC 完成后 yieldToMain，保证 rAF 进度回调执行
+        // 让出主线程：IPC 完成后 yieldToMain，保证 rAF 进度回调执行
         await yieldToMain();
       } catch (e) {
         const error = e instanceof Error ? e.message : String(e);
@@ -279,7 +279,7 @@ export class ImportPipeline {
         }
       };
 
-      // ★ P0+P1 修复：生产者并行化 + yieldToMain 让出主线程
+      // P0+P1 修复：生产者并行化 + yieldToMain 让出主线程
       //
       // 根因：旧实现 for 循环内 await readBytes() 串行读取，主线程被永久阻塞，
       //       requestAnimationFrame 回调被挤压在任务队列末尾，进度条冻结。
@@ -317,7 +317,7 @@ export class ImportPipeline {
             log.error(`读取文件失败: ${fileInput.name}`, e);
             failed++;
             this.progress.update(1, 0);
-            // ★ 让出主线程，保证 rAF 执行
+            // 让出主线程，保证 rAF 执行
             await yieldToMain();
             continue;
           }
@@ -332,7 +332,7 @@ export class ImportPipeline {
           const submitTime = performance.now();
 
           // 提交到 Worker 池（传输器阶段，自带背压）
-          // ★ 不 await submit()：让加密与下一次文件读取并行（真正的流水线）
+          // 不 await submit()：让加密与下一次文件读取并行（真正的流水线）
           const submitPromise = photoWorkerPool
             .submit({
               fileName: fileInput.name,
@@ -351,7 +351,7 @@ export class ImportPipeline {
                 return;
               }
 
-              // ★ 逐文件进度更新：文件加密完成即推进进度
+              // 逐文件进度更新：文件加密完成即推进进度
               //   旧实现仅在 IPC 批次完成后更新 → 加密期间进度条冻结
               //   新实现：per-file update → 用户实时感知「正在加密第 N 张」
               this.progress.update(1, fileElapsed);
@@ -364,7 +364,7 @@ export class ImportPipeline {
                 data_b64: success.metaB64,
               };
 
-              // ★ 竞态修复：buffer 已满时仅第一个回调触发 flush，后续回调跳过
+              // 竞态修复：buffer 已满时仅第一个回调触发 flush，后续回调跳过
               //  JS 单线程 + splice 原子清空保证数据不丢失，此处避免冗余 inflightBatches 操作
               consumerBuffer.push(record);
               consumerResults.push(success);
@@ -372,7 +372,7 @@ export class ImportPipeline {
               // 达到消费者批量大小，触发 IPC 写入
               if (consumerBuffer.length >= this.config.consumerBatchSize) {
                 await waitForInflightSlot();
-                // ★ 二次检查：await 期间 buffer 可能已被其他回调 flush 清空
+                // 二次检查：await 期间 buffer 可能已被其他回调 flush 清空
                 //  若已清空，直接返回（不占用 inflightBatches slot，避免负数）
                 if (consumerBuffer.length === 0) {
                   return;
@@ -397,7 +397,7 @@ export class ImportPipeline {
 
           submitPromises.push(submitPromise);
 
-          // ★ P0 核心：每处理 N 个文件后 yieldToMain，强制让出主线程
+          // P0 核心：每处理 N 个文件后 yieldToMain，强制让出主线程
           //   保证 requestAnimationFrame 回调（进度条渲染）得到执行机会
           //   这是让进度条「真正动起来」的唯一解
           filesSinceYield++;
@@ -469,7 +469,7 @@ export class ImportPipeline {
   }
 
   /**
-   * ★ Parsed Import：执行 .venc 解析照片的导入流水线
+   * Parsed Import：执行 .venc 解析照片的导入流水线
    *
    * 与 run() 的区别：
    *   - 输入：ParsedPhotoPreview[]（已解密的 meta + 已加密的 chunks）
@@ -577,7 +577,7 @@ export class ImportPipeline {
             `elapsed=${batchElapsed.toFixed(1)}ms`,
         );
 
-        // ★ 让出主线程：IPC 完成后 yieldToMain，保证 rAF 进度回调执行
+        // 让出主线程：IPC 完成后 yieldToMain，保证 rAF 进度回调执行
         await yieldToMain();
       } catch (e) {
         const error = e instanceof Error ? e.message : String(e);
@@ -615,7 +615,7 @@ export class ImportPipeline {
         }
       };
 
-      // ★ 并发生产者：从共享索引拉取已解析照片 → 构造新 meta → 提交到 Worker 池 → yieldToMain
+      // 并发生产者：从共享索引拉取已解析照片 → 构造新 meta → 提交到 Worker 池 → yieldToMain
       //
       // 与 run() 的区别：
       //   1. 输入是 ParsedPhotoPreview（已解密 meta + 已加密 chunks），无需读取文件
@@ -641,7 +641,7 @@ export class ImportPipeline {
 
           const ph = parsedPhotos[i];
 
-          // ★ 仅处理 meta 非 null 的照片（同设备导入：chunks 已用当前 photoKey 加密）
+          // 仅处理 meta 非 null 的照片（同设备导入：chunks 已用当前 photoKey 加密）
           //   meta 为 null 的照片（不同设备导入）跳过，由调用方在内存中保留
           if (!ph.meta) {
             failed++;
@@ -665,7 +665,7 @@ export class ImportPipeline {
           const submitTime = performance.now();
 
           // 提交到 Worker 池（meta-only 加密，自带背压）
-          // ★ 不 await submitMetaOnly()：让加密与下一次构造并行（真正的流水线）
+          // 不 await submitMetaOnly()：让加密与下一次构造并行（真正的流水线）
           const submitPromise = photoWorkerPool
             .submitMetaOnly({
               meta: newMeta,
@@ -683,7 +683,7 @@ export class ImportPipeline {
                 return;
               }
 
-              // ★ 逐文件进度更新：meta 加密完成即推进进度
+              // 逐文件进度更新：meta 加密完成即推进进度
               this.progress.update(1, fileElapsed);
 
               // 构造 BatchRecordInput
@@ -694,7 +694,7 @@ export class ImportPipeline {
                 data_b64: success.metaB64,
               };
 
-              // ★ 竞态修复：buffer 已满时仅第一个回调触发 flush，后续回调跳过
+              // 竞态修复：buffer 已满时仅第一个回调触发 flush，后续回调跳过
               consumerBuffer.push(record);
               consumerResults.push({
                 name: success.name,
@@ -706,7 +706,7 @@ export class ImportPipeline {
               // 达到消费者批量大小，触发 IPC 写入
               if (consumerBuffer.length >= this.config.consumerBatchSize) {
                 await waitForInflightSlot();
-                // ★ 二次检查：await 期间 buffer 可能已被其他回调 flush 清空
+                // 二次检查：await 期间 buffer 可能已被其他回调 flush 清空
                 if (consumerBuffer.length === 0) {
                   return;
                 }
@@ -730,7 +730,7 @@ export class ImportPipeline {
 
           submitPromises.push(submitPromise);
 
-          // ★ P0 核心：每处理 N 个照片后 yieldToMain，强制让出主线程
+          // P0 核心：每处理 N 个照片后 yieldToMain，强制让出主线程
           //   保证 requestAnimationFrame 回调（进度条渲染）得到执行机会
           filesSinceYield++;
           if (filesSinceYield >= this.config.producerYieldInterval) {

@@ -16,6 +16,11 @@
 #define VERTHYS_BACKOFF_MAX_SECS 3600u
 #define VERTHYS_READ_FILE_MAX_BYTES ((size_t)4u * 1024u * 1024u * 1024u)
 
+/* 工作线程汇合超时（毫秒）：Deinit/Lock 等待后台线程退出（预热/进度消费）
+ * 的有界上限。超时后放弃等待并继续生命周期流程，残存线程由进程退出统一
+ * 回收——避免阻塞点被外部卡死时 Deinit/Lock 永久挂起。 */
+#define VERTHYS_JOIN_TIMEOUT_MS 3000u
+
 /* ---------- 全局变量（自 verthys_api.c 迁移） ---------- */
 extern int g_has_avx2;
 
@@ -28,6 +33,15 @@ uint64_t verthys_monotonic_ms(void);
 uint64_t verthys_backoff_remaining_ms(void);
 void verthys_backoff_record_failure(void);
 void verthys_backoff_reset(void);
+
+/* ---------- 工作线程有界汇合 ----------
+ * 以 VERTHYS_JOIN_TIMEOUT_MS 为上限等待线程退出。
+ * 返回 WaitForSingleObject 的结果：WAIT_OBJECT_0=已退出；WAIT_TIMEOUT=
+ * 超时放弃等待（线程残存，由进程退出回收）；WAIT_FAILED=等待异常（同样不
+ * 阻断生命周期）。不关闭句柄（句柄回收由调用方决定）。 */
+#ifdef _WIN32
+DWORD verthys_join_thread_bounded(HANDLE thread);
+#endif
 
 /* ---------- 小端序读取（用于索引区长度前缀） ---------- */
 uint64_t verthys_get_u64le(const uint8_t *p);
@@ -48,7 +62,7 @@ void ctx_zero_sensitive(struct VerthysContext *ctx);
 
 /* ---------- 格式检测（V3-only）----------
  * 读取文件头 8 字节判断格式：V3 超级块首副本帧头 magic "V3RP"。
- * 返回 VERTHYS_ERR_FORMAT——"V3 不读 V2 文件"）。 */
+ * 非 V3 一律返回 VERTHYS_ERR_FORMAT。 */
 VerthysContainerVersion detect_format(const uint8_t *buf, size_t size);
 
 int verthys_check_avx2_support(void);

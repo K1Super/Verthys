@@ -25,7 +25,7 @@ export interface VerthysResponse {
   shm_size?: number;
   /** 共享内存中本次返回的记录数 */
   record_count?: number;
-  /* ★ 企业级根治：解锁响应内联全局主密钥探测结果
+  /* 修复：解锁响应内联全局主密钥探测结果
    *   worker 解锁成功后进程内一次性完成 has_record + find_lid + get_record，
    *   结果内联到 unlock 响应三字段，彻底消除前端 IPC 链路与 v1 假阴性死锁。
    *
@@ -40,12 +40,12 @@ export interface VerthysResponse {
   global_key_id?: number;
   /** 全局主密钥记录数据 base64（仅 unlock 操作且 has_global_key=true 时返回） */
   global_key_record?: string;
-  /* ★ 防御闭环状态报告（仅 security_status 操作返回）
+  /* 防御闭环状态报告（仅 security_status 操作返回）
    *
    * 与后端 Rust controller::types::SecurityStatusReport 严格对齐
    * （字段名保持 snake_case）。防御状态为进程级事实，锁定态亦可查询。 */
   security_status?: SecurityStatusReport;
-  /* ★ 异步批处理流水线 — 批量导入字段
+  /* 异步批处理流水线 — 批量导入字段
    *
    * 「N 次加密，1 次 IPC 传输」：verthys_add_records_batch 单次 IPC 写入 N 条记录，
    * 返回分配的 verthys ID 列表 + 失败索引 + 检查点信息。WAL 保证断点续传幂等。
@@ -70,7 +70,7 @@ export interface VerthysResponse {
 }
 
 /**
- * ★ 解锁进度信息
+ * 解锁进度信息
  *
  * 与后端 Rust worker::UnlockProgress 严格对齐（字段名保持 snake_case）。
  * 解锁期间通过 Tauri Channel 流式推送，在解锁各阶段触发：
@@ -97,7 +97,7 @@ export interface UnlockProgress {
 }
 
 /**
- * ★ 防御闭环状态报告
+ * 防御闭环状态报告
  *
  * 与后端 Rust controller::types::SecurityStatusReport 严格对齐
  * （字段名保持 snake_case）。Verthys_GetSecurityStatus 的结构化输出。
@@ -133,7 +133,7 @@ export interface VerthysRecordEntry {
 }
 
 /**
- * ★ 项5：枚举记录流式分页批次（Tauri Channel 推送载荷）
+ * 项5：枚举记录流式分页批次（Tauri Channel 推送载荷）
  *
  * 与后端 Rust controller::types::EnumerateBatch 严格对齐（字段名保持 snake_case）。
  * verthys_enumerate_records_stream 命令循环调用 worker，每批通过 Channel 推送到前端。
@@ -158,7 +158,7 @@ export interface EnumerateBatch {
  * 与 VerthysRecordEntry 的区别：
  *   - 无 data 字段（不解密数据块，解锁后 1-2 秒内完成列表渲染）
  *   - 新增 data_size / physical_offset / merkle_leaf（供按需加载定位 + 完整性校验）
- *   - ★ 新增 created_time（创建时间戳，列表展示用）
+ *   - 新增 created_time（创建时间戳，列表展示用）
  *
  * 与后端 Rust VerthysSummaryEntry 严格对齐（字段名保持 snake_case）
  */
@@ -172,7 +172,7 @@ export interface VerthysSummaryEntry {
   physical_offset: number;
   /** Merkle 叶子哈希 base64（完整性校验码，后台巡检用） */
   merkle_leaf: string;
-  /** ★ 创建时间戳（Unix 秒，列表展示用） */
+  /** 创建时间戳（Unix 秒，列表展示用） */
   created_time: number;
 }
 
@@ -316,7 +316,7 @@ export interface PresetConfig {
 }
 
 /* ================================================================== *
- * ★ Comprehensive_optimization：照片导入异步批处理流水线类型           *
+ * Comprehensive_optimization：照片导入异步批处理流水线类型           *
  *                                                                  *
  * 与后端 Rust controller::verthys_batch_controller 严格对齐            *
  * （字段名保持 snake_case，Tauri 自动映射）                          *

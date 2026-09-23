@@ -1,7 +1,7 @@
 /*
  * shm_schema.rs — 共享内存 (SHM) 协议契约（worker ↔ 主进程同源定义）
  *
- * ★ 同源定义策略（替代 bindgen 解析 C 头文件）：
+ * 同源定义策略（替代 bindgen 解析 C 头文件）：
  *   经源码核验，verthys-worker 为 Rust crate（非 C 源码），主进程与 worker 均为 Rust。
  *   采用 `include!()` 宏方式使两 crate 共享同一份源文件，达到与 bindgen 同等的
  *   "单一定义源"效果，且避免 C FFI 边界与跨语言结构体布局风险。

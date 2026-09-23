@@ -93,7 +93,10 @@ TEST(dcl_boot_check_no_failed_paths)
 
     CHECK_EQ(Verthys_GetSecurityStatus(h, &st), VERTHYS_OK);
     CHECK_EQ(st.failed_count, 0u);
-    CHECK_EQ(st.all_critical_blocked, 1);
+    /* 未解锁态存在 DEGRADED 路径（MEM_DUMP/HIBERNATION 密钥尚未内核托管），
+     * 非 7/7 全阻断；all_critical_blocked 语义为"全部路径 BLOCKED 才为 1"，
+     * 故此处应为 0，而非旧语义下"无 FAILED 即 1"。 */
+    CHECK_EQ(st.all_critical_blocked, 0);
     /* BOOT 已执行：无 NOT_CHECKED；无 FAILED ⟹ 每条路径 ∈ {BLOCKED, DEGRADED} */
     for (int i = 0; i < VERTHYS_DEFENSE_PATH_COUNT; i++) {
         CHECK(st.path_state[i] == VERTHYS_DEFENSE_BLOCKED ||
@@ -151,5 +154,83 @@ TEST(dcl_all_seven_blocked_when_unlocked)
 
     CHECK_EQ(Verthys_Deinit(h), VERTHYS_OK);
     remove(DCL_VERTHYS);
+    return 0;
+}
+
+/* ================== 4. all_critical_blocked 三态语义 ================== */
+
+/*
+ * 场景 1：sandbox 属性全缺（不注入任何 mitigation 掩码）时，DLL 劫持等
+ * 路径无法全部 BLOCKED —— all_critical_blocked 必须为 0。旧实现仅凭
+ * "无 FAILED"即误报为全阻断（1），本断言在旧实现上失败。
+ */
+TEST(dcl_sandbox_absent_all_critical_blocked_zero)
+{
+    VerthysHandle h;
+    VerthysSecurityStatus st;
+    int            acb;
+    int            blocked;
+
+    /* 显式清零沙盒注入掩码，构造"全缺"起点（s_active_attrs 进程级，覆盖历史值） */
+    (void)Verthys_NotifySandboxAttrs(0);
+
+    VerthysResult rc_init = Verthys_Init(&h);
+    VerthysResult rc_get  = (rc_init == VERTHYS_OK)
+                                ? Verthys_GetSecurityStatus(h, &st)
+                                : VERTHYS_ERR_INTERNAL;
+    acb     = st.all_critical_blocked;
+    blocked = (int)st.blocked_count;
+    VerthysResult rc_deinit = Verthys_Deinit(h);
+
+    CHECK_EQ(rc_init, VERTHYS_OK);
+    CHECK_EQ(rc_get, VERTHYS_OK);
+    CHECK_EQ(acb, 0);
+    CHECK(blocked < VERTHYS_DEFENSE_PATH_COUNT);
+    CHECK_EQ(rc_deinit, VERTHYS_OK);
+    return 0;
+}
+
+/*
+ * 场景 3：部分降级（仅注入 NO_REMOTE，缺 NO_LOW_LABEL）——DLL_HIJACK 落
+ * DEGRADED，其余路径 BLOCKED，无 FAILED。此时 all_critical_blocked 必须为 0
+ * 且 has_degraded 必须为 1。旧实现"无 FAILED 即 1"，本断言在旧实现上失败。
+ */
+TEST(dcl_partial_degraded_all_critical_blocked_zero)
+{
+    VerthysHandle h;
+    int            acb;
+    int            has_deg;
+    int            deg_count;
+    int            failed_count;
+
+    remove(DCL_VERTHYS);
+    VerthysResult rc_init = Verthys_Init(&h);
+    VerthysResult rc_create = (rc_init == VERTHYS_OK)
+        ? Verthys_CreateWithPreset(h, DCL_VERTHYS, DCL_PW, DCL_PW_LEN, DCL_PRESET)
+        : VERTHYS_ERR_INTERNAL;
+
+    /* 部分降级注入：仅 NO_REMOTE 就位，NO_LOW_LABEL 缺位 → DLL_HIJACK DEGRADED */
+    VerthysSecurityStatus st;
+    memset(&st, 0, sizeof(st));
+    (void)Verthys_NotifySandboxAttrs(SANDBOX_ATTR_IMAGE_NO_REMOTE);
+    VerthysResult rc_get = (rc_create == VERTHYS_OK)
+        ? Verthys_GetSecurityStatus(h, &st)
+        : VERTHYS_ERR_INTERNAL;
+    acb          = st.all_critical_blocked;
+    has_deg      = st.has_degraded;
+    deg_count    = (int)st.degraded_count;
+    failed_count = (int)st.failed_count;
+
+    VerthysResult rc_deinit = Verthys_Deinit(h);
+    remove(DCL_VERTHYS);
+
+    CHECK_EQ(rc_init, VERTHYS_OK);
+    CHECK_EQ(rc_create, VERTHYS_OK);
+    CHECK_EQ(rc_get, VERTHYS_OK);
+    CHECK_EQ(failed_count, 0u);
+    CHECK(deg_count >= 1);
+    CHECK_EQ(has_deg, 1);
+    CHECK_EQ(acb, 0);
+    CHECK_EQ(rc_deinit, VERTHYS_OK);
     return 0;
 }

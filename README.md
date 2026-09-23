@@ -75,7 +75,6 @@
   </tr>
   <tr>
     <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E">COMPAT</td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:12px 16px;color:#A8B2C0">兼容 v1/v2 容器读取，提供 V1→V2 迁移接口。</td>
   </tr>
 </table>
 
@@ -309,7 +308,6 @@ ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
 <ul style="margin:0 0 4px;padding-left:22px">
   <li style="color:#A8B2C0;margin:6px 0">品牌名仅 <b style="color:#E7EBF0">Verthys</b>；容器扩展名 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">.verthys</code>；事件 scheme <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">verthys://</code>；环境变量前缀 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">VERTHYS_</code>；核心 DLL <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">verthys.dll</code>；公开 API 前缀 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">Verthys_</code>。</li>
   <li style="color:#A8B2C0;margin:6px 0">产品版本 <b style="color:#E7EBF0">2.6.1</b>，在根 CMakeLists.txt、package.json、Cargo.toml 三处一致。</li>
-  <li style="color:#A8B2C0;margin:6px 0">vcpkg.json 的 version-string 为 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">3.2.6</code>——历史遗留值，仅作 vcpkg 清单标识，不用于产品版本判断。</li>
 </ul>
 
 <div style="border-top:1px solid #1E2733;margin-top:44px;padding-top:14px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;color:#5D6B80;letter-spacing:1px">

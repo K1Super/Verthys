@@ -7,7 +7,7 @@
  *   3. 模块登出（logoutModule）
  *   4. 模块密钥保护开关（setModuleKeyEnabled）
  *
- * ★ 架构优化目标：
+ * 架构优化目标：
  *   - 统一错误契约 — 所有公共函数返回 Promise<VerthysResult<T>>
  *   - CacheCoordinator — 缓存操作由单一协调器管理，消除遗漏风险
  *   - 版本化 + 自愈 — findModuleKeyRecord 返回 version 最大者，发现多条记录触发后台清理
@@ -51,7 +51,7 @@ import { createLogger } from "../utils/logger";
 const log = createLogger("module-auth");
 
 /* ------------------------------------------------------------------ *
- * ★ 企业级根治修复6：模块密钥状态乐观并发控制                          *
+ * 修复修复6：模块密钥状态乐观并发控制                          *
  *                                                                    *
  * 原缺陷（"开关直接影响全局"根因）：                                   *
  *   loadModuleKeyStatus 会整体覆盖 keyState.moduleKeyEnabled 全部模块  *
@@ -76,7 +76,7 @@ let moduleKeyStatusVersion = 0;
 /* ------------------------------------------------------------------ *
  * verthys 记录查找（版本化 + 自愈清理）                                  *
  *                                                                    *
- * ★ 版本化 + 自愈清理：
+ * 版本化 + 自愈清理：
  *   findModuleKeyRecord 收集全部同 moduleId 的记录，                 *
  *   返回 version 最大者（即使删除失败导致新旧记录共存，也能正确返回   *
  *   最新记录）。发现多条记录时触发后台自愈清理。                      *
@@ -109,7 +109,7 @@ async function findModuleRecord<T>(
 /**
  * 在 verthys 中查找指定模块的密钥验证器记录
  *
- * ★ 版本化 + 自愈清理
+ * 版本化 + 自愈清理
  *
  * 行为：
  *   1. 查找全部同 moduleId 的记录
@@ -125,7 +125,7 @@ async function findModuleKeyRecord(
   // 收集全部同 moduleId 的记录（不提前终止）
   const candidates: Array<{ id: number; rec: ModuleKeyRecord }> = [];
 
-  // ★ 优先使用摘要缓存增量加载（O(1) IPC，模块记录极少）
+  // 优先使用摘要缓存增量加载（O(1) IPC，模块记录极少）
   const keyIds = getSummaryIdsByType(TYPE_MODULE_KEY);
   if (keyIds.length > 0) {
     // 摘要缓存已就绪 → 逐条 verthysGetRecord（常数次 IPC）
@@ -162,7 +162,7 @@ async function findModuleKeyRecord(
   candidates.sort((a, b) => (b.rec.version ?? 0) - (a.rec.version ?? 0));
   const latest = candidates[0];
 
-  // ★ 自愈：发现多条记录 → 后台清理旧版本
+  // 自愈：发现多条记录 → 后台清理旧版本
   if (candidates.length > 1) {
     const staleIds = candidates.slice(1).map((c) => c.id);
     log.info(`模块 ${moduleId} 发现 ${candidates.length} 条记录，触发自愈清理: ${staleIds.join(",")}`);
@@ -176,7 +176,7 @@ async function findModuleKeyRecord(
 }
 
 /**
- * ★ 自愈清理：删除指定 ID 的旧版本记录
+ * 自愈清理：删除指定 ID 的旧版本记录
  *
  * 使用 deleteAndPersist 入队（防抖合并 flush），失败不阻塞主流程。
  * 单次最多清理 MODULE_KEY_SELF_HEAL_BATCH 条，防止极端情况阻塞。
@@ -199,7 +199,7 @@ async function selfHealCleanupStaleRecords(ids: number[]): Promise<void> {
 /**
  * 在 verthys 中查找指定模块的密钥保护开关记录
  *
- * ★ 企业级根治：改用摘要缓存 O(1) 查询替代全量扫描（根治开关操作卡慢）
+ * 修复：改用摘要缓存 O(1) 查询替代全量扫描（根治开关操作卡慢）
  *
  * 原缺陷：findModuleKeyConfigRecord 调用 findModuleRecord → ensureRecordScan +
  *   scanVerthysRecords 全量扫描所有记录（含照片块），verthys 有 N 条记录时
@@ -212,7 +212,7 @@ async function selfHealCleanupStaleRecords(ids: number[]): Promise<void> {
 async function findModuleKeyConfigRecord(
   moduleId: ModuleId,
 ): Promise<{ id: number; rec: ModuleKeyConfigRecord } | null> {
-  // ★ 优先使用摘要缓存（O(1) IPC，模块配置记录极少）
+  // 优先使用摘要缓存（O(1) IPC，模块配置记录极少）
   const configIds = getSummaryIdsByType(TYPE_MODULE_KEY_CONFIG);
   if (configIds.length > 0) {
     for (const id of configIds) {
@@ -231,7 +231,7 @@ async function findModuleKeyConfigRecord(
     return null;
   }
 
-  // ★ 回退：摘要缓存未就绪 → 全量扫描（仅极端情况触发）
+  // 回退：摘要缓存未就绪 → 全量扫描（仅极端情况触发）
   try { await ensureRecordScan(); } catch { /* */ }
   let result: { id: number; rec: ModuleKeyConfigRecord } | null = null;
   await scanVerthysRecords((entry) => {
@@ -254,7 +254,7 @@ async function findModuleKeyConfigRecord(
 /**
  * 扫描 verthys 中所有模块密钥记录与开关配置，更新 hasModuleKeyRecord 和 moduleKeyEnabled
  *
- * ★ 增量状态加载
+ * 增量状态加载
  *   不再全量扫描，而是利用摘要缓存 getSummaryIdsByType 快速获取 ID 列表，
  *   然后逐个 verthysGetRecord 获取数据（模块记录极少，仅常数次 IPC）。
  *   若摘要未就绪，回退到原有扫描。将 O(N) 降为 O(1)。
@@ -262,13 +262,13 @@ async function findModuleKeyConfigRecord(
  * @returns VerthysResult<void>
  */
 export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
-  // ★ 捕获启动版本号，用于完成后并发校验
+  // 捕获启动版本号，用于完成后并发校验
   const startVersion = moduleKeyStatusVersion;
-  // ★ 标记后台加载进行中（供模块组件/SecurityCenter 守卫）
+  // 标记后台加载进行中（供模块组件/SecurityCenter 守卫）
   keyState.moduleKeyStatusLoading.value = true;
   try {
     const status: Record<ModuleId, boolean> = { photo: false, accounts: false, certs: false, fileverthys: false };
-    // ★ 企业级根治修复：enabled 默认 false（安全默认）
+    // 修复修复：enabled 默认 false（安全默认）
     //
     // 原缺陷：默认 true 意味着"保护开关开启"=所有模块需密钥验证。
     // 当 verthys 中无 TYPE_MODULE_KEY_CONFIG 记录时（用户从未配置过保护开关），
@@ -279,20 +279,20 @@ export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
     // 仅当 verthys 中存在 TYPE_MODULE_KEY_CONFIG 记录且 cfg.enabled=true 时才开启。
     const enabled: Record<ModuleId, boolean> = { photo: false, accounts: false, certs: false, fileverthys: false };
 
-    // ★ 企业级根治修复：主动触发摘要扫描确保缓存就绪
+    // 修复修复：主动触发摘要扫描确保缓存就绪
     //
     // 原缺陷：直接调用 getSummaryIdsByType 读取摘要缓存，若摘要扫描未完成
     // （startBackgroundTasks 有 2.5s 延迟），返回空数组 → 回退到全量解密扫描。
     // 模块密钥记录极少（最多 4 条），但回退路径会全量解密所有记录（含照片），
     // 造成 20-30s 延迟。
     //
-    // ★ 性能根治：移除冗余 ensureSummaryScan 调用
+    // 性能根治：移除冗余 ensureSummaryScan 调用
     //
     // initUnlock/initCreate 在调用 loadModuleKeyStatus 之前已调用 ensureSummaryScan（行 560/353），
     // 此处重复调用浪费 IPC（v1 格式下还会静默失败）。
     // 直接读取 getSummaryIdsByType，若为空则进入 fallback（已由 ensureRecordScan 兜底）。
 
-    // ★ 增量加载：优先使用摘要缓存（O(1) IPC）
+    // 增量加载：优先使用摘要缓存（O(1) IPC）
     const keyIds = getSummaryIdsByType(TYPE_MODULE_KEY);
     const configIds = getSummaryIdsByType(TYPE_MODULE_KEY_CONFIG);
 
@@ -331,7 +331,7 @@ export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
       }
     }
 
-    // ★ 企业级根治修复6：乐观并发提交校验
+    // 修复修复6：乐观并发提交校验
     //
     // 加载期间若用户切换了任一模块的密钥开关（setModuleKeyEnabled/setModuleKey），
     // moduleKeyStatusVersion 会递增 → startVersion !== moduleKeyStatusVersion。
@@ -347,7 +347,7 @@ export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
         `loadModuleKeyStatus: 检测到并发修改（startVersion=${startVersion}, current=${moduleKeyStatusVersion}），丢弃本次加载结果，保留用户最新操作`,
       );
       keyState.moduleKeyStatusLoading.value = false;
-      // ★ 安全守卫根治：标记已加载完成（虽丢弃结果，但 setModuleKeyEnabled 已更新状态，状态已知）
+      // 安全守卫根治：标记已加载完成（虽丢弃结果，但 setModuleKeyEnabled 已更新状态，状态已知）
       keyState.moduleKeyStatusLoaded.value = true;
       return ok(undefined);
     }
@@ -355,7 +355,7 @@ export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
     keyState.hasModuleKeyRecord.value = status;
     keyState.moduleKeyEnabled.value = enabled;
     keyState.moduleKeyStatusLoading.value = false;
-    // ★ 安全守卫根治：标记已加载完成（switchModule 守卫据此放行/拦截）
+    // 安全守卫根治：标记已加载完成（switchModule 守卫据此放行/拦截）
     keyState.moduleKeyStatusLoaded.value = true;
     return ok(undefined);
   } catch (e) {
@@ -367,7 +367,7 @@ export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
 
 /** 回退路径：摘要缓存未就绪时复用 ensureRecordScan 缓存（消除重复全量枚举）
  *
- * ★ 性能根治：复用 ensureRecordScan 缓存，替代直接 verthysEnumerateRecords
+ * 性能根治：复用 ensureRecordScan 缓存，替代直接 verthysEnumerateRecords
  *
  * 原缺陷：
  *   loadModuleKeyStatusFallback 直接调用 verthysEnumerateRecords(1) 全量枚举，
@@ -385,7 +385,7 @@ async function loadModuleKeyStatusFallback(
   status: Record<ModuleId, boolean>,
   enabled: Record<ModuleId, boolean>,
 ): Promise<void> {
-  // ★ 复用 ensureRecordScan 缓存：全量枚举只执行一次，结果供模块组件复用
+  // 复用 ensureRecordScan 缓存：全量枚举只执行一次，结果供模块组件复用
   try { await ensureRecordScan(); } catch { /* ensureRecordScan 内部已回退兜底 */ }
 
   // 从扫描缓存按类型查询 ID（零 IPC，O(1) 索引查询）
@@ -421,9 +421,9 @@ async function loadModuleKeyStatusFallback(
 /**
  * 设置模块密钥保护开关（持久化到 verthys）。
  *
- * ★ 返回 VerthysResult<void>
- * ★ 通过 CacheCoordinator 统一同步缓存
- * ★ 使用 flushVerthysAsync(false) 延迟冲刷
+ * 返回 VerthysResult<void>
+ * 通过 CacheCoordinator 统一同步缓存
+ * 使用 flushVerthysAsync(false) 延迟冲刷
  *
  * 写入顺序：先添加新记录，成功后再删除旧记录（先添后删）。
  *
@@ -447,7 +447,7 @@ export async function setModuleKeyEnabled(moduleId: ModuleId, enabled: boolean):
     return err(VerthysErrorCode.E_MODULE_CONFIG_SAVE_FAILED, "写入 verthys 失败");
   }
 
-  // ★ 通过 CacheCoordinator 统一同步缓存（消除手动调用遗漏风险）
+  // 通过 CacheCoordinator 统一同步缓存（消除手动调用遗漏风险）
   cacheCoordinator.addRecord({
     id, type: TYPE_MODULE_KEY_CONFIG, name, dataB64, dataSize: dataB64.length,
   });
@@ -458,7 +458,7 @@ export async function setModuleKeyEnabled(moduleId: ModuleId, enabled: boolean):
     cacheCoordinator.removeRecord(existing.id);
   }
 
-  // ★ 企业级根治修复：await persistVerthys 替代 void persistVerthys（根治持久化丢失）
+  // 修复修复：await persistVerthys 替代 void persistVerthys（根治持久化丢失）
   //
   // 原缺陷：void persistVerthys() 火并忘，写入 worker 内存后不等待落盘。
   // 若用户快速操作或应用退出，flush 未完成 → 磁盘无新配置 → 下次解锁"设置被遗忘"。
@@ -474,7 +474,7 @@ export async function setModuleKeyEnabled(moduleId: ModuleId, enabled: boolean):
   }
 
   // 更新状态（数据已确认落盘）
-  // ★ 递增版本号，使进行中的 loadModuleKeyStatus 丢弃其旧结果
+  // 递增版本号，使进行中的 loadModuleKeyStatus 丢弃其旧结果
   //   杜绝后台加载用旧 verthys 状态覆盖用户刚切换的开关（"开关直接影响全局"根因）
   moduleKeyStatusVersion++;
   keyState.moduleKeyEnabled.value = { ...keyState.moduleKeyEnabled.value, [moduleId]: enabled };
@@ -484,7 +484,7 @@ export async function setModuleKeyEnabled(moduleId: ModuleId, enabled: boolean):
 
 /** 查询模块密钥保护是否开启
  *
- * ★ 企业级根治修复：兜底默认 false（与 key_state 初始化默认一致）
+ * 修复修复：兜底默认 false（与 key_state 初始化默认一致）
  *
  * 原缺陷：兜底 true，当 moduleKeyEnabled 未被 loadModuleKeyStatus 正确填充时，
  * 任何模块查询都返回 true（保护开启），导致"全部模块被自动开启密钥"。
@@ -506,10 +506,10 @@ export function generateModuleKey(): string {
 /**
  * 设置模块独立密钥（首次设置或修改）
  *
- * ★ 返回 VerthysResult<void>
- * ★ 通过 CacheCoordinator 统一同步缓存
- * ★ 版本递增（每次 setModuleKey 递增 version）
- * ★ 使用 flushVerthysAsync(false) 延迟冲刷
+ * 返回 VerthysResult<void>
+ * 通过 CacheCoordinator 统一同步缓存
+ * 版本递增（每次 setModuleKey 递增 version）
+ * 使用 flushVerthysAsync(false) 延迟冲刷
  *
  * 写入顺序：先添加新记录（带递增 version），成功后再删除旧记录。
  *
@@ -531,7 +531,7 @@ export async function setModuleKey(moduleId: ModuleId, key: string): Promise<Ver
 
   // 2. 查找旧记录（用于版本号递增 + 后续删除）
   const existing = await findModuleKeyRecord(moduleId);
-  // ★ 版本递增
+  // 版本递增
   const newVersion = (existing?.rec.version ?? 0) + 1;
 
   // 3. 构造记录（带 version）
@@ -549,7 +549,7 @@ export async function setModuleKey(moduleId: ModuleId, key: string): Promise<Ver
     return err(VerthysErrorCode.E_MODULE_KEY_SET_FAILED, "写入 verthys 失败");
   }
 
-  // ★ 通过 CacheCoordinator 统一同步缓存
+  // 通过 CacheCoordinator 统一同步缓存
   cacheCoordinator.addRecord({
     id, type: TYPE_MODULE_KEY, name, dataB64, dataSize: dataB64.length,
   });
@@ -560,7 +560,7 @@ export async function setModuleKey(moduleId: ModuleId, key: string): Promise<Ver
     cacheCoordinator.removeRecord(existing.id);
   }
 
-  // ★ 企业级根治修复：await persistVerthys 替代 void persistVerthys（根治持久化丢失）
+  // 修复修复：await persistVerthys 替代 void persistVerthys（根治持久化丢失）
   //
   // 原缺陷：void persistVerthys() 火并忘，写入 worker 内存后不等待落盘。
   // 若用户快速操作或应用退出，flush 未完成 → 磁盘无新密钥记录 → 下次解锁"密钥验证完全无效"。
@@ -575,7 +575,7 @@ export async function setModuleKey(moduleId: ModuleId, key: string): Promise<Ver
   }
 
   // 6. 更新状态（数据已确认落盘）
-  // ★ 递增版本号，使进行中的 loadModuleKeyStatus 丢弃其旧结果
+  // 递增版本号，使进行中的 loadModuleKeyStatus 丢弃其旧结果
   //   杜绝后台加载用旧 verthys 状态覆盖用户刚设置的模块密钥记录状态
   moduleKeyStatusVersion++;
   keyState.hasModuleKeyRecord.value = { ...keyState.hasModuleKeyRecord.value, [moduleId]: true };
@@ -586,8 +586,8 @@ export async function setModuleKey(moduleId: ModuleId, key: string): Promise<Ver
 /**
  * 验证模块独立密钥（模块登录时调用）
  *
- * ★ 返回 VerthysResult<void>
- * ★ cacheModuleKey 内部原子地设置 moduleKeyReady=true
+ * 返回 VerthysResult<void>
+ * cacheModuleKey 内部原子地设置 moduleKeyReady=true
  *
  * @returns VerthysResult<void>
  */
@@ -610,7 +610,7 @@ export async function verifyModuleKey(moduleId: ModuleId, key: string): Promise<
     return errFromUnknown(e, VerthysErrorCode.E_MODULE_VERIFY_FAILED);
   }
 
-  // ★ cacheModuleKey 内部原子地设置 moduleKeyReady=true
+  // cacheModuleKey 内部原子地设置 moduleKeyReady=true
   //   消除「先缓存密钥后置状态」的不一致窗口
   cacheModuleKey(moduleId, key);
   touchSession();
@@ -640,7 +640,7 @@ export function isModuleReady(moduleId: ModuleId): boolean {
 /**
  * 登出模块（清除会话密钥缓存，不影响持久化记录）
  *
- * ★ 会话状态原子化
+ * 会话状态原子化
  *   removeModuleKey 内部原子地同时清空密钥字节 + 置 moduleKeyReady=false，
  *   消除「先清缓存再置状态」的不一致窗口。
  */

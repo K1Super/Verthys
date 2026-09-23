@@ -5,7 +5,7 @@
  *   verthys_scan_open  → 首批 → A 区（current_buffer），后台预取 B 区
  *   verthys_scan_next  → 返回 A 区，等待 B 区 → 新 current_buffer，后台预取下一批
  *   verthys_scan_close → 取消预取、安全擦除、关闭游标
- *   verthys_scan_abort → 取消并回滚游标（发 scan_abort 到 worker）
+ *   （打开新扫描时内部发 scan_abort 回滚旧游标，见 open 流程注释）
  *
  * 状态层变更要点：
  *   - LockedBuffer RAII 替代 virtual_lock/unlock + secure_zero 自由函数
@@ -26,6 +26,7 @@
 
 use crate::controller::api_error::ErrorCode;
 use crate::controller::types::{VerthysRecordEntry, VerthysResponse, VerthysSummaryEntry};
+use crate::controller::verthys_controller::require_unlocked;
 use crate::state::{
     cleanup_scan_on_failure, cleanup_summary_scan_on_failure, AppState, LockedBuffer,
     PrefetchTaskHandle, ScanPipelineState, ScanRecord, ScanSessionState,
@@ -196,6 +197,11 @@ pub async fn verthys_scan_open(
     start_id: u64,
     batch_size: u64,
 ) -> Result<VerthysResponse, String> {
+    // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
+    if let Err(msg) = require_unlocked(&app, &state, "scan_open") {
+        return Ok(VerthysResponse::err("scan_open", &msg));
+    }
+
     // 若已有扫描在进行，先关闭旧游标
     let old_scan = {
         let mut guard = state.lock_scan_state();
@@ -345,6 +351,10 @@ pub async fn verthys_scan_next(
     state: State<'_, AppState>,
     batch_size: u64,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "scan_next") {
+        return Ok(VerthysResponse::err("scan_next", &msg));
+    }
+
     // 1. 取出整个 ScanPipelineState（lock_scan_state 中毒恢复）
     let mut scan = {
         let mut guard = state.lock_scan_state();
@@ -533,6 +543,10 @@ pub async fn verthys_scan_close(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "scan_close") {
+        return Ok(VerthysResponse::err("scan_close", &msg));
+    }
+
     // 1. 取出 ScanPipelineState（lock_scan_state 中毒恢复）
     let scan_opt = {
         let mut guard = state.lock_scan_state();
@@ -565,52 +579,6 @@ pub async fn verthys_scan_close(
     Ok(resp)
 }
 
-/// 取消扫描并回滚游标
-///
-/// 与 scan_close 的区别：
-///   - scan_close：正常关闭，发 scan_close 到 worker
-///   - scan_abort：取消并回滚，发 scan_abort 到 worker（语义为"中断回滚"）
-///
-/// 适用场景：
-///   - 用户主动取消扫描
-///   - 前端通道关闭时 CancellationToken 通知
-///   - 异常路径需要立即回滚游标
-#[tauri::command]
-pub async fn verthys_scan_abort(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<VerthysResponse, String> {
-    // 1. 取出 ScanPipelineState
-    let scan_opt = {
-        let mut guard = state.lock_scan_state();
-        guard.take()
-    };
-
-    if let Some(mut scan) = scan_opt {
-        // 2. shutdown 预取任务（cancel + 等待退出）
-        if let Some(handle) = scan.prefetch_task.take() {
-            handle.shutdown(PREFETCH_SHUTDOWN_TIMEOUT).await;
-        }
-        // 3. drop pending_reply + current_buffer
-        scan.pending_reply.take();
-        scan.current_buffer.take();
-        // session_state → Closed
-        scan.session_state = ScanSessionState::Closed;
-    }
-
-    // 4. 通知 worker 取消并回滚游标（发 scan_abort）
-    let req = serde_json::json!({"op": "scan_abort"});
-    let resp_json = state.send_with_timeout(&req.to_string(), SCAN_CLOSE_TIMEOUT)?;
-    let resp: VerthysResponse =
-        serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
-
-    // 5. 审计日志
-    let result = if resp.ok { AuditResult::Success } else { AuditResult::Failure };
-    write_scan_audit(&app, AuditEventType::ScanAbort, result, resp.error.clone());
-
-    Ok(resp)
-}
-
 /* ------------------------------------------------------------------ *
  * 摘要扫描控制器（轻量元数据，不读数据块）                  *
  *                                                                    *
@@ -631,6 +599,9 @@ pub async fn verthys_scan_summary_open(
     start_id: u64,
     batch_size: u64,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "scan_summary_open") {
+        return Ok(VerthysResponse::err("scan_summary_open", &msg));
+    }
     // 若已有摘要扫描在进行，先关闭旧游标
     let old_scan = {
         let mut guard = state.lock_scan_summary_state();
@@ -760,6 +731,9 @@ pub async fn verthys_scan_summary_next(
     state: State<'_, AppState>,
     batch_size: u64,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "scan_summary_next") {
+        return Ok(VerthysResponse::err("scan_summary_next", &msg));
+    }
     // 1. 取出整个 ScanPipelineState
     let mut scan = {
         let mut guard = state.lock_scan_summary_state();
@@ -928,6 +902,10 @@ pub async fn verthys_scan_summary_close(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "scan_summary_close") {
+        return Ok(VerthysResponse::err("scan_summary_close", &msg));
+    }
+
     let scan_opt = {
         let mut guard = state.lock_scan_summary_state();
         guard.take()
@@ -950,38 +928,6 @@ pub async fn verthys_scan_summary_close(
 
     let result = if resp.ok { AuditResult::Success } else { AuditResult::Failure };
     write_scan_audit(&app, AuditEventType::ScanClose, result, resp.error.clone());
-
-    Ok(resp)
-}
-
-/// 取消摘要扫描并回滚游标
-#[tauri::command]
-pub async fn verthys_scan_summary_abort(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<VerthysResponse, String> {
-    let scan_opt = {
-        let mut guard = state.lock_scan_summary_state();
-        guard.take()
-    };
-
-    if let Some(mut scan) = scan_opt {
-        if let Some(handle) = scan.prefetch_task.take() {
-            handle.shutdown(PREFETCH_SHUTDOWN_TIMEOUT).await;
-        }
-        scan.pending_reply.take();
-        scan.current_buffer.take();
-        scan.session_state = ScanSessionState::Closed;
-    }
-
-    // 发 scan_summary_abort 到 worker
-    let req = serde_json::json!({"op": "scan_summary_abort"});
-    let resp_json = state.send_with_timeout(&req.to_string(), SCAN_CLOSE_TIMEOUT)?;
-    let resp: VerthysResponse =
-        serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
-
-    let result = if resp.ok { AuditResult::Success } else { AuditResult::Failure };
-    write_scan_audit(&app, AuditEventType::ScanAbort, result, resp.error.clone());
 
     Ok(resp)
 }

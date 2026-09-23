@@ -94,7 +94,7 @@ struct VerthysContextV3;
  * [in]     pw_len        口令字节数
  * [in]     flags         VERTHYS_UNLOCK_FLAG_* 位域
  * [in]     fail_mask     故障注入（bit i = 阶段 i 失败；生产恒 0）
- * [in]     progress_cb   进度回调（可为 NULL；迁移自 v2 lifecycle 阶段通知）
+ * [in]     progress_cb   进度回调（可为 NULL）
  * [in]     progress_user 回调透传
  *
  * 返回：VERTHYS_OK / VERTHYS_ERR_PARTIAL_UNLOCK（MINIMAL_FIRST 且后台预热已

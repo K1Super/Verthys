@@ -100,7 +100,7 @@ import { useCosmicBackground } from "../composables/useCosmicBackground";
 import { useWindowControls } from "../composables/useWindowControls";
 import { useModuleNavigation } from "../composables/useModuleNavigation";
 
-/* ★ 缓存层组合根初始化（v3 懒加载架构修复 — 由 bootstrap 迁入）：
+/* 缓存层组合根初始化（v3 懒加载架构修复 — 由 bootstrap 迁入）：
  * MainView 为异步 chunk（静态入口不引用 verthys-cache，业务层不进主包）；
  * onBeforeMount 先于全部子组件的挂载钩子（父先于子时序）——
  * 首个业务消费方（模块登录/数据加载，均在子树内）运行前
@@ -162,16 +162,16 @@ const {
   flex-direction: column;
   width: 100%;
   height: 100%;
-  /* ★ 性能根治：全屏 backdrop-filter 叠在持续动画的深空背景上 =
+  /* 性能根治：全屏 backdrop-filter 叠在持续动画的深空背景上 =
    * 合成器每帧全屏重采样（掉帧主因）→ 去实时毛玻璃，
    * 底色加深补偿视觉（背后本就是弥散星空，暗化层视觉等效）
-   * ★ 入场语义统一（v3）：本层零入场动画 — 外层 App.vue 双缓冲层
+   * 入场语义统一（v3）：本层零入场动画 — 外层 App.vue 双缓冲层
    * materialize 过渡（opacity/blur/scale 1.9s 与渡越消散同步收束）
    * 独立承担「自星系辉光深处浮现成型」；旧 view-fade-in 0.6s 与
    * 外层 2.5s 不同步（opacity 先到终点、blur 仍在途）= 双层入场
    * 节奏割裂 → 移除。子组件入场编排由 prewarm 冻结体系与外层
    * 同步解冻（App.vue .main-layer.prewarm 动画冻结规则） */
-  /* ★ v3：过渡遮罩减淡 0.66→0.55 — 页面交接淡入窗口内，星系消散段
+  /* v3：过渡遮罩减淡 0.66→0.55 — 页面交接淡入窗口内，星系消散段
    * 透出更亮（「由明到暗过暗」校正）。稳态下本层位于不透明深空底
    * （CosmicBackground.deep-space）之下，仅在入场淡入期生效 */
   background: rgba(6, 8, 13, 0.55);

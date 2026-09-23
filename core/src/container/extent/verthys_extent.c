@@ -22,6 +22,7 @@
 #include "verthys_crypto.h"
 #include "verthys_io.h"
 #include "verthys_internal.h"     /* verthys_secure_zero */
+#include "verthys_persist_guard.h"
 
 #include <io.h>                 /* _commit / _fileno */
 #include <string.h>
@@ -122,7 +123,9 @@ VerthysResult verthys_extent_put(FILE *f, VerthysPartition *part,
 
     if (f == NULL || part == NULL || idx == NULL) return VERTHYS_ERR_INVALID;
     if (pt == NULL && pt_len != 0) return VERTHYS_ERR_INVALID;
-    if (pt_len > UINT32_MAX) return VERTHYS_ERR_INVALID;  /* 条目字段为 u32 */
+    /* 条目字段为 u32：明文 + tag 之和须无损（只挡明文则 pt_len==UINT32_MAX
+     * 时密文长溢出 u32，尺寸字段截断 → 索引不可恢复），超界拒绝而非截断 */
+    VERTHYS_GUARD_U32_PLUS(pt_len, VERTHYS_EXTENT_TAG_BYTES);
 
     /* 1. 内容哈希（内容寻址键） */
     r = verthys_extent_hash(hash, pt, pt_len);

@@ -287,7 +287,7 @@ pub fn read_device_serial(drive_letter: char, salt: &[u8]) -> Result<String, Str
 
     // 6. HMAC-SHA256(salt, serial) 加盐哈希
     // 使用安装唯一盐值，即使数据库泄露也无法进行设备关联（彩虹表攻击无效）
-    let hash = crate::util::crypto::hmac_sign(salt, serial.as_bytes());
+    let hash = crate::util::crypto::hmac_sign(salt, serial.as_bytes())?;
     let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
 
     Ok(hex)

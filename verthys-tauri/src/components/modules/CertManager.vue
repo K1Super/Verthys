@@ -207,7 +207,7 @@ import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
 
-/* ★ 企业级根治：顶部错误提示弹窗（.error-toast，2.5s 自动消失） */
+/* 修复：顶部错误提示弹窗（.error-toast，2.5s 自动消失） */
 const { errorMsg, showError } = useErrorToast();
 
 /**
@@ -220,7 +220,7 @@ const { errorMsg, showError } = useErrorToast();
  *   彻底避免整体替换模式（add 新 + delete 旧 + flush）的并发竞态
  *   导致数据丢失/恢复问题。
  *
- * ★ 企业级根治：TYPE_CERT 从 record_types.ts 导入，不再本地定义。
+ * 修复：TYPE_CERT 从 record_types.ts 导入，不再本地定义。
  */
 
 /* 非阻塞加载状态（无底板居中展示，加载完成自动消失） */
@@ -252,7 +252,7 @@ const types = [
 
 const searchKey = ref("");
 const typeFilter = ref("");
-/* ★ 项2：shallowRef 替代 ref，避免 Vue 对 certs 数组内每条记录深度代理
+/* 项2：shallowRef 替代 ref，避免 Vue 对 certs 数组内每条记录深度代理
  * （每条记录含 content/密钥等敏感字段，万条记录深度代理开销 200-500ms） */
 const certs = shallowRef<CertEntry[]>([]);
 
@@ -336,7 +336,7 @@ const loadCerts = async () => {
   const cached = getModuleCache<CertEntry[]>("certs");
   let maxRecordId = 0;
   if (cached.data && cached.data.length > 0) {
-    // ★ 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
+    // 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
     replaceShallowArray(certs, cached.data);
     // 计算缓存中最大的 recordId，作为增量扫描起点（参考 PhotoAlbum）
     maxRecordId = cached.data.reduce((max, c) => Math.max(max, c.recordId || 0), 0);
@@ -353,7 +353,7 @@ const loadCerts = async () => {
   let listFields: Omit<CertEntry, "id">[] | null = null;
   const legacyRecords: { id: number; fields: Omit<CertEntry, "id"> }[] = [];
 
-  // ★ 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
+  // 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
   //    原实现：ensureSummaryScanSafe + for 循环串行 getFullRecord（N 条 = N 次串行 IPC，
   //            100 条 ≈ 7.5s，300 条 ≈ 22s，与后台 ensureRecordScan 抢同一常驻 worker → 30s）
   //    新实现：ensureRecordScanSafe（后台 startBackgroundTasks 已扫描则瞬时增量返回）
@@ -407,7 +407,7 @@ const loadCerts = async () => {
     let nextMemId = certs.value.length > 0
       ? Math.max(...certs.value.map(c => c.id)) + 1
       : 1;
-    // ★ 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
+    // 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
     const newItems: CertEntry[] = [];
     for (const { id, fields } of found) {
       newItems.push({
@@ -451,7 +451,7 @@ const loadCerts = async () => {
           ...certData,
         });
       }
-      // ★ 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
+      // 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
       replaceShallowArray(certs, migrated);
       if (listRecordId !== null) {
         try { await verthysDeleteRecord(listRecordId); } catch { /* */ }
@@ -459,13 +459,13 @@ const loadCerts = async () => {
       for (const lr of legacyRecords) {
         try { await verthysDeleteRecord(lr.id); } catch { /* */ }
       }
-      // ★ 企业级数据持久化修复：检查迁移落盘返回值，失败时提示用户
+      // 数据持久化修复：检查迁移落盘返回值，失败时提示用户
       let migratePersistOk = false;
       try { migratePersistOk = await persistVerthys(); } catch (e) { console.error("[loadCerts] 迁移 persistVerthys 异常", e); }
       if (!migratePersistOk) {
         showError("证书数据迁移已执行但持久化失败，重启后可能需重新迁移。请勿关闭应用并重试");
       }
-      // ★ 迁移涉及批量增删，清空三层缓存确保一致性
+      // 迁移涉及批量增删，清空三层缓存确保一致性
       //    旧格式记录已从磁盘删除，但 summaryCache / fullRecordCache 仍持有旧条目；
       //    新格式记录已写入磁盘但未入缓存。清空三层缓存后，下次 ensureSummaryScanSafe()
       //    会从 maxSummaryId=0 重新全量扫描，正确反映磁盘最新状态。
@@ -473,11 +473,11 @@ const loadCerts = async () => {
       clearFullRecordCache();
       clearRecordScanCache();
     } else {
-      // ★ 项2：shallowRef 清空需用 clearShallowArray 触发 triggerRef
+      // 项2：shallowRef 清空需用 clearShallowArray 触发 triggerRef
       clearShallowArray(certs);
     }
   } else {
-    // ★ 项2：shallowRef 清空需用 clearShallowArray 触发 triggerRef
+    // 项2：shallowRef 清空需用 clearShallowArray 触发 triggerRef
     clearShallowArray(certs);
   }
 
@@ -544,17 +544,17 @@ const onSave = async () => {
       throw e;
     }
     if (newRid !== null) {
-      // ★ 同步两层缓存（摘要 + 全量），确保列表立即显示新记录
+      // 同步两层缓存（摘要 + 全量），确保列表立即显示新记录
       addFullRecord(newRid, TYPE_CERT, recordName, dataB64);
       if (oldRid !== undefined) {
         try { await verthysDeleteRecord(oldRid); } catch { /* 旧记录删除失败不阻断 */ }
-        // ★ 失效两层缓存中的旧记录（杜绝删除复活）
+        // 失效两层缓存中的旧记录（杜绝删除复活）
         invalidateSummaryRecord(oldRid);
         invalidateFullRecord(oldRid);
       }
       const idx = certs.value.findIndex(c => c.id === editing.value!.id);
       if (idx >= 0) {
-        // ★ 项2：shallowRef 下整体替换元素需用 updateShallowItem 触发 triggerRef
+        // 项2：shallowRef 下整体替换元素需用 updateShallowItem 触发 triggerRef
         updateShallowItem(certs, idx, { recordId: newRid, ...certData });
       }
       setModuleCache("certs", certs.value);
@@ -572,15 +572,15 @@ const onSave = async () => {
       throw e;
     }
     if (newRid !== null) {
-      // ★ 同步两层缓存（摘要 + 全量）
+      // 同步两层缓存（摘要 + 全量）
       addFullRecord(newRid, TYPE_CERT, recordName, dataB64);
-      // ★ 项2：shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
+      // 项2：shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
       pushShallowItems(certs, [{ id: Date.now(), recordId: newRid, ...certData }]);
       setModuleCache("certs", certs.value);
     }
   }
 
-  // ★ 企业级数据持久化修复：检查 persistVerthys 返回值，根治"保存后重启数据丢失"
+  // 数据持久化修复：检查 persistVerthys 返回值，根治"保存后重启数据丢失"
   //    旧实现仅 await persistVerthys() 不检查返回值，flush 失败时 UI 显示新证书但
   //    磁盘未落盘 → 重启后数据丢失。修复：检查返回值，失败时 showError 提示用户。
   let persistOk = false;
@@ -610,17 +610,17 @@ const confirmDelete = async () => {
   // 立即关闭弹窗 + 移除 UI + 更新缓存（同步无缝，消除删除按钮到内容消失的空白间隔）
   showDeleteConfirm.value = false;
   deleteTargetId.value = null;
-  // ★ 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
+  // 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
   removeShallowItems(certs, c => c.id === id);
   setModuleCache("certs", certs.value);
   // 立即失效两层缓存（同步，杜绝删除复活）
   if (rid !== undefined) {
-    // ★ 同步失效摘要缓存 + 全量缓存 + 旧扫描缓存（三条路径同时清理）
+    // 同步失效摘要缓存 + 全量缓存 + 旧扫描缓存（三条路径同时清理）
     //    确保无论走哪条加载路径（summary / fullRecord / 旧 scan）都不会复活已删除记录
     invalidateSummaryRecord(rid);
     invalidateFullRecord(rid);
     invalidateScannedRecord(rid);
-    // ★ 企业级根治：await deleteAndPersist + await persistVerthys（根治删除后复活）
+    // 修复：await deleteAndPersist + await persistVerthys（根治删除后复活）
     //
     // 原缺陷：deleteAndPersist(...).catch(() => {}) 火并忘——防抖 flush（300ms）
     //   未执行即返回，应用退出 → 磁盘仍含已删记录 → "删除后复活"。
@@ -630,7 +630,7 @@ const confirmDelete = async () => {
     //   立即落盘）。UI 已同步移除（无缝删除），await 不阻塞 UI 渲染。
     try {
       await deleteAndPersist(() => verthysDeleteRecord(rid), rid);
-      // ★ 企业级数据持久化修复：检查 persistVerthys 返回值，根治"删除后复活"
+      // 数据持久化修复：检查 persistVerthys 返回值，根治"删除后复活"
       //    persistVerthys 返回 false（非抛异常）时旧 catch 无法捕获 → 静默假成功 →
       //    UI 已移除但磁盘未落盘 → 重启后记录"复活"。
       const persistOk = await persistVerthys(); // 立即落盘（取消防抖，根治删除后复活）
@@ -648,7 +648,7 @@ const confirmDelete = async () => {
 };
 
 /* 密钥内容查看 / 复制 */
-/* ★ 项2：shallowRef 下直接修改属性不触发更新，必须 updateShallowItem */
+/* 项2：shallowRef 下直接修改属性不触发更新，必须 updateShallowItem */
 const toggleContent = (c: CertEntry) => {
   const idx = certs.value.findIndex(item => item.id === c.id);
   if (idx >= 0) {
@@ -659,7 +659,7 @@ const toggleContent = (c: CertEntry) => {
 const { clipCountdown, copyWithTimeout } = useClipToast();
 const copyContent = async (c: CertEntry) => { await copyWithTimeout(c.content); };
 
-/* ★ 企业级修复「页面覆盖」：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
+/* 修复「页面覆盖」：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
 import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
 useModuleDialogGuard("certs", () => {
   showDialog.value = false;

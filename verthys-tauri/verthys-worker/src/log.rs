@@ -33,10 +33,25 @@ pub(crate) use init_diag;
  * 崩溃诊断：panic hook + Windows 异常处理                              *
  * ------------------------------------------------------------------ */
 
-/// 安装 panic hook：将 panic 信息完整输出到 stderr
+/// 进程级 panic 标记：hook 置位，主循环每轮检查后走安全退出，
+/// 防止"捕获失败路径的 panic"残留为静默降级继续处理敏感数据。
+static PANIC_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 查询进程内是否已发生 panic（主循环退出判据之一）
+pub fn panic_flag_is_set() -> bool {
+    PANIC_FLAG.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 供 FFI 边界捕获到的 panic 置位同一标记（回调体等 catch_unwind 现场）
+pub fn mark_panic_flag() {
+    PANIC_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 安装 panic hook：将 panic 信息完整输出到 stderr，并置位进程级标记
 /// 默认 Rust panic hook 也会输出到 stderr，但显式 hook 可确保格式完整
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
+        PANIC_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
         let location = info.location();
         let loc_str = location
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))

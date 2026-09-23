@@ -1,7 +1,7 @@
 /*
  * hardware_binding.h — 机器实例指纹绑定（内部模块，不导出）
  *
- * ★ 弃用 CPUID/SMBIOS/UEFI 变量，改用 MachineGuid。
+ * 弃用 CPUID/SMBIOS/UEFI 变量，改用 MachineGuid。
 
  * 原实现缺陷：
  *   - CPUID leaf 1 是 family/model/stepping + feature flags，同型号所有

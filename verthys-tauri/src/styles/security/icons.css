@@ -1,6 +1,6 @@
 /* ============================================================
    icons.css — 安全视图共享排印体系（v5：引力悬浮场适配）
-   ★ v5 变更（无底板悬浮弹窗重构）：
+   v5 变更（无底板悬浮弹窗重构）：
      - .sc-dialog / .sc-dialog--auto 已删（卡片式弹窗底板连同
        CosmicDialog 一起被 LevitationField 悬浮场体系替代 —
        尺寸/布局由 float-field.css .ff-field 承载）
@@ -31,7 +31,7 @@
   line-height: 1.6;
 }
 
-/* ★ 企业级方案：修复失败告警（repair_fail_count >= 3 时显示） */
+/* 修复失败告警（repair_fail_count >= 3 时显示） */
 .sc-repair-alert {
   text-align: center;
   font-size: 11px;

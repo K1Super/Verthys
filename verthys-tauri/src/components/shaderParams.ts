@@ -171,7 +171,7 @@ export const CURTAIN_WARP: CurtainShaderOpts = {
  * 银河盘引力坠渡参数（3s 序列标定）：缠绕增益 2.4（∫env≈1.65 → 全程
  * 约 ±4 rad，内圈衰减后 ~±2.6 — 倒卷/收紧清晰可辨）/ 收缩 35% /
  * 核心吞没半径 90 / 噪声 14 / 静止漂移 1.1。
- * ★ 增益为 3s 基准标定 — 每帧速率剖面恒定，累计角度随 ENTER_T 线性缩放
+ * 增益为 3s 基准标定 — 每帧速率剖面恒定，累计角度随 ENTER_T 线性缩放
  * （5s 正渡 ≈ ±4.3 rad），缠绕手感不因时长改变。
  */
 export const GALAXY_ORBIT: OrbitShaderOpts = {
@@ -185,7 +185,7 @@ export const GALAXY_ORBIT: OrbitShaderOpts = {
 /**
  * 近景坠渡参数（3s 序列标定）：缠绕增益 3.6（大半径衰减后仍 ~±1 大弧
  * 横扫）/ 无收缩（保持掠过半径）/ 无核心吞没 / 最强噪声 26 / 静止漂移 1.8。
- * ★ 增益为 3s 基准标定 — 累计弧长随 ENTER_T 线性缩放（5s 正渡更长掠翼）。
+ * 增益为 3s 基准标定 — 累计弧长随 ENTER_T 线性缩放（5s 正渡更长掠翼）。
  */
 export const CLOSE_ORBIT: OrbitShaderOpts = {
   swirlGain: 3.6,

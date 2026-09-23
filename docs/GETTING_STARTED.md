@@ -14,7 +14,7 @@ Verthys 2.6.1 仅支持 Windows（x64）。构建入口为根目录 `build_produ
 | CMake | ≥ 3.20（`CMakeLists.txt` 首行 `cmake_minimum_required(VERSION 3.20)`） | 生成并构建 C 核心；实际使用 VS 自带 `cmake.exe`（`env.load.ps1` 派生 `VERTHYS_CMAKE_EXE`） |
 | Node.js + npm | 无硬性版本号；前端栈 vite 6 / vue-tsc / typescript / `@tauri-apps/cli` ^2 | 前端构建、类型检查与 Tauri 打包（脚本执行 `npm install`、`npx vue-tsc --noEmit`） |
 | Rust | stable，宿主目标 `x86_64-pc-windows-msvc`；`src-tauri/.cargo/config.toml` 注释引用 Rust 1.96 / rustc≥80，raw-dylib 需 Rust 1.71+ | 编译 verthys-worker 与 Tauri 主应用（`cargo build` / `cargo check` / `cargo update`） |
-| vcpkg | 不要求 | 构建不使用 vcpkg：C 依赖为 vendored `third_party/`（Libsodium / Flatcc），本地脚本与 CI 均无 vcpkg 步骤；`vcpkg.json` 仅为依赖清单声明 |
+| vcpkg | 不要求 | 构建不使用 vcpkg：C 依赖为 vendored `third_party/`（Libsodium / Flatcc），本地脚本与 CI 均无 vcpkg 步骤 |
 
 CI 实际安装的工具以 `.github/workflows/core.yml` 为准：`actions/checkout@v4` + `ilammy/msvc-dev-cmd@v1`（`arch: x64`）+ Ninja 生成器（`cmake -G Ninja`）；`ci/run_ci.ps1` 额外使用 `python`（正则扫描）与 `cargo`（AST 分析器）。core 工作流不涉及 Node/npm/Tauri 打包。
 
@@ -61,7 +61,7 @@ powershell -ExecutionPolicy Bypass -File build_dev.ps1
 ### 步骤 3：验证构建成功（最小命令组）
 
 ```powershell
-# 运行 C 核心测试（生产构建目录，单一聚合测试 verthys_tests，内含 250 个用例）
+# 运行 C 核心测试（生产构建目录，单一聚合测试 verthys_tests，内含 296 个用例）
 ctest --test-dir build -C Release --output-on-failure
 
 # 或直接运行测试可执行文件（Release 配置）

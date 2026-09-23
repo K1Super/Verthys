@@ -119,8 +119,11 @@ VerthysResult verthys_cng_km_generate_keyset(
 
 /*
  * 获取指定角色的内核态 AEAD 上下文（调用点接线用）。
- * 返回 NULL：参数非法或该角色未导入。
- * 返回的指针生命周期与 km 一致；KERNEL_RESIDENT 态下线程安全
+ * 返回 NULL：参数非法、状态非驻留（KERNEL_RESIDENT / REKEYING 之外的
+ * 态）或该角色未导入。
+ * REKEYING 语义为双域句柄生灭共存期：旧句柄仍驻留可读，自动轮换
+ * 内部的重包装步骤（旧 key_a 解包分区密钥）按此依赖放行。
+ * 返回的指针生命周期与 km 一致；驻留态下线程安全
  * （AEAD 运算并发安全，nonce 计数器原子递增）。
  */
 VerthysCngAead *verthys_cng_km_get(VerthysCngKeyManager *km, VerthysCngKeyRole role);
@@ -174,14 +177,17 @@ VerthysResult verthys_cng_km_rotate_mek(
 
 /*
  * 自动密钥轮换：A/B/C 句柄原位切换（超级块提交成功后收尾）。
- * 前置：KERNEL_RESIDENT。new_a/b/c 为调用方已 init + import 的全新
- * 上下文（verthys_rekey_auto_rotate 产物）。消耗语义（调用方在任意
+ * 前置：KERNEL_RESIDENT 或 REKEYING（轮换在途，旧句柄共存待切换）。
+ * new_a/b/c 为调用方已 init + import 的全新上下文
+ * （verthys_rekey_auto_rotate 产物）。消耗语义（调用方在任意
  * 返回路径均不得再 destroy 这三个结构）：
  *   - 成功：三个上下文按值移交 km->keys[A/B/C]（调用方栈结构置零），
  *     km->keys[] 槽位地址不变——wal/txn 借用的 VerthysCngAead 指针
  *     续期有效（原子切换句柄的落地形态）；nonce 计数器
  *     随结构移交（wrap/table 帧已消耗的值不回退）；
  *   - 失败（参数/状态非法）：三个上下文由本函数销毁，km 零变更。
+ * 成功时迁移 REKEYING → KERNEL_RESIDENT（本函数为轮换的状态收尾点，
+ * 切换后恢复常态）；失败时状态由调用方收口恢复。
  * MEK 句柄不动（轮换非改密）。handle_count / 进程级总量严格配对
  * （销毁旧 3 + 移交新 3，净值不变）。
  */

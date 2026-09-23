@@ -65,7 +65,7 @@ extern "C" {
 #define VERTHYS_V3_SB_REGION_END          UINT64_C(0x10000) /* 64KB */
 
 /*
- * ★ 对齐红线（flatcc verifier 物理地址对齐）：verifier 的字段校验基于
+ * 对齐红线（flatcc verifier 物理地址对齐）：verifier 的字段校验基于
  * 缓冲区绝对地址（verify_field: k = buf + table + vte，k & (align-1)），
  * u64 标量字段要求 8 字节物理对齐。因此所有承载 FlatBuffers 载荷、
  * 传入 *_verify_as_root / vsb_v3_parse* 的缓冲区，其载荷起点
@@ -87,7 +87,7 @@ static inline uint64_t vsb_v3_replica_offset(unsigned idx)
 }
 
 /* WAL 区（[0x10000, 0x100000) = 960KB，双 480KB 半区）。
- * ★ 区域容量由布局边界推导（单一事实源，防漂移红线）：原设计描述
+ * 区域容量由布局边界推导（单一事实源，防漂移红线）：原设计描述
  * "512KB 活跃 + 512KB 备份"与其自身边界 [64KB,1MB)=960KB 矛盾
  * （64KB + 1MB 越界至 1MB+64KB，verthys_wal_reset 整区清零将覆写
  * 分区表区首帧——api_full_roundtrip 解锁 S4 magic=0 回归根因）；
@@ -257,8 +257,9 @@ VerthysResult vsb_v3_commit_quorum(FILE *f, VerthysSuperBlockV3 *sb,
 /*
  * 法定人数读取（崩溃恢复路径）：
  *   1. 依次读取 3 副本，逐一 HMAC + verifier 验证；
- *   2. 有效副本按 txid 分组，取 ≥2 副本一致中的最高 txid → *out；
- *   3. 仅 1 副本有效 → VERTHYS_ERR_QUORUM_FAILED（触发恢复流程）；
+ *   2. 有效副本按 txid 与完整内容分组：一致须 txid 相等且解析内容
+ *      逐字节相同，取 ≥2 副本一致中的最高 txid → *out；
+ *   3. 仅 1 副本有效或互不一致 → VERTHYS_ERR_QUORUM_FAILED（恢复流程）；
  *   4. 0 副本有效 → VERTHYS_ERR_CORRUPT（WAL 恢复兜底）；
  * valid_mask_out（可 NULL）：bit i=1 表示副本 i HMAC+结构有效。
  */

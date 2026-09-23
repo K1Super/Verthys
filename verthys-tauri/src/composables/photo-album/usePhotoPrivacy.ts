@@ -7,7 +7,7 @@
  * 设计要点：
  * - privacyMode 为响应式状态，控制 UI 按钮开关
  * - privacySessionToken 为非响应式 let（闭包变量），启用时由后端返回，关闭时需传入验证
- *   ★ 注意：return 时返回的是快照值（null），外部无法获取最新值。
+ *   注意：return 时返回的是快照值（null），外部无法获取最新值。
  *   因此提供 cleanup 方法供 onUnmounted 调用，内部通过闭包访问最新 privacySessionToken。
  * - Tauri 模式：启用 setPrivacyMode(true) 成功后存储 session_token；
  *   关闭需传入 token 验证，无令牌时拒绝关闭（防止应用重启后状态不一致）
@@ -78,7 +78,7 @@ export function usePhotoPrivacy(isTauri: boolean) {
    * 令牌不可用时保持启用状态（安全默认：宁可不关也不无凭据关闭）
    * fire-and-forget：onUnmounted 同步回调，不阻塞卸载
    *
-   * ★ 通过闭包访问最新 privacySessionToken（return 的快照值无法反映后续修改）
+   * 通过闭包访问最新 privacySessionToken（return 的快照值无法反映后续修改）
    */
   const cleanup = () => {
     if (privacyMode.value && isTauri && privacySessionToken) {

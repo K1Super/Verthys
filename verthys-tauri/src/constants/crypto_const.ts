@@ -80,7 +80,7 @@ export const VENC_VERSION = 1;
 /* ------------------------------------------------------------------ *
  * Verthys 记录类型常量
  *
- * ★ 企业级根治：TYPE 常量统一到 constants/record_types.ts（单一真相源）
+ * 修复：TYPE 常量统一到 constants/record_types.ts（单一真相源）
  *
  * 原缺陷：TYPE_PHOTO_CHUNK=0x05 与 FileVerthys.vue 局部定义的 TYPE_META=0x05
  * 值相同，导致照片数据块与文件保险箱元数据互相误识。

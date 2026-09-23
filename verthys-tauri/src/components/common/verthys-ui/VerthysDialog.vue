@@ -16,8 +16,8 @@
       </div>
       <slot name="error" />
       <div class="dialog-actions">
-        <button class="btn" @click="$emit('update:modelValue', false)" :disabled="saving">取消</button>
-        <button class="btn btn-primary" @click="$emit('save')" :disabled="saveDisabled || saving">
+        <button class="btn kv-cancel" @click="$emit('update:modelValue', false)" :disabled="saving">取消</button>
+        <button class="btn btn-primary kv-confirm" @click="$emit('save')" :disabled="saveDisabled || saving">
           {{ saving ? '保存中…' : (saveLabel || '保存') }}
         </button>
       </div>
