@@ -15,7 +15,7 @@ libloading = "0.8"
 sha2 = "0.10"
 hkdf = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["simple"] }
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 rand = "0.8"
 # CSPRNG（共享内存随机名与擦除填充；Windows 走 BCryptGenRandom 家族）
 getrandom = "0.2"
