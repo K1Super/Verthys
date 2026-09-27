@@ -22,7 +22,10 @@ pub enum BruteForceCheckResponse {
     /// 允许尝试解锁
     Allow,
     /// 界面锁定中，剩余秒数
-    Locked { #[ts(type = "number")] remaining_secs: u64 },
+    Locked {
+        #[ts(type = "number")]
+        remaining_secs: u64,
+    },
     /// 需要清空索引并触发完整性校验
     PurgeRequired,
 }

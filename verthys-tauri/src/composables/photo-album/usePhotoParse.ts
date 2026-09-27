@@ -7,7 +7,7 @@
  * 设计要点：
  * - 接收 usePhotoData 返回值 + usePhotoToast 的 showError/showToast（依赖注入）
  * - chooseParseFile：Tauri 用 open() + readUserFile；浏览器用 input[type=file]
- *   感知：文件读取过程复用中枢初始化窗口进度条样式（非量子动画）
+ *   感知：文件读取过程复用进度条样式
  *     rAF 推进至 90% → 实际完成跳 100%，1.5s 最小感知时长，进度单调递增
  * - doParse：decryptExportFile → unpackVencMultiFile → 遍历用当前密钥 decryptMeta 预览
  *   感知：解析过程复用中枢初始化窗口进度条样式（非量子动画）
@@ -20,20 +20,39 @@
  *   - 持久化：pipeline 完成后 persistVerthys + 返回值检查
  *   - 复用 usePhotoImport 的 pipeline 实例 + importing refs（共享 QuantumProgressFlow）
  */
-import { ref, type Ref, type ShallowRef } from "vue";
+import { ref, onScopeDispose, type Ref, type ShallowRef } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readUserFile } from "../../lib/verthys";
-import { persistVerthys, setModuleCache } from "../../lib/keyManager";
-import {
-  decryptMeta, decryptExportFile, unpackVencMultiFile,
-  type PhotoMeta,
-} from "../../lib/crypto";
+import { persistVerthysDetailed, setModuleCache } from "../../lib/keyManager";
+import { MIN_TOKEN_LENGTH } from "../../constants/crypto_const";
 import { pushShallowItems } from "../../utils/shallow-array";
-import { yieldToMain } from "../../utils/promise_utils";
 import type { PhotoEntry, ParsedPhotoPreview } from "./types";
-import { formatSize } from "./utils";
+import { formatSize, nextMemoryPhotoId } from "./utils";
+import { useSingleTimer } from "./utils/timer";
 import type { ImportPipeline } from "./importPipeline";
 import { importedToPhotoEntries } from "./importPipeline";
+import type {
+  ParseCryptoRequest,
+  ParseCryptoResponse,
+  ParseCryptoCompletion,
+  ParseCryptoPreview,
+} from "../../workers/parse-crypto.worker";
+
+/** 解析 Worker 最小接口（依赖注入：测试以伪实现替代真实 Worker） */
+export interface ParseWorkerLike {
+  postMessage(message: ParseCryptoRequest, transfer?: Transferable[]): void;
+  onmessage: ((e: MessageEvent<ParseCryptoResponse>) => void) | null;
+  onerror: ((e: ErrorEvent) => void) | null;
+  terminate(): void;
+}
+
+/** 默认解析 Worker 工厂：按需冷启动（一次解析一个实例，完成即终止） */
+function defaultParseWorkerFactory(): ParseWorkerLike {
+  return new Worker(
+    new URL("../../workers/parse-crypto.worker.ts", import.meta.url),
+    { type: "module" },
+  );
+}
 
 /* ===== 进度条感知参数（复用 useModuleNavigation 的 1.5s 感知模式） ===== */
 /** 最小感知时长（毫秒）—— 保证用户清晰感知加载过程 */
@@ -68,6 +87,8 @@ export interface UsePhotoParseDeps {
   importElapsed: Ref<number>;
   /** 导入预计剩余时间（毫秒，复用 usePhotoImport 的 ref） */
   importEta: Ref<number>;
+  /** 解析 Worker 工厂（测试注入点；默认真实 Worker） */
+  parseWorkerFactory?: () => ParseWorkerLike;
 }
 
 export function usePhotoParse(deps: UsePhotoParseDeps) {
@@ -75,15 +96,23 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
     photos, photoKey, isTauri, ensurePhotoKey, showError, showToast,
     /* Parsed Import：复用 usePhotoImport 的流水线 + 导入状态 refs */
     getPipeline, importing, importProgress, importStatus, importElapsed, importEta,
+    parseWorkerFactory = defaultParseWorkerFactory,
   } = deps;
 
   /* ===== 解析对话框（反向解密 .venc 文件） ===== */
   const showParseDialog = ref(false);
   const parseFileName = ref("");
   const parseFileData = ref<Uint8Array | null>(null);
+  /** 已选文件的完整路径（Tauri 模式）：解析会把字节所有权转移给 Worker，
+   *  失败后重试必须能按原路径重读，避免复用已转移（detached）缓冲区 */
+  const parseFilePath = ref<string | null>(null);
   const parseToken = ref("");
   const parsing = ref(false);
   const parsedPhotos = ref<ParsedPhotoPreview[]>([]);
+  /** 无法用当前模块密钥解密的照片数（doParse 预检结果，导入前展示原因） */
+  const parsedUndecryptable = ref(0);
+  /** 空数据记录数（容器内无内容块）：与"密钥不匹配"分列，避免向用户报错原因 */
+  const parsedEmpty = ref(0);
   /* Parsed Import：对话框内导入进度条状态（复用 QuantumProgressFlow 组件）
      importingParsed 控制对话框内 QuantumProgressFlow 显示，与顶部的 importing ref 解耦，
      避免关闭对话框造成的视觉割裂（用户在对话框内实时看到导入进度） */
@@ -102,9 +131,13 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
   let fileLoadRafId: number | null = null;
   let parseRafId: number | null = null;
 
-  /* Parsed Import：导入完成后的清理定时器
-     用于追踪 setTimeout 句柄，在 openParseDialog 时清除残留定时器，防止内存泄漏 */
-  let importDoneTimer: ReturnType<typeof setTimeout> | null = null;
+  /* Parsed Import：导入完成后的清理定时器（句柄纳管统一工具）
+     用于在 openParseDialog 时清除残留定时器，防止旧回调污染新状态 */
+  const importDoneTimer = useSingleTimer("photo-parse-done");
+
+  onScopeDispose(() => {
+    importDoneTimer.dispose();
+  });
 
   /**
    * 创建单调递增进度发射器（复用 global-verthys.ts 的 lastEmittedPercent 闸门模式）
@@ -154,16 +187,16 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
   };
 
   const openParseDialog = () => {
-    // 清除上一次可能残留的导入完成定时器（防止内存泄漏 + 状态错乱）
-    if (importDoneTimer) {
-      clearTimeout(importDoneTimer);
-      importDoneTimer = null;
-    }
+    // 清除上一次可能残留的导入完成定时器（防止状态错乱）
+    importDoneTimer.cancel();
     showParseDialog.value = true;
     parseFileName.value = "";
     parseFileData.value = null;
+    parseFilePath.value = null;
     parseToken.value = "";
     parsedPhotos.value = [];
+    parsedUndecryptable.value = 0;
+    parsedEmpty.value = 0;
     // 重置进度状态（防止上次残留）
     fileLoading.value = false;
     fileLoadingPercent.value = 0;
@@ -242,6 +275,7 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         //   原缺陷：readFileBytes 白名单仅含 home_dir，D:\ 等路径被拒
         //   二进制 IPC 直传 Uint8Array（去 base64 化）
         parseFileData.value = await readUserFile(path);
+        parseFilePath.value = path;
         parseFileName.value = path.split(/[\\/]/).pop() || "unknown.venc";
         await finishLoading(emitter);
       } catch (e) {
@@ -268,6 +302,8 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
           const file = input.files[0];
           parseFileName.value = file.name;
           parseFileData.value = new Uint8Array(await file.arrayBuffer());
+          // 浏览器模式无路径可重读：置空以触发"请重新选择文件"的保护分支
+          parseFilePath.value = null;
           await finishLoading(emitter);
         } catch (e) {
           console.error("[chooseParseFile] 浏览器读取失败:", e);
@@ -279,7 +315,18 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
   };
 
   const doParse = async () => {
-    if (!parseFileData.value || !parseToken.value) return;
+    if (!parseFileData.value || !parseToken.value.trim()) return;
+
+    // 令牌归一化：从剪贴板/聊天工具粘贴常带首尾空白或换行，须先剔除再参与密钥派生
+    const token = parseToken.value.trim();
+    parseToken.value = token;
+    // 格式预检：令牌仅约束最小长度——支持任意自定义令牌（字符集不限，
+    //   与导出侧的可编辑令牌口径一致）；过短令牌给出专用提示，避免走
+    //   PBKDF2 后撞击 TAG 校验失败并把内部错误文案暴露给用户
+    if (token.length < MIN_TOKEN_LENGTH) {
+      showError(`令牌格式不正确（至少 ${MIN_TOKEN_LENGTH} 位字符）`);
+      return;
+    }
     // 感知：启动 rAF 进度推进（复用中枢初始化窗口进度条样式）
     parsing.value = true;
     parsingPercent.value = 0;
@@ -330,55 +377,115 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
     };
 
     try {
-      // 1. 解密外层 AES-256-GCM
+      // 1. 容器解包 + 逐张预览还原全部在解析 Worker 内完成：
+      //    令牌派生、逐帧 AEAD、首块密钥预检与块 base64 转换均不占主线程；
+      //    主线程仅等待完成、按 worker 进度消息渲染、装载预览结果
       parsingMsg.value = "正在解密加密文件";
-      const vencBytes = await decryptExportFile(parseFileData.value, parseToken.value);
 
-      // 2. 解包（unpackVencMultiFile 内部校验 magic 头 "VERTHYSPHOTO"(9字节) + 版本号）
-      parsingMsg.value = "正在解包照片数据";
-      const photoList = unpackVencMultiFile(vencBytes);
-
-      // 3. 尝试用当前密钥解密元数据以预览（不同设备密钥不同时显示占位）
-      // P0 修复：逐张解密 + 真实进度 + yieldToMain 让出主线程
-      //   旧实现：for 循环内 await decryptMeta 串行阻塞，rAF 无法执行 → 进度条冻结
-      //   新实现：每解密完一张 → emitRealProgress 真实进度 → yieldToMain 让出 → rAF 得以执行
-      parsingMsg.value = "正在还原照片预览";
-      const preview: ParsedPhotoPreview[] = [];
-      const total = photoList.length;
-      for (let i = 0; i < photoList.length; i++) {
-        const p = photoList[i];
-        let name = "加密照片";
-        let thumb = "";
-        let size = 0;
-        let meta: PhotoMeta | null = null;
-        if (photoKey.value) {
+      // 缓冲区所有权契约：上一次解析已把字节所有权转移给 Worker（原引用变为
+      // detached，byteLength 归零）。失败后未重选文件直接重试时，必须重新获取
+      // 缓冲区——优先按原路径重读（不增加常驻内存），浏览器模式无路径可用时
+      // 明确要求重新选择；绝不把 0 字节缓冲投递给 Worker 导致"文件已损坏"的
+      // 误导性失败。
+      let data = parseFileData.value;
+      if (!data || data.buffer.byteLength === 0) {
+        if (parseFilePath.value) {
           try {
-            meta = await decryptMeta(p.metaB64, photoKey.value);
-            name = meta.name;
-            size = meta.size;
-            if (meta.thumbB64) thumb = `url(data:image/jpeg;base64,${meta.thumbB64})`;
-          } catch { /* 当前密钥无法解密，显示占位 */ }
+            data = await readUserFile(parseFilePath.value);
+            parseFileData.value = data;
+          } catch (e) {
+            console.error("[doParse] 重新读取文件失败:", e);
+            await handleParseError("无法重新读取文件，请重新选择");
+            return;
+          }
+        } else {
+          await handleParseError("文件数据已释放，请重新选择文件");
+          return;
         }
-        preview.push({ name, thumb, size, metaB64: p.metaB64, chunkB64List: p.chunkB64List, meta });
-
-        // 发射真实进度（rAF 去重）
-        emitRealProgress(i + 1, total);
-
-        // P0 核心：每解密完一张照片后 yieldToMain，强制让出主线程
-        //   保证 requestAnimationFrame 回调（进度条渲染）得到执行机会
-        //   这是让进度条「真正动起来」的唯一解
-        await yieldToMain();
       }
-      parsedPhotos.value = preview;
+      // 转移容器字节所有权（零拷贝）；视图与底层缓冲不重合时先复制精确片段
+      const ownsBuffer =
+        data.byteOffset === 0 && data.byteLength === data.buffer.byteLength;
+      const transferBuffer: ArrayBuffer = ownsBuffer
+        ? data.buffer
+        : data.slice().buffer;
+
+      const worker = parseWorkerFactory();
+      const finalResponse = new Promise<ParseCryptoCompletion>((resolve) => {
+        worker.onmessage = (e) => {
+          const msg: ParseCryptoResponse = e.data;
+          if (msg.type === "progress") {
+            // 真实进度映射（rAF 去重），留 1% 给完成动画
+            emitRealProgress(msg.current, msg.total);
+            return;
+          }
+          resolve(msg);
+        };
+        worker.onerror = (err) => {
+          resolve({
+            id: 0,
+            type: "failure",
+            ok: false,
+            error: err.message ?? "解析 Worker 异常退出",
+          });
+        };
+      });
+
+      worker.postMessage(
+        {
+          id: 1,
+          fileBytes: transferBuffer,
+          token,
+          photoKey: photoKey.value,
+        } satisfies ParseCryptoRequest,
+        [transferBuffer],
+      );
+
+      const res = await finalResponse;
+      try {
+        worker.terminate();
+      } catch {
+        // 终止失败忽略：实例随引用释放被回收
+      }
+
+      if (!res.ok) {
+        // 面向用户文案：区分密钥错误与文件损坏，不暴露内部错误码与实现细节
+        const msg = res.error.includes("TAG_VERIFICATION_FAILED")
+          ? "密钥不正确，或文件已损坏/被篡改"
+          : "文件格式无法识别或已损坏";
+        await handleParseError(`解析失败：${msg}`);
+        return;
+      }
+
+      const previews: ParsedPhotoPreview[] = res.previews.map(
+        (p: ParseCryptoPreview): ParsedPhotoPreview => ({
+          name: p.name,
+          thumb: p.thumb,
+          size: p.size,
+          metaB64: p.metaB64,
+          chunkB64List: p.chunkB64List,
+          meta: p.meta,
+        }),
+      );
+      parsedPhotos.value = previews;
+      // 预检结果：不可解密数量供结果区与导入提示使用（与流水线分类口径一致）
+      parsedUndecryptable.value = res.undecryptable;
+      parsedEmpty.value = res.emptyCount;
       await finishParsing();
     } catch (e) {
       console.error("[doParse] 解析失败:", e);
-      const msg = e instanceof Error ? e.message : "未知错误";
-      await handleParseError("解析失败：" + msg);
+      // 面向用户文案：区分密钥错误与文件损坏，不暴露内部错误码与实现细节
+      const msg = e instanceof Error && e.message.includes("TAG_VERIFICATION_FAILED")
+        ? "密钥不正确，或文件已损坏/被篡改"
+        : "文件格式无法识别或已损坏";
+      await handleParseError(`解析失败：${msg}`);
     }
   };
 
   const importParsedPhotos = async () => {
+    // 重入守卫：解析导入进行中禁止再次触发（连点/双击防护）
+    if (importingParsed.value) return;
+
     // 模块密钥超时锁定后提示用户返回重新解锁
     if (!ensurePhotoKey()) {
       showError("拾光模块已锁定，请返回重新解锁");
@@ -386,10 +493,7 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
     }
 
     // 清除上一次可能残留的导入完成定时器
-    if (importDoneTimer) {
-      clearTimeout(importDoneTimer);
-      importDoneTimer = null;
-    }
+    importDoneTimer.cancel();
 
     // 保持解析对话框开启，在对话框内复用 QuantumProgressFlow 显示导入进度
     importingParsed.value = true;
@@ -420,7 +524,7 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
       }
 
       // ----- 阶段 2：处理 pipeline 返回的错误（非异常） -----
-      if (!result.ok && result.error) {
+      if (!result.ok) {
         // 失败路径：重置导入状态，保留 parsedPhotos 供重试，不关闭对话框
         importingParsed.value = false;
         importProgress.value = 0;
@@ -428,74 +532,84 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         importElapsed.value = 0;
         importEta.value = 0;
 
-        if (result.error.includes("VERTHYS_WRITE_BLOCKED")) {
+        if (result.error?.includes("VERTHYS_WRITE_BLOCKED")) {
           showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-        } else {
+        } else if (result.error) {
           showError(`导入失败: ${result.error}`);
+        } else {
+          // 部分失败且无会话级错误：按失败计数提示（成功项已入账，可重试失败部分）
+          showError(`导入 ${result.imported.length} 张，失败 ${result.failedRecords.length} 张，请重试`);
         }
         return;
       }
 
-      // ----- 阶段 3：成功路径 — 处理导入结果 -----
+      // ----- 阶段 3：成功路径 — 先落盘，后按三态提交 -----
       try {
-        // 将导入结果转换为 PhotoEntry 并追加到照片列表
+        // 1. 落盘（判别式）：
+        //    ok                → 落盘且结构自查通过；
+        //    partial_persisted → flush 成功（数据已 fsync）但结构自查未过，仍提交列表；
+        //    not_persisted     → flush 本身失败，不提交、保留 parsedPhotos 供重试。
+        let persistOutcome: Awaited<ReturnType<typeof persistVerthysDetailed>>;
+        try {
+          persistOutcome = await persistVerthysDetailed();
+        } catch (e) {
+          console.error("[importParsedPhotos] persistVerthysDetailed 异常", e);
+          persistOutcome = { kind: "not_persisted", reason: String(e) };
+        }
+        if (persistOutcome.kind === "not_persisted") {
+          importingParsed.value = false;
+          importProgress.value = 0;
+          importStatus.value = "";
+          importElapsed.value = 0;
+          importEta.value = 0;
+          showError("持久化失败，本次导入未生效，请重试");
+          return;
+        }
+        // 结构性自查告警（partial_persisted）：数据已落盘，仅提示，不阻断提交
+        const persistWarning =
+          persistOutcome.kind === "partial_persisted" ? persistOutcome.reason : null;
+
+        // 2. 提交列表：仅成功导入项（不可解密项已由流水线剔除，不写入列表）
         if (result.imported.length > 0) {
-          const newEntries = importedToPhotoEntries(result.imported, photos.value.length);
+          const newEntries = importedToPhotoEntries(result.imported);
           pushShallowItems(photos, newEntries);
         }
 
-        // 无法解密的照片（meta 为 null，不同设备导入）：仅添加到内存列表
-        const inMemoryOnly = parsedPhotos.value.filter(ph => !ph.meta);
-        if (inMemoryOnly.length > 0) {
-          const memoryEntries: PhotoEntry[] = inMemoryOnly.map((ph, i) => ({
-            id: Date.now() + result.imported.length + i,
-            name: ph.name,
-            thumb: ph.thumb,
-            size: formatSize(ph.size),
-            height: 180 + (((result.imported.length + i) * 23) % 100),
-            meta: ph.meta || undefined,
-          }));
-          pushShallowItems(photos, memoryEntries);
-        }
-
-        // 修复：持久化到磁盘 + 返回值检查
-        let persistOk = false;
-        try {
-          persistOk = await persistVerthys();
-        } catch (e) {
-          console.error("[importParsedPhotos] persistVerthys 异常", e);
-        }
-        if (!persistOk && result.imported.length > 0) {
-          showError(`${result.imported.length} 张照片已导入内存但持久化失败，重启后可能丢失。请勿关闭应用，尝试重新导入或联系支持。`);
-        }
-
-        // 同步模块缓存
+        // 3. 同步模块缓存（落盘成功之后，避免缓存与磁盘状态脱节）
         setModuleCache("photos", photos.value);
 
-        const totalImported = result.imported.length + inMemoryOnly.length;
+        const totalImported = result.imported.length;
 
         // 关键：进度条显示 100% 完成状态，保持 importingParsed=true 1.5s
         //   让用户看到完成反馈，然后一次性清理状态并关闭对话框
         //   （避免 importingParsed=false 后 parsedPhotos 未清空导致结果复现）
         importProgress.value = 100;
+        // 文案仅由成功计数派生；不可解密项单列并说明原因，不混入成功计数
+        const undecryptableNote = result.undecryptable > 0
+          ? `（${result.undecryptable} 张无法用当前密钥解密，未导入）`
+          : "";
         if (result.skipped > 0) {
-          importStatus.value = `完成：导入 ${totalImported} 张，去重跳过 ${result.skipped} 张`;
+          importStatus.value = `完成：导入 ${totalImported} 张，去重跳过 ${result.skipped} 张${undecryptableNote}`;
         } else {
-          importStatus.value = `完成：导入 ${totalImported} 张照片`;
+          importStatus.value = `完成：导入 ${totalImported} 张照片${undecryptableNote}`;
         }
 
         // Toast 提示（toast 层级高于对话框，立即显示）
         if (result.skipped > 0) {
-          showToast(`已导入 ${totalImported} 张照片，去重跳过 ${result.skipped} 张`);
+          showToast(`已导入 ${totalImported} 张照片，去重跳过 ${result.skipped} 张${undecryptableNote}`);
         } else {
-          showToast(`已导入 ${totalImported} 张照片`);
+          showToast(`已导入 ${totalImported} 张照片${undecryptableNote}`);
+        }
+        // 落盘结构性告警（partial_persisted）：数据已落盘，用非 error 的
+        // 警告 toast 提示；不阻断提交，也不使用红色 error 条。
+        if (persistWarning) {
+          showToast(`照片已导入（校验警告）：${persistWarning}；如重启后异常请重新导入`);
         }
 
         // 1.5s 后一次性清理所有状态 + 关闭对话框（无缝衔接）
         //   顺序：清空 parsedPhotos → 重置 importingParsed → 重置进度 → 关闭对话框
         //   必须同时执行，避免中间状态导致模板回退到结果显示
-        importDoneTimer = setTimeout(() => {
-          importDoneTimer = null;
+        importDoneTimer.schedule(() => {
           parsedPhotos.value = [];           // 清理解析结果（根治"关闭后又复现"）
           importingParsed.value = false;      // 隐藏进度条
           importProgress.value = 0;
@@ -515,9 +629,11 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         showError("导入后处理失败，请重试");
       }
     } else {
-      // ===== 浏览器模式：仅添加到内存列表（无加密、无 IPC） =====
-      const newPhotos: PhotoEntry[] = parsedPhotos.value.map((ph, i) => ({
-        id: Date.now() + i,
+      // ===== 浏览器模式：仅添加到内存列表（无加密、无 IPC），ID 统一走单调计数器 =====
+      const importable = parsedPhotos.value.filter(ph => ph.meta);
+      const skipCount = parsedPhotos.value.length - importable.length;
+      const newPhotos: PhotoEntry[] = importable.map((ph, i) => ({
+        id: nextMemoryPhotoId(),
         name: ph.name,
         thumb: ph.thumb,
         size: formatSize(ph.size),
@@ -526,7 +642,9 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
       }));
       pushShallowItems(photos, newPhotos);
       setModuleCache("photos", photos.value);
-      showToast(`已导入 ${newPhotos.length} 张照片`);
+      // 文案仅由成功计数派生；浏览器模式不持久化，需向用户明示会话级生命周期
+      const skipNote = skipCount > 0 ? `（${skipCount} 张无法用当前密钥解密，未导入）` : "";
+      showToast(`已导入 ${newPhotos.length} 张照片${skipNote}（浏览器模式不持久化，仅本次会话可见）`);
       // 浏览器模式：立即清理并关闭
       parsedPhotos.value = [];
       importingParsed.value = false;
@@ -542,6 +660,9 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
     parseToken,
     parsing,
     parsedPhotos,
+    /** 无法用当前模块密钥解密的照片数（结果区预检展示用） */
+    parsedUndecryptable,
+    parsedEmpty,
     // 感知：进度条状态（复用中枢初始化窗口进度条样式，非量子动画）
     fileLoading,
     fileLoadingPercent,

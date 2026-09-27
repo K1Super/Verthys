@@ -15,9 +15,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::BufReader;
 use tokio::process::ChildStderr;
 
-use super::protocol::{
-    bounded_read_line, BoundedLineError, MAX_LINE_BYTES, STDERR_RING_SIZE,
-};
+use super::protocol::{bounded_read_line, BoundedLineError, MAX_LINE_BYTES, STDERR_RING_SIZE};
 
 /* ------------------------------------------------------------------ *
  * stderr 环形缓冲区                                                   *

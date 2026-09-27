@@ -53,7 +53,7 @@ use tauri::Manager;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /* ------------------------------------------------------------------ *
  * ScanRecord trait                                         *
@@ -83,10 +83,16 @@ pub trait ScanRecord: Zeroize + VirtualLockable + Clone + Send + 'static {
 
     /// 从共享内存读取一批记录
     ///
+    /// `auth_key` 为本次 fetch 申请的一次性 SHM 认证密钥：Some 时读取函数
+    /// 会核验数据区尾部 HMAC 标签；None 表示无认证（scan_open 首批）。
+    ///
     /// 返回 `(记录列表, 共享内存是否已耗尽, worker 报告的 record_count)`。
     /// 调用方校验 `records.len() == record_count`，不一致则判定数据损坏熔断。
     /// 共享内存已耗尽表示本批是最后一批，但游标可能未遍历结束（需下一轮 fetch 确认）。
-    fn read_from_shm(shm_name: &str) -> Result<(Vec<Self>, bool, usize), String>;
+    fn read_from_shm(
+        shm_name: &str,
+        auth_key: Option<&[u8]>,
+    ) -> Result<(Vec<Self>, bool, usize), String>;
 }
 
 impl ScanRecord for VerthysRecordEntry {
@@ -94,8 +100,11 @@ impl ScanRecord for VerthysRecordEntry {
     const CLOSE_OP: &'static str = "scan_close";
     const ABORT_OP: &'static str = "scan_abort";
 
-    fn read_from_shm(shm_name: &str) -> Result<(Vec<Self>, bool, usize), String> {
-        read_shm_records(shm_name)
+    fn read_from_shm(
+        shm_name: &str,
+        auth_key: Option<&[u8]>,
+    ) -> Result<(Vec<Self>, bool, usize), String> {
+        read_shm_records(shm_name, auth_key)
     }
 }
 
@@ -104,8 +113,11 @@ impl ScanRecord for VerthysSummaryEntry {
     const CLOSE_OP: &'static str = "scan_summary_close";
     const ABORT_OP: &'static str = "scan_summary_abort";
 
-    fn read_from_shm(shm_name: &str) -> Result<(Vec<Self>, bool, usize), String> {
-        read_shm_summary_records(shm_name)
+    fn read_from_shm(
+        shm_name: &str,
+        auth_key: Option<&[u8]>,
+    ) -> Result<(Vec<Self>, bool, usize), String> {
+        read_shm_summary_records(shm_name, auth_key)
     }
 }
 
@@ -113,8 +125,11 @@ impl ScanRecord for VerthysSummaryEntry {
  * 预取命令 + 长期任务控制                                   *
  * ------------------------------------------------------------------ */
 
-/// 预取结果：记录批次 + 是否遍历结束 + worker 报告的 record_count
-pub type PrefetchReply<T> = Result<(Vec<T>, bool, usize), String>;
+/// 预取结果：记录批次 + 是否遍历结束 + worker 报告的 record_count + 失败条目 ID
+///
+/// 失败条目 ID 由 worker 响应（C 层按 lid 记账的解密失败/索引不一致条目）
+/// 透传，与批次记录同程返回：控制器将其透传给前端，用于标记损坏条目。
+pub type PrefetchReply<T> = Result<(Vec<T>, bool, usize, Vec<u64>), String>;
 
 /// 预取任务命令
 ///
@@ -169,13 +184,12 @@ impl<T: ScanRecord> PrefetchTaskHandle<T> {
     pub fn spawn(app: tauri::AppHandle, shm_name: String) -> Self {
         let (tx, rx) = mpsc::channel::<PrefetchCommand<T>>(8);
         let cancel = CancellationToken::new();
-        let join = tokio::spawn(prefetch_task::<T>(
-            app,
-            shm_name,
-            rx,
-            cancel.clone(),
-        ));
-        Self { tx: Some(tx), cancel, join: Some(join) }
+        let join = tokio::spawn(prefetch_task::<T>(app, shm_name, rx, cancel.clone()));
+        Self {
+            tx: Some(tx),
+            cancel,
+            join: Some(join),
+        }
     }
 
     /// 发送 Fetch 命令并返回回复接收器
@@ -190,12 +204,9 @@ impl<T: ScanRecord> PrefetchTaskHandle<T> {
     pub async fn send_fetch(
         &self,
         batch_size: u64,
-    ) -> Result<oneshot::Receiver<Result<(Vec<T>, bool, usize), String>>, String> {
+    ) -> Result<oneshot::Receiver<PrefetchReply<T>>, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let tx = self
-            .tx
-            .as_ref()
-            .ok_or("prefetch task already shut down")?;
+        let tx = self.tx.as_ref().ok_or("prefetch task already shut down")?;
         tx.send(PrefetchCommand::Fetch {
             batch_size,
             reply: reply_tx,
@@ -330,10 +341,9 @@ async fn prefetch_task<T: ScanRecord>(
 
                 let result = match result {
                     Ok(r) => r,
-                    Err(join_err) => Err(format!(
-                        "prefetch spawn_blocking join error: {}",
-                        join_err
-                    )),
+                    Err(join_err) => {
+                        Err(format!("prefetch spawn_blocking join error: {}", join_err))
+                    }
                 };
 
                 // 发送回复（如果接收端已 drop 则忽略）
@@ -360,8 +370,8 @@ async fn prefetch_task<T: ScanRecord>(
 ///   1. 通过 AppState::send_with_timeout 发送 fetch 请求到 worker
 ///   2. 通过 T::read_from_shm 从共享内存读取记录
 ///
-/// 返回 worker 报告的 record_count（来自 SHM 头部），
-/// 供控制器校验 records.len() == record_count。
+/// 返回 worker 报告的 record_count（来自 SHM 头部，供控制器校验
+/// records.len() == record_count）与失败条目 ID（来自 worker 响应）。
 ///
 /// # 错误
 /// - send_with_timeout 失败（worker 超时/断开）
@@ -372,22 +382,29 @@ fn do_prefetch_blocking<T: ScanRecord>(
     app: &tauri::AppHandle,
     shm_name: &str,
     batch_size: u64,
-) -> Result<(Vec<T>, bool, usize), String> {
+) -> Result<(Vec<T>, bool, usize, Vec<u64>), String> {
     let state = app.state::<AppState>();
+    // 每次 fetch 生成一次性 SHM 认证密钥，Zeroizing 确保读回验证后自动清零
+    let mut key_buf = [0u8; 32];
+    crate::util::random::fill_random_bytes(&mut key_buf);
+    let shm_auth_key = Zeroizing::new(key_buf);
     let req = serde_json::json!({
         "op": T::FETCH_OP,
         "id": batch_size,
+        "shm_key": crate::util::base64::base64_encode(&*shm_auth_key),
     });
     // 预取内部二级超时（使用 TimeoutConfig.scan_prefetch）
     let prefetch_timeout = crate::constants::timeout::DEFAULT.scan_prefetch;
     let resp_json = state.send_with_timeout(&req.to_string(), prefetch_timeout)?;
-    let resp: VerthysResponse = serde_json::from_str(&resp_json)
-        .map_err(|e| format!("parse response: {}", e))?;
+    let resp: VerthysResponse =
+        serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
     if !resp.ok {
         return Err(format!("{} failed: {:?}", T::FETCH_OP, resp.error));
     }
-    // fetch 复用 scan_open 创建的共享内存段，使用原有 shm_name 读取
-    T::read_from_shm(shm_name)
+    // fetch 复用 scan_open 创建的共享内存段，使用原有 shm_name 读取并核验 HMAC
+    let (records, exhausted, record_count) =
+        T::read_from_shm(shm_name, Some(&shm_auth_key[..]))?;
+    Ok((records, exhausted, record_count, resp.failed_ids.unwrap_or_default()))
 }
 
 /* ------------------------------------------------------------------ *

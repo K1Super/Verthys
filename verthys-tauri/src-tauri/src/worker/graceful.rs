@@ -30,8 +30,7 @@ use super::stderr::{snapshot_stderr, truncate_utf8, StderrRing};
 pub(crate) fn reject_request_after_exit(req: ActorRequest, pid: u32) {
     let err = Err(format!("worker 子进程 PID={} 已退出", pid));
     match req {
-        ActorRequest::Send { reply, .. }
-        | ActorRequest::SendStreamingUnlock { reply, .. } => {
+        ActorRequest::Send { reply, .. } | ActorRequest::SendStreamingUnlock { reply, .. } => {
             let _ = reply.send(err);
         }
         ActorRequest::WaitReady { reply, .. } => {
@@ -129,11 +128,7 @@ pub(crate) async fn mark_child_dead_if_needed(
 ) {
     match child.try_wait() {
         Ok(Some(status)) => {
-            log::warn!(
-                "[actor] PID={} 子进程已退出: code={:?}",
-                pid,
-                status.code()
-            );
+            log::warn!("[actor] PID={} 子进程已退出: code={:?}", pid, status.code());
             child_alive.store(false, Ordering::SeqCst);
         }
         Ok(None) => {

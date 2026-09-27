@@ -42,7 +42,10 @@ pub fn security_session_start(
         })?
         .hwnd()
         .map_err(|e| {
-            log::error!("[security_session_start] 第 13.2.8 项：获取 HWND 失败: {}", e);
+            log::error!(
+                "[security_session_start] 第 13.2.8 项：获取 HWND 失败: {}",
+                e
+            );
             format!("获取 HWND 失败: {}", e)
         })?
         .0 as isize;
@@ -114,7 +117,10 @@ pub fn security_session_set_high_security(
             AuditEventType::SecurityCommand,
             AuditResult::Denied,
             None,
-            Some(format!("PERMISSION_DENIED: set_high_security({}) {}", enabled, msg)),
+            Some(format!(
+                "PERMISSION_DENIED: set_high_security({}) {}",
+                enabled, msg
+            )),
         );
         return Ok(SecurityResult::error(
             "PERMISSION_DENIED",
@@ -133,7 +139,10 @@ pub fn security_session_set_high_security(
         AuditEventType::SecurityCommand,
         AuditResult::Success,
         None,
-        Some(format!("高安全模式: {}", if enabled { "启用" } else { "禁用" })),
+        Some(format!(
+            "高安全模式: {}",
+            if enabled { "启用" } else { "禁用" }
+        )),
     );
 
     log::info!(

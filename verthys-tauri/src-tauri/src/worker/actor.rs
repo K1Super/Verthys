@@ -81,7 +81,11 @@ pub(crate) async fn actor_loop(
             continue;
         }
         match req {
-            ActorRequest::Send { json, timeout, reply } => {
+            ActorRequest::Send {
+                json,
+                timeout,
+                reply,
+            } => {
                 let result = handle_send(
                     &mut stdin,
                     &mut stdout_reader,
@@ -133,7 +137,11 @@ pub(crate) async fn actor_loop(
     perform_graceful_shutdown(&mut stdin, &mut child, pid, &child_alive).await;
 
     // 等待 stderr 任务结束（短超时，确保最后的 stderr 输出被消费）
-    log::info!("[actor] PID={} 等待 stderr 任务结束（{}ms 超时）", pid, STDERR_DRAIN_FINAL_TIMEOUT.as_millis());
+    log::info!(
+        "[actor] PID={} 等待 stderr 任务结束（{}ms 超时）",
+        pid,
+        STDERR_DRAIN_FINAL_TIMEOUT.as_millis()
+    );
     let _ = tokio::time::timeout(STDERR_DRAIN_FINAL_TIMEOUT, stderr_task).await;
 
     log::info!("[actor] PID={} Actor 任务退出", pid);
@@ -337,11 +345,7 @@ async fn handle_streaming_unlock_send(
                 // 解析 op 字段
                 let op = serde_json::from_str::<serde_json::Value>(&trimmed)
                     .ok()
-                    .and_then(|v| {
-                        v.get("op")
-                            .and_then(|o| o.as_str())
-                            .map(|s| s.to_string())
-                    });
+                    .and_then(|v| v.get("op").and_then(|o| o.as_str()).map(|s| s.to_string()));
 
                 if op.as_deref() == Some(UNLOCK_PROGRESS_OP) {
                     // 进度行：解析并推送，重置 deadline
@@ -363,11 +367,7 @@ async fn handle_streaming_unlock_send(
                             }
                         }
                         Err(e) => {
-                            log::warn!(
-                                "[worker] 解锁进度行解析失败: {} | raw={}",
-                                e,
-                                trimmed
-                            );
+                            log::warn!("[worker] 解锁进度行解析失败: {} | raw={}", e, trimmed);
                         }
                     }
                     deadline = Instant::now() + idle_timeout;
@@ -453,10 +453,7 @@ async fn handle_wait_ready(
                 // EOF — 子进程已退出
                 let diag = diagnose_exit(child, pid, stderr_ring).await;
                 log::error!("[worker] 就绪检测：子进程已崩溃: {}", diag);
-                return Err(format!(
-                    "worker 就绪检测失败: 子进程已崩溃 — {}",
-                    diag
-                ));
+                return Err(format!("worker 就绪检测失败: 子进程已崩溃 — {}", diag));
             }
             Ok(Ok(Some(_))) => {
                 let trimmed = line.trim();

@@ -398,9 +398,8 @@ fn get_physical_disk_number(drive_letter: char) -> Result<u32, String> {
         return Err("磁盘扩展信息数据不完整".to_string());
     }
 
-    let extent: &DiskExtent = unsafe {
-        &*(extents_buf.as_ptr().add(extent_offset) as *const DiskExtent)
-    };
+    let extent: &DiskExtent =
+        unsafe { &*(extents_buf.as_ptr().add(extent_offset) as *const DiskExtent) };
 
     Ok(extent.disk_number)
 }
@@ -471,7 +470,9 @@ impl UsbRegistry {
     /// /// 注册表容量限制
     /// 返回 Ok(()) 表示注册成功，Err(msg) 表示已达容量上限。
     pub fn register_device(&mut self, volume_label: &str, serial_hash: &str) -> Result<(), String> {
-        if self.known_devices.len() >= self.max_entries && !self.known_devices.contains_key(volume_label) {
+        if self.known_devices.len() >= self.max_entries
+            && !self.known_devices.contains_key(volume_label)
+        {
             log::warn!(
                 "[usb_guard] SECURITY.md 第 6 项：USB 注册表已达上限 ({} 条)，\
                  拒绝注册新设备: label={}",
@@ -497,10 +498,7 @@ impl UsbRegistry {
     pub fn check_clone(&self, volume_label: &str, serial_hash: &str) -> CloneCheckResult {
         match self.known_devices.get(volume_label) {
             Some(existing_hash) => {
-                if crate::util::crypto::ct_eq(
-                    existing_hash.as_bytes(),
-                    serial_hash.as_bytes(),
-                ) {
+                if crate::util::crypto::ct_eq(existing_hash.as_bytes(), serial_hash.as_bytes()) {
                     // 合法设备：卷标 + 序列号哈希双因子匹配
                     CloneCheckResult::Trusted
                 } else {
@@ -557,14 +555,10 @@ impl UsbRegistry {
             if self.known_devices.len() >= self.max_entries
                 && !self.known_devices.contains_key(label)
             {
-                log::warn!(
-                    "[usb_guard] 导入设备时达到容量上限，跳过: label={}",
-                    label
-                );
+                log::warn!("[usb_guard] 导入设备时达到容量上限，跳过: label={}", label);
                 break;
             }
-            self.known_devices
-                .insert(label.clone(), hash.clone());
+            self.known_devices.insert(label.clone(), hash.clone());
         }
     }
 }
@@ -833,9 +827,7 @@ fn shadow_timer_loop_with_deadline(
             let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
             // 再次检查是否仍有数据（可能已被 try_recover/purge 取走）
             if inner.encrypted_index.is_some() {
-                log::info!(
-                    "[shadow_sleep] SECURITY.md 第 7 项：定时器到期，自动 purge 加密索引"
-                );
+                log::info!("[shadow_sleep] SECURITY.md 第 7 项：定时器到期，自动 purge 加密索引");
                 // SecuredBuffer 的 Drop 会自动 zeroize
                 inner.encrypted_index = None;
                 inner.txid = 0;

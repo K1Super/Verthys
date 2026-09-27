@@ -85,6 +85,29 @@ const WAIT_FLUSH_TIMEOUT_MS = 22000;
 /** doFlush 重试线性退避间隔 */
 const FLUSH_RETRY_BACKOFF_MS = 100;
 
+/* C 端 VerPersistStatus 状态码（与 verthys.h VerPersistStatus 对齐）：
+ * 0=OK / 1=HEADER_INVALID / 2=SIZE_MISMATCH / 3=WAL_REGION / 4=IO / 5=INTERNAL。
+ * 仅 IO 类可重试；HEADER/SIZE/WAL_REGION 属结构性失败，重试不可自愈。 */
+const VER_PERSIST_E_IO = 4;
+
+/** flush + 落盘校验的判别式结果 */
+export type FlushResult =
+  | { kind: "ok"; fileSize: number; mtimeMs: number }
+  | { kind: "verify_failed"; statusCode: number; detail: string }
+  | { kind: "io_failed"; error: string }
+  | { kind: "session_gone" };
+
+/** 对外落盘持久化判别式结果
+ *
+ *  - ok：flush 成功且结构校验通过；
+ *  - partial_persisted：flush 成功（数据已 fsync 落盘）但结构自查未过——
+ *    数据确已落盘，不得判为"未落盘"，仅作结构告警；
+ *  - not_persisted：flush 本身失败（数据可能未落盘）。 */
+export type PersistOutcome =
+  | { kind: "ok" }
+  | { kind: "partial_persisted"; reason: string; statusCode?: number; detail?: string }
+  | { kind: "not_persisted"; reason: string; statusCode?: number; detail?: string };
+
 export class VerthysFlushService {
   // === 私有状态（原模块级散落变量收拢） ===
   private flushChain: Promise<void> = Promise.resolve();
@@ -251,12 +274,35 @@ export class VerthysFlushService {
   /**
    * 持久化 verthys 到磁盘（新增/编辑后调用，写透模式）。
    * 立即入队 flush，取消防抖（此立即 flush 已覆盖 pending delete）。
+   *
+   * 对外签名保持不变：返回"数据是否已落盘"。flush 成功但结构自查未过
+   * （partial_persisted）时数据已 fsync，返回 true 以避免误报，同时以
+   * log.warn 结构化记录。
    */
   async persistVerthys(): Promise<boolean> {
+    const r = await this.persistVerthysDetailed();
+    if (r.kind === "partial_persisted") {
+      log.warn("persistVerthys: 数据已落盘但落盘结构自查未通过", {
+        reason: r.reason,
+        statusCode: r.statusCode,
+        detail: r.detail,
+      });
+    }
+    return r.kind === "ok" || r.kind === "partial_persisted";
+  }
+
+  /**
+   * 持久化 verthys 的判别式版本（照片链路消费）。
+   *
+   * 与 persistVerthys 同一队列语义（flushChain 串行 + 代际校验），
+   * 但返回三态：ok / partial_persisted（已 fsync 但结构自查未过）/
+   * not_persisted（flush 本身失败）。调用方据此决定 UI 提交/告警策略。
+   */
+  async persistVerthysDetailed(): Promise<PersistOutcome> {
     const currentVerthysPath = this.currentVerthysPathGetter();
     if (!currentVerthysPath) {
-      log.error("persistVerthys: currentVerthysPath 为空");
-      return false;
+      log.error("persistVerthysDetailed: currentVerthysPath 为空");
+      return { kind: "not_persisted", reason: "no active session path" };
     }
     this.resetTimersCancelledFlag();
     const gen = this.queueGeneration;
@@ -265,9 +311,14 @@ export class VerthysFlushService {
     this.pendingFlushCount++;
     this.updatePendingFlushWork();
 
-    const result = this.flushChain.then(() => {
-      if (gen !== this.queueGeneration) return;
-      return this.doFlush();
+    // 结果经闭包变量回传（队列 callback 返回 void，保持 flushChain 语义不变）
+    let outcome: PersistOutcome = { kind: "not_persisted", reason: "session reset" };
+    const result = this.flushChain.then(async () => {
+      if (gen !== this.queueGeneration) {
+        outcome = { kind: "not_persisted", reason: "session reset before flush" };
+        return;
+      }
+      outcome = this.toPersistOutcome(await this.flushWithVerify());
     });
 
     // 更新链尾（吞掉错误，避免一次失败中断后续所有 flush）
@@ -283,7 +334,28 @@ export class VerthysFlushService {
         this.updatePendingFlushWork();
       },
     );
-    return result.then(() => true, () => false);
+    await result;
+    return outcome;
+  }
+
+  /** FlushResult → PersistOutcome 映射（flush 成功与否决定落盘语义） */
+  private toPersistOutcome(r: FlushResult): PersistOutcome {
+    switch (r.kind) {
+      case "ok":
+        return { kind: "ok" };
+      case "verify_failed":
+        // flush 已成功 → 数据已 fsync，结构性自查未过只能算"部分落盘"
+        return {
+          kind: "partial_persisted",
+          reason: `verify failed (status ${r.statusCode})`,
+          statusCode: r.statusCode,
+          detail: r.detail,
+        };
+      case "io_failed":
+        return { kind: "not_persisted", reason: r.error };
+      case "session_gone":
+        return { kind: "not_persisted", reason: "session gone" };
+    }
   }
 
   /**
@@ -526,7 +598,7 @@ export class VerthysFlushService {
     }
   }
 
-  /** 入队一次 flush（在 flushChain 尾部追加 doFlush）— 内部使用 */
+  /** 入队一次 flush（在 flushChain 尾部追加 flushWithVerify）— 内部使用 */
   private enqueueFlushInternal(): void {
     const gen = this.queueGeneration;
     this.pendingFlushCount++;
@@ -534,7 +606,7 @@ export class VerthysFlushService {
 
     const flushResult = this.flushChain.then(() => {
       if (gen !== this.queueGeneration) return;
-      return this.doFlush();
+      return this.flushWithVerify();
     });
 
     this.flushChain = flushResult.then(
@@ -767,20 +839,25 @@ export class VerthysFlushService {
   /* ==================== 实际 flush 执行 ==================== */
 
   /**
-   * 实际执行 flush 操作（含重试逻辑与磁盘级持久化验证）。
+   * flush + 落盘自查（含重试逻辑）。
    *
-   * 新 flush 模式（Verthys_Flush）不改变 worker 状态（始终保持 UNLOCKED），
-   * flush 失败后无需 verthysUnlock 恢复。短暂延迟后重试（线性退避 100ms）。
+   * 拆分自旧 doFlush：flush（写入侧）与 verify（C 层持锁句柄自查）独立错误码。
+   *   - flush 失败 → 按 IO 失败重试（上限 FLUSH_MAX_RETRIES）；
+   *   - flush 成功 → worker 进程内 C 层持锁句柄自查盘面结构；
+   *   - 自查 IO 类失败 → 可重试；结构性失败（HEADER/SIZE/WAL_REGION）→
+   *     不重试直接报错（重试不可自愈）。
+   * Verthys_Flush 不改变 worker 状态（始终 UNLOCKED），失败无需 unlock 恢复。
    */
-  private async doFlush(): Promise<boolean> {
+  private async flushWithVerify(): Promise<FlushResult> {
     const path = this.currentVerthysPathGetter();
     // 空路径保护：lockAll 已清空路径后，残留的 pending flush 不得触发 IPC
     if (!path) {
-      log.warn("doFlush: currentVerthysPath 为空，跳过 flush（worker 可能已销毁）");
-      return false;
+      log.warn("flushWithVerify: currentVerthysPath 为空，跳过 flush（worker 可能已销毁）");
+      return { kind: "session_gone" };
     }
 
     for (let attempt = 1; attempt <= FLUSH_MAX_RETRIES; attempt++) {
+      // 1. flush（写入侧 fsync）
       const okResult = await Promise.race([
         verthysFlush(path, VERTHYS_DEFAULT_PASSWORD),
         new Promise<boolean>((resolve) => {
@@ -793,30 +870,62 @@ export class VerthysFlushService {
       if (!okResult) {
         log.error(`verthysFlush 第 ${attempt}/${FLUSH_MAX_RETRIES} 次失败`);
         this.lastFlushError = `verthysFlush 第 ${attempt} 次失败`;
-      } else {
-        // 磁盘级持久化验证：flush 成功后绕过 worker 内存直接校验磁盘文件，
-        // 消除"内存可见、磁盘丢失"假成功。验证失败按 flush 失败处理，触发重试。
-        const diskOk = await verthysVerifyDiskPersist(path);
-        if (diskOk) {
-          // flush 成功后立即从 Set 中批量移除已提交删除的对应 ID（而非 clear 全部）
-          for (const id of this._committedDeletionIds) {
-            this._pendingDeletionIds.delete(id);
-          }
-          this._committedDeletionIds.clear();
-          // 重置脏数据标记（数据已成功落盘）
-          this.cacheDirty = false;
-          this.lastFlushError = null;
-          return true;
+        if (attempt === FLUSH_MAX_RETRIES) {
+          return { kind: "io_failed", error: this.lastFlushError };
         }
-        log.error(`磁盘验证失败第 ${attempt}/${FLUSH_MAX_RETRIES} 次`);
-        this.lastFlushError = "disk verification failed";
+        await this.backoff(attempt);
+        continue;
       }
-      if (attempt < FLUSH_MAX_RETRIES) {
-        // 短暂延迟后重试（线性退避：100ms）
-        await new Promise<void>(resolve => this.trackedSetTimeout(resolve, FLUSH_RETRY_BACKOFF_MS));
+
+      // 2. 校验：worker 进程内 C 层持锁句柄自查（主进程外部读会被字节锁拒绝）
+      const verify = await verthysVerifyDiskPersist();
+      if (verify.ok) {
+        // 已落盘：批量移除已提交删除 ID + 复位脏标记
+        for (const id of this._committedDeletionIds) {
+          this._pendingDeletionIds.delete(id);
+        }
+        this._committedDeletionIds.clear();
+        this.cacheDirty = false;
+        this.lastFlushError = null;
+        return { kind: "ok", fileSize: verify.fileSize, mtimeMs: verify.mtimeMs };
       }
+
+      // 3. 分类失败
+      if (verify.statusCode === VER_PERSIST_E_IO) {
+        // IO 错误 → 可重试
+        log.warn(`落盘自查 IO 失败第 ${attempt}/${FLUSH_MAX_RETRIES} 次`);
+        this.lastFlushError = `落盘自查 IO 失败: ${verify.lastError}`;
+        if (attempt === FLUSH_MAX_RETRIES) {
+          return {
+            kind: "verify_failed",
+            statusCode: verify.statusCode,
+            detail: verify.lastError,
+          };
+        }
+        await this.backoff(attempt);
+        continue;
+      }
+
+      // 结构性失败（HEADER/SIZE/WAL_REGION）→ 不重试
+      log.error(
+        `落盘自查结构性失败 statusCode=${verify.statusCode} detail=${verify.lastError}`,
+      );
+      this.lastFlushError = `落盘自查结构性失败(${verify.statusCode})`;
+      return {
+        kind: "verify_failed",
+        statusCode: verify.statusCode,
+        detail: verify.lastError,
+      };
     }
-    return false;
+    // 理论不可达（循环内每轮均返回）；保守兜底
+    return { kind: "session_gone" };
+  }
+
+  /** 线性退避等待（受追踪定时器，代际失效自动丢弃） */
+  private backoff(attempt: number): Promise<void> {
+    return new Promise<void>((resolve) =>
+      this.trackedSetTimeout(resolve, FLUSH_RETRY_BACKOFF_MS * attempt),
+    );
   }
 
   /* ==================== 删除集合管理 ==================== */

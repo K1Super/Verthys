@@ -136,9 +136,7 @@ pub(super) fn lock_session_guard_or_recover(
         Ok(guard) => Ok(guard),
         Err(poisoned) => {
             let _old = poisoned.into_inner();
-            log::error!(
-                "[security] 第 13.2.4 项：session_guard 锁中毒！已重置。"
-            );
+            log::error!("[security] 第 13.2.4 项：session_guard 锁中毒！已重置。");
             Err("会话守卫锁中毒，已记录告警。".into())
         }
     }
@@ -152,9 +150,7 @@ pub(super) fn lock_usb_registry_or_recover(
         Ok(guard) => Ok(guard),
         Err(poisoned) => {
             let _old = poisoned.into_inner();
-            log::error!(
-                "[security] 第 13.2.4 项：usb_registry 锁中毒！已重置。"
-            );
+            log::error!("[security] 第 13.2.4 项：usb_registry 锁中毒！已重置。");
             Err("USB 注册表锁中毒，已记录告警。".into())
         }
     }
@@ -168,9 +164,7 @@ pub(super) fn lock_shadow_sleep_or_recover(
         Ok(guard) => Ok(guard),
         Err(poisoned) => {
             let _old = poisoned.into_inner();
-            log::error!(
-                "[security] 第 13.2.4 项：shadow_sleep 锁中毒！已重置。"
-            );
+            log::error!("[security] 第 13.2.4 项：shadow_sleep 锁中毒！已重置。");
             Err("影子休眠锁中毒，已记录告警。".into())
         }
     }

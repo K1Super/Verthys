@@ -11,20 +11,20 @@
  *
  * 依赖方向：controller → service（单向，禁止反向）
  */
-pub mod types;
 /// API 错误码与响应信封（ApiResponse<T> / ApiError / ErrorCode）
 pub mod api_error;
-pub mod verthys_controller;
+pub mod clipboard_controller;
+pub mod device_controller;
+pub mod diag_controller;
+pub mod file_controller;
+pub mod key_controller;
+pub mod preflight_controller;
+pub mod scan_controller;
+pub mod types;
 /// 照片导入异步批处理流水线 — 批量控制器
 ///
 /// verthys_import_begin / verthys_add_records_batch / verthys_import_end /
 /// verthys_import_checkpoint / verthys_wal_recover（WAL + 串行 worker 插入 + 进度 Channel）
 pub mod verthys_batch_controller;
-pub mod scan_controller;
+pub mod verthys_controller;
 pub mod worker_controller;
-pub mod key_controller;
-pub mod device_controller;
-pub mod clipboard_controller;
-pub mod file_controller;
-pub mod diag_controller;
-pub mod preflight_controller;

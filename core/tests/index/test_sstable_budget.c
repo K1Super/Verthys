@@ -43,7 +43,7 @@ static int sstb_setup(VerthysCngAead *wrap, uint8_t wk[SSTB_KEY_BYTES],
     {
         uint8_t copy[SSTB_KEY_BYTES];
         memcpy(copy, wk, SSTB_KEY_BYTES);
-        if (verthys_cng_aead_import_key(wrap, copy, NULL) != VERTHYS_OK) return -1;
+        if (verthys_cng_aead_import_key(wrap, copy, NULL, 0) != VERTHYS_OK) return -1;
     }
     if (verthys_partition_create(part, SSTB_PART_ID, VERTHYS_PARTITION_INDEX,
                                0, SSTB_REGION_SIZE, 1, wrap) != VERTHYS_OK) {

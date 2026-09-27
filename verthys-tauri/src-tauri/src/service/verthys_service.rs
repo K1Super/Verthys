@@ -1,7 +1,7 @@
 /*
  * service/verthys_service.rs — 加密库服务层模板
  *
- *    、 
+ *    、
  *
  * 模板展示：
  *   - 无状态业务函数
@@ -58,10 +58,14 @@ pub fn lock_verthys(ctx: &Context) -> VerthysResult<()> {
 pub fn add_record(ctx: &Context, name: &str, data: &[u8], rtype: u32) -> VerthysResult<u64> {
     // 参数校验
     if name.is_empty() {
-        return Err(VerthysError::InvalidArgument("记录名称不能为空".to_string()));
+        return Err(VerthysError::InvalidArgument(
+            "记录名称不能为空".to_string(),
+        ));
     }
     if data.is_empty() {
-        return Err(VerthysError::InvalidArgument("记录数据不能为空".to_string()));
+        return Err(VerthysError::InvalidArgument(
+            "记录数据不能为空".to_string(),
+        ));
     }
 
     // 调用持久层（模板）

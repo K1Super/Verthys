@@ -45,7 +45,7 @@
 
 ### 2.3 公共/私有头物理隔离
 
-- 公共接口仅 `core/include/verthys.h`（+ 配套 `error_codes.h`），`core/src` 下私有实现头不得被外部 include。
+- 公共接口仅 `core/include/verthys.h`，`core/src` 下私有实现头不得被外部 include。
 - 包含守卫统一 `#ifndef VERTHYS_XXX_H / #define / #endif`（见 `verthys.h`、`verthys_crypto.h`、`verthys_container_v3.h`）。
 - 导出标记：`VERTHYS_API` 为**空宏**（不携带 dllexport/dllimport），导出唯一由 `core/verthys.def` 白名单决定——禁止重新启用 `VERTHYS_EXPORTS` 全量导出（红线，见 [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md) ADR-011）。
 - C++ 互操作用 `extern "C"` 包裹（`verthys.h` 已有）。
@@ -61,7 +61,7 @@
 - 用 `<stdint.h>` 定宽类型 + `size_t`/`ptrdiff_t`；禁止隐式窄化/符号混算。
 - `malloc/calloc/realloc` 与 `free` 成对；`realloc` 结果先赋临时指针；错误路径 `goto cleanup` 释放。
 - 敏感数据（密钥/口令）用后立即 `verthys_secure_zero`（`core/src/crypto/cipher/secure_mem.c`），`volatile` 防优化零化。
-- 统一错误码：内核返回 `VerthysResult`（`verthys.h`）；C 源内部禁向 stdout/stderr 调试输出（`core/include/error_codes.h` 红线）。
+- 统一错误码：内核返回 `VerthysResult`（`verthys.h`，唯一错误码体系）；C 源内部禁向 stdout/stderr 调试输出。
 
 ---
 
@@ -101,11 +101,11 @@
 
 ## 5. Rust 规范（src-tauri + verthys-worker）
 
-- 包与版本：`verthys-tauri`（lib crate `verthys_tauri_lib`，edition 2021，2.6.1）、`verthys-worker`（bin crate）；依赖显式版本锁定（`=x.y.z`）。
+- 包与版本：`verthys-tauri`（lib crate `verthys_tauri_lib`，edition 2021）、`verthys-worker`（bin crate）；产品版本唯一手改点为仓库根 `VERSION` 文件（由 `ci/sync_version.ps1` 同步至两个 Cargo.toml 等载体），依赖显式版本锁定（`=x.y.z`）。
 - release profile：`opt-level=3`、`lto=true`、`codegen-units=1`、`panic="abort"`、`strip=true`；dev `incremental=false`（LNK1181 修复，见 Cargo.toml 注释）。
 - 模块分域：`controller/`（Tauri command）、`infrastructure/`、`security/`、`security_commands/`、`state/`、`util/`、`worker/`；worker 内 `runtime/`（dispatch/protocol/worker/gmk/ffi_types）。
 - 敏感内存：`zeroize`（GMK/密码清零）+ `subtle`（常量时间比较），禁止对敏感值 `Clone` 扩散。
-- 与 C 边界：libloading 按名解析 → 错误码镜像 `util/ffi.rs` 与 `error_codes.h` 对齐；本地补丁进 `patches/`（`keyboard-types` 等），升级时复核补丁是否可移除（Cargo.toml 维护说明）。
+- 与 C 边界：libloading 按名解析 → 错误码镜像 `util/ffi.rs`（自包含常量，映射 Rust `VerthysError`）；本地补丁进 `patches/`（`keyboard-types` 等），升级时复核补丁是否可移除（Cargo.toml 维护说明）。
 
 ---
 
@@ -122,4 +122,4 @@
 
 - 提交信息、分支策略、PR 流程、代码评审要求见 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)。
 - 文档同步是完成定义（DoD）的一部分：接口/目录/构建/配置/安全边界变更须同 PR 更新对应文档（`DOCUMENTATION_CHECKLIST.md` §4）。
-- 单一事实来源：版本号以 `CMakeLists.txt`/`Cargo.toml`/`tauri.conf.json` 为准，依赖版本以 `Cargo.toml`/`package.json`/`dep-versions.txt` 为准，文档只引用不抄录。
+- 单一事实来源：产品版本以仓库根 `VERSION` 文件为唯一手改点——`CMakeLists.txt` 与 vite（`define` 注入）构建期读取，两个 `Cargo.toml`、`package.json`、`package-lock.json`、`config.ts` 回退值由 `ci/sync_version.ps1` 同步，`tauri.conf.json` 不承载版本（构建期继承 src-tauri crate 版本），CI 门禁校验漂移；依赖版本以 `Cargo.toml`/`package.json`/`dep-versions.txt` 为准，文档只引用不抄录。

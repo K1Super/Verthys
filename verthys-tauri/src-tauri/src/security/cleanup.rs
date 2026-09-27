@@ -117,8 +117,7 @@ fn replace_userprofile(s: &str) -> String {
 /// 替换含 ".verthys" 的文件名 token 为 <VERTHYS>
 fn replace_verthys_filenames(s: &str) -> String {
     fn is_sep(c: char) -> bool {
-        c.is_whitespace()
-            || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        c.is_whitespace() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
     }
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
@@ -175,11 +174,15 @@ fn replace_sids(s: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         // 检测 "S-" 开头后跟数字
-        if chars[i] == 'S' && i + 2 < chars.len() && chars[i + 1] == '-' && chars[i + 2].is_ascii_digit() {
+        if chars[i] == 'S'
+            && i + 2 < chars.len()
+            && chars[i + 1] == '-'
+            && chars[i + 2].is_ascii_digit()
+        {
             // 收集 SID：S-数字-数字-...
             let start = i;
             i += 2; // 跳过 "S-"
-            // 收集所有 数字- 段
+                    // 收集所有 数字- 段
             while i < chars.len() {
                 // 收集数字
                 while i < chars.len() && chars[i].is_ascii_digit() {
@@ -304,7 +307,9 @@ fn try_match_email(chars: &[char], start: usize) -> Option<usize> {
     let mut i = start;
     // 收集本地部分（字母数字._-）
     let local_start = i;
-    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '.' || chars[i] == '_' || chars[i] == '-') {
+    while i < chars.len()
+        && (chars[i].is_alphanumeric() || chars[i] == '.' || chars[i] == '_' || chars[i] == '-')
+    {
         i += 1;
     }
     let local_len = i - local_start;
@@ -316,7 +321,7 @@ fn try_match_email(chars: &[char], start: usize) -> Option<usize> {
         return None;
     }
     i += 1; // 跳过 '@'
-    // 收集域名部分（字母数字.-）
+            // 收集域名部分（字母数字.-）
     let domain_start = i;
     while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '.' || chars[i] == '-') {
         i += 1;
@@ -374,10 +379,11 @@ mod win_impl {
     use windows::core::{PCSTR, PCWSTR};
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, DeleteFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_BEGIN, FILE_FLAGS_AND_ATTRIBUTES,
-        FILE_SHARE_READ, FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers,
-        GetFileInformationByHandle, GetFileSizeEx, MoveFileExW, MOVE_FILE_FLAGS, OPEN_EXISTING,
-        SetFilePointerEx, WriteFile, BY_HANDLE_FILE_INFORMATION, WIN32_FIND_DATAW,
+        CreateFileW, DeleteFileW, FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers,
+        GetFileInformationByHandle, GetFileSizeEx, MoveFileExW, SetFilePointerEx, WriteFile,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_BEGIN,
+        FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, MOVE_FILE_FLAGS, OPEN_EXISTING,
+        WIN32_FIND_DATAW,
     };
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     use windows::Win32::System::IO::DeviceIoControl;
@@ -441,7 +447,10 @@ mod win_impl {
 
     /// 将 Path 转为以 null 结尾的 UTF-16 宽字符序列（使用 encode_wide，兼容非 UTF-8 路径）
     fn path_to_wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(iter::once(0)).collect()
+        path.as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect()
     }
 
     /// 将 [u16]（null 结尾）转为 String
@@ -464,9 +473,8 @@ mod win_impl {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x9E3779B97F4A7C15);
-        let mut state = nanos
-            ^ (buf.as_ptr() as u64)
-            ^ (buf.len() as u64).wrapping_mul(0xD1B54A32D192ED03);
+        let mut state =
+            nanos ^ (buf.as_ptr() as u64) ^ (buf.len() as u64).wrapping_mul(0xD1B54A32D192ED03);
         if state == 0 {
             state = 0x9E3779B97F4A7C15;
         }
@@ -498,20 +506,15 @@ mod win_impl {
         }
         let pattern = path_to_wide(&dir_path.join("*"));
         let mut fd: WIN32_FIND_DATAW = WIN32_FIND_DATAW::default();
-        let handle =
-            unsafe { FindFirstFileW(PCWSTR::from_raw(pattern.as_ptr()), &mut fd) }.map_err(|e| {
-                format!("FindFirstFileW 失败 ({}): {}", dir, e)
-            })?;
+        let handle = unsafe { FindFirstFileW(PCWSTR::from_raw(pattern.as_ptr()), &mut fd) }
+            .map_err(|e| format!("FindFirstFileW 失败 ({}): {}", dir, e))?;
         let mut files = Vec::new();
         loop {
             let name = utf16_to_string(&fd.cFileName);
             if name != "." && name != ".." {
                 let is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0;
                 if !is_dir {
-                    let full = dir_path
-                        .join(&name)
-                        .to_string_lossy()
-                        .into_owned();
+                    let full = dir_path.join(&name).to_string_lossy().into_owned();
                     files.push(full);
                 }
             }
@@ -527,8 +530,8 @@ mod win_impl {
 
     /// 清空系统最近记录
     pub(super) fn clear_recent_records() -> Result<(), String> {
-        let appdata = std::env::var("APPDATA")
-            .map_err(|_| "无法读取 %APPDATA% 环境变量".to_string())?;
+        let appdata =
+            std::env::var("APPDATA").map_err(|_| "无法读取 %APPDATA% 环境变量".to_string())?;
 
         let sub_dirs = [
             r"Microsoft\Windows\Recent",
@@ -642,10 +645,7 @@ mod win_impl {
 
         // 覆写失败（含超时）则记录告警但继续删除流程
         if let Err(e) = &overwrite_res {
-            log::warn!(
-                "[secure_delete] 覆写未完成（{}），继续执行重命名和删除",
-                e
-            );
+            log::warn!("[secure_delete] 覆写未完成（{}），继续执行重命名和删除", e);
         }
 
         // 重命名为随机名（破坏 MFT 中的原文件名关联）
@@ -718,15 +718,8 @@ mod win_impl {
             while offset < to_write {
                 let mut written: u32 = 0;
                 let written_ptr: *mut u32 = &mut written;
-                unsafe {
-                    WriteFile(
-                        handle,
-                        Some(&chunk[offset..]),
-                        Some(written_ptr),
-                        None,
-                    )
-                }
-                .map_err(|e| format!("WriteFile 失败: {}", e))?;
+                unsafe { WriteFile(handle, Some(&chunk[offset..]), Some(written_ptr), None) }
+                    .map_err(|e| format!("WriteFile 失败: {}", e))?;
                 if written == 0 {
                     return Err("WriteFile 写入 0 字节（磁盘已满或介质错误）".to_string());
                 }
@@ -756,7 +749,10 @@ mod win_impl {
     ///
     /// 通知文件系统对应物理页可被标记为无效，利用固件的安全擦除能力。
     /// 仅在 SSD 模式下调用，HDD 模式不发送 TRIM。
-    fn send_trim_command(handle: windows::Win32::Foundation::HANDLE, file_size: u64) -> Result<(), String> {
+    fn send_trim_command(
+        handle: windows::Win32::Foundation::HANDLE,
+        file_size: u64,
+    ) -> Result<(), String> {
         let trim = FileLevelTrim {
             key: 0,
             num_ranges: 1,

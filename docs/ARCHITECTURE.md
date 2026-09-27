@@ -117,7 +117,7 @@ flowchart LR
 
 ```
 core/
-├── include/                verthys.h（公共 ABI）· error_codes.h
+├── include/                verthys.h（公共 ABI）
 ├── schema/                 FlatBuffers schema（flatcc 编译，generated/）
 ├── src/
 │   ├── api/                lifecycle/ transfer/ scan/ progress/ unlock/ shared/

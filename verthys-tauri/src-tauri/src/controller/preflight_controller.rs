@@ -29,9 +29,9 @@
  *           util::path / util::disk / util::random / constants::timeout
  */
 
+use crate::constants::timeout::DEFAULT as TIMEOUT_CONFIG;
 use crate::controller::api_error::ErrorCode;
 use crate::controller::types::PreflightResult;
-use crate::constants::timeout::DEFAULT as TIMEOUT_CONFIG;
 use crate::util::path::{sanitize_path, validate_path_input};
 use crate::util::random::random_hex;
 use std::path::{Path, PathBuf};
@@ -177,7 +177,9 @@ fn build_safe_whitelist() -> Vec<PathBuf> {
             }
         }
         // 2. XDG_DATA_HOME 或 ~/.local/share
-        let xdg_data = std::env::var("XDG_DATA_HOME").ok().filter(|s| !s.is_empty());
+        let xdg_data = std::env::var("XDG_DATA_HOME")
+            .ok()
+            .filter(|s| !s.is_empty());
         let data_dir = xdg_data.map(PathBuf::from).or_else(|| {
             std::env::var("HOME")
                 .ok()
@@ -201,8 +203,8 @@ fn build_safe_whitelist() -> Vec<PathBuf> {
 #[cfg(windows)]
 fn get_windows_user_dirs() -> Vec<PathBuf> {
     use windows::Win32::UI::Shell::{
-        SHGetKnownFolderPath, FOLDERID_Documents, FOLDERID_LocalAppData, FOLDERID_Profile,
-        FOLDERID_RoamingAppData, KNOWN_FOLDER_FLAG,
+        FOLDERID_Documents, FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData,
+        SHGetKnownFolderPath, KNOWN_FOLDER_FLAG,
     };
 
     let mut dirs = Vec::new();
@@ -316,7 +318,10 @@ fn is_system_protected_dir(canonical: &Path) -> bool {
         ];
 
         // 子目录前缀匹配（C:\Windows\... C:\Program Files\... 等）
-        if system_subdir_prefixes.iter().any(|p| path_str.starts_with(p)) {
+        if system_subdir_prefixes
+            .iter()
+            .any(|p| path_str.starts_with(p))
+        {
             return true;
         }
 
@@ -332,7 +337,9 @@ fn is_system_protected_dir(canonical: &Path) -> bool {
 
     #[cfg(not(windows))]
     {
-        let system_prefixes = ["/etc", "/boot", "/usr", "/bin", "/sbin", "/root", "/proc", "/sys"];
+        let system_prefixes = [
+            "/etc", "/boot", "/usr", "/bin", "/sbin", "/root", "/proc", "/sys",
+        ];
         system_prefixes.iter().any(|p| path_str.starts_with(p))
     }
 }
@@ -878,7 +885,10 @@ mod tests {
     fn test_resolve_parent_for_whitelist_nonexistent_ancestor() {
         // 构造不存在的路径，但其祖先（temp_dir）存在
         let temp = std::env::temp_dir();
-        let nonexistent = temp.join("verthys_nonexistent_lvl1").join("lvl2").join("lvl3");
+        let nonexistent = temp
+            .join("verthys_nonexistent_lvl1")
+            .join("lvl2")
+            .join("lvl3");
         let result = resolve_parent_for_whitelist(&nonexistent);
         assert!(result.is_ok(), "应回溯到已存在祖先");
         let canon = result.unwrap();

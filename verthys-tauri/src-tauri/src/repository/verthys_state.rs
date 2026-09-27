@@ -75,8 +75,7 @@ pub fn get_state_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, Strin
         .app_config_dir()
         .map_err(|e| format!("获取配置目录失败: {}", e))?;
     if !dir.exists() {
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("创建配置目录失败: {}", e))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {}", e))?;
     }
     Ok(dir)
 }
@@ -89,8 +88,7 @@ pub fn read_last_verthys_path(app: &tauri::AppHandle) -> Result<Option<String>, 
     if !pointer.exists() {
         return Ok(None);
     }
-    let path = std::fs::read_to_string(&pointer)
-        .map_err(|e| format!("读取路径指针失败: {}", e))?;
+    let path = std::fs::read_to_string(&pointer).map_err(|e| format!("读取路径指针失败: {}", e))?;
     let trimmed = path.trim().to_string();
     if trimmed.is_empty() {
         return Ok(None);
@@ -102,8 +100,7 @@ pub fn read_last_verthys_path(app: &tauri::AppHandle) -> Result<Option<String>, 
 fn write_last_verthys_path(app: &tauri::AppHandle, verthys_path: &str) -> Result<(), String> {
     let dir = get_state_dir(app)?;
     let pointer = dir.join(".verthys_last_path");
-    std::fs::write(&pointer, verthys_path)
-        .map_err(|e| format!("写入路径指针失败: {}", e))
+    std::fs::write(&pointer, verthys_path).map_err(|e| format!("写入路径指针失败: {}", e))
 }
 
 /* ------------------------------------------------------------------ *
@@ -141,7 +138,10 @@ fn try_migrate_from_legacy_state(app: &tauri::AppHandle) -> Option<VerthysState>
         return None;
     }
 
-    log::info!("[state] 检测到旧版状态文件，开始迁移: {}", legacy_state_file.display());
+    log::info!(
+        "[state] 检测到旧版状态文件，开始迁移: {}",
+        legacy_state_file.display()
+    );
 
     // 1. 读取旧版状态文件
     let content = match std::fs::read_to_string(&legacy_state_file) {
@@ -163,7 +163,10 @@ fn try_migrate_from_legacy_state(app: &tauri::AppHandle) -> Option<VerthysState>
 
     // 3. 校验 magic
     if legacy_state.magic != STATE_MAGIC {
-        log::warn!("[state] 迁移失败：旧版状态文件 magic 不匹配: {}", legacy_state.magic);
+        log::warn!(
+            "[state] 迁移失败：旧版状态文件 magic 不匹配: {}",
+            legacy_state.magic
+        );
         return None;
     }
 
@@ -176,7 +179,10 @@ fn try_migrate_from_legacy_state(app: &tauri::AppHandle) -> Option<VerthysState>
 
     // 5. 校验 .verthys 文件存在
     if !std::path::Path::new(&verthys_path).exists() {
-        log::warn!("[state] 迁移失败：旧版状态文件指向的 .verthys 不存在: {}", crate::util::path::sanitize_path(&verthys_path));
+        log::warn!(
+            "[state] 迁移失败：旧版状态文件指向的 .verthys 不存在: {}",
+            crate::util::path::sanitize_path(&verthys_path)
+        );
         // .verthys 不存在 → 清理旧版状态文件，按全新用户处理
         let _ = std::fs::remove_file(&legacy_state_file);
         return None;
@@ -213,7 +219,10 @@ fn try_migrate_from_legacy_state(app: &tauri::AppHandle) -> Option<VerthysState>
 
     // 9. 删除旧版状态文件（迁移成功后清理）
     let _ = std::fs::remove_file(&legacy_state_file);
-    log::info!("[state] 旧版状态文件迁移成功: verthys_path={}", crate::util::path::sanitize_path(&verthys_path));
+    log::info!(
+        "[state] 旧版状态文件迁移成功: verthys_path={}",
+        crate::util::path::sanitize_path(&verthys_path)
+    );
     Some(new_state)
 }
 
@@ -259,13 +268,20 @@ pub fn validate_verthys_file(verthys_path: &str) -> bool {
         return false;
     }
     if frame[..4] != V3_FRAME_MAGIC {
-        log::warn!("[state] 文件帧 magic 校验失败: {:02X?} (期望 'V3RP')", &frame[..4]);
+        log::warn!(
+            "[state] 文件帧 magic 校验失败: {:02X?} (期望 'V3RP')",
+            &frame[..4]
+        );
         return false;
     }
     let payload_len = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]) as usize;
     let max_payload = V3_REPLICA_BYTES - V3_FRAME_HEADER_BYTES;
     if payload_len == 0 || payload_len > max_payload {
-        log::warn!("[state] 帧载荷长度非法: {} (期望 1..={})", payload_len, max_payload);
+        log::warn!(
+            "[state] 帧载荷长度非法: {} (期望 1..={})",
+            payload_len,
+            max_payload
+        );
         return false;
     }
     true
@@ -300,13 +316,16 @@ pub fn read_state_file(app: &tauri::AppHandle) -> Result<Option<VerthysState>, S
         // 路径指针存在但状态文件不存在
         // 可能原因：跨设备复制 .verthys 时未携带 .verthys.state
         // 返回 None，让 verthys_init_status / verthys_unlock 主动修复
-        log::info!("[state] 状态文件不存在（可能跨设备复制未携带）: verthys_path={}", crate::util::path::sanitize_path(&verthys_path));
+        log::info!(
+            "[state] 状态文件不存在（可能跨设备复制未携带）: verthys_path={}",
+            crate::util::path::sanitize_path(&verthys_path)
+        );
         return Ok(None);
     }
-    let content = std::fs::read_to_string(&state_file)
-        .map_err(|e| format!("读取状态文件失败: {}", e))?;
-    let state: VerthysState = serde_json::from_str(&content)
-        .map_err(|e| format!("解析状态文件失败: {}", e))?;
+    let content =
+        std::fs::read_to_string(&state_file).map_err(|e| format!("读取状态文件失败: {}", e))?;
+    let state: VerthysState =
+        serde_json::from_str(&content).map_err(|e| format!("解析状态文件失败: {}", e))?;
     if state.magic != STATE_MAGIC {
         return Err("状态文件 magic 不匹配".into());
     }
@@ -323,20 +342,17 @@ pub fn write_state_file_atomic(app: &tauri::AppHandle, state: &VerthysState) -> 
     let state_file = get_state_file_for_verthys(&state.verthys_path);
     let tmp_file = std::path::PathBuf::from(format!("{}.tmp", state_file.to_string_lossy()));
 
-    let content = serde_json::to_string(state)
-        .map_err(|e| format!("序列化状态文件失败: {}", e))?;
+    let content = serde_json::to_string(state).map_err(|e| format!("序列化状态文件失败: {}", e))?;
 
     // 1. 写临时文件（同文件系统，保证 rename 原子性）
-    std::fs::write(&tmp_file, &content)
-        .map_err(|e| format!("写入临时状态文件失败: {}", e))?;
+    std::fs::write(&tmp_file, &content).map_err(|e| format!("写入临时状态文件失败: {}", e))?;
 
     // 2. 原子 rename（同文件系统内 rename 是原子的）
-    std::fs::rename(&tmp_file, &state_file)
-        .map_err(|e| {
-            // rename 失败：清理临时文件
-            let _ = std::fs::remove_file(&tmp_file);
-            format!("原子重命名状态文件失败: {}", e)
-        })?;
+    std::fs::rename(&tmp_file, &state_file).map_err(|e| {
+        // rename 失败：清理临时文件
+        let _ = std::fs::remove_file(&tmp_file);
+        format!("原子重命名状态文件失败: {}", e)
+    })?;
 
     // 3. 更新路径指针（失败不阻塞状态文件已写入）
     if let Err(e) = write_last_verthys_path(app, &state.verthys_path) {
@@ -391,7 +407,10 @@ pub fn try_repair_state_file(app: &tauri::AppHandle, verthys_path: &str) -> Opti
 
     // 1. 校验 .verthys 文件格式合法性
     if !validate_verthys_file(verthys_path) {
-        log::warn!("[state] 主动修复中止：.verthys 格式校验失败: {}", sanitize_path(verthys_path));
+        log::warn!(
+            "[state] 主动修复中止：.verthys 格式校验失败: {}",
+            sanitize_path(verthys_path)
+        );
         return None;
     }
 
@@ -476,7 +495,8 @@ mod tests {
 
     #[test]
     fn test_validate_verthys_file_rejects_missing_file() {
-        let path = std::env::temp_dir().join(format!("verthys_state_t_none_{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("verthys_state_t_none_{}", std::process::id()));
         assert!(!validate_verthys_file(path.to_str().unwrap()));
     }
 }

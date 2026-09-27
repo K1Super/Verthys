@@ -27,6 +27,104 @@ Write-Host "=" * 60
 Write-Host "Verthys CI 统一执行入口"
 Write-Host "=" * 60
 
+# ===== 版本号一致性门禁 =====
+# 全仓版本号以根 VERSION 文件为唯一手改点；漂移即拒绝，防止版本再分裂。
+Write-Host ""
+Write-Host "[版本门禁] 校验全仓版本与根 VERSION 文件一致..."
+& (Join-Path $PSScriptRoot "sync_version.ps1") -CheckOnly
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[版本门禁] 检测到漂移：编辑根 VERSION 文件后运行 ci\sync_version.ps1 并提交同步结果"
+    exit 1
+}
+Write-Host "[版本门禁] 通过：全仓版本一致"
+
+# ===== 零容忍锚点门（防回退） =====
+# 三条文本级精确锚点，命中即红，成本毫秒级、零误报：
+#   1. 已删除的负数错误码体系不得复活（单一定义源为 verthys.h 正数枚举）；
+#   2. worker 主循环禁止 .unwrap()（panic 与 abort 语义冲突，见受控错误路径约定）；
+#   3. 容器格式版本禁止字面量赋值（必须经 VERTHYS_FMT_* 枚举）。
+Write-Host ""
+Write-Host "[锚点门] 零容忍防回退检查..."
+$anchorFiles = @()
+$anchorFiles += Get-ChildItem -Path (Join-Path $projectRoot "core\src"), (Join-Path $projectRoot "core\include"), (Join-Path $projectRoot "core\examples") -Recurse -Include *.c,*.h -ErrorAction SilentlyContinue
+$anchorFiles += Get-ChildItem -Path (Join-Path $projectRoot "verthys-tauri\src-tauri\src"), (Join-Path $projectRoot "verthys-tauri\verthys-worker\src") -Recurse -Include *.rs -ErrorAction SilentlyContinue
+
+$anchorRed = $false
+
+# 锚点 1：负数错误码体系（禁止复活）
+$hits = $anchorFiles | Select-String -Pattern 'VERTHYS_C_ERR_' -ErrorAction SilentlyContinue
+if ($hits) {
+    Write-Host "[锚点门][RED] VERTHYS_C_ERR_ 负数错误码体系禁止复活："
+    $hits | ForEach-Object { Write-Host ("  {0}:{1}" -f $_.Path, $_.LineNumber) }
+    $anchorRed = $true
+}
+
+# 锚点 2：worker 主循环 unwrap 清零（受控错误路径红线）。
+# 扫描范围排除 #[cfg(test)] 测试模块：测试内 unwrap 作用于确定性
+# Cursor<&[u8]> 输入（模块头注释已标注理由），不属于生产 panic 源。
+$mainLoop = Join-Path $projectRoot "verthys-tauri\verthys-worker\src\runtime\main_loop.rs"
+if (Test-Path $mainLoop) {
+    $uwHits = Select-String -Path $mainLoop -Pattern '\.unwrap\(\)' -AllMatches -ErrorAction SilentlyContinue
+    $testLine = (Select-String -Path $mainLoop -Pattern '^\s*#\[cfg\(test\)\]' -ErrorAction SilentlyContinue | Select-Object -First 1).LineNumber
+    $prodHits = if ($testLine) { $uwHits | Where-Object { $_.LineNumber -lt $testLine } } else { $uwHits }
+    $uwCount = ($prodHits | ForEach-Object { $_.Matches.Count } | Measure-Object -Sum).Sum
+    if ($uwCount) {
+        Write-Host "[锚点门][RED] main_loop.rs 生产路径存在 .unwrap() 调用 $uwCount 处，必须走受控错误路径"
+        $anchorRed = $true
+    }
+}
+
+# 锚点 3：容器格式版本禁用字面量赋值
+$fmtMagic = Get-ChildItem -Path (Join-Path $projectRoot "core\src") -Recurse -Include *.c,*.h -ErrorAction SilentlyContinue |
+    Select-String -Pattern 'fmt_version\s*=\s*[0-9]' -ErrorAction SilentlyContinue
+if ($fmtMagic) {
+    Write-Host "[锚点门][RED] fmt_version 禁止字面量赋值（必须经 VERTHYS_FMT_* 枚举）："
+    $fmtMagic | ForEach-Object { Write-Host ("  {0}:{1}" -f $_.Path, $_.LineNumber) }
+    $anchorRed = $true
+}
+
+# 锚点 4：批量导入域全部数据命令必须挂接解锁闸门（防回退）。
+# 导入/删除/GC 均为写入型数据域命令，闸门挂接不得少于 8 处
+# （begin / add_records / add_chunk / forget_hashes / dev_reset_wal /
+#   import_end / import_checkpoint / gc_orphan_chunks 各一）。
+$batchCtrl = Join-Path $projectRoot "verthys-tauri\src-tauri\src\controller\verthys_batch_controller.rs"
+if (Test-Path $batchCtrl) {
+    $gateHits = Select-String -Path $batchCtrl -Pattern 'require_unlocked' -AllMatches -ErrorAction SilentlyContinue
+    $gateCount = ($gateHits | ForEach-Object { $_.Matches.Count } | Measure-Object -Sum).Sum
+    if ($gateCount -lt 8) {
+        Write-Host "[锚点门][RED] verthys_batch_controller.rs 授权闸门挂接不足：require_unlocked 命中 $gateCount 处，要求 >= 8（导入域八命令各一）"
+        $anchorRed = $true
+    }
+}
+
+if ($anchorRed) {
+    Write-Host "[锚点门] 失败：存在防回退红线违规"
+    exit 1
+}
+Write-Host "[锚点门] 通过：零容忍红线全部满足"
+
+# ===== 常量生成物门禁 =====
+# 跨层预算常量以权威来源文件为单一定义，生成物（前端 TS 与 Rust 同源常量）
+# 与来源漂移即红：防手改生成物造成三端取值分裂。
+Write-Host ""
+Write-Host "[常量门] 校验跨层预算常量生成物与权威来源一致..."
+$budgetGen = Join-Path $projectRoot "verthys-tauri\constants\generate.mjs"
+if (-not (Test-Path $budgetGen)) {
+    Write-Host "[常量门][RED] 缺少跨层预算常量生成器"
+    exit 1
+}
+$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+if ($null -eq $nodeCmd) {
+    Write-Host "[常量门][RED] 未找到 node，无法校验常量生成物"
+    exit 1
+}
+& $nodeCmd.Source $budgetGen --check
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[常量门][RED] 生成物与权威来源不一致：请重新运行常量生成器并提交生成物"
+    exit 1
+}
+Write-Host "[常量门] 通过：生成物与权威来源一致"
+
 $exitCode = 0
 
 # ===== 第一级：快速正则过滤 =====

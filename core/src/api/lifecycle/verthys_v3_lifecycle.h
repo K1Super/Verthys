@@ -61,6 +61,8 @@ typedef struct VerthysContextV3 {
     int                  minimal_mode;          /* 1 = 渐进式解锁返回（预热进行中） */
     HANDLE               bg_preheat_thread;     /* 后台预热线程（MINIMAL_FIRST） */
     volatile LONG        bg_preheat_running;    /* 后台预热运行标志（Lock 汇合依据） */
+    FILE                *bg_preheat_f;          /* 预热专用只读流（主线程开/关；预热线程专属 IO，与共享容器流游标隔离，销毁汇合时经 CancelIoEx 取消在途慢读） */
+    volatile LONG        bg_preheat_stop;       /* 预热停止标志（销毁汇合置位；预热线程逐表检查，配合取消把汇合等待压到有时限） */
 
     /* === 诊断（Verthys_GetDiagnostics 映射；非敏感指标） === */
     uint64_t             diag_unlock_total_ms;  /* 解锁总耗时 */

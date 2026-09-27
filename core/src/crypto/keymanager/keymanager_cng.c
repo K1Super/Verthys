@@ -101,9 +101,12 @@ static VerthysResult import_wrapped_role(VerthysCngKeyManager *km,
         return VERTHYS_ERR_CORRUPT;
     }
 
-    /* 导入内核（import 内部清零 key_material，const 契约同 verthys_crypto_cng.h） */
+    /* 导入内核（import 内部清零 key_material，const 契约同 verthys_crypto_cng.h）。
+     * 角色密钥随容器持久化但仅承担一次性包装用途（包装 nonce 随帧持久化、
+     * 后继会话只解不包），导入时 counter 从 0 起步安全；若未来某角色
+     * 引入跨会话加密用途，须在此传入其持久化 counter */
     r = verthys_cng_aead_import_key(&km->keys[role], key_material,
-                                  ROLE_KEY_ID[role]);
+                                  ROLE_KEY_ID[role], 0);
     verthys_secure_zero(key_material, sizeof(key_material));
     if (r != VERTHYS_OK) return r;
 
@@ -157,9 +160,11 @@ VerthysResult verthys_cng_km_import_batch(
         return VERTHYS_ERR_INTERNAL;
     }
 
-    /* 1. 导入 MEK——密钥组唯一用户态明文暴露点（导入后立即清零） */
+    /* 1. 导入 MEK——密钥组唯一用户态明文暴露点（导入后立即清零）。
+     *    与角色导入同理：MEK 仅一次性包装三角色（nonce 随 wrapped 帧
+     *    持久化），后继会话只解不包，counter 从 0 起步安全 */
     r = verthys_cng_aead_import_key(&km->keys[VERTHYS_CNG_KEY_MEK],
-                                  mek, ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK]);
+                                  mek, ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK], 0);
     if (r != VERTHYS_OK) {
         km->state = VERTHYS_CNG_KM_UNINITIALIZED;
         return r;
@@ -280,7 +285,9 @@ VerthysResult verthys_cng_km_verify_mek(
         verthys_secure_zero(key_material, sizeof(key_material));
         return r;
     }
-    r = verthys_cng_aead_import_key(&probe, mek, ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK]);
+    /* 探针上下文仅用于解密一枚 wrapped 帧（口令正确性验证），
+     * 不执行任何加密，counter 从 0 起步无安全影响 */
+    r = verthys_cng_aead_import_key(&probe, mek, ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK], 0);
     if (r != VERTHYS_OK) {
         /* import_key 清零契约覆盖成功与失败路径，mek 已被消耗，无需再清 */
         verthys_secure_zero(key_material, sizeof(key_material));
@@ -393,11 +400,12 @@ VerthysResult verthys_cng_km_rekey(
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* 新 MEK 临时句柄（导入 + 三角色重包裹 + 销毁，全在本栈帧内） */
+    /* 新 MEK 临时句柄（导入 + 三角色重包裹 + 销毁，全在本栈帧内）；
+     * 新派生的密钥从未投入加密，counter 从 0 起步合法 */
     r = verthys_cng_aead_init(&new_mek_ctx);
     if (r != VERTHYS_OK) return r;
     r = verthys_cng_aead_import_key(&new_mek_ctx, new_mek,
-                                 ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK]);
+                                 ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK], 0);
     if (r != VERTHYS_OK) {
         /* import_key 清零契约覆盖成功与失败路径，new_mek 已被消耗 */
         return r;
@@ -441,8 +449,9 @@ VerthysResult verthys_cng_km_rotate_mek(
      */
     r = verthys_cng_aead_init(&candidate);
     if (r != VERTHYS_OK) return r;
+    /* 轮换产生的新 MEK 从未投入加密，counter 从 0 起步合法 */
     r = verthys_cng_aead_import_key(&candidate, new_mek,
-                                 ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK]);
+                                 ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK], 0);
     if (r != VERTHYS_OK) {
         verthys_cng_aead_destroy(&candidate);   /* 未导入态：幂等清理 */
         return r;
@@ -553,9 +562,10 @@ VerthysResult verthys_cng_km_generate_keyset(
     }
     km->state = VERTHYS_CNG_KM_DERIVED;
 
-    /* 1. MEK 临时代入（wrap 语境；产物销毁后状态归还 UNINITIALIZED） */
+    /* 1. MEK 临时代入（wrap 语境；产物销毁后状态归还 UNINITIALIZED）；
+     *    新建容器的新 MEK 从未投入加密，counter 从 0 起步合法 */
     r = verthys_cng_aead_import_key(&km->keys[VERTHYS_CNG_KEY_MEK],
-                                  mek, ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK]);
+                                  mek, ROLE_KEY_ID[VERTHYS_CNG_KEY_MEK], 0);
     if (r != VERTHYS_OK) {
         km->state = VERTHYS_CNG_KM_UNINITIALIZED;
         return r;

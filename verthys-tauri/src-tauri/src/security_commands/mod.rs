@@ -40,26 +40,26 @@
  *       8. auth：require_session_authorized
  */
 
-pub mod state;
-pub mod persistence;
-pub mod responses;
-pub mod path_resolver;
 pub mod audit;
 pub mod auth;
-/// 安全预设受信持久化（单一事实源，与状态文件同域）
-pub mod preset_persistence;
-pub mod commands;
 /// 解锁命令的服务端暴力熔断桥接（gate 检查 / 失败计数 / 成功重置）
 pub mod brute_force_bridge;
+pub mod commands;
+pub mod path_resolver;
+pub mod persistence;
+/// 安全预设受信持久化（单一事实源，与状态文件同域）
+pub mod preset_persistence;
+pub mod responses;
+pub mod state;
 
 pub use commands::brute_force::*;
-pub use commands::session::*;
-pub use commands::module_whitelist::*;
 pub use commands::cleanup::*;
 pub use commands::file_lock::*;
-pub use commands::usb::*;
+pub use commands::module_whitelist::*;
 pub use commands::preset::*;
+pub use commands::session::*;
 pub use commands::system_metrics::*;
+pub use commands::usb::*;
 
 pub use state::SecurityState;
 

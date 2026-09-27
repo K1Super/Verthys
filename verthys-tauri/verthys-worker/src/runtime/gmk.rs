@@ -405,6 +405,13 @@ pub(crate) fn handle_clear_global_key() -> Response {
     Response::ok("clear_global_key")
 }
 
+/// panic 清零器：清除当前线程 GMK TLS 驻留。
+/// Zeroizing 的 Drop 在正常展开时同样会清零，此处为 panic hook 内
+/// 的显式前置清零——hook 早于栈展开执行，清零先于任何诊断/转储输出。
+pub(crate) fn wipe_thread_gmk() {
+    GMK.with(|g| *g.borrow_mut() = None);
+}
+
 /* ------------------------------------------------------------------ *
  * 单元测试                                                            *
  *                                                                    *
@@ -425,6 +432,7 @@ mod tests {
             password: Zeroizing::new(password.to_string()),
             id: 0,
             rtype: 0,
+            max_count: 0,
             name: String::new(),
             data: Zeroizing::new(record.to_string()),
             old_password: Zeroizing::new(String::new()),
@@ -435,6 +443,9 @@ mod tests {
             preset: 0,
             ids: Vec::new(),
             flags: 0,
+            shm_key: String::new(),
+            project: String::new(),
+            inline_max_bytes: 0,
         }
     }
 

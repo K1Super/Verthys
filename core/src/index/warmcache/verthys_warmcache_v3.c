@@ -147,7 +147,9 @@ static VerthysResult v3ic_derive_cache_key(const uint8_t integrity_key[VERTHYS_K
     if (verthys_hkdf_expand(cache_key, integrity_key, info, info_len) != 0) {
         return VERTHYS_ERR_INTERNAL;
     }
-    r = verthys_cng_aead_import_key(aead, cache_key, NULL);
+    /* 缓存密钥由本会话 HKDF 派生（kdf_salt 每次重建随机），
+     * 密钥生命周期即缓存生命周期，nonce 空间从 0 起步合法 */
+    r = verthys_cng_aead_import_key(aead, cache_key, NULL, 0);
     verthys_secure_zero(cache_key, sizeof(cache_key));
     return r;
 }

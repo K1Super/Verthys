@@ -27,19 +27,51 @@ static PANIC_HOOK_INIT: Once = Once::new();
 /// minimal hook 安装守卫（早于完整 hook）
 static MINIMAL_HOOK_INIT: Once = Once::new();
 
+/* ================================================================== *
+ * 敏感驻留清零器注册表                                 *
+ *                                                                        *
+ * panic hook 在输出任何诊断之前，先对已注册的静态敏感驻留（如隐私   *
+ * 会话令牌）执行尽力清零——hook 早于栈展开执行，清零先于日志/转储     *
+ * 外泄窗口。每个清零器独立 catch_unwind 隔断，单个失败不阻断其余。   *
+ * ================================================================== */
+
+type PanicWiper = Box<dyn Fn() + Send + Sync>;
+static PANIC_WIPERS: std::sync::OnceLock<std::sync::Mutex<Vec<PanicWiper>>> =
+    std::sync::OnceLock::new();
+
+fn wiper_list() -> &'static std::sync::Mutex<Vec<PanicWiper>> {
+    PANIC_WIPERS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// 注册 panic 清零器（运行期就绪时调用；业务模块提供具体清零动作）
+pub fn register_panic_wiper(f: impl Fn() + Send + Sync + 'static) {
+    wiper_list()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(Box::new(f));
+}
+
+/// 依次执行全部已注册清零器（两个 handler 的第一顺序动作）
+fn run_panic_wipers() {
+    let list = wiper_list().lock().unwrap_or_else(|p| p.into_inner());
+    for wiper in list.iter() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(wiper));
+    }
+}
+
 /// 安装最小化 panic hook
 ///
 /// 在 main 函数第一行调用，**先于任何其他代码**。
 ///
 /// 此 hook 不依赖日志系统，仅：
-///   1. Windows: 调用 OutputDebugStringW 输出崩溃信息（调试器可见）
-///   2. Windows: 弹出 MessageBoxW 提示用户（GUI 模式下）
+///   1. 对已注册的敏感驻留执行前置清零
+///   2. Windows: 调用 OutputDebugStringW 输出崩溃信息（调试器可见）
 ///   3. 其他平台: 输出到 stderr
 ///
 /// 日志系统就绪后，调用 upgrade(log_sender) 升级为完整 hook。
 ///
-/// 注意：Cargo.toml 中 panic = "abort"，栈展开受限。
-/// 此 hook 仅做最小化输出后让默认 abort 执行，不依赖展开。
+/// panic 策略为 unwind：hook 执行后栈展开，Zeroizing 等 Drop 清零兜底生效；
+/// 未被 catch_unwind 捕获的 panic 在展开完成后仍终止进程。
 pub fn install_minimal() {
     MINIMAL_HOOK_INIT.call_once(|| {
         std::panic::set_hook(Box::new(minimal_panic_handler));
@@ -50,8 +82,9 @@ pub fn install_minimal() {
 ///
 /// 在日志管道就绪后调用（lib.rs run() 内）。
 /// 此方法将 panic hook 替换为完整版本：
-///   1. 构造 JSON 格式的致命错误日志投递至管道
-///   2. 仍调用 OutputDebugStringW 作为兜底（管道不可用时不丢）
+///   1. 对已注册的敏感驻留执行前置清零
+///   2. 构造 JSON 格式的致命错误日志投递至管道
+///   3. 仍调用 OutputDebugStringW 作为兜底（管道不可用时不丢）
 ///
 /// log_sender 参数通过入口层注入，非全局静态变量。
 pub fn upgrade(log_sender: LogSender) {
@@ -106,6 +139,9 @@ fn sanitize_panic_payload(raw: &str) -> String {
 ///
 /// 仅输出到 OutputDebugString（Windows）或 stderr（其他平台）。
 fn minimal_panic_handler(info: &std::panic::PanicHookInfo<'_>) {
+    // 前置清零：任何诊断输出之前执行，最小化敏感驻留随日志外泄窗口
+    run_panic_wipers();
+
     let payload = info.payload();
     let msg = if let Some(s) = payload.downcast_ref::<&str>() {
         s.to_string()
@@ -116,22 +152,23 @@ fn minimal_panic_handler(info: &std::panic::PanicHookInfo<'_>) {
     };
     let msg = sanitize_panic_payload(&msg);
 
-    let location = info.location().map(|l| {
-        format!("{}:{}:{}", l.file(), l.line(), l.column())
-    }).unwrap_or_else(|| "unknown".to_string());
+    let location = info
+        .location()
+        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+        .unwrap_or_else(|| "unknown".to_string());
 
     let panic_msg = format!(
         "VERTHYS PANIC (minimal hook): {} at {}\npid={}",
-        msg, location, std::process::id()
+        msg,
+        location,
+        std::process::id()
     );
 
-    // Windows: OutputDebugString + MessageBoxW
+    // Windows: OutputDebugString（GUI 模式下无弹窗，避免阻塞展开；
+    // 日志系统升级后投递完整记录）
     #[cfg(windows)]
     {
         output_debug_string(&panic_msg);
-        // MessageBoxW 在 panic = "abort" 下可能阻塞，仅在非 windows_subsystem = "windows" 时弹窗
-        // GUI 模式下不弹窗（用户可能无法看到，且会阻塞 abort）
-        // 改为仅 OutputDebugString，由日志系统（升级后）记录
     }
 
     // 其他平台: stderr
@@ -145,6 +182,9 @@ fn minimal_panic_handler(info: &std::panic::PanicHookInfo<'_>) {
 ///
 /// 构造 JSON 日志投递至管道 + OutputDebugString 兜底。
 fn full_panic_handler(info: &std::panic::PanicHookInfo<'_>, sender: &LogSender) {
+    // 前置清零：任何诊断输出之前执行，最小化敏感驻留随日志外泄窗口
+    run_panic_wipers();
+
     let payload = info.payload();
     let msg = if let Some(s) = payload.downcast_ref::<&str>() {
         s.to_string()
@@ -155,26 +195,25 @@ fn full_panic_handler(info: &std::panic::PanicHookInfo<'_>, sender: &LogSender) 
     };
     let msg = sanitize_panic_payload(&msg);
 
-    let location = info.location().map(|l| {
-        format!("{}:{}:{}", l.file(), l.line(), l.column())
-    }).unwrap_or_else(|| "unknown".to_string());
+    let location = info
+        .location()
+        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+        .unwrap_or_else(|| "unknown".to_string());
 
     let backtrace = std::backtrace::Backtrace::force_capture();
 
-    let message = format!(
-        "PANIC: {} at {}\nBacktrace:\n{}",
-        msg, location, backtrace
-    );
+    let message = format!("PANIC: {} at {}\nBacktrace:\n{}", msg, location, backtrace);
 
     // 1. 构造 JSON 格式的致命错误日志，使用 send_guaranteed 不丢
     let entry = LogEntry::new(LogLevel::Fatal, "panic_hook", message.clone());
     sender.send_guaranteed(entry);
 
-    // 2. OutputDebugString 兜底（管道可能未消费完就 abort）
+    // 2. OutputDebugString 兜底（管道可能未消费完进程即退出）
     #[cfg(windows)]
     output_debug_string(&format!(
         "VERTHYS PANIC (full hook): {} | pid={}",
-        message, std::process::id()
+        message,
+        std::process::id()
     ));
 
     #[cfg(not(windows))]
@@ -187,8 +226,8 @@ fn full_panic_handler(info: &std::panic::PanicHookInfo<'_>, sender: &LogSender) 
 #[cfg(windows)]
 fn output_debug_string(msg: &str) {
     use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
     use windows::core::PCWSTR;
+    use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 
     let wide: Vec<u16> = std::ffi::OsStr::new(msg)
         .encode_wide()

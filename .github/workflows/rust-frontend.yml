@@ -22,20 +22,33 @@ name: rust-frontend-check
 
 on:
   push:
-    paths: ["verthys-tauri/**", "dep-versions.txt", ".github/workflows/rust-frontend.yml"]
+    paths: ["verthys-tauri/**", "dep-versions.txt", ".github/workflows/rust-frontend.yml", "VERSION", "ci/**", "scripts/**", "build_dev.ps1", "build_production.ps1", ".clang-tidy", "deny.toml", ".github/dependabot.yml"]
   pull_request:
-    paths: ["verthys-tauri/**", "dep-versions.txt", ".github/workflows/rust-frontend.yml"]
+    paths: ["verthys-tauri/**", "dep-versions.txt", ".github/workflows/rust-frontend.yml", "VERSION", "ci/**", "scripts/**", "build_dev.ps1", "build_production.ps1", ".clang-tidy", "deny.toml", ".github/dependabot.yml"]
 
 jobs:
   rust-and-frontend:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Version consistency gate (VERSION single source)
+        shell: pwsh
+        run: |
+          & ".\ci\sync_version.ps1" -CheckOnly
+          if ($LASTEXITCODE -ne 0) { throw "version drift: edit root VERSION then run ci\sync_version.ps1" }
+
       - name: Setup Rust (pinned by rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
+
+      - name: Restore Rust build cache (per-workspace)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            verthys-tauri/src-tauri
+            verthys-tauri/verthys-worker
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -49,6 +62,19 @@ jobs:
         run: |
           & ".\ci\verify_vendor_hashes.ps1"
           if ($LASTEXITCODE -ne 0) { throw "vendor hash gate failed" }
+
+      - name: Install cargo-deny (locked)
+        run: cargo install --locked cargo-deny
+
+      - name: Supply-chain scan (cargo-deny: advisories/licenses/bans/sources)
+        shell: pwsh
+        run: |
+          # 仓库无根 workspace：两个独立 crate 分别以各自 manifest 扫描
+          # （deny.toml 位于仓库根，经 manifest 父目录链自动发现）
+          cargo deny --manifest-path verthys-tauri/src-tauri/Cargo.toml check advisories licenses bans sources
+          if ($LASTEXITCODE -ne 0) { throw "cargo-deny (src-tauri) gate failed" }
+          cargo deny --manifest-path verthys-tauri/verthys-worker/Cargo.toml check advisories licenses bans sources
+          if ($LASTEXITCODE -ne 0) { throw "cargo-deny (worker) gate failed" }
 
       - name: Setup MSVC (x64)
         uses: ilammy/msvc-dev-cmd@v1
@@ -103,6 +129,13 @@ jobs:
         run: npm ci
         working-directory: verthys-tauri
 
+      - name: npm vulnerability gate (high+ blocked)
+        run: |
+          npm audit --audit-level=high
+          if ($LASTEXITCODE -ne 0) { throw "npm audit gate failed" }
+        shell: pwsh
+        working-directory: verthys-tauri
+
       - name: Dependency snapshot drift gate
         shell: pwsh
         run: |
@@ -135,6 +168,40 @@ jobs:
         shell: pwsh
         working-directory: verthys-tauri
 
+      - name: SBOM (CycloneDX, npm)
+        run: |
+          npx --yes @cyclonedx/cyclonedx-npm --output-file ../sbom-npm.json
+        shell: pwsh
+        working-directory: verthys-tauri
+
+      - name: Install cargo-cyclonedx (locked)
+        run: cargo install --locked cargo-cyclonedx
+
+      - name: SBOM (CycloneDX, Rust)
+        shell: pwsh
+        run: |
+          cargo cyclonedx -f json --spec-version 1.4 --output-file ../../sbom-cargo.json
+          if ($LASTEXITCODE -ne 0) { throw "cargo cyclonedx failed" }
+        working-directory: verthys-tauri/src-tauri
+
+      - name: SBOM (CycloneDX, Rust worker)
+        shell: pwsh
+        run: |
+          cargo cyclonedx -f json --spec-version 1.4 --output-file ../../sbom-worker.json
+          if ($LASTEXITCODE -ne 0) { throw "worker cyclonedx failed" }
+        working-directory: verthys-tauri/verthys-worker
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-artifacts
+          path: |
+            sbom-npm.json
+            sbom-cargo.json
+            sbom-worker.json
+          retention-days: 30
+          if-no-files-found: error
+
   local-script-smoke:
     runs-on: windows-latest
     timeout-minutes: 90
@@ -142,8 +209,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Version consistency gate (VERSION single source)
+        shell: pwsh
+        run: |
+          & ".\ci\sync_version.ps1" -CheckOnly
+          if ($LASTEXITCODE -ne 0) { throw "version drift: edit root VERSION then run ci\sync_version.ps1" }
+
       - name: Setup Rust (pinned by rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
+
+      - name: Restore Rust build cache (per-workspace)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            verthys-tauri/src-tauri
+            verthys-tauri/verthys-worker
 
       - name: Setup Node
         uses: actions/setup-node@v4

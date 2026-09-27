@@ -72,7 +72,7 @@
 | 键 | 值 | 说明 |
 |---|---|---|
 | `productName` | `Verthys`（品牌仅 Verthys） | 安装包/窗口名 |
-| `version` | `2.6.1` | 与 CMakeLists、package.json、Cargo.toml 一致 |
+| （无 `version` 字段） | 不承载 | 构建期自动继承 `src-tauri/Cargo.toml` 的 crate 版本；唯一手改点为根 `VERSION` 文件（`ci/sync_version.ps1` 同步其余载体） |
 | `identifier` | `com.verthys.app` | 包标识 |
 | `build.devUrl` | `http://localhost:1420` | 开发服务器（Vite） |
 | `build.frontendDist` | `../dist` | 前端产物目录 |

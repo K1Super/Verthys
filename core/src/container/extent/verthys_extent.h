@@ -199,6 +199,38 @@ VerthysResult verthys_extent_release(VerthysExtentIndex *idx,
 VerthysResult verthys_extent_gc_eligible(const VerthysExtentIndex *idx,
                                      size_t *count);
 
+/* ---------- 紧凑化（容量不足时的盘面回收） ---------- */
+
+#define VERTHYS_EXTENT_COMPACT_IO_BYTES (256u * 1024u) /* 搬移分块缓冲 */
+
+/*
+ * 紧凑化：按数据区序前移活跃条目密文块，回收 ref_count==0 死块空隙，
+ * 收缩追加游标（next_offset）与分区 used。
+ *
+ * 搬移语义（崩溃一致性）：
+ *   - 复制语义：目标区写入后 fsync，源区保持完好——索引帧持久化前
+ *     崩溃时，盘面索引快照仍指向源区（旧 offset），数据可读，搬移
+ *     仅为冗余；索引帧持久化后新 offset 视图生效，目标区数据已先
+ *     落盘；
+ *   - 收缩尾部不清零：残留密文不可达（条目 offset 均小于游标），
+ *     后续追加写自然覆盖；
+ *   - 密文原样搬移（数据块 AAD 不绑定 offset），不重加密、不消耗
+ *     nonce；
+ *   - 搬移方向恒为前向（目标偏移 ≤ 源偏移，条目按追加序 offset
+ *     单调），分块读写不产生重叠破坏。
+ * 死块条目保留于索引（ref_count=0），仅其盘面空间被回收。
+ *
+ * [in]     f     容器文件（已打开，须非 NULL）
+ * [in]     part  Extent 分区（仅读写 offset 字段，不需导入密钥）
+ * [in,out] idx   索引；条目 offset / next_offset 就地更新
+ *                 （part->used 同步收缩）
+ *
+ * 返回：VERTHYS_OK / VERTHYS_ERR_INVALID（含索引 offset 乱序的内聚
+ * 违例，拒绝破坏性搬移）/ VERTHYS_ERR_IO / VERTHYS_ERR_INTERNAL。
+ */
+VerthysResult verthys_extent_compact(FILE *f, VerthysPartition *part,
+                                     VerthysExtentIndex *idx);
+
 /* ---------- 索引持久化 ---------- */
 
 /*

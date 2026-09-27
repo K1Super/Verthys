@@ -4,7 +4,7 @@
 >
 > Last updated: 2026-09-19 · 维护人：K1Super
 
-本文档依据 `DOCUMENTATION_CHECKLIST.md` 的 P0 需求层要求整合，素材来自 `archive/PROJECT_DOCUMENTATION.md` 与 `archive/应用功能全量核验报告.md`；每条功能需求均以代码实现位置佐证，可被命令或可观察现象验收。约定：版本 2.6.1；品牌仅 Verthys；容器扩展名 `.verthys`；公开符号前缀 `Verthys_`；环境变量前缀 `VERTHYS_`。
+本文档依据 `DOCUMENTATION_CHECKLIST.md` 的 P0 需求层要求整合，素材来自 `archive/PROJECT_DOCUMENTATION.md` 与 `archive/应用功能全量核验报告.md`；每条功能需求均以代码实现位置佐证，可被命令或可观察现象验收。约定：版本 3.3.0；品牌仅 Verthys；容器扩展名 `.verthys`；公开符号前缀 `Verthys_`；环境变量前缀 `VERTHYS_`。
 
 ---
 
@@ -18,7 +18,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 |---|---|
 | 技术栈 | 核心 C11 DLL（MSVC）+ Tauri(Rust) + Vue3/TypeScript |
 | 容器格式 | V3（FlatBuffers schema 驱动），`.verthys` |
-| 版本 | 2.6.1 |
+| 版本 | 3.3.0 |
 | 威胁模型 | 同机非特权用户态攻击者（严于普通桌面应用） |
 
 ---

@@ -47,7 +47,7 @@ use crate::infrastructure::path_resolver::{
 };
 use crate::state::{AppState, InitLockGuard, SetupCache, WorkerLifecycleState};
 use crate::util::path::sanitize_path;
-use crate::worker::{WorkerSession, kill_orphan_workers};
+use crate::worker::{kill_orphan_workers, WorkerSession};
 use std::time::Duration;
 use tauri::State;
 
@@ -232,11 +232,17 @@ pub async fn worker_init(
                     return Ok(VerthysResponse::err("worker_init", &reason));
                 }
                 _ => {
-                    return Ok(VerthysResponse::err("worker_init", "安全子进程仍在初始化中，请稍后重试"));
+                    return Ok(VerthysResponse::err(
+                        "worker_init",
+                        "安全子进程仍在初始化中，请稍后重试",
+                    ));
                 }
             }
         }
-        return Ok(VerthysResponse::err("worker_init", "初始化流程进行中，拒绝并发请求"));
+        return Ok(VerthysResponse::err(
+            "worker_init",
+            "初始化流程进行中，拒绝并发请求",
+        ));
     }
 
     // 确保锁在函数退出时释放
@@ -355,10 +361,7 @@ pub async fn worker_init(
                     lc.transition_to_failed("spawn 任务异常");
                 })
                 .await;
-            return Ok(VerthysResponse::err(
-                "worker_init",
-                "安全核心启动失败",
-            ));
+            return Ok(VerthysResponse::err("worker_init", "安全核心启动失败"));
         }
         // WorkerSession::spawn 失败
         Ok(Ok(Err(e))) => {

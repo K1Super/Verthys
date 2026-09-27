@@ -173,7 +173,9 @@ impl DropResource for LogDaemonResource {
     }
 
     fn cleanup(&mut self) {
-        let _ = self.daemon.flush_and_shutdown(std::time::Duration::from_secs(3));
+        let _ = self
+            .daemon
+            .flush_and_shutdown(std::time::Duration::from_secs(3));
     }
 }
 

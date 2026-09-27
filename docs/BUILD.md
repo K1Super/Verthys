@@ -8,7 +8,7 @@
 
 ## 1. 仅 Windows 平台
 
-Verthys 2.6.1 仅支持 Windows / MSVC / x64：构建脚本固定使用 `VERTHYS_VS_GENERATOR`（默认 `Visual Studio 18 2026`）+ `-A x64`，产物命名含 `x86_64-pc-windows-msvc`；工作流 `core.yml` 用 `ilammy/msvc-dev-cmd@v1`（`arch: x64`）。不存在其他平台的构建脚本。
+Verthys 3.3.0 仅支持 Windows / MSVC / x64：构建脚本固定使用 `VERTHYS_VS_GENERATOR`（默认 `Visual Studio 18 2026`）+ `-A x64`，产物命名含 `x86_64-pc-windows-msvc`；工作流 `core.yml` 用 `ilammy/msvc-dev-cmd@v1`（`arch: x64`）。不存在其他平台的构建脚本。
 
 ## 2. 构建矩阵（参数抄自 build_production.ps1:22-29）
 
@@ -25,7 +25,7 @@ Verthys 2.6.1 仅支持 Windows / MSVC / x64：构建脚本固定使用 `VERTHYS
 
 ### 前置步骤（阶段 0 / 0.5 / 0.6）
 
-1. `阶段 0`：清理僵尸进程（`cargo/rustc/verthys-tauri/verthys-worker`）与 `.cargo-lock` 锁文件（`build_production.ps1:119-151`）。
+1. `阶段 0`：清理僵尸进程（`cargo/rustc/Verthys/verthys-worker`）与 `.cargo-lock` 锁文件（`build_production.ps1:119-151`）。
 2. `阶段 0.5`：dot-source 加载 `scripts/env.load.ps1`（MSVC 环境，`build_production.ps1:154-156`）。
 3. `阶段 0.6`：清理旧 `build_err.log`、校验 `node_modules`（缺失则 `npm install`）、校验 `keyboard-types-patched` 本地补丁、执行 `cargo update -p keyboard-types`（`build_production.ps1:159-225`）。
 

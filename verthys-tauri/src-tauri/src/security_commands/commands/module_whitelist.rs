@@ -38,9 +38,10 @@ pub async fn security_module_patrol(
     let install_dir = get_install_dir()?;
 
     // spawn_blocking 执行阻塞式巡检
-    let unknown = tokio::task::spawn_blocking(move || module_whitelist::patrol_modules(&install_dir))
-        .await
-        .map_err(|e| format!("巡检任务执行失败: {}", e))?;
+    let unknown =
+        tokio::task::spawn_blocking(move || module_whitelist::patrol_modules(&install_dir))
+            .await
+            .map_err(|e| format!("巡检任务执行失败: {}", e))?;
 
     // 审计日志
     write_security_audit(
@@ -90,8 +91,7 @@ pub fn security_add_trusted_path(
     }
 
     // 路径校验
-    crate::util::path::validate_path_input(&path)
-        .map_err(|e| format!("路径校验失败: {}", e))?;
+    crate::util::path::validate_path_input(&path).map_err(|e| format!("路径校验失败: {}", e))?;
 
     module_whitelist::add_trusted_path(&path);
 

@@ -106,7 +106,10 @@ pub fn verify_resource_hashes() -> Result<(), String> {
     }
 
     if mismatch_count > 0 {
-        return Err(format!("资源完整性校验失败：{} 个文件被篡改或缺失", mismatch_count));
+        return Err(format!(
+            "资源完整性校验失败：{} 个文件被篡改或缺失",
+            mismatch_count
+        ));
     }
 
     Ok(())

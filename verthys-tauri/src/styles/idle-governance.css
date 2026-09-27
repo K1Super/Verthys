@@ -38,9 +38,13 @@
      列名仅备注，实际持续运转由组件 rAF 保证） */
   /* 提交按钮光包巡行（引力锚点 loading 指示） */
   .cs-rail-packet,
-  /* Toast 活动指示点 */
+  /* Toast 提示立标（入场动画单次播放，豁免保持转发语义完整） */
   .toast-dot
-) {
+),
+/* 立标的影子/光子环/盘弧体与伪元素承载入场动画，须随本体一并豁免 —
+   否则空闲期出现提示时立标冻结在 0% 帧（透明）而不可见 */
+.idle-idle .toast-dot::before,
+.idle-idle .toast-dot::after {
   animation-play-state: running !important;
 }
 
@@ -90,7 +94,10 @@ body.reduced-motion .anim-interactive::after {
 body.reduced-motion :is(
   .cs-rail-packet,
   .toast-dot
-) {
+),
+/* 立标光子环/盘弧伪元素随本体豁免（与 idle 豁免同一缺口补齐） */
+body.reduced-motion .toast-dot::before,
+body.reduced-motion .toast-dot::after {
   animation-play-state: running !important;
 }
 

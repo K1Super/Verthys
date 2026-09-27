@@ -9,9 +9,15 @@ regex_scan.py — CI 第一级：快速正则过滤
 
 扫描内容：
 1. 入口文件是否包含危险关键词（encrypt、decrypt、fs::read、write）
-2. 全项目是否包含 println!、eprintln!、log::info!、printf 等输出类函数调用
+2. Rust 源码是否包含 println!、eprintln!、log::*! 输出类函数调用
+   （覆盖主进程 src-tauri/src、worker crate verthys-worker/src、
+   根共享契约 shm_schema.rs 与 src-tauri/build.rs）
 3. C 文件是否包含 printf / fprintf
 4. 底层文件是否反向引用上层模块（use crate::controller / use crate::service）
+
+扫描根目录列表化：任何 Rust 新增目录/根级敏感文件必须显式加入
+RUST_SCAN_ROOTS / RUST_SCAN_FILES，防止"新增 crate 默认不被扫"的
+覆盖盲区。
 """
 
 import os
@@ -22,8 +28,20 @@ from pathlib import Path
 # 项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
 
-# Rust 源码目录
-RUST_SRC = PROJECT_ROOT / "verthys-tauri" / "src-tauri" / "src"
+# 主进程 Rust 源码目录（白名单 ALLOWED_OUTPUT_FILES 的相对基准）
+RUST_MAIN_SRC = PROJECT_ROOT / "verthys-tauri" / "src-tauri" / "src"
+
+# Rust 扫描根目录（递归扫描其中全部 .rs）
+RUST_SCAN_ROOTS = [
+    RUST_MAIN_SRC,                                             # 主进程逻辑
+    PROJECT_ROOT / "verthys-tauri" / "verthys-worker" / "src",  # worker（协议/GMK 等敏感代码）
+]
+
+# Rust 扫描单文件（位于扫描根之外的同源契约与构建脚本）
+RUST_SCAN_FILES = [
+    PROJECT_ROOT / "verthys-tauri" / "shm_schema.rs",           # 主进程/worker 同源 SHM 契约
+    PROJECT_ROOT / "verthys-tauri" / "src-tauri" / "build.rs",  # 构建脚本（素材门禁逻辑）
+]
 
 # C 源码目录
 C_SRC = PROJECT_ROOT / "core" / "src"
@@ -84,7 +102,7 @@ def scan_file(filepath: Path, patterns, category: str, file_filter=None):
     except Exception:
         return
 
-    rel_path = filepath.relative_to(RUST_SRC).as_posix() if filepath.is_relative_to(RUST_SRC) else str(filepath)
+    rel_path = filepath.relative_to(PROJECT_ROOT).as_posix() if filepath.is_relative_to(PROJECT_ROOT) else str(filepath)
 
     for pattern, label in patterns:
         for match in re.finditer(pattern, content):
@@ -95,21 +113,24 @@ def scan_file(filepath: Path, patterns, category: str, file_filter=None):
 def scan_entry_files():
     """扫描入口文件是否包含危险关键词"""
     for entry_file in ENTRY_FILES:
-        filepath = RUST_SRC / entry_file
+        filepath = RUST_MAIN_SRC / entry_file
         if filepath.exists():
             scan_file(filepath, [(p, p) for p in ENTRY_DANGER_KEYWORDS], "入口文件危险关键词")
 
 
 def scan_rust_output():
     """扫描 Rust 文件中的输出类函数"""
-    for filepath in RUST_SRC.rglob("*.rs"):
-        rel_path = filepath.relative_to(RUST_SRC).as_posix()
-
-        # 跳过白名单文件
-        if rel_path in ALLOWED_OUTPUT_FILES:
-            continue
-
-        scan_file(filepath, OUTPUT_PATTERNS, "Rust输出函数")
+    for root in RUST_SCAN_ROOTS:
+        for filepath in root.rglob("*.rs"):
+            # 跳过白名单文件（白名单键相对主进程 src 目录）
+            if filepath.is_relative_to(RUST_MAIN_SRC):
+                rel_path = filepath.relative_to(RUST_MAIN_SRC).as_posix()
+                if rel_path in ALLOWED_OUTPUT_FILES:
+                    continue
+            scan_file(filepath, OUTPUT_PATTERNS, "Rust输出函数")
+    for filepath in RUST_SCAN_FILES:
+        if filepath.exists():
+            scan_file(filepath, OUTPUT_PATTERNS, "Rust输出函数")
 
 
 def scan_c_output():
@@ -121,13 +142,13 @@ def scan_c_output():
 def scan_reverse_imports():
     """扫描反向导入"""
     # 工具层文件不应引用上层
-    util_dir = RUST_SRC / "util"
+    util_dir = RUST_MAIN_SRC / "util"
     if util_dir.exists():
         for filepath in util_dir.rglob("*.rs"):
             scan_file(filepath, REVERSE_IMPORT_PATTERNS, "反向导入")
 
     # 持久层文件不应引用 controller/service
-    repo_dir = RUST_SRC / "repository"
+    repo_dir = RUST_MAIN_SRC / "repository"
     if repo_dir.exists():
         for filepath in repo_dir.rglob("*.rs"):
             # repository 可以引用 util，但不能引用 controller/service
@@ -137,7 +158,7 @@ def scan_reverse_imports():
             scan_file(filepath, repo_patterns, "反向导入")
 
     # 服务层文件不应引用 controller
-    service_dir = RUST_SRC / "service"
+    service_dir = RUST_MAIN_SRC / "service"
     if service_dir.exists():
         for filepath in service_dir.rglob("*.rs"):
             service_patterns = [

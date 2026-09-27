@@ -23,9 +23,13 @@
 #include "verthys_transaction_v3.h"
 #include "verthys_crypto.h"      /* verthys_generichash */
 #include "verthys_internal.h"    /* verthys_secure_zero */
+#include "verthys_diag.h"        /* VERTHYS_DIAG_LOG（强制复位诊断） */
+#include "verthys_io.h"          /* vio_pread64/vio_pwrite64（搬迁复制） */
 
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>               /* ENOSPC（容量告罄归类依据） */
+#include <io.h>                  /* _chsize_s/_fileno/_commit */
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -60,6 +64,12 @@ static uint64_t txn_now_unix_ms(void)
 {
     return (txn_now_filetime() - 116444736000000000ULL) / 10000ULL;
 }
+
+/* 前置声明：Extent 写入前容量保障三级链（紧凑化/扩展/审计搬迁，
+ * 定义位于 PREPARE 前置区）。 */
+static VerthysResult txn_ensure_extent_capacity(VerthysTxnV3 *t,
+                                                uint64_t incoming_bytes,
+                                                int allow_compact);
 
 /* Extent 索引内按哈希定位条目（与 verthys_extent.c 同款线性扫描；
  * 本模块需就地修改条目（重放 ref_count++），故不复用只读接口） */
@@ -215,6 +225,7 @@ VerthysResult verthys_txn_v3_begin(VerthysTxnV3 *t)
     t->has_prepare = 0;
     t->persist_done = 0;
     memset(&t->prepare, 0, sizeof(t->prepare));
+    t->reloc_hole_floor = 0;            /* 跳洞地板为事务级账目，BEGIN 复位 */
     txn_ledger_clear(t);                /* 终态复用时弃置残账（防御） */
 
     verthys_lsm_set_flush_suppress(t->lsm, 1);   /* 未提交条目禁入 SSTable */
@@ -237,6 +248,12 @@ VerthysResult verthys_txn_v3_write_extent(VerthysTxnV3 *t,
 
     if (t == NULL) return VERTHYS_ERR_INVALID;
     if (t->state != VERTHYS_TXN_V3_ACTIVE) return VERTHYS_ERR_INVALID;
+
+    /* 容量预检（含本块密文长度）：三级保障链执行于写盘之前，失败
+     * 零副作用返回（未落盘、未记账），调用方 abort 安全。去重命中
+     * 场景游标不动，预检至多触发一次无谓扩展，代价可忽略。 */
+    r = txn_ensure_extent_capacity(t, pt_len + VERTHYS_EXTENT_TAG_BYTES, 1);
+    if (r != VERTHYS_OK) return r;
 
     r = verthys_extent_put(t->f, t->extent_part, t->ext_idx, t->txid,
                          pt, pt_len, hash, &was_stored);
@@ -399,6 +416,175 @@ static const VerthysPartition *txn_ptable_find(const VerthysPartitionTable *pt,
     return NULL;
 }
 
+/* ================== Extent 容量保障（紧凑化 / 扩展 / 审计搬迁） ================== */
+
+/* 分区密文搬迁 IO 分块字节数（栈外堆缓冲，适配任意分区容量） */
+#define TXN_RELOC_IO_BYTES (256u * 1024u)
+
+/*
+ * 文件内区间复制（搬迁专用）：源区→目标区逐块读改写，完成后 fsync。
+ * 承载审计分区密文搬迁——审计数据 AAD 不绑定偏移，密文原样搬移
+ * 不重加密、不消耗 nonce。
+ */
+static VerthysResult txn_copy_file_range(FILE *f, uint64_t src, uint64_t dst,
+                                         uint64_t len)
+{
+    uint8_t *io;
+    uint64_t done = 0;
+    VerthysResult r = VERTHYS_OK;
+
+    if (len == 0) return VERTHYS_OK;
+    io = (uint8_t *)malloc(TXN_RELOC_IO_BYTES);
+    if (io == NULL) return VERTHYS_ERR_INTERNAL;
+    while (done < len) {
+        size_t chunk = (size_t)(len - done);
+        if (chunk > TXN_RELOC_IO_BYTES) chunk = TXN_RELOC_IO_BYTES;
+        if (vio_pread64(f, src + done, io, chunk) != 0 ||
+            vio_pwrite64(f, dst + done, io, chunk) != 0) {
+            r = VERTHYS_ERR_IO;
+            break;
+        }
+        done += chunk;
+    }
+    free(io);
+    if (r != VERTHYS_OK) return r;
+    if (fflush(f) != 0 || _commit(_fileno(f)) != 0) return VERTHYS_ERR_IO;
+    return VERTHYS_OK;
+}
+
+/*
+ * 审计分区整体后移搬迁（Extent 容量不足的最后手段）：
+ * 审计分区起点是 Extent 常规 2x 扩展的区域上限；搬迁将其整体后移，
+ * 以新起点为上限重新扩展，物理文件随之增长。
+ *
+ * 顺序纪律（数据先于元数据）：
+ *   1. 一致性守卫：分区表审计条目 offset 与超级块值必须一致
+ *      （不一致为半更新状态，拒绝以避免搬运依据错位）；
+ *   2. _chsize_s 扩展物理文件至新审计终点（目标区位于旧文件尾
+ *      之外，必须先扩展再写入）；ENOSPC 归 RESOURCE_LIMIT——
+ *      容量告罄是资源界限，非普通 IO 故障；
+ *   3. 审计密文原样搬迁并 fsync；旧区原地保留——元数据（超级块/
+ *      分区表）尚未持久化前崩溃时，恢复路径仍指向旧区，依赖
+ *      旧区数据完好；
+ *   4. 以新审计起点为上限重新执行 2x 扩展；
+ *   5. 追加游标/used 抬升跳过旧审计区间：本事务后续追加写落于
+ *      空洞之后，不覆盖旧区数据（旧区数据在元数据持久化前不可
+ *      失——覆盖会与崩溃回退依赖旧区的语义冲突）。空洞不挂任何
+ *      条目，成为数据区内部不可达区间，后续紧凑化自然回填；
+ *      崩溃重放的重建游标以最大条目末尾为下限（不含空洞），
+ *      回填同样自然发生；
+ *   6. 内存元数据更新：超级块审计偏移 + 分区表审计条目 offset，
+ *      随 COMMIT 的超块/分区表落盘步骤持久化（数据已先落盘），
+ *      该两步任一失败按崩溃重放语义收尾。
+ */
+static VerthysResult txn_extent_relocate_audit(VerthysTxnV3 *t, uint64_t need)
+{
+    VerthysPartition *ap = NULL;
+    uint64_t new_size, new_off, new_end;
+    uint64_t hole_rel, hoist, required;
+    VerthysResult r;
+
+    for (size_t i = 0; i < t->ptable->count; i++) {
+        if (t->ptable->entries[i].type == VERTHYS_PARTITION_AUDIT) {
+            ap = &t->ptable->entries[i];
+            break;
+        }
+    }
+    if (ap == NULL) return VERTHYS_ERR_INTERNAL;
+    if (ap->offset != t->sb->audit_partition_offset) return VERTHYS_ERR_INTERNAL;
+
+    /* 跳洞地板：旧审计区间 [旧 extent 终点, 旧 audit 终点) 在元数据
+     * 持久化前必须保持原样，本事务后续追加写一律落到跳洞之后
+     * （数据区相对偏移口径；区域上限纪律保证该值恒非负）。 */
+    hole_rel = (ap->offset + ap->size) - t->extent_part->offset -
+               VERTHYS_EXTENT_INDEX_REGION_BYTES;
+    hoist = (hole_rel > t->ext_idx->next_offset)
+                ? hole_rel : t->ext_idx->next_offset;
+    /* 抬升后容量需求 = 原 need + 游标净抬升量（抬升产生不可达空洞，
+     * 空洞计入容量账） */
+    required = need + (hoist - t->ext_idx->next_offset);
+
+    /* 新容量 = 2x 与 required 取大（与 verthys_partition_grow 同型） */
+    new_size = t->extent_part->size * 2u;
+    if (new_size < t->extent_part->size) return VERTHYS_ERR_INTERNAL;
+    if (new_size < required) new_size = required;
+    new_off = t->extent_part->offset + new_size;
+    if (new_off < t->extent_part->offset) return VERTHYS_ERR_INTERNAL;
+    new_end = new_off + ap->size;
+    if (new_end < new_off || new_end > INT64_MAX) return VERTHYS_ERR_INTERNAL;
+
+    /* 物理文件扩展（先扩后写）+ 审计密文搬迁（copy 语义 + fsync） */
+    if (_chsize_s(_fileno(t->f), (__int64)new_end) != 0) {
+        return (errno == ENOSPC) ? VERTHYS_ERR_RESOURCE_LIMIT : VERTHYS_ERR_IO;
+    }
+    if (ap->used > 0) {
+        r = txn_copy_file_range(t->f, ap->offset, new_off, ap->used);
+        if (r != VERTHYS_OK) return r;
+    }
+
+    /* 以新审计起点为上限重新扩展（上限按 required 计算，必然成功） */
+    r = verthys_partition_grow(t->extent_part,
+                               required - t->extent_part->size, new_off);
+    if (r != VERTHYS_OK) return r;
+
+    /* 追加游标/used 抬升至跳洞地板（本事务内不得回落到旧审计区间） */
+    t->ext_idx->next_offset = hoist;
+    t->extent_part->used = hoist;
+    t->reloc_hole_floor = hoist;
+
+    /* 内存元数据更新（COMMIT 的超块/分区表落盘步骤持久化） */
+    t->sb->audit_partition_offset = new_off;
+    ap->offset = new_off;
+    return VERTHYS_OK;
+}
+
+/*
+ * Extent 写入前容量保障三级链：紧凑化 → 常规扩展 → 审计搬迁。
+ *   1. need（含即将写入块长度）≤ 分区容量 → 无需动作；
+ *   2. allow_compact 时先紧凑化回收死块空隙，重新审视 need；
+ *   3. 常规 2x 扩展（上限 = 当前审计分区起点）；
+ *   4. 扩展触上限（审计分区尚未后移的历史布局）→ 审计分区搬迁。
+ * 调用时机：write_extent 写盘前（allow_compact=1）——保障失败时
+ * 本块未落盘、未记账，调用方 abort 零副作用。
+ * 紧凑化/搬迁均修改盘面（复制语义），元数据变更随本次 COMMIT
+ * 持久化；COMMIT 前崩溃时组被丢弃，盘面索引快照仍指向旧偏移
+ * 视图且源区数据完好，搬移仅为冗余。
+ */
+static VerthysResult txn_ensure_extent_capacity(VerthysTxnV3 *t,
+                                                uint64_t incoming_bytes,
+                                                int allow_compact)
+{
+    uint64_t need;
+    VerthysResult r;
+
+    need = (uint64_t)VERTHYS_EXTENT_INDEX_REGION_BYTES +
+           t->ext_idx->next_offset + incoming_bytes;
+    if (need <= t->extent_part->size) return VERTHYS_OK;
+
+    if (allow_compact) {
+        r = verthys_extent_compact(t->f, t->extent_part, t->ext_idx);
+        if (r != VERTHYS_OK) return r;
+        /* 本事务存在跳洞地板（此前审计搬迁）时，紧凑化收紧的游标
+         * 必须重新抬升回地板——否则本事务后续追加写会覆盖旧审计
+         * 区间，而崩溃回退仍依赖旧区数据（元数据尚未持久化）。 */
+        if (t->reloc_hole_floor != 0 &&
+            t->ext_idx->next_offset < t->reloc_hole_floor) {
+            t->ext_idx->next_offset = t->reloc_hole_floor;
+            t->extent_part->used = t->reloc_hole_floor;
+        }
+        need = (uint64_t)VERTHYS_EXTENT_INDEX_REGION_BYTES +
+               t->ext_idx->next_offset + incoming_bytes;
+        if (need <= t->extent_part->size) return VERTHYS_OK;
+    }
+
+    r = verthys_partition_grow(t->extent_part, need - t->extent_part->size,
+                               t->sb->audit_partition_offset);
+    if (r == VERTHYS_OK) return VERTHYS_OK;
+    if (r != VERTHYS_ERR_RESOURCE_LIMIT) return r;
+
+    return txn_extent_relocate_audit(t, need);
+}
+
 VerthysResult verthys_txn_v3_prepare(VerthysTxnV3 *t)
 {
     const VerthysPartition *ip, *ap;
@@ -442,17 +628,19 @@ VerthysResult verthys_txn_v3_commit(VerthysTxnV3 *t)
     if (t == NULL) return VERTHYS_ERR_INVALID;
     if (t->state != VERTHYS_TXN_V3_PREPARED) return VERTHYS_ERR_INVALID;
 
-    /* ---- 0. Extent 分区扩展决策（2x 扩区策略；须在超块候选写入前，
-     *        使 sb->extent_partition_size 与分区表一致持久） ---- */
+    /* ---- 0. Extent 分区扩展决策（write 阶段容量预检已执行完整
+     *        保障链，此处为兜底防御：处理游标被直接推进的路径，并
+     *        无条件同步 sb 记账值——保障链在 write 阶段的扩展同样
+     *        须随本次超块提交持久） ---- */
     need = (uint64_t)VERTHYS_EXTENT_INDEX_REGION_BYTES + t->ext_idx->next_offset;
     if (need > t->extent_part->size) {
         /* region_limit = audit 分区起点：extent 容量不得与其后的
-         * audit 区重叠（越界即拒绝，need 为上界实际无法满足） */
+         * audit 区重叠（越界即拒绝） */
         r = verthys_partition_grow(t->extent_part, need - t->extent_part->size,
                                    t->sb->audit_partition_offset);
         if (r != VERTHYS_OK) return r;
-        t->sb->extent_partition_size = t->extent_part->size;
     }
+    t->sb->extent_partition_size = t->extent_part->size;
 
     /* ---- 1/2. 超块候选字段 + 法定人数提交（vsb_txn 备份保护） ---- */
     r = vsb_txn_v3_begin(&vtxn, t->sb);     /* 失败内存回滚基准 */
@@ -602,6 +790,75 @@ VerthysResult verthys_txn_v3_rollback(VerthysTxnV3 *t)
     /* 4. 解除 flush 抑制。 */
     verthys_lsm_set_flush_suppress(t->lsm, 0);
 
+    t->state = VERTHYS_TXN_V3_ABORTED;
+    return VERTHYS_OK;
+}
+
+/* ================== 强制回滚（兜底复位） ================== */
+
+/*
+ * 常规回滚失效时的强制复位：保证事务状态机归位到 begin 可再次进入的
+ * 终态 ABORTED——常规回滚失败后若停留 ACTIVE/PREPARED，begin 的终态
+ * 检查将使后续全部写入返回 INVALID（单点瞬时故障永久瘫痪会话）。
+ *
+ * 收敛步骤（每步独立幂等，可重复执行）：
+ *   1. 首选常规回滚（保留 LSM WAL 截断精确撤销语义）；成功直接返回；
+ *   2. LSM 过滤式重建：以 created_txid 剔除本事务帧后自 WAL 重放重建
+ *      MemTable——不依赖截断是否成功（残留帧同样被剔除；若 flush
+ *      违反抑制纪律已把本事务条目写入 SSTable，则超出运行时回滚
+ *      能力，仅能保证状态归位，该风险由抑制纪律封闭）；
+ *   3. Extent 引用账本反向调整（常规回滚在失败点前未施加的步骤）；
+ *   4. 事务 WAL 复位（2 次重试）：残余帧无 COMMIT 记录，崩溃恢复
+ *      按未提交组丢弃；若重试终局失败（IO 级持续故障），帧残留使
+ *      txid 复用时存在组合并复活窗口，记诊断后仍归位——持久 IO
+ *      故障下容器本已不可用，为保可用性收敛主动放弃该窗口；
+ *   5. 解除 flush 抑制 + 状态归位 ABORTED。
+ *
+ * 返回 VERTHYS_OK（状态必归位）；入参/状态非法返回 VERTHYS_ERR_INVALID。
+ */
+VerthysResult verthys_txn_v3_force_abort(VerthysTxnV3 *t)
+{
+    VerthysResult r;
+    int retry;
+
+    if (t == NULL) return VERTHYS_ERR_INVALID;
+    if (t->state != VERTHYS_TXN_V3_ACTIVE && t->state != VERTHYS_TXN_V3_PREPARED) {
+        return VERTHYS_ERR_INVALID;
+    }
+
+    /* 1. 常规回滚优先：截断 + 重放重建 + WAL 复位的精确路径 */
+    if (verthys_txn_v3_rollback(t) == VERTHYS_OK) {
+        return VERTHYS_OK;
+    }
+
+    VERTHYS_DIAG_LOG("verthys: txn force_abort txid=%llu (rollback failed)",
+                     (unsigned long long)t->txid);
+
+    /* 2. LSM 过滤式重建（剔除本事务帧，不依赖截断结果） */
+    r = verthys_lsm_rebuild_excluding(t->lsm, &t->txid, 1);
+    if (r != VERTHYS_OK) {
+        VERTHYS_DIAG_LOG("verthys: txn force_abort lsm rebuild failed (%d)",
+                         (int)r);
+        /* 重建失败（内存/IO）不阻塞状态归位：LSM 可能停留只读态，
+         * 写路径自愈尝试在后续 put 时进行 */
+    }
+
+    /* 3. Extent 引用净额还原（账本先弃置再复位 WAL——重入不二次调整） */
+    txn_ledger_apply_rollback(t);
+    txn_ledger_clear(t);
+
+    /* 4. 事务 WAL 复位（含首次共 3 次尝试；终局失败记诊断不阻塞归位） */
+    r = verthys_wal_reset(t->wal);
+    for (retry = 0; retry < 2 && r != VERTHYS_OK; retry++) {
+        r = verthys_wal_reset(t->wal);
+    }
+    if (r != VERTHYS_OK) {
+        VERTHYS_DIAG_LOG("verthys: txn force_abort wal reset failed (%d)",
+                         (int)r);
+    }
+
+    /* 5. 解除 flush 抑制 + 状态归位（begin 可再次进入） */
+    verthys_lsm_set_flush_suppress(t->lsm, 0);
     t->state = VERTHYS_TXN_V3_ABORTED;
     return VERTHYS_OK;
 }

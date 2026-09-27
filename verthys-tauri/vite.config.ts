@@ -1,7 +1,12 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import obfuscatorPlugin from "rollup-plugin-obfuscator";
 import { visualizer } from "rollup-plugin-visualizer";
+
+// 产品版本唯一手改点为仓库根 VERSION 文件；构建期注入 import.meta.env.VITE_APP_VERSION，
+// 与 Cargo/package 元数据的一致性由 ci/sync_version.ps1 与 CI 门禁保证。
+const appVersion = readFileSync(new URL("../VERSION", import.meta.url), "utf8").trim();
 
 const host = process.env.TAURI_DEV_HOST;
 
@@ -51,6 +56,9 @@ export default defineConfig(async ({ command }) => ({
       : []),
   ],
   clearScreen: false,
+  define: {
+    "import.meta.env.VITE_APP_VERSION": JSON.stringify(appVersion),
+  },
   // 使用较新 target 以支持解构语法降级（esbuild-wasm 0.28 严格检查）
   build: {
     target: "esnext",

@@ -11,17 +11,21 @@
 #   通过 rustflags 全局设置 --cfg=has_std，确保 Windows 桌面环境下 std 始终可用。
 #   has_std 不含值，无嵌入双引号，不会触发 Windows 命令行解析问题。
 #
-#   格式注意：使用 --cfg=fast_arithmetic=64（值不带嵌入双引号），
-#   Rust cfg 系统会将 =64 解析为字符串 "64"，与 #[cfg(fast_arithmetic = "64")] 匹配。
-#   避免了旧配置中 fast_arithmetic="64" 嵌入双引号导致的 Windows 命令行解析问题。
+#   格式注意：使用 --cfg=fast_arithmetic="64"（值带双引号）。
+#   rustc 要求 cfg 值必须为字符串字面量形式：无引号写法 --cfg=fast_arithmetic=64
+#   会被以 invalid --cfg argument (argument value must be a string) 拒绝
+#   （rustc 1.98 实测）。serde_json 自身的 build.rs 以
+#   cargo:rustc-cfg=fast_arithmetic="64" 输出同一 cfg，本处与其保持一致。
+#   本文件的 rustflags 为数组逐项透传，cargo 不做 shell 分词，双引号
+#   安全保留至 rustc，不引入命令行解析风险。
 #
 # 原配置问题历史：
-#   - 旧 rustflags = ['--cfg=fast_arithmetic="64"', '--cfg=has_std'] 的嵌入双引号
-#     导致 cargo build.rs hash 不匹配（Windows 命令行解析），引发连锁编译错误
+#   - 曾在带引号与无引号写法间反复：无引号写法在较新 rustc 下编译失败
+#     （invalid --cfg argument），本文件现已固定为带引号写法
 #   - 移除 rustflags 后，serde_json build.rs 自动设置的 cfg 在并行编译时偶尔丢失
 #   - 同时移除 has_std 后，indexmap 1.9.3 的 autocfg 探测在构建上下文中失败，
 #     导致 schemars 0.8.22 编译失败（E0107）
-#   - 当前方案：保留 has_std（无值 cfg，无双引号问题），同时使用 =64 格式的 fast_arithmetic
+#   - 当前方案：保留 has_std（无值 cfg），fast_arithmetic 使用带引号写法
 #
 # 修复：windows-targets 0.52.6 有两种链接模式：
 #   - windows_raw_dylib 启用：使用 #[link(kind = "raw-dylib")]，编译器自动生成导入库

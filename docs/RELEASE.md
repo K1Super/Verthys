@@ -4,11 +4,22 @@
 >
 > Last updated: 2026-09-19 · 维护人：K1Super
 
-当前版本 2.6.1。发布为本地 Git tag + 手动产物分发，无远程发布渠道；本文档定义一致、可验收的发版流程。
+当前版本 3.3.0（唯一手改点：仓库根 `VERSION` 文件）。发布为本地 Git tag + 手动产物分发，无远程发布渠道；本文档定义一致、可验收的发版流程。
 
 ## 1. 版本号规则
 
-遵循语义化版本 SemVer：`MAJOR.MINOR.PATCH`。当前 2.6.1 在四处元数据一致：`CMakeLists.txt`（`project(VERSION 2.6.1)`）、`verthys-tauri/package.json`、`verthys-tauri/src-tauri/Cargo.toml`、`verthys-tauri/src-tauri/tauri.conf.json` 均为 `2.6.1`。
+遵循语义化版本 SemVer：`MAJOR.MINOR.PATCH`。版本号单一权威源为仓库根 `VERSION` 文件（单行 semver），其余载体全部自动派生，禁止手工改载体：
+
+| 载体 | 更新方式 |
+|---|---|
+| `CMakeLists.txt` | 构建期读取 `VERSION` 并校验 semver（缺失/非法即配置失败） |
+| `verthys-tauri/src-tauri/Cargo.toml`、`verthys-tauri/verthys-worker/Cargo.toml` | `ci\sync_version.ps1` 同步 |
+| `verthys-tauri/package.json`、`verthys-tauri/package-lock.json` | `ci\sync_version.ps1` 同步 |
+| `verthys-tauri/src/app/config.ts` 回退值 | `ci\sync_version.ps1` 同步 |
+| `verthys-tauri/src-tauri/tauri.conf.json` | 不承载版本：Tauri 工具链回退取 src-tauri crate 版本 |
+| 前端运行期 `import.meta.env.VITE_APP_VERSION` | vite 构建期读取 `VERSION` 注入 |
+
+升版命令：编辑根 `VERSION` → `powershell -ExecutionPolicy Bypass -File ci\sync_version.ps1` → 审阅 `git diff` 后提交。CI 门禁（`run_ci.ps1` 与两个 GitHub 工作流）执行 `-CheckOnly` 漂移校验，任何载体与 `VERSION` 不一致即红。
 
 ## 2. 发版检查清单（逐项可验收）
 
@@ -19,14 +30,14 @@
 5. Rust 检查：`cargo check` 通过（`build_production.ps1:417`）；`npm run tauri build` 成功产出 NSIS 包。
 6. 产物哈希校验：阶段 3.3 的 `Get-FileSha256` 副本比对无哈希漂移（`build_production.ps1:365-391`）。
 7. NSIS 包冒烟：在干净机器安装 `src-tauri/target/release/bundle/nsis/*.exe`，按 [DEPLOYMENT.md](DEPLOYMENT.md) 第 5 节做安装后验证。
-8. 打 tag：`git tag -a v2.6.x -m "Release 2.6.x"` 并 `git push origin v2.6.x`（命令须与当次版本号一致）。
+8. 打 tag：`git tag -a v3.3.x -m "Release 3.3.x"` 并 `git push origin v3.3.x`（命令须与当次版本号一致）。
 9. 更新 CHANGELOG：按 Keep a Changelog（Added/Changed/Fixed/Security）追加版本段，与 tag 对应。
 
 ## 3. tag 与发布物流程
 
 ```powershell
-git tag -a v2.6.1 -m "Release 2.6.1"
-git push origin v2.6.1
+git tag -a v3.3.0 -m "Release 3.3.0"
+git push origin v3.3.0
 ```
 
 发布物 = 手动上传的 NSIS 安装包（`*.exe`）。当前 `.github/workflows/` 仅有 `core.yml`（core 构建与测试 + fuzz），无 release 发布工作流，故发布渠道待定；tag 为本地仓库标签，产出物由维护人手动分发。

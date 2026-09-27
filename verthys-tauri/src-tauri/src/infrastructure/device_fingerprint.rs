@@ -55,7 +55,8 @@ const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
 const CIRCUIT_BREAKER_COOLDOWN: u64 = 60;
 
 /// 全局熔断器实例，互斥锁保证多线程状态修改安全
-static CIRCUIT_BREAKER: std::sync::Mutex<CircuitBreaker> = std::sync::Mutex::new(CircuitBreaker::new());
+static CIRCUIT_BREAKER: std::sync::Mutex<CircuitBreaker> =
+    std::sync::Mutex::new(CircuitBreaker::new());
 
 // ===== 硬件组件指纹数据结构 =====
 
@@ -95,7 +96,12 @@ impl DeviceComponents {
     /// 设计意图：固定长度前缀便于可靠解析，用于DPAPI加密落地持久化
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut result = Vec::new();
-        for hash in [&self.cpu_hash, &self.motherboard_hash, &self.disk_hash, &self.combined_hash] {
+        for hash in [
+            &self.cpu_hash,
+            &self.motherboard_hash,
+            &self.disk_hash,
+            &self.combined_hash,
+        ] {
             let bytes = hash.as_bytes();
             result.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             result.extend_from_slice(bytes);
@@ -155,7 +161,9 @@ fn check_circuit_breaker() -> Result<(), String> {
         .unwrap_or_default()
         .as_secs();
 
-    let mut cb = CIRCUIT_BREAKER.lock().map_err(|e| format!("熔断器互斥锁获取失败: {}", e))?;
+    let mut cb = CIRCUIT_BREAKER
+        .lock()
+        .map_err(|e| format!("熔断器互斥锁获取失败: {}", e))?;
 
     if cb.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
         let elapsed = now.saturating_sub(cb.last_failure_time);
@@ -237,7 +245,11 @@ fn collect_components_blocking() -> Result<DeviceComponents, String> {
         let motherboard_id = get_motherboard_uuid_windows()?;
         let disk_id = get_disk_id_windows()?;
 
-        Ok(DeviceComponents::from_raw_ids(&cpu_id, &motherboard_id, &disk_id))
+        Ok(DeviceComponents::from_raw_ids(
+            &cpu_id,
+            &motherboard_id,
+            &disk_id,
+        ))
     }
 
     #[cfg(not(windows))]
@@ -246,7 +258,11 @@ fn collect_components_blocking() -> Result<DeviceComponents, String> {
         let hostname = get_hostname_unix()?;
         let cpu_id = format!("{}-{}", machine_id, hostname);
 
-        Ok(DeviceComponents::from_raw_ids(&cpu_id, &machine_id, &hostname))
+        Ok(DeviceComponents::from_raw_ids(
+            &cpu_id,
+            &machine_id,
+            &hostname,
+        ))
     }
 }
 
@@ -263,7 +279,9 @@ fn get_cpu_id_windows() -> Result<String, String> {
         vendor[0..4].copy_from_slice(&result.ebx.to_le_bytes());
         vendor[4..8].copy_from_slice(&result.edx.to_le_bytes());
         vendor[8..12].copy_from_slice(&result.ecx.to_le_bytes());
-        String::from_utf8_lossy(&vendor).trim_end_matches('\0').to_string()
+        String::from_utf8_lossy(&vendor)
+            .trim_end_matches('\0')
+            .to_string()
     };
 
     // CPUID叶子1读取处理器版本与功能标识位
@@ -286,9 +304,7 @@ fn get_motherboard_uuid_windows() -> Result<String, String> {
     }
 
     let mut buffer = vec![0u8; size as usize];
-    let written = unsafe {
-        GetSystemFirmwareTable(RSMB, 0, Some(&mut buffer))
-    };
+    let written = unsafe { GetSystemFirmwareTable(RSMB, 0, Some(&mut buffer)) };
 
     if written == 0 {
         return Err("GetSystemFirmwareTable 读取SMBIOS数据表内容失败".into());
@@ -436,7 +452,10 @@ pub const MATCH_THRESHOLD_PERCENT: u32 = 80;
 
 /// 基于历史存储指纹与当前指纹计算加权匹配得分
 /// 返回匹配百分比与各组件单独匹配状态明细
-pub fn calculate_match_score(stored: &DeviceComponents, current: &DeviceComponents) -> (u32, ComponentMatch) {
+pub fn calculate_match_score(
+    stored: &DeviceComponents,
+    current: &DeviceComponents,
+) -> (u32, ComponentMatch) {
     let cpu_match = stored.cpu_hash == current.cpu_hash;
     let motherboard_match = stored.motherboard_hash == current.motherboard_hash;
     let disk_match = stored.disk_hash == current.disk_hash;
@@ -454,12 +473,15 @@ pub fn calculate_match_score(stored: &DeviceComponents, current: &DeviceComponen
 
     let percent = (score * 100) / WEIGHT_TOTAL;
 
-    (percent, ComponentMatch {
-        cpu_match,
-        motherboard_match,
-        disk_match,
-        score: percent,
-    })
+    (
+        percent,
+        ComponentMatch {
+            cpu_match,
+            motherboard_match,
+            disk_match,
+            score: percent,
+        },
+    )
 }
 
 /// 组件级逐项匹配结果载体，用于上层日志记录与变更提示

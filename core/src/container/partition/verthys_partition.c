@@ -101,10 +101,11 @@ VerthysResult verthys_partition_create(VerthysPartition *p,
         goto fail;
     }
 
-    /* 2. CNG 内核导入（import 内部清零明文密钥） */
+    /* 2. CNG 内核导入（import 内部清零明文密钥）。
+     *    全新随机分区密钥未经任何加密操作，nonce 空间从 0 起步合法 */
     r = verthys_cng_aead_init(&p->aead);
     if (r != VERTHYS_OK) goto fail;
-    r = verthys_cng_aead_import_key(&p->aead, key, key_id);
+    r = verthys_cng_aead_import_key(&p->aead, key, key_id, 0);
     if (r != VERTHYS_OK) goto fail;
 
     /* 3. 内存态登记 */
@@ -174,19 +175,23 @@ VerthysResult verthys_partition_load(VerthysPartition *p,
         return VERTHYS_ERR_FORMAT;
     }
 
-    /* 2. CNG 内核导入（清零明文密钥） */
+    /* 2. CNG 内核导入（清零明文密钥）。
+     *    分区密钥随容器持久化，nonce 恢复在导入入参一次性完成——
+     *    以元数据持久化值 nonce_counter 为起步下限 */
     r = verthys_cng_aead_init(&p->aead);
     if (r != VERTHYS_OK) {
         verthys_secure_zero(key, sizeof(key));
         return r;
     }
-    r = verthys_cng_aead_import_key(&p->aead, key, key_id);
+    r = verthys_cng_aead_import_key(&p->aead, key, key_id, nonce_counter);
     if (r != VERTHYS_OK) {
         verthys_secure_zero(key, sizeof(key));
         return r;
     }
 
-    /* 3. nonce 计数器恢复（防回退） */
+    /* 3. 防回退兜底：导入已恢复 nonce_counter，此处再以前值调用
+     *    restore 属于单调性强制校验（拒绝任何意外回退；同会话重载
+     *    场景下入参为过期旧值会被安全忽略） */
     r = verthys_cng_aead_restore_nonce_counter(&p->aead, nonce_counter);
     if (r != VERTHYS_OK) {
         verthys_secure_zero(key, sizeof(key));

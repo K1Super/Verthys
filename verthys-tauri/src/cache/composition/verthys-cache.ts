@@ -64,6 +64,7 @@ import {
   VerthysCacheDomain,
   type VerthysCacheApi,
   type KeyStateForCache,
+  type ScanProgress,
 } from "../domain/verthys-cache-domain";
 import {
   isCacheTimersCancelled,
@@ -80,6 +81,7 @@ const log = createLogger("verthys-cache");
 // re-export flush 队列 API（统一冲刷队列服务）
 export {
   persistVerthys,
+  persistVerthysDetailed,
   deleteAndPersist,
   deleteAndPersistBatch,
   waitForFlush,
@@ -222,9 +224,34 @@ export function clearModuleKeyCache(): void {
 
 /* === 3. 共享记录扫描缓存 === */
 
-/** 确保记录扫描缓存覆盖最新记录（游标批量扫描 + v1 回退；并发复用同一 Promise） */
-export function ensureRecordScan(): Promise<void> {
-  return ensureDomain().ensureRecordScan();
+/** 确保记录扫描缓存覆盖最新记录（游标批量扫描 + v1 回退；并发复用同一 Promise）
+ *
+ * @param onProgress 批次粒度进度回调（可选）：仅在本次调用真正发起扫描时生效，
+ *   复用进行中扫描时不回调（上层不得据此伪造完成度）。
+ */
+export function ensureRecordScan(onProgress?: (progress: ScanProgress) => void): Promise<void> {
+  return ensureDomain().ensureRecordScan(onProgress);
+}
+
+/** 请求取消进行中的记录扫描（批次边界生效；已合并批次保留，可续扫） */
+export function cancelRecordScan(): void {
+  ensureDomain().cancelRecordScan();
+}
+
+/** 请求取消进行中的摘要扫描（批次边界生效） */
+export function cancelSummaryScan(): void {
+  ensureDomain().cancelSummaryScan();
+}
+
+/** 扫描进度快照类型（供上层信号层消费） */
+export type { ScanProgress };
+
+/** 记录扫描期发现的损坏条目 ID（升序；供完整性巡检与诊断使用）
+ *
+ * 这些条目数据不可读（后端解密失败/索引不一致），未进入扫描缓存；
+ * 留档使"损坏"与"不存在"在前端可区分。 */
+export function getScanFailedIds(): number[] {
+  return ensureDomain().getScanFailedIds();
 }
 
 /** 从扫描缓存中按类型获取记录 ID 列表（O(1) 索引查询，已排序） */

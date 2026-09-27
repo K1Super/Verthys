@@ -23,6 +23,8 @@ add_executable(verthys_tests
     security/test_integrity_verify.c
     transaction/test_txn_recovery_inject.c
     transaction/test_txn_delete_retry.c
+    transaction/test_txn_force_abort.c
+    transaction/test_txn_extent_reloc.c
     perf/test_perf_baseline.c
     regression/test_final_repair.c
     schema/test_flatcc_demo.c
@@ -30,6 +32,7 @@ add_executable(verthys_tests
     security/test_secure_allocator.c
     security/test_backoff_process_wide.c
     container/test_v3_container.c
+    container/test_container_lock.c
     container/test_v3_partition.c
     container/test_v3_extent.c
     index/test_v3_lsm.c

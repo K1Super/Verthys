@@ -81,16 +81,19 @@ pub fn verify_dll_integrity(dll_path: &str) -> Result<(), String> {
             log::error!(
                 "[DLL 校验] DLL 哈希不匹配（dev 环境强制阻断）expected={} actual={} — \
                  拒绝加载，防止 FFI 布局不匹配导致 worker 崩溃",
-                expected, actual
+                expected,
+                actual
             );
             // 返回脱敏错误（不含哈希值，符合"禁止输出错误具体信息"约束）
             return Err(
-                "DLL 完整性校验失败：加载的加密核心与编译时不一致，请重新编译或同步 Release 版本".into(),
+                "DLL 完整性校验失败：加载的加密核心与编译时不一致，请重新编译或同步 Release 版本"
+                    .into(),
             );
         }
         log::warn!(
             "[DLL 校验] DLL 哈希不匹配（安全警告）expected={} actual={} — 已记录，继续启动",
-            expected, actual
+            expected,
+            actual
         );
         return Ok(());
     }
@@ -119,15 +122,10 @@ pub fn get_dll_hash_prefix() -> String {
 pub fn check_dll_dependencies(_dll_path: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let system32 = std::env::var("SystemRoot")
-            .unwrap_or_else(|_| r"C:\Windows".into());
+        let system32 = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         let system32_dir = std::path::Path::new(&system32).join("System32");
 
-        let required_runtimes = [
-            "vcruntime140.dll",
-            "msvcp140.dll",
-            "vcruntime140_1.dll",
-        ];
+        let required_runtimes = ["vcruntime140.dll", "msvcp140.dll", "vcruntime140_1.dll"];
 
         let mut missing = Vec::new();
         for dll in &required_runtimes {
@@ -220,7 +218,8 @@ pub fn detect_pe_architecture(path: &str) -> Result<PeArch, String> {
 
     // DOS 头：前 64 字节足够读取 e_lfanew（偏移 0x3C，4 字节）
     let mut dos = [0u8; 64];
-    f.read_exact(&mut dos).map_err(|e| format!("read dos header: {}", e))?;
+    f.read_exact(&mut dos)
+        .map_err(|e| format!("read dos header: {}", e))?;
     if dos[0] != b'M' || dos[1] != b'Z' {
         return Err("not a PE/DOS image (missing MZ signature)".into());
     }
@@ -234,7 +233,8 @@ pub fn detect_pe_architecture(path: &str) -> Result<PeArch, String> {
         .map_err(|e| format!("seek to PE header: {}", e))?;
     // PE 签名 (4B "PE\0\0") + COFF 头 (20B)：Machine 字段在偏移 +4
     let mut pe = [0u8; 24];
-    f.read_exact(&mut pe).map_err(|e| format!("read PE/COFF header: {}", e))?;
+    f.read_exact(&mut pe)
+        .map_err(|e| format!("read PE/COFF header: {}", e))?;
     if pe[0] != b'P' || pe[1] != b'E' || pe[2] != 0 || pe[3] != 0 {
         return Err("missing PE signature".into());
     }
@@ -267,8 +267,8 @@ pub fn detect_pe_architecture(path: &str) -> Result<PeArch, String> {
 pub fn verify_binary_architecture(worker_exe: &str, dll_path: &str) -> Result<(), String> {
     let worker_arch = detect_pe_architecture(worker_exe)
         .map_err(|e| format!("worker exe 架构解析失败: {}", e))?;
-    let dll_arch = detect_pe_architecture(dll_path)
-        .map_err(|e| format!("dll 架构解析失败: {}", e))?;
+    let dll_arch =
+        detect_pe_architecture(dll_path).map_err(|e| format!("dll 架构解析失败: {}", e))?;
 
     log::info!(
         "[arch_check] worker={} dll={}",
@@ -575,10 +575,10 @@ pub fn check_binary_dependencies(worker_exe: &str, dll_path: &str) -> Result<(),
         .ok_or_else(|| "无法解析 worker exe 所在目录".to_string())?;
 
     // 3. 解析 worker exe 与 verthys.dll 的导入表
-    let worker_imports = parse_pe_imports(worker_exe)
-        .map_err(|e| format!("worker exe 导入表解析失败: {}", e))?;
-    let dll_imports = parse_pe_imports(dll_path)
-        .map_err(|e| format!("verthys.dll 导入表解析失败: {}", e))?;
+    let worker_imports =
+        parse_pe_imports(worker_exe).map_err(|e| format!("worker exe 导入表解析失败: {}", e))?;
+    let dll_imports =
+        parse_pe_imports(dll_path).map_err(|e| format!("verthys.dll 导入表解析失败: {}", e))?;
 
     log::debug!(
         "[dep_check] worker 导入 {} 项, dll 导入 {} 项",
@@ -642,11 +642,16 @@ pub fn resolve_worker_path(app: &tauri::AppHandle) -> Result<String, String> {
 
             if is_dev {
                 for profile in &["release", "debug"] {
-                    let p = exe_dir
-                        .join(format!("../../../verthys-worker/target/{}/{}", profile, exe_name));
+                    let p = exe_dir.join(format!(
+                        "../../../verthys-worker/target/{}/{}",
+                        profile, exe_name
+                    ));
                     if p.exists() {
                         let abs = p.canonicalize().map_err(|e| e.to_string())?;
-                        log::info!("[resolve_worker] 开发环境命中: {}", sanitize_path(&abs.display().to_string()));
+                        log::info!(
+                            "[resolve_worker] 开发环境命中: {}",
+                            sanitize_path(&abs.display().to_string())
+                        );
                         return Ok(abs.display().to_string());
                     }
                 }
@@ -660,7 +665,10 @@ pub fn resolve_worker_path(app: &tauri::AppHandle) -> Result<String, String> {
         "verthys-worker".to_string(),
     ];
     for rel in &resource_candidates {
-        if let Ok(path) = app.path().resolve(rel, tauri::path::BaseDirectory::Resource) {
+        if let Ok(path) = app
+            .path()
+            .resolve(rel, tauri::path::BaseDirectory::Resource)
+        {
             let exe = if cfg!(target_os = "windows") {
                 format!("{}.exe", path.display())
             } else {
@@ -685,7 +693,10 @@ pub fn resolve_worker_path(app: &tauri::AppHandle) -> Result<String, String> {
             for p in &exe_based {
                 if p.exists() {
                     let abs = p.canonicalize().map_err(|e| e.to_string())?;
-                    log::info!("[resolve_worker] exe 同级命中: {}", sanitize_path(&abs.display().to_string()));
+                    log::info!(
+                        "[resolve_worker] exe 同级命中: {}",
+                        sanitize_path(&abs.display().to_string())
+                    );
                     return Ok(abs.display().to_string());
                 }
             }
@@ -702,7 +713,10 @@ pub fn resolve_worker_path(app: &tauri::AppHandle) -> Result<String, String> {
     for c in &dev_candidates {
         if std::path::Path::new(c).exists() {
             let abs = std::fs::canonicalize(c).map_err(|e| e.to_string())?;
-            log::info!("[resolve_worker] CWD 相对命中: {}", sanitize_path(&abs.display().to_string()));
+            log::info!(
+                "[resolve_worker] CWD 相对命中: {}",
+                sanitize_path(&abs.display().to_string())
+            );
             return Ok(abs.display().to_string());
         }
     }
@@ -758,7 +772,10 @@ pub fn resolve_dll_path(app: &tauri::AppHandle) -> Result<String, String> {
                 let p = exe_dir.join("../../../../build/core/Release/verthys.dll");
                 if p.exists() {
                     let abs = p.canonicalize().map_err(|e| e.to_string())?;
-                    log::info!("[resolve_dll] 开发环境命中: {}", sanitize_path(&abs.display().to_string()));
+                    log::info!(
+                        "[resolve_dll] 开发环境命中: {}",
+                        sanitize_path(&abs.display().to_string())
+                    );
                     return Ok(abs.display().to_string());
                 }
             }
@@ -766,9 +783,15 @@ pub fn resolve_dll_path(app: &tauri::AppHandle) -> Result<String, String> {
     }
 
     // 2. Tauri 资源目录
-    if let Ok(path) = app.path().resolve("verthys.dll", tauri::path::BaseDirectory::Resource) {
+    if let Ok(path) = app
+        .path()
+        .resolve("verthys.dll", tauri::path::BaseDirectory::Resource)
+    {
         if path.exists() {
-            log::info!("[resolve_dll] 资源路径命中: {}", sanitize_path(&path.display().to_string()));
+            log::info!(
+                "[resolve_dll] 资源路径命中: {}",
+                sanitize_path(&path.display().to_string())
+            );
             return Ok(path.display().to_string());
         }
     }
@@ -785,7 +808,10 @@ pub fn resolve_dll_path(app: &tauri::AppHandle) -> Result<String, String> {
             for p in &exe_based {
                 if p.exists() {
                     let abs = p.canonicalize().map_err(|e| e.to_string())?;
-                    log::info!("[resolve_dll] exe 同级命中: {}", sanitize_path(&abs.display().to_string()));
+                    log::info!(
+                        "[resolve_dll] exe 同级命中: {}",
+                        sanitize_path(&abs.display().to_string())
+                    );
                     return Ok(abs.display().to_string());
                 }
             }
@@ -803,7 +829,10 @@ pub fn resolve_dll_path(app: &tauri::AppHandle) -> Result<String, String> {
     for c in &candidates {
         if std::path::Path::new(c).exists() {
             let abs = std::fs::canonicalize(c).map_err(|e| e.to_string())?;
-            log::info!("[resolve_dll] CWD 相对命中: {}", sanitize_path(&abs.display().to_string()));
+            log::info!(
+                "[resolve_dll] CWD 相对命中: {}",
+                sanitize_path(&abs.display().to_string())
+            );
             return Ok(abs.display().to_string());
         }
     }
@@ -816,7 +845,11 @@ pub fn resolve_dll_path(app: &tauri::AppHandle) -> Result<String, String> {
                     .join("../".repeat(depth))
                     .join("build/core/Release/verthys.dll");
                 if p.exists() {
-                    return Ok(p.canonicalize().map_err(|e| e.to_string())?.display().to_string());
+                    return Ok(p
+                        .canonicalize()
+                        .map_err(|e| e.to_string())?
+                        .display()
+                        .to_string());
                 }
             }
         }
@@ -950,10 +983,6 @@ mod tests {
         // 用自身同时作为 worker 与 dll（仅验证导入表解析 + 搜索路径逻辑，
         // 不验证架构一致性，因为此处不关心 dll 架构）
         let r = check_binary_dependencies(&exe_str, &exe_str);
-        assert!(
-            r.is_ok(),
-            "当前二进制依赖检查应通过: {:?}",
-            r
-        );
+        assert!(r.is_ok(), "当前二进制依赖检查应通过: {:?}", r);
     }
 }

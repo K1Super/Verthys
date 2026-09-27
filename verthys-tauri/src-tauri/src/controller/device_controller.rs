@@ -34,12 +34,9 @@
 use crate::controller::api_error::ErrorCode;
 use crate::controller::types::{DeviceBindingResult, DeviceBindingStatus};
 use crate::infrastructure::device_fingerprint::{
-    calculate_match_score, get_device_components, DeviceComponents,
-    MATCH_THRESHOLD_PERCENT,
+    calculate_match_score, get_device_components, DeviceComponents, MATCH_THRESHOLD_PERCENT,
 };
-use crate::repository::verthys_state::{
-    read_state_file, write_state_file_atomic, VerthysState,
-};
+use crate::repository::verthys_state::{read_state_file, write_state_file_atomic, VerthysState};
 use crate::util::audit_log::{append_audit, AuditEvent, AuditEventType, AuditResult};
 use crate::util::base64::{base64_decode, base64_encode};
 use crate::util::crypto::dpapi_protect;
@@ -205,10 +202,7 @@ pub async fn set_device_binding(
                 return Err(format!("设备组件采集任务异常: {}", join_err));
             }
             Err(_) => {
-                let msg = format!(
-                    "设备指纹采集超时（{}s）",
-                    FINGERPRINT_TIMEOUT.as_secs()
-                );
+                let msg = format!("设备指纹采集超时（{}s）", FINGERPRINT_TIMEOUT.as_secs());
                 write_device_audit(
                     &app,
                     AuditEventType::DeviceBind,
@@ -256,8 +250,7 @@ pub async fn set_device_binding(
         Ok(None) => {
             log::info!("[device] 状态文件不存在，自动创建并绑定");
             let verthys_path = crate::repository::verthys_state::read_last_verthys_path(&app)
-                .unwrap_or(None
-                )
+                .unwrap_or(None)
                 .unwrap_or_default();
             if verthys_path.is_empty() {
                 return Err("无法确定 verthys 路径，请先初始化加密库".into());
@@ -355,10 +348,7 @@ pub async fn check_device_binding(
             Err(_) => {
                 return Ok(DeviceBindingResult {
                     status: DeviceBindingStatus::Error,
-                    detail: format!(
-                        "设备指纹采集超时（{}s）",
-                        FINGERPRINT_TIMEOUT.as_secs()
-                    ),
+                    detail: format!("设备指纹采集超时（{}s）", FINGERPRINT_TIMEOUT.as_secs()),
                     error_code: Some(ErrorCode::TemporaryFailure.as_str().to_string()),
                     match_score: None,
                 });
@@ -396,10 +386,7 @@ pub async fn check_device_binding(
                     );
                     Ok(DeviceBindingResult {
                         status: DeviceBindingStatus::PartialMatch,
-                        detail: format!(
-                            "设备部分匹配（{}%），可能硬件已变更，建议重新绑定",
-                            score
-                        ),
+                        detail: format!("设备部分匹配（{}%），可能硬件已变更，建议重新绑定", score),
                         error_code: None,
                         match_score: Some(score),
                     })
@@ -416,9 +403,7 @@ pub async fn check_device_binding(
                 }
             }
             None => {
-                log::warn!(
-                    "[device] DPAPI 解密失败，状态文件可能来自其他机器"
-                );
+                log::warn!("[device] DPAPI 解密失败，状态文件可能来自其他机器");
                 Ok(DeviceBindingResult {
                     status: DeviceBindingStatus::Mismatch,
                     detail: "设备绑定数据无法解密（可能来自其他机器）".into(),

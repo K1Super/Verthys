@@ -74,7 +74,9 @@ impl fmt::Display for VerthysError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             VerthysError::Io(e) => write!(f, "IO 错误: {}", e),
-            VerthysError::WindowsApi(code, msg) => write!(f, "Windows API 错误 [{}]: {}", code, msg),
+            VerthysError::WindowsApi(code, msg) => {
+                write!(f, "Windows API 错误 [{}]: {}", code, msg)
+            }
             VerthysError::FfiError(code, msg) => write!(f, "FFI 调用失败 [{}]: {}", code, msg),
             VerthysError::OutOfMemory => write!(f, "内存分配失败"),
             VerthysError::Serialization(msg) => write!(f, "序列化失败: {}", msg),

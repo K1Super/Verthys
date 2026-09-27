@@ -57,11 +57,7 @@ extern "system" {
 
     fn GetLastError() -> u32;
 
-    fn OpenProcessToken(
-        ProcessHandle: isize,
-        DesiredAccess: u32,
-        TokenHandle: *mut isize,
-    ) -> i32;
+    fn OpenProcessToken(ProcessHandle: isize, DesiredAccess: u32, TokenHandle: *mut isize) -> i32;
 
     fn GetCurrentProcess() -> isize;
 
@@ -104,10 +100,7 @@ extern "system" {
         Inheritance: u32,
     );
 
-    fn ConvertStringSidToSidW(
-        StringSid: *const u16,
-        Sid: *mut *mut u8,
-    ) -> i32;
+    fn ConvertStringSidToSidW(StringSid: *const u16, Sid: *mut *mut u8) -> i32;
 
     fn GetNamedSecurityInfoW(
         pObjectName: *const u16,
@@ -158,19 +151,21 @@ pub struct ExplicitAccessW {
 #[cfg(target_os = "windows")]
 const GENERIC_READ: u32 = 0x8000_0000;
 #[cfg(target_os = "windows")]
-const GENERIC_WRITE: u32 = 0x4000_0000;
-#[cfg(target_os = "windows")]
 const GENERIC_EXECUTE: u32 = 0x2000_0000;
 #[cfg(target_os = "windows")]
 const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
 #[cfg(target_os = "windows")]
 const OPEN_EXISTING: u32 = 3;
 #[cfg(target_os = "windows")]
+const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x01;
+#[cfg(target_os = "windows")]
 const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x02;
 #[cfg(target_os = "windows")]
 const FILE_SHARE_READ: u32 = 0x0000_0001;
 #[cfg(target_os = "windows")]
 const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+#[cfg(target_os = "windows")]
+const FILE_SHARE_DELETE: u32 = 0x0000_0004;
 #[cfg(target_os = "windows")]
 const TOKEN_QUERY: u32 = 0x0008;
 #[cfg(target_os = "windows")]
@@ -292,14 +287,26 @@ unsafe impl Sync for VerthysFileLock {}
 impl VerthysFileLock {
     /// 尝试对 .verthys 文件加独占锁。
     /// 若文件已被另一进程锁定，返回 Err。
+    ///
+    /// 锁请求必须携带非阻塞标志：哨兵竞争时以 Err 快速失败，由命令层
+    /// 转化为用户可见错误；缺少该标志时内核会把调用方挂入等待队列，
+    /// 同进程内二次加锁将自锁（互斥检查永远等不到释放）。
+    ///
+    /// 句柄访问权限必须为只读：本锁是会话哨兵协作信号（独占字节范围锁
+    /// 位于 2GB 哨兵偏移），不承载任何写入。若以 GENERIC_WRITE 打开，
+    /// 句柄将持有写访问，而 worker 会话内以 FILE_SHARE_READ 单写者语义
+    /// 存活并在创建步骤中重新打开容器——Windows 共享矩阵要求新打开的
+    /// 共享模式兼容既有句柄的全部访问，写访问与拒绝写的共享模式冲突，
+    /// 重开被内核拒绝（ERROR_SHARING_VIOLATION → 容器互斥 BUSY），创建
+    /// 流程必然失败。共享模式放开删除位，避免哨兵句柄阻塞删除类操作。
     pub fn lock_exclusive(path: &str) -> Result<Self, String> {
         let wide = to_wide(path);
 
         unsafe {
             let handle = CreateFileW(
                 wide.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 ptr::null(),
                 OPEN_EXISTING,
                 0,
@@ -318,7 +325,7 @@ impl VerthysFileLock {
 
             let ok = LockFileEx(
                 handle,
-                LOCKFILE_EXCLUSIVE_LOCK,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
                 0,
                 1,
                 0,
@@ -331,10 +338,7 @@ impl VerthysFileLock {
                 return Err(format!("LockFileEx 失败: {}", err));
             }
 
-            log::info!(
-                "[file_lock] 独占锁已获取 (handle=0x{:X})",
-                handle
-            );
+            log::info!("[file_lock] 独占锁已获取 (handle=0x{:X})", handle);
 
             Ok(VerthysFileLock {
                 handle,
@@ -344,6 +348,9 @@ impl VerthysFileLock {
     }
 
     /// 尝试对 .verthys 文件加共享读锁。
+    ///
+    /// 只读打开且共享模式放开删除位：只读访问不干扰 worker 的单写者
+    /// 句柄重新打开；删除位保证删除类操作不被读锁句柄阻塞。
     pub fn lock_shared(path: &str) -> Result<Self, String> {
         let wide = to_wide(path);
 
@@ -351,7 +358,7 @@ impl VerthysFileLock {
             let handle = CreateFileW(
                 wide.as_ptr(),
                 GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 ptr::null(),
                 OPEN_EXISTING,
                 0,
@@ -370,7 +377,7 @@ impl VerthysFileLock {
 
             let ok = LockFileEx(
                 handle,
-                0, /* 无 LOCKFILE_EXCLUSIVE_LOCK → 共享锁 */
+                LOCKFILE_FAIL_IMMEDIATELY, /* 无 LOCKFILE_EXCLUSIVE_LOCK → 共享锁 */
                 0,
                 1,
                 0,
@@ -383,10 +390,7 @@ impl VerthysFileLock {
                 return Err(format!("LockFileEx(shared) 失败: {}", err));
             }
 
-            log::info!(
-                "[file_lock] 共享锁已获取 (handle=0x{:X})",
-                handle
-            );
+            log::info!("[file_lock] 共享锁已获取 (handle=0x{:X})", handle);
 
             Ok(VerthysFileLock {
                 handle,
@@ -414,7 +418,7 @@ impl VerthysFileLock {
 
             let ok = LockFileEx(
                 self.handle,
-                LOCKFILE_EXCLUSIVE_LOCK,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
                 0,
                 1,
                 0,
@@ -429,10 +433,7 @@ impl VerthysFileLock {
             }
 
             self.lock_type = LockType::Exclusive;
-            log::info!(
-                "[file_lock] 锁已升级为独占 (handle=0x{:X})",
-                self.handle
-            );
+            log::info!("[file_lock] 锁已升级为独占 (handle=0x{:X})", self.handle);
             Ok(())
         }
     }
@@ -483,10 +484,7 @@ impl Drop for VerthysFileLock {
                     );
                 }
             } else {
-                log::debug!(
-                    "[file_lock] UnlockFile 成功 (handle=0x{:X})",
-                    self.handle
-                );
+                log::debug!("[file_lock] UnlockFile 成功 (handle=0x{:X})", self.handle);
             }
 
             // 2. 关闭句柄（无论解锁成功与否）
@@ -650,9 +648,7 @@ pub fn harden_private_dir(dir: &str) -> Result<(), String> {
 
             /* 失败时尝试回滚到备份 DACL */
             if has_backup {
-                log::warn!(
-                    "[file_lock] ACL 加固失败，尝试回滚到原始 DACL..."
-                );
+                log::warn!("[file_lock] ACL 加固失败，尝试回滚到原始 DACL...");
                 let rollback_status = SetNamedSecurityInfoW(
                     wide_dir.as_ptr(),
                     SE_FILE_OBJECT,
@@ -814,5 +810,95 @@ mod tests {
         // 编译期验证：VerthysFileLock 实现了 Send + Sync
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<VerthysFileLock>();
+    }
+
+    /// 模拟 C 层容器句柄：GENERIC_READ|WRITE + FILE_SHARE_READ 单写者语义
+    /// （与 core/src/container/io/verthys_container_lock.c 的 open_exclusive 一致）。
+    /// 返回句柄；失败返回 -1。
+    #[cfg(target_os = "windows")]
+    fn open_single_writer_handle(path: &str) -> isize {
+        const OPEN_EXISTING: u32 = 3;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        unsafe {
+            CreateFileW(
+                to_wide(path).as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                ptr::null(),
+                OPEN_EXISTING,
+                0,
+                ptr::null(),
+            )
+        }
+    }
+
+    /// 锁契约（防回退）：
+    ///   - worker 容器句柄（FILE_SHARE_READ 单写者）存活期间，共享读哨兵锁
+    ///     必须成功（会话守卫依赖此语义）；
+    ///   - 独占哨兵锁（只读句柄 + 2GB 字节锁）同样必须成功——哨兵不承载
+    ///     写访问，不与单写者句柄的拒绝写共享模式冲突；
+    ///   - 哨兵持有期间单写者句柄必须可重新打开（创建步骤 3 依赖此语义：
+    ///     若此处转为失败，说明哨兵又持有写访问，创建流程将回滚）；
+    ///   - 哨兵独占字节锁持有期间，第二个哨兵（共享或独占）必须被拒绝
+    ///     （跨实例互斥语义不因只读化而削弱）；
+    ///   - 单写者句柄关闭后独占哨兵锁可获取（创建步骤 2.5 时序）。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_lock_timing_contract_with_single_writer_handle() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "verthys_lock_contract_{}_{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let path_str = path.to_string_lossy().to_string();
+        std::fs::write(&path, b"x").expect("temp file");
+
+        let worker_handle = open_single_writer_handle(&path_str);
+        assert!(
+            worker_handle != -1,
+            "模拟 C 层单写者句柄打开失败: {}",
+            last_error_str()
+        );
+
+        // 1. 共享读哨兵锁必须兼容单写者句柄
+        let guard_lock = VerthysFileLock::lock_shared(&path_str)
+            .expect("会话哨兵共享锁必须与 C 层 FILE_SHARE_READ 句柄兼容");
+        drop(guard_lock);
+
+        // 2. 独占哨兵锁（只读）同样兼容单写者句柄
+        let sentinel =
+            VerthysFileLock::lock_exclusive(&path_str).expect("只读独占哨兵必须与单写者句柄兼容");
+
+        // 3. 哨兵持有期间：跨实例互斥仍有效（第二个哨兵必须被拒）
+        assert!(
+            VerthysFileLock::lock_exclusive(&path_str).is_err(),
+            "哨兵持有期间第二个独占哨兵必须被拒绝（跨实例互斥）"
+        );
+        assert!(
+            VerthysFileLock::lock_shared(&path_str).is_err(),
+            "哨兵持有期间共享哨兵必须被拒绝（跨实例互斥）"
+        );
+
+        // 4. 哨兵持有期间：单写者句柄必须可重新打开（创建步骤 3 重开容器）
+        unsafe { CloseHandle(worker_handle) };
+        let reopened = open_single_writer_handle(&path_str);
+        assert!(
+            reopened != -1,
+            "哨兵持有期间单写者句柄重开被拒绝（创建流程将回滚）: {}",
+            last_error_str()
+        );
+        unsafe { CloseHandle(reopened) };
+
+        // 5. 哨兵释放后独占锁可再次获取
+        drop(sentinel);
+        let after_release =
+            VerthysFileLock::lock_exclusive(&path_str).expect("哨兵释放后独占锁必须可获取");
+        drop(after_release);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

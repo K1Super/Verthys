@@ -44,52 +44,18 @@
  * 依赖方向：controller → state / repository / controller::types / worker（单向）
  */
 
-use crate::controller::types::VerthysResponse;
-use crate::repository::verthys_wal::{self, ImportSession, WalEntry};
+use crate::constants::import_writer::{WRITER_CMD_TIMEOUT, WRITER_SEND_TIMEOUT};
+use crate::controller::types::{BatchRecordInput, ChunkBlob, ImportBatchProgress, VerthysResponse};
+use crate::controller::verthys_controller::require_unlocked;
+use crate::repository::verthys_wal::{self, ImportSession};
+use crate::security::command_names::cmd;
+use crate::state::import_writer::{
+    self, BatchAppendOutcome, ChunkAppendOutcome, EndOutcome, WriterCommand,
+};
 use crate::state::AppState;
 use crate::util::path::sanitize_path;
-use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
-use tauri::State;
-
-/* ------------------------------------------------------------------ *
- * 批量导入数据类型（与前端 types/verthys.ts 严格对齐，snake_case）       *
- * ------------------------------------------------------------------ */
-
-/// 单条已加密记录输入（前端 Worker 池加密后产出）
-///
-/// 字段语义：
-///   - rtype：记录类型（TYPE_PHOTO_META=0x01 等，与现有 verthys_add_record 一致）
-///   - name：记录名称（如 `meta_xxx.jpg`）
-///   - hash：原始文件内容的 BLAKE3 hex（用于去重 + WAL 幂等）
-///   - data_b64：已加密的记录数据 base64（前端 XChaCha20-Poly1305 加密产物）
-#[derive(Debug, Clone, Deserialize)]
-pub struct BatchRecordInput {
-    pub rtype: u32,
-    pub name: String,
-    pub hash: String,
-    pub data_b64: String,
-}
-
-/// 批量写入进度（通过 Tauri Channel 流式推送到前端）
-///
-/// 前端在 requestAnimationFrame 内接收并绘制进度条，保证任何时刻最多一帧间隔更新，
-/// 绝不参与数据处理热路径。
-#[derive(Debug, Clone, Serialize)]
-pub struct ImportBatchProgress {
-    /// 本批次 ID（从 1 递增，前端据此对齐检查点）
-    pub batch_id: u64,
-    /// 本批次已处理记录数（含去重跳过 + 失败）
-    pub processed_in_batch: u64,
-    /// 本批次总记录数
-    pub total_in_batch: u64,
-    /// 导入会话累计已 committed 记录数（检查点）
-    pub total_committed: u64,
-    /// 导入会话累计因哈希去重跳过的记录数
-    pub total_skipped: u64,
-    /// 本批次已耗时（毫秒，自批次开始累计）
-    pub elapsed_ms: u64,
-}
+use tauri::{Manager, State};
 
 /* ------------------------------------------------------------------ *
  * 辅助函数                                                            *
@@ -106,15 +72,10 @@ fn generate_import_id() -> String {
         .as_millis();
     let mut rand_buf = [0u8; 4];
     let _ = getrandom::getrandom(&mut rand_buf);
-    format!("imp-{}-{:02x}{:02x}{:02x}{:02x}", ts, rand_buf[0], rand_buf[1], rand_buf[2], rand_buf[3])
-}
-
-/// 当前 Unix 毫秒时间戳
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    format!(
+        "imp-{}-{:02x}{:02x}{:02x}{:02x}",
+        ts, rand_buf[0], rand_buf[1], rand_buf[2], rand_buf[3]
+    )
 }
 
 /* ------------------------------------------------------------------ *
@@ -136,9 +97,15 @@ fn now_ms() -> u64 {
 ///   - total_count：续传起始的累计 committed 计数（检查点）
 #[tauri::command]
 pub async fn verthys_import_begin(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     verthys_path: Option<String>,
 ) -> Result<VerthysResponse, String> {
+    // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
+    if let Err(msg) = require_unlocked(&app, &state, cmd::IMPORT_BEGIN) {
+        return Ok(VerthysResponse::err(cmd::IMPORT_BEGIN, &msg));
+    }
+
     log::info!("[verthys_import_begin] 开始创建导入会话");
 
     // 防重入：单 verthys 同一时刻仅一个活跃会话
@@ -171,14 +138,28 @@ pub async fn verthys_import_begin(
     let import_id = generate_import_id();
     log::info!("[verthys_import_begin] 生成 import_id: {}", import_id);
 
-    // 创建 ImportSession：加载遗留 WAL 快照 → 恢复 committed_hashes → 截断 WAL 写 begin
-    let session = match ImportSession::new(&vpath, &import_id) {
-        Ok(s) => s,
-        Err(e) => {
+    // 创建 ImportSession：加载遗留 WAL 快照 → 恢复 committed_hashes → 截断 WAL 写 begin。
+    // 会话创建含快照载入与 WAL 截断，属同步 IO，移出异步运行时线程执行
+    let session_vpath = vpath.clone();
+    let session_id = import_id.clone();
+    let session = match tauri::async_runtime::spawn_blocking(move || {
+        ImportSession::new(&session_vpath, &session_id)
+    })
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             log::error!("[verthys_import_begin] 创建导入会话失败: {}", e);
             return Ok(VerthysResponse::err(
                 "verthys_import_begin",
                 &format!("创建导入会话失败: {}", e),
+            ));
+        }
+        Err(e) => {
+            log::error!("[verthys_import_begin] 创建导入会话任务异常: {}", e);
+            return Ok(VerthysResponse::err(
+                "verthys_import_begin",
+                "创建导入会话失败",
             ));
         }
     };
@@ -211,23 +192,76 @@ pub async fn verthys_import_begin(
  * 命令：verthys_add_records_batch                                       *
  * ------------------------------------------------------------------ */
 
-/// 批量写入 N 条已加密记录（WAL pending → worker add_record 串行 → WAL committed → 检查点）。
+/// 单写者命令投递：发送层超时 + 应答层超时（三层超时的前两层）。
+///
+/// 发送在 spawn_blocking 中执行（通道容量 1 背压时阻塞不影响异步线程），
+/// 应答经 oneshot 等待；第三层（写者心跳看门狗）由 import_writer 独立
+/// 巡检，此处只把两类超时映射为可读错误供调用方组装响应。
+async fn submit_writer_cmd<T>(
+    writer: &import_writer::ImportWriterHandle,
+    cmd: WriterCommand,
+    reply_rx: tokio::sync::oneshot::Receiver<Result<T, String>>,
+) -> Result<T, String> {
+    // 第一层：命令层发送超时（通道背压满时兜底）
+    let writer = writer.clone();
+    let send_result = tokio::time::timeout(
+        WRITER_SEND_TIMEOUT,
+        tauri::async_runtime::spawn_blocking(move || writer.submit(cmd)),
+    )
+    .await;
+    match send_result {
+        Err(_) => {
+            log::error!(
+                "[import_writer] 命令发送超时（{}s）",
+                WRITER_SEND_TIMEOUT.as_secs()
+            );
+            return Err("写者通道繁忙，请稍后重试".to_string());
+        }
+        Ok(Err(e)) => {
+            log::error!("[import_writer] 命令发送任务异常: {}", e);
+            return Err("写者通道内部错误".to_string());
+        }
+        Ok(Ok(Err(e))) => {
+            log::warn!("[import_writer] 写者通道不可用: {}", e);
+            return Err(e);
+        }
+        Ok(Ok(Ok(()))) => {}
+    }
+
+    // 第二层：应答层超时
+    match tokio::time::timeout(WRITER_CMD_TIMEOUT, reply_rx).await {
+        Err(_) => {
+            log::error!(
+                "[import_writer] 写者应答超时（{}s）",
+                WRITER_CMD_TIMEOUT.as_secs()
+            );
+            Err("写入超时，请检查存储状态后重试".to_string())
+        }
+        Ok(Err(_)) => {
+            log::error!("[import_writer] 写者应答通道关闭");
+            Err("写者通道已关闭".to_string())
+        }
+        Ok(Ok(result)) => result,
+    }
+}
+
+/// 批量写入 N 条已加密记录（经单写者通道串行执行 WAL pending → worker
+/// add_record → WAL committed → 检查点）。
 ///
 /// 落实「N 次加密，1 次 IPC 传输」：前端 Worker 池并行加密 N 条记录后，
-/// 单次 IPC 调用本命令写入。后端串行调用 worker add_record（worker 内部已即时 fsync），
-/// 每条记录伴随 WAL pending/committed，每批次结束写检查点。
+/// 单次 IPC 调用本命令写入。实际存储变更由唯一写者线程执行（worker
+/// add_record 即时 fsync + 会话内串行），本命令仅做闸门、投递与应答
+/// 组装，阻塞的存储 IO 不再占用异步运行时线程。
 ///
-/// 流程（每条记录）：
-///   1. 哈希去重：若 hash ∈ committed_hashes → 跳过，ids[i]=0，skipped_count++
-///   2. WAL pending：写入 {hash, status:'pending'} 到 WAL（fsync）
-///   3. worker add_record：发送 {"op":"add_record",...} 到 worker，获取分配的 verthys ID
-///   4. WAL committed：写入 {hash, verthys_id, status:'committed'} 到 WAL（fsync）
+/// 每条记录的语义（写者线程内）：
+///   1. 哈希去重：若 hash ∈ committed_hashes → 跳过，ids[i]=0
+///   2. WAL pending（批次级合并刷盘）
+///   3. worker add_record：获取分配的 verthys ID
+///   4. WAL committed（逐条落盘）
 ///   5. mark_committed：更新内存去重集合 + 累计计数
-///   6. 失败处理：worker 返回失败 → failed_indices.push(i)，ids[i]=0，不写 committed
+///   6. 失败处理：worker 失败 → failed_indices.push(i)，ids[i]=0
 ///   7. 进度推送：每条记录处理后通过 Channel 推送 ImportBatchProgress
-///
-/// 批次结束：
-///   8. WAL checkpoint：写入 {batch_id, committed_count} 到 WAL（fsync）
+/// 批次结束：WAL checkpoint（fsync）
 ///
 /// 返回字段：
 ///   - ids：本批次每条记录分配的 verthys ID（0 表示去重跳过或失败）
@@ -238,318 +272,486 @@ pub async fn verthys_import_begin(
 ///   - skipped_count：本批次因哈希去重跳过的记录数
 #[tauri::command]
 pub async fn verthys_add_records_batch(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     records: Vec<BatchRecordInput>,
     on_progress: tauri::ipc::Channel<ImportBatchProgress>,
 ) -> Result<VerthysResponse, String> {
-    let batch_start = now_ms();
-    let total_in_batch = records.len() as u64;
+    // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
+    if let Err(msg) = require_unlocked(&app, &state, cmd::ADD_RECORDS_BATCH) {
+        return Ok(VerthysResponse::err(cmd::ADD_RECORDS_BATCH, &msg));
+    }
 
+    let total_in_batch = records.len() as u64;
     log::info!(
         "[verthys_add_records_batch] 收到批量写入请求: {} 条记录",
         total_in_batch
     );
 
-    // 取出导入会话引用（持锁期间完成本批次全部操作，保证 WAL 写顺序）
-    // 注意：ImportSession 持有 WalWriter 文件句柄，必须独占访问。
-    // 此处通过 lock_import_session 获取 MutexGuard，整个批次期间持锁。
-    // 批次内串行 worker add_record（worker 内部已即时 fsync，串行保证写顺序）。
-    let mut session_guard = state.lock_import_session();
-    let session: &mut ImportSession = match session_guard.as_mut() {
-        Some(s) => s,
-        None => {
-            log::warn!("[verthys_add_records_batch] 无活跃导入会话，拒绝写入");
+    // 快速失败：无活跃会话（权威判定在写者线程内持会话锁复核）
+    if !state.has_import_session() {
+        log::warn!("[verthys_add_records_batch] 无活跃导入会话，拒绝写入");
+        return Ok(VerthysResponse::err(
+            cmd::ADD_RECORDS_BATCH,
+            &format!("无活跃导入会话，请先调用 {}", cmd::IMPORT_BEGIN),
+        ));
+    }
+
+    // 取用写者（缺失/心跳失效时原地重建）——全部存储变更经唯一写者串行
+    let writer = match import_writer::ensure(&app) {
+        Ok(w) => w,
+        Err(e) => {
+            log::error!("[verthys_add_records_batch] 写者不可用: {}", e);
             return Ok(VerthysResponse::err(
-                "verthys_add_records_batch",
-                "无活跃导入会话，请先调用 verthys_import_begin",
+                cmd::ADD_RECORDS_BATCH,
+                &format!("写入通道不可用: {}", e),
             ));
         }
     };
 
-    let batch_id = session.allocate_batch_id();
-    let import_id = session.import_id.clone();
+    let (reply_tx, reply_rx) =
+        tokio::sync::oneshot::channel::<Result<BatchAppendOutcome, String>>();
+    let cmd = WriterCommand::AppendPending {
+        records,
+        progress: Some(on_progress),
+        reply: reply_tx,
+    };
+
+    let outcome = match submit_writer_cmd(&writer, cmd, reply_rx).await {
+        Ok(o) => o,
+        Err(e) => return Ok(VerthysResponse::err(cmd::ADD_RECORDS_BATCH, &e)),
+    };
+
+    let mut resp = VerthysResponse::ok(cmd::ADD_RECORDS_BATCH);
+    resp.ids = Some(outcome.ids);
+    resp.batch_id = Some(outcome.batch_id);
+    resp.failed_indices = Some(outcome.failed_indices);
+    resp.processed_count = Some(outcome.processed_in_batch);
+    resp.total_count = Some(outcome.total_committed);
+    resp.skipped_count = Some(outcome.skipped_in_batch);
+    Ok(resp)
+}
+
+/* ------------------------------------------------------------------ *
+ * 命令：verthys_add_chunk_batch                                         *
+ * ------------------------------------------------------------------ */
+
+/// 上传外置加密块（大文件分块记录，经单写者通道串行落库）。
+///
+/// 大文件（块密文总量超过内联阈值）的照片先将块上传为独立记录，
+/// 随后 meta 记录携带 chunk_ids 引用；块上传与 meta 写入同走唯一
+/// 写者 FIFO，写者侧校验引用完整性（块必须在本会话已成功上传），
+/// 未上传的引用按条拒绝，杜绝悬空引用入库。
+///
+/// 返回字段：
+///   - ids：每块的记录 ID（0 = 失败；同哈希重复上传复用既有 ID）
+///   - failed_indices：失败块的下标列表
+///
+/// 块记录不参与 WAL 去重语义：块是纯密文负载，meta committed 才是
+/// 恢复单元；同哈希重传经会话映射幂等复用，不产生重复块记录。
+#[tauri::command]
+pub async fn verthys_add_chunk_batch(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    chunks: Vec<ChunkBlob>,
+) -> Result<VerthysResponse, String> {
+    // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
+    if let Err(msg) = require_unlocked(&app, &state, cmd::ADD_CHUNK_BATCH) {
+        return Ok(VerthysResponse::err(cmd::ADD_CHUNK_BATCH, &msg));
+    }
 
     log::info!(
-        "[verthys_add_records_batch] 开始批次 {}: import_id={} 记录数={}",
-        batch_id,
-        import_id,
-        total_in_batch
+        "[verthys_add_chunk_batch] 收到块上传请求: {} 条",
+        chunks.len()
     );
 
-    let mut ids: Vec<u64> = vec![0u64; records.len()];
-    let mut failed_indices: Vec<u64> = Vec::new();
-    let mut processed_in_batch: u64 = 0;
-    let mut skipped_in_batch: u64 = 0;
-    let mut committed_in_batch: u64 = 0;
+    // 快速失败：无活跃会话（权威判定在写者线程内持会话锁复核）
+    if !state.has_import_session() {
+        log::warn!("[verthys_add_chunk_batch] 无活跃导入会话，拒绝块上传");
+        return Ok(VerthysResponse::err(
+            cmd::ADD_CHUNK_BATCH,
+            &format!("无活跃导入会话，请先调用 {}", cmd::IMPORT_BEGIN),
+        ));
+    }
 
-    // 串行处理每条记录（worker add_record 必须串行：保证 WAL 写顺序 + verthys 内部事务一致）
-    for (i, rec) in records.iter().enumerate() {
-        let idx = i as u64;
-        processed_in_batch += 1;
-
-        // 1. 哈希去重：hash ∈ committed_hashes → 跳过（幂等保证）
-        if session.is_committed(&rec.hash) {
-            skipped_in_batch += 1;
-            session.mark_skipped();
-            log::debug!(
-                "[verthys_add_records_batch] 批次 {} 记录 {} 哈希已 committed，跳过: hash={}",
-                batch_id,
-                idx,
-                rec.hash
-            );
-            // 推送进度
-            let _ = on_progress.send(ImportBatchProgress {
-                batch_id,
-                processed_in_batch,
-                total_in_batch,
-                total_committed: session.total_committed,
-                total_skipped: session.total_skipped,
-                elapsed_ms: now_ms().saturating_sub(batch_start),
-            });
-            continue;
+    // 取用写者（缺失/心跳失效时原地重建）——块上传与 meta 写入同一 FIFO
+    let writer = match import_writer::ensure(&app) {
+        Ok(w) => w,
+        Err(e) => {
+            log::error!("[verthys_add_chunk_batch] 写者不可用: {}", e);
+            return Ok(VerthysResponse::err(
+                cmd::ADD_CHUNK_BATCH,
+                &format!("写入通道不可用: {}", e),
+            ));
         }
+    };
 
-        // 2. WAL pending：写入 {hash, status:'pending'} 到 WAL（fsync）
-        if let Err(e) = session.writer.append(&WalEntry::Pending {
-            import_id: import_id.clone(),
-            batch_id,
-            hash: rec.hash.clone(),
-            name: rec.name.clone(),
-            idx,
-        }) {
-            log::error!(
-                "[verthys_add_records_batch] 批次 {} 记录 {} WAL pending 写入失败: {}",
-                batch_id,
-                idx,
-                e
-            );
-            failed_indices.push(idx);
-            let _ = on_progress.send(ImportBatchProgress {
-                batch_id,
-                processed_in_batch,
-                total_in_batch,
-                total_committed: session.total_committed,
-                total_skipped: session.total_skipped,
-                elapsed_ms: now_ms().saturating_sub(batch_start),
-            });
-            continue;
-        }
+    let (reply_tx, reply_rx) =
+        tokio::sync::oneshot::channel::<Result<ChunkAppendOutcome, String>>();
+    let cmd = WriterCommand::AppendChunks {
+        chunks,
+        reply: reply_tx,
+    };
 
-        // 3. worker add_record：发送 {"op":"add_record",...} 到 worker
-        let req = serde_json::json!({
-            "op": "add_record",
-            "rtype": rec.rtype,
-            "name": rec.name,
-            "data": rec.data_b64,
-        });
+    let outcome = match submit_writer_cmd(&writer, cmd, reply_rx).await {
+        Ok(o) => o,
+        Err(e) => return Ok(VerthysResponse::err(cmd::ADD_CHUNK_BATCH, &e)),
+    };
 
-        let add_result: Result<VerthysResponse, String> = match state.send(&req.to_string()) {
-            Ok(resp_json) => {
-                match serde_json::from_str::<VerthysResponse>(&resp_json) {
-                    Ok(resp) if resp.ok => Ok(resp),
-                    Ok(resp) => {
-                        log::warn!(
-                            "[verthys_add_records_batch] 批次 {} 记录 {} worker add_record 返回失败: {:?}",
-                            batch_id,
-                            idx,
-                            resp.error
-                        );
-                        Err(format!("worker add_record 失败: {:?}", resp.error))
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[verthys_add_records_batch] 批次 {} 记录 {} 响应解析失败: {}",
-                            batch_id,
-                            idx,
-                            e
-                        );
-                        Err(format!("响应解析失败: {}", e))
-                    }
-                }
-            }
+    let mut resp = VerthysResponse::ok(cmd::ADD_CHUNK_BATCH);
+    resp.ids = Some(outcome.ids);
+    resp.failed_indices = Some(outcome.failed_indices);
+    Ok(resp)
+}
+
+/* ------------------------------------------------------------------ *
+ * 命令：verthys_forget_hashes / dev_reset_wal                          *
+ * ------------------------------------------------------------------ */
+
+/// 删除照片后释放去重锁（WAL 追加删除墓碑）。
+///
+/// 前端批量删除照片成功后调用：后端向 WAL 追加删除墓碑（含 fsync），
+/// 恢复重放时从 committed 去重集合移除哈希，实现「删除后可重新导入」。
+/// 若存在活跃导入会话，同步更新会话内存集合与计数（本会话立即生效）。
+/// WAL 不存在时为无操作（去重集合本为空）。
+///
+/// 说明：store 侧不持有内容哈希（哈希位于客户端加密的 meta 密文内），
+/// 「当前存活哈希」交集无法由后端独立计算；删除是唯一变更存活集的
+/// 路径且必经前端，故以前端删除成功后的墓碑写入作为等价闭环。
+#[tauri::command]
+pub async fn verthys_forget_hashes(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    hashes: Vec<String>,
+) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, cmd::FORGET_HASHES) {
+        return Ok(VerthysResponse::err(cmd::FORGET_HASHES, &msg));
+    }
+    if hashes.is_empty() {
+        return Ok(VerthysResponse::err(cmd::FORGET_HASHES, "哈希列表不能为空"));
+    }
+    if hashes
+        .iter()
+        .any(|h| h.is_empty() || h.len() > crate::constants::import_writer::MAX_RECORD_HASH_LEN)
+    {
+        return Ok(VerthysResponse::err(cmd::FORGET_HASHES, "哈希格式非法"));
+    }
+
+    // 活跃会话：墓碑必须经单写者 FIFO 落盘（与会话批量写入共用同一
+    // WAL 文件句柄），命令层直接以第二句柄追加会与写者线程并发写
+    // 同一文件，存在 JSON 行交错损坏风险
+    if state.has_import_session() {
+        let writer = match import_writer::ensure(&app) {
+            Ok(w) => w,
             Err(e) => {
-                log::warn!(
-                    "[verthys_add_records_batch] 批次 {} 记录 {} worker 通信失败: {}",
-                    batch_id,
-                    idx,
-                    e
-                );
-                Err(format!("worker 通信失败: {}", e))
+                log::error!("[verthys_forget_hashes] 写者不可用: {}", e);
+                return Ok(VerthysResponse::err(
+                    cmd::FORGET_HASHES,
+                    &format!("写入通道不可用: {}", e),
+                ));
             }
         };
 
-        match add_result {
-            Ok(resp) => {
-                let verthys_id = resp.id.unwrap_or(0);
-                if verthys_id == 0 {
-                    log::warn!(
-                        "[verthys_add_records_batch] 批次 {} 记录 {} worker 返回 id=0，视为失败",
-                        batch_id,
-                        idx
-                    );
-                    failed_indices.push(idx);
-                } else {
-                    // 4. WAL committed：写入 {hash, verthys_id, status:'committed'} 到 WAL（fsync）
-                    if let Err(e) = session.writer.append(&WalEntry::Committed {
-                        import_id: import_id.clone(),
-                        batch_id,
-                        hash: rec.hash.clone(),
-                        verthys_id,
-                        name: rec.name.clone(),
-                    }) {
-                        log::error!(
-                            "[verthys_add_records_batch] 批次 {} 记录 {} WAL committed 写入失败（数据已入库但 WAL 未记录）: {}",
-                            batch_id,
-                            idx,
-                            e
-                        );
-                        // 数据已入库但 WAL committed 写入失败：记录为失败但 verthys_id 已分配
-                        // 此处仍标记为失败，让前端感知异常（数据已落盘，下次续传哈希不在 committed 集合会重复入库）
-                        // 权衡：WAL committed 写入失败是极端情况（磁盘满/IO错误），
-                        //   数据已通过 worker add_record 即时 fsync 落盘，但去重集合未更新。
-                        //   续传时该哈希不在 committed_hashes → 重复入库（产生重复记录）。
-                        //   为避免重复，此处仍标记 committed（best-effort）：更新内存集合，
-                        //   即使磁盘 WAL 未记录，内存集合在本会话内仍可去重。
-                        session.mark_committed(&rec.hash);
-                        ids[i] = verthys_id;
-                        committed_in_batch += 1;
-                    } else {
-                        // 5. mark_committed：更新内存去重集合 + 累计计数
-                        session.mark_committed(&rec.hash);
-                        ids[i] = verthys_id;
-                        committed_in_batch += 1;
-                        log::debug!(
-                            "[verthys_add_records_batch] 批次 {} 记录 {} 已 committed: hash={} verthys_id={}",
-                            batch_id,
-                            idx,
-                            rec.hash,
-                            verthys_id
-                        );
-                    }
-                }
-            }
-            Err(_) => {
-                failed_indices.push(idx);
-            }
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let cmd = WriterCommand::AppendRemoved {
+            hashes: hashes.clone(),
+            reply: reply_tx,
+        };
+        if let Err(e) = submit_writer_cmd(&writer, cmd, reply_rx).await {
+            log::error!("[verthys_forget_hashes] 墓碑写入失败: {}", e);
+            return Ok(VerthysResponse::err(cmd::FORGET_HASHES, &e));
         }
 
-        // 6. 进度推送：每条记录处理后推送
-        let _ = on_progress.send(ImportBatchProgress {
-            batch_id,
-            processed_in_batch,
-            total_in_batch,
-            total_committed: session.total_committed,
-            total_skipped: session.total_skipped,
-            elapsed_ms: now_ms().saturating_sub(batch_start),
-        });
-    }
-
-    // 8. WAL checkpoint：写入 {batch_id, committed_count} 到 WAL（fsync）
-    if let Err(e) = session.writer.append(&WalEntry::Checkpoint {
-        import_id: import_id.clone(),
-        batch_id,
-        committed_count: session.total_committed,
-    }) {
-        log::error!(
-            "[verthys_add_records_batch] 批次 {} WAL checkpoint 写入失败: {}",
-            batch_id,
-            e
+        log::info!(
+            "[verthys_forget_hashes] 墓碑已落盘: {} 哈希（经写者通道，会话内即时移除）",
+            hashes.len()
         );
-        // checkpoint 写入失败不回滚已 committed 数据（已落盘），仅告警
+
+        let mut resp = VerthysResponse::ok(cmd::FORGET_HASHES);
+        resp.processed_count = Some(hashes.len() as u64);
+        return Ok(resp);
     }
 
-    let elapsed = now_ms().saturating_sub(batch_start);
+    // 无活跃会话：不存在并发写者，直接以单句柄追加墓碑（原有快速路径）
+    let vpath = match state.verthys_session_path() {
+        Some(p) => p,
+        None => {
+            return Ok(VerthysResponse::err(
+                cmd::FORGET_HASHES,
+                "无法确定加密库路径，请先解锁",
+            ));
+        }
+    };
+
+    let vpath_clone = vpath.clone();
+    let hashes_clone = hashes.clone();
+    let write_result = tokio::time::timeout(
+        WRITER_SEND_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            verthys_wal::append_removed(&vpath_clone, &hashes_clone)
+        }),
+    )
+    .await;
+
+    match write_result {
+        Err(_) => {
+            log::error!("[verthys_forget_hashes] 墓碑写入超时");
+            return Ok(VerthysResponse::err(cmd::FORGET_HASHES, "去重锁释放超时"));
+        }
+        Ok(Err(e)) => {
+            log::error!("[verthys_forget_hashes] 墓碑写入任务异常: {}", e);
+            return Ok(VerthysResponse::err(cmd::FORGET_HASHES, "去重锁释放失败"));
+        }
+        Ok(Ok(Err(e))) => {
+            log::error!("[verthys_forget_hashes] 墓碑写入失败: {}", e);
+            return Ok(VerthysResponse::err(cmd::FORGET_HASHES, &e));
+        }
+        Ok(Ok(Ok(()))) => {}
+    }
+
     log::info!(
-        "[verthys_add_records_batch] 批次 {} 完成: committed={} skipped={} failed={} 耗时={}ms 累计 committed={}",
-        batch_id,
-        committed_in_batch,
-        skipped_in_batch,
-        failed_indices.len(),
-        elapsed,
-        session.total_committed
+        "[verthys_forget_hashes] 墓碑已落盘: {} 哈希（无活跃会话，恢复期生效）",
+        hashes.len()
     );
 
-    let total_committed = session.total_committed;
-
-    // 释放会话锁（guard drop）
-    drop(session_guard);
-
-    let mut resp = VerthysResponse::ok("verthys_add_records_batch");
-    resp.ids = Some(ids);
-    resp.batch_id = Some(batch_id);
-    resp.failed_indices = Some(failed_indices);
-    resp.processed_count = Some(processed_in_batch);
-    resp.total_count = Some(total_committed);
-    resp.skipped_count = Some(skipped_in_batch);
+    let mut resp = VerthysResponse::ok(cmd::FORGET_HASHES);
+    resp.processed_count = Some(hashes.len() as u64);
     Ok(resp)
+}
+
+/// 开发用：重置 WAL 与快照（清空续传去重状态）。
+///
+/// 仅在无活跃导入会话时可用（会话期间重置会破坏 pending 恢复语义）。
+/// 删除 WAL 与快照两文件，下次导入从空去重集合开始。
+#[tauri::command]
+pub async fn dev_reset_wal(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, cmd::DEV_RESET_WAL) {
+        return Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, &msg));
+    }
+    if state.has_import_session() {
+        return Ok(VerthysResponse::err(
+            cmd::DEV_RESET_WAL,
+            "存在活跃导入会话，请先结束导入",
+        ));
+    }
+    let vpath = match state.verthys_session_path() {
+        Some(p) => p,
+        None => {
+            return Ok(VerthysResponse::err(
+                cmd::DEV_RESET_WAL,
+                "无法确定加密库路径，请先解锁",
+            ));
+        }
+    };
+
+    let reset_result = tokio::time::timeout(
+        WRITER_SEND_TIMEOUT,
+        tokio::task::spawn_blocking(move || verthys_wal::remove_all(&vpath)),
+    )
+    .await;
+
+    match reset_result {
+        Err(_) => {
+            log::error!("[dev_reset_wal] 重置超时");
+            return Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, "重置超时"));
+        }
+        Ok(Err(e)) => {
+            log::error!("[dev_reset_wal] 重置任务异常: {}", e);
+            return Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, "重置失败"));
+        }
+        Ok(Ok(Err(e))) => {
+            log::error!("[dev_reset_wal] 重置失败: {}", e);
+            return Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, &e));
+        }
+        Ok(Ok(Ok(()))) => {
+            log::info!("[dev_reset_wal] WAL 与快照已清除");
+            Ok(VerthysResponse::ok(cmd::DEV_RESET_WAL))
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * 命令：verthys_gc_orphan_chunks                                       *
+ * ------------------------------------------------------------------ */
+
+/// 孤儿外置块 GC：删除台账中 owner=0（未被任何 meta 引用）的块记录。
+///
+/// 大文件照片先以外置块（独立记录）上传，上传成功即记账 owner=0；随后
+/// meta 记录入库时把引用块的 owner 改写为 meta id。若上传后、meta 入库
+/// 前发生崩溃或导入中断，这些块记录残留且无引用，即为孤儿。
+///
+/// 流程：
+///   1. 数据域解锁态闸门 + 活跃导入会话检查（会话期间台账驻留内存，
+///      文件视图滞后，禁止 GC）；
+///   2. spawn_blocking 内：加载台账 → 取 garbage_ids()；
+///   3. 空列表直接返回 ok（processed_count=0）；
+///   4. 非空：经 worker delete_records 逐个删除，!ok 即 err（不删台账）；
+///   5. 删除成功后从台账移除各垃圾 id 并落盘（落盘失败也 err，但记录已删，
+///      下次 GC 重试收敛，语义无害）。
+///
+/// 返回 processed_count = 实际回收的块记录数。
+#[tauri::command]
+pub async fn verthys_gc_orphan_chunks(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<VerthysResponse, String> {
+    // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
+    if let Err(msg) = require_unlocked(&app, &state, cmd::GC_ORPHAN_CHUNKS) {
+        return Ok(VerthysResponse::err(cmd::GC_ORPHAN_CHUNKS, &msg));
+    }
+
+    // 活跃会话期间台账驻留会话内存，磁盘台账文件视图滞后，禁止 GC
+    if state.has_import_session() {
+        log::warn!("[verthys_gc_orphan_chunks] 存在活跃导入会话，拒绝 GC");
+        return Ok(VerthysResponse::err(
+            cmd::GC_ORPHAN_CHUNKS,
+            "存在活跃导入会话，请先结束导入",
+        ));
+    }
+
+    let vpath = match state.verthys_session_path() {
+        Some(p) => p,
+        None => {
+            return Ok(VerthysResponse::err(
+                cmd::GC_ORPHAN_CHUNKS,
+                "无法确定加密库路径，请先解锁",
+            ));
+        }
+    };
+
+    let gc_vpath = vpath.clone();
+    let gc_app = app.clone();
+    // 单次 GC 的整体超时上界：删除经 worker 往返，取发送超时的两倍兜底
+    let gc_timeout = WRITER_SEND_TIMEOUT * 2;
+
+    let outcome = tokio::time::timeout(
+        gc_timeout,
+        tauri::async_runtime::spawn_blocking(move || -> Result<u64, String> {
+            let mut ledger = crate::repository::verthys_chunks::load_chunk_ledger(&gc_vpath)?;
+            let garbage = ledger.garbage_ids();
+            if garbage.is_empty() {
+                return Ok(0);
+            }
+
+            let removed = garbage.len() as u64;
+            let req = serde_json::json!({"op": "delete_records", "ids": garbage.clone()});
+            let state = gc_app.state::<AppState>();
+            let resp_json = state
+                .send(&req.to_string())
+                .map_err(|e| format!("worker 通信失败: {}", e))?;
+            let resp: VerthysResponse = serde_json::from_str(&resp_json)
+                .map_err(|e| format!("delete_records 响应解析失败: {}", e))?;
+            if !resp.ok {
+                return Err(format!("delete_records 失败: {:?}", resp.error));
+            }
+
+            // 删除成功后从台账移除垃圾条目；落盘失败也回 err，但块已删除，
+            // 台账下次 GC 会重试收敛，无害。
+            for id in &garbage {
+                ledger.remove(id);
+            }
+            if let Err(e) = crate::repository::verthys_chunks::save_chunk_ledger(&gc_vpath, &ledger)
+            {
+                return Err(format!(
+                    "块已删除但台账未收敛（下次 GC 会重试，无害）: {}",
+                    e
+                ));
+            }
+            Ok(removed)
+        }),
+    )
+    .await;
+
+    match outcome {
+        Err(_) => {
+            log::error!("[verthys_gc_orphan_chunks] GC 超时");
+            Ok(VerthysResponse::err(
+                cmd::GC_ORPHAN_CHUNKS,
+                "孤儿块回收超时，请重试",
+            ))
+        }
+        Ok(Err(e)) => {
+            log::error!("[verthys_gc_orphan_chunks] GC 任务异常: {}", e);
+            Ok(VerthysResponse::err(
+                cmd::GC_ORPHAN_CHUNKS,
+                "孤儿块回收失败",
+            ))
+        }
+        Ok(Ok(Err(e))) => {
+            log::error!("[verthys_gc_orphan_chunks] GC 失败: {}", e);
+            Ok(VerthysResponse::err(cmd::GC_ORPHAN_CHUNKS, &e))
+        }
+        Ok(Ok(Ok(removed))) => {
+            log::info!("[verthys_gc_orphan_chunks] 已回收 {} 个孤儿块", removed);
+            let mut resp = VerthysResponse::ok(cmd::GC_ORPHAN_CHUNKS);
+            resp.processed_count = Some(removed);
+            Ok(resp)
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ *
  * 命令：verthys_import_end                                              *
  * ------------------------------------------------------------------ */
 
-/// 关闭导入会话：success=true 触发 WAL 压缩，failure 保留 WAL 供续传。
+/// 关闭导入会话（经单写者通道执行 WAL end + 按需 compact）。
 ///
-/// 流程：
-///   1. 取出 ImportSession（Option::take）
-///   2. 调用 WalWriter::finish(import_id, success)：
-///      - 写入 end 条目（fsync）
-///      - success=true：compact WAL（原子替换，仅保留 committed 哈希清单）
-///      - success=false：原样保留 WAL 供下次续传
-///   3. 清空 AppState.import_session
+/// 结束命令与批量命令同走唯一写者 FIFO：end 之前在通道内排队的批次
+/// 必先执行完毕，杜绝「结束先于最后一批」的交错。写者线程内取出会话
+/// 并调用 WalWriter::finish(import_id, success)：
+///   - success=true：写入 end 条目并 compact WAL（原子替换，仅保留
+///     committed 哈希清单）
+///   - success=false：原样保留 WAL 供下次续传
+/// 会话随执行结束从 AppState 清空。
 ///
 /// 返回 total_count（最终累计 committed 计数）。
 #[tauri::command]
 pub async fn verthys_import_end(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     success: bool,
 ) -> Result<VerthysResponse, String> {
+    // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
+    if let Err(msg) = require_unlocked(&app, &state, cmd::IMPORT_END) {
+        return Ok(VerthysResponse::err(cmd::IMPORT_END, &msg));
+    }
+
     log::info!("[verthys_import_end] 结束导入会话: success={}", success);
 
-    let session = {
-        let mut guard = state.lock_import_session();
-        guard.take()
-    };
+    // 快速失败：无活跃会话（权威判定在写者线程内持会话锁复核）
+    if !state.has_import_session() {
+        log::warn!("[verthys_import_end] 无活跃导入会话");
+        return Ok(VerthysResponse::err(cmd::IMPORT_END, "无活跃导入会话"));
+    }
 
-    let session = match session {
-        Some(s) => s,
-        None => {
-            log::warn!("[verthys_import_end] 无活跃导入会话");
+    let writer = match import_writer::ensure(&app) {
+        Ok(w) => w,
+        Err(e) => {
+            log::error!("[verthys_import_end] 写者不可用: {}", e);
             return Ok(VerthysResponse::err(
-                "verthys_import_end",
-                "无活跃导入会话",
+                cmd::IMPORT_END,
+                &format!("写入通道不可用: {}", e),
             ));
         }
     };
 
-    let import_id = session.import_id.clone();
-    let total_committed = session.total_committed;
-    let writer = session.writer;
-
-    // 写入 end 条目 + 压缩（success=true 时）
-    if let Err(e) = writer.finish(&import_id, success) {
-        log::error!(
-            "[verthys_import_end] WAL finish 失败: import_id={} success={} err={}",
-            import_id,
-            success,
-            e
-        );
-        return Ok(VerthysResponse::err(
-            "verthys_import_end",
-            &format!("WAL 关闭失败: {}", e),
-        ));
-    }
-
-    log::info!(
-        "[verthys_import_end] 导入会话已关闭: import_id={} success={} 累计 committed={}",
-        import_id,
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Result<EndOutcome, String>>();
+    let cmd = WriterCommand::End {
         success,
-        total_committed
-    );
+        reply: reply_tx,
+    };
 
-    let mut resp = VerthysResponse::ok("verthys_import_end");
-    resp.total_count = Some(total_committed);
-    resp.import_id = Some(import_id);
+    let outcome = match submit_writer_cmd(&writer, cmd, reply_rx).await {
+        Ok(o) => o,
+        Err(e) => return Ok(VerthysResponse::err(cmd::IMPORT_END, &e)),
+    };
+
+    let mut resp = VerthysResponse::ok(cmd::IMPORT_END);
+    resp.total_count = Some(outcome.total_committed);
+    resp.import_id = Some(outcome.import_id);
     Ok(resp)
 }
 
@@ -563,8 +765,14 @@ pub async fn verthys_import_end(
 /// 不修改 WAL，纯只读操作。
 #[tauri::command]
 pub async fn verthys_import_checkpoint(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<VerthysResponse, String> {
+    // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
+    if let Err(msg) = require_unlocked(&app, &state, cmd::IMPORT_CHECKPOINT) {
+        return Ok(VerthysResponse::err(cmd::IMPORT_CHECKPOINT, &msg));
+    }
+
     let guard = state.lock_import_session();
     match guard.as_ref() {
         Some(session) => {
@@ -634,26 +842,25 @@ pub async fn verthys_wal_recover(
         }
     };
 
-    // 检查 WAL 是否存在
-    if !verthys_wal::exists(&vpath) {
-        log::info!("[verthys_wal_recover] 无遗留 WAL，无需续传");
-        let mut resp = VerthysResponse::ok("verthys_wal_recover");
-        resp.hashes = Some(Vec::new());
-        resp.total_count = Some(0);
-        return Ok(resp);
-    }
-
-    // 加载 WAL 快照
-    let snapshot = match verthys_wal::load(&vpath) {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("[verthys_wal_recover] WAL 加载失败: {}", e);
-            return Ok(VerthysResponse::err(
-                "verthys_wal_recover",
-                &format!("WAL 加载失败: {}", e),
-            ));
-        }
-    };
+    // 统一走 load：WAL 缺失但快照存在时（异常清理/损坏场景）快照仍
+    // 承载去重集合，提前空返回会静默丢弃基线导致重启后重复入库
+    let recover_vpath = vpath.clone();
+    let snapshot =
+        match tauri::async_runtime::spawn_blocking(move || verthys_wal::load(&recover_vpath)).await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                log::error!("[verthys_wal_recover] WAL 加载失败: {}", e);
+                return Ok(VerthysResponse::err(
+                    "verthys_wal_recover",
+                    &format!("WAL 加载失败: {}", e),
+                ));
+            }
+            Err(e) => {
+                log::error!("[verthys_wal_recover] WAL 加载任务异常: {}", e);
+                return Ok(VerthysResponse::err("verthys_wal_recover", "WAL 加载失败"));
+            }
+        };
 
     let hashes: Vec<String> = snapshot.committed_hashes.iter().cloned().collect();
     let total_committed = snapshot.committed_hashes.len() as u64;
@@ -715,5 +922,14 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"batch_id\":1"));
         assert!(json.contains("\"total_committed\":100"));
+    }
+
+    #[test]
+    fn test_command_name_constants_match_registered_commands() {
+        // 命令名常量必须与 Tauri 命令注册名逐字一致（授权闸门审计口径依赖）。
+        assert_eq!(cmd::IMPORT_BEGIN, "verthys_import_begin");
+        assert_eq!(cmd::ADD_RECORDS_BATCH, "verthys_add_records_batch");
+        assert_eq!(cmd::IMPORT_CHECKPOINT, "verthys_import_checkpoint");
+        assert_eq!(cmd::IMPORT_END, "verthys_import_end");
     }
 }

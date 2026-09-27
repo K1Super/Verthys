@@ -17,7 +17,7 @@
     <!-- 搜索栏 -->
     <VerthysSearchBar v-model="searchKey" placeholder="搜索平台 / 账户…" add-label="新增账户" @add="onAdd" />
 
-    <!-- 卡片网格：≥200 条启用虚拟滚动（项1），小列表保留原 v-for 路径零开销 -->
+    <!-- 卡片网格：≥200 条启用虚拟滚动，小列表保留原 v-for 路径零开销 -->
     <VirtualCardGrid
       v-if="filteredAccounts.length >= 200"
       :items="filteredAccounts"
@@ -173,7 +173,7 @@ import {
   updateShallowItem, pushShallowItems, replaceShallowArray,
   clearShallowArray, removeShallowItems,
 } from "../../utils/shallow-array";
-import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, ensureRecordScanSafe, getRecordIdsByType, invalidateScannedRecord, clearRecordScanCache, getRecordsDataB64Batch } from "../../lib/keyManager";
+import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, ensureIndexSourceSafe, getSummaryIdsByType, getRecordIdsByType, invalidateScannedRecord, clearRecordScanCache, getRecordsDataB64Batch } from "../../lib/keyManager";
 import { TYPE_ACCOUNT, TYPE_ACCOUNT_LIST, TYPE_ACCOUNT_LEGACY, TYPE_ACCOUNT_OLD } from "../../constants/record_types";
 import { useClipToast } from "../../composables/useClipToast";
 import { useCardTilt } from "../../composables/useCardTilt";
@@ -216,7 +216,7 @@ interface AccountEntry {
 }
 
 const searchKey = ref("");
-/* 项2：shallowRef 替代 ref，避免 Vue 对 accounts 数组内每条记录深度代理
+/* shallowRef 替代 ref，避免 Vue 对 accounts 数组内每条记录深度代理
  * （每条记录含 fields.password/dataB64 等敏感字段，万条记录深度代理开销 200-500ms）
  * 代价：直接修改元素属性（如 acc.pwdVisible = true）不触发更新，必须用 updateShallowItem */
 const accounts = shallowRef<AccountEntry[]>([]);
@@ -226,7 +226,7 @@ const loadAccounts = async () => {
   const cached = getModuleCache<AccountEntry[]>("accounts");
   let maxRecordId = 0;
   if (cached.data && cached.data.length > 0) {
-    // 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
+    // shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
     replaceShallowArray(accounts, cached.data);
     // 计算缓存中最大的 recordId，作为增量扫描起点（参考 PhotoAlbum）
     maxRecordId = cached.data.reduce((max, a) => Math.max(max, a.recordId || 0), 0);
@@ -243,16 +243,16 @@ const loadAccounts = async () => {
   let listFields: AccountFields[] | null = null;
   const legacyRecords: { id: number; fields: AccountFields }[] = [];
 
-  // 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
-  //    原实现：ensureSummaryScanSafe + for 循环串行 getFullRecord（N 条 = N 次串行 IPC，
-  //            100 条 ≈ 7.5s，300 条 ≈ 22s，与后台 ensureRecordScan 抢同一常驻 worker → 30s）
-  //    新实现：ensureRecordScanSafe（后台 startBackgroundTasks 已扫描则瞬时增量返回）
-  //            + getRecordsDataB64Batch（扫描缓存命中零 IPC，未命中/大体积并行 IPC 回退）
-  //            总耗时 < 2.5s。内存优先合并保证用户并发编辑不丢失。
-  await ensureRecordScanSafe();
+  // ID 来源：摘要索引优先（仅读索引、不解密数据，不受记录体积影响）；
+  //   摘要缓存整体为空（旧格式容器/熔断静默返回空）时回退记录扫描缓存。
+  //   记录扫描仍会在后台并发触发一次作数据层预热：命中扫描缓存的小体积记录
+  //   在后续批量取数时零 IPC；预热失败不影响列表可用性（取数走并行 IPC 回退）。
+  const useSummaryIds = await ensureIndexSourceSafe();
+  const idsOf = (type: number): number[] =>
+    useSummaryIds ? getSummaryIdsByType(type) : getRecordIdsByType(type);
 
-  // 1. 批量获取新格式 TYPE_ACCOUNT 记录数据（扫描缓存优先，并行 IPC 回退）
-  const allAccountIds = getRecordIdsByType(TYPE_ACCOUNT);
+  // 1. 批量获取新格式 TYPE_ACCOUNT 记录数据（缓存优先，并行 IPC 回退）
+  const allAccountIds = idsOf(TYPE_ACCOUNT);
   const newAccountIds = allAccountIds.filter(id => id > maxRecordId);
   if (newAccountIds.length > 0) {
     const b64Map = await getRecordsDataB64Batch(newAccountIds);
@@ -269,7 +269,7 @@ const loadAccounts = async () => {
   // 2. 缓存无效时检查旧格式记录用于迁移（同样批量获取，消除串行 IPC）
   if (needMigration) {
     // TYPE_ACCOUNT_LIST（整体列表旧格式）
-    const listIds = getRecordIdsByType(TYPE_ACCOUNT_LIST);
+    const listIds = idsOf(TYPE_ACCOUNT_LIST);
     if (listIds.length > 0) {
       const listB64Map = await getRecordsDataB64Batch(listIds);
       for (const id of listIds) {
@@ -285,7 +285,7 @@ const loadAccounts = async () => {
       }
     }
     // TYPE_ACCOUNT_LEGACY（单条旧格式）
-    const legacyIds = getRecordIdsByType(TYPE_ACCOUNT_LEGACY);
+    const legacyIds = idsOf(TYPE_ACCOUNT_LEGACY);
     if (legacyIds.length > 0) {
       const legacyB64Map = await getRecordsDataB64Batch(legacyIds);
       for (const id of legacyIds) {
@@ -305,7 +305,7 @@ const loadAccounts = async () => {
     // 修复：扫描 0x10 记录，用 deserializeAccount 内容嗅探区分账户 vs 全局密钥——
     //   账户记录为 JSON（platform/username），全局密钥为二进制，反序列化必然失败。
     //   匹配的记录加入 legacyRecords，后续迁移为 TYPE_ACCOUNT (0x02)。
-    const oldIds = getRecordIdsByType(TYPE_ACCOUNT_OLD);
+    const oldIds = idsOf(TYPE_ACCOUNT_OLD);
     if (oldIds.length > 0) {
       const oldB64Map = await getRecordsDataB64Batch(oldIds);
       for (const id of oldIds) {
@@ -324,7 +324,7 @@ const loadAccounts = async () => {
     let nextMemId = accounts.value.length > 0
       ? Math.max(...accounts.value.map(a => a.id)) + 1
       : 1;
-    // 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
+    // 批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
     const newItems: AccountEntry[] = [];
     for (const { id, fields } of found) {
       newItems.push({
@@ -367,7 +367,7 @@ const loadAccounts = async () => {
           displayPwd: fields.encrypted ? "已加密" : "••••••••••",
         });
       }
-      // 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
+      // shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
       replaceShallowArray(accounts, migrated);
       if (listRecordId !== null) {
         try { await verthysDeleteRecord(listRecordId); } catch { /* */ }
@@ -383,11 +383,11 @@ const loadAccounts = async () => {
       }
       clearRecordScanCache(); // 迁移涉及批量增删，清空 scan cache 确保一致性
     } else {
-      // 项2：shallowRef 清空需用 clearShallowArray 触发 triggerRef
+      // shallowRef 清空需用 clearShallowArray 触发 triggerRef
       clearShallowArray(accounts);
     }
   } else {
-    // 项2：shallowRef 清空需用 clearShallowArray 触发 triggerRef
+    // shallowRef 清空需用 clearShallowArray 触发 triggerRef
     clearShallowArray(accounts);
   }
 
@@ -421,7 +421,7 @@ const togglePwd = (acc: AccountEntry) => {
       showKeyDialog.value = true;
       return;
     }
-    // 项2：shallowRef 下直接修改属性不触发更新，必须 updateShallowItem
+    // shallowRef 下直接修改属性不触发更新，必须 updateShallowItem
     const idx = accounts.value.findIndex(a => a.id === acc.id);
     if (idx >= 0) {
       updateShallowItem(accounts, idx, {
@@ -431,7 +431,7 @@ const togglePwd = (acc: AccountEntry) => {
       });
     }
   } else {
-    // 项2：shallowRef 下直接修改属性不触发更新，必须 updateShallowItem
+    // shallowRef 下直接修改属性不触发更新，必须 updateShallowItem
     const idx = accounts.value.findIndex(a => a.id === acc.id);
     if (idx >= 0) {
       updateShallowItem(accounts, idx, {
@@ -453,7 +453,7 @@ const confirmKey = async () => {
   if (!keyTarget.value || !keyInput.value) return;
   try {
     const plain = await decryptPasswordField(keyTarget.value.fields.password, keyInput.value);
-    // 项2：shallowRef 下通过 id 找索引后 updateShallowItem，避免直接修改 keyTarget.value 属性
+    // shallowRef 下通过 id 找索引后 updateShallowItem，避免直接修改 keyTarget.value 属性
     const targetId = keyTarget.value.id;
     const idx = accounts.value.findIndex(a => a.id === targetId);
     if (idx >= 0) {
@@ -556,7 +556,7 @@ const onSave = async () => {
       }
       const idx = accounts.value.findIndex(a => a.id === editing.value!.id);
       if (idx >= 0) {
-        // 项2：shallowRef 下整体替换元素需用 updateShallowItem 触发 triggerRef
+        // shallowRef 下整体替换元素需用 updateShallowItem 触发 triggerRef
         updateShallowItem(accounts, idx, {
           recordId: newRid,
           fields,
@@ -582,7 +582,7 @@ const onSave = async () => {
     if (newRid !== null) {
       // 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
       addFullRecord(newRid, TYPE_ACCOUNT, recordName, dataB64, dataB64.length);
-      // 项2：shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
+      // shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
       pushShallowItems(accounts, [{
         id: Date.now(),
         recordId: newRid,
@@ -613,7 +613,7 @@ const confirmDelete = async () => {
   // 立即关闭弹窗 + 移除 UI + 更新缓存（同步无缝，消除删除按钮到内容消失的空白间隔）
   showDeleteConfirm.value = false;
   deleteTargetId.value = null;
-  // 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
+  // shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
   removeShallowItems(accounts, a => a.id === id);
   setModuleCache("accounts", accounts.value);
   // 立即失效扫描缓存（同步，杜绝删除复活）

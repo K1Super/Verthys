@@ -27,7 +27,7 @@
   </g>
 
   <text x="80" y="58" font-size="19" fill="#5D6B80" letter-spacing="4">DOC 001 · PROJECT DOSSIER</text>
-  <text x="1520" y="58" text-anchor="end" font-size="19" fill="#5D6B80" letter-spacing="4">WINDOWS X64 · V2.6.1</text>
+  <text x="1520" y="58" text-anchor="end" font-size="19" fill="#5D6B80" letter-spacing="4">WINDOWS X64 · V3.3.0</text>
 
   <circle cx="190" cy="200" r="96" fill="#0E131B" stroke="#1E2733" stroke-width="2"/>
   <circle cx="190" cy="200" r="81" fill="none" stroke="#232E3D" stroke-width="1.5" stroke-dasharray="3 6"/>
@@ -54,6 +54,6 @@
   <circle cx="1160" cy="376" r="3" fill="#D9A94E"/>
 
   <line x1="80" y1="556" x2="1520" y2="556" stroke="#1E2733" stroke-width="1.5"/>
-  <text x="80" y="594" font-size="19" fill="#64748B" letter-spacing="2">VER 2.6.1 · CONTAINER .verthys · SCHEME verthys://</text>
+  <text x="80" y="594" font-size="19" fill="#64748B" letter-spacing="2">VER 3.3.0 · CONTAINER .verthys · SCHEME verthys://</text>
   <text x="1520" y="594" text-anchor="end" font-size="19" fill="#64748B" letter-spacing="2">© 2026 K1SUPER</text>
 </svg>

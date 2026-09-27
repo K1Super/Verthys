@@ -52,15 +52,17 @@
  * - 数据目录解析不依赖环境变量修改，仅从受信命令行参数获取。
  */
 
-mod worker;
+mod constants;
 mod security;
 mod security_commands;
 mod state;
-mod constants;
+mod worker;
 
 // ==== 强制分层架构 ====
 #[allow(dead_code)]
-pub mod util;
+pub mod controller;
+#[allow(dead_code)]
+pub mod entry_template;
 #[allow(dead_code)]
 pub mod infrastructure;
 #[allow(dead_code)]
@@ -70,9 +72,7 @@ pub mod repository;
 #[allow(dead_code)]
 pub mod service;
 #[allow(dead_code)]
-pub mod controller;
-#[allow(dead_code)]
-pub mod entry_template;
+pub mod util;
 
 // 启动资源哈希校验：由 build.rs 生成 dist 目录 SHA-256 清单
 mod resource_hashes {
@@ -95,8 +95,8 @@ use controller::file_controller::*;
 use controller::key_controller::*;
 use controller::preflight_controller::*;
 use controller::scan_controller::*;
-use controller::verthys_controller::*;
 use controller::verthys_batch_controller::*;
+use controller::verthys_controller::*;
 use controller::worker_controller::*;
 
 // 入口层基础设施引用
@@ -141,7 +141,7 @@ impl log::Log for LogPipeBridge {
         }
         if let Ok(guard) = self.sender.lock() {
             if let Some(sender) = guard.as_ref() {
-                use infrastructure::log_pipe::{LogLevel, LogEntry};
+                use infrastructure::log_pipe::{LogEntry, LogLevel};
                 let entry = LogEntry::new(
                     match record.level() {
                         log::Level::Error => LogLevel::Error,
@@ -249,6 +249,11 @@ fn run_process(mode: ProcessMode) {
 
     // 升级 panic hook
     panic_hook::upgrade(log_sender.clone());
+    // panic 清零器注册：hook 触发时对隐私会话令牌等敏感静态驻留
+    // 执行前置清零（在每个 handler 的诊断输出之前运行）
+    panic_hook::register_panic_wiper(
+        crate::controller::clipboard_controller::wipe_privacy_session_token,
+    );
 
     // 桥接 log 宏
     let log_bridge = LogPipeBridge {
@@ -345,10 +350,8 @@ fn run_main_ui(
                 //    覆盖 lockAll 内部 40s 安全网 + 5s 余量
                 let app_handle = window.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        CLOSE_HARD_TIMEOUT_MS,
-                    ))
-                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(CLOSE_HARD_TIMEOUT_MS))
+                        .await;
                     log::warn!(
                         "[close] 关闭超时 {}ms，前端未自行退出，后端强制终止进程",
                         CLOSE_HARD_TIMEOUT_MS
@@ -361,6 +364,9 @@ fn run_main_ui(
             let shutdown_token_clone = shutdown_token.clone();
             move |app| {
                 let app_handle = app.handle().clone();
+                // 注册熔断闸门实现到服务层契约（依赖反转：控制器只经 service
+                // 层调用闸门，避免 controller → security_commands 反向依赖）
+                security_commands::brute_force_bridge::install_unlock_gate();
                 let install_dir = std::env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
@@ -370,6 +376,11 @@ fn run_main_ui(
                     install_dir,
                 );
                 app.manage(patrol);
+                // 启动导入写者心跳看门狗（写者卡死超时自动重建）
+                crate::state::import_writer::spawn_watchdog(
+                    app_handle.clone(),
+                    shutdown_token_clone.clone(),
+                );
                 // 启动锁持有时间监控任务（死锁兜底）
                 AppState::spawn_lock_monitor(app_handle, shutdown_token_clone);
                 Ok(())
@@ -388,6 +399,7 @@ fn run_main_ui(
             verthys_lock_persist,
             verthys_flush,
             verthys_verify_disk_persist,
+            verthys_force_close_import_session,
             verthys_add_record,
             verthys_get_record,
             verthys_enumerate_records,
@@ -395,9 +407,13 @@ fn run_main_ui(
             // 照片导入异步批处理流水线（WAL + 批量 IPC + 检查点）
             verthys_import_begin,
             verthys_add_records_batch,
+            verthys_add_chunk_batch,
             verthys_import_end,
             verthys_import_checkpoint,
             verthys_wal_recover,
+            verthys_forget_hashes,
+            dev_reset_wal,
+            verthys_gc_orphan_chunks,
             verthys_scan_open,
             verthys_scan_next,
             verthys_scan_close,
@@ -428,6 +444,11 @@ fn run_main_ui(
             write_file_bytes,
             read_user_file,
             write_user_file,
+            // 单文件导出流式落盘（暂存 + 原子替换，压低内存峰值）
+            write_user_file_stream,
+            append_user_file_chunk,
+            finalize_user_file_stream,
+            abort_user_file_stream,
             get_device_fingerprint,
             set_device_binding,
             check_device_binding,
@@ -489,11 +510,7 @@ fn run_main_ui(
 ///
 /// 启动后执行句柄继承自检，若失败则退出。
 /// 后续进入无限循环等待 IPC 指令，实际交互由 `WorkerSession` Actor 处理。
-fn run_secure_worker(
-    log_sender: LogSender,
-    _guard: ProcessGuard,
-    _log_daemon: LogDaemon,
-) {
+fn run_secure_worker(log_sender: LogSender, _guard: ProcessGuard, _log_daemon: LogDaemon) {
     log_sender.info("entry", "安全 Worker 进程启动");
 
     if let Err(e) = infrastructure::handle_factory::validate_no_inherited_handles() {
@@ -512,11 +529,7 @@ fn run_secure_worker(
 /// 定时巡检进程运行逻辑。
 ///
 /// 独立进程循环执行系统健康监控、模块白名单、USB 检测等任务。
-fn run_inspector_proc(
-    log_sender: LogSender,
-    _guard: ProcessGuard,
-    _log_daemon: LogDaemon,
-) {
+fn run_inspector_proc(log_sender: LogSender, _guard: ProcessGuard, _log_daemon: LogDaemon) {
     log_sender.info("entry", "定时巡检进程启动");
     loop {
         // TODO：接入安全巡检逻辑
@@ -539,7 +552,9 @@ impl infrastructure::process_guard::DropResource for LogDaemonResource {
     }
 
     fn cleanup(&mut self) {
-        let _ = self.daemon.flush_and_shutdown(std::time::Duration::from_secs(3));
+        let _ = self
+            .daemon
+            .flush_and_shutdown(std::time::Duration::from_secs(3));
     }
 }
 

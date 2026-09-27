@@ -65,8 +65,8 @@ pub(super) fn resolve_logical_path(
         .map_err(|e| format!("路径解析失败 [{}]: {}", target.display(), e))?;
 
     // 白名单校验：规范化后的路径必须在 config_dir 下
-    let config_canonical = std::fs::canonicalize(&config_dir)
-        .map_err(|e| format!("配置目录解析失败: {}", e))?;
+    let config_canonical =
+        std::fs::canonicalize(&config_dir).map_err(|e| format!("配置目录解析失败: {}", e))?;
 
     if !canonical.starts_with(&config_canonical) {
         return Err("路径不在白名单基目录内（安全拒绝）".to_string());
@@ -77,8 +77,7 @@ pub(super) fn resolve_logical_path(
 
 /// 获取应用安装目录（从 current_exe 推导，不信任前端）
 pub(super) fn get_install_dir() -> Result<String, String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("获取当前可执行文件路径失败: {}", e))?;
+    let exe = std::env::current_exe().map_err(|e| format!("获取当前可执行文件路径失败: {}", e))?;
     let install_dir = exe
         .parent()
         .ok_or_else(|| "无法获取可执行文件父目录".to_string())?;

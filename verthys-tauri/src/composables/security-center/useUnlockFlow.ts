@@ -258,7 +258,6 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
           try {
             const preflight = await verthysPreflight(path);
             if (preflight.file_exists) {
-              console.log('[doUnlock] 文件已存在，回退到打开');
               result = await withFrontendTimeout(
                 initUnlock(path, undefined, onUnlockProgress),
                 '打开文件',

@@ -1,0 +1,50 @@
+# cargo-deny 供应链门禁配置（Rust 生态）
+#
+# 四类检查全开：advisories（CVE/unsound/yanked）、licenses（合规）、
+# bans（多重版本/误用）、sources（注册表/来历不明来源）。
+# 扫描目标限定 Windows 目标三元组——锁文件包含跨平台传递依赖，
+# 仅检出实际会进入 Windows 产物的图谱，避免误报平台无关条目。
+
+[advisories]
+# 漏洞与 unsound 告警：阻断（默认）
+vulnerability = "deny"
+unmaintained = "warn"
+unsound = "deny"
+# yanked 版本属瞬态状态（上游撤版后新解析可自愈），告警不阻断
+yanked = "warn"
+notice = "warn"
+ignore = []
+
+[licenses]
+# 允许的许可证集合（与当前依赖图谱实测对齐，增量收敛）
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+# 未声明许可证依赖：阻断（私有仓库内部 crate 以 exceptions 显式登记）
+confidence-threshold = 0.8
+exceptions = []
+
+[bans]
+# 版本通配符（"*" 依赖）：阻断——锁文件才是版本事实源
+wildcards = "deny"
+# 同 crate 多版本并存：告警（windows-sys 0.52/0.59 属有意并存，
+# 由 Cargo.toml 注释锁定缘由；新出现的重复应被审视而非静默）
+multiple-versions = "warn"
+deny = []
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+# 仅对 Windows 产物图谱执行许可证/来源检查
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+all-features = true

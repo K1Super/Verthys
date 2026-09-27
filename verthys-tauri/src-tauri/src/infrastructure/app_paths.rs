@@ -154,13 +154,11 @@ pub fn normalize_long_path(path: &Path) -> PathBuf {
 #[cfg(windows)]
 fn get_known_folder_local_app_data() -> Option<PathBuf> {
     use windows::Win32::UI::Shell::{
-        SHGetKnownFolderPath, FOLDERID_LocalAppData, KNOWN_FOLDER_FLAG,
+        FOLDERID_LocalAppData, SHGetKnownFolderPath, KNOWN_FOLDER_FLAG,
     };
 
     let flags = KNOWN_FOLDER_FLAG(0);
-    let result = unsafe {
-        SHGetKnownFolderPath(&FOLDERID_LocalAppData, flags, None)
-    };
+    let result = unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, flags, None) };
 
     match result {
         Ok(pwsz) => {
@@ -222,7 +220,11 @@ mod tests {
         let p = Path::new(r"C:\Users\Test\Data");
         let normalized = normalize_long_path(p);
         let s = normalized.to_string_lossy();
-        assert!(s.starts_with(r"\\?\") || !s.starts_with(r"\\?\\"), "normalized: {}", s);
+        assert!(
+            s.starts_with(r"\\?\") || !s.starts_with(r"\\?\\"),
+            "normalized: {}",
+            s
+        );
     }
 
     /// 校验批量目录创建接口健壮性

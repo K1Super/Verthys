@@ -37,16 +37,23 @@
  *             util::random / constants / controller::api_error
  */
 
-use crate::controller::api_error::ErrorCode;
+use crate::constants::export_stream::{
+    MAX_EXPORT_SINGLE_BYTES, STALE_TEMP_MAX_AGE, WRITE_FILE_CHUNK_BYTES,
+};
 use crate::constants::timeout::DEFAULT as TIMEOUT_CONFIG;
+use crate::controller::api_error::ErrorCode;
+use crate::controller::verthys_controller::require_unlocked;
+use crate::security::command_names::cmd;
+use crate::state::file_streams::FileStreamState;
 use crate::util::audit_log::{append_audit, AuditEvent, AuditEventType, AuditResult};
 use crate::util::path::sanitize_path;
 use crate::util::sandbox::{resolve_and_validate, SandboxError};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::ipc::{InvokeBody, Request, Response};
-use tauri::Manager;
+use tauri::{Manager, State};
 
 // ===== 文件大小与块大小 =====
 
@@ -137,8 +144,7 @@ fn write_file_audit(
 
     let session_id = format!("pid-{}", std::process::id());
 
-    let mut event = AuditEvent::new(event_type, &session_id, "user", result)
-        .with_resource(path);
+    let mut event = AuditEvent::new(event_type, &session_id, "user", result).with_resource(path);
 
     let mut detail_parts = Vec::new();
     if let Some(s) = size {
@@ -322,10 +328,11 @@ fn write_file_blocking(path: &str, data: &[u8], whitelist: &[String]) -> Result<
                 let parent = std::path::Path::new(path)
                     .parent()
                     .ok_or_else(|| ErrorCode::InvalidPath.default_message().to_string())?;
-                let parent_str = parent.to_str()
+                let parent_str = parent
+                    .to_str()
                     .ok_or_else(|| ErrorCode::InvalidPath.default_message().to_string())?;
-                let parent_canonical = resolve_and_validate(parent_str, &whitelist_refs)
-                    .map_err(|_| {
+                let parent_canonical =
+                    resolve_and_validate(parent_str, &whitelist_refs).map_err(|_| {
                         log::warn!(
                             "[write_file_bytes] 父目录沙箱校验失败 | {}",
                             sanitize_path(path)
@@ -362,10 +369,7 @@ fn write_file_blocking(path: &str, data: &[u8], whitelist: &[String]) -> Result<
     // 生成临时文件
     let mut random_bytes = [0u8; 8];
     crate::util::random::fill_random_bytes(&mut random_bytes);
-    let random_suffix: String = random_bytes
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect();
+    let random_suffix: String = random_bytes.iter().map(|b| format!("{:02x}", b)).collect();
     let temp_path = canonical.with_extension(format!("tmp.{}", random_suffix));
 
     log::debug!(
@@ -425,10 +429,7 @@ fn write_file_blocking(path: &str, data: &[u8], whitelist: &[String]) -> Result<
 /// 返回 `tauri::ipc::Response` → 前端 invoke 直接收到 ArrayBuffer，
 /// 消除 base64 编码带来的 1.33× 内存放大与编解码 CPU 开销。
 #[tauri::command]
-pub async fn read_file_bytes(
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<Response, String> {
+pub async fn read_file_bytes(app: tauri::AppHandle, path: String) -> Result<Response, String> {
     log::info!("[read_file_bytes] 开始读取: {}", sanitize_path(&path));
 
     let whitelist = build_whitelist(&app);
@@ -580,10 +581,7 @@ fn decode_percent_path(raw: &str) -> Result<String, String> {
 ///     兼容中文/空格/特殊字符路径；raw body 与 JSON args 互斥）
 ///   - 文件字节经请求体直传（`InvokeBody::Raw`），零 base64 编解码
 #[tauri::command]
-pub async fn write_file_bytes(
-    app: tauri::AppHandle,
-    request: Request<'_>,
-) -> Result<(), String> {
+pub async fn write_file_bytes(app: tauri::AppHandle, request: Request<'_>) -> Result<(), String> {
     // x-path 头百分号解码（前端 encodeURIComponent 编码，兼容中文路径）
     let path = decode_x_path_header(&request)?;
     log::info!("[write_file_bytes] 开始写入: {}", sanitize_path(&path));
@@ -768,13 +766,21 @@ fn read_user_file_blocking(path: &str) -> Result<Vec<u8>, String> {
 
     // 1. 字符级校验（防路径注入、目录遍历、保留设备名）
     crate::util::path::validate_path_input(path).map_err(|e| {
-        log::warn!("[read_user_file] 路径校验失败: {} | {}", sanitize_path(path), e);
+        log::warn!(
+            "[read_user_file] 路径校验失败: {} | {}",
+            sanitize_path(path),
+            e
+        );
         ErrorCode::InvalidPath.default_message().to_string()
     })?;
 
     // 2. canonicalize 解析符号链接（文件必须存在）
     let canonical = std::fs::canonicalize(path).map_err(|e| {
-        log::warn!("[read_user_file] 路径解析失败: {} | {}", sanitize_path(path), e);
+        log::warn!(
+            "[read_user_file] 路径解析失败: {} | {}",
+            sanitize_path(path),
+            e
+        );
         ErrorCode::InvalidPath.default_message().to_string()
     })?;
 
@@ -833,6 +839,75 @@ fn read_user_file_blocking(path: &str) -> Result<Vec<u8>, String> {
     Ok(all_bytes)
 }
 
+/// 解析用户授权写入目标为规范化绝对路径（原子写入与流式写入共用）。
+///
+/// 校验链：
+///   1. validate_path_input 字符级校验（防路径注入、目录遍历、保留设备名）；
+///   2. canonicalize：文件已存在直接解析，不存在则解析父目录并拼接文件名；
+///   3. 系统关键目录拒绝（防止覆盖 C:\Windows 等系统文件）。
+///
+/// `log_tag` 仅用于日志前缀区分调用方，不参与任何语义。
+fn resolve_user_file_target(path: &str, log_tag: &str) -> Result<PathBuf, String> {
+    // 1. 字符级校验
+    crate::util::path::validate_path_input(path).map_err(|e| {
+        log::warn!(
+            "[{}] 路径校验失败: {} | {}",
+            log_tag,
+            sanitize_path(path),
+            e
+        );
+        ErrorCode::InvalidPath.default_message().to_string()
+    })?;
+
+    // 2. 解析目标路径：若文件已存在直接 canonicalize；否则 canonicalize 父目录 + 拼接文件名
+    let path_obj = std::path::Path::new(path);
+    let canonical = match std::fs::canonicalize(path) {
+        // 文件已存在 → canonicalize 成功
+        Ok(c) => c,
+        // 文件不存在 → canonicalize 父目录 + 拼接文件名
+        Err(_) => {
+            let parent = path_obj.parent().ok_or_else(|| {
+                log::warn!("[{}] 无法解析父目录 | {}", log_tag, sanitize_path(path));
+                ErrorCode::InvalidPath.default_message().to_string()
+            })?;
+            let parent_str = parent.to_str().ok_or_else(|| {
+                log::warn!(
+                    "[{}] 父目录路径含非 UTF-8 字符 | {}",
+                    log_tag,
+                    sanitize_path(path)
+                );
+                ErrorCode::InvalidPath.default_message().to_string()
+            })?;
+            let parent_canonical = std::fs::canonicalize(parent_str).map_err(|e| {
+                log::warn!(
+                    "[{}] 父目录解析失败: {} | {}",
+                    log_tag,
+                    sanitize_path(path),
+                    e
+                );
+                ErrorCode::InvalidPath.default_message().to_string()
+            })?;
+            let file_name = path_obj.file_name().ok_or_else(|| {
+                log::warn!("[{}] 无效文件名 | {}", log_tag, sanitize_path(path));
+                ErrorCode::InvalidPath.default_message().to_string()
+            })?;
+            parent_canonical.join(file_name)
+        }
+    };
+
+    // 3. 系统关键目录拒绝
+    if is_system_critical_path(&canonical) {
+        log::warn!(
+            "[{}] 拒绝写入系统关键目录: {}",
+            log_tag,
+            sanitize_path(path)
+        );
+        return Err(ErrorCode::PermissionDenied.default_message().to_string());
+    }
+
+    Ok(canonical)
+}
+
 /// 同步执行用户授权的原子写入（跳过白名单，拒绝系统关键目录）。
 ///
 /// 与 `write_file_blocking` 的区别：
@@ -849,47 +924,8 @@ fn write_user_file_blocking(path: &str, data: &[u8]) -> Result<u64, String> {
     })?;
     use std::io::Write;
 
-    // 1. 字符级校验
-    crate::util::path::validate_path_input(path).map_err(|e| {
-        log::warn!("[write_user_file] 路径校验失败: {} | {}", sanitize_path(path), e);
-        ErrorCode::InvalidPath.default_message().to_string()
-    })?;
-
-    // 2. 解析目标路径：若文件已存在直接 canonicalize；否则 canonicalize 父目录 + 拼接文件名
-    let path_obj = std::path::Path::new(path);
-    let canonical = match std::fs::canonicalize(path) {
-        // 文件已存在 → canonicalize 成功
-        Ok(c) => c,
-        // 文件不存在 → canonicalize 父目录 + 拼接文件名
-        Err(_) => {
-            let parent = path_obj.parent().ok_or_else(|| {
-                log::warn!("[write_user_file] 无法解析父目录 | {}", sanitize_path(path));
-                ErrorCode::InvalidPath.default_message().to_string()
-            })?;
-            let parent_str = parent.to_str().ok_or_else(|| {
-                log::warn!("[write_user_file] 父目录路径含非 UTF-8 字符 | {}", sanitize_path(path));
-                ErrorCode::InvalidPath.default_message().to_string()
-            })?;
-            let parent_canonical = std::fs::canonicalize(parent_str).map_err(|e| {
-                log::warn!("[write_user_file] 父目录解析失败: {} | {}", sanitize_path(path), e);
-                ErrorCode::InvalidPath.default_message().to_string()
-            })?;
-            let file_name = path_obj.file_name().ok_or_else(|| {
-                log::warn!("[write_user_file] 无效文件名 | {}", sanitize_path(path));
-                ErrorCode::InvalidPath.default_message().to_string()
-            })?;
-            parent_canonical.join(file_name)
-        }
-    };
-
-    // 3. 系统关键目录拒绝
-    if is_system_critical_path(&canonical) {
-        log::warn!(
-            "[write_user_file] 拒绝写入系统关键目录: {}",
-            sanitize_path(path)
-        );
-        return Err(ErrorCode::PermissionDenied.default_message().to_string());
-    }
+    // 目标解析：字符校验 + canonicalize + 系统关键目录拒绝
+    let canonical = resolve_user_file_target(path, "write_user_file")?;
 
     // 4. 大小检查（原始字节直传，无需 Base64 解码）
     let data_size = data.len() as u64;
@@ -906,10 +942,7 @@ fn write_user_file_blocking(path: &str, data: &[u8]) -> Result<u64, String> {
     // 5. 生成临时文件
     let mut random_bytes = [0u8; 8];
     crate::util::random::fill_random_bytes(&mut random_bytes);
-    let random_suffix: String = random_bytes
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect();
+    let random_suffix: String = random_bytes.iter().map(|b| format!("{:02x}", b)).collect();
     let temp_path = canonical.with_extension(format!("tmp.{}", random_suffix));
 
     log::debug!(
@@ -977,11 +1010,11 @@ fn write_user_file_blocking(path: &str, data: &[u8]) -> Result<u64, String> {
 ///
 /// 安全边界：调用方必须确保 path 来自用户通过 Tauri dialog open() 显式选择的路径。
 #[tauri::command]
-pub async fn read_user_file(
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<Response, String> {
-    log::info!("[read_user_file] 开始读取用户选择文件: {}", sanitize_path(&path));
+pub async fn read_user_file(app: tauri::AppHandle, path: String) -> Result<Response, String> {
+    log::info!(
+        "[read_user_file] 开始读取用户选择文件: {}",
+        sanitize_path(&path)
+    );
 
     let path_clone = path.clone();
     let read_result = tokio::time::timeout(
@@ -1054,13 +1087,13 @@ pub async fn read_user_file(
 ///     兼容中文/空格/特殊字符路径；raw body 与 JSON args 互斥）
 ///   - 文件字节经请求体直传（`InvokeBody::Raw`），零 base64 编解码
 #[tauri::command]
-pub async fn write_user_file(
-    app: tauri::AppHandle,
-    request: Request<'_>,
-) -> Result<(), String> {
+pub async fn write_user_file(app: tauri::AppHandle, request: Request<'_>) -> Result<(), String> {
     // x-path 头百分号解码（前端 encodeURIComponent 编码，兼容中文路径）
     let path = decode_x_path_header(&request)?;
-    log::info!("[write_user_file] 开始写入用户选择位置: {}", sanitize_path(&path));
+    log::info!(
+        "[write_user_file] 开始写入用户选择位置: {}",
+        sanitize_path(&path)
+    );
 
     let path_in = path.clone();
     // 从请求体提取原始字节（Request 为借用类型，clone 一次后 move 进 'static 闭包；
@@ -1074,9 +1107,7 @@ pub async fn write_user_file(
     };
     let write_result = tokio::time::timeout(
         USER_FILE_OP_TIMEOUT,
-        tokio::task::spawn_blocking(move || {
-            write_user_file_blocking(&path_in, &data)
-        }),
+        tokio::task::spawn_blocking(move || write_user_file_blocking(&path_in, &data)),
     )
     .await;
 
@@ -1131,6 +1162,554 @@ pub async fn write_user_file(
             );
             Err(e)
         }
+    }
+}
+
+// ===== 流式写入（write/append/finalize/abort） =====
+//
+// 单文件导出（.venc 容器，可达数百 MB）若沿用一次全量原子写入，
+// 峰值内存为容器字节数；流式写入将数据分帧落盘至暂存文件，最终
+// fsync + rename 原子替换，既压低内存峰值又保证目标文件任何时刻
+// 要么是旧完整版、要么是新完整版，不存在部分写入的最终文件。
+
+/// 生成流式会话标识（32 字符小写 hex，熵 128 bit）。
+///
+/// hex 字符集保证标识可经 HTTP 请求头（append 命令 x-stream-id）安全
+/// 传输；熵值使枚举无效标识不可行（无效标识仅触发 STREAM_NOT_FOUND）。
+fn generate_stream_id() -> String {
+    let mut buf = [0u8; 16];
+    crate::util::random::fill_random_bytes(&mut buf);
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// 清理目录内的流式暂存残留（修改时间早于清理阈值的 `.venc.tmp` 文件）。
+///
+/// 崩溃/强杀会遗留未 finalize 的暂存文件；暂存永远不会被 rename 到目标
+/// （finalize 在 rename 前注销会话），残留是纯磁盘垃圾。创建新流时对
+/// 目标所在目录执行按龄清理，等价于启动清理的惰性化，不影响新鲜残留
+/// （可能属于并发活跃会话）。
+fn cleanup_stale_stream_temps(dir: &std::path::Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_temp = path
+            .file_name()
+            .map(|n| n.to_string_lossy().ends_with(".venc.tmp"))
+            .unwrap_or(false);
+        if !is_temp {
+            continue;
+        }
+        let stale = match std::fs::metadata(&path) {
+            Ok(meta) => match meta.modified() {
+                Ok(modified) => match modified.elapsed() {
+                    Ok(age) => age >= STALE_TEMP_MAX_AGE,
+                    Err(_) => false,
+                },
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
+        if stale {
+            log::info!(
+                "[file_stream] 清理暂存残留: {}",
+                sanitize_path(&path.to_string_lossy())
+            );
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("[file_stream] 清理暂存残留失败: {}", e);
+            }
+        }
+    }
+}
+
+/// 创建流式写入会话（阻塞核心）：目标校验 + 暂存独占创建。
+///
+/// 返回会话标识与会话状态（尚未注册进会话表，由命令层在短临界区内
+/// 完成注册）。暂存文件使用 create_new 独占创建：同目标并发的第二个
+/// 会话创建必然失败，从根上排除双写同一暂存路径。
+fn stream_create_blocking(target: &str) -> Result<(String, Arc<Mutex<FileStreamState>>), String> {
+    let canonical = resolve_user_file_target(target, "stream_create")?;
+
+    // 暂存路径：与目标同级、固定后缀，finalize rename 后即消失
+    let temp_path = canonical.with_extension("venc.tmp");
+    let parent = match temp_path.parent() {
+        Some(p) => p.to_path_buf(),
+        None => {
+            log::warn!("[stream_create] 暂存路径无父目录");
+            return Err(ErrorCode::InvalidPath.default_message().to_string());
+        }
+    };
+    cleanup_stale_stream_temps(&parent);
+
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)
+        .map_err(|e| {
+            log::warn!(
+                "[stream_create] 创建暂存文件失败（同目标并发会话或残留未过期）: {}",
+                e
+            );
+            ErrorCode::TemporaryFailure.default_message().to_string()
+        })?;
+
+    log::debug!(
+        "[stream_create] 暂存文件: {}",
+        sanitize_path(&temp_path.to_string_lossy())
+    );
+
+    let stream_id = generate_stream_id();
+    let state = FileStreamState::new(file, temp_path, canonical);
+    Ok((stream_id, Arc::new(Mutex::new(state))))
+}
+
+/// 追加数据块（阻塞核心）：单块上限 + 累计总量上限 + 写入暂存。
+///
+/// 会话指针由调用方从会话表克隆取得；会话状态锁覆盖「句柄写入 + 计数
+/// 更新」，保证同会话追加严格串行。
+fn stream_append_blocking(entry: &Arc<Mutex<FileStreamState>>, data: &[u8]) -> Result<(), String> {
+    if data.len() > WRITE_FILE_CHUNK_BYTES {
+        log::warn!(
+            "[append_user_file_chunk] 单块超限: {} bytes > {}",
+            data.len(),
+            WRITE_FILE_CHUNK_BYTES
+        );
+        return Err(ErrorCode::FileTooLarge.default_message().to_string());
+    }
+
+    let mut state = match entry.lock() {
+        Ok(s) => s,
+        Err(poisoned) => {
+            log::error!("[append_user_file_chunk] 会话状态锁中毒");
+            let s = poisoned.into_inner();
+            return Err(if s.is_active() {
+                ErrorCode::Internal.default_message().to_string()
+            } else {
+                ErrorCode::StreamNotFound.default_message().to_string()
+            });
+        }
+    };
+
+    let next_bytes = state.bytes_written().saturating_add(data.len() as u64);
+    if next_bytes > MAX_EXPORT_SINGLE_BYTES {
+        log::warn!(
+            "[append_user_file_chunk] 累计超限: {} bytes > {}",
+            next_bytes,
+            MAX_EXPORT_SINGLE_BYTES
+        );
+        return Err(ErrorCode::FileTooLarge.default_message().to_string());
+    }
+
+    state.append(data).map_err(|e| {
+        log::warn!("[append_user_file_chunk] 写入暂存失败: {}", e);
+        ErrorCode::TemporaryFailure.default_message().to_string()
+    })
+}
+
+/// 终结流式会话（阻塞核心）：同步落盘 → 关闭句柄 → 原子替换目标。
+///
+/// 调用方已从会话表移除会话取得独占所有权；持有全局写互斥执行，与
+/// 原子写入路径互斥避免 rename 交错。rename 失败时清理暂存并报错，
+/// 目标文件保持旧完整版不变。
+fn stream_finalize_blocking(entry: Arc<Mutex<FileStreamState>>) -> Result<u64, String> {
+    let _write_guard = WRITE_MUTEX.lock().map_err(|e| {
+        log::error!("[finalize_user_file_stream] 写互斥锁中毒: {}", e);
+        ErrorCode::Internal.default_message().to_string()
+    })?;
+
+    let (temp, target, total) = {
+        let state = match entry.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Err(e) = state.sync_all() {
+            log::warn!("[finalize_user_file_stream] fsync 失败: {}", e);
+            return Err(ErrorCode::Internal.default_message().to_string());
+        }
+        let temp = state.temp_path().clone();
+        let target = state.target_path().clone();
+        let total = state.bytes_written();
+        drop(state);
+        (temp, target, total)
+    };
+    // state 守卫已释放但句柄仍被 Arc 持有：rename 前显式关闭暂存句柄。
+    // 正常独占消费路径下 Arc 强引用唯一，直接消费取得所有权；存在在途
+    // append 克隆时以 close_handle 兜底关闭。
+    match Arc::try_unwrap(entry) {
+        Ok(mutex) => {
+            let _ = mutex.into_inner();
+        }
+        Err(arc) => {
+            if let Ok(mut state) = arc.lock() {
+                state.close_handle();
+            }
+        }
+    }
+
+    if let Err(e) = std::fs::rename(&temp, &target) {
+        log::error!("[finalize_user_file_stream] rename 失败: {}", e);
+        let _ = std::fs::remove_file(&temp);
+        return Err(ErrorCode::Internal.default_message().to_string());
+    }
+
+    log::info!("[finalize_user_file_stream] 流式落盘完成: {} bytes", total);
+    Ok(total)
+}
+
+/// 中止流式会话（阻塞核心）：关闭句柄并删除暂存，目标文件不触碰。
+///
+/// 暂存不存在（NotFound）视为清理已完成；其余删除失败上报，
+/// 残留交由下次创建流时的按龄清理兜底。
+fn stream_abort_blocking(entry: Arc<Mutex<FileStreamState>>) -> Result<(), String> {
+    let temp = {
+        let state = match entry.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let temp = state.temp_path().clone();
+        drop(state);
+        temp
+    };
+    // 独占消费路径下直接销毁会话关闭句柄；存在在途 append 克隆时
+    // 等其完成后以 close_handle 关闭，保证删除前句柄已释放
+    match Arc::try_unwrap(entry) {
+        Ok(mutex) => {
+            let _ = mutex.into_inner();
+        }
+        Err(arc) => {
+            if let Ok(mut state) = arc.lock() {
+                state.close_handle();
+            }
+        }
+    }
+
+    match std::fs::remove_file(&temp) {
+        Ok(()) => {
+            log::info!("[abort_user_file_stream] 会话已中止，暂存已清理");
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            log::info!("[abort_user_file_stream] 会话已中止（暂存已不存在）");
+            Ok(())
+        }
+        Err(e) => {
+            log::warn!("[abort_user_file_stream] 清理暂存失败: {}", e);
+            Err(ErrorCode::TemporaryFailure.default_message().to_string())
+        }
+    }
+}
+
+/// 从 `x-stream-id` 请求头解码会话标识并做字符集校验。
+///
+/// 前端以原始二进制体直传块字节（raw body 与 JSON 参数互斥），会话
+/// 标识仅能经请求头传递；标识为 32 位小写 hex，预检失败直接拒绝，
+/// 防止畸形输入进入会话表查询路径。
+fn decode_stream_id_header(request: &Request<'_>) -> Result<String, String> {
+    let raw = request
+        .headers()
+        .get("x-stream-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let valid = !raw.is_empty()
+        && raw.len() <= 64
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+    if !valid {
+        log::warn!("[append_user_file_chunk] 会话标识缺失或畸形");
+        return Err(ErrorCode::StreamNotFound.default_message().to_string());
+    }
+    Ok(raw.to_string())
+}
+
+/// 创建流式写入会话（单文件导出流式落盘入口）。
+///
+/// 通过数据域解锁闸门后，校验目标路径（与原子写入同链）并独占创建
+/// 暂存文件，会话注册进程内表。返回会话标识供后续 append/finalize/
+/// abort 使用；同目标并发创建第二个会话将以暂存冲突拒绝。
+#[tauri::command]
+pub async fn write_user_file_stream(
+    app: tauri::AppHandle,
+    state: State<'_, crate::state::AppState>,
+    path: String,
+) -> Result<String, String> {
+    require_unlocked(&app, &state, cmd::WRITE_USER_FILE_STREAM)?;
+    log::info!(
+        "[write_user_file_stream] 创建流式写入会话: {}",
+        sanitize_path(&path)
+    );
+
+    let path_clone = path.clone();
+    let create_result = tokio::time::timeout(
+        USER_FILE_OP_TIMEOUT,
+        tokio::task::spawn_blocking(move || stream_create_blocking(&path_clone)),
+    )
+    .await;
+
+    match create_result {
+        Err(_) => {
+            log::error!(
+                "[write_user_file_stream] 创建超时（{}s）",
+                USER_FILE_OP_TIMEOUT.as_secs()
+            );
+            write_file_audit(
+                &app,
+                AuditEventType::FileWrite,
+                &path,
+                AuditResult::Failure,
+                None,
+                Some(format!("创建会话超时 {}s", USER_FILE_OP_TIMEOUT.as_secs())),
+            );
+            Err(ErrorCode::TemporaryFailure.default_message().to_string())
+        }
+        Ok(Err(e)) => {
+            log::error!("[write_user_file_stream] spawn_blocking 异常: {}", e);
+            write_file_audit(
+                &app,
+                AuditEventType::FileWrite,
+                &path,
+                AuditResult::Failure,
+                None,
+                Some(format!("任务异常: {}", e)),
+            );
+            Err(ErrorCode::Internal.default_message().to_string())
+        }
+        Ok(Ok(Err(e))) => {
+            write_file_audit(
+                &app,
+                AuditEventType::FileWrite,
+                &path,
+                AuditResult::Failure,
+                None,
+                Some(e.clone()),
+            );
+            Err(e)
+        }
+        Ok(Ok(Ok((stream_id, entry)))) => {
+            // 注册进会话表（短临界区，仅指针插入）
+            let mut table = state.lock_file_streams();
+            table.insert(stream_id.clone(), entry);
+            write_file_audit(
+                &app,
+                AuditEventType::FileWrite,
+                &path,
+                AuditResult::Success,
+                None,
+                None,
+            );
+            Ok(stream_id)
+        }
+    }
+}
+
+/// 向流式会话追加原始数据块（二进制 IPC）。
+///
+/// 块字节经请求体直传（`InvokeBody::Raw`），会话标识经 `x-stream-id`
+/// 请求头传递（raw body 与 JSON 参数互斥）。单块与累计总量双重上限，
+/// 越界拒绝且会话保持可用（调用方可中止后重试或改用多文件模式）。
+#[tauri::command]
+pub async fn append_user_file_chunk(
+    app: tauri::AppHandle,
+    state: State<'_, crate::state::AppState>,
+    request: Request<'_>,
+) -> Result<(), String> {
+    require_unlocked(&app, &state, cmd::APPEND_USER_FILE_CHUNK)?;
+
+    let stream_id = decode_stream_id_header(&request)?;
+    let data: Vec<u8> = match request.body() {
+        InvokeBody::Raw(bytes) => bytes.clone(),
+        _ => {
+            log::warn!("[append_user_file_chunk] 请求体非原始二进制");
+            return Err(ErrorCode::InvalidPath.default_message().to_string());
+        }
+    };
+    if data.is_empty() {
+        log::warn!("[append_user_file_chunk] 拒绝空数据块");
+        return Err(ErrorCode::InvalidPath.default_message().to_string());
+    }
+
+    // 取会话指针（不注销：追加失败后会话仍须可被中止清理；
+    // 注意追加在字节层不幂等 —— write_all 半途出错时已写入的字节不回滚，
+    // 失败路径必须走 abort 丢弃整个暂存，不得重试同一数据块）
+    let entry = {
+        let table = state.lock_file_streams();
+        match table.get(&stream_id) {
+            Some(entry) => Arc::clone(entry),
+            None => {
+                log::warn!("[append_user_file_chunk] 会话不存在或已结束");
+                write_file_audit(
+                    &app,
+                    AuditEventType::FileWrite,
+                    &stream_id,
+                    AuditResult::Failure,
+                    None,
+                    Some("会话不存在".into()),
+                );
+                return Err(ErrorCode::StreamNotFound.default_message().to_string());
+            }
+        }
+    };
+
+    let append_result = tokio::time::timeout(
+        USER_FILE_OP_TIMEOUT,
+        tokio::task::spawn_blocking(move || stream_append_blocking(&entry, &data)),
+    )
+    .await;
+
+    match append_result {
+        Err(_) => {
+            log::error!(
+                "[append_user_file_chunk] 追加超时（{}s）",
+                USER_FILE_OP_TIMEOUT.as_secs()
+            );
+            Err(ErrorCode::TemporaryFailure.default_message().to_string())
+        }
+        Ok(Err(e)) => {
+            log::error!("[append_user_file_chunk] spawn_blocking 异常: {}", e);
+            Err(ErrorCode::Internal.default_message().to_string())
+        }
+        Ok(Ok(Err(e))) => Err(e),
+        Ok(Ok(Ok(()))) => Ok(()),
+    }
+}
+
+/// 终结流式会话：同步落盘暂存并原子替换目标文件。
+///
+/// 一次性消费会话（从表移除取得独占所有权），并发 finalize/abort 仅
+/// 一个成功。任何失败路径均保证目标文件未被部分写入。
+#[tauri::command]
+pub async fn finalize_user_file_stream(
+    app: tauri::AppHandle,
+    state: State<'_, crate::state::AppState>,
+    stream_id: String,
+) -> Result<(), String> {
+    require_unlocked(&app, &state, cmd::FINALIZE_USER_FILE_STREAM)?;
+
+    let entry = {
+        let mut table = state.lock_file_streams();
+        match table.remove(&stream_id) {
+            Some(entry) => entry,
+            None => {
+                log::warn!("[finalize_user_file_stream] 会话不存在或已结束");
+                write_file_audit(
+                    &app,
+                    AuditEventType::FileWrite,
+                    &stream_id,
+                    AuditResult::Failure,
+                    None,
+                    Some("会话不存在".into()),
+                );
+                return Err(ErrorCode::StreamNotFound.default_message().to_string());
+            }
+        }
+    };
+
+    let finalize_result = tokio::time::timeout(
+        USER_FILE_OP_TIMEOUT,
+        tokio::task::spawn_blocking(move || stream_finalize_blocking(entry)),
+    )
+    .await;
+
+    match finalize_result {
+        Err(_) => {
+            log::error!(
+                "[finalize_user_file_stream] 落盘超时（{}s）",
+                USER_FILE_OP_TIMEOUT.as_secs()
+            );
+            write_file_audit(
+                &app,
+                AuditEventType::FileWrite,
+                &stream_id,
+                AuditResult::Failure,
+                None,
+                Some("落盘超时".into()),
+            );
+            Err(ErrorCode::TemporaryFailure.default_message().to_string())
+        }
+        Ok(Err(e)) => {
+            log::error!("[finalize_user_file_stream] spawn_blocking 异常: {}", e);
+            write_file_audit(
+                &app,
+                AuditEventType::FileWrite,
+                &stream_id,
+                AuditResult::Failure,
+                None,
+                Some(format!("任务异常: {}", e)),
+            );
+            Err(ErrorCode::Internal.default_message().to_string())
+        }
+        Ok(Ok(Err(e))) => {
+            write_file_audit(
+                &app,
+                AuditEventType::FileWrite,
+                &stream_id,
+                AuditResult::Failure,
+                None,
+                Some(e.clone()),
+            );
+            Err(e)
+        }
+        Ok(Ok(Ok(total))) => {
+            write_file_audit(
+                &app,
+                AuditEventType::FileWrite,
+                &stream_id,
+                AuditResult::Success,
+                Some(total),
+                None,
+            );
+            Ok(())
+        }
+    }
+}
+
+/// 中止流式会话：删除暂存文件，目标文件不触碰。
+///
+/// 幂等语义：会话不存在视为已中止（返回成功）。供导出失败路径与用户
+/// 取消路径调用，保证暂存不残留。
+#[tauri::command]
+pub async fn abort_user_file_stream(
+    app: tauri::AppHandle,
+    state: State<'_, crate::state::AppState>,
+    stream_id: String,
+) -> Result<(), String> {
+    require_unlocked(&app, &state, cmd::ABORT_USER_FILE_STREAM)?;
+
+    let entry = {
+        let mut table = state.lock_file_streams();
+        table.remove(&stream_id)
+    };
+
+    let entry = match entry {
+        None => {
+            log::info!("[abort_user_file_stream] 会话不存在，视为已中止");
+            return Ok(());
+        }
+        Some(entry) => entry,
+    };
+
+    let abort_result = tokio::time::timeout(
+        USER_FILE_OP_TIMEOUT,
+        tokio::task::spawn_blocking(move || stream_abort_blocking(entry)),
+    )
+    .await;
+
+    match abort_result {
+        Err(_) => {
+            log::error!(
+                "[abort_user_file_stream] 清理超时（{}s）",
+                USER_FILE_OP_TIMEOUT.as_secs()
+            );
+            Err(ErrorCode::TemporaryFailure.default_message().to_string())
+        }
+        Ok(Err(e)) => {
+            log::error!("[abort_user_file_stream] spawn_blocking 异常: {}", e);
+            Err(ErrorCode::Internal.default_message().to_string())
+        }
+        Ok(Ok(Err(e))) => Err(e),
+        Ok(Ok(Ok(()))) => Ok(()),
     }
 }
 
@@ -1292,13 +1871,154 @@ mod tests {
             let entry = entry.unwrap();
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            assert!(
-                !name_str.contains(".tmp."),
-                "临时文件残留: {}",
-                name_str
-            );
+            assert!(!name_str.contains(".tmp."), "临时文件残留: {}", name_str);
         }
 
         let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    /* ===== 流式写入（暂存 + 原子替换）测试 ===== */
+
+    #[test]
+    fn test_stream_roundtrip_and_no_residue() {
+        let temp_dir = std::env::temp_dir().join("verthys_test_stream_roundtrip");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let target = temp_dir.join("out.venc");
+        let target_str = target.to_string_lossy().to_string();
+
+        let (stream_id, entry) = stream_create_blocking(&target_str).unwrap();
+        assert_eq!(stream_id.len(), 32);
+
+        let part1 = vec![0x41u8; 100_000];
+        let part2 = vec![0x42u8; 50_000];
+        stream_append_blocking(&entry, &part1).unwrap();
+        stream_append_blocking(&entry, &part2).unwrap();
+
+        let total = stream_finalize_blocking(entry).unwrap();
+        assert_eq!(total, 150_000);
+
+        let read_back = std::fs::read(&target).unwrap();
+        assert_eq!(read_back.len(), 150_000);
+        assert_eq!(&read_back[..100_000], &part1[..]);
+        assert_eq!(&read_back[100_000..], &part2[..]);
+
+        // 暂存文件已 rename 消失，无残留
+        let residue = std::fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".venc.tmp"));
+        assert!(!residue, "暂存文件残留");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_stream_abort_removes_temp_and_leaves_target_untouched() {
+        let temp_dir = std::env::temp_dir().join("verthys_test_stream_abort");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let target = temp_dir.join("out.venc");
+        let target_str = target.to_string_lossy().to_string();
+
+        let (_, entry) = stream_create_blocking(&target_str).unwrap();
+        stream_append_blocking(&entry, b"unfinished").unwrap();
+        stream_abort_blocking(entry).unwrap();
+
+        // 目标文件不存在（从未 rename），暂存已清理
+        assert!(!target.exists());
+        let residue = std::fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".venc.tmp"));
+        assert!(!residue, "中止后暂存残留");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_stream_finalize_replaces_existing_target() {
+        let temp_dir = std::env::temp_dir().join("verthys_test_stream_replace");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let target = temp_dir.join("out.venc");
+        std::fs::write(&target, b"old-version").unwrap();
+        let target_str = target.to_string_lossy().to_string();
+
+        let (_, entry) = stream_create_blocking(&target_str).unwrap();
+        stream_append_blocking(&entry, b"new-version").unwrap();
+        stream_finalize_blocking(entry).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new-version");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_stream_append_rejects_oversize_chunk_keeping_session_usable() {
+        let temp_dir = std::env::temp_dir().join("verthys_test_stream_oversize");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let target = temp_dir.join("out.venc");
+        let target_str = target.to_string_lossy().to_string();
+
+        let (_, entry) = stream_create_blocking(&target_str).unwrap();
+        let big = vec![0u8; WRITE_FILE_CHUNK_BYTES + 1];
+        let err = stream_append_blocking(&entry, &big).unwrap_err();
+        assert_eq!(err, ErrorCode::FileTooLarge.default_message().to_string());
+
+        // 超限拒绝后会话仍可用（不破坏状态）
+        stream_append_blocking(&entry, b"ok").unwrap();
+        stream_abort_blocking(entry).unwrap();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_stream_create_fails_on_fresh_temp_residue() {
+        let temp_dir = std::env::temp_dir().join("verthys_test_stream_fresh_residue");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let target = temp_dir.join("out.venc");
+        let target_str = target.to_string_lossy().to_string();
+
+        // 伪造未过期的暂存残留：按龄清理不会触碰，独占创建必须失败
+        std::fs::write(temp_dir.join("out.venc.tmp"), b"residue").unwrap();
+        let err = stream_create_blocking(&target_str).unwrap_err();
+        assert_eq!(
+            err,
+            ErrorCode::TemporaryFailure.default_message().to_string()
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_stream_create_rejects_invalid_paths() {
+        // 空串与相对路径必须在字符级校验层被拒绝
+        assert!(stream_create_blocking("").is_err());
+        assert!(stream_create_blocking("relative/out.venc").is_err());
+    }
+
+    #[test]
+    fn test_cleanup_stale_temps_preserves_fresh() {
+        let temp_dir = std::env::temp_dir().join("verthys_test_cleanup_fresh");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("a.venc.tmp"), b"x").unwrap();
+        cleanup_stale_stream_temps(&temp_dir);
+        assert!(temp_dir.join("a.venc.tmp").exists());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_generate_stream_id_format() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..500 {
+            let id = generate_stream_id();
+            assert_eq!(id.len(), 32);
+            assert!(id
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+            seen.insert(id);
+        }
+        assert_eq!(seen.len(), 500);
     }
 }

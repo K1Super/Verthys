@@ -188,7 +188,6 @@ struct VerifyGlobalKeyReq<'a> {
 pub async fn verthys_derive_global_key(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    security_state: State<'_, crate::security_commands::SecurityState>,
     password: String,
     bin_data_b64: String,
     bin_password: String,
@@ -204,7 +203,6 @@ pub async fn verthys_derive_global_key(
     let req_str = match precheck_derive_request(DerivePrecheckCtx {
         app: &app,
         state: &state,
-        security_state: &security_state,
         op: "derive_global_key",
         allowed_states: &[KeyLifecycleState::NoKey, KeyLifecycleState::Unlocked],
         password: &password,
@@ -235,7 +233,11 @@ pub async fn verthys_derive_global_key(
     drop(password);
 
     let resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
-        log::error!("[verthys_derive_global_key] 解析响应失败: {} | raw={}", e, crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"]));
+        log::error!(
+            "[verthys_derive_global_key] 解析响应失败: {} | raw={}",
+            e,
+            crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"])
+        );
         write_key_audit(
             &app,
             AuditEventType::KeyDerive,
@@ -270,7 +272,6 @@ pub async fn verthys_derive_global_key(
 struct DerivePrecheckCtx<'a> {
     app: &'a tauri::AppHandle,
     state: &'a AppState,
-    security_state: &'a crate::security_commands::SecurityState,
     op: &'static str,
     allowed_states: &'a [KeyLifecycleState],
     password: &'a Zeroizing<String>,
@@ -289,7 +290,6 @@ fn precheck_derive_request(ctx: DerivePrecheckCtx<'_>) -> Result<Zeroizing<Strin
     let DerivePrecheckCtx {
         app,
         state,
-        security_state,
         op,
         allowed_states,
         password,
@@ -298,15 +298,19 @@ fn precheck_derive_request(ctx: DerivePrecheckCtx<'_>) -> Result<Zeroizing<Strin
     } = ctx;
     // 1. 服务端强制熔断闸门：锁定/清空状态下拒绝一切口令类操作。
     //    派生失败本身不计数——NoKey 态是首次设置新秘密，无既有秘密可暴破。
-    use crate::security_commands::brute_force_bridge::{gate_check, UnlockGate};
-    match gate_check(app, security_state) {
+    //    经 service 层契约调用（实现由 security_commands 启动时注册）。
+    use crate::service::unlock_gate::{gate_check, UnlockGate};
+    match gate_check(app) {
         UnlockGate::Allowed => {}
         UnlockGate::Locked(secs) => {
             write_key_audit(
                 app,
                 AuditEventType::KeyDerive,
                 AuditResult::Denied,
-                Some(format!("BRUTE_FORCE_LOCKOUT: 界面锁定 {} 秒（服务端强制）", secs)),
+                Some(format!(
+                    "BRUTE_FORCE_LOCKOUT: 界面锁定 {} 秒（服务端强制）",
+                    secs
+                )),
             );
             return Err(format!("尝试次数过多，已锁定 {} 秒，请稍后再试", secs));
         }
@@ -345,15 +349,30 @@ fn precheck_derive_request(ctx: DerivePrecheckCtx<'_>) -> Result<Zeroizing<Strin
 
     // 3. 输入校验
     if let Err(e) = validate_password_length(password) {
-        write_key_audit(app, AuditEventType::KeyDerive, AuditResult::Denied, Some(e.clone()));
+        write_key_audit(
+            app,
+            AuditEventType::KeyDerive,
+            AuditResult::Denied,
+            Some(e.clone()),
+        );
         return Err(e);
     }
     if let Err(e) = validate_password_complexity(password) {
-        write_key_audit(app, AuditEventType::KeyDerive, AuditResult::Denied, Some(e.clone()));
+        write_key_audit(
+            app,
+            AuditEventType::KeyDerive,
+            AuditResult::Denied,
+            Some(e.clone()),
+        );
         return Err(e);
     }
     if let Err(e) = decode_and_validate_b64(bin_data_b64) {
-        write_key_audit(app, AuditEventType::KeyDerive, AuditResult::Denied, Some(e.clone()));
+        write_key_audit(
+            app,
+            AuditEventType::KeyDerive,
+            AuditResult::Denied,
+            Some(e.clone()),
+        );
         return Err(e);
     }
     if bin_password.is_empty() {
@@ -366,7 +385,12 @@ fn precheck_derive_request(ctx: DerivePrecheckCtx<'_>) -> Result<Zeroizing<Strin
         return Err("密钥文件密码不能为空".to_string());
     }
     if let Err(e) = validate_password_length(bin_password) {
-        write_key_audit(app, AuditEventType::KeyDerive, AuditResult::Denied, Some(e.clone()));
+        write_key_audit(
+            app,
+            AuditEventType::KeyDerive,
+            AuditResult::Denied,
+            Some(e.clone()),
+        );
         return Err(e);
     }
 
@@ -402,7 +426,6 @@ fn precheck_derive_request(ctx: DerivePrecheckCtx<'_>) -> Result<Zeroizing<Strin
 pub async fn verthys_derive_and_store_global_key(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    security_state: State<'_, crate::security_commands::SecurityState>,
     password: String,
     bin_data_b64: String,
     bin_password: String,
@@ -415,7 +438,6 @@ pub async fn verthys_derive_and_store_global_key(
     let req_str = match precheck_derive_request(DerivePrecheckCtx {
         app: &app,
         state: &state,
-        security_state: &security_state,
         op: "derive_and_store_global_key",
         allowed_states: &[KeyLifecycleState::NoKey],
         password: &password,
@@ -423,9 +445,7 @@ pub async fn verthys_derive_and_store_global_key(
         bin_password: &bin_password,
     }) {
         Ok(r) => r,
-        Err(msg) => {
-            return Ok(VerthysResponse::err("derive_and_store_global_key", &msg))
-        }
+        Err(msg) => return Ok(VerthysResponse::err("derive_and_store_global_key", &msg)),
     };
 
     let resp_json = state
@@ -495,7 +515,6 @@ pub async fn verthys_derive_and_store_global_key(
 pub async fn verthys_verify_global_key(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    security_state: State<'_, crate::security_commands::SecurityState>,
     password: String,
     bin_data_b64: String,
     bin_password: String,
@@ -506,10 +525,11 @@ pub async fn verthys_verify_global_key(
 
     // 服务端强制熔断闸门：锁定/清空状态下拒绝一切口令类操作（fail-closed）。
     // 与 unlock 共享同一守卫：两处口令入口的失败计数累加，成功任一即重置。
-    use crate::security_commands::brute_force_bridge::{
+    // 经 service 层契约调用（实现由 security_commands 启动时注册）。
+    use crate::service::unlock_gate::{
         gate_check, record_auth_failure, record_auth_success, UnlockGate,
     };
-    match gate_check(&app, &security_state) {
+    match gate_check(&app) {
         UnlockGate::Allowed => {}
         UnlockGate::Locked(secs) => {
             log::warn!(
@@ -520,7 +540,10 @@ pub async fn verthys_verify_global_key(
                 &app,
                 AuditEventType::KeyVerify,
                 AuditResult::Denied,
-                Some(format!("BRUTE_FORCE_LOCKOUT: 界面锁定 {} 秒（服务端强制）", secs)),
+                Some(format!(
+                    "BRUTE_FORCE_LOCKOUT: 界面锁定 {} 秒（服务端强制）",
+                    secs
+                )),
             );
             return Ok(VerthysResponse::err(
                 "verify_global_key",
@@ -579,10 +602,7 @@ pub async fn verthys_verify_global_key(
     match state.key_lifecycle.check_verify_allowed() {
         VerifyCheckResult::Allow => {}
         VerifyCheckResult::Cooldown(remaining) => {
-            log::warn!(
-                "[verthys_verify_global_key] 冷却中，剩余 {}s",
-                remaining
-            );
+            log::warn!("[verthys_verify_global_key] 冷却中，剩余 {}s", remaining);
             write_key_audit(
                 &app,
                 AuditEventType::KeyVerify,
@@ -631,7 +651,10 @@ pub async fn verthys_verify_global_key(
             AuditResult::Denied,
             Some("密钥文件密码不能为空".into()),
         );
-        return Ok(VerthysResponse::err("verify_global_key", "密钥文件密码不能为空"));
+        return Ok(VerthysResponse::err(
+            "verify_global_key",
+            "密钥文件密码不能为空",
+        ));
     }
     if let Err(e) = validate_password_length(&bin_password) {
         log::warn!("[verthys_verify_global_key] bin_password 长度校验失败");
@@ -658,22 +681,25 @@ pub async fn verthys_verify_global_key(
     let bin_password = Zeroizing::new(bin_password);
     let record_b64 = Zeroizing::new(record_b64);
 
-    let req_str = Zeroizing::new(serde_json::to_string(&VerifyGlobalKeyReq {
-        op: "verify_global_key",
-        password: &password,
-        bin_data: &bin_data_b64,
-        bin_password: &bin_password,
-        data: &record_b64,
-    }).map_err(|e| {
-        log::error!("[verthys_verify_global_key] 请求序列化失败: {}", e);
-        write_key_audit(
-            &app,
-            AuditEventType::KeyVerify,
-            AuditResult::Failure,
-            Some(format!("请求序列化失败: {}", e)),
-        );
-        "验证密钥失败".to_string()
-    })?);
+    let req_str = Zeroizing::new(
+        serde_json::to_string(&VerifyGlobalKeyReq {
+            op: "verify_global_key",
+            password: &password,
+            bin_data: &bin_data_b64,
+            bin_password: &bin_password,
+            data: &record_b64,
+        })
+        .map_err(|e| {
+            log::error!("[verthys_verify_global_key] 请求序列化失败: {}", e);
+            write_key_audit(
+                &app,
+                AuditEventType::KeyVerify,
+                AuditResult::Failure,
+                Some(format!("请求序列化失败: {}", e)),
+            );
+            "验证密钥失败".to_string()
+        })?,
+    );
 
     let resp_json = state
         .send_with_timeout(req_str.as_str(), DERIVE_VERIFY_TIMEOUT)
@@ -696,7 +722,11 @@ pub async fn verthys_verify_global_key(
     drop(password);
 
     let resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
-        log::error!("[verthys_verify_global_key] 解析响应失败: {} | raw={}", e, crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"]));
+        log::error!(
+            "[verthys_verify_global_key] 解析响应失败: {} | raw={}",
+            e,
+            crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"])
+        );
         write_key_audit(
             &app,
             AuditEventType::KeyVerify,
@@ -709,7 +739,7 @@ pub async fn verthys_verify_global_key(
     if resp.ok {
         // 口令验证成功即重置熔断计数：无论后续状态转移是否成功，
         // 正确口令本身已证明非暴破会话。
-        record_auth_success(&app, &security_state);
+        record_auth_success(&app);
         if let Err(e) = state.key_lifecycle.record_verify_success() {
             log::error!("[verthys_verify_global_key] 状态转移失败: {}", e);
             write_key_audit(
@@ -725,8 +755,8 @@ pub async fn verthys_verify_global_key(
     } else {
         // 服务端权威计数：仅认证域错误码计一次失败。
         // 通信层失败与功能性状态码不构成暴破证据，不计数。
-        if resp.error.as_deref() == Some(crate::security_commands::brute_force_bridge::AUTH_DOMAIN_ERROR) {
-            record_auth_failure(&app, &security_state);
+        if resp.error.as_deref() == Some(crate::service::unlock_gate::AUTH_DOMAIN_ERROR) {
+            record_auth_failure(&app);
         }
         let result = state.key_lifecycle.record_verify_failure();
         match result {
@@ -794,7 +824,11 @@ pub async fn verthys_clear_global_key(
         })?;
 
     let resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
-        log::error!("[verthys_clear_global_key] 解析响应失败: {} | raw={}", e, crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"]));
+        log::error!(
+            "[verthys_clear_global_key] 解析响应失败: {} | raw={}",
+            e,
+            crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"])
+        );
         write_key_audit(
             &app,
             AuditEventType::KeyClear,
@@ -963,10 +997,7 @@ mod tests {
                 lifecycle.record_verify_failure(),
                 crate::state::VerifyAttemptResult::Failure
             );
-            assert_eq!(
-                lifecycle.check_verify_allowed(),
-                VerifyCheckResult::Allow
-            );
+            assert_eq!(lifecycle.check_verify_allowed(), VerifyCheckResult::Allow);
         }
 
         let result = lifecycle.record_verify_failure();

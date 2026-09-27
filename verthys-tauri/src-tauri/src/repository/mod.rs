@@ -9,6 +9,11 @@
  *
  * 依赖方向：repository → util（单向，禁止引用 service / controller / entry）
  */
+/// 照片导入外置块台账（ChunkLedger，孤儿块 GC 判定依据）
+///
+/// 持久化「块记录 ID → 拥有者 meta ID」映射，支撑崩溃后未引用块回收。
+/// 只存纯数字 ID 映射，只由导入单写者线程读写，GC 命令在无活跃会话时接触。
+pub mod verthys_chunks;
 pub mod verthys_repository;
 pub mod verthys_state;
 /// 照片导入 Write-Ahead Log（断点续传持久层）

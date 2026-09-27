@@ -25,6 +25,7 @@ EXPORTS
     Verthys_Import
     Verthys_ChangePassword
     Verthys_ScanOpen
+    Verthys_ScanOpenEx
     Verthys_ScanFetch
     Verthys_ScanRecordFree
     Verthys_ScanClose
@@ -39,3 +40,4 @@ EXPORTS
     Verthys_VerifyIntegrity
     Verthys_GetDiagnostics
     Verthys_GetSecurityStatus
+    Verthys_VerifyPersist

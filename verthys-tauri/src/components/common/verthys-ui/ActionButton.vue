@@ -2,7 +2,7 @@
   ActionButton.vue — 通用可复用按钮组件
   复用全局 .btn 基础样式（与相册导出按钮一致），简洁不带渐变
   变体：default（默认）/ danger（红色）
-  尺寸：sm（紧凑，复用 .import-btn 的 padding/font-size）
+  尺寸：sm（紧凑，与相册顶部图标按钮同高 32px）
 -->
 <template>
   <button
@@ -40,7 +40,7 @@ defineEmits<{ (e: "click", ev: MouseEvent): void }>();
 </script>
 
 <style scoped>
-/* 布局：与相册 .import-btn / .export-top-btn 一致 */
+/* 布局：紧凑尺寸，与相册顶部图标按钮同高 32px */
 .action-btn {
   display: inline-flex;
   align-items: center;

@@ -263,7 +263,9 @@ pub struct AuditLogEntry {
 /// 失败：I/O 错误或序列化失败返回 Err
 pub fn append_audit(log_path: &Path, hmac_key: &[u8], event: AuditEvent) -> Result<(), String> {
     // 1. 读取最后一条记录的 HMAC（链式前驱）
-    let prev_hmac = read_last_hmac(log_path).unwrap_or_else(|| "0000000000000000000000000000000000000000000000000000000000000000".to_string());
+    let prev_hmac = read_last_hmac(log_path).unwrap_or_else(|| {
+        "0000000000000000000000000000000000000000000000000000000000000000".to_string()
+    });
 
     // 2. 序列化事件
     let event_json = serde_json::to_string(&event)
@@ -298,8 +300,7 @@ pub fn append_audit(log_path: &Path, hmac_key: &[u8], event: AuditEvent) -> Resu
         .open(log_path)
         .map_err(|e| format!("open audit log file failed: {}", e))?;
 
-    writeln!(file, "{}", entry_json)
-        .map_err(|e| format!("write audit log entry failed: {}", e))?;
+    writeln!(file, "{}", entry_json).map_err(|e| format!("write audit log entry failed: {}", e))?;
 
     Ok(())
 }
@@ -339,7 +340,8 @@ pub fn verify_audit_chain(log_path: &Path, hmac_key: &[u8]) -> Result<(), usize>
     }
 
     let content = std::fs::read_to_string(log_path).map_err(|_| 0usize)?;
-    let mut prev_hmac = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+    let mut prev_hmac =
+        "0000000000000000000000000000000000000000000000000000000000000000".to_string();
 
     for (idx, line) in content.lines().filter(|l| !l.trim().is_empty()).enumerate() {
         let line_no = idx + 1;
@@ -428,10 +430,7 @@ mod tests {
         let content = std::fs::read_to_string(&log_path).unwrap();
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
         let tampered_line = lines[1].replace("derive #1", "derive #TAMPERED");
-        let tampered_content = format!(
-            "{}\n{}\n{}\n",
-            lines[0], tampered_line, lines[2]
-        );
+        let tampered_content = format!("{}\n{}\n{}\n", lines[0], tampered_line, lines[2]);
         std::fs::write(&log_path, tampered_content).unwrap();
 
         // 篡改后应校验失败

@@ -163,7 +163,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3"/></svg>
           </span>
           <span class="section-title">密钥生成工具</span>
-          <button class="keygen-export-icon" @click="exportBin" :disabled="!keygenBytes || !keygenRaw.length" v-tip="'导出密钥'">
+          <button class="gen-btn" @click="exportBin" :disabled="!keygenBytes || !keygenRaw.length" v-tip="'导出密钥'" aria-label="导出密钥">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           </button>
         </div>
@@ -405,14 +405,14 @@ const keygenHashShort = computed(() => {
   return Array.from(h.slice(0, 6)).map(b => b.toString(16).padStart(2, "0")).join("");
 });
 
-/** 生成14位无规律随机文件名（大小写字母混排，每次不同，不暴露任何信息） */
+/** 生成 verthys_ 前缀的 12 位小写字母数字随机文件名（无大写字母，每次不同，不暴露任何信息） */
 const randomKeyFileName = (): string => {
-  const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  const bytes = new Uint8Array(14);
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const bytes = new Uint8Array(12);
   crypto.getRandomValues(bytes);
   let s = "";
-  for (let i = 0; i < 14; i++) s += alphabet[bytes[i] % alphabet.length];
-  return s + ".bin";
+  for (let i = 0; i < 12; i++) s += alphabet[bytes[i] % alphabet.length];
+  return `verthys_${s}.bin`;
 };
 
 /** 导出 .bin 文件 */
@@ -557,7 +557,7 @@ watch(keygenBytes, () => generateKey());
 
 /* ===== 生成器 ===== */
 .gen-display { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-glass); border-radius: var(--radius); margin-bottom: 14px; cursor: pointer; transition: all 0.3s; }
-.gen-display:hover { border-color: var(--border-hover); box-shadow: 0 0 16px rgba(0,212,255,0.08); }
+.gen-display:hover { border-color: var(--border-hover); }
 .gen-pwd { font-family: var(--font-mono); font-size: 16px; letter-spacing: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
   background: linear-gradient(90deg, #00d4ff, #b46cff, #ff6eb4, #00d4ff);
   background-size: 200% auto;
@@ -567,7 +567,7 @@ watch(keygenBytes, () => generateKey());
 }
 @keyframes gradient-flow { to { background-position: 200% center; } }
 .gen-actions { display: flex; gap: 6px; flex-shrink: 0; }
-/* .gen-btn 样式已提取为全局类（App.vue），此处复用全局定义 */
+/* .gen-btn 图标按钮统一样式已提取为全局复用类，本组件三个图标按钮（重新生成/复制/导出密钥）直接复用，不再定义专属样式 */
 
 .gen-controls { display: flex; gap: 20px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .ctrl-length { flex: 1; min-width: 140px; }
@@ -689,7 +689,7 @@ watch(keygenBytes, () => generateKey());
 
 /* ===== 密钥生成工具 ===== */
 .keygen-display { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-glass); border-radius: var(--radius); margin-bottom: 12px; cursor: pointer; transition: all 0.3s; }
-.keygen-display:hover { border-color: var(--border-hover); box-shadow: 0 0 16px rgba(139, 92, 246, 0.08); }
+.keygen-display:hover { border-color: var(--border-hover); }
 .keygen-code { font-family: var(--font-mono); font-size: 12px; color: #b46cff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; letter-spacing: 1px;
   background: linear-gradient(90deg, #b46cff, #00d4ff, #b46cff);
   background-size: 200% auto;
@@ -704,40 +704,11 @@ watch(keygenBytes, () => generateKey());
 .keygen-presets { display: flex; gap: 6px; }
 .preset-btn { flex: 1; padding: 7px 0; font-size: 12px; border: 1px solid var(--border-glass); border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.2s; font-family: var(--font); font-weight: 600; }
 .preset-btn:hover { color: var(--text-primary); border-color: var(--border-hover); }
-.preset-btn.active { color: var(--accent); border-color: rgba(0, 212, 255, 0.3); background: rgba(0, 212, 255, 0.08); box-shadow: 0 0 8px rgba(0, 212, 255, 0.1); }
+.preset-btn.active { color: var(--accent); border-color: rgba(0, 212, 255, 0.3); background: rgba(0, 212, 255, 0.08); }
 .keygen-format-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .format-label { font-size: 11px; color: var(--text-secondary); letter-spacing: 1px; }
 
 .keygen-export-row { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: auto; padding-top: 10px; border-top: 1px dashed var(--border-glass); }
-/* 右上角导出图标按钮 */
-.keygen-export-icon {
-  display: flex; align-items: center; justify-content: center;
-  width: 26px; height: 26px; padding: 0;
-  background: rgba(139, 92, 246, 0.08);
-  border: 1px solid rgba(139, 92, 246, 0.22);
-  border-radius: var(--radius-sm);
-  color: #b46cff;
-  cursor: pointer;
-  transition: all 0.3s var(--ease);
-  flex-shrink: 0;
-  position: relative;
-}
-.keygen-export-icon::before {
-  content: ''; position: absolute; inset: -1px; border-radius: inherit;
-  background: linear-gradient(135deg, rgba(139, 92, 246, 0.35), rgba(0, 212, 255, 0.35));
-  opacity: 0; transition: opacity 0.3s var(--ease); z-index: -1;
-}
-.keygen-export-icon:hover:not(:disabled) {
-  border-color: #b46cff;
-  color: #fff;
-  transform: translateY(-1px);
-  box-shadow: 0 0 14px rgba(139, 92, 246, 0.35), 0 0 4px rgba(0, 212, 255, 0.2);
-}
-.keygen-export-icon:hover:not(:disabled)::before { opacity: 1; }
-.keygen-export-icon:active:not(:disabled) { transform: translateY(0); }
-.keygen-export-icon:disabled { opacity: 0.3; cursor: not-allowed; }
-.keygen-export-icon svg { width: 13px; height: 13px; transition: transform 0.3s var(--ease); }
-.keygen-export-icon:hover:not(:disabled) svg { transform: translateY(1px); }
 .keygen-hint { font-size: 10px; color: var(--text-muted); font-family: var(--font); text-align: center; }
 
 /* 复制提示过渡（复用全局 .clip-toast） */

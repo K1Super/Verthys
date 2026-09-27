@@ -271,12 +271,13 @@ VerthysResult verthys_rekey_auto_rotate(VerthysContextV3 *ctx3, int force,
                               new_wc, (uint32_t)sizeof(new_wc));
     if (r != VERTHYS_OK) goto fail_ctx;
 
-    /* 新句柄导入模块本地上下文（km 记账由 rotate_abc 移交时补齐） */
-    r = verthys_cng_aead_import_key(&new_a, ka_imp, id_a);
+    /* 新句柄导入模块本地上下文（km 记账由 rotate_abc 移交时补齐）。
+     * 三把均为本轮新随机派生的密钥，nonce 空间从 0 起步合法 */
+    r = verthys_cng_aead_import_key(&new_a, ka_imp, id_a, 0);
     if (r != VERTHYS_OK) goto fail_ctx;
-    r = verthys_cng_aead_import_key(&new_b, kb_imp, id_b);
+    r = verthys_cng_aead_import_key(&new_b, kb_imp, id_b, 0);
     if (r != VERTHYS_OK) goto fail_ctx;
-    r = verthys_cng_aead_import_key(&new_c, kc_imp, id_c);
+    r = verthys_cng_aead_import_key(&new_c, kc_imp, id_c, 0);
     if (r != VERTHYS_OK) goto fail_ctx;
 
     /* ---- 2. 分区密钥内核态重包装（旧 key_a 解密 → 新 key_a' 加密，

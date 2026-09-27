@@ -23,7 +23,7 @@
     <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">事务&nbsp;&nbsp;<span style="color:#A8B2C0">6 阶段</span></td>
     <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">密钥&nbsp;&nbsp;<span style="color:#A8B2C0">4 级</span></td>
     <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">轮换&nbsp;&nbsp;<span style="color:#A8B2C0">90d / 10k ops</span></td>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">产品&nbsp;&nbsp;<span style="color:#A8B2C0">2.6.1</span></td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">产品&nbsp;&nbsp;<span style="color:#A8B2C0">3.3.0</span></td>
   </tr>
 </table>
 
@@ -307,7 +307,7 @@ ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
 
 <ul style="margin:0 0 4px;padding-left:22px">
   <li style="color:#A8B2C0;margin:6px 0">品牌名仅 <b style="color:#E7EBF0">Verthys</b>；容器扩展名 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">.verthys</code>；事件 scheme <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">verthys://</code>；环境变量前缀 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">VERTHYS_</code>；核心 DLL <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">verthys.dll</code>；公开 API 前缀 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">Verthys_</code>。</li>
-  <li style="color:#A8B2C0;margin:6px 0">产品版本 <b style="color:#E7EBF0">2.6.1</b>，在根 CMakeLists.txt、package.json、Cargo.toml 三处一致。</li>
+  <li style="color:#A8B2C0;margin:6px 0">产品版本 <b style="color:#E7EBF0">3.3.0</b>，唯一手改点为根 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">VERSION</code> 文件，其余载体由 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">ci/sync_version.ps1</code> 自动同步，CI 门禁校验漂移。</li>
 </ul>
 
 <div style="border-top:1px solid #1E2733;margin-top:44px;padding-top:14px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;color:#5D6B80;letter-spacing:1px">

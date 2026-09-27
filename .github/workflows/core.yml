@@ -7,9 +7,9 @@ name: core-build-test
 
 on:
   push:
-    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml", "verthys-tauri/src-tauri/src/**", "verthys-tauri/verthys-worker/src/**"]
+    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "build_dev.ps1", "build_production.ps1", ".clang-tidy", "scripts/**", "ci/**", ".github/workflows/core.yml", "verthys-tauri/src-tauri/src/**", "verthys-tauri/verthys-worker/src/**", "VERSION"]
   pull_request:
-    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "scripts/build_core.*", "ci/**", ".github/workflows/core.yml", "verthys-tauri/src-tauri/src/**", "verthys-tauri/verthys-worker/src/**"]
+    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "build_dev.ps1", "build_production.ps1", ".clang-tidy", "scripts/**", "ci/**", ".github/workflows/core.yml", "verthys-tauri/src-tauri/src/**", "verthys-tauri/verthys-worker/src/**", "VERSION"]
 
 jobs:
   ast-redline:
@@ -18,6 +18,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Version consistency gate (VERSION single source)
+        shell: pwsh
+        run: |
+          & ".\ci\sync_version.ps1" -CheckOnly
+          if ($LASTEXITCODE -ne 0) { throw "version drift: edit root VERSION then run ci\sync_version.ps1" }
 
       - name: Setup Rust (pinned by rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
@@ -92,10 +98,7 @@ jobs:
           cmake --build build_ci --config Debug
 
       - name: Run C tests
-        run: |
-          & ".\build_ci\core\verthys_tests.exe"
-          if ($LASTEXITCODE -ne 0) { throw "C tests failed" }
-        shell: pwsh
+        run: ctest --test-dir build_ci -C Debug --output-on-failure --no-tests=error
 
       - name: Build (Release + .vsec integrity baseline injection)
         run: |
@@ -111,11 +114,13 @@ jobs:
           $out = & $dumpbin.FullName -exports ".\build\core\Release\verthys.dll" 2>&1 | Out-String
           $actual = [regex]::Matches($out, 'Verthys_[A-Za-z0-9]+') |
                     ForEach-Object { $_.Value } | Sort-Object -Unique
-          # dumpbin 输出中正则会截断包含数字的符号名，先对已知数字后缀做还原映射
-          $actual = $actual | ForEach-Object {
-              if ($_ -eq 'Verthys_MigrateV') { 'Verthys_MigrateV1ToV2' } else { $_ }
-          }
-          $baseline = Get-Content ".\ci\export_baseline.txt" | Where-Object { $_.Trim() -ne '' } | Sort-Object -Unique
+          # 白名单直接读 core/verthys.def 的 EXPORTS 节（导出面唯一
+          # 权威源）；无任何符号名手工映射，规避 dumpbin 正则在
+          # 数字后缀符号上的截断假阳性
+          $baseline = Get-Content ".\core\verthys.def" |
+                      Where-Object { $_ -match '^\s+Verthys_' } |
+                      ForEach-Object { ($_ -split ';')[0].Trim() } |
+                      Where-Object { $_ -ne '' } | Sort-Object -Unique
           $diff = Compare-Object @($baseline) @($actual)
           if ($diff) {
               $diff | ForEach-Object { Write-Host "EXPORT-DIFF: $($_.SideIndicator) $($_.InputObject)" }

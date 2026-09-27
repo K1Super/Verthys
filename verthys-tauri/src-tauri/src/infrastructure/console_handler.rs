@@ -31,14 +31,17 @@ pub fn register_shutdown_token(token: CancellationToken) -> Result<(), String> {
         /// 约束：严格遵循系统调用约定，上下文内仅执行令牌取消操作，规避系统中断环境下各类未定义行为
         unsafe extern "system" fn handler_proc(ctrl_type: u32) -> windows::Win32::Foundation::BOOL {
             use windows::Win32::System::Console::{
-                CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT,
-                CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+                CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT,
+                CTRL_SHUTDOWN_EVENT,
             };
 
             let should_cancel = matches!(
                 ctrl_type,
-                CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT
-                    | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT
+                CTRL_C_EVENT
+                    | CTRL_BREAK_EVENT
+                    | CTRL_CLOSE_EVENT
+                    | CTRL_LOGOFF_EVENT
+                    | CTRL_SHUTDOWN_EVENT
             );
 
             if should_cancel {
@@ -52,9 +55,7 @@ pub fn register_shutdown_token(token: CancellationToken) -> Result<(), String> {
             windows::Win32::Foundation::BOOL(0)
         }
 
-        let result = unsafe {
-            SetConsoleCtrlHandler(Some(handler_proc), true)
-        };
+        let result = unsafe { SetConsoleCtrlHandler(Some(handler_proc), true) };
 
         result.map_err(|e| format!("SetConsoleCtrlHandler 注册失败: {}", e))?;
     }

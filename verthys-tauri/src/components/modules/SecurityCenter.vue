@@ -504,7 +504,6 @@ onMounted(() => {
   if (isTauri && !verthysReadyRef.value) {
     void checkInitStatus()
       .then((result) => {
-        console.log("[onMounted] checkInitStatus:", result.status, result.verthys_path);
         if (result.status === "ready" && result.verthys_path) {
           // 自动填充上次使用的 verthys 路径
           verthysPath.value = result.verthys_path;

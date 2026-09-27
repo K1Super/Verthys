@@ -62,7 +62,7 @@
  *      自动覆盖，杜绝硬编码列表遗漏；逐键置 false 保持响应式更新）
  */
 import type { ModuleId, ScannedRecord } from "../../types/key_manager";
-import type { SummaryRecord } from "../../lib/verthys";
+import type { ScanProjectOptions, SummaryRecord } from "../../lib/verthys";
 import { AsyncMutex } from "../concurrency/async-mutex";
 import { LRUCache } from "../concurrency/lru-cache";
 import { TypedEventEmitter } from "../concurrency/typed-event-emitter";
@@ -74,8 +74,10 @@ import { MODULE_IDS } from "../../constants/key_manager_const";
 import { setSnapshotProvider } from "../composition/verthys-flush";
 // 前端 IPC 优先级门控：关键 IPC 调用标记前端活跃，后台任务据此让出 worker 通道
 //   （该模块零导入，不引入循环依赖）
-import { markFrontendIpcActive } from "../../core/frontend-ipc-priority";
+import { markFrontendIpcActive, yieldIfFrontendBusy } from "../../core/frontend-ipc-priority";
 import { createLogger } from "../../utils/logger";
+// 跨层预算常量：缓存管控阈值与后端索引投影内联阈值成对约束（由生成器断言把守）
+import { DATAB64_CACHE_MAX_BYTES } from "../../constants/photo_budget.generated";
 
 const log = createLogger("verthys-cache-domain");
 
@@ -88,10 +90,14 @@ const log = createLogger("verthys-cache-domain");
  * 由绑定层注入真实 IPC 适配器，测试可注入 mock）。
  */
 export interface VerthysCacheApi {
-  /** 打开记录扫描游标，返回首批记录（v2 格式；v1 抛异常触发回退） */
-  scanOpen(startId: number, batchSize: number): Promise<{ records: ScannedRecord[]; exhausted: boolean }>;
+  /** 打开记录扫描游标，返回首批记录（v2 格式；v1 抛异常触发回退）
+   *
+   * options 为投影选项：记录扫描只需索引与小体积数据，传 INDEX 投影 +
+   * 缓存管控阈值即可让后端跳过 MB 级记录的解密与搬运（含大记录的数据集
+   * 不再因单批超容而整批失败）。 */
+  scanOpen(startId: number, batchSize: number, options?: ScanProjectOptions): Promise<{ records: ScannedRecord[]; exhausted: boolean; failedIds: number[] }>;
   /** 拉取下一批记录（双缓冲流水线切换） */
-  scanNext(batchSize: number): Promise<{ records: ScannedRecord[]; exhausted: boolean }>;
+  scanNext(batchSize: number): Promise<{ records: ScannedRecord[]; exhausted: boolean; failedIds: number[] }>;
   /** 关闭记录扫描游标（释放共享内存 + C 游标 + 预取任务） */
   scanClose(): Promise<boolean>;
   /** 批量枚举记录（单次 IPC，v1 内存路径回退用） */
@@ -163,14 +169,28 @@ interface ScanToken {
   cancelled: boolean;
 }
 
+/**
+ * 记录扫描进度快照（批次粒度上报，供上层把扫描推进接到进度呈现）。
+ *
+ * 数值全部为可验证的真实计数：cached 为缓存当前条数（含本次合并结果），
+ * scanned 为本次扫描已读取条数（含损坏条目），failed 为本次扫描发现的
+ * 不可读条目数。上层以"全库条数"为分母即可得到真实完成度。
+ */
+export interface ScanProgress {
+  /** 缓存中当前记录条数（本次扫描合并后） */
+  cached: number;
+  /** 本次扫描已读取条数（含损坏条目） */
+  scanned: number;
+  /** 本次扫描发现的不可读条目数 */
+  failed: number;
+}
+
 /* ------------------------------------------------------------------ *
  * 常量（与旧版一致）                                                  *
  * ------------------------------------------------------------------ */
 
 /** 记录扫描缓存 LRU 容量（超限移除最久未使用记录，防内存溢出） */
 const RECORD_CACHE_LRU_THRESHOLD = 5000;
-/** 大体积 dataB64 管控阈值：超出仅缓存 id/type/name，dataB64 置空 */
-const DATAB64_CACHE_MAX_BYTES = 64 * 1024;
 /** 全量记录缓存 LRU 容量（50 条） */
 const FULL_RECORD_CACHE_CAPACITY = 50;
 /** 扫描批大小（每批 200 条，渐进式渲染） */
@@ -190,6 +210,13 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   private moduleKeyTimers = new Map<ModuleId, ReturnType<typeof setTimeout>>();
   /** 记录扫描缓存（LRU-5000，淘汰时同步移除类型索引） */
   private recordScanCache: LRUCache<number, ScannedRecord>;
+  /**
+   * 记录扫描期发现的损坏条目 ID（后端按 lid 记账的解密失败/索引不一致）。
+   *
+   * 这些条目数据不可读，不进入扫描缓存；此处留档供完整性巡检与诊断使用，
+   * 使"损坏"与"不存在"在前端可区分。仅在全量清除缓存时重置。
+   */
+  private scanFailedIds = new Set<number>();
   /** 摘要缓存（第一层：常驻内存，永久存在，无 LRU 淘汰） */
   private summaryCache = new Map<number, SummaryRecord>();
   /** 全量记录缓存（第二层：LRU-50，永不截断 dataB64） */
@@ -436,15 +463,17 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    *   - 仅设标志、不清空 activeScanToken/scanVerthysPath 引用——状态引用
    *     统一由 runRecordScan 的 finally 按属主关系收尾，全路径无陈旧残留
    */
-  private invalidateScanIfCurrent(token: ScanToken): void {
-    if (this.activeScanToken === token) {
+  private invalidateScanIfCurrent(token: ScanToken | null): void {
+    // token 为 null 表示当前无活动扫描（空槽场景）：显式排除，
+    // 否则 activeScanToken 同为 null 时会误入分支并对 null 解引用。
+    if (token !== null && this.activeScanToken === token) {
       token.cancelled = true;
     }
   }
 
   /** 属主保护的摘要扫描自检失效（语义同 invalidateScanIfCurrent） */
-  private invalidateSummaryScanIfCurrent(token: ScanToken): void {
-    if (this.activeSummaryScanToken === token) {
+  private invalidateSummaryScanIfCurrent(token: ScanToken | null): void {
+    if (token !== null && this.activeSummaryScanToken === token) {
       token.cancelled = true;
     }
   }
@@ -456,11 +485,15 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 并发安全：scanMutex 保证检查-登记原子性；多个模块同时调用时只执行一次扫描
    * （复用同一 Promise）。进行中的扫描经 scanInProgress 暴露给并发调用方。
    *
+   * @param onProgress 批次粒度进度回调（可选）。仅在本次调用真正发起扫描时
+   *   被注册；复用进行中扫描的场景拿不到回调（上层以阶段文案兜底，
+   *   不伪造完成度）。
+   *
    * 回退策略：scan_open 依赖 v2 B+ 树游标。.verthys 为 v1 格式时
    *   Verthys_ScanOpen 返回 VERTHYS_ERR_INVALID，回退 verthysEnumerateRecords
    *   （单次 IPC，v1 内存路径），再失败回退 verthysEnumerateRecordsStream。
    */
-  async ensureRecordScan(): Promise<void> {
+  async ensureRecordScan(onProgress?: (progress: ScanProgress) => void): Promise<void> {
     // 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
     markFrontendIpcActive();
     const release = await this.scanMutex.acquire();
@@ -469,7 +502,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       // 已有扫描在进行中 → 复用同一 Promise（避免并发重复扫描）
       if (this.scanInProgress) return this.scanInProgress;
 
-      const scanPromise = this.runRecordScan();
+      const scanPromise = this.runRecordScan(onProgress);
       // 修复：finally 无条件清空，保证扫描结束后能重新触发
       wrapped = scanPromise.finally(() => {
         this.scanInProgress = null;
@@ -481,19 +514,54 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     return wrapped;
   }
 
+  /**
+   * 请求取消进行中的记录扫描（协作式：在批次边界生效）。
+   *
+   * 已合并入缓存的批次保留（增量扫描语义：下次扫描自 maxScannedId+1 继续，
+   * 取消不会造成重复搬运）；游标关闭由 runRecordScan 的 finally 按属主关系
+   * 完成，此处只置取消标志，不动状态引用（避免误杀后继扫描）。
+   * 无进行中扫描时为 no-op。
+   */
+  cancelRecordScan(): void {
+    this.invalidateScanIfCurrent(this.activeScanToken);
+  }
+
+  /** 请求取消进行中的摘要扫描（语义同 cancelRecordScan，摘要域独立） */
+  cancelSummaryScan(): void {
+    this.invalidateSummaryScanIfCurrent(this.activeSummaryScanToken);
+  }
+
   /** 实际执行记录扫描（令牌校验 + 路径校验 + 逐批合并） */
-  private async runRecordScan(): Promise<void> {
+  private async runRecordScan(onProgress?: (progress: ScanProgress) => void): Promise<void> {
     const token = this.createScanToken();
     this.activeScanToken = token;
     this.scanVerthysPath = this.getCurrentVerthysPath();
     if (!this.scanVerthysPath) return;
 
     const startId = this.maxScannedId > 0 ? this.maxScannedId + 1 : 0;
+    // 本次扫描读取条数（含损坏条目）：与缓存条数共同构成真实完成度
+    let scanned = 0;
+    let failed = 0;
+    const report = (): void => {
+      if (onProgress) {
+        onProgress({ cached: this.recordScanCache.size, scanned, failed });
+      }
+    };
 
     try {
       // 优先使用游标批量扫描（v2 格式，双缓冲流水线预取 + 共享内存零拷贝）
-      const first = await this.verthysApi.scanOpen(startId, SCAN_BATCH_SIZE);
+      // 投影：本缓存只保留"索引 + 不超过管控阈值的数据"，故请求索引投影并
+      //   以缓存管控阈值作为内联阈值——超过阈值的记录（MB 级分块等）由后端
+      //   跳过解密与搬运，含大记录的库也能完整扫描（不再整批超容失败）。
+      const first = await this.verthysApi.scanOpen(startId, SCAN_BATCH_SIZE, {
+        project: "index",
+        inlineMaxBytes: DATAB64_CACHE_MAX_BYTES,
+      });
+      this.recordScanFailedIds(first.failedIds, token);
       this.mergeScanBatch(first.records, token);
+      scanned += first.records.length + first.failedIds.length;
+      failed += first.failedIds.length;
+      report();
 
       // 后续批次（双缓冲流水线：A 区消费时 B 区已预取就绪）
       let exhausted = first.exhausted;
@@ -503,12 +571,19 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
           return;
         }
         const next = await this.verthysApi.scanNext(SCAN_BATCH_SIZE);
+        this.recordScanFailedIds(next.failedIds, token);
         this.mergeScanBatch(next.records, token);
+        scanned += next.records.length + next.failedIds.length;
+        failed += next.failedIds.length;
+        report();
         exhausted = next.exhausted;
       }
     } catch {
       // 回退：v1 格式不支持游标扫描（Verthys_ScanOpen 返回 VERTHYS_ERR_INVALID）
-      await this.runRecordScanFallback(token, startId);
+      await this.runRecordScanFallback(token, startId, (batchCount) => {
+        scanned += batchCount;
+        report();
+      });
     } finally {
       // 评审 #3/#5 落实（属主保护收尾）：
       //   - activeScanToken === token：游标所有权仍在本扫描（正常完成，或
@@ -533,31 +608,29 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   }
 
   /**
-   * 回退路径：游标扫描失败时使用 verthysEnumerateRecords（单次 IPC，
-   * v1 内存路径），再失败回退 verthysEnumerateRecordsStream（逐批 Channel）。
-   * 同样全程校验令牌与路径。
+   * 回退路径：游标扫描失败时使用流式枚举（逐批 Channel 推送，单批有界）。
+   *
+   * Why 不再先试一次性全量枚举：单次枚举把 startId 起的全部记录塞进一行 JSON，
+   * 照片等 MB 级记录会让响应行越过 worker 单行上限并导致子进程被判死；
+   * 流式枚举按批拉取，单批载荷可控，v1/v2 容器走同一 op，能力不缺失。
+   *
+   * @param onBatch 每批合并后回调本批条数（供上层推进真实进度）
    */
-  private async runRecordScanFallback(token: ScanToken, startId: number): Promise<void> {
+  private async runRecordScanFallback(
+    token: ScanToken,
+    startId: number,
+    onBatch?: (batchCount: number) => void,
+  ): Promise<void> {
     if (!this.isScanTokenValid(token) || this.isPathChanged(this.scanVerthysPath)) {
       this.invalidateScanIfCurrent(token);
       return;
     }
     const fallbackStart = startId > 0 ? startId : 1;
-    try {
-      // 单次 IPC，v1 格式下从 unlock 时已解密内存读取（v1 路径 1-3s）
-      const allRecords = await this.verthysApi.enumerateRecords(fallbackStart);
-      this.mergeScanBatch(allRecords, token);
-    } catch {
-      // verthysEnumerateRecords 也失败（worker 异常）→ 最后兜底：流式枚举
-      if (!this.isScanTokenValid(token) || this.isPathChanged(this.scanVerthysPath)) {
-        this.invalidateScanIfCurrent(token);
-        return;
-      }
-      await this.verthysApi.enumerateRecordsStream(fallbackStart, SCAN_BATCH_SIZE, (batch) => {
-        // Channel 回调中再次检查（扫描期间若 verthys 已切换或锁定 → 丢弃结果）
-        this.mergeScanBatch(batch.records, token);
-      });
-    }
+    await this.verthysApi.enumerateRecordsStream(fallbackStart, SCAN_BATCH_SIZE, (batch) => {
+      // Channel 回调中再次检查（扫描期间若 verthys 已切换或锁定 → 丢弃结果）
+      this.mergeScanBatch(batch.records, token);
+      if (onBatch) onBatch(batch.records.length);
+    });
   }
 
   /** 合并一批扫描记录（逐条校验令牌与路径 + 过滤待删 ID + 内存优先合并） */
@@ -573,6 +646,27 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       // 内存优先合并（不覆盖已有缓存，仅补充缺失项）
       this.mergeScanEntry(r.id, r.type, r.name, r.dataB64);
     }
+  }
+
+  /**
+   * 记账一批扫描期发现的损坏条目 ID（后端按 lid 透传的解密失败/索引不一致）。
+   *
+   * 与记录合并同源校验：令牌失效或路径已切换时丢弃，不污染新会话留档；
+   * 这些条目数据不可读（未进入缓存），留档使前端可区分"损坏"与"不存在"。
+   */
+  private recordScanFailedIds(ids: readonly number[], token: ScanToken): void {
+    if (ids.length === 0) return;
+    if (!this.isScanTokenValid(token) || this.isPathChanged(this.scanVerthysPath)) {
+      this.invalidateScanIfCurrent(token);
+      return;
+    }
+    for (const id of ids) this.scanFailedIds.add(id);
+    log.warn(`记录扫描发现 ${ids.length} 条损坏记录（数据不可读，未进入缓存；ID 已留档）`);
+  }
+
+  /** 读取记录扫描期发现的损坏条目 ID（升序；供完整性巡检与诊断使用） */
+  getScanFailedIds(): number[] {
+    return [...this.scanFailedIds].sort((a, b) => a - b);
   }
 
   /**
@@ -687,6 +781,8 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     this.activeScanToken = null;
     this.scanInProgress = null;   // 允许新扫描立即启动
     this.scanVerthysPath = null;
+    // 损坏条目留档随缓存一并清除（重新扫描会重新记账）
+    this.scanFailedIds.clear();
 
     // 2. 清空缓存和索引（LRU clear 逐条触发 onEvict 同步移除索引，幂等）
     this.recordScanCache.clear();
@@ -701,8 +797,10 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    *
    * 流程：
    *   1. 逐条 getRecordFromScan(id) —— 命中 recordScanCache 零 IPC
-   *   2. miss 或 dataB64 为空（>64KB 大体积记录被管控置空）→ 收集 fallbackIds
-   *   3. Promise.all 并行 IPC 回退（JS 端 round-trip 重叠，比串行快 3-5 倍）
+   *   2. miss 或 dataB64 为空（超过管控阈值的大体积记录被置空）→ 收集 fallbackIds
+   *   3. Promise.all 并行 IPC 回退。注意：worker 侧为单消费者串行执行，
+   *      并行只重叠前端的往返与 JSON 解析等待，不提高后端吞吐；
+   *      真正省下主线程的是解密下沉（AEAD 与密钥派生在 worker 池执行）。
    *
    * 返回 Map<id, dataB64>（仅含成功获取且 dataB64 非空的记录）。
    * 调用方应先 await ensureRecordScan() 确保扫描缓存就绪。
@@ -1107,6 +1205,10 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
       // 让出主线程，避免阻塞 UI（低优先级后台任务）
       await new Promise<void>(resolve => setTimeout(resolve, 0));
       // 会话已结束（lockAll 触发 cacheTimersCancelled）→ 停止预加载
+      if (this.shouldAbortBackgroundWork()) return;
+      // 前端 IPC 优先级门控：前端活跃时让出 worker 通道（逐条让位，
+      //   否则单条 MB 级记录会在串行 Actor 上排在前端请求之前，造成可感知卡顿）
+      await yieldIfFrontendBusy();
       if (this.shouldAbortBackgroundWork()) return;
       try {
         await this.getFullRecord(id);

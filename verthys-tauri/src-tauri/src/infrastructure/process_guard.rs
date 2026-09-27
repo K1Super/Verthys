@@ -172,13 +172,12 @@ pub struct ChildProcessConfig {
 /// 以发现潜在的继承漏洞（防御性编程）。
 #[cfg(windows)]
 pub fn spawn_isolated_child(config: &ChildProcessConfig) -> Result<u32, String> {
-    use std::os::windows::ffi::OsStrExt;
     use std::ffi::OsStr;
-    use windows::Win32::System::Threading::{
-        CreateProcessW, STARTUPINFOW,
-        STARTF_USESTDHANDLES, CREATE_NO_WINDOW,
-    };
+    use std::os::windows::ffi::OsStrExt;
     use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::System::Threading::{
+        CreateProcessW, CREATE_NO_WINDOW, STARTF_USESTDHANDLES, STARTUPINFOW,
+    };
 
     let mut cmdline = config.executable.clone();
     for arg in &config.args {
@@ -191,14 +190,18 @@ pub fn spawn_isolated_child(config: &ChildProcessConfig) -> Result<u32, String> 
         .collect();
 
     let cwd_wide: Option<Vec<u16>> = config.working_dir.as_ref().map(|d| {
-        OsStr::new(d).encode_wide().chain(std::iter::once(0)).collect()
+        OsStr::new(d)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     });
 
     let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
     si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
     si.dwFlags = STARTF_USESTDHANDLES;
 
-    let mut pi: windows::Win32::System::Threading::PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut pi: windows::Win32::System::Threading::PROCESS_INFORMATION =
+        unsafe { std::mem::zeroed() };
 
     // bInheritHandles = FALSE 确保子进程不继承父进程句柄
     let result = unsafe {
@@ -210,7 +213,9 @@ pub fn spawn_isolated_child(config: &ChildProcessConfig) -> Result<u32, String> 
             false,
             CREATE_NO_WINDOW,
             None,
-            cwd_wide.as_ref().map_or(PCWSTR::null(), |p| PCWSTR(p.as_ptr())),
+            cwd_wide
+                .as_ref()
+                .map_or(PCWSTR::null(), |p| PCWSTR(p.as_ptr())),
             &si,
             &mut pi,
         )

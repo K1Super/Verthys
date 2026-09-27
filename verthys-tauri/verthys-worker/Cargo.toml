@@ -1,6 +1,6 @@
 [package]
 name = "verthys-worker"
-version = "2.6.1"
+version = "3.3.0"
 edition = "2021"
 
 [[bin]]
@@ -44,5 +44,10 @@ incremental = false
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# unwind：FFI 边界/后台任务的 catch_unwind 防护真实生效（abort 会使其失效），
+# 且 panic hook 内可对 GMK 等敏感驻留状态执行清零；未捕获 panic 仍终止进程
+panic = "unwind"
 strip = true
+# 整数溢出由回绕改为受控 panic：SHM 条目索引/批大小等安全关键计算
+# 溢出即显式失败，禁止静默回绕
+overflow-checks = true

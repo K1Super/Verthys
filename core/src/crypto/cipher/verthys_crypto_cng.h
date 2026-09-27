@@ -20,9 +20,9 @@
  * nonce 管理（红线级）：
  *   - 加密侧 nonce 由封装层内部计数器原子递增生成并经 nonce_out 回传，
  *     调用方持久化（V3：随超级块分区表；过渡期：ctx 内存）
- *   - 计数器可经 verthys_cng_aead_restore_nonce_counter 从持久化值恢复
- *     （解锁 S3 阶段），恢复值须取 max(盘面值, WAL 重放值)
- *     + 安全裕量
+ *   - 跨会话恢复在 import_key 入参（persisted_counter）一次性完成——
+ *     恢复值须取 max(盘面值, WAL 重放值) + 安全裕量；restore 仅用于
+ *     导入后的单调前推（追赶 WAL/索引帧发现的新下限）
  *   - 解密侧 nonce 由调用方传入（与加密时一致）
  *
  * nonce 字节布局（公共契约，全仓一致）：
@@ -104,14 +104,21 @@ VerthysResult verthys_cng_aead_init(VerthysCngAead *aead);
  *   的所有返回路径（成功、内核导入失败、提供者不可用、上下文非法）
  *   均清零调用方缓冲——调用方无法区分成败，零化责任全部在本函数。
  * key_id：16 字节非敏感标识符（诊断/轮换追踪），可为 NULL（置零）。
+ * persisted_counter：该密钥已消耗的 nonce 计数值（持久化恢复下限）。
+ *   导入成功即把内部计数器复位到该值——对应"新钥匙由零起步"的场景
+ *   传 0（全新随机派生的密钥，nonce 空间从未使用，从 0 开始安全）；
+ *   对应"同密钥跨会话恢复"的场景必须传持久化值，禁止之后再依赖
+ *   外部 restore 调用兜底（本签名从入参层面收口了恢复点，
+ *   漏恢复在编译期即不可能发生）。
  * 前置条件：上下文已经 verthys_cng_aead_init / 整体置零初始化。
  * 重复导入：仅当 imported 标志置位时销毁旧句柄再导入新句柄（句柄不泄露，
- * 且不对未初始化内存中的垃圾句柄值执行销毁）。
+ *   且不对未初始化内存中的垃圾句柄值执行销毁）。
  */
 __declspec(noinline) VerthysResult verthys_cng_aead_import_key(
     VerthysCngAead *aead,
     const uint8_t key[VERTHYS_CNG_KEY_BYTES],
-    const uint8_t key_id[VERTHYS_CNG_KEY_ID_BYTES]
+    const uint8_t key_id[VERTHYS_CNG_KEY_ID_BYTES],
+    uint64_t persisted_counter
 );
 
 /*
@@ -121,8 +128,8 @@ __declspec(noinline) VerthysResult verthys_cng_aead_import_key(
  *   调用方持久化）。空明文（0 字节）合法，输出仅 16 字节标签。
  *   长度域：单条明文上限 = ULONG_MAX - 16、AAD 上限 = ULONG_MAX
  *   （CNG 32 位参数域），超限返回 VERTHYS_ERR_INVALID，更大场景由
- *   上层分块。nonce_counter 溢出（2^64 加密次数，理论边界）返回
- *   VERTHYS_ERR_INTERNAL。
+ *   上层分块。nonce_counter 耗尽（2^64 加密次数，理论边界）返回
+ *   VERTHYS_ERR_NONCE_EXHAUSTED。
  */
 __declspec(noinline) VerthysResult verthys_cng_aead_encrypt(
     VerthysCngAead *aead,

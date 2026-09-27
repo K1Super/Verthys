@@ -45,7 +45,7 @@
  *   progress.etaMs.value    // 剩余毫秒
  *   progress.elapsedMs.value // 已耗毫秒
  *   progress.isStalled.value // 是否卡顿
- *   progress.end();
+ *   progress.end(true);     // 成功；失败/中止传 false 保持真实进度
  */
 import { ref, type Ref } from "vue";
 import { createLogger } from "../../utils/logger";
@@ -363,9 +363,17 @@ export class ImportProgressState {
     };
   }
 
-  /** 结束进度追踪（强制刷新最终状态） */
-  end(): void {
-    // 强制刷新到 100%
+  /**
+   * 结束进度追踪。
+   *
+   * 成功路径强制落到 100% 并给出完成文案；失败/中止路径保持真实进度
+   * 不虚假冲刺，文案如实呈现「已导入数量」——进度条与结果语义一致，
+   * 杜绝「未完成却显示 100% 已导入 N 张」的误导。
+   *
+   * @param ok 是否零失败完成（决定百分比是否落到 100 与完成文案）
+   */
+  end(ok: boolean): void {
+    // 强制刷新（帧对齐节流豁免）
     this.forceFlush = true;
     this.flush();
 
@@ -375,12 +383,16 @@ export class ImportProgressState {
       this.rafId = null;
     }
 
-    // 最终状态：100%
-    this.percent.value = 100;
-    this.text.value = `完成：${this.total} 张照片已导入`;
+    if (ok) {
+      this.percent.value = 100;
+      this.text.value = `已导入 ${this.total} 张照片`;
+    } else {
+      // 真实进度封顶：显示已处理数量而非虚假 100%
+      this.text.value = `导入未完成（已导入 ${this.processed} 张）`;
+    }
 
     log.info(
-      `进度追踪结束: processed=${this.processed}, skipped=${this.skipped}, ` +
+      `进度追踪结束: ok=${ok}, processed=${this.processed}, skipped=${this.skipped}, ` +
         `elapsed=${this.elapsedMs.value}ms`,
     );
   }

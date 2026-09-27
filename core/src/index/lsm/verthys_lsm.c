@@ -50,6 +50,12 @@
 /* 后台线程空闲采样/轮询间隔 */
 #define VERTHYS_LSM_BG_POLL_MS 1000u
 
+/* 前置声明：MemTable 重放重建内核（定义于文件尾，写路径自愈与
+ * rollback/rebuild 共用；调用方须持独占锁） */
+static VerthysResult memtable_rebuild_locked(VerthysLsm *lsm,
+                                             const uint64_t *exclude_txids,
+                                             size_t exclude_count);
+
 /* ================== 小端读写 ================== */
 
 static void put_u32le(uint8_t *p, uint32_t v)
@@ -584,9 +590,11 @@ VerthysResult verthys_lsm_flush_locked(VerthysLsm *lsm)
     fresh = verthys_lsm_memtable_create();
     if (fresh == NULL) {
         /* 内存耗尽：条目已全部持久化（新 SSTable + Manifest 已提交）。
-         * 销毁旧表（读路径走 SSTable 不受影响）并置只读态——后续写入
-         * 一律拒绝，杜绝"再写已持久化的旧表 → 下次 flush 重复条目"。
-         * WAL 未复位：Lock 重开时重放幂等，写能力恢复。 */
+         * 销毁旧表（读路径走 SSTable 不受影响）并置只读态——杜绝
+         * "再写已持久化的旧表 → 下次 flush 重复条目"。WAL 未复位
+         * （全部历史帧仍在盘面）：写路径下一次 put 触发一次性重放
+         * 重建自愈（与 SSTable 幂等，新者胜）；重建仍失败（持续内存
+         * 压力）则继续拒绝直至下一次写入尝试。 */
         verthys_lsm_memtable_destroy(lsm->memtable);
         lsm->memtable = NULL;
         lsm->memtable_readonly = 1;
@@ -1200,12 +1208,20 @@ static VerthysResult verthys_lsm_put_internal(VerthysLsm *lsm, uint64_t txid,
     clean.created_txid = txid;
 
     AcquireSRWLockExclusive(&lsm->lock);
-    /* 只读态：MemTable 重建失败后写路径整体拒绝（含墓碑），防写入
-     * 空表或已持久化的旧表；锁内检查（与 flush 置位互斥），恢复需
-     * Lock 重开（WAL 重放重建 MemTable）。 */
+    /* 只读态自愈：只读置位发生于 flush 换表失败点（旧表已销毁、
+     * 条目已持久化，WAL 未复位——全部历史帧仍在盘面），此后的写路径
+     * 若永久拒绝，导入将在"单点瞬时内存压力"后瘫痪整个会话（历史缺陷）。
+     * 此处做一次性重放重建尝试：自偏移 0 重放重建 MemTable（与已持久化
+     * SSTable 幂等，新者胜），成功即解除只读、写能力原地恢复，无需
+     * 重开容器。重建的首步是 fresh memtable 分配——分配持续失败时
+     * 瞬时返回，不产生重放空转。 */
     if (lsm->memtable_readonly) {
-        ReleaseSRWLockExclusive(&lsm->lock);
-        return VERTHYS_ERR_RESOURCE_LIMIT;
+        r = memtable_rebuild_locked(lsm, NULL, 0);
+        if (r != VERTHYS_OK) {
+            ReleaseSRWLockExclusive(&lsm->lock);
+            return VERTHYS_ERR_RESOURCE_LIMIT;
+        }
+        lsm->memtable_readonly = 0;
     }
     r = wal_append(lsm, &clean);            /* WAL 先行 */
     if (r == VERTHYS_OK) {
@@ -1538,15 +1554,31 @@ fail:
 
 VerthysResult verthys_lsm_preheat_full(VerthysLsm *lsm)
 {
+    /* 委托前先判空：ex 内部会在 f==NULL 时回退 lsm->f，此处须防
+     * lsm==NULL 的先行解引用 */
+    return (lsm != NULL) ? verthys_lsm_preheat_full_ex(lsm, lsm->f, NULL)
+                         : VERTHYS_ERR_INVALID;
+}
+
+VerthysResult verthys_lsm_preheat_full_ex(VerthysLsm *lsm, FILE *f,
+                                      const volatile LONG *stop_flag)
+{
     VerthysResult r;
 
     if (lsm == NULL) return VERTHYS_ERR_INVALID;
-    if (lsm->f == NULL || lsm->part == NULL) return VERTHYS_ERR_INVALID;
+    if (f == NULL) f = lsm->f;
+    if (f == NULL || lsm->part == NULL) return VERTHYS_ERR_INVALID;
 
     /* 独占锁：惰性加载修改 Manifest 内存态（与 get 路径同一纪律） */
     AcquireSRWLockExclusive(&lsm->lock);
     for (size_t i = 0; i < lsm->manifest.count; i++) {
-        r = verthys_lsm_sstable_preheat(lsm->f, lsm->part,
+        /* 停止检查（表边界粒度）：销毁汇合置位后不再触碰后续表，
+         * 把"汇合未完成"的暴露面压缩到单表读/解密时延内 */
+        if (stop_flag != NULL && *stop_flag != 0) {
+            ReleaseSRWLockExclusive(&lsm->lock);
+            return VERTHYS_ERR_LOCKED;
+        }
+        r = verthys_lsm_sstable_preheat(f, lsm->part,
                                       &lsm->manifest.tables[i]);
         if (r != VERTHYS_OK) {
             ReleaseSRWLockExclusive(&lsm->lock);

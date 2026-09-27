@@ -34,8 +34,7 @@ use super::platform::assign_child_to_job_object;
 #[cfg(target_os = "windows")]
 use super::platform::JobHandle;
 use super::protocol::{
-    ActorRequest, UnlockProgress, DEFAULT_IPC_TIMEOUT, DROP_ACTOR_JOIN_TIMEOUT,
-    READY_CHECK_TIMEOUT,
+    ActorRequest, UnlockProgress, DEFAULT_IPC_TIMEOUT, DROP_ACTOR_JOIN_TIMEOUT, READY_CHECK_TIMEOUT,
 };
 use super::stderr::StderrRing;
 
@@ -94,10 +93,7 @@ impl SessionInner {
     ///
     /// 返回 None 表示通道已关闭（Actor 已退出或正在关闭）。
     fn clone_sender(&self) -> Option<mpsc::Sender<ActorRequest>> {
-        self.request_tx
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
+        self.request_tx.lock().ok().and_then(|g| g.clone())
     }
 
     /// 取出并丢弃请求通道 Sender，关闭通道
@@ -226,15 +222,12 @@ impl WorkerSession {
     ///
     /// 使用 tokio::time::timeout 包裹 read_line()，
     /// 替代 PeekNamedPipe + thread::sleep(50ms) 轮询。
-    pub fn send_json_with_timeout(
-        &self,
-        json: &str,
-        timeout: Duration,
-    ) -> Result<String, String> {
+    pub fn send_json_with_timeout(&self, json: &str, timeout: Duration) -> Result<String, String> {
         let json_owned = json.to_string();
-        let request_tx = self.inner.clone_sender().ok_or_else(|| {
-            "worker actor 已退出（通道已关闭）".to_string()
-        })?;
+        let request_tx = self
+            .inner
+            .clone_sender()
+            .ok_or_else(|| "worker actor 已退出（通道已关闭）".to_string())?;
         let runtime_handle = self.inner.runtime_handle.clone();
 
         block_on_with_handle(&runtime_handle, async move {
@@ -285,9 +278,10 @@ impl WorkerSession {
         progress_cb: &dyn Fn(&UnlockProgress),
     ) -> Result<String, String> {
         let json_owned = json.to_string();
-        let request_tx = self.inner.clone_sender().ok_or_else(|| {
-            "worker actor 已退出（通道已关闭）".to_string()
-        })?;
+        let request_tx = self
+            .inner
+            .clone_sender()
+            .ok_or_else(|| "worker actor 已退出（通道已关闭）".to_string())?;
         let runtime_handle = self.inner.runtime_handle.clone();
 
         block_on_with_handle(&runtime_handle, async move {
@@ -349,9 +343,10 @@ impl WorkerSession {
     ///   - 超时 + stderr 有内容 → 可判断 worker 卡在哪一步（DLL 加载/Verthys_Init）
     ///   - 超时 + stderr 为空 → worker 使用旧版本二进制（无 eprintln 诊断）
     pub fn wait_for_ready_signal(&self) -> Result<(), String> {
-        let request_tx = self.inner.clone_sender().ok_or_else(|| {
-            "worker actor 已退出（通道已关闭）".to_string()
-        })?;
+        let request_tx = self
+            .inner
+            .clone_sender()
+            .ok_or_else(|| "worker actor 已退出（通道已关闭）".to_string())?;
         let runtime_handle = self.inner.runtime_handle.clone();
 
         block_on_with_handle(&runtime_handle, async move {
@@ -440,11 +435,7 @@ impl Drop for SessionInner {
         self.close_request_channel();
 
         // 2. 取出 actor_handle（若 kill() 已取走则为 None）
-        let actor_handle_opt = self
-            .actor_handle
-            .lock()
-            .ok()
-            .and_then(|mut g| g.take());
+        let actor_handle_opt = self.actor_handle.lock().ok().and_then(|mut g| g.take());
 
         if let Some(actor_handle) = actor_handle_opt {
             let runtime_handle = self.runtime_handle.clone();
@@ -457,11 +448,9 @@ impl Drop for SessionInner {
                         Ok(Ok(())) => {
                             log::info!("[actor] PID={} 析构时 Actor 优雅退出完成", pid)
                         }
-                        Ok(Err(e)) => log::warn!(
-                            "[actor] PID={} 析构时 Actor 任务 panic: {}",
-                            pid,
-                            e
-                        ),
+                        Ok(Err(e)) => {
+                            log::warn!("[actor] PID={} 析构时 Actor 任务 panic: {}", pid, e)
+                        }
                         Err(_) => log::warn!(
                             "[actor] PID={} 析构时 {}s 超时，强制分离 Actor 任务",
                             pid,
@@ -483,7 +472,9 @@ impl Drop for SessionInner {
         {
             if let Ok(mut g) = self.job_handle.lock() {
                 if let Some(h) = g.take() {
-                    unsafe { let _ = CloseHandle(h.0); }
+                    unsafe {
+                        let _ = CloseHandle(h.0);
+                    }
                 }
             }
         }

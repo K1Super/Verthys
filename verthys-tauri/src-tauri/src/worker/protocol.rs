@@ -37,12 +37,17 @@ pub const STDERR_RING_SIZE: usize = 32;
 /// stderr 诊断片段最大长度（截断过长内容，注意 UTF-8 字符边界）。
 pub const STDERR_DIAG_MAX_LEN: usize = 2048;
 
-/// IPC 管道单行字节上限（16MB）
+/// worker 输出单行读取上限（跨层预算常量：读侧兜底）
 ///
-/// worker 响应（含记录 base64）与进度行远小于此值。
-/// 超限即协议异常（对端被攻破或协议失步），读取方必须断开并报错。
-/// 读取全程经 bounded_read_line，行缓冲增长被约束在上限之内。
-pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+/// 取值依据（跨层载荷预算）：导入侧允许单条记录不超过
+/// `MAX_IPC_PAYLOAD_BYTES`（12 MiB）的 base64 载荷，取回响应会对该载荷
+/// 再编码一次（4/3 膨胀）并叠加 JSON 头，最大合法响应行约 16 MiB；
+/// 此处留出 2 倍余量作为读取侧兜底，用于识别真正的协议损坏。
+///
+/// worker 写侧另有更小的自我约束（超限响应被替换为受控错误行），
+/// 因此正常运行时读取侧只会看到有界行；超出本上限仍视为协议异常，
+/// 读取方断开并报错。读取全程经 bounded_read_line，行缓冲增长被约束在上限内。
+pub const MAX_LINE_BYTES: usize = crate::infrastructure::shm_schema::PB_IPC_MAX_LINE_BYTES as usize;
 
 /// 带限行读取错误
 #[derive(Debug)]
@@ -179,9 +184,7 @@ pub(crate) enum ActorRequest {
     },
     /// 显式关闭请求（保留用于未来协议扩展，当前通过 drop Sender 触发关闭）
     #[allow(dead_code)]
-    Shutdown {
-        reply: oneshot::Sender<()>,
-    },
+    Shutdown { reply: oneshot::Sender<()> },
 }
 
 /// 解锁进度流的 JSON 行 op 字段值（worker C 回调写入的进度行标识）
@@ -202,9 +205,23 @@ mod tests {
     #[test]
     fn test_unlock_progress_constants() {
         assert_eq!(UNLOCK_PROGRESS_OP, "unlock_progress");
-        assert_eq!(
-            UNLOCK_PROGRESS_IDLE_TIMEOUT,
-            Duration::from_secs(60)
+        assert_eq!(UNLOCK_PROGRESS_IDLE_TIMEOUT, Duration::from_secs(60));
+    }
+
+    /// 跨层载荷预算：最大合法记录响应行必须落在读取上限内
+    ///
+    /// 导入侧允许单条记录的 base64 载荷不超过 MAX_IPC_PAYLOAD_BYTES；
+    /// 取回时 worker 对该载荷再编码一次（4/3 膨胀）并加 JSON 头即响应行长度。
+    /// 该值越过 MAX_LINE_BYTES 时，读取方会把合法响应误判为协议断裂并标记
+    /// 子进程死亡，因此本断言失败即阻断发布。
+    #[test]
+    fn test_max_legal_record_response_fits_read_limit() {
+        let worst_case = crate::constants::import_writer::MAX_IPC_PAYLOAD_BYTES / 3 * 4 + 64 * 1024;
+        assert!(
+            worst_case < MAX_LINE_BYTES,
+            "最大合法记录响应行 {} 字节必须小于读取上限 {} 字节",
+            worst_case,
+            MAX_LINE_BYTES
         );
     }
 
@@ -246,7 +263,11 @@ mod tests {
         // Actor 端接收并回复
         let req = request_rx.recv().await.unwrap();
         match req {
-            ActorRequest::Send { json, timeout, reply } => {
+            ActorRequest::Send {
+                json,
+                timeout,
+                reply,
+            } => {
                 assert_eq!(json, r#"{"op":"ping"}"#);
                 assert_eq!(timeout, Duration::from_secs(1));
                 let _ = reply.send(Ok(r#"{"ok":true,"op":"pong"}"#.to_string()));
@@ -320,12 +341,21 @@ mod tests {
     async fn bounded_read_short_lines_and_crlf() {
         let mut r = cursor_reader(b"ping\nunlock\r\nok".to_vec());
         let mut buf = String::new();
-        assert_eq!(bounded_read_line(&mut r, &mut buf, 64).await.unwrap(), Some(4));
+        assert_eq!(
+            bounded_read_line(&mut r, &mut buf, 64).await.unwrap(),
+            Some(4)
+        );
         assert_eq!(buf, "ping");
-        assert_eq!(bounded_read_line(&mut r, &mut buf, 64).await.unwrap(), Some(6));
+        assert_eq!(
+            bounded_read_line(&mut r, &mut buf, 64).await.unwrap(),
+            Some(6)
+        );
         assert_eq!(buf, "unlock"); // CRLF 剥离
-        // EOF 前无换行残余按最后一行返回，随后 EOF
-        assert_eq!(bounded_read_line(&mut r, &mut buf, 64).await.unwrap(), Some(2));
+                                   // EOF 前无换行残余按最后一行返回，随后 EOF
+        assert_eq!(
+            bounded_read_line(&mut r, &mut buf, 64).await.unwrap(),
+            Some(2)
+        );
         assert_eq!(buf, "ok");
         assert_eq!(bounded_read_line(&mut r, &mut buf, 64).await.unwrap(), None);
     }
@@ -341,7 +371,10 @@ mod tests {
             other => panic!("应为 TooLong，实为: {:?}", other.map(|x| x.is_some())),
         }
         // 超长行已被完整丢弃：下一行必须读到 next
-        assert_eq!(bounded_read_line(&mut r, &mut buf, 16).await.unwrap(), Some(4));
+        assert_eq!(
+            bounded_read_line(&mut r, &mut buf, 16).await.unwrap(),
+            Some(4)
+        );
         assert_eq!(buf, "next");
     }
 
@@ -376,7 +409,10 @@ mod tests {
         // max=16：15 字节内容 + \n = 16 字节 → 恰好为行
         let mut r = cursor_reader(b"0123456789abcde\n".to_vec());
         let mut buf = String::new();
-        assert_eq!(bounded_read_line(&mut r, &mut buf, 16).await.unwrap(), Some(15));
+        assert_eq!(
+            bounded_read_line(&mut r, &mut buf, 16).await.unwrap(),
+            Some(15)
+        );
         assert_eq!(buf, "0123456789abcde");
         // 16 字节内容 + \n = 17 字节 → TooLong
         let mut r2 = cursor_reader(b"0123456789abcdef\n".to_vec());

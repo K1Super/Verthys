@@ -20,16 +20,17 @@ use std::io::{self, BufRead, Write};
 use zeroize::Zeroizing;
 
 use crate::log::{diag, init_diag};
+use crate::runtime::budget::PB_IPC_MAX_REQUEST_LINE_BYTES;
 use crate::runtime::worker::Worker;
 use crate::runtime::dispatch::handle_request;
-use crate::runtime::protocol::{Request, Response};
+use crate::runtime::protocol::{bound_response_line, Request, Response};
 
-/// stdin 单行字节上限（16MB）
+/// stdin 单行字节上限（跨层预算：与主进程请求构造侧同一取值）
 ///
 /// 单个请求 JSON（含口令与记录数据 base64）远小于此值；
 /// 超限即协议异常（对端被攻破或数据损坏），按 fail-safe 断开。
 /// 读取路径全程经 read_line_bounded，行缓冲不会无界增长。
-const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LINE_BYTES: usize = PB_IPC_MAX_REQUEST_LINE_BYTES as usize;
 
 /// 带限行读取结果
 enum BoundedLine {
@@ -186,7 +187,14 @@ pub fn run(dll_path: &str) -> i32 {
                     error: Some("line too long".into()),
                     ..Response::ok("parse")
                 };
-                let json = serde_json::to_string(&resp).unwrap();
+                let json = match serde_json::to_string(&resp) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        diag!("[worker] 响应序列化失败(line-too-long): {}", e);
+                        let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
+                        String::from("{}")
+                    }
+                };
                 let stdout = io::stdout();
                 let mut lock = stdout.lock();
                 let _ = writeln!(lock, "{}", json);
@@ -222,7 +230,14 @@ pub fn run(dll_path: &str) -> i32 {
                     error: Some(format!("json parse: {}", e)),
                     ..Response::ok("parse")
                 };
-                let json = serde_json::to_string(&resp).unwrap();
+                let json = match serde_json::to_string(&resp) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        diag!("[worker] 响应序列化失败(parse): {}", e);
+                        let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
+                        String::from("{}")
+                    }
+                };
                 let stdout = io::stdout();
                 let mut lock = stdout.lock();
                 if let Err(e) = writeln!(lock, "{}", json) {
@@ -236,7 +251,19 @@ pub fn run(dll_path: &str) -> i32 {
 
         // get_record 返回 NOTFOUND 时，枚举探测应停止
         let resp = handle_request(&mut worker, &req);
-        let json = serde_json::to_string(&resp).unwrap();
+        let json = match serde_json::to_string(&resp) {
+            Ok(j) => j,
+            Err(e) => {
+                diag!("[worker] 主响应序列化失败: {}", e);
+                let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
+                String::from("{}")
+            }
+        };
+        // 写侧自我约束：超限响应替换为受控错误行。
+        // 父进程按行读取并对超长行判为协议断裂（标记子进程死亡），
+        // 而合法的超大记录取回响应本身就可能达到 MB 级——若原样写出，
+        // 单条读取失败会升级为整个会话不可用。
+        let json = bound_response_line(json, &resp.op);
         diag!("[worker] 发送响应: op={} ok={} bytes={}", resp.op, resp.ok, json.len());
 
         // 修复（D-PROGRESS-DRAIN）：进度排空保障
@@ -284,6 +311,11 @@ pub fn run(dll_path: &str) -> i32 {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    // 本模块各用例中的 .unwrap() 均作用于 Cursor<&[u8]> 之上的
+    // read_line_bounded（内存读取，无 IO 错误源），失败不可达，
+    // 故逐个 unwrap 而不改造成 Result 链；生产路径不适用同一前提
+    // （stdin 为真实 IO），已全部改受控错误分支。
 
     #[test]
     fn bounded_short_lines_and_crlf() {

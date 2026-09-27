@@ -22,8 +22,8 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -185,7 +185,10 @@ impl LogDaemon {
                 .ok();
 
             #[cfg(windows)]
-            output_debug_string(&format!("主日志文件打开失败，降级路径：{}", fallback.display()));
+            output_debug_string(&format!(
+                "主日志文件打开失败，降级路径：{}",
+                fallback.display()
+            ));
         }
 
         while let Ok(entry) = receiver.recv() {
@@ -337,7 +340,11 @@ fn output_debug_string(msg: &str) {
 fn output_debug_string_fallback(entry: &LogEntry) {
     let text = format!(
         "[{}][{}] pid:{} | {} | {}",
-        entry.timestamp, entry.level.as_str(), entry.pid, entry.module, entry.message
+        entry.timestamp,
+        entry.level.as_str(),
+        entry.pid,
+        entry.module,
+        entry.message
     );
     output_debug_string(&text);
 }

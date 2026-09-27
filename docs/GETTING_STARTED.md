@@ -4,7 +4,7 @@
 >
 > Last updated: 2026-09-19 · 维护人：K1Super
 
-Verthys 2.6.1 仅支持 Windows（x64）。构建入口为根目录 `build_production.ps1`（生产，含 NSIS 安装包）与 `build_dev.ps1`（开发运行）。本文所有命令均抄自脚本实文，参数含义以脚本顶部注释为准。
+Verthys 3.3.0 仅支持 Windows（x64）。构建入口为根目录 `build_production.ps1`（生产，含 NSIS 安装包）与 `build_dev.ps1`（开发运行）。本文所有命令均抄自脚本实文，参数含义以脚本顶部注释为准。
 
 ## 1. 前置依赖：装什么、为什么
 

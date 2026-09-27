@@ -39,14 +39,36 @@ import {
   prefetchFullRecords,
   getAllSummaryIds,
   getSummaryIdsByType,
+  getSummaryRecord,
+  getScanFailedIds,
   hasFullRecord,
 } from "../cache/composition/verthys-cache";
-import { TYPE_PRIORITY } from "../constants/record_types";
+import {
+  TYPE_PRIORITY,
+  TYPE_PHOTO_META,
+  TYPE_PHOTO_CHUNK,
+  TYPE_FILEVERTHYS_CHUNK,
+} from "../constants/record_types";
 import { createLogger } from "../utils/logger";
 // 前端 IPC 优先级门控：后台任务在前端活跃时让出 worker 通道
 import { yieldIfFrontendBusy } from "./frontend-ipc-priority";
 
 const log = createLogger("background-tasks");
+
+/* ------------------------------------------------------------------ *
+ * 后台任务避让类型表（MB 级载荷类记录）                                *
+ *                                                                    *
+ * 照片索引内联加密块、照片/文件分块记录的单条体积可达 MB 级：          *
+ *   - 预取它们会把 worker 串行通道与一层缓存额度占满，挤出用户刚看过的项；*
+ *   - 完整性巡检拉取它们等于把整库密文重搬一遍，纯浪费。                *
+ * 这些类型的可读性由各自的按需读取路径负责（读失败会对用户可见），      *
+ * 后台任务不重复承担。                                                *
+ * ------------------------------------------------------------------ */
+const BACKGROUND_SKIP_TYPES: ReadonlySet<number> = new Set([
+  TYPE_PHOTO_META,
+  TYPE_PHOTO_CHUNK,
+  TYPE_FILEVERTHYS_CHUNK,
+]);
 
 /* ------------------------------------------------------------------ *
  * 项8：后台任务降级常量                                            *
@@ -321,14 +343,17 @@ export function isBackgroundTasksRunning(): boolean {
 
 /**
  * 收集各类型前 N 条记录 ID（用于预加载可见区域）。
- * 优先返回照片类型（最可能被点击查看）。
+ *
+ * 只取轻量记录类型：MB 级载荷类记录（见 BACKGROUND_SKIP_TYPES）跳过，
+ * 由各自的按需读取路径承担；其余类型按 TYPE_PRIORITY 顺序取前 N 条。
  *
  * @param perType 每种类型取前 N 条
- * @returns 按 TYPE_PRIORITY 排序的 ID 列表
+ * @returns 去重后的 ID 列表（按类型优先级分组、组内按 ID 升序）
  */
 function collectVisibleRecordIds(perType: number): number[] {
   const ids: number[] = [];
   for (const type of TYPE_PRIORITY) {
+    if (BACKGROUND_SKIP_TYPES.has(type)) continue;
     const typeIds = getSummaryIdsByType(type);
     if (typeIds.length === 0) continue;
     // 取前 perType 条（已按 ID 升序排序）
@@ -357,16 +382,36 @@ function collectVisibleRecordIds(perType: number): number[] {
  */
 async function integrityPatrol(controller: { cancelled: boolean }): Promise<void> {
   const allIds = getAllSummaryIds();
+  // 记录扫描期已记账的损坏条目：数据不可读（后端解密失败/索引不一致），
+  //   不重复拉取（同一读路径必然同样失败），单独计数并在汇总中区分
+  const knownDamaged = new Set(getScanFailedIds());
   let checked = 0;
   let failed = 0;
+  let skipped = 0;
+  let known = 0;
 
   for (const id of allIds) {
     // 取消检查：lockAll 触发后立即退出
     if (controller.cancelled) return;
 
+    // 扫描期已判定损坏 → 不再拉取，计入异常
+    if (knownDamaged.has(id)) {
+      known++;
+      failed++;
+      continue;
+    }
+
     // 已在全量缓存中 → 跳过（无需重复读取，已验证可读）
     if (hasFullRecord(id)) {
       checked++;
+      continue;
+    }
+
+    // MB 级载荷类记录跳过：拉取它们等于把整库密文重搬一遍，
+    //   且这些类型的可读性由各自的按需读取路径负责
+    const rec = getSummaryRecord(id);
+    if (rec && BACKGROUND_SKIP_TYPES.has(rec.type)) {
+      skipped++;
       continue;
     }
 
@@ -396,8 +441,11 @@ async function integrityPatrol(controller: { cancelled: boolean }): Promise<void
   }
 
   if (failed > 0) {
-    log.warn(`巡检完成：${checked} 条正常，${failed} 条异常`);
+    log.warn(
+      `巡检完成：${checked} 条正常，${failed} 条异常（其中 ${known} 条已由记录扫描判定损坏），` +
+        `${skipped} 条跳过（MB 级载荷类型）`,
+    );
   } else if (checked > 0) {
-    log.debug(`巡检完成：${checked} 条记录全部正常`);
+    log.debug(`巡检完成：${checked} 条记录全部正常，${skipped} 条跳过（MB 级载荷类型）`);
   }
 }

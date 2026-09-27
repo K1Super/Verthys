@@ -1,0 +1,41 @@
+{
+  "description": "跨层预算常量单一权威来源。所有取值必须与当前实现一致：任一改动都要同步重新生成 TS / Rust 常量，并由 CI 校验生成物与本源一致。派生量（scan_batch_max_bytes / enum_response_data_budget）由生成器按公式计算，禁止在本文件里手填。",
+  "unit": "混合口径：多数为字节；*_ms 为毫秒；*_retries 为次数；见各常量键名与生成物注释",
+  "constants": {
+    "shm_default_size": 8388608,
+    "scan_batch_waterline_num": 3,
+    "scan_batch_waterline_den": 5,
+    "scan_shm_overhead_bytes": 65536,
+    "scan_index_inline_max": 1048576,
+    "datab64_cache_max": 65536,
+    "meta_index_overhead_chars": 4096,
+    "photo_thumb_max_chars": 45000,
+    "ipc_max_payload": 12582912,
+    "max_chunks_per_ipc": 8,
+    "payload_chunk_size": 1048576,
+    "ipc_max_request_line": 16777216,
+    "ipc_max_response_line": 25165824,
+    "ipc_max_line": 33554432,
+    "photo_max_bytes": 104857600,
+    "max_record_name_bytes": 1024,
+    "max_file_chunk_size": 4194304,
+    "flush_max_retries": 3,
+    "flush_retry_backoff_ms": 100,
+    "flush_verify_timeout_ms": 5000,
+    "session_begin_timeout_ms": 3000,
+    "session_end_timeout_ms": 30000,
+    "session_force_close_timeout_ms": 5000,
+    "meta_fixed_plain_bytes": 512,
+    "meta_ref_bytes": 96,
+    "chunk_ref_bytes": 12,
+    "chunk_hash_bytes": 67,
+    "chunk_set_fixed_plain_bytes": 64
+  },
+  "layouts": {
+    "meta_crypto_overhead": 56,
+    "chunk_crypto_overhead": 64,
+    "json_frame_overhead": 4096,
+    "base64_num": 4,
+    "base64_den": 3
+  }
+}

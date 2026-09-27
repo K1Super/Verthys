@@ -16,7 +16,8 @@ use tauri::Manager;
 
 use crate::security::{
     brute_force::{BruteForceGuard, BruteForcePersistedState},
-    module_whitelist, usb_guard::UsbRegistry,
+    module_whitelist,
+    usb_guard::UsbRegistry,
 };
 
 use super::state::SecurityState;
@@ -204,10 +205,7 @@ pub(super) fn persist_trusted_paths(app: &tauri::AppHandle) {
         return;
     }
 
-    log::info!(
-        "[trusted_paths] 白名单已持久化 ({} 条路径)",
-        paths.len()
-    );
+    log::info!("[trusted_paths] 白名单已持久化 ({} 条路径)", paths.len());
 }
 
 /// 加载受信任路径白名单（DPAPI 解密）
@@ -245,7 +243,10 @@ fn load_trusted_paths(app: &tauri::AppHandle) {
     };
 
     module_whitelist::import_trusted_paths(&paths);
-    log::info!("[trusted_paths] 白名单已从持久化恢复 ({} 条路径)", paths.len());
+    log::info!(
+        "[trusted_paths] 白名单已从持久化恢复 ({} 条路径)",
+        paths.len()
+    );
 }
 
 /// 首次访问时加载白名单
@@ -388,7 +389,10 @@ fn load_usb_salt(app: &tauri::AppHandle) -> Option<Vec<u8>> {
 ///
 /// 首次调用时从持久化加载盐值；若不存在则生成新盐值并持久化。
 /// 后续调用直接从内存读取。
-pub(super) fn ensure_usb_salt(app: &tauri::AppHandle, state: &SecurityState) -> Result<Vec<u8>, String> {
+pub(super) fn ensure_usb_salt(
+    app: &tauri::AppHandle,
+    state: &SecurityState,
+) -> Result<Vec<u8>, String> {
     if state.usb_salt_loaded.swap(true, Ordering::SeqCst) {
         // 已加载，从内存读取
         let salt = state
@@ -482,10 +486,7 @@ pub(super) fn persist_usb_registry(app: &tauri::AppHandle, registry: &UsbRegistr
         return;
     }
 
-    log::info!(
-        "[usb_registry] 注册表已持久化 ({} 台设备)",
-        devices.len()
-    );
+    log::info!("[usb_registry] 注册表已持久化 ({} 台设备)", devices.len());
 }
 
 /// 加载 USB 注册表（DPAPI 解密）

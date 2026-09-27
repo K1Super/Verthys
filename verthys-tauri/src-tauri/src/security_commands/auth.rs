@@ -20,8 +20,6 @@ use crate::state::{AppState, KeyLifecycleState};
 pub(super) fn require_session_authorized(app_state: &AppState) -> Result<(), String> {
     match app_state.key_lifecycle.current_state() {
         KeyLifecycleState::Locked | KeyLifecycleState::Unlocked => Ok(()),
-        KeyLifecycleState::NoKey => {
-            Err("会话未授权：容器未解锁或未设置全局密钥".to_string())
-        }
+        KeyLifecycleState::NoKey => Err("会话未授权：容器未解锁或未设置全局密钥".to_string()),
     }
 }

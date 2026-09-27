@@ -125,11 +125,10 @@ trait SessionGuardBackend: Send {
 #[cfg(target_os = "windows")]
 mod win_backend {
     use super::{
-        SessionEvent, SessionGuardBackend, WindowInstanceData, MAX_RESTART_ATTEMPTS,
+        SessionEvent, SessionGuardBackend, WindowInstanceData, GWLP_USERDATA, MAX_RESTART_ATTEMPTS,
         NOTIFY_FOR_THIS_SESSION, PBT_APMSUSPEND, WATCHDOG_CHECK_SECS, WM_DESTROY,
         WM_POWERBROADCAST, WM_QUIT, WM_WTSESSION_CHANGE, WTS_CONSOLE_DISCONNECT,
         WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF, WTS_SESSION_UNLOCK,
-        GWLP_USERDATA,
     };
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
@@ -238,7 +237,10 @@ mod win_backend {
     #[allow(non_camel_case_types)]
     type WTSUnRegisterSessionNotification_t = unsafe extern "system" fn(isize) -> i32;
 
-    fn load_wts_api() -> (Option<WTSRegisterSessionNotification_t>, Option<WTSUnRegisterSessionNotification_t>) {
+    fn load_wts_api() -> (
+        Option<WTSRegisterSessionNotification_t>,
+        Option<WTSUnRegisterSessionNotification_t>,
+    ) {
         unsafe {
             let wide = to_wide("wtsapi32.dll");
             let lib = LoadLibraryW(wide.as_ptr());
@@ -248,13 +250,25 @@ mod win_backend {
 
             let reg_name = b"WTSRegisterSessionNotification\0";
             let reg_proc = GetProcAddress(lib, reg_name.as_ptr());
-            let reg: Option<WTSRegisterSessionNotification_t> =
-                if reg_proc.is_null() { None } else { Some(std::mem::transmute::<*const u8, WTSRegisterSessionNotification_t>(reg_proc)) };
+            let reg: Option<WTSRegisterSessionNotification_t> = if reg_proc.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute::<
+                    *const u8,
+                    WTSRegisterSessionNotification_t,
+                >(reg_proc))
+            };
 
             let unreg_name = b"WTSUnRegisterSessionNotification\0";
             let unreg_proc = GetProcAddress(lib, unreg_name.as_ptr());
-            let unreg: Option<WTSUnRegisterSessionNotification_t> =
-                if unreg_proc.is_null() { None } else { Some(std::mem::transmute::<*const u8, WTSUnRegisterSessionNotification_t>(unreg_proc)) };
+            let unreg: Option<WTSUnRegisterSessionNotification_t> = if unreg_proc.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute::<
+                    *const u8,
+                    WTSUnRegisterSessionNotification_t,
+                >(unreg_proc))
+            };
 
             (reg, unreg)
         }
@@ -272,29 +286,27 @@ mod win_backend {
     /// 不再在 Drop 中 UnregisterClassW — 类随进程退出自动清理，
     /// 消除"类残留"和"多次注册"的竞态问题。
     fn register_window_class_once() {
-        CLASS_REGISTERED.call_once(|| {
-            unsafe {
-                let class_name = to_wide("VerthysSecGuard");
-                let hinst = GetModuleHandleW(std::ptr::null());
+        CLASS_REGISTERED.call_once(|| unsafe {
+            let class_name = to_wide("VerthysSecGuard");
+            let hinst = GetModuleHandleW(std::ptr::null());
 
-                let wc = WndClassExW {
-                    cbSize: std::mem::size_of::<WndClassExW>() as u32,
-                    lpfnWndProc: Some(window_proc),
-                    hInstance: hinst,
-                    lpszClassName: class_name.as_ptr(),
-                    ..Default::default()
-                };
+            let wc = WndClassExW {
+                cbSize: std::mem::size_of::<WndClassExW>() as u32,
+                lpfnWndProc: Some(window_proc),
+                hInstance: hinst,
+                lpszClassName: class_name.as_ptr(),
+                ..Default::default()
+            };
 
-                let atom = RegisterClassExW(&wc);
-                if atom == 0 {
-                    let err = GetLastError();
-                    log::error!(
-                        "[session_guard] 第 2 项：RegisterClassExW 失败: GetLastError={}",
-                        err
-                    );
-                } else {
-                    log::debug!("[session_guard] 窗口类已注册 (atom={})", atom);
-                }
+            let atom = RegisterClassExW(&wc);
+            if atom == 0 {
+                let err = GetLastError();
+                log::error!(
+                    "[session_guard] 第 2 项：RegisterClassExW 失败: GetLastError={}",
+                    err
+                );
+            } else {
+                log::debug!("[session_guard] 窗口类已注册 (atom={})", atom);
             }
         });
     }
@@ -325,8 +337,10 @@ mod win_backend {
             WM_WTSESSION_CHANGE => {
                 let code = wparam as u32;
                 let event = match code {
-                    WTS_SESSION_LOCK | WTS_SESSION_LOGOFF
-                    | WTS_REMOTE_DISCONNECT | WTS_CONSOLE_DISCONNECT => Some(SessionEvent::Lock),
+                    WTS_SESSION_LOCK
+                    | WTS_SESSION_LOGOFF
+                    | WTS_REMOTE_DISCONNECT
+                    | WTS_CONSOLE_DISCONNECT => Some(SessionEvent::Lock),
                     WTS_SESSION_UNLOCK => Some(SessionEvent::Unlock),
                     _ => None,
                 };
@@ -340,9 +354,7 @@ mod win_backend {
             }
             WM_POWERBROADCAST => {
                 // 从实例数据读取高安全标志（非全局变量）
-                if data.high_security.load(Ordering::SeqCst)
-                    && wparam as u32 == PBT_APMSUSPEND
-                {
+                if data.high_security.load(Ordering::SeqCst) && wparam as u32 == PBT_APMSUSPEND {
                     if let Ok(tx) = data.event_tx.lock() {
                         let _ = tx.send(SessionEvent::PowerSuspend);
                     }
@@ -379,8 +391,14 @@ mod win_backend {
                 class_name.as_ptr(),
                 class_name.as_ptr(),
                 0,
-                0, 0, 0, 0,
-                0, 0, hinst, std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                hinst,
+                std::ptr::null(),
             );
 
             if hwnd == 0 {
@@ -459,10 +477,7 @@ mod win_backend {
     }
 
     impl MessageLoopState {
-        fn new(
-            instance_data: Arc<WindowInstanceData>,
-            stop_flag: Arc<AtomicBool>,
-        ) -> Self {
+        fn new(instance_data: Arc<WindowInstanceData>, stop_flag: Arc<AtomicBool>) -> Self {
             MessageLoopState {
                 instance_data,
                 stop_flag,
@@ -497,17 +512,15 @@ mod win_backend {
 
             let handle = thread::Builder::new()
                 .name("verthys-session-msgloop".into())
-                .spawn(move || {
-                    match create_guard_window(&instance_data) {
-                        Ok((hwnd, unreg_fn)) => {
-                            *hwnd_slot.lock().unwrap() = hwnd;
-                            *unreg_slot.lock().unwrap() = Some(unreg_fn);
-                            let _ = create_tx.send(Ok(hwnd));
-                            run_message_loop(hwnd, stop_flag);
-                        }
-                        Err(e) => {
-                            let _ = create_tx.send(Err(e));
-                        }
+                .spawn(move || match create_guard_window(&instance_data) {
+                    Ok((hwnd, unreg_fn)) => {
+                        *hwnd_slot.lock().unwrap() = hwnd;
+                        *unreg_slot.lock().unwrap() = Some(unreg_fn);
+                        let _ = create_tx.send(Ok(hwnd));
+                        run_message_loop(hwnd, stop_flag);
+                    }
+                    Err(e) => {
+                        let _ = create_tx.send(Err(e));
                     }
                 })
                 .map_err(|e| format!("启动消息循环线程失败: {}", e))?;
@@ -516,10 +529,7 @@ mod win_backend {
 
             match create_rx.recv() {
                 Ok(Ok(hwnd)) => {
-                    log::info!(
-                        "[session_guard] 消息循环线程已启动 (HWND=0x{:X})",
-                        hwnd
-                    );
+                    log::info!("[session_guard] 消息循环线程已启动 (HWND=0x{:X})", hwnd);
                     Ok(())
                 }
                 Ok(Err(e)) => {
@@ -569,7 +579,9 @@ mod win_backend {
                 if old_hwnd != 0 {
                     if let Ok(mut unreg_guard) = self.unreg_fn.lock() {
                         if let Some(unreg) = unreg_guard.take() {
-                            unsafe { unreg(old_hwnd); }
+                            unsafe {
+                                unreg(old_hwnd);
+                            }
                         }
                     }
                     *hwnd_guard = 0;
@@ -596,7 +608,9 @@ mod win_backend {
                 if hwnd != 0 {
                     if let Ok(mut unreg_guard) = self.unreg_fn.lock() {
                         if let Some(unreg) = unreg_guard.take() {
-                            unsafe { unreg(hwnd); }
+                            unsafe {
+                                unreg(hwnd);
+                            }
                         }
                     }
                 }
@@ -611,9 +625,7 @@ mod win_backend {
                     let deadline = Instant::now() + Duration::from_secs(2);
                     while !handle.is_finished() {
                         if Instant::now() >= deadline {
-                            log::error!(
-                                "[session_guard] 消息循环线程 2s 内未退出"
-                            );
+                            log::error!("[session_guard] 消息循环线程 2s 内未退出");
                             break;
                         }
                         thread::sleep(Duration::from_millis(10));
@@ -651,7 +663,10 @@ mod win_backend {
         stop_flag: Arc<AtomicBool>,
         high_security: Arc<AtomicBool>,
     ) {
-        log::info!("[session_guard] 工作线程已启动（含看门狗，间隔 {}s）", WATCHDOG_CHECK_SECS);
+        log::info!(
+            "[session_guard] 工作线程已启动（含看门狗，间隔 {}s）",
+            WATCHDOG_CHECK_SECS
+        );
 
         loop {
             match receiver.recv_timeout(Duration::from_secs(WATCHDOG_CHECK_SECS)) {
@@ -691,10 +706,7 @@ mod win_backend {
                     // 看门狗检查消息循环线程
                     if !message_loop_state.is_alive() {
                         if let Err(e) = message_loop_state.restart() {
-                            log::error!(
-                                "[session_guard] 第 6 项：消息循环重启失败: {}",
-                                e
-                            );
+                            log::error!("[session_guard] 第 6 项：消息循环重启失败: {}", e);
                         }
                     }
                 }
@@ -926,11 +938,7 @@ impl SessionGuard {
 
         SessionGuard {
             #[cfg(target_os = "windows")]
-            backend: win_backend::WindowsBackend::new(
-                on_lock.clone(),
-                on_unlock.clone(),
-                false,
-            ),
+            backend: win_backend::WindowsBackend::new(on_lock.clone(), on_unlock.clone(), false),
             #[cfg(not(target_os = "windows"))]
             backend: noop_backend::NoopBackend::new(false),
             on_lock,

@@ -33,14 +33,15 @@
  *      - 记录时间戳、操作类型、结果状态
  */
 
-pub mod session_guard;
-pub mod file_lock;
-pub mod usb_guard;
-pub mod module_whitelist;
-pub mod cleanup;
-pub mod brute_force;
 pub mod background_patrol;
+pub mod brute_force;
+pub mod cleanup;
 pub mod clipboard_guard;
+pub mod command_names;
+pub mod file_lock;
+pub mod module_whitelist;
+pub mod session_guard;
+pub mod usb_guard;
 
 /* ====================================================================== *
  *  统一剪贴板清空入口                                *
@@ -257,8 +258,7 @@ impl WindowPrivacyGuard {
         } else {
             Err(format!(
                 "SetWindowDisplayAffinity(0x{:X}) 失败 (HWND=0x{:X})",
-                affinity,
-                self.hwnd
+                affinity, self.hwnd
             ))
         }
     }
@@ -333,7 +333,9 @@ pub fn set_window_privacy(hwnd: isize, enabled: bool) -> bool {
 #[cfg(target_os = "windows")]
 fn set_window_display_affinity(hwnd: isize, affinity: u32) -> bool {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY,
+    };
 
     unsafe {
         let hwnd = HWND(hwnd as *mut _);

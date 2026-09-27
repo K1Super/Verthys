@@ -15,10 +15,11 @@
  */
 
 use crate::constants::{
-    SHM_ENTRY_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_MAX_SIZE,
-    SHM_SUMMARY_ENTRY_SIZE, SHM_SUMMARY_MAGIC, SHM_SUMMARY_MAX_SIZE,
+    SHM_ENTRY_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_MAX_SIZE, SHM_SUMMARY_ENTRY_SIZE,
+    SHM_SUMMARY_MAGIC, SHM_SUMMARY_MAX_SIZE,
 };
 use crate::controller::types::{VerthysRecordEntry, VerthysSummaryEntry};
+use crate::infrastructure::ipc_secure::{shm_auth_verify, SHM_AUTH_BLOCK_LEN};
 use crate::util::base64::base64_encode;
 use crate::util::random::fill_random_bytes;
 use crate::util::secured_string::SecuredString;
@@ -50,15 +51,21 @@ fn note_cleanup_failure(op: &str, result: windows::core::Result<()>) {
 /// - 越界记录跳过而非整体失败，兼容部分损坏场景。
 /// - 使用 `VirtualLock` 锁定映射页，防止换出到 pagefile。
 #[cfg(windows)]
-pub fn read_shm_records(shm_name: &str) -> Result<(Vec<VerthysRecordEntry>, bool, usize), String> {
-    use windows::Win32::System::Memory::{
-        MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualLock,
-        VirtualUnlock, FILE_MAP_WRITE,
-    };
-    use windows::Win32::Foundation::CloseHandle;
+pub fn read_shm_records(
+    shm_name: &str,
+    auth_key: Option<&[u8]>,
+) -> Result<(Vec<VerthysRecordEntry>, bool, usize), String> {
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Memory::{
+        MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualLock, VirtualUnlock,
+        FILE_MAP_WRITE,
+    };
 
-    let wide: Vec<u16> = shm_name.encode_utf16().chain(std::iter::once(0u16)).collect();
+    let wide: Vec<u16> = shm_name
+        .encode_utf16()
+        .chain(std::iter::once(0u16))
+        .collect();
 
     unsafe {
         let handle = OpenFileMappingW(FILE_MAP_WRITE.0, false, PCWSTR::from_raw(wide.as_ptr()))
@@ -93,12 +100,17 @@ pub fn read_shm_records(shm_name: &str) -> Result<(Vec<VerthysRecordEntry>, bool
             note_cleanup_failure("VirtualUnlock", VirtualUnlock(base as *const _, lock_size));
             note_cleanup_failure("UnmapViewOfFile", UnmapViewOfFile(addr));
             note_cleanup_failure("CloseHandle", CloseHandle(handle));
-            return Err(format!("shared memory record_count too large: {}", record_count));
+            return Err(format!(
+                "shared memory record_count too large: {}",
+                record_count
+            ));
         }
 
-        let entries_size = record_count.checked_mul(SHM_ENTRY_SIZE)
+        let entries_size = record_count
+            .checked_mul(SHM_ENTRY_SIZE)
             .ok_or_else(|| "record_count * SHM_ENTRY_SIZE overflow".to_string())?;
-        let total_size = SHM_HEADER_SIZE.checked_add(entries_size)
+        let total_size = SHM_HEADER_SIZE
+            .checked_add(entries_size)
             .and_then(|s| s.checked_add(total_name_bytes))
             .and_then(|s| s.checked_add(total_data_bytes))
             .ok_or_else(|| "total_size arithmetic overflow".to_string())?;
@@ -111,6 +123,29 @@ pub fn read_shm_records(shm_name: &str) -> Result<(Vec<VerthysRecordEntry>, bool
                 "shared memory data exceeds SHM_MAX_SIZE: {} > {}",
                 total_size, SHM_MAX_SIZE
             ));
+        }
+
+        // SHM 认证：提供密钥时核验数据区尾部的 HMAC 标签，防同用户进程篡改
+        // 标签位于实际使用区之后 32 字节，认证失败即拒绝并审计（不含密钥）
+        if let Some(key) = auth_key {
+            let auth_end = total_size
+                .checked_add(SHM_AUTH_BLOCK_LEN)
+                .ok_or_else(|| "auth block size overflow".to_string())?;
+            if auth_end > SHM_MAX_SIZE {
+                note_cleanup_failure("VirtualUnlock", VirtualUnlock(base as *const _, lock_size));
+                note_cleanup_failure("UnmapViewOfFile", UnmapViewOfFile(addr));
+                note_cleanup_failure("CloseHandle", CloseHandle(handle));
+                return Err("SHM 认证失败：载荷完整性校验未通过".to_string());
+            }
+            let data_slice = std::slice::from_raw_parts(base, total_size);
+            let tag_slice = std::slice::from_raw_parts(base.add(total_size), SHM_AUTH_BLOCK_LEN);
+            if !shm_auth_verify(key, data_slice, tag_slice) {
+                log::error!("[read_shm_records] SHM 认证失败：载荷完整性校验未通过");
+                note_cleanup_failure("VirtualUnlock", VirtualUnlock(base as *const _, lock_size));
+                note_cleanup_failure("UnmapViewOfFile", UnmapViewOfFile(addr));
+                note_cleanup_failure("CloseHandle", CloseHandle(handle));
+                return Err("SHM 认证失败：载荷完整性校验未通过".to_string());
+            }
         }
 
         // 遍历索引条目
@@ -135,15 +170,17 @@ pub fn read_shm_records(shm_name: &str) -> Result<(Vec<VerthysRecordEntry>, bool
             // 逐条矩形区间校验：名称/数据字节必须完整落在各自区域内
             //（下界 + 上界双约束；坏 offset 拒绝并跳过该记录——与既有
             // 降级策略一致，防 base.add 越界指针）
-            let name_end = name_offset.checked_add(name_len)
+            let name_end = name_offset
+                .checked_add(name_len)
                 .ok_or_else(|| "name_offset + name_len overflow".to_string())?;
-            let data_end = data_offset.checked_add(data_len)
+            let data_end = data_offset
+                .checked_add(data_len)
                 .ok_or_else(|| "data_offset + data_len overflow".to_string())?;
 
-            let name_in_region = name_len == 0
-                || (name_offset >= name_region_start && name_end <= name_region_end);
-            let data_in_region = data_len == 0
-                || (data_offset >= data_region_start && data_end <= data_region_end);
+            let name_in_region =
+                name_len == 0 || (name_offset >= name_region_start && name_end <= name_region_end);
+            let data_in_region =
+                data_len == 0 || (data_offset >= data_region_start && data_end <= data_region_end);
             if !name_in_region || !data_in_region {
                 continue; // 跳过损坏记录
             }
@@ -176,7 +213,8 @@ pub fn read_shm_records(shm_name: &str) -> Result<(Vec<VerthysRecordEntry>, bool
         // 消费完成后用随机字节覆写共享内存，防止残留数据泄露
         log::info!(
             "[read_shm_records] 消费完成: count={}, total_size={}, 开始覆写共享内存",
-            record_count, total_size
+            record_count,
+            total_size
         );
         let wipe_slice = std::slice::from_raw_parts_mut(base as *mut u8, total_size);
         fill_random_bytes(wipe_slice);
@@ -190,7 +228,10 @@ pub fn read_shm_records(shm_name: &str) -> Result<(Vec<VerthysRecordEntry>, bool
 }
 
 #[cfg(not(windows))]
-pub fn read_shm_records(_shm_name: &str) -> Result<(Vec<VerthysRecordEntry>, bool, usize), String> {
+pub fn read_shm_records(
+    _shm_name: &str,
+    _auth_key: Option<&[u8]>,
+) -> Result<(Vec<VerthysRecordEntry>, bool, usize), String> {
     Err("shared memory scan not supported on non-Windows".into())
 }
 
@@ -202,21 +243,28 @@ pub fn read_shm_records(_shm_name: &str) -> Result<(Vec<VerthysRecordEntry>, boo
 ///
 /// 与 `read_shm_records` 的区别：
 /// - 验证 `SHM_SUMMARY_MAGIC` 而非 `SHM_MAGIC`。
-/// - 每条索引条目为 72 字节（含 `data_size`, `physical_offset`, `merkle_leaf`）。
+/// - 每条索引条目为 80 字节（`SHM_SUMMARY_ENTRY_SIZE`，8 字节对齐）：
+///   `[40..72]` `merkle_leaf`（32 字节内联）、`[72..80]` `created_time`。
 /// - 无独立数据区（`total_data_bytes` 恒为 0，`merkle_leaf` 内联在条目中）。
 /// - 返回 `VerthysSummaryEntry` 而非 `VerthysRecordEntry`。
 ///
 /// 同样进行严格的边界校验，消费后覆写共享内存，防止残留。
 #[cfg(windows)]
-pub fn read_shm_summary_records(shm_name: &str) -> Result<(Vec<VerthysSummaryEntry>, bool, usize), String> {
-    use windows::Win32::System::Memory::{
-        MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualLock,
-        VirtualUnlock, FILE_MAP_WRITE,
-    };
-    use windows::Win32::Foundation::CloseHandle;
+pub fn read_shm_summary_records(
+    shm_name: &str,
+    auth_key: Option<&[u8]>,
+) -> Result<(Vec<VerthysSummaryEntry>, bool, usize), String> {
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Memory::{
+        MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualLock, VirtualUnlock,
+        FILE_MAP_WRITE,
+    };
 
-    let wide: Vec<u16> = shm_name.encode_utf16().chain(std::iter::once(0u16)).collect();
+    let wide: Vec<u16> = shm_name
+        .encode_utf16()
+        .chain(std::iter::once(0u16))
+        .collect();
 
     unsafe {
         let handle = OpenFileMappingW(FILE_MAP_WRITE.0, false, PCWSTR::from_raw(wide.as_ptr()))
@@ -249,19 +297,27 @@ pub fn read_shm_summary_records(shm_name: &str) -> Result<(Vec<VerthysSummaryEnt
             note_cleanup_failure("VirtualUnlock", VirtualUnlock(base as *const _, lock_size));
             note_cleanup_failure("UnmapViewOfFile", UnmapViewOfFile(addr));
             note_cleanup_failure("CloseHandle", CloseHandle(handle));
-            return Err(format!("shared memory summary record_count too large: {}", record_count));
+            return Err(format!(
+                "shared memory summary record_count too large: {}",
+                record_count
+            ));
         }
 
         if total_data_bytes != 0 {
             note_cleanup_failure("VirtualUnlock", VirtualUnlock(base as *const _, lock_size));
             note_cleanup_failure("UnmapViewOfFile", UnmapViewOfFile(addr));
             note_cleanup_failure("CloseHandle", CloseHandle(handle));
-            return Err(format!("summary total_data_bytes must be 0, got {}", total_data_bytes));
+            return Err(format!(
+                "summary total_data_bytes must be 0, got {}",
+                total_data_bytes
+            ));
         }
 
-        let entries_size = record_count.checked_mul(SHM_SUMMARY_ENTRY_SIZE)
+        let entries_size = record_count
+            .checked_mul(SHM_SUMMARY_ENTRY_SIZE)
             .ok_or_else(|| "summary record_count * SHM_SUMMARY_ENTRY_SIZE overflow".to_string())?;
-        let total_size = SHM_HEADER_SIZE.checked_add(entries_size)
+        let total_size = SHM_HEADER_SIZE
+            .checked_add(entries_size)
             .and_then(|s| s.checked_add(total_name_bytes))
             .ok_or_else(|| "summary total_size arithmetic overflow".to_string())?;
 
@@ -273,6 +329,28 @@ pub fn read_shm_summary_records(shm_name: &str) -> Result<(Vec<VerthysSummaryEnt
                 "summary shared memory data exceeds SHM_SUMMARY_MAX_SIZE: {} > {}",
                 total_size, SHM_SUMMARY_MAX_SIZE
             ));
+        }
+
+        // SHM 认证：与全量路径同口径，核验数据区尾部 HMAC 标签（不含密钥）
+        if let Some(key) = auth_key {
+            let auth_end = total_size
+                .checked_add(SHM_AUTH_BLOCK_LEN)
+                .ok_or_else(|| "summary auth block size overflow".to_string())?;
+            if auth_end > SHM_SUMMARY_MAX_SIZE {
+                note_cleanup_failure("VirtualUnlock", VirtualUnlock(base as *const _, lock_size));
+                note_cleanup_failure("UnmapViewOfFile", UnmapViewOfFile(addr));
+                note_cleanup_failure("CloseHandle", CloseHandle(handle));
+                return Err("SHM 认证失败：载荷完整性校验未通过".to_string());
+            }
+            let data_slice = std::slice::from_raw_parts(base, total_size);
+            let tag_slice = std::slice::from_raw_parts(base.add(total_size), SHM_AUTH_BLOCK_LEN);
+            if !shm_auth_verify(key, data_slice, tag_slice) {
+                log::error!("[read_shm_summary_records] SHM 认证失败：载荷完整性校验未通过");
+                note_cleanup_failure("VirtualUnlock", VirtualUnlock(base as *const _, lock_size));
+                note_cleanup_failure("UnmapViewOfFile", UnmapViewOfFile(addr));
+                note_cleanup_failure("CloseHandle", CloseHandle(handle));
+                return Err("SHM 认证失败：载荷完整性校验未通过".to_string());
+            }
         }
 
         let entries_start = base.add(SHM_HEADER_SIZE);
@@ -295,10 +373,11 @@ pub fn read_shm_summary_records(shm_name: &str) -> Result<(Vec<VerthysSummaryEnt
 
             // 逐条矩形区间校验：名称字节必须完整落在名称区内
             //（下界 + 上界双约束；坏 offset 拒绝并跳过该记录）
-            let name_end = name_offset.checked_add(name_len)
+            let name_end = name_offset
+                .checked_add(name_len)
                 .ok_or_else(|| "summary name_offset + name_len overflow".to_string())?;
-            let name_in_region = name_len == 0
-                || (name_offset >= name_region_start && name_end <= name_region_end);
+            let name_in_region =
+                name_len == 0 || (name_offset >= name_region_start && name_end <= name_region_end);
             if !name_in_region {
                 continue;
             }
@@ -324,7 +403,8 @@ pub fn read_shm_summary_records(shm_name: &str) -> Result<(Vec<VerthysSummaryEnt
 
         log::info!(
             "[read_shm_summary_records] 消费完成: count={}, total_size={}, 开始覆写共享内存",
-            record_count, total_size
+            record_count,
+            total_size
         );
         let wipe_slice = std::slice::from_raw_parts_mut(base as *mut u8, total_size);
         fill_random_bytes(wipe_slice);
@@ -338,7 +418,10 @@ pub fn read_shm_summary_records(shm_name: &str) -> Result<(Vec<VerthysSummaryEnt
 }
 
 #[cfg(not(windows))]
-pub fn read_shm_summary_records(_shm_name: &str) -> Result<(Vec<VerthysSummaryEntry>, bool, usize), String> {
+pub fn read_shm_summary_records(
+    _shm_name: &str,
+    _auth_key: Option<&[u8]>,
+) -> Result<(Vec<VerthysSummaryEntry>, bool, usize), String> {
     Err("shared memory summary scan not supported on non-Windows".into())
 }
 
@@ -465,7 +548,7 @@ mod tests {
         ];
         unsafe { write_records_layout(base, &entries, b"AB", b"") };
 
-        let (out, _exhausted, count) = read_shm_records(&name).expect("read_shm_records");
+        let (out, _exhausted, count) = read_shm_records(&name, None).expect("read_shm_records");
         assert_eq!(count, 2, "头部声明计数原样回传");
         assert_eq!(out.len(), 1, "坏 offset 记录被跳过");
         assert_eq!(out[0].id, 2);
@@ -489,7 +572,7 @@ mod tests {
         ];
         unsafe { write_records_layout(base, &entries, b"", b"XXXXXXXX") };
 
-        let (out, _exhausted, count) = read_shm_records(&name).expect("read_shm_records");
+        let (out, _exhausted, count) = read_shm_records(&name, None).expect("read_shm_records");
         assert_eq!(count, 2);
         assert_eq!(out.len(), 0, "数据区越界/重叠记录全部拒绝");
 
@@ -507,7 +590,8 @@ mod tests {
         let entries = [(1u64, 1u32, 2u32, 8u64), (2u64, 1u32, 2u32, 224u64)];
         unsafe { write_summary_layout(base, &entries, b"XY") };
 
-        let (out, _exhausted, count) = read_shm_summary_records(&name).expect("read_shm_summary_records");
+        let (out, _exhausted, count) =
+            read_shm_summary_records(&name, None).expect("read_shm_summary_records");
         assert_eq!(count, 2);
         assert_eq!(out.len(), 1, "坏 offset 摘要记录被跳过");
         assert_eq!(out[0].id, 2);

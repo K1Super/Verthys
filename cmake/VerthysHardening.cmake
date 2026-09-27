@@ -69,6 +69,11 @@ set(VERTHYS_LINK_RELEASE
 function(verthys_apply_hardening target)
     target_compile_options(${target} PRIVATE ${VERTHYS_SAFETY_FLAGS})
     target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:${VERTHYS_RELEASE_FLAGS}>)
+    # /WX 分阶段收紧（当前阶段：Debug）：
+    #   新引入的编译警告在 Debug 配置即阻断构建——CI 的 Ninja Debug
+    #   构建与 clang-tidy 门首先生效；Release 侧待存量告警基线清理
+    #   完成后归入全量（避免一次性升级导致发布构建被历史告警阻塞）。
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Debug>:/WX>)
     target_link_options(${target} PRIVATE ${VERTHYS_LINK_BASE})
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         target_link_options(${target} PRIVATE ${VERTHYS_LINK_X64})

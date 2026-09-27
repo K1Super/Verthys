@@ -13,6 +13,9 @@ pub(crate) type VerthysHandle = *mut c_void;
 /// 标准化错误码
 pub(crate) const VERTHYS_OK: u32 = 0x00000000;
 
+/// 落盘自查成功状态码（对齐 C 端 VerPersistStatus::VERTHYS_PERSIST_OK）
+pub(crate) const VERTHYS_PERSIST_OK: i32 = 0;
+
 /// repr(C) 记录结构（与 C 端 VerthysRecord 对齐）
 #[repr(C)]
 pub(crate) struct VerthysRecordC {
@@ -27,6 +30,18 @@ pub(crate) struct VerthysRecordC {
 pub(crate) type VerthysInitFn = unsafe extern "C" fn(*mut VerthysHandle) -> u32;
 /// 通知 DLL 当前 Worker 已应用的沙盒属性位掩码
 pub(crate) type VerthysNotifySandboxAttrsFn = unsafe extern "C" fn(u32) -> u32;
+/// 容器版本探测结构：仅映射 C 端 VerthysContainerInfo 的前 8 字节
+/// （api_version u32 + fmt_version u16 + preset u16）。前导字段布局为
+/// ABI 固定契约，加载方据此在布局敏感调用之前校准版本兼容性；
+/// 后续字段一概不触碰。
+#[repr(C)]
+pub(crate) struct VerthysContainerInfoProbeC {
+    pub(crate) api_version: u32,
+    pub(crate) fmt_version: u16,
+    pub(crate) preset: u16,
+}
+pub(crate) type VerthysGetContainerInfoFn =
+    unsafe extern "C" fn(VerthysHandle, *mut VerthysContainerInfoProbeC) -> u32;
 pub(crate) type VerthysDeinitFn = unsafe extern "C" fn(VerthysHandle) -> u32;
 pub(crate) type VerthysUnlockFn =
     unsafe extern "C" fn(VerthysHandle, *const c_char, *const c_char, usize, u32) -> u32;
@@ -97,10 +112,26 @@ pub(crate) type VerthysRegisterUnlockProgressFn = unsafe extern "C" fn(
 /* 游标批量扫描函数指针类型 */
 /// VerthysScanCursor 不透明指针
 pub(crate) type VerthysScanCursorPtr = *mut c_void;
-pub(crate) type VerthysScanOpenFn = unsafe extern "C" fn(
+
+/// VerthysScanProject 取值（与 verthys.h 对齐）
+pub(crate) const VERTHYS_SCAN_PROJECT_FULL: u32 = 0;
+pub(crate) const VERTHYS_SCAN_PROJECT_INDEX: u32 = 1;
+
+/// Verthys_ScanOpenEx：带投影与取批预算的扫描游标入口
+///
+/// 投影与取批预算均随游标携带（Fetch 签名不变）：
+///   - project：投影选择（FULL=全量解密 / INDEX=仅内联小记录解密）
+///   - index_inline_max_bytes：INDEX 投影的内联数据阈值（0=纯索引）
+///   - max_batch_bytes：单次 Fetch 输出字节预算（0=不限）
+/// 既有入口 Verthys_ScanOpen 保留在 C 侧（等价于 Ex 的 FULL/0/0），
+/// worker 统一经本入口打开游标：投影与预算无法经旧签名传入。
+pub(crate) type VerthysScanOpenExFn = unsafe extern "C" fn(
     VerthysHandle,
     u64,                    /* start_lid */
     u64,                    /* batch_size */
+    u32,                    /* project（VerthysScanProject） */
+    u64,                    /* index_inline_max_bytes */
+    u64,                    /* max_batch_bytes */
     *mut VerthysScanCursorPtr, /* out_cursor */
 ) -> u32;
 pub(crate) type VerthysScanFetchFn = unsafe extern "C" fn(
@@ -155,8 +186,9 @@ pub(crate) type VerthysScanSummaryFetchFn = unsafe extern "C" fn(
     *mut u64,                    /* out_count */
 ) -> u32;
 pub(crate) type VerthysScanSummaryRecordFreeFn = unsafe extern "C" fn(*mut VerthysSummaryRecordC) -> u32;
-/// 轻量摘要记录数查询
-/// 移出导出白名单（ci/export_baseline.txt），对应 FFI 类型一并删除
+/// 轻量摘要记录数查询。
+/// 该符号仍在导出白名单且在役（core/verthys.def 导出，worker 经
+/// scan_summary 路径实际调用）——保留对应 FFI 绑定额。
 pub(crate) type VerthysGetSummaryCountFn = unsafe extern "C" fn(VerthysHandle, *mut u64) -> u32;
 
 /* 动态防护状态查询 FFI 绑定
@@ -190,3 +222,30 @@ pub(crate) type VerthysHasRecordByTypeFn = unsafe extern "C" fn(VerthysHandle, u
  *   （不报 FORMAT，避免前端 probe 抛异常）
  *   用于解锁成功后进程内探测全局主密钥记录，消除解锁后 3~4 次 IPC 往返 */
 pub(crate) type VerthysFindFirstLidByTypeFn = unsafe extern "C" fn(VerthysHandle, u8, *mut u8, *mut u64) -> u32;
+
+/* 落盘自查 FFI 绑定（与 verthys.h Verthys_VerifyPersist 严格对齐）
+ *
+ * C 端签名：VerPersistStatus Verthys_VerifyPersist(VerthysHandle, VerPersistVerifyResult*)
+ *   - 返回 VerPersistStatus（C enum = int = 4 字节，0=OK）
+ *   - 结构体布局（x64，8 字节对齐）：
+ *       [i32 status][4B pad][u64 file_size][u64 mtime_ms]
+ *       [u32 header_magic][u32 header_version][u64 wal_offset]
+ *       [c_char last_error; 256]  → sizeof = 296
+ *
+ * Why 走 worker 而非主机主进程：容器会话在 C 层子进程内以独占方式
+ * 持有超级块区 [0,64KB) 字节范围锁（Windows 强制锁），主进程新开句柄
+ * 读取恒被 ERROR_LOCK_VIOLATION 拒绝；只有持锁子进程内的持锁句柄
+ * （ctx->v3->f）能完成自查。 */
+#[repr(C)]
+pub(crate) struct VerPersistVerifyResultC {
+    pub(crate) status: i32,
+    pub(crate) file_size: u64,
+    pub(crate) mtime_ms: u64,
+    pub(crate) header_magic: u32,
+    pub(crate) header_version: u32,
+    pub(crate) wal_offset: u64,
+    pub(crate) last_error: [c_char; 256],
+}
+
+pub(crate) type VerthysVerifyPersistFn =
+    unsafe extern "C" fn(VerthysHandle, *mut VerPersistVerifyResultC) -> i32;

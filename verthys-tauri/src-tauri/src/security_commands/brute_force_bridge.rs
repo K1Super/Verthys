@@ -20,32 +20,44 @@
  *     由守卫内部消化，仅透传审计。
  */
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::security::brute_force::{AttemptResult, BruteForceCheck};
+use crate::service::unlock_gate::{self, UnlockGate};
 use crate::util::audit_log::{AuditEventType, AuditResult};
 
 use super::audit::write_security_audit;
 use super::persistence::{ensure_brute_force_loaded, persist_brute_force_state};
 use super::state::{lock_brute_force_or_recover, SecurityState};
 
-/// worker 错误码统一化后的认证域错误标识（口令错误/认证数据损坏）。
-/// 仅此错误码构成暴破证据并计数；通信层失败、格式错误与功能性
-/// 状态码不计数，防止非口令因素被误判为暴破。
-pub(crate) const AUTH_DOMAIN_ERROR: &str = "ERR_00000002";
+/// 注册本模块实现到服务层闸门契约（应用启动阶段调用一次）。
+///
+/// 依赖反转落地：service 层只声明契约，本模块提供实现；控制器经 service
+/// 调用闸门，杜绝 controller → security_commands 的反向依赖（分层红线）。
+/// 判定结果枚举与认证域错误标识同样定义在 service 层（契约随实现分离）。
+pub(crate) fn install_unlock_gate() {
+    unlock_gate::install(
+        adapter_gate_check,
+        adapter_record_failure,
+        adapter_record_success,
+    );
+}
 
-/// 口令类命令入口的熔断判定结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UnlockGate {
-    /// 允许发起本次尝试
-    Allowed,
-    /// 熔断锁定中，携带剩余秒数
-    Locked(u64),
-    /// 失败次数已达清空阈值，要求先执行索引清空与完整性校验
-    PurgeRequired,
-    /// 守卫状态不可用（锁中毒等内部异常）。
-    /// 安全语义为 fail-closed：无法确认熔断状态时拒绝放行。
-    Unavailable,
+/// 从应用句柄取安全状态（与命令注入的是同一托管实例）
+fn state_of(app: &AppHandle) -> tauri::State<'_, SecurityState> {
+    app.state::<SecurityState>()
+}
+
+fn adapter_gate_check(app: &AppHandle) -> UnlockGate {
+    gate_check(app, &state_of(app))
+}
+
+fn adapter_record_failure(app: &AppHandle) {
+    record_auth_failure(app, &state_of(app));
+}
+
+fn adapter_record_success(app: &AppHandle) {
+    record_auth_success(app, &state_of(app));
 }
 
 /// 口令类命令入口熔断检查（在口令进入任何业务逻辑之前调用）。
@@ -112,14 +124,7 @@ pub(crate) fn record_auth_failure(app: &AppHandle, state: &SecurityState) {
         }
         _ => AuditEventType::SecurityCommand,
     };
-    write_security_audit(
-        app,
-        state,
-        event_type,
-        audit_result,
-        None,
-        audit_detail,
-    );
+    write_security_audit(app, state, event_type, audit_result, None, audit_detail);
 }
 
 /// 记录一次服务端观察到的口令验证成功：重置连续失败计数。

@@ -79,6 +79,8 @@ pub enum ErrorCode {
     DiskSpaceInsufficient,
     /// 磁盘空间查询失败（无法获取剩余空间）
     DiskSpaceUnknown,
+    /// 流式写入会话不存在（无效标识或已结束/已中止）
+    StreamNotFound,
 
     // ===== 频率限制 / 熔断 =====
     /// 操作频率超限（剪贴板 / 爆破计数 / 批次断档）
@@ -137,6 +139,7 @@ impl ErrorCode {
             ErrorCode::FileTooLarge => "FILE_TOO_LARGE",
             ErrorCode::DiskSpaceInsufficient => "DISK_SPACE_INSUFFICIENT",
             ErrorCode::DiskSpaceUnknown => "DISK_SPACE_UNKNOWN",
+            ErrorCode::StreamNotFound => "STREAM_NOT_FOUND",
             ErrorCode::RateLimited => "RATE_LIMITED",
             ErrorCode::ClipboardMonitorFailed => "CLIPBOARD_MONITOR_FAILED",
             ErrorCode::DeviceMismatch => "DEVICE_MISMATCH",
@@ -170,6 +173,7 @@ impl ErrorCode {
             ErrorCode::FileTooLarge => "文件过大",
             ErrorCode::DiskSpaceInsufficient => "磁盘空间不足",
             ErrorCode::DiskSpaceUnknown => "无法获取磁盘空间信息",
+            ErrorCode::StreamNotFound => "流式写入会话不存在或已结束",
             ErrorCode::RateLimited => "操作过于频繁，请稍后重试",
             ErrorCode::ClipboardMonitorFailed => "剪贴板监听启动失败",
             ErrorCode::DeviceMismatch => "设备指纹不匹配",

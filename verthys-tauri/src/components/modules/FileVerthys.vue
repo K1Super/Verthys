@@ -32,15 +32,6 @@
       />
     </div>
 
-    <!-- 导入进度（含断点续传） -->
-    <div v-if="importing" class="import-panel glass">
-      <div class="import-info">
-        <span class="import-name">{{ importingFile }}</span>
-        <span class="import-progress-text">{{ importDone }} / {{ importTotal }} 块 · {{ importPercent }}%</span>
-      </div>
-      <div class="progress-bar"><div class="progress-fill" :style="{ width: importPercent + '%' }"></div></div>
-    </div>
-
     <!-- 文件卡片网格：≥150 条启用虚拟滚动（项1），小列表保留原 v-for 路径零开销 -->
     <VirtualCardGrid
       v-if="filteredFiles.length >= 150"
@@ -182,6 +173,16 @@
       @confirm="confirmDelete"
       @cancel="showDeleteConfirm = false"
     />
+
+    <!-- 导入进度悬浮覆盖层（统一组件，复用量子能量导流通道）：
+         悬浮模块内容区中央，不挤压下方文件网格 -->
+    <ImportProgressOverlay
+      :visible="importing"
+      :percent="importPercent"
+      :message="importingFile"
+      :detail="`${importDone} / ${importTotal} 块 · ${importPercent}%`"
+      :show-meta="false"
+    />
   </div>
 </template>
 
@@ -191,14 +192,16 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import ActionButton from "../common/verthys-ui/ActionButton.vue";
 import CosmicLoading from "../common/cosmic/CosmicLoading.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
+import ImportProgressOverlay from "../common/cosmic/ImportProgressOverlay.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 import {
   verthysAddRecord, verthysGetRecord, verthysDeleteRecord,
   readUserFile, base64ToBytes, bytesToBase64, writeUserFile,
   encryptPasswordField, decryptPasswordField,
 } from "../../lib/verthys";
-import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, clearSummaryCache, clearFullRecordCache, ensureRecordScanSafe, getRecordIdsByType, invalidateScannedRecord, clearRecordScanCache, getRecordsDataB64Batch } from "../../lib/keyManager";
+import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, ensureIndexSourceSafe, getSummaryIdsByType, getRecordIdsByType, invalidateScannedRecord, getRecordsDataB64Batch } from "../../lib/keyManager";
 import { TYPE_FILEVERTHYS_META, TYPE_FILEVERTHYS_CHUNK, TYPE_FILEVERTHYS_META_OLD } from "../../constants/record_types";
+import { MAX_FILE_CHUNK_SIZE_BYTES } from "../../constants/photo_budget.generated";
 import { useErrorToast } from "../../composables/useErrorToast";
 import {
   updateShallowItem, pushShallowItems, replaceShallowArray,
@@ -219,12 +222,15 @@ interface FileEntry {
   totalChunks: number;
   encrypted: boolean;
   metaId?: number;             // 元数据记录 ID
-  chunkIds?: number[];         // 旧格式：数据块记录 ID 列表
-  chunkDataB64?: string[];     // 新格式：内联 chunk 数据（参考 PhotoAlbum，避免 ID 漂移）
+  chunkIds?: number[];         // 外置格式：数据块记录 ID 列表（当前写入形态）
+  chunkDataB64?: string[];     // 历史内联格式：meta 记录内嵌的全部块密文
 }
 
 /* ===== 常量 ===== */
-const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB 每块
+/* 分块口径取跨层预算常量单一权威来源（禁止字面量）。
+ *   块恒以独立记录落库、meta 只保存引用与展示字段，单文件体量不再受
+ *   单条记录载荷约束（仅受容器容量约束），导入前无需体量拦截。 */
+const CHUNK_SIZE = MAX_FILE_CHUNK_SIZE_BYTES;
 /* 修复：TYPE 常量从 record_types.ts 导入，不再本地定义
  *   TYPE_FILEVERTHYS_META (0x08) — 原 TYPE_FILEVERTHYS_META=0x05，与 TYPE_PHOTO_CHUNK 冲突，已改
  *   TYPE_FILEVERTHYS_CHUNK (0x04) — 原 TYPE_FILEVERTHYS_CHUNK=0x04，值不变仅重命名
@@ -392,8 +398,12 @@ const startImport = async () => {
       importTotal.value = totalChunks;
       importDone.value = 0;
 
-      // 2. 分块加密（全部内联到 meta 记录，参考 PhotoAlbum 模式，避免 ID 漂移）
-      const chunkDataB64: string[] = [];
+      // 2. 分块加密后逐块落为独立 chunk 记录，meta 只保存引用（chunkIds）。
+      //    Why 外置：内联模型把全部块密文塞进单条 meta，受单条记录载荷上限约束；
+      //    块恒独立落库后，单文件体量只受容器容量约束，meta 体积与文件大小解耦。
+      //    块加密口径与历史内联块完全一致：设置文档密码时逐块 AES-GCM、否则明文块，
+      //    读取侧按同一路径解密。
+      const chunkIds: number[] = [];
       for (let i = 0; i < totalChunks; i++) {
         const start = i * CHUNK_SIZE;
         const end = Math.min(start + CHUNK_SIZE, fileSize);
@@ -407,7 +417,16 @@ const startImport = async () => {
           chunkData = base64ToBytes(encryptedB64);
         }
 
-        chunkDataB64.push(bytesToBase64(chunkData));
+        const chunkId = await verthysAddRecord(
+          TYPE_FILEVERTHYS_CHUNK, `chunk_${fileName}_${i}`, bytesToBase64(chunkData),
+        );
+        // 块落库失败即抛出：不得留下「部分块已落库、meta 未写」的静默残留。
+        // 中断本文件导入由既有 try/catch 计入失败并在日志中留痕，便于追溯。
+        if (chunkId === null) {
+          throw new Error(`数据块 ${i + 1}/${totalChunks} 写入失败`);
+        }
+        chunkIds.push(chunkId);
+
         importDone.value = i + 1;
         // 多文件时进度合并显示
         const fileProgress = (i + 1) / totalChunks;
@@ -416,13 +435,13 @@ const startImport = async () => {
           : Math.round(((fi + fileProgress) / list.length) * 100);
       }
 
-      // 3. 存储元数据记录（单条记录包含所有 chunk 数据，无单独 chunk 记录）
+      // 3. 存储元数据记录（仅保存展示字段与块引用，不再内联块密文）
       const meta = {
         name: fileName,
         size: fileSize,
         mime: fileMime,
-        chunkIds: [] as number[],   // 新格式不使用，保留兼容
-        chunkDataB64,                // 内联 chunk 数据
+        chunkIds,                     // 外置块引用
+        chunkDataB64: [] as string[], // 外置后 meta 不再内联块密文
         chunkSize: CHUNK_SIZE,
         totalChunks,
         completedChunks: totalChunks,
@@ -444,7 +463,7 @@ const startImport = async () => {
         totalChunks,
         encrypted: usePassword.value,
         metaId: metaId || undefined,
-        chunkDataB64,
+        chunkIds,
       });
       successCount++;
     } catch (e) {
@@ -522,7 +541,7 @@ const doSave = async (f: FileEntry, password: string | null) => {
     return;
   }
 
-  // 1. 收集所有 chunk 的 base64 数据（优先使用内联 chunkDataB64，旧格式回退到 chunkIds）
+  // 1. 收集所有 chunk 的 base64 数据（优先使用历史内联 chunkDataB64，外置格式回退到 chunkIds）
   const chunkB64List: string[] = [];
   if (f.chunkDataB64 && f.chunkDataB64.length > 0) {
     chunkB64List.push(...f.chunkDataB64);
@@ -596,7 +615,7 @@ const confirmDelete = async () => {
   showToast(`已删除 ${f.name}`);
   // 修复：await deleteAndPersist + await persistVerthys（根治删除后复活）
   if (isTauri) {
-    // 收集所有需要删除的 recordId（旧格式 chunk 记录 + meta 记录）
+    // 收集所有需要删除的 recordId（外置 chunk 记录 + meta 记录）
     const idsToDelete: number[] = [];
     if (f.chunkIds && f.chunkIds.length > 0 && (!f.chunkDataB64 || f.chunkDataB64.length === 0)) {
       for (const chunkId of f.chunkIds) idsToDelete.push(chunkId);
@@ -701,14 +720,15 @@ const loadFiles = async () => {
   // 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
   const newItems: FileEntry[] = [];
 
-  // 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
-  //    原实现：ensureSummaryScanSafe + for 循环串行 getFullRecord（meta + 内层 chunk
-  //            双层串行 IPC，N 个文件 × M 个 chunk → N×M 次 IPC，与后台扫描抢 worker → 30s）
-  //    新实现：ensureRecordScanSafe + getRecordsDataB64Batch（meta 批量 + chunk 批量，
-  //            扫描缓存命中零 IPC，未命中并行回退），总耗时 < 2.5s。
-  await ensureRecordScanSafe();
-  // 从扫描缓存取 ID 列表
-  let metaIds = getRecordIdsByType(TYPE_FILEVERTHYS_META);
+  // ID 来源：摘要索引优先（仅读索引、不解密数据，不受记录体积影响）；
+  //   摘要缓存整体为空（旧格式容器/熔断静默返回空）时回退记录扫描缓存。
+  //   记录扫描仍会在后台并发触发一次作数据层预热：命中扫描缓存的小体积记录
+  //   在后续批量取数时零 IPC；预热失败不影响列表可用性（取数走并行 IPC 回退）。
+  const useSummaryIds = await ensureIndexSourceSafe();
+  const idsOf = (type: number): number[] =>
+    useSummaryIds ? getSummaryIdsByType(type) : getRecordIdsByType(type);
+
+  let metaIds = idsOf(TYPE_FILEVERTHYS_META);
   // 修复：旧类型 0x05 回退扫描（迁移失败的兜底）
   //
   // 原缺陷：若 migrateRecordTypes 超时/失败，旧 FileVerthys 元数据仍停留在 0x05
@@ -718,7 +738,7 @@ const loadFiles = async () => {
   // 修复：若 0x08 无记录，追加扫描 0x05 记录。后续 JSON.parse 会自然过滤掉
   //   照片数据块（二进制密文 parse 失败 → catch 跳过），仅保留 FileVerthys 元数据。
   if (metaIds.length === 0) {
-    metaIds = getRecordIdsByType(TYPE_FILEVERTHYS_META_OLD);
+    metaIds = idsOf(TYPE_FILEVERTHYS_META_OLD);
   }
 
   // 增量过滤 + 去重，仅批量获取需要处理的 meta
@@ -733,7 +753,7 @@ const loadFiles = async () => {
         const bytes = base64ToBytes(metaDataB64);
         const meta = JSON.parse(new TextDecoder().decode(bytes));
 
-        // 新格式：优先使用内联 chunkDataB64
+        // 历史内联格式：meta 内嵌块密文（读取侧优先按内联还原）
         if (meta.chunkDataB64 && meta.chunkDataB64.length > 0) {
           // 项2：收集到 newItems，循环外一次性 pushShallowItems
           newItems.push({
@@ -749,69 +769,23 @@ const loadFiles = async () => {
           existingMetaIds.add(id);
           hasNewFiles = true;
         }
-        // 旧格式迁移：如果 meta 有 chunkIds 但无 chunkDataB64，批量读取 chunk 记录并内联
+        // 外置格式：meta 只保存块引用（chunkIds），块密文在独立 chunk 记录中，
+        // 读取侧按引用取块解密（导出与删除级联均依赖 chunkIds）。
+        // 迁移方向已反转，外置为当前写入形态，不再把块回填内联进 meta。
         else if (meta.chunkIds && meta.chunkIds.length > 0) {
-          // 2. 批量获取该 meta 的所有 chunk 数据（扫描缓存优先，并行 IPC 回退）
-          const chunkB64Map = await getRecordsDataB64Batch(meta.chunkIds);
-          const chunkDataB64: string[] = [];
-          let allFound = true;
-          for (const cid of meta.chunkIds) {
-            const chunkB64 = chunkB64Map.get(cid);
-            if (!chunkB64) { allFound = false; break; }
-            chunkDataB64.push(chunkB64);
-          }
-          if (allFound && chunkDataB64.length === meta.chunkIds.length) {
-            // 迁移成功：将 chunk 数据内联到 meta 记录
-            meta.chunkDataB64 = chunkDataB64;
-            const migratedMetaB64 = bytesToBase64(new TextEncoder().encode(JSON.stringify(meta)));
-            const newMetaId = await verthysAddRecord(TYPE_FILEVERTHYS_META, `meta_${meta.name}`, migratedMetaB64);
-            if (newMetaId !== null) {
-              try { await verthysDeleteRecord(id); } catch { /* */ }
-              // 删除旧的 chunk 记录
-              for (const cid of meta.chunkIds) {
-                try { await verthysDeleteRecord(cid); } catch { /* */ }
-              }
-              // 数据持久化修复：检查迁移落盘返回值，失败时提示用户
-              let migratePersistOk = false;
-              try { migratePersistOk = await persistVerthys(); } catch (e) { console.error("[loadFiles] 迁移 persistVerthys 异常", e); }
-              if (!migratePersistOk) {
-                showError("文件数据迁移已执行但持久化失败，重启后可能需重新迁移。请勿关闭应用并重试");
-              }
-              // 迁移涉及批量增删，清空所有缓存确保一致性
-              clearRecordScanCache();   // 清空旧扫描缓存
-              clearSummaryCache();      // 清空摘要缓存
-              clearFullRecordCache();   // 清空全量记录缓存
-            }
-            const finalMetaId = newMetaId || id;
-            // 项2：收集到 newItems，循环外一次性 pushShallowItems
-            newItems.push({
-              id: Date.now() + id,
-              name: meta.name,
-              size: meta.size,
-              mime: meta.mime,
-              totalChunks: meta.totalChunks,
-              encrypted: meta.encrypted,
-              metaId: finalMetaId,
-              chunkDataB64,
-            });
-            existingMetaIds.add(finalMetaId);
-            hasNewFiles = true;
-          } else {
-            // 迁移失败：仅使用 chunkIds 读取（部分数据可能丢失）
-            // 项2：收集到 newItems，循环外一次性 pushShallowItems
-            newItems.push({
-              id: Date.now() + id,
-              name: meta.name,
-              size: meta.size,
-              mime: meta.mime,
-              totalChunks: meta.totalChunks,
-              encrypted: meta.encrypted,
-              metaId: id,
-              chunkIds: meta.chunkIds,
-            });
-            existingMetaIds.add(id);
-            hasNewFiles = true;
-          }
+          // 项2：收集到 newItems，循环外一次性 pushShallowItems
+          newItems.push({
+            id: Date.now() + id,
+            name: meta.name,
+            size: meta.size,
+            mime: meta.mime,
+            totalChunks: meta.totalChunks,
+            encrypted: meta.encrypted,
+            metaId: id,
+            chunkIds: meta.chunkIds,
+          });
+          existingMetaIds.add(id);
+          hasNewFiles = true;
         }
       } catch { /* */ }
     }
@@ -857,14 +831,6 @@ useModuleDialogGuard("verthys", () => {
 .search-input { flex: 1; background: transparent; border: none; color: var(--text-primary); font-size: 13px; outline: none; font-family: var(--font); min-width: 0; }
 .search-input::placeholder { color: var(--text-muted); }
 .plus { font-weight: 300; }
-
-/* 导入进度面板 */
-.import-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px 16px; flex-shrink: 0; }
-.import-info { display: flex; justify-content: space-between; align-items: center; }
-.import-name { font-size: 12px; color: var(--text-primary); font-family: var(--font); }
-.import-progress-text { font-size: 11px; color: var(--accent); font-family: var(--font); }
-.progress-bar { height: 3px; background: rgba(255,255,255,0.05); border-radius: 2px; overflow: hidden; }
-.progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #b46cff); transition: width 0.3s var(--ease); border-radius: 2px; }
 
 /* 卡片网格 */
 .card-grid { flex: 1; overflow-y: auto; overflow-x: hidden; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-content: start; padding-right: 4px; }

@@ -110,7 +110,11 @@ fn preset_config_static(preset: u32) -> Result<PresetConfig, String> {
             ));
         }
     };
-    Ok(PresetConfig { name, code, features })
+    Ok(PresetConfig {
+        name,
+        code,
+        features,
+    })
 }
 
 /// 获取三档安全预设的配置详情
@@ -283,13 +287,17 @@ pub async fn security_apply_preset(
         )),
     );
 
-    log::info!("[security_apply_preset] 切档并落盘成功: {:?} → {}", prev, code);
+    log::info!(
+        "[security_apply_preset] 切档并落盘成功: {:?} → {}",
+        prev,
+        code
+    );
 
     // 返回新档真实配置（后端权威副本）
     match code {
         3 => {
-            let features = custom_features
-                .ok_or("E_INVALID_PRESET: CUSTOM 缺少自定义特性".to_string())?;
+            let features =
+                custom_features.ok_or("E_INVALID_PRESET: CUSTOM 缺少自定义特性".to_string())?;
             Ok(PresetConfig {
                 name: "CUSTOM",
                 code: 3,

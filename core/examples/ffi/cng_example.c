@@ -12,10 +12,10 @@
  *
  * CI 红线：
  *   - 本文件不得包含 printf / fprintf / OutputDebugString
- *   - 所有函数返回值必须为 error_codes.h 定义的错误码常量
+ *   - 所有函数返回值必须为 verthys.h 定义的 VerthysResult 错误码常量
  */
 
-#include "error_codes.h"
+#include "verthys.h"
 
 /* Windows CNG (Cryptography Next Generation) */
 #ifdef _WIN32
@@ -49,13 +49,13 @@ int verthys_cng_encrypt(
 #ifdef _WIN32
     if (plaintext == NULL || ciphertext == NULL ||
         ciphertext_len == NULL || key == NULL || nonce == NULL) {
-        return VERTHYS_C_ERR_INVALID;
+        return VERTHYS_ERR_INVALID;
     }
 
     /* 检查输出缓冲区容量（XChaCha20-Poly1305: 明文 + 16字节 MAC） */
     size_t required = plaintext_len + 16;
     if (*ciphertext_len < required) {
-        return VERTHYS_C_ERR_INVALID;
+        return VERTHYS_ERR_INVALID;
     }
 
     BCRYPT_ALG_HANDLE alg_handle = NULL;
@@ -69,7 +69,7 @@ int verthys_cng_encrypt(
         NULL,
         0);
     if (!BCRYPT_SUCCESS(status)) {
-        return VERTHYS_C_ERR_INTERNAL;
+        return VERTHYS_ERR_INTERNAL;
     }
 
     /* 生成对称密钥 */
@@ -83,7 +83,7 @@ int verthys_cng_encrypt(
         0);
     if (!BCRYPT_SUCCESS(status)) {
         BCryptCloseAlgorithmProvider(alg_handle, 0);
-        return VERTHYS_C_ERR_INTERNAL;
+        return VERTHYS_ERR_INTERNAL;
     }
 
     /* 初始化 GCM IV（12 字节 Nonce） */
@@ -111,11 +111,11 @@ int verthys_cng_encrypt(
     BCryptCloseAlgorithmProvider(alg_handle, 0);
 
     if (!BCRYPT_SUCCESS(status)) {
-        return VERTHYS_C_ERR_INTERNAL;
+        return VERTHYS_ERR_INTERNAL;
     }
 
     *ciphertext_len = encrypted_len;
-    return VERTHYS_C_SUCCESS;
+    return VERTHYS_OK;
 #else
     /* 非 Windows 平台：返回内部错误（实际项目使用 libsodium 替代） */
     (void)plaintext;
@@ -124,7 +124,7 @@ int verthys_cng_encrypt(
     (void)ciphertext_len;
     (void)key;
     (void)nonce;
-    return VERTHYS_C_ERR_INTERNAL;
+    return VERTHYS_ERR_INTERNAL;
 #endif
 }
 
@@ -142,16 +142,16 @@ int verthys_cng_decrypt(
 #ifdef _WIN32
     if (ciphertext == NULL || plaintext == NULL ||
         plaintext_len == NULL || key == NULL || nonce == NULL) {
-        return VERTHYS_C_ERR_INVALID;
+        return VERTHYS_ERR_INVALID;
     }
 
     /* GCM 密文 = 明文 + 16字节 MAC */
     if (ciphertext_len < 16) {
-        return VERTHYS_C_ERR_CORRUPT;
+        return VERTHYS_ERR_CORRUPT;
     }
     size_t plain_len = ciphertext_len - 16;
     if (*plaintext_len < plain_len) {
-        return VERTHYS_C_ERR_INVALID;
+        return VERTHYS_ERR_INVALID;
     }
 
     BCRYPT_ALG_HANDLE alg_handle = NULL;
@@ -164,7 +164,7 @@ int verthys_cng_decrypt(
         NULL,
         0);
     if (!BCRYPT_SUCCESS(status)) {
-        return VERTHYS_C_ERR_INTERNAL;
+        return VERTHYS_ERR_INTERNAL;
     }
 
     status = BCryptGenerateSymmetricKey(
@@ -177,7 +177,7 @@ int verthys_cng_decrypt(
         0);
     if (!BCRYPT_SUCCESS(status)) {
         BCryptCloseAlgorithmProvider(alg_handle, 0);
-        return VERTHYS_C_ERR_INTERNAL;
+        return VERTHYS_ERR_INTERNAL;
     }
 
     BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO auth_info;
@@ -203,11 +203,11 @@ int verthys_cng_decrypt(
 
     if (!BCRYPT_SUCCESS(status)) {
         /* 认证失败 */
-        return VERTHYS_C_ERR_AUTH;
+        return VERTHYS_ERR_AUTH;
     }
 
     *plaintext_len = decrypted_len;
-    return VERTHYS_C_SUCCESS;
+    return VERTHYS_OK;
 #else
     (void)ciphertext;
     (void)ciphertext_len;
@@ -215,7 +215,7 @@ int verthys_cng_decrypt(
     (void)plaintext_len;
     (void)key;
     (void)nonce;
-    return VERTHYS_C_ERR_INTERNAL;
+    return VERTHYS_ERR_INTERNAL;
 #endif
 }
 
@@ -231,7 +231,7 @@ int verthys_create_non_inheritable_file(
 {
 #ifdef _WIN32
     if (path == NULL || out_handle == NULL) {
-        return VERTHYS_C_ERR_INVALID;
+        return VERTHYS_ERR_INVALID;
     }
 
     /* 安全属性：bInheritHandle = FALSE */
@@ -243,12 +243,12 @@ int verthys_create_non_inheritable_file(
     /* 转换路径为宽字符 */
     int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
     if (wlen == 0) {
-        return VERTHYS_C_ERR_INVALID;
+        return VERTHYS_ERR_INVALID;
     }
     wchar_t *wpath = (wchar_t *)HeapAlloc(
         GetProcessHeap(), 0, wlen * sizeof(wchar_t));
     if (wpath == NULL) {
-        return VERTHYS_C_ERR_NOMEM;
+        return VERTHYS_ERR_RESOURCE_LIMIT;
     }
     MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wlen);
 
@@ -264,14 +264,14 @@ int verthys_create_non_inheritable_file(
     HeapFree(GetProcessHeap(), 0, wpath);
 
     if (hFile == INVALID_HANDLE_VALUE) {
-        return VERTHYS_C_ERR_IO;
+        return VERTHYS_ERR_IO;
     }
 
     *out_handle = (void *)hFile;
-    return VERTHYS_C_SUCCESS;
+    return VERTHYS_OK;
 #else
     (void)path;
     (void)out_handle;
-    return VERTHYS_C_ERR_INTERNAL;
+    return VERTHYS_ERR_INTERNAL;
 #endif
 }

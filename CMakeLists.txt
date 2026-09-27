@@ -3,8 +3,15 @@ cmake_minimum_required(VERSION 3.20)
 # Verthys - 私密数据管理器
 # 四层架构：UI 交互层 / 应用调度层 / 核心 DLL 层 / 持久化存储层
 # 第一阶段：核心安全 DLL（本 CMake 构建 core 与其测试）
+# 产品版本唯一手改点为仓库根 VERSION 文件；此处读取并校验 semver 后注入项目。
+# 文件缺失或格式非法时直接配置失败，宁失败勿静默。
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" VERTHYS_VERSION_FILE)
+string(STRIP "${VERTHYS_VERSION_FILE}" VERTHYS_VERSION_FILE)
+if(NOT VERTHYS_VERSION_FILE MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "Root VERSION file must hold a single semver line (MAJOR.MINOR.PATCH), got: '${VERTHYS_VERSION_FILE}'")
+endif()
 project(Verthys
-    VERSION 2.6.1
+    VERSION ${VERTHYS_VERSION_FILE}
     LANGUAGES C CXX
     DESCRIPTION "Private data manager with encrypted .verthys container"
 )

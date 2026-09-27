@@ -87,6 +87,13 @@ typedef struct VerthysTxnV3 {
     VerthysWalPreparePayload prepare;        /* 候选快照 */
     int                   persist_done;    /* COMMIT 步骤 3/4 成功标志
                                               （CONFIRM 幂等补存依据） */
+    /*
+     * 审计搬迁跳洞地板（数据区相对偏移，0 = 本事务无跳洞）。
+     * 搬迁后旧审计区间在元数据持久化前必须保持原样；本事务内任何
+     * 收紧追加游标的操作（紧凑化）之后，游标/used 重新抬升至该
+     * 地板，追加写不落入旧审计区间。事务结束时随上下文弃置。
+     */
+    uint64_t              reloc_hole_floor;
 
     /*
      * Extent 引用变动账本（回滚精确还原）：
@@ -188,6 +195,16 @@ __declspec(noinline) VerthysResult verthys_txn_v3_confirm(VerthysTxnV3 *t);
  * 盘面 Extent 追加块成为孤儿（索引不可达），由 GC 回收。
  */
 __declspec(noinline) VerthysResult verthys_txn_v3_rollback(VerthysTxnV3 *t);
+
+/*
+ * 强制复位（常规回滚失效时的兜底）：保证状态机归位到 ABORTED，
+ * 避免残留 ACTIVE/PREPARED 使后续 begin 永久返回 INVALID（会话级瘫痪）。
+ * 收敛步骤为幂等降级链：例行回滚 → LSM 过滤式重建（剔除本事务帧）→
+ * Extent 账本还原 → 事务 WAL 复位（2 次重试）→ 状态归位；任一步失败
+ * 记诊断不阻塞归位。见实现文件函数注释的路径细节。
+ * 前置：state == ACTIVE / PREPARED；成功返回 VERTHYS_OK（状态必归位）。
+ */
+__declspec(noinline) VerthysResult verthys_txn_v3_force_abort(VerthysTxnV3 *t);
 
 /* ---------- 崩溃恢复（open 后、首个事务前调用一次） ---------- */
 

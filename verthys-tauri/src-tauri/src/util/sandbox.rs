@@ -104,7 +104,8 @@ impl PathSandbox {
         validate_path_input(path).map_err(SandboxError::InvalidPath)?;
 
         // 2. canonicalize 目标路径
-        let canonical = std::fs::canonicalize(path).map_err(|e| SandboxError::ResolveFailed(e.to_string()))?;
+        let canonical =
+            std::fs::canonicalize(path).map_err(|e| SandboxError::ResolveFailed(e.to_string()))?;
 
         // 3. 白名单前缀校验
         if !is_within_whitelist(&canonical, &self.bases) {
@@ -175,8 +176,7 @@ pub fn resolve_and_validate(path: &str, whitelist: &[&str]) -> Result<PathBuf, S
     validate_path_input(path).map_err(|e| format!("路径校验失败: {}", e))?;
 
     // 2. canonicalize 目标路径
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|e| format!("路径解析失败: {}", e))?;
+    let canonical = std::fs::canonicalize(path).map_err(|e| format!("路径解析失败: {}", e))?;
 
     // 3. canonicalize 白名单基目录
     let mut canonical_whitelist = Vec::with_capacity(whitelist.len());

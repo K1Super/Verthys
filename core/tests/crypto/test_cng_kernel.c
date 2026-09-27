@@ -60,7 +60,7 @@ static int wrap_with_mek(const uint8_t mek[VERTHYS_CNG_KEY_BYTES],
 
     /* import_key 红线语义：清零入参密钥缓冲——必须传副本保护原件 */
     if (verthys_cng_aead_init(&m) != VERTHYS_OK ||
-        verthys_cng_aead_import_key(&m, mek_copy, NULL) != VERTHYS_OK) {
+        verthys_cng_aead_import_key(&m, mek_copy, NULL, 0) != VERTHYS_OK) {
         verthys_secure_zero(mek_copy, sizeof(mek_copy));
         verthys_secure_zero(key_copy, sizeof(key_copy));
         return -1;
@@ -94,7 +94,7 @@ TEST(cng_aead_roundtrip)
     for (i = 0; i < sizeof(pt); i++) pt[i] = (uint8_t)(i * 13 + 5);
 
     CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0) == VERTHYS_OK);
     /* import 后 key_copy 已被清零（红线：明文仅存于 import 栈帧） */
     {
         uint8_t zero[VERTHYS_CNG_KEY_BYTES] = {0};
@@ -136,7 +136,7 @@ TEST(cng_aead_init_contract)
     CHECK(verthys_cng_aead_nonce_counter(&aead) == 0);
 
     memcpy(key_copy, key, sizeof(key_copy));
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0) == VERTHYS_OK);
     CHECK(verthys_cng_aead_is_imported(&aead) == 1);
 
     /* destroy → init → 未导入态（init 不执行句柄销毁，契约第 2 条） */
@@ -148,7 +148,7 @@ TEST(cng_aead_init_contract)
 
     /* 消毒 → 导入 → roundtrip 全链路无残留 */
     memcpy(key_copy, key, sizeof(key_copy));
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0) == VERTHYS_OK);
     ctlen = sizeof(ct);
     CHECK(verthys_cng_aead_encrypt(&aead, (const uint8_t *)"x", 1, NULL, 0,
                                  ct, &ctlen, nonce) == VERTHYS_OK);
@@ -169,7 +169,7 @@ TEST(cng_aead_empty_plaintext)
     verthys_random_bytes(key, sizeof(key));
     memcpy(key_copy, key, sizeof(key_copy));
     CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0) == VERTHYS_OK);
 
     /* 空明文：输出仅 16B 标签 */
     CHECK(verthys_cng_aead_encrypt(&aead, NULL, 0, NULL, 0,
@@ -197,7 +197,7 @@ TEST(cng_aead_nonce_unique_monotonic)
     verthys_random_bytes(key, sizeof(key));
     memcpy(key_copy, key, sizeof(key_copy));
     CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0) == VERTHYS_OK);
     CHECK(verthys_cng_aead_nonce_counter(&aead) == 0);
 
     for (i = 0; i < 100; i++) {
@@ -234,7 +234,7 @@ TEST(cng_aead_nonce_decode_layout)
     verthys_random_bytes(key, sizeof(key));
     memcpy(key_copy, key, sizeof(key_copy));
     CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0) == VERTHYS_OK);
     for (unsigned i = 0; i < 8; i++) {
         ctlen = sizeof(ct);
         CHECK(verthys_cng_aead_encrypt(&aead, (const uint8_t *)"abc", 3,
@@ -258,7 +258,7 @@ TEST(cng_aead_nonce_counter_restore)
     verthys_random_bytes(key, sizeof(key));
     memcpy(key_copy, key, sizeof(key_copy));
     CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0) == VERTHYS_OK);
 
     /* 模拟解锁恢复：计数器从持久化值继续（防回退语义） */
     CHECK(verthys_cng_aead_restore_nonce_counter(&aead, 1000) == VERTHYS_OK);
@@ -280,6 +280,68 @@ TEST(cng_aead_nonce_counter_restore)
     return 0;
 }
 
+/* 恢复点收口：import_key 入参即持久化 counters——
+ * 新角色导入后不显式调用 restore，计数器也必须自动从持久化值起步 */
+TEST(cng_aead_import_auto_restores_counter)
+{
+    VerthysCngAead aead;
+    uint8_t key[VERTHYS_CNG_KEY_BYTES], key_copy[VERTHYS_CNG_KEY_BYTES];
+    uint8_t ct[8 + VERTHYS_CNG_TAG_BYTES], nonce[VERTHYS_CNG_NONCE_BYTES];
+    size_t ctlen = sizeof(ct);
+
+    verthys_random_bytes(key, sizeof(key));
+    memcpy(key_copy, key, sizeof(key_copy));
+    CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
+    /* 模拟"同密钥跨会话恢复"：持久化值 12345 直接作为导入入参，
+     * 全程不再出现任何显式 restore 调用 */
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 12345) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_nonce_counter(&aead) >= 12345);
+    CHECK(verthys_cng_aead_nonce_counter(&aead) == 12345);
+
+    /* 首次加密必须消费 12346（绝不从 0/Hole 位置重启复用历史 nonce） */
+    CHECK(verthys_cng_aead_encrypt(&aead, (const uint8_t *)"x", 1,
+                                 NULL, 0, ct, &ctlen, nonce) == VERTHYS_OK);
+    CHECK(verthys_cng_nonce_decode_counter(nonce) == 12346);
+    CHECK(verthys_cng_aead_nonce_counter(&aead) == 12346);
+
+    verthys_cng_aead_destroy(&aead);
+    verthys_secure_zero(key, sizeof(key));
+    return 0;
+}
+
+/* 计数器耗尽防线：2^64 计数空间用尽后加密必须被拒绝而非回绕重用 */
+TEST(cng_aead_nonce_exhausted_rejected)
+{
+    VerthysCngAead aead;
+    uint8_t key[VERTHYS_CNG_KEY_BYTES], key_copy[VERTHYS_CNG_KEY_BYTES];
+    uint8_t ct[8 + VERTHYS_CNG_TAG_BYTES], nonce[VERTHYS_CNG_NONCE_BYTES];
+    size_t ctlen = sizeof(ct);
+
+    verthys_random_bytes(key, sizeof(key));
+    memcpy(key_copy, key, sizeof(key_copy));
+    CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL,
+                                    UINT64_MAX - 5) == VERTHYS_OK);
+
+    /* 耗尽前最后 5 次加密正常消费 */
+    for (int i = 0; i < 5; i++) {
+        ctlen = sizeof(ct);
+        CHECK(verthys_cng_aead_encrypt(&aead, (const uint8_t *)"x", 1,
+                                     NULL, 0, ct, &ctlen, nonce) == VERTHYS_OK);
+    }
+    CHECK(verthys_cng_aead_nonce_counter(&aead) == UINT64_MAX);
+
+    /* 计数器拉满后：拒绝并回滚计数（不得回绕到 0 重用 nonce） */
+    CHECK(verthys_cng_aead_encrypt(&aead, (const uint8_t *)"x", 1,
+                                 NULL, 0, ct, &ctlen, nonce)
+          == VERTHYS_ERR_NONCE_EXHAUSTED);
+    CHECK(verthys_cng_aead_nonce_counter(&aead) == UINT64_MAX);
+
+    verthys_cng_aead_destroy(&aead);
+    verthys_secure_zero(key, sizeof(key));
+    return 0;
+}
+
 TEST(cng_aead_tamper_rejected)
 {
     VerthysCngAead aead;
@@ -294,7 +356,7 @@ TEST(cng_aead_tamper_rejected)
     memcpy(key_copy, key, sizeof(key_copy));
     for (i = 0; i < sizeof(pt); i++) pt[i] = (uint8_t)(i + 1);
     CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0) == VERTHYS_OK);
     CHECK(verthys_cng_aead_encrypt(&aead, pt, sizeof(pt), aad, sizeof(aad) - 1,
                                  ct, &ctlen, nonce) == VERTHYS_OK);
 
@@ -351,8 +413,8 @@ TEST(cng_aead_wrong_key_rejected)
 
     CHECK(verthys_cng_aead_init(&a) == VERTHYS_OK);
     CHECK(verthys_cng_aead_init(&b) == VERTHYS_OK);
-    CHECK(verthys_cng_aead_import_key(&a, k1c, NULL) == VERTHYS_OK);
-    CHECK(verthys_cng_aead_import_key(&b, k2c, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&a, k1c, NULL, 0) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&b, k2c, NULL, 0) == VERTHYS_OK);
 
     CHECK(verthys_cng_aead_encrypt(&a, pt, sizeof(pt), NULL, 0,
                                  ct, &ctlen, nonce) == VERTHYS_OK);
@@ -377,7 +439,7 @@ TEST(cng_aead_destroy_invalidates)
     verthys_random_bytes(key, sizeof(key));
     memcpy(key_copy, key, sizeof(key_copy));
     CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0) == VERTHYS_OK);
     verthys_cng_aead_destroy(&aead);
 
     /* 句柄销毁后：任何 AEAD 运算必须失败（内核密钥材料已释放） */
@@ -408,11 +470,11 @@ TEST(cng_aead_null_params_rejected)
     memcpy(key_copy, key, sizeof(key_copy));
 
     CHECK(verthys_cng_aead_init(NULL) == VERTHYS_ERR_INVALID);
-    CHECK(verthys_cng_aead_import_key(NULL, key_copy, NULL)
+    CHECK(verthys_cng_aead_import_key(NULL, key_copy, NULL, 0)
           == VERTHYS_ERR_INVALID);
     CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
-    CHECK(verthys_cng_aead_import_key(&aead, NULL, NULL) == VERTHYS_ERR_INVALID);
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, NULL, NULL, 0) == VERTHYS_ERR_INVALID);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0) == VERTHYS_OK);
 
     /* 加密参数校验 */
     CHECK(verthys_cng_aead_encrypt(NULL, (const uint8_t *)"x", 1, NULL, 0,
@@ -712,20 +774,20 @@ TEST(cng_aead_import_failure_zeroes_key)
     memcpy(key_copy, key, sizeof(key_copy));
     CHECK(verthys_cng_aead_init(&aead) == VERTHYS_OK);
     verthys_cng_test_inject_import_failure();
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL)
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0)
           == VERTHYS_ERR_CNG_UNAVAILABLE);
     CHECK(memcmp(key_copy, zero, sizeof(zero)) == 0);
     CHECK(verthys_cng_aead_is_imported(&aead) == 0);
 
     /* aead == NULL：key 非 NULL 的所有返回路径均清零（契约完备性） */
     memcpy(key_copy, key, sizeof(key_copy));
-    CHECK(verthys_cng_aead_import_key(NULL, key_copy, NULL)
+    CHECK(verthys_cng_aead_import_key(NULL, key_copy, NULL, 0)
           == VERTHYS_ERR_INVALID);
     CHECK(memcmp(key_copy, zero, sizeof(zero)) == 0);
 
     /* 注入一次性：后续导入恢复正常 */
     memcpy(key_copy, key, sizeof(key_copy));
-    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&aead, key_copy, NULL, 0) == VERTHYS_OK);
     CHECK(verthys_cng_aead_is_imported(&aead) == 1);
     verthys_cng_aead_destroy(&aead);
     verthys_secure_zero(key, sizeof(key));
@@ -890,7 +952,7 @@ static unsigned __stdcall pcp_worker(void *arg)
             continue;
         }
         if (verthys_cng_aead_init(&aead) != VERTHYS_OK ||
-            verthys_cng_aead_import_key(&aead, key_copy, NULL)
+            verthys_cng_aead_import_key(&aead, key_copy, NULL, 0)
                 != VERTHYS_OK) {
             InterlockedIncrement(&st->import_fails);
         } else {

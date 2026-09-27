@@ -42,11 +42,7 @@ static TRUSTED_PATHS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 #[cfg(target_os = "windows")]
 #[link(name = "kernel32")]
 extern "system" {
-    fn GetLongPathNameW(
-        lpszShortPath: *const u16,
-        lpszLongPath: *mut u16,
-        cchBuffer: u32,
-    ) -> u32;
+    fn GetLongPathNameW(lpszShortPath: *const u16, lpszLongPath: *mut u16, cchBuffer: u32) -> u32;
 }
 
 /// 路径真实化
@@ -66,13 +62,8 @@ fn realize_path(path: &str) -> String {
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let mut long_buf = [0u16; 520]; // MAX_PATH * 2 + 余量
 
-    let len = unsafe {
-        GetLongPathNameW(
-            wide.as_ptr(),
-            long_buf.as_mut_ptr(),
-            long_buf.len() as u32,
-        )
-    };
+    let len =
+        unsafe { GetLongPathNameW(wide.as_ptr(), long_buf.as_mut_ptr(), long_buf.len() as u32) };
 
     // 获取真实路径（GetLongPathNameW 失败时回退到原始路径）
     let realized = if len > 0 && (len as usize) < long_buf.len() {
@@ -198,8 +189,8 @@ mod win_impl {
 
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W,
-        TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32,
+        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
+        TH32CS_SNAPMODULE32,
     };
     use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
     use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -265,12 +256,12 @@ mod win_impl {
         pub cb_struct: u32,
         pub p_policy_callback_data: *mut c_void, // 4 字节后补齐到 8 字节对齐
         pub p_sip_client_data: *mut c_void,
-        pub dw_ui_choice: u32,            // WTD_UI_NONE = 2
-        pub fdw_revocation_checks: u32,  // WTD_REVOKE_NONE = 0
-        pub dw_union_choice: u32,        // WTD_CHOICE_FILE = 1
-        pub p_file: *mut WinTrustFileInfo, // 替代 union（4 字节后补齐到 8 字节对齐）
-        pub dw_state_action: u32,        // WTD_STATEACTION_VERIFY=1 / CLOSE=2
-        pub h_wvt_state_data: *mut c_void, // HANDLE（4 字节后补齐到 8 字节对齐）
+        pub dw_ui_choice: u32,              // WTD_UI_NONE = 2
+        pub fdw_revocation_checks: u32,     // WTD_REVOKE_NONE = 0
+        pub dw_union_choice: u32,           // WTD_CHOICE_FILE = 1
+        pub p_file: *mut WinTrustFileInfo,  // 替代 union（4 字节后补齐到 8 字节对齐）
+        pub dw_state_action: u32,           // WTD_STATEACTION_VERIFY=1 / CLOSE=2
+        pub h_wvt_state_data: *mut c_void,  // HANDLE（4 字节后补齐到 8 字节对齐）
         pub pwsz_url_reference: *const u16, // PWSTR
         pub dw_prov_flags: u32,
         pub dw_ui_context: u32,
@@ -433,9 +424,8 @@ mod win_impl {
         // 取当前进程模块快照
         // TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32：枚举当前进程的 32 位 + 64 位模块
         let pid = unsafe { GetCurrentProcessId() };
-        let snapshot = unsafe {
-            CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
-        };
+        let snapshot =
+            unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) };
         let snapshot: HANDLE = match snapshot {
             Ok(h) => h,
             Err(_) => {
@@ -462,14 +452,12 @@ mod win_impl {
                 let path_norm = realize_path(&path);
 
                 // 路径白名单匹配（前缀比较，大小写已规范化）
-                let in_install = !install_norm.is_empty()
-                    && path_norm.starts_with(&install_norm);
-                let in_system32 = !system32_norm.is_empty()
-                    && path_norm.starts_with(&system32_norm);
-                let in_syswow64 = !syswow64_norm.is_empty()
-                    && path_norm.starts_with(&syswow64_norm);
-                let in_winsxs = !winsxs_norm.is_empty()
-                    && path_norm.starts_with(&winsxs_norm);
+                let in_install = !install_norm.is_empty() && path_norm.starts_with(&install_norm);
+                let in_system32 =
+                    !system32_norm.is_empty() && path_norm.starts_with(&system32_norm);
+                let in_syswow64 =
+                    !syswow64_norm.is_empty() && path_norm.starts_with(&syswow64_norm);
+                let in_winsxs = !winsxs_norm.is_empty() && path_norm.starts_with(&winsxs_norm);
                 let in_ms_runtime = ms_runtime_dirs
                     .iter()
                     .any(|d| !d.is_empty() && path_norm.starts_with(d));
@@ -566,7 +554,10 @@ mod win_impl {
     /// 实际调用 WinVerifyTrust 执行签名验证（无缓存）
     fn verify_signature_uncached(module_path: &str) -> bool {
         // 路径转 UTF-16（含 null 终止符，供 PCWSTR 使用）
-        let wide: Vec<u16> = module_path.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = module_path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
 
         // WINTRUST_FILE_INFO：指定待验证文件路径
         let mut file_info = WinTrustFileInfo {

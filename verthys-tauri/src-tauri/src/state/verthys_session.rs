@@ -9,8 +9,13 @@
  *   - 提供 VerthysSessionGuard RAII + PreheatToken 一次性凭证
  *
  * VerthysSessionGuard RAII：
+ *   构造时获取共享读哨兵锁 + 记录会话路径，Drop 时自动释放。
+ *   锁语义红线：worker 容器句柄以 FILE_SHARE_READ 单写者语义存活
+ *   （C 层跨进程互斥），本进程以 GENERIC_WRITE 打开同文件会被内核以
+ *   SHARING_VIOLATION 拒绝——守卫只能挂共享读锁（GENERIC_READ），
+ *   跨实例单写者互斥由 C 层容器句柄承担，本锁仅作进程内会话哨兵。
  *   原 verthys_unlock / verthys_lock 手工 file_lock 移入移出，异常路径可能遗漏释放。
- *   新设计：VerthysSessionGuard 构造时获取文件锁 + 记录会话路径，
+ *   新设计：VerthysSessionGuard 构造时获取哨兵锁 + 记录会话路径，
  *   Drop 时自动释放文件锁。AppState 持 Option<VerthysSessionGuard>，
  *   命令通过 with_session 访问。
  *
@@ -41,8 +46,12 @@ const PREHEAT_TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Verthys 会话 RAII 守卫
 ///
-/// 构造时获取 .verthys 文件独占锁，记录会话路径与 ID。
+/// 构造时获取 .verthys 文件共享读哨兵锁，记录会话路径与 ID。
 /// Drop 时自动释放文件锁，确保异常路径不遗漏。
+///
+/// 哨兵锁为共享读锁：worker 容器句柄存续期间（FILE_SHARE_READ
+/// 单写者语义）以写访问打开同文件会被内核拒绝，故本守卫不得
+/// 使用独占锁；跨实例写互斥由 C 层容器锁承担。
 ///
 /// AppState 持有 `Option<VerthysSessionGuard>`：
 ///   - verthys_unlock 成功后创建（Some）
@@ -51,7 +60,7 @@ const PREHEAT_TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
 /// 所有需要访问 verthys 文件的命令通过此守卫获取会话路径，
 /// 不再直接操作 verthys_file_lock。
 pub struct VerthysSessionGuard {
-    /// .verthys 文件跨进程独占锁（Drop 自动释放 LockFileEx）
+    /// .verthys 文件共享读哨兵锁（Drop 自动释放 LockFileEx）
     #[allow(dead_code)]
     file_lock: VerthysFileLock,
     /// 当前会话绑定的 .verthys 文件路径（会话期间不可更改）
@@ -63,18 +72,19 @@ pub struct VerthysSessionGuard {
 }
 
 impl VerthysSessionGuard {
-    /// 创建会话守卫（获取文件锁）
+    /// 创建会话守卫（获取共享读哨兵锁）
     ///
     /// 在 verthys_unlock 成功后调用：
-    ///   1. 对 .verthys 文件获取独占锁（LockFileEx）
+    ///   1. 对 .verthys 文件获取共享读锁（LockFileEx，GENERIC_READ 句柄，
+    ///      与 worker 的 FILE_SHARE_READ 容器句柄共享模式兼容）
     ///   2. 记录会话路径与 ID
     ///
     /// # 错误
     /// 文件锁获取失败返回 Err，verthys_unlock 应据此回滚。
     pub fn new(verthys_path: &str, session_id: &str) -> Result<Self, String> {
-        let file_lock = VerthysFileLock::lock_exclusive(verthys_path).inspect_err(|_| {
+        let file_lock = VerthysFileLock::lock_shared(verthys_path).inspect_err(|_| {
             log::error!(
-                "[VerthysSessionGuard] 获取文件锁失败: {}",
+                "[VerthysSessionGuard] 获取哨兵锁失败: {}",
                 crate::util::path::sanitize_path(verthys_path)
             );
         })?;

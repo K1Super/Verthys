@@ -37,13 +37,17 @@ const ENTRY_FILES: &[&str] = &["main.rs", "lib.rs", "entry_template.rs"];
 
 /// 分层目录名与允许的依赖方向
 /// key -> 允许引用的层级（value 为允许的目录名列表）
+///
+/// `constants` 为 crate 根纯常量叶模块（无任何依赖，仅聚合常量/超时配置），
+/// 属共享基础层：所有分层均允许引用——统一列入各层允许表，避免同类引用
+/// 反复登记基线豁免。
 const LAYER_HIERARCHY: &[(&str, &[&str])] = &[
-    ("util", &[]),                    // util 不允许引用任何上层
-    ("repository", &["util"]),        // repository 只允许引用 util
-    ("service", &["repository", "util"]), // service 允许引用 repository + util
-    ("controller", &["service", "repository", "util"]), // controller 允许引用 service + repository + util
-    ("middleware", &["util", "infrastructure"]), // middleware 允许引用 util + infrastructure
-    ("infrastructure", &["util"]),    // infrastructure 允许引用 util
+    ("util", &["constants"]),                    // util 只允许引用共享常量叶层
+    ("repository", &["util", "constants"]),      // repository 允许引用 util + 常量叶层
+    ("service", &["repository", "util", "constants"]), // service 允许引用 repository + util + 常量叶层
+    ("controller", &["service", "repository", "util", "constants"]), // controller 同前 + 常量叶层
+    ("middleware", &["util", "infrastructure", "constants"]), // middleware 同前 + 常量叶层
+    ("infrastructure", &["util", "constants"]),  // infrastructure 允许引用 util + 常量叶层
 ];
 
 /// 危险函数模式（入口文件中不应调用）

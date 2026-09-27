@@ -43,6 +43,11 @@ struct VerthysScanCursor {
     uint64_t            batch_size;      /* 单次批量拉取建议条数 */
     int                 exhausted;       /* 全局遍历完成标记，置1后不再继续读取数据 */
 
+    /* 扫描投影与取批预算（Verthys_ScanOpenEx 设定；ScanOpen 按 FULL/不限 设定） */
+    uint32_t            project;         /* VerthysScanProject 取值 */
+    uint64_t            index_inline_max_bytes; /* INDEX 投影的内联数据阈值 */
+    uint64_t            max_batch_bytes; /* 单次 Fetch 输出字节预算，0=不限 */
+
     /* 安全管控状态字段 */
     int                 mem_locked;      /* 标记游标结构体内存是否已执行页锁定 */
     int                 invalidated;     /* 标记游标是否被应急熔断机制强制作废 */
@@ -105,10 +110,15 @@ static int scan_v3_alive(const VerthysScanCursor *cursor)
  * 分配 + LSM 快照迭代器打开 + 内存防护三件套（页锁定 / 内存防护
  * 管理器注册 / 零初始化）。
  * label 传入内存防护注册标识（区分全量/摘要游标）。
+ * project / index_inline_max_bytes / max_batch_bytes 为全量 Fetch 的投影
+ * 与取批预算（摘要 Fetch 不消费投影，传 FULL/0/0 即保持原语义）。
  */
 static VerthysResult scan_v3_open(struct VerthysContext *ctx,
                                 uint64_t start_lid,
                                 uint64_t batch_size,
+                                uint32_t project,
+                                uint64_t index_inline_max_bytes,
+                                uint64_t max_batch_bytes,
                                 const char *guard_label,
                                 VerthysScanCursor **out_cursor)
 {
@@ -128,6 +138,9 @@ static VerthysResult scan_v3_open(struct VerthysContext *ctx,
     cursor->batch_size = (batch_size > 0) ? batch_size : 500;
     cursor->exhausted  = 0;
     cursor->invalidated = 0;
+    cursor->project    = project;
+    cursor->index_inline_max_bytes = index_inline_max_bytes;
+    cursor->max_batch_bytes = max_batch_bytes;
 
     rc = verthys_lsm_scan_open(ctx->v3->lsm, &cursor->v3_iter);
     if (rc != VERTHYS_OK) {
@@ -150,8 +163,20 @@ static VerthysResult scan_v3_open(struct VerthysContext *ctx,
 /*
  * V3 全量拉取（ScanFetch 路径）：
  * LSM 快照迭代器逐条（lid 升序，墓碑已被迭代器跳过）→ start_lid 定位
- * → 有效槽位过滤 → Extent 内核态解密（AEAD + BLAKE2b 双重完整性）→
- * 深拷贝输出（借用契约，调用方 ScanRecordFree 释放）。
+ * → 有效槽位过滤 → 投影判定 → Extent 内核态解密（AEAD + BLAKE2b 双重
+ * 完整性）→ 深拷贝输出（借用契约，调用方 ScanRecordFree 释放）。
+ *
+ * 投影（cursor->project）：
+ *   - FULL：全部记录解密并返回数据（历史行为）；
+ *   - INDEX：仅 plaintext_size <= index_inline_max_bytes 的记录解密，
+ *     超出阈值的记录仍按序返回索引条目（data=NULL/data_len=0），
+ *     使"只取索引"的调用不为搬运 MB 级载荷付出解密与内存代价。
+ *
+ * 取批预算（cursor->max_batch_bytes，软水位线）：累计输出字节（名称 + 数据）
+ * 越过预算即收批——本条已写入输出，批次最多超出预算一条记录的大小。迭代器
+ * 不可回退，"先量后收"会使越预算的条目既未输出又已被消费（静默丢记录），
+ * 故取"越过即停"。调用方按传输窗口（如共享内存段）尺寸扣除单条最大记录后
+ * 设定预算，即可保证单批载荷不超窗口、扫描恒完整推进。
  *
  * 失败语义：单条解密/索引不变量背离不中止整体扫描，记入 failed
  * 清单输出 lid（上层可做损坏条目提示与修复）；迭代器自身损坏
@@ -170,6 +195,7 @@ static VerthysResult scan_v3_fetch(VerthysScanCursor *cursor,
     uint8_t name_buf[VERTHYS_NAME_MAX_BYTES];
     uint64_t count = 0;
     uint64_t failed = 0;
+    uint64_t batch_bytes = 0;   /* 本批累计输出字节（名称 + 数据） */
     size_t name_len = 0;
     VerthysResult rc;
 
@@ -190,6 +216,8 @@ static VerthysResult scan_v3_fetch(VerthysScanCursor *cursor,
         uint8_t *data;
         uint8_t *name = NULL;
         size_t cap;
+        int inline_data;
+        uint64_t rec_bytes;
 
         rc = verthys_lsm_scan_next(cursor->v3_iter, &e, name_buf,
                                  sizeof(name_buf), &name_len);
@@ -220,35 +248,49 @@ static VerthysResult scan_v3_fetch(VerthysScanCursor *cursor,
             continue;
         }
 
-        /* Extent 解密缓冲（契约要求 pt 非 NULL：空数据走 1 字节哑缓冲，
-         * 成功后清零丢弃，输出 data=NULL / data_len=0） */
-        cap = (e.plaintext_size > 0) ? (size_t)e.plaintext_size : 1u;
-        data = (uint8_t *)malloc(cap);
-        if (data == NULL) {
-            *out_count = count;
-            if (out_failed_count != NULL) *out_failed_count = failed;
-            return VERTHYS_ERR_INTERNAL;
-        }
+        /* 投影判定：INDEX 投影仅对不超过内联阈值的记录解密取数 */
+        inline_data = (cursor->project == VERTHYS_SCAN_PROJECT_FULL) ||
+                      (e.plaintext_size <= cursor->index_inline_max_bytes);
 
-        rc = verthys_extent_get(v->f, v->txn.extent_part, v->ext_idx, e.hash,
-                              data, &cap);
-        if (rc != VERTHYS_OK || cap != (size_t)e.plaintext_size) {
-            /* 解密失败（AUTH/CORRUPT/IO）或长度背离：failed 记账，扫描继续 */
-            verthys_secure_zero(data, cap);
-            free(data);
-            if (out_failed_lids != NULL && failed < max_count) {
-                out_failed_lids[failed] = e.lid;
+        rec_bytes = (uint64_t)e.name_len + (inline_data ? e.plaintext_size : 0u);
+
+        if (inline_data) {
+            /* Extent 解密缓冲（契约要求 pt 非 NULL：空数据走 1 字节哑缓冲，
+             * 成功后清零丢弃，输出 data=NULL / data_len=0） */
+            cap = (e.plaintext_size > 0) ? (size_t)e.plaintext_size : 1u;
+            data = (uint8_t *)malloc(cap);
+            if (data == NULL) {
+                *out_count = count;
+                if (out_failed_count != NULL) *out_failed_count = failed;
+                return VERTHYS_ERR_INTERNAL;
             }
-            failed++;
-            continue;
+
+            rc = verthys_extent_get(v->f, v->txn.extent_part, v->ext_idx, e.hash,
+                                  data, &cap);
+            if (rc != VERTHYS_OK || cap != (size_t)e.plaintext_size) {
+                /* 解密失败（AUTH/CORRUPT/IO）或长度背离：failed 记账，扫描继续 */
+                verthys_secure_zero(data, cap);
+                free(data);
+                if (out_failed_lids != NULL && failed < max_count) {
+                    out_failed_lids[failed] = e.lid;
+                }
+                failed++;
+                continue;
+            }
+        } else {
+            /* 投影跳过：不解密、不分配数据缓冲，仅返回索引条目 */
+            data = NULL;
+            cap = 0;
         }
 
         /* 名称深拷贝（e.name/name_buf 为迭代器内借用缓冲，跨迭代复用） */
         if (e.name_len > 0) {
             name = (uint8_t *)malloc(e.name_len);
             if (name == NULL) {
-                verthys_secure_zero(data, cap);
-                free(data);
+                if (data != NULL) {
+                    verthys_secure_zero(data, cap);
+                    free(data);
+                }
                 *out_count = count;
                 if (out_failed_count != NULL) *out_failed_count = failed;
                 return VERTHYS_ERR_INTERNAL;
@@ -260,17 +302,29 @@ static VerthysResult scan_v3_fetch(VerthysScanCursor *cursor,
         out_records[count].type     = (VerthysRecordType)e.type;
         out_records[count].name     = (const char *)name;
         out_records[count].name_len = e.name_len;
-        if (e.plaintext_size > 0) {
+        if (data != NULL && cap > 0) {
             out_records[count].data     = data;
             out_records[count].data_len = cap;
         } else {
             /* 空数据语义（与 verthys_api_v3_get 一致）：哑缓冲即刻回收 */
-            verthys_secure_zero(data, cap);
-            free(data);
+            if (data != NULL) {
+                verthys_secure_zero(data, cap);
+                free(data);
+            }
             out_records[count].data     = NULL;
             out_records[count].data_len = 0;
         }
+        batch_bytes += rec_bytes;
         count++;
+
+        /* 取批预算（软水位线）：累计输出字节越过预算即收批。本条已取出并
+         * 写入输出，批次最多超出预算一条记录的大小——迭代器不可回退，
+         * "先量后收"会让越预算的条目既未被输出又已被消费（静默丢记录），
+         * 故采用"越过即停"。调用方按传输窗口尺寸扣除单条最大记录后设定
+         * 预算，即可保证单批载荷不超窗口。 */
+        if (cursor->max_batch_bytes > 0 && batch_bytes > cursor->max_batch_bytes) {
+            break;
+        }
     }
 
     *out_count = count;
@@ -425,10 +479,32 @@ VerthysResult Verthys_ScanOpen(VerthysHandle handle,
                            uint64_t batch_size,
                            VerthysScanCursor **out_cursor)
 {
+    /* 既有入口语义保持：FULL 投影、无内联阈值、无取批预算 */
+    return Verthys_ScanOpenEx(handle, start_lid, batch_size,
+                              VERTHYS_SCAN_PROJECT_FULL, 0, 0, out_cursor);
+}
+
+/* ------------------------------------------------------------------ *
+ * 对外导出接口：打开带投影与取批预算的扫描游标                         *
+ * ------------------------------------------------------------------ */
+VerthysResult Verthys_ScanOpenEx(VerthysHandle handle,
+                           uint64_t start_lid,
+                           uint64_t batch_size,
+                           VerthysScanProject project,
+                           uint64_t index_inline_max_bytes,
+                           uint64_t max_batch_bytes,
+                           VerthysScanCursor **out_cursor)
+{
     struct VerthysContext *ctx;
     VerthysResult rc;
 
     if (handle == NULL || out_cursor == NULL) return VERTHYS_ERR_INVALID;
+
+    /* 投影取值白名单：未知投影拒绝，避免调用方以为拿到索引却得到未定义行为 */
+    if (project != VERTHYS_SCAN_PROJECT_FULL &&
+        project != VERTHYS_SCAN_PROJECT_INDEX) {
+        return VERTHYS_ERR_INVALID;
+    }
 
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
@@ -449,26 +525,29 @@ VerthysResult Verthys_ScanOpen(VerthysHandle handle,
 #endif
 
     /* 统计全量解密扫描调用次数，用于监控不合理调用场景：
-     * 列表渲染优先使用仅元数据的摘要扫描接口（原子递增——
-     * 共享锁允许多个 ScanOpen 并发，计数不丢失） */
+     * 列表渲染应使用索引投影或仅元数据的摘要扫描接口，FULL 投影才是
+     * "为读索引而解密全部数据"的不合理调用（原子递增——共享锁允许多个
+     * 扫描并发，计数不丢失） */
+    if (project == VERTHYS_SCAN_PROJECT_FULL) {
 #ifdef _WIN32
-    InterlockedIncrement64((LONG64 *)&ctx->diag_scan_open_count);
+        InterlockedIncrement64((LONG64 *)&ctx->diag_scan_open_count);
 #else
-    ctx->diag_scan_open_count++;
+        ctx->diag_scan_open_count++;
 #endif
 #ifdef _WIN32
-    {
-        char _warn[256];
-        snprintf(_warn, sizeof(_warn),
-                 "[VERTHYS] WARNING: Verthys_ScanOpen called (full-scan, v3). "
-                 "List rendering should use Verthys_ScanSummaryOpen instead. "
-                 "count=%llu",
-                 (unsigned long long)ctx->diag_scan_open_count);
-        VERTHYS_DIAG_LOG(_warn);
-    }
+        /* 仅首次打开时告警一次：全量解密扫描的代价与记录体积成正比，
+         * 列表/索引场景应改用索引投影或摘要扫描；累计次数由诊断计数器
+         * 承担，重复告警只会淹没诊断通道。 */
+        if (ctx->diag_scan_open_count == 1) {
+            VERTHYS_DIAG_LOG("[VERTHYS] WARNING: full (decrypt-all) scan opened; "
+                             "index/list rendering should use index projection or summary scan");
+        }
 #endif
+    }
 
-    rc = scan_v3_open(ctx, start_lid, batch_size, "scan_cursor", out_cursor);
+    rc = scan_v3_open(ctx, start_lid, batch_size,
+                      (uint32_t)project, index_inline_max_bytes, max_batch_bytes,
+                      "scan_cursor", out_cursor);
 
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
@@ -613,9 +692,11 @@ VerthysResult Verthys_ScanSummaryOpen(VerthysHandle handle,
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
     /* 与全量扫描共用 scan_v3_open 骨架；摘要/全量差异仅在 Fetch 路径
-     * ——元数据直读 vs Extent 解密。guard_label 区分内存防护注册标识。 */
+     * ——元数据直读 vs Extent 解密。guard_label 区分内存防护注册标识。
+     * 摘要 Fetch 不消费投影与预算，按 FULL/0/0 建立游标（语义等价于原行为）。 */
     {
         VerthysResult rc = scan_v3_open(ctx, start_lid, batch_size,
+                                        VERTHYS_SCAN_PROJECT_FULL, 0, 0,
                                         "scan_summary_cursor", out_cursor);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);

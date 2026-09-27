@@ -16,10 +16,10 @@
  */
 
 pub mod brute_force;
-pub mod session;
-pub mod module_whitelist;
 pub mod cleanup;
 pub mod file_lock;
-pub mod usb;
+pub mod module_whitelist;
 pub mod preset;
+pub mod session;
 pub mod system_metrics;
+pub mod usb;

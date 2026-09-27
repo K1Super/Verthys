@@ -37,6 +37,12 @@
 #   - verthys_tests：测试 exe，链接对象 + 测试源（直接调用实现，不走 DLL 边界）
 # .def 文件在链接器层面强制最小接口，确保内部符号不泄露。
 
+# 容器格式版本（构建契约与运行时唯一事实值）。
+# 该常量写入构建产物契约（build/core/verthys.artifacts.json），并须与
+# 容器层头文件的版本常量 `VERTHYS_FMT_V3` 保持同步——契约消费方按此
+# 校验 DLL 与主程序/worker 的格式兼容性，不一致即为契约失效。
+set(VERTHYS_FMT_VERSION 3)
+
 # ASAN 构建开关（-DVERTHYS_ENABLE_ASAN=ON）
 option(VERTHYS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 if(VERTHYS_ENABLE_ASAN AND MSVC)
@@ -90,6 +96,8 @@ set(VERTHYS_CORE_SOURCES
     # L1 container/ — 容器格式与交换信封
     src/container/format/verthys_format.c
     src/container/io/verthys_io.c
+    # 容器跨进程互斥打开（单写者 + 超级块区独占锁）
+    src/container/io/verthys_container_lock.c
     # V3 超级块（多副本法定人数）+ 分区管理
     src/container/superblock/verthys_superblock_v3.c
     src/container/partition/verthys_partition.c
@@ -333,7 +341,18 @@ target_link_options(verthys_core PRIVATE
 add_dependencies(verthys_core rhash_gen)
 add_custom_command(TARGET verthys_core POST_BUILD
     COMMAND $<TARGET_FILE:rhash_gen> --patch $<TARGET_FILE:verthys_core>
-    COMMENT "[rhash] rhash_gen: verthys.dll .rhat 运行时哈希表补丁"
+    # 产物契约必须在 .rhat 补丁完成之后生成（同一脚本内顺序执行）：
+    # 契约哈希覆盖最终交付的 DLL 字节，消费方校验才不会误判
+    COMMAND ${CMAKE_COMMAND}
+        -DVER_DLL_PATH=$<TARGET_FILE:verthys_core>
+        -DVER_OUT_PATH=${CMAKE_BINARY_DIR}/core/verthys.artifacts.json
+        -DVER_VERSION=${PROJECT_VERSION}
+        -DVER_FMT_VERSION=${VERTHYS_FMT_VERSION}
+        -DVER_GENERATOR=${CMAKE_GENERATOR}
+        -DVER_CONFIG=$<CONFIG>
+        -DVER_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -P ${CMAKE_SOURCE_DIR}/cmake/write_artifacts.cmake
+    COMMENT "[rhash] rhash_gen: verthys.dll .rhat 运行时哈希表补丁 + 产物契约生成"
     VERBATIM
 )
 

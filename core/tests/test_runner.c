@@ -4,6 +4,8 @@
  */
 #include "verthys_test.h"
 #include "verthys_crypto.h"
+#include "verthys_container_lock.h"
+#include "verthys_container_v3.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -20,6 +22,33 @@
 
 int g_tests_passed = 0;
 int g_tests_failed = 0;
+
+/*
+ * 双进程容器锁测试的持锁子进程入口（test_container_lock.c 配套）。
+ * 在沙箱初始化之前调用：子进程继承父进程已切换的沙箱 CWD，
+ * 相对路径参数与父进程语义一致。独占打开成功后落盘握手文件并
+ * 驻留 15s（正常由父进程 TerminateProcess 终止）。
+ */
+static int container_lock_child_main(const char *path, const char *handshake)
+{
+    FILE *f = NULL;
+    HANDLE h;
+
+    if (verthys_container_open_exclusive(path, 0, &f) != VERTHYS_OK) {
+        return 1;
+    }
+    h = CreateFileA(handshake, GENERIC_WRITE, FILE_SHARE_READ,
+                    NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        verthys_container_close_exclusive(f, path);
+        return 1;
+    }
+    CloseHandle(h);
+
+    Sleep(15000);
+    verthys_container_close_exclusive(f, path);
+    return 0;
+}
 
 /* test_init.c */
 TEST(init_deinit_roundtrip);
@@ -173,6 +202,13 @@ TEST(inject_wal_third_round_residual_not_replayed);
 /* test_txn_delete_retry.c — DELETE 中途失败的引用完好性（1 项） */
 TEST(txn_delete_failure_keeps_extent_ref);
 
+/* test_txn_force_abort.c — 写入失败后的会话级恢复（1 项） */
+TEST(txn_add_failure_session_recovery);
+
+/* test_txn_extent_reloc.c — Extent 容量三级链审计搬迁集成验收（2 项） */
+TEST(txn_extent_reloc_chain_two_rounds);
+TEST(txn_extent_reloc_same_txn_compact_floor);
+
 /* test_perf_prefetch.c — 性能回归测试（8 项） */
 TEST(perf_balanced_enables_warm_cache);
 TEST(perf_secure_disables_warm_cache);
@@ -207,6 +243,8 @@ TEST(cng_aead_init_contract);
 TEST(cng_aead_empty_plaintext);
 TEST(cng_aead_nonce_unique_monotonic);
 TEST(cng_aead_nonce_counter_restore);
+TEST(cng_aead_import_auto_restores_counter);
+TEST(cng_aead_nonce_exhausted_rejected);
 TEST(cng_aead_nonce_decode_layout);
 TEST(cng_aead_tamper_rejected);
 TEST(cng_aead_wrong_key_rejected);
@@ -233,6 +271,9 @@ TEST(sec_alloc_destroy_releases_all);
 
 /* test_backoff_process_wide.c — 暴力破解退避进程级聚合语义 */
 TEST(backoff_process_wide_aggregation);
+
+/* test_container_lock.c — 容器跨进程互斥（单写者 + 超级块独占锁） */
+TEST(container_lock_dual_process_exclusive);
 
 /* test_v3_container.c — 验收：V3 超级块（多副本 + 法定人数 + 事务） */
 TEST(v3sb_init_new_defaults);
@@ -318,6 +359,9 @@ TEST(v3ext_index_load_nonce_rollback_rejected);
 TEST(v3ext_index_tamper_rejected);
 TEST(v3ext_index_load_empty_region_rejected);
 TEST(v3ext_null_params_rejected);
+TEST(v3ext_compact_reclaims_dead_blocks);
+TEST(v3ext_compact_noop_and_empty);
+TEST(v3ext_put_beyond_capacity_rejected);
 
 /* test_v3_lifecycle.c — 验收：V3 生命周期全链路 + 流水线 + 温缓存 + WAL 崩溃恢复 */
 TEST(v3life_full_chain_roundtrip);
@@ -325,8 +369,10 @@ TEST(v3life_cp_old_password_rejected);
 TEST(v3life_container_info_v3);
 TEST(v3life_verify_integrity_tamper);
 TEST(v3life_scan_family_v3);
+TEST(v3life_scan_projection);
 TEST(v3life_pipeline_fail_mask_stages);
 TEST(v3life_unlock_minimal_first);
+TEST(v3life_preheat_interrupt_and_join);
 TEST(v3life_warmcache_hit_miss_tamper);
 TEST(v3life_crash_uncommitted_discarded);
 TEST(v3life_crash_committed_replayed);
@@ -338,6 +384,7 @@ TEST(arekey_crash_orphan_frame);
 TEST(arekey_crash_after_commit);
 TEST(arekey_inflight_guard_rejects);
 TEST(arekey_prep_failure_restores_state);
+TEST(v3life_verify_persist_selfcheck);
 
 /* test_v3_property.c — 属性测试（自研 harness：
  * 随机序列 + 不变式断言，种子可复现）+ 回滚耐久定向回归 */
@@ -654,6 +701,14 @@ void test_state_checkpoint(const char *group_label)
 
 int main(int argc, char **argv)
 {
+    /* 持锁子进程模式：先于沙箱初始化处理——子进程继承父进程已切换的
+     * 沙箱 CWD，相对路径参数（容器/握手文件）语义与父进程一致。
+     * 该模式不执行任何测试，仅提供跨进程互斥测试所需的独立进程句柄。 */
+    if (argc >= 4 && argv[1] != NULL &&
+        strcmp(argv[1], "child-hold-container") == 0) {
+        return container_lock_child_main(argv[2], argv[3]);
+    }
+
     /* 沙箱先行：CWD 切换必须先于任何测试执行（含过滤参数解析输出），
      * 保证所有相对路径临时文件统一落入构建树内沙箱并在结束时清除 */
     scratch_setup();
@@ -911,6 +966,15 @@ int main(int argc, char **argv)
     RUN_TEST(txn_delete_failure_keeps_extent_ref);
     test_state_checkpoint("txn_delete_retry");
 
+    /* 写入失败后的会话级恢复测试 */
+    RUN_TEST(txn_add_failure_session_recovery);
+    test_state_checkpoint("txn_force_abort");
+
+    /* Extent 容量三级链审计搬迁集成测试 */
+    RUN_TEST(txn_extent_reloc_chain_two_rounds);
+    RUN_TEST(txn_extent_reloc_same_txn_compact_floor);
+    test_state_checkpoint("txn_extent_reloc");
+
     /* 回归测试（12 项） */
     RUN_TEST(repair_pool_extend_boundary);
     RUN_TEST(repair_lsm_large_insert);
@@ -936,6 +1000,8 @@ int main(int argc, char **argv)
     RUN_TEST(cng_aead_empty_plaintext);
     RUN_TEST(cng_aead_nonce_unique_monotonic);
     RUN_TEST(cng_aead_nonce_counter_restore);
+    RUN_TEST(cng_aead_import_auto_restores_counter);
+    RUN_TEST(cng_aead_nonce_exhausted_rejected);
     RUN_TEST(cng_aead_nonce_decode_layout);
     RUN_TEST(cng_aead_tamper_rejected);
     RUN_TEST(cng_aead_wrong_key_rejected);
@@ -965,6 +1031,10 @@ int main(int argc, char **argv)
     /* 暴力破解退避进程级聚合 */
     RUN_TEST(backoff_process_wide_aggregation);
     test_state_checkpoint("backoff_process_wide");
+
+    /* 容器跨进程互斥：双进程单写者拒绝 + 诊断旁路 + 锁释放（独立于
+     * 超级块组前端——锁定语义不依赖任何加密结构） */
+    RUN_TEST(container_lock_dual_process_exclusive);
 
     /* 验收：V3 超级块（flatcc 序列化 + HMAC + 三副本法定人数 + 事务） */
     RUN_TEST(v3sb_init_new_defaults);
@@ -1027,6 +1097,9 @@ int main(int argc, char **argv)
     RUN_TEST(v3ext_index_tamper_rejected);
     RUN_TEST(v3ext_index_load_empty_region_rejected);
     RUN_TEST(v3ext_null_params_rejected);
+    RUN_TEST(v3ext_compact_reclaims_dead_blocks);
+    RUN_TEST(v3ext_compact_noop_and_empty);
+    RUN_TEST(v3ext_put_beyond_capacity_rejected);
     test_state_checkpoint("v3_extent");
 
     /* 验收：V3 LSM 索引（MemTable 跳表 + SSTable + Bloom +
@@ -1067,8 +1140,10 @@ int main(int argc, char **argv)
     RUN_TEST(v3life_container_info_v3);
     RUN_TEST(v3life_verify_integrity_tamper);
     RUN_TEST(v3life_scan_family_v3);
+    RUN_TEST(v3life_scan_projection);
     RUN_TEST(v3life_pipeline_fail_mask_stages);
     RUN_TEST(v3life_unlock_minimal_first);
+    RUN_TEST(v3life_preheat_interrupt_and_join);
     RUN_TEST(v3life_warmcache_hit_miss_tamper);
     RUN_TEST(v3life_crash_uncommitted_discarded);
     RUN_TEST(v3life_crash_committed_replayed);
@@ -1080,6 +1155,7 @@ int main(int argc, char **argv)
     RUN_TEST(arekey_crash_after_commit);
     RUN_TEST(arekey_inflight_guard_rejects);
     RUN_TEST(arekey_prep_failure_restores_state);
+    RUN_TEST(v3life_verify_persist_selfcheck);
     test_state_checkpoint("v3_lifecycle");
 
     /* 验收：属性测试（LSM/Extent/事务三大不变式族 + 回滚耐久性回归） */

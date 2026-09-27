@@ -50,7 +50,9 @@ struct RateLimiter {
 
 impl RateLimiter {
     const fn new() -> Self {
-        RateLimiter { timestamps: Vec::new() }
+        RateLimiter {
+            timestamps: Vec::new(),
+        }
     }
 
     /// 检查是否允许本次调用，若允许则记录当前时间戳。
@@ -144,18 +146,14 @@ fn persist_privacy_mode(
             .as_secs(),
     };
 
-    let json = serde_json::to_vec(&state)
-        .map_err(|e| format!("序列化隐私模式状态失败: {}", e))?;
+    let json = serde_json::to_vec(&state).map_err(|e| format!("序列化隐私模式状态失败: {}", e))?;
     let encrypted = dpapi_protect(&json, Some("verthys_privacy_mode"))?;
 
-    let file_path = get_privacy_mode_file(app)
-        .ok_or_else(|| "获取配置目录失败".to_string())?;
+    let file_path = get_privacy_mode_file(app).ok_or_else(|| "获取配置目录失败".to_string())?;
 
     let tmp_path = file_path.with_extension("privacy_mode.tmp");
-    std::fs::write(&tmp_path, &encrypted)
-        .map_err(|e| format!("写入临时文件失败: {}", e))?;
-    std::fs::rename(&tmp_path, &file_path)
-        .map_err(|e| format!("重命名状态文件失败: {}", e))?;
+    std::fs::write(&tmp_path, &encrypted).map_err(|e| format!("写入临时文件失败: {}", e))?;
+    std::fs::rename(&tmp_path, &file_path).map_err(|e| format!("重命名状态文件失败: {}", e))?;
 
     log::info!(
         "[privacy_mode] 状态已持久化 (enabled={}, partial={})",
@@ -187,10 +185,7 @@ fn clear_privacy_mode_state(app: &tauri::AppHandle) {
 
 /// 对所有 WebView 窗口应用或取消防截屏保护。
 /// 返回 (成功数, 失败数)，调用方据此判断是否全部成功。
-fn apply_privacy_to_all_windows(
-    app: &tauri::AppHandle,
-    enabled: bool,
-) -> (usize, usize) {
+fn apply_privacy_to_all_windows(app: &tauri::AppHandle, enabled: bool) -> (usize, usize) {
     let windows = app.webview_windows();
     if windows.is_empty() {
         log::warn!("[privacy_mode] 未找到任何 webview 窗口");
@@ -200,7 +195,9 @@ fn apply_privacy_to_all_windows(
     let (mut success, mut fail) = (0, 0);
     for (label, window) in windows {
         match window.hwnd() {
-            Ok(hwnd) if crate::security::set_window_privacy(hwnd.0 as isize, enabled) => success += 1,
+            Ok(hwnd) if crate::security::set_window_privacy(hwnd.0 as isize, enabled) => {
+                success += 1
+            }
             Ok(_) => {
                 fail += 1;
                 log::warn!("[privacy_mode] 窗口 '{}' 防截屏设置失败", label);
@@ -220,6 +217,20 @@ fn apply_privacy_to_all_windows(
 /// 令牌在验证通过后一次性消费，防止重复使用。
 static PRIVACY_SESSION_TOKEN: Mutex<Option<String>> = Mutex::new(None);
 
+/// panic 清零器：清除隐私会话令牌驻留。
+/// panic hook 在诊断输出前调用（零化先于日志/转储外泄窗口）；
+/// 令牌为 64 位十六进制字符串，zeroize 后不可恢复。
+pub(crate) fn wipe_privacy_session_token() {
+    use zeroize::Zeroize;
+    let mut guard = PRIVACY_SESSION_TOKEN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(token) = guard.take() {
+        let mut t = token;
+        t.zeroize();
+    }
+}
+
 fn generate_session_token() -> String {
     #[cfg(target_os = "windows")]
     {
@@ -227,7 +238,8 @@ fn generate_session_token() -> String {
             BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
         };
         let mut buf = [0u8; 32];
-        let status = unsafe { BCryptGenRandom(None, &mut buf[..], BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+        let status =
+            unsafe { BCryptGenRandom(None, &mut buf[..], BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
         if status.0 >= 0 {
             return buf.iter().map(|b| format!("{:02x}", b)).collect();
         }
@@ -382,7 +394,11 @@ pub async fn set_privacy_mode(
     let (success_count, fail_count) = apply_privacy_to_all_windows(&app, enabled);
 
     // 生成会话令牌（启用时）
-    let session_token = if enabled { Some(generate_session_token()) } else { None };
+    let session_token = if enabled {
+        Some(generate_session_token())
+    } else {
+        None
+    };
 
     // 构建结构化结果
     let result = if success_count == 0 && fail_count == 0 {
@@ -427,7 +443,10 @@ pub async fn set_privacy_mode(
             PrivacyModeResult::success(enabled)
         }
     } else {
-        PrivacyModeResult::error("TEMPORARY_FAILURE", "防截屏设置失败（SetWindowDisplayAffinity 调用失败）")
+        PrivacyModeResult::error(
+            "TEMPORARY_FAILURE",
+            "防截屏设置失败（SetWindowDisplayAffinity 调用失败）",
+        )
     };
 
     // 存储/清除会话令牌
@@ -439,27 +458,49 @@ pub async fn set_privacy_mode(
         clear_session_token();
     }
 
-    // 持久化状态（仅成功或部分保护）
+    // 持久化状态（仅成功或部分保护）。
+    // 持久化为阻塞 IO（DPAPI + 文件写），经 spawn_blocking 移出 async
+    // 执行器线程，避免阻塞事件循环；仍 await 保持"持久化落盘后才
+    // 返回成功"的既有调用契约。
     if result.ok {
-        if let Err(e) = persist_privacy_mode(&app, enabled, result.partial_protection) {
-            log::warn!("[privacy_mode] 状态持久化失败: {}", e);
-        }
+        let app_for_persist = app.clone();
+        let partial = result.partial_protection;
+        // join 结果无附加信息：持久化成败已由闭包内日志记录，
+        // 显式吸收避免 must_use 警告。
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            if let Err(e) = persist_privacy_mode(&app_for_persist, enabled, partial) {
+                log::warn!("[privacy_mode] 状态持久化失败: {}", e);
+            }
+        })
+        .await;
     }
 
     // 审计日志
     let audit_result = if result.ok {
-        if result.partial_protection { AuditResult::Failure } else { AuditResult::Success }
+        if result.partial_protection {
+            AuditResult::Failure
+        } else {
+            AuditResult::Success
+        }
     } else {
         AuditResult::Failure
     };
     let audit_detail = if result.partial_protection {
-        Some(format!("partial_protection: enabled={}, error_code={:?}", enabled, result.error_code))
+        Some(format!(
+            "partial_protection: enabled={}, error_code={:?}",
+            enabled, result.error_code
+        ))
     } else if !result.ok {
         Some(format!("failed: error_code={:?}", result.error_code))
     } else {
         None
     };
-    write_clipboard_audit(&app, AuditEventType::ClipboardModeChange, audit_result, audit_detail);
+    write_clipboard_audit(
+        &app,
+        AuditEventType::ClipboardModeChange,
+        audit_result,
+        audit_detail,
+    );
 
     if result.ok {
         let monitor_detail = if enabled {
@@ -474,7 +515,11 @@ pub async fn set_privacy_mode(
         write_clipboard_audit(
             &app,
             AuditEventType::ClipboardMonitorEvent,
-            if monitor_failed { AuditResult::Failure } else { AuditResult::Success },
+            if monitor_failed {
+                AuditResult::Failure
+            } else {
+                AuditResult::Success
+            },
             monitor_detail,
         );
     }
@@ -490,9 +535,7 @@ pub async fn set_privacy_mode(
 /// - 受频率限制（10 次/分钟），超限返回 `RATE_LIMITED`。
 /// - 每次清空均记录审计日志。
 #[tauri::command]
-pub async fn clear_clipboard(
-    app: tauri::AppHandle,
-) -> Result<ClipboardResult, String> {
+pub async fn clear_clipboard(app: tauri::AppHandle) -> Result<ClipboardResult, String> {
     // 频率限制
     {
         let mut limiter = CLEAR_CLIPBOARD_RATE_LIMITER
@@ -544,8 +587,16 @@ pub async fn clear_clipboard(
     write_clipboard_audit(
         &app,
         AuditEventType::ClipboardClear,
-        if result.ok { AuditResult::Success } else { AuditResult::Failure },
-        if result.ok { None } else { Some(format!("error_code={:?}", result.error_code)) },
+        if result.ok {
+            AuditResult::Success
+        } else {
+            AuditResult::Failure
+        },
+        if result.ok {
+            None
+        } else {
+            Some(format!("error_code={:?}", result.error_code))
+        },
     );
 
     Ok(result)
@@ -605,8 +656,15 @@ pub async fn restore_privacy_mode(
             write_clipboard_audit(
                 &app,
                 AuditEventType::ClipboardModeChange,
-                if result.partial_protection { AuditResult::Failure } else { AuditResult::Success },
-                Some(format!("restored from persisted state (partial={})", result.partial_protection)),
+                if result.partial_protection {
+                    AuditResult::Failure
+                } else {
+                    AuditResult::Success
+                },
+                Some(format!(
+                    "restored from persisted state (partial={})",
+                    result.partial_protection
+                )),
             );
 
             Ok(result)
@@ -713,11 +771,7 @@ mod tests {
 
     #[test]
     fn test_privacy_mode_result_partial() {
-        let r = PrivacyModeResult::partial(
-            true,
-            "CLIPBOARD_MONITOR_FAILED",
-            "部分保护",
-        );
+        let r = PrivacyModeResult::partial(true, "CLIPBOARD_MONITOR_FAILED", "部分保护");
         assert!(r.ok);
         assert!(r.enabled);
         assert!(r.partial_protection);

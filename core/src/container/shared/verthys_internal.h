@@ -46,6 +46,13 @@ typedef struct SecureAllocator SecureAllocator;
  * 密钥派生/索引存储分裂） */
 #define VERTHYS_NAME_MAX_BYTES 4096u
 
+/* 单条记录明文数据长度上限（字节，API 边界钳制）。
+ * 与二次序列化能力对齐：导出/导入格式的 data_len 为 32 位字段
+ *（容量上限 0xFFFFFFFF），入口侧提前拒绝超限写入，避免"写入成功
+ * 但永久不可导出"的不可弥补不一致；下沉层（V3 事务写入）复用同
+ * 常量做纵深校验。 */
+#define VERTHYS_RECORD_DATA_MAX_BYTES ((size_t)0xFFFFFFFFu)
+
 /*
  * VerthysContext — 句柄背后的真实结构。
  * 所有敏感字段在 Lock/Deinit 时经 verthys_secure_zero / CNG 句柄销毁清理。

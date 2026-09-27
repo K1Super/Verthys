@@ -139,7 +139,7 @@ static int p1_setup(VerthysCngAead *wrap, uint8_t wk[P1_KEY_BYTES],
     if (verthys_cng_aead_init(wrap) != VERTHYS_OK) return -1;
     verthys_random_bytes(wk, P1_KEY_BYTES);
     memcpy(copy, wk, P1_KEY_BYTES);
-    if (verthys_cng_aead_import_key(wrap, copy, NULL) != VERTHYS_OK) {
+    if (verthys_cng_aead_import_key(wrap, copy, NULL, 0) != VERTHYS_OK) {
         verthys_cng_aead_destroy(wrap);
         return -1;
     }
@@ -361,7 +361,7 @@ static int p2_setup(VerthysCngAead *wrap, uint8_t wk[P2_KEY_BYTES],
     if (verthys_cng_aead_init(wrap) != VERTHYS_OK) return -1;
     verthys_random_bytes(wk, P2_KEY_BYTES);
     memcpy(copy, wk, P2_KEY_BYTES);
-    if (verthys_cng_aead_import_key(wrap, copy, NULL) != VERTHYS_OK) {
+    if (verthys_cng_aead_import_key(wrap, copy, NULL, 0) != VERTHYS_OK) {
         verthys_cng_aead_destroy(wrap);
         return -1;
     }

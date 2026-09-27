@@ -13,3 +13,6 @@
  * 依赖方向：service → repository / util（单向，禁止反向）
  */
 pub mod verthys_service;
+
+/* 口令类入口暴力熔断的服务层契约（依赖反转：实现由 security_commands 注册） */
+pub mod unlock_gate;

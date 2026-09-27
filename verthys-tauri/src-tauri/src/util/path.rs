@@ -187,20 +187,14 @@ fn is_reserved_device_name(path: &str) -> bool {
 
     // 检查 COM1-9
     if let Some(suffix) = stem_upper.strip_prefix("COM") {
-        if !suffix.is_empty()
-            && suffix.len() <= 2
-            && suffix.chars().all(|c| c.is_ascii_digit())
-        {
+        if !suffix.is_empty() && suffix.len() <= 2 && suffix.chars().all(|c| c.is_ascii_digit()) {
             return true;
         }
     }
 
     // 检查 LPT1-9
     if let Some(suffix) = stem_upper.strip_prefix("LPT") {
-        if !suffix.is_empty()
-            && suffix.len() <= 2
-            && suffix.chars().all(|c| c.is_ascii_digit())
-        {
+        if !suffix.is_empty() && suffix.len() <= 2 && suffix.chars().all(|c| c.is_ascii_digit()) {
             return true;
         }
     }
@@ -226,8 +220,7 @@ pub fn canonicalize_strict(path: &str) -> Result<PathBuf, String> {
     validate_path_input(path).map_err(|e| format!("路径校验失败: {}", e))?;
 
     // 2. canonicalize 解析符号链接
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|e| format!("路径解析失败: {}", e))?;
+    let canonical = std::fs::canonicalize(path).map_err(|e| format!("路径解析失败: {}", e))?;
 
     Ok(canonical)
 }

@@ -125,7 +125,7 @@ try {
 # -ErrorAction SilentlyContinue 能正确抑制"进程不存在"错误。
 Write-Stage "阶段 0: 清理僵尸进程与锁文件"
 
-$zombies = Get-Process -Name "cargo","rustc","verthys-tauri","verthys-worker" -ErrorAction SilentlyContinue
+$zombies = Get-Process -Name "cargo","rustc","Verthys","verthys-worker" -ErrorAction SilentlyContinue
 if ($zombies) {
     Write-Step "发现僵尸进程: $($zombies.Name -join ', ') (PID: $($zombies.Id -join ', '))"
     foreach ($z in $zombies) {
@@ -183,13 +183,10 @@ if (-not [string]::IsNullOrEmpty($env:VCToolsInstallDir) -and
 }
 . (Join-Path $ScriptsDir "cmake.utils.ps1")
 
-# C 核心 DLL 产物路径：Ninja 单配置直接输出 build/core/verthys.dll，
-# VS 多配置输出 build/core/Release/verthys.dll（二者随注入模式二选一）。
-$script:actualCoreDll = if ($script:msvcInjected) {
-    Join-Path $CoreBuildDir "core\verthys.dll"
-} else {
-    Join-Path $CoreBuildDir "core\Release\verthys.dll"
-}
+# C 核心 DLL 产物路径：由构建产物契约提供（scripts/artifacts.ps1 读取
+# CMake POST_BUILD 生成的 build/core/verthys.artifacts.json）——消除按
+# 生成器类型猜测子目录的历史分支（Ninja/VS 布局差异曾导致哈希退化为 None）。
+# 契约在构建/跳过决策之后读取：首次构建不会因契约尚未生成而失败。
 
 # ========== 依赖与补丁校验 ==========
 Write-Stage "阶段 0.6: 依赖与补丁校验"
@@ -300,9 +297,16 @@ if (-not $SkipCore) {
         throw "CMake 构建失败 (exit=$LASTEXITCODE)"
     }
 
+    # 构建后读取产物契约（POST_BUILD 刚刷新），契约路径即权威 DLL 位置
+    . (Join-Path $ScriptsDir "artifacts.ps1")
+    $script:actualCoreDll = Get-VerthysArtifactDll
+
     Assert-FileExists $script:actualCoreDll "verthys.dll"
 } else {
     Write-Stage "阶段 1/4: 跳过 C 核心构建（-SkipCore）"
+    # 跳过构建：契约必须来自既有构建；缺失即给明确指引而非继续
+    . (Join-Path $ScriptsDir "artifacts.ps1")
+    $script:actualCoreDll = Get-VerthysArtifactDll
     Assert-FileExists $script:actualCoreDll "verthys.dll (已有)"
 }
 

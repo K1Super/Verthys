@@ -23,6 +23,11 @@
  */
 
 import { invokeWithTimeout } from "../utils/invoke_wrapper";
+import {
+  SESSION_BEGIN_TIMEOUT_MS,
+  SESSION_END_TIMEOUT_MS,
+  SESSION_FORCE_CLOSE_TIMEOUT_MS,
+} from "../constants/photo_budget.generated";
 import { wrapAsVerthysError, ipcFailed } from "./verthys_error";
 import { serializeToJsonB64, deserializeFromJsonB64 } from "../utils/json_codec";
 import { withTimeout } from "../utils/promise_utils";
@@ -55,6 +60,8 @@ import type {
   ImportBatchProgress,
   ImportBeginResult,
   AddRecordsBatchResult,
+  ChunkBlobInput,
+  AddChunkBatchResult,
   WalRecoverResult,
   DeviceBindingResult,
 } from "../types/verthys";
@@ -95,6 +102,8 @@ export type {
   ImportBatchProgress,
   ImportBeginResult,
   AddRecordsBatchResult,
+  ChunkBlobInput,
+  AddChunkBatchResult,
   WalRecoverResult,
   DeviceBindingResult,
 } from "../types/verthys";
@@ -422,32 +431,65 @@ export async function verthysFlush(verthysPath: string, password: string): Promi
   return r.ok;
 }
 
-/** 磁盘级持久化验证（只读，绕过 worker 内存，直接校验磁盘文件）
+/** 落盘自查结果（判别式返回） */
+export interface VerifyDiskPersistResult {
+  /** 落盘结构是否完整（statusCode === 0） */
+  ok: boolean;
+  /** C 端 VerPersistStatus：0=OK / 1=HEADER / 2=SIZE / 3=WAL / 4=IO / 5=INTERNAL */
+  statusCode: number;
+  /** 容器文件字节大小（失败时为 0） */
+  fileSize: number;
+  /** 文件修改时间（Unix 毫秒；不可得为 0） */
+  mtimeMs: number;
+  /** 磁盘偏移 0 的副本帧头 magic */
+  headerMagic: number;
+  /** 容器格式版本 */
+  headerVersion: number;
+  /** 失败详情（成功为空串） */
+  lastError: string;
+}
+
+/** 落盘持久化自查（worker 进程内 C 层持锁句柄）
  *
- *  消除"内存可见、磁盘丢失"的假成功：persistVerthys 成功后回读 worker 内存
- *  无法检测磁盘是否真正写入（v1 AddRecord 仅写内存）。本命令绕过 worker，
- *  直接读取磁盘文件，校验 flush 确实将数据写入了磁盘文件。
+ *  why 不在主进程读盘：容器会话在 C 层子进程内以独占方式持有超级块区
+ *  [0,64KB) 字节范围锁（Windows 强制锁），主进程新开句柄读取恒被
+ *  ERROR_LOCK_VIOLATION 拒绝。故校验经 worker 的 verify_persist op 下发到
+ *  持锁子进程，由 C 层用持锁句柄（ctx->v3->f）自查盘面结构（头部帧头、
+ *  文件大小下限、WAL 区可达性）。
  *
- *  验证项（全部只读，不解密、不接触密钥、不修改文件、不改变 worker 状态）：
- *    1. 文件存在且非空
- *    2. magic "VERT" 合法
- *    3. mtime 时效性：文件修改时间在 15s 内（核心检测项）
- *    4. v2 超级块明文字段一致性 / v1 头部字段一致性
- *    5. expectedRecordCount 弱大小合理性检查
- *
- *  @param verthysPath 加密库文件路径
- *  @param expectedRecordCount 期望记录数（可选，用于弱大小校验）
- *  @returns true=磁盘文件已落盘且结构完整，false=验证失败
+ *  返回判别式结果：statusCode 供上层区分"可重试 IO 失败"与"结构性失败"。
+ *  @returns 结构化自查结果（ok=true 表示结构完整）
  */
-export async function verthysVerifyDiskPersist(
-  verthysPath: string,
-  expectedRecordCount?: number
-): Promise<boolean> {
-  const r = await ipc<VerthysResponse>("verthys_verify_disk_persist", {
-    verthysPath,
-    expectedRecordCount: expectedRecordCount ?? null,
-  });
-  return r.ok;
+export async function verthysVerifyDiskPersist(): Promise<VerifyDiskPersistResult> {
+  const r = await ipc<VerthysResponse>("verthys_verify_disk_persist", {});
+  return {
+    ok: r.ok,
+    statusCode: r.status_code ?? -1,
+    fileSize: r.file_size ?? 0,
+    mtimeMs: r.mtime_ms ?? 0,
+    headerMagic: r.header_magic ?? 0,
+    headerVersion: r.header_version ?? 0,
+    lastError: r.error ?? "",
+  };
+}
+
+/** 强制关闭（丢弃）当前活跃的导入会话（异常/中断清理）
+ *
+ *  语义：不写 end、不压缩 WAL——会话被直接丢弃，盘面 WAL 保留，
+ *  断点续传状态在下次 begin 时可恢复。无活跃会话时幂等返回 true。 */
+export async function verthysForceCloseImportSession(): Promise<boolean> {
+  // 强制清理超时（跨层预算常量）：清理为幂等轻操作，超时视为未生效（返回 false）
+  try {
+    const r = await invokeWithTimeout<VerthysResponse>(
+      "verthys_force_close_import_session",
+      undefined,
+      SESSION_FORCE_CLOSE_TIMEOUT_MS,
+    );
+    return r.ok;
+  } catch (e) {
+    console.warn("[verthysForceCloseImportSession] 调用失败/超时:", e);
+    return false;
+  }
 }
 
 /** 新增记录（返回分配的 ID） */
@@ -492,16 +534,26 @@ export async function verthysAddRecord(
 export async function verthysImportBegin(
   verthysPath?: string,
 ): Promise<ImportBeginResult> {
-  const r = await ipc<VerthysResponse>("verthys_import_begin", {
-    verthysPath: verthysPath ?? null,
-  });
-  return {
-    ok: r.ok,
-    import_id: r.import_id ?? "",
-    hashes: r.hashes ?? [],
-    total_count: r.total_count ?? 0,
-    error: r.error,
-  };
+  // 会话开始超时（跨层预算常量）：worker 挂死时不再无限等待——超时按可重试
+  // 失败返回（非抛出），由调用方按"导入初始化失败"提示并可重试
+  try {
+    const r = await invokeWithTimeout<VerthysResponse>(
+      "verthys_import_begin",
+      { verthysPath: verthysPath ?? null },
+      SESSION_BEGIN_TIMEOUT_MS,
+    );
+    return {
+      ok: r.ok,
+      import_id: r.import_id ?? "",
+      hashes: r.hashes ?? [],
+      total_count: r.total_count ?? 0,
+      error: r.error,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[verthysImportBegin] 调用失败/超时:", msg);
+    return { ok: false, import_id: "", hashes: [], total_count: 0, error: `导入初始化超时或失败: ${msg}` };
+  }
 }
 
 /**
@@ -545,6 +597,66 @@ export async function verthysAddRecordsBatch(
 }
 
 /**
+ * 上传外置加密块（大文件分块记录，经后端单写者通道串行落库）。
+ *
+ * 大文件照片的块密文总量超过内联阈值时，块先经本命令落为独立记录，
+ * 随后 meta 记录携带 chunk_ids 引用。后端校验块已上传（与 meta 写入
+ * 同 FIFO），同哈希重复上传幂等复用既有记录 ID。
+ *
+ * @param chunks 块列表（单批 ≤ 8 条，载荷受后端上限校验）
+ * @returns { ok, ids, failed_indices }
+ */
+export async function verthysAddChunkBatch(
+  chunks: ChunkBlobInput[],
+): Promise<AddChunkBatchResult> {
+  if (chunks.length === 0) {
+    return { ok: true, ids: [], failed_indices: [] };
+  }
+  const r = await ipc<VerthysResponse>("verthys_add_chunk_batch", { chunks });
+  return {
+    ok: r.ok,
+    ids: r.ids ?? [],
+    failed_indices: r.failed_indices ?? [],
+    error: r.error,
+  };
+}
+
+/**
+ * 删除照片后释放去重锁（后端 WAL 追加删除墓碑，删除后可重新导入）。
+ *
+ * @param hashes 已删除照片的文件内容哈希列表（取自已加载 meta）
+ */
+export async function verthysForgetHashes(hashes: string[]): Promise<void> {
+  if (hashes.length === 0) return;
+  // 去重锁释放失败会让被删文件在重新导入时被静默跳过（用户只看到"导入 0 张"
+  // 且无任何失败提示）：失败重试一次，仍失败则上抛，由调用方记录或提示，
+  // 不再吞掉返回值。
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const r = await ipc<VerthysResponse>("verthys_forget_hashes", { hashes });
+    if (r.ok) return;
+    if (attempt === 2) {
+      throw new Error(`去重锁释放失败: ${r.error ?? "unknown error"}`);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+  }
+}
+
+/**
+ * 清理孤儿外置块记录（GC）。
+ *
+ * 删除台账中 owner=0（已上传但未被任何 meta 引用）的块记录——典型来源
+ * 是「块已落库、meta 提交前崩溃」的残留。仅在无活跃导入会话时可用
+ * （活跃会话台账在内存，文件视图滞后）。调用方按维护时机 best-effort
+ * 触发：导入会话成功结束后、批量删除成功后。
+ *
+ * @returns 本次清除的块记录数
+ */
+export async function verthysGcOrphanChunks(): Promise<number> {
+  const r = await ipc<VerthysResponse>("verthys_gc_orphan_chunks");
+  return r.ok ? (r.processed_count ?? 0) : 0;
+}
+
+/**
  * 关闭导入会话：success=true 触发 WAL 压缩，failure 保留 WAL 供续传。
  *
  * @param success 是否成功完成（true 压缩 WAL，false 保留供续传）
@@ -553,13 +665,25 @@ export async function verthysAddRecordsBatch(
 export async function verthysImportEnd(
   success: boolean,
 ): Promise<{ ok: boolean; total_count: number; import_id: string; error?: string }> {
-  const r = await ipc<VerthysResponse>("verthys_import_end", { success });
-  return {
-    ok: r.ok,
-    total_count: r.total_count ?? 0,
-    import_id: r.import_id ?? "",
-    error: r.error,
-  };
+  // 会话结束超时（跨层预算常量）：WAL 压缩可能较慢，超时给足 30s；
+  // 超时按失败返回（非抛出），由管线的 endSessionSafely 重试并自愈清理
+  try {
+    const r = await invokeWithTimeout<VerthysResponse>(
+      "verthys_import_end",
+      { success },
+      SESSION_END_TIMEOUT_MS,
+    );
+    return {
+      ok: r.ok,
+      total_count: r.total_count ?? 0,
+      import_id: r.import_id ?? "",
+      error: r.error,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[verthysImportEnd] 调用失败/超时:", msg);
+    return { ok: false, total_count: 0, import_id: "", error: `会话结束超时或失败: ${msg}` };
+  }
 }
 
 /**
@@ -615,12 +739,20 @@ export async function verthysWalRecover(
   };
 }
 
-/** 读取记录（返回 base64 数据） */
+/** 读取记录（返回 base64 数据；失败返回 null） */
 export async function verthysGetRecord(
   id: number
 ): Promise<{ type: number; name: string; dataB64: string } | null> {
+  // 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
+  markFrontendIpcActive();
   const r = await ipc<VerthysResponse>("verthys_get_record", { id });
-  if (!r.ok) return null;
+  if (!r.ok) {
+    // 失败必须留痕：记录过大（record_too_large）、通道异常与"记录不存在"
+    // 在返回值上不可区分，历史实现静默返回 null 使结构性问题退化为
+    // "记录缺失"而无法定位（调用方只看到空数据）。
+    console.warn(`[verthysGetRecord] 读取记录 ${id} 失败: ${r.error ?? "unknown error"}`);
+    return null;
+  }
   return {
     type: r.rtype ?? 0,
     name: r.name ?? "",
@@ -650,7 +782,7 @@ export async function verthysEnumerateRecords(
 }
 
 /**
- * 项5：流式枚举记录（Tauri Channel 分页推送）
+ * 流式枚举记录（Tauri Channel 分页推送）
  *
  * 替代一次性 verthysEnumerateRecords（数千条记录 JSON.parse 阻塞主线程 100ms+）。
  * 后端循环调用 worker enumerate_records（每批 batchSize 条），
@@ -701,10 +833,24 @@ export async function verthysEnumerateRecordsStream(
  *   await verthysScanClose();                                          *
  * ------------------------------------------------------------------ */
 
+/** 记录扫描投影选项（缺省 = 全量解密，既有调用方语义不变） */
+export interface ScanProjectOptions {
+  /**
+   * 投影选择：
+   *   - "full"（缺省）：全部记录完整解密并返回数据；
+   *   - "index"：仅对不超过 inlineMaxBytes 的记录解密并返回数据，超出阈值的
+   *     记录仍返回索引条目但 dataB64 为空（后端不解密、不搬运数据）。
+   */
+  project?: "full" | "index";
+  /** INDEX 投影的内联数据字节阈值（0 = 纯索引，任何记录都不附带数据） */
+  inlineMaxBytes?: number;
+}
+
 /** 打开扫描游标，返回首批记录
  * @param startId 起始记录 ID（0 表示从头扫描）
  * @param batchSize 单批拉取条数（<1KB 记录建议 1000~2000，>1KB 建议 200~500）
- * @returns 首批记录列表 + 是否遍历结束
+ * @param options 投影选项（索引/列表类调用传 { project: "index", inlineMaxBytes }）
+ * @returns 首批记录列表 + 是否遍历结束 + 本批损坏记录 ID
  * @throws 当后端 scan_open 失败时抛异常（v1 格式不支持游标扫描等）
  *
  * 失败时不静默返回空记录，而是抛异常让调用方决定回退策略。
@@ -713,11 +859,17 @@ export async function verthysEnumerateRecordsStream(
  */
 export async function verthysScanOpen(
   startId: number = 0,
-  batchSize: number = 1000
-): Promise<{ records: { id: number; type: number; name: string; dataB64: string }[]; exhausted: boolean }> {
+  batchSize: number = 1000,
+  options: ScanProjectOptions = {}
+): Promise<{ records: { id: number; type: number; name: string; dataB64: string }[]; exhausted: boolean; failedIds: number[] }> {
   // 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
   markFrontendIpcActive();
-  const r = await ipc<VerthysResponse>("verthys_scan_open", { startId, batchSize });
+  const r = await ipc<VerthysResponse>("verthys_scan_open", {
+    startId,
+    batchSize,
+    project: options.project,
+    inlineMaxBytes: options.inlineMaxBytes,
+  });
   if (!r.ok) {
     throw ipcFailed(`scan_open failed: ${r.error ?? "unknown error"}`);
   }
@@ -727,25 +879,32 @@ export async function verthysScanOpen(
     name: e.name,
     dataB64: e.data,
   }));
-  return { records, exhausted: r.exhausted ?? false };
+  return { records, exhausted: r.exhausted ?? false, failedIds: r.failed_ids ?? [] };
 }
 
 /** 拉取下一批记录（双缓冲流水线切换）
+ *
+ * 失败必须上抛（与 scanOpen 同一契约）：静默返回空批会让调用方误判「已遍历
+ * 完毕」，扫描缓存被无声截断——表现为相册/文件库缺失记录且无任何错误提示。
+ * 上抛后由调用方（记录扫描）进入回退链路（enumerate 全量 + 流式枚举）。
+ *
  * @param batchSize 单批拉取条数（与 open 时一致）
- * @returns 下一批记录列表 + 是否遍历结束
+ * @returns 下一批记录列表 + 是否遍历结束 + 本批损坏记录 ID
  */
 export async function verthysScanNext(
   batchSize: number = 1000
-): Promise<{ records: { id: number; type: number; name: string; dataB64: string }[]; exhausted: boolean }> {
+): Promise<{ records: { id: number; type: number; name: string; dataB64: string }[]; exhausted: boolean; failedIds: number[] }> {
   const r = await ipc<VerthysResponse>("verthys_scan_next", { batchSize });
-  if (!r.ok) return { records: [], exhausted: true };
+  if (!r.ok) {
+    throw new Error(`scan_next failed: ${r.error ?? "unknown error"}`);
+  }
   const records = (r.records || []).map(e => ({
     id: e.id,
     type: e.rtype,
     name: e.name,
     dataB64: e.data,
   }));
-  return { records, exhausted: r.exhausted ?? false };
+  return { records, exhausted: r.exhausted ?? false, failedIds: r.failed_ids ?? [] };
 }
 
 /** 关闭扫描游标，释放所有资源（共享内存、C 游标、预取任务） */
@@ -1241,6 +1400,62 @@ export async function writeUserFile(path: string, data: Uint8Array): Promise<voi
     await invokeWithTimeout<void>("write_user_file", data, undefined, {
       headers: { "x-path": encodeURIComponent(path) },
     });
+  } catch (e) {
+    throw wrapAsVerthysError(e);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 单文件导出流式写入（暂存 + 原子替换）                                *
+ *                                                                    *
+ * 大文件导出不再整包直传（峰值内存 = 容器体积），改为：                 *
+ *   writeUserFileStream 建会话（后端独占创建暂存）→                   *
+ *   appendUserFileChunk 逐帧追加原始字节 →                            *
+ *   finalizeUserFileStream 后端 fsync + rename 原子替换目标。         *
+ * 失败路径调用 abortUserFileStream 清理暂存；任何时刻目标文件          *
+ * 要么是旧完整版、要么是新完整版，不存在部分写入的最终文件。           *
+ * ------------------------------------------------------------------ */
+
+/** 创建流式写入会话并返回会话标识（32 位小写 hex）
+ *
+ *  目标路径安全链与 writeUserFile 一致（字符校验 + canonicalize +
+ *  系统关键目录拒绝）；同目标并发创建第二个会话因暂存独占而失败。 */
+export async function writeUserFileStream(path: string): Promise<string> {
+  try {
+    return await invokeWithTimeout<string>("write_user_file_stream", { path });
+  } catch (e) {
+    throw wrapAsVerthysError(e);
+  }
+}
+
+/** 向流式会话追加原始数据块（二进制 IPC）
+ *
+ *  块字节经请求体直传（Tauri v2 raw IPC），会话标识经 x-stream-id
+ *  请求头传递 — raw body 与 JSON 参数互斥，与 writeUserFile 的
+ *  x-path 同机制；标识为 32 位小写 hex，天然满足头值字符约束。 */
+export async function appendUserFileChunk(streamId: string, data: Uint8Array): Promise<void> {
+  try {
+    await invokeWithTimeout<void>("append_user_file_chunk", data, undefined, {
+      headers: { "x-stream-id": streamId },
+    });
+  } catch (e) {
+    throw wrapAsVerthysError(e);
+  }
+}
+
+/** 终结流式会话：后端同步落盘暂存并以原子替换方式改名到目标路径 */
+export async function finalizeUserFileStream(streamId: string): Promise<void> {
+  try {
+    await invokeWithTimeout<void>("finalize_user_file_stream", { streamId });
+  } catch (e) {
+    throw wrapAsVerthysError(e);
+  }
+}
+
+/** 中止流式会话：后端删除暂存文件（幂等，会话不存在视为成功） */
+export async function abortUserFileStream(streamId: string): Promise<void> {
+  try {
+    await invokeWithTimeout<void>("abort_user_file_stream", { streamId });
   } catch (e) {
     throw wrapAsVerthysError(e);
   }

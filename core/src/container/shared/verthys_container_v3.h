@@ -254,6 +254,12 @@ VerthysResult vsb_v3_commit_quorum_ex(FILE *f, VerthysSuperBlockV3 *sb,
 VerthysResult vsb_v3_commit_quorum(FILE *f, VerthysSuperBlockV3 *sb,
                                  const uint8_t integrity_key[VERTHYS_KEY_BYTES]);
 
+/* 测试注入（仅测试 exe 经对象直链使用，非 DLL 导出面）：
+ * 置位后 vsb_txn_v3_commit 以 fail_mask=0x7 强制三副本写失败。
+ * 存在理由：会话级单写者锁使外部字节锁故障注入不可行，测试
+ * 改经本开关等价模拟"落盘 IO 失败→回滚"分支。 */
+void vsb_v3_test_force_commit_fail(int enabled);
+
 /*
  * 法定人数读取（崩溃恢复路径）：
  *   1. 依次读取 3 副本，逐一 HMAC + verifier 验证；

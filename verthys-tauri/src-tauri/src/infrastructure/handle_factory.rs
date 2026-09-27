@@ -72,8 +72,15 @@ pub fn create_non_inheritable_pipe(buffer_size: u32) -> Result<(HANDLE, HANDLE),
     let mut read_handle = HANDLE::default();
     let mut write_handle = HANDLE::default();
 
-    unsafe { CreatePipe(&mut read_handle, &mut write_handle, Some(&security_attr), buffer_size) }
-        .map_err(|err| format!("CreatePipe 创建匿名管道失败：{}", err))?;
+    unsafe {
+        CreatePipe(
+            &mut read_handle,
+            &mut write_handle,
+            Some(&security_attr),
+            buffer_size,
+        )
+    }
+    .map_err(|err| format!("CreatePipe 创建匿名管道失败：{}", err))?;
 
     Ok((read_handle, write_handle))
 }
@@ -106,7 +113,10 @@ pub fn validate_no_inherited_handles() -> Result<(), String> {
         if unsafe { GetHandleInformation(handle, &mut flags) }.is_ok()
             && (flags & HANDLE_FLAG_INHERIT) != 0
         {
-            return Err(format!("进程安全自检不通过：{} 被设置为可继承句柄，违反资源隔离规范", desc));
+            return Err(format!(
+                "进程安全自检不通过：{} 被设置为可继承句柄，违反资源隔离规范",
+                desc
+            ));
         }
     }
 

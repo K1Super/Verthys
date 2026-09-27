@@ -18,7 +18,7 @@ export function validateConfig(): EnvConfig {
   const apiBase = import.meta.env.VITE_API_BASE ?? "tauri://localhost";
 
   // 校验应用版本号
-  const version = import.meta.env.VITE_APP_VERSION ?? "2.6.1";
+  const version = import.meta.env.VITE_APP_VERSION ?? "3.3.0";
 
   // 开发模式下输出配置摘要（入口层允许的启动关键事件）
   if (debug) {

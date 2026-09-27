@@ -52,7 +52,7 @@ static int v3l_setup(VerthysCngAead *wrap, uint8_t wk[V3L_KEY_BYTES],
     {
         uint8_t copy[V3L_KEY_BYTES];
         memcpy(copy, wk, V3L_KEY_BYTES);
-        if (verthys_cng_aead_import_key(wrap, copy, NULL) != VERTHYS_OK) return -1;
+        if (verthys_cng_aead_import_key(wrap, copy, NULL, 0) != VERTHYS_OK) return -1;
     }
     if (verthys_partition_create(part, V3L_PART_ID, VERTHYS_PARTITION_INDEX,
                                0, V3L_REGION_SIZE, 1, wrap) != VERTHYS_OK) {
@@ -321,12 +321,20 @@ TEST(v3lsm_flush_rebuild_fail_readonly)
     CHECK_EQ(verthys_lsm_table_count(&lsm), 1);       /* SSTable 已持久化 */
     CHECK_EQ(verthys_lsm_memtable_count(&lsm), 0);    /* 旧表已销毁 */
 
-    /* 只读态：写路径（put 与墓碑 delete）整体拒绝，表计数不再增长 */
-    v3l_make_entry(&extra, 404, "blocked", 2, 66);
+    /* 只读态：持续分配失败下，写路径（put 与墓碑 delete）仍整体
+     * 拒绝（自愈尝试的首步 memtable 分配即瞬时失败），表计数不增长 */
+    v3l_make_entry(&extra, 404, "ro-extra", 1, 77);
+    verthys_lsm_memtable_test_force_alloc_fail(1);
     CHECK_EQ(verthys_lsm_put(&lsm, 2, &extra), VERTHYS_ERR_RESOURCE_LIMIT);
     CHECK_EQ(verthys_lsm_delete(&lsm, 2, lids[0]), VERTHYS_ERR_RESOURCE_LIMIT);
+    verthys_lsm_memtable_test_force_alloc_fail(0);   /* 先复位再断言 */
     CHECK_EQ(verthys_lsm_table_count(&lsm), 1);       /* 无重复 flush */
     CHECK_EQ(verthys_lsm_memtable_count(&lsm), 0);
+
+    /* 分配恢复（瞬时内存压力消退）：下一次写入触发一次性重放重建
+     * 自愈，写能力原地恢复（无需 close/reopen），旧条目与新增一致 */
+    CHECK_EQ(verthys_lsm_put(&lsm, 2, &extra), VERTHYS_OK);
+    CHECK_EQ(verthys_lsm_memtable_count(&lsm), 4);    /* 3 重放 + 1 新增 */
 
     /* 读路径不受只读态影响（SSTable 直读） */
     for (int i = 0; i < 3; i++) {

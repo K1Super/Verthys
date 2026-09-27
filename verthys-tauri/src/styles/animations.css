@@ -5,9 +5,54 @@
  *   消除分散在各组件中的动画定义冗余
  */
 
-/* ===== 闪烁圆点（clip-toast 配套）===== */
-@keyframes dot-blink {
-  50% { opacity: 0.3; }
+/* ===== 复制提示视界立标入场（clip-toast 配套）===== */
+/* 影子「凝聚」：视界自极小质点聚合成形，先过冲后回落；
+ * 两段复合缓动（各异非标准曲线），末帧与落态 transform 一致（零跳变），
+ * 单次播放后静止，随弹窗重建重演 */
+@keyframes toast-void-birth {
+  0% {
+    opacity: 0;
+    transform: scale(0.28);
+    animation-timing-function: cubic-bezier(0.25, 0.66, 0.3, 1);
+  }
+  62% {
+    opacity: 1;
+    transform: scale(1.1);
+    animation-timing-function: cubic-bezier(0.42, 0.05, 0.3, 1);
+  }
+  100% { transform: scale(1); }
+}
+
+/* 光子环「旋转锁定」：迟于影子 0.05s（视界成形后环自远方坍缩到位），
+ * 自 76° 高位带缩放旋入，越过落态 8° 回弹后锁定 — 束流环捕获时序 */
+@keyframes toast-ring-lock {
+  0% {
+    opacity: 0;
+    transform: rotate(76deg) scale(1.85);
+    animation-timing-function: cubic-bezier(0.3, 0.6, 0.28, 1);
+  }
+  56% {
+    opacity: 1;
+    transform: rotate(-6deg) scale(0.955);
+    animation-timing-function: cubic-bezier(0.44, 0.04, 0.3, 1);
+  }
+  100% { transform: rotate(8deg) scale(1); }
+}
+
+/* 盘弧「反向掠切」：迟于光子环 0.12s，自 -64° 反角动量切入，
+ * 越过落态 -14° 至 -7° 后回正 — 环与盘双错向汇聚的非对称时序 */
+@keyframes toast-disk-razor {
+  0% {
+    opacity: 0;
+    transform: rotate(-64deg) scale(1.62);
+    animation-timing-function: cubic-bezier(0.24, 0.64, 0.3, 1);
+  }
+  58% {
+    opacity: 1;
+    transform: rotate(-7deg) scale(1.02);
+    animation-timing-function: cubic-bezier(0.42, 0.05, 0.3, 1);
+  }
+  100% { transform: rotate(-14deg) scale(1); }
 }
 
 /* ===== 故障文字双通道偏移 ===== */

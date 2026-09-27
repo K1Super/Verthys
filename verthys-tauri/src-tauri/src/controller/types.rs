@@ -484,6 +484,12 @@ pub struct VerthysResponse {
     /// 共享内存中本次返回的记录数
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_count: Option<u64>,
+    /// 扫描批内解密失败/索引不一致的记录 ID（仅 verthys_scan_open / verthys_scan_next 返回）
+    ///
+    /// 上游（C 层）按 lid 记账失败条目而不是静默丢弃，worker 透传本字段；
+    /// 前端据此把对应条目标记为损坏（区别于"记录不存在"）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_ids: Option<Vec<u64>>,
     /* 解锁响应内联全局主密钥探测结果
      *   worker 解锁成功后进程内一次性完成 has_record + find_lid + get_record，
      *   结果内联到 unlock 响应三字段，彻底消除前端 IPC 链路与 v1 假阴性死锁。
@@ -532,6 +538,26 @@ pub struct VerthysResponse {
     pub total_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped_count: Option<u64>,
+    /* 落盘自查结果（仅 verthys_verify_disk_persist 返回）
+     *
+     * 由 worker 进程内 C 层持锁句柄自查产生（主进程外部读在 Windows
+     * 强制字节范围锁下必失败）。字段名与 worker protocol.rs 保持一致，
+     * serde 反序列化直接同名透传。均为非敏感结构元数据。 */
+    /// C 端 VerPersistStatus 状态码（0=OK / 1=HEADER / 2=SIZE / 3=WAL / 4=IO / 5=INTERNAL）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<i32>,
+    /// 容器文件字节大小
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+    /// 文件修改时间（Unix 毫秒；不可得为 0）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtime_ms: Option<u64>,
+    /// 磁盘偏移 0 的副本帧头 magic
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_magic: Option<u32>,
+    /// 容器格式版本
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_version: Option<u32>,
 }
 
 impl VerthysResponse {
@@ -550,6 +576,7 @@ impl VerthysResponse {
             shm_name: None,
             shm_size: None,
             record_count: None,
+            failed_ids: None,
             has_global_key: None,
             global_key_id: None,
             global_key_record: None,
@@ -562,6 +589,11 @@ impl VerthysResponse {
             processed_count: None,
             total_count: None,
             skipped_count: None,
+            status_code: None,
+            file_size: None,
+            mtime_ms: None,
+            header_magic: None,
+            header_version: None,
         }
     }
     pub fn err(op: &str, msg: &str) -> Self {
@@ -579,6 +611,7 @@ impl VerthysResponse {
             shm_name: None,
             shm_size: None,
             record_count: None,
+            failed_ids: None,
             has_global_key: None,
             global_key_id: None,
             global_key_record: None,
@@ -591,6 +624,11 @@ impl VerthysResponse {
             processed_count: None,
             total_count: None,
             skipped_count: None,
+            status_code: None,
+            file_size: None,
+            mtime_ms: None,
+            header_magic: None,
+            header_version: None,
         }
     }
     pub fn to_json(&self) -> String {
@@ -709,4 +747,67 @@ pub struct EnumerateBatch {
     #[ts(optional)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::controller::api_error::ApiError>,
+}
+
+// ===== 照片导入批量协议类型 =====
+//
+// verthys_add_records_batch 的输入/进度契约，与前端 verthys.ts 对齐。
+// 定义于本模块供控制器命令入口与单写者通道（state::import_writer）共享，
+// 避免跨分层重复定义同一批处理数据类型。
+
+/// 单条已加密记录输入（前端 Worker 池加密后产出）
+///
+/// 字段语义：
+///   - rtype：记录类型（与 verthys_add_record 一致）
+///   - name：记录名称（如 `meta_xxx.jpg`）
+///   - hash：原始文件内容的 BLAKE3 hex（用于去重 + WAL 幂等）
+///   - data_b64：已加密的记录数据 base64（前端 XChaCha20-Poly1305 加密产物）
+///   - chunk_ids / chunk_hashes：外置块引用（仅大文件外置模式携带；
+///     导入时校验块在本会话已成功上传，防止悬空引用）
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchRecordInput {
+    pub rtype: u32,
+    pub name: String,
+    pub hash: String,
+    pub data_b64: String,
+    #[serde(default)]
+    pub chunk_ids: Option<Vec<u64>>,
+    #[serde(default)]
+    pub chunk_hashes: Option<Vec<String>>,
+}
+
+/// 单条外置加密块输入（verthys_add_chunk_batch 载荷元素）
+///
+/// 字段语义：
+///   - hash：块密文的 BLAKE3 hex（本会话内幂等去重依据）
+///   - data_b64：块密文 base64（前端 XChaCha20-Poly1305 加密产物）
+///   - rtype：记录类型（外置载荷角色）。缺省为照片数据块；索引瘦身布局的
+///     缩略图记录显式指定缩略图类型，写者据此分配记录名与类型，二者共用
+///     同一上传通道、台账与幂等去重
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChunkBlob {
+    pub hash: String,
+    pub data_b64: String,
+    #[serde(default)]
+    pub rtype: Option<u32>,
+}
+
+/// 批量写入进度（通过 Tauri Channel 流式推送到前端）
+///
+/// 前端在 requestAnimationFrame 内接收并绘制进度条，保证任何时刻最多一帧间隔更新，
+/// 绝不参与数据处理热路径。
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportBatchProgress {
+    /// 本批次 ID（从 1 递增，前端据此对齐检查点）
+    pub batch_id: u64,
+    /// 本批次已处理记录数（含去重跳过 + 失败）
+    pub processed_in_batch: u64,
+    /// 本批次总记录数
+    pub total_in_batch: u64,
+    /// 导入会话累计已 committed 记录数（检查点）
+    pub total_committed: u64,
+    /// 导入会话累计因哈希去重跳过的记录数
+    pub total_skipped: u64,
+    /// 本批次已耗时（毫秒，自批次开始累计）
+    pub elapsed_ms: u64,
 }

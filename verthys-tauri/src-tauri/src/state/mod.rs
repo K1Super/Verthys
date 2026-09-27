@@ -32,6 +32,8 @@
  * 分层依赖方向：state → worker / infrastructure / controller::types / util
  */
 
+pub mod file_streams;
+pub mod import_writer;
 pub mod key_lifecycle;
 pub mod locked_buffer;
 pub mod scan_pipeline;
@@ -42,9 +44,7 @@ pub mod worker_lifecycle;
 // VirtualLockable / PrefetchCommand 未通过 mod.rs 重导出（无外部消费者），
 // 需要时可直接从 locked_buffer / scan_pipeline 模块导入。
 #[allow(unused_imports)]
-pub use key_lifecycle::{
-    KeyLifecycle, KeyLifecycleState, VerifyAttemptResult, VerifyCheckResult,
-};
+pub use key_lifecycle::{KeyLifecycle, KeyLifecycleState, VerifyAttemptResult, VerifyCheckResult};
 #[allow(unused_imports)]
 pub use locked_buffer::LockedBuffer;
 #[allow(unused_imports)]
@@ -56,8 +56,7 @@ pub use scan_pipeline::{
 pub use verthys_session::{PreheatToken, PreheatTokenStore, VerthysSessionGuard};
 #[allow(unused_imports)]
 pub use worker_lifecycle::{
-    spawn_health_checker, SetupCache, WorkerLifecycle, WorkerLifecycleHandle,
-    WorkerLifecycleState,
+    spawn_health_checker, SetupCache, WorkerLifecycle, WorkerLifecycleHandle, WorkerLifecycleState,
 };
 
 use crate::controller::types::{VerthysRecordEntry, VerthysSummaryEntry};
@@ -197,6 +196,17 @@ pub struct AppState {
     /// verthys_import_end 关闭。单 verthys 同一时刻仅一个活跃会话（Mutex 串行化保证）。
     /// 中毒处理：into_inner() 取出废弃 → 重置为 None → 告警。
     import_session: Mutex<Option<crate::repository::verthys_wal::ImportSession>>,
+    /// 流式文件写入会话表（导出流式落盘）
+    ///
+    /// 通过 lock_file_streams() 访问；finalize/abort 一次性消费会话。
+    /// 中毒处理：清理各会话暂存残留 → 重置为空表 → 告警。
+    file_streams: file_streams::FileStreamTable,
+    /// 导入写者句柄（单写者通道）
+    ///
+    /// 通过 lock_writer() 访问；缺失或心跳超时由 import_writer::ensure
+    /// 原地重建。中毒处理：置死旧写者（防其继续变更存储）→ 重置为
+    /// None → 告警。
+    writer: Mutex<Option<import_writer::ImportWriterHandle>>,
 }
 
 impl AppState {
@@ -217,6 +227,8 @@ impl AppState {
             verthys_session: Mutex::new(None),
             key_lifecycle: KeyLifecycle::new(),
             import_session: Mutex::new(None),
+            file_streams: Mutex::new(std::collections::HashMap::new()),
+            writer: Mutex::new(None),
         }
     }
 
@@ -240,9 +252,7 @@ impl AppState {
         let guard = match self.scan_state.lock() {
             Ok(g) => g,
             Err(poisoned) => {
-                log::error!(
-                    "[POISON][scan_state] Mutex 中毒，废弃旧状态并重置为 None"
-                );
+                log::error!("[POISON][scan_state] Mutex 中毒，废弃旧状态并重置为 None");
                 let mut g = poisoned.into_inner();
                 // 废弃旧状态（LockedBuffer Drop 会擦除+解锁记录）
                 *g = None;
@@ -253,8 +263,7 @@ impl AppState {
             }
         };
         // 记录锁获取时间戳
-        self.scan_lock_acquired_ms
-            .store(now_ms(), Ordering::SeqCst);
+        self.scan_lock_acquired_ms.store(now_ms(), Ordering::SeqCst);
         TimedMutexGuard {
             guard,
             timestamp: &self.scan_lock_acquired_ms,
@@ -270,9 +279,7 @@ impl AppState {
         let guard = match self.scan_summary_state.lock() {
             Ok(g) => g,
             Err(poisoned) => {
-                log::error!(
-                    "[POISON][scan_summary_state] Mutex 中毒，废弃旧状态并重置为 None"
-                );
+                log::error!("[POISON][scan_summary_state] Mutex 中毒，废弃旧状态并重置为 None");
                 let mut g = poisoned.into_inner();
                 *g = None;
                 let req = serde_json::json!({"op": "scan_summary_close"});
@@ -292,15 +299,11 @@ impl AppState {
     ///
     /// 中毒处理：into_inner() 取出废弃 → 重置为 None → 告警。
     /// 无时间戳监控（文件锁持有时间短，不涉及死锁风险）。
-    pub fn lock_verthys_file(
-        &self,
-    ) -> std::sync::MutexGuard<'_, Option<VerthysFileLock>> {
+    pub fn lock_verthys_file(&self) -> std::sync::MutexGuard<'_, Option<VerthysFileLock>> {
         match self.verthys_file_lock.lock() {
             Ok(g) => g,
             Err(poisoned) => {
-                log::error!(
-                    "[POISON][verthys_file_lock] Mutex 中毒，废弃旧锁并重置为 None"
-                );
+                log::error!("[POISON][verthys_file_lock] Mutex 中毒，废弃旧锁并重置为 None");
                 let mut g = poisoned.into_inner();
                 // 废弃旧文件锁（VerthysFileLock Drop 会释放 LockFileEx）
                 *g = None;
@@ -332,9 +335,7 @@ impl AppState {
         match self.session.write() {
             Ok(g) => g,
             Err(poisoned) => {
-                log::error!(
-                    "[POISON][session] RwLock write 中毒，废弃旧会话并重置为 None"
-                );
+                log::error!("[POISON][session] RwLock write 中毒，废弃旧会话并重置为 None");
                 let mut g = poisoned.into_inner();
                 *g = None;
                 g
@@ -450,11 +451,7 @@ impl AppState {
     }
 
     /// 发送 JSON 请求到 worker，自定义超时
-    pub fn send_with_timeout(
-        &self,
-        json: &str,
-        timeout: Duration,
-    ) -> Result<String, String> {
+    pub fn send_with_timeout(&self, json: &str, timeout: Duration) -> Result<String, String> {
         let session = {
             let guard = self.read_session();
             guard.as_ref().ok_or("worker not initialized")?.clone()
@@ -540,9 +537,7 @@ impl AppState {
         match self.verthys_session.lock() {
             Ok(g) => g,
             Err(poisoned) => {
-                log::error!(
-                    "[POISON][verthys_session] Mutex 中毒，废弃旧会话守卫并重置为 None"
-                );
+                log::error!("[POISON][verthys_session] Mutex 中毒，废弃旧会话守卫并重置为 None");
                 let mut g = poisoned.into_inner();
                 // 废弃旧会话守卫（VerthysSessionGuard Drop 会释放文件锁）
                 *g = None;
@@ -587,9 +582,7 @@ impl AppState {
         match self.import_session.lock() {
             Ok(g) => g,
             Err(poisoned) => {
-                log::error!(
-                    "[POISON][import_session] Mutex 中毒，废弃旧导入会话并重置为 None"
-                );
+                log::error!("[POISON][import_session] Mutex 中毒，废弃旧导入会话并重置为 None");
                 let mut g = poisoned.into_inner();
                 // 废弃旧会话（WalWriter Drop 关闭文件句柄；committed_hashes 已落盘可恢复）
                 *g = None;
@@ -602,6 +595,80 @@ impl AppState {
     pub fn has_import_session(&self) -> bool {
         let guard = self.lock_import_session();
         guard.is_some()
+    }
+
+    /* ----------------------------------------------------------------
+     * 流式文件写入会话表访问方法                         *
+     *                                                                *
+     * write_user_file_stream 创建会话，append 查指针，finalize/abort  *
+     * 一次性消费（从表移除取得独占所有权）。表锁仅覆盖指针增删查，    *
+     * 磁盘 IO 均在各会话自身锁与外层 spawn_blocking 中执行。          *
+     * ---------------------------------------------------------------- */
+
+    /// 锁定文件流会话表
+    ///
+    /// 中毒处理：取出的旧表逐会话尽力清理暂存残留（句柄已不可能再被
+    /// finalize 消费，残留为纯磁盘垃圾）→ 重置为空表 → 告警。
+    pub fn lock_file_streams(
+        &self,
+    ) -> std::sync::MutexGuard<
+        '_,
+        std::collections::HashMap<
+            String,
+            std::sync::Arc<std::sync::Mutex<file_streams::FileStreamState>>,
+        >,
+    > {
+        match self.file_streams.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                log::error!("[POISON][file_streams] Mutex 中毒，清理各会话暂存残留并重置为空表");
+                let mut guard = poisoned.into_inner();
+                let stale = std::mem::take(&mut *guard);
+                for (_, entry) in stale {
+                    file_streams::cleanup_stream_residue(entry);
+                }
+                guard
+            }
+        }
+    }
+
+    /* ----------------------------------------------------------------
+     * 导入写者句柄访问方法（单写者通道）                  *
+     *                                                                *
+     * 写者由 import_writer::ensure 惰性创建并注册；看门狗通过          *
+     * writer_is_stale 判定心跳超时并触发重建。                        *
+     * ---------------------------------------------------------------- */
+
+    /// 锁定导入写者句柄
+    ///
+    /// 中毒处理：置死旧写者（阻断其继续执行变更命令）→ 重置为
+    /// None → 告警。下次 import_writer::ensure 将原地重建。
+    pub fn lock_writer(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<import_writer::ImportWriterHandle>> {
+        match self.writer.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                log::error!("[POISON][writer] Mutex 中毒，置死旧写者并重置");
+                let mut guard = poisoned.into_inner();
+                if let Some(handle) = guard.as_ref() {
+                    handle.kill();
+                }
+                *guard = None;
+                guard
+            }
+        }
+    }
+
+    /// 写者心跳是否超时（看门狗判定用）
+    ///
+    /// 无写者（尚未首次取用）视为健康——按需创建即可，不触发重建。
+    pub fn writer_is_stale(&self) -> bool {
+        let guard = self.lock_writer();
+        match guard.as_ref() {
+            Some(handle) => !handle.is_alive(),
+            None => false,
+        }
     }
 
     /* ----------------------------------------------------------------
@@ -635,9 +702,7 @@ impl AppState {
                     let req = serde_json::json!({"op": "scan_close"});
                     let _ = self.send(&req.to_string());
                 } else {
-                    log::warn!(
-                        "[LOCK_MONITOR] scan_state try_lock 失败（仍被持有），仅告警"
-                    );
+                    log::warn!("[LOCK_MONITOR] scan_state try_lock 失败（仍被持有），仅告警");
                 }
             }
         }
@@ -653,11 +718,10 @@ impl AppState {
                     LOCK_HOLD_WARN_THRESHOLD_MS
                 );
                 if let Ok(mut guard) = self.scan_summary_state.try_lock() {
-                    log::warn!(
-                        "[LOCK_MONITOR] scan_summary_state try_lock 成功，强制重置为 None"
-                    );
+                    log::warn!("[LOCK_MONITOR] scan_summary_state try_lock 成功，强制重置为 None");
                     *guard = None;
-                    self.scan_summary_lock_acquired_ms.store(0, Ordering::SeqCst);
+                    self.scan_summary_lock_acquired_ms
+                        .store(0, Ordering::SeqCst);
                     let req = serde_json::json!({"op": "scan_summary_close"});
                     let _ = self.send(&req.to_string());
                 } else {
@@ -843,9 +907,7 @@ mod tests {
             state_clone.end_io();
         });
 
-        let result = state
-            .wait_io_complete(Duration::from_secs(2))
-            .await;
+        let result = state.wait_io_complete(Duration::from_secs(2)).await;
         assert!(result);
         handle.await.unwrap();
     }
@@ -856,9 +918,7 @@ mod tests {
         let state = AppState::new();
         state.begin_io();
 
-        let result = state
-            .wait_io_complete(Duration::from_millis(100))
-            .await;
+        let result = state.wait_io_complete(Duration::from_millis(100)).await;
         assert!(!result);
 
         // 清理
@@ -893,9 +953,7 @@ mod tests {
 
         {
             let _guard = state.lock_scan_summary_state();
-            assert!(
-                state.scan_summary_lock_acquired_ms.load(Ordering::SeqCst) > 0
-            );
+            assert!(state.scan_summary_lock_acquired_ms.load(Ordering::SeqCst) > 0);
         }
 
         assert_eq!(

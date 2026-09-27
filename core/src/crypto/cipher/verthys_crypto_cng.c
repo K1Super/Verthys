@@ -186,7 +186,8 @@ VerthysResult verthys_cng_aead_init(VerthysCngAead *aead)
 VerthysResult verthys_cng_aead_import_key(
     VerthysCngAead *aead,
     const uint8_t key[VERTHYS_CNG_KEY_BYTES],
-    const uint8_t key_id[VERTHYS_CNG_KEY_ID_BYTES])
+    const uint8_t key_id[VERTHYS_CNG_KEY_ID_BYTES],
+    uint64_t persisted_counter)
 {
     NTSTATUS st;
 
@@ -241,7 +242,11 @@ VerthysResult verthys_cng_aead_import_key(
 
     aead->alg           = s_shared_alg;
     aead->imported      = 1;
-    aead->nonce_counter = 0;
+    /* 计数器恢复到该密钥已消耗的持久化下限：
+     * 这是 nonce 恢复的唯一入口——每个使用本函数的加密角色都必须在
+     * 入参处给出正确的持久化值，从调用纪律上消灭"导入后漏恢复、
+     * 同密钥 nonce 从 0 重启"的 GCM nonce 重用类缺陷。 */
+    aead->nonce_counter = persisted_counter;
 
     if (key_id != NULL) {
         memcpy(aead->key_id, key_id, VERTHYS_CNG_KEY_ID_BYTES);
@@ -295,9 +300,10 @@ VerthysResult verthys_cng_aead_encrypt(
     uint64_t counter = (uint64_t)InterlockedIncrement64(
         (volatile LONG64 *)&aead->nonce_counter);
     if (counter == 0) {
-        /* 2^64 回绕：理论上不可达，防御性拒绝而非静默重用 nonce */
+        /* 2^64 回绕：计数器已耗尽——拒绝而非静默重用 nonce，
+         * 否则同一密钥下 nonce 重复直接破坏 GCM 机密性与真实性 */
         InterlockedDecrement64((volatile LONG64 *)&aead->nonce_counter);
-        return VERTHYS_ERR_INTERNAL;
+        return VERTHYS_ERR_NONCE_EXHAUSTED;
     }
 
     uint8_t nonce[VERTHYS_CNG_NONCE_BYTES];

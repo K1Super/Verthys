@@ -10,7 +10,7 @@
  * =============================================================================
  * 1. 同源定义：SHM 常量与 verthys-worker 进程共享同一份源码（通过 include! 引入），
  *    确保主/子进程结构体布局与常量严格一致，根治版本分化。
- * 2. 版本策略：状态文件 magic 前缀与版本号分离，支持 v1→v2 平滑迁移，旧版
+ * 2. 版本策略：状态文件 magic 前缀与版本号分离，支持平滑迁移，旧版
  *    magic 保留作为迁移回退标识。
  * 3. 超时特化：按操作类型分别配置超时（初始化、IPC、派生、迁移等），避免单一
  *    全局超时导致长流程误判或短操作等待过长。
@@ -71,22 +71,10 @@ pub mod state {
 ///   用于运行时输入校验。
 pub mod shm {
     pub use crate::infrastructure::shm_schema::{
-        SHM_MAGIC,
-        SHM_VERSION,
-        SHM_HEADER_SIZE,
-        SHM_ENTRY_SIZE,
-        SHM_DEFAULT_SIZE,
-        SHM_MAX_SIZE,
-        SHM_SUMMARY_MAGIC,
-        SHM_SUMMARY_ENTRY_SIZE,
-        SHM_SUMMARY_DEFAULT_SIZE,
-        SHM_SUMMARY_MAX_SIZE,
-        SHM_NAME_MAX_LEN,
-        ShmHeader,
-        ShmEntry,
-        ShmSummaryEntry,
-        is_valid_shm_name,
-        validate_header_entry_size,
+        is_valid_shm_name, validate_header_entry_size, ShmEntry, ShmHeader, ShmSummaryEntry,
+        SHM_DEFAULT_SIZE, SHM_ENTRY_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_MAX_SIZE,
+        SHM_NAME_MAX_LEN, SHM_SUMMARY_DEFAULT_SIZE, SHM_SUMMARY_ENTRY_SIZE, SHM_SUMMARY_MAGIC,
+        SHM_SUMMARY_MAX_SIZE, SHM_VERSION,
     };
 }
 
@@ -158,6 +146,70 @@ pub mod timeout {
     };
 }
 
+// ===== 导入单写者通道常量 =====
+
+/// 照片导入批量写入约束（与前端导入常量表严格对齐）
+///
+/// 通道超时三层结构各自独立：命令层发送、响应层等待、写者线程心跳，
+/// 三者共同保证端到端延迟有上界（超时必返回明确错误）。
+pub mod import_writer {
+    use std::time::Duration;
+
+    use crate::infrastructure::shm_schema::{PB_IPC_MAX_PAYLOAD_BYTES, PB_MAX_CHUNKS_PER_IPC};
+
+    /// 命令层向写者通道发送的超时（通道背压满时兜底）
+    pub const WRITER_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+    /// 响应层等待写者命令完成的超时
+    pub const WRITER_CMD_TIMEOUT: Duration = Duration::from_secs(60);
+    /// 写者线程心跳超时阈值（毫秒，超过判定写者卡死触发重建）
+    pub const WRITER_HEARTBEAT_TIMEOUT_MS: u64 = 15_000;
+    /// 心跳看门狗巡检周期（毫秒）
+    pub const WRITER_HEARTBEAT_SWEEP_MS: u64 = 5_000;
+    /// 单条 IPC 载荷上限（字节，与前端同一跨层预算取值）
+    pub const MAX_IPC_PAYLOAD_BYTES: usize = PB_IPC_MAX_PAYLOAD_BYTES as usize;
+    /// 单批次记录数硬上限
+    pub const MAX_BATCH_RECORDS: usize = 512;
+    /// 单条外置 chunk 分批 IPC 的 chunk 数硬上限（与前端同一跨层预算取值）
+    pub const MAX_CHUNKS_PER_IPC: usize = PB_MAX_CHUNKS_PER_IPC as usize;
+    /// 单条记录名称长度上限（UTF-8 字节，与实现侧 `name.len()` 按字节比较的口径一致）
+    pub const MAX_RECORD_NAME_LEN: usize = 1024;
+    /// 单条记录内容哈希长度上限（字符）
+    pub const MAX_RECORD_HASH_LEN: usize = 256;
+}
+
+// ===== 照片记录类型常量 =====
+
+/// 照片记录类型值（与前端加密层同值）
+///
+/// meta 记录由前端加密后携带 rtype 提交；外置块记录由主进程单写者
+/// 写入，类型值在此单源定义，禁止控制层散落字面量。
+pub mod record_types {
+    /// 照片数据块记录类型值（外置加密块记录）
+    pub const TYPE_PHOTO_CHUNK: u32 = 5;
+    /// 照片缩略图记录类型值（索引瘦身布局的独立缩略图记录）
+    pub const TYPE_PHOTO_THUMB: u32 = 7;
+    /// 照片块集记录类型值（索引瘦身布局：逐块引用与逐块哈希）
+    pub const TYPE_PHOTO_CHUNK_SET: u32 = 9;
+}
+
+// ===== 导出流式写入常量 =====
+
+/// 单文件流式导出约束（与前端导出常量表严格对齐）
+///
+/// 分块上界保证单次追加在内存与带宽上可控；总量上界为单文件流式导出
+/// 的硬性安全边界，防止失控写入耗尽磁盘；暂存文件残留按龄清理，避免
+/// 崩溃遗留堆积。
+pub mod export_stream {
+    use std::time::Duration;
+
+    /// 单次流式追加（append_user_file_chunk）的载荷字节上界
+    pub const WRITE_FILE_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+    /// 单文件流式导出累计写入字节硬上限
+    pub const MAX_EXPORT_SINGLE_BYTES: u64 = 512 * 1024 * 1024;
+    /// 暂存文件残留清理阈值（创建新流时清理修改时间早于该阈值的残留）
+    pub const STALE_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
+}
+
 // ===== 顶层重导出（向后兼容） =====
 
 // 保持旧版 `use crate::constants::*` 导入方式有效，降低阶段迁移影响。
@@ -165,14 +217,14 @@ pub mod timeout {
 // 后续主版本将移除顶层重导出。
 
 #[allow(unused_imports)]
-pub use state::{STATE_MAGIC, STATE_VERSION};
-#[allow(unused_imports)]
 pub use shm::{
-    SHM_MAGIC, SHM_VERSION, SHM_HEADER_SIZE, SHM_ENTRY_SIZE, SHM_DEFAULT_SIZE, SHM_MAX_SIZE,
-    SHM_SUMMARY_MAGIC, SHM_SUMMARY_ENTRY_SIZE, SHM_SUMMARY_DEFAULT_SIZE, SHM_SUMMARY_MAX_SIZE,
-    SHM_NAME_MAX_LEN, ShmHeader, ShmEntry, ShmSummaryEntry,
-    is_valid_shm_name, validate_header_entry_size,
+    is_valid_shm_name, validate_header_entry_size, ShmEntry, ShmHeader, ShmSummaryEntry,
+    SHM_DEFAULT_SIZE, SHM_ENTRY_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_MAX_SIZE, SHM_NAME_MAX_LEN,
+    SHM_SUMMARY_DEFAULT_SIZE, SHM_SUMMARY_ENTRY_SIZE, SHM_SUMMARY_MAGIC, SHM_SUMMARY_MAX_SIZE,
+    SHM_VERSION,
 };
+#[allow(unused_imports)]
+pub use state::{STATE_MAGIC, STATE_VERSION};
 #[allow(unused_imports)]
 pub use timeout::{TimeoutConfig, DEFAULT as TIMEOUT_DEFAULT};
 

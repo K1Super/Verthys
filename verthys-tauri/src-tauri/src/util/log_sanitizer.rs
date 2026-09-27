@@ -30,10 +30,7 @@ fn sanitize_value(v: &Value, keep: &[&str]) -> Value {
             let mut out = serde_json::Map::new();
             for (k, val) in map {
                 let kept = keep.contains(&k.as_str())
-                    && matches!(
-                        val,
-                        Value::String(_) | Value::Number(_) | Value::Bool(_)
-                    );
+                    && matches!(val, Value::String(_) | Value::Number(_) | Value::Bool(_));
                 let sanitized = if kept {
                     val.clone()
                 } else {
@@ -67,11 +64,20 @@ mod tests {
 
     #[test]
     fn 敏感字段被脱敏且白名单字段保留() {
-        let payload = r#"{"op":"derive_global_key","password":"secret-pw","bin_password":"secret-bp"}"#;
+        let payload =
+            r#"{"op":"derive_global_key","password":"secret-pw","bin_password":"secret-bp"}"#;
         let out = json_log_summary(payload, KEEP);
         assert!(!out.contains("secret-pw"), "口令明文不得出现: {}", out);
-        assert!(!out.contains("secret-bp"), "二进制口令明文不得出现: {}", out);
-        assert!(out.contains("derive_global_key"), "白名单 op 应保留: {}", out);
+        assert!(
+            !out.contains("secret-bp"),
+            "二进制口令明文不得出现: {}",
+            out
+        );
+        assert!(
+            out.contains("derive_global_key"),
+            "白名单 op 应保留: {}",
+            out
+        );
     }
 
     #[test]
@@ -99,7 +105,11 @@ mod tests {
     fn 白名单命中结构化值时仍只保留规模() {
         let payload = r#"{"op":{"evil":"结构化值不应整体保留"}}"#;
         let out = json_log_summary(payload, KEEP);
-        assert!(!out.contains("结构化值不应整体保留"), "结构化白名单值应脱敏: {}", out);
+        assert!(
+            !out.contains("结构化值不应整体保留"),
+            "结构化白名单值应脱敏: {}",
+            out
+        );
     }
 
     #[test]

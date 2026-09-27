@@ -32,5 +32,17 @@ mod dispatch;
 mod main_loop;
 mod diagnostics;
 
+/// 跨层预算常量（与主进程同源）
+///
+/// 单独成模块而非并入 scan_shm：预算常量同时被非 Windows 路径的协议
+/// 行上限与请求侧校验消费，而 scan_shm 为 Windows 专用传输层；
+/// 此处与平台无关地引入同一份生成物，保证任何目标平台都引用同一定义。
+pub(crate) mod budget {
+    #![allow(dead_code)]
+    include!("../../../photo_budget.rs");
+}
+
 pub use main_loop::run;
 pub use diagnostics::{ffi_get_last_error, format_os_error};
+// panic 清零器（log.rs hook 经入口层注册；模块本体保持私有）
+pub(crate) use gmk::wipe_thread_gmk;

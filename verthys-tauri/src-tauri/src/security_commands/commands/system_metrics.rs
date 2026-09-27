@@ -41,9 +41,7 @@ fn sample_cpu_times() -> Option<CpuTimes> {
     let mut idle = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
-    let ok = unsafe {
-        GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user))
-    };
+    let ok = unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) };
     if ok.is_err() {
         return None;
     }

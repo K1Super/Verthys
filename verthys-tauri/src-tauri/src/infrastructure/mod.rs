@@ -52,16 +52,18 @@
  * - 内部依赖：各模块间保持单向依赖，避免循环。
  * - 平台支持：Windows 为一级目标，非Windows平台提供条件编译存根确保编译通过。
  */
-pub mod log_pipe;
-pub mod process_guard;
-pub mod handle_factory;
-pub mod shared_memory;
-pub mod device_fingerprint;
-pub mod path_resolver;
-pub mod resource_guard;
-/// SHM 协议契约（通过 include! 引入共享源文件，保证主/子进程数据结构一致）
-pub mod shm_schema;
 /// 应用数据目录解析（使用 SHGetKnownFolderPath，支持便携模式与长路径）
 pub mod app_paths;
 /// Windows 控制台信号处理（SetConsoleCtrlHandler → CancellationToken）
 pub mod console_handler;
+pub mod device_fingerprint;
+pub mod handle_factory;
+/// 主进程 ↔ Worker 安全 IPC 与 SHM 载荷认证（会话密钥 + HMAC 信封 + SHM 认证标签）
+pub mod ipc_secure;
+pub mod log_pipe;
+pub mod path_resolver;
+pub mod process_guard;
+pub mod resource_guard;
+pub mod shared_memory;
+/// SHM 协议契约（通过 include! 引入共享源文件，保证主/子进程数据结构一致）
+pub mod shm_schema;

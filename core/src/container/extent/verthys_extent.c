@@ -175,6 +175,16 @@ VerthysResult verthys_extent_put(FILE *f, VerthysPartition *part,
             break;
         }
 
+        /* 数据区边界守卫（纵深防御）：追加起点 + 本块长度不得越过
+         * 分区容量。容量扩展决策位于上层事务层且必须先于写入执行；
+         * 此处越界即拒绝——追加写越过容量会覆盖分区之后的区域
+         * （审计分区/文件尾），造成跨分区布局破坏。 */
+        if ((uint64_t)VERTHYS_EXTENT_INDEX_REGION_BYTES + idx->next_offset +
+            ct_len > part->size) {
+            r = VERTHYS_ERR_RESOURCE_LIMIT;
+            break;
+        }
+
         /* 4. 追加写（数据区 = 分区偏移 + 索引区 + 游标）+ fsync */
         abs_offset = part->offset + VERTHYS_EXTENT_INDEX_REGION_BYTES +
                      idx->next_offset;
@@ -331,6 +341,99 @@ VerthysResult verthys_extent_gc_eligible(const VerthysExtentIndex *idx,
     }
     *count = eligible;
     return VERTHYS_OK;
+}
+
+/* ---------- 紧凑化（容量不足时的盘面回收） ---------- */
+
+VerthysResult verthys_extent_compact(FILE *f, VerthysPartition *part,
+                                     VerthysExtentIndex *idx)
+{
+    uint64_t abs_cursor;
+    uint8_t *io = NULL;
+    uint64_t cursor = 0;
+    int moved = 0;
+    VerthysResult r = VERTHYS_OK;
+
+    if (f == NULL || part == NULL || idx == NULL) return VERTHYS_ERR_INVALID;
+
+    /* 索引不变量（仅校验活跃条目）：活跃条目按追加序排列，offset
+     * 单调不减且不重叠，next_offset 不落后于活跃尾部。违例条目为
+     * 半状态索引（不可自愈），拒绝搬移——破坏性整理必须以可信
+     * 偏移关系为前提。死块条目不参与校验：其偏移在往轮 compact 后
+     * 为陈旧值（可能低于后续活跃条目偏移），但搬运循环同样跳过
+     * 死块，陈旧偏移既不会被读取也不会被搬移。 */
+    for (size_t i = 0; i < idx->count; i++) {
+        VerthysExtent *ve = &idx->entries[i];
+
+        if (ve->ref_count == 0) continue;
+        if (ve->offset < cursor) return VERTHYS_ERR_INVALID;
+        cursor = ve->offset + ve->size;
+        if (cursor < ve->offset) return VERTHYS_ERR_INVALID; /* 回绕 */
+    }
+    if (idx->next_offset < cursor) return VERTHYS_ERR_INVALID;
+
+    io = (uint8_t *)malloc(VERTHYS_EXTENT_COMPACT_IO_BYTES);
+    if (io == NULL) return VERTHYS_ERR_INTERNAL;
+
+    /* 目标游标恒 ≤ 当前条目源偏移（死块跳过使空隙聚拢），前向分块
+     * 复制无重叠；死块（ref_count==0）原地弃置，其空间被填补或
+     * 落于收缩尾部。 */
+    cursor = 0;
+    for (size_t i = 0; i < idx->count; i++) {
+        VerthysExtent *e = &idx->entries[i];
+
+        if (e->ref_count == 0) continue;
+        if (e->offset == cursor) {
+            cursor += e->size;
+            continue;
+        }
+        abs_cursor = part->offset + VERTHYS_EXTENT_INDEX_REGION_BYTES + cursor;
+        if (abs_cursor > INT64_MAX) {
+            r = VERTHYS_ERR_INTERNAL;
+            goto out;
+        }
+        {
+            uint64_t src = part->offset + VERTHYS_EXTENT_INDEX_REGION_BYTES +
+                           e->offset;
+            uint64_t done = 0;
+
+            if (src > INT64_MAX) {
+                r = VERTHYS_ERR_INTERNAL;
+                goto out;
+            }
+            while (done < e->size) {
+                size_t chunk = (size_t)(e->size - done);
+                if (chunk > VERTHYS_EXTENT_COMPACT_IO_BYTES) {
+                    chunk = VERTHYS_EXTENT_COMPACT_IO_BYTES;
+                }
+                if (vio_pread64(f, src + done, io, chunk) != 0 ||
+                    vio_pwrite64(f, abs_cursor + done, io, chunk) != 0) {
+                    r = VERTHYS_ERR_IO;
+                    goto out;
+                }
+                done += chunk;
+            }
+        }
+        e->offset = cursor;
+        cursor += e->size;
+        moved = 1;
+    }
+
+    /* 目标区写入持久化先于索引帧（新 offset 视图）落盘 */
+    if (moved) {
+        if (fflush(f) != 0 || _commit(_fileno(f)) != 0) {
+            r = VERTHYS_ERR_IO;
+            goto out;
+        }
+    }
+
+    idx->next_offset = cursor;
+    part->used = cursor;
+    r = VERTHYS_OK;
+
+out:
+    free(io);
+    return r;
 }
 
 /* ---------- 索引持久化 ---------- */

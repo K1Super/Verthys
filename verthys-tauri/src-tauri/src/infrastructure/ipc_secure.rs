@@ -21,7 +21,7 @@
  * - util::base64：载荷Base64编解码
  */
 
-use crate::util::crypto::{ct_eq, hmac_sign, hmac_verify};
+use crate::util::crypto::{ct_eq, hmac_sign};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use zeroize::{Zeroize, Zeroizing};
@@ -71,7 +71,7 @@ impl SignedMessage {
         signing_data.extend_from_slice(payload_b64.as_bytes());
 
         let hmac_tag = hmac_sign(session_key, &signing_data)?;
-        Ok(hex::encode(hmac_tag))
+        Ok(hex::encode(&hmac_tag))
     }
 
     /// 常量时间校验HMAC签名，抵御侧信道计时攻击
@@ -198,7 +198,7 @@ impl IpcSecureChannel {
 
     /// 获取密钥只读引用，仅限传递给子进程启动参数，禁止日志打印
     pub fn session_key(&self) -> &[u8] {
-        &self.session_key
+        &self.session_key[..]
     }
 
     /// 导出密钥十六进制字符串，用于命令行参数传递给Worker子进程
@@ -211,7 +211,7 @@ impl IpcSecureChannel {
     pub fn sign_request(&self, json: &str) -> Result<String, String> {
         let nonce = self.send_nonce.fetch_add(1, Ordering::SeqCst);
         let payload_b64 = SignedMessage::encode_payload(json);
-        let hmac_tag = SignedMessage::compute_hmac(&self.session_key, nonce, &payload_b64)?;
+        let hmac_tag = SignedMessage::compute_hmac(&self.session_key[..], nonce, &payload_b64)?;
 
         let envelope = SignedMessage {
             payload: payload_b64,
@@ -230,16 +230,22 @@ impl IpcSecureChannel {
             .map_err(|e| format!("响应信封反序列化失败: {}", e))?;
 
         // 2. HMAC完整性与身份校验，失败判定消息被篡改
-        if !envelope.verify_hmac(&self.session_key) {
+        if !envelope.verify_hmac(&self.session_key[..]) {
             log::error!("[ipc_secure] IPC响应HMAC校验不通过，载荷疑似篡改");
             return Err("IPC安全校验失败：签名不匹配".to_string());
         }
 
         // 3. Nonce滑动窗口防重放判定，加锁保护窗口状态
         {
-            let mut window_guard = self.recv_window.lock().unwrap_or_else(|poison| poison.into_inner());
+            let mut window_guard = self
+                .recv_window
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             if !window_guard.check_and_record(envelope.nonce) {
-                log::error!("[ipc_secure] 检测到IPC消息重放攻击，nonce:{}", envelope.nonce);
+                log::error!(
+                    "[ipc_secure] 检测到IPC消息重放攻击，nonce:{}",
+                    envelope.nonce
+                );
                 return Err("IPC安全校验失败：重放消息拦截".to_string());
             }
         }
@@ -284,20 +290,64 @@ mod hex {
     }
 
     pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return Err("十六进制字符串长度必须为偶数".to_string());
         }
 
         let mut output = Vec::with_capacity(s.len() / 2);
         let chars: Vec<char> = s.chars().collect();
 
-        for chunk in chars.chunks_exact(2) {
+        for chunk in chars.as_chunks::<2>().0 {
             let high = chunk[0].to_digit(16).ok_or("非法十六进制字符")?;
             let low = chunk[1].to_digit(16).ok_or("非法十六进制字符")?;
             output.push((high * 16 + low) as u8);
         }
 
         Ok(output)
+    }
+}
+
+// =============================================================================
+// SHM 载荷认证原语：命名共享内存数据的完整性校验
+// =============================================================================
+//
+// 命名共享内存仅绑定当前用户 SID 可读写，但同用户下其他进程仍可能
+// 打开并篡改映射内容。为闭合该威胁面，worker 写入积分数据后在数据区
+// 尾部追加一段 HMAC-SHA256 认证标签，主进程读回时用同一密钥核验，
+// 任何一处字节被改动都会令标签不匹配而被拒绝。
+
+/// SHM 载荷认证块长度（同源契约：与 worker 端共用 shm_schema.rs 定义，
+/// 禁止本模块另立常量——长度漂移即协议断裂）
+pub use super::shm_schema::SHM_AUTH_BLOCK_LEN;
+
+/// 计算 SHM 载荷的 HMAC-SHA256 认证标签
+///
+/// 复用底层 hmac_sign（HMAC-SHA256），返回 32 字节原始标签。
+/// 密钥本身绝不进入日志或错误信息。
+///
+/// 参数：
+///   - key: 一次性 32 字节认证密钥（由调用方 Zeroizing 持有）
+///   - data: 待签名的载荷字节（SHM 映射区实际使用区间）
+///
+/// 返回：
+///   - Ok: 32 字节原始标签
+///   - Err: 底层密码头被拒绝（防御性传播，不吞错）
+pub fn shm_auth_compute(key: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+    let tag = hmac_sign(key, data)?;
+    Ok(tag.to_vec())
+}
+
+/// 常量时间校验 SHM 载荷认证标签
+///
+/// 长度不符直接拒绝；否则重新计算期望标签并以常量时间比较，
+/// 防时序侧信道。密钥错误 / 载荷被改 / 标签损坏统一返回 false。
+pub fn shm_auth_verify(key: &[u8], data: &[u8], tag: &[u8]) -> bool {
+    if tag.len() != SHM_AUTH_BLOCK_LEN {
+        return false;
+    }
+    match hmac_sign(key, data) {
+        Ok(expected) => ct_eq(&expected, tag),
+        Err(_) => false,
     }
 }
 
@@ -322,7 +372,12 @@ mod tests {
         let resp_env = SignedMessage {
             payload: SignedMessage::encode_payload(resp_json),
             nonce: 1,
-            hmac: SignedMessage::compute_hmac(&worker_channel.session_key, 1, &SignedMessage::encode_payload(resp_json)).unwrap(),
+            hmac: SignedMessage::compute_hmac(
+                &worker_channel.session_key[..],
+                1,
+                &SignedMessage::encode_payload(resp_json),
+            )
+            .unwrap(),
         };
         let resp_str = serde_json::to_string(&resp_env).unwrap();
 
@@ -339,9 +394,10 @@ mod tests {
         let env = SignedMessage {
             payload: SignedMessage::encode_payload(raw_json),
             nonce: 1,
-            hmac: SignedMessage::compute_hmac(&key, 1, &SignedMessage::encode_payload(raw_json)).unwrap(),
+            hmac: SignedMessage::compute_hmac(&key, 1, &SignedMessage::encode_payload(raw_json))
+                .unwrap(),
         };
-        let mut json_str = serde_json::to_string(&env).unwrap();
+        let json_str = serde_json::to_string(&env).unwrap();
 
         // 篡改载荷内容
         let mut tampered_env: SignedMessage = serde_json::from_str(&json_str).unwrap();
@@ -361,7 +417,8 @@ mod tests {
         let env = SignedMessage {
             payload: SignedMessage::encode_payload(r#"{}"#),
             nonce: 1,
-            hmac: SignedMessage::compute_hmac(&key, 1, &SignedMessage::encode_payload(r#"{}"#)).unwrap(),
+            hmac: SignedMessage::compute_hmac(&key, 1, &SignedMessage::encode_payload(r#"{}"#))
+                .unwrap(),
         };
         let msg_str = serde_json::to_string(&env).unwrap();
 
@@ -419,5 +476,40 @@ mod tests {
         assert_eq!(hex_str, "0123456789abcdef");
         let decode_back = hex::decode(&hex_str).unwrap();
         assert_eq!(decode_back, raw_bytes.to_vec());
+    }
+
+    #[test]
+    fn test_shm_auth_roundtrip() {
+        let key = [0x5Au8; SHM_AUTH_BLOCK_LEN];
+        let data = b"shared memory payload bytes";
+        let tag = shm_auth_compute(&key, data).unwrap();
+        assert_eq!(tag.len(), SHM_AUTH_BLOCK_LEN);
+        assert!(shm_auth_verify(&key, data, &tag));
+    }
+
+    #[test]
+    fn test_shm_auth_reject_single_byte_tamper() {
+        let key = [0x11u8; SHM_AUTH_BLOCK_LEN];
+        let mut data = b"original payload".to_vec();
+        let tag = shm_auth_compute(&key, &data).unwrap();
+        data[0] ^= 0xFF;
+        assert!(!shm_auth_verify(&key, &data, &tag));
+    }
+
+    #[test]
+    fn test_shm_auth_reject_wrong_key() {
+        let key = [0x22u8; SHM_AUTH_BLOCK_LEN];
+        let wrong = [0x33u8; SHM_AUTH_BLOCK_LEN];
+        let data = b"payload";
+        let tag = shm_auth_compute(&key, data).unwrap();
+        assert!(!shm_auth_verify(&wrong, data, &tag));
+    }
+
+    #[test]
+    fn test_shm_auth_reject_bad_tag_len() {
+        let key = [0x44u8; SHM_AUTH_BLOCK_LEN];
+        let data = b"payload";
+        assert!(!shm_auth_verify(&key, data, b"short"));
+        assert!(!shm_auth_verify(&key, data, b""));
     }
 }

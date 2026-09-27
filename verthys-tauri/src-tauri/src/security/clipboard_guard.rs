@@ -116,9 +116,7 @@ static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 
 /// 辅助：安全获取状态锁（处理 poison）
 fn lock_state() -> std::sync::MutexGuard<'static, ClipboardStateData> {
-    CLIPBOARD_STATE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    CLIPBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /* ==================================================================== *
@@ -176,10 +174,7 @@ extern "system" {
 
     fn RegisterClassExW(lpWndClass: *const WndClassExW) -> u16;
 
-    fn UnregisterClassW(
-        lpClassName: *const u16,
-        hInstance: isize,
-    ) -> i32;
+    fn UnregisterClassW(lpClassName: *const u16, hInstance: isize) -> i32;
 }
 
 #[cfg(target_os = "windows")]
@@ -666,16 +661,9 @@ impl ClipboardGuard {
                     let ptr = GlobalLock(h_mem_raw);
                     if ptr.is_null() {
                         let _ = CloseClipboard();
-                        Err(format!(
-                            "GlobalLock 失败: GetLastError={}",
-                            GetLastError()
-                        ))
+                        Err(format!("GlobalLock 失败: GetLastError={}", GetLastError()))
                     } else {
-                        std::ptr::copy_nonoverlapping(
-                            utf16.as_ptr() as *const u8,
-                            ptr,
-                            size,
-                        );
+                        std::ptr::copy_nonoverlapping(utf16.as_ptr() as *const u8, ptr, size);
                         let _ = GlobalUnlock(h_mem_raw);
 
                         // 3. SetClipboardData(CF_UNICODETEXT, handle)
@@ -791,7 +779,7 @@ impl ClipboardGuard {
     /* ---------------- 启动监听 ---------------- */
     /// 启动剪贴板格式监听器（AddClipboardFormatListener）+ 监听线程。
     ///
-    /// 
+    ///
     ///   - 调用 OleInitialize 并检查返回值
     ///   - AddClipboardFormatListener 失败做细化处理（重试 / 降级轮询）
     ///   - 监听线程在退出前调用 OleUninitialize
@@ -875,7 +863,11 @@ impl ClipboardGuard {
         log::info!(
             "[clipboard_guard] 剪贴板监听已启动 (hwnd={}, mode={})",
             self.hwnd,
-            if self.hwnd != 0 { "format_listener" } else { "polling_only" }
+            if self.hwnd != 0 {
+                "format_listener"
+            } else {
+                "polling_only"
+            }
         );
         Ok(())
     }

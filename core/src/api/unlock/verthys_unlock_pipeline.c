@@ -532,6 +532,25 @@ static VerthysResult upl_stage_s4(UnlockPipelineState *p)
      * table_load 内部完成帧 nonce 计数器恢复（防回退） */
     r = verthys_partition_table_load(ctx3->f, ctx3->sb.partition_table_offset,
                                    key_a, key_a, &ctx3->ptable);
+    if (r == VERTHYS_OK) {
+        /* 布局校正（sb → ptable）：超级块法定人数提交先行于分区表
+         * 落盘，崩溃于两者之间的半程状态使盘面分区表滞后（Extent
+         * 扩展/审计搬迁的旧值残帧）；数据搬迁先于元数据，校正方向
+         * 下新址数据已落位，以 sb 值对正分区表条目是唯一收敛方向。
+         * 校正仅改内存态，随下次 COMMIT 的分区表落盘持久。 */
+        for (size_t i = 0; i < ctx3->ptable.count; i++) {
+            VerthysPartition *ep = &ctx3->ptable.entries[i];
+            if (ep->type == VERTHYS_PARTITION_EXTENT) {
+                if (ep->size != ctx3->sb.extent_partition_size) {
+                    ep->size = ctx3->sb.extent_partition_size;
+                }
+            } else if (ep->type == VERTHYS_PARTITION_AUDIT) {
+                if (ep->offset != ctx3->sb.audit_partition_offset) {
+                    ep->offset = ctx3->sb.audit_partition_offset;
+                }
+            }
+        }
+    }
     p->res.stages[UNLOCK_STAGE_S4].sub_steps = (uint32_t)ctx3->ptable.count;
 
 done:
@@ -546,8 +565,12 @@ done:
 static DWORD WINAPI upl_bg_preheat_thread(LPVOID param)
 {
     VerthysContextV3 *ctx3 = (VerthysContextV3 *)param;
+    /* 预热流经 bg_preheat_f 传专用只读流（可经 CancelIoEx 取消、与共享
+     * 流游标隔离）；为 NULL（打开失败）时由 preheat_full_ex 内部回退
+     * 共享流——仅失去取消能力，停止标志仍逐表生效 */
     if (ctx3->lsm != NULL &&
-        verthys_lsm_preheat_full(ctx3->lsm) == VERTHYS_OK) {
+        verthys_lsm_preheat_full_ex(ctx3->lsm, ctx3->bg_preheat_f,
+                                    &ctx3->bg_preheat_stop) == VERTHYS_OK) {
         ctx3->preheated = 1;
     }
     InterlockedExchange(&ctx3->bg_preheat_running, 0);
@@ -720,12 +743,24 @@ static VerthysResult upl_stage_s6(UnlockPipelineState *p)
     if ((p->flags & VERTHYS_UNLOCK_FLAG_MINIMAL_FIRST) != 0) {
         ctx3->minimal_mode = 1;
         InterlockedExchange(&ctx3->bg_preheat_running, 1);
+        /* 预热专用只读流：与共享容器流隔离（预热期间主线程照常服务
+         * 读写的游标/缓冲互不干扰），并成为销毁汇合的取消对象
+         * （CancelIoEx 可跨线程取消在途慢读）。打开失败回退共享流。
+         * 生命周期：本函数打开，subsystems_close 汇合后统一关闭。 */
+        InterlockedExchange(&ctx3->bg_preheat_stop, 0);
+        if (ctx3->verthys_path != NULL) {
+            ctx3->bg_preheat_f = fopen(ctx3->verthys_path, "rb");
+        }
         ctx3->bg_preheat_thread = CreateThread(NULL, 0,
                                                upl_bg_preheat_thread,
                                                ctx3, 0, NULL);
         if (ctx3->bg_preheat_thread == NULL) {
             InterlockedExchange(&ctx3->bg_preheat_running, 0);
             ctx3->minimal_mode = 0;
+            if (ctx3->bg_preheat_f != NULL) {
+                fclose(ctx3->bg_preheat_f);
+                ctx3->bg_preheat_f = NULL;
+            }
             if (verthys_lsm_preheat_full(ctx3->lsm) == VERTHYS_OK) {
                 ctx3->preheated = 1;
             }

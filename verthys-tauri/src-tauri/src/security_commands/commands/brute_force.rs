@@ -39,7 +39,9 @@ pub fn security_brute_check(
     let guard = lock_brute_force_or_recover(&state)?;
     Ok(match guard.check() {
         BruteForceCheck::Allow => BruteForceCheckResponse::Allow,
-        BruteForceCheck::Locked(secs) => BruteForceCheckResponse::Locked { remaining_secs: secs },
+        BruteForceCheck::Locked(secs) => BruteForceCheckResponse::Locked {
+            remaining_secs: secs,
+        },
         BruteForceCheck::PurgeRequired => BruteForceCheckResponse::PurgeRequired,
     })
 }
@@ -95,22 +97,22 @@ pub fn security_brute_record_failure(
         match result {
             AttemptResult::Success => BruteForceCheckResponse::Allow,
             AttemptResult::Failure => BruteForceCheckResponse::Allow,
-            AttemptResult::FailureLocked(secs) => {
-                BruteForceCheckResponse::Locked { remaining_secs: secs }
-            }
+            AttemptResult::FailureLocked(secs) => BruteForceCheckResponse::Locked {
+                remaining_secs: secs,
+            },
             AttemptResult::FailurePurgeRequired => BruteForceCheckResponse::PurgeRequired,
             // 速率限制 — 返回当前状态
             AttemptResult::RateLimited => match guard.check() {
                 BruteForceCheck::Allow => BruteForceCheckResponse::Allow,
-                BruteForceCheck::Locked(s) => {
-                    BruteForceCheckResponse::Locked { remaining_secs: s }
-                }
+                BruteForceCheck::Locked(s) => BruteForceCheckResponse::Locked { remaining_secs: s },
                 BruteForceCheck::PurgeRequired => BruteForceCheckResponse::PurgeRequired,
             },
             // 冻结 — secs>0 表示锁定中，secs=0 表示 PurgeRequired
             AttemptResult::Frozen(secs) => {
                 if secs > 0 {
-                    BruteForceCheckResponse::Locked { remaining_secs: secs }
+                    BruteForceCheckResponse::Locked {
+                        remaining_secs: secs,
+                    }
                 } else {
                     BruteForceCheckResponse::PurgeRequired
                 }

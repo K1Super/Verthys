@@ -16,6 +16,8 @@ export interface PhotoEntry {
   meta?: PhotoMeta;
   /** 是否已解密完整元数据（按需加载标志：false=占位项待解密，true=已解密可渲染缩略图） */
   loaded?: boolean;
+  /** 该条按需解密曾失败（保留占位并提供重试入口；不参与 loaded 判定，避免永久跳过） */
+  failed?: boolean;
   /** 浏览器模式下缓存原始 Blob URL（用于预览/导出） */
   blobUrl?: string;
   /** 浏览器模式下缓存原始字节（用于加密导出） */

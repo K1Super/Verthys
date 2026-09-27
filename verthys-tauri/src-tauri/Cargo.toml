@@ -9,7 +9,7 @@
 # 一、包概述
 # ==============================================================================
 # - 名称：verthys-tauri
-# - 版本：2.6.1
+# - 版本：唯一手改点为仓库根 VERSION 文件，由 ci/sync_version.ps1 同步至本字段
 # - 描述：Verthys 私密数据管理器
 # - 版本号遵循语义化版本规范，与 Tauri 生态版本对齐。
 #
@@ -79,12 +79,12 @@
 # ==============================================================================
 # - 升级依赖时，务必验证所有补丁是否仍需保留，并测试完整构建与功能。
 # - 新增 feature 时需同步更新本注释，说明其用途与安全影响。
-# - 任何版本号变更应同步更新文档，确保团队对版本一致性有共识。
+# - 版本号变更须编辑仓库根 VERSION 文件并运行 ci/sync_version.ps1，勿手工改本字段。
 # ==============================================================================
 
 [package]
 name = "verthys-tauri"
-version = "2.6.1"
+version = "3.3.0"
 description = "Verthys 私密数据管理器"
 authors = ["Verthys"]
 edition = "2021"
@@ -98,6 +98,16 @@ default = []
 # 便携模式：数据目录重定向至 <exe_dir>/data，编译期固化，不可运行时切换。
 portable_mode = []
 
+# Lint 配置
+# linker_messages：MSVC 为 cdylib 生成导入库/导出对象时固定向 stdout 输出
+#   “正在创建库 <name>.dll.lib 和对象 <name>.dll.exp” 状态行，rustc 会将其
+#   包装为 linker_messages 警告（warning: linker stdout: …）。该状态行是
+#   工具链生成 cdylib 的固有行为，与构建质量无关，且 .dll.lib/.exp 由
+#   cdylib 目标（Tauri 库形态之一）正常产出，故在 crate 级关闭该 lint，
+#   避免每次构建出现误导性警告。
+[lints.rust]
+linker_messages = "allow"
+
 [build-dependencies]
 # 构建时依赖：锁定版本以确保与 tauri-build 2.6.3 兼容
 tauri-build = { version = "=2.6.3", features = [] }
@@ -106,6 +116,9 @@ proc-macro2 = { version = "=1.0.106", features = ["span-locations"] }
 # 资源哈希生成（构建时计算 dist 目录 SHA-256）
 sha2 = "0.10"
 walkdir = "2"
+# 构建产物契约解析（build/core/verthys.artifacts.json，与主依赖同版本锁定）
+serde = { version = "1", features = ["derive"] }
+serde_json = "=1.0.151"
 
 [dependencies]
 # Tauri 核心及插件（版本锁定）
@@ -184,8 +197,13 @@ incremental = false
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# unwind：FFI 边界/后台任务的 catch_unwind 防护真实生效（abort 会使其失效），
+# 且 panic hook 内可对敏感静态缓冲执行清零；未捕获 panic 仍终止进程
+panic = "unwind"
 strip = true
+# 整数溢出由回绕改为受控 panic：偏移/长度/计数类安全关键计算
+# 溢出即显式失败，禁止静默回绕（与 C 核心 nonce 耗尽拒绝同一防线）
+overflow-checks = true
 
 # 本地补丁：解决上游依赖的兼容性问题
 [patch.crates-io]

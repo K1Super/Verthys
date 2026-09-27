@@ -26,11 +26,11 @@
 #include "keymanager.h"            /* keymanager_derive_master_v3 */
 #include "verthys_pepper.h"
 #include "verthys_crypto.h"          /* Argon2 常量 / 校准 */
-#include "verthys_api_utils.h"       /* verthys_monotonic_ms / verthys_join_thread_bounded */
-#include "verthys_diag.h"            /* VERTHYS_DIAG_LOG（线程汇合超时诊断） */
+#include "verthys_api_utils.h"       /* verthys_monotonic_ms */
+#include "verthys_diag.h"            /* VERTHYS_DIAG_LOG（汇合等待诊断） */
 #include "verthys_rekey_auto.h"      /* 解锁后自动轮换编排 */
 
-#include <io.h>                    /* _chsize_s / _fileno / _commit */
+#include <io.h>                    /* _chsize_s / _fileno / _get_osfhandle / _commit */
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>                  /* time（add_record_in_txn 时间戳） */
@@ -86,25 +86,68 @@ VerthysContextV3 *verthys_v3_ctx_create(VerthysCngKeyManager *km,
 }
 
 /*
- * 后台预热线程有界汇合（Destroy/Lock 共用）。
- * 以 VERTHYS_JOIN_TIMEOUT_MS 为上限等待；超时/失败仅记诊断并继续收口，
- * 不延长生命周期阻塞。当前预热阻塞点为 LSM 文件读，不可取消（未实现
- * CancelSynchronousIo）：超时放弃等待后，残存线程可能在本函数返回后继续
- * 触碰已销毁子系统——此处接受该窗口，残存线程及其引用由进程退出统一回收。
+ * 后台预热线程汇合（Destroy/Lock/应急降级共用）。
+ *
+ * 顺序与约束（红线）：
+ *   1. 置停止标志——预热线程于每张 SSTable 边界检查，后续表不再加载；
+ *   2. CancelIoEx 取消预热专用流上的在途同步读——慢磁盘读被瞬时打断
+ *      （共享容器流不可取消：CRT 流状态破裂会连带破坏所有后续读写，
+ *      且 CancelSynchronousIo 仅作用于发起线程自身）；
+ *   3. 等待线程句柄 signaled：取消 + 停止双保险把退出上界压缩到单表
+ *      解密尾部时延；等待无放弃窗口——放弃等于放行残存线程触碰已销毁
+ *      的 LSM / 分区内核句柄（线程内 BCrypt 句柄 UAF），而进程存活路径
+ *      （Lock/降级/Close）没有"进程退出统一回收"兜底可言；
+ *   4. 汇合成功后关闭专用流（主线程所有）并回收线程句柄。
+ *
+ * 幂等：bg_preheat_thread == NULL 直接返回（创建路径 / 同步解锁路径）。
+ * 等待句柄失效（WAIT_FAILED）属不可恢复域：记诊断后按原语义继续收口。
  */
 static void v3_join_preheat_thread(VerthysContextV3 *ctx3)
 {
-    DWORD wr;
+    HANDLE h;
+    FILE *pf;
 
-    if (ctx3->bg_preheat_thread == NULL) return;
+    if (ctx3 == NULL) return;
+    h = ctx3->bg_preheat_thread;
+    if (h == NULL) return;
 
-    wr = verthys_join_thread_bounded(ctx3->bg_preheat_thread);
-    if (wr == WAIT_TIMEOUT) {
-        VERTHYS_DIAG_LOG("verthys: bg preheat thread join timeout (abandon wait)");
-    } else if (wr == WAIT_FAILED) {
-        VERTHYS_DIAG_LOG("verthys: bg preheat thread join failed (abandon wait)");
+    /* 停止标志先行：即便取消失败，线程也会止步于下一表边界 */
+    InterlockedExchange(&ctx3->bg_preheat_stop, 1);
+
+    /* 取消专用流的在途慢读（无挂起读时返回 ERROR_NOT_FOUND，无害——
+     * 线程可能已自然完成）。专用流归主线程所有（打开/关闭均在本层），
+     * 线程只读不关，此处取底层句柄无生命周期竞态。 */
+    pf = ctx3->bg_preheat_f;
+    if (pf != NULL) {
+        intptr_t fh = _get_osfhandle(_fileno(pf));
+        if (fh != -1 && fh != (intptr_t)INVALID_HANDLE_VALUE) {
+            (void)CancelIoEx((HANDLE)fh, NULL);
+        }
     }
-    CloseHandle(ctx3->bg_preheat_thread);
+
+    /* 汇合等待：分片以便周期性诊断（慢读已取消、停止已置位，
+     * 正常路径毫秒级退出） */
+    {
+        unsigned long rounds = 0;
+        for (;;) {
+            DWORD wr = WaitForSingleObject(h, 1000);
+            if (wr == WAIT_OBJECT_0) break;
+            if (wr == WAIT_FAILED) {
+                VERTHYS_DIAG_LOG("verthys: bg preheat join wait failed (invalid handle)");
+                break;
+            }
+            rounds++;
+            VERTHYS_DIAG_LOG("verthys: bg preheat join pending round %lu (stop+cancel issued)",
+                             rounds);
+        }
+    }
+
+    /* 汇合完成：线程不再触碰任何子系统；关闭专用流并回收句柄 */
+    if (pf != NULL) {
+        fclose(pf);
+        ctx3->bg_preheat_f = NULL;
+    }
+    CloseHandle(h);
     ctx3->bg_preheat_thread = NULL;
 }
 
@@ -112,10 +155,16 @@ void verthys_v3_ctx_subsystems_close(VerthysContextV3 *ctx3)
 {
     if (ctx3 == NULL) return;
 
-    /* 0. 后台预热线程汇合（MINIMAL_FIRST 场景；线程只读 lsm，
-     *    有界等待，超时放弃等待继续收口） */
+    /* 0. 后台预热线程汇合（MINIMAL_FIRST 场景；停止标志 + 取消 + 无放弃
+     *    等待——汇合成功前不得销毁任何子系统，否则残存线程触碰已释放
+     *    的 LSM / 分区内核句柄构成 UAF） */
     v3_join_preheat_thread(ctx3);
     InterlockedExchange(&ctx3->bg_preheat_running, 0);
+    if (ctx3->bg_preheat_f != NULL) {
+        /* 纵深兜底：join 早退（无线程）路径下清掉可能残留的专用流 */
+        fclose(ctx3->bg_preheat_f);
+        ctx3->bg_preheat_f = NULL;
+    }
 
     /* 1. 事务上下文（integrity_key 拷贝清零；借用子系统不触碰） */
     verthys_txn_v3_deinit(&ctx3->txn);
@@ -544,7 +593,8 @@ VerthysResult verthys_v3_lock(VerthysContextV3 *ctx3)
     if (ctx3 == NULL) return VERTHYS_ERR_INVALID;
     if (!ctx3->subsystems_open) return VERTHYS_ERR_LOCKED;
 
-    /* 1. 后台预热线程汇合（MINIMAL_FIRST 场景；有界等待，超时放弃继续） */
+    /* 1. 后台预热线程汇合（MINIMAL_FIRST 场景；停止 + 取消 + 无放弃等待——
+     *    预热线程持有 LSM 与分区内核句柄，汇合完成前不得推进后续收口） */
     v3_join_preheat_thread(ctx3);
     InterlockedExchange(&ctx3->bg_preheat_running, 0);
     ctx3->minimal_mode = 0;
@@ -621,9 +671,31 @@ VerthysResult verthys_v3_txn_finish(VerthysContextV3 *ctx3)
     if (ctx3 == NULL) return VERTHYS_ERR_INVALID;
 
     rc = verthys_txn_v3_prepare(&ctx3->txn);
-    if (rc != VERTHYS_OK) return rc;
+    if (rc != VERTHYS_OK) {
+        /* prepare 失败：事务残留 ACTIVE（快照计算/WAL 落笔失败等）。
+         * abort 归位（回滚失败自动转强制复位）——残留 ACTIVE 会使
+         * 同会话后续 begin 被状态守卫拒绝（会话级写瘫痪），状态
+         * 归位不可妥协；原错误码上抛（入参等确定性错误无回滚内容，
+         * abort 内按状态分流空转）。 */
+        verthys_v3_txn_abort(ctx3);
+        return rc;
+    }
     rc = verthys_txn_v3_commit(&ctx3->txn);
-    if (rc != VERTHYS_OK) return rc;
+    if (rc != VERTHYS_OK) {
+        if (verthys_txn_v3_state(&ctx3->txn) == VERTHYS_TXN_V3_COMMITTED) {
+            /* commit 在状态置 COMMITTED 之后的索引/分区表落盘步骤失败：
+             * 法定人数已持久含 txid，回滚通道永久关闭；若不收口，同会话
+             * 后续 begin 将被 COMMITTED 残留状态拒绝（写阻塞直至重开）。
+             * 走 confirm 的幂等补存（重试索引/分区表落盘）把事务收口为
+             * CONFIRMED；补存同样失败则保留原错误，交崩溃恢复收尾。 */
+            (void)verthys_txn_v3_confirm(&ctx3->txn);
+        } else {
+            /* commit 在法定人数提交前失败（扩区/搬迁/超块写入失败）：
+             * 事务残留 PREPARED，同理必须 abort 归位防会话级瘫痪。 */
+            verthys_v3_txn_abort(ctx3);
+        }
+        return rc;
+    }
     return verthys_txn_v3_confirm(&ctx3->txn);
 }
 
@@ -634,7 +706,11 @@ void verthys_v3_txn_abort(VerthysContextV3 *ctx3)
     switch (verthys_txn_v3_state(&ctx3->txn)) {
     case VERTHYS_TXN_V3_ACTIVE:
     case VERTHYS_TXN_V3_PREPARED:
-        (void)verthys_txn_v3_rollback(&ctx3->txn);
+        /* 回滚失败必须走强制复位：残留 ACTIVE/PREPARED 会使后续
+         * begin 永久 INVALID（会话级写瘫痪），状态归位不可妥协 */
+        if (verthys_txn_v3_rollback(&ctx3->txn) != VERTHYS_OK) {
+            (void)verthys_txn_v3_force_abort(&ctx3->txn);
+        }
         break;
     case VERTHYS_TXN_V3_COMMITTED:
         (void)verthys_txn_v3_confirm(&ctx3->txn);
@@ -664,6 +740,8 @@ VerthysResult verthys_v3_add_record_in_txn(VerthysContextV3 *ctx3,
     if (name == NULL && name_len != 0) return VERTHYS_ERR_INVALID;
     if (name_len > VERTHYS_NAME_MAX_BYTES) return VERTHYS_ERR_INVALID;
     if (data == NULL && data_size != 0) return VERTHYS_ERR_INVALID;
+    /* 下沉层纵深校验：与 API 入口同一常量（导出格式 32 位长度容量） */
+    if (data_size > VERTHYS_RECORD_DATA_MAX_BYTES) return VERTHYS_ERR_INVALID;
 
     /* Extent 写入（去重命中零重写；hash 回传供索引条目关联） */
     rc = verthys_txn_v3_write_extent(&ctx3->txn, data, data_size, hash, NULL);

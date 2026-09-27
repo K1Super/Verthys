@@ -25,6 +25,8 @@ export interface VerthysResponse {
   shm_size?: number;
   /** 共享内存中本次返回的记录数 */
   record_count?: number;
+  /** 扫描批内解密失败/索引不一致的记录 ID（仅 scan_open / scan_next 返回） */
+  failed_ids?: number[];
   /* 修复：解锁响应内联全局主密钥探测结果
    *   worker 解锁成功后进程内一次性完成 has_record + find_lid + get_record，
    *   结果内联到 unlock 响应三字段，彻底消除前端 IPC 链路与 v1 假阴性死锁。
@@ -67,6 +69,20 @@ export interface VerthysResponse {
   processed_count?: number;
   total_count?: number;
   skipped_count?: number;
+  /* 落盘自查结果（仅 verthys_verify_disk_persist 返回）
+   *
+   * 由 worker 进程内 C 层持锁句柄自查产生；字段名与后端
+   * VerthysResponse 保持一致（snake_case）。前端据此做三态判定。 */
+  /** C 端 VerPersistStatus 状态码（0=OK / 1=HEADER / 2=SIZE / 3=WAL / 4=IO / 5=INTERNAL） */
+  status_code?: number;
+  /** 容器文件字节大小 */
+  file_size?: number;
+  /** 文件修改时间（Unix 毫秒；不可得为 0） */
+  mtime_ms?: number;
+  /** 磁盘偏移 0 的副本帧头 magic */
+  header_magic?: number;
+  /** 容器格式版本 */
+  header_version?: number;
 }
 
 /**
@@ -337,6 +353,42 @@ export interface BatchRecordInput {
   hash: string;
   /** 已加密的记录数据 base64（前端 XChaCha20-Poly1305 加密产物） */
   data_b64: string;
+  /** 外置块记录 ID 列表（大文件外置模式携带；后端校验块已上传） */
+  chunk_ids?: number[];
+  /** 外置块密文哈希列表（与 chunk_ids 等长，块完整性校验权威值） */
+  chunk_hashes?: string[];
+}
+
+/**
+ * 单条外置加密块输入（verthys_add_chunk_batch 载荷元素）
+ *
+ * 与后端 ChunkBlob 对齐。大文件照片的块密文总量超过内联阈值时，
+ * 块先经 verthys_add_chunk_batch 落为独立记录，meta 再引用其 ID。
+ */
+export interface ChunkBlobInput {
+  /** 块密文的 BLAKE3 hex（本会话内幂等去重依据） */
+  hash: string;
+  /** 块密文 base64（前端 XChaCha20-Poly1305 加密产物） */
+  data_b64: string;
+  /**
+   * 记录类型（外置载荷角色）：缺省为照片数据块；
+   * 索引瘦身布局的缩略图记录显式指定缩略图类型（写者据此分配记录名与类型）
+   */
+  rtype?: number;
+}
+
+/**
+ * verthys_add_chunk_batch 返回结果
+ */
+export interface AddChunkBatchResult {
+  /** 是否成功 */
+  ok: boolean;
+  /** 每块的记录 ID（0 = 失败；同哈希重复上传复用既有 ID） */
+  ids: number[];
+  /** 失败块的下标列表 */
+  failed_indices: number[];
+  /** 错误信息（ok=false 时有值） */
+  error?: string;
 }
 
 /**

@@ -352,8 +352,22 @@ VerthysResult verthys_lsm_open_warm(VerthysLsm *lsm, FILE *f, VerthysPartition *
  * 全量索引预热（完全解锁 S6 / MINIMAL_FIRST 后台预热线程）：
  * 逐表强制加载 Footer + Bloom 位图 + Index Block（惰性缓存填充），
  * 后续 get 路径元数据零 IO。幂等（缓存已在时 no-op）。
+ * 等价于 verthys_lsm_preheat_full_ex(lsm, lsm->f, NULL)。
  */
 VerthysResult verthys_lsm_preheat_full(VerthysLsm *lsm);
+
+/*
+ * 可中断全量索引预热（后台预热线程专用）：
+ *   - f：预热读取文件。后台路径传专用只读流（与共享容器流隔离，
+ *     销毁汇合时可经 CancelIoEx 取消在途慢读）；传 NULL 时按 lsm->f。
+ *   - stop_flag：非 NULL 时于每张 SSTable 预热前检查，置位即提前返回
+ *     VERTHYS_ERR_LOCKED（容器正进入锁定/销毁收口，预热不可继续，
+ *     已完成的表缓存保留——本函数幂等，无部分表损坏）。
+ *   - 在途慢读被取消时底层读返回错误，经 VERTHYS_ERR_IO 透传
+ *     （同为"预热未完成"语义，调用方均不置 preheated）。
+ */
+VerthysResult verthys_lsm_preheat_full_ex(VerthysLsm *lsm, FILE *f,
+                                      const volatile LONG *stop_flag);
 
 /* ---------- 统计（测试/诊断） ---------- */
 

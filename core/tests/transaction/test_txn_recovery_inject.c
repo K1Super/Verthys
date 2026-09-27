@@ -240,7 +240,7 @@ TEST(inject_wal_third_round_residual_not_replayed)
     if (setup_ok) {
         verthys_random_bytes(wk, W3R_KEY_BYTES);
         memcpy(wk_copy, wk, W3R_KEY_BYTES);
-        if (verthys_cng_aead_import_key(&aead, wk_copy, NULL) != VERTHYS_OK) {
+        if (verthys_cng_aead_import_key(&aead, wk_copy, NULL, 0) != VERTHYS_OK) {
             setup_ok = 0;
         }
     }

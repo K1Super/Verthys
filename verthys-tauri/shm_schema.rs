@@ -7,7 +7,7 @@
  *   "单一定义源"效果，且避免 C FFI 边界与跨语言结构体布局风险。
  *
  *   - 主进程：`infrastructure/shm_schema.rs` 通过 `include!` 引入本文件
- *   - worker：`shm_schema.rs` 通过 `include!` 引入本文件
+ *   - worker：`runtime/scan_shm.rs` 经 `shm_contract` 模块通过 `include!` 引入本文件
  *   - 修改本文件后，两 crate 同步重编译，根治版本分化
  *
  * 编译期校验：
@@ -51,14 +51,20 @@
 
 // SHM 协议契约（include! 引入，无外部依赖）
 //
-// 本文件由主进程 `infrastructure/shm_schema.rs` 与 worker `shm_schema.rs`
-// 共同 `include!`，确保两端结构体布局与常量严格一致。
+// 本文件由主进程 `infrastructure/shm_schema.rs` 与 worker
+// `runtime/scan_shm.rs`（经 `shm_contract` 模块）共同 `include!`，
+// 确保两端结构体布局与常量严格一致。
 //
 // 注意：本文件通过 include! 宏引入，不能使用 `//!` 内部文档注释
 //       和 `#![...]` 内部属性（仅 crate/module 根可用）。
 //       dead_code 警告由各 include 站点按需添加 #[allow(dead_code)] 抑制。
 
 use std::mem::size_of;
+
+// 跨层预算常量（与主进程同源）：段容量与取批预算的权威取值在预算常量文件中
+// 单一定义，本契约仅做协议层命名映射（SHM_* / SCAN_BATCH_*），
+// 禁止再出现第二处字面量数值。
+include!("photo_budget.rs");
 
 // ===== 全量扫描 SHM 常量 =====
 /// 共享内存魔数 "VSMM"（全量扫描，0x56='V' 0x53='S' 0x4D='M' 0x4D='M'）
@@ -69,10 +75,10 @@ pub const SHM_VERSION: u32 = 1;
 pub const SHM_HEADER_SIZE: usize = 64;
 /// 每条全量记录索引 40 字节
 pub const SHM_ENTRY_SIZE: usize = 40;
-/// 默认共享内存大小 8MB
-pub const SHM_DEFAULT_SIZE: usize = 8 * 1024 * 1024;
-/// 共享内存最大大小（reader 边界校验用）
-pub const SHM_MAX_SIZE: usize = 8 * 1024 * 1024;
+/// 默认共享内存大小（字节，取跨层预算的段容量）
+pub const SHM_DEFAULT_SIZE: usize = PB_SHM_DEFAULT_SIZE as usize;
+/// 共享内存最大大小（reader 边界校验用，与段容量同值）
+pub const SHM_MAX_SIZE: usize = PB_SHM_DEFAULT_SIZE as usize;
 
 // ===== 摘要扫描 SHM 常量 =====
 /// 摘要扫描共享内存魔数 "VSUM"（区别于全量扫描 VSMM）
@@ -83,6 +89,26 @@ pub const SHM_SUMMARY_ENTRY_SIZE: usize = 80;
 pub const SHM_SUMMARY_DEFAULT_SIZE: usize = 4 * 1024 * 1024;
 /// 摘要扫描共享内存最大大小（reader 边界校验用）
 pub const SHM_SUMMARY_MAX_SIZE: usize = 4 * 1024 * 1024;
+
+// ===== 扫描取批预算（SHM 窗口水位线）=====
+/// 扫描单批取数预算（名称 + 数据合计字节）。
+///
+/// 取值来自跨层预算的段容量水位线（段容量的 3/5），而非独立拍定：段内除
+/// 名称与数据外还要容纳头部（64B）、索引条目表与尾部认证块，水位线使
+/// 「条目表 + 名称 + 数据 + 认证块」恒落在段容量内。C 层按本预算取批，
+/// 取满即返回本批（游标停在未取条目之前），从根上消除"单批超容即整批
+/// 失败"的失败面——扫描在含大记录的数据集上也能完整推进。
+pub const SCAN_BATCH_MAX_BYTES: u64 = PB_SCAN_BATCH_MAX_BYTES;
+
+// ===== 载荷认证块 =====
+/// SHM 载荷认证块长度：HMAC-SHA256 原始标签 32 字节。
+///
+/// HMAC-SHA256 的输出标签固定为 32 字节，本常量即其原始长度。
+/// writer 写入记录后对使用区 [0, used) 计算 HMAC 并把标签写到
+/// used 偏移处；reader 以同批密钥验签。认证块不属于头部布局（头部
+/// reserved 区不动），随每批载荷附加在尾部——两端同源引用本常量，
+/// 禁止各端自定义长度。
+pub const SHM_AUTH_BLOCK_LEN: usize = 32;
 
 // ===== 编译期常量断言宏（等价 const_assert_eq!）=====
 /// 编译期常量相等断言（无需外部 crate）

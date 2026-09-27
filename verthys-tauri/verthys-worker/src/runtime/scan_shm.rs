@@ -27,31 +27,20 @@ mod windows_impl {
         PAGE_READWRITE,
     };
 
-    /// 共享内存魔数 "VSMM"（全量扫描）
-    pub const SHM_MAGIC: u32 = 0x56534D4D;
-    pub const SHM_VERSION: u32 = 1;
-    /// 头部 64 字节
-    pub const SHM_HEADER_SIZE: usize = 64;
-    /// 每条全量记录索引 40 字节
-    pub const SHM_ENTRY_SIZE: usize = 40;
-    /// 默认共享内存大小 8MB
-    pub const SHM_DEFAULT_SIZE: usize = 8 * 1024 * 1024;
-
-    /* ===== 摘要扫描专用常量（轻量元数据，无数据块）===== */
-    /// 摘要扫描共享内存魔数 "VSUM"（区别于全量扫描 VSMM，reader 据此选择解析路径）
-    pub const SHM_SUMMARY_MAGIC: u32 = 0x5653554D;
-    /// 每条摘要记录索引 80 字节（8 字节对齐）：
-    ///   [0..8]   lid: u64
-    ///   [8..12]  rtype: u32
-    ///   [12..16] name_len: u32
-    ///   [16..24] data_size: u64
-    ///   [24..32] physical_offset: u64
-    ///   [32..40] name_offset: u64
-    ///   [40..72] merkle_leaf: [u8; 32]
-    ///   [72..80] created_time: u64
-    pub const SHM_SUMMARY_ENTRY_SIZE: usize = 80;
-    /// 摘要扫描默认共享内存大小 4MB（元数据体积极小，4MB 足够上万条）
-    pub const SHM_SUMMARY_DEFAULT_SIZE: usize = 4 * 1024 * 1024;
+    /// SHM 协议契约（与主进程同源）：经 include! 引入仓库根共享契约文件，
+    /// 常量/结构体布局与主进程编译期同源——改根文件后两端同步重编译，
+    /// 杜绝历史"双份常量人工同步"导致的协议漂移（如 88/80 条目错位）。
+    /// dead_code 压降：worker 仅消费常量子集，未使用条目按契约文件约定
+    /// 在本 include 站点统一豁免。
+    #[allow(dead_code)]
+    mod shm_contract {
+        include!("../../../shm_schema.rs");
+    }
+    pub use shm_contract::{
+        SCAN_BATCH_MAX_BYTES, SHM_AUTH_BLOCK_LEN, SHM_DEFAULT_SIZE, SHM_ENTRY_SIZE,
+        SHM_HEADER_SIZE, SHM_MAGIC, SHM_SUMMARY_DEFAULT_SIZE, SHM_SUMMARY_ENTRY_SIZE,
+        SHM_SUMMARY_MAGIC, SHM_VERSION,
+    };
 
     /// 摘要记录元组（writer 侧构造 → SHM 传输）：
     /// (lid, rtype, name, data_size, physical_offset, merkle_leaf, created_time)
@@ -175,14 +164,40 @@ mod windows_impl {
             &mut self,
             records: &[(u64, u32, String, Vec<u8>)],
             exhausted: bool,
+            auth_key: Option<&[u8]>,
         ) -> Result<usize, &'static str> {
-            let entry_table_size = records.len() * SHM_ENTRY_SIZE;
-            let total_name_bytes: usize = records.iter().map(|r| r.2.len()).sum();
-            let total_data_bytes: usize = records.iter().map(|r| r.3.len()).sum();
-            let needed = SHM_HEADER_SIZE + entry_table_size + total_name_bytes + total_data_bytes;
+            // 尺寸推导全部 checked 运算：记录数/名称长度来自上游 C 层，
+            // 溢出必须显式失败（返回受控错误），禁止回绕后越界写
+            let entry_table_size = records
+                .len()
+                .checked_mul(SHM_ENTRY_SIZE)
+                .ok_or("entry table size overflow")?;
+            let total_name_bytes: usize = records
+                .iter()
+                .try_fold(0usize, |acc, r| acc.checked_add(r.2.len()))
+                .ok_or("name bytes overflow")?;
+            let total_data_bytes: usize = records
+                .iter()
+                .try_fold(0usize, |acc, r| acc.checked_add(r.3.len()))
+                .ok_or("data bytes overflow")?;
+            let needed = SHM_HEADER_SIZE
+                .checked_add(entry_table_size)
+                .and_then(|v| v.checked_add(total_name_bytes))
+                .and_then(|v| v.checked_add(total_data_bytes))
+                .ok_or("size computation overflow")?;
 
             if needed > self.size {
                 return Err("data exceeds shared memory size");
+            }
+
+            // 认证块（可选）：提供密钥时须为尾部 32 字节 HMAC 标签预留空间
+            if auth_key.is_some()
+                && needed
+                    .checked_add(SHM_AUTH_BLOCK_LEN)
+                    .ok_or("auth block overflow")?
+                    > self.size
+            {
+                return Err("auth block overflow");
             }
 
             // 写入前先擦除旧数据
@@ -237,6 +252,19 @@ mod windows_impl {
                 data_off_rel += data.len();
             }
 
+            // 认证块：对 [0, needed) 全部字节计算 HMAC-SHA256，把 32 字节标签写到 needed 偏移处
+            if let Some(key) = auth_key {
+                let data_slice = unsafe { std::slice::from_raw_parts(base, needed) };
+                let tag = hmac_sha256(key, data_slice);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        tag.as_ptr(),
+                        base.add(needed),
+                        SHM_AUTH_BLOCK_LEN,
+                    );
+                }
+            }
+
             Ok(records.len())
         }
 
@@ -255,15 +283,37 @@ mod windows_impl {
             &mut self,
             records: &[SummaryRecord],
             exhausted: bool,
+            auth_key: Option<&[u8]>,
         ) -> Result<usize, &'static str> {
-            let entry_table_size = records.len() * SHM_SUMMARY_ENTRY_SIZE;
-            let total_name_bytes: usize = records.iter().map(|r| r.2.len()).sum();
+            // 尺寸推导全部 checked 运算（同 write_records：上游输入溢出必须显式失败）
+            let entry_table_size = records
+                .len()
+                .checked_mul(SHM_SUMMARY_ENTRY_SIZE)
+                .ok_or("entry table size overflow")?;
+            let total_name_bytes: usize = records
+                .iter()
+                .try_fold(0usize, |acc, r| acc.checked_add(r.2.len()))
+                .ok_or("name bytes overflow")?;
             // 摘要扫描无独立数据区（merkle_leaf 内联在索引条目中）
             let total_data_bytes: usize = 0;
-            let needed = SHM_HEADER_SIZE + entry_table_size + total_name_bytes + total_data_bytes;
+            let needed = SHM_HEADER_SIZE
+                .checked_add(entry_table_size)
+                .and_then(|v| v.checked_add(total_name_bytes))
+                .and_then(|v| v.checked_add(total_data_bytes))
+                .ok_or("size computation overflow")?;
 
             if needed > self.size {
                 return Err("summary data exceeds shared memory size");
+            }
+
+            // 认证块（可选）：提供密钥时须为尾部 32 字节 HMAC 标签预留空间
+            if auth_key.is_some()
+                && needed
+                    .checked_add(SHM_AUTH_BLOCK_LEN)
+                    .ok_or("auth block overflow")?
+                    > self.size
+            {
+                return Err("auth block overflow");
             }
 
             // 写入前先擦除旧数据
@@ -312,6 +362,19 @@ mod windows_impl {
                 }
                 name_off_abs = unsafe { name_off_abs.add(name.len()) };
                 name_off_rel += name.len();
+            }
+
+            // 认证块：对 [0, needed) 全部字节计算 HMAC-SHA256，把 32 字节标签写到 needed 偏移处
+            if let Some(key) = auth_key {
+                let data_slice = unsafe { std::slice::from_raw_parts(base, needed) };
+                let tag = hmac_sha256(key, data_slice);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        tag.as_ptr(),
+                        base.add(needed),
+                        SHM_AUTH_BLOCK_LEN,
+                    );
+                }
             }
 
             Ok(records.len())
@@ -363,6 +426,46 @@ mod windows_impl {
                 *byte = 0;
             }
         }
+    }
+
+    /// 标准 HMAC-SHA256（用 sha2 原语手写 HMAC 结构）
+    ///
+    /// worker 未直接依赖 hmac crate，此处用 sha2 实现同一算法，输出与主进程
+    /// hmac crate 逐字节一致。密钥长度超过分组大小先哈希再使用，精确对齐
+    /// 标准 HMAC 密钥预处理。
+    /// pub(super)：供本模块测试重算认证标签比对。
+    pub(super) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+
+        const BLOCK: usize = 64;
+        let mut k = [0u8; BLOCK];
+        if key.len() > BLOCK {
+            let d = Sha256::digest(key);
+            k[..32].copy_from_slice(&d);
+        } else {
+            k[..key.len()].copy_from_slice(key);
+        }
+
+        let mut ipad = [0x36u8; BLOCK];
+        let mut opad = [0x5cu8; BLOCK];
+        for i in 0..BLOCK {
+            ipad[i] ^= k[i];
+            opad[i] ^= k[i];
+        }
+
+        let mut inner = Sha256::new();
+        inner.update(ipad);
+        inner.update(data);
+        let inner_hash = inner.finalize();
+
+        let mut outer = Sha256::new();
+        outer.update(opad);
+        outer.update(inner_hash);
+        let out = outer.finalize();
+
+        let mut tag = [0u8; 32];
+        tag.copy_from_slice(&out);
+        tag
     }
 
     /// 构建受限安全属性：仅当前用户 SID 可读写共享内存
@@ -479,6 +582,9 @@ pub(crate) struct ScanShm;
 #[cfg(all(test, windows))]
 mod tests {
     use super::windows_impl::{fill_random_bytes, random_hex_name};
+    use super::windows_impl::{
+        hmac_sha256, ScanShm, SHM_AUTH_BLOCK_LEN, SHM_ENTRY_SIZE, SHM_HEADER_SIZE,
+    };
 
     #[test]
     fn random_name_is_hex_and_unique() {
@@ -504,5 +610,46 @@ mod tests {
         assert!(!a.iter().all(|&x| x == 0), "CSPRNG 不可用导致全零");
         // 两次输出逐字节必需有差异（128 字节全同概率 2^-1024）
         assert_ne!(&a[..], &b[..], "两次 CSPRNG 输出完全一致（熵源失效）");
+    }
+
+    #[test]
+    fn write_records_with_auth_writes_correct_tag() {
+        let key = [0x42u8; 32];
+        let mut shm = ScanShm::create(8 * 1024 * 1024).expect("create");
+        let records = [(1u64, 2u32, "name".to_string(), vec![0xAAu8, 0xBB, 0xCC])];
+        let written = shm.write_records(&records, false, Some(&key)).expect("write");
+        assert_eq!(written, 1);
+
+        // 头部 64 + 1 条 40 字节条目 + 名称 4 + 数据 3
+        let needed = SHM_HEADER_SIZE + SHM_ENTRY_SIZE + 4 + 3;
+        let base = shm.ptr();
+        unsafe {
+            let data = std::slice::from_raw_parts(base, needed);
+            let expected = hmac_sha256(&key, data);
+            let tag = std::slice::from_raw_parts(base.add(needed), SHM_AUTH_BLOCK_LEN);
+            assert_eq!(tag, &expected[..], "认证块应等于重算的 HMAC 标签");
+        }
+        shm.destroy();
+    }
+
+    #[test]
+    fn tampered_shm_auth_tag_mismatch() {
+        let key = [0x37u8; 32];
+        let mut shm = ScanShm::create(8 * 1024 * 1024).expect("create");
+        let records = [(9u64, 1u32, "tamper".to_string(), vec![1u8, 2, 3, 4])];
+        shm.write_records(&records, false, Some(&key)).expect("write");
+
+        // 头部 64 + 1 条 40 字节条目 + 名称 6 + 数据 4
+        let needed = SHM_HEADER_SIZE + SHM_ENTRY_SIZE + 6 + 4;
+        let base = shm.ptr();
+        unsafe {
+            let stored_tag = std::slice::from_raw_parts(base.add(needed), SHM_AUTH_BLOCK_LEN).to_vec();
+            // 篡改载荷区首字节（magic）
+            *base ^= 0xFF;
+            let data = std::slice::from_raw_parts(base, needed);
+            let recomputed = hmac_sha256(&key, data);
+            assert_ne!(recomputed.as_slice(), stored_tag.as_slice(), "篡改后重算标签应与原标签不同");
+        }
+        shm.destroy();
     }
 }

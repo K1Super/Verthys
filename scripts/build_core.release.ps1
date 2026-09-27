@@ -146,6 +146,36 @@ function Update-VsecBaseline {
 
 Update-VsecBaseline -DllPath $dllPath
 
+# ========== Regenerate artifact contract after .vsec injection ==========
+# The .vsec baseline injection rewrites DLL bytes AFTER the CMake POST_BUILD
+# step that wrote build/core/verthys.artifacts.json. The contract sha256 then
+# no longer matches the delivered DLL, which fails the src-tauri bundle gate.
+# Regenerate the contract from the final bytes so every consumer verifies
+# exactly what ships. Version and fmt_version are read from their single
+# sources of truth (root VERSION file / core CMakeLists) - no hardcoding.
+$verSrc = Join-Path $root "VERSION"
+if (-not (Test-Path $verSrc)) { throw "VERSION file missing: $verSrc" }
+$verVersion = (Get-Content -LiteralPath $verSrc -Raw).Trim()
+if ($verVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "VERSION format invalid: $verVersion" }
+
+$coreCmake = Join-Path $root "core\CMakeLists.txt"
+$fmtMatch = Select-String -LiteralPath $coreCmake -Pattern '^\s*set\(\s*VERTHYS_FMT_VERSION\s+(\d+)\s*\)' -AllMatches
+if ($null -eq $fmtMatch -or $fmtMatch.Matches.Count -ne 1) { throw "VERTHYS_FMT_VERSION not found in core\CMakeLists.txt" }
+$fmtVersion = $fmtMatch.Matches[0].Groups[1].Value
+
+$contractScript = Join-Path $root "cmake\write_artifacts.cmake"
+$contractPath   = Join-Path $buildDir "core\verthys.artifacts.json"
+& $VERTHYS_CMAKE_EXE `
+    "-DVER_DLL_PATH=$dllPath" `
+    "-DVER_OUT_PATH=$contractPath" `
+    "-DVER_SOURCE_DIR=$root" `
+    "-DVER_VERSION=$verVersion" `
+    "-DVER_FMT_VERSION=$fmtVersion" `
+    "-DVER_GENERATOR=$VERTHYS_VS_GENERATOR" `
+    "-DVER_CONFIG=$config" `
+    -P $contractScript
+if ($LASTEXITCODE -ne 0) { throw "artifact contract regeneration failed" }
+
 Write-Host "[done] 生产构建完成" -ForegroundColor Green
 Write-Host "  产物: $dllPath"
 $info = Get-Item $dllPath

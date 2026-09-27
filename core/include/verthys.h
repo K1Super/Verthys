@@ -26,7 +26,7 @@
  *   #endif
  *
  * ================================================================== */
-#define VERTHYS_API_VERSION 0x000Bu
+#define VERTHYS_API_VERSION 0x000Cu
 
 /* ================================================================== *
  * Verthys_Unlock flags 位域定义（API 版本 0x0005）
@@ -179,6 +179,20 @@ typedef enum {
      * 区别于 INTERNAL（未归类异常）与 INVALID（参数非法）。
      * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
     VERTHYS_ERR_UNSUPPORTED = 0x00000013u,
+    /* V3 升级（API 版本 0x000C 扩展）：
+     * 加密层 nonce 计数器耗尽——同一密钥已消耗全部 2^64 计数空间，
+     * 继续加密必然导致 GCM nonce 重用（机密性与真实性双重破坏），
+     * 加密操作被拒绝。区别于 VERTHYS_ERR_INTERNAL：此为确定性、
+     * 可识别的密钥生命周期终点，上层应触发密钥轮换而非重试。
+     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+    VERTHYS_ERR_NONCE_EXHAUSTED = 0x00000014u,
+    /* V3 升级（API 版本 0x000C 扩展）：
+     * 容器正被其他进程独占占用——单写者语义下第二个写者被拒绝
+     * （文件句柄共享模式或超级块区独占锁任一判定命中）。区别于
+     * VERTHYS_ERR_IO：不是设备/文件系统故障，等待持有进程退出后重试
+     * 即可成功；区别于 VERTHYS_ERR_LOCKED：后者是容器自身密码学锁定态。
+     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+    VERTHYS_ERR_CONTAINER_BUSY = 0x00000015u,
     VERTHYS_ERR_INTERNAL = 0xFFFFFFFFu   /* 未归类的底层内部异常 */
 } VerthysResult;
 
@@ -340,6 +354,9 @@ typedef struct {
  *   MT-Unsafe — 非线程安全，同一操作句柄不可多线程并发执行
  *   MT-Const  — 只读安全，只读接口可并发调用，禁止与写操作并行执行
  *   MT-Handle — 句柄级别安全，不同句柄可并发，同一句柄禁止并发
+ * 并发度注记（与实现对齐）：索引读路径（单记录读取、类型探测）因
+ * SSTable 元数据惰性加载需互斥，内部以独占锁串行化读者——调用安全
+ * 但读者不并行；扫描游标类只读遍历持共享锁，读者可真正并行。
  * ------------------------------------------------------------------ */
 
 /* ================================================================== *
@@ -628,13 +645,51 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_VerifyIntegrity(VerthysHandle han
 typedef struct VerthysScanCursor VerthysScanCursor;
 
 /*
+ * 扫描投影：控制游标拉取时对记录数据的处理方式。
+ *
+ * 列表/索引类调用（只需 id/type/name）应选 INDEX 投影，避免为读取索引而
+ * 解密并搬运 MB 级记录数据；确需逐条完整数据的调用才选 FULL。
+ */
+typedef enum {
+    VERTHYS_SCAN_PROJECT_FULL  = 0,  /* 全部记录完整解密并返回数据（Verthys_ScanOpen 的既有行为） */
+    VERTHYS_SCAN_PROJECT_INDEX = 1   /* 索引优先：仅对不超过内联阈值的记录解密并返回数据 */
+} VerthysScanProject;
+
+/*
  * 创建数据全量扫描游标
  * 指定起始遍历ID与单次批量读取条数，初始化B+树遍历迭代器并绑定只读事务快照。
  * 线程安全：MT-Unsafe，同一容器句柄不可并发创建多个扫描游标
+ * 等价于 Verthys_ScanOpenEx(handle, start_lid, batch_size, VERTHYS_SCAN_PROJECT_FULL, 0, 0, out_cursor)。
  */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ScanOpen(VerthysHandle handle,
                            uint64_t start_lid,
                            uint64_t batch_size,
+                           VerthysScanCursor **out_cursor);
+
+/*
+ * 创建数据扫描游标（带投影与取批预算）。
+ *
+ * 参数：
+ * - project：投影选择。FULL 完整解密（与 Verthys_ScanOpen 相同）；
+ *   INDEX 仅对 plaintext_size <= index_inline_max_bytes 的记录解密并返回
+ *   数据，超出阈值的记录仍按序返回条目但 data=NULL/data_len=0（不解密、
+ *   不分配数据缓冲），调用方按需经单条读取接口获取。
+ * - index_inline_max_bytes：INDEX 投影的内联数据字节阈值，0 表示纯索引
+ *   （任何记录都不附带数据）。FULL 投影忽略本参数。
+ * - max_batch_bytes：单次 Fetch 输出字节预算（名称 + 数据合计），0 表示
+ *   不限。预算为软水位线：累计输出越过预算即收批，本批最多超出预算一条
+ *   记录的大小（游标不可回退，"先量后收"会让越预算条目既未输出又已被
+ *   消费）。调用方按传输窗口尺寸扣除单条最大记录后设定预算，即可保证
+ *   单批载荷不超窗口，避免"整批超限即失败"。
+ *
+ * 线程安全：MT-Unsafe，同一容器句柄不可并发创建多个扫描游标
+ */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ScanOpenEx(VerthysHandle handle,
+                           uint64_t start_lid,
+                           uint64_t batch_size,
+                           VerthysScanProject project,
+                           uint64_t index_inline_max_bytes,
+                           uint64_t max_batch_bytes,
                            VerthysScanCursor **out_cursor);
 
 /*
@@ -643,7 +698,8 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ScanOpen(VerthysHandle handle,
  * 1. 解密失败的损坏条目会单独输出失败ID列表，不会静默丢弃
  * 2. 拉取前校验快照事务版本，容器已修改则返回快照过期错误，需重建游标
  * 3. 返回记录内存为堆深拷贝，必须调用专用接口释放，不可直接free释放
- * 4. 本接口完整解密所有二进制数据，CPU与IO开销较高，列表渲染优先使用摘要扫描接口
+ * 4. FULL 投影下本接口完整解密所有二进制数据，CPU与IO开销较高：列表渲染
+ *    请改用 INDEX 投影（超阈值记录不解密）或摘要扫描接口
  *
  * 线程安全：MT-Const
  */
@@ -694,7 +750,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ScanSummaryRecordFree(VerthysSumm
 
 /* 获取当前已加载摘要索引内记录总条数，上层用于判断是否可直接渲染列表，跳过索引全量遍历
  * 线程安全：MT-Const */
-VERTHYS_API VerthysResult Verthys_GetSummaryCount(VerthysHandle handle, uint64_t *out_count);
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetSummaryCount(VerthysHandle handle, uint64_t *out_count);
 
 /* ================================================================== *
  * 设计：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）     *
@@ -764,7 +820,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_FindFirstLidByType(VerthysHandle 
  * 读取容器运行过程中缓存、耗时、GC、事务等全量性能指标，用于后台监控与问题定位。
  * 线程安全：MT-Const
  * ================================================================== */
-VERTHYS_API VerthysResult Verthys_GetDiagnostics(VerthysHandle handle,
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetDiagnostics(VerthysHandle handle,
                                   VerthysDiagnostics *out_diag);
 
 /* ================================================================== *
@@ -830,6 +886,59 @@ typedef struct {
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetSecurityStatus(
     VerthysHandle handle,
     VerthysSecurityStatus *out_status);
+
+/* ================================================================== *
+ * 落盘持久化自查接口（API 版本 0x000C）
+ *
+ * 背景：Windows 字节范围锁为强制锁——会话期内 C 层以独占方式
+ * 持有超级块区 [0,64KB) 锁。同进程内只有持锁句柄本身可自由读写该
+ * 区间，任何"外部新开句柄"（含 Tauri 主进程 std::fs::File::open）
+ * 读取该区间都会得到 ERROR_LOCK_VIOLATION。因此落盘校验必须由
+ * 持锁进程用持锁句柄自查，不能经外部读路径实现。
+ *
+ * 本接口幂等、只读、无副作用：仅用会话持锁句柄读取头部与 WAL 区
+ * 边界，不改变会话状态、不写盘。校验内容：
+ *   - 头部 128 字节可读；
+ *   - 磁盘偏移 0 的副本帧头（magic 'V3RP' + payload_len 合法）；
+ *   - 文件大小不低于 V3 固定布局区下限（分区表结束处）；
+ *   - WAL 区起始偏移处可读。
+ *
+ * 线程安全：MT-Const（只读，可与其它只读接口并发）
+ * ================================================================== */
+
+/* 落盘自查状态码 */
+typedef enum {
+    VERTHYS_PERSIST_OK               = 0,  /* 结构完整，落盘有效 */
+    VERTHYS_PERSIST_E_HEADER_INVALID = 1,  /* 头部结构校验失败（帧头/长度非法） */
+    VERTHYS_PERSIST_E_SIZE_MISMATCH  = 2,  /* 文件大小低于合法容器下限 */
+    VERTHYS_PERSIST_E_WAL_REGION     = 3,  /* WAL 区不可读 */
+    VERTHYS_PERSIST_E_IO             = 4,  /* 文件读写 IO 异常 */
+    VERTHYS_PERSIST_E_INTERNAL       = 5   /* 无可用会话上下文/内部错误 */
+} VerPersistStatus;
+
+/* 落盘自查结果（非敏感结构元数据，不含密钥/明文） */
+typedef struct {
+    VerPersistStatus status;         /* 状态码，对应 VerPersistStatus */
+    uint64_t file_size;              /* 容器文件字节大小 */
+    uint64_t mtime_ms;               /* 文件修改时间（Unix 毫秒；不可得为 0） */
+    uint32_t header_magic;           /* 磁盘偏移 0 的副本帧头 magic（'V3RP'） */
+    uint32_t header_version;         /* 容器格式版本（V3 会话已裁决的超级块版本） */
+    uint64_t wal_offset;             /* WAL 区起始绝对偏移（成功时回填） */
+    char     last_error[256];        /* 失败详情（UTF-8，NULL 终结；成功为空串） */
+} VerPersistVerifyResult;
+
+/*
+ * 校验当前会话持锁句柄对应的磁盘持久化结构。
+ *
+ *   handle     : 已解锁的 Verthys 句柄（内部经 ctx->v3->f 持锁句柄读取）
+ *   out_result : 输出结果载体（必填，NULL 直接返回 INTERNAL）
+ *
+ * 返回值：VerPersistStatus（同时写入 out_result->status）。
+ *   会话未解锁 / 无 V3 上下文 / 句柄为空 → INTERNAL。
+ */
+VERTHYS_API VerPersistStatus VERTHYS_CALL Verthys_VerifyPersist(
+    VerthysHandle handle,
+    VerPersistVerifyResult *out_result);
 
 #ifdef __cplusplus
 } /* extern "C" */

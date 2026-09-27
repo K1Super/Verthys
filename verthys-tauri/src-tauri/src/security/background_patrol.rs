@@ -12,7 +12,9 @@
  *      - 连续检测计数、触发历史、巡检总次数持久化到受保护文件
  *      - 即使重启，累积计数不丢失，已触发的信号保持有效
  *   4. 巡检看门狗，确保线程存活并具备自愈能力
- *      - 每 5 秒检查巡检线程心跳，发现线程退出立即重启
+ *      - 每 5 秒检查巡检线程心跳：巡检线程在睡眠期每秒、哈希扫描期每
+ *        模块更新心跳，15 秒静默阈值只捕获真实卡死，不受 10~80 秒
+ *        动态巡检间隔影响
  *      - 连续重启失败后强制触发应急熔断（直接销毁 Worker 会话）
  *   5. 后端的独立应急响应通道，不依赖前端
  *      - 检测到威胁时直接通过 AppState::set_session(None) 销毁 Worker
@@ -35,8 +37,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::module_whitelist::{
-    self, build_system_baseline, verify_module_against_baseline, HashBaseline,
-    UnknownModule,
+    self, build_system_baseline, verify_module_against_baseline, HashBaseline, UnknownModule,
 };
 use crate::state::AppState;
 use crate::util::audit_log::{append_audit, AuditEvent, AuditEventType, AuditResult};
@@ -63,8 +64,11 @@ const RING_BUFFER_MAX_ENTRIES: usize = 256;
 
 /// 看门狗检查间隔（秒）
 const WATCHDOG_CHECK_SECS: u64 = 5;
-/// 心跳超时阈值（秒）：心跳超过此时间未更新视为巡检线程已死
+/// 心跳超时阈值（秒）：巡检线程在睡眠期按秒、哈希扫描期按模块推进心跳，
+/// 该阈值必须显著大于节拍间隔（秒级），只表示真实卡死而非巡检间隔。
 const HEARTBEAT_TIMEOUT_SECS: u64 = 15;
+/// 睡眠期心跳节拍/停止标志检查粒度（秒）
+const HEARTBEAT_BEAT_SECS: u64 = 1;
 /// 看门狗连续重启失败上限：超过后强制触发应急熔断
 const WATCHDOG_MAX_RESTART_FAILURES: u32 = 3;
 
@@ -176,7 +180,10 @@ impl PatrolPersistence {
         let file_path = config_dir.join(".patrol_state");
 
         let hmac_key = derive_hmac_key()?;
-        Some(PatrolPersistence { file_path, hmac_key })
+        Some(PatrolPersistence {
+            file_path,
+            hmac_key,
+        })
     }
 
     /// 加载持久化状态
@@ -232,10 +239,7 @@ impl PatrolPersistence {
                 return;
             }
         };
-        let entry = PersistentEntry {
-            state_json,
-            hmac,
-        };
+        let entry = PersistentEntry { state_json, hmac };
 
         let plain = match serde_json::to_vec(&entry) {
             Ok(v) => v,
@@ -293,8 +297,8 @@ fn derive_hmac_key() -> Option<[u8; 32]> {
 /// 密钥被后端拒绝时返回 Err（调用方按各自降级语义处置，不 panic）
 fn compute_hmac(key: &[u8], data: &str) -> Result<String, String> {
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|_| "HMAC key rejected by backend".to_string())?;
+    let mut mac =
+        HmacSha256::new_from_slice(key).map_err(|_| "HMAC key rejected by backend".to_string())?;
     mac.update(data.as_bytes());
     let result = mac.finalize();
     let bytes = result.into_bytes();
@@ -399,10 +403,8 @@ impl PatrolState {
     fn record(&mut self, unknowns: &[UnknownModule]) -> Vec<UnknownModule> {
         self.patrol_count += 1;
 
-        let current_paths: HashSet<String> = unknowns
-            .iter()
-            .map(|m| normalize_key(&m.path))
-            .collect();
+        let current_paths: HashSet<String> =
+            unknowns.iter().map(|m| normalize_key(&m.path)).collect();
 
         // 1) 连续中断检测：已跟踪但本次未出现 → 移除
         let broken: Vec<String> = self
@@ -518,7 +520,10 @@ impl HashBaselineManager {
             if state.baseline.is_some() || state.building {
                 false
             } else if state.failure_count >= 3 {
-                log::warn!("[background_patrol] 哈希基线构建连续失败 {} 次，放弃构建", state.failure_count);
+                log::warn!(
+                    "[background_patrol] 哈希基线构建连续失败 {} 次，放弃构建",
+                    state.failure_count
+                );
                 false
             } else {
                 state.building = true;
@@ -544,12 +549,17 @@ impl HashBaselineManager {
 
                 // 通过全局通道回传结果
                 // 由于无法直接持有 manager 引用，使用全局静态 OnceLock 通道
-                BASELINE_BUILD_RESULT.lock().unwrap_or_else(|e| e.into_inner()).replace(baseline);
+                BASELINE_BUILD_RESULT
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .replace(baseline);
                 BASELINE_BUILD_DONE.store(true, Ordering::SeqCst);
 
                 log::info!(
                     "[background_patrol] 哈希基线构建完成：{} 个模块，耗时 {}ms",
-                    BASELINE_BUILD_RESULT.lock().unwrap_or_else(|e| e.into_inner())
+                    BASELINE_BUILD_RESULT
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
                         .as_ref()
                         .map(|b| b.len())
                         .unwrap_or(0),
@@ -568,7 +578,9 @@ impl HashBaselineManager {
         }
 
         let baseline = {
-            let mut result = BASELINE_BUILD_RESULT.lock().unwrap_or_else(|e| e.into_inner());
+            let mut result = BASELINE_BUILD_RESULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             result.take()
         };
 
@@ -884,18 +896,13 @@ fn watchdog_loop(
                     );
                 }
                 Err(e) => {
-                    log::error!(
-                        "[background_patrol][看门狗] 巡检线程重启失败: {}",
-                        e
-                    );
+                    log::error!("[background_patrol][看门狗] 巡检线程重启失败: {}", e);
                 }
             }
         } else {
             // 心跳正常，重置重启计数
             if restart_count.load(Ordering::SeqCst) > 0 {
-                log::info!(
-                    "[background_patrol][看门狗] 巡检线程心跳恢复正常，重置重启计数"
-                );
+                log::info!("[background_patrol][看门狗] 巡检线程心跳恢复正常，重置重启计数");
                 restart_count.store(0, Ordering::SeqCst);
             }
         }
@@ -907,6 +914,21 @@ fn watchdog_loop(
 /* ====================================================================== *
  *  巡检主循环（动态频率 + catch_unwind + 哈希基线 + 持久化）                *
  * ====================================================================== */
+
+/// 分段睡眠并逐拍推进心跳（每拍检查停止标志）。
+///
+/// 心跳只有在睡眠期持续推进，看门狗才能把"长睡"（动态间隔最长 80 秒）
+/// 与"线程卡死"区分开：仅在巡检前后报活会让长睡跨越静默阈值，
+/// 触发误判重启并泄漏巡检线程。
+fn sleep_with_heartbeat(stop_flag: &AtomicBool, heartbeat: &AtomicU64, secs: u64) {
+    for _ in 0..secs {
+        if stop_flag.load(Ordering::SeqCst) {
+            break;
+        }
+        heartbeat.store(now_ms(), Ordering::SeqCst);
+        thread::sleep(Duration::from_secs(HEARTBEAT_BEAT_SECS));
+    }
+}
 
 fn patrol_loop(ctx: PatrolContext) {
     // 设置线程优先级为 THREAD_PRIORITY_LOWEST
@@ -947,18 +969,10 @@ fn patrol_loop(ctx: PatrolContext) {
 
         // 动态频率计算
         let sleep_secs = compute_dynamic_interval();
-        log::debug!(
-            "[background_patrol] 下次巡检间隔: {}s",
-            sleep_secs
-        );
+        log::debug!("[background_patrol] 下次巡检间隔: {}s", sleep_secs);
 
-        // 分段睡眠（每秒检查停止标志）
-        for _ in 0..sleep_secs {
-            if ctx.stop_flag.load(Ordering::SeqCst) {
-                break;
-            }
-            thread::sleep(Duration::from_secs(1));
-        }
+        // 分段睡眠（每拍检查停止标志并推进心跳）
+        sleep_with_heartbeat(&ctx.stop_flag, &ctx.heartbeat, sleep_secs);
     }
 
     log::info!("[background_patrol] 巡检线程退出");
@@ -977,7 +991,8 @@ fn compute_dynamic_interval() -> u64 {
     let idle_secs = get_system_idle_secs();
 
     // 生成随机抖动基数（10~40 秒）
-    let base = PATROL_MIN_INTERVAL_SECS + (generate_random_u64() % (PATROL_MAX_INTERVAL_SECS - PATROL_MIN_INTERVAL_SECS + 1));
+    let base = PATROL_MIN_INTERVAL_SECS
+        + (generate_random_u64() % (PATROL_MAX_INTERVAL_SECS - PATROL_MIN_INTERVAL_SECS + 1));
 
     let interval = if idle_secs < ACTIVE_THRESHOLD_SECS {
         // 系统活跃：使用最小间隔（高频巡检，覆盖攻击窗口）
@@ -1027,7 +1042,7 @@ fn run_one_patrol(ctx: &PatrolContext) {
     let mut all_threats: Vec<UnknownModule> = unknowns;
 
     if let Some(baseline) = ctx.baseline_manager.get_snapshot() {
-        let hash_threats = check_hash_baseline_violations(&baseline);
+        let hash_threats = check_hash_baseline_violations(&baseline, &ctx.heartbeat);
         if !hash_threats.is_empty() {
             log::warn!(
                 "[background_patrol] 哈希基线检测到 {} 个被替换的系统模块",
@@ -1105,7 +1120,13 @@ fn run_one_patrol(ctx: &PatrolContext) {
 ///
 /// 枚举当前进程已加载的系统目录模块，对每个模块计算 SHA-256 并与基线比较。
 /// 哈希不匹配的模块视为威胁（可能被替换）。
-fn check_hash_baseline_violations(baseline: &HashBaseline) -> Vec<UnknownModule> {
+///
+/// 扫描期间按模块推进心跳（heartbeat）：整轮哈希扫描可能跨越看门狗静默
+/// 阈值，持续报告存活才能让看门狗区分"长扫描"与"真卡死"。
+fn check_hash_baseline_violations(
+    baseline: &HashBaseline,
+    heartbeat: &AtomicU64,
+) -> Vec<UnknownModule> {
     let mut threats = Vec::new();
 
     // 获取当前进程模块列表（仅路径，不做白名单匹配）
@@ -1113,6 +1134,7 @@ fn check_hash_baseline_violations(baseline: &HashBaseline) -> Vec<UnknownModule>
     let modules = enumerate_loaded_module_paths();
 
     for (name, path) in modules {
+        heartbeat.store(now_ms(), Ordering::SeqCst);
         // 仅验证系统目录下的模块（基线仅包含系统目录）
         match verify_module_against_baseline(&path, baseline) {
             Ok(true) => {
@@ -1144,16 +1166,15 @@ fn check_hash_baseline_violations(baseline: &HashBaseline) -> Vec<UnknownModule>
 fn enumerate_loaded_module_paths() -> Vec<(String, String)> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W,
-        TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32,
+        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
+        TH32CS_SNAPMODULE32,
     };
     use windows::Win32::System::Threading::GetCurrentProcessId;
 
     let mut result = Vec::new();
     let pid = unsafe { GetCurrentProcessId() };
-    let snapshot = unsafe {
-        CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
-    };
+    let snapshot =
+        unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) };
     let snapshot = match snapshot {
         Ok(h) => h,
         Err(_) => return result,
@@ -1166,9 +1187,17 @@ fn enumerate_loaded_module_paths() -> Vec<(String, String)> {
 
     let mut ok = unsafe { Module32FirstW(snapshot, &mut me) }.is_ok();
     while ok {
-        let name_len = me.szModule.iter().position(|&c| c == 0).unwrap_or(me.szModule.len());
+        let name_len = me
+            .szModule
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(me.szModule.len());
         let name = String::from_utf16_lossy(&me.szModule[..name_len]);
-        let path_len = me.szExePath.iter().position(|&c| c == 0).unwrap_or(me.szExePath.len());
+        let path_len = me
+            .szExePath
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(me.szExePath.len());
         let path = String::from_utf16_lossy(&me.szExePath[..path_len]);
 
         if !path.is_empty() {
@@ -1229,10 +1258,8 @@ fn trigger_emergency_signal(ctx: &PatrolContext, module: &UnknownModule) {
     );
 
     // 后端独立应急响应（先于前端执行）
-    let circuit_breaker_executed = execute_backend_circuit_breaker(
-        &ctx.app,
-        &format!("dll_injection:{}", module.name),
-    );
+    let circuit_breaker_executed =
+        execute_backend_circuit_breaker(&ctx.app, &format!("dll_injection:{}", module.name));
 
     // 写入审计日志（应急熔断执行）
     write_patrol_audit(
@@ -1245,7 +1272,11 @@ fn trigger_emergency_signal(ctx: &PatrolContext, module: &UnknownModule) {
         },
         Some(format!(
             "后端强制熔断: 销毁 Worker 会话 (结果={})",
-            if circuit_breaker_executed { "成功" } else { "失败" }
+            if circuit_breaker_executed {
+                "成功"
+            } else {
+                "失败"
+            }
         )),
     );
 
@@ -1294,9 +1325,7 @@ fn execute_backend_circuit_breaker(app: &AppHandle, reason: &str) -> bool {
             true
         }
         None => {
-            log::error!(
-                "[background_patrol][应急] 无法获取 AppState，强制熔断失败（状态未注册）"
-            );
+            log::error!("[background_patrol][应急] 无法获取 AppState，强制熔断失败（状态未注册）");
             false
         }
     }
@@ -1587,8 +1616,14 @@ mod tests {
 
     #[test]
     fn test_normalize_key() {
-        assert_eq!(normalize_key(r"\\?\C:\Windows\System32\test.dll"), "c:\\windows\\system32\\test.dll");
-        assert_eq!(normalize_key("C:/Windows/test.dll"), "c:\\windows\\test.dll");
+        assert_eq!(
+            normalize_key(r"\\?\C:\Windows\System32\test.dll"),
+            "c:\\windows\\system32\\test.dll"
+        );
+        assert_eq!(
+            normalize_key("C:/Windows/test.dll"),
+            "c:\\windows\\test.dll"
+        );
         assert_eq!(normalize_key("C:\\Windows\\"), "c:\\windows");
     }
 
@@ -1680,6 +1715,30 @@ mod tests {
             assert!(interval >= PATROL_MIN_INTERVAL_SECS);
             assert!(interval <= PATROL_MAX_INTERVAL_SECS * 2);
         }
+    }
+
+    /// 防回退：睡眠期必须推进心跳。仅在巡检前后报活时，长睡（动态间隔
+    /// 可达 80 秒）会跨越看门狗静默阈值，被误判为线程死亡而重复重启，
+    /// 造成巡检线程累积泄漏与巡检频次翻倍。
+    #[test]
+    fn test_sleep_with_heartbeat_advances_beat() {
+        let stop = AtomicBool::new(false);
+        let hb = AtomicU64::new(0);
+        sleep_with_heartbeat(&stop, &hb, 1);
+        assert!(
+            hb.load(Ordering::SeqCst) > 0,
+            "睡眠期心跳未推进，看门狗将误判长睡为线程死亡"
+        );
+
+        // 停止标志置位时立即返回且不刷新心跳
+        let stop_set = AtomicBool::new(true);
+        let hb_idle = AtomicU64::new(0);
+        sleep_with_heartbeat(&stop_set, &hb_idle, 3);
+        assert_eq!(
+            hb_idle.load(Ordering::SeqCst),
+            0,
+            "停止标志置位后不得再刷新心跳"
+        );
     }
 
     #[test]

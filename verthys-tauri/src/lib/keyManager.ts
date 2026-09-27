@@ -85,12 +85,15 @@ export {
   setModuleCache,
   clearModuleCache,
   ensureRecordScan,
+  cancelRecordScan,
+  cancelSummaryScan,
   getRecordIdsByType,
   getRecordFromScan,
   invalidateScannedRecord,
   addRecordToScan,
   clearRecordScanCache,
   persistVerthys,
+  persistVerthysDetailed,
   deleteAndPersist,
   deleteAndPersistBatch,
   waitForFlush,
@@ -125,7 +128,9 @@ export { startBackgroundTasks, stopBackgroundTasks } from "../core/background-ta
 export type { SummaryRecord } from "../lib/verthys";
 
 /* ===== 安全扫描包装（永不抛出，Vue 组件专用） ===== */
-export { ensureRecordScanSafe, ensureSummaryScanSafe } from "../utils/verthys_scan_safe";
+export { ensureRecordScanSafe, ensureSummaryScanSafe, ensureIndexSourceSafe } from "../utils/verthys_scan_safe";
+/* 扫描进度快照类型（信号层消费；仅类型，无运行时代码） */
+export type { ScanProgress } from "../cache/composition/verthys-cache";
 
 /* ===== 会话安全层 API ===== */
 export {

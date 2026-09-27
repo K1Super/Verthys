@@ -30,6 +30,7 @@ const service = new VerthysFlushService(() => getCurrentVerthysPath());
 
 export const setSnapshotProvider = service.setSnapshotProvider.bind(service);
 export const persistVerthys = service.persistVerthys.bind(service);
+export const persistVerthysDetailed = service.persistVerthysDetailed.bind(service);
 export const deleteAndPersist = service.deleteAndPersist.bind(service);
 export const deleteAndPersistBatch = service.deleteAndPersistBatch.bind(service);
 export const waitForFlush = service.waitForFlush.bind(service);

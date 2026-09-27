@@ -11,7 +11,9 @@
 
 use tauri::State;
 
-use crate::security::cleanup::{clear_recent_records, cleanup_crash_residue, secure_delete_file, DeleteMode};
+use crate::security::cleanup::{
+    cleanup_crash_residue, clear_recent_records, secure_delete_file, DeleteMode,
+};
 use crate::util::audit_log::{AuditEventType, AuditResult};
 
 use crate::security_commands::audit::write_security_audit;
@@ -109,11 +111,10 @@ pub async fn security_secure_delete(
 
     let path_for_task = target_str.clone();
     // spawn_blocking 执行安全删除（1 遍覆写 + 可选 TRIM）
-    let result = tokio::task::spawn_blocking(move || {
-        secure_delete_file(&path_for_task, delete_mode)
-    })
-    .await
-    .map_err(|e| format!("安全删除任务执行失败: {}", e))?;
+    let result =
+        tokio::task::spawn_blocking(move || secure_delete_file(&path_for_task, delete_mode))
+            .await
+            .map_err(|e| format!("安全删除任务执行失败: {}", e))?;
 
     result.map_err(|e| {
         log::error!("[security_secure_delete] 删除失败: {}", e);
@@ -155,11 +156,9 @@ pub async fn security_cleanup_crash_residue(
     let temp_dir_str = temp_dir.to_string_lossy().to_string();
 
     // spawn_blocking 执行清理
-    let result = tokio::task::spawn_blocking(move || {
-        cleanup_crash_residue(&temp_dir_str)
-    })
-    .await
-    .map_err(|e| format!("清理任务执行失败: {}", e))?;
+    let result = tokio::task::spawn_blocking(move || cleanup_crash_residue(&temp_dir_str))
+        .await
+        .map_err(|e| format!("清理任务执行失败: {}", e))?;
 
     let count = result.map_err(|e| {
         log::error!("[security_cleanup_crash_residue] 清理失败: {}", e);
@@ -183,6 +182,9 @@ pub async fn security_cleanup_crash_residue(
         Some(format!("已清理 {} 个残留文件", count)),
     );
 
-    log::info!("[security_cleanup_crash_residue] 已清理 {} 个残留文件", count);
+    log::info!(
+        "[security_cleanup_crash_residue] 已清理 {} 个残留文件",
+        count
+    );
     Ok(count)
 }

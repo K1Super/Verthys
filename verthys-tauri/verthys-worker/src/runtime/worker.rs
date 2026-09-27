@@ -136,6 +136,21 @@ pub(crate) fn clamp_enum_count(v: u64) -> u64 {
     v.min(MAX_ENUM_COUNT)
 }
 
+/// 落盘自查结构化结果（Verthys_VerifyPersist 出参的 Rust 侧投影）
+///
+/// status_code 语义（对齐 C 端 VerPersistStatus）：
+///   0=OK / 1=HEADER_INVALID / 2=SIZE_MISMATCH / 3=WAL_REGION
+///   / 4=IO / 5=INTERNAL
+pub(crate) struct VerifyPersistOutcome {
+    pub(crate) status_code: i32,
+    pub(crate) file_size: u64,
+    pub(crate) mtime_ms: u64,
+    pub(crate) header_magic: u32,
+    pub(crate) header_version: u32,
+    pub(crate) wal_offset: u64,
+    pub(crate) last_error: String,
+}
+
 /// 统一 FFI 调用收口：所有对 C 导出函数的调用必须经此函数
 ///
 /// Rust panic 展开穿过 extern "C" 边界属于未定义行为。
@@ -236,6 +251,58 @@ impl Worker {
                 return Err(format!("Verthys_Init failed: {:08X}", r));
             }
             init_diag!("[worker] Verthys_Init 成功（六层动态防护已就绪），进入主循环");
+
+            /* DLL 版本预检：布局敏感调用（Unlock/Scan 系列携带跨边界结构体）
+             * 之前校准接口与容器格式版本。版本错位的旧 DLL 在此被显式拒绝，
+             * 而不是在后续 FFI 结构体解析时以栈损坏形式崩溃。预检读取的是
+             * VerthysContainerInfo 前 8 字节——该头部在任何容器状态均可读，
+             * stateless 且无副作用。预检失败时进程随即退出，已初始化句柄
+             * 由进程回收，无驻留窗口。 */
+            const WORKER_KNOWN_API_VERSION: u32 = 0x000C;
+            const WORKER_EXPECTED_FMT_V3: u16 = 3;
+            let get_info: Symbol<VerthysGetContainerInfoFn> =
+                lib.get(b"Verthys_GetContainerInfo").map_err(|e| {
+                    init_diag!("[worker] DLL 缺少 Verthys_GetContainerInfo 导出（版本过旧），拒绝加载: {}", e);
+                    format!("get Verthys_GetContainerInfo: {}", e)
+                })?;
+            let mut probe = VerthysContainerInfoProbeC {
+                api_version: 0,
+                fmt_version: 0,
+                preset: 0,
+            };
+            let probe_r = ffi_call(|| { get_info(handle, &mut probe) }).unwrap_or(0xFFFFFFFF);
+            if probe_r != VERTHYS_OK {
+                init_diag!("[worker] DLL 版本预检调用失败: code={:08X}", probe_r);
+                return Err(format!("Verthys_GetContainerInfo failed: {:08X}", probe_r));
+            }
+            if probe.fmt_version != WORKER_EXPECTED_FMT_V3 {
+                init_diag!(
+                    "[worker] DLL 容器格式版本不匹配: dll_fmt={}, expected={}，拒绝加载",
+                    probe.fmt_version,
+                    WORKER_EXPECTED_FMT_V3
+                );
+                return Err(format!(
+                    "DLL format version mismatch: {} != {}",
+                    probe.fmt_version, WORKER_EXPECTED_FMT_V3
+                ));
+            }
+            if probe.api_version > WORKER_KNOWN_API_VERSION {
+                init_diag!(
+                    "[worker] DLL 接口版本超前于 worker: dll_api={:04X}, worker={:04X}，拒绝加载",
+                    probe.api_version,
+                    WORKER_KNOWN_API_VERSION
+                );
+                return Err(format!(
+                    "DLL API version {:04X} is newer than worker-known {:04X}",
+                    probe.api_version, WORKER_KNOWN_API_VERSION
+                ));
+            }
+            init_diag!(
+                "[worker] DLL 版本预检通过: api={:04X}, fmt={}",
+                probe.api_version,
+                probe.fmt_version
+            );
+
             Ok(Worker { _lib: lib, handle, scan_cursor: None, #[cfg(windows)] scan_shm: None })
         }
     }
@@ -448,10 +515,17 @@ impl Worker {
      * ---------------------------------------------------------------- */
 
     /// 打开扫描游标 + 创建共享内存 + 首批预加载
-    /// 返回 (shm_name, shm_size, record_count, exhausted)
+    /// 返回 (shm_name, shm_size, record_count, exhausted, failed_lids)
+    ///
+    /// project / index_inline_max_bytes 为投影参数（FULL=全部记录解密；
+    /// INDEX=仅对不超过内联阈值的记录解密取数），取批预算恒取 SHM 水位线
+    /// SCAN_BATCH_MAX_BYTES：单批载荷因此恒落在段容量内（取满即返回本批），
+    /// 大记录数据集不再出现"单批超容 → 整批失败"。
     #[cfg(windows)]
-    pub(crate) fn call_scan_open(&mut self, start_lid: u64, batch_size: u64)
-        -> Result<(String, usize, usize, bool), u32>
+    pub(crate) fn call_scan_open(&mut self, start_lid: u64, batch_size: u64,
+                                 project: u32, index_inline_max_bytes: u64,
+                                 auth_key: Option<&[u8]>)
+        -> Result<(String, usize, usize, bool, Vec<u64>), u32>
     {
         // 1. 创建共享内存段（VirtualLock + 随机名称）
         let shm = scan_shm::ScanShm::create(scan_shm::SHM_DEFAULT_SIZE)
@@ -462,13 +536,15 @@ impl Worker {
         // 2. 打开 C 游标（复用 vbtree_scan_all，绑定瞬时只读快照）
         unsafe {
             let lib = &self._lib;
-            let func: Symbol<VerthysScanOpenFn> = match lib.get(b"Verthys_ScanOpen") {
+            let func: Symbol<VerthysScanOpenExFn> = match lib.get(b"Verthys_ScanOpenEx") {
                 Ok(f) => f,
                 Err(_) => { shm.destroy(); return Err(0xFFFFFFFF); }
             };
             let mut cursor: VerthysScanCursorPtr = std::ptr::null_mut();
             // 传 C 前同样 clamp：batch_size 进入游标状态，保持与预分配上限一致
-            let r = ffi_call(|| { func(self.handle, start_lid, clamp_enum_count(batch_size), &mut cursor) }).unwrap_or(0xFFFFFFFF);
+            let r = ffi_call(|| { func(self.handle, start_lid, clamp_enum_count(batch_size),
+                                      project, index_inline_max_bytes,
+                                      scan_shm::SCAN_BATCH_MAX_BYTES, &mut cursor) }).unwrap_or(0xFFFFFFFF);
             if r != VERTHYS_OK {
                 shm.destroy();
                 return Err(r);
@@ -482,22 +558,30 @@ impl Worker {
         }
         self.scan_shm = Some(shm);
 
-        // 4. 首批预加载：驱动遍历器填充共享内存
-        let (count, exhausted) = self.fetch_into_shm(batch_size)?;
-        Ok((shm_name, shm_size, count, exhausted))
+        // 4. 首批预加载：驱动遍历器填充共享内存（同样携带 SHM 认证密钥）
+        let (count, exhausted, failed_ids) = self.fetch_into_shm(batch_size, auth_key)?;
+        Ok((shm_name, shm_size, count, exhausted, failed_ids))
     }
 
     /// 批量拉取记录写入共享内存
-    /// 返回 (record_count, exhausted)
+    /// 返回 (record_count, exhausted, failed_lids)
     #[cfg(windows)]
-    pub(crate) fn call_scan_fetch(&mut self, max_count: u64) -> Result<(usize, bool), u32> {
-        self.fetch_into_shm(max_count)
+    pub(crate) fn call_scan_fetch(
+        &mut self,
+        max_count: u64,
+        auth_key: Option<&[u8]>,
+    ) -> Result<(usize, bool, Vec<u64>), u32> {
+        self.fetch_into_shm(max_count, auth_key)
     }
 
     /// 内部：调用 C Verthys_ScanFetch → 拷贝到共享内存 → 释放 C 深拷贝 → 安全擦除临时缓冲
     /// 紧急熔断响应：ScanFetch 返回 VERTHYS_ERR_LOCKED 时立即吊销游标 + 销毁 SHM
     #[cfg(windows)]
-    fn fetch_into_shm(&mut self, max_count: u64) -> Result<(usize, bool), u32> {
+    fn fetch_into_shm(
+        &mut self,
+        max_count: u64,
+        auth_key: Option<&[u8]>,
+    ) -> Result<(usize, bool, Vec<u64>), u32> {
         const VERTHYS_ERR_LOCKED: u32 = 0x00000007;
         let cursor = match self.scan_cursor {
             Some(c) => c,
@@ -527,11 +611,15 @@ impl Worker {
             }).collect();
             let mut lids: Vec<u64> = vec![0u64; mc];
             let mut out_count: u64 = 0;
-            /* 根治：传递 out_failed_lids=NULL, out_failed_count=NULL
-             *   与 C 端 Verthys_ScanFetch 7 参数签名严格对齐（verthys.h:574-580）
-             *   原缺陷：FFI 仅传 5 参数，C 从栈读取垃圾值作为 out_failed_count，
-             *   执行 *out_failed_count=0 向垃圾地址写入 → 0xC0000005 崩溃 */
-            let r = ffi_call(|| { func(cursor, records.as_mut_ptr(), lids.as_mut_ptr(), mc as u64, &mut out_count, std::ptr::null_mut(), std::ptr::null_mut()) }).unwrap_or(0xFFFFFFFF);
+            /* 失败条目清单：C 端按 lid 记账解密失败/索引不一致的条目
+             * （不静默丢弃），此处必须传入真实缓冲——传 NULL 会让上层
+             * 完全看不到损坏条目，把"损坏"误当"不存在"。
+             * 缓冲按本批条数上限分配，超出部分 C 端不再写（计数仍报总数）。 */
+            let mut failed_lids: Vec<u64> = vec![0u64; mc];
+            let mut out_failed_count: u64 = 0;
+            let r = ffi_call(|| { func(cursor, records.as_mut_ptr(), lids.as_mut_ptr(), mc as u64,
+                                      &mut out_count, failed_lids.as_mut_ptr(),
+                                      &mut out_failed_count) }).unwrap_or(0xFFFFFFFF);
             if r != VERTHYS_OK {
                 // 紧急熔断吊销：ScanFetch 返回 LOCKED 表示 emergency_is_triggered
                 // 或游标已被标记 invalidated，立即销毁 SHM 缓冲区 + 关闭游标
@@ -559,14 +647,21 @@ impl Worker {
                 let _ = ffi_call(|| { free_fn(&mut records[i] as *mut VerthysRecordC) }).unwrap_or(0xFFFFFFFF);
             }
 
+            // 失败条目：仅取缓冲范围内已写入的 lid（计数可能大于缓冲容量）
+            let failed: Vec<u64> = failed_lids
+                .iter()
+                .take((out_failed_count as usize).min(mc))
+                .copied()
+                .collect();
+
             let exhausted = out_count == 0;
 
             // 写入共享内存（内部先 3 轮擦除旧数据）
             // 失败时 ? 提前返回 → 守卫 Drop 仍三轮覆写全部明文行
-            let count = shm.write_records(result.rows(), exhausted).map_err(|_| 0xFFFFFFFFu32)?;
+            let count = shm.write_records(result.rows(), exhausted, auth_key).map_err(|_| 0xFFFFFFFFu32)?;
 
             // 成功路径由守卫 Drop 在函数返回时统一擦除
-            Ok((count, exhausted))
+            Ok((count, exhausted, failed))
         }
     }
 
@@ -615,10 +710,10 @@ impl Worker {
 
     /* 非 Windows 平台：游标扫描不支持，返回错误 */
     #[cfg(not(windows))]
-    pub(crate) fn call_scan_open(&mut self, _start_lid: u64, _batch_size: u64)
+    pub(crate) fn call_scan_open(&mut self, _start_lid: u64, _batch_size: u64, _auth_key: Option<&[u8]>)
         -> Result<(String, usize, usize, bool), u32> { Err(0xFFFFFFFF) }
     #[cfg(not(windows))]
-    pub(crate) fn call_scan_fetch(&mut self, _max_count: u64) -> Result<(usize, bool), u32> { Err(0xFFFFFFFF) }
+    pub(crate) fn call_scan_fetch(&mut self, _max_count: u64, _auth_key: Option<&[u8]>) -> Result<(usize, bool), u32> { Err(0xFFFFFFFF) }
     #[cfg(not(windows))]
     pub(crate) fn call_scan_close(&mut self) -> u32 { 0xFFFFFFFF }
 
@@ -638,7 +733,8 @@ impl Worker {
     /// 摘要扫描使用更小的 SHM（4MB），因为元数据体积极小。
     /// 游标复用 self.scan_cursor 字段（与全量扫描互斥，不会并发）。
     #[cfg(windows)]
-    pub(crate) fn call_scan_summary_open(&mut self, start_lid: u64, batch_size: u64)
+    pub(crate) fn call_scan_summary_open(&mut self, start_lid: u64, batch_size: u64,
+                                         auth_key: Option<&[u8]>)
         -> Result<(String, usize, usize, bool), u32>
     {
         // 1. 创建摘要专用共享内存段（4MB，VirtualLock + 随机名称）
@@ -670,22 +766,30 @@ impl Worker {
         }
         self.scan_shm = Some(shm);
 
-        // 4. 首批预加载：驱动摘要遍历器填充共享内存
-        let (count, exhausted) = self.fetch_summary_into_shm(batch_size)?;
+        // 4. 首批预加载：驱动摘要遍历器填充共享内存（同样携带 SHM 认证密钥）
+        let (count, exhausted) = self.fetch_summary_into_shm(batch_size, auth_key)?;
         Ok((shm_name, shm_size, count, exhausted))
     }
 
     /// 批量拉取摘要记录写入共享内存
     /// 返回 (record_count, exhausted)
     #[cfg(windows)]
-    pub(crate) fn call_scan_summary_fetch(&mut self, max_count: u64) -> Result<(usize, bool), u32> {
-        self.fetch_summary_into_shm(max_count)
+    pub(crate) fn call_scan_summary_fetch(
+        &mut self,
+        max_count: u64,
+        auth_key: Option<&[u8]>,
+    ) -> Result<(usize, bool), u32> {
+        self.fetch_summary_into_shm(max_count, auth_key)
     }
 
     /// 内部：调用 C Verthys_ScanSummaryFetch → 拷贝到共享内存 → 释放 C 深拷贝 → 安全擦除临时缓冲
     /// 紧急熔断响应：ScanSummaryFetch 返回 VERTHYS_ERR_LOCKED 时立即吊销游标 + 销毁 SHM
     #[cfg(windows)]
-    fn fetch_summary_into_shm(&mut self, max_count: u64) -> Result<(usize, bool), u32> {
+    fn fetch_summary_into_shm(
+        &mut self,
+        max_count: u64,
+        auth_key: Option<&[u8]>,
+    ) -> Result<(usize, bool), u32> {
         const VERTHYS_ERR_LOCKED: u32 = 0x00000007;
         let cursor = match self.scan_cursor {
             Some(c) => c,
@@ -761,7 +865,7 @@ impl Worker {
 
             // 写入共享内存（内部先随机覆写旧数据）
             // 失败时 ? 提前返回 → 守卫 Drop 仍三轮覆写全部摘要行
-            let count = shm.write_summary_records(result.rows(), exhausted).map_err(|_| 0xFFFFFFFFu32)?;
+            let count = shm.write_summary_records(result.rows(), exhausted, auth_key).map_err(|_| 0xFFFFFFFFu32)?;
 
             // 成功路径由守卫 Drop 在函数返回时统一擦除
             Ok((count, exhausted))
@@ -770,10 +874,10 @@ impl Worker {
 
     /* 非 Windows 平台：摘要扫描不支持，返回错误 */
     #[cfg(not(windows))]
-    pub(crate) fn call_scan_summary_open(&mut self, _start_lid: u64, _batch_size: u64)
+    pub(crate) fn call_scan_summary_open(&mut self, _start_lid: u64, _batch_size: u64, _auth_key: Option<&[u8]>)
         -> Result<(String, usize, usize, bool), u32> { Err(0xFFFFFFFF) }
     #[cfg(not(windows))]
-    pub(crate) fn call_scan_summary_fetch(&mut self, _max_count: u64) -> Result<(usize, bool), u32> { Err(0xFFFFFFFF) }
+    pub(crate) fn call_scan_summary_fetch(&mut self, _max_count: u64, _auth_key: Option<&[u8]>) -> Result<(usize, bool), u32> { Err(0xFFFFFFFF) }
 
     pub(crate) fn call_delete_record(&self, id: u64) -> u32 {
         unsafe {
@@ -964,6 +1068,45 @@ impl Worker {
             all_critical_blocked: st.all_critical_blocked != 0,
             has_degraded: st.has_degraded != 0,
         })
+    }
+
+    /* ----------------------------------------------------------------
+     * 落盘自查（Verthys_VerifyPersist）
+     *
+     * 由 worker 进程内用 C 层持锁句柄自查盘面结构：容器会话以独占方式
+     * 持有超级块区 [0,64KB) 字节范围锁，主进程外部读必失败（os error
+     * 33），只有持锁进程持锁句柄能读。Err(0xFFFFFFFF) 仅表示符号缺失或
+     * FFI panic；C 层返回的非 OK 状态经 Ok(outcome.status_code) 原样透传。
+     * ---------------------------------------------------------------- */
+    pub(crate) fn call_verify_persist(&self) -> Result<VerifyPersistOutcome, u32> {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysVerifyPersistFn> =
+                match lib.get(b"Verthys_VerifyPersist") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let mut out: VerPersistVerifyResultC = std::mem::zeroed();
+            let status = ffi_call(|| { func(self.handle, &mut out as *mut VerPersistVerifyResultC) })
+                .map_err(|_| 0xFFFFFFFFu32)?;
+
+            // last_error 为 C 端 NULL 终结的 UTF-8 缓冲：按首个 NUL 截断
+            let mut len = 0usize;
+            while len < out.last_error.len() && out.last_error[len] != 0 {
+                len += 1;
+            }
+            let bytes: Vec<u8> = out.last_error[..len].iter().map(|c| *c as u8).collect();
+
+            Ok(VerifyPersistOutcome {
+                status_code: status,
+                file_size: out.file_size,
+                mtime_ms: out.mtime_ms,
+                header_magic: out.header_magic,
+                header_version: out.header_version,
+                wal_offset: out.wal_offset,
+                last_error: String::from_utf8_lossy(&bytes).into_owned(),
+            })
+        }
     }
 }
 

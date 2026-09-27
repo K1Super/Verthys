@@ -215,9 +215,7 @@ impl WorkerLifecycle {
                 self.state = WorkerLifecycleState::Initializing;
                 Ok(())
             }
-            WorkerLifecycleState::Initializing => {
-                Err("已在初始化中".into())
-            }
+            WorkerLifecycleState::Initializing => Err("已在初始化中".into()),
             WorkerLifecycleState::Ready => Err("worker 已就绪".into()),
             WorkerLifecycleState::ShuttingDown => Err("正在关闭中".into()),
         }
@@ -445,10 +443,7 @@ pub fn spawn_health_checker(
 
 /// 执行一次健康检查
 #[allow(dead_code)]
-async fn check_worker_health(
-    app: &tauri::AppHandle,
-    lifecycle: &WorkerLifecycleHandle,
-) {
+async fn check_worker_health(app: &tauri::AppHandle, lifecycle: &WorkerLifecycleHandle) {
     use tauri::Manager;
 
     let state = app.state::<crate::state::AppState>();
@@ -464,9 +459,7 @@ async fn check_worker_health(
     let alive = state.is_worker_alive();
 
     if !alive {
-        log::error!(
-            "[HEALTH_CHECK] worker 子进程异常退出（PID 可能已终止）"
-        );
+        log::error!("[HEALTH_CHECK] worker 子进程异常退出（PID 可能已终止）");
 
         // 转移到 Failed 状态
         let can_recover = lifecycle

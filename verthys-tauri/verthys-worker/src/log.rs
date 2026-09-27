@@ -37,6 +37,33 @@ pub(crate) use init_diag;
 /// 防止"捕获失败路径的 panic"残留为静默降级继续处理敏感数据。
 static PANIC_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// panic 清零器注册表：hook 触发时在输出诊断前逐一对当前线程
+/// 的敏感驻留状态执行尽力清零（如 GMK TLS 拷贝）。
+/// 每个清零器独立 catch_unwind 隔断——单个失败不阻断其余与诊断输出。
+type PanicWiper = Box<dyn Fn() + Send + Sync>;
+static PANIC_WIPERS: std::sync::OnceLock<std::sync::Mutex<Vec<PanicWiper>>> =
+    std::sync::OnceLock::new();
+
+fn wiper_list() -> &'static std::sync::Mutex<Vec<PanicWiper>> {
+    PANIC_WIPERS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// 注册 panic 清零器（入口层在 hook 安装后调用，业务模块提供具体清零动作）
+pub fn register_panic_wiper(f: impl Fn() + Send + Sync + 'static) {
+    wiper_list()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(Box::new(f));
+}
+
+/// 依次执行全部已注册清零器（hook 内第一顺序动作）
+fn run_panic_wipers() {
+    let list = wiper_list().lock().unwrap_or_else(|p| p.into_inner());
+    for wiper in list.iter() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(wiper));
+    }
+}
+
 /// 查询进程内是否已发生 panic（主循环退出判据之一）
 pub fn panic_flag_is_set() -> bool {
     PANIC_FLAG.load(std::sync::atomic::Ordering::SeqCst)
@@ -47,10 +74,13 @@ pub fn mark_panic_flag() {
     PANIC_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// 安装 panic hook：将 panic 信息完整输出到 stderr，并置位进程级标记
-/// 默认 Rust panic hook 也会输出到 stderr，但显式 hook 可确保格式完整
+/// 安装 panic hook：先执行敏感驻留清零（零化在诊断输出之前完成，
+/// 最小化密钥材料随诊断/转储外泄窗口），再将 panic 信息完整输出到
+/// stderr，并置位进程级标记。panic 策略为 unwind（清零器与后续
+/// catch_unwind 边界保护均需展开语义才有效）
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
+        run_panic_wipers();
         PANIC_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
         let location = info.location();
         let loc_str = location

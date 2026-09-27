@@ -311,11 +311,9 @@ pub fn parse_config(args: &[String]) -> VerthysResult<StartupConfig> {
             "--log-capacity" => {
                 i += 1;
                 if i < args.len() {
-                    config.log_capacity = args[i]
-                        .parse::<usize>()
-                        .map_err(|e| VerthysError::InvalidArgument(format!(
-                            "--log-capacity 无效: {}", e
-                        )))?;
+                    config.log_capacity = args[i].parse::<usize>().map_err(|e| {
+                        VerthysError::InvalidArgument(format!("--log-capacity 无效: {}", e))
+                    })?;
                     // 容量下限保护
                     if config.log_capacity < 64 {
                         config.log_capacity = 64;
@@ -323,9 +321,7 @@ pub fn parse_config(args: &[String]) -> VerthysResult<StartupConfig> {
                 }
             }
             "-h" | "--help" => {
-                return Err(VerthysError::InvalidArgument(
-                    "帮助信息".to_string(),
-                ));
+                return Err(VerthysError::InvalidArgument("帮助信息".to_string()));
             }
             _ => {
                 // 未知参数：忽略（兼容 Tauri 注入的参数如 --webview-debug）
@@ -434,10 +430,7 @@ mod tests {
 
     #[test]
     fn test_parse_config_debug_flag() {
-        let args = vec![
-            "verthys.exe".to_string(),
-            "--debug".to_string(),
-        ];
+        let args = vec!["verthys.exe".to_string(), "--debug".to_string()];
         let config = parse_config(&args).expect("debug 标志应成功");
         assert!(config.debug);
     }

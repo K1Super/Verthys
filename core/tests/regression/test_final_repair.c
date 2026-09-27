@@ -205,16 +205,16 @@ TEST(repair_lsm_large_insert)
 }
 
 /* ------------------------------------------------------------------ *
- * 改密落盘失败（超块区字节锁注入）→ 超级块盐值回滚，
+ * 改密落盘失败（超级块提交 fail_mask 测试注入）→ 超级块盐值回滚，
  * 后续解锁仍用旧口令成功（修复前：内存盐值残留新值，后续提交锁库）。
+ * 注：注入经 vsb_v3_test_force_commit_fail 开关而非外部字节锁——
+ * 会话级单写者锁（超块区独占锁恒由会话持有）使字节锁故障注入
+ * 在同进程与跨进程两个方向上都不可行（锁互斥/阻塞）。
  * ------------------------------------------------------------------ */
 TEST(repair_changepw_fail_rollback)
 {
     fr_cleanup();
     VerthysHandle h;
-#ifdef _WIN32
-    HANDLE hInj = INVALID_HANDLE_VALUE;   /* 超块区字节锁注入句柄 */
-#endif
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
     CHECK_EQ(Verthys_CreateWithPreset(h, FR_VERTHYS, "old-pw", 6, VERTHYS_PRESET_BALANCED), VERTHYS_OK);
     VerthysRecord r = {VERTHYS_RECORD_ACCOUNT, "a", 1, (const uint8_t *)"d", 1};
@@ -227,33 +227,11 @@ TEST(repair_changepw_fail_rollback)
     CHECK_EQ(Verthys_Unlock(h, FR_VERTHYS, "old-pw", 6, 0), VERTHYS_OK);
     memcpy(salt_before, ctx->v3->sb.salt, VERTHYS_V3_SALT_BYTES);
 
-#ifdef _WIN32
-    /* 注入：超块区独占字节锁（第二句柄）——VsbTxnV3 提交三副本
-     * 写入 [0,64KB) 全部 LOCK_VIOLATION → IO → 回滚。READONLY 属性
-     * 注入对 V3 无效：ctx3->f 解锁时已以 r+b 打开，只读属性不撤销
-     * 既有句柄的写权限（属性仅在打开时校验）。 */
-    hInj = CreateFileA(FR_VERTHYS, GENERIC_READ | GENERIC_WRITE,
-                       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    CHECK(hInj != INVALID_HANDLE_VALUE);
-    LARGE_INTEGER li; li.QuadPart = 0;
-    OVERLAPPED ov = {0}; ov.Offset = (DWORD)li.LowPart;
-    CHECK(LockFileEx(hInj, LOCKFILE_EXCLUSIVE_LOCK, 0,
-                     (DWORD)VERTHYS_V3_SB_REGION_END, 0, &ov));
-#endif
-
-    /* 改密：序列化成功但落盘失败 → 必须返回错误且超级块回滚 */
+    /* 注入：超级块提交三副本写入强制失败（等价落盘 IO 失败） */
+    vsb_v3_test_force_commit_fail(1);
     VerthysResult cp_rc = Verthys_ChangePassword(h, "old-pw", 6, "new-pw", 6);
+    vsb_v3_test_force_commit_fail(0);
     CHECK(cp_rc != VERTHYS_OK);
-
-#ifdef _WIN32
-    {
-        LARGE_INTEGER li; li.QuadPart = 0;
-        OVERLAPPED ov = {0}; ov.Offset = (DWORD)li.LowPart;
-        CHECK(UnlockFileEx(hInj, 0, (DWORD)VERTHYS_V3_SB_REGION_END, 0, &ov));
-        CloseHandle(hInj);
-    }
-#endif
 
     /* 核心断言：内存超级块盐值必须恢复为旧值（回滚修复点） */
     CHECK(memcmp(ctx->v3->sb.salt, salt_before, sizeof salt_before) == 0);

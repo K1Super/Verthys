@@ -21,9 +21,11 @@ Verthys_RegisterUnlockProgressCallback
 Verthys_ScanClose
 Verthys_ScanFetch
 Verthys_ScanOpen
+Verthys_ScanOpenEx
 Verthys_ScanRecordFree
 Verthys_ScanSummaryFetch
 Verthys_ScanSummaryOpen
 Verthys_ScanSummaryRecordFree
+Verthys_SwitchSecurityPreset
 Verthys_Unlock
 Verthys_VerifyIntegrity

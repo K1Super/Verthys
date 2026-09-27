@@ -20,6 +20,8 @@ fn main() {
     // 实现由 log.rs（日志基础设施层）提供，入口仅调用安装函数
     log::install_panic_hook();
     log::install_exception_filter();
+    // panic 清零器注册：hook 触发时对当前线程 GMK 驻留执行前置清零
+    log::register_panic_wiper(runtime::wipe_thread_gmk);
 
     // Step 2: 参数解析 — 提取 dll_path
     let args: Vec<String> = std::env::args().collect();

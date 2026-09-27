@@ -32,6 +32,7 @@
 #include "verthys_container_v3.h"      /* VsbTxnV3 / vsb_txn_v3_* */
 #include "verthys_wal.h"               /* verthys_wal_head/tail_offset */
 #include "verthys_io.h"                /* vio_pread64/pwrite64（篡改注入） */
+#include "verthys_lsm.h"               /* verthys_lsm_preheat_full_ex（预热中断契约） */
 
 #include <string.h>
 #include <stdio.h>
@@ -258,8 +259,11 @@ TEST(v3life_container_info_v3)
              VERTHYS_ERR_INVALID);
     CHECK_EQ(Verthys_VerifyIntegrity(h, NULL, 0, NULL), VERTHYS_ERR_INVALID);
 
-    /* 锁定态拒绝 */
-    CHECK_EQ(Verthys_GetContainerInfo(h, &info), VERTHYS_ERR_LOCKED);
+    /* 锁定态：版本头部可读（加载方预检语义），其余字段如实归零 */
+    CHECK_EQ(Verthys_GetContainerInfo(h, &info), VERTHYS_OK);
+    CHECK_EQ(info.api_version, VERTHYS_API_VERSION);
+    CHECK_EQ(info.fmt_version, VERTHYS_FMT_V3);
+    CHECK_EQ(info.record_count, 0u);
     CHECK_EQ(Verthys_VerifyIntegrity(h, NULL, 0, &failed_count), VERTHYS_ERR_LOCKED);
 
     CHECK_EQ(Verthys_Unlock(h, V3L_VERTHYS, V3L_PW, V3L_PW_LEN, 0), VERTHYS_OK);
@@ -293,7 +297,10 @@ TEST(v3life_container_info_v3)
     CHECK(info.last_fullscan_time > 0);
 
     Verthys_Lock(h);
-    CHECK_EQ(Verthys_GetContainerInfo(h, &info), VERTHYS_ERR_LOCKED);
+    /* 锁定态：版本头部仍可读，统计归零（预检语义） */
+    CHECK_EQ(Verthys_GetContainerInfo(h, &info), VERTHYS_OK);
+    CHECK_EQ(info.fmt_version, VERTHYS_FMT_V3);
+    CHECK_EQ(info.record_count, 0u);
     Verthys_Deinit(h);
     v3life_cleanup();
     return 0;
@@ -514,7 +521,185 @@ TEST(v3life_scan_family_v3)
     return 0;
 }
 
-/* ================== 2. 解锁流水线（fail_mask / MINIMAL_FIRST） ================== */
+/*
+ * 扫描投影与取批预算（Verthys_ScanOpenEx）：
+ *
+ * 矩阵：
+ *   - INDEX 投影 + 内联阈值：不超过阈值的记录解密并返回数据，超过阈值的
+ *     记录仍按序返回索引条目（data=NULL/data_len=0）——"只取索引"的调用
+ *     不再为 MB 级载荷付出解密与内存代价；
+ *   - INDEX + 阈值 0：纯索引（任何记录都不附带数据）；
+ *   - 取批预算：累计输出字节（名称 + 数据）达预算即提前收批，续批不丢
+ *     条目、不重复遍历（游标停在未取记录之前）；
+ *   - FULL 投影与既有 Verthys_ScanOpen 等价（全部记录完整解密）；
+ *   - 未知投影取值拒绝（INVALID）。
+ */
+#define V3LP_SMALL_LEN  16
+#define V3LP_BIG_LEN    4096
+#define V3LP_INLINE     64      /* 内联阈值：小记录（16B）命中，大记录（4096B）超出 */
+#define V3LP_RECS       5
+
+TEST(v3life_scan_projection)
+{
+    VerthysHandle h;
+    uint64_t ids[V3LP_RECS] = {0};
+    VerthysScanCursor *cur = NULL;
+    VerthysRecord recs[V3LP_RECS];
+    uint64_t lids[V3LP_RECS];
+    uint64_t count = 0;
+    uint64_t failed = 0;
+    uint8_t small[V3LP_SMALL_LEN];
+    uint8_t big[V3LP_BIG_LEN];
+    char name[8];
+    size_t i;
+
+    v3life_cleanup();
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_CreateWithPreset(h, V3L_VERTHYS, V3L_PW, V3L_PW_LEN,
+                                      VERTHYS_PRESET_PERFORMANCE), VERTHYS_OK);
+
+    /* 交替大小记录：小-大-小-大-小（内容含序号，避免内容寻址去重合并） */
+    memset(small, 0x41, sizeof(small));
+    memset(big, 0x42, sizeof(big));
+    for (i = 0; i < V3LP_RECS; i++) {
+        VerthysRecord r;
+        int is_small = (i % 2) == 0;
+        snprintf(name, sizeof(name), "sp-%u", (unsigned)i);
+        r.type     = VERTHYS_RECORD_ACCOUNT;
+        r.name     = name;
+        r.name_len = strlen(name);
+        if (is_small) {
+            small[0] = (uint8_t)(0x30 + i);
+            r.data     = small;
+            r.data_len = sizeof(small);
+        } else {
+            big[0] = (uint8_t)(0x30 + i);
+            r.data     = big;
+            r.data_len = sizeof(big);
+        }
+        CHECK_EQ(Verthys_AddRecord(h, &r, &ids[i]), VERTHYS_OK);
+    }
+
+    /* === 1. INDEX 投影 + 内联阈值：大记录只回索引，小记录回数据 === */
+    CHECK_EQ(Verthys_ScanOpenEx(h, 1, 10, VERTHYS_SCAN_PROJECT_INDEX,
+                                V3LP_INLINE, 0, &cur), VERTHYS_OK);
+    memset(recs, 0, sizeof(recs));
+    CHECK_EQ(Verthys_ScanFetch(cur, recs, lids, 10, &count, NULL, &failed),
+             VERTHYS_OK);
+    CHECK_EQ(count, (uint64_t)V3LP_RECS);
+    CHECK_EQ(failed, 0u);
+    for (i = 0; i < V3LP_RECS; i++) {
+        int is_small = (i % 2) == 0;
+        CHECK_EQ(lids[i], ids[i]);                       /* 顺序与写入一致 */
+        CHECK_EQ(recs[i].type, (VerthysRecordType)VERTHYS_RECORD_ACCOUNT);
+        CHECK(recs[i].name != NULL);
+        CHECK(memcmp(recs[i].name, "sp-", 3) == 0);
+        CHECK_EQ((int)recs[i].name[3], (int)('0' + i));
+        if (is_small) {
+            CHECK_EQ(recs[i].data_len, (size_t)V3LP_SMALL_LEN);
+            CHECK(recs[i].data != NULL);
+            CHECK_EQ((int)recs[i].data[0], (int)(0x30 + i));  /* 序号字节 */
+            CHECK_EQ((int)recs[i].data[1], 0x41);             /* 填充字节未被改写 */
+            CHECK_EQ((int)recs[i].data[V3LP_SMALL_LEN - 1], 0x41);
+        } else {
+            /* 超阈值：不解密、不分配，仅索引条目 */
+            CHECK(recs[i].data == NULL);
+            CHECK_EQ(recs[i].data_len, (size_t)0);
+        }
+        CHECK_EQ(Verthys_ScanRecordFree(&recs[i]), VERTHYS_OK);
+    }
+    CHECK_EQ(Verthys_ScanFetch(cur, recs, lids, 10, &count, NULL, &failed),
+             VERTHYS_OK);
+    CHECK_EQ(count, 0u);                                 /* 已耗尽 */
+    CHECK_EQ(Verthys_ScanClose(cur), VERTHYS_OK);
+    cur = NULL;
+
+    /* === 2. INDEX + 阈值 0：纯索引（任何记录都不附带数据） === */
+    CHECK_EQ(Verthys_ScanOpenEx(h, 1, 10, VERTHYS_SCAN_PROJECT_INDEX,
+                                0, 0, &cur), VERTHYS_OK);
+    memset(recs, 0, sizeof(recs));
+    CHECK_EQ(Verthys_ScanFetch(cur, recs, lids, 10, &count, NULL, &failed),
+             VERTHYS_OK);
+    CHECK_EQ(count, (uint64_t)V3LP_RECS);
+    for (i = 0; i < V3LP_RECS; i++) {
+        CHECK(recs[i].data == NULL);
+        CHECK_EQ(recs[i].data_len, (size_t)0);
+        CHECK(recs[i].name != NULL);
+        CHECK_EQ(Verthys_ScanRecordFree(&recs[i]), VERTHYS_OK);
+    }
+    CHECK_EQ(Verthys_ScanClose(cur), VERTHYS_OK);
+    cur = NULL;
+
+    /* === 3. 取批预算截批（软水位线）：续批不丢条目、不重复 === */
+    /* 每批输出字节 = 名称(4) + 数据（小记录 16 / 大记录 0）
+     * 序列 20,4,20,4,20；预算 40 → 越过预算即收批：
+     *   首批 20+4+20 = 44（第 3 条越过 40 后收批），次批 4+20 = 24（遍历自然结束） */
+    CHECK_EQ(Verthys_ScanOpenEx(h, 1, 10, VERTHYS_SCAN_PROJECT_INDEX,
+                                V3LP_INLINE, 40, &cur), VERTHYS_OK);
+    {
+        uint64_t seen = 0;
+        uint64_t seq = 0;
+        int round;
+        for (round = 0; round < 3; round++) {
+            uint64_t got = 0;
+            memset(recs, 0, sizeof(recs));
+            CHECK_EQ(Verthys_ScanFetch(cur, recs, lids, 10, &got, NULL, &failed),
+                     VERTHYS_OK);
+            if (round == 0)      CHECK_EQ(got, 3u);
+            else if (round == 1) CHECK_EQ(got, 2u);
+            else                 CHECK_EQ(got, 0u);
+            for (i = 0; i < got; i++) {
+                CHECK_EQ(lids[i], ids[seq]);             /* 严格按序推进，无重复 */
+                seq++;
+                seen++;
+                CHECK_EQ(Verthys_ScanRecordFree(&recs[i]), VERTHYS_OK);
+            }
+        }
+        CHECK_EQ(seen, (uint64_t)V3LP_RECS);             /* 批次合计 = 全部记录 */
+    }
+    CHECK_EQ(Verthys_ScanClose(cur), VERTHYS_OK);
+    cur = NULL;
+
+    /* === 4. FULL 投影与既有入口等价：全部记录完整解密 === */
+    CHECK_EQ(Verthys_ScanOpenEx(h, 1, 10, VERTHYS_SCAN_PROJECT_FULL,
+                                0, 0, &cur), VERTHYS_OK);
+    memset(recs, 0, sizeof(recs));
+    CHECK_EQ(Verthys_ScanFetch(cur, recs, lids, 10, &count, NULL, &failed),
+             VERTHYS_OK);
+    CHECK_EQ(count, (uint64_t)V3LP_RECS);
+    for (i = 0; i < V3LP_RECS; i++) {
+        int is_small = (i % 2) == 0;
+        CHECK_EQ(recs[i].data_len,
+                 is_small ? (size_t)V3LP_SMALL_LEN : (size_t)V3LP_BIG_LEN);
+        CHECK(recs[i].data != NULL);
+        CHECK_EQ((int)recs[i].data[0], (int)(0x30 + i));
+        CHECK_EQ(Verthys_ScanRecordFree(&recs[i]), VERTHYS_OK);
+    }
+    CHECK_EQ(Verthys_ScanClose(cur), VERTHYS_OK);
+    cur = NULL;
+
+    CHECK_EQ(Verthys_ScanOpen(h, 1, 10, &cur), VERTHYS_OK);
+    memset(recs, 0, sizeof(recs));
+    CHECK_EQ(Verthys_ScanFetch(cur, recs, lids, 10, &count, NULL, &failed),
+             VERTHYS_OK);
+    CHECK_EQ(count, (uint64_t)V3LP_RECS);
+    for (i = 0; i < V3LP_RECS; i++) {
+        CHECK(recs[i].data_len > 0);                     /* 既有入口仍是全量解密 */
+        CHECK_EQ(Verthys_ScanRecordFree(&recs[i]), VERTHYS_OK);
+    }
+    CHECK_EQ(Verthys_ScanClose(cur), VERTHYS_OK);
+    cur = NULL;
+
+    /* === 5. 未知投影取值：拒绝而非静默按 FULL 处理 === */
+    CHECK_EQ(Verthys_ScanOpenEx(h, 1, 10, (VerthysScanProject)7,
+                                0, 0, &cur), VERTHYS_ERR_INVALID);
+    CHECK(cur == NULL);
+
+    Verthys_Lock(h);
+    Verthys_Deinit(h);
+    v3life_cleanup();
+    return 0;
+}
 
 /*
  * fail_mask 逐阶段注入（bit i = 阶段 i 强制失败）：
@@ -608,6 +793,75 @@ TEST(v3life_unlock_minimal_first)
     CHECK_EQ(Verthys_GetRecord(h, ids[0], &out), VERTHYS_ERR_LOCKED);
 
     Verthys_Deinit(h);
+    v3life_cleanup();
+    return 0;
+}
+
+/*
+ * 可中断预热契约 + 销毁汇合竞态回归：
+ *   a. 白盒 preheat_full_ex：stop_flag 预置位 → 首张表边界即折返
+ *      （VERTHYS_ERR_LOCKED），复位后幂等续跑返回 OK；
+ *   b. MINIMAL_FIRST 解锁后不等待预热完成即锁定——销毁汇合在预热线程
+ *      仍持有子系统期间发起；多轮循环放大竞态窗口，每轮必须正常收口
+ *      （停止标志复位 / 专用流生命周期完整 / 无悬挂线程）。
+ */
+TEST(v3life_preheat_interrupt_and_join)
+{
+    VerthysHandle h;
+    VerthysRecord out;
+    uint64_t ids[2] = {0, 0};
+
+    CHECK_EQ(v3life_make_locked(V3L_VERTHYS, V3L_PW, V3L_PW_LEN,
+                                VERTHYS_PRESET_PERFORMANCE, 2, ids), 0);
+
+    /* --- a. 可中断预热契约（低层装配，复用 fail_mask 测试模式） --- */
+    {
+        struct VerthysContext *ctx;
+        FILE *f = NULL;
+        VerthysContextV3 *v3;
+        volatile LONG stop;
+
+        CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+        ctx = (struct VerthysContext *)h;
+
+        fopen_s(&f, V3L_VERTHYS, "r+b");
+        CHECK(f != NULL);
+        v3 = verthys_v3_ctx_create(&ctx->cng_keys, f, V3L_VERTHYS);
+        CHECK(v3 != NULL);
+        CHECK_EQ(verthys_unlock_pipeline_run(v3, V3L_PW, V3L_PW_LEN, 0,
+                                             0, NULL, NULL), VERTHYS_OK);
+
+        /* 停止标志预置位：不加载任何表，直接以锁定语义折返。
+         * f 传 NULL：由 preheat_full_ex 内部回退共享流（VerthysLsm 为
+         * 不透明句柄，测试侧不触及内部字段） */
+        stop = 1;
+        CHECK_EQ(verthys_lsm_preheat_full_ex(v3->lsm, NULL, &stop),
+                 VERTHYS_ERR_LOCKED);
+        /* 复位后幂等续跑（惰性缓存已就绪或补加载均返回 OK） */
+        stop = 0;
+        CHECK_EQ(verthys_lsm_preheat_full_ex(v3->lsm, NULL, &stop),
+                 VERTHYS_OK);
+        /* 常规入口与委托版等价（幂等） */
+        CHECK_EQ(verthys_lsm_preheat_full(v3->lsm), VERTHYS_OK);
+
+        verthys_v3_ctx_destroy(v3);
+        fclose(f);
+        Verthys_Deinit(h);
+    }
+
+    /* --- b. MINIMAL_FIRST 解锁后立即锁定（多轮放大汇合竞态窗口） --- */
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    for (int round = 0; round < 8; round++) {
+        VerthysResult rc = Verthys_Unlock(h, V3L_VERTHYS, V3L_PW, V3L_PW_LEN,
+                                      VERTHYS_UNLOCK_FLAG_MINIMAL_FIRST);
+        CHECK(rc == VERTHYS_ERR_PARTIAL_UNLOCK || rc == VERTHYS_OK);
+        /* 最小可操作态读验证后立即锁定（不等预热完成） */
+        CHECK_EQ(Verthys_GetRecord(h, ids[0], &out), VERTHYS_OK);
+        CHECK(memcmp(out.data, "data-0", 6) == 0);
+        CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    }
+    Verthys_Deinit(h);
+
     v3life_cleanup();
     return 0;
 }
@@ -896,6 +1150,54 @@ TEST(v3life_crash_prepare_only_replayed)
     }
 
     CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    Verthys_Deinit(h);
+    v3life_cleanup();
+    return 0;
+}
+
+/* ================== 5. 落盘自查（持锁句柄 C 层校验） ================== */
+
+/*
+ * Verthys_VerifyPersist：解锁态用会话持锁句柄自查盘面结构 → OK，
+ * 且 file_size>0、帧头 magic 与版本正确、wal_offset 为 WAL 区起点；
+ * 锁定后无会话（ctx->v3 已收口）→ INTERNAL 且不崩溃；空句柄/空出参同。
+ */
+TEST(v3life_verify_persist_selfcheck)
+{
+    VerthysHandle h;
+    VerPersistVerifyResult res;
+    uint64_t ids[1] = {0};
+
+    CHECK_EQ(v3life_make_locked(V3L_VERTHYS, V3L_PW, V3L_PW_LEN,
+                                VERTHYS_PRESET_PERFORMANCE, 1, ids), 0);
+
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_Unlock(h, V3L_VERTHYS, V3L_PW, V3L_PW_LEN, 0), VERTHYS_OK);
+
+    /* 解锁态：持锁句柄自查应全绿 */
+    memset(&res, 0, sizeof(res));
+    CHECK_EQ(Verthys_VerifyPersist(h, &res), VERTHYS_PERSIST_OK);
+    CHECK_EQ(res.status, VERTHYS_PERSIST_OK);
+    CHECK(res.file_size > 0);
+    CHECK_EQ(res.header_magic, (long)VERTHYS_V3_REPLICA_FRAME_MAGIC);
+    CHECK_EQ(res.header_version, VERTHYS_V3_VERSION);
+    CHECK_EQ(res.wal_offset, (long)VERTHYS_V3_WAL_REGION_OFFSET);
+    CHECK(res.last_error[0] == '\0');
+
+    /* 幂等：重复调用结果一致（只读、无副作用） */
+    memset(&res, 0, sizeof(res));
+    CHECK_EQ(Verthys_VerifyPersist(h, &res), VERTHYS_PERSIST_OK);
+    CHECK_EQ(res.header_magic, (long)VERTHYS_V3_REPLICA_FRAME_MAGIC);
+
+    /* 锁定后无会话：INTERNAL，且不得崩溃 */
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    memset(&res, 0, sizeof(res));
+    CHECK_EQ(Verthys_VerifyPersist(h, &res), VERTHYS_PERSIST_E_INTERNAL);
+
+    /* 空句柄 / 空出参：不崩溃，返回 INTERNAL */
+    CHECK_EQ(Verthys_VerifyPersist(NULL, &res), VERTHYS_PERSIST_E_INTERNAL);
+    CHECK_EQ(Verthys_VerifyPersist(h, NULL), VERTHYS_PERSIST_E_INTERNAL);
+
     Verthys_Deinit(h);
     v3life_cleanup();
     return 0;

@@ -55,7 +55,11 @@ pub(crate) fn assign_child_to_job_object(pid: u32) -> Option<JobHandle> {
     let job = match unsafe { CreateJobObjectW(None, PCWSTR::null()) } {
         Ok(h) => h,
         Err(e) => {
-            log::warn!("[watchdog] Job Object 创建失败（pid={}）：{}，回退到 kill_on_drop", pid, e);
+            log::warn!(
+                "[watchdog] Job Object 创建失败（pid={}）：{}，回退到 kill_on_drop",
+                pid,
+                e
+            );
             return None;
         }
     };
@@ -66,16 +70,17 @@ pub(crate) fn assign_child_to_job_object(pid: u32) -> Option<JobHandle> {
     let info_ptr = &mut info as *mut _ as *const _;
     let info_len = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
     let rc = unsafe {
-        SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            info_ptr,
-            info_len,
-        )
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, info_ptr, info_len)
     };
     if rc.is_err() {
-        log::warn!("[watchdog] SetInformationJobObject 失败（pid={}）：{:?}，回退到 kill_on_drop", pid, rc);
-        unsafe { let _ = CloseHandle(job); }
+        log::warn!(
+            "[watchdog] SetInformationJobObject 失败（pid={}）：{:?}，回退到 kill_on_drop",
+            pid,
+            rc
+        );
+        unsafe {
+            let _ = CloseHandle(job);
+        }
         return None;
     }
 
@@ -84,8 +89,14 @@ pub(crate) fn assign_child_to_job_object(pid: u32) -> Option<JobHandle> {
     let ph = match proc_handle {
         Ok(h) => h,
         Err(e) => {
-            log::warn!("[watchdog] OpenProcess 失败（pid={}）：{}，回退到 kill_on_drop", pid, e);
-            unsafe { let _ = CloseHandle(job); }
+            log::warn!(
+                "[watchdog] OpenProcess 失败（pid={}）：{}，回退到 kill_on_drop",
+                pid,
+                e
+            );
+            unsafe {
+                let _ = CloseHandle(job);
+            }
             return None;
         }
     };
@@ -95,11 +106,19 @@ pub(crate) fn assign_child_to_job_object(pid: u32) -> Option<JobHandle> {
     //    即使 worker 自身有 NoChildProcessCreation 策略，Job Object 仍生效。
     let assign_rc = unsafe { AssignProcessToJobObject(job, ph) };
     // 关闭进程句柄（Job Object 已保留引用）
-    unsafe { let _ = CloseHandle(ph); }
+    unsafe {
+        let _ = CloseHandle(ph);
+    }
 
     if assign_rc.is_err() {
-        log::warn!("[watchdog] AssignProcessToJobObject 失败（pid={}）：{:?}，回退到 kill_on_drop", pid, assign_rc);
-        unsafe { let _ = CloseHandle(job); }
+        log::warn!(
+            "[watchdog] AssignProcessToJobObject 失败（pid={}）：{:?}，回退到 kill_on_drop",
+            pid,
+            assign_rc
+        );
+        unsafe {
+            let _ = CloseHandle(job);
+        }
         return None;
     }
 
@@ -118,7 +137,9 @@ pub fn kill_orphan_workers() {
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
-    use windows::Win32::System::Threading::{TerminateProcess, OpenProcess as OpenProc2, PROCESS_TERMINATE as PT2};
+    use windows::Win32::System::Threading::{
+        OpenProcess as OpenProc2, TerminateProcess, PROCESS_TERMINATE as PT2,
+    };
 
     // windows 0.58: CreateToolhelp32Snapshot 返回 Result<HANDLE, Error>
     let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
@@ -138,7 +159,9 @@ pub fn kill_orphan_workers() {
     let ok = unsafe { Process32FirstW(snapshot, &mut entry) };
     if ok.is_err() {
         log::warn!("[orphan_cleanup] Process32FirstW 失败，跳过孤儿清理");
-        unsafe { let _ = CloseHandle(snapshot); }
+        unsafe {
+            let _ = CloseHandle(snapshot);
+        }
         return;
     }
 
@@ -147,7 +170,9 @@ pub fn kill_orphan_workers() {
 
     loop {
         // 比较 szExeFile（宽字符数组，null 结尾）
-        let exe_name: Vec<u16> = entry.szExeFile.iter()
+        let exe_name: Vec<u16> = entry
+            .szExeFile
+            .iter()
             .take_while(|&&c| c != 0)
             .copied()
             .collect();
@@ -158,7 +183,9 @@ pub fn kill_orphan_workers() {
             if let Ok(h) = ph {
                 let rc = unsafe { TerminateProcess(h, 1) };
                 let _ = rc;
-                unsafe { let _ = CloseHandle(h); }
+                unsafe {
+                    let _ = CloseHandle(h);
+                }
                 log::warn!("[orphan_cleanup] 杀死孤儿 verthys-worker PID={}", pid);
                 killed += 1;
             }
@@ -170,10 +197,15 @@ pub fn kill_orphan_workers() {
         }
     }
 
-    unsafe { let _ = CloseHandle(snapshot); }
+    unsafe {
+        let _ = CloseHandle(snapshot);
+    }
 
     if killed > 0 {
-        log::warn!("[orphan_cleanup] 共杀死 {} 个孤儿 verthys-worker 进程", killed);
+        log::warn!(
+            "[orphan_cleanup] 共杀死 {} 个孤儿 verthys-worker 进程",
+            killed
+        );
         // 等待内核回收
         std::thread::sleep(std::time::Duration::from_millis(500));
     }

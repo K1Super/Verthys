@@ -23,6 +23,10 @@
  *  14. 索引帧篡改：密文翻转 → AUTH；magic/ct_len 破坏 → FORMAT
  *  15. 空索引区 load → FORMAT
  *  16. 全 API NULL 参数校验
+ *  17. compact：死块弃置 + 活跃块前移 + next_offset/used 收缩 +
+ *      搬移后数据完整 + 二次 compact + no-op + 空索引 + NULL 校验
+ *  18. 数据区容量守卫：超容量写入 RESOURCE_LIMIT 拒绝（零副作用）、
+ *      恰好吃满容量放行、容量吃满后再次写入拒绝
  */
 #include "verthys_test.h"
 #include "verthys_extent.h"
@@ -62,7 +66,7 @@ static int v3e_setup(VerthysCngAead *wrap, uint8_t wk[V3E_KEY_BYTES],
     verthys_random_bytes(wk, V3E_KEY_BYTES);
     memcpy(copy, wk, V3E_KEY_BYTES);
     if (verthys_cng_aead_init(wrap) != VERTHYS_OK) return -1;
-    if (verthys_cng_aead_import_key(wrap, copy, NULL) != VERTHYS_OK) return -1;
+    if (verthys_cng_aead_import_key(wrap, copy, NULL, 0) != VERTHYS_OK) return -1;
     if (verthys_partition_create(part, V3E_PART_ID, VERTHYS_PARTITION_EXTENT,
                                0, 16u * 1024u * 1024u, 1, wrap) != VERTHYS_OK) {
         return -1;
@@ -85,7 +89,7 @@ static int v3e_reimport(VerthysCngAead *a, const uint8_t key[V3E_KEY_BYTES])
 
     memcpy(copy, key, V3E_KEY_BYTES);
     if (verthys_cng_aead_init(a) != VERTHYS_OK) return -1;
-    return verthys_cng_aead_import_key(a, copy, NULL) == VERTHYS_OK ? 0 : -1;
+    return verthys_cng_aead_import_key(a, copy, NULL, 0) == VERTHYS_OK ? 0 : -1;
 }
 
 /* ---------- 1. 内容寻址哈希 ---------- */
@@ -932,6 +936,252 @@ TEST(v3ext_put_size_guard_rejects)
     CHECK(idx.next_offset == 0);
     CHECK(part.used == 0);
     CHECK(stored == -1);   /* 拒绝路径不得触碰出参 */
+
+    fclose(f);
+    v3e_teardown(&part, &wrap, wk);
+    v3e_cleanup();
+    return 0;
+}
+
+/* ---------- 17. 紧凑化（死块回收 + 活跃块前移） ---------- */
+
+/*
+ * compact 语义：ref_count==0 死块弃置（条目保留、偏移失效），活跃块
+ * 按追加序前移聚拢空隙（目标游标恒 ≤ 源偏移，前向复制无重叠）；
+ * next_offset/used 收缩至活跃总长。搬移后活跃块 get 数据完整
+ * （数据 AAD 不绑 offset，密文原样搬移可解），死块原位数据被
+ * 覆盖后解密必然失败。
+ */
+TEST(v3ext_compact_reclaims_dead_blocks)
+{
+    VerthysCngAead wrap;
+    VerthysPartition part;
+    uint8_t wk[V3E_KEY_BYTES];
+    FILE *f;
+    VerthysExtentIndex idx;
+    VerthysExtent e;
+    uint8_t a[100], b[80], c[50];
+    uint8_t ha[VERTHYS_EXTENT_HASH_BYTES];
+    uint8_t hb[VERTHYS_EXTENT_HASH_BYTES];
+    uint8_t hc[VERTHYS_EXTENT_HASH_BYTES];
+    uint8_t out[128];
+    size_t olen;
+    uint32_t rc;
+    size_t eligible;
+    uint64_t used_after_fill;
+    int stored = -1;
+
+    CHECK(v3e_setup(&wrap, wk, &part) == 0);
+    f = fopen(V3E_TMP, "wb+");
+    CHECK(f != NULL);
+    CHECK(verthys_extent_index_init(&idx, 5) == VERTHYS_OK);
+
+    v3e_fill(a, sizeof(a), 31u);
+    v3e_fill(b, sizeof(b), 32u);
+    v3e_fill(c, sizeof(c), 33u);
+    CHECK(verthys_extent_put(f, &part, &idx, 5, a, sizeof(a),
+                           ha, &stored) == VERTHYS_OK);
+    CHECK(verthys_extent_put(f, &part, &idx, 5, b, sizeof(b),
+                           hb, &stored) == VERTHYS_OK);
+    CHECK(verthys_extent_put(f, &part, &idx, 5, c, sizeof(c),
+                           hc, &stored) == VERTHYS_OK);
+    CHECK(idx.count == 3);
+    used_after_fill = part.used;
+
+    /* A 引用归零成死块 */
+    CHECK(verthys_extent_release(&idx, ha, 6, &rc) == VERTHYS_OK);
+    CHECK(rc == 0);
+    CHECK(verthys_extent_gc_eligible(&idx, &eligible) == VERTHYS_OK);
+    CHECK(eligible == 1);
+
+    /* compact：B/C 前移填补 A 死块空隙 */
+    CHECK(verthys_extent_compact(f, &part, &idx) == VERTHYS_OK);
+    CHECK(idx.count == 3);                     /* 死块条目保留 */
+    CHECK(verthys_extent_index_find(&idx, hb, &e) == VERTHYS_OK);
+    CHECK(e.offset == 0);                      /* B 移至数据区起点 */
+    CHECK(e.size == sizeof(b) + VERTHYS_EXTENT_TAG_BYTES);
+    CHECK(verthys_extent_index_find(&idx, hc, &e) == VERTHYS_OK);
+    CHECK(e.offset == sizeof(b) + VERTHYS_EXTENT_TAG_BYTES);
+    CHECK(idx.next_offset == sizeof(b) + sizeof(c)
+          + 2u * VERTHYS_EXTENT_TAG_BYTES);    /* 收缩至活跃总长 */
+    CHECK(part.used == idx.next_offset);
+    CHECK(part.used < used_after_fill);
+
+    /* 活跃块搬移后数据完整可读 */
+    olen = sizeof(out);
+    CHECK(verthys_extent_get(f, &part, &idx, hb, out, &olen) == VERTHYS_OK);
+    CHECK(olen == sizeof(b));
+    CHECK(memcmp(out, b, sizeof(b)) == 0);
+    olen = sizeof(out);
+    CHECK(verthys_extent_get(f, &part, &idx, hc, out, &olen) == VERTHYS_OK);
+    CHECK(olen == sizeof(c));
+    CHECK(memcmp(out, c, sizeof(c)) == 0);
+
+    /* 死块原槽位已被活跃块密文覆盖 → 解密失败（条目仍在但不可读） */
+    olen = sizeof(out);
+    CHECK(verthys_extent_get(f, &part, &idx, ha, out, &olen) != VERTHYS_OK);
+
+    /* 二次 compact：B 归零后 C 再度前移 */
+    CHECK(verthys_extent_release(&idx, hb, 7, &rc) == VERTHYS_OK);
+    CHECK(rc == 0);
+    CHECK(verthys_extent_compact(f, &part, &idx) == VERTHYS_OK);
+    CHECK(verthys_extent_index_find(&idx, hc, &e) == VERTHYS_OK);
+    CHECK(e.offset == 0);
+    CHECK(idx.next_offset == sizeof(c) + VERTHYS_EXTENT_TAG_BYTES);
+    CHECK(part.used == idx.next_offset);
+    olen = sizeof(out);
+    CHECK(verthys_extent_get(f, &part, &idx, hc, out, &olen) == VERTHYS_OK);
+    CHECK(memcmp(out, c, sizeof(c)) == 0);
+
+    fclose(f);
+    v3e_teardown(&part, &wrap, wk);
+    v3e_cleanup();
+    return 0;
+}
+
+/* ---------- 18. 紧凑化 no-op 与空索引 ---------- */
+
+/*
+ * 无死块：不搬移（offset/next_offset/used 零变化，数据零扰动）；
+ * 空索引：OK 且游标/used 保持 0。
+ */
+TEST(v3ext_compact_noop_and_empty)
+{
+    VerthysCngAead wrap;
+    VerthysPartition part;
+    uint8_t wk[V3E_KEY_BYTES];
+    FILE *f;
+    VerthysExtentIndex idx;
+    VerthysExtent e;
+    uint8_t a[60], b[40];
+    uint8_t ha[VERTHYS_EXTENT_HASH_BYTES];
+    uint8_t hb[VERTHYS_EXTENT_HASH_BYTES];
+    uint8_t out[80];
+    size_t olen;
+    uint64_t off_a, off_b, no, used;
+    int stored = -1;
+
+    CHECK(v3e_setup(&wrap, wk, &part) == 0);
+    f = fopen(V3E_TMP, "wb+");
+    CHECK(f != NULL);
+
+    /* 空索引 compact：无操作成功 */
+    CHECK(verthys_extent_index_init(&idx, 5) == VERTHYS_OK);
+    CHECK(verthys_extent_compact(f, &part, &idx) == VERTHYS_OK);
+    CHECK(idx.count == 0);
+    CHECK(idx.next_offset == 0);
+    CHECK(part.used == 0);
+
+    /* 全活跃索引 compact：零搬移、游标与数据不变 */
+    v3e_fill(a, sizeof(a), 41u);
+    v3e_fill(b, sizeof(b), 42u);
+    CHECK(verthys_extent_put(f, &part, &idx, 5, a, sizeof(a),
+                           ha, &stored) == VERTHYS_OK);
+    CHECK(verthys_extent_put(f, &part, &idx, 5, b, sizeof(b),
+                           hb, &stored) == VERTHYS_OK);
+    CHECK(verthys_extent_index_find(&idx, ha, &e) == VERTHYS_OK);
+    off_a = e.offset;
+    CHECK(verthys_extent_index_find(&idx, hb, &e) == VERTHYS_OK);
+    off_b = e.offset;
+    no = idx.next_offset;
+    used = part.used;
+
+    CHECK(verthys_extent_compact(f, &part, &idx) == VERTHYS_OK);
+    CHECK(verthys_extent_index_find(&idx, ha, &e) == VERTHYS_OK);
+    CHECK(e.offset == off_a);
+    CHECK(verthys_extent_index_find(&idx, hb, &e) == VERTHYS_OK);
+    CHECK(e.offset == off_b);
+    CHECK(idx.next_offset == no);
+    CHECK(part.used == used);
+
+    olen = sizeof(out);
+    CHECK(verthys_extent_get(f, &part, &idx, ha, out, &olen) == VERTHYS_OK);
+    CHECK(memcmp(out, a, sizeof(a)) == 0);
+    olen = sizeof(out);
+    CHECK(verthys_extent_get(f, &part, &idx, hb, out, &olen) == VERTHYS_OK);
+    CHECK(memcmp(out, b, sizeof(b)) == 0);
+
+    /* NULL 参数校验 */
+    CHECK(verthys_extent_compact(NULL, &part, &idx) == VERTHYS_ERR_INVALID);
+    CHECK(verthys_extent_compact(f, NULL, &idx) == VERTHYS_ERR_INVALID);
+    CHECK(verthys_extent_compact(f, &part, NULL) == VERTHYS_ERR_INVALID);
+
+    fclose(f);
+    v3e_teardown(&part, &wrap, wk);
+    v3e_cleanup();
+    return 0;
+}
+
+/* ---------- 19. 数据区容量守卫（小容量分区） ---------- */
+
+/*
+ * 分区数据区容量 = part->size - 索引帧区。追加起点 + 密文长度越过该
+ * 容量即 RESOURCE_LIMIT 拒绝，且零副作用（无条目、无游标推进、
+ * 无盘面写入）；刚好吃满容量的写入放行。
+ */
+TEST(v3ext_put_beyond_capacity_rejected)
+{
+    VerthysCngAead wrap;
+    VerthysPartition part;
+    uint8_t wk[V3E_KEY_BYTES];
+    FILE *f;
+    VerthysExtentIndex idx;
+    uint8_t pt_exact[100];
+    uint8_t pt_over[101];
+    uint8_t hash[VERTHYS_EXTENT_HASH_BYTES];
+    uint8_t out[128];
+    size_t olen;
+    size_t capacity = 100u;            /* 数据区容量（字节） */
+    size_t exact_len = capacity - (size_t)VERTHYS_EXTENT_TAG_BYTES;
+    size_t over_len = exact_len + 1u;
+    int stored = -1;
+
+    /* 自定义小容量分区：size = 索引帧区 + 100 字节数据区 */
+    verthys_random_bytes(wk, V3E_KEY_BYTES);
+    CHECK(verthys_cng_aead_init(&wrap) == VERTHYS_OK);
+    CHECK(verthys_cng_aead_import_key(&wrap, wk, NULL, 0) == VERTHYS_OK);
+    CHECK(verthys_partition_create(&part, V3E_PART_ID, VERTHYS_PARTITION_EXTENT,
+                                   0,
+                                   (uint64_t)VERTHYS_EXTENT_INDEX_REGION_BYTES
+                                   + capacity, 1, &wrap) == VERTHYS_OK);
+    f = fopen(V3E_TMP, "wb+");
+    CHECK(f != NULL);
+    CHECK(verthys_extent_index_init(&idx, 5) == VERTHYS_OK);
+
+    /* 超容量一字节 → 拒绝且零副作用 */
+    v3e_fill(pt_over, over_len, 51u);
+    CHECK(verthys_extent_put(f, &part, &idx, 5, pt_over, over_len,
+                           hash, &stored) == VERTHYS_ERR_RESOURCE_LIMIT);
+    CHECK(idx.count == 0);
+    CHECK(idx.next_offset == 0);
+    CHECK(part.used == 0);
+
+    /* 大块（远超容量）→ 同样拒绝 */
+    memset(pt_over, 0x7F, sizeof(pt_over));
+    CHECK(verthys_extent_put(f, &part, &idx, 5, pt_over, sizeof(pt_over),
+                           hash, &stored) == VERTHYS_ERR_RESOURCE_LIMIT);
+    CHECK(idx.count == 0);
+    CHECK(idx.next_offset == 0);
+    CHECK(part.used == 0);
+
+    /* 恰好吃满容量 → 放行并完整回读 */
+    v3e_fill(pt_exact, exact_len, 52u);
+    CHECK(verthys_extent_put(f, &part, &idx, 5, pt_exact, exact_len,
+                           hash, &stored) == VERTHYS_OK);
+    CHECK(stored == 1);
+    CHECK(idx.count == 1);
+    CHECK(idx.next_offset == capacity);
+    CHECK(part.used == capacity);
+    olen = sizeof(out);
+    CHECK(verthys_extent_get(f, &part, &idx, hash, out, &olen) == VERTHYS_OK);
+    CHECK(olen == exact_len);
+    CHECK(memcmp(out, pt_exact, exact_len) == 0);
+
+    /* 容量吃满后再次写入 → 拒绝（游标推进后边界正确生效） */
+    CHECK(verthys_extent_put(f, &part, &idx, 6, pt_over, over_len,
+                           hash, &stored) == VERTHYS_ERR_RESOURCE_LIMIT);
+    CHECK(idx.count == 1);
+    CHECK(idx.next_offset == capacity);
 
     fclose(f);
     v3e_teardown(&part, &wrap, wk);

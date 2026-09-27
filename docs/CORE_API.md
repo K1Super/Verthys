@@ -4,17 +4,15 @@
 > Last updated: 2026-09-19 · 维护人：K1Super
 
 本文档是 C 核心动态库对外接口的唯一契约文件，与 `core/include/verthys.h`（公开头文件）、
-`core/include/error_codes.h`（C/Rust 边界标准错误码）、`core/verthys.def`（导出符号白名单）
-逐条对齐。所有签名、枚举值、成员语义均照源码编写；未在源码注释中显式给出的错误码语义已标注
-“据实现推断”。接口分组以头文件实际声明为准。
+`core/verthys.def`（导出符号白名单）逐条对齐。所有签名、枚举值、成员语义均照源码编写；
+未在源码注释中显式给出的错误码语义已标注“据实现推断”。接口分组以头文件实际声明为准。
 
 ---
 
 ## 1. 包含方式
 
 ```c
-#include "verthys.h"          /* 公开 ABI：Verthys_* 接口 + VerthysResult 错误码 */
-#include "error_codes.h"      /* C/Rust FFI 边界标准错误码：VERTHYS_C_*（int） */
+#include "verthys.h"          /* 公开 ABI：Verthys_* 接口 + VerthysResult 错误码（唯一错误码体系） */
 ```
 
 - 头文件仅依赖标准库 `<stdint.h>` / `<stddef.h>`，自包含，无第三方头文件依赖。
@@ -55,13 +53,13 @@ if (r != VERTHYS_OK) {
 安全规则：各类认证失败、数据篡改、密码错误在错误码粒度上不做区分（统一返回
 `VERTHYS_ERR_AUTH` 等），仅内部日志记录详情，防止攻击者枚举探测。
 
-> 示例来源说明：`core/examples/ffi/` 下仅有 `cng_example.c`，它演示的是 `error_codes.h`
-> 的 `VERTHYS_C_*`（int）错误码与 CNG 纯函数调用，**并未**调用 `verthys.h` 的 `Verthys_*`
+> 示例来源说明：`core/examples/ffi/` 下仅有 `cng_example.c`，它演示的是 `verthys.h`
+> 的 `VerthysResult` 错误码与 CNG 纯函数调用，**并未**调用 `verthys.h` 的 `Verthys_*`
 > 公共 API。本仓库暂无调用 `Verthys_*` ABI 的 C 示例文件，上面的 `VerthysResult` 用法为本文档
 > 撰写（非取自 `examples/ffi` 实文件）；实际调用范例见 `core/tests/api/`（test_init.c、
 > test_verthys_api.c 等）。
 
-## 5. 错误码体系（两套，勿混淆）
+## 5. 错误码体系（唯一：`VerthysResult`）
 
 ### 5.1 `VerthysResult`（verthys.h，公开 ABI 返回值，u32）
 
@@ -87,27 +85,9 @@ if (r != VERTHYS_OK) {
 | `VERTHYS_ERR_PARTIAL_UNLOCK` | `0x00000011` | 渐进式解锁：最小可操作态，索引未完全预热 |
 | `VERTHYS_ERR_TIMEOUT` | `0x00000012` | 解锁流水线总超时（预算 10s） |
 | `VERTHYS_ERR_UNSUPPORTED` | `0x00000013` | 容器格式不支持该操作（显式拒绝） |
+| `VERTHYS_ERR_NONCE_EXHAUSTED` | `0x00000014` | 加密层 nonce 计数器耗尽（2^64 计数空间用尽），须密钥轮换 |
+| `VERTHYS_ERR_CONTAINER_BUSY` | `0x00000015` | 容器被其他进程独占占用（单写者语义拒绝第二写者），重试需等待持有者退出 |
 | `VERTHYS_ERR_INTERNAL` | `0xFFFFFFFF` | 未归类底层内部异常 |
-
-### 5.2 `VERTHYS_C_*`（error_codes.h，C/Rust FFI 边界标准码，int）
-
-与 Rust 侧 `util/ffi.rs` 的 `c_error_codes` 模块对齐；是 C 源文件内部返回码的规范化标准，
-**非** `verthys.h` 公开 API 的返回类型。
-
-| 宏 | 值 | 含义 |
-|---|---|---|
-| `VERTHYS_C_SUCCESS` | `0` | 成功 |
-| `VERTHYS_C_ERR_INVALID` | `-1` | 无效参数 |
-| `VERTHYS_C_ERR_LOCKED` | `-2` | 加密库已锁定 |
-| `VERTHYS_C_ERR_AUTH` | `-3` | 认证失败（密码错误） |
-| `VERTHYS_C_ERR_IO` | `-4` | I/O 错误 |
-| `VERTHYS_C_ERR_CORRUPT` | `-5` | 数据损坏 |
-| `VERTHYS_C_ERR_FULL` | `-6` | 容器已满 |
-| `VERTHYS_C_ERR_NOTFOUND` | `-7` | 记录不存在 |
-| `VERTHYS_C_ERR_NOMEM` | `-8` | 内存不足 |
-| `VERTHYS_C_ERR_STATE` | `-9` | 状态错误 |
-| `VERTHYS_C_ERR_INTERNAL` | `-10` | 通用内部错误 |
-| `VERTHYS_C_ERR_ROLLBACK` | `-11` | 检测到回滚攻击 |
 
 ## 6. 线程安全模型标注规范
 
@@ -117,6 +97,10 @@ if (r != VERTHYS_OK) {
 | MT-Unsafe | 非线程安全，同一句柄不可多线程并发执行 |
 | MT-Const | 只读安全，只读接口可并发，禁止与写操作并行 |
 | MT-Handle | 句柄级安全，不同句柄可并发，同一句柄禁止并发 |
+
+并发度注记（与实现对齐）：索引读路径（单记录读取、类型探测）因 SSTable
+元数据惰性加载需互斥，内部以独占锁串行化读者——调用安全但读者不并行；
+扫描游标类只读遍历持共享锁，读者可真正并行。
 
 ## 7. 接口分组总览（29 个公开符号，与 `verthys.def` 一致）| # | 功能域 | 函数 |
 |---|---|---|

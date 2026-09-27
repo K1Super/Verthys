@@ -64,8 +64,8 @@ pub fn hmac_sign(key: &[u8], message: &[u8]) -> Result<[u8; 32], String> {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<Sha256>;
 
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|_| "HMAC key rejected by backend".to_string())?;
+    let mut mac =
+        HmacSha256::new_from_slice(key).map_err(|_| "HMAC key rejected by backend".to_string())?;
     mac.update(message);
     let result = mac.finalize();
     let bytes = result.into_bytes();
@@ -134,10 +134,7 @@ pub fn pbkdf2_derive(
 }
 
 /// 便捷函数：使用默认迭代次数派生密钥
-pub fn pbkdf2_derive_default(
-    password: &[u8],
-    salt: &[u8],
-) -> Result<[u8; PBKDF2_KEY_LEN], String> {
+pub fn pbkdf2_derive_default(password: &[u8], salt: &[u8]) -> Result<[u8; PBKDF2_KEY_LEN], String> {
     pbkdf2_derive(password, salt, PBKDF2_ITERATIONS)
 }
 
@@ -179,9 +176,7 @@ unsafe fn local_free(ptr: isize) {
 #[cfg(windows)]
 pub fn dpapi_protect(plaintext: &[u8], description: Option<&str>) -> Result<Vec<u8>, String> {
     use windows::core::PCWSTR;
-    use windows::Win32::Security::Cryptography::{
-        CryptProtectData, CRYPT_INTEGER_BLOB,
-    };
+    use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
 
     // windows-rs 0.58 未导出 DATA_BLOB，使用 CRYPT_INTEGER_BLOB（同构别名）
     // in_blob 以不可变引用传给 CryptProtectData，无需 mut
@@ -207,22 +202,13 @@ pub fn dpapi_protect(plaintext: &[u8], description: Option<&str>) -> Result<Vec<
     };
 
     unsafe {
-        CryptProtectData(
-            &in_blob,
-            desc_ptr,
-            None,
-            None,
-            None,
-            0,
-            &mut out_blob,
-        )
-        .map_err(|e| format!("CryptProtectData failed: {}", e))?;
+        CryptProtectData(&in_blob, desc_ptr, None, None, None, 0, &mut out_blob)
+            .map_err(|e| format!("CryptProtectData failed: {}", e))?;
     }
 
     // 复制加密数据到 Vec
-    let ciphertext = unsafe {
-        std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec()
-    };
+    let ciphertext =
+        unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec() };
 
     // 释放 DPAPI 分配的内存
     // DPAPI 使用 LocalAlloc 分配内存，需用 LocalFree 释放
@@ -250,9 +236,7 @@ pub fn dpapi_protect(_plaintext: &[u8], _description: Option<&str>) -> Result<Ve
 /// 返回：解密后的明文（字节）
 #[cfg(windows)]
 pub fn dpapi_unprotect(ciphertext: &[u8]) -> Result<Vec<u8>, String> {
-    use windows::Win32::Security::Cryptography::{
-        CryptUnprotectData, CRYPT_INTEGER_BLOB,
-    };
+    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
 
     // in_blob 以不可变引用传给 CryptUnprotectData，无需 mut
     let in_blob = CRYPT_INTEGER_BLOB {
@@ -266,22 +250,13 @@ pub fn dpapi_unprotect(ciphertext: &[u8]) -> Result<Vec<u8>, String> {
     };
 
     unsafe {
-        CryptUnprotectData(
-            &in_blob,
-            None,
-            None,
-            None,
-            None,
-            0,
-            &mut out_blob,
-        )
-        .map_err(|e| format!("CryptUnprotectData failed: {}", e))?;
+        CryptUnprotectData(&in_blob, None, None, None, None, 0, &mut out_blob)
+            .map_err(|e| format!("CryptUnprotectData failed: {}", e))?;
     }
 
     // 复制解密数据到 Vec
-    let plaintext = unsafe {
-        std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec()
-    };
+    let plaintext =
+        unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec() };
 
     // 释放 DPAPI 分配的内存
     // windows-rs 0.58 未导出 LocalFree/HLOCAL，通过 extern 声明调用

@@ -46,10 +46,10 @@ pub fn read_preset_persist(app: &tauri::AppHandle) -> Result<Option<PresetPersis
     if !file.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(&file)
-        .map_err(|e| format!("读取预设配置文件失败: {}", e))?;
-    let parsed: PresetPersist = serde_json::from_str(&content)
-        .map_err(|e| format!("解析预设配置文件失败: {}", e))?;
+    let content =
+        std::fs::read_to_string(&file).map_err(|e| format!("读取预设配置文件失败: {}", e))?;
+    let parsed: PresetPersist =
+        serde_json::from_str(&content).map_err(|e| format!("解析预设配置文件失败: {}", e))?;
     // 合法域校验：code ∈ 0..=3，且 CUSTOM 必须携带自定义特性
     if parsed.code > 3 {
         return Err(format!("预设配置文件 code 非法: {}", parsed.code));
@@ -61,30 +61,23 @@ pub fn read_preset_persist(app: &tauri::AppHandle) -> Result<Option<PresetPersis
 }
 
 /// 原子写入受信预设配置（tmp + rename）。失败上抛明确错误。
-pub fn write_preset_persist(
-    app: &tauri::AppHandle,
-    persist: &PresetPersist,
-) -> Result<(), String> {
-    let verthys_path = read_last_verthys_path(app)?
-        .ok_or("无法写入预设配置：路径指针不存在".to_string())?;
+pub fn write_preset_persist(app: &tauri::AppHandle, persist: &PresetPersist) -> Result<(), String> {
+    let verthys_path =
+        read_last_verthys_path(app)?.ok_or("无法写入预设配置：路径指针不存在".to_string())?;
     let file = preset_file_for(&verthys_path);
     let tmp = std::path::PathBuf::from(format!("{}.tmp", file.to_string_lossy()));
 
-    let content = serde_json::to_string(persist)
-        .map_err(|e| format!("序列化预设配置失败: {}", e))?;
+    let content =
+        serde_json::to_string(persist).map_err(|e| format!("序列化预设配置失败: {}", e))?;
 
-    std::fs::write(&tmp, &content)
-        .map_err(|e| format!("写入预设配置临时文件失败: {}", e))?;
+    std::fs::write(&tmp, &content).map_err(|e| format!("写入预设配置临时文件失败: {}", e))?;
 
     std::fs::rename(&tmp, &file).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("原子重命名预设配置文件失败: {}", e)
     })?;
 
-    log::info!(
-        "[preset_persist] 预设配置已原子提交: code={}",
-        persist.code
-    );
+    log::info!("[preset_persist] 预设配置已原子提交: code={}", persist.code);
     Ok(())
 }
 
@@ -105,10 +98,7 @@ mod tests {
     #[test]
     fn test_preset_file_suffix_mapping() {
         let p = preset_file_for("D:/data/vault.verthys");
-        assert_eq!(
-            p.to_string_lossy(),
-            "D:/data/vault.verthys.preset.json"
-        );
+        assert_eq!(p.to_string_lossy(), "D:/data/vault.verthys.preset.json");
     }
 
     #[test]

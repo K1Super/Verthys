@@ -23,6 +23,7 @@
  * 本文件 V3 分支直接编排六阶段事务）。 */
 #include "verthys_v3_lifecycle.h"
 #include "verthys_rekey_auto.h"      /* DEGRADE 强制轮换标志持久化 */
+#include "verthys_container_lock.h"  /* 容器跨进程单写者打开/关闭 */
 
 /* 项目头 */
 #include "verthys_crypto.h"
@@ -91,7 +92,8 @@ static void verthys_ctx_registry_remove(struct VerthysContext *ctx)
  *
  * 语义：对全部已解锁句柄执行"密钥与明文立即清零 + 状态置 LOCKED"，
  * 进程保持存活。不执行任何磁盘写入（与 Verthys_Lock 的差异：跳过事务
- * 提交与缓存刷盘——降级路径优先保证敏感数据不落盘、响应微秒级；
+ * 提交与缓存刷盘——降级路径优先保证敏感数据不落盘）；耗时以后台
+ * 预热线程汇合为上界（停止标志 + 读取消后毫秒级）；
  * 未完成事务由下次解锁的 WAL 崩溃恢复路径接管，数据安全
  * 由事务日志与法定人数超级块保障）。恢复方式：用户正常 Verthys_Unlock。
  *
@@ -144,6 +146,7 @@ static void verthys_emergency_lock_all(void)
 #include <stdio.h>
 #include <errno.h>
 #include <time.h>
+#include <sys/stat.h>            /* _fstat64 / st_mtime（落盘自查文件元数据） */
 
 #include "verthys_diag.h"
 
@@ -332,7 +335,8 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
      * 安全销毁）；LOCKED 态残留实例（应急 DEGRADE 遗留）子系统已收口，
      * 直接销毁。verthys_v3_lock 失败不阻断 Deinit：V3 崩溃一致性由 WAL
      * 重放兜底（下次 open 幂等恢复），销毁仍完整执行（密钥零残留红线）。
-     * 文件句柄所有权：ctx3->f 为借用引用，本处统一 fclose。 */
+     * 文件句柄所有权：ctx3->f 为借用引用，本处统一经
+     * verthys_container_close_exclusive 关闭（释放独占锁 + 清理旁路）。 */
     if (ctx->v3 != NULL) {
         FILE *f_v3 = ctx->v3->f;
         if (ctx->state == VERTHYS_STATE_UNLOCKED) {
@@ -340,7 +344,9 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
         }
         verthys_v3_ctx_destroy(ctx->v3);
         ctx->v3 = NULL;
-        if (f_v3 != NULL) fclose(f_v3);
+        if (f_v3 != NULL) {
+            verthys_container_close_exclusive(f_v3, ctx->file_path);
+        }
     }
 
     if (ctx->state == VERTHYS_STATE_UNLOCKED) {
@@ -476,12 +482,14 @@ static void verthys_api_v3_residual_cleanup(struct VerthysContext *ctx)
     f = ctx->v3->f;                       /* 借用引用，本函数负责关闭 */
     verthys_v3_ctx_destroy(ctx->v3);
     ctx->v3 = NULL;
-    if (f != NULL) fclose(f);
+    if (f != NULL) {
+        verthys_container_close_exclusive(f, ctx->file_path);
+    }
 }
 
 /*
  * V3 解锁编排（Verthys_Unlock 的 V3 分支目标；调用方已持 api_mutex 独占）：
- *   1. "r+b" 打开容器（解锁后可读写）；
+ *   1. 单写者独占打开容器（解锁后可读写，跨进程互斥）；
  *   2. 装配 VerthysContextV3（借用 ctx->cng_keys 与文件句柄）；
  *   3. verthys_v3_open_existing → 解锁流水线 S0-S6 全权承担；
  *   4. 成功（含 PARTIAL_UNLOCK——渐进式解锁的最小可操作态）：上下文移交
@@ -501,37 +509,16 @@ static VerthysResult verthys_api_v3_unlock(struct VerthysContext *ctx,
     /* 残留清理（应急 DEGRADE 遗留实例：销毁 + 关闭其文件句柄） */
     verthys_api_v3_residual_cleanup(ctx);
 
-#ifdef _WIN32
-    /* 共享语义（deny-none）：会话期持久句柄必须 FILE_SHARE_READ|WRITE。
-     * MSVC CRT fopen/fopen_s 默认仅 FILE_SHARE_READ（拒绝写共享）——实测
-     * CRT "r+b" 句柄使后续 CreateFileA(GENERIC_WRITE) 全部 SHARING_VIOLATION，
-     * 阻塞一切合法第二句柄（字节范围锁故障注入、热备/维护工具）。V2 会话
-     * 不持有持久写句柄（按需重开），V3 持久句柄若拒绝写共享则可达性不对等。
-     * 容器完整性由 AEAD+HMAC+法定人数的密码学保证，不依赖共享模式拒写。
-     * 所有权链：CreateFileA → _open_osfhandle → _fdopen → fclose 全链关闭。 */
+    /* 单写者独占打开（跨进程互斥）：
+     * 共享模式 FILE_SHARE_READ + 超级块区独占锁二层互斥——第二进程
+     * 以写访问打开同容器即被内核拒绝（CONTAINER_BUSY），杜绝双进程
+     * 并发写导致的超级块/WAL/extent 结构互覆（AEAD+HMAC 只能事后
+     * 检出篡改，无法阻止字节级并发写）。会话句柄关闭必须走
+     * verthys_container_close_exclusive（释放锁 + 清理 PID 旁路）。 */
     {
-        HANDLE hFile = CreateFileA(verthys_path,
-                                   GENERIC_READ | GENERIC_WRITE,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                   NULL, OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL, NULL);
-        int fd;
-        if (hFile == INVALID_HANDLE_VALUE) return VERTHYS_ERR_IO;
-        fd = _open_osfhandle((intptr_t)hFile, _O_RDWR | _O_BINARY);
-        if (fd < 0) {
-            CloseHandle(hFile);
-            return VERTHYS_ERR_IO;
-        }
-        f = _fdopen(fd, "r+b");
-        if (f == NULL) {
-            _close(fd);
-            return VERTHYS_ERR_IO;
-        }
+        rc = verthys_container_open_exclusive(verthys_path, 0, &f);
+        if (rc != VERTHYS_OK) return rc;
     }
-#else
-    f = fopen(verthys_path, "r+");
-    if (f == NULL) return VERTHYS_ERR_IO;
-#endif
 
     /* 结构尺寸下限：V3 固定布局区（超块 64KB +
      * WAL 960KB + 分区表 3MB = 4MB）为容器必备结构，文件小于该下限
@@ -546,14 +533,14 @@ static VerthysResult verthys_api_v3_unlock(struct VerthysContext *ctx,
             (fsz = vio_ftell64(f)) < 0 ||
             (uint64_t)fsz < VERTHYS_V3_PARTITION_TABLE_END ||
             vio_fseek64(f, 0, SEEK_SET) != 0) {
-            fclose(f);
+            verthys_container_close_exclusive(f, verthys_path);
             return VERTHYS_ERR_FORMAT;
         }
     }
 
     v3 = verthys_v3_ctx_create(&ctx->cng_keys, f, verthys_path);
     if (v3 == NULL) {
-        fclose(f);
+        verthys_container_close_exclusive(f, verthys_path);
         return VERTHYS_ERR_INTERNAL;
     }
 
@@ -586,7 +573,7 @@ static VerthysResult verthys_api_v3_unlock(struct VerthysContext *ctx,
      * abort 式关闭）后关闭文件句柄（借用引用，本函数拥有） */
     if (rc == VERTHYS_ERR_AUTH) verthys_backoff_record_failure();
     verthys_v3_ctx_destroy(v3);
-    fclose(f);
+    verthys_container_close_exclusive(f, verthys_path);
     return rc;
 }
 
@@ -610,53 +597,17 @@ static VerthysResult verthys_api_v3_create(struct VerthysContext *ctx,
     /* 残留清理（应急 DEGRADE 遗留实例：销毁 + 关闭其文件句柄） */
     verthys_api_v3_residual_cleanup(ctx);
 
-#ifdef _WIN32
-    /* 原子创建（CREATE_NEW：文件已存在则 ERROR_FILE_EXISTS，不截断）。
-     * 共享语义 deny-none（FILE_SHARE_READ|WRITE）：创建成功后句柄即整个
-     * 会话的持久容器句柄（容器创建后立即处于解锁态），与解锁路径
-     * verthys_api_v3_unlock 的会话句柄共享语义保持一致。
-     * 所有权链：CreateFileA → _open_osfhandle → _fdopen → fclose 全链关闭。 */
+    /* 单写者独占打开（跨进程互斥，语义同解锁路径）：
+     * CREATE_NEW 原子性由内核保证（TOCTOU 防护），叠加超级块区
+     * 独占锁——新建文件无并发持有者，锁仅为统一契约的组成部分。 */
     {
-        HANDLE hFile = CreateFileA(verthys_path,
-                                   GENERIC_READ | GENERIC_WRITE,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                   NULL,
-                                   CREATE_NEW,
-                                   FILE_ATTRIBUTE_NORMAL,
-                                   NULL);
-        int fd;
-        if (hFile == INVALID_HANDLE_VALUE) {
-            DWORD err = GetLastError();
-            return (err == ERROR_FILE_EXISTS) ? VERTHYS_ERR_EXISTS : VERTHYS_ERR_IO;
-        }
-        fd = _open_osfhandle((intptr_t)hFile, _O_RDWR | _O_BINARY);
-        if (fd < 0) {
-            CloseHandle(hFile);
-            return VERTHYS_ERR_IO;
-        }
-        f = _fdopen(fd, "r+b");
-        if (f == NULL) {
-            _close(fd);
-            return VERTHYS_ERR_IO;
-        }
+        rc = verthys_container_open_exclusive(verthys_path, 1, &f);
+        if (rc != VERTHYS_OK) return rc;
     }
-#else
-    {
-        int fd = open(verthys_path, O_RDWR | O_CREAT | O_EXCL | O_BINARY, 0600);
-        if (fd < 0) {
-            return (errno == EEXIST) ? VERTHYS_ERR_EXISTS : VERTHYS_ERR_IO;
-        }
-        f = fdopen(fd, "r+b");
-        if (f == NULL) {
-            close(fd);
-            return VERTHYS_ERR_IO;
-        }
-    }
-#endif
 
     v3 = verthys_v3_ctx_create(&ctx->cng_keys, f, verthys_path);
     if (v3 == NULL) {
-        fclose(f);
+        verthys_container_close_exclusive(f, verthys_path);
         return VERTHYS_ERR_INTERNAL;
     }
 
@@ -685,7 +636,7 @@ static VerthysResult verthys_api_v3_create(struct VerthysContext *ctx,
     /* 失败路径：半写文件留待调用方决策（创建失败不删除——上层可提示
      * 重试或手动清理；盘面由法定人数 + HMAC + WAL 兜底不可误开）。 */
     verthys_v3_ctx_destroy(v3);
-    fclose(f);
+    verthys_container_close_exclusive(f, verthys_path);
     return rc;
 }
 
@@ -1145,7 +1096,9 @@ VerthysResult Verthys_Lock(VerthysHandle handle)
             rc = verthys_v3_lock(ctx->v3);
             verthys_v3_ctx_destroy(ctx->v3);     /* 幂等（子系统已收口） */
             ctx->v3 = NULL;
-            if (f != NULL) fclose(f);
+            if (f != NULL) {
+                verthys_container_close_exclusive(f, ctx->file_path);
+            }
         }
         /* GetRecord 借用指针缓存释放（V3 密钥清理已由 subsystems_close
          * 完成，此处仅清缓存） */
@@ -1178,6 +1131,12 @@ VerthysResult Verthys_AddRecord(VerthysHandle handle,
      * 足够宽松，且为索引体积留出确定性上界）。
      */
     if (record->name_len > VERTHYS_NAME_MAX_BYTES) return VERTHYS_ERR_INVALID;
+    /*
+     * 数据长度在 API 边界钳制：超出导出/导入格式 32 位 data_len
+     * 容量的记录无法被二次序列化，写入即永久不可导出——入口提前
+     * 拒绝。
+     */
+    if (record->data_len > VERTHYS_RECORD_DATA_MAX_BYTES) return VERTHYS_ERR_INVALID;
 
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
@@ -1567,7 +1526,10 @@ VerthysResult Verthys_GetContainerInfo(VerthysHandle handle, VerthysContainerInf
 {
     if (handle == NULL || out_info == NULL) return VERTHYS_ERR_INVALID;
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
-    if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
+
+    /* 版本探测语义（worker 启动预检）：api_version/fmt_version/preset
+     * 三个头部字段在任何状态（含 LOCKED/未解锁）均可读——供加载方在
+     * 首个解锁操作前校准 ABI/格式兼容性，早于任何布局敏感调用。 */
 
     /* 读操作使用共享锁（AcquireSRWLockShared），允许多个读取并发执行
      *   容器元数据为只读访问，可与 GetDiagnostics/VerifyIntegrity/Export 并发 */
@@ -1577,10 +1539,19 @@ VerthysResult Verthys_GetContainerInfo(VerthysHandle handle, VerthysContainerInf
 
     memset(out_info, 0, sizeof(*out_info));
     out_info->api_version = VERTHYS_API_VERSION;
-    out_info->fmt_version = 3;
+    out_info->fmt_version = VERTHYS_FMT_V3;
     out_info->preset = (uint16_t)ctx->preset;
     out_info->last_fullscan_time = ctx->last_fullscan_time;
     out_info->warm_cache_enabled = (uint8_t)ctx->warm_cache_enabled;
+
+    /* 未解锁态：仅版本头部有意义，统计字段全部如实归零并提前返回
+     * （不伪造数据；容器未打开时不存在可报告的运行时统计） */
+    if (ctx->state != VERTHYS_STATE_UNLOCKED) {
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#endif
+        return VERTHYS_OK;
+    }
 
     /* 收尾：V3 唯一数据通路——超级块/LSM/分区表为权威数据源
      * （无 ctx 镜像字段依赖，全部现值直读，杜绝解锁时快照过期）。
@@ -1789,4 +1760,149 @@ VerthysResult Verthys_VerifyIntegrity(VerthysHandle handle,
      * 是否发现损坏由 *out_failed_count > 0 表明（调用方必填此参数）。
      * 不再返回 VERTHYS_ERR_CORRUPT，该错误码保留给读取类接口使用。 */
     return VERTHYS_OK;
+}
+
+/* ================================================================== *
+ * Verthys_VerifyPersist 落盘自查接口
+ *
+ * 为什么必须由 C 层实现：Windows 字节范围锁为强制锁——会话期内 C 层
+ * 以独占方式持有超级块区 [0,64KB)。同进程内只有持锁句柄本身可自由
+ * 读写该区间；任何"外部新开句柄"读取都会被内核以 ERROR_LOCK_VIOLATION
+ * 拒绝（os error 33），这正是主机侧 std::fs::File::open 校验恒失败的
+ * 根因。故本接口全部结构读取都走会话持锁句柄 ctx->v3->f。
+ *
+ * 幂等、只读、无副作用：不改会话状态、不写盘、不 fflush；仅一次流游标
+ * 复位（不影响任何后续显式 seek 的调用方）。
+ * ================================================================== */
+/* 写入静态错误文案：last_error 仅承载稳定短文案（no printf family——
+ * 数值细节由结构体的 header_magic / header_version / file_size /
+ * wal_offset 字段承载，避免命中输出函数红线） */
+static void ver_persist_set_error(VerPersistVerifyResult *out, const char *msg)
+{
+    size_t n;
+    if (out == NULL || msg == NULL) return;
+    n = strlen(msg);
+    if (n >= sizeof(out->last_error)) n = sizeof(out->last_error) - 1u;
+    memcpy(out->last_error, msg, n);
+    out->last_error[n] = '\0';
+}
+
+VerPersistStatus Verthys_VerifyPersist(VerthysHandle handle,
+                                       VerPersistVerifyResult *out_result)
+{
+    struct VerthysContext *ctx;
+    VerthysContextV3 *v;
+    FILE *f;
+    uint8_t hdr[128];
+    uint8_t wal_probe[16];
+    uint32_t magic, plen;
+    int64_t fsz;
+
+    if (out_result == NULL) return VERTHYS_PERSIST_E_INTERNAL;
+    memset(out_result, 0, sizeof(*out_result));
+
+    /* 无可用会话（未解锁 / 锁定态 / 句柄为空）→ INTERNAL：
+     * 此时不存在持锁句柄，外部读路径才是唯一选择，本接口无从自查。 */
+    ctx = (struct VerthysContext *)handle;
+    if (ctx == NULL || ctx->v3 == NULL || ctx->v3->f == NULL) {
+        out_result->status = VERTHYS_PERSIST_E_INTERNAL;
+        ver_persist_set_error(out_result, "no active unlocked session");
+        return out_result->status;
+    }
+    v = ctx->v3;
+    f = v->f;
+
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
+#endif
+
+    /* 1. 头部 128 字节可读（偏移 0，持锁句柄） */
+    if (vio_fseek64(f, 0, SEEK_SET) != 0) {
+        out_result->status = VERTHYS_PERSIST_E_IO;
+        ver_persist_set_error(out_result, "fseek(0) failed");
+        goto verify_done;
+    }
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
+        out_result->status = VERTHYS_PERSIST_E_HEADER_INVALID;
+        ver_persist_set_error(out_result, "header read shorter than 128 bytes");
+        goto verify_done;
+    }
+
+    /* 2. 副本帧头：磁盘偏移 0 为 Replica-0，布局 [u32 magic 'V3RP'][u32 payload_len] */
+    magic = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) |
+            ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
+    plen  = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) |
+            ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
+    out_result->header_magic = magic;
+    /* 格式版本：磁盘帧头本身仅含 magic + payload_len，版本字段位于
+     * FlatBuffers 载荷内；此处复用会话 S1-S3 已裁决（HMAC + 法定人数）
+     * 的超级块版本，避免在自查路径重做一遍重解析。 */
+    out_result->header_version = (uint32_t)v->sb.version;
+
+    if (magic != VERTHYS_V3_REPLICA_FRAME_MAGIC) {
+        out_result->status = VERTHYS_PERSIST_E_HEADER_INVALID;
+        ver_persist_set_error(out_result, "frame magic mismatch");
+        goto verify_done;
+    }
+    if (plen == 0 || plen > VERTHYS_V3_SB_REPLICA_BYTES - 8u) {
+        out_result->status = VERTHYS_PERSIST_E_HEADER_INVALID;
+        ver_persist_set_error(out_result, "frame payload_len out of range");
+        goto verify_done;
+    }
+
+    /* 3. 文件大小不低于 V3 固定布局区下限（分区表结束 = 4MB） */
+    if (vio_fseek64(f, 0, SEEK_END) != 0) {
+        out_result->status = VERTHYS_PERSIST_E_IO;
+        ver_persist_set_error(out_result, "fseek(END) failed");
+        goto verify_done;
+    }
+    fsz = vio_ftell64(f);
+    if (fsz < 0) {
+        out_result->status = VERTHYS_PERSIST_E_IO;
+        ver_persist_set_error(out_result, "ftell failed");
+        goto verify_done;
+    }
+    out_result->file_size = (uint64_t)fsz;
+    if (out_result->file_size < VERTHYS_V3_PARTITION_TABLE_END) {
+        out_result->status = VERTHYS_PERSIST_E_SIZE_MISMATCH;
+        ver_persist_set_error(out_result, "file_size below layout floor");
+        goto verify_done;
+    }
+
+    /* 文件修改时间（非关键元数据，取不到如实留 0，不判失败） */
+#ifdef _WIN32
+    {
+        struct _stat64 st;
+        if (_fstat64(_fileno(f), &st) == 0 && st.st_mtime > 0) {
+            out_result->mtime_ms = (uint64_t)st.st_mtime * 1000u;
+        }
+    }
+#else
+    {
+        struct stat st;
+        if (fstat(fileno(f), &st) == 0 && st.st_mtime > 0) {
+            out_result->mtime_ms = (uint64_t)st.st_mtime * 1000u;
+        }
+    }
+#endif
+
+    /* 4. WAL 区起始偏移处可读（文件大小已过 4MB，此读必落在文件内） */
+    out_result->wal_offset = VERTHYS_V3_WAL_REGION_OFFSET;
+    if (vio_pread64(f, out_result->wal_offset, wal_probe,
+                    sizeof(wal_probe)) != 0) {
+        out_result->status = VERTHYS_PERSIST_E_WAL_REGION;
+        ver_persist_set_error(out_result, "wal region unreadable");
+        goto verify_done;
+    }
+
+    out_result->status = VERTHYS_PERSIST_OK;
+
+verify_done:
+    /* 复位流游标至文件头：自查是穿插在会话 IO 之间的旁路读，复位可避免
+     * 依赖"调用方总会先 seek"的隐式假设（非会话状态变更，无写盘副作用）。 */
+    (void)vio_fseek64(f, 0, SEEK_SET);
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#endif
+    return out_result->status;
 }

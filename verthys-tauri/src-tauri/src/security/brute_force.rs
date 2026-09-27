@@ -365,8 +365,8 @@ impl BruteForceGuard {
         if state.consecutive_failures >= self.config.lock_threshold {
             /* 锁定时间随机化 */
             let jitter = random_jitter(self.config.lock_jitter_secs);
-            let actual_lock_secs = self.config.lock_duration_secs + jitter
-                - self.config.lock_jitter_secs; /* [duration - jitter, duration + jitter] */
+            let actual_lock_secs =
+                self.config.lock_duration_secs + jitter - self.config.lock_jitter_secs; /* [duration - jitter, duration + jitter] */
 
             state.lock_until = Some(Instant::now() + Duration::from_secs(actual_lock_secs));
             /* 重置连续计数，进入锁定期 */
@@ -445,9 +445,8 @@ impl BruteForceGuard {
 
         /* 重建 lock_until：从当前时刻起算剩余秒数 */
         if persisted.lock_remaining_secs > 0 {
-            state.lock_until = Some(
-                Instant::now() + Duration::from_secs(persisted.lock_remaining_secs),
-            );
+            state.lock_until =
+                Some(Instant::now() + Duration::from_secs(persisted.lock_remaining_secs));
         } else {
             state.lock_until = None;
         }
@@ -472,12 +471,18 @@ impl BruteForceGuard {
 
     /// 获取当前连续失败次数（用于 UI 展示）
     pub fn consecutive_failures(&self) -> u32 {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).consecutive_failures
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .consecutive_failures
     }
 
     /// 获取累计失败次数（用于 UI 展示）
     pub fn total_failures(&self) -> u32 {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).total_failures
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .total_failures
     }
 
     /// 获取锁定剩余秒数（未锁定返回 0）

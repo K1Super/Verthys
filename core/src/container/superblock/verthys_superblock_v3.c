@@ -33,6 +33,20 @@
 #include <stdlib.h>
 #include <stdio.h>  /* 调试诊断（fprintf） */
 
+/* ---------- 测试注入 ---------- */
+
+/* one-shot/开关标志：置位时 vsb_txn_v3_commit 以 fail_mask=0x7 强制
+ * 三副本写入失败（仅测试 exe 经 vsb_v3_test_force_commit_fail 使用，
+ * 对象直链内部符号，不在 DLL 导出清单，发布面零变化）。
+ * 存在理由：会话级单写者锁（FILE_SHARE_READ + 超块区独占锁）使
+ * 外部字节锁故障注入不可行，测试改经本开关等价模拟落盘 IO 失败。 */
+static volatile LONG s_test_force_commit_fail = 0;
+
+void vsb_v3_test_force_commit_fail(int enabled)
+{
+    InterlockedExchange(&s_test_force_commit_fail, enabled ? 1 : 0);
+}
+
 /* ---------- 内部工具 ---------- */
 
 /* 常量时间字节比较（防时序侧信道；返回 0=相等） */
@@ -672,7 +686,12 @@ VerthysResult vsb_txn_v3_commit(VsbTxnV3 *txn, VerthysSuperBlockV3 *sb,
     }
     if (txn->committed || txn->rolled_back) return VERTHYS_ERR_INVALID;
 
-    VerthysResult r = vsb_v3_commit_quorum_ex(f, sb, integrity_key, 0,
+    /* 测试注入（仅测试 exe 使用；发布面零变化）：会话单写者锁使
+     * 真实字节锁注入不可行（两进程的锁互斥、会话恒持超块锁），
+     * 改以 fail_mask 强制三副本写失败，等价模拟"落盘 IO 失败"分支 */
+    uint32_t fail_mask = (InterlockedCompareExchange(
+        &s_test_force_commit_fail, 0, 0) != 0) ? 0x7u : 0u;
+    VerthysResult r = vsb_v3_commit_quorum_ex(f, sb, integrity_key, fail_mask,
                                             txn->replica_status);
     if (r != VERTHYS_OK) return r;
     txn->committed = 1;

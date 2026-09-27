@@ -166,16 +166,16 @@ impl<T: VirtualLockable + Zeroize> LockedBuffer<T> {
                             let _ = VirtualUnlock(*p as *const _, *l);
                         }
                     }
-                    return Err(format!(
-                        "VirtualLock failed for region of {} bytes",
-                        len
-                    ));
+                    return Err(format!("VirtualLock failed for region of {} bytes", len));
                 }
                 locked_regions.push((ptr, len));
             }
         }
 
-        Ok(LockedBuffer { records, locked_regions })
+        Ok(LockedBuffer {
+            records,
+            locked_regions,
+        })
     }
 
     /// 非 Windows 平台构造：无 VirtualLock，仅包装 Vec

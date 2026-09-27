@@ -139,9 +139,7 @@ fn write_scan_audit(
 fn validate_shm_name(shm_name: &str) -> Result<(), String> {
     use crate::constants::is_valid_shm_name;
     if !is_valid_shm_name(shm_name) {
-        log::warn!(
-            "[scan] shm_name 校验失败（仅字母/数字/下划线/连字符，1-64 字符）"
-        );
+        log::warn!("[scan] shm_name 校验失败（仅字母/数字/下划线/连字符，1-64 字符）");
         return Err(ErrorCode::ShmCorrupted.default_message().to_string());
     }
     Ok(())
@@ -175,6 +173,18 @@ fn validate_batch_count(actual_count: usize, expected_count: usize) -> Result<()
     Ok(())
 }
 
+/// 生成单批随机 SHM 认证密钥（32 字节 CSPRNG，base64 入 IPC 载荷）
+///
+/// 每批（open 首批与每轮 fetch）一把独立密钥：请求经匿名父子管道传入
+/// worker，worker 以该密钥对 SHM 使用区计算 HMAC 并写尾部认证块；主进程
+/// 以同一密钥验签后解析。密钥随批即弃（Zeroizing），无跨批重放面。
+fn gen_shm_batch_key() -> (zeroize::Zeroizing<[u8; 32]>, String) {
+    let mut key = zeroize::Zeroizing::new([0u8; 32]);
+    crate::util::random::fill_random_bytes(&mut key[..]);
+    let encoded = crate::util::base64::base64_encode(&key[..]);
+    (key, encoded)
+}
+
 /* ------------------------------------------------------------------ *
  * 全量扫描控制器                                                       *
  * ------------------------------------------------------------------ */
@@ -190,12 +200,18 @@ fn validate_batch_count(actual_count: usize, expected_count: usize) -> Result<()
 ///   6. 若未遍历结束，启动长期预取任务并发送首批 Fetch
 ///   7. 存入 ScanPipelineState（session_state = Active）
 ///   8. 审计日志
+///
+/// project / inline_max_bytes 为扫描投影参数（可选，缺省 = FULL 全量解密）：
+/// 索引/列表类调用传 project="index" 与内联阈值，超过阈值的记录只回索引
+/// 条目（不解密、不搬运数据），大批量数据集的扫描因此不再整批失败。
 #[tauri::command]
 pub async fn verthys_scan_open(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     start_id: u64,
     batch_size: u64,
+    project: Option<String>,
+    inline_max_bytes: Option<u64>,
 ) -> Result<VerthysResponse, String> {
     // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
     if let Err(msg) = require_unlocked(&app, &state, "scan_open") {
@@ -221,12 +237,23 @@ pub async fn verthys_scan_open(
         let _ = state.send(&req.to_string());
     }
 
-    // 1. 发送 scan_open 到 worker
-    let req = serde_json::json!({
+    // 1. 发送 scan_open 到 worker（首批同样携带 SHM 认证密钥）
+    let (open_key, open_key_b64) = gen_shm_batch_key();
+    let mut req = serde_json::json!({
         "op": "scan_open",
         "id": start_id,
-        "rtype": batch_size,
+        "max_count": batch_size,
+        "shm_key": open_key_b64,
     });
+    // 投影与内联阈值按需附加：缺省字段等价于 FULL 全量解密（既有调用方语义不变）
+    if let Some(p) = project.as_deref() {
+        if !p.is_empty() {
+            req["project"] = serde_json::Value::String(p.to_string());
+        }
+    }
+    if let Some(n) = inline_max_bytes {
+        req["inline_max_bytes"] = serde_json::json!(n);
+    }
     let resp_json = state.send_with_timeout(&req.to_string(), SCAN_OPEN_TIMEOUT)?;
     let resp: VerthysResponse =
         serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
@@ -239,6 +266,9 @@ pub async fn verthys_scan_open(
         );
         return Ok(resp);
     }
+
+    // 首批失败条目：上游按 lid 记账（解密失败/索引不一致），随响应透传前端
+    let open_failed_ids = resp.failed_ids.clone().unwrap_or_default();
 
     let shm_name = resp
         .shm_name
@@ -264,7 +294,7 @@ pub async fn verthys_scan_open(
 
     // 3. 从共享内存读取首批记录 → LockedBuffer（VirtualLock RAII）
     let (records, _shm_exhausted, worker_record_count) =
-        VerthysRecordEntry::read_from_shm(&shm_name)?;
+        VerthysRecordEntry::read_from_shm(&shm_name, Some(&open_key[..]))?;
 
     // 4. 批次记录数校验
     if let Err(e) = validate_batch_count(records.len(), worker_record_count) {
@@ -279,16 +309,15 @@ pub async fn verthys_scan_open(
         return Err(ErrorCode::ShmCorrupted.default_message().to_string());
     }
 
-    let locked_buffer = LockedBuffer::new(records)
-        .map_err(|e| format!("VirtualLock failed: {}", e))?;
+    let locked_buffer =
+        LockedBuffer::new(records).map_err(|e| format!("VirtualLock failed: {}", e))?;
     // 克隆用于响应（原记录保持锁定存储于 current_buffer）
     let return_records = locked_buffer.records().to_vec();
 
     // 5. 后台预取 B 区（若未遍历结束）
     // 启动长期预取任务，发送首批 Fetch
     let (prefetch_task, pending_reply) = if !exhausted {
-        let handle =
-            PrefetchTaskHandle::<VerthysRecordEntry>::spawn(app.clone(), shm_name.clone());
+        let handle = PrefetchTaskHandle::<VerthysRecordEntry>::spawn(app.clone(), shm_name.clone());
         // 发送失败：向上传播错误，handle 随函数提前返回被 Drop
         // 自动取消预取任务（cancel + 关闭命令通道，PrefetchTaskHandle::drop）
         let reply_rx = handle.send_fetch(batch_size).await?;
@@ -329,6 +358,11 @@ pub async fn verthys_scan_open(
         op: "scan_open".into(),
         records: Some(return_records),
         exhausted: Some(exhausted),
+        failed_ids: if open_failed_ids.is_empty() {
+            None
+        } else {
+            Some(open_failed_ids)
+        },
         ..VerthysResponse::ok("scan_open")
     })
 }
@@ -392,9 +426,9 @@ pub async fn verthys_scan_next(
     let shm_name = scan.shm_name.clone();
 
     // 4. 等待预取完成
-    let (new_records, new_exhausted, worker_record_count) = if scan.exhausted {
+    let (new_records, new_exhausted, worker_record_count, failed_ids) = if scan.exhausted {
         // 已经遍历结束，无更多数据
-        (Vec::new(), true, 0)
+        (Vec::new(), true, 0, Vec::new())
     } else if let Some(reply_rx) = scan.pending_reply.take() {
         // 等待长期预取任务的回复
         // reply_rx.await 返回 Result<Result<(Vec<T>, bool, usize), String>, RecvError>
@@ -437,7 +471,12 @@ pub async fn verthys_scan_next(
     } else {
         // 无 pending_reply（异常状态），同步拉取降级单缓冲模式
         log::warn!("[scan_next] 无 pending_reply，降级同步单缓冲模式");
-        let req = serde_json::json!({"op": "scan_fetch", "id": batch_size});
+        let (fallback_key, fallback_key_b64) = gen_shm_batch_key();
+        let req = serde_json::json!({
+            "op": "scan_fetch",
+            "id": batch_size,
+            "shm_key": fallback_key_b64,
+        });
         let resp_json = state.send_with_timeout(&req.to_string(), SCAN_NEXT_TIMEOUT)?;
         let resp: VerthysResponse =
             serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
@@ -450,8 +489,10 @@ pub async fn verthys_scan_next(
             cleanup_scan_on_failure(state.inner()).await;
             return Ok(resp);
         }
-        let (records, exhausted, count) = VerthysRecordEntry::read_from_shm(&shm_name)?;
-        (records, exhausted, count)
+        let fallback_failed = resp.failed_ids.clone().unwrap_or_default();
+        let (records, exhausted, count) =
+            VerthysRecordEntry::read_from_shm(&shm_name, Some(&fallback_key[..]))?;
+        (records, exhausted, count, fallback_failed)
     };
 
     // 5. 批次记录数校验
@@ -472,8 +513,8 @@ pub async fn verthys_scan_next(
     }
 
     // 6. LockedBuffer 锁定新记录
-    let locked_buffer = LockedBuffer::new(new_records)
-        .map_err(|e| format!("VirtualLock failed: {}", e))?;
+    let locked_buffer =
+        LockedBuffer::new(new_records).map_err(|e| format!("VirtualLock failed: {}", e))?;
     let return_records = locked_buffer.records().to_vec();
     let return_empty = return_records.is_empty();
 
@@ -523,6 +564,11 @@ pub async fn verthys_scan_next(
         op: "scan_next".into(),
         records: Some(return_records),
         exhausted: Some(new_exhausted && return_empty),
+        failed_ids: if failed_ids.is_empty() {
+            None
+        } else {
+            Some(failed_ids)
+        },
         ..VerthysResponse::ok("scan_next")
     })
 }
@@ -573,7 +619,11 @@ pub async fn verthys_scan_close(
         serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
 
     // 5. 审计日志
-    let result = if resp.ok { AuditResult::Success } else { AuditResult::Failure };
+    let result = if resp.ok {
+        AuditResult::Success
+    } else {
+        AuditResult::Failure
+    };
     write_scan_audit(&app, AuditEventType::ScanClose, result, resp.error.clone());
 
     Ok(resp)
@@ -618,11 +668,13 @@ pub async fn verthys_scan_summary_open(
         let _ = state.send(&req.to_string());
     }
 
-    // 1. 发送 scan_summary_open 到 worker
+    // 1. 发送 scan_summary_open 到 worker（首批同样携带 SHM 认证密钥）
+    let (open_key, open_key_b64) = gen_shm_batch_key();
     let req = serde_json::json!({
         "op": "scan_summary_open",
         "id": start_id,
-        "rtype": batch_size,
+        "max_count": batch_size,
+        "shm_key": open_key_b64,
     });
     let resp_json = state.send_with_timeout(&req.to_string(), SCAN_OPEN_TIMEOUT)?;
     let resp: VerthysResponse =
@@ -660,7 +712,7 @@ pub async fn verthys_scan_summary_open(
 
     // 3. 从共享内存读取首批摘要记录 → LockedBuffer
     let (records, _shm_exhausted, worker_record_count) =
-        VerthysSummaryEntry::read_from_shm(&shm_name)?;
+        VerthysSummaryEntry::read_from_shm(&shm_name, Some(&open_key[..]))?;
 
     // 4. 批次记录数校验
     if let Err(e) = validate_batch_count(records.len(), worker_record_count) {
@@ -674,8 +726,8 @@ pub async fn verthys_scan_summary_open(
         return Err(ErrorCode::ShmCorrupted.default_message().to_string());
     }
 
-    let locked_buffer = LockedBuffer::new(records)
-        .map_err(|e| format!("VirtualLock failed: {}", e))?;
+    let locked_buffer =
+        LockedBuffer::new(records).map_err(|e| format!("VirtualLock failed: {}", e))?;
     let return_records = locked_buffer.records().to_vec();
 
     // 5. 后台预取 B 区（若未遍历结束）
@@ -768,9 +820,9 @@ pub async fn verthys_scan_summary_next(
 
     let shm_name = scan.shm_name.clone();
 
-    // 4. 等待预取完成
-    let (new_records, new_exhausted, worker_record_count) = if scan.exhausted {
-        (Vec::new(), true, 0)
+    // 4. 等待预取完成（摘要扫描无失败条目：元数据直读不解密数据块）
+    let (new_records, new_exhausted, worker_record_count, _failed_ids) = if scan.exhausted {
+        (Vec::new(), true, 0, Vec::new())
     } else if let Some(reply_rx) = scan.pending_reply.take() {
         match reply_rx.await {
             Ok(Ok(result)) => result,
@@ -808,7 +860,12 @@ pub async fn verthys_scan_summary_next(
     } else {
         // 5. 降级同步单缓冲模式
         log::warn!("[scan_summary_next] 无 pending_reply，降级同步单缓冲模式");
-        let req = serde_json::json!({"op": "scan_summary_fetch", "id": batch_size});
+        let (fallback_key, fallback_key_b64) = gen_shm_batch_key();
+        let req = serde_json::json!({
+            "op": "scan_summary_fetch",
+            "id": batch_size,
+            "shm_key": fallback_key_b64,
+        });
         let resp_json = state.send_with_timeout(&req.to_string(), SCAN_NEXT_TIMEOUT)?;
         let resp: VerthysResponse =
             serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
@@ -821,8 +878,9 @@ pub async fn verthys_scan_summary_next(
             cleanup_summary_scan_on_failure(state.inner()).await;
             return Ok(resp);
         }
-        let (records, exhausted, count) = VerthysSummaryEntry::read_from_shm(&shm_name)?;
-        (records, exhausted, count)
+        let (records, exhausted, count) =
+            VerthysSummaryEntry::read_from_shm(&shm_name, Some(&fallback_key[..]))?;
+        (records, exhausted, count, Vec::new())
     };
 
     // 5. 批次记录数校验
@@ -843,8 +901,8 @@ pub async fn verthys_scan_summary_next(
     }
 
     // 6. LockedBuffer 锁定新记录
-    let locked_buffer = LockedBuffer::new(new_records)
-        .map_err(|e| format!("VirtualLock failed: {}", e))?;
+    let locked_buffer =
+        LockedBuffer::new(new_records).map_err(|e| format!("VirtualLock failed: {}", e))?;
     let return_records = locked_buffer.records().to_vec();
     let return_empty = return_records.is_empty();
 
@@ -926,7 +984,11 @@ pub async fn verthys_scan_summary_close(
     let resp: VerthysResponse =
         serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
 
-    let result = if resp.ok { AuditResult::Success } else { AuditResult::Failure };
+    let result = if resp.ok {
+        AuditResult::Success
+    } else {
+        AuditResult::Failure
+    };
     write_scan_audit(&app, AuditEventType::ScanClose, result, resp.error.clone());
 
     Ok(resp)

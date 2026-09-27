@@ -32,7 +32,7 @@ static int v3p_import_random(VerthysCngAead *a, uint8_t key_out[V3P_KEY_BYTES])
     verthys_random_bytes(key_out, V3P_KEY_BYTES);
     memcpy(copy, key_out, V3P_KEY_BYTES);
     if (verthys_cng_aead_init(a) != VERTHYS_OK) return -1;
-    if (verthys_cng_aead_import_key(a, copy, NULL) != VERTHYS_OK) return -1;
+    if (verthys_cng_aead_import_key(a, copy, NULL, 0) != VERTHYS_OK) return -1;
     return 0;
 }
 
@@ -42,7 +42,7 @@ static int v3p_reimport(VerthysCngAead *a, const uint8_t key[V3P_KEY_BYTES])
     uint8_t copy[V3P_KEY_BYTES];
     memcpy(copy, key, V3P_KEY_BYTES);
     if (verthys_cng_aead_init(a) != VERTHYS_OK) return -1;
-    return verthys_cng_aead_import_key(a, copy, NULL) == VERTHYS_OK ? 0 : -1;
+    return verthys_cng_aead_import_key(a, copy, NULL, 0) == VERTHYS_OK ? 0 : -1;
 }
 
 static void v3p_zero_key(uint8_t key[V3P_KEY_BYTES])

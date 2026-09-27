@@ -192,8 +192,8 @@ import {
 import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache,
   addFullRecord,
   invalidateSummaryRecord, invalidateFullRecord, clearSummaryCache, clearFullRecordCache,
-  /* 旧全量扫描兜底（摘要缓存为空时回退） */
-  ensureRecordScanSafe, getRecordIdsByType,
+  /* 索引来源：摘要优先，记录扫描兜底与数据层预热 */
+  ensureIndexSourceSafe, getSummaryIdsByType, getRecordIdsByType,
   invalidateScannedRecord, clearRecordScanCache, getRecordsDataB64Batch } from "../../lib/keyManager";
 import { TYPE_CERT, TYPE_CERT_LIST, TYPE_CERT_LEGACY } from "../../constants/record_types";
 import { useClipToast } from "../../composables/useClipToast";
@@ -353,16 +353,16 @@ const loadCerts = async () => {
   let listFields: Omit<CertEntry, "id">[] | null = null;
   const legacyRecords: { id: number; fields: Omit<CertEntry, "id"> }[] = [];
 
-  // 性能修复：改走 recordScanCache + 批量获取（落实 2.5s 预算）
-  //    原实现：ensureSummaryScanSafe + for 循环串行 getFullRecord（N 条 = N 次串行 IPC，
-  //            100 条 ≈ 7.5s，300 条 ≈ 22s，与后台 ensureRecordScan 抢同一常驻 worker → 30s）
-  //    新实现：ensureRecordScanSafe（后台 startBackgroundTasks 已扫描则瞬时增量返回）
-  //            + getRecordsDataB64Batch（扫描缓存命中零 IPC，未命中/大体积并行 IPC 回退）
-  //            总耗时 < 2.5s。内存优先合并保证用户并发编辑不丢失。
-  await ensureRecordScanSafe();
+  // ID 来源：摘要索引优先（仅读索引、不解密数据，不受记录体积影响）；
+  //   摘要缓存整体为空（旧格式容器/熔断静默返回空）时回退记录扫描缓存。
+  //   记录扫描仍会在后台并发触发一次作数据层预热：命中扫描缓存的小体积记录
+  //   在后续批量取数时零 IPC；预热失败不影响列表可用性（取数走并行 IPC 回退）。
+  const useSummaryIds = await ensureIndexSourceSafe();
+  const idsOf = (type: number): number[] =>
+    useSummaryIds ? getSummaryIdsByType(type) : getRecordIdsByType(type);
 
-  // 1. 批量获取新格式 TYPE_CERT 记录数据（扫描缓存优先，并行 IPC 回退）
-  const allCertIds = getRecordIdsByType(TYPE_CERT);
+  // 1. 批量获取新格式 TYPE_CERT 记录数据（缓存优先，并行 IPC 回退）
+  const allCertIds = idsOf(TYPE_CERT);
   const newCertIds = allCertIds.filter(id => id > maxRecordId);
   if (newCertIds.length > 0) {
     const b64Map = await getRecordsDataB64Batch(newCertIds);
@@ -379,7 +379,7 @@ const loadCerts = async () => {
   // 2. 缓存无效时检查旧格式记录用于迁移（同样批量获取，消除串行 IPC）
   if (needMigration) {
     // TYPE_CERT_LIST（整体列表旧格式）
-    const listIds = getRecordIdsByType(TYPE_CERT_LIST);
+    const listIds = idsOf(TYPE_CERT_LIST);
     if (listIds.length > 0) {
       const listB64Map = await getRecordsDataB64Batch(listIds);
       for (const id of listIds) {
@@ -391,7 +391,7 @@ const loadCerts = async () => {
       }
     }
     // TYPE_CERT_LEGACY（单条旧格式）
-    const legacyIds = getRecordIdsByType(TYPE_CERT_LEGACY);
+    const legacyIds = idsOf(TYPE_CERT_LEGACY);
     if (legacyIds.length > 0) {
       const legacyB64Map = await getRecordsDataB64Batch(legacyIds);
       for (const id of legacyIds) {
