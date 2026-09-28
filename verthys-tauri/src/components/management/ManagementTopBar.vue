@@ -8,7 +8,7 @@
     2. 状态文本（标题 + 子标题含会话空闲倒计时，mono 微文）
     3. 立即锁定端子（sf-terminal--warn，禁用条件：!globalKeyReady）
 
-  Props: globalKeyReady / sessionRemaining
+  Props: globalKeyReady / sessionRemaining / idleLockEnabled
   Emits: lockAll
 -->
 <template>
@@ -20,7 +20,8 @@
           {{ globalKeyReady ? '全局密钥已就绪' : '未就绪' }}
         </div>
         <div class="sf-meridian-sub">
-          <span v-if="globalKeyReady">XChaCha20-Poly1305 · 会话空闲 {{ Math.ceil(sessionRemaining / 60000) }} 分钟后自动锁定</span>
+          <span v-if="globalKeyReady && idleLockEnabled">XChaCha20-Poly1305 · 会话空闲 {{ Math.ceil(sessionRemaining / 60000) }} 分钟后自动锁定</span>
+          <span v-else-if="globalKeyReady">XChaCha20-Poly1305 · 会话空闲锁定已关闭</span>
           <span v-else>请验证全局密钥</span>
         </div>
       </div>
@@ -46,6 +47,8 @@ defineProps<{
   globalKeyReady: boolean;
   /** 会话剩余时间（毫秒，UI 倒计时显示） */
   sessionRemaining: number;
+  /** 会话空闲锁定开关（false = 不自动锁定，展示"已关闭"） */
+  idleLockEnabled: boolean;
 }>();
 
 /**

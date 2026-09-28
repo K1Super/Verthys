@@ -5,7 +5,7 @@
  *   1. 双进程场景——子进程（child-hold-container 模式）持有容器
  *      独占句柄期间，父进程再次独占打开被明确拒绝
  *      （VERTHYS_ERR_CONTAINER_BUSY），无结构损坏风险；
- *   2. 诊断旁路——被拒后 <container>.lock 旁路文件里的 PID
+ *   2. 诊断旁路——被拒后 <container>.d\container.lock 旁路文件里的 PID
  *      必须等于持有者进程 PID；
  *   3. 锁生命周期——持有者退出后立即可重开成功；
  *   4. 旁路清理——会话关闭后诊断旁路文件被删除，无残留。
@@ -85,12 +85,13 @@ TEST(container_lock_dual_process_exclusive)
     CHECK(rc == VERTHYS_ERR_CONTAINER_BUSY);
     CHECK(second == NULL);
 
-    /* 诊断旁路：PID 内容须等于持有者进程 PID（支持排障定位） */
+    /* 诊断旁路：PID 内容须等于持有者进程 PID（支持排障定位），
+     * 旁路固定落在附属目录 <容器>.d\container.lock */
     {
         char pidbuf[24];
         DWORD got = 0;
         HANDLE h;
-        snprintf(sidecar, sizeof(sidecar), "%s.lock", container);
+        snprintf(sidecar, sizeof(sidecar), "%s.d\\container.lock", container);
         h = CreateFileA(sidecar, GENERIC_READ,
                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -99,6 +100,13 @@ TEST(container_lock_dual_process_exclusive)
         CHECK(ReadFile(h, pidbuf, (DWORD)sizeof(pidbuf) - 1, &got, NULL));
         CloseHandle(h);
         CHECK(strtoul(pidbuf, NULL, 10) == (unsigned long)pi.dwProcessId);
+    }
+
+    /* 旧布局旁路不得被新建（遗留会话才可能有 <容器>.lock） */
+    {
+        char legacy[MAX_PATH];
+        snprintf(legacy, sizeof(legacy), "%s.lock", container);
+        CHECK(GetFileAttributesA(legacy) == INVALID_FILE_ATTRIBUTES);
     }
 
     /* 持有者退出 → 锁随句柄释放 → 重开成功；关闭后旁路清理 */
@@ -112,10 +120,11 @@ TEST(container_lock_dual_process_exclusive)
     CHECK(second != NULL);
     verthys_container_close_exclusive(second, container);
 
-    snprintf(sidecar, sizeof(sidecar), "%s.lock", container);
+    snprintf(sidecar, sizeof(sidecar), "%s.d\\container.lock", container);
     CHECK(GetFileAttributesA(sidecar) == INVALID_FILE_ATTRIBUTES);
 
     DeleteFileA(container);
     DeleteFileA(handshake);
+    RemoveDirectoryA("container_lock_test.bin.d");
     return 0;
 }

@@ -14,7 +14,7 @@
       { 'glass-calm': idleLevel === 'deep-idle', 'reduce-motion': prefersReducedMotion },
     ]"
   >
-    <ParticleBackground :phase="phase" />
+    <ParticleBackground :phase="phase" :reduced-motion="prefersReducedMotion" />
     <div class="app-shell">
       <!-- 引导页层（上层 — 淡出离场） -->
       <div class="intro-layer">
@@ -31,6 +31,10 @@
         <MainView v-if="mainPrewarmed" />
       </div>
     </div>
+
+    <!-- 全局 Toast 渲染层（唯一渲染通道）：单点挂载 + Teleport 至 body，
+         层级 = --z-toast（全应用最高层）—— 任何界面不可覆盖提示 -->
+    <ToastLayer :idle-level="idleLevel" />
   </div>
 </template>
 
@@ -38,6 +42,8 @@
 import { defineAsyncComponent, ref, computed, onMounted, onBeforeUnmount } from "vue";
 import ParticleBackground from "./components/ParticleBackground.vue";
 import UnlockView from "./components/UnlockView.vue";
+// 全局 Toast 渲染层（唯一渲染通道；静态导入：提示须在任何阶段随时可用）
+import ToastLayer from "./components/common/feedback/ToastLayer.vue";
 // 主界面懒加载：MainView 静态导入会拉入 keyManager.ts → verthys.ts 整个业务层，
 // 改为 defineAsyncComponent 后，业务层代码移至独立 chunk，主包体积大幅下降。
 const MainView = defineAsyncComponent(() => import("./components/MainView.vue"));
@@ -47,9 +53,15 @@ import { useGlobalIdleScheduler } from "./composables/useGlobalIdleScheduler";
 import { masterFrameLoop } from "./core/master-frame-loop";
 import { frameBudgetMonitor } from "./core/frame-budget";
 
-/* 页面流转 + 星河阶段编排（v3 双缓冲预挂载：预挂载冻结层 → 交接零成本
- * 切换 → materialize 与渡越消散同步收束；旧撕裂过渡层无残留） */
-const { entered, mainPrewarmed, phase, onEnter } = useAppTransition();
+/* prefers-reduced-motion 响应式跟踪（无障碍：动画静止 + 引擎门控） */
+const prefersReducedMotion = ref(
+  typeof window !== "undefined" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+);
+
+/* 页面流转 + 星河阶段编排（双缓冲预挂载：预挂载冻结层 → 交接零成本
+ * 切换 → materialize 与渡越消散同步收束；无障碍偏好下压缩为短流程） */
+const { entered, mainPrewarmed, phase, onEnter } = useAppTransition(prefersReducedMotion);
 
 /* 全局前端安全拦截（dev 环境自动关闭） */
 useSecurityGuard();
@@ -58,11 +70,6 @@ useSecurityGuard();
 const { level } = useGlobalIdleScheduler();
 const idleLevel = computed(() => level.value);
 
-/* prefers-reduced-motion 响应式跟踪（无障碍：动画静止 + 引擎降档） */
-const prefersReducedMotion = ref(
-  typeof window !== "undefined" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-);
 let onMotionChange: ((e: MediaQueryListEvent) => void) | null = null;
 onMounted(() => {
   const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -118,7 +125,7 @@ onBeforeUnmount(() => {
   height: 100%;
 }
 
-/* ===== 双缓冲页面层（v3 — 「突然跳转」根治架构） =====
+/* ===== 双缓冲页面层（「突然跳转」根治架构） =====
  * 两层绝对叠放：intro-layer（上）淡出 / main-layer（下）浮现。
  * 旧 v-if 同帧「卸载+挂载」= 交接帧主线程停帧 → 星系跳越（已根除）。 */
 .intro-layer {
@@ -167,9 +174,9 @@ onBeforeUnmount(() => {
 }
 
 /* ===== UnlockView 离场（page-glitch leave） =====
- * 交接时刻（3100ms）UnlockView 内容早已弹射清空（逐字弹射/谱线
- * 塌缩/丝线收回于 ~1000ms 完成，全子树 opacity=0）——离场仅需
- * 容器残余淡出。旧实现的 blur(8px)+hue-rotate+scale 在交接窗口
+ * 交接时刻（3100ms）UnlockView 内容早已离场清空（逐字弹射/谱线塌缩/
+ * 丝线收回，或入场未完成组的软离场淡出 — 均于 ~1000ms 内完成，全子树
+ * opacity=0）——离场仅需容器残余淡出。旧实现的 blur(8px)+hue-rotate+scale 在交接窗口
  * 与 materialize 的 blur(14px) 形成双全屏重采样叠加（渡越帧节奏
  * 被挤占）→ 简化为纯 opacity（视觉等效：无可视内容可模糊）。 */
 .page-glitch-leave-active {

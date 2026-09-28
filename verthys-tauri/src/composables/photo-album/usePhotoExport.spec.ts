@@ -19,23 +19,35 @@ installBase64Polyfill();
 
 const { askMock } = vi.hoisted(() => ({ askMock: vi.fn() }));
 
-vi.mock("../../lib/verthys", () => ({
-  verthysGetRecord: vi.fn(),
-  bytesToBase64: vi.fn((bytes: Uint8Array) => `b64(${bytes.length})`),
-  writeUserFile: vi.fn(async (_path: string, _data: Uint8Array): Promise<void> => {
-    /* 由各用例断言调用形态 */
-  }),
-  writeUserFileStream: vi.fn(async (_path: string): Promise<string> => "stream-1"),
-  appendUserFileChunk: vi.fn(async (_streamId: string, _data: Uint8Array): Promise<void> => {
-    /* 由各用例断言调用形态 */
-  }),
-  finalizeUserFileStream: vi.fn(async (_streamId: string): Promise<void> => {
-    /* 由各用例断言调用形态 */
-  }),
-  abortUserFileStream: vi.fn(async (_streamId: string): Promise<void> => {
-    /* 由各用例断言调用形态 */
-  }),
-}));
+vi.mock("../../lib/verthys", () => {
+  const verthysGetRecord = vi.fn();
+  return {
+    verthysGetRecord,
+    // 判别式读取委托到同一 mock：既有用例只设置 verthysGetRecord 的返回值
+    verthysGetRecordDetailed: vi.fn(async (id: number) => {
+      const record = (await verthysGetRecord(id)) as
+        | { type: number; name: string; dataB64: string }
+        | null;
+      return record
+        ? { ok: true as const, record }
+        : { ok: false as const, error: "record not found", code: "not_found" as const };
+    }),
+    bytesToBase64: vi.fn((bytes: Uint8Array) => `b64(${bytes.length})`),
+    writeUserFile: vi.fn(async (_path: string, _data: Uint8Array): Promise<void> => {
+      /* 由各用例断言调用形态 */
+    }),
+    writeUserFileStream: vi.fn(async (_path: string): Promise<string> => "stream-1"),
+    appendUserFileChunk: vi.fn(async (_streamId: string, _data: Uint8Array): Promise<void> => {
+      /* 由各用例断言调用形态 */
+    }),
+    finalizeUserFileStream: vi.fn(async (_streamId: string): Promise<void> => {
+      /* 由各用例断言调用形态 */
+    }),
+    abortUserFileStream: vi.fn(async (_streamId: string): Promise<void> => {
+      /* 由各用例断言调用形态 */
+    }),
+  };
+});
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
   save: vi.fn(),
@@ -112,6 +124,7 @@ import {
   verthysGetRecord,
 } from "../../lib/verthys";
 import type { PhotoMeta } from "../../lib/crypto";
+import { estimateVencTotalBytes } from "../../lib/crypto";
 import { PHOTO_FMT_SLIM } from "../../constants/crypto_const";
 import { decryptChunksPreferWorker } from "../../workers/photo-decrypt-bridge";
 import type { PhotoEntry } from "./types";
@@ -328,6 +341,34 @@ describe("usePhotoExport — 单文件流式写出协议", () => {
     expect(made.api.exportStatus.value).toBe("已导出 1 张照片");
   });
 
+  it("单文件上限放宽回归：512MiB 以上且在上限之内不再被前置拦截", async () => {
+    (estimateVencTotalBytes as ReturnType<typeof vi.fn>).mockReturnValueOnce(600 * 1024 * 1024);
+    const made = makeExport([makePlaceholder(31)]);
+    scope = made.scope;
+    made.api.exportSelectedIds.value = new Set([31]);
+    made.api.exportFormat.value = "single";
+    made.api.exportPath.value = "C:\\out\\photo.venc";
+
+    await made.api.doExport();
+
+    expect(writeUserFileStream).toHaveBeenCalledTimes(1);
+    expect(made.api.exportStatus.value).toBe("已导出 1 张照片");
+  });
+
+  it("单文件上限拦截：超过上限即前置拒绝且不建流（GB 读数文案）", async () => {
+    (estimateVencTotalBytes as ReturnType<typeof vi.fn>).mockReturnValueOnce(3 * 1024 * 1024 * 1024);
+    const made = makeExport([makePlaceholder(32)]);
+    scope = made.scope;
+    made.api.exportSelectedIds.value = new Set([32]);
+    made.api.exportFormat.value = "single";
+    made.api.exportPath.value = "C:\\out\\photo.venc";
+
+    await made.api.doExport();
+
+    expect(writeUserFileStream).not.toHaveBeenCalled();
+    expect(made.api.exportStatus.value).toContain("超过单文件上限 2 GB");
+  });
+
   it("追加中途失败：中止会话清理暂存，未 finalize，错误显式呈现", async () => {
     (appendUserFileChunk as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error("disk full"),
@@ -401,8 +442,10 @@ describe("usePhotoExport — PNG 明文导出：解密下沉 Worker 桥", () => 
     await made.api.doExport();
 
     expect(decryptChunksPreferWorker).toHaveBeenCalledTimes(1);
+    // 完整性权威值随解密任务透传：逐块哈希（历史记录可为空）与整图明文哈希
     expect(decryptChunksPreferWorker).toHaveBeenCalledWith(
       ["Y2g="], "test-key", "1".repeat(64), "占位.jpg", undefined,
+      { expectedHashes: undefined, expectedFileHash: "1".repeat(64) },
     );
     expect(writeUserFile).toHaveBeenCalledTimes(1);
     expect(made.api.exportStatus.value).toBe("已导出 1 张照片");
@@ -421,12 +464,17 @@ describe("usePhotoExport — PNG 明文导出：解密下沉 Worker 桥", () => 
     expect(decryptChunksPreferWorker).toHaveBeenCalledWith(
       ["Y2g="], "test-key", "1".repeat(64), "占位.jpg",
       { wrappedFileKey: "wrapped-key", chunkTotal: 1 },
+      { expectedHashes: undefined, expectedFileHash: "1".repeat(64) },
     );
     expect(made.api.exportStatus.value).toBe("已导出 1 张照片");
   });
 
   it("解密/完整性校验失败：归因为 decrypt-failed，不写出且不标为转换失败", async () => {
-    // 内容哈希声明与实得字节不符（bytesToHex mock 恒为 "1"×64）
+    // 完整性校验已随解密任务下沉：在桥边界注入确定性失败（与 Worker 内
+    // 校验失败的可见语义一致——拒绝产出、不写出、归因为解密失败）
+    vi.mocked(decryptChunksPreferWorker).mockRejectedValueOnce(
+      new Error("整图哈希校验失败（内容与声明不符）"),
+    );
     await setMeta({ fileHash: "9".repeat(64) });
     const made = makeExport([makePlaceholder(42)]);
     scope = made.scope;

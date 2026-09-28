@@ -22,7 +22,7 @@ import {
   MODULE_LABELS,
   type ModuleId,
 } from "../lib/keyManager";
-import { useErrorToast } from "./useErrorToast";
+import { useToastCenter } from "./useToastCenter";
 import {
   scheduleBackgroundFlush,
   ensureRecordScan,
@@ -130,7 +130,7 @@ const MODULE_ID_MAP: Record<string, ModuleId> = {
 };
 
 export function useModuleNavigation() {
-  const { errorMsg, showError } = useErrorToast();
+  const { showError } = useToastCenter();
 
   /* ===== 当前模块状态 ===== */
   const currentModule = ref<string>("");
@@ -380,9 +380,6 @@ export function useModuleNavigation() {
   };
 
   return {
-    /* 错误提示 */
-    errorMsg,
-    showError,
     /* 模块状态 */
     currentModule,
     /* Dock 状态 */

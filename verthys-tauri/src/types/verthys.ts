@@ -13,6 +13,8 @@ export interface VerthysResponse {
   name?: string;
   data?: string; // base64 编码的二进制数据
   error?: string;
+  /** 结构化错误码（前端按码分支控制流与引导文案，不做文案判定） */
+  error_code?: string | null;
   /** 批量枚举记录列表（仅 enumerate_records 操作返回） */
   records?: VerthysRecordEntry[];
   /** 摘要扫描记录列表（仅 scan_summary_open / scan_summary_next 操作返回） */
@@ -259,20 +261,35 @@ export interface ClipboardResult {
   error_code?: string | null;
 }
 
-/** 第 7.2/7.4/7.5 项：隐私模式设置结果（结构化返回） */
+/** 防截屏保护设置结果（结构化返回）
+ *
+ * 窗口捕获排除为整体成功或整体失败，不存在部分保护：
+ * partial_protection 恒为 false，保留字段仅为结构稳定。 */
 export interface PrivacyModeResult {
-  /** 操作是否成功（true=隐私模式已按预期切换） */
+  /** 操作是否成功（true=保护已按预期切换） */
   ok: boolean;
-  /** 隐私模式当前状态（true=已启用，false=已关闭） */
+  /** 保护当前状态（true=已启用，false=已关闭） */
   enabled: boolean;
-  /** 是否处于部分保护状态（防截屏已启用但剪贴板监听失败） */
+  /** 恒为 false：保护不存在"部分成功" */
   partial_protection: boolean;
   /** 用户可读描述 */
   detail: string;
-  /** 错误码（CLIPBOARD_MONITOR_FAILED/RATE_LIMITED/PERMISSION_DENIED/TEMPORARY_FAILURE/INTERNAL） */
+  /** 错误码（PRIVACY_* 系列 / RATE_LIMITED） */
   error_code?: string | null;
-  /** 会话令牌（仅 enabled=true 时返回，关闭时需作为 authToken 传入） */
+  /** 会话令牌（仅开启成功时返回一次；关闭需作为 authToken 传入） */
   session_token?: string | null;
+}
+
+/** 防截屏保护状态快照（按钮状态、接管与恢复入口的唯一依据） */
+export interface PrivacyStatusResult {
+  /** 状态机：disabled / enabled / transitioning / quarantined */
+  state: "disabled" | "enabled" | "transitioning" | "quarantined";
+  /** 凭证槽位：empty / pending_adoption / active */
+  slot: "empty" | "pending_adoption" | "active";
+  /** 受保护窗口数量 */
+  protected_count: number;
+  /** 隔离原因（仅 quarantined 时存在） */
+  quarantined_reason?: string | null;
 }
 
 /** v2 安全预设 */
@@ -317,7 +334,6 @@ export interface PresetFeatures {
   key_separation: boolean;
   emergency_response: boolean;
   session_lock_on_idle: boolean;
-  shadow_sleep: boolean;
   module_patrol: boolean;
   clip_clear_on_lock: boolean;
   usb_clone_detect: boolean;
@@ -424,8 +440,10 @@ export interface ImportBeginResult {
   hashes: string[];
   /** 续传起始的累计 committed 计数（检查点） */
   total_count: number;
-  /** 错误信息（ok=false 时有值） */
+  /** 错误信息（ok=false 时有值；仅作展示） */
   error?: string;
+  /** 结构化错误码（前端按码分支，不做文案判定） */
+  error_code?: string | null;
 }
 
 /**

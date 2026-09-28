@@ -2,7 +2,7 @@
 
 > 定义四层信任边界、密钥派生链路、哈希校验机制与威胁建模，供安全审计与应急处置参考。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-09-28 · 维护人：K1Super
 
 ---
 
@@ -13,7 +13,7 @@
 ```mermaid
 flowchart TB
     subgraph T4["边界 4：持久化层（不可信磁盘/外设）"]
-        V[" .verthys 容器 · pepper.bin · .idx_cache"]
+        V[" .verthys 容器 · pepper.bin · 附属数据目录 .d（idx_cache 等）"]
     end
     subgraph T3["边界 3：核心 DLL 层（信任根，进程内）"]
         C["verthys.dll<br/>api/crypto/container/index/transaction/security<br/>CNG 内核密钥托管"]
@@ -74,6 +74,29 @@ flowchart TB
 ### 2.4 关于 “.vsec / .rhat”
 
 澄清：`.vsec`（DLL 只读节，构建期签名基线）与 `.rhat`（DLL 只读节，运行时函数哈希表）是**完整性校验数据**，不是密钥存储；密钥的“拆分存储”体现为 V3 超级块内 `wrapped_key_a/b/c` 三份包装密钥与 3 副本超级块，而非文件级拆分。详见 §4 与 [ARCHITECTURE.md](ARCHITECTURE.md) §2.5。
+
+### 2.5 文件记录口令派生（文件级 KDF，2026-09-28 收口）
+
+文件（清藏）记录可设独立访问密码，采用**文件级派生**，与容器级密钥体系相互独立、不混胡椒：
+
+- **派生**：`文件密钥 = PBKDF2(口令, 文件盐, 150000 次)`；文件盐 16B 随机、每文件派生一次
+  （历史逐块盐形态的写入路径已删除，旧记录读取保持兼容）。
+- **块布局**：`iv(12B) ‖ 密文+标签`（AES-256-GCM）；每块唯一 IV、同一文件密钥。
+- **口令判定唯一化**：记录携带 `passwordCheck`（固定明文的一次 AEAD）。导出时先解密
+  校验 `passwordCheck` 判定口令（错误即 `E_PWD_WRONG`，发生在选择保存位置之前）；
+  数据块解密失败一律按数据损坏归类，不再以“全部块解密失败”推断口令错误。
+- **oracle 边界**：`passwordCheck` 与数据块 AEAD 属同类认证界面，不新增可离线攻击的
+  新界面；口令强度由 PBKDF2 迭代数与用户口令共同承担。历史记录（无校验块）导出时
+  显示“密码错误或数据已损坏”合并提示并给出可执行引导。
+- **去重键不含口令材料**：文件级去重键 = `BLAKE3(明文 ‖ 格式版本 ‖ 形态标志)`；
+  会话日志为明文落盘，任何口令派生量入键即构成可离线爆破的验证器，故同内容不同
+  口令共用一键（换口令需先删除原记录）。
+- **内存上界**：导入分片读取上界 4MiB/次，块载荷在进程间层为 base64 但受批量预算
+  约束（≤11.19MiB/批）；导入与导出内存占用与文件大小无关。
+
+台账与回收的完整性语义（会话结算、GC 前置守卫、删除事务化）见 [DATA_FLOW.md](DATA_FLOW.md) §5
+与 [ARCHITECTURE.md](ARCHITECTURE.md) §3.1。
+
 ## 3. 解锁流程数据流
 
 以 `verthys_unlock_pipeline.h` 的 S0–S6 为准（与《解锁.md》一致）。

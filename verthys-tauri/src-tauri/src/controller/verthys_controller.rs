@@ -46,6 +46,7 @@
 use crate::controller::api_error::ErrorCode;
 use crate::controller::types::{EnumerateBatch, InitStatus, InitStatusResult, VerthysResponse};
 use crate::constants::import_writer as wconst;
+use crate::repository::container_layout;
 use crate::repository::verthys_state::{
     delete_state_file, read_last_verthys_path, read_state_file, try_repair_state_file,
     validate_verthys_file, write_state_file_atomic, VerthysState,
@@ -123,17 +124,30 @@ fn get_audit_log_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     }
 }
 
-/// 从设备指纹派生出审计 HMAC 密钥，用于防篡改审计链。
-/// 失败时返回 None，调用方应跳过审计写入。
+/// 审计 HMAC 密钥的进程内缓存（仅缓存成功结果：采集/派生瞬时失败不占缓存，
+/// 下次写入仍可自愈重试）。
+static AUDIT_HMAC_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+/// 从设备指纹派生审计 HMAC 密钥（进程内派生一次后复用）。
+///
+/// 派生含 10 万次 PBKDF2；逐次重派生会让连续审计操作产生可感延迟，
+/// 故与其余审计调用点统一走进程内缓存。失败时返回 None，调用方跳过审计写入。
 fn get_audit_hmac_key() -> Option<[u8; 32]> {
     use crate::infrastructure::device_fingerprint::get_device_fingerprint;
     use crate::util::crypto::pbkdf2_derive_default;
+
+    if let Some(key) = AUDIT_HMAC_KEY.get() {
+        return Some(*key);
+    }
 
     match get_device_fingerprint() {
         Ok(fingerprint) => {
             const AUDIT_SALT: &[u8] = b"verthys_audit_log_hmac_salt_v1";
             match pbkdf2_derive_default(fingerprint.as_bytes(), AUDIT_SALT) {
-                Ok(key) => Some(key),
+                Ok(key) => {
+                    let _ = AUDIT_HMAC_KEY.set(key);
+                    Some(key)
+                }
                 Err(e) => {
                     log::warn!("[audit] 派生 HMAC 密钥失败，跳过审计写入: {}", e);
                     None
@@ -341,6 +355,16 @@ pub fn verthys_init_status(app: tauri::AppHandle) -> Result<InitStatusResult, St
                     let _ = std::fs::remove_file(verthys_path);
                     log::info!("[init_status] 已清理残留 .verthys 文件");
                 }
+                // 残留容器的附属数据一并回收（有界清理：只删已知附属文件，
+                // 目录含未知内容时保留目录本体）
+                let report = container_layout::cleanup_container_sidecars(&s.verthys_path);
+                if report.removed_files > 0 || report.removed_dir {
+                    log::info!(
+                        "[init_status] 已回收残留附属数据: files={} dir_removed={}",
+                        report.removed_files,
+                        report.removed_dir
+                    );
+                }
                 delete_state_file(&app);
                 Ok(InitStatusResult {
                     status: "broken".into(),
@@ -501,7 +525,7 @@ fn verthys_preheat_blocking(verthys_path: &str) -> Result<(), String> {
     // V3 预热目标（page cache 进页即用）：
     //   1. 固定布局区：超块三副本（64KB）+ WAL 区（960KB）+ 分区表（3MB），
     //      即解锁流水线的首批读段，与 C 层布局契约同源；
-    //   2. 温缓存文件 .verthys.idx_cache：解锁时由 C 层加载的索引缓存。
+    //   2. 温缓存文件（附属数据目录 idx_cache）：解锁时由 C 层加载的索引缓存。
     preheat_range_sequential(verthys_path, 0, V3_FIXED_LAYOUT_PREHEAT_BYTES);
     preheat_cache_file(verthys_path);
     log::info!(
@@ -557,12 +581,22 @@ fn preheat_range_sequential(path: &str, off: u64, size: u64) {
     }
 }
 
-/// 预读持久化缓存文件（.verthys.idx_cache）到页缓存，提升温启动性能。
+/// 预读持久化缓存文件（附属数据目录 idx_cache）到页缓存，提升温启动性能。
+///
+/// 附属目录优先，旧布局缓存作为只读回退（升级后首次打开、C 层尚未迁移时
+/// 仍可享受温启动预读）。
 fn preheat_cache_file(verthys_path: &str) {
-    let cache_path = format!("{}.idx_cache", verthys_path);
-    if !std::path::Path::new(&cache_path).exists() {
-        return;
-    }
+    let primary = container_layout::idx_cache_file_for(verthys_path);
+    let cache_path = if primary.exists() {
+        primary
+    } else {
+        let legacy = container_layout::legacy_idx_cache_file_for(verthys_path);
+        if !legacy.exists() {
+            return;
+        }
+        legacy
+    };
+    let cache_path = cache_path.to_string_lossy().to_string();
 
     #[cfg(windows)]
     {
@@ -606,9 +640,10 @@ fn preheat_cache_file(verthys_path: &str) {
 /// 1. 校验文件存在性及密码复杂度。
 /// 2. 持有共享文件锁（读锁）防止其他进程写操作。
 /// 3. 验证预热令牌，若有效则启用零拷贝路径（flags 含 INDEX_PREHEATED）。
-/// 4. 通过 IPC 向 worker 发送 unlock 指令，并流式接收进度。
-/// 5. 解锁成功后创建 VerthysSessionGuard（持有独占锁），存入 AppState。
-/// 6. 检查状态文件，若缺失或路径不一致则自动修复/更新。
+/// 4. 应用受信档位到 C 运行时策略层（fail-closed：失败即中止）。
+/// 5. 通过 IPC 向 worker 发送 unlock 指令，并流式接收进度。
+/// 6. 解锁成功后创建 VerthysSessionGuard（持有独占锁），存入 AppState。
+/// 7. 检查状态文件，若缺失或路径不一致则自动修复/更新。
 ///
 /// 密码在发送后立即擦除，不驻留内存。
 /// 解锁失败时文件锁自动释放（RAII）。
@@ -745,6 +780,10 @@ pub async fn verthys_unlock(
         }
     }
     log::info!("[verthys_unlock] flags=0x{:02x}", flags);
+
+    // 解锁前应用受信档位（经服务层契约调用，实现由安全模块启动时注册；
+    // fail-closed：失败即中止，禁止降级解锁）
+    crate::service::preset_source::apply_persisted_preset_before_unlock(&app, &verthys_path)?;
 
     let req_str = Zeroizing::new(
         serde_json::to_string(&UnlockReq {
@@ -1051,6 +1090,24 @@ pub async fn verthys_create(
 
     let path_for_rollback = verthys_path.clone();
 
+    // 附属数据目录前置保障：目录被同名文件占用、路径超长或不可创建时，
+    // 创建流程整体拒绝（不进入 worker 创建，避免产生只带容器的半成品）。
+    if let Err(e) = container_layout::ensure_sidecar_dir(&verthys_path) {
+        log::warn!("[verthys_create] 附属数据目录不可用: {} | {}", e, sanitize_path(&verthys_path));
+        write_verthys_audit(
+            &app,
+            AuditEventType::VerthysUnlock,
+            &verthys_path,
+            AuditResult::Denied,
+            Some(format!("附属数据目录不可用: {}", e)),
+        );
+        return Err(format!("创建加密库失败：{}", e));
+    }
+    log::info!(
+        "[verthys_create] 附属数据目录就绪: {}",
+        sanitize_path(&container_layout::sidecar_dir_for(&verthys_path).to_string_lossy())
+    );
+
     let create_timeout = std::time::Duration::from_secs(60);
     let lock_unlock_timeout = std::time::Duration::from_secs(30);
 
@@ -1159,10 +1216,15 @@ pub async fn verthys_create(
         let _ = std::fs::remove_file(&path_for_rollback);
         state.set_session(None);
         delete_state_file(&app);
+        // 附属数据有界清理：只删本次流程可能产生的已知附属文件（state / idx_cache /
+        // lock / tmp），目录清空即回收；目录含未知文件时保留目录本体。
+        let report = container_layout::cleanup_container_sidecars(&path_for_rollback);
         log::error!(
-            "[verthys_create] 创建失败，已回滚: {} | {}",
+            "[verthys_create] 创建失败，已回滚: {} | {} | 附属文件清理={} 目录回收={}",
             sanitize_path(&path_for_rollback),
-            e
+            e,
+            report.removed_files,
+            report.removed_dir
         );
         write_verthys_audit(
             &app,
@@ -1181,6 +1243,7 @@ pub async fn verthys_create(
         drop(file_lock.take());
         state.set_session(None);
         delete_state_file(&app);
+        let _ = container_layout::cleanup_container_sidecars(&path_for_rollback);
         write_verthys_audit(
             &app,
             AuditEventType::VerthysUnlock,
@@ -1198,6 +1261,7 @@ pub async fn verthys_create(
         let _ = std::fs::remove_file(&path_for_rollback);
         state.set_session(None);
         delete_state_file(&app);
+        let _ = container_layout::cleanup_container_sidecars(&path_for_rollback);
         let msg = "[verthys_create] 文件落地校验失败: .verthys 文件大小为 0".to_string();
         log::error!("{}", msg);
         write_verthys_audit(

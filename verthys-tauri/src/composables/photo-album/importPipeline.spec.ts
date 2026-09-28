@@ -3,7 +3,8 @@
  *
  * 覆盖（故障注入，断言静默丢失路径被根治）：
  * - 全成功：仅零失败路径以 verthysImportEnd(true) 压缩 WAL
- * - 致命错误（VERTHYS_WRITE_BLOCKED）：fatal 传播到返回结果，importEnd(false)
+ * - 致命错误（后端容量告罄 ERR_0000000F）：fatal 传播到返回结果并映射为
+ *   存储空间不足文案，importEnd(false)
  * - 部分失败：只重试失败子集，成功项不回灌；重试耗尽按失败入账且 importEnd(false)
  * - 后端去重跳过：计入 skipped，绝不重试
  * - 致命错误后停止后续批次写入（消费端短路）
@@ -227,7 +228,7 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
     expect(importEndMock).toHaveBeenCalledWith(true);
   });
 
-  it("致命错误：WRITE_BLOCKED 传播到返回结果，WAL 以 false 保留", async () => {
+  it("致命错误（后端容量告罄）：fatal 传播到返回结果并映射为存储空间不足，WAL 以 false 保留", async () => {
     addRecordsBatchMock.mockResolvedValue({
       ok: false,
       ids: [],
@@ -236,14 +237,17 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
       processed_count: 0,
       total_count: 0,
       skipped_count: 0,
-      error: "VERTHYS_WRITE_BLOCKED",
+      error: "写入失败 (ERR_0000000F)",
     });
     const pipe = makePipeline();
 
     const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")], "key");
 
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("VERTHYS_WRITE_BLOCKED");
+    expect(result.error).toContain("存储空间不足");
+    // 错误码映射：致命原因归类为 storage-full
+    expect(result.failedRecords.length).toBeGreaterThan(0);
+    expect(result.failedRecords.every((r) => r.reason === "storage-full")).toBe(true);
     // 四分类不变量：致命路径下剩余条目全部入账失败
     expect(result.imported.length + result.failedRecords.length + result.skipped + result.undecryptable)
       .toBe(2);
@@ -261,7 +265,7 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
       processed_count: 0,
       total_count: 0,
       skipped_count: 0,
-      error: "VERTHYS_WRITE_BLOCKED",
+      error: "写入失败 (ERR_0000000F)",
     });
 
     const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")], "key");

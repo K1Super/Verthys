@@ -63,9 +63,9 @@ import type { VerifyRhythm } from './useVerifyRhythm';
 export interface UseGlobalKeyOptions {
   /** 是否处于 Tauri 环境（非浏览器模式） */
   isTauri: boolean;
-  /** 显示错误提示（来自 useErrorToast） */
+  /** 显示错误提示（来自全局 Toast 中心） */
   showError: (msg: string) => void;
-  /** 显示成功提示（来自 useErrorToast） */
+  /** 显示成功提示（来自全局 Toast 中心） */
   showToast: (msg: string) => void;
   /** 验证后强制动画标志（SecurityCenter 顶层持有，useViewMode 读取，onVerify 写入） */
   postVerifyAnim: Ref<boolean>;

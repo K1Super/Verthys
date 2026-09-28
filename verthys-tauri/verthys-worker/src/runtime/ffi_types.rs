@@ -54,6 +54,11 @@ pub(crate) type VerthysCreateWithPresetFn = unsafe extern "C" fn(
 ) -> u32;
 /// 运行时切换安全预设（双缓冲原子发布，立即生效）
 pub(crate) type VerthysSwitchSecurityPresetFn = unsafe extern "C" fn(VerthysHandle, u32) -> u32;
+/// 查询活跃安全预设档位（快照读取，供切档回读校验）
+pub(crate) type VerthysGetSecurityPresetFn = unsafe extern "C" fn(VerthysHandle, *mut u32) -> u32;
+/// 查询指定档位的特性位投影（跨层特性契约的唯一权威输出）
+pub(crate) type VerthysGetPresetFeatureBitsFn =
+    unsafe extern "C" fn(VerthysHandle, u32, *mut u32) -> u32;
 pub(crate) type VerthysLockFn = unsafe extern "C" fn(VerthysHandle) -> u32;
 /// 修复：Verthys_Flush 显式刷盘接口
 ///   签名与 Verthys_Lock 相同：接收 handle，返回 VerthysResult(u32)
@@ -123,6 +128,7 @@ pub(crate) const VERTHYS_SCAN_PROJECT_INDEX: u32 = 1;
 ///   - project：投影选择（FULL=全量解密 / INDEX=仅内联小记录解密）
 ///   - index_inline_max_bytes：INDEX 投影的内联数据阈值（0=纯索引）
 ///   - max_batch_bytes：单次 Fetch 输出字节预算（0=不限）
+///
 /// 既有入口 Verthys_ScanOpen 保留在 C 侧（等价于 Ex 的 FULL/0/0），
 /// worker 统一经本入口打开游标：投影与预算无法经旧签名传入。
 pub(crate) type VerthysScanOpenExFn = unsafe extern "C" fn(

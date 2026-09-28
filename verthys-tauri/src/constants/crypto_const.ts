@@ -13,6 +13,13 @@ import { PAYLOAD_CHUNK_SIZE_BYTES } from "./photo_budget.generated";
 /* 跨层预算再导出：导入链路（批量记录与分块上传）按此约束单次 IPC 载荷 */
 export { MAX_IPC_PAYLOAD_BYTES, MAX_CHUNKS_PER_IPC } from "./photo_budget.generated";
 
+/* 照片与导出上限再导出：取值来自跨层预算常量（单一权威来源），
+   保持既有导入路径不变；本模块不再保留同义字面量。 */
+export {
+  PHOTO_MAX_BYTES as MAX_PHOTO_BYTES,
+  MAX_EXPORT_SINGLE_BYTES,
+} from "./photo_budget.generated";
+
 /* ------------------------------------------------------------------ *
  * 密钥派生参数                                                        *
  * ------------------------------------------------------------------ */
@@ -51,11 +58,9 @@ export const FILE_HASH_LEN = 32;
 /* ------------------------------------------------------------------ *
  * 照片导入批量处理约束（内存边界与韧性上限）                          *
  *                                                                    *
- * 全部约束的单一权威来源，导入链路任何环节不得使用字面量替代。        *
+ * 单文件上限由跨层预算常量再导出；其余约束为导入链路的单一权威来源，  *
+ * 任何环节不得使用字面量替代。                                        *
  * ------------------------------------------------------------------ */
-
-/** 单文件硬上限（字节）：超过直接拒绝导入 */
-export const MAX_PHOTO_BYTES = 100 * 1024 * 1024;
 
 /** 内联 meta 阈值（加密 chunk 原始字节）。
  *
@@ -197,11 +202,8 @@ export const MIN_TOKEN_LENGTH = 8;
 /** 导出文件名 UTF-8 字节上限（净化与截断基准，防超长名写入失败） */
 export const MAX_EXPORT_FILENAME_BYTES = 200;
 
-/** 单文件导出模式总字节软上限（超过即拦截并建议改用多文件模式） */
-export const MAX_EXPORT_SINGLE_BYTES = 512 * 1024 * 1024;
-
-/** 流式导出单次追加分块字节上限（与后端流式写入约束一致） */
-export const WRITE_FILE_CHUNK_BYTES = 4 * 1024 * 1024;
+/* 单文件导出上限与流式分片上限属跨层预算口径：上限由本模块再导出
+   （前端在单文件模式前置拦截）；分片上限仅由后端强制，前端不保留副本。 */
 
 /** 尾部校验帧负载固定字节数（frame_count u32 + body_bytes u64） */
 export const VENC_TRAILER_PAYLOAD_BYTES = 12;

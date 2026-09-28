@@ -449,19 +449,23 @@ TEST(api_create_with_preset_secure)
     uint64_t id;
     CHECK_EQ(Verthys_AddRecord(h, &r, &id), VERTHYS_OK);
 
-    /* 锁定 → 重新解锁 → 验证 SECURE 预设持久化 */
+    /* 锁定 → 应用运行时档位（宿主在解锁前应用受信档位）→ 重新解锁 */
     CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_SwitchSecurityPreset(h, VERTHYS_PRESET_SECURE), VERTHYS_OK);
     CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS_CP, "pw", 2, 0), VERTHYS_OK);
 
-    /* 白盒校验：解锁后预设从扩展 TLV 恢复为 SECURE（V3） */
+    /* 白盒校验：容器头档位从扩展 TLV 恢复；温缓存按运行时档位禁用 */
     CHECK_EQ(ctx->preset, VERTHYS_PRESET_SECURE);
-    CHECK_EQ(ctx->warm_cache_enabled, 0);  /* SECURE 持久禁用温启动缓存 */
+    CHECK_EQ(ctx->warm_cache_enabled, 0);  /* 运行时 SECURE 禁用温启动缓存 */
 
     /* 记录持久化 */
     CHECK_EQ(Verthys_GetRecord(h, id, &r), VERTHYS_OK);
     CHECK(memcmp(r.name, "secret", 6) == 0);
     CHECK_EQ(r.data_len, 10u);
     CHECK(memcmp(r.data, "classified", 10) == 0);
+
+    /* 复位运行时档位：避免影响依赖平衡档的后续用例 */
+    CHECK_EQ(Verthys_SwitchSecurityPreset(h, VERTHYS_PRESET_BALANCED), VERTHYS_OK);
 
     Verthys_Deinit(h);
     cleanup_cp();
@@ -524,13 +528,17 @@ TEST(api_create_with_preset_survives_cp)
     /* 修改密码 */
     CHECK_EQ(Verthys_ChangePassword(h, "old", 3, "new", 3), VERTHYS_OK);
 
-    /* 锁定 → 用新密码解锁 */
+    /* 锁定 → 应用运行时档位 → 用新密码解锁 */
     CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_SwitchSecurityPreset(h, VERTHYS_PRESET_SECURE), VERTHYS_OK);
     CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS_CP, "new", 3, 0), VERTHYS_OK);
 
-    /* 预设仍为 SECURE（密码更改不影响预设） */
+    /* 预设仍为 SECURE（密码更改不影响预设）；温缓存按运行时档位禁用 */
     CHECK_EQ(ctx->preset, VERTHYS_PRESET_SECURE);
     CHECK_EQ(ctx->warm_cache_enabled, 0);
+
+    /* 复位运行时档位：避免影响依赖平衡档的后续用例 */
+    CHECK_EQ(Verthys_SwitchSecurityPreset(h, VERTHYS_PRESET_BALANCED), VERTHYS_OK);
 
     Verthys_Deinit(h);
     cleanup_cp();

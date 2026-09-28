@@ -10,7 +10,7 @@
 import {
   securityBruteCheck,
   securityBruteClearPurge, securityBruteStatus,
-  securitySessionStart, securitySessionStop, securitySessionSetHighSecurity,
+  securitySessionStart, securitySessionStop, securitySessionSetHardening,
   securityApplyPreset, securityLoadPresetState,
   verthysClearGlobalKey, verthysLock, verthysLockPersist, workerDestroy,
   type SecurityPresetCode, type BruteForceCheckResponse,
@@ -25,6 +25,9 @@ import { startBackgroundTasks, stopBackgroundTasks } from "../core/background-ta
 
 // 导出 securityPresetRef 供 keyManager.ts 再导出
 export const securityPresetRef = keyState.securityPreset;
+
+// 导出 sessionLockEnabledRef 供 keyManager.ts 再导出（UI 据此展示空闲锁定状态）
+export const sessionLockEnabledRef = keyState.sessionLockEnabled;
 
 /* ------------------------------------------------------------------ *
  * 会话计时                                                            *
@@ -44,6 +47,8 @@ function clearSessionTimer(): void {
 
 function resetSessionTimer(): void {
   clearSessionTimer();
+  // 空闲锁定关闭（自定义档显式关闭）时不武装计时器
+  if (!keyState.sessionLockEnabled.value) return;
   sessionTimer = window.setTimeout(() => {
     lockAll();
   }, sessionTimeoutMs);
@@ -78,6 +83,27 @@ export function getSessionTimeout(): number {
   return sessionTimeoutMs;
 }
 
+/**
+ * 设置会话空闲锁定开关
+ *  关闭时立即清除在途计时器（不再自动锁定）；开启时按当前超时重新武装
+ * @param enabled true = 启用空闲锁定；false = 不自动锁定
+ */
+export function setSessionLockEnabled(enabled: boolean): void {
+  keyState.sessionLockEnabled.value = enabled;
+  if (!enabled) {
+    clearSessionTimer();
+    return;
+  }
+  if (keyState.globalKeyReady.value) {
+    resetSessionTimer();
+  }
+}
+
+/** 查询会话空闲锁定开关（UI 据此展示"已关闭"状态） */
+export function isSessionLockEnabled(): boolean {
+  return keyState.sessionLockEnabled.value;
+}
+
 /* ------------------------------------------------------------------ *
  * 三档安全预设适配                                                    *
  *                                                                    *
@@ -85,44 +111,54 @@ export function getSessionTimeout(): number {
  *   - 标准档 0/1/2：先调后端真实切档（security_apply_preset →        *
  *     worker → C 层双缓冲原子切换），成功后才更新前端状态；           *
  *     失败抛错（明确错误码），前端状态保持原值                        *
- *   - CUSTOM 档：组合会话层开关（高安全模式），无 C 层档位            *
+ *   - CUSTOM 档：组合会话层硬化开关，无 C 层档位                     *
  * ------------------------------------------------------------------ */
 
 /**
  * 应用三档安全预设
  *  在初始化成功后与用户切换预设时调用
  *  @param preset 0=BALANCED, 1=SECURE, 2=PERFORMANCE, 3=CUSTOM
- *  @returns 该预设的配置详情（含各特性开关）
+ *  @param issuedEpoch 恢复链发起时的竞态版本号（可选）；
+ *         应用前若已被用户显式切换超越，则放弃本次应用并返回 null
+ *  @returns 该预设的配置详情（含各特性开关）；被超越时返回 null
  *  @throws 后端切档/落盘失败或超时时抛错（调用方以 withTimeout 兜底并提示）
  */
-export async function applySecurityPreset(preset: SecurityPresetCode) {
+export async function applySecurityPreset(preset: SecurityPresetCode, issuedEpoch?: number) {
+  // 竞态仲裁：恢复链携带发起时版本号，应用前校验未被用户显式切换超越
+  if (issuedEpoch !== undefined && issuedEpoch !== presetEpoch) {
+    console.warn("[applySecurityPreset] 恢复结果已被用户切换超越，放弃应用");
+    return null;
+  }
   // CUSTOM 档：后端落盘自定义特性（无 C 层档位），会话层开关组合实现
   if (preset === 3) {
     const custom = loadCustomFeatures();
     // 先后端落盘 + 返回权威配置；失败抛错，前端状态不变
     const config = await securityApplyPreset(3, custom);
 
-    // 会话层开关：高安全模式 = session_lock_on_idle + clip_clear_on_lock
-    const highSec = custom.session_lock_on_idle && custom.clip_clear_on_lock;
+    // 会话层硬化：剪贴板监听由专用开关独立控制（不再与空闲锁定合并为
+    // 单一布尔——两能力互不牵连）；挂起锁定不向自定义档暴露。
     try {
       // 3s 超时兜底：后端会话守卫命令阻塞时不得卡死预设应用流程
       const ok = await withTimeout(
-        securitySessionSetHighSecurity(highSec),
+        securitySessionSetHardening(false, custom.clip_clear_on_lock),
         3000,
-        "设置高安全模式",
+        "设置会话硬化开关",
       );
       if (!ok) {
-        // 后端返回 ok=false（会话未解锁被拒绝）：可见地报告而非静默吞掉
-        console.warn("[applySecurityPreset] CUSTOM 高安全模式被后端拒绝（会话未解锁）");
+        // 后端返回 ok=false（会话未解锁被拒绝/监听启动失败）：可见报告而非静默吞掉
+        console.warn("[applySecurityPreset] CUSTOM 会话硬化开关被后端拒绝或监听启动失败");
       }
     } catch (e) {
-      console.warn("[applySecurityPreset] CUSTOM 设置高安全模式失败（非致命）", e);
+      console.warn("[applySecurityPreset] CUSTOM 设置会话硬化开关失败（非致命）", e);
     }
 
     // 后端成功后更新前端状态 + localStorage 缓存（后端为权威）
     keyState.securityPreset.value = preset;
     saveSecurityPreset(preset);
     saveCustomFeatures(custom);
+    // 自定义档：超时取档位常量，空闲锁定由特性开关决定
+    sessionTimeoutMs = PRESET_SESSION_TIMEOUT_MS[preset];
+    setSessionLockEnabled(custom.session_lock_on_idle);
     return config;
   }
 
@@ -133,37 +169,40 @@ export async function applySecurityPreset(preset: SecurityPresetCode) {
   keyState.securityPreset.value = preset;
   saveSecurityPreset(preset);
   sessionTimeoutMs = PRESET_SESSION_TIMEOUT_MS[preset];
-  if (keyState.globalKeyReady.value) {
-    resetSessionTimer();
-  }
+  // 标准档恒启用空闲锁定（覆盖自定义档可能关闭的状态），并按新超时重新武装
+  setSessionLockEnabled(true);
 
-  // 会话层开关（与 C 层档位分离）：SECURE 启用高安全模式。
+  // 会话层硬化（与 C 层档位分离）：SECURE 启用挂起锁定与剪贴板监听；
+  // 其余标准档关闭两项（剪贴板锁定清空为恒定底线，不受该开关影响）。
   // 失败独立可见报告，不回滚已成功的 C 层切档。
   try {
+    const suspendLock = preset === 1;
+    const clipboardMonitor = preset === 1;
     const ok = await withTimeout(
-      securitySessionSetHighSecurity(preset === 1),
+      securitySessionSetHardening(suspendLock, clipboardMonitor),
       3000,
-      "设置高安全模式",
+      "设置会话硬化开关",
     );
     if (!ok) {
-      console.warn("[applySecurityPreset] 高安全模式被后端拒绝（会话未解锁）");
+      console.warn("[applySecurityPreset] 会话硬化开关被后端拒绝或监听启动失败");
     }
   } catch (e) {
-    console.warn("[applySecurityPreset] 设置高安全模式失败（非致命）", e);
+    console.warn("[applySecurityPreset] 设置会话硬化开关失败（非致命）", e);
   }
 
   return config;
 }
 
 /* ------------------------------------------------------------------ *
- * 启动恢复链：受信配置为权威，localStorage 仅作迁移来源与缓存        *
+ * 启动恢复链：受信配置为权威，localStorage 仅作迁移来源与只读缓存     *
  *                                                                    *
  *   1. 后端有值 → 真实应用后端档位，同步前端缓存                      *
- *   2. 后端无值、localStorage 有值 → 迁移：应用并落盘后端，清缓存     *
+ *   2. 后端无值、localStorage 有值 → 迁移：应用并落盘后端；           *
+ *      localStorage 保留为只读缓存（清键会造成下次启动初值退化）      *
  *   3. 两端均无 → 应用默认 BALANCED（落盘后端建立权威副本）           *
  *                                                                    *
- * 竞态仲裁：用户显式切换递增 presetEpoch；恢复链在每次 await 后       *
- * 校验 epoch 未变，变化即丢弃恢复结果（用户的最新选择为最终状态）。   *
+ * 竞态仲裁：用户显式切换递增 presetEpoch；恢复链在读取后与应用入口   *
+ * 双重校验 epoch，变化即丢弃恢复结果（用户的最新选择为最终状态）。   *
  * ------------------------------------------------------------------ */
 
 /** 预设竞态版本号（单调递增）：用户显式切换时递增 */
@@ -174,28 +213,35 @@ export function bumpPresetEpoch(): void {
   presetEpoch += 1;
 }
 
+/** 恢复完成报告 */
+export interface PresetRestoreReport {
+  /** 持久化不一致标记：本次恢复前后端处于回滚失败状态（已按受信文件重新收敛） */
+  persistDirty: boolean;
+}
+
 /**
  * 恢复安全预设（全局密钥就绪后调用）
  *
- * 后端受信文件为单一事实源；localStorage 仅在前端缓存与
- * 首次迁移时参与。失败抛错由调用方提示，不静默回退。
+ * 后端受信文件为单一事实源；localStorage 仅作只读缓存与首次迁移来源。
+ * 失败抛错由调用方提示，不静默回退。
+ * @returns 恢复报告（含持久化不一致标记，供调用方可见报告）
  */
-export async function restoreSecurityPreset(): Promise<void> {
+export async function restoreSecurityPreset(): Promise<PresetRestoreReport> {
   const epochAtStart = presetEpoch;
-  const backend = await securityLoadPresetState();
+  const { state: backend, persistDirty } = await securityLoadPresetState();
 
   // 竞态仲裁：读取后端期间用户已显式切换 → 丢弃恢复结果
   if (presetEpoch !== epochAtStart) {
-    return;
+    return { persistDirty };
   }
 
   if (backend && backend.code >= 0 && backend.code <= 3) {
-    // 后端有值：同步 CUSTOM 特性后真实应用
+    // 后端有值：同步 CUSTOM 特性后真实应用（apply 入口按 epoch 做最终裁决）
     if (backend.code === 3 && backend.customFeatures) {
       saveCustomFeatures(backend.customFeatures);
     }
-    await applySecurityPreset(backend.code as SecurityPresetCode);
-    return;
+    await applySecurityPreset(backend.code as SecurityPresetCode, epochAtStart);
+    return { persistDirty };
   }
 
   // 后端无值：迁移 localStorage 旧值（若存在）
@@ -203,20 +249,21 @@ export async function restoreSecurityPreset(): Promise<void> {
   const hadCustom = localStorage.getItem(CUSTOM_FEATURES_KEY) != null;
   if (hadPreset || hadCustom) {
     const localCode = loadSecurityPreset();
-    await applySecurityPreset(localCode);
+    await applySecurityPreset(localCode, epochAtStart);
     // 竞态仲裁：应用迁移期间用户已显式切换 → 保留其新缓存，不清理
     if (presetEpoch !== epochAtStart) {
-      return;
+      return { persistDirty };
     }
-    // 迁移完成：清除 localStorage（后端已持有权威副本）
-    localStorage.removeItem(SECURITY_PRESET_KEY);
-    localStorage.removeItem(CUSTOM_FEATURES_KEY);
-    return;
+    // 迁移完成：localStorage 保留为只读缓存（后端已持有权威副本）。
+    // 不删键——缓存空洞会使下次启动的前端初值退化，进而存在以默认档
+    // 覆盖受信副本的路径（解锁收尾不再回写权威，此路径必须一并封死）。
+    return { persistDirty };
   }
 
   // 两端均无：应用默认档并落盘后端，建立权威副本
   saveSecurityPreset(0);
-  await applySecurityPreset(0);
+  await applySecurityPreset(0, epochAtStart);
+  return { persistDirty };
 }
 
 /* ------------------------------------------------------------------ *

@@ -9,6 +9,11 @@
  *
  * 依赖方向：repository → util（单向，禁止引用 service / controller / entry）
  */
+/// 容器附属数据目录命名契约（路径派生 / 懒迁移 / 有界清理）
+///
+/// 附属数据（状态 / 预设 / WAL / 台账 / 温缓存 / 锁诊断）的统一落盘位置
+/// 与派生规则的唯一权威定义；idx_cache 与 container.lock 的命名与 C 层保持一致。
+pub mod container_layout;
 /// 照片导入外置块台账（ChunkLedger，孤儿块 GC 判定依据）
 ///
 /// 持久化「块记录 ID → 拥有者 meta ID」映射，支撑崩溃后未引用块回收。

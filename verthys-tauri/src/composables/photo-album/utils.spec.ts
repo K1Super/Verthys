@@ -12,6 +12,7 @@ import {
   makeThumbBlobUrl, makeThumbCssValue, thumbUrlOf, revokeThumbUrl,
 } from "./utils";
 import type { PhotoEntry } from "./types";
+import type { PhotoMeta } from "../../lib/crypto";
 
 /** 构造一条已解密条目（具备 meta 即视为已解密） */
 function decrypted(metaId: number): PhotoEntry {
@@ -76,6 +77,24 @@ describe("rehydrateEntries", () => {
     const noThumb: PhotoEntry = { ...decrypted(12), thumb: 'url("blob:nodedata:stale")' };
     noThumb.meta = { ...noThumb.meta!, thumbB64: "" };
     const [restored] = rehydrateEntries([noThumb], () => 'url("rebuilt")');
+    expect(restored.thumb).toBe("");
+  });
+
+  it("瘦身布局（缩略图在独立记录）：回灌回到待解密态，等待可视区补齐", () => {
+    const base = decrypted(13).meta!;
+    const meta: PhotoMeta = { ...base, fmt: 2, thumbId: 42, thumbB64: "", chunkSetId: 7, chunkCount: 3 };
+    const entry: PhotoEntry = { ...decrypted(13), thumb: 'url("blob:nodedata:stale")', meta };
+    const [restored] = rehydrateEntries([entry], makeThumbCssValue);
+    expect(restored.loaded).toBe(false);
+    expect(restored.thumb).toBe("");
+  });
+
+  it("瘦身布局但无缩略图引用（thumbId 为零）：保持已加载态，不重复回源", () => {
+    const base = decrypted(14).meta!;
+    const meta: PhotoMeta = { ...base, fmt: 2, thumbId: 0, thumbB64: "", chunkSetId: 7, chunkCount: 3 };
+    const entry: PhotoEntry = { ...decrypted(14), meta };
+    const [restored] = rehydrateEntries([entry], makeThumbCssValue);
+    expect(restored.loaded).toBe(true);
     expect(restored.thumb).toBe("");
   });
 });

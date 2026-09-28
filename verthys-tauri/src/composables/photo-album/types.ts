@@ -28,6 +28,9 @@ export interface PhotoEntry {
 export interface VisiblePhoto extends PhotoEntry {
   _left: number;
   _top: number;
+  /** 预计算的内联样式字符串（行窗口重建时生成一次；模板直接消费，
+   *  避免每次渲染重建 style 对象并逐键 diff——滚动路径零对象分配） */
+  _style: string;
 }
 
 /** 解密后的照片元数据渲染字段 */
@@ -49,10 +52,4 @@ export interface ParsedPhotoPreview {
   metaB64: string;
   chunkB64List: string[];
   meta: PhotoMeta | null;
-}
-
-/** 导出完成 Toast 类型 */
-export interface ExportDoneToast {
-  msg: string;
-  type: "success" | "error";
 }

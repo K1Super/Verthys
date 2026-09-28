@@ -1,0 +1,447 @@
+/**
+ * reg-desk.css — 凭证登记台（全局共享皮肤 · 单一来源）
+ *
+ * 提炼自 存签 / 枢钥 登记窗口，提升为全局共享层：
+ *   存签 / 枢钥 登记窗口 + 中枢 密钥窗口（修改全局密钥 / 验证全局密钥）共用。
+ * 任何窗口不得局部复制本文件的 reg-* 规则；变体在文件尾统一声明。
+ */
+
+/* ============================================================
+   凭证登记台（全局共享皮肤）
+   用法：VerthysDialog 传 layout="plain" + class="reg-panel"，
+   内容按「分区登记行 / 凭据舱 / 选项条 / 读数」词汇组织。
+   排版语法：左缘刻度轴贯穿登记区，行级刻度随聚焦注能；
+   控件取凹槽形（内阴影示意嵌于面板），与凸起按钮成对；
+   全部动效为一次性入场（仅 opacity/transform），无循环装饰。
+   变体：reg-wide — 宽幅双舱并置（中枢 · 密钥轮换台）。
+   ============================================================ */
+
+/* 面板：内边距归零自管，纵向弹性 —— 头部与动作区固定、登记区独立滚动。
+   以元素名提升特异性（div.dialog），使覆盖不依赖样式注入顺序：
+   面板同时要压过 .dialog 的内边距/宽度基线与 .glass 的悬浮形变；
+   面板本身不是可交互元素，过渡链收窄以免无意义的插值重绘 */
+div.dialog.reg-panel {
+  display: flex; flex-direction: column;
+  width: min(540px, 92vw);
+  min-width: 0;
+  max-width: min(540px, 92vw);
+  padding: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 12% 0%, rgba(var(--accent-rgb), 0.05), transparent 44%),
+    radial-gradient(ellipse at 90% 100%, rgba(var(--accent-purple-rgb), 0.045), transparent 46%),
+    rgba(12, 16, 25, 0.96);
+  transition: none;
+  animation: reg-panel-in 0.42s var(--ease) both;
+}
+/* 静态裁定：悬浮与静置同貌（静态阴影一次定值，零逐帧重绘） */
+div.dialog.reg-panel,
+div.dialog.reg-panel:hover {
+  border-color: rgba(205, 224, 244, 0.12);
+  box-shadow:
+    0 32px 80px rgba(var(--black-rgb), 0.68),
+    inset 0 1px 0 rgba(var(--white-rgb), 0.06);
+}
+@keyframes reg-panel-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.975); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ===== 头部：徽记 + 双层标题 + 关闭 ===== */
+.reg-head {
+  position: relative;
+  display: flex; align-items: center; gap: 14px;
+  padding: 18px 18px 15px 22px;
+  border-bottom: 1px solid var(--border-glass);
+}
+/* 底缘收笔：中段一脉微亮（静态一次定值，不从属任何循环） */
+.reg-head::after {
+  content: ""; position: absolute; left: 22px; right: 18px; bottom: -1px; height: 1px;
+  background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.3), rgba(205, 224, 244, 0.16) 46%, transparent 88%);
+  pointer-events: none;
+}
+/* 枢轴徽记：实心枢核 + 两道互错开环（开环即「编制中」的登记意象） */
+.reg-mark {
+  display: block; flex-shrink: 0;
+  width: 26px; height: 26px;
+  color: rgba(var(--accent-rgb), 0.9);
+}
+.reg-mark svg { display: block; width: 100%; height: 100%; }
+.reg-heading { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.reg-kicker {
+  font-size: 10px; letter-spacing: 3px; line-height: 1.2;
+  color: var(--text-muted); font-family: var(--font);
+}
+.reg-title {
+  font-size: 16px; font-weight: 500; letter-spacing: 1px; line-height: 1.3;
+  color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.reg-close {
+  display: flex; align-items: center; justify-content: center;
+  margin-left: auto; flex-shrink: 0;
+  width: 28px; height: 28px;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  color: var(--text-muted); cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+.reg-close svg { width: 13px; height: 13px; }
+.reg-close:hover {
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+  background-color: rgba(var(--accent-rgb), 0.06);
+}
+.reg-close:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 2px; }
+.reg-close:active { color: var(--accent); }
+
+/* ===== 登记区：分区排列，左缘一条刻度轴贯穿 ===== */
+.reg-body {
+  position: relative;
+  flex: 1; min-height: 0;
+  padding: 16px 26px 6px 42px;
+  overflow-y: auto; overflow-x: hidden;
+}
+.reg-body::before {
+  content: ""; position: absolute; left: 23px; top: 20px; bottom: 14px; width: 1px;
+  background: linear-gradient(180deg, transparent, var(--border-glass) 8%, var(--border-glass) 92%, transparent);
+  pointer-events: none;
+}
+.reg-section {
+  --rs: 0;
+  animation: reg-sec-in 0.5s var(--ease) both;
+  animation-delay: calc(0.05s + var(--rs) * 0.07s);
+}
+.reg-section + .reg-section { margin-top: 18px; }
+@keyframes reg-sec-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.reg-sec-head {
+  position: relative;
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 11px;
+}
+/* 分区主刻度：轴上更长的一节，标识分区锚点 */
+.reg-sec-head::before {
+  content: ""; position: absolute; left: -19px; top: 50%; width: 9px; height: 1px;
+  background: rgba(var(--accent-rgb), 0.34);
+}
+.reg-sec-no {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 1.5px;
+  color: rgba(var(--accent-rgb), 0.7);
+}
+.reg-sec-name { font-size: 11px; letter-spacing: 2.5px; color: var(--text-secondary); }
+/* 分区引线：铺展划入（一次性因果动效——登记即划线） */
+.reg-rule {
+  flex: 1; height: 1px; margin-left: 2px;
+  background: linear-gradient(90deg, rgba(var(--white-rgb), 0.09), rgba(var(--white-rgb), 0.02) 72%, transparent);
+  transform-origin: left center;
+  animation: reg-rule-in 0.6s var(--ease) both;
+  animation-delay: calc(0.12s + var(--rs) * 0.07s);
+}
+@keyframes reg-rule-in {
+  from { transform: scaleX(0); opacity: 0; }
+  to { transform: scaleX(1); opacity: 1; }
+}
+.reg-req {
+  font-style: normal; margin-right: 3px;
+  color: rgba(var(--danger-rgb), 0.66);
+}
+
+/* ===== 登记行：标签右对齐 + 控件左伸，行刻度随聚焦注能 ===== */
+.reg-row {
+  position: relative;
+  display: grid; grid-template-columns: 54px minmax(0, 1fr);
+  gap: 14px; align-items: center;
+}
+.reg-row + .reg-row { margin-top: 10px; }
+.reg-row::before {
+  content: ""; position: absolute; left: -19px; top: 50%; width: 7px; height: 1px;
+  background: var(--border-glass);
+  transition: background-color var(--dur-fast) var(--ease);
+}
+.reg-row:focus-within::before { background: var(--accent); }
+.reg-key {
+  font-size: 11px; letter-spacing: 1px; text-align: right;
+  color: var(--text-muted); cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+  user-select: none;
+}
+.reg-row:focus-within .reg-key { color: var(--accent); }
+
+/* ===== 控件：凹槽形（挖入面板），聚焦补一道冷白内收边 ===== */
+.reg-input {
+  width: 100%; min-width: 0;
+  padding: 7px 11px;
+  background-color: rgba(var(--black-rgb), 0.34);
+  border: 1px solid rgba(var(--white-rgb), 0.07);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px; font-family: var(--font);
+  outline: none;
+  box-shadow: inset 0 1px 2px rgba(var(--black-rgb), 0.3);
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+.reg-input::placeholder { color: var(--text-muted); }
+.reg-input:hover { border-color: rgba(var(--white-rgb), 0.12); }
+.reg-input:focus {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background-color: rgba(var(--black-rgb), 0.44);
+  box-shadow:
+    inset 0 1px 2px rgba(var(--black-rgb), 0.3),
+    inset 0 1px 0 rgba(214, 244, 255, 0.08);
+}
+/* 多行变体：备注类长文本（纵向可调，几何由使用方约束） */
+.reg-textarea {
+  resize: vertical;
+  min-height: 52px; max-height: 150px;
+  line-height: 1.65;
+}
+/* 控件组：输入 + 尾部图标按钮（如密钥显隐），按钮用全局 icon-btn 词汇 */
+.reg-input-group { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.reg-input-group .reg-input { flex: 1; }
+.reg-select {
+  appearance: none;
+  padding-right: 30px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236c7689' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+.reg-select option { background: rgba(20, 22, 30, 0.95); color: var(--text-primary); }
+
+/* ===== 到期行：日期 + 状态读数（能量点三态：实心/半透/空心） ===== */
+.reg-expiry { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.reg-date-wrap { position: relative; flex: 0 0 150px; cursor: pointer; }
+.reg-date { color: transparent; cursor: pointer; padding-right: 30px; }
+.reg-date.has-value { color: var(--text-primary); }
+.reg-date::-webkit-calendar-picker-indicator {
+  position: absolute; right: 9px; top: 50%; transform: translateY(-50%);
+  opacity: 0.55; filter: invert(0.75); cursor: pointer;
+}
+.reg-date::-webkit-calendar-picker-indicator:hover { opacity: 0.9; }
+.reg-date-ph {
+  position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+  font-size: 13px; color: var(--text-muted); pointer-events: none;
+}
+/* 读数：等宽字体，紧贴控件右侧的仪器式回显 */
+.reg-readout {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.4px;
+  white-space: nowrap; flex-shrink: 0;
+  color: var(--text-muted);
+}
+.reg-readout-dot {
+  position: relative; flex-shrink: 0;
+  width: 7px; height: 7px; box-sizing: border-box;
+  border: 1.5px solid currentColor; border-radius: 50%;
+}
+.reg-readout.is-valid { color: var(--success); }
+.reg-readout.is-valid .reg-readout-dot::after {
+  content: ""; position: absolute; inset: 1px; border-radius: 50%; background: currentColor;
+}
+.reg-readout.is-expiring { color: var(--warning); }
+.reg-readout.is-expiring .reg-readout-dot::after {
+  content: ""; position: absolute; inset: 1px; border-radius: 50%;
+  background: currentColor; opacity: 0.5;
+}
+.reg-readout.is-expired { color: var(--danger); }
+
+/* ===== 凭据舱：内容区与工具栏同舱，拖拽即收纳 ===== */
+.reg-vault {
+  position: relative;
+  border: 1px solid rgba(var(--white-rgb), 0.07);
+  border-radius: 8px;
+  background-color: rgba(var(--black-rgb), 0.34);
+  box-shadow: inset 0 1px 2px rgba(var(--black-rgb), 0.3);
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+/* 舱位刻度：与登记行同轴的次刻度，聚焦/收纳态同步注能 */
+.reg-vault::before {
+  content: ""; position: absolute; left: -19px; top: 20px; width: 7px; height: 1px;
+  background: var(--border-glass);
+  transition: background-color var(--dur-fast) var(--ease);
+}
+.reg-vault:hover { border-color: rgba(var(--white-rgb), 0.12); }
+.reg-vault:focus-within {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background-color: rgba(var(--black-rgb), 0.44);
+}
+.reg-vault:focus-within::before { background: var(--accent); }
+.reg-vault.is-drag {
+  border-color: rgba(var(--accent-rgb), 0.7);
+  background-color: rgba(var(--accent-rgb), 0.07);
+}
+.reg-vault.is-drag::before { background: var(--accent); }
+.reg-vault-input {
+  display: block; width: 100%;
+  min-height: 104px; max-height: 260px;
+  padding: 12px 14px 8px;
+  background: none; border: none; outline: none; resize: vertical;
+  color: var(--text-primary);
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.7; letter-spacing: 0.3px;
+}
+.reg-vault-input::placeholder {
+  color: var(--text-muted);
+  font-family: var(--font); font-size: 12px; letter-spacing: 0.5px;
+}
+.reg-vault-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 12px 7px 8px;
+  border-top: 1px solid rgba(var(--white-rgb), 0.05);
+  background-color: rgba(var(--white-rgb), 0.015);
+  border-radius: 0 0 8px 8px;
+}
+.reg-vault-import {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 9px;
+  background: none; border: 1px solid transparent; border-radius: 5px;
+  color: var(--text-secondary); font-size: 11px; font-family: var(--font); letter-spacing: 0.5px;
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+.reg-vault-import svg { width: 12px; height: 12px; opacity: 0.85; }
+.reg-vault-import:hover {
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.24);
+  background-color: rgba(var(--accent-rgb), 0.06);
+}
+.reg-vault-import:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 1px; }
+.reg-vault-file {
+  min-width: 0; max-width: 200px; flex-shrink: 1;
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.3px;
+  color: var(--accent);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 舱底读数：字符/行数（拖拽时切换为收纳提示） */
+.reg-vault-readout {
+  margin-left: auto; flex-shrink: 0;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.5px;
+  color: var(--text-muted); white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease);
+}
+.reg-vault.is-drag .reg-vault-readout { color: var(--accent); }
+.reg-file-input { display: none; }
+
+/* ===== 选项条：整行可点的开关（勾选态注能），可联动一张附属登记行 ===== */
+.reg-option {
+  position: relative;
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 12px;
+  border: 1px solid rgba(var(--white-rgb), 0.07);
+  border-radius: 6px;
+  background-color: rgba(var(--black-rgb), 0.22);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+/* 选项条刻度：与登记行同轴的次刻度 */
+.reg-option::before {
+  content: ""; position: absolute; left: -19px; top: 50%; width: 7px; height: 1px;
+  background: var(--border-glass);
+  transition: background-color var(--dur-fast) var(--ease);
+}
+.reg-option:hover { border-color: rgba(var(--white-rgb), 0.12); }
+.reg-option.on {
+  border-color: rgba(var(--accent-rgb), 0.35);
+  background-color: rgba(var(--accent-rgb), 0.05);
+}
+.reg-option.on::before { background: var(--accent); }
+/* 原生复选框视觉隐藏但保留可聚焦路径（键盘可达），勾选态由 .on 表意 */
+.reg-option-input {
+  position: absolute; width: 1px; height: 1px;
+  opacity: 0; pointer-events: none;
+}
+.reg-option-check {
+  position: relative; flex-shrink: 0;
+  width: 14px; height: 14px; box-sizing: border-box;
+  border: 1px solid rgba(var(--white-rgb), 0.14); border-radius: 3px;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+.reg-option.on .reg-option-check { background-color: var(--accent); border-color: var(--accent); }
+.reg-option.on .reg-option-check::after {
+  content: ""; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px;
+  border: solid #04121a; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.reg-option-input:focus-visible + .reg-option-check {
+  outline: 1px solid var(--border-hover); outline-offset: 2px;
+}
+.reg-option-text { font-size: 12px; letter-spacing: 0.5px; color: var(--text-secondary); }
+.reg-option.on .reg-option-text { color: var(--text-primary); }
+.reg-option-hint {
+  margin-left: auto;
+  font-size: 10.5px; letter-spacing: 0.3px;
+  color: var(--text-muted); font-family: var(--font);
+  white-space: nowrap;
+}
+/* 编辑既有加密记录时开关锁定：禁用语义走光标与沉降 */
+.reg-option:has(.reg-option-input:disabled) { cursor: not-allowed; opacity: 0.55; }
+/* 选项条联动的附属行：入场一次性浮现 */
+.reg-option-row { margin-top: 10px; animation: reg-row-in 0.28s var(--ease) both; }
+@keyframes reg-row-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ===== 校验提示：左缘竖标 + 瞥入（一次性冲量，非循环抖动） ===== */
+.reg-error {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 26px 4px;
+  padding: 8px 12px;
+  color: var(--danger);
+  font-size: 11px; font-family: var(--font); letter-spacing: 0.3px;
+  background-color: rgba(var(--danger-rgb), 0.05);
+  border: 1px solid rgba(var(--danger-rgb), 0.22);
+  border-radius: 6px;
+  animation: reg-error-in 0.36s var(--ease);
+}
+.reg-error::before {
+  content: ""; flex-shrink: 0;
+  width: 2px; align-self: stretch; border-radius: 1px;
+  background: var(--danger); opacity: 0.75;
+}
+.reg-error svg { width: 13px; height: 13px; flex-shrink: 0; opacity: 0.9; }
+@keyframes reg-error-in {
+  0% { opacity: 0; transform: translateX(-6px); }
+  55% { transform: translateX(2px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+
+/* 动作区：贴底收束，随面板圆角内收 */
+.dialog.reg-panel .dialog-actions {
+  margin-top: 0;
+  padding: 14px 22px 16px;
+  background: linear-gradient(180deg, transparent, rgba(var(--black-rgb), 0.22));
+}
+
+/* 无障碍：偏好减少动态时，一次性入场直接落到终态 */
+@media (prefers-reduced-motion: reduce) {
+  div.dialog.reg-panel,
+  .reg-section,
+  .reg-rule,
+  .reg-error,
+  .reg-option-row { animation: none; }
+}
+
+/* ===== 宽幅变体：reg-wide — 双舱并置（中枢 · 密钥轮换台）=====
+ * 双舱（现行 / 继任）需要横向空间；窄视口由使用方降级单列，
+ * min() 钳制确保任何窗口不溢出 */
+div.dialog.reg-panel.reg-wide {
+  width: min(780px, 94vw);
+  min-width: 0;
+  max-width: min(780px, 94vw);
+}

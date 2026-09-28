@@ -594,15 +594,25 @@ async function processDecryptMeta(
  *
  * @param slim 索引瘦身布局参数（包裹态文件密钥与块总数）：提供时先解封
  *   随机文件密钥，再按 nonce|密文 布局逐块解密（AD 绑定由序号位置给出）
+ * @param verify 完整性权威值：逐块密文哈希在解密前比对；
+ *   整图明文哈希在解密后按序增量比对。任一不符即拒绝该任务，
+ *   主线程不再重算（确定性失败）。
  */
 async function processDecryptChunks(
   chunksB64: string[],
   photoKey: string,
   fileHashHex: string,
   slim?: { wrappedFileKey: string; chunkTotal: number },
+  verify?: { expectedHashes?: string[]; expectedFileHash?: string },
 ): Promise<ArrayBuffer[]> {
   if (chunksB64.length === 0) {
     throw new Error("待解密块列表为空");
+  }
+  const expectedHashes = verify?.expectedHashes;
+  if (expectedHashes && expectedHashes.length > 0 && expectedHashes.length !== chunksB64.length) {
+    throw new Error(
+      `哈希项数与块数不一致（哈希 ${expectedHashes.length}，块 ${chunksB64.length}）`,
+    );
   }
   if (slim && (!Number.isInteger(slim.chunkTotal) || slim.chunkTotal !== chunksB64.length)) {
     throw new Error(`块总数与密文数量不一致（声明 ${slim.chunkTotal}，实得 ${chunksB64.length}）`);
@@ -614,10 +624,23 @@ async function processDecryptChunks(
       fileKey = await unwrapSlimFileKey(slim.wrappedFileKey, photoKey);
     }
     const plaintexts: ArrayBuffer[] = [];
+    // 整图哈希增量计算：不拼接大缓冲，逐块喂入哈希器
+    const fileHasher = verify?.expectedFileHash
+      ? blake3.create({ dkLen: FILE_HASH_LEN })
+      : null;
     for (let c = 0; c < chunksB64.length; c++) {
       try {
+        if (expectedHashes && expectedHashes.length > 0) {
+          // 逐块密文哈希在解密前校验：先证密文与权威值一致，再解明文；
+          // 不一致即拒绝该任务（确定性失败，主线程不重算）。
+          const actual = bytesToHex(blake3(base64ToBytes(chunksB64[c]), { dkLen: FILE_HASH_LEN }));
+          if (actual !== expectedHashes[c]) {
+            throw new Error(`块密文哈希校验失败（第 ${c + 1}/${chunksB64.length} 块）`);
+          }
+        }
         if (fileKey) {
           const plaintext = decryptSlimChunk(chunksB64[c], fileKey, fileHashHex, c, chunksB64.length);
+          fileHasher?.update(plaintext);
           plaintexts.push(toTransferableBuffer(plaintext));
         } else {
           const { plaintext, seq, total } = await decryptChunk(chunksB64[c], photoKey, fileHashHex);
@@ -629,11 +652,20 @@ async function processDecryptChunks(
               `数据块顺序校验失败（seq=${seq} total=${total}，期望 ${c}/${chunksB64.length}）`,
             );
           }
+          fileHasher?.update(plaintext);
           plaintexts.push(toTransferableBuffer(plaintext));
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new Error(`第 ${c + 1}/${chunksB64.length} 块解密失败: ${msg}`);
+      }
+    }
+    if (fileHasher && verify?.expectedFileHash) {
+      const actualFileHash = bytesToHex(fileHasher.digest());
+      if (actualFileHash !== verify.expectedFileHash) {
+        throw new Error(
+          `整图哈希校验失败（期望 ${verify.expectedFileHash}，实际 ${actualFileHash}）`,
+        );
       }
     }
     return plaintexts;
@@ -722,12 +754,17 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
 
   // ===== 数据块解密路径（查看原图） =====
   if (isDecryptChunksRequest(req)) {
-    const { id, chunksB64, photoKey, fileHashHex, label, wrappedFileKey, chunkTotal } = req;
+    const {
+      id, chunksB64, photoKey, fileHashHex, label,
+      wrappedFileKey, chunkTotal, expectedHashes, expectedFileHash,
+    } = req;
     try {
       const slim = wrappedFileKey !== undefined && chunkTotal !== undefined
         ? { wrappedFileKey, chunkTotal }
         : undefined;
-      const plaintexts = await processDecryptChunks(chunksB64, photoKey, fileHashHex, slim);
+      const plaintexts = await processDecryptChunks(
+        chunksB64, photoKey, fileHashHex, slim, { expectedHashes, expectedFileHash },
+      );
       // 明文随 transferList 零拷贝回传：转移后 Worker 侧失去访问权，
       // 明文不在工作线程多驻留一份
       workerScope.postMessage(assemblePhotoDecryptChunksSuccess(id, plaintexts), plaintexts);

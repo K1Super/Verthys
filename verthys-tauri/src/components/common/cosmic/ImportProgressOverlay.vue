@@ -16,8 +16,11 @@
     - detail?:  string   附加明细行（如清藏 "12 / 48 块 · 36%"）
     - showMeta?: boolean 是否显示百分比/耗时（默认 false，明细由 detail 承担）
     - compact?: boolean  紧凑通道（默认 true，居中悬浮更轻量）
+    - cancelable?: boolean 是否显示"取消"操作（默认 false）
+    - cancelLabel?: string 取消按钮文案
 
-  Emits: 无
+  Emits:
+    - cancel: 用户点击取消（调用方负责把取消意图传递给任务并收敛状态）
 -->
 <template>
   <div v-if="visible" class="import-overlay" role="status" aria-live="polite">
@@ -32,6 +35,9 @@
         :compact="compact"
       />
       <div v-if="detail" class="import-overlay-detail">{{ detail }}</div>
+      <button v-if="cancelable" type="button" class="import-overlay-cancel" @click="emit('cancel')">
+        {{ cancelLabel }}
+      </button>
     </div>
   </div>
 </template>
@@ -42,6 +48,7 @@
  *
  * 职责：仅为 QuantumProgressFlow 提供居中悬浮容器与遮罩，
  * 纯展示、单向数据流、零业务逻辑；动画仅走 opacity/transform。
+ * 取消操作只向调用方发出意图，任务收敛与状态复位由调用方负责。
  */
 import QuantumProgressFlow from './QuantumProgressFlow.vue';
 
@@ -60,6 +67,10 @@ interface Props {
   showMeta?: boolean;
   /** 紧凑通道模式 */
   compact?: boolean;
+  /** 是否显示取消操作 */
+  cancelable?: boolean;
+  /** 取消按钮文案 */
+  cancelLabel?: string;
 }
 
 withDefaults(defineProps<Props>(), {
@@ -69,7 +80,11 @@ withDefaults(defineProps<Props>(), {
   detail: '',
   showMeta: false,
   compact: true,
+  cancelable: false,
+  cancelLabel: '取消',
 });
+
+const emit = defineEmits<{ cancel: [] }>();
 </script>
 
 <style scoped>
@@ -96,6 +111,35 @@ withDefaults(defineProps<Props>(), {
   font-size: 12px;
   color: var(--text-muted, rgba(255, 255, 255, 0.5));
   font-family: var(--font, inherit);
+}
+
+/* 取消操作：无阴影、状态仅走背景/描边变化；可点击态明确 pointer */
+.import-overlay-cancel {
+  display: block;
+  margin: 12px auto 0;
+  padding: 6px 20px;
+  font-size: 12px;
+  font-family: var(--font, inherit);
+  color: var(--text-primary, #d4dae4);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.import-overlay-cancel:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: var(--border-hover, rgba(0, 212, 255, 0.25));
+}
+
+.import-overlay-cancel:active {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.import-overlay-cancel:focus-visible {
+  outline: 1px solid var(--accent, #00d4ff);
+  outline-offset: 2px;
 }
 
 @keyframes overlay-enter {

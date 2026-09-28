@@ -19,6 +19,8 @@
     "photo_max_bytes": 104857600,
     "max_record_name_bytes": 1024,
     "max_file_chunk_size": 4194304,
+    "write_file_chunk_bytes": 4194304,
+    "user_file_size_limit": 2147483648,
     "flush_max_retries": 3,
     "flush_retry_backoff_ms": 100,
     "flush_verify_timeout_ms": 5000,

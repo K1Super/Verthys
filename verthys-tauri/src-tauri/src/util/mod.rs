@@ -20,6 +20,7 @@
  *   - crypto:    密码学工具（PBKDF2/DPAPI/HMAC/ct_eq）
  *   - audit_log: 审计日志（HMAC 链式防篡改）
  *   - sandbox:   路径沙箱（白名单基目录 + resolve_and_validate）
+ *   - rate_limiter: 滑动窗口频率限制（共用实现，按用途分离实例）
  */
 /// HMAC 链式防篡改审计日志
 pub mod audit_log;
@@ -32,6 +33,8 @@ pub mod error;
 pub mod log_sanitizer;
 pub mod path;
 pub mod random;
+/// 滑动窗口频率限制（共用实现，按用途分离实例）
+pub mod rate_limiter;
 /// 路径沙箱白名单 + resolve_and_validate
 pub mod sandbox;
 /// 零化擦除的安全字符串包装（Zeroizing<String> + 透明 serde）

@@ -28,6 +28,15 @@ export const ENUM_RESPONSE_DATA_BUDGET_BYTES = 12582912;
 /** 单文件分块大小（字节）：FileVerthys 分块模型的分片口径 */
 export const MAX_FILE_CHUNK_SIZE_BYTES = 4194304;
 
+/** 照片单文件上限（字节）：导入闸门按此拒绝超限文件 */
+export const PHOTO_MAX_BYTES = 104857600;
+
+/** 单文件体量上限（字节）：用户授权文件读写（含分片）与单文件导出的统一上限 */
+export const USER_FILE_SIZE_LIMIT = 2147483648;
+
+/** 单文件导出累计上限（字节）：与 USER_FILE_SIZE_LIMIT 同源（同一上限的两个消费名） */
+export const MAX_EXPORT_SINGLE_BYTES = 2147483648;
+
 /** 落盘 flush 链重试次数上限 */
 export const FLUSH_MAX_RETRIES = 3;
 

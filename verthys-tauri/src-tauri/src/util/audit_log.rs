@@ -54,8 +54,18 @@ pub enum AuditEventType {
     FileDelete,
     // 剪贴板操作
     ClipboardClear,
+    /// 历史事件：隐私与剪贴板联动时期，隐私模式变更曾记入该事件名。
+    /// 保留变体使旧日志的反序列化与 HMAC 链验证可字节级复原；
+    /// 新代码不得再用该事件名记录隐私变更（改用 PrivacyModeChange）。
     ClipboardModeChange,
     ClipboardMonitorEvent,
+    // 隐私模式（窗口亲和性）操作
+    /// 隐私模式变更（开启 / 关闭 / 采纳 / 幂等）
+    PrivacyModeChange,
+    /// 隐私模式进入隔离（回滚失败 / 卡死 / 凭证不变式违反）
+    PrivacyQuarantine,
+    /// 隔离对账执行结果
+    PrivacyReconcile,
     // 状态文件操作
     StateCreate,
     StateModify,
@@ -107,6 +117,9 @@ impl AuditEventType {
             AuditEventType::ClipboardClear => "CLIPBOARD_CLEAR",
             AuditEventType::ClipboardModeChange => "CLIPBOARD_MODE_CHANGE",
             AuditEventType::ClipboardMonitorEvent => "CLIPBOARD_MONITOR_EVENT",
+            AuditEventType::PrivacyModeChange => "PRIVACY_MODE_CHANGE",
+            AuditEventType::PrivacyQuarantine => "PRIVACY_QUARANTINE",
+            AuditEventType::PrivacyReconcile => "PRIVACY_RECONCILE",
             AuditEventType::StateCreate => "STATE_CREATE",
             AuditEventType::StateModify => "STATE_MODIFY",
             AuditEventType::StateRepair => "STATE_REPAIR",
@@ -181,6 +194,100 @@ pub struct AuditEvent {
     /// 可选详情（错误码、参数摘要，不含密码/密钥/明文）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// 结构化扩展信息（新增记录可选，历史记录无此字段）
+    ///
+    /// 为空时跳过序列化：历史记录重新序列化后字节不变，
+    /// HMAC 链的逐条验证保持与旧版本完全一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<AuditExtensions>,
+}
+
+/// 审计扩展信息
+///
+/// 仅承载可追溯所需的非敏感结构化字段：凭证世代与租约、过渡身份号、
+/// 回读取值、回滚结果、失败窗口数量、采纳与对账结果。全部字段可选，
+/// 为空即不参与序列化。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AuditExtensions {
+    /// 凭证世代号
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    /// 未决租约号
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<u64>,
+    /// 过渡身份号
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transition_id: Option<u64>,
+    /// 回读得到的显示亲和性取值
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affinity_readback: Option<u32>,
+    /// 回滚结果（"ok" / "failed"）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<String>,
+    /// 还原失败的窗口数量
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stuck_windows: Option<usize>,
+    /// 采纳结果（"adopted"）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adoption: Option<String>,
+    /// 对账方向（"to_enabled" / "to_disabled"）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconcile: Option<String>,
+}
+
+impl AuditExtensions {
+    /// 是否为空：为空时不写入扩展块字段（保持记录最小化）
+    pub fn is_empty(&self) -> bool {
+        self.generation.is_none()
+            && self.lease_id.is_none()
+            && self.transition_id.is_none()
+            && self.affinity_readback.is_none()
+            && self.rollback.is_none()
+            && self.stuck_windows.is_none()
+            && self.adoption.is_none()
+            && self.reconcile.is_none()
+    }
+
+    pub fn generation(mut self, generation: u64) -> Self {
+        self.generation = Some(generation);
+        self
+    }
+
+    pub fn lease(mut self, lease_id: u64, generation: u64) -> Self {
+        self.lease_id = Some(lease_id);
+        self.generation = Some(generation);
+        self
+    }
+
+    pub fn transition(mut self, transition_id: u64) -> Self {
+        self.transition_id = Some(transition_id);
+        self
+    }
+
+    pub fn readback(mut self, value: u32) -> Self {
+        self.affinity_readback = Some(value);
+        self
+    }
+
+    pub fn rollback(mut self, ok: bool) -> Self {
+        self.rollback = Some(if ok { "ok".into() } else { "failed".into() });
+        self
+    }
+
+    pub fn stuck_windows(mut self, count: usize) -> Self {
+        self.stuck_windows = Some(count);
+        self
+    }
+
+    pub fn adoption(mut self) -> Self {
+        self.adoption = Some("adopted".into());
+        self
+    }
+
+    pub fn reconcile(mut self, to_enabled: bool) -> Self {
+        self.reconcile = Some(if to_enabled { "to_enabled".into() } else { "to_disabled".into() });
+        self
+    }
 }
 
 impl AuditEvent {
@@ -199,6 +306,7 @@ impl AuditEvent {
             resource_hash: String::new(),
             result,
             detail: None,
+            extensions: None,
         }
     }
 
@@ -211,6 +319,12 @@ impl AuditEvent {
     /// 设置详情
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
+        self
+    }
+
+    /// 设置结构化扩展信息
+    pub fn with_extensions(mut self, extensions: AuditExtensions) -> Self {
+        self.extensions = Some(extensions);
         self
     }
 }
@@ -309,7 +423,15 @@ pub fn append_audit(log_path: &Path, hmac_key: &[u8], event: AuditEvent) -> Resu
 ///
 /// 用于链式 HMAC 的前驱获取。
 /// 空文件或读取失败返回 None（首条记录使用全零 HMAC）。
+///
+/// 性能：审计日志只追加不清空，全量读取会让每次追加的成本随日志大小恶化，
+/// 把用户操作拖成秒级延迟。因此默认只读文件尾部窗口定位最后一行，
+/// 仅在尾窗口内无法解析（例如最后一行本身超过窗口）时回退全量读取。
 fn read_last_hmac(log_path: &Path) -> Option<String> {
+    if let Some(entry) = read_last_entry_in_tail(log_path) {
+        return Some(entry.hmac);
+    }
+
     if !log_path.exists() {
         return None;
     }
@@ -318,6 +440,35 @@ fn read_last_hmac(log_path: &Path) -> Option<String> {
     let last_line = content.lines().rfind(|l| !l.trim().is_empty())?;
     let entry: AuditLogEntry = serde_json::from_str(last_line).ok()?;
     Some(entry.hmac)
+}
+
+/// 尾窗口大小：单条审计记录远小于该值，窗口内必含完整最后一行
+const AUDIT_TAIL_WINDOW_BYTES: u64 = 64 * 1024;
+
+/// 只读文件尾部窗口解析最后一条记录
+///
+/// 窗口从文件中部切断时，受损的只会是窗口内第一行（可能截断半个多字节
+/// 字符或半个 JSON）；最后一行终点即文件末尾，天然完整。窗口内找不到
+/// 可解析的最后一行时返回 None，由调用方回退全量读取。
+fn read_last_entry_in_tail(log_path: &Path) -> Option<AuditLogEntry> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(log_path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    file.seek(SeekFrom::Start(len.saturating_sub(AUDIT_TAIL_WINDOW_BYTES)))
+        .ok()?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).ok()?;
+
+    let line = buffer
+        .split(|&byte| byte == b'\n')
+        .rev()
+        .find(|line| !line.iter().all(|byte| byte.is_ascii_whitespace()))?;
+    let line = std::str::from_utf8(line).ok()?;
+    serde_json::from_str(line).ok()
 }
 
 // ===== 审计日志校验 =====
@@ -438,5 +589,115 @@ mod tests {
 
         // 清理
         let _ = std::fs::remove_file(&log_path);
+    }
+
+    /// 历史条目（无扩展块字段）必须与新版本写入的条目共存于同一条链
+    ///
+    /// 事件内新增可选字段若破坏历史序列化字节序，本用例会因验签不匹配而失败。
+    #[test]
+    fn test_legacy_entry_without_extensions_still_verifies() {
+        let hmac_key = b"legacy_chain_key";
+        let zeros = "0".repeat(64);
+        // 历史格式事件 JSON：字段与顺序为旧版本序列化产物（无 extensions 字段）
+        let event_json = concat!(
+            r#"{"event_type":"KeyDerive","timestamp":"2026-01-01T00:00:00+00:00","#,
+            r#""session_id":"pid-1","source":"user","resource_hash":"","#,
+            r#""result":"success","detail":"legacy"}"#
+        );
+        let mut input = event_json.as_bytes().to_vec();
+        input.extend_from_slice(zeros.as_bytes());
+        let hmac = crate::util::crypto::hmac_sign(hmac_key, &input).unwrap();
+        let hmac_hex: String = hmac.iter().map(|b| format!("{:02x}", b)).collect();
+
+        let dir = std::env::temp_dir().join(format!("verthys_audit_legacy_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("legacy.log");
+        let line = format!(
+            r#"{{"event":{},"prev_hmac":"{}","hmac":"{}"}}"#,
+            event_json, zeros, hmac_hex
+        );
+        std::fs::write(&log_path, format!("{}\n", line)).unwrap();
+
+        assert!(
+            verify_audit_chain(&log_path, hmac_key).is_ok(),
+            "历史条目必须字节级兼容"
+        );
+
+        // 同文件追加一条含扩展块的新条目：链式关系继续成立
+        let event = AuditEvent::new(
+            AuditEventType::PrivacyModeChange,
+            "pid-1",
+            "user",
+            AuditResult::Success,
+        )
+        .with_extensions(
+            AuditExtensions::default()
+                .generation(7)
+                .readback(0x11)
+                .rollback(true),
+        );
+        append_audit(&log_path, hmac_key, event).unwrap();
+        assert!(verify_audit_chain(&log_path, hmac_key).is_ok(), "混合链必须通过");
+
+        // 篡改扩展块取值（世代号）：扩展块必须参与哈希，篡改即失败
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let tampered = content.replace("\"generation\":7", "\"generation\":8");
+        assert_ne!(content, tampered, "测试前置：扩展块应已写入");
+        std::fs::write(&log_path, tampered).unwrap();
+        assert!(
+            verify_audit_chain(&log_path, hmac_key).is_err(),
+            "扩展块篡改必须导致链验证失败"
+        );
+
+        let _ = std::fs::remove_file(&log_path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// 尾窗口读取：日志超过窗口大小时仍能正确定位最后一条记录
+    ///
+    /// 场景覆盖两条路径：
+    ///   1. 首条记录超长（窗口起点落在行中间）→ 追加第二条时回退全量读取；
+    ///   2. 文件已含完整尾行 → 追加第三条时走尾窗口快速路径。
+    #[test]
+    fn test_read_last_hmac_tail_window_boundary() {
+        let dir = std::env::temp_dir().join(format!("verthys_audit_tail_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("tail.log");
+        let hmac_key = b"tail_window_key";
+
+        // 首条记录超长：把文件推过尾窗口边界
+        let oversized = AuditEvent::new(
+            AuditEventType::KeyDerive,
+            "pid-1",
+            "user",
+            AuditResult::Success,
+        )
+        .with_detail("x".repeat(AUDIT_TAIL_WINDOW_BYTES as usize + 1024));
+        append_audit(&log_path, hmac_key, oversized).unwrap();
+
+        // 追加第二条：尾窗口内只有被截断的超长行，必须回退全量读取才能续链
+        let second = AuditEvent::new(
+            AuditEventType::PrivacyModeChange,
+            "pid-1",
+            "user",
+            AuditResult::Success,
+        )
+        .with_detail("尾窗口定位");
+        append_audit(&log_path, hmac_key, second).unwrap();
+
+        // 尾窗口路径：返回的必须是文件最后一行的 hmac
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let last_line = content.lines().rfind(|l| !l.trim().is_empty()).unwrap();
+        let entry: AuditLogEntry = serde_json::from_str(last_line).unwrap();
+        assert_eq!(
+            read_last_hmac(&log_path).as_deref(),
+            Some(entry.hmac.as_str())
+        );
+
+        // 链式完整性不受尾读定位影响
+        assert!(verify_audit_chain(&log_path, hmac_key).is_ok());
+
+        let _ = std::fs::remove_file(&log_path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

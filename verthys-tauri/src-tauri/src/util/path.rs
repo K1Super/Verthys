@@ -24,27 +24,37 @@
 
 use std::path::{Path, PathBuf};
 
-/// 路径标准化：反斜杠转正斜杠（跨平台适配）
+/// 路径标准化：反斜杠转正斜杠（跨平台适配）。
+///
+/// 例外：`\\?\` / `\\.\` 前缀路径原样返回——Win32 对带前缀的路径不执行
+/// 正斜杠归一，改写会让该路径失效（容器附属数据派生依赖同一纪律）。
 pub fn normalize_path(path: &str) -> String {
+    if path.starts_with(r"\\?\") || path.starts_with(r"\\.\") {
+        return path.to_string();
+    }
     path.replace('\\', "/")
 }
 
 /// 日志脱敏：隐藏用户路径中的用户名等敏感信息
+///
+/// 同时覆盖正斜杠与原生反斜杠两种写法（含 `\\?\` 前缀路径的原始形态）。
 pub fn sanitize_path(path: &str) -> String {
-    let normalized = normalize_path(path);
-    if let Ok(home) = std::env::var("USERPROFILE") {
+    let mut sanitized = normalize_path(path);
+    for key in ["USERPROFILE", "HOME"] {
+        let Ok(home) = std::env::var(key) else {
+            continue;
+        };
+        if home.is_empty() {
+            continue;
+        }
         let normalized_home = normalize_path(&home);
-        if normalized.contains(&normalized_home) {
-            return normalized.replace(&normalized_home, "<USER_HOME>");
+        if sanitized.contains(&normalized_home) {
+            sanitized = sanitized.replace(&normalized_home, "<USER_HOME>");
+        } else if sanitized.contains(&home) {
+            sanitized = sanitized.replace(&home, "<USER_HOME>");
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        let normalized_home = normalize_path(&home);
-        if normalized.contains(&normalized_home) {
-            return normalized.replace(&normalized_home, "<USER_HOME>");
-        }
-    }
-    normalized
+    sanitized
 }
 
 // ===== 路径输入硬校验 =====
@@ -149,9 +159,10 @@ pub fn validate_path_input(path: &str) -> Result<(), PathValidationError> {
     }
 
     // 6. 目录遍历 `..`
-    //    检查路径组件中是否包含 `..`（按分隔符分割后逐组件检查）
+    //    检查路径组件中是否包含 `..`（两种分隔符都参与分割：`\\?\` 前缀路径
+    //    保持原生反斜杠，不能被跳过）
     let normalized = normalize_path(path);
-    for component in normalized.split('/') {
+    for component in normalized.split(['/', '\\']) {
         if component == ".." {
             return Err(PathValidationError::ContainsParentDir);
         }
@@ -173,9 +184,9 @@ pub fn validate_path_input(path: &str) -> Result<(), PathValidationError> {
 
 /// 检测 Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）
 fn is_reserved_device_name(path: &str) -> bool {
-    // 提取路径最后一段的文件名（不含扩展名）
+    // 提取路径最后一段的文件名（两种分隔符都参与分割，兼容 `\\?\` 前缀路径）
     let normalized = normalize_path(path);
-    let filename = normalized.rsplit('/').next().unwrap_or("");
+    let filename = normalized.rsplit(['/', '\\']).next().unwrap_or("");
     // 去除扩展名
     let stem = filename.split('.').next().unwrap_or("");
     let stem_upper = stem.to_uppercase();
@@ -240,15 +251,20 @@ pub fn canonicalize_strict(path: &str) -> Result<PathBuf, String> {
 ///
 /// CI 红线：本函数不执行任何 I/O，仅做字符串前缀比较。
 ///
-/// 修复修复：trim 尾部分隔符（与 preflight_controller.rs 同步修复）
-///   驱动器根 D:\ canonicalize 后含尾部 \，规范化为 //?/d:/，
-///   需 trim 尾部 / 后再拼接分隔符，否则 //?/d:// 无法匹配 //?/d:/test。
+/// 比较口径：两侧统一进入「比较形式」——分隔符归一为正斜杠、剥离 `\\?\`
+/// 长路径前缀（该前缀不改变路径语义，仅关闭 Win32 路径解析）、去掉尾部分隔符。
+/// 仅用于字符串比较，不参与任何文件系统调用；`\\.\` 设备命名空间不剥离（保守拒绝）。
+/// 大小写不做折叠（与 canonicalize 返回值口径一致）。
 pub fn is_within_whitelist(path: &Path, whitelist: &[PathBuf]) -> bool {
-    let path_str = normalize_path(&path.to_string_lossy());
-    let path_str = path_str.trim_end_matches('/');
+    fn comparison_form(p: &Path) -> String {
+        let raw = p.to_string_lossy().replace('\\', "/");
+        let stripped = raw.strip_prefix("//?/").unwrap_or(&raw);
+        stripped.trim_end_matches('/').to_string()
+    }
+
+    let path_str = comparison_form(path);
     for base in whitelist {
-        let base_str = normalize_path(&base.to_string_lossy());
-        let base_str = base_str.trim_end_matches('/');
+        let base_str = comparison_form(base);
         // 精确匹配或为子路径（path 以 base/ 开头）
         if path_str == base_str || path_str.starts_with(&format!("{}/", base_str)) {
             return true;
@@ -355,7 +371,80 @@ mod tests {
     }
 
     #[test]
+    fn test_is_within_whitelist_handles_canonicalized_forms() {
+        // canonicalize 结果可能带 \\?\ 前缀并保留反斜杠，必须与原生白名单可比较
+        let whitelist = vec![PathBuf::from(r"\\?\C:\Users\test\data")];
+        assert!(is_within_whitelist(
+            &PathBuf::from(r"\\?\C:\Users\test\data\file.txt"),
+            &whitelist
+        ));
+        assert!(is_within_whitelist(
+            &PathBuf::from(r"C:\Users\test\data\file.txt"),
+            &whitelist
+        ));
+        // 驱动器根尾部分隔符（D:\ → D:）不得破坏前缀匹配
+        let root = vec![PathBuf::from(r"D:\")];
+        assert!(is_within_whitelist(&PathBuf::from(r"D:\"), &root));
+        assert!(is_within_whitelist(
+            &PathBuf::from(r"\\?\D:\data\file.txt"),
+            &root
+        ));
+        // 相似前缀不得误判通过
+        assert!(!is_within_whitelist(
+            &PathBuf::from(r"C:\Users\test\data_evil\x"),
+            &whitelist
+        ));
+    }
+
+    #[test]
     fn test_normalize_path() {
         assert_eq!(normalize_path("C:\\Users\\test"), "C:/Users/test");
+    }
+
+    #[test]
+    fn test_normalize_path_preserves_long_path_prefix() {
+        // 长路径前缀路径不得被改写（Win32 对其不做正斜杠归一）
+        let prefixed = r"\\?\D:\data\Vault.verthys";
+        assert_eq!(normalize_path(prefixed), prefixed);
+        let device = r"\\.\C:\data\Vault.verthys";
+        assert_eq!(normalize_path(device), device);
+        assert_eq!(normalize_path(r"D:\data\Vault.verthys"), "D:/data/Vault.verthys");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_validate_path_input_rejects_parent_dir_in_long_path() {
+        assert_eq!(
+            validate_path_input(r"\\?\D:\data\..\evil\Vault.verthys"),
+            Err(PathValidationError::ContainsParentDir)
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_validate_path_input_reserved_device_in_long_path() {
+        assert_eq!(
+            validate_path_input(r"\\?\D:\data\CON.txt"),
+            Err(PathValidationError::ReservedDeviceName)
+        );
+    }
+
+    #[test]
+    fn test_sanitize_path_redacts_long_path_form() {
+        let Ok(home) = std::env::var("USERPROFILE") else {
+            return; // 无用户目录环境时跳过（CI 沙箱不强制）
+        };
+        if home.is_empty() {
+            return;
+        }
+        let prefixed = format!(r"\\?\{}\Vault.verthys", home);
+        let sanitized = sanitize_path(&prefixed);
+        assert!(
+            sanitized.contains("<USER_HOME>"),
+            "带前缀路径中的用户目录必须被脱敏: {}",
+            sanitized
+        );
+        let native = format!(r"{}\Vault.verthys", home);
+        assert!(sanitize_path(&native).contains("<USER_HOME>"));
     }
 }

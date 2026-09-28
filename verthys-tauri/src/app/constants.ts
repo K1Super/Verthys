@@ -10,8 +10,22 @@
  * 调整渡越总时长只改此一处，编排相对节奏（包络锚点比例）保持不变 */
 export const ENTER_T_MS = 5000;
 
-/** 双缓冲预挂载点（毫秒，自渡越时钟 0 点）：
- * = 弹射交接（320ms）+ 逐字弹射动画（620ms）+ 余量（160ms）。
+/** 启动逆渡时长（毫秒）— 引擎逆渡与引导页品牌编排的统一权威源 */
+export const INTRO_T_MS = 3000;
+
+/** 引导页编排节点（毫秒，自组件挂载起算）— 与 INTRO_T_MS 同源对齐 */
+export const INTRO = {
+  /** 副标题入场（逆渡消散段） */
+  SUB_SHOWN: 2450,
+  /** 谱线充能完毕 → 呼吸驻留（逆渡收束 + 50ms 余量） */
+  CHARGED: INTRO_T_MS + 50,
+  /** 进入提示浮现（逆渡完成后） */
+  HINT_VISIBLE: INTRO_T_MS + 250,
+} as const;
+
+/** 双缓冲预挂载点（毫秒，自点击时刻起算）：
+ * = 逐字弹射最晚起始（--ed ≤ 312ms）+ 弹射时长（620ms，弹射完成
+ *   ≤ 932ms）+ 余量（≥ 168ms）。
  * MainView 在此时刻挂载进 prewarm 冻结层（visibility:hidden +
  * 动画 paused + pointer-events:none）——组件树构建 / 首次布局 /
  * composable 初始化的全部尖峰成本在蓄能段（视觉最平缓期）消化；
@@ -34,4 +48,14 @@ export const TRANSITION = {
    *  materialize 全屏过渡的满帧窗口 —「星系落定后氛围苏醒」语义
    *  精确保持（预挂载提前量已内含：ENTER_T_MS - PREWARM_MOUNT） */
   MAINVIEW_AMBIENT_WAIT: ENTER_T_MS - PREWARM_MOUNT,
+} as const;
+
+/** 无障碍编排（prefers-reduced-motion）：引擎正渡整体停用（无大幅
+ *  运动），页面流转压缩为短流程；预挂载节点沿用 PREWARM_MOUNT 不变
+ *  （双缓冲时序要求交接必须晚于预挂载）。 */
+export const TRANSITION_REDUCED = {
+  /** 页面交接点：预挂载 + 200ms 消化余量 */
+  PAGE_HANDOFF: PREWARM_MOUNT + 200,
+  /** 星河态切换：交接后 200ms（取景已就位 — 无运镜） */
+  GALAXY_PHASE: PREWARM_MOUNT + 400,
 } as const;

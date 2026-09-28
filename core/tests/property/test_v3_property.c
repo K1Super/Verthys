@@ -560,7 +560,7 @@ prop_fail:
 /* ================== 属性 3：事务 commit/rollback 超级块与 WAL 一致 ================== */
 
 #define P3_VERTHYS     "test_v3_prop_txn.verthys"
-#define P3_CACHE     "test_v3_prop_txn.verthys.idx_cache"
+#define P3_CACHE     "test_v3_prop_txn.verthys.d\\idx_cache"
 #define P3_PW        "prop-txn-pass"
 #define P3_PW_LEN    12
 #define P3_CONTENTS  8u

@@ -22,7 +22,11 @@
 #include <io.h>                 /* _fseeki64 / _ftelli64 */
 
 #define V3IC_T_BASE  "test_warmcache_v3"
-#define V3IC_T_CACHE "test_warmcache_v3.idx_cache"
+/* 附属目录布局：<容器>.d\idx_cache（与 container_layout 命名契约命中同一文件；
+ * 反斜杠拼接：\\?\ 长路径前缀路径不接受正斜杠） */
+#define V3IC_T_CACHE "test_warmcache_v3.d\\idx_cache"
+/* 旧布局：<容器>.idx_cache（仅作回退与回收断言） */
+#define V3IC_T_LEGACY "test_warmcache_v3.idx_cache"
 
 /* Header 字段偏移（与 160B 定长头布局一致，测试补丁专用） */
 #define V3IC_T_OFF_HMAC     46u
@@ -238,5 +242,66 @@ TEST(v3ic_roundtrip_and_layout_fuzz)
     verthys_secure_zero(key, sizeof(key));
     verthys_secure_zero(cid, sizeof(cid));
     v3ict_cleanup();
+    return 0;
+}
+
+/*
+ * 附属目录命名契约（与主进程 container_layout 命名契约互为镜像）：
+ *   1. save 落在 <容器>.d/idx_cache，并回收预置的旧布局缓存；
+ *   2. 缓存仅存在于旧布局时，try_load 仍命中（只读回退）；
+ *   3. delete 同时清除新旧两处。
+ */
+TEST(v3ic_sidecar_dir_contract)
+{
+    uint8_t key[VERTHYS_KEY_BYTES];
+    uint8_t cid[VERTHYS_V3IC_CONTAINER_ID_BYTES];
+    uint8_t tables_pt[32];
+    const uint64_t txid = 7;
+    uint8_t *t_out = NULL, *m_out = NULL;
+    size_t t_len = 0, m_len = 0;
+    int hit = -1;
+
+    v3ict_cleanup();
+    remove(V3IC_T_LEGACY);
+    verthys_random_bytes(key, sizeof(key));
+    verthys_random_bytes(cid, sizeof(cid));
+    memset(tables_pt, 0x5A, sizeof(tables_pt));
+
+    /* 1. 预置旧布局缓存：save 成功后必须被回收，权威文件落在附属目录 */
+    {
+        FILE *lf = fopen(V3IC_T_LEGACY, "wb");
+        CHECK(lf != NULL);
+        if (lf != NULL) {
+            CHECK(fwrite("stale", 1, 5, lf) == 5);
+            fclose(lf);
+        }
+    }
+    CHECK_EQ(verthys_warmcache_v3_save(V3IC_T_BASE, cid, txid, key,
+                                       tables_pt, sizeof(tables_pt), NULL, 0),
+             VERTHYS_OK);
+    CHECK_EQ(_access(V3IC_T_CACHE, 0), 0);          /* 附属目录内存在 */
+    CHECK(_access(V3IC_T_LEGACY, 0) != 0);          /* 旧布局已被回收 */
+
+    /* 2. 旧布局只读回退：权威缓存搬到旧路径后仍应命中 */
+    CHECK_EQ(rename(V3IC_T_CACHE, V3IC_T_LEGACY), 0);
+    CHECK_EQ(verthys_warmcache_v3_try_load(V3IC_T_BASE, cid, txid, key,
+                                           &t_out, &t_len, &m_out, &m_len, &hit),
+             VERTHYS_OK);
+    CHECK_EQ(hit, 1);
+    CHECK_EQ(t_len, sizeof(tables_pt));
+    CHECK(t_out != NULL && memcmp(t_out, tables_pt, sizeof(tables_pt)) == 0);
+    if (t_out != NULL) {
+        verthys_secure_zero(t_out, t_len);
+        free(t_out);
+    }
+
+    /* 3. delete 双清：新旧两处都不存在 */
+    CHECK_EQ(verthys_warmcache_v3_delete(V3IC_T_BASE), VERTHYS_OK);
+    CHECK(_access(V3IC_T_CACHE, 0) != 0);
+    CHECK(_access(V3IC_T_LEGACY, 0) != 0);
+    /* 附属目录本体由测试沙箱递归回收，此处无需处理 */
+
+    verthys_secure_zero(key, sizeof(key));
+    verthys_secure_zero(cid, sizeof(cid));
     return 0;
 }

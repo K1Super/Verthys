@@ -19,15 +19,29 @@
  *     无活跃导入会话时接触台账文件，避免与写者内存视图并发冲突；
  *   - 台账落盘失败不破坏已入库数据：GC 退化为保守语义（不删）。
  *
+ * 附属目录与旧布局迁移：
+ *   - 权威写路径：附属数据目录内 import.chunks.json（受 VerthysFileLock 保护）；
+ *   - 旧布局 <verthys_path>.import.chunks.json 仅作只读回退：首次加载先解析
+ *     成功再原子搬迁；解析失败不搬迁（保留现场），搬迁失败不阻断本次读取。
+ *
  * 依赖方向：repository → util（单向，禁止引用 controller/service/entry）。
  */
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::repository::container_layout;
+
+/// 「无法证明归属」的台账占位值。
+///
+/// 孤儿回收只删除归属为 0 的条目；当历史条目既未被 meta 引用、又缺少
+/// 可结算的引用记录时，回填本值将其冻结：既不参与回收，也不冒充真实归属。
+/// 记录 ID 自 1 起单调分配且永不复用，本值不会与真实归属冲突。
+pub const UNVERIFIABLE_OWNER: u64 = u64::MAX;
 
 /// 外置块记录 ID → 拥有者 meta 记录 ID 映射（0 = 未被引用，孤儿候选）
 ///
@@ -53,7 +67,17 @@ impl ChunkLedger {
         self.entries.remove(chunk_id).is_some()
     }
 
+    /// 查询块记录的当前归属；未登记返回 None
+    ///
+    /// 结算路径据此判断归属是否真的发生变化，避免无变更时重写台账文件。
+    pub fn owner_of(&self, chunk_id: u64) -> Option<u64> {
+        self.entries.get(&chunk_id).copied()
+    }
+
     /// 返回所有 owner==0（未被任何 meta 引用）的块记录 ID，升序
+    ///
+    /// 冻结条目（{@link UNVERIFIABLE_OWNER}）不在此列：它们归属不可证明，
+    /// 任何情况下都不得进入回收候选。
     pub fn garbage_ids(&self) -> Vec<u64> {
         let mut ids: Vec<u64> = self
             .entries
@@ -74,28 +98,12 @@ struct ChunkLedgerFile {
     entries: Vec<(u64, u64)>,
 }
 
-/// 计算给定 verthys 路径对应的台账文件路径（WAL 同目录）
-///
-/// 文件名为 `<verthys>.import.chunks.json`，与 WAL（`.import.wal`）同套
-/// 命名，均位于 verthys 文件同目录（受 VerthysFileLock 独占锁保护）。
-pub fn chunk_ledger_path_for(verthys_path: &str) -> PathBuf {
-    let mut p = PathBuf::from(verthys_path);
-    let mut name = p.file_name().map(|s| s.to_os_string()).unwrap_or_default();
-    name.push(".import.chunks.json");
-    p.set_file_name(name);
-    p
-}
-
-/// 从磁盘加载台账；文件不存在时返回空台账
+/// 解析既有台账文件（调用方保证文件存在）
 ///
 /// 解析失败（JSON 损坏、字段类型不符）向上传播为 Err，不静默吞掉：
 /// 损坏台账意味着 GC 判定依据不可信，宁可失败也不误删。
-pub fn load_chunk_ledger(verthys_path: &str) -> Result<ChunkLedger, String> {
-    let path = chunk_ledger_path_for(verthys_path);
-    if !path.exists() {
-        return Ok(ChunkLedger::default());
-    }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("块台账读取失败: {}", e))?;
+fn parse_ledger_file(path: &Path) -> Result<ChunkLedger, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("块台账读取失败: {}", e))?;
     let file: ChunkLedgerFile =
         serde_json::from_str(&text).map_err(|e| format!("块台账解析失败: {}", e))?;
     let mut ledger = ChunkLedger::default();
@@ -105,13 +113,40 @@ pub fn load_chunk_ledger(verthys_path: &str) -> Result<ChunkLedger, String> {
     Ok(ledger)
 }
 
+/// 从磁盘加载台账；文件不存在时返回空台账
+///
+/// 附属目录优先，旧布局命中即懒迁移（先解析成功再搬迁；搬迁失败不阻断读取）。
+pub fn load_chunk_ledger(verthys_path: &str) -> Result<ChunkLedger, String> {
+    let primary = container_layout::chunk_ledger_file_for(verthys_path);
+    if primary.exists() {
+        return parse_ledger_file(&primary);
+    }
+
+    let legacy = container_layout::legacy_chunk_ledger_file_for(verthys_path);
+    if !legacy.exists() {
+        return Ok(ChunkLedger::default());
+    }
+
+    let ledger = parse_ledger_file(&legacy)?;
+    match container_layout::migrate_legacy_file(&legacy, &primary) {
+        Ok(()) => log::info!("[chunk_ledger] 旧布局台账已收口至附属数据目录"),
+        Err(e) => log::warn!(
+            "[chunk_ledger] 旧布局台账迁移失败（保持原位置，下次访问重试）: {}",
+            e
+        ),
+    }
+    Ok(ledger)
+}
+
 /// 原子写出台账（tmp 文件 + write_all + sync_all + rename，沿用 WAL 的
 /// `.tmp` 命名套路）
 ///
 /// 写失败向上传播为 Err：调用方据此决定是否中断（写者路径）或退化为
 /// 保守 GC（不删）。rename 在 Windows 上目标不存在时原子替换。
+/// 目录保障失败同样上抛，不回退旧布局写入。
 pub fn save_chunk_ledger(verthys_path: &str, ledger: &ChunkLedger) -> Result<(), String> {
-    let path = chunk_ledger_path_for(verthys_path);
+    container_layout::ensure_sidecar_dir(verthys_path)?;
+    let path = container_layout::chunk_ledger_file_for(verthys_path);
     let mut tmp = path.clone();
     let mut name = tmp
         .file_name()
@@ -191,6 +226,20 @@ mod tests {
     }
 
     #[test]
+    fn test_frozen_owner_excluded_from_garbage() {
+        // 冻结条目（归属不可证明）不得进入回收候选；归属查询按原值返回
+        let mut ledger = ChunkLedger::default();
+        ledger.set_owner(1, 0);
+        ledger.set_owner(2, UNVERIFIABLE_OWNER);
+        ledger.set_owner(3, 42);
+
+        assert_eq!(ledger.garbage_ids(), vec![1]);
+        assert_eq!(ledger.owner_of(2), Some(UNVERIFIABLE_OWNER));
+        assert_eq!(ledger.owner_of(3), Some(42));
+        assert_eq!(ledger.owner_of(999), None);
+    }
+
+    #[test]
     fn test_remove_semantics() {
         let mut ledger = ChunkLedger::default();
         ledger.set_owner(11, 0);
@@ -215,7 +264,8 @@ mod tests {
         save_chunk_ledger(&verthys_path, &ledger).unwrap();
 
         // 文件内 entries 升序且结构自洽
-        let text = std::fs::read_to_string(chunk_ledger_path_for(&verthys_path)).unwrap();
+        let text =
+            std::fs::read_to_string(container_layout::chunk_ledger_file_for(&verthys_path)).unwrap();
         assert!(text.starts_with('{'));
         assert!(text.contains("\"entries\""));
         // 首个键值对应为 (1, 0)
@@ -223,5 +273,52 @@ mod tests {
 
         let loaded = load_chunk_ledger(&verthys_path).unwrap();
         assert_eq!(loaded.entries, ledger.entries);
+    }
+
+    #[test]
+    fn test_legacy_ledger_migrated_on_load() {
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let legacy = container_layout::legacy_chunk_ledger_file_for(&verthys_path);
+        std::fs::write(&legacy, r#"{"entries":[[7,55]]}"#).unwrap();
+
+        let loaded = load_chunk_ledger(&verthys_path).unwrap();
+        assert_eq!(loaded.owner_of(7), Some(55));
+
+        assert!(!legacy.exists(), "旧布局台账必须被搬走");
+        assert!(
+            container_layout::chunk_ledger_file_for(&verthys_path).exists(),
+            "搬移目标必须落在附属数据目录"
+        );
+    }
+
+    #[test]
+    fn test_legacy_ledger_corrupted_not_migrated() {
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let legacy = container_layout::legacy_chunk_ledger_file_for(&verthys_path);
+        std::fs::write(&legacy, "{not-json").unwrap();
+
+        assert!(load_chunk_ledger(&verthys_path).is_err());
+        assert!(legacy.exists(), "解析失败不得搬移（保留现场）");
+        assert!(!container_layout::chunk_ledger_file_for(&verthys_path).exists());
+    }
+
+    #[test]
+    fn test_save_leaves_no_tmp_residue() {
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let mut ledger = ChunkLedger::default();
+        ledger.set_owner(1, 0);
+        save_chunk_ledger(&verthys_path, &ledger).unwrap();
+
+        let tmp = std::path::PathBuf::from(format!(
+            "{}.tmp",
+            container_layout::chunk_ledger_file_for(&verthys_path).to_string_lossy()
+        ));
+        assert!(!tmp.exists(), "不得遗留台账临时文件");
     }
 }

@@ -2,7 +2,7 @@
 
 > 用时序图说明解锁、加解密、导出、更新/完整性校验四类跨层数据流，标注各方参与模块。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-09-28 · 维护人：K1Super
 
 ---
 
@@ -114,3 +114,48 @@ sequenceDiagram
     CT-->>API: 输出损坏 lid 列表 + 损坏数
     API->>INT: 启动期 integrity_verify_startup（.text/.rdata/.rhat HMAC）
 ```
+
+## 5. 导入域数据流（会话 · 台账 · 去重跳过与结算）
+
+图片（拾光）与文件（清藏）两条导入链路共用同一写入通道：全部写入经单写者
+串行，块归属由台账记账，孤儿块回收前先与会话日志结算。
+
+### 5.1 导入会话与台账结算（含 GC 守卫）
+
+```mermaid
+sequenceDiagram
+    participant FE as 前端管道（useFileImport / importPipeline）
+    participant TC as Tauri command（verthys_batch_controller.rs）
+    participant IW as 单写者通道（state/import_writer.rs）
+    participant LG as 块台账（repository/verthys_chunks.rs）
+    participant WL as 会话日志（repository/verthys_wal.rs）
+    FE->>TC: import_begin
+    TC->>WL: 载入快照 → 结算（committed chunk_ids → 台账 owner）并落盘
+    Note over TC: 结算落盘失败即拒绝创建会话（防未结算引用被回收）
+    FE->>TC: add_chunk_batch（块上传）
+    IW->>LG: 块入账 owner=0（上传中）
+    IW->>WL: 追加 pending
+    FE->>TC: add_records_batch（元数据）
+    IW->>LG: owner 改写为元数据 ID
+    IW->>WL: 追加 committed（含 verthys_id + chunk_ids）
+    FE->>TC: import_end（success=true）
+    IW->>LG: 台账落盘（失败即拒绝结束、保留日志供续传）
+    IW->>WL: 压缩日志
+    FE->>TC: gc_orphan_chunks
+    TC->>WL: 先结算（无法证明归属的历史条目冻结为不可回收值）
+    TC->>LG: 回收 owner 为空且已结算的块
+```
+
+### 5.2 去重跳过与删除释放
+
+- **去重键**：`fileHash = BLAKE3(明文 ‖ 格式版本 ‖ 形态标志)`；键集合持久于会话日志。
+- **导入**：键命中即文件级"去重跳过"（不计失败、不入列表、显式报告）；
+  块级重传不保证幂等（加密形态每块随机 IV，密文互异）。
+- **删除**：记录批量删除并落盘成功后执行 `forget_hashes`（日志追加删除墓碑）释放键，
+  同一文件即可重新导入；释放失败转入待重试队列，由下次导入开始前补释放。
+- **清藏删除**：块引用与元数据合并单次批量事务删除；删除提交后立即失效三层缓存
+  并落盘。失败语义：删除失败保持原状可重试（零副作用）；落盘失败保持条目并提供
+  "仅重放落盘"的重试入口（批量删除对缺失条目整体拒绝，删除步骤不可重放）；
+  去重释放失败不改变删除结论。
+- **内存口径**：分片读取上界 4MiB/次（越界即报错），块载荷在进程间层为 base64
+  但受批量预算约束（≤11.19MiB/批）；导入/导出内存占用与文件大小无关。

@@ -182,6 +182,11 @@ TEST(fuzz_extended_file);
 TEST(keysep_install_consumes_and_reports);
 TEST(keysep_commit_sleep_enforced);
 
+/* test_security_preset.c — 三档预设配置与快照读取（3 项） */
+TEST(preset_feature_bits_matrix);
+TEST(preset_switch_readback_idempotent);
+TEST(preset_snapshot_concurrent_stress);
+
 /* test_emergency.c — 应急响应分级（3 项） */
 TEST(emergency_telemetry_no_trigger);
 TEST(emergency_degrade_requires_window_threshold);
@@ -333,6 +338,7 @@ TEST(v3lsm_get_notfound_and_invalid);
 TEST(v3lsm_null_params_rejected);
 TEST(v3lsm_flush_manifest_save_fail_rollback);
 TEST(v3lsm_compact_manifest_save_fail_rollback);
+TEST(v3lsm_large_insert_find);
 
 /* test_sstable_budget.c — SSTable 写前预算（越界字节不落盘） */
 TEST(sstb_budget_rejects_before_physical_write);
@@ -340,6 +346,7 @@ TEST(sstb_budget_normal_write_unaffected);
 
 /* test_warmcache_v3.c — V3 温缓存（保存/加载/段布局矩形校验） */
 TEST(v3ic_roundtrip_and_layout_fuzz);
+TEST(v3ic_sidecar_dir_contract);
 
 /* test_v3_extent.c — 验收：V3 内容寻址 Extent（去重 + 完整性） */
 TEST(v3ext_hash_basics);
@@ -475,8 +482,8 @@ static void test_filter_save(int argc, char **argv)
 /* ------------------------------------------------------------------ *
  * 测试文件沙箱（测试残留文件统一管理与自动清除）
  *
- * 问题：各测试用相对路径创建临时文件（test_*.verthys / *.idx_cache /
- * WAL / manifest 等），测试进程的 CWD 决定落盘位置——从项目根直接运行
+ * 问题：各测试用相对路径创建临时文件（test_*.verthys / 附属数据目录
+ * <base>.d/（idx_cache 等） / WAL / manifest 等），测试进程的 CWD 决定落盘位置——从项目根直接运行
  * verthys_tests.exe 时，残留文件散落源码树根目录。
  *
  * 做法：main() 入口将 CWD 切换到构建树内专属沙箱目录
@@ -756,6 +763,12 @@ int main(int argc, char **argv)
     RUN_TEST(scd_error_code_passthrough);
     RUN_TEST(scd_detector_wiring_clean);
     test_state_checkpoint("syscall_direct");
+
+    /* 三档预设配置与快照读取（特性位契约 / 回读一致性 / 并发快照） */
+    RUN_TEST(preset_feature_bits_matrix);
+    RUN_TEST(preset_switch_readback_idempotent);
+    RUN_TEST(preset_snapshot_concurrent_stress);
+    test_state_checkpoint("security_preset");
 
     /* 防御闭环 7 路径状态查询（7/7 BLOCKED 运行时验证） */
     RUN_TEST(dcl_status_invalid_params);
@@ -1121,6 +1134,8 @@ int main(int argc, char **argv)
     RUN_TEST(v3lsm_null_params_rejected);
     RUN_TEST(v3lsm_flush_manifest_save_fail_rollback);
     RUN_TEST(v3lsm_compact_manifest_save_fail_rollback);
+    /* 大规模插入 + 全量查找（跳表 / 多表 flush / compaction 归并 / Bloom 全路径） */
+    RUN_TEST(v3lsm_large_insert_find);
     test_state_checkpoint("v3_lsm");
 
     /* SSTable 写前预算（越界字节不落盘 + 正常路径行为不变） */
@@ -1130,6 +1145,8 @@ int main(int argc, char **argv)
 
     /* V3 温缓存（保存/加载/段布局矩形校验：非法布局判 miss） */
     RUN_TEST(v3ic_roundtrip_and_layout_fuzz);
+    /* 附属目录命名契约：写入落点 / 旧布局回退 / 双清 */
+    RUN_TEST(v3ic_sidecar_dir_contract);
     test_state_checkpoint("warmcache_v3");
 
     /* 验收：V3 生命周期全链路（创建→写→读→删→改密→导出→导入重开）

@@ -30,7 +30,9 @@ use tauri::ipc::Channel;
 use tauri::Manager;
 
 use crate::constants::import_writer as wconst;
-use crate::constants::record_types::{TYPE_PHOTO_CHUNK, TYPE_PHOTO_CHUNK_SET, TYPE_PHOTO_THUMB};
+use crate::constants::record_types::{
+    TYPE_FILEVERTHYS_CHUNK, TYPE_PHOTO_CHUNK, TYPE_PHOTO_CHUNK_SET, TYPE_PHOTO_THUMB,
+};
 use crate::controller::types::{BatchRecordInput, ChunkBlob, ImportBatchProgress};
 use crate::repository::verthys_chunks::save_chunk_ledger;
 use crate::repository::verthys_wal::{ImportSession, WalEntry};
@@ -424,12 +426,15 @@ fn process_append_pending(
         match worker_add_record(state, rec.rtype, &rec.name, &rec.data_b64) {
             Ok(verthys_id) => {
                 // 4. WAL committed（逐条 fsync；数据已即时落盘）
+                //    同时携带本条引用的外置块集合：崩溃后据此把块归属结算
+                //    进台账，避免已提交记录引用的块被当作孤儿回收
                 match session.writer.append(&WalEntry::Committed {
                     import_id: import_id.clone(),
                     batch_id,
                     hash: rec.hash.clone(),
                     verthys_id,
                     name: rec.name.clone(),
+                    chunk_ids: rec.chunk_ids.clone(),
                 }) {
                     Ok(()) => {
                         session.mark_committed(&rec.hash);
@@ -496,11 +501,14 @@ fn process_append_pending(
         );
     }
 
-    // 外置块台账落盘（同一持锁窗口内，session_guard 尚未 drop）：失败仅
-    // 记 error 不中断批次。台账丢失不破坏已入库数据，GC 退化为保守不删。
+    // 外置块台账落盘（同一持锁窗口内，session_guard 尚未 drop）：失败不中断
+    // 批次，但必须置脏标记并在会话结束前重试。磁盘台账若停留在旧版本，已被
+    // meta 引用的块仍显示为孤儿候选；回收前的结算会依据 WAL 归属声明兜底，
+    // 且结束失败时拒绝压缩 WAL，确保归属声明不丢。
     if let Err(e) = save_chunk_ledger(&session.verthys_path, &session.chunk_ledger) {
+        session.ledger_dirty = true;
         log::error!(
-            "[import_writer] 批次 {} 块台账落盘失败（GC 退化为保守不删）: {}",
+            "[import_writer] 批次 {} 块台账落盘失败（将在会话结束前重试）: {}",
             batch_id,
             e
         );
@@ -579,6 +587,29 @@ fn worker_add_record(
     }
 }
 
+/// 外置块角色是否受支持：未知角色值一律拒收，防越界类型写入容器索引。
+///
+/// 受支持角色覆盖照片链路（数据块 / 缩略图 / 块集）与清藏链路（文件块），
+/// 各角色共用同一上传通道、会话幂等映射与孤儿台账。
+fn is_supported_chunk_rtype(rtype: u32) -> bool {
+    matches!(
+        rtype,
+        TYPE_PHOTO_CHUNK | TYPE_PHOTO_THUMB | TYPE_PHOTO_CHUNK_SET | TYPE_FILEVERTHYS_CHUNK
+    )
+}
+
+/// 由角色与块哈希派生块记录名。
+///
+/// 名称不承载原始文件名与分块序号：块记录是纯密文负载，与来源文件
+/// 解耦后同一内容块可跨文件复用（幂等键即哈希），也避免来源信息外泄。
+fn chunk_record_name(rtype: u32, hash: &str) -> String {
+    match rtype {
+        TYPE_PHOTO_THUMB => format!("thumb_{}", hash),
+        TYPE_PHOTO_CHUNK_SET => format!("cset_{}", hash),
+        _ => format!("chunk_{}", hash),
+    }
+}
+
 /// 外置块上传（写者线程内）：校验 → 会话内幂等去重 → worker add_record。
 ///
 /// 块记录不入 WAL：块是纯密文负载，meta committed 才是恢复单元；
@@ -642,7 +673,7 @@ fn process_append_chunks(
             continue;
         }
         let rtype = chunk.rtype.unwrap_or(TYPE_PHOTO_CHUNK);
-        if rtype != TYPE_PHOTO_CHUNK && rtype != TYPE_PHOTO_THUMB && rtype != TYPE_PHOTO_CHUNK_SET {
+        if !is_supported_chunk_rtype(rtype) {
             log::warn!(
                 "[import_writer] 块 {} 记录类型越界被拒绝: rtype={}",
                 idx,
@@ -652,11 +683,7 @@ fn process_append_chunks(
             ids.push(0);
             continue;
         }
-        let record_name = match rtype {
-            TYPE_PHOTO_THUMB => format!("thumb_{}", chunk.hash),
-            TYPE_PHOTO_CHUNK_SET => format!("cset_{}", chunk.hash),
-            _ => format!("chunk_{}", chunk.hash),
-        };
+        let record_name = chunk_record_name(rtype, &chunk.hash);
 
         // 会话内幂等去重：同哈希复用既有 ID（批次重试安全）
         if let Some(existing) = session.lookup_chunk(&chunk.hash) {
@@ -754,12 +781,28 @@ fn emit_progress(
 /// 关闭导入会话（写者线程内）：取出会话 → WAL finish（end 条目 +
 /// success 时 compact），会话随 guard 复位为空
 fn process_end(state: &AppState, success: bool) -> Result<EndOutcome, String> {
-    let session = {
-        let mut guard = state.lock_import_session();
-        guard.take()
-    };
-    let session =
-        session.ok_or_else(|| format!("无活跃导入会话，请先调用 {}", cmd::IMPORT_BEGIN))?;
+    let mut guard = state.lock_import_session();
+
+    // 成功结束必须先让台账落盘：台账是块归属的权威副本，若落盘失败仍压缩
+    // WAL，归属声明会随压缩消失，之后只能按过期台账回收。失败时保留会话与
+    // WAL，调用方可排除磁盘障碍后重试结束，不丢失任何已提交数据。
+    if success {
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| format!("无活跃导入会话，请先调用 {}", cmd::IMPORT_BEGIN))?;
+        if let Err(e) = save_chunk_ledger(&session.verthys_path, &session.chunk_ledger) {
+            log::error!("[import_writer] 会话结束前块台账落盘失败，拒绝结束: {}", e);
+            return Err(format!(
+                "块台账落盘失败，导入结束被拒绝（保留续传状态）: {}",
+                e
+            ));
+        }
+        session.ledger_dirty = false;
+    }
+
+    let session = guard
+        .take()
+        .ok_or_else(|| format!("无活跃导入会话，请先调用 {}", cmd::IMPORT_BEGIN))?;
 
     let import_id = session.import_id.clone();
     let total_committed = session.total_committed;
@@ -814,6 +857,15 @@ mod tests {
         }
     }
 
+    /// 台账落盘临时文件路径；把该路径占为目录即可令落盘确定性失败
+    fn ledger_tmp_path(verthys_path: &str) -> std::path::PathBuf {
+        let mut p = crate::repository::container_layout::chunk_ledger_file_for(verthys_path);
+        let mut name = p.file_name().map(|s| s.to_os_string()).unwrap_or_default();
+        name.push(".tmp");
+        p.set_file_name(name);
+        p
+    }
+
     #[test]
     fn test_process_end_success_compacts_and_clears_session() {
         let (state, verthys_path, _dir) = state_with_session();
@@ -829,6 +881,7 @@ mod tests {
                     hash: "h1".into(),
                     verthys_id: 42,
                     name: "a.jpg".into(),
+                    chunk_ids: Some(Vec::new()),
                 })
                 .unwrap();
         }
@@ -848,6 +901,46 @@ mod tests {
         let state = AppState::new();
         assert!(process_end(&state, true).is_err());
         assert!(process_end(&state, false).is_err());
+    }
+
+    #[test]
+    fn test_process_end_rejects_when_ledger_persist_fails() {
+        // 成功结束以减少 WAL 为前提：台账落盘失败必须拒绝结束并保留会话，
+        // 否则归属声明随压缩消失，之后只能按过期台账回收
+        let (state, verthys_path, _dir) = state_with_session();
+        let tmp_dir = ledger_tmp_path(&verthys_path);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let err = process_end(&state, true).unwrap_err();
+        assert!(err.contains("台账落盘失败"), "错误应说明台账落盘失败: {}", err);
+        assert!(
+            state.lock_import_session().is_some(),
+            "落盘失败必须保留会话以支持重试"
+        );
+
+        std::fs::remove_dir_all(&tmp_dir).unwrap();
+        let outcome = process_end(&state, true).unwrap();
+        assert_eq!(outcome.import_id, "imp-test");
+        assert!(state.lock_import_session().is_none());
+    }
+
+    #[test]
+    fn test_batch_ledger_persist_failure_marks_dirty_and_end_clears() {
+        let (state, verthys_path, _dir) = state_with_session();
+        let tmp_dir = ledger_tmp_path(&verthys_path);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        // worker 不可用 → 批次按条失败，但批次末尾仍会尝试台账落盘并失败
+        let records = vec![rec("a.jpg", "h1")];
+        let _ = process_append_pending(&state, records, None, &hb()).unwrap();
+        {
+            let guard = state.lock_import_session();
+            assert!(guard.as_ref().unwrap().ledger_dirty, "落盘失败应置脏标记");
+        }
+
+        // 排除障碍后，结束路径重试落盘并清除脏标记
+        std::fs::remove_dir_all(&tmp_dir).unwrap();
+        process_end(&state, true).unwrap();
     }
 
     #[test]
@@ -1002,6 +1095,35 @@ mod tests {
         let outcome = process_append_chunks(&state, &chunks, &hb()).unwrap();
         assert_eq!(outcome.failed_indices, vec![0]);
         assert_eq!(outcome.ids, vec![0]);
+    }
+
+    #[test]
+    fn test_chunk_rtype_whitelist_covers_fileverthys_and_rejects_others() {
+        // 受支持角色：照片数据块 / 缩略图 / 块集 + 清藏文件块
+        assert!(is_supported_chunk_rtype(TYPE_FILEVERTHYS_CHUNK));
+        assert!(is_supported_chunk_rtype(TYPE_PHOTO_CHUNK));
+        assert!(is_supported_chunk_rtype(TYPE_PHOTO_THUMB));
+        assert!(is_supported_chunk_rtype(TYPE_PHOTO_CHUNK_SET));
+
+        // 非外置载荷角色（元数据类型 / 加密根记录 / 越界值）一律拒收
+        assert!(!is_supported_chunk_rtype(0));
+        assert!(!is_supported_chunk_rtype(0x08));
+        assert!(!is_supported_chunk_rtype(0x10));
+        assert!(!is_supported_chunk_rtype(0x30));
+    }
+
+    #[test]
+    fn test_chunk_record_name_derivation_by_role() {
+        let hash = "d".repeat(64);
+
+        // 清藏文件块与照片数据块共用默认前缀；缩略图与块集各有专属前缀
+        assert_eq!(chunk_record_name(TYPE_FILEVERTHYS_CHUNK, &hash), format!("chunk_{hash}"));
+        assert_eq!(chunk_record_name(TYPE_PHOTO_CHUNK, &hash), format!("chunk_{hash}"));
+        assert_eq!(chunk_record_name(TYPE_PHOTO_THUMB, &hash), format!("thumb_{hash}"));
+        assert_eq!(chunk_record_name(TYPE_PHOTO_CHUNK_SET, &hash), format!("cset_{hash}"));
+
+        // 记录名不承载来源文件名与分块序号（可追溯性由哈希承担）
+        assert!(!chunk_record_name(TYPE_FILEVERTHYS_CHUNK, "e").contains("bin"));
     }
 
     #[test]

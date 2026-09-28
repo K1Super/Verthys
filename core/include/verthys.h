@@ -26,7 +26,7 @@
  *   #endif
  *
  * ================================================================== */
-#define VERTHYS_API_VERSION 0x000Cu
+#define VERTHYS_API_VERSION 0x000Du
 
 /* ================================================================== *
  * Verthys_Unlock flags 位域定义（API 版本 0x0005）
@@ -37,7 +37,7 @@
  * 位域定义：
  *   bit 0 (0x01)：索引区已完成预热，C 层可直接 CreateFileMapping
  *                 零拷贝读取索引区，跳过磁盘同步 IO
- *   bit 1 (0x02)：允许加载本地持久化缓存（.verthys.idx_cache）
+ *   bit 1 (0x02)：允许加载本地持久化缓存（附属数据目录 <容器>.d/idx_cache）
  *   bit 2 (0x04)：V3（API 版本 0x0009）渐进式
  *                 解锁——最小可操作优先：S0-S4（超块/密钥/分区表）完成后
  *                 立即返回 VERTHYS_ERR_PARTIAL_UNLOCK，索引预热转后台线程
@@ -315,7 +315,7 @@ typedef struct {
     /* === 可观测性指标扩展（5 项新增指标） === */
     /* 读写锁平均等待耗时（毫秒）— 采集 AcquireSRWLockShared/Exclusive 的排队耗时 */
     uint64_t lock_wait_ms;          /* 读写锁平均等待耗时（毫秒） */
-    /* 持久化缓存加载耗时（毫秒）— .verthys.idx_cache 加载全流程耗时 */
+    /* 持久化缓存加载耗时（毫秒）— 附属目录 .d\idx_cache 加载全流程耗时 */
     uint64_t cache_load_ms;         /* 持久化缓存加载耗时（毫秒） */
     /* 本次解锁磁盘实际读取字节数 — 累计真实磁盘 IO 量（不含命中页缓存） */
     uint64_t disk_bytes_read;       /* 本次解锁磁盘实际读取字节数 */
@@ -519,6 +519,42 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_CreateWithPreset(VerthysHandle ha
  */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_SwitchSecurityPreset(VerthysHandle handle,
                                                                     VerthysPreset preset);
+
+/*
+ * 查询当前活跃安全预设档位（0=BALANCED / 1=SECURE / 2=PERFORMANCE）
+ *
+ * 取自活跃配置快照，供调用方做切档回读校验（切换是否真实生效）。
+ * 进程启动后未显式切档时，活跃档位为平衡档基线。
+ *
+ * 返回值：
+ *   VERTHYS_OK          — 查询成功，*out_preset 已填充
+ *   VERTHYS_ERR_INVALID — handle / out_preset 为 NULL
+ *
+ * 线程安全：MT-Safe（快照读取，无锁）
+ */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetSecurityPreset(VerthysHandle handle,
+                                                                 uint32_t *out_preset);
+
+/*
+ * 查询指定预设档位的特性位投影（跨层特性契约，11 位）
+ *
+ * 位序（禁止重排）：
+ *   0 anti_debug / 1 anti_inject / 2 integrity_check / 3 memory_guard /
+ *   4 key_separation / 5 emergency_response / 6 session_lock_on_idle /
+ *   7 module_patrol / 8 clipboard_guard / 9 usb_clone_detect /
+ *   10 trace_cleanup
+ * 其中 2/6/7/8/9/10 为应用侧策略位（宿主按位执行），其余为 C 层消费能力。
+ * 该投影是档位矩阵的唯一权威输出，宿主展示与执行均以此为准。
+ *
+ * 返回值：
+ *   VERTHYS_OK          — 查询成功，*out_bits 已填充
+ *   VERTHYS_ERR_INVALID — handle / out_bits 为 NULL 或 preset 非法
+ *
+ * 线程安全：MT-Safe
+ */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetPresetFeatureBits(VerthysHandle handle,
+                                                                    VerthysPreset preset,
+                                                                    uint32_t *out_bits);
 
 /*
  * 锁定容器，清空内存中所有密钥与明文数据，句柄退回锁定不可操作状态

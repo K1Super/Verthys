@@ -13,6 +13,21 @@
   --bg-secondary: rgba(14, 18, 28, 0.75);
   --bg-tertiary: rgba(20, 26, 40, 0.7);
 
+  /* 星野导航带底板（单源）：冷调半透明纵向渐变，下缘自然消失 ——
+     StarlitSky 底板与「存签 / 枢钥 / 清藏」模块卡片背景共用此定义 */
+  --bar-surface: linear-gradient(
+    180deg,
+    rgba(13, 17, 27, 0.68),
+    rgba(10, 13, 21, 0.36) 66%,
+    rgba(10, 13, 21, 0.08)
+  );
+
+  /* 提示底板（单源）：玻璃体基面 —— 填充保持低不透明度让衬底透出，
+     可读性由背衬折射（backdrop-filter）与内缘收边共同承担；
+     斜向微光取自既有「光源偏左上」约定，语义色光晕与双平面星野
+     由 .clip-toast / .error-toast 叠加 */
+  --toast-surface: linear-gradient(168deg, rgba(16, 21, 33, 0.5), rgba(9, 12, 20, 0.36));
+
   /* RGB 三元组：供 rgba(var(--xxx-rgb), alpha) 动态组合，消除重复色值 */
   --accent-rgb: 0, 212, 255;
   --accent-dim-rgb: 0, 106, 133;
@@ -31,6 +46,11 @@
   --accent-glow: rgba(var(--accent-rgb), 0.15);
   --accent-purple: #8b5cf6;
   --accent-red: #ff2e63;
+
+  /* 卡片指针光晕（.card-shine / .photo-shine）强度单源：透明度与扩散范围在此
+     定义一次（色相取 --accent-rgb）；各表面只保留几何与混合模式差异（Wave 54 收口） */
+  --shine-alpha: 0.14;
+  --shine-reach: 60%;
 
   /* 文字：高通透白色，低对比 */
   --text-primary: #d4dae4;
@@ -60,6 +80,14 @@
   --dur-fast: 0.2s;
   --dur: 0.4s;
   --dur-slow: 0.8s;
+
+  /* 分层序（全局唯一权威源，按绘制序升序）：
+     Dock 50 → 模块弹窗 1000 → 查看器 2000 → 二次确认 3000 →
+     导出对话框 4000 → 扫描线 9998（body::after 混合层）→
+     背景遮罩 / 加载态 9999 → Toast 层 100000（全应用最高层 —
+     任何界面不得覆盖提示；提示层持有者 = .toast-layer，
+     提示本体不得再声明 z-index） */
+  --z-toast: 100000;
 
   /* 页面专属动效时长（App.vue 双缓冲层引用 — 与渡越序列引擎对齐，
    * 总时长唯一权威源 = constants.ts ENTER_T_MS（5s）：

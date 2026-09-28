@@ -38,7 +38,7 @@
 #include <stdio.h>
 
 #define V3L_VERTHYS  "test_v3life.verthys"
-#define V3L_CACHE  "test_v3life.verthys.idx_cache"
+#define V3L_CACHE  "test_v3life.verthys.d\\idx_cache"
 #define V3L_EXPORT "test_v3life_export.verthys"
 #define V3L_IMP    "test_v3life_imp.verthys"
 #define V3L_PW     "v3life-pass"

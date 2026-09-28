@@ -1,21 +1,15 @@
 <!--
-  AccountVerthys.vue — 账户密码库模块
-  布局：浮动搜索栏 + 卡片网格（非传统表格）
-  交互：3D 视差卡片、悬浮操作、密码复制倒计时
-  v2: 移除标签/密保，密码显隐用图标，支持单条密码独立加密
-  v3: 复用 VerthysSearchBar / VerthysDialog / ClipToast / useCardTilt / useClipToast
+  AccountVerthys.vue — 存签：账户密码库模块
+  列表：浮动搜索栏 + 卡片网格（3D 视差、悬浮操作、密码复制倒计时）
+  登记窗口：VerthysDialog 承载「凭证登记台」皮肤（与枢钥共用 reg-* 词汇），
+            独立加密开关联动独立密钥登记行；保存前校验以窗口内联提示反馈
 -->
 <template>
   <div class="account-verthys verthys-module">
-    <!-- 顶部错误提示弹窗 -->
-    <Teleport to="body">
-      <transition name="err-toast">
-        <div v-if="errorMsg" class="error-toast glass"><span class="toast-dot"></span>{{ errorMsg }}</div>
-      </transition>
-    </Teleport>
+    <!-- 瞬时提示（错误/复制倒计时）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
 
     <!-- 搜索栏 -->
-    <VerthysSearchBar v-model="searchKey" placeholder="搜索平台 / 账户…" add-label="新增账户" @add="onAdd" />
+    <VerthysSearchBar v-model="searchKey" placeholder="搜索平台 / 账户…" add-label="新增账户" :sky-seed="5" @add="onAdd" />
 
     <!-- 卡片网格：≥200 条启用虚拟滚动，小列表保留原 v-for 路径零开销 -->
     <VirtualCardGrid
@@ -97,33 +91,136 @@
       <CosmicEmpty v-if="!loading && filteredAccounts.length === 0" text="暂无账号" />
     </div>
 
-    <!-- 编辑对话框 -->
-    <VerthysDialog v-model="showDialog" :title="editing ? '编辑账户' : '新增账户'" @save="onSave" :save-disabled="form.encrypted && !form.encKey" width="420px">
-      <div class="form-field"><label>平台</label><input class="input" v-model="form.platform"/></div>
-      <div class="form-field"><label>账户</label><input class="input" v-model="form.username" /></div>
-      <div class="form-field full"><label>密码</label><input class="input" v-model="form.password" :type="formPwdVisible ? 'text' : 'password'" /></div>
-      <div class="form-field full"><label>备注</label><textarea class="input textarea" v-model="form.note" rows="2"></textarea></div>
-
-      <!-- 独立加密选项 -->
-      <div class="form-field full encrypt-row" :class="{ on: form.encrypted }">
-        <label class="encrypt-toggle">
-          <input type="checkbox" v-model="form.encrypted" :disabled="editing !== null && editing.fields.encrypted" />
-          <span class="encrypt-check"></span>
-          <span class="encrypt-label">加密此密码（需独立密钥才能查看）</span>
-        </label>
-        <div v-if="form.encrypted" class="encrypt-key-input">
-          <input
-            class="input"
-            v-model="form.encKey"
-            :type="encKeyVisible ? 'text' : 'password'"
-            :placeholder="editing ? '输入密钥以重新加密' : '设置独立密钥'"
-          />
-          <button class="icon-btn" @click="encKeyVisible = !encKeyVisible" tabindex="-1">
-            <svg v-if="!encKeyVisible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+    <!-- 账户登记窗口：与枢钥共用「凭证登记台」皮肤（分区登记行 + 刻度轴 + 选项条） -->
+    <VerthysDialog
+      v-model="showDialog"
+      :title="editing ? '编辑账户' : '新增账户'"
+      layout="plain"
+      class="reg-panel"
+      :save-label="editing ? '保存修改' : '登记入库'"
+      :save-disabled="form.encrypted && !form.encKey"
+      @save="onSave"
+    >
+      <template #header>
+        <header class="reg-head">
+          <span class="reg-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
+              <circle cx="12" cy="12" r="5.4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-dasharray="25.5 8.4" transform="rotate(38 12 12)" opacity="0.8" />
+              <circle cx="12" cy="12" r="8.6" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-dasharray="38.6 15.4" transform="rotate(-76 12 12)" opacity="0.45" />
+            </svg>
+          </span>
+          <span class="reg-heading">
+            <span class="reg-kicker">存签 · 账户登记</span>
+            <span class="reg-title">{{ editing ? '编辑账户' : '新增账户' }}</span>
+          </span>
+          <button class="reg-close" type="button" @click="showDialog = false" aria-label="关闭窗口" v-tip="'关闭'">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
-        </div>
+        </header>
+      </template>
+
+      <div class="reg-body">
+        <!-- 01 标识：平台 / 账户 -->
+        <section class="reg-section" :style="{ '--rs': '0' }">
+          <div class="reg-sec-head">
+            <span class="reg-sec-no">01</span>
+            <span class="reg-sec-name">标识</span>
+            <span class="reg-rule"></span>
+          </div>
+          <div class="reg-row">
+            <label class="reg-key" for="acc-f-platform"><i class="reg-req" aria-hidden="true">*</i>平台</label>
+            <input id="acc-f-platform" class="reg-input" v-model="form.platform" placeholder="如 GitHub / 公司邮箱" aria-required="true" />
+          </div>
+          <div class="reg-row">
+            <label class="reg-key" for="acc-f-username"><i class="reg-req" aria-hidden="true">*</i>账户</label>
+            <input id="acc-f-username" class="reg-input" v-model="form.username" placeholder="登录名或邮箱" aria-required="true" />
+          </div>
+        </section>
+
+        <!-- 02 凭据：密码（显隐切换） -->
+        <section class="reg-section" :style="{ '--rs': '1' }">
+          <div class="reg-sec-head">
+            <span class="reg-sec-no">02</span>
+            <span class="reg-sec-name">凭据<i class="reg-req" aria-hidden="true">*</i></span>
+            <span class="reg-rule"></span>
+          </div>
+          <div class="reg-row">
+            <label class="reg-key" for="acc-f-password">密码</label>
+            <div class="reg-input-group">
+              <input id="acc-f-password" class="reg-input" v-model="form.password" :type="formPwdVisible ? 'text' : 'password'" aria-required="true" />
+              <button
+                class="icon-btn"
+                type="button"
+                @click="formPwdVisible = !formPwdVisible"
+                :aria-label="formPwdVisible ? '隐藏密码' : '显示密码'"
+                v-tip="formPwdVisible ? '隐藏' : '显示'"
+              >
+                <svg v-if="!formPwdVisible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 03 加密：独立加密开关（编辑既有加密记录时锁定），启用后联动密钥登记行 -->
+        <section class="reg-section" :style="{ '--rs': '2' }">
+          <div class="reg-sec-head">
+            <span class="reg-sec-no">03</span>
+            <span class="reg-sec-name">加密</span>
+            <span class="reg-rule"></span>
+          </div>
+          <label class="reg-option" :class="{ on: form.encrypted }">
+            <input class="reg-option-input" type="checkbox" v-model="form.encrypted" :disabled="editing !== null && editing.fields.encrypted" />
+            <span class="reg-option-check"></span>
+            <span class="reg-option-text">独立加密</span>
+            <span class="reg-option-hint">查看时需二次输入独立密钥</span>
+          </label>
+          <div v-if="form.encrypted" class="reg-row reg-option-row">
+            <label class="reg-key" for="acc-f-encKey">密钥</label>
+            <div class="reg-input-group">
+              <input
+                id="acc-f-encKey"
+                class="reg-input"
+                v-model="form.encKey"
+                :type="encKeyVisible ? 'text' : 'password'"
+                :placeholder="editing ? '输入密钥以重新加密' : '设置独立密钥'"
+                aria-required="true"
+              />
+              <button
+                class="icon-btn"
+                type="button"
+                @click="encKeyVisible = !encKeyVisible"
+                :aria-label="encKeyVisible ? '隐藏密钥' : '显示密钥'"
+                v-tip="encKeyVisible ? '隐藏' : '显示'"
+              >
+                <svg v-if="!encKeyVisible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 04 附注：备注 -->
+        <section class="reg-section" :style="{ '--rs': '3' }">
+          <div class="reg-sec-head">
+            <span class="reg-sec-no">04</span>
+            <span class="reg-sec-name">附注</span>
+            <span class="reg-rule"></span>
+          </div>
+          <div class="reg-row">
+            <label class="reg-key" for="acc-f-note">备注</label>
+            <textarea id="acc-f-note" class="reg-input reg-textarea" v-model="form.note" rows="2" placeholder="可选备注信息"></textarea>
+          </div>
+        </section>
       </div>
+
+      <template #error v-if="formError">
+        <div class="reg-error">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          {{ formError }}
+        </div>
+      </template>
     </VerthysDialog>
 
     <!-- 解密密钥输入框 -->
@@ -143,9 +240,6 @@
         <div class="key-error">密钥错误或密码已损坏</div>
       </template>
     </VerthysDialog>
-
-    <!-- 复制提示 -->
-    <ClipToast :countdown="clipCountdown" text="密码已复制" />
 
     <!-- 非阻塞加载：无底板居中展示，加载完成自动消失 -->
     <CosmicLoading :show="loading" text="正在加载账户数据…" />
@@ -176,18 +270,17 @@ import {
 import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, ensureIndexSourceSafe, getSummaryIdsByType, getRecordIdsByType, invalidateScannedRecord, clearRecordScanCache, getRecordsDataB64Batch } from "../../lib/keyManager";
 import { TYPE_ACCOUNT, TYPE_ACCOUNT_LIST, TYPE_ACCOUNT_LEGACY, TYPE_ACCOUNT_OLD } from "../../constants/record_types";
 import { useClipToast } from "../../composables/useClipToast";
-import { useCardTilt } from "../../composables/useCardTilt";
-import { useErrorToast } from "../../composables/useErrorToast";
+import { useCardShine } from "../../composables/useCardShine";
+import { useToastCenter } from "../../composables/useToastCenter";
 import VerthysSearchBar from "../common/verthys-ui/VerthysSearchBar.vue";
 import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
-import ClipToast from "../common/verthys-ui/ClipToast.vue";
 import CosmicLoading from "../common/cosmic/CosmicLoading.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
 
-/* 修复：顶部错误提示弹窗（.error-toast，2.5s 自动消失） */
-const { errorMsg, showError } = useErrorToast();
+/* 瞬时提示（错误，2.5s 自动消失）— 全局 Toast 中心；渲染归 ToastLayer */
+const { showError } = useToastCenter();
 
 /**
  * 独立记录存储模式（参考 PhotoAlbum）：
@@ -408,8 +501,8 @@ const filteredAccounts = computed(() => {
   );
 });
 
-/* 卡片 3D 视差 */
-const { onCardMove, onCardLeave } = useCardTilt();
+/* 卡片光泽追踪（3D 视差倾斜已按用户决策移除，Wave 53） */
+const { onCardMove, onCardLeave } = useCardShine();
 
 /* 密码显隐 */
 const togglePwd = (acc: AccountEntry) => {
@@ -471,8 +564,8 @@ const confirmKey = async () => {
   }
 };
 
-/* 复制密码 */
-const { clipCountdown, copyWithTimeout } = useClipToast();
+/* 复制密码（提示经全局 Toast 中心倒计时通道渲染） */
+const { copyWithTimeout } = useClipToast("密码已复制");
 
 const copyPwd = async (acc: AccountEntry) => {
   let plain = acc.plainPwd;
@@ -489,6 +582,7 @@ const copyPwd = async (acc: AccountEntry) => {
 /* CRUD */
 const showDialog = ref(false);
 const editing = ref<AccountEntry | null>(null);
+const formError = ref("");
 const form = ref<AccountFields>({ platform: "", username: "", password: "", note: "", encrypted: false, encKey: "" });
 const formPwdVisible = ref(false);
 const encKeyVisible = ref(false);
@@ -496,6 +590,7 @@ const encKeyVisible = ref(false);
 const onAdd = () => {
   editing.value = null;
   form.value = { platform: "", username: "", password: "", note: "", encrypted: false, encKey: "" };
+  formError.value = "";
   formPwdVisible.value = false;
   encKeyVisible.value = false;
   showDialog.value = true;
@@ -503,12 +598,15 @@ const onAdd = () => {
 const onEdit = (acc: AccountEntry) => {
   editing.value = acc;
   form.value = { ...acc.fields, encKey: "" };
+  formError.value = "";
   formPwdVisible.value = false;
   encKeyVisible.value = false;
   showDialog.value = true;
 };
 const onSave = async () => {
-  if (!form.value.platform || !form.value.username) return;
+  formError.value = "";
+  if (!form.value.platform) { formError.value = "请填写平台名称"; return; }
+  if (!form.value.username) { formError.value = "请填写账户"; return; }
   if (form.value.encrypted && !form.value.encKey) return;
 
   let storedPassword = form.value.password;
@@ -534,16 +632,7 @@ const onSave = async () => {
     // 编辑：先添加新记录 → 删除旧记录 → 更新内存 recordId
     // 顺序：add 新 → delete 旧，避免删除后新增时 recordId 复用导致数据错乱
     const oldRid = editing.value.recordId;
-    let newRid: number | null = null;
-    try {
-      newRid = await verthysAddRecord(TYPE_ACCOUNT, recordName, dataB64);
-    } catch (e) {
-      if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-        showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-        return;
-      }
-      throw e;
-    }
+    const newRid = await verthysAddRecord(TYPE_ACCOUNT, recordName, dataB64);
     if (newRid !== null) {
       // 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
       addFullRecord(newRid, TYPE_ACCOUNT, recordName, dataB64, dataB64.length);
@@ -569,16 +658,7 @@ const onSave = async () => {
     }
   } else {
     // 新增：添加独立记录 → 保存 recordId 到内存
-    let newRid: number | null = null;
-    try {
-      newRid = await verthysAddRecord(TYPE_ACCOUNT, recordName, dataB64);
-    } catch (e) {
-      if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-        showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-        return;
-      }
-      throw e;
-    }
+    const newRid = await verthysAddRecord(TYPE_ACCOUNT, recordName, dataB64);
     if (newRid !== null) {
       // 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
       addFullRecord(newRid, TYPE_ACCOUNT, recordName, dataB64, dataB64.length);
@@ -646,11 +726,7 @@ const confirmDelete = async () => {
       if (!persistOk) {
         showError("删除已提交但持久化失败，重启后记录可能恢复。请勿关闭应用并重试删除");
       }
-    } catch (e) {
-      if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-        showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-        return;
-      }
+    } catch {
       showError("删除失败，请重试");
     }
   }
@@ -686,17 +762,7 @@ useModuleDialogGuard("accounts", () => {
 .lock-badge { width: 14px; height: 14px; color: var(--warning); flex-shrink: 0; }
 .lock-badge svg { width: 100%; height: 100%; }
 
-/* 加密选项 */
-.encrypt-row { padding: 10px 12px; border: 1px solid var(--border-glass); border-radius: var(--radius-sm); transition: all 0.2s; }
-.encrypt-row.on { border-color: rgba(0,212,255,0.25); background: rgba(0,212,255,0.03); }
-.encrypt-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
-.encrypt-toggle input { display: none; }
-.encrypt-check { width: 14px; height: 14px; border: 1px solid var(--border-glass); border-radius: 3px; position: relative; transition: all 0.2s; flex-shrink: 0; }
-.encrypt-row.on .encrypt-check { background: var(--accent); border-color: var(--accent); }
-.encrypt-row.on .encrypt-check::after { content: ""; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px; border: solid #000; border-width: 0 2px 2px 0; transform: rotate(45deg); }
-.encrypt-label { font-size: 11px; color: var(--text-secondary); }
-.encrypt-key-input { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
-.encrypt-key-input .input { flex: 1; min-width: 0; }
+/* 登记窗口的选项条 / 登记行 / 输入控件样式已抽取到 verthys-common.css（凭证登记台 · reg-* 词汇） */
 
 /* 解密密钥对话框 */
 .key-target { font-size: 12px; color: var(--text-secondary); font-family: var(--font); margin-bottom: 14px; }

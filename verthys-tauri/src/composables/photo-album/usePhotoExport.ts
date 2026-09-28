@@ -5,7 +5,7 @@
  * 从原 PhotoAlbum.vue 提取，保持 100% 功能不变。
  *
  * 设计要点：
- * - 接收 usePhotoData 返回值 + usePhotoToast 的 showError/showToast/showExportDone/showCopied（依赖注入）
+ * - 接收 usePhotoData 返回值 + 全局 Toast 中心的 showError/showExportDone/showCopied（依赖注入）
  * - 三种导出格式：单个打包文件 / 多个独立文件 / PNG 明文图片
  * - Tauri 模式写入磁盘，浏览器模式触发下载
  * - 兼容新旧 verthys 格式（内联 chunkDataB64 / 旧 chunkIds）
@@ -17,7 +17,7 @@
  */
 import { ref, watch, onScopeDispose, type Ref, type ShallowRef } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { verthysGetRecord, bytesToBase64, writeUserFile, writeUserFileStream, appendUserFileChunk, finalizeUserFileStream, abortUserFileStream } from "../../lib/verthys";
+import { verthysGetRecord, verthysGetRecordDetailed, bytesToBase64, writeUserFile, writeUserFileStream, appendUserFileChunk, finalizeUserFileStream, abortUserFileStream } from "../../lib/verthys";
 import { base64ToBytes } from "../../utils/binary_codec";
 import {
   encryptChunk,
@@ -29,7 +29,7 @@ import {
 import {
   decryptMetaPreferWorker, decryptThumbPreferWorker, decryptChunksPreferWorker,
 } from "../../workers/photo-decrypt-bridge";
-import { MAX_EXPORT_FILENAME_BYTES, MIN_TOKEN_LENGTH, isSlimPhotoMeta, isSlimLayout } from "../../constants/crypto_const";
+import { MAX_EXPORT_FILENAME_BYTES, MAX_EXPORT_SINGLE_BYTES, MIN_TOKEN_LENGTH, isSlimPhotoMeta, isSlimLayout } from "../../constants/crypto_const";
 import type { PhotoEntry, ExportFormat } from "./types";
 import {
   guessMime, downloadBlob, convertToPngBytes,
@@ -82,11 +82,11 @@ export interface UsePhotoExportParams {
   isTauri: boolean;
   /** 恢复模块密钥（从 keyManager 会话缓存） */
   ensurePhotoKey: () => boolean;
-  /** 显示错误提示（来自 usePhotoToast，统一 Toast 中心） */
+  /** 显示错误提示（来自全局 Toast 中心） */
   showError: (msg: string) => void;
-  /** 显示导出完成提示（来自 usePhotoToast，统一 Toast 中心） */
+  /** 显示导出完成提示（来自全局 Toast 中心） */
   showExportDone: (msg: string, type: "success" | "error") => void;
-  /** 显示复制成功提示（来自 usePhotoToast，统一 Toast 中心） */
+  /** 显示复制成功提示（来自全局 Toast 中心） */
   showCopied: () => void;
 }
 
@@ -224,7 +224,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
         success = true;
       } catch { /* */ }
     }
-    // 通过 usePhotoToast 统一显示复制成功提示（替代原 copiedToast.value = true）
+    // 通过全局 Toast 中心统一显示复制成功提示
     showCopied();
     // tokenCopied 为按钮 UI 状态（图标切换为对勾），独立于提示
     tokenCopied.value = true;
@@ -270,7 +270,17 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     /** 逐块密文哈希（块集/索引给出的权威值；缺失时调用方现场补算） */
     chunkHashesForExport: string[];
   }> => {
-    const metaB64 = ph.metaId ? (await verthysGetRecord(ph.metaId))?.dataB64 || "" : "";
+    let metaB64 = "";
+    if (ph.metaId) {
+      // 判别式读取：超出单条上限 / 通道异常与"记录不存在"分流留痕，
+      //   不再统一退化为"记录缺失"（旧返回值无法定位归因）。
+      const readOutcome = await verthysGetRecordDetailed(ph.metaId);
+      if (readOutcome.ok) {
+        metaB64 = readOutcome.record.dataB64;
+      } else {
+        console.warn(`[导出] 读取照片元数据失败（${readOutcome.code}）: ${readOutcome.error}`);
+      }
+    }
     const chunkB64List: string[] = [];
     let chunkHashesForExport: string[] = [];
     // 修复：meta 缺失时按需解密（重启后 watch 解密未完成即导出的场景）
@@ -340,12 +350,23 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     if (chunkB64List.length === 0) throw new Error("照片无数据块");
 
     const expectedTotal = chunkB64List.length;
+    // 逐块哈希权威值非空即必须与块数一致；残缺或不符在解密任务内拒绝
+    //   （空哈希数组属历史记录，保持兼容不比对）。
+    if (refs.hashes.length > 0 && refs.hashes.length !== expectedTotal) {
+      throw new Error(`哈希项数与块数不一致（哈希 ${refs.hashes.length} ≠ 块 ${expectedTotal}）`);
+    }
     // 索引瘦身布局：块密文不携带序号与总数，位置由列表给出并绑定进 AD
     const slim = isSlimLayout(meta) && meta.wrappedFileKey
       ? { wrappedFileKey: meta.wrappedFileKey, chunkTotal: expectedTotal }
       : undefined;
+    // 完整性校验随解密任务下沉：逐块密文哈希与整图明文哈希在 Worker 内比对，
+    //   主线程不再对兆字节级数据做同步哈希（回退路径保持同等校验标准）。
     const chunks = await decryptChunksPreferWorker(
       chunkB64List, photoKey.value, meta.fileHash, label, slim,
+      {
+        expectedHashes: refs.hashes.length > 0 ? refs.hashes : undefined,
+        expectedFileHash: meta.fileHash,
+      },
     );
     if (chunks.length !== expectedTotal) {
       throw new Error(`解密块数不一致: 期望 ${expectedTotal}，实得 ${chunks.length}`);
@@ -355,13 +376,6 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     const fullBytes = new Uint8Array(totalLen);
     let offset = 0;
     for (const c of chunks) { fullBytes.set(c, offset); offset += c.length; }
-
-    // 内容哈希校验：meta.fileHash 为导入时记录的原文件 BLAKE3，
-    //   比对失败即数据非原始（截断、损坏或替换），必须暴露而非静默产出
-    const actualHex = bytesToHex(computeFileHash(fullBytes));
-    if (actualHex !== meta.fileHash) {
-      throw new Error(`内容哈希校验失败: 期望 ${meta.fileHash}，实际 ${actualHex}`);
-    }
     return fullBytes;
   };
 
@@ -384,7 +398,13 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     let meta = ph.meta;
     if (!meta) {
       if (!ph.metaId) return null;
-      const metaB64 = (await verthysGetRecord(ph.metaId))?.dataB64 || "";
+      // 判别式读取：归因保留（超限/通道异常不再与"记录不存在"混同）
+      const readOutcome = await verthysGetRecordDetailed(ph.metaId);
+      if (!readOutcome.ok) {
+        console.warn(`[导出] 读取照片元数据失败（${readOutcome.code}）: ${readOutcome.error}`);
+        return null;
+      }
+      const metaB64 = readOutcome.record.dataB64;
       if (!metaB64) return null;
       try {
         const outcome = await decryptMetaPreferWorker(
@@ -508,6 +528,18 @@ export function usePhotoExport(params: UsePhotoExportParams) {
         const specs = await collectPhotoSpecs(selected, failures);
 
         if (specs.length > 0) {
+          // 单文件模式的累计上限前置拦截：先按产出估算拦截，避免读完照片
+          //   数据、写出部分帧后才在追加阶段失败（浪费解密与 IO 成本）。
+          const estimatedBytes = estimateVencTotalBytes(specs);
+          if (estimatedBytes > MAX_EXPORT_SINGLE_BYTES) {
+            // 上限读数按 GB 展示（跨层常量为 GB 级时，MB 读数不易比较）
+            const limitGb = MAX_EXPORT_SINGLE_BYTES / (1024 * 1024 * 1024);
+            const limitText = `${Number.isInteger(limitGb) ? limitGb : limitGb.toFixed(1)} GB`;
+            exportStatus.value = `预计容器体积超过单文件上限 ${limitText}，请改用多文件模式`;
+            showExportDone(`容器体积超过单文件上限（${limitText}），请改用多文件模式`, "error");
+            exporting.value = false;
+            return;
+          }
           exportStatus.value = "逐帧加密打包…";
           exportProgress.value = 50;
 

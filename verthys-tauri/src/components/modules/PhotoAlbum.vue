@@ -13,28 +13,26 @@
     - 渲染模板（视图层声明，不含业务逻辑）
 
   分层目录（composables/photo-album/）：
-    - usePhotoToast        Toast 反馈中心（统一提示）
+    - Toast 反馈：复用全局 composables/useToastCenter（渲染归 ToastLayer，最高层）
     - usePhotoData         核心数据层（列表/虚拟滚动/按需解密/加载）
     - usePhotoImport       导入层（文件选择/加密入库）
     - usePhotoExport       导出层（对话框/三种格式导出）
     - usePhotoViewer       查看器层（内存预览/缩放）
     - usePhotoParse        解析层（.venc 解密/导入）
     - usePhotoDelete       删除层（单删/批删/选择模式）
-    - usePhotoPrivacy      隐私模式层（防截屏）
-    - usePhotoInteraction  交互层（卡片视差效果）
+    -（卡片指针光晕复用共享 composables/useCardShine —— 与存签/枢钥/钥域同一实现）
     - useModuleDialogGuard 弹窗清理守卫（页面覆盖根治）
+
+  防截屏保护不在本目录：它是应用级能力，状态与凭证由 session/privacy-session
+  单例持有（模块挂载只做状态映射与提示，卸载不关闭保护）。
 -->
 <template>
   <div class="photo-album">
-    <!-- 顶部错误提示弹窗 -->
-    <Teleport to="body">
-      <transition name="err-toast">
-        <div v-if="errorMsg" class="error-toast glass"><span class="toast-dot"></span>{{ errorMsg }}</div>
-      </transition>
-    </Teleport>
+    <!-- 瞬时提示（错误/导出完成/复制/状态）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
 
-    <!-- 顶部栏 -->
-    <div class="album-top glass">
+    <!-- 顶部栏：星野导航带（半透明无框；星野底板与溶解边界由 StarlitSky 承担） -->
+    <div class="album-top starlit-bar">
+      <StarlitSky :seed="11" />
       <div class="top-left">
         <span class="album-title">拾光</span>
         <span class="album-count">{{ photos.length }} 张</span>
@@ -44,9 +42,21 @@
         </span>
       </div>
       <div class="top-right">
-        <button class="btn btn-sm privacy-btn" :class="{ on: privacyMode }" @click="togglePrivacy" v-tip="privacyMode ? '关闭隐私模式' : '开启隐私模式（防截屏）'">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-          <span v-if="privacyMode" class="privacy-dot"></span>
+        <button
+          class="btn btn-sm privacy-btn"
+          :class="{ on: privacyMode, 'is-busy': privacyBusy, 'cursor-not-allowed': privacyButtonDisabled }"
+          :disabled="privacyButtonDisabled"
+          @click="onPrivacyToggle"
+          v-tip="privacyTip"
+        >
+          <!-- 状态图标随开关切换：开启=保护生效（睁眼），关闭=保护关闭（划斜线眼）；
+               两枚图标绝对定位交叉淡入，切换不产生布局抖动 -->
+          <span class="privacy-ico">
+            <transition name="privacy-ico">
+              <svg v-if="privacyMode" key="guarded" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg v-else key="unguarded" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            </transition>
+          </span>
         </button>
         <button class="btn btn-sm export-top-btn" @click="openExportDialog" :disabled="photos.length === 0 || albumBusy" v-tip="'导出加密照片'">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -86,16 +96,7 @@
       </div>
     </div>
 
-    <!-- 加载状态横幅：扫描失败/降级/密钥失效/解密失败/解密暂停必须可见，
-         并给出可执行动作（重试 / 继续解密）；禁止把失败折叠成"暂无照片"的空态。
-         置于滚动容器之外，保证滚动时始终可见 -->
-    <div v-if="loadError || decryptPaused || failedCount > 0" class="photo-load-banner glass">
-      <span class="toast-dot"></span>
-      <span class="photo-load-text">{{ bannerText }}</span>
-      <button class="photo-load-retry" type="button" @click="bannerAction">{{ bannerActionText }}</button>
-    </div>
-
-    <!-- 重打包进度（后台任务运行中）：与加载横幅同区，提供取消入口 -->
+    <!-- 重打包进度（后台任务运行中）：提供取消入口 -->
     <div v-if="repackRunning && repackState" class="photo-load-banner glass">
       <span class="toast-dot"></span>
       <span class="photo-load-text">{{ repackState.message }}</span>
@@ -114,34 +115,33 @@
       />
 
       <!-- 非阻塞加载：无底板居中展示，加载完成自动消失。
-           加载过程不打断浏览（无阶段进度卡）；失败由通用错误提示（toast）
-           与顶部状态横幅（重试入口）承载。 -->
+           失败由通用错误提示（toast）承接，不打断浏览（无提示横幅/进度卡）。 -->
       <CosmicLoading :show="photosLoading && photos.length === 0" text="正在加载照片列表…" />
 
       <!-- 虚拟滚动容器（相册列表强制采用虚拟滚动）：
-           绝对定位网格，仅渲染可视区域 + buffer 行对应的项目。
-           上万照片也只渲染数十 DOM 节点，消除 Vue 响应式 diff 与全量布局开销。
-           容器高度 = 总行数 × 行高，撑开滚动条；每个 masonry-item 用 translate3d 精确定位。 -->
-      <div v-if="photos.length > 0" class="masonry-cols" :style="{ height: totalHeight + 'px' }">
+           行窗口模型：滚动位置的唯一量化状态是行窗口，像素级移动不产生重建；
+           渲染数组引用稳定（未变化的项复用对象），上万照片也只渲染数十 DOM 节点。
+           容器高度 = 总行数 × 行高，撑开滚动条；每个 masonry-item 用 translate3d 精确定位。
+           no-anim 挂容器（动画关停是全局状态，不属于任何单项——避免 per-item class 抖动） -->
+      <div v-if="photos.length > 0" class="masonry-cols" :class="{ 'no-anim': animationDone }" :style="{ height: totalHeight + 'px' }">
         <div
           v-for="ph in visiblePhotos"
           :key="ph.id"
           class="masonry-item"
-          :class="{ selected: selectMode && selectedPhotoIds.has(ph.id), 'no-anim': animationDone }"
-          :style="{ transform: `translate3d(${ph._left}px, ${ph._top}px, 0)`, width: itemWidth + 'px', height: itemWidth + 'px' }"
-          @mousemove="onPhotoMove($event)"
-          @mouseleave="onPhotoLeave($event)"
+          :class="{ selected: selectMode && selectedPhotoIds.has(ph.id) }"
+          :style="ph._style"
+          @mousemove="onCardMove($event)"
+          @mouseleave="onCardLeave($event)"
           @click="onPhotoClick(ph)"
         >
+          <!-- 文字清晰度铁律：文字层（overlay）与图像层平级分离——
+               图像层只保留静态滤镜（照片 3D 倾斜已移除），
+               文字祖先链上无 filter / 3D 变换 / 缩放，恒走静态栅格化清晰路径。 -->
           <div class="photo-card glass">
-            <div class="photo-thumb" :style="{ backgroundImage: ph.thumb }">
-              <div class="photo-overlay">
-                <span class="photo-name">{{ ph.name }}</span>
-                <span class="photo-size">{{ ph.size }}</span>
-              </div>
-              <div class="enc-mark" v-tip="'XChaCha20-Poly1305 加密'">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-              </div>
+            <div class="photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
+            <div class="photo-overlay">
+              <span class="photo-name">{{ ph.name }}</span>
+              <span class="photo-size">{{ ph.size }}</span>
             </div>
             <div class="photo-shine"></div>
           </div>
@@ -356,18 +356,6 @@
       </template>
     </CosmicOverlay>
 
-    <!-- 导出完成状态感知（顶部，复用 clip-toast 样式） -->
-    <transition name="toast">
-      <div v-if="exportDoneToast" class="clip-toast glass clip-toast--top clip-toast--over-dialog" :class="exportDoneToast.type === 'error' ? 'clip-toast--error' : 'clip-toast--success'"><span class="toast-dot"></span>{{ exportDoneToast.msg }}</div>
-    </transition>
-    <!-- 复制提示（复用全局 clip-toast 样式） -->
-    <transition name="toast">
-      <div v-if="copiedToast" class="clip-toast glass clip-toast--over-dialog"><span class="toast-dot"></span>已复制到剪贴板</div>
-    </transition>
-    <transition name="toast">
-      <div v-if="toastMsg" class="clip-toast glass clip-toast--over-dialog"><span class="toast-dot"></span>{{ toastMsg }}</div>
-    </transition>
-
     <!-- 选择模式操作栏（悬浮层）：绝对定位悬浮照片区底部中央，不占据文档流、不挤压网格 -->
     <div v-if="selectMode" class="select-bar glass">
       <div class="select-bar-left">
@@ -403,6 +391,19 @@
       @confirm="confirmDelete"
       @cancel="cancelDeleteConfirm"
     />
+
+    <!-- 防截屏保护恢复对话框（隔离态：修复是对账的唯一入口） -->
+    <CosmicOverlay :show="showPrivacyRecovery" width="420px" @close="showPrivacyRecovery = false">
+      <div class="kv-title">防截屏保护需要修复</div>
+      <div class="kv-desc">
+        上一次保护状态变更未能完整还原，窗口保护状态未知。点击"立即修复"将按失败前的
+        设置对全部窗口重新应用保护；在此之前请勿进行截图或录屏操作。
+      </div>
+      <div class="kv-actions">
+        <button class="btn kv-cancel" @click="showPrivacyRecovery = false">稍后处理</button>
+        <button class="btn btn-primary kv-confirm" @click="doPrivacyReconcile">立即修复</button>
+      </div>
+    </CosmicOverlay>
   </div>
 </template>
 
@@ -416,9 +417,10 @@
  * 业务逻辑零侵入：所有加密/解密、verthys 读写、数据处理、交互逻辑均下沉至
  * composables/photo-album/ 分层目录，入口仅通过依赖注入装配。
  */
-import { onMounted, onUnmounted, computed, watch, defineAsyncComponent } from "vue";
+import { onMounted, onUnmounted, computed, ref, watch, defineAsyncComponent } from "vue";
 import { isModuleReady } from "../../lib/keyManager";
 import { tryGc } from "../../utils/gc";
+import StarlitSky from "../common/cosmic/StarlitSky.vue";
 import CosmicLoading from "../common/cosmic/CosmicLoading.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
@@ -430,7 +432,7 @@ const QuantumProgressFlow = defineAsyncComponent(() => import("../common/cosmic/
 const ImportProgressOverlay = defineAsyncComponent(() => import("../common/cosmic/ImportProgressOverlay.vue"));
 
 /* ===== 分层 composable 装配（依赖加载调度器） ===== */
-import { usePhotoToast } from "../../composables/photo-album/usePhotoToast";
+import { useToastCenter } from "../../composables/useToastCenter";
 import { usePhotoData } from "../../composables/photo-album/usePhotoData";
 import { usePhotoImport } from "../../composables/photo-album/usePhotoImport";
 import { usePhotoExport } from "../../composables/photo-album/usePhotoExport";
@@ -438,26 +440,34 @@ import { usePhotoViewer } from "../../composables/photo-album/usePhotoViewer";
 import { usePhotoParse } from "../../composables/photo-album/usePhotoParse";
 import { usePhotoRepack } from "../../composables/photo-album/usePhotoRepack";
 import { usePhotoDelete } from "../../composables/photo-album/usePhotoDelete";
-import { usePhotoPrivacy } from "../../composables/photo-album/usePhotoPrivacy";
-import { usePhotoInteraction } from "../../composables/photo-album/usePhotoInteraction";
+import { useCardShine } from "../../composables/useCardShine";
 import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
 import { resolveChunkSet } from "../../composables/photo-album/chunk-refs";
+// 防截屏保护：应用级会话单例（能力归属应用而非组件，模块卸载不关闭保护）
+import {
+  ensureAdopted as ensurePrivacyAdopted,
+  privacyBusy,
+  privacyEnabled,
+  privacyQuarantined,
+  privacyTokenLost,
+  reconcilePrivacySession,
+  togglePrivacy,
+} from "../../session/privacy-session";
 
-/* ---------- 1. Toast 反馈中心（最先装配，后续 composable 依赖其 showError 等） ---------- */
-const {
-  errorMsg, toastMsg, exportDoneToast, copiedToast,
-  showError, showToast, showExportDone, showCopied,
-} = usePhotoToast();
+/* ---------- 1. Toast 反馈中心（全局单例，最先装配，后续 composable 依赖其 showError 等） ----------
+ * 渲染统一归 ToastLayer（最高层）；本模块仅取用通道方法并注入各子 composable */
+const { showError, showStatus, showExportDone, showCopied } = useToastCenter();
+/** 状态提示（拾光既有 2s 口径；子 composable 的 DI 参数名沿用 showToast） */
+const showToast = (msg: string) => showStatus(msg, 2000);
 
 /* ---------- 2. 核心数据层（提供 photos / photoKey / isTauri / 虚拟滚动 / 按需解密） ---------- */
 const {
   photos, photoKey, isTauri, photosLoading, animationDone,
-  loadError, failedCount, decryptPaused,
-  scrollRef, scrollTop, viewportHeight, containerWidth, columns,
-  itemWidth, rowHeight, totalRows, totalHeight, visiblePhotos,
-  onScroll, updateLayout, resizeObserver,
+  loadError, failedCount,
+  scrollRef, totalHeight, visiblePhotos,
+  onScroll,
   initVirtualScroll, destroyVirtualScroll,
-  decryptPhotoMeta, loadPhotos, retryLoad, resumeLoad, releaseThumbUrls, ensurePhotoKey,
+  decryptPhotoMeta, loadPhotos, releaseThumbUrls, ensurePhotoKey,
   cancelPendingDecrypt,
 } = usePhotoData();
 
@@ -468,20 +478,16 @@ const {
 const albumBusy = computed(() =>
   importing.value || parsing.value || importingParsed.value || exporting.value || repackRunning.value,
 );
-/** 加载失败/降级：以通用错误提示（toast）呈现（顶部横幅保留错误文案与重试入口） */
+/** 加载失败/降级：以通用错误提示（toast）呈现（不设常驻提示栏） */
 watch(loadError, (v) => {
   if (v) showError(v);
 });
-
-/** 状态横幅文案：暂停 > 错误 > 失败计数（越需要用户处理越靠前） */
-const bannerText = computed(() => {
-  if (decryptPaused.value) return "已暂停解密：可视区缩略图不再自动补齐";
-  if (loadError.value) return loadError.value;
-  return `已加载 ${photos.value.length - failedCount.value} 张，${failedCount.value} 张解密失败`;
+/** 解密失败计数：首次出现时经 toast 如实告知（便于用户察觉部分照片未就绪） */
+watch(failedCount, (n, prev) => {
+  if (n > 0 && prev === 0) {
+    showError(`已加载 ${photos.value.length - n} 张，${n} 张解密失败`);
+  }
 });
-/** 横幅动作：暂停态给"继续解密"，其余给"重试" */
-const bannerAction = computed(() => (decryptPaused.value ? resumeLoad : retryLoad));
-const bannerActionText = computed(() => (decryptPaused.value ? "继续解密" : "重试"));
 
 /* ---------- 3. 查看器层（依赖 usePhotoData 的 photos/photoKey/decryptPhotoMeta） ---------- */
 const {
@@ -560,11 +566,83 @@ const {
   },
 });
 
-/* ---------- 8. 隐私模式层 ---------- */
-const { privacyMode, togglePrivacy, cleanup: cleanupPrivacy } = usePhotoPrivacy(isTauri);
+/* ---------- 8. 防截屏保护层（应用级会话单例，界面只做状态映射与提示） ---------- */
+/** 模板沿用既有命名：保护是否启用 */
+const privacyMode = privacyEnabled;
+/** 恢复对话框开关（隔离态下由按钮或错误码打开） */
+const showPrivacyRecovery = ref(false);
 
-/* ---------- 9. 交互层（卡片视差效果） ---------- */
-const { onPhotoMove, onPhotoLeave, cancel: cancelInteraction } = usePhotoInteraction();
+/** 按钮禁用：处理中或凭证丢失（凭证丢失时无法关闭，须重启接管） */
+const privacyButtonDisabled = computed(
+  () => !isTauri || privacyBusy.value || privacyTokenLost.value,
+);
+/** 按钮提示：如实反映当前能力状态，隔离态引导进入修复 */
+const privacyTip = computed(() => {
+  if (!isTauri) return "防截屏保护仅在桌面端生效";
+  if (privacyBusy.value) return "保护状态变更中…";
+  if (privacyQuarantined.value) return "保护状态异常，点击修复";
+  if (privacyTokenLost.value) return "会话凭证丢失，重启应用可重新接管";
+  return privacyMode.value ? "防截屏保护已开启，点击关闭" : "防截屏保护已关闭，点击开启";
+});
+
+/**
+ * 切换保护：按钮语义随状态（隔离态点击进入修复）
+ * 错误码到提示的映射集中在此处，会话层不含任何界面文案。
+ */
+const onPrivacyToggle = async () => {
+  if (privacyQuarantined.value) {
+    showPrivacyRecovery.value = true;
+    return;
+  }
+  const outcome = await togglePrivacy();
+  if (outcome.ok) {
+    showToast(privacyMode.value ? "防截屏保护已开启" : "防截屏保护已关闭");
+    return;
+  }
+  switch (outcome.code) {
+    case "PRIVACY_QUARANTINED":
+      showPrivacyRecovery.value = true;
+      break;
+    case "PRIVACY_ROLLED_BACK":
+      showError("保护失败，已还原到变更前状态");
+      break;
+    case "PRIVACY_TRANSITION_SUPERSEDED":
+      showError("操作已被新的状态变更取代");
+      break;
+    case "PRIVACY_TOKEN_MISSING":
+    case "PRIVACY_TOKEN_INVALID":
+      showError("会话凭证丢失，重启应用可重新接管");
+      break;
+    case "PRIVACY_LEASE_HELD":
+      showError("已有待确认的关闭操作，请稍后重试");
+      break;
+    case "PRIVACY_IPC_FAILED":
+      showError("保护服务暂不可用，请稍后重试");
+      break;
+    case "RATE_LIMITED":
+      showError("操作过于频繁，请稍后再试");
+      break;
+    case "PRIVACY_BUSY":
+      // 连击由单飞与状态机兜住，静默
+      break;
+    default:
+      showError("防截屏保护操作失败，请重试");
+  }
+};
+
+/** 恢复对话框：立即修复（隔离对账） */
+const doPrivacyReconcile = async () => {
+  const outcome = await reconcilePrivacySession();
+  if (outcome.ok) {
+    showPrivacyRecovery.value = false;
+    showToast(privacyMode.value ? "防截屏保护已修复" : "残留保护已清除");
+    return;
+  }
+  showError("修复失败，请重试或重启应用");
+};
+
+/* ---------- 9. 交互层（卡片指针光晕，共享实现：存签/枢钥/钥域/拾光同一 composable） ---------- */
+const { onCardMove, onCardLeave, cancel: cancelShine } = useCardShine();
 
 /* ===== 生命周期总管家（onMounted / onUnmounted） ===== */
 
@@ -580,19 +658,25 @@ const initLifecycle = () => {
   window.addEventListener("blur", onBlur);
   window.addEventListener("focus", onFocus);
 
+  // 保护会话接管（应用级单例，单飞幂等）：判定待采纳后取得关闭保护所需凭证；
+  // 失败不阻断模块加载——状态不可知时按钮按不可用处理
+  ensurePrivacyAdopted().catch((e) => {
+    console.warn("[privacy] 会话接管失败", e);
+  });
+
   // 虚拟滚动布局初始化收敛至数据层（initVirtualScroll 内部完成 updateLayout + ResizeObserver 注册）
   initVirtualScroll();
 
   // 首批照片入场动画播完后禁用，避免虚拟滚动时新进入可视区项重播动画导致闪烁
   setTimeout(() => { animationDone.value = true; }, 1500);
 
-  // 安全前置校验闸门：模块密钥已由 MainView 登录时缓存到 keyManager 会话，直接读取
+  // 安全前置校验闸门：模块密钥已由 MainView 登录时缓存到 keyManager 会话，直接读取。
+  // 未就绪时不加载、不提示（进入拾光本应经过安全管理验证），仅留控制台告警便于排查
   if (isTauri) {
     if (isModuleReady("photo") && ensurePhotoKey()) {
       loadPhotos();
     } else {
-      // 保护关闭或密钥已失效：给出可见原因，避免只剩"暂无照片"的空态
-      loadError.value = "模块密钥不可用（模块保护未开启或密钥已失效），请从安全管理进入拾光";
+      console.warn("[photo] 模块密钥不可用，跳过加载（应由安全管理验证后进入拾光）");
     }
   } else {
     // 浏览器模式：使用占位密钥（仅用于本地演示，不涉及真实加密）
@@ -607,10 +691,11 @@ const initLifecycle = () => {
  *   - 取消 rafThrottle 未触发的回调（防止卸载后状态写入空组件）
  *   - 销毁虚拟滚动 ResizeObserver（由 usePhotoData.destroyVirtualScroll 封装）
  *   - 释放查看器 Blob URL（由 usePhotoViewer.cleanup 封装）
- *   - 关闭隐私模式（需会话令牌验证）
  *   - 释放浏览器模式照片 Blob URL
  *   - 清空照片数组释放引用 + 主动触发 V8 Major GC
  *   - 清零模块子密钥（全局密钥由 keyManager 统一管理）
+ *
+ * 不在卸载时改动防截屏保护：保护是应用级能力，不由模块生命周期驱动。
  */
 const cleanupLifecycle = () => {
   window.removeEventListener("blur", onBlur);
@@ -624,7 +709,7 @@ const cleanupLifecycle = () => {
 
   // 取消 rafThrottle 未触发的回调
   onScroll.cancel();
-  cancelInteraction();
+  cancelShine();
 
   // 取消去抖中未触发的可视区解密批次（防止卸载后写状态）
   cancelPendingDecrypt();
@@ -634,9 +719,6 @@ const cleanupLifecycle = () => {
 
   // 释放查看器 Blob URL
   cleanupViewer();
-
-  // 关闭隐私模式（fire-and-forget，不阻塞卸载）
-  cleanupPrivacy();
 
   // 释放浏览器模式的 Blob URL
   for (const ph of photos.value) {
@@ -676,7 +758,7 @@ useModuleDialogGuard("photos", () => {
 <style scoped>
 .photo-album { width: 100%; height: 100%; display: flex; flex-direction: column; gap: 14px; overflow: hidden; position: relative; }
 
-/* 顶部栏 */
+/* 顶部栏：星野导航带仅承载布局（无边框/圆角/投影 —— 底板与左右溶解边界由 StarlitSky 承担） */
 .album-top { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; flex-shrink: 0; animation: slide-down 0.5s var(--ease) both; }
 @keyframes slide-down { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
 .top-left { display: flex; align-items: center; gap: 8px; }
@@ -686,10 +768,23 @@ useModuleDialogGuard("photos", () => {
 .enc-badge svg { width: 10px; height: 10px; }
 .top-right { display: flex; gap: 8px; align-items: center; }
 .privacy-btn { position: relative; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; }
-.privacy-btn svg { width: 15px; height: 15px; }
+/* 双状态图标叠放容器：两枚图标绝对定位交叉淡入，切换不产生布局抖动 */
+.privacy-ico { position: relative; display: block; width: 15px; height: 15px; }
+.privacy-ico svg { position: absolute; inset: 0; width: 15px; height: 15px; }
+.privacy-ico-enter-active, .privacy-ico-leave-active { transition: opacity 0.18s var(--ease); }
+.privacy-ico-enter-from, .privacy-ico-leave-to { opacity: 0; }
 .privacy-btn.on { color: var(--accent); border-color: rgba(0,212,255,0.3); background: rgba(0,212,255,0.08); }
-.privacy-dot { position: absolute; top: 2px; right: 2px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: dot-blink 1.5s infinite; }
-@keyframes dot-blink { 50% { opacity: 0.3; } }
+/* 禁用态光标：可点击与不可点击必须可区分 */
+.privacy-btn:disabled { cursor: not-allowed; }
+/* 持久不可用（凭证丢失/非桌面端）：视觉降级；处理中在途窗口极短，
+   不做降级以免快速开关时按钮闪烁（光标与悬浮提示已表达处理中） */
+.privacy-btn:disabled:not(.is-busy),
+.privacy-btn:disabled:not(.is-busy):hover {
+  opacity: 0.35;
+  border-color: var(--border-glass);
+  background: rgba(var(--bg-tertiary-rgb), 0.62);
+  color: var(--text-muted);
+}
 
 /* 顶部纯图标按钮（导出/解析/导入照片）：与 .del-top-btn 同尺寸 32×32，无文字标签，语义由 v-tip 悬浮提示承担 */
 .export-top-btn, .import-top-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; }
@@ -715,7 +810,7 @@ useModuleDialogGuard("photos", () => {
 .del-top-btn:hover { color: var(--danger); border-color: rgba(255,71,87,0.3); background: rgba(255,71,87,0.06); }
 .del-top-btn.active { color: var(--danger); border-color: rgba(255,71,87,0.4); background: rgba(255,71,87,0.1); }
 
-/* 加载状态横幅：告知失败/降级原因并提供重试；点击态光标与反馈明确，无阴影 */
+/* 后台进度横幅（重打包）：进度文案 + 取消迁移入口 */
 .photo-load-banner {
   display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
   margin: 0 4px; padding: 8px 14px;
@@ -733,13 +828,6 @@ useModuleDialogGuard("photos", () => {
 .photo-load-retry:hover { background: rgba(var(--accent-rgb), 0.08); border-color: rgba(var(--accent-rgb), 0.35); }
 .photo-load-retry:active { background: rgba(var(--accent-rgb), 0.14); }
 .photo-load-retry:focus-visible { outline: 1px solid rgba(var(--accent-rgb), 0.55); outline-offset: 2px; }
-.plus { font-weight: 300; }
-
-/* 导入进度 */
-.import-progress { display: flex; align-items: center; gap: 12px; padding: 8px 16px; flex-shrink: 0; }
-.progress-bar { flex: 1; height: 3px; background: rgba(255,255,255,0.05); border-radius: 2px; overflow: hidden; }
-.progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #b46cff); transition: width 0.3s var(--ease); border-radius: 2px; }
-.progress-text { font-size: 11px; color: var(--text-secondary); font-family: var(--font); white-space: nowrap; }
 
 /* 选择模式操作栏：悬浮层——绝对定位在照片区底部中央，脱离文档流不挤压网格。
    动画仅 opacity/transform（合成器友好）；玻璃底 + 零阴影与模块整体语言一致 */
@@ -770,15 +858,39 @@ useModuleDialogGuard("photos", () => {
 .masonry-scroll:hover::-webkit-scrollbar-thumb { background: rgba(var(--accent-rgb), 0.25); border-radius: 4px; }
 .masonry-scroll:hover::-webkit-scrollbar-thumb:hover { background: rgba(var(--accent-rgb), 0.45); }
 /* CSS Grid 行优先布局：照片按行从左至右排列，加载顺序自然正确 */
-/* 虚拟滚动：绝对定位网格容器（不再使用 CSS grid，由 JS 精确计算每项 translate3d 定位）
+/* 虚拟滚动：绝对定位网格容器（行窗口模型，由 JS 精确计算每项 translate3d 定位）；
       列数/行高由 JS computeColumns + itemWidth 计算，响应式断点与原媒体查询一致 */
 .masonry-cols { position: relative; width: 100%; }
-.masonry-item { position: absolute; top: 0; left: 0; cursor: pointer; }
+/* 条目隔离为独立堆叠上下文：内部光影层（z 0）与卡片（z 1）的层级不外泄，
+   跨条目遮挡由文档树序保证（后绘制者在上） */
+.masonry-item { position: absolute; top: 0; left: 0; cursor: pointer; isolation: isolate; }
+
+/* hover 悬浮光影层（滚动性能第 2 铁律的阴影落点）——
+   原实现让 box-shadow 参与 0.3s 过渡：大半径模糊阴影是重绘型属性，过渡期
+   逐帧重绘卡片；滚动中卡片掠过指针时连续触发，是滚动掉帧主因之一。
+   现改为"固定阴影纹理 + opacity/transform 过渡"（两者均走合成器）：
+   层仅在 hover 时可见（visibility 门控，非 hover 态不参与栅格化），
+   translateY 与卡片抬升同步（视觉上与旧版悬浮阴影加深一致）。 */
+.masonry-item::before {
+  content: ''; position: absolute; inset: 0; z-index: 0; border-radius: var(--radius);
+  pointer-events: none; visibility: hidden; opacity: 0;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.5), 0 0 20px rgba(0,212,255,0.12);
+  transition: opacity 0.3s var(--ease), transform 0.3s var(--ease), visibility 0s linear 0.3s;
+}
+/* 进入时 visibility 立即生效；离开时延迟到淡出结束再隐藏（保持淡出过程可见） */
+.masonry-item:hover::before {
+  visibility: visible; opacity: 1; transform: translateY(-6px);
+  transition: opacity 0.3s var(--ease), transform 0.3s var(--ease), visibility 0s;
+}
 
 /* 入场动画作用于 .photo-card 子元素，避免与 masonry-item 的 translate3d 定位 transform 冲突
-   首批加载播放（animationDone=false）；1.5s 后 no-anim 禁用，防止虚拟滚动新进入项重播闪烁 */
-.masonry-item:not(.no-anim) .photo-card { animation: photo-reveal 0.65s cubic-bezier(0.22, 1, 0.36, 1) both; }
-.masonry-item.no-anim .photo-card { animation: none; }
+   首批加载播放（animationDone=false）；1.5s 后由容器 no-anim 关停，防止虚拟滚动新进入项重播闪烁。
+   no-anim 挂在容器而非逐项：动画关停是全局状态，挂容器后切换 1.5s 只 patch 一个节点。
+   填充模式必须为 backwards，不得改回 both/forwards：动画声明优先级高于普通/内联声明，
+   前向填充会在动画结束后继续用动画终态压住卡片悬浮抬升（transform 被覆盖），
+   表现为「进入模块后一段时间内悬停无抬升」；终态关键帧与基础样式一致，无需前向填充 */
+.masonry-cols:not(.no-anim) .photo-card { animation: photo-reveal 0.65s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+.masonry-cols.no-anim .photo-card { animation: none; }
 
 /* 高级照片入场动画：从缩放+下移 → 还原，配合逐个动态加载产生行优先瀑布入场效果 */
 @keyframes photo-reveal {
@@ -787,16 +899,75 @@ useModuleDialogGuard("photos", () => {
   100% { opacity: 1; transform: scale(1) translateY(0); }
 }
 
-.photo-card { position: relative; overflow: hidden; border-radius: var(--radius); transition: transform 0.3s var(--ease), box-shadow 0.3s var(--ease); will-change: transform; transform-style: preserve-3d; }
-.photo-card:hover { box-shadow: 0 16px 40px rgba(0,0,0,0.5), 0 0 20px rgba(0,212,255,0.12); }
-.photo-thumb { background-size: cover; background-position: center; position: relative; transition: filter 0.4s var(--ease); filter: saturate(0.85) brightness(0.9); aspect-ratio: 1 / 1; }
-.photo-card:hover .photo-thumb { filter: saturate(1.1) brightness(1); }
-.photo-overlay { position: absolute; bottom: 0; left: 0; right: 0; padding: 10px 12px; background: linear-gradient(180deg, transparent, rgba(0,0,0,0.85)); opacity: 0; transition: opacity 0.3s; display: flex; justify-content: space-between; align-items: flex-end; }
+/* 照片卡片 · 滚动性能第 2 铁律（禁止重绘型属性参与过渡）+ 文字清晰度铁律：
+   - 卡片过渡只保留 transform（合成器路径）——整数像素平移（-6px 悬浮抬升，
+     合成器做整数设备像素吸附），文字层（.photo-overlay）位于卡片层，保持清晰；
+   - border-color / box-shadow 全状态恒定（下方钉死 .glass 的 hover 漂移），
+     阴影加深改由 .masonry-item::before 光影层承担；hover 提亮改由 ::before
+     提亮层承担（白色叠加，仅 opacity 过渡）；被替换的 box-shadow / filter
+     过渡——两者都是重绘型属性，过渡期逐帧重绘，是滚动掉帧的主因；
+   - 图像层 .photo-thumb 只保留静态降饱和滤镜，不做任何 transform
+     （照片 3D 倾斜已按用户决策整体移除）；
+   - contain: layout style 隔离内外布局/样式计算（不做 paint 裁剪：避开
+     自身盒阴影绘制与裁剪实现的灰区）；isolation 使提亮层（z 2）< 文字遮罩
+     （z 3）< 光晕（z 4）的层序封闭在卡内，不向相邻条目外泄；
+   - 禁令：不得恢复 will-change: transform / transform-style: preserve-3d；
+     不得把文字/浮层节点移回 .photo-thumb（filter 子树会禁用文字亚像素抗锯齿）。 */
+.photo-card {
+  position: relative; overflow: hidden; border-radius: var(--radius);
+  z-index: 1;
+  contain: layout style; isolation: isolate;
+  transition: transform 0.3s var(--ease);
+}
+/* 钉死 .glass:hover 的边框/阴影漂移：卡片外观任何状态恒定，hover 不再触发
+   边框与阴影的瞬时重绘（取值与 styles/components.css 的 .glass 基线一致，
+   基线改动须同步此处） */
+.photo-card.glass,
+.photo-card.glass:hover {
+  border-color: var(--border-glass);
+  box-shadow: 0 8px 32px rgba(var(--black-rgb), 0.4), 0 0 1px rgba(var(--white-rgb), 0.05), inset 0 1px 0 rgba(var(--white-rgb), 0.04);
+}
+.photo-card:hover { transform: translateY(-6px); }
+/* 提亮层（替代 hover 的 filter 提亮）：白色叠加层仅 opacity 过渡（合成器）。
+   强度 0.08 ≈ 原 brightness(0.9→1) 的观感差；饱和度不随 hover 提升
+   （合成器约束下无法等价实现 saturate 增益，观感差异记录于修复文档） */
+.photo-card::before {
+  content: ''; position: absolute; inset: 0; z-index: 2; border-radius: inherit;
+  pointer-events: none; background: rgba(255,255,255,0.08); opacity: 0;
+  transition: opacity 0.3s var(--ease);
+}
+.photo-card:hover::before { opacity: 1; }
+/* 图像层：静态降饱和滤镜保留（未悬浮观的基色不变）；无 transform、无过渡 */
+.photo-thumb { background-size: cover; background-position: center; position: relative; z-index: 1; filter: saturate(0.85) brightness(0.9); aspect-ratio: 1 / 1; }
+.photo-overlay { position: absolute; bottom: 0; left: 0; right: 0; z-index: 3; padding: 10px 12px; background: linear-gradient(180deg, transparent, rgba(0,0,0,0.85)); opacity: 0; transition: opacity 0.3s; display: flex; justify-content: space-between; align-items: flex-end; }
 .photo-card:hover .photo-overlay { opacity: 1; }
 .photo-name { font-size: 11px; color: var(--text-primary); font-family: var(--font); }
 .photo-size { font-size: 9px; color: var(--accent); font-family: var(--font); letter-spacing: 0.5px; }
-.enc-mark { position: absolute; top: 6px; right: 6px; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; color: var(--accent); opacity: 0.7; }
-.enc-mark svg { width: 12px; height: 12px; }
+
+/* 滚动静默态（滚动性能第 3 铁律）：滚动期间冻结本网格的一切 hover 过渡与
+   入场动画（data-scrolling 由 usePhotoData 静默态挂载在滚动容器上）——
+   卡片掠过指针不再产生任何闪烁与重绘，网格保持静止态；停止滚动
+   ~120ms 后移除标记，hover 视觉经过渡恢复（追帧补齐）。
+   冻结方式：把 hover 结果压回非 hover 值 + 关停过渡/动画（而非隐藏元素），
+   解冻瞬间从当前计算值过渡到 hover 值，观感自然。 */
+.masonry-scroll[data-scrolling] .photo-card,
+.masonry-scroll[data-scrolling] .photo-card::before,
+.masonry-scroll[data-scrolling] .photo-overlay,
+.masonry-scroll[data-scrolling] .photo-shine,
+.masonry-scroll[data-scrolling] .masonry-item::before {
+  transition: none !important;
+}
+/* 入场动画用"暂停"而非"移除"冻结：若用 animation: none，解冻瞬间动画会
+   重新从 0% 播放（进入模块 1.5s 窗口内滚动 → 停稳后整屏卡片重新淡入闪烁）；
+   paused 相位连续，停稳后从暂停点继续（与 idle-governance 同款实现）。 */
+.masonry-scroll[data-scrolling] .photo-card {
+  animation-play-state: paused !important;
+}
+.masonry-scroll[data-scrolling] .photo-card:hover { transform: none; }
+.masonry-scroll[data-scrolling] .photo-card:hover::before { opacity: 0; }
+.masonry-scroll[data-scrolling] .photo-card:hover .photo-overlay { opacity: 0; }
+.masonry-scroll[data-scrolling] .photo-card:hover .photo-shine { opacity: 0; }
+.masonry-scroll[data-scrolling] .masonry-item:hover::before { visibility: hidden; opacity: 0; transform: none; }
 
 /* 选择删除模式：仅红框选中。环形描边内嵌于缩略图内部渲染，不超出元素边界，
    滚动容器边缘处（首行顶部/首列两侧）的描边不会被 overflow 裁剪；
@@ -807,14 +978,12 @@ useModuleDialogGuard("photos", () => {
   box-shadow: inset 0 0 0 2px var(--danger);
 }
 
-.photo-shine { position: absolute; inset: 0; border-radius: var(--radius); pointer-events: none; opacity: 0; transition: opacity 0.3s; }
+/* 照片指针光晕（图像层之上的独立表面，常规混合）；位置与强度口径与卡片
+   .card-shine 一致：位置由共享 useCardShine 写入 --shine-x / --shine-y，
+   强度取 tokens.css --shine-alpha / --shine-reach（Wave 54 收口）；
+   z 4 使其位于提亮层（z 2）与文字遮罩（z 3）之上（沿用原树序层叠） */
+.photo-shine { position: absolute; inset: 0; z-index: 4; border-radius: var(--radius); pointer-events: none; opacity: 0; transition: opacity 0.3s; background: radial-gradient(circle at var(--shine-x, 50%) var(--shine-y, 50%), rgba(var(--accent-rgb), var(--shine-alpha)), transparent var(--shine-reach)); }
 .photo-card:hover .photo-shine { opacity: 1; }
-
-/* 空状态 */
-.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px; width: 100%; min-height: 200px; }
-.empty-icon { font-size: 40px; color: var(--text-muted); opacity: 0.3; margin-bottom: 8px; }
-.empty-text { font-size: 13px; color: var(--text-muted); margin-bottom: 4px; }
-.empty-hint { font-size: 11px; color: var(--text-muted); opacity: 0.6; text-align: center; }
 
 /* 查看器 */
 .viewer { position: fixed; inset: 0; background: rgba(0,0,0,0.96); display: flex; align-items: center; justify-content: center; z-index: 2000; transition: filter 0.4s var(--ease); animation: viewer-in 0.4s var(--ease); }
@@ -828,7 +997,6 @@ useModuleDialogGuard("photos", () => {
 .viewer-name { font-size: 12px; color: var(--text-primary); font-family: var(--font); }
 /* 原图准备阶段反馈：与文件名同排，低调呈现真实阶段（读取数据块 / 解密中） */
 .viewer-status { font-size: 11px; color: var(--accent); font-family: var(--font); letter-spacing: 0.5px; }
-.viewer-hint { font-size: 10px; color: var(--text-muted); font-family: var(--font); letter-spacing: 1px; }
 
 /* 动画关键帧（被导出对话框等复用） */
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
@@ -926,18 +1094,6 @@ useModuleDialogGuard("photos", () => {
   .ed-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
   .ed-pane--config { border-left: none; border-top: 1px solid var(--border-glass); padding: 14px 22px 6px; }
 }
-
-/* 提示过渡动画（复用全局 .clip-toast） */
-.toast-enter-active, .toast-leave-active { transition: all 0.3s var(--ease); }
-.toast-enter-from, .toast-leave-to { opacity: 0; transform: translate(-50%, 10px); }
-
-/* Toast 层级与变体（覆盖导出对话框 z-index:4000，不改全局 components.css） */
-.clip-toast--over-dialog { z-index: 4500; }
-.clip-toast--top { top: 24px; bottom: auto; }
-.clip-toast--success { color: #00ffaa; }
-.clip-toast--success .toast-dot { --mark-c: #00ffaa; }
-.clip-toast--error { color: var(--danger); }
-.clip-toast--error .toast-dot { --mark-c: var(--danger); }
 
 /* ===== 解析对话框（外壳复用 CosmicOverlay + kv-* 全局样式，仅保留解析特有元素） ===== */
 .parse-file-row { display: flex; gap: 8px; }

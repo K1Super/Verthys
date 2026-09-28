@@ -1,21 +1,20 @@
 # AST 红线基线：由 --write-baseline 生成（存量豁免，新增违规不受豁免）
-反向导入|controller\clipboard_controller.rs|88
 反向导入|controller\device_controller.rs|36
-反向导入|controller\device_controller.rs|66
+反向导入|controller\device_controller.rs|73
 反向导入|controller\file_controller.rs|46
 反向导入|controller\file_controller.rs|47
-反向导入|controller\file_controller.rs|103
+反向导入|controller\file_controller.rs|110
 反向导入|controller\key_controller.rs|37
-反向导入|controller\key_controller.rs|59
+反向导入|controller\key_controller.rs|67
 反向导入|controller\scan_controller.rs|30
-反向导入|controller\scan_controller.rs|78
+反向导入|controller\scan_controller.rs|85
 反向导入|controller\verthys_batch_controller.rs|51
 反向导入|controller\verthys_batch_controller.rs|52
 反向导入|controller\verthys_batch_controller.rs|55
-反向导入|controller\verthys_controller.rs|53
 反向导入|controller\verthys_controller.rs|54
 反向导入|controller\verthys_controller.rs|55
-反向导入|controller\verthys_controller.rs|130
+反向导入|controller\verthys_controller.rs|56
+反向导入|controller\verthys_controller.rs|137
 反向导入|controller\worker_controller.rs|44
 反向导入|controller\worker_controller.rs|48
 反向导入|controller\worker_controller.rs|50

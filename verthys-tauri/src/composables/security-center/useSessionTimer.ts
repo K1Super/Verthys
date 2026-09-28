@@ -13,6 +13,7 @@
  * 设计说明：
  *   - 计时器仅用于 UI 显示倒计时，不触发实际锁定（实际超时由 keyManager 守护）
  *   - globalKeyReady 为 true 时倒计时；归零后重置为 getSessionTimeout()（循环显示）
+ *   - 空闲锁定关闭时倒计时冻结（顶部状态栏据此展示"已关闭"）
  *   - globalKeyReady 为 false 时不倒计时（未验证，无需显示）
  *
  * 设计：纯 Composable，globalKeyReady 通过 Ref 注入。计时器生命周期由调用方管理。
@@ -29,6 +30,8 @@ import { useGlobalIdleScheduler } from '../useGlobalIdleScheduler';
 export interface UseSessionTimerOptions {
   /** 全局密钥是否已就绪（仅就绪时倒计时，归零后重置） */
   globalKeyReady: Ref<boolean>;
+  /** 会话空闲锁定开关（false = 不自动锁定，倒计时冻结不推进） */
+  idleLockEnabled: Ref<boolean>;
 }
 
 /**
@@ -40,7 +43,7 @@ export interface UseSessionTimerOptions {
  * @example
  * ```ts
  * const { sessionRemaining, startSessionTick, stopSessionTick, resetSession } =
- *   useSessionTimer({ globalKeyReady: globalKeyReadyRef });
+ *   useSessionTimer({ globalKeyReady: globalKeyReadyRef, idleLockEnabled: sessionLockEnabledRef });
  * // onMounted(() => startSessionTick());
  * // onBeforeUnmount(() => stopSessionTick());
  * ```
@@ -79,12 +82,18 @@ export function useSessionTimer(options: UseSessionTimerOptions) {
     }
   });
 
-  /** 启动会话计时器（1s 间隔，仅更新 UI 显示；空闲档跳过更新） */
+  /** 空闲锁定开关切换：恢复启用时按当前超时刷新显示（关闭期间倒计时冻结） */
+  watch(options.idleLockEnabled, (enabled) => {
+    if (enabled) sessionRemaining.value = getSessionTimeout();
+  });
+
+  /** 启动会话计时器（1s 间隔，仅更新 UI 显示；空闲档/锁定关闭时跳过更新） */
   const startSessionTick = () => {
     sessionTick = window.setInterval(() => {
       if (idleLevel.value === 'idle' || idleLevel.value === 'deep-idle') {
         return; // 空闲档暂停 UI 更新（恢复时 watch 立即补偿刷新）
       }
+      if (!options.idleLockEnabled.value) return; // 空闲锁定关闭：倒计时不推进
       if (options.globalKeyReady.value && sessionRemaining.value > 0) {
         sessionRemaining.value = Math.max(0, sessionRemaining.value - 1000);
       } else if (options.globalKeyReady.value) {

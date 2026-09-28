@@ -2,22 +2,23 @@
   FileVerthys.vue — 加密文件加密库模块（清藏）
   功能：
     - 支持 PDF / Word / Excel / 压缩包等任意格式文档加密入库
-    - 大文件分块加密存储（4MB/块），支持断点导入
+    - 大文件分块加密存储（分块口径取跨层预算常量），块经导入会话单写者落库
     - 可保存到本地（加密文档需输入独立密码解密后导出）
     - 可单独给文档设置独立访问密码，实现细粒度权限隔离
-  记录类型：0x05 元数据，0x04 数据块
+  导入语义：文件级去重跳过（同内容同形态命中即跳过）；中断后重传经会话日志
+    续传，块级重传不保证幂等（加密形态每块随机盐使密文互异）。
+  删除语义：块引用与元数据合并为单次批量事务删除；删除提交后立即落盘、
+    释放文件级去重键并触发孤儿回收；任一子步骤失败保留条目并给出
+    重试入口（删除失败直接重试；落盘失败仅重放落盘与收尾）。
+  记录类型：0x08 元数据，0x04 数据块
 -->
 <template>
   <div class="file-verthys">
-    <!-- 顶部错误提示弹窗 -->
-    <Teleport to="body">
-      <transition name="err-toast">
-        <div v-if="errorMsg" class="error-toast glass"><span class="toast-dot"></span>{{ errorMsg }}</div>
-      </transition>
-    </Teleport>
+    <!-- 瞬时提示（错误/状态）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
 
-    <!-- 顶部栏 -->
-    <div class="search-bar glass">
+    <!-- 顶部栏：星野导航带（半透明无框；星野底板与溶解边界由 StarlitSky 承担） -->
+    <div class="search-bar starlit-bar">
+      <StarlitSky :seed="7" />
       <div class="search-inner">
         <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
@@ -60,8 +61,17 @@
           <span class="info-item"><span class="info-label">分块</span> {{ f.totalChunks }} 块</span>
         </div>
         <div class="card-actions">
-          <button class="mini-btn" @click="onSave(f)">保存</button>
-          <button class="mini-btn danger" @click="onDelete(f)">删除</button>
+          <button
+            class="mini-btn"
+            :disabled="deleteStateOf(f) !== undefined"
+            @click="onSave(f)"
+          >保存</button>
+          <button
+            class="mini-btn danger"
+            :disabled="deleteStateOf(f) === 'deleting'"
+            v-tip="deleteStateOf(f) === 'persist-retry' ? '删除已提交但落盘失败，点击重试完成落盘' : ''"
+            @click="onDelete(f)"
+          >{{ deleteStateOf(f) === 'deleting' ? '删除中…' : deleteStateOf(f) === 'persist-retry' ? '重试' : '删除' }}</button>
         </div>
         <div class="card-shine"></div>
       </div>
@@ -89,8 +99,17 @@
           <span class="info-item"><span class="info-label">分块</span> {{ f.totalChunks }} 块</span>
         </div>
         <div class="card-actions">
-          <button class="mini-btn" @click="onSave(f)">保存</button>
-          <button class="mini-btn danger" @click="onDelete(f)">删除</button>
+          <button
+            class="mini-btn"
+            :disabled="deleteStateOf(f) !== undefined"
+            @click="onSave(f)"
+          >保存</button>
+          <button
+            class="mini-btn danger"
+            :disabled="deleteStateOf(f) === 'deleting'"
+            v-tip="deleteStateOf(f) === 'persist-retry' ? '删除已提交但落盘失败，点击重试完成落盘' : ''"
+            @click="onDelete(f)"
+          >{{ deleteStateOf(f) === 'deleting' ? '删除中…' : deleteStateOf(f) === 'persist-retry' ? '重试' : '删除' }}</button>
         </div>
         <div class="card-shine"></div>
       </div>
@@ -133,7 +152,7 @@
         </div>
         <div class="dialog-actions">
           <button class="btn kv-cancel" @click="showImportDialog = false">取消</button>
-          <button class="btn btn-primary kv-confirm" @click="startImport">开始加密导入</button>
+          <button class="btn btn-primary kv-confirm" :disabled="usePassword && !docPassword" @click="startImport">开始加密导入</button>
         </div>
       </div>
     </div>
@@ -153,15 +172,10 @@
         />
         <div class="dialog-actions">
           <button class="btn kv-cancel" @click="showKeyDialog = false">取消</button>
-          <button class="btn btn-primary kv-confirm" @click="confirmSaveKey">解密保存</button>
+          <button class="btn btn-primary kv-confirm" :disabled="!keyInput" @click="confirmSaveKey">解密保存</button>
         </div>
       </div>
     </div>
-
-    <!-- 复制提示 -->
-    <transition name="toast">
-      <div v-if="toast" class="clip-toast glass"><span class="toast-dot"></span>{{ toast }}</div>
-    </transition>
 
     <!-- 非阻塞加载：无底板居中展示，加载完成自动消失 -->
     <CosmicLoading :show="loading" text="正在加载文件数据…" />
@@ -175,14 +189,32 @@
     />
 
     <!-- 导入进度悬浮覆盖层（统一组件，复用量子能量导流通道）：
-         悬浮模块内容区中央，不挤压下方文件网格 -->
+         悬浮模块内容区中央，不挤压下方文件网格；导入中可取消（断点状态保留） -->
     <ImportProgressOverlay
       :visible="importing"
       :percent="importPercent"
       :message="importingFile"
       :detail="`${importDone} / ${importTotal} 块 · ${importPercent}%`"
       :show-meta="false"
+      :cancelable="!cancelPending"
+      cancel-label="取消导入"
+      @cancel="requestImportCancel"
     />
+
+    <!-- 并发导入互斥：存在活跃导入会话时的显式确认（结束上一会话保留其断点状态） -->
+    <div v-if="showSessionConflict" class="dialog-overlay" @click.self="resolveSessionConflict(false)">
+      <div class="dialog glass">
+        <div class="dialog-title">已有导入会话进行中</div>
+        <div class="session-conflict-text">
+          检测到未结束的导入会话（可能是上次导入中断或另一模块正在导入）。
+          继续将先结束该会话并保留其断点状态，之后可续传。
+        </div>
+        <div class="dialog-actions">
+          <button class="btn kv-cancel" @click="resolveSessionConflict(false)">取消导入</button>
+          <button class="btn btn-primary kv-confirm" @click="resolveSessionConflict(true)">结束并继续</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -190,28 +222,53 @@
 import { ref, shallowRef, computed, onMounted, onUnmounted } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import ActionButton from "../common/verthys-ui/ActionButton.vue";
+import StarlitSky from "../common/cosmic/StarlitSky.vue";
 import CosmicLoading from "../common/cosmic/CosmicLoading.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ImportProgressOverlay from "../common/cosmic/ImportProgressOverlay.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
+import { useCardShine } from "../../composables/useCardShine";
 import {
-  verthysAddRecord, verthysGetRecord, verthysDeleteRecord,
-  readUserFile, base64ToBytes, bytesToBase64, writeUserFile,
-  encryptPasswordField, decryptPasswordField,
+  verthysGetRecord, verthysForgetHashes,
+  verthysWalRecover, verthysImportBegin, verthysImportEnd, verthysForceCloseImportSession,
+  verthysAddChunkBatch, verthysAddRecordsBatch, verthysGcOrphanChunks,
+  userFileStat, readUserFileChunked, checkDiskSpace, base64ToBytes,
+  decryptPasswordField,
+  writeUserFileStream, appendUserFileChunk, finalizeUserFileStream, abortUserFileStream,
 } from "../../lib/verthys";
-import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, ensureIndexSourceSafe, getSummaryIdsByType, getRecordIdsByType, invalidateScannedRecord, getRecordsDataB64Batch } from "../../lib/keyManager";
-import { TYPE_FILEVERTHYS_META, TYPE_FILEVERTHYS_CHUNK, TYPE_FILEVERTHYS_META_OLD } from "../../constants/record_types";
-import { MAX_FILE_CHUNK_SIZE_BYTES } from "../../constants/photo_budget.generated";
-import { useErrorToast } from "../../composables/useErrorToast";
 import {
-  updateShallowItem, pushShallowItems, replaceShallowArray,
-  clearShallowArray, removeShallowItems,
+  createFileKeyV2, encryptChunkV2, buildPasswordCheckV2,
+  unlockFileKeyV2, verifyPasswordCheckV2, decryptChunkV2,
+  type FileKdfV2,
+} from "../../lib/crypto";
+import { runFileExport } from "../../composables/file-verthys/useFileExport";
+import {
+  runFileImport,
+  type FileImportDeps,
+  type ImportProgress,
+} from "../../composables/file-verthys/useFileImport";
+import {
+  runFileDelete,
+  retryFileDeletePersist,
+  createDedupeReleaseQueue,
+  type DeleteSourceEntry,
+  type FileDeleteDeps,
+  type FileDeleteResult,
+} from "../../composables/file-verthys/useFileDelete";
+import { persistVerthys, deleteAndPersistBatch, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, ensureIndexSourceSafe, getSummaryIdsByType, getRecordIdsByType, invalidateScannedRecord, getRecordsDataB64Batch } from "../../lib/keyManager";
+import { TYPE_FILEVERTHYS_META, TYPE_FILEVERTHYS_META_OLD } from "../../constants/record_types";
+import { useToastCenter } from "../../composables/useToastCenter";
+import {
+  pushShallowItems, replaceShallowArray,
+  removeShallowItems,
 } from "../../utils/shallow-array";
 import { debounce } from "../../utils/debounce";
 import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
 
-/* ===== 顶部错误提示弹窗 ===== */
-const { errorMsg, showError } = useErrorToast();
+/* ===== 瞬时提示（错误 / 状态）— 全局 Toast 中心；渲染归 ToastLayer ===== */
+const { showError, showStatus } = useToastCenter();
+/* 状态提示口径（模块内沿用 showToast 命名，指向标准状态通道，2.5s 自动消失） */
+const showToast = showStatus;
 
 /* ===== 类型 ===== */
 interface FileEntry {
@@ -224,17 +281,17 @@ interface FileEntry {
   metaId?: number;             // 元数据记录 ID
   chunkIds?: number[];         // 外置格式：数据块记录 ID 列表（当前写入形态）
   chunkDataB64?: string[];     // 历史内联格式：meta 记录内嵌的全部块密文
+  chunkHashes?: string[];      // 逐块密文哈希（当前写入形态；导出完整性权威值）
+  chunkSize?: number;          // 分块口径（meta 声明值；历史记录可能缺省）
+  fileHash?: string;           // 文件级去重键（删除时须释放，否则重导被跳过）
+  kdf?: FileKdfV2;             // 文件级密钥派生参数（加密条目；导出解锁用）
+  passwordCheck?: string;      // 口令校验块（加密条目；导出前置判定用）
 }
 
 /* ===== 常量 ===== */
-/* 分块口径取跨层预算常量单一权威来源（禁止字面量）。
- *   块恒以独立记录落库、meta 只保存引用与展示字段，单文件体量不再受
- *   单条记录载荷约束（仅受容器容量约束），导入前无需体量拦截。 */
-const CHUNK_SIZE = MAX_FILE_CHUNK_SIZE_BYTES;
-/* 修复：TYPE 常量从 record_types.ts 导入，不再本地定义
- *   TYPE_FILEVERTHYS_META (0x08) — 原 TYPE_FILEVERTHYS_META=0x05，与 TYPE_PHOTO_CHUNK 冲突，已改
- *   TYPE_FILEVERTHYS_CHUNK (0x04) — 原 TYPE_FILEVERTHYS_CHUNK=0x04，值不变仅重命名
- */
+/* 记录类型常量统一取自 constants/record_types.ts（单一权威来源）：
+ *   TYPE_FILEVERTHYS_META (0x08) 元数据；TYPE_FILEVERTHYS_CHUNK (0x04) 数据块
+ *   （块记录由导入管道按角色类型写入，本组件不直接构造块记录）。 */
 
 /* 非阻塞加载状态（无底板居中展示，加载完成自动消失） */
 const loading = ref(false);
@@ -331,6 +388,7 @@ const onImport = async () => {
       size: 1024 * 1024 * (2 + files.value.length), mime: "application/pdf",
       totalChunks: 3 + files.value.length, encrypted: false,
     }]);
+    syncModuleCache();
     showToast("已添加演示文件");
     return;
   }
@@ -371,141 +429,169 @@ const importDone = ref(0);
 const importTotal = ref(0);
 const importPercent = ref(0);
 
+/* 取消导入：置位后由管道在每个文件与块批边界检查；已提交文件保留，
+   会话按"未成功"语义结束（断点状态保留，下次导入续传去重） */
+const importCancelRequested = ref(false);
+/* 取消请求已发出但管道尚未收敛：按钮先隐藏，避免重复点击 */
+const cancelPending = ref(false);
+const requestImportCancel = () => {
+  if (!importing.value || importCancelRequested.value) return;
+  importCancelRequested.value = true;
+  cancelPending.value = true;
+};
+
+/* 并发导入互斥确认：存在活跃导入会话时由管道回调唤起，用户抉择驱动后续动作 */
+const showSessionConflict = ref(false);
+let sessionConflictResolver: ((allow: boolean) => void) | null = null;
+const askSessionConflict = (): Promise<boolean> =>
+  new Promise((resolve) => {
+    sessionConflictResolver = resolve;
+    showSessionConflict.value = true;
+  });
+const resolveSessionConflict = (allow: boolean) => {
+  showSessionConflict.value = false;
+  const resolve = sessionConflictResolver;
+  sessionConflictResolver = null;
+  resolve?.(allow);
+};
+
+/* 管道进度 → 覆盖层状态（百分比按文件完成比例合并；续传形态的只读校验轮占半权重） */
+const applyImportProgress = (p: ImportProgress) => {
+  importingFile.value = p.fileCount === 1
+    ? p.fileName
+    : `${p.fileName}（${p.fileIndex + 1}/${p.fileCount}）`;
+  importDone.value = p.doneInFile;
+  importTotal.value = p.totalInFile;
+  importPercent.value = Math.round(((p.fileIndex + p.fileFraction) / p.fileCount) * 100);
+};
+
+/* 导入管道依赖装配：全部经导入会话单写者通道落库 */
+const importDeps: FileImportDeps = {
+  statFile: userFileStat,
+  readChunk: readUserFileChunked,
+  v2: {
+    createFileKey: createFileKeyV2,
+    encryptChunk: encryptChunkV2,
+    buildPasswordCheck: buildPasswordCheckV2,
+  },
+  // 容器卷空间预检：path 缺省 = 当前会话容器所在卷
+  freeSpaceBytes: async (path) => (await checkDiskSpace(path ?? undefined)).free_bytes,
+  walRecover: verthysWalRecover,
+  importBegin: () => verthysImportBegin(),
+  importEnd: async (success) => {
+    const r = await verthysImportEnd(success);
+    return { ok: r.ok, error: r.error };
+  },
+  forceCloseSession: verthysForceCloseImportSession,
+  chunkBatch: verthysAddChunkBatch,
+  recordsBatch: (records) => verthysAddRecordsBatch(records),
+  gcOrphanChunks: verthysGcOrphanChunks,
+  onSessionBusy: askSessionConflict,
+  isCancelled: () => importCancelRequested.value,
+  onProgress: applyImportProgress,
+};
+
 const startImport = async () => {
+  // 同步重入闸门（置位于首个 await 之前）：对话框确认键连击或重复触发的
+  // 第二次调用在此直接返回，杜绝两轮导入并发建会话互杀与重复入库窗口
+  if (importing.value) return;
   if (usePassword.value && !docPassword.value) return;
   if (pendingFiles.value.length === 0) return;
-  showImportDialog.value = false;
   importing.value = true;
+  importCancelRequested.value = false;
+  cancelPending.value = false;
+  importDone.value = 0;
+  importTotal.value = 0;
+  importPercent.value = 0;
+  try {
+    // 上轮删除遗留的去重键释放：建会话前补释放，避免旧键使本轮导入被误跳过
+    await dedupeReleaseQueue.flush();
+  } catch (e) {
+    // 兜底：补释放异常不阻断本轮导入（旧键影响仅体现为显式"跳过"报告）
+    console.warn("[FileVerthys] 待重试去重键补释放异常", e);
+  }
+  showImportDialog.value = false;
 
   const list = pendingFiles.value.slice();
-  let successCount = 0;
-  let failCount = 0;
-  // 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
-  const newItems: FileEntry[] = [];
+  const password = usePassword.value ? docPassword.value : null;
 
-  for (let fi = 0; fi < list.length; fi++) {
-    const { path: filePath, name: fileName } = list[fi];
-    importingFile.value = list.length === 1
-      ? fileName
-      : `${fileName}（${fi + 1}/${list.length}）`;
+  try {
+    const result = await runFileImport(
+      list.map((f) => ({ path: f.path, name: f.name, mime: getMimeFromName(f.name) })),
+      password,
+      importDeps,
+    );
 
-    try {
-      // 1. 读取全部文件字节（二进制 IPC 直传 Uint8Array）
-      const fileBytes = await readUserFile(filePath);
-      const fileSize = fileBytes.length;
-      const fileMime = getMimeFromName(fileName);
-      const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
-      importTotal.value = totalChunks;
-      importDone.value = 0;
-
-      // 2. 分块加密后逐块落为独立 chunk 记录，meta 只保存引用（chunkIds）。
-      //    Why 外置：内联模型把全部块密文塞进单条 meta，受单条记录载荷上限约束；
-      //    块恒独立落库后，单文件体量只受容器容量约束，meta 体积与文件大小解耦。
-      //    块加密口径与历史内联块完全一致：设置文档密码时逐块 AES-GCM、否则明文块，
-      //    读取侧按同一路径解密。
-      const chunkIds: number[] = [];
-      for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, fileSize);
-        const chunkBytes = fileBytes.slice(start, end);
-        let chunkData: Uint8Array = chunkBytes;
-
-        // 如果设置了独立密码，用 AES-GCM 加密该块
-        if (usePassword.value && docPassword.value) {
-          const chunkB64 = bytesToBase64(chunkBytes);
-          const encryptedB64 = await encryptPasswordField(chunkB64, docPassword.value);
-          chunkData = base64ToBytes(encryptedB64);
-        }
-
-        const chunkId = await verthysAddRecord(
-          TYPE_FILEVERTHYS_CHUNK, `chunk_${fileName}_${i}`, bytesToBase64(chunkData),
-        );
-        // 块落库失败即抛出：不得留下「部分块已落库、meta 未写」的静默残留。
-        // 中断本文件导入由既有 try/catch 计入失败并在日志中留痕，便于追溯。
-        if (chunkId === null) {
-          throw new Error(`数据块 ${i + 1}/${totalChunks} 写入失败`);
-        }
-        chunkIds.push(chunkId);
-
-        importDone.value = i + 1;
-        // 多文件时进度合并显示
-        const fileProgress = (i + 1) / totalChunks;
-        importPercent.value = list.length === 1
-          ? Math.round(fileProgress * 100)
-          : Math.round(((fi + fileProgress) / list.length) * 100);
-      }
-
-      // 3. 存储元数据记录（仅保存展示字段与块引用，不再内联块密文）
-      const meta = {
-        name: fileName,
-        size: fileSize,
-        mime: fileMime,
-        chunkIds,                     // 外置块引用
-        chunkDataB64: [] as string[], // 外置后 meta 不再内联块密文
-        chunkSize: CHUNK_SIZE,
-        totalChunks,
-        completedChunks: totalChunks,
-        encrypted: usePassword.value,
-      };
-      const metaB64 = bytesToBase64(new TextEncoder().encode(JSON.stringify(meta)));
-      const metaId = await verthysAddRecord(TYPE_FILEVERTHYS_META, `meta_${fileName}`, metaB64);
-      if (metaId !== null) {
-        // 同步两层缓存（摘要 + 全量），替代旧 addRecordToScan
-        addFullRecord(metaId, TYPE_FILEVERTHYS_META, `meta_${fileName}`, metaB64, metaB64.length);
-      }
-
-      // 4. 添加到文件列表（先收集，循环外一次性 pushShallowItems）
-      newItems.push({
-        id: Date.now() + fi,
-        name: fileName,
-        size: fileSize,
-        mime: fileMime,
-        totalChunks,
-        encrypted: usePassword.value,
-        metaId: metaId || undefined,
-        chunkIds,
-      });
-      successCount++;
-    } catch (e) {
-      if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-        showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-        break;
-      }
-      console.error(`[FileVerthys] 导入 ${fileName} 失败`, e);
-      failCount++;
+    // 列表提交：仅 meta 记录已确认（metaId > 0）的条目进入列表与缓存；
+    // 失败文件的块留在台账中由孤儿回收处理，不做前端补偿删除
+    const newItems: FileEntry[] = result.entries.map((e, idx) => ({
+      id: Date.now() + idx,
+      name: e.name,
+      size: e.size,
+      mime: e.mime,
+      totalChunks: e.totalChunks,
+      encrypted: e.encrypted,
+      metaId: e.metaId,
+      chunkIds: e.chunkIds,
+      chunkHashes: e.chunkHashes,
+      chunkSize: e.chunkSize,
+      fileHash: e.fileHash,
+      kdf: e.kdf,
+      passwordCheck: e.passwordCheck,
+    }));
+    for (const e of result.entries) {
+      addFullRecord(e.metaId, TYPE_FILEVERTHYS_META, e.metaName, e.metaB64, e.metaB64.length);
     }
-  }
+    if (newItems.length > 0) {
+      pushShallowItems(files, newItems);
+    }
+    syncModuleCache();
 
-  // 项2：循环外一次性 pushShallowItems 触发 triggerRef
-  if (newItems.length > 0) {
-    pushShallowItems(files, newItems);
-  }
-
-  // 统一持久化（所有 meta 记录已写入 worker 内存，一次 flush 全部落盘）
-  setModuleCache("fileverthys", files.value);
-  // 数据持久化修复：检查 persistVerthys 返回值，根治"导入后重启数据丢失"
-  //    旧实现仅 await persistVerthys() 不检查返回值，flush 失败时 UI 显示已导入文件但
-  //    磁盘未落盘 → 重启后数据丢失。修复：检查返回值，失败时 showError 提示用户。
-  if (isTauri) {
+    // 持久化：与旧行为一致地检查落盘结果，失败必须显式告知
     let persistOk = false;
     try { persistOk = await persistVerthys(); } catch (e) { console.error("[onImport] persistVerthys 异常", e); }
     if (!persistOk) {
       showError("文件已加密导入内存但持久化失败，重启后可能丢失。请勿关闭应用，尝试重新导入或联系支持");
     }
-  }
 
-  importing.value = false;
-  importPercent.value = 0;
-  pendingFiles.value = [];
-
-  if (list.length === 1) {
-    if (successCount === 1) {
-      showToast(`已加密导入 ${list[0].name}`);
+    if (result.error) {
+      showError(`导入初始化失败：${result.error}`);
     } else {
-      showError("导入失败");
+      if (result.failCount > 0) {
+        const head = result.failures[0];
+        const more = result.failCount > 1 ? ` 等 ${result.failCount} 个文件` : "";
+        showError(`导入失败：${head.name}｜${head.message}${more}`);
+      }
+      if (result.cancelled) {
+        showToast("已取消导入（断点已保留，下次导入将续传）");
+      } else if (result.failCount === 0 && result.successCount > 0) {
+        showToast(
+          list.length === 1
+            ? `已加密导入 ${result.entries[0].name}`
+            : `批量导入完成：成功 ${result.successCount} 个${result.skippedCount > 0 ? `，跳过 ${result.skippedCount} 个` : ""}`,
+        );
+      } else if (result.successCount > 0) {
+        showToast(`另有 ${result.successCount} 个文件已导入`);
+      } else if (result.skippedCount > 0) {
+        showToast(`已跳过 ${result.skippedCount} 个已存在的文件（删除后可重导）`);
+      } else if (result.failCount === 0) {
+        showToast("没有可导入的文件");
+      }
+      if (result.sessionWarning) {
+        showError(result.sessionWarning);
+      }
     }
-  } else {
-    showToast(`批量导入完成：成功 ${successCount} 个${failCount > 0 ? `，失败 ${failCount} 个` : ""}`);
+  } catch (e) {
+    console.error("[FileVerthys] 导入失败", e);
+    showError("导入失败，请重试");
+  } finally {
+    importing.value = false;
+    importPercent.value = 0;
+    importDone.value = 0;
+    importTotal.value = 0;
+    importCancelRequested.value = false;
+    cancelPending.value = false;
+    pendingFiles.value = [];
   }
 };
 
@@ -521,172 +607,200 @@ const onSave = (f: FileEntry) => {
     showKeyDialog.value = true;
     return;
   }
-  doSave(f, null);
+  void doSave(f, null);
 };
 
 const confirmSaveKey = async () => {
   if (!saveTarget.value || !keyInput.value) return;
   try {
-    await doSave(saveTarget.value, keyInput.value);
-    showKeyDialog.value = false;
-    keyInput.value = "";
+    const saved = await doSave(saveTarget.value, keyInput.value);
+    if (saved) {
+      showKeyDialog.value = false;
+      keyInput.value = "";
+    }
   } catch {
     showError("密码错误或数据已损坏");
   }
 };
 
-const doSave = async (f: FileEntry, password: string | null) => {
+/** 保存到本地：经导出管道逐块校验并流式落盘；返回是否真正写出（取消视为未成功） */
+const doSave = async (f: FileEntry, password: string | null): Promise<boolean> => {
   if (!isTauri) {
     showError("浏览器模式不支持保存");
-    return;
+    return false;
   }
 
-  // 1. 收集所有 chunk 的 base64 数据（优先使用历史内联 chunkDataB64，外置格式回退到 chunkIds）
-  const chunkB64List: string[] = [];
-  if (f.chunkDataB64 && f.chunkDataB64.length > 0) {
-    chunkB64List.push(...f.chunkDataB64);
-  } else if (f.chunkIds && f.chunkIds.length > 0) {
-    for (const chunkId of f.chunkIds) {
-      const r = await verthysGetRecord(chunkId);
-      if (!r) continue;
-      chunkB64List.push(r.dataB64);
-    }
-  } else {
-    showError("无数据可保存");
-    return;
-  }
-
-  // 2. 解密并重组
-  const chunks: Uint8Array[] = [];
-  for (const chunkB64 of chunkB64List) {
-    let chunkBytes = base64ToBytes(chunkB64);
-    if (password) {
-      const decryptedB64 = await decryptPasswordField(chunkB64, password);
-      chunkBytes = base64ToBytes(decryptedB64);
-    }
-    chunks.push(chunkBytes);
-  }
-  const fullBytes = new Uint8Array(f.size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    fullBytes.set(chunk, offset);
-    offset += chunk.length;
-  }
-
-  // 3. 选择保存位置
   const ext = f.name.split(".").pop() || "";
-  const baseName = f.name.replace(/\.[^.]+$/, "");
-  const savePath = await save({
-    defaultPath: f.name,
-    filters: ext
-      ? [{ name: ext.toUpperCase(), extensions: [ext] }, { name: "所有文件", extensions: ["*"] }]
-      : [{ name: "所有文件", extensions: ["*"] }],
+  const result = await runFileExport(f, password, {
+    getRecord: async (id) => {
+      const r = await verthysGetRecord(id);
+      return r ? { dataB64: r.dataB64 } : null;
+    },
+    // 当前加密形态：解锁文件密钥并以口令校验块判定（唯一判定点）
+    openV2Decryptor: async (entry, pwd) => {
+      if (!entry.kdf || !entry.passwordCheck) return null;
+      const key = await unlockFileKeyV2(pwd, entry.kdf);
+      const ok = await verifyPasswordCheckV2(entry.passwordCheck, key);
+      if (!ok) return null;
+      return {
+        decryptChunk: async (b64: string) => decryptChunkV2(base64ToBytes(b64), key),
+      };
+    },
+    // 历史逐块盐形态：无口令判定点，逐块解密（失败给合并文案）
+    decryptField: decryptPasswordField,
+    pickSavePath: async (defaultName) => {
+      const chosen = await save({
+        defaultPath: defaultName,
+        filters: ext
+          ? [{ name: ext.toUpperCase(), extensions: [ext] }, { name: "所有文件", extensions: ["*"] }]
+          : [{ name: "所有文件", extensions: ["*"] }],
+      });
+      return chosen ?? null;
+    },
+    streamOpen: writeUserFileStream,
+    streamAppend: appendUserFileChunk,
+    streamFinalize: finalizeUserFileStream,
+    streamAbort: abortUserFileStream,
+    // 导出前目标卷空间预检
+    freeSpaceBytes: async (path) => (await checkDiskSpace(path)).free_bytes,
   });
-  if (!savePath) return;
 
-  // 4. 写入文件
-  try {
-    await writeUserFile(savePath, fullBytes);
-    showToast(`已保存到本地: ${baseName}.${ext}`);
-  } catch (e) {
-    console.error("[saveFile] 异常", e);
-    showError("保存失败");
+  if (result.ok) {
+    showToast(`已保存到本地: ${f.name}`);
+    return true;
   }
+  if (result.code === "CANCELLED") return false;
+  showError(result.message);
+  return false;
 };
 
-/* ===== 删除二次确认 ===== */
+/* ===== 删除（单次批量事务 + 失败保留与重试） ===== */
 const showDeleteConfirm = ref(false);
 const deleteTargetName = ref("");
 const deleteTarget = ref<FileEntry | null>(null);
-const onDelete = (f: FileEntry) => {
-  deleteTarget.value = f;
-  deleteTargetName.value = f.name;
-  showDeleteConfirm.value = true;
-};
-const confirmDelete = async () => {
-  const f = deleteTarget.value;
-  if (!f) return;
-  // 立即关闭弹窗 + 移除 UI + 更新缓存（同步无缝，消除删除按钮到内容消失的空白间隔）
-  showDeleteConfirm.value = false;
-  deleteTarget.value = null;
-  // 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
-  removeShallowItems(files, x => x.id === f.id);
-  setModuleCache("fileverthys", files.value);
-  showToast(`已删除 ${f.name}`);
-  // 修复：await deleteAndPersist + await persistVerthys（根治删除后复活）
-  if (isTauri) {
-    // 收集所有需要删除的 recordId（外置 chunk 记录 + meta 记录）
-    const idsToDelete: number[] = [];
-    if (f.chunkIds && f.chunkIds.length > 0 && (!f.chunkDataB64 || f.chunkDataB64.length === 0)) {
-      for (const chunkId of f.chunkIds) idsToDelete.push(chunkId);
-    }
-    if (f.metaId) idsToDelete.push(f.metaId);
-    // 立即失效所有缓存（同步，杜绝删除复活）
-    // 同时失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容
-    for (const rid of idsToDelete) {
+
+/* 条目删除状态：deleting = 删除中（按钮禁用、等待收口）；
+   persist-retry = 落盘失败待重试（删除已提交，仅重放落盘与收尾步骤） */
+const deleteStates = ref(new Map<number, "deleting" | "persist-retry">());
+const deleteStateOf = (f: FileEntry) => deleteStates.value.get(f.id);
+
+/* 去重键释放待重试队列：删除落盘成功但释放失败时暂存键，
+   下次导入开始前自动补释放（避免"删除后重导被静默跳过"残留为永久状态） */
+const dedupeReleaseQueue = createDedupeReleaseQueue(verthysForgetHashes);
+
+/* 删除管道依赖装配：批量事务删除 + 立即落盘 + 去重键释放 + 缓存失效 + 孤儿回收 */
+const deleteDeps: FileDeleteDeps = {
+  deleteRecords: deleteAndPersistBatch,
+  persist: persistVerthys,
+  forgetHashes: verthysForgetHashes,
+  invalidateRecords: (ids) => {
+    // 失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容，杜绝删除复活
+    for (const rid of ids) {
       invalidateSummaryRecord(rid);
       invalidateFullRecord(rid);
       invalidateScannedRecord(rid);
     }
-    // 修复：await deleteAndPersist + await persistVerthys（根治删除后复活）
-    //
-    // 原缺陷：deleteAndPersist(...).catch(() => {}) 火并忘——防抖 flush（300ms）
-    //   未执行即返回，应用退出 → 磁盘仍含已删记录 → "删除后复活"。
-    //   .catch(() => {}) 静默吞错 → 用户不知删除失败。
-    //
-    // 修复：await deleteAndPersist（删除 IPC 完成）+ await persistVerthys（取消防抖
-    //   立即落盘）。UI 已同步移除（无缝删除），await 不阻塞 UI 渲染。
-    try {
-      await deleteAndPersist(async () => {
-        for (const rid of idsToDelete) {
-          try { await verthysDeleteRecord(rid); } catch (e) {
-            if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") throw e;
-          }
-        }
-        return true;
-      });
-      // 数据持久化修复：检查 persistVerthys 返回值，根治"删除后复活"
-      //    persistVerthys 返回 false（非抛异常）时旧 catch 无法捕获 → 静默假成功 →
-      //    UI 已移除但磁盘未落盘 → 重启后记录"复活"。
-      const persistOk = await persistVerthys(); // 立即落盘（取消防抖，根治删除后复活）
-      if (!persistOk) {
-        showError("删除已提交但持久化失败，重启后记录可能恢复。请勿关闭应用并重试删除");
-      }
-    } catch (e) {
-      if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-        showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-        return;
-      }
-      showError("删除失败，请重试");
-    }
+  },
+  gcOrphanChunks: verthysGcOrphanChunks,
+  enqueuePendingRelease: (hash) => dedupeReleaseQueue.enqueue(hash),
+};
+
+/** 列表条目 → 删除管道输入 */
+const toDeleteSource = (f: FileEntry): DeleteSourceEntry => ({
+  id: f.id,
+  name: f.name,
+  metaId: f.metaId,
+  chunkIds: f.chunkIds,
+  chunkDataB64: f.chunkDataB64,
+  fileHash: f.fileHash,
+});
+
+/** 删除收口：移除列表条目 + 同步模块缓存（仅成功路径调用） */
+const applyDeleted = (f: FileEntry) => {
+  // 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
+  removeShallowItems(files, x => x.id === f.id);
+  syncModuleCache();
+};
+
+/** 同步模块列表缓存：按"数据层视图"写入——已删除待落盘（persist-retry）
+    条目不计入缓存，避免切模块重挂载后以常规卡片复活（此时数据层已无
+    该记录：保存必失败、删除因条目缺失被整体拒绝，形成幽灵条目）。 */
+const syncModuleCache = () => {
+  setModuleCache(
+    "fileverthys",
+    files.value.filter((x) => deleteStates.value.get(x.id) !== "persist-retry"),
+  );
+};
+
+/** 删除结果 → 条目状态与提示：成功即移除；失败保留条目并留下重试入口 */
+const settleDeleteResult = (f: FileEntry, result: FileDeleteResult) => {
+  if (result.ok) {
+    deleteStates.value.delete(f.id);
+    applyDeleted(f);
+    showToast(`已删除 ${f.name}`);
+    if (result.warning) showError(result.warning);
+    return;
   }
+  if (result.code === "E_PERSIST_FAILED") {
+    // 删除已提交：条目保留并提供"重试"入口完成落盘；缓存按数据层视图
+    // 摘除该条目（重试态仅存在于本组件内存，缓存保留会让切模块重挂载后
+    // 出现"看得见却打不开、删不掉"的幽灵条目，直至重启才恢复）
+    deleteStates.value.set(f.id, "persist-retry");
+    syncModuleCache();
+  } else {
+    // 删除未发生：恢复常态，删除按钮可直接重试
+    deleteStates.value.delete(f.id);
+  }
+  showError(result.message);
 };
 
-/* ===== 卡片视差 ===== */
-const onCardMove = (e: MouseEvent) => {
-  const card = e.currentTarget as HTMLElement;
-  const r = card.getBoundingClientRect();
-  const px = (e.clientX - r.left) / r.width - 0.5;
-  const py = (e.clientY - r.top) / r.height - 0.5;
-  card.style.transform = `perspective(800px) rotateY(${px * 6}deg) rotateX(${-py * 6}deg) translateY(-3px)`;
-  const shine = card.querySelector(".card-shine") as HTMLElement;
-  if (shine) shine.style.background = `radial-gradient(circle at ${px * 100 + 50}% ${py * 100 + 50}%, rgba(0,212,255,0.1), transparent 60%)`;
-};
-const onCardLeave = (e: MouseEvent) => {
-  const card = e.currentTarget as HTMLElement;
-  card.style.transform = "";
-  const shine = card.querySelector(".card-shine") as HTMLElement;
-  if (shine) shine.style.background = "";
+const onDelete = (f: FileEntry) => {
+  const state = deleteStates.value.get(f.id);
+  if (state === "deleting") return;
+  if (state === "persist-retry") {
+    // 用户已确认过删除：直接重放落盘与收尾，不再二次确认
+    void retryPersistDelete(f);
+    return;
+  }
+  deleteTarget.value = f;
+  deleteTargetName.value = f.name;
+  showDeleteConfirm.value = true;
 };
 
-/* ===== Toast ===== */
-const toast = ref("");
-let toastTimer: ReturnType<typeof setTimeout> | null = null;
-const showToast = (msg: string) => {
-  toast.value = msg;
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toast.value = ""; }, 2500);
+const confirmDelete = async () => {
+  const f = deleteTarget.value;
+  if (!f || deleteStates.value.has(f.id)) return;
+  showDeleteConfirm.value = false;
+  deleteTarget.value = null;
+  deleteStates.value.set(f.id, "deleting");
+  let result: FileDeleteResult;
+  try {
+    result = await runFileDelete(toDeleteSource(f), deleteDeps);
+  } catch {
+    // 管道异常兜底：按删除失败处理（保持条目与可重试态）
+    deleteStates.value.delete(f.id);
+    showError("删除失败，请重试");
+    return;
+  }
+  settleDeleteResult(f, result);
 };
+
+/** 落盘失败重试：删除已提交，仅重放落盘与其后的收尾步骤 */
+const retryPersistDelete = async (f: FileEntry) => {
+  deleteStates.value.set(f.id, "deleting");
+  let result: FileDeleteResult;
+  try {
+    result = await retryFileDeletePersist(toDeleteSource(f), deleteDeps);
+  } catch {
+    deleteStates.value.set(f.id, "persist-retry");
+    showError("删除落盘仍失败，请重试");
+    return;
+  }
+  settleDeleteResult(f, result);
+};
+
+/* ===== 卡片光泽追踪（共享实现；3D 视差倾斜已按用户决策移除，Wave 53） ===== */
+const { onCardMove, onCardLeave } = useCardShine();
 
 /* ===== 加载已有文件 ===== */
 const loadFiles = async () => {
@@ -771,8 +885,9 @@ const loadFiles = async () => {
         }
         // 外置格式：meta 只保存块引用（chunkIds），块密文在独立 chunk 记录中，
         // 读取侧按引用取块解密（导出与删除级联均依赖 chunkIds）。
-        // 迁移方向已反转，外置为当前写入形态，不再把块回填内联进 meta。
-        else if (meta.chunkIds && meta.chunkIds.length > 0) {
+        // 接纳条件按"字段存在且为数组"判定：0 字节文件的块引用恰为空数组，
+        // 若按长度判定会把空文件永久排除在列表之外。
+        else if (Array.isArray(meta.chunkIds)) {
           // 项2：收集到 newItems，循环外一次性 pushShallowItems
           newItems.push({
             id: Date.now() + id,
@@ -783,6 +898,11 @@ const loadFiles = async () => {
             encrypted: meta.encrypted,
             metaId: id,
             chunkIds: meta.chunkIds,
+            chunkHashes: meta.chunkHashes,
+            chunkSize: meta.chunkSize,
+            fileHash: meta.fileHash,
+            kdf: meta.kdf,
+            passwordCheck: meta.passwordCheck,
           });
           existingMetaIds.add(id);
           hasNewFiles = true;
@@ -797,7 +917,7 @@ const loadFiles = async () => {
   }
   // 2. 只有发现新文件才更新缓存（避免不必要的缓存写入）
   if (hasNewFiles) {
-    setModuleCache("fileverthys", files.value);
+    syncModuleCache();
   }
 };
 
@@ -817,29 +937,36 @@ useModuleDialogGuard("verthys", () => {
   showImportDialog.value = false;
   showKeyDialog.value = false;
   showDeleteConfirm.value = false;
+  resolveSessionConflict(false);
+  sessionConflictResolver = null;
 });
 </script>
 
 <style scoped>
 .file-verthys { width: 100%; height: 100%; display: flex; flex-direction: column; gap: 14px; overflow: hidden; position: relative; }
 
-/* 顶部栏 */
-.search-bar { display: flex; align-items: center; gap: 12px; padding: 8px 10px 8px 14px; flex-shrink: 0; animation: slide-down 0.5s var(--ease) both; }
+/* 顶部栏：星野导航带仅承载布局（无边框/圆角/投影 —— 底板与左右溶解边界由 StarlitSky 承担） */
+.search-bar { display: flex; align-items: center; gap: 12px; padding: 9px 10px 9px 14px; flex-shrink: 0; animation: slide-down 0.5s var(--ease) both; }
 @keyframes slide-down { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
 .search-inner { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .search-icon { width: 14px; height: 14px; color: var(--text-muted); flex-shrink: 0; }
 .search-input { flex: 1; background: transparent; border: none; color: var(--text-primary); font-size: 13px; outline: none; font-family: var(--font); min-width: 0; }
 .search-input::placeholder { color: var(--text-muted); }
-.plus { font-weight: 300; }
 
 /* 卡片网格 */
 .card-grid { flex: 1; overflow-y: auto; overflow-x: hidden; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-content: start; padding-right: 4px; }
-.acct-card { position: relative; padding: 14px 16px 14px 18px; transform-style: preserve-3d; transition: transform 0.3s var(--ease), box-shadow 0.3s var(--ease); animation: card-in 0.5s var(--ease) both; animation-delay: calc(var(--i) * 0.05s); }
+/* 悬浮效果只有阴影 + 光泽追踪（3D 视差倾斜已按用户决策移除，Wave 53）；
+   入场动画填充模式必须为 backwards，不得改回 both/forwards——
+   前向填充会永久用动画终态压住 hover transform（曾使卡片倾斜静默失效） */
+/* 卡片底色：直接复用顶部星野导航带底板（单源 tokens.css --bar-surface，
+   与 StarlitSky 底板同一定义）；.glass 仅保留边框 / 圆角 / 投影 */
+.acct-card { position: relative; padding: 14px 16px 14px 18px; background: var(--bar-surface); transition: box-shadow 0.3s var(--ease); animation: card-in 0.5s var(--ease) backwards; animation-delay: calc(var(--i) * 0.05s); }
 @keyframes card-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 .acct-card:hover { box-shadow: 0 12px 36px rgba(0,0,0,0.5), 0 0 16px rgba(0,212,255,0.1); }
 .card-accent { position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; background: linear-gradient(180deg, transparent, var(--accent), transparent); opacity: 0; transition: opacity 0.3s; border-radius: 1px; }
 .acct-card:hover .card-accent { opacity: 1; box-shadow: 0 0 8px rgba(0,212,255,0.4); }
-.card-shine { position: absolute; inset: 0; border-radius: var(--radius); pointer-events: none; opacity: 0; transition: opacity 0.3s; }
+/* 光晕层几何/混合/强度统一由共享定义（styles/verthys-common.css .card-shine +
+   tokens.css --shine-alpha / --shine-reach）；本模块只需卡片自身的悬浮显隐（Wave 54 收口） */
 .acct-card:hover .card-shine { opacity: 1; }
 .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .file-icon-wrap { width: 18px; height: 18px; color: var(--accent); flex-shrink: 0; }
@@ -856,12 +983,9 @@ useModuleDialogGuard("verthys", () => {
 .mini-btn:hover { background: rgba(0,212,255,0.1); }
 .mini-btn.danger { color: var(--danger); }
 .mini-btn.danger:hover { background: rgba(255,46,99,0.1); }
-
-/* 空状态 */
-.empty { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px; }
-.empty-icon { font-size: 32px; color: var(--text-muted); opacity: 0.3; margin-bottom: 8px; }
-.empty-text { font-size: 13px; color: var(--text-muted); margin-bottom: 4px; }
-.empty-hint { font-size: 11px; color: var(--text-muted); opacity: 0.6; }
+/* 禁用态（删除中 / 删除已提交待落盘）：光标与可点击态明确区分，悬浮不再着色 */
+.mini-btn:disabled { cursor: not-allowed; opacity: 0.45; }
+.mini-btn:disabled:hover { background: none; }
 
 /* 对话框 */
 .dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.74); display: flex; align-items: center; justify-content: center; z-index: 1000; }
@@ -892,12 +1016,10 @@ useModuleDialogGuard("verthys", () => {
 
 .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; padding-top: 14px; border-top: 1px solid var(--border-glass); }
 
+/* 并发导入互斥确认 */
+.session-conflict-text { font-size: 12px; line-height: 1.7; color: var(--text-secondary); font-family: var(--font); margin-bottom: 6px; }
+
 /* 密钥对话框 */
 .key-dialog { min-width: 360px; }
 .key-target { font-size: 12px; color: var(--text-secondary); font-family: var(--font); margin-bottom: 14px; }
-
-/* Toast */
-.clip-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); padding: 10px 20px; font-size: 12px; color: var(--accent); font-family: var(--font); z-index: 999; }
-.toast-enter-active, .toast-leave-active { transition: all 0.4s var(--ease); }
-.toast-enter-from, .toast-leave-to { opacity: 0; transform: translate(-50%, 10px); }
 </style>

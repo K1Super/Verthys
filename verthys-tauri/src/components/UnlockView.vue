@@ -1,17 +1,17 @@
 <!--
-  UnlockView.vue — 动态引导页（星系协同版 v3）
-  与偏轴旋涡星系逆渡（INTRO_T=3s）同步编排：
-    0-3s    星系倒卷成型（全屏逆渡）‖ VERTHYS 不规则字号雕刻排印
-            逐字轨道入射 + 谱线组逐线充能
+  UnlockView.vue — 动态引导页（星系协同）
+  与偏轴旋涡星系逆渡（INTRO_T_MS）同步编排：
+    0-3s    星系倒卷成型（全屏逆渡）‖ VERTHYS 星轨刻线体字标
+            逐字轨道入射（定制字形装配）+ 谱线组逐线充能
     3s+     静旋驻留 ‖ 谱线呼吸 ‖ 进入提示浮现（线体极简 · 无呼吸静态）
     点击    逐字引力弹射（外缘先走）+ 谱线组塌缩（外缘先收）
-            + 丝线 dash 收回 → 星系正渡（warping）
-  排印设计（v3 — 顶级排印美学，零渐变）：
-    不规则字号（56-108px hash 差化）/ baseline 非均匀基线错落 /
-    实色·镂空描边·accent 锚点三态混合（瑞士排印空心字手法）/
-    双层雕刻（暗色克隆偏移 — 深度感，非阴影辉光）
+            + 丝线 dash 收回 → 星系正渡（warping）；入场动画未完成的组
+            改走软离场（整组淡出，不打断入场）
+  字标设计（零渐变 · 定制字形 — 唯一样式见 common/BrandMark.vue）：
+    单线几何骨格 + 光门镂空 V + 枢钥刻槽（每字一痕）+ 悬锤垂针 Y +
+    双层雕刻深度 + 单一强调（H）— 形态为设计定值，hash 仅差化运动
   反大众化约束：无同心圆环 / 无渐变 / 无等距逐字浮现 / 无规整加载条；
-  入射、弹射、字号、基线、三态、时序全部逐元素差异化（确定性 hash）
+  入射、弹射、时序全部逐元素差异化（确定性 hash — 形整而气活）
 -->
 <template>
   <div
@@ -28,7 +28,7 @@
          dash 沿椭圆持续巡行 = 轨道碎屑流，揭示/收回均经 dash 生长塌缩） -->
     <svg
       class="orbit-filaments"
-      :class="{ leaving: leaving }"
+      :class="{ leaving: leaving && !softFils, soft: leaving && softFils }"
       viewBox="0 0 1200 720"
       fill="none"
       aria-hidden="true"
@@ -39,29 +39,12 @@
     </svg>
 
     <!-- 品牌核心视觉 -->
-    <div class="brand-core" :class="{ leaving: leaving }">
-      <!-- 主标题：VERTHYS 不规则字号雕刻排印
-           （实色 / 镂空 / accent 三态 · 非均匀基线 · 双层雕刻深度 —
-             全局共享样式体系 animations.css .brand-title/.brand-char） -->
-      <h1 class="brand-title">
-        <span
-          v-for="(cv, i) in charVariants"
-          :key="i"
-          class="brand-char"
-          :class="cv.mode"
-          :data-char="cv.ch"
-          :style="{
-            '--fs': cv.fs + 'px',
-            '--dx': cv.dx + 'px',
-            '--dy': cv.dy + 'px',
-            '--by': cv.by + 'px',
-            '--tr': cv.tr + 'deg',
-            '--rot': cv.rot + 'deg',
-            '--delay': cv.delay + 'ms',
-            '--dur': cv.dur + 's',
-            '--ed': cv.ed + 'ms',
-          }"
-        >{{ cv.ch }}</span>
+    <div class="brand-core" :class="{ leaving: leaving && !softBrand, soft: leaving && softBrand }">
+      <!-- 主标题：VERTHYS 星轨刻线体字标（定制字形 — 光门镂空 V /
+           枢钥刻槽 / 悬锤垂针 Y / 双层雕刻；三级同源之引导级，
+           形态与运动参数见 useBrandTitle 唯一权威源） -->
+      <h1 class="brand-h1">
+        <BrandMark level="intro" />
       </h1>
 
       <!-- 谱线组（光谱发射线隐喻 — 逐线差化充能 → 呼吸 + 微跳驻留 → 外缘先收塌缩） -->
@@ -95,7 +78,7 @@
 
     <!-- 底部进入提示（线体极简 — 非对称发丝线 + 端点竖标；无呼吸，静态高级） -->
     <transition name="hint-fade">
-      <div v-if="hintVisible" class="enter-hint" :class="{ leaving: leaving }">
+      <div v-if="hintVisible" class="enter-hint" :class="{ leaving: leaving && !softHint, soft: leaving && softHint }">
         <span class="hint-line hint-line-l"><i class="hint-cap"></i></span>
         <span class="hint-text">点击进入</span>
         <span class="hint-line hint-line-r"><i class="hint-cap"></i></span>
@@ -106,6 +89,8 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount } from "vue";
+import { INTRO } from "../app/constants";
+import BrandMark from "./common/BrandMark.vue";
 import { useBrandTitle } from "../composables/useBrandTitle";
 import { useSpectraTicks } from "../composables/useSpectraTicks";
 import { masterFrameLoop } from "../core/master-frame-loop";
@@ -116,6 +101,13 @@ const subShown = ref(false);
 const hintVisible = ref(false);
 const charged = ref(false);
 const leaving = ref(false);
+/* 软离场分级（入场动画未完成的组改走整组淡出 — 离场编排整体替换
+ * 入场动画会形成跳变）：门控时刻与样式编排成对维护 */
+const softBrand = ref(false);
+const softFils = ref(false);
+const softHint = ref(false);
+/* 组件挂载时刻（performance.now 基准 — 软离场门控的经过时长原点） */
+let mountedAt = 0;
 
 /* ============================================================================
  * 鼠标跟随光晕 — 性能根治版：
@@ -166,13 +158,14 @@ const kickAura = () => {
 };
 
 /* ============================================================================
- * 不规则字号雕刻排印 — 参数由 useBrandTitle 全局唯一权威源生成
- *   （与主界面 HomeView 共享同一确定性 hash 场，品牌排印跨场景同源）：
- *   字号 56-108px 逐字差化 / 基线 ±13px 非均匀错落 / 微倾 ±2° /
- *   实色·镂空·accent 三态（accent 唯一 = 'C'）/ 双层雕刻暗色克隆 /
- *   轨道入射 + 外缘先走引力弹射
+ * 星轨刻线体字标 — 形态/运动参数由 useBrandTitle 全局唯一权威源生成
+ *   （与主界面 HomeView 同源：同一字形库与确定性运动场，跨场景形态一致）：
+ *   定制字形（光门镂空 V / 枢钥刻槽 / 悬锤垂针 Y / 双层雕刻）/
+ *   单强调锚点（H）/ 轨道入射 + 外缘先走引力弹射
+ *   注：BrandMark 内部自持模型（模板直出）；此处仅取入场完成时刻
+ *   用于软离场门控 — 同一权威源两处调用，零硬编码漂移
  * ========================================================================== */
-const charVariants = useBrandTitle();
+const brand = useBrandTitle("intro");
 
 /* 谱线组（光谱发射线隐喻，拒绝规整加载条）— 参数由 useSpectraTicks
  * 唯一权威源生成（与主界面 HomeView 谱线回声共享：光谱色/时序/呼吸/
@@ -181,6 +174,18 @@ const charVariants = useBrandTitle();
  * 100% 帧（scaleY(1)/opacity=op 逐值一致），且每线呼吸延迟 sm 精确对齐
  * 自身充能结束时刻 — 起始帧 = 当前帧零跳变 */
 const spectraTicks = useSpectraTicks("intro");
+
+/* 组入场完成时刻（软离场门控）：字标逐字组装由模型延时+时长求和
+ * （本地时刻 — 无硬编码漂移）；丝线揭示与进入提示为样式编排
+ * 派生常量，改动样式编排须同步此三处 */
+const brandDoneAt = Math.max(
+  brand.doneAt,
+  ...spectraTicks.map((t) => t.td + 900),
+);
+/** 丝线揭示完成：最晚揭示延迟 1.5s + 揭示时长 1.9s */
+const FILS_DONE_AT = 3400;
+/** 进入提示生长完成：浮现 + 右线延迟 120ms + 生长 900ms */
+const HINT_DONE_AT = INTRO.HINT_VISIBLE + 1020;
 
 /* 指针事件仅记录目标（中心系坐标），写入与插值全部由主循环逐帧排程承担 */
 const onMouseMove = (e: MouseEvent) => {
@@ -191,11 +196,16 @@ const onMouseMove = (e: MouseEvent) => {
 
 const onEnter = () => {
   if (leaving.value) return;
+  /* 软离场分级：按点击时刻的各组入场进度选择离场形态（未完成组整组
+   * 淡出，已完成组走既定弹射/塌缩编排） */
+  const elapsed = performance.now() - mountedAt;
+  softBrand.value = elapsed < brandDoneAt;
+  softFils.value = elapsed < FILS_DONE_AT;
+  softHint.value = elapsed < HINT_DONE_AT;
   leaving.value = true;
-  /* 逐字弹射起飞后交接星系正渡（0.32s ≈ 弹射前段，衔接无空窗） */
-  setTimeout(() => {
-    emit("enter");
-  }, 320);
+  /* 同位交接：弹射编排与引擎正渡同帧启动，页面编排同锚此刻 —
+   * 点击后无响应窗口，交接节点与渡越包络相位恒对齐 */
+  emit("enter");
 };
 
 let timers: number[] = [];
@@ -205,14 +215,16 @@ const pushTimer = (fn: () => void, delay: number) => {
 };
 
 onMounted(() => {
-  /* 谱线组充能完毕 → 呼吸驻留（3.05s — 与逆渡 INTRO_T=3s 收束同步） */
-  pushTimer(() => { charged.value = true; }, 3050);
+  mountedAt = performance.now();
+
+  /* 谱线组充能完毕 → 呼吸驻留（与逆渡收束同源对齐） */
+  pushTimer(() => { charged.value = true; }, INTRO.CHARGED);
 
   /* 副标题入场（逆渡消散段，星系已倒卷成型） */
-  pushTimer(() => { subShown.value = true; }, 2450);
+  pushTimer(() => { subShown.value = true; }, INTRO.SUB_SHOWN);
 
   /* 底部进入舱（逆渡完成后浮现） */
-  pushTimer(() => { hintVisible.value = true; }, 3250);
+  pushTimer(() => { hintVisible.value = true; }, INTRO.HINT_VISIBLE);
 });
 
 onBeforeUnmount(() => {
@@ -369,26 +381,27 @@ onBeforeUnmount(() => {
 }
 
 /* ============================================================================
- * 主标题：几何/三态着色/双层雕刻/组装曲线全部复用全局共享体系
- * （animations.css .brand-title + .brand-char + brand-assemble —
+ * 主标题：字形/三态着色/双层雕刻/组装曲线全部复用全局共享体系
+ * （animations.css .brand-wordmark + .wm-glyph + wm-assemble —
  * 与主界面 HomeView compact 级同源，引导级幅度即共享默认值）；
  * 此处仅保留本组件专属的引力弹射离场编排。
  * ========================================================================== */
 
-/* 引力弹射离场：自浮动基线沿入射向量反向弹射（外缘字先走），
- * 加速离场曲线（引力弹弓），与星系正渡衔接 */
-.brand-core.leaving .brand-char {
-  animation: char-eject 0.62s cubic-bezier(0.5, 0, 0.9, 0.4) var(--ed, 0ms) both;
+/* 引力弹射离场：自落位态沿入射向量反向弹射（外缘字先走），
+ * 加速离场曲线（引力弹弓），与星系正渡衔接；
+ * 起帧 = 落位恒等态（transform:none）— 与组装终帧逐值一致，零跳变 */
+.brand-core.leaving :deep(.wm-glyph) {
+  animation: wm-eject 0.62s cubic-bezier(0.5, 0, 0.9, 0.4) var(--ed, 0ms) both;
 }
-@keyframes char-eject {
+@keyframes wm-eject {
   0% {
     opacity: 1;
-    transform: translateY(var(--by, 0px)) rotate(var(--tr, 0deg)) scale(1);
+    transform: none;
   }
   100% {
     opacity: 0;
-    transform: translate(calc(var(--dx, 60px) * 1.7), calc(var(--dy, -40px) * 1.7))
-      rotate(calc(var(--rot, 8deg) * -2)) scale(0.5);
+    transform: translate(calc(var(--dx, 60px) * 1.8), calc(var(--dy, -40px) * 1.8))
+      rotate(calc(var(--rot, 0deg) * -1.8)) scale(0.55);
   }
 }
 
@@ -490,15 +503,16 @@ onBeforeUnmount(() => {
 }
 
 /* ============================================================================
- * 底部进入提示（v5 — 线体极简，极致美学，无呼吸静态）：
- * v5 等长校正：左右能量轨统一由 --hint-line-w 唯一权威源驱动
- *   （46px × 2 — 取 v4 非对称 54/38 的均值，轨组总宽 92px 不变、
+ * 底部进入提示（线体极简，极致美学，无呼吸静态）：
+ * 等长校正：左右能量轨统一由 --hint-line-w 唯一权威源驱动
+ *   （46px × 2 — 取非对称 54/38 的均值，轨组总宽 92px 不变、
  *   整体居中质量零漂移，仅消除左右不等长的视觉缺陷）；时序差化
  *   保留（右线晚生 0.12s — 几何等长但入场时序非机械同步）
- * v4 体系（保留）：端点竖标（1×5px 微刻度 — 仪器级收笔，非装饰堆砌）；
+ * 既有体系（保留）：端点竖标（1×5px 微刻度 — 仪器级收笔，非装饰堆砌）；
  *   文字静态定Opacity（无任何循环动画 — 安静的高级感）；
  *   入场：双线自文字侧向外生长（一次性）+ 文字淡入；
- *   离场：双线向文字侧收回 + 端点渐隐 + 文字字距扩散消解。
+ *   离场：双线向文字侧收回 + 端点渐隐 + 文字字距扩散消解
+ *   （入场生长未完成时为软离场：整组淡出，不打断入场）。
  * ========================================================================== */
 .enter-hint {
   position: absolute;
@@ -509,7 +523,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 18px;
   z-index: 3;
-  /* 左右能量轨等长唯一权威源（46px × 2 = v4 轨组总宽 54+38） */
+  /* 左右能量轨等长唯一权威源（46px × 2 = 轨组总宽 54+38） */
   --hint-line-w: 46px;
 }
 .hint-line {
@@ -573,6 +587,25 @@ onBeforeUnmount(() => {
 .enter-hint.leaving .hint-text {
   opacity: 0;
   letter-spacing: 10px;
+}
+
+/* ===== 软离场（入场动画未完成的组 — 不打断入场动画，整组淡出快移） =====
+ * 离场编排会整体替换入场动画；入场未完成时替换形成跳变，故未完成组
+ * 仅做父级淡出（与子级入场动画叠加，零跳变）。
+ * 门控时刻（brandDoneAt / FILS_DONE_AT / HINT_DONE_AT）与编排时长
+ * 成对维护。 */
+.brand-core.soft {
+  transition: opacity 0.45s var(--ease), transform 0.45s var(--ease);
+  opacity: 0;
+  transform: translateY(-10px);
+}
+.orbit-filaments.soft {
+  transition: opacity 0.45s var(--ease);
+  opacity: 0;
+}
+.enter-hint.soft {
+  transition: opacity 0.4s var(--ease);
+  opacity: 0;
 }
 
 /* 提示入场动画 */

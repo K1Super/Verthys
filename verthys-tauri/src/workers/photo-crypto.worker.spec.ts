@@ -184,4 +184,48 @@ describe("photo-crypto.worker — 解密路径", () => {
     expect(String(response.error)).toContain("第 1/1 块解密失败");
     expect(String(response.error)).toContain("数据块顺序校验失败");
   });
+
+  it("逐块密文哈希与权威值不符：解密前拒绝并标注块序号", async () => {
+    const fileHashHex = bytesToHex(computeFileHash(new Uint8Array([9])));
+    const salt = new Uint8Array(16).fill(6);
+    const cipher = await encryptChunk(new Uint8Array([1, 2]), "k", 0, 1, fileHashHex, salt);
+    workerSelf.postMessage.mockClear();
+
+    await dispatch({
+      id: 16,
+      op: "decrypt_chunks",
+      chunksB64: [bytesToBase64(cipher)],
+      photoKey: "k",
+      fileHashHex,
+      label: "照片.png",
+      expectedHashes: ["0".repeat(64)],
+    });
+
+    const { response } = lastPost();
+    expect(response.id).toBe(16);
+    expect(response.ok).toBe(false);
+    expect(String(response.error)).toContain("块密文哈希校验失败");
+  });
+
+  it("整图明文哈希与权威值不符：整体失败（解密产物被拒绝）", async () => {
+    const fileHashHex = bytesToHex(computeFileHash(new Uint8Array([9])));
+    const salt = new Uint8Array(16).fill(8);
+    const cipher = await encryptChunk(new Uint8Array([1, 2]), "k", 0, 1, fileHashHex, salt);
+    workerSelf.postMessage.mockClear();
+
+    await dispatch({
+      id: 17,
+      op: "decrypt_chunks",
+      chunksB64: [bytesToBase64(cipher)],
+      photoKey: "k",
+      fileHashHex,
+      label: "照片.png",
+      expectedFileHash: "f".repeat(64),
+    });
+
+    const { response } = lastPost();
+    expect(response.id).toBe(17);
+    expect(response.ok).toBe(false);
+    expect(String(response.error)).toContain("整图哈希校验失败");
+  });
 });

@@ -258,7 +258,7 @@ impl Worker {
              * VerthysContainerInfo 前 8 字节——该头部在任何容器状态均可读，
              * stateless 且无副作用。预检失败时进程随即退出，已初始化句柄
              * 由进程回收，无驻留窗口。 */
-            const WORKER_KNOWN_API_VERSION: u32 = 0x000C;
+            const WORKER_KNOWN_API_VERSION: u32 = 0x000D;
             const WORKER_EXPECTED_FMT_V3: u16 = 3;
             let get_info: Symbol<VerthysGetContainerInfoFn> =
                 lib.get(b"Verthys_GetContainerInfo").map_err(|e| {
@@ -410,6 +410,49 @@ impl Worker {
                     Err(_) => return 0xFFFFFFFF,
                 };
             ffi_call(|| { func(self.handle, preset) }).unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    /// 查询活跃安全预设档位（快照读取）
+    ///
+    /// 返回 Ok(档位代号 0/1/2)；失败返回 Err(错误码/0xFFFFFFFF)，
+    /// 由上层据此做切档回读校验（不一致即判定切换未生效）。
+    pub(crate) fn call_get_security_preset(&self) -> Result<u32, u32> {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysGetSecurityPresetFn> =
+                match lib.get(b"Verthys_GetSecurityPreset") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let mut preset: u32 = 0;
+            let rc = ffi_call(|| { func(self.handle, &mut preset as *mut u32) })
+                .unwrap_or(0xFFFFFFFF);
+            if rc != VERTHYS_OK {
+                return Err(rc);
+            }
+            Ok(preset)
+        }
+    }
+
+    /// 查询指定档位的特性位投影（跨层特性契约）
+    ///
+    /// 返回 Ok(特性位)；失败返回 Err(错误码/0xFFFFFFFF)。
+    pub(crate) fn call_get_preset_feature_bits(&self, preset: u32) -> Result<u32, u32> {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysGetPresetFeatureBitsFn> =
+                match lib.get(b"Verthys_GetPresetFeatureBits") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let mut bits: u32 = 0;
+            let rc = ffi_call(|| { func(self.handle, preset, &mut bits as *mut u32) })
+                .unwrap_or(0xFFFFFFFF);
+            if rc != VERTHYS_OK {
+                return Err(rc);
+            }
+            Ok(bits)
         }
     }
 

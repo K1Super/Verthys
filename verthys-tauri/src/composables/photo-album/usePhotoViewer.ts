@@ -5,7 +5,7 @@
  * 从原 PhotoAlbum.vue 提取，保持 100% 功能不变。
  *
  * 设计要点：
- * - 接收 usePhotoData 返回值 + usePhotoToast 的 showError（依赖注入）
+ * - 接收 usePhotoData 返回值 + 全局 Toast 中心的 showError（依赖注入）
  * - viewerBlobUrl 为非响应式 let，避免 Blob URL 字符串被 Vue 深度代理
  * - 浏览器模式直接复用 ph.blobUrl，无需解密
  * - Tauri 模式：meta 缺失时按需解密回填 photos（decryptPhotoMeta）
@@ -20,7 +20,6 @@
  * - 窗口失焦/聚焦时 viewer 模糊控制（隐私保护）
  */
 import { ref, type Ref, type ShallowRef } from "vue";
-import { computeChunkHashesForB64 } from "../../lib/crypto";
 import { decryptChunksPreferWorker } from "../../workers/photo-decrypt-bridge";
 import { isSlimLayout } from "../../constants/crypto_const";
 import { updateShallowItem } from "../../utils/shallow-array";
@@ -28,19 +27,10 @@ import type { PhotoEntry, DecryptedPhotoMeta } from "./types";
 import { toArrayBuffer, thumbUrlOf } from "./utils";
 import { resolveChunkRefs, loadChunkCiphers, type ChunkRefs } from "./chunk-refs";
 
-/** 逐块密文哈希比对（hex 串，大小写不敏感） */
-function hashesEqual(a: readonly string[], b: readonly string[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i].toLowerCase() !== b[i].toLowerCase()) return false;
-  }
-  return true;
-}
-
 /**
  * usePhotoViewer 依赖注入接口。
  *
- * 接收 usePhotoData 的返回值对象 + usePhotoToast 的 showError，保持 Composable 单向数据流。
+ * 接收 usePhotoData 的返回值对象 + 全局 Toast 中心的 showError，保持 Composable 单向数据流。
  */
 export interface UsePhotoViewerOptions {
   /** 照片列表（shallowRef，避免深度代理） */
@@ -53,7 +43,7 @@ export interface UsePhotoViewerOptions {
   ensurePhotoKey: () => boolean;
   /** 解密单张照片完整元数据（来自 usePhotoData） */
   decryptPhotoMeta: (vid: number, prefetchedMetaB64?: string) => Promise<DecryptedPhotoMeta | null>;
-  /** 显示错误提示（来自 usePhotoToast，统一 Toast 中心） */
+  /** 显示错误提示（来自全局 Toast 中心） */
   showError: (msg: string) => void;
 }
 
@@ -184,15 +174,17 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
         return;
       }
 
-      // 渲染前完整性校验：块数必须等于元数据声明，逐块密文哈希必须与权威值一致。
-      //   残缺数据直接拼接会渲染出半张图/花屏，用户会误判为照片本身损坏；
-      //   校验用的是密文哈希，无需先解密即可发现缺失与篡改。
-      const hashMismatch = refs.hashes.length === cipherB64.length
-        && !hashesEqual(computeChunkHashesForB64(cipherB64), refs.hashes);
-      if (cipherB64.length !== expected || hashMismatch) {
+      // 渲染前完整性判定（主线程只做常数级校验）：块数与哈希项数必须与
+      //   元数据声明一致；逐块密文哈希比对下沉到解密任务内（Worker 侧先校验
+      //   再解密），避免对兆字节级密文在主线程做同步哈希。
+      //   空哈希数组属历史记录（无权威值），保持兼容不比对。
+      const hashesPartial = refs.hashes.length > 0 && refs.hashes.length !== cipherB64.length;
+      if (cipherB64.length !== expected || hashesPartial) {
         const detail = notFound > 0
           ? `缺失 ${notFound} 块`
-          : hashMismatch ? "逐块哈希校验未通过" : "块数不一致";
+          : hashesPartial
+            ? `哈希项数不一致（${refs.hashes.length} ≠ ${cipherB64.length}）`
+            : "块数不一致";
         console.error(`[onView] 照片数据不完整：${detail}`);
         showError("此照片数据已损坏，请删除后重新导入");
         commitViewer(seq, thumbUrlOf(ph.thumb));
@@ -213,6 +205,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
           : undefined;
         plaintexts = await decryptChunksPreferWorker(
           cipherB64, photoKey.value, meta.fileHash, ph.name, slim,
+          refs.hashes.length > 0 ? { expectedHashes: refs.hashes } : undefined,
         );
         setViewerProgress("");
       } catch (e) {
@@ -241,8 +234,8 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
       viewerBlobUrl = url;
       commitViewer(seq, url);
 
-      // 隐私模式已启用时无需重复调用（避免生成新令牌覆盖旧令牌）
-      // 防截屏保护在隐私模式启用时已覆盖所有窗口，viewer 覆盖层不影响其生效
+      // 防截屏保护是应用级能力：保护生效时已覆盖全部窗口，
+      // viewer 覆盖层不影响其生效，打开查看器无需任何额外命令
     } catch (e) {
       console.error("预览失败:", e);
       setViewerProgress("");
@@ -263,8 +256,8 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
     viewerDragging.value = false;
     window.removeEventListener("mousemove", onWindowMouseMove);
     window.removeEventListener("mouseup", onWindowMouseUp);
-    // 关闭 viewer 时不再自动关闭隐私模式
-    // 隐私模式由用户通过 togglePrivacy 按钮显式控制，viewer 关闭不应影响其状态
+    // 关闭 viewer 不触碰防截屏保护：保护是应用级能力，
+    // 由应用级会话单例与拾光按钮显式控制，不随查看器开闭变化
   };
 
   /* ===== 边界约束：防止图片拖出视口 =====

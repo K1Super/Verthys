@@ -946,6 +946,16 @@ fn patrol_loop(ctx: PatrolContext) {
         // 更新心跳
         ctx.heartbeat.store(now_ms(), Ordering::SeqCst);
 
+        // 档位门控：模块巡检（矩阵中性能档关闭、自定义档由用户开关决定）。
+        // 关闭时保持线程与看门狗存活，仅跳过扫描本体与副作用；
+        // 门控读取应用侧策略位镜像（权威源为 C 运行时投影）。
+        if !crate::security::app_feature_gate::enabled(
+            crate::security::app_feature_gate::FEAT_MODULE_PATROL,
+        ) {
+            sleep_with_heartbeat(&ctx.stop_flag, &ctx.heartbeat, compute_dynamic_interval());
+            continue;
+        }
+
         // catch_unwind 包裹单次巡检
         let patrol_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             run_one_patrol(&ctx);

@@ -21,7 +21,7 @@
  * 安全策略：
  *   - KILL 路径严格按 极速熔断→内存绝育→故障码上报→退出 顺序执行。
  *   - 故障码仅匿名类型码，不含任何用户隐私数据。
- *   - emergency_circuit 配置在三档模式下恒为 1，应急逻辑无条件启用。
+ *   - 应急熔断为红线恒定能力，三档模式下无条件启用。
  */
 #include "emergency.h"
 #include "memory_guard.h"
@@ -224,10 +224,10 @@ int emergency_init(void)
     s_degrade_handler = NULL;
 
     /*
-     * 读取安全配置：确认应急熔断连锁响应已启用。
-     * 三档模式均设置 emergency_circuit=1，应急逻辑无条件启用。
+     * 确保安全配置已就绪。应急熔断为红线恒定能力：
+     * 三档模式下均无条件启用，不随档位或开关关闭。
      */
-    (void)security_get_config();
+    security_config_ensure_init();
 
     /*
      * 创建看门狗事件对象（命名、手动复位、初始未触发）。

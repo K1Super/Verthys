@@ -3,6 +3,7 @@
  *
  * 零业务依赖：纯函数与仅含模块级单调计数器的辅助工具，可独立测试
  */
+import { isSlimPhotoMeta } from "../../constants/crypto_const";
 import type { PhotoEntry } from "./types";
 
 /** Uint8Array → ArrayBuffer（类型安全转换） */
@@ -248,29 +249,37 @@ export function revokeThumbUrl(thumb: string): void {
 /**
  * 模块缓存回灌：把缓存中的列表项还原为可渲染项。
  *
- * Why：回灌曾无条件把每条置 loaded=true，未解密占位项因此在再次进入模块时
- * 被按需解密整体跳过，缩略图与名称永久空白（只能逐张点击恢复）。
- * 此处只认"已解密"这一事实：携带 meta 的项才标记 loaded；未解密项保留
- * 摘要来源的名称并回到待解密态，由可视区按需解密继续补齐。
+ * Why：「已加载」必须与「具备可渲染的缩略图来源」绑定。回灌曾无条件把每条
+ * 置 loaded=true，未解密占位项因此在再次进入模块时被按需解密整体跳过，
+ * 缩略图与名称永久空白（只能逐张点击恢复）。瘦身布局的缩略图存放在独立
+ * 记录中（索引内恒为空），回灌无法就地重建，同类空白会以另一种形态复现，
+ * 故此类项必须回到待解密态，由可视区按引用取数回填。
  *
  * @param rebuildThumb 缩略图重建器（可选）。缓存中的缩略图可能是上一会话
  *   已释放的 Blob URL（卸载时统一 revoke），回灌必须按 meta 内的缩略图数据
- *   重建；不传则沿用缓存字段（无 Blob 生命周期的场景）。
+ *   重建；不传则沿用缓存字段（无 Blob 生命周期的场景），但不得为不可渲染项
+ *   沿用——其地址可能已悬空。
  */
 export function rehydrateEntries(
   cached: readonly PhotoEntry[],
   rebuildThumb?: (thumbB64: string) => string,
 ): PhotoEntry[] {
   return cached.map((p) => {
-    const decrypted = !!p.meta;
+    const meta = p.meta;
+    const decrypted = meta != null;
+    // 瘦身布局且带缩略图引用的项：内联缩略图为空且地址需按引用回源，
+    // 回到待解密态由可视区补齐，避免已加载短路造成永久空白。
+    const needsThumbRefill = meta != null && isSlimPhotoMeta(meta);
+
     let thumb = "";
-    if (decrypted) {
-      const b64 = p.meta?.thumbB64 ?? "";
+    if (decrypted && !needsThumbRefill) {
+      const b64 = meta?.thumbB64 ?? "";
       thumb = rebuildThumb ? (b64 ? rebuildThumb(b64) : "") : p.thumb;
     }
+
     return {
       ...p,
-      loaded: decrypted,
+      loaded: decrypted && !needsThumbRefill,
       failed: false,
       thumb,
       size: decrypted ? p.size : "",

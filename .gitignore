@@ -44,4 +44,5 @@ CMakeFiles/
 cmake_install.cmake
 compile_commands.json
 *.idx_cache
+*.verthys.d/
 

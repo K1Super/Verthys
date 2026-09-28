@@ -32,6 +32,7 @@
  */
 #include "verthys_unlock_pipeline.h"
 #include "verthys_v3_lifecycle.h"
+#include "security_preset.h"   /* security_runtime_preset */
 #include "verthys_warmcache_v3.h"
 #include "verthys_container_v3.h"
 #include "verthys_extent.h"
@@ -608,9 +609,11 @@ static VerthysResult upl_stage_s5(UnlockPipelineState *p)
         goto done;
     }
 
-    /* 2. 温缓存优先（flags + preset 双门控；失败语义 = miss，红线） */
+    /* 2. 温缓存优先（flags + preset 双门控；失败语义 = miss，红线）。
+     *    档位门控按运行时策略判定（宿主在解锁前已应用受信档位），
+     *    容器头档位仅作创建基线记录，不作为策略来源。 */
     if ((p->flags & VERTHYS_UNLOCK_FLAG_ALLOW_CACHE) != 0 &&
-        !verthys_v3_warmcache_disabled_by_preset(ctx3->preset) &&
+        !verthys_v3_warmcache_disabled_by_preset((VerthysPreset)security_runtime_preset()) &&
         ctx3->verthys_path != NULL) {
         t_cache = upl_now_ns();
         r = verthys_warmcache_v3_try_load(ctx3->verthys_path,

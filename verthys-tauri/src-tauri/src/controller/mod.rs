@@ -19,6 +19,8 @@ pub mod diag_controller;
 pub mod file_controller;
 pub mod key_controller;
 pub mod preflight_controller;
+/// 防截屏隐私保护（窗口捕获排除）：凭证槽位 / 原子应用与还原 / 隔离与对账 / 启动序列
+pub mod privacy_controller;
 pub mod scan_controller;
 pub mod types;
 /// 照片导入异步批处理流水线 — 批量控制器

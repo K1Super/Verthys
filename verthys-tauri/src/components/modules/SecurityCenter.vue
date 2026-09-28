@@ -10,8 +10,7 @@
 -->
 <template>
   <div class="security-center">
-    <!-- ===== 顶部错误提示弹窗（统一替代所有内联错误） ===== -->
-    <ToastOverlay :message="errorMsg" />
+    <!-- 瞬时提示（错误/成功）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
 
     <!-- ===== 解锁视图 ===== -->
     <UnlockView
@@ -72,6 +71,7 @@
       :initializing="initializing"
       :global-key-ready="globalKeyReadyRef"
       :session-remaining="sessionRemaining"
+      :idle-lock-enabled="sessionLockEnabledRef"
       :device-check-result="deviceCheckResult"
       :device-fingerprint-short="deviceFingerprintShort"
       :module-ids="moduleIds"
@@ -86,6 +86,7 @@
       :security-preset-code="securityPresetRef"
       :preset-applying="presetApplying"
       :preset-ambience-mode="presetAmbienceMode"
+      :preset-sync-failed="presetSyncFailed"
       :cpu-overhead="cpuOverhead"
       :security-coverage="securityCoverage"
       :overall-score="overallScore"
@@ -159,8 +160,8 @@
       @confirm="onConfirmChangeKey"
     />
 
-    <!-- 导出密钥文件验证弹窗（复用全局密钥窗口样式 · 紧凑版：
-         双要素凭据，密钥文件在确认后的导出流程中选择） -->
+    <!-- 导出密钥文件验证弹窗（核验台皮肤 · 双闸凭据：
+         密钥文件在确认后的导出流程中选择） -->
     <ExportVerifyDialog
       :show="showExportVerifyDialog"
       :processing="exportVerifyProcessing"
@@ -169,11 +170,6 @@
       @close="onCancelExportVerify"
       @confirm="onConfirmExportVerify"
     />
-
-    <!-- 复制提示 -->
-    <transition name="toast">
-      <div v-if="toast" class="sc-toast glass">{{ toast }}</div>
-    </transition>
   </div>
 </template>
 
@@ -187,13 +183,13 @@ import {
   hasModuleKeyRecordRef, moduleKeyReadyRef, moduleKeyEnabledRef,
   MODULE_IDS, MODULE_LABELS,
   securityPresetRef, restoreSecurityPreset,
+  sessionLockEnabledRef,
   checkInitStatus,
 } from "../../lib/keyManager";
 import {
   verthysPreheat,
   preloadWorker, workerDestroy,
 } from "../../lib/verthys";
-import ToastOverlay from "../common/feedback/ToastOverlay.vue";
 import KeyEditDialog from "../dialogs/KeyEditDialog.vue";
 import DisableVerifyDialog from "../dialogs/DisableVerifyDialog.vue";
 /* 视图级懒加载：拆分中枢首挂载成本 — 首次进入仅执行 UnlockView
@@ -206,7 +202,7 @@ const DeviceMismatchView = defineAsyncComponent(() => import("../views/DeviceMis
 const ManagementView = defineAsyncComponent(() => import("../views/ManagementView.vue"));
 const ChangeKeyDialog = defineAsyncComponent(() => import("../management/ChangeKeyDialog.vue"));
 const ExportVerifyDialog = defineAsyncComponent(() => import("../management/ExportVerifyDialog.vue"));
-import { useErrorToast } from "../../composables/useErrorToast";
+import { useToastCenter } from "../../composables/useToastCenter";
 import { useViewMode } from "../../composables/security-center/useViewMode";
 // useDeviceBinding 必须在 useViewMode / useUnlockFlow 之前调用（提供 deviceCheckResult / checkDevice 注入）
 import { useDeviceBinding } from "../../composables/security-center/useDeviceBinding";
@@ -222,20 +218,13 @@ import { isCacheDirty } from "../../cache/composition/verthys-cache";
 
 const emit = defineEmits<{ (e: "back"): void; (e: "panel-active", val: boolean): void }>();
 
-/* ===== 顶部错误提示弹窗（统一替代所有内联 sc-error / kv-error） ===== */
-const { errorMsg, showError } = useErrorToast();
+/* ===== 瞬时提示（统一替代所有内联 sc-error / kv-error / sc-toast）
+ * 全局单例中心：渲染统一归 ToastLayer（最高层），本处仅取用方法 ===== */
+const { showError, showStatus, showCopied } = useToastCenter();
+/* 安全子 composable 注入口径（DI 参数名沿用 showToast，指向标准状态通道） */
+const showToast = showStatus;
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-/* ===== Toast（成功提示，2.5s 自动消失）
- * 提前至 useUnlockFlow 调用前定义以避免 TDZ（showToast 被 useUnlockFlow 注入使用） */
-const toast = ref("");
-let toastTimer: number | null = null;
-const showToast = (msg: string) => {
-  toast.value = msg;
-  if (toastTimer) window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => { toast.value = ""; }, 2500);
-};
 
 /* ===== 初始化守卫：组件挂载期间禁止管理视图交互 ===== */
 const initializing = ref(true);
@@ -254,7 +243,7 @@ const postVerifyAnim = ref(false);
 const verifyRhythm = useVerifyRhythm();
 
 /* ===== 视图模式（五态严格互斥） =====
- * 修复：移除 "loading" 态。worker 解锁成功后进程内即时完成
+ *   移除 "loading" 态。worker 解锁成功后进程内即时完成
  *   全局密钥记录探测，结果内联到 unlock 响应，前端零异步扫描阶段。
  *   解锁完成即确定 hasGlobalKeyRecord，直接进入 init 或 verify，无中间态。 */
 const { viewMode } = useViewMode({
@@ -334,12 +323,15 @@ const moduleIds = MODULE_IDS;
 const moduleLabels = MODULE_LABELS;
 
 /* ===== 会话超时计时器（仅 UI 显示，实际超时由 keyManager 守护） ===== */
-const { sessionRemaining, startSessionTick, stopSessionTick, resetSession } = useSessionTimer({ globalKeyReady: globalKeyReadyRef });
+const { sessionRemaining, startSessionTick, stopSessionTick, resetSession } = useSessionTimer({
+  globalKeyReady: globalKeyReadyRef,
+  idleLockEnabled: sessionLockEnabledRef,
+});
 
 /* ===== 剪贴板工具（注入 useModuleKeys 的 onShowModuleKey 使用） ===== */
 const onCopyText = async (text: string) => {
   try { await navigator.clipboard.writeText(text); } catch { /* */ }
-  showToast("已复制到剪贴板");
+  showCopied();
 };
 
 /* ===== 模块独立密钥管理 ===== */
@@ -371,12 +363,13 @@ const {
  * 先于 usePreset 装配：defenseMeta 作为真实信号注入预设指标合成 */
 const { defensePaths, defenseMeta } = useDefenseStatus();
 
-/* ===== 系统运行指标（CPU 占用率真实采样，2s 轮询） ===== */
-const { cpuUsage } = useSystemMetrics();
+/* ===== 系统运行指标（CPU 占用率真实采样，就绪期 2s 轮询） ===== */
+const { cpuUsage } = useSystemMetrics(globalKeyReadyRef);
 
 /* ===== 安全防护预设 ===== */
 const {
   presetApplying,
+  presetSyncFailed,
   currentPresetFeatures,
   customPanelOpen,
   customFeatures,
@@ -406,13 +399,7 @@ const {
 /* ===== 返回重新选择（锁定当前 verthys，回到解锁视图） ===== */
 const goBackToUnlock = async () => {
   if (processing.value || unlocking.value) return;
-  // 修复E：锁定 UI，防止 lockAll 期间用户重选 verthys 触发 doUnlock
-  //
-  // 根治"回退重选 verthys 卡死"根因：
-  //   lockAll 异步执行（最多 40s），期间 doLockAll 同步置 verthysReady=false
-  //   → UI 立即显示解锁视图 → 用户可重选 verthys → doUnlock → initUnlock →
-  //   ensureWorkerReady 复用被 lockAll 销毁中的 worker → 永久卡死。
-  //
+
   // 防护：设置 unlocking=true 锁定解锁按钮（doUnlock 守卫 if(unlocking) return），
   //   并显示量子核心加载动画告知用户"正在清理上一个会话…"。
   //   lockAll 完成后 finally 释放 UI 锁，允许用户重选 verthys。
@@ -471,13 +458,6 @@ onMounted(() => {
   //   - 应用关闭（MainView.onClose）
   initializing.value = false;
 
-  // 修复修复：挂载即刷新设备机器码短显示
-  //
-  // 根因：deviceFingerprintShort 唯一填充点是 checkDevice()，而它仅在
-  // doUnlock 成功且已有全局密钥记录时被调用。以下场景管理界面机器码空白：
-  //   a) 新建 verthys → 初始化密钥路径（doUnlock 时 hasGlobalKeyRecord=false）
-  //   b) 跨模块切换重挂载（Composable 状态重置，checkDevice 不再触发）
-  //
   // 机器码为本机硬件固有属性（CPU/主板/磁盘 SHA-256），与 verthys 解锁状态无关，
   // 挂载立即获取（fire-and-forget，失败仅警告不阻断主流程）。
   void refreshDeviceFingerprint();
@@ -487,19 +467,6 @@ onMounted(() => {
   //   - 挂载时已解锁 → immediate 立即恢复（避免与 watch 就绪回调双触发重复落盘）
   //   - 挂载时未解锁 → onChange 在解锁瞬间恢复；解锁前仅展示 localStorage 快照
 
-  // 修复：启动时自动查询初始化状态，填充上次使用的 verthys 路径
-  //
-  // 原问题：checkInitStatus 从未被调用，导致：
-  //   - initStatusRef 始终为 "none"（初始值）
-  //   - storedVerthysPathRef 始终为空
-  //   - 用户每次启动都需要手动选择 verthys 文件，无法自动填充上次路径
-  //   - 模板中 initStatusRef === 'broken' 的提示文案永远不显示
-  //
-  // 修复：onMounted 时调用 checkInitStatus 查询 .verthys_state 状态文件：
-  //   - status="ready" → 自动填充 verthysPath，用户只需点击确认即可解锁
-  //   - status="broken" → 显示"上次初始化失败，已自动清理残留"提示
-  //   - status="none" → 全新用户，显示默认引导
-  //
   // 注意：此处仅填充路径，不自动触发解锁（用户需手动点击确认按钮）
   if (isTauri && !verthysReadyRef.value) {
     void checkInitStatus()
@@ -525,6 +492,30 @@ onMounted(() => {
   }
 });
 
+/* ===== 预设恢复链（唯一权威同步路径：读取受信档位 → 应用 → 刷新面板配置） =====
+ * 失败可见：单次退避重试仍失败时置 presetSyncFailed 并弹出通用错误提示，
+ * 禁止静默吞掉（安全关键配置的同步状态必须对用户可见）。 */
+const runPresetRestore = async (attempt: number): Promise<void> => {
+  try {
+    const report = await restoreSecurityPreset();
+    await loadPresetConfig();
+    presetSyncFailed.value = false;
+    if (report.persistDirty) {
+      // 后端此前处于回滚失败状态：本次已按受信文件重新收敛，向用户可见告知
+      showToast("预设持久化状态异常，已按受信配置重新同步");
+    }
+  } catch (e) {
+    console.warn("[globalKeyReady] 恢复安全预设失败", e);
+    if (attempt < 1) {
+      // 单次退避重试：覆盖后端瞬时不可用（IPC 抖动/落盘竞争）
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      return runPresetRestore(attempt + 1);
+    }
+    presetSyncFailed.value = true;
+    showError("安全预设恢复失败，当前档位可能未同步");
+  }
+};
+
 // 监听全局密钥就绪状态：解锁后以后端受信配置为权威恢复预设（迁移/落盘/真实切档）
 // immediate：挂载时已解锁立即恢复（onMounted 不再单独触发，避免双写重复落盘）
 watch(globalKeyReadyRef, (ready) => {
@@ -534,14 +525,11 @@ watch(globalKeyReadyRef, (ready) => {
   if (!deviceFingerprintShort.value) {
     void refreshDeviceFingerprint();
   }
-  restoreSecurityPreset()
-    .then(() => loadPresetConfig())
-    .catch((e) => console.warn("[globalKeyReady] 恢复安全预设失败", e));
+  void runPresetRestore(0);
 }, { immediate: true });
 
 onBeforeUnmount(() => {
   stopSessionTick();
-  if (toastTimer !== null) window.clearTimeout(toastTimer);
   // 清理感知层动画帧调度（中断策略：取消调度并冻结状态）
   verifyRhythm.dispose();
   // 清理预启动但未使用的 worker，防止僵尸进程
@@ -559,7 +547,6 @@ onBeforeUnmount(() => {
    SecurityCenter.vue 样式引用聚合
    引用顺序：容器 → 表单 → 按钮 → 加载 → 悬浮场 → 图标 → 路径状态 →
    仪表盘 → 量子面板
-   （flow-hint.css 已删 — FlowHint 流程指示组件随弹窗精简一并移除）
    ============================================================ */
 @import '../../styles/security/management.css';
 @import '../../styles/security/section-field.css';

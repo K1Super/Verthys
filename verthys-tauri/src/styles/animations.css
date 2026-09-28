@@ -5,54 +5,66 @@
  *   消除分散在各组件中的动画定义冗余
  */
 
-/* ===== 复制提示视界立标入场（clip-toast 配套）===== */
-/* 影子「凝聚」：视界自极小质点聚合成形，先过冲后回落；
- * 两段复合缓动（各异非标准曲线），末帧与落态 transform 一致（零跳变），
- * 单次播放后静止，随弹窗重建重演 */
-@keyframes toast-void-birth {
+/* ===== 极光幕立标：入场与幕面缓流（toast-dot 配套）=====
+ * 入场为因果时序的两段：前景光幕自上方垂落铺展（支点在幕顶，亮下沿
+ * 领先扫下，自 0.24 撑开并越位回弹）→ 后景纱幕随后跟上；
+ * 每段独立复合缓动（非单一标准曲线），末帧与落态 transform 一致
+ * （零跳变），单次播放后静止，随提示重建重演。
+ * 常驻缓流：双幕以互质周期（6.7s / 8.3s）起伏摇曳 —— 支点在幕顶，
+ * 下沿摆幅最大；前景与后景相位互异，与其余周期动效亦不整齐。
+ * 全程仅动 opacity/transform（合成器属性）。 */
+/* 前景光幕「垂落」：落点与落态同角（-7deg），越位后回正 */
+@keyframes toast-aurora-curtain {
   0% {
     opacity: 0;
-    transform: scale(0.28);
-    animation-timing-function: cubic-bezier(0.25, 0.66, 0.3, 1);
-  }
-  62% {
-    opacity: 1;
-    transform: scale(1.1);
-    animation-timing-function: cubic-bezier(0.42, 0.05, 0.3, 1);
-  }
-  100% { transform: scale(1); }
-}
-
-/* 光子环「旋转锁定」：迟于影子 0.05s（视界成形后环自远方坍缩到位），
- * 自 76° 高位带缩放旋入，越过落态 8° 回弹后锁定 — 束流环捕获时序 */
-@keyframes toast-ring-lock {
-  0% {
-    opacity: 0;
-    transform: rotate(76deg) scale(1.85);
-    animation-timing-function: cubic-bezier(0.3, 0.6, 0.28, 1);
-  }
-  56% {
-    opacity: 1;
-    transform: rotate(-6deg) scale(0.955);
-    animation-timing-function: cubic-bezier(0.44, 0.04, 0.3, 1);
-  }
-  100% { transform: rotate(8deg) scale(1); }
-}
-
-/* 盘弧「反向掠切」：迟于光子环 0.12s，自 -64° 反角动量切入，
- * 越过落态 -14° 至 -7° 后回正 — 环与盘双错向汇聚的非对称时序 */
-@keyframes toast-disk-razor {
-  0% {
-    opacity: 0;
-    transform: rotate(-64deg) scale(1.62);
-    animation-timing-function: cubic-bezier(0.24, 0.64, 0.3, 1);
+    transform: translateY(-7px) scaleY(0.24) rotate(-12deg);
+    animation-timing-function: cubic-bezier(0.2, 0.82, 0.24, 1);
   }
   58% {
     opacity: 1;
-    transform: rotate(-7deg) scale(1.02);
+    transform: translateY(0.8px) scaleY(1.1) rotate(-5.4deg);
     animation-timing-function: cubic-bezier(0.42, 0.05, 0.3, 1);
   }
-  100% { transform: rotate(-14deg) scale(1); }
+  100% { transform: translateY(0) scaleY(1) rotate(-7deg); }
+}
+/* 后景纱幕「跟上」：迟于前景 0.04s，落点与落态同角（6deg） */
+@keyframes toast-aurora-veil {
+  0% {
+    opacity: 0;
+    transform: translateY(-5px) scaleY(0.3) rotate(9.5deg);
+    animation-timing-function: cubic-bezier(0.22, 0.8, 0.26, 1);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(0.5px) scaleY(1.07) rotate(4.6deg);
+    animation-timing-function: cubic-bezier(0.42, 0.05, 0.3, 1);
+  }
+  100% { transform: translateY(0) scaleY(1) rotate(6deg); }
+}
+/* 前景幕缓流：摆动与纵向伸缩同相错峰（拐点 42%/71% 非对称） */
+@keyframes toast-aurora-drift {
+  0%, 100% { transform: rotate(-7deg) scaleY(1); opacity: 1; }
+  42% { transform: rotate(-10.6deg) scaleY(1.05); opacity: 0.86; }
+  71% { transform: rotate(-4.2deg) scaleY(0.965); opacity: 0.95; }
+}
+/* 后景幕缓流：与前景相位互异（38%/69%），双幕不同步起伏 */
+@keyframes toast-aurora-veil-drift {
+  0%, 100% { transform: rotate(6deg) scaleY(1); opacity: 0.88; }
+  38% { transform: rotate(9.6deg) scaleY(1.04); opacity: 1; }
+  69% { transform: rotate(2.8deg) scaleY(0.97); opacity: 0.74; }
+}
+
+/* ===== 提示底板星野视差缓漂（clip-toast / error-toast 配套）=====
+ * 每周期位移恰为一个平铺宽（repeat-x 平铺与位移严格等长）——
+ * 循环无接缝，星点不在回卷帧跳变；两平面周期互质（97s / 61s）
+ * 形成速度差即空间纵深，多提示同屏亦不会机械同步；
+ * 位移仅走 transform（合成器属性），平铺宽取自面板上的
+ * --toast-tile-far / --toast-tile-near（单源）。 */
+@keyframes toast-field-drift-far {
+  to { transform: translateX(calc(-1 * var(--toast-tile-far))); }
+}
+@keyframes toast-field-drift-near {
+  to { transform: translateX(calc(-1 * var(--toast-tile-near))); }
 }
 
 /* ===== 故障文字双通道偏移 ===== */
@@ -189,141 +201,146 @@ body::after {
 }
 
 /* ============================================================================
- * 品牌雕刻排印共享体系（VERTHYS — UnlockView 引导级 / HomeView compact 级
- * 唯一样式源）。参数层见 composables/useBrandTitle.ts（确定性 hash 逐字差化）。
+ * 品牌字标共享体系（VERTHYS 星轨刻线体 — 引导级 / 主界面级 / 弹窗级
+ * 唯一样式源）。形态与运动参数层见 composables/useBrandTitle.ts
+ * （定制字形 / 枢钥刻槽 / 确定性运动场），组件层见 common/BrandMark.vue。
  *
  * 分层职责：
- *   此处（全局）   — 跨场景恒定：标题几何 / 三态着色（实色·镂空·accent）/
- *                    双层雕刻暗色克隆 / 轨道组装曲线 brand-assemble；
- *   组件（scoped） — 场景专属编排：UnlockView 弹射离场 char-eject 等。
+ *   此处（全局）   — 跨级恒定：画布比例 / 三态着色（冰银·强调·光门镂空）/
+ *                    双层雕刻暗色克隆 / 切割语言（butt 端面 + miter 尖角）/
+ *                    组装曲线 wm-assemble；
+ *   组件（scoped） — 场景专属编排：UnlockView 弹射离场 wm-eject 等。
  *
- * 幅度参数全部 CSS 变量化（.brand-title 默认 = 引导级原值；
- * .brand-title--compact 覆写 = 主界面 compact 级原值）：
- *   --brand-stroke 镂空描边宽 / --carve-x/--carve-y 雕刻克隆偏移 /
- *   --bs·--bo 入射与过冲缩放
+ * 级别幅度全部 CSS 变量化（.brand-wordmark 默认 = 引导级原值；
+ * --compact / --mini 覆写）：
+ *   --wm-stroke 实色笔画重量 / --wm-hollow-stroke 光门发丝宽 /
+ *   --wm-carve-x·y 雕刻克隆偏移 / --wm-from-scale·--wm-bo 入射与过冲缩放
  * ========================================================================== */
-.brand-title {
-  position: relative;
-  display: flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 0;
-  margin: 0;
-  z-index: 1;
-  line-height: 1;
-  font-family: var(--font);
-  font-weight: 800;
-  /* 逐字字号差异 → 视觉字距天然非均匀（hash 差化排印） */
-  letter-spacing: 0;
+.brand-wordmark {
+  display: block;
+  margin: 0 auto;
+  /* 画布比例 = viewBox 618 × 125（高度定级、宽度自算） */
+  aspect-ratio: 618 / 125;
+  width: auto;
+  /* 入射/弹射在画布之外发生 — 根画布不得裁切 */
+  overflow: visible;
 
-  /* 引导级幅度默认（compact 级经 .brand-title--compact 覆写） */
-  --brand-stroke: 1.5px;
-  --carve-x: 3px;
-  --carve-y: 4px;
-  --bs: 0.42;
-  --bo: 1.055;
+  /* 引导级默认（cap 84：全量身份 — 刻槽曝光 + 光门镂空） */
+  height: 105px;
+  --wm-stroke: 9.8;
+  --wm-hollow-stroke: 1.8;
+  --wm-carve-x: 3px;
+  --wm-carve-y: 3.7px;
+  --wm-hollow-carve-x: 1px;
+  --wm-hollow-carve-y: 1.2px;
+  --wm-from-scale: 0.78;
+  --wm-bo: 1.018;
 }
 
-/* compact 级（主界面 — 与引导页同源形态、幅度收敛）：
- * 描边 1.1px / 克隆偏移 (2,3)px / 过冲 1.045 */
-.brand-title--compact {
-  line-height: 0.82;
-  --brand-stroke: 1.1px;
-  --carve-x: 2px;
-  --carve-y: 3px;
-  --bs: 0.55;
-  --bo: 1.045;
+/* compact 级（主界面左区 cap 40 — 同源形态、幅度与雕刻收敛）：
+ * 重量 10 / 光门 2.2 / 克隆 (1.6,2)px / 过冲 1.012 */
+.brand-wordmark--compact {
+  height: 50px;
+  --wm-stroke: 10;
+  --wm-hollow-stroke: 2.2;
+  --wm-carve-x: 1.6px;
+  --wm-carve-y: 2px;
+  --wm-hollow-carve-x: 0.55px;
+  --wm-hollow-carve-y: 0.65px;
+  --wm-from-scale: 0.88;
+  --wm-bo: 1.012;
 }
 
-/* mini 级（弹窗品牌字 — 弹窗顶部标识，弹窗内最大文字层级）：
- * 字号 24-34px（useBrandTitle mini 级 hash 场 — 高于 sc-title 16px）；
- * 描边 0.8px 发丝 / 克隆偏移 (1,1.5)px 微雕刻 / 过冲 1.03 / 无入射
- * 模糊（小字号对模糊敏感 — 入射深度感由位移/缩放单独承载） */
-.brand-title--mini {
-  line-height: 0.9;
+/* mini 级（弹窗品牌字 cap 24 — 静默简化锁版：刻槽/镂空于模型层收敛，
+ * 仅保留雕刻与强调锚点；小字号相对加粗补偿光学减重）
+ * 重量 11 / 克隆 (0.9,1.1)px 微雕刻 / 过冲 1.008 */
+.brand-wordmark--mini {
+  height: 30px;
   margin: 0 auto 12px;
-  --brand-stroke: 0.8px;
-  --carve-x: 1px;
-  --carve-y: 1.5px;
-  --bs: 0.7;
-  --bo: 1.03;
-}
-/* mini 级雕刻克隆降透明度（小字号下 0.55 过重） */
-.brand-title--mini .brand-char::before {
-  opacity: 0.4;
+  --wm-stroke: 11;
+  --wm-carve-x: 0.9px;
+  --wm-carve-y: 1.1px;
+  --wm-from-scale: 0.93;
+  --wm-bo: 1.008;
 }
 
-.brand-char {
-  position: relative;
-  display: inline-block;
-  font-size: var(--fs, 76px);
-  line-height: 0.82;
+/* 切割语言：端切面垂直于笔画（butt）+ 锐角 miter 尖锋 —
+ * 所有笔画统一在此声明（零圆头零软切） */
+.wm-glyph path {
+  fill: none;
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
+  stroke-miterlimit: 4;
+}
+
+/* 面层与雕刻克隆（零渐变纯色） */
+.wm-face {
+  stroke-width: var(--wm-stroke);
+}
+.wm-recess {
+  transform: translate(var(--wm-carve-x), var(--wm-carve-y));
+  opacity: 0.92;
+}
+.wm-recess path {
+  stroke-width: var(--wm-stroke);
+}
+
+/* 三态着色：冰银主力（六字）/ 唯一强调（H）/ 光门镂空（V 发丝） */
+.wm-glyph--ice .wm-face {
+  stroke: #d9e6f2;
+}
+.wm-glyph--ice .wm-recess {
+  stroke: #0a1622;
+}
+.wm-glyph--accent .wm-face {
+  stroke: #16c8ea;
+}
+.wm-glyph--accent .wm-recess {
+  stroke: #06222e;
+}
+.wm-glyph--hollow .wm-face {
+  stroke: #a9bed2;
+  stroke-width: var(--wm-hollow-stroke);
+}
+/* 光门镂空的双层：克隆贴近平移（发丝字距 ≥ 克隆偏移即读出重影 —
+ * 浮雕只许收窄，不并列成双线） */
+.wm-glyph--hollow .wm-recess {
+  stroke: #1e3547;
+  opacity: 0.5;
+  transform: translate(var(--wm-hollow-carve-x), var(--wm-hollow-carve-y));
+}
+.wm-glyph--hollow .wm-recess path {
+  stroke-width: var(--wm-hollow-stroke);
+}
+
+/* 逐字组装（轨道入射 → 轻度过冲 → 零跳变落位）：
+ * 形态层零随机 — 差化只发生在入射向量/时序/时长（模型层逐字变量）；
+ * transform-box: fill-box + center bottom — 各字绕自身底心回稳 */
+.wm-glyph {
+  transform-box: fill-box;
   transform-origin: center bottom;
-  /* 轨道成型：复合关键帧（入射 → 过冲回稳 → 浮动基线落位），逐字差化 */
-  animation: brand-assemble var(--dur, 1.1s) cubic-bezier(0.22, 1, 0.36, 1) var(--delay, 0ms) both;
+  animation: wm-assemble var(--dur, 1.1s) cubic-bezier(0.16, 1, 0.3, 1) var(--delay, 0ms) both;
   will-change: transform, opacity;
-  /* 基线 = 组装完成态（both 填充结束后回落基线零跳变；显式 transform
-   * 替代 none — 合成层恒定，杜绝"动画结束渲染模式突变"类回平跳变） */
-  transform: translateY(var(--by, 0px)) rotate(var(--tr, 0deg));
 }
 
-/* 三态着色（实色 — 零渐变纯色；低饱和冰银/雾青 — 深空冷调主题，
- * 主题色系（青 00d4ff）的淡色变体，不抢星系主体） */
-.brand-char.solid {
-  color: #d7e4f0;
-}
-.brand-char.hollow {
-  color: transparent;
-  -webkit-text-stroke: var(--brand-stroke) #9fb5c9;
-}
-.brand-char.accent {
-  color: #86d5e8;
-}
-
-/* 双层雕刻：暗色克隆偏移（深度 — 排印雕刻感，非阴影非辉光）。
- * hollow 态描边克隆加深 — 空心字的第二层轮廓厚度 */
-.brand-char::before {
-  content: attr(data-char);
-  position: absolute;
-  left: 0;
-  top: 0;
-  z-index: -1;
-  opacity: 0.55;
-  transform: translate(var(--carve-x), var(--carve-y));
-  pointer-events: none;
-}
-.brand-char.solid::before {
-  color: #131f2c;
-  -webkit-text-stroke: 0;
-}
-.brand-char.hollow::before {
-  color: transparent;
-  -webkit-text-stroke: var(--brand-stroke) #223246;
-}
-.brand-char.accent::before {
-  color: #0e2833;
-  -webkit-text-stroke: 0;
-}
-
-/* 轨道组装：沿逐字入射向量弧线入场 → 轻度过冲 → 浮动基线落位
- * （字号差化排印终态 — 复合曲线拒绝单一标准缓动）；
- * 过冲帧与首末帧的强度经 --bo 变量化，两级场景共用一轨 */
-@keyframes brand-assemble {
+/* 轨道组装：沿逐字入射向量弧线入场 → 轻度过冲 → 落位归零
+ * （入射向量/时序/时长逐字差化 — 形态终态为设计定值，零跳变零抖动）；
+ * 过冲帧强度经 --wm-bo 变量化（三级同轨，仅幅度分级收束） */
+@keyframes wm-assemble {
   0% {
     opacity: 0;
-    transform: translate(var(--dx, 60px), var(--dy, -40px)) rotate(var(--rot, 8deg)) scale(var(--bs, 0.42));
+    transform: translate(var(--dx, 60px), var(--dy, -40px)) rotate(var(--rot, 0deg))
+      scale(var(--wm-from-scale, 0.78));
   }
-  58% {
+  62% {
     opacity: 1;
     transform:
-      translate(calc(var(--dx, 60px) * -0.05), calc(var(--dy, -40px) * -0.04))
-      rotate(calc(var(--rot, 8deg) * -0.08))
-      translateY(calc(var(--by, 0px) * 0.5))
-      rotate(var(--tr, 0deg))
-      scale(var(--bo, 1.055));
+      translate(calc(var(--dx, 60px) * -0.045), calc(var(--dy, -40px) * -0.04))
+      rotate(calc(var(--rot, 0deg) * -0.06))
+      scale(var(--wm-bo, 1.018));
   }
   100% {
     opacity: 1;
-    transform: translateY(var(--by, 0px)) rotate(var(--tr, 0deg)) scale(1);
+    transform: none;
   }
 }

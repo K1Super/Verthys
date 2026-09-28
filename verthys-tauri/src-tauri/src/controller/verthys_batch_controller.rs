@@ -38,7 +38,7 @@
  * =============================================================================
  * - 本控制器不解密、不接触明文密钥：记录数据由前端 Worker 加密后以 base64 传入
  * - 仅记录内容哈希（BLAKE3 hex）与文件名到 WAL，不含密钥/明文/密文
- * - WAL 文件位于 verthys 文件同目录（受 VerthysFileLock 独占锁保护）
+ * - WAL 文件位于容器附属数据目录 <verthys_path>.d（受 VerthysFileLock 独占锁保护）
  * - 所有 IO 失败向上传播为 Err，由前端决定降级策略
  *
  * 依赖方向：controller → state / repository / controller::types / worker（单向）
@@ -60,6 +60,22 @@ use tauri::{Manager, State};
 /* ------------------------------------------------------------------ *
  * 辅助函数                                                            *
  * ------------------------------------------------------------------ */
+
+/// 结构化错误码：已有活跃导入会话（前端据此唤起会话冲突确认，不做文案判定）。
+/// 两个消费方（清藏导入管线与照片导入流水线）以本码为控制流契约。
+const IMPORT_SESSION_BUSY_CODE: &str = "E_IMPORT_SESSION_BUSY";
+
+/// 结构化错误码：加密库未就绪（未解锁/路径缺失；前端据此给出重新解锁引导）
+const VERTHYS_NOT_READY_CODE: &str = "E_VERTHYS_NOT_READY";
+
+/// 构造「已有导入会话」拒绝响应（导入域防重入的唯一出口）
+fn import_session_busy_response() -> VerthysResponse {
+    VerthysResponse::err_code(
+        "verthys_import_begin",
+        IMPORT_SESSION_BUSY_CODE,
+        "已有导入会话进行中，请先结束当前会话",
+    )
+}
 
 /// 生成导入会话 ID（imp-<unix_ms>-<rand_hex8>）
 ///
@@ -103,7 +119,11 @@ pub async fn verthys_import_begin(
 ) -> Result<VerthysResponse, String> {
     // 数据域统一解锁态闸门：未解锁直接拒绝（审计 Denied 已写入）
     if let Err(msg) = require_unlocked(&app, &state, cmd::IMPORT_BEGIN) {
-        return Ok(VerthysResponse::err(cmd::IMPORT_BEGIN, &msg));
+        return Ok(VerthysResponse::err_code(
+            cmd::IMPORT_BEGIN,
+            VERTHYS_NOT_READY_CODE,
+            &msg,
+        ));
     }
 
     log::info!("[verthys_import_begin] 开始创建导入会话");
@@ -111,10 +131,7 @@ pub async fn verthys_import_begin(
     // 防重入：单 verthys 同一时刻仅一个活跃会话
     if state.has_import_session() {
         log::warn!("[verthys_import_begin] 已存在活跃导入会话，拒绝重复创建");
-        return Ok(VerthysResponse::err(
-            "verthys_import_begin",
-            "已有导入会话进行中，请先结束当前会话",
-        ));
+        return Ok(import_session_busy_response());
     }
 
     // 解析 verthys 路径：优先参数，否则从会话守卫读取
@@ -122,8 +139,9 @@ pub async fn verthys_import_begin(
         Some(p) => p,
         None => {
             log::warn!("[verthys_import_begin] 无法确定 verthys 路径（参数缺失且无活跃会话）");
-            return Ok(VerthysResponse::err(
+            return Ok(VerthysResponse::err_code(
                 "verthys_import_begin",
+                VERTHYS_NOT_READY_CODE,
                 "无法确定加密库路径，请先解锁",
             ));
         }
@@ -522,7 +540,7 @@ pub async fn verthys_forget_hashes(
 /// 开发用：重置 WAL 与快照（清空续传去重状态）。
 ///
 /// 仅在无活跃导入会话时可用（会话期间重置会破坏 pending 恢复语义）。
-/// 删除 WAL 与快照两文件，下次导入从空去重集合开始。
+/// 删除新布局与旧布局两处的 WAL 与快照文件，下次导入从空去重集合开始。
 #[tauri::command]
 pub async fn dev_reset_wal(
     app: tauri::AppHandle,
@@ -556,15 +574,15 @@ pub async fn dev_reset_wal(
     match reset_result {
         Err(_) => {
             log::error!("[dev_reset_wal] 重置超时");
-            return Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, "重置超时"));
+            Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, "重置超时"))
         }
         Ok(Err(e)) => {
             log::error!("[dev_reset_wal] 重置任务异常: {}", e);
-            return Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, "重置失败"));
+            Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, "重置失败"))
         }
         Ok(Ok(Err(e))) => {
             log::error!("[dev_reset_wal] 重置失败: {}", e);
-            return Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, &e));
+            Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, &e))
         }
         Ok(Ok(Ok(()))) => {
             log::info!("[dev_reset_wal] WAL 与快照已清除");
@@ -586,11 +604,15 @@ pub async fn dev_reset_wal(
 /// 流程：
 ///   1. 数据域解锁态闸门 + 活跃导入会话检查（会话期间台账驻留内存，
 ///      文件视图滞后，禁止 GC）；
-///   2. spawn_blocking 内：加载台账 → 取 garbage_ids()；
+///   2. spawn_blocking 内：结算块归属（依据 WAL 归属声明改写台账、冻结
+///      无法证明归属的历史条目）→ 加载台账 → 取 garbage_ids()；
 ///   3. 空列表直接返回 ok（processed_count=0）；
 ///   4. 非空：经 worker delete_records 逐个删除，!ok 即 err（不删台账）；
 ///   5. 删除成功后从台账移除各垃圾 id 并落盘（落盘失败也 err，但记录已删，
 ///      下次 GC 重试收敛，语义无害）。
+///
+/// 结算失败即拒绝本次回收：台账若可能把已被引用的块判为孤儿，宁可暂缓
+/// 回收也不得删除。
 ///
 /// 返回 processed_count = 实际回收的块记录数。
 #[tauri::command]
@@ -630,6 +652,18 @@ pub async fn verthys_gc_orphan_chunks(
     let outcome = tokio::time::timeout(
         gc_timeout,
         tauri::async_runtime::spawn_blocking(move || -> Result<u64, String> {
+            // 结算必须先于台账读取：崩溃窗口内记录已提交而台账尚未改写归属，
+            // 直接按台账回收会删掉仍被引用的块。结算失败即放弃本次回收。
+            let settlement = crate::repository::verthys_wal::settle_chunk_owners(&gc_vpath)
+                .map_err(|e| format!("块归属结算失败，放弃回收: {}", e))?;
+            if settlement.changed() {
+                log::info!(
+                    "[verthys_gc_orphan_chunks] 回收前结算: 归属改写={} 冻结={}",
+                    settlement.settled,
+                    settlement.frozen
+                );
+            }
+
             let mut ledger = crate::repository::verthys_chunks::load_chunk_ledger(&gc_vpath)?;
             let garbage = ledger.garbage_ids();
             if garbage.is_empty() {
@@ -888,6 +922,18 @@ pub async fn verthys_wal_recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_import_session_busy_response_carries_stable_code() {
+        // 会话冲突码为前端控制流契约（清藏冲突确认 / 照片引导文案）：
+        // 码值与序列化形态必须稳定，文案仅作展示
+        let resp = import_session_busy_response();
+        assert!(!resp.ok);
+        assert_eq!(resp.error_code.as_deref(), Some("E_IMPORT_SESSION_BUSY"));
+        assert_eq!(resp.error.as_deref(), Some("已有导入会话进行中，请先结束当前会话"));
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"error_code\":\"E_IMPORT_SESSION_BUSY\""));
+    }
 
     #[test]
     fn test_generate_import_id_unique() {

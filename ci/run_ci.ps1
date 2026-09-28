@@ -97,6 +97,58 @@ if (Test-Path $batchCtrl) {
     }
 }
 
+# 锚点 5：清藏写入必须经导入会话（防单条写入复活）。
+# 判定范围：清藏模块组件与清藏组合式目录（其内任何文件命中即红）。
+$fvComp = Join-Path $projectRoot "verthys-tauri\src\composables\file-verthys"
+$fvTargets = @(Join-Path $projectRoot "verthys-tauri\src\components\modules\FileVerthys.vue")
+if (Test-Path $fvComp) {
+    $fvTargets += Get-ChildItem -Path $fvComp -Recurse -Include *.ts,*.vue -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.FullName }
+}
+$fvTargets = $fvTargets | Where-Object { Test-Path $_ }
+$a1Hits = Select-String -Path $fvTargets -Pattern 'verthysAddRecord\s*\(|"verthys_add_record"'
+if ($a1Hits) {
+    Write-Host "[锚点门][RED] 清藏写入必须经导入会话，单条写入禁止复活："
+    $a1Hits | ForEach-Object { Write-Host ("  {0}:{1}" -f $_.Path, $_.LineNumber) }
+    $anchorRed = $true
+}
+
+# 锚点 6：清藏导入必须分片读取（禁整文件读载）。
+# 判定对象为导入管线本体：命名区分 readUserFileChunked，不会误伤分片读取。
+$fvImport = Join-Path $fvComp "useFileImport.ts"
+if (Test-Path $fvImport) {
+    $a2Hits = Select-String -Path $fvImport -Pattern 'readUserFile\s*\('
+    if ($a2Hits) {
+        Write-Host "[锚点门][RED] 清藏导入必须分片读取（整文件读载禁止出现在导入管线）："
+        $a2Hits | ForEach-Object { Write-Host ("  {0}:{1}" -f $_.Path, $_.LineNumber) }
+        $anchorRed = $true
+    }
+
+    # 锚点 7：清藏导入路径禁止读取单条记录（记录读取仅限导出路径）。
+    $bHits = Select-String -Path $fvImport -Pattern 'verthysGetRecord'
+    if ($bHits) {
+        Write-Host "[锚点门][RED] 导入路径禁止读取单条记录（记录读取仅限导出路径）："
+        $bHits | ForEach-Object { Write-Host ("  {0}:{1}" -f $_.Path, $_.LineNumber) }
+        $anchorRed = $true
+    }
+}
+
+# 锚点 8（C）：旧格式写保护字符串分支禁止复活（T-1 收口，判定范围为全前端）。
+# 该字符串在核心与进程间层无生产者（非 V3 容器在解锁即被格式门禁拒绝，
+# 不存在"已解锁但格式需升级"的状态），前端消费分支属死代码，已全量删除；
+# 按整串禁入以覆盖等式 / 包含 / 变量判等等全部复活形态。
+$srcRoot = Join-Path $projectRoot "verthys-tauri\src"
+$srcFiles = @(Get-ChildItem -Path $srcRoot -Recurse -Include *.ts,*.vue -ErrorAction SilentlyContinue |
+    ForEach-Object { $_.FullName })
+$cHits = if ($srcFiles.Count -gt 0) {
+    Select-String -Path $srcFiles -Pattern 'VERTHYS_WRITE_BLOCKED' -ErrorAction SilentlyContinue
+} else { $null }
+if ($cHits) {
+    Write-Host "[锚点门][RED] 旧格式写保护字符串分支禁止复活（全前端整串禁入）："
+    $cHits | ForEach-Object { Write-Host ("  {0}:{1}" -f $_.Path, $_.LineNumber) }
+    $anchorRed = $true
+}
+
 if ($anchorRed) {
     Write-Host "[锚点门] 失败：存在防回退红线违规"
     exit 1
@@ -126,6 +178,69 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "[常量门] 通过：生成物与权威来源一致"
 
 $exitCode = 0
+
+# ===== 常量消费门 =====
+# 跨层行为常量必须有真实消费点：生成常量失去消费者时，权威来源即失效
+# （历史发生过硬编码与生成值并存的静默漂移）。
+Write-Host ""
+Write-Host "[常量消费门] 校验跨层常量的消费点..."
+$tsSrc = Join-Path $projectRoot "verthys-tauri\src"
+$rsRoots = @(
+    (Join-Path $projectRoot "verthys-tauri\src-tauri\src"),
+    (Join-Path $projectRoot "verthys-tauri\verthys-worker\src")
+)
+$tsGenerated = Join-Path $tsSrc "constants\photo_budget.generated.ts"
+$rsGenerated = Join-Path $projectRoot "verthys-tauri\photo_budget.rs"
+$tsRequired = @(
+    'FLUSH_MAX_RETRIES', 'FLUSH_RETRY_BACKOFF_MS', 'FLUSH_VERIFY_TIMEOUT_MS',
+    'SESSION_BEGIN_TIMEOUT_MS', 'SESSION_END_TIMEOUT_MS', 'SESSION_FORCE_CLOSE_TIMEOUT_MS',
+    'DATAB64_CACHE_MAX_BYTES', 'PHOTO_INDEX_MAX_BYTES', 'PHOTO_THUMB_MAX_CHARS',
+    'PHOTO_MAX_BYTES', 'MAX_EXPORT_SINGLE_BYTES'
+)
+$rsRequired = @(
+    'PB_IPC_MAX_RESPONSE_LINE_BYTES', 'PB_IPC_MAX_REQUEST_LINE_BYTES', 'PB_IPC_MAX_LINE_BYTES',
+    'PB_ENUM_RESPONSE_DATA_BUDGET_BYTES', 'PB_SCAN_INDEX_INLINE_MAX_BYTES',
+    'PB_IPC_MAX_PAYLOAD_BYTES', 'PB_MAX_CHUNKS_PER_IPC',
+    'PB_MAX_RECORD_NAME_BYTES', 'PB_WRITE_FILE_CHUNK_BYTES', 'PB_MAX_EXPORT_SINGLE_BYTES'
+)
+$consumerRed = $false
+foreach ($name in $tsRequired) {
+    $hits = Get-ChildItem -Path $tsSrc -Recurse -Filter *.ts |
+        Where-Object { $_.FullName -ne $tsGenerated } |
+        Select-String -Pattern "\b$name\b"
+    if (-not $hits) {
+        Write-Host "[常量消费门][RED] 生成常量 $name 无消费点"
+        $consumerRed = $true
+    }
+}
+foreach ($name in $rsRequired) {
+    $hits = Get-ChildItem -Path $rsRoots -Recurse -Filter *.rs |
+        Where-Object { $_.FullName -ne $rsGenerated } |
+        Select-String -Pattern "\b$name\b"
+    if (-not $hits) {
+        Write-Host "[常量消费门][RED] 生成常量 $name 无消费点"
+        $consumerRed = $true
+    }
+}
+if ($consumerRed) { $exitCode = 1 } else { Write-Host "[常量消费门] 通过：清单内常量均存在消费点" }
+
+# ===== 导出契约门 =====
+# verthys.def 为导出符号权威清单，export_baseline 为验收快照；
+# 集合不相等即红（历史发生过新增导出未同步基线）。
+Write-Host ""
+Write-Host "[导出契约门] 校验导出符号与基线一致..."
+$defSyms = (Select-String -Path (Join-Path $projectRoot "core\verthys.def") -Pattern '^\s*Verthys_\w+' |
+    ForEach-Object { $_.Line.Trim() }) | Sort-Object
+$baseSyms = (Get-Content (Join-Path $projectRoot "ci\export_baseline.txt") |
+    Where-Object { $_.Trim() -ne '' }) | Sort-Object
+$symDiff = Compare-Object $defSyms $baseSyms
+if ($symDiff) {
+    Write-Host "[导出契约门][RED] 导出符号与基线不一致："
+    $symDiff | ForEach-Object { Write-Host ("  {0} {1}" -f $_.SideIndicator, $_.InputObject) }
+    $exitCode = 1
+} else {
+    Write-Host "[导出契约门] 通过：$($defSyms.Count) 个符号一致"
+}
 
 # ===== 第一级：快速正则过滤 =====
 if (-not $Level2Only) {

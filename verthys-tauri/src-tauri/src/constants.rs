@@ -155,7 +155,9 @@ pub mod timeout {
 pub mod import_writer {
     use std::time::Duration;
 
-    use crate::infrastructure::shm_schema::{PB_IPC_MAX_PAYLOAD_BYTES, PB_MAX_CHUNKS_PER_IPC};
+    use crate::infrastructure::shm_schema::{
+        PB_IPC_MAX_PAYLOAD_BYTES, PB_MAX_CHUNKS_PER_IPC, PB_MAX_RECORD_NAME_BYTES,
+    };
 
     /// 命令层向写者通道发送的超时（通道背压满时兜底）
     pub const WRITER_SEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -172,7 +174,7 @@ pub mod import_writer {
     /// 单条外置 chunk 分批 IPC 的 chunk 数硬上限（与前端同一跨层预算取值）
     pub const MAX_CHUNKS_PER_IPC: usize = PB_MAX_CHUNKS_PER_IPC as usize;
     /// 单条记录名称长度上限（UTF-8 字节，与实现侧 `name.len()` 按字节比较的口径一致）
-    pub const MAX_RECORD_NAME_LEN: usize = 1024;
+    pub const MAX_RECORD_NAME_LEN: usize = PB_MAX_RECORD_NAME_BYTES as usize;
     /// 单条记录内容哈希长度上限（字符）
     pub const MAX_RECORD_HASH_LEN: usize = 256;
 }
@@ -190,6 +192,11 @@ pub mod record_types {
     pub const TYPE_PHOTO_THUMB: u32 = 7;
     /// 照片块集记录类型值（索引瘦身布局：逐块引用与逐块哈希）
     pub const TYPE_PHOTO_CHUNK_SET: u32 = 9;
+    /// 文件保险箱数据块记录类型值（清藏外置分块记录）
+    ///
+    /// 与前端记录类型分配表同值：清藏的文件块经同一单写者通道上传，
+    /// 由角色值决定记录名与类型，块归属纳入同一台账。
+    pub const TYPE_FILEVERTHYS_CHUNK: u32 = 4;
 }
 
 // ===== 导出流式写入常量 =====
@@ -202,10 +209,21 @@ pub mod record_types {
 pub mod export_stream {
     use std::time::Duration;
 
+    use crate::infrastructure::shm_schema::{
+        PB_MAX_EXPORT_SINGLE_BYTES, PB_USER_FILE_SIZE_LIMIT, PB_WRITE_FILE_CHUNK_BYTES,
+    };
+
     /// 单次流式追加（append_user_file_chunk）的载荷字节上界
-    pub const WRITE_FILE_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+    pub const WRITE_FILE_CHUNK_BYTES: usize = PB_WRITE_FILE_CHUNK_BYTES as usize;
     /// 单文件流式导出累计写入字节硬上限
-    pub const MAX_EXPORT_SINGLE_BYTES: u64 = 512 * 1024 * 1024;
+    pub const MAX_EXPORT_SINGLE_BYTES: u64 = PB_MAX_EXPORT_SINGLE_BYTES;
+    /// 用户授权文件读写的单文件体量上限（与导出累计上限同源）。
+    ///
+    /// 用户通过对话框显式选择的文件（如含数千张加密照片的打包文件）可达数 GB，
+    /// 沙箱白名单操作的 FILE_SIZE_LIMIT（50MB）会误拒合法大文件；本上限仅用于
+    /// read_user_file / user_file_stat / write_user_file 与分片读取，与沙箱白名单
+    /// 操作的安全边界隔离。取值由跨层预算常量单一权威来源派生，禁止本地字面量。
+    pub const USER_FILE_SIZE_LIMIT: u64 = PB_USER_FILE_SIZE_LIMIT;
     /// 暂存文件残留清理阈值（创建新流时清理修改时间早于该阈值的残留）
     pub const STALE_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 }

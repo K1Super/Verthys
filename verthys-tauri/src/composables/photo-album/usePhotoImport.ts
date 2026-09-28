@@ -14,7 +14,7 @@
  * 新增 ref：importElapsed / importEta（供 QuantumProgressFlow 使用）
  *
  * 设计要点：
- * - 接收 usePhotoData 返回值 + usePhotoToast 的 showError（依赖注入）
+ * - 接收 usePhotoData 返回值 + 全局 Toast 中心的 showError（依赖注入）
  * - 批量构建 importedItems 后一次性 pushShallowItems，避免循环内多次触发响应式
  * - persistVerthys + 返回值检查 + setModuleCache 更新缓存
  */
@@ -56,7 +56,7 @@ export interface UsePhotoImportDeps {
   isTauri: boolean;
   /** 恢复模块密钥（从 keyManager 会话缓存） */
   ensurePhotoKey: () => boolean;
-  /** 显示错误提示（来自 usePhotoToast，统一 Toast 中心） */
+  /** 显示错误提示（来自全局 Toast 中心） */
   showError: (msg: string) => void;
   /** 显示非错误警告提示（可选；缺省回退 showError）。用于落盘结构自查告警 */
   showToast?: (msg: string) => void;
@@ -201,9 +201,7 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
             // 状态文案如实补记已导入数量（已提交批次已落库）
             importStatus.value = `导入已取消（已导入 ${result.imported.length} 张）`;
           } else if (!result.ok) {
-            if (result.error?.includes("VERTHYS_WRITE_BLOCKED")) {
-              showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-            } else if (result.error) {
+            if (result.error) {
               showError(`导入失败: ${result.error}`);
             } else {
               // 部分失败且无会话级错误：按失败计数提示（成功项已入账，可重试失败部分）
@@ -246,12 +244,8 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           // 同步模块缓存：导入后立即更新缓存，防止切走再切回时 loadPhotos 用旧缓存覆盖
           setModuleCache("photos", photos.value);
         } catch (e) {
-          if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-            showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-          } else {
-            console.error("[onImport] 流水线异常", e);
-            showError("导入失败，请重试");
-          }
+          console.error("[onImport] 流水线异常", e);
+          showError("导入失败，请重试");
         } finally {
           activeAbort = null;
         }

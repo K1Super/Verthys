@@ -49,6 +49,10 @@ pub struct SecurityState {
     /// 后端最近一次成功切档的预设代号（0/1/2；None = 本进程尚未切档）。
     /// 内存级权威缓存：审计旧档、“切到当前档”幂等提示据此判定。
     pub(super) last_applied_preset: Mutex<Option<u32>>,
+    /// 预设持久化不一致标记（切档失败回滚落盘失败时置位）。
+    /// 语义：受信文件内容可能与运行时档位不一致，需向用户可见报告；
+    /// 任意一次成功落盘（切档写路径）后自动清除。
+    pub(super) preset_persist_dirty: std::sync::atomic::AtomicBool,
     /// 会话标识（进程级，用于审计日志关联）
     session_id: String,
 }
@@ -74,6 +78,7 @@ impl SecurityState {
             usb_salt_loaded: std::sync::atomic::AtomicBool::new(false),
             usb_registry_loaded: std::sync::atomic::AtomicBool::new(false),
             last_applied_preset: Mutex::new(None),
+            preset_persist_dirty: std::sync::atomic::AtomicBool::new(false),
             session_id: format!("pid-{}", std::process::id()),
         }
     }
@@ -81,6 +86,26 @@ impl SecurityState {
     /// 获取会话标识
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// 启停剪贴板监听与"外部写入即清空"标志
+    ///
+    /// 由安全档位命令显式驱动：剪贴板能力不再随隐私模式（窗口捕获排除）启停。
+    /// 启动监听失败如实返回错误（调用方据实回报并写审计），
+    /// 不回滚已经设置的高安全标志——两项能力相互独立。
+    pub(crate) fn set_clipboard_guard(&self, enabled: bool) -> Result<(), String> {
+        let mut guard = self
+            .clipboard_guard
+            .lock()
+            .map_err(|e| format!("剪贴板守卫锁中毒: {}", e))?;
+        if enabled {
+            guard.set_high_security_mode(true);
+            guard.start_monitoring()
+        } else {
+            guard.stop_monitoring();
+            guard.set_high_security_mode(false);
+            Ok(())
+        }
     }
 }
 

@@ -45,6 +45,13 @@ export async function resolveChunkSet(
       `块集项数与索引声明不一致（块集 ${set.ids.length} ≠ 索引 ${meta.chunkCount}）`,
     );
   }
+  // 哈希非空即必须与块数一一对应：残缺哈希若被静默放行，逐块校验会整段跳过。
+  // 空哈希数组属历史记录（无权威值），保持兼容。
+  if (set.hashes.length > 0 && set.hashes.length !== set.ids.length) {
+    throw new Error(
+      `块集哈希项数与块数不一致（哈希 ${set.hashes.length} ≠ 块 ${set.ids.length}）`,
+    );
+  }
   return set;
 }
 

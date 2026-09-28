@@ -1,6 +1,9 @@
 /**
  * verthys-common.css — AccountVerthys / CertManager 共享样式
- * 提取两个模块的通用卡片、表单、空状态等样式
+ * 卡片、表单、空状态等通用样式
+ *
+ * 「凭证登记台」皮肤（reg-* 词汇：分区登记行 / 凭据舱 / 选项条 / 读数）
+ * 已提升为全局共享层 — 见 styles/reg-desk.css（存签 / 枢钥 / 中枢 共用）
  */
 
 /* ===== 模块根容器 ===== */
@@ -23,13 +26,23 @@
 /* ===== 卡片 ===== */
 .verthys-card {
   position: relative; padding: 14px 16px 14px 18px;
-  transform-style: preserve-3d;
-  transition: transform 0.3s var(--ease), box-shadow 0.3s var(--ease);
-  animation: card-in 0.5s var(--ease) both;
+  /* 悬浮效果只有阴影 + 光泽追踪（3D 视差倾斜已按用户决策移除，Wave 53） */
+  transition: box-shadow 0.3s var(--ease);
+  /* 入场动画填充模式必须为 backwards，不得改回 both/forwards——
+     前向填充会永久用动画终态压住 hover transform（曾使卡片倾斜静默失效） */
+  animation: card-in 0.5s var(--ease) backwards;
   animation-delay: calc(var(--i) * 0.05s);
 }
 .verthys-card:hover {
   box-shadow: 0 12px 36px rgba(0,0,0,0.5), 0 0 16px rgba(0,212,255,0.1);
+}
+
+/* 卡片底色：直接复用顶部星野导航带底板（单源 tokens.css --bar-surface，
+   与 StarlitSky 底板同一定义；存签 / 枢钥 共用）。
+   复合选择器确定性压过 .glass 底色 —— 不依赖样式加载顺序；
+   .glass 仅保留边框 / 圆角 / 投影 */
+.verthys-card.glass {
+  background: var(--bar-surface);
 }
 
 /* 卡片左侧彩条 */
@@ -56,11 +69,14 @@
 }
 .verthys-card:hover .card-accent.accent-expired { opacity: 1; }
 
-/* 卡片光泽追踪层 */
+/* 卡片光泽追踪层
+   指针位置由 useCardShine 写入卡片上的 --shine-x / --shine-y（自定义属性继承到本层）；
+   强度（透明度 / 范围 / 色相）为令牌单源：tokens.css --shine-alpha / --shine-reach */
 .card-shine {
   position: absolute; inset: 0; border-radius: var(--radius);
   pointer-events: none; opacity: 0; transition: opacity 0.3s;
   z-index: 1; mix-blend-mode: screen;
+  background: radial-gradient(circle at var(--shine-x, 50%) var(--shine-y, 50%), rgba(var(--accent-rgb), var(--shine-alpha)), transparent var(--shine-reach));
 }
 .verthys-card:hover .card-shine { opacity: 1; }
 
@@ -177,3 +193,5 @@
   background: rgba(0,212,255,0.04);
   flex-shrink: 0;
 }
+
+/* 「凭证登记台」皮肤（reg-* 词汇）已迁出至全局共享层：styles/reg-desk.css */

@@ -101,7 +101,7 @@ export const CUSTOM_FEATURES_KEY = "verthys_custom_security_features";
 /* 当前安全预设代号 localStorage key（持久化用户选择的安全模式） */
 export const SECURITY_PRESET_KEY = "verthys_security_preset";
 
-/** C 层核心防护特性（固定 ON，不可关闭） */
+/** 核心防护特性（不随自定义模板逐项开关；各档位取值以 C 权威矩阵投影为准） */
 export const LOCKED_FEATURES: ReadonlySet<string> = new Set([
   "anti_debug",
   "anti_inject",
@@ -120,7 +120,6 @@ export const DEFAULT_CUSTOM_FEATURES: PresetFeatures = {
   key_separation: true,
   emergency_response: true,
   session_lock_on_idle: true,
-  shadow_sleep: true,
   module_patrol: true,
   clip_clear_on_lock: true,
   usb_clone_detect: true,

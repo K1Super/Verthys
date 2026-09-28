@@ -1,18 +1,15 @@
 <!--
-  CertManager.vue — 重要证书 / 密钥管理模块
-  v3: 复用 VerthysSearchBar / VerthysDialog / ClipToast / useCardTilt / useClipToast / verthys-common.css
+  CertManager.vue — 枢钥：重要证书 / 密钥管理模块
+  列表：搜索栏 + 卡片网格（超大列表走虚拟滚动），复用 VerthysSearchBar / VirtualCardGrid / useCardShine
+  登记窗口：VerthysDialog 承载「凭证登记台」皮肤 —— 分区登记行 + 左缘刻度轴 + 凭据舱，
+            表单读数（到期状态 / 字符行数）由本模块计算属性提供，持久化逻辑与列表共用
 -->
 <template>
   <div class="cert-manager verthys-module">
-    <!-- 顶部错误提示弹窗 -->
-    <Teleport to="body">
-      <transition name="err-toast">
-        <div v-if="errorMsg" class="error-toast glass"><span class="toast-dot"></span>{{ errorMsg }}</div>
-      </transition>
-    </Teleport>
+    <!-- 瞬时提示（错误/复制倒计时）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
 
     <!-- 搜索栏（带类型筛选） -->
-    <VerthysSearchBar v-model="searchKey" placeholder="搜索证书 / 密钥…" add-label="新增" @add="onAdd">
+    <VerthysSearchBar v-model="searchKey" placeholder="搜索证书 / 密钥…" add-label="新增" :sky-seed="3" @add="onAdd">
       <template #filters>
         <div class="search-divider"></div>
         <div class="type-chips">
@@ -119,52 +116,115 @@
       <CosmicEmpty v-if="!loading && filteredCerts.length === 0" text="暂无证书 / 密钥" />
     </div>
 
-    <!-- 编辑对话框 -->
-    <VerthysDialog v-model="showDialog" :title="editing ? '编辑证书' : '新增证书或密钥'" @save="onSave">
-      <div class="form-field full"><label>名称</label><input class="input" v-model="form.name" placeholder="如 生产环境 SSL 证书" /></div>
-      <div class="form-field">
-        <label>类型</label>
-        <select class="input sc-select" v-model="form.type">
-          <option value="" disabled>请选择证书或密钥类型</option>
-          <option v-for="t in types" :key="t.id" :value="t.id">{{ t.label }}</option>
-        </select>
-      </div>
-      <div class="form-field">
-        <label>到期日期</label>
-        <div class="date-wrap" @click="openDatePicker">
-          <input class="input sc-select date-input" :class="{ 'has-value': form.expiry }" type="date" v-model="form.expiry" ref="dateInputRef" />
-          <span v-if="!form.expiry" class="date-placeholder">请选择</span>
-        </div>
-      </div>
-      <div class="form-field full">
-        <label>内容 / 密钥</label>
-        <div class="content-input-area"
-          @dragover.prevent="onDragOver"
-          @dragleave.prevent="onDragLeave"
-          @drop.prevent="onDrop"
-          :class="{ 'drag-active': isDragging }">
-          <textarea class="input textarea" v-model="form.content" rows="4" placeholder="粘贴证书或密钥内容，或拖拽文件到此处…"></textarea>
-          <div class="upload-btn-row">
-            <button class="btn btn-sm upload-btn" @click="triggerFileUpload" type="button">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-              上传文件导入
-            </button>
-            <span v-if="uploadedFileName" class="uploaded-name">{{ uploadedFileName }}</span>
+    <!-- 凭证登记窗口：左侧刻度轴 + 分区登记行 + 凭据舱，实时读数回显 -->
+    <VerthysDialog
+      v-model="showDialog"
+      :title="editing ? '编辑证书' : '新增证书或密钥'"
+      layout="plain"
+      class="reg-panel"
+      :save-label="editing ? '保存修改' : '登记入库'"
+      @save="onSave"
+    >
+      <template #header>
+        <header class="reg-head">
+          <span class="reg-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
+              <circle cx="12" cy="12" r="5.4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-dasharray="25.5 8.4" transform="rotate(38 12 12)" opacity="0.8" />
+              <circle cx="12" cy="12" r="8.6" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-dasharray="38.6 15.4" transform="rotate(-76 12 12)" opacity="0.45" />
+            </svg>
+          </span>
+          <span class="reg-heading">
+            <span class="reg-kicker">枢钥 · 凭证登记</span>
+            <span class="reg-title">{{ editing ? '编辑证书' : '新增证书或密钥' }}</span>
+          </span>
+          <button class="reg-close" type="button" @click="showDialog = false" aria-label="关闭窗口" v-tip="'关闭'">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
+      </template>
+
+      <div class="reg-body">
+        <!-- 01 标识：名称 / 类型 / 到期（含到期状态读数） -->
+        <section class="reg-section" :style="{ '--rs': '0' }">
+          <div class="reg-sec-head">
+            <span class="reg-sec-no">01</span>
+            <span class="reg-sec-name">标识</span>
+            <span class="reg-rule"></span>
           </div>
-          <input type="file" ref="fileInputRef" class="hidden-file-input" accept=".pem,.crt,.key,.der,.cer,.pub" @change="onFileSelected" />
-        </div>
+          <div class="reg-row">
+            <label class="reg-key" for="cert-f-name"><i class="reg-req" aria-hidden="true">*</i>名称</label>
+            <input id="cert-f-name" class="reg-input" v-model="form.name" placeholder="如 生产环境 SSL 证书" aria-required="true" />
+          </div>
+          <div class="reg-row">
+            <label class="reg-key" for="cert-f-type"><i class="reg-req" aria-hidden="true">*</i>类型</label>
+            <select id="cert-f-type" class="reg-input reg-select" v-model="form.type" aria-required="true">
+              <option value="" disabled>请选择证书或密钥类型</option>
+              <option v-for="t in types" :key="t.id" :value="t.id">{{ t.label }}</option>
+            </select>
+          </div>
+          <div class="reg-row">
+            <label class="reg-key" for="cert-f-expiry">到期</label>
+            <div class="reg-expiry">
+              <div class="reg-date-wrap" @click="openDatePicker">
+                <input id="cert-f-expiry" ref="dateInputRef" class="reg-input reg-date" :class="{ 'has-value': form.expiry }" type="date" v-model="form.expiry" />
+                <span v-if="!form.expiry" class="reg-date-ph">未设置</span>
+              </div>
+              <span class="reg-readout" :class="`is-${expiryReadout.tone}`">
+                <i class="reg-readout-dot"></i>{{ expiryReadout.text }}
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 02 凭据：内容舱（拖拽 / 粘贴 / 文件导入），底部条形读数 -->
+        <section class="reg-section" :style="{ '--rs': '1' }">
+          <div class="reg-sec-head">
+            <span class="reg-sec-no">02</span>
+            <span class="reg-sec-name">凭据<i class="reg-req" aria-hidden="true">*</i></span>
+            <span class="reg-rule"></span>
+          </div>
+          <div
+            class="reg-vault"
+            :class="{ 'is-drag': isDragging }"
+            @dragover.prevent="onDragOver"
+            @dragleave.prevent="onDragLeave"
+            @drop.prevent="onDrop"
+          >
+            <textarea class="reg-vault-input" v-model="form.content" rows="5" placeholder="粘贴证书或密钥内容，或拖拽文件到此处…" aria-required="true"></textarea>
+            <div class="reg-vault-bar">
+              <button class="reg-vault-import" type="button" @click="triggerFileUpload">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <span>导入文件</span>
+              </button>
+              <span v-if="uploadedFileName" class="reg-vault-file" v-tip="uploadedFileName">{{ uploadedFileName }}</span>
+              <span class="reg-vault-readout">{{ isDragging ? '松开即导入' : contentStats }}</span>
+            </div>
+            <input type="file" ref="fileInputRef" class="reg-file-input" accept=".pem,.crt,.key,.der,.cer,.pub" @change="onFileSelected" />
+          </div>
+        </section>
+
+        <!-- 03 附注：备注 -->
+        <section class="reg-section" :style="{ '--rs': '2' }">
+          <div class="reg-sec-head">
+            <span class="reg-sec-no">03</span>
+            <span class="reg-sec-name">附注</span>
+            <span class="reg-rule"></span>
+          </div>
+          <div class="reg-row">
+            <label class="reg-key" for="cert-f-note">备注</label>
+            <input id="cert-f-note" class="reg-input" v-model="form.note" placeholder="可选备注信息" />
+          </div>
+        </section>
       </div>
-      <div class="form-field full"><label>备注</label><input class="input" v-model="form.note" placeholder="可选备注信息" /></div>
+
       <template #error v-if="formError">
-        <div class="form-error">
+        <div class="reg-error">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           {{ formError }}
         </div>
       </template>
     </VerthysDialog>
-
-    <!-- 复制提示 -->
-    <ClipToast :countdown="clipCountdown" text="已复制" />
 
     <!-- 非阻塞加载：无底板居中展示，加载完成自动消失 -->
     <CosmicLoading :show="loading" text="正在加载证书数据…" />
@@ -197,18 +257,17 @@ import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache,
   invalidateScannedRecord, clearRecordScanCache, getRecordsDataB64Batch } from "../../lib/keyManager";
 import { TYPE_CERT, TYPE_CERT_LIST, TYPE_CERT_LEGACY } from "../../constants/record_types";
 import { useClipToast } from "../../composables/useClipToast";
-import { useCardTilt } from "../../composables/useCardTilt";
-import { useErrorToast } from "../../composables/useErrorToast";
+import { useCardShine } from "../../composables/useCardShine";
+import { useToastCenter } from "../../composables/useToastCenter";
 import VerthysSearchBar from "../common/verthys-ui/VerthysSearchBar.vue";
 import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
-import ClipToast from "../common/verthys-ui/ClipToast.vue";
 import CosmicLoading from "../common/cosmic/CosmicLoading.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
 
-/* 修复：顶部错误提示弹窗（.error-toast，2.5s 自动消失） */
-const { errorMsg, showError } = useErrorToast();
+/* 瞬时提示（错误，2.5s 自动消失）— 全局 Toast 中心；渲染归 ToastLayer */
+const { showError } = useToastCenter();
 
 /**
  * 独立记录存储模式（参考 PhotoAlbum / AccountVerthys）：
@@ -277,8 +336,8 @@ const computeStatus = (expiry: string): "valid" | "expiring" | "expired" => {
   return "valid";
 };
 
-/* 卡片 3D 视差 */
-const { onCardMove, onCardLeave } = useCardTilt();
+/* 卡片光泽追踪（3D 视差倾斜已按用户决策移除，Wave 53） */
+const { onCardMove, onCardLeave } = useCardShine();
 
 /* 文件上传 */
 const isDragging = ref(false);
@@ -306,7 +365,14 @@ const onFileSelected = async (e: Event) => {
 };
 
 const onDragOver = () => { isDragging.value = true; };
-const onDragLeave = () => { isDragging.value = false; };
+/* 拖拽离开判定：指针仍在舱内（子元素间移动）时保持高亮，
+ * 仅真正越过舱体边界才复位，避免边缘抖动导致收纳态闪烁 */
+const onDragLeave = (e: DragEvent) => {
+  const current = e.currentTarget as HTMLElement | null;
+  const related = e.relatedTarget as Node | null;
+  if (current && related && current.contains(related)) return;
+  isDragging.value = false;
+};
 const onDrop = async (e: DragEvent) => {
   isDragging.value = false;
   if (e.dataTransfer && e.dataTransfer.files[0]) await readFileContent(e.dataTransfer.files[0]);
@@ -497,6 +563,24 @@ const editing = ref<CertEntry | null>(null);
 const formError = ref("");
 const form = ref<CertEntry>({ id: 0, name: "", type: "", expiry: "", status: "valid", content: "", note: "" });
 
+/** 凭据舱读数：字符数与行数（粘贴/导入后即时核对内容体量，空内容显式给零值） */
+const contentStats = computed(() => {
+  const text = form.value.content;
+  if (!text) return "0 字符 · 0 行";
+  return `${text.length} 字符 · ${text.split(/\r\n|\r|\n/).length} 行`;
+});
+
+/** 到期读数：与 computeStatus 同源的阈值语义（<0 过期、<30 天临期），
+ *  附剩余或超期天数；未设置到期日视为永久有效 */
+const expiryReadout = computed<{ tone: "none" | "valid" | "expiring" | "expired"; text: string }>(() => {
+  if (!form.value.expiry) return { tone: "none", text: "永久有效" };
+  const diffDays = (new Date(form.value.expiry).getTime() - Date.now()) / 86400000;
+  if (diffDays < 0) return { tone: "expired", text: `已过期 ${Math.ceil(-diffDays)} 天` };
+  if (diffDays < 1) return { tone: "expiring", text: "今日内到期" };
+  if (diffDays < 30) return { tone: "expiring", text: `${Math.floor(diffDays)} 天后到期` };
+  return { tone: "valid", text: `${Math.floor(diffDays)} 天后到期` };
+});
+
 const onAdd = () => {
   editing.value = null;
   form.value = { id: 0, name: "", type: "", expiry: "", status: "valid", content: "", note: "" };
@@ -533,16 +617,7 @@ const onSave = async () => {
     // 编辑：先添加新记录 → 删除旧记录 → 更新内存 recordId
     // 顺序：add 新 → delete 旧，避免删除后新增时 recordId 复用导致数据错乱
     const oldRid = editing.value.recordId;
-    let newRid: number | null = null;
-    try {
-      newRid = await verthysAddRecord(TYPE_CERT, recordName, dataB64);
-    } catch (e) {
-      if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-        showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-        return;
-      }
-      throw e;
-    }
+    const newRid = await verthysAddRecord(TYPE_CERT, recordName, dataB64);
     if (newRid !== null) {
       // 同步两层缓存（摘要 + 全量），确保列表立即显示新记录
       addFullRecord(newRid, TYPE_CERT, recordName, dataB64);
@@ -561,16 +636,7 @@ const onSave = async () => {
     }
   } else {
     // 新增：添加独立记录 → 保存 recordId 到内存
-    let newRid: number | null = null;
-    try {
-      newRid = await verthysAddRecord(TYPE_CERT, recordName, dataB64);
-    } catch (e) {
-      if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-        showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-        return;
-      }
-      throw e;
-    }
+    const newRid = await verthysAddRecord(TYPE_CERT, recordName, dataB64);
     if (newRid !== null) {
       // 同步两层缓存（摘要 + 全量）
       addFullRecord(newRid, TYPE_CERT, recordName, dataB64);
@@ -637,11 +703,7 @@ const confirmDelete = async () => {
       if (!persistOk) {
         showError("删除已提交但持久化失败，重启后记录可能恢复。请勿关闭应用并重试删除");
       }
-    } catch (e) {
-      if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-        showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-        return;
-      }
+    } catch {
       showError("删除失败，请重试");
     }
   }
@@ -656,7 +718,8 @@ const toggleContent = (c: CertEntry) => {
   }
 };
 
-const { clipCountdown, copyWithTimeout } = useClipToast();
+/* 复制内容（提示经全局 Toast 中心倒计时通道渲染） */
+const { copyWithTimeout } = useClipToast("已复制");
 const copyContent = async (c: CertEntry) => { await copyWithTimeout(c.content); };
 
 /* 修复「页面覆盖」：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
@@ -697,52 +760,7 @@ useModuleDialogGuard("certs", () => {
   white-space: normal; line-height: 1.4;
 }
 
-/* 表单错误提示 */
-.form-error {
-  display: flex; align-items: center; gap: 6px;
-  margin-top: 14px; padding: 8px 12px; font-size: 11px;
-  color: var(--danger); background: rgba(255, 71, 87, 0.06);
-  border: 1px solid rgba(255, 71, 87, 0.2); border-radius: var(--radius-sm);
-  font-family: var(--font); animation: error-shake 0.4s var(--ease);
-}
-.form-error svg { width: 14px; height: 14px; flex-shrink: 0; }
-@keyframes error-shake {
-  0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-4px); }
-  75% { transform: translateX(4px); }
-}
-
-/* 主题化下拉框 / 日期选择器 */
-.sc-select {
-  appearance: none; background: rgba(0,0,0,0.3);
-  border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
-  padding: 8px 12px; color: var(--text-primary);
-  font-size: 12px; font-family: var(--font);
-  outline: none; transition: border-color 0.2s; cursor: pointer;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a8a9a' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-  background-repeat: no-repeat; background-position: right 10px center;
-  padding-right: 32px;
-}
-.sc-select:focus { border-color: var(--accent); }
-.sc-select option { background: rgba(20,22,30,0.95); color: var(--text-primary); }
-.sc-select::-webkit-calendar-picker-indicator { filter: invert(0.7); cursor: pointer; }
-
-/* 日期选择器 */
-.date-wrap { position: relative; cursor: pointer; }
-input[type="date"].date-input { background-image: none; padding-right: 12px; color: transparent; cursor: pointer; }
-input[type="date"].date-input.has-value { color: var(--text-primary); }
-input[type="date"].date-input::-webkit-calendar-picker-indicator { filter: invert(0.7); cursor: pointer; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); }
-.date-placeholder { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 12px; font-family: var(--font); pointer-events: none; }
-
-/* 文件上传 */
-.content-input-area { position: relative; border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; padding: 4px; transition: border-color 0.2s; }
-.content-input-area.drag-active { border-color: var(--accent); background: rgba(0,212,255,0.05); }
-.upload-btn-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
-.upload-btn { display: flex; align-items: center; gap: 4px; }
-.upload-btn svg { width: 12px; height: 12px; }
-.btn-sm { padding: 5px 10px; font-size: 11px; }
-.uploaded-name { font-size: 11px; color: var(--accent); font-family: var(--font); }
-.hidden-file-input { display: none; }
+/* 登记窗口皮肤已抽取到 verthys-common.css（凭证登记台 · reg-* 词汇，与存签共用） */
 
 /* 卡片可点击 */
 .verthys-card { cursor: pointer; }

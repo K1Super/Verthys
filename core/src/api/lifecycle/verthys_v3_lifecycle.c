@@ -20,6 +20,7 @@
  *     绝不 flush 落 SSTable（rebuild_excluding 仅 MemTable，落表即永久可见）。
  */
 #include "verthys_v3_lifecycle.h"
+#include "security_preset.h"   /* security_runtime_preset */
 #include "verthys_unlock_pipeline.h"
 #include "verthys_warmcache_v3.h"
 #include "verthys_io.h"              /* vio_pread64 */
@@ -615,9 +616,10 @@ VerthysResult verthys_v3_lock(VerthysContextV3 *ctx3)
 
     /* 3. 温缓存（Lock 同步写；SECURE 跳过并清除残留）。
      *    失败不影响锁定语义（持久化优化，非正确性依赖）。
+     *    档位门控按运行时策略判定（锁定时刻的会话档位即权威）。
      *    快照纪律：flush（快照 = 刷盘后空 MemTable）→ export → save。 */
     if (ctx3->lsm != NULL && ctx3->verthys_path != NULL) {
-        if (verthys_v3_warmcache_disabled_by_preset(ctx3->preset)) {
+        if (verthys_v3_warmcache_disabled_by_preset((VerthysPreset)security_runtime_preset())) {
             (void)verthys_warmcache_v3_delete(ctx3->verthys_path);
         } else {
             uint8_t *tables_pt = NULL, *memtable_pt = NULL;

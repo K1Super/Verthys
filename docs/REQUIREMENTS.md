@@ -107,11 +107,19 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 - **验收标准**：`VerthysPreset` 枚举 4 值；`applyPreset` 重复应用被守卫拒绝；预设持久写入超级块。
 - **实现佐证**：`core/src/security/preset/security_preset.c` + 前端 `usePreset.ts`。
 
-### FR-12 隐私模式与剪贴板隔离
+### FR-12 隐私模式（防截屏）与剪贴板隔离
 
-- **描述**：隐私模式加密剪贴板（partial_protection 语义），锁定/超时清空剪贴板。
-- **验收标准**：`set_privacy_mode`/`clear_clipboard`/`restore_privacy_mode` 命令真实实现。
-- **实现佐证**：`verthys-tauri/src-tauri/src/controller/clipboard_controller.rs` + `verthys-tauri/src-tauri/src/security/clipboard_guard.rs`。
+- **描述**：隐私模式对全部应用窗口施加捕获排除（`SetWindowDisplayAffinity`），每次启动默认开启
+  且启动即生效（窗口在保护就绪后才显示）；全或无语义——任一窗口施加或回读失败即逆序回滚并返回明确错误码，
+  失败窗口整体隔离并进入对账，无"部分保护"假象。剪贴板隔离（外部写入即清空 + 显式事务式清空）
+  随安全档位启停，与隐私模式解耦，故障互不误报。
+- **验收标准**：`set_privacy_mode`/`get_privacy_status`/`adopt_privacy_session`/`reconcile_privacy`/
+  `clear_clipboard` 命令真实实现；启动一律默认开启（每次启动自动施加保护、无需手动操作；
+  会话内关闭仅本次会话有效，不持久化关闭选择）；关闭需凭证（凭证只存摘要、可重试、单次消费）。
+- **实现佐证**：`verthys-tauri/src-tauri/src/controller/privacy_controller.rs` +
+  `verthys-tauri/src-tauri/src/security/window_affinity.rs` +
+  `verthys-tauri/src-tauri/src/controller/clipboard_controller.rs` +
+  `verthys-tauri/src-tauri/src/security/clipboard_guard.rs`。
 
 ### FR-13 USB 安全影子
 
@@ -217,13 +225,13 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 
 - **要求**：Windows x64 首发，架构预留跨平台；工具链 VS 2026 / MSVC 14.51。
 - **现状佐证**：`CMakeLists.txt`（C11，MSVC）+ Tauri NSIS 打包；`cmake/VerthysHardening.cmake`。
-- **验收**：Release 构建产出 `build/core/Release/verthys.dll` 且 `dumpbin -exports` 与 `ci/export_baseline.txt` 29 符号逐一相等。
+- **验收**：Release 构建产出 `build/core/Release/verthys.dll` 且 `dumpbin -exports` 与 `ci/export_baseline.txt` 逐一相等（当前 32 符号，由 CI 导出契约门自动校验）。
 
 ### NFR-09 导出面最小化
 
 - **要求**：导出面唯一由 `.def` 白名单管控，无全量导出。
-- **现状佐证**：`core/verthys.def` 29 符号 = `ci/export_baseline.txt`；`VERTHYS_API` 为空宏。
-- **验收**：`dumpbin -exports build/core/Release/verthys.dll` 数出 29 个导出。
+- **现状佐证**：`core/verthys.def` 32 符号 = `ci/export_baseline.txt`；`VERTHYS_API` 为空宏。
+- **验收**：`dumpbin -exports build/core/Release/verthys.dll` 数出 32 个导出。
 
 ---
 

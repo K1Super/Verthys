@@ -5,7 +5,7 @@
  * 从原 PhotoAlbum.vue 提取，保持 100% 功能不变。
  *
  * 设计要点：
- * - 接收 usePhotoData 返回值 + usePhotoToast 的 showError/showToast（依赖注入）
+ * - 接收 usePhotoData 返回值 + 全局 Toast 中心的 showError/showToast（依赖注入）
  * - chooseParseFile：Tauri 用 open() + readUserFile；浏览器用 input[type=file]
  *   感知：文件读取过程复用进度条样式
  *     rAF 推进至 90% → 实际完成跳 100%，1.5s 最小感知时长，进度单调递增
@@ -70,9 +70,9 @@ export interface UsePhotoParseDeps {
   isTauri: boolean;
   /** 恢复模块密钥（从 keyManager 会话缓存） */
   ensurePhotoKey: () => boolean;
-  /** 显示错误提示（来自 usePhotoToast，统一 Toast 中心） */
+  /** 显示错误提示（来自全局 Toast 中心） */
   showError: (msg: string) => void;
-  /** 显示成功提示（来自 usePhotoToast，统一 Toast 中心） */
+  /** 显示成功提示（来自全局 Toast 中心） */
   showToast: (msg: string) => void;
   /* Parsed Import：复用 usePhotoImport 的流水线实例 + 导入状态 refs */
   /** 获取流水线实例（复用 usePhotoImport 的 pipeline，共享进度状态机） */
@@ -514,12 +514,8 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         importElapsed.value = 0;
         importEta.value = 0;
 
-        if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-          showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-        } else {
-          console.error("[importParsedPhotos] 流水线异常", e);
-          showError("导入失败，请重试");
-        }
+        console.error("[importParsedPhotos] 流水线异常", e);
+        showError("导入失败，请重试");
         return;
       }
 
@@ -532,9 +528,7 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         importElapsed.value = 0;
         importEta.value = 0;
 
-        if (result.error?.includes("VERTHYS_WRITE_BLOCKED")) {
-          showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-        } else if (result.error) {
+        if (result.error) {
           showError(`导入失败: ${result.error}`);
         } else {
           // 部分失败且无会话级错误：按失败计数提示（成功项已入账，可重试失败部分）

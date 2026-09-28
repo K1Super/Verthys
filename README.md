@@ -41,7 +41,7 @@
   <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">L4 UI 交互层</span> — Tauri + Vue 3，纯渲染，口令、密钥不出前端。</li>
   <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">L3 应用调度层</span> — Rust 控制器 + worker 子进程，进程编排 / 会话策略 / 安全命令，零密钥接触。</li>
   <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">L2 核心 DLL 层</span> — C11 编写的 verthys.dll，六大子域：api / crypto / container / index / transaction / security，对外黑盒。</li>
-  <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">L1 持久化层</span> — .verthys 加密容器、pepper.bin、.idx_cache 温缓存。</li>
+  <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">L1 持久化层</span> — .verthys 加密容器、pepper.bin、附属数据目录（&lt;容器&gt;.d：状态 / 预设 / WAL / 台账 / idx_cache 温缓存）。</li>
 </ul>
 
 <div style="display:flex;align-items:baseline;gap:16px;border-bottom:1px solid #1E2733;padding-bottom:10px;margin:44px 0 16px">

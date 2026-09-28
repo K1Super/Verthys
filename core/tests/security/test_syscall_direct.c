@@ -127,7 +127,6 @@ TEST(scd_detector_wiring_clean)
 {
     CHECK_EQ(anti_debug_v2_init(), 0);
     CHECK_EQ(anti_debug_v2_check(), DBG_THREAT_NONE);
-    CHECK_EQ(anti_debug_v2_is_punish_mode(), 0);
 
     /* memory_guard 句柄表扫描经直接系统调用（干净环境返回 0；
      * test_memory_safety.c 亦有覆盖，此处从传输视角复验） */

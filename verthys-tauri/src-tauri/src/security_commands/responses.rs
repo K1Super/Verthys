@@ -113,7 +113,6 @@ pub struct PresetFeatures {
     pub key_separation: bool,
     pub emergency_response: bool,
     pub session_lock_on_idle: bool,
-    pub shadow_sleep: bool,
     pub module_patrol: bool,
     pub clip_clear_on_lock: bool,
     pub usb_clone_detect: bool,

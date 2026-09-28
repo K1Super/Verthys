@@ -17,44 +17,18 @@
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, defineComponent, h, onMounted, provide, toRef } from "vue";
+import { defineAsyncComponent, onMounted, provide, toRef } from "vue";
 import HomeView from "./HomeView.vue";
 import { MODULE_DIALOG_GUARD_KEY } from "../../composables/useModuleDialogGuard";
 import { TRANSITION } from "../../app/constants";
 
-/* 模块加载兜底提示（预热未完成时点击模块可达）：
- * 「深空对接」— 双层反向旋转叠加出偏心轨迹光点（非标准圆环旋转），
- * 纯 transform 动画无 filter；delay 250ms — chunk 就绪快时不闪现 */
-const ModuleLoading = defineComponent({
-  name: "ModuleLoading",
-  render() {
-    return h("div", { class: "module-loading" }, [
-      h("span", { class: "ml-orbit-a" }, [
-        h("span", { class: "ml-orbit-b" }, [
-          h("i", { class: "ml-pip" }),
-        ]),
-      ]),
-      h("p", { class: "ml-text" }, "正在对接"),
-    ]);
-  },
-});
-
-/** 异步模块工厂：统一挂载兜底提示 */
-function asyncModule(loader: () => Promise<unknown>) {
-  return defineAsyncComponent({
-    loader: loader as never,
-    loadingComponent: ModuleLoading,
-    delay: 250,
-  });
-}
-
 /* 页面级组件懒加载：每个模块独立分包，按需加载 */
-const AccountVerthys = asyncModule(() => import("../modules/AccountVerthys.vue"));
-const CertManager = asyncModule(() => import("../modules/CertManager.vue"));
-const PasswordTools = asyncModule(() => import("../modules/PasswordTools.vue"));
-const PhotoAlbum = asyncModule(() => import("../modules/PhotoAlbum.vue"));
-const FileVerthys = asyncModule(() => import("../modules/FileVerthys.vue"));
-const SecurityCenter = asyncModule(() => import("../modules/SecurityCenter.vue"));
+const AccountVerthys = defineAsyncComponent(() => import("../modules/AccountVerthys.vue"));
+const CertManager = defineAsyncComponent(() => import("../modules/CertManager.vue"));
+const PasswordTools = defineAsyncComponent(() => import("../modules/PasswordTools.vue"));
+const PhotoAlbum = defineAsyncComponent(() => import("../modules/PhotoAlbum.vue"));
+const FileVerthys = defineAsyncComponent(() => import("../modules/FileVerthys.vue"));
+const SecurityCenter = defineAsyncComponent(() => import("../modules/SecurityCenter.vue"));
 
 const props = defineProps<{
   currentModule: string;
@@ -157,58 +131,5 @@ onMounted(() => {
 .module-switch-leave-to {
   opacity: 0;
   transform: scale(1.01) translateX(-12px);
-}
-
-/* ===== 模块加载兜底（「深空对接」— 点击时有即时反馈不空白） =====
- * 双层反向旋转叠加成偏心轨迹光点（非标准圆环/螺旋），
- * 纯 transform 动画（无 filter — 动画目标禁令），静态微光为
- * 一次性光栅化 box-shadow */
-.module-loading {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  z-index: 1;
-}
-.ml-orbit-a {
-  position: relative;
-  width: 46px;
-  height: 46px;
-  animation: ml-a 3.4s linear infinite;
-}
-.ml-orbit-b {
-  position: absolute;
-  top: 9px;
-  left: 9px;
-  width: 28px;
-  height: 28px;
-  animation: ml-b 2.2s linear infinite reverse;
-}
-.ml-pip {
-  position: absolute;
-  top: 1px;
-  left: 50%;
-  width: 5px;
-  height: 5px;
-  margin-left: -2.5px;
-  border-radius: 50%;
-  background: rgba(0, 212, 255, 0.85);
-  box-shadow: 0 0 8px rgba(0, 212, 255, 0.45);
-}
-@keyframes ml-a {
-  to { transform: rotate(360deg); }
-}
-@keyframes ml-b {
-  to { transform: rotate(360deg); }
-}
-.ml-text {
-  margin: 0;
-  font-size: 12px;
-  letter-spacing: 0.35em;
-  text-indent: 0.35em;
-  color: rgba(160, 190, 220, 0.55);
 }
 </style>

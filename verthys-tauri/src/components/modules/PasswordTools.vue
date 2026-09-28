@@ -214,20 +214,7 @@
       </section>
     </div>
 
-    <!-- 顶部错误提示弹窗 -->
-    <Teleport to="body">
-      <transition name="err-toast">
-        <div v-if="errorMsg" class="error-toast glass"><span class="toast-dot"></span>{{ errorMsg }}</div>
-      </transition>
-    </Teleport>
-
-    <!-- 底部成功提示（复用全局 clip-toast 样式） -->
-    <transition name="toast">
-      <div v-if="copied" class="clip-toast glass"><span class="toast-dot"></span>已复制到剪贴板</div>
-    </transition>
-    <transition name="toast">
-      <div v-if="toastMsg" class="clip-toast glass"><span class="toast-dot"></span>{{ toastMsg }}</div>
-    </transition>
+    <!-- 瞬时提示（错误/复制/状态）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
   </div>
 </template>
 
@@ -237,10 +224,12 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { sha256 } from "@noble/hashes/sha2";
 import { argon2id } from "hash-wasm";
 import { writeUserFile } from "../../lib/verthys";
-import { useErrorToast } from "../../composables/useErrorToast";
+import { useToastCenter } from "../../composables/useToastCenter";
 
-/* ===== 顶部错误提示弹窗 ===== */
-const { errorMsg, showError } = useErrorToast();
+/* ===== 瞬时提示（错误 / 复制 / 状态）— 全局 Toast 中心；渲染归 ToastLayer ===== */
+const { showError, showStatus, showCopied } = useToastCenter();
+/* 状态提示口径（模块内沿用 showToast 命名，指向标准状态通道，2.5s 自动消失） */
+const showToast = showStatus;
 
 /* ===== 环境检测 ===== */
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -451,8 +440,7 @@ const exportBin = async () => {
   } catch { showError("导出失败"); }
 };
 
-/* ===== 复制 + Toast ===== */
-const copied = ref(false);
+/* ===== 复制 ===== */
 const copyText = async (text: string) => {
   if (!text) return;
   // 优先尝试 Clipboard API（浏览器安全上下文）
@@ -476,18 +464,7 @@ const copyText = async (text: string) => {
       document.body.removeChild(ta);
     } catch { /* */ }
   }
-  if (ok) {
-    copied.value = true;
-    setTimeout(() => { copied.value = false; }, 1500);
-  }
-};
-
-const toastMsg = ref("");
-let toastTimer: number | null = null;
-const showToast = (msg: string) => {
-  toastMsg.value = msg;
-  if (toastTimer) window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => { toastMsg.value = ""; }, 2500);
+  if (ok) showCopied();
 };
 
 onMounted(() => {
@@ -523,8 +500,11 @@ watch(keygenBytes, () => generateKey());
 }
 
 /* 工具区块通用 */
+/* 卡片底色：直接复用星野导航带底板（单源 tokens.css --bar-surface，
+   与 StarlitSky 底板同一定义）；.glass 仅保留边框 / 圆角 / 投影 */
 .tool-section {
   padding: 20px;
+  background: var(--bar-surface);
   animation: section-in 0.5s var(--ease) both;
   display: flex;
   flex-direction: column;
@@ -710,8 +690,4 @@ watch(keygenBytes, () => generateKey());
 
 .keygen-export-row { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: auto; padding-top: 10px; border-top: 1px dashed var(--border-glass); }
 .keygen-hint { font-size: 10px; color: var(--text-muted); font-family: var(--font); text-align: center; }
-
-/* 复制提示过渡（复用全局 .clip-toast） */
-.toast-enter-active, .toast-leave-active { transition: all 0.3s var(--ease); }
-.toast-enter-from, .toast-leave-to { opacity: 0; transform: translate(-50%, 10px); }
 </style>

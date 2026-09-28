@@ -17,9 +17,12 @@
 //! 每行一个 JSON 对象，以 `\n` 分隔。条目类型：
 //!   {"kind":"begin","import_id":"<uuid>","ts":<unix_ms>}
 //!   {"kind":"pending","import_id":"<uuid>","batch_id":<n>,"hash":"<blake3 hex>","name":"<file>","idx":<i>}
-//!   {"kind":"committed","import_id":"<uuid>","batch_id":<n>,"hash":"<blake3 hex>","verthys_id":<lid>,"name":"<file>"}
+//!   {"kind":"committed","import_id":"<uuid>","batch_id":<n>,"hash":"<blake3 hex>","verthys_id":<lid>,"name":"<file>","chunk_ids":<[lid]|缺省>}
 //!   {"kind":"checkpoint","import_id":"<uuid>","batch_id":<n>,"committed_count":<x>}
 //!   {"kind":"end","import_id":"<uuid>","success":<bool>}
+//!
+//! `chunk_ids` 为显式声明的外置块引用集合（缺省表示历史条目、引用不可推断）；
+//! 崩溃恢复据此把块归属结算进台账，防止已提交记录引用的块被当作孤儿回收。
 //!
 //! 每条 append 后立即 sync_all（fsync）+ 刷新到磁盘，保证崩溃不丢失已提交记录。
 //!
@@ -36,8 +39,17 @@
 //! 安全边界
 //! =============================================================================
 //! - 仅记录哈希（BLAKE3 hex）与文件名，不含密钥、不含明文、不含密文。
-//! - WAL 文件位于 verthys 文件同目录（受 VerthysFileLock 独占锁保护，防并发写）。
+//! - WAL 文件位于容器附属数据目录（受 VerthysFileLock 独占锁保护，防并发写）。
 //! - 所有 IO 失败向上传播为 Err（持久层不吞异常），由控制器决定降级策略。
+//!
+//! =============================================================================
+//! 附属目录与旧布局迁移
+//! =============================================================================
+//! - 权威写路径：附属数据目录内 import.wal（快照同目录，后缀 .snapshot）。
+//! - 旧布局 <verthys_path>.import.wal（及快照）仅作只读回退：读取入口先尝试
+//!   原子搬迁，搬迁失败时本次读取沿用旧位置（数据连续性优先），下次访问重试。
+//! - 会话创建（截断 WAL）后旧布局文件被 best-effort 回收；去重集合已在建会话
+//!   前载入内存，回收不丢失语义。
 //!
 //! 依赖方向：repository → util（单向，禁止引用 controller/service/entry）
 
@@ -47,6 +59,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::repository::container_layout;
 
 /// WAL 单条记录类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +79,10 @@ pub enum WalEntry {
         idx: u64,
     },
     /// 记录已入库并落盘（缓存刷新 + worker add_record 完成）
+    ///
+    /// `chunk_ids` 承载本条记录引用的外置块记录 ID：
+    ///   - `Some([...])`：本条目显式声明引用集合（空集合表示无外置块）；
+    ///   - `None`：字段缺省的历史条目，引用集合不可推断。
     #[serde(rename = "committed")]
     Committed {
         import_id: String,
@@ -72,6 +90,8 @@ pub enum WalEntry {
         hash: String,
         verthys_id: u64,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chunk_ids: Option<Vec<u64>>,
     },
     /// 检查点：标记某批次完整提交
     #[serde(rename = "checkpoint")]
@@ -105,15 +125,78 @@ pub struct WalSnapshot {
     pub active_import_id: Option<String>,
     /// 已 committed 的 {hash → verthys_id} 映射（供调试/审计）
     pub committed_ids: std::collections::HashMap<String, u64>,
+    /// 已 committed 条目显式声明的外置块归属：{块记录 ID → 拥有者记录 ID}
+    ///
+    /// 仅由携带引用集合的条目累积；删除墓碑会撤销对应拥有者的声明。
+    pub committed_chunk_owners: HashMap<u64, u64>,
+    /// WAL 中是否存在引用集合不可推断的历史 committed 条目
+    ///
+    /// 为真时，台账中仍为孤儿候选的条目无法证明归属，结算路径须将其冻结，
+    /// 宁可永久保留也不得回收。
+    pub has_unsettleable_commits: bool,
 }
 
-/// 计算给定 verthys 路径对应的 WAL 文件路径
-pub fn wal_path_for(verthys_path: &str) -> PathBuf {
-    let mut p = PathBuf::from(verthys_path);
-    let mut name = p.file_name().map(|s| s.to_os_string()).unwrap_or_default();
-    name.push(".import.wal");
-    p.set_file_name(name);
-    p
+/// 解析 WAL 数据位置：附属目录优先，旧布局命中时先尝试原子迁移。
+///
+/// 迁移失败（重命名被占用、权限异常等）不中断调用方：返回旧路径作为本次
+/// 数据位置（数据连续性优先），后续访问自动重试迁移；任何情况下都不会把
+/// 同一份数据同时写到两处。
+fn resolve_wal_path(verthys_path: &str) -> PathBuf {
+    let primary = container_layout::wal_file_for(verthys_path);
+    if primary.exists() {
+        return primary;
+    }
+    let legacy = container_layout::legacy_wal_file_for(verthys_path);
+    if !legacy.exists() {
+        return primary;
+    }
+    match container_layout::migrate_legacy_file(&legacy, &primary) {
+        Ok(()) => {
+            let snapshot = container_layout::legacy_wal_snapshot_file_for(verthys_path);
+            if snapshot.exists() {
+                let snap_primary = container_layout::wal_snapshot_file_for(verthys_path);
+                if let Err(e) = container_layout::migrate_legacy_file(&snapshot, &snap_primary) {
+                    log::warn!("[wal] 旧布局快照迁移失败（快照缺失按全量重放等价处理）: {}", e);
+                }
+            }
+            log::info!("[wal] 旧布局 WAL 已收口至附属数据目录");
+            primary
+        }
+        Err(e) => {
+            log::warn!(
+                "[wal] 旧布局 WAL 迁移失败（本次沿用原位置，下次访问重试）: {}",
+                e
+            );
+            legacy
+        }
+    }
+}
+
+/// 回收旧布局 WAL 相关文件（best-effort）。
+///
+/// 仅在会话创建（WAL 已截断）之后调用：此刻旧 WAL 承载的去重集合已在建会话
+/// 前载入内存，回收不丢失语义；残留文件在下次访问或显式删除时再被清理。
+fn discard_legacy_wal_files(verthys_path: &str) {
+    for path in [
+        container_layout::legacy_wal_file_for(verthys_path),
+        container_layout::legacy_wal_snapshot_file_for(verthys_path),
+    ] {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+        let tmp = PathBuf::from(format!("{}.tmp", path.to_string_lossy()));
+        if tmp.exists() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// 删除既有文件；不存在视为成功，其余错误上抛。
+fn remove_file_if_exists(path: &Path, label: &str) -> Result<(), String> {
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| format!("{}删除失败: {}", label, e))?;
+    }
+    Ok(())
 }
 
 /// 快照文件路径（WAL 同目录附加后缀）
@@ -180,8 +263,12 @@ pub struct WalWriter {
 impl WalWriter {
     /// 创建/截断 WAL 文件并写入 begin 条目（新导入会话起始）
     /// 若存在遗留 WAL（未 end 的旧会话），调用方应先 load() 恢复再决定是否覆盖。
+    ///
+    /// 全部写路径固定为附属数据目录；截断成功后旧布局 WAL 与快照被 best-effort
+    /// 回收（其去重集合已由调用方在此之前载入）。
     pub fn create(verthys_path: &str, import_id: &str) -> Result<Self, String> {
-        let path = wal_path_for(verthys_path);
+        container_layout::ensure_sidecar_dir(verthys_path)?;
+        let path = container_layout::wal_file_for(verthys_path);
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -195,6 +282,7 @@ impl WalWriter {
             ts: now_ms(),
         })?;
         writer.flush_sync()?;
+        discard_legacy_wal_files(verthys_path);
         Ok(writer)
     }
 
@@ -369,10 +457,21 @@ fn load_from_path(path: &Path) -> Result<WalSnapshot, String> {
                 hash,
                 verthys_id,
                 import_id,
+                chunk_ids,
                 ..
             } => {
                 snapshot.committed_hashes.insert(hash.clone());
                 snapshot.committed_ids.insert(hash, verthys_id);
+                match chunk_ids {
+                    Some(ids) => {
+                        for chunk_id in ids {
+                            snapshot.committed_chunk_owners.insert(chunk_id, verthys_id);
+                        }
+                    }
+                    // 历史条目未携带引用集合：归属无从推断，标记为不可结算，
+                    // 由结算路径对台账孤儿候选执行冻结
+                    None => snapshot.has_unsettleable_commits = true,
+                }
                 snapshot.active_import_id = Some(import_id);
             }
             WalEntry::Checkpoint {
@@ -385,10 +484,15 @@ fn load_from_path(path: &Path) -> Result<WalSnapshot, String> {
                 snapshot.active_import_id = Some(import_id);
             }
             WalEntry::Removed { hashes, .. } => {
-                // 删除墓碑：从去重集合移除（删除后可重新导入语义）
+                // 删除墓碑：从去重集合移除（删除后可重新导入语义），并撤销
+                // 该记录声明过的块归属，避免把已删除记录的块结算成有效归属
                 for hash in &hashes {
+                    if let Some(owner_id) = snapshot.committed_ids.remove(hash) {
+                        snapshot
+                            .committed_chunk_owners
+                            .retain(|_, owner| *owner != owner_id);
+                    }
                     snapshot.committed_hashes.remove(hash);
-                    snapshot.committed_ids.remove(hash);
                 }
             }
             WalEntry::End { .. } => {
@@ -403,22 +507,101 @@ fn load_from_path(path: &Path) -> Result<WalSnapshot, String> {
 
 /// 加载给定 verthys 路径对应的 WAL 快照（恢复入口）
 pub fn load(verthys_path: &str) -> Result<WalSnapshot, String> {
-    let path = wal_path_for(verthys_path);
+    let path = resolve_wal_path(verthys_path);
     load_from_path(&path)
 }
 
-/// 删除 WAL 文件（导入彻底完成且无需续传去重时调用）
-pub fn remove(verthys_path: &str) -> Result<(), String> {
-    let path = wal_path_for(verthys_path);
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| format!("WAL 删除失败: {}", e))?;
+/// 台账结算统计（用于日志与断言，不参与分支判定）
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SettlementOutcome {
+    /// 本次真正改写归属的块记录数
+    pub settled: u64,
+    /// 本次被冻结（归属不可证明）的块记录数
+    pub frozen: u64,
+}
+
+impl SettlementOutcome {
+    /// 是否产生了台账变更；无变更时调用方无需重写台账文件
+    pub fn changed(&self) -> bool {
+        self.settled > 0 || self.frozen > 0
     }
+}
+
+/// 把 WAL 快照中的块归属声明应用到台账（纯内存变换，不落盘）
+///
+/// 两条规则：
+///   1. 显式声明过引用集合的条目：把其块记录的归属改写为对应记录 ID；
+///   2. 存在引用集合不可推断的历史条目时：台账中仍为孤儿候选的条目一律冻结
+///      —— 它们可能被已提交记录引用，只是无从证明，宁可永久保留也不误删。
+fn apply_settlement(
+    snapshot: &WalSnapshot,
+    ledger: &mut crate::repository::verthys_chunks::ChunkLedger,
+) -> SettlementOutcome {
+    let mut outcome = SettlementOutcome::default();
+
+    for (chunk_id, owner_id) in &snapshot.committed_chunk_owners {
+        if ledger.owner_of(*chunk_id) != Some(*owner_id) {
+            ledger.set_owner(*chunk_id, *owner_id);
+            outcome.settled += 1;
+        }
+    }
+
+    if snapshot.has_unsettleable_commits {
+        for chunk_id in ledger.garbage_ids() {
+            ledger.set_owner(
+                chunk_id,
+                crate::repository::verthys_chunks::UNVERIFIABLE_OWNER,
+            );
+            outcome.frozen += 1;
+        }
+    }
+
+    outcome
+}
+
+/// 结算块归属并落盘（孤儿回收前的守卫入口）
+///
+/// 存在这样的崩溃窗口：记录已提交，而台账尚未把块归属从「孤儿候选」改写
+/// 为拥有者；此时直接按台账回收，会删掉仍被已提交记录引用的块。本函数以
+/// WAL 中的归属声明为权威重建台账，对无法证明归属的历史条目执行冻结，
+/// 保证回收面绝不扩大。
+///
+/// 台账落盘失败向上传播为 Err：调用方必须放弃本次回收（保守不删）。
+pub fn settle_chunk_owners(verthys_path: &str) -> Result<SettlementOutcome, String> {
+    let snapshot = load(verthys_path)?;
+    let mut ledger = crate::repository::verthys_chunks::load_chunk_ledger(verthys_path)?;
+    let outcome = apply_settlement(&snapshot, &mut ledger);
+    if outcome.changed() {
+        crate::repository::verthys_chunks::save_chunk_ledger(verthys_path, &ledger)?;
+    }
+    Ok(outcome)
+}
+
+/// 删除 WAL 文件（导入彻底完成且无需续传去重时调用）
+///
+/// 新布局与旧布局两处 WAL 及其临时文件一并清理（总清）；快照保留
+/// （去重基线仍由快照承载），与既有语义一致。
+pub fn remove(verthys_path: &str) -> Result<(), String> {
+    let primary = container_layout::wal_file_for(verthys_path);
+    remove_file_if_exists(&primary, "WAL")?;
+    remove_file_if_exists(
+        &PathBuf::from(format!("{}.tmp", primary.to_string_lossy())),
+        "WAL 临时文件",
+    )?;
+
+    let legacy = container_layout::legacy_wal_file_for(verthys_path);
+    remove_file_if_exists(&legacy, "旧布局 WAL")?;
+    remove_file_if_exists(
+        &PathBuf::from(format!("{}.tmp", legacy.to_string_lossy())),
+        "旧布局 WAL 临时文件",
+    )?;
     Ok(())
 }
 
-/// 判断 WAL 文件是否存在（用于决定是否触发恢复流程）
+/// 判断 WAL 文件是否存在（新布局与旧布局任一命中，用于决定是否触发恢复流程）
 pub fn exists(verthys_path: &str) -> bool {
-    wal_path_for(verthys_path).exists()
+    container_layout::wal_file_for(verthys_path).exists()
+        || container_layout::legacy_wal_file_for(verthys_path).exists()
 }
 
 /// 追加删除墓碑（照片删除后释放去重锁，删除后可重新导入）。
@@ -431,7 +614,7 @@ pub fn append_removed(verthys_path: &str, hashes: &[String]) -> Result<(), Strin
     if hashes.is_empty() {
         return Ok(());
     }
-    let path = wal_path_for(verthys_path);
+    let path = resolve_wal_path(verthys_path);
     if !path.exists() {
         return Ok(());
     }
@@ -452,15 +635,37 @@ pub fn append_removed(verthys_path: &str, hashes: &[String]) -> Result<(), Strin
 }
 
 /// 删除 WAL 与快照文件（开发用重置入口：清空续传去重状态）
+///
+/// 新布局与旧布局两处一并清理，尾部回收空目录（仅当目录内无其他附属数据）。
 pub fn remove_all(verthys_path: &str) -> Result<(), String> {
-    let path = wal_path_for(verthys_path);
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| format!("WAL 删除失败: {}", e))?;
-    }
-    let snap = snapshot_path_for(&path);
-    if snap.exists() {
-        std::fs::remove_file(&snap).map_err(|e| format!("WAL 快照删除失败: {}", e))?;
-    }
+    let primary = container_layout::wal_file_for(verthys_path);
+    remove_file_if_exists(&primary, "WAL")?;
+    remove_file_if_exists(
+        &PathBuf::from(format!("{}.tmp", primary.to_string_lossy())),
+        "WAL 临时文件",
+    )?;
+    let snap = snapshot_path_for(&primary);
+    remove_file_if_exists(&snap, "WAL 快照")?;
+    remove_file_if_exists(
+        &PathBuf::from(format!("{}.tmp", snap.to_string_lossy())),
+        "WAL 快照临时文件",
+    )?;
+
+    let legacy = container_layout::legacy_wal_file_for(verthys_path);
+    remove_file_if_exists(&legacy, "旧布局 WAL")?;
+    remove_file_if_exists(
+        &PathBuf::from(format!("{}.tmp", legacy.to_string_lossy())),
+        "旧布局 WAL 临时文件",
+    )?;
+    let legacy_snap = container_layout::legacy_wal_snapshot_file_for(verthys_path);
+    remove_file_if_exists(&legacy_snap, "旧布局 WAL 快照")?;
+    remove_file_if_exists(
+        &PathBuf::from(format!("{}.tmp", legacy_snap.to_string_lossy())),
+        "旧布局 WAL 快照临时文件",
+    )?;
+
+    let _ =
+        container_layout::remove_dir_if_empty(&container_layout::sidecar_dir_for(verthys_path));
     Ok(())
 }
 
@@ -499,11 +704,20 @@ pub struct ImportSession {
     /// 创建会话时从台账文件加载（缺失即空），随块上传/meta 入库在写者
     /// 线程内维护并落盘；孤儿块 GC 依据该映射判定可回收对象。
     pub chunk_ledger: crate::repository::verthys_chunks::ChunkLedger,
+    /// 本会话内台账是否曾落盘失败
+    ///
+    /// 仅供诊断与日志：会话成功结束时无条件重试落盘，失败即拒绝结束并保留
+    /// WAL，因此该标志不参与任何分支判定。
+    pub ledger_dirty: bool,
 }
 
 impl ImportSession {
     /// 创建新会话：初始化 WAL + 从既有快照恢复 committed_hashes（续传去重）
     /// 并加载外置块台账（缺失即空，损坏则向上传播失败）。
+    ///
+    /// 建会话前必须完成台账结算：把上一会话已提交记录的块归属写回台账，
+    /// 冻结无法证明归属的历史条目。结算落盘失败即会话创建失败——绝不允许
+    /// 在「台账可能把已被引用的块判成孤儿」的状态下开始新一轮写入。
     pub fn new(verthys_path: &str, import_id: &str) -> Result<Self, String> {
         // 先加载既有 WAL 快照（若存在遗留 WAL，恢复 committed_hashes 实现续传去重）
         let snapshot = load(verthys_path)?;
@@ -512,7 +726,19 @@ impl ImportSession {
 
         // 加载外置块台账（在截断 WAL 之前：台账损坏时直接失败，避免已截断
         // WAL 却未能建立会话的半成品状态）
-        let chunk_ledger = crate::repository::verthys_chunks::load_chunk_ledger(verthys_path)?;
+        let mut chunk_ledger = crate::repository::verthys_chunks::load_chunk_ledger(verthys_path)?;
+
+        // 台账结算（必须在截断 WAL 之前）：此时快照仍能读到上一会话的全部
+        // 归属声明；一旦 WAL 被截断，未结算的归属将永久失去证明来源
+        let settlement = apply_settlement(&snapshot, &mut chunk_ledger);
+        if settlement.changed() {
+            crate::repository::verthys_chunks::save_chunk_ledger(verthys_path, &chunk_ledger)?;
+            log::info!(
+                "[import_session] 台账结算完成: 归属改写={} 冻结={}",
+                settlement.settled,
+                settlement.frozen
+            );
+        }
 
         // 创建/截断 WAL（新会话起始；遗留 pending 记录已被快照忽略，仅 committed 进入去重集合）
         let writer = WalWriter::create(verthys_path, import_id)?;
@@ -524,7 +750,7 @@ impl ImportSession {
         // 照片删除后重新导入被静默全部跳过（去重锁未释放）。
         // 不变量：快照文件恒为「当前 WAL 首条目之前全部历史」的合并结果。
         // 载入结果 snapshot 即该合并结果（hashes / committed_ids / 计数均已收敛）。
-        write_snapshot_file(&wal_path_for(verthys_path), &snapshot)?;
+        write_snapshot_file(&container_layout::wal_file_for(verthys_path), &snapshot)?;
 
         Ok(ImportSession {
             writer,
@@ -537,6 +763,7 @@ impl ImportSession {
             chunk_ids_by_hash: HashMap::new(),
             issued_chunk_ids: HashSet::new(),
             chunk_ledger,
+            ledger_dirty: false,
         })
     }
 
@@ -609,6 +836,26 @@ mod tests {
         dir.join("test.verthys").to_string_lossy().to_string()
     }
 
+    /// 台账落盘临时文件路径；把该路径占为目录即可令落盘确定性失败
+    fn ledger_tmp_path(verthys_path: &str) -> PathBuf {
+        let mut p = container_layout::chunk_ledger_file_for(verthys_path);
+        let mut name = p.file_name().map(|s| s.to_os_string()).unwrap_or_default();
+        name.push(".tmp");
+        p.set_file_name(name);
+        p
+    }
+
+    /// 新布局 WAL 路径（测试直读写用；先确保附属目录存在）
+    fn wal_file(verthys_path: &str) -> PathBuf {
+        let _ = container_layout::ensure_sidecar_dir(verthys_path);
+        container_layout::wal_file_for(verthys_path)
+    }
+
+    /// 手写 WAL 文本（用于构造携带/缺省引用集合的历史条目）
+    fn write_wal_text(verthys_path: &str, text: &str) {
+        std::fs::write(wal_file(verthys_path), text).unwrap();
+    }
+
     #[test]
     fn test_wal_create_append_commit() {
         let dir = tempdir().unwrap();
@@ -631,6 +878,7 @@ mod tests {
                 hash: "abc".into(),
                 verthys_id: 42,
                 name: "a.jpg".into(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         writer.finish("imp-1", true).unwrap();
@@ -664,6 +912,7 @@ mod tests {
                 hash: "ok".into(),
                 verthys_id: 7,
                 name: "c.jpg".into(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         // 不调用 finish，模拟崩溃
@@ -692,6 +941,7 @@ mod tests {
                 hash: "h1".into(),
                 verthys_id: 1,
                 name: "x".into(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         writer.finish("imp-3", true).unwrap();
@@ -723,6 +973,7 @@ mod tests {
                     hash: format!("h{}", i),
                     verthys_id: 100 + i,
                     name: format!("f{}", i),
+                    chunk_ids: Some(Vec::new()),
                 })
                 .unwrap();
         }
@@ -776,7 +1027,7 @@ mod tests {
         writer.flush_sync().unwrap();
         drop(writer);
 
-        let text = std::fs::read_to_string(wal_path_for(&verthys_path)).unwrap();
+        let text = std::fs::read_to_string(wal_file(&verthys_path)).unwrap();
         assert_eq!(text.lines().count(), 3, "begin + 2 条 pending 应全部落盘");
 
         let snap = load(&verthys_path).unwrap();
@@ -798,6 +1049,7 @@ mod tests {
                 hash: "h1".into(),
                 verthys_id: 5,
                 name: "a.jpg".into(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         writer.finish("imp-r", true).unwrap();
@@ -832,12 +1084,13 @@ mod tests {
                 hash: "hs".into(),
                 verthys_id: 9,
                 name: "s.jpg".into(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         writer.finish("imp-s", true).unwrap();
 
         // WAL 文件被移除（模拟外部清理/损坏），快照仍提供去重集合
-        std::fs::remove_file(wal_path_for(&verthys_path)).unwrap();
+        std::fs::remove_file(wal_file(&verthys_path)).unwrap();
         let snap = load(&verthys_path).unwrap();
         assert!(snap.committed_hashes.contains("hs"));
         assert_eq!(snap.committed_ids.get("hs"), Some(&9));
@@ -900,6 +1153,7 @@ mod tests {
                 hash: "h1".into(),
                 verthys_id: 1,
                 name: String::new(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         writer
@@ -909,6 +1163,7 @@ mod tests {
                 hash: "h2".into(),
                 verthys_id: 2,
                 name: String::new(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         writer
@@ -929,6 +1184,7 @@ mod tests {
                 hash: "h3".into(),
                 verthys_id: 3,
                 name: String::new(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         writer
@@ -966,6 +1222,7 @@ mod tests {
                     hash: format!("h{}", i),
                     verthys_id: 100 + i,
                     name: String::new(),
+                    chunk_ids: Some(Vec::new()),
                 })
                 .unwrap();
         }
@@ -978,7 +1235,7 @@ mod tests {
             .unwrap();
         writer.finish("imp-m", true).unwrap();
 
-        let wal_text = std::fs::read_to_string(wal_path_for(&verthys_path)).unwrap();
+        let wal_text = std::fs::read_to_string(wal_file(&verthys_path)).unwrap();
         let line_count = wal_text.lines().count();
         assert!(
             line_count < 10,
@@ -1005,6 +1262,7 @@ mod tests {
                 hash: "keep".into(),
                 verthys_id: 1,
                 name: String::new(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         writer
@@ -1014,6 +1272,7 @@ mod tests {
                 hash: "gone".into(),
                 verthys_id: 2,
                 name: String::new(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         writer
@@ -1053,6 +1312,7 @@ mod tests {
                 hash: "keep".into(),
                 verthys_id: 1,
                 name: String::new(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         writer
@@ -1062,6 +1322,7 @@ mod tests {
                 hash: "gone".into(),
                 verthys_id: 2,
                 name: String::new(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         writer
@@ -1104,6 +1365,7 @@ mod tests {
                 hash: "fresh".into(),
                 verthys_id: 3,
                 name: String::new(),
+                chunk_ids: Some(Vec::new()),
             })
             .unwrap();
         session.writer.finish("imp-c", true).unwrap();
@@ -1115,5 +1377,198 @@ mod tests {
             !snap.committed_hashes.contains("gone"),
             "墓碑必须跨会话创建持久化（成功压缩路径）"
         );
+    }
+
+    #[test]
+    fn test_committed_chunk_ids_accumulate_and_legacy_marked() {
+        // 显式声明引用集合的条目累积归属；字段缺省的历史条目标记为不可结算
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+        write_wal_text(
+            &verthys_path,
+            concat!(
+                "{\"kind\":\"begin\",\"import_id\":\"imp-x\",\"ts\":1}\n",
+                "{\"kind\":\"committed\",\"import_id\":\"imp-x\",\"batch_id\":1,",
+                "\"hash\":\"legacy\",\"verthys_id\":11,\"name\":\"a.jpg\"}\n",
+                "{\"kind\":\"committed\",\"import_id\":\"imp-x\",\"batch_id\":1,",
+                "\"hash\":\"fresh\",\"verthys_id\":22,\"name\":\"b.jpg\",\"chunk_ids\":[7,8]}\n"
+            ),
+        );
+
+        let snap = load(&verthys_path).unwrap();
+        assert_eq!(snap.committed_chunk_owners.get(&7), Some(&22));
+        assert_eq!(snap.committed_chunk_owners.get(&8), Some(&22));
+        assert!(snap.has_unsettleable_commits, "历史条目应标记为不可结算");
+    }
+
+    #[test]
+    fn test_settle_chunk_owners_applies_and_freezes() {
+        // 已被声明的块归属改写为记录 ID；无法证明归属的孤儿候选冻结
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let mut ledger = crate::repository::verthys_chunks::ChunkLedger::default();
+        ledger.set_owner(7, 0);
+        ledger.set_owner(9, 0);
+        crate::repository::verthys_chunks::save_chunk_ledger(&verthys_path, &ledger).unwrap();
+
+        write_wal_text(
+            &verthys_path,
+            concat!(
+                "{\"kind\":\"begin\",\"import_id\":\"imp-y\",\"ts\":1}\n",
+                "{\"kind\":\"committed\",\"import_id\":\"imp-y\",\"batch_id\":1,",
+                "\"hash\":\"legacy\",\"verthys_id\":11,\"name\":\"a.jpg\"}\n",
+                "{\"kind\":\"committed\",\"import_id\":\"imp-y\",\"batch_id\":1,",
+                "\"hash\":\"fresh\",\"verthys_id\":33,\"name\":\"b.jpg\",\"chunk_ids\":[7]}\n"
+            ),
+        );
+
+        let outcome = settle_chunk_owners(&verthys_path).unwrap();
+        assert_eq!(outcome.settled, 1, "块 7 的归属应被改写");
+        assert_eq!(outcome.frozen, 1, "块 9 应被冻结");
+
+        let reloaded = crate::repository::verthys_chunks::load_chunk_ledger(&verthys_path).unwrap();
+        assert_eq!(reloaded.owner_of(7), Some(33));
+        assert_eq!(
+            reloaded.owner_of(9),
+            Some(crate::repository::verthys_chunks::UNVERIFIABLE_OWNER)
+        );
+        assert!(reloaded.garbage_ids().is_empty(), "结算后不得再有回收候选");
+
+        let again = settle_chunk_owners(&verthys_path).unwrap();
+        assert!(!again.changed(), "重复结算应为无变更");
+    }
+
+    #[test]
+    fn test_settle_chunk_owners_failure_propagates() {
+        // 台账落盘通道被占时结算必须失败，不得静默跳过
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let mut ledger = crate::repository::verthys_chunks::ChunkLedger::default();
+        ledger.set_owner(7, 0);
+        crate::repository::verthys_chunks::save_chunk_ledger(&verthys_path, &ledger).unwrap();
+
+        write_wal_text(
+            &verthys_path,
+            concat!(
+                "{\"kind\":\"begin\",\"import_id\":\"imp-z\",\"ts\":1}\n",
+                "{\"kind\":\"committed\",\"import_id\":\"imp-z\",\"batch_id\":1,",
+                "\"hash\":\"fresh\",\"verthys_id\":44,\"name\":\"c.jpg\",\"chunk_ids\":[7]}\n"
+            ),
+        );
+
+        let tmp_dir = ledger_tmp_path(&verthys_path);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        assert!(
+            settle_chunk_owners(&verthys_path).is_err(),
+            "落盘失败必须向上传播"
+        );
+        std::fs::remove_dir_all(&tmp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_import_session_settles_before_wal_truncation() {
+        // 建会话先结算并落盘，随后才截断 WAL；归属不会因截断而失去证明
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let mut ledger = crate::repository::verthys_chunks::ChunkLedger::default();
+        ledger.set_owner(7, 0);
+        crate::repository::verthys_chunks::save_chunk_ledger(&verthys_path, &ledger).unwrap();
+
+        write_wal_text(
+            &verthys_path,
+            concat!(
+                "{\"kind\":\"begin\",\"import_id\":\"imp-s1\",\"ts\":1}\n",
+                "{\"kind\":\"committed\",\"import_id\":\"imp-s1\",\"batch_id\":1,",
+                "\"hash\":\"h\",\"verthys_id\":55,\"name\":\"d.jpg\",\"chunk_ids\":[7]}\n"
+            ),
+        );
+
+        let session = ImportSession::new(&verthys_path, "imp-s2").unwrap();
+        assert_eq!(session.chunk_ledger.owner_of(7), Some(55));
+        drop(session);
+
+        let reloaded = crate::repository::verthys_chunks::load_chunk_ledger(&verthys_path).unwrap();
+        assert_eq!(reloaded.owner_of(7), Some(55), "结算结果必须落盘");
+    }
+
+    #[test]
+    fn test_import_session_refuses_when_settlement_persist_fails() {
+        // 结算落盘失败时会话创建失败，且不得截断 WAL（归属声明不可丢）
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let mut ledger = crate::repository::verthys_chunks::ChunkLedger::default();
+        ledger.set_owner(7, 0);
+        crate::repository::verthys_chunks::save_chunk_ledger(&verthys_path, &ledger).unwrap();
+
+        write_wal_text(
+            &verthys_path,
+            concat!(
+                "{\"kind\":\"begin\",\"import_id\":\"imp-s3\",\"ts\":1}\n",
+                "{\"kind\":\"committed\",\"import_id\":\"imp-s3\",\"batch_id\":1,",
+                "\"hash\":\"h\",\"verthys_id\":66,\"name\":\"e.jpg\",\"chunk_ids\":[7]}\n"
+            ),
+        );
+
+        let tmp_dir = ledger_tmp_path(&verthys_path);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        assert!(ImportSession::new(&verthys_path, "imp-s4").is_err());
+        std::fs::remove_dir_all(&tmp_dir).unwrap();
+
+        let wal_after = std::fs::read_to_string(wal_file(&verthys_path)).unwrap();
+        assert!(
+            wal_after.contains("imp-s3"),
+            "会话创建失败时 WAL 必须保持原样（含归属声明）"
+        );
+    }
+
+    #[test]
+    fn test_legacy_wal_and_snapshot_migrated_on_read() {
+        // 旧布局 WAL + 快照在首次读取时被原子搬迁到附属目录
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let legacy_wal = container_layout::legacy_wal_file_for(&verthys_path);
+        std::fs::write(
+            &legacy_wal,
+            "{\"kind\":\"begin\",\"import_id\":\"imp-l\",\"ts\":1}\n",
+        )
+        .unwrap();
+        let mut baseline = WalSnapshot::default();
+        baseline.committed_hashes.insert("hl".to_string());
+        baseline.committed_ids.insert("hl".to_string(), 11);
+        write_snapshot_file(&legacy_wal, &baseline).unwrap();
+
+        let snap = load(&verthys_path).unwrap();
+        assert!(snap.committed_hashes.contains("hl"));
+        assert_eq!(snap.committed_ids.get("hl"), Some(&11));
+
+        assert!(!legacy_wal.exists(), "旧布局 WAL 必须被搬走");
+        assert!(
+            !container_layout::legacy_wal_snapshot_file_for(&verthys_path).exists(),
+            "旧布局快照必须被搬走"
+        );
+        assert!(container_layout::wal_file_for(&verthys_path).exists());
+        assert!(container_layout::wal_snapshot_file_for(&verthys_path).exists());
+    }
+
+    #[test]
+    fn test_create_recycles_legacy_after_truncate() {
+        // 会话创建截断 WAL 后，旧布局 WAL 与快照被回收（去重集合已载入内存）
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+        let legacy_wal = container_layout::legacy_wal_file_for(&verthys_path);
+        let legacy_snap = container_layout::legacy_wal_snapshot_file_for(&verthys_path);
+        std::fs::write(&legacy_wal, "stale").unwrap();
+        std::fs::write(&legacy_snap, "stale").unwrap();
+
+        let _writer = WalWriter::create(&verthys_path, "imp-c").unwrap();
+
+        assert!(!legacy_wal.exists(), "旧布局 WAL 必须被回收");
+        assert!(!legacy_snap.exists(), "旧布局快照必须被回收");
+        assert!(container_layout::wal_file_for(&verthys_path).exists());
     }
 }

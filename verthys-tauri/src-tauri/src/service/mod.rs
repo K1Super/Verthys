@@ -16,3 +16,6 @@ pub mod verthys_service;
 
 /* 口令类入口暴力熔断的服务层契约（依赖反转：实现由 security_commands 注册） */
 pub mod unlock_gate;
+
+/* 解锁期受信档位的服务层契约（依赖反转：实现由 security_commands 注册） */
+pub mod preset_source;

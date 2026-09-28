@@ -1,5 +1,5 @@
 /*
- * verthys_warmcache_v3.c — V3 温启动缓存（.verthys.idx_cache，'V3IC' 格式）
+ * verthys_warmcache_v3.c — V3 温启动缓存（附属目录 <容器>.d/idx_cache，'V3IC' 格式）
  *
  * 失败语义（红线）：温缓存为持久化优化，非数据正确性依赖——
  * 读取路径任何失败（不存在/超限/magic 不符/HMAC 不符/解密失败）一律
@@ -89,7 +89,7 @@ static int v3ic_ct_equal(const uint8_t *a, const uint8_t *b, size_t len)
     return diff == 0;
 }
 
-/* ---------- 路径构建（verthys_path + ".idx_cache"，UTF-8 → 宽字符） ---------- */
+/* ---------- 路径构建（附属目录，UTF-8 → 宽字符） ---------- */
 
 static wchar_t *v3ic_utf8_to_wide(const char *s)
 {
@@ -105,19 +105,57 @@ static wchar_t *v3ic_utf8_to_wide(const char *s)
     return w;
 }
 
-static wchar_t *v3ic_build_path_w(const char *verthys_path)
+/* 拼接 verthys_path + suffix 后转宽字符（suffix 指针参数仅在本文件内使用） */
+static wchar_t *v3ic_build_concat_w(const char *verthys_path, const char *suffix)
 {
-    if (verthys_path == NULL) return NULL;
+    if (verthys_path == NULL || suffix == NULL) return NULL;
     size_t plen = strlen(verthys_path);
-    size_t slen = strlen(VERTHYS_V3IC_SUFFIX);
+    size_t slen = strlen(suffix);
     char *path = (char *)malloc(plen + slen + 1);
     if (path == NULL) return NULL;
     memcpy(path, verthys_path, plen);
-    memcpy(path + plen, VERTHYS_V3IC_SUFFIX, slen + 1);
+    memcpy(path + plen, suffix, slen + 1);
     wchar_t *w = v3ic_utf8_to_wide(path);
     verthys_secure_zero(path, plen + slen + 1);
     free(path);
     return w;
+}
+
+/* 附属目录：<verthys_path>.d */
+static wchar_t *v3ic_build_dir_w(const char *verthys_path)
+{
+    return v3ic_build_concat_w(verthys_path, VERTHYS_V3IC_DIR_SUFFIX);
+}
+
+/* 权威缓存路径：<verthys_path>.d\idx_cache */
+static wchar_t *v3ic_build_path_w(const char *verthys_path)
+{
+    return v3ic_build_concat_w(verthys_path,
+                               VERTHYS_V3IC_DIR_SUFFIX VERTHYS_V3IC_CACHE_FILE);
+}
+
+/* 旧布局缓存路径：<verthys_path>.idx_cache（只读回退与回收） */
+static wchar_t *v3ic_build_legacy_path_w(const char *verthys_path)
+{
+    return v3ic_build_concat_w(verthys_path, VERTHYS_V3IC_LEGACY_SUFFIX);
+}
+
+/* 旧布局缓存临时文件路径：<verthys_path>.idx_cache.tmp（崩溃残留回收） */
+static wchar_t *v3ic_build_legacy_tmp_path_w(const char *verthys_path)
+{
+    return v3ic_build_concat_w(verthys_path, VERTHYS_V3IC_LEGACY_TMP_SUFFIX);
+}
+
+/* 确保附属目录存在（best-effort：已存在视为成功，其余失败上抛由调用方降级） */
+static VerthysResult v3ic_ensure_dir_w(const char *verthys_path)
+{
+    wchar_t *wdir = v3ic_build_dir_w(verthys_path);
+    if (wdir == NULL) return VERTHYS_ERR_IO;
+    BOOL created = CreateDirectoryW(wdir, NULL);
+    DWORD err = created ? ERROR_SUCCESS : GetLastError();
+    free(wdir);
+    if (created || err == ERROR_ALREADY_EXISTS) return VERTHYS_OK;
+    return VERTHYS_ERR_IO;
 }
 
 /* ---------- AEAD 段加密 / 解密（派生缓存密钥，私有上下文） ---------- */
@@ -182,6 +220,15 @@ VerthysResult verthys_warmcache_v3_try_load(const char *verthys_path,
 
     HANDLE h = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        /* 附属目录未命中：回退旧布局（尚未迁移时的温启动兜底），
+         * 迁移由保存路径完成（save 成功后回收旧布局文件） */
+        free(wpath);
+        wpath = v3ic_build_legacy_path_w(verthys_path);
+        if (wpath == NULL) return VERTHYS_OK;
+        h = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
     free(wpath);
     if (h == INVALID_HANDLE_VALUE) return VERTHYS_OK;   /* 不存在 = miss */
 
@@ -398,6 +445,11 @@ VerthysResult verthys_warmcache_v3_save(const char *verthys_path,
     }
     size_t file_len = VERTHYS_V3IC_HEADER_BYTES + mt_ct_len + sst_ct_len;
 
+    /* 附属目录保障：创建失败即降级（调用方忽略返回，缓存写失败=冷启动） */
+    if (v3ic_ensure_dir_w(verthys_path) != VERTHYS_OK) {
+        return VERTHYS_ERR_IO;
+    }
+
     wchar_t *wpath = v3ic_build_path_w(verthys_path);
     if (wpath == NULL) return VERTHYS_ERR_IO;
 
@@ -519,6 +571,20 @@ VerthysResult verthys_warmcache_v3_save(const char *verthys_path,
         goto fail;
     }
 
+    /* 旧布局回收：新布局已落定，best-effort 清除旧缓存与旧残留临时文件 */
+    {
+        wchar_t *wlegacy = v3ic_build_legacy_path_w(verthys_path);
+        if (wlegacy != NULL) {
+            DeleteFileW(wlegacy);
+            free(wlegacy);
+        }
+        wchar_t *wlegacy_tmp = v3ic_build_legacy_tmp_path_w(verthys_path);
+        if (wlegacy_tmp != NULL) {
+            DeleteFileW(wlegacy_tmp);
+            free(wlegacy_tmp);
+        }
+    }
+
     verthys_secure_zero(buf, file_len);
     free(buf);
     free(wtmp);
@@ -548,5 +614,19 @@ VerthysResult verthys_warmcache_v3_delete(const char *verthys_path)
         return VERTHYS_ERR_IO;
     }
     free(wpath);
+
+    /* 旧布局一并回收（best-effort：残留无害，不得让清理本身失败） */
+    {
+        wchar_t *wlegacy = v3ic_build_legacy_path_w(verthys_path);
+        if (wlegacy != NULL) {
+            DeleteFileW(wlegacy);
+            free(wlegacy);
+        }
+        wchar_t *wlegacy_tmp = v3ic_build_legacy_tmp_path_w(verthys_path);
+        if (wlegacy_tmp != NULL) {
+            DeleteFileW(wlegacy_tmp);
+            free(wlegacy_tmp);
+        }
+    }
     return VERTHYS_OK;
 }

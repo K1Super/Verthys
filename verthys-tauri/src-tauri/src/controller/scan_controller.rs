@@ -72,16 +72,30 @@ fn get_audit_log_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     }
 }
 
-/// 获取审计日志 HMAC 密钥（设备指纹派生）
+/// 审计 HMAC 密钥的进程内缓存（仅缓存成功结果：采集/派生瞬时失败不占缓存，
+/// 下次写入仍可自愈重试）。
+static AUDIT_HMAC_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+/// 从设备指纹派生审计 HMAC 密钥（进程内派生一次后复用）。
+///
+/// 派生含 10 万次 PBKDF2；逐次重派生会让连续审计操作产生可感延迟，
+/// 故与其余审计调用点统一走进程内缓存。
 fn get_audit_hmac_key() -> Option<[u8; 32]> {
     use crate::infrastructure::device_fingerprint::get_device_fingerprint;
     use crate::util::crypto::pbkdf2_derive_default;
+
+    if let Some(key) = AUDIT_HMAC_KEY.get() {
+        return Some(*key);
+    }
 
     match get_device_fingerprint() {
         Ok(fingerprint) => {
             const AUDIT_SALT: &[u8] = b"verthys_audit_log_hmac_salt_v1";
             match pbkdf2_derive_default(fingerprint.as_bytes(), AUDIT_SALT) {
-                Ok(key) => Some(key),
+                Ok(key) => {
+                    let _ = AUDIT_HMAC_KEY.set(key);
+                    Some(key)
+                }
                 Err(e) => {
                     log::warn!("[audit] 派生 HMAC 密钥失败，跳过审计写入: {}", e);
                     None

@@ -1439,3 +1439,1331 @@ repository / util / constants）以依赖反转根治，消除架构性反向引
    整改（用户未提出，暂不动）；本轮已顺带调整其文案与入口——占位文案
    精简为「请选择 .venc 文件」「请输入密钥」，文字「浏览」改为打开文件
    图标钮（正方形居中，悬浮提示「打开文件」）。
+
+### 2026-09-28 Wave 48：总修复方案落地（回灌契约 / 常量唯一化 / 完整性下沉 / 门禁机械化）
+
+依据：《总修复方案》（审查产出的统一执行文档）。承接 Wave 38-47 的主体修复，
+只收敛残余缺陷、接缝缺口与纪律破口；无数据模型变更、无数据迁移。
+
+#### 变更点
+
+1. **回灌契约与瘦身布局接缝闭合**：`rehydrateEntries` 的「已加载」与「具备可渲染的缩略图来源」
+   绑定——瘦身布局且带缩略图引用（`isSlimPhotoMeta`）的项回到待解密态，由可视区按引用回填；
+   重建器存在且内联缩略图为空时置空（不保留上一会话已释放的陈旧地址）。
+2. **跨层常量唯一化**：
+   - flush 服务的重试次数 / 退避 / 落盘自查超时改为消费生成常量；自查加超时包裹
+     （超时按可重试失败处理，与 IO 失败的恢复动作一致）；
+   - schema 新增 `write_file_chunk_bytes` / `max_export_single_bytes`；生成器发射
+     TS `PHOTO_MAX_BYTES` / `MAX_EXPORT_SINGLE_BYTES` 与 Rust `PB_MAX_RECORD_NAME_BYTES` /
+     `PB_WRITE_FILE_CHUNK_BYTES` / `PB_MAX_EXPORT_SINGLE_BYTES`；
+   - Rust 侧移除无消费者的前端语义发射（`PB_FLUSH_*` / `PB_SESSION_*`）；
+   - 调用点接线：Rust `constants.rs`（记录名 / 导出分片 / 导出上限）、前端 `crypto_const`
+     再导出、单文件导出入口按预估总量前置拦截；
+   - 生成器不变式 13 → 15 条（新增导出分片上限与单文件上限关系两条）。
+3. **完整性校验下沉**：`decrypt_chunks` 协议新增可选 `expectedHashes` / `expectedFileHash`；
+   Worker 解密前逐块校验密文哈希、解密后按序增量比对整图明文哈希，不符即确定性拒绝（不回退重算）；
+   桥接层透传、主线程回退路径保持同等校验标准；查看器主线程只做块数与哈希项数判定；
+   块集解析补齐哈希项数等式；导出 PNG 路径的整图哈希校验随任务下沉（主线程不再做兆字节级同步哈希）。
+4. **读侧错误语义判别化**：新增 `verthysGetRecordDetailed`（判别式 + 归因分类），
+   原函数保留为兼容包装；导出链路的元数据读取迁移到判别式版本。
+5. **机械化门禁**：`run_ci.ps1` 新增「常量消费门」（TS/Rust 清单逐名检查生成物之外的真实消费点）
+   与「导出契约门」（`verthys.def` 与 `export_baseline.txt` 集合比对）；导出基线补齐至 32 符号。
+6. **部署一致性**：清理不在解析路径内的陈旧 worker 副本；声明改为按解析路径枚举校验
+   （构建脚本对打包源与 Tauri target 副本逐一哈希比对）。
+7. **文档同步**：加载方案文档加「状态说明」并按现行实现修订（部署口径、导出契约、进度展示、
+   S2 适用范围、常量表、不变式条数）；需求与架构决策文档的导出符号计数更新为 32。
+
+#### Wave 48 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 常量生成器 | node constants/generate.mjs --check | 一致（15 条不变式） |
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| 前端单测 | npx vitest run | 250 passed（23 文件；新增 10 例：回灌契约 2、flush 行为 2、判别式 3、Worker 校验 2、桥回退校验 1） |
+| 宿主单测 | cargo test --lib（src-tauri） | 372 passed / 0 failed |
+| CI 新门禁 | run_ci.ps1（常量消费门 / 导出契约门） | 本地预演通过（消费清单全命中；32 符号一致） |
+| C 全量套件 | — | 本轮未改 C，沿用上一阶段 308/0 |
+
+#### Wave 48 收尾交接清单
+
+1. **用户实测项（开发模式）**：布局切为瘦身后导入 → 进入拾光 → 切走 → 切回，缩略图自动补齐；
+   大图（10 MB / 100 MB）点击查看无秒级无响应；落盘失败注入后重试与自查超时符合权威值。
+2. **构建与部署**：无 Rust 侧协议改动（解密校验扩展在前端 Worker）；常量接线涉及 Rust 源码
+   （`constants.rs` 与生成物 `photo_budget.rs`），生产打包需重建宿主与 worker，由项目方
+   执行构建脚本（含哈希校验）；`run_ci.ps1` 全流程由项目方执行。
+3. **本波次改动文件**：`photo-album/utils.ts`（+其 spec）/ `cache/domain/verthys-flush-service.ts`
+   （+新增 spec）/ `constants/photo_budget.schema.json` + `constants/generate.mjs` + 两侧生成物 /
+   `constants/crypto_const.ts` / `src-tauri/src/constants.rs` / `usePhotoExport.ts`（+其 spec）/
+   `usePhotoViewer.ts` / `chunk-refs.ts` / `photo-crypto-protocol.ts` / `photo-crypto.worker.ts`
+   （+其 spec）/ `photo-decrypt-bridge.ts`（+其 spec）/ `lib/verthys.ts`（+新增 spec）/
+   `ci/run_ci.ps1` / `ci/export_baseline.txt` / `build_production.ps1`（未改动，核对确认不刷新陈旧副本）；
+   `docs/REQUIREMENTS.md` / `docs/ARCHITECTURE_DECISIONS.md` / 加载方案文档（状态说明与漂移修订）。
+4. **遗留**：无未闭环项；真机验收项由用户执行。
+
+### 2026-09-28 Wave 49：防截屏隐私保护总修复（上传方案评审校正 + 全链路重写）
+
+依据：用户上传的《拾光·防截屏生产方案》。逐条评审后产出唯一执行文档
+[防截屏隐私保护总修复方案.md](./防截屏隐私保护总修复方案.md)（含逐条裁定与
+校正理由），并按其完成施工。核心校正：对账一律全窗口重扫（上传方案按卡死清单
+对账会漏掉「还原成功但从未被保护」的窗口）；过渡被取代时必须释放未决租约
+（上传方案未覆盖）；不做统一窗口工厂（本项目唯一主窗口，配置 `visible:false` +
+启动序列即可，工厂为无消费者的过度设计）；审计改可选扩展块而非格式号迁移
+（保持历史条目序列化字节不变、HMAC 链逐字节兼容）；剪贴板监听剥离回安全档位
+（与捕获排除解耦，故障互不误报）；隐私模式默认开启（上传方案未涉及）。
+
+#### 变更点
+
+1. **底层原语**：新增 `security/window_affinity.rs`——WDA 三常量
+   （NONE/MONITOR/EXCLUDEFROMCAPTURE）、`RtlGetVersion` 版本检测
+   （Win10 19041+ 用排除捕获、旧系统降级监视器亲和性）、原始读
+   （`get_raw_affinity` 回读校验）/写 `set_raw_affinity`、4 单测。
+2. **协调器重写**（`controller/privacy_controller.rs`，约 2390 行含测试）：
+   - 令牌槽位三态（Empty / PendingAdoption / Active）：只存 SHA-256 摘要；
+     校验占位为租约（可重试、世代单调、单租约），提交即消费，释放可重试；
+     采纳即轮换；跨世代校验拒绝陈旧租约；
+   - 状态机单飞：`Transitioning` 变体自带身份号，过渡身份校验兜底——
+     被新变更取代的过渡不得覆盖状态且必须释放未决租约；
+   - 卡死看门狗（30s 阈值）：内联收尸转隔离，不轮询、不阻塞执行器；
+   - 应用原子性：逐窗施加 + 回读校验，任一失败逆序回滚至快照；
+     回滚失败窗口整体隔离（无「部分保护」假象，失败错误码明确）；
+   - 隔离与对账：隔离为纯运行时状态（不持久化）；对账一律全窗口重扫，
+     收敛到目标态后按需轮换令牌；
+   - 意图持久化：`PersistedIntent{schema,enabled,written_at}`，DPAPI 加密 +
+     临时文件原子替换，旧格式一次性重写；解析为纯函数便于单测；
+   - 启动序列：`visible:false` 窗口在保护就绪+回读成功后才显示；还原失败弹
+     原生 `MessageBoxW`（MB_RETRYCANCEL）驱动对账，拒绝则退出不留无界面进程；
+     还原目标缺失（窗口不存在）时如实 log + `exit(0)`；
+   - 四命令：`set_privacy_mode`（开启默认无凭证；关闭/再开启需租约）/
+     `get_privacy_status` / `adopt_privacy_session` / `reconcile_privacy`；
+   - 29 单测（FakeOps / Fake Gate / RecordingSink；覆盖取代路径、看门狗、
+     全窗口重扫断言、意图兼容、回滚失败隔离）。
+3. **限流组件**（`util/rate_limiter.rs`）：`SlidingWindowLimiter::new` 为
+   `const fn`（支持 static 初始化）；拒绝不占额度；按用途分离实例——
+   开启 10/分、关闭 60/分、采纳 10/分、对账 5/分、状态查询不限；4 单测。
+4. **审计扩展块**（`util/audit_log.rs`）：新增 `PrivacyModeChange` /
+   `PrivacyQuarantine` / `PrivacyReconcile` 事件类型（`ClipboardModeChange`
+   标注为历史事件不再产生）；`AuditExtensions`（`is_empty` + 链式 builder）
+   挂为 `AuditEvent.extensions: Option<...>` 且 `skip_serializing_if`——
+   历史条目序列化字节不变、HMAC 链验证逐字节兼容；扩展块篡改检测单测。
+   `security_commands/audit.rs` 提供 `write_audit_with_extensions`（空块不写）。
+5. **剪贴板剥离**：`clipboard_controller.rs` 仅保留 `clear_clipboard`
+   （静态限流 10/分）；外部写入即清空随安全档位启停
+   （`SecurityState::set_clipboard_guard`，启停失败不回滚会话高安全并返回
+   `CLIPBOARD_MONITOR_FAILED`），与防截屏完全解耦。
+6. **启动装配**（`lib.rs`）：setup 最先装配协调器（`app.manage(Arc)`）并执行
+   `startup_engage`；主窗口缺失时 log + `exit(0)`；删除 panic 清零器注册
+   （槽位只存摘要，无敏感驻留可清零）；`tauri.conf.json` 主窗口
+   `"visible": false`。
+7. **前端**：新增 `session/privacy-session.ts` 应用级模块单例（状态 ref /
+   令牌 / 两个单飞 Promise；失败不伪造为关闭）；`PhotoAlbum.vue` 按钮
+   （禁用态 `cursor-not-allowed` + 悬浮提示）、恢复对话框（CosmicOverlay，
+   「稍后处理 / 立即修复」）、错误码→界面映射、`MainView.vue` 最早挂载点
+   采纳；`lib/verthys.ts` 增三命令、删 `restorePrivacyMode`；新增
+   `privacy-session.spec.ts` 7 例（连击单飞、并发采纳、不重复签发、凭证丢失
+   不发 IPC、关闭回传凭证、对账后再采纳）。
+8. **清理**：删除 `security::WindowPrivacyGuard` / `set_window_privacy` /
+   panic 清零器 / `usePhotoPrivacy.ts` / `restore_privacy_mode` 命令与前端
+   包装 / 陈旧注释；AST 基线删除已消除的豁免行。
+9. **文档同步**：`docs/REQUIREMENTS.md` FR-12 按现行实现重写（默认开启、
+   全或无语义、命令集、剪贴板解耦）。
+
+#### Wave 49 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 常量生成器 | node verthys-tauri/constants/generate.mjs --check | 一致 |
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| 前端单测 | npx vitest run | 257 passed（24 文件；新增 7 例 privacy-session） |
+| 宿主单测 | cargo test --lib（src-tauri） | 405 passed / 0 failed（基线 372，+33） |
+| Worker 单测 | cargo test（worker） | 33 passed / 0 failed |
+| CI 全量 | run_ci.ps1 -SkipBuild | 全通过（AST 第二级 0 错误 0 警告） |
+
+#### Wave 49 收尾交接清单
+
+1. **用户实测项（真机验收，开发模式）**：
+   - 首次启动：主窗口出现即受保护——系统截图 / 录屏（Win10 19041+）
+     中窗口区域被排除；旧系统为空白矩形；
+   - 应用内关闭防截屏 → 重启应用 → 不再自动开启（意图持久化）；
+   - 关闭后凭证丢失（重启后直接尝试关闭）→ 界面提示需先修复，不发 IPC；
+   - 关闭失败注入（他人抢改亲和性）→ 按钮可立即重试（租约可重试不消费）；
+   - 还原失败注入 → 启动时出现原生对话框（重试 / 取消），取消则进程退出
+     不显示窗口；重试成功后窗口才显示；
+   - 隔离注入 → 界面出现恢复对话框，「立即修复」触发对账并收敛；
+   - 连击开关十次 → 仅一次 IPC（单飞），计数与状态最终一致。
+2. **构建与部署**：Rust 侧有改动（新模块与命令契约），生产打包需重建宿主；
+   构建脚本与 git 提交由项目方执行（`run_ci.ps1` 全流程亦由项目方复跑），
+   后端已本地预演全绿。
+3. **本波次改动文件**：Rust——`src-tauri/src/security/window_affinity.rs`（新）/
+   `controller/privacy_controller.rs`（新）/ `controller/clipboard_controller.rs`
+   （重写）/ `controller/types.rs` / `util/rate_limiter.rs`（新）/
+   `util/audit_log.rs` / `security/mod.rs` / `security_commands/audit.rs` /
+   `security_commands/state.rs` / `security_commands/commands/session.rs` /
+   `middleware/panic_hook.rs` / `lib.rs` / `tauri.conf.json` / `util/mod.rs` /
+   `controller/mod.rs` / `ci/ast_baseline.txt`；前端——`session/privacy-session.ts`
+   （+ 其 spec）/ `lib/verthys.ts` / `types/verthys.ts` / `bindings/*`（再生成）/
+   `components/modules/PhotoAlbum.vue` / `components/MainView.vue` /
+   `composables/photo-album/usePhotoViewer.ts`（注释）/ 删除 `usePhotoPrivacy.ts`；
+   文档——`docs/RemediationPlan/防截屏隐私保护总修复方案.md`（新）/
+   `docs/REQUIREMENTS.md`。
+4. **遗留**：无未闭环项；上传方案中的「统一窗口工厂」经核实为过度设计不予采纳
+   （本项目配置声明唯一主窗口），若后续引入多窗口需重评启动序列的窗口枚举。
+
+#### Wave 49 增补：全链路复核（核验轮）
+
+在 Wave 49 落地后再次逐链路复核（Rust 启动序列/命令注册、协调器状态机与并发、
+安全原语、审计与剪贴板、前端会话层与集成、契约与 bindings、清理残留、门禁），
+逐行核对实现；复核发现的缺陷与裁决如下：
+
+| 发现 | 性质 | 裁定 |
+|---|---|---|
+| 前端会话层 IPC 异常外泄：`ipc()` 对 invoke 失败抛异常，而 privacy-session 三个入口未防护——切换/对账路径异常会外泄为 unhandled rejection（按钮无反馈、界面无提示） | 真实缺陷 | **已修复**：会话层新增"不抛异常"契约（`runGuarded` 把 IPC 异常转为 `PRIVACY_IPC_FAILED` 失败结果）；界面层补该错误码的提示映射；新增 2 例（切换异常后单飞可重试、对账异常不外泄） |
+| `adopt()` 未显式拒绝过渡态与隔离态：当前所有可达路径下"隔离+待采纳"组合不可达（隐含兜底成立），但契约声明"隔离态仅对账可达"未在状态层显式化 | 防御缺口 | **已加固**：稳定态显式校验（过渡→Busy、隔离→Quarantined），任何状态下不签发无主凭证；新增 1 例 |
+| `rate_limiter::max_calls()` 无生产消费者（仅测试引用） | 死 API | **已删除**（测试断言改为行为断言） |
+| 状态机锁内写审计（append_audit 读文件尾 + HMAC + 追加） | 设计偏差（低风险） | **记录不改**：审计写为操作级低频（模式变更/隔离/对账），并发调用方仅有单飞下的状态查询；锁持有窗口毫秒级，无卡顿实测面。改动面大（十余处尾段）收益低，维持现状 |
+
+其余复核项全部确认无缺陷：取代路径释放未决租约、看门狗收尸转隔离、对账全窗口
+重扫、原子应用逆序回滚、意图 DPAPI 原子替换与旧格式迁移、审计扩展块字节级兼容
+（混合链验签单测）、剪贴板剥离与安全档位启停、命令注册与前端调用一一对应、
+bindings 与 Rust 结构一致、`visible:false` 启动序列与窗口缺失退出分支、
+清理无残留（全仓 grep 陈旧符号零命中）。
+
+##### 复核轮验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 前端单测 | npx vitest run | 259 passed（24 文件；+2 异常防护用例） |
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| 宿主单测 | cargo test --lib（src-tauri） | 406 passed / 0 failed（+1 采纳拒绝用例） |
+| CI 全量 | run_ci.ps1 -SkipBuild | 全通过（第二级 0 错误 0 警告；基线豁免 37 条不变，新增代码零违规） |
+
+### 2026-09-28 Wave 50：拾光交互整改与防截屏操作延迟根治（用户决策驱动）
+
+用户两项决策：① 系统化移除拾光加载提示栏（含"模块密钥已失效"提示与栏内其它提示），
+必要提示改走通用 toast；② 防截屏按钮点击延迟高、高亮圆点效果低级——需即时响应、
+图标随状态变化。根因诊断与整改如下。
+
+#### 变更点
+
+1. **加载提示栏系统化移除**（表现层）：
+   - 删除拾光顶部加载状态横幅（聚合"密钥失效 / 扫描失败 / 解密暂停 / 解密失败计数"
+     四类文案与"重试 / 继续解密"动作）及其全部展示派生（`bannerText` /
+     `bannerAction` / `bannerActionText`）与解构项（`decryptPaused` /
+     `retryLoad` / `resumeLoad`）；
+   - "模块密钥不可用"不再产生任何用户提示（进入拾光本应经安全管理验证），
+     保留 console 告警便于排查；`loadError` → toast 既有接线保留；
+   - 解密失败计数首次非零 → toast 一次性告知（`0 → >0` 边沿触发，
+     重试清零后可再次提示）；
+   - 重打包进度横幅保留（后台任务进度 + 取消入口，非提示条）；
+   - 数据层能力（`retryLoad` / `resumeLoad` / `cancelLoad` / `decryptPaused`）
+     保留不删：UI 决策不删数据层能力（延续既有约束）。
+2. **防截屏按钮重构（即时响应 + 状态图标）**：
+   - 会话层新增乐观显示态（点击同帧切换图标）与在途标志；成功后按后端契约
+     本地收敛（启用=槽位生效 / 关闭=槽位清空），**移除串行的状态查询 IPC**
+     （原路径固定 3 次 IPC 往返 + 采纳路径 5 次，现为 1 次命令 IPC）；
+   - 新增状态写序号（`statusEpoch`）：在途旧查询结果按序号丢弃，防止
+     "旧查询晚到覆盖新状态"的竞态；失败/异常回退真实态并经错误码映射提示；
+   - 图标随状态切换：开启=捕获被阻止（划斜线的眼），关闭=画面可被捕获（睁眼）；
+     双图标绝对定位交叉淡入（无布局抖动）；**移除高亮圆点与 blink 动画**；
+   - 在途窗口极短，禁用态不做视觉降级（仅 not-allowed 光标 + 悬浮提示），
+     避免快速开关时按钮闪烁；凭证丢失/非桌面端仍用完整降级样式。
+3. **操作延迟根治（后端审计路径，全项目受益）**：
+   - **审计 HMAC 密钥进程级缓存**（`OnceLock`，仅缓存成功）：密钥派生为
+     设备指纹采集 + PBKDF2 十万次迭代，此前**每次审计写入都重新派生**
+     （调试构建单次数百毫秒），是防截屏开关可感延迟的主因；密钥材料
+     （设备指纹 + 固定盐）进程内不变，缓存不改变任何审计字节序；
+   - **剪贴板控制器审计委托共享写入器**：删除第二套派生/落盘逻辑
+     （复用安全命令层 `write_audit_with_extensions`，分层约束用全限定路径），
+     剪贴板清空同样受益于密钥缓存；
+   - **audit.log 尾窗口读取**（64KB 窗口 + 无法解析时全量回退）：审计日志
+     只追加不清空，全量读取让每次追加成本随日志大小恶化（当前已 3MB 且
+     持续增长）；尾窗口只可能截断首行，末行终点即文件末尾天然完整。
+
+#### Wave 50 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 前端单测 | npx vitest run | 261 passed（24 文件；+2：点击即刻反馈、失败回退真实态） |
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| 宿主单测 | cargo test --lib（src-tauri） | 407 passed / 0 failed（+1 尾窗口边界用例） |
+| 编译警告 | cargo check --lib | 0 警告 |
+| CI 全量 | run_ci.ps1 -SkipBuild | 全通过（第二级 0 错误 0 警告） |
+
+#### Wave 50 收尾交接清单
+
+1. **用户实测项（开发模式）**：拾光顶部无加载提示栏（密钥失效/解密暂停/失败计数
+   不再常驻）；解密失败时一次性 toast；防截屏按钮点击后图标同帧切换（无迟滞感），
+   开启=划斜线眼、关闭=睁眼，无圆点闪烁；连点行为由单飞兜底。
+2. **性能说明**：审计密钥首次派生仍发生在进程内首次审计写入（一次性成本，
+   由既有阻塞路径承担）；后续全部审计写入走缓存密钥 + 尾窗口读取。
+3. **本波次改动文件**：`verthys-tauri/src/components/modules/PhotoAlbum.vue` /
+   `src/session/privacy-session.ts`（+ 其 spec）/ `src-tauri/src/security_commands/audit.rs` /
+   `src-tauri/src/controller/clipboard_controller.rs` / `src-tauri/src/util/audit_log.rs`。
+4. **遗留**：无未闭环项；构建与 git 提交由项目方执行。
+
+### 2026-09-28 Wave 51：拾光卡片悬浮文字模糊根治（文字层与图像层解耦）
+
+用户报告：拾光照片卡悬浮时，浮出的文字突然变模糊，要求系统化/工程化定位根因。
+
+#### 根因（渲染管线路径切换，四条件叠加）
+
+1. **文字被画进滤镜表面**：`.photo-overlay`（11px/9px 小字）原为 `.photo-thumb`
+   子元素，而 `.photo-thumb` 带 `filter: saturate() brightness()`——filter 为强制
+   分组属性，子树须先画进离屏表面再整体过滤：表面内亚像素抗锯齿（ClearType）
+   被禁用，文字回退灰度抗锯齿；hover 时 filter 值还在 0.4s 过渡，该表面逐帧重绘。
+2. **文字被拉进 3D 渲染上下文 + 常驻合成层**：`.photo-card` 常驻
+   `will-change: transform` + `transform-style: preserve-3d`——常驻合成令合成器
+   优先复用既有纹理、不按新比例重新栅格化；preserve-3d 让文字参与 3D 投影，
+   不再是独立清晰层。违反项目在 `App.vue` 已确立的「文字不进 3D 渲染上下文，
+   ClearType 渲染路径恒定」规范。
+3. **核心根因（栅格锁定 + 非整数放大）**：悬浮 transform 为
+   `perspective(800px) + rotateY/rotateX + translateY(-6px) + scale(1.03)`，
+   由 `usePhotoInteraction` 每帧直写，同时 `.photo-card` 又保留
+   `transition: transform 0.3s`——双写下变换目标每帧变化，浏览器视为持续动画，
+   栅格比例被锁在 1×，交互期间不按 1.03 重新栅格化：合成器只能把 1× 纹理做
+   非整数放大 + 透视重采样，字形全程模糊。
+4. **「突然」的时序**：hover 是「文字 opacity 0→1 出现 + transform 激活 +
+   filter 值过渡」三者同帧发生的唯一时刻。
+
+排除项（已逐一核验）：祖先链（main-view / workspace / module-switch / stage）
+无常驻 filter/opacity/transform；`.glass { transition: all }` 与 `.glass:hover`
+box-shadow 被 scoped `.photo-card[data-v]` 覆盖；无 `blur` / `backdrop-filter`
+作用于卡片；`.viewer.blurred` 与入场动画无关；`.masonry-item` 虚滚动定位的
+分数像素 `translate3d` 由合成器整数设备像素吸附（列为同类隐患，见遗留）。
+
+#### 变更点（文字清晰度铁律落地）
+
+1. **结构解耦**（`PhotoAlbum.vue` 模板）：`.photo-overlay` 与 `.enc-mark` 移出
+   `.photo-thumb`，与图像层平级成为 `.photo-card` 直接子元素——文字不再进入
+   filter 子树，缩略图滤镜只包裹图片；overlay 与锁标相对卡片几何位置不变。
+2. **样式**（同文件）：
+   - 删除 `.photo-card` 的 `will-change: transform` 与
+     `transform-style: preserve-3d`（禁令以注释固化在样式位）；
+   - 卡片悬浮抬升改为 CSS `:hover { transform: translateY(-6px) }`——纯整数
+     平移，合成器整数设备像素吸附，字形不重采样；
+   - 图像层 `.photo-card:hover .photo-thumb` 增 `will-change: transform`：
+     仅悬浮期按需提升合成层（逐帧 transform 走合成器变换，避免逐帧重绘），
+     离悬浮即撤销——常驻合成会锁定栅格比例并占用每卡显存。
+3. **交互层**（`usePhotoInteraction.ts`）：3D 倾斜
+   （`perspective(800px)` + 8° rotate + scale）改为只写 `.photo-thumb`，
+   平移量从 JS 变换中移除（与 CSS 抬升单写不冲突）；1.06 过扫保证倾斜/透视
+   收缩时画面始终覆盖卡片圆角框不露底；文件头补齐铁律与「逐帧直写不得叠加
+   CSS transform 过渡」约束。
+4. **视觉等价**：抬升量、阴影、光晕跟随、滤镜提亮、选中红环、入场动画行为不变；
+   倾斜由「整卡倾斜」变为「框内照片倾斜」（滤镜/缩放只作用于位图，观感一致）。
+
+#### 关键约束（改动时勿破坏）
+
+- 文字层（`.photo-overlay` / `.enc-mark`）祖先链禁止出现 filter / 3D 变换 /
+  非整数缩放；3D 倾斜与非整数缩放只能作用于 `.photo-thumb`；
+- 禁止恢复 `.photo-card` 的常驻 `will-change: transform` 与
+  `transform-style: preserve-3d`；
+- `.photo-thumb` 的 transform 由 JS 逐帧直写，不得声明 transform 过渡
+  （双写会锁死栅格比例）；卡片抬升只能经 CSS 整数平移（`translateY(-6px)`）；
+- 缩略图滤镜（`.photo-thumb` filter）不得重新包裹文字节点。
+
+#### Wave 51 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| 前端单测 | npx vitest run | 261 passed（24 文件；本次为表现层改动，语义等价） |
+| 前端构建 + 打包 | — | 由项目方执行（延续 Wave 46 起惯例，助手不代跑构建） |
+
+#### Wave 51 收尾交接清单
+
+1. **用户实测项（开发模式）**：悬停照片卡，浮出的文件名/大小文字应与界面其余
+   文字同等锐利（不再突然发虚）；快速移动指针时倾斜跟随流畅，指针静止后文字
+   依旧清晰；卡片抬升、阴影、光晕、加密锁标、图片提亮观感与旧版一致。
+   DevTools 核验口径：Rendering → Paint flashing / Layers——悬停时文字层不得被
+   缩放或重新栅格化，文字祖先链无 filter / 3D transform。
+2. **本波次改动文件**：`verthys-tauri/src/components/modules/PhotoAlbum.vue`
+   （模板 + 样式）、`verthys-tauri/src/composables/photo-album/usePhotoInteraction.ts`；
+   未提交 git，与既有工作树同批待用户评审验收。
+3. **遗留**：`.masonry-item` 虚滚动定位的分数像素 `translate3d` 为同类隐患
+   （合成器整数吸附已缓解，非本次症状来源）；若后续实测出现列表文字发虚，
+   按同一铁律对定位坐标做整数量化。
+
+### 2026-09-28 Wave 52：拾光死样式清零 + 照片倾斜移除 + 入场动画遮蔽缺陷修复
+
+用户决策：① 清理验证轮发现的全部死样式；② 照片 3D 倾斜功能整体移除；
+③ 修复此前验证发现的「入场动画前向填充压住卡片悬浮抬升」缺陷。
+
+#### 变更点
+
+1. **死样式清零**（`PhotoAlbum.vue` scoped 样式，共 10 条无消费者规则）：
+   - `.empty` / `.empty-icon` / `.empty-text` / `.empty-hint`（空态已由 `CosmicEmpty`
+     组件承载）；
+   - `.plus`（旧「+ 导入照片」文案节点已不存在）；
+   - `.import-progress` / `.progress-bar` / `.progress-fill` / `.progress-text`
+     （导入进度已由 `ImportProgressOverlay` 组件承载）；
+   - `.viewer-hint`（查看器提示行已移除，仅保留 `.viewer-status`）。
+   复扫口径：样式块类选择器 × 模板/脚本引用比对 → 清零（仅余 Vue `<transition>`
+   运行时类名 `privacy-ico-*` / `toast-*`，非死代码）。
+2. **照片 3D 倾斜整体移除**：
+   - `usePhotoInteraction.ts` 删除 `.photo-thumb` 逐帧 3D 写入
+     （`perspective(800px)` + ±8° rotate + 1.06 过扫缩放）；该 composable 现只承载
+     光晕跟随（职责注释同步收敛；恢复倾斜的约束写入文件头：3D/非整数缩放只能作用
+     于图像层、不得与 CSS 过渡或逐帧写入双写）；
+   - `.photo-card:hover .photo-thumb` 移除 `will-change: transform`（图像层不再做
+     任何 transform，仅保留滤镜提亮）；卡片层注释收敛为三条：卡片只做整数像素平移、
+     图像层无 transform、禁令（不得恢复 will-change / preserve-3d；不得把文字浮层
+     移回 filter 子树）。
+   - **保留效果（未受影响）**：光晕跟随、卡片抬升 + 阴影、文字浮层淡入、图片滤镜
+     提亮、加密锁标、选中红环、入场动画。
+3. **入场动画遮蔽缺陷修复**（验证轮发现的真实缺陷）：
+   `photo-reveal` 填充模式 `both` → `backwards`。CSS 级联中动画声明优先级高于
+   普通/内联声明，前向填充会在动画结束后继续以终态 `transform` 覆盖卡片悬浮抬升，
+   表现为「进入拾光后一段时间内（首批 `no-anim` 生效前）悬停无抬升」。终态关键帧
+   与基础样式一致，改后视觉零变化，入场结束后立即释放 hover 变换；注释固化
+   「不得改回 both/forwards」。
+
+#### 关键约束（改动时勿破坏）
+
+- 卡片悬浮位移只能经 CSS 整数平移（`translateY(-6px)`）；图像层不得声明 transform；
+- 文字/浮层节点不得移回 `.photo-thumb`（filter 子树禁用亚像素抗锯齿并逐帧重绘）；
+- `.photo-card` 禁止恢复常驻 `will-change: transform` / `transform-style: preserve-3d`；
+- `photo-reveal` 填充模式必须为 `backwards`（前向填充会压住 hover 变换）。
+
+#### Wave 52 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| 前端单测 | npx vitest run | 261 passed（24 文件） |
+| 死样式复扫 | 样式块类名 × 模板/脚本引用比对 | 0 条（仅余 Vue transition 运行时类名） |
+| 前端构建 + 打包 | — | 由项目方执行（延续 Wave 46 起惯例，助手不代跑构建） |
+
+#### Wave 52 收尾交接清单
+
+1. **用户实测项（开发模式）**：悬停照片卡不再倾斜/缩放，仅剩抬升 + 阴影 + 光晕跟随 +
+   图片提亮 + 文字浮层；进入拾光后立刻悬停即应有抬升（1.5s 遮蔽窗口消失）。
+2. **同类倾斜实现（本次未动，待决策是否一并移除）**：`FileVerthys.vue` 内联卡片视差
+   （6° + `translateY(-3px)`）、`CertManager.vue` / `AccountVerthys.vue` 经共享
+   `useCardTilt`（6° + `translateY(-3px)`）——若同样要求移除，须按同一铁律批量治理。
+3. **本波次改动文件**：`verthys-tauri/src/components/modules/PhotoAlbum.vue`、
+   `verthys-tauri/src/composables/photo-album/usePhotoInteraction.ts`；
+   未提交 git，与既有工作树同批待用户评审验收。
+
+### 2026-09-28 Wave 53：同类卡片倾斜批量移除（存签/枢钥/钥域）+ 共享光泽追踪收敛
+
+用户决策：承接 Wave 52 遗留，按同一口径移除其余三处卡片 3D 视差倾斜——
+`FileVerthys.vue`（存签，内联实现）与 `CertManager.vue`（枢钥）/
+`AccountVerthys.vue`（钥域）（经共享 `useCardTilt`）。
+
+#### 根因补充（这三处倾斜实际从未渲染）
+
+三个模块的卡片均带入场动画 `card-in`（`animation: ... both` + `--i` 交错延迟）。
+CSS 级联中动画声明优先级高于普通/内联声明 → 前向填充**永久**以动画终态
+（`transform: translateY(0)`）覆盖 JS 逐帧写入的倾斜与 -3px 抬升。即这三处
+倾斜/抬升从未真正生效（与 Wave 51 拾光卡片属同一缺陷类；拾光因 1.5s 后
+`no-anim` 摘除动画而部分可见，这三处无摘除机制，恒被覆盖）。
+
+#### 变更点
+
+1. **共享 composable 收敛**：新增 `composables/useCardShine.ts`（仅光泽追踪：
+   删除 transform/抬升写入，保留主循环排帧节流与 currentTarget 同步捕获的关键
+   修复）；删除 `useCardTilt.ts`；`CertManager.vue` / `AccountVerthys.vue`
+   的 import、调用点、文件头注释与段注释同步更名。
+2. **FileVerthys.vue**：内联倾斜移除（保留本地光晕跟随，强度口径不变）；
+   `.acct-card` 删除 `transform-style: preserve-3d` 与失效的 transform 过渡，
+   入场动画填充模式 `both` → `backwards`（禁令写入注释）。
+3. **`styles/verthys-common.css`（共享卡片皮肤）**：`.verthys-card` 同口径清理
+   （去 `preserve-3d`、transform 过渡；填充模式 `both` → `backwards`），
+   消除「前向填充静默压住未来 hover transform」的陷阱。
+4. **FileVerthys 死样式清零**（同 Wave 52 口径，5 条无消费者规则）：
+   `.plus` / `.empty` / `.empty-icon` / `.empty-text` / `.empty-hint`
+   （空态已由 `CosmicEmpty` 组件承载）。
+5. **视觉效果**：三处倾斜/抬升本就未渲染，移除后无可见变化；光晕跟随、阴影、
+   彩条、入场动画、卡片其余交互全部保留。全仓已无卡片倾斜实现
+   （`useCardTilt` / `perspective(800px)` 零命中）。
+
+#### 关键约束（改动时勿破坏）
+
+- 卡片悬浮效果仅阴影 + 光泽追踪；如需恢复倾斜，必须同时满足：入场动画不得前向
+  填充 transform、3D/非整数缩放不得作用于文字层、不得与 CSS 过渡或逐帧写入双写；
+- `.verthys-card` / `.acct-card` 入场动画填充模式必须为 `backwards`；
+- 新增卡片的指针光泽追踪统一复用 `composables/useCardShine.ts`。
+
+#### Wave 53 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| 前端单测 | npx vitest run | 261 passed（24 文件） |
+| 残留检索 | src 内 `useCardTilt` / `perspective(800px)` | 0 命中 |
+| 死样式扫描 | FileVerthys / CertManager / AccountVerthys 类名 × 引用比对 | FileVerthys 5 条已清；AccountVerthys 0；CertManager `expiry-*` 系模板字面量动态类（`expiry-${status}`），非死样式 |
+| 前端构建 + 打包 | — | 由项目方执行（延续 Wave 46 起惯例，助手不代跑构建） |
+
+#### Wave 53 收尾交接清单
+
+1. **用户实测项（开发模式）**：存签 / 枢钥 / 钥域卡片悬停不再有倾斜（此前亦不可见），
+   光晕、阴影、彩条、入场动画与旧版一致；拾光不受影响。
+2. **遗留**：FileVerthys 本地光晕实现（强度 0.1）与 `useCardShine`（0.18）口径不一，
+   待产品确认强度后合并为单一实现；`verthys-common.css` 未做全量死样式扫描
+   （跨文件动态类名易误报），如需清扫另开批次。
+3. **本波次改动文件**：`composables/useCardShine.ts`（新）、`composables/useCardTilt.ts`
+   （删）、`components/modules/FileVerthys.vue`、`CertManager.vue`、
+   `AccountVerthys.vue`、`styles/verthys-common.css`；未提交 git，
+   与既有工作树同批待用户评审验收。
+
+### 2026-09-28 Wave 54：卡片指针光晕强度统一 + 实现收口（单令牌 / 单 composable / 单渐变定义）
+
+用户决策：统一四处光晕强度并收口实现（此前为三套 rgba 字面量 0.1 / 0.12 / 0.18、
+两种范围 50% / 60%、四种写法）。
+
+#### 变更点
+
+1. **强度单源（设计令牌）**：`styles/tokens.css` 新增 `--shine-alpha: 0.14` /
+   `--shine-reach: 60%`（色相沿用 `--accent-rgb`）。三套字面量与两种范围收敛为
+   单一取值，后续调整只改令牌一处。取值说明：0.14 为中位折衷——卡片表面
+   （screen 混合）由此前 0.18 略降、拾光照片面（常规混合）由此前 0.12 略升，
+   四处观感趋同。
+2. **实现单源（一个 composable）**：`useCardShine` 不再组建渐变字符串、不再查询
+   光晕节点——只把指针位置写成卡片元素上的 `--shine-x` / `--shine-y`
+   （自定义属性继承到光晕层），并新增 `cancel()`（卸载时丢弃未触发的排帧写入）。
+   拾光 `usePhotoInteraction`（光晕专用件）与存签内联实现全部删除；四个模块
+   （存签 / 枢钥 / 钥域 / 拾光）共用同一 composable。
+3. **渲染单源（一处渐变定义）**：渐变由 CSS 渲染——共享 `verthys-common.css`
+   的 `.card-shine` 与拾光 `.photo-shine` 统一为
+   `radial-gradient(circle at var(--shine-x, 50%) var(--shine-y, 50%),
+   rgba(var(--accent-rgb), var(--shine-alpha)), transparent var(--shine-reach))`；
+   存签删除与共享定义重复的 scoped `.card-shine` 几何声明（仅保留其悬浮显隐规则）。
+4. **表面差异（有意保留）**：卡片表面保持 `mix-blend-mode: screen` + `z-index: 1`
+   （光晕与玻璃底/彩条融合），拾光照片面为常规混合（不把屏幕混合叠加在照片与
+   文字上）——几何与混合模式属表面属性；强度、色相、范围已统一。
+5. 顺带：光晕在「悬浮但未移动指针」时也有默认居中光斑（渐变由 CSS 常驻定义），
+   此前该场景无光晕（JS 未写入即无背景）。
+
+#### 关键约束（改动时勿破坏）
+
+- 光晕强度只能改 `tokens.css` 的 `--shine-alpha` / `--shine-reach`；
+  禁止在各模块重新硬编码 rgba 字面量或第二份渐变定义；
+- 指针光晕统一入口为 `composables/useCardShine.ts`（存签/枢钥/钥域/拾光），
+  禁止再复制内联实现；新模块接入 = 卡片上挂 `.card-shine` 层 +
+  `@mousemove/@mouseleave` 绑定；
+- 该 composable 只写 `--shine-*` 变量（不写 background），渲染口径归 CSS。
+
+#### Wave 54 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| 前端单测 | npx vitest run | 261 passed（24 文件） |
+| 字面量残留 | src 内 `usePhotoInteraction` / `shine.style.background` / 光晕 rgba 字面量检索 | 0 命中（仅剩无关的悬浮阴影 rgba 与 SVG stroke） |
+| 死样式扫描 | 四模块类名 × 引用比对 | FileVerthys 0 / AccountVerthys 0；CertManager `expiry-*`、PhotoAlbum `card-shine` 均为动态类/注释文本（非死样式） |
+| 前端构建 + 打包 | — | 由项目方执行（延续 Wave 46 起惯例，助手不代跑构建） |
+
+#### Wave 54 收尾交接清单
+
+1. **用户实测项（开发模式）**：存签 / 枢钥 / 钥域 / 拾光四处卡片光晕强度应一致
+   （此前 0.1 / 0.12 / 0.18 差异消失）；指针移动时光斑跟随；如需更强/更弱，
+   只调 `tokens.css` 的 `--shine-alpha` 一处即全站生效。
+2. **本波次改动文件**：`styles/tokens.css`、`styles/verthys-common.css`、
+   `composables/useCardShine.ts`、`composables/photo-album/usePhotoInteraction.ts`
+   （删）、`components/modules/PhotoAlbum.vue`、`FileVerthys.vue`；
+   `CertManager.vue` / `AccountVerthys.vue` 无需改动（自动继承新口径）；
+   未提交 git，与既有工作树同批待用户评审验收。
+
+### Wave 0（2026-09-28）：清藏导入链路预研与基线实测
+
+#### 产出
+
+1. **BLAKE3 哈希吞吐实测（决定实现后端）**
+   - 纯 JS 实现（`@noble/hashes`，照片链路现用）：512MiB 实测 **28~29 MB/s**（1GiB ≈ 36s），
+     主线程不可接受，移入 Worker 也降低不了总耗时；
+   - `hash-wasm`（WASM，项目既有依赖）：流式 **512 MB/s**、逐块 4MiB **489 MB/s**（每块约 8ms）；
+   - 两者摘要逐字节一致（同一输入 hex 完全相同），可互换。
+   - 裁定：清藏批量哈希改用 hash-wasm 流式实例；零新增依赖，无需 Worker。
+2. **内容寻址去重生效范围（实测 + 分层结论）**
+   - 实跑：`build/core/tests/Release/verthys_tests.exe v3ext_dedup` → `[OK] v3ext_dedup_no_rewrite`；
+   - 结论：去重键是写入 extent 的字节。无密码分支写明文 → 跨文件同内容块共享 extent；
+     有密码分支每块唯一随机盐/IV → 密文互异 → 去重不生效。
+3. **IPC 次数基线（按跨层常量推导）**
+   - 现路径（逐块单条写）：1GiB ≈ **259 次 IPC**（256 块 + meta + 落盘校验）；
+   - 迁移后（2 块/批，受 12MiB 与 8 条双预算约束）：≈ **133 次**。
+4. **内存口径**：现路径峰值 ≥ 文件体积（整文件驻留）；目标路径峰值 ≈ 单块 + base64 + 批预算
+   ≤ ~16MiB。端到端峰值/耗时需交互式桌面实测（用户实测项）。
+
+### Wave 1（2026-09-28）：导出完整性热修（P1-2 / P2-4 / D5 / P1-1 语义守卫）
+
+#### 变更点
+
+1. 新增组合式导出管道 `composables/file-verthys/useFileExport.ts`：单遍流式
+   （逐块取回 → 布局/长度校验 → 可选解密 → 追加写流 → 最终一次 finalize），
+   失败即中止流（目标位置不产生文件）；加密条目在选取保存位置**之前**先解密首块；
+   依赖注入设计便于单测。
+2. 布局校验口径：块数 == 分块总数 == ceil(声明长度 / 分块口径)；空文件与零块严格对应；
+   meta 声明的分块口径必须与跨层常量一致；历史内联形态同样校验。
+3. 组件接线：保存改用管道（流式落盘替代整文件内存拼装）；导入侧 meta 写入失败即抛错
+   （不计数、不入列表、不提示成功）；meta 不再写入 `completedChunks`（伪字段），
+   列表条目携带 meta 声明的分块口径。
+
+#### Wave 1 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| 前端单测 | npx vitest run | 275 passed（25 文件，新增导出矩阵 14 例） |
+| 后端回归 | cargo test --lib | 411 passed（未受影响） |
+
+#### Wave 1 收尾交接清单
+
+1. 未完成项（随 Wave 2 迁移一并交付）：导入侧组合式抽层与"导入三态"单测
+   （meta 失败/块失败/正常）——导入管线在 Wave 2 整体迁移到批量会话路径，
+   现在抽层会造成测试断言二次返工，故与迁移同批交付。
+2. 用户实测项（开发模式）：导入含加密与非加密条目 → 保存到本地逐字节比对；
+   删除一条块记录后保存应报"第 N 块数据缺失"且目标位置不产生文件；
+   0 字节文件导入后可导出为 0 字节文件。
+3. 未提交 git，与既有工作树同批待用户评审验收。
+
+### Wave H（2026-09-28，施工顺序先于下列 Wave 0/1）：共享写者 GC 误删窗口 hotfix（清藏链路施工前置）
+
+#### 变更点
+
+1. 收起一个在线数据损坏窗口：块台账的归属改写只存在于导入写者内存，落盘
+   发生在批末且失败被静默降级；WAL 的 committed 条目不携带块引用，崩溃恢复
+   无法重建归属。窗口内若触发孤儿回收，会删除仍被已提交记录引用的块，表现为
+   数据"看得见却打不开"，且去重键仍在、重新导入被跳过。
+2. 四件套闭环：
+   - WAL `committed` 条目携带 `chunk_ids`（显式声明引用集合；字段缺省即历史条目）；
+   - 会话创建先结算（归属改写 + 冻结）再截断 WAL，结算落盘失败即拒绝创建会话；
+   - 批末台账落盘失败置脏标记；成功结束前必须落盘台账，失败即拒绝结束并保留
+     会话与 WAL（可排除障碍后重试）；
+   - 孤儿回收前先结算：可证明归属的块改写为拥有者，无法证明归属的孤儿候选冻结
+     为不可回收值，结算落盘失败则放弃本次回收。
+3. 冻结语义：历史条目（无引用集合）无法结算时，宁可永久保留也不误删；冻结值
+   不进入回收候选，回收面绝不扩大。
+
+#### Wave H 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 全量单测 | cargo test --lib（src-tauri） | 411 passed |
+| 新增单测 | 台账结算 5 / 写者 2 / 台账冻结 1 | 8 passed |
+| 静态检查 | cargo clippy --all-targets -- -D warnings | 0 告警（含 5 条基线遗留告警的机械修复） |
+| worker 单测 | cargo test --manifest-path verthys-worker/Cargo.toml | 33 passed |
+
+#### Wave H 收尾交接清单
+
+1. 本波次改动文件：`src-tauri/src/repository/verthys_wal.rs`、`verthys_chunks.rs`、
+   `src-tauri/src/state/import_writer.rs`、`src-tauri/src/controller/verthys_batch_controller.rs`；
+   基线告警机械修复：`src-tauri/src/controller/privacy_controller.rs`（2 处改写）。
+2. 用户实测项（开发模式）：导入照片 → 中途结束进程 → 重启后再次导入 → 删除若干
+   照片 → 观察容器内数据可正常打开、回收不误删；若磁盘异常导致台账落盘失败，
+   导入结束应给出明确失败提示并可重试。
+3. 未提交 git，与既有工作树同批待用户评审验收。
+
+### 2026-09-28 Wave 55：拾光滚动丝滑度根治（七层方案评审落地 · 三铁律）
+
+用户报告拾光网格上下滚动"不流畅丝滑"，经七层方案（行窗口模型 / 零重绘 hover /
+滚动静默态 / 优先级调度 / 滚轮平滑器 / 设备分档 / 验证标准）评审后实施根治；
+方案缺陷与项目不符处已直接修正（完整评审裁定表与验收清单见专项文档
+`拾光滚动丝滑度根治修复方案.md`）。
+
+#### 根因（五因素叠加，按影响排序）
+
+1. 滚轮滚动时卡片从指针下掠过，连续触发 hover 过渡链——box-shadow 与 filter
+   是重绘型属性，过渡期逐帧重绘（滚动掉帧主因）；
+2. 每个滚动帧全量重建可视区列表（48 项对象 + style/class 对象）并全量 diff；
+3. 每项独立合成层（translate3d），新进屏行首次栅格化（大模糊阴影最贵）排队；
+4. 滚动停顿 80ms 即启动 4 路并发解密，与再度滚动竞争主线程；
+5. 滚轮离散步进（约 100px/格）无平滑——"丝滑感"行为层底座。
+
+#### 变更点（三铁律落地）
+
+1. **滚动期主线程不做 O(可见项) 工作**：新增 `photo-album/visible-window.ts`
+   行窗口模型（像素 → 行窗口量化；跨行重建按"源引用 + 布局键"复用对象，
+   内容未变时返回旧数组）；`usePhotoData` 以 computed 惰性重算接入，滚动像素级
+   移动零状态写入；条目 style 预算为字符串（`_style`）；坐标整数量化
+   （合成器整数吸附）；no-anim 迁移至容器级（1.5s 切换只 patch 一个节点）。
+2. **禁止重绘型属性参与过渡**：卡片过渡只剩 transform；阴影加深改为固定阴影层
+   `masonry-item::before`（opacity/transform 过渡、visibility 门控不参与静态
+   栅格化）；hover 提亮改为 `photo-card::before` 白层（仅 opacity）；钉死
+   `.glass:hover` 的边框/阴影漂移（零重绘）；`contain: layout style` +
+   条目/卡片双 isolation 固化层序（图像 1＜提亮 2＜文字遮罩 3＜光晕 4）。
+3. **滚动期冻结非必要动画与解码**：`scrollQuiet` 静默态状态机（容器
+   `data-scrolling` + 根节点 `app-scrolling`）：解密在项边界暂停取新项、
+   hover 视觉压平且过渡/动画关停、背景氛围动画暂停（idle-governance.css
+   第 7 节通配暂停，与 idle/reduce-motion 同款实现）；停稳 120ms 后统一追帧：
+   立即补齐可视区解密 + 预热运动方向下一行缩略图（Image.decode，有界去重）。
+4. **滚轮平滑器**：新增 `utils/wheel-smoothing.ts`——只接管鼠标离散步进
+   （整数 deltaY ≥ 40px、无横向/缩放/行页模式），指数插值写原生 scrollTop
+   （合成器滚动/键盘/拖条/无障碍全保留）；外部打断让位（键盘/拖滚动条）；
+   触控板高频熔断（<25ms 连发 3 次让位原生，保护系统惯性）；开关与手感系数
+   集中于 `config/scroll-perf.ts`（一键回退原生滚动）。
+5. **方案修正**（评审直接改方案处，详见专项文档 §二）：光晕跟随不改 transform
+   （非滚动路径 + 已排帧节流）；阴影层落 masonry-item（photo-card 的
+   overflow:hidden 会裁阴影）；背景降频走根类 CSS（背景为合成器 CSS 动画，
+   不走 useFrameGate）；postTask 分片与 Blob 延迟创建裁剪（复杂度/生命周期
+   权衡）；设备分档与运行期自动降级裁剪（项目已有 FrameBudgetMonitor +
+   reduce-motion 治理，避免双监控与观感突变）；平滑器补齐方案未覆盖的
+   4 个接缝（动态 maxScroll / 打断让位 / 触控板熔断 / 整数性判定）。
+6. **实施后审查轮（同批次）修复 2 缺陷**：① 静默态入场动画冻结由
+   `animation: none` 改为 `animation-play-state: paused`（前者解冻瞬间会从 0%
+   重播 → 停稳后整屏卡片重新淡入闪烁）；② 首批解密被静默暂停时的收尾三分支
+   （静默保持"在途与进度位置，停稳追帧续跑"，不得虚假宣告完成/置位
+   firstFillDone 使剩余项永不续跑）。另清理 8 个无消费者死导出
+   （loadStage/loadPercent/loadMessage/loadElapsedMs/firstFillInFlight/
+   decryptPaused/decryptingMetaIds/ensureVisiblePhotosDecrypted）；
+   `retryLoad/cancelLoad/resumeLoad` 悬空能力面登记（Wave 50 移除横幅后
+   失去 UI 入口，保留实现并注释标注，待产品决策）。
+7. **第二轮根因重判与根治（用户实测"仍卡顿"后）**：取证排除软渲染（RTX 3050
+   + 本地 console 会话 + WebView2 GrShaderCache 活跃）；定位架构级根因为
+   第一轮平滑器在主线程逐帧写 scrollTop（preventDefault 取消原生滚动 =
+   把合成器滚动降级为主线程滚动，主线程任何忙碌直接卡住滚动）→ 重写为
+   合成器驱动平滑滚动（scrollBy behavior:"smooth"，插值在合成器线程完成；
+   删除手写插值/打断/让位状态机）；同轮加固 ParticleBackground 滚动静默期
+   跳过渲染帧（渡越相位冻结，GPU/主线程让位滚动合成）；干扰变量记录：
+   用户实测时间窗与后端 92.3s 系统模块哈希基线构建重叠（最低优先级单线程，
+   对照实验项，不判定为主因）。
+8. **第二轮验证门**：vue-tsc 0 错误；vitest 315 passed（28 文件）；
+   CI 两级全通过（第二级 0 错误，0 警告）。平滑单测重写为"判定 + 合成器
+   发起 + 熔断 + 脱钩"四面对齐新架构。
+9. **第三轮红线处置（生产级事故回退：快速滚轮顿挫）**：用户实测"快速滚轮
+   顿挫极其严重、劣于修复前"→ 定位两处自引入缺陷：① `scrollBy smooth`
+   每格调用在高频滚轮下平滑动画被反复取消/重启（短目标反复重启 → 爬行 +
+   顿挫，频率越高越严重）→ **滚轮平滑整体移除**（含 spec / 配置开关 /
+   挂载点，不留悬空），滚动回归原生合成器路径——"任何 JS 接管都是降级"
+   固化进配置头注与代码注释；② 静默态 `html.app-scrolling .ambient-bg *`
+   通配最右端：html 类切换触发全文档样式失效（慢速逐格滚动每格两次全文档
+   重算）→ 改为枚举动画元素（约 200 节点，含伪元素单列，CSS 内固化维护
+   契约）。另修复既有缺陷：`useCardShine` 在 mousemove 同步阶段
+   `getBoundingClientRect()`（滚动期强制 reflow）→ 布局读延迟到排帧回调 +
+   静默期跳过采集。第三轮验证门：vue-tsc 0 错误；vitest 308 passed
+   （27 文件，平滑用例随实现删除）；CI 两级全通过。
+
+#### Wave 55 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| 前端单测 | npx vitest run | 308 passed（27 文件；第三轮随平滑实现删除相关用例） |
+| CI 第一级 | pwsh ci/run_ci.ps1 -Level1Only | 通过（存量基线警告，本轮零新增） |
+| CI 第二级 | pwsh ci/run_ci.ps1 | 0 错误（存量 37 条含并行施工登记，项目方已纳入基线豁免） |
+
+#### Wave 55 收尾交接清单
+
+1. **用户实测项（开发模式）**：滚轮 / 触控板 / 拖滚动条 / 键盘四输入源对照——
+   滚动全程由合成器线程保障（平滑滚动经 scrollBy smooth 合成器插值）；
+   滚动中卡片掠过指针不闪烁；停稳后 hover 经过渡自然呈现；快速下滚新行无
+   "空白等待"。DevTools Performance 判据：滚动期 Scripting 近空、无大面积
+   Paint、无棋盘格补白。详见专项文档 §五 验收清单。
+2. **观感差异（有意为之）**：hover 提亮不再提升饱和度（合成器约束，白层近似
+   亮度差）；滚动期间 hover 视觉冻结（静止态，停稳后过渡恢复）；背景氛围
+   （.ambient-bg CSS 动画 + ParticleBackground WebGL）滚动期静止、停稳恢复；
+   滚轮"1 行"设置（deltaY≈33）不接管（保护触控板，安全退化）；滚轮平滑曲线
+   为浏览器合成器内置（不自定义 easing）。
+3. **回退**：`config/scroll-perf.ts` 单点开关（wheelSmoothing / wheelStepGain /
+   静默态延时）；ParticleBackground 让位检查单点可去。
+4. 本波次改动文件：`src/config/scroll-perf.ts`（新）、
+   `src/composables/photo-album/visible-window.ts`（新 + spec）、
+   `src/utils/wheel-smoothing.ts`（新 + spec）、
+   `src/composables/photo-album/usePhotoData.ts`、
+   `src/composables/photo-album/types.ts`、
+   `src/components/modules/PhotoAlbum.vue`、`src/styles/idle-governance.css`、
+   `src/components/ParticleBackground.vue`（滚动静默让位）；
+   未提交 git，与既有工作树同批待用户评审验收。
+
+### Wave 2（2026-09-28）：清藏架构收敛（P2-1 / P2-2 / P2-4 读取侧 / P1-2 消费侧补齐）
+
+#### 变更点
+
+1. 块角色白名单收敛：新增记录类型单源常量 `TYPE_FILEVERTHYS_CHUNK = 4`；写者块上传
+   校验由三分支判断改为角色白名单函数 + 名称派生函数（记录名 `chunk_{hash}`，不承载
+   来源文件名与分块序号）；新增 2 例（白名单含 4 / 名称派生）。
+2. 分片读取与元数据快照：`read_user_file` 增 `offset/length`（成对缺省 = 整文件读取，
+   行为不变；成对给出 = 分片），越界/超尾/超单次分片上界/空分片一律报错、不静默截断；
+   新增独立分片超时 15s（整文件保持 120s）；新增 `user_file_stat(path) → {size, mtime_ms}`
+   （与读取同一授权链）；新增 8 例（0/末块/越界/超尾/超上限与空片/参数不配对/缺省不变/
+   stat 契约，另含超时关系断言）。
+3. 导入管线迁移：新增 `composables/file-verthys/useFileImport.ts`——单遍优先（无遗留
+   去重集合）/ 续传两遍（只读轮哈希判定 → 上传轮，上传轮重算哈希与只读轮比对）；
+   块批 2 块/批（由载荷上限与块数上限双预算推导，无字面量）；来源身份稳定（文件开始 +
+   每个块批边界 + 文件结束三处复查长度与修改时间，收尾断言已读总字节等于初始长度）；
+   明文与密文缓冲用后清零；元数据仅在块引用全部确认后写入（写入形态字段：schema /
+   chunkIds / chunkHashes / chunkSize / fileHash / encrypted）；失败文件的块留台账由
+   孤儿回收处理（前端不做补偿删除）；会话成功语义 = 全部文件成功且会话正常结束。
+4. 组件接线：FileVerthys.vue 旧逐块单条写入路径整体删除（锚点 A1）；导入改走管道；
+   列表接纳条件改为 `Array.isArray(chunkIds)`（0 字节文件可入列表，P2-4 读取侧）；
+   条目携带 chunkHashes。
+5. 导出侧完整性消费（补齐 P1-2 的哈希校验，避免 chunkHashes 成为无消费方字段）：
+   `useFileExport.ts` 增逐块密文哈希校验（携带 chunkHashes 时逐块 BLAKE3 比对，不符即
+   E_CHUNK_CORRUPTED；条数与块数不一致 → E_LAYOUT_INVALID）；新增 3 例（不符中止 /
+   一致通过 / 条数不一致）。
+6. 取消导入与并发互斥：进度覆盖层增"取消导入"（管道在每个文件与每个块批边界检查；
+   取消保留断点、会话按未成功语义结束）；会话冲突（已有活跃会话）时弹确认框
+   （结束并继续 / 取消导入），允许则 `import_end(false)` → 重建会话，仍失败则强制清理
+   残留会话后再建。
+7. 支撑性性能修复（方案外声明）：`utils/binary_codec.bytesToBase64` 由逐字节字符串拼接
+   改为 32 KiB 分块 `String.fromCharCode`（4 MiB 实测 ~480ms → ~74ms，输出逐字节一致），
+   消除 4 MiB 块 base64 在导入热路径上的放大。
+8. 注释与文档对齐：FileVerthys.vue 模块头（记录类型 0x08/0x04、去重与重传语义）；
+   `read_user_file` 文档 50MB/10s → 2GB/120s（分片 15s）——P3-1 中与本次改动同函数的
+   部分，其余留 Wave 4。
+
+#### 能力边界（本波次声明）
+
+- 去重指纹：当前写入形态的块密钥逐块派生（无稳定文件级密钥），有密码分支的同内容
+  不同口令共用同一去重键；区分能力随 Wave 3 文件级密钥落地（指纹改为文件密钥摘要，
+  历史条目按形态标记天然分流）。
+- 加密分支每块一次 PBKDF2（150k，历史逐块盐口径）：1GiB 加密导入的 KDF 占比目标由
+  Wave 3 文件级密钥达成，本波次不度量该指标。
+- GUI 端到端（真实大文件导入/导出、杀进程续传、取消交互）为交互式桌面实测项，
+  本环境无交互桌面，未实测。
+
+#### Wave 2 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 全量 Rust 单测 | cargo test --lib（src-tauri） | 421 passed（新增 10：写者 2 / 分片与 stat 8） |
+| 静态检查 | cargo clippy --all-targets -- -D warnings | 0 告警 |
+| worker 单测 | cargo test --manifest-path verthys-worker/Cargo.toml | 33 passed |
+| 前端单测 | npx vitest run | 315 passed（28 文件；清藏新增导入 14 例 + 导出 3 例） |
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| CI 全量 | ci/run_ci.ps1（含 AST 第二级） | 全绿（exit 0） |
+| 锚点注入即红 | A1 / A2 / B 逐条注入 | 三条均 [RED] 且 exit 1，随后撤回、文件复原 |
+
+#### Wave 2 收尾交接清单
+
+1. 本波次改动文件（未提交 git，与既有工作树同批）：
+   Rust：`src-tauri/src/constants.rs`、`src-tauri/src/state/import_writer.rs`、
+   `src-tauri/src/controller/file_controller.rs`、`src-tauri/src/lib.rs`；
+   前端：`src/composables/file-verthys/useFileImport.ts`（新）、
+   `useFileImport.spec.ts`（新）、`useFileExport.ts`、`useFileExport.spec.ts`、
+   `src/lib/verthys.ts`、`src/utils/binary_codec.ts`、
+   `src/components/modules/FileVerthys.vue`、
+   `src/components/common/cosmic/ImportProgressOverlay.vue`；
+   CI：`ci/run_ci.ps1`（锚点 5/6/7）、`ci/ast_baseline.txt`（存量违规行号随插入位移
+   同步 103 → 110，语义未变）。
+2. 用户实测项（开发模式）：导入单文件/多文件（含加密与非加密）→ 列表出现、保存到本地
+   逐字节一致；同文件重复导入 → 显式"已跳过"；导入中点击取消 → 覆盖层消失、断点保留；
+   导入中修改源文件 → 该文件报"源文件被修改"且不入列表；0 字节文件导入 → 入列表且
+   可导出为空文件；删除一条块记录后保存 → 报"第 N 块数据校验失败"且目标位置不产生文件。
+3. 遗留（后续波次）：Wave 3 文件级密钥与密码前置、D1 常量收编、磁盘空间预检；
+   Wave 4 删除失败可回滚、密码为空按钮禁用（P3-3 余项）、注释与文档全量同步。
+
+### Wave 2 增补（2026-09-28 同批）：全链路深度审查与整改
+
+#### 审查范围
+
+Wave 2 改动全链（导入管线 / 导出管线 / 删除链路 / 列表加载 / 后端分片读取与单写者
+块角色白名单 / CI 锚点），并覆盖其上下游交互面（照片链路共享的会话日志与去重集合、
+审计日志、二进制编解码）。
+
+#### 发现与整改（5 项）
+
+1. **审计 HMAC 密钥逐次派生（性能放大，高）**：每个审计调用点各自执行 10 万次
+   PBKDF2 派生密钥；分片读取按片追加审计，单次 1GiB 导入被放大为约 128 次派生
+   （秒级 CPU）。六个调用点中仅 `security_commands/audit.rs` 已做进程内缓存。
+   整改：五个控制器统一加进程内单次派生缓存（仅缓存成功结果：采集/派生瞬时失败
+   不占缓存，下次写入自愈重试）；新增 1 例（两次取键一致 + 成功结果入缓存）。
+2. **删除未释放文件级去重键（功能缺陷，高）**：本轮导入让 `fileHash` 成为会话日志
+   中的去重键，但删除链路从未调用 `verthysForgetHashes`，且列表条目不携带
+   `fileHash` → 删除后的文件重新导入被静默跳过（"删除后可重导"不成立）。
+   整改：条目携带 `fileHash`（导入产物 + 读取侧解析）；删除落盘成功后释放；
+   释放失败进进程内待重试队列（下次导入开始前自动重试）并给出精确提示；
+   历史条目无键则跳过并留日志。属 P2-5"成功后释放去重锁"子项的提前落地。
+3. **块批/元数据写入的传输层异常未分类（契约缺陷，中）**：`chunkBatch` /
+   `recordsBatch` 抛出的通道异常会退化为未分类错误（默认归为读取失败），归因误导。
+   整改：两处包裹并分类为 `E_CHUNK_FAILED` / `E_META_FAILED`；新增 2 例。
+4. **后端按会话日志跳过元数据被误判为失败（边界缺陷，中）**：该路径返回
+   `ids[0]=0`（失败集为空），原实现按 `E_META_FAILED` 处理。整改：按结构化字段
+   `skipped_count` 判定为"跳过"入账，不计成功、不产生条目；新增 1 例。
+5. **死导入清理（卫生）**：`FileVerthys.vue` 移除两个无消费者的 shallow 工具导入。
+
+#### 同步的机械化项
+
+- `ci/ast_baseline.txt`：本次插入导致 5 处控制器存量违规行号位移，按分析器实际
+  行号同步（device 66→73 / file 110→118 / key 59→67 / scan 78→85 / verthys
+  130→136），违规语义未变。
+- 复核分块 base64 与旧实现逐字节一致（边界含 0/1/2/3/255/32767/32768/32769/
+  65536/65537/123456/4MiB+1）。
+
+#### 确认保留（不在本批改动，逐项说明）
+
+- **删除链路事务化（P2-5，Wave 4）**：逐条删除失败仅 `VERTHYS_WRITE_BLOCKED`
+  上抛，无回滚与重试态，存在"元数据删除失败而块删除成功"的复活窗口与"块删除
+  失败"的空间泄漏；按方案归 Wave 4，统一改 `verthysDeleteRecords` 单事务 +
+  可见可重试。
+- **每分片一条审计（容量）**：约 128 条/GiB；成本在整改 1 后降至微秒级，保留
+  逐片可追溯。
+- **去重集合为容器级共享**：容器内有过照片导入时清藏导入固定走两遍形态（多一轮
+  读取）；两侧去重键构造域不同、无互误跳过；已在代码注释声明，属"续传正确性
+  优先"的设计取舍。
+- 加密分支每块一次 PBKDF2 仍为历史逐块盐口径（Wave 3 文件级密钥收口）。
+
+#### 批次验证门（增补）
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 全量 Rust 单测 | cargo test --lib（src-tauri） | 422 passed（+1） |
+| 静态检查 | cargo clippy --all-targets -- -D warnings | 0 告警 |
+| 前端单测 | npx vitest run | 318 passed（+3） |
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| CI 全量 | ci/run_ci.ps1（含 AST 第二级） | 全绿（exit 0） |
+
+#### 交接
+
+1. 本批追加改动文件：Rust `src-tauri/src/controller/{file,device,key,scan,
+   verthys}_controller.rs`；前端 `src/components/modules/FileVerthys.vue`、
+   `src/composables/file-verthys/useFileImport.ts`、`useFileImport.spec.ts`；
+   CI `ci/ast_baseline.txt`。未提交 git，与既有工作树同批。
+2. 用户实测项（追加）：删除一个已导入文件 → 重新导入同一文件 → 必须正常导入
+   （不得被跳过）；导入 1GiB 文件过程中不出现秒级停顿（审计派生不再重复）。
+
+### Wave 3（2026-09-28）：加密与体量（文件级 KDF / D1 常量收编 / 磁盘空间预检）
+
+#### 施工裁定（实现前冻结，已回写方案文档）
+
+1. **无密码条目**不写 `kdf`/`passwordCheck`；加密条目两者必写。
+2. **去重键维持"内容 + 形态标志"**（D4 的"指纹取文件密钥 BLAKE3"**不采纳**）：
+   文件盐逐次随机 → 密钥摘要不稳定（续传重试会重复导入已提交文件，破坏
+   已验收的中断续传跳过）；若改为稳定值则必然是口令派生量，而会话日志
+   （`<容器>.import.wal` 与快照）为明文 JSON，落盘即公开口令验证器。
+   用户裁定采纳本口径；§9.1"同内容不同密码可并存"回写为"删除后重导可换口令"。
+3. **2GiB 边界**：`size > limit` 拒绝（恰好 2GiB 允许）；读数文案按 GB。
+4. **磁盘预检时机**：导入 = `user_file_stat` 后、读块前（容器卷，阈值
+   `size × 1.05`）；导出 = 选定路径后、开流前（目标卷，阈值 `size`）；
+   读数不可得不阻断（前置预检为尽力而为），确定不足即拒绝且零副作用。
+5. **`check_disk_space(path?)`** 独立命令：缺省 = 会话容器路径；复用
+   `util::disk`（新增字节口径，MB 口径改为其派生）。
+6. **crypto 层原语**落 `lib/crypto.ts`；导入/导出管线接口见变更点 2、3。
+
+#### 变更点
+
+1. crypto 层（`lib/crypto.ts`）：`FileKdfV2` / `FileKeyV2`、
+   `createFileKeyV2`（随机盐一次派生，原始密钥导入句柄后即刻清零）、
+   `unlockFileKeyV2`、`encryptChunkV2`（`iv(12)‖ct+tag`）、`decryptChunkV2`、
+   `buildPasswordCheckV2` / `verifyPasswordCheckV2`（固定明文，唯一口令判定点）。
+2. 导入管线：deps 增 `FileKeySuite`（有密码导入的唯一加密路径；**历史逐块盐
+   写入路径删除**——无未来用途，不留死代码）；文件密钥每文件派生一次、只读轮与
+   上传轮共用句柄；meta 携 `kdf`/`passwordCheck`；`user_file_stat` 后新增体量预检
+   （超限 `E_FILE_TOO_LARGE`，读块前拒绝）与容器卷空间预检（`E_DISK_FULL`）。
+3. 导出管线：条目携 `kdf`/`passwordCheck`；`openV2Decryptor` 在选路径之前完成解锁
+   与口令判定（不匹配 → `E_PWD_WRONG`）；块解密失败一律 `E_CHUNK_CORRUPTED`
+   （删除"全部失败=密码错"启发式）；v1 合并文案补可执行引导；目标卷空间预检。
+4. D1 常量收编：`photo_budget.schema.json` 新增 `user_file_size_limit = 2147483648`
+   （移除手填 `max_export_single_bytes`）；生成器派生 `USER_FILE_SIZE_LIMIT` 与
+   `MAX_EXPORT_SINGLE_BYTES`（同源赋值 + Rust 编译期断言相等）；
+   `file_controller.rs` 删除本地字面量改用生成常量；前端按该常量做超限预检；
+   照片导出上限 512MiB → 2GiB（放宽回归 2 例，文案改 GB 读数）。
+5. 磁盘空间预检：Rust `check_disk_space(path?) → {free_bytes}`（预检超时、
+   系统关键目录拒绝、未创建目标回退最近已存在祖先）；`util::disk` 增字节口径；
+   两个管线与组件接线完成。
+6. **3.3 裁定留证**：1GiB 流式 BLAKE3 实测 **581 MB/s（1762ms/1GiB）**，
+   无需移入 Worker（与 Wave 0 的 512MB/s 结论一致）。
+7. AST 基线：`file_controller.rs` 存量违规行号随本地常量删除位移同步
+   （118 → 110）；`state` 层引用并入既有导入行（同类既有豁免，不新增违规）。
+
+#### 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 全量 Rust 单测 | cargo test --lib（src-tauri） | 426 passed（+4：D1 统一断言 + 磁盘预检 3） |
+| 静态检查 | cargo clippy --all-targets -- -D warnings | 0 告警 |
+| 前端单测 | npx vitest run | 326 passed（27 文件；新增 crypto 5 / 导入 5 / 导出 6 / 照片 2） |
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| CI 全量 | ci/run_ci.ps1（含 AST 第二级） | 全绿（exit 0） |
+| 常量门 | node constants/generate.mjs --check | 生成物与权威来源一致 |
+| 哈希位置复核 | node 基准（1GiB 流式 BLAKE3） | 581 MB/s（1762ms），无需 Worker |
+
+#### 能力边界
+
+- 同内容不同口令共用同一去重键（换口令导入须先删除原条目）——用户裁定口径。
+- 加密导入的 PBKDF2 由"每块一次"降为"每文件一次"；1GiB 端到端 KDF 占比 ≤ 5%
+  属交互式桌面实测项（本环境无交互桌面，未实测）。
+- v1 存量（旧 meta / 内联块 / 逐块盐）读取与导出路径保持；v1 写入路径已删除。
+
+#### 收尾交接清单
+
+1. 改动文件（未提交 git，与既有工作树同批）：
+   Rust：`src-tauri/src/constants.rs`、`src-tauri/src/util/disk.rs`、
+   `src-tauri/src/controller/file_controller.rs`、`src-tauri/src/lib.rs`、
+   `photo_budget.rs`（生成物）；
+   前端：`src/lib/crypto.ts`、`src/composables/file-verthys/{useFileImport,useFileExport}.ts`
+   及两个 spec、`src/lib/verthys.ts`、`src/components/modules/FileVerthys.vue`、
+   `src/composables/photo-album/usePhotoExport.ts` 及其 spec、
+   `src/constants/{photo_budget.schema.json,generate.mjs,photo_budget.generated.ts}`；
+   CI：`ci/ast_baseline.txt`。
+2. 用户实测项：加密导入 → 导出逐字节一致；错误口令即时报"密码错误"且不弹保存框；
+   历史 v1 条目仍可导出（合并文案含可执行引导）；`>512MiB` 照片单文件导出不再被拒；
+   容器/目标磁盘不足时前置拒绝。
+3. 遗留（Wave 4）：删除链路事务化（P2-5）、密码为空按钮禁用（P3-3 余项）、
+   注释与文档全量同步、组合式抽层与 spec 全量。
+
+### Wave 4（2026-09-28）：清藏收口（删除事务化 / 交互余项 / 组合式抽层 / 文档全量同步）
+
+#### 变更点
+
+1. **删除链路事务化（P2-5）**：新增 `composables/file-verthys/useFileDelete.ts`——
+   块引用（外置形态）与元数据 ID 收敛为单次批量事务删除（`deleteAndPersistBatch`
+   → 单事务 `verthysDeleteRecords`）；删除提交后立即失效摘要/全量/扫描三层缓存
+   并强制立即落盘（`persistVerthys` 取消防抖）；落盘成功后释放文件级去重键
+   （`verthysForgetHashes`，释放实现内含一次即时重试），历史条目无键跳过并留
+   日志；收尾 best-effort 触发一次孤儿块回收。失败语义：
+   - 删除失败（返回 false 或抛异常）→ 条目与缓存零变化，按钮恢复，重新执行即重试；
+   - 落盘失败 → 条目保持"删除已提交待落盘"态（保存禁用、删除按钮变"重试"），
+     重试经 `retryFileDeletePersist` 仅重放落盘与收尾——批量删除对缺失条目整体
+     拒绝并零副作用返回，删除步骤不可重放；
+   - 释放失败 → 删除结论不变，键入待重试队列并给出精确提示。
+2. **组件接线**：FileVerthys.vue 删除段整体改用该管道；删除期间卡片保持可见
+   （按钮禁用、`cursor: not-allowed`、标签"删除中…"），成功才移除条目并提示；
+   删除路径不再携带"格式升级"字符串分支（该串在核心与进程间层均无生产者，
+   属死代码；清藏消费点按 B 分支对齐，其余模块消费点由 T-1 独立跟踪）。
+3. **待重试队列迁移（Wave 2 深审子项）**：进程内 `pendingDedupeReleases` 由组件
+   迁入 `createDedupeReleaseQueue`（组合式导出），`startImport` 建会话前补释放，
+   语义不变（避免"删除后重导被静默跳过"残留为永久状态）。
+4. **交互余项（P3-3）**：导入对话框"开始加密导入"在勾选独立密码且口令为空时
+   禁用；密钥对话框"解密保存"在口令为空时禁用；禁用态 `cursor: not-allowed`
+   由全局主按钮样式承载。
+5. **回归防线**：新增 `useFileDelete.spec.ts` 4 例——批量失败回滚（零副作用 +
+   恢复后重试）/ 落盘失败（不重删、仅收尾重放）/ 去重键释放（成功释放、
+   失败入队与补释放、历史条目跳过）/ 成功路径（单次合并调用、缓存失效、
+   孤儿回收、删除后可重导；含历史内联形态与无后端记录边界）。
+6. **文档与注释全量同步**：方案实施记录与 §9.3 勾选、本进度、审查清单状态
+   回填（新增第十节）、`DATA_FLOW.md`（导入域会话/台账结算/去重跳过与删除
+   释放）、`ARCHITECTURE.md`（导入域单写者/台账/GC 守卫/分片读取）、
+   `SECURITY_DESIGN.md`（文件级 KDF v2、口令判定唯一化、去重键不含口令材料）、
+   `FileVerthys.vue` 模块头（删除语义）。
+
+#### 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 全量 Rust 单测 | cargo test --lib（src-tauri） | 426 passed（本波无 Rust 改动，与 Wave 3 一致） |
+| 静态检查 | cargo clippy --all-targets -- -D warnings | 0 告警 |
+| 前端单测 | npx vitest run | 330 passed（28 文件；新增 useFileDelete 4 例） |
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| CI 全量 | ci/run_ci.ps1（含 AST 第二级） | 全绿（exit 0；AST 基线 37 条存量豁免未动） |
+
+#### 能力边界
+
+- 去重键释放待重试队列为进程内：跨重启的极端窗口（释放失败且随后重启再导入
+  同一文件）仍会命中跳过并有提示，需再执行一次删除以补释放；释放失败本身
+  已含一次即时重试，实际触发概率极低。
+- 删除交互（删除中禁用态、"重试"入口、落盘失败文案）为交互式桌面实测项
+  （本环境无交互桌面，未实测）。
+
+#### 收尾交接清单
+
+1. 改动文件（未提交 git，与既有工作树同批）：
+   前端：`src/composables/file-verthys/useFileDelete.ts`（新）、
+   `useFileDelete.spec.ts`（新）、`src/components/modules/FileVerthys.vue`；
+   文档：`docs/RemediationPlan/{清藏模块导入文件链路修复方案,清藏模块导入文件链路审查清单,IMPL_PROGRESS}.md`、
+   `docs/{DATA_FLOW,ARCHITECTURE,SECURITY_DESIGN}.md`。
+2. 用户实测项（开发模式）：删除一个已导入文件 → 卡片短暂显示"删除中…"后消失
+   并提示"已删除"；重启后不复活；删除后重新导入同一文件 → 正常导入（不被
+   跳过）；勾选"独立加密"但不输入密码 → "开始加密导入"为禁用态；密钥对话框
+   口令为空 → "解密保存"为禁用态。
+3. 遗留：T-1 错误码契约收口（独立任务，不占本波出口门）；§9.1 中需交互式
+   桌面实测的大文件/杀进程/磁盘不足场景（本环境无交互桌面）。
+
+### T-1（2026-09-28）：错误码契约收口（P2-6 · 独立任务）
+
+#### 事实核实（A/B 分支前提，证据闭合）
+
+1. 核心为 V3-only：格式枚举仅保留 `VERTHYS_FMT_NONE/V3`
+   （`core/src/container/shared/verthys_internal.h:28-33`）；解锁格式门禁对
+   非 V3 头一律 `VERTHYS_ERR_FORMAT` 拒绝（`core/src/api/lifecycle/verthys_api.c:952-959`，
+   注释语义"V3 不读 V2 文件"，无应用内迁移路径，数据保全经由旧版本导出 /
+   新版导入）。
+2. 全部 V3 分发 API 对非 V3 返回 `VERTHYS_ERR_INTERNAL`
+   （`verthys_api.c:1160/1193/1228/1280/1478`）；扫描与导入导出返回
+   `VERTHYS_ERR_FORMAT`（`verthys_scan.c:513/683/796/856`、
+   `verthys_export_import.c:249/555/663`）；worker DLL 预检要求 fmt=3
+   （`verthys-worker/src/runtime/worker.rs:262-288`）。
+3. 结论：**不存在"已解锁但格式需升级"的状态**；`VERTHYS_WRITE_BLOCKED`
+   无生产者，其"格式升级"分支与文案（"重新打开应用重试升级"）为死代码且
+   误导（无应用内升级路径）。原两分支假设均不成立 → **裁定 B 分支（删除死分支）**；
+   A 分支为不可达状态发明后端接口，不采纳。
+
+#### 变更点（全仓收口）
+
+1. 消费点删除（16 处 + 注释 2 处）：`CertManager.vue` ×3、`AccountVerthys.vue` ×3、
+   `usePhotoDelete.ts` ×4、`usePhotoParse.ts` ×2、`usePhotoImport.ts` ×2、
+   `importPipeline.ts` ×2（另 1 处方法注释）、`verthys-flush-service.ts` 注释；
+   `FileVerthys.vue` 已于 Wave 4 对齐。删除后各路径按既有通用失败分支收口
+   （或直接抛错传播），死分支原不可达，可达行为不变。
+2. 照片链路"致命错误"机制保留：唯一可达类别为后端容量告罄（`ERR_0000000F`
+   → `storage-full`）；`importPipeline.spec.ts` 2 例由注入该字符串改写为容量
+   告罄类别，并新增映射断言（`failedRecords.reason === "storage-full"`、
+   错误文案含"存储空间不足"）。
+3. **锚点 C 启用**：`ci/run_ci.ps1` 新增锚点 8——全前端
+   （`verthys-tauri/src/**/*.{ts,vue}`）整串禁入 `VERTHYS_WRITE_BLOCKED`；
+   注入验证 [RED] + exit 1 后撤回复原。原冻结等式正则在实测中存在覆盖盲区
+   （`.includes(...)` 与 `msg ===` 形态），按整串禁入收紧并回写方案 §8.2。
+
+#### 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 全量 Rust 单测 | cargo test --lib（src-tauri） | 426 passed（本任务无 Rust 改动，沿用本树结果） |
+| 静态检查 | cargo clippy --all-targets -- -D warnings | 0 告警（同上） |
+| 前端单测 | npx vitest run | 340 passed（28 文件；T-1 改写 2 例断言口径，未增减用例数） |
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| CI 全量 | ci/run_ci.ps1（含锚点 8 与 AST） | 全绿（exit 0） |
+| 锚点 C 注入即红 | 注入字符串 → CI | [RED] + exit 1，随后撤回复原 |
+| 字符串零残留 | src 全目录检索 | 零命中 |
+
+#### 能力边界
+
+- 旧容器在解锁阶段被格式门禁拒绝的用户提示链路不在本任务核查范围
+  （观察项：如需面向旧容器的显式指引"请用旧版本导出后重新导入"，另行立项）。
+- vitest 全量 340 例含并行工作流对 `useTransitionEngine.spec.ts` 的扩充
+  （该文件非本任务改动），与本链路无关。
+
+#### 收尾交接清单
+
+1. 改动文件（未提交 git，与既有工作树同批）：
+   前端：`src/components/modules/{CertManager,AccountVerthys}.vue`、
+   `src/composables/photo-album/{usePhotoDelete,usePhotoParse,usePhotoImport}.ts`、
+   `src/composables/photo-album/importPipeline.ts` 及 `importPipeline.spec.ts`、
+   `src/cache/domain/verthys-flush-service.ts`（注释）；
+   CI：`ci/run_ci.ps1`（锚点 8）；
+   文档：`docs/RemediationPlan/{清藏模块导入文件链路修复方案,清藏模块导入文件链路审查清单,IMPL_PROGRESS}.md`。
+2. 用户实测项（开发模式）：证书新增/编辑/删除、账户新增/编辑/删除、照片删除、
+   加密文件解析导入、照片导入 —— 正常路径不回归（死分支删除不影响可达行为）。
+3. 遗留：无（P2-6 闭合，T-1 结项）。
+
+### 复审（2026-09-29）：修复后全链路复核与整改（第四次全链路审查）
+
+#### 复审范围与方法
+
+范围：清藏导入文件全链路（导入/列表/导出/删除）+ 其共享底座（会话 / 单写者 /
+台账 / WAL 结算 / GC 守卫 / 分片读取 / 磁盘预检）+ T-1 波及面（照片导入与
+致命机制、证书 / 账户消费点）。方法：前后端全量读码 + 跨层契约比对 +
+并发假说构造与验证（先证伪防线、再定位缺口）+ 全量门禁复跑。
+
+#### 假说验证（防线确认 / 高危假说证伪）
+
+1. **GC × 活跃会话**：`verthys_gc_orphan_chunks` 对活跃会话直接拒绝
+   （`verthys_batch_controller.rs:610-617`），前端 best-effort 吞错 →
+   不存在"GC 误删在途块"窗口（证伪）。
+2. **删除 × 导入并发**：`delete_records` 经 worker actor 串行
+   （`verthys_controller.rs:1876-1880`）；`forget_hashes` 活跃会话时经单写者
+   FIFO 落盘（`:440-475`）；删除不触碰 WAL/台账 → 无交错损坏（证伪）。
+3. **同会话同哈希块重传**：会话内幂等复用返回既有 ID（`import_writer.rs:688-692`），
+   前端 `id<=0` 失败判定不会误伤（证伪）。
+4. **结算不失证明**：会话创建先结算（committed chunk_ids → 台账 owner，
+   失败拒绝建会话）再截断 WAL，且墓碑基线固化回快照
+   （`verthys_wal.rs:616-663`）→ 删除后重导不复活（防线确认）。
+5. **结束义务**：成功结束前台账落盘失败即拒绝结束并保留 WAL
+   （`import_writer.rs:789-801`）；批末落盘失败置脏（防线确认）。
+6. **读取与预检**：分片越界即报错（`file_controller.rs:890-897`，含测试）、
+   磁盘预检回退最近已存在祖先（`:1361/:1381`）（防线确认）。
+7. **容量告罄判定属码匹配**：`ERR_0000000F` 为 worker 结构化错误码单一格式器
+   输出（`verthys-worker/src/runtime/protocol.rs:266`，格式由 `gmk.rs:540`
+   测试钉住）→ 非文案判定，保留（防线确认）。
+8. **导入中 UI 遮挡**：覆盖层 `inset:0` 全遮蔽（`ImportProgressOverlay.vue:93-101`）
+   → 同模块"删除 × 导入"不可达；跨模块删除按第 2 条收敛（证伪）。
+9. **模块切换（无 keep-alive）中的导入**：后台继续、缓存与落盘仍提交，
+   重入由会话冲突确认收敛，无重复入库 / 数据丢失（已评估收敛）。
+10. **去重键域隔离**：清藏 `BLAKE3(明文‖格式版本‖形态标志)`
+    （`useFileImport.ts:72-77`）与照片 `BLAKE3(明文)`（`crypto.ts:232`）
+    构造域不同，无互误跳过（证伪）。
+
+#### 发现与整改（3 项，全部根治）
+
+1. **导入确认键同步重入窗口（P2，并发）**：`startImport` 在首个 `await` 之前
+   未置位 `importing`，确认键连击 / 重复触发可双开导入（两轮会话并发互杀 +
+   重复入库窗口）。整改：同步重入闸门置位于首个 `await` 之前
+   （`FileVerthys.vue:501-507`）；待重试去重键补释放异常兜底不阻断。
+2. **落盘失败重试态的幽灵条目（P2，状态一致性）**：`E_PERSIST_FAILED` 保留
+   卡片与"重试"态（仅组件内存），而模块缓存仍含条目；组件无 keep-alive，
+   切模块重挂载后条目以常规卡片复活——数据层已删除：保存必失败、删除因
+   条目缺失被批量命令整体拒绝，形成"看得见却打不开、删不掉"的幽灵条目
+   （直至重启）。整改：模块缓存按"数据层视图"写入（`syncModuleCache`，
+   persist-retry 条目不入缓存，4 处写点统一：导入提交 / 删除收口 / 扫描回填 /
+   演示条目）。
+3. **会话冲突判定文案耦合（P3，违反"结果式契约"纪律）**：两处按后端文案
+   子串驱动控制流（`useFileImport.ts` 旧 `.includes("已有导入会话")` 与
+   `importPipeline.ts` 旧 `classifyBeginFailure` 三文案分支；且"正在自动清理"
+   引导与事实不符）。整改：`VerthysResponse` 增结构化 `error_code` 字段与
+   `err_code()` 构造器（`controller/types.rs:474-476/:612-617`）；`import_begin`
+   三个拒绝分支携带稳定错误码（`E_IMPORT_SESSION_BUSY` / `E_VERTHYS_NOT_READY`，
+   busy 出口收敛为单一构造函数 `import_session_busy_response`）；TS 侧导出
+   同源码常量（`lib/verthys.ts:525-529`），两消费点按码分支；照片引导文案改为
+   如实（等待重试 / 持续存在时重启清理会话）；新增 Rust 契约测试
+   （码值 + 序列化形态）与前端"无码不做冲突确认"用例。
+
+#### 复审批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 全量 Rust 单测 | cargo test --lib（src-tauri） | 427 passed（+1：会话冲突码契约） |
+| 静态检查 | cargo clippy --all-targets -- -D warnings | 0 告警 |
+| 前端单测 | npx vitest run | 343 passed（28 文件；本波 +1 冲突码用例，另含并行工作流扩充） |
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| CI 全量 | ci/run_ci.ps1（含锚点门与 AST） | 全绿（exit 0；AST 0 错误 0 警告，基线 37 条未动） |
+
+#### 边界（复审结束语）
+
+- 组件级防护（重入闸门、缓存视图一致性）与冲突引导文案为交互式桌面实测项
+  （本环境无交互桌面）；仓库无 SFC 组件测试基建，与既有测试口径一致。
+- 落盘失败重试态的跨重启窗口（未重试即退出）为既有声明边界：重启后记录复活
+  可正常再次删除，不产生不可恢复状态。
+
+### 2026-09-29 Wave 56：全局 Toast 层收口（唯一渲染层 + 最高层级令牌 · 四套并存实现归一）
+
+用户要求：toast 不被其它界面覆盖、必须在最高层，系统化工程化标准化修改。
+
+#### 问题定位（审查实测）
+
+1. **层级失控（根因）**：toast DOM 渲染在模块组件内部（拾光导出/复制/状态提示、
+   钥域/清藏底部提示等均未 Teleport），被困在 `#app`（z 1）→ 模块栈上下文内 ——
+   凡 Teleport 到 body 的弹窗（模块密钥窗 z 1000 / 二次确认 z 3000 / 导出对话框
+   z 4000）在根栈上下文绘制，必然整体盖过提示；既有逐处补丁各自为政
+   （z 999 / 4500 / 5000 / 100000 四套口径），拾光甚至需要 `.clip-toast--over-dialog`
+   手工抬层覆盖自家导出对话框。
+2. **状态分裂**：`useErrorToast` 非单例（每次调用各持一份 errorMsg），跨 composable
+   共享时提示丢失；拾光曾因此二次封装 `usePhotoToast` 补救 —— 同源问题两套实现。
+
+#### 变更点
+
+1. **唯一渲染层（新增）**：`components/common/feedback/ToastLayer.vue` ——
+   App 根节点单点挂载 + `<Teleport to="body">`，脱离 `#app` 栈上下文；
+   层容器 `pointer-events: none`（提示永不拦截交互）；空闲治理类（`idle-*`）
+   由层根节点按唯一权威源（useGlobalIdleScheduler）透传承载，Teleport 出栈后
+   `.toast-dot` 的暂停/豁免语义与主界面一致。
+2. **唯一状态中心（新增）**：`composables/useToastCenter.ts` —— 模块级单例状态 +
+   5 通道方法（error / status / copied / exportDone / clip），自动消失计时收敛
+   到中心（重复触发重置计时）；任何模块任意 composable 调用都写入同一份 ref。
+3. **层级唯一权威（标准化）**：`tokens.css` 新增分层序令牌 `--z-toast: 100000`
+   （注释载明全序：Dock 50 → 弹窗 1000 → 查看器 2000 → 确认 3000 → 导出 4000 →
+   遮罩/加载 9999 → 扫描线 9998 → Toast 100000）；`.toast-layer` 唯一持有，
+   提示本体不再声明 z-index，调整层级只改令牌一处。
+4. **样式收口**：`.toast-layer` / `.clip-toast`（含 `--top` / `--success` / `--error`
+   变体，自拾光 scoped 收编）/ 全局 `.toast-*` 过渡（模块 scoped 四份删除；
+   `!important` 压过 `.glass` 的 `transition: all`，与 `.err-toast-*` 同款处置）
+   全部归 `components.css`；`dashboard.css` 删除 `.sc-toast` + `toast-in` +
+   重复过渡（`.sc-toast` 系中枢私有实现，同批归一为 `.clip-toast`）。
+5. **调用方迁移（7 模块 + 2 composable）**：MainView/useModuleNavigation、中枢、
+   存签、枢钥、钥域、拾光、清藏 —— 模块内 toast DOM / 本地计时器 / 本地样式
+   全部清零，仅保留中心方法调用；`useClipToast(text)` 保留剪贴板生命周期
+   （写入 → 逐秒倒计时 → 到期覆写清零），渲染改经中心倒计时通道，
+   卸载时同步收起提示（防全局状态残留）。
+6. **拾光依赖注入口径保留**：子 composable 注入口径不变
+   （showError/showToast/showExportDone/showCopied），由 PhotoAlbum 绑定中心
+   方法（showToast 保留模块既有 2s 口径）；中枢子系统沿用 `showToast` 参数名
+   绑定标准状态通道，四个安全 composable 注入点零改动。
+7. **旧实现删除**：`useErrorToast.ts`、`photo-album/usePhotoToast.ts`、
+   `common/feedback/ToastOverlay.vue`、`common/verthys-ui/ClipToast.vue`
+   及 `ExportDoneToast` 类型；9 处 composable 注释口径同步
+   （「来自 useErrorToast/usePhotoToast」→「来自全局 Toast 中心」）。
+
+#### 关键约束（改动时勿破坏）
+
+- 全部瞬时提示必须且只能经 `useToastCenter` 写入、由 `ToastLayer` 渲染；
+  禁止任何模块再自行渲染 toast DOM（层级/状态分裂均由此而来）；
+- 层级唯一来源 = `tokens.css` 的 `--z-toast`（`.toast-layer` 持有）；
+  提示本体不得声明 z-index；
+- 新增提示通道时：`useToastCenter` 扩展状态 + `ToastLayer` 扩展渲染，保持一一对应；
+- `.toast-*` / `.err-toast-*` 过渡的 `!important` 为压过 `.glass { transition: all }`
+  所必需（同特异性、位序靠后），不得移除。
+
+#### 批次验证门
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 前端类型 | npx vue-tsc --noEmit | 0 错误 |
+| 前端单测 | npx vitest run | 343 passed（28 文件） |
+| 残留检索 | src 内 toast 渲染点 / `class="(error-toast\|clip-toast)"` | 仅 ToastLayer.vue（+ components.css 定义） |
+| 旧实现残留 | `useErrorToast\|usePhotoToast\|ToastOverlay\|ClipToast` 引用 | 0 命中（中心文件历史沿革注释除外） |
+| z-index 口径 | `z-index: 4500/5000/999`（toast 相关）| 0 命中 |
+| 前端构建 + 打包 | — | 由项目方执行（延续 Wave 46 起惯例，助手不代跑构建） |
+
+#### 收尾交接清单
+
+1. **用户实测项（开发模式）**：各模块触发提示（清藏导入/删除、钥域复制/导出、
+   存签/枢钥复制倒计时、拾光导入/导出/防截屏开关、中枢锁存与模块密钥操作）——
+   提示均在最高层，弹出导出对话框 / 查看器 / 二次确认时仍不被覆盖；
+   提示不再拦截底部区域点击（pointer-events: none）。
+2. **本波次改动文件**：新增 `composables/useToastCenter.ts`、
+   `components/common/feedback/ToastLayer.vue`；修改 `App.vue`、`MainView.vue`、
+   7 个模块组件、`useModuleNavigation.ts`、`useClipToast.ts`、
+   `styles/{tokens,components,security/dashboard}.css`、
+   照片链路 5 个 composable 与安全链路 4 个 composable（注释口径）；删除
+   4 个旧实现文件；未提交 git，与既有工作树同批待用户评审验收。
+
+#### 复审增补（同日 · 全链路全量审查）
+
+复审范围：状态中心 / 渲染层 / 层级令牌 / 治理契约 / 全量调用点 / 样式残留 /
+测试与文档，共七轴。结论：0 残留、0 未迁移调用点；发现 2 项缺陷与 1 项契约
+缺口，已整改；补 1 组防回退测试。
+
+1. **缺陷 1（已修）**：`tokens.css` 分层序注释绘制序倒置（9999 遮罩/加载
+   与 9998 扫描线次序写反）→ 按真实绘制序修正为
+   `… 4000 → 扫描线 9998 → 遮罩/加载 9999 → Toast 100000`。
+2. **缺陷 2（已修）**：`useClipToast` 卸载清理跨模块竞态 —— 模块切换为
+   交叉淡出（新旧短暂并存），旧实例卸载会误清新模块已接管的倒计时提示。
+   整改：以「对象身份归属判定」精确收回（`toastState.clip.value ===
+   本实例最后写入` 时才清除），中心侧只读不写第二来源。
+3. **契约补注（已加）**：`idle-governance.css` §3 增补维护契约 ——
+   `.toast-layer` 经 Teleport 挂 body、不在 `.app-root` 之下，其根节点按
+   唯一权威源透传 `idle-*` 类，豁免/暂停语义对立标同样生效。
+4. **新增防回退测试（已加）**：`composables/useToastCenter.spec.ts` 7 例 ——
+   单例语义（方法同一引用 / 后写覆盖先写）、error 2.5s + 重复触发重置、
+   status 默认 2.5s + 显式时长覆写（拾光 2s）、copied 1.5s、exportDone 2.6s
+   + 载荷保真、clip 长驻无计时、通道互不干扰。
+5. **全量核查结果（零残留证据）**：
+   - 写者纪律：`toastState.*.value` 直写仅存在于中心实现（模块/composable 零直写）；
+   - 渲染单点：toast 渲染 DOM 仅 `ToastLayer.vue`；`transition name="toast"/"err-toast"`
+     仅 Layer；`.clip-toast`/`.error-toast` 定义仅 `components.css`；
+   - 层级：全仓 `z-index` 数值扫描最大值 9999（遮罩/加载）< Toast 100000；
+     toast 相关 999/4500/5000 口径零命中；
+   - 调用点：7 模块 + 2 composable 逐点清点，与改前调用数一致
+     （清藏 20 / 拾光 12 / 钥域 6 / 枢钥 6 / 存签 5 / 中枢 4 / 导航 1）；
+   - 依赖面：无 barrel/index 引用删除物；无 spec 引用删除物；
+     `common/feedback/` 仅存 ToastLayer；所有编辑 CSS 经 postcss 解析通过。
+6. **有意行为差异（标准化结果，非缺陷；交接说明）**：
+   - 中枢私有 `.sc-toast`（bottom 30 / text-primary / 无立标）归一为标准
+     `.clip-toast`（bottom 24 / accent / 立标）—— 与清藏/钥域口径一致；
+   - 中枢「已复制到剪贴板」并入标准 copied 通道（1.5s / accent / 立标）；
+   - 提示不再随模块卸载被强杀：错误/状态/导出完成按自身时长自然消失，
+     倒计时按归属收回（全局层语义：消息不被模块切换中断）；
+   - deep-idle 下错误提示立标入场动画随治理暂停（与既有 inline 提示口径
+     统一；deep-idle 语义为用户远离 / 窗口失焦，可接受）。
+7. **复审后验证门**：`npx vue-tsc --noEmit` 0 错误；`npx vitest run`
+   350 passed（29 文件，含新增 7 例）；4 个编辑 CSS postcss 解析通过；
+   前端构建 + 打包仍由项目方执行（惯例不变）。
+
+#### 第二轮复审增补（同日 · 独立对抗式审查 + 演进态复核）
+
+复审方式：① 独立审查员对当前冻结态做对抗式审查（渲染单点 / 层级锚定 /
+治理透传 / 单写者 / 身份不变式 / CSS 收敛 / 删除物残留 / 死导入，共八轴）；
+② 对「提示底板 · 星野场」视觉演进态逐项复核引用完整性与治理覆盖。
+
+1. **P1 缺陷（本次唯一实质缺陷，已修）**：深响应式代理使对象身份比较失效
+   —— `ref` 包装对象时 `.value` 返回 Proxy，与写入方持有的原始对象恒不等，
+   引入「单写者自守」后倒计时会在第 1 秒自停（提示冻结在起始值、到期覆写
+   与剪贴板清空不再执行 —— 安全清空功能失效）。整改：载荷状态
+   （`exportDone` / `clip`）改用 `shallowRef`（恒定整体替换、身份稳定），
+   并在状态定义处注明不变式「禁止改回 deep ref」。
+2. **P2 补强（已加）**：到期清理路径加 try/catch（无 clipboard API 环境
+   不得以未捕获异常逃逸出计时回调）；新增 `useClipToast.spec.ts` 6 例
+   （倒计时递减 / 到期覆写与清空 / 无 API 健壮性 / 自守让出 / 卸载归属与
+   精确收回 / 重复复制重置）—— 该链路此前零覆盖，是本轮唯一 P1 的检出者。
+3. **P3（已修·注释口径）**：提示底板性能说明「存续 1.5~2.6s」与倒计时
+   通道现口径不符 → 补注「剪贴板倒计时最长 = COUNTDOWN_SECONDS 30s，
+   仍为单件小面积」。
+4. **P3（归入有意差异）**：剪贴板倒计时口径 15s → 30s（外部调整，非本次
+   引入）；相关测试改为**常量无关断言**（动态读取起步值，验证逐秒递减与
+   到期收束），口径再调整不再破测。
+5. **独立审查结论**：A 渲染单点 / B 层级与 containing block / C 治理透传 /
+   D 单写者纪律 / G 删除物残留 / H 死导入 = 全部无发现；E 身份不变式在
+   shallowRef 后成立（其提出的 15→30 表述问题已按第 4 条处置）；F 两处 P3
+   均非缺陷（PhotoAlbum 横幅为既有非 toast 元素复用立标；`.error-toast`
+   `position: fixed !important` 冗余但无害、保留以守约束）。
+6. **演进态复核（星野场底板）**：`--toast-surface`（tokens）与
+   `toast-field-drift-far/near`（animations，仅 transform、平铺宽单源）
+   定义齐备；reduced-motion 媒体查询已覆盖星野伪元素；提示脱离 `.glass`
+   后 `.toast-*` / `.err-toast-*` 去 `!important` 成立（无 `transition: all`
+   竞逐）；`isolation` + 星野 `z-index:-1` 的图层秩序正确（文字不被星点
+   覆盖）；idle-* 透传使漂移动画随空闲治理暂停。
+7. **已知既有特征（非本次引入；如需消除另立项）**：顶部
+   error 与 exportDone、底部 status/copied/clip 同位并存时完全重叠
+   （同一 24px 锚点）—— 需两条独立失败路径在 ≤2.6s 窗口内并发才可出现，
+   属原实现既有行为。
+8. **第二轮验证门**：`npx vue-tsc --noEmit` 0 错误；`npx vitest run`
+   356 passed（30 文件，含新增 useClipToast 6 例）；4 个 CSS
+   （components / tokens / animations / idle-governance）postcss 解析通过。

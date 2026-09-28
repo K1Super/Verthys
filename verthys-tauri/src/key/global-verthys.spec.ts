@@ -163,7 +163,6 @@ beforeEach(() => {
       key_separation: true,
       emergency_response: true,
       session_lock_on_idle: true,
-      shadow_sleep: true,
       module_patrol: true,
       clip_clear_on_lock: true,
       usb_clone_detect: true,

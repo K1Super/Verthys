@@ -29,111 +29,226 @@
 .gen-btn--spin:hover:not(:disabled) svg { transform: rotate(180deg); }
 .gen-btn--spin:active:not(:disabled) svg { transform: rotate(360deg); transition: transform 0.6s var(--ease); }
 
-/* ===== 全局复用：复制成功提示（clip-toast）=====
- * 源自账户模块，统一所有复制提示样式
- * 用法：<div class="clip-toast glass"><span class="toast-dot"></span>已复制</div>
- * toast-dot 为提示前导「视界立标」（定义见下） */
+/* ===== 全局复用：Toast 层（唯一渲染通道 / 全应用最高层）=====
+ * 所有瞬时提示（错误 / 状态 / 复制 / 导出完成 / 剪贴板倒计时）统一由
+ * components/common/feedback/ToastLayer.vue 渲染，禁止任何模块自行渲染
+ * toast DOM（DOM 分裂 + 层级失控 + 模块切换叠加残留的根源）。
+ *   - 单点挂载（App 根节点）+ <Teleport to="body">：提示脱离 #app 栈
+ *     上下文，弹窗 / 查看器 / 覆盖层（z 1000~9999）均无法覆盖；
+ *   - 层级唯一权威 = --z-toast（tokens.css 分层序最高层）——
+ *     提示本体不声明 z-index，调整层级只改令牌一处；
+ *   - pointer-events: none：提示永不拦截交互。 */
+.toast-layer {
+  position: fixed; inset: 0;
+  z-index: var(--z-toast);
+  pointer-events: none;
+}
+
+/* ===== 全局复用：状态提示（clip-toast）=====
+ * 全应用成功 / 状态提示的布局与语义色；底板构图与星野由下方
+ * 「提示底板 · 星野场」统一承载（.error-toast 同源共用）
+ * 用法（仅 ToastLayer 内）：<div class="clip-toast"><span class="toast-dot"></span>已复制</div> */
 .clip-toast {
+  --mark-c: var(--accent);
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
   display: flex; align-items: center; gap: 8px;
   padding: 10px 20px; font-size: 12px;
   color: var(--accent); font-family: var(--font);
-  z-index: 999;
 }
-/* 视界立标（原创 3D 立标 — 引力视界）：
- *   构图：以黑洞真实天体结构为基准的三层纵深 —
- *     影子（视界黑洞，最底）→ 光子环（爱因斯坦环发丝亮圈）→
- *     吸积盘近掠弧（盘面自影子正前方横切，最前），
- *     盘弧内缘越过视界边缘的遮挡关系即空间纵深；
- *   多普勒：三层亮部同偏左下方位（约 220° 单肢增亮）、盘弧热核与
- *     光子环亮肢错相 8°，模拟相对论束流且含可控不规则偏差；
- *   盘弧：横切弧从 92° 至 311°，左右收口步宽错落（5/7/8 与 6/7/6 度
- *     硬边分阶），拒绝镜像对称；热核近白色沿弧向两端密度渐弱；
- *   影形：视界为近黑实心圆硬边切割（零羽化、零发光），盘弧内缘
- *     切入影子下半圆 — 黑洞遮断星光的正确剪影关系；
- *   入场：影子凝聚 → 光子环旋转坍缩锁定 → 盘弧反向掠切，三段
- *     因果时序、每段独立复合缓动（非单一标准曲线），全程仅动
- *     opacity/transform（合成器属性），环形遮罩与锥形渐变静态一次
- *     栅格化；末帧与落态 transform 一致（零跳变）；
- *   主题色经 --mark-c 单一色源注入，光子环混入冷白冰色
- *   派生（error 红 / success 绿 / 默认青），影形恒为虚空深色不随
- *   主题；reduced-motion 与空闲治理停用动画时静态呈现完整形态。 */
+/* 顶部变体（导出完成等顶部状态感知）：自底部定位上翻 */
+.clip-toast--top { top: 24px; bottom: auto; }
+/* 语义变体：success 亮绿 / error 危险红 —— 变体类为底板光晕与立标
+ * 注入同一 --mark-c，提示整体（场 + 标）同色系 */
+.clip-toast--success { --mark-c: #00ffaa; color: #00ffaa; }
+.clip-toast--success .toast-dot { --mark-c: #00ffaa; }
+.clip-toast--error { --mark-c: var(--danger); color: var(--danger); }
+.clip-toast--error .toast-dot { --mark-c: var(--danger); }
+/* 状态提示出入场过渡（全局唯一定义，模块 scoped 变体已全部收编） */
+.toast-enter-active, .toast-leave-active { transition: opacity 0.3s var(--ease), transform 0.3s var(--ease); }
+.toast-enter-from, .toast-leave-to { opacity: 0; transform: translate(-50%, 10px); }
+
+/* ===== 全局复用：提示底板 · 星野场（clip-toast / error-toast 共用）=====
+ * 材质：通透玻璃体 —— 低不透明填充让衬底轮廓可辨，可读性由背衬折射与
+ * 内缘收边承担：看得清轮廓是通透，被抹平是哑光，本皮肤取前者。
+ * 构图自下而上：
+ *   1. 玻璃基面（tokens.css --toast-surface）；
+ *   2. 语义色微晕：偏立标一侧的极淡径向（--mark-c 派生，8% 封顶）——
+ *      与立标同源于 --mark-c 单色源，不是独立装饰；
+ *   3. 镜面转折反光：左上向下的极淡斜掠高光（玻璃面的入射角反光）；
+ *   4. 双平面星野（::before 远 / ::after 近）：逐周期位移 = 平铺宽
+ *      （repeat-x 与位移严格等长）→ 循环无接缝；两平面速度互异形成纵深。
+ * 胎体棱线：无描边 —— 顶缘亮收边 + 底缘微亮收边即全部轮廓（上下棱线同收）。
+ * 图层秩序：面板自成栈（本身带 transform 亦成栈，声明 isolation 显式固定
+ * 语义），星野走 z-index:-1 —— 位于底板之上、文字与立标之下，
+ * 文字永不被星点覆盖；面板裁圆角（overflow）令星野仅呈现于提示之内。
+ * 背衬折射的适用范围：提示为瞬时少量元素（同屏至多 4 件、单件约万级 px²、
+ * 存续 1.5~2.6s；剪贴板倒计时通道最长 = COUNTDOWN_SECONDS 30s，
+ * 仍为单件小面积且漂移动画随空闲治理暂停），与「数十张常驻卡片逐帧
+ * 重采样」的过载成因不同量级；
+ * 帧预算降级 minimal-motion 档位会全局移除背衬折射，不支持时仅损失折射，
+ * 玻璃体仍由填充与棱线独立成立。
+ * 性能：仅动 transform（合成器属性），渐变与描边静态一次栅格化；
+ * 氛围动画随空闲治理自动暂停，reduced-motion 下静态呈现完整底板。 */
+.clip-toast,
+.error-toast {
+  isolation: isolate;
+  overflow: hidden;
+  border-radius: var(--radius);
+  /* 无框裁定：不设描边 —— 轮廓由上下收边（玻璃棱线）与投影界定；
+     描边是「框」，收边是「光」：通透玻璃的边缘应当反光而非被画线 */
+  /* 背衬折射：低不透明填充下的可读性担当 —— 模糊半径刻意收敛
+     （连通轮廓保留 = 通透；抹平轮廓 = 哑光），提纯与提亮补足色彩显度 */
+  -webkit-backdrop-filter: blur(10px) saturate(150%) brightness(1.05);
+  backdrop-filter: blur(10px) saturate(150%) brightness(1.05);
+  background:
+    linear-gradient(112deg, rgba(var(--white-rgb), 0.09), rgba(var(--white-rgb), 0.02) 36%, transparent 60%),
+    radial-gradient(
+      ellipse 150% 240% at 3% 50%,
+      color-mix(in srgb, var(--mark-c) 8%, transparent),
+      transparent 62%
+    ),
+    var(--toast-surface);
+  box-shadow:
+    0 16px 40px rgba(var(--black-rgb), 0.54),
+    0 2px 10px rgba(var(--black-rgb), 0.36),
+    /* 无描边后轮廓全由收边承担：顶亮底弱 —— 光自上方，棱线随光向分强弱 */
+    inset 0 1px 0 rgba(var(--white-rgb), 0.14),
+    inset 0 -1px 0 rgba(var(--white-rgb), 0.07);
+}
+/* 星野平铺宽（单源）：层宽、平铺宽与漂移位移共用同一定义，
+ * 三处不会漂移失配 */
+.clip-toast,
+.error-toast {
+  --toast-tile-far: 240px;
+  --toast-tile-near: 320px;
+}
+.clip-toast::before,
+.clip-toast::after,
+.error-toast::before,
+.error-toast::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-repeat: repeat-x;
+  will-change: transform;
+}
+/* 远平面：颗粒细 / 亮度低 / 96s 缓漂（深度最远） */
+.clip-toast::before,
+.error-toast::before {
+  width: calc(100% + var(--toast-tile-far));
+  background-size: var(--toast-tile-far) 100%;
+  background-image:
+    radial-gradient(circle 0.9px at 14% 30%, rgba(255, 255, 255, 0.34), transparent 100%),
+    radial-gradient(circle 0.7px at 33% 72%, rgba(200, 230, 245, 0.26), transparent 100%),
+    radial-gradient(circle 0.8px at 52% 24%, rgba(255, 255, 255, 0.28), transparent 100%),
+    radial-gradient(circle 0.7px at 71% 66%, rgba(201, 189, 242, 0.24), transparent 100%),
+    radial-gradient(circle 0.8px at 88% 44%, rgba(200, 230, 245, 0.26), transparent 100%);
+  animation: toast-field-drift-far 97s linear infinite;
+}
+/* 近平面：颗粒略大 / 亮度略高 / 61s 缓漂（与远平面周期互质，免机械同步） */
+.clip-toast::after,
+.error-toast::after {
+  width: calc(100% + var(--toast-tile-near));
+  background-size: var(--toast-tile-near) 100%;
+  background-image:
+    radial-gradient(circle 1.3px at 18% 34%, rgba(255, 255, 255, 0.55), transparent 100%),
+    radial-gradient(circle 1.1px at 44% 70%, rgba(200, 230, 245, 0.46), transparent 100%),
+    radial-gradient(circle 1.2px at 66% 26%, rgba(201, 189, 242, 0.42), transparent 100%),
+    radial-gradient(circle 1.0px at 86% 76%, rgba(255, 255, 255, 0.50), transparent 100%);
+  animation: toast-field-drift-near 61s linear infinite;
+}
+/* 极光幕立标（原创 3D 动态立标 — 极地光学现象）：
+ *   取「极点之上」的原型：前景光幕 + 后景纱幕（纯光幕，不设立柱）——
+ *   与星野场（星点）、登记台徽记（环轨）、已弃用的黑洞语言（环形 /
+ *   辉光球）全无重合。
+ *   双幕（真实极光解剖，非装饰飘带）：
+ *     前景幕 = 三根不等高幕肋 + 幕体薄雾 + 亮下沿（真实极光的下边界最亮）
+ *       —— 以软椭圆包络遮罩收形，杜绝读成条形码；
+ *     后景纱幕 = 中性冷调（不随语义色）+ 一抹淡紫，错角 +13° 且更宽更虚 ——
+ *       双幕错角即透视纵深；双幕走 z-index:-1，前幕遮后幕即前后景关系。
+ *   入场（因果时序，单次播放）：前景幕自上方垂落铺展（缩放支点在幕顶，
+ *     亮下沿领先扫下）→ 后景纱幕随后跟上；每段独立复合缓动，
+ *     末帧与落态一致（零跳变）。
+ *   常驻缓流：双幕以互质周期（6.7s / 8.3s）起伏摇曳（支点在幕顶，
+ *     下沿摆幅最大），前景与后景相位互异。
+ *   主题色经 --mark-c 单源注入（error 红 / success 绿 / 默认青），
+ *   后景纱幕保持中性冷调；全程仅动 opacity/transform，渐变与遮罩
+ *   静态一次栅格化；空闲治理自动暂停，reduced-motion 静态完整成形。 */
 .toast-dot {
   --mark-c: var(--accent);
   position: relative;
   width: 18px; height: 18px;
   flex-shrink: 0;
-  /* 影子（底）：近黑实心圆（硬边切割，零羽化） */
-  background-image: radial-gradient(circle 4.9px at 50% 50%, #04060c 0 92%, #05090f 93% 98%, transparent 99%);
-  animation: toast-void-birth 0.5s backwards;
+  /* 本体不绘制：仅作双幕的定位盒与 --mark-c 载体（纯光幕，不设立柱） */
 }
-/* 光子环（发丝亮圈）：环形遮罩贴视界边缘，锥形渐变压暗 8 段连续
- * 不对称偏亮（205°-250° 全亮单肢），环色混冷白冰色 — 多普勒亮肢 */
+/* 前景光幕：亮下沿 + 三幕肋 + 幕体薄雾；垂落支点在幕顶，下沿摆幅最大 */
 .toast-dot::before {
   content: '';
   position: absolute; inset: 0;
-  --ring: color-mix(in srgb, var(--mark-c) 62%, #e6f6fd);
-  -webkit-mask: radial-gradient(circle at 50% 50%, transparent 0 4.78px, #000 4.86px 5.32px, transparent 5.4px);
-  mask: radial-gradient(circle at 50% 50%, transparent 0 4.78px, #000 4.86px 5.32px, transparent 5.4px);
-  background: conic-gradient(
-    color-mix(in srgb, var(--ring) 34%, transparent) 0deg 40deg,
-    color-mix(in srgb, var(--ring) 50%, transparent) 40deg 90deg,
-    color-mix(in srgb, var(--ring) 68%, transparent) 90deg 140deg,
-    color-mix(in srgb, var(--ring) 86%, transparent) 140deg 205deg,
-    var(--ring) 205deg 250deg,
-    color-mix(in srgb, var(--ring) 82%, transparent) 250deg 292deg,
-    color-mix(in srgb, var(--ring) 56%, transparent) 292deg 328deg,
-    color-mix(in srgb, var(--ring) 38%, transparent) 328deg 360deg
-  );
-  transform: rotate(8deg);
-  animation: toast-ring-lock 0.66s 0.05s backwards;
+  z-index: -1;
+  transform: rotate(-7deg);
+  transform-origin: 50% 23%;
+  -webkit-mask: radial-gradient(ellipse 9.6px 7.6px at 50% 47%, #000 0 46%, transparent 84%);
+  mask: radial-gradient(ellipse 9.6px 7.6px at 50% 47%, #000 0 46%, transparent 84%);
+  background-image:
+    linear-gradient(0deg, transparent 51%, color-mix(in srgb, var(--mark-c) 52%, #f2fbff) 55%, transparent 61%),
+    radial-gradient(ellipse 1.3px 5.4px at 30% 49%, color-mix(in srgb, var(--mark-c) 60%, #e8f7ff) 0 30%, transparent 78%),
+    radial-gradient(ellipse 1px 4px at 52% 45%, color-mix(in srgb, var(--mark-c) 50%, #eef9ff) 0 26%, transparent 76%),
+    radial-gradient(ellipse 1.2px 6px at 72% 51%, color-mix(in srgb, var(--mark-c) 56%, #dff2fb) 0 28%, transparent 78%),
+    radial-gradient(ellipse 7.8px 6.4px at 50% 47%, color-mix(in srgb, var(--mark-c) 15%, transparent) 0 34%, transparent 82%);
+  animation:
+    toast-aurora-curtain 0.66s 0.04s backwards,
+    toast-aurora-drift 6.7s 0.7s infinite;
 }
-/* 吸积盘近掠弧（前层）：锥形横切弧自 92° 至 311°，入口三段硬边
- * 分阶上爬（5/7/8 度）、出口三段下落（6/7/6 度）步宽错落；
- * 196°-248° 热核近白（束流最强侧），其余满色填充 — 贴影横掠 */
+/* 后景纱幕：中性冷调 + 一抹淡紫，更宽更虚、错角反向 —— 纵深平面 */
 .toast-dot::after {
   content: '';
   position: absolute; inset: 0;
-  -webkit-mask: radial-gradient(circle at 50% 50%, transparent 0 3.88px, #000 3.96px 5.88px, transparent 5.96px);
-  mask: radial-gradient(circle at 50% 50%, transparent 0 3.88px, #000 3.96px 5.88px, transparent 5.96px);
-  background: conic-gradient(
-    transparent 0deg 92deg,
-    color-mix(in srgb, var(--mark-c) 38%, transparent) 92deg 97deg,
-    color-mix(in srgb, var(--mark-c) 62%, transparent) 97deg 104deg,
-    color-mix(in srgb, var(--mark-c) 86%, transparent) 104deg 112deg,
-    var(--mark-c) 112deg 196deg,
-    color-mix(in srgb, var(--mark-c) 82%, #f0fcff) 196deg 248deg,
-    var(--mark-c) 248deg 292deg,
-    color-mix(in srgb, var(--mark-c) 72%, transparent) 292deg 298deg,
-    color-mix(in srgb, var(--mark-c) 42%, transparent) 298deg 305deg,
-    color-mix(in srgb, var(--mark-c) 16%, transparent) 305deg 311deg,
-    transparent 311deg 360deg
-  );
-  transform: rotate(-14deg);
-  animation: toast-disk-razor 0.52s 0.17s backwards;
+  z-index: -1;
+  transform: rotate(6deg);
+  transform-origin: 50% 21%;
+  -webkit-mask: radial-gradient(ellipse 10.4px 8.4px at 52% 45%, #000 0 42%, transparent 82%);
+  mask: radial-gradient(ellipse 10.4px 8.4px at 52% 45%, #000 0 42%, transparent 82%);
+  background-image:
+    linear-gradient(0deg, transparent 53%, rgba(226, 240, 250, 0.24) 57%, transparent 63%),
+    radial-gradient(ellipse 1.6px 6.4px at 38% 43%, rgba(226, 240, 250, 0.26) 0 26%, transparent 78%),
+    radial-gradient(ellipse 1.4px 5px at 66% 47%, rgba(201, 189, 242, 0.22) 0 24%, transparent 76%),
+    radial-gradient(ellipse 8.6px 7px at 52% 45%, rgba(214, 236, 248, 0.12) 0 32%, transparent 82%);
+  animation:
+    toast-aurora-veil 0.72s 0.08s backwards,
+    toast-aurora-veil-drift 8.3s 0.8s infinite;
 }
-/* 无障碍：减少动态 → 视界静态呈现（落态 transform 即静态值，结构完整） */
+/* 无障碍：减少动态 → 极光幕与星野静态呈现
+ * （落态 transform / 平铺原位即静态值，形态完整） */
 @media (prefers-reduced-motion: reduce) {
   .toast-dot,
   .toast-dot::before,
-  .toast-dot::after {
+  .toast-dot::after,
+  .clip-toast::before,
+  .clip-toast::after,
+  .error-toast::before,
+  .error-toast::after {
     animation: none;
   }
 }
 
 /* ===== 全局复用：错误提示（error-toast）— 顶部红色弹窗，与 clip-toast 同结构 =====
- * 用法：<div class="error-toast glass"><span class="toast-dot"></span>错误信息</div>
+ * 用法（仅 ToastLayer 内）：<div class="error-toast"><span class="toast-dot"></span>错误信息</div>
+ * 底板与星野：「提示底板 · 星野场」共用定义（.clip-toast / .error-toast 选择器组）
+ * 层级：由 .toast-layer 统一持 --z-toast（100000）—— 提示本体不声明 z-index
  * 配合 transition name="err-toast" 使用 */
 .error-toast {
+  --mark-c: var(--danger);
   position: fixed !important; top: 24px; left: 50%; transform: translate(-50%, 0);
   display: flex; align-items: center; gap: 8px;
   padding: 10px 20px; font-size: 12px;
   color: var(--danger); font-family: var(--font);
-  z-index: 100000;
   pointer-events: none;
 }
 .error-toast .toast-dot { --mark-c: var(--danger); }
-.err-toast-enter-active, .err-toast-leave-active { transition: opacity 0.3s var(--ease), transform 0.3s var(--ease) !important; }
+.err-toast-enter-active, .err-toast-leave-active { transition: opacity 0.3s var(--ease), transform 0.3s var(--ease); }
 .err-toast-enter-from, .err-toast-leave-to { opacity: 0; transform: translate(-50%, -10px); }
 
 /* ===== 玻璃质感卡片 ===== */
@@ -157,6 +272,20 @@
     0 12px 40px rgba(var(--black-rgb), 0.5),
     0 0 1px rgba(var(--accent-rgb), 0.15),
     inset 0 1px 0 rgba(var(--white-rgb), 0.06);
+}
+
+/* ===== 全局复用：星野导航带（starlit-bar）=====
+ * 无框半透明导航带的承载类：为装饰层（StarlitSky）建立定位上下文与
+ * 图层秩序 —— 星野沉底、其余子元素浮上。底板、星野与溶解边界全部由
+ * StarlitSky 承担，承载方只负责布局（排列与内距），
+ * 一律不设边框、圆角与投影（边界由渐变消解，而非线条切割） */
+.starlit-bar {
+  position: relative;
+  isolation: isolate;
+}
+.starlit-bar > :not(.starlit-sky) {
+  position: relative;
+  z-index: 1;
 }
 
 /* ===== 故障文字特效 ===== */

@@ -57,6 +57,7 @@
         <ManagementTopBar
           :global-key-ready="globalKeyReady"
           :session-remaining="sessionRemaining"
+          :idle-lock-enabled="idleLockEnabled"
           @lock-all="$emit('lockAll')"
         />
 
@@ -111,6 +112,7 @@
           :custom-panel-open="customPanelOpen"
           :defense-paths="defensePaths"
           :defense-meta="defenseMeta"
+          :preset-sync-failed="presetSyncFailed"
           v-model:orbit-slider-pos="orbitSliderPos"
           @toggle-gear-panel="$emit('toggleGearPanel')"
           @toggle-custom-feature="(key) => $emit('toggleCustomFeature', key)"
@@ -145,6 +147,8 @@ const props = defineProps<{
   globalKeyReady: boolean;
   /** 会话剩余时间（毫秒，UI 倒计时显示） */
   sessionRemaining: number;
+  /** 会话空闲锁定开关（false = 不自动锁定） */
+  idleLockEnabled: boolean;
   /** 设备绑定校验结果（引导单元视觉形态） */
   deviceCheckResult: DeviceCheckResult;
   /** 设备机器码短显示 */
@@ -205,6 +209,8 @@ const props = defineProps<{
   defensePaths: DefensePathView[];
   /** 动态防护汇总态势（计数 + 全阻断标志 + 总体态势） */
   defenseMeta: DefenseMetaView;
+  /** 档位同步失败标志（恢复链失败时展示警示文案） */
+  presetSyncFailed: boolean;
 }>();
 
 /* ===== defineModel：无极轨道滑块位置双向绑定（透传至 SecurityDashboard） ===== */

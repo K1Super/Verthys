@@ -125,9 +125,9 @@ export function withFrontendTimeout<T>(
 export interface UseUnlockFlowOptions {
   /** 是否处于 Tauri 环境 */
   isTauri: boolean;
-  /** 显示错误提示的方法（来自 useErrorToast） */
+  /** 显示错误提示的方法（来自全局 Toast 中心） */
   showError: (msg: string) => void;
-  /** 显示成功提示的方法（来自 useErrorToast） */
+  /** 显示成功提示的方法（来自全局 Toast 中心） */
   showToast: (msg: string) => void;
   /** 设备机器码校验回调（fire-and-forget 调用） */
   checkDevice: () => Promise<void>;
@@ -198,15 +198,15 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
   /**
    * 新建 .verthys 文件。
    *
-   * 触发系统文件保存对话框，选中后自动补全 .verthys 扩展名，
-   * 填充 verthysPath 并标记为新建操作。
+   * 触发系统文件保存对话框（默认文件名 Vault.verthys），选中后自动补全
+   * .verthys 扩展名，填充 verthysPath 并标记为新建操作。
    */
   const createNewVerthys = async () => {
     if (!options.isTauri || unlocking.value) return;
     try {
       const newPath = await save({
         filters: [{ name: 'Verthys 加密库', extensions: ['verthys'] }],
-        defaultPath: 'verthys.verthys',
+        defaultPath: 'Vault.verthys',
       });
       if (!newPath) return;
       const finalPath = newPath.toLowerCase().endsWith('.verthys') ? newPath : newPath + '.verthys';

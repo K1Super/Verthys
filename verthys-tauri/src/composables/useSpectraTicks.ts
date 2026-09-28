@@ -17,6 +17,8 @@
  * =============================================================================
  */
 
+import { INTRO } from "../app/constants";
+
 /** 谱线变体：intro = 引导页充能组 / echo = 主界面静默回声 */
 export type SpectraVariant = "intro" | "echo";
 
@@ -52,9 +54,9 @@ const hash = (seed: number, salt: number): number => {
 export function useSpectraTicks(variant: SpectraVariant): SpectraTick[] {
   const intro = variant === "intro";
   const N = intro ? 9 : 6;
-  /* intro：charged 类挂载时刻（与逆渡 INTRO_T 收束同步）— 呼吸延迟
-   * 换算基准（充能未完的线，呼吸在其充能恰好结束后无缝接入） */
-  const CHARGED_AT = 3050;
+  /* intro：charged 类挂载时刻（与逆渡时长同源对齐）— 呼吸延迟换算
+   * 基准（充能未完的线，呼吸在其充能恰好结束后无缝接入） */
+  const CHARGED_AT = INTRO.CHARGED;
   const GROW_DUR = intro ? 900 : 700; // 入场动画时长（charge/tick-in）
 
   return Array.from({ length: N }, (_, i) => {

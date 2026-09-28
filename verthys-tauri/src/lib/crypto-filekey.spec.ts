@@ -11,9 +11,13 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   encryptChunk, decryptChunk, clearFileKeyCache, getFileKeyCacheSize,
+  createFileKeyV2, unlockFileKeyV2, encryptChunkV2, decryptChunkV2,
+  buildPasswordCheckV2, verifyPasswordCheckV2,
+  encryptPasswordField, decryptPasswordField,
+  FILE_KDF_V2_VERSION, FILE_V2_IV_LEN,
 } from "./crypto";
 import { bytesToBase64, base64ToBytes } from "../utils/binary_codec";
-import { FILE_HASH_LEN, SALT_LEN } from "../constants/crypto_const";
+import { FILE_HASH_LEN, SALT_LEN, TAG_LEN, PBKDF2_ITER } from "../constants/crypto_const";
 
 const MODULE_KEY = "photo-module-key";
 const FILE_HASH = "a".repeat(FILE_HASH_LEN * 2);
@@ -92,5 +96,70 @@ describe("文件子密钥按盐复用", () => {
     await expect(
       decryptChunk(bytesToBase64(tampered), MODULE_KEY, FILE_HASH),
     ).rejects.toThrow();
+  });
+});
+
+describe("文件级密钥层（清藏外置块：一次派生 + 逐块 AES-GCM）", () => {
+  it("v2 多块往返：派生参数契约成立、块密文结构固定、明文逐字节还原", async () => {
+    const key = await createFileKeyV2("pwd-一号");
+
+    expect(key.kdf.version).toBe(FILE_KDF_V2_VERSION);
+    expect(key.kdf.iterations).toBe(PBKDF2_ITER);
+    expect(base64ToBytes(key.kdf.saltB64)).toHaveLength(SALT_LEN);
+
+    const chunks = [new Uint8Array([1, 2, 3]), new Uint8Array(1000).fill(7)];
+    for (const plain of chunks) {
+      const cipher = await encryptChunkV2(plain, key);
+      // iv(12) + 密文 + 认证标签(16)
+      expect(cipher.length).toBe(FILE_V2_IV_LEN + plain.length + TAG_LEN);
+      const back = await decryptChunkV2(cipher, key);
+      expect(Array.from(back)).toEqual(Array.from(plain));
+    }
+  });
+
+  it("v2 篡改检测：块密文任一字节被改即拒绝", async () => {
+    const key = await createFileKeyV2("pwd-tamper");
+    const cipher = await encryptChunkV2(new Uint8Array([9, 9, 9]), key);
+
+    const tampered = new Uint8Array(cipher);
+    tampered[FILE_V2_IV_LEN] ^= 0x01;
+    await expect(decryptChunkV2(tampered, key)).rejects.toThrow();
+  });
+
+  it("passwordCheck：正确口令通过、错误口令不通过、篡改即不通过（不抛错）", async () => {
+    const key = await createFileKeyV2("right-pwd");
+    const check = await buildPasswordCheckV2(key);
+    expect(await verifyPasswordCheckV2(check, key)).toBe(true);
+
+    // 同盐同口令重新解锁 → 仍通过（判定与派生批次无关）
+    const same = await unlockFileKeyV2("right-pwd", key.kdf);
+    expect(await verifyPasswordCheckV2(check, same)).toBe(true);
+
+    // 错误口令 → 不通过，且不抛错（供前置分支消费）
+    const wrong = await unlockFileKeyV2("wrong-pwd", key.kdf);
+    expect(await verifyPasswordCheckV2(check, wrong)).toBe(false);
+
+    // 校验块被篡改 → 不通过
+    const bytes = base64ToBytes(check);
+    bytes[bytes.length - 1] ^= 0x01;
+    expect(await verifyPasswordCheckV2(bytesToBase64(bytes), key)).toBe(false);
+  });
+
+  it("解锁参数校验：盐长度非法即拒绝（不进入派生）", async () => {
+    await expect(
+      unlockFileKeyV2("pwd", {
+        version: FILE_KDF_V2_VERSION,
+        saltB64: bytesToBase64(new Uint8Array(3)),
+        iterations: PBKDF2_ITER,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("v1 兼容：历史逐块盐形态（salt|iv|ct）仍可往返，错误口令即失败", async () => {
+    const plain = bytesToBase64(new TextEncoder().encode("legacy-payload"));
+    const enc = await encryptPasswordField(plain, "pwd-legacy");
+
+    expect(await decryptPasswordField(enc, "pwd-legacy")).toBe(plain);
+    await expect(decryptPasswordField(enc, "pwd-other")).rejects.toThrow();
   });
 });

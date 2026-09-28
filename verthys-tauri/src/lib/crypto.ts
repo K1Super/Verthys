@@ -1428,6 +1428,157 @@ export async function decryptPasswordField(b64: string, passphrase: string): Pro
 }
 
 /* ------------------------------------------------------------------ *
+ * 文件级密钥层（清藏文件外置块：一次派生 + 逐块 AES-GCM）             *
+ *                                                                    *
+ * 与逐字段层（每块独立盐、每块一次 PBKDF2）的差异：                    *
+ *   - 密钥由「口令 + 文件盐」派生一次，文件内全部块复用同一句柄，      *
+ *     块循环只剩 AES-GCM（大文件的派生占比由"每块一次"降为"每文件一次"）；*
+ *   - 块密文 = iv(12) ‖ ct+tag；盐随元数据持久化，不随块重复；         *
+ *   - 密码判定点唯一：passwordCheck（固定明文的一次 AEAD）在导出前置   *
+ *     校验，块解密失败一律按数据损坏处理，不据"全部块失败"推断密码错。 *
+ *                                                                    *
+ * 内存约束：派生的原始密钥仅用于导入 AES 句柄，随即清零，不随对象驻留。*
+ * 去重说明：去重键不取本层任何材料（见"去重键尾部形态标识"的既有口径）——*
+ * 会话日志为明文落盘，任何口令派生量入键即构成可离线爆破的验证器。     *
+ * ------------------------------------------------------------------ */
+
+/** 文件级密钥派生参数（随元数据持久化，读取侧据此解锁） */
+export interface FileKdfV2 {
+  /** 派生方案标识（读取侧据此分流；当前仅 2） */
+  version: number;
+  /** 文件盐（base64，16 字节） */
+  saltB64: string;
+  /** PBKDF2-SHA256 迭代次数 */
+  iterations: number;
+}
+
+/** 文件级密钥句柄（AES-GCM 句柄 + 持久化派生参数） */
+export interface FileKeyV2 {
+  /** AES-GCM 密钥句柄（原始密钥已清零，仅此句柄可用） */
+  key: CryptoKey;
+  /** 随元数据持久化的派生参数 */
+  kdf: FileKdfV2;
+}
+
+/** 文件级派生方案标识（当前写入形态） */
+export const FILE_KDF_V2_VERSION = 2;
+
+/** v2 块密文头长度（iv 12 字节；密文体含 16 字节认证标签） */
+export const FILE_V2_IV_LEN = 12;
+
+/** 密码校验固定明文：passwordCheck 解密结果必须与之全等 */
+export const FILE_PASSWORD_CHECK_PLAINTEXT = "verthys-filecheck-v1";
+
+/** 派生文件级原始密钥（口令 + 文件盐，单次 PBKDF2） */
+async function deriveFileKeyV2Raw(
+  password: string,
+  salt: Uint8Array,
+  iterations: number,
+): Promise<Uint8Array> {
+  const bits = await derivePBKDF2Bits(password, salt, iterations);
+  return new Uint8Array(bits);
+}
+
+/** 组装文件密钥句柄：原始密钥导入句柄后即刻清零 */
+async function assembleFileKeyV2(raw: Uint8Array, kdf: FileKdfV2): Promise<FileKeyV2> {
+  try {
+    const key = await crypto.subtle.importKey(
+      "raw", toArrayBuffer(raw), { name: "AES-GCM" }, false, ["encrypt", "decrypt"],
+    );
+    return { key, kdf };
+  } catch (e) {
+    throw wrapAsCryptoError(e, CryptoErrorKind.KEY_DERIVATION_FAILED, "文件密钥导入失败");
+  } finally {
+    zeroize(raw);
+  }
+}
+
+/**
+ * 新建文件密钥：随机文件盐 + 一次 PBKDF2（导入路径每文件调用一次）。
+ *
+ * @throws CryptoError(INVALID_INPUT) 口令为空
+ */
+export async function createFileKeyV2(password: string): Promise<FileKeyV2> {
+  if (!password || password.length === 0) {
+    throw invalidInput("独立访问密码不能为空");
+  }
+  const salt = crypto.getRandomValues(new Uint8Array(SALT_LEN));
+  const raw = await deriveFileKeyV2Raw(password, salt, PBKDF2_ITER);
+  return assembleFileKeyV2(raw, {
+    version: FILE_KDF_V2_VERSION,
+    saltB64: bytesToBase64(salt),
+    iterations: PBKDF2_ITER,
+  });
+}
+
+/**
+ * 由持久化参数解锁文件密钥（导出路径每文件调用一次）。
+ *
+ * 迭代次数以记录携带值为准（历史记录可能缺省，缺省取当前常量）；
+ * 盐长度非法即拒绝，避免把错位数据当盐派生。
+ *
+ * @throws CryptoError(INVALID_INPUT) 口令为空或盐长度非法
+ */
+export async function unlockFileKeyV2(password: string, kdf: FileKdfV2): Promise<FileKeyV2> {
+  if (!password || password.length === 0) {
+    throw invalidInput("独立访问密码不能为空");
+  }
+  const salt = base64ToBytes(kdf.saltB64);
+  if (salt.length !== SALT_LEN) {
+    throw invalidInput("文件盐长度非法");
+  }
+  const iterations = kdf.iterations > 0 ? kdf.iterations : PBKDF2_ITER;
+  const raw = await deriveFileKeyV2Raw(password, salt, iterations);
+  return assembleFileKeyV2(raw, { version: kdf.version, saltB64: kdf.saltB64, iterations });
+}
+
+/** 加密单块：输出 `iv(12) ‖ ct+tag` */
+export async function encryptChunkV2(plain: Uint8Array, key: FileKeyV2): Promise<Uint8Array> {
+  const iv = crypto.getRandomValues(new Uint8Array(FILE_V2_IV_LEN));
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key.key, plain),
+  );
+  const out = new Uint8Array(FILE_V2_IV_LEN + ct.length);
+  out.set(iv, 0);
+  out.set(ct, FILE_V2_IV_LEN);
+  return out;
+}
+
+/**
+ * 解密单块（原始字节入参）。
+ *
+ * 认证失败即抛错，由调用方按数据损坏分类；不得据此推断口令错误
+ * （口令判定仅由 {@link verifyPasswordCheckV2} 承担）。
+ */
+export async function decryptChunkV2(cipher: Uint8Array, key: FileKeyV2): Promise<Uint8Array> {
+  if (cipher.length <= FILE_V2_IV_LEN + TAG_LEN) {
+    throw invalidInput("块密文长度非法");
+  }
+  const iv = cipher.subarray(0, FILE_V2_IV_LEN);
+  const ct = cipher.subarray(FILE_V2_IV_LEN);
+  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key.key, ct));
+}
+
+/** 生成密码校验块（固定明文的一次 AEAD，仅用于口令前置判定） */
+export async function buildPasswordCheckV2(key: FileKeyV2): Promise<string> {
+  const pt = new TextEncoder().encode(FILE_PASSWORD_CHECK_PLAINTEXT);
+  return bytesToBase64(await encryptChunkV2(pt, key));
+}
+
+/** 校验密码校验块：解密失败或明文不符均返回 false（不抛错，供前置分支使用） */
+export async function verifyPasswordCheckV2(
+  passwordCheckB64: string,
+  key: FileKeyV2,
+): Promise<boolean> {
+  try {
+    const plain = await decryptChunkV2(base64ToBytes(passwordCheckB64), key);
+    return new TextDecoder().decode(plain) === FILE_PASSWORD_CHECK_PLAINTEXT;
+  } catch {
+    return false;
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * 再导出（保持原有 API 完全不变）                                     *
  *                                                                    *
  * 上层组件（PhotoAlbum.vue 等）通过 `from "../../lib/crypto"` 导入   *

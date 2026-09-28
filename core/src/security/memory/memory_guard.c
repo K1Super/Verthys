@@ -14,7 +14,7 @@
  */
 #include "memory_guard.h"
 #include "verthys_internal.h"    /* verthys_secure_zero / verthys_lock_memory / verthys_unlock_memory */
-#include "security_preset.h"   /* security_get_config */
+#include "security_preset.h"   /* security_config_snapshot */
 #include "emergency.h"         /* emergency_report / EMERG_SIG_REMOTE_MEM_READ */
 /* NtQueryInformationProcess / NtQuerySystemInformation 改走
  * 直接系统调用包装（stub 优先 / GetProcAddress 回退），绕过用户态
@@ -245,8 +245,8 @@ int memory_guard_init(void)
     memset(s_regions, 0, sizeof(s_regions));
     LeaveCriticalSection(&s_regions_cs);
 
-    /* 确保安全配置已就绪（未初始化时 security_get_config 会以 BALANCED 默认填充） */
-    (void)security_get_config();
+    /* 确保安全配置已就绪（未初始化时按平衡档建立基线） */
+    security_config_ensure_init();
 
     s_initialized = 1;
     return 0;
@@ -257,8 +257,9 @@ int memory_guard_lock(void *ptr, size_t len)
     if (ptr == NULL || len == 0) return 0;
 
     /* 性能模式（memory_lock=0）：返回 0 但不实际调用 VirtualLock */
-    const SecurityConfig *cfg = security_get_config();
-    if (cfg != NULL && !cfg->memory_lock) {
+    SecurityConfig cfg;
+    (void)security_config_snapshot(&cfg);
+    if (!cfg.memory_lock) {
         return 0;
     }
 
@@ -319,8 +320,9 @@ int memory_guard_check_remote_read(void)
     ensure_init();
 
     /* 性能模式（anti_dump=0）：跳过检测 */
-    const SecurityConfig *cfg = security_get_config();
-    if (cfg != NULL && !cfg->anti_dump) {
+    SecurityConfig cfg;
+    (void)security_config_snapshot(&cfg);
+    if (!cfg.anti_dump) {
         return 0;
     }
 
@@ -560,8 +562,9 @@ int memory_guard_patrol_start(void)
     ensure_init();
 
     /* 性能模式（anti_dump=0）：不启动巡逻 */
-    const SecurityConfig *cfg = security_get_config();
-    if (cfg != NULL && !cfg->anti_dump) return 0;
+    SecurityConfig cfg;
+    (void)security_config_snapshot(&cfg);
+    if (!cfg.anti_dump) return 0;
 
     if (s_patrol_queue != NULL) return 0;  /* 已运行，幂等 */
 

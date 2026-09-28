@@ -38,13 +38,13 @@
  */
 
 use crate::constants::export_stream::{
-    MAX_EXPORT_SINGLE_BYTES, STALE_TEMP_MAX_AGE, WRITE_FILE_CHUNK_BYTES,
+    MAX_EXPORT_SINGLE_BYTES, STALE_TEMP_MAX_AGE, USER_FILE_SIZE_LIMIT, WRITE_FILE_CHUNK_BYTES,
 };
 use crate::constants::timeout::DEFAULT as TIMEOUT_CONFIG;
 use crate::controller::api_error::ErrorCode;
 use crate::controller::verthys_controller::require_unlocked;
 use crate::security::command_names::cmd;
-use crate::state::file_streams::FileStreamState;
+use crate::state::{file_streams::FileStreamState, AppState};
 use crate::util::audit_log::{append_audit, AuditEvent, AuditEventType, AuditResult};
 use crate::util::path::sanitize_path;
 use crate::util::sandbox::{resolve_and_validate, SandboxError};
@@ -60,14 +60,6 @@ use tauri::{Manager, State};
 /// 允许读取/写入的最大文件大小（50MB），防止内存耗尽。
 const FILE_SIZE_LIMIT: u64 = 50 * 1024 * 1024;
 
-/// 用户授权文件操作的最大文件大小（2GB）。
-///
-/// 用户通过对话框显式选择的文件（如含几千张加密照片的 .venc 打包文件）
-/// 可能达到数百 MB 甚至 GB 级。50MB 的白名单限制会误拒合法的大文件。
-/// 此限制仅用于 read_user_file / write_user_file，与沙箱白名单操作的
-/// FILE_SIZE_LIMIT 隔离，避免内部文件操作的安全边界被放宽。
-const USER_FILE_SIZE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
-
 /// 流式读写的分块大小（64KB），平衡内存与性能。
 const READ_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -80,6 +72,13 @@ const FILE_OP_TIMEOUT: Duration = TIMEOUT_CONFIG.ipc;
 /// 10 秒超时会误杀合法的大文件传输。此超时仅用于 read_user_file /
 /// write_user_file，与沙箱白名单操作的 FILE_OP_TIMEOUT 隔离。
 const USER_FILE_OP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 用户授权文件分片操作的调用超时（15 秒）。
+///
+/// 分片读取单次只搬运一个分片（≤ 流式写入分片上界），正常耗时远低于
+/// 整文件读取；独立短超时用于快速暴露卡在慢速介质上的源文件，避免单次
+/// 读取长期占用导入流水线。整文件读取仍沿用 120 秒语义。
+const USER_FILE_CHUNK_OP_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ===== 写操作互斥锁 =====
 
@@ -98,15 +97,30 @@ fn get_audit_log_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     }
 }
 
+/// 审计 HMAC 密钥的进程内缓存（仅缓存成功结果：采集/派生瞬时失败不占缓存，
+/// 下次写入仍可自愈重试）。
+static AUDIT_HMAC_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+/// 从设备指纹派生审计 HMAC 密钥（进程内派生一次后复用）。
+///
+/// 派生含 10 万次 PBKDF2；分片读写会为每片追加一条审计，逐次重派生会把
+/// 单次大文件导入放大成秒级 CPU 开销，故与其余审计调用点统一走进程内缓存。
 fn get_audit_hmac_key() -> Option<[u8; 32]> {
     use crate::infrastructure::device_fingerprint::get_device_fingerprint;
     use crate::util::crypto::pbkdf2_derive_default;
+
+    if let Some(key) = AUDIT_HMAC_KEY.get() {
+        return Some(*key);
+    }
 
     match get_device_fingerprint() {
         Ok(fingerprint) => {
             const AUDIT_SALT: &[u8] = b"verthys_audit_log_hmac_salt_v1";
             match pbkdf2_derive_default(fingerprint.as_bytes(), AUDIT_SALT) {
-                Ok(key) => Some(key),
+                Ok(key) => {
+                    let _ = AUDIT_HMAC_KEY.set(key);
+                    Some(key)
+                }
                 Err(e) => {
                     log::warn!("[audit] 派生 HMAC 密钥失败，跳过审计写入: {}", e);
                     None
@@ -692,8 +706,8 @@ pub async fn write_file_bytes(app: tauri::AppHandle, request: Request<'_>) -> Re
 //   - 保留 validate_path_input 字符级校验（防路径注入、目录遍历、保留设备名）
 //   - 保留 canonicalize（解析符号链接，确保路径真实）
 //   - 新增系统关键目录拒绝（C:\Windows、C:\Program Files 等）
-//   - 保留文件大小限制（50MB）
-//   - 保留超时控制（10s）
+//   - 保留文件大小限制（2GB）
+//   - 保留超时控制（整文件读取 120s；分片读取按分片超时）
 //   - 保留审计日志
 
 /// 系统关键目录前缀列表（canonicalize 后规范化为小写 + 正斜杠比较）。
@@ -755,14 +769,27 @@ fn is_system_critical_path(canonical: &std::path::Path) -> bool {
 
 /// 同步读取用户通过对话框选择的文件（跳过白名单，拒绝系统关键目录）。
 ///
+/// 读取形态由参数决定：
+///   - `offset` / `length` 均缺省：整文件读取（历史调用路径，行为不变）；
+///   - 两者同时给出：读取 `[offset, offset + length)` 分片。
+///
+/// 分片形态的契约（越界即报错，禁止静默截断）：
+///   - 参数必须成对给出——只给其一即拒绝，避免"缺省长度=读到末尾"
+///     之类的隐式语义掩盖源文件长度变化；
+///   - `length` 必须大于 0 且不超过流式写入分片上界；
+///   - `offset` 不得越过文件长度，`offset + length` 不得越过文件末尾；
+///   - 实际读出字节数必须恰为 `length`（读取期间源文件被截断即报错）。
+///
 /// 与 `read_file_blocking` 的区别：
 ///   - 跳过白名单校验（用户已通过对话框显式授权）
 ///   - 新增系统关键目录拒绝（防止读取 C:\Windows 等系统文件）
-///   - 保留 validate_path_input 字符级校验（防路径注入）
-///   - 保留 canonicalize（解析符号链接）
-///   - 保留文件大小限制、分块读取
-fn read_user_file_blocking(path: &str) -> Result<Vec<u8>, String> {
-    use std::io::Read;
+///   - 保留 validate_path_input 字符级校验、canonicalize 与文件大小限制
+fn read_user_file_range_blocking(
+    path: &str,
+    offset: Option<u64>,
+    length: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
 
     // 1. 字符级校验（防路径注入、目录遍历、保留设备名）
     crate::util::path::validate_path_input(path).map_err(|e| {
@@ -809,34 +836,175 @@ fn read_user_file_blocking(path: &str) -> Result<Vec<u8>, String> {
         return Err(ErrorCode::FileTooLarge.default_message().to_string());
     }
 
-    // 5. 分块读取
+    // 5. 读取
     let file = std::fs::File::open(&canonical).map_err(|e| {
         log::warn!("[read_user_file] 打开文件失败: {}", e);
         ErrorCode::InvalidPath.default_message().to_string()
     })?;
 
-    let mut reader = std::io::BufReader::new(file);
-    let mut all_bytes = Vec::with_capacity(file_size as usize);
-    let mut chunk = vec![0u8; READ_CHUNK_SIZE];
+    match (offset, length) {
+        (None, None) => {
+            let mut reader = std::io::BufReader::new(file);
+            let mut all_bytes = Vec::with_capacity(file_size as usize);
+            let mut chunk = vec![0u8; READ_CHUNK_SIZE];
 
-    loop {
-        let n = reader.read(&mut chunk).map_err(|e| {
-            log::warn!("[read_user_file] 读取文件失败: {}", e);
-            ErrorCode::Internal.default_message().to_string()
-        })?;
-        if n == 0 {
-            break;
+            loop {
+                let n = reader.read(&mut chunk).map_err(|e| {
+                    log::warn!("[read_user_file] 读取文件失败: {}", e);
+                    ErrorCode::Internal.default_message().to_string()
+                })?;
+                if n == 0 {
+                    break;
+                }
+                all_bytes.extend_from_slice(&chunk[..n]);
+            }
+
+            log::info!(
+                "[read_user_file] 读取成功: {} bytes（整文件） | {}",
+                all_bytes.len(),
+                sanitize_path(path)
+            );
+            Ok(all_bytes)
         }
-        all_bytes.extend_from_slice(&chunk[..n]);
+        (Some(offset), Some(length)) => {
+            if length == 0 {
+                log::warn!("[read_user_file] 拒绝空分片请求: {}", sanitize_path(path));
+                return Err("分片长度必须大于 0".to_string());
+            }
+            if length > WRITE_FILE_CHUNK_BYTES as u64 {
+                log::warn!(
+                    "[read_user_file] 分片长度超限: {} > {} | {}",
+                    length,
+                    WRITE_FILE_CHUNK_BYTES,
+                    sanitize_path(path)
+                );
+                return Err(format!(
+                    "分片长度超过上限 {} 字节",
+                    WRITE_FILE_CHUNK_BYTES
+                ));
+            }
+            let end = offset.checked_add(length);
+            let in_range = matches!(end, Some(end) if offset <= file_size && end <= file_size);
+            if !in_range {
+                log::warn!(
+                    "[read_user_file] 读取范围越界: offset={} length={} size={} | {}",
+                    offset,
+                    length,
+                    file_size,
+                    sanitize_path(path)
+                );
+                return Err(format!(
+                    "读取范围越界（偏移 {} + 长度 {} 超出文件 {} 字节）",
+                    offset, length, file_size
+                ));
+            }
+
+            let mut file = file;
+            file.seek(SeekFrom::Start(offset)).map_err(|e| {
+                log::warn!("[read_user_file] 定位失败: {}", e);
+                ErrorCode::Internal.default_message().to_string()
+            })?;
+            let mut buf = vec![0u8; length as usize];
+            file.read_exact(&mut buf).map_err(|e| {
+                log::warn!(
+                    "[read_user_file] 分片读取失败（可能被并发截断）: offset={} length={} | {}",
+                    offset,
+                    length,
+                    e
+                );
+                format!("读取字节数不足（要求 {} 字节）", length)
+            })?;
+
+            log::info!(
+                "[read_user_file] 读取成功: {} bytes（offset={}） | {}",
+                length,
+                offset,
+                sanitize_path(path)
+            );
+            Ok(buf)
+        }
+        _ => {
+            log::warn!(
+                "[read_user_file] 分片参数不完整（offset/length 必须成对）: {}",
+                sanitize_path(path)
+            );
+            Err("分片参数不完整：offset 与 length 必须同时提供".to_string())
+        }
+    }
+}
+
+/// 用户授权文件的元数据快照（分块规划与来源身份校验的输入）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UserFileStat {
+    /// 文件长度（字节）
+    pub size: u64,
+    /// 最后修改时间（Unix 纪元毫秒）
+    pub mtime_ms: u64,
+}
+
+/// 同步读取用户授权文件的元数据（跳过白名单，拒绝系统关键目录）。
+///
+/// 与读取命令共用同一校验链（字符级校验 + canonicalize + 系统关键目录拒绝），
+/// 保证"能 stat 的文件与能读的文件"范围一致。
+///
+/// 修改时间不可得即报错而非回退默认值：身份校验以 `(size, mtime_ms)`
+/// 为依据，缺失该字段会让"源文件被替换"不可检测。
+fn user_file_stat_blocking(path: &str) -> Result<UserFileStat, String> {
+    use std::time::UNIX_EPOCH;
+
+    crate::util::path::validate_path_input(path).map_err(|e| {
+        log::warn!(
+            "[user_file_stat] 路径校验失败: {} | {}",
+            sanitize_path(path),
+            e
+        );
+        ErrorCode::InvalidPath.default_message().to_string()
+    })?;
+
+    let canonical = std::fs::canonicalize(path).map_err(|e| {
+        log::warn!(
+            "[user_file_stat] 路径解析失败: {} | {}",
+            sanitize_path(path),
+            e
+        );
+        ErrorCode::InvalidPath.default_message().to_string()
+    })?;
+
+    if is_system_critical_path(&canonical) {
+        log::warn!(
+            "[user_file_stat] 拒绝读取系统关键目录: {}",
+            sanitize_path(path)
+        );
+        return Err(ErrorCode::PermissionDenied.default_message().to_string());
     }
 
+    let metadata = std::fs::metadata(&canonical).map_err(|e| {
+        log::warn!("[user_file_stat] 获取文件元数据失败: {}", e);
+        ErrorCode::InvalidPath.default_message().to_string()
+    })?;
+    let mtime_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .ok_or_else(|| {
+            log::warn!(
+                "[user_file_stat] 无法获取修改时间: {}",
+                sanitize_path(path)
+            );
+            "无法获取文件修改时间".to_string()
+        })?;
+
     log::info!(
-        "[read_user_file] 读取成功: {} bytes | {}",
-        file_size,
+        "[user_file_stat] 元数据读取成功: size={} mtime_ms={} | {}",
+        metadata.len(),
+        mtime_ms,
         sanitize_path(path)
     );
-
-    Ok(all_bytes)
+    Ok(UserFileStat {
+        size: metadata.len(),
+        mtime_ms,
+    })
 }
 
 /// 解析用户授权写入目标为规范化绝对路径（原子写入与流式写入共用）。
@@ -1002,32 +1170,60 @@ fn write_user_file_blocking(path: &str, data: &[u8]) -> Result<u64, String> {
 ///   - canonicalize（解析符号链接，确保路径真实）
 ///   - 系统关键目录拒绝（C:\Windows、C:\Program Files 等）
 ///   - 文件大小限制（2GB）
-///   - 超时控制（10s）
+///   - 超时控制（整文件 120s；分片 15s）
 ///   - 审计日志
+///
+/// 读取形态：
+///   - `offset` / `length` 缺省 → 整文件读取（返回全部字节）；
+///   - 两者同时给出 → 读取分片，越界/长度不符即报错，不静默截断。
 ///
 /// 返回 `tauri::ipc::Response` → 前端 invoke 直接收到 ArrayBuffer，
 /// 消除 base64 编码 1.33× 内存放大与编解码 CPU（原单张照片峰值 ×2.66 → ×1）。
 ///
 /// 安全边界：调用方必须确保 path 来自用户通过 Tauri dialog open() 显式选择的路径。
 #[tauri::command]
-pub async fn read_user_file(app: tauri::AppHandle, path: String) -> Result<Response, String> {
+pub async fn read_user_file(
+    app: tauri::AppHandle,
+    path: String,
+    offset: Option<u64>,
+    length: Option<u64>,
+) -> Result<Response, String> {
+    let chunked = offset.is_some() || length.is_some();
+    let op_timeout = if chunked {
+        USER_FILE_CHUNK_OP_TIMEOUT
+    } else {
+        USER_FILE_OP_TIMEOUT
+    };
+    let mode = if chunked {
+        format!(
+            "分片 offset={} length={}",
+            offset.map(|v| v.to_string()).unwrap_or_default(),
+            length.map(|v| v.to_string()).unwrap_or_default()
+        )
+    } else {
+        "整文件".to_string()
+    };
     log::info!(
-        "[read_user_file] 开始读取用户选择文件: {}",
-        sanitize_path(&path)
+        "[read_user_file] 开始读取用户选择文件: {}（{}）",
+        sanitize_path(&path),
+        mode
     );
 
     let path_clone = path.clone();
     let read_result = tokio::time::timeout(
-        USER_FILE_OP_TIMEOUT,
-        tokio::task::spawn_blocking(move || read_user_file_blocking(&path_clone)),
+        op_timeout,
+        tokio::task::spawn_blocking(move || {
+            read_user_file_range_blocking(&path_clone, offset, length)
+        }),
     )
     .await;
 
     match read_result {
         Err(_) => {
             log::error!(
-                "[read_user_file] 读取超时（{}s）| {}",
-                USER_FILE_OP_TIMEOUT.as_secs(),
+                "[read_user_file] 读取超时（{}s，{}）| {}",
+                op_timeout.as_secs(),
+                mode,
                 sanitize_path(&path)
             );
             write_file_audit(
@@ -1036,7 +1232,7 @@ pub async fn read_user_file(app: tauri::AppHandle, path: String) -> Result<Respo
                 &path,
                 AuditResult::Failure,
                 None,
-                Some(format!("超时 {}s", USER_FILE_OP_TIMEOUT.as_secs())),
+                Some(format!("超时 {}s", op_timeout.as_secs())),
             );
             Err(ErrorCode::TemporaryFailure.default_message().to_string())
         }
@@ -1058,8 +1254,8 @@ pub async fn read_user_file(app: tauri::AppHandle, path: String) -> Result<Respo
                 AuditEventType::FileRead,
                 &path,
                 AuditResult::Success,
-                None,
-                None,
+                Some(bytes.len() as u64),
+                Some(mode),
             );
             Ok(Response::new(bytes))
         }
@@ -1074,6 +1270,194 @@ pub async fn read_user_file(app: tauri::AppHandle, path: String) -> Result<Respo
             );
             Err(e)
         }
+    }
+}
+
+/// 读取用户通过对话框选择的文件的元数据快照（二进制 IPC 之外的轻量 JSON 返回）。
+///
+/// 用途：清藏导入前获取文件长度用于分块规划，并留存 `(size, mtime_ms)`
+/// 作为来源身份基线——导入过程中按批边界复查，源文件被改写即中止。
+///
+/// 安全策略与 read_user_file 一致（跳过白名单 + 系统关键目录拒绝 + 审计日志）。
+#[tauri::command]
+pub async fn user_file_stat(app: tauri::AppHandle, path: String) -> Result<UserFileStat, String> {
+    log::info!(
+        "[user_file_stat] 开始读取用户选择文件元数据: {}",
+        sanitize_path(&path)
+    );
+
+    let path_clone = path.clone();
+    let stat_result = tokio::time::timeout(
+        USER_FILE_CHUNK_OP_TIMEOUT,
+        tokio::task::spawn_blocking(move || user_file_stat_blocking(&path_clone)),
+    )
+    .await;
+
+    match stat_result {
+        Err(_) => {
+            log::error!(
+                "[user_file_stat] 超时（{}s）| {}",
+                USER_FILE_CHUNK_OP_TIMEOUT.as_secs(),
+                sanitize_path(&path)
+            );
+            write_file_audit(
+                &app,
+                AuditEventType::FileRead,
+                &path,
+                AuditResult::Failure,
+                None,
+                Some(format!("stat 超时 {}s", USER_FILE_CHUNK_OP_TIMEOUT.as_secs())),
+            );
+            Err(ErrorCode::TemporaryFailure.default_message().to_string())
+        }
+        Ok(Err(e)) => {
+            log::error!("[user_file_stat] spawn_blocking 异常: {}", e);
+            write_file_audit(
+                &app,
+                AuditEventType::FileRead,
+                &path,
+                AuditResult::Failure,
+                None,
+                Some(format!("任务异常: {}", e)),
+            );
+            Err(ErrorCode::Internal.default_message().to_string())
+        }
+        Ok(Ok(Ok(stat))) => {
+            write_file_audit(
+                &app,
+                AuditEventType::FileRead,
+                &path,
+                AuditResult::Success,
+                Some(stat.size),
+                Some("stat".to_string()),
+            );
+            Ok(stat)
+        }
+        Ok(Ok(Err(e))) => {
+            write_file_audit(
+                &app,
+                AuditEventType::FileRead,
+                &path,
+                AuditResult::Failure,
+                None,
+                Some(e.clone()),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// 磁盘剩余空间读数（命令应答负载）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiskSpaceInfo {
+    /// 剩余可用字节数
+    pub free_bytes: u64,
+}
+
+/// 向上回溯到最近的已存在祖先路径（目标可能尚未创建）。
+///
+/// Win32 卷查询要求入参路径存在：导出保存位置与容器文件都可能尚未落盘，
+/// 直接查询会失败；回退到最近已存在的祖先目录即得到同一卷的读数。
+fn nearest_existing_ancestor(path: &std::path::Path) -> Option<PathBuf> {
+    let mut current = path;
+    loop {
+        if current.exists() {
+            return Some(current.to_path_buf());
+        }
+        match current.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => current = parent,
+            _ => return None,
+        }
+    }
+}
+
+/// 查询路径所在卷的剩余空间（字节）。
+///
+/// 路径解析：显式路径走用户授权目标的解析链（存在即 canonicalize，不存在则
+/// 解析父目录后拼接，导出目标常尚未创建）；缺省时取当前会话容器路径，
+/// 供导入侧在写块之前预检容器卷。查询前回退到最近已存在祖先（同一卷）。
+/// 卷信息不可得即报错（DISK_SPACE_UNKNOWN），不得按 0 空间拒绝合法操作，
+/// 也不得静默放行。
+fn check_disk_space_blocking(
+    path: Option<&str>,
+    session_path: Option<&str>,
+) -> Result<DiskSpaceInfo, String> {
+    use crate::util::disk::get_disk_space_bytes;
+
+    let resolved: PathBuf = match path {
+        Some(p) => resolve_user_file_target(p, "check_disk_space")?,
+        None => match session_path {
+            Some(p) => PathBuf::from(p),
+            None => {
+                log::warn!("[check_disk_space] 无显式路径且无活跃容器路径");
+                return Err(ErrorCode::InvalidPath.default_message().to_string());
+            }
+        },
+    };
+
+    let query_path = match nearest_existing_ancestor(&resolved) {
+        Some(p) => p,
+        None => {
+            log::warn!(
+                "[check_disk_space] 路径不存在且无已存在祖先: {}",
+                sanitize_path(&resolved.to_string_lossy())
+            );
+            return Err(ErrorCode::InvalidPath.default_message().to_string());
+        }
+    };
+
+    match get_disk_space_bytes(&query_path) {
+        Some(free_bytes) => Ok(DiskSpaceInfo { free_bytes }),
+        None => {
+            log::warn!(
+                "[check_disk_space] 无法获取磁盘空间: {}",
+                sanitize_path(&query_path.to_string_lossy())
+            );
+            Err(ErrorCode::DiskSpaceUnknown.default_message().to_string())
+        }
+    }
+}
+
+/// 查询用户授权路径（或当前容器卷）的剩余磁盘空间（字节）。
+///
+/// 用途：导入前预检容器卷（路径缺省分支）与导出前预检目标卷（显式路径分支），
+/// 空间不足由调用方前置拒绝，避免读到一半或写出部分暂存后才失败。
+#[tauri::command]
+pub async fn check_disk_space(
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<DiskSpaceInfo, String> {
+    let session_path = state.verthys_session_path();
+    log::info!(
+        "[check_disk_space] 查询磁盘空间: path={} 容器路径={}",
+        path.as_deref().map(sanitize_path).unwrap_or_else(|| "（缺省）".to_string()),
+        session_path
+            .as_deref()
+            .map(sanitize_path)
+            .unwrap_or_else(|| "（无）".to_string()),
+    );
+
+    let result = tokio::time::timeout(
+        TIMEOUT_CONFIG.preflight,
+        tokio::task::spawn_blocking(move || {
+            check_disk_space_blocking(path.as_deref(), session_path.as_deref())
+        }),
+    )
+    .await;
+
+    match result {
+        Err(_) => {
+            log::error!(
+                "[check_disk_space] 查询超时（{}s）",
+                TIMEOUT_CONFIG.preflight.as_secs()
+            );
+            Err(ErrorCode::TemporaryFailure.default_message().to_string())
+        }
+        Ok(Err(e)) => {
+            log::error!("[check_disk_space] spawn_blocking 异常: {}", e);
+            Err(ErrorCode::Internal.default_message().to_string())
+        }
+        Ok(Ok(r)) => r,
     }
 }
 
@@ -1810,6 +2194,81 @@ mod tests {
     }
 
     #[test]
+    fn test_user_file_chunk_op_timeout_shorter_than_full_read() {
+        // 分片读取的短超时语义：单次分片必须比整文件读取更早暴露卡顿
+        assert_eq!(USER_FILE_CHUNK_OP_TIMEOUT, Duration::from_secs(15));
+        assert!(USER_FILE_CHUNK_OP_TIMEOUT < USER_FILE_OP_TIMEOUT);
+    }
+
+    #[test]
+    fn test_user_file_size_limit_is_unified_with_export_limit() {
+        // 单文件体量上限单一权威来源：读写上限与导出累计上限同源（生成器侧另有
+        // 编译期断言，此处锁定 Rust 侧取值与关系，防生成物被绕过）
+        assert_eq!(USER_FILE_SIZE_LIMIT, MAX_EXPORT_SINGLE_BYTES);
+        assert_eq!(USER_FILE_SIZE_LIMIT, 2 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_audit_hmac_key_is_cached_and_stable() {
+        // 审计 HMAC 密钥在进程内只派生一次：分片读写按片追加审计，
+        // 逐次重派生（10 万次 PBKDF2）会把单次大文件导入放大成秒级 CPU 开销
+        let first = get_audit_hmac_key();
+        let second = get_audit_hmac_key();
+        assert_eq!(first, second, "同一进程内两次取键必须一致");
+        if first.is_some() {
+            assert!(AUDIT_HMAC_KEY.get().is_some(), "成功结果必须进入缓存");
+        }
+    }
+
+    #[test]
+    fn test_check_disk_space_reads_existing_dir_and_missing_child() {
+        let temp = std::env::temp_dir().join("verthys_test_disk_space");
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let dir = temp.to_string_lossy().to_string();
+
+        // 存在的目录：返回可用空间（0 视为环境异常）
+        let existing = check_disk_space_blocking(Some(&dir), None).unwrap();
+        assert!(existing.free_bytes > 0, "已存在目录必须返回可用空间");
+
+        // 目标尚未创建（导出保存位置）：解析父目录后仍可查询
+        let missing = temp.join("not-created-yet.bin").to_string_lossy().to_string();
+        let pending = check_disk_space_blocking(Some(&missing), None).unwrap();
+        assert!(pending.free_bytes > 0, "未创建目标必须按父目录卷查询");
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_check_disk_space_rejects_invalid_and_system_paths() {
+        // 相对路径在字符级校验即拒绝
+        assert!(check_disk_space_blocking(Some("relative/path.bin"), None).is_err());
+
+        #[cfg(windows)]
+        {
+            // 系统关键目录一律拒绝（父目录解析后命中拒绝链）
+            assert!(check_disk_space_blocking(Some("C:/Windows/notepad.exe"), None).is_err());
+        }
+    }
+
+    #[test]
+    fn test_check_disk_space_session_path_branch() {
+        let temp = std::env::temp_dir().join("verthys_test_disk_space_session");
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let container = temp.join("c.verthys").to_string_lossy().to_string();
+
+        // 路径缺省 = 容器卷：查询容器所在卷的可用空间
+        let info = check_disk_space_blocking(None, Some(&container)).unwrap();
+        assert!(info.free_bytes > 0);
+
+        // 无显式路径且无容器路径：拒绝（不得静默按未知放行）
+        assert!(check_disk_space_blocking(None, None).is_err());
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn test_write_mutex_can_lock() {
         let guard = WRITE_MUTEX.lock();
         assert!(guard.is_ok());
@@ -1875,6 +2334,113 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    /* ===== 用户文件分片读取与元数据快照测试 ===== */
+
+    /// 构造定长测试文件（内容为递增字节），返回（目录，路径串）
+    fn make_range_test_file(tag: &str, bytes: &[u8]) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("verthys_test_range_{}", tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("src.bin");
+        std::fs::write(&file, bytes).unwrap();
+        let path = file.to_string_lossy().to_string();
+        (dir, path)
+    }
+
+    #[test]
+    fn test_range_read_head_and_tail_exact_bytes() {
+        let data: Vec<u8> = (0..=63u8).collect();
+        let (dir, path) = make_range_test_file("head_tail", &data);
+
+        // 头部：offset 0 + 定长
+        let head = read_user_file_range_blocking(&path, Some(0), Some(4)).unwrap();
+        assert_eq!(head, data[..4]);
+
+        // 末块：offset = 长度 - 3，恰好读到文件末尾
+        let tail = read_user_file_range_blocking(&path, Some(61), Some(3)).unwrap();
+        assert_eq!(tail, data[61..]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_range_read_rejects_offset_beyond_size() {
+        let data = vec![7u8; 10];
+        let (dir, path) = make_range_test_file("offset_over", &data);
+
+        // offset 越过文件长度（即使 length=1 也在界外）
+        let err = read_user_file_range_blocking(&path, Some(11), Some(1)).unwrap_err();
+        assert!(err.contains("越界"), "越界必须给出明确原因: {}", err);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_range_read_rejects_tail_overrun_without_truncation() {
+        let data = vec![7u8; 10];
+        let (dir, path) = make_range_test_file("tail_over", &data);
+
+        // offset 合法但 offset + length 越过末尾：拒绝，不得静默截断
+        let err = read_user_file_range_blocking(&path, Some(8), Some(4)).unwrap_err();
+        assert!(err.contains("越界"), "超尾必须给出明确原因: {}", err);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_range_read_rejects_oversize_and_empty_length() {
+        let data = vec![7u8; 16];
+        let (dir, path) = make_range_test_file("oversize", &data);
+
+        let err =
+            read_user_file_range_blocking(&path, Some(0), Some(WRITE_FILE_CHUNK_BYTES as u64 + 1))
+                .unwrap_err();
+        assert!(err.contains("上限"), "超分片上界必须拒绝: {}", err);
+
+        let err = read_user_file_range_blocking(&path, Some(0), Some(0)).unwrap_err();
+        assert!(err.contains("大于 0"), "空分片必须拒绝: {}", err);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_range_read_requires_paired_params() {
+        let data = vec![7u8; 8];
+        let (dir, path) = make_range_test_file("unpaired", &data);
+
+        assert!(read_user_file_range_blocking(&path, Some(0), None).is_err());
+        assert!(read_user_file_range_blocking(&path, None, Some(4)).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_range_read_default_mode_unchanged() {
+        let data: Vec<u8> = (0..=99u8).collect();
+        let (dir, path) = make_range_test_file("default_mode", &data);
+
+        // 缺省参数与整文件读取历史行为一致（返回全部字节）
+        let all = read_user_file_range_blocking(&path, None, None).unwrap();
+        assert_eq!(all, data);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_user_file_stat_contract() {
+        let data = vec![9u8; 12345];
+        let (dir, path) = make_range_test_file("stat", &data);
+
+        let stat = user_file_stat_blocking(&path).unwrap();
+        assert_eq!(stat.size, data.len() as u64);
+        assert!(stat.mtime_ms > 0, "修改时间必须可读（身份校验依据）");
+
+        // 与读取命令共用同一校验链：非法路径一律拒绝
+        assert!(user_file_stat_blocking("relative/file.bin").is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /* ===== 流式写入（暂存 + 原子替换）测试 ===== */

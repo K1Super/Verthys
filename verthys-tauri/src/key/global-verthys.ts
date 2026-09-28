@@ -47,7 +47,7 @@ import {
   VerthysErrorCode, type VerthysResult,
   wrapAsVerthysError,
 } from "../lib/verthys_error";
-import { resetSessionTimer, clearSessionTimer, applySecurityPreset, checkBruteForceGate, awaitLockAllIfInProgress } from "../session/security-session";
+import { resetSessionTimer, clearSessionTimer, checkBruteForceGate, awaitLockAllIfInProgress } from "../session/security-session";
 import type { VerifyGlobalKeyResult } from "../types/key_manager";
 import { loadModuleKeyStatus } from "./module-auth";
 import { migrateRecordTypes, isAccountRecordB64 } from "./type-migration";
@@ -1323,12 +1323,8 @@ export async function verifyGlobalKey(
   } catch (e) {
     log.warn("启动会话守卫失败/超时（非致命）", e);
   }
-  // 应用当前安全预设（加超时兜底 5s）
-  try {
-    await withTimeout(applySecurityPreset(keyState.securityPreset.value), 5000, "applySecurityPreset");
-  } catch (e) {
-    log.warn("应用安全预设失败/超时（非致命）", e);
-  }
+  // 运行档位不在解锁收尾应用：恢复链以受信配置为唯一权威（读取→应用），
+  // 本地缓存值禁止回写权威文件，此处的缓存 apply 会与恢复链竞态并覆盖受信副本。
   emit(8, 100, "验证完成");
   return ok(undefined);
 }

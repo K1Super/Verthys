@@ -99,6 +99,12 @@ use controller::verthys_batch_controller::*;
 use controller::verthys_controller::*;
 use controller::worker_controller::*;
 
+// 防截屏隐私保护：命令与启动序列引用
+use controller::privacy_controller::{
+    adopt_privacy_session, get_privacy_status, reconcile_privacy, run_startup_recovery_dialog,
+    set_privacy_mode, startup_engage, AppAuditSink, PrivacyCoordinator, StartupOutcome,
+};
+
 // 入口层基础设施引用
 use infrastructure::app_paths::{AppPaths, PathSource};
 use infrastructure::console_handler;
@@ -249,11 +255,6 @@ fn run_process(mode: ProcessMode) {
 
     // 升级 panic hook
     panic_hook::upgrade(log_sender.clone());
-    // panic 清零器注册：hook 触发时对隐私会话令牌等敏感静态驻留
-    // 执行前置清零（在每个 handler 的诊断输出之前运行）
-    panic_hook::register_panic_wiper(
-        crate::controller::clipboard_controller::wipe_privacy_session_token,
-    );
 
     // 桥接 log 宏
     let log_bridge = LogPipeBridge {
@@ -364,9 +365,57 @@ fn run_main_ui(
             let shutdown_token_clone = shutdown_token.clone();
             move |app| {
                 let app_handle = app.handle().clone();
+
+                /* ===== 防截屏保护：保护先于窗口可见 =====
+                 *
+                 * 主窗口在配置中声明为不可见，由本序列在保护就绪后显式显示：
+                 *   1. 默认开启：启动即自动施加保护 + 回读校验（无需用户手动开启，
+                 *      也不依赖任何持久化意图；会话内关闭仅本次会话有效）；
+                 *   2. 成功 / 已还原 → 显示主窗口，前端挂载后采纳会话取得凭证；
+                 *   3. 还原失败（窗口取值未知）→ 原生对话框驱动对账，成功才显示窗口。
+                 * 本钩子返回前前端命令不会派发，因此启动序列与前端查询无竞态。 */
+                let coordinator = std::sync::Arc::new(PrivacyCoordinator::new(std::sync::Arc::new(
+                    AppAuditSink::new(app_handle.clone()),
+                )));
+                app.manage(std::sync::Arc::clone(&coordinator));
+
+                let show_main_window = match startup_engage(&app_handle, &coordinator) {
+                    StartupOutcome::Protected { generation } => {
+                        log::info!("[privacy] 启动保护已生效（世代 {}）", generation);
+                        true
+                    }
+                    StartupOutcome::Unprotected => true,
+                    StartupOutcome::NeedsRecovery => {
+                        run_startup_recovery_dialog(&app_handle, &coordinator)
+                    }
+                };
+
+                if show_main_window {
+                    match app.get_webview_window("main") {
+                        Some(window) => {
+                            if let Err(e) = window.show() {
+                                log::error!("[privacy] 显示主窗口失败: {}", e);
+                            }
+                        }
+                        None => {
+                            // 无窗口可用即无界面可用：如实失败退出，不留无界面进程
+                            log::error!("[privacy] 主窗口不存在，进程退出");
+                            app_handle.exit(0);
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    // 用户在对账对话框中确认退出：不显示任何窗口，直接结束事件循环
+                    log::warn!("[privacy] 启动恢复被拒绝，进程退出且不显示窗口");
+                    app_handle.exit(0);
+                    return Ok(());
+                }
+
                 // 注册熔断闸门实现到服务层契约（依赖反转：控制器只经 service
                 // 层调用闸门，避免 controller → security_commands 反向依赖）
                 security_commands::brute_force_bridge::install_unlock_gate();
+                // 注册解锁前受信档位应用实现到服务层契约（同一分层红线约束）
+                security_commands::install_preset_source();
                 let install_dir = std::env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
@@ -438,11 +487,15 @@ fn run_main_ui(
             verthys_reconcile_key_presence,
             verthys_reset_global_key_state,
             set_privacy_mode,
+            get_privacy_status,
+            adopt_privacy_session,
+            reconcile_privacy,
             clear_clipboard,
-            restore_privacy_mode,
             read_file_bytes,
             write_file_bytes,
             read_user_file,
+            user_file_stat,
+            check_disk_space,
             write_user_file,
             // 单文件导出流式落盘（暂存 + 原子替换，压低内存峰值）
             write_user_file_stream,
@@ -459,7 +512,7 @@ fn run_main_ui(
             security_commands::security_brute_status,
             security_commands::security_session_start,
             security_commands::security_session_stop,
-            security_commands::security_session_set_high_security,
+            security_commands::security_session_set_hardening,
             security_commands::security_module_patrol,
             security_commands::security_add_trusted_path,
             security_commands::security_clear_trusted_paths,

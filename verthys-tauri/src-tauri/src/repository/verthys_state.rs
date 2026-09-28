@@ -1,18 +1,23 @@
 /*
  * repository/verthys_state.rs — 状态文件持久化（实现）
  *
- *   1. 状态文件强绑定：存放到 .verthys 同级目录（<verthys_path>.state）
- *      用户复制 .verthys 时状态文件自然跟随，跨设备无缝迁移
+ *   1. 状态文件强绑定：存放到容器附属数据目录（目录内 state.json）
+ *      用户整体复制容器与附属目录时状态自然跟随，跨设备无缝迁移
  *   2. 路径指针：app_config_dir/.verthys_last_path 记录上次使用的 verthys 路径
  *      verthys_init_status 据此找到状态文件
  *   3. 主动修复：verthys_init_status 中校验 .verthys magic，合法则修复状态文件
  *   4. 修复失败可观测性：repair_fail_count 计数器
  *   5. 幂等性：内存缓存避免重复 I/O
+ *   6. 旧布局懒迁移：<verthys_path>.state 首次读取时原子搬入附属目录，
+ *      解析失败不搬移（保留现场），迁移失败不阻断读取
  *
- * 原子提交：先写 .state.tmp，再 rename 覆盖
+ * 原子提交：先写 state.json.tmp，再 rename 覆盖
+ *
+ * 路径派生统一由 repository::container_layout 提供，本文件禁止自行拼接附属路径。
  */
 
 use crate::constants::{STATE_MAGIC, STATE_VERSION};
+use crate::repository::container_layout;
 use crate::util::path::normalize_path;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -107,7 +112,7 @@ fn write_last_verthys_path(app: &tauri::AppHandle, verthys_path: &str) -> Result
  * ：旧版状态文件迁移                                       *
  *                                                                    *
  * 旧版状态文件存放在 app_config_dir/.verthys_state（与 .verthys 分离）。   *
- * 新版改为 .verthys 同级目录（<verthys_path>.state）+ 路径指针。           *
+ * 新版改为附属数据目录（<verthys_path>.d/state.json）+ 路径指针。           *
  *                                                                    *
  * 升级场景：用户从旧版升级后，路径指针不存在但旧状态文件存在。         *
  * 若不迁移，verthys_init_status 会误判为全新用户，显示"初始化密钥"界面。  *
@@ -227,18 +232,13 @@ fn try_migrate_from_legacy_state(app: &tauri::AppHandle) -> Option<VerthysState>
 }
 
 /* ------------------------------------------------------------------ *
- * 状态文件路径：.verthys 同级目录                                       *
+ * 状态文件路径：容器附属数据目录                                        *
  *                                                                    *
- * verthys_path = "D:/data/verthys.verthys"                              *
- * state_path = "D:/data/verthys.verthys.state"                        *
+ * verthys_path = "D:/data/verthys.verthys"                            *
+ * state_path   = "D:/data/verthys.verthys.d/state.json"               *
  *                                                                    *
- * 用户复制 .verthys 时 .verthys.state 自然跟随，跨设备无缝迁移。          *
+ * 旧布局 "D:/data/verthys.verthys.state" 仅作只读回退与一次性迁移的旧位置。    *
  * ------------------------------------------------------------------ */
-
-/// 获取状态文件路径（.verthys 同级目录）
-fn get_state_file_for_verthys(verthys_path: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!("{}.state", verthys_path))
-}
 
 /* ------------------------------------------------------------------ *
  * .verthys 文件格式合法性校验                                           *
@@ -295,8 +295,8 @@ pub fn validate_verthys_file(verthys_path: &str) -> bool {
 ///
 /// 流程：
 ///   1. 读取路径指针获取 verthys_path
-///   2. 读取 <verthys_path>.state 状态文件
-///   3. 路径指针不存在 → None（全新用户）
+///   2. 读取附属目录状态文件；缺失时回退旧布局并懒迁移
+///   3. 路径指针不存在 → None（全新用户，含旧版应用级状态文件迁移）
 ///   4. 状态文件不存在 → None（跨设备复制未携带状态文件）
 pub fn read_state_file(app: &tauri::AppHandle) -> Result<Option<VerthysState>, String> {
     let verthys_path = match read_last_verthys_path(app)? {
@@ -311,35 +311,65 @@ pub fn read_state_file(app: &tauri::AppHandle) -> Result<Option<VerthysState>, S
             return Ok(None); // 全新用户，无路径指针
         }
     };
-    let state_file = get_state_file_for_verthys(&verthys_path);
-    if !state_file.exists() {
+    read_state_at(&verthys_path)
+}
+
+/// 读取指定容器的状态文件（附属目录优先，旧布局命中即懒迁移）
+///
+/// 迁移纪律：旧文件先解析成功再搬移；解析失败不搬移且原样保留（保留现场），
+/// 搬移失败不阻断本次读取（下次访问自动重试）。
+fn read_state_at(verthys_path: &str) -> Result<Option<VerthysState>, String> {
+    let primary = container_layout::state_file_for(verthys_path);
+    if primary.exists() {
+        return parse_state_file(&primary).map(Some);
+    }
+
+    let legacy = container_layout::legacy_state_file_for(verthys_path);
+    if !legacy.exists() {
         // 路径指针存在但状态文件不存在
-        // 可能原因：跨设备复制 .verthys 时未携带 .verthys.state
+        // 可能原因：跨设备复制 .verthys 时未携带状态文件
         // 返回 None，让 verthys_init_status / verthys_unlock 主动修复
         log::info!(
             "[state] 状态文件不存在（可能跨设备复制未携带）: verthys_path={}",
-            crate::util::path::sanitize_path(&verthys_path)
+            crate::util::path::sanitize_path(verthys_path)
         );
         return Ok(None);
     }
+
+    let state = parse_state_file(&legacy)?;
+    match container_layout::migrate_legacy_file(&legacy, &primary) {
+        Ok(()) => log::info!("[state] 旧布局状态文件已收口至附属数据目录"),
+        Err(e) => log::warn!(
+            "[state] 旧布局状态文件迁移失败（保持原位置，下次访问重试）: {}",
+            e
+        ),
+    }
+    Ok(Some(state))
+}
+
+/// 解析既有状态文件（调用方保证文件存在）
+fn parse_state_file(file: &std::path::Path) -> Result<VerthysState, String> {
     let content =
-        std::fs::read_to_string(&state_file).map_err(|e| format!("读取状态文件失败: {}", e))?;
+        std::fs::read_to_string(file).map_err(|e| format!("读取状态文件失败: {}", e))?;
     let state: VerthysState =
         serde_json::from_str(&content).map_err(|e| format!("解析状态文件失败: {}", e))?;
     if state.magic != STATE_MAGIC {
         return Err("状态文件 magic 不匹配".into());
     }
-    Ok(Some(state))
+    Ok(state)
 }
 
-/// 原子写入状态文件（.verthys 同级目录）+ 更新路径指针
+/// 原子写入状态文件（附属数据目录）+ 更新路径指针
 ///
 /// 写入两处：
-///   1. <verthys_path>.state — 状态文件（与 .verthys 同级，跨设备跟随）
+///   1. <verthys_path>.d/state.json — 状态文件（随附属目录迁移）
 ///   2. app_config_dir/.verthys_last_path — 路径指针（记录上次路径）
+///
+/// 目录保障失败返回明确错误（只读介质 / 同名文件占用），不做旧布局回退写。
 pub fn write_state_file_atomic(app: &tauri::AppHandle, state: &VerthysState) -> Result<(), String> {
     use crate::util::path::sanitize_path;
-    let state_file = get_state_file_for_verthys(&state.verthys_path);
+    container_layout::ensure_sidecar_dir(&state.verthys_path)?;
+    let state_file = container_layout::state_file_for(&state.verthys_path);
     let tmp_file = std::path::PathBuf::from(format!("{}.tmp", state_file.to_string_lossy()));
 
     let content = serde_json::to_string(state).map_err(|e| format!("序列化状态文件失败: {}", e))?;
@@ -369,13 +399,25 @@ pub fn write_state_file_atomic(app: &tauri::AppHandle, state: &VerthysState) -> 
 }
 
 /// 删除状态文件 + 路径指针（回滚时调用）
+///
+/// 删除范围为状态文件本体及其临时文件（新布局与旧布局两处），
+/// 附属目录仅在因此清空时回收；其余附属数据由调用方按需清理。
 pub fn delete_state_file(app: &tauri::AppHandle) {
-    // 删除 .verthys 同级的状态文件
+    // 删除状态文件（附属目录 + 旧布局两处，含各自临时文件）
     if let Ok(Some(verthys_path)) = read_last_verthys_path(app) {
-        let state_file = get_state_file_for_verthys(&verthys_path);
+        let state_file = container_layout::state_file_for(&verthys_path);
         let tmp_file = std::path::PathBuf::from(format!("{}.tmp", state_file.to_string_lossy()));
         let _ = std::fs::remove_file(&state_file);
         let _ = std::fs::remove_file(&tmp_file);
+
+        let legacy = container_layout::legacy_state_file_for(&verthys_path);
+        let legacy_tmp = std::path::PathBuf::from(format!("{}.tmp", legacy.to_string_lossy()));
+        let _ = std::fs::remove_file(&legacy);
+        let _ = std::fs::remove_file(&legacy_tmp);
+
+        let _ = container_layout::remove_dir_if_empty(&container_layout::sidecar_dir_for(
+            &verthys_path,
+        ));
     }
     // 删除路径指针
     if let Ok(dir) = get_state_dir(app) {

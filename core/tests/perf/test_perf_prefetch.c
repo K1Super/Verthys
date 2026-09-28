@@ -38,7 +38,7 @@
 #endif
 
 #define TMP_VERTHYS       "test_perf_tmp.verthys"
-#define TMP_VERTHYS_CACHE "test_perf_tmp.verthys.idx_cache"
+#define TMP_VERTHYS_CACHE "test_perf_tmp.verthys.d\\idx_cache"
 
 /* 跨平台高精度毫秒时间戳 */
 static uint64_t perf_now_ms(void)
@@ -131,6 +131,16 @@ TEST(perf_secure_disables_warm_cache)
     struct VerthysContext *ctx = (struct VerthysContext *)h;
     CHECK_EQ(ctx->warm_cache_enabled, 0);
     CHECK_EQ(ctx->preset, VERTHYS_PRESET_SECURE);
+
+    /* 解锁路径同样禁用：温缓存门控按运行时档位判定，
+     * 宿主在解锁前应用受信档位（容器头仅作创建基线记录） */
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_SwitchSecurityPreset(h, VERTHYS_PRESET_SECURE), VERTHYS_OK);
+    CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "pw", 2, 0), VERTHYS_OK);
+    CHECK_EQ(ctx->warm_cache_enabled, 0);
+
+    /* 复位运行时档位：避免影响依赖平衡档的后续用例 */
+    CHECK_EQ(Verthys_SwitchSecurityPreset(h, VERTHYS_PRESET_BALANCED), VERTHYS_OK);
 
     Verthys_Deinit(h);
     cleanup_tmp();

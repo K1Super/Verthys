@@ -20,6 +20,8 @@
 // 全局CSS统一引入（设计令牌 → 复用组件 → 动画关键帧 → 空闲治理）
 import "./styles/tokens.css";
 import "./styles/components.css";
+// 凭证登记台共享皮肤（存签 / 枢钥 / 中枢 窗口共用 · 单一来源 styles/reg-desk.css）
+import "./styles/reg-desk.css";
 import "./styles/animations.css";
 // 空闲 CSS 动画治理（idle-*/glass-calm/reduce-motion 根类规则，置于最后覆盖）
 import "./styles/idle-governance.css";

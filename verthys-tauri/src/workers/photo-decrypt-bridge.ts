@@ -17,9 +17,10 @@
  */
 import {
   decryptMeta, decryptChunk, decryptSlimThumb, unwrapSlimFileKey, decryptSlimChunk,
-  decryptSlimChunkSet,
+  decryptSlimChunkSet, computeChunkHashesForB64, computeFileHash,
   type PhotoMeta, type SlimChunkSet,
 } from "../lib/crypto";
+import { bytesToHex } from "../utils/binary_codec";
 import { createLogger } from "../utils/logger";
 import { photoWorkerPool, TaskRejectedError } from "./photoWorkerPool";
 
@@ -162,6 +163,14 @@ async function decryptMetaOnMainThread(
   };
 }
 
+/** 块解密任务的完整性权威值（缺省表示不校验：历史记录无权威值的兼容路径） */
+export interface ChunkVerifyOptions {
+  /** 逐块密文哈希（非空时在解密前逐块校验） */
+  expectedHashes?: string[];
+  /** 整图明文哈希（提供时对解密产物按序增量校验） */
+  expectedFileHash?: string;
+}
+
 /**
  * 解密照片数据块：优先 Worker 池，池基础设施失败时回退主线程。
  *
@@ -170,8 +179,10 @@ async function decryptMetaOnMainThread(
  * @param fileHashHex 文件哈希 hex（块 AD 绑定）
  * @param label 定位标识（记录 ID 或照片名，用于日志与错误提示）
  * @param slim 索引瘦身布局参数（提供时按 nonce|密文 布局解密）
+ * @param verify 完整性权威值：随任务透传给 Worker 在解密前后比对；
+ *   回退主线程时保持同等校验标准（降级不降标准）
  * @returns 按输入顺序的明文块（长度与输入一致）
- * @throws Error 任一块解密失败即整体失败（不产出残缺序列）
+ * @throws Error 任一块解密失败或校验不符即整体失败（不产出残缺序列）
  */
 export async function decryptChunksPreferWorker(
   chunksB64: string[],
@@ -179,6 +190,7 @@ export async function decryptChunksPreferWorker(
   fileHashHex: string,
   label: string,
   slim?: SlimChunkParams,
+  verify?: ChunkVerifyOptions,
 ): Promise<Uint8Array[]> {
   try {
     const { plaintexts } = await photoWorkerPool.submitDecryptChunks({
@@ -188,13 +200,15 @@ export async function decryptChunksPreferWorker(
       label,
       wrappedFileKey: slim?.wrappedFileKey,
       chunkTotal: slim?.chunkTotal,
+      expectedHashes: verify?.expectedHashes,
+      expectedFileHash: verify?.expectedFileHash,
     });
     // 转移回传的缓冲直接以视图消费：不再拷贝，避免 MB 级明文在主线程翻倍驻留
     return plaintexts.map((buf) => new Uint8Array(buf));
   } catch (e) {
     if (e instanceof TaskRejectedError) throw e;
     log.warn(`Worker 池不可用，回退主线程解密数据块（${label}）:`, e);
-    return decryptChunksOnMainThread(chunksB64, photoKey, fileHashHex, slim);
+    return decryptChunksOnMainThread(chunksB64, photoKey, fileHashHex, slim, verify);
   }
 }
 
@@ -209,9 +223,25 @@ async function decryptChunksOnMainThread(
   photoKey: string,
   fileHashHex: string,
   slim?: SlimChunkParams,
+  verify?: ChunkVerifyOptions,
 ): Promise<Uint8Array[]> {
   if (slim && (!Number.isInteger(slim.chunkTotal) || slim.chunkTotal !== chunksB64.length)) {
     throw new Error(`块总数与密文数量不一致（声明 ${slim.chunkTotal}，实得 ${chunksB64.length}）`);
+  }
+  const expectedHashes = verify?.expectedHashes;
+  if (expectedHashes && expectedHashes.length > 0) {
+    if (expectedHashes.length !== chunksB64.length) {
+      throw new Error(
+        `哈希项数与块数不一致（哈希 ${expectedHashes.length}，块 ${chunksB64.length}）`,
+      );
+    }
+    // 降级路径保持同等校验标准：密文哈希先于解密比对
+    const actualHashes = computeChunkHashesForB64(chunksB64);
+    for (let i = 0; i < actualHashes.length; i++) {
+      if (actualHashes[i].toLowerCase() !== expectedHashes[i].toLowerCase()) {
+        throw new Error(`块密文哈希校验失败（第 ${i + 1}/${chunksB64.length} 块）`);
+      }
+    }
   }
   const plaintexts: Uint8Array[] = [];
   let fileKey: Uint8Array | null = null;
@@ -237,6 +267,20 @@ async function decryptChunksOnMainThread(
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new Error(`第 ${c + 1}/${chunksB64.length} 块解密失败: ${msg}`);
+      }
+    }
+    if (verify?.expectedFileHash) {
+      // 降级路径保持同等校验标准：整图哈希在此按拼接结果比对
+      //（可接受的降级成本：仅在 Worker 池不可用时发生）
+      const totalLen = plaintexts.reduce((s, c) => s + c.length, 0);
+      const fullBytes = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const c of plaintexts) { fullBytes.set(c, offset); offset += c.length; }
+      const actualFileHash = bytesToHex(computeFileHash(fullBytes));
+      if (actualFileHash !== verify.expectedFileHash) {
+        throw new Error(
+          `整图哈希校验失败（期望 ${verify.expectedFileHash}，实际 ${actualFileHash}）`,
+        );
       }
     }
     return plaintexts;

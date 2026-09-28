@@ -1,46 +1,201 @@
 /**
- * useBrandTitle — VERTHYS 品牌排印参数系统（全局唯一权威源）
+ * useBrandTitle — VERTHYS 品牌字标系统（全局唯一权威源）
  *
- * 职责：
- *   生成「不规则字号雕刻排印」的逐字参数 — 不规则字号 / 非均匀浮动基线 /
- *   逐字微倾 / 实色·镂空·accent 三态混合 / 轨道入射与弹射向量。
- *   UnlockView（引导页 84px 级）与 HomeView（主界面紧凑级）共享同一
- *   确定性参数场，保证品牌排印跨场景形态同源（同一 hash 场，仅幅度缩放）。
+ * 设计体系：星轨刻线体（Orbital Engraved Capitals）
+ *   VERTHYS 字标为定制字形（非任何字库字），全部数据在此单源定义，
+ *   引导页 / 主界面 / 弹窗三级共用同一形态，仅幅度与暴露项分级收敛。
  *
- * 反大众化设计：
- *   - 确定性 hash（可控不规则偏差）— 拒绝等距模板与均匀排布
- *   - 所有参数逐字独立差化，构建期一次求值恒定（非运行时随机抖动）
- *   - accent 锚点唯一（index 4 = 'C'），拒绝多点亮色泛滥
+ *   1. 单线几何骨格 — cap = 100，baseline = 100，笔画重量逐级可调；
+ *      端切面垂直于笔画（butt）、尖锋/叉口为锐角 miter — 仪器刻度式
+ *      切割语言（「刻线」），拒绝圆头软切与等宽模板感。
+ *   2. 光门（唯一镂空字）— V 为发丝镂空（1.8），似光绘之门；
+ *      其余六字实色主力，构成「一清六实」的克重对比。
+ *   3. 枢钥刻槽（keyway）— E/R/T/H/Y/S 各携一刀 21° 半深切痕
+ *      （切入笔画一半深度，不切断笔画）：同刃角、异落位，
+ *      呼应星盘刻度与锁芯钥匙槽 — 品牌独有形制。
+ *   4. 悬锤垂针 — Y 尾针下探至 116.5（越过基线 16.5）：全字唯一
+ *      垂坠，如铅锤定中，破除等底排印的板滞。
+ *   5. 双层雕刻 — 暗色克隆沿光向（右下）偏移，物理凹刻深度；
+ *      非阴影非辉光，零渐变。
+ *   6. 单一强调 — 仅 H 取主题强调色的深度化变体（#16c8ea），
+ *      其余冰银（#d9e6f2）：拒绝多点亮色泛滥。
  *
- * 运动语言（轨道成型 → 引力弹射）：
- *   入射向量沿上半弧差异化角度，弹射外缘先走（引力弹弓语义）；
- *   compact 模式按统一比例收敛幅度（主界面安静驻留，不复制引导页戏剧性）。
+ * 反大众化约束（延续并升级旧体系）：
+ *   旧体系以确定性 hash 差化「形态」（字号/基线/倾角随机错落）——
+ *   形散而近于生硬。本体系改由设计决定形态（字形即定数，零随机），
+ *   确定性 hash 仅差化「运动」（入射向量/时序/时长逐字独立）：
+ *   设计定形，扰动生于运动 —— 形整而气活。
+ *
+ * 运动语言（轨道入射 → 引力弹射）：
+ *   入射沿上半弧差异化角度 + 距离差化，末段轻度过冲回稳；
+ *   弹射离场自外缘先走（引力弹弓语义，仅引导页使用）。
+ *   intro 戏剧性 / compact 安静驻留 / mini 近静默 — 三级幅度收敛。
  */
 
-/** 品牌排印字符参数（全部数值 — 模板层负责拼接单位） */
-export interface BrandChar {
-  ch: string;
-  /** 着色三态：实色 / 镂空描边 / 唯一 accent 锚点 */
-  mode: "solid" | "hollow" | "accent";
-  /** 字号（px）— 不规则视觉重量分布 */
-  fs: number;
-  /** 浮动基线偏移（px）— 非均匀错落 */
-  by: number;
-  /** 逐字微倾角（deg） */
-  tr: number;
-  /** 入射向量 x（px）— 轨道成型入场 */
-  dx: number;
-  /** 入射向量 y（px） */
-  dy: number;
-  /** 入射旋转偏角（deg） */
-  rot: number;
-  /** 入场延迟（ms）— 基础交错 + hash 抖动 */
-  delay: number;
-  /** 入场时长（s）— 逐字差化 */
-  dur: number;
-  /** 弹射延迟（ms）— 外缘字先走 */
-  ed: number;
+/** 字标级别：intro（引导页）/ compact（主界面）/ mini（弹窗品牌字） */
+export type BrandLevel = "intro" | "compact" | "mini";
+
+/** 着色三态：冰银实色 / 唯一强调 / 光门镂空 */
+export type BrandTone = "ice" | "accent" | "hollow";
+
+/** 枢钥刻槽落位（字形局部坐标 — 即切痕中心） */
+export interface BrandNotch {
+  cx: number;
+  cy: number;
 }
+
+/** 刻槽形制（刃角恒定 21° — 与轨道丝线族同角语言） */
+export interface BrandNotchSpec {
+  w: number;
+  h: number;
+  angle: number;
+}
+
+/** 单字模型（模板层据此直出 SVG） */
+export interface BrandGlyph {
+  /** 字键（V/E/R/T/H/Y/S — 亦作遮罩 id 后缀） */
+  key: string;
+  /** 笔画中心线路径（cap 0-100 坐标系） */
+  d: string;
+  /** 布局横向偏移（字距为设计值 — 非等距也无 hash 抖动） */
+  x: number;
+  tone: BrandTone;
+  /** 本字刻槽落位（null = 无刻痕：V 光门独清） */
+  notch: BrandNotch | null;
+  /** 逐字 CSS 变量（入射 / 时序 / 弹射 — 运动差化，非形态差化） */
+  style: Record<string, string>;
+}
+
+export interface BrandWordmark {
+  viewBox: string;
+  notch: BrandNotchSpec;
+  glyphs: BrandGlyph[];
+  /** 入场完成时刻（ms — 末字 delay + dur 与各字最大值）：软离场门控源 */
+  doneAt: number;
+}
+
+/* ============================================================================
+ * 字形库（自绘中心线 — butt 端切面，y 向下，cap 0..100，baseline 100）
+ *   端切面即笔画终点（butt）；转角为 miter（V 尖锋 / Y 叉口吃满锐角）；
+ *   Y 尾针越过基线至 116.5；S 为双弧 + 三次样条脊线（ogee 中脊）
+ * ========================================================================== */
+const GLYPHS: Array<{ key: string; d: string; x: number; tone: BrandTone; notch: BrandNotch | null }> = [
+  {
+    key: "V",
+    /* 尖锋至 86.5 + miter 延伸 ≈ 100.6（基线对齐）— 光门镂空字 */
+    d: "M4.25 1.48 L33 86.5 L61.75 1.48",
+    x: 0,
+    tone: "hollow",
+    notch: null,
+  },
+  {
+    key: "E",
+    /* 中臂短于上下臂 8.5 — 经典克重收束 */
+    d: "M63 4.5 H4.5 V95.5 H63 M4.5 50 H54.5",
+    x: 86.8,
+    tone: "ice",
+    notch: { cx: 9, cy: 27 },
+  },
+  {
+    key: "R",
+    /* 几何圆腹（r 25.5）+ 直腿（55°）下落至基线 */
+    d: "M0 4.5 H31 A25.5 25.5 0 0 1 31 55.5 H0 M4.5 0 V100 M31 55.5 L60.3 97.4",
+    x: 174.8,
+    tone: "ice",
+    notch: { cx: 9, cy: 72 },
+  },
+  {
+    key: "T",
+    d: "M0 4.5 H55 M27.5 0 V100",
+    x: 264.4,
+    tone: "ice",
+    notch: { cx: 23, cy: 66 },
+  },
+  {
+    key: "H",
+    /* 唯一强调字（主题强调色的深度化变体） */
+    d: "M4.5 0 V100 M63.5 0 V100 M0 50 H68",
+    x: 346.4,
+    tone: "accent",
+    notch: { cx: 9, cy: 30 },
+  },
+  {
+    key: "Y",
+    /* 锐角叉口双肩 + 尾针下探 116.5（悬锤垂针） */
+    d: "M3.81 2.39 L33 50 M62.19 2.39 L33 50 M33 50 V116.5",
+    x: 438.4,
+    tone: "ice",
+    notch: { cx: 28.5, cy: 66 },
+  },
+  {
+    key: "S",
+    /* 双弧（r 24，上下各溢出 1.5 光学补偿）+ 三次样条中脊（相切进出） */
+    d: "M51.78 15 A24 24 0 1 0 16.22 45.91 C22.52 50.84 37.48 49.16 43.78 54.09 A24 24 0 1 1 8.22 85",
+    x: 529.7,
+    tone: "ice",
+    notch: { cx: 3.6, cy: 34 },
+  },
+];
+
+/** 刻槽形制：6.2 × 7.0 @ 21° — 半深切痕（约切入笔画 4.2 / 9.8，笔画不断） */
+const NOTCH_SPEC: BrandNotchSpec = { w: 6.2, h: 7, angle: 21 };
+
+/** 画布（含 Y 尾针与 S 光学溢出余量；左右留白对称） */
+const VIEW_BOX = "-14 -4 618 125";
+
+/* ============================================================================
+ * 级别运动场（确定性 hash — 只差化运动，不差化形态）
+ *   dist/dur 区间 · lift 入射抬升 · rot 微倾幅度 · stagger/jitter 时序
+ *   expose：刻槽与镂空仅在可辨级别暴露（mini 弹窗级收敛为静默简化锁版）
+ * ========================================================================== */
+interface LevelSpec {
+  exposeNotches: boolean;
+  exposeHollow: boolean;
+  dist: [number, number];
+  lift: number;
+  rot: number;
+  stagger: number;
+  jitter: number;
+  dur: [number, number];
+  /** 弹射幅度缩放（仅引导页实际使用） */
+  ejectScale: number;
+}
+
+const LEVELS: Record<BrandLevel, LevelSpec> = {
+  intro: {
+    exposeNotches: true,
+    exposeHollow: true,
+    dist: [66, 152],
+    lift: 18,
+    rot: 8.5,
+    stagger: 128,
+    jitter: 168,
+    dur: [0.95, 1.3],
+    ejectScale: 1,
+  },
+  compact: {
+    exposeNotches: true,
+    exposeHollow: true,
+    dist: [24, 54],
+    lift: 7,
+    rot: 3.6,
+    stagger: 92,
+    jitter: 118,
+    dur: [0.72, 0.92],
+    ejectScale: 0.6,
+  },
+  mini: {
+    exposeNotches: false,
+    exposeHollow: false,
+    dist: [10, 22],
+    lift: 4,
+    rot: 2.2,
+    stagger: 52,
+    jitter: 78,
+    dur: [0.5, 0.66],
+    ejectScale: 0.4,
+  },
+};
 
 /** 确定性 hash（seed×salt 双域）∈ [0,1) */
 const hash = (seed: number, salt: number): number => {
@@ -48,62 +203,46 @@ const hash = (seed: number, salt: number): number => {
   return x - Math.floor(x);
 };
 
-export const BRAND_TITLE = "VERTHYS";
-/** accent 锚点字符索引（'C' — 单锚点，唯一强调色） */
-const ACCENT_IDX = 4;
+/**
+ * 生成字标模型（字形 + 刻槽 + 逐字运动变量）。
+ * 构建期一次求值恒定 — 非运行时随机抖动。
+ */
+export function useBrandTitle(level: BrandLevel = "intro"): BrandWordmark {
+  const spec = LEVELS[level];
+  let doneAt = 0;
 
-export interface BrandTitleOptions {
-  /** 紧凑级（主界面）：字号 30-50px，幅度整体收敛 */
-  compact?: boolean;
-  /** mini 级（弹窗品牌字）：字号 24-34px（弹窗内最大文字 — 层级高于 sc-title 16px），幅度收敛 */
-  mini?: boolean;
-}
-
-/** 排印级别：intro（引导页默认）/ compact（主界面）/ mini（弹窗品牌字） */
-type BrandLevel = "intro" | "compact" | "mini";
-
-export function useBrandTitle(options: BrandTitleOptions = {}): BrandChar[] {
-  const level: BrandLevel = options.mini
-    ? "mini"
-    : options.compact
-      ? "compact"
-      : "intro";
-
-  return BRAND_TITLE.split("").map((ch, i) => {
+  const glyphs: BrandGlyph[] = GLYPHS.map((g, i) => {
     const h = (n: number) => hash(i, n);
 
-    /* 三态抽取：accent 唯一；其余按 hash 加权（实色主力 / 镂空次之） */
-    const mr = h(11);
-    const mode: BrandChar["mode"] =
-      i === ACCENT_IDX ? "accent" : mr < 0.45 ? "solid" : mr < 0.85 ? "hollow" : "solid";
-
-    /* 轨道入射向量：上半弧差异化角度 + 距离差化（级别缩放） */
+    /* 轨道入射：上半弧差异化角度 + 距离差化（级别缩放） */
     const ang = (0.22 + h(1) * 0.56) * Math.PI;
-    const distBase =
-      level === "mini" ? 13 + h(2) * 15 : level === "compact" ? 38 + h(2) * 46 : 92 + h(2) * 108;
-    const r1 = (n: number, lo: number, hi: number) =>
-      +(lo + h(n) * (hi - lo)).toFixed(1);
-    const levelPick = <T,>(intro: T, compact: T, mini: T): T =>
-      level === "mini" ? mini : level === "compact" ? compact : intro;
+    const dist = spec.dist[0] + h(2) * (spec.dist[1] - spec.dist[0]);
+    const dx = +(Math.cos(ang) * dist).toFixed(1);
+    const dy = +(Math.sin(ang) * dist * 0.5 - spec.lift).toFixed(1);
+    const rot = +((h(3) * 2 - 1) * spec.rot).toFixed(2);
+    const delay = Math.round(spec.stagger * i + h(4) * spec.jitter);
+    const dur = +(spec.dur[0] + h(5) * (spec.dur[1] - spec.dur[0])).toFixed(2);
+
+    doneAt = Math.max(doneAt, delay + dur * 1000);
 
     return {
-      ch,
-      mode,
-      fs: Math.round(levelPick(56 + h(12) * 52, 30 + h(12) * 20, 24 + h(12) * 10)),
-      /* mini 级浮动基线整型化：亚像素基线 = 小字号文字持续子像素
-       * 光栅化模糊（恒模糊非运动瞬态）— 必须落物理像素栅格 */
-      by: levelPick(r1(13, -13, 13), r1(13, -6.5, 6.5), Math.round(-2 + h(13) * 4)),
-      tr: levelPick(r1(14, -2, 2), r1(14, -1.4, 1.4), r1(14, -0.7, 0.7)),
-      dx: +(Math.cos(ang) * distBase).toFixed(1),
-      dy: +(Math.sin(ang) * distBase * 0.55 - (level === "mini" ? 4 : level === "compact" ? 10 : 26)).toFixed(1),
-      rot: levelPick(r1(3, -23, 23), r1(3, -11.5, 11.5), r1(3, -7, 7)),
-      delay: Math.round(
-        (level === "mini" ? 0.5 : level === "compact" ? 0.8 : 1) * (130 * i + h(4) * 230),
-      ),
-      dur: +levelPick(1.05 + h(5) * 0.4, 0.82 + h(5) * 0.3, 0.6 + h(5) * 0.22).toFixed(2),
-      ed: Math.round(
-        (level === "mini" ? 0.4 : level === "compact" ? 0.6 : 1) * ((BRAND_TITLE.length - 1 - i) * 42 + 60),
-      ),
+      key: g.key,
+      d: g.d,
+      x: g.x,
+      /* 简化级别：镂空降为实色（发丝描边在小字号级低于可辨阈值） */
+      tone: g.tone === "hollow" && !spec.exposeHollow ? "ice" : g.tone,
+      notch: spec.exposeNotches ? g.notch : null,
+      style: {
+        "--dx": `${dx}px`,
+        "--dy": `${dy}px`,
+        "--rot": `${rot}deg`,
+        "--delay": `${delay}ms`,
+        "--dur": `${dur}s`,
+        /* 弹射时序：外缘先走（末字最先离场 — 引力弹弓语义） */
+        "--ed": `${Math.round(((GLYPHS.length - 1 - i) * 42 + 60) * spec.ejectScale)}ms`,
+      },
     };
   });
+
+  return { viewBox: VIEW_BOX, notch: NOTCH_SPEC, glyphs, doneAt };
 }

@@ -362,6 +362,28 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("switch_preset", r)
             }
         }
+        // 查询活跃安全预设档位（切档回读校验：切换是否真实生效）
+        "get_active_preset" => {
+            match worker.call_get_security_preset() {
+                Ok(preset) => {
+                    let mut resp = Response::ok("get_active_preset");
+                    resp.data = Some(preset.to_string());
+                    resp
+                }
+                Err(code) => Response::err("get_active_preset", code),
+            }
+        }
+        // 查询指定档位的特性位投影（档位矩阵唯一权威输出，宿主据此展示与执行）
+        "get_preset_features" => {
+            match worker.call_get_preset_feature_bits(req.preset) {
+                Ok(bits) => {
+                    let mut resp = Response::ok("get_preset_features");
+                    resp.data = Some(bits.to_string());
+                    resp
+                }
+                Err(code) => Response::err("get_preset_features", code),
+            }
+        }
         // 根治：Verthys_Flush 显式刷盘
         //   替代旧 verthys_flush 的 lock+unlock 模式。
         //   旧模式缺陷：lock 清零密钥 + state=LOCKED，若 unlock 超时/失败，

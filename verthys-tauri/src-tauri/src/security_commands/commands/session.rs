@@ -7,7 +7,7 @@
  *   会话守卫 Tauri 命令实现：
  *     - security_session_start：启动会话守卫（必须获取主窗口 HWND，失败不静默）
  *     - security_session_stop：停止会话守卫
- *     - security_session_set_high_security：设置高安全模式（需已解锁会话）
+ *     - security_session_set_hardening：设置会话硬化开关（需已解锁会话）
  */
 
 use tauri::{Manager, State};
@@ -98,17 +98,23 @@ pub fn security_session_stop(
     Ok(())
 }
 
-/// 设置高安全模式（启用电源挂起监听 + 更激进的锁屏策略）
+/// 设置会话硬化开关（挂起锁定 / 剪贴板监听）
 ///
-/// 授权：当前会话必须已解锁容器且存在主密钥记录（密钥生命周期
-/// 为 Locked 或 Unlocked），防止未建立会话的进程操纵防护级别。
-/// 高安全标志为进程内原子写，命令持锁时间与执行时长均可忽略。
+/// 两项能力相互独立，各自启停：
+///   - suspend_lock：系统挂起（睡眠）时是否销毁密钥；
+///   - clipboard_monitor：是否监听外部剪贴板写入并清空（锁定清空为恒定底线）。
+///
+/// 授权：当前会话必须已解锁容器且存在主密钥记录，防止未建立会话的
+/// 进程操纵防护级别。挂起锁定标志为进程内原子写，持锁时间可忽略。
+/// 剪贴板监听启动失败如实回报错误码，不回滚已设置的挂起标志——
+/// 两项能力相互独立，不制造"整体成功"的假象。
 #[tauri::command]
-pub fn security_session_set_high_security(
+pub fn security_session_set_hardening(
     app: tauri::AppHandle,
     state: State<SecurityState>,
     app_state: State<'_, AppState>,
-    enabled: bool,
+    suspend_lock: bool,
+    clipboard_monitor: bool,
 ) -> Result<SecurityResult, String> {
     if let Err(msg) = require_session_authorized(&app_state) {
         write_security_audit(
@@ -118,40 +124,62 @@ pub fn security_session_set_high_security(
             AuditResult::Denied,
             None,
             Some(format!(
-                "PERMISSION_DENIED: set_high_security({}) {}",
-                enabled, msg
+                "PERMISSION_DENIED: set_hardening(suspend_lock={}, clipboard_monitor={}) {}",
+                suspend_lock, clipboard_monitor, msg
             )),
         );
         return Ok(SecurityResult::error(
             "PERMISSION_DENIED",
-            "设置高安全模式需要已解锁的会话",
+            "设置会话硬化开关需要已解锁的会话",
         ));
     }
 
     {
         let mut guard = lock_session_guard_or_recover(&state)?;
-        guard.set_high_security_mode(enabled);
+        guard.set_high_security_mode(suspend_lock);
     }
 
-    write_security_audit(
-        &app,
-        &state,
-        AuditEventType::SecurityCommand,
-        AuditResult::Success,
-        None,
-        Some(format!(
-            "高安全模式: {}",
-            if enabled { "启用" } else { "禁用" }
-        )),
-    );
-
-    log::info!(
-        "[security_session_set_high_security] 高安全模式: {}",
-        if enabled { "启用" } else { "禁用" }
-    );
-    Ok(SecurityResult::success(if enabled {
-        "高安全模式已启用"
-    } else {
-        "高安全模式已禁用"
-    }))
+    // 剪贴板监听随开关启停：失败如实回报错误码，不回滚挂起标志
+    match state.set_clipboard_guard(clipboard_monitor) {
+        Ok(()) => {
+            write_security_audit(
+                &app,
+                &state,
+                AuditEventType::SecurityCommand,
+                AuditResult::Success,
+                None,
+                Some(format!(
+                    "会话硬化开关: 挂起锁定={}（剪贴板监听{}）",
+                    if suspend_lock { "启用" } else { "禁用" },
+                    if clipboard_monitor { "已启动" } else { "已停止" }
+                )),
+            );
+            log::info!(
+                "[security_session_set_hardening] 挂起锁定: {}, 剪贴板监听: {}",
+                suspend_lock, clipboard_monitor
+            );
+            Ok(SecurityResult::success("会话硬化开关已更新"))
+        }
+        Err(e) => {
+            write_security_audit(
+                &app,
+                &state,
+                AuditEventType::SecurityCommand,
+                AuditResult::Failure,
+                None,
+                Some(format!(
+                    "CLIPBOARD_MONITOR_FAILED: set_hardening(suspend_lock={}, clipboard_monitor={}) {}",
+                    suspend_lock, clipboard_monitor, e
+                )),
+            );
+            log::error!(
+                "[security_session_set_hardening] 剪贴板监听启动失败: {}",
+                e
+            );
+            Ok(SecurityResult::error(
+                "CLIPBOARD_MONITOR_FAILED",
+                format!("挂起锁定已设置，但剪贴板监听启动失败: {}", e),
+            ))
+        }
+    }
 }

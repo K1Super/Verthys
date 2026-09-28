@@ -22,10 +22,14 @@ vi.mock("./photoWorkerPool", async (importOriginal) => {
   };
 });
 
-vi.mock("../lib/crypto", () => ({
-  decryptMeta: vi.fn(),
-  decryptChunk: vi.fn(),
-}));
+vi.mock("../lib/crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/crypto")>();
+  return {
+    ...actual,
+    decryptMeta: vi.fn(),
+    decryptChunk: vi.fn(),
+  };
+});
 
 import { photoWorkerPool, TaskRejectedError, TaskTimeoutError } from "./photoWorkerPool";
 import { decryptMeta, decryptChunk } from "../lib/crypto";
@@ -180,5 +184,17 @@ describe("decryptChunksPreferWorker — Worker 优先与回退策略", () => {
     await expect(
       decryptChunksPreferWorker(["c1", "c2"], "key", "f".repeat(64), "a.jpg"),
     ).rejects.toThrow("第 1/2 块解密失败: 数据块顺序校验失败");
+  });
+
+  it("回退路径保持同等校验标准：逐块哈希不符即拒绝（不进入解密）", async () => {
+    vi.mocked(photoWorkerPool.submitDecryptChunks).mockRejectedValue(new TaskTimeoutError(8, 60_000));
+
+    await expect(
+      decryptChunksPreferWorker(
+        ["Y2g=", "ZGU="], "key", "f".repeat(64), "a.jpg", undefined,
+        { expectedHashes: ["0".repeat(64), "0".repeat(64)] },
+      ),
+    ).rejects.toThrow("块密文哈希校验失败");
+    expect(decryptChunk).not.toHaveBeenCalled();
   });
 });

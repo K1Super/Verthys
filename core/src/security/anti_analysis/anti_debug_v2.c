@@ -12,9 +12,8 @@
  * 响应层（分级模型）：
  *   - 任一命中 → emergency_report(EMERG_LEVEL_KILL, ...)：调试器确认属于
  *     高置信度信号（软件探测与 DR 寄存器无法被正常执行流置位）。
- *   - 惩罚模式：检测到威胁后激活，KDF 迭代提升（延迟惩罚语义保留，
- *     与比特反转"行为误导"彻底切割）。
- *   - 高安全模式（anti_debug_aggressive=1）：检测即本模块直接退出。
+ *   - 高安全档（anti_debug_aggressive=1）：可疑及以上由本模块直接零化退出。
+ *   - 档位开关 anti_debug 为总门控（矩阵中全档恒开，保留门控语义）。
  *
  * 调用时机：Verthys_Init、Verthys_ChangePassword、Verthys_Export
  * 各一次——高频路径零开销。
@@ -22,7 +21,7 @@
 #include "anti_debug_v2.h"
 #include "verthys_internal.h"    /* verthys_secure_zero */
 #include "verthys_crypto.h"      /* verthys_crypto_init */
-#include "security_preset.h"   /* security_get_config */
+#include "security_preset.h"     /* security_config_snapshot */
 #include "emergency.h"         /* emergency_report */
 /* NtQueryInformationProcess 改走直接系统调用包装
  * （stub 优先 / GetProcAddress 回退），绕过用户态 API Hook。 */
@@ -41,8 +40,6 @@
 
 /* ---------- 模块内部状态 ---------- */
 static int s_initialized = 0;                 /* 幂等初始化标志 */
-static int s_punish_mode = 0;                 /* 惩罚模式标志（检测到威胁后置1） */
-static const SecurityConfig *s_config = NULL;  /* 安全配置缓存（只读） */
 
 /* ===================================================================== *
  *                        检测层：软件调试器探测                          *
@@ -141,9 +138,6 @@ int anti_debug_v2_init(void)
         return -1;
     }
 
-    /* 读取安全配置（决定是否启用激进策略与 KDF 迭代轮次） */
-    s_config = security_get_config();
-
     /* 直接系统调用传输就绪（stub 提取或 GetProcAddress 降级） */
     (void)syscall_direct_init();
 
@@ -156,9 +150,15 @@ DebugThreatLevel anti_debug_v2_check(void)
     if (!s_initialized) {
         if (anti_debug_v2_init() != 0) {
             /* 初始化失败（密码库不可用）：按严重威胁处理，触发应急熔断 */
-            s_punish_mode = 1;
             return DBG_THREAT_CRITICAL;
         }
+    }
+
+    /* 档位开关：调试器检测总门控（每次取配置快照，禁止跨调用持有指针） */
+    SecurityConfig cfg;
+    (void)security_config_snapshot(&cfg);
+    if (!cfg.anti_debug) {
+        return DBG_THREAT_NONE;
     }
 
     /* 多层特征检测（本进程内信号，全量启用） */
@@ -177,11 +177,6 @@ DebugThreatLevel anti_debug_v2_check(void)
         level = DBG_THREAT_NONE;
     }
 
-    /* 检测到威胁后激活惩罚模式（一次激活，本会话不撤销） */
-    if (level >= DBG_THREAT_SUSPICIOUS) {
-        s_punish_mode = 1;
-    }
-
     /* 调试器确认 = 高置信度信号 → KILL 级上报 */
     if (hw_bp) {
         emergency_report(EMERG_LEVEL_KILL, EMERG_SIG_HARDWARE_BP);
@@ -190,40 +185,18 @@ DebugThreatLevel anti_debug_v2_check(void)
         emergency_report(EMERG_LEVEL_KILL, EMERG_SIG_DEBUGGER_ACTIVE);
     }
 
-    /* 高安全模式：SUSPICIOUS 及以上直接退出（替代延迟惩罚） */
-    if (s_config != NULL && s_config->anti_debug_aggressive) {
-        if (level >= DBG_THREAT_SUSPICIOUS) {
-            anti_debug_v2_emergency_exit();  /* 不返回 */
-        }
+    /* 高安全档：可疑及以上直接零化退出（替代常规应急处置） */
+    if (cfg.anti_debug_aggressive && level >= DBG_THREAT_SUSPICIOUS) {
+        anti_debug_v2_emergency_exit();  /* 不返回 */
     }
 
     return level;
-}
-
-int anti_debug_v2_is_punish_mode(void)
-{
-    return s_punish_mode ? 1 : 0;
-}
-
-uint32_t anti_debug_v2_get_kdf_iters(void)
-{
-    const SecurityConfig *cfg = s_config;
-    if (cfg == NULL) {
-        /* 未初始化时回退到默认配置 */
-        cfg = security_get_config();
-    }
-    if (s_punish_mode) {
-        return cfg->kdf_iters_punish;
-    }
-    return cfg->kdf_iters_normal;
 }
 
 void anti_debug_v2_emergency_exit(void)
 {
     /* 清零本模块内部状态（单轮覆写足够，废除多轮民俗） */
     verthys_secure_zero(&s_initialized, sizeof(s_initialized));
-    verthys_secure_zero(&s_punish_mode, sizeof(s_punish_mode));
-    verthys_secure_zero(&s_config, sizeof(s_config));
 
     /* 终止进程：不生成 dump、不弹窗 */
     TerminateProcess(GetCurrentProcess(), 1);

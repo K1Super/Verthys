@@ -59,11 +59,11 @@ import {
  * 所有外部依赖通过参数注入，保持 Composable 纯净可测试
  */
 export interface UseModuleKeysOptions {
-  /** 显示错误提示（来自 useErrorToast） */
+  /** 显示错误提示（来自全局 Toast 中心） */
   showError: (msg: string) => void;
-  /** 显示成功提示（SecurityCenter 顶层持有，2.5s 自动消失） */
+  /** 显示成功提示（SecurityCenter 顶层注入，全局 Toast 中心状态通道，2.5s 自动消失） */
   showToast: (msg: string) => void;
-  /** 复制文本到剪贴板（SecurityCenter 顶层持有，含 toast 反馈） */
+  /** 复制文本到剪贴板（SecurityCenter 顶层持有，含提示反馈） */
   onCopyText: (text: string) => Promise<void>;
 }
 

@@ -551,9 +551,11 @@ static VerthysResult verthys_api_v3_unlock(struct VerthysContext *ctx,
         ctx->file_path = dup_string(verthys_path);
         ctx->fmt_version = VERTHYS_FMT_V3;
         ctx->v3 = v3;
-        ctx->preset = v3->preset;   /* 扩展 TLV 裁决产物（GetContainerInfo 源） */
+        ctx->preset = v3->preset;   /* 容器头档位（GetContainerInfo 元数据源） */
+        /* 温缓存按运行时策略判定（宿主在解锁前已应用受信档位）；
+         * 容器头档位仅作创建基线记录，不作为策略来源 */
         ctx->warm_cache_enabled =
-            !verthys_v3_warmcache_disabled_by_preset(v3->preset);
+            !verthys_v3_warmcache_disabled_by_preset((VerthysPreset)security_runtime_preset());
         ctx->state = VERTHYS_STATE_UNLOCKED;
         verthys_backoff_reset();
         /* 诊断映射（GetDiagnostics 的 V3 数据源）：
@@ -623,7 +625,8 @@ static VerthysResult verthys_api_v3_create(struct VerthysContext *ctx,
         free(ctx->file_path);
         ctx->file_path = dup_string(verthys_path);
         ctx->fmt_version = VERTHYS_FMT_V3;
-        ctx->preset = preset;       /* 创建语境（GetContainerInfo 源） */
+        ctx->preset = preset;       /* 创建基线（GetContainerInfo 源） */
+        /* 创建会话按创建基线判定温缓存（运行策略由宿主在创建后应用） */
         ctx->warm_cache_enabled =
             !verthys_v3_warmcache_disabled_by_preset(preset);
         ctx->v3 = v3;
@@ -1049,6 +1052,49 @@ VerthysResult Verthys_SwitchSecurityPreset(VerthysHandle handle, VerthysPreset p
     }
 
     if (security_preset_switch(sp) != 0) {
+        return VERTHYS_ERR_INVALID;
+    }
+    return VERTHYS_OK;
+}
+
+/* 运行时查询活跃安全预设档位。
+ *
+ * 取自活跃配置快照，供调用方做切档回读校验：切档后读回值与请求值
+ * 不一致即可判定切换未生效（宿主据此回滚持久化并报错）。
+ * 线程安全：MT-Safe（快照读取，无锁）。 */
+VerthysResult Verthys_GetSecurityPreset(VerthysHandle handle, uint32_t *out_preset)
+{
+    if (handle == NULL || out_preset == NULL) return VERTHYS_ERR_INVALID;
+
+    SecurityPreset sp = security_runtime_preset();
+    if (sp != SEC_PRESET_BALANCED && sp != SEC_PRESET_SECURE &&
+        sp != SEC_PRESET_PERFORMANCE) {
+        return VERTHYS_ERR_INVALID;
+    }
+    *out_preset = (uint32_t)sp;
+    return VERTHYS_OK;
+}
+
+/* 运行时查询指定预设档位的特性位投影（11 位跨层特性契约）。
+ *
+ * 投影是档位矩阵的唯一权威输出：宿主展示与执行均以此为准，
+ * 消除多端各自维护特性表导致的语义漂移。
+ * 线程安全：MT-Safe。 */
+VerthysResult Verthys_GetPresetFeatureBits(VerthysHandle handle,
+                                           VerthysPreset preset,
+                                           uint32_t *out_bits)
+{
+    if (handle == NULL || out_bits == NULL) return VERTHYS_ERR_INVALID;
+
+    SecurityPreset sp;
+    switch (preset) {
+        case VERTHYS_PRESET_BALANCED:    sp = SEC_PRESET_BALANCED;    break;
+        case VERTHYS_PRESET_SECURE:      sp = SEC_PRESET_SECURE;      break;
+        case VERTHYS_PRESET_PERFORMANCE: sp = SEC_PRESET_PERFORMANCE; break;
+        default: return VERTHYS_ERR_INVALID;
+    }
+
+    if (security_preset_feature_bits(sp, out_bits) != 0) {
         return VERTHYS_ERR_INVALID;
     }
     return VERTHYS_OK;

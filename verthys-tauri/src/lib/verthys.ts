@@ -56,6 +56,7 @@ import type {
   UnlockProgress,
   ClipboardResult,
   PrivacyModeResult,
+  PrivacyStatusResult,
   BatchRecordInput,
   ImportBatchProgress,
   ImportBeginResult,
@@ -98,6 +99,7 @@ export type {
   UnlockProgress,
   ClipboardResult,
   PrivacyModeResult,
+  PrivacyStatusResult,
   BatchRecordInput,
   ImportBatchProgress,
   ImportBeginResult,
@@ -520,6 +522,12 @@ export async function verthysAddRecord(
  * 后，单次 IPC 调用 verthysAddRecordsBatch 写入。WAL 保证断点续传幂等。*
  * ================================================================== */
 
+/** 导入会话繁忙（结构化错误码）：前端据此唤起会话冲突确认，不做文案判定 */
+export const IMPORT_SESSION_BUSY_CODE = "E_IMPORT_SESSION_BUSY";
+
+/** 加密库未就绪（结构化错误码）：前端据此给出重新解锁引导，不做文案判定 */
+export const VERTHYS_NOT_READY_CODE = "E_VERTHYS_NOT_READY";
+
 /**
  * 创建导入会话：初始化 WAL + 从既有快照恢复 committed_hashes（续传去重）。
  *
@@ -548,6 +556,7 @@ export async function verthysImportBegin(
       hashes: r.hashes ?? [],
       total_count: r.total_count ?? 0,
       error: r.error,
+      error_code: r.error_code ?? undefined,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -739,25 +748,57 @@ export async function verthysWalRecover(
   };
 }
 
-/** 读取记录（返回 base64 数据；失败返回 null） */
-export async function verthysGetRecord(
-  id: number
-): Promise<{ type: number; name: string; dataB64: string } | null> {
+/** 读取失败的归因分类：供调用方分流提示与告警 */
+export type GetRecordErrorCode = "not_found" | "record_too_large" | "channel_error";
+
+/** 单条记录读取结果（判别式）：成功携带记录；失败携带原始错误与可归类语义 */
+export type GetRecordOutcome =
+  | { ok: true; record: { type: number; name: string; dataB64: string } }
+  | { ok: false; error: string; code: GetRecordErrorCode };
+
+/** 把后端错误文案归类为可判别的语义（后端未定义结构化错误码，按文案前缀匹配） */
+function classifyGetRecordError(error: string): GetRecordErrorCode {
+  if (error.includes("record_too_large") || error.includes("超过单条")) {
+    return "record_too_large";
+  }
+  if (error.includes("not found") || error.includes("不存在") || error.includes("no such")) {
+    return "not_found";
+  }
+  return "channel_error";
+}
+
+/**
+ * 读取单条记录的判别式版本：失败原因原样透出并可归类，
+ * 供需要区分「记录不存在 / 超出单条上限 / 通道异常」的调用方使用。
+ */
+export async function verthysGetRecordDetailed(id: number): Promise<GetRecordOutcome> {
   // 前端 IPC 优先级门控：标记前端活跃，后台任务让出 worker 通道
   markFrontendIpcActive();
   const r = await ipc<VerthysResponse>("verthys_get_record", { id });
   if (!r.ok) {
+    const error = r.error ?? "unknown error";
     // 失败必须留痕：记录过大（record_too_large）、通道异常与"记录不存在"
-    // 在返回值上不可区分，历史实现静默返回 null 使结构性问题退化为
+    // 在旧返回值上不可区分，历史实现静默返回 null 使结构性问题退化为
     // "记录缺失"而无法定位（调用方只看到空数据）。
-    console.warn(`[verthysGetRecord] 读取记录 ${id} 失败: ${r.error ?? "unknown error"}`);
-    return null;
+    console.warn(`[verthysGetRecord] 读取记录 ${id} 失败: ${error}`);
+    return { ok: false, error, code: classifyGetRecordError(error) };
   }
   return {
-    type: r.rtype ?? 0,
-    name: r.name ?? "",
-    dataB64: r.data ?? "",
+    ok: true,
+    record: {
+      type: r.rtype ?? 0,
+      name: r.name ?? "",
+      dataB64: r.data ?? "",
+    },
   };
+}
+
+/** 读取记录（返回 base64 数据；失败返回 null，兼容既有调用方） */
+export async function verthysGetRecord(
+  id: number
+): Promise<{ type: number; name: string; dataB64: string } | null> {
+  const outcome = await verthysGetRecordDetailed(id);
+  return outcome.ok ? outcome.record : null;
 }
 
 /**
@@ -1268,16 +1309,15 @@ export async function verthysReconcileKeyPresence(hasGlobalKey: boolean): Promis
 }
 
 /**
- * 设置隐私模式（防截屏 + 剪贴板保护联动）
+ * 设置防截屏保护（窗口捕获排除）
  *
- * 关闭隐私模式（enabled=false）要求 auth_token 授权。
- * auth_token 为用户主密码，由前端在用户确认关闭后传入。
- * 未提供 auth_token 时后端返回 PERMISSION_DENIED 错误码。
- *
- * 返回 PrivacyModeResult 结构化结果：
- *   - ok=true, partial_protection=false：隐私模式已按预期切换
- *   - ok=true, partial_protection=true：防截屏已启用但剪贴板监听失败（部分保护）
- *   - ok=false：频率超限 / 未授权 / 全部窗口失败
+ * 开启（enabled=true）整体成功或整体失败，成功后返回一次性会话凭证
+ * （session_token），前端需存储并在关闭时作为 authToken 传入。
+ * 关闭（enabled=false）失败时凭证保留在状态机内，可用同一凭证立即重试；
+ * 关闭成功后凭证即失效。返回 PrivacyModeResult 结构化结果：
+ *   - ok=true, enabled=true：保护已启用（session_token 存在）
+ *   - ok=true, enabled=false：保护已关闭（凭证已消费）
+ *   - ok=false：按 error_code 分支（PRIVACY_* 系列 / RATE_LIMITED）
  *
  * 向后兼容：返回值同时包含 ok 字段，旧代码 r.ok 仍可用。
  */
@@ -1289,6 +1329,37 @@ export async function setPrivacyMode(
     enabled,
     authToken: authToken ?? null,
   });
+}
+
+/**
+ * 查询防截屏保护状态快照（只读幂等，不限流）
+ *
+ * 前端据此决定按钮状态、是否需要接管会话（slot=pending_adoption）
+ * 与是否给出隔离恢复入口（state=quarantined）。
+ */
+export async function getPrivacyStatus(): Promise<PrivacyStatusResult> {
+  return await ipc<PrivacyStatusResult>("get_privacy_status");
+}
+
+/**
+ * 采纳保护会话（启动恢复与对账后的接管）
+ *
+ * 后端在启动保护生效与对账收敛到启用后，把凭证槽位置为待采纳：
+ * 前端调用本命令取得一次性会话凭证（session_token），并进入生效态。
+ * 重复采纳返回 ok=true（会话已接管），无需按错误处理。
+ */
+export async function adoptPrivacySession(): Promise<PrivacyModeResult> {
+  return await ipc<PrivacyModeResult>("adopt_privacy_session");
+}
+
+/**
+ * 隔离对账（仅在保护处于隔离状态时可达）
+ *
+ * 按失败前的稳定状态全窗口重扫收敛：稳定状态为启用则重新加固保护并回到待采纳
+ * （前端随后需再次采纳取得新凭证）；稳定状态为关闭则清除残留保护。
+ */
+export async function reconcilePrivacy(): Promise<PrivacyModeResult> {
+  return await ipc<PrivacyModeResult>("reconcile_privacy");
 }
 
 /**
@@ -1306,21 +1377,6 @@ export async function setPrivacyMode(
  */
 export async function clearClipboard(): Promise<ClipboardResult> {
   return await ipc<ClipboardResult>("clear_clipboard");
-}
-
-/**
- * 启动时恢复持久化的隐私模式状态
- *
- * 从 DPAPI 加密的状态文件加载隐私模式状态，自动恢复防截屏 + 剪贴板监听。
- * 应在应用启动后（setup 阶段）调用。
- *
- * 返回 PrivacyModeResult：
- *   - ok=true, enabled=true：隐私模式已恢复
- *   - ok=true, enabled=true, partial_protection=true：部分保护已恢复
- *   - ok=true, enabled=false：无持久化状态或上次为关闭
- */
-export async function restorePrivacyMode(): Promise<PrivacyModeResult> {
-  return await ipc<PrivacyModeResult>("restore_privacy_mode");
 }
 
 /** 读取文件字节（二进制 IPC：返回原始 Uint8Array，去 base64 化）
@@ -1378,7 +1434,59 @@ export async function writeFileBytes(path: string, data: Uint8Array): Promise<vo
  *  若位于 D:\ 等非 home_dir 路径，沙箱返回 PermissionDenied，
  *  前端 catch 块仅显示"读取文件失败"。 */
 export async function readUserFile(path: string): Promise<Uint8Array> {
-  const buf = await ipc<ArrayBuffer>("read_user_file", { path });
+  // 分片参数显式置空：后端按"双缺省 = 整文件读取"判定；显式传 null 使
+  // 调用面不依赖"参数缺省"的解析差异（各调用方行为与历史完全一致）
+  const buf = await ipc<ArrayBuffer>("read_user_file", { path, offset: null, length: null });
+  return new Uint8Array(buf);
+}
+
+/** 用户授权文件的元数据快照（后端 user_file_stat 契约） */
+export interface UserFileStat {
+  /** 文件长度（字节） */
+  size: number;
+  /** 最后修改时间（Unix 纪元毫秒） */
+  mtime_ms: number;
+}
+
+/** 读取用户授权文件的元数据（长度 + 修改时间）
+ *
+ *  用途：分块规划（按长度与分块口径推出块数）与导入身份基线
+ *  （导入期间按批边界复查 `(size, mtime_ms)`，源文件被改写即中止）。
+ *
+ *  安全链与 readUserFile 一致：字符级校验 + canonicalize + 系统关键目录拒绝。 */
+export async function userFileStat(path: string): Promise<UserFileStat> {
+  return await ipc<UserFileStat>("user_file_stat", { path });
+}
+
+/** 磁盘剩余空间读数（后端 check_disk_space 契约） */
+export interface DiskSpaceInfo {
+  /** 剩余可用字节数 */
+  free_bytes: number;
+}
+
+/** 查询路径所在卷的剩余磁盘空间（字节）
+ *
+ *  `path` 缺省 = 当前会话容器所在卷（导入前预检容器卷）；
+ *  显式路径 = 该路径所在卷（导出前预检目标卷；目标未创建时按父目录卷查询）。 */
+export async function checkDiskSpace(path?: string): Promise<DiskSpaceInfo> {
+  return await ipc<DiskSpaceInfo>("check_disk_space", { path: path ?? null });
+}
+
+/** 分片读取用户授权文件（读取 `[offset, offset + length)`）
+ *
+ *  与 readUserFile 的差别：单次只搬运一个分片（≤ 流式写入分片上界），
+ *  内存占用与文件大小无关。
+ *
+ *  契约（后端强制，越界即报错）：
+ *  - offset 与 length 必须成对给出；length 必须大于 0；
+ *  - offset 不得越过文件长度，offset + length 不得越过文件末尾；
+ *  - 返回字节数恒等于 length（源文件被并发截断时后端报错，不静默截断）。 */
+export async function readUserFileChunked(
+  path: string,
+  offset: number,
+  length: number,
+): Promise<Uint8Array> {
+  const buf = await ipc<ArrayBuffer>("read_user_file", { path, offset, length });
   return new Uint8Array(buf);
 }
 
@@ -1536,11 +1644,18 @@ export async function securitySessionStop(): Promise<void> {
   await ipc<void>("security_session_stop");
 }
 
-/** 设置高安全模式（启用电源挂起监听 + 更激进的锁屏策略）
+/** 设置会话硬化开关（挂起锁定 / 剪贴板监听，两项独立启停）
  *  后端以 SecurityResult 包装返回：授权拒绝（会话未解锁）时 ok=false，
+ *  剪贴板监听启动失败时同样 ok=false（挂起标志已生效，错误码可区分），
  *  此处不抛错，将 ok 透传给调用方以便可见地报告失败。 */
-export async function securitySessionSetHighSecurity(enabled: boolean): Promise<boolean> {
-  const r = await ipc<{ ok: boolean }>("security_session_set_high_security", { enabled });
+export async function securitySessionSetHardening(
+  suspendLock: boolean,
+  clipboardMonitor: boolean,
+): Promise<boolean> {
+  const r = await ipc<{ ok: boolean }>("security_session_set_hardening", {
+    suspendLock,
+    clipboardMonitor,
+  });
   return r.ok === true;
 }
 
@@ -1665,7 +1780,14 @@ export interface PresetPersistState {
   customFeatures?: PresetFeatures | null;
 }
 
-/** 读取受信持久化的预设状态；无配置（全新用户/未落盘）返回 null */
-export async function securityLoadPresetState(): Promise<PresetPersistState | null> {
-  return await ipc<PresetPersistState | null>("security_load_preset_state");
+/** 受信持久化读取响应：state 为权威副本（无配置时 null）；
+ *  persistDirty 为持久化不一致标记（回滚失败后为真，任意成功落盘即清除） */
+export interface PresetLoadResponse {
+  state: PresetPersistState | null;
+  persistDirty: boolean;
+}
+
+/** 读取受信持久化的预设状态（含持久化不一致标记） */
+export async function securityLoadPresetState(): Promise<PresetLoadResponse> {
+  return await ipc<PresetLoadResponse>("security_load_preset_state");
 }

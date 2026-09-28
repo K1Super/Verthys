@@ -29,7 +29,7 @@
 #include "anti_inject.h"
 #include "verthys_internal.h"   /* verthys_secure_zero */
 #include "verthys_crypto.h"     /* verthys_crypto_init */
-#include "security_preset.h"  /* security_get_config */
+#include "security_preset.h"  /* security_config_snapshot */
 #include "emergency.h"        /* emergency_report */
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -455,8 +455,9 @@ static int count_external_threads(DWORD pid)
  */
 int anti_inject_check_remote_thread(void)
 {
-    const SecurityConfig *cfg = security_get_config();
-    if (cfg == NULL || !cfg->anti_inject) return 0;
+    SecurityConfig cfg;
+    (void)security_config_snapshot(&cfg);
+    if (!cfg.anti_inject) return 0;
 
     NtQueryInformationThread_t pNtQuery = get_ntquery_thread();
     if (pNtQuery == NULL) return 0;
@@ -518,8 +519,9 @@ int anti_inject_check_remote_thread(void)
  */
 int anti_inject_check_apc(void)
 {
-    const SecurityConfig *cfg = security_get_config();
-    if (cfg == NULL || !cfg->anti_inject) return 0;
+    SecurityConfig cfg;
+    (void)security_config_snapshot(&cfg);
+    if (!cfg.anti_inject) return 0;
 
     NtQueryInformationThread_t pNtQuery = get_ntquery_thread();
     if (pNtQuery == NULL) return 0;
@@ -716,8 +718,9 @@ static int check_thread_hook_chain(const wchar_t *install_dir,
  */
 int anti_inject_check_window_hook(void)
 {
-    const SecurityConfig *cfg = security_get_config();
-    if (cfg == NULL || !cfg->anti_inject) return 0;
+    SecurityConfig cfg;
+    (void)security_config_snapshot(&cfg);
+    if (!cfg.anti_inject) return 0;
 
     int threat = 0;
 
@@ -772,9 +775,10 @@ int anti_inject_check_window_hook(void)
  */
 int anti_inject_check_modules(void)
 {
-    const SecurityConfig *cfg = security_get_config();
+    SecurityConfig cfg;
+    (void)security_config_snapshot(&cfg);
     /* 性能模式（anti_inject=1）下仍执行模块巡检 */
-    if (cfg == NULL || !cfg->anti_inject) return 0;
+    if (!cfg.anti_inject) return 0;
 
     wchar_t install_dir[MAX_PATH];
     wchar_t system32_dir[MAX_PATH];

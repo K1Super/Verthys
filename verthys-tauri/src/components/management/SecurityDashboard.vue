@@ -34,7 +34,7 @@
   Emits: toggleGearPanel / toggleCustomFeature(key) / resetCustom / applyCustom /
          orbitSliderInput / orbitSliderRelease / snapToAnchor(idx)
 
-  拖拽性能架构（极其平滑 · 根治"一段一段"跳变）：
+  拖拽性能架构：
     - 连续浮点 pointer 驱动：抛弃 range 整数步进，pointermove 按测线
       宽度计算连续浮点位置；拖拽期间 DOM 直写 CSS 变量（零 Vue patch）
     - 合成器驱动：游标 translateX(cqw) + 亮层 clip-path，全程零 layout
@@ -51,7 +51,7 @@
       <span class="sf-ghost" aria-hidden="true">03</span>
       <span class="sf-coord">Binary System</span>
       <h2 class="sf-title">安全防护</h2>
-      <p class="sf-digest">性能 ↔ 安全 权衡 · 拖拽滑块即时切换</p>
+      <p class="sf-digest">{{ presetSyncFailed ? '档位同步失败 · 当前显示可能与后端不一致' : '性能 ↔ 安全 权衡 · 拖拽松手吸附 · 即时切换档位' }}</p>
     </header>
 
     <div class="security-dashboard" :class="{ 'is-dragging': dragging }">
@@ -198,7 +198,7 @@
             v-for="(anchor, i) in orbitAnchors"
             :key="i"
             class="bs-anchor"
-            :class="[`bs-anchor-${i}`, { near: nearestAnchorIdx === i, current: activeAnchorIdx === i }]"
+            :class="[`bs-anchor-${i}`, { near: dragging && nearestAnchorIdx === i, current: activeAnchorIdx === i }]"
             :style="{ left: anchor.pos + '%' }"
           >
             <span class="bs-anchor-stela"></span>
@@ -368,7 +368,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { DefensePathView, DefenseMetaView } from "../../composables/security-center/useDefenseStatus";
 import { masterFrameLoop } from "../../core/master-frame-loop";
 
@@ -416,6 +416,8 @@ const props = defineProps<{
   defensePaths: DefensePathView[];
   /** 动态防护汇总态势（计数 + 全阻断标志 + 总体态势行） */
   defenseMeta: DefenseMetaView;
+  /** 档位同步失败标志（恢复链失败时展示警示文案） */
+  presetSyncFailed: boolean;
 }>();
 
 /**
@@ -472,8 +474,9 @@ const capActiveCount = computed(() =>
       渐变/邻近锚点高亮（低频 patch，视觉无感）
    5. pointer capture：指针移出测线/窗口仍持续跟踪；触屏不受滚动
       打断（touch-action: none）
-   6. 非拖拽路径（松手吸附/锚点点击/键盘/预设同步）统一由
-      watch(model) 驱动 DOM 写入；拖拽态关闭主视觉过渡（单帧
+   6. 非拖拽路径（挂载播种 / 松手吸附 / 锚点点击 / 键盘 / 预设同步）
+      统一经 syncVisualState 写入 DOM —— 挂载期由 onMounted 播种，
+      变更期由 watch(model) 同步；拖拽态关闭主视觉过渡（单帧
       直跟），松手恢复 → 吸附以带过冲的复合贝塞尔缓动落位
    ============================================================ */
 /** 拖拽中标志（驱动 .is-dragging 状态类） */
@@ -541,19 +544,27 @@ const writeLitPos = (pos: number, draggingNow: boolean) => {
   el.style.setProperty("--posw", `${quant.toFixed(2)}%`);
 };
 
-/* 非拖拽路径统一驱动：model 变化（松手吸附/锚点点击/键盘/预设同步）
- * → 写入 DOM（游标全精度 + 亮层量化即时写入）；拖拽期间跳过
+/** 视觉状态统一入口：挂载播种 / 变更同步 / 吸附落位共用同一写入路径。
+ *  挂载期写入不可省略 —— immediate watch 回调在组件挂载前执行，
+ *  此时测线元素尚未就绪，写入会被空判丢弃；缺少挂载播种会导致
+ *  重进面板时 --pos/--posw 保持 CSS 默认中位，游标与亮层指示失真。 */
+const syncVisualState = (pos: number) => {
+  writePosToDom(pos);
+  writeLitPos(pos, false);
+};
+
+/* 变更期同步：model 变化（松手吸附/锚点点击/键盘/预设同步）→ 写入 DOM
+ * （游标全精度 + 亮层量化即时写入）；拖拽期间跳过
  * （直写优先，避免节流值回跳覆盖最新指针位置） */
-watch(
-  orbitSliderPos,
-  (pos) => {
-    if (!dragging.value) {
-      writePosToDom(pos);
-      writeLitPos(pos, false);
-    }
-  },
-  { immediate: true },
-);
+watch(orbitSliderPos, (pos) => {
+  if (!dragging.value) syncVisualState(pos);
+});
+
+/* 挂载期播种：把当前权威位置写入 DOM（重进面板不回中位的保证点） */
+onMounted(() => {
+  latestPos = orbitSliderPos.value;
+  syncVisualState(orbitSliderPos.value);
+});
 
 /* ===== 游标天平摆锤（欠阻尼弹簧积分） ===== */
 /** 当前倾角（度，写入 --tilt） */
@@ -665,13 +676,18 @@ const onTrackPointerUp = () => {
   emit("orbitSliderRelease");
 };
 
+/** 键盘交互激活标志：仅在一次键盘输入序列内允许触发释放吸附 */
+let keyActive = false;
 /** 键盘输入（原生 range 仅键盘可达，低频路径走 Vue model） */
 const onKeyInput = (e: Event) => {
+  keyActive = true;
   orbitSliderPos.value = Number((e.target as HTMLInputElement).value);
   emit("orbitSliderInput");
 };
-/** 键盘提交 — 磁性吸附 */
+/** 键盘提交 — 磁性吸附（无输入序列时忽略，防止空 change 触发吸附） */
 const onKeyRelease = () => {
+  if (!keyActive) return;
+  keyActive = false;
   emit("orbitSliderRelease");
 };
 

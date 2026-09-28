@@ -46,7 +46,7 @@
 - **上下文**：worker（Rust）与核心（C DLL）的边界，需最小导出面且版本可验证。
 - **备选项**：① raw-dylib 静态链接导入库；② libloading 运行时按名解析。
 - **结论**：选 ②。worker 以 `libloading = "0.8"` 按名解析 `.def` 白名单符号；raw-dylib 仅用于 `windows` crate（系统 API 绑定），与 verthys.dll 边界无关。
-- **后果**：加载失败可显式降级；符号集与 `ci/export_baseline.txt` 29 符号对齐。佐证：`verthys-worker/Cargo.toml`、`src-tauri/Cargo.toml` LNK1181 注释、`core/verthys.def`。
+- **后果**：加载失败可显式降级；符号集与 `ci/export_baseline.txt` 32 符号对齐（由 CI 导出契约门把守）。佐证：`verthys-worker/Cargo.toml`、`src-tauri/Cargo.toml` LNK1181 注释、`core/verthys.def`。
 
 ### ADR-004 worker 子进程隔离模型
 
@@ -102,7 +102,7 @@
 - **上下文**：历史用 `VERTHYS_EXPORTS` 全量导出，"最小导出面"失效。
 - **备选项**：① 头文件 dllexport；② `.def` 唯一白名单。
 - **结论**：选 ②。`VERTHYS_API` 为空宏，导出唯一由 `/DEF:verthys.def` 决定。
-- **后果**：实测 `dumpbin -exports` = 29 符号逐一相等。佐证：`core/include/verthys.h`、`core/verthys.def`、`ci/export_baseline.txt`。
+- **后果**：实测 `dumpbin -exports` = 32 符号逐一相等。佐证：`core/include/verthys.h`、`core/verthys.def`、`ci/export_baseline.txt`。
 
 ### ADR-012 反 Oracle 错误码统一化（E-8）
 

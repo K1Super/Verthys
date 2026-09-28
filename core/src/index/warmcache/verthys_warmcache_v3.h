@@ -1,5 +1,5 @@
 /*
- * verthys_warmcache_v3.h — V3 温启动缓存（.verthys.idx_cache，'V3IC' 格式）
+ * verthys_warmcache_v3.h — V3 温启动缓存（附属目录 <容器>.d/idx_cache，'V3IC' 格式）
  *
  * 文件格式（160B 定长头）：
  *   ┌────────────────────────────────────────────────────┐
@@ -76,8 +76,15 @@ extern "C" {
 #define VERTHYS_V3IC_KDF_SALT_BYTES    16u
 #define VERTHYS_V3IC_MAX_BYTES         (32u * 1024u * 1024u) /* 32MB 上限 */
 
-/* 温缓存文件名后缀（verthys_path + ".idx_cache"） */
-#define VERTHYS_V3IC_SUFFIX            ".idx_cache"
+/* 温缓存命名契约（与主进程 container_layout 模块命中同一文件，改一侧必须同步另一侧）：
+ *   附属目录：<verthys_path> + ".d"
+ *   缓存文件：附属目录内 "idx_cache"（完整后缀 = ".d" + "\idx_cache"，反斜杠拼接：
+ *             Win32 对 \\?\ 长路径前缀不做正斜杠归一，混用会导致文件不可达）
+ *   旧布局：<verthys_path> + ".idx_cache"（容器同级，仅作只读回退与回收） */
+#define VERTHYS_V3IC_DIR_SUFFIX        ".d"
+#define VERTHYS_V3IC_CACHE_FILE        "\\idx_cache"
+#define VERTHYS_V3IC_LEGACY_SUFFIX     ".idx_cache"
+#define VERTHYS_V3IC_LEGACY_TMP_SUFFIX ".idx_cache.tmp"
 
 /* MemTable 快照条目数上限（容量防护：32MB / 最小条目 78B 裕量取整） */
 #define VERTHYS_V3IC_MEMTABLE_MAX_ENTRIES  100000u
@@ -131,8 +138,8 @@ VerthysResult verthys_warmcache_v3_try_load(const char *verthys_path,
  *      CNG 导入私有上下文；
  *   2. 两段 AEAD 加密（AAD 域分离）+ Header 组装（HMAC 字段零化）；
  *   3. cache_hmac = HMAC-SHA256(integrity_key, 整文件) 原地写回；
- *   4. 写入 <verthys_path>.idx_cache.tmp → fflush + _commit →
- *      MoveFileExW(REPLACE_EXISTING) 原子替换。
+ *   4. 写入 <容器>.d\idx_cache.tmp → fflush + _commit →
+ *      MoveFileExW(REPLACE_EXISTING) 原子替换；成功后再回收旧布局缓存。
  *
  * tables_pt / memtable_pt 为 verthys_lsm_export_warm 产物（表记录段 +
  * MemTable 快照编码流；memtable_pt 可为 NULL/0 = 空快照段）。

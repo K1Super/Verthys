@@ -81,23 +81,20 @@ pub const PB_ENUM_RESPONSE_DATA_BUDGET_BYTES: u64 = 12_582_912;
 /// 单文件分块大小（字节）
 pub const PB_MAX_FILE_CHUNK_SIZE_BYTES: u64 = 4_194_304;
 
-/// 落盘 flush 链重试次数上限
-pub const PB_FLUSH_MAX_RETRIES: u64 = 3;
+/// 记录名长度上限（字节）
+pub const PB_MAX_RECORD_NAME_BYTES: u64 = 1_024;
 
-/// 落盘 flush 链重试退避（毫秒）
-pub const PB_FLUSH_RETRY_BACKOFF_MS: u64 = 100;
+/// 流式导出单次追加分片上限（字节）
+pub const PB_WRITE_FILE_CHUNK_BYTES: u64 = 4_194_304;
 
-/// 落盘校验（结构自查）超时（毫秒）
-pub const PB_FLUSH_VERIFY_TIMEOUT_MS: u64 = 5_000;
+/// 单文件体量上限（字节）：用户授权文件读写（含分片）与单文件导出的统一上限
+pub const PB_USER_FILE_SIZE_LIMIT: u64 = 2_147_483_648;
 
-/// 导入会话开始阶段超时（毫秒）
-pub const PB_SESSION_BEGIN_TIMEOUT_MS: u64 = 3_000;
+/// 单文件导出累计上限（字节）：与 PB_USER_FILE_SIZE_LIMIT 同源（同一上限的两个消费名）
+pub const PB_MAX_EXPORT_SINGLE_BYTES: u64 = 2_147_483_648;
 
-/// 导入会话结束阶段超时（毫秒）
-pub const PB_SESSION_END_TIMEOUT_MS: u64 = 30_000;
-
-/// 导入会话强制清理超时（毫秒）
-pub const PB_SESSION_FORCE_CLOSE_TIMEOUT_MS: u64 = 5_000;
+/* 落盘与导入会话超时属前端语义，由前端生成物承载并消费，
+   不在本文件发射，避免无消费者常量沉淀。 */
 
 /// 编译期不变式断言（const 上下文 panic 即编译错误，锚点行号即失败断言）
 const fn pb_assert(cond: bool) {
@@ -124,5 +121,8 @@ const _: () = {
             <= PB_IPC_MAX_RESPONSE_LINE_BYTES,
     );
     pb_assert(PB_MAX_FILE_CHUNK_SIZE_BYTES <= PB_IPC_MAX_PAYLOAD_BYTES / 2);
-    pb_assert(PB_SESSION_END_TIMEOUT_MS > PB_SESSION_BEGIN_TIMEOUT_MS);
+    pb_assert(PB_WRITE_FILE_CHUNK_BYTES <= PB_IPC_MAX_PAYLOAD_BYTES / 2);
+    pb_assert(PB_MAX_EXPORT_SINGLE_BYTES >= PB_WRITE_FILE_CHUNK_BYTES);
+    // 统一口径：读写上限与导出上限必须同源（任一漂移即编译失败）
+    pb_assert(PB_MAX_EXPORT_SINGLE_BYTES == PB_USER_FILE_SIZE_LIMIT);
 };

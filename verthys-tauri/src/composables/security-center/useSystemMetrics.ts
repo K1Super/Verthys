@@ -8,16 +8,20 @@
  *   3. cpuUsage = -1 表示尚未取得基线（显示层占位处理），采样失败
  *      保留上次值（指标为可观测出口，不打扰用户）。
  *
- * 生命周期：挂载即首采 + 定期间隔，卸载停表并丢弃在途结果。
+ * 生命周期：由注入的启用开关驱动（解锁就绪期才轮询，避免解锁视图
+ * 期间的无效 IPC）；卸载停表并丢弃在途结果。
  */
 
-import { ref, onBeforeUnmount } from "vue";
+import { ref, watch, onBeforeUnmount, type Ref } from "vue";
 import { verthysGetSystemSnapshot } from "../../lib/verthys";
 
 /** 轮询间隔（毫秒）：采样差分窗口，兼顾时效与 IPC 频率 */
 export const SYSTEM_METRICS_POLL_MS = 2000;
 
-export function useSystemMetrics() {
+/**
+ * @param enabled 轮询启用开关（false 时停表；切换为 true 立即首采）
+ */
+export function useSystemMetrics(enabled: Ref<boolean>) {
   /** 系统 CPU 占用率（0~100；-1 = 尚无基线） */
   const cpuUsage = ref(-1);
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -35,15 +39,33 @@ export function useSystemMetrics() {
     }
   };
 
-  void poll();
-  timer = setInterval(() => void poll(), SYSTEM_METRICS_POLL_MS);
+  /** 启动轮询（幂等：立即首采 + 定期间隔） */
+  const startPolling = () => {
+    if (timer !== null || disposed) return;
+    void poll();
+    timer = setInterval(() => void poll(), SYSTEM_METRICS_POLL_MS);
+  };
 
-  onBeforeUnmount(() => {
-    disposed = true;
+  /** 停止轮询（保留最后值，避免指标闪跳） */
+  const stopPolling = () => {
     if (timer !== null) {
       clearInterval(timer);
       timer = null;
     }
+  };
+
+  watch(
+    enabled,
+    (on) => {
+      if (on) startPolling();
+      else stopPolling();
+    },
+    { immediate: true },
+  );
+
+  onBeforeUnmount(() => {
+    disposed = true;
+    stopPolling();
   });
 
   return { cpuUsage };

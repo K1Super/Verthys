@@ -9,11 +9,14 @@
  * 两层任一命中均映射 VERTHYS_ERR_CONTAINER_BUSY，区别于
  * 设备级 IO 故障（VERTHYS_ERR_IO）。
  *
- * PID 旁路（<path>.lock）：仅承载诊断（竞争者被拒后可见持有者 PID），
+ * PID 旁路（<path>.d\container.lock）：仅承载诊断（竞争者被拒后可见持有者 PID），
  * 写入失败/解析失败一律不影响互斥判定与返回码——诊断是尽力而为。
  * 旁路文件句柄以 FILE_SHARE_DELETE 打开，保证持有者会话退出时
  * 可删除；删除后的文件对已打开句柄保持可读（Windows 延迟删除语义），
  * 竞争者侧读到的是打开时刻的完整内容。
+ *
+ * 命名契约（与主进程 container_layout 模块一一对应，改一侧必须同步另一侧）：
+ *   旁路：<path>.d\container.lock；旧布局 <path>.lock 仅作残留回收。
  */
 
 #include "verthys_container_lock.h"
@@ -32,19 +35,22 @@
 /* 超级块区独占锁长度：覆盖超级块三副本区 [0, 64KB)，
  * 上界即 VERTHYS_V3_WAL_REGION_OFFSET（同一布局常量，防漂移） */
 #define VERTHYS_CONTAINER_LOCK_BYTES VERTHYS_V3_WAL_REGION_OFFSET
-#define VERTHYS_CONTAINER_LOCK_SUFFIX ".lock"
+
+/* 旁路命名常量：附属目录后缀 + 目录内文件名 + 旧布局后缀 */
+#define VERTHYS_LOCK_DIR_SUFFIX   ".d"
+#define VERTHYS_LOCK_FILE_NAME    "\\container.lock"
+#define VERTHYS_LOCK_LEGACY_SUFFIX ".lock"
 
 /* 旁路路径缓冲容量：容器路径 + 后缀 + 终止符（路径超长时安全截断诊断，
  * 旁路缺失不影响互斥，仅诊断降级） */
 #define VERTHYS_LOCK_SIDECAR_MIN_CAP 64
 
-/* 构造 <path><suffix> 旁路路径（malloc，调用方 free；失败返回 NULL） */
-static char *verthys_lock_sidecar_path(const char *path)
+/* 构造 <path> + suffix 旁路路径（malloc，调用方 free；失败返回 NULL） */
+static char *verthys_lock_concat_path(const char *path, const char *suffix)
 {
-    const char *suffix = VERTHYS_CONTAINER_LOCK_SUFFIX;
     size_t plen, slen, total;
 
-    if (path == NULL) return NULL;
+    if (path == NULL || suffix == NULL) return NULL;
     plen = strlen(path);
     slen = strlen(suffix);
     total = plen + slen;
@@ -55,9 +61,32 @@ static char *verthys_lock_sidecar_path(const char *path)
 
     char *buf = (char *)malloc(total + 1);
     if (buf == NULL) return NULL;
+    memset(buf, 0, total + 1);
     memcpy(buf, path, plen);
-    memcpy(buf + plen, suffix, slen + 1);
+    memcpy(buf + plen, suffix, slen);
     return buf;
+}
+
+/* 权威旁路路径：<path>.d\container.lock */
+static char *verthys_lock_sidecar_path(const char *path)
+{
+    return verthys_lock_concat_path(path,
+                                    VERTHYS_LOCK_DIR_SUFFIX VERTHYS_LOCK_FILE_NAME);
+}
+
+/* 旧布局旁路路径：<path>.lock（仅用于崩溃残留回收） */
+static char *verthys_lock_legacy_sidecar_path(const char *path)
+{
+    return verthys_lock_concat_path(path, VERTHYS_LOCK_LEGACY_SUFFIX);
+}
+
+/* 确保附属目录存在（best-effort：失败仅令诊断降级，不阻断互斥路径） */
+static void verthys_lock_ensure_dir(const char *path)
+{
+    char *dir = verthys_lock_concat_path(path, VERTHYS_LOCK_DIR_SUFFIX);
+    if (dir == NULL) return;
+    (void)CreateDirectoryA(dir, NULL);   /* 已存在返回 ERROR_ALREADY_EXISTS，无需区分 */
+    free(dir);
 }
 
 /*
@@ -78,6 +107,9 @@ static void verthys_lock_owner_record(const char *path, DWORD pid)
         free(sidecar);
         return;
     }
+
+    /* 附属目录保障：失败仅跳过诊断（best-effort），不阻断互斥路径 */
+    verthys_lock_ensure_dir(path);
 
     h = CreateFileA(sidecar, GENERIC_WRITE,
                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -119,9 +151,25 @@ static DWORD verthys_lock_owner_read(const char *path)
 static void verthys_lock_owner_delete(const char *path)
 {
     char *sidecar = verthys_lock_sidecar_path(path);
-    if (sidecar == NULL) return;
-    DeleteFileA(sidecar);   /* 尽力而为：失败仅残留无害旁路文件 */
-    free(sidecar);
+    if (sidecar != NULL) {
+        DeleteFileA(sidecar);   /* 尽力而为：失败仅残留无害旁路文件 */
+        free(sidecar);
+    }
+
+    /* 旧布局残留回收：升级前崩溃可能遗留 <path>.lock，随会话关闭一并清除 */
+    char *legacy = verthys_lock_legacy_sidecar_path(path);
+    if (legacy != NULL) {
+        DeleteFileA(legacy);
+        free(legacy);
+    }
+
+    /* 空目录回收：附属目录可能仅为本会话诊断而建（未产生其他附属数据），
+     * 关闭时移除空目录，避免在容器同级留下空文件夹；非空/不存在均失败无副作用 */
+    char *dir = verthys_lock_concat_path(path, VERTHYS_LOCK_DIR_SUFFIX);
+    if (dir != NULL) {
+        (void)RemoveDirectoryA(dir);
+        free(dir);
+    }
 }
 
 /* 竞争者被拒时的统一诊断：尽可能报出持有者 PID（旁路可读时） */

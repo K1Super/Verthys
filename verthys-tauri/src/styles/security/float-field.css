@@ -73,7 +73,7 @@
  * translate3d(0,0,0) 永久保持（非回退 none），元素合成层恒定，
  * 杜绝"动画结束 → 合成层释放 → 文本重栅格化"在 Windows DPI
  * 缩放（125%/150%）下的一次性亚像素跳变
- * （animations.css .brand-char ） */
+ * （animations.css .wm-glyph ） */
 .ff-node {
   /* 基态 = 终态（显式非 none — 渲染模式终身恒定） */
   transform: translate3d(0, 0, 0);

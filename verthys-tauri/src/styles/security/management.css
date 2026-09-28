@@ -139,32 +139,3 @@
 .dm-back:active {
   transform: translateY(1px) scale(0.985);
 }
-
-/* ===== 修改全局密钥弹窗（特定布局：分组+字段；通用样式由全局 kv-* 提供） ===== */
-.ck-desc-strong strong { color: rgba(255, 107, 107, 0.9); }
-.ck-section {
-  padding: 16px;
-  margin-bottom: 16px;
-  background: rgba(255, 255, 255, 0.02);
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.04);
-}
-.ck-section-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--accent);
-  margin-bottom: 12px;
-  letter-spacing: 0.5px;
-}
-.ck-field { margin-bottom: 12px; }
-.ck-field:last-child { margin-bottom: 0; }
-.ck-field label {
-  display: block;
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-bottom: 4px;
-  letter-spacing: 0.5px;
-}
-.ck-file-row { display: flex; gap: 8px; }
-.ck-file-row .kv-input { flex: 1; }
-.ck-browse { white-space: nowrap; }

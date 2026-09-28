@@ -11,7 +11,6 @@
      - .kd-* 密钥编辑弹窗特定布局
      - .derive-* / .custom-derive-area / .result-* 自定义派生区域
      - .param-grid 参数网格
-     - .sc-toast Toast 提示
    设计约束：零卡片底板/边框/阴影 — 组件直接悬浮于宇宙背景；
    开放弧 + 能量丝线语言与引导区（mgmt-hub）/分区体系（section-field）同源
 
@@ -1017,28 +1016,4 @@
   font-size: 12px;
   color: var(--text-primary);
   font-family: var(--font);
-}
-
-/* Toast */
-.sc-toast {
-  position: fixed;
-  bottom: 30px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 10px 20px;
-  font-size: 12px;
-  color: var(--text-primary);
-  z-index: 5000;
-  animation: toast-in 0.3s var(--ease);
-}
-@keyframes toast-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
-  to { opacity: 1; transform: translateX(-50%) translateY(0); }
-}
-.toast-enter-active, .toast-leave-active {
-  transition: all 0.3s var(--ease);
-}
-.toast-enter-from, .toast-leave-to {
-  opacity: 0;
-  transform: translateX(-50%) translateY(10px);
 }

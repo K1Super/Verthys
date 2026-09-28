@@ -13,7 +13,7 @@
  *   4. 锁中毒自愈：获取锁时检测中毒，into_inner() 取出后废弃，
  *            重置为新实例并记录严重告警。
  *   5. 命令权限分级：敏感操作（record_success/clear_purge/
- *            set_high_security / 白名单变更 / USB 注册）要求已解锁会话，
+ *            set_hardening / 白名单变更 / USB 注册）要求已解锁会话，
  *            由 auth::require_session_authorized 按密钥生命周期统一裁决。
  *   6. 使用 base64 crate 替换自编 Base64 实现。
  *   7. 统一结构化审计日志：每个安全命令执行时记录审计事件。
@@ -30,7 +30,7 @@
  *   - path_resolver：路径白名单解析
  *   - commands：Tauri 命令分组
  *       1. brute_force：check / record_failure / record_success / clear_purge / status
- *       2. session：start / stop / set_high_security
+ *       2. session：start / stop / set_hardening
  *       3. module_whitelist：patrol / add_trusted_path / clear_trusted_paths
  *       4. cleanup：clear_recent / secure_delete / cleanup_crash_residue
  *       5. file_lock：harden_private_dir

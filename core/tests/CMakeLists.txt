@@ -44,6 +44,7 @@ add_executable(verthys_tests
     crypto/test_pepper_v3.c
     security/test_runtime_hash.c
     security/test_syscall_direct.c
+    security/test_security_preset.c
     security/test_defense_closure.c
     security/test_anti_inject.c
     security/test_system32_loader.c

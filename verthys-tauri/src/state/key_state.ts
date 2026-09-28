@@ -75,6 +75,8 @@ export interface KeyState {
   moduleKeyStatusLoaded: Ref<boolean>;
   /** 当前安全预设 */
   securityPreset: Ref<SecurityPresetCode>;
+  /** 会话空闲锁定开关（false = 不自动锁定；自定义档可关闭此项） */
+  sessionLockEnabled: Ref<boolean>;
   /** 初始化状态 */
   initStatus: Ref<string>;
   /** 状态文件中记录的加密库路径 */
@@ -113,6 +115,7 @@ export const keyState: KeyState = {
   // 安全守卫根治：模块密钥状态已加载完成标志（初始 false，loadModuleKeyStatus 完成时置 true）
   moduleKeyStatusLoaded: ref(false),
   securityPreset: ref<SecurityPresetCode>(loadSecurityPreset()),
+  sessionLockEnabled: ref(true),
   initStatus: ref("none"),
   storedVerthysPath: ref(""),
   lastInitError: ref(""),

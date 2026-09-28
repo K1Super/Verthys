@@ -44,7 +44,7 @@
 #include <windows.h>                 /* GetSystemTimeAsFileTime */
 
 #define AREKEY_VERTHYS  "test_rekey.verthys"
-#define AREKEY_CACHE  "test_rekey.verthys.idx_cache"
+#define AREKEY_CACHE  "test_rekey.verthys.d\\idx_cache"
 #define AREKEY_PW     "rekey-pass"
 #define AREKEY_PW_LEN 10
 

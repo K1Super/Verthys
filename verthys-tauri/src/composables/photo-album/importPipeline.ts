@@ -52,6 +52,8 @@ import {
   verthysForceCloseImportSession,
   verthysWalRecover,
   verthysGcOrphanChunks,
+  IMPORT_SESSION_BUSY_CODE,
+  VERTHYS_NOT_READY_CODE,
   type ImportBeginResult,
   type AddRecordsBatchResult,
   type ImportBatchProgress,
@@ -219,20 +221,21 @@ function partialFailureError(
 }
 
 /**
- * 导入会话建立失败的用户可读文案（按后端错误语义分流）。
+ * 导入会话建立失败的用户可读文案（按后端结构化错误码分流）。
  *
- * Why：后端拒绝 begin 的原因决定用户下一步动作——残留会话可自愈、库未就绪
- *   需重新解锁、其余属未知故障需上报；统一文案会让用户与排障都无法判断。
+ * Why：后端拒绝 begin 的原因决定用户下一步动作——会话冲突需等待或重启、
+ *   库未就绪需重新解锁、其余属未知故障需上报；统一文案会让用户与排障
+ *   都无法判断。
  */
-function classifyBeginFailure(error: string | undefined): string {
-  const raw = error ?? "未知原因";
-  if (raw.includes("已有导入会话进行中")) {
-    return "上一次导入尚未正常结束，正在自动清理，请稍候重试";
+function classifyBeginFailure(error: string | undefined, errorCode?: string | null): string {
+  // 按后端结构化错误码分流（不做文案判定）：码值决定用户下一步动作
+  if (errorCode === IMPORT_SESSION_BUSY_CODE) {
+    return "检测到未结束的导入会话（可能来自上次中断或另一模块正在导入）：本次导入已中止，请稍候重试；若持续存在，请重新打开应用以清理会话";
   }
-  if (raw.includes("无法确定加密库路径") || raw.includes("未解锁")) {
+  if (errorCode === VERTHYS_NOT_READY_CODE) {
     return "加密库未就绪，请返回重新解锁后再导入";
   }
-  return `导入初始化失败：${raw}`;
+  return `导入初始化失败：${error ?? "未知原因"}`;
 }
 
 /** 消费者在途条目：待写记录与其渲染元信息并排，保证逐条状态可回朔到输入下标 */
@@ -677,7 +680,7 @@ export class ImportPipeline {
         undecryptable: 0,
         total,
         elapsedMs: performance.now() - startAt,
-        error: classifyBeginFailure(beginResult.error),
+        error: classifyBeginFailure(beginResult.error, beginResult.error_code),
       };
     }
 
@@ -697,7 +700,7 @@ export class ImportPipeline {
     let undecryptable = 0;
     /** 取消标志：signal 中止后停止投喂新条目，进行收尾 */
     let aborted = false;
-    /** 会话级致命错误收集器：Verthys 库格式需升级等不可恢复错误在此集合 */
+    /** 会话级致命错误收集器：后端容量告罄等不可恢复错误在此集合 */
     const fatalErrors: Error[] = [];
     /** 首个生产者/消费者错误的错误类名（会话错误文案归因用，取首次非空值） */
     let firstErrorName: string | undefined;
@@ -839,11 +842,6 @@ export class ImportPipeline {
           // 归因采集：仅记录首个错误类名（文案用类名而非文案，避免耦合）
           if (firstErrorName === undefined && error.name) {
             firstErrorName = error.name;
-          }
-          // 致命错误入集合而不抛出：Promise.allSettled 会吸收 reject，
-          //   唯一可靠的传播通道是共享数组，由会话结束决策统一处理
-          if (error.message === "VERTHYS_WRITE_BLOCKED") {
-            fatalErrors.push(error);
           }
           this.progress.update(1, 0);
         },
@@ -1605,8 +1603,8 @@ export class ImportPipeline {
    * 重试幂等依据：后端以记录哈希去重，已成功提交的项在重试子批次中会返回
    * ids=0 且不计入 failed_indices（按去重跳过入账），因此只重试失败项不会重复入库。
    *
-   * 致命错误（VERTHYS_WRITE_BLOCKED，代表库格式需升级）：推入 fatalErrors 后
-   * 立即停止后续写入，剩余条目按不可重试失败入账，由调用方走导入结束决策。
+   * 致命错误（后端容量告罄）：推入 fatalErrors 后立即停止后续写入，
+   * 剩余条目按不可重试失败入账，由调用方走导入结束决策。
    *
    * @param items 待写条目（含渲染元信息与输入下标）
    * @param ledger 三分类入账回调
@@ -1633,12 +1631,6 @@ export class ImportPipeline {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const err = e instanceof Error ? e : new Error(msg);
-        if (msg === "VERTHYS_WRITE_BLOCKED") {
-          // 致命：库格式需升级，任何重试都无意义
-          fatalErrors.push(err);
-          for (const it of pending) ledger.onFailed(it, "unknown", false);
-          return;
-        }
         if (isStorageFullMessage(msg)) {
           // 致命：后端容量告罄（内存预算/容器容量/磁盘空间），重试无法好转
           fatalErrors.push(err);

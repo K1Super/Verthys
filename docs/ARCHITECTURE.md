@@ -2,7 +2,7 @@
 
 > 梳理 Verthys 四层架构、core 六大子域职责、进程模型与 core/前端边界，作为全仓技术蓝图。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-09-28 · 维护人：K1Super
 
 ---
 
@@ -26,7 +26,7 @@ flowchart TB
 - L4 纯渲染，仅通过 Tauri `invoke` 调用命令，口令、密钥不出前端。
 - L3 由 `verthys-tauri`（Tauri 主进程）负责进程编排；具体 C 调用全部下沉到独立子进程 `verthys-worker`，主进程与 worker 间用 `stdin/stdout` JSON 行协议通信，扫描结果经命名共享内存零拷贝传输。
 - L2 是对外黑盒：仅暴露 `verthys.h` 白名单 ABI（导出面由 `verthys.def` 白名单管控），加密算法、容器格式、内存防护均内部封装。
-- L1 是磁盘持久化：`.verthys` 为唯一容器格式；pepper 由 OS 加密存储（`%APPDATA%\Verthys\pepper.bin`）；温缓存为 `.verthys.idx_cache`。
+- L1 是磁盘持久化：`.verthys` 为唯一容器格式；pepper 由 OS 加密存储（`%APPDATA%\Verthys\pepper.bin`）；容器附属数据（状态 / 预设 / WAL / 台账 / 温缓存 / 锁诊断）统一落在附属数据目录 `<容器路径>.d/`，其中温缓存为 `idx_cache`。
 
 ## 2. core 六大子域职责
 
@@ -42,7 +42,7 @@ flowchart TB
 `shared/verthys_container_v3.h` 是 V3 常量与结构体单一事实源（`V3SB` 魔数、3 副本、法定人数）；`superblock/verthys_superblock_v3.c` 实现 3 副本超级块 + 法定人数提交/读取；`partition/verthys_partition.c` 管理分区与独立 AEAD 密钥；`extent/verthys_extent.c` 实现内容寻址 Extent（去重 + 引用计数）；`io/verthys_io.c` 是统一 64 位 I/O 层；`format/verthys_format.c` 兼容 v1/v2 格式读取。
 
 ### 2.4 index/ — 索引
-`lsm/` 实现 V3 LSM 索引：`verthys_lsm.c` 主控、`verthys_lsm_memtable.c` 跳表 MemTable、`verthys_lsm_sstable.c` SSTable 读写 + 布隆过滤器、`verthys_lsm_compaction.c` 分级合并压缩。`warmcache/verthys_warmcache_v3.c` 实现温启动缓存（.idx_cache）读写。
+`lsm/` 实现 V3 LSM 索引：`verthys_lsm.c` 主控、`verthys_lsm_memtable.c` 跳表 MemTable、`verthys_lsm_sstable.c` SSTable 读写 + 布隆过滤器、`verthys_lsm_compaction.c` 分级合并压缩。`warmcache/verthys_warmcache_v3.c` 实现温启动缓存（附属数据目录 `<容器>.d/idx_cache`）读写。
 
 ### 2.5 security/ — 纵深防御
 六层防线：`layer1_process_guard/job_isolation.c`（Job Object 隔离）、`layer3_hw_binding/`（cng_machine_key / hardware_binding / system32_loader，机器绑定）、`layer4_hook_defense/`（tls_loader / tls_callbacks / tamper_destroy，防 Hook）、`layer5_sandbox/process_sandbox.c`（进程 mitigation policy）、`layer6_closure/defense_closure.c`（7 路径闭环校验）；另有 `anti_analysis/`（anti_debug_v2 / anti_inject / syscall_direct 直接系统调用）、`memory/`（memory_guard / key_separation / secure_allocator）、`integrity/`（.vsec 验签 + .rhat 运行时哈希）、`emergency/`（三级应急响应）、`preset/`（安全预设双缓冲切换）。
@@ -70,6 +70,28 @@ flowchart TB
 
 - `brute_force.rs`、`session.rs`、`usb.rs`、`file_lock.rs`、`module_whitelist.rs`、`preset.rs`、`cleanup.rs`
 - 支撑模块：`security_commands/{audit,auth,path_resolver,persistence,responses,state,tests}.rs`；Rust 侧 `security/` 模块（`brute_force`、`session_guard`、`usb_guard`、`file_lock`、`module_whitelist`、`clipboard_guard`、`cleanup`、`background_patrol`）
+
+### 3.1 导入域（会话 · 单写者 · 台账 · GC 守卫）
+
+图片（拾光）与文件（清藏）两条导入链路共用同一写入通道（核对于 2026-09-28）：
+
+- **会话**：`verthys_import_begin / checkpoint / end` 配会话日志（附属数据目录 `<容器>.d/import.wal`）
+  承载断点与已提交集合；结束（成功）前必须先落盘块归属台账，落盘失败即拒绝
+  结束并保留日志供续传。会话冲突（已有活跃会话 / 库未就绪）以结构化错误码
+  （`E_IMPORT_SESSION_BUSY` / `E_VERTHYS_NOT_READY`）回传，前端按码分支，
+  不做文案判定。
+- **单写者**：全部块与元数据写入经 `state/import_writer.rs` 串行通道（前端不得
+  直连 worker 写数据域，CI 锚点防回归）；会话创建时按日志结算块归属（已提交
+  条目的 `chunk_ids` → 台账 owner），无法证明归属的历史条目冻结为不可回收值。
+- **台账与回收**：`repository/verthys_chunks.rs` 记录块归属；`verthys_gc_orphan_chunks`
+  只回收归属为空且已结算的块，回收前先结算，结算落盘失败即拒绝回收。
+- **分片读取与流式落盘**：`read_user_file(path, offset, length)` + `user_file_stat`
+  （越界即报错，单次分片上界 4MiB；缺省形态保持整文件读取语义）；导出与流式
+  目标经 `write_user_file_stream` 三命令（分片追加 → fsync + rename 原子替换 /
+  abort 清理暂存，失败不产生目标文件）。
+- **前端管道**：`composables/file-verthys/{useFileImport,useFileExport,useFileDelete}.ts`
+  （清藏：导入 / 导出 / 删除）与 `composables/photo-album/importPipeline.ts`（拾光）。
+
 ## 4. 进程/线程模型
 
 进程分工（与代码核实）：主进程 `verthys-tauri`（Tauri/Rust）作为唯一 UI 宿主；`verthys-worker.exe` 是独立子进程，承载 verthys.dll 与全部 FFI 调用。

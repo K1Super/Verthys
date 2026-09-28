@@ -1,5 +1,5 @@
 /*
- * idle-governance.css — 全局空闲 CSS 动画治理（R1 根治）
+ * idle-governance.css — 全局空闲 CSS 动画治理
  * =============================================================================
  * 配套：useGlobalIdleScheduler（唯一权威源）在 App.vue 根节点挂载
  *   .idle-active / .idle-settling / .idle-idle / .idle-deep-idle
@@ -32,17 +32,20 @@
 
 /* ===== 3. idle：工作进行中指示器豁免
  *   加载/处理旋转指示器在空闲保持运转，避免「卡死」误读；
- *   deep-idle（>60s 无交互）时由通配规则统一暂停。 ===== */
+ *   deep-idle（>60s 无交互）时由通配规则统一暂停。
+ *   维护契约：Toast 层（.toast-layer）经 Teleport 挂到 body、不在 .app-root
+ *   之下 —— 其根节点按唯一权威源（useGlobalIdleScheduler）透传 idle-* 类，
+ *   故本节豁免/暂停语义对提示立标（.toast-dot）同样生效。 ===== */
 .idle-idle :is(
   /* 脉冲星磁层辐射加载器（rAF 驱动 — CSS 仅视觉层，无动画需豁免；
      列名仅备注，实际持续运转由组件 rAF 保证） */
   /* 提交按钮光包巡行（引力锚点 loading 指示） */
-  .cs-rail-packet,
-  /* Toast 提示立标（入场动画单次播放，豁免保持转发语义完整） */
-  .toast-dot
+  .cs-rail-packet
 ),
-/* 立标的影子/光子环/盘弧体与伪元素承载入场动画，须随本体一并豁免 —
-   否则空闲期出现提示时立标冻结在 0% 帧（透明）而不可见 */
+/* Toast 提示立标双幕（入场单次播放 + 幕面缓流 —— 提示存续期间属
+   「转发进行中」，豁免保持语义完整）：
+   本体不绘制，豁免落在幕面伪元素上；否则空闲期出现提示时
+   幕面冻结在 0% 帧（透明）而不成形 */
 .idle-idle .toast-dot::before,
 .idle-idle .toast-dot::after {
   animation-play-state: running !important;
@@ -76,35 +79,34 @@
  *   降级是平滑的：用户感知到粒子密度降低而非卡顿（粒子密度经
  *   setDrawRange 由监控器直接驱动，不经 CSS）。 ===== */
 
-/* 6.1 降级 ≥2：全部动画暂停（后接豁免 — 「通配暂停 + 语义豁免」同款落地） */
+/* 全部动画暂停 */
 body.reduced-motion *,
 body.reduced-motion *::before,
 body.reduced-motion *::after {
   animation-play-state: paused !important;
 }
 
-/* 6.2 降级 ≥2：交互动画豁免（「核心」保留集） */
+/* 交互动画豁免（「核心」保留集） */
 body.reduced-motion .anim-interactive,
 body.reduced-motion .anim-interactive::before,
 body.reduced-motion .anim-interactive::after {
   animation-play-state: running !important;
 }
 
-/* 6.3 降级 ≥2：工作进行中指示器豁免（加载/处理语义不失真） */
+/* 工作进行中指示器豁免（加载/处理语义不失真） */
 body.reduced-motion :is(
-  .cs-rail-packet,
-  .toast-dot
-),
-/* 立标光子环/盘弧伪元素随本体豁免（与 idle 豁免同一缺口补齐） */
+    .cs-rail-packet
+  ),
+  /* 立标双幕伪元素随本体豁免（与 idle 豁免同一缺口补齐） */
 body.reduced-motion .toast-dot::before,
 body.reduced-motion .toast-dot::after {
   animation-play-state: running !important;
 }
 
-/* 6.4 降级 ≥2：backdrop-filter「减少」档已无消费者（常态动效无实时
+/* backdrop-filter「减少」档已无消费者（常态动效无实时
  * backdrop-filter，此档无对应规则，编号仅保留层级连续性） */
 
-/* 6.5 空闲治理优先于降级豁免：idle 及以下时交互动画同样静止
+/* 空闲治理优先于降级豁免：idle 及以下时交互动画同样静止
  *   （降级豁免不得反向击穿空闲暂停 — 特异性压制） */
 body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot),
 body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot)::before,
@@ -112,9 +114,42 @@ body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-
   animation-play-state: paused !important;
 }
 
-/* 6.6 降级 =3：backdrop-filter「移除」档（全量）— minimal-motion 恒与
- *   reduced-motion 并存，动画侧由 6.1-6.3 继续承载（「最少」集） */
+/* backdrop-filter「移除」档（全量）— minimal-motion 恒与
+ *   reduced-motion 并存 */
 body.minimal-motion * {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
+}
+
+/* ===== 7. 滚动瞬时静默：滚动期间暂停主界面氛围动画 =====
+ *   类由 usePhotoData 的滚动静默态挂载在 html 根节点（与 idle-* 类平行），
+ *   滚动停止 ~120ms 后移除。语义：滚动是瞬时高负载窗口，装饰性氛围动画
+ *   （深空星场/星云/流星，全部为合成器 CSS 动画）在滚动期暂停，让出合成器
+ *   带宽给滚动合成；滚动停止即恢复（animation-play-state 暂停无相位跳变，
+ *   与 idle 治理同款实现；未使用 duration 降频）。
+ *
+ *   失效范围红线（第三轮处置）：禁止使用 `html.app-scrolling .ambient-bg *`
+ *   这类"通配最右端"——html 上切换类时，通配最右端会把文档内全部元素标记为
+ *   可能失效（全文档样式重算），低频切换尚可、滚动节奏（120ms 级）将成为
+ *   顿挫源；此处枚举全部动画元素（含伪元素），失效范围收敛到约 200 个节点。
+ *   维护契约：.ambient-bg 子树新增 CSS 动画元素时必须同步加入本列表。 */
+html.app-scrolling .ambient-bg :is(
+  .star-dot,
+  .star-bright,
+  .dust-particle,
+  .const-line,
+  .const-node,
+  .nebula-1, .nebula-2, .nebula-3, .nebula-4, .nebula-5, .nebula-6,
+  .galaxy-band,
+  .bg-galaxy-1, .bg-galaxy-2, .bg-galaxy-3, .bg-galaxy-4, .bg-galaxy-5, .bg-galaxy-6,
+  .lane-a, .lane-b,
+  .m1, .m2, .m3,
+  .vignette
+) {
+  animation-play-state: paused !important;
+}
+/* 近层亮星十字光苒为伪元素动画（:is() 不能承载伪元素，单独列出） */
+html.app-scrolling .ambient-bg .star-bright::before,
+html.app-scrolling .ambient-bg .star-bright::after {
+  animation-play-state: paused !important;
 }

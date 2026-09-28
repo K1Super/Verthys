@@ -10,6 +10,16 @@
  * - 扫描失败必须可见：加载错误经 loadError 上报，禁止把失败折叠成"暂无照片"
  * - 模块密钥失效（闲置销毁/登出）必须联动：清除已解密内容并提示重新验证
  * - ensureVisiblePhotosDecrypted 并发上限 4，批量预取 meta dataB64
+ *
+ * 滚动性能三铁律（改动前先读）：
+ * 1. 滚动期间主线程不做 O(可见项) 的工作——行窗口状态模型把滚动事件降为
+ *    O(行窗口变化)：像素级移动不产生任何重建，跨行时窗口交集内对象整体复用
+ *    （见 visible-window.ts）；
+ * 2. hover 与滚动路径禁止重绘型属性参与过渡——卡片视觉全部由层 + opacity /
+ *    transform 承担（见 PhotoAlbum.vue 样式区）；
+ * 3. 滚动期间冻结非必要动画与解码——滚动静默态（scrollQuiet）暂停解密取项、
+ *    暂停背景氛围动画并暴露 data-scrolling 供样式层冻结，滚动停止后
+ *    统一追帧（解密补齐 + 下一行图片预热）。
  */
 import { ref, shallowRef, computed, watch } from "vue";
 import {
@@ -24,6 +34,7 @@ import { clearFileKeyCache, TYPE_PHOTO_META, type PhotoMeta } from "../../lib/cr
 import { decryptMetaPreferWorker, decryptThumbPreferWorker } from "../../workers/photo-decrypt-bridge";
 import { photoWorkerPool } from "../../workers/photoWorkerPool";
 import { isSlimPhotoMeta } from "../../constants/crypto_const";
+import { scrollPerf } from "../../config/scroll-perf";
 import { rafThrottle } from "../../utils/debounce";
 import {
   updateShallowItem, pushShallowItems, replaceShallowArray, clearShallowArray,
@@ -31,9 +42,13 @@ import {
 import type { PhotoEntry, VisiblePhoto, DecryptedPhotoMeta } from "./types";
 import {
   formatSize, rehydrateEntries, diffNewIds, sortByMetaId,
-  stripMetaRecordPrefix, prefetchRowIndices,
+  stripMetaRecordPrefix, prefetchRowIndices, thumbUrlOf,
   makeThumbCssValue, makeThumbCssValueFromBytes, revokeThumbUrl,
 } from "./utils";
+import {
+  computeRowWindow, buildVisibleWindow,
+  type RowWindow, type VisibleCacheEntry,
+} from "./visible-window";
 import {
   stageStartPercent, stagePercent, monotonicPercent,
   type PhotoLoadStage,
@@ -116,17 +131,17 @@ export function usePhotoData() {
    *   - 列数响应式：常规窗口 4 列，极窄窗口（≤640px）2 列
    *   - 每项 aspect-ratio 1:1（正方形缩略图），故项高 = 列宽，行高 = 列宽 + gap
    *   - 容器高度 = 总行数 × 行高，撑出滚动条
-   *   - 仅渲染 [可视起始行 - buffer, 可视结束行 + buffer] 范围内的项目
    *
-   * 性能收益：上万照片也只渲染数十 DOM 节点（可视区 + buffer），
-   *           彻底消除 Vue 响应式 diff 与浏览器布局/绘制开销。
+   * 行窗口状态模型（滚动性能第 1 铁律）：滚动位置的唯一量化状态是行窗口
+   * [winStart, winEnd)；同窗口内的像素级移动不产生任何状态写入，跨行时窗口
+   * 交集内的渲染对象整体复用（见 visible-window.ts），渲染数组引用保持稳定，
+   * 下游 watch/patch 在绝大多数滚动帧零空转。
    *
    * 动画策略：首批加载播放 photo-reveal 入场动画（美感），1.5s 后置 animationDone=true，
    *           后续滚动新进入项不重播动画（避免快速滚动闪烁）。动画作用于 .photo-card
    *           子元素，与 masonry-item 的 translate3d 定位互不干扰。
    */
   const scrollRef = ref<HTMLElement | null>(null);
-  const scrollTop = ref(0);
   const viewportHeight = ref(600);
   const containerWidth = ref(0);
   const columns = ref(4);
@@ -161,67 +176,150 @@ export function usePhotoData() {
   /** 容器总高度（撑出滚动条） */
   const totalHeight = computed(() => Math.max(0, totalRows.value * rowHeight.value));
 
-  /** 含 buffer 的行窗口（可视区上下各多渲染 BUFFER_ROWS 行，消除快速滚动空白闪烁） */
-  const bufferedRowWindow = computed(() => {
-    const rh = rowHeight.value;
-    if (rh <= 0) return { startRow: 0, endRow: 0 };
-    const startRow = Math.max(0, Math.floor(scrollTop.value / rh) - BUFFER_ROWS);
-    const endRow = Math.min(
-      totalRows.value,
-      Math.ceil((scrollTop.value + viewportHeight.value) / rh) + BUFFER_ROWS
-    );
-    return { startRow, endRow };
-  });
+  /* ===== 行窗口状态与渲染数组（滚动性能第 1 铁律） ===== */
 
-  /** 可视区域项目（带 _left/_top 定位坐标） */
+  /** 行窗口边界（唯一滚动量化状态；-1 表示未完成首次布局测量） */
+  const winStart = ref(-1);
+  const winEnd = ref(-1);
+  /** 上次滚动的像素位置（非响应式：只服务方向判定，不参与渲染） */
+  let lastScrollPos = 0;
+  /** 渲染项缓存：下标 → {源引用, 渲染对象, 布局键}（内容不变时对象持续复用） */
+  let visibleCacheMap = new Map<number, VisibleCacheEntry>();
+  /** 上次返回的渲染数组（内容逐项相同则保持引用，杜绝下游 watch/patch 空转） */
+  let lastVisible: VisiblePhoto[] = [];
+  /** 稳定空数组（空列表/无效窗口共用同一引用，避免新引用触发空跑） */
+  const EMPTY_VISIBLE: VisiblePhoto[] = [];
+
+  /**
+   * 可视区域项目（渲染数组）。
+   *
+   * 缓存复用策略（滚动性能核心）：computed 只在"窗口跨行 / 列表内容变化 /
+   * 布局参数变化"三种情况失效重算；重算时按数组下标查缓存，源条目引用与
+   * 布局键均未变的项直接复用旧对象，只有新进入窗口或内容更新的项才新建；
+   * 若逐项引用与上次一致，则连同数组本身一并复用（下游零感知）。
+   */
   const visiblePhotos = computed<VisiblePhoto[]>(() => {
+    const list = photos.value;
     const cols = columns.value;
-    const rh = rowHeight.value;
     const iw = itemWidth.value;
-    if (cols <= 0 || rh <= 0 || iw <= 0 || photos.value.length === 0) return [];
-    const { startRow, endRow } = bufferedRowWindow.value;
-    const startIdx = startRow * cols;
-    const endIdx = Math.min(photos.value.length, endRow * cols);
-    const out: VisiblePhoto[] = [];
-    for (let i = startIdx; i < endIdx; i++) {
-      const ph = photos.value[i];
-      const row = Math.floor(i / cols);
-      const col = i % cols;
-      out.push({ ...ph, _left: col * (iw + GAP), _top: row * rh });
+    const rh = rowHeight.value;
+    if (list.length === 0 || winStart.value < 0 || winEnd.value <= winStart.value
+      || cols <= 0 || iw <= 0 || rh <= 0) {
+      visibleCacheMap = new Map();
+      return EMPTY_VISIBLE;
     }
-    return out;
+    const { items, cache } = buildVisibleWindow(
+      visibleCacheMap, list,
+      { startRow: winStart.value, endRow: winEnd.value },
+      cols, iw, rh, GAP,
+    );
+    visibleCacheMap = cache;
+    if (items.length === lastVisible.length && items.every((it, k) => it === lastVisible[k])) {
+      return lastVisible;
+    }
+    lastVisible = items;
+    return items;
   });
 
-  /** 滚动事件：更新 scrollTop 触发 visiblePhotos 重算
-   * 项3：rAF 节流（同帧多次 scroll 合并为一次，60fps 上限）
-   * 同时在位移变化时更新滚动方向，供方向感知预取使用。 */
-  const onScroll = rafThrottle(() => {
-    if (!scrollRef.value) return;
-    const cur = scrollRef.value.scrollTop;
-    if (cur !== scrollTop.value) {
-      scrollDir.value = cur > scrollTop.value ? "down" : "up";
-    }
-    scrollTop.value = cur;
-  });
+  /* ===== 滚动静默态（滚动性能第 3 铁律） =====
+   *
+   * 滚动是瞬时高负载窗口：滚动开始即冻结非必要工作，停止 scrollPerf.scrollSettleMs
+   * 后解冻并统一追帧。
+   *   - DOM：容器 data-scrolling（样式层冻结 hover 过渡与动画）；
+   *     根节点 app-scrolling（idle-governance.css 暂停主界面氛围动画）；
+   *   - 数据：scrollQuiet 门控解密取项与图片预热（见 decryptBatch / ensureVisible）；
+   *   - 追帧：解冻时立即补齐可视区解密，并对运动方向下一行做图片预热解码。 */
+  const scrollQuiet = ref(false);
+  let quietSettleTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** 重新测量容器尺寸（列数 + 视口高度 + 容器宽度） */
-  const updateLayout = () => {
-    if (!scrollRef.value) return;
+  /** 同步静默态的 DOM 表现（容器 dataset + 根节点治理类） */
+  const applyQuietDom = (on: boolean) => {
     const el = scrollRef.value;
+    if (el) {
+      if (on) el.dataset.scrolling = "";
+      else delete el.dataset.scrolling;
+    }
+    document.documentElement.classList.toggle("app-scrolling", on);
+  };
+
+  const enterScrollQuiet = () => {
+    if (!scrollQuiet.value) {
+      scrollQuiet.value = true;
+      applyQuietDom(true);
+    }
+    if (quietSettleTimer !== null) clearTimeout(quietSettleTimer);
+    quietSettleTimer = setTimeout(() => {
+      quietSettleTimer = null;
+      exitScrollQuiet();
+    }, scrollPerf.scrollSettleMs);
+  };
+
+  const exitScrollQuiet = () => {
+    if (!scrollQuiet.value) return;
+    scrollQuiet.value = false;
+    applyQuietDom(false);
+    // 追帧：停稳后立即补齐可视区解密（不等去抖窗口），并预热运动方向下一行
+    void ensureVisiblePhotosDecrypted(visiblePhotos.value);
+    warmNextRow();
+  };
+
+  /** 滚动事件：rAF 节流（同帧多次 scroll 合并为一次）。
+   * 处理序：方向判定（供方向感知预取）→ 进入/续期静默态 → 行窗口量化更新
+   * （只有跨行才写状态；同窗口内的像素级移动不产生任何重建）。 */
+  const onScroll = rafThrottle(() => {
+    const el = scrollRef.value;
+    if (!el) return;
+    const cur = el.scrollTop;
+    if (cur > lastScrollPos) scrollDir.value = "down";
+    else if (cur < lastScrollPos) scrollDir.value = "up";
+    lastScrollPos = cur;
+    enterScrollQuiet();
+    const rh = rowHeight.value;
+    if (rh > 0) {
+      const next = computeRowWindow(cur, rh, viewportHeight.value, totalRows.value, BUFFER_ROWS);
+      if (next.startRow !== winStart.value || next.endRow !== winEnd.value) {
+        winStart.value = next.startRow;
+        winEnd.value = next.endRow;
+      }
+    }
+  });
+
+  /** 同步行窗口（尺寸变化 / 总行数变化 / 布局变化后调用；像素滚动路径由 onScroll 驱动） */
+  const syncWindow = () => {
+    const el = scrollRef.value;
+    if (!el) return;
+    const rh = rowHeight.value;
+    if (rh <= 0) return;
+    const next = computeRowWindow(el.scrollTop, rh, viewportHeight.value, totalRows.value, BUFFER_ROWS);
+    if (next.startRow !== winStart.value || next.endRow !== winEnd.value) {
+      winStart.value = next.startRow;
+      winEnd.value = next.endRow;
+    }
+  };
+
+  /** 重新测量容器尺寸（列数 + 视口高度 + 容器宽度），随后同步行窗口
+   *  （尺寸变化会改变行高与视口行数：滚动位置未变也可能跨窗口） */
+  const updateLayout = () => {
+    const el = scrollRef.value;
+    if (!el) return;
     containerWidth.value = el.clientWidth;
     viewportHeight.value = el.clientHeight;
     columns.value = computeColumns(containerWidth.value);
+    syncWindow();
   };
 
-  /**
-   * 跨 composable 引用修复：resizeObserver 改为 ref，使外部可安全赋值/读取
-   *   旧实现为 let 闭包变量，return 时返回快照值（null），外部赋值后内部不可见。
-   *   ref 包装后内外共享同一响应式引用，且 .value 语义与 ref<HTMLElement> 一致。
-   */
+  /* 列表/布局变化 → 行窗口跟新（初次加载 totalRows 0→N 由此得到首个有效窗口；
+     项宽变化会改变行高，同步后行窗口按新行高重算） */
+  watch([() => totalRows.value, () => rowHeight.value], syncWindow);
+
+  /** ResizeObserver 句柄（ref 包装便于 init/destroy 成对管理） */
   const resizeObserver = ref<ResizeObserver | null>(null);
 
-  /** 初始化虚拟滚动布局：测量容器尺寸 + 启动 ResizeObserver 监听 resize
-   *  入口文件 onMounted 调用，将生命周期管理收敛至数据层（单一职责） */
+  /** 初始化虚拟滚动布局：测量容器尺寸 + 启动 ResizeObserver
+   *  入口文件 onMounted 调用，将生命周期管理收敛至数据层（单一职责）。
+   *  滚动本身不做任何 JS 接管：滚轮走浏览器原生合成器路径（红线级结论——
+   *  主线程插值 / scrollBy smooth 两代平滑实现均在快速滚轮下劣化滚动，
+   *  已整体移除，见修复文档"第三轮红线处置"）。 */
   const initVirtualScroll = () => {
     updateLayout();
     if (scrollRef.value && typeof ResizeObserver !== "undefined") {
@@ -230,12 +328,20 @@ export function usePhotoData() {
     }
   };
 
-  /** 销毁虚拟滚动：释放 ResizeObserver
-   *  入口文件 onUnmounted 调用，防止内存泄漏 */
+  /** 销毁虚拟滚动：释放 ResizeObserver / 静默态定时器与 DOM 标记
+   *  入口文件 onUnmounted 调用，防止内存泄漏与遗留全局类 */
   const destroyVirtualScroll = () => {
     if (resizeObserver.value) {
       resizeObserver.value.disconnect();
       resizeObserver.value = null;
+    }
+    if (quietSettleTimer !== null) {
+      clearTimeout(quietSettleTimer);
+      quietSettleTimer = null;
+    }
+    if (scrollQuiet.value) {
+      scrollQuiet.value = false;
+      applyQuietDom(false);
     }
   };
 
@@ -385,9 +491,11 @@ export function usePhotoData() {
       let cursor = 0;
       const runNext = async (): Promise<void> => {
         while (cursor < metaIds.length) {
-          // 暂停（用户取消首批解密）：在项边界停止取新项，已解密结果保留。
+          // 暂停（用户取消首批解密）或滚动静默态：在项边界停止取新项，已解密结果保留。
           //   去重标记由 finally 统一释放，恢复时这些项可重新参与解密。
-          if (decryptPaused.value) return;
+          //   静默态冻结的是"滚动期间新启动的解密片"，满足滚动性能第 3 铁律；
+          //   滚动停止后由 exitScrollQuiet 的追帧脉冲重新驱动。
+          if (decryptPaused.value || scrollQuiet.value) return;
           const vid = metaIds[cursor++];
           try {
             const data = await decryptPhotoMeta(vid, metaB64Map.get(vid));
@@ -431,9 +539,10 @@ export function usePhotoData() {
   /** 收集方向感知预取目标：含 buffer 窗口之外、运动方向优先的行内待解密项 */
   const collectPrefetchMetaIds = (): number[] => {
     const cols = columns.value;
-    if (cols <= 0) return [];
+    if (cols <= 0 || winStart.value < 0) return [];
     const rows = prefetchRowIndices(
-      bufferedRowWindow.value, totalRows.value, scrollDir.value,
+      { startRow: winStart.value, endRow: winEnd.value },
+      totalRows.value, scrollDir.value,
       PREFETCH_AHEAD_ROWS, PREFETCH_TRAIL_ROWS,
     );
     const ids: number[] = [];
@@ -453,9 +562,11 @@ export function usePhotoData() {
    *
    * 首批（进入模块后的第一次可视区解密）接入进度信号：done/total 均为真实
    * 计数，完成后阶段置 done（进度达 100）。用户取消后 decryptPaused 置位，
-   * 本函数与滚动触发的批次一并停摆，由恢复入口重新驱动。 */
+   * 本函数与滚动触发的批次一并停摆，由恢复入口重新驱动。
+   * 滚动静默态（scrollQuiet）期间入口直接拒绝：滚动期不改动解密并发面，
+   * 滚动停止后由 exitScrollQuiet 追帧脉冲补齐。 */
   const ensureVisiblePhotosDecrypted = async (visible: VisiblePhoto[]) => {
-    if (!isTauri || !photoKey.value || decryptPaused.value) return;
+    if (!isTauri || !photoKey.value || decryptPaused.value || scrollQuiet.value) return;
     const toDecrypt: number[] = [];
     for (const vph of visible) {
       if (vph.loaded || !vph.metaId) continue;
@@ -475,13 +586,19 @@ export function usePhotoData() {
         }
       });
       if (isFirstFill) {
-        firstFillDone = true;
-        firstFillInFlight.value = false;
-        // 用户中途取消：进度停在真实位置并转为暂停提示（不宣告完成）
-        if (decryptPaused.value) {
-          pushProgress("cancelled", `已暂停解密（本次 ${done}/${total} 张已完成）`);
+        if (scrollQuiet.value) {
+          // 滚动静默暂停（既非用户取消也非完成）：首批尚未跑完，保持"在途"状态
+          //   与进度位置，由停稳后的追帧脉冲继续首批。此处不得宣告完成——否则
+          //   进度虚假推进，且 firstFillDone 置位会让剩余项永不续跑。
         } else {
-          pushProgress("done", "加载完成", total, total);
+          firstFillDone = true;
+          firstFillInFlight.value = false;
+          // 用户中途取消：进度停在真实位置并转为暂停提示（不宣告完成）
+          if (decryptPaused.value) {
+            pushProgress("cancelled", `已暂停解密（本次 ${done}/${total} 张已完成）`);
+          } else {
+            pushProgress("done", "加载完成", total, total);
+          }
         }
       }
     } else if (!firstFillDone) {
@@ -493,6 +610,46 @@ export function usePhotoData() {
     if (!photoKey.value) return;
     const ahead = collectPrefetchMetaIds();
     if (ahead.length > 0) await decryptBatch(ahead);
+  };
+
+  /* ===== 图片预热解码（滚动性能第 3 铁律的"追帧补齐"） =====
+   *
+   * 缩略图是背景图（Blob URL），若进入视口才首次解码会出现"先空白后弹出"
+   * 的一帧等待；本模块在滚动停止后的追帧脉冲里，对运动方向下一行的已加载项
+   * 提前解码（Image.decode 只走解码不进 DOM，命中浏览器图片解码缓存），
+   * 进入视口即就绪。滚动期间绝不预热（冻结非必要解码）；去重集合有界
+   * （先进先出淘汰），防止万张相册长期驻留。 */
+  const WARM_DECODE_MAX = 512;
+  const warmedThumbs = new Set<string>();
+
+  const warmThumbDecode = (thumb: string) => {
+    const url = thumbUrlOf(thumb);
+    if (!url || !url.startsWith("blob:")) return;
+    if (warmedThumbs.has(url)) return;
+    if (warmedThumbs.size >= WARM_DECODE_MAX) {
+      // 先进先出淘汰（Set 迭代序即插入序），保持集合有界
+      const first = warmedThumbs.values().next().value;
+      if (first !== undefined) warmedThumbs.delete(first);
+    }
+    warmedThumbs.add(url);
+    const img = new Image();
+    img.decoding = "async";
+    img.src = url;
+    // 预热失败无害（进入视口时浏览器会正常解码），静默忽略
+    void img.decode().catch(() => { /* 仅损失预热收益，无功能影响 */ });
+  };
+
+  /** 预热运动方向下一行的已加载缩略图（追帧脉冲调用；至多一行的量） */
+  const warmNextRow = () => {
+    if (scrollQuiet.value) return;
+    const cols = columns.value;
+    if (cols <= 0 || winStart.value < 0) return;
+    const row = scrollDir.value === "down" ? winEnd.value : winStart.value - 1;
+    if (row < 0 || row >= totalRows.value) return;
+    for (let c = 0; c < cols; c++) {
+      const ph = photos.value[row * cols + c];
+      if (ph?.loaded && ph.thumb) warmThumbDecode(ph.thumb);
+    }
   };
 
   /** 首批可视区解密是否已跑完（进度只覆盖首批，滚动批次不再弹进度） */
@@ -516,7 +673,9 @@ export function usePhotoData() {
     }
   };
 
-  // 可视区变化 → 去抖后触发按需解密
+  // 可视区渲染数组变化 → 去抖后触发按需解密。
+  //    行窗口模型下数组引用保持稳定：只在"跨行 / 内容变化 / 布局变化"时触发，
+  //    滚动帧绝大多数不再空跑本 watch（滚动性能第 1 铁律）。
   //    flush:'post' 确保 DOM 更新后执行，避免与响应式更新竞争。
   //    函数内部有 decryptingMetaIds 去重 + loaded 检查，重复触发安全。
   watch(visiblePhotos, (v) => {
@@ -748,41 +907,22 @@ export function usePhotoData() {
     animationDone,
     loadError,
     failedCount,
-    scrollDir,
-    // ===== 加载进度（信号层） =====
-    loadStage,
-    loadPercent,
-    loadMessage,
-    loadElapsedMs,
-    firstFillInFlight,
-    decryptPaused,
-    // ===== 虚拟滚动 =====
+    // ===== 虚拟滚动（行窗口模型：对外只暴露渲染数组与滚动入口） =====
     scrollRef,
-    scrollTop,
-    viewportHeight,
-    containerWidth,
-    columns,
-    GAP,
-    BUFFER_ROWS,
-    computeColumns,
-    itemWidth,
-    rowHeight,
-    totalRows,
     totalHeight,
     visiblePhotos,
     onScroll,
-    updateLayout,
-    resizeObserver,
     /** 生命周期收敛至数据层：入口文件 onMounted/onUnmounted 调用 */
     initVirtualScroll,
     destroyVirtualScroll,
     // ===== 按需解密 =====
     decryptPhotoMeta,
-    decryptingMetaIds,
-    ensureVisiblePhotosDecrypted,
     cancelPendingDecrypt,
     // ===== 加载照片 =====
     loadPhotos,
+    /* 取消 / 重试 / 恢复：能力保留、UI 入口待恢复——Wave 50 系统化移除拾光
+       提示横幅后，三个动作失去入口载体；此处保留导出与完整实现（含协作式
+       取消链），待产品决策恢复入口或整链清理（见修复文档遗留观察）。 */
     retryLoad,
     cancelLoad,
     resumeLoad,

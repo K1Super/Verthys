@@ -5,7 +5,7 @@
  * 从原 PhotoAlbum.vue 提取，保持 100% 功能不变。
  *
  * 设计要点：
- * - 接收 usePhotoData 返回值中的 photos/isTauri + usePhotoToast 的 showError/showToast（依赖注入）
+ * - 接收 usePhotoData 返回值中的 photos/isTauri + 全局 Toast 中心的 showError/showToast（依赖注入）
  * - onView 由外部传入（来自 usePhotoViewer），选择模式下拦截点击改为切换选中
  * - showToast 由外部传入，用于删除成功提示
  * - onDelete 基于 metaId 判断（非 meta），重启后占位项也能正确删除 verthys 记录
@@ -34,9 +34,9 @@ export interface UsePhotoDeleteParams {
   isTauri: boolean;
   /** 打开查看器回调（非选择模式下点击照片时调用，来自 usePhotoViewer） */
   onView: (ph: PhotoEntry) => void;
-  /** 显示错误提示（来自 usePhotoToast，统一 Toast 中心） */
+  /** 显示错误提示（来自全局 Toast 中心） */
   showError: (msg: string) => void;
-  /** 成功提示回调（来自 usePhotoToast，用于删除完成提示） */
+  /** 成功提示回调（来自全局 Toast 中心，用于删除完成提示） */
   showToast: (msg: string) => void;
   /**
    * 按 metaId 强制解密元数据（来自 usePhotoData::decryptPhotoMeta）。
@@ -77,13 +77,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
         }
       }
       // 删除 meta 记录（新格式的 chunk 数据已内联时删 meta 即彻底清除）
-      try { await verthysDeleteRecord(ph.metaId); } catch (e) {
-        if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-          showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-          return;
-        }
-        /* 其他错误静默 */
-      }
+      try { await verthysDeleteRecord(ph.metaId); } catch { /* 删除失败静默 */ }
       // 同时失效两层缓存（摘要 + 全量），杜绝删除复活
       invalidateSummaryRecord(ph.metaId);
       invalidateFullRecord(ph.metaId);
@@ -91,13 +85,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
       // 外置 chunk 级联删除（新外置格式与旧格式共用 chunkIds 字段）
       if (chunkIds.length > 0) {
         for (const cid of chunkIds) {
-          try { await verthysDeleteRecord(cid); } catch (e) {
-            if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-              showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-              return;
-            }
-            /* 其他错误静默 */
-          }
+          try { await verthysDeleteRecord(cid); } catch { /* 删除失败静默 */ }
           // chunk 记录同样失效两层缓存
           invalidateSummaryRecord(cid);
           invalidateFullRecord(cid);
@@ -107,13 +95,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
       // 索引瘦身布局：缩略图独立记录级联删除（与 chunk 同级处理）
       const thumbId = meta?.thumbId;
       if (typeof thumbId === "number" && thumbId > 0) {
-        try { await verthysDeleteRecord(thumbId); } catch (e) {
-          if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-            showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-            return;
-          }
-          /* 其他错误静默 */
-        }
+        try { await verthysDeleteRecord(thumbId); } catch { /* 删除失败静默 */ }
         invalidateSummaryRecord(thumbId);
         invalidateFullRecord(thumbId);
         invalidateScannedRecord(thumbId);
@@ -352,10 +334,6 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
           console.warn("[executeBatchDelete] 孤儿块 GC 失败（可下次再触发）", e);
         }
       } catch (e) {
-        if (e instanceof Error && e.message === "VERTHYS_WRITE_BLOCKED") {
-          showError("当前加密库格式需要升级，暂无法写入新数据，请重新打开应用重试升级或导出已有数据");
-          return;
-        }
         console.warn("[executeBatchDelete] deleteAndPersistBatch 失败", e);
         showError("删除失败，请重试");
       }

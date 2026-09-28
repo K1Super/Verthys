@@ -137,6 +137,8 @@ export {
   touchSession,
   setSessionTimeout,
   getSessionTimeout,
+  setSessionLockEnabled,
+  isSessionLockEnabled,
   applySecurityPreset,
   restoreSecurityPreset,
   bumpPresetEpoch,
@@ -146,6 +148,7 @@ export {
   lockAll,
   awaitLockAllIfInProgress,
   securityPresetRef,
+  sessionLockEnabledRef,
 } from "../session/security-session";
 
 /* ===== 全局加密库层 API ===== */

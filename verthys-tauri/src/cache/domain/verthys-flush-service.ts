@@ -26,7 +26,7 @@
  * 评审修复：
  *   删除失败时 pendingDeletionIds 未清理（严重缺陷）→ deleteAndPersist /
  *   deleteAndPersistBatch 的删除执行统一容错：返回 false 或抛出异常
- *   （verthysDeleteRecords/verthysDeleteRecord 会抛 VERTHYS_WRITE_BLOCKED 等）
+ *   （verthysDeleteRecords/verthysDeleteRecord 可能抛出异常）
  *   即为"删除未发生"，立即解除对应 ID 的过滤屏蔽，杜绝"记录仍在磁盘却被
  *   永久屏蔽 → 界面隐形丢失"；异常路径解除屏蔽后重新抛出，保持调用方
  *   现有异常契约（UI catch 提示用户）。成功路径不变：ID 进入
@@ -35,7 +35,8 @@
  * 核心保证（与旧版一致）：
  *   1. 串行执行：flushChain Promise 链保证所有 flush 操作顺序执行
  *   2. 防抖合并：连续 delete 在 300ms 窗口内合并为单次 flush
- *   3. 超时保护：单次 doFlush 18s 超时 + 重试 2 次；waitForFlush 22s 超时
+ *   3. 超时保护：单次 doFlush 18s 超时；重试次数、退避与落盘自查超时由跨层预算常量给出；
+ *      waitForFlush 22s 超时
  *   4. ID 复用防护：delete 入队时记录 name+type+dataB64 快照，执行时校验
  *   5. 定时器统一管理：trackedSetTimeout 注册 trackedTimerIds + 代际 token
  *
@@ -52,6 +53,11 @@ import { VERTHYS_DEFAULT_PASSWORD } from "../../constants/key_manager_const";
 import { createLogger } from "../../utils/logger";
 import { ok, err, VerthysErrorCode, type VerthysResult } from "../../lib/verthys_error";
 import { ref, type Ref } from "vue";
+import {
+  FLUSH_MAX_RETRIES,
+  FLUSH_RETRY_BACKOFF_MS,
+  FLUSH_VERIFY_TIMEOUT_MS,
+} from "../../constants/photo_budget.generated";
 
 const log = createLogger("verthys-flush");
 
@@ -78,12 +84,10 @@ const FLUSH_DEBOUNCE_MS = 300;
 /** doFlush 单次 IPC 超时（Rust verthys_flush 使用 send_batch_with_timeout 8s/操作，
  *  lock+unlock 两次最坏 16s，前端 18s 兜底覆盖 Rust 最坏情况 + 2s IPC 开销） */
 const FLUSH_SINGLE_TIMEOUT_MS = 18000;
-/** doFlush 最大重试次数（每次 18s，2 次 = 36s 最坏；waitForFlush 22s 超时后 doFlush 后台继续） */
-const FLUSH_MAX_RETRIES = 2;
 /** waitForFlush 总超时（覆盖单次 flush 18s + 4s 开销；超时后 lockAll 继续，doFlush 后台运行） */
 const WAIT_FLUSH_TIMEOUT_MS = 22000;
-/** doFlush 重试线性退避间隔 */
-const FLUSH_RETRY_BACKOFF_MS = 100;
+/* 重试次数、退避间隔与落盘自查超时属跨层预算口径，由生成常量给出：
+ *   FLUSH_MAX_RETRIES / FLUSH_RETRY_BACKOFF_MS / FLUSH_VERIFY_TIMEOUT_MS */
 
 /* C 端 VerPersistStatus 状态码（与 verthys.h VerPersistStatus 对齐）：
  * 0=OK / 1=HEADER_INVALID / 2=SIZE_MISMATCH / 3=WAL_REGION / 4=IO / 5=INTERNAL。
@@ -877,8 +881,28 @@ export class VerthysFlushService {
         continue;
       }
 
-      // 2. 校验：worker 进程内 C 层持锁句柄自查（主进程外部读会被字节锁拒绝）
-      const verify = await verthysVerifyDiskPersist();
+      // 2. 校验：worker 进程内 C 层持锁句柄自查（主进程外部读会被字节锁拒绝）；
+      //    IPC 无响应时不能无限等待——超时按可重试失败处理，与 IO 失败的重试
+      //    动作一致（重试或重建会话），避免拖死 flush 队列。
+      const verify = await Promise.race([
+        verthysVerifyDiskPersist(),
+        new Promise<null>((resolve) =>
+          this.trackedSetTimeout(() => resolve(null), FLUSH_VERIFY_TIMEOUT_MS),
+        ),
+      ]);
+      if (!verify) {
+        log.warn(`落盘自查超时 ${FLUSH_VERIFY_TIMEOUT_MS}ms（第 ${attempt}/${FLUSH_MAX_RETRIES} 次）`);
+        this.lastFlushError = `落盘自查超时 ${FLUSH_VERIFY_TIMEOUT_MS}ms`;
+        if (attempt === FLUSH_MAX_RETRIES) {
+          return {
+            kind: "verify_failed",
+            statusCode: VER_PERSIST_E_IO,
+            detail: this.lastFlushError,
+          };
+        }
+        await this.backoff(attempt);
+        continue;
+      }
       if (verify.ok) {
         // 已落盘：批量移除已提交删除 ID + 复位脏标记
         for (const id of this._committedDeletionIds) {

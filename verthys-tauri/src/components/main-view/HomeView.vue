@@ -1,8 +1,8 @@
 <!--
   HomeView.vue — 主界面默认视图（深空巡天 · 引力星图）
   非对称构图（拒绝居中对称模板）：
-    左 8%  — 品牌雕刻排印（useBrandTitle compact 级 — 与引导页同源
-              hash 参数场，跨场景品牌形态一致）+ 谱线回声 + 静默引导
+    左 8%  — 品牌星轨刻线体字标（BrandMark compact 级 — 与引导页
+              同源字形库与运动场，跨场景品牌形态一致）+ 谱线回声 + 静默引导
     右侧   — 引力星图 HomeAtlas（非同心轨道 + 奇点 + 差速航点）
     对角视觉张力：Dock → 品牌 → 星图 → 深空（阅读动线成势）
   视差策略：本层内容（品牌/星图）不参与指针视差 — 深度感全部
@@ -20,24 +20,10 @@
 
     <!-- 品牌区（左侧 — 静态锚定） -->
     <div class="brand-pos">
-      <h1 class="brand-title brand-title--compact">
-        <span
-          v-for="(cv, i) in chars"
-          :key="i"
-          class="brand-char"
-          :class="cv.mode"
-          :data-char="cv.ch"
-          :style="{
-            '--fs': cv.fs + 'px',
-            '--dx': cv.dx + 'px',
-            '--dy': cv.dy + 'px',
-            '--by': cv.by + 'px',
-            '--tr': cv.tr + 'deg',
-            '--rot': cv.rot + 'deg',
-            '--delay': cv.delay + 'ms',
-            '--dur': cv.dur + 's',
-          }"
-        >{{ cv.ch }}</span>
+      <!-- 星轨刻线体字标（compact 级 — 与引导页同源字形库/运动场，
+           幅度收敛；形态细节：光门镂空 V / 枢钥刻槽 / 悬锤垂针 Y） -->
+      <h1 class="brand-h1">
+        <BrandMark level="compact" />
       </h1>
 
       <!-- 谱线回声（引导页谱线组的静默变体 — 呼吸 + 微跳，相对品牌文字居中） -->
@@ -67,11 +53,12 @@
 
 <script setup lang="ts">
 import HomeAtlas from "./HomeAtlas.vue";
-import { useBrandTitle } from "../../composables/useBrandTitle";
+import BrandMark from "../common/BrandMark.vue";
 import { useSpectraTicks } from "../../composables/useSpectraTicks";
 
-/* 品牌排印 — compact 级（与引导页同源确定性 hash 场，幅度收敛） */
-const chars = useBrandTitle({ compact: true });
+/* 品牌字标（common/BrandMark.vue — compact 级）：
+ * 字形与运动参数由 useBrandTitle 唯一权威源直出，与引导页同源同轨，
+ * 仅级别幅度收敛（组件内部自持模型，此处零参数透传） */
 
 /* 谱线回声参数 — echo 变体（与引导页充能组共享唯一权威源
  * useSpectraTicks：光谱色/时序/呼吸/微跳逐线差化） */
@@ -115,9 +102,9 @@ const ticks = useSpectraTicks("echo");
 }
 
 /* ============================================================================
- * 品牌雕刻排印：全部复用全局共享体系（animations.css
- * .brand-title + .brand-char + brand-assemble — compact 级幅度经
- * .brand-title--compact 变量覆写：描边/克隆偏移/入射强度收敛，
+ * 品牌字标：全部复用全局共享体系（animations.css
+ * .brand-wordmark + .wm-glyph + wm-assemble — compact 级幅度经
+ * .brand-wordmark--compact 变量覆写：笔画重量/雕刻偏移/入射强度收敛，
  * 与引导页引导级同源同轨）
  * ========================================================================== */
 
