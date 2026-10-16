@@ -35,7 +35,6 @@ import {
   applySecurityPreset,
   bumpPresetEpoch,
   loadCustomFeatures,
-  saveCustomFeatures,
   isLockedFeature,
   globalKeyReadyRef,
 } from '../../lib/keyManager';
@@ -308,9 +307,14 @@ const orbitTrackGradient = computed(() => ({
     // 竞态仲裁：用户显式切换递增版本，使在途恢复链自弃
     bumpPresetEpoch();
     try {
-      saveCustomFeatures(customFeatures.value);
+      // 自定义特性显式传入应用链：本地缓存在后端应用成功后由会话层
+      // 单点落盘（本函数不预写），失败路径缓存与前端状态保持一致
       // 8s 超时兜底：预设应用链路阻塞时不得无限 pending 卡死按钮
-      const config = await withTimeout(applySecurityPreset(3), 8000, "应用自定义模板");
+      const config = await withTimeout(
+        applySecurityPreset(3, undefined, customFeatures.value),
+        8000,
+        "应用自定义模板",
+      );
       if (config) {
         currentPresetFeatures.value = { ...config.features };
       }

@@ -39,7 +39,10 @@ fn get_audit_log_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
 static AUDIT_HMAC_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
 
 /// 获取审计日志 HMAC 密钥（设备指纹派生，进程内派生一次后复用）
-fn get_audit_hmac_key() -> Option<[u8; 32]> {
+///
+/// 供安全命令层与后台核验模块（integrity_check 等）复用同一密钥，
+/// 避免各处自行派生导致的重复 PBKDF2 开销。
+pub(crate) fn get_audit_hmac_key() -> Option<[u8; 32]> {
     use crate::infrastructure::device_fingerprint::get_device_fingerprint;
     use crate::util::crypto::pbkdf2_derive_default;
 

@@ -154,6 +154,17 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
   const unlockProgressElapsed = ref(0);
 
   /**
+   * 介质标识变化确认态（非 null 时显示确认对话框）。
+   *
+   * 场景：加密库位于可移动介质上，介质标识与登记记录不一致（克隆嫌疑）
+   * 时后端阻止解锁；此处不直接报错，交由用户确认"合法更换介质"后带
+   * 确认参数重试——重绑定仅在凭据验证通过后由后端落实。
+   */
+  const usbRebindPrompt = ref<{ path: string; isCreate: boolean } | null>(null);
+  /** 确认后的重试进行中（禁用按钮，避免重复提交） */
+  const usbRebindSaving = ref(false);
+
+  /**
    * 进度完成标志（根治修复）。
    *
    * 目的：阻止 Tauri Channel 残留消息在 Promise resolve 后覆盖最终 UI 状态。
@@ -231,7 +242,7 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
    *    并 fire-and-forget 触发设备校验（若存在全局密钥）。
    *  - 失败后调用 translateVerthysError 翻译错误码为用户可读消息。
    */
-  const doUnlock = async (path: string, isCreate: boolean) => {
+  const doUnlock = async (path: string, isCreate: boolean, usbRebindConfirmed = false) => {
     if (unlocking.value) return;
     unlocking.value = true;
     unlockProgressMsg.value = '准备就绪';
@@ -259,7 +270,7 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
             const preflight = await verthysPreflight(path);
             if (preflight.file_exists) {
               result = await withFrontendTimeout(
-                initUnlock(path, undefined, onUnlockProgress),
+                initUnlock(path, undefined, onUnlockProgress, usbRebindConfirmed),
                 '打开文件',
                 UNLOCK_FRONTEND_TIMEOUT_MS,
               );
@@ -270,7 +281,7 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
         }
       } else {
         result = await withFrontendTimeout(
-          initUnlock(path, undefined, onUnlockProgress),
+          initUnlock(path, undefined, onUnlockProgress, usbRebindConfirmed),
           '打开文件',
           UNLOCK_FRONTEND_TIMEOUT_MS,
         );
@@ -284,6 +295,10 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
             console.warn('[doUnlock] 设备校验失败（非致命）:', e);
           });
         }
+      } else if (result.code === VerthysErrorCode.E_USB_CLONE_SUSPECTED) {
+        // 介质标识变化（克隆嫌疑）：不直接报错，升起确认态；
+        // 用户确认后带 usbRebindConfirmed 重试，密码验证通过才改写绑定
+        usbRebindPrompt.value = { path, isCreate };
       } else {
         options.showError(translateVerthysError(result));
       }
@@ -295,6 +310,31 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
     }
   };
 
+  /**
+   * 用户确认"合法更换介质"：带确认参数重试解锁。
+   *
+   * 安全性：确认参数只放行克隆嫌疑阻断，重绑定仍以本次密码验证
+   * 通过为前提（后端在解锁成功后落实），失败不会改写绑定记录。
+   */
+  const confirmUsbRebind = async () => {
+    const pending = usbRebindPrompt.value;
+    if (!pending || usbRebindSaving.value) return;
+    usbRebindSaving.value = true;
+    try {
+      usbRebindPrompt.value = null;
+      await doUnlock(pending.path, pending.isCreate, true);
+    } finally {
+      usbRebindSaving.value = false;
+    }
+  };
+
+  /** 用户取消确认：关闭确认态并明确告知解锁保持阻止（不静默） */
+  const cancelUsbRebind = () => {
+    if (!usbRebindPrompt.value) return;
+    usbRebindPrompt.value = null;
+    options.showError('已取消介质更换确认，解锁保持阻止状态');
+  };
+
   return {
     verthysPath,
     unlocking,
@@ -303,9 +343,13 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
     unlockProgressPercent,
     unlockProgressElapsed,
     unlockProgressDone,
+    usbRebindPrompt,
+    usbRebindSaving,
     openExistingVerthys,
     createNewVerthys,
     doUnlock,
+    confirmUsbRebind,
+    cancelUsbRebind,
   };
 }
 

@@ -180,3 +180,38 @@ flowchart TB
 | 完整性校验 | `integrity_verify_startup`、`runtime_hash_verify(_periodic)`、`Verthys_VerifyIntegrity` |
 | 应急自毁 | `emergency_report / emergency_trigger`（TELEMETRY/DEGRADE/KILL 三级） |
 | 事务提交 | `vsb_v3_commit_quorum`（3 副本 2/3 成功）、WAL 回放 |
+| 预设切档 | `security_apply_preset`（授权 → 原子落盘 → worker 切档 → C 投影回读，不一致回滚并报 `E_PRESET_VERIFY`）；落盘失败回滚置 `preset_persist_dirty` 阻断后续切档 |
+| 自完整性核验 | `integrity_check::verify_self_image_async`（启动主镜像 WinVerifyTrust）+ 后台巡检抽样复核；结果写 `INTEGRITY_CHECK` 审计事件 |
+| 痕迹清理 | `trace_cleanup::run_locked_cleanup_async`（锁定/退出触发）；仅删除指向应用自身痕迹域（`.verthys`/`.venc` 扩展名 + 应用自有目录前缀）的最近记录条目，写 `TRACE_CLEANUP` 审计事件 |
+| 介质绑定 | `pre_unlock_guard`（解锁前卷序列号哈希比对，克隆嫌疑 fail-closed 拒绝）+ `post_unlock_commit`（DPAPI 持久化登记/重绑定） |
+
+## 7. 安全防护档位与特性契约
+
+三档预设（BALANCED / SECURE / PERFORMANCE）与自定义档的策略唯一权威在 C 运行时策略层（`security_preset.c` 三档填充矩阵），Rust/TS/UI 仅只读消费，禁止本地可写副本与缓存回写权威。
+
+### 7.1 特性位契约（11 位，位序跨层禁止重排）
+
+位序：0=anti_debug，1=anti_inject，2=integrity_check，3=memory_guard，4=key_separation，5=emergency_response，6=session_lock_on_idle，7=module_patrol，8=clipboard_guard，9=usb_clone_detect，10=trace_cleanup；有效掩码 `0x7FF`。
+
+档位值：BALANCED `0x6FF`、SECURE `0x7FF`、PERFORMANCE `0x073`。C 层投影接口 `security_preset_feature_bits` / `security_active_preset` 为唯一口径；应用侧镜像 `app_feature_gate`（AtomicU32）按回读结果更新，未应用预设时按保守全开处理——任何异常路径朝"防护更严"方向失败。
+
+### 7.2 红线能力（全档恒定，不随档位或用户开关关闭）
+
+调试检测（anti_debug 全档恒开，性能档不减负）、注入拦截、密钥三权分立（CNG）、应急熔断（`emergency.c` 无条件 KILL 级）、锁定清空剪贴板、系统锁屏/注销/断连即锁定（WTS 事件）、全局密钥导出二次验证。`key_separation` / `emergency_response` 两位由红线常量提供。
+
+### 7.3 特性执行路径（能力真实性）
+
+| 特性 | 执行路径 |
+|---|---|
+| module_patrol | 后台巡检线程按动态周期扫描，门控关闭时仅维持线程与心跳 |
+| integrity_check | 启动期主镜像签名核验（WinVerifyTrust，后台线程）+ 巡检轮次随机抽样已加载受信位置模块复核；失败不阻断启动/解锁（离线吊销检查可能误报），审计 + 日志可见 |
+| usb_clone_detect | 解锁前置守卫：可移动卷序列号哈希与 DPAPI 登记比对，不匹配拒绝解锁并提供重绑定流程（全局密钥二次验证） |
+| trace_cleanup | 锁定/退出时精确清理系统最近记录中指向应用自身文件的条目（COM 专用线程解析 .lnk，绝不触碰无关记录） |
+| session_lock_on_idle | 前端会话计时器按档位超时应用；自定义档可显式关闭 |
+| clipboard_guard | 语义 = 剪贴板监听（外部写入即清空）；锁定清空为恒定底线，不受该位影响 |
+
+### 7.4 档位生效时机与信任链
+
+解锁流程在凭据验证前按受信文件（`<verthys_path>.preset.json`，按本次容器路径派生）应用档位并回读校验，失败中止解锁（fail-closed）；本地 localStorage 仅作迁移来源与只读缓存，任何路径不得以其覆盖受信文件；运行期唯一写路径是用户显式切换（落盘 → 切档 → 回读 → 成功才更新 UI，并递增竞态版本号）。
+
+显示器关闭锁定（display-off）：会话守卫注册 `GUID_CONSOLE_DISPLAY_STATE` 电源设置通知，仅高安全（SECURE）模式下显示器关闭执行锁定；通知注册失败退化为既有挂起监听。

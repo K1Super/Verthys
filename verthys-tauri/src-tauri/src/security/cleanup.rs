@@ -616,7 +616,7 @@ mod win_impl {
         let is_sparse = info_result.is_ok() && is_sparse_file(&file_info);
         if is_sparse {
             log::warn!(
-                "[secure_delete] SECURITY.md 第 2 项：检测到稀疏文件，逻辑大小 {} 字节，\
+                "[secure_delete] 检测到稀疏文件，逻辑大小 {} 字节，\
                  仅对已分配区域覆写零",
                 file_size
             );
@@ -699,7 +699,7 @@ mod win_impl {
             // 检查时间上限
             if Instant::now() >= *deadline {
                 log::warn!(
-                    "[secure_delete] SECURITY.md 第 2 项：覆写超过 {} 秒上限，强制终止",
+                    "[secure_delete] 覆写超过 {} 秒上限，强制终止",
                     OVERWRITE_TIMEOUT_SECS
                 );
                 return Err(format!("覆写超时（{} 秒上限）", OVERWRITE_TIMEOUT_SECS));

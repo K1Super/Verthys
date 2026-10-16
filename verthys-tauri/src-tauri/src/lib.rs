@@ -14,8 +14,9 @@
  *    不依赖具体业务实现细节（如 util 内部函数）。
  * 2. 资源管理：进程级资源（日志管道、取消令牌）通过 ProcessGuard 注册，
  *    确保进程退出时按逆序自动清理。
- * 3. 模式派发：通过 --mode 参数决定启动模式，分离 UI 进程与安全 Worker 进程，
- *    Worker 模式跳过 WebView 初始化，缩小攻击面。
+ * 3. 进程模式：本可执行文件仅运行主 UI 模式。`--mode` 的 worker / inspector
+ *    属于已识别但未实现的关键字，由入口层显式拒绝并退出；真实 worker 为独立
+ *    可执行文件 verthys-worker.exe，不通过本进程承载。
  * 4. 敏感操作下沉：所有加解密、密钥派生、容器操作由 verthys-worker 子进程执行，
  *    主进程永不加载 DLL 或持有 VerthysHandle。
  *
@@ -48,7 +49,7 @@
  * 版本与兼容
  * =============================================================================
  * - 保留 run() 函数作为 run_ui() 的兼容别名，以支持旧调用点。
- * - 新增进程模式（Worker / Inspector）通过 --mode 参数区分。
+ * - 进程模式经 --mode 参数识别；本可执行文件仅实现主 UI 模式。
  * - 数据目录解析不依赖环境变量修改，仅从受信命令行参数获取。
  */
 
@@ -416,6 +417,8 @@ fn run_main_ui(
                 security_commands::brute_force_bridge::install_unlock_gate();
                 // 注册解锁前受信档位应用实现到服务层契约（同一分层红线约束）
                 security_commands::install_preset_source();
+                // 注册可移动介质绑定实现到服务层契约（同一分层红线约束）
+                security_commands::usb_binding_bridge::install_usb_binding();
                 let install_dir = std::env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
@@ -425,6 +428,8 @@ fn run_main_ui(
                     install_dir,
                 );
                 app.manage(patrol);
+                // 启动期程序自完整性核验（完整校验能力执行路径；后台线程，不阻塞启动）
+                security::integrity_check::verify_self_image_async(app_handle.clone());
                 // 启动导入写者心跳看门狗（写者卡死超时自动重建）
                 crate::state::import_writer::spawn_watchdog(
                     app_handle.clone(),
@@ -523,6 +528,9 @@ fn run_main_ui(
             security_commands::security_usb_read_serial,
             security_commands::security_usb_register_device,
             security_commands::security_usb_check_clone,
+            security_commands::security_usb_volume_status,
+            security_commands::security_usb_register_current,
+            security_commands::security_usb_rebind_device,
             security_commands::security_usb_shadow_sleep,
             security_commands::security_usb_try_recover,
             security_commands::security_usb_purge,

@@ -103,6 +103,10 @@ pub enum AuditEventType {
     PatrolEmergency,
     /// 巡检看门狗事件（线程重启 / 重启失败强制熔断）
     PatrolWatchdog,
+    // 程序自完整性核验（启动镜像签名核验 / 运行期模块抽检）
+    IntegrityCheck,
+    // 应用自身痕迹清理（系统最近记录中的本应用条目）
+    TraceCleanup,
 }
 
 impl AuditEventType {
@@ -144,6 +148,8 @@ impl AuditEventType {
             AuditEventType::PatrolThreat => "PATROL_THREAT",
             AuditEventType::PatrolEmergency => "PATROL_EMERGENCY",
             AuditEventType::PatrolWatchdog => "PATROL_WATCHDOG",
+            AuditEventType::IntegrityCheck => "INTEGRITY_CHECK",
+            AuditEventType::TraceCleanup => "TRACE_CLEANUP",
         }
     }
 }

@@ -306,7 +306,7 @@ impl BruteForceGuard {
             if now < until {
                 let remaining = (until - now).as_secs();
                 log::warn!(
-                    "[brute_force] 第 2 项：锁定期间 record_failure 被冻结（剩余 {} 秒），\
+                    "[brute_force] 锁定期间 record_failure 被冻结（剩余 {} 秒），\
                      计数不变 (consecutive={}, total={})",
                     remaining,
                     state.consecutive_failures,
@@ -321,7 +321,7 @@ impl BruteForceGuard {
         /* PurgeRequired 状态下完全冻结 */
         if state.purge_triggered {
             log::warn!(
-                "[brute_force] 第 2 项：PurgeRequired 状态下 record_failure 被冻结，\
+                "[brute_force] PurgeRequired 状态下 record_failure 被冻结，\
                  计数不变 (consecutive={}, total={})",
                 state.consecutive_failures,
                 state.total_failures
@@ -332,7 +332,7 @@ impl BruteForceGuard {
         /* 速率限制 */
         if !Self::check_rate_limit(&mut state, self.config.rate_limit_ms) {
             log::warn!(
-                "[brute_force] 第 4 项：record_failure 被速率限制拒绝（间隔 < {}ms）",
+                "[brute_force] record_failure 被速率限制拒绝（间隔 < {}ms）",
                 self.config.rate_limit_ms
             );
             return AttemptResult::RateLimited;
@@ -399,7 +399,7 @@ impl BruteForceGuard {
         /* total_failures 和 last_purge_total 不重置 */
 
         log::info!(
-            "[brute_force] 第 3 项：clear_purge 已清除熔断状态（total_failures={} 保留，\
+            "[brute_force] clear_purge 已清除熔断状态（total_failures={} 保留，\
              last_purge_total={} 保留）",
             total,
             state.last_purge_total

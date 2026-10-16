@@ -13,7 +13,7 @@ import {
   securitySessionStart, securitySessionStop, securitySessionSetHardening,
   securityApplyPreset, securityLoadPresetState,
   verthysClearGlobalKey, verthysLock, verthysLockPersist, workerDestroy,
-  type SecurityPresetCode, type BruteForceCheckResponse,
+  type SecurityPresetCode, type BruteForceCheckResponse, type PresetFeatures,
 } from "../lib/verthys";
 import { keyState, setCurrentVerthysPath, loadCustomFeatures, saveSecurityPreset, saveCustomFeatures, loadSecurityPreset, resetAllState } from "../state/key_state";
 import { PRESET_SESSION_TIMEOUT_MS, SECURITY_PRESET_KEY, CUSTOM_FEATURES_KEY } from "../constants/key_manager_const";
@@ -120,10 +120,17 @@ export function isSessionLockEnabled(): boolean {
  *  @param preset 0=BALANCED, 1=SECURE, 2=PERFORMANCE, 3=CUSTOM
  *  @param issuedEpoch 恢复链发起时的竞态版本号（可选）；
  *         应用前若已被用户显式切换超越，则放弃本次应用并返回 null
+ *  @param customOverride CUSTOM 档的显式特性集（可选）；缺省时读取本地
+ *         缓存。显式传入使"应用自定义模板"链路避免先写缓存再读回的
+ *         双写 —— 本地缓存只在后端应用成功后落一次（单一落盘点）。
  *  @returns 该预设的配置详情（含各特性开关）；被超越时返回 null
  *  @throws 后端切档/落盘失败或超时时抛错（调用方以 withTimeout 兜底并提示）
  */
-export async function applySecurityPreset(preset: SecurityPresetCode, issuedEpoch?: number) {
+export async function applySecurityPreset(
+  preset: SecurityPresetCode,
+  issuedEpoch?: number,
+  customOverride?: PresetFeatures,
+) {
   // 竞态仲裁：恢复链携带发起时版本号，应用前校验未被用户显式切换超越
   if (issuedEpoch !== undefined && issuedEpoch !== presetEpoch) {
     console.warn("[applySecurityPreset] 恢复结果已被用户切换超越，放弃应用");
@@ -131,7 +138,7 @@ export async function applySecurityPreset(preset: SecurityPresetCode, issuedEpoc
   }
   // CUSTOM 档：后端落盘自定义特性（无 C 层档位），会话层开关组合实现
   if (preset === 3) {
-    const custom = loadCustomFeatures();
+    const custom = customOverride ?? loadCustomFeatures();
     // 先后端落盘 + 返回权威配置；失败抛错，前端状态不变
     const config = await securityApplyPreset(3, custom);
 

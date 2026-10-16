@@ -103,12 +103,21 @@ body.reduced-motion .toast-dot::after {
   animation-play-state: running !important;
 }
 
+/* 品牌字标逐字组装豁免（身份语义不失真）：组装为一次性成形
+ *   （0.5-1.3s），冻结在起始帧（opacity 0 + 位移缩放）等于品牌标识
+ *   整体消失 — 降级期间打开弹窗/回主界面即见品牌缺失。一次性动画
+ *   成形后零持续开销，不构成常驻负载，故列为核心保留集。 */
+body.reduced-motion .brand-wordmark .wm-glyph {
+  animation-play-state: running !important;
+}
+
 /* backdrop-filter「减少」档已无消费者（常态动效无实时
  * backdrop-filter，此档无对应规则，编号仅保留层级连续性） */
 
 /* 空闲治理优先于降级豁免：idle 及以下时交互动画同样静止
- *   （降级豁免不得反向击穿空闲暂停 — 特异性压制） */
-body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot),
+ *   （降级豁免不得反向击穿空闲暂停 — 特异性压制；
+ *   品牌字标豁免一并纳入本条，空闲暂停优先于其降级豁免） */
+body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot, .wm-glyph),
 body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot)::before,
 body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot)::after {
   animation-play-state: paused !important;

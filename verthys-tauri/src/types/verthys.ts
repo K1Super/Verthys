@@ -325,6 +325,18 @@ export interface ShadowSleepStatus {
   txid: number;
 }
 
+/** 可移动介质绑定状态（检测命令响应）
+ *  verdict：trusted / clone_suspected / first_use / not_applicable /
+ *           disabled_by_preset / undetermined */
+export interface UsbVolumeStatus {
+  applicable: boolean;
+  drive_letter: string;
+  volume_label: string;
+  registered: boolean;
+  verdict: string;
+  enabled_by_preset: boolean;
+}
+
 /** 预设下的安全特性开关集合 */
 export interface PresetFeatures {
   anti_debug: boolean;

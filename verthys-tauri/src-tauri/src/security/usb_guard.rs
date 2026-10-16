@@ -439,6 +439,88 @@ pub enum CloneCheckResult {
     Unknown,
 }
 
+/// 卷信息（可移动介质绑定判定的输入）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeInfo {
+    /// 盘符（如 'E'；无盘符挂载点返回 '\0'）
+    pub drive_letter: char,
+    /// 卷标（注册表键；空卷标不可作为绑定键）
+    pub volume_label: String,
+    /// 是否为可移动介质（固定盘不参与绑定判定）
+    pub removable: bool,
+}
+
+/// 由任意文件路径解析所在卷信息（挂载点根 → 盘符 / 介质类型 / 卷标）。
+///
+/// 返回 Ok(None) 表示不可判定（路径不存在 / 卷信息不可得 / 无盘符挂载点）——
+/// 调用方按"绑定不适用"处理，不阻断解锁（加固层尽力而为，不制造数据不可达）。
+#[cfg(target_os = "windows")]
+pub fn resolve_volume_for_path(path: &str) -> Result<Option<VolumeInfo>, String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetDriveTypeW, GetVolumeInformationW, GetVolumePathNameW,
+    };
+
+    /// GetDriveTypeW 返回值：可移动介质（Win32 DRIVE_REMOVABLE = 2）
+    const DRIVE_TYPE_REMOVABLE: u32 = 2;
+
+    if path.is_empty() {
+        return Ok(None);
+    }
+
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut root = [0u16; 261]; // MAX_PATH + 1：GetVolumePathNameW 输出挂载点根
+    if unsafe { GetVolumePathNameW(PCWSTR::from_raw(wide.as_ptr()), &mut root) }.is_err() {
+        return Ok(None);
+    }
+    let root_len = root.iter().position(|&c| c == 0).unwrap_or(0);
+    if root_len == 0 {
+        return Ok(None);
+    }
+    let root_str = String::from_utf16_lossy(&root[..root_len]);
+
+    // 盘符形态校验：仅在盘符挂载点（如 "E:\"）下参与绑定判定；
+    // 目录挂载点/卷 GUID 路径不参与（无稳定盘符键）
+    let drive_letter = root_str.chars().next().unwrap_or('\0');
+    if !drive_letter.is_ascii_alphabetic() {
+        return Ok(None);
+    }
+
+    let removable = unsafe { GetDriveTypeW(PCWSTR::from_raw(root.as_ptr())) } == DRIVE_TYPE_REMOVABLE;
+
+    let mut label_buf = [0u16; 261];
+    let mut serial_number: u32 = 0;
+    // 卷信息不可得（如未就绪介质）按不可判定处理
+    if unsafe {
+        GetVolumeInformationW(
+            PCWSTR::from_raw(root.as_ptr()),
+            Some(&mut label_buf),
+            Some(&mut serial_number as *mut u32),
+            None,
+            None,
+            None,
+        )
+    }
+    .is_err()
+    {
+        return Ok(None);
+    }
+    let label_len = label_buf.iter().position(|&c| c == 0).unwrap_or(0);
+    let volume_label = String::from_utf16_lossy(&label_buf[..label_len]);
+
+    Ok(Some(VolumeInfo {
+        drive_letter,
+        volume_label,
+        removable,
+    }))
+}
+
+/// 非 Windows 平台：绑定判定不可用，恒为"不适用"
+#[cfg(not(target_os = "windows"))]
+pub fn resolve_volume_for_path(_path: &str) -> Result<Option<VolumeInfo>, String> {
+    Ok(None)
+}
+
 /// USB 设备注册表：维护"卷标 → 序列号哈希"映射，用于克隆外设检测
 ///
 /// 基于持久化白名单的显式信任模型
@@ -467,14 +549,14 @@ impl UsbRegistry {
 
     /// 注册已知设备（卷标 + 序列号哈希）
     ///
-    /// /// 注册表容量限制
+    /// 注册表容量限制
     /// 返回 Ok(()) 表示注册成功，Err(msg) 表示已达容量上限。
     pub fn register_device(&mut self, volume_label: &str, serial_hash: &str) -> Result<(), String> {
         if self.known_devices.len() >= self.max_entries
             && !self.known_devices.contains_key(volume_label)
         {
             log::warn!(
-                "[usb_guard] SECURITY.md 第 6 项：USB 注册表已达上限 ({} 条)，\
+                "[usb_guard] USB 注册表已达上限 ({} 条)，\
                  拒绝注册新设备: label={}",
                 self.max_entries,
                 volume_label
@@ -516,6 +598,12 @@ impl UsbRegistry {
     /// 检查卷标是否已注册
     pub fn is_registered(&self, volume_label: &str) -> bool {
         self.known_devices.contains_key(volume_label)
+    }
+
+    /// 查询卷标对应的既有登记哈希（未登记返回 None）。
+    /// 供绑定判定使用（判定逻辑在服务层契约，注册表只提供事实）。
+    pub fn known_hash(&self, volume_label: &str) -> Option<String> {
+        self.known_devices.get(volume_label).cloned()
     }
 
     /// 移除已注册设备
@@ -827,7 +915,7 @@ fn shadow_timer_loop_with_deadline(
             let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
             // 再次检查是否仍有数据（可能已被 try_recover/purge 取走）
             if inner.encrypted_index.is_some() {
-                log::info!("[shadow_sleep] SECURITY.md 第 7 项：定时器到期，自动 purge 加密索引");
+                log::info!("[shadow_sleep] 定时器到期，自动 purge 加密索引");
                 // SecuredBuffer 的 Drop 会自动 zeroize
                 inner.encrypted_index = None;
                 inner.txid = 0;

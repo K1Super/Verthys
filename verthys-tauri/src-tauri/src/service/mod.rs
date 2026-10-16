@@ -19,3 +19,6 @@ pub mod unlock_gate;
 
 /* 解锁期受信档位的服务层契约（依赖反转：实现由 security_commands 注册） */
 pub mod preset_source;
+
+/* 可移动介质绑定的服务层契约（依赖反转：实现由 security_commands 注册） */
+pub mod usb_binding;

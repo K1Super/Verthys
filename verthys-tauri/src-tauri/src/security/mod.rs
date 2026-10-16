@@ -2,15 +2,21 @@
  * security/mod.rs — Windows 安全 API 封装
  *
  * 子模块：
- *   - session_guard:    智能会话自动锁屏（mpsc 通道 + RAII 窗口 + 看门狗）
+ *   - session_guard:    智能会话自动锁屏（mpsc 通道 + RAII 窗口 + 看门狗
+ *                       + WTS 会话通知 + 显示器电源设置通知）
  *   - file_lock:        独占锁与防并发 + 私有目录 ACL 隔离
  *   - usb_guard:        移动存储安全强化（DPAPI 持久化 + 加盐哈希 + 影子休眠）
  *   - module_whitelist: 模块白名单实时巡检（路径真实化 + 吊销检查 + 缓存）
  *   - cleanup:          程序痕迹、缓存与卸载残留防护（移除 Gutmann + TRIM）
  *   - brute_force:      登录暴力拦截（DPAPI 持久化 + 不可逆计数 + 速率限制）
- *   - background_patrol:后台模块巡检线程（动态频率 + 看门狗 + 独立熔断）
+ *   - background_patrol:后台模块巡检线程（动态频率 + 看门狗 + 独立熔断
+ *                       + 完整校验抽样复核）
  *   - clipboard_guard:  剪贴板保护升级（延迟清空 + 外部写入检测 + 统一入口）
  *   - window_affinity:  窗口显示亲和性原语（原始取值读写 + OS 能力降级）
+ *   - app_feature_gate: 应用侧档位特性位镜像（11 位契约，单写多读）
+ *   - integrity_check:  程序自完整性签名核验（启动主镜像 + 巡检抽样口径）
+ *   - trace_cleanup:    应用自身痕迹清理（最近记录精确清理，锁定/退出触发）
+ *   - command_names:    安全命令名登记
  *
  * 剪贴板清空实现要点：
  *   - 废弃"写入随机数据再清空"模式，直接调用 EmptyClipboard 清空剪贴板
@@ -26,8 +32,10 @@ pub mod cleanup;
 pub mod clipboard_guard;
 pub mod command_names;
 pub mod file_lock;
+pub mod integrity_check;
 pub mod module_whitelist;
 pub mod session_guard;
+pub mod trace_cleanup;
 pub mod usb_guard;
 pub mod window_affinity;
 

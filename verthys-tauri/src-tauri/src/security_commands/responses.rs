@@ -59,6 +59,25 @@ pub struct ShadowSleepStatus {
     pub txid: u64,
 }
 
+/// 可移动介质绑定状态（检测命令响应）
+#[derive(serde::Serialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct UsbVolumeStatus {
+    /// 是否适用绑定判定（可移动介质 + 盘符挂载点 + 非空卷标；否则 false）
+    pub applicable: bool,
+    /// 盘符（如 "E"；不适用时为空串）
+    pub drive_letter: String,
+    /// 卷标（绑定键；不适用时为空串）
+    pub volume_label: String,
+    /// 该卷标是否已登记
+    pub registered: bool,
+    /// 检测结论：trusted / clone_suspected / first_use / not_applicable /
+    /// disabled_by_preset / undetermined
+    pub verdict: String,
+    /// 档位是否启用克隆检测（应用侧门控位）
+    pub enabled_by_preset: bool,
+}
+
 /// 敏感操作结构化结果
 #[derive(serde::Serialize, TS)]
 #[ts(export, export_to = "bindings/")]

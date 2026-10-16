@@ -170,6 +170,28 @@
       @close="onCancelExportVerify"
       @confirm="onConfirmExportVerify"
     />
+
+    <!-- 介质标识变化确认（克隆嫌疑阻断后的自助重绑定；
+         确认参数只放行阻断，重绑定以本次密码验证通过为前提） -->
+    <VerthysDialog
+      :model-value="usbRebindPrompt !== null"
+      layout="plain"
+      width="480px"
+      title="介质标识变化"
+      save-label="确认更换介质"
+      saving-label="重试解锁中…"
+      :saving="usbRebindSaving"
+      :save-disabled="unlocking"
+      @update:model-value="onUsbRebindDialogToggle"
+      @save="confirmUsbRebind"
+    >
+      <p class="usb-rebind-text">
+        检测到加密库所在可移动介质的标识与登记记录不一致（可能为更换介质，或介质被克隆）。
+      </p>
+      <p class="usb-rebind-text">
+        如确为本人更换介质，可确认后重试：本次仍须通过密码验证，验证通过后才会更新绑定记录。
+      </p>
+    </VerthysDialog>
   </div>
 </template>
 
@@ -192,6 +214,7 @@ import {
 } from "../../lib/verthys";
 import KeyEditDialog from "../dialogs/KeyEditDialog.vue";
 import DisableVerifyDialog from "../dialogs/DisableVerifyDialog.vue";
+import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
 /* 视图级懒加载：拆分中枢首挂载成本 — 首次进入仅执行 UnlockView
  * （最常见入口视图，保持同步渲染零等待），其余视图/弹窗按需拉取
  * （本地分包，切换时微任务级就绪） */
@@ -263,15 +286,24 @@ const {
   unlockProgressPercent,
   unlockProgressElapsed,
   unlockProgressDone,
+  usbRebindPrompt,
+  usbRebindSaving,
   openExistingVerthys,
   createNewVerthys,
   doUnlock,
+  confirmUsbRebind,
+  cancelUsbRebind,
 } = useUnlockFlow({
   isTauri,
   showError,
   showToast,
   checkDevice,
 });
+
+/** 介质确认弹层显隐：仅允许关闭路径（确认动作走 @save → confirmUsbRebind） */
+const onUsbRebindDialogToggle = (visible: boolean) => {
+  if (!visible) cancelUsbRebind();
+};
 
 /* ===== 全局密钥管理 =====
  * 依赖注入：postVerifyAnim（useViewMode 读取 / onVerify 写入）
@@ -559,4 +591,16 @@ onBeforeUnmount(() => {
 @import '../../styles/security/dashboard.css';
 @import '../../styles/security/qd-panel.css';
 @import '../../styles/security/mgmt-hub.css';
+
+/* ===== 介质标识变化确认弹层（说明文案：纯文本、零阴影） ===== */
+.usb-rebind-text {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.8;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+.usb-rebind-text:last-child {
+  margin-bottom: 0;
+}
 </style>

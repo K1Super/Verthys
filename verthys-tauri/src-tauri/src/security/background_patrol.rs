@@ -23,6 +23,9 @@
  *      - SetProcessMitigationPolicy 启用 ProcessSignaturePolicy / ProcessImageLoadPolicy
  *   7. catch_unwind 包裹单次巡检，防 panic 退出
  *      - 单次扫描 panic 不会导致线程退出，看门狗仍可恢复
+ *   8. 完整校验抽样复核（FEAT_INTEGRITY_CHECK 执行路径）
+ *      - 每轮随机抽样少量受信位置已加载模块做签名复核（部分
+ *        Fisher-Yates 抽样，抽样期推进心跳），失效进入威胁管线
  */
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -58,6 +61,10 @@ const ACTIVE_THRESHOLD_SECS: u64 = 30;
 
 /// 连续检测阈值：同一未知模块在连续 N 次巡检中出现即触发应急信号。
 const CONSECUTIVE_TRIGGER_THRESHOLD: u32 = 3;
+
+/// 完整校验抽样复核：每轮巡检最多抽样的受信位置模块数。
+/// 抽样数量与巡检周期（10~40s）共同约束签名复核的网络/CPU 开销上限。
+const INTEGRITY_SAMPLE_PER_ROUND: usize = 3;
 
 /// 环形缓冲区最大条目数。防止攻击者注入海量不同路径模块导致无界内存增长。
 const RING_BUFFER_MAX_ENTRIES: usize = 256;
@@ -1030,14 +1037,31 @@ fn generate_random_u64() -> u64 {
     }
 }
 
+/// 随机抽取 k 个元素（部分 Fisher-Yates，不改变原切片顺序）
+///
+/// k >= len 时返回全量副本。随机源与巡检抖动共用 generate_random_u64
+/// （getrandom 失败时内部降级为时间伪随机，抽样不中断）。
+fn sample_random<T: Clone>(items: &[T], k: usize) -> Vec<T> {
+    if items.len() <= k {
+        return items.to_vec();
+    }
+    let mut indices: Vec<usize> = (0..items.len()).collect();
+    for i in 0..k {
+        let j = i + (generate_random_u64() % ((items.len() - i) as u64)) as usize;
+        indices.swap(i, j);
+    }
+    indices[..k].iter().map(|&i| items[i].clone()).collect()
+}
+
 /* ====================================================================== *
  *  执行单次巡检                                                            *
  *                                                                        *
  *  1. 轻量扫描：路径白名单匹配                                            *
  *  2. 哈希基线验证：系统目录模块哈希匹配                                  *
- *  3. 更新环形缓冲                                                       *
- *  4. 持久化状态                                                         *
- *  5. 对新达阈值的模块触发应急信号                                        *
+ *  3. 完整校验抽样：受信位置模块签名随机复核（门控内）                    *
+ *  4. 更新环形缓冲                                                       *
+ *  5. 持久化状态                                                         *
+ *  6. 对新达阈值的模块触发应急信号                                        *
  * ====================================================================== */
 
 fn run_one_patrol(ctx: &PatrolContext) {
@@ -1059,6 +1083,32 @@ fn run_one_patrol(ctx: &PatrolContext) {
                 hash_threats.len()
             );
             all_threats.extend(hash_threats);
+        }
+    }
+
+    // 完整校验抽样复核（FEAT_INTEGRITY_CHECK 执行路径）
+    // 对受信位置（非系统目录）的已加载模块随机抽样做签名复核；
+    // 签名失效与"未知路径 / 哈希基线不匹配"同为威胁类别，进入同一
+    // 连续检测管线（去重 + 连续阈值后才升级应急，单轮失败仅记录）。
+    if crate::security::app_feature_gate::enabled(
+        crate::security::app_feature_gate::FEAT_INTEGRITY_CHECK,
+    ) {
+        let candidates = module_whitelist::trusted_signable_module_paths(&ctx.install_dir);
+        for (name, path) in sample_random(&candidates, INTEGRITY_SAMPLE_PER_ROUND) {
+            // 抽样期间推进心跳（签名核验可能联网检查吊销，耗时不可控）
+            ctx.heartbeat.store(now_ms(), Ordering::SeqCst);
+            if !module_whitelist::verify_signature(&path) {
+                log::warn!(
+                    "[background_patrol] 完整校验抽样：模块 {} 签名失效（受信位置）: {}",
+                    name,
+                    sanitize_path(&path)
+                );
+                all_threats.push(UnknownModule {
+                    name,
+                    path,
+                    reason: "签名失效（完整校验抽样）".to_string(),
+                });
+            }
         }
     }
 
@@ -1788,5 +1838,28 @@ mod tests {
         // 轮询构建结果（尚未构建）
         manager.poll_build_result();
         assert!(manager.get_snapshot().is_none());
+    }
+
+    /// 防回退：抽样必须不重不漏、数量受 k 约束，且 k >= len 时返回全量。
+    #[test]
+    fn test_sample_random_bounds_and_uniqueness() {
+        let items: Vec<u32> = (0..50).collect();
+
+        // k < len：恰好 k 个、无重复、均来自原集合
+        let picked = sample_random(&items, 3);
+        assert_eq!(picked.len(), 3);
+        let unique: std::collections::HashSet<u32> = picked.iter().copied().collect();
+        assert_eq!(unique.len(), 3);
+        assert!(picked.iter().all(|v| *v < 50));
+
+        // k >= len：全量副本
+        let all = sample_random(&items, 50);
+        assert_eq!(all.len(), 50);
+        let all_more = sample_random(&items, 60);
+        assert_eq!(all_more.len(), 50);
+
+        // 空集合：空结果
+        let empty: Vec<u32> = Vec::new();
+        assert!(sample_random(&empty, 3).is_empty());
     }
 }

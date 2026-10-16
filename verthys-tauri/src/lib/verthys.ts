@@ -49,6 +49,7 @@ import type {
   BruteForceStatus,
   UnknownModuleInfo,
   ShadowSleepStatus,
+  UsbVolumeStatus,
   SecurityPresetCode,
   PresetConfig,
   PresetFeatures,
@@ -93,6 +94,7 @@ export type {
   BruteForceStatus,
   UnknownModuleInfo,
   ShadowSleepStatus,
+  UsbVolumeStatus,
   SecurityPresetCode,
   PresetConfig,
   SecurityStatusReport,
@@ -351,12 +353,16 @@ export async function verthysPreheat(verthysPath: string): Promise<boolean> {
  * @param verthysPath 加密库文件路径
  * @param password 解锁密码
  * @param onProgress 进度回调（在解锁各阶段触发，可选）
+ * @param usbRebindConfirmed 介质标识变化确认（可选）：
+ *   可移动介质已登记但序列号哈希不匹配时，默认阻止解锁；
+ *   用户确认"合法更换介质"后置 true 重试——重绑定在凭据验证通过后落实。
  * @returns 解锁响应（含 has_global_key/global_key_id/global_key_record 进程内探测结果）
  */
 export async function verthysUnlock(
   verthysPath: string,
   password: string,
   onProgress?: (progress: UnlockProgress) => void,
+  usbRebindConfirmed?: boolean,
 ): Promise<VerthysResponse> {
   // 创建 Tauri Channel 用于流式接收进度
   const channel = new Channel<UnlockProgress>();
@@ -392,6 +398,7 @@ export async function verthysUnlock(
       verthysPath,
       password,
       onProgress: channel,
+      ...(usbRebindConfirmed ? { usbRebindConfirmed: true } : {}),
     });
     if (resp.ok) {
       // 修复B：标记 worker 已被使用（unlock 成功）
@@ -1709,20 +1716,59 @@ export async function securityUsbReadSerial(driveLetter: string): Promise<string
   return await ipc<string>("security_usb_read_serial", { driveLetter });
 }
 
-/** 注册已知 USB 设备（卷标 + 序列号哈希） */
+/** 注册已知 USB 设备（卷标 + 序列号哈希；需已解锁会话）
+ *  后端以 SecurityResult 包装返回：授权拒绝/容量超限等情形 ok=false，
+ *  此处不抛错，将结果透传以便调用方可见报告 */
 export async function securityUsbRegisterDevice(
   volumeLabel: string,
   serialHash: string
-): Promise<void> {
-  await ipc<void>("security_usb_register_device", { volumeLabel, serialHash });
+): Promise<{ ok: boolean; detail: string; error_code?: string }> {
+  return await ipc<{ ok: boolean; detail: string; error_code?: string }>(
+    "security_usb_register_device",
+    { volumeLabel, serialHash }
+  );
 }
 
-/** 检测克隆外设（true=克隆，false=合法或首次见到） */
+/** 检测克隆外设（trusted=已登记且哈希匹配 / clone=序列号不匹配 / unknown=未登记） */
 export async function securityUsbCheckClone(
   volumeLabel: string,
   serialHash: string
-): Promise<boolean> {
-  return await ipc<boolean>("security_usb_check_clone", { volumeLabel, serialHash });
+): Promise<"Trusted" | "Clone" | "Unknown"> {
+  return await ipc<"Trusted" | "Clone" | "Unknown">("security_usb_check_clone", {
+    volumeLabel,
+    serialHash,
+  });
+}
+
+/** 检测容器所在介质的绑定状态（永不阻断，仅报告 + 审计留痕）
+ *  verdict：trusted / clone_suspected / first_use / not_applicable /
+ *           disabled_by_preset / undetermined */
+export async function securityUsbVolumeStatus(
+  verthysPath: string
+): Promise<UsbVolumeStatus> {
+  return await ipc<UsbVolumeStatus>("security_usb_volume_status", { verthysPath });
+}
+
+/** 登记当前容器所在的可移动介质（需已解锁会话）
+ *  固定盘 / 非盘符挂载点 → ok=false + error_code=NOT_APPLICABLE（无需登记） */
+export async function securityUsbRegisterCurrent(
+  verthysPath: string
+): Promise<{ ok: boolean; detail: string; error_code?: string }> {
+  return await ipc<{ ok: boolean; detail: string; error_code?: string }>(
+    "security_usb_register_current",
+    { verthysPath }
+  );
+}
+
+/** 重新绑定介质（需已解锁会话；改写既有登记记录，卷标未登记时拒绝） */
+export async function securityUsbRebindDevice(
+  volumeLabel: string,
+  serialHash: string
+): Promise<{ ok: boolean; detail: string; error_code?: string }> {
+  return await ipc<{ ok: boolean; detail: string; error_code?: string }>(
+    "security_usb_rebind_device",
+    { volumeLabel, serialHash }
+  );
 }
 
 /** 进入影子休眠（外设拔出后加密索引驻留内存）

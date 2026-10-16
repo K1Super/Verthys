@@ -34,8 +34,9 @@
  *       3. module_whitelist：patrol / add_trusted_path / clear_trusted_paths
  *       4. cleanup：clear_recent / secure_delete / cleanup_crash_residue
  *       5. file_lock：harden_private_dir
- *       6. usb：read_serial / register_device / check_clone /
- *          shadow_sleep / try_recover / purge / shadow_status
+ *       6. usb：read_serial / register_device / check_clone / volume_status /
+ *          register_current / rebind_device / shadow_sleep / try_recover /
+ *          purge / shadow_status
  *       7. preset：get_preset_config / apply_preset / load_preset_state
  *       8. auth：require_session_authorized
  */
@@ -44,6 +45,8 @@ pub mod audit;
 pub mod auth;
 /// 解锁命令的服务端暴力熔断桥接（gate 检查 / 失败计数 / 成功重置）
 pub mod brute_force_bridge;
+/// 可移动介质绑定的解锁期接入（检测 / 登记 / 重绑定；服务层契约实现）
+pub mod usb_binding_bridge;
 pub mod commands;
 pub mod path_resolver;
 pub mod persistence;

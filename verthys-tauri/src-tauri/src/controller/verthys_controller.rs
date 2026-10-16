@@ -655,6 +655,7 @@ pub async fn verthys_unlock(
     verthys_path: String,
     password: String,
     preheat_token: Option<String>,
+    usb_rebind_confirmed: Option<bool>,
     on_progress: tauri::ipc::Channel<crate::worker::UnlockProgress>,
 ) -> Result<VerthysResponse, String> {
     let password = Zeroizing::new(password);
@@ -785,6 +786,15 @@ pub async fn verthys_unlock(
     // fail-closed：失败即中止，禁止降级解锁）
     crate::service::preset_source::apply_persisted_preset_before_unlock(&app, &verthys_path)?;
 
+    // 解锁前介质绑定守卫（经服务层契约调用）：可移动介质的登记/克隆嫌疑
+    // 判定；克隆嫌疑且未确认重绑定时中止解锁（fail-closed，明确错误码）。
+    // 解锁成功后按返回动作落实登记或重绑定（凭据验证通过为前提）。
+    let usb_bind_action = crate::service::usb_binding::pre_unlock_guard(
+        &app,
+        &verthys_path,
+        usb_rebind_confirmed.unwrap_or(false),
+    )?;
+
     let req_str = Zeroizing::new(
         serde_json::to_string(&UnlockReq {
             op: "unlock",
@@ -876,6 +886,10 @@ pub async fn verthys_unlock(
         // 服务端强制成功重置：连续失败计数归零
         //（解锁响应 ok=true 已确认成功，服务端直调闸门契约，无需会话授权检查）
         crate::service::unlock_gate::record_auth_success(&app);
+
+        // 介质绑定落实：凭据验证通过后登记（首次使用）或改写绑定（重绑定）。
+        // 失败只审计，不影响已完成的解锁（加固层，不制造数据不可达）。
+        crate::service::usb_binding::post_unlock_commit(&app, &verthys_path, usb_bind_action);
 
         // 修复：同步 key_lifecycle 状态机与 verthys 生命周期
         //
@@ -1431,6 +1445,11 @@ pub async fn verthys_lock(
             None,
         );
     }
+
+    // 痕迹清理（锁定 / 退出时机的执行路径）：清理系统最近记录中指向
+    // 本应用文件的条目。fire-and-forget：专用阻塞线程执行（COM 初始化
+    // 在任务内完成），失败仅审计 + 告警，不阻塞锁定响应。
+    crate::security::trace_cleanup::run_locked_cleanup_async(app.clone());
 
     Ok(VerthysResponse::ok("lock"))
 }

@@ -25,6 +25,10 @@
  *      - 工作线程使用 recv_timeout 充当看门狗
  *      - 消息循环线程意外退出时自动重启
  *      - 重启次数上限防止无限循环
+ *   7. 显示器关闭锁定（display-off 硬化）
+ *      - RegisterPowerSettingNotification 注册 GUID_CONSOLE_DISPLAY_STATE；
+ *        高安全模式下显示器关闭等同于 Lock 事件
+ *      - 与挂起锁定同门控同语义；通知注册失败退化为既有挂起监听
  */
 
 use std::sync::atomic::AtomicBool;
@@ -46,6 +50,29 @@ const WTS_CONSOLE_DISCONNECT: u32 = 0x2;
 
 /* 电源广播事件 */
 const PBT_APMSUSPEND: u32 = 0x0004;
+/// 电源设置变更广播（wParam），lParam 指向 POWERBROADCAST_SETTING
+const PBT_POWERSETTINGCHANGE: u32 = 0x8011;
+
+/// GUID_CONSOLE_DISPLAY_STATE = {6FE69556-704A-47A0-8F24-C28D936FDA47}
+/// （显示器开/关状态设置，crate 未导出故本地定义；Data[0]: 0=关 1=开）
+#[cfg(target_os = "windows")]
+const GUID_CONSOLE_DISPLAY_STATE: Guid = Guid {
+    data1: 0x6fe6_9556,
+    data2: 0x704a,
+    data3: 0x47a0,
+    data4: [0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47],
+};
+
+/// Win32 GUID 布局（本文件内 FFI 使用；与 SDK GUID 内存布局一致）
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct Guid {
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+}
 
 /* NOTIFY_FOR_THIS_SESSION = 0 */
 const NOTIFY_FOR_THIS_SESSION: u32 = 0;
@@ -76,6 +103,9 @@ enum SessionEvent {
     Unlock,
     /// 电源挂起（高安全模式下等同于 Lock）
     PowerSuspend,
+    /// 显示器关闭（高安全模式下等同于 Lock；源自
+    /// GUID_CONSOLE_DISPLAY_STATE 电源设置广播）
+    DisplayOff,
     /// 关闭信号（stop 时发送，工作线程退出）
     Shutdown,
 }
@@ -125,10 +155,11 @@ trait SessionGuardBackend: Send {
 #[cfg(target_os = "windows")]
 mod win_backend {
     use super::{
-        SessionEvent, SessionGuardBackend, WindowInstanceData, GWLP_USERDATA, MAX_RESTART_ATTEMPTS,
-        NOTIFY_FOR_THIS_SESSION, PBT_APMSUSPEND, WATCHDOG_CHECK_SECS, WM_DESTROY,
-        WM_POWERBROADCAST, WM_QUIT, WM_WTSESSION_CHANGE, WTS_CONSOLE_DISCONNECT,
-        WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF, WTS_SESSION_UNLOCK,
+        Guid, SessionEvent, SessionGuardBackend, WindowInstanceData, GWLP_USERDATA,
+        MAX_RESTART_ATTEMPTS, NOTIFY_FOR_THIS_SESSION, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE,
+        WATCHDOG_CHECK_SECS, WM_DESTROY, WM_POWERBROADCAST, WM_QUIT, WM_WTSESSION_CHANGE,
+        WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
+        WTS_SESSION_UNLOCK, GUID_CONSOLE_DISPLAY_STATE,
     };
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
@@ -187,6 +218,29 @@ mod win_backend {
         fn GetModuleHandleW(lpModuleName: *const u16) -> isize;
         fn LoadLibraryW(lpLibFileName: *const u16) -> isize;
         fn GetProcAddress(hModule: isize, lpProcName: *const u8) -> *const u8;
+    }
+
+    /* ---------- 电源设置通知 FFI（user32） ----------
+     * RegisterPowerSettingNotification 返回 HPOWERNOTIFY 句柄（非零成功），
+     * 须与 UnregisterPowerSettingNotification 配对，防止句柄泄漏。
+     */
+    #[link(name = "user32")]
+    extern "system" {
+        fn RegisterPowerSettingNotification(
+            hwnd: isize,
+            powersettingguid: *const Guid,
+            flags: u32,
+        ) -> isize;
+        fn UnregisterPowerSettingNotification(handle: isize) -> i32;
+    }
+
+    /// POWERBROADCAST_SETTING（WM_POWERBROADCAST + PBT_POWERSETTINGCHANGE
+    /// 时 lParam 指向的结构：GUID + 数据长度 + 柔性数组首字节）
+    #[repr(C)]
+    struct PowerBroadcastSetting {
+        power_setting: Guid,
+        data_length: u32,
+        data: [u8; 1],
     }
 
     /* ---------- FFI 结构体 ---------- */
@@ -302,7 +356,7 @@ mod win_backend {
             if atom == 0 {
                 let err = GetLastError();
                 log::error!(
-                    "[session_guard] 第 2 项：RegisterClassExW 失败: GetLastError={}",
+                    "[session_guard] RegisterClassExW 失败: GetLastError={}",
                     err
                 );
             } else {
@@ -353,10 +407,31 @@ mod win_backend {
                 0
             }
             WM_POWERBROADCAST => {
-                // 从实例数据读取高安全标志（非全局变量）
-                if data.high_security.load(Ordering::SeqCst) && wparam as u32 == PBT_APMSUSPEND {
-                    if let Ok(tx) = data.event_tx.lock() {
-                        let _ = tx.send(SessionEvent::PowerSuspend);
+                // 从实例数据读取高安全标志（非全局变量）：
+                // 挂起与显示器关闭两项硬化事件均仅在高安全模式下触发锁定
+                if data.high_security.load(Ordering::SeqCst) {
+                    match wparam as u32 {
+                        PBT_APMSUSPEND => {
+                            if let Ok(tx) = data.event_tx.lock() {
+                                let _ = tx.send(SessionEvent::PowerSuspend);
+                            }
+                        }
+                        // lParam 为 POWERBROADCAST_SETTING 指针，仅在
+                        // 本消息处理期间有效；逐字段判别后立即转事件
+                        PBT_POWERSETTINGCHANGE if lparam != 0 => {
+                            let setting = lparam as *const PowerBroadcastSetting;
+                            let s = unsafe { &*setting };
+                            if s.power_setting == GUID_CONSOLE_DISPLAY_STATE
+                                && s.data_length >= 1
+                                && s.data[0] == 0
+                            {
+                                // 显示器关闭（Data[0]=0）
+                                if let Ok(tx) = data.event_tx.lock() {
+                                    let _ = tx.send(SessionEvent::DisplayOff);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 1 /* TRUE — 确认电源广播 */
@@ -373,13 +448,16 @@ mod win_backend {
      *  窗口创建 + 消息循环                                                   *
      * ==================================================================== */
 
-    /// 创建隐藏窗口并注册 WTS 会话通知
+    /// 创建隐藏窗口并注册 WTS 会话通知 + 显示器电源设置通知
     ///
     /// 窗口类通过 Once 仅注册一次。
     /// 实例数据通过 GWLP_USERDATA 存储在窗口上。
+    ///
+    /// 返回 (HWND, WTS 注销函数, HPOWERNOTIFY 句柄)。显示器电源设置
+    /// 通知注册失败不视为致命（退化为仅监听系统挂起，既有能力保留）。
     fn create_guard_window(
         instance_data: &Arc<WindowInstanceData>,
-    ) -> Result<(isize, WTSUnRegisterSessionNotification_t), String> {
+    ) -> Result<(isize, WTSUnRegisterSessionNotification_t, isize), String> {
         unsafe {
             register_window_class_once();
 
@@ -426,7 +504,22 @@ mod win_backend {
                 ));
             }
 
-            Ok((hwnd, unreg_fn))
+            // 注册显示器开/关状态通知（display-off 锁定的信号源）。
+            // 注册失败仅告警降级：挂起监听（既有能力）不受影响。
+            let power_notify = RegisterPowerSettingNotification(
+                hwnd,
+                &GUID_CONSOLE_DISPLAY_STATE,
+                NOTIFY_FOR_THIS_SESSION,
+            );
+            if power_notify == 0 {
+                log::warn!(
+                    "[session_guard] 显示器电源设置通知注册失败 (GetLastError={})，\
+                     display-off 锁定降级为仅监听系统挂起",
+                    GetLastError()
+                );
+            }
+
+            Ok((hwnd, unreg_fn, power_notify))
         }
     }
 
@@ -473,6 +566,8 @@ mod win_backend {
         current_thread: Mutex<Option<JoinHandle<()>>>,
         current_hwnd: Arc<Mutex<isize>>,
         unreg_fn: Arc<Mutex<Option<WTSUnRegisterSessionNotification_t>>>,
+        /// 显示器电源设置通知句柄（0 = 未注册），与窗口生命周期配对注销
+        power_notify: Arc<Mutex<isize>>,
         restart_count: AtomicU32,
     }
 
@@ -484,6 +579,7 @@ mod win_backend {
                 current_thread: Mutex::new(None),
                 current_hwnd: Arc::new(Mutex::new(0)),
                 unreg_fn: Arc::new(Mutex::new(None)),
+                power_notify: Arc::new(Mutex::new(0)),
                 restart_count: AtomicU32::new(0),
             }
         }
@@ -507,15 +603,17 @@ mod win_backend {
             let stop_flag = self.stop_flag.clone();
             let hwnd_slot = self.current_hwnd.clone();
             let unreg_slot = self.unreg_fn.clone();
+            let power_slot = self.power_notify.clone();
 
             let (create_tx, create_rx) = mpsc::channel::<Result<isize, String>>();
 
             let handle = thread::Builder::new()
                 .name("verthys-session-msgloop".into())
                 .spawn(move || match create_guard_window(&instance_data) {
-                    Ok((hwnd, unreg_fn)) => {
+                    Ok((hwnd, unreg_fn, power_notify)) => {
                         *hwnd_slot.lock().unwrap() = hwnd;
                         *unreg_slot.lock().unwrap() = Some(unreg_fn);
+                        *power_slot.lock().unwrap() = power_notify;
                         let _ = create_tx.send(Ok(hwnd));
                         run_message_loop(hwnd, stop_flag);
                     }
@@ -547,33 +645,11 @@ mod win_backend {
             }
         }
 
-        /// 看门狗重启消息循环线程
-        fn restart(&self) -> Result<(), String> {
-            let count = self.restart_count.fetch_add(1, Ordering::SeqCst);
-            if count >= MAX_RESTART_ATTEMPTS {
-                log::error!(
-                    "[session_guard] 第 6 项：重启次数已达上限 ({})，放弃重启",
-                    MAX_RESTART_ATTEMPTS
-                );
-                return Err(format!(
-                    "消息循环线程重启次数已达上限 ({})",
-                    MAX_RESTART_ATTEMPTS
-                ));
-            }
-
-            log::warn!(
-                "[session_guard] 第 6 项：消息循环线程已退出，尝试重启 (第 {} 次)...",
-                count + 1
-            );
-
-            // 清理旧线程
-            if let Ok(mut guard) = self.current_thread.lock() {
-                if let Some(old) = guard.take() {
-                    let _ = old.join();
-                }
-            }
-
-            // 注销旧 WTS 通知
+        /// 注销 WTS 会话通知与显示器电源设置通知（幂等，清空句柄槽）
+        ///
+        /// 注销必须在窗口仍存活时执行；两路通知句柄独立管理，任一路
+        /// 缺失不影响另一路注销。
+        fn unregister_notifications(&self) {
             if let Ok(mut hwnd_guard) = self.current_hwnd.lock() {
                 let old_hwnd = *hwnd_guard;
                 if old_hwnd != 0 {
@@ -584,9 +660,48 @@ mod win_backend {
                             }
                         }
                     }
-                    *hwnd_guard = 0;
+                }
+                *hwnd_guard = 0;
+            }
+            if let Ok(mut power_guard) = self.power_notify.lock() {
+                let handle = *power_guard;
+                if handle != 0 {
+                    unsafe {
+                        UnregisterPowerSettingNotification(handle);
+                    }
+                }
+                *power_guard = 0;
+            }
+        }
+
+        /// 看门狗重启消息循环线程
+        fn restart(&self) -> Result<(), String> {
+            let count = self.restart_count.fetch_add(1, Ordering::SeqCst);
+            if count >= MAX_RESTART_ATTEMPTS {
+                log::error!(
+                    "[session_guard] 消息循环线程重启次数已达上限 ({})，放弃重启",
+                    MAX_RESTART_ATTEMPTS
+                );
+                return Err(format!(
+                    "消息循环线程重启次数已达上限 ({})",
+                    MAX_RESTART_ATTEMPTS
+                ));
+            }
+
+            log::warn!(
+                "[session_guard] 消息循环线程已退出，尝试重启 (第 {} 次)...",
+                count + 1
+            );
+
+            // 清理旧线程
+            if let Ok(mut guard) = self.current_thread.lock() {
+                if let Some(old) = guard.take() {
+                    let _ = old.join();
                 }
             }
+
+            // 注销旧 WTS / 电源设置通知
+            self.unregister_notifications();
 
             // 重置 stop_flag（可能是前次 stop 残留）
             self.stop_flag.store(false, Ordering::SeqCst);
@@ -594,7 +709,7 @@ mod win_backend {
             // 启动新消息循环
             self.start()?;
             log::warn!(
-                "[session_guard] 第 6 项：消息循环线程已重启 (第 {} 次)",
+                "[session_guard] 消息循环线程已重启 (第 {} 次)",
                 count + 1
             );
             Ok(())
@@ -602,19 +717,8 @@ mod win_backend {
 
         /// 停止消息循环并清理
         fn stop(&self) {
-            // 1. 注销 WTS 通知
-            if let Ok(hwnd_guard) = self.current_hwnd.lock() {
-                let hwnd = *hwnd_guard;
-                if hwnd != 0 {
-                    if let Ok(mut unreg_guard) = self.unreg_fn.lock() {
-                        if let Some(unreg) = unreg_guard.take() {
-                            unsafe {
-                                unreg(hwnd);
-                            }
-                        }
-                    }
-                }
-            }
+            // 1. 注销 WTS / 电源设置通知
+            self.unregister_notifications();
 
             // 2. 设置停止标志
             self.stop_flag.store(true, Ordering::SeqCst);
@@ -676,7 +780,9 @@ mod win_backend {
                         match event {
                             SessionEvent::Lock => on_lock(),
                             SessionEvent::Unlock => on_unlock(),
-                            SessionEvent::PowerSuspend => {
+                            // 挂起与显示器关闭同属"环境不可视"硬化事件：
+                            // 仅高安全模式下执行锁定（与矩阵门控一致）
+                            SessionEvent::PowerSuspend | SessionEvent::DisplayOff => {
                                 if high_security.load(Ordering::SeqCst) {
                                     on_lock();
                                 }
@@ -689,7 +795,7 @@ mod win_backend {
 
                     if let Err(payload) = result {
                         log::error!(
-                            "[session_guard] 第 3 项：用户回调 panic 已捕获: {:?}",
+                            "[session_guard] 用户回调 panic 已捕获: {:?}",
                             payload
                         );
                     }
@@ -706,7 +812,7 @@ mod win_backend {
                     // 看门狗检查消息循环线程
                     if !message_loop_state.is_alive() {
                         if let Err(e) = message_loop_state.restart() {
-                            log::error!("[session_guard] 第 6 项：消息循环重启失败: {}", e);
+                            log::error!("[session_guard] 消息循环重启失败: {}", e);
                         }
                     }
                 }

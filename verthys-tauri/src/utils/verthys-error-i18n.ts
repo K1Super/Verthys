@@ -64,6 +64,9 @@ const ERROR_CODE_MESSAGES: Record<VerthysErrorCode, string> = {
   [VerthysErrorCode.E_MODULE_CONFIG_SAVE_FAILED]: "持久化失败，已回滚",
   [VerthysErrorCode.E_MODULE_NOT_READY]: "模块未就绪，请先登录",
   [VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY]: "加密库未解锁",
+
+  // ===== 可移动介质绑定 =====
+  [VerthysErrorCode.E_USB_CLONE_SUSPECTED]: "介质标识与登记记录不一致，已阻止解锁（可确认更换介质后重试）",
 };
 
 /**

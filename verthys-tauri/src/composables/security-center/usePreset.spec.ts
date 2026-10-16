@@ -21,7 +21,6 @@ const mocks = vi.hoisted(() => ({
   applySecurityPreset: vi.fn(),
   bumpPresetEpoch: vi.fn(),
   loadCustomFeatures: vi.fn(),
-  saveCustomFeatures: vi.fn(),
   isLockedFeature: vi.fn(),
   securityGetPresetConfig: vi.fn(),
 }));
@@ -34,7 +33,6 @@ vi.mock("../../lib/keyManager", async () => {
     applySecurityPreset: mocks.applySecurityPreset,
     bumpPresetEpoch: mocks.bumpPresetEpoch,
     loadCustomFeatures: mocks.loadCustomFeatures,
-    saveCustomFeatures: mocks.saveCustomFeatures,
     isLockedFeature: mocks.isLockedFeature,
   };
 });
@@ -224,6 +222,39 @@ describe("usePreset 自定义档语义", () => {
     expect(api.activeAnchorIdx.value).toBe(-1);
     expect(api.customPanelOpen.value).toBe(true);
     expect(api.presetAmbienceMode.value).toBe("balanced");
+  });
+});
+
+describe("usePreset 自定义模板应用链", () => {
+  it("应用自定义模板：特性显式传入应用链并提示成功", async () => {
+    const options = stubOptions();
+    const api = usePreset(options);
+    mocks.applySecurityPreset.mockResolvedValueOnce({
+      name: "CUSTOM",
+      code: 3,
+      features: allTrue(),
+    });
+
+    await api.onApplyCustom();
+
+    // 特性集显式传参（缓存单一落盘点在会话层，应用成功后才写）
+    expect(mocks.applySecurityPreset).toHaveBeenCalledWith(3, undefined, api.customFeatures.value);
+    expect(options.showToast).toHaveBeenCalledWith("自定义模板已保存并应用");
+  });
+
+  it("应用失败：可见报错且不提示成功", async () => {
+    const options = stubOptions();
+    const api = usePreset(options);
+    mocks.applySecurityPreset.mockRejectedValueOnce(new Error("backend unavailable"));
+
+    await api.onApplyCustom();
+
+    // 应用链失败时不得预写缓存：saveCustomFeatures 已从 usePreset 依赖面
+    // 移除（mock 模块不再提供该导出，再引入即类型/导入失败），本地缓存
+    // 仅在会话层应用成功后单点写入
+    expect(mocks.applySecurityPreset).toHaveBeenCalledWith(3, undefined, api.customFeatures.value);
+    expect(options.showError).toHaveBeenCalledWith("应用自定义模板失败");
+    expect(options.showToast).not.toHaveBeenCalled();
   });
 });
 

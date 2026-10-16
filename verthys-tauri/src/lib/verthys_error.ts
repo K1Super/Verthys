@@ -149,6 +149,10 @@ export enum VerthysErrorCode {
   E_MODULE_CONFIG_SAVE_FAILED = "E_MODULE_CONFIG_SAVE_FAILED",
   E_MODULE_NOT_READY = "E_MODULE_NOT_READY",
   E_MODULE_VERTHYS_NOT_READY = "E_MODULE_VERTHYS_NOT_READY",
+
+  // ===== 可移动介质绑定 =====
+  /** 介质标识与登记记录不一致（克隆嫌疑），解锁被阻止；用户确认更换介质后可重试 */
+  E_USB_CLONE_SUSPECTED = "E_USB_CLONE_SUSPECTED",
 }
 
 /**
@@ -398,6 +402,13 @@ const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
     title: "加密库未就绪",
     message: "加密库尚未解锁，模块功能不可用。",
     guidance: "请先解锁加密库后再使用模块功能。",
+  },
+
+  // ===== 可移动介质绑定 =====
+  [VerthysErrorCode.E_USB_CLONE_SUSPECTED]: {
+    title: "介质标识变化",
+    message: "加密库所在可移动介质的标识与登记记录不一致，已阻止解锁。",
+    guidance: "如确为本人更换介质，请确认更换介质后重试；否则请检查介质是否为克隆盘。",
   },
 };
 

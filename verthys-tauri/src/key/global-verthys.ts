@@ -445,12 +445,15 @@ export async function initCreate(
  * @param verthysPath .verthys 文件路径（已有文件）
  * @param preflightResult 调用方已执行的路径预检结果（可选）
  * @param onProgress 解锁进度回调（在解锁各阶段触发，可选）
+ * @param usbRebindConfirmed 介质标识变化确认（可选）：置 true 时放行
+ *   克隆嫌疑阻断，重绑定在凭据验证通过后由后端落实
  * @returns VerthysResult<void>
  */
 export async function initUnlock(
   verthysPath: string,
   preflightResult?: PreflightResult,
   onProgress?: (progress: UnlockProgress) => void,
+  usbRebindConfirmed?: boolean,
 ): Promise<VerthysResult<void>> {
   // 修复6：全流程进度反馈 — 前端各阶段直接调用 onProgress 推送进度
   // 不依赖 Tauri Channel（Channel 仅在 verthysUnlock 阶段由后端推送），
@@ -596,7 +599,7 @@ export async function initUnlock(
         verthysUnlock(verthysPath, VERTHYS_DEFAULT_PASSWORD, (p) => {
           const mapped = Math.min(85, 8 + Math.floor(p.percent * 0.77));
           emit(p.stage, mapped, pickUnlockChannelText(p.percent));
-        }),
+        }, usbRebindConfirmed),
         UNLOCK_SOFT_TIMEOUT_MS,
         UNLOCK_HARD_TIMEOUT_MS,
         "verthys_unlock",
@@ -608,6 +611,15 @@ export async function initUnlock(
       );
     } catch (e) {
       await resetKeyManagerState();
+      // 介质克隆嫌疑：保留可识别错误码，供上层触发"确认更换介质"流程
+      //（后端以 E_USB_CLONE_SUSPECTED 前缀返回，通用包装层不识别该域错误码）
+      const rawMsg = e instanceof Error ? e.message : String(e);
+      if (rawMsg.includes(VerthysErrorCode.E_USB_CLONE_SUSPECTED)) {
+        return err(
+          VerthysErrorCode.E_USB_CLONE_SUSPECTED,
+          "介质标识与登记记录不一致，已阻止解锁",
+        );
+      }
       return errFromUnknown(e, VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED);
     }
     if (!unlockResp.ok) {

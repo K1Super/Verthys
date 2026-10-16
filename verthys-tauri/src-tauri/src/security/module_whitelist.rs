@@ -509,6 +509,69 @@ mod win_impl {
         scan_modules(install_dir, false)
     }
 
+    /// 枚举受信位置（非系统目录）的已加载模块清单
+    ///
+    /// 与 scan_modules 的签名验证集合保持同一口径：安装目录、Microsoft
+    /// 运行时目录、用户受信白名单下的模块纳入返回；系统目录模块
+    /// （catalog 签名，按位置信任 + 哈希基线校验）与未知路径模块不返回
+    /// （未知路径已由轻量巡检的路径白名单直接检出）。
+    pub(super) fn trusted_signable_module_paths(install_dir: &str) -> Vec<(String, String)> {
+        let mut result: Vec<(String, String)> = Vec::new();
+
+        let install_norm = realize_path(install_dir);
+        let system32_norm = get_system32_dir_normalized();
+        let syswow64_norm = get_syswow64_dir_normalized();
+        let winsxs_norm = get_winsxs_dir_normalized();
+        let ms_runtime_dirs = get_microsoft_runtime_dirs_normalized();
+        let trusted: Vec<String> = match TRUSTED_PATHS.lock() {
+            Ok(g) => g.iter().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
+
+        let pid = unsafe { GetCurrentProcessId() };
+        let snapshot =
+            unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) };
+        let snapshot: HANDLE = match snapshot {
+            Ok(h) => h,
+            Err(_) => return result,
+        };
+
+        let mut me = MODULEENTRY32W {
+            dwSize: std::mem::size_of::<MODULEENTRY32W>() as u32,
+            ..Default::default()
+        };
+
+        let mut ok = unsafe { Module32FirstW(snapshot, &mut me) }.is_ok();
+        while ok {
+            let name = wchar_to_string(&me.szModule);
+            let path = wchar_to_string(&me.szExePath);
+
+            if !path.is_empty() && !name.is_empty() {
+                let path_norm = realize_path(&path);
+                let in_system_dir = (!system32_norm.is_empty()
+                    && path_norm.starts_with(&system32_norm))
+                    || (!syswow64_norm.is_empty() && path_norm.starts_with(&syswow64_norm))
+                    || (!winsxs_norm.is_empty() && path_norm.starts_with(&winsxs_norm));
+                let in_trusted = (!install_norm.is_empty() && path_norm.starts_with(&install_norm))
+                    || ms_runtime_dirs
+                        .iter()
+                        .any(|d| !d.is_empty() && path_norm.starts_with(d))
+                    || trusted
+                        .iter()
+                        .any(|t| !t.is_empty() && path_norm.starts_with(t));
+
+                if !in_system_dir && in_trusted {
+                    result.push((name, path));
+                }
+            }
+
+            ok = unsafe { Module32NextW(snapshot, &mut me) }.is_ok();
+        }
+
+        let _ = unsafe { CloseHandle(snapshot) };
+        result
+    }
+
     /* ---------------- Authenticode 数字签名验证 ---------------- */
 
     /// 验证模块的 Authenticode 数字签名（含吊销检查 + 缓存）
@@ -642,6 +705,27 @@ pub fn patrol_modules_paths_only(install_dir: &str) -> Vec<UnknownModule> {
 #[allow(dead_code)]
 pub fn verify_signature(module_path: &str) -> bool {
     win_impl::verify_signature(module_path)
+}
+
+/// 枚举当前进程已加载模块中"位于受信位置且签名核验被轻量巡检跳过"的模块
+///
+/// 返回 (模块名, 完整路径) 列表，路径为原始形态（未规范化），供调用方
+/// 随机抽样后逐个执行签名复核。筛选口径与 scan_modules 的签名验证集合
+/// 一致：安装目录 / Microsoft 运行时目录 / 用户受信白名单下的模块，
+/// 排除系统目录（System32/SysWOW64/WinSxS，catalog 签名，由哈希基线负责）。
+///
+/// 供后台巡检线程做完整校验抽样（FEAT_INTEGRITY_CHECK 执行路径）。
+/// 非 Windows 平台返回空列表。
+pub fn trusted_signable_module_paths(install_dir: &str) -> Vec<(String, String)> {
+    #[cfg(target_os = "windows")]
+    {
+        win_impl::trusted_signable_module_paths(install_dir)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = install_dir;
+        Vec::new()
+    }
 }
 
 /* ====================================================================== *
