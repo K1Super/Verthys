@@ -121,9 +121,8 @@
       <!-- 虚拟滚动容器（相册列表强制采用虚拟滚动）：
            行窗口模型：滚动位置的唯一量化状态是行窗口，像素级移动不产生重建；
            渲染数组引用稳定（未变化的项复用对象），上万照片也只渲染数十 DOM 节点。
-           容器高度 = 总行数 × 行高，撑开滚动条；每个 masonry-item 用 translate3d 精确定位。
-           no-anim 挂容器（动画关停是全局状态，不属于任何单项——避免 per-item class 抖动） -->
-      <div v-if="photos.length > 0" class="masonry-cols" :class="{ 'no-anim': animationDone }" :style="{ height: totalHeight + 'px' }">
+           容器高度 = 总行数 × 行高，撑开滚动条；每个 masonry-item 用 translate3d 精确定位。 -->
+      <div v-if="photos.length > 0" class="masonry-cols" :style="{ height: totalHeight + 'px' }">
         <div
           v-for="ph in visiblePhotos"
           :key="ph.id"
@@ -461,7 +460,7 @@ const showToast = (msg: string) => showStatus(msg, 2000);
 
 /* ---------- 2. 核心数据层（提供 photos / photoKey / isTauri / 虚拟滚动 / 按需解密） ---------- */
 const {
-  photos, photoKey, isTauri, photosLoading, animationDone,
+  photos, photoKey, isTauri, photosLoading,
   loadError, failedCount,
   scrollRef, totalHeight, visiblePhotos,
   onScroll,
@@ -665,9 +664,6 @@ const initLifecycle = () => {
 
   // 虚拟滚动布局初始化收敛至数据层（initVirtualScroll 内部完成 updateLayout + ResizeObserver 注册）
   initVirtualScroll();
-
-  // 首批照片入场动画播完后禁用，避免虚拟滚动时新进入可视区项重播动画导致闪烁
-  setTimeout(() => { animationDone.value = true; }, 1500);
 
   // 安全前置校验闸门：模块密钥已由 MainView 登录时缓存到 keyManager 会话，直接读取。
   // 未就绪时不加载、不提示（进入拾光本应经过安全管理验证），仅留控制台告警便于排查
@@ -878,22 +874,6 @@ useModuleDialogGuard("photos", () => {
 .masonry-item:hover::before {
   visibility: visible; opacity: 1; transform: translateY(-6px);
   transition: opacity 0.3s var(--ease), transform 0.3s var(--ease), visibility 0s;
-}
-
-/* 入场动画作用于 .photo-card 子元素，避免与 masonry-item 的 translate3d 定位 transform 冲突
-   首批加载播放（animationDone=false）；1.5s 后由容器 no-anim 关停，防止虚拟滚动新进入项重播闪烁。
-   no-anim 挂在容器而非逐项：动画关停是全局状态，挂容器后切换 1.5s 只 patch 一个节点。
-   填充模式必须为 backwards，不得改回 both/forwards：动画声明优先级高于普通/内联声明，
-   前向填充会在动画结束后继续用动画终态压住卡片悬浮抬升（transform 被覆盖），
-   表现为「进入模块后一段时间内悬停无抬升」；终态关键帧与基础样式一致，无需前向填充 */
-.masonry-cols:not(.no-anim) .photo-card { animation: photo-reveal 0.65s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
-.masonry-cols.no-anim .photo-card { animation: none; }
-
-/* 高级照片入场动画：从缩放+下移 → 还原，配合逐个动态加载产生行优先瀑布入场效果 */
-@keyframes photo-reveal {
-  0%   { opacity: 0; transform: scale(0.85) translateY(20px); }
-  50%  { opacity: 1; transform: scale(0.97) translateY(4px); }
-  100% { opacity: 1; transform: scale(1) translateY(0); }
 }
 
 /* 照片卡片 · 滚动性能第 2 铁律（禁止重绘型属性参与过渡）+ 文字清晰度铁律：

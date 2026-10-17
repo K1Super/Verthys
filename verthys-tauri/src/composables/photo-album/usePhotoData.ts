@@ -79,7 +79,6 @@ export function usePhotoData() {
   const photoKey = ref<string>("");
 
   const photosLoading = ref(false);
-  const animationDone = ref(false);
 
   /** 列表装载错误（扫描失败/降级/密钥失效），供模块顶部提示与重试入口消费 */
   const loadError = ref<string>("");
@@ -136,10 +135,6 @@ export function usePhotoData() {
    * [winStart, winEnd)；同窗口内的像素级移动不产生任何状态写入，跨行时窗口
    * 交集内的渲染对象整体复用（见 visible-window.ts），渲染数组引用保持稳定，
    * 下游 watch/patch 在绝大多数滚动帧零空转。
-   *
-   * 动画策略：首批加载播放 photo-reveal 入场动画（美感），1.5s 后置 animationDone=true，
-   *           后续滚动新进入项不重播动画（避免快速滚动闪烁）。动画作用于 .photo-card
-   *           子元素，与 masonry-item 的 translate3d 定位互不干扰。
    */
   const scrollRef = ref<HTMLElement | null>(null);
   const viewportHeight = ref(600);
@@ -904,7 +899,6 @@ export function usePhotoData() {
     photoKey,
     isTauri,
     photosLoading,
-    animationDone,
     loadError,
     failedCount,
     // ===== 虚拟滚动（行窗口模型：对外只暴露渲染数组与滚动入口） =====
