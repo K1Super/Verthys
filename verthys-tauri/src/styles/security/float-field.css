@@ -5,31 +5,31 @@
    卡片职能由"场"承接：
      分组   → 轨道基准线（标题两侧 hairline）+ 中轴对齐
      可读性 → 中心衰减渐晕（径向暗化，无边缘无形状感知）
-     层级   → 节点入场深度差化（一次性入射动画）
+     层级   → 逐条显影入场（仅不透明度通道 + 非文字细线写入 — 见 .ff-node 段）
 
-   静态化根治（视差/漂移体系全量清算）：
+   静态化根治（视差/漂移体系全量清算 · 入场通道收敛）：
      原指针视差 + 斥力场物理引擎（useLevitationField）与失重漂移
-     无限动画（.ff-drift / ff-levitate）已彻底删除 — 弹窗内容
-     静态驻留：零指针监听、零 rAF 循环、零每帧样式写入、
-     零持续位移动画（文字动态模糊根源连根拔除）。
+     无限动画（.ff-drift / ff-levitate）已彻底删除；入场经
+     透视深度 → 旋转 → 2D 平移逐级收敛，最终只保留两条零重栅格化
+     通道：节点不透明度（文字承载层禁用一切 transform）与非文字
+     1px 细线的 scaleX 写入。零指针监听、零 rAF、零每帧样式写入。
 
-   入场变量（静态 — 规则承载）：
-     --ff-ex/--ff-ey/--ff-ez/--ff-er  节点入射矢量（角色差化）
-     --ff-i       级联序号（:nth-child 自动分配 — 仅入场动画消费）
+   入场变量：--ff-i 级联序号（:nth-child 分配 — 驱动逐条显影时序）
    ============================================================ */
 
-/* ===== 场容器：透视舞台 + 中心衰减渐晕 =====
- * perspective 860px 建立堆叠上下文 → ::before z-index:-1 恒沉于
- * 节点之下、浮于遮罩之上；渐晕无边界无形状（纯径向衰减 —
- * 非"隐形卡片"：各方向衰减速率不同且无任何收边） */
+/* ===== 场容器：隔离层 + 中心衰减渐晕 =====
+ * isolation 建立堆叠上下文 → ::before z-index:-1 恒沉于节点之下、
+ * 浮于遮罩之上（原以 perspective 建上下文，一并移除 — 场不再进入
+ * 3D 渲染上下文，节点纹理不参与透视投影缩放）
+ * 渐晕无边界无形状（纯径向衰减 — 非"隐形卡片"：各方向衰减速率
+ * 不同且无任何收边） */
 .ff-field {
   position: relative;
   display: flex;
   flex-direction: column;
   align-items: stretch;
   max-width: 92vw;
-  perspective: 860px;
-  perspective-origin: 50% 40%;
+  isolation: isolate;
   color: var(--text-primary);
 }
 .ff-field::before {
@@ -61,41 +61,26 @@
   justify-content: center;
 }
 
-/* ===== 出场层：深空定位入射（一次性 — 终态静态驻留） =====
- * 复合缓动（overshoot-free 指数族末端）+ 逐节点差化时长/延迟；
- * 入射矢量（--ff-ex/ey/ez/er）由角色规则承载 — 非统一缩放淡入。
- * 零 filter：入场不使用 blur（深度感由 translateZ + opacity 承载）
- * — 模糊滤镜会使出现中的文字"模糊→清晰"跳变，全局禁用；
- * --ff-i 仅在挂载瞬间有效（一次性动画），后续清单变化不影响已
- * 完成动画 → v-if 切换零重播零跳变
- * 动画结束零跳变（弹窗内容"突然右下移动"根治）：
- * fill: both + 基态显式 identity 3D transform — 终态关键帧
- * translate3d(0,0,0) 永久保持（非回退 none），元素合成层恒定，
- * 杜绝"动画结束 → 合成层释放 → 文本重栅格化"在 Windows DPI
- * 缩放（125%/150%）下的一次性亚像素跳变
- * （animations.css .wm-glyph ） */
+/* ===== 节点层：逐条显影入场（唯一动画通道 = 不透明度） =====
+ * 入场只走不透明度：节点承载全部行内文字与矢量标识，任何节点级
+ * transform（含 3D 平移）都会让节点成为受变换的合成层，被按非 1 比例
+ * 光栅化并于动画首末帧重栅格化 —— 即"模糊 → 清晰"跳变。故
+ * transform / 缩放 / 旋转 / 滤镜在节点层全部禁用；入场红线：
+ * 全程 computed transform 与 filter 恒为 none（可逐帧采样验证）。
+ * 逐条时序差化（--ff-i 由 :nth-child 分配）与谱线充能、品牌逐字凝聚
+ * 同构：整场按注记顺序逐条显影，拒绝齐步浮现。
+ * 成形后零持续开销，落位帧与静态态逐值一致（零跳变）。 */
 .ff-node {
-  /* 基态 = 终态（显式非 none — 渲染模式终身恒定） */
-  transform: translate3d(0, 0, 0);
-  animation: ff-emerge
-    calc(0.82s + var(--ff-i, 0) * 0.05s)
-    cubic-bezier(0.16, 1, 0.3, 1)
-    calc(110ms + var(--ff-i, 0) * 85ms)
-    both;
+  transform: none;
+  animation: ff-emerge 0.62s cubic-bezier(0.22, 1, 0.36, 1)
+    calc(90ms + var(--ff-i, 0) * 70ms) both;
 }
 @keyframes ff-emerge {
-  from {
-    opacity: 0;
-    transform: translate3d(var(--ff-ex, 0px), var(--ff-ey, 24px), var(--ff-ez, -60px))
-      rotate(var(--ff-er, 0deg));
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) rotate(0deg);
-  }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-/* 级联序号自动分配（直接子节点 — 仅入场级联视觉顺序） */
+/* 级联序号（直接子节点 — 驱动逐条显影时序） */
 .ff-field > .ff-node:nth-child(1) { --ff-i: 0; }
 .ff-field > .ff-node:nth-child(2) { --ff-i: 1; }
 .ff-field > .ff-node:nth-child(3) { --ff-i: 2; }
@@ -105,38 +90,54 @@
 .ff-field > .ff-node:nth-child(7) { --ff-i: 6; }
 .ff-field > .ff-node:nth-child(8) { --ff-i: 7; }
 
-/* 角色入射物理（矢量差化 — 拒绝整齐划一的统一入射） */
+/* 轨道基准线写入：标题两侧 hairline 自标题向两侧延展（先于标题显影
+ * 70ms 起笔 —— 刻度先写入、字随后显影的天文图注记语义）。
+ * 该动效只作用于 1px 无文字细线，走合成器 scaleX 通道 ——
+ * 与输入框聚焦光谱轨同一通道，零重栅格化（文字不参与）。 */
+.ff-title::before,
+.ff-title::after {
+  animation: ff-rule-write 0.5s cubic-bezier(0.22, 1, 0.36, 1)
+    calc(20ms + var(--ff-i, 0) * 70ms) both;
+}
+/* 各自以标题侧为锚点向外延展（左线锚右端、右线锚左端） */
+.ff-title::before {
+  transform-origin: 100% 50%;
+}
+.ff-title::after {
+  transform-origin: 0% 50%;
+}
+@keyframes ff-rule-write {
+  from { transform: scaleX(0); opacity: 0; }
+  to { transform: scaleX(1); opacity: 1; }
+}
+
+/* 标题簇内层逐行显影（谱号 → 主标 → 说明）：时序在外层节点之后逐行
+ * 递进，与天文注记的阅读次序一致 —— 拒绝整块同时浮现。
+ * 同属不透明度通道（无 transform / 无 filter）：内层仍为文字承载层，
+ * 任何 transform 都会触发重栅格化（红线同 .ff-node）。
+ * 延迟以 60ms 一档递进，基址取节点时序（--ff-i 继承自所属节点）。 */
+.ff-overline,
+.ff-title,
+.sc-desc {
+  animation: ff-emerge 0.5s cubic-bezier(0.22, 1, 0.36, 1)
+    calc(150ms + var(--ff-i, 0) * 70ms) both;
+}
+.ff-title {
+  animation-delay: calc(210ms + var(--ff-i, 0) * 70ms);
+}
+.sc-desc {
+  animation-delay: calc(270ms + var(--ff-i, 0) * 70ms);
+}
+
+/* 角色间距（排版职责 — 与入场时序无关） */
 .ff-node--brand {
-  --ff-ex: 7px;
-  --ff-ey: 38px;
-  --ff-ez: -120px;
-  --ff-er: -1.4deg;
   margin-bottom: 16px;
 }
 .ff-node--title {
-  --ff-ex: -12px;
-  --ff-ey: 20px;
-  --ff-ez: -64px;
-  --ff-er: 0.9deg;
   margin-bottom: 14px;
 }
-.ff-node--body {
-  --ff-ex: 9px;
-  --ff-ey: 16px;
-  --ff-ez: -44px;
-  --ff-er: -0.4deg;
-}
 .ff-node--action {
-  --ff-ex: -7px;
-  --ff-ey: 30px;
-  --ff-ez: -96px;
-  --ff-er: 0deg;
   margin-top: 14px;
-}
-/* 同类节点奇偶交替入射方向（可控不规则偏差） */
-.ff-field > .ff-node--body:nth-child(even) {
-  --ff-ex: -10px;
-  --ff-er: 0.5deg;
 }
 
 /* ===== 场域排印：协议谱号 + 场域命名（轨道基准线） ===== */
@@ -206,18 +207,20 @@
  *
  * 引力井沉降动画彻底移除（「点击文本框 → 文字/文本框/点击样式
  *   突然模糊又清晰」终极根治）：
- *   病根链 = .form-row 承载全部行内文字 + 处于 .ff-field
- *   perspective: 860px 的 3D 渲染上下文内 + 聚焦触发 transform
- *   沉降过渡（0→2px）→ 过渡期间该合成层按透视矩阵逐帧重采样
+ *   病根链 = .form-row 承载全部行内文字 + 聚焦触发 transform
+ *   沉降过渡（0→2px）→ 过渡期间该合成层按该偏移逐帧重采样
  *   （Windows DPI 125%/150% 下 2px = 2.5/3 物理像素，恒为非整数
  *   偏移）→ 文字纹理双线性采样模糊；过渡结束层稳定重栅格化
  *   → 恢复清晰。每次聚焦/失焦双次 churn。
  *   根治 = 文字承载层全生命周期零 transform（连基态 identity
- *   translate3d 一并移除 — 该层根本不进 3D 上下文，恒定主绘
- *   制路径 ClearType 渲染）；聚焦反馈全部走零重栅格化通道：
- *   光谱轨 ::after scaleX（合成器）、标签 color / 底线
- *   border-color（小区域 paint）— 视觉层级完整保留，仅去掉
- *   2px 位移动效（分辨率不可感知的牺牲换文字恒定锐利）。 */
+ *   translate3d 一并移除 — 恒定走主绘制路径 ClearType 渲染）；
+ *   聚焦反馈全部走零重栅格化通道：光谱轨 ::after scaleX（合成器）、
+ *   标签 color / 底线 border-color（小区域 paint）— 视觉层级完整保留。
+ *
+ *   同源延伸：原场的 perspective 3D 上下文与节点入射的深度（z）分量
+ *   属同一恶果 —— 透视投影会把节点纹理按非 1 比例缩放，收束到终态
+ *   再重栅格化，同样形成"模糊 → 清晰"跳变。故场的 3D 上下文与入射的
+ *   深度/旋转分量整体移除，入射只剩 2D 平移。 */
 /* 高特异性（.form-row 层级）— 压制 PasswordInput scoped 表单样式 */
 .ff-field .form-row .form-label {
   display: flex;
@@ -316,9 +319,11 @@
   transform: scale(0.92);
 }
 
-/* ===== 无障碍：减少动态 → 全场静止 ===== */
+/* ===== 无障碍：减少动态 → 节点入场与基准线写入直落终态 ===== */
 @media (prefers-reduced-motion: reduce) {
-  .ff-node {
+  .ff-node,
+  .ff-title::before,
+  .ff-title::after {
     animation: none;
   }
   .ff-field .pw-row::after,

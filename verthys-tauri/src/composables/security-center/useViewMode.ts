@@ -17,7 +17,7 @@
  * 五态互斥规则（按优先级从高到低）
  * =============================================================================
  * 1. !verthysReady                          → "unlock"          （verthys 未解锁）
- * 2. !hasGlobalKeyRecord                  → "init"            （已解锁但无全局密钥记录）
+ * 2. !hasGlobalKeyRecord || postInitAnim   → "init"            （无全局密钥记录，或初始化收束中）
  * 3. deviceCheckResult === "mismatch"     → "device_mismatch" （设备机器码不匹配拦截）
  * 4. !globalKeyReady || postVerifyAnim    → "verify"          （全局密钥未验证或验证收束中）
  * 5. 其他                                  → "management"      （全局密钥已就绪，管理主界面）
@@ -73,6 +73,11 @@ export interface UseViewModeOptions {
   /** 验证收束标志：验证流程与成功收束（补满 100%）期间保持 verify 视图；
    *  收束完成事件触发后由 onVerify 复位，视图随即切换（时长由感知层决定） */
   postVerifyAnim: Ref<boolean>;
+  /** 初始化收束标志：初始化流程与成功收束期间保持 init 视图。
+   *  initGlobalKey 成功即翻转 hasGlobalKeyRecord/globalKeyReady，若无此保持位，
+   *  视图会在收束完成前抢跳（表现为「点击初始化后直接放行」）；
+   *  收束完成事件触发后由 onInitKey 复位。 */
+  postInitAnim: Ref<boolean>;
 }
 
 /**
@@ -101,8 +106,8 @@ export function useViewMode(options: UseViewModeOptions): {
   const viewMode = computed<ViewMode>(() => {
     // 优先级 1：verthys 未解锁 → 解锁视图
     if (!options.verthysReady.value) return 'unlock';
-    // 优先级 2：已解锁但无全局密钥记录 → 初始化视图
-    if (!options.hasGlobalKeyRecord.value) return 'init';
+    // 优先级 2：无全局密钥记录（或初始化收束中）→ 初始化视图
+    if (!options.hasGlobalKeyRecord.value || options.postInitAnim.value) return 'init';
     // 优先级 3：设备机器码不匹配 → 拦截视图
     if (options.deviceCheckResult.value === 'mismatch') return 'device_mismatch';
     // 优先级 4：全局密钥未验证或验证收束中 → 验证视图

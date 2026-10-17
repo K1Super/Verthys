@@ -139,28 +139,30 @@ onBeforeUnmount(() => {
 
 /* ===== MainView materialize（自星系消散的辉光深处浮现成型） =====
  * prewarm 态 = 静态 from 样式（非动画）；解除 prewarm（entered=true）
- * 触发 transition 插值回基线 — 过渡结束 transform 归 none：
- * MainView 树不进 3D 渲染上下文（文字 ClearType 渲染路径恒定）。
- * 合成器铁律：过渡目标仅 opacity / transform —— 原 blur(14px)
- * brightness(1.55) 全屏重采样已移除（交接窗口重绘开销归零），
- * 柔性由 scale 1.045→1 收敛承担。
+ * 触发 transition 插值回基线 — 渡越结束即终态，全链无残留变换
+ * （MainView 树不进 3D 渲染上下文，文字栅格化路径恒定）。
+ * 合成器铁律：过渡目标仅 opacity。原 blur(14px)+brightness 是实时滤镜的
+ * 全屏重采样；原 scale(1.045)→none 是整层以非整数比例光栅化、收束时再
+ * 回落整数比例 —— 两者都会让细亮笔画（品牌字标）在渡越窗口内糊化、
+ * 结束帧又骤然转锐，即所见「模糊闪现」。故整层缩放一并移除：不缩放
+ * 即不重栅格化，字标全程以最终整数尺寸渲染。
+ * 浮现的柔性由内部元素自身的入场编排承担（字标逐字凝聚 / 星图揭示 /
+ * 谱线生长各有错峰时序），不依赖外层缩放。
  * 时长 --dur-page-enter(1.9s) = 渡越消散段等长（3100→5000ms）：
  * 引擎包络归零时刻「星系落定 = 界面清晰」同步收束。 */
 .main-layer {
-  transition: opacity var(--dur-page-enter) var(--ease),
-              transform var(--dur-page-enter) var(--ease);
+  transition: opacity var(--dur-page-enter) var(--ease);
 }
 .main-layer.prewarm {
   visibility: hidden;
   pointer-events: none;
   opacity: 0;
-  transform: scale(1.045);
 }
 
 /* prewarm 动画冻结：MainView 子树全部 CSS 动画（入场编排/呼吸/
  * 微跳）自挂载起 paused（时钟冻结于 t=0，含 delay 期）——预挂载期
  * 不偷跑；解除 prewarm 同帧解冻，与外层 materialize 从 0 同步启动
- * （「整体虚化成型 + 内部元素错峰编排」双层同步的层次感）。
+ * （「整体浮现 + 内部元素错峰编排」双层同步的层次感）。
  * transition 不受 animation-play-state 影响 — prewarm 态为静态
  * 样式，无过渡触发。 */
 .main-layer.prewarm,

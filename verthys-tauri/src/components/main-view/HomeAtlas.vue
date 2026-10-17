@@ -308,41 +308,43 @@ onBeforeUnmount(stopGate);
 @keyframes flow-rev {
   to { stroke-dashoffset: 1; }
 }
-/* 生长揭示：dash 自零生长 + 微缩放渐显（backwards 填充覆盖延迟期，
- * to 帧 = 基线逐值一致 — 揭示结束零跳变；巡行动画同名保留相位连续） */
+/* 生长揭示：dash 自零生长 + 渐显（backwards 填充覆盖延迟期，
+ * to 帧 = 基线逐值一致 — 揭示结束零跳变；巡行动画同名保留相位连续）。
+ * 揭示不含缩放：轨道为细矢量笔画，缩放会按非 1 比例重采样 —
+ * 揭示中即"模糊 → 清晰"跳变，故倾角保持恒定基态。 */
 @keyframes reveal-o0 {
   from {
     opacity: 0;
-    transform: rotate(-17deg) scale(0.955);
+    transform: rotate(-17deg);
     stroke-dasharray: 0 0.5 0 0.5;
   }
   to {
     opacity: 1;
-    transform: rotate(-17deg) scale(1);
+    transform: rotate(-17deg);
     stroke-dasharray: 0.44 0.07 0.3 0.19;
   }
 }
 @keyframes reveal-o1 {
   from {
     opacity: 0;
-    transform: rotate(-8deg) scale(0.955);
+    transform: rotate(-8deg);
     stroke-dasharray: 0 0.5 0 0.5;
   }
   to {
     opacity: 1;
-    transform: rotate(-8deg) scale(1);
+    transform: rotate(-8deg);
     stroke-dasharray: 0.16 0.12 0.5 0.22;
   }
 }
 @keyframes reveal-o2 {
   from {
     opacity: 0;
-    transform: rotate(6deg) scale(0.955);
+    transform: rotate(6deg);
     stroke-dasharray: 0 0.5 0 0.5;
   }
   to {
     opacity: 1;
-    transform: rotate(6deg) scale(1);
+    transform: rotate(6deg);
     stroke-dasharray: 0.3 0.1 0.38 0.22;
   }
 }

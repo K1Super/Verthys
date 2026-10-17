@@ -24,7 +24,6 @@ import { decryptChunksPreferWorker } from "../../workers/photo-decrypt-bridge";
 import { isSlimLayout } from "../../constants/crypto_const";
 import { updateShallowItem } from "../../utils/shallow-array";
 import type { PhotoEntry, DecryptedPhotoMeta } from "./types";
-import { toArrayBuffer, thumbUrlOf } from "./utils";
 import { resolveChunkRefs, loadChunkCiphers, type ChunkRefs } from "./chunk-refs";
 
 /**
@@ -101,25 +100,35 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
     const seq = ++viewRequestSeq;
     viewerName.value = ph.name;
     viewerBlurred.value = false;
-    viewerSrc.value = "";
     viewerScale.value = 1;
     viewerOffsetX.value = 0;
     viewerOffsetY.value = 0;
     viewerDragging.value = false;
-    setViewerProgress("");
 
-    // 浏览器模式：直接用缓存的 Blob URL
+    // 浏览器模式：直接用缓存的 Blob URL（无解密链路，点击即出图）
     if (!isTauri && ph.blobUrl) {
+      viewerSrc.value = "";
+      setViewerProgress("");
       commitViewer(seq, ph.blobUrl);
       return;
     }
 
-    // 无模块密钥 → 显示错误（在 meta 检查之前，因为按需解密需要密钥）
+    // 无模块密钥 → 同步可判定，直接报错、不打开查看器（避免「开图再关闭」闪动）
     if (!ensurePhotoKey()) {
       showError("模块密钥不可用，请重新登录拾光模块");
-      commitViewer(seq, "");
       return;
     }
+
+    // 打开查看器：不使用缩略图占位。原图本身即解密产物 —— 点击时磁盘上仍是
+    //   密文，解密完成前不存在可显示的原图；故此处立即打开覆盖层并给出真实
+    //   阶段文案（读取块 / 解密中），解密在后台进行，完成后由 commitViewer
+    //   设置原图 Blob URL 无缝呈现。
+    //   原实现把 viewer.value 门控在整条链路（块引用解析 → 密文块读取 →
+    //   Worker 解密 → Blob 构造）之后：解密完成前覆盖层不渲染，用户看到的
+    //   不是「加载中」而是「点了没反应」，感知为延迟一会才放大。
+    viewerSrc.value = "";
+    setViewerProgress("读取原图…");
+    viewer.value = true;
 
     // meta 缺失时按需解密回退
     //    场景：摘要首屏与重启后的占位项（loaded=false、meta 未解密），
@@ -130,7 +139,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
       if (!ph.metaId) {
         // 无 metaId（演示数据等）→ 显示缩略图 + 警告
         showError("照片元数据缺失，无法预览原图");
-        commitViewer(seq, thumbUrlOf(ph.thumb));
+        closeViewer();
         return;
       }
       setViewerProgress("读取照片元数据…");
@@ -139,7 +148,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
       setViewerProgress("");
       if (!data) {
         showError("照片元数据解密失败，可能密钥已变更或数据损坏");
-        commitViewer(seq, thumbUrlOf(ph.thumb));
+        closeViewer();
         return;
       }
       // 回填到 photos 数组（后续点击直接命中，无需重复解密）
@@ -159,7 +168,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
       } catch (e) {
         console.error(`[onView] 块集解析失败: ${e instanceof Error ? e.message : String(e)}`);
         showError("照片索引数据不完整，无法读取原图");
-        commitViewer(seq, thumbUrlOf(ph.thumb));
+        closeViewer();
         return;
       }
       if (seq !== viewRequestSeq) return;
@@ -170,7 +179,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
 
       if (expected === 0) {
         showError("未找到照片数据");
-        commitViewer(seq, thumbUrlOf(ph.thumb));
+        closeViewer();
         return;
       }
 
@@ -187,7 +196,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
             : "块数不一致";
         console.error(`[onView] 照片数据不完整：${detail}`);
         showError("此照片数据已损坏，请删除后重新导入");
-        commitViewer(seq, thumbUrlOf(ph.thumb));
+        closeViewer();
         return;
       }
 
@@ -213,19 +222,19 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
         if (seq !== viewRequestSeq) return;
         setViewerProgress("");
         showError("照片数据无法读取，可能密钥已变更");
-        commitViewer(seq, thumbUrlOf(ph.thumb));
+        closeViewer();
         return;
       }
       if (seq !== viewRequestSeq) return;
 
-      const totalLen = plaintexts.reduce((s, c) => s + c.length, 0);
-      const fullBytes = new Uint8Array(totalLen);
-      let offset = 0;
-      for (const c of plaintexts) { fullBytes.set(c, offset); offset += c.length; }
-
-      const blob = new Blob([toArrayBuffer(fullBytes)], { type: meta.mime });
+      // 直接以解密块数组构造 Blob：Blob 构造按规范即复制字节，
+      //   省去「逐块拼接到新 Uint8Array + ArrayBuffer 再切片」两次主线程
+      //   整图拷贝 —— 拷贝量与图大小成正比，大图曾因此在打开瞬间明显卡顿。
+      const blob = new Blob(plaintexts as BlobPart[], { type: meta.mime });
       const url = URL.createObjectURL(blob);
-      fullBytes.fill(0);
+      // 明文块清零：Blob 已复制字节，此后解密产物不在堆中驻留
+      //   （旧实现只清了拼接缓冲，未清解密块本体）
+      for (const c of plaintexts) c.fill(0);
       if (seq !== viewRequestSeq) {
         URL.revokeObjectURL(url);   // 过期请求：本次产出的 Blob 立即释放
         return;
@@ -240,7 +249,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
       console.error("预览失败:", e);
       setViewerProgress("");
       showError("预览失败，请重试");
-      commitViewer(seq, thumbUrlOf(ph.thumb));
+      closeViewer();
     }
   };
 

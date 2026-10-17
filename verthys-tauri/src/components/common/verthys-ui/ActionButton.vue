@@ -7,22 +7,32 @@
 <template>
   <button
     class="btn action-btn"
-    :class="[`action-${variant}`, { 'is-loading': loading }]"
+    :class="[primary ? 'btn-primary' : `action-${variant}`, { 'is-loading': loading, 'action-icon-only': !label && !$slots.default }]"
     :disabled="disabled || loading"
     @click="$emit('click', $event)"
   >
-    <span v-if="loading" class="action-spinner"></span>
-    <span v-else-if="showPlus" class="action-plus">+</span>
-    <span class="action-label">
+    <CosmicRingLoader v-if="loading" :size="12" />
+    <svg v-else-if="showPlus" class="action-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+    <span v-if="label || $slots.default" class="action-label">
       <slot>{{ label }}</slot>
     </span>
   </button>
 </template>
 
 <script setup lang="ts">
+import CosmicRingLoader from "../cosmic/CosmicRingLoader.vue";
+
 interface Props {
   label?: string;
   variant?: "default" | "danger";
+  /**
+   * 采用主按钮皮肤：直接复用全局 .btn-primary（与各窗口「确认」按钮
+   * 完全同一套样式：渐变面 + 势隙线三态呼吸，无白色幕布）。
+   */
+  primary?: boolean;
   disabled?: boolean;
   loading?: boolean;
   showPlus?: boolean;
@@ -31,6 +41,7 @@ interface Props {
 withDefaults(defineProps<Props>(), {
   label: "",
   variant: "default",
+  primary: false,
   disabled: false,
   loading: false,
   showPlus: true,
@@ -61,27 +72,17 @@ defineEmits<{ (e: "click", ev: MouseEvent): void }>();
   border-color: var(--accent-red);
 }
 
-/* 加号图标 */
+/* 加号图标：SVG 描边十字 —— 几何精确、粗细可控，与全应用图标语言一致
+   （替代此前的文本「+」，避免字体基线与字重差异导致的对不齐） */
 .action-plus {
-  font-weight: 300;
-  font-size: 14px;
-  line-height: 1;
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  display: block;
 }
-
-/* 加载指示器 */
-.action-spinner {
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  border: 1.5px solid currentColor;
-  border-top-color: transparent;
-  border-radius: 50%;
-  animation: action-spin 0.6s linear infinite;
-}
-@keyframes action-spin {
-  to {
-    transform: rotate(360deg);
-  }
+/* 纯图标按钮（无文案）：收紧横向内边距，使近方形、加号居中 */
+.action-icon-only {
+  padding: 6px 8px;
 }
 
 /* 加载状态时隐藏加号 */

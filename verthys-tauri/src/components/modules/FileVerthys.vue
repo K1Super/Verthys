@@ -24,10 +24,10 @@
           <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
         </svg>
         <!-- 项3：搜索输入防抖（300ms 尾部触发），连续快速输入仅触发一次过滤 -->
-        <input class="search-input" :value="searchKey" @input="onSearchInput" placeholder="搜索文件…" />
+        <input class="search-input" :value="searchKey" @input="onSearchInput" placeholder="搜索" />
       </div>
       <ActionButton
-        :label="importing ? '导入中…' : '导入文件'"
+        primary
         :loading="importing"
         @click="onImport"
       />
@@ -118,38 +118,57 @@
     </div>
 
     <!-- 导入对话框（含独立密码选项） -->
+    <!-- 导入窗口：底板（背景/描边/圆角/收边投影/入场）与头部·登记区·动作区
+         结构直接复用凭证登记台共享皮肤（styles/reg-desk.css，与存签 / 枢钥 登记
+         窗口同一来源）—— 面板类与两窗完全同形（dialog + glass + reg-panel），
+         本组件只挂类与结构，不复制任何 reg-* 规则 -->
     <div v-if="showImportDialog" class="dialog-overlay" @click.self="showImportDialog = false">
-      <div class="dialog glass">
-        <div class="dialog-title">导入文件到加密库</div>
-        <div class="import-file-info">
-          <span class="file-icon-lg" v-html="getFileIcon(pendingMime)"></span>
-          <div class="file-meta">
-            <div class="file-name">{{ pendingName }}</div>
-            <template v-if="pendingFiles.length === 1">
-              <div class="file-size">{{ formatSize(pendingSize) }}</div>
-              <div class="file-chunks">将分块加密存储（大小在导入时读取）</div>
-            </template>
-            <template v-else>
-              <div class="file-size">共 {{ pendingFiles.length }} 个文件</div>
-              <div class="file-chunks">将逐个加密导入</div>
-            </template>
+      <div class="dialog glass reg-panel">
+        <header class="reg-head">
+          <span class="reg-heading">
+            <span class="reg-kicker">钥域 · 加密入库</span>
+            <span class="reg-title">导入文件到加密库</span>
+          </span>
+          <button class="reg-close" type="button" @click="showImportDialog = false" aria-label="关闭窗口" v-tip="'关闭'">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </header>
+
+        <div class="reg-body">
+          <div class="import-file-info">
+            <span class="file-icon-lg" v-html="getFileIcon(pendingMime)"></span>
+            <div class="file-meta">
+              <div class="file-name">{{ pendingName }}</div>
+              <template v-if="pendingFiles.length === 1">
+                <div class="file-size">{{ pendingSize === null ? "—" : formatSize(pendingSize) }}</div>
+                <div class="file-chunks">分块加密存储</div>
+              </template>
+              <template v-else>
+                <div class="file-size">
+                  共 {{ pendingFiles.length }} 个文件 ·
+                  {{ pendingSize === null ? "—" : formatSize(pendingSize) }}
+                </div>
+                <div class="file-chunks">逐个加密导入</div>
+              </template>
+            </div>
+          </div>
+          <div class="encrypt-row" :class="{ on: usePassword }">
+            <label class="encrypt-toggle">
+              <input type="checkbox" v-model="usePassword" />
+              <span class="encrypt-check"></span>
+              <span class="encrypt-label">设置独立访问密码（细粒度权限隔离）</span>
+            </label>
+            <div v-if="usePassword" class="encrypt-key-input">
+              <input
+                class="input"
+                v-model="docPassword"
+                type="password"
+                placeholder="文档独立访问密码"
+              />
+            </div>
           </div>
         </div>
-        <div class="encrypt-row" :class="{ on: usePassword }">
-          <label class="encrypt-toggle">
-            <input type="checkbox" v-model="usePassword" />
-            <span class="encrypt-check"></span>
-            <span class="encrypt-label">设置独立访问密码（细粒度权限隔离）</span>
-          </label>
-          <div v-if="usePassword" class="encrypt-key-input">
-            <input
-              class="input"
-              v-model="docPassword"
-              type="password"
-              placeholder="文档独立访问密码"
-            />
-          </div>
-        </div>
+
         <div class="dialog-actions">
           <button class="btn kv-cancel" @click="showImportDialog = false">取消</button>
           <button class="btn btn-primary kv-confirm" :disabled="usePassword && !docPassword" @click="startImport">开始加密导入</button>
@@ -178,7 +197,7 @@
     </div>
 
     <!-- 非阻塞加载：无底板居中展示，加载完成自动消失 -->
-    <CosmicLoading :show="loading" text="正在加载文件数据…" />
+    <CosmicRingLoader :overlay="true" :show="loading" text="正在加载文件数据…" />
 
     <!-- 删除二次确认弹窗 -->
     <ConfirmDelete
@@ -223,7 +242,7 @@ import { ref, shallowRef, computed, onMounted, onUnmounted } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import ActionButton from "../common/verthys-ui/ActionButton.vue";
 import StarlitSky from "../common/cosmic/StarlitSky.vue";
-import CosmicLoading from "../common/cosmic/CosmicLoading.vue";
+import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ImportProgressOverlay from "../common/cosmic/ImportProgressOverlay.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
@@ -244,6 +263,7 @@ import {
 import { runFileExport } from "../../composables/file-verthys/useFileExport";
 import {
   runFileImport,
+  fileImportErrorMessage,
   type FileImportDeps,
   type ImportProgress,
 } from "../../composables/file-verthys/useFileImport";
@@ -374,7 +394,9 @@ const pendingFiles = ref<PendingFile[]>([]);
 // 以下用于对话框显示（单文件时填充详情，多文件时显示汇总）
 const pendingPath = ref("");
 const pendingName = ref("");
-const pendingSize = ref(0);
+const pendingSize = ref<number | null>(null);
+/* 选择序号：异步取元数据期间若发生新的选择，过期回填即被丢弃 */
+let importSeq = 0;
 const pendingMime = ref("application/octet-stream");
 const usePassword = ref(false);
 const docPassword = ref("");
@@ -406,7 +428,7 @@ const onImport = async () => {
     path: p,
     name: p.split(/[\\/]/).pop() || "file",
   }));
-  // 填充显示用变量（大小在导入时获取，避免预先读取大文件）
+  // 填充显示用变量（大小在选定路径时即取 — 见下方元数据回填）
   if (pendingFiles.value.length === 1) {
     const f = pendingFiles.value[0];
     pendingPath.value = f.path;
@@ -417,10 +439,28 @@ const onImport = async () => {
     pendingName.value = `${pendingFiles.value.length} 个文件`;
     pendingMime.value = "application/octet-stream";
   }
-  pendingSize.value = 0;
   usePassword.value = false;
   docPassword.value = "";
+  pendingSize.value = null;
   showImportDialog.value = true;
+
+  /* 待导入大小 = 文件元数据（与导入管道同一权威通道 userFileStat —
+   * 同源同校验，不新开并行实现）：只读 inode 元信息、不读文件内容，
+   * 故并发取用亦即时且零读流量 ——「导入时才读取内容」的约束不变，
+   * 变的只是把「大小」这一元数据提前到选定时刻取回。
+   * 取失败（文件已移除 / 无权限）→ 显示占位并给出通用错误提示，绝不伪 0 B。 */
+  const seq = ++importSeq;
+  const sizes = await Promise.all(
+    pendingFiles.value.map(f =>
+      userFileStat(f.path).then(s => s.size).catch(() => null),
+    ),
+  );
+  // 期间发生新的选择 → 丢弃过期回填
+  if (seq !== importSeq) return;
+  pendingSize.value = sizes.every((s): s is number => s !== null)
+    ? sizes.reduce((a, b) => a + b, 0)
+    : null;
+  if (pendingSize.value === null) showError("部分文件大小无法读取");
 };
 
 const importing = ref(false);
@@ -560,7 +600,7 @@ const startImport = async () => {
       if (result.failCount > 0) {
         const head = result.failures[0];
         const more = result.failCount > 1 ? ` 等 ${result.failCount} 个文件` : "";
-        showError(`导入失败：${head.name}｜${head.message}${more}`);
+        showError(`导入失败：${head.name}｜${fileImportErrorMessage(head.code)}${more}`);
       }
       if (result.cancelled) {
         showToast("已取消导入（断点已保留，下次导入将续传）");
@@ -990,7 +1030,7 @@ useModuleDialogGuard("verthys", () => {
 /* 对话框 */
 .dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.74); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .dialog { padding: 28px; min-width: 440px; max-width: 90vw; animation: dialog-in 0.4s var(--ease); }
-@keyframes dialog-in { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+@keyframes dialog-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 .dialog-title { font-size: 14px; margin-bottom: 20px; color: var(--accent); letter-spacing: 2px; font-family: var(--font); }
 
 /* 导入文件信息 */

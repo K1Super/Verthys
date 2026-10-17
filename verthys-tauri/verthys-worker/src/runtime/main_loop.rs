@@ -249,6 +249,19 @@ pub fn run(dll_path: &str) -> i32 {
             }
         };
 
+        // 关闭请求：显式优雅退出主循环。
+        //
+        // 父进程（worker/graceful.rs 的 perform_graceful_shutdown）发送
+        // {"op":"shutdown"} 后等待子进程自行退出。在此 break，函数返回时
+        // 局部变量 worker 的 Drop 链（Lock → Deinit → 清零 GMK + 扫描游标/
+        // 共享内存释放）得以真实执行；否则父进程只会等满 1s 硬超时后
+        // TerminateProcess 强杀，Drop 不执行，安全清理落空。
+        // 本请求无需回写响应：父进程仅等待进程退出，不读取 shutdown 的响应行。
+        if req.op == "shutdown" {
+            init_diag!("[worker] 收到 shutdown，优雅退出主循环");
+            break;
+        }
+
         // get_record 返回 NOTFOUND 时，枚举探测应停止
         let resp = handle_request(&mut worker, &req);
         let json = match serde_json::to_string(&resp) {

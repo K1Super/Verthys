@@ -10,7 +10,9 @@
  *   - 成功收束（SEALING）：缓出曲线补满 100% 后转 DONE，完成事件由
  *     waitForComplete 以 Promise 形式交付业务层
  *   - 失败冻结（HALTED）：视觉值冻结不回弹、输出降级标识 dimmed，
- *     并保证错误最小展示时长
+ *     并保证错误最小展示时长 —— 保留给中断/降级用途；生产验证与初始化
+ *     流程统一改为「收束完成后呈现结果」（见 useGlobalKey），不以冻结
+ *     打断进度与加载编排
  *   - 尊重 prefers-reduced-motion：整体切换为直通策略
  *     （无假进度、无平滑、收束瞬时完成），不留散落分支
  *
@@ -61,12 +63,14 @@ export interface VerifyRhythmConfig {
   sealCurve: 'easeOutCubic';
   /** 错误最小展示时长（ms），取值域 (200, 800) */
   errorMinDuration: number;
-  /** 极快成功判定阈值（ms），取值域 (50, 300) */
+  /** 极快成功判定阈值（ms），取值域 (50, 300) — 仅 skipAnimation 策略消费 */
   fastSuccessThreshold: number;
   /**
-   * 极快成功处理策略：
-   *   - skipAnimation：跳过收束动画，立即补满并触发完成事件
+   * 极快成功处理策略（默认 minStartPoint）：
    *   - minStartPoint：收束起点上抬至 minSealStart，再执行完整收束
+   *     —— 验证再快也必然跑完整段进度/加载编排后才交付结果
+   *   - skipAnimation：跳过收束动画，立即补满并触发完成事件（会令进度与
+   *     加载编排在极快成功时整体消失，结果抢先落地）
    */
   fastSuccessStrategy: 'skipAnimation' | 'minStartPoint';
   /** 最小收束起点（minStartPoint 策略使用），取值域 (0, plateau) */
@@ -85,7 +89,7 @@ export const DEFAULT_VERIFY_RHYTHM_CONFIG: Readonly<VerifyRhythmConfig> = {
   sealCurve: 'easeOutCubic',
   errorMinDuration: 400,
   fastSuccessThreshold: 150,
-  fastSuccessStrategy: 'skipAnimation',
+  fastSuccessStrategy: 'minStartPoint',
   minSealStart: 0.35,
 };
 

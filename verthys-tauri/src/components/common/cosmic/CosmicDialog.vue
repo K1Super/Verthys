@@ -86,11 +86,11 @@ const dialogStars = Array.from({ length: 10 }, (_, i) => ({
 @keyframes cd-rise {
   from {
     opacity: 0;
-    transform: translateY(14px) scale(0.965);
+    transform: translateY(14px);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: translateY(0);
   }
 }
 

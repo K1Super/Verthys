@@ -17,7 +17,7 @@
       <input class="search-input" :value="modelValue" @input="onInput" :placeholder="placeholder" />
       <slot name="filters" />
     </div>
-    <ActionButton :label="addLabel" @click="$emit('add')" />
+    <ActionButton :label="addLabel" primary @click="$emit('add')" />
   </div>
 </template>
 

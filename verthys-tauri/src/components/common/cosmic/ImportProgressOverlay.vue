@@ -142,10 +142,13 @@ const emit = defineEmits<{ cancel: [] }>();
   outline-offset: 2px;
 }
 
+/* 入场只走 2D 平移与不透明度：覆盖层内含文字与矢量控件，
+ * scale 会让内容纹理按非 1 比例缩放、结束帧再重栅格化 —
+ * 出现中即"模糊 → 清晰"跳变，故不设缩放分量 */
 @keyframes overlay-enter {
   from {
     opacity: 0;
-    transform: translateY(8px) scale(0.98);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;

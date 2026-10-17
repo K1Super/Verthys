@@ -9,7 +9,7 @@
     <!-- 瞬时提示（错误/复制倒计时）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
 
     <!-- 搜索栏 -->
-    <VerthysSearchBar v-model="searchKey" placeholder="搜索平台 / 账户…" add-label="新增账户" :sky-seed="5" @add="onAdd" />
+    <VerthysSearchBar v-model="searchKey" placeholder="搜索" add-label="" :sky-seed="5" @add="onAdd" />
 
     <!-- 卡片网格：≥200 条启用虚拟滚动，小列表保留原 v-for 路径零开销 -->
     <VirtualCardGrid
@@ -94,10 +94,10 @@
     <!-- 账户登记窗口：与枢钥共用「凭证登记台」皮肤（分区登记行 + 刻度轴 + 选项条） -->
     <VerthysDialog
       v-model="showDialog"
-      :title="editing ? '编辑账户' : '新增账户'"
+      :title="editing ? '编辑账户' : '添加'"
       layout="plain"
       class="reg-panel"
-      :save-label="editing ? '保存修改' : '登记入库'"
+      :save-label="editing ? '保存修改' : '确认'"
       :save-disabled="form.encrypted && !form.encKey"
       @save="onSave"
     >
@@ -111,8 +111,8 @@
             </svg>
           </span>
           <span class="reg-heading">
-            <span class="reg-kicker">存签 · 账户登记</span>
-            <span class="reg-title">{{ editing ? '编辑账户' : '新增账户' }}</span>
+            <span class="reg-kicker">存签</span>
+            <span class="reg-title">{{ editing ? '编辑账户' : '添加' }}</span>
           </span>
           <button class="reg-close" type="button" @click="showDialog = false" aria-label="关闭窗口" v-tip="'关闭'">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -130,11 +130,11 @@
           </div>
           <div class="reg-row">
             <label class="reg-key" for="acc-f-platform"><i class="reg-req" aria-hidden="true">*</i>平台</label>
-            <input id="acc-f-platform" class="reg-input" v-model="form.platform" placeholder="如 GitHub / 公司邮箱" aria-required="true" />
+            <input id="acc-f-platform" class="reg-input" v-model="form.platform" aria-required="true" />
           </div>
           <div class="reg-row">
             <label class="reg-key" for="acc-f-username"><i class="reg-req" aria-hidden="true">*</i>账户</label>
-            <input id="acc-f-username" class="reg-input" v-model="form.username" placeholder="登录名或邮箱" aria-required="true" />
+            <input id="acc-f-username" class="reg-input" v-model="form.username" aria-required="true" />
           </div>
         </section>
 
@@ -184,7 +184,6 @@
                 class="reg-input"
                 v-model="form.encKey"
                 :type="encKeyVisible ? 'text' : 'password'"
-                :placeholder="editing ? '输入密钥以重新加密' : '设置独立密钥'"
                 aria-required="true"
               />
               <button
@@ -210,7 +209,7 @@
           </div>
           <div class="reg-row">
             <label class="reg-key" for="acc-f-note">备注</label>
-            <textarea id="acc-f-note" class="reg-input reg-textarea" v-model="form.note" rows="2" placeholder="可选备注信息"></textarea>
+            <textarea id="acc-f-note" class="reg-input reg-textarea" v-model="form.note" rows="2"></textarea>
           </div>
         </section>
       </div>
@@ -242,7 +241,7 @@
     </VerthysDialog>
 
     <!-- 非阻塞加载：无底板居中展示，加载完成自动消失 -->
-    <CosmicLoading :show="loading" text="正在加载账户数据…" />
+    <CosmicRingLoader :overlay="true" :show="loading" text="正在加载账户数据…" />
 
     <!-- 删除二次确认弹窗 -->
     <ConfirmDelete
@@ -274,7 +273,7 @@ import { useCardShine } from "../../composables/useCardShine";
 import { useToastCenter } from "../../composables/useToastCenter";
 import VerthysSearchBar from "../common/verthys-ui/VerthysSearchBar.vue";
 import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
-import CosmicLoading from "../common/cosmic/CosmicLoading.vue";
+import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";

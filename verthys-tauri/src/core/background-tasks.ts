@@ -294,10 +294,10 @@ export async function startBackgroundTasks(): Promise<void> {
  *   通道，与后续 lockAll 步骤争抢资源，用户感知"停止后台任务时间过长"。
  *
  * 修复：
- *   1. 设置取消标志后，最多等待 3000ms 让任务在检查点退出
+ *   1. 设置取消标志后，最多等待 1500ms 让任务在检查点退出
  *   2. 超时后强制清理状态（taskPromises/allTasksCompletion），不再等待
  *   3. 残留任务 Promise 在后台继续运行，但 cancelled=true 确保它们在下个检查点退出
- *   4. worker 销毁（verthysLock）会强制终止所有在途 IPC，彻底清理残留任务
+ *   4. worker 销毁（verthysLock / workerDestroy）会强制终止所有在途 IPC，彻底清理残留任务
  *
  * @returns Promise<void>，resolve 时表示已尽力停止后台任务（不保证全部实际终止）
  */
@@ -305,10 +305,13 @@ export async function stopBackgroundTasks(): Promise<void> {
   // 设置取消标志（所有任务在下个检查点退出）
   backgroundTaskController.cancelled = true;
 
-  // 修复：限制最大等待时间 3000ms
-  //    足以让任务在检查点退出（cancelled 检查在每次循环开始），
-  //    超时后强制清理，由 verthysLock 销毁 worker 彻底终止残留 IPC
-  const STOP_TIMEOUT_MS = 3000;
+  // 限制最大等待时间 1500ms
+  //    任务在检查点（每次循环开始）校验 cancelled，正常在数十毫秒内退出；
+  //    仅当某任务卡在不可中断的在途 IPC（verthysGetRecord / 扫描）时才等满上限。
+  //    超时后强制清理状态，残留任务由随后的 verthysLock / workerDestroy
+  //    销毁 worker 强制终止在途 IPC——故上限无需留 3s，收紧至 1500ms
+  //    即可，避免退出路径被无谓拖长。
+  const STOP_TIMEOUT_MS = 1500;
   try {
     await Promise.race([
       allTasksCompletion,

@@ -4,7 +4,7 @@
 >
 > Last updated: 2026-09-19 · 维护人：K1Super
 
-当前版本 3.3.0（唯一手改点：仓库根 `VERSION` 文件）。发布为本地 Git tag + 手动产物分发，无远程发布渠道；本文档定义一致、可验收的发版流程。
+当前版本 3.3.1（唯一手改点：仓库根 `VERSION` 文件）。发布为本地 Git tag + 手动产物分发，无远程发布渠道；本文档定义一致、可验收的发版流程。
 
 ## 1. 版本号规则
 
@@ -36,8 +36,8 @@
 ## 3. tag 与发布物流程
 
 ```powershell
-git tag -a v3.3.0 -m "Release 3.3.0"
-git push origin v3.3.0
+git tag -a v3.3.1 -m "Release 3.3.1"
+git push origin v3.3.1
 ```
 
 发布物 = 手动上传的 NSIS 安装包（`*.exe`）。当前 `.github/workflows/` 仅有 `core.yml`（core 构建与测试 + fuzz），无 release 发布工作流，故发布渠道待定；tag 为本地仓库标签，产出物由维护人手动分发。

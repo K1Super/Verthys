@@ -711,8 +711,9 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  /* 默认隐藏态 */
-  transform: translate(0, 10px) scale(0.94);
+  /* 默认隐藏态（只位移不缩放：缩放会令提示文字按非 1 比例重采样，
+     出现中即"模糊 → 清晰"跳变） */
+  transform: translate(0, 10px);
   transition:
     opacity 0.3s var(--ease),
     transform 0.4s var(--ease);
@@ -783,5 +784,5 @@
 
 /* 隐藏态：能量消散，回落 */
 .cosmic-tip.ct-hide {
-  transform: translate(0, 4px) scale(0.96);
+  transform: translate(0, 4px);
 }

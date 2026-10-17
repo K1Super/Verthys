@@ -261,6 +261,9 @@ const { deviceCheckResult, deviceFingerprintShort, checkDevice, refreshDeviceFin
  * 视图切换由感知层收束完成事件驱动，不依赖固定时长。
  * 移至 useViewMode 调用前定义以避免 TDZ（时序死区） */
 const postVerifyAnim = ref(false);
+/** 初始化收束标志（用途同 postVerifyAnim）：onInitKey 写入、useViewMode 读取。
+ *  缺此保持位时，初始化成功会在收束完成前抢跳视图（表现为「点击后直接放行」）。 */
+const postInitAnim = ref(false);
 
 /* ===== 验证进度感知层（信号层 → 感知层 → 呈现层 的中间层） ===== */
 const verifyRhythm = useVerifyRhythm();
@@ -275,6 +278,7 @@ const { viewMode } = useViewMode({
   globalKeyReady: globalKeyReadyRef,
   deviceCheckResult,
   postVerifyAnim,
+  postInitAnim,
 });
 
 /* ===== 解锁/创建逻辑 ===== */
@@ -344,6 +348,7 @@ const {
   showError,
   showToast,
   postVerifyAnim,
+  postInitAnim,
   verifyRhythm,
   unlockProgressMsg,
   unlockProgressPercent,

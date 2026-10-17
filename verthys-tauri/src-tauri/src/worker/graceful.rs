@@ -45,8 +45,11 @@ pub(crate) fn reject_request_after_exit(req: ActorRequest, pid: u32) {
 /* ------------------------------------------------------------------ *
  * 优雅退出                                                            *
  *                                                                    *
- * stdin 发 {"op":"shutdown"} 等 1s；                    *
- *   超时 child.kill() + await。                                       *
+ * stdin 发 {"op":"shutdown"} → worker 主循环 break → 局部 Worker 的   *
+ *   Drop 链（Lock → Deinit → 清零 GMK + 扫描游标/共享内存释放）执行 → *
+ *   进程自行退出；父进程 child.wait() 随即返回（正常路径数十毫秒）。   *
+ *   GRACEFUL_SHUTDOWN_TIMEOUT 仅为兜底：仅当 worker 卡死时超时后       *
+ *   child.kill()（TerminateProcess）+ await。                        *
  * ------------------------------------------------------------------ */
 pub(crate) async fn perform_graceful_shutdown(
     stdin: &mut ChildStdin,

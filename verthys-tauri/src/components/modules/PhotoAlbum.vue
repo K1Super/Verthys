@@ -75,7 +75,7 @@
             <line x1="12" y1="5" x2="12" y2="19"/>
             <line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
-          <span v-else class="import-spinner"></span>
+          <CosmicRingLoader v-else :size="13" />
         </button>
         <!-- 重打包入口（仅写入布局开关开启时出现）：后台迁移旧布局照片 -->
         <button
@@ -116,7 +116,7 @@
 
       <!-- 非阻塞加载：无底板居中展示，加载完成自动消失。
            失败由通用错误提示（toast）承接，不打断浏览（无提示横幅/进度卡）。 -->
-      <CosmicLoading :show="photosLoading && photos.length === 0" text="正在加载照片列表…" />
+      <CosmicRingLoader :overlay="true" :show="photosLoading && photos.length === 0" text="正在加载照片列表…" />
 
       <!-- 虚拟滚动容器（相册列表强制采用虚拟滚动）：
            行窗口模型：滚动位置的唯一量化状态是行窗口，像素级移动不产生重建；
@@ -159,17 +159,16 @@
           class="viewer-image"
           :class="{ dragging: viewerDragging }"
           :src="viewerSrc"
+          decoding="async"
           alt=""
           draggable="false"
           :style="{ transform: `translate(${viewerOffsetX}px, ${viewerOffsetY}px) scale(${viewerScale})`, cursor: viewerDragging ? 'grabbing' : viewerScale > 1 ? 'grab' : 'default' }"
           @mousedown="onViewerMouseDown"
           @dblclick.prevent="onViewerDoubleClick"
         />
-        <div class="viewer-info">
-          <span class="viewer-name">{{ viewerName }}</span>
-          <!-- 原图准备阶段反馈：读取密文块 / 解密中（真实阶段） -->
-          <span v-if="viewerLoading" class="viewer-status">{{ viewerProgressMsg }}</span>
-        </div>
+        <!-- 原图准备中：统一加载环 + 文案（原图本身即解密产物，
+             不设缩略图占位；解密在后台进行） -->
+        <CosmicRingLoader v-else-if="viewerLoading" text="解密中" />
       </div>
     </div>
 
@@ -421,7 +420,7 @@ import { onMounted, onUnmounted, computed, ref, watch, defineAsyncComponent } fr
 import { isModuleReady } from "../../lib/keyManager";
 import { tryGc } from "../../utils/gc";
 import StarlitSky from "../common/cosmic/StarlitSky.vue";
-import CosmicLoading from "../common/cosmic/CosmicLoading.vue";
+import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 // 大型弹窗组件级懒加载（遵循项目硬约束：大型弹窗使用 defineAsyncComponent）
@@ -491,8 +490,8 @@ watch(failedCount, (n, prev) => {
 
 /* ---------- 3. 查看器层（依赖 usePhotoData 的 photos/photoKey/decryptPhotoMeta） ---------- */
 const {
-  viewer, viewerSrc, viewerName, viewerBlurred, viewerScale,
-  viewerOffsetX, viewerOffsetY, viewerDragging, viewerLoading, viewerProgressMsg,
+  viewer, viewerSrc, viewerBlurred, viewerScale,
+  viewerOffsetX, viewerOffsetY, viewerDragging, viewerLoading,
   onView, closeViewer, onViewerWheel, onViewerMouseDown, onViewerDoubleClick,
   onBlur, onFocus,
   cleanup: cleanupViewer,
@@ -802,9 +801,7 @@ useModuleDialogGuard("photos", () => {
 .repack-top-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; color: var(--text-muted); }
 .repack-top-btn svg { width: 14px; height: 14px; }
 .repack-top-btn:hover { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.3); background: rgba(var(--accent-rgb), 0.06); }
-/* 导入中旋转指示器（仅导入照片按钮在加密过程中显示，替换静态图标） */
-.import-spinner { width: 13px; height: 13px; border: 1.5px solid var(--accent); border-top-color: transparent; border-radius: 50%; animation: import-top-spin 0.7s linear infinite; }
-@keyframes import-top-spin { to { transform: rotate(360deg); } }
+/* 导入中指示器：统一加载环 CosmicRingLoader（按钮内 13px 迷你档） */
 .del-top-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; color: var(--text-muted); transition: all 0.2s; }
 .del-top-btn svg { width: 14px; height: 14px; }
 .del-top-btn:hover { color: var(--danger); border-color: rgba(255,71,87,0.3); background: rgba(255,71,87,0.06); }
@@ -993,14 +990,9 @@ useModuleDialogGuard("photos", () => {
 .viewer-image { max-width: 90vw; max-height: 80vh; object-fit: contain; border-radius: var(--radius); box-shadow: 0 0 40px rgba(0,0,0,0.8), 0 0 1px rgba(0,212,255,0.2); transform-origin: center center; transition: transform 0.12s ease-out; animation: photo-in 0.6s var(--ease); user-select: none; -webkit-user-drag: none; }
 .viewer-image.dragging { transition: none; }
 @keyframes photo-in { from { opacity: 0; } to { opacity: 1; } }
-.viewer-info { display: flex; align-items: center; gap: 16px; }
-.viewer-name { font-size: 12px; color: var(--text-primary); font-family: var(--font); }
-/* 原图准备阶段反馈：与文件名同排，低调呈现真实阶段（读取数据块 / 解密中） */
-.viewer-status { font-size: 11px; color: var(--accent); font-family: var(--font); letter-spacing: 0.5px; }
-
 /* 动画关键帧（被导出对话框等复用） */
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes dialog-in { from { opacity: 0; transform: scale(0.95) translateY(10px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+@keyframes dialog-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
 /* ===== 导出对话框：两栏工作台（左选片 / 右配置） ===== */
 .export-dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.84); display: flex; align-items: center; justify-content: center; z-index: 4000; animation: fade-in 0.2s var(--ease); }

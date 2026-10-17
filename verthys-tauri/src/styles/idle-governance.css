@@ -103,8 +103,8 @@ body.reduced-motion .toast-dot::after {
   animation-play-state: running !important;
 }
 
-/* 品牌字标逐字组装豁免（身份语义不失真）：组装为一次性成形
- *   （0.5-1.3s），冻结在起始帧（opacity 0 + 位移缩放）等于品牌标识
+/* 品牌字标逐字凝聚豁免（身份语义不失真）：凝聚为一次性成形
+ *   （0.5-1.3s），冻结在起始帧（opacity 0 + 位移）等于品牌标识
  *   整体消失 — 降级期间打开弹窗/回主界面即见品牌缺失。一次性动画
  *   成形后零持续开销，不构成常驻负载，故列为核心保留集。 */
 body.reduced-motion .brand-wordmark .wm-glyph {
@@ -114,10 +114,40 @@ body.reduced-motion .brand-wordmark .wm-glyph {
 /* backdrop-filter「减少」档已无消费者（常态动效无实时
  * backdrop-filter，此档无对应规则，编号仅保留层级连续性） */
 
+/* ===== 3.1 idle：一次性入场动画豁免（内容语义不失真） =====
+ *   入场动画为一次性成形（0.5-1.3s）：冻结在起始帧（opacity 0 + 位移）
+ *   等于内容整体不可见 —— 空闲期间挂载的品牌字标即整体缺失，须等下一次
+ *   交互才能出现（实测：空闲态重挂载时 playState=paused / opacity=0）。
+ *   成形后零持续开销，不构成常驻负载，故与交互动画同列核心保留集。
+ *   维护契约：新增一次性入场动画须加入本豁免清单；
+ *   循环氛围/状态动画（呼吸/微跳/旋转）仍由通配规则暂停。 */
+.idle-idle .brand-wordmark .wm-glyph,
+.idle-deep-idle .brand-wordmark .wm-glyph,
+.idle-idle .ff-field :is(.ff-node, .ff-overline, .ff-title, .sc-desc),
+.idle-deep-idle .ff-field :is(.ff-node, .ff-overline, .ff-title, .sc-desc) {
+  animation-play-state: running !important;
+}
+/* 悬浮场基准线写入为伪元素一次性动画 — 须与本体同列豁免（否则空闲
+ * 态打开弹窗时基准线停在零宽起始帧，标题两侧线条缺失） */
+.idle-idle .ff-field .ff-title::before,
+.idle-idle .ff-field .ff-title::after,
+.idle-deep-idle .ff-field .ff-title::before,
+.idle-deep-idle .ff-field .ff-title::after {
+  animation-play-state: running !important;
+}
+/* 主界面副标「选择模块」为一次性末拍显影 — 同列豁免
+ * （谱线回声不列入：该元素同时承载循环呼吸/微跳氛围动画，元素级
+ * 豁免无法只放开入场而不放开氛围 —— 其入场自挂载后 ~1s 起播，
+ * 必在进入主界面的那次交互之后，实际不会被空闲暂停拦住） */
+.idle-idle .home-view .hub-sub,
+.idle-deep-idle .home-view .hub-sub {
+  animation-play-state: running !important;
+}
+
 /* 空闲治理优先于降级豁免：idle 及以下时交互动画同样静止
  *   （降级豁免不得反向击穿空闲暂停 — 特异性压制；
- *   品牌字标豁免一并纳入本条，空闲暂停优先于其降级豁免） */
-body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot, .wm-glyph),
+ *   一次性入场豁免同样受本条约束 —— 空闲暂停优先） */
+body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot),
 body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot)::before,
 body.reduced-motion :is(.idle-idle, .idle-deep-idle) :is(.anim-interactive, .cs-rail-packet, .toast-dot)::after {
   animation-play-state: paused !important;

@@ -73,16 +73,28 @@ let statusTimer: ReturnType<typeof setTimeout> | null = null;
 let copiedTimer: ReturnType<typeof setTimeout> | null = null;
 let exportDoneTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** 提示文案字符上限：异常原文（如 CSP 长串、堆栈）不得把提示撑满界面 */
+const TOAST_MAX_CHARS = 160;
+
+/** 规整提示文案：折叠换行与连续空白、去首尾空白、超长截断加省略号。
+ *  防御性收敛在本层——任何调用方误传超长原始异常文本，渲染都不会失控。 */
+const normalizeToastMessage = (msg: string): string => {
+  const collapsed = msg.replace(/\s+/g, " ").trim();
+  return collapsed.length > TOAST_MAX_CHARS
+    ? collapsed.slice(0, TOAST_MAX_CHARS) + "…"
+    : collapsed;
+};
+
 /** 显示顶部错误提示（红色，默认 2.5s 自动消失） */
 const showError = (msg: string, duration: number = ERROR_DURATION): void => {
-  toastState.error.value = msg;
+  toastState.error.value = normalizeToastMessage(msg);
   if (errorTimer) clearTimeout(errorTimer);
   errorTimer = setTimeout(() => { toastState.error.value = ""; }, duration);
 };
 
 /** 显示底部状态提示（成功 / 中性，默认 2.5s 自动消失） */
 const showStatus = (msg: string, duration: number = STATUS_DURATION): void => {
-  toastState.status.value = msg;
+  toastState.status.value = normalizeToastMessage(msg);
   if (statusTimer) clearTimeout(statusTimer);
   statusTimer = setTimeout(() => { toastState.status.value = ""; }, duration);
 };
@@ -96,13 +108,16 @@ const showCopied = (): void => {
 
 /** 显示顶部导出完成提示（success/error 变体，2.6s 自动消失） */
 const showExportDone = (msg: string, type: "success" | "error"): void => {
-  toastState.exportDone.value = { msg, type };
+  toastState.exportDone.value = { msg: normalizeToastMessage(msg), type };
   if (exportDoneTimer) clearTimeout(exportDoneTimer);
   exportDoneTimer = setTimeout(() => { toastState.exportDone.value = null; }, EXPORT_DONE_DURATION);
 };
 
 /** 写入 / 刷新剪贴板安全倒计时状态（null 收起；秒数由 useClipToast 逐秒推入） */
 const setClip = (state: ToastClip | null): void => {
+  /* 保持载荷对象身份不变：useClipToast 的「单写者自守 / 卸载归属判定」
+   * 依赖写入与读取间的对象身份稳定，禁止在此复制或改写载荷对象；
+   * 该通道文案为场景标签（短文本），不参与异常原文长度防护。 */
   toastState.clip.value = state;
 };
 

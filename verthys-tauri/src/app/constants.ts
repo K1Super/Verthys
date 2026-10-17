@@ -48,6 +48,14 @@ export const TRANSITION = {
    *  materialize 全屏过渡的满帧窗口 —「星系落定后氛围苏醒」语义
    *  精确保持（预挂载提前量已内含：ENTER_T_MS - PREWARM_MOUNT） */
   MAINVIEW_AMBIENT_WAIT: ENTER_T_MS - PREWARM_MOUNT,
+  /** 主界面三元素统一入场起笔时刻（ms — 自解除冻结/主界面挂载起）：
+   *  解除 prewarm 后整层以不透明度浮现（--dur-page-enter 1.9s @ --ease
+   *  ease-out — 前置上升，约 1/4 时长处该层已近八成可辨）。
+   *  品牌字标 / 谱线回声 / 副标在此刻**同刻起笔**：早于此刻则动作落在
+   *  整层尚近透明的窗口内、待整层显影完成时动作已静止 ⇒ 观感为「直接
+   *  出现」；晚于此刻则白留空窗。模块切回无整层渡越，此值即成为
+   *  交叉淡入（0.35s）之后的自然节拍。 */
+  HUB_ENTRANCE_AT: 450,
 } as const;
 
 /** 无障碍编排（prefers-reduced-motion）：引擎正渡整体停用（无大幅

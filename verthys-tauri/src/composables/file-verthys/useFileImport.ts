@@ -99,6 +99,25 @@ export type FileImportErrorCode =
   | "E_FILE_TOO_LARGE"
   | "E_DISK_FULL";
 
+/** 错误码 → 面向用户的简洁文案。
+ *  禁止把原始异常文本（如 WebAssembly/CSP 报错、堆栈）直出界面：
+ *  异常文本可达数千字符，会把提示撑满窗口。 */
+const FILE_IMPORT_ERROR_TEXT: Record<FileImportErrorCode, string> = {
+  E_STAT_FAILED: "无法读取文件信息",
+  E_READ_FAILED: "读取文件失败",
+  E_ENCRYPT_FAILED: "文件加密失败",
+  E_CHUNK_FAILED: "数据块写入失败",
+  E_META_FAILED: "文件元数据写入失败",
+  E_FILE_CHANGED: "文件在导入过程中被改动",
+  E_FILE_TOO_LARGE: "文件超过大小上限",
+  E_DISK_FULL: "磁盘空间不足",
+};
+
+/** 取错误码对应的用户可见文案（未知码回退为通用文案） */
+export function fileImportErrorMessage(code: FileImportErrorCode): string {
+  return FILE_IMPORT_ERROR_TEXT[code] ?? "导入失败，请重试";
+}
+
 /** 待导入文件（来自文件对话框的路径与展示名） */
 export interface ImportSourceFile {
   /** 绝对路径（来自用户显式选择） */

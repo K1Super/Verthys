@@ -1,7 +1,7 @@
 <!--
   CosmicEmpty.vue — 通用空态组件
-  与 CosmicLoading 视觉同源：静止的圆环 + 暗淡中心球体
-  加载→旋转（CosmicLoading），空态→静止（CosmicEmpty），形成视觉呼应
+  与 CosmicRingLoader 视觉同源：静止的圆环 + 暗淡中心球体
+  加载→旋转（CosmicRingLoader），空态→静止（CosmicEmpty），形成视觉呼应
   无底板、无灰色背景框，居中展示
 -->
 <template>
@@ -24,9 +24,10 @@ defineProps<{
 </script>
 
 <style scoped>
-/* ===== 无底板、居中展示的空态层（与 CosmicLoading 视觉同源） =====
+/* ===== 无底板、居中展示的空态层（与 CosmicRingLoader 视觉同源） =====
  * 轨道绝对居中（top: 50%），文字/hint 在轨道下方独立定位
- * 确保轨道位置与 CosmicLoading 完全一致，消除加载→空态切换时的位置偏移
+ * 确保轨道位置与 CosmicRingLoader（overlay 模式）完全一致，
+ * 消除加载→空态切换时的位置偏移
  */
 .cosmic-empty {
   position: absolute;

@@ -19,8 +19,11 @@ pub const DEFAULT_IPC_TIMEOUT: Duration = Duration::from_secs(15);
 /// 就绪检测超时（5 秒）。worker_init 后等待 worker 主动推送的 ready 信号。
 pub const READY_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Actor 优雅退出超时：发送 shutdown 后等待子进程自行退出的时间。
-/// 超时后强制 child.kill() + child.wait()。
+/// Actor 优雅退出兜底超时：发送 shutdown 后等待子进程自行退出的上限。
+///
+/// worker 已实现 {"op":"shutdown"} 主循环退出（Drop 执行安全清理），
+/// 正常路径下子进程在数十毫秒内自行退出，本超时不会触发；
+/// 仅在 worker 卡死时超时后强制 child.kill() + child.wait()。
 pub const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Drop 时等待 Actor 任务结束的总超时（5 秒）。

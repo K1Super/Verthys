@@ -1,18 +1,24 @@
 <!--
   HomeView.vue — 主界面默认视图（深空巡天 · 引力星图）
   非对称构图（拒绝居中对称模板）：
-    左 8%  — 品牌星弦衡列体字标（BrandMark compact 级 — 与引导页
+    左 8%  — 品牌星晶棱镜体字标（BrandMark compact 级 — 与引导页
               同源字形库与运动表，跨场景品牌形态一致）+ 谱线回声 + 静默引导
     右侧   — 引力星图 HomeAtlas（非同心轨道 + 奇点 + 差速航点）
     对角视觉张力：Dock → 品牌 → 星图 → 深空（阅读动线成势）
   视差策略：本层内容（品牌/星图）不参与指针视差 — 深度感全部
     由 CosmicBackground 三层星场视差承担；内容层恒定静止保证
     品牌文字始终物理像素对齐（零亚像素栅格化 → 恒定锐利）。
-  入场编排：逐字升轨入列（左→右加速扫掠）→ 谱线生长 → 副标淡升
+ 统一入场编排（三元素同刻起笔、一笔书写 — 单一权威见 animations.css 编排段）：
+    品牌逐字凝聚（2D 平移 + 不透明度，递减加速扫掠）
+    ‖ 谱线逐条自各自基线下升起（同通道同缓动）
+    ‖ 副标显影（同通道同缓动）
     → 星图同步揭示（HomeAtlas 内部编排）— 一次性 backwards 零跳变。
+    三者起笔时刻同为 TRANSITION.HUB_ENTRANCE_AT（与整层浮现可辨度对齐，
+    避免动作被整层淡入掩盖 ⇒ 观感为直接出现）。
+    全程零重采样：文字与矢量承载层只用 2D 平移与不透明度。
 -->
 <template>
-  <div class="home-view">
+  <div class="home-view" :style="{ '--hub-t0': hubT0 }">
     <!-- 引力星图（右侧 — 静态锚定） -->
     <div class="atlas-pos">
       <HomeAtlas />
@@ -20,8 +26,8 @@
 
     <!-- 品牌区（左侧 — 静态锚定） -->
     <div class="brand-pos">
-      <!-- 星弦衡列体字标（compact 级 — 与引导页同源字形库/运动表，
-           幅度收敛；形态细节：光门发丝 V / 悬锤垂针 Y） -->
+      <!-- 星晶棱镜体字标（compact 级 — 与引导页同源字形库/运动表，
+           材质与幅度收敛；形制：棱镜口 V / 悬锤垂针 Y / 能量芯 H） -->
       <h1 class="brand-h1">
         <BrandMark level="compact" />
       </h1>
@@ -46,7 +52,7 @@
         ></i>
       </div>
 
-      <p class="hub-sub">选择模块</p>
+      <p class="hub-sub" :style="{ '--sub-d': subDelay + 'ms' }">选择模块</p>
     </div>
   </div>
 </template>
@@ -55,14 +61,22 @@
 import HomeAtlas from "./HomeAtlas.vue";
 import BrandMark from "../common/BrandMark.vue";
 import { useSpectraTicks } from "../../composables/useSpectraTicks";
+import { TRANSITION } from "../../app/constants";
 
 /* 品牌字标（common/BrandMark.vue — compact 级）：
- * 字形与运动参数由 useBrandTitle 唯一权威源直出，与引导页同源同轨，
- * 仅级别幅度收敛（组件内部自持模型，此处零参数透传） */
+ * 字形/四层叠材/运动参数由 useBrandTitle 唯一权威源直出，与引导页同源同轨，
+ * 仅级别材质与幅度收敛（组件内部自持模型，此处零参数透传） */
 
 /* 谱线回声参数 — echo 变体（与引导页充能组共享唯一权威源
  * useSpectraTicks：光谱色/时序/呼吸/微跳逐线差化） */
 const ticks = useSpectraTicks("echo");
+
+/* 三元素统一起笔时刻（单一权威 = TRANSITION.HUB_ENTRANCE_AT）：
+ * 与整层浮现（materialize 组不透明度）的可辨度对齐，使入场动作全程
+ * 落在整层已可辨的窗口内 —— 早于此刻动作会被整层淡入掩盖，观感为
+ * 「直接出现」。品牌侧经 --hub-t0 注入 CSS；谱线/副标由各自数据派生。 */
+const hubT0 = TRANSITION.HUB_ENTRANCE_AT + "ms";
+const subDelay = TRANSITION.HUB_ENTRANCE_AT;
 
 /* 视差策略：品牌区/星图静态锚定（无指针视差）— 深度感由
  * CosmicBackground 三层星场视差承担；内容层零位移 = 品牌文字
@@ -103,39 +117,23 @@ const ticks = useSpectraTicks("echo");
 
 /* ============================================================================
  * 品牌字标：全部复用全局共享体系（animations.css
- * .brand-wordmark + .wm-glyph + wm-assemble — compact 级幅度经
- * .brand-wordmark--compact 变量覆写：笔画重量/雕刻偏移/入射强度收敛，
+ * .brand-wordmark + .wm-glyph + wm-crystallize — compact 级材质经
+ * .brand-wordmark--compact 变量覆写：体宽/棱边与折射偏移/凝聚幅度收敛，
  * 与引导页引导级同源同轨）
  * ========================================================================== */
 
-/* ===== 谱线回声（基础形态与驻留动效见全局 animations.css 共享体系；
- * 此处仅声明入场编排 + 驻留接入时序 — 呼吸/微跳延迟均精确对齐自身
- * 入场结束时刻，起始帧 = 当前帧零跳变） ===== */
+/* ===== 谱线回声（入场/驻留动效与统一令牌见全局 animations.css 编排段 —
+ * 本文件只承载布局） ===== */
 .hub-ticks {
   display: flex;
   align-items: flex-end;
   height: 14px;
   margin-top: 22px;
 }
-.hub-ticks .spectra-tick {
-  animation:
-    tick-in 0.7s var(--ease) var(--td, 0ms) backwards,
-    spectra-breathe var(--sd, 5s) ease-in-out var(--sp, 700ms) infinite,
-    spectra-jitter var(--jd, 6s) linear var(--jp, 800ms) infinite;
-}
-@keyframes tick-in {
-  0% {
-    transform: scaleY(0);
-    opacity: 0;
-  }
-  100% {
-    transform: scaleY(1);
-    opacity: var(--op, 0.5);
-  }
-}
 
 /* ===== 静默引导（无循环动画 — 安静驻留；相对品牌文字居中，
- * 负右距收缩 letter-spacing 尾距 → 精确视觉居中） ===== */
+ * 负右距收缩 letter-spacing 尾距 → 精确视觉居中；
+ * 入场见全局编排段第三幕） ===== */
 .hub-sub {
   margin-top: 20px;
   margin-right: -0.58em;
@@ -144,17 +142,6 @@ const ticks = useSpectraTicks("echo");
   letter-spacing: 0.58em;
   font-family: var(--font);
   opacity: 0;
-  animation: sub-in 0.9s var(--ease) 1.35s forwards;
-}
-@keyframes sub-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 0.9;
-    transform: translateY(0);
-  }
 }
 
 /* ===== 窄窗口适配：星图降透明度让位品牌（布局坐标系不变形） ===== */

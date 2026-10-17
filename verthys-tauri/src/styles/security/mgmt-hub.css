@@ -81,11 +81,11 @@
    全部由引擎逐帧写入变量驱动，此处严禁 transition（防二次平滑）
    ============================================================ */
 
-/* 1. 语义核心升腾（上浮 + 微放大 — 磁悬浮感） */
+/* 1. 语义核心升腾（上浮 — 磁悬浮感） */
+/* 只上浮不缩放：持续缩放会把矢量核心按非 1 比例重采样，
+ * 悬浮态一停即"模糊 → 清晰"，故升腾只用平移承载 */
 .mh-sema {
-  transform:
-    translateY(calc(var(--lift, 0) * -1px))
-    scale(calc(1 + var(--lift, 0) * 0.008));
+  transform: translateY(calc(var(--lift, 0) * -1px));
   transform-origin: 100px 100px;
   transform-box: view-box;
 }
@@ -308,9 +308,9 @@
 }
 .mgmt-x-enter-from {
   opacity: 0;
-  transform: translateY(14px) scale(0.985);
+  transform: translateY(14px);
 }
 .mgmt-x-leave-to {
   opacity: 0;
-  transform: translateY(-10px) scale(0.99);
+  transform: translateY(-10px);
 }

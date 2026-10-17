@@ -1,17 +1,17 @@
 <!--
   UnlockView.vue — 动态引导页（星系协同）
   与偏轴旋涡星系逆渡（INTRO_T_MS）同步编排：
-    0-3s    星系倒卷成型（全屏逆渡）‖ VERTHYS 星弦衡列体字标
-            逐字升轨入列（定制字形装配）+ 谱线组逐线充能
+    0-3s    星系倒卷成型（全屏逆渡）‖ VERTHYS 星晶棱镜体字标
+            逐字星晶凝聚（定制字形装配）+ 谱线组逐线充能
     3s+     静旋驻留 ‖ 谱线呼吸 ‖ 进入提示浮现（线体极简 · 无呼吸静态）
-    点击    逐字离轨升离（外缘先走）+ 谱线组塌缩（外缘先收）
+    点击    逐字折光消散（外缘先走）+ 谱线组塌缩（外缘先收）
             + 丝线 dash 收回 → 星系正渡（warping）；入场动画未完成的组
             改走软离场（整组淡出，不打断入场）
-  字标设计（零渐变 · 定制连续笔画字形 — 唯一样式见 common/BrandMark.vue）：
-    连续光弦笔画（零切口）+ 光门发丝 V + 悬锤垂针 Y +
-    双层雕刻深度 + 单一强调（H 定音弦）— 形与动皆为设计定值
-  反大众化约束：无同心圆环 / 无渐变 / 无等距逐字浮现 / 无规整加载条；
-    升轨摆角交替异号、两翼强中弱，时序左→右加速扫掠 — 阵形感非随机感
+  字标设计（半透明晶棱 · 定制柔顺曲线字形 — 唯一样式见 common/BrandMark.vue）：
+    四层光学叠材（折射影 / 玻璃体 / 棱边光 / 能量芯）+ 圆端面柔顺曲线 +
+    棱镜口 V + 悬锤垂针 Y — 形与动皆为设计定值
+  反大众化约束：无同心圆环 / 无等距逐字浮现 / 无规整加载条；
+    双向量平移凝聚、两翼强中弱，时序左→右加速扫掠
 -->
 <template>
   <div
@@ -40,9 +40,9 @@
 
     <!-- 品牌核心视觉 -->
     <div class="brand-core" :class="{ leaving: leaving && !softBrand, soft: leaving && softBrand }">
-      <!-- 主标题：VERTHYS 星弦衡列体字标（定制连续笔画字形 — 光门发丝 V /
-           悬锤垂针 Y / 双层雕刻；三级同源之引导级，
-           形态与运动参数见 useBrandTitle 唯一权威源） -->
+      <!-- 主标题：VERTHYS 星晶棱镜体字标（定制连续笔画字形 — 棱镜口 V /
+           悬锤垂针 Y / 能量芯 H；三级同源之引导级，
+           字形与四层叠材见 useBrandTitle 唯一权威源） -->
       <h1 class="brand-h1">
         <BrandMark level="intro" />
       </h1>
@@ -158,10 +158,10 @@ const kickAura = () => {
 };
 
 /* ============================================================================
- * 星弦衡列体字标 — 形态/运动参数由 useBrandTitle 全局唯一权威源生成
+ * 星晶棱镜体字标 — 字形/材质/运动参数由 useBrandTitle 全局唯一权威源生成
  *   （与主界面 HomeView 同源：同一字形库与设计运动表，跨场景形态一致）：
- *   定制连续笔画字形（光门发丝 V / 悬锤垂针 Y / 双层雕刻）/
- *   单强调锚点（H 定音弦）/ 升轨入列 + 外缘先走离轨升离
+ *   四层光学叠材（折射影 / 玻璃体 / 棱边光 / 能量芯）/
+ *   棱镜口 V + 悬锤垂针 Y / 星晶凝聚入场 + 折光消散离场
  *   注：BrandMark 内部自持模型（模板直出）；此处仅取入场完成时刻
  *   用于软离场门控 — 同一权威源两处调用，零硬编码漂移
  * ========================================================================== */
@@ -330,18 +330,20 @@ onBeforeUnmount(() => {
 @keyframes fil-orbit {
   to { stroke-dashoffset: -1; }
 }
-/* 揭示：dash 自零生长 + 微缩放渐显（与星系逆渡成型同步，逐线错峰） */
+/* 揭示：dash 自零生长 + 渐显（与星系逆渡成型同步，逐线错峰）。
+ * 不含缩放：轨道为细矢量笔画，缩放会按非 1 比例重采样 —
+ * 揭示中即"模糊 → 清晰"跳变；倾角保持恒定基态 */
 @keyframes fil-reveal-a {
-  from { opacity: 0; transform: rotate(-13deg) scale(0.965); stroke-dasharray: 0 0.5 0 0.5; }
-  to { opacity: 0.9; transform: rotate(-13deg) scale(1); stroke-dasharray: 0.46 0.06 0.3 0.18; }
+  from { opacity: 0; transform: rotate(-13deg); stroke-dasharray: 0 0.5 0 0.5; }
+  to { opacity: 0.9; transform: rotate(-13deg); stroke-dasharray: 0.46 0.06 0.3 0.18; }
 }
 @keyframes fil-reveal-b {
-  from { opacity: 0; transform: rotate(21deg) scale(0.965); stroke-dasharray: 0 0.5 0 0.5; }
-  to { opacity: 0.75; transform: rotate(21deg) scale(1); stroke-dasharray: 0.12 0.1 0.52 0.26; }
+  from { opacity: 0; transform: rotate(21deg); stroke-dasharray: 0 0.5 0 0.5; }
+  to { opacity: 0.75; transform: rotate(21deg); stroke-dasharray: 0.12 0.1 0.52 0.26; }
 }
 @keyframes fil-reveal-c {
-  from { opacity: 0; transform: rotate(-6deg) scale(0.965); stroke-dasharray: 0 0.5 0 0.5; }
-  to { opacity: 0.7; transform: rotate(-6deg) scale(1); stroke-dasharray: 0.3 0.08 0.38 0.24; }
+  from { opacity: 0; transform: rotate(-6deg); stroke-dasharray: 0 0.5 0 0.5; }
+  to { opacity: 0.7; transform: rotate(-6deg); stroke-dasharray: 0.3 0.08 0.38 0.24; }
 }
 /* 收回：dash 塌缩回隐藏模式 + 向外舒展释放（引力松开 — 非瞬时消失）；
  * fil-orbit 同名保留 → 巡行相位连续，仅揭示层被替换 */
@@ -381,28 +383,29 @@ onBeforeUnmount(() => {
 }
 
 /* ============================================================================
- * 主标题：字形/三态着色/双层雕刻/入列曲线全部复用全局共享体系
- * （animations.css .brand-wordmark + .wm-glyph + wm-assemble —
+ * 主标题：字形/四层叠材/凝聚曲线全部复用全局共享体系
+ * （animations.css .brand-wordmark + .wm-glyph + wm-crystallize —
  * 与主界面 HomeView compact 级同源，引导级幅度即共享默认值）；
- * 此处仅保留本组件专属的离轨升离编排。
+ * 此处仅保留本组件专属的折光消散编排。
  * ========================================================================== */
 
-/* 离轨升离：自落位态沿自身轴线继续升离（入列的惯性延续 — 升轨的
- * 摆穿镜像：升幅反摆、摆角反向），外缘先走与丝线塌缩同构；
+/* 折光消散：自落位态沿凝聚向量的同一轴线继续平移散离（光散去，
+ * 晶体消隐 —— 凝聚的逆向语义），外缘先走与丝线塌缩同构；
  * 加速离场曲线与星系正渡衔接；
- * 起帧 = 落位恒等态（transform:none）— 与入列终帧逐值一致，零跳变 */
+ * 仅平移与不透明度（缩放/旋转会令合成层改变光栅比例而非轴对齐
+ * 重采样 → 细亮笔画糊化再转锐，即模糊闪现）；
+ * 起帧 = 落位恒等态（transform:none）— 与凝聚终帧逐值一致，零跳变 */
 .brand-core.leaving :deep(.wm-glyph) {
-  animation: wm-eject 0.58s cubic-bezier(0.55, 0, 0.85, 0.45) var(--ed, 0ms) both;
+  animation: wm-dissolve 0.6s cubic-bezier(0.5, 0, 0.85, 0.5) var(--ed, 0ms) both;
 }
-@keyframes wm-eject {
+@keyframes wm-dissolve {
   0% {
     opacity: 1;
     transform: none;
   }
   100% {
     opacity: 0;
-    transform: translateY(calc(var(--dy, 24px) * -1.7)) rotate(calc(var(--rot, 0deg) * -1.5))
-      scale(0.92);
+    transform: translate(calc(var(--dx, 0px) * 1.5), calc(var(--dy, 23px) * -1.5));
   }
 }
 

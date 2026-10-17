@@ -91,8 +91,11 @@ defineEmits<{
   margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border-glass);
 }
 
+/* 入场只走 2D 平移与不透明度：弹窗体含表单文字与矢量控件，
+ * scale 会让内容纹理按非 1 比例缩放、结束帧再重栅格化 —
+ * 出现中即"模糊 → 清晰"跳变，故不设缩放分量。 */
 @keyframes dialog-in {
-  from { opacity: 0; transform: scale(0.95); }
-  to { opacity: 1; transform: scale(1); }
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 </style>

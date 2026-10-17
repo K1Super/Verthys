@@ -81,10 +81,12 @@ export type SnapshotProvider = (id: number) => RecordSnapshot | null;
 
 /** 防抖窗口：300ms 内的连续 delete 共享一次 flush（与旧版一致） */
 const FLUSH_DEBOUNCE_MS = 300;
-/** doFlush 单次 IPC 超时（Rust verthys_flush 使用 send_batch_with_timeout 8s/操作，
- *  lock+unlock 两次最坏 16s，前端 18s 兜底覆盖 Rust 最坏情况 + 2s IPC 开销） */
+/** 单次 verthysFlush IPC 超时。
+ *  后端 verthys_flush 为单次 flush op（clear_global_key 之外的独立调用），
+ *  Rust 侧 send_with_timeout 15s；前端 18s 兜底覆盖后端最坏情况 + 3s IPC/调度开销。 */
 const FLUSH_SINGLE_TIMEOUT_MS = 18000;
-/** waitForFlush 总超时（覆盖单次 flush 18s + 4s 开销；超时后 lockAll 继续，doFlush 后台运行） */
+/** waitForFlush 总超时（覆盖单次 flush 18s + 落盘自查 5s + 退避；超时后 lockAll 继续，
+ *  队列已由 handleFlushTimeout 重置，doFlush 不再阻塞退出路径） */
 const WAIT_FLUSH_TIMEOUT_MS = 22000;
 /* 重试次数、退避间隔与落盘自查超时属跨层预算口径，由生成常量给出：
  *   FLUSH_MAX_RETRIES / FLUSH_RETRY_BACKOFF_MS / FLUSH_VERIFY_TIMEOUT_MS */

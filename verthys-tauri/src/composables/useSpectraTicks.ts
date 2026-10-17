@@ -17,7 +17,7 @@
  * =============================================================================
  */
 
-import { INTRO } from "../app/constants";
+import { INTRO, TRANSITION } from "../app/constants";
 
 /** 谱线变体：intro = 引导页充能组 / echo = 主界面静默回声 */
 export type SpectraVariant = "intro" | "echo";
@@ -59,6 +59,12 @@ export function useSpectraTicks(variant: SpectraVariant): SpectraTick[] {
   const CHARGED_AT = INTRO.CHARGED;
   const GROW_DUR = intro ? 900 : 700; // 入场动画时长（charge/tick-in）
 
+  /* echo（主界面）入场与品牌字标**同刻起笔**：起笔基准取统一编排时刻
+   * （TRANSITION.HUB_ENTRANCE_AT，与整层浮现的可辨度对齐）；
+   * 幕内步长递减加速，与品牌逐字凝聚的扫掠同形；取确定性设计值
+   * （不带 hash 抖动 — 与品牌「形与动皆定值」的语言一致） */
+  const ECHO_FROM = TRANSITION.HUB_ENTRANCE_AT;
+
   return Array.from({ length: N }, (_, i) => {
     const h = (n: number) => hash(i + (intro ? 41 : 17), n); // 变体独立 salt 域
     const cr = h(1);
@@ -67,7 +73,7 @@ export function useSpectraTicks(variant: SpectraVariant): SpectraTick[] {
       cr < 0.68 ? "rgba(139,92,246," :
       cr < 0.88 ? "rgba(205,224,244," : "rgba(255,217,160,";
     const td = Math.round(
-      intro ? 360 + i * 165 + h(6) * 140 : 520 + i * 115 + h(6) * 150,
+      intro ? 360 + i * 165 + h(6) * 140 : ECHO_FROM + i * 76 - i * i * 5,
     );
     /* 呼吸起始 = 自身入场结束时刻（intro 需再折算 charged 挂载时间差，≥0） */
     const sm = intro

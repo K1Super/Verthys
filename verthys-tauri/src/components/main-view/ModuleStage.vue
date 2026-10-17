@@ -108,8 +108,12 @@ onMounted(() => {
   transition: margin-left 0.55s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-/* 模块切换过渡（cross-fade：新旧组件同时存在，无 out-in 死等） */
-/* 修复：z-index 层级确保新模块覆盖旧模块，杜绝视觉覆盖 */
+/* 模块切换过渡（cross-fade：新旧组件同时存在，无 out-in 死等）
+ * 修复：z-index 层级确保新模块覆盖旧模块，杜绝视觉覆盖 */
+/* 渡越只走 2D 平移与不透明度：新旧视图容器内含品牌字标等细亮笔画，
+ * scale 会使容器纹理按非 1 比例缩放、结束帧回落到 1 时再重栅格化，
+ * 形成"模糊 → 清晰"跳变（即用户所见的突然模糊一下）。
+ * 方向感由反向平移承担（入场自右入、离场向左去），不依赖缩放。 */
 .module-switch-enter-active {
   transition: opacity 0.35s var(--ease), transform 0.35s var(--ease);
   position: relative;
@@ -126,10 +130,10 @@ onMounted(() => {
 }
 .module-switch-enter-from {
   opacity: 0;
-  transform: scale(0.98) translateX(16px);
+  transform: translateX(16px);
 }
 .module-switch-leave-to {
   opacity: 0;
-  transform: scale(1.01) translateX(-12px);
+  transform: translateX(-12px);
 }
 </style>

@@ -8,21 +8,8 @@
   <div class="cert-manager verthys-module">
     <!-- 瞬时提示（错误/复制倒计时）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
 
-    <!-- 搜索栏（带类型筛选） -->
-    <VerthysSearchBar v-model="searchKey" placeholder="搜索证书 / 密钥…" add-label="新增" :sky-seed="3" @add="onAdd">
-      <template #filters>
-        <div class="search-divider"></div>
-        <div class="type-chips">
-          <button
-            v-for="t in types"
-            :key="t.id"
-            class="type-chip"
-            :class="{ active: typeFilter === t.id }"
-            @click="typeFilter = typeFilter === t.id ? '' : t.id"
-          >{{ t.label }}</button>
-        </div>
-      </template>
-    </VerthysSearchBar>
+    <!-- 搜索栏 -->
+    <VerthysSearchBar v-model="searchKey" placeholder="搜索" add-label="" :sky-seed="3" @add="onAdd" />
 
     <!-- 证书卡片网格：≥300 条启用虚拟滚动（项1），小列表保留原 v-for 路径零开销 -->
     <VirtualCardGrid
@@ -119,10 +106,10 @@
     <!-- 凭证登记窗口：左侧刻度轴 + 分区登记行 + 凭据舱，实时读数回显 -->
     <VerthysDialog
       v-model="showDialog"
-      :title="editing ? '编辑证书' : '新增证书或密钥'"
+      :title="editing ? '编辑证书' : '添加'"
       layout="plain"
       class="reg-panel"
-      :save-label="editing ? '保存修改' : '登记入库'"
+      :save-label="editing ? '保存修改' : '确认'"
       @save="onSave"
     >
       <template #header>
@@ -135,8 +122,8 @@
             </svg>
           </span>
           <span class="reg-heading">
-            <span class="reg-kicker">枢钥 · 凭证登记</span>
-            <span class="reg-title">{{ editing ? '编辑证书' : '新增证书或密钥' }}</span>
+            <span class="reg-kicker">枢钥</span>
+            <span class="reg-title">{{ editing ? '编辑证书' : '添加' }}</span>
           </span>
           <button class="reg-close" type="button" @click="showDialog = false" aria-label="关闭窗口" v-tip="'关闭'">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -154,7 +141,7 @@
           </div>
           <div class="reg-row">
             <label class="reg-key" for="cert-f-name"><i class="reg-req" aria-hidden="true">*</i>名称</label>
-            <input id="cert-f-name" class="reg-input" v-model="form.name" placeholder="如 生产环境 SSL 证书" aria-required="true" />
+            <input id="cert-f-name" class="reg-input" v-model="form.name" aria-required="true" />
           </div>
           <div class="reg-row">
             <label class="reg-key" for="cert-f-type"><i class="reg-req" aria-hidden="true">*</i>类型</label>
@@ -191,7 +178,7 @@
             @dragleave.prevent="onDragLeave"
             @drop.prevent="onDrop"
           >
-            <textarea class="reg-vault-input" v-model="form.content" rows="5" placeholder="粘贴证书或密钥内容，或拖拽文件到此处…" aria-required="true"></textarea>
+            <textarea class="reg-vault-input" v-model="form.content" rows="5" aria-required="true"></textarea>
             <div class="reg-vault-bar">
               <button class="reg-vault-import" type="button" @click="triggerFileUpload">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -213,7 +200,7 @@
           </div>
           <div class="reg-row">
             <label class="reg-key" for="cert-f-note">备注</label>
-            <input id="cert-f-note" class="reg-input" v-model="form.note" placeholder="可选备注信息" />
+            <input id="cert-f-note" class="reg-input" v-model="form.note" />
           </div>
         </section>
       </div>
@@ -227,7 +214,7 @@
     </VerthysDialog>
 
     <!-- 非阻塞加载：无底板居中展示，加载完成自动消失 -->
-    <CosmicLoading :show="loading" text="正在加载证书数据…" />
+    <CosmicRingLoader :overlay="true" :show="loading" text="正在加载证书数据…" />
 
     <!-- 删除二次确认弹窗 -->
     <ConfirmDelete
@@ -261,7 +248,7 @@ import { useCardShine } from "../../composables/useCardShine";
 import { useToastCenter } from "../../composables/useToastCenter";
 import VerthysSearchBar from "../common/verthys-ui/VerthysSearchBar.vue";
 import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
-import CosmicLoading from "../common/cosmic/CosmicLoading.vue";
+import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
@@ -310,18 +297,13 @@ const types = [
 ];
 
 const searchKey = ref("");
-const typeFilter = ref("");
 /* 项2：shallowRef 替代 ref，避免 Vue 对 certs 数组内每条记录深度代理
  * （每条记录含 content/密钥等敏感字段，万条记录深度代理开销 200-500ms） */
 const certs = shallowRef<CertEntry[]>([]);
 
 const filteredCerts = computed(() => {
   const k = searchKey.value.trim().toLowerCase();
-  const t = typeFilter.value;
-  return certs.value.filter(c =>
-    (!k || c.name.toLowerCase().includes(k)) &&
-    (!t || c.type === t)
-  );
+  return certs.value.filter(c => !k || c.name.toLowerCase().includes(k));
 });
 
 const getTypeLabel = (type: string) => types.find(t => t.id === type)?.label || type;
@@ -735,13 +717,6 @@ useModuleDialogGuard("certs", () => {
 
 <style scoped>
 /* CertManager 模块特有样式 */
-
-/* 类型筛选 chips */
-.search-divider { width: 1px; height: 16px; background: var(--border-glass); flex-shrink: 0; }
-.type-chips { display: flex; gap: 4px; flex-shrink: 0; }
-.type-chip { padding: 3px 8px; font-size: 10px; border: 1px solid var(--border-glass); border-radius: 10px; background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.2s; letter-spacing: 0.5px; white-space: nowrap; }
-.type-chip:hover { color: var(--text-primary); border-color: var(--border-hover); }
-.type-chip.active { color: var(--accent); border-color: rgba(0,212,255,0.3); background: rgba(0,212,255,0.08); }
 
 /* 证书信息 */
 .cert-info { display: flex; flex-direction: column; gap: 3px; margin-bottom: 6px; }

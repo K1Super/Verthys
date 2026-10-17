@@ -81,7 +81,10 @@
   96% { transform: translate(1px, 0); opacity: 0.2; }
 }
 
-/* ===== 对话框入场 ===== */
+/* ===== 对话框入场 =====
+ * 只走 2D 平移与不透明度：进入中的容器内含文字与矢量控件，
+ * scale 会令内容纹理按非 1 比例缩放、结束帧再重栅格化，
+ * 出现中即"模糊 → 清晰"跳变 — 故入场曲线不设缩放分量 */
 @keyframes overlay-in {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -89,11 +92,11 @@
 @keyframes dialog-in {
   from {
     opacity: 0;
-    transform: scale(0.95) translateY(8px);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
-    transform: scale(1) translateY(0);
+    transform: translateY(0);
   }
 }
 
@@ -201,23 +204,87 @@ body::after {
 }
 
 /* ============================================================================
- * 品牌字标共享体系（VERTHYS 星弦衡列体 — 引导级 / 主界面级 / 弹窗级
- * 唯一样式源）。形态与运动参数由 useBrandTitle 单源产出（定制连续
- * 笔画字形 / 逐字设计运动表），渲染载体为 BrandMark 组件。
+ * 主界面统一入场编排（单一权威 — 三元素同刻起笔、一笔书写）
+ * 适用：.home-view 内的 VERTHYS 品牌字标 / 谱线回声 / 「选择模块」副标。
+ *   ① 同刻起笔：三者起笔时刻同为 --hub-t0（由 HomeView 自
+ *      TRANSITION.HUB_ENTRANCE_AT 注入 —— 该时刻与整层浮现的可辨度对齐，
+ *      使入场动作全程落在整层已可辨的窗口内，杜绝「动作被整层淡入掩盖
+ *      ⇒ 观感为直接出现」；其余场景未定义该变量 ⇒ 默认 0ms，互不牵连）。
+ *   ② 同语言：通道 = 2D 平移 + 不透明度（文字与矢量承载层禁缩放与旋转，
+ *      只走零重采样通道）；缓动 = 与品牌逐字凝聚同族
+ *      cubic-bezier(0.2, 1, 0.34, 1)。
+ *   ③ 幕内步长同为「递减加速」扫掠（品牌逐字 66→28ms；谱线
+ *      i*76 − i²*5 = 0/71/132/183/224/255ms）——三束各自成波、同刻起浪。
+ *   成形后零持续开销，且与谱线充能、品牌逐字凝聚、悬浮场逐条显影同构。
+ * ========================================================================== */
+.home-view {
+  --hub-ease: cubic-bezier(0.2, 1, 0.34, 1);
+  --hub-dur: 0.7s;
+}
+
+/* 第一幕：品牌逐字凝聚 —— 规则见下方品牌共享体系 .wm-glyph / wm-crystallize
+ * （延迟 = --hub-t0 + 逐字差化；本幕缓动族即上方 --hub-ease 之来源） */
+
+/* 第二幕：谱线逐条自各自基线下升起 + 显影。
+ * 通道/缓动/幕内步长与品牌同源：升距取自身线高 + 6px，各线自各自基线
+ * 下浮出（非统一位移）；起笔基准 --td 由 useSpectraTicks 自
+ * HUB_ENTRANCE_AT 派生（与品牌同刻）；终帧 = 静态基态（零跳变、零重采样）。 */
+.hub-ticks .spectra-tick {
+  animation:
+    tick-in var(--hub-dur, 0.7s) var(--hub-ease, cubic-bezier(0.2, 1, 0.34, 1)) var(--td, 0ms) backwards,
+    spectra-breathe var(--sd, 5s) ease-in-out var(--sp, 700ms) infinite,
+    spectra-jitter var(--jd, 6s) linear var(--jp, 800ms) infinite;
+}
+@keyframes tick-in {
+  from {
+    transform: translateY(calc(var(--th, 8px) + 6px));
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: var(--op, 0.5);
+  }
+}
+
+/* 第三幕：副标「选择模块」同刻显影（载体无循环动画 — 安静驻留）。
+ * --sub-d 由 HomeView 注入：取统一起笔时刻（与品牌、谱线同刻起笔）。 */
+.hub-sub {
+  animation: sub-in var(--hub-dur, 0.7s) var(--hub-ease, cubic-bezier(0.2, 1, 0.34, 1))
+    var(--sub-d, 1400ms) forwards;
+}
+@keyframes sub-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 0.9;
+    transform: translateY(0);
+  }
+}
+
+/* ============================================================================
+ * 品牌字标共享体系（VERTHYS 星晶棱镜体 — 引导级 / 主界面级 / 弹窗级
+ * 唯一样式源）。字形与运动参数由 useBrandTitle 单源产出（连续笔画
+ * 字形 / 逐字设计运动表），渲染载体为 BrandMark 组件。
  *
  * 分层职责：
- *   此处（全局）   — 跨级恒定：画布比例 / 三态着色（冰银·强调·光门发丝）/
- *                    双层雕刻暗色克隆 / 切割语言（butt 端面 + miter 尖角）/
- *                    入列曲线 wm-assemble；
- *   组件（scoped） — 场景专属编排：UnlockView 离轨升离 wm-eject 等。
+ *   此处（全局）   — 跨级恒定：画布比例 / 四层光学叠材的几何与浓度
+ *                    （折射影 · 玻璃体 · 棱边光；能量芯见三态覆写）/
+ *                    笔画语言（圆端面 + 圆角转接）/ 凝聚曲线；
+ *   组件（scoped） — 场景专属编排：UnlockView 折光消散等。
  *
- * 性能红线：零遮罩零滤镜零渐变；动画仅动 transform/opacity（合成器
- * 属性），合成层数量恒定为逐字一层。
+ * 光楔（玻璃体 / 棱边光 / 能量芯的渐变）由组件内联注入并配逐实例唯一
+ * id（同页多实例不撞），故此处只承载与 id 无关的材质几何、浓度与动效。
+ *
+ * 性能红线：零遮罩零滤镜、零渐变动画 —— 光楔与叠层全为静态 SVG
+ * 材质（入场后零重算）；动画仅动 transform/opacity（合成器属性），
+ * 合成层恒定为逐字一层。
  *
  * 级别幅度全部 CSS 变量化（.brand-wordmark 默认 = 引导级原值；
  * --compact / --mini 覆写）：
- *   --wm-stroke 实弦重量 / --wm-hollow-stroke 光门发丝宽 /
- *   --wm-carve-x·y 雕刻克隆偏移 / --wm-from-scale·--wm-bo 入列缩放与过冲
+ *   --wm-body-w 玻璃体笔宽 / --wm-edge-w·x·y 近侧棱光笔宽与受光偏移 /
+ *   --wm-efar-w·x·y 远侧棱光 / --wm-refract-x·y·op 折射影偏移与浓度
  * ========================================================================== */
 .brand-wordmark {
   display: block;
@@ -225,128 +292,144 @@ body::after {
   /* 画布比例 = 字形坐标系 618 × 125（高度定级、宽度自算） */
   aspect-ratio: 618 / 125;
   width: auto;
-  /* 升轨/离轨发生在画布之外 — 根画布不得裁切 */
+  /* 凝聚/消散发生在画布之外 — 根画布不得裁切 */
   overflow: visible;
 
-  /* 引导级默认（全量身份 — 光门发丝 V + 悬锤垂针 Y） */
+  /* 引导级默认（全量身份 — 棱镜口 V + 悬锤垂针 Y + 能量芯 H） */
   height: 105px;
-  --wm-stroke: 10;
-  --wm-hollow-stroke: 1.8;
-  --wm-carve-x: 3px;
-  --wm-carve-y: 3.7px;
-  --wm-hollow-carve-x: 1px;
-  --wm-hollow-carve-y: 1.2px;
-  --wm-from-scale: 0.94;
-  --wm-bo: 1.012;
+  --wm-body-w: 10;
+  --wm-edge-w: 3.4;
+  --wm-edge-x: -1.7px;
+  --wm-edge-y: -2px;
+  --wm-efar-w: 2.4;
+  --wm-efar-x: 1.4px;
+  --wm-efar-y: 1.7px;
+  --wm-refract-x: 3.2px;
+  --wm-refract-y: 3.9px;
+  --wm-refract-op: 0.5;
 }
 
-/* compact 级（主界面左区 — 同源形态、幅度与雕刻收敛）：
- * 重量 10.2 / 光门 2.2 / 克隆 (1.6,2)px / 过冲 1.009 */
+/* compact 级（主界面左区 — 同源材质，偏移与浓度按字号收敛）：
+ * 体 10.2 / 近棱 3.6 @ (-0.9,-1.1) / 远棱 2.5 @ (0.8,0.95) */
 .brand-wordmark--compact {
   height: 50px;
-  --wm-stroke: 10.2;
-  --wm-hollow-stroke: 2.2;
-  --wm-carve-x: 1.6px;
-  --wm-carve-y: 2px;
-  --wm-hollow-carve-x: 0.55px;
-  --wm-hollow-carve-y: 0.65px;
-  --wm-from-scale: 0.96;
-  --wm-bo: 1.009;
+  --wm-body-w: 10.2;
+  --wm-edge-w: 3.6;
+  --wm-edge-x: -0.9px;
+  --wm-edge-y: -1.1px;
+  --wm-efar-w: 2.5;
+  --wm-efar-x: 0.8px;
+  --wm-efar-y: 0.95px;
+  --wm-refract-x: 1.8px;
+  --wm-refract-y: 2.2px;
+  --wm-refract-op: 0.45;
 }
 
-/* mini 级（弹窗品牌字 — 静默简化版：光门于模型层收敛为实弦，
- * 仅保留雕刻与强调锚点；小字号相对加粗补偿光学减重）
- * 重量 11.5 / 克隆 (0.9,1.1)px 微雕刻 / 过冲 1.006 */
+/* mini 级（弹窗品牌字 — 棱镜口于模型层收敛为玻璃体；偏移压至亚像素
+ * 量级以防小字号材质糊化；体相对加粗补偿光学减重）
+ * 体 11.4 / 近棱 4 @ (-0.5,-0.6) / 远棱 3 @ (0.45,0.55) */
 .brand-wordmark--mini {
   height: 30px;
   margin: 0 auto 12px;
-  --wm-stroke: 11.5;
-  --wm-carve-x: 0.9px;
-  --wm-carve-y: 1.1px;
-  --wm-from-scale: 0.97;
-  --wm-bo: 1.006;
+  --wm-body-w: 11.4;
+  --wm-edge-w: 4;
+  --wm-edge-x: -0.5px;
+  --wm-edge-y: -0.6px;
+  --wm-efar-w: 3;
+  --wm-efar-x: 0.45px;
+  --wm-efar-y: 0.55px;
+  --wm-refract-x: 0.9px;
+  --wm-refract-y: 1.1px;
+  --wm-refract-op: 0.4;
 }
 
-/* 切割语言：端切面垂直于笔画（butt）+ 锐角 miter 尖锋 —
- * 所有笔画统一在此声明（零圆头零软切）；
+/* 柔顺笔画语言：端面为圆端（round cap）+ 拐点为圆角转接（round join）——
+ * 所有笔画统一在此声明（零锐角切面零硬折角）；
  * fill: none 为字标可见性前提（笔画中心线路径填充后即非字形） */
 .wm-glyph path {
   fill: none;
-  stroke-linecap: butt;
-  stroke-linejoin: miter;
-  stroke-miterlimit: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-/* 面层与雕刻克隆（零渐变纯色） */
-.wm-face {
-  stroke-width: var(--wm-stroke);
+/* 折射影：光穿过晶体后落在右下方的位移暗像 —— 以偏移替代表模糊
+ * （零滤镜即得柔化，规避实时滤镜在动画期被逐帧重新求值） */
+.wm-refract {
+  opacity: var(--wm-refract-op);
+  transform: translate(var(--wm-refract-x), var(--wm-refract-y));
 }
-.wm-recess {
-  transform: translate(var(--wm-carve-x), var(--wm-carve-y));
-  opacity: 0.92;
-}
-.wm-recess path {
-  stroke-width: var(--wm-stroke);
-}
-
-/* 三态着色：冰银主力（六字）/ 唯一强调（H 定音弦）/ 光门发丝（V） */
-.wm-glyph--ice .wm-face {
-  stroke: #d9e6f2;
-}
-.wm-glyph--ice .wm-recess {
-  stroke: #0a1622;
-}
-.wm-glyph--accent .wm-face {
-  stroke: #16c8ea;
-}
-.wm-glyph--accent .wm-recess {
-  stroke: #06222e;
-}
-.wm-glyph--hollow .wm-face {
-  stroke: #a9bed2;
-  stroke-width: var(--wm-hollow-stroke);
-}
-/* 光门发丝的双层：克隆贴近平移（发丝字距 ≥ 克隆偏移即读出重影 —
- * 浮雕只许收窄，不并列成双线） */
-.wm-glyph--hollow .wm-recess {
-  stroke: #1e3547;
-  opacity: 0.5;
-  transform: translate(var(--wm-hollow-carve-x), var(--wm-hollow-carve-y));
-}
-.wm-glyph--hollow .wm-recess path {
-  stroke-width: var(--wm-hollow-stroke);
+.wm-refract path {
+  stroke: #03080f;
+  stroke-width: var(--wm-body-w);
 }
 
-/* 逐字升轨入列（轴线上升 → 微过冲 → 摆正归零）：
- * 运动参数为逐字设计定值（升幅/摆角/时序 — 模型层设计表驱动），
- * 无随机向量 — 阵形感取代离散感；
- * transform-box: fill-box + center bottom — 各字绕自身底心摆正
- * （Y 绕垂针尖 — 铅锤语义）；
+/* 玻璃体：半透明主材（光楔 stroke 由模板内联注入 —— 逐实例唯一 id）；
+ * 浓度经 --wm-body-op 分级，使深空背景透过笔画可见 */
+.wm-glass {
+  stroke-width: var(--wm-body-w);
+  stroke-opacity: var(--wm-body-op, 0.92);
+}
+
+/* 棱光双层：近侧（左上 · 受光面 · 最强）与远侧（右下 · 透体光打亮远壁 ·
+ * 较弱）—— 双侧棱光夹中间半透明体，截面才读作玻璃棒；
+ * 偏移量远小于体宽，读作棱边高光而非并列双线 */
+.wm-edge {
+  stroke-width: var(--wm-edge-w);
+  stroke-opacity: var(--wm-edge-op, 0.8);
+  transform: translate(var(--wm-edge-x), var(--wm-edge-y));
+}
+.wm-edge-far {
+  stroke-width: var(--wm-efar-w);
+  stroke-opacity: var(--wm-efar-op, 0.4);
+  transform: translate(var(--wm-efar-x), var(--wm-efar-y));
+}
+
+/* 材质三态浓度：玻璃体（六字）/ 能量芯（H）/ 棱镜口（V）
+ * —— 同一套叠层，仅以浓度分级出「一虚六实一芯」的层次 */
+.wm-glyph--glass {
+  --wm-body-op: 0.92;
+  --wm-edge-op: 0.8;
+  --wm-efar-op: 0.4;
+}
+.wm-glyph--core {
+  --wm-body-op: 0.95;
+  --wm-edge-op: 0.84;
+  --wm-efar-op: 0.44;
+}
+/* 棱镜口：极淡轮廓（背景几乎全透）+ 全亮近侧折光线 —— 七字中唯一「虚」，
+ * 似深空中一道光门；远侧棱光压至极弱，避免极淡轮廓被反光噪声填满 */
+.wm-glyph--prism {
+  --wm-body-op: 0.16;
+  --wm-edge-op: 1;
+  --wm-efar-op: 0.18;
+}
+
+/* 逐字星晶凝聚：自外侧与下方双向量平移入列 → 轻度越位 → 位移归零。
+ * 运动参数为逐字设计定值（模型层设计表驱动），无随机向量 —
+ * 阵形感取代离散感。
+ * 运动只用平移与不透明度：缩放/旋转会令合成层改变光栅比例或以
+ * 非轴对齐方式重采样，细亮笔画即糊化再转锐（所见模糊闪现的成因）；
+ * 平移不改变光栅比例，字标全程锐利。
+ * 纯平移与变换原点无关 — 故不声明 transform-box / transform-origin。
  * will-change 常驻（合成层终身恒定，杜绝结束后重栅格化的亚像素跳变） */
 .wm-glyph {
-  transform-box: fill-box;
-  transform-origin: center bottom;
-  animation: wm-assemble var(--dur, 1.02s) cubic-bezier(0.22, 1, 0.36, 1) var(--delay, 0ms) both;
+  animation: wm-crystallize var(--dur, 1.06s) cubic-bezier(0.2, 1, 0.34, 1)
+    calc(var(--hub-t0, 0ms) + var(--delay, 0ms)) both;
   will-change: transform, opacity;
 }
 
-/* 升轨入列：0% 自轴线下方携摆升轨（强缓出）→ 68% 轻微越过稳位
- * （物理惯性的微过冲 + 反向微摆）→ 100% 摆正归零（慢尾收稳）。
- * 末帧 transform:none 与驻留态逐值一致 — 零跳变；
- * 过冲帧强度经 --wm-bo 变量化（三级同轨，仅幅度分级收束） */
-@keyframes wm-assemble {
+/* 星晶凝聚：0% 自外侧下方以满距起步（不透明 0）→ 64% 位移略过稳位
+ * （反向微偏移后再归位）→ 100% 位移归零（慢尾收稳）。
+ * 末帧 transform:none 与驻留态逐值一致 — 零跳变、零重栅格化 */
+@keyframes wm-crystallize {
   0% {
     opacity: 0;
-    transform: translateY(var(--dy, 24px)) rotate(var(--rot, 0deg))
-      scale(var(--wm-from-scale, 0.94));
-    animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+    transform: translate(var(--dx, 0px), var(--dy, 23px));
+    animation-timing-function: cubic-bezier(0.2, 1, 0.34, 1);
   }
-  68% {
+  64% {
     opacity: 1;
-    transform:
-      translateY(calc(var(--dy, 24px) * -0.14))
-      rotate(calc(var(--rot, 0deg) * -0.12))
-      scale(var(--wm-bo, 1.012));
+    transform: translate(calc(var(--dx, 0px) * -0.07), calc(var(--dy, 23px) * -0.1));
     animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   }
   100% {

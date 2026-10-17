@@ -69,6 +69,8 @@ export interface UseGlobalKeyOptions {
   showToast: (msg: string) => void;
   /** 验证后强制动画标志（SecurityCenter 顶层持有，useViewMode 读取，onVerify 写入） */
   postVerifyAnim: Ref<boolean>;
+  /** 初始化后强制动画标志（SecurityCenter 顶层持有，useViewMode 读取，onInitKey 写入） */
+  postInitAnim: Ref<boolean>;
   /** 验证进度感知层（注入：信号订阅 + 收束完成事件驱动视图切换） */
   verifyRhythm: VerifyRhythm;
   /** 解锁进度消息（来自 useUnlockFlow，验证视图复用进度条显示） */
@@ -168,6 +170,33 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
     }
   };
 
+  /**
+   * 提交前置校验失败的统一呈现：先跑完进度与加载收束，再给出结果。
+   *
+   * 与提交路径同构 —— 点击提交后一律先走完整段进度/加载编排，
+   * 不在动画开始前抢先把结果落地（避免「点击即报错」的观感断裂）。
+   *
+   * @param keepView 对应视图的收束保持位（初始化传 postInitAnim、
+   *   验证传 postVerifyAnim），使视图在收束期间不被状态翻转抢跳。
+   */
+  const presentPreCheckError = async (
+    message: string,
+    keepView: Ref<boolean>,
+  ): Promise<void> => {
+    processing.value = true;
+    keepView.value = true;
+    options.verifyRhythm.start();
+    options.verifyRhythm.seal();
+    try {
+      await options.verifyRhythm.waitForComplete();
+    } catch (e) {
+      console.warn('[pre-check] 收束等待被中断，按已完成处理', e);
+    }
+    keepView.value = false;
+    processing.value = false;
+    options.showError(message);
+  };
+
   /* ===== 初始化全局密钥 ===== */
   /**
    * 设计约束：
@@ -189,8 +218,8 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
     // 保持 UI 状态一致，让用户明确知道需要重新选择密钥文件。
     if (!initPassword.value || !binPassword.value) return;
     if (!binBytes.value) {
-      options.showError('密钥文件未加载，请重新选择');
       binFileName.value = '';
+      await presentPreCheckError('密钥文件未加载，请重新选择', options.postInitAnim);
       return;
     }
     // 修复：客户端密码长度前置校验
@@ -204,10 +233,11 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
     // 此为前置 UX 要求提示（非后端敏感错误披露），不违反模糊化约束。
     const initPwByteLen = new TextEncoder().encode(initPassword.value).length;
     if (initPwByteLen < 8) {
-      options.showError('访问密钥至少 8 位');
+      await presentPreCheckError('访问密钥至少 8 位', options.postInitAnim);
       return;
     }
     processing.value = true;
+    options.postInitAnim.value = true;
 
     // 进度接入（与验证视图同构复用同一感知层）：
     //   信号层 = initGlobalKey 的阶段 emit（真实进度）；
@@ -257,15 +287,20 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
         options.showError('设备绑定失败，可在设置中重新绑定');
       }
     } else {
-      // 失败：冻结进度 + 视觉降级；错误提示淡入覆盖，取得视觉重心
-      options.verifyRhythm.halt();
+      /* 失败：与 onVerify 同构 —— 先跑完进度收束再呈现结果
+       * （不以冻结/降级打断编排，结果不抢先落地） */
+      options.verifyRhythm.seal();
+      try {
+        await options.verifyRhythm.waitForComplete();
+      } catch (e) {
+        console.warn('[onInitKey] 收束等待被中断，按已完成处理', e);
+      }
       const msg = result && !result.ok
         ? translateVerthysError(result)
         : (errored ? '初始化失败，请重试' : '初始化失败');
       options.showError(msg);
-      // 错误最小展示时长（取自感知层配置源，业务层不硬编码毫秒值）
-      await options.verifyRhythm.waitForHaltMin();
     }
+    options.postInitAnim.value = false;
     processing.value = false;
   };
 
@@ -290,8 +325,8 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
     // 修复：binBytes 为 null 时显示错误提示并重置 binFileName。
     if (!verifyPassword.value || !binPassword.value) return;
     if (!binBytes.value) {
-      options.showError('密钥文件未加载，请重新选择');
       binFileName.value = '';
+      await presentPreCheckError('密钥文件未加载，请重新选择', options.postVerifyAnim);
       return;
     }
     processing.value = true;
@@ -342,15 +377,22 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       binBytes.value = null;
       options.showToast('验证成功');
     } else {
-      // 失败：冻结进度 + 视觉降级；错误提示淡入覆盖，取得视觉重心
-      options.verifyRhythm.halt();
+      /* 失败与成功同构：先跑完进度收束（补满 100%）再呈现结果。
+       * 结果一律在收束完成事件之后给出 —— 不因成败抢先落地，
+       * 也不以冻结/降级打断进度与加载编排（加载动画随 processing
+       * 一直持续到收束完成，故「跑完」含进度条与加载两部分）。 */
+      options.verifyRhythm.seal();
+      try {
+        await options.verifyRhythm.waitForComplete();
+      } catch (e) {
+        // 收束中途被 halt/reset/销毁：按已完成处理，照常给出失败提示
+        console.warn('[onVerify] 收束等待被中断，按已完成处理', e);
+      }
       // 结构化错误提示：translateVerthysError 处理 VerthysResult 失败分支
       const msg = result && !result.ok
         ? translateVerthysError(result)
         : (errored ? '验证失败，请重试' : '验证失败');
       options.showError(msg);
-      // 错误最小展示时长（取自感知层配置源，业务层不硬编码毫秒值）
-      await options.verifyRhythm.waitForHaltMin();
     }
     options.postVerifyAnim.value = false;
     processing.value = false;

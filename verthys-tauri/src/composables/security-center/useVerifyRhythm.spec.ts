@@ -112,7 +112,12 @@ describe('useVerifyRhythm — 状态机与成功收束', () => {
 
   it('极快成功（skipAnimation）：跳过收束动画，立即补满并触发完成事件', async () => {
     const { env, report, frame } = createFakeEnv();
-    const rhythm = useVerifyRhythm({ env });
+    /* 策略显式注入：生产默认已改 minStartPoint（验证再快也跑完收束），
+       本用例只覆盖 skipAnimation 这一可选策略本身 */
+    const rhythm = useVerifyRhythm({
+      env,
+      config: { fastSuccessStrategy: 'skipAnimation', fastSuccessThreshold: 150 },
+    });
 
     rhythm.start();
     const complete = rhythm.waitForComplete();

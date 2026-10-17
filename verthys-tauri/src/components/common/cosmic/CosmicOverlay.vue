@@ -53,15 +53,18 @@ const onBackdrop = () => {
 .cosmic-enter-from {
   opacity: 0;
 }
+/* 遮罩与弹窗渡越只走 2D 平移与不透明度：弹窗内含文字与矢量标识，
+ * scale 会使内容纹理按非 1 比例缩放、结束帧再重栅格化，出现中即
+ * "模糊 → 清晰"跳变 — 方向感由平移承担，不依赖缩放。 */
 .cosmic-enter-from :deep(.cosmic-dialog) {
   opacity: 0;
-  transform: scale(0.92) translateY(20px);
+  transform: translateY(20px);
 }
 .cosmic-leave-to {
   opacity: 0;
 }
 .cosmic-leave-to :deep(.cosmic-dialog) {
   opacity: 0;
-  transform: scale(0.96) translateY(8px);
+  transform: translateY(8px);
 }
 </style>
