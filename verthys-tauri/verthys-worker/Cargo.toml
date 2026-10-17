@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-libloading = "0.8"
+libloading = "0.9"
 # 加密库
 sha2 = "0.10"
 hkdf = "0.12"
