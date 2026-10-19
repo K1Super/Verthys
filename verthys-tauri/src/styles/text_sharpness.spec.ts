@@ -193,6 +193,15 @@ describe("文字清晰度：入场动画只走 opacity", () => {
       ruleBody(panel, ".qd-module-node"),
       "节点锚点须为装饰环圆心（上移环半径 24px）",
     ).toMatch(/transform:\s*translate\(-50%,\s*-24px\)/);
+    /* 卫星环饰与吸积盘同一渲染语言：环饰须由引擎 Canvas 绘制（CSS 不得残留
+     * 环描边 —— DOM 侧只剩图标热区），且复用同一钟形弧段形态与路径复用机制 */
+    expect(src, "卫星环饰须由引擎绘制").toMatch(/function drawSatellites\(/);
+    expect(src, "卫星刻度环须构建为路径复用（禁逐帧路径构建）").toMatch(/makeSatBezelPath\(/);
+    expect(src, "卫星弧段须与吸积弧共用钟形形态语言").toMatch(/SAT_BELL/);
+    expect(src, "卫星环饰不得写入 DOM style（唯一逐帧写入仍为装饰环热区缩放）")
+      .not.toMatch(/sat[A-Za-z]*\.style\./);
+    expect(panel, "CSS 不得残留节点环描边（环饰归引擎 Canvas 管线）")
+      .not.toMatch(/qd-reticle|qd-node-reticle/);
     expect(src, "节点层不得有位移写入").not.toMatch(/midEl\.style\.transform/);
     expect(src, "近层不得有位移写入").not.toMatch(/nearEl\.style\.transform/);
   });

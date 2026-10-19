@@ -36,18 +36,9 @@
         @click="onNodeClick"
       >
         <div class="qd-node-orb">
-          <!-- 引力锚点环（零底托）：基准刻度环为三段非均匀断裂弧，
-               状态扇段与环同半径、恒居正上方，以弧长 + 色相编码状态；
-               字形浮于环心 —— 无实心圆盘、无辉光阴影 -->
-          <svg class="qd-node-reticle" viewBox="0 0 48 48" aria-hidden="true">
-            <path
-              class="qd-reticle-base"
-              d="M45 24 A21 21 0 0 1 12.98 41.87 M9.43 39.13 A21 21 0 0 1 11.23 7.33 M14.12 5.47 A21 21 0 0 1 43.43 16.02"
-            />
-            <path class="qd-reticle-tick" d="M7.01 11.66 A21 21 0 0 1 40.99 11.66" />
-          </svg>
-          <!-- 图标取导航栏同一权威源（useModuleNavigation 的模块图标注册表）：
-               与 Dock 逐字同一份 SVG 路径，面板与导航栏视觉严格一致 -->
+          <!-- 装饰环饰（引力锚点环）由 Canvas 引擎绘制 —— 与吸积盘同一渲染语言：
+               三段非均匀断裂刻度环 + 内外双自转能量弧 + 状态扇段 + 捕获光晕。
+               DOM 侧只留可交互的导航栏同源图标（无 DOM 描边 → 无 DOM transform）。 -->
           <span class="qd-node-icon" v-html="MODULE_ICONS[mid]"></span>
         </div>
       </div>
@@ -67,7 +58,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, toRef } from 'vue';
+import { computed, onMounted, ref, toRef } from 'vue';
 import type { ModuleId } from '../../lib/keyManager';
 import { useQuantumField } from '../../composables/security-center/useQuantumField';
 /* 模块图标（导航栏同一权威源）：节点图标与 Dock 共享同一份 SVG 路径 */
@@ -115,6 +106,10 @@ const setNodeRef = (el: unknown, idx: number) => {
 /** globalKeyReady → 引擎响应式桥接（toRef 保持引用同步，状态变化即时应答） */
 const coreReadyRef = toRef(props, 'globalKeyReady');
 
+/* 模块状态类名（与 DOM 上的 state-* 类同源）→ 引擎侧状态扇段
+ * （跨度 / 色相 / 休眠压暗）—— 单一状态源，DOM 与 Canvas 两处不会漂移 */
+const nodeStates = computed(() => props.moduleIds.map((mid) => props.moduleStateClass(mid)));
+
 /* ===== 引擎实例（watch coreReady + onBeforeUnmount 自动清理） ===== */
 const field = useQuantumField({
   panel: panelRef,
@@ -122,6 +117,7 @@ const field = useQuantumField({
   coreCluster: coreRef,
   nodes: nodeRefs,
   nodePositions: moduleNodePos,
+  nodeStates,
   coreReady: coreReadyRef,
   /* 视图切换由光水仪式完成事件驱动（传播 + 落定渲染完成后的下一帧）——
      与引导区「传播完成事件驱动」同规范，避免固定延时的时序漂移。 */
