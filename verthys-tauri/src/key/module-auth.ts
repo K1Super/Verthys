@@ -267,7 +267,7 @@ export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
   // 标记后台加载进行中（供模块组件/SecurityCenter 守卫）
   keyState.moduleKeyStatusLoading.value = true;
   try {
-    const status: Record<ModuleId, boolean> = { photo: false, accounts: false, certs: false, fileverthys: false };
+    const status: Record<ModuleId, boolean> = { photo: false, accounts: false, fileverthys: false };
     // 修复修复：enabled 默认 false（安全默认）
     //
     // 原缺陷：默认 true 意味着"保护开关开启"=所有模块需密钥验证。
@@ -277,7 +277,7 @@ export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
     //
     // 修复：默认 false（无配置记录=不开启保护）。
     // 仅当 verthys 中存在 TYPE_MODULE_KEY_CONFIG 记录且 cfg.enabled=true 时才开启。
-    const enabled: Record<ModuleId, boolean> = { photo: false, accounts: false, certs: false, fileverthys: false };
+    const enabled: Record<ModuleId, boolean> = { photo: false, accounts: false, fileverthys: false };
 
     // 修复修复：主动触发摘要扫描确保缓存就绪
     //

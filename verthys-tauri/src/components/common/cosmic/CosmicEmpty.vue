@@ -3,6 +3,15 @@
   与 CosmicRingLoader 视觉同源：静止的圆环 + 暗淡中心球体
   加载→旋转（CosmicRingLoader），空态→静止（CosmicEmpty），形成视觉呼应
   无底板、无灰色背景框，居中展示
+
+  【挂载契约 · 全模块统一（清藏 / 存签 / 拾光）】
+  本组件为容器级覆盖层（position: absolute; inset: 0），居中参照系为「最近的
+  已定位祖先」。为保证各模块空态位置一致，调用方必须将它（以及 overlay 模式
+  的 CosmicRingLoader）挂载为「模块根容器」的直接子节点 —— 根容器带
+  position: relative（如 .file-verthys / .verthys-module / .photo-album）。
+  严禁置于任何定位子容器（如 .card-grid 之外的 .masonry-scroll、
+  position: relative 的滚动/内容区）内：否则将以该子容器为参照系居中，
+  整体下移（顶部导航带高度的一半），与其余模块不齐。
 -->
 <template>
   <div class="cosmic-empty">

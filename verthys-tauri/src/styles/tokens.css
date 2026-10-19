@@ -14,7 +14,7 @@
   --bg-tertiary: rgba(20, 26, 40, 0.7);
 
   /* 星野导航带底板（单源）：冷调半透明纵向渐变，下缘自然消失 ——
-     StarlitSky 底板与「存签 / 枢钥 / 清藏」模块卡片背景共用此定义 */
+     StarlitSky 底板与「存签 / 清藏」模块卡片背景共用此定义 */
   --bar-surface: linear-gradient(
     180deg,
     rgba(13, 17, 27, 0.68),
@@ -97,6 +97,20 @@
   --dur-sweep: 1.7s;
   --dur-page-enter: 1.9s;
   --dur-page-leave: 0.45s;
+
+  /* 模块步入编排时长（单一权威 — 关键帧与编排契约见
+   * styles/animations.css；JS 侧错峰与窗口参数见 app/constants.ts
+   * MODULE_REVEAL，--reveal-dur 必须与 MODULE_REVEAL.durMs 一致）：
+   *   --reveal-dur      内容元素单次显影时长
+   *   --stage-reveal-dur 模块根渡越显影时长（短于内容显影 —
+   *                     根先成形、内容随后逐级沉积，两层不互相掩盖）
+   *   --stage-leave-dur 模块根离场时长（快于入场：让位新模块显影主体）
+   *   --mgmt-leave-dur  中枢管理视图离场时长（同上口径；入场复用
+   *                     --reveal-dur，与模块内容同一包络） */
+  --reveal-dur: 0.62s;
+  --stage-reveal-dur: 0.4s;
+  --stage-leave-dur: 0.18s;
+  --mgmt-leave-dur: 0.34s;
 }
 
 /* ===== 全局重置 ===== */

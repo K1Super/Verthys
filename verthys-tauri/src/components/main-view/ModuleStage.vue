@@ -7,7 +7,6 @@
     <transition name="module-switch">
       <HomeView v-if="!currentModule" key="home" />
       <AccountVerthys v-else-if="currentModule === 'accounts'" key="accounts" />
-      <CertManager v-else-if="currentModule === 'certs'" key="certs" />
       <PasswordTools v-else-if="currentModule === 'tools'" key="tools" />
       <PhotoAlbum v-else-if="currentModule === 'photos'" key="photos" />
       <FileVerthys v-else-if="currentModule === 'verthys'" key="verthys" />
@@ -24,7 +23,6 @@ import { TRANSITION } from "../../app/constants";
 
 /* 页面级组件懒加载：每个模块独立分包，按需加载 */
 const AccountVerthys = defineAsyncComponent(() => import("../modules/AccountVerthys.vue"));
-const CertManager = defineAsyncComponent(() => import("../modules/CertManager.vue"));
 const PasswordTools = defineAsyncComponent(() => import("../modules/PasswordTools.vue"));
 const PhotoAlbum = defineAsyncComponent(() => import("../modules/PhotoAlbum.vue"));
 const FileVerthys = defineAsyncComponent(() => import("../modules/FileVerthys.vue"));
@@ -63,7 +61,6 @@ const moduleWarmups: Array<() => Promise<unknown>> = [
   () => import("../modules/AccountVerthys.vue"),
   () => import("../modules/PhotoAlbum.vue"),
   () => import("../modules/FileVerthys.vue"),
-  () => import("../modules/CertManager.vue"),
   () => import("../modules/PasswordTools.vue"),
 ];
 let warmIdx = 0;
@@ -110,17 +107,23 @@ onMounted(() => {
 
 /* 模块切换过渡（cross-fade：新旧组件同时存在，无 out-in 死等）
  * 修复：z-index 层级确保新模块覆盖旧模块，杜绝视觉覆盖 */
-/* 渡越只走 2D 平移与不透明度：新旧视图容器内含品牌字标等细亮笔画，
- * scale 会使容器纹理按非 1 比例缩放、结束帧回落到 1 时再重栅格化，
- * 形成"模糊 → 清晰"跳变（即用户所见的突然模糊一下）。
- * 方向感由反向平移承担（入场自右入、离场向左去），不依赖缩放。 */
+/* 渡越只走不透明度：模块子树承载全部界面文字，任何位移或缩放都会把字形
+ * 提升到合成层（灰度抗锯齿），动画结束回落主层时再子像素化 ——
+ * 用户所见即"整个模块忽然模糊、随即变清晰"。方向感改由进出场时长错峰承担
+ * （入场慢于离场），不再下发 transform。
+ *
+ * 包络改用共享「模块步入编排」关键帧（见 styles/animations.css）而非
+ * transition：原 transition 走 --ease（cubic-bezier(0.16, 1, 0.3, 1)），
+ * 在 0.35s 的前 20% 时长内不透明度即冲到约七成 —— 肉眼读作"整块直接呈现"，
+ * 正是入场生硬的成因。关键帧的两段式包络把"沉积"摊开成可辨的渐显，
+ * 后段再缓慢沉降到实；模块根与内容条目由此共用同一运动语言。 */
 .module-switch-enter-active {
-  transition: opacity 0.35s var(--ease), transform 0.35s var(--ease);
+  animation: module-reveal var(--stage-reveal-dur, 0.4s) linear backwards;
   position: relative;
   z-index: 2;
 }
 .module-switch-leave-active {
-  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
+  animation: module-reveal-out var(--stage-leave-dur, 0.18s) linear forwards;
   position: absolute;
   top: 0;
   left: 0;
@@ -130,10 +133,8 @@ onMounted(() => {
 }
 .module-switch-enter-from {
   opacity: 0;
-  transform: translateX(16px);
 }
 .module-switch-leave-to {
   opacity: 0;
-  transform: translateX(-12px);
 }
 </style>

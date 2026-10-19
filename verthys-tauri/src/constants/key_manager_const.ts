@@ -40,12 +40,11 @@ export const MODULE_KEY_RECORD_VERSION = 1;
 export const MODULE_KEY_SELF_HEAL_BATCH = 10;
 
 /* 模块枚举 */
-export const MODULE_IDS: ModuleId[] = ["photo", "accounts", "certs", "fileverthys"];
+export const MODULE_IDS: ModuleId[] = ["photo", "accounts", "fileverthys"];
 
 export const MODULE_LABELS: Record<ModuleId, string> = {
   photo: "拾光",
   accounts: "存签",
-  certs: "枢钥",
   fileverthys: "清藏",
 };
 

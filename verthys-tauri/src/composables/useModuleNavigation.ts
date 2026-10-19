@@ -92,16 +92,6 @@ export const modules = [
     icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`,
   },
   {
-    id: "certs",
-    label: "枢钥",
-    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>`,
-  },
-  {
-    id: "tools",
-    label: "钥域",
-    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`,
-  },
-  {
     id: "photos",
     label: "拾光",
     icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`,
@@ -112,6 +102,11 @@ export const modules = [
     icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/><line x1="12" y1="17" x2="12" y2="19"/></svg>`,
   },
   {
+    id: "tools",
+    label: "钥域",
+    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`,
+  },
+  {
     id: "security",
     label: "中枢",
     icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5"/></svg>`,
@@ -119,15 +114,27 @@ export const modules = [
 ];
 
 /** 需要独立密钥的业务模块（密码工具和安全管理不需要） */
-const KEY_REQUIRED_MODULES = ["accounts", "certs", "photos", "verthys"];
+const KEY_REQUIRED_MODULES = ["accounts", "photos", "verthys"];
 
 /* 模块 ID 到 ModuleId 的映射（用于模块密钥查询） */
 const MODULE_ID_MAP: Record<string, ModuleId> = {
   accounts: "accounts",
-  certs: "certs",
   photos: "photo",
   verthys: "fileverthys",
 };
+
+/**
+ * 模块图标（按 ModuleId 索引）—— 与 Dock 导航栏同一权威源。
+ *
+ * 由 modules 与 MODULE_ID_MAP 派生：中枢量子面板的模块节点与导航栏图标
+ * 共享同一份 SVG 路径数据，任何组件均不得另存图标副本（副本必然漂移）。
+ */
+export const MODULE_ICONS: Record<ModuleId, string> = Object.fromEntries(
+  Object.entries(MODULE_ID_MAP).map(([navId, mid]) => [
+    mid,
+    modules.find((m) => m.id === navId)?.icon ?? "",
+  ]),
+) as Record<ModuleId, string>;
 
 export function useModuleNavigation() {
   const { showError } = useToastCenter();

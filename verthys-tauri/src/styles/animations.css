@@ -92,29 +92,71 @@
 @keyframes dialog-in {
   from {
     opacity: 0;
-    transform: translateY(8px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
+/* ============================================================================
+ * 模块步入编排（单一权威）
+ * 适用：模块根渡越（ModuleStage 进/离场）+ 模块工具条与顶栏 + 模块内容组条目。
+ * 通道：仅不透明度。承载文字的层一旦位移或缩放即被提升为合成层并改用灰度
+ *   抗锯齿，动画结束回落主层时再子像素化 —— 观感即「突然模糊、随即清晰」
+ *   （铁律守卫见 styles/text_sharpness.spec.ts）。
+ * 包络：两段式「星尘沉积」—— 前段近线性沉积（显影过程清晰可辨），后段缓慢
+ *   沉降到实。原实现统一用 --ease（cubic-bezier(0.16, 1, 0.3, 1)，前 20% 时长
+ *   内即冲到约七成不透明度）承载入场，肉眼读作「直接呈现」而非淡入。
+ * 错峰：序 → 延迟由 useModuleEntrance#revealDelayOf 以渐近饱和曲线给出
+ *   （前段步长明显、后段渐次收拢）并经 --reveal-delay 注入：长列表（含虚拟
+ *   滚动绝对索引）尾部不会出现秒级空白，也不产生「前半错峰、后半齐现」折线。
+ * 窗口：内容条目仅在步入窗口内（宿主 .reveal-host.is-entering）播放入场；
+ *   窗口结束撤除标记，此后动态挂载的条目（虚拟滚动换行 / 数据增量）直接
+ *   呈现 —— 杜绝滚动期条目以错峰延迟留白与停稳后整屏重演闪烁。
+ * 治理：一次性显现动画在空闲态冻结于 0% 帧（backwards 填充）等于内容整体
+ *   不可见，故列入 idle-governance.css 核心保留集。
+ * ========================================================================== */
+@keyframes module-reveal {
+  0% {
+    opacity: 0;
+    animation-timing-function: cubic-bezier(0.26, 0.62, 0.34, 1);
+  }
+  46% {
+    opacity: 0.62;
+    animation-timing-function: cubic-bezier(0.42, 0, 0.24, 1);
+  }
+  100% { opacity: 1; }
+}
+/* 离场：与入场同族但更快收束（仅模块根使用 — 内容不做离场编排） */
+@keyframes module-reveal-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* 常显元素显现：随挂载一次性显影，不参与步入窗口（模块工具条 / 顶栏 / 搜索栏）。
+ * 填充模式固定 backwards：不得改 both/forwards —— 前向填充会把动画终态永久
+ * 压在该元素上（曾使卡片悬停位移静默失效）。 */
+.module-reveal {
+  animation: module-reveal var(--reveal-dur, 0.62s) linear var(--reveal-delay, 0ms) backwards;
+}
+/* 内容条目显现：仅步入窗口内生效（窗口外挂载的条目直接呈现） */
+.reveal-host.is-entering .reveal-item {
+  animation: module-reveal var(--reveal-dur, 0.62s) linear var(--reveal-delay, 0ms) backwards;
+}
+
 /* ===== 量子悬浮提示（cosmic-tip）=====
- * 粒子从下方汇聚上升 → 玻璃面板凝聚渐晰 → 能量线延展
+ * 光晕层从下方汇聚上升 → 面板淡入 → 能量线延展；
+ * 位移与缩放只作用于装饰层，文字层恒不参与（避免字形抗锯齿跳变）
  */
-@keyframes ct-rise {
+@keyframes ct-glow-rise {
   0% {
     transform: translate(0, 14px) scale(0.9);
-    opacity: 0;
   }
   55% {
     transform: translate(0, -1px) scale(1.02);
-    opacity: 1;
   }
   100% {
     transform: translate(0, 0) scale(1);
-    opacity: 1;
   }
 }
 

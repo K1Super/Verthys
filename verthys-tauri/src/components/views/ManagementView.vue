@@ -33,9 +33,7 @@
         key="dashboard"
         :global-key-ready="globalKeyReady"
         :module-ids="moduleIds"
-        :module-labels="moduleLabels"
         :module-state-class="moduleStateClass"
-        :module-state-text="moduleStateText"
         @enter-section="enterSection"
       />
 

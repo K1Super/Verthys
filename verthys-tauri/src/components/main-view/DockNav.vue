@@ -337,7 +337,6 @@ defineEmits<{
 }
 .dock-item:hover .dock-label {
   opacity: 1;
-  transform: translateY(-50%) translateX(0);
 }
 .dock-item:hover .dock-label::before,
 .dock-item:hover .dock-label::after {
@@ -349,27 +348,36 @@ defineEmits<{
   border-color: rgba(0, 212, 255, 0.2);
   box-shadow: 0 0 12px rgba(0, 212, 255, 0.15);
 }
-/* ===== 导航悬浮提示 — 双能量光轨（打破传统气泡框架） ===== */
+/* ===== 导航悬浮提示 — 双能量光轨（打破传统气泡框架） =====
+ * 揭示只走不透明度：本标签承载提示文字，任何位移/缩放都会把字形提升为
+ * 合成层（改用灰度抗锯齿）并按亚像素偏移重采样，过渡结束释放合成层时
+ * 再子像素化 —— 观感即「忽然模糊、随即清晰」。
+ * 原实现以 transform: translateY(-50%) translateX(-8px)→translateX(0)
+ * 配越位回弹曲线（cubic-bezier(0.34,1.56,0.64,1)）承担滑入：位移全程为
+ * 亚像素且越位折返，模糊最重。滑入动感改由装饰层承担（::before/::after
+ * 两道能量光轨以 scaleX 生长），文字层只淡入。
+ * 垂直居中改用显式行盒：line-height 定高（16px）+ 上下内边距 3px × 2
+ * = 22px 盒高，故 top = 50% − 11px 为整数偏移 —— 不依赖 translateY(-50%)
+ * 这类百分比位移（其结果为亚像素，且使标签恒带 transform）。 */
 .dock-label {
   position: absolute;
   left: calc(100% + 14px);
-  top: 50%;
+  top: calc(50% - 11px);
   /* 明确字体配置 — 防止继承或过渡导致字体突变 */
   font-family: var(--font);
   font-size: 11px;
+  line-height: 16px;
   font-weight: 500;
   letter-spacing: 2px;
   color: var(--text-primary);
   white-space: nowrap;
   pointer-events: none;
   z-index: 200;
-  /* 初始隐藏态 — 保留 translateY(-50%) 避免垂直位置突变 */
+  /* 初始隐藏态 */
   opacity: 0;
-  transform: translateY(-50%) translateX(-8px);
-  /* 仅过渡 opacity 和 transform — 严禁 transition: all（会导致字体渲染抖动） */
-  transition:
-    opacity 0.35s var(--ease),
-    transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* 仅过渡 opacity — 严禁 transition: all（会导致字体渲染抖动），
+     严禁把 transform 纳入过渡（合成层重采样即「模糊再清晰」的成因） */
+  transition: opacity 0.35s var(--ease);
   /* 文字发光 — 替代传统背景框 */
   text-shadow:
     0 0 8px rgba(0, 212, 255, 0.55),

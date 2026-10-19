@@ -1,8 +1,8 @@
 /**
  * reg-desk.css — 凭证登记台（全局共享皮肤 · 单一来源）
  *
- * 提炼自 存签 / 枢钥 登记窗口，提升为全局共享层：
- *   存签 / 枢钥 登记窗口 + 中枢 密钥窗口（修改全局密钥 / 验证全局密钥）共用。
+ * 提炼自 存签 登记窗口，提升为全局共享层：
+ *   存签 登记窗口 + 中枢 密钥窗口（修改全局密钥 / 验证全局密钥）共用。
  * 任何窗口不得局部复制本文件的 reg-* 规则；变体在文件尾统一声明。
  */
 
@@ -42,12 +42,11 @@ div.dialog.reg-panel:hover {
     0 32px 80px rgba(var(--black-rgb), 0.68),
     inset 0 1px 0 rgba(var(--white-rgb), 0.06);
 }
-/* 窗口入场只走 2D 平移与不透明度：中枢密钥窗口含矢量徽记与表单文字，
- * scale 会令内容纹理按非 1 比例缩放、结束帧再重栅格化 —
- * 出现中即"模糊 → 清晰"跳变，故不设缩放分量。 */
+/* 窗口入场只走不透明度：面板承载表单项与标题，任何位移或缩放都会让字形
+ * 在合成层与主层之间切换抗锯齿，出现"模糊 → 清晰"跳变，故不下发 transform。 */
 @keyframes reg-panel-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* ===== 头部：徽记 + 双层标题 + 关闭 ===== */
@@ -119,8 +118,8 @@ div.dialog.reg-panel:hover {
 }
 .reg-section + .reg-section { margin-top: 18px; }
 @keyframes reg-sec-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 .reg-sec-head {
   position: relative;
@@ -396,11 +395,14 @@ div.dialog.reg-panel:hover {
 /* 选项条联动的附属行：入场一次性浮现 */
 .reg-option-row { margin-top: 10px; animation: reg-row-in 0.28s var(--ease) both; }
 @keyframes reg-row-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-/* ===== 校验提示：左缘竖标 + 瞥入（一次性冲量，非循环抖动） ===== */
+/* ===== 校验提示：左缘竖标 + 淡入 =====
+ * 揭示只走不透明度：本行承载错误文案，原 translateX 瞥入会让字形随亚像素
+ * 位移被合成层重采样，收束时再子像素化（观感「忽然模糊、随即清晰」）。
+ * 提示的辨识度由左缘危险色竖标与语义色文字承担，不再依赖位移。 */
 .reg-error {
   display: flex; align-items: center; gap: 8px;
   margin: 0 26px 4px;
@@ -410,7 +412,7 @@ div.dialog.reg-panel:hover {
   background-color: rgba(var(--danger-rgb), 0.05);
   border: 1px solid rgba(var(--danger-rgb), 0.22);
   border-radius: 6px;
-  animation: reg-error-in 0.36s var(--ease);
+  animation: reg-error-in 0.36s cubic-bezier(0.3, 0.5, 0.3, 1);
 }
 .reg-error::before {
   content: ""; flex-shrink: 0;
@@ -419,9 +421,8 @@ div.dialog.reg-panel:hover {
 }
 .reg-error svg { width: 13px; height: 13px; flex-shrink: 0; opacity: 0.9; }
 @keyframes reg-error-in {
-  0% { opacity: 0; transform: translateX(-6px); }
-  55% { transform: translateX(2px); }
-  100% { opacity: 1; transform: translateX(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* 动作区：贴底收束，随面板圆角内收 */

@@ -34,11 +34,12 @@
   flex-direction: column;
   gap: 16px;
   min-height: 0;
-  animation: mgmt-in 0.5s var(--ease);
-}
-@keyframes mgmt-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  /* 入场显影走全局「模块步入编排」关键帧（styles/animations.css）：
+     本视图为常显元素（中枢各管理态共用同一容器，随就绪一次性显影）。
+     原 mgmt-in 于 --ease 下前 20% 时长即冲到约七成不透明度 —— 肉眼读作
+     「直接呈现」；且其 translateY(10px) 会让本视图承载的全部文字在动画期间
+     被提升到合成层改用灰度抗锯齿，收束时再子像素化。改为只走不透明度。 */
+  animation: module-reveal var(--reveal-dur, 0.62s) linear backwards;
 }
 
 /* ===== 分区详情容器：收窄占局 + 制造可点击空白 =====
