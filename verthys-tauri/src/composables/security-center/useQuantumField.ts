@@ -26,12 +26,18 @@
  *      「悬浮 / 就绪」这类交互状态即时变化（CORE_GLOW），不含任何
  *      sin/时间项驱动的呼吸 —— 呼吸效果已整体移除，不得再引入
  *   5. 零视差组（有意设计）：圆环整组（吸积盘 / 暗核 / 核心辉点）恒绘于
- *      面板中心，核心文字近层无位移写入；三个模块节点（节点层无位移写入）
+ *      面板中心，核心文字近层无位移写入；三个模块节点（DOM 节点层无位移写入）
  *      与三条能量连线（起点 = 静态中心、终点 = 装饰环环沿 —— 环心沿圆环
  *      方向回缩固定半径，见 LINK_DOCK_R；含数据包与光水路径）同属该组
  *      —— 鼠标移动时整组一动不动。
  *      视差仅保留给圆环「背后」的氛围元素：Canvas 尘埃（系数 5）与
  *      数据碎片（系数 13×0.8），二者只改绘制坐标，无任何 DOM 位移
+ *   6. 卫星环饰与吸积盘同一渲染语言（有意设计）：三个模块节点的装饰环不再由
+ *      DOM/SVG 描边承担，而由本引擎绘制 —— 发丝刻度环（三段非均匀断裂弧 +
+ *      断口刻度）+ 内外双自转能量弧（钟形端点渐隐、模块色相）+ 状态扇段
+ *      （跨度弹簧 × 色相插值 × 休眠压暗）+ 捕获光晕贴图。逐节点独立种子 →
+ *      刻向/相位/跨度/速度互异（拒绝整齐划一的机械同步）；运动由引擎驱动，
+ *      故与核心吸积盘共享同一档位治理与自限节拍
  *
  * 【渲染性能】
  *   1. DPR 缩放抗锯齿；粒子预渲染径向渐变贴图 drawImage（禁用 shadowBlur）；
@@ -41,8 +47,8 @@
  *      长时间运行无衰减无泄漏（粒子池预分配，零 GC 压力）
  *   4. 统一帧门控（useFrameGate）：全局空闲四档 60/30/5/1fps，
  *      失焦/隐藏由全局调度器置 deep-idle（rAF 天然停帧）
- *   5. 文字清晰度：承载文字的层（节点/核心 DOM）存活期内不参与任何缩放
- *      或位移 —— 缩放归装饰球体（矢量图标，其自身为独立合成层，逐帧缩放
+ *   5. 文字清晰度：承载文字的层（核心 DOM 存活期内不参与任何缩放或位移）
+ *      —— 缩放归装饰环热区（其内仅矢量图标，自身为独立合成层，逐帧缩放
  *      不再使父层栅格失效）；两层 DOM 均零位移且不提升合成层 → 保持主层内
  *      栅格化，字形走亚像素抗锯齿（更清晰），且永不被重栅格化。
  *      非整数缩放与亚像素平移都会让合成层重采样，字形在悬浮/静止期发糊
@@ -955,6 +961,110 @@ export function useQuantumField(options: QuantumFieldOptions) {
   }
 
   /* ============================================================
+   * 节点装饰环（图标与卫星环饰共用同一曲线/系数 — 单一权威）
+   * ============================================================ */
+
+  /** 节点苏醒相位（环饰与图标同一条错峰曲线 — 严禁两处各算一套） */
+  function nodeIntroPhase(running: boolean, it: number, i: number): number {
+    return running ? phase(it, 0.45 + i * 0.12, 0.7) : 1;
+  }
+
+  /** 装饰环缩放系数（环饰与图标同源 — 单一权威） */
+  function orbScaleOf(p: number, hover: number): number {
+    return (0.72 + 0.28 * p) * (1 + hover * 0.1);
+  }
+
+  /** 钟形端点渐隐弧段（本地坐标：环心为原点，半径/角度均由调用方给定）——
+   *  与吸积弧共用同一钟形形态语言，且跳过权重为 0 的首末段（免无谓描边） */
+  function strokeSatArc(
+    c: CanvasRenderingContext2D, radius: number, span: number, mid: number, alpha: number,
+  ): void {
+    for (let s = 0; s < SAT_SEGS; s++) {
+      const bell = SAT_BELL[s];
+      if (bell <= 0.001) continue;
+      c.globalAlpha = alpha * bell;
+      c.beginPath();
+      c.arc(0, 0, radius, mid + span * (s / SAT_SEGS - 0.5), mid + span * ((s + 1) / SAT_SEGS - 0.5));
+      c.stroke();
+    }
+  }
+
+  /**
+   * 描绘卫星环饰（模块节点的引力锚点环）。
+   *
+   * 与吸积盘完全同一套渲染语言：钟形端点渐隐的断裂弧 + 预渲染贴图 + additive
+   * 发光 + 模块色相。层次（由后至前）：捕获光晕 → 静态刻度环 → 外圈自转能量弧
+   * → 内圈反向自转弧 → 状态扇段。全部绘于节点像素坐标（= 装饰环心），
+   * 缩放系数与节点图标同源，故环饰与图标严格同步、且不产生任何 DOM transform。
+   *
+   * 调用位置契约：须在节点像素坐标写入之后、能量连线之前 —— 连线终点对接在
+   * 环沿（LINK_DOCK_R），环饰压在连线之下，故线尾落在环沿上、不穿过环内空间。
+   */
+  function drawSatellites(c: CanvasRenderingContext2D, introRunning: boolean, it: number, dt: number): void {
+    const states = options.nodeStates.value;
+    for (let i = 0; i < nodePx.length; i++) {
+      const spring = nodeSprings[i];
+      const hover = spring ? spring.v : 0;
+      const p = nodeIntroPhase(introRunning, it, i);
+      const k = orbScaleOf(p, hover);
+      const px = nodePx[i].x;
+      const py = nodePx[i].y;
+
+      /* 状态过渡（原 DOM 版由 CSS 过渡承担，现由本引擎统一承担）：
+         跨度由弹簧驱动、色相逐帧插值、休眠压暗连续收敛 —— 状态切换全程无硬跳 */
+      const key = states[i];
+      const st = SAT_STATE[key] ?? SAT_STATE['state-off'];
+      satSpanSpring[i].target = st.span;
+      satDim[i] += ((key === 'state-off' ? 1 : 0) - satDim[i]) * Math.min(1, dt * 5);
+      const dim = 1 - (1 - SAT_DORMANT_ALPHA) * satDim[i];
+      const hue = satHue[i];
+      const hueK = Math.min(1, dt * 6);
+      hue[0] += (st.rgb[0] - hue[0]) * hueK;
+      hue[1] += (st.rgb[1] - hue[1]) * hueK;
+      hue[2] += (st.rgb[2] - hue[2]) * hueK;
+      /* 环饰能量：入场苏醒 × 悬浮应答 × 休眠压暗（三者同一乘子链） */
+      const energy = p * dim * (1 + hover * SAT_HOVER_LIFT);
+
+      /* 捕获光晕（预渲染贴图 — 与核心暗核/辉点同一素材体系；浓度 ≤0.15，克制） */
+      const halo = SAT_R_BEZEL * k * SAT_HALO_SCALE;
+      c.globalAlpha = SAT_HALO_ALPHA * energy;
+      c.drawImage(sprites[i % sprites.length], px - halo / 2, py - halo / 2, halo, halo);
+
+      /* 环饰本体：本地坐标（环心为原点）+ 与图标同源的缩放 */
+      c.save();
+      c.translate(px, py);
+      c.scale(k, k);
+
+      /* 静态刻度环（三段非均匀断裂弧 + 三处断口刻度；构建期成路径，逐帧一次描边） */
+      c.globalAlpha = 0.16 * energy;
+      c.lineWidth = SAT_BEZEL_WIDTH;
+      c.strokeStyle = 'rgba(176,202,220,1)';
+      c.stroke(satBezel[i]);
+
+      /* 外圈自转能量弧：模块色相（与连线/光水同源），钟形端点渐隐；悬浮时增亮增粗 */
+      const accent = satAccent[i];
+      accent.theta += accent.omega * dt;
+      c.strokeStyle = accent.stroke;
+      c.lineWidth = accent.width * (1 + hover * 0.25);
+      strokeSatArc(c, accent.radius, accent.span, accent.theta, accent.alpha * energy);
+
+      /* 内圈反向自转弧：制造纵深（与吸积盘的内外圈层次同构） */
+      const inner = satInner[i];
+      inner.theta += inner.omega * dt;
+      c.strokeStyle = inner.stroke;
+      c.lineWidth = inner.width;
+      strokeSatArc(c, inner.radius, inner.span, inner.theta, inner.alpha * energy);
+
+      /* 状态扇段：恒居正上方，跨度（弹簧）× 色相（插值）双通道编码状态 */
+      c.strokeStyle = `rgb(${hue[0] | 0},${hue[1] | 0},${hue[2] | 0})`;
+      c.lineWidth = 1.8;
+      strokeSatArc(c, SAT_R_BEZEL, satSpanSpring[i].v * Math.PI * 2, -Math.PI / 2, 0.9 * energy);
+
+      c.restore();
+    }
+  }
+
+  /* ============================================================
    * 主循环（物理积分 → DOM 层写入 → Canvas 绘制）
    * ============================================================ */
 
@@ -1041,14 +1151,13 @@ export function useQuantumField(options: QuantumFieldOptions) {
        核心文字簇同样只淡入且不位移 —— 悬浮应答完全由吸积盘与核心辉点的
        能量增益承担（Canvas 侧），核心文字存活期间不参与任何位移/缩放/旋转。 */
     nodeEls.forEach((el, i) => {
-      const p = introRunning ? phase(it, 0.45 + i * 0.12, 0.7) : 1;
+      const p = nodeIntroPhase(introRunning, it, i);
       el.style.opacity = p.toFixed(3);
       const orb = orbEls[i];
       if (orb) {
-        /* 装饰球体（矢量图标 — 无字形栅格化）：入场涌现 + 悬浮磁吸放大 */
-        const s = nodeSprings[i];
-        const orbScale = (0.72 + 0.28 * p) * (1 + s.v * 0.1);
-        orb.style.transform = `scale(${orbScale.toFixed(4)})`;
+        /* 装饰环（矢量图标 — 无字形栅格化）：入场涌现 + 悬浮磁吸放大；
+           缩放系数与 Canvas 侧卫星环饰共用 orbScaleOf（单一权威 → 环饰与图标同步） */
+        orb.style.transform = `scale(${orbScaleOf(p, nodeSprings[i].v).toFixed(4)})`;
       }
     });
     if (coreEl) {
@@ -1107,13 +1216,17 @@ export function useQuantumField(options: QuantumFieldOptions) {
       ctx.drawImage(sprites[d.sprite], x - half, y - half, d.size, d.size);
     }
 
-    // ---- mid 层：能量连线 + 数据包 + 数据碎片 ----
+    // ---- mid 层：卫星环饰 + 能量连线 + 数据包 + 数据碎片 ----
     // 节点像素坐标（原地写入预分配缓冲，无偏移 —— 与静态 DOM 节点层严格一致）
     for (let i = 0; i < nodePx.length; i++) {
       const p = options.nodePositions[i];
       nodePx[i].x = (p.x / 100) * width;
       nodePx[i].y = (p.y / 100) * height;
     }
+
+    /* 卫星环饰（模块节点的引力锚点环 — 与吸积盘同一渲染语言）：须在连线之前
+       描绘，线尾对接在环沿（LINK_DOCK_R）→ 环饰压在连线之下，线不穿过环内空间 */
+    drawSatellites(ctx, introRunning, it, dt);
 
     // 连线（贝塞尔 + 弓曲噪声微动 + 鼠标高斯增益；入场 0.5s 起"绷紧"点亮，最晚苏醒）
     const linkIntro = introRunning ? phase(it, 0.5, 0.8) : 1;
