@@ -2,7 +2,7 @@
   ExportVerifyDialog.vue — 验证全局密钥（导出核验台 · 双闸放行）
   背景皮肤：直接复用「凭证登记台」共享层 ——
     VerthysDialog（layout="plain" + class="reg-panel"），
-    与 存签 / 枢钥 登记窗口同一来源（styles/reg-desk.css），不自定义窗口底板。
+    与 存签 登记窗口同一来源（styles/reg-desk.css），不自定义窗口底板。
 
   构图（打破纵向表单惯例）：
     双闸凭据舱（01 访问密钥 / 02 密钥口令）经闸缝并置为一条准入管线；

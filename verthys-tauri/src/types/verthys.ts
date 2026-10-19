@@ -206,6 +206,29 @@ export interface AccountFields {
   encKey?: string;
 }
 
+/**
+ * 统一条目（列表的内存形态）：记录 id + 类型 id + 字段值字典 + 敏感字段展示态。
+ *
+ * 字段值一律为字符串；敏感字段的展示值与明文分离保存在条目上，使列表渲染
+ * 不必反复解密，也使掩码/显示切换只需改动条目自身（配合浅层响应式更新）。
+ */
+export interface VaultEntry {
+  /** 内存唯一 id（列表渲染与更新定位用，与 recordId 无关） */
+  id: number;
+  /** 记录 id（编辑与删除的依据；新增失败时可能缺失） */
+  recordId?: number;
+  /** 类型 id（内置短标识或自定义 id） */
+  kind: string;
+  /** 字段值字典（键为字段 id） */
+  data: Record<string, string>;
+  /** 敏感字段是否处于明文展示态 */
+  secretVisible: boolean;
+  /** 敏感字段当前展示文本（掩码、已加密提示或明文） */
+  displaySecret: string;
+  /** 已解出的明文（供复制使用；未解出时为空） */
+  plainSecret?: string;
+}
+
 /** 枚举得到的记录条目 */
 export interface RecordEntry {
   id: number;

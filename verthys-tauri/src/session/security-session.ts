@@ -463,7 +463,7 @@ async function doLockAll(onProgress?: (percent: number, message: string) => void
   // 同步重置前端状态（避免中间态闪烁）
   keyState.verthysReady.value = false;
   keyState.globalKeyReady.value = false;
-  keyState.moduleKeyReady.value = { photo: false, accounts: false, certs: false, fileverthys: false };
+  keyState.moduleKeyReady.value = { photo: false, accounts: false, fileverthys: false };
 
   // 步骤 1+2：取消防抖定时器 + 阻塞等待全部删除、落盘队列执行完成
   onProgress?.(5, "等待数据落盘");

@@ -4,7 +4,7 @@
 >
 > Last updated: 2026-09-19 · 维护人：K1Super
 
-当前版本 3.3.1（唯一手改点：仓库根 `VERSION` 文件）。发布为本地 Git tag + 手动产物分发，无远程发布渠道；本文档定义一致、可验收的发版流程。
+当前版本 4.1.2（唯一手改点：仓库根 `VERSION` 文件）。发布为本地 Git tag + 手动产物分发，无远程发布渠道；本文档定义一致、可验收的发版流程。
 
 ## 1. 版本号规则
 
@@ -30,14 +30,14 @@
 5. Rust 检查：`cargo check` 通过（`build_production.ps1:417`）；`npm run tauri build` 成功产出 NSIS 包。
 6. 产物哈希校验：阶段 3.3 的 `Get-FileSha256` 副本比对无哈希漂移（`build_production.ps1:365-391`）。
 7. NSIS 包冒烟：在干净机器安装 `src-tauri/target/release/bundle/nsis/*.exe`，按 [DEPLOYMENT.md](DEPLOYMENT.md) 第 5 节做安装后验证。
-8. 打 tag：`git tag -a v3.3.x -m "Release 3.3.x"` 并 `git push origin v3.3.x`（命令须与当次版本号一致）。
+8. 打 tag：`git tag -a v4.1.x -m "Release 4.1.x"` 并 `git push origin v4.1.x`（命令须与当次版本号一致）。
 9. 更新 CHANGELOG：按 Keep a Changelog（Added/Changed/Fixed/Security）追加版本段，与 tag 对应。
 
 ## 3. tag 与发布物流程
 
 ```powershell
-git tag -a v3.3.1 -m "Release 3.3.1"
-git push origin v3.3.1
+git tag -a v4.1.2 -m "Release 4.1.2"
+git push origin v4.1.2
 ```
 
 发布物 = 手动上传的 NSIS 安装包（`*.exe`）。当前 `.github/workflows/` 仅有 `core.yml`（core 构建与测试 + fuzz），无 release 发布工作流，故发布渠道待定；tag 为本地仓库标签，产出物由维护人手动分发。

@@ -9,6 +9,7 @@
   可编排能力（不启用时保持上述默认形态）：
     - #header 插槽：以模块自定义头部替换默认标题行
     - layout="plain"：内容不再套用双列网格，由调用方自行组织排版
+    - hide-actions：不渲染动作区（纯选择类窗口无"保存"语义，由头部关闭键承担取消）
     - class/style 等 attrs 透传至面板（.dialog），供模块定制皮肤
 -->
 <template>
@@ -29,7 +30,7 @@
       </div>
       <slot v-else />
       <slot name="error" />
-      <div class="dialog-actions">
+      <div v-if="!hideActions" class="dialog-actions">
         <button class="btn kv-cancel" @click="$emit('update:modelValue', false)" :disabled="saving">取消</button>
         <button class="btn btn-primary kv-confirm" @click="$emit('save')" :disabled="saveDisabled || saving">
           {{ saving ? savingLabel : (saveLabel || '保存') }}
@@ -57,6 +58,8 @@ withDefaults(defineProps<{
   layout?: "grid" | "plain";
   /** 处理中确认按钮文案（默认「保存中…」；语义窗口可覆写，如「修改中…」「验证中…」） */
   savingLabel?: string;
+  /** 不渲染动作区：纯选择/只读类窗口无保存语义，取消由头部关闭键或遮罩承担 */
+  hideActions?: boolean;
 }>(), {
   layout: "grid",
   savingLabel: "保存中…",

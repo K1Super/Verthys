@@ -20,18 +20,18 @@
     - usePhotoViewer       查看器层（内存预览/缩放）
     - usePhotoParse        解析层（.venc 解密/导入）
     - usePhotoDelete       删除层（单删/批删/选择模式）
-    -（卡片指针光晕复用共享 composables/useCardShine —— 与存签/枢钥/钥域同一实现）
+    -（卡片指针光晕复用共享 composables/useCardShine —— 与存签/钥域同一实现）
     - useModuleDialogGuard 弹窗清理守卫（页面覆盖根治）
 
   防截屏保护不在本目录：它是应用级能力，状态与凭证由 session/privacy-session
   单例持有（模块挂载只做状态映射与提示，卸载不关闭保护）。
 -->
 <template>
-  <div class="photo-album">
+  <div class="photo-album reveal-host" :class="{ 'is-entering': entering }">
     <!-- 瞬时提示（错误/导出完成/复制/状态）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
 
     <!-- 顶部栏：星野导航带（半透明无框；星野底板与溶解边界由 StarlitSky 承担） -->
-    <div class="album-top starlit-bar">
+    <div class="album-top starlit-bar module-reveal">
       <StarlitSky :seed="11" />
       <div class="top-left">
         <span class="album-title">拾光</span>
@@ -42,57 +42,86 @@
         </span>
       </div>
       <div class="top-right">
-        <button
-          class="btn btn-sm privacy-btn"
-          :class="{ on: privacyMode, 'is-busy': privacyBusy, 'cursor-not-allowed': privacyButtonDisabled }"
+        <!-- 顶栏图标键：全部走共享 ActionButton（几何 .btn-icon / 皮肤 .btn-primary /
+             三态 / 图标口径均来自全局单源），本地只挂状态类，不再重复声明尺寸与肤色 -->
+        <ActionButton
+          primary
+          class="privacy-btn"
+          :class="{ 'is-busy': privacyBusy }"
           :disabled="privacyButtonDisabled"
-          @click="onPrivacyToggle"
           v-tip="privacyTip"
+          @click="onPrivacyToggle"
         >
           <!-- 状态图标随开关切换：开启=保护生效（睁眼），关闭=保护关闭（划斜线眼）；
                两枚图标绝对定位交叉淡入，切换不产生布局抖动 -->
-          <span class="privacy-ico">
-            <transition name="privacy-ico">
-              <svg v-if="privacyMode" key="guarded" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-              <svg v-else key="unguarded" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-            </transition>
-          </span>
-        </button>
-        <button class="btn btn-sm export-top-btn" @click="openExportDialog" :disabled="photos.length === 0 || albumBusy" v-tip="'导出加密照片'">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        </button>
-        <button class="btn btn-sm export-top-btn" @click="openParseDialog" :disabled="albumBusy" v-tip="'解析加密文件并导入'">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        </button>
-        <button
-          class="btn btn-sm import-top-btn"
+          <template #icon>
+            <span class="privacy-ico">
+              <transition name="privacy-ico">
+                <svg v-if="privacyMode" key="guarded" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg v-else key="unguarded" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              </transition>
+            </span>
+          </template>
+        </ActionButton>
+        <ActionButton
+          primary
+          class="export-top-btn"
+          :disabled="photos.length === 0 || albumBusy"
+          v-tip="'导出加密照片'"
+          @click="openExportDialog"
+        >
+          <template #icon>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </template>
+        </ActionButton>
+        <ActionButton
+          primary
+          class="export-top-btn"
           :disabled="albumBusy"
-          @click="onImport"
+          v-tip="'解析加密文件并导入'"
+          @click="openParseDialog"
+        >
+          <template #icon>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </template>
+        </ActionButton>
+        <!-- 导入键：图标位取组件自带的加号语义；导入中由组件加载态替换为旋转指示器
+             （进度由悬浮提示与中枢覆盖层承担） -->
+        <ActionButton
+          primary
+          class="import-top-btn"
+          :loading="importing"
+          :disabled="albumBusy"
           v-tip="importing ? `加密中…${importProgress}%` : '导入照片'"
-        >
-          <!-- 加号：添加照片入库语义；导入中图标位切换为旋转指示器（进度由悬浮提示与中枢覆盖层承担） -->
-          <svg v-if="!importing" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <line x1="12" y1="5" x2="12" y2="19"/>
-            <line x1="5" y1="12" x2="19" y2="12"/>
-          </svg>
-          <CosmicRingLoader v-else :size="13" />
-        </button>
+          @click="onImport"
+        />
         <!-- 重打包入口（仅写入布局开关开启时出现）：后台迁移旧布局照片 -->
-        <button
+        <ActionButton
           v-if="repackAvailable && !repackRunning"
-          class="btn btn-sm repack-top-btn"
-          @click="startRepack"
+          primary
+          class="repack-top-btn"
           v-tip="'迁移旧布局照片（后台任务，可取消）'"
+          @click="startRepack"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <polyline points="23 4 23 10 17 10"/>
-            <polyline points="1 20 1 14 7 14"/>
-            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-          </svg>
-        </button>
-        <button class="btn btn-sm del-top-btn" :class="{ active: selectMode }" :disabled="albumBusy && !selectMode" @click="onDeleteBtn" v-tip="selectMode ? '取消选择' : '选择删除'">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-        </button>
+          <template #icon>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <polyline points="23 4 23 10 17 10"/>
+              <polyline points="1 20 1 14 7 14"/>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+            </svg>
+          </template>
+        </ActionButton>
+        <ActionButton
+          primary
+          class="del-top-btn"
+          :disabled="albumBusy && !selectMode"
+          v-tip="selectMode ? '取消选择' : '选择删除'"
+          @click="onDeleteBtn"
+        >
+          <template #icon>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </template>
+        </ActionButton>
       </div>
     </div>
 
@@ -114,21 +143,17 @@
         :show-meta="true"
       />
 
-      <!-- 非阻塞加载：无底板居中展示，加载完成自动消失。
-           失败由通用错误提示（toast）承接，不打断浏览（无提示横幅/进度卡）。 -->
-      <CosmicRingLoader :overlay="true" :show="photosLoading && photos.length === 0" text="正在加载照片列表…" />
-
       <!-- 虚拟滚动容器（相册列表强制采用虚拟滚动）：
            行窗口模型：滚动位置的唯一量化状态是行窗口，像素级移动不产生重建；
            渲染数组引用稳定（未变化的项复用对象），上万照片也只渲染数十 DOM 节点。
            容器高度 = 总行数 × 行高，撑开滚动条；每个 masonry-item 用 translate3d 精确定位。 -->
       <div v-if="photos.length > 0" class="masonry-cols" :style="{ height: totalHeight + 'px' }">
         <div
-          v-for="ph in visiblePhotos"
+          v-for="(ph, vi) in visiblePhotos"
           :key="ph.id"
           class="masonry-item"
           :class="{ selected: selectMode && selectedPhotoIds.has(ph.id) }"
-          :style="ph._style"
+          :style="[ph._style, { '--reveal-delay': revealDelayOf(vi) + 'ms' }]"
           @mousemove="onCardMove($event)"
           @mouseleave="onCardLeave($event)"
           @click="onPhotoClick(ph)"
@@ -136,7 +161,7 @@
           <!-- 文字清晰度铁律：文字层（overlay）与图像层平级分离——
                图像层只保留静态滤镜（照片 3D 倾斜已移除），
                文字祖先链上无 filter / 3D 变换 / 缩放，恒走静态栅格化清晰路径。 -->
-          <div class="photo-card glass">
+          <div class="photo-card glass reveal-item">
             <div class="photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
             <div class="photo-overlay">
               <span class="photo-name">{{ ph.name }}</span>
@@ -146,9 +171,16 @@
           </div>
         </div>
       </div>
-
-      <CosmicEmpty v-if="!photosLoading && photos.length === 0 && !loadError" text="暂无照片" hint="点击「导入照片」添加 · 自动 XChaCha20 加密" />
     </div>
+
+    <!-- 加载 / 空态覆盖层：遵循「模块根视口居中」统一契约（与清藏·存签同源）——
+         必须挂载为模块根容器（.photo-album，position: relative）的直接子节点，
+         不得置于任何定位子容器（如 .masonry-scroll，position: relative）之内，
+         否则将以该子容器（顶部导航带之下的内容区）为参照系居中，导致整体
+         下移约半个导航带高度、与其余模块的空态位置不齐。
+         加载失败由通用错误提示（toast）承接，不打断浏览（无横幅/进度卡）。 -->
+    <CosmicRingLoader :overlay="true" :show="photosLoading && photos.length === 0" text="正在加载照片列表…" />
+    <CosmicEmpty v-if="!photosLoading && photos.length === 0 && !loadError" text="暂无照片" hint="点击「导入照片」添加" />
 
     <!-- 沉浸式查看器（内存预览，不落地，滚轮缩放 + 拖拽平移 + 双击复位） -->
     <div v-if="viewer" class="viewer" :class="{ blurred: viewerBlurred }" @click="closeViewer">
@@ -381,7 +413,7 @@
       </div>
     </div>
 
-    <!-- 删除二次确认弹窗（复用全局 ConfirmDelete，与存签/枢钥/清藏的删除确认一致） -->
+    <!-- 删除二次确认弹窗（复用全局 ConfirmDelete，与存签/清藏的删除确认一致） -->
     <ConfirmDelete
       :show="showDeleteConfirm"
       :item-name="`已选 ${deleteConfirmCount} 张照片`"
@@ -422,6 +454,7 @@ import StarlitSky from "../common/cosmic/StarlitSky.vue";
 import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
+import ActionButton from "../common/verthys-ui/ActionButton.vue";
 // 大型弹窗组件级懒加载（遵循项目硬约束：大型弹窗使用 defineAsyncComponent）
 const CosmicOverlay = defineAsyncComponent(() => import("../common/cosmic/CosmicOverlay.vue"));
 // 量子能量导流通道进度条（全局统一进度条组件，替代已删除的 QuantumProgressBar）
@@ -440,6 +473,7 @@ import { usePhotoRepack } from "../../composables/photo-album/usePhotoRepack";
 import { usePhotoDelete } from "../../composables/photo-album/usePhotoDelete";
 import { useCardShine } from "../../composables/useCardShine";
 import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
+import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
 import { resolveChunkSet } from "../../composables/photo-album/chunk-refs";
 // 防截屏保护：应用级会话单例（能力归属应用而非组件，模块卸载不关闭保护）
 import {
@@ -468,6 +502,11 @@ const {
   decryptPhotoMeta, loadPhotos, releaseThumbUrls, ensurePhotoKey,
   cancelPendingDecrypt,
 } = usePhotoData();
+
+/* 步入窗口：以「照片列表首次非空」起算 —— 相册条目总是异步就绪，
+ *   以挂载起算会让窗口在条目出现前耗尽（整批照片直接呈现）。
+ *   就绪判定与宿主渲染同批落地，见 useModuleEntrance 契约 */
+const { entering } = useModuleEntrance(() => photos.value.length > 0);
 
 /* ===== 加载状态的展示派生（表现层，无业务判断） ===== */
 /** 相册内重操作统一忙碌信号：任一在途即禁用全部并发入口。
@@ -580,7 +619,7 @@ const privacyTip = computed(() => {
   if (privacyBusy.value) return "保护状态变更中…";
   if (privacyQuarantined.value) return "保护状态异常，点击修复";
   if (privacyTokenLost.value) return "会话凭证丢失，重启应用可重新接管";
-  return privacyMode.value ? "防截屏保护已开启，点击关闭" : "防截屏保护已关闭，点击开启";
+  return privacyMode.value ? "关闭防截屏" : "开启防截屏";
 });
 
 /**
@@ -639,7 +678,7 @@ const doPrivacyReconcile = async () => {
   showError("修复失败，请重试或重启应用");
 };
 
-/* ---------- 9. 交互层（卡片指针光晕，共享实现：存签/枢钥/钥域/拾光同一 composable） ---------- */
+/* ---------- 9. 交互层（卡片指针光晕，共享实现：存签/钥域/拾光同一 composable） ---------- */
 const { onCardMove, onCardLeave, cancel: cancelShine } = useCardShine();
 
 /* ===== 生命周期总管家（onMounted / onUnmounted） ===== */
@@ -754,54 +793,37 @@ useModuleDialogGuard("photos", () => {
 .photo-album { width: 100%; height: 100%; display: flex; flex-direction: column; gap: 14px; overflow: hidden; position: relative; }
 
 /* 顶部栏：星野导航带仅承载布局（无边框/圆角/投影 —— 底板与左右溶解边界由 StarlitSky 承担） */
-.album-top { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; flex-shrink: 0; animation: slide-down 0.5s var(--ease) both; }
-@keyframes slide-down { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+.album-top { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; flex-shrink: 0; }
+/* 入场编排已收敛到全局「模块步入编排」（入口根为步入窗口宿主：顶栏为
+   常显元素 [.module-reveal]、照片卡片为内容条目 [.reveal-item]）；
+   入场一律只走不透明度 —— 顶栏/选择栏/弹窗都承载文字，位移会让字形抗锯齿
+   在合成层与主层之间跳变（观感为"模糊再变清晰"）。本文件不再定义入场关键帧。 */
 .top-left { display: flex; align-items: center; gap: 8px; }
 .album-title { font-size: 13px; color: var(--text-primary); letter-spacing: 1px; }
 .album-count { font-size: 10px; color: var(--text-muted); font-family: var(--font); }
 .enc-badge { display: flex; align-items: center; gap: 3px; font-size: 9px; color: var(--accent); font-family: var(--font); letter-spacing: 0.5px; padding: 2px 6px; border: 1px solid rgba(0,212,255,0.2); border-radius: 8px; background: rgba(0,212,255,0.05); }
 .enc-badge svg { width: 10px; height: 10px; }
 .top-right { display: flex; gap: 8px; align-items: center; }
-.privacy-btn { position: relative; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; }
+/* 顶栏图标键的状态与色相：几何（正方形 + 图标口径）与皮肤（实心主色 + 势隙线）
+   全部来自全局 .btn-icon / .btn-primary 与共享 ActionButton，本节不再声明尺寸与肤色 */
 /* 双状态图标叠放容器：两枚图标绝对定位交叉淡入，切换不产生布局抖动 */
-.privacy-ico { position: relative; display: block; width: 15px; height: 15px; }
-.privacy-ico svg { position: absolute; inset: 0; width: 15px; height: 15px; }
+.privacy-ico { position: relative; display: block; width: 13px; height: 13px; }
+.privacy-ico svg { position: absolute; inset: 0; width: 13px; height: 13px; }
 .privacy-ico-enter-active, .privacy-ico-leave-active { transition: opacity 0.18s var(--ease); }
 .privacy-ico-enter-from, .privacy-ico-leave-to { opacity: 0; }
-.privacy-btn.on { color: var(--accent); border-color: rgba(0,212,255,0.3); background: rgba(0,212,255,0.08); }
-/* 禁用态光标：可点击与不可点击必须可区分 */
-.privacy-btn:disabled { cursor: not-allowed; }
-/* 持久不可用（凭证丢失/非桌面端）：视觉降级；处理中在途窗口极短，
-   不做降级以免快速开关时按钮闪烁（光标与悬浮提示已表达处理中） */
-.privacy-btn:disabled:not(.is-busy),
-.privacy-btn:disabled:not(.is-busy):hover {
-  opacity: 0.35;
-  border-color: var(--border-glass);
-  background: rgba(var(--bg-tertiary-rgb), 0.62);
-  color: var(--text-muted);
-}
-
-/* 顶部纯图标按钮（导出/解析/导入照片）：与 .del-top-btn 同尺寸 32×32，无文字标签，语义由 v-tip 悬浮提示承担 */
-.export-top-btn, .import-top-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; }
-.export-top-btn svg, .import-top-btn svg { width: 14px; height: 14px; }
-/* 顶部纯图标按钮禁用态：视觉降级 + not-allowed 光标；:hover 同规则覆盖，
-   避免禁用按钮在悬浮时仍出现提亮反馈（误导为可点击） */
+/* 顶栏六个图标键的样式一律来自全局 .btn-icon / .btn-primary：
+   本节只保留禁用态的视觉降级，不注入任何额外肤色、遮罩层或位移 ——
+   键与键之间的差异只有图标本身（隐私键的睁眼/闭眼、删除键的垃圾桶） */
+/* 禁用态：各键同口径；隐私键处理中（.is-busy）不降级，
+   避免快速开关时按钮在禁用与可用之间闪烁（光标与悬浮提示已表达处理中） */
 .export-top-btn:disabled, .import-top-btn:disabled, .del-top-btn:disabled,
-.export-top-btn:disabled:hover, .import-top-btn:disabled:hover, .del-top-btn:disabled:hover {
+.export-top-btn:disabled:hover, .import-top-btn:disabled:hover, .del-top-btn:disabled:hover,
+.privacy-btn:disabled:not(.is-busy), .privacy-btn:disabled:not(.is-busy):hover {
   opacity: 0.35; cursor: not-allowed;
   border-color: var(--border-glass);
   background: rgba(var(--bg-tertiary-rgb), 0.62);
   color: var(--text-muted);
 }
-/* 重打包入口：与其它顶栏图标按钮同尺寸；仅写入布局开关开启时出现 */
-.repack-top-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; color: var(--text-muted); }
-.repack-top-btn svg { width: 14px; height: 14px; }
-.repack-top-btn:hover { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.3); background: rgba(var(--accent-rgb), 0.06); }
-/* 导入中指示器：统一加载环 CosmicRingLoader（按钮内 13px 迷你档） */
-.del-top-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; color: var(--text-muted); transition: all 0.2s; }
-.del-top-btn svg { width: 14px; height: 14px; }
-.del-top-btn:hover { color: var(--danger); border-color: rgba(255,71,87,0.3); background: rgba(255,71,87,0.06); }
-.del-top-btn.active { color: var(--danger); border-color: rgba(255,71,87,0.4); background: rgba(255,71,87,0.1); }
 
 /* 后台进度横幅（重打包）：进度文案 + 取消迁移入口 */
 .photo-load-banner {
@@ -825,7 +847,8 @@ useModuleDialogGuard("photos", () => {
 /* 选择模式操作栏：悬浮层——绝对定位在照片区底部中央，脱离文档流不挤压网格。
    动画仅 opacity/transform（合成器友好）；玻璃底 + 零阴影与模块整体语言一致 */
 .select-bar { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 30; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; max-width: calc(100% - 28px); animation: select-bar-enter 0.3s var(--ease) both; }
-@keyframes select-bar-enter { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+/* 仅淡入：水平居中由元素自身的静态 transform 承担，动画不再叠加位移 */
+@keyframes select-bar-enter { from { opacity: 0; } to { opacity: 1; } }
 .select-bar-left { display: flex; align-items: center; gap: 12px; }
 .select-bar-right { display: flex; align-items: center; gap: 8px; }
 .select-all-btn { display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; }
@@ -972,7 +995,7 @@ useModuleDialogGuard("photos", () => {
 @keyframes photo-in { from { opacity: 0; } to { opacity: 1; } }
 /* 动画关键帧（被导出对话框等复用） */
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes dialog-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes dialog-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* ===== 导出对话框：两栏工作台（左选片 / 右配置） ===== */
 .export-dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.84); display: flex; align-items: center; justify-content: center; z-index: 4000; animation: fade-in 0.2s var(--ease); }

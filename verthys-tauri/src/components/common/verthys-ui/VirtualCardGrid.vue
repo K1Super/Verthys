@@ -20,7 +20,8 @@
     :buffer-rows="4"
   >
     <template #default="{ item, index }">
-      <div class="verthys-card glass" :style="{ '--i': index }">
+      <div class="verthys-card glass reveal-item"
+           :style="{ '--reveal-delay': revealDelayOf(index) + 'ms' }">
         卡片内容
       </div>
     </template>

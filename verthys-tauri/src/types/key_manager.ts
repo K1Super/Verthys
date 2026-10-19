@@ -5,7 +5,7 @@
 import type { SecurityPresetCode, BruteForceCheckResponse, PresetFeatures } from "./verthys";
 
 /** 模块 ID 枚举（PasswordTools 故意排除） */
-export type ModuleId = "photo" | "accounts" | "certs" | "fileverthys";
+export type ModuleId = "photo" | "accounts" | "fileverthys";
 
 /** 模块密钥验证器记录（JSON）
  *

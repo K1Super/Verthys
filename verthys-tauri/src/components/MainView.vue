@@ -1,9 +1,9 @@
 <!--
   MainView.vue — 主界面壳层
   布局：浮动玻璃 Dock（左侧）+ 沉浸式模块舞台（右侧）
-  模块：存签 / 枢钥 / 钥域 / 拾光 / 清藏 / 中枢
+  模块：存签 / 钥域 / 拾光 / 清藏 / 中枢
 
-  拆分架构：
+  架构：
     骨架组件 MainView.vue（本文件）→ 组合子组件 + 组合式函数
     - main-view/CosmicBackground.vue   宇宙星空背景
     - main-view/WindowControls.vue     窗口控制按钮
@@ -36,7 +36,7 @@
     <!-- 工作区：Dock + 模块舞台 -->
     <div
       class="workspace"
-      :class="{ 'dock-floating': dockCollapsed }"
+      :class="{ 'dock-floating': dockCollapsed, 'stage-margin-instant': stageMarginInstant }"
       @mousemove="onDockEdgeHover"
     >
       <!-- 浮动宇宙 Dock -->
@@ -92,7 +92,7 @@ import { useCosmicBackground } from "../composables/useCosmicBackground";
 import { useWindowControls } from "../composables/useWindowControls";
 import { useModuleNavigation } from "../composables/useModuleNavigation";
 
-import { onBeforeMount } from "vue";
+import { onBeforeMount, onBeforeUnmount, ref, watch } from "vue";
 import { initVerthysCache } from "../cache/composition/verthys-cache";
 import { ensureAdopted as ensurePrivacyAdopted } from "../session/privacy-session";
 onBeforeMount(() => {
@@ -144,6 +144,25 @@ const {
   cancelModuleKeyVerify,
   goToSecurityFromHint,
 } = useModuleNavigation();
+
+/* 模块切换窗口内抑制舞台边距过渡。
+ * Why：中枢的面板模式会同时收展 Dock，而 Dock 收展经 .stage 的 margin-left 弹性
+ *   过渡改变舞台宽度 —— 若与模块交叉淡入同一时刻发生，整块模块内容会被横向推移，
+ *   形成"从左至右"的方向感，与其它模块之间的切换（纯交叉淡入）不一致。
+ *   故仅在切换窗口内让边距变化即时生效；Dock 悬停展开的过渡不受影响。
+ * 窗口时长取模块渡越总时长（入场 0.35s）之上留余量。 */
+const stageMarginInstant = ref(false);
+let stageMarginTimer: number | undefined;
+watch(currentModule, () => {
+  stageMarginInstant.value = true;
+  window.clearTimeout(stageMarginTimer);
+  stageMarginTimer = window.setTimeout(() => {
+    stageMarginInstant.value = false;
+  }, 600);
+});
+onBeforeUnmount(() => {
+  window.clearTimeout(stageMarginTimer);
+});
 </script>
 
 <style scoped>
@@ -170,5 +189,10 @@ const {
 
 .workspace.dock-floating :deep(.stage) {
   margin-left: 0;
+}
+/* 模块切换窗口内：舞台边距变化即时生效，不参与弹性过渡 ——
+   避免"中枢面板模式收展 Dock"与模块交叉淡入叠加成横向推移的方向感 */
+.workspace.stage-margin-instant :deep(.stage) {
+  transition: none;
 }
 </style>

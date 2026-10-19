@@ -67,3 +67,18 @@ export const TRANSITION_REDUCED = {
   /** 星河态切换：交接后 200ms（取景已就位 — 无运镜） */
   GALAXY_PHASE: PREWARM_MOUNT + 400,
 } as const;
+
+/** 模块步入编排参数（毫秒）— 前端唯一权威源。
+ *  CSS 侧的显影时长令牌与包络关键帧见 styles/tokens.css 与
+ *  styles/animations.css；本表承载需要 JS 参与的错峰延迟与窗口时长。 */
+export const MODULE_REVEAL = {
+  /** 单元素显影时长 — 必须与 tokens.css --reveal-dur 保持一致 */
+  durMs: 620,
+  /** 错峰延迟的渐近上限：序 → 延迟的饱和渐进值（步长前大后小） */
+  staggerSpanMs: 420,
+  /** 错峰饱和尺度：延迟 ≈ span × (1 − 1/(1 + 序/K))，K 越小越早收拢 */
+  staggerK: 2.5,
+  /** 步入窗口总时长 — 必须 ≥ 最大错峰延迟 + 显影时长 + 余量：
+   *  窗口结束即撤除宿主的 is-entering 标记，中途撤除会让动画被移除而突跳 */
+  holdMs: 1200,
+} as const;

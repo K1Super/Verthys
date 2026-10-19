@@ -2,7 +2,7 @@
   ChangeKeyDialog.vue — 修改全局密钥弹窗（密钥轮换台 · 双舱交接）
   背景皮肤：直接复用「凭证登记台」共享层 ——
     VerthysDialog（layout="plain" + class="reg-panel reg-wide"），
-    与 存签 / 枢钥 登记窗口同一来源（styles/reg-desk.css），不自定义窗口底板。
+    与 存签 登记窗口同一来源（styles/reg-desk.css），不自定义窗口底板。
 
   构图（打破纵向表单惯例）：
     01 现行密钥舱（核验交出） ⇄ 中轴轮换 ⇄ 02 继任密钥舱（设定承入）；

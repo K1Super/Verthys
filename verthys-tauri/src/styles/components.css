@@ -334,6 +334,16 @@
 .btn:active {
   transform: scale(0.97);
 }
+/* ===== 纯图标按钮（正方形 · 全局单源） =====
+   与 .btn 系列成对使用：.btn 负责皮肤与三态，.btn-icon 负责几何。
+   几何与图标口径在此一处定义，各模块不得重复声明宽高与图标尺寸，
+   否则同一行按钮会出现尺寸不齐；仅直接子级 svg 受此口径约束，
+   按钮内自带定位容器的图标（如双状态叠放）不受影响。 */
+.btn-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0;
+}
+.btn-icon > svg { display: block; width: 13px; height: 13px; }
 /* ===== 主确认按钮（btn-primary · kv-confirm 复用面）：潮汐注能 =====
  * 确认保存/确认修改/验证/解密保存等全局复用主按钮的统一视觉。
  * 与推杆长按钮（解锁/初始化/验证视图提交钮）并列但气质独立：
@@ -688,8 +698,8 @@
 }
 
 /* ===== 全局复用：量子悬浮提示（cosmic-tip）=====
- * 非传统气泡：玻璃面板 + 量子粒子汇聚上升 + 底部发光能量线
- * 无尖角箭头，文字从虚化凝聚渐晰
+ * 非传统气泡：玻璃面板淡入 + 量子光晕汇聚上升 + 底部发光能量线
+ * 无尖角箭头；文字层恒不参与位移/缩放/滤波，字形保持清晰
  * 用法：v-tip="'提示文字'" 或 v-tip="动态变量"
  */
 .cosmic-tip {
@@ -711,12 +721,11 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  /* 默认隐藏态（只位移不缩放：缩放会令提示文字按非 1 比例重采样，
-     出现中即"模糊 → 清晰"跳变） */
-  transform: translate(0, 10px);
-  transition:
-    opacity 0.3s var(--ease),
-    transform 0.4s var(--ease);
+  /* 揭示只走 opacity：承载文字的层不做任何 transform/滤波 ——
+     位移或缩放会把文字提升为合成层（改用灰度抗锯齿），动画结束回落主层时
+     字形再度子像素化，观感即"忽然模糊、随即变清晰"；汇聚上升的动感交由
+     内部光晕层承担（装饰层，不承载文字） */
+  transition: opacity 0.3s var(--ease);
 }
 
 /* 内部光晕背景（量子粒子汇聚场） */
@@ -768,21 +777,12 @@
   transition: opacity 0.4s var(--ease) 0.1s, width 0.5s var(--ease) 0.1s;
 }
 
-/* 显示态：粒子已汇聚，玻璃面板凝聚成型 */
-.cosmic-tip.ct-show {
-  transform: translate(0, 0) scale(1);
-  animation: ct-rise 0.42s var(--ease);
-}
+/* 显示态：光晕层汇聚上升（仅装饰层参与位移/缩放），文字层只做淡入 */
 .cosmic-tip.ct-show .ct-glow {
   opacity: 1;
-  animation: ct-glow-pulse 2.4s ease-in-out infinite;
+  animation: ct-glow-rise 0.42s var(--ease), ct-glow-pulse 2.4s ease-in-out infinite;
 }
 .cosmic-tip.ct-show .ct-line {
   opacity: 1;
   width: 72%;
-}
-
-/* 隐藏态：能量消散，回落 */
-.cosmic-tip.ct-hide {
-  transform: translate(0, 4px);
 }

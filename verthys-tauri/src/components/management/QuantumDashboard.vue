@@ -6,7 +6,8 @@
   分层结构：
     canvas（qd-field-canvas）  — 物理场渲染：引力尘埃 / 数据碎片 / 能量连线 /
                                  数据包 / 非对称吸积盘（三层视差独立系数）
-    qd-layer-mid               — 4 个模块轨道节点 DOM（图标+文字，可交互）
+    qd-layer-mid               — 3 个模块轨道节点 DOM（引力锚点环 + 导航栏同源
+                                 图标，可交互；节点无任何文字）
     qd-layer-near              — 中心量子核心 DOM（文字组，可交互）
 
   交互（全部由引擎弹簧驱动，无 CSS transition 突变）：
@@ -15,16 +16,16 @@
     - 面板视差：三层独立系数 + 噪声漂移（欠阻尼惯性跟手）
     - 鼠标力场：高斯衰减漩涡扰动尘埃/碎片/连线亮度
 
-  Props: globalKeyReady / moduleIds / moduleLabels / moduleStateClass(fn) / moduleStateText(fn)
+  Props: globalKeyReady / moduleIds / moduleStateClass(fn)
   Emits: enterSection(section: "globalKey" | "moduleKeys")
 -->
 <template>
   <div ref="panelRef" class="qd-panel">
-    <!-- 物理场画布（尘埃/连线/碎片/吸积盘，三层视差） -->
+    <!-- 物理场画布（尘埃/碎片视差在画布内部完成；连线/吸积盘为零视差组） -->
     <canvas ref="canvasRef" class="qd-field-canvas"></canvas>
 
-    <!-- 模块轨道节点（视差中层，hover 弹簧由引擎驱动） -->
-    <div ref="midLayerRef" class="qd-layer qd-layer-mid">
+    <!-- 模块轨道节点（静态居中定位：三个模块与三条连线同为零视差组） -->
+    <div class="qd-layer qd-layer-mid">
       <div
         v-for="(mid, i) in moduleIds"
         :key="`node-${mid}`"
@@ -32,32 +33,30 @@
         class="qd-module-node"
         :class="moduleStateClass(mid)"
         :style="{ left: `${moduleNodePos[i].x}%`, top: `${moduleNodePos[i].y}%` }"
-        @click="$emit('enterSection', 'moduleKeys')"
+        @click="onNodeClick"
       >
         <div class="qd-node-orb">
-          <div class="qd-node-core">
-            <span v-if="mid === 'photo'" class="qd-node-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-            </span>
-            <span v-else-if="mid === 'accounts'" class="qd-node-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-            </span>
-            <span v-else-if="mid === 'certs'" class="qd-node-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5"/></svg>
-            </span>
-            <span v-else-if="mid === 'fileverthys'" class="qd-node-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z"/></svg>
-            </span>
-          </div>
+          <!-- 引力锚点环（零底托）：基准刻度环为三段非均匀断裂弧，
+               状态扇段与环同半径、恒居正上方，以弧长 + 色相编码状态；
+               字形浮于环心 —— 无实心圆盘、无辉光阴影 -->
+          <svg class="qd-node-reticle" viewBox="0 0 48 48" aria-hidden="true">
+            <path
+              class="qd-reticle-base"
+              d="M45 24 A21 21 0 0 1 12.98 41.87 M9.43 39.13 A21 21 0 0 1 11.23 7.33 M14.12 5.47 A21 21 0 0 1 43.43 16.02"
+            />
+            <path class="qd-reticle-tick" d="M7.01 11.66 A21 21 0 0 1 40.99 11.66" />
+          </svg>
+          <!-- 图标取导航栏同一权威源（useModuleNavigation 的模块图标注册表）：
+               与 Dock 逐字同一份 SVG 路径，面板与导航栏视觉严格一致 -->
+          <span class="qd-node-icon" v-html="MODULE_ICONS[mid]"></span>
         </div>
-        <div class="qd-node-label">{{ moduleLabels[mid] }}</div>
-        <div class="qd-node-state">{{ moduleStateText(mid) }}</div>
       </div>
     </div>
 
-    <!-- 中心量子核心（视差近层，吸积盘在 canvas 中渲染，此处为可交互文字簇） -->
-    <div ref="nearLayerRef" class="qd-layer qd-layer-near">
-      <div ref="coreRef" class="qd-core-cluster" @click="$emit('enterSection', 'globalKey')">
+    <!-- 中心量子核心（近层为纯布局容器：核心文字静态居中，不参与任何位移；
+         吸积盘在 canvas 中渲染，此处为可交互文字簇） -->
+    <div class="qd-layer qd-layer-near">
+      <div ref="coreRef" class="qd-core-cluster" @click="onCoreClick">
         <div class="qd-core-text">
           <div class="qd-core-label">全局密钥</div>
           <div class="qd-core-hint">点击管理</div>
@@ -71,6 +70,8 @@
 import { onMounted, ref, toRef } from 'vue';
 import type { ModuleId } from '../../lib/keyManager';
 import { useQuantumField } from '../../composables/security-center/useQuantumField';
+/* 模块图标（导航栏同一权威源）：节点图标与 Dock 共享同一份 SVG 路径 */
+import { MODULE_ICONS } from '../../composables/useModuleNavigation';
 
 /**
  * QuantumDashboard Props
@@ -80,37 +81,30 @@ const props = defineProps<{
   globalKeyReady: boolean;
   /** 模块 ID 列表（渲染节点 + 能量连线） */
   moduleIds: ModuleId[];
-  /** 模块标签映射（节点文字） */
-  moduleLabels: Record<string, string>;
-  /** 模块状态指示条样式类（函数） */
+  /** 模块状态样式类（函数 — 驱动节点状态扇段的弧长与色相） */
   moduleStateClass: (mid: ModuleId) => string;
-  /** 模块状态文本（函数） */
-  moduleStateText: (mid: ModuleId) => string;
 }>();
 
 /**
  * QuantumDashboard Emits
  */
-defineEmits<{
+const emit = defineEmits<{
   /** 点击节点/核心进入指定区块（父组件切换到 detail 视图并滚动定位） */
   (e: 'enterSection', section: 'globalKey' | 'moduleKeys'): void;
 }>();
 
-/* 4 个模块节点位置（百分比，0-100 坐标系）
+/* 模块节点位置（百分比，0-100 坐标系）
  * 非对称布局：手工设计的可控不规则偏差（±4.5%），
  *   打破正交对称但保持构图张力（反AI大众化：拒绝完全均匀分布） */
 const moduleNodePos = [
-  { x: 54.5, y: 13.5 },  // photo — 偏右上
-  { x: 86.5, y: 47.5 },  // accounts — 偏上
-  { x: 45.5, y: 86.5 },  // certs — 偏左下
-  { x: 12.5, y: 53.5 },  // fileverthys — 偏下
+  { x: 54.5, y: 16.5 },  // photo — 偏右上
+  { x: 84.5, y: 50.0 },  // accounts — 偏上
+  { x: 24.0, y: 76.0 },  // fileverthys — 偏左下
 ];
 
 /* ===== 物理场引擎 DOM refs ===== */
 const panelRef = ref<HTMLElement | null>(null);
 const canvasRef = ref<HTMLCanvasElement | null>(null);
-const midLayerRef = ref<HTMLElement | null>(null);
-const nearLayerRef = ref<HTMLElement | null>(null);
 const coreRef = ref<HTMLElement | null>(null);
 const nodeRefs = ref<HTMLElement[]>([]);
 /** 模板 ref 回调收集（v-for 中 ref 数组收集的标准方式） */
@@ -125,13 +119,25 @@ const coreReadyRef = toRef(props, 'globalKeyReady');
 const field = useQuantumField({
   panel: panelRef,
   canvas: canvasRef,
-  midLayer: midLayerRef,
-  nearLayer: nearLayerRef,
   coreCluster: coreRef,
   nodes: nodeRefs,
   nodePositions: moduleNodePos,
   coreReady: coreReadyRef,
+  /* 视图切换由光水仪式完成事件驱动（传播 + 落定渲染完成后的下一帧）——
+     与引导区「传播完成事件驱动」同规范，避免固定延时的时序漂移。 */
+  onFlowComplete: (section) => emit('enterSection', section),
 });
+
+/* ===== 点击入口：先走光水仪式，再由完成事件驱动视图切换 =====
+ * 仪式进行中重复点击被状态机幂等拒绝（playFlow 返回 false），
+ * 故此处无需额外闸门 —— 与引导区同一语义。 */
+const onCoreClick = (): void => {
+  field.playFlow('globalKey');
+};
+
+const onNodeClick = (): void => {
+  field.playFlow('moduleKeys');
+};
 
 /* DOM 就绪后初始化引擎（绑定事件 + 构建粒子池 + ResizeObserver + 启动 rAF） */
 onMounted(() => {

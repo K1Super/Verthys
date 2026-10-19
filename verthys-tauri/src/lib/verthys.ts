@@ -111,7 +111,7 @@ export type {
   WalRecoverResult,
   DeviceBindingResult,
 } from "../types/verthys";
-export type { PresetFeatures } from "../types/verthys";
+export type { PresetFeatures, VaultEntry } from "../types/verthys";
 
 // 常量再导出
 export {

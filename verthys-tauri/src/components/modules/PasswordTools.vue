@@ -7,10 +7,10 @@
     4. 密钥生成工具（右下）— 支持生成密钥并导出为 .bin 文件
 -->
 <template>
-  <div class="password-tools">
+  <div class="password-tools reveal-host" :class="{ 'is-entering': entering }">
     <div class="tools-grid">
       <!-- ===== 密码生成器 ===== -->
-      <section class="tool-section glass gen-section">
+      <section class="tool-section glass gen-section reveal-item" :style="{ '--reveal-delay': revealDelayOf(0) + 'ms' }">
         <div class="section-header">
           <span class="section-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5"/></svg>
@@ -75,7 +75,7 @@
       </section>
 
       <!-- ===== 密码安全评估 ===== -->
-      <section class="tool-section glass check-section">
+      <section class="tool-section glass check-section reveal-item" :style="{ '--reveal-delay': revealDelayOf(1) + 'ms' }">
         <div class="section-header">
           <span class="section-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -127,7 +127,7 @@
       </section>
 
       <!-- ===== 随机令牌生成器 ===== -->
-      <section class="tool-section glass token-section">
+      <section class="tool-section glass token-section reveal-item" :style="{ '--reveal-delay': revealDelayOf(2) + 'ms' }">
         <div class="section-header">
           <span class="section-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
@@ -157,7 +157,7 @@
       </section>
 
       <!-- ===== 密钥生成工具（新增，支持 .bin 导出） ===== -->
-      <section class="tool-section glass keygen-section">
+      <section class="tool-section glass keygen-section reveal-item" :style="{ '--reveal-delay': revealDelayOf(3) + 'ms' }">
         <div class="section-header">
           <span class="section-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3"/></svg>
@@ -225,6 +225,11 @@ import { sha256 } from "@noble/hashes/sha2";
 import { argon2id } from "hash-wasm";
 import { writeUserFile } from "../../lib/verthys";
 import { useToastCenter } from "../../composables/useToastCenter";
+import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
+
+/* 步入窗口：四个工具分区为静态内容 —— 窗口随挂载开启（内容就绪恒为真），
+ *   标记与分区同批落地，首帧即入场起点 */
+const { entering } = useModuleEntrance(() => true);
 
 /* ===== 瞬时提示（错误 / 复制 / 状态）— 全局 Toast 中心；渲染归 ToastLayer ===== */
 const { showError, showStatus, showCopied } = useToastCenter();
@@ -505,20 +510,14 @@ watch(keygenBytes, () => generateKey());
 .tool-section {
   padding: 20px;
   background: var(--bar-surface);
-  animation: section-in 0.5s var(--ease) both;
   display: flex;
   flex-direction: column;
   height: 280px;
   overflow: hidden;
 }
-@keyframes section-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.gen-section { animation-delay: 0s; }
-.check-section { animation-delay: 0.08s; }
-.token-section { animation-delay: 0.16s; }
-.keygen-section { animation-delay: 0.24s; }
+/* 分区入场已收敛到全局「模块步入编排」（styles/animations.css）：
+   本组件根为步入窗口宿主、四分区为内容条目，错峰由 revealDelayOf 注入 ——
+   包络与错峰曲线不再各自定义 */
 
 .section-header { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
 .section-icon { width: 16px; height: 16px; color: var(--accent); }

@@ -13,11 +13,11 @@
   记录类型：0x08 元数据，0x04 数据块
 -->
 <template>
-  <div class="file-verthys">
+  <div class="file-verthys reveal-host" :class="{ 'is-entering': entering }">
     <!-- 瞬时提示（错误/状态）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
 
     <!-- 顶部栏：星野导航带（半透明无框；星野底板与溶解边界由 StarlitSky 承担） -->
-    <div class="search-bar starlit-bar">
+    <div class="search-bar starlit-bar module-reveal">
       <StarlitSky :seed="7" />
       <div class="search-inner">
         <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -26,8 +26,12 @@
         <!-- 项3：搜索输入防抖（300ms 尾部触发），连续快速输入仅触发一次过滤 -->
         <input class="search-input" :value="searchKey" @input="onSearchInput" placeholder="搜索" />
       </div>
+      <!-- 悬浮提示复用全局 v-tip 气泡（量子玻璃面板）：
+           指令落在 ActionButton 唯一根 <button> 上（Vue 单根组件支持组件级指令）；
+           loading 时按钮为 disabled，原生不派发悬浮事件，故仅在可点击态呈现 -->
       <ActionButton
         primary
+        v-tip="'导入文件'"
         :loading="importing"
         @click="onImport"
       />
@@ -42,8 +46,8 @@
       v-slot="{ item: f, index }"
     >
       <div
-        class="acct-card glass"
-        :style="{ '--i': index }"
+        class="acct-card glass reveal-item"
+        :style="{ '--reveal-delay': revealDelayOf(index) + 'ms' }"
         @mousemove="onCardMove($event)"
         @mouseleave="onCardLeave($event)"
       >
@@ -80,8 +84,8 @@
       <div
         v-for="(f, idx) in filteredFiles"
         :key="f.id"
-        class="acct-card glass"
-        :style="{ '--i': idx }"
+        class="acct-card glass reveal-item"
+        :style="{ '--reveal-delay': revealDelayOf(idx) + 'ms' }"
         @mousemove="onCardMove($event)"
         @mouseleave="onCardLeave($event)"
       >
@@ -113,13 +117,16 @@
         </div>
         <div class="card-shine"></div>
       </div>
-
-      <CosmicEmpty v-if="!loading && filteredFiles.length === 0" text="暂无加密文件" hint="点击「导入文件」添加" />
     </div>
+
+    <!-- 空态覆盖层：遵循「模块根视口居中」统一契约（与存签·拾光同源）——
+         挂载为模块根容器（.file-verthys，position: relative）的直接子节点，
+         不得置于定位/滚动子容器（如 .card-grid）之内，避免参照系漂移。 -->
+    <CosmicEmpty v-if="!loading && filteredFiles.length === 0" text="暂无加密文件" hint="点击「导入文件」添加" />
 
     <!-- 导入对话框（含独立密码选项） -->
     <!-- 导入窗口：底板（背景/描边/圆角/收边投影/入场）与头部·登记区·动作区
-         结构直接复用凭证登记台共享皮肤（styles/reg-desk.css，与存签 / 枢钥 登记
+         结构直接复用凭证登记台共享皮肤（styles/reg-desk.css，与存签登记
          窗口同一来源）—— 面板类与两窗完全同形（dialog + glass + reg-panel），
          本组件只挂类与结构，不复制任何 reg-* 规则 -->
     <div v-if="showImportDialog" class="dialog-overlay" @click.self="showImportDialog = false">
@@ -278,6 +285,7 @@ import {
 import { persistVerthys, deleteAndPersistBatch, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, ensureIndexSourceSafe, getSummaryIdsByType, getRecordIdsByType, invalidateScannedRecord, getRecordsDataB64Batch } from "../../lib/keyManager";
 import { TYPE_FILEVERTHYS_META, TYPE_FILEVERTHYS_META_OLD } from "../../constants/record_types";
 import { useToastCenter } from "../../composables/useToastCenter";
+import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
 import {
   pushShallowItems, replaceShallowArray,
   removeShallowItems,
@@ -328,6 +336,10 @@ const filteredFiles = computed(() => {
   const k = searchKey.value.trim().toLowerCase();
   return files.value.filter(f => !k || f.name.toLowerCase().includes(k));
 });
+
+/* 步入窗口：以「文件列表首次非空」起算（缓存命中即首个渲染批，未命中则
+ *   数据落地批）—— 标记与首批卡片同一 patch 生效，见 useModuleEntrance 契约 */
+const { entering } = useModuleEntrance(() => filteredFiles.value.length > 0);
 
 /* 项3：搜索输入防抖（300ms 尾部触发）
  * 原问题：v-model 每次按键触发 filteredFiles computed 重新计算，
@@ -986,8 +998,7 @@ useModuleDialogGuard("verthys", () => {
 .file-verthys { width: 100%; height: 100%; display: flex; flex-direction: column; gap: 14px; overflow: hidden; position: relative; }
 
 /* 顶部栏：星野导航带仅承载布局（无边框/圆角/投影 —— 底板与左右溶解边界由 StarlitSky 承担） */
-.search-bar { display: flex; align-items: center; gap: 12px; padding: 9px 10px 9px 14px; flex-shrink: 0; animation: slide-down 0.5s var(--ease) both; }
-@keyframes slide-down { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+.search-bar { display: flex; align-items: center; gap: 12px; padding: 9px 10px 9px 14px; flex-shrink: 0; }
 .search-inner { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .search-icon { width: 14px; height: 14px; color: var(--text-muted); flex-shrink: 0; }
 .search-input { flex: 1; background: transparent; border: none; color: var(--text-primary); font-size: 13px; outline: none; font-family: var(--font); min-width: 0; }
@@ -995,13 +1006,10 @@ useModuleDialogGuard("verthys", () => {
 
 /* 卡片网格 */
 .card-grid { flex: 1; overflow-y: auto; overflow-x: hidden; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-content: start; padding-right: 4px; }
-/* 悬浮效果只有阴影 + 光泽追踪（3D 视差倾斜已按用户决策移除，Wave 53）；
-   入场动画填充模式必须为 backwards，不得改回 both/forwards——
-   前向填充会永久用动画终态压住 hover transform（曾使卡片倾斜静默失效） */
-/* 卡片底色：直接复用顶部星野导航带底板（单源 tokens.css --bar-surface，
-   与 StarlitSky 底板同一定义）；.glass 仅保留边框 / 圆角 / 投影 */
-.acct-card { position: relative; padding: 14px 16px 14px 18px; background: var(--bar-surface); transition: box-shadow 0.3s var(--ease); animation: card-in 0.5s var(--ease) backwards; animation-delay: calc(var(--i) * 0.05s); }
-@keyframes card-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+/* 卡片入场已收敛到全局「模块步入编排」（styles/animations.css —
+   .reveal-host.is-entering .reveal-item）：搜索栏与卡片都承载文字，
+   入场一律只走不透明度（位移会让字形抗锯齿在合成层与主层之间跳变）。 */
+.acct-card { position: relative; padding: 14px 16px 14px 18px; background: var(--bar-surface); transition: box-shadow 0.3s var(--ease); }
 .acct-card:hover { box-shadow: 0 12px 36px rgba(0,0,0,0.5), 0 0 16px rgba(0,212,255,0.1); }
 .card-accent { position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; background: linear-gradient(180deg, transparent, var(--accent), transparent); opacity: 0; transition: opacity 0.3s; border-radius: 1px; }
 .acct-card:hover .card-accent { opacity: 1; box-shadow: 0 0 8px rgba(0,212,255,0.4); }
@@ -1030,7 +1038,7 @@ useModuleDialogGuard("verthys", () => {
 /* 对话框 */
 .dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.74); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .dialog { padding: 28px; min-width: 440px; max-width: 90vw; animation: dialog-in 0.4s var(--ease); }
-@keyframes dialog-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes dialog-in { from { opacity: 0; } to { opacity: 1; } }
 .dialog-title { font-size: 14px; margin-bottom: 20px; color: var(--accent); letter-spacing: 2px; font-family: var(--font); }
 
 /* 导入文件信息 */

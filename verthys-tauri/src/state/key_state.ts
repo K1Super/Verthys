@@ -98,8 +98,8 @@ export const keyState: KeyState = {
   globalKeyRecordLoading: ref(false),
   globalKeyRecordB64: ref(""),
   globalKeyRecordId: ref(0),
-  moduleKeyReady: ref({ photo: false, accounts: false, certs: false, fileverthys: false }),
-  hasModuleKeyRecord: ref({ photo: false, accounts: false, certs: false, fileverthys: false }),
+  moduleKeyReady: ref({ photo: false, accounts: false, fileverthys: false }),
+  hasModuleKeyRecord: ref({ photo: false, accounts: false, fileverthys: false }),
   // 修复修复：moduleKeyEnabled 默认 false（安全默认）
   //
   // 原缺陷：默认 true 意味着"保护开关开启"=所有模块需密钥验证。
@@ -109,7 +109,7 @@ export const keyState: KeyState = {
   // 修复：默认 false（无配置记录时不开启保护）。
   // 仅当 verthys 中存在 TYPE_MODULE_KEY_CONFIG 记录且 enabled=true 时才开启。
   // 这确保"未被用户显式配置的模块"不会自动启用密钥验证。
-  moduleKeyEnabled: ref({ photo: false, accounts: false, certs: false, fileverthys: false }),
+  moduleKeyEnabled: ref({ photo: false, accounts: false, fileverthys: false }),
   // 修复修复4：模块密钥状态后台加载标志（初始 false，解锁后置 true）
   moduleKeyStatusLoading: ref(false),
   // 安全守卫根治：模块密钥状态已加载完成标志（初始 false，loadModuleKeyStatus 完成时置 true）
@@ -156,10 +156,10 @@ export function resetAllState(): void {
   keyState.globalKeyRecordId.value = 0;
   _currentVerthysPath = "";
   // moduleKeyCache is in cache/composition/verthys-cache.ts, cleared via clearModuleCache there
-  keyState.moduleKeyReady.value = { photo: false, accounts: false, certs: false, fileverthys: false };
+  keyState.moduleKeyReady.value = { photo: false, accounts: false, fileverthys: false };
   // 修复修复：重置为安全默认 false（与初始化默认一致）
-  keyState.moduleKeyEnabled.value = { photo: false, accounts: false, certs: false, fileverthys: false };
-  keyState.hasModuleKeyRecord.value = { photo: false, accounts: false, certs: false, fileverthys: false };
+  keyState.moduleKeyEnabled.value = { photo: false, accounts: false, fileverthys: false };
+  keyState.hasModuleKeyRecord.value = { photo: false, accounts: false, fileverthys: false };
   // 修复修复4：重置后台加载标志
   keyState.moduleKeyStatusLoading.value = false;
   // 安全守卫根治：重置已加载标志

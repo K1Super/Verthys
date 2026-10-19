@@ -295,22 +295,28 @@
 
 /* ============================================================
    管理视图切换过渡（单一 Transition，out-in 严格串行）
-   - 离场动画完成前入场不挂载，离场/入场/挂载不并行争抢
+   - 离场动画完成前入场不挂载，离场/入场挂载不并行争抢主线程与合成器
+   - 承接上游「光水仪式」：面板/引导区的仪式完成事件驱动本过渡启动，
+     故切换起点必落在仪式视觉已收束（光水淡出至零浓度）之后
+   - 只走不透明度：三态视图均承载文字（节点标签 / 分区读数），
+     任何位移或缩放都会把字形提升为合成层并按亚像素偏移重采样，
+     收束时再子像素化 —— 观感即「忽然模糊、随即清晰」（铁律见
+     styles/text_sharpness.spec.ts）。原实现同时过渡 translateY 与
+     前 20% 时长即冲到约七成浓度的 --ease，肉眼读作「直接呈现」，
+     正是切换生硬的成因；现改用全局「模块步入编排」两段式包络：
+     离场（快于入场，让位新视图显影主体）→ 空窗 → 入场逐级沉积。
    - blur 不参与过渡：禁止大面域滤镜在切换期逐帧重绘
-     （离场 Canvas 已停帧、入场首帧挂载与模糊化错峰）
    ============================================================ */
 .mgmt-x-enter-active {
-  transition: opacity 0.32s var(--ease), transform 0.32s var(--ease);
+  animation: module-reveal var(--reveal-dur, 0.62s) linear backwards;
 }
 .mgmt-x-leave-active {
-  transition: opacity 0.22s var(--ease), transform 0.22s var(--ease);
+  animation: module-reveal-out var(--mgmt-leave-dur, 0.34s) linear forwards;
   pointer-events: none;
 }
 .mgmt-x-enter-from {
   opacity: 0;
-  transform: translateY(14px);
 }
 .mgmt-x-leave-to {
   opacity: 0;
-  transform: translateY(-10px);
 }

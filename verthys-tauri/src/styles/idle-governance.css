@@ -111,6 +111,18 @@ body.reduced-motion .brand-wordmark .wm-glyph {
   animation-play-state: running !important;
 }
 
+/* 步入编排与过渡活动动画豁免（语义不失真）：同因 —— backwards 填充的
+ *   一次性显现被冻结在 opacity 0 即等于内容整体不可见；过渡活动类被冻结
+ *   则 animationend 永不触发，视图切换停帧。
+ *   通道仅不透明度（合成器属性），单次播放后静止，降级期不增持续负载。 */
+body.reduced-motion :is(
+  .module-reveal, .reveal-item,
+  .module-switch-enter-active, .module-switch-leave-active,
+  .mgmt-x-enter-active, .mgmt-x-leave-active
+) {
+  animation-play-state: running !important;
+}
+
 /* backdrop-filter「减少」档已无消费者（常态动效无实时
  * backdrop-filter，此档无对应规则，编号仅保留层级连续性） */
 
@@ -141,6 +153,30 @@ body.reduced-motion .brand-wordmark .wm-glyph {
  * 必在进入主界面的那次交互之后，实际不会被空闲暂停拦住） */
 .idle-idle .home-view .hub-sub,
 .idle-deep-idle .home-view .hub-sub {
+  animation-play-state: running !important;
+}
+
+/* ===== 3.2 idle：步入编排与过渡活动动画豁免（一次性显现 · 语义不失真） =====
+ *   涵盖三类一次性动画，冻结即语义受损：
+ *     1) 步入编排元素（.module-reveal / .reveal-item）：backwards 填充使其
+ *        起始帧为 opacity 0 —— 冻结等于内容整体不可见；
+ *     2) 模块渡越活动类（.module-switch-enter/leave-active）：冻结入场即新模块
+ *        不显影；冻结离场则过渡永不触发 animationend，视图切换停帧；
+ *     3) 管理视图活动类（.mgmt-x-enter/leave-active）：同 2。
+ *   三者成形后零持续开销，不构成常驻负载，故与品牌字标同列核心保留集。
+ *   维护契约：一次性编排元素以 .module-reveal / .reveal-item 为唯一入口，
+ *     过渡活动类以 .module-switch-* / .mgmt-x-* 为唯一入口 —— 本节按类豁免，
+ *     新增编排元素自动纳入，无需逐项登记。 */
+.idle-idle :is(
+    .module-reveal, .reveal-item,
+    .module-switch-enter-active, .module-switch-leave-active,
+    .mgmt-x-enter-active, .mgmt-x-leave-active
+  ),
+.idle-deep-idle :is(
+    .module-reveal, .reveal-item,
+    .module-switch-enter-active, .module-switch-leave-active,
+    .mgmt-x-enter-active, .mgmt-x-leave-active
+  ) {
   animation-play-state: running !important;
 }
 

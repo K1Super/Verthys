@@ -60,11 +60,12 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* 星野导航带：仅布局（无边框/圆角/投影 —— 边界由星野的渐变消解） */
+/* 星野导航带：仅布局（无边框/圆角/投影 —— 边界由星野的渐变消解）。
+   入场编排不在此声明：搜索栏随模块步入编排由承载层（调用方的
+   .module-reveal 包裹层）统一承担，避免同一条内容链双重淡入。 */
 .search-bar {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 12px 9px 14px;
-  animation: slide-down 0.5s var(--ease) both;
 }
 .search-inner {
   flex: 1; display: flex; align-items: center; gap: 8px;
@@ -78,9 +79,4 @@ onBeforeUnmount(() => {
   color: var(--text-primary); font-size: 13px; min-width: 0;
 }
 .search-input::placeholder { color: var(--text-muted); }
-
-@keyframes slide-down {
-  from { opacity: 0; transform: translateY(-8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
 </style>
