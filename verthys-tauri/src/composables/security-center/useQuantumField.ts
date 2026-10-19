@@ -432,6 +432,9 @@ export interface QuantumFieldOptions {
   nodes: Ref<HTMLElement[]>;
   /** 模块节点布局（百分比，与 DOM 定位严格一致） */
   nodePositions: Array<{ x: number; y: number }>;
+  /** 模块状态类名（与 nodePositions 同序）—— 卫星环饰的状态扇段由此读取
+   *  （跨度 / 色相 / 休眠压暗）；与 DOM 的 state-* 类同源，故两者不会漂移 */
+  nodeStates: { readonly value: readonly string[] };
   /** 中心核心就绪状态（吸积盘能量与色相应答） */
   coreReady: Ref<boolean>;
   /** 光水仪式完成回调（落定渲染帧的下一帧调用 — 双帧约定，
@@ -551,6 +554,20 @@ export function useQuantumField(options: QuantumFieldOptions) {
 
   /* ---------- 节点 hover 弹簧池 ---------- */
   const nodeSprings: Spring[] = [];
+
+  /* ---------- 卫星环饰（逐节点：静态刻度环 + 双自转弧 + 状态扇段） ---------- */
+  /** 静态刻度环路径（构建期成路径 — 逐帧一次描边，零逐帧路径构建） */
+  const satBezel: Path2D[] = [];
+  /** 外圈自转能量弧（模块色相 — 与连线/光水同源） */
+  const satAccent: SatArc[] = [];
+  /** 内圈反向自转弧（纵深） */
+  const satInner: SatArc[] = [];
+  /** 状态扇段跨度弹簧（状态切换无硬跳） */
+  const satSpanSpring: Spring[] = [];
+  /** 状态扇段当前色相（逐帧向目标色相插值，帧率无关） */
+  const satHue: number[][] = [];
+  /** 休眠压暗系数（0 = 常态，1 = 保护已关闭；逐帧收敛，切换无硬跳） */
+  const satDim: number[] = [];
 
   /* ---------- 节点像素坐标缓冲（每帧原地写入，零 GC） ---------- */
   const nodePx: Array<{ x: number; y: number }> = [];
@@ -730,6 +747,38 @@ export function useQuantumField(options: QuantumFieldOptions) {
     options.nodePositions.forEach(() => {
       nodeSprings.push(makeSpring(30, 1.05));
       nodePx.push({ x: 0, y: 0 });
+    });
+    /* 卫星环饰：逐节点独立种子 → 刻向/相位/跨度/角速度互异（拒绝整齐划一）；
+     * 半径与线宽为定值（与 DOM 环同径），仅相位/跨度/速度/色相逐节点差化 */
+    const nodeStates = options.nodeStates.value;
+    options.nodePositions.forEach((_, i) => {
+      const satRand = mulberry32(0x6b21 + i * 8191);
+      satBezel.push(makeSatBezelPath(satRand() * Math.PI * 2));
+      const satStroke = `${WATER_EDGE[i % WATER_EDGE.length]}1)`;
+      satAccent.push({
+        radius: SAT_R_BEZEL,
+        span: SAT_ACCENT_SPAN[0] + satRand() * (SAT_ACCENT_SPAN[1] - SAT_ACCENT_SPAN[0]),
+        theta: satRand() * Math.PI * 2,
+        omega:
+          (SAT_ACCENT_OMEGA[0] + satRand() * (SAT_ACCENT_OMEGA[1] - SAT_ACCENT_OMEGA[0])) *
+          (satRand() < 0.5 ? -1 : 1),
+        width: 1.3 + satRand() * 0.5,
+        alpha: 0.34 + satRand() * 0.14,
+        stroke: satStroke,
+      });
+      satInner.push({
+        radius: SAT_INNER_R,
+        span: SAT_INNER_SPAN[0] + satRand() * (SAT_INNER_SPAN[1] - SAT_INNER_SPAN[0]),
+        theta: satRand() * Math.PI * 2,
+        omega: SAT_INNER_OMEGA[0] + satRand() * (SAT_INNER_OMEGA[1] - SAT_INNER_OMEGA[0]),
+        width: 0.8,
+        alpha: 0.2 + satRand() * 0.12,
+        stroke: satStroke,
+      });
+      const st = SAT_STATE[nodeStates[i]] ?? SAT_STATE['state-off'];
+      satSpanSpring.push(makeSpring(26, 1.0, st.span));
+      satHue.push([st.rgb[0], st.rgb[1], st.rgb[2]]);
+      satDim.push(nodeStates[i] === 'state-off' ? 1 : 0);
     });
     // 发光贴图 + 核心暗核贴图（离屏一次栅格化，逐帧零渐变构建）
     SPRITE_COLORS.forEach((c) => sprites.push(makeSprite(c)));
@@ -956,6 +1005,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
     springStep(coreHover, dt);
     springStep(coreReadySpring, dt);
     nodeSprings.forEach((s) => springStep(s, dt));
+    satSpanSpring.forEach((s) => springStep(s, dt));
 
     /* ---- 入场编排主时钟：introTime 由 applySize 的尺寸有效跃迁归零 ---- */
     const it = introTime;
