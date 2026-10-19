@@ -7,33 +7,35 @@
      - .qd-layer 层容器（mid = 三个模块节点 / near = 核心文字；两者均静态居中，
                         零视差 —— 视差只在 Canvas 内部作用于尘埃与碎片）
      - .qd-core-cluster 中心量子核心（文字簇，不含任何 transform）
-     - .qd-module-node 模块轨道节点（引力锚点环 + 状态扇段 + 导航栏同源图标，
-                        缩放归装饰环；节点无任何文字）
+     - .qd-module-node 模块轨道节点（DOM 侧仅导航栏同源图标热区；装饰环饰由
+                        useQuantumField 的 Canvas 管线绘制，节点无任何文字）
    变换归属（文字清晰度铁律 — 守卫见 styles/text_sharpness.spec.ts）：
      1) 承载文字的层（节点文字子树 / 中心核心文字簇）严禁缩放与旋转 ——
         非整数缩放会让字形按非 1 比例重栅格化，悬浮期读作「文字发糊」；
-        故悬浮/入场的缩放一律作用于装饰环 .qd-node-orb（矢量描边，
-        无字形栅格化）；
+        故悬浮/入场的缩放一律作用于装饰环热区 .qd-node-orb（环饰本身在
+        Canvas 侧，缩放由引擎施加于绘制半径；盒内仅矢量图标，无字形栅格化）；
      2) 两层 DOM（mid 节点 / near 核心文字）均零位移且不提升合成层：
         零位移层不需要合成，保持主层内栅格化 → 字形走亚像素抗锯齿（更清晰），
         且永不被重栅格化；引擎逐帧 transform 写入仅装饰环一处；
      3) 引擎逐帧写入的元素禁止声明 transform transition/hover 缩放
         （CSS transition 会与逐帧写入叠加造成二次平滑与滞后卡顿）。
-   模块节点样式（引力锚点环 — 反「实心圆盘 + 辉光」的通用球形指示灯观感）：
-     7) 零底托：节点 = 发丝刻度环 + 状态扇段 + 环心图标（图标取自导航栏同一
-        权威源，节点不含任何文字），无实心圆盘、无 box-shadow、无 drop-shadow、
-        无描边发光 —— 环即轮廓，扇段即读数；
+   模块节点样式（卫星环饰 = 引擎 Canvas 绘制的引力锚点环 — 与吸积盘同一渲染语言）：
+     7) 媒介统一：节点装饰环饰不再由 DOM/SVG 描边承担，而由 useQuantumField 的
+        Canvas 管线绘制（发丝刻度环 + 内外双自转能量弧 + 状态扇段 + 捕获光晕 +
+        模块色相），故质感与运动与中心吸积盘同源；运动由引擎驱动 —— 受全局
+        帧率档位治理（CSS 动画在 deep-idle 不会停帧，本引擎的自限节拍会停）。
+        DOM 侧只留 48px 图标热区与导航栏同源图标，无描边、无阴影、无文字；
         节点锚点（left/top 百分比）即装饰环圆心：引擎的节点像素坐标、
-        连线/光水终点与落定光晕一律以环心为基准，且终点再沿
-        「圆环中心 → 环心」方向回缩至环沿（见 useQuantumField 的
-        LINK_DOCK_R）—— 线尾对接在环上，绝不进入环内空间；
-     8) 刻度环（.qd-node-reticle，viewBox 48 = 元素 48 CSS px）为三段非均匀
-        断裂弧（弧长 121.68° / 98.64° / 95.76°，断口 12.24° / 9.36° / 22.32°）
-        —— 与吸积盘的分段不等长弧同一语言，拒绝「一枚完美圆环」的加载器观感；
-     9) 状态扇段（.qd-reticle-tick）与刻度环同半径、满量程恒居正上方，以弧长
-        与色相共同编码状态；过渡只作用于描边属性（stroke / stroke-dasharray /
-        stroke-dashoffset），且字形恒为冷白 —— 状态语义不染字形，
-        故条款 1~3 的「承载文字子树不得变换 / 不得过渡 transform」不受影响。
+        连线/光水终点与落定光晕一律以环心为基准，且终点沿「圆环中心 → 环心」
+        方向回缩至环沿（见 useQuantumField 的 LINK_DOCK_R）—— 线尾对接在环上、
+        绝不进入环内空间；环饰先绘、连线后绘（环饰压在连线之下）；
+     8) 刻度环几何（引擎内构建为 Path2D，逐帧一次描边）：三段非均匀断裂弧
+        （弧长 121.68° / 98.64° / 95.76°，断口 12.24° / 9.36° / 22.32°，
+        每处断口一枚内指刻度）—— 与吸积盘的分段不等长弧同一语言，
+        拒绝「一枚完美圆环」的加载器观感；
+     9) 状态读数在 Canvas 侧成全：扇段跨度由弹簧驱动、色相逐帧插值、休眠压暗
+        连续收敛，与 DOM 的 state-* 类同源（nodeStates 为单一状态源）——
+        状态语义不染图标，故条款 1~3 的「承载文字子树不得变换」不受影响。
    零视差裁定（圆环及其三个卫星）：
      6) 圆环整组（吸积盘 / 暗核 / 核心辉点 + 核心文字）恒居面板中心；
         三个模块节点与三条连线（含数据包、光水路径）一并零视差 ——
@@ -132,12 +134,12 @@
   margin-top: 2px;
 }
 
-/* --- 模块轨道节点（锚点 = 装饰环圆心；引擎只写不透明度，缩放归装饰环，
-       禁止对文字子树做任何逐帧变换） --- */
+/* --- 模块轨道节点（锚点 = 装饰环圆心；DOM 侧仅存图标，环饰全部由引擎
+       Canvas 绘制 —— 本层无描边、无阴影、不参与任何逐帧变换） --- */
 .qd-module-node {
   position: absolute;
   /* 上移环半径（48px 装饰环的一半）→ 元素盒的环心落在 left/top 锚点上
-     （节点不含文字，盒即环；此式使锚点与环心恒等，不随盒内内容变化）。
+     （节点不含文字，盒即图标热区；此式使锚点与环心恒等，不随盒内内容变化）。
      引擎的节点像素坐标、连线/光水终点（环心沿圆环方向回缩至环沿）与
      落定光晕一律以环心为基准，无需任何布局补偿常量。 */
   transform: translate(-50%, -24px);
@@ -147,13 +149,14 @@
   cursor: pointer;
 }
 
-/* 引力锚点环（装饰环）：零底托 —— 无实心圆盘、无辉光阴影、无描边发光，
-   环即轮廓、扇段即读数、字形浮于环心。
-   独立合成层：引擎逐帧写入本元素的缩放（入场涌现 + 悬浮磁吸）。若不提升，
-   该缩放写在「非合成子元素」上 → 内容变化使承载它的 .qd-layer-mid（整层、
-   满面板、含文字）每帧整层重栅格化；提升后缩放由合成器施加于缓存纹理，
-   父层栅格不再被牵连（—— 一并消除「悬浮时三个模块顿挫」与逐帧重栅格化
-   导致的文字发糊）。环内只有矢量描边、无字形，缩放重采样无清晰度代价。 */
+/* 环心图标热区（48px）：装饰环饰（刻度环 / 自转能量弧 / 状态扇段 / 捕获光晕）
+   由 useQuantumField 的 Canvas 管线绘制 —— 与吸积盘同一渲染语言，
+   且其运动由引擎驱动（受全局帧率档位治理：CSS 动画在 deep-idle 不会停帧）。
+   独立合成层：引擎逐帧写入本元素的缩放（入场涌现 + 悬浮磁吸，与 Canvas
+   侧环饰共用同一系数）。若不提升，该缩放写在「非合成子元素」上 → 内容变化
+   使承载它的 .qd-layer-mid（整层、满面板）每帧整层重栅格化；提升后缩放由
+   合成器施加于缓存纹理，父层栅格不再被牵连。
+   盒内只有矢量图标（无字形、无描边），缩放重采样无清晰度代价。 */
 .qd-node-orb {
   position: relative;
   width: 48px; height: 48px;
@@ -163,44 +166,9 @@
   will-change: transform;
 }
 
-/* 刻度环矢量：viewBox 48 与元素 48 CSS px 等比 → stroke-width 即 CSS px；
-   半径 21、圆心 (24,24)，环外恰留 3px 内边距 */
-.qd-node-reticle {
-  position: absolute;
-  inset: 0;
-  width: 100%; height: 100%;
-  fill: none;
-}
-
-/* 基准刻度环：三段非均匀断裂弧（弧长 121.68° / 98.64° / 95.76°，
-   断口 12.24° / 9.36° / 22.32°，合为整周）—— 与吸积盘的分段不等长弧
-   同一语言，拒绝「一枚完美圆环」的通用加载器观感 */
-.qd-reticle-base {
-  stroke: rgba(176, 202, 220, 0.15);
-  stroke-width: 1;
-  transition: stroke 0.35s var(--ease);
-}
-
-/* 状态扇段：与基准环同半径，满量程弧恒居正上方（216° → 324°，108°）。
-   状态由「弧长 + 色相」两处编码 —— 状态是仪表读数，不是通体变色的圆球。
-   满量程弧长 = 21 × 108° = 39.584；各档取圆周长占比
-   （已登录 30% / 已设置 20% / 未设置 11% / 关闭 5%）。
-   dasharray 两段之和恒为 200（过渡期间两段同步线性插值、周期不变 → 弧长
-   平滑收束）；dashoffset = 200 − (39.584 − L) / 2 使收束后的弧仍居中于
-   正上方（两端对称内收）。过渡只作用于描边属性：不含 transform / filter，
-   故不触碰「变换归属」条款 1~3 */
-.qd-reticle-tick {
-  stroke: var(--text-muted);
-  stroke-width: 1.8;
-  stroke-dasharray: 39.58 160.42;
-  stroke-dashoffset: 200;
-  transition: stroke 0.4s var(--ease), stroke-dasharray 0.4s var(--ease),
-    stroke-dashoffset 0.4s var(--ease);
-}
-
-/* 环心字形：图标取自导航栏同一权威源（useModuleNavigation 的模块图标注册表），
-   冷白恒色 —— 状态语义不染色（交给状态扇段），无 drop-shadow（辉光由吸积盘与
-   连线承担，字形只做精确读数） */
+/* 环心图标：取自导航栏同一权威源（useModuleNavigation 的模块图标注册表），
+   冷白恒色 —— 状态语义不染色（交给 Canvas 侧状态扇段），无 drop-shadow
+   （发光由吸积盘与卫星环饰承担，图标只做精确读数） */
 .qd-node-icon {
   width: 19px; height: 19px;
   color: rgba(214, 231, 243, 0.84);
@@ -212,39 +180,11 @@
   stroke-linejoin: round;
 }
 
-/* --- 模块状态读数（扇段弧长 + 色相两处同源，不做整体变色 ——
-       拒绝「通体变色的红绿灯圆球」；节点无文字，状态只由此扇段读出） --- */
-.qd-module-node.state-active .qd-reticle-tick {
-  stroke: rgba(0, 255, 170, 0.9);
-  stroke-dasharray: 39.58 160.42;
-  stroke-dashoffset: 200;
-}
-
-.qd-module-node.state-set .qd-reticle-tick {
-  stroke: rgba(var(--accent-rgb), 0.9);
-  stroke-dasharray: 26.39 173.61;
-  stroke-dashoffset: 193.4;
-}
-
-.qd-module-node.state-empty .qd-reticle-tick {
-  stroke: rgba(255, 170, 0, 0.88);
-  stroke-dasharray: 14.51 185.49;
-  stroke-dashoffset: 187.47;
-}
-
-.qd-module-node.state-off .qd-reticle-tick {
-  stroke: rgba(150, 164, 180, 0.5);
-  stroke-dasharray: 6.6 193.4;
-  stroke-dashoffset: 183.51;
-}
-/* 保护已关闭 → 节点休眠：环与字形一并压暗，与状态扇段同一语义 */
-.qd-module-node.state-off .qd-reticle-base { stroke: rgba(150, 164, 180, 0.1); }
-.qd-module-node.state-off .qd-node-icon { color: rgba(150, 164, 180, 0.55); }
-
-/* --- 悬浮应答（着色解耦）：环的磁吸缩放与对应连线能量增益由引擎承担，
-       此处只做描边与字形的亮度应答 —— 不含 transform，与条款 1~3 一致 --- */
-.qd-module-node:hover .qd-reticle-base { stroke: rgba(196, 220, 238, 0.28); }
+/* --- 悬浮应答（着色解耦）：环饰的磁吸缩放、悬浮增亮与对应连线能量增益
+       全部由引擎承担（Canvas 侧），此处只做图标的亮度应答 ——
+       不含 transform，与条款 1~3 一致 --- */
 .qd-module-node:hover .qd-node-icon { color: rgba(242, 251, 255, 0.98); }
+/* 保护已关闭 → 节点休眠：图标压暗（环饰的同步压暗由引擎按状态承担） */
+.qd-module-node.state-off .qd-node-icon { color: rgba(150, 164, 180, 0.55); }
 /* 休眠节点的悬浮只温和提亮（不得读作「已可用」） */
-.qd-module-node.state-off:hover .qd-reticle-base { stroke: rgba(150, 164, 180, 0.2); }
 .qd-module-node.state-off:hover .qd-node-icon { color: rgba(190, 204, 220, 0.78); }
