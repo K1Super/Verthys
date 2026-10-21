@@ -32,14 +32,13 @@
    * 过渡链触发额外重绘/重栅格化） */
   transition:
     border-color var(--dur-fast) var(--ease),
-    background-color var(--dur-fast) var(--ease),
-    box-shadow var(--dur-fast) var(--ease);
+    background-color var(--dur-fast) var(--ease);
   min-width: 0;
 }
+/* 聚焦：仅边框与底色应答（无 12px 辉光阴影 — 克制、非发光堆积） */
 .sc-input:focus {
   border-color: var(--accent);
   background: rgba(0, 0, 0, 0.45);
-  box-shadow: 0 0 12px rgba(0, 212, 255, 0.1);
 }
 .path-row, .pw-row {
   display: flex;

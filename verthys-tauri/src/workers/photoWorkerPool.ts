@@ -955,26 +955,6 @@ export class PhotoWorkerPool {
   }
 
   /**
-   * 批量提交并收集所有结果（保持输入顺序）
-   *
-   * 内部并行调度到 Worker 池，结果按输入顺序排列，失败项被过滤并通过
-   * onFailure 回调通知。
-   */
-  async submitBatch(
-    inputs: SubmitInput[],
-    onFailure?: (input: SubmitInput, error: Error) => void,
-  ): Promise<PhotoCryptoSuccess[]> {
-    const promises = inputs.map((input) =>
-      this.submit(input).catch((err: Error) => {
-        onFailure?.(input, err);
-        return null;
-      }),
-    );
-    const results = await Promise.all(promises);
-    return results.filter((r): r is PhotoCryptoSuccess => r !== null);
-  }
-
-  /**
    * 提交 meta-only 加密任务到 Worker 池（解析导入路径）
    *
    * 与 submit() 共享队列、背压、崩溃恢复与看门狗。请求经结构化克隆

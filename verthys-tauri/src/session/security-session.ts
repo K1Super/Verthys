@@ -15,6 +15,8 @@ import {
   verthysClearGlobalKey, verthysLock, verthysLockPersist, workerDestroy,
   type SecurityPresetCode, type BruteForceCheckResponse, type PresetFeatures,
 } from "../lib/verthys";
+import { ref } from "vue";
+import { isTauriEnvironment } from "../utils/tauri_env";
 import { keyState, setCurrentVerthysPath, loadCustomFeatures, saveSecurityPreset, saveCustomFeatures, loadSecurityPreset, resetAllState } from "../state/key_state";
 import { PRESET_SESSION_TIMEOUT_MS, SECURITY_PRESET_KEY, CUSTOM_FEATURES_KEY } from "../constants/key_manager_const";
 import { withTimeout } from "../utils/promise_utils";
@@ -28,6 +30,13 @@ export const securityPresetRef = keyState.securityPreset;
 
 // 导出 sessionLockEnabledRef 供 keyManager.ts 再导出（UI 据此展示空闲锁定状态）
 export const sessionLockEnabledRef = keyState.sessionLockEnabled;
+
+/** 会话硬化 / 会话守卫是否处于降级状态
+ *
+ * 安全档位宣称的「挂起锁定 / 剪贴板监听 / 系统锁屏会话守卫」若启停失败，
+ * 旧实现仅 console.warn —— 界面仍显示已启用，属不可见的安全降级。
+ * 本 ref 供管理面板如实标注「部分安全硬化未生效」。 */
+export const securityHardeningFailedRef = ref(false);
 
 /* ------------------------------------------------------------------ *
  * 会话计时                                                            *
@@ -151,11 +160,13 @@ export async function applySecurityPreset(
         3000,
         "设置会话硬化开关",
       );
+      securityHardeningFailedRef.value = !ok;
       if (!ok) {
         // 后端返回 ok=false（会话未解锁被拒绝/监听启动失败）：可见报告而非静默吞掉
         console.warn("[applySecurityPreset] CUSTOM 会话硬化开关被后端拒绝或监听启动失败");
       }
     } catch (e) {
+      securityHardeningFailedRef.value = true;
       console.warn("[applySecurityPreset] CUSTOM 设置会话硬化开关失败（非致命）", e);
     }
 
@@ -190,10 +201,12 @@ export async function applySecurityPreset(
       3000,
       "设置会话硬化开关",
     );
+    securityHardeningFailedRef.value = !ok;
     if (!ok) {
       console.warn("[applySecurityPreset] 会话硬化开关被后端拒绝或监听启动失败");
     }
   } catch (e) {
+    securityHardeningFailedRef.value = true;
     console.warn("[applySecurityPreset] 设置会话硬化开关失败（非致命）", e);
   }
 
@@ -283,7 +296,10 @@ export async function restoreSecurityPreset(): Promise<PresetRestoreReport> {
  *   3. clearBruteForcePurge — PurgeRequired 处理完成后清除           *
  * ------------------------------------------------------------------ */
 
-/** 检查当前是否允许尝试解锁（暴力拦截门禁） */
+/** 检查当前是否允许尝试解锁（暴力拦截门禁）
+ *
+ * 失败语义：Tauri 环境下查询失败一律 fail-closed（无法确认门禁状态时
+ * 不得进入长运算解锁流程）；仅浏览器模式（无安全后端）允许放行。 */
 export async function checkBruteForceGate(): Promise<BruteForceGateResult> {
   try {
     const r: BruteForceCheckResponse = await securityBruteCheck();
@@ -293,8 +309,12 @@ export async function checkBruteForceGate(): Promise<BruteForceGateResult> {
     }
     return { allowed: false, reason: "purge_required" };
   } catch (e) {
-    // Tauri 不可用时放行（浏览器模式/开发期）
-    console.warn("[checkBruteForceGate] 查询失败，放行", e);
+    console.warn("[checkBruteForceGate] 查询失败", e);
+    if (isTauriEnvironment()) {
+      // 后端不可用 / 查询失败：拒绝进入认证流程（服务端闸门仍会兜底）
+      return { allowed: false, reason: "gate_unavailable" };
+    }
+    // 浏览器模式（开发期）：无安全后端，允许继续
     return { allowed: true };
   }
 }
@@ -344,21 +364,23 @@ export async function clearBruteForcePurge(): Promise<void> {
 /** 重入保护标志：防止 session_guard on_lock 回调与用户操作并发触发 lockAll */
 let lockAllInProgress = false;
 
-/** 修复C：当前 lockAll 的 Promise（null 表示无 lockAll 进行中）
+/** 当前 lockAll 的"真实工作"Promise（null 表示无 lockAll 进行中）
  *
- * 用于 awaitLockAllIfInProgress：外部代码（doUnlock/initUnlock/goBackToUnlock）
- * 可在执行解锁/创建前等待正在进行的 lockAll 完成，避免：
- *   - worker 被 lockAll 销毁期间发起 verthys_unlock → IPC 发往死 worker → 永久卡死
- *   - lockAll 清空缓存期间发起 initUnlock → 状态机不一致
+ * 与等待上限分离（关键治理）：
+ *   旧实现以 40s `Promise.race` 结束等待并释放闸门，但 doLockAll 仍在后台
+ *   继续执行；40s 后用户可立即解锁，残留的「清 GMK / 锁库 / 销毁 worker」
+ *   会打在**新会话**上（新 worker 被销毁、新状态被 resetAllState 抹掉），
+ *   窗口期内还可并发启动第二个 lockAll。
  *
- * 必须与 lockAllInProgress 同步生命周期：
- *   - lockAll() 入口置 lockAllPromise = doLockAll 的 Promise
- *   - lockAll() finally 块置 lockAllPromise = null
+ * 现语义：
+ *   - 闸门（lockAllInProgress）只在 doLockAll 真正结束后释放；
+ *   - 等待方 await 的是真实工作（各步均有超时包裹，总时长有界）；
+ *   - 破坏性步骤执行前校验代际，任何强制换代都会让旧步骤立即自弃。
  */
-let lockAllPromise: Promise<void> | null = null;
+let lockWorkPromise: Promise<void> | null = null;
 
-/** lockAll 总体超时（40s 安全网，覆盖 waitForFlush 22s + 各步骤超时） */
-const LOCK_ALL_TOTAL_TIMEOUT_MS = 40000;
+/** 锁定代际（单调递增）：每次 lockAll 启动递增；步骤执行前校验 */
+let lockGeneration = 0;
 
 /** 单步超时包装：防止单个 IPC 调用卡死 */
 function withStepTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | undefined> {
@@ -367,6 +389,8 @@ function withStepTimeout<T>(promise: Promise<T>, ms: number, label: string): Pro
     new Promise<undefined>((resolve) => {
       setTimeout(() => {
         console.warn(`[lockAll] ${label} 超时 ${ms}ms，继续执行后续步骤`);
+        // 任一步超时都意味着落盘/清理可能不完整：如实标记缓存脏数据
+        setCacheDirty(true);
         resolve(undefined);
       }, ms);
     }),
@@ -376,88 +400,71 @@ function withStepTimeout<T>(promise: Promise<T>, ms: number, label: string): Pro
 /**
  * 锁定全部：按 7 步流程串行执行，确保删除数据落盘后再销毁 worker。
  *
- * 重入保护：lockAllInProgress 标志防止 session_guard on_lock 回调与
- * 用户操作（关闭按钮/手动锁定）并发触发，避免竞态。
+ * 重入保护：lockAllInProgress 闸门防止 session_guard on_lock 回调与
+ * 用户操作（关闭按钮/手动锁定）并发触发；已在执行时本调用只等待真实
+ * 工作完成，绝不并行启动第二套销毁步骤。
  *
- * 总体超时：40s 安全网，防止单步卡死导致 lockAll 无限阻塞。
- *
- * 修复C：lockAllPromise 暴露给 awaitLockAllIfInProgress，
- *   使 doUnlock/initUnlock 能等待正在进行的 lockAll 完成后再发起新解锁。
+ * 时长治理：不再使用「40s 总超时后释放闸门」的竞速收口 —— 各步骤均有
+ * 独立超时包裹，真实工作总时长有界；闸门只在真实工作结束后释放。
  */
 export async function lockAll(onProgress?: (percent: number, message: string) => void): Promise<void> {
-  // 重入保护：已在进行中则忽略（session_guard 可能并发触发）
-  if (lockAllInProgress) {
-    console.warn("[lockAll] 已在进行中，忽略重入调用");
+  // 重入：等待在途真实工作完成（不重复启动销毁链）
+  if (lockAllInProgress && lockWorkPromise) {
+    console.warn("[lockAll] 已在进行中，等待当前锁定序列完成");
+    await lockWorkPromise;
     return;
   }
   lockAllInProgress = true;
-
-  // 修复C：构建本次 lockAll 的 Promise（含总体超时安全网）
-  //   暴露给 awaitLockAllIfInProgress，使并发解锁请求能等待其完成
-  const thisPromise = Promise.race([
-    doLockAll(onProgress),
-    new Promise<void>((resolve) => {
-      setTimeout(() => {
-        console.error(`[lockAll] 总体超时 ${LOCK_ALL_TOTAL_TIMEOUT_MS}ms，强制完成`);
-        // 40s 超时标记缓存脏数据
-        //    部分数据可能未落盘，下次导航/解锁时弹窗提示用户
-        setCacheDirty(true);
-        resolve();
-      }, LOCK_ALL_TOTAL_TIMEOUT_MS);
-    }),
-  ]);
-  lockAllPromise = thisPromise;
+  const generation = ++lockGeneration;
+  const work = doLockAll(generation, onProgress);
+  lockWorkPromise = work;
 
   try {
-    await thisPromise;
+    await work;
   } finally {
-    lockAllInProgress = false;
-    lockAllPromise = null;
+    // 仅当前代次可释放闸门；强制换代时由新代次接管
+    if (generation === lockGeneration) {
+      lockAllInProgress = false;
+      lockWorkPromise = null;
+    }
   }
 }
 
-/** 修复C：等待正在进行的 lockAll 完成
+/** 等待正在进行的 lockAll 完成
  *
- * 若有 lockAll 正在进行，阻塞等待其完成（最多 40s + 5s 余量）；
+ * 若有 lockAll 正在进行，阻塞等待其**真实工作**结束；
  * 若无 lockAll 进行中，立即返回。
  *
  * 使用场景：
  *   - doUnlock/initUnlock/initCreate 起始处：确保旧的 lockAll 完成后再解锁
  *   - goBackToUnlock 调用 lockAll 后：确保锁定完成后再允许用户操作
  *
- * 安全超时：45s 兜底（覆盖 lockAll 40s 总体超时 + 5s 余量），
- *   防止 lockAllPromise 因异常未清空导致永久等待。
+ * 为何不再设 45s 提前返回：提前返回会让解锁与残留销毁步骤并行，
+ * 新会话会被旧 lockAll 的清 GMK / 锁库 / 销毁 worker 命中。各步均有
+ * 超时包裹，真实工作不会无限阻塞。
  *
  * 注意：本函数不触发新的 lockAll，仅等待已存在的 lockAll。
  */
 export async function awaitLockAllIfInProgress(): Promise<void> {
-  const ongoing = lockAllPromise;
+  const ongoing = lockWorkPromise;
   if (ongoing === null) return;
-
-  // 安全超时兜底：45s（覆盖 lockAll 40s + 5s 余量）
-  //   防止 lockAllPromise 因未捕获异常未清空导致永久等待
-  await Promise.race([
-    ongoing,
-    new Promise<void>((resolve) => {
-      setTimeout(() => {
-        console.warn("[awaitLockAllIfInProgress] 等待 lockAll 超时 45s，强制返回");
-        resolve();
-      }, 45000);
-    }),
-  ]);
+  await ongoing;
 }
 
 /** 7 步流程实际实现
  *
  * 修复：接受 onProgress 回调，每步推送进度
  *
- * 原缺陷：goBackToUnlock 调用 lockAll() 后进度条停在 0% 无响应，
- *   因为 lockAll 是单个 await，40s 阻塞期间无进度更新。
- *
- * 修复：doLockAll 每步调用 onProgress 推送百分比和消息，
- *   goBackToUnlock 传入回调直接更新 UI 进度条。
+ * 代际仲裁：每个破坏性步骤执行前校验 generation —— 若在等待期间被
+ *   强制换代（新锁定序列接管），旧序列立即自弃，绝不污染新会话。
  */
-async function doLockAll(onProgress?: (percent: number, message: string) => void): Promise<void> {
+async function doLockAll(
+  generation: number,
+  onProgress?: (percent: number, message: string) => void,
+): Promise<void> {
+  /** 当前序列是否仍为权威（否则立即停止后续破坏性步骤） */
+  const current = (): boolean => generation === lockGeneration;
+
   clearSessionTimer();
 
   // 同步重置前端状态（避免中间态闪烁）
@@ -468,6 +475,7 @@ async function doLockAll(onProgress?: (percent: number, message: string) => void
   // 步骤 1+2：取消防抖定时器 + 阻塞等待全部删除、落盘队列执行完成
   onProgress?.(5, "等待数据落盘");
   try { await waitForFlush(); } catch { /* */ }
+  if (!current()) return;
 
   // waitForFlush 完成后立即清空所有缓存定时器
   clearAllCacheTimers();
@@ -478,6 +486,7 @@ async function doLockAll(onProgress?: (percent: number, message: string) => void
   //    修复：缩短至 5s（stopBackgroundTasks 3s + 余量），超时后继续后续步骤
   onProgress?.(20, "停止后台任务");
   try { await withStepTimeout(stopBackgroundTasks(), 5000, "stopBackgroundTasks"); } catch { /* */ }
+  if (!current()) return;
   clearModuleKeyCache();
   clearModuleCache();
   clearRecordScanCache();
@@ -487,14 +496,17 @@ async function doLockAll(onProgress?: (percent: number, message: string) => void
   // 步骤 3.5：清除 worker 内存中的 GMK
   onProgress?.(35, "清除内存密钥");
   try { await withStepTimeout(verthysClearGlobalKey(), 8000, "verthysClearGlobalKey"); } catch { /* */ }
+  if (!current()) return;
 
   // 步骤 4+5：安全原子落盘 + 等待持久化回执
   onProgress?.(50, "安全落盘");
   try { await withStepTimeout(verthysLockPersist(), 12000, "verthysLockPersist"); } catch { /* */ }
+  if (!current()) return;
 
   // 步骤 6：停止 C 消息线程
   onProgress?.(70, "停止安全会话");
   try { await withStepTimeout(securitySessionStop(), 5000, "securitySessionStop"); } catch { /* */ }
+  if (!current()) return;
 
   // 步骤 7：销毁 worker（根治：verthysLock + workerDestroy 双重销毁）
   //
@@ -521,7 +533,9 @@ async function doLockAll(onProgress?: (percent: number, message: string) => void
   //   双重保险清空前端缓存。
   onProgress?.(85, "销毁安全核心");
   try { await withStepTimeout(verthysLock(), 8000, "verthysLock"); } catch { /* */ }
+  if (!current()) return;
   try { await withStepTimeout(workerDestroy(), 5000, "workerDestroy"); } catch { /* */ }
+  if (!current()) return;
 
   onProgress?.(100, "清理完成");
 

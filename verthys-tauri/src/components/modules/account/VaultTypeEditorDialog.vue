@@ -178,7 +178,7 @@
                 class="filter-chip"
                 :aria-pressed="active.cardFields.includes(field.id)"
                 :data-on="active.cardFields.includes(field.id) ? '1' : '0'"
-                @click="toggleMember(active.cardFields, field.id, MAX_CARD_FIELDS)"
+                @click="toggleCardField(field.id)"
               >{{ field.label }}</button>
             </div>
           </div>
@@ -192,7 +192,7 @@
                 class="filter-chip"
                 :aria-pressed="active.searchFields.includes(field.id)"
                 :data-on="active.searchFields.includes(field.id) ? '1' : '0'"
-                @click="toggleMember(active.searchFields, field.id)"
+                @click="toggleSearchField(field.id)"
               >{{ field.label }}</button>
             </div>
           </div>
@@ -236,6 +236,9 @@ import type {
 import {
   BUILTIN_VAULT_TYPE_IDS,
   CUSTOM_VAULT_TYPE_PREFIX,
+  MAX_VAULT_CARD_FIELDS,
+  VAULT_FIELD_KINDS,
+  VAULT_TONES,
   createCustomFieldId,
   createCustomVaultTypeId,
   resolveVaultIcon,
@@ -246,20 +249,25 @@ import { saveCustomVaultTypes, validateVaultTypeDefs } from "../../../lib/vault_
 import VerthysDialog from "../../common/verthys-ui/VerthysDialog.vue";
 import ConfirmDelete from "../../common/verthys-ui/ConfirmDelete.vue";
 
-/** 卡片次行字段上限（与卡片映射一致，超出会在保存前被拒） */
-const MAX_CARD_FIELDS = 3;
+/** 卡片次行字段上限（与卡片映射、存储截断同取单一权威源） */
+const MAX_CARD_FIELDS = MAX_VAULT_CARD_FIELDS;
 
-/** 字段控件种类的中文名（面板下拉用） */
-const fieldKinds: readonly { id: VaultFieldKind; label: string }[] = [
-  { id: "text", label: "单行文本" },
-  { id: "password", label: "密码" },
-  { id: "multiline", label: "多行文本" },
-  { id: "date", label: "日期" },
-  { id: "select", label: "选项" },
-  { id: "switch", label: "开关" },
-];
+/** 字段控件种类的中文名（键集必须覆盖全部种类 — 漏项在编译期即报错） */
+const fieldKindLabels: Record<VaultFieldKind, string> = {
+  text: "单行文本",
+  password: "密码",
+  multiline: "多行文本",
+  date: "日期",
+  select: "选项",
+  switch: "开关",
+};
 
-/** 色调中文名 */
+/** 面板下拉项：顺序与权威源一致 */
+const fieldKinds: readonly { id: VaultFieldKind; label: string }[] = VAULT_FIELD_KINDS.map(
+  (id) => ({ id, label: fieldKindLabels[id] }),
+);
+
+/** 色调中文名（键集必须覆盖全部色调） */
 const toneLabels: Record<VaultTone, string> = {
   accent: "青",
   purple: "紫",
@@ -268,7 +276,7 @@ const toneLabels: Record<VaultTone, string> = {
   danger: "红",
 };
 
-const toneIds = Object.keys(toneLabels) as VaultTone[];
+const toneIds = VAULT_TONES;
 const iconIds = Object.keys(VAULT_ICON_LIBRARY) as VaultIconId[];
 
 const props = defineProps<{
@@ -299,12 +307,22 @@ const showRemoveConfirm = ref(false);
 
 const active = computed<VaultTypeDef | null>(() => draft.value[activeIndex.value] ?? null);
 
-/** 打开时以当前自定义类型重建编辑副本 */
+/** 打开时以当前自定义类型重建编辑副本（逐层深拷贝 — 关闭不保存即零副作用） */
 watch(
   () => props.modelValue,
   (val) => {
     if (!val) return;
-    draft.value = props.types.map((item) => ({ ...item, fields: item.fields.map((field) => ({ ...field })) }));
+    draft.value = props.types.map((item) => ({
+      ...item,
+      // 展示字段 / 搜索字段是数组：必须复制数组本体，否则下方切换会原地改写
+      // props 里的同一数组 —— 用户点「关闭」不保存，父级数据却已经被改了
+      cardFields: [...item.cardFields],
+      searchFields: [...item.searchFields],
+      fields: item.fields.map((field) => ({
+        ...field,
+        ...(field.options ? { options: [...field.options] } : {}),
+      })),
+    }));
     activeIndex.value = 0;
     errorText.value = "";
     saving.value = false;
@@ -374,14 +392,25 @@ const onOptionsChange = (field: VaultFieldDef, e: Event): void => {
     .filter((item) => item.length > 0);
 };
 
-/** 多选成员切换（limit 为上限时达到上限不再追加） */
-const toggleMember = (list: string[], id: string, limit?: number): void => {
-  if (list.includes(id)) {
-    list.splice(list.indexOf(id), 1);
-    return;
-  }
-  if (limit !== undefined && list.length >= limit) return;
-  list.push(id);
+/** 多选成员切换（纯函数：返回新数组，绝不原地改写调用方数组） */
+const toggledMember = (list: readonly string[], id: string, limit?: number): string[] => {
+  if (list.includes(id)) return list.filter((item) => item !== id);
+  if (limit !== undefined && list.length >= limit) return [...list];
+  return [...list, id];
+};
+
+/** 切换卡片次行字段（上限内增删；赋值回 draft，父级 props 不受影响） */
+const toggleCardField = (id: string): void => {
+  const current = active.value;
+  if (!current) return;
+  current.cardFields = toggledMember(current.cardFields, id, MAX_CARD_FIELDS);
+};
+
+/** 切换搜索字段 */
+const toggleSearchField = (id: string): void => {
+  const current = active.value;
+  if (!current) return;
+  current.searchFields = toggledMember(current.searchFields, id);
 };
 
 const removeConfirmName = computed(() => {

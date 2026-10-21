@@ -247,13 +247,13 @@ describe("读取自定义类型", () => {
   it("模块缓存命中时直接返回，不触发任何扫描", async () => {
     const cached = [makeDef()];
     cacheMock.mockReturnValue({ data: cached, recordId: 3 });
-    expect(await loadCustomVaultTypes()).toBe(cached);
+    expect(await loadCustomVaultTypes()).toEqual({ types: cached, failed: false });
     expect(indexSourceMock).not.toHaveBeenCalled();
     expect(batchMock).not.toHaveBeenCalled();
   });
 
   it("容器内无记录时返回空数组并写入空缓存", async () => {
-    expect(await loadCustomVaultTypes()).toEqual([]);
+    expect(await loadCustomVaultTypes()).toEqual({ types: [], failed: false });
     expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, []);
   });
 
@@ -261,7 +261,7 @@ describe("读取自定义类型", () => {
     const defs = [makeDef()];
     summaryIdsMock.mockReturnValue([7]);
     batchMock.mockResolvedValue(new Map([[7, serializeToJsonB64(defs)]]));
-    expect(await loadCustomVaultTypes()).toEqual(defs);
+    expect(await loadCustomVaultTypes()).toEqual({ types: defs, failed: false });
     expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, defs, 7);
   });
 
@@ -270,7 +270,7 @@ describe("读取自定义类型", () => {
     indexSourceMock.mockResolvedValue(false);
     scanIdsMock.mockReturnValue([5]);
     batchMock.mockResolvedValue(new Map([[5, serializeToJsonB64(defs)]]));
-    expect(await loadCustomVaultTypes()).toEqual(defs);
+    expect(await loadCustomVaultTypes()).toEqual({ types: defs, failed: false });
     expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, defs, 5);
   });
 
@@ -283,14 +283,36 @@ describe("读取自定义类型", () => {
         [7, serializeToJsonB64(defs)],
       ]),
     );
-    expect(await loadCustomVaultTypes()).toEqual(defs);
+    expect(await loadCustomVaultTypes()).toEqual({ types: defs, failed: false });
     expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, defs, 7);
   });
 
-  it("取数异常时返回空数组且不写缓存", async () => {
+  it("结构不是数组的记录被跳过并继续回退更早的记录", async () => {
+    const defs = [makeDef()];
+    summaryIdsMock.mockReturnValue([7, 9]);
+    batchMock.mockResolvedValue(
+      new Map([
+        [9, serializeToJsonB64({ kind: "not-an-array" })],
+        [7, serializeToJsonB64(defs)],
+      ]),
+    );
+    expect(await loadCustomVaultTypes()).toEqual({ types: defs, failed: false });
+    expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, defs, 7);
+  });
+
+  it("取数异常时按读取失败返回，不清空已缓存的可用类型", async () => {
     summaryIdsMock.mockReturnValue([7]);
     batchMock.mockRejectedValue(new Error("ipc failed"));
-    expect(await loadCustomVaultTypes()).toEqual([]);
+    expect(await loadCustomVaultTypes()).toEqual({ types: [], failed: true });
+    expect(setCacheMock).not.toHaveBeenCalled();
+  });
+
+  it("记录 id 收集失败时同样按读取失败返回且不写缓存", async () => {
+    indexSourceMock.mockRejectedValue(new Error("index unavailable"));
+    vi.mocked(getRecordIdsByType).mockImplementation(() => {
+      throw new Error("scan unavailable");
+    });
+    expect(await loadCustomVaultTypes()).toEqual({ types: [], failed: true });
     expect(setCacheMock).not.toHaveBeenCalled();
   });
 });

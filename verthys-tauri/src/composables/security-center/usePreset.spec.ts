@@ -21,8 +21,11 @@ const mocks = vi.hoisted(() => ({
   applySecurityPreset: vi.fn(),
   bumpPresetEpoch: vi.fn(),
   loadCustomFeatures: vi.fn(),
+  saveCustomFeatures: vi.fn(),
+  saveSecurityPreset: vi.fn(),
   isLockedFeature: vi.fn(),
   securityGetPresetConfig: vi.fn(),
+  securityLoadPresetState: vi.fn(),
 }));
 
 vi.mock("../../lib/keyManager", async () => {
@@ -33,12 +36,15 @@ vi.mock("../../lib/keyManager", async () => {
     applySecurityPreset: mocks.applySecurityPreset,
     bumpPresetEpoch: mocks.bumpPresetEpoch,
     loadCustomFeatures: mocks.loadCustomFeatures,
+    saveCustomFeatures: mocks.saveCustomFeatures,
+    saveSecurityPreset: mocks.saveSecurityPreset,
     isLockedFeature: mocks.isLockedFeature,
   };
 });
 
 vi.mock("../../lib/verthys", () => ({
   securityGetPresetConfig: mocks.securityGetPresetConfig,
+  securityLoadPresetState: mocks.securityLoadPresetState,
 }));
 
 /** 核心防护特性键（不可在自定义模板逐项关闭） */
@@ -83,6 +89,7 @@ function stubOptions() {
       allCriticalBlocked: false,
       stance: "pending" as const,
       stanceLabel: "待检测",
+      stale: false,
     }),
   };
 }
@@ -208,6 +215,19 @@ describe("usePreset 吸附与守卫", () => {
   });
 });
 
+describe("usePreset 齿轮面板", () => {
+  it("齿轮仅展开/收起面板，不静默切档（不得产生越权副作用）", () => {
+    const api = usePreset(stubOptions());
+    api.onToggleGearPanel();
+    expect(api.customPanelOpen.value).toBe(true);
+    expect(mocks.applySecurityPreset).not.toHaveBeenCalled();
+
+    api.onToggleGearPanel();
+    expect(api.customPanelOpen.value).toBe(false);
+    expect(mocks.applySecurityPreset).not.toHaveBeenCalled();
+  });
+});
+
 describe("usePreset 自定义档语义", () => {
   it("应用自定义档：游标停靠中位、清锚点、展开面板", async () => {
     const api = usePreset(stubOptions());
@@ -278,5 +298,20 @@ describe("usePreset 特性快照加载", () => {
 
     expect(mocks.securityGetPresetConfig).not.toHaveBeenCalled();
     expect(api.currentPresetFeatures.value.session_lock_on_idle).toBe(true);
+  });
+
+  it("加载失败 → presetSyncFailed 可见 + 错误提示（不得静默保留旧快照）", async () => {
+    securityPresetRef.value = 1;
+    const options = stubOptions();
+    const api = usePreset(options);
+    mocks.securityGetPresetConfig.mockRejectedValueOnce(new Error("ipc down"));
+
+    const ok = await api.loadPresetConfig();
+
+    expect(ok).toBe(false);
+    expect(api.presetSyncFailed.value).toBe(true);
+    expect(options.showError).toHaveBeenCalledWith(
+      "安全预设配置加载失败，当前显示可能不准确",
+    );
   });
 });

@@ -82,6 +82,20 @@ describe("到期维度", () => {
     expect(result.map((e) => e.data.name)).toEqual(["乙"]);
   });
 
+  it("到期日为今日的条目归入即将到期（按本地日历日，不因钟点提前过期）", () => {
+    const today = new Date();
+    const stamp = [
+      today.getFullYear(),
+      String(today.getMonth() + 1).padStart(2, "0"),
+      String(today.getDate()).padStart(2, "0"),
+    ].join("-");
+    const entries: VaultFilterEntry[] = [
+      { kind: "idcard", data: { name: "今日", number: "9", expiry: stamp }, recordId: 7 },
+    ];
+    expect(applyVaultFilter(entries, withCriteria({ expiry: ["expiring"] }), defOf)).toHaveLength(1);
+    expect(applyVaultFilter(entries, withCriteria({ expiry: ["expired"] }), defOf)).toHaveLength(0);
+  });
+
   it("已设到期与未设到期覆盖全部条目且互斥", () => {
     const has = applyVaultFilter(ENTRIES, withCriteria({ expiry: ["hasExpiry"] }), defOf);
     const none = applyVaultFilter(ENTRIES, withCriteria({ expiry: ["noExpiry"] }), defOf);

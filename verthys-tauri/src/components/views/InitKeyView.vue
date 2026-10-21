@@ -40,6 +40,7 @@
           v-model="initPassword"
           label="访问密钥"
           placeholder="设置访问密钥"
+          autocomplete="new-password"
           :disabled="processing"
         />
       </div>
@@ -48,8 +49,8 @@
         <div class="form-row">
           <label class="form-label">密钥文件</label>
           <div class="path-row">
-            <input class="sc-input" :value="binFileName || ''" readonly placeholder="选择密钥文件" />
-            <button class="sc-browse-icon" @click="$emit('browseBin')" :disabled="processing" v-tip="'选择密钥文件'">
+            <input class="sc-input" :value="binFileName || ''" readonly placeholder="选择密钥文件" aria-label="已选密钥文件" />
+            <button class="sc-browse-icon" aria-label="选择密钥文件" @click="$emit('browseBin')" :disabled="processing" v-tip="'选择密钥文件'">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z"/></svg>
             </button>
           </div>
@@ -61,6 +62,7 @@
           v-model="binPassword"
           label="密钥口令"
           placeholder="请输入密钥口令"
+          autocomplete="new-password"
           :disabled="processing"
         />
       </div>

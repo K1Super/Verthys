@@ -97,7 +97,8 @@ export type FileImportErrorCode =
   | "E_META_FAILED"
   | "E_FILE_CHANGED"
   | "E_FILE_TOO_LARGE"
-  | "E_DISK_FULL";
+  | "E_DISK_FULL"
+  | "E_UNKNOWN";
 
 /** 错误码 → 面向用户的简洁文案。
  *  禁止把原始异常文本（如 WebAssembly/CSP 报错、堆栈）直出界面：
@@ -111,6 +112,7 @@ const FILE_IMPORT_ERROR_TEXT: Record<FileImportErrorCode, string> = {
   E_FILE_CHANGED: "文件在导入过程中被改动",
   E_FILE_TOO_LARGE: "文件超过大小上限",
   E_DISK_FULL: "磁盘空间不足",
+  E_UNKNOWN: "导入失败，请重试",
 };
 
 /** 取错误码对应的用户可见文案（未知码回退为通用文案） */
@@ -350,7 +352,8 @@ export async function runFileImport(
       result.failCount += 1;
       result.failures.push({
         name: file.name,
-        code: e instanceof ImportAbort ? e.code : "E_READ_FAILED",
+        // 未分类异常独立归为 E_UNKNOWN：不得冒充"读取失败"误导用户与日志归因
+        code: e instanceof ImportAbort ? e.code : "E_UNKNOWN",
         message: e instanceof Error ? e.message : String(e),
       });
     }
@@ -692,7 +695,6 @@ async function readAndUpload(
       // 明文与密文缓冲用后清零（无口令时两者为同一缓冲，单次清零即可）
       plain.fill(0);
       if (cipherBytes !== plain) cipherBytes.fill(0);
-      report(index + 1, totalChunks, "upload");
     }
 
     let resp: AddChunkBatchResult;
@@ -714,6 +716,8 @@ async function readAndUpload(
     }
     chunkIds.push(...resp.ids);
     chunkHashes.push(...batchHashes);
+    // 进度在整批落库成功后才上报：批写入失败时进度不得先走到 100%
+    report(upper, totalChunks, "upload");
 
     await checkIdentity(file, snapshot, deps);
   }

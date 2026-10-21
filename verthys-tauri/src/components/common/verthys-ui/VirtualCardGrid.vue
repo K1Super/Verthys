@@ -147,6 +147,15 @@ const totalRows = computed(() => {
 const totalHeight = computed(() => totalRows.value * rowHeight.value);
 
 /* ===== 可视区计算 ===== */
+/** 可视起始行（含 buffer）：独立派生，避免在 visibleItems 内写副作用 */
+const startRow = computed(() => {
+  if (rowHeight.value <= 0) return 0;
+  return Math.max(0, Math.floor(scrollTop.value / rowHeight.value) - props.bufferRows);
+});
+
+/** 渲染层整体偏移：与起始行同一来源，滚动时同步位移而非改动每项坐标 */
+const offsetY = computed(() => startRow.value * rowHeight.value);
+
 const visibleItems = computed(() => {
   if (props.items.length === 0 || columns.value <= 0 || viewportHeight.value <= 0) {
     return [];
@@ -157,16 +166,13 @@ const visibleItems = computed(() => {
   const st = scrollTop.value;
   const vh = viewportHeight.value;
   const buf = props.bufferRows;
+  const first = startRow.value;
 
-  // 可视起始行 / 结束行（含 buffer）
-  const startRow = Math.max(0, Math.floor(st / rh) - buf);
+  // 可视结束行（含 buffer）
   const endRow = Math.min(
     totalRows.value - 1,
     Math.floor((st + vh) / rh) + buf,
   );
-
-  // 计算偏移量：第一行的 Y 坐标（可能为负，使 buffer 行在可视区上方）
-  const offsetY = startRow * rh;
 
   const result: Array<{
     key: string | number;
@@ -176,7 +182,7 @@ const visibleItems = computed(() => {
     y: number;
   }> = [];
 
-  const startIndex = startRow * cols;
+  const startIndex = first * cols;
   const endIndex = Math.min(props.items.length - 1, (endRow + 1) * cols - 1);
 
   for (let i = startIndex; i <= endIndex; i++) {
@@ -189,19 +195,12 @@ const visibleItems = computed(() => {
       item,
       index: i,
       x: col * (itemWidth.value + props.gap),
-      y: (row - startRow) * rh,
+      y: (row - first) * rh,
     });
   }
 
-  // 缓存 offsetY 供模板使用
-  offsetYValue.value = offsetY;
   return result;
 });
-
-/* offsetY 需要在 visibleItems 计算时更新，但 computed 不能有副作用，
- * 改为在 visibleItems 内部赋值（Vue 允许在 computed 中修改非依赖的 ref） */
-const offsetYValue = ref(0);
-const offsetY = offsetYValue;
 
 /* ===== 滚动事件处理（rAF 节流） ===== */
 const onScrollInternal = () => {

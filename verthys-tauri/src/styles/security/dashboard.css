@@ -514,7 +514,7 @@
   height: 2px;
   border-radius: 1px;
   background: rgba(148, 160, 178, 0.16);
-  transition: background 0.4s var(--ease), box-shadow 0.4s var(--ease);
+  transition: background 0.4s var(--ease);
 }
 .bs-spec-state {
   flex: none;
@@ -530,7 +530,6 @@
     rgba(0, 255, 200, 0.55),
     rgba(0, 212, 255, 0.8),
     rgba(139, 92, 246, 0.55));
-  box-shadow: 0 0 6px rgba(0, 212, 255, 0.35);
 }
 .bs-spectral.on .bs-spec-label { color: var(--text-primary); }
 .bs-spectral.on .bs-spec-state { color: rgba(0, 212, 255, 0.9); }
@@ -652,6 +651,14 @@
 }
 .cap-item.off .cap-name { color: rgba(148, 160, 178, 0.62); }
 .cap-item.off .cap-tag { opacity: 0.35; }
+/* 未确认态（配置未加载 / 同步失败）：虚线空心圆点 —— 不做"缺省点亮"伪装 */
+.cap-item.unknown .cap-dot {
+  background: transparent;
+  border: 1px dashed rgba(148, 160, 178, 0.55);
+  opacity: 0.7;
+}
+.cap-item.unknown .cap-name { color: rgba(148, 160, 178, 0.62); }
+.cap-item.unknown .cap-tag { opacity: 0.35; }
 
 /* ============================================================
    视觉语言：延续 cap-board 端子排（圆点状态位 + 名称 + 状态标签 +
@@ -697,6 +704,7 @@
   color: rgba(0, 212, 255, 0.8);
 }
 .def-count--degraded { color: rgba(255, 165, 2, 0.9); }
+.def-count--partial { color: rgba(var(--warning-rgb), 0.85); }
 .def-count--breach { color: var(--danger); }
 /* 双列清单：按列流向（前 4 项左列，后 3 项右列下沉错位） */
 .def-ledger {
@@ -792,6 +800,7 @@
 }
 .def-stance--ok .def-stance-mark { background: var(--dashboard-accent, var(--accent)); }
 .def-stance--degraded .def-stance-mark { background: rgba(255, 165, 2, 0.85); }
+.def-stance--partial .def-stance-mark { background: rgba(var(--warning-rgb), 0.7); }
 .def-stance--breach .def-stance-mark { background: var(--danger); }
 .def-stance-text {
   font-size: 11px;
@@ -800,6 +809,7 @@
 }
 .def-stance--ok .def-stance-text { color: rgba(0, 212, 255, 0.9); }
 .def-stance--degraded .def-stance-text { color: rgba(255, 165, 2, 0.9); }
+.def-stance--partial .def-stance-text { color: rgba(var(--warning-rgb), 0.9); }
 .def-stance--breach .def-stance-text { color: var(--danger); }
 .def-stance-detail {
   margin-left: auto;
@@ -957,6 +967,22 @@
   padding: 8px 12px;
 }
 .kd-random svg { width: 13px; height: 13px; }
+/* 密钥显隐端子（图标，无底板；与输入行等高） */
+.kd-eye {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+}
+.kd-eye:hover { color: var(--accent); }
+.kd-eye svg { width: 14px; height: 14px; }
 
 /* 密钥警告 */
 .derive-warn {

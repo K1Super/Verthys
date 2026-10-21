@@ -259,6 +259,8 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
 
     try {
       let result: VerthysResult<void>;
+      /** 是否真正新建了文件（E_PATH_EXISTS 回退成功时为 false） */
+      let createdNew = false;
       if (isCreate) {
         result = await withFrontendTimeout(
           initCreate(path, undefined, onUnlockProgress),
@@ -278,6 +280,8 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
           } catch {
             // preflight 失败，保留原错误
           }
+        } else if (result.ok) {
+          createdNew = true;
         }
       } else {
         result = await withFrontendTimeout(
@@ -289,7 +293,8 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
 
       if (result.ok) {
         unlockProgressDone.value = true;
-        options.showToast(isCreate ? '文件已创建' : '文件已加载');
+        // 提示必须与实际路径一致：创建回退到「打开已有文件」时不得宣称已创建
+        options.showToast(createdNew ? '文件已创建' : '文件已加载');
         if (hasGlobalKeyRecordRef.value) {
           void options.checkDevice().catch((e) => {
             console.warn('[doUnlock] 设备校验失败（非致命）:', e);
@@ -304,7 +309,12 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
       }
     } catch (e) {
       console.error('[doUnlock] 异常', e);
-      options.showError('操作失败');
+      // 抛出真实原因（超时单独收敛为可读文案），不得统一吞成「操作失败」
+      if (e instanceof Error && e.message.includes('前端超时')) {
+        options.showError('操作超时，请重试');
+      } else {
+        options.showError(e instanceof Error && e.message ? e.message : '操作失败');
+      }
     } finally {
       unlocking.value = false;
     }

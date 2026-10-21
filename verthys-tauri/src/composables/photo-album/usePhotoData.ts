@@ -29,7 +29,6 @@ import {
   getRecordsDataB64Batch,
   moduleKeyReadyRef,
 } from "../../lib/keyManager";
-import { verthysGetSummaryCount } from "../../lib/verthys";
 import { clearFileKeyCache, TYPE_PHOTO_META, type PhotoMeta } from "../../lib/crypto";
 import { decryptMetaPreferWorker, decryptThumbPreferWorker } from "../../workers/photo-decrypt-bridge";
 import { photoWorkerPool } from "../../workers/photoWorkerPool";
@@ -44,15 +43,12 @@ import {
   formatSize, rehydrateEntries, diffNewIds, sortByMetaId,
   stripMetaRecordPrefix, prefetchRowIndices, thumbUrlOf,
   makeThumbCssValue, makeThumbCssValueFromBytes, revokeThumbUrl,
+  toPhotoCacheEntries,
 } from "./utils";
 import {
   computeRowWindow, buildVisibleWindow,
   type RowWindow, type VisibleCacheEntry,
 } from "./visible-window";
-import {
-  stageStartPercent, stagePercent, monotonicPercent,
-  type PhotoLoadStage,
-} from "./load-progress";
 
 /** 可视区解密并发上限（限制同时进行的 IPC/解密数量，避免通道与主线程拥塞） */
 const DECRYPT_CONCURRENCY = 4;
@@ -86,35 +82,20 @@ export function usePhotoData() {
   /** 按需解密失败条目数（保留占位并提示，不静默丢弃） */
   const failedCount = ref(0);
 
-  /* ===== 加载进度（信号层 → 表现层透传，数值只来自真实计数） =====
+  /* ===== 装载阶段（取消/恢复语义的唯一依据） =====
    *
-   * 阶段：index（摘要索引）→ records（回退的记录扫描，可取消，批次粒度上报）
-   *       → decrypt（可视区首批解密，可暂停）→ done。
-   * 百分比经纯函数映射 + 单调闸门，分母不可得的阶段停在区间起点，
-   * 由文案承担"仍在推进"的反馈（见 load-progress.ts 的不变式）。
+   * stage：index（摘要索引）→ records（回退记录扫描，可取消）
+   *       → decrypt（可视区首批解密，可暂停）。
+   * 进度百分比/耗时信号已随进度卡一并移除（模块改为骨架直出 + 常驻恢复条），
+   * 此处只保留区分「此刻取消会命中哪一段」的阶段标识。
    */
-  const loadStage = ref<PhotoLoadStage>("idle");
-  const loadPercent = ref(0);
-  const loadMessage = ref("");
-  const loadElapsedMs = ref(0);
-  /** 首批可视区解密是否在进行（表现层据此显示进度卡） */
-  const firstFillInFlight = ref(false);
+  type LoadStage = "idle" | "index" | "records" | "decrypt" | "done" | "cancelled";
+  const loadStage = ref<LoadStage>("idle");
   /** 解密暂停标志（用户取消首批解密后置位；恢复入口会清位） */
   const decryptPaused = ref(false);
 
-  /** 加载起点时间戳（用于耗时展示；0 表示未在加载） */
-  let loadStartedAt = 0;
   /** 用户已请求取消本轮装载：阻止其后继阶段（更重的回退扫描等）继续启动 */
   let loadAbortRequested = false;
-
-  /** 推进进度：阶段 + 真实计数 → 百分比（单调不减，异常输入被收束） */
-  const pushProgress = (stage: PhotoLoadStage, message: string, done = 0, total = 0) => {
-    loadStage.value = stage;
-    loadMessage.value = message;
-    const next = total > 0 ? stagePercent(stage, done, total) : stageStartPercent(stage);
-    loadPercent.value = monotonicPercent(loadPercent.value, next);
-    loadElapsedMs.value = loadStartedAt > 0 ? Date.now() - loadStartedAt : 0;
-  };
 
   /* ===== 密钥管理 ===== */
   const ensurePhotoKey = (): boolean => {
@@ -254,7 +235,9 @@ export function usePhotoData() {
     scrollQuiet.value = false;
     applyQuietDom(false);
     // 追帧：停稳后立即补齐可视区解密（不等去抖窗口），并预热运动方向下一行
-    void ensureVisiblePhotosDecrypted(visiblePhotos.value);
+    void ensureVisiblePhotosDecrypted(visiblePhotos.value).catch((e) => {
+      console.warn("[photo] 追帧解密批次异常", e);
+    });
     warmNextRow();
   };
 
@@ -393,9 +376,8 @@ export function usePhotoData() {
       id: p.id, metaId: p.metaId, name: p.name, thumb: "", size: "", height: 0,
       loaded: false, failed: false,
     })));
-    setModuleCache("photos", photos.value);
+    setModuleCache("photos", toPhotoCacheEntries(photos.value));
     failedCount.value = 0;
-    firstFillInFlight.value = false;
     decryptPaused.value = false;
     loadStage.value = "idle";
     loadError.value = "模块密钥已失效，请返回安全管理重新验证后进入拾光";
@@ -467,21 +449,22 @@ export function usePhotoData() {
   };
 
   /** 批量解密给定 metaId 列表（并发上限 4），就地更新列表项。
-   *  解密失败保留占位并标记 failed，由上层聚合提示与重试入口处理。
-   *
-   * @param onItemDone 单项处理完成后回调（真实计数：含失败项），供进度信号层使用。
-   *   逐项回调而非批次回调：并发池中先完成的项先计入，进度不随最慢项停滞。 */
-  const decryptBatch = async (
-    metaIds: number[],
-    onItemDone?: () => void,
-  ): Promise<void> => {
+   *  解密失败保留占位并标记 failed，由上层聚合提示与重试入口处理。 */
+  const decryptBatch = async (metaIds: number[]): Promise<void> => {
     if (metaIds.length === 0) return;
     for (const vid of metaIds) decryptingMetaIds.add(vid);
     try {
       // 性能修复：批量预取所有待解密照片的 meta dataB64（扫描缓存优先，并行 IPC 回退）
       //   原实现：并发池内每条 decryptPhotoMeta 各自 getFullRecord → 4 路串行 IPC 抢 worker
       //   新实现：一次批量预取（命中缓存零 IPC），并发池直接消费预取结果，仅做 CPU 解密
-      const metaB64Map = await getRecordsDataB64Batch(metaIds);
+      // 异常收敛：批量预取失败不得中断整批（否则全部项停在未加载态且无失败标记），
+      //   留空映射让 decryptPhotoMeta 逐条按需取数；单条仍失败则由占位项标 failed 并计数。
+      let metaB64Map = new Map<number, string>();
+      try {
+        metaB64Map = await getRecordsDataB64Batch(metaIds);
+      } catch (e) {
+        console.warn("[decryptBatch] 批量预取失败，降级逐条取数", e);
+      }
 
       let cursor = 0;
       const runNext = async (): Promise<void> => {
@@ -508,8 +491,14 @@ export function usePhotoData() {
                 updateShallowItem(photos, pidx, { failed: true });
               }
             }
-          } catch { /* 单项失败不影响其他 */ }
-          finally { if (onItemDone) onItemDone(); }
+          } catch (e) {
+            // 单项异常不中断整批，但同样落失败占位（不静默）：由 recountFailures 聚合提示
+            const pidx = entryIndexOf(vid);
+            if (pidx >= 0 && !photos.value[pidx].loaded) {
+              updateShallowItem(photos, pidx, { failed: true });
+            }
+            console.warn("[decryptBatch] 单项解密异常", { metaId: vid, reason: e instanceof Error ? e.message : "unknown" });
+          }
         }
       };
       await Promise.all(
@@ -555,9 +544,8 @@ export function usePhotoData() {
 
   /** 可视区按需解密：对未 loaded 的占位项触发解密，并发上限 4 避免 IPC 风暴。
    *
-   * 首批（进入模块后的第一次可视区解密）接入进度信号：done/total 均为真实
-   * 计数，完成后阶段置 done（进度达 100）。用户取消后 decryptPaused 置位，
-   * 本函数与滚动触发的批次一并停摆，由恢复入口重新驱动。
+   * 用户取消后 decryptPaused 置位，本函数与滚动触发的批次一并停摆，
+   * 由恢复入口重新驱动。
    * 滚动静默态（scrollQuiet）期间入口直接拒绝：滚动期不改动解密并发面，
    * 滚动停止后由 exitScrollQuiet 追帧脉冲补齐。 */
   const ensureVisiblePhotosDecrypted = async (visible: VisiblePhoto[]) => {
@@ -569,36 +557,8 @@ export function usePhotoData() {
       toDecrypt.push(vph.metaId);
     }
     if (toDecrypt.length > 0) {
-      const isFirstFill = !firstFillDone;
-      if (isFirstFill) firstFillInFlight.value = true;
-      let done = 0;
-      const total = toDecrypt.length;
-      if (isFirstFill) pushProgress("decrypt", `解密缩略图 0/${total}`, 0, total);
-      await decryptBatch(toDecrypt, () => {
-        done += 1;
-        if (isFirstFill) {
-          pushProgress("decrypt", `解密缩略图 ${done}/${total}`, done, total);
-        }
-      });
-      if (isFirstFill) {
-        if (scrollQuiet.value) {
-          // 滚动静默暂停（既非用户取消也非完成）：首批尚未跑完，保持"在途"状态
-          //   与进度位置，由停稳后的追帧脉冲继续首批。此处不得宣告完成——否则
-          //   进度虚假推进，且 firstFillDone 置位会让剩余项永不续跑。
-        } else {
-          firstFillDone = true;
-          firstFillInFlight.value = false;
-          // 用户中途取消：进度停在真实位置并转为暂停提示（不宣告完成）
-          if (decryptPaused.value) {
-            pushProgress("cancelled", `已暂停解密（本次 ${done}/${total} 张已完成）`);
-          } else {
-            pushProgress("done", "加载完成", total, total);
-          }
-        }
-      }
-    } else if (!firstFillDone) {
-      // 可视区无可解密项（缓存回灌已齐）：首批填充视为已完成，进度不驻留
-      firstFillDone = true;
+      loadStage.value = "decrypt";
+      await decryptBatch(toDecrypt);
     }
     if (decryptPaused.value) return;
     // 可视区完成后按滚动方向补齐即将进入的行（额度复用同一并发池）
@@ -647,16 +607,15 @@ export function usePhotoData() {
     }
   };
 
-  /** 首批可视区解密是否已跑完（进度只覆盖首批，滚动批次不再弹进度） */
-  let firstFillDone = false;
-
   /** 滚动触发的解密去抖：连续滚动期间合并批次收集，避免逐帧重复建批 */
   let decryptDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   const scheduleVisibleDecrypt = (v: VisiblePhoto[]) => {
     if (decryptDebounceTimer !== null) clearTimeout(decryptDebounceTimer);
     decryptDebounceTimer = setTimeout(() => {
       decryptDebounceTimer = null;
-      void ensureVisiblePhotosDecrypted(v);
+      void ensureVisiblePhotosDecrypted(v).catch((e) => {
+        console.warn("[photo] 滚动解密批次异常", e);
+      });
     }, SCROLL_DECRYPT_DEBOUNCE_MS);
   };
 
@@ -694,18 +653,16 @@ export function usePhotoData() {
    *  摘要扫描只读索引、不解密数据，是列表装载的最轻路径；
    *  摘要不可用（旧格式容器等）时回退增量记录扫描并标记降级。
    *
-   *  回退路径为大库上可感知的耗时阶段，故接入真实进度：分母取后端统计的
-   *  全库条数（估算失败则不推进百分比，由文案报告已装载条数），分子取扫描
-   *  缓存当前条数（含历史增量装载，单调增）。 */
+   *  回退扫描的增量回调此前只服务于进度卡；进度卡移除后回调仅保留为
+   *  协作式取消的批次检查点（取消入口据此停止更重的后续阶段）。 */
   const loadIdList = async (): Promise<IdListResult> => {
     try {
-      pushProgress("index", "读取加密索引");
+      loadStage.value = "index";
       await ensureSummaryScan();
       const ids = getSummaryIdsByType(TYPE_PHOTO_META);
       // 摘要扫描在旧格式容器/熔断场景下会"静默返回空"，此时缓存整体为空；
       // 需要与"确实没有照片"区分：只有缓存有内容才认定摘要结果可信。
       if (ids.length > 0 || getSummaryCacheSize() > 0) {
-        pushProgress("index", "索引就绪", 1, 1);
         return { ok: true, ids, source: "summary", degraded: false };
       }
       console.warn("[loadPhotos] 摘要缓存为空，回退记录索引扫描");
@@ -718,19 +675,13 @@ export function usePhotoData() {
       return { ok: true, ids: getRecordIdsByType(TYPE_PHOTO_META), source: "record", degraded: false };
     }
     try {
-      // 全库条数（后端一次性统计，不随批次变化）：作为进度分母
-      const total = await verthysGetSummaryCount().catch(() => 0);
-      await ensureRecordScan((p) => {
-        const message = total > 0
-          ? `扫描记录 ${p.cached}/${total}`
-          : `扫描记录（已读 ${p.scanned} 条）`;
-        pushProgress("records", message, p.cached, total);
-      });
+      loadStage.value = "records";
+      // 扫描增量回调已无表现层消费者（进度卡已移除）；保留取消边界语义
+      await ensureRecordScan(() => { /* 扫描批次仅作为协作式取消的检查点 */ });
       if (loadAbortRequested) {
         // 取消发生在记录扫描期间：已装载批次保留，不宣告"就绪"
         return { ok: true, ids: getRecordIdsByType(TYPE_PHOTO_META), source: "record", degraded: false };
       }
-      pushProgress("records", "记录索引就绪", 1, 1);
       return { ok: true, ids: getRecordIdsByType(TYPE_PHOTO_META), source: "record", degraded: true };
     } catch (e) {
       console.error("[loadPhotos] 记录索引扫描失败", e);
@@ -781,10 +732,6 @@ export function usePhotoData() {
       return;
     }
     loadError.value = "";
-    // 进度起点：单调闸门在新一轮装载前归零（阶段节点本身仍是真实节点）
-    loadStartedAt = Date.now();
-    loadPercent.value = 0;
-    loadElapsedMs.value = 0;
     decryptPaused.value = false;
     loadAbortRequested = false;
 
@@ -816,15 +763,13 @@ export function usePhotoData() {
       recountFailures();
     } finally {
       photosLoading.value = false;
-      // 阶段收口：扫描阶段结束即转为"待解密"阶段；进度卡只在实际在途时显示，
-      //   此处的阶段迁移仅用于让取消入口的语义与当前动作保持一致。
+      // 阶段收口：扫描阶段结束即转为"待解密"阶段（取消入口据此区分语义）
       if (loadStage.value === "index" || loadStage.value === "records") {
         loadStage.value = "decrypt";
-        loadMessage.value = "解密可视区缩略图";
       }
       // 不在此处全量解密，由 watch(visiblePhotos) 按需解密可视区
       if (photos.value.length > 0) {
-        setModuleCache("photos", photos.value);
+        setModuleCache("photos", toPhotoCacheEntries(photos.value));
       }
     }
   };
@@ -848,7 +793,6 @@ export function usePhotoData() {
     if (loadStage.value === "index" || loadStage.value === "records") {
       cancelRecordScan();
       loadStage.value = "cancelled";
-      loadMessage.value = "已取消扫描（已装载的条目保留）";
       loadError.value = "加载已取消：列表可能不完整，可点击重试继续";
       return;
     }
@@ -856,7 +800,6 @@ export function usePhotoData() {
       loadAbortRequested = false;   // 解密暂停不属于"取消装载"，重试入口无需复位
       decryptPaused.value = true;
       loadStage.value = "cancelled";
-      loadMessage.value = "已暂停解密（已完成的缩略图保留）";
     }
   };
 
@@ -865,9 +808,10 @@ export function usePhotoData() {
     if (!decryptPaused.value) return;
     decryptPaused.value = false;
     loadStage.value = "idle";
-    loadMessage.value = "";
     loadError.value = "";
-    void ensureVisiblePhotosDecrypted(visiblePhotos.value);
+    void ensureVisiblePhotosDecrypted(visiblePhotos.value).catch((e) => {
+      console.warn("[photo] 恢复解密批次异常", e);
+    });
   };
 
   /** 重试：清空失败标记与在途去重，重新装载列表并触发可视区解密 */
@@ -876,21 +820,25 @@ export function usePhotoData() {
     failedCount.value = 0;
     decryptingMetaIds.clear();
     decryptPaused.value = false;
-    firstFillDone = false;
     removeFailedFlags();
-    void loadPhotos();
+    void loadPhotos().catch((e) => {
+      console.warn("[photo] 重试装载异常", e);
+      loadError.value = "照片列表加载失败，请重试";
+    });
   };
 
-  /** 清除失败标记（保留占位项，等待下一轮解密尝试） */
+  /** 清除失败标记（保留占位项，等待下一轮解密尝试）
+   *  整体替换一次数组（单次 triggerRef），避免逐项 updateShallowItem 触发 N 次重渲染。 */
   const removeFailedFlags = () => {
     let changed = false;
-    for (let i = 0; i < photos.value.length; i++) {
-      if (photos.value[i].failed) {
-        updateShallowItem(photos, i, { failed: false });
-        changed = true;
-      }
-    }
-    if (changed) setModuleCache("photos", photos.value);
+    const next = photos.value.map((p) => {
+      if (!p.failed) return p;
+      changed = true;
+      return { ...p, failed: false };
+    });
+    if (!changed) return;
+    replaceShallowArray(photos, next);
+    setModuleCache("photos", toPhotoCacheEntries(photos.value));
   };
 
   return {
@@ -914,12 +862,13 @@ export function usePhotoData() {
     cancelPendingDecrypt,
     // ===== 加载照片 =====
     loadPhotos,
-    /* 取消 / 重试 / 恢复：能力保留、UI 入口待恢复——Wave 50 系统化移除拾光
-       提示横幅后，三个动作失去入口载体；此处保留导出与完整实现（含协作式
-       取消链），待产品决策恢复入口或整链清理（见修复文档遗留观察）。 */
+    /* 取消 / 重试 / 恢复：入口文件据此提供常驻恢复条（失败与暂停均可操作）。
+       取消为协作式：已装载批次保留，重试入口可继续。 */
     retryLoad,
     cancelLoad,
     resumeLoad,
+    /** 首批解密是否被用户暂停（表现层据此显示「继续解密」入口） */
+    decryptPaused,
     /** 释放全部缩略图 Blob URL（模块卸载时由入口调用，防对象 URL 泄漏） */
     releaseThumbUrls,
     // ===== 密钥管理 =====

@@ -91,10 +91,13 @@ export interface DefenseMetaView {
   unchecked: number;
   /** 关键路径全阻断标志（worker 透传） */
   allCriticalBlocked: boolean;
-  /** 总体态势：breach（有失败）> degraded（有降级）> ok（全阻断）/ pending（未拉取） */
-  stance: 'breach' | 'degraded' | 'ok' | 'pending';
+  /** 总体态势：breach（有失败）> degraded（有降级）> partial（部分未校验）
+   *  > ok（全部已阻断且关键路径全阻断）/ pending（未拉取或全未校验） */
+  stance: 'breach' | 'degraded' | 'partial' | 'ok' | 'pending';
   /** 态势中文标签 */
   stanceLabel: string;
+  /** 报告陈旧标记（启用轮询后最近一次拉取失败，当前展示的是上一次的报告） */
+  stale: boolean;
 }
 
 /* ------------------------------------------------------------------ *
@@ -116,15 +119,20 @@ export function useDefenseStatus() {
   /** 最近一次防御状态报告（null = 未拉取 / 会话已锁定） */
   const defenseReport = ref<SecurityStatusReport | null>(null);
 
+  /** 报告陈旧标记：最近一次拉取失败时置位（保留旧报告但如实标注） */
+  const defenseReportStale = ref(false);
+
   /** 轮询定时器句柄 */
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-  /** 拉取防御状态（静默失败，保留旧报告） */
+  /** 拉取防御状态（静默失败，保留旧报告并标记陈旧） */
   const refreshDefenseStatus = async () => {
     if (!verthysReadyRef.value) return;
     try {
       defenseReport.value = await verthysGetSecurityStatus();
+      defenseReportStale.value = false;
     } catch (e) {
+      defenseReportStale.value = true;
       console.warn('[useDefenseStatus] 防御状态拉取失败', e);
     }
   };
@@ -142,6 +150,7 @@ export function useDefenseStatus() {
       pollTimer = null;
     }
     defenseReport.value = null;
+    defenseReportStale.value = false;
   };
 
   /* verthys 就绪状态驱动：立即拉取 + 轮询启停（immediate 覆盖挂载时已就绪） */
@@ -171,31 +180,50 @@ export function useDefenseStatus() {
     }),
   );
 
-  /** 汇总态势（报告缺位时 pending 占位） */
+  /** 汇总态势（报告缺位时 pending 占位）
+   *
+   * 旧实现只要 blocked 计数 > 0（或全为 0）就判 ok「关键路径全阻断」，
+   * 忽略 all_critical_blocked 与未校验路径 —— 1 条阻断 + 6 条未校验也
+   * 宣称全阻断，属虚假安全声明。现按真实计数与关键路径标志裁决：
+   *   失败 > 降级 > 全未校验(pending) > 部分未校验(partial)
+   *   > 关键路径未全阻断(degraded) > ok */
   const defenseMeta = computed<DefenseMetaView>(() => {
+    const total = DEFENSE_PATH_DEFS.length;
+    const stale = defenseReportStale.value;
     const r = defenseReport.value;
     if (!r) {
       return {
         blocked: 0,
         degraded: 0,
         failed: 0,
-        unchecked: DEFENSE_PATH_DEFS.length,
+        unchecked: total,
         allCriticalBlocked: false,
         stance: 'pending',
         stanceLabel: '待检测',
+        stale,
       };
     }
     const blocked = r.blocked_count;
     const degraded = r.degraded_count;
     const failed = r.failed_count;
-    const unchecked = Math.max(DEFENSE_PATH_DEFS.length - blocked - degraded - failed, 0);
+    const unchecked = Math.max(total - blocked - degraded - failed, 0);
+    const base = { blocked, degraded, failed, unchecked, allCriticalBlocked: r.all_critical_blocked, stale };
     if (failed > 0) {
-      return { blocked, degraded, failed, unchecked, allCriticalBlocked: r.all_critical_blocked, stance: 'breach', stanceLabel: `${failed} 条路径防御失败` };
+      return { ...base, stance: 'breach', stanceLabel: `${failed} 条路径防御失败` };
     }
     if (degraded > 0) {
-      return { blocked, degraded, failed, unchecked, allCriticalBlocked: r.all_critical_blocked, stance: 'degraded', stanceLabel: `${degraded} 条路径降级` };
+      return { ...base, stance: 'degraded', stanceLabel: `${degraded} 条路径降级` };
     }
-    return { blocked, degraded, failed, unchecked, allCriticalBlocked: r.all_critical_blocked, stance: 'ok', stanceLabel: '关键路径全阻断' };
+    if (blocked + degraded + failed === 0) {
+      return { ...base, stance: 'pending', stanceLabel: '待检测' };
+    }
+    if (unchecked > 0) {
+      return { ...base, stance: 'partial', stanceLabel: `${blocked}/${total} 条路径已阻断 · 其余待校验` };
+    }
+    if (!r.all_critical_blocked) {
+      return { ...base, stance: 'degraded', stanceLabel: '关键路径未全部阻断' };
+    }
+    return { ...base, stance: 'ok', stanceLabel: '关键路径全阻断' };
   });
 
   return {

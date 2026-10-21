@@ -36,7 +36,15 @@
         </div>
 
         <Transition name="cd-pop" appear>
-          <div v-if="show" class="cd-dialog">
+          <div
+            v-if="show"
+            ref="dialogRef"
+            class="cd-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            :aria-label="title"
+            aria-describedby="cd-desc-text"
+          >
             <!-- 事件视界光环（环绕弹窗） -->
             <div class="cd-horizon cd-horizon-1"></div>
             <div class="cd-horizon cd-horizon-2"></div>
@@ -46,13 +54,15 @@
               <div class="cd-core-photon"></div>
             </div>
 
-            <!-- 标题 + 描述 -->
+            <!-- 标题 + 删除对象 + 描述 -->
             <div class="cd-title">{{ title }}</div>
-            <div class="cd-desc">{{ desc }}</div>
+            <!-- 对象名是二次确认的核心信息：不可逆操作必须让用户看清「删的是哪一条」 -->
+            <div v-if="itemName" class="cd-target" :title="itemName">{{ itemName }}</div>
+            <div id="cd-desc-text" class="cd-desc">{{ desc }}</div>
 
-            <!-- 操作按钮 -->
+            <!-- 操作按钮（默认焦点落在取消：误按回车不得执行删除） -->
             <div class="cd-actions">
-              <button class="cd-btn cd-cancel" @click="onCancel">
+              <button ref="cancelRef" class="cd-btn cd-cancel" @click="onCancel">
                 <span class="cd-btn-text">取消</span>
               </button>
               <button class="cd-btn cd-confirm" @click="onConfirm">
@@ -69,6 +79,9 @@
 </template>
 
 <script setup lang="ts">
+import { nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { isTopModal, popModal, pushModal } from "../../../utils/modal_stack";
+
 interface Props {
   show: boolean;
   itemName?: string;
@@ -76,7 +89,7 @@ interface Props {
   desc?: string;
 }
 
-withDefaults(defineProps<Props>(), {
+const props = withDefaults(defineProps<Props>(), {
   itemName: "",
   title: "确认删除",
   desc: "此操作不可撤销，删除后数据将永久丢失",
@@ -89,6 +102,65 @@ const emit = defineEmits<{
 
 const onCancel = () => emit("cancel");
 const onConfirm = () => emit("confirm");
+
+/* ===== 模态行为（Esc 取消 + 焦点落位/归还） =====
+ * 不可逆确认必须可被键盘安全退出：Esc 取消；打开时焦点落在「取消」而非
+ * 「确认删除」——误按回车绝不触发删除。关闭后焦点归还到触发元素。 */
+const cancelRef = ref<HTMLButtonElement | null>(null);
+const dialogRef = ref<HTMLElement | null>(null);
+let restoreFocus: HTMLElement | null = null;
+
+/** 模态栈身份：确认窗常叠在编辑器之上，Esc 只允许关掉栈顶这一层 */
+const modalId = Symbol("confirm-delete");
+
+const onKeydown = (e: KeyboardEvent): void => {
+  if (!isTopModal(modalId)) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    onCancel();
+    return;
+  }
+  if (e.key !== "Tab") return;
+  // aria-modal 已声明模态：Tab 必须留在窗内，否则焦点会跑到遮罩后的页面上
+  const panel = dialogRef.value;
+  if (!panel) return;
+  const buttons = Array.from(panel.querySelectorAll<HTMLButtonElement>("button:not([disabled])"));
+  if (buttons.length === 0) return;
+  const first = buttons[0];
+  const last = buttons[buttons.length - 1];
+  const active = document.activeElement;
+  if (!e.shiftKey && active === last) {
+    e.preventDefault();
+    first.focus();
+  } else if (e.shiftKey && (active === first || !panel.contains(active))) {
+    e.preventDefault();
+    last.focus();
+  }
+};
+
+watch(
+  () => props.show,
+  async (visible) => {
+    if (visible) {
+      restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      pushModal(modalId);
+      document.addEventListener("keydown", onKeydown);
+      await nextTick();
+      cancelRef.value?.focus();
+    } else {
+      document.removeEventListener("keydown", onKeydown);
+      popModal(modalId);
+      restoreFocus?.focus?.();
+      restoreFocus = null;
+    }
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => {
+  document.removeEventListener("keydown", onKeydown);
+  if (props.show) popModal(modalId);
+});
 
 /* ===== 数据碎片粒子配置：20 条双圈螺旋，多普勒色温 ===== */
 const FRAG_COLORS = [
@@ -399,6 +471,26 @@ const fragments = Array.from({ length: 20 }, (_, i) => {
   letter-spacing: 0.5px;
 }
 
+/* 删除对象：本次操作的作用目标（不可逆操作的核心确认信息） */
+.cd-target {
+  position: relative;
+  z-index: 2;
+  margin: -2px auto 8px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 71, 87, 0.24);
+  border-radius: 6px;
+  background: rgba(255, 71, 87, 0.05);
+  color: rgba(255, 177, 184, 0.92);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ===== 操作按钮 ===== */
 .cd-actions {
   position: relative;
@@ -493,18 +585,18 @@ const fragments = Array.from({ length: 20 }, (_, i) => {
 .cd-fade-leave-to {
   opacity: 0;
 }
+/* 弹窗入场/离场：只走不透明度。
+ * 原实现 transition: all + scale(0.7→1) 会把承载文字的整窗提升为合成层并按
+ * 非 1 比例光栅化，收束时再回落 —— 标题与描述在渡越窗口内发糊后骤然转锐。
+ * 缩放带来的"弹入感"由光环/喷流等装饰层承担，文字层保持轴对齐清晰。 */
 .cd-pop-enter-active {
-  transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: opacity 0.42s cubic-bezier(0.34, 1.2, 0.64, 1);
 }
 .cd-pop-leave-active {
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
-.cd-pop-enter-from {
-  opacity: 0;
-  transform: scale(0.7);
-}
+.cd-pop-enter-from,
 .cd-pop-leave-to {
   opacity: 0;
-  transform: scale(0.85);
 }
 </style>

@@ -104,7 +104,9 @@ export const generateThumbnail = async (dataB64: string, mime: string): Promise<
       const canvas = document.createElement("canvas");
       canvas.width = Math.round(w);
       canvas.height = Math.round(h);
-      const ctx = canvas.getContext("2d")!;
+      const ctx = canvas.getContext("2d");
+      // 无 2D 上下文（内存紧张/被策略禁用）：按无缩略图处理，不抛未捕获异常
+      if (!ctx) { resolve(""); return; }
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       const thumbB64 = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -285,6 +287,27 @@ export function rehydrateEntries(
       size: decrypted ? p.size : "",
     };
   });
+}
+
+/**
+ * 模块缓存的列表投影：只保留跨会话仍然成立的展示字段。
+ *
+ * Why：缓存此前直接存入整份 PhotoEntry —— meta 含内联缩略图（旧布局）与
+ * 块引用，thumb 是卸载即失效的 Blob URL；万张相册常驻可达数百 MB，且缓存
+ * 只服务「重进模块的第一帧」。投影后名称即时可见，尺寸/缩略图由可视区
+ * 按需解密回填；meta 一律不缓存（截断后的 meta 会让点击路径误判数据完整）。
+ */
+export function toPhotoCacheEntries(entries: readonly PhotoEntry[]): PhotoEntry[] {
+  return entries.map((p) => ({
+    id: p.id,
+    metaId: p.metaId,
+    name: p.name,
+    thumb: "",
+    size: "",
+    height: p.height,
+    loaded: false,
+    failed: false,
+  }));
 }
 
 /**

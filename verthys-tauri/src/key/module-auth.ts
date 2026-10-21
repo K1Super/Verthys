@@ -199,19 +199,15 @@ async function selfHealCleanupStaleRecords(ids: number[]): Promise<void> {
 /**
  * 在 verthys 中查找指定模块的密钥保护开关记录
  *
- * 修复：改用摘要缓存 O(1) 查询替代全量扫描（根治开关操作卡慢）
- *
- * 原缺陷：findModuleKeyConfigRecord 调用 findModuleRecord → ensureRecordScan +
- *   scanVerthysRecords 全量扫描所有记录（含照片块），verthys 有 N 条记录时
- *   耗时 5-20s。用户每次切换模块密钥开关都触发全量扫描 → UI 卡死。
- *
- * 修复：与 findModuleKeyRecord 一致，优先使用 getSummaryIdsByType 摘要缓存
- *   获取 TYPE_MODULE_KEY_CONFIG 记录 ID 列表（常数条，通常 ≤4），逐条
- *   verthysGetRecord 反序列化匹配 moduleId。仅常数次 IPC，<100ms。
+ * 版本化 + 自愈（与模块密钥记录同口径）：
+ *   配置记录写入顺序为「先添新、后删旧」，历史中断/删除失败会留下多条；
+ *   读取一律取 version 最大者为权威，并后台清理旧版本 —— 禁止 first-match
+ *   读到旧开关（否则表现为「设置被遗忘 / 开关回滚」）。
  */
 async function findModuleKeyConfigRecord(
   moduleId: ModuleId,
 ): Promise<{ id: number; rec: ModuleKeyConfigRecord } | null> {
+  const candidates: Array<{ id: number; rec: ModuleKeyConfigRecord }> = [];
   // 优先使用摘要缓存（O(1) IPC，模块配置记录极少）
   const configIds = getSummaryIdsByType(TYPE_MODULE_KEY_CONFIG);
   if (configIds.length > 0) {
@@ -221,30 +217,39 @@ async function findModuleKeyConfigRecord(
         if (r) {
           const rec = deserializeModuleKeyConfigRecord(r.dataB64);
           if (rec && rec.moduleId === moduleId) {
-            return { id, rec };
+            candidates.push({ id, rec });
           }
         }
       } catch (e) {
         log.warn(`findModuleKeyConfigRecord: verthysGetRecord(${id}) 失败`, e);
       }
     }
-    return null;
+  } else {
+    // 回退：摘要缓存未就绪 → 全量扫描（仅极端情况触发）
+    try { await ensureRecordScan(); } catch { /* */ }
+    await scanVerthysRecords((entry) => {
+      if (entry.type === TYPE_MODULE_KEY_CONFIG) {
+        const rec = deserializeModuleKeyConfigRecord(entry.dataB64);
+        if (rec && rec.moduleId === moduleId) {
+          candidates.push({ id: entry.id, rec });
+        }
+      }
+      return false;
+    });
   }
 
-  // 回退：摘要缓存未就绪 → 全量扫描（仅极端情况触发）
-  try { await ensureRecordScan(); } catch { /* */ }
-  let result: { id: number; rec: ModuleKeyConfigRecord } | null = null;
-  await scanVerthysRecords((entry) => {
-    if (entry.type === TYPE_MODULE_KEY_CONFIG) {
-      const rec = deserializeModuleKeyConfigRecord(entry.dataB64);
-      if (rec && rec.moduleId === moduleId) {
-        result = { id: entry.id, rec };
-        return true;
-      }
-    }
-    return false;
-  });
-  return result;
+  if (candidates.length === 0) return null;
+
+  candidates.sort((a, b) => (b.rec.version ?? 0) - (a.rec.version ?? 0));
+  const latest = candidates[0];
+  if (candidates.length > 1) {
+    const staleIds = candidates.slice(1).map((c) => c.id);
+    log.info(`模块 ${moduleId} 配置记录存在 ${candidates.length} 条，触发自愈清理: ${staleIds.join(",")}`);
+    selfHealCleanupStaleRecords(staleIds).catch((e) => {
+      log.warn(`模块 ${moduleId} 配置记录自愈清理失败`, e);
+    });
+  }
+  return latest;
 }
 
 /* ------------------------------------------------------------------ *
@@ -266,6 +271,9 @@ export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
   const startVersion = moduleKeyStatusVersion;
   // 标记后台加载进行中（供模块组件/SecurityCenter 守卫）
   keyState.moduleKeyStatusLoading.value = true;
+  /* 新一轮加载开始：先清失败标志，守卫按「加载中」等待本轮结果；
+   * 失败时再置 true 并保持 loaded=false（fail-closed）。 */
+  keyState.moduleKeyStatusFailed.value = false;
   try {
     const status: Record<ModuleId, boolean> = { photo: false, accounts: false, fileverthys: false };
     // 修复修复：enabled 默认 false（安全默认）
@@ -349,6 +357,7 @@ export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
       keyState.moduleKeyStatusLoading.value = false;
       // 安全守卫根治：标记已加载完成（虽丢弃结果，但 setModuleKeyEnabled 已更新状态，状态已知）
       keyState.moduleKeyStatusLoaded.value = true;
+      keyState.moduleKeyStatusFailed.value = false;
       return ok(undefined);
     }
 
@@ -357,10 +366,15 @@ export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
     keyState.moduleKeyStatusLoading.value = false;
     // 安全守卫根治：标记已加载完成（switchModule 守卫据此放行/拦截）
     keyState.moduleKeyStatusLoaded.value = true;
+    keyState.moduleKeyStatusFailed.value = false;
     return ok(undefined);
   } catch (e) {
     log.error("loadModuleKeyStatus 失败", e);
     keyState.moduleKeyStatusLoading.value = false;
+    /* 失败不等于"无保护"：loaded 保持 false（fail-closed），并置 failed
+     * 供守卫跳过超时等待、直接要求密钥验证，避免每次切换模块空等 10s。 */
+    keyState.moduleKeyStatusLoaded.value = false;
+    keyState.moduleKeyStatusFailed.value = true;
     return errFromUnknown(e, VerthysErrorCode.E_INIT_FAILED);
   }
 }
@@ -434,11 +448,14 @@ export async function setModuleKeyEnabled(moduleId: ModuleId, enabled: boolean):
     return err(VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY, "verthys 未解锁");
   }
 
-  const rec: ModuleKeyConfigRecord = { moduleId, enabled };
-  const dataB64 = serializeModuleKeyConfigRecord(rec);
-
-  // 1. 先查找旧记录
+  // 1. 查找旧记录（取最新版本，供版本递增 + 后续删除）
   const existing = await findModuleKeyConfigRecord(moduleId);
+  const rec: ModuleKeyConfigRecord = {
+    moduleId,
+    enabled,
+    version: (existing?.rec.version ?? 0) + 1,
+  };
+  const dataB64 = serializeModuleKeyConfigRecord(rec);
 
   // 2. 先添加新记录
   const name = `module-key-config-${moduleId}`;
@@ -452,25 +469,32 @@ export async function setModuleKeyEnabled(moduleId: ModuleId, enabled: boolean):
     id, type: TYPE_MODULE_KEY_CONFIG, name, dataB64, dataSize: dataB64.length,
   });
 
-  // 3. 添加成功后再删除旧记录
-  if (existing) {
-    await verthysDeleteRecord(existing.id);
-    cacheCoordinator.removeRecord(existing.id);
-  }
-
-  // 修复修复：await persistVerthys 替代 void persistVerthys（根治持久化丢失）
-  //
-  // 原缺陷：void persistVerthys() 火并忘，写入 worker 内存后不等待落盘。
-  // 若用户快速操作或应用退出，flush 未完成 → 磁盘无新配置 → 下次解锁"设置被遗忘"。
-  // 用户反馈"原先verthys文件的设置和内容被直接忘记了"。
-  //
-  // 修复：await persistVerthys() 确保落盘完成后再返回成功。
-  // 模块密钥配置是低频操作（用户手动切换开关），await 的延迟可接受。
-  // persistVerthys 内部通过 flushChain 串行执行，不会并发竞态。
+  /* 3. 新记录先确认落盘，再删除旧记录。
+   *    旧实现先删旧再持久化：落盘失败/中断会让磁盘既无新记录也无旧记录，
+   *    重启后保护开关回退默认关闭 —— 属不可见的安全降级。 */
   const flushOk = await persistVerthys();
   if (!flushOk) {
-    log.error(`setModuleKeyEnabled: 模块 ${moduleId} 配置落盘失败`);
+    log.error(`setModuleKeyEnabled: 模块 ${moduleId} 新配置落盘失败，回滚新记录`);
+    try {
+      await verthysDeleteRecord(id);
+      cacheCoordinator.removeRecord(id);
+    } catch (e) {
+      log.warn(`setModuleKeyEnabled: 回滚新配置记录失败（保留旧记录为权威）`, e);
+    }
     return err(VerthysErrorCode.E_MODULE_CONFIG_SAVE_FAILED, "配置落盘失败，请重试");
+  }
+
+  // 4. 新记录已持久化 → 删除旧记录（失败仅影响冗余，读取按版本取新）
+  let deletedOld = false;
+  if (existing) {
+    try {
+      deletedOld = await verthysDeleteRecord(existing.id);
+      if (deletedOld) cacheCoordinator.removeRecord(existing.id);
+      else log.warn(`setModuleKeyEnabled: 旧配置记录 ${existing.id} 删除失败（读取按版本取新）`);
+    } catch (e) {
+      log.warn(`setModuleKeyEnabled: 旧配置记录 ${existing.id} 删除异常（读取按版本取新）`, e);
+    }
+    if (deletedOld) await persistVerthys();
   }
 
   // 更新状态（数据已确认落盘）
@@ -554,24 +578,32 @@ export async function setModuleKey(moduleId: ModuleId, key: string): Promise<Ver
     id, type: TYPE_MODULE_KEY, name, dataB64, dataSize: dataB64.length,
   });
 
-  // 5. 删除旧记录（先添后删）
-  if (existing) {
-    await verthysDeleteRecord(existing.id);
-    cacheCoordinator.removeRecord(existing.id);
-  }
-
-  // 修复修复：await persistVerthys 替代 void persistVerthys（根治持久化丢失）
-  //
-  // 原缺陷：void persistVerthys() 火并忘，写入 worker 内存后不等待落盘。
-  // 若用户快速操作或应用退出，flush 未完成 → 磁盘无新密钥记录 → 下次解锁"密钥验证完全无效"。
-  // 用户反馈"原先的密钥验证完全无效"。
-  //
-  // 修复：await persistVerthys() 确保落盘完成后再返回成功。
-  // 模块密钥设置是低频关键操作，await 的延迟可接受且必须保证持久化。
+  /* 5. 新密钥先确认落盘，再删除旧记录。
+   *    旧实现先删旧再持久化：落盘失败/中断会同时失去新旧两份密钥记录，
+   *    模块加密数据将永久无法解密 —— 不可逆数据损失。 */
   const flushOk = await persistVerthys();
   if (!flushOk) {
-    log.error(`setModuleKey: 模块 ${moduleId} 密钥记录落盘失败`);
+    log.error(`setModuleKey: 模块 ${moduleId} 新密钥落盘失败，回滚新记录`);
+    try {
+      await verthysDeleteRecord(id);
+      cacheCoordinator.removeRecord(id);
+    } catch (e) {
+      log.warn(`setModuleKey: 回滚新密钥记录失败（旧记录仍为权威）`, e);
+    }
     return err(VerthysErrorCode.E_MODULE_KEY_SET_FAILED, "密钥落盘失败，请重试");
+  }
+
+  // 6. 新密钥已持久化 → 删除旧记录（失败仅影响冗余，读取按版本取新）
+  let deletedOld = false;
+  if (existing) {
+    try {
+      deletedOld = await verthysDeleteRecord(existing.id);
+      if (deletedOld) cacheCoordinator.removeRecord(existing.id);
+      else log.warn(`setModuleKey: 旧密钥记录 ${existing.id} 删除失败（读取按版本取新）`);
+    } catch (e) {
+      log.warn(`setModuleKey: 旧密钥记录 ${existing.id} 删除异常（读取按版本取新）`, e);
+    }
+    if (deletedOld) await persistVerthys();
   }
 
   // 6. 更新状态（数据已确认落盘）

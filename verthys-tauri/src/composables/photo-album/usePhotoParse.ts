@@ -20,14 +20,14 @@
  *   - 持久化：pipeline 完成后 persistVerthys + 返回值检查
  *   - 复用 usePhotoImport 的 pipeline 实例 + importing refs（共享 QuantumProgressFlow）
  */
-import { ref, onScopeDispose, type Ref, type ShallowRef } from "vue";
+import { ref, shallowRef, onScopeDispose, type Ref, type ShallowRef } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import { readUserFile } from "../../lib/verthys";
+import { readUserFile, userFileStat } from "../../lib/verthys";
 import { persistVerthysDetailed, setModuleCache } from "../../lib/keyManager";
-import { MIN_TOKEN_LENGTH } from "../../constants/crypto_const";
-import { pushShallowItems } from "../../utils/shallow-array";
+import { MAX_EXPORT_SINGLE_BYTES, MIN_TOKEN_LENGTH } from "../../constants/crypto_const";
+import { pushShallowItems, replaceShallowArray } from "../../utils/shallow-array";
 import type { PhotoEntry, ParsedPhotoPreview } from "./types";
-import { formatSize, nextMemoryPhotoId } from "./utils";
+import { formatSize, nextMemoryPhotoId, sortByMetaId, toPhotoCacheEntries } from "./utils";
 import { useSingleTimer } from "./utils/timer";
 import type { ImportPipeline } from "./importPipeline";
 import { importedToPhotoEntries } from "./importPipeline";
@@ -60,6 +60,15 @@ const MIN_PERCEIVE_MS = 1500;
 /** rAF 推进的目标百分比（预留 100% 给实际完成） */
 const PROGRESS_RAF_TARGET = 90;
 
+/** 解析容器体积上限：与单文件导出口径一致，读盘前预检 */
+const MAX_PARSE_CONTAINER_BYTES = MAX_EXPORT_SINGLE_BYTES;
+
+/** 上限读数（GB 级常量按 GB 展示，便于与文件大小比较） */
+const containerLimitText = (): string => {
+  const gb = MAX_PARSE_CONTAINER_BYTES / (1024 * 1024 * 1024);
+  return `${Number.isInteger(gb) ? gb : gb.toFixed(1)} GB`;
+};
+
 /** usePhotoParse 依赖注入接口 */
 export interface UsePhotoParseDeps {
   /** 照片列表（shallowRef，避免深度代理） */
@@ -85,8 +94,6 @@ export interface UsePhotoParseDeps {
   importStatus: Ref<string>;
   /** 导入已耗时（毫秒，复用 usePhotoImport 的 ref） */
   importElapsed: Ref<number>;
-  /** 导入预计剩余时间（毫秒，复用 usePhotoImport 的 ref） */
-  importEta: Ref<number>;
   /** 解析 Worker 工厂（测试注入点；默认真实 Worker） */
   parseWorkerFactory?: () => ParseWorkerLike;
 }
@@ -95,7 +102,7 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
   const {
     photos, photoKey, isTauri, ensurePhotoKey, showError, showToast,
     /* Parsed Import：复用 usePhotoImport 的流水线 + 导入状态 refs */
-    getPipeline, importing, importProgress, importStatus, importElapsed, importEta,
+    getPipeline, importing, importProgress, importStatus, importElapsed,
     parseWorkerFactory = defaultParseWorkerFactory,
   } = deps;
 
@@ -108,7 +115,12 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
   const parseFilePath = ref<string | null>(null);
   const parseToken = ref("");
   const parsing = ref(false);
-  const parsedPhotos = ref<ParsedPhotoPreview[]>([]);
+  /**
+   * 解析结果（shallowRef）：每条预览含整张照片的块密文 base64 列表。
+   * 深层响应式会为整包容器建立代理并随读写多次复制，超大容器直接打满内存；
+   * 本层只整体替换数组（预览列表不可变），shallowRef 语义完全够用。
+   */
+  const parsedPhotos = shallowRef<ParsedPhotoPreview[]>([]);
   /** 无法用当前模块密钥解密的照片数（doParse 预检结果，导入前展示原因） */
   const parsedUndecryptable = ref(0);
   /** 空数据记录数（容器内无内容块）：与"密钥不匹配"分列，避免向用户报错原因 */
@@ -208,7 +220,6 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
     importProgress.value = 0;
     importStatus.value = "";
     importElapsed.value = 0;
-    importEta.value = 0;
   };
 
   const closeParseDialog = () => {
@@ -219,6 +230,15 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
     // 导入中禁止关闭（保护流水线数据完整性）
     if (importingParsed.value) return;
     showParseDialog.value = false;
+    // 关闭即释放解析产物：容器可达 GB 级，不依赖下次打开时才重置
+    importDoneTimer.cancel();
+    parsedPhotos.value = [];
+    parsedUndecryptable.value = 0;
+    parsedEmpty.value = 0;
+    parseFileData.value = null;
+    parseFilePath.value = null;
+    parseFileName.value = "";
+    parseToken.value = "";
   };
 
   const chooseParseFile = async () => {
@@ -265,6 +285,18 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         // 用户取消选择 → 静默返回，不显示任何进度
         return;
       }
+      // 体积预检：容器整包进入内存前先按文件长度拒绝超限项。
+      //   统计失败不阻断（读取/解包层仍会拒绝超长数据），但成功时绝不把
+      //   超限文件读进内存 —— 这正是历史实现缺失的一道闸门。
+      try {
+        const stat = await userFileStat(path);
+        if (stat.size > MAX_PARSE_CONTAINER_BYTES) {
+          showError(`容器超过解析上限（${containerLimitText()}），无法解析`);
+          return;
+        }
+      } catch (e) {
+        console.warn("[chooseParseFile] 文件长度预检失败，按读取/解包层兜底", e);
+      }
       // 用户已确认选择文件 → 启动真实读取进度
       startLoading();
       const emitter = createProgressEmitter(fileLoadingPercent);
@@ -294,12 +326,17 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
           // 用户取消选择 → 静默返回，不显示任何进度
           return;
         }
+        const file = input.files[0];
+        // 体积预检：浏览器无流式落盘，整包进内存前先拒绝超限项
+        if (file.size > MAX_PARSE_CONTAINER_BYTES) {
+          showError(`容器超过解析上限（${containerLimitText()}），无法解析`);
+          return;
+        }
         // 用户已确认选择文件 → 启动真实读取进度
         startLoading();
         const emitter = createProgressEmitter(fileLoadingPercent);
         fileLoadRafId = requestAnimationFrame(emitter.tick);
         try {
-          const file = input.files[0];
           parseFileName.value = file.name;
           parseFileData.value = new Uint8Array(await file.arrayBuffer());
           // 浏览器模式无路径可重读：置空以触发"请重新选择文件"的保护分支
@@ -512,7 +549,6 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         importProgress.value = 0;
         importStatus.value = "";
         importElapsed.value = 0;
-        importEta.value = 0;
 
         console.error("[importParsedPhotos] 流水线异常", e);
         showError("导入失败，请重试");
@@ -526,7 +562,6 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         importProgress.value = 0;
         importStatus.value = "";
         importElapsed.value = 0;
-        importEta.value = 0;
 
         if (result.error) {
           showError(`导入失败: ${result.error}`);
@@ -555,7 +590,6 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
           importProgress.value = 0;
           importStatus.value = "";
           importElapsed.value = 0;
-          importEta.value = 0;
           showError("持久化失败，本次导入未生效，请重试");
           return;
         }
@@ -567,10 +601,12 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         if (result.imported.length > 0) {
           const newEntries = importedToPhotoEntries(result.imported);
           pushShallowItems(photos, newEntries);
+          // 列表约定按记录 ID 升序：ID 复用场景下增量项需重新归位
+          replaceShallowArray(photos, sortByMetaId(photos.value));
         }
 
         // 3. 同步模块缓存（落盘成功之后，避免缓存与磁盘状态脱节）
-        setModuleCache("photos", photos.value);
+        setModuleCache("photos", toPhotoCacheEntries(photos.value));
 
         const totalImported = result.imported.length;
 
@@ -609,7 +645,6 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
           importProgress.value = 0;
           importStatus.value = "";
           importElapsed.value = 0;
-          importEta.value = 0;
           showParseDialog.value = false;      // 关闭对话框
         }, 1500);
       } catch (e) {
@@ -618,7 +653,6 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         importProgress.value = 0;
         importStatus.value = "";
         importElapsed.value = 0;
-        importEta.value = 0;
         console.error("[importParsedPhotos] 持久化/缓存异常", e);
         showError("导入后处理失败，请重试");
       }
@@ -635,7 +669,7 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         meta: ph.meta || undefined,
       }));
       pushShallowItems(photos, newPhotos);
-      setModuleCache("photos", photos.value);
+      setModuleCache("photos", toPhotoCacheEntries(photos.value));
       // 文案仅由成功计数派生；浏览器模式不持久化，需向用户明示会话级生命周期
       const skipNote = skipCount > 0 ? `（${skipCount} 张无法用当前密钥解密，未导入）` : "";
       showToast(`已导入 ${newPhotos.length} 张照片${skipNote}（浏览器模式不持久化，仅本次会话可见）`);

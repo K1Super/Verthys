@@ -1171,7 +1171,7 @@ export interface SystemSnapshot {
   cpu_usage: number | null;
 }
 
-/** 查询系统运行指标（安全防护面板「CPU / IO 开销」的真实数据源） */
+/** 查询系统运行指标（安全防护面板「CPU 占用」的真实数据源） */
 export async function verthysGetSystemSnapshot(): Promise<SystemSnapshot> {
   return await ipc<SystemSnapshot>("verthys_system_snapshot");
 }

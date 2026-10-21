@@ -32,11 +32,13 @@
  *    冻结（样式层），采集无意义且会引入布局读。
  *
  * 用法：
- *   const { onCardMove, onCardLeave, cancel } = useCardShine();
+ *   const { onCardMove, onCardLeave } = useCardShine();
  *   // 模板: @mousemove="onCardMove($event)" @mouseleave="onCardLeave($event)"
- *   // 卸载: cancel()
+ *   // 卸载清理由本 composable 自行注册（onBeforeUnmount）—— 调用方无需记住，
+ *   // 避免「组件卸载后仍有一帧写入已脱离文档的元素」这类契约漂移。
  */
 
+import { onBeforeUnmount } from "vue";
 import { masterFrameLoop } from "../core/master-frame-loop";
 
 export function useCardShine() {
@@ -80,6 +82,10 @@ export function useCardShine() {
   const cancel = () => {
     pending = null;
   };
+
+  /* 生命周期自持：本 composable 在 setup 内调用，卸载即断泵 ——
+   * 排帧回调持有卡片元素引用，卸载后若仍触发会写入已脱离文档的节点。 */
+  onBeforeUnmount(cancel);
 
   return { onCardMove, onCardLeave, cancel };
 }

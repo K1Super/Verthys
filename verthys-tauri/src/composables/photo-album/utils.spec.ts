@@ -9,7 +9,7 @@
 import { describe, it, expect } from "vitest";
 import {
   rehydrateEntries, diffNewIds, stripMetaRecordPrefix, sortByMetaId, prefetchRowIndices,
-  makeThumbBlobUrl, makeThumbCssValue, thumbUrlOf, revokeThumbUrl,
+  makeThumbBlobUrl, makeThumbCssValue, thumbUrlOf, revokeThumbUrl, toPhotoCacheEntries,
 } from "./utils";
 import type { PhotoEntry } from "./types";
 import type { PhotoMeta } from "../../lib/crypto";
@@ -132,6 +132,22 @@ describe("缩略图 URL 助手", () => {
     if (css) expect(css).toMatch(/^url\("blob:/);
     else expect(css).toBe("");
     expect(makeThumbCssValue("")).toBe("");
+  });
+});
+
+describe("toPhotoCacheEntries", () => {
+  it("只保留跨会话成立的展示字段，丢弃 thumb/meta/尺寸（防模块缓存常驻整包数据）", () => {
+    const [cached] = toPhotoCacheEntries([decrypted(21)]);
+    expect(cached).toMatchObject({ id: 21, metaId: 21, name: "photo-21.jpg", thumb: "", size: "", loaded: false, failed: false });
+    // meta（内联缩略图/块数据）不得进入缓存
+    expect(cached.meta).toBeUndefined();
+  });
+
+  it("缓存条目回灌后仍为待解密态（缩略图由可视区按需补齐）", () => {
+    const [restored] = rehydrateEntries(toPhotoCacheEntries([decrypted(22)]), makeThumbCssValue);
+    expect(restored.loaded).toBe(false);
+    expect(restored.thumb).toBe("");
+    expect(restored.name).toBe("photo-22.jpg");
   });
 });
 

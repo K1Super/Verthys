@@ -12,7 +12,7 @@
  * - meta 缺失时按需解密回退（重启后占位项导出场景）
  * - copyExportToken 三级降级：Tauri clipboard → navigator.clipboard → textarea execCommand
  * - tokenCopied 为按钮 UI 状态（图标切换），独立于 copiedToast 提示
- * - 结果三态契约：成功计数 / 失败明细 / 跳过明细，完成文案仅由成功计数派生
+ * - 结果契约：成功计数 / 失败明细，完成文案仅由成功计数派生
  * - 导出文件名经 sanitizeFileName 净化 + uniqueFileName 批次内唯一化
  */
 import { ref, watch, onScopeDispose, type Ref, type ShallowRef } from "vue";
@@ -21,9 +21,9 @@ import { verthysGetRecord, verthysGetRecordDetailed, bytesToBase64, writeUserFil
 import { base64ToBytes } from "../../utils/binary_codec";
 import {
   encryptChunk,
-  computeFileHash, bytesToHex, packVencV2, packVencV2Streamed,
+  computeFileHash, bytesToHex, packVencV2, packVencV2StreamedLazy,
   estimateVencTotalBytes, toLightMeta, computeChunkHashesForB64,
-  generateRandomToken, CHUNK_SIZE,
+  generateRandomToken, CHUNK_SIZE, VENC_CONTAINER_FIXED_BYTES, vencPhotoFramesBytes,
   type PhotoMeta, type VencPhotoSpecV2,
 } from "../../lib/crypto";
 import {
@@ -37,6 +37,7 @@ import {
 } from "./utils";
 import { resolveChunkRefs, loadChunkCiphers } from "./chunk-refs";
 import { createLogger } from "../../utils/logger";
+import { pushModal, popModal } from "../../utils/modal_stack";
 
 const log = createLogger("photo-export");
 
@@ -60,14 +61,25 @@ interface ExportFailure {
 /** 照片解密/完整性校验失败（与格式转换失败区分，保证失败归因准确） */
 class PhotoDecryptError extends Error {}
 
+/**
+ * 单文件容器体积超出上限。
+ *
+ * 惰性写出路径在「写出该张之前」累计真实帧字节，超限即抛本错误；
+ * 调用方据此给出「请改用多文件模式」的专用提示，而不是通用导出失败。
+ */
+class ExportTooLargeError extends Error {
+  constructor() {
+    super("容器体积超过单文件上限");
+    this.name = "ExportTooLargeError";
+  }
+}
+
 /** 导出结果三态契约：完成文案与 Toast 的唯一派生来源 */
 export interface ExportOutcome {
   /** 成功导出的照片数 */
   successCount: number;
   /** 失败的照片数（含失败明细） */
   failCount: number;
-  /** 被跳过的照片数（如单文件模式因个别照片缺数据被剔除） */
-  skippedCount: number;
   /** 失败明细（按照片） */
   failures: ExportFailure[];
 }
@@ -106,6 +118,22 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   const tokenCopied = ref(false);
   let tokenCopiedTimer: ReturnType<typeof setTimeout> | undefined;
 
+  /* ===== 模态层身份（滚动锁与 Esc 栈序由共享模态栈统一管理） =====
+   * 导出面板与查看器、确认窗可以叠层：入栈/出栈必须严格成对，
+   * 否则一次 Esc 会连内层一并关掉，或滚动锁提前解除。 */
+  const exportModalId = Symbol("photo-export");
+  let exportModalEngaged = false;
+  const engageExportModal = () => {
+    if (exportModalEngaged) return;
+    exportModalEngaged = true;
+    pushModal(exportModalId);
+  };
+  const releaseExportModal = () => {
+    if (!exportModalEngaged) return;
+    exportModalEngaged = false;
+    popModal(exportModalId);
+  };
+
   /* ===== 写入 .venc 文件到磁盘（Tauri 模式） ===== */
   /** 修复：走 writeUserFile（Raw body + x-path 头），
    *   与 write_user_file 命令的真实协议一致；JSON+dataB64 旧写法与命令签名不符必失败。
@@ -114,29 +142,74 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     await writeUserFile(path, bytes);
   };
 
-  /** 单文件流式写出：建会话 → 逐帧追加 → finalize 原子替换。
+  /**
+   * 读取单张照片的容器数据（惰性路径的唯一驻留单位）。
    *
-   *  容器按帧流式产出即写盘：前端峰值内存与容器总字节解耦（单张照片
-   *  上限 100MB，容器可达数百 MB）。失败路径中止会话清理暂存，abort
-   *  幂等（会话不存在视为成功）；清理失败仅记录，原始错误原样上抛，
-   *  成功/失败判定不依赖清理结果。
+   * @returns 容器数据；元数据/块缺失返回 null（由调用方按 data-missing 记账并跳过）
    *
-   * @param onBytes 每段落盘后的进度回调（累计已写字节 / 预估总字节） */
-  const writeVencFileStreamed = async (
+   * 只有当前这一张的块密文被解码为字节，帧写出后引用即失效 —— 这是单文件
+   * 导出内存峰值与容器总字节解耦的关键。
+   */
+  const loadPhotoSpec = async (ph: PhotoEntry): Promise<VencPhotoSpecV2 | null> => {
+    const { metaB64, chunkB64List, meta, chunkHashesForExport } = await getPhotoVerthysData(ph);
+    if (!metaB64 || !meta || chunkB64List.length === 0) return null;
+    const chunkBytes = chunkB64List.map((cb) => base64ToBytes(cb));
+    // 块哈希优先取权威值（块集 / 索引给出；缺失时现场补算），保证容器逐块校验可用
+    const chunkHashes =
+      chunkHashesForExport.length === chunkBytes.length
+        ? chunkHashesForExport
+        : computeChunkHashesForB64(chunkB64List);
+    const lightMeta = toLightMeta({ ...meta, chunkDataB64: chunkB64List, chunkHashes });
+    return { lightMeta, chunkBytes };
+  };
+
+  /**
+   * 单文件惰性流式写出：建会话 → 逐张加载 → 逐帧追加 → finalize 原子替换。
+   *
+   * 峰值内存 = 一张照片的块字节 + 一个输出段（与容器总字节无关）。
+   * 体积预算在写出该张之前累计（`VENC_CONTAINER_FIXED_BYTES` + 逐张帧字节），
+   * 超限即抛 ExportTooLargeError，暂存文件随会话中止清理 —— 不会留下
+   * 超限或半截产物。
+   *
+   * @returns packed 实际打包张数；skippedEmpty 表示全部照片都不可导出（未 finalize）
+   */
+  const writeVencFileStreamedLazy = async (
     path: string,
-    specs: VencPhotoSpecV2[],
-    onBytes: (written: number, total: number) => void,
-  ): Promise<void> => {
+    selected: readonly PhotoEntry[],
+    failures: ExportFailure[],
+    onPhoto: (index: number, total: number) => void,
+  ): Promise<{ packed: number; skippedEmpty: boolean }> => {
     const streamId = await writeUserFileStream(path);
-    const totalBytes = estimateVencTotalBytes(specs);
-    let written = 0;
+    let produced = VENC_CONTAINER_FIXED_BYTES;
+    let packed = 0;
     try {
-      await packVencV2Streamed(specs, exportToken.value, async (part) => {
-        await appendUserFileChunk(streamId, part);
-        written += part.length;
-        onBytes(written, totalBytes);
-      });
+      await packVencV2StreamedLazy(
+        selected.length,
+        exportToken.value,
+        async (index) => {
+          const ph = selected[index];
+          const spec = await loadPhotoSpec(ph);
+          onPhoto(index, selected.length);
+          if (!spec) {
+            failures.push({ name: ph.name || `#${ph.metaId ?? ph.id}`, reason: "data-missing" });
+            return null;
+          }
+          produced += vencPhotoFramesBytes(spec.lightMeta, spec.chunkBytes.map((c) => c.length));
+          if (produced > MAX_EXPORT_SINGLE_BYTES) throw new ExportTooLargeError();
+          packed += 1;
+          return spec;
+        },
+        async (part) => {
+          await appendUserFileChunk(streamId, part);
+        },
+      );
+      if (packed === 0) {
+        // 一张都没能打包：容器不允许零照片，直接中止暂存会话（不 finalize）
+        try { await abortUserFileStream(streamId); } catch { /* 清理失败仅记录在调用方 */ }
+        return { packed: 0, skippedEmpty: true };
+      }
       await finalizeUserFileStream(streamId);
+      return { packed, skippedEmpty: false };
     } catch (e) {
       try {
         await abortUserFileStream(streamId);
@@ -163,11 +236,13 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     exportProgress.value = 0;
     exportStatus.value = "";
     showExportDialog.value = true;
+    engageExportModal();
   };
 
   const closeExportDialog = () => {
     if (exporting.value) return;
     showExportDialog.value = false;
+    releaseExportModal();
   };
 
   /* 格式切换时重置路径（single 选文件 vs multiple/png 选目录，路径类型不同） */
@@ -213,16 +288,24 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     }
     // 最终降级：textarea + execCommand（兼容旧版 WebView）
     if (!success) {
+      const ta = document.createElement("textarea");
       try {
-        const ta = document.createElement("textarea");
         ta.value = exportToken.value;
         ta.style.position = "fixed"; ta.style.opacity = "0";
         document.body.appendChild(ta);
         ta.select();
-        document.execCommand("copy");
-        document.body.removeChild(ta);
-        success = true;
-      } catch { /* */ }
+        // execCommand 返回布尔：false 表示复制未发生，不能当作成功
+        success = document.execCommand("copy");
+      } catch {
+        success = false;
+      } finally {
+        ta.remove();
+      }
+    }
+    // 三级通道全部失败：如实提示，不置对勾、不启动复位计时
+    if (!success) {
+      showError("复制失败：剪贴板不可用或权限被拒绝");
+      return;
     }
     // 通过全局 Toast 中心统一显示复制成功提示
     showCopied();
@@ -235,6 +318,8 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   // 组件卸载时清理复制按钮复位定时器（与导入/解析层的定时器纳管规范一致）
   onScopeDispose(() => {
     if (tokenCopiedTimer) clearTimeout(tokenCopiedTimer);
+    // 面板未关闭即卸载：必须归还滚动锁，否则整页永久不可滚动
+    releaseExportModal();
   });
 
   const chooseExportPath = async () => {
@@ -487,6 +572,12 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     return specs;
   };
 
+  /** 文件名净化：字节预算必须含扩展名，否则超长名称拼上后缀后仍会越界 */
+  const sanitizeWithExtension = (name: string, ext: string): string => {
+    const extBytes = new TextEncoder().encode(ext).length;
+    return `${sanitizeFileName(name, Math.max(1, MAX_EXPORT_FILENAME_BYTES - extBytes))}${ext}`;
+  };
+
   /** 派生导出目标文件名（净化 + 批次内唯一化），basename 缺失时回退占位 */
   const makeExportFileName = (
     baseName: string,
@@ -494,9 +585,9 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     fallbackId: number,
     used: Set<string>,
   ): string => {
-    const cleaned = sanitizeFileName(baseName, MAX_EXPORT_FILENAME_BYTES);
-    const stem = cleaned === "photo" ? `photo_${fallbackId}` : cleaned;
-    return uniqueFileName(`${stem}${ext}`, used);
+    const cleaned = sanitizeWithExtension(baseName, ext);
+    const stem = cleaned === `photo${ext}` ? `photo_${fallbackId}${ext}` : cleaned;
+    return uniqueFileName(stem, used);
   };
 
   const doExport = async () => {
@@ -525,44 +616,67 @@ export function usePhotoExport(params: UsePhotoExportParams) {
         const failures: ExportFailure[] = [];
         exportStatus.value = "读取照片数据…";
         exportProgress.value = 10;
-        const specs = await collectPhotoSpecs(selected, failures);
 
-        if (specs.length > 0) {
-          // 单文件模式的累计上限前置拦截：先按产出估算拦截，避免读完照片
-          //   数据、写出部分帧后才在追加阶段失败（浪费解密与 IO 成本）。
-          const estimatedBytes = estimateVencTotalBytes(specs);
-          if (estimatedBytes > MAX_EXPORT_SINGLE_BYTES) {
-            // 上限读数按 GB 展示（跨层常量为 GB 级时，MB 读数不易比较）
-            const limitGb = MAX_EXPORT_SINGLE_BYTES / (1024 * 1024 * 1024);
-            const limitText = `${Number.isInteger(limitGb) ? limitGb : limitGb.toFixed(1)} GB`;
-            exportStatus.value = `预计容器体积超过单文件上限 ${limitText}，请改用多文件模式`;
-            showExportDone(`容器体积超过单文件上限（${limitText}），请改用多文件模式`, "error");
-            exporting.value = false;
-            return;
-          }
+        if (isTauri) {
+          // 惰性流式写出：一次只驻留一张照片的块字节，体积预算在写出该张
+          // 之前累计；超限即中止暂存会话（不留超限产物），并以专用文案引导
+          // 改用多文件模式。
           exportStatus.value = "逐帧加密打包…";
           exportProgress.value = 50;
-
-          if (isTauri) {
-            // 单文件模式流式写出：容器逐帧产出即落盘，峰值内存与容器
-            // 总字节解耦；进度按「累计已写 / 预估总量」换算，单调爬升。
-            await writeVencFileStreamed(exportPath.value, specs, (written, total) => {
-              const ratio = total > 0 ? written / total : 0;
-              exportProgress.value = Math.min(95, 50 + Math.round(ratio * 45));
-            });
-          } else {
+          let writtenResult: { packed: number; skippedEmpty: boolean };
+          try {
+            writtenResult = await writeVencFileStreamedLazy(
+              exportPath.value,
+              selected,
+              failures,
+              (index, total) => {
+                exportStatus.value = `逐帧加密打包 ${index + 1}/${total}…`;
+                exportProgress.value = Math.min(96, 50 + Math.round(((index + 1) / total) * 46));
+              },
+            );
+          } catch (e) {
+            if (e instanceof ExportTooLargeError) {
+              // 上限读数按 GB 展示（跨层常量为 GB 级时，MB 读数不易比较）
+              const limitGb = MAX_EXPORT_SINGLE_BYTES / (1024 * 1024 * 1024);
+              const limitText = `${Number.isInteger(limitGb) ? limitGb : limitGb.toFixed(1)} GB`;
+              exportStatus.value = `容器体积超过单文件上限 ${limitText}，请改用多文件模式`;
+              showExportDone(`容器体积超过单文件上限（${limitText}），请改用多文件模式`, "error");
+              exporting.value = false;
+              return;
+            }
+            throw e;
+          }
+          exportProgress.value = 100;
+          outcome = {
+            successCount: writtenResult.packed,
+            failCount: failures.length,
+            failures,
+          };
+        } else {
+          // 浏览器模式：无流式落盘通道，保持「装配后一次性下载」
+          const specs = await collectPhotoSpecs(selected, failures);
+          if (specs.length > 0) {
+            const estimatedBytes = estimateVencTotalBytes(specs);
+            if (estimatedBytes > MAX_EXPORT_SINGLE_BYTES) {
+              const limitGb = MAX_EXPORT_SINGLE_BYTES / (1024 * 1024 * 1024);
+              const limitText = `${Number.isInteger(limitGb) ? limitGb : limitGb.toFixed(1)} GB`;
+              exportStatus.value = `预计容器体积超过单文件上限 ${limitText}，请改用多文件模式`;
+              showExportDone(`容器体积超过单文件上限（${limitText}），请改用多文件模式`, "error");
+              exporting.value = false;
+              return;
+            }
+            exportStatus.value = "逐帧加密打包…";
+            exportProgress.value = 50;
             const vencBytes = await packVencV2(specs, exportToken.value);
             downloadBlob(vencBytes, `verthys_${Date.now()}.venc`);
           }
+          exportProgress.value = 100;
+          outcome = {
+            successCount: specs.length,
+            failCount: failures.length,
+            failures,
+          };
         }
-
-        exportProgress.value = 100;
-        outcome = {
-          successCount: specs.length,
-          failCount: failures.length,
-          skippedCount: 0,
-          failures,
-        };
       } else if (exportFormat.value === "png") {
         // === PNG 明文导出模式：逐张解密（三重完整性校验）→ 转换 → 写出 ===
         outcome = await (async (): Promise<ExportOutcome> => {
@@ -619,7 +733,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
                 const displayName = decoded.meta?.name || ph.name;
                 const mime = decoded.meta?.mime || guessMime(displayName);
                 const pngBytes = await convertToPngBytes(decoded.bytes, mime);
-                downloadBlob(pngBytes, `${sanitizeFileName(displayName, MAX_EXPORT_FILENAME_BYTES)}.png`);
+                downloadBlob(pngBytes, sanitizeWithExtension(displayName, ".png"));
                 successCount++;
                 // 防止浏览器拦截多下载
                 await new Promise(r => setTimeout(r, 500));
@@ -633,7 +747,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
             }
           }
 
-          return { successCount, failCount: failures.length, skippedCount: 0, failures };
+          return { successCount, failCount: failures.length, failures };
         })();
       } else {
         // === 多文件模式：逐张打包为独立 .venc，占位项按需解密后计入结果 ===
@@ -665,7 +779,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
                 const lightMeta = toLightMeta({ ...meta, chunkDataB64: chunkB64List, chunkHashes });
                 const vencBytes = await packVencV2([{ lightMeta, chunkBytes }], exportToken.value);
                 const displayName = meta.name || ph.name;
-                const fileName = `${sanitizeFileName(displayName, MAX_EXPORT_FILENAME_BYTES)}.venc`;
+                const fileName = sanitizeWithExtension(displayName, ".venc");
                 await writeVencFile(`${dir}/${uniqueFileName(fileName, usedNames)}`, vencBytes);
                 successCount++;
               } catch (e) {
@@ -683,7 +797,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
               const specs = await collectPhotoSpecs([ph], failures);
               if (specs.length > 0) {
                 const vencBytes = await packVencV2(specs, exportToken.value);
-                downloadBlob(vencBytes, `${sanitizeFileName(ph.name, MAX_EXPORT_FILENAME_BYTES)}.venc`);
+                downloadBlob(vencBytes, sanitizeWithExtension(ph.name, ".venc"));
                 successCount++;
                 // 防止浏览器拦截多下载
                 await new Promise(r => setTimeout(r, 500));
@@ -691,7 +805,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
             }
           }
 
-          return { successCount, failCount: failures.length, skippedCount: 0, failures };
+          return { successCount, failCount: failures.length, failures };
         })();
       }
 
@@ -721,6 +835,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
       setTimeout(() => {
         exporting.value = false;
         showExportDialog.value = false;
+        releaseExportModal();
       }, 2000);
     } catch (e) {
       console.error("[onExportBatch] 导出失败", e);

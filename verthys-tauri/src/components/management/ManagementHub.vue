@@ -44,6 +44,7 @@
     <button
       ref="u1Ref"
       class="mh-unit mh-u1"
+      aria-label="全局密钥与设备绑定"
       :class="{ ready: globalKeyReady, ['mh-bind-' + bindVisual]: true }"
       @pointerenter="onEnter(0)" @pointerleave="onLeave(0)"
       @pointerdown="onDown(0)" @pointerup="onUp(0)"
@@ -81,6 +82,7 @@
     <button
       ref="u2Ref"
       class="mh-unit mh-u2"
+      aria-label="模块独立密钥"
       @pointerenter="onEnter(1)" @pointerleave="onLeave(1)"
       @pointerdown="onDown(1)" @pointerup="onUp(1)"
       @click="activate(1)"
@@ -117,6 +119,7 @@
     <button
       ref="u3Ref"
       class="mh-unit mh-u3"
+      aria-label="安全防护"
       @pointerenter="onEnter(2)" @pointerleave="onLeave(2)"
       @pointerdown="onDown(2)" @pointerup="onUp(2)"
       @click="activate(2)"

@@ -45,6 +45,9 @@ import {
   changeGlobalKey,
   bindDevice,
   translateVerthysError,
+  globalKeyReadyRef,
+  hasGlobalKeyRecordRef,
+  globalKeyRecordIdRef,
   VerthysErrorCode,
   type VerthysResult,
 } from '../../lib/keyManager';
@@ -55,6 +58,63 @@ import {
 } from '../../lib/verthys';
 import { withFrontendTimeout } from './useUnlockFlow';
 import type { VerifyRhythm } from './useVerifyRhythm';
+
+/* ===== 前端超时矩阵（最后防线） =====
+ * 均严格大于内部单步上界（INIT_TIMEOUT_MS 30s / derive_verify 15s），
+ * 避免前端先于后端收口 —— 否则会出现「前端报超时、后端仍在跑」的
+ * 假失败与状态错配。超时后一律回查权威状态，不直接断言失败。 */
+export const INIT_KEY_FRONTEND_TIMEOUT_MS = 90 * 1000;
+export const VERIFY_KEY_FRONTEND_TIMEOUT_MS = 90 * 1000;
+export const CHANGE_KEY_FRONTEND_TIMEOUT_MS = 150 * 1000;
+export const EXPORT_VERIFY_FRONTEND_TIMEOUT_MS = 90 * 1000;
+
+/** .bin 密钥文件字节上限（密钥文件为小体积记录，超限拒绝读取） */
+export const MAX_BIN_FILE_BYTES = 64 * 1024;
+
+/** 密钥文件读取前端超时（后端 read_user_file 自身 10s 超时） */
+const BIN_READ_TIMEOUT_MS = 15 * 1000;
+
+/** 判定是否为前端兜底超时（与 withFrontendTimeout 的文案契约一致） */
+const isFrontendTimeout = (e: unknown): boolean =>
+  e instanceof Error && e.message.includes('前端超时');
+
+/** 清零敏感字节（成功/关闭/卸载路径统一调用，降低内存驻留窗口） */
+const zeroBytes = (bytes: Uint8Array | null): void => {
+  if (bytes && typeof bytes.fill === 'function') bytes.fill(0);
+};
+
+/** 读取 .bin 密钥文件：大小上限 + 前端超时 + 统一错误语义 */
+const readBinBytes = async (path: string): Promise<Uint8Array> => {
+  const bytes = await withFrontendTimeout(
+    readUserFile(path),
+    '读取密钥文件',
+    BIN_READ_TIMEOUT_MS,
+  );
+  if (bytes.byteLength > MAX_BIN_FILE_BYTES) {
+    zeroBytes(bytes);
+    throw new Error('密钥文件超出大小上限（64 KiB），请选择正确的 .bin 文件');
+  }
+  return bytes;
+};
+
+/** 生成无取模偏差的随机导出文件名（拒绝采样，36 进制等概率） */
+const randomExportFileName = (): string => {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const length = 14;
+  // 拒绝采样阈值：256 - (256 % 36) = 252，落在阈值外的字节直接丢弃
+  const limit = 256 - (256 % alphabet.length);
+  let name = '';
+  while (name.length < length) {
+    const buf = new Uint8Array(length - name.length + 8);
+    crypto.getRandomValues(buf);
+    for (const b of buf) {
+      if (b >= limit) continue;
+      name += alphabet[b % alphabet.length];
+      if (name.length === length) break;
+    }
+  }
+  return name;
+};
 
 /**
  * useGlobalKey 选项
@@ -129,16 +189,30 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
   /* ===== 选择 .bin 密钥文件（初始化/验证视图共用） ===== */
   const browseBin = async () => {
     if (!options.isTauri) {
-      // 浏览器模式：使用 File API
+      // 浏览器模式：使用 File API（同样受大小上限与错误反馈约束）
       const input = document.createElement('input');
       input.type = 'file';
       input.accept = '.bin,application/octet-stream';
       input.onchange = async () => {
         const f = input.files?.[0];
-        if (f) {
+        if (!f) return;
+        if (f.size > MAX_BIN_FILE_BYTES) {
+          binFileName.value = '';
+          zeroBytes(binBytes.value);
+          binBytes.value = null;
+          options.showError('密钥文件超出大小上限（64 KiB），请选择正确的 .bin 文件');
+          return;
+        }
+        try {
           binFileName.value = f.name;
           const buf = await f.arrayBuffer();
+          zeroBytes(binBytes.value);
           binBytes.value = new Uint8Array(buf);
+        } catch (e) {
+          binFileName.value = '';
+          binBytes.value = null;
+          options.showError('密钥文件读取失败，请检查文件路径与权限');
+          console.error('[browseBin] 浏览器模式读取失败', e);
         }
       };
       input.click();
@@ -150,7 +224,9 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       });
       if (selected) {
         binFileName.value = (selected as string).split(/[\\/]/).pop() || 'key.bin';
-        binBytes.value = await readUserFile(selected as string);
+        const next = await readBinBytes(selected as string);
+        zeroBytes(binBytes.value);
+        binBytes.value = next;
       }
     } catch (e) {
       // 修复：不再静默吞错（消除"按钮完全无反应"根因）
@@ -164,8 +240,13 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       // 修复：显示错误提示 + 重置 binFileName/binBytes 保持 UI 状态一致，
       // 让用户明确知道文件读取失败而非按钮失灵。
       binFileName.value = '';
+      zeroBytes(binBytes.value);
       binBytes.value = null;
-      options.showError('密钥文件读取失败，请检查文件路径与权限');
+      options.showError(
+        e instanceof Error && e.message.includes('大小上限')
+          ? e.message
+          : '密钥文件读取失败，请检查文件路径与权限',
+      );
       console.error('[browseBin] 读取密钥文件失败', e);
     }
   };
@@ -257,17 +338,27 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
 
     let result: VerthysResult<void> | null = null;
     let errored = false;
+    let timedOut = false;
     try {
       result = await withFrontendTimeout(
         initGlobalKey(initPassword.value, binBytes.value!, binPassword.value, onInitProgress),
         '初始化全局密钥',
+        INIT_KEY_FRONTEND_TIMEOUT_MS,
       );
     } catch (e) {
       errored = true;
+      timedOut = isFrontendTimeout(e);
       console.error('[onInitKey] 异常', e);
     }
 
-    if (result?.ok) {
+    // 超时回查权威状态：初始化成功的唯一判据是「记录已存在且 GMK 就绪」。
+    // 前端兜底超时不等于后端失败（后端可能仍在跑或已成功），禁止直接断言失败。
+    const recovered = timedOut
+      && !result?.ok
+      && hasGlobalKeyRecordRef.value
+      && globalKeyReadyRef.value;
+
+    if (result?.ok || recovered) {
       // 成功：收束补满 100% 后释放视图（与验证成功路径同构）
       options.verifyRhythm.seal();
       try {
@@ -278,13 +369,20 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       initPassword.value = '';
       binPassword.value = '';
       binFileName.value = '';
+      zeroBytes(binBytes.value);
       binBytes.value = null;
       options.showToast('全局安全密钥已初始化');
       // 设备绑定解耦，由 UI 显式调用
-      //    失败仅提示不阻塞主流程，用户可在设置中重新绑定
-      const bindResult = await bindDevice(false);
-      if (!bindResult.ok) {
-        options.showError('设备绑定失败，可在设置中重新绑定');
+      //    失败仅提示不阻塞主流程，用户可在设置中重新绑定；
+      //    bindDevice 无内部超时，此处以 15s 前端兜底防止按钮永久 pending
+      try {
+        const bindResult = await withFrontendTimeout(bindDevice(), '绑定设备', 15 * 1000);
+        if (!bindResult.ok) {
+          options.showError('设备绑定失败，可在设置中重新绑定');
+        }
+      } catch (e) {
+        console.warn('[onInitKey] 设备绑定超时/异常', e);
+        options.showError('设备绑定超时，可在设置中重新绑定');
       }
     } else {
       /* 失败：与 onVerify 同构 —— 先跑完进度收束再呈现结果
@@ -297,7 +395,9 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       }
       const msg = result && !result.ok
         ? translateVerthysError(result)
-        : (errored ? '初始化失败，请重试' : '初始化失败');
+        : timedOut
+          ? '初始化超时，结果未确认：请重启应用后确认密钥状态'
+          : (errored ? '初始化失败，请重试' : '初始化失败');
       options.showError(msg);
     }
     options.postInitAnim.value = false;
@@ -351,17 +451,23 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
 
     let result: VerthysResult<void> | null = null;
     let errored = false;
+    let timedOut = false;
     try {
       result = await withFrontendTimeout(
         verifyGlobalKey(verifyPassword.value, binBytes.value!, binPassword.value, onVerifyProgress),
         '验证全局密钥',
+        VERIFY_KEY_FRONTEND_TIMEOUT_MS,
       );
     } catch (e) {
       errored = true;
+      timedOut = isFrontendTimeout(e);
       console.error('[onVerify] 异常', e);
     }
 
-    if (result?.ok) {
+    // 超时回查权威状态：验证成功的唯一判据是 GMK 就绪（会话已解锁）
+    const recovered = timedOut && !result?.ok && globalKeyReadyRef.value;
+
+    if (result?.ok || recovered) {
       // 成功：发出收束指令，等待收束完成事件；视图切换由该事件驱动，
       // 不猜测动画时长（成功路径必须补满 100% 后才释放视图）
       options.verifyRhythm.seal();
@@ -374,6 +480,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       verifyPassword.value = '';
       binPassword.value = '';
       binFileName.value = '';
+      zeroBytes(binBytes.value);
       binBytes.value = null;
       options.showToast('验证成功');
     } else {
@@ -391,7 +498,9 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       // 结构化错误提示：translateVerthysError 处理 VerthysResult 失败分支
       const msg = result && !result.ok
         ? translateVerthysError(result)
-        : (errored ? '验证失败，请重试' : '验证失败');
+        : timedOut
+          ? '验证超时，结果未确认：请重新验证'
+          : (errored ? '验证失败，请重试' : '验证失败');
       options.showError(msg);
     }
     options.postVerifyAnim.value = false;
@@ -407,12 +516,19 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
         filters: [{ name: 'BIN 密钥文件', extensions: ['bin'] }],
       });
       if (typeof selected !== 'string' || !selected) return;
-      oldBinBytes.value = await readUserFile(selected);
+      const next = await readBinBytes(selected);
+      zeroBytes(oldBinBytes.value);
+      oldBinBytes.value = next;
       const parts = selected.replace(/\\/g, '/').split('/');
       oldBinFileName.value = parts[parts.length - 1];
     } catch (e) {
       console.error('[browseOldBin] 异常', e);
-      options.showError('读取文件失败');
+      oldBinFileName.value = '';
+      zeroBytes(oldBinBytes.value);
+      oldBinBytes.value = null;
+      options.showError(
+        e instanceof Error && e.message.includes('大小上限') ? e.message : '读取文件失败',
+      );
     }
   };
 
@@ -424,42 +540,63 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
         filters: [{ name: 'BIN 密钥文件', extensions: ['bin'] }],
       });
       if (typeof selected !== 'string' || !selected) return;
-      newBinBytes.value = await readUserFile(selected);
+      const next = await readBinBytes(selected);
+      zeroBytes(newBinBytes.value);
+      newBinBytes.value = next;
       const parts = selected.replace(/\\/g, '/').split('/');
       newBinFileName.value = parts[parts.length - 1];
     } catch (e) {
       console.error('[browseNewBin] 异常', e);
-      options.showError('读取文件失败');
+      newBinFileName.value = '';
+      zeroBytes(newBinBytes.value);
+      newBinBytes.value = null;
+      options.showError(
+        e instanceof Error && e.message.includes('大小上限') ? e.message : '读取文件失败',
+      );
     }
+  };
+
+  /** 清空修改密钥弹窗的全部敏感字段（打开/关闭/成功后统一调用） */
+  const clearChangeKeyFields = () => {
+    oldPassword.value = '';
+    oldBinFileName.value = '';
+    zeroBytes(oldBinBytes.value);
+    oldBinBytes.value = null;
+    oldBinPassword.value = '';
+    newPassword.value = '';
+    newBinFileName.value = '';
+    zeroBytes(newBinBytes.value);
+    newBinBytes.value = null;
+    newBinPassword.value = '';
   };
 
   /** 打开修改全局密钥弹窗 */
   const onOpenChangeKeyDialog = () => {
     showChangeKeyDialog.value = true;
-    oldPassword.value = '';
-    oldBinFileName.value = '';
-    oldBinBytes.value = null;
-    oldBinPassword.value = '';
-    newPassword.value = '';
-    newBinFileName.value = '';
-    newBinBytes.value = null;
-    newBinPassword.value = '';
+    clearChangeKeyFields();
   };
 
-  /** 关闭修改全局密钥弹窗 */
+  /** 关闭修改全局密钥弹窗（处理中禁止关闭；关闭即清空敏感字段） */
   const onCloseChangeKeyDialog = () => {
     if (changeKeyProcessing.value) return;
     showChangeKeyDialog.value = false;
+    clearChangeKeyFields();
   };
 
   /** 确认修改全局密钥
    *
    * changeGlobalKey 返回 VerthysResult<void>
    *   细分错误码：旧密钥错误 vs 落盘失败，提供精确 UI 提示
+   *
+   * 超时处理：changeGlobalKey 成功时会把 globalKeyRecordId 更新为新记录 id，
+   *   前端兜底超时后以「记录 id 是否变化」判定真实结果，不直接断言失败。
    */
   const onConfirmChangeKey = async () => {
+    // 重入闸门：处理中拒绝再次提交（按钮 disabled 之外的第二道防线）
+    if (changeKeyProcessing.value) return;
     if (!oldBinBytes.value || !newBinBytes.value) return;
     changeKeyProcessing.value = true;
+    const recordIdBefore = globalKeyRecordIdRef.value;
     try {
       const result = await withFrontendTimeout(
         changeGlobalKey(
@@ -467,6 +604,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
           newPassword.value, newBinBytes.value, newBinPassword.value,
         ),
         '修改全局密钥',
+        CHANGE_KEY_FRONTEND_TIMEOUT_MS,
       );
       if (!result.ok) {
         // 细分错误码：旧密钥错误 vs 落盘失败
@@ -481,11 +619,22 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       }
       options.showToast('全局密钥修改成功');
       showChangeKeyDialog.value = false;
-      // 清空敏感字段
-      oldPassword.value = ''; oldBinFileName.value = ''; oldBinBytes.value = null; oldBinPassword.value = '';
-      newPassword.value = ''; newBinFileName.value = ''; newBinBytes.value = null; newBinPassword.value = '';
+      clearChangeKeyFields();
     } catch (e) {
-      options.showError(e instanceof Error ? e.message : String(e));
+      if (isFrontendTimeout(e)) {
+        // 超时回查权威状态：记录 id 变化 = 后端已成功写入新记录
+        const changed = globalKeyRecordIdRef.value > 0
+          && globalKeyRecordIdRef.value !== recordIdBefore;
+        if (changed) {
+          options.showToast('全局密钥已修改（响应超时，结果已确认）');
+          showChangeKeyDialog.value = false;
+          clearChangeKeyFields();
+        } else {
+          options.showError('修改超时，结果未确认：请重启应用后以新密钥验证');
+        }
+      } else {
+        options.showError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       changeKeyProcessing.value = false;
     }
@@ -516,6 +665,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
     if (exportVerifyProcessing.value) return;
     if (!exportVerifyPassword.value || !exportVerifyBinPassword.value) return;
     exportVerifyProcessing.value = true;
+    let srcBytes: Uint8Array | null = null;
     try {
       // 1. 选择源 .bin 密钥文件（同时是验证要素与导出源）
       const src = await open({
@@ -523,12 +673,15 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
         multiple: false,
       });
       if (typeof src !== 'string' || !src) return; // 用户取消 → 静默中止
-      let srcBytes: Uint8Array;
       try {
-        srcBytes = await readUserFile(src);
+        srcBytes = await readBinBytes(src);
       } catch (readErr) {
         console.error('[onConfirmExportVerify] 密钥文件读取失败', readErr);
-        options.showError('密钥文件读取失败，请检查文件路径与权限');
+        options.showError(
+          readErr instanceof Error && readErr.message.includes('大小上限')
+            ? readErr.message
+            : '密钥文件读取失败，请检查文件路径与权限',
+        );
         return;
       }
 
@@ -540,6 +693,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
           exportVerifyBinPassword.value,
         ),
         '验证全局密钥',
+        EXPORT_VERIFY_FRONTEND_TIMEOUT_MS,
       );
       if (!result.ok) {
         options.showError(translateVerthysError(result));
@@ -551,14 +705,9 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       exportVerifyPassword.value = '';
       exportVerifyBinPassword.value = '';
 
-      // 保存位置（14位无规律随机文件名，每次不同，不暴露任何信息）
-      const fileNameBytes = new Uint8Array(14);
-      crypto.getRandomValues(fileNameBytes);
-      const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
-      let randomName = '';
-      for (let i = 0; i < 14; i++) randomName += alphabet[fileNameBytes[i] % alphabet.length];
+      // 保存位置（14 位无规律随机文件名，拒绝采样保证字符等概率）
       const dst = await save({
-        defaultPath: randomName + '.bin',
+        defaultPath: randomExportFileName() + '.bin',
         filters: [{ name: 'BIN 密钥文件', extensions: ['bin'] }],
       });
       if (!dst) return; // 用户取消保存 → 已验证不缓存，下次导出需重新验证
@@ -566,8 +715,14 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       options.showToast('已导出密钥文件备份');
     } catch (e) {
       console.error('[onConfirmExportVerify] 异常', e);
-      options.showError('导出失败');
+      if (isFrontendTimeout(e)) {
+        options.showError('导出验证超时，请重试');
+      } else {
+        options.showError('导出失败');
+      }
     } finally {
+      // 源密钥字节在流程结束（成功/取消/失败）一律清零
+      zeroBytes(srcBytes);
       exportVerifyProcessing.value = false;
     }
   };
@@ -581,12 +736,13 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
     showExportVerifyDialog.value = true;
   };
 
-  /** 复位初始化/验证表单（供 goBackToUnlock 调用，清空敏感字段） */
+  /** 复位初始化/验证表单（供 goBackToUnlock 调用，清空并清零敏感字段） */
   const resetInitVerifyForm = () => {
     initPassword.value = '';
     verifyPassword.value = '';
     binPassword.value = '';
     binFileName.value = '';
+    zeroBytes(binBytes.value);
     binBytes.value = null;
   };
 

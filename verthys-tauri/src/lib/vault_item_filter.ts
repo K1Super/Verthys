@@ -15,7 +15,12 @@
  */
 import type { VaultTypeDef } from "../constants/vault_item_types";
 import { VAULT_EXPIRY_FIELD_ID } from "../constants/vault_item_types";
-import { vaultExpiryReadout, vaultItemTitle, vaultItemTypeLabel } from "./vault_item_card";
+import {
+  vaultExpiryReadout,
+  vaultExpiryTimestamp,
+  vaultItemTitle,
+  vaultItemTypeLabel,
+} from "./vault_item_card";
 
 /** 到期状态筛选取值 */
 export type VaultExpiryFilter = "expired" | "expiring" | "hasExpiry" | "noExpiry";
@@ -129,12 +134,10 @@ function matchProtection(entry: VaultFilterEntry, def: VaultTypeDef | undefined,
   });
 }
 
-/** 取条目排序用的到期时间（毫秒；无到期或日期非法返回 null） */
+/** 取条目排序用的到期时间（毫秒；无到期或日期非法返回 null）。
+ *  与到期读数共用同一解析（纯日期按本地日历日）—— 排序与读数不出现时区分歧 */
 function expiryTimeOf(entry: VaultFilterEntry): number | null {
-  const value = entry.data[VAULT_EXPIRY_FIELD_ID] ?? "";
-  if (!value) return null;
-  const time = new Date(value).getTime();
-  return Number.isNaN(time) ? null : time;
+  return vaultExpiryTimestamp(entry.data[VAULT_EXPIRY_FIELD_ID] ?? "");
 }
 
 /**

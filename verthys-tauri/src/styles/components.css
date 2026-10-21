@@ -13,7 +13,12 @@
   width: 32px; height: 32px;
   border: 1px solid var(--border-glass); border-radius: var(--radius-sm);
   background: transparent; color: var(--text-muted);
-  cursor: pointer; transition: all var(--dur-fast); flex-shrink: 0;
+  cursor: pointer; flex-shrink: 0;
+  /* 精确属性过渡（禁 transition: all — 仅动画实际变化的绘制属性） */
+  transition:
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
 }
 .gen-btn svg { width: 14px; height: 14px; transition: transform 0.5s var(--ease); }
 .gen-btn:hover:not(:disabled) {
@@ -30,7 +35,7 @@
 .gen-btn--spin:active:not(:disabled) svg { transform: rotate(360deg); transition: transform 0.6s var(--ease); }
 
 /* ===== 全局复用：Toast 层（唯一渲染通道 / 全应用最高层）=====
- * 所有瞬时提示（错误 / 状态 / 复制 / 导出完成 / 剪贴板倒计时）统一由
+ * 所有瞬时提示（错误 / 状态 / 复制 / 导出完成 / 剪贴板清空时间）统一由
  * components/common/feedback/ToastLayer.vue 渲染，禁止任何模块自行渲染
  * toast DOM（DOM 分裂 + 层级失控 + 模块切换叠加残留的根源）。
  *   - 单点挂载（App 根节点）+ <Teleport to="body">：提示脱离 #app 栈
@@ -52,8 +57,10 @@
   --mark-c: var(--accent);
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
   display: flex; align-items: center; gap: 8px;
-  padding: 10px 20px; font-size: 12px;
+  padding: 10px 20px; font-size: 12px; font-weight: 500; letter-spacing: 0.2px;
   color: var(--accent); font-family: var(--font);
+  /* 薄雾底板上的文字锚定：1px 暗晕保证任何衬底下字缘清晰（非发光） */
+  text-shadow: 0 1px 1px rgba(var(--black-rgb), 0.38);
 }
 /* 顶部变体（导出完成等顶部状态感知）：自底部定位上翻 */
 .clip-toast--top { top: 24px; bottom: auto; }
@@ -68,21 +75,22 @@
 .toast-enter-from, .toast-leave-to { opacity: 0; transform: translate(-50%, 10px); }
 
 /* ===== 全局复用：提示底板 · 星野场（clip-toast / error-toast 共用）=====
- * 材质：通透玻璃体 —— 低不透明填充让衬底轮廓可辨，可读性由背衬折射与
- * 内缘收边承担：看得清轮廓是通透，被抹平是哑光，本皮肤取前者。
+ * 材质：通透玻璃体 —— 薄雾级填充让衬底结构明确可辨，可读性由背衬折射与
+ * 上下光缝承担：看得清轮廓是通透，被抹平是哑光，本皮肤取前者。
  * 构图自下而上：
- *   1. 玻璃基面（tokens.css --toast-surface）；
- *   2. 语义色微晕：偏立标一侧的极淡径向（--mark-c 派生，8% 封顶）——
- *      与立标同源于 --mark-c 单色源，不是独立装饰；
- *   3. 镜面转折反光：左上向下的极淡斜掠高光（玻璃面的入射角反光）；
+ *   1. 玻璃基面（tokens.css --toast-surface，薄雾填充）；
+ *   2. 语义色双晕：立标侧 9% 主晕 + 反侧 4.5% 反射晕（--mark-c 单源）——
+ *      与立标同源，不是独立装饰；
+ *   3. 镜面转折反光：左上斜掠主高光 + 顶缘二次反光面（入射角反光）；
  *   4. 双平面星野（::before 远 / ::after 近）：逐周期位移 = 平铺宽
  *      （repeat-x 与位移严格等长）→ 循环无接缝；两平面速度互异形成纵深。
- * 胎体棱线：无描边 —— 顶缘亮收边 + 底缘微亮收边即全部轮廓（上下棱线同收）。
+ * 胎体棱线：无描边 —— 顶缘亮光缝 + 底缘微亮光缝即全部轮廓（两端随
+ * 圆角淡出：真实玻璃棱线是「光渐隐」而非整宽画线）。
  * 图层秩序：面板自成栈（本身带 transform 亦成栈，声明 isolation 显式固定
  * 语义），星野走 z-index:-1 —— 位于底板之上、文字与立标之下，
  * 文字永不被星点覆盖；面板裁圆角（overflow）令星野仅呈现于提示之内。
  * 背衬折射的适用范围：提示为瞬时少量元素（同屏至多 4 件、单件约万级 px²、
- * 存续 1.5~2.6s；剪贴板倒计时通道最长 = COUNTDOWN_SECONDS 30s，
+ * 存续 1.5~2.6s；复制结果与清空时间两段轮番、均不常驻，
  * 仍为单件小面积且漂移动画随空闲治理暂停），与「数十张常驻卡片逐帧
  * 重采样」的过载成因不同量级；
  * 帧预算降级 minimal-motion 档位会全局移除背衬折射，不支持时仅损失折射，
@@ -96,24 +104,35 @@
   border-radius: var(--radius);
   /* 无框裁定：不设描边 —— 轮廓由上下收边（玻璃棱线）与投影界定；
      描边是「框」，收边是「光」：通透玻璃的边缘应当反光而非被画线 */
-  /* 背衬折射：低不透明填充下的可读性担当 —— 模糊半径刻意收敛
-     （连通轮廓保留 = 通透；抹平轮廓 = 哑光），提纯与提亮补足色彩显度 */
-  -webkit-backdrop-filter: blur(10px) saturate(150%) brightness(1.05);
-  backdrop-filter: blur(10px) saturate(150%) brightness(1.05);
+  /* 背衬折射：更通透的玻璃体 —— 模糊上调一档（衬底结构仍可辨：通透
+     ≠ 糊成一片），饱和度 / 亮度微提补足薄雾填充下的色彩显度 */
+  -webkit-backdrop-filter: blur(16px) saturate(170%) brightness(1.06);
+  backdrop-filter: blur(16px) saturate(170%) brightness(1.06);
   background:
-    linear-gradient(112deg, rgba(var(--white-rgb), 0.09), rgba(var(--white-rgb), 0.02) 36%, transparent 60%),
+    /* 顶缘光缝：两端随圆角淡出 —— 真实玻璃棱线是「光渐隐」而非整宽画线 */
+    linear-gradient(90deg, transparent, rgba(var(--white-rgb), 0.20) 14%, rgba(var(--white-rgb), 0.20) 86%, transparent) top / 100% 1px no-repeat,
+    linear-gradient(90deg, transparent, rgba(var(--white-rgb), 0.07) 22%, rgba(var(--white-rgb), 0.07) 78%, transparent) bottom / 100% 1px no-repeat,
+    /* 镜面转折反光：左上入射主高光 + 顶缘二次反光面 */
+    linear-gradient(112deg, rgba(var(--white-rgb), 0.13), rgba(var(--white-rgb), 0.028) 38%, transparent 62%),
+    radial-gradient(120% 90% at 14% -12%, rgba(var(--white-rgb), 0.09), transparent 56%),
+    /* 语义色微晕（立标侧）+ 反侧反射微晕 —— 同源于 --mark-c 单色源 */
     radial-gradient(
       ellipse 150% 240% at 3% 50%,
-      color-mix(in srgb, var(--mark-c) 8%, transparent),
+      color-mix(in srgb, var(--mark-c) 9%, transparent),
       transparent 62%
     ),
+    radial-gradient(
+      ellipse 90% 150% at 98% 112%,
+      color-mix(in srgb, var(--mark-c) 4.5%, transparent),
+      transparent 58%
+    ),
+    /* 玻璃基面（薄雾填充，单源 tokens.css --toast-surface） */
     var(--toast-surface);
   box-shadow:
-    0 16px 40px rgba(var(--black-rgb), 0.54),
-    0 2px 10px rgba(var(--black-rgb), 0.36),
-    /* 无描边后轮廓全由收边承担：顶亮底弱 —— 光自上方，棱线随光向分强弱 */
-    inset 0 1px 0 rgba(var(--white-rgb), 0.14),
-    inset 0 -1px 0 rgba(var(--white-rgb), 0.07);
+    /* 投影收敛：通透体的落地感来自小半径近影，而非大范围压暗 */
+    0 10px 26px rgba(var(--black-rgb), 0.32),
+    0 1px 3px rgba(var(--black-rgb), 0.22),
+    inset 0 1px 0 rgba(var(--white-rgb), 0.10);
 }
 /* 星野平铺宽（单源）：层宽、平铺宽与漂移位移共用同一定义，
  * 三处不会漂移失配 */
@@ -134,17 +153,18 @@
   background-repeat: repeat-x;
   will-change: transform;
 }
-/* 远平面：颗粒细 / 亮度低 / 96s 缓漂（深度最远） */
+/* 远平面：颗粒细 / 亮度低 / 96s 缓漂（深度最远）—— 薄雾底板上取低亮，
+ * 星点只作空间暗示，不与文字争噪 */
 .clip-toast::before,
 .error-toast::before {
   width: calc(100% + var(--toast-tile-far));
   background-size: var(--toast-tile-far) 100%;
   background-image:
-    radial-gradient(circle 0.9px at 14% 30%, rgba(255, 255, 255, 0.34), transparent 100%),
-    radial-gradient(circle 0.7px at 33% 72%, rgba(200, 230, 245, 0.26), transparent 100%),
-    radial-gradient(circle 0.8px at 52% 24%, rgba(255, 255, 255, 0.28), transparent 100%),
-    radial-gradient(circle 0.7px at 71% 66%, rgba(201, 189, 242, 0.24), transparent 100%),
-    radial-gradient(circle 0.8px at 88% 44%, rgba(200, 230, 245, 0.26), transparent 100%);
+    radial-gradient(circle 0.9px at 14% 30%, rgba(255, 255, 255, 0.26), transparent 100%),
+    radial-gradient(circle 0.7px at 33% 72%, rgba(200, 230, 245, 0.20), transparent 100%),
+    radial-gradient(circle 0.8px at 52% 24%, rgba(255, 255, 255, 0.22), transparent 100%),
+    radial-gradient(circle 0.7px at 71% 66%, rgba(201, 189, 242, 0.18), transparent 100%),
+    radial-gradient(circle 0.8px at 88% 44%, rgba(200, 230, 245, 0.20), transparent 100%);
   animation: toast-field-drift-far 97s linear infinite;
 }
 /* 近平面：颗粒略大 / 亮度略高 / 61s 缓漂（与远平面周期互质，免机械同步） */
@@ -153,10 +173,10 @@
   width: calc(100% + var(--toast-tile-near));
   background-size: var(--toast-tile-near) 100%;
   background-image:
-    radial-gradient(circle 1.3px at 18% 34%, rgba(255, 255, 255, 0.55), transparent 100%),
-    radial-gradient(circle 1.1px at 44% 70%, rgba(200, 230, 245, 0.46), transparent 100%),
-    radial-gradient(circle 1.2px at 66% 26%, rgba(201, 189, 242, 0.42), transparent 100%),
-    radial-gradient(circle 1.0px at 86% 76%, rgba(255, 255, 255, 0.50), transparent 100%);
+    radial-gradient(circle 1.3px at 18% 34%, rgba(255, 255, 255, 0.44), transparent 100%),
+    radial-gradient(circle 1.1px at 44% 70%, rgba(200, 230, 245, 0.36), transparent 100%),
+    radial-gradient(circle 1.2px at 66% 26%, rgba(201, 189, 242, 0.33), transparent 100%),
+    radial-gradient(circle 1.0px at 86% 76%, rgba(255, 255, 255, 0.40), transparent 100%);
   animation: toast-field-drift-near 61s linear infinite;
 }
 /* 极光幕立标（原创 3D 动态立标 — 极地光学现象）：
@@ -243,8 +263,9 @@
   --mark-c: var(--danger);
   position: fixed !important; top: 24px; left: 50%; transform: translate(-50%, 0);
   display: flex; align-items: center; gap: 8px;
-  padding: 10px 20px; font-size: 12px;
+  padding: 10px 20px; font-size: 12px; font-weight: 500; letter-spacing: 0.2px;
   color: var(--danger); font-family: var(--font);
+  text-shadow: 0 1px 1px rgba(var(--black-rgb), 0.38);
   pointer-events: none;
 }
 .error-toast .toast-dot { --mark-c: var(--danger); }
@@ -264,7 +285,10 @@
     0 8px 32px rgba(var(--black-rgb), 0.4),
     0 0 1px rgba(var(--white-rgb), 0.05),
     inset 0 1px 0 rgba(var(--white-rgb), 0.04);
-  transition: all var(--dur) var(--ease);
+  /* 精确属性过渡（禁 transition: all — 仅描边与投影随悬浮变化） */
+  transition:
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
 }
 .glass:hover {
   border-color: var(--border-hover);
@@ -322,7 +346,13 @@
   color: var(--text-secondary);
   font-size: 13px;
   cursor: pointer;
-  transition: all var(--dur-fast) var(--ease);
+  /* 精确属性过渡（禁 transition: all — 悬浮三态仅改描边/底色/前景，
+   * 按压仅改 transform，杜绝几何以外属性被卷入过渡链） */
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
   font-family: var(--font);
   letter-spacing: 0.5px;
 }
@@ -562,13 +592,12 @@
   /* 精确属性过渡（禁 transition: all — 同 .input 防御性根治） */
   transition:
     border-color var(--dur-fast) var(--ease),
-    background-color var(--dur-fast) var(--ease),
-    box-shadow var(--dur-fast) var(--ease);
+    background-color var(--dur-fast) var(--ease);
   min-width: 0;
 }
+/* 聚焦：仅边框应答（无辉光阴影） */
 .kv-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.1);
 }
 .kv-actions {
   display: flex;

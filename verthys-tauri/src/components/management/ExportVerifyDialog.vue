@@ -64,7 +64,7 @@
         <div class="ev-gate">
           <span class="ev-gate-no">01</span>
           <label class="ev-gate-key" for="ev-pwd">访问密钥</label>
-          <input id="ev-pwd" class="reg-input" v-model="password" type="password" placeholder="输入全局访问密钥" />
+          <input id="ev-pwd" class="reg-input" v-model="password" type="password" autocomplete="current-password" spellcheck="false" placeholder="输入全局访问密钥" />
         </div>
         <span class="ev-gate-seam" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><polyline points="9 6 15 12 9 18"/></svg>
@@ -72,7 +72,7 @@
         <div class="ev-gate">
           <span class="ev-gate-no">02</span>
           <label class="ev-gate-key" for="ev-binpwd">密钥口令</label>
-          <input id="ev-binpwd" class="reg-input" v-model="binPassword" type="password" placeholder="输入密钥口令" />
+          <input id="ev-binpwd" class="reg-input" v-model="binPassword" type="password" autocomplete="current-password" spellcheck="false" placeholder="输入密钥口令" />
         </div>
       </div>
 

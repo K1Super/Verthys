@@ -1,13 +1,14 @@
 /*
  * vault_item_codec.spec.ts — 条目信封编解码与独立加密保存决策
  *
- * 覆盖：信封往返一致、脏取值归一化、损坏输入兜底；账号字段双向映射；
- * 独立加密保存决策的全部正反例（尤其是"既有取值已是密文"这一判据）。
+ * 覆盖：信封往返一致、脏取值归一化、旧版扁平账号识别、空/解码失败/结构
+ * 不可识别三态区分；账号字段双向映射；独立加密保存决策的全部正反例
+ * （尤其是"既有取值已是密文"这一判据）。
  */
 import { describe, it, expect } from "vitest";
 import {
   buildVaultItemData,
-  deserializeVaultItem,
+  decodeVaultItem,
   normalizeVaultData,
   resolveSecretSaveAction,
   serializeVaultItem,
@@ -19,7 +20,8 @@ import { ACCOUNT_VAULT_TYPE_ID, getBuiltinVaultType } from "../constants/vault_i
 describe("条目信封编解码", () => {
   it("合法信封往返一致", () => {
     const payload = { kind: "idcard", data: { name: "张三", number: "110101199001010011" } };
-    expect(deserializeVaultItem(serializeVaultItem(payload))).toEqual(payload);
+    const decoded = decodeVaultItem(serializeVaultItem(payload));
+    expect(decoded).toEqual({ ok: true, payload, legacy: false });
   });
 
   it("编码侧归一化脏取值：布尔与有限数值转字符串，其余丢弃", () => {
@@ -39,9 +41,11 @@ describe("条目信封编解码", () => {
       kind: "custom:demo",
       data: dirty as unknown as Record<string, string>,
     });
-    expect(deserializeVaultItem(b64)).toEqual({
-      kind: "custom:demo",
-      data: { a: "文本", b: "12", c: "1", d: "0" },
+    const decoded = decodeVaultItem(b64);
+    expect(decoded).toEqual({
+      ok: true,
+      payload: { kind: "custom:demo", data: { a: "文本", b: "12", c: "1", d: "0" } },
+      legacy: false,
     });
   });
 
@@ -52,22 +56,63 @@ describe("条目信封编解码", () => {
     expect(normalizeVaultData("字符串")).toEqual({});
   });
 
-  it("损坏输入一律兜底为账号信封，不抛错", () => {
-    const fallback = { kind: ACCOUNT_VAULT_TYPE_ID, data: {} };
-    expect(deserializeVaultItem("")).toEqual(fallback);
-    expect(deserializeVaultItem("%%%非base64%%%")).toEqual(fallback);
-    expect(deserializeVaultItem(serializeToJsonB64([1, 2]))).toEqual(fallback);
-    expect(deserializeVaultItem(serializeToJsonB64("纯字符串"))).toEqual(fallback);
+  it("空载荷、解码失败与结构不可识别三态可区分", () => {
+    expect(decodeVaultItem("")).toEqual({ ok: false, reason: "empty" });
+    expect(decodeVaultItem("%%%非base64%%%")).toEqual({ ok: false, reason: "undecodable" });
+    expect(decodeVaultItem(serializeToJsonB64([1, 2]))).toEqual({
+      ok: false,
+      reason: "unrecognized",
+    });
+    expect(decodeVaultItem(serializeToJsonB64("纯字符串"))).toEqual({
+      ok: false,
+      reason: "unrecognized",
+    });
+    // 结构可解析但既非信封亦非旧版账号：不得降级成空信封（会把损坏伪装成空条目）
+    expect(decodeVaultItem(serializeToJsonB64({ foo: "bar" }))).toEqual({
+      ok: false,
+      reason: "unrecognized",
+    });
   });
 
   it("类型 id 缺失或非字符串时兜底为账号类型，字段值仍被保留", () => {
-    expect(deserializeVaultItem(serializeToJsonB64({ data: { a: "1" } }))).toEqual({
-      kind: ACCOUNT_VAULT_TYPE_ID,
-      data: { a: "1" },
+    expect(decodeVaultItem(serializeToJsonB64({ data: { a: "1" } }))).toEqual({
+      ok: true,
+      payload: { kind: ACCOUNT_VAULT_TYPE_ID, data: { a: "1" } },
+      legacy: false,
     });
-    expect(deserializeVaultItem(serializeToJsonB64({ kind: 7, data: { a: "1" } }))).toEqual({
-      kind: ACCOUNT_VAULT_TYPE_ID,
-      data: { a: "1" },
+    expect(decodeVaultItem(serializeToJsonB64({ kind: 7, data: { a: "1" } }))).toEqual({
+      ok: true,
+      payload: { kind: ACCOUNT_VAULT_TYPE_ID, data: { a: "1" } },
+      legacy: false,
+    });
+  });
+
+  it("旧版扁平账号载荷被识别为账号类型（升级后账号不得消失）", () => {
+    const legacy = {
+      platform: "示例平台",
+      username: "user",
+      password: "secret",
+      note: "备注",
+      encrypted: true,
+    };
+    expect(decodeVaultItem(serializeToJsonB64(legacy))).toEqual({
+      ok: true,
+      payload: {
+        kind: ACCOUNT_VAULT_TYPE_ID,
+        data: { platform: "示例平台", username: "user", password: "secret", note: "备注", encrypted: "1" },
+      },
+      legacy: true,
+    });
+  });
+
+  it("仅含平台或账户单键的结构不算旧版账号载荷", () => {
+    expect(decodeVaultItem(serializeToJsonB64({ platform: "示例平台" }))).toEqual({
+      ok: false,
+      reason: "unrecognized",
+    });
+    expect(decodeVaultItem(serializeToJsonB64({ username: "user" }))).toEqual({
+      ok: false,
+      reason: "unrecognized",
     });
   });
 });

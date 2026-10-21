@@ -1,13 +1,20 @@
 <!--
   AccountVerthys.vue — 存签：统一条目库模块
-  列表：浮动搜索栏 + 卡片网格（3D 视差、悬浮操作、密码复制倒计时）
+  列表：浮动搜索栏 + 卡片网格（光泽追踪、悬浮操作、密码复制安全清空）
   新增：`+` → 类型选择台（VaultTypePicker）→ 类型化编辑窗口（VaultItemFormDialog）→ 保存
-  卡片：账号类型保持既有版式；其余类型按类型声明渲染主标题、次行与敏感行
-  持久化：每条条目一条独立记录（TYPE_ACCOUNT），载荷为 {类型 id, 字段值字典} 信封
+  卡片：唯一渲染源为 account/VaultItemCard.vue（虚拟滚动与普通网格共用）
+  持久化：每条条目一条独立记录（TYPE_ACCOUNT），载荷为 {类型 id, 字段值字典} 信封；
+        历史扁平账号载荷（旧版 AccountFields）由 lib/vault_item_codec 形态嗅探兼容
+
+  记录不可读时的裁定（禁止静默丢弃）：
+    载荷解码失败 / 无任何字段值的记录仍进入列表，标记为 corrupt ——
+    记录在容器内真实存在，直接过滤会让用户误判为「数据丢失」。
+    此类条目只呈现「数据不可读」与删除入口，不提供编辑（空表单覆盖会抹掉
+    仍可能恢复的原始载荷）。
 -->
 <template>
   <div class="account-verthys verthys-module reveal-host" :class="{ 'is-entering': entering }">
-    <!-- 瞬时提示（错误/复制倒计时）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
+    <!-- 瞬时提示（错误 / 复制结果与清空时间）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
 
     <!-- 搜索栏（筛选按钮与条件摘要挂在搜索栏右侧的筛选插槽内）
          外层包裹承担层序：搜索栏自身以 isolation 建立层叠上下文，若整层不提升，
@@ -24,166 +31,40 @@
       </VerthysSearchBar>
     </div>
 
-    <!-- 卡片网格：≥200 条启用虚拟滚动，小列表保留原 v-for 路径零开销 -->
+    <!-- 卡片网格：≥200 条启用虚拟滚动，小列表保留原 v-for 路径零开销。
+         两条路径共用同一卡片组件，仅容器不同。 -->
     <VirtualCardGrid
       v-if="filteredAccounts.length >= 200"
       :items="filteredAccounts"
       :item-height="172"
       :min-column-width="300"
+      :item-key="itemKeyOf"
       v-slot="{ item: entry, index }"
     >
-      <div
-        class="verthys-card glass reveal-item"
-        :style="{ '--reveal-delay': revealDelayOf(index) + 'ms' }"
-        @mousemove="onCardMove($event)"
-        @mouseleave="onCardLeave($event)"
-      >
-        <div class="card-accent"></div>
-        <!-- 账号条目的卡片版式与既有实现一致 -->
-        <template v-if="entry.kind === accountTypeId">
-          <div class="card-head">
-            <span class="card-title">{{ entry.data.platform }}</span>
-            <span class="vault-type-badge" :style="badgeStyle(entry)">
-              <span class="badge-icon" aria-hidden="true" v-html="viewOf(entry).icon"></span>
-              <span class="badge-name">{{ viewOf(entry).typeLabel }}</span>
-            </span>
-            <span v-if="entry.data.encrypted === '1'" class="lock-badge" v-tip="'独立加密'">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-            </span>
-          </div>
-          <div class="username">{{ entry.data.username }}</div>
-          <div class="secret-row">
-            <span class="secret-text">{{ entry.displaySecret }}</span>
-            <div class="secret-actions">
-              <button class="icon-btn" @click="toggleSecret(entry)" v-tip="entry.secretVisible ? '隐藏' : '显示'">
-                <svg v-if="!entry.secretVisible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-              </button>
-              <button class="icon-btn" @click="copySecret(entry)" v-tip="'复制'">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              </button>
-            </div>
-          </div>
-        </template>
-        <!-- 其余类型：主标题 + 次行（敏感项掩码）+ 敏感行 -->
-        <template v-else>
-          <div class="card-head">
-            <span class="card-title" v-tip="viewOf(entry).title">{{ viewOf(entry).title }}</span>
-            <span class="vault-type-badge" :style="badgeStyle(entry)">
-              <span class="badge-icon" aria-hidden="true" v-html="viewOf(entry).icon"></span>
-              <span class="badge-name">{{ viewOf(entry).typeLabel }}</span>
-            </span>
-            <span v-if="viewOf(entry).secret?.encrypted" class="lock-badge" v-tip="'独立加密'">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-            </span>
-          </div>
-          <div class="card-lines">
-            <div v-for="line in viewOf(entry).lines" :key="line.fieldId" class="card-line">
-              <span class="line-label">{{ line.label }}</span>
-              <span class="line-value">{{ line.value }}</span>
-            </div>
-            <div v-if="viewOf(entry).expiry" class="card-line">
-              <span class="line-label">{{ viewOf(entry).expiry?.label }}</span>
-              <span class="card-readout" :style="readoutStyle(entry)">{{ viewOf(entry).expiry?.text }}</span>
-            </div>
-          </div>
-          <div v-if="viewOf(entry).secret" class="secret-row">
-            <span class="secret-label">{{ viewOf(entry).secret?.label }}</span>
-            <span class="secret-text">{{ entry.displaySecret }}</span>
-            <div class="secret-actions">
-              <button class="icon-btn" @click="toggleSecret(entry)" v-tip="entry.secretVisible ? '隐藏' : '显示'">
-                <svg v-if="!entry.secretVisible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-              </button>
-              <button class="icon-btn" @click="copySecret(entry)" v-tip="'复制'">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              </button>
-            </div>
-          </div>
-        </template>
-        <div class="card-actions">
-          <button class="mini-btn" @click="onEdit(entry)">编辑</button>
-          <button class="mini-btn danger" @click="onDelete(entry)">删除</button>
-        </div>
-        <div class="card-shine"></div>
-      </div>
+      <VaultItemCard
+        :entry="entry"
+        :view="viewOf(entry)"
+        :is-account="entry.kind === accountTypeId"
+        :reveal-delay="revealDelayOf(index)"
+        @toggle="toggleSecret(entry)"
+        @copy="copySecret(entry)"
+        @edit="onEdit(entry)"
+        @remove="onDelete(entry)"
+      />
     </VirtualCardGrid>
     <div v-else class="card-grid">
-      <div
+      <VaultItemCard
         v-for="(entry, idx) in filteredAccounts"
         :key="entry.id"
-        class="verthys-card glass reveal-item"
-        :style="{ '--reveal-delay': revealDelayOf(idx) + 'ms' }"
-        @mousemove="onCardMove($event)"
-        @mouseleave="onCardLeave($event)"
-      >
-        <div class="card-accent"></div>
-        <template v-if="entry.kind === accountTypeId">
-          <div class="card-head">
-            <span class="card-title">{{ entry.data.platform }}</span>
-            <span class="vault-type-badge" :style="badgeStyle(entry)">
-              <span class="badge-icon" aria-hidden="true" v-html="viewOf(entry).icon"></span>
-              <span class="badge-name">{{ viewOf(entry).typeLabel }}</span>
-            </span>
-            <span v-if="entry.data.encrypted === '1'" class="lock-badge" v-tip="'独立加密'">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-            </span>
-          </div>
-          <div class="username">{{ entry.data.username }}</div>
-          <div class="secret-row">
-            <span class="secret-text">{{ entry.displaySecret }}</span>
-            <div class="secret-actions">
-              <button class="icon-btn" @click="toggleSecret(entry)" v-tip="entry.secretVisible ? '隐藏' : '显示'">
-                <svg v-if="!entry.secretVisible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-              </button>
-              <button class="icon-btn" @click="copySecret(entry)" v-tip="'复制'">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              </button>
-            </div>
-          </div>
-        </template>
-        <template v-else>
-          <div class="card-head">
-            <span class="card-title" v-tip="viewOf(entry).title">{{ viewOf(entry).title }}</span>
-            <span class="vault-type-badge" :style="badgeStyle(entry)">
-              <span class="badge-icon" aria-hidden="true" v-html="viewOf(entry).icon"></span>
-              <span class="badge-name">{{ viewOf(entry).typeLabel }}</span>
-            </span>
-            <span v-if="viewOf(entry).secret?.encrypted" class="lock-badge" v-tip="'独立加密'">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-            </span>
-          </div>
-          <div class="card-lines">
-            <div v-for="line in viewOf(entry).lines" :key="line.fieldId" class="card-line">
-              <span class="line-label">{{ line.label }}</span>
-              <span class="line-value">{{ line.value }}</span>
-            </div>
-            <div v-if="viewOf(entry).expiry" class="card-line">
-              <span class="line-label">{{ viewOf(entry).expiry?.label }}</span>
-              <span class="card-readout" :style="readoutStyle(entry)">{{ viewOf(entry).expiry?.text }}</span>
-            </div>
-          </div>
-          <div v-if="viewOf(entry).secret" class="secret-row">
-            <span class="secret-label">{{ viewOf(entry).secret?.label }}</span>
-            <span class="secret-text">{{ entry.displaySecret }}</span>
-            <div class="secret-actions">
-              <button class="icon-btn" @click="toggleSecret(entry)" v-tip="entry.secretVisible ? '隐藏' : '显示'">
-                <svg v-if="!entry.secretVisible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-              </button>
-              <button class="icon-btn" @click="copySecret(entry)" v-tip="'复制'">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              </button>
-            </div>
-          </div>
-        </template>
-        <div class="card-actions">
-          <button class="mini-btn" @click="onEdit(entry)">编辑</button>
-          <button class="mini-btn danger" @click="onDelete(entry)">删除</button>
-        </div>
-        <div class="card-shine"></div>
-      </div>
+        :entry="entry"
+        :view="viewOf(entry)"
+        :is-account="entry.kind === accountTypeId"
+        :reveal-delay="revealDelayOf(idx)"
+        @toggle="toggleSecret(entry)"
+        @copy="copySecret(entry)"
+        @edit="onEdit(entry)"
+        @remove="onDelete(entry)"
+      />
     </div>
 
     <!-- 空态覆盖层：遵循「模块根视口居中」统一契约（与清藏·拾光同源）——
@@ -221,21 +102,40 @@
       v-model="showForm"
       :type-def="formType"
       :initial-data="formInitial"
+      :saving="saving"
       @submit="onPersist"
     />
 
-    <!-- 解密密钥输入框 -->
-    <VerthysDialog v-model="showKeyDialog" title="输入密钥以查看密码" @save="confirmKey" save-label="解密查看">
+    <!-- 解密密钥输入框（显隐切换与表单同语言；显隐只为核对输入，不落盘） -->
+    <VerthysDialog
+      v-model="showKeyDialog"
+      title="输入密钥以查看密码"
+      save-label="解密查看"
+      :saving="keyBusy"
+      @save="confirmKey"
+    >
       <div class="key-target">{{ keyTargetName }}</div>
-      <div class="form-field full">
+      <div class="form-field full key-field">
         <input
+          id="vault-key-input"
           class="input"
           v-model="keyInput"
           :type="keyInputVisible ? 'text' : 'password'"
           placeholder="独立密钥"
-          @keydown.enter="confirmKey"
+          aria-label="独立密钥"
           autofocus
+          @keydown.enter="confirmKey"
         />
+        <button
+          class="icon-btn"
+          type="button"
+          @click="keyInputVisible = !keyInputVisible"
+          :aria-label="keyInputVisible ? '隐藏密钥' : '显示密钥'"
+          v-tip="keyInputVisible ? '隐藏' : '显示'"
+        >
+          <svg v-if="!keyInputVisible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+        </button>
       </div>
       <template #error v-if="keyError">
         <div class="key-error">密钥错误或密码已损坏</div>
@@ -256,7 +156,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, shallowRef, computed, onMounted } from "vue";
+import { ref, shallowRef, computed, onMounted, watch } from "vue";
 import {
   decryptPasswordField, verthysAddRecord, verthysDeleteRecord,
   type VaultEntry,
@@ -271,10 +171,9 @@ import {
   ACCOUNT_VAULT_TYPE_ID, BUILTIN_VAULT_TYPES,
   buildVaultTypeIndex, type VaultItemPayload, type VaultTypeDef,
 } from "../../constants/vault_item_types";
-import { deserializeVaultItem, serializeVaultItem } from "../../lib/vault_item_codec";
+import { decodeVaultItem, serializeVaultItem } from "../../lib/vault_item_codec";
 import {
-  VAULT_SECRET_MASK, VAULT_TONE_RGB_VARS, buildVaultCardView, findCardSecretField,
-  vaultReadoutColorVar, vaultSearchText,
+  VAULT_SECRET_MASK, buildVaultCardView, findCardSecretField, vaultSearchText,
   type VaultCardView,
 } from "../../lib/vault_item_card";
 import { loadCustomVaultTypes } from "../../lib/vault_item_type_store";
@@ -283,7 +182,6 @@ import {
   type VaultFilterCriteria,
 } from "../../lib/vault_item_filter";
 import { useClipToast } from "../../composables/useClipToast";
-import { useCardShine } from "../../composables/useCardShine";
 import { useToastCenter } from "../../composables/useToastCenter";
 import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
 import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
@@ -297,6 +195,7 @@ import VaultCardFilter from "../common/verthys-ui/VaultCardFilter.vue";
 import VaultTypePicker from "./account/VaultTypePicker.vue";
 import VaultTypeEditorDialog from "./account/VaultTypeEditorDialog.vue";
 import VaultItemFormDialog from "./account/VaultItemFormDialog.vue";
+import VaultItemCard from "./account/VaultItemCard.vue";
 
 /* 瞬时提示（错误，2.5s 自动消失）— 全局 Toast 中心；渲染归 ToastLayer */
 const { showError } = useToastCenter();
@@ -323,6 +222,22 @@ const searchKey = ref("");
  * 代价：直接修改元素属性（如 entry.secretVisible = true）不触发更新，必须用 updateShallowItem */
 const accounts = shallowRef<VaultEntry[]>([]);
 
+/**
+ * 内存 id 分配器（唯一出口）。
+ * 禁止用 Date.now() 充当条目 id：同一毫秒内新增两条会得到同一 id，
+ * 导致列表 key 重复、findIndex 定位到错误条目（隐藏/复制会作用到别人身上）。
+ * 载入缓存后按既有最大值续号，保证会话内单调且不冲突。
+ */
+let memIdSeq = 1;
+const allocMemId = (): number => memIdSeq++;
+const reseedMemId = (): void => {
+  let max = 0;
+  for (const entry of accounts.value) {
+    if (entry.id > max) max = entry.id;
+  }
+  memIdSeq = max + 1;
+};
+
 /* 步入窗口：以「列表首次非空」起算（缓存命中即首个渲染批，未命中则数据落地批），
  *   标记与首批卡片同一 patch 生效 —— 见 useModuleEntrance 契约 */
 const { entering } = useModuleEntrance(() => accounts.value.length > 0);
@@ -338,13 +253,27 @@ const EMPTY_CARD_VIEW: VaultCardView = buildVaultCardView({}, undefined);
 /**
  * 由记录数据构造内存条目。
  * 敏感展示初始为掩码（已独立加密时显示"已加密"），明文只在用户显式查看后写入条目。
+ *
+ * @param corrupt 载荷不可读：保留占位条目（不得静默丢弃），不建敏感行
  */
 const makeEntry = (
   memId: number,
   recordId: number,
   kind: string,
   data: Record<string, string>,
+  corrupt = false,
 ): VaultEntry => {
+  if (corrupt) {
+    return {
+      id: memId,
+      recordId,
+      kind,
+      data: {},
+      secretVisible: false,
+      displaySecret: "",
+      corrupt: true,
+    };
+  }
   const def = typeIndex.value.get(kind);
   const secretField = def ? findCardSecretField(def) : undefined;
   const encrypted = data.encrypted === "1";
@@ -358,13 +287,14 @@ const makeEntry = (
   };
 };
 
-/** 加载自定义类型定义（失败按空列表处理，内置类型不受影响） */
+/** 加载自定义类型定义（失败保留上次已知类型并提示，绝不静默清空） */
 const loadVaultTypes = async (): Promise<void> => {
-  try {
-    customTypes.value = await loadCustomVaultTypes();
-  } catch {
-    customTypes.value = [];
+  const result = await loadCustomVaultTypes();
+  if (result.failed) {
+    showError("自定义类型读取失败，已暂时沿用上次已知类型");
+    return;
   }
+  customTypes.value = result.types;
 };
 
 const loadAccounts = async (): Promise<void> => {
@@ -372,10 +302,13 @@ const loadAccounts = async (): Promise<void> => {
   const cached = getModuleCache<VaultEntry[]>("accounts");
   let maxRecordId = 0;
   if (cached.data && cached.data.length > 0) {
-    // shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
+    // shallowRef 整体替换即触发更新（replaceShallowArray 内部只做赋值）
     replaceShallowArray(accounts, cached.data);
+    reseedMemId();
     // 计算缓存中最大的 recordId，作为增量扫描起点
-    maxRecordId = cached.data.reduce((max, e) => Math.max(max, e.recordId || 0), 0);
+    for (const entry of cached.data) {
+      if ((entry.recordId ?? 0) > maxRecordId) maxRecordId = entry.recordId ?? 0;
+    }
     loading.value = false;
   } else {
     loading.value = true;
@@ -395,33 +328,47 @@ const loadAccounts = async (): Promise<void> => {
   const allIds = idsOf(TYPE_ACCOUNT);
   const newIds = allIds.filter((id) => id > maxRecordId);
 
-  const found: { recordId: number; kind: string; data: Record<string, string> }[] = [];
+  const found: { recordId: number; kind: string; data: Record<string, string>; corrupt: boolean }[] = [];
   if (newIds.length > 0) {
     const dataB64Map = await getRecordsDataB64Batch(newIds);
     for (const id of newIds) {
       const dataB64 = dataB64Map.get(id);
-      if (!dataB64) continue;
-      const payload = deserializeVaultItem(dataB64);
-      // 无任何字段值的载荷一律视为损坏：信封兜底与真实条目都可区分
-      if (Object.keys(payload.data).length === 0) continue;
-      found.push({ recordId: id, kind: payload.kind, data: payload.data });
+      // 取不到载荷不等于记录不存在：保留为不可读条目，交由用户决定删除
+      if (!dataB64) {
+        found.push({ recordId: id, kind: "", data: {}, corrupt: true });
+        continue;
+      }
+      const decoded = decodeVaultItem(dataB64);
+      if (!decoded.ok) {
+        found.push({ recordId: id, kind: "", data: {}, corrupt: true });
+        continue;
+      }
+      // 无任何字段值的载荷：仍保留为不可读条目（既不丢弃，也不伪装成空条目）
+      if (Object.keys(decoded.payload.data).length === 0) {
+        found.push({ recordId: id, kind: decoded.payload.kind, data: {}, corrupt: true });
+        continue;
+      }
+      found.push({
+        recordId: id,
+        kind: decoded.payload.kind,
+        data: decoded.payload.data,
+        corrupt: false,
+      });
     }
   }
 
   // 3. 有新记录 → 追加到现有列表（缓存有效时增量追加，缓存无效时构建新列表）
   if (found.length > 0) {
-    let nextMemId = accounts.value.length > 0
-      ? Math.max(...accounts.value.map((e) => e.id)) + 1
-      : 1;
     // 批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
     const newItems: VaultEntry[] = [];
     for (const item of found) {
-      newItems.push(makeEntry(nextMemId++, item.recordId, item.kind, item.data));
+      newItems.push(makeEntry(allocMemId(), item.recordId, item.kind, item.data, item.corrupt));
     }
     pushShallowItems(accounts, newItems);
   } else if (!cached.data || cached.data.length === 0) {
     // 缓存无效且无记录 → 清空列表，避免残留上一次会话的条目
     clearShallowArray(accounts);
+    memIdSeq = 1;
   }
 
   setModuleCache("accounts", accounts.value);
@@ -434,32 +381,8 @@ onMounted(() => {
   });
 });
 
-/** 卡片视图索引：随列表变化重建，避免在模板内反复构建视图对象 */
-const cardViews = computed<Map<number, VaultCardView>>(() => {
-  const index = typeIndex.value;
-  const map = new Map<number, VaultCardView>();
-  for (const entry of filteredAccounts.value) {
-    map.set(entry.id, buildVaultCardView(entry.data, index.get(entry.kind)));
-  }
-  return map;
-});
-
-const viewOf = (entry: VaultEntry): VaultCardView => cardViews.value.get(entry.id) ?? EMPTY_CARD_VIEW;
-
-/**
- * 类型标识着色：把设计令牌的三元组变量注入元素自定义属性。
- * 用内联变量而非逐项类名，避免同列表内出现随数据变化的类名集合。
- */
-const badgeStyle = (entry: VaultEntry): Record<string, string> => ({
-  "--tone-rgb": `var(${VAULT_TONE_RGB_VARS[viewOf(entry).tone]})`,
-});
-
-/** 到期读数着色：未设置到期日不给颜色，沿用次要文字色 */
-const readoutStyle = (entry: VaultEntry): Record<string, string> => {
-  const readout = viewOf(entry).expiry;
-  const colorVar = readout ? vaultReadoutColorVar(readout) : null;
-  return colorVar ? { color: `rgb(var(${colorVar}))` } : {};
-};
+/** 虚拟网格的稳定键：条目内存 id 会话内唯一（禁止退回 index 键） */
+const itemKeyOf = (entry: VaultEntry): number => entry.id;
 
 /** 高级筛选条件（模块内本地状态，不跨会话持久化） */
 const filterCriteria = ref<VaultFilterCriteria>(createEmptyVaultFilter());
@@ -482,15 +405,31 @@ const filteredAccounts = computed(() => {
   const index = typeIndex.value;
   const defOf = (kind: string) => index.get(kind);
 
-  // 关键字与筛选维度为叠加关系：先按关键字取子集，再套用维度筛选与排序
+  // 关键字与筛选维度为叠加关系：先按关键字取子集，再套用维度筛选与排序。
+  // 不可读条目不参与关键字匹配：其字段名/值不可知，检索命中即等于旁路泄露。
   const matched = k
-    ? accounts.value.filter((entry) => vaultSearchText(entry.data, defOf(entry.kind)).includes(k))
+    ? accounts.value.filter((entry) =>
+        entry.corrupt ? false : vaultSearchTextOf(entry, defOf(entry.kind)).includes(k),
+      )
     : accounts.value;
   return applyVaultFilter(matched, filterCriteria.value, defOf);
 });
 
-/* 卡片光泽追踪（3D 视差倾斜已按用户决策移除，Wave 53） */
-const { onCardMove, onCardLeave } = useCardShine();
+/** 搜索文本（不可读条目不参与；类型缺失由 vaultSearchText 自身返回空串） */
+const vaultSearchTextOf = (entry: VaultEntry, def: VaultTypeDef | undefined): string =>
+  entry.corrupt ? "" : vaultSearchText(entry.data, def);
+
+/** 卡片视图索引：随列表变化重建，避免在模板内反复构建视图对象 */
+const cardViews = computed<Map<number, VaultCardView>>(() => {
+  const index = typeIndex.value;
+  const map = new Map<number, VaultCardView>();
+  for (const entry of filteredAccounts.value) {
+    map.set(entry.id, buildVaultCardView(entry.data, index.get(entry.kind)));
+  }
+  return map;
+});
+
+const viewOf = (entry: VaultEntry): VaultCardView => cardViews.value.get(entry.id) ?? EMPTY_CARD_VIEW;
 
 /* 敏感字段显隐：未独立加密的条目直接解开掩码；独立加密的条目需输入独立密钥 */
 const toggleSecret = (entry: VaultEntry): void => {
@@ -514,9 +453,11 @@ const toggleSecret = (entry: VaultEntry): void => {
       plainSecret: secret.raw,
     });
   } else {
+    // 隐藏即撤销授权：明文不再留在内存条目上（否则复制会绕过密钥校验）
     updateShallowItem(accounts, idx, {
       secretVisible: false,
       displaySecret: secret.encrypted ? "已加密" : secretMask,
+      plainSecret: "",
     });
   }
 };
@@ -527,6 +468,12 @@ const keyTargetId = ref<number | null>(null);
 const keyInput = ref("");
 const keyInputVisible = ref(false);
 const keyError = ref(false);
+const keyBusy = ref(false);
+
+/* 输入即清除错误态：错误提示只描述「上一次提交」的结果 */
+watch(keyInput, () => {
+  if (keyError.value) keyError.value = false;
+});
 
 /** 密钥对话框中的目标描述：主标题 · 次行首项（账号条目即「平台 · 账户」） */
 const keyTargetName = computed(() => {
@@ -538,10 +485,12 @@ const keyTargetName = computed(() => {
 });
 
 const confirmKey = async (): Promise<void> => {
+  if (keyBusy.value) return;
   const target = accounts.value.find((e) => e.id === keyTargetId.value);
   if (!target || !keyInput.value) return;
   const secret = viewOf(target).secret;
   if (!secret) return;
+  keyBusy.value = true;
   try {
     const plain = await decryptPasswordField(secret.raw, keyInput.value);
     // shallowRef 下通过 id 找索引后 updateShallowItem，避免直接修改目标条目属性
@@ -558,22 +507,30 @@ const confirmKey = async (): Promise<void> => {
     keyInput.value = "";
   } catch {
     keyError.value = true;
+  } finally {
+    keyBusy.value = false;
+    keyInputVisible.value = false;
   }
 };
 
-/* 复制敏感字段（提示经全局 Toast 中心倒计时通道渲染） */
+/* 复制敏感字段（提示经全局 Toast 中心状态通道轮番渲染：结果 → 清空时间） */
 const { copyWithTimeout } = useClipToast("密码已复制");
 
 const copySecret = async (entry: VaultEntry): Promise<void> => {
   const secret = viewOf(entry).secret;
   if (!secret) return;
-  let plain = entry.plainSecret;
-  if (!plain && !secret.encrypted) plain = secret.raw;
+  // 独立加密且未处于已解锁展示态 → 先走密钥授权，绝不使用残留明文
+  if (secret.encrypted && !entry.secretVisible) {
+    toggleSecret(entry);
+    return;
+  }
+  const plain = entry.plainSecret || (secret.encrypted ? "" : secret.raw);
   if (!plain) {
     toggleSecret(entry);
     return;
   }
-  await copyWithTimeout(plain);
+  const copied = await copyWithTimeout(plain);
+  if (!copied) showError("复制失败：剪贴板不可用或权限被拒绝");
 };
 
 /* ===== 新增与编辑 ===== */
@@ -583,6 +540,8 @@ const showTypeEditor = ref(false);
 const formType = ref<VaultTypeDef | null>(null);
 const formInitial = ref<Record<string, string> | null>(null);
 const editingId = ref<number | null>(null);
+/** 保存进行中（编辑窗口保持开启并锁定动作，失败不丢输入） */
+const saving = ref(false);
 /** 待重新指派类型的条目（自定义类型被删后条目类型定义缺失时使用） */
 const reassignEntryId = ref<number | null>(null);
 
@@ -600,10 +559,9 @@ const onManageTypes = (): void => {
   showTypeEditor.value = true;
 };
 
-/** 类型集合保存完成：刷新类型索引，列表中的类型名与卡片视图随之更新 */
-const onTypesSaved = async (types: VaultTypeDef[]): Promise<void> => {
+/** 类型集合保存完成：直接采用保存结果（落盘侧已同步模块缓存，无需二次读盘） */
+const onTypesSaved = (types: VaultTypeDef[]): void => {
   customTypes.value = types;
-  await loadVaultTypes();
 };
 
 /**
@@ -632,6 +590,7 @@ const onPickType = (typeId: string): void => {
 };
 
 const onEdit = (entry: VaultEntry): void => {
+  if (entry.corrupt) return;
   const def = typeIndex.value.get(entry.kind);
   if (!def) {
     // 类型定义缺失（自定义类型已删除）：改由类型选择台重新指派，避免条目不可编辑
@@ -647,47 +606,67 @@ const onEdit = (entry: VaultEntry): void => {
 
 /** 保存：写入独立记录并同步两级缓存（新增与编辑同一路径，编辑时删旧记录） */
 const onPersist = async (payload: VaultItemPayload): Promise<void> => {
-  showForm.value = false; // 立即关闭对话框
+  if (saving.value) return;
+  saving.value = true;
 
-  const dataB64 = serializeVaultItem(payload);
-  const titleField = typeIndex.value.get(payload.kind)?.titleField ?? "";
-  const title = titleField ? (payload.data[titleField] ?? "") : "";
-  const recordName = `${payload.kind}_${title}_${Date.now()}`.slice(0, 180);
+  try {
+    const dataB64 = serializeVaultItem(payload);
+    const titleField = typeIndex.value.get(payload.kind)?.titleField ?? "";
+    const title = titleField ? (payload.data[titleField] ?? "") : "";
+    const recordName = `${payload.kind}_${title}_${Date.now()}`.slice(0, 180);
 
-  const editing = editingId.value;
-  editingId.value = null;
-  const target = editing === null ? undefined : accounts.value.find((e) => e.id === editing);
-  const oldRid = target?.recordId;
+    const editing = editingId.value;
+    const target = editing === null ? undefined : accounts.value.find((e) => e.id === editing);
+    const oldRid = target?.recordId;
 
-  const newRid = await verthysAddRecord(TYPE_ACCOUNT, recordName, dataB64);
-  if (newRid === null) {
-    showError("保存失败，请重试");
-    return;
-  }
-
-  // 同步两级缓存（摘要 + 全量）
-  addFullRecord(newRid, TYPE_ACCOUNT, recordName, dataB64, dataB64.length);
-
-  if (target) {
-    // 编辑：先添加新记录 → 删除旧记录 → 更新内存条目
-    // 顺序：add 新 → delete 旧，避免删除后新增时 recordId 复用导致数据错乱
-    if (oldRid !== undefined) {
-      try { await verthysDeleteRecord(oldRid); } catch { /* 旧记录删除失败不阻断 */ }
-      invalidateSummaryRecord(oldRid);
-      invalidateFullRecord(oldRid);
-      invalidateScannedRecord(oldRid);
+    const newRid = await verthysAddRecord(TYPE_ACCOUNT, recordName, dataB64);
+    if (newRid === null) {
+      // 写入未发生：保持窗口与全部输入，用户可直接重试
+      showError("保存失败，请重试");
+      return;
     }
-    const idx = accounts.value.findIndex((e) => e.id === target.id);
-    if (idx >= 0) {
-      // shallowRef 下整体替换元素需用 updateShallowItem 触发 triggerRef
-      updateShallowItem(accounts, idx, makeEntry(target.id, newRid, payload.kind, payload.data));
-    }
-  } else {
-    pushShallowItems(accounts, [makeEntry(Date.now(), newRid, payload.kind, payload.data)]);
-  }
-  setModuleCache("accounts", accounts.value);
 
-  await persistVerthys(); // 落盘（串行 flush 队列）
+    // 同步两级缓存（摘要 + 全量）
+    addFullRecord(newRid, TYPE_ACCOUNT, recordName, dataB64, dataB64.length);
+
+    if (target) {
+      // 编辑：先添加新记录 → 删除旧记录 → 更新内存条目
+      // 顺序：add 新 → delete 旧，避免删除后新增时 recordId 复用导致数据错乱
+      if (oldRid !== undefined) {
+        let removed = false;
+        try {
+          removed = await deleteAndPersist(() => verthysDeleteRecord(oldRid), oldRid);
+        } catch {
+          removed = false;
+        }
+        if (!removed) {
+          // 旧版本未被清理：必须在界面上说清，否则下次启动出现同一条目两份
+          showError("条目已保存，但旧版本未能清理；重启后可能出现重复条目，请再次编辑以重试");
+        }
+        invalidateSummaryRecord(oldRid);
+        invalidateFullRecord(oldRid);
+        invalidateScannedRecord(oldRid);
+      }
+      const idx = accounts.value.findIndex((e) => e.id === target.id);
+      if (idx >= 0) {
+        // shallowRef 下整体替换元素需用 updateShallowItem 触发 triggerRef
+        updateShallowItem(accounts, idx, makeEntry(target.id, newRid, payload.kind, payload.data));
+      }
+    } else {
+      pushShallowItems(accounts, [makeEntry(allocMemId(), newRid, payload.kind, payload.data)]);
+    }
+    setModuleCache("accounts", accounts.value);
+    editingId.value = null;
+    formInitial.value = null;
+    showForm.value = false;
+
+    const persisted = await persistVerthys(); // 落盘（串行 flush 队列）
+    if (!persisted) {
+      showError("条目已写入，但落盘失败；请勿关闭应用并重试保存");
+    }
+  } finally {
+    saving.value = false;
+  }
 };
 
 /* ===== 删除二次确认 ===== */
@@ -697,7 +676,11 @@ const deleteTargetId = ref<number | null>(null);
 const onDelete = (entry: VaultEntry): void => {
   deleteTargetId.value = entry.id;
   const view = viewOf(entry);
-  deleteTargetName.value = view.typeLabel ? `${view.title} · ${view.typeLabel}` : view.title;
+  if (entry.corrupt) {
+    deleteTargetName.value = `数据不可读 · 记录 #${entry.recordId ?? "—"}`;
+  } else {
+    deleteTargetName.value = view.typeLabel ? `${view.title} · ${view.typeLabel}` : view.title;
+  }
   showDeleteConfirm.value = true;
 };
 const confirmDelete = async (): Promise<void> => {
@@ -747,134 +730,10 @@ useModuleDialogGuard("accounts", () => {
 <style src="../../styles/verthys-common.css"></style>
 
 <style scoped>
-/* AccountVerthys 模块特有样式 */
-.account-verthys { /* verthys-module 已在共享样式中 */ }
-
 /* 搜索栏层序：抬高整层以脱离卡片网格的绘制顺序。
    搜索栏以 isolation 自建层叠上下文，其内部的锚定下拉无论 z-index 多大都
    只能在该层内比较，故必须提升承载层本身；层级仍低于模块弹窗与加载遮罩。 */
 .search-layer { position: relative; z-index: 10; }
-
-/* 卡片：纵向弹性 + 撑满网格槽位 —— 卡片高度由槽位决定（虚拟网格为 item-height，
-   普通网格为行高），操作区因此可贴底固定，不再随内容长短上下漂移 */
-.verthys-card { display: flex; flex-direction: column; height: 100%; }
-
-/* 操作区贴底且成紧凑簇：贴底由 margin-top:auto 承担，间距显式收紧到 2px
-   （共享样式为 4px），左对齐显式声明以免受其它规则影响 */
-.card-actions { margin-top: auto; gap: 2px; justify-content: flex-start; }
-
-/* 卡片操作键：悬浮/按压的底色注能 + 内收边（登记台同族语言，零阴影；
-   静置即带透明描边，故交互态不产生任何几何位移） */
-.card-actions .mini-btn {
-  position: relative;
-  padding: 3px 6px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  transition:
-    color var(--dur-fast) var(--ease),
-    border-color var(--dur-fast) var(--ease),
-    background-color var(--dur-fast) var(--ease);
-}
-.card-actions .mini-btn:hover {
-  color: var(--text-primary);
-  border-color: rgba(var(--accent-rgb), 0.3);
-  background-color: rgba(var(--accent-rgb), 0.09);
-}
-.card-actions .mini-btn:active {
-  border-color: rgba(var(--accent-rgb), 0.42);
-  background-color: rgba(var(--accent-rgb), 0.14);
-}
-.card-actions .mini-btn:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 1px; }
-.card-actions .mini-btn.danger:hover {
-  color: var(--danger);
-  border-color: rgba(var(--danger-rgb), 0.34);
-  background-color: rgba(var(--danger-rgb), 0.09);
-}
-.card-actions .mini-btn.danger:active {
-  border-color: rgba(var(--danger-rgb), 0.44);
-  background-color: rgba(var(--danger-rgb), 0.14);
-}
-
-/* 底缘微亮线：与主键皮肤的势隙线同族，克制到只在悬浮/按压时出现（仅走 opacity） */
-.card-actions .mini-btn::after {
-  content: ""; position: absolute; left: 15%; right: 24%; bottom: 0; height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(var(--accent-rgb), 0.3) 34%,
-    rgba(var(--white-rgb), 0.5) 71%,
-    transparent
-  );
-  opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease);
-  pointer-events: none;
-}
-.card-actions .mini-btn:hover::after,
-.card-actions .mini-btn:active::after { opacity: 1; }
-.card-actions .mini-btn.danger::after {
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(var(--danger-rgb), 0.3) 34%,
-    rgba(var(--white-rgb), 0.5) 71%,
-    transparent
-  );
-}
-
-/* 用户名行 */
-.username {
-  font-size: 12px; color: var(--text-secondary);
-  margin-bottom: 8px; font-family: var(--font);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-
-/* 类型化次行：标签 + 取值紧凑排布 */
-.card-lines {
-  display: flex; flex-direction: column; gap: 4px;
-  margin-bottom: 8px;
-}
-.card-line {
-  display: flex; align-items: baseline; gap: 8px; min-width: 0;
-  font-family: var(--font); font-size: 12px;
-}
-.line-label {
-  flex-shrink: 0; font-size: 10.5px; letter-spacing: 0.5px;
-  color: var(--text-muted);
-}
-.line-value {
-  color: var(--text-secondary);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
-}
-
-/* 敏感行标签：类型化卡片的敏感行带字段名（账号卡片沿用无标签版式） */
-.secret-label {
-  flex-shrink: 0; font-size: 10.5px; letter-spacing: 0.5px;
-  color: var(--text-muted); font-family: var(--font);
-}
-
-/* 到期读数：沿用仪表式回显的字体口径，色调由内联样式给出 */
-.card-readout {
-  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.4px;
-  color: var(--text-muted);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-
-/* 类型标识：右上角绝对定位，固定字号与最大宽度，超长类型名截断加省略号；
-   不参与标题行布局，标题可用宽度与既有版式一致 */
-.vault-type-badge {
-  position: absolute; top: 11px; right: 14px;
-  display: inline-flex; align-items: center; gap: 4px;
-  max-width: 68px; padding: 2px 8px;
-  font-size: 10px; letter-spacing: 1px; font-family: var(--font);
-  border-radius: 10px;
-  border: 1px solid rgba(var(--tone-rgb, var(--accent-rgb)), 0.2);
-  background: rgba(var(--tone-rgb, var(--accent-rgb)), 0.04);
-  color: rgb(var(--tone-rgb, var(--accent-rgb)));
-  white-space: nowrap; pointer-events: none;
-}
-.badge-icon { width: 10px; height: 10px; flex-shrink: 0; }
-.badge-icon :deep(svg) { width: 100%; height: 100%; }
-.badge-name { overflow: hidden; text-overflow: ellipsis; }
 
 /* 空结果的清除入口：与空态文字同层，故用绝对定位与空态居中口径对齐 */
 .empty-clear {
@@ -889,13 +748,9 @@ useModuleDialogGuard("accounts", () => {
 .empty-clear:hover { color: var(--accent); border-color: var(--border-hover); }
 .empty-clear:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 1px; }
 
-/* 锁定徽章：同处右上角并让出类型标识的位置，不占用标题行宽度 */
-.lock-badge { position: absolute; top: 15px; right: 90px; width: 14px; height: 14px; color: var(--warning); }
-.lock-badge svg { width: 100%; height: 100%; }
-
-/* 登记窗口的选项条 / 登记行 / 输入控件样式已抽取到 verthys-common.css（凭证登记台 · reg-* 词汇） */
-
 /* 解密密钥对话框 */
 .key-target { font-size: 12px; color: var(--text-secondary); font-family: var(--font); margin-bottom: 14px; }
+.key-field { display: flex; align-items: center; gap: 8px; }
+.key-field .input { flex: 1; min-width: 0; }
 .key-error { font-size: 11px; color: var(--danger); margin-top: 6px; }
 </style>

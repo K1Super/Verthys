@@ -49,6 +49,7 @@
           class="privacy-btn"
           :class="{ 'is-busy': privacyBusy }"
           :disabled="privacyButtonDisabled"
+          :aria-label="privacyTip"
           v-tip="privacyTip"
           @click="onPrivacyToggle"
         >
@@ -67,6 +68,7 @@
           primary
           class="export-top-btn"
           :disabled="photos.length === 0 || albumBusy"
+          aria-label="导出加密照片"
           v-tip="'导出加密照片'"
           @click="openExportDialog"
         >
@@ -78,6 +80,7 @@
           primary
           class="export-top-btn"
           :disabled="albumBusy"
+          aria-label="解析加密文件并导入"
           v-tip="'解析加密文件并导入'"
           @click="openParseDialog"
         >
@@ -92,6 +95,7 @@
           class="import-top-btn"
           :loading="importing"
           :disabled="albumBusy"
+          :aria-label="importing ? `正在导入照片 ${importProgress}%` : '导入照片'"
           v-tip="importing ? `加密中…${importProgress}%` : '导入照片'"
           @click="onImport"
         />
@@ -100,6 +104,7 @@
           v-if="repackAvailable && !repackRunning"
           primary
           class="repack-top-btn"
+          aria-label="迁移旧布局照片"
           v-tip="'迁移旧布局照片（后台任务，可取消）'"
           @click="startRepack"
         >
@@ -115,6 +120,7 @@
           primary
           class="del-top-btn"
           :disabled="albumBusy && !selectMode"
+          :aria-label="selectMode ? '取消选择' : '选择删除'"
           v-tip="selectMode ? '取消选择' : '选择删除'"
           @click="onDeleteBtn"
         >
@@ -130,6 +136,25 @@
       <span class="toast-dot"></span>
       <span class="photo-load-text">{{ repackState.message }}</span>
       <button class="photo-load-retry" type="button" @click="cancelRepack">取消迁移</button>
+    </div>
+
+    <!-- 加载恢复条（常驻，直至用户处置）：
+         失败与暂停都要有可执行的恢复入口——一次性 toast 会随时间消失，
+         用户错过即无路可走，只能退出重进。错误语义按模块规范以状态红
+         文字直陈，不加底色方框、不加图标；暂停为中性信息，用常规文字色。 -->
+    <div v-if="loadError || decryptPaused" class="photo-recover-bar" role="status">
+      <span class="photo-recover-text" :class="{ 'is-error': loadError }">
+        {{ loadError || '首批解密已暂停，其余缩略图待补齐' }}
+      </span>
+      <button v-if="loadError" class="photo-recover-action" type="button" @click="onRetryLoad">重试</button>
+      <button v-if="decryptPaused" class="photo-recover-action" type="button" @click="onResumeLoad">继续解密</button>
+      <button
+        v-if="loadError && !decryptPaused"
+        class="photo-recover-dismiss"
+        type="button"
+        aria-label="关闭提示"
+        @click="dismissLoadError"
+      >×</button>
     </div>
 
     <!-- Masonry 瀑布流（滚动容器与列布局分离，确保滚轮垂直滚动正常） -->
@@ -154,9 +179,15 @@
           class="masonry-item"
           :class="{ selected: selectMode && selectedPhotoIds.has(ph.id) }"
           :style="[ph._style, { '--reveal-delay': revealDelayOf(vi) + 'ms' }]"
+          role="button"
+          tabindex="0"
+          :aria-label="ph.name || '照片'"
+          :aria-pressed="selectMode ? selectedPhotoIds.has(ph.id) : undefined"
           @mousemove="onCardMove($event)"
           @mouseleave="onCardLeave($event)"
           @click="onPhotoClick(ph)"
+          @keydown.enter.prevent="onPhotoClick(ph)"
+          @keydown.space.prevent="onPhotoClick(ph)"
         >
           <!-- 文字清晰度铁律：文字层（overlay）与图像层平级分离——
                图像层只保留静态滤镜（照片 3D 倾斜已移除），
@@ -178,12 +209,23 @@
          不得置于任何定位子容器（如 .masonry-scroll，position: relative）之内，
          否则将以该子容器（顶部导航带之下的内容区）为参照系居中，导致整体
          下移约半个导航带高度、与其余模块的空态位置不齐。
-         加载失败由通用错误提示（toast）承接，不打断浏览（无横幅/进度卡）。 -->
+         加载失败不折叠为空态：由上方常驻恢复条承接（可重试/继续/关闭）。 -->
     <CosmicRingLoader :overlay="true" :show="photosLoading && photos.length === 0" text="正在加载照片列表…" />
     <CosmicEmpty v-if="!photosLoading && photos.length === 0 && !loadError" text="暂无照片" hint="点击「导入照片」添加" />
 
     <!-- 沉浸式查看器（内存预览，不落地，滚轮缩放 + 拖拽平移 + 双击复位） -->
-    <div v-if="viewer" class="viewer" :class="{ blurred: viewerBlurred }" @click="closeViewer">
+    <div
+      v-if="viewer"
+      ref="viewerRef"
+      class="viewer"
+      :class="{ blurred: viewerBlurred }"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="viewerName ? `预览：${viewerName}` : '照片预览'"
+      tabindex="-1"
+      @click="closeViewer"
+      @keydown="onViewerKeydown"
+    >
       <div class="viewer-content" :style="{ '--viewer-scale': viewerScale }" @click.stop @wheel.prevent="onViewerWheel">
         <img
           v-if="viewerSrc"
@@ -191,23 +233,31 @@
           :class="{ dragging: viewerDragging }"
           :src="viewerSrc"
           decoding="async"
-          alt=""
+          :alt="viewerName || '照片预览'"
           draggable="false"
           :style="{ transform: `translate(${viewerOffsetX}px, ${viewerOffsetY}px) scale(${viewerScale})`, cursor: viewerDragging ? 'grabbing' : viewerScale > 1 ? 'grab' : 'default' }"
           @mousedown="onViewerMouseDown"
           @dblclick.prevent="onViewerDoubleClick"
         />
-        <!-- 原图准备中：统一加载环 + 文案（原图本身即解密产物，
-             不设缩略图占位；解密在后台进行） -->
-        <CosmicRingLoader v-else-if="viewerLoading" text="解密中" />
+        <!-- 原图准备中：统一加载环 + 真实阶段文案（读取原图/元数据/解密中）；
+             原图本身即解密产物，不设缩略图占位 -->
+        <CosmicRingLoader v-else-if="viewerLoading" :text="viewerProgressMsg || '解密中'" />
       </div>
     </div>
 
     <!-- 导出对话框：两栏工作台（左选片 / 右配置；计数融入头部、摘要融入底栏） -->
     <div v-if="showExportDialog" class="export-dialog-overlay" @click.self="closeExportDialog">
-      <div class="export-dialog glass">
+      <div
+        ref="exportDialogRef"
+        class="export-dialog glass"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="photo-export-title"
+        tabindex="-1"
+        @keydown="onExportDialogKeydown"
+      >
         <div class="ed-header">
-          <span class="ed-title">导出加密照片</span>
+          <span class="ed-title" id="photo-export-title">导出加密照片</span>
           <div class="ed-header-right">
             <span class="ed-count">已选 <b>{{ exportSelectedIds.size }}</b> / {{ photos.length }}</span>
             <button class="ed-close" @click="closeExportDialog" :disabled="exporting">×</button>
@@ -221,19 +271,35 @@
               <button class="ed-mini-btn" @click="selectAllPhotos" :disabled="exporting">全选</button>
               <button class="ed-mini-btn" @click="deselectAllPhotos" :disabled="exporting">清空</button>
             </div>
-            <div class="ed-photo-grid">
-              <div
-                v-for="ph in photos"
-                :key="ph.id"
-                class="ed-photo-item"
-                :class="{ selected: exportSelectedIds.has(ph.id) }"
-                @click="togglePhotoSelect(ph.id)"
-                v-tip="`${ph.name} · ${ph.size}`"
-              >
-                <div class="ed-photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
-                <span class="ed-photo-name">{{ ph.name }}</span>
-              </div>
-            </div>
+            <!-- 选片网格：虚拟滚动（万张相册打开面板也不铺满 DOM）。
+                 容器与主网格同款行窗口模型：只渲染可视区 + 缓冲行。 -->
+            <VirtualCardGrid
+              class="ed-photo-grid"
+              :items="photos"
+              :item-height="92"
+              :min-column-width="92"
+              :gap="8"
+              :buffer-rows="3"
+              :item-key="photoIdKey"
+            >
+              <template #default="{ item: ph }">
+                <div
+                  class="ed-photo-item"
+                  :class="{ selected: exportSelectedIds.has(ph.id) }"
+                  role="button"
+                  tabindex="0"
+                  :aria-pressed="exportSelectedIds.has(ph.id)"
+                  :aria-label="ph.name || '照片'"
+                  @click="togglePhotoSelect(ph.id)"
+                  @keydown.enter.prevent="togglePhotoSelect(ph.id)"
+                  @keydown.space.prevent="togglePhotoSelect(ph.id)"
+                  v-tip="`${ph.name} · ${ph.size}`"
+                >
+                  <div class="ed-photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
+                  <span class="ed-photo-name">{{ ph.name }}</span>
+                </div>
+              </template>
+            </VirtualCardGrid>
           </div>
 
           <!-- 右栏：配置（格式 / 令牌 / 保存位置） -->
@@ -447,7 +513,7 @@
  * 业务逻辑零侵入：所有加密/解密、verthys 读写、数据处理、交互逻辑均下沉至
  * composables/photo-album/ 分层目录，入口仅通过依赖注入装配。
  */
-import { onMounted, onUnmounted, computed, ref, watch, defineAsyncComponent } from "vue";
+import { onMounted, onUnmounted, computed, ref, watch, nextTick, defineAsyncComponent } from "vue";
 import { isModuleReady } from "../../lib/keyManager";
 import { tryGc } from "../../utils/gc";
 import StarlitSky from "../common/cosmic/StarlitSky.vue";
@@ -455,6 +521,8 @@ import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 import ActionButton from "../common/verthys-ui/ActionButton.vue";
+import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
+import type { PhotoEntry } from "../../composables/photo-album/types";
 // 大型弹窗组件级懒加载（遵循项目硬约束：大型弹窗使用 defineAsyncComponent）
 const CosmicOverlay = defineAsyncComponent(() => import("../common/cosmic/CosmicOverlay.vue"));
 // 量子能量导流通道进度条（全局统一进度条组件，替代已删除的 QuantumProgressBar）
@@ -501,6 +569,7 @@ const {
   initVirtualScroll, destroyVirtualScroll,
   decryptPhotoMeta, loadPhotos, releaseThumbUrls, ensurePhotoKey,
   cancelPendingDecrypt,
+  retryLoad, resumeLoad, decryptPaused,
 } = usePhotoData();
 
 /* 步入窗口：以「照片列表首次非空」起算 —— 相册条目总是异步就绪，
@@ -515,10 +584,11 @@ const { entering } = useModuleEntrance(() => photos.value.length > 0);
 const albumBusy = computed(() =>
   importing.value || parsing.value || importingParsed.value || exporting.value || repackRunning.value,
 );
-/** 加载失败/降级：以通用错误提示（toast）呈现（不设常驻提示栏） */
-watch(loadError, (v) => {
-  if (v) showError(v);
-});
+/** 加载/暂停恢复条的动作入口（提示常驻到用户处置，不再依赖一次性 toast） */
+const onRetryLoad = () => retryLoad();
+const onResumeLoad = () => resumeLoad();
+/** 关闭仅清除提示，不改变已装载内容（已解密条目保持原状） */
+const dismissLoadError = () => { loadError.value = ""; };
 /** 解密失败计数：首次出现时经 toast 如实告知（便于用户察觉部分照片未就绪） */
 watch(failedCount, (n, prev) => {
   if (n > 0 && prev === 0) {
@@ -528,8 +598,8 @@ watch(failedCount, (n, prev) => {
 
 /* ---------- 3. 查看器层（依赖 usePhotoData 的 photos/photoKey/decryptPhotoMeta） ---------- */
 const {
-  viewer, viewerSrc, viewerBlurred, viewerScale,
-  viewerOffsetX, viewerOffsetY, viewerDragging, viewerLoading,
+  viewer, viewerSrc, viewerName, viewerBlurred, viewerScale,
+  viewerOffsetX, viewerOffsetY, viewerDragging, viewerLoading, viewerProgressMsg,
   onView, closeViewer, onViewerWheel, onViewerMouseDown, onViewerDoubleClick,
   onBlur, onFocus,
   cleanup: cleanupViewer,
@@ -540,8 +610,8 @@ const {
 /* ---------- 4. 导入层 ---------- */
 const {
   importing, importProgress, importStatus,
-  /* Comprehensive_optimization：新增耗时与 ETA（供 QuantumProgressFlow 使用） */
-  importElapsed, importEta,
+  /* Comprehensive_optimization：新增耗时（供 QuantumProgressFlow 使用） */
+  importElapsed,
   onImport,
   /* 卸载时取消进行中的导入（守护流水线：中止投喂并保留 WAL 续传） */
   abortImport,
@@ -563,6 +633,84 @@ const {
   showError, showExportDone, showCopied,
 });
 
+/* ---------- 5b. 模态可访问性（查看器 / 导出面板） ----------
+ * 焦点契约：打开时把焦点移入模态根，关闭时归还给打开前的焦点元素；
+ * Esc 只由持有焦点的模态响应（栈序由 utils/modal_stack 的滚动锁保证）。
+ * 导出面板额外做 Tab 循环，防止焦点逃逸到背景网格。 */
+const viewerRef = ref<HTMLElement | null>(null);
+const exportDialogRef = ref<HTMLElement | null>(null);
+/** 打开前的焦点元素（关闭时归还；元素可能已被虚拟滚动回收，focus 失败静默） */
+let viewerReturnFocus: HTMLElement | null = null;
+let exportReturnFocus: HTMLElement | null = null;
+
+watch(viewer, async (open) => {
+  if (open) {
+    const active = document.activeElement;
+    viewerReturnFocus = active instanceof HTMLElement ? active : null;
+    await nextTick();
+    viewerRef.value?.focus();
+    return;
+  }
+  if (viewerReturnFocus) {
+    viewerReturnFocus.focus();
+    viewerReturnFocus = null;
+  }
+});
+
+watch(showExportDialog, async (open) => {
+  if (open) {
+    const active = document.activeElement;
+    exportReturnFocus = active instanceof HTMLElement ? active : null;
+    await nextTick();
+    exportDialogRef.value?.focus();
+    return;
+  }
+  if (exportReturnFocus) {
+    exportReturnFocus.focus();
+    exportReturnFocus = null;
+  }
+});
+
+/** 查看器 Esc 关闭（焦点在查看器内才会触发；不误伤其它层） */
+const onViewerKeydown = (e: KeyboardEvent) => {
+  if (e.key !== "Escape") return;
+  e.preventDefault();
+  e.stopPropagation();
+  closeViewer();
+};
+
+/** 导出面板键盘契约：Esc 关闭（导出中禁关，与关闭按钮一致）；Tab 在面板内循环 */
+const onExportDialogKeydown = (e: KeyboardEvent) => {
+  if (e.key === "Escape") {
+    if (exporting.value) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeExportDialog();
+    return;
+  }
+  if (e.key !== "Tab") return;
+  const root = exportDialogRef.value;
+  if (!root) return;
+  const focusables = Array.from(root.querySelectorAll<HTMLElement>(
+    'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+  )).filter((el) => el.offsetParent !== null || el === document.activeElement);
+  if (focusables.length === 0) {
+    e.preventDefault();
+    root.focus();
+    return;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  if (e.shiftKey && (active === first || active === root)) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && (active === last || active === root)) {
+    e.preventDefault();
+    first.focus();
+  }
+};
+
 /* ---------- 6. 解析层 ---------- */
 const {
   showParseDialog, parseFileName, parseFileData, parseToken, parsing, parsedPhotos, parsedUndecryptable,
@@ -577,7 +725,7 @@ const {
   photos, photoKey, isTauri, ensurePhotoKey, showError, showToast,
   /* Parsed Import：复用 usePhotoImport 的流水线实例 + 导入状态 refs
      （对话框内复用 QuantumProgressFlow，导入进度实时反馈，UI 不卡死） */
-  getPipeline, importing, importProgress, importStatus, importElapsed, importEta,
+  getPipeline, importing, importProgress, importStatus, importElapsed,
 });
 
 /* ---------- 6b. 重打包层（后台迁移旧布局照片；复用导入流水线写入链路） ---------- */
@@ -590,7 +738,7 @@ const {
 /* ---------- 7. 删除层（依赖 usePhotoViewer 的 onView 用于非选择模式下的照片点击） ---------- */
 const {
   selectMode, selectedPhotoIds, allSelected,
-  toggleSelectAll, cancelSelectMode, onDelete, onDeleteBtn, onDeleteSelected, onPhotoClick,
+  toggleSelectAll, cancelSelectMode, onDeleteBtn, onDeleteSelected, onPhotoClick,
   showDeleteConfirm, deleteConfirmCount, confirmDelete, cancelDeleteConfirm,
 } = usePhotoDelete({
   photos, isTauri, onView, showError, showToast,
@@ -683,6 +831,9 @@ const { onCardMove, onCardLeave, cancel: cancelShine } = useCardShine();
 
 /* ===== 生命周期总管家（onMounted / onUnmounted） ===== */
 
+/** 选片虚拟网格的稳定键（照片内存 id 会话内唯一，禁止退回 index 键） */
+const photoIdKey = (ph: PhotoEntry): number => ph.id;
+
 /**
  * 初始化生命周期：
  *   - 注册窗口失焦/聚焦事件（查看器模糊控制）
@@ -705,12 +856,17 @@ const initLifecycle = () => {
   initVirtualScroll();
 
   // 安全前置校验闸门：模块密钥已由 MainView 登录时缓存到 keyManager 会话，直接读取。
-  // 未就绪时不加载、不提示（进入拾光本应经过安全管理验证），仅留控制台告警便于排查
+  // 未就绪时不加载；必须写入 loadError —— 静默跳过会让空列表被误读为「暂无照片」，
+  //   用户无从得知真实原因，也没有任何恢复入口。
   if (isTauri) {
     if (isModuleReady("photo") && ensurePhotoKey()) {
-      loadPhotos();
+      void loadPhotos().catch((e) => {
+        console.warn("[photo] 装载异常", e);
+        loadError.value = "照片列表加载失败，请重试";
+      });
     } else {
       console.warn("[photo] 模块密钥不可用，跳过加载（应由安全管理验证后进入拾光）");
+      loadError.value = "模块密钥不可用：请返回安全管理验证后重新进入拾光";
     }
   } else {
     // 浏览器模式：使用占位密钥（仅用于本地演示，不涉及真实加密）
@@ -844,6 +1000,34 @@ useModuleDialogGuard("photos", () => {
 .photo-load-retry:active { background: rgba(var(--accent-rgb), 0.14); }
 .photo-load-retry:focus-visible { outline: 1px solid rgba(var(--accent-rgb), 0.55); outline-offset: 2px; }
 
+/* 加载恢复条：常驻单行，无底色方框、无图标；
+   失败以状态红文字直陈，暂停为中性信息（常规文字色）。 */
+.photo-recover-bar {
+  display: flex; align-items: center; gap: 12px; flex: 0 0 auto;
+  margin: 0 4px; padding: 8px 14px;
+  font-size: 12px; font-family: var(--font); color: var(--text-muted);
+  position: relative; z-index: 2;
+}
+.photo-recover-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.photo-recover-text.is-error { color: var(--danger); }
+.photo-recover-action {
+  flex: 0 0 auto; padding: 4px 12px; font-size: 12px; font-family: var(--font);
+  color: var(--accent); background: transparent; border: 1px solid var(--border-glass);
+  border-radius: var(--radius); cursor: pointer;
+  transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease);
+}
+.photo-recover-action:hover { background: rgba(var(--accent-rgb), 0.08); border-color: rgba(var(--accent-rgb), 0.35); }
+.photo-recover-action:active { background: rgba(var(--accent-rgb), 0.14); }
+.photo-recover-action:focus-visible { outline: 1px solid rgba(var(--accent-rgb), 0.55); outline-offset: 2px; }
+.photo-recover-dismiss {
+  flex: 0 0 auto; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+  padding: 0; font-size: 14px; line-height: 1; color: var(--text-muted);
+  background: transparent; border: none; border-radius: var(--radius); cursor: pointer;
+  transition: color 0.2s var(--ease);
+}
+.photo-recover-dismiss:hover { color: var(--text-primary); }
+.photo-recover-dismiss:focus-visible { outline: 1px solid rgba(var(--accent-rgb), 0.55); outline-offset: 2px; }
+
 /* 选择模式操作栏：悬浮层——绝对定位在照片区底部中央，脱离文档流不挤压网格。
    动画仅 opacity/transform（合成器友好）；玻璃底 + 零阴影与模块整体语言一致 */
 .select-bar { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 30; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; max-width: calc(100% - 28px); animation: select-bar-enter 0.3s var(--ease) both; }
@@ -880,6 +1064,8 @@ useModuleDialogGuard("photos", () => {
 /* 条目隔离为独立堆叠上下文：内部光影层（z 0）与卡片（z 1）的层级不外泄，
    跨条目遮挡由文档树序保证（后绘制者在上） */
 .masonry-item { position: absolute; top: 0; left: 0; cursor: pointer; isolation: isolate; }
+/* 键盘可达：条目不进入 tab 序列就无法在选择模式中操作；焦点框内嵌不改变布局 */
+.masonry-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius); }
 
 /* hover 悬浮光影层（滚动性能第 2 铁律的阴影落点）——
    原实现让 box-shadow 参与 0.3s 过渡：大半径模糊阴影是重绘型属性，过渡期
@@ -890,7 +1076,7 @@ useModuleDialogGuard("photos", () => {
 .masonry-item::before {
   content: ''; position: absolute; inset: 0; z-index: 0; border-radius: var(--radius);
   pointer-events: none; visibility: hidden; opacity: 0;
-  box-shadow: 0 16px 40px rgba(0,0,0,0.5), 0 0 20px rgba(0,212,255,0.12);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.5);
   transition: opacity 0.3s var(--ease), transform 0.3s var(--ease), visibility 0s linear 0.3s;
 }
 /* 进入时 visibility 立即生效；离开时延迟到淡出结束再隐藏（保持淡出过程可见） */
@@ -941,6 +1127,13 @@ useModuleDialogGuard("photos", () => {
 .photo-thumb { background-size: cover; background-position: center; position: relative; z-index: 1; filter: saturate(0.85) brightness(0.9); aspect-ratio: 1 / 1; }
 .photo-overlay { position: absolute; bottom: 0; left: 0; right: 0; z-index: 3; padding: 10px 12px; background: linear-gradient(180deg, transparent, rgba(0,0,0,0.85)); opacity: 0; transition: opacity 0.3s; display: flex; justify-content: space-between; align-items: flex-end; }
 .photo-card:hover .photo-overlay { opacity: 1; }
+/* 键盘进入同样揭示：焦距在条目上时用户必须读得到名称与尺寸 */
+.masonry-item:focus-within .photo-overlay { opacity: 1; }
+/* 触屏无 hover 态：文字层若仍依赖悬浮，将永远不可见 */
+@media (hover: none) {
+  .photo-overlay { opacity: 1; }
+  .photo-card::before { display: none; }
+}
 .photo-name { font-size: 11px; color: var(--text-primary); font-family: var(--font); }
 .photo-size { font-size: 9px; color: var(--accent); font-family: var(--font); letter-spacing: 0.5px; }
 
@@ -987,10 +1180,12 @@ useModuleDialogGuard("photos", () => {
 
 /* 查看器 */
 .viewer { position: fixed; inset: 0; background: rgba(0,0,0,0.96); display: flex; align-items: center; justify-content: center; z-index: 2000; transition: filter 0.4s var(--ease); animation: viewer-in 0.4s var(--ease); }
+/* 模态根以 tabindex="-1" 承接程序化焦点：不绘制焦点框（焦点语义由模态本身承担） */
+.viewer:focus, .viewer:focus-visible { outline: none; }
 @keyframes viewer-in { from { opacity: 0; } to { opacity: 1; } }
 .viewer.blurred { filter: blur(50px) brightness(0.2); }
 .viewer-content { max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column; gap: 12px; align-items: center; position: relative; }
-.viewer-image { max-width: 90vw; max-height: 80vh; object-fit: contain; border-radius: var(--radius); box-shadow: 0 0 40px rgba(0,0,0,0.8), 0 0 1px rgba(0,212,255,0.2); transform-origin: center center; transition: transform 0.12s ease-out; animation: photo-in 0.6s var(--ease); user-select: none; -webkit-user-drag: none; }
+.viewer-image { max-width: 90vw; max-height: 80vh; object-fit: contain; border-radius: var(--radius); transform-origin: center center; transition: transform 0.12s ease-out; animation: photo-in 0.6s var(--ease); user-select: none; -webkit-user-drag: none; }
 .viewer-image.dragging { transition: none; }
 @keyframes photo-in { from { opacity: 0; } to { opacity: 1; } }
 /* 动画关键帧（被导出对话框等复用） */
@@ -1000,6 +1195,7 @@ useModuleDialogGuard("photos", () => {
 /* ===== 导出对话框：两栏工作台（左选片 / 右配置） ===== */
 .export-dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.84); display: flex; align-items: center; justify-content: center; z-index: 4000; animation: fade-in 0.2s var(--ease); }
 .export-dialog { width: min(860px, calc(100vw - 48px)); height: min(560px, calc(100vh - 96px)); display: flex; flex-direction: column; border-radius: var(--radius); animation: dialog-in 0.3s var(--ease); overflow: hidden; }
+.export-dialog:focus, .export-dialog:focus-visible { outline: none; }
 
 /* 头部：标题 + 实时计数 + 关闭（计数常驻头部，滚动区不再重复） */
 .ed-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px 14px; flex-shrink: 0; }
@@ -1023,10 +1219,12 @@ useModuleDialogGuard("photos", () => {
 .ed-mini-btn:hover:not(:disabled) { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.3); background: rgba(var(--accent-rgb), 0.06); }
 .ed-mini-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* 选片网格：填满左栏（固定窗口内滚动收敛在栏内）；选中态为蓝色描边 */
-.ed-photo-grid { flex: 1; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); grid-auto-rows: 92px; gap: 8px; padding: 1px 2px 14px 1px; align-content: start; }
-.ed-photo-item { position: relative; border-radius: var(--radius-sm); overflow: hidden; cursor: pointer; background: rgba(0,0,0,0.35); outline: 1px solid transparent; outline-offset: -1px; transition: outline-color 0.18s var(--ease); }
+/* 选片网格：虚拟滚动容器（行窗口模型，与主网格同源）。
+   flex-basis 归零保证高度由 flex 布局决定，滚动收敛在左栏内部。 */
+.ed-pane--gallery .ed-photo-grid { flex: 1 1 0; min-height: 0; padding: 1px 0 14px 0; }
+.ed-photo-item { position: relative; width: 100%; height: 100%; border-radius: var(--radius-sm); overflow: hidden; cursor: pointer; background: rgba(0,0,0,0.35); outline: 1px solid transparent; outline-offset: -1px; transition: outline-color 0.18s var(--ease); }
 .ed-photo-item:hover { outline-color: rgba(var(--accent-rgb), 0.3); }
+.ed-photo-item:focus-visible { outline: 2px solid var(--accent); }
 .ed-photo-item.selected { outline: 2px solid var(--accent); }
 .ed-photo-thumb { position: absolute; inset: 0 0 18px 0; background-size: cover; background-position: center; }
 .ed-photo-name { position: absolute; left: 0; right: 0; bottom: 0; height: 18px; line-height: 18px; padding: 0 6px; font-size: 9px; color: var(--text-secondary); background: rgba(0,0,0,0.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

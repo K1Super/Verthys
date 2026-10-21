@@ -68,7 +68,6 @@
     <!-- ===== 管理主界面 ===== -->
     <ManagementView
       v-else
-      :initializing="initializing"
       :global-key-ready="globalKeyReadyRef"
       :session-remaining="sessionRemaining"
       :idle-lock-enabled="sessionLockEnabledRef"
@@ -87,6 +86,7 @@
       :preset-applying="presetApplying"
       :preset-ambience-mode="presetAmbienceMode"
       :preset-sync-failed="presetSyncFailed"
+      :hardening-failed="securityHardeningFailedRef"
       :cpu-overhead="cpuOverhead"
       :security-coverage="securityCoverage"
       :overall-score="overallScore"
@@ -206,6 +206,7 @@ import {
   MODULE_IDS, MODULE_LABELS,
   securityPresetRef, restoreSecurityPreset,
   sessionLockEnabledRef,
+  securityHardeningFailedRef,
   checkInitStatus,
 } from "../../lib/keyManager";
 import {
@@ -226,6 +227,7 @@ const ManagementView = defineAsyncComponent(() => import("../views/ManagementVie
 const ChangeKeyDialog = defineAsyncComponent(() => import("../management/ChangeKeyDialog.vue"));
 const ExportVerifyDialog = defineAsyncComponent(() => import("../management/ExportVerifyDialog.vue"));
 import { useToastCenter } from "../../composables/useToastCenter";
+import { useClipToast } from "../../composables/useClipToast";
 import { useViewMode } from "../../composables/security-center/useViewMode";
 // useDeviceBinding 必须在 useViewMode / useUnlockFlow 之前调用（提供 deviceCheckResult / checkDevice 注入）
 import { useDeviceBinding } from "../../composables/security-center/useDeviceBinding";
@@ -243,14 +245,11 @@ const emit = defineEmits<{ (e: "back"): void; (e: "panel-active", val: boolean):
 
 /* ===== 瞬时提示（统一替代所有内联 sc-error / kv-error / sc-toast）
  * 全局单例中心：渲染统一归 ToastLayer（最高层），本处仅取用方法 ===== */
-const { showError, showStatus, showCopied } = useToastCenter();
+const { showError, showStatus } = useToastCenter();
 /* 安全子 composable 注入口径（DI 参数名沿用 showToast，指向标准状态通道） */
 const showToast = showStatus;
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-/* ===== 初始化守卫：组件挂载期间禁止管理视图交互 ===== */
-const initializing = ref(true);
 
 /* ===== 设备机器码校验 =====
  * 必须在 useViewMode / useUnlockFlow 之前调用（提供 deviceCheckResult / checkDevice 注入） */
@@ -365,10 +364,38 @@ const { sessionRemaining, startSessionTick, stopSessionTick, resetSession } = us
   idleLockEnabled: sessionLockEnabledRef,
 });
 
-/* ===== 剪贴板工具（注入 useModuleKeys 的 onShowModuleKey 使用） ===== */
-const onCopyText = async (text: string) => {
-  try { await navigator.clipboard.writeText(text); } catch { /* */ }
-  showCopied();
+/* ===== 剪贴板工具（模块密钥复制；生命周期归 useClipToast） =====
+ * 复制结果与清空时间轮番提示（先结果、后清空时间），默认 1 分钟后静默清空；
+ * 写入失败如实返回，由调用方红字直陈 —— 禁止无条件提示「已复制」。 */
+const writeViaTextarea = async (content: string): Promise<boolean> => {
+  const prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const ta = document.createElement("textarea");
+  try {
+    ta.value = content;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    ta.remove();
+    prevFocus?.focus?.();
+  }
+};
+const { copyWithTimeout: copySecure } = useClipToast("模块密钥已复制", { write: writeViaTextarea });
+
+/** 复制敏感文本（失败不得静默；成功/清空时间由安全通道轮番提示） */
+const onCopyText = async (text: string): Promise<boolean> => {
+  if (!text) return false;
+  const ok = await copySecure(text);
+  if (!ok) showError("复制失败：剪贴板不可用或权限被拒绝");
+  return ok;
 };
 
 /* ===== 模块独立密钥管理 ===== */
@@ -493,8 +520,6 @@ onMounted(() => {
   //   - 系统锁屏（会话守卫触发）
   //   - 会话空闲超时
   //   - 应用关闭（MainView.onClose）
-  initializing.value = false;
-
   // 机器码为本机硬件固有属性（CPU/主板/磁盘 SHA-256），与 verthys 解锁状态无关，
   // 挂载立即获取（fire-and-forget，失败仅警告不阻断主流程）。
   void refreshDeviceFingerprint();
@@ -535,8 +560,8 @@ onMounted(() => {
 const runPresetRestore = async (attempt: number): Promise<void> => {
   try {
     const report = await restoreSecurityPreset();
+    // loadPresetConfig 内部按真实结果置 presetSyncFailed（成功清除 / 失败置位）
     await loadPresetConfig();
-    presetSyncFailed.value = false;
     if (report.persistDirty) {
       // 后端此前处于回滚失败状态：本次已按受信文件重新收敛，向用户可见告知
       showToast("预设持久化状态异常，已按受信配置重新同步");
@@ -562,6 +587,9 @@ watch(globalKeyReadyRef, (ready) => {
   if (!deviceFingerprintShort.value) {
     void refreshDeviceFingerprint();
   }
+  // 设备绑定补检：进入管理界面（含已解锁重挂载）时主动校验一次，
+  // 覆盖 useUnlockFlow 解锁路径之外的重进场景（设备在会话期间变更可被发现）
+  void checkDevice();
   void runPresetRestore(0);
 }, { immediate: true });
 

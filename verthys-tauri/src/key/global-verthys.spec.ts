@@ -60,13 +60,17 @@ vi.mock("../cache/composition/verthys-cache", () => ({
   ensureRecordScan: vi.fn(),
 }));
 
-vi.mock("../session/security-session", () => ({
-  resetSessionTimer: vi.fn(),
-  clearSessionTimer: vi.fn(),
-  applySecurityPreset: vi.fn(),
-  checkBruteForceGate: vi.fn(),
-  awaitLockAllIfInProgress: vi.fn(),
-}));
+vi.mock("../session/security-session", async () => {
+  const { ref } = await import("vue");
+  return {
+    resetSessionTimer: vi.fn(),
+    clearSessionTimer: vi.fn(),
+    applySecurityPreset: vi.fn(),
+    checkBruteForceGate: vi.fn(),
+    awaitLockAllIfInProgress: vi.fn(),
+    securityHardeningFailedRef: ref(false),
+  };
+});
 
 vi.mock("../core/background-tasks", () => ({
   startBackgroundTasks: vi.fn(() => Promise.resolve()),

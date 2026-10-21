@@ -121,7 +121,7 @@ self.onmessage = async (e: MessageEvent<ParseCryptoRequest>) => {
     for (let i = 0; i < containers.length; i++) {
       const container = containers[i];
       const lm = container.lightMeta;
-      const chunkB64List = container.chunkBytes.map((b) => bytesToBase64(b));
+      const chunkCount = container.chunkBytes.length;
 
       // 空数据记录（chunkCount = 0）：容器内本就不含内容块，无法也不应
       // 归因"密钥不匹配"——单独计数，避免向用户报错误原因
@@ -131,24 +131,33 @@ self.onmessage = async (e: MessageEvent<ParseCryptoRequest>) => {
       // 索引瘦身布局：块密文按包裹态文件密钥解封（来源布局随容器携带），
       //   可导入性预检与本地导入采用同一判定口径
       const slim = lm.fmt === PHOTO_FMT_SLIM && typeof lm.wrappedFileKey === "string";
-      if (!isEmptyRecord && req.photoKey && chunkB64List.length === lm.chunkCount) {
+      if (!isEmptyRecord && req.photoKey && chunkCount === lm.chunkCount) {
         try {
+          // 预检只需首块：先按单块转码，避免为判定而转码整张照片的块列表
+          const firstB64 = bytesToBase64(container.chunkBytes[0]);
           if (slim) {
             const fileKey = await unwrapSlimFileKey(lm.wrappedFileKey!, req.photoKey);
             try {
-              decryptSlimChunk(chunkB64List[0], fileKey, lm.fileHash, 0, lm.chunkCount);
+              decryptSlimChunk(firstB64, fileKey, lm.fileHash, 0, lm.chunkCount);
               importable = true;
             } finally {
               fileKey.fill(0);
             }
           } else {
-            const first = await decryptChunk(chunkB64List[0], req.photoKey, lm.fileHash);
+            const first = await decryptChunk(firstB64, req.photoKey, lm.fileHash);
             importable = first.seq === 0 && first.total === lm.chunkCount;
           }
         } catch {
           // 模块密钥不匹配或首块损坏：计入不可解密分类，不阻断其他照片预览
         }
       }
+
+      // 块 base64 只为可导入项生成：不可导入/空记录的密文不搬运、不驻留。
+      //   历史实现为每一帧无条件转码并回传，整包密文在主线程以 base64 常驻
+      //   （约 1.33 倍放大，且随响应式容器再复制一份），超大容器会打满内存。
+      const chunkB64List = importable
+        ? container.chunkBytes.map((b) => bytesToBase64(b))
+        : [];
 
       // 可导入时预组装完整元数据（含内联块与逐块哈希），导入流水线仅重加密 meta；
       // 来源布局随元数据保留：块密文无法在缺少来源密钥时重写

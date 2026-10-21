@@ -11,13 +11,21 @@
   <div class="search-bar starlit-bar">
     <StarlitSky :seed="skySeed" />
     <div class="search-inner">
-      <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
         <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
       </svg>
-      <input class="search-input" :value="modelValue" @input="onInput" :placeholder="placeholder" />
+      <!-- 占位符只是提示而非可访问名：读屏在输入后即失去名称，故显式给出 aria-label -->
+      <input
+        class="search-input"
+        :value="modelValue"
+        @input="onInput"
+        :placeholder="placeholder"
+        :aria-label="placeholder || '搜索'"
+      />
       <slot name="filters" />
     </div>
-    <ActionButton :label="addLabel" primary @click="$emit('add')" />
+    <!-- 纯图标形态（无 add-label）没有可见文案，必须显式给出可访问名 -->
+    <ActionButton :label="addLabel" primary :aria-label="addLabel || '添加'" @click="$emit('add')" />
   </div>
 </template>
 

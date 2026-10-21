@@ -14,6 +14,11 @@
         :value="modelValue"
         :placeholder="placeholder"
         :disabled="disabled"
+        :autocomplete="autocomplete"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
+        :aria-label="label || placeholder || '密钥输入'"
         @input="$emit('update:modelValue', ($event.target as HTMLInputElement).value)"
         @keydown.enter="$emit('submit')"
       />
@@ -22,6 +27,8 @@
         type="button"
         tabindex="-1"
         :disabled="disabled"
+        :aria-label="visible ? '隐藏密钥' : '显示密钥'"
+        :aria-pressed="visible"
         @click="visible = !visible"
       >
         <svg v-if="!visible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -45,11 +52,14 @@ interface Props {
   label?: string;
   placeholder?: string;
   disabled?: boolean;
+  /** 自动填充语义：init 用 new-password、verify 用 current-password；缺省 off */
+  autocomplete?: string;
 }
 withDefaults(defineProps<Props>(), {
   label: '',
   placeholder: '',
   disabled: false,
+  autocomplete: 'off',
 });
 defineEmits<{
   'update:modelValue': [value: string];

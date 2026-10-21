@@ -1,16 +1,14 @@
 /**
- * useClipToast.spec.ts — 剪贴板安全倒计时链路回归
+ * useClipToast.spec.ts — 剪贴板安全清空链路回归
  *
- * 覆盖（Wave 56 收口 + 复审缺陷 2 的防回退门）：
- * - 复制后倒计时提示经全局 Toast 中心渲染：起步秒数入通道、逐秒递减、
- *   到期收起并覆写剪贴板 + 调用 Tauri 清空
- * - 通道单写者自守：被新实例接管后，旧实例计时器自行让出（不交错回写）
- * - 卸载归属判定：仅收回本实例写入的提示 —— 模块交叉淡出（新旧并存）时，
- *   旧实例卸载不得误清新实例已接管的倒计时通道
- * - 清理路径健壮性：无 clipboard API 时不得以未捕获异常逃逸出计时回调
- *
- * 断言口径说明：起步秒数由实现常量（COUNTDOWN_SECONDS）决定，属可调产品
- * 口径 —— 本测试不钉值，动态读取起步值后验证「逐秒递减 + 到期收束」。
+ * 覆盖（用户裁定的轮番提示契约）：
+ *   1. 复制成功先提示结果；成功提示收起后再单独提示清空时间（不叠加、不常驻）
+ *   2. 默认 1 分钟静默清空：到期覆写剪贴板 + 调用 Tauri 清空，全程无逐秒倒计时
+ *   3. 新复制取消上一笔清空计时（最后复制的内容才拥有清空权）
+ *   4. 组件卸载只取消接力提示，清空计时继续（跨模块切换仍按时清空）
+ *   5. 写入被拒（无权限 / 被占用）：如实返回 false，不提示成功
+ *   6. 降级写入器成功 / 失败 / 抛错三种收口
+ *   7. 无 clipboard API / 到期时 API 消失：不得抛未捕获异常
  *
  * 说明：onBeforeUnmount 需组件实例，node 测试环境以 vi.mock 捕获注册回调、
  * 手动触达卸载路径（仓库既有口径：无 SFC 组件测试基建）。
@@ -34,11 +32,15 @@ vi.mock("../lib/verthys", () => ({ clearClipboard: clearClipboardMock }));
 
 import { useClipToast } from "./useClipToast";
 
+/** 清空时长口径（默认 1 分钟） */
+const CLEAR_MS = 60_000;
+/** 成功提示展示时长（与实现常量对齐） */
+const STATUS_MS = 2500;
+/** 接力提示间隔（与实现常量对齐） */
+const RELAY_GAP_MS = 200;
+
 describe("useClipToast", () => {
   const writeTextMock = vi.fn(() => Promise.resolve());
-
-  /** 读取当前提示秒数（起步值由实现常量决定） */
-  const clipSeconds = () => toastState.clip.value?.seconds;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -47,7 +49,8 @@ describe("useClipToast", () => {
     writeTextMock.mockClear();
     vi.stubGlobal("navigator", { clipboard: { writeText: writeTextMock } });
     /* 单例状态复位（与 useToastCenter.spec 同口径） */
-    toastState.clip.value = null;
+    toastState.status.value = "";
+    vi.clearAllTimers();
   });
 
   afterEach(() => {
@@ -55,98 +58,139 @@ describe("useClipToast", () => {
     vi.useRealTimers();
   });
 
-  it("复制即入倒计时通道：起步秒数入通道并逐秒递减", async () => {
-    const { copyWithTimeout } = useClipToast("密码已复制");
-    await copyWithTimeout("secret");
+  it("成功：先提示复制结果，不显示倒计时也不常驻", async () => {
+    const { copyWithTimeout } = useClipToast("模块密钥已复制");
+    await expect(copyWithTimeout("secret")).resolves.toBe(true);
 
     expect(writeTextMock).toHaveBeenCalledWith("secret");
-    const start = clipSeconds();
-    expect(start).toBeGreaterThan(0);
-    expect(toastState.clip.value?.text).toBe("密码已复制");
-
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(clipSeconds()).toBe(start! - 1);
-
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(clipSeconds()).toBe(start! - 2);
+    expect(toastState.status.value).toBe("模块密钥已复制");
+    // 无秒级倒计时文案
+    expect(toastState.status.value).not.toContain("s 后自动清空");
   });
 
-  it("到期：收起提示 + 覆写剪贴板 + 调用 Tauri 清空", async () => {
-    const { copyWithTimeout } = useClipToast("已复制");
+  it("轮番提示：成功提示收起后，再单独提示清空时间（不同屏叠加）", async () => {
+    const { copyWithTimeout } = useClipToast("模块密钥已复制");
     await copyWithTimeout("secret");
-    const start = clipSeconds()!;
+
+    // 成功提示到期收起
+    await vi.advanceTimersByTimeAsync(STATUS_MS);
+    expect(toastState.status.value).toBe("");
+
+    // 间隔后接力给出设定时长（60 秒 — 不折算已消耗的提示时间）
+    await vi.advanceTimersByTimeAsync(RELAY_GAP_MS);
+    expect(toastState.status.value).toBe("剪贴板将在 60 秒后自动清空");
+  });
+
+  it("到期：静默覆写剪贴板 + 调用 Tauri 清空", async () => {
+    const { copyWithTimeout } = useClipToast("模块密钥已复制");
+    await copyWithTimeout("secret");
     writeTextMock.mockClear();
 
-    await vi.advanceTimersByTimeAsync(start * 1000 - 1000);
-    expect(clipSeconds()).toBe(1); // 到期前一秒仍在
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(CLEAR_MS - 1);
+    expect(clearClipboardMock).not.toHaveBeenCalled();
 
-    expect(toastState.clip.value).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
     expect(writeTextMock).toHaveBeenCalledWith("\u0000".repeat(32)); // 覆写
     expect(clearClipboardMock).toHaveBeenCalledTimes(1);            // Tauri 清空
   });
 
-  it("清理路径健壮性：无 clipboard API 时不抛未捕获异常", async () => {
-    vi.stubGlobal("navigator", {}); // 无 clipboard
-    const { copyWithTimeout } = useClipToast("已复制");
-    await copyWithTimeout("secret");
-    const start = clipSeconds()!;
+  it("新复制重置清空计时：仅最后复制的内容拥有清空权", async () => {
+    const { copyWithTimeout } = useClipToast("密码已复制");
+    await copyWithTimeout("first");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(clearClipboardMock).not.toHaveBeenCalled();
 
-    // 到期清理路径含 clipboard 覆写：无 API 时也必须安全走完（异常将在此 await 抛出）
-    await vi.advanceTimersByTimeAsync(start * 1000);
-    expect(toastState.clip.value).toBeNull();
+    await copyWithTimeout("second");
+    writeTextMock.mockClear();
+    // 首笔原定 60s 到点不得清空（已被第二笔接管）
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(clearClipboardMock).not.toHaveBeenCalled();
+
+    // 第二笔满 60s 才清空
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(clearClipboardMock).toHaveBeenCalledTimes(1);
   });
 
-  it("卸载归属判定：被新实例接管后旧实例让出，卸载不得误清他人状态", async () => {
-    const a = useClipToast("A");
-    await a.copyWithTimeout("a-secret");
+  it("卸载：只取消接力提示，清空计时继续（跨模块切换仍按时清空）", async () => {
+    const { copyWithTimeout } = useClipToast("模块密钥已复制");
+    await copyWithTimeout("secret");
 
-    const b = useClipToast("B");
-    await b.copyWithTimeout("b-secret");
-    const bStart = clipSeconds()!;
+    unmountCbs[0](); // 组件卸载
+    // 接力提示不再弹出
+    await vi.advanceTimersByTimeAsync(STATUS_MS + RELAY_GAP_MS);
+    expect(toastState.status.value).toBe("");
 
-    // 双计时器并存一个节拍：B（后写）保持通道，A 自守让出
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(toastState.clip.value).toEqual({ text: "B", seconds: bStart - 1 });
-
-    // 交叉淡出：旧实例 A 先卸载 —— 归属非 A，不得清除
-    unmountCbs[0]();
-    expect(toastState.clip.value).toEqual({ text: "B", seconds: bStart - 1 });
-
-    // 再推进：状态仅由 B 驱动（若 A 未让出将出现秒数抽动）
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(toastState.clip.value).toEqual({ text: "B", seconds: bStart - 2 });
-
-    // 新实例 B 卸载 —— 归属为 B，精确收回
-    unmountCbs[1]();
-    expect(toastState.clip.value).toBeNull();
+    // 清空仍按时执行
+    await vi.advanceTimersByTimeAsync(CLEAR_MS);
+    expect(clearClipboardMock).toHaveBeenCalledTimes(1);
   });
 
-  it("卸载即收回：单实例未到期卸载时提示不残留且计时停止", async () => {
-    const a = useClipToast("密码已复制");
-    await a.copyWithTimeout("secret");
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(toastState.clip.value).not.toBeNull();
-
-    unmountCbs[0]();
-    expect(toastState.clip.value).toBeNull();
-
-    // 卸载后定时器已停止：继续推进时间不得回写状态
-    await vi.advanceTimersByTimeAsync(120_000);
-    expect(toastState.clip.value).toBeNull();
-  });
-
-  it("重复复制：重置倒计时（旧计时器被替换）", async () => {
+  it("写入被拒：如实返回失败，不提示成功", async () => {
+    writeTextMock.mockRejectedValueOnce(new Error("clipboard denied"));
     const { copyWithTimeout } = useClipToast("密码已复制");
-    await copyWithTimeout("first");
-    const start = clipSeconds()!;
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(clipSeconds()).toBe(start - 1);
 
-    await copyWithTimeout("second"); // 重新起步
-    expect(clipSeconds()).toBe(start);
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(clipSeconds()).toBe(start - 1); // 仅一次递减：旧计时器已替换
+    await expect(copyWithTimeout("secret")).resolves.toBe(false);
+    expect(toastState.status.value).toBe("");
+    await vi.advanceTimersByTimeAsync(CLEAR_MS * 2);
+    expect(clearClipboardMock).not.toHaveBeenCalled();
+  });
+
+  it("Clipboard API 不可用但注入降级写入器成功：按成功处理", async () => {
+    writeTextMock.mockRejectedValueOnce(new Error("clipboard denied"));
+    const fallback = vi.fn(async () => true);
+    const { copyWithTimeout } = useClipToast("已复制", { write: fallback });
+
+    await expect(copyWithTimeout("secret")).resolves.toBe(true);
+    expect(fallback).toHaveBeenCalledWith("secret");
+    expect(toastState.status.value).toBe("已复制");
+  });
+
+  it("降级写入器同样失败：返回失败且不提示成功", async () => {
+    writeTextMock.mockRejectedValueOnce(new Error("clipboard denied"));
+    const fallback = vi.fn(async () => false);
+    const { copyWithTimeout } = useClipToast("已复制", { write: fallback });
+
+    await expect(copyWithTimeout("secret")).resolves.toBe(false);
+    expect(toastState.status.value).toBe("");
+  });
+
+  it("降级写入器抛出：按失败收口，异常不逃逸", async () => {
+    writeTextMock.mockRejectedValueOnce(new Error("clipboard denied"));
+    const fallback = vi.fn(async () => {
+      throw new Error("execCommand failed");
+    });
+    const { copyWithTimeout } = useClipToast("已复制", { write: fallback });
+
+    await expect(copyWithTimeout("secret")).resolves.toBe(false);
+    expect(toastState.status.value).toBe("");
+  });
+
+  it("无 clipboard API：如实返回失败，不抛未捕获异常", async () => {
+    vi.stubGlobal("navigator", {});
+    const { copyWithTimeout } = useClipToast("已复制");
+
+    await expect(copyWithTimeout("secret")).resolves.toBe(false);
+    expect(toastState.status.value).toBe("");
+  });
+
+  it("到期清理路径：计时中途 clipboard 不可用仍安全走完", async () => {
+    const { copyWithTimeout } = useClipToast("已复制");
+    await copyWithTimeout("secret");
+    writeTextMock.mockClear();
+
+    vi.stubGlobal("navigator", {});
+    await vi.advanceTimersByTimeAsync(CLEAR_MS);
+    expect(clearClipboardMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("自定义清空时长：提示与清空均按该时长收敛", async () => {
+    const { copyWithTimeout } = useClipToast("已复制", { seconds: 10 });
+    await copyWithTimeout("secret");
+
+    await vi.advanceTimersByTimeAsync(STATUS_MS + RELAY_GAP_MS);
+    expect(toastState.status.value).toBe("剪贴板将在 10 秒后自动清空");
+
+    await vi.advanceTimersByTimeAsync(10_000 - STATUS_MS - RELAY_GAP_MS);
+    expect(clearClipboardMock).toHaveBeenCalledTimes(1);
   });
 });

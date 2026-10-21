@@ -6,14 +6,22 @@
 <template>
   <Transition name="cosmic">
     <CosmicBackdrop v-if="show" fixed @backdrop="onBackdrop">
-      <CosmicDialog :width="width">
-        <slot />
-      </CosmicDialog>
+      <div ref="hostRef" class="cosmic-overlay-host">
+        <CosmicDialog
+          :width="width"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="ariaLabel"
+        >
+          <slot />
+        </CosmicDialog>
+      </div>
     </CosmicBackdrop>
   </Transition>
 </template>
 
 <script setup lang="ts">
+import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 import CosmicBackdrop from "./CosmicBackdrop.vue";
 import CosmicDialog from "./CosmicDialog.vue";
 
@@ -22,11 +30,14 @@ interface Props {
   width?: string;
   /** 点击遮罩背景是否关闭（默认 true） */
   backdropClose?: boolean;
+  /** 弹窗无障碍名称（读屏播报；无可见标题关联时的兜底） */
+  ariaLabel?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   width: "400px",
   backdropClose: true,
+  ariaLabel: "对话框",
 });
 
 const emit = defineEmits<{ (e: "close"): void }>();
@@ -34,7 +45,90 @@ const emit = defineEmits<{ (e: "close"): void }>();
 const onBackdrop = () => {
   if (props.backdropClose) emit("close");
 };
+
+/* ===== 模态语义：焦点陷阱 + Esc 关闭 + 焦点归还 =====
+ * 旧实现仅有视觉遮罩：键盘 Tab 可穿透到背景页面，Esc 无响应，
+ * 关闭后焦点丢失到 body —— 读屏与键盘用户无法完成弹窗交互闭环。 */
+const hostRef = ref<HTMLElement | null>(null);
+let prevFocus: HTMLElement | null = null;
+
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+/** 当前弹窗内可见的可聚焦元素（按 DOM 顺序） */
+const collectFocusables = (): HTMLElement[] => {
+  const host = hostRef.value;
+  if (!host) return [];
+  return Array.from(host.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter((el) => el.offsetParent !== null || el === document.activeElement);
+};
+
+const onKeydown = (e: KeyboardEvent) => {
+  if (!props.show) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    emit('close');
+    return;
+  }
+  if (e.key !== 'Tab') return;
+  const list = collectFocusables();
+  const host = hostRef.value;
+  if (!host) return;
+  if (list.length === 0) {
+    e.preventDefault();
+    return;
+  }
+  const first = list[0];
+  const last = list[list.length - 1];
+  const active = document.activeElement as HTMLElement | null;
+  const inside = active !== null && host.contains(active);
+  if (e.shiftKey) {
+    if (!inside || active === first) {
+      e.preventDefault();
+      last.focus();
+    }
+  } else if (!inside || active === last) {
+    e.preventDefault();
+    first.focus();
+  }
+};
+
+watch(
+  () => props.show,
+  async (show) => {
+    if (show) {
+      prevFocus =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      document.addEventListener('keydown', onKeydown, true);
+      await nextTick();
+      const list = collectFocusables();
+      (list[0] ?? hostRef.value)?.focus?.();
+    } else {
+      document.removeEventListener('keydown', onKeydown, true);
+      if (prevFocus && prevFocus.isConnected) prevFocus.focus();
+      prevFocus = null;
+    }
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeydown, true);
+});
 </script>
+
+<style scoped>
+/* display: contents —— 语义包装不参与布局（弹窗仍是遮罩的居中子项） */
+.cosmic-overlay-host {
+  display: contents;
+}
+</style>
 
 <style scoped>
 /* ===== 进场 / 退场动画（针对子组件根元素） ===== */

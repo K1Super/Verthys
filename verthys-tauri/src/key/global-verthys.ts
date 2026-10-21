@@ -47,7 +47,7 @@ import {
   VerthysErrorCode, type VerthysResult,
   wrapAsVerthysError,
 } from "../lib/verthys_error";
-import { resetSessionTimer, clearSessionTimer, checkBruteForceGate, awaitLockAllIfInProgress } from "../session/security-session";
+import { resetSessionTimer, clearSessionTimer, checkBruteForceGate, awaitLockAllIfInProgress, securityHardeningFailedRef } from "../session/security-session";
 import type { VerifyGlobalKeyResult } from "../types/key_manager";
 import { loadModuleKeyStatus } from "./module-auth";
 import { migrateRecordTypes, isAccountRecordB64 } from "./type-migration";
@@ -540,14 +540,18 @@ export async function initUnlock(
     // 2.5 暴力熔断门禁预检（纯查询，不计数）
     //
     // 服务端在 unlock 入口已强制熔断（fail-closed）；此处仅提前拦截，
-    // 避免锁定态进入 Argon2id 长运算流程浪费用户等待。查询失败时
-    // 放行，由服务端闸门兜底强制。
+    // 避免锁定态进入 Argon2id 长运算流程浪费用户等待。Tauri 环境下查询
+    // 失败按 fail-closed 拒绝（无法确认门禁状态不得进入认证流程）。
     const unlockGate = await checkBruteForceGate();
     if (!unlockGate.allowed) {
       await resetKeyManagerState();
-      return unlockGate.reason === "locked"
-        ? err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, `尝试次数过多，已锁定 ${Math.ceil(unlockGate.remainingSecs ?? 0)} 秒，请稍后再试`)
-        : err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, "失败次数已达上限，需完成安全清理与完整性校验后重试");
+      if (unlockGate.reason === "locked") {
+        return err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, `尝试次数过多，已锁定 ${Math.ceil(unlockGate.remainingSecs ?? 0)} 秒，请稍后再试`);
+      }
+      if (unlockGate.reason === "gate_unavailable") {
+        return err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, "无法确认安全门禁状态，请稍后重试");
+      }
+      return err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, "失败次数已达上限，需完成安全清理与完整性校验后重试");
     }
 
     // 3. verthys_unlock — 修复：返回完整 VerthysResponse
@@ -1332,7 +1336,10 @@ export async function verifyGlobalKey(
   // 启动会话守卫（加超时兜底 5s，防止 IPC 挂起卡死）
   try {
     await withTimeout(securitySessionStart(), 5000, "securitySessionStart");
+    securityHardeningFailedRef.value = false;
   } catch (e) {
+    // 系统锁屏会话守卫未启动成功：属可见的安全降级（面板如实标注）
+    securityHardeningFailedRef.value = true;
     log.warn("启动会话守卫失败/超时（非致命）", e);
   }
   // 运行档位不在解锁收尾应用：恢复链以受信配置为唯一权威（读取→应用），
@@ -1367,6 +1374,9 @@ export async function verifyGlobalKeyWithBruteForce(
     if (gate.reason === "locked") {
       return { ok: false, reason: "gate_locked", remainingSecs: gate.remainingSecs };
     }
+    if (gate.reason === "gate_unavailable") {
+      return { ok: false, reason: "gate_unavailable" };
+    }
     return { ok: false, reason: "gate_purge_required" };
   }
 
@@ -1400,21 +1410,20 @@ export async function verifyGlobalKeyWithBruteForce(
  * 从 initGlobalKey 中移除，由调用方决定是否绑定。
  * 绑定失败返回明确错误码，UI 层可展示提示并允许用户重试。
  *
- * @param force 是否强制重新绑定（已绑定时也覆盖）
+ * 无 force 参数：setDeviceBinding 始终写入当前机器码（覆盖语义已是唯一行为，
+ * 旧 force 参数两分支实现完全相同，属无效形参 —— 已移除避免误导调用方）。
  * @returns VerthysResult<void>
  *   - ok：绑定成功
  *   - err(E_VERTHYS_NOT_READY)：verthys 未解锁
  *   - err(E_DEVICE_BIND_FAILED)：绑定失败，UI 可提示用户重试
  */
-export async function bindDevice(force: boolean = false): Promise<VerthysResult<void>> {
+export async function bindDevice(): Promise<VerthysResult<void>> {
   if (!keyState.verthysReady.value) {
     return err(VerthysErrorCode.E_VERTHYS_NOT_READY, "verthys 未解锁");
   }
   try {
-    // force=true 时 setDeviceBinding 内部覆盖旧绑定
-    // force=false 时若已绑定则覆盖（setDeviceBinding 始终写入最新机器码）
     await setDeviceBinding();
-    log.info(force ? "设备已强制重新绑定" : "设备绑定成功");
+    log.info("设备绑定成功");
     return ok(undefined);
   } catch (e) {
     const ve = wrapAsVerthysError(e);
