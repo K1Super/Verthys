@@ -376,6 +376,34 @@ describe("runFileImport", () => {
     expect(h.endCalls).toEqual([false]);
   });
 
+  it("进度不先于落库上报：块批失败时进度停在本批之前", async () => {
+    const h = makeHarness({ chunkBatchFails: true });
+    // 两块：一批写入即失败，任何块都不应被计为已完成
+    h.vfs.set("C:\\in\\a.bin", { bytes: makeBytes(CHUNK + 4, 1), mtime: 1000 });
+
+    const result = await runFileImport([fileOf("a.bin")], null, h.deps);
+
+    expect(result.failCount).toBe(1);
+    const uploadReports = h.progress.filter((p) => p.phase === "upload");
+    expect(uploadReports.length).toBeGreaterThan(0);
+    expect(uploadReports.every((p) => p.doneInFile === 0)).toBe(true);
+  });
+
+  it("未分类异常独立归类为 E_UNKNOWN（不冒充读取失败）", async () => {
+    const h = makeHarness();
+    h.vfs.set("C:\\in\\a.bin", { bytes: makeBytes(10, 1), mtime: 1000 });
+    // 进度回调抛出属管道外异常：既非读取也非块写入
+    h.deps.onProgress = () => {
+      throw new Error("进度回调注入异常");
+    };
+
+    const result = await runFileImport([fileOf("a.bin")], null, h.deps);
+
+    expect(result.failCount).toBe(1);
+    expect(result.failures[0].code).toBe("E_UNKNOWN");
+    expect(h.endCalls).toEqual([false]);
+  });
+
   it("元数据传输层异常：按元数据失败分类（不退化为读取失败）", async () => {
     const h = makeHarness({ recordsBatchThrows: true });
     h.vfs.set("C:\\in\\a.bin", { bytes: makeBytes(10, 1), mtime: 1000 });

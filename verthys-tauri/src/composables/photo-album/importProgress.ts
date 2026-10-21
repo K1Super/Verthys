@@ -212,12 +212,20 @@ export class ImportProgressState {
     this.processed += processedInBatch;
     this.skipped += skippedInBatch;
 
-    // 单条平均耗时（防除零）
-    const perItemMs = processedInBatch > 0 ? batchElapsedMs / processedInBatch : 0;
+    // 单条平均耗时：分母只统计真正加密写入的条目。
+    //   去重跳过项几乎不耗时，若计入分母会把均摊耗时稀释到趋近 0，
+    //   EWMA 随之下探，紧随其后的正常批次就会被误判成「速率骤降」。
+    const timedCount = processedInBatch - skippedInBatch;
+    if (timedCount <= 0) {
+      this.dirty = true;
+      this.requestFlush();
+      return;
+    }
+    const perItemMs = batchElapsedMs / timedCount;
 
     // 记录样本到滑动窗口
     const sample: TimingSample = {
-      count: processedInBatch,
+      count: timedCount,
       elapsedMs: batchElapsedMs,
       perItemMs,
       timestamp: performance.now(),

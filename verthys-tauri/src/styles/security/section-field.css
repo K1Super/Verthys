@@ -117,6 +117,10 @@
   max-width: 560px;
   line-height: 1.7;
 }
+/* 降级 / 未同步警示：红字直陈（不加底色、不加图标） */
+.sf-digest.is-warn {
+  color: var(--danger);
+}
 
 /* ============================================================
    会话谱线（顶栏）— 水平丝线收尾，无卡片
@@ -486,17 +490,20 @@
   background: rgba(148, 160, 178, 0.75);
   transition:
     transform 0.42s cubic-bezier(0.34, 1.4, 0.44, 1),
-    background 0.4s var(--ease),
-    box-shadow 0.4s var(--ease);
+    background 0.4s var(--ease);
 }
-/* 激活：轨道充能渐变 + 节点跃迁至高能级（青色辉点） */
+/* 激活：轨道充能渐变 + 节点跃迁至高能级（纯色节点，无辉光阴影） */
 .sf-toggle input:checked ~ .sf-toggle-track {
   background: linear-gradient(90deg, rgba(0, 212, 255, 0.15), rgba(0, 212, 255, 0.65));
 }
 .sf-toggle input:checked ~ .sf-toggle-node {
   transform: translateX(20px);
   background: #00d4ff;
-  box-shadow: 0 0 7px rgba(0, 212, 255, 0.6);
+}
+/* 键盘焦点：轨道外轮廓显式可见（不依赖被隐藏的原生 checkbox 焦点样式） */
+.sf-toggle input:focus-visible ~ .sf-toggle-track {
+  outline: 1px solid var(--accent);
+  outline-offset: 3px;
 }
 
 /* ============================================================

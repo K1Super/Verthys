@@ -70,11 +70,12 @@ import {
   PHOTO_FMT_SLIM,
 } from "../../constants/crypto_const";
 import { estimateBase64Size } from "../../cache/shared/base64-size";
+import { isProxy } from "vue";
 import type { PhotoCryptoSuccess, PhotoMetaCryptoSuccess } from "../../workers/photo-crypto.worker";
 import { computeChunkHashesForB64, extractSlimFileSalt, type PhotoMeta } from "../../lib/crypto";
 import { bytesToBase64 } from "../../utils/binary_codec";
 import type { PhotoEntry, ParsedPhotoPreview } from "./types";
-import { formatSize } from "./utils";
+import { formatSize, makeThumbCssValue } from "./utils";
 import { createLogger } from "../../utils/logger";
 import { yieldToMain } from "../../utils/promise_utils";
 
@@ -112,6 +113,13 @@ export interface ImportFileInput {
   name: string;
   /** MIME 类型 */
   mime: string;
+  /**
+   * 文件字节数（导入前的 stat 预检结果）。
+   *
+   * 用于在读取前占用内存预算：仅按任务数背压在「少量超大文件」下仍会把
+   * 内存顶满（任务数 × 单文件上限）；未知大小时按单文件上限保守预估。
+   */
+  size?: number;
   /** 读取文件字节（流式，避免一次性加载全部到内存） */
   readBytes: () => Promise<Uint8Array>;
 }
@@ -277,31 +285,6 @@ class ChunkUploadError extends Error {
     super(message);
     this.name = "ChunkUploadError";
   }
-}
-
-/**
- * 脱代理净化：把可能被 Vue 响应式代理包裹的纯 JSON 载荷复制为普通数据对象。
- *
- * Why：解析产物存入 `parsedPhotos`（ref）后，其嵌套字段（chunkDataB64 /
- *   chunkHashes 等数组与对象）在读取时是响应式 Proxy。Proxy 不是结构化
- *   克隆的合法载荷——Worker 池 `postMessage` 会抛 DataCloneError
- *   （"[object Array] could not be cloned"），使 meta-only 加密任务对
- *   每一张照片系统性失败（表现为「加密任务失败×N」的整体失败）。
- *   浅层展开（`{...meta}`）不能消除嵌套代理，必须整对象深复制。
- *
- * 实现选择：JSON 往返是最可靠的脱代理手段（Vue 代理的 get/ownKeys 陷阱
- *   对 JSON.stringify 透明，输出纯数据）。载荷本为纯 JSON 类型，一次
- *   序列化成本远小于随后的 PBKDF2 加密；不引入深拷贝工具依赖。
- *
- * 语义说明：与 JSON 语义一致——值为 undefined 的字段净化后消失
- *   （跨线程结构化克隆与后端 JSON 解析后，缺失与 undefined 本就不可区分，
- *   调用方对两者的处理必须等价）。
- *
- * @param payload 可能含响应式代理的纯 JSON 载荷
- * @returns 与输入值相等的深复制（完全脱离代理）
- */
-function toPlainPayload<T>(payload: T): T {
-  return JSON.parse(JSON.stringify(payload)) as T;
 }
 
 /**
@@ -516,6 +499,13 @@ interface ProduceContext {
   recordProduceError(error: Error, index: number, name: string): void;
   /** 记一个条目本地拒绝（读取失败 / 超限）：显式原因分类，不进致命集合 */
   recordLocalFailure(index: number, name: string, reason: "read-failed" | "file-too-large"): void;
+  /**
+   * 占用在途源字节预算（读取前调用），返回幂等的释放函数。
+   *
+   * 任务数背压无法约束单文件体积：并发生产者各自读取一个大文件即可顶满
+   * 内存。预算覆盖「读取 → 提交 → 加密任务 settle」整段驻留期。
+   */
+  acquireBytes(bytes: number): Promise<() => void>;
   /** 请求中止会话（取消信号确认后停止投喂新条目，已提交任务照常收尾） */
   abort(): void;
 }
@@ -794,6 +784,30 @@ export class ImportPipeline {
 
       const submitPromises: Promise<void>[] = [];
 
+      /* 在途源字节预算：读取后的源字节被在途加密任务引用，直到 settle 才释放。
+       * 仅按任务数背压无法约束单文件体积——并发生产者各读一个大文件即可顶满
+       * 内存；此处按字节总量闸门，未知大小的文件按单文件上限保守占用。 */
+      const IN_FLIGHT_BYTE_BUDGET = 256 * 1024 * 1024;
+      let inFlightBytes = 0;
+      const byteWaiters: Array<() => void> = [];
+
+      /** 占用字节预算（返回幂等释放函数；单文件超预算时独占放行，避免死锁） */
+      const acquireBytes = async (bytes: number): Promise<() => void> => {
+        const reserved = Math.min(Math.max(bytes, 0), MAX_PHOTO_BYTES);
+        while (inFlightBytes > 0 && inFlightBytes + reserved > IN_FLIGHT_BYTE_BUDGET) {
+          await new Promise<void>((resolve) => byteWaiters.push(resolve));
+        }
+        inFlightBytes += reserved;
+        let released = false;
+        return () => {
+          if (released) return;
+          released = true;
+          inFlightBytes = Math.max(0, inFlightBytes - reserved);
+          const waiters = byteWaiters.splice(0);
+          for (const w of waiters) w();
+        };
+      };
+
       /**
        * 入列消费者缓冲：达到批量阈值即按背压约束触发刷新。
        *
@@ -849,6 +863,7 @@ export class ImportPipeline {
           failedRecords.push({ index, name, reason, retryable: false });
           this.progress.update(1, 0);
         },
+        acquireBytes,
         abort: () => { aborted = true; },
       };
 
@@ -1082,12 +1097,17 @@ export class ImportPipeline {
   ): Promise<void> {
     const fileInput = files[i];
 
+    // 读取前占用在途字节预算（未知大小按单文件上限保守占用）：
+    //   预算覆盖「读取 → 提交 → 加密任务 settle」整段字节驻留期
+    const releaseBytes = await ctx.acquireBytes(fileInput.size ?? MAX_PHOTO_BYTES);
+
     // 读取闸门：在途任务达到池配额前不读取下一个文件。读取结果会被
     // 在途任务引用至 settle，若无闸门则全部源文件字节同时驻留内存，
     // 大批量导入易触发内存暴涨
     await photoWorkerPool.waitForCapacity();
     if (signal?.aborted) {
       ctx.abort();
+      releaseBytes();
       return;
     }
 
@@ -1098,6 +1118,7 @@ export class ImportPipeline {
     } catch (e) {
       log.error(`读取文件失败: ${fileInput.name}`, e);
       ctx.recordLocalFailure(i, fileInput.name, "read-failed");
+      releaseBytes();
       // 让出主线程，保证 rAF 执行
       await yieldToMain();
       return;
@@ -1109,15 +1130,23 @@ export class ImportPipeline {
         `文件超过单文件上限: ${fileInput.name} (${fileBytes.byteLength} > ${MAX_PHOTO_BYTES} 字节)`,
       );
       ctx.recordLocalFailure(i, fileInput.name, "file-too-large");
+      releaseBytes();
       await yieldToMain();
       return;
     }
 
-    // 转为 ArrayBuffer（transferList 零拷贝转让到 Worker）
-    const arrayBuffer = fileBytes.buffer.slice(
-      fileBytes.byteOffset,
-      fileBytes.byteOffset + fileBytes.byteLength,
-    ) as ArrayBuffer;
+    // 转为 ArrayBuffer（transferList 零拷贝转让到 Worker）。
+    //   全量读取（readUserFile）返回的视图覆盖整个 buffer：此时直接转让原
+    //   buffer，省去 slice 的一次整文件拷贝；仅当视图是 buffer 的子区间时
+    //   才切片（转让整 buffer 会把区间外的字节一并送进 Worker）。
+    const wholeBuffer = fileBytes.byteOffset === 0
+      && fileBytes.byteLength === fileBytes.buffer.byteLength;
+    const arrayBuffer = wholeBuffer
+      ? (fileBytes.buffer as ArrayBuffer)
+      : (fileBytes.buffer.slice(
+          fileBytes.byteOffset,
+          fileBytes.byteOffset + fileBytes.byteLength,
+        ) as ArrayBuffer);
 
     // 记录提交时间（用于计算单文件加密耗时）
     const submitTime = performance.now();
@@ -1186,7 +1215,9 @@ export class ImportPipeline {
       .catch((e: Error) => {
         log.error(`加密失败: ${fileInput.name}`, e);
         ctx.recordProduceError(e, i, fileInput.name);
-      });
+      })
+      // 加密任务 settle 后才释放源字节预算（读取结果此前一直被任务引用）
+      .finally(releaseBytes);
 
     ctx.addSubmit(submitPromise);
   }
@@ -1256,12 +1287,16 @@ export class ImportPipeline {
       await yieldToMain();
       return;
     }
-    // 提升为 const 局部：闭包内保留非空收窄（属性级收窄不进嵌套函数）；
-    // 一并脱代理净化——解析产物经 Vue ref 存储，meta 及其嵌套数组字段是
-    // 响应式 Proxy，直接进 Worker 载荷会使 postMessage 抛 DataCloneError
-    // （meta-only 加密任务对每张照片系统性失败）。此处一次净化覆盖本条目
-    // 后续全部派生（metaTemplate / 内联提交 / 外置提交）与模块引用。
-    const meta: PhotoMeta = toPlainPayload(ph.meta);
+    // 提升为 const 局部：闭包内保留非空收窄（属性级收窄不进嵌套函数）。
+    //   解析产物由 usePhotoParse 以 shallowRef 承载（不建立深层代理），
+    //   meta 及其嵌套数组本就是 Worker 结构化克隆出的纯数据 —— 常规路径
+    //   直接引用，不再做整包复制。
+    //   防御式净化：若调用方传入 Vue 响应式 meta（深层代理），Worker 池
+    //   postMessage 会抛 DataCloneError，整张照片被误计为加密失败；此路径
+    //   极少发生，故仅在此做一次 JSON 往返脱代理（不在热路径复制整包密文）。
+    const meta: PhotoMeta = isProxy(ph.meta)
+      ? (JSON.parse(JSON.stringify(ph.meta)) as PhotoMeta)
+      : ph.meta;
 
     // 外置判定（按块密文总量：b64 长度 × 3/4 ≈ 原始字节）
     const b64Total = ph.chunkB64List.reduce((s, c) => s + c.length, 0);
@@ -1479,9 +1514,11 @@ export class ImportPipeline {
    *
    * 重打包复用导入通道（块 / 缩略图 / 块集 / 索引同走单写者 FIFO 与台账），
    * 故与导入一样需要显式会话；会话由调用方在整轮重打包前后成对开启与结束。
+   * 返回会话建立结果（与导入同一契约）：调用方必须检查 `ok` —— 被后端拒绝时
+   * 继续逐张写入只会让每一项都失败，真实原因（已有会话/路径不可确定）被掩盖。
    */
-  async beginRepackSession(): Promise<void> {
-    await this.beginImportSession();
+  async beginRepackSession(): Promise<ImportBeginResult> {
+    return await this.beginImportSession();
   }
 
   /**
@@ -1691,8 +1728,14 @@ export function importedToPhotoEntries(
     metaId: item.metaId,
     // 展示名以结构化 displayName 为权威（真实文件名），仅缺失时回退记录名剥离前缀
     name: item.displayName || item.name.replace(/^meta_/, ""),
-    thumb: `url(data:image/jpeg;base64,${item.thumbB64})`,
+    // 缩略图走 Blob URL：data URL 的 base64 字符串会随列表常驻 JS 堆（每张数十 KB），
+    //   且与 meta 内的同一份数据重复；Blob 数据不进字符串，释放点与生成点成对。
+    thumb: makeThumbCssValue(item.thumbB64),
     size: formatSize(item.size),
     height: 180 + ((i * 23) % 100),
+    // 刚导入项的名称/尺寸/缩略图均来自本次写入结果，无需再解密一遍元数据：
+    //   标记已加载，避免进入可视区后被按需解密重复处理（点击查看时仍会按需补齐 meta）。
+    loaded: true,
+    failed: false,
   }));
 }

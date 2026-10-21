@@ -22,11 +22,11 @@
     rgba(10, 13, 21, 0.08)
   );
 
-  /* 提示底板（单源）：玻璃体基面 —— 填充保持低不透明度让衬底透出，
-     可读性由背衬折射（backdrop-filter）与内缘收边共同承担；
+  /* 提示底板（单源）：玻璃体基面 —— 填充压至薄雾级（0.34→0.22），衬底
+     结构明确可辨，可读性由背衬折射（backdrop-filter）与上下光缝共同承担；
      斜向微光取自既有「光源偏左上」约定，语义色光晕与双平面星野
      由 .clip-toast / .error-toast 叠加 */
-  --toast-surface: linear-gradient(168deg, rgba(16, 21, 33, 0.5), rgba(9, 12, 20, 0.36));
+  --toast-surface: linear-gradient(168deg, rgba(16, 21, 33, 0.34), rgba(9, 12, 20, 0.22));
 
   /* RGB 三元组：供 rgba(var(--xxx-rgb), alpha) 动态组合，消除重复色值 */
   --accent-rgb: 0, 212, 255;

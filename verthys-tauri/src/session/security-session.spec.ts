@@ -24,6 +24,7 @@ import {
   isSessionLockEnabled,
   clearSessionTimer,
   resetSessionTimer,
+  lockAll,
 } from "./security-session";
 
 const mocks = vi.hoisted(() => ({
@@ -215,6 +216,34 @@ describe("自定义档会话语义", () => {
     await applySecurityPreset(0);
     expect(isSessionLockEnabled()).toBe(true);
     expect(getSessionTimeout()).toBe(PRESET_SESSION_TIMEOUT_MS[0]);
+  });
+});
+
+describe("lockAll 重入与代际闸门", () => {
+  it("并发重入：只跑一条真实销毁链，两方均等待其完成", async () => {
+    mocks.verthysLockPersist.mockResolvedValue(undefined);
+    mocks.verthysLock.mockResolvedValue(undefined);
+    mocks.workerDestroy.mockResolvedValue(undefined);
+
+    const first = lockAll();
+    const second = lockAll();
+    await Promise.all([first, second]);
+
+    // 第二次调用必须等待第一次的真实工作，不得并行启动第二条销毁链
+    expect(mocks.verthysLockPersist).toHaveBeenCalledTimes(1);
+    expect(mocks.workerDestroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("闸门释放：前一序列完成后可再次完整锁定", async () => {
+    mocks.verthysLockPersist.mockResolvedValue(undefined);
+    mocks.verthysLock.mockResolvedValue(undefined);
+    mocks.workerDestroy.mockResolvedValue(undefined);
+
+    await lockAll();
+    await lockAll();
+
+    expect(mocks.verthysLockPersist).toHaveBeenCalledTimes(2);
+    expect(mocks.workerDestroy).toHaveBeenCalledTimes(2);
   });
 });
 

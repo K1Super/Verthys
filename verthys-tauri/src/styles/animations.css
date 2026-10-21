@@ -264,7 +264,8 @@ body::after {
   --hub-dur: 0.7s;
 }
 
-/* 第一幕：品牌逐字凝聚 —— 规则见下方品牌共享体系 .wm-glyph / wm-crystallize
+/* 第一幕：品牌逐字凝聚 —— 规则见下方品牌共享体系 .wm-glyph /
+ * wm-crystallize（形动）· wm-ignite（质凝）
  * （延迟 = --hub-t0 + 逐字差化；本幕缓动族即上方 --hub-ease 之来源） */
 
 /* 第二幕：谱线逐条自各自基线下升起 + 显影。
@@ -313,7 +314,8 @@ body::after {
  * 分层职责：
  *   此处（全局）   — 跨级恒定：画布比例 / 四层光学叠材的几何与浓度
  *                    （折射影 · 玻璃体 · 棱边光；能量芯见三态覆写）/
- *                    笔画语言（圆端面 + 圆角转接）/ 凝聚曲线；
+ *                    笔画语言（圆端面 + 圆角转接）/
+ *                    凝聚双通道（形动 wm-crystallize ‖ 质凝 wm-ignite）；
  *   组件（scoped） — 场景专属编排：UnlockView 折光消散等。
  *
  * 光楔（玻璃体 / 棱边光 / 能量芯的渐变）由组件内联注入并配逐实例唯一
@@ -446,36 +448,62 @@ body::after {
   --wm-efar-op: 0.18;
 }
 
-/* 逐字星晶凝聚：自外侧与下方双向量平移入列 → 轻度越位 → 位移归零。
- * 运动参数为逐字设计定值（模型层设计表驱动），无随机向量 —
- * 阵形感取代离散感。
- * 运动只用平移与不透明度：缩放/旋转会令合成层改变光栅比例或以
- * 非轴对齐方式重采样，细亮笔画即糊化再转锐（所见模糊闪现的成因）；
- * 平移不改变光栅比例，字标全程锐利。
+/* 逐字星晶凝聚（双通道 — 形动 ‖ 质凝）：
+ *   形动 wm-crystallize 只走平移；质凝 wm-ignite 只走不透明度。
+ * 拆成两条独立动画而非一条混合：光与形各有各的缓动 —— 材料方能
+ * 「先到一道淡痕，落位时才实心化」；两者共用一条时间曲线时，亮度
+ * 随位移同步到位，读作整体平移浮现（即所见「简陋」的成因）。
+ * 双动画并列于同一元素：各占一条属性通道，互不覆盖（仅同名属性才覆盖）。
+ * 运动只用平移：缩放/旋转会令合成层改变光栅比例或以非轴对齐方式重采样，
+ * 细亮笔画即糊化再转锐（所见模糊闪现的成因）；平移不改变光栅比例，
+ * 故字标全程锐利。
  * 纯平移与变换原点无关 — 故不声明 transform-box / transform-origin。
+ * 两条通道的 fill 均取 backwards（延迟期为起始帧、结束后回落本位）：
+ * 末帧与本位逐值一致 —— 零跳变，且成形后即退出填充、不留常驻动画效果。
  * will-change 常驻（合成层终身恒定，杜绝结束后重栅格化的亚像素跳变） */
 .wm-glyph {
-  animation: wm-crystallize var(--dur, 1.06s) cubic-bezier(0.2, 1, 0.34, 1)
-    calc(var(--hub-t0, 0ms) + var(--delay, 0ms)) both;
+  animation:
+    wm-crystallize var(--dur, 1.06s) cubic-bezier(0.2, 1, 0.34, 1)
+      calc(var(--hub-t0, 0ms) + var(--delay, 0ms)) backwards,
+    wm-ignite var(--dur, 1.06s) cubic-bezier(0.34, 0.8, 0.36, 1)
+      calc(var(--hub-t0, 0ms) + var(--delay, 0ms)) backwards;
   will-change: transform, opacity;
 }
 
-/* 星晶凝聚：0% 自外侧下方以满距起步（不透明 0）→ 64% 位移略过稳位
- * （反向微偏移后再归位）→ 100% 位移归零（慢尾收稳）。
+/* 形动：0% 自外侧下方以满距起步 → 64% 位移略过稳位（反向微偏移后再
+ * 归位）→ 100% 位移归零（慢尾收稳）。
  * 末帧 transform:none 与驻留态逐值一致 — 零跳变、零重栅格化 */
 @keyframes wm-crystallize {
   0% {
-    opacity: 0;
     transform: translate(var(--dx, 0px), var(--dy, 23px));
     animation-timing-function: cubic-bezier(0.2, 1, 0.34, 1);
   }
   64% {
-    opacity: 1;
     transform: translate(calc(var(--dx, 0px) * -0.07), calc(var(--dy, 23px) * -0.1));
     animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   }
   100% {
-    opacity: 1;
     transform: none;
+  }
+}
+
+/* 质凝（光通道）：0% 全暗 → 44% 半透淡痕（晶体初凝 —— 此时形动已近
+ * 落位，笔画仍是一道未填实的光）→ 74% 近实心 → 100% 满亮驻留。
+ * 与形动同起笔同时长，但自成曲线：亮度滞后位移半拍 —— 「先见一道光的
+ * 痕迹，落位才凝成实体」，而非光随形同步推移（同步即整体平移浮现）。
+ * 逐字差化延迟仍由两通道共用的起笔时刻承担，故扫掠阵形完全不变。 */
+@keyframes wm-ignite {
+  0% {
+    opacity: 0;
+  }
+  44% {
+    opacity: 0.55;
+    animation-timing-function: cubic-bezier(0.36, 0, 0.3, 1);
+  }
+  74% {
+    opacity: 0.94;
+  }
+  100% {
+    opacity: 1;
   }
 }

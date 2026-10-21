@@ -49,7 +49,9 @@ import {
   PARSE_MAX_FRAME_COUNT, PARSE_MAX_FRAME_BYTES, PARSE_MAX_CONTAINER_BYTES,
   TYPE_PHOTO_META, TYPE_PHOTO_CHUNK,
 } from "../constants/crypto_const";
-import type { PhotoMeta, LightMeta, VencPhotoSpecV2, SlimChunkSet } from "../types/crypto";
+import type {
+  PhotoMeta, LightMeta, VencPhotoSpecV2, SlimChunkSet,
+} from "../types/crypto";
 import { PHOTO_INDEX_MAX_BYTES } from "../constants/photo_budget.generated";
 import {
   CryptoError, CryptoErrorKind,
@@ -1064,6 +1066,9 @@ export async function packVencV2(
  * `await emit(part)`，由调用方决定落盘 / 拼接策略；回调返回 Promise
  * 以支持背压（如流式追加落盘）。回调抛错即中止打包并向上传播。
  *
+ * 注意：本入口要求全部块字节已在内存（`photos[*].chunkBytes`）。容器体积
+ * 与内存同阶；GB 级单文件导出应改用 {@link packVencV2StreamedLazy}。
+ *
  * @param photos 照片容器数据（轻量头 + 加密块字节）
  * @param token 导出令牌（外层内容密钥封装的凭据）
  * @param emit 分段写出回调（按容器字节顺序调用）
@@ -1077,12 +1082,49 @@ export async function packVencV2Streamed(
 }
 
 /**
- * 预估 .venc v2 容器总字节数（打包前进度分母）。
+ * 惰性流式打包：不持有全部块字节，逐张加载、逐帧写出。
  *
- * 逐段合计：容器前缀 + 每个轻量头帧 / 块帧（帧头 + nonce + 负载 + tag）
- * + 尾部校验帧，与打包核心的实际产出逐字节一致，误差仅在深层异常时
- * 出现（异常路径进度不生效）。供流式导出进度换算使用。
+ * Why：单文件容器的体积可达 GB 级。若先把每张照片的块密文全部解码驻留，
+ * 内存峰值与容器总字节同阶（base64→字节还会瞬时翻倍），大库导出会在体积
+ * 上限校验之前就把进程打满。本入口在打包循环内调用一次 `loadPhoto`，
+ * 该照片的帧写出后引用即失效，峰值收敛到「一张照片 + 一个输出段」。
+ *
+ * 结构校验：每张加载结果仍走 `assertVencPhotoShape`（块数/哈希声明与负载
+ * 逐块核对），任何不符立即拒绝，绝不产出「注定无法解析」的容器。
+ *
+ * 逐张跳过：加载函数返回 null 表示该张不可导出（元数据/块缺失），该张不产生
+ * 任何帧、不占位；尾部校验帧按实际产出的帧计数，容器仍然自洽。调用方据此
+ * 保留「个别照片失败、其余照常导出」的既有语义，而不必为跳过而在内存里
+ * 预先装配全部照片。
+ *
+ * @param count 照片数（进度与循环上界）
+ * @param token 导出令牌
+ * @param loadPhoto 按序号加载该照片的完整容器数据（含块字节）；返回 null 表示跳过
+ * @param emit 分段写出回调（按容器字节顺序调用）
  */
+export async function packVencV2StreamedLazy(
+  count: number,
+  token: string,
+  loadPhoto: (index: number) => Promise<VencPhotoSpecV2 | null>,
+  emit: (part: Uint8Array) => Promise<void>,
+): Promise<void> {
+  if (!Number.isInteger(count) || count <= 0) {
+    throw invalidInput("照片数据列表不能为空");
+  }
+  await packVencV2Core(
+    count,
+    async (index) => {
+      const spec = await loadPhoto(index);
+      if (spec === null) return null;
+      assertVencPhotoShape(spec);
+      return spec;
+    },
+    token,
+    emit,
+  );
+}
+
+/** 预估 .venc v2 容器总字节数（打包前进度分母）。 */
 export function estimateVencTotalBytes(photos: VencPhotoSpecV2[]): number {
   const frameOverhead = VENC_FRAME_HEADER_BYTES + NONCE_LEN + TAG_LEN;
   let total = VENC_OUTER_HEADER_BYTES + VENC_WRAPPED_KEY_BYTES;
@@ -1097,8 +1139,39 @@ export function estimateVencTotalBytes(photos: VencPhotoSpecV2[]): number {
 }
 
 /**
- * 打包核心（packVencV2 / packVencV2Streamed 共用）：外层头部 + 内容密钥
- * 封装 + 逐帧 AEAD + 尾部校验帧，全程逐段向 `emit` 产出，不缓存帧序列。
+ * 容器固定开销（前缀 + 尾部校验帧），与打包核心逐字节一致。
+ *
+ * 供调用方在惰性导出前做体积预算：容器实际产出 = 本常量 + Σ单张帧字节。
+ */
+export const VENC_CONTAINER_FIXED_BYTES =
+  VENC_OUTER_HEADER_BYTES + VENC_WRAPPED_KEY_BYTES
+  + VENC_FRAME_HEADER_BYTES + NONCE_LEN + TAG_LEN + VENC_TRAILER_PAYLOAD_BYTES;
+
+/**
+ * 单张照片在容器内的帧字节数（轻量头帧 + 逐块帧），与打包核心逐字节一致。
+ *
+ * 惰性出口的调用方据此累计体积预算：超限即可在写出该张之前中止，
+ * 不会留下超限产物。
+ *
+ * @param lightMeta 轻量头（明文，按 JSON 序列化计入）
+ * @param chunkLengths 逐块密文字节长度（顺序无关，仅求和）
+ */
+export function vencPhotoFramesBytes(
+  lightMeta: LightMeta,
+  chunkLengths: readonly number[],
+): number {
+  const frameOverhead = VENC_FRAME_HEADER_BYTES + NONCE_LEN + TAG_LEN;
+  let total = frameOverhead + new TextEncoder().encode(JSON.stringify(lightMeta)).length;
+  for (const len of chunkLengths) total += frameOverhead + len;
+  return total;
+}
+
+/**
+ * 打包入口（快照式）：先对全部照片做结构预检，再走共享核心。
+ *
+ * @param photos 照片容器数据（块字节已全部驻留）
+ * @param token 导出令牌
+ * @param emit 分段写出回调
  */
 async function packVencV2Internal(
   photos: VencPhotoSpecV2[],
@@ -1108,10 +1181,26 @@ async function packVencV2Internal(
   if (!photos || photos.length === 0) {
     throw invalidInput("照片数据列表不能为空");
   }
+  for (const photo of photos) assertVencPhotoShape(photo);
+  await packVencV2Core(photos.length, async (index) => photos[index], token, emit);
+}
+
+/**
+ * 打包核心（快照式 / 惰性式共用）：外层头部 + 内容密钥封装 + 逐帧 AEAD
+ * + 尾部校验帧，全程逐段向 `emit` 产出，不缓存帧序列。
+ *
+ * 照片数据经 `loadPhoto` 逐张取用：惰性入口因此只驻留当前照片的块字节，
+ * 帧写出后即由作用域释放。
+ */
+async function packVencV2Core(
+  count: number,
+  loadPhoto: (index: number) => Promise<VencPhotoSpecV2 | null>,
+  token: string,
+  emit: (part: Uint8Array) => Promise<void>,
+): Promise<void> {
   if (!token || token.length === 0) {
     throw invalidInput("加密令牌不能为空");
   }
-  for (const photo of photos) assertVencPhotoShape(photo);
 
   // 1. 外层头部（明文，42B）
   const header = new Uint8Array(VENC_OUTER_HEADER_BYTES);
@@ -1157,7 +1246,11 @@ async function packVencV2Internal(
     let seq = 0;
     let frameCount = 0;
     let bodyBytes = 0;
-    for (const photo of photos) {
+    for (let pi = 0; pi < count; pi++) {
+      // 逐张取用：惰性入口在此刻才加载块字节，帧写出后由作用域释放。
+      //   加载结果为 null 表示该张不可导出：不产生任何帧（尾部帧计数按实际产出）。
+      const photo = await loadPhoto(pi);
+      if (!photo) continue;
       const lmBytes = new TextEncoder().encode(JSON.stringify(photo.lightMeta));
       await emit(encryptFrame(contentKey, VENC_FRAME_TYPE_LIGHT_META, seq++, lmBytes));
       frameCount += 1;

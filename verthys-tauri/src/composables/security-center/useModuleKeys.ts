@@ -51,6 +51,7 @@ import {
   moduleKeyReadyRef,
   moduleKeyEnabledRef,
   MODULE_LABELS,
+  touchSession,
   type ModuleId,
 } from '../../lib/keyManager';
 
@@ -63,8 +64,8 @@ export interface UseModuleKeysOptions {
   showError: (msg: string) => void;
   /** 显示成功提示（SecurityCenter 顶层注入，全局 Toast 中心状态通道，2.5s 自动消失） */
   showToast: (msg: string) => void;
-  /** 复制文本到剪贴板（SecurityCenter 顶层持有，含提示反馈） */
-  onCopyText: (text: string) => Promise<void>;
+  /** 复制文本到剪贴板（SecurityCenter 顶层持有；返回是否真正写入） */
+  onCopyText: (text: string) => Promise<boolean>;
 }
 
 /**
@@ -126,6 +127,9 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
   const disableVerifyModuleId = ref<ModuleId>("photo");
   const disableVerifyKey = ref("");
   const disableVerifyProcessing = ref(false);
+  /** 关闭保护验证代际：取消/切换目标即作废在途验证结果
+   *  （用户在验证途中取消后，验证成功不得仍关闭保护）。 */
+  let disableVerifySeq = 0;
 
   /* ===== 切换模块密钥保护开关（乐观更新 — 立即响应，后台持久化） =====
    *
@@ -157,6 +161,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
     if (!enabled && hasModuleKey(mid)) {
       // 强制恢复 checkbox 开启状态（验证通过前不改变保护状态）
       moduleKeyEnabledRef.value = { ...moduleKeyEnabledRef.value, [mid]: true };
+      disableVerifySeq += 1;
       disableVerifyModuleId.value = mid;
       disableVerifyKey.value = "";
       showDisableVerifyDialog.value = true;
@@ -188,10 +193,14 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
    */
   const onConfirmDisableVerify = async () => {
     if (!disableVerifyKey.value || disableVerifyProcessing.value) return;
+    const seq = disableVerifySeq;
     disableVerifyProcessing.value = true;
     try {
       const mid = disableVerifyModuleId.value;
       const verifyResult = await verifyModuleKey(mid, disableVerifyKey.value);
+      /* 代际仲裁：验证在途期间用户已取消 / 切换目标 / 弹窗已关闭 →
+       * 本次结果作废，绝不因「验证成功」而违背用户取消意愿去关闭保护。 */
+      if (seq !== disableVerifySeq || !showDisableVerifyDialog.value) return;
       if (!verifyResult.ok) {
         options.showError(translateVerthysError(verifyResult));
         return;
@@ -201,6 +210,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
       options.showToast(`${MODULE_LABELS[mid]} 密钥保护已关闭`);
       showDisableVerifyDialog.value = false;
       disableVerifyKey.value = "";
+      touchSession();
       setModuleKeyEnabled(mid, false).then((result) => {
         if (!result.ok) {
           moduleKeyEnabledRef.value = { ...moduleKeyEnabledRef.value, [mid]: true };
@@ -217,8 +227,12 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
     }
   };
 
-  /** 关闭密钥保护验证弹窗 — 取消 */
+  /** 关闭密钥保护验证弹窗 — 取消
+   *  处理中禁止取消（弹窗侧同步禁用取消/遮罩关闭）：在途验证结果一旦在
+   *  用户取消后落地关闭保护，属未经确认的安全降级。 */
   const onCancelDisableVerify = () => {
+    if (disableVerifyProcessing.value) return;
+    disableVerifySeq += 1;
     showDisableVerifyDialog.value = false;
     disableVerifyKey.value = "";
     // 回滚 checkbox 状态
@@ -241,9 +255,11 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
   };
 
   /** 关闭密钥编辑弹窗
+   * 处理中禁止关闭（写入在途时关闭会让已提交的写入失去落点提示）
    * 中途退出处理：若处于「待启用」流程（开启保护触发的密钥设置），
    *   中止流程 → 保护保持关闭，checkbox 回滚为关闭态（UI 与状态一致） */
   const onCloseKeyDialog = () => {
+    if (keyDialogProcessing.value) return;
     if (pendingEnableModuleId.value !== null) {
       moduleKeyEnabledRef.value = { ...moduleKeyEnabledRef.value, [pendingEnableModuleId.value]: false };
       pendingEnableModuleId.value = null;
@@ -295,6 +311,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
       // 验证通过（或生成模式）→ 保存新密钥
       const result = await setModuleKey(mid, editingKeyValue.value);
       if (result.ok) {
+        touchSession();
         // 待启用流程判定：密钥设置成功 → 自动开启该模块密钥保护
         const pendingEnable = pendingEnableModuleId.value === mid;
         pendingEnableModuleId.value = null;
@@ -347,8 +364,10 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
       options.showToast("密钥不可用");
       return;
     }
-    await options.onCopyText(key);
-    options.showToast(`${MODULE_LABELS[mid]} 密钥已复制到剪贴板`);
+    /* 复制结果与清空时间由安全剪贴板通道轮番提示；此处不再叠加第二条
+     * 「已复制」提示（避免同一动作两段提示并排出现）。 */
+    const copied = await options.onCopyText(key);
+    if (copied) touchSession();
   };
 
   /** 登出模块（清除会话密钥缓存） */

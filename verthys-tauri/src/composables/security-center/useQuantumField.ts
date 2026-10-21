@@ -32,12 +32,16 @@
  *      —— 鼠标移动时整组一动不动。
  *      视差仅保留给圆环「背后」的氛围元素：Canvas 尘埃（系数 5）与
  *      数据碎片（系数 13×0.8），二者只改绘制坐标，无任何 DOM 位移
- *   6. 卫星环饰与吸积盘同一渲染语言（有意设计）：三个模块节点的装饰环不再由
+ *   6. 卫星环饰为引擎绘制的精密刻度盘（有意设计）：三个模块节点的装饰环不再由
  *      DOM/SVG 描边承担，而由本引擎绘制 —— 发丝刻度环（三段非均匀断裂弧 +
- *      断口刻度）+ 内外双自转能量弧（钟形端点渐隐、模块色相）+ 状态扇段
- *      （跨度弹簧 × 色相插值 × 休眠压暗）+ 捕获光晕贴图。逐节点独立种子 →
- *      刻向/相位/跨度/速度互异（拒绝整齐划一的机械同步）；运动由引擎驱动，
- *      故与核心吸积盘共享同一档位治理与自限节拍
+ *      断口主刻度 + 十二枚不等角细刻度 + 内凹镜筒细环）+ 内外双自转能量弧
+ *      （钟形端点渐隐、向中性钢色收敛的模块色相）+ 状态扇段（跨度弹簧 ×
+ *      色相插值 × 休眠压暗）。逐节点独立种子 → 刻向/刻度抖动/相位/跨度/速度
+ *      互异（拒绝整齐划一的机械同步）；运动由引擎驱动，故与核心吸积盘共享
+ *      同一档位治理与自限节拍。
+ *      材质裁定（反「AI 模板霓虹」）：卫星走**正常混合**（非 additive），
+ *      不绘任何大面积光晕贴图 —— 亮度与层次一律来自刻线密度、线宽对比与
+ *      结构明暗；加法混合仅保留给核心吸积盘与能量流（它们本就是能量体）
  *
  * 【渲染性能】
  *   1. DPR 缩放抗锯齿；粒子预渲染径向渐变贴图 drawImage（禁用 shadowBlur）；
@@ -99,21 +103,25 @@ const FIELD_CUTOFF2 = FIELD_SIGMA2 * -Math.log(FIELD_EPSILON);
 /** 连线中点增益高斯分母（σ 放宽 √2.2 —— 连线尺度大于粒子） */
 const LINK_SIGMA2 = FIELD_SIGMA2 * 2.2;
 /** 连线终点回缩半径（px）：装饰环圆心 → 环沿。
- *  装饰环半径 21（见 qd-panel.css 的 .qd-node-reticle：viewBox 48 = 元素
- *  48 CSS px，r = 21）+ 0.5 描边外缘 + 0.5 视觉间隙。节点 DOM 锚点即环圆心
- *  （见 qd-panel.css 的 .qd-module-node），终点沿「圆环中心 → 环心」方向
- *  回缩至此半径：线尾对接在环沿，绝不进入环内空间 —— 旧实心暗底托时代
+ *  刻度环半径 SAT_R_BEZEL（20.5，环饰与 48px 目录图标严格同径）+ 半线宽
+ *  0.5（SAT_BEZEL_WIDTH，环沿线外缘 21.0）+ 1.0 视觉间隙。节点 DOM 锚点即
+ *  环圆心（见 qd-panel.css 的 .qd-module-node），终点沿「圆环中心 → 环心」
+ *  方向回缩至此半径：线尾对接在环沿，绝不进入环内空间 —— 旧实心暗底托时代
  *  终点取环心无碍（线尾落在盘内读作「接在盘上」），换成中空刻度环 +
  *  悬浮字形后则读作「线穿过图标、把节点串起来」。 */
 const LINK_DOCK_R = 22;
 
-/* ---------- 卫星环饰（模块节点的引力锚点环 — 与吸积盘同一渲染语言） ----------
+/* ---------- 卫星环饰（模块节点的引力锚点环 — 加工件语言，非发光球） ----------
  * 三个模块节点原先只有一层静态 SVG 发丝描边，而中心圆环是本引擎逐帧渲染的
- * 多层活体（等长断弧 + 暗核 + 辉点 + 尘埃场），两者媒介层级相差一档 ——
- * 「与圆环天差地别」的根因即此。故把卫星环饰一并搬入本引擎：与吸积盘共用
- * 同一套语言（钟形端点渐隐的断裂弧、预渲染贴图、additive 发光、模块色相），
- * 运动同样由本引擎驱动 —— CSS/DOM 动画在 deep-idle 不会停帧，而本引擎的
- * 自限节拍与空闲档位对该层同样生效。
+ * 多层活体（断弧 + 暗核 + 辉点 + 尘埃场），两者媒介层级相差一档 ——
+ * 「与圆环天差地别」的根因即此。故把卫星环饰一并搬入本引擎，运动由本引擎
+ * 驱动（CSS/DOM 动画在 deep-idle 不会停帧，本引擎的自限节拍与空闲档位会）。
+ *
+ * 材质裁定（反「AI 模板霓虹」）：环饰读作**精密仪表刻度盘**而非发光球 ——
+ *   - 正常混合（非 additive）：加法混合会让弧段交叠处浓度堆积成发光团块；
+ *   - 无大面积软光（不绘捕获光晕贴图）：亮度一律来自刻线与线宽对比；
+ *   - 模块色相向中性钢色收敛（SAT_DESATURATE）：着色加工件而非夜光管；
+ *   - 线端一律平口（butt）：端面垂直切口是刻线语言，圆头属装饰球语言。
  *
  * 全部为定值 px：节点尺寸由 CSS 定死 48px、回缩半径 LINK_DOCK_R 亦为定值，
  * 故卫星环饰不随面板尺度缩放（与 DOM 图标严格同径）。 */
@@ -124,9 +132,19 @@ const SAT_SEGS = 6;
  *  沿用既定的非均匀取值，环的身份与此前完全一致 */
 const SAT_BEZEL_ARCS_DEG = [121.68, 98.64, 95.76];
 const SAT_BEZEL_GAPS_DEG = [12.24, 9.36, 22.32];
-/** 环内刻度长度（自环沿向内，px）与环沿线宽 */
-const SAT_TICK_LEN = 2.4;
+/** 细刻度数量（不等角，构建期由种子抖动 → 手作刻度而非机器均分） */
+const SAT_TICK_FAN = 12;
+/** 细刻度 / 断口主刻度的内伸长度（px，自刻度起点向内）与刻度起点半径 */
+const SAT_TICK_MINOR = 2.2;
+const SAT_TICK_MAJOR = 4.4;
+const SAT_TICK_FROM = 19.4;
+/** 环沿线宽 */
 const SAT_BEZEL_WIDTH = 1;
+/** 内凹镜筒细环半径（加工件第二道槽 — 明暗对比来自结构，不来自软光） */
+const SAT_GROOVE_R = 16.4;
+/** 模块色相向中性钢色收敛的比例（0 = 本色，1 = 纯钢）与其基准钢色 */
+const SAT_DESATURATE = 0.55;
+const SAT_STEEL_RGB = [176, 202, 220] as const;
 /** 外圈自转能量弧：跨度、角速度（rad/s → 约 30~78s 一圈）与亮度区间 */
 const SAT_ACCENT_SPAN = [1.15, 1.75];
 const SAT_ACCENT_OMEGA = [0.08, 0.2];
@@ -134,9 +152,6 @@ const SAT_ACCENT_OMEGA = [0.08, 0.2];
 const SAT_INNER_R = 13.4;
 const SAT_INNER_SPAN = [0.55, 0.95];
 const SAT_INNER_OMEGA = [-0.14, -0.06];
-/** 捕获光晕（additive 贴图）直径 / 环半径，与其浓度上限（克制 — 拒绝辉光泛滥） */
-const SAT_HALO_SCALE = 4.6;
-const SAT_HALO_ALPHA = 0.15;
 /** 保护已关闭（state-off）时的整体压暗系数 */
 const SAT_DORMANT_ALPHA = 0.42;
 /** 悬浮时的环饰能量增益 */
@@ -175,17 +190,20 @@ interface SatArc {
 
 /**
  * 构建卫星静态刻度环路径（局部坐标，环心为原点）：三段非均匀断裂弧 +
- * 每处断口一枚内指刻度 —— 「刻痕即刻度」的仪表语言，拒绝「一枚完美圆环」
- * 的加载器观感（与吸积盘的分段不等长弧同族）。
+ * 断口主刻度（长） + 细刻度扇（短，不等角） + 内凹镜筒细环（第二道槽）。
+ * —— 精密仪表的刻度盘语言：亮度与层次全部来自刻线与线宽对比，
+ * 拒绝「一枚完美圆环」的加载器观感与「一片软光」的模板观感。
  *
  * @param base 逐节点静态偏转角（rad）—— 同一几何、不同刻向，赋予三个节点
- *   各自的仪表朝向（差异来自确定性取值，非随机抖动）
+ *   各自的仪表朝向
+ * @param rand 逐节点种子（细刻度的不等角抖动 —— 手作刻度，非机器均分）
  */
-function makeSatBezelPath(base: number): Path2D {
+function makeSatBezelPath(base: number, rand: () => number): Path2D {
   const path = new Path2D();
   const r = SAT_R_BEZEL;
-  const tickIn = SAT_R_BEZEL - SAT_TICK_LEN;
   const deg = Math.PI / 180;
+
+  /* 三段非均匀断裂弧 + 每处断口一枚主刻度 → 断口即刻度分区 */
   let acc = 0;
   for (let i = 0; i < SAT_BEZEL_ARCS_DEG.length; i++) {
     const a0 = base + acc * deg;
@@ -194,11 +212,38 @@ function makeSatBezelPath(base: number): Path2D {
     path.arc(0, 0, r, a0, a1);
     acc += SAT_BEZEL_ARCS_DEG[i];
     const mid = base + (acc + SAT_BEZEL_GAPS_DEG[i] / 2) * deg;
-    path.moveTo(Math.cos(mid) * r, Math.sin(mid) * r);
-    path.lineTo(Math.cos(mid) * tickIn, Math.sin(mid) * tickIn);
+    const rIn = SAT_TICK_FROM - SAT_TICK_MAJOR;
+    path.moveTo(Math.cos(mid) * SAT_TICK_FROM, Math.sin(mid) * SAT_TICK_FROM);
+    path.lineTo(Math.cos(mid) * rIn, Math.sin(mid) * rIn);
     acc += SAT_BEZEL_GAPS_DEG[i];
   }
+
+  /* 细刻度扇：十二枚短刻线，角度带种子抖动（手作感），自刻度起点向内 */
+  const rMinor = SAT_TICK_FROM - SAT_TICK_MINOR;
+  for (let k = 0; k < SAT_TICK_FAN; k++) {
+    const a = base + (k / SAT_TICK_FAN) * Math.PI * 2 + (rand() - 0.5) * 0.07;
+    path.moveTo(Math.cos(a) * SAT_TICK_FROM, Math.sin(a) * SAT_TICK_FROM);
+    path.lineTo(Math.cos(a) * rMinor, Math.sin(a) * rMinor);
+  }
+
+  /* 内凹镜筒细环（第二道槽）：不等长双弧，与刻度环同一语言 */
+  const gA0 = base + 0.7;
+  const gB0 = gA0 + 2.9;
+  path.moveTo(Math.cos(gA0) * SAT_GROOVE_R, Math.sin(gA0) * SAT_GROOVE_R);
+  path.arc(0, 0, SAT_GROOVE_R, gA0, gA0 + 2.31);
+  path.moveTo(Math.cos(gB0) * SAT_GROOVE_R, Math.sin(gB0) * SAT_GROOVE_R);
+  path.arc(0, 0, SAT_GROOVE_R, gB0, gB0 + 2.02);
+
   return path;
+}
+
+/** 逐链色相 → 向中性钢色收敛的加工件描边色串（构建期一次拼定，逐帧零色串构建） */
+function satTint(rgb: readonly [number, number, number]): string {
+  const k = SAT_DESATURATE;
+  const r = Math.round(rgb[0] + (SAT_STEEL_RGB[0] - rgb[0]) * k);
+  const g = Math.round(rgb[1] + (SAT_STEEL_RGB[1] - rgb[1]) * k);
+  const b = Math.round(rgb[2] + (SAT_STEEL_RGB[2] - rgb[2]) * k);
+  return `rgba(${r},${g},${b},1)`;
 }
 /** 引擎自身耗时 EMA 平滑系数（密度自适应依据） */
 const FRAME_EMA = 0.92;
@@ -251,8 +296,13 @@ const FLOW_DURATION = {
   landing: 0.36,
 } as const;
 
-/** 光水配色（三条水带各取一色 + 逐链相位差化 → 不同步，非机械重复） */
-const WATER_EDGE = ['rgba(0,212,255,', 'rgba(139,92,246,', 'rgba(255,110,180,'];
+/** 逐链色相（数值权威源）：连线水带与卫星环饰的模块色相一律由此派生 —
+ *  禁止任何一处另写一份色值（副本必然漂移）；三条水带各取一色 +
+ *  逐链相位差化 → 不同步，非机械重复 */
+const LINK_HUE_RGB: readonly (readonly [number, number, number])[] = [
+  [0, 212, 255], [139, 92, 246], [255, 110, 180],
+];
+const WATER_EDGE = LINK_HUE_RGB.map((c) => `rgba(${c[0]},${c[1]},${c[2]},`);
 const WATER_CORE = ['rgba(214,255,252,', 'rgba(226,214,255,', 'rgba(255,226,240,'];
 
 /** 光水回传的分区（与 QuantumDashboard 的 enterSection 载荷同一口径） */
@@ -461,7 +511,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
   let ctx: CanvasRenderingContext2D | null = null;
   let coreEl: HTMLElement | null = null;
   let nodeEls: HTMLElement[] = [];
-  /** 装饰球体引用（逐帧缩放目标 — 承载文字的节点外层不得缩放） */
+  /** 装饰环热区引用（逐帧缩放目标 — 盒内仅矢量图标，无字形栅格化代价） */
   let orbEls: HTMLElement[] = [];
 
   /* ---------- 画布尺寸 ---------- */
@@ -754,13 +804,14 @@ export function useQuantumField(options: QuantumFieldOptions) {
       nodeSprings.push(makeSpring(30, 1.05));
       nodePx.push({ x: 0, y: 0 });
     });
-    /* 卫星环饰：逐节点独立种子 → 刻向/相位/跨度/角速度互异（拒绝整齐划一）；
-     * 半径与线宽为定值（与 DOM 环同径），仅相位/跨度/速度/色相逐节点差化 */
+    /* 卫星环饰：逐节点独立种子 → 刻向/细刻度抖动/相位/跨度/角速度互异
+     * （拒绝整齐划一）；半径与线宽为定值（与 DOM 图标同径），色相为该节点的
+     * 连线色相向中性钢色收敛后的加工件色（去霓虹化 — 见 SAT_DESATURATE） */
     const nodeStates = options.nodeStates.value;
     options.nodePositions.forEach((_, i) => {
       const satRand = mulberry32(0x6b21 + i * 8191);
-      satBezel.push(makeSatBezelPath(satRand() * Math.PI * 2));
-      const satStroke = `${WATER_EDGE[i % WATER_EDGE.length]}1)`;
+      satBezel.push(makeSatBezelPath(satRand() * Math.PI * 2, satRand));
+      const satStroke = satTint(LINK_HUE_RGB[i % LINK_HUE_RGB.length]);
       satAccent.push({
         radius: SAT_R_BEZEL,
         span: SAT_ACCENT_SPAN[0] + satRand() * (SAT_ACCENT_SPAN[1] - SAT_ACCENT_SPAN[0]),
@@ -769,7 +820,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
           (SAT_ACCENT_OMEGA[0] + satRand() * (SAT_ACCENT_OMEGA[1] - SAT_ACCENT_OMEGA[0])) *
           (satRand() < 0.5 ? -1 : 1),
         width: 1.3 + satRand() * 0.5,
-        alpha: 0.34 + satRand() * 0.14,
+        alpha: 0.3 + satRand() * 0.12,
         stroke: satStroke,
       });
       satInner.push({
@@ -778,7 +829,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
         theta: satRand() * Math.PI * 2,
         omega: SAT_INNER_OMEGA[0] + satRand() * (SAT_INNER_OMEGA[1] - SAT_INNER_OMEGA[0]),
         width: 0.8,
-        alpha: 0.2 + satRand() * 0.12,
+        alpha: 0.16 + satRand() * 0.08,
         stroke: satStroke,
       });
       const st = SAT_STATE[nodeStates[i]] ?? SAT_STATE['state-off'];
@@ -990,18 +1041,29 @@ export function useQuantumField(options: QuantumFieldOptions) {
   }
 
   /**
-   * 描绘卫星环饰（模块节点的引力锚点环）。
+   * 描绘卫星环饰（模块节点的引力锚点环 — 精密刻度盘）。
    *
-   * 与吸积盘完全同一套渲染语言：钟形端点渐隐的断裂弧 + 预渲染贴图 + additive
-   * 发光 + 模块色相。层次（由后至前）：捕获光晕 → 静态刻度环 → 外圈自转能量弧
-   * → 内圈反向自转弧 → 状态扇段。全部绘于节点像素坐标（= 装饰环心），
-   * 缩放系数与节点图标同源，故环饰与图标严格同步、且不产生任何 DOM transform。
+   * 材质裁定：**正常混合（非 additive）**—— 加法混合会让弧段交叠处浓度堆积成
+   * 发光团块（读作「大面积软光 / AI 模板霓虹」）；亮度与层次一律来自刻线密度、
+   * 线宽对比与明暗结构，不绘任何大面积光晕贴图。线端平口（butt）＝端面垂直
+   * 切口，是刻线语言。
+   *
+   * 层次（由后至前）：静态刻度环（断弧 + 主刻度 + 细刻度扇 + 镜筒细环）
+   * → 外圈自转能量弧 → 内圈反向自转弧 → 状态扇段。全部绘于节点像素坐标
+   * （= 装饰环心），缩放系数与节点图标同源，故环饰与图标严格同步、
+   * 且不产生任何 DOM transform。
    *
    * 调用位置契约：须在节点像素坐标写入之后、能量连线之前 —— 连线终点对接在
    * 环沿（LINK_DOCK_R），环饰压在连线之下，故线尾落在环沿上、不穿过环内空间。
    */
   function drawSatellites(c: CanvasRenderingContext2D, introRunning: boolean, it: number, dt: number): void {
     const states = options.nodeStates.value;
+    /* 环饰整体走正常混合：退出时 restore 交还外层状态（连线/光水/数据包仍按
+       既有加法发光描绘 —— 卫星去霓虹，能量流保持既有语言） */
+    c.save();
+    c.globalCompositeOperation = 'source-over';
+    c.lineCap = 'butt';
+    c.lineJoin = 'miter';
     for (let i = 0; i < nodePx.length; i++) {
       const spring = nodeSprings[i];
       const hover = spring ? spring.v : 0;
@@ -1025,23 +1087,20 @@ export function useQuantumField(options: QuantumFieldOptions) {
       /* 环饰能量：入场苏醒 × 悬浮应答 × 休眠压暗（三者同一乘子链） */
       const energy = p * dim * (1 + hover * SAT_HOVER_LIFT);
 
-      /* 捕获光晕（预渲染贴图 — 与核心暗核/辉点同一素材体系；浓度 ≤0.15，克制） */
-      const halo = SAT_R_BEZEL * k * SAT_HALO_SCALE;
-      c.globalAlpha = SAT_HALO_ALPHA * energy;
-      c.drawImage(sprites[i % sprites.length], px - halo / 2, py - halo / 2, halo, halo);
-
       /* 环饰本体：本地坐标（环心为原点）+ 与图标同源的缩放 */
       c.save();
       c.translate(px, py);
       c.scale(k, k);
 
-      /* 静态刻度环（三段非均匀断裂弧 + 三处断口刻度；构建期成路径，逐帧一次描边） */
-      c.globalAlpha = 0.16 * energy;
+      /* 静态刻度盘（三段非均匀断弧 + 断口主刻度 + 细刻度扇 + 镜筒细环：
+         构建期成路径，逐帧一次描边） */
+      c.globalAlpha = 0.17 * energy;
       c.lineWidth = SAT_BEZEL_WIDTH;
       c.strokeStyle = 'rgba(176,202,220,1)';
       c.stroke(satBezel[i]);
 
-      /* 外圈自转能量弧：模块色相（与连线/光水同源），钟形端点渐隐；悬浮时增亮增粗 */
+      /* 外圈自转能量弧：该节点的模块色相（已向钢色收敛），钟形端点渐隐；
+         悬浮时增亮增粗 —— 读数来自线宽与刻线对比，不来自发光 */
       const accent = satAccent[i];
       accent.theta += accent.omega * dt;
       c.strokeStyle = accent.stroke;
@@ -1062,6 +1121,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
 
       c.restore();
     }
+    c.restore();
   }
 
   /* ============================================================
@@ -1146,8 +1206,8 @@ export function useQuantumField(options: QuantumFieldOptions) {
     const debrisOy = -py * 13 + driftDebris(elapsed + 53) * 1.9;
 
     /* ---- DOM 层写入（绕过 Vue 响应式，直接 transform，GPU 合成） ----
-     * 逐帧写入仅装饰球体一处（缩放）；节点层与核心文字层均静态。 */
-    /* 节点入场：文字层只淡入（缩放归装饰球体，见下）；
+     * 逐帧写入仅装饰环热区一处（缩放）；节点层与核心文字层均静态。 */
+    /* 节点入场：节点层只淡入（缩放归装饰环热区，见下）；
        核心文字簇同样只淡入且不位移 —— 悬浮应答完全由吸积盘与核心辉点的
        能量增益承担（Canvas 侧），核心文字存活期间不参与任何位移/缩放/旋转。 */
     nodeEls.forEach((el, i) => {
@@ -1464,8 +1524,8 @@ export function useQuantumField(options: QuantumFieldOptions) {
     canvasEl = options.canvas.value;
     coreEl = options.coreCluster.value;
     nodeEls = nodeElsReady ?? options.nodes.value;
-    /* 装饰球体引用（逐帧缩放目标）：承载文字的节点外层不参与缩放，
-       故从节点子树中取装饰球体元素一次（节点结构与文字布局稳定，无需逐帧查询） */
+    /* 装饰环热区引用（逐帧缩放目标）：缩放只作用于图标热区，与 Canvas 侧
+       环饰共用同一系数；自节点子树中取该元素一次（节点结构稳定，无需逐帧查询） */
     orbEls = nodeEls
       .map((el) => el.querySelector<HTMLElement>('.qd-node-orb'))
       .filter((el): el is HTMLElement => el !== null);

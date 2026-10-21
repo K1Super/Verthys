@@ -61,17 +61,26 @@ vi.mock("../../lib/crypto", () => ({
   computeFileHash: vi.fn(() => new Uint8Array(32).fill(1)),
   bytesToHex: vi.fn(() => "1".repeat(64)),
   packVencV2: vi.fn(async () => new Uint8Array([9, 9])),
-  packVencV2Streamed: vi.fn(
+  // 惰性逐张供给：逐条取规格并产出帧段（真实实现由 lib/crypto 契约测试锁定，
+  // 本层用例只验证「建会话 → 逐段追加 → finalize / abort」的编排）
+  packVencV2StreamedLazy: vi.fn(
     async (
-      _photos: unknown,
+      count: number,
       _token: string,
+      loadPhoto: (index: number) => Promise<unknown>,
       emit: (part: Uint8Array) => Promise<void>,
     ): Promise<void> => {
-      await emit(new Uint8Array([1, 2, 3]));
-      await emit(new Uint8Array([4, 5]));
+      for (let i = 0; i < count; i++) {
+        const spec = await loadPhoto(i);
+        if (!spec) continue;
+        await emit(new Uint8Array([1, 2, 3]));
+        await emit(new Uint8Array([4, 5]));
+      }
     },
   ),
   estimateVencTotalBytes: vi.fn(() => 100),
+  VENC_CONTAINER_FIXED_BYTES: 0,
+  vencPhotoFramesBytes: vi.fn(() => 100),
   toLightMeta: vi.fn(
     (local: {
       name: string; mime: string; size: number; thumbB64: string;
@@ -124,7 +133,7 @@ import {
   verthysGetRecord,
 } from "../../lib/verthys";
 import type { PhotoMeta } from "../../lib/crypto";
-import { estimateVencTotalBytes } from "../../lib/crypto";
+import { vencPhotoFramesBytes } from "../../lib/crypto";
 import { PHOTO_FMT_SLIM } from "../../constants/crypto_const";
 import { decryptChunksPreferWorker } from "../../workers/photo-decrypt-bridge";
 import type { PhotoEntry } from "./types";
@@ -342,7 +351,7 @@ describe("usePhotoExport — 单文件流式写出协议", () => {
   });
 
   it("单文件上限放宽回归：512MiB 以上且在上限之内不再被前置拦截", async () => {
-    (estimateVencTotalBytes as ReturnType<typeof vi.fn>).mockReturnValueOnce(600 * 1024 * 1024);
+    vi.mocked(vencPhotoFramesBytes).mockReturnValueOnce(600 * 1024 * 1024);
     const made = makeExport([makePlaceholder(31)]);
     scope = made.scope;
     made.api.exportSelectedIds.value = new Set([31]);
@@ -355,8 +364,10 @@ describe("usePhotoExport — 单文件流式写出协议", () => {
     expect(made.api.exportStatus.value).toBe("已导出 1 张照片");
   });
 
-  it("单文件上限拦截：超过上限即前置拒绝且不建流（GB 读数文案）", async () => {
-    (estimateVencTotalBytes as ReturnType<typeof vi.fn>).mockReturnValueOnce(3 * 1024 * 1024 * 1024);
+  it("单文件上限拦截：写出前累计超限即中止暂存会话（GB 读数文案）", async () => {
+    // 惰性路径无法在「读数据前」知道真实体积：预算在写出该张之前累计，
+    //   超限即中止会话（不留超限产物），并以专用文案引导改用多文件模式
+    vi.mocked(vencPhotoFramesBytes).mockReturnValueOnce(3 * 1024 * 1024 * 1024);
     const made = makeExport([makePlaceholder(32)]);
     scope = made.scope;
     made.api.exportSelectedIds.value = new Set([32]);
@@ -365,7 +376,9 @@ describe("usePhotoExport — 单文件流式写出协议", () => {
 
     await made.api.doExport();
 
-    expect(writeUserFileStream).not.toHaveBeenCalled();
+    expect(writeUserFileStream).toHaveBeenCalledWith("C:\\out\\photo.venc");
+    expect(abortUserFileStream).toHaveBeenCalledWith("stream-1");
+    expect(finalizeUserFileStream).not.toHaveBeenCalled();
     expect(made.api.exportStatus.value).toContain("超过单文件上限 2 GB");
   });
 

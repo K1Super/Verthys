@@ -1,21 +1,20 @@
 /**
  * photo-album/usePhotoDelete.ts — 拾光模块删除层 composable
  *
- * 职责：管理单张删除、批量删除、选择模式。
- * 从原 PhotoAlbum.vue 提取，保持 100% 功能不变。
+ * 职责：管理批量删除与选择模式。
  *
  * 设计要点：
  * - 接收 usePhotoData 返回值中的 photos/isTauri + 全局 Toast 中心的 showError/showToast（依赖注入）
  * - onView 由外部传入（来自 usePhotoViewer），选择模式下拦截点击改为切换选中
  * - showToast 由外部传入，用于删除成功提示
- * - onDelete 基于 metaId 判断（非 meta），重启后占位项也能正确删除 verthys 记录
+ * - 删除一律走 metaId（非 meta），重启后占位项也能正确级联删除 verthys 记录
  * - onDeleteBtn（右上角按钮）仅切换选择模式，不承担删除动作；
  *   真实删除由选择栏 onDeleteSelected 拉起二次确认，confirmDelete → executeBatchDelete 执行
- * - onDeleteBtn 批量删除合并为单次 flush（deleteAndPersistBatch + persistVerthys）
+ * - 批量删除合并为单次 flush（deleteAndPersistBatch + persistVerthys）
  * - shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
  */
 import { ref, computed, type ShallowRef } from "vue";
-import { verthysDeleteRecord, verthysForgetHashes, verthysGcOrphanChunks } from "../../lib/verthys";
+import { verthysForgetHashes, verthysGcOrphanChunks } from "../../lib/verthys";
 import {
   persistVerthysDetailed, deleteAndPersistBatch, setModuleCache,
   invalidateSummaryRecord, invalidateFullRecord, invalidateScannedRecord,
@@ -24,7 +23,7 @@ import { removeShallowItems } from "../../utils/shallow-array";
 import type { PhotoEntry } from "./types";
 import type { PhotoMeta } from "../../lib/crypto";
 import { isSlimLayout } from "../../constants/crypto_const";
-import { revokeThumbUrl } from "./utils";
+import { revokeThumbUrl, toPhotoCacheEntries } from "./utils";
 
 /** usePhotoDelete 参数接口 */
 export interface UsePhotoDeleteParams {
@@ -57,83 +56,6 @@ export interface UsePhotoDeleteParams {
 
 export function usePhotoDelete(params: UsePhotoDeleteParams) {
   const { photos, isTauri, onView, showError, showToast, resolveMeta, resolveChunkIds } = params;
-
-  /* ===== 删除 ===== */
-  const onDelete = async (id: number) => {
-    const ph = photos.value.find(p => p.id === id);
-    // 修复：删除判断基于 metaId（始终存在）而非 meta（可能未解密）
-    //    旧实现 if (ph?.meta && isTauri) 在重启后 meta 未解密时跳过整个 verthys 删除，
-    //    导致：UI 移除了照片，但 verthys 记录仍在磁盘 → 重启后"删除的照片复活"。
-    if (isTauri && ph?.metaId) {
-      // 占位项兜底：meta 未解密时强制解密一次，补齐 chunk 级联与去重锁释放所需字段
-      const meta: PhotoMeta | null = ph.meta ?? (await (resolveMeta?.(ph.metaId) ?? null));
-      // 逐块引用解析：瘦身布局的逐块 ID 在块集记录内（解析失败退化为内联引用）
-      let chunkIds = meta?.chunkIds ?? [];
-      if (meta && isSlimLayout(meta) && meta.chunkSetId && resolveChunkIds) {
-        try {
-          chunkIds = await resolveChunkIds(ph.metaId, meta);
-        } catch (e) {
-          console.warn(`[onDelete] 块集解析失败，级联改用内联引用: ${ph.metaId}`, e);
-        }
-      }
-      // 删除 meta 记录（新格式的 chunk 数据已内联时删 meta 即彻底清除）
-      try { await verthysDeleteRecord(ph.metaId); } catch { /* 删除失败静默 */ }
-      // 同时失效两层缓存（摘要 + 全量），杜绝删除复活
-      invalidateSummaryRecord(ph.metaId);
-      invalidateFullRecord(ph.metaId);
-      invalidateScannedRecord(ph.metaId);
-      // 外置 chunk 级联删除（新外置格式与旧格式共用 chunkIds 字段）
-      if (chunkIds.length > 0) {
-        for (const cid of chunkIds) {
-          try { await verthysDeleteRecord(cid); } catch { /* 删除失败静默 */ }
-          // chunk 记录同样失效两层缓存
-          invalidateSummaryRecord(cid);
-          invalidateFullRecord(cid);
-          invalidateScannedRecord(cid);
-        }
-      }
-      // 索引瘦身布局：缩略图独立记录级联删除（与 chunk 同级处理）
-      const thumbId = meta?.thumbId;
-      if (typeof thumbId === "number" && thumbId > 0) {
-        try { await verthysDeleteRecord(thumbId); } catch { /* 删除失败静默 */ }
-        invalidateSummaryRecord(thumbId);
-        invalidateFullRecord(thumbId);
-        invalidateScannedRecord(thumbId);
-      }
-      // 释放去重锁（best-effort：失败仅影响「再导入去重」，不影响删除结果）
-      if (typeof meta?.fileHash === "string" && meta.fileHash.length > 0) {
-        try { await verthysForgetHashes([meta.fileHash]); } catch (e) {
-          console.warn("[onDelete] 去重锁释放失败（不影响删除结果）", e);
-        }
-      }
-    }
-    // 浏览器模式：释放 Blob URL；缩略图 Blob URL 同时释放（条目即将从列表移除）
-    if (ph?.blobUrl) URL.revokeObjectURL(ph.blobUrl);
-    if (ph?.thumb) revokeThumbUrl(ph.thumb);
-    // 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
-    removeShallowItems(photos, p => p.id === id);
-    // 更新缓存
-    setModuleCache("photos", photos.value);
-    // 修复：持久化删除操作到磁盘 + 三态判定
-    //    旧实现仅 try/catch 吞掉异常，忽略 persistVerthys 返回的 false（flush 失败），
-    //    导致删除操作未落盘 → 重启后"删除的照片复活"。
-    //    判别式：not_persisted（flush 失败）才提示可能恢复；partial_persisted
-    //    表示数据已 fsync 落盘（仅结构自查告警），以低噪 warning 提示。
-    if (isTauri) {
-      let outcome: Awaited<ReturnType<typeof persistVerthysDetailed>> = { kind: "ok" };
-      try {
-        outcome = await persistVerthysDetailed();
-      } catch (e) {
-        console.error("[onDelete] persistVerthysDetailed 异常", e);
-        outcome = { kind: "not_persisted", reason: String(e) };
-      }
-      if (outcome.kind === "not_persisted") {
-        showError("删除操作持久化失败，重启后照片可能恢复。请重试或重新删除。");
-      } else if (outcome.kind === "partial_persisted") {
-        showToast(`删除操作已落盘（校验警告）：${outcome.reason}`);
-      }
-    }
-  };
 
   /* ===== 选择删除模式 ===== */
   const selectMode = ref(false);
@@ -220,7 +142,9 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
   const executeBatchDelete = async () => {
     // 批量删除：收集全部待删除照片 + 对应记录 ID（metaId + 外置 chunkIds）
     const ids = Array.from(selectedPhotoIds.value);
-    const photosToRemove = photos.value.filter(p => ids.includes(p.id));
+    // 集合命中代替 includes：万张相册全选时避免 O(n·m)
+    const idSet = new Set(ids);
+    const photosToRemove = photos.value.filter(p => idSet.has(p.id));
 
     // 占位项兜底：对 meta 未解密的照片强制解密（并发上限 4，避免 IPC 风暴），
     // 补齐 chunk 级联 ID 与去重锁哈希；解密失败不阻断删除（残留交孤儿 GC 台账兜底）
@@ -243,7 +167,8 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
       );
     }
 
-    // 块引用解析：瘦身布局的逐块 ID 在块集记录内，既有布局在索引内联
+    // 块引用解析：瘦身布局的逐块 ID 在块集记录内，既有布局在索引内联。
+    //    逐张串行会让「删 100 张」退化为 100 次 IPC；此处按同一并发上限并行。
     const refs = new Map<number, { chunkIds: number[]; thumbId: number }>();
     const resolveIds = async (metaId: number, meta: PhotoMeta | undefined | null) => {
       if (!meta) {
@@ -262,9 +187,19 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
       }
       refs.set(metaId, { chunkIds, thumbId });
     };
-    for (const ph of photosToRemove) {
-      if (!ph.metaId) continue;
-      await resolveIds(ph.metaId, ph.meta ?? resolvedMetaMap.get(ph.metaId) ?? null);
+    const resolveQueue = photosToRemove.filter((ph) => ph.metaId);
+    if (resolveQueue.length > 0) {
+      const CONCURRENCY = 4;
+      let cursor = 0;
+      const runNext = async (): Promise<void> => {
+        while (cursor < resolveQueue.length) {
+          const ph = resolveQueue[cursor++];
+          await resolveIds(ph.metaId!, ph.meta ?? resolvedMetaMap.get(ph.metaId!) ?? null);
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, resolveQueue.length) }, runNext),
+      );
     }
 
     const allRecordIds: number[] = [];
@@ -283,61 +218,73 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
       //    deleteAndPersistBatch 内部：全部 ID 加入 pendingDeletionIds →
       //    verthysDeleteRecords(ids) 一次 IPC → worker 单次 vtxn_commit →
       //    防抖调度单次 flush（300ms 窗口）
+      //
+      // 结果判定不可省略：deleteAndPersistBatch 返回 false 表示删除未发生
+      //   （后端拒绝 / 路径缺失 / 执行异常被其内部收敛）。历史实现丢弃该
+      //   返回值，仍移除卡片并提示「已删除 N 张」—— 重启后照片复活。
+      let deleted = false;
       try {
-        await deleteAndPersistBatch(allRecordIds);
-        // 修复：await persistVerthysDetailed 强制立即落盘（根治删除后复活）+ 三态判定
-        //
-        // 原缺陷：deleteAndPersistBatch 仅防抖调度 flush（300ms），不等待落盘
-        //   即返回。应用退出 → 防抖 flush 未执行 → 磁盘仍含已删照片 → "删除后复活"。
-        //
-        // 修复：await persistVerthysDetailed 取消防抖定时器，立即 flush 落盘。
-        //   判别式：not_persisted（flush 失败）才提示可能恢复；
-        //   partial_persisted 表示数据已 fsync（仅结构自查告警），低噪 warning。
-        let outcome: Awaited<ReturnType<typeof persistVerthysDetailed>> = { kind: "ok" };
-        try {
-          outcome = await persistVerthysDetailed();
-        } catch (e) {
-          console.error("[executeBatchDelete] persistVerthysDetailed 异常", e);
-          outcome = { kind: "not_persisted", reason: String(e) };
-        }
-        if (outcome.kind === "not_persisted") {
-          showError("删除操作持久化失败，重启后照片可能恢复。请重试或重新删除。");
-        } else if (outcome.kind === "partial_persisted") {
-          showToast(`删除操作已落盘（校验警告）：${outcome.reason}`);
-        }
-
-        // 删除成功后释放去重锁（WAL 删除墓碑）：被删照片可重新导入。
-        // 覆盖已加载 meta 与本次强制解密的 meta；best-effort——失败仅
-        // 影响「再导入去重」（会被视为已导入而跳过），不影响删除结果本身
-        const forgetHashes: string[] = [];
-        for (const ph of photosToRemove) {
-          const fh = ph.meta?.fileHash ?? resolvedMetaMap.get(ph.metaId!)?.fileHash;
-          if (typeof fh === "string" && fh.length > 0) forgetHashes.push(fh);
-        }
-        if (forgetHashes.length > 0) {
-          try {
-            await verthysForgetHashes(forgetHashes);
-          } catch (e) {
-            console.warn("[executeBatchDelete] 去重锁释放失败（不影响删除结果）", e);
-          }
-        }
-
-        // 归属残留兜底：删除路径未覆盖的孤儿块记录由后端台账 GC 清理
-        // （如「块已落库但 meta 从未提交」的崩溃残留）。无活跃导入会话，
-        // best-effort——失败仅推迟到下次触发时机，不影响删除结果。
-        try {
-          const collected = await verthysGcOrphanChunks();
-          if (collected > 0) {
-            console.info(`[executeBatchDelete] 孤儿块 GC 清理 ${collected} 条残留块记录`);
-          }
-        } catch (e) {
-          console.warn("[executeBatchDelete] 孤儿块 GC 失败（可下次再触发）", e);
-        }
+        deleted = await deleteAndPersistBatch(allRecordIds);
       } catch (e) {
         console.warn("[executeBatchDelete] deleteAndPersistBatch 失败", e);
         showError("删除失败，请重试");
+        return;
       }
-      // 失效两层缓存（摘要 + 全量 + 扫描回退），杜绝删除复活
+      if (!deleted) {
+        showError("删除未生效（数据仍保留），请重试");
+        return;
+      }
+
+      // 修复：await persistVerthysDetailed 强制立即落盘（根治删除后复活）+ 三态判定
+      //
+      // 原缺陷：deleteAndPersistBatch 仅防抖调度 flush（300ms），不等待落盘
+      //   即返回。应用退出 → 防抖 flush 未执行 → 磁盘仍含已删照片 → "删除后复活"。
+      //
+      // 修复：await persistVerthysDetailed 取消防抖定时器，立即 flush 落盘。
+      //   判别式：not_persisted（flush 失败）才提示可能恢复；
+      //   partial_persisted 表示数据已 fsync（仅结构自查告警），低噪 warning。
+      let outcome: Awaited<ReturnType<typeof persistVerthysDetailed>> = { kind: "ok" };
+      try {
+        outcome = await persistVerthysDetailed();
+      } catch (e) {
+        console.error("[executeBatchDelete] persistVerthysDetailed 异常", e);
+        outcome = { kind: "not_persisted", reason: String(e) };
+      }
+      if (outcome.kind === "not_persisted") {
+        showError("删除操作持久化失败，重启后照片可能恢复。请重试或重新删除。");
+      } else if (outcome.kind === "partial_persisted") {
+        showToast(`删除操作已落盘（校验警告）：${outcome.reason}`);
+      }
+
+      // 删除成功后释放去重锁（WAL 删除墓碑）：被删照片可重新导入。
+      // 覆盖已加载 meta 与本次强制解密的 meta；best-effort——失败仅
+      // 影响「再导入去重」（会被视为已导入而跳过），不影响删除结果本身
+      const forgetHashes: string[] = [];
+      for (const ph of photosToRemove) {
+        const fh = ph.meta?.fileHash ?? resolvedMetaMap.get(ph.metaId!)?.fileHash;
+        if (typeof fh === "string" && fh.length > 0) forgetHashes.push(fh);
+      }
+      if (forgetHashes.length > 0) {
+        try {
+          await verthysForgetHashes(forgetHashes);
+        } catch (e) {
+          console.warn("[executeBatchDelete] 去重锁释放失败（不影响删除结果）", e);
+        }
+      }
+
+      // 归属残留兜底：删除路径未覆盖的孤儿块记录由后端台账 GC 清理
+      // （如「块已落库但 meta 从未提交」的崩溃残留）。无活跃导入会话，
+      // best-effort——失败仅推迟到下次触发时机，不影响删除结果。
+      try {
+        const collected = await verthysGcOrphanChunks();
+        if (collected > 0) {
+          console.info(`[executeBatchDelete] 孤儿块 GC 清理 ${collected} 条残留块记录`);
+        }
+      } catch (e) {
+        console.warn("[executeBatchDelete] 孤儿块 GC 失败（可下次再触发）", e);
+      }
+
+      // 失效三层缓存（摘要 + 全量 + 扫描回退），杜绝删除复活
       for (const rid of allRecordIds) {
         invalidateSummaryRecord(rid);
         invalidateFullRecord(rid);
@@ -355,7 +302,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
     // 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
     removeShallowItems(photos, p => removedIdSet.has(p.id));
     // 更新缓存
-    setModuleCache("photos", photos.value);
+    setModuleCache("photos", toPhotoCacheEntries(photos.value));
     // 修复：persistVerthys 已在上方 await 调用（取消防抖，立即落盘）
 
     showToast(`已删除 ${ids.length} 张照片`);
@@ -381,7 +328,6 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
     allSelected,
     toggleSelectAll,
     cancelSelectMode,
-    onDelete,
     onDeleteBtn,
     onDeleteSelected,
     showDeleteConfirm,

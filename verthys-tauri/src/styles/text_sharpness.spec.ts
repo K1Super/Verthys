@@ -158,17 +158,17 @@ describe("文字清晰度：入场动画只走 opacity", () => {
     }
   });
 
-  it("量子面板引擎：零视差组恒静态，逐帧变换仅作用于装饰球体", () => {
+  it("量子面板引擎：零视差组恒静态，逐帧变换仅作用于装饰环热区", () => {
     const src = read("../composables/security-center/useQuantumField.ts");
-    /* 逐帧 DOM transform 写入仅一处：装饰球体（缩放）。任何新增写入 ——
+    /* 逐帧 DOM transform 写入仅一处：装饰环热区（缩放）。任何新增写入 ——
      * 尤其写向承载文字的层 —— 都会在此失败：那正是「文字发糊 / 整层逐帧
      * 重栅格」的入口。 */
     const writes = src.match(/\b[A-Za-z_$][\w$]*(?:\[[^\]]+\])?\.style\.transform\s*=\s*[^;]+;/g) ?? [];
     expect(
       writes.length,
-      `逐帧 transform 写入应仅装饰球体一处，实际 ${writes.length} 处`,
+      `逐帧 transform 写入应仅装饰环热区一处，实际 ${writes.length} 处`,
     ).toBe(1);
-    expect(writes[0], "唯一的逐帧变换须作用于装饰球体（.qd-node-orb）").toMatch(/orb/i);
+    expect(writes[0], "唯一的逐帧变换须作用于装饰环热区（.qd-node-orb）").toMatch(/orb/i);
     /* 零视差组（有意设计，圆环 + 三个模块 + 三条连线一体静态）：
      *  - 圆环整组恒绘于面板静态中心（吸积弧直接取 cx, cy）；
      *  - 方位偏移量不得残留（nearOx / nearOy、midOx / midOy 均为历史遗留）；
@@ -198,6 +198,13 @@ describe("文字清晰度：入场动画只走 opacity", () => {
     expect(src, "卫星环饰须由引擎绘制").toMatch(/function drawSatellites\(/);
     expect(src, "卫星刻度环须构建为路径复用（禁逐帧路径构建）").toMatch(/makeSatBezelPath\(/);
     expect(src, "卫星弧段须与吸积弧共用钟形形态语言").toMatch(/SAT_BELL/);
+    /* 材质裁定（反「AI 模板霓虹 / 大面积阴影」）：卫星环饰须走正常混合，
+     * 且不得绘任何大面积光晕贴图 —— 加法混合会让弧段交叠处浓度堆积成发光
+     * 团块。本条即该缺陷的防回退点：加法发光只允许存在于核心与能量流 */
+    expect(src, "卫星环饰须走正常混合（去加法辉光堆积）")
+      .toMatch(/c\.save\(\);\s*\n\s*c\.globalCompositeOperation = 'source-over';/);
+    expect(src, "卫星不得残留大面积光晕贴图（去 AI 模板辉光）")
+      .not.toMatch(/SAT_HALO|drawImage\(sprites\[i % sprites\.length\]/);
     expect(src, "卫星环饰不得写入 DOM style（唯一逐帧写入仍为装饰环热区缩放）")
       .not.toMatch(/sat[A-Za-z]*\.style\./);
     expect(panel, "CSS 不得残留节点环描边（环饰归引擎 Canvas 管线）")

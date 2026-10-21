@@ -18,14 +18,21 @@
           <span class="section-title">密码生成器</span>
         </div>
 
-        <!-- 大显示区 -->
-        <div class="gen-display" @click="copyText(genPassword)">
+        <!-- 大显示区（点击或 Enter/Space 复制） -->
+        <div
+          class="gen-display"
+          role="button"
+          tabindex="0"
+          aria-label="复制生成的密码"
+          @click="copyText(genPassword, 'password')"
+          @keydown="onDisplayKeydown($event, genPassword, 'password')"
+        >
           <span class="gen-pwd" :class="`strength-${genStrength.level}`">{{ genPassword || '点击生成' }}</span>
           <div class="gen-actions">
-            <button class="gen-btn gen-btn--spin" @click.stop="generatePassword" v-tip="'重新生成'">
+            <button class="gen-btn gen-btn--spin" @click.stop="generatePassword" v-tip="'重新生成'" aria-label="重新生成密码">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             </button>
-            <button class="gen-btn" @click.stop="copyText(genPassword)" v-tip="'复制'">
+            <button class="gen-btn" @click.stop="copyText(genPassword, 'password')" v-tip="'复制'" aria-label="复制密码">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             </button>
           </div>
@@ -38,34 +45,49 @@
               <span>长度</span>
               <span class="ctrl-value">{{ genLength }}</span>
             </div>
-            <input type="range" class="slider" v-model.number="genLength" min="8" max="64" step="1" />
+            <input
+              type="range"
+              class="slider"
+              v-model.number="genLength"
+              min="8"
+              max="64"
+              step="1"
+              aria-label="密码长度"
+            />
           </div>
           <div class="ctrl-opts">
             <label class="opt-chip" :class="{ on: genOpts.upper }">
-              <input type="checkbox" v-model="genOpts.upper" />
+              <input type="checkbox" v-model="genOpts.upper" aria-label="包含大写字母" />
               <span>A-Z</span>
             </label>
             <label class="opt-chip" :class="{ on: genOpts.lower }">
-              <input type="checkbox" v-model="genOpts.lower" />
+              <input type="checkbox" v-model="genOpts.lower" aria-label="包含小写字母" />
               <span>a-z</span>
             </label>
             <label class="opt-chip" :class="{ on: genOpts.digits }">
-              <input type="checkbox" v-model="genOpts.digits" />
+              <input type="checkbox" v-model="genOpts.digits" aria-label="包含数字" />
               <span>0-9</span>
             </label>
             <label class="opt-chip" :class="{ on: genOpts.symbols }">
-              <input type="checkbox" v-model="genOpts.symbols" />
+              <input type="checkbox" v-model="genOpts.symbols" aria-label="包含符号" />
               <span>!@#</span>
             </label>
             <label class="opt-chip" :class="{ on: genOpts.exclude }">
-              <input type="checkbox" v-model="genOpts.exclude" />
+              <input type="checkbox" v-model="genOpts.exclude" aria-label="排除易混淆字符" />
               <span>排除相似</span>
             </label>
           </div>
         </div>
 
         <!-- 强度指示 -->
-        <div class="strength-bar">
+        <div
+          class="strength-bar"
+          role="meter"
+          aria-label="密码熵估算"
+          aria-valuemin="0"
+          aria-valuemax="128"
+          :aria-valuenow="genStrength.entropy"
+        >
           <div class="strength-fill" :class="`strength-${genStrength.level}`" :style="{ width: `${genStrength.percent}%` }"></div>
         </div>
         <div class="strength-info">
@@ -82,13 +104,31 @@
           </span>
           <span class="section-title">密码安全评估</span>
         </div>
-        <input
-          class="check-input"
-          v-model="checkInput"
-          type="text"
-          :placeholder="checkInputPlaceholder"
-          @input="checkStrength"
-        />
+        <!-- 待评估口令默认遮罩：安全工具里不得把真实口令全程明文展示 -->
+        <div class="check-input-row">
+          <input
+            class="check-input"
+            v-model="checkInput"
+            :type="checkVisible ? 'text' : 'password'"
+            :maxlength="CHECK_INPUT_MAX"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            aria-label="待评估密码"
+            :placeholder="checkInputPlaceholder"
+            @input="checkStrength"
+          />
+          <button
+            class="gen-btn check-toggle"
+            type="button"
+            :aria-label="checkVisible ? '隐藏密码' : '显示密码'"
+            v-tip="checkVisible ? '隐藏密码' : '显示密码'"
+            @click="checkVisible = !checkVisible"
+          >
+            <svg v-if="!checkVisible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
+        </div>
         <div class="check-meter">
           <div class="meter-segment" v-for="i in 5" :key="i" :class="{ filled: checkResult.level >= i, [`seg-${i}`]: true }"></div>
         </div>
@@ -96,6 +136,8 @@
           <span class="check-level" :class="`strength-${checkResult.level}`">{{ checkResult.label }}</span>
           <span class="check-entropy">熵 ~{{ checkResult.entropy }} bits · 破解 ~{{ checkResult.crackTime }}</span>
         </div>
+        <!-- 口径如实标注：本模型不含字典与键盘布局检测 -->
+        <div class="check-caveat">按字符集熵估算（含重复/顺子惩罚），不含字典与键盘布局检测</div>
 
         <!-- Argon2id 单向加密 -->
         <div class="argon-divider"></div>
@@ -109,15 +151,26 @@
               class="argon-gen-btn"
               @click="generateArgonHash"
               :disabled="argonProcessing || !checkInput"
+              :aria-label="argonProcessing ? '正在计算' : '生成 Argon2id 凭证串'"
               v-tip="argonProcessing ? '计算中…' : '生成 Argon2id 哈希'"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             </button>
           </div>
+          <!-- 参数标签与 KDF 调用同源（key-tools/password_tools.ts ARGON2_PARAMS） -->
           <div class="argon-params">
-            <span>t=3</span><span>m=65536</span><span>p=1</span><span>len=32</span>
+            <span>{{ argonParams }}</span>
           </div>
-          <div class="argon-result" @click="copyArgonResult" :class="{ clickable: argonResult, processing: argonProcessing }">
+          <div
+            class="argon-result"
+            :class="{ clickable: argonResult, processing: argonProcessing }"
+            role="button"
+            :tabindex="argonResult ? 0 : -1"
+            :aria-label="argonResult ? '复制凭证串' : '凭证串尚未生成'"
+            :aria-disabled="!argonResult"
+            @click="copyArgonResult"
+            @keydown="onDisplayKeydown($event, argonResult, 'argon')"
+          >
             <code v-if="argonResult" class="argon-code">{{ argonResult }}</code>
             <span v-else-if="argonProcessing" class="argon-loading">计算中…</span>
             <span v-else class="argon-placeholder">{{ checkInput ? '点击按钮生成凭证串' : '请先输入密码' }}</span>
@@ -134,11 +187,23 @@
           </span>
           <span class="section-title">随机令牌</span>
         </div>
-        <div class="token-display" @click="copyText(tokenResult)">
+        <div
+          class="token-display"
+          role="button"
+          tabindex="0"
+          aria-label="复制随机令牌"
+          @click="copyText(tokenResult, 'token')"
+          @keydown="onDisplayKeydown($event, tokenResult, 'token')"
+        >
           <code class="token-code">{{ tokenResult || '点击生成' }}</code>
-          <button class="gen-btn gen-btn--spin" @click.stop="generateToken" v-tip="'生成'">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-          </button>
+          <div class="token-actions">
+            <button class="gen-btn gen-btn--spin" @click.stop="generateToken" v-tip="'重新生成'" aria-label="生成令牌">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            </button>
+            <button class="gen-btn" @click.stop="copyText(tokenResult, 'token')" v-tip="'复制'" aria-label="复制令牌">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+          </div>
         </div>
         <div class="token-controls">
           <div class="token-slider-wrap">
@@ -146,7 +211,16 @@
               <span>字节数</span>
               <span class="ctrl-value">{{ tokenBytes }}</span>
             </div>
-            <input type="range" class="slider" v-model.number="tokenBytes" min="4" max="64" step="1" />
+            <input
+              type="range"
+              class="slider"
+              v-model.number="tokenBytes"
+              min="4"
+              max="64"
+              step="1"
+              aria-label="令牌字节数"
+              :disabled="tokenFormat === 'uuid'"
+            />
           </div>
           <div class="token-format">
             <button class="fmt-btn" :class="{ active: tokenFormat === 'hex' }" @click="tokenFormat = 'hex'; generateToken()">HEX</button>
@@ -163,19 +237,32 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3"/></svg>
           </span>
           <span class="section-title">密钥生成工具</span>
-          <button class="gen-btn" @click="exportBin" :disabled="!keygenBytes || !keygenRaw.length" v-tip="'导出密钥'" aria-label="导出密钥">
+          <button
+            class="gen-btn"
+            @click="exportBin"
+            :disabled="!keygenRaw.length || exportingKey"
+            :aria-label="exportingKey ? '正在导出密钥' : '导出密钥'"
+            v-tip="'导出密钥'"
+          >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           </button>
         </div>
 
         <!-- 密钥显示区 -->
-        <div class="keygen-display" @click="copyText(keygenDisplay)">
+        <div
+          class="keygen-display"
+          role="button"
+          tabindex="0"
+          aria-label="复制密钥"
+          @click="copyText(keygenDisplay, 'key')"
+          @keydown="onDisplayKeydown($event, keygenDisplay, 'key')"
+        >
           <code class="keygen-code">{{ keygenDisplay || '点击生成密钥' }}</code>
           <div class="keygen-actions">
-            <button class="gen-btn gen-btn--spin" @click.stop="generateKey" v-tip="'重新生成'">
+            <button class="gen-btn gen-btn--spin" @click.stop="generateKey" v-tip="'重新生成'" aria-label="重新生成密钥">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             </button>
-            <button class="gen-btn" @click.stop="copyText(keygenDisplay)" v-tip="'复制'">
+            <button class="gen-btn" @click.stop="copyText(keygenDisplay, 'key')" v-tip="'复制'" aria-label="复制密钥">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             </button>
           </div>
@@ -194,15 +281,15 @@
                 :key="n"
                 class="preset-btn"
                 :class="{ active: keygenBytes === n }"
-                @click="keygenBytes = n; generateKey()"
+                @click="keygenBytes = n"
               >{{ n }}</button>
             </div>
           </div>
           <div class="keygen-format-row">
             <span class="format-label">显示格式</span>
             <div class="token-format">
-              <button class="fmt-btn" :class="{ active: keygenFormat === 'hex' }" @click="keygenFormat = 'hex'; updateKeygenDisplay()">HEX</button>
-              <button class="fmt-btn" :class="{ active: keygenFormat === 'base64' }" @click="keygenFormat = 'base64'; updateKeygenDisplay()">Base64</button>
+              <button class="fmt-btn" :class="{ active: keygenFormat === 'hex' }" @click="keygenFormat = 'hex'">HEX</button>
+              <button class="fmt-btn" :class="{ active: keygenFormat === 'base64' }" @click="keygenFormat = 'base64'">Base64</button>
             </div>
           </div>
         </div>
@@ -225,99 +312,139 @@ import { sha256 } from "@noble/hashes/sha2";
 import { argon2id } from "hash-wasm";
 import { writeUserFile } from "../../lib/verthys";
 import { useToastCenter } from "../../composables/useToastCenter";
+import { useClipToast } from "../../composables/useClipToast";
 import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
+import {
+  ARGON2_PARAMS,
+  argonParamsLabel,
+  buildCharset,
+  calcCrackTime,
+  calcStrength,
+  composePassword,
+  formatToken,
+  randomKeyFileName,
+  type CharsetOptions,
+  type RandomSource,
+} from "../../composables/key-tools/password_tools";
 
 /* 步入窗口：四个工具分区为静态内容 —— 窗口随挂载开启（内容就绪恒为真），
  *   标记与分区同批落地，首帧即入场起点 */
 const { entering } = useModuleEntrance(() => true);
 
 /* ===== 瞬时提示（错误 / 复制 / 状态）— 全局 Toast 中心；渲染归 ToastLayer ===== */
-const { showError, showStatus, showCopied } = useToastCenter();
+const { showError, showStatus } = useToastCenter();
 /* 状态提示口径（模块内沿用 showToast 命名，指向标准状态通道，2.5s 自动消失） */
 const showToast = showStatus;
 
 /* ===== 环境检测 ===== */
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/* ===== 安全复制（生命周期归 useClipToast：默认 1 分钟 + 到期覆写/Tauri 清空） ===== */
+/** 随机源适配（Uint32/Uint8 两种取样共用） */
+const randomSource: RandomSource = (out) => {
+  crypto.getRandomValues(out);
+};
+
+/**
+ * 降级写入（Clipboard API 不可用时）：textarea + execCommand。
+ *
+ * 明文节点必须在 finally 中回收 —— 早期实现在 execCommand 抛错时跳过
+ * removeChild，含完整密钥的 textarea 会永久留在 document 中。
+ */
+const writeViaTextarea = async (content: string): Promise<boolean> => {
+  const prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const ta = document.createElement("textarea");
+  try {
+    ta.value = content;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    ta.remove();
+    prevFocus?.focus?.();
+  }
+};
+
+/* 四类内容各自独立文案；同一时刻只有最后一次复制持有清空计时归属权 */
+const { copyWithTimeout: copyPassword } = useClipToast("密码已复制", { write: writeViaTextarea });
+const { copyWithTimeout: copyToken } = useClipToast("令牌已复制", { write: writeViaTextarea });
+const { copyWithTimeout: copyKey } = useClipToast("密钥已复制", { write: writeViaTextarea });
+const { copyWithTimeout: copyArgon } = useClipToast("凭证串已复制", { write: writeViaTextarea });
+
+type CopyKind = "password" | "token" | "key" | "argon";
+const copyWriterOf = (kind: CopyKind): ((v: string) => Promise<boolean>) => {
+  if (kind === "password") return copyPassword;
+  if (kind === "token") return copyToken;
+  if (kind === "key") return copyKey;
+  return copyArgon;
+};
+
+/** 复制并给出如实结果（失败必须显式告知，不得静默） */
+const copyText = async (text: string, kind: CopyKind): Promise<void> => {
+  if (!text) return;
+  const ok = await copyWriterOf(kind)(text);
+  if (!ok) showError("复制失败：剪贴板不可用或权限被拒绝");
+};
+
+/** 展示区键盘可达：Enter/Space 等价于点击复制（只响应当前元素本身） */
+const onDisplayKeydown = (e: KeyboardEvent, text: string, kind: CopyKind): void => {
+  if (e.target !== e.currentTarget) return;
+  if (e.key !== "Enter" && e.key !== " ") return;
+  e.preventDefault();
+  void copyText(text, kind);
+};
+
 /* ===== 密码生成器 ===== */
 const genLength = ref(16);
-const genOpts = ref({ upper: true, lower: true, digits: true, symbols: false, exclude: false });
+const genOpts = ref<CharsetOptions>({ upper: true, lower: true, digits: true, symbols: false, exclude: false });
 const genPassword = ref("");
 
-const charsets = {
-  upper: "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-  lower: "abcdefghijklmnopqrstuvwxyz",
-  digits: "0123456789",
-  symbols: "!@#$%^&*()_+-=[]{}|;:,.<>?",
-  similar: "Il1O0o",
-};
-
-const generatePassword = () => {
-  let pool = "";
-  if (genOpts.value.upper) pool += charsets.upper;
-  if (genOpts.value.lower) pool += charsets.lower;
-  if (genOpts.value.digits) pool += charsets.digits;
-  if (genOpts.value.symbols) pool += charsets.symbols;
-  if (genOpts.value.exclude) {
-    pool = pool.split("").filter(c => !charsets.similar.includes(c)).join("");
+const generatePassword = (): void => {
+  const opts: CharsetOptions = { ...genOpts.value };
+  // 全部关闭时明确置空（不接受"看起来生成了但实际为空池"）
+  if (!buildCharset(opts)) {
+    genPassword.value = "";
+    return;
   }
-  if (!pool) { genPassword.value = ""; return; }
-  const arr = new Uint32Array(genLength.value);
-  crypto.getRandomValues(arr);
-  let pwd = "";
-  for (let i = 0; i < genLength.value; i++) pwd += pool[arr[i] % pool.length];
-  genPassword.value = pwd;
+  genPassword.value = composePassword(opts, genLength.value, randomSource);
 };
 
-/* 强度计算 */
-const calcStrength = (pwd: string) => {
-  if (!pwd) return { level: 0, percent: 0, entropy: 0, label: "", crackTime: "" };
-  let charsetSize = 0;
-  if (/[a-z]/.test(pwd)) charsetSize += 26;
-  if (/[A-Z]/.test(pwd)) charsetSize += 26;
-  if (/[0-9]/.test(pwd)) charsetSize += 10;
-  if (/[^a-zA-Z0-9]/.test(pwd)) charsetSize += 32;
-  const entropy = Math.round(pwd.length * Math.log2(charsetSize || 1));
-  let level = 1, label = "极弱", percent = 20;
-  if (entropy >= 40) { level = 2; label = "弱"; percent = 40; }
-  if (entropy >= 60) { level = 3; label = "中等"; percent = 60; }
-  if (entropy >= 80) { level = 4; label = "强"; percent = 80; }
-  if (entropy >= 100) { level = 5; label = "极强"; percent = 100; }
-  return { level, percent, entropy, label, crackTime: "" };
-};
+/* 强度指示（口径见 key-tools/password_tools.ts：周期重复/顺子已扣减） */
 const genStrength = computed(() => calcStrength(genPassword.value));
 
 /* ===== 密码安全评估 ===== */
 const checkInput = ref("");
-const checkResult = ref(calcStrength(""));
+const checkVisible = ref(false);
+/** 评估输入长度上限：防止超长字符串直接进入 Argon2id 造成可感知卡顿 */
+const CHECK_INPUT_MAX = 256;
+const checkResult = ref({ ...calcStrength(""), crackTime: calcCrackTime(0) });
 const checkInputPlaceholder = "输入要检测的密码…";
 
-const checkStrength = () => {
-  const pwd = checkInput.value;
-  const base = calcStrength(pwd);
-  const crackTime = calcCrackTime(base.entropy);
-  checkResult.value = { ...base, crackTime };
-};
-
-const calcCrackTime = (entropy: number) => {
-  if (entropy === 0) return "即时";
-  const seconds = Math.pow(2, entropy) / 1e10; // 10 billion guesses/sec
-  if (seconds < 1) return "即时";
-  if (seconds < 60) return `${Math.round(seconds)} 秒`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟`;
-  if (seconds < 86400) return `${Math.round(seconds / 3600)} 小时`;
-  if (seconds < 31536000) return `${Math.round(seconds / 86400)} 天`;
-  if (seconds < 31536000 * 100) return `${Math.round(seconds / 31536000)} 年`;
-  if (seconds < 31536000 * 1e6) return `${Math.round(seconds / 31536000 / 1000)} 千年`;
-  return "宇宙年龄+";
+const checkStrength = (): void => {
+  const base = calcStrength(checkInput.value);
+  checkResult.value = { ...base, crackTime: calcCrackTime(base.entropy) };
 };
 
 /* ===== Argon2id 单向加密 ===== */
 const argonResult = ref("");
 const argonProcessing = ref(false);
+/** 计算代际：输入在计算期间变化时，过期结果必须丢弃（不得冒充当前口令的哈希） */
+let argonRunSeq = 0;
+/** 参数标签与计算调用同源（单一权威来源） */
+const argonParams = argonParamsLabel();
 
 const generateArgonHash = async () => {
-  if (!checkInput.value || argonProcessing.value) return;
+  const pwd = checkInput.value;
+  if (!pwd || argonProcessing.value) return;
+  const seq = ++argonRunSeq;
   argonProcessing.value = true;
   argonResult.value = "";
   try {
@@ -325,14 +452,12 @@ const generateArgonHash = async () => {
     await new Promise(r => setTimeout(r, 10));
     const salt = crypto.getRandomValues(new Uint8Array(16));
     const hash = await argon2id({
-      password: checkInput.value,
+      password: pwd,
       salt,
-      parallelism: 1,
-      memorySize: 65536,  // 64 MB
-      iterations: 3,
-      hashLength: 32,
+      ...ARGON2_PARAMS,
       outputType: "encoded",
     });
+    if (seq !== argonRunSeq) return;
     argonResult.value = hash;
   } catch (e) {
     console.error("[argonCompute] 异常", e);
@@ -342,55 +467,48 @@ const generateArgonHash = async () => {
   }
 };
 
-const copyArgonResult = () => {
+const copyArgonResult = (): void => {
   if (!argonResult.value || argonProcessing.value) return;
-  copyText(argonResult.value);
+  void copyText(argonResult.value, "argon");
 };
+
+/** 输入变化即失效旧哈希：结果必须始终属于当前输入 */
+watch(checkInput, () => {
+  argonRunSeq += 1;
+  argonResult.value = "";
+});
 
 /* ===== 随机令牌 ===== */
 const tokenBytes = ref(16);
 const tokenFormat = ref<"hex" | "base64" | "uuid">("hex");
 const tokenResult = ref("");
 
-const generateToken = () => {
+const generateToken = (): void => {
   if (tokenFormat.value === "uuid") {
     tokenResult.value = crypto.randomUUID();
     return;
   }
   const arr = new Uint8Array(tokenBytes.value);
   crypto.getRandomValues(arr);
-  if (tokenFormat.value === "hex") {
-    tokenResult.value = Array.from(arr).map(b => b.toString(16).padStart(2, "0")).join("");
-  } else {
-    tokenResult.value = btoa(String.fromCharCode(...arr));
-  }
+  tokenResult.value = formatToken(arr, tokenFormat.value);
 };
 
-/* ===== 密钥生成工具（新增，支持 .bin 导出） ===== */
+/* ===== 密钥生成工具（支持 .bin 导出） ===== */
 const keygenBytes = ref(32);
 const keygenFormat = ref<"hex" | "base64">("hex");
 const keygenRaw = ref<Uint8Array>(new Uint8Array(0));
-const keygenDisplay = ref("");
+const keygenDisplay = computed(() => (
+  keygenRaw.value.length === 0 ? "" : formatToken(keygenRaw.value, keygenFormat.value)
+));
+/** 导出会话闸门：双击不得并发打开两个保存对话框 */
+const exportingKey = ref(false);
 
 const keygenBits = computed(() => keygenBytes.value * 8);
 
-const generateKey = () => {
+const generateKey = (): void => {
   const arr = new Uint8Array(keygenBytes.value);
   crypto.getRandomValues(arr);
   keygenRaw.value = arr;
-  updateKeygenDisplay();
-};
-
-const updateKeygenDisplay = () => {
-  if (keygenRaw.value.length === 0) {
-    keygenDisplay.value = "";
-    return;
-  }
-  if (keygenFormat.value === "hex") {
-    keygenDisplay.value = Array.from(keygenRaw.value).map(b => b.toString(16).padStart(2, "0")).join("");
-  } else {
-    keygenDisplay.value = btoa(String.fromCharCode(...keygenRaw.value));
-  }
 };
 
 const keygenHashShort = computed(() => {
@@ -399,77 +517,49 @@ const keygenHashShort = computed(() => {
   return Array.from(h.slice(0, 6)).map(b => b.toString(16).padStart(2, "0")).join("");
 });
 
-/** 生成 verthys_ 前缀的 12 位小写字母数字随机文件名（无大写字母，每次不同，不暴露任何信息） */
-const randomKeyFileName = (): string => {
-  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
-  const bytes = new Uint8Array(12);
-  crypto.getRandomValues(bytes);
-  let s = "";
-  for (let i = 0; i < 12; i++) s += alphabet[bytes[i] % alphabet.length];
-  return `verthys_${s}.bin`;
-};
-
-/** 导出 .bin 文件 */
+/** 导出 .bin 文件（密钥副本用后清零；失败如实告知） */
 const exportBin = async () => {
-  if (keygenRaw.value.length === 0) return;
+  if (keygenRaw.value.length === 0 || exportingKey.value) return;
+  exportingKey.value = true;
   const data = keygenRaw.value.slice();
-  const suggestedName = randomKeyFileName();
+  const suggestedName = randomKeyFileName(randomSource);
 
-  if (isTauri) {
-    try {
-      const target = await save({
-        filters: [{ name: "密钥文件", extensions: ["bin"] }],
-        defaultPath: suggestedName,
-      });
-      if (target) {
-        await writeUserFile(target, data);
-        showToast(`已导出密钥文件：${target.split(/[\\/]/).pop()}`);
+  try {
+    if (isTauri) {
+      try {
+        const target = await save({
+          filters: [{ name: "密钥文件", extensions: ["bin"] }],
+          defaultPath: suggestedName,
+        });
+        if (target) {
+          await writeUserFile(target, data);
+          showToast(`已导出密钥文件：${target.split(/[\\/]/).pop()}`);
+        }
+      } catch {
+        showError("导出失败");
       }
+      return;
+    }
+    // 浏览器模式：Blob 下载
+    try {
+      const blob = new Blob([data.buffer as ArrayBuffer], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = suggestedName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast(`已导出 ${suggestedName}`);
     } catch {
       showError("导出失败");
     }
-    return;
+  } finally {
+    // 内存中的密钥副本不驻留
+    data.fill(0);
+    exportingKey.value = false;
   }
-  // 浏览器模式：Blob 下载
-  try {
-    const blob = new Blob([data.slice().buffer as ArrayBuffer], { type: "application/octet-stream" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = suggestedName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast(`已导出 ${suggestedName}`);
-  } catch { showError("导出失败"); }
-};
-
-/* ===== 复制 ===== */
-const copyText = async (text: string) => {
-  if (!text) return;
-  // 优先尝试 Clipboard API（浏览器安全上下文）
-  let ok = false;
-  try {
-    await navigator.clipboard.writeText(text);
-    ok = true;
-  } catch {
-    // 回退：textarea + execCommand（Tauri webview 兼容）
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.left = "-9999px";
-      ta.style.top = "0";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.focus();
-      ta.select();
-      ok = document.execCommand("copy");
-      document.body.removeChild(ta);
-    } catch { /* */ }
-  }
-  if (ok) showCopied();
 };
 
 onMounted(() => {
@@ -480,6 +570,7 @@ onMounted(() => {
 
 watch([genLength, genOpts], () => generatePassword(), { deep: true });
 watch(keygenBytes, () => generateKey());
+watch(tokenBytes, () => generateToken());
 </script>
 
 <style scoped>
@@ -487,18 +578,25 @@ watch(keygenBytes, () => generateKey());
   width: 100%;
   height: 100%;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
 }
 
-/* ===== 2x2 栅格布局 ===== */
+/* ===== 2x2 栅格布局 =====
+ *   margin: auto（而非 align-items: center）+ min-height: 100%：
+ *   内容不足时整块居中；四分区总高超出视口时可从顶部完整滚到底 ——
+ *   居中容器直接叠加 overflow 会把上沿推到不可达区域。
+ */
 .tools-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 14px;
   align-content: center;
   width: 100%;
+  min-height: 100%;
+  margin: auto;
+  padding: 2px;
 }
 @media (max-width: 680px) {
   .tools-grid { grid-template-columns: 1fr; }
@@ -512,7 +610,7 @@ watch(keygenBytes, () => generateKey());
   background: var(--bar-surface);
   display: flex;
   flex-direction: column;
-  height: 280px;
+  min-height: 280px;
   overflow: hidden;
 }
 /* 分区入场已收敛到全局「模块步入编排」（styles/animations.css）：
@@ -535,7 +633,7 @@ watch(keygenBytes, () => generateKey());
 }
 
 /* ===== 生成器 ===== */
-.gen-display { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-glass); border-radius: var(--radius); margin-bottom: 14px; cursor: pointer; transition: all 0.3s; }
+.gen-display { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-glass); border-radius: var(--radius); margin-bottom: 14px; cursor: pointer; transition: border-color 0.3s, background-color 0.3s; }
 .gen-display:hover { border-color: var(--border-hover); }
 .gen-pwd { font-family: var(--font-mono); font-size: 16px; letter-spacing: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
   background: linear-gradient(90deg, #00d4ff, #b46cff, #ff6eb4, #00d4ff);
@@ -553,12 +651,28 @@ watch(keygenBytes, () => generateKey());
 .ctrl-label { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; letter-spacing: 1px; }
 .ctrl-value { color: var(--accent); font-family: var(--font); font-weight: 600; }
 .slider { -webkit-appearance: none; appearance: none; width: 100%; height: 4px; background: rgba(0,212,255,0.1); border-radius: 2px; outline: none; }
-.slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer; box-shadow: 0 0 8px rgba(0,212,255,0.4); transition: transform 0.2s; }
+.slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer; transition: transform 0.2s; }
 .slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
-.slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer; border: none; box-shadow: 0 0 8px rgba(0,212,255,0.4); }
+.slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer; border: none; }
+/* 键盘可达：remove outline 后必须以 focus-visible 补回焦点指示 */
+.slider:focus-visible { outline: 1px solid var(--accent); outline-offset: 4px; }
+.slider:disabled { opacity: 0.45; cursor: not-allowed; }
+.slider:disabled::-webkit-slider-thumb { background: var(--text-muted); cursor: not-allowed; transform: none; }
+.slider:disabled::-moz-range-thumb { background: var(--text-muted); cursor: not-allowed; }
 .ctrl-opts { display: flex; gap: 6px; flex-wrap: wrap; }
-.opt-chip { display: flex; align-items: center; gap: 4px; padding: 5px 10px; border: 1px solid var(--border-glass); border-radius: 12px; font-size: 11px; color: var(--text-muted); cursor: pointer; transition: all 0.2s; font-family: var(--font); user-select: none; }
-.opt-chip input { display: none; }
+.opt-chip { position: relative; display: flex; align-items: center; gap: 4px; padding: 5px 10px; border: 1px solid var(--border-glass); border-radius: 12px; font-size: 11px; color: var(--text-muted); cursor: pointer; transition: color 0.2s, border-color 0.2s, background-color 0.2s; font-family: var(--font); user-select: none; }
+/* 复选框视觉隐藏但保留在无障碍树与 Tab 序列中（display:none 会同时剥夺键盘可达） */
+.opt-chip input {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+/* 仅键盘聚焦（:focus-visible）才点亮焦点环 —— 鼠标点选只改选中态，不遗留焦点描边 */
+.opt-chip:has(input:focus-visible) { border-color: var(--accent); color: var(--accent); }
 .opt-chip.on { color: var(--accent); border-color: rgba(0,212,255,0.3); background: rgba(0,212,255,0.08); }
 
 /* 强度条 */
@@ -572,11 +686,16 @@ watch(keygenBytes, () => generateKey());
 .strength-entropy { color: var(--text-muted); font-family: var(--font); }
 
 /* ===== 检测器 ===== */
-.check-input { width: 100%; padding: 12px 14px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-glass); border-radius: var(--radius); color: var(--text-primary); font-size: 14px; font-family: var(--font-mono); outline: none; transition: all 0.2s; margin-bottom: 12px; }
+/* 显隐钮收进检测框内右侧：与生成器/令牌的重新生成、复制按钮同用 .gen-btn
+ * 皮肤（32×32 / 1px 玻璃描边 / 透明底 / 悬浮同源高亮），仅追加定位；
+ * 输入框右侧留出按钮宽度 + 内距，长口令滚动时文字不钻入按钮下方 */
+.check-input-row { position: relative; margin-bottom: 12px; }
+.check-input { width: 100%; min-width: 0; padding: 12px 52px 12px 14px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-glass); border-radius: var(--radius); color: var(--text-primary); font-size: 14px; font-family: var(--font-mono); outline: none; transition: border-color 0.2s; }
 .check-input::placeholder { font-family: var(--font); font-size: 11px; color: var(--text-muted); font-style: italic; }
-.check-input:focus { border-color: var(--accent); box-shadow: 0 0 12px rgba(0,212,255,0.08); }
+.check-input:focus-visible { border-color: var(--accent); }
+.check-toggle { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); }
 .check-meter { display: flex; gap: 3px; margin-bottom: 8px; }
-.meter-segment { flex: 1; height: 4px; background: rgba(255,255,255,0.05); border-radius: 2px; transition: all 0.3s; }
+.meter-segment { flex: 1; height: 4px; background: rgba(255,255,255,0.05); border-radius: 2px; transition: background-color 0.3s; }
 .meter-segment.filled { background: linear-gradient(90deg, #ff2e63, #ff8c42); }
 .meter-segment.filled.seg-2 { background: linear-gradient(90deg, #ff8c42, #ffd700); }
 .meter-segment.filled.seg-3 { background: linear-gradient(90deg, #ffd700, #00d4ff); }
@@ -590,6 +709,7 @@ watch(keygenBytes, () => generateKey());
 .check-level.strength-4 { color: var(--accent); }
 .check-level.strength-5 { color: var(--success); }
 .check-entropy { font-size: 10px; color: var(--text-muted); font-family: var(--font); }
+.check-caveat { font-size: 9px; line-height: 1.5; color: var(--text-muted); font-family: var(--font); letter-spacing: 0.2px; }
 
 /* ===== Argon2id 单向加密 ===== */
 .argon-divider {
@@ -609,7 +729,7 @@ watch(keygenBytes, () => generateKey());
   width: 28px; height: 28px;
   border: 1px solid var(--border-glass); border-radius: var(--radius-sm);
   background: transparent; color: var(--text-muted);
-  cursor: pointer; transition: all 0.2s; flex-shrink: 0;
+  cursor: pointer; transition: color 0.2s, border-color 0.2s, background-color 0.2s; flex-shrink: 0;
 }
 .argon-gen-btn svg { width: 13px; height: 13px; transition: transform 0.5s var(--ease, ease); }
 .argon-gen-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--border-hover); background: rgba(0,212,255,0.06); }
@@ -633,7 +753,7 @@ watch(keygenBytes, () => generateKey());
   border: 1px solid var(--border-glass);
   border-radius: var(--radius-sm);
   min-height: 38px;
-  transition: all 0.3s;
+  transition: border-color 0.3s, background-color 0.3s;
 }
 .argon-result.clickable { cursor: pointer; }
 .argon-result.clickable:hover { border-color: var(--border-hover); background: rgba(0, 212, 255, 0.04); }
@@ -656,18 +776,19 @@ watch(keygenBytes, () => generateKey());
 @keyframes pulse-text { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
 
 /* ===== 令牌生成器 ===== */
-.token-display { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-glass); border-radius: var(--radius); margin-bottom: 12px; cursor: pointer; transition: all 0.3s; }
+.token-display { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-glass); border-radius: var(--radius); margin-bottom: 12px; cursor: pointer; transition: border-color 0.3s, background-color 0.3s; }
 .token-display:hover { border-color: var(--border-hover); }
 .token-code { font-family: var(--font-mono); font-size: 13px; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; letter-spacing: 1px; }
+.token-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .token-controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
 .token-slider-wrap { flex: 1; min-width: 140px; }
 .token-slider-label { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; letter-spacing: 1px; }
 .token-format { display: flex; gap: 4px; }
-.fmt-btn { padding: 5px 12px; font-size: 11px; border: 1px solid var(--border-glass); border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.2s; font-family: var(--font); letter-spacing: 1px; }
+.fmt-btn { padding: 5px 12px; font-size: 11px; border: 1px solid var(--border-glass); border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; transition: color 0.2s, border-color 0.2s, background-color 0.2s; font-family: var(--font); letter-spacing: 1px; }
 .fmt-btn.active { color: var(--accent); border-color: rgba(0,212,255,0.3); background: rgba(0,212,255,0.08); }
 
 /* ===== 密钥生成工具 ===== */
-.keygen-display { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-glass); border-radius: var(--radius); margin-bottom: 12px; cursor: pointer; transition: all 0.3s; }
+.keygen-display { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-glass); border-radius: var(--radius); margin-bottom: 12px; cursor: pointer; transition: border-color 0.3s, background-color 0.3s; }
 .keygen-display:hover { border-color: var(--border-hover); }
 .keygen-code { font-family: var(--font-mono); font-size: 12px; color: #b46cff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; letter-spacing: 1px;
   background: linear-gradient(90deg, #b46cff, #00d4ff, #b46cff);
@@ -681,7 +802,7 @@ watch(keygenBytes, () => generateKey());
 .keygen-controls { display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px; }
 .keygen-length { display: flex; flex-direction: column; gap: 6px; }
 .keygen-presets { display: flex; gap: 6px; }
-.preset-btn { flex: 1; padding: 7px 0; font-size: 12px; border: 1px solid var(--border-glass); border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.2s; font-family: var(--font); font-weight: 600; }
+.preset-btn { flex: 1; padding: 7px 0; font-size: 12px; border: 1px solid var(--border-glass); border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; transition: color 0.2s, border-color 0.2s, background-color 0.2s; font-family: var(--font); font-weight: 600; }
 .preset-btn:hover { color: var(--text-primary); border-color: var(--border-hover); }
 .preset-btn.active { color: var(--accent); border-color: rgba(0, 212, 255, 0.3); background: rgba(0, 212, 255, 0.08); }
 .keygen-format-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -689,4 +810,15 @@ watch(keygenBytes, () => generateKey());
 
 .keygen-export-row { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: auto; padding-top: 10px; border-top: 1px dashed var(--border-glass); }
 .keygen-hint { font-size: 10px; color: var(--text-muted); font-family: var(--font); text-align: center; }
+
+/* ===== 可聚焦展示区（复制入口）焦点指示 =====
+ *  四块展示区均以 role=button + tabindex 提供键盘复制；
+ *  鼠标点击不显示焦点环，键盘 Tab 到必须可见 —— 与全站焦点语言一致 */
+.gen-display:focus-visible,
+.token-display:focus-visible,
+.keygen-display:focus-visible,
+.argon-result.clickable:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
 </style>

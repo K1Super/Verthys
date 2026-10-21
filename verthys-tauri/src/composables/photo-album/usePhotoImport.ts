@@ -11,7 +11,7 @@
  * - 浏览器模式：保留原始字节到内存（用于后续导出），不使用流水线
  *
  * 保持 ref 兼容：importing / importProgress / importStatus
- * 新增 ref：importElapsed / importEta（供 QuantumProgressFlow 使用）
+ * 新增 ref：importElapsed（供 QuantumProgressFlow 使用）
  *
  * 设计要点：
  * - 接收 usePhotoData 返回值 + 全局 Toast 中心的 showError（依赖注入）
@@ -20,12 +20,12 @@
  */
 import { ref, watch, onScopeDispose, type ShallowRef, type Ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import { readUserFile } from "../../lib/verthys";
+import { readUserFile, userFileStat } from "../../lib/verthys";
 import { persistVerthysDetailed, setModuleCache } from "../../lib/keyManager";
-import { pushShallowItems } from "../../utils/shallow-array";
+import { pushShallowItems, replaceShallowArray } from "../../utils/shallow-array";
 import { yieldToMain } from "../../utils/promise_utils";
 import type { PhotoEntry } from "./types";
-import { formatSize, generateThumbnail, guessMime, nextMemoryPhotoId, openBrowserFileDialog, toArrayBuffer } from "./utils";
+import { formatSize, generateThumbnail, guessMime, nextMemoryPhotoId, openBrowserFileDialog, sortByMetaId, toArrayBuffer, toPhotoCacheEntries } from "./utils";
 import { useSingleTimer } from "./utils/timer";
 import { ImportPipeline, importedToPhotoEntries, type ImportFileInput } from "./importPipeline";
 import { MAX_PHOTO_BYTES } from "../../constants/crypto_const";
@@ -69,9 +69,8 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
   const importing = ref(false);
   const importProgress = ref(0);
   const importStatus = ref("");
-  /* ===== 新增：耗时与 ETA（供 QuantumProgressFlow 使用） ===== */
+  /* ===== 新增：耗时（供 QuantumProgressFlow 使用） ===== */
   const importElapsed = ref(0);
-  const importEta = ref(0);
 
   /* ===== 导入流程阶段状态机（跨 await 边界的重入守卫权威） ===== */
   const phase = ref<ImportPhase>({ kind: "idle" });
@@ -108,7 +107,6 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
         importStatus.value = "";
         importProgress.value = 0;
         importElapsed.value = 0;
-        importEta.value = 0;
       }
     }, 1500);
   };
@@ -132,7 +130,6 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
       watch(pipeline.progress.percent, (v) => { importProgress.value = v; });
       watch(pipeline.progress.text, (v) => { importStatus.value = v; });
       watch(pipeline.progress.elapsedMs, (v) => { importElapsed.value = v; });
-      watch(pipeline.progress.etaMs, (v) => { importEta.value = v; });
     }
     return pipeline;
   };
@@ -168,11 +165,33 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
         });
         if (!selected || (Array.isArray(selected) && selected.length === 0)) return;
         const paths = Array.isArray(selected) ? selected : [selected];
-        filesToProcess = paths.map((p) => ({
-          name: p.split(/[\\/]/).pop() || "photo",
-          mime: guessMime(p.split(/[\\/]/).pop() || "photo"),
-          readBytes: () => readUserFile(p),
+        // 读前预检：readUserFile 会整文件搬进内存，超限文件若「读后才拒」，
+        //   内存峰值与读取耗时已经付出。stat 失败不影响导入（按未知大小继续，
+        //   后续仍受流水线的单文件上限与字节预算双重约束）。
+        const checked = await Promise.all(paths.map(async (path) => {
+          try {
+            const stat = await userFileStat(path);
+            return { path, size: stat.size };
+          } catch (e) {
+            console.warn("[onImport] 文件预检失败，按未知大小继续", path, e);
+            return { path, size: undefined as number | undefined };
+          }
         }));
+        const accepted = checked.filter((f) => f.size === undefined || f.size <= MAX_PHOTO_BYTES);
+        const rejected = checked.length - accepted.length;
+        if (rejected > 0) {
+          showError(`${rejected} 个文件超过单文件大小上限，已跳过`);
+        }
+        if (accepted.length === 0) return;
+        filesToProcess = accepted.map(({ path, size }) => {
+          const fileName = path.split(/[\\/]/).pop() || "photo";
+          return {
+            name: fileName,
+            mime: guessMime(fileName),
+            size,
+            readBytes: () => readUserFile(path),
+          };
+        });
       } else {
         // 浏览器模式：使用 File API
         browserFiles = await openBrowserFileDialog();
@@ -235,6 +254,8 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           if (result.imported.length > 0) {
             const newEntries = importedToPhotoEntries(result.imported);
             pushShallowItems(photos, newEntries);
+            // 列表约定按记录 ID 升序：ID 删除后会被复用，增量项可能落在中间
+            replaceShallowArray(photos, sortByMetaId(photos.value));
           }
 
           if (result.skipped > 0) {
@@ -242,7 +263,7 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           }
 
           // 同步模块缓存：导入后立即更新缓存，防止切走再切回时 loadPhotos 用旧缓存覆盖
-          setModuleCache("photos", photos.value);
+          setModuleCache("photos", toPhotoCacheEntries(photos.value));
         } catch (e) {
           console.error("[onImport] 流水线异常", e);
           showError("导入失败，请重试");
@@ -322,9 +343,8 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
     importing,
     importProgress,
     importStatus,
-    /* 新增：耗时与 ETA（供 QuantumProgressFlow 使用） */
+    /* 新增：耗时（供 QuantumProgressFlow 使用） */
     importElapsed,
-    importEta,
     onImport,
     abortImport,
     /* Parsed Import：导出流水线获取函数，供 usePhotoParse 复用同一实例

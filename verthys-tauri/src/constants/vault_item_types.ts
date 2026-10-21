@@ -27,14 +27,29 @@
  *   lib/vault_item_type_store 负责。
  */
 
-/** 字段控件种类：决定编辑窗口渲染何种输入控件 */
-export type VaultFieldKind = "text" | "password" | "date" | "multiline" | "select" | "switch";
+/**
+ * 字段控件种类（单一权威源）：决定编辑窗口渲染何种输入控件。
+ * 由常量数组派生联合类型 —— 校验集合与类型声明不可能漂移。
+ */
+export const VAULT_FIELD_KINDS = [
+  "text",
+  "password",
+  "date",
+  "multiline",
+  "select",
+  "switch",
+] as const;
+
+export type VaultFieldKind = (typeof VAULT_FIELD_KINDS)[number];
 
 /**
  * 色调标识：取值对应既有设计令牌中的点缀色名。
  * 渲染侧据此外取实际颜色变量，未定义的色名一律落到 accent，不产生无效样式。
+ * 同为常量数组派生：校验集合与类型声明单一来源。
  */
-export type VaultTone = "accent" | "purple" | "success" | "warning" | "danger";
+export const VAULT_TONES = ["accent", "purple", "success", "warning", "danger"] as const;
+
+export type VaultTone = (typeof VAULT_TONES)[number];
 
 /**
  * 图标库：键名为图标 id，值为 24×24 描边标记。
@@ -157,6 +172,12 @@ export const ACCOUNT_VAULT_TYPE_ID = "account";
 
 /** 到期字段 id：卡片到期读数与到期筛选固定按此 id 取值 */
 export const VAULT_EXPIRY_FIELD_ID = "expiry";
+
+/**
+ * 卡片次行上限（单一权威源）：超出会让卡片内容层高度溢出。
+ * 写入侧截断与编辑侧校验同取本常量 —— 两处不得各存一份。
+ */
+export const MAX_VAULT_CARD_FIELDS = 3;
 
 /** 自定义类型 id 前缀：区分内置与自定义，便于按前缀路由与校验 */
 export const CUSTOM_VAULT_TYPE_PREFIX = "custom:";

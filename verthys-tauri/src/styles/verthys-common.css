@@ -98,6 +98,8 @@
   opacity: 0; transition: opacity 0.3s var(--ease);
 }
 .verthys-card:hover .secret-actions { opacity: 1; }
+/* 键盘进入同样要让操作可见：焦点已在隐藏键上却看不见，等于不可达 */
+.verthys-card:focus-within .secret-actions { opacity: 1; }
 
 /* ===== 卡片操作按钮 ===== */
 .card-actions {
@@ -105,6 +107,13 @@
   opacity: 0; transition: opacity 0.3s var(--ease);
 }
 .verthys-card:hover .card-actions { opacity: 1; }
+.verthys-card:focus-within .card-actions { opacity: 1; }
+
+/* 无悬浮能力的设备（触屏）不存在 hover 态：操作区若仍靠 hover 揭示，
+   则永远不可见。此处常显，悬浮式揭示只保留给有指针的设备。 */
+@media (hover: none) {
+  .secret-actions, .card-actions { opacity: 1; }
+}
 
 /* ===== 图标按钮 ===== */
 .icon-btn {
@@ -112,7 +121,9 @@
   width: 26px; height: 26px;
   border: 1px solid var(--border-glass); border-radius: var(--radius-sm);
   background: transparent; color: var(--text-muted);
-  cursor: pointer; transition: all 0.2s; flex-shrink: 0; padding: 0;
+  cursor: pointer; flex-shrink: 0; padding: 0;
+  /* 精确属性过渡（禁 transition: all — 仅悬浮三项绘制属性） */
+  transition: color 0.2s, border-color 0.2s, background-color 0.2s;
 }
 .icon-btn svg { width: 13px; height: 13px; }
 .icon-btn:hover {
@@ -125,7 +136,9 @@
   background: none; border: none;
   color: var(--accent); font-size: 11px;
   cursor: pointer; padding: 2px 8px;
-  border-radius: 3px; transition: all 0.2s;
+  border-radius: 3px;
+  /* 精确属性过渡（禁 transition: all — 仅悬浮底色变化） */
+  transition: background-color 0.2s;
   letter-spacing: 0.5px;
 }
 .mini-btn:hover { background: rgba(0,212,255,0.1); }

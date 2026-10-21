@@ -147,7 +147,6 @@ function makeParse(overrides: ParseDepsOverrides = {}) {
       importProgress: ref(0),
       importStatus: ref(""),
       importElapsed: ref(0),
-      importEta: ref(0),
       parseWorkerFactory: () => {
         const worker = makeFakeParseWorker();
         workers.push(worker);

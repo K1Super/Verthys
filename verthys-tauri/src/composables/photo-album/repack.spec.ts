@@ -123,6 +123,23 @@ describe("单张迁移成功路径", () => {
     }
   });
 
+  it("半途遗留的外置引用：旧记录集一并回收缩略图/块集记录并去重", async () => {
+    // 索引未落全（缺 fmt）但已写入外置缩略图/块集引用：迁移成功后这些记录
+    // 若不一并删除就是永久孤儿（台账无从认领）
+    const metaById = new Map<number, PhotoMetaLike>([
+      [8, legacyMeta({ chunkIds: [11, 11, 12], thumbId: 42, chunkSetId: 43 })],
+    ]);
+    let deletedIds: number[] = [];
+    const deps = makeDeps(metaById, {
+      deleteLegacyRecords: async (_id, ids) => { deletedIds = ids; },
+    });
+
+    const result = await runPhotoRepack(deps, freshSignal());
+
+    expect(result.migrated).toBe(1);
+    expect(deletedIds).toEqual([11, 12, 42, 43]);
+  });
+
   it("已是布局二的照片直接跳过（幂等：重复运行不重复改写）", async () => {
     const metaById = new Map<number, PhotoMetaLike>([[8, slimMeta()]]);
     const deps = makeDeps(metaById);

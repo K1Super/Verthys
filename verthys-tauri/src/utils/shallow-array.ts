@@ -23,6 +23,9 @@
 
 import { triggerRef, type ShallowRef } from "vue";
 
+/** 批量追加的单块大小：远低于引擎实参上限（约 6.5 万），万级加载亦不会抛错 */
+const PUSH_CHUNK_SIZE = 4096;
+
 /**
  * 原地修改单条记录的多个字段，并触发响应式更新
  *
@@ -83,34 +86,36 @@ export function updateShallowItemByPredicate<T extends object>(
  *
  * 适用场景：流式加载（verthysEnumerateRecords 分页推送）、批量导入
  *
+ * 分批写入：`push(...items)` 的实参个数受引擎栈/参数上限约束（约 6.5 万），
+ * 万级以上的批量加载会抛 RangeError 并让整次加载失败。故按固定块大小切片，
+ * 首块之后沿用同一引用继续追加 —— 响应式只需一次 triggerRef。
+ *
  * @param arr shallowRef 持有的数组
  * @param items 待追加的记录数组
- * @param trigger 可选的触发函数
  *
  * @example
  * // 流式加载回调中：
  * pushShallowItems(accounts, batchRecords);
  */
-export function pushShallowItems<T>(
-  arr: ShallowRef<T[]>,
-  items: T[],
-  trigger: () => void = () => triggerRef(arr),
-): void {
+export function pushShallowItems<T>(arr: ShallowRef<T[]>, items: T[]): void {
   if (items.length === 0) return;
-  // 使用 push 批量追加（避免 concat 创建新数组的大内存开销）
-  // shallowRef 的 .value.push 不会自动触发，必须显式 triggerRef
-  arr.value.push(...items);
-  trigger();
+  if (items.length <= PUSH_CHUNK_SIZE) {
+    arr.value.push(...items);
+  } else {
+    for (let i = 0; i < items.length; i += PUSH_CHUNK_SIZE) {
+      arr.value.push(...items.slice(i, i + PUSH_CHUNK_SIZE));
+    }
+  }
+  triggerRef(arr);
 }
 
 /**
- * 整体替换数组内容，并触发响应式更新
+ * 整体替换数组内容（shallowRef 赋值本身即触发更新，无需再次 triggerRef）
  *
  * 适用场景：初次加载、过滤/搜索结果替换、模块切换重置
  *
  * @param arr shallowRef 持有的数组
  * @param items 新的记录数组
- * @param trigger 可选的触发函数
  *
  * @example
  * // 初次加载：
@@ -119,13 +124,8 @@ export function pushShallowItems<T>(
  * // 搜索过滤：
  * replaceShallowArray(filteredAccounts, accounts.value.filter(a => a.name.includes(keyword)));
  */
-export function replaceShallowArray<T>(
-  arr: ShallowRef<T[]>,
-  items: T[],
-  trigger: () => void = () => triggerRef(arr),
-): void {
+export function replaceShallowArray<T>(arr: ShallowRef<T[]>, items: T[]): void {
   arr.value = items;
-  trigger();
 }
 
 /**
@@ -135,8 +135,10 @@ export function replaceShallowArray<T>(
  *
  * @param arr shallowRef 持有的数组
  * @param predicate 谓词函数（返回 true 表示待删除）
- * @param trigger 可选的触发函数
  * @returns 实际删除的记录数
+ *
+ * 无命中时不赋新数组：filter 必然产出新引用，无差别赋值会让「点了删除但
+ * 一条也没匹配」也触发整列表重渲染。
  *
  * @example
  * // 删除多条记录后：
@@ -145,15 +147,12 @@ export function replaceShallowArray<T>(
 export function removeShallowItems<T>(
   arr: ShallowRef<T[]>,
   predicate: (item: T) => boolean,
-  trigger: () => void = () => triggerRef(arr),
 ): number {
   const before = arr.value.length;
-  arr.value = arr.value.filter(item => !predicate(item));
-  const removed = before - arr.value.length;
-  if (removed > 0) {
-    trigger();
-  }
-  return removed;
+  const next = arr.value.filter(item => !predicate(item));
+  if (next.length === before) return 0;
+  arr.value = next;
+  return before - next.length;
 }
 
 /**
@@ -161,31 +160,21 @@ export function removeShallowItems<T>(
  *
  * @param arr shallowRef 持有的数组
  * @param index 待移除记录的索引
- * @param trigger 可选的触发函数
  * @returns 是否移除成功
  */
-export function removeShallowItemAt<T>(
-  arr: ShallowRef<T[]>,
-  index: number,
-  trigger: () => void = () => triggerRef(arr),
-): boolean {
+export function removeShallowItemAt<T>(arr: ShallowRef<T[]>, index: number): boolean {
   if (index < 0 || index >= arr.value.length) return false;
   arr.value.splice(index, 1);
-  trigger();
+  triggerRef(arr);
   return true;
 }
 
 /**
- * 清空数组，并触发响应式更新
+ * 清空数组（shallowRef 赋值本身即触发更新）
  *
  * @param arr shallowRef 持有的数组
- * @param trigger 可选的触发函数
  */
-export function clearShallowArray<T>(
-  arr: ShallowRef<T[]>,
-  trigger: () => void = () => triggerRef(arr),
-): void {
+export function clearShallowArray<T>(arr: ShallowRef<T[]>): void {
   if (arr.value.length === 0) return;
   arr.value = [];
-  trigger();
 }

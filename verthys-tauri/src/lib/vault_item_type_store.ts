@@ -24,6 +24,9 @@ import {
   BUILTIN_VAULT_TYPE_IDS,
   CUSTOM_VAULT_TYPE_PREFIX,
   DEFAULT_VAULT_ICON_ID,
+  MAX_VAULT_CARD_FIELDS,
+  VAULT_FIELD_KINDS,
+  VAULT_TONES,
   isVaultIconId,
 } from "../constants/vault_item_types";
 import { TYPE_VAULT_TYPES } from "../constants/record_types";
@@ -52,21 +55,14 @@ export const VAULT_TYPES_CACHE_KEY = "vault_types";
 /** 自定义类型定义记录的显示名（记录列表中的可读标识） */
 export const VAULT_TYPES_RECORD_NAME = "vault-types";
 
-/** 合法字段控件种类（存储读取侧的校验集合） */
-const VALID_FIELD_KINDS: readonly VaultFieldKind[] = [
-  "text",
-  "password",
-  "date",
-  "multiline",
-  "select",
-  "switch",
-];
+/** 合法字段控件种类（单一权威源派生 — 校验集合与类型声明同源） */
+const VALID_FIELD_KINDS: readonly VaultFieldKind[] = VAULT_FIELD_KINDS;
 
-/** 合法色调（存储读取侧的校验集合） */
-const VALID_TONES: readonly VaultTone[] = ["accent", "purple", "success", "warning", "danger"];
+/** 合法色调（单一权威源派生） */
+const VALID_TONES: readonly VaultTone[] = VAULT_TONES;
 
-/** 卡片次行字段上限：超出会让卡片内容层高度溢出，故在写入前截断 */
-const MAX_CARD_FIELDS = 3;
+/** 卡片次行字段上限（单一权威源：与编辑侧校验同取 vault_item_types） */
+const MAX_CARD_FIELDS = MAX_VAULT_CARD_FIELDS;
 
 /** 写入结果：ok 表示记录已写入并同步缓存；persisted 表示已落盘 */
 export interface SaveCustomVaultTypesResult {
@@ -295,13 +291,18 @@ export function validateVaultTypeDefs(
  * 解析类型定义记录的 base64 内容。
  *
  * @param b64 记录载荷
- * @returns 类型定义数组；解析失败返回 null（供调用方继续尝试其它记录）
+ * @returns 类型定义数组；载荷不是数组（结构不符）时返回 null ——
+ *   调用方据此继续回退更早的记录。不得把「形状不符」当成「空类型集」：
+ *   那会让一条损坏的新记录遮蔽掉仍然可用的旧记录，用户观感为类型全部丢失。
  */
 function parseVaultTypesRecord(b64: string): VaultTypeDef[] | null {
   try {
     const raw = deserializeFromJsonB64<unknown>(b64);
-    const defs = sanitizeVaultTypeDefs(raw);
-    return defs;
+    if (!Array.isArray(raw)) {
+      log.warn("类型定义记录不是数组，按结构不符跳过并继续回退");
+      return null;
+    }
+    return sanitizeVaultTypeDefs(raw);
   } catch (e) {
     log.warn("类型定义记录解析失败", e);
     return null;
@@ -335,22 +336,40 @@ async function collectVaultTypeRecordIds(): Promise<number[]> {
   return [...ids].sort((a, b) => a - b);
 }
 
+/** 自定义类型读取结果（判别式：读取失败不得伪装成「没有类型」） */
+export interface VaultTypesLoadResult {
+  /** 可用的类型定义 */
+  types: VaultTypeDef[];
+  /**
+   * 读取失败（区别于「容器内确实没有类型」）。
+   * 失败时调用方应保留上次已知类型并提示，而不是把界面呈现为「零自定义类型」。
+   */
+  failed: boolean;
+}
+
 /**
  * 读取自定义类型定义。
  *
- * @returns 类型定义数组；容器内无该记录或内容不可用时返回空数组
+ * @returns 类型定义 + 读取状态；容器内无该记录或内容不可用时类型为空数组
  *
  * 顺序：模块缓存命中即返回；否则按记录 id 从大到小尝试解析（最新写入的
  * 记录 id 最大），首个可解析的记录即为结果。
  */
-export async function loadCustomVaultTypes(): Promise<VaultTypeDef[]> {
+export async function loadCustomVaultTypes(): Promise<VaultTypesLoadResult> {
   const cached = getModuleCache<VaultTypeDef[]>(VAULT_TYPES_CACHE_KEY);
-  if (cached.data !== null) return cached.data;
+  if (cached.data !== null) return { types: cached.data, failed: false };
 
-  const ids = await collectVaultTypeRecordIds();
+  let ids: number[];
+  try {
+    ids = await collectVaultTypeRecordIds();
+  } catch (e) {
+    // 索引源不可用不代表「没有类型」—— 不得写空缓存（否则本会话永久为空）
+    log.warn("类型定义记录 id 收集失败，按读取失败返回且不写缓存", e);
+    return { types: [], failed: true };
+  }
   if (ids.length === 0) {
     setModuleCache(VAULT_TYPES_CACHE_KEY, []);
-    return [];
+    return { types: [], failed: false };
   }
 
   let dataB64Map: Map<number, string>;
@@ -358,8 +377,8 @@ export async function loadCustomVaultTypes(): Promise<VaultTypeDef[]> {
     dataB64Map = await getRecordsDataB64Batch(ids);
   } catch (e) {
     // 取数异常时不写缓存：空结果一旦入缓存，本会话后续读取会一直为空
-    log.warn("类型定义记录批量取数失败，按空列表返回且不写缓存", e);
-    return [];
+    log.warn("类型定义记录批量取数失败，按读取失败返回且不写缓存", e);
+    return { types: [], failed: true };
   }
 
   for (const id of [...ids].reverse()) {
@@ -368,11 +387,11 @@ export async function loadCustomVaultTypes(): Promise<VaultTypeDef[]> {
     const defs = parseVaultTypesRecord(b64);
     if (defs === null) continue;
     setModuleCache(VAULT_TYPES_CACHE_KEY, defs, id);
-    return defs;
+    return { types: defs, failed: false };
   }
 
   setModuleCache(VAULT_TYPES_CACHE_KEY, []);
-  return [];
+  return { types: [], failed: false };
 }
 
 /**

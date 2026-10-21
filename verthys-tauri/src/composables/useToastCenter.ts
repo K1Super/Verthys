@@ -20,8 +20,9 @@
  *   status     底部 .clip-toast（成功 / 中性状态）          默认 2.5s（可传时长）
  *   copied     底部 .clip-toast（「已复制到剪贴板」）       1.5s
  *   exportDone 顶部 .clip-toast--top（success/error 变体）  2.6s
- *   clip       底部 .clip-toast（剪贴板安全倒计时，秒级刷新；无自动消失计时，
- *              由 useClipToast 在倒计时结束/组件卸载时收起）
+ *
+ * 剪贴板清空提示不使用长驻通道：复制结果与清空时间由 useClipToast 以
+ * status 通道「轮番」呈现（先结果、后清空时间），到期静默清空剪贴板。
  *
  * 【硬约束】
  *   - 禁止任何模块再自行渲染 toast DOM（层级/状态分裂均由此而来）；
@@ -37,12 +38,6 @@ export interface ToastExportDone {
   type: "success" | "error";
 }
 
-/** 剪贴板安全倒计时载荷（text 为场景文案，seconds 为剩余秒数） */
-export interface ToastClip {
-  text: string;
-  seconds: number;
-}
-
 /* ===== 显示时长（毫秒） ===== */
 const ERROR_DURATION = 2500;
 const STATUS_DURATION = 2500;
@@ -50,10 +45,7 @@ const COPIED_DURATION = 1500;
 const EXPORT_DONE_DURATION = 2600;
 
 /** 全局 Toast 状态（单例；唯一渲染消费方 = ToastLayer.vue）
- *  另：useClipToast 只读 clip 状态用于卸载归属判定（不渲染、不写入第二来源）。
- *  载荷类状态（exportDone / clip）用 shallowRef：载荷恒定整体替换、无深响应需求，
- *  且对象身份在写入与读取间稳定 —— 这是「单写者自守 / 卸载归属判定」
- *  （useClipToast 的对象身份比较）成立的前提，禁止改为 deep ref。 */
+ *  载荷类状态（exportDone）用 shallowRef：载荷恒定整体替换、无深响应需求。 */
 export const toastState = {
   /** 顶部错误提示（.error-toast） */
   error: ref(""),
@@ -63,8 +55,6 @@ export const toastState = {
   copied: ref(false),
   /** 顶部导出完成（.clip-toast--top + success/error 变体） */
   exportDone: shallowRef<ToastExportDone | null>(null),
-  /** 底部剪贴板安全倒计时（.clip-toast） */
-  clip: shallowRef<ToastClip | null>(null),
 };
 
 /* ===== 自动消失计时器（单例级；各通道独享，重复触发重置计时） ===== */
@@ -113,18 +103,10 @@ const showExportDone = (msg: string, type: "success" | "error"): void => {
   exportDoneTimer = setTimeout(() => { toastState.exportDone.value = null; }, EXPORT_DONE_DURATION);
 };
 
-/** 写入 / 刷新剪贴板安全倒计时状态（null 收起；秒数由 useClipToast 逐秒推入） */
-const setClip = (state: ToastClip | null): void => {
-  /* 保持载荷对象身份不变：useClipToast 的「单写者自守 / 卸载归属判定」
-   * 依赖写入与读取间的对象身份稳定，禁止在此复制或改写载荷对象；
-   * 该通道文案为场景标签（短文本），不参与异常原文长度防护。 */
-  toastState.clip.value = state;
-};
-
 /**
  * 全局 Toast 中心（组件 / composable 统一取用入口）
  * 单例语义：模块级共享状态，无组件级生命周期（提示随应用存续）。
  */
 export function useToastCenter() {
-  return { showError, showStatus, showCopied, showExportDone, setClip };
+  return { showError, showStatus, showCopied, showExportDone };
 }

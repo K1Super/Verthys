@@ -60,26 +60,45 @@ export function normalizeVaultData(raw: unknown): Record<string, string> {
 /**
  * 归一化条目信封：补齐缺失类型、清洗字段值。
  *
+ * 兼容三种合法落盘形态（按优先级嗅探，识别成功一律产出信封）：
+ *   1. 信封形态 `{ kind, data }` —— 当前写入形态；
+ *   2. 旧版账号形态（扁平 AccountFields：`platform` / `username` 同现）——
+ *      v0x10 账户记录迁入 0x02 时载荷原样搬运，未改写结构；
+ *   3. 旧版账号形态的布尔标记：`encrypted: true/false` 经归一化转 "1"/"0"。
+ *
+ * 判据为「结构形状」而非记录类型：同一记录类型下历史载荷共存，
+ * 若只认信封形态，旧记录会被读成空载荷并在列表侧被当作损坏丢弃 ——
+ * 用户观感即「升级后账号全部消失」。
+ *
  * @param raw 未知来源的信封对象
- * @returns 合法信封；类型缺失或非字符串时回落到账号类型并记录告警
+ * @returns 合法信封；结构无法识别时返回 null（由调用方判为不可读，
+ *          不得降级为空信封 —— 那会把「损坏」伪装成「空条目」）
  */
-function normalizeVaultItemPayload(raw: unknown): VaultItemPayload {
-  if (!isPlainObject(raw)) {
-    log.warn("条目信封不是对象，按缺省账号信封兜底");
-    return { kind: ACCOUNT_VAULT_TYPE_ID, data: {} };
+function normalizeVaultItemPayload(raw: unknown): VaultItemPayload | null {
+  if (!isPlainObject(raw)) return null;
+
+  /* 形态 1：信封 —— data 必须是对象（空对象合法，代表「无字段」） */
+  if (isPlainObject(raw.data)) {
+    const rawKind = raw.kind;
+    const kind =
+      typeof rawKind === "string" && rawKind.length > 0 ? rawKind : ACCOUNT_VAULT_TYPE_ID;
+    if (kind !== rawKind) {
+      log.warn("条目信封缺少合法类型 id，按账号类型兜底");
+    }
+    return { kind, data: normalizeVaultData(raw.data) };
   }
 
-  const rawKind = raw.kind;
-  const kind =
-    typeof rawKind === "string" && rawKind.length > 0 ? rawKind : ACCOUNT_VAULT_TYPE_ID;
-  if (kind !== rawKind) {
-    log.warn("条目信封缺少合法类型 id，按账号类型兜底");
+  /* 形态 2：旧版扁平账号载荷 —— 以平台/账户双键同现为识别依据
+     （这两个键是账号类型的必填字段，命中即几乎不可能是其它结构） */
+  if (typeof raw.platform === "string" && typeof raw.username === "string") {
+    return { kind: ACCOUNT_VAULT_TYPE_ID, data: normalizeVaultData(raw) };
   }
-  return { kind, data: normalizeVaultData(raw.data) };
+
+  return null;
 }
 
 /**
- * 序列化条目信封为 base64 文本（JSON → UTF-8 → base64）。
+ * 获取条目载荷的 base64 文本（写入侧唯一出口）。
  *
  * @param payload 条目信封
  * @returns base64 文本
@@ -91,19 +110,53 @@ export function serializeVaultItem(payload: VaultItemPayload): string {
   });
 }
 
+/** 条目载荷解码失败的原因（供界面区分「空记录」与「损坏记录」） */
+export type VaultDecodeFailure =
+  /** 载荷为空 */
+  | "empty"
+  /** base64 / JSON 解码失败 */
+  | "undecodable"
+  /** 结构可解析但不属于任何已知载荷形态 */
+  | "unrecognized";
+
+/** 条目载荷解码结果（判别式：失败不得伪装成空信封） */
+export type VaultDecodeResult =
+  | {
+      ok: true;
+      payload: VaultItemPayload;
+      /** 是否为旧版扁平账号载荷（调用方可据此在首次编辑时按新形态重写） */
+      legacy: boolean;
+    }
+  | { ok: false; reason: VaultDecodeFailure };
+
 /**
- * 反序列化 base64 文本为条目信封。
+ * 解码条目载荷（唯一读取入口）。
  *
  * @param b64 base64 文本（可能来自存储，按未知输入处理）
- * @returns 条目信封；解码或解析失败时返回 {kind:'account', data:{}} 并记录告警
+ * @returns 判别式结果；不抛错，失败原因交调用方呈现
+ *
+ * 失败与「空条目」必须可区分：前者是数据不可读（用户仍需看见该记录存在），
+ * 后者是合法但无字段值的信封。混为一谈会把损坏记录从界面上抹掉。
  */
-export function deserializeVaultItem(b64: string): VaultItemPayload {
+export function decodeVaultItem(b64: string): VaultDecodeResult {
+  if (!b64) return { ok: false, reason: "empty" };
+
+  let raw: unknown;
   try {
-    return normalizeVaultItemPayload(deserializeFromJsonB64<unknown>(b64));
+    raw = deserializeFromJsonB64<unknown>(b64);
   } catch (e) {
-    log.warn("条目载荷反序列化失败，按缺省账号信封兜底", e);
-    return { kind: ACCOUNT_VAULT_TYPE_ID, data: {} };
+    log.warn("条目载荷反序列化失败", e);
+    return { ok: false, reason: "undecodable" };
   }
+
+  const payload = normalizeVaultItemPayload(raw);
+  if (!payload) {
+    log.warn("条目载荷结构无法识别（既非信封亦非旧版账号形态）");
+    return { ok: false, reason: "unrecognized" };
+  }
+
+  const legacy = !(isPlainObject(raw) && isPlainObject(raw.data));
+  return { ok: true, payload, legacy };
 }
 
 /**

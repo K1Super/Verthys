@@ -40,6 +40,24 @@
     rgba(0, 0, 0, 0.32);
 }
 
+/* 已选路径文本：左内嵌，右侧预留刻痕与操作区（不遮挡、不换行） */
+.ps-path {
+  position: absolute;
+  left: 10px;
+  right: 78px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: rgba(148, 160, 178, 0.62);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.path-status.active .ps-path { color: rgba(0, 212, 255, 0.82); }
+
 /* ===== 锁定刻痕组（选中即亮 — 静态确认；撤销即灭） ===== */
 .ps-lock {
   position: absolute;

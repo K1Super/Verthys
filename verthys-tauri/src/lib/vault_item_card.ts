@@ -29,9 +29,6 @@ export const VAULT_SECRET_MASK = "••••••••••";
 /** 类型定义缺失时卡片上的类型名 */
 export const VAULT_UNKNOWN_TYPE_LABEL = "未知类型";
 
-/** 类型定义缺失时卡片的次行取值上限 */
-const UNKNOWN_TYPE_LINE_LIMIT = 2;
-
 /** 卡片次行展示项 */
 export interface VaultCardLine {
   /** 字段 id（列表渲染的稳定键） */
@@ -76,6 +73,11 @@ export interface VaultCardView {
   secret: VaultCardSecret | null;
   /** 到期读数；该类型未声明到期字段时为 null */
   expiry: VaultCardExpiry | null;
+  /**
+   * 类型定义缺失时的已存字段数（仅供卡片说明「有 N 项数据待重新指派」）。
+   * 字段值与字段名一概不外泄 —— 类型未知即无法判断哪些字段敏感。
+   */
+  fieldCount: number;
 }
 
 /** 到期读数：tone 决定色调语义，text 为展示文案 */
@@ -115,8 +117,38 @@ export function vaultReadoutColorVar(readout: VaultExpiryReadout): string | null
 /** 临期阈值（天）：剩余天数小于该值按临期呈现 */
 export const VAULT_EXPIRY_WARN_DAYS = 30;
 
-/** 一天的毫秒数（天数换算用） */
+/** 一天的毫秒数（本地日历日换算用） */
 const DAY_MS = 86_400_000;
+
+/** 纯日期字符串（`YYYY-MM-DD`，日期控件唯一产出形态） */
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * 把到期取值解析为「本地日历日」起点时间戳。
+ *
+ * `new Date("YYYY-MM-DD")` 按 **UTC** 解析，而日期控件与用户心智都是本地日期：
+ * 东八区当天 08:00 之后，UTC 零点已过 → 同一张「今日到期」的卡片会被读成
+ * 「已过期 1 天」。故纯日期一律按本地年月日构造；
+ * 带时刻的取值（历史数据）退回原生解析，语义保持「到那一刻为止」。
+ *
+ * @param expiry 到期取值
+ * @returns 毫秒时间戳；空值或不可解析返回 null
+ */
+export function vaultExpiryTimestamp(expiry: string): number | null {
+  if (!expiry) return null;
+  const dateOnly = DATE_ONLY_RE.exec(expiry);
+  if (dateOnly) {
+    return new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3])).getTime();
+  }
+  const time = new Date(expiry).getTime();
+  return Number.isNaN(time) ? null : time;
+}
+
+/** 取时间戳所属的本地日历日起点（跨夏令时仍以日历日为准） */
+function startOfLocalDay(time: number): number {
+  const d = new Date(time);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
 
 /**
  * 计算到期读数。
@@ -125,18 +157,23 @@ const DAY_MS = 86_400_000;
  * @param now 参照时刻（毫秒时间戳，默认当前时刻；便于固定断言）
  * @returns 读数语调与文案；未设置到期日按永久有效呈现
  *
- * 阈值语义：已过期按超出天数告警、剩余不足一天按今日内到期、剩余不足
- * 临期阈值按临期、其余按有效。
+ * 天数一律按**本地日历日差**计算：到期日当天整天都算「今日内到期」，
+ * 不因当前钟点（或时区）提前判定过期。
  */
 export function vaultExpiryReadout(expiry: string, now: number = Date.now()): VaultExpiryReadout {
   if (!expiry) return { tone: "none", text: "永久有效" };
 
-  const diffDays = (new Date(expiry).getTime() - now) / DAY_MS;
-  if (Number.isNaN(diffDays)) return { tone: "none", text: "永久有效" };
-  if (diffDays < 0) return { tone: "expired", text: `已过期 ${Math.ceil(-diffDays)} 天` };
-  if (diffDays < 1) return { tone: "expiring", text: "今日内到期" };
-  if (diffDays < VAULT_EXPIRY_WARN_DAYS) return { tone: "expiring", text: `${Math.floor(diffDays)} 天后到期` };
-  return { tone: "valid", text: `${Math.floor(diffDays)} 天后到期` };
+  const target = vaultExpiryTimestamp(expiry);
+  if (target === null) return { tone: "none", text: "永久有效" };
+
+  const diffDays = Math.round(
+    (startOfLocalDay(target) - startOfLocalDay(now)) / DAY_MS,
+  );
+
+  if (diffDays < 0) return { tone: "expired", text: `已过期 ${-diffDays} 天` };
+  if (diffDays === 0) return { tone: "expiring", text: "今日内到期" };
+  if (diffDays < VAULT_EXPIRY_WARN_DAYS) return { tone: "expiring", text: `${diffDays} 天后到期` };
+  return { tone: "valid", text: `${diffDays} 天后到期` };
 }
 
 /**
@@ -157,16 +194,19 @@ export function findCardSecretField(def: VaultTypeDef): VaultFieldDef | undefine
  * 取条目的主标题取值。
  *
  * @param data 条目数据字典
- * @param def 类型定义；缺失时取数据中的首个取值
+ * @param def 类型定义；缺失时返回空串
  * @returns 主标题文本
+ *
+ * 类型缺失时不回落到「首个取值」：类型未知即无法判断该值是否敏感，
+ * 以原始数据充当标题等于在卡面上泄露一条未受保护的信息。
+ * 卡片改以类型标识承担主信息（见 buildVaultCardView 的 unknown 分支）。
  */
 export function vaultItemTitle(
   data: Readonly<Record<string, string>>,
   def: VaultTypeDef | undefined,
 ): string {
-  if (def) return data[def.titleField] ?? "";
-  const first = Object.values(data)[0];
-  return first ?? "";
+  if (!def) return "";
+  return data[def.titleField] ?? "";
 }
 
 /**
@@ -183,30 +223,30 @@ export function vaultItemTypeLabel(def: VaultTypeDef | undefined): string {
  * 构建卡片视图。
  *
  * @param data 条目数据字典
- * @param def 类型定义；缺失时按未知类型兜底展示
+ * @param def 类型定义；缺失时按未知类型兜底展示（不展示任何字段值）
  * @returns 卡片视图
+ *
+ * 类型缺失的安全裁定：字段名与字段值**一律不出卡面**。类型声明是「哪些字段
+ * 敏感」的唯一依据，声明缺失时无法判断任意取值的敏感属性 —— 此时展示原文
+ * 等于把密码/证件号平铺在卡片上。故只给出字段数，取值由「重新指派类型」
+ * 或显式查看入口承担。
  */
 export function buildVaultCardView(
   data: Readonly<Record<string, string>>,
   def: VaultTypeDef | undefined,
 ): VaultCardView {
   if (!def) {
-    const entries = Object.entries(data);
     return {
       kind: "",
       typeLabel: VAULT_UNKNOWN_TYPE_LABEL,
       icon: resolveVaultIcon(DEFAULT_VAULT_ICON_ID),
       tone: "accent",
       unknown: true,
-      title: vaultItemTitle(data, undefined),
-      lines: entries.slice(1, 1 + UNKNOWN_TYPE_LINE_LIMIT).map(([fieldId, value]) => ({
-        fieldId,
-        label: fieldId,
-        value,
-        sensitive: false,
-      })),
+      title: "",
+      lines: [],
       secret: null,
       expiry: null,
+      fieldCount: Object.keys(data).length,
     };
   }
 
@@ -254,6 +294,7 @@ export function buildVaultCardView(
     lines,
     secret,
     expiry,
+    fieldCount: Object.keys(data).length,
   };
 }
 
@@ -261,16 +302,20 @@ export function buildVaultCardView(
  * 生成条目的搜索文本（小写）。
  *
  * @param data 条目数据字典
- * @param def 类型定义；缺失时以全部字段值参与搜索
+ * @param def 类型定义；缺失时返回空串
  * @returns 参与搜索的字段值拼接文本
+ *
+ * 类型缺失时不参与检索：类型声明同时决定「哪些字段可搜」，声明缺失即无法
+ * 判断某个取值是否敏感 —— 若把它纳入检索，用户可用关键字试探出未展示的
+ * 密码/证件号（卡面已掩码，检索却成了旁路）。故宁可搜不到，不可泄值。
  */
 export function vaultSearchText(
   data: Readonly<Record<string, string>>,
   def: VaultTypeDef | undefined,
 ): string {
-  const fields = def ? def.searchFields : Object.keys(data);
+  if (!def) return "";
   const parts: string[] = [];
-  for (const fieldId of fields) {
+  for (const fieldId of def.searchFields) {
     const value = data[fieldId];
     if (value) parts.push(value);
   }

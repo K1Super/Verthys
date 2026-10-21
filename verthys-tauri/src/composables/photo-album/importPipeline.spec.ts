@@ -98,7 +98,7 @@ vi.mock("../../cache/coordination/batch-cache-coordinator", () => ({
   },
 }));
 
-import { ImportPipeline } from "./importPipeline";
+import { ImportPipeline, importedToPhotoEntries } from "./importPipeline";
 import type { ParsedPhotoPreview } from "./types";
 import type { PhotoMeta } from "../../lib/crypto";
 import { createSlimFileKeys } from "../../lib/crypto";
@@ -701,6 +701,33 @@ describe("importPipeline — 共享会话编排（两路一致的会话语义）
     expect(waitForCapacityMock).not.toHaveBeenCalled();
     expect(photoWorkerPool.submit).not.toHaveBeenCalled();
     expect(importEndMock).toHaveBeenCalledWith(false);
+  });
+});
+
+describe("importedToPhotoEntries — 导入后首帧条目投影", () => {
+  it("缩略图转 Blob URL 且标记已加载（不再重复解密同一份元数据）", () => {
+    const [entry] = importedToPhotoEntries([
+      {
+        metaId: 5,
+        name: "meta_a.jpg",
+        displayName: "a.jpg",
+        thumbB64: "AAAA",
+        size: 2048,
+        mime: "image/jpeg",
+      },
+    ]);
+    expect(entry).toMatchObject({
+      id: 5,
+      metaId: 5,
+      name: "a.jpg",
+      size: "2.0 KB",
+      loaded: true,
+      failed: false,
+    });
+    // data: 字符串会随列表常驻 JS 堆：缩略图必须走对象 URL
+    // （node 环境无对象存储时安全退化为空串，渲染层按无缩略图处理）
+    expect(entry.thumb.startsWith("data:")).toBe(false);
+    if (entry.thumb) expect(entry.thumb).toMatch(/^url\("blob:/);
   });
 });
 

@@ -2,7 +2,7 @@
   SecurityDashboard.vue — 安全防护 · 双星系统分区（无底板）
   设计：引力谱系 · sf-zone--binary —— 谱系坐标头（BINARY SYSTEM / 03）+
   面板五组件全部重塑（零卡片底板/边框/阴影，直接悬浮于宇宙背景）：
-    1. bs-field   双星引力场：开销星（扫掠弧=CPU/IO）↔ 质心（综合评分+齿轮）
+    1. bs-field   双星引力场：开销星（扫掠弧=CPU 占用）↔ 质心（综合评分+齿轮）
                   ↔ 覆盖星（扫掠弧=安全覆盖），氛围弧差速旋转
     2. bs-track   引力测线：非均匀测绘残段刻度（暗层休眠/潮汐亮层连续
                   点亮=能量进程）+ 基准桩锚点（错落桩高，端点锚兼作
@@ -18,7 +18,7 @@
                   轨道下方运行状态行随模式切换语义与流速
 
   职责：
-    1. 双星引力场（左星 CPU/IO + 质心综合评分 + 右星 安全覆盖 + 齿轮入口）
+    1. 双星引力场（左星 CPU 占用 + 质心综合评分 + 右星 安全覆盖 + 齿轮入口）
     2. 引力测线滑块（三基准桩磁性吸附 + 潮汐亮层 + 游标天平）
     3. 特性谱线自定义面板（toggleableFeatures + 恢复默认/保存并应用）
     4. 安全防护栏（lockedFeatures 清单：圆点 + 名称 + 【核心】）
@@ -51,7 +51,7 @@
       <span class="sf-ghost" aria-hidden="true">03</span>
       <span class="sf-coord">Binary System</span>
       <h2 class="sf-title">安全防护</h2>
-      <p class="sf-digest">{{ presetSyncFailed ? '档位同步失败 · 当前显示可能与后端不一致' : '性能 ↔ 安全 权衡 · 拖拽松手吸附 · 即时切换档位' }}</p>
+      <p class="sf-digest" :class="{ 'is-warn': digestWarn }">{{ digestText }}</p>
     </header>
 
     <div class="security-dashboard" :class="{ 'is-dragging': dragging }">
@@ -60,7 +60,7 @@
 
       <!-- ===== 1. 双星引力场 ===== -->
       <div class="bs-field">
-        <!-- 左星：CPU/IO 开销 -->
+        <!-- 左星：CPU 占用 -->
         <div class="bs-star bs-star-left">
           <svg viewBox="0 0 140 140" class="bs-star-svg" aria-hidden="true">
             <defs>
@@ -91,7 +91,7 @@
           </svg>
           <div class="bs-star-info">
             <div class="bs-star-value">{{ cpuOverhead }}<span class="bs-star-unit">%</span></div>
-            <div class="bs-star-label">CPU / IO 开销</div>
+            <div class="bs-star-label">CPU 占用</div>
           </div>
         </div>
 
@@ -106,6 +106,8 @@
             class="bs-gear"
             :class="{ active: securityPresetCode === 3, open: customPanelOpen }"
             :disabled="!globalKeyReady"
+            :aria-label="customPanelOpen ? '收起自定义防护模板' : '展开自定义防护模板'"
+            :aria-expanded="customPanelOpen"
             @click="$emit('toggleGearPanel')"
             v-tip="'自定义防护模板'"
           >
@@ -220,6 +222,8 @@
           step="1"
           :value="orbitSliderPos"
           class="bs-range-input"
+          aria-label="安全强度轨道（性能 ↔ 平衡 ↔ 安全）"
+          :aria-valuetext="rangeValueText"
           :disabled="!globalKeyReady || presetApplying"
           @input="onKeyInput"
           @change="onKeyRelease"
@@ -274,7 +278,7 @@
             v-for="(feat, i) in lockedFeatures"
             :key="feat.key"
             class="cap-item"
-            :class="[`cap-item-${i}`, { off: !capFeatOn(feat.key) }]"
+            :class="[`cap-item-${i}`, { off: capFeatState(feat.key) === 'off', unknown: capFeatState(feat.key) === 'unknown' }]"
             v-tip="feat.desc"
           >
             <span class="cap-dot" aria-hidden="true"></span>
@@ -313,7 +317,7 @@
           <span class="def-stance-mark" aria-hidden="true"></span>
           <span class="def-stance-text">{{ defenseMeta.stanceLabel }}</span>
           <span class="def-stance-detail">
-            阻断 {{ defenseMeta.blocked }} · 降级 {{ defenseMeta.degraded }} · 失败 {{ defenseMeta.failed }}
+            阻断 {{ defenseMeta.blocked }} · 降级 {{ defenseMeta.degraded }} · 失败 {{ defenseMeta.failed }}{{ defenseMeta.stale ? ' · 数据陈旧' : '' }}
           </span>
         </div>
       </div>
@@ -384,7 +388,7 @@ const props = defineProps<{
   presetApplying: boolean;
   /** 预设环境光效模式 */
   presetAmbienceMode: string;
-  /** CPU/IO 开销百分比（左星扫掠弧） */
+  /** CPU 占用百分比（左星扫掠弧） */
   cpuOverhead: number;
   /** 安全覆盖度百分比（右星扫掠弧） */
   securityCoverage: number;
@@ -418,7 +422,26 @@ const props = defineProps<{
   defenseMeta: DefenseMetaView;
   /** 档位同步失败标志（恢复链失败时展示警示文案） */
   presetSyncFailed: boolean;
+  /** 会话硬化/会话守卫降级标志（部分安全能力未生效时如实提示） */
+  hardeningFailed: boolean;
 }>();
+
+/** 谱系摘要：优先如实披露降级/未同步状态（安全关键信息不得被常规文案淹没） */
+const digestWarn = computed(() =>
+  props.presetSyncFailed || props.hardeningFailed,
+);
+const digestText = computed(() => {
+  if (props.presetSyncFailed) return "档位同步失败 · 当前显示可能与后端不一致";
+  if (props.hardeningFailed) return "会话硬化未完全生效 · 剪贴板监听或系统锁屏守卫可能不可用";
+  return "性能 ↔ 安全 权衡 · 拖拽松手吸附 · 即时切换档位";
+});
+
+/** 轨道键盘可达语义值（读屏播报当前锚点档位而非裸数字） */
+const rangeValueText = computed(() => {
+  const idx = props.nearestAnchorIdx;
+  const anchor = props.orbitAnchors[idx];
+  return anchor ? `当前吸附方向：${anchor.label}（${Math.round(orbitSliderPos.value)}%）` : `${Math.round(orbitSliderPos.value)}%`;
+});
 
 /**
  * SecurityDashboard Model
@@ -452,11 +475,19 @@ const emit = defineEmits<{
    完整性校验/内存保护），圆点如实灰态 —— 禁止恒等伪装计数
    ============================================================ */
 
-/** 判定核心能力在当前档位的真实启用态（应用配置为权威，缺省视为启用） */
-const capFeatOn = (key: string): boolean => props.presetFeatures[key] !== false;
-/** 当前档位真实启用的核心能力数 */
+/** 判定核心能力在当前档位的真实状态（三态）
+ *  - on：后端权威快照明确为启用；
+ *  - off：后端权威快照明确为关闭；
+ *  - unknown：快照未加载 / 同步失败 / 缺失该键 —— 不得缺省点亮
+ *    （旧实现 `!== false` 把缺失当启用，配置未加载时全绿属虚假声明）。 */
+const capFeatState = (key: string): 'on' | 'off' | 'unknown' => {
+  if (props.presetSyncFailed) return 'unknown';
+  const v = props.presetFeatures[key];
+  return v === true ? 'on' : v === false ? 'off' : 'unknown';
+};
+/** 当前档位真实启用的核心能力数（unknown 不计入） */
 const capActiveCount = computed(() =>
-  props.lockedFeatures.filter((f) => capFeatOn(f.key)).length,
+  props.lockedFeatures.filter((f) => capFeatState(f.key) === 'on').length,
 );
 
 /* ============================================================

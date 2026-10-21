@@ -39,6 +39,7 @@ const baseProps = {
   customFeatures: { session_lock_on_idle: true },
   customPanelOpen: false,
   presetSyncFailed: false,
+  hardeningFailed: false,
   defensePaths: [
     {
       key: "suspend_bypass",
@@ -57,6 +58,7 @@ const baseProps = {
     allCriticalBlocked: true,
     stance: "ok" as const,
     stanceLabel: "关键路径全阻断",
+    stale: false,
   },
 };
 

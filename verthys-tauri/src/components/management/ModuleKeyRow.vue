@@ -31,6 +31,7 @@
           type="checkbox"
           :checked="enabled"
           :disabled="!globalKeyReady"
+          :aria-label="`${label} · 模块密钥保护开关`"
           @change="$emit('toggleEnabled', ($event.target as HTMLInputElement).checked)"
         />
         <span class="sf-toggle-track" aria-hidden="true"></span>
@@ -39,6 +40,7 @@
       <!-- 生成/修改密钥节点（仅密钥保护开启时可用） -->
       <button
         class="sf-node"
+        :aria-label="`${label} · ${hasRecord ? '修改独立密钥' : '生成独立密钥'}`"
         @click="$emit('openKeyDialog')"
         :disabled="!globalKeyReady || !enabled"
         v-tip="hasRecord ? '修改独立密钥' : '生成独立密钥'"
@@ -49,6 +51,7 @@
       <button
         v-if="hasRecord"
         class="sf-node"
+        :aria-label="`${label} · 查看并复制模块密钥`"
         @click="$emit('showModuleKey')"
         :disabled="!hasKey || !isReady"
         v-tip="'查看/复制密钥（需先登录该模块）'"
@@ -59,6 +62,7 @@
       <button
         v-if="ready"
         class="sf-node"
+        :aria-label="`${label} · 登出模块`"
         @click="$emit('logoutModule')"
         v-tip="'登出模块'"
       >

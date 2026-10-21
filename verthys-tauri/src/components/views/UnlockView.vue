@@ -46,6 +46,8 @@
         <div class="form-row">
           <div class="path-row">
             <div class="path-status" :class="{ active: verthysPath }">
+              <!-- 已选存储位置（文件名 + 完整路径悬停可见；旧实现完全不显示） -->
+              <span class="ps-path" :title="verthysPath || '未选择存储位置'">{{ selectedPathDisplay }}</span>
               <!-- 锁定刻痕组（静态点亮 — 选中确认） -->
               <div class="ps-lock">
                 <i class="ps-lock-tick ps-lock-tick-1"></i>
@@ -54,11 +56,11 @@
               </div>
               <!-- 操作图标（右侧内嵌） -->
               <div class="ps-actions">
-                <button class="ps-btn" @click="$emit('openExisting')" :disabled="unlocking" v-tip="'打开'">
+                <button class="ps-btn" aria-label="打开已有存储文件" @click="$emit('openExisting')" :disabled="unlocking" v-tip="'打开'">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z"/></svg>
                 </button>
                 <span class="ps-divider"></span>
-                <button class="ps-btn" @click="$emit('createNew')" :disabled="unlocking" v-tip="'新建'">
+                <button class="ps-btn" aria-label="新建存储文件" @click="$emit('createNew')" :disabled="unlocking" v-tip="'新建'">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                 </button>
               </div>
@@ -99,6 +101,7 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import CosmicBackdrop from "../common/cosmic/CosmicBackdrop.vue";
 import LevitationField from "../common/cosmic/LevitationField.vue";
 import CosmicSubmit from "../common/cosmic/CosmicSubmit.vue";
@@ -124,6 +127,13 @@ const props = defineProps<{
   /** 初始化详情（含 ⚠ repair_fail_count 告警） */
   initDetailRef: string;
 }>();
+
+/** 已选路径显示名（仅文件名；完整路径经 title 悬停可见，避免长路径挤爆定宽指示器） */
+const selectedPathDisplay = computed(() => {
+  const p = props.verthysPath;
+  if (!p) return "未选择存储位置";
+  return p.split(/[\\/]/).filter(Boolean).pop() || p;
+});
 
 /**
  * UnlockView Emits

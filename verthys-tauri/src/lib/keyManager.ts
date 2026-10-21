@@ -50,6 +50,8 @@ import { keyState } from "../state/key_state";
 export const verthysReadyRef = keyState.verthysReady;
 export const globalKeyReadyRef = keyState.globalKeyReady;
 export const hasGlobalKeyRecordRef = keyState.hasGlobalKeyRecord;
+/* 全局密钥记录 id：修改密钥成功后更新；超时回查据此确认后端真实结果 */
+export const globalKeyRecordIdRef = keyState.globalKeyRecordId;
 export const globalKeyRecordLoadingRef = keyState.globalKeyRecordLoading;
 export const moduleKeyReadyRef = keyState.moduleKeyReady;
 export const hasModuleKeyRecordRef = keyState.hasModuleKeyRecord;
@@ -62,6 +64,8 @@ export const moduleKeyStatusLoadingRef = keyState.moduleKeyStatusLoading;
  *   判断模块密钥状态是否已加载完成。仅 loadModuleKeyStatus 真正完成时为 true，
  *   未加载完前守卫拦截业务模块进入，杜绝"超时后默认 false 放行"绕过漏洞。 */
 export const moduleKeyStatusLoadedRef = keyState.moduleKeyStatusLoaded;
+/* 模块密钥状态加载失败标志：守卫据此立即 fail-closed（不再空等超时窗口） */
+export const moduleKeyStatusFailedRef = keyState.moduleKeyStatusFailed;
 export const initStatusRef = keyState.initStatus;
 export const storedVerthysPathRef = keyState.storedVerthysPath;
 export const lastInitErrorRef = keyState.lastInitError;
@@ -146,6 +150,7 @@ export {
   awaitLockAllIfInProgress,
   securityPresetRef,
   sessionLockEnabledRef,
+  securityHardeningFailedRef,
 } from "../session/security-session";
 
 /* ===== 全局加密库层 API ===== */
@@ -254,8 +259,8 @@ export { isBackgroundTasksRunning } from "../core/background-tasks";
 /* ===== 设备绑定独立 API =====
  *
  * 从 initGlobalKey 中解耦，由调用方显式控制。
- * SecurityCenter.vue 在 initGlobalKey 成功后调用 bindDevice(false)，
- * 失败仅 Toast 提示不阻塞主流程；force=true 覆盖旧绑定。
+ * SecurityCenter.vue 在 initGlobalKey 成功后调用 bindDevice()，
+ * 失败仅 Toast 提示不阻塞主流程（始终写入当前机器码）。
  */
 export { bindDevice } from "../key/global-verthys";
 

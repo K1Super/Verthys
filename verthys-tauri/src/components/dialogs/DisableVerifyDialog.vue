@@ -13,7 +13,7 @@
   Emits: close / confirm
 -->
 <template>
-  <CosmicOverlay :show="show" width="440px" @close="$emit('close')">
+  <CosmicOverlay :show="show" width="440px" :backdrop-close="!disableVerifyProcessing" @close="$emit('close')">
     <div class="kv-title">关闭「{{ moduleLabel }}」密钥保护</div>
     <div class="kv-desc">关闭后该模块可直接访问无需密钥。为防止误操作，请验证原独立密钥。</div>
     <div class="kd-old-key-row">
@@ -27,7 +27,7 @@
       />
     </div>
     <div class="kv-actions">
-      <button class="btn kv-cancel" @click="$emit('close')">取消</button>
+      <button class="btn kv-cancel" @click="$emit('close')" :disabled="disableVerifyProcessing">取消</button>
       <button class="btn btn-primary kv-confirm" @click="$emit('confirm')" :disabled="!disableVerifyKey || disableVerifyProcessing">
         {{ disableVerifyProcessing ? '验证中…' : '确认关闭' }}
       </button>

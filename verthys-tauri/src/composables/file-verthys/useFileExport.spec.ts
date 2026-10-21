@@ -46,7 +46,10 @@ interface HarnessOptions {
 }
 
 function makeHarness(opts: HarnessOptions = {}) {
+  /** 写入时刻的内容快照（管道在追加返回后立即清零原缓冲，不能按引用断言） */
   const appended: Uint8Array[] = [];
+  /** 追加时传入的原始缓冲引用（用于锁定"用后清零"不变式） */
+  const appendedRefs: Uint8Array[] = [];
   const aborted: string[] = [];
   const finalized: string[] = [];
   const opened: string[] = [];
@@ -91,7 +94,8 @@ function makeHarness(opts: HarnessOptions = {}) {
       return "stream-1";
     },
     streamAppend: async (_sid, data) => {
-      appended.push(data);
+      appended.push(data.slice());
+      appendedRefs.push(data);
     },
     streamFinalize: async (sid) => {
       if (opts.finalizeFails) throw new Error("finalize 注入失败");
@@ -102,7 +106,7 @@ function makeHarness(opts: HarnessOptions = {}) {
     },
   };
 
-  return { deps, appended, aborted, finalized, opened, picked, stats };
+  return { deps, appended, appendedRefs, aborted, finalized, opened, picked, stats };
 }
 
 function chunkBuffer(fill: number, len: number): Uint8Array {
@@ -469,5 +473,91 @@ describe("runFileExport", () => {
     if (!result.ok) expect(result.code).toBe("E_STREAM_FAILED");
     expect(h.opened).toEqual([]);
     expect(h.aborted).toEqual([]);
+  });
+});
+
+describe("runFileExport — 明文生命周期与可观测性", () => {
+  it("成功路径：追加返回后逐块清零明文缓冲（不驻留堆）", async () => {
+    const size = CHUNK + 8;
+    const records = new Map<number, string>([
+      [10, bytesToBase64(chunkBuffer(5, CHUNK))],
+      [11, bytesToBase64(chunkBuffer(6, 8))],
+    ]);
+    const h = makeHarness({ records });
+
+    const result = await runFileExport(entryOf(size, [10, 11]), null, h.deps);
+
+    expect(result.ok).toBe(true);
+    // 写入时刻内容正确（快照）
+    expect(h.appended[0][0]).toBe(5);
+    expect(h.appended[1][0]).toBe(6);
+    // 原始缓冲在追加返回后已被清零：明文不在堆上驻留到 GC
+    expect(h.appendedRefs).toHaveLength(2);
+    for (const buf of h.appendedRefs) {
+      expect(buf.every((byte) => byte === 0)).toBe(true);
+    }
+  });
+
+  it("进度按块上报且末次等于总块数（不先于落盘）", async () => {
+    const size = CHUNK * 2 + 4;
+    const records = new Map<number, string>([
+      [10, bytesToBase64(chunkBuffer(1, CHUNK))],
+      [11, bytesToBase64(chunkBuffer(2, CHUNK))],
+      [12, bytesToBase64(chunkBuffer(3, 4))],
+    ]);
+    const h = makeHarness({ records });
+    const progress: Array<[number, number]> = [];
+    h.deps.onProgress = (done, total) => progress.push([done, total]);
+
+    const result = await runFileExport(entryOf(size, [10, 11, 12]), null, h.deps);
+
+    expect(result.ok).toBe(true);
+    expect(progress).toEqual([[1, 3], [2, 3], [3, 3]]);
+  });
+
+  it("取消在块边界生效：中止流、不 finalize、按取消返回（不计失败）", async () => {
+    const size = CHUNK + 4;
+    const records = new Map<number, string>([
+      [10, bytesToBase64(chunkBuffer(1, CHUNK))],
+      [11, bytesToBase64(chunkBuffer(2, 4))],
+    ]);
+    const h = makeHarness({ records });
+    let cancel = false;
+    h.deps.isCancelled = () => cancel;
+    h.deps.onProgress = (done, total) => {
+      if (done === 1 && total === 2) cancel = true;
+    };
+
+    const result = await runFileExport(entryOf(size, [10, 11]), null, h.deps);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("CANCELLED");
+    // 首块已写，第二块在边界被拦下
+    expect(h.appended).toHaveLength(1);
+    expect(h.aborted).toEqual(["stream-1"]);
+    expect(h.finalized).toEqual([]);
+    // 取消路径同样清零：首块明文缓冲不驻留
+    for (const buf of h.appendedRefs) {
+      expect(buf.every((byte) => byte === 0)).toBe(true);
+    }
+  });
+
+  it("v2 解锁装配抛错按形态不符归类（不得退化为密码错误）", async () => {
+    const h = makeHarness({
+      records: new Map([[10, bytesToBase64(chunkBuffer(1, 4))]]),
+      withV2: true,
+    });
+    h.deps.openV2Decryptor = async () => {
+      throw new Error("文件盐长度非法");
+    };
+
+    const result = await runFileExport(entryV2(4, [10]), "pwd", h.deps);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("E_LAYOUT_INVALID");
+      expect(result.message).toContain("加密形态与当前版本不符");
+    }
+    expect(h.opened).toEqual([]);
   });
 });

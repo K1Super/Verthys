@@ -6,7 +6,8 @@
  *
  * 设计要点：
  * - 单遍流式：逐块取回 → 结构校验 →（可选）解密 → 追加写入 → 累计长度，
- *   全程只驻留单块明文与其 base64 中间量；
+ *   全程只驻留单块明文与其 base64 中间量；明文缓冲用后立即清零
+ *   （成功、失败、用户取消三条路径共用同一清零出口，不驻留堆内存）；
  * - 完整性前置：块数、逐块长度、累计长度三项与声明值一致，任一不符即失败；
  * - 失败可收敛：任一步失败即中止流式写入并删除暂存，目标位置不产生文件；
  * - 密码前置：当前加密形态以 passwordCheck 为唯一判定点（选路径之前完成）；
@@ -89,6 +90,10 @@ export interface FileExportDeps {
   streamFinalize: (streamId: string) => Promise<void>;
   /** 中止会话（删除暂存；幂等） */
   streamAbort: (streamId: string) => Promise<void>;
+  /** 进度回调（可选）：每块写入完成后上报（块计），进度不先于实际落盘 */
+  onProgress?: (done: number, total: number) => void;
+  /** 取消信号（可选）：用户请求取消后返回 true（每块边界检查；取消不计失败） */
+  isCancelled?: () => boolean;
 }
 
 export interface FileExportSuccess {
@@ -247,8 +252,15 @@ export async function runFileExport(
       }
       try {
         session = await deps.openV2Decryptor(entry, password);
-      } catch {
-        session = null;
+      } catch (e) {
+        // 口令错误由 passwordCheck 判定（依赖方返回 null）；此处的抛出只可能
+        // 来自派生参数非法 / 密钥导入失败，属元数据或装配错误，不得报"密码错误"
+        console.warn("[useFileExport] v2 解锁装配异常（非口令错误）", e);
+        return {
+          ok: false,
+          code: "E_LAYOUT_INVALID",
+          message: "文件加密形态与当前版本不符，无法导出",
+        };
       }
       if (!session) {
         return { ok: false, code: "E_PWD_WRONG", message: "密码错误" };
@@ -259,30 +271,46 @@ export async function runFileExport(
   // 首个数据块先行取回并解密：历史逐块盐形态（无口令判定点）的口令错误
   // 在选取保存位置之前暴露，该块明文随后直接参与写出，不产生二次读取
   let firstChunkPlain: Uint8Array | null = null;
+  /** 在途明文缓冲：正常路径逐块清零后置空，异常与早退路径经 fail() 统一清零 */
+  let pendingPlain: Uint8Array | null = null;
+  /**
+   * 统一失败出口。
+   *
+   * 解密明文必须在所有返回路径上清零（含用户取消保存、目标盘空间不足、
+   * 开流失败等"未进入写入循环"的早退）——明文不在堆上驻留到 GC。
+   */
+  const fail = (code: FileExportErrorCode, message: string): FileExportFailure => {
+    if (firstChunkPlain) {
+      firstChunkPlain.fill(0);
+      firstChunkPlain = null;
+    }
+    if (pendingPlain) {
+      pendingPlain.fill(0);
+      pendingPlain = null;
+    }
+    return { ok: false, code, message };
+  };
+
   if (layout.count > 0 && entry.encrypted && !session) {
     let headB64: string | null;
     try {
       headB64 = await fetchChunkB64(0);
     } catch {
-      return { ok: false, code: "E_READ_FAILED", message: "读取文件数据失败，请重试" };
+      return fail("E_READ_FAILED", "读取文件数据失败，请重试");
     }
     if (headB64 === null) {
-      return { ok: false, code: "E_CHUNK_MISSING", message: "第 1 块数据缺失，文件可能已损坏" };
+      return fail("E_CHUNK_MISSING", "第 1 块数据缺失，文件可能已损坏");
     }
     if (hashMismatch(headB64, 0)) {
-      return { ok: false, code: "E_CHUNK_CORRUPTED", message: "第 1 块数据校验失败，文件可能已损坏" };
+      return fail("E_CHUNK_CORRUPTED", "第 1 块数据校验失败，文件可能已损坏");
     }
     try {
       firstChunkPlain = base64ToBytes(await deps.decryptField(headB64, password!));
     } catch {
-      return { ok: false, code: "E_PWD_OR_CORRUPT", message: V1_PWD_OR_CORRUPT_MESSAGE };
+      return fail("E_PWD_OR_CORRUPT", V1_PWD_OR_CORRUPT_MESSAGE);
     }
     if (firstChunkPlain.length !== expectedChunkLength(entry, 0)) {
-      return {
-        ok: false,
-        code: "E_CHUNK_CORRUPTED",
-        message: "第 1 块数据校验失败，文件可能已损坏",
-      };
+      return fail("E_CHUNK_CORRUPTED", "第 1 块数据校验失败，文件可能已损坏");
     }
   }
 
@@ -291,10 +319,10 @@ export async function runFileExport(
   try {
     savePath = await deps.pickSavePath(entry.name);
   } catch {
-    return { ok: false, code: "E_STREAM_FAILED", message: "保存失败，请重试" };
+    return fail("E_STREAM_FAILED", "保存失败，请重试");
   }
   if (savePath === null) {
-    return { ok: false, code: "CANCELLED", message: "" };
+    return fail("CANCELLED", "");
   }
 
   // 目标卷空间预检：不足即在开流之前拒绝（不产生暂存文件）。
@@ -307,11 +335,10 @@ export async function runFileExport(
       free = null;
     }
     if (free !== null && free < entry.size) {
-      return {
-        ok: false,
-        code: "E_DISK_FULL",
-        message: `目标磁盘空间不足：需要约 ${formatGigabytes(entry.size)} GB，可用 ${formatGigabytes(free)} GB`,
-      };
+      return fail(
+        "E_DISK_FULL",
+        `目标磁盘空间不足：需要约 ${formatGigabytes(entry.size)} GB，可用 ${formatGigabytes(free)} GB`,
+      );
     }
   }
 
@@ -321,6 +348,11 @@ export async function runFileExport(
 
     let offset = 0;
     for (let index = 0; index < layout.count; index++) {
+      // 取消在块边界生效：已写入的暂存由 abort 统一清理，目标位置不产生文件
+      if (deps.isCancelled?.()) {
+        await safeAbort(deps, streamId);
+        return fail("CANCELLED", "");
+      }
       let plain: Uint8Array;
       if (index === 0 && firstChunkPlain) {
         plain = firstChunkPlain;
@@ -331,23 +363,15 @@ export async function runFileExport(
           chunkB64 = await fetchChunkB64(index);
         } catch {
           await safeAbort(deps, streamId);
-          return { ok: false, code: "E_READ_FAILED", message: "读取文件数据失败，请重试" };
+          return fail("E_READ_FAILED", "读取文件数据失败，请重试");
         }
         if (chunkB64 === null) {
           await safeAbort(deps, streamId);
-          return {
-            ok: false,
-            code: "E_CHUNK_MISSING",
-            message: `第 ${index + 1} 块数据缺失，文件可能已损坏`,
-          };
+          return fail("E_CHUNK_MISSING", `第 ${index + 1} 块数据缺失，文件可能已损坏`);
         }
         if (hashMismatch(chunkB64, index)) {
           await safeAbort(deps, streamId);
-          return {
-            ok: false,
-            code: "E_CHUNK_CORRUPTED",
-            message: `第 ${index + 1} 块数据校验失败，文件可能已损坏`,
-          };
+          return fail("E_CHUNK_CORRUPTED", `第 ${index + 1} 块数据校验失败，文件可能已损坏`);
         }
         if (entry.encrypted) {
           if (session) {
@@ -356,11 +380,7 @@ export async function runFileExport(
               plain = await session.decryptChunk(chunkB64);
             } catch {
               await safeAbort(deps, streamId);
-              return {
-                ok: false,
-                code: "E_CHUNK_CORRUPTED",
-                message: `第 ${index + 1} 块数据校验失败，文件可能已损坏`,
-              };
+              return fail("E_CHUNK_CORRUPTED", `第 ${index + 1} 块数据校验失败，文件可能已损坏`);
             }
           } else {
             // v1（历史逐块盐）：无判定点，解密失败返回合并文案
@@ -368,7 +388,7 @@ export async function runFileExport(
               plain = base64ToBytes(await deps.decryptField(chunkB64, password!));
             } catch {
               await safeAbort(deps, streamId);
-              return { ok: false, code: "E_PWD_OR_CORRUPT", message: V1_PWD_OR_CORRUPT_MESSAGE };
+              return fail("E_PWD_OR_CORRUPT", V1_PWD_OR_CORRUPT_MESSAGE);
             }
           }
         } else {
@@ -376,17 +396,19 @@ export async function runFileExport(
         }
       }
 
+      pendingPlain = plain;
       const expected = expectedChunkLength(entry, index);
       if (plain.length !== expected) {
         await safeAbort(deps, streamId);
-        return {
-          ok: false,
-          code: "E_CHUNK_CORRUPTED",
-          message: `第 ${index + 1} 块数据校验失败，文件可能已损坏`,
-        };
+        return fail("E_CHUNK_CORRUPTED", `第 ${index + 1} 块数据校验失败，文件可能已损坏`);
       }
       await deps.streamAppend(streamId, plain);
       offset += plain.length;
+      // 追加返回后立即清零：解密明文不在堆上驻留到 GC
+      plain.fill(0);
+      pendingPlain = null;
+      // 进度在写入完成之后上报：失败/取消时进度不会先走到 100%
+      deps.onProgress?.(index + 1, layout.count);
     }
 
     // 逐块长度校验已蕴含"累计长度 == 声明长度"（期望长度总和恒等于 size），
@@ -397,7 +419,7 @@ export async function runFileExport(
     if (streamId !== null) {
       await safeAbort(deps, streamId);
     }
-    return { ok: false, code: "E_STREAM_FAILED", message: "保存失败，请重试" };
+    return fail("E_STREAM_FAILED", "保存失败，请重试");
   }
 }
 

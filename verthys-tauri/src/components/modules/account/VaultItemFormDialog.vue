@@ -323,11 +323,27 @@ const missingRequired = computed<string[]>(() => {
     .map((field) => field.label);
 });
 
-/* 账号类型沿用既有保存禁用条件（开启独立加密必须提供密钥）；
- * 其余类型以必填项是否填满为条件 */
-const saveDisabled = computed(() =>
-  isAccount.value ? accountEncrypted.value && !accountEncKey.value : missingRequired.value.length > 0,
+/* 保存可用性必须与落盘决策同源：
+ *   - 通用类型：必填项是否填满；
+ *   - 账号类型：必填项 + 独立加密的保存决策（resolveSecretSaveAction）。
+ * 反例（原实现）：以「已开启加密但未输入密钥」直接禁用保存 ——
+ * 既有已加密条目由于开关被锁定、密钥框恒为空，改一个备注也会被永久禁用；
+ * 而落盘决策本身支持 unchanged→reuse（无需密钥）。两套判断必然互相打脸。 */
+const secretPlan = computed(() =>
+  resolveSecretSaveAction({
+    previousEncrypted: initialEncrypted.value,
+    previousValue: props.initialData?.password ?? "",
+    currentValue: values.value.password ?? "",
+    enableEncryption: accountEncrypted.value,
+    hasKey: accountEncKey.value.length > 0,
+  }),
 );
+
+const saveDisabled = computed(() => {
+  if (!def.value) return true;
+  if (missingRequired.value.length > 0) return true;
+  return isAccount.value && secretPlan.value.action === "needs-key";
+});
 
 /** 重置表单：以类型字段清单与既有数据初始化（新增时全部为空） */
 const resetForm = (): void => {
@@ -442,13 +458,7 @@ const submitAccount = async (current: VaultTypeDef): Promise<void> => {
     return;
   }
 
-  const plan = resolveSecretSaveAction({
-    previousEncrypted: initialEncrypted.value,
-    previousValue: props.initialData?.password ?? "",
-    currentValue: values.value.password ?? "",
-    enableEncryption: accountEncrypted.value,
-    hasKey: accountEncKey.value.length > 0,
-  });
+  const plan = secretPlan.value;
 
   if (plan.action === "needs-key") {
     formError.value = "请输入独立密钥";

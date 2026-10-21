@@ -64,13 +64,13 @@
           </div>
           <div class="reg-row">
             <label class="reg-key" for="ck-old-pwd">访问密钥</label>
-            <input id="ck-old-pwd" class="reg-input" v-model="oldPassword" type="password" placeholder="输入当前全局访问密钥" />
+            <input id="ck-old-pwd" class="reg-input" v-model="oldPassword" type="password" autocomplete="current-password" spellcheck="false" placeholder="输入当前全局访问密钥" />
           </div>
           <div class="reg-row">
             <span class="reg-key">密钥文件</span>
             <div class="ck-slot" :class="{ 'is-empty': !oldBinFileName }">
               <span class="ck-slot-token">{{ oldBinFileName || '待选择当前密钥文件' }}</span>
-              <button class="ck-slot-pick" type="button" @click="$emit('browseOldBin')" :disabled="changeKeyProcessing">
+              <button class="ck-slot-pick" type="button" aria-label="选择现行密钥文件" @click="$emit('browseOldBin')" :disabled="changeKeyProcessing">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z"/></svg>
                 <span>选择</span>
               </button>
@@ -78,7 +78,7 @@
           </div>
           <div class="reg-row">
             <label class="reg-key" for="ck-old-binpwd">密钥口令</label>
-            <input id="ck-old-binpwd" class="reg-input" v-model="oldBinPassword" type="password" placeholder="输入当前密钥口令" />
+            <input id="ck-old-binpwd" class="reg-input" v-model="oldBinPassword" type="password" autocomplete="current-password" spellcheck="false" placeholder="输入当前密钥口令" />
           </div>
         </section>
 
@@ -107,13 +107,13 @@
           </div>
           <div class="reg-row">
             <label class="reg-key" for="ck-new-pwd">访问密钥</label>
-            <input id="ck-new-pwd" class="reg-input" v-model="newPassword" type="password" placeholder="输入新的全局访问密钥" />
+            <input id="ck-new-pwd" class="reg-input" v-model="newPassword" type="password" autocomplete="new-password" spellcheck="false" placeholder="输入新的全局访问密钥" />
           </div>
           <div class="reg-row">
             <span class="reg-key">密钥文件</span>
             <div class="ck-slot" :class="{ 'is-empty': !newBinFileName }">
               <span class="ck-slot-token">{{ newBinFileName || '待选择新密钥文件' }}</span>
-              <button class="ck-slot-pick" type="button" @click="$emit('browseNewBin')" :disabled="changeKeyProcessing">
+              <button class="ck-slot-pick" type="button" aria-label="选择继任密钥文件" @click="$emit('browseNewBin')" :disabled="changeKeyProcessing">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z"/></svg>
                 <span>选择</span>
               </button>
@@ -121,7 +121,7 @@
           </div>
           <div class="reg-row">
             <label class="reg-key" for="ck-new-binpwd">密钥口令</label>
-            <input id="ck-new-binpwd" class="reg-input" v-model="newBinPassword" type="password" placeholder="输入新密钥口令" />
+            <input id="ck-new-binpwd" class="reg-input" v-model="newBinPassword" type="password" autocomplete="new-password" spellcheck="false" placeholder="输入新密钥口令" />
           </div>
         </section>
       </div>

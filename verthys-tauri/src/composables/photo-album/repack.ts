@@ -101,6 +101,23 @@ function concatChunks(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
+/**
+ * 旧记录集合：旧索引 + 内联块 + 独立缩略图/块集记录。
+ *
+ * Why：迁移判定是「非完整瘦身布局」，因此可能遇到半途遗留的索引（已写
+ * thumbId/chunkSetId 但 fmt 未落全）。只删 chunkIds 会把这些外置记录留在
+ * 磁盘上变成永久孤儿（台账无从认领）；此处按引用一并回收并去重。
+ */
+function legacyRecordIds(meta: PhotoMetaLike): number[] {
+  const ids = new Set<number>();
+  for (const id of meta.chunkIds ?? []) {
+    if (id > 0) ids.add(id);
+  }
+  if (typeof meta.thumbId === "number" && meta.thumbId > 0) ids.add(meta.thumbId);
+  if (typeof meta.chunkSetId === "number" && meta.chunkSetId > 0) ids.add(meta.chunkSetId);
+  return [...ids];
+}
+
 /** 取消标志（由调用方持有，置 true 即请求取消） */
 export interface RepackSignal {
   aborted: boolean;
@@ -188,7 +205,7 @@ export async function runPhotoRepack(
       }
 
       // 新索引落库确认后才删除旧记录集：任何时刻都有可读索引
-      await deps.deleteLegacyRecords(metaId, meta.chunkIds ?? []);
+      await deps.deleteLegacyRecords(metaId, legacyRecordIds(meta));
       deps.onMigrated?.(metaId, newMetaId);
       progress.migrated++;
       progress.processed++;

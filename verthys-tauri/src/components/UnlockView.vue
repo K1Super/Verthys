@@ -4,9 +4,10 @@
     0-3s    星系倒卷成型（全屏逆渡）‖ VERTHYS 星晶棱镜体字标
             逐字星晶凝聚（定制字形装配）+ 谱线组逐线充能
     3s+     静旋驻留 ‖ 谱线呼吸 ‖ 进入提示浮现（线体极简 · 无呼吸静态）
-    点击    逐字折光消散（外缘先走）+ 谱线组塌缩（外缘先收）
+    点击    逐字折光消散（外缘先走 · 先聚后散）+ 谱线组塌缩（外缘先收）
             + 丝线 dash 收回 → 星系正渡（warping）；入场动画未完成的组
-            改走软离场（整组淡出，不打断入场）
+            改走软离场（先冻结子级于当前入场帧，再整组淡出 —— 父级淡出
+            为唯一单调通道，不打断入场、亦不被子级上升抵消）
   字标设计（半透明晶棱 · 定制柔顺曲线字形 — 唯一样式见 common/BrandMark.vue）：
     四层光学叠材（折射影 / 玻璃体 / 棱边光 / 能量芯）+ 圆端面柔顺曲线 +
     棱镜口 V + 悬锤垂针 Y — 形与动皆为设计定值
@@ -394,14 +395,27 @@ onBeforeUnmount(() => {
  * 加速离场曲线与星系正渡衔接；
  * 仅平移与不透明度（缩放/旋转会令合成层改变光栅比例而非轴对齐
  * 重采样 → 细亮笔画糊化再转锐，即模糊闪现）；
- * 起帧 = 落位恒等态（transform:none）— 与凝聚终帧逐值一致，零跳变 */
+ * 起帧 = 落位恒等态（transform:none）— 与凝聚终帧逐值一致，零跳变。
+ * 中段「先收后散」：0→16% 沿凝聚反轴微收（引力收紧的最后一刻，
+ * 亮度不变），16%→100% 再沿逸出轴加速散离 —— 消散因此是一次
+ * 力学事件而非匀速淡出（先聚后放，与星系缠绕收紧 → 松开的叙事同轴）。
+ * 无障碍兜底：prefers-reduced-motion 下全局 animation:none 会令本动画
+ * 不生效，故同处补一条同轴过渡（仅亮度收束、不带位移 —— 减少动态偏好
+ * 下不应有位移）；常态下动画优先于过渡（属性受动画控制时不启动过渡），
+ * 故兜底声明在常态下无副作用。 */
 .brand-core.leaving :deep(.wm-glyph) {
-  animation: wm-dissolve 0.6s cubic-bezier(0.5, 0, 0.85, 0.5) var(--ed, 0ms) both;
+  animation: wm-dissolve 0.72s cubic-bezier(0.5, 0, 0.85, 0.5) var(--ed, 0ms) both;
+  transition: opacity 0.6s var(--ease) var(--ed, 0ms);
+  opacity: 0;
 }
 @keyframes wm-dissolve {
   0% {
     opacity: 1;
     transform: none;
+  }
+  16% {
+    opacity: 1;
+    transform: translate(calc(var(--dx, 0px) * -0.165), calc(var(--dy, 23px) * 0.165));
   }
   100% {
     opacity: 0;
@@ -452,9 +466,13 @@ onBeforeUnmount(() => {
     spectra-breathe var(--sd, 3.5s) ease-in-out var(--sm, 0ms) infinite,
     spectra-jitter var(--jd, 6s) linear var(--jp, 0ms) infinite;
 }
-/* 塌缩：外缘先收（引力回收集波 — 与逐字弹射同步编排） */
+/* 塌缩：外缘先收（引力回收集波 — 与逐字弹射同步编排）
+ * 无障碍兜底：prefers-reduced-motion 全局 animation:none 下由过渡收亮
+ * （无位移）—— 常态下动画优先，兜底声明不参与 */
 .brand-core.leaving .spectra-tick {
   animation: tick-collapse 0.55s cubic-bezier(0.55, 0, 0.82, 0.5) var(--cl, 0ms) both;
+  transition: opacity 0.5s var(--ease) var(--cl, 0ms);
+  opacity: 0;
 }
 @keyframes tick-collapse {
   0% {
@@ -593,15 +611,41 @@ onBeforeUnmount(() => {
   letter-spacing: 10px;
 }
 
-/* ===== 软离场（入场动画未完成的组 — 不打断入场动画，整组淡出快移） =====
+/* ===== 软离场（入场动画未完成的组 — 不打断入场，整组淡出快移） =====
  * 离场编排会整体替换入场动画；入场未完成时替换形成跳变，故未完成组
  * 仅做父级淡出（与子级入场动画叠加，零跳变）。
+ *
+ * 根治「过早点击时品牌字没有淡出」（本缺陷的根因）：
+ *   父级不透明度下降的同时，子级入场动画仍在推进 —— 子级亮度「上升」
+ *   与父级「下降」逐帧相互抵消，净可见度先不降反升、再在尾段骤断，
+ *   观感即「点了却不见淡出」。
+ *   故软离场必须先冻结子级于其当前入场帧：animation-play-state: paused
+ *   冻结当前插值值且动画效果仍在 —— 不同于 animation:none（会抽走填充值、
+ *   使笔画回弹到本位亮度而闪跳）。父级淡出遂成为唯一单调通道：
+ *   父级 0 × 子级冻结值 = 0 —— 数学与观感一致，未成形的星晶在光中退去。
+ *   !important 用于压过空闲 / 帧预算降级对一次性入场动画的豁免
+ *   （那些豁免防的是「空闲期挂载时内容整体缺失」，离场期冻结恰是正解 —
+ *   见 idle-governance.css 开头的维护契约）。
  * 门控时刻（brandDoneAt / FILS_DONE_AT / HINT_DONE_AT）与编排时长
  * 成对维护。 */
 .brand-core.soft {
-  transition: opacity 0.45s var(--ease), transform 0.45s var(--ease);
+  transition: opacity 0.66s var(--ease), transform 0.66s var(--ease);
   opacity: 0;
-  transform: translateY(-10px);
+  transform: translateY(-8px);
+}
+/* 子级冻结：字标逐字（含其上各通道）与谱线组、立标光点 —— 凡本组内
+ * 尚在播放动画的元素均须冻结，否则其上升与父级下降相互抵消（即本缺陷） */
+.brand-core.soft :deep(.wm-glyph),
+.brand-core.soft .spectra-tick,
+.brand-core.soft .sub-dot {
+  animation-play-state: paused !important;
+}
+/* 副标（transition 驱动，非动画）：软离场期只收亮度 —— 不再自持位移
+ * （位移统一交给父级承载，避免子级自漂移与父级漂移相互抵消），
+ * 过渡缩短一档使其跟随父级而非拖在其后 */
+.brand-core.soft .brand-sub {
+  transition: opacity 0.5s var(--ease);
+  opacity: 0;
 }
 .orbit-filaments.soft {
   transition: opacity 0.45s var(--ease);

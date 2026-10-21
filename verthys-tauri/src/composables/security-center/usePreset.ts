@@ -35,11 +35,14 @@ import {
   applySecurityPreset,
   bumpPresetEpoch,
   loadCustomFeatures,
+  saveCustomFeatures,
+  saveSecurityPreset,
   isLockedFeature,
   globalKeyReadyRef,
 } from '../../lib/keyManager';
 import {
   securityGetPresetConfig,
+  securityLoadPresetState,
   type SecurityPresetCode,
   type PresetFeatures,
 } from '../../lib/verthys';
@@ -144,7 +147,7 @@ export function usePreset(options: UsePresetOptions) {
   const orbitDragging = ref(false);
 
   /* ===== 双环三指标（真实数据合成，无随滑块摆动的模拟公式） ===== */
-  /** CPU/IO 开销 — 后端系统采样真实值（-1 无基线时按 0 占位，2s 内更新） */
+  /** CPU 占用 — 后端系统采样真实值（-1 无基线时按 0 占位，2s 内更新） */
   const cpuOverhead = computed(() => Math.max(0, options.cpuUsage.value));
   /** 当前档位已启用特性数（后端权威配置快照） */
   const enabledFeatureCount = computed(() =>
@@ -272,12 +275,13 @@ const orbitTrackGradient = computed(() => ({
       void onApplyPreset(anchor.code).then((ok) => { if (!ok) syncOrbitFromPresetRef(); });
     }
   };
-  /** 齿轮按钮 — 打开/关闭自定义面板；打开时切入自定义档 */
+  /** 齿轮按钮 — 仅打开/关闭自定义面板
+   *
+   * 旧实现在打开面板时立即 applySecurityPreset(3)：用户只是「查看」模板，
+   * 档位却被静默切为自定义（含后端落盘与会话硬化重配）—— 属越权副作用。
+   * 现仅展开面板；切档必须经「保存并应用」显式确认。 */
   const onToggleGearPanel = () => {
     customPanelOpen.value = !customPanelOpen.value;
-    if (customPanelOpen.value && securityPresetRef.value !== 3) {
-      void onApplyPreset(3).then((ok) => { if (!ok) syncOrbitFromPresetRef(); });
-    }
   };
 
   /* ===== 自定义特性管理 ===== */
@@ -355,6 +359,35 @@ const orbitTrackGradient = computed(() => ({
     }
   });
 
+  /** 判定是否为前端兜底超时（与 withTimeout 的文案契约一致） */
+  const isTimeoutError = (e: unknown): boolean =>
+    e instanceof Error && e.message.includes('超时');
+
+  /** 失败/超时后回读后端权威档位：前端状态恒收敛到真实事实
+   *
+   * 超时不等于失败 —— 后端可能已切档成功而响应丢失；直接停留在
+   * 「界面未变 + 报错」会让显示与真实档位长期不一致。
+   * @returns true = 已成功回读并同步；false = 回读失败（保持 presetSyncFailed）
+   */
+  const reconcilePresetFromBackend = async (): Promise<boolean> => {
+    try {
+      const { state } = await withTimeout(securityLoadPresetState(), 8000, "回读安全预设");
+      if (!state || state.code < 0 || state.code > 3) return false;
+      const code = state.code as SecurityPresetCode;
+      if (code === 3 && state.customFeatures) {
+        saveCustomFeatures(state.customFeatures);
+      }
+      securityPresetRef.value = code;
+      saveSecurityPreset(code);
+      const loaded = await loadPresetConfig();
+      syncOrbitFromPresetRef();
+      return loaded;
+    } catch (e) {
+      console.warn("[usePreset] 回读权威档位失败", e);
+      return false;
+    }
+  };
+
   /* ===== 应用三档预设（调用 keyManager.applySecurityPreset） =====
    * 流程：
    *   1. 防重复守卫（presetApplying / globalKeyReady）
@@ -394,6 +427,17 @@ const orbitTrackGradient = computed(() => ({
       return true;
     } catch (e) {
       console.error("[onApplyPreset] 切换预设失败", e);
+      if (isTimeoutError(e)) {
+        // 超时回读权威档位：后端可能已切档成功，禁止把"未确认"当失败展示
+        const reconciled = await reconcilePresetFromBackend();
+        if (reconciled) {
+          options.showError("切换超时，已按后端权威档位同步");
+        } else {
+          presetSyncFailed.value = true;
+          options.showError("切换超时，当前档位可能未同步");
+        }
+        return false;
+      }
       // 失败回撤：界面位置回齐后端权威档位（即时落位保持可逆）
       syncOrbitFromPresetRef();
       options.showError("切换预设失败");
@@ -410,8 +454,9 @@ const orbitTrackGradient = computed(() => ({
   /* ===== 加载预设配置（onMounted / 全局密钥就绪后调用） =====
    * 拉取当前权威档位的特性快照（能力状态栏的真实状态源）；
    * 自定义档直接取本地配置。此函数需由 SecurityCenter 在
-   * onMounted / watch(globalKeyReadyRef) 中调用。 */
-  const loadPresetConfig = async () => {
+   * onMounted / watch(globalKeyReadyRef) 中调用。
+   * @returns true = 已加载权威配置；false = 失败（已置 presetSyncFailed 并提示） */
+  const loadPresetConfig = async (): Promise<boolean> => {
     try {
       const code = securityPresetRef.value;
       if (code === 3) {
@@ -425,8 +470,15 @@ const orbitTrackGradient = computed(() => ({
       }
       // 同步无极轨道滑块到当前预设位置（与切档成功/失败共用同一逻辑）
       syncOrbitFromPresetRef();
+      presetSyncFailed.value = false;
+      return true;
     } catch (e) {
       console.warn("[loadPresetConfig] 加载预设配置失败", e);
+      // 安全关键配置的同步状态必须对用户可见：不得静默保留旧快照，
+      // 否则能力状态栏会以过期快照"全绿"展示。
+      presetSyncFailed.value = true;
+      options.showError("安全预设配置加载失败，当前显示可能不准确");
+      return false;
     }
   };
 

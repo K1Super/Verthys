@@ -48,6 +48,8 @@ export type DeviceBindingResult =
 export interface ModuleKeyConfigRecord {
   moduleId: string;
   enabled: boolean;
+  /** 记录版本号，每次写入递增；旧记录缺失视为 0（取最大版本为权威） */
+  version?: number;
 }
 
 /** 扫描缓存中的记录条目 */
@@ -62,12 +64,13 @@ export interface ScannedRecord {
 export type BruteForceGateResult =
   | { allowed: true }
   | { allowed: false; reason: "locked"; remainingSecs: number }
-  | { allowed: false; reason: "purge_required" };
+  | { allowed: false; reason: "purge_required" }
+  | { allowed: false; reason: "gate_unavailable" };
 
 /** verifyGlobalKeyWithBruteForce 返回类型 */
 export type VerifyGlobalKeyResult =
   | { ok: true }
-  | { ok: false; reason: "wrong_key" | "locked" | "purge_required" | "gate_locked" | "gate_purge_required"; remainingSecs?: number };
+  | { ok: false; reason: "wrong_key" | "locked" | "purge_required" | "gate_locked" | "gate_purge_required" | "gate_unavailable"; remainingSecs?: number };
 
 // Re-export verthys types for convenience
 export type { SecurityPresetCode, BruteForceCheckResponse, PresetFeatures };

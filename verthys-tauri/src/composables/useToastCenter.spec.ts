@@ -6,8 +6,8 @@
  *   旧 useErrorToast 非单例导致提示丢失的问题不得复活）
  * - 各通道自动消失时长：error 2.5s / status 2.5s（可显式覆写）/
  *   copied 1.5s / exportDone 2.6s；重复触发重置计时
- * - clip 通道为长驻状态：无自动消失计时，仅显式收起（由 useClipToast 驱动）
  * - 通道互不干扰：同屏并存时各通道独立计时与覆盖
+ * - 剪贴板清空提示不再使用长驻通道（改由 status 轮番呈现，见 useClipToast.spec）
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { toastState, useToastCenter } from "./useToastCenter";
@@ -28,7 +28,6 @@ describe("useToastCenter", () => {
     toastState.status.value = "";
     toastState.copied.value = false;
     toastState.exportDone.value = null;
-    toastState.clip.value = null;
     vi.clearAllTimers();
   });
 
@@ -94,20 +93,6 @@ describe("useToastCenter", () => {
     expect(toastState.exportDone.value).toEqual({ msg: "导出失败，请重试", type: "error" });
     vi.advanceTimersByTime(EXPORT_MS);
     expect(toastState.exportDone.value).toBeNull();
-  });
-
-  it("clip 通道：长驻状态（无自动消失计时，仅显式收起）", () => {
-    center.setClip({ text: "密码已复制", seconds: 15 });
-    expect(toastState.clip.value).toEqual({ text: "密码已复制", seconds: 15 });
-
-    // 秒级刷新由 useClipToast 推入；中心不做任何计时
-    vi.advanceTimersByTime(60_000);
-    expect(toastState.clip.value).not.toBeNull();
-
-    center.setClip({ text: "密码已复制", seconds: 14 });
-    expect(toastState.clip.value?.seconds).toBe(14);
-    center.setClip(null);
-    expect(toastState.clip.value).toBeNull();
   });
 
   it("通道互不干扰：同屏并存各自独立计时", () => {

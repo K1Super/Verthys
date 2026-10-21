@@ -73,6 +73,9 @@ export interface KeyState {
    * 修复：loaded 初始 false，仅 loadModuleKeyStatus 真正完成（含乐观并发丢弃）时设 true。
    * switchModule 守卫据此判断：未加载完不允许进入业务模块。 */
   moduleKeyStatusLoaded: Ref<boolean>;
+  /** 模块密钥状态加载失败标志（加载异常；守卫据此立即 fail-closed，
+   *  不再每次切换模块空等超时窗口） */
+  moduleKeyStatusFailed: Ref<boolean>;
   /** 当前安全预设 */
   securityPreset: Ref<SecurityPresetCode>;
   /** 会话空闲锁定开关（false = 不自动锁定；自定义档可关闭此项） */
@@ -114,6 +117,8 @@ export const keyState: KeyState = {
   moduleKeyStatusLoading: ref(false),
   // 安全守卫根治：模块密钥状态已加载完成标志（初始 false，loadModuleKeyStatus 完成时置 true）
   moduleKeyStatusLoaded: ref(false),
+  // 模块密钥状态加载失败标志（初始 false；加载异常时置 true，守卫据此立即 fail-closed）
+  moduleKeyStatusFailed: ref(false),
   securityPreset: ref<SecurityPresetCode>(loadSecurityPreset()),
   sessionLockEnabled: ref(true),
   initStatus: ref("none"),
@@ -164,6 +169,7 @@ export function resetAllState(): void {
   keyState.moduleKeyStatusLoading.value = false;
   // 安全守卫根治：重置已加载标志
   keyState.moduleKeyStatusLoaded.value = false;
+  keyState.moduleKeyStatusFailed.value = false;
 }
 
 /* ------------------------------------------------------------------ *

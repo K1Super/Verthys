@@ -18,6 +18,7 @@ import {
   verthysReadyRef,
   moduleKeyStatusLoadingRef,
   moduleKeyStatusLoadedRef,
+  moduleKeyStatusFailedRef,
   moduleKeyEnabledRef,
   MODULE_LABELS,
   type ModuleId,
@@ -45,17 +46,19 @@ function waitForFlagFalse(flag: Ref<boolean>, timeoutMs: number): Promise<void> 
   if (!flag.value) return Promise.resolve();
   return new Promise<void>((resolve) => {
     let done = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const finish = () => {
       if (done) return;
       done = true;
       unwatch();
+      if (timer !== null) clearTimeout(timer);
       resolve();
     };
     const unwatch = watch(flag, (v) => {
       if (!v) finish();
     });
     // 超时兜底：无论 flag 是否变 false 都 resolve（调用方事后重检 verthysReady）
-    setTimeout(finish, timeoutMs);
+    timer = setTimeout(finish, timeoutMs);
   });
 }
 
@@ -70,17 +73,19 @@ function waitForFlagTrue(flag: Ref<boolean>, timeoutMs: number): Promise<void> {
   if (flag.value) return Promise.resolve();
   return new Promise<void>((resolve) => {
     let done = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const finish = () => {
       if (done) return;
       done = true;
       unwatch();
+      if (timer !== null) clearTimeout(timer);
       resolve();
     };
     const unwatch = watch(flag, (v) => {
       if (v) finish();
     });
     // 超时兜底：无论 flag 是否变 true 都 resolve（调用方事后重检 + 安全兜底弹密钥框）
-    setTimeout(finish, timeoutMs);
+    timer = setTimeout(finish, timeoutMs);
   });
 }
 
@@ -228,14 +233,15 @@ export function useModuleNavigation() {
       applySwitch(id);
       return;
     }
-    // 业务模块：检查是否属于需要独立密钥的模块
+    /* 业务模块必须命中白名单与 ID 映射：未知模块一律拒绝（fail-closed），
+     * 禁止"映射缺失 → 直接放行"的隐式绕过路径。 */
     if (!KEY_REQUIRED_MODULES.includes(id)) {
-      applySwitch(id);
+      showError("未知模块，已阻止进入");
       return;
     }
     const moduleId = MODULE_ID_MAP[id];
     if (!moduleId) {
-      applySwitch(id);
+      showError("模块配置异常，已阻止进入");
       return;
     }
     // 0b. verthys 未解锁（自动解锁失败或全新用户）→ 提示前往安全管理初始化
@@ -252,12 +258,14 @@ export function useModuleNavigation() {
     // 守卫误判"加载完成"→ 读 isModuleKeyEnabled=false → 放行，绕过密钥验证。
     //
     // 根治：改用 moduleKeyStatusLoaded 判断。
-    //   - loaded=false（未加载完）→ 等待 loadModuleKeyStatus 完成（最多 10s）
+    //   - loaded=false 且未失败 → 等待 loadModuleKeyStatus 完成（最多 10s）
+    //   - 加载已失败 → 不再空等，立即按安全兜底弹密钥框（fail-closed）
     //   - 等待期间 verthys 被锁定 → 提示前往安全管理
     //   - 超时仍未加载完 → 安全兜底弹密钥框（绝不放行）
-    //   - loaded=true → 正常判断 isModuleKeyEnabled
     if (!moduleKeyStatusLoadedRef.value) {
-      await waitForFlagTrue(moduleKeyStatusLoadedRef, 10000);
+      if (!moduleKeyStatusFailedRef.value) {
+        await waitForFlagTrue(moduleKeyStatusLoadedRef, 10000);
+      }
       // lockAll 竞态防护：await 期间 verthys 可能已被锁定
       if (!verthysReadyRef.value) {
         pendingModule.value = id;
@@ -303,7 +311,8 @@ export function useModuleNavigation() {
    */
   const VERIFY_DURATION = 1500;
   const confirmModuleKeyVerify = async () => {
-    if (!pendingModule.value || !moduleKeyInput.value) return;
+    // 重入闸门：Enter 连发/双击不得并发启动多轮验证
+    if (!pendingModule.value || !moduleKeyInput.value || moduleKeyVerifying.value) return;
     moduleKeyVerifying.value = true;
     moduleKeyVerifyError.value = false;
     moduleKeyVerifyPercent.value = 0;
@@ -364,7 +373,9 @@ export function useModuleNavigation() {
       moduleKeyInput.value = "";
       applySwitch(target);
     } catch {
-      await handleVerifyError("密钥错误，请重试");
+      /* IPC/异常不等于"密钥错误"：如实区分会话已锁定与验证异常，
+       * 避免把系统故障误导为用户口令错误。 */
+      await handleVerifyError(verthysReadyRef.value ? "验证异常，请重试" : "会话已锁定，请重新解锁");
     } finally {
       stopVerifyTicker();
       moduleKeyVerifying.value = false;

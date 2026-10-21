@@ -2,7 +2,8 @@
  * vault_item_card.spec.ts — 卡片视图映射、到期读数与色调变量
  *
  * 覆盖：各类型的主标题 / 次行 / 敏感行 / 到期读数选取规则、敏感值与到期字段
- * 不重复呈现、未知类型兜底展示，以及到期读数的阈值边界与色调变量映射。
+ * 不重复呈现、未知类型只披露数据量而不回显取值与检索、到期读数的阈值边界
+ * 与本地日历日口径、色调变量映射。
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -97,22 +98,27 @@ describe("卡片视图映射", () => {
     expect(buildVaultCardView({ name: "公司", region: "北京市" }, address).expiry).toBeNull();
   });
 
-  it("类型定义缺失：主标题取首个取值、次行取其后的两项，标识为未知类型", () => {
+  it("类型定义缺失：不回显任何字段名与取值，只给出待重新指派的数据量", () => {
     const view = buildVaultCardView({ b: "乙", c: "丙", d: "丁" }, undefined);
     expect(view.unknown).toBe(true);
     expect(view.typeLabel).toBe(VAULT_UNKNOWN_TYPE_LABEL);
-    expect(view.title).toBe("乙");
-    expect(view.lines.map((l) => l.value)).toEqual(["丙", "丁"]);
+    // 类型缺失即无法判断哪些字段敏感：取一个值当标题等于在卡面泄露未保护信息
+    expect(view.title).toBe("");
+    expect(view.lines).toEqual([]);
+    expect(view.fieldCount).toBe(3);
+    expect(JSON.stringify(view)).not.toContain("乙");
+    expect(JSON.stringify(view)).not.toContain("丙");
     expect(view.secret).toBeNull();
     expect(view.expiry).toBeNull();
     expect(view.tone).toBe("accent");
     expect(view.icon.length).toBeGreaterThan(0);
   });
 
-  it("类型定义缺失且数据为空：主标题与次行均为空而非留白异常", () => {
+  it("类型定义缺失且数据为空：视图为空且数据量为 0", () => {
     const view = buildVaultCardView({}, undefined);
     expect(view.title).toBe("");
     expect(view.lines).toEqual([]);
+    expect(view.fieldCount).toBe(0);
   });
 
   it("敏感行仅取首个敏感字段，且不取仅用于窗口交互的字段", () => {
@@ -128,9 +134,8 @@ describe("搜索文本", () => {
     expect(text).toBe("example\u0000user");
   });
 
-  it("类型定义缺失时以全部取值参与搜索", () => {
-    const text = vaultSearchText({ a: "Alpha", b: "Beta" }, undefined);
-    expect(text).toBe("alpha\u0000beta");
+  it("类型定义缺失时不参与检索：关键字不得试探出未展示的取值", () => {
+    expect(vaultSearchText({ a: "Alpha", b: "Beta" }, undefined)).toBe("");
   });
 });
 
@@ -164,6 +169,23 @@ describe("到期读数", () => {
 
   it("无法解析的到期日按未设置处理，不产生异常读数", () => {
     expect(vaultExpiryReadout("非日期", now).tone).toBe("none");
+  });
+
+  it("纯日期按本地日历日计算：当天深夜仍算今日内到期", () => {
+    // 本地时间 2030-01-01 23:30 —— UTC 已跨到 01-02，若按 UTC 解析会误报已过期
+    const lateNight = new Date(2030, 0, 1, 23, 30).getTime();
+    expect(vaultExpiryReadout("2030-01-01", lateNight)).toEqual({
+      tone: "expiring",
+      text: "今日内到期",
+    });
+    expect(vaultExpiryReadout("2030-01-02", lateNight)).toEqual({
+      tone: "expiring",
+      text: "1 天后到期",
+    });
+    expect(vaultExpiryReadout("2029-12-31", new Date(2030, 0, 1, 0, 5).getTime())).toEqual({
+      tone: "expired",
+      text: "已过期 1 天",
+    });
   });
 
   it("读数色调对应设计令牌：有效 / 临期 / 过期各取一色，未设置不着色", () => {

@@ -22,7 +22,7 @@
          orbit-slider-release / snap-to-anchor / panel-active
 -->
 <template>
-  <div class="view-management" :style="{ pointerEvents: initializing ? 'none' : 'auto' }">
+  <div class="view-management">
     <!-- ===== 单一编排控制器：三态视图共用同一 Transition（out-in 严格串行）
        ===== 离场动画完成前入场不挂载 — 离场 Canvas / 入场挂载 / 模糊重绘
        ===== 绝不并行争抢主线程与合成器。key 保证三态间过渡触发。 -->
@@ -111,6 +111,7 @@
           :defense-paths="defensePaths"
           :defense-meta="defenseMeta"
           :preset-sync-failed="presetSyncFailed"
+          :hardening-failed="hardeningFailed"
           v-model:orbit-slider-pos="orbitSliderPos"
           @toggle-gear-panel="$emit('toggleGearPanel')"
           @toggle-custom-feature="(key) => $emit('toggleCustomFeature', key)"
@@ -139,8 +140,6 @@ import SecurityDashboard from "../management/SecurityDashboard.vue";
 
 /* ===== Props 接口定义（从 SecurityCenter 顶层 Composable 注入，透传至子组件） ===== */
 const props = defineProps<{
-  /** 初始化守卫：组件挂载期间禁止管理视图交互 */
-  initializing: boolean;
   /** 全局密钥就绪状态 */
   globalKeyReady: boolean;
   /** 会话剩余时间（毫秒，UI 倒计时显示） */
@@ -175,7 +174,7 @@ const props = defineProps<{
   presetApplying: boolean;
   /** 预设环境光效模式 */
   presetAmbienceMode: string;
-  /** CPU/IO 开销百分比 */
+  /** CPU 占用百分比 */
   cpuOverhead: number;
   /** 安全覆盖度百分比 */
   securityCoverage: number;
@@ -209,6 +208,8 @@ const props = defineProps<{
   defenseMeta: DefenseMetaView;
   /** 档位同步失败标志（恢复链失败时展示警示文案） */
   presetSyncFailed: boolean;
+  /** 会话硬化/会话守卫降级标志（剪贴板监听、系统锁屏守卫未生效时如实提示） */
+  hardeningFailed: boolean;
 }>();
 
 /* ===== defineModel：无极轨道滑块位置双向绑定（透传至 SecurityDashboard） ===== */
@@ -259,7 +260,6 @@ const activeSection = ref<"globalKey" | "moduleKeys" | "security">("globalKey");
  *   核心点击（globalKey）→ 前置引导区（管理界面前置组件）
  *   模块节点点击（moduleKeys）→ 直达模块密钥分区 */
 const enterSection = (section: "globalKey" | "moduleKeys") => {
-  if (props.initializing) return;
   if (section === "globalKey") {
     mgmtView.value = "hub";
   } else {
@@ -314,7 +314,7 @@ function isWithin(node: Node | null, ancestor: Element): boolean {
 
 /** document 捕获阶段点击处理：空白处返回引导区 */
 const onDetailBlankClick = (e: MouseEvent) => {
-  if (mgmtView.value !== "detail" || props.initializing) return;
+  if (mgmtView.value !== "detail") return;
   if (e.button !== 0 || !(e.target instanceof Element)) return;
   const root = detailRef.value;
   if (!root || !root.isConnected) return;

@@ -25,6 +25,7 @@ import { isSlimLayout } from "../../constants/crypto_const";
 import { updateShallowItem } from "../../utils/shallow-array";
 import type { PhotoEntry, DecryptedPhotoMeta } from "./types";
 import { resolveChunkRefs, loadChunkCiphers, type ChunkRefs } from "./chunk-refs";
+import { pushModal, popModal } from "../../utils/modal_stack";
 
 /**
  * usePhotoViewer 依赖注入接口。
@@ -63,6 +64,20 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
   const viewerProgressMsg = ref("");
   let viewerBlobUrl: string | null = null;
 
+  /* ===== 模态层身份（与导出面板/确认窗共用栈：滚动锁计数 + Esc 栈序） ===== */
+  const viewerModalId = Symbol("photo-viewer");
+  let viewerModalEngaged = false;
+  const engageViewerModal = () => {
+    if (viewerModalEngaged) return;
+    viewerModalEngaged = true;
+    pushModal(viewerModalId);
+  };
+  const releaseViewerModal = () => {
+    if (!viewerModalEngaged) return;
+    viewerModalEngaged = false;
+    popModal(viewerModalId);
+  };
+
   /** 更新原图准备阶段反馈（文案为空即视为阶段结束） */
   const setViewerProgress = (message: string) => {
     viewerProgressMsg.value = message;
@@ -86,6 +101,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
     if (seq !== viewRequestSeq) return false;
     viewerSrc.value = src;
     viewer.value = true;
+    engageViewerModal();
     return true;
   };
 
@@ -129,6 +145,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
     viewerSrc.value = "";
     setViewerProgress("读取原图…");
     viewer.value = true;
+    engageViewerModal();
 
     // meta 缺失时按需解密回退
     //    场景：摘要首屏与重启后的占位项（loaded=false、meta 未解密），
@@ -265,6 +282,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
     viewerDragging.value = false;
     window.removeEventListener("mousemove", onWindowMouseMove);
     window.removeEventListener("mouseup", onWindowMouseUp);
+    releaseViewerModal();
     // 关闭 viewer 不触碰防截屏保护：保护是应用级能力，
     // 由应用级会话单例与拾光按钮显式控制，不随查看器开闭变化
   };
@@ -396,6 +414,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
     viewRequestSeq++;   // 作废在途请求，防止卸载后旧结果落地
     disposeViewerBlob();
     setViewerProgress("");
+    releaseViewerModal();
     window.removeEventListener("mousemove", onWindowMouseMove);
     window.removeEventListener("mouseup", onWindowMouseUp);
   };

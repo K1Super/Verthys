@@ -82,29 +82,52 @@ export function usePhotoRepack(params: UsePhotoRepackParams) {
   });
 
   /** 迁移完成回调：列表项引用切换到新记录，并复位其解密状态等待按需重解密 */
-  const onMigrated = (oldMetaId: number, newMetaId: number) => {
-    const arr = photos.value;
-    for (let i = 0; i < arr.length; i++) {
-      if (arr[i].metaId === oldMetaId) {
-        if (arr[i].thumb) revokeThumbUrl(arr[i].thumb);
-        updateShallowItem(photos, i, {
-          id: newMetaId,
-          metaId: newMetaId,
-          thumb: "",
-          size: "",
-          loaded: false,
-          failed: false,
-          meta: undefined,
-        });
-        return;
+  /* 列表定位索引（metaId → 下标）：惰性重建，迁移逐张回调时为 O(1)。
+   *   旧实现每次线性扫描整个数组，万张相册迁移为 O(n²)。 */
+  let indexSource: PhotoEntry[] | null = null;
+  let indexByMetaId = new Map<number, number>();
+  const indexOfMetaId = (metaId: number): number => {
+    if (indexSource !== photos.value) {
+      const map = new Map<number, number>();
+      const arr = photos.value;
+      for (let i = 0; i < arr.length; i++) {
+        const mid = arr[i].metaId;
+        if (mid) map.set(mid, i);
       }
+      indexByMetaId = map;
+      indexSource = arr;
     }
+    return indexByMetaId.get(metaId) ?? -1;
   };
 
-  /** 删除旧记录集（索引 + 旧块）并失效三层缓存 */
+  const onMigrated = (oldMetaId: number, newMetaId: number) => {
+    const i = indexOfMetaId(oldMetaId);
+    if (i < 0) return;
+    const item = photos.value[i];
+    if (item.thumb) revokeThumbUrl(item.thumb);
+    updateShallowItem(photos, i, {
+      id: newMetaId,
+      metaId: newMetaId,
+      thumb: "",
+      size: "",
+      loaded: false,
+      failed: false,
+      meta: undefined,
+    });
+    // 索引随替换同步（metaId 已变更）：旧键删除、新键指向同一下标
+    indexByMetaId.delete(oldMetaId);
+    indexByMetaId.set(newMetaId, i);
+  };
+
+  /** 删除旧记录集（索引 + 旧块 + 半途遗留的缩略图/块集记录）并失效三层缓存 */
   const deleteLegacyRecords = async (metaId: number, chunkIds: number[]): Promise<void> => {
     const ids = [metaId, ...chunkIds];
-    await deleteAndPersistBatch(ids);
+    const deleted = await deleteAndPersistBatch(ids);
+    if (!deleted) {
+      // false = 删除未落盘（记录仍在）：不得当作成功。抛出交由引擎按失败
+      //   记账并保留源记录，避免「列表已切新索引、旧记录重启后复活」。
+      throw new Error(`旧记录删除未生效（${ids.length} 条），源记录保留`);
+    }
     for (const id of ids) {
       invalidateSummaryRecord(id);
       invalidateFullRecord(id);
@@ -140,7 +163,12 @@ export function usePhotoRepack(params: UsePhotoRepackParams) {
     const pipeline = getPipeline();
     let sessionOpen = false;
     try {
-      await pipeline.beginRepackSession();
+      const begin = await pipeline.beginRepackSession();
+      // 会话建立被后端拒绝（已有导入会话 / 无法确定加密库路径）：必须立即终止。
+      //   旧实现无条件继续，逐张写入全部被后端拒绝，最终被误读为「迁移失败 N 张」。
+      if (!begin.ok) {
+        throw new Error(begin.error ? `迁移会话建立被拒绝：${begin.error}` : "迁移会话建立被拒绝");
+      }
       sessionOpen = true;
 
       const result = await runPhotoRepack(

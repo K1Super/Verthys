@@ -6,8 +6,9 @@
   分层结构：
     canvas（qd-field-canvas）  — 物理场渲染：引力尘埃 / 数据碎片 / 能量连线 /
                                  数据包 / 非对称吸积盘（三层视差独立系数）
-    qd-layer-mid               — 3 个模块轨道节点 DOM（引力锚点环 + 导航栏同源
-                                 图标，可交互；节点无任何文字）
+    qd-layer-mid               — 3 个模块轨道节点 DOM（仅 48px 图标热区 + 导航栏
+                                 同源图标；装饰环饰全部由 Canvas 引擎绘制，
+                                 节点无任何文字）
     qd-layer-near              — 中心量子核心 DOM（文字组，可交互）
 
   交互（全部由引擎弹簧驱动，无 CSS transition 突变）：
@@ -33,11 +34,17 @@
         class="qd-module-node"
         :class="moduleStateClass(mid)"
         :style="{ left: `${moduleNodePos[i].x}%`, top: `${moduleNodePos[i].y}%` }"
+        role="button"
+        tabindex="0"
+        :aria-label="`${MODULE_LABELS[mid] ?? mid} · 模块密钥`"
         @click="onNodeClick"
+        @keydown.enter.prevent="onNodeClick"
+        @keydown.space.prevent="onNodeClick"
       >
         <div class="qd-node-orb">
-          <!-- 装饰环饰（引力锚点环）由 Canvas 引擎绘制 —— 与吸积盘同一渲染语言：
-               三段非均匀断裂刻度环 + 内外双自转能量弧 + 状态扇段 + 捕获光晕。
+          <!-- 装饰环饰（引力锚点环）由 Canvas 引擎绘制 —— 精密刻度盘语言：
+               三段非均匀断裂刻度环 + 断口主刻度 + 细刻度扇 + 镜筒细环 +
+               内外双自转能量弧 + 状态扇段（正常混合、无大面积软光）。
                DOM 侧只留可交互的导航栏同源图标（无 DOM 描边 → 无 DOM transform）。 -->
           <span class="qd-node-icon" v-html="MODULE_ICONS[mid]"></span>
         </div>
@@ -47,7 +54,16 @@
     <!-- 中心量子核心（近层为纯布局容器：核心文字静态居中，不参与任何位移；
          吸积盘在 canvas 中渲染，此处为可交互文字簇） -->
     <div class="qd-layer qd-layer-near">
-      <div ref="coreRef" class="qd-core-cluster" @click="onCoreClick">
+      <div
+        ref="coreRef"
+        class="qd-core-cluster"
+        role="button"
+        tabindex="0"
+        aria-label="全局密钥管理"
+        @click="onCoreClick"
+        @keydown.enter.prevent="onCoreClick"
+        @keydown.space.prevent="onCoreClick"
+      >
         <div class="qd-core-text">
           <div class="qd-core-label">全局密钥</div>
           <div class="qd-core-hint">点击管理</div>
@@ -59,7 +75,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, toRef } from 'vue';
-import type { ModuleId } from '../../lib/keyManager';
+import { MODULE_LABELS, type ModuleId } from '../../lib/keyManager';
 import { useQuantumField } from '../../composables/security-center/useQuantumField';
 /* 模块图标（导航栏同一权威源）：节点图标与 Dock 共享同一份 SVG 路径 */
 import { MODULE_ICONS } from '../../composables/useModuleNavigation';

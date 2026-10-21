@@ -474,12 +474,18 @@ async function processSlimRepack(
   fileHashHex: string,
   name: string,
   mime: string,
-  size: number,
+  declaredSize: number,
   createdAt: number,
   thumbB64: string,
   photoKey: string,
 ): Promise<PhotoProcessResult> {
   const origBytes = new Uint8Array(fileBytes);
+  // 实际字节长度是唯一权威分块口径：源索引声明的 size 可能滞后（历史记录/
+  //   异常中断），按声明值分块会截断末块或产出多余空块，新索引的 size 也随之失真。
+  const size = origBytes.length;
+  if (declaredSize !== size) {
+    console.warn(`[slim-repack] 源索引声明大小与实得字节不一致（${declaredSize} ≠ ${size}），以实际为准`);
+  }
   try {
     // 源校验：明文哈希必须与源索引声明一致（不一致即源数据损坏，拒绝重打包）
     const actualHash = bytesToHex(computeFileHash(origBytes));
@@ -619,11 +625,12 @@ async function processDecryptChunks(
   }
 
   let fileKey: Uint8Array | null = null;
+  // 已解密的明文块：失败路径必须逐块覆写清零（明文不得留在 Worker 堆中）
+  const plaintexts: ArrayBuffer[] = [];
   try {
     if (slim) {
       fileKey = await unwrapSlimFileKey(slim.wrappedFileKey, photoKey);
     }
-    const plaintexts: ArrayBuffer[] = [];
     // 整图哈希增量计算：不拼接大缓冲，逐块喂入哈希器
     const fileHasher = verify?.expectedFileHash
       ? blake3.create({ dkLen: FILE_HASH_LEN })
@@ -669,6 +676,11 @@ async function processDecryptChunks(
       }
     }
     return plaintexts;
+  } catch (e) {
+    // 任一块失败（含整图哈希不符）时，此前已解密的块不再返回给调用方：
+    //   在抛出前就地清零，杜绝明文在 Worker 堆中按 GC 时序残留。
+    for (const buf of plaintexts) new Uint8Array(buf).fill(0);
+    throw e;
   } finally {
     fileKey?.fill(0);
   }
