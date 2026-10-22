@@ -20,6 +20,8 @@
  *   - dispatch       : probe_global_key_inproc + handle_request 派发器
  *   - main_loop     : pub fn run 主循环
  *   - diagnostics   : GetLastError FFI + 错误码格式化
+ *   - ipc_auth      : 会话密钥、HMAC 信封、通道序号
+ *   - path_grants   : 宿主签发的一次性路径授权表
  */
 
 mod protocol;
@@ -31,6 +33,8 @@ mod worker;
 mod dispatch;
 mod main_loop;
 mod diagnostics;
+pub(crate) mod ipc_auth;
+pub(crate) mod path_grants;
 
 /// 跨层预算常量（与主进程同源）
 ///

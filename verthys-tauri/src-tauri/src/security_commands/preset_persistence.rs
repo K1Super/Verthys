@@ -28,6 +28,19 @@ use crate::security_commands::responses::PresetFeatures;
 /// 临时文件后缀（唯一命名：{主文件}.{pid}.{seq}.tmp）
 const PRESET_TMP_SUFFIX: &str = ".tmp";
 
+/// 自定义档空闲锁定时长下限（分钟）
+pub const CUSTOM_SESSION_MINUTES_MIN: u32 = 1;
+
+/// 自定义档空闲锁定时长上限（分钟，2 小时）
+pub const CUSTOM_SESSION_MINUTES_MAX: u32 = 120;
+
+/// 持久化读取允许的上限（分钟）：历史文件可能写入更大的时长，
+/// 读取放行，应用时由会话层收敛到当前上限
+pub const CUSTOM_SESSION_MINUTES_READ_MAX: u32 = 1440;
+
+/// 自定义档空闲锁定时长默认值（分钟）
+pub const CUSTOM_SESSION_MINUTES_DEFAULT: u32 = 60;
+
 /// 受信持久化的预设状态
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +50,9 @@ pub struct PresetPersist {
     /// CUSTOM 档自定义特性（仅 code=3 时有效；其他档位为 None）
     #[serde(default)]
     pub custom_features: Option<PresetFeatures>,
+    /// CUSTOM 档空闲锁定时长（分钟；仅 code=3 时有效）
+    #[serde(default)]
+    pub custom_session_timeout_minutes: Option<u32>,
 }
 
 /// 写序列互斥锁：临时文件写入 + 重命名全序列串行化（进程内并发写防护）
@@ -51,12 +67,21 @@ fn parse_preset_file(file: &std::path::Path) -> Result<PresetPersist, String> {
         std::fs::read_to_string(file).map_err(|e| format!("读取预设配置文件失败: {}", e))?;
     let parsed: PresetPersist =
         serde_json::from_str(&content).map_err(|e| format!("解析预设配置文件失败: {}", e))?;
-    // 合法域校验：code ∈ 0..=3，且 CUSTOM 必须携带自定义特性
+    // 合法域校验：code ∈ 0..=3，CUSTOM 必须携带自定义特性，
+    // 空闲锁定时长（若存在）必须落在允许区间
     if parsed.code > 3 {
         return Err(format!("预设配置文件 code 非法: {}", parsed.code));
     }
     if parsed.code == 3 && parsed.custom_features.is_none() {
         return Err("预设配置文件 code=3 缺少自定义特性".into());
+    }
+    if let Some(minutes) = parsed.custom_session_timeout_minutes {
+        if !(CUSTOM_SESSION_MINUTES_MIN..=CUSTOM_SESSION_MINUTES_READ_MAX).contains(&minutes) {
+            return Err(format!(
+                "预设配置文件空闲锁定时长非法: {} 分钟（允许 {}~{}）",
+                minutes, CUSTOM_SESSION_MINUTES_MIN, CUSTOM_SESSION_MINUTES_READ_MAX
+            ));
+        }
     }
     Ok(parsed)
 }
@@ -244,11 +269,13 @@ mod tests {
         let p = PresetPersist {
             code: 3,
             custom_features: Some(features),
+            custom_session_timeout_minutes: Some(45),
         };
         let json = serde_json::to_string(&p).unwrap();
         let restored: PresetPersist = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.code, 3);
         assert!(restored.custom_features.is_some());
+        assert_eq!(restored.custom_session_timeout_minutes, Some(45));
     }
 
     #[test]
@@ -257,6 +284,7 @@ mod tests {
         let restored: PresetPersist = serde_json::from_str(json).unwrap();
         assert_eq!(restored.code, 1);
         assert!(restored.custom_features.is_none());
+        assert!(restored.custom_session_timeout_minutes.is_none());
     }
 
     #[test]
@@ -265,6 +293,7 @@ mod tests {
         let persist = PresetPersist {
             code: 1,
             custom_features: None,
+            custom_session_timeout_minutes: None,
         };
         write_preset_persist_for_path(container.to_string_lossy().as_ref(), &persist)
             .expect("写入应当成功");
@@ -305,6 +334,39 @@ mod tests {
         std::fs::write(&file, r#"{"code":3}"#).unwrap();
         let result = read_preset_persist_for_path(&path_str);
         assert!(result.is_err(), "CUSTOM 缺少特性必须上抛错误");
+    }
+
+    #[test]
+    fn test_read_rejects_out_of_range_session_minutes() {
+        let container = temp_container_path("custom_minutes_out_of_range");
+        let path_str = container.to_string_lossy().to_string();
+        container_layout::ensure_sidecar_dir(&path_str).unwrap();
+        let file = container_layout::preset_file_for(&path_str);
+        std::fs::write(
+            &file,
+            r#"{"code":3,"customFeatures":{"antiDebug":true},"customSessionTimeoutMinutes":0}"#,
+        )
+        .unwrap();
+        let result = read_preset_persist_for_path(&path_str);
+        assert!(result.is_err(), "越界空闲锁定时长必须上抛错误");
+    }
+
+    /// 历史文件可能写入大于当前上限的时长：读取必须放行，
+    /// 否则旧配置会导致解锁链读取失败并中止解锁。
+    #[test]
+    fn test_read_accepts_legacy_session_minutes_above_current_max() {
+        let container = temp_container_path("custom_minutes_legacy");
+        let path_str = container.to_string_lossy().to_string();
+        let persist = PresetPersist {
+            code: 3,
+            custom_features: Some(all_true_features()),
+            custom_session_timeout_minutes: Some(600),
+        };
+        write_preset_persist_for_path(&path_str, &persist).expect("写入应当成功");
+        let loaded = read_preset_persist_for_path(&path_str)
+            .expect("历史超限值不得阻断读取")
+            .expect("文件应当存在");
+        assert_eq!(loaded.custom_session_timeout_minutes, Some(600));
     }
 
     #[test]
@@ -351,6 +413,7 @@ mod tests {
                 let persist = PresetPersist {
                     code: code % 4,
                     custom_features: (code % 4 == 3).then(all_true_features),
+                    custom_session_timeout_minutes: (code % 4 == 3).then_some(30),
                 };
                 write_preset_persist_for_path(&path, &persist).expect("并发写入应当成功");
             }));

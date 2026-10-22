@@ -26,6 +26,10 @@ const TEXT_BEARING_ENTRANCES: readonly { file: string; name: string }[] = [
   /* 模块步入编排（模块根渡越 + 模块工具条/顶栏 + 内容条目）— 全局单一权威源 */
   { file: "./animations.css", name: "module-reveal" },
   { file: "./animations.css", name: "module-reveal-out" },
+  /* 中枢专属离场包络（ModuleStage）与核心文字簇离场（qd-panel）：
+   * 均承载文字 —— 只允许不透明度；运动交给同期的装饰层内缩关键帧 */
+  { file: "../components/main-view/ModuleStage.vue", name: "hub-dissolve-out" },
+  { file: "./security/qd-panel.css", name: "qd-core-dissolve" },
   { file: "./reg-desk.css", name: "reg-panel-in" },
   { file: "./reg-desk.css", name: "reg-sec-in" },
   { file: "./reg-desk.css", name: "reg-row-in" },
@@ -59,6 +63,9 @@ const TEXT_BEARING_REVEALS: readonly { file: string; selector: string }[] = [
   { file: "./security/qd-panel.css", selector: ".qd-core-text" },
   { file: "./security/qd-panel.css", selector: ".qd-core-label" },
   { file: "./security/qd-panel.css", selector: ".qd-core-hint" },
+  /* 中枢离场：核心文字簇（承载文字）只走不透明度；
+   * 圆环/卫星的内缩归画布与节点图标层（无文字） */
+  { file: "./security/qd-panel.css", selector: ".security-center.module-switch-leave-active .qd-layer-near" },
 ];
 
 /** 去注释：断言只针对声明本身 —— 注释里的措辞（如「严禁过渡 transform」）

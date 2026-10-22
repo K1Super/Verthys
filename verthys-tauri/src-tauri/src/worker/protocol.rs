@@ -190,9 +190,6 @@ pub(crate) enum ActorRequest {
     Shutdown { reply: oneshot::Sender<()> },
 }
 
-/// 解锁进度流的 JSON 行 op 字段值（worker C 回调写入的进度行标识）
-pub(crate) const UNLOCK_PROGRESS_OP: &str = "unlock_progress";
-
 /// 解锁进度感知空闲超时（每收到一条进度行重置）
 ///
 /// Argon2id SECURE 预设（64MiB/3/1）单次派生 6~15s，期间无进度事件，
@@ -204,10 +201,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// 验证解锁进度流常量
+    /// 验证解锁进度空闲超时
     #[test]
-    fn test_unlock_progress_constants() {
-        assert_eq!(UNLOCK_PROGRESS_OP, "unlock_progress");
+    fn test_unlock_progress_idle_timeout() {
         assert_eq!(UNLOCK_PROGRESS_IDLE_TIMEOUT, Duration::from_secs(60));
     }
 

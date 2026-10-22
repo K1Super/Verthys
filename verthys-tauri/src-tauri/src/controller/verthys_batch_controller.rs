@@ -423,7 +423,7 @@ pub async fn verthys_add_chunk_batch(
 }
 
 /* ------------------------------------------------------------------ *
- * 命令：verthys_forget_hashes / dev_reset_wal                          *
+ * 命令：verthys_forget_hashes                                        *
  * ------------------------------------------------------------------ */
 
 /// 删除照片后释放去重锁（WAL 追加删除墓碑）。
@@ -535,60 +535,6 @@ pub async fn verthys_forget_hashes(
     let mut resp = VerthysResponse::ok(cmd::FORGET_HASHES);
     resp.processed_count = Some(hashes.len() as u64);
     Ok(resp)
-}
-
-/// 开发用：重置 WAL 与快照（清空续传去重状态）。
-///
-/// 仅在无活跃导入会话时可用（会话期间重置会破坏 pending 恢复语义）。
-/// 删除新布局与旧布局两处的 WAL 与快照文件，下次导入从空去重集合开始。
-#[tauri::command]
-pub async fn dev_reset_wal(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<VerthysResponse, String> {
-    if let Err(msg) = require_unlocked(&app, &state, cmd::DEV_RESET_WAL) {
-        return Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, &msg));
-    }
-    if state.has_import_session() {
-        return Ok(VerthysResponse::err(
-            cmd::DEV_RESET_WAL,
-            "存在活跃导入会话，请先结束导入",
-        ));
-    }
-    let vpath = match state.verthys_session_path() {
-        Some(p) => p,
-        None => {
-            return Ok(VerthysResponse::err(
-                cmd::DEV_RESET_WAL,
-                "无法确定加密库路径，请先解锁",
-            ));
-        }
-    };
-
-    let reset_result = tokio::time::timeout(
-        WRITER_SEND_TIMEOUT,
-        tokio::task::spawn_blocking(move || verthys_wal::remove_all(&vpath)),
-    )
-    .await;
-
-    match reset_result {
-        Err(_) => {
-            log::error!("[dev_reset_wal] 重置超时");
-            Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, "重置超时"))
-        }
-        Ok(Err(e)) => {
-            log::error!("[dev_reset_wal] 重置任务异常: {}", e);
-            Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, "重置失败"))
-        }
-        Ok(Ok(Err(e))) => {
-            log::error!("[dev_reset_wal] 重置失败: {}", e);
-            Ok(VerthysResponse::err(cmd::DEV_RESET_WAL, &e))
-        }
-        Ok(Ok(Ok(()))) => {
-            log::info!("[dev_reset_wal] WAL 与快照已清除");
-            Ok(VerthysResponse::ok(cmd::DEV_RESET_WAL))
-        }
-    }
 }
 
 /* ------------------------------------------------------------------ *

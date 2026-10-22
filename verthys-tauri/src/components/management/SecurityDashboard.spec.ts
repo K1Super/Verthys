@@ -17,7 +17,6 @@ import SecurityDashboard from "./SecurityDashboard.vue";
 /** 面板 Props 基线（与本组件 defineProps 契约一一对应） */
 const baseProps = {
   globalKeyReady: true,
-  securityPresetCode: 1,
   presetApplying: false,
   presetAmbienceMode: "secure",
   cpuOverhead: 12,
@@ -37,7 +36,7 @@ const baseProps = {
   lockedFeatures: [{ key: "anti_debug", label: "调试检测", desc: "调试器检测与反附加" }],
   presetFeatures: { anti_debug: true },
   customFeatures: { session_lock_on_idle: true },
-  customPanelOpen: false,
+  customSessionMinutes: 10,
   presetSyncFailed: false,
   hardeningFailed: false,
   defensePaths: [
@@ -63,7 +62,14 @@ const baseProps = {
 };
 
 /** 挂载面板：以模型 ref 驱动 orbit-slider-pos 双向绑定 */
-function mountDashboard(model: Ref<number>) {
+function mountDashboard(
+  model: Ref<number>,
+  overrides: Record<string, unknown> = {},
+  handlers: {
+    setMinutes?: (minutes: number) => void;
+    toggleFeature?: (key: string) => void;
+  } = {},
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const Root = defineComponent({
@@ -71,10 +77,13 @@ function mountDashboard(model: Ref<number>) {
       return () =>
         h(SecurityDashboard, {
           ...baseProps,
+          ...overrides,
           orbitSliderPos: model.value,
           "onUpdate:orbitSliderPos": (v: number) => {
             model.value = v;
           },
+          onSetCustomSessionMinutes: handlers.setMinutes ?? (() => {}),
+          onToggleCustomFeature: handlers.toggleFeature ?? (() => {}),
         });
     },
   });
@@ -153,6 +162,31 @@ describe("SecurityDashboard 视觉状态契约", () => {
       await nextTick();
       expect(readVar(container, "--pos")).toBe("0.000");
       expect(readVar(container, "--posw")).toBe("0.00%");
+    } finally {
+      teardown();
+    }
+  });
+
+  it("自定义防护：点击端子行切换特性，键盘调节空闲锁定时长", () => {
+    const model = ref(100);
+    const toggled: string[] = [];
+    const minutes: number[] = [];
+    const { teardown, container } = mountDashboard(model, {}, {
+      toggleFeature: (key) => toggled.push(key),
+      setMinutes: (value) => minutes.push(value),
+    });
+    try {
+      const toggle = container.querySelector(".cus-toggle") as HTMLButtonElement | null;
+      expect(toggle).not.toBeNull();
+      toggle!.click();
+      expect(toggled).toEqual(["session_lock_on_idle"]);
+
+      const track = container.querySelector(".cus-idle-track") as HTMLElement | null;
+      expect(track).not.toBeNull();
+      track!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      expect(minutes).toEqual([11]);
+      track!.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+      expect(minutes).toEqual([11, 120]);
     } finally {
       teardown();
     }

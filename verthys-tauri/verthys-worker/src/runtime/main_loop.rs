@@ -17,10 +17,11 @@
 
 use std::io::{self, BufRead, Write};
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::log::{diag, init_diag};
 use crate::runtime::budget::PB_IPC_MAX_REQUEST_LINE_BYTES;
+use crate::runtime::ipc_auth;
 use crate::runtime::worker::Worker;
 use crate::runtime::dispatch::handle_request;
 use crate::runtime::protocol::{bound_response_line, Request, Response};
@@ -135,8 +136,15 @@ pub fn run(dll_path: &str) -> i32 {
     // 主动发送就绪信号：告诉父进程 DLL 已加载、Verthys_Init 成功、主循环即将开始
     // 父进程的 wait_for_ready_signal 会读取此信号（而非发送 ping），避免协议失步
     {
-        let ready = r#"{"ok":true,"op":"ready"}"#;
-        init_diag!("[worker] 发送就绪信号: {}", ready);
+        let ready_payload = r#"{"ok":true,"op":"ready"}"#;
+        let mut ready = match ipc_auth::seal_ready(ready_payload) {
+            Ok(line) => line,
+            Err(e) => {
+                init_diag!("[worker] 就绪信号签名失败: {}", e);
+                return 1;
+            }
+        };
+        init_diag!("[worker] 发送就绪信号: {}", ready_payload);
         let stdout = io::stdout();
         let mut lock = stdout.lock();
         if let Err(e) = writeln!(lock, "{}", ready) {
@@ -148,12 +156,14 @@ pub fn run(dll_path: &str) -> i32 {
             return 1;
         }
         drop(lock);
+        ready.zeroize();
         init_diag!("[worker] 就绪信号已发送，进入主循环");
     }
 
     let stdin = io::stdin();
     let mut stdin_lock = stdin.lock();
     let mut raw = String::new();
+    let mut exit_code = 0i32;
 
     loop {
         // ★ panic 兜底第三层：任何线程/回调捕获到 panic 都会置位进程级标记，
@@ -187,7 +197,7 @@ pub fn run(dll_path: &str) -> i32 {
                     error: Some("line too long".into()),
                     ..Response::ok("parse")
                 };
-                let json = match serde_json::to_string(&resp) {
+                let mut json = match serde_json::to_string(&resp) {
                     Ok(j) => j,
                     Err(e) => {
                         diag!("[worker] 响应序列化失败(line-too-long): {}", e);
@@ -195,11 +205,24 @@ pub fn run(dll_path: &str) -> i32 {
                         String::from("{}")
                     }
                 };
+                /* 超长行无法取得可信的请求序号，以关联号 0 返回错误；
+                 * 宿主会因关联号不匹配终止会话。 */
+                let mut sealed = match ipc_auth::seal_response(&json, 0) {
+                    Ok(line) => line,
+                    Err(e) => {
+                        diag!("[worker] 协议错误响应签名失败: {}", e);
+                        let _ = &e;
+                        json.zeroize();
+                        break;
+                    }
+                };
                 let stdout = io::stdout();
                 let mut lock = stdout.lock();
-                let _ = writeln!(lock, "{}", json);
+                let _ = writeln!(lock, "{}", sealed);
                 let _ = lock.flush();
                 drop(lock);
+                json.zeroize();
+                sealed.zeroize();
                 break;
             }
             BoundedLine::Line => {}
@@ -221,7 +244,18 @@ pub fn run(dll_path: &str) -> i32 {
             None => line,
         };
 
-        let req: Request = match serde_json::from_str(&line) {
+        /* 先校验信封签名与序号，再解析业务载荷；认证失败即失败关闭。 */
+        let (request_seq, payload_json) = match ipc_auth::verify_request(&line) {
+            Ok(value) => value,
+            Err(e) => {
+                init_diag!("[worker] IPC 请求认证失败，安全退出: {}", e);
+                exit_code = 2;
+                break;
+            }
+        };
+        let payload_json = Zeroizing::new(payload_json);
+
+        let req: Request = match serde_json::from_str(&payload_json) {
             Ok(r) => r,
             Err(e) => {
                 let resp = Response {
@@ -230,7 +264,7 @@ pub fn run(dll_path: &str) -> i32 {
                     error: Some(format!("json parse: {}", e)),
                     ..Response::ok("parse")
                 };
-                let json = match serde_json::to_string(&resp) {
+                let mut json = match serde_json::to_string(&resp) {
                     Ok(j) => j,
                     Err(e) => {
                         diag!("[worker] 响应序列化失败(parse): {}", e);
@@ -238,16 +272,30 @@ pub fn run(dll_path: &str) -> i32 {
                         String::from("{}")
                     }
                 };
+                let mut sealed = match ipc_auth::seal_response(&json, request_seq) {
+                    Ok(line) => line,
+                    Err(e) => {
+                        diag!("[worker] 解析错误响应签名失败: {}", e);
+                        let _ = &e;
+                        json.zeroize();
+                        exit_code = 2;
+                        break;
+                    }
+                };
                 let stdout = io::stdout();
                 let mut lock = stdout.lock();
-                if let Err(e) = writeln!(lock, "{}", json) {
+                if let Err(e) = writeln!(lock, "{}", sealed) {
                     diag!("[worker] 写响应失败(parse): {}", e);
                     let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
                 }
                 let _ = lock.flush();
+                drop(lock);
+                json.zeroize();
+                sealed.zeroize();
                 continue;
             }
         };
+        ipc_auth::set_current_request(request_seq);
 
         // 关闭请求：显式优雅退出主循环。
         //
@@ -263,7 +311,7 @@ pub fn run(dll_path: &str) -> i32 {
         }
 
         // get_record 返回 NOTFOUND 时，枚举探测应停止
-        let resp = handle_request(&mut worker, &req);
+        let mut resp = handle_request(&mut worker, &req);
         let json = match serde_json::to_string(&resp) {
             Ok(j) => j,
             Err(e) => {
@@ -276,8 +324,22 @@ pub fn run(dll_path: &str) -> i32 {
         // 父进程按行读取并对超长行判为协议断裂（标记子进程死亡），
         // 而合法的超大记录取回响应本身就可能达到 MB 级——若原样写出，
         // 单条读取失败会升级为整个会话不可用。
-        let json = bound_response_line(json, &resp.op);
+        let mut json = bound_response_line(json, &resp.op);
         diag!("[worker] 发送响应: op={} ok={} bytes={}", resp.op, resp.ok, json.len());
+        // 序列化已完成，立即清除响应内残留的明文副本；写失败路径同样覆盖。
+        resp.scrub();
+        /* 响应必须先签名再写出；签名失败时不得回退发送明文。 */
+        let mut sealed = match ipc_auth::seal_response(&json, request_seq) {
+            Ok(line) => line,
+            Err(e) => {
+                diag!("[worker] 响应签名失败，安全退出: {}", e);
+                let _ = &e;
+                json.zeroize();
+                exit_code = 2;
+                break;
+            }
+        };
+        json.zeroize();
 
         // 修复（D-PROGRESS-DRAIN）：进度排空保障
         //
@@ -296,21 +358,26 @@ pub fn run(dll_path: &str) -> i32 {
 
         let stdout = io::stdout();
         let mut lock = stdout.lock();
-        if let Err(e) = writeln!(lock, "{}", json) {
+        if let Err(e) = writeln!(lock, "{}", sealed) {
             diag!("[worker] 写响应失败: {}", e);
             let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
+            drop(lock);
+            sealed.zeroize();
             break;
         }
         if let Err(e) = lock.flush() {
             diag!("[worker] flush 失败: {}", e);
             let _ = &e; /* release 下 diag! 为空操作，显式消费 e */
+            drop(lock);
+            sealed.zeroize();
             break;
         }
         drop(lock);
+        sealed.zeroize();
     }
 
     // stdin 关闭 → 主进程已退出或主动 kill → Drop 自动清理
-    0
+    exit_code
 }
 
 /* ------------------------------------------------------------------ *

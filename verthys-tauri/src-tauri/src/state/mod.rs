@@ -450,6 +450,22 @@ impl AppState {
         session.send_json(json)
     }
 
+    /// 为路径型 worker 操作签发一次性授权。
+    ///
+    /// 授权与操作、模式、规范化路径绑定，worker 在操作入口消费。
+    pub fn authorize_worker_path(
+        &self,
+        target_op: &str,
+        mode: &str,
+        path: &str,
+    ) -> Result<(), String> {
+        let session = {
+            let guard = self.read_session();
+            guard.as_ref().ok_or("worker not initialized")?.clone()
+        };
+        session.authorize_path(target_op, mode, path)
+    }
+
     /// 发送 JSON 请求到 worker，自定义超时
     pub fn send_with_timeout(&self, json: &str, timeout: Duration) -> Result<String, String> {
         let session = {

@@ -11,6 +11,8 @@
  */
 
 use libloading::{Library, Symbol};
+use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::os::raw::c_char;
 
 use crate::log::{diag, init_diag};
@@ -177,27 +179,117 @@ pub(crate) struct Worker {
     scan_shm: Option<scan_shm::ScanShm>,
 }
 
+// 构建期生成的 DLL 完整性基线（Release 必存在，Debug 允许占位）
+include!(concat!(env!("OUT_DIR"), "/expected_dll_hash.rs"));
+
+/// 常数时间比较两组 32 字节摘要。
+///
+/// 逐字节异或累加，不做提前返回，避免摘要比较环节泄露前导匹配长度。
+fn digest_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for index in 0..32 {
+        diff |= left[index] ^ right[index];
+    }
+    diff == 0
+}
+
+/// 摘要转十六进制文本（仅用于诊断日志）
+fn digest_hex(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    out
+}
+
+/// 在 `Library::new` 之前校验 DLL 的路径归属与全文件摘要。
+///
+/// 契约：
+///   - Release：DLL 必须位于 worker 可执行文件所在目录内，且 SHA-256 与
+///     构建期基线一致；任一条件不满足即拒绝加载，防止宿主传入路径被替换
+///     后加载被篡改的模块。
+///   - Debug：构建期无稳定基线，跳过哈希比对，仅记录摘要。
+/// 返回值为规范化后的绝对路径，后续加载必须使用该路径，避免相对路径重解析。
+/// 副作用：完整读取一次 DLL 字节；不回写、不修改文件。
+fn verify_dll_integrity(dll_path: &str) -> Result<std::path::PathBuf, String> {
+    let canonical_dll = std::fs::canonicalize(dll_path)
+        .map_err(|e| format!("规范化 DLL 路径失败: {}", e))?;
+
+    #[cfg(not(debug_assertions))]
+    {
+        let exe = std::env::current_exe().map_err(|e| format!("获取 worker 路径失败: {}", e))?;
+        let exe_dir = exe
+            .parent()
+            .ok_or_else(|| "worker 路径缺少父目录".to_string())?;
+        let canonical_dir = std::fs::canonicalize(exe_dir)
+            .map_err(|e| format!("规范化 worker 目录失败: {}", e))?;
+        // 未打包的 release 开发树（target/release）中 worker 与 DLL 分处不同目录，
+        // 该布局不是部署形态；打包安装目录中两者必须同根。
+        let dir_text = canonical_dir.display().to_string().to_lowercase();
+        let is_dev_layout = dir_text.ends_with("\\target\\release");
+        if !is_dev_layout && !canonical_dll.starts_with(&canonical_dir) {
+            return Err(format!(
+                "DLL 路径越界: {} 不在 {} 内",
+                canonical_dll.display(),
+                canonical_dir.display()
+            ));
+        }
+    }
+
+    let mut file = std::fs::File::open(&canonical_dll)
+        .map_err(|e| format!("打开 DLL 失败: {}", e))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("读取 DLL 失败: {}", e))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let mut actual = [0u8; 32];
+    actual.copy_from_slice(&hasher.finalize());
+
+    if HAS_EXPECTED_DLL_HASH && !digest_equal(&actual, &EXPECTED_DLL_SHA256) {
+        return Err(format!(
+            "DLL 摘要不匹配: actual={} expected={}",
+            digest_hex(&actual),
+            digest_hex(&EXPECTED_DLL_SHA256)
+        ));
+    }
+    init_diag!("[worker] DLL 完整性校验通过: {}", digest_hex(&actual));
+    Ok(canonical_dll)
+}
+
 impl Worker {
     pub(crate) fn new(dll_path: &str) -> Result<Self, String> {
         init_diag!("[worker] 开始加载 DLL: {}", dll_path);
+        /* 加载前先完成路径归属与全文件摘要校验：宿主传入的路径不可信，
+         * 必须在任何符号解析之前拒绝越界路径与内容被替换的模块。 */
+        let verified_dll = verify_dll_integrity(dll_path).map_err(|e| {
+            init_diag!("[worker] DLL 完整性校验失败，拒绝加载: {}", e);
+            e
+        })?;
+
         /*
-         * Windows 加密 Worker 最终完整版安全设计 — 进程无菌沙盒
+         * Windows 进程级沙盒
          *
          * 必须在加载 verthys.dll 之前应用进程级 mitigation policy：
-         *   1. WIN32K_SYSTEM_CALL_DISABLE：免疫所有窗口注入
-         *   2. PROCESS_CREATION_DISABLED：绝杀进程镂空、子进程注入
-         *   3. IMAGE_LOAD_PREFER_SYSTEM32：防本地 DLL 劫持
-         *   4. IMAGE_LOAD_NO_REMOTE：防反射注入、内存 PE 加载
+         *   1. WIN32K_SYSTEM_CALL_DISABLE：阻断窗口站/桌面相关注入面
+         *   2. PROCESS_CREATION_DISABLED：阻断子进程创建与镂空链
+         *   3. IMAGE_LOAD_NO_REMOTE / NO_LOW_LABEL：阻断远程与低完整性镜像
+         *   4. ACG：阻断运行期动态代码生成
+         *   5. StrictHandle：阻断句柄引用违规
          *
-         * 这些 mitigation policy 是进程级策略，一旦应用不可撤销。
-         * 必须在加载任何业务 DLL 之前完成沙盒包装，否则后续 DLL 加载行为
-         * 可能已被攻击者篡改（如本地目录 DLL 劫持）。
-         *
-         * 失败降级：旧版 Windows 不支持某些 policy（Win10 1709+ 才有），
-         * 失败不阻断启动，仅记录降级状态。实际状态由 verthys.dll 内的
-         * defense_closure_check 在 BOOT 模式查询。
+         * System32-only DLL 搜索已由入口处的 apply_early_dll_policy 固定，
+         * 此处失败必须失败关闭：降级启动会让后续所有加固建立在不可信基线上。
          */
-        let sandbox_attrs = crate::defense::apply_process_sandbox();
+        let sandbox_attrs = crate::defense::apply_process_sandbox().map_err(|e| {
+            init_diag!("[worker] 进程级沙盒 mitigation 失败，拒绝加载 DLL: {}", e);
+            e
+        })?;
         init_diag!("[worker] 进程级沙盒 mitigation 已应用: attrs=0x{:02X}", sandbox_attrs);
 
         unsafe {
@@ -205,7 +297,7 @@ impl Worker {
             let path_exists = std::path::Path::new(dll_path).exists();
             init_diag!("[worker] DLL 路径: {} | 文件存在: {}", dll_path, path_exists);
 
-            let lib = Library::new(dll_path).map_err(|e| {
+            let lib = Library::new(&verified_dll).map_err(|e| {
                 // 使用 {:?} 输出 Debug 格式，包含底层 WindowsError(io::Error) 的原始错误码
                 // 这是诊断 "LoadLibraryExW failed" 但 Display 不显示错误码的关键手段
                 init_diag!("[worker] DLL 加载失败 (Display): {}", e);
@@ -258,7 +350,7 @@ impl Worker {
              * VerthysContainerInfo 前 8 字节——该头部在任何容器状态均可读，
              * stateless 且无副作用。预检失败时进程随即退出，已初始化句柄
              * 由进程回收，无驻留窗口。 */
-            const WORKER_KNOWN_API_VERSION: u32 = 0x000D;
+            const WORKER_KNOWN_API_VERSION: u32 = 0x000E;
             const WORKER_EXPECTED_FMT_V3: u16 = 3;
             let get_info: Symbol<VerthysGetContainerInfoFn> =
                 lib.get(b"Verthys_GetContainerInfo").map_err(|e| {
@@ -549,6 +641,12 @@ impl Worker {
             } else {
                 Vec::new()
             };
+            /* 借用指针已深拷贝到自有缓冲，立即清零 C 层缓存，
+             * 缩短明文在 DLL 堆中的驻留窗口。旧 DLL 不导出该符号时
+             * 保持原行为，由 next GetRecord/Lock 失效缓存。 */
+            if let Ok(clear) = lib.get::<VerthysClearRecordCacheFn>(b"Verthys_ClearRecordCache") {
+                let _ = ffi_call(|| { clear(self.handle) });
+            }
             Ok((rec.rtype, name, data))
         }
     }

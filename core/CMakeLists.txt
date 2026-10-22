@@ -127,7 +127,7 @@ set(VERTHYS_CORE_SOURCES
     #   anti_analysis/ — 反调试 + 反注入
     src/security/anti_analysis/anti_debug_v2.c
     src/security/anti_analysis/anti_inject.c
-    # 直接系统调用（SSN 排序法提取 + W^X stub 页 +
+    # 直接系统调用（SSN 排序法提取 + 映像内 thunk +
     #   优雅降级；anti_debug_v2 / memory_guard 检测器唯一 NT 查询传输）
     src/security/anti_analysis/syscall_direct.c
     #   memory/ — 内存防护 + 三权分立密钥
@@ -162,6 +162,14 @@ set(VERTHYS_CORE_SOURCES
     src/api/scan/verthys_scan.c
     src/api/lifecycle/dllmain.c
 )
+
+# 直连系统调用 thunk：ACG 兼容实现依赖映像内固定的 syscall 指令序列。
+# 仅 MSVC 工具链提供 MASM；其他工具链不生成 thunk，模块保持 GetProcAddress 回退。
+if(MSVC)
+    list(APPEND VERTHYS_CORE_SOURCES
+        src/security/anti_analysis/syscall_thunk_x64.asm
+    )
+endif()
 
 # 相对路径 → 绝对路径一次性转换。相对源路径按使用处的
 # CMAKE_CURRENT_SOURCE_DIR 解析（非定义处）——tests/fuzz 复用本清单
@@ -256,14 +264,19 @@ add_custom_target(flatcc_generate DEPENDS ${VERTHYS_SCHEMA_GEN_FILES})
 
 # 对象库：编译一次，供 DLL 与测试共用
 add_library(verthys_core_obj OBJECT ${VERTHYS_CORE_SOURCES})
+# 仅当构建包含 MASM thunk 时才允许 C 代码引用该符号，
+# 避免其他工具链在链接阶段出现未解析外部符号。
+if(MSVC)
+    target_compile_definitions(verthys_core_obj PRIVATE VERTHYS_SCD_INLINE_THUNK)
+endif()
 # LSM 源文件直接 include flatcc 生成头（sstable_builder.h 等）→
 #   编译前必须完成 schema codegen（此前仅 verthys_tests 声明该依赖，
 #   verthys_core_obj 先于 verthys_tests 构建时生成头尚不存在 → C1083）
 add_dependencies(verthys_core_obj flatcc_generate)
-# 不再定义 VERTHYS_EXPORTS —— VERTHYS_API 为空宏，
-#   导出面唯一由 /DEF:verthys.def 白名单决定（见 verthys.h 宏注释）。
+# 不定义 VERTHYS_EXPORTS：VERTHYS_API 为空宏，
+#   导出面仅由 /DEF:verthys.def 白名单决定。
 # /FS：允许多个 cl.exe 进程并发写入同一 .PDB 文件（并行编译必需）
-target_compile_options(verthys_core_obj PRIVATE /FS)
+target_compile_options(verthys_core_obj PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:/FS>)
 target_include_directories(verthys_core_obj
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src

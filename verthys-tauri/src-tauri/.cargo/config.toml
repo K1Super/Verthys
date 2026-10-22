@@ -61,5 +61,23 @@
 #   syn::Error 诊断，dummy 值完全满足需求且无 nightly-feature 依赖，最稳健。
 #   build.rs 行 31 已无条件输出 cargo:rustc-check-cfg=cfg(span_locations)（rustc>=80），
 #   故强制该 cfg 不会触发 unexpected_cfgs 警告。
+# 安全加固：发布二进制必须启用控制流保护与高熵地址空间布局。
+#   -Ccontrol-flow-guard=yes：为间接调用生成 CFG 校验，并请求链接器生成
+#   CFG 函数表；-Clink-arg=/guard:cf 显式固定链接器行为。
+#   -Clink-arg=/highentropyva：启用 64 位高熵 ASLR，扩大基址随机化范围。
+#
+# 路径重映射：构建产物不得泄露开发者本机绝对路径（用户名/目录结构）。
+#   将仓库根与用户目录统一映射为稳定前缀，仅供调试符号与诊断字符串使用。
 [target.'cfg(target_arch = "x86_64")']
-rustflags = ['--cfg=fast_arithmetic="64"', '--cfg=has_std', '--cfg=windows_raw_dylib', '--cfg=desktop', '--cfg=span_locations']
+rustflags = [
+    '--cfg=fast_arithmetic="64"',
+    '--cfg=has_std',
+    '--cfg=windows_raw_dylib',
+    '--cfg=desktop',
+    '--cfg=span_locations',
+    '-Ccontrol-flow-guard=yes',
+    '-Clink-arg=/guard:cf',
+    '-Clink-arg=/highentropyva',
+    '--remap-path-prefix=C:\Users\Administrator\Desktop\Verthys=/build/verthys',
+    '--remap-path-prefix=C:\Users\Administrator=/build/home',
+]

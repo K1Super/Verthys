@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     CI 统一执行入口
 
@@ -84,15 +84,15 @@ if ($fmtMagic) {
 }
 
 # 锚点 4：批量导入域全部数据命令必须挂接解锁闸门（防回退）。
-# 导入/删除/GC 均为写入型数据域命令，闸门挂接不得少于 8 处
-# （begin / add_records / add_chunk / forget_hashes / dev_reset_wal /
+# 导入/删除/GC 均为写入型数据域命令，闸门挂接不得少于 7 处
+# （begin / add_records / add_chunk / forget_hashes /
 #   import_end / import_checkpoint / gc_orphan_chunks 各一）。
 $batchCtrl = Join-Path $projectRoot "verthys-tauri\src-tauri\src\controller\verthys_batch_controller.rs"
 if (Test-Path $batchCtrl) {
     $gateHits = Select-String -Path $batchCtrl -Pattern 'require_unlocked' -AllMatches -ErrorAction SilentlyContinue
     $gateCount = ($gateHits | ForEach-Object { $_.Matches.Count } | Measure-Object -Sum).Sum
-    if ($gateCount -lt 8) {
-        Write-Host "[锚点门][RED] verthys_batch_controller.rs 授权闸门挂接不足：require_unlocked 命中 $gateCount 处，要求 >= 8（导入域八命令各一）"
+    if ($gateCount -lt 7) {
+        Write-Host "[锚点门][RED] verthys_batch_controller.rs 授权闸门挂接不足：require_unlocked 命中 $gateCount 处，要求 >= 7（导入域七命令各一）"
         $anchorRed = $true
     }
 }

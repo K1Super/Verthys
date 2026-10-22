@@ -71,6 +71,11 @@
       :global-key-ready="globalKeyReadyRef"
       :session-remaining="sessionRemaining"
       :idle-lock-enabled="sessionLockEnabledRef"
+      :update-available="!!availableUpdate"
+      :update-version="availableUpdate?.version ?? ''"
+      :update-checking="updateChecking"
+      :update-installing="updateInstalling || updateFlowActive"
+      :update-percent="updatePercent"
       :device-check-result="deviceCheckResult"
       :device-fingerprint-short="deviceFingerprintShort"
       :module-ids="moduleIds"
@@ -82,7 +87,6 @@
       :is-module-ready="isModuleReady"
       :module-state-class="moduleStateClass"
       :module-state-text="moduleStateText"
-      :security-preset-code="securityPresetRef"
       :preset-applying="presetApplying"
       :preset-ambience-mode="presetAmbienceMode"
       :preset-sync-failed="presetSyncFailed"
@@ -100,21 +104,23 @@
       :locked-features="lockedFeatures"
       :preset-features="currentPresetFeatures"
       :custom-features="customFeatures"
-      :custom-panel-open="customPanelOpen"
+      :custom-session-minutes="customSessionMinutes"
       :defense-paths="defensePaths"
       :defense-meta="defenseMeta"
       v-model:orbit-slider-pos="orbitSliderPos"
       @panel-active="(v: boolean) => emit('panel-active', v)"
       @lock-all="onLockAll"
+      @check-update="onCheckUpdate"
+      @install-update="onInstallUpdate"
       @open-change-key-dialog="onOpenChangeKeyDialog"
       @export-bin="onExportBin"
       @toggle-module-key-enabled="onToggleModuleKeyEnabled"
       @open-key-dialog="onOpenKeyDialog"
       @show-module-key="onShowModuleKey"
       @logout-module="onLogoutModule"
-      @toggle-gear-panel="onToggleGearPanel"
       @toggle-custom-feature="onToggleCustomFeature"
       @reset-custom="onResetCustom"
+      @set-custom-session-minutes="onSetCustomSessionMinutes"
       @apply-custom="onApplyCustom"
       @orbit-slider-input="onOrbitSliderInput"
       @orbit-slider-release="onOrbitSliderRelease"
@@ -196,7 +202,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch, defineAsyncComponent } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, watch, defineAsyncComponent } from "vue";
 import {
   lockAll,
   hasModuleKey, isModuleReady,
@@ -204,7 +210,7 @@ import {
   initStatusRef, initDetailRef,
   hasModuleKeyRecordRef, moduleKeyReadyRef, moduleKeyEnabledRef,
   MODULE_IDS, MODULE_LABELS,
-  securityPresetRef, restoreSecurityPreset,
+  restoreSecurityPreset,
   sessionLockEnabledRef,
   securityHardeningFailedRef,
   checkInitStatus,
@@ -239,6 +245,7 @@ import { useModuleKeys } from "../../composables/security-center/useModuleKeys";
 import { usePreset } from "../../composables/security-center/usePreset";
 import { useDefenseStatus } from "../../composables/security-center/useDefenseStatus";
 import { useSystemMetrics } from "../../composables/security-center/useSystemMetrics";
+import { useAppUpdater } from "../../composables/useAppUpdater";
 import { isCacheDirty } from "../../cache/composition/verthys-cache";
 
 const emit = defineEmits<{ (e: "back"): void; (e: "panel-active", val: boolean): void }>();
@@ -435,8 +442,8 @@ const {
   presetApplying,
   presetSyncFailed,
   currentPresetFeatures,
-  customPanelOpen,
   customFeatures,
+  customSessionMinutes,
   orbitSliderPos,
   orbitAnchors,
   nearestAnchorIdx,
@@ -453,12 +460,85 @@ const {
   onOrbitSliderInput,
   onOrbitSliderRelease,
   snapToAnchor,
-  onToggleGearPanel,
   onToggleCustomFeature,
   onResetCustom,
+  onSetCustomSessionMinutes,
   onApplyCustom,
   loadPresetConfig,
 } = usePreset({ showError, showToast, resetSession, cpuUsage, defenseMeta });
+
+/* ===== 应用更新 =====
+ * 状态与启动静默检查共享同一单例；安装分两段执行：
+ *   1. 先下载安装包 —— 传输期间会话保持解锁，不打断当前操作；
+ *   2. 再锁库落盘 —— 缓存脏或锁定失败即中止，绝不启动覆盖程序的安装器。
+ * 安装器接管后进程由插件退出，因此锁库必须发生在安装之前。 */
+const {
+  availableUpdate,
+  checking: updateChecking,
+  installing: updateInstalling,
+  downloadedBytes: updateDownloadedBytes,
+  totalBytes: updateTotalBytes,
+  lastError: updateLastError,
+  checkForUpdate,
+  downloadUpdate,
+  installUpdate: installDownloadedUpdate,
+} = useAppUpdater();
+
+/** 下载进度百分比（0-100；总长未知时保持 0，端子只显示「正在更新…」） */
+const updatePercent = computed(() => {
+  if (updateTotalBytes.value <= 0) return 0;
+  return Math.min(100, Math.round((updateDownloadedBytes.value / updateTotalBytes.value) * 100));
+});
+
+/** 安装流程互斥闸门：覆盖下载、锁库与安装全过程，防止重复点击并发启动安装器 */
+const updateFlowActive = ref(false);
+
+/** 手动检查更新：区分「已是最新」与「检查失败」两种无更新结果 */
+const onCheckUpdate = async () => {
+  if (updateChecking.value || updateInstalling.value || updateFlowActive.value) return;
+  const found = await checkForUpdate();
+  if (found) {
+    showToast(`发现新版本 ${found.version}`);
+  } else if (updateLastError.value) {
+    showError(`检查更新失败：${updateLastError.value}`);
+  } else {
+    showToast("当前已是最新版本");
+  }
+};
+
+/** 下载并安装更新：下载完成后先锁库落盘，再交给安装器接管进程 */
+const onInstallUpdate = async () => {
+  if (updateInstalling.value || updateFlowActive.value) return;
+  updateFlowActive.value = true;
+  try {
+    if (!availableUpdate.value) {
+      const found = await checkForUpdate();
+      if (!found) {
+        if (updateLastError.value) {
+          showError(`检查更新失败：${updateLastError.value}`);
+        } else {
+          showToast("当前已是最新版本");
+        }
+        return;
+      }
+    }
+    await downloadUpdate();
+    if (verthysReadyRef.value) {
+      await lockAll();
+      if (isCacheDirty()) {
+        showError("部分数据可能未保存，已中止更新安装");
+        return;
+      }
+    }
+    await installDownloadedUpdate();
+  } catch (e) {
+    console.error("[updater] 更新安装失败", e);
+    showError(`更新失败：${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    /* 安装成功时进程由安装器接管退出，不会执行此处；失败或中止时释放闸门 */
+    updateFlowActive.value = false;
+  }
+};
 
 /* ===== 返回重新选择（锁定当前 verthys，回到解锁视图） ===== */
 const goBackToUnlock = async () => {

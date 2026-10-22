@@ -19,6 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::process::{Child, ChildStdin};
+use zeroize::Zeroize;
+
+use crate::infrastructure::ipc_secure::IpcSecureChannel;
 
 use super::actor::write_line;
 use super::protocol::{ActorRequest, GRACEFUL_SHUTDOWN_TIMEOUT, STDERR_DIAG_MAX_LEN};
@@ -56,6 +59,7 @@ pub(crate) async fn perform_graceful_shutdown(
     child: &mut Child,
     pid: u32,
     child_alive: &Arc<AtomicBool>,
+    ipc: &IpcSecureChannel,
 ) {
     // 先检查子进程是否已退出
     match child.try_wait() {
@@ -76,16 +80,24 @@ pub(crate) async fn perform_graceful_shutdown(
         }
     }
 
-    // 1. 发送 shutdown 命令
+    // 1. 发送 shutdown 命令（必须带会话签名；签名失败直接进入强制终止）
     let shutdown_json = serde_json::json!({"op": "shutdown"}).to_string();
-    if let Err(e) = write_line(stdin, &shutdown_json).await {
-        log::warn!(
-            "[actor] PID={} 发送 shutdown 失败（管道可能已关闭）: {}",
-            pid,
-            e
-        );
-    } else {
-        log::info!("[actor] PID={} 已发送 shutdown 命令", pid);
+    match ipc.sign_request(&shutdown_json) {
+        Ok((_seq, mut signed)) => {
+            if let Err(e) = write_line(stdin, &signed).await {
+                log::warn!(
+                    "[actor] PID={} 发送 shutdown 失败（管道可能已关闭）: {}",
+                    pid,
+                    e
+                );
+            } else {
+                log::info!("[actor] PID={} 已发送 shutdown 命令", pid);
+            }
+            signed.zeroize();
+        }
+        Err(e) => {
+            log::error!("[actor] PID={} shutdown 签名失败: {}", pid, e);
+        }
     }
 
     // 2. 等待 1 秒优雅期

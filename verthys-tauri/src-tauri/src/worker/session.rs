@@ -30,13 +30,17 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::actor::actor_loop;
-use super::platform::assign_child_to_job_object;
+use super::platform::verify_install_paths;
 #[cfg(target_os = "windows")]
-use super::platform::JobHandle;
+use super::platform::{harden_suspended_worker, JobHandle};
 use super::protocol::{
     ActorRequest, UnlockProgress, DEFAULT_IPC_TIMEOUT, DROP_ACTOR_JOIN_TIMEOUT, READY_CHECK_TIMEOUT,
 };
 use super::stderr::StderrRing;
+use crate::infrastructure::ipc_secure::{IpcSecureChannel, ENV_SESSION_KEY};
+
+/// 路径授权签发超时：本地进程内往返，超时即视为失败关闭。
+const PATH_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 // Windows CloseHandle 用于 Drop 中显式关闭 Job Object 句柄
 #[cfg(target_os = "windows")]
@@ -124,33 +128,57 @@ impl WorkerSession {
             )
         })?;
 
+        // 先校验产物归属：Release 下 worker 与 DLL 必须位于安装目录内，
+        // 避免解析逻辑被替换后启动目录外二进制。
+        verify_install_paths(worker_exe, dll_path)?;
+
+        // 会话密钥：仅通过子进程环境变量传递，避免进程列表泄露；
+        // worker 入口读取后立即删除该变量。
+        let ipc_channel = IpcSecureChannel::new()?;
+        let key_hex = ipc_channel.master_key_hex();
+
         // 构建 tokio::process::Command
         let mut cmd = Command::new(worker_exe);
-        cmd.arg(dll_path)
+        cmd.env(ENV_SESSION_KEY, key_hex.as_str())
+            .arg(dll_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             // 安全兜底：Actor 任务异常终止时子进程不会成为孤儿
             .kill_on_drop(true);
 
-        // Windows: 不创建控制台窗口 + 后台任务降级
+        // Windows: 挂起创建 + 不创建控制台窗口 + 后台任务降级
+        // CREATE_SUSPENDED (0x00000004)：
+        //   子进程在加载任何用户态代码前保持挂起，宿主在此期间施加
+        //   Job Object 资源上限与受限 DACL，再恢复主线程，消除
+        //   「先运行后加固」的竞态窗口。
         // BELOW_NORMAL_PRIORITY_CLASS (0x00004000)：
         //   worker 进程承载后台 Merkle 重建 / 全量扫描 / 完整性巡检等长尾任务，
         //   优先级低于 UI 主进程（NORMAL），保证前端 IPC 始终优先获得 CPU 调度。
-        //   消除解锁后前 10 秒「后台任务抢占 CPU 导致界面卡顿」问题。
-        //   效果：消除后台任务抢占 CPU 导致的解锁后界面卡顿。
         #[cfg(target_os = "windows")]
         {
             // tokio::process::Command 在 Windows 上有固有的 creation_flags 方法
+            const CREATE_SUSPENDED: u32 = 0x00000004;
             const CREATE_NO_WINDOW: u32 = 0x08000000;
             const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
-            cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+            cmd.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
         }
 
         // 同步 spawn（tokio::process::Command::spawn 是同步方法，注册 I/O 驱动）
         let mut child = cmd.spawn().map_err(|e| format!("spawn worker: {}", e))?;
 
         let pid = child.id().ok_or_else(|| "无法获取子进程 PID".to_string())?;
+
+        // 加固失败即终止子进程：不允许以无 Job/DACL 保护的形态继续运行。
+        #[cfg(target_os = "windows")]
+        let hardened_job = match harden_suspended_worker(pid) {
+            Ok(job) => job,
+            Err(e) => {
+                let _ = child.start_kill();
+                return Err(format!("worker 进程加固失败: {}", e));
+            }
+        };
+
         let stdin = child.stdin.take().ok_or_else(|| "no stdin".to_string())?;
         let stdout = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
         let stderr = child.stderr.take().ok_or_else(|| "no stderr".to_string())?;
@@ -180,6 +208,7 @@ impl WorkerSession {
             pid,
             child_alive.clone(),
             stderr_ring,
+            Arc::new(ipc_channel),
         ));
 
         Ok(WorkerSession {
@@ -191,7 +220,7 @@ impl WorkerSession {
                 started_at: Instant::now(),
                 child_alive,
                 #[cfg(target_os = "windows")]
-                job_handle: StdMutex::new(assign_child_to_job_object(pid)),
+                job_handle: StdMutex::new(Some(hardened_job)),
             }),
         })
     }
@@ -216,6 +245,37 @@ impl WorkerSession {
     /// 发送 JSON 请求并等待 JSON 响应（默认 15 秒超时）
     pub fn send_json(&self, json: &str) -> Result<String, String> {
         self.send_json_with_timeout(json, DEFAULT_IPC_TIMEOUT)
+    }
+
+    /// 签发一次性路径授权。
+    ///
+    /// `target_op` 限定消费该授权的操作，`mode` 限定读写方向；
+    /// worker 只接受与规范化路径完全匹配且未过期的授权。
+    pub fn authorize_path(
+        &self,
+        target_op: &str,
+        mode: &str,
+        path: &str,
+    ) -> Result<(), String> {
+        let request = serde_json::json!({
+            "op": "authorize_path",
+            "path": path,
+            "mode": mode,
+            "target_op": target_op,
+        })
+        .to_string();
+        let response = self.send_json_with_timeout(&request, PATH_AUTH_TIMEOUT)?;
+        let value: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| format!("路径授权响应解析失败: {}", e))?;
+        if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+            Ok(())
+        } else {
+            Err(value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("路径授权失败")
+                .to_string())
+        }
     }
 
     /// 发送 JSON 请求并等待 JSON 响应（自定义超时）

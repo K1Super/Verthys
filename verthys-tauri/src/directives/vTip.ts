@@ -21,10 +21,13 @@ function ensureTipEl(): HTMLDivElement {
   tipEl.id = TIP_ID;
   tipEl.className = "cosmic-tip";
   tipEl.setAttribute(TIP_ATTR, "");
-  tipEl.innerHTML =
-    '<span class="ct-glow"></span>' +
-    '<span class="ct-text"></span>' +
-    '<span class="ct-line"></span>';
+  const glow = document.createElement("span");
+  glow.className = "ct-glow";
+  const text = document.createElement("span");
+  text.className = "ct-text";
+  const line = document.createElement("span");
+  line.className = "ct-line";
+  tipEl.replaceChildren(glow, text, line);
   tipEl.style.position = "fixed";
   tipEl.style.zIndex = "100000";
   tipEl.style.pointerEvents = "none";

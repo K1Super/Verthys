@@ -16,11 +16,12 @@ use crate::runtime::ffi_types::{
     VERTHYS_OK, VERTHYS_PERSIST_OK, VERTHYS_SCAN_PROJECT_FULL, VERTHYS_SCAN_PROJECT_INDEX,
 };
 use crate::runtime::budget::PB_ENUM_RESPONSE_DATA_BUDGET_BYTES;
+use crate::runtime::path_grants;
 use crate::runtime::gmk::{
     handle_derive_global_key, handle_derive_and_store_global_key, handle_verify_global_key,
     handle_derive_module_subkey, handle_clear_global_key,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /* 全量枚举遍历上界：与 C 层温缓存单段条目上限同值（100_000），
  * 全量模式以该值兜底终止，防无限枚举。 */
@@ -96,13 +97,17 @@ pub(crate) fn probe_global_key_inproc(
     }
     diag!("[worker] probe_global_key: 命中全局密钥记录 lid={}", lid);
     match worker.call_get_record(lid) {
-        Ok((_rtype, _name, data)) => {
+        Ok((_rtype, mut name, mut data)) => {
             let b64 = base64_encode(&data);
             diag!(
                 "[worker] probe_global_key: 读取记录成功 ({} bytes → b64 {})",
                 data.len(),
                 b64.len()
             );
+            /* 记录名与原始明文在派生 base64 后立即清零，避免调用栈
+             * 与分配器继续持有全局主密钥记录内容。 */
+            name.zeroize();
+            data.zeroize();
             (Some(true), Some(lid), Some(b64))
         }
         Err(e) => {
@@ -167,7 +172,7 @@ where
             break;
         }
         match fetch(id) {
-            Ok((rtype, name, data)) => {
+            Ok((rtype, mut name, mut data)) => {
                 null_streak = 0;
                 last_id = id;
                 // base64 长度按 4*ceil(n/3) 精确推导，避免仅为预算判定
@@ -180,6 +185,8 @@ where
                     // 游标保持在上一条，保证续批不丢记录
                     last_id = id.saturating_sub(1);
                     budget_stopped = true;
+                    name.zeroize();
+                    data.zeroize();
                     break;
                 }
                 if b64_len > ENUM_RESPONSE_DATA_BUDGET_BYTES {
@@ -199,6 +206,7 @@ where
                         name,
                         data: String::new(),
                     });
+                    data.zeroize();
                     continue;
                 }
                 accumulated_b64_bytes = accumulated_b64_bytes.saturating_add(b64_len);
@@ -208,6 +216,7 @@ where
                     name,
                     data: base64_encode(&data),
                 });
+                data.zeroize();
             }
             Err(_) => {
                 null_streak += 1;
@@ -249,11 +258,38 @@ fn parse_shm_auth_key(op: &str, shm_key: &str) -> Result<Option<Zeroizing<Vec<u8
     }
 }
 
+/// 消费路径型操作所需的一次性授权；缺失时返回受控拒绝响应。
+///
+/// 授权由宿主在用户选择路径后签发，与操作、模式、规范化路径三元组绑定。
+fn require_path_grant(op: &str, mode: &str, path: &str) -> Option<Response> {
+    if path_grants::consume(op, mode, path) {
+        return None;
+    }
+    Some(Response {
+        ok: false,
+        op: op.into(),
+        error: Some("路径未授权或授权已过期".into()),
+        ..Response::ok(op)
+    })
+}
+
 pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
     diag!("[worker] 处理请求: op={}", req.op);
     match req.op.as_str() {
         "ping" => Response::ok("ping"),
+        "authorize_path" => match path_grants::authorize(&req.target_op, &req.mode, &req.path) {
+            Ok(()) => Response::ok("authorize_path"),
+            Err(e) => Response {
+                ok: false,
+                op: "authorize_path".into(),
+                error: Some(e),
+                ..Response::ok("authorize_path")
+            },
+        },
         "unlock" => {
+            if let Some(denied) = require_path_grant("unlock", "read", &req.path) {
+                return denied;
+            }
             /* 透传 flags（预热状态位域）给 C 层 Verthys_Unlock */
             /* VERTHYS_ERR_PARTIAL_UNLOCK 表示容器已进入
              * 最小可操作状态（超级块验证 + 密钥导入 + 分区表加载完成，索引
@@ -309,6 +345,9 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
         }
         "create_with_preset" => {
+            if let Some(denied) = require_path_grant("create_with_preset", "write", &req.path) {
+                return denied;
+            }
             // 路径为前端可控字符串：日志只记字节长度与 preset，
             // 不回显原始内容（防内嵌 NUL/控制符日志注入）
             diag!("[worker] call_create_with_preset: path_bytes={} preset={}", req.path.len(), req.preset);
@@ -433,7 +472,17 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
         }
         "add_record" => {
-            let data = match base64_decode(&req.data) {
+            /* 解码前先按 base64 字符数拦截，避免超大载荷先分配再拒绝。
+             * 12MiB 与 host 请求构造侧使用同一预算常量。 */
+            if req.data.len() > crate::runtime::budget::PB_IPC_MAX_PAYLOAD_BYTES as usize {
+                return Response {
+                    ok: false,
+                    op: "add_record".into(),
+                    error: Some("record payload exceeds ipc budget".into()),
+                    ..Response::ok("add_record")
+                };
+            }
+            let mut data = match base64_decode(&req.data) {
                 Ok(d) => d,
                 Err(_) => {
                     return Response {
@@ -444,7 +493,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                     }
                 }
             };
-            match worker.call_add_record(req.rtype, &req.name, &data) {
+            let result = match worker.call_add_record(req.rtype, &req.name, &data) {
                 Ok(id) => Response {
                     ok: true,
                     op: "add_record".into(),
@@ -452,10 +501,12 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                     ..Response::ok("add_record")
                 },
                 Err(code) => Response::err("add_record", code),
-            }
+            };
+            data.zeroize();
+            result
         }
         "get_record" => match worker.call_get_record(req.id) {
-            Ok((rtype, name, data)) => {
+            Ok((rtype, mut name, mut data)) => {
                 // 协议安全护栏：单条返回同样受响应预算约束。写入侧 12MiB
                 // 上限保证新数据恒可返回；历史存量超限记录改为明确错误，
                 // 绝不生成超长响应行（超行即协议断开，是全链路级联故障源）
@@ -466,22 +517,27 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                         req.id,
                         b64_len
                     );
+                    let data_len = data.len();
+                    name.zeroize();
+                    data.zeroize();
                     return Response {
                         ok: false,
                         op: "get_record".into(),
                         error: Some(format!(
                             "record_too_large: 记录数据 {} 字节超出单条返回上限",
-                            data.len()
+                            data_len
                         )),
                         ..Response::ok("get_record")
                     };
                 }
+                let encoded = base64_encode(&data);
+                data.zeroize();
                 Response {
                     ok: true,
                     op: "get_record".into(),
                     rtype: Some(rtype),
                     name: Some(name),
-                    data: Some(base64_encode(&data)),
+                    data: Some(encoded),
                     ..Response::ok("get_record")
                 }
             }
@@ -702,6 +758,9 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
         }
         "export" => {
+            if let Some(denied) = require_path_grant("export", "write", &req.path) {
+                return denied;
+            }
             let r = worker.call_export(&req.path, &req.password);
             if r == VERTHYS_OK {
                 Response::ok("export")
@@ -710,6 +769,9 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
         }
         "import" => {
+            if let Some(denied) = require_path_grant("import", "read", &req.path) {
+                return denied;
+            }
             let r = worker.call_import(&req.path, &req.password);
             if r == VERTHYS_OK {
                 Response::ok("import")

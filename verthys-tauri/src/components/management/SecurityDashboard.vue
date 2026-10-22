@@ -2,15 +2,15 @@
   SecurityDashboard.vue — 安全防护 · 双星系统分区（无底板）
   设计：引力谱系 · sf-zone--binary —— 谱系坐标头（BINARY SYSTEM / 03）+
   面板五组件全部重塑（零卡片底板/边框/阴影，直接悬浮于宇宙背景）：
-    1. bs-field   双星引力场：开销星（扫掠弧=CPU 占用）↔ 质心（综合评分+齿轮）
+    1. bs-field   双星引力场：开销星（扫掠弧=CPU 占用）↔ 质心（综合评分）
                   ↔ 覆盖星（扫掠弧=安全覆盖），氛围弧差速旋转
     2. bs-track   引力测线：非均匀测绘残段刻度（暗层休眠/潮汐亮层连续
                   点亮=能量进程）+ 基准桩锚点（错落桩高，端点锚兼作
                   左高右低终点桩）+ 游标天平（速度感应摆锤，欠阻尼弹簧）
-    3. bs-spectra 特性谱线：折叠面板内每特性一条光谱线（亮谱=启用），
-                  grid 行高过渡无重排
+    3. cus-board  自定义防护：常驻分区（标题行 + 双列错位端子排 +
+                  空闲锁定时长拖拽谱线），与安全防护/动态防护同构
     4. cap-board  安全防护栏：双列错位端子排清单（圆点状态位 +
-                  功能名称 + 【核心】标签 + 虚线引出线）
+                  功能名称 + 核心标签 + 虚线引出线）
     5. def-board  动态防护：七攻击路径端子排诊断（四态语义色
                   圆点 + 状态标签 + 虚线引出线）+ 总体态势行
     6. flow-rail  数据流转轨道：磁盘→内存电路走线（横段 + 斜向抬升
@@ -18,21 +18,22 @@
                   轨道下方运行状态行随模式切换语义与流速
 
   职责：
-    1. 双星引力场（左星 CPU 占用 + 质心综合评分 + 右星 安全覆盖 + 齿轮入口）
+    1. 双星引力场（左星 CPU 占用 + 质心综合评分 + 右星 安全覆盖）
     2. 引力测线滑块（三基准桩磁性吸附 + 潮汐亮层 + 游标天平）
-    3. 特性谱线自定义面板（toggleableFeatures + 恢复默认/保存并应用）
-    4. 安全防护栏（lockedFeatures 清单：圆点 + 名称 + 【核心】）
+    3. 自定义防护（toggleableFeatures 开关端子排 + 空闲锁定时长拖拽虚线 +
+       toast 反馈 + 恢复默认/保存应用）
+    4. 安全防护栏（lockedFeatures 清单：圆点 + 名称 + 核心）
     5. 动态防护状态（defensePaths：7 攻击路径 × 4 态 + defenseMeta 态势）
     6. 数据流转轨道（磁盘→内存走线 + 站点 + 运行状态文字）
 
-  Props: globalKeyReady / securityPresetCode / presetApplying / presetAmbienceMode /
+  Props: globalKeyReady / presetApplying / presetAmbienceMode /
          cpuOverhead / securityCoverage / overallScore / ringCircumference /
          ringDashOffset(fn) / orbitAnchors / nearestAnchorIdx / activeAnchorIdx /
          orbitTrackGradient / toggleableFeatures / lockedFeatures / customFeatures /
-         customPanelOpen / defensePaths / defenseMeta
+         customSessionMinutes / defensePaths / defenseMeta
   Model: orbitSliderPos
-  Emits: toggleGearPanel / toggleCustomFeature(key) / resetCustom / applyCustom /
-         orbitSliderInput / orbitSliderRelease / snapToAnchor(idx)
+  Emits: toggleCustomFeature / resetCustom / applyCustom /
+         setCustomSessionMinutes / orbitSliderInput / orbitSliderRelease / snapToAnchor(idx)
 
   拖拽性能架构：
     - 连续浮点 pointer 驱动：抛弃 range 整数步进，pointermove 按测线
@@ -51,7 +52,7 @@
       <span class="sf-ghost" aria-hidden="true">03</span>
       <span class="sf-coord">Binary System</span>
       <h2 class="sf-title">安全防护</h2>
-      <p class="sf-digest" :class="{ 'is-warn': digestWarn }">{{ digestText }}</p>
+      <p v-if="digestWarn" class="sf-digest is-warn">{{ digestText }}</p>
     </header>
 
     <div class="security-dashboard" :class="{ 'is-dragging': dragging }">
@@ -95,27 +96,13 @@
           </div>
         </div>
 
-        <!-- 质心：综合评分 + 齿轮入口 -->
+        <!-- 质心：综合评分 -->
         <div class="bs-barycenter">
           <span class="bs-bc-filament" aria-hidden="true"></span>
           <div class="bs-bc-node">
             <span class="bs-bc-value">{{ overallScore }}<span class="bs-bc-unit">%</span></span>
             <span class="bs-bc-label">综合</span>
           </div>
-          <button
-            class="bs-gear"
-            :class="{ active: securityPresetCode === 3, open: customPanelOpen }"
-            :disabled="!globalKeyReady"
-            :aria-label="customPanelOpen ? '收起自定义防护模板' : '展开自定义防护模板'"
-            :aria-expanded="customPanelOpen"
-            @click="$emit('toggleGearPanel')"
-            v-tip="'自定义防护模板'"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="bs-gear-icon">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-          </button>
         </div>
 
         <!-- 右星：安全覆盖 -->
@@ -230,38 +217,92 @@
         />
       </div>
 
-      <!-- ===== 3. 特性谱线（自定义模板折叠层，grid 行高过渡无重排） ===== -->
-      <div class="bs-spectra" :class="{ open: customPanelOpen }">
-        <div class="bs-spectra-panel">
-          <div class="bs-spectra-head">
-            <span class="bs-spectra-title">自定义模板</span>
-            <span class="bs-spectra-hint">点击谱线切换状态 · 亮谱=启用 · 暗谱=禁用</span>
-          </div>
-          <div class="bs-spectra-grid">
+      <!-- ===== 3. 自定义防护（常驻分区：端子排开关 + 空闲锁定时长谱线）
+           与安全防护 / 动态防护同构：标题行 + 双列错位端子排 + 虚线引出线；
+           无底色 / 无边框 / 无浮层 / 无淡入淡出 — 直接悬浮于背景 ===== -->
+      <div class="cus-board">
+        <div class="cus-head">
+          <span class="cap-glyph" aria-hidden="true"></span>
+          <span class="cus-title">自定义防护</span>
+          <div class="cus-actions">
             <button
-              v-for="feat in toggleableFeatures"
-              :key="feat.key"
-              class="bs-spectral"
-              :class="{ on: customFeatures[feat.key], off: !customFeatures[feat.key] }"
+              class="sf-terminal"
+              :disabled="!globalKeyReady || presetApplying"
+              @click="$emit('resetCustom')"
+            >恢复默认</button>
+            <button
+              class="sf-terminal"
+              :disabled="!globalKeyReady || presetApplying"
+              @click="$emit('applyCustom')"
+            >
+              {{ presetApplying ? '应用中…' : '保存应用' }}
+            </button>
+          </div>
+          <span class="cus-count">{{ customEnabledCount }}/{{ toggleableFeatures.length }}</span>
+        </div>
+        <ul class="cus-ledger">
+          <li
+            v-for="(feat, i) in toggleableFeatures"
+            :key="feat.key"
+            class="cus-item"
+            :class="[
+              `cus-item-${i}`,
+              {
+                off: !customFeatures[feat.key],
+                'cus-item--idle': feat.key === 'session_lock_on_idle',
+              },
+            ]"
+          >
+            <!-- 空闲锁定行：启用/关闭后的虚线即拖动区
+                 底轨为默认灰色虚线（与其余四行一致）；启用时叠加彩色
+                 进度层（长度=当前时长），仅启用时可拖动；时长经 toast 反馈 -->
+            <template v-if="feat.key === 'session_lock_on_idle'">
+              <button
+                class="cus-toggle"
+                :disabled="!globalKeyReady || presetApplying"
+                :aria-pressed="!!customFeatures[feat.key]"
+                v-tip="feat.desc"
+                @click="$emit('toggleCustomFeature', feat.key)"
+              >
+                <span class="cus-dot" aria-hidden="true"></span>
+                <span class="cus-name">{{ feat.label }}</span>
+                <span class="cus-tag">{{ customFeatures[feat.key] ? '启用' : '关闭' }}</span>
+              </button>
+              <div
+                :ref="bindTimeoutTrack"
+                class="cus-idle-track"
+                :class="{ enabled: customFeatures[feat.key] }"
+                role="slider"
+                :tabindex="customFeatures[feat.key] ? 0 : -1"
+                :aria-disabled="!customFeatures[feat.key]"
+                :aria-label="'空闲锁定时长（分钟）'"
+                :aria-valuemin="CUSTOM_SESSION_MINUTES_MIN"
+                :aria-valuemax="CUSTOM_SESSION_MINUTES_MAX"
+                @pointerdown="onTimeoutPointerDown"
+                @pointermove="onTimeoutPointerMove"
+                @pointerup="onTimeoutPointerUp"
+                @pointercancel="onTimeoutPointerUp"
+                @keydown="onTimeoutKeydown"
+              >
+                <span class="cus-idle-rail" aria-hidden="true"></span>
+                <span :ref="bindTimeoutLit" class="cus-idle-lit" aria-hidden="true"></span>
+              </div>
+            </template>
+            <button
+              v-else
+              class="cus-toggle"
+              :disabled="!globalKeyReady || presetApplying"
+              :aria-pressed="!!customFeatures[feat.key]"
               v-tip="feat.desc"
               @click="$emit('toggleCustomFeature', feat.key)"
             >
-              <span class="bs-spec-line" aria-hidden="true"></span>
-              <span class="bs-spec-label">{{ feat.label }}</span>
-              <span class="bs-spec-state">{{ customFeatures[feat.key] ? 'ON' : 'OFF' }}</span>
+              <span class="cus-dot" aria-hidden="true"></span>
+              <span class="cus-name">{{ feat.label }}</span>
+              <span class="cus-tag">{{ customFeatures[feat.key] ? '启用' : '关闭' }}</span>
+              <span class="cus-lead" aria-hidden="true"></span>
             </button>
-          </div>
-          <div class="bs-spectra-actions">
-            <button class="sf-terminal" @click="$emit('resetCustom')">恢复默认</button>
-            <button
-              class="sf-terminal"
-              :disabled="presetApplying || !globalKeyReady"
-              @click="$emit('applyCustom')"
-            >
-              {{ presetApplying ? '应用中…' : '保存并应用' }}
-            </button>
-          </div>
-        </div>
+          </li>
+        </ul>
       </div>
 
       <!-- ===== 4. 安全防护栏（核心防护清单 · 双列错位端子排）
@@ -283,7 +324,7 @@
           >
             <span class="cap-dot" aria-hidden="true"></span>
             <span class="cap-name">{{ feat.label }}</span>
-            <span class="cap-tag">【核心】</span>
+            <span class="cap-tag">核心</span>
             <span class="cap-lead" aria-hidden="true"></span>
           </li>
         </ul>
@@ -292,7 +333,7 @@
       <!-- ===== 5. 动态防护（7 攻击路径实时阻断状态 · 端子排诊断） ===== -->
       <div class="def-board">
         <div class="def-head">
-          <span class="def-glyph" aria-hidden="true"></span>
+          <span class="cap-glyph" aria-hidden="true"></span>
           <span class="def-title">动态防护</span>
           <span class="def-count" :class="`def-count--${defenseMeta.stance}`">
             {{ defenseMeta.blocked }}/{{ defensePaths.length }}
@@ -312,8 +353,12 @@
             <span class="def-lead" aria-hidden="true"></span>
           </li>
         </ul>
-        <!-- 总体态势行（失败 > 降级 > 全阻断 / 待检测） -->
-        <div class="def-stance" :class="`def-stance--${defenseMeta.stance}`">
+        <!-- 总体态势行（全阻断时隐藏；仅异常/未阻断/陈旧时显示） -->
+        <div
+          v-if="defenseMeta.stance !== 'ok' || defenseMeta.stale"
+          class="def-stance"
+          :class="`def-stance--${defenseMeta.stance}`"
+        >
           <span class="def-stance-mark" aria-hidden="true"></span>
           <span class="def-stance-text">{{ defenseMeta.stanceLabel }}</span>
           <span class="def-stance-detail">
@@ -375,15 +420,18 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { DefensePathView, DefenseMetaView } from "../../composables/security-center/useDefenseStatus";
 import { masterFrameLoop } from "../../core/master-frame-loop";
+import { useToastCenter } from "../../composables/useToastCenter";
+import {
+  CUSTOM_SESSION_MINUTES_MIN,
+  CUSTOM_SESSION_MINUTES_MAX,
+} from "../../constants/key_manager_const";
 
 /**
  * SecurityDashboard Props
  */
 const props = defineProps<{
-  /** 全局密钥就绪状态（控制齿轮按钮 + 滑块 + 应用按钮 disabled） */
+  /** 全局密钥就绪状态（控制滑块与应用按钮 disabled） */
   globalKeyReady: boolean;
-  /** 安全预设代码（securityPresetRef，0=平衡/1=安全/2=性能/3=自定义） */
-  securityPresetCode: number;
   /** 预设应用中状态 */
   presetApplying: boolean;
   /** 预设环境光效模式 */
@@ -414,8 +462,8 @@ const props = defineProps<{
   presetFeatures: Record<string, boolean>;
   /** 自定义特性配置（谱线开关状态） */
   customFeatures: Record<string, boolean>;
-  /** 自定义面板展开状态 */
-  customPanelOpen: boolean;
+  /** 自定义档空闲锁定时长（分钟，仅自定义档生效） */
+  customSessionMinutes: number;
   /** 动态防护路径状态列表（7 攻击路径 × 4 态端子排） */
   defensePaths: DefensePathView[];
   /** 动态防护汇总态势（计数 + 全阻断标志 + 总体态势行） */
@@ -426,14 +474,14 @@ const props = defineProps<{
   hardeningFailed: boolean;
 }>();
 
-/** 谱系摘要：优先如实披露降级/未同步状态（安全关键信息不得被常规文案淹没） */
+/** 降级 / 未同步警示：仅异常时出现（常规摘要文案已移除） */
 const digestWarn = computed(() =>
   props.presetSyncFailed || props.hardeningFailed,
 );
 const digestText = computed(() => {
   if (props.presetSyncFailed) return "档位同步失败 · 当前显示可能与后端不一致";
   if (props.hardeningFailed) return "会话硬化未完全生效 · 剪贴板监听或系统锁屏守卫可能不可用";
-  return "性能 ↔ 安全 权衡 · 拖拽松手吸附 · 即时切换档位";
+  return "";
 });
 
 /** 轨道键盘可达语义值（读屏播报当前锚点档位而非裸数字） */
@@ -453,14 +501,14 @@ const orbitSliderPos = defineModel<number>("orbitSliderPos", { default: 50 });
  * SecurityDashboard Emits
  */
 const emit = defineEmits<{
-  /** 切换齿轮（自定义）面板展开状态 */
-  (e: "toggleGearPanel"): void;
   /** 切换单个自定义特性 */
   (e: "toggleCustomFeature", key: string): void;
   /** 恢复自定义默认 */
   (e: "resetCustom"): void;
-  /** 保存并应用自定义配置 */
+  /** 保存应用自定义配置 */
   (e: "applyCustom"): void;
+  /** 设置自定义档空闲锁定时长（分钟） */
+  (e: "setCustomSessionMinutes", minutes: number): void;
   /** 轨道滑块输入中 */
   (e: "orbitSliderInput"): void;
   /** 轨道滑块释放（磁性吸附触发） */
@@ -468,6 +516,176 @@ const emit = defineEmits<{
   /** 吸附到指定锚点 */
   (e: "snapToAnchor", idx: number): void;
 }>();
+
+/** 统一状态通道（拖动时长反馈） */
+const { showStatus } = useToastCenter();
+
+/* ============================================================
+   自定义防护：开关计数 + 空闲锁定拖拽虚线
+   空闲锁定行「启用/关闭」之后的虚线即为拖动区：底轨保持默认灰色虚线，
+   启用时叠加彩色进度层（长度=当前时长，无游标），线性映射 1~120 分钟；
+   时长通过统一 toast 反馈，关闭态不显示进度层且不可拖动。
+   ============================================================ */
+
+/** 当前启用特性数（标题行计数） */
+const customEnabledCount = computed(
+  () => props.toggleableFeatures.filter((f) => props.customFeatures[f.key]).length,
+);
+
+/** 时长轨道与彩色进度层（函数式 ref：元素位于 v-for 内，模板 ref 会被收集成数组） */
+let timeoutTrackEl: HTMLElement | null = null;
+let timeoutLitEl: HTMLElement | null = null;
+const bindTimeoutTrack = (el: unknown) => {
+  timeoutTrackEl = el instanceof HTMLElement ? el : null;
+};
+const bindTimeoutLit = (el: unknown) => {
+  timeoutLitEl = el instanceof HTMLElement ? el : null;
+};
+
+/** 拖拽中标志与当前读数（非响应式：拖拽不触发组件重渲染） */
+let timeoutDragging = false;
+let dragMinutes = props.customSessionMinutes;
+/** 按下时缓存的轨道几何（拖拽期零布局读取） */
+let trackLeft = 0;
+let trackWidth = 1;
+/** 最近一次 toast 时间戳（拖动期节流，避免提示轰炸） */
+let lastToastAt = 0;
+
+/** 分钟 → 进度百分比（线性） */
+const minutesToPercent = (minutes: number): number => {
+  const clamped = Math.min(
+    CUSTOM_SESSION_MINUTES_MAX,
+    Math.max(CUSTOM_SESSION_MINUTES_MIN, minutes),
+  );
+  return (
+    ((clamped - CUSTOM_SESSION_MINUTES_MIN) /
+      (CUSTOM_SESSION_MINUTES_MAX - CUSTOM_SESSION_MINUTES_MIN)) *
+    100
+  );
+};
+
+/** 把进度写入彩色虚线长度与读屏属性
+ *  DOM 直写而非模板绑定：组件其余状态（CPU 采样等）重渲染时不得覆盖
+ *  拖拽中的进度值，与引力测线的写入架构保持一致。 */
+const applyTimeoutVisual = (minutes: number) => {
+  if (timeoutLitEl) {
+    timeoutLitEl.style.width = `${minutesToPercent(minutes).toFixed(3)}%`;
+  }
+  if (timeoutTrackEl) {
+    timeoutTrackEl.setAttribute("aria-valuenow", String(minutes));
+    timeoutTrackEl.setAttribute("aria-valuetext", `${minutes} 分钟`);
+  }
+};
+
+/* 挂载播种 + 父层草稿变化同步（拖拽期以拖拽读数为准，不被覆盖） */
+onMounted(() => applyTimeoutVisual(props.customSessionMinutes));
+watch(
+  () => props.customSessionMinutes,
+  (minutes) => {
+    if (!timeoutDragging) applyTimeoutVisual(minutes);
+  },
+);
+
+/** 分钟收敛到允许区间 */
+const clampIdleMinutes = (minutes: number): number =>
+  Math.min(
+    CUSTOM_SESSION_MINUTES_MAX,
+    Math.max(CUSTOM_SESSION_MINUTES_MIN, Math.round(minutes)),
+  );
+
+/** 通过统一状态通道反馈当前时长（拖动期节流，释放时强制刷新） */
+const announceIdleMinutes = (minutes: number, force = false) => {
+  const now = performance.now();
+  if (!force && now - lastToastAt < 120) return;
+  lastToastAt = now;
+  showStatus(`空闲锁定 ${minutes} 分钟`, 1600);
+};
+
+/** 指针横坐标 → 分钟（按下时缓存的轨道左缘与宽度，线性映射） */
+const minutesFromPointer = (clientX: number): number => {
+  const ratio = Math.min(1, Math.max(0, (clientX - trackLeft) / trackWidth));
+  return Math.round(
+    CUSTOM_SESSION_MINUTES_MIN +
+      ratio * (CUSTOM_SESSION_MINUTES_MAX - CUSTOM_SESSION_MINUTES_MIN),
+  );
+};
+
+const onTimeoutPointerDown = (e: PointerEvent) => {
+  if (!props.globalKeyReady || props.presetApplying) return;
+  // 关闭态只展示默认虚线，不接受拖动
+  if (!props.customFeatures.session_lock_on_idle) return;
+  if (e.button !== undefined && e.button !== 0) return;
+  const el = timeoutTrackEl;
+  if (!el) return;
+  el.setPointerCapture(e.pointerId);
+  timeoutDragging = true;
+  const rect = el.getBoundingClientRect();
+  trackLeft = rect.left;
+  trackWidth = rect.width || 1;
+  dragMinutes = minutesFromPointer(e.clientX);
+  applyTimeoutVisual(dragMinutes);
+  announceIdleMinutes(dragMinutes, true);
+};
+
+const onTimeoutPointerMove = (e: PointerEvent) => {
+  if (!timeoutDragging) return;
+  const next = minutesFromPointer(e.clientX);
+  if (next === dragMinutes) return;
+  dragMinutes = next;
+  applyTimeoutVisual(dragMinutes);
+  announceIdleMinutes(next);
+};
+
+const onTimeoutPointerUp = (e: PointerEvent) => {
+  if (!timeoutDragging) return;
+  timeoutDragging = false;
+  // 取消事件不携带有效坐标：提交最后一次拖拽读数
+  if (e.type === "pointerup") {
+    const next = minutesFromPointer(e.clientX);
+    if (next !== dragMinutes) {
+      dragMinutes = next;
+      applyTimeoutVisual(next);
+    }
+  }
+  emit("setCustomSessionMinutes", dragMinutes);
+  announceIdleMinutes(dragMinutes, true);
+};
+
+/** 键盘调节：方向键 ±1 分钟，Shift ±10，PageUp/PageDown ±10，Home/End 直达端点 */
+const onTimeoutKeydown = (e: KeyboardEvent) => {
+  if (!props.globalKeyReady || props.presetApplying) return;
+  if (!props.customFeatures.session_lock_on_idle) return;
+  let next = props.customSessionMinutes;
+  switch (e.key) {
+    case "ArrowLeft":
+    case "ArrowDown":
+      next -= e.shiftKey ? 10 : 1;
+      break;
+    case "ArrowRight":
+    case "ArrowUp":
+      next += e.shiftKey ? 10 : 1;
+      break;
+    case "PageDown":
+      next -= 10;
+      break;
+    case "PageUp":
+      next += 10;
+      break;
+    case "Home":
+      next = CUSTOM_SESSION_MINUTES_MIN;
+      break;
+    case "End":
+      next = CUSTOM_SESSION_MINUTES_MAX;
+      break;
+    default:
+      return;
+  }
+  e.preventDefault();
+  const clamped = clampIdleMinutes(next);
+  applyTimeoutVisual(clamped);
+  emit("setCustomSessionMinutes", clamped);
+  announceIdleMinutes(clamped, true);
+};
 
 /* ============================================================
    安全防护栏真实状态（后端权威配置快照驱动）

@@ -157,6 +157,14 @@
   gap: 12px;
   min-width: 0;
 }
+/* 端子动作区：更新与锁定并置，保持右侧收束
+   组内间距与自定义防护动作区保持同一值 */
+.sf-meridian-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: none;
+}
 /* 状态脉动点：青绿呼吸（就绪）/ 琥珀静止（未就绪） */
 .sf-pulse {
   position: relative;
@@ -215,13 +223,17 @@
   position: relative;
   transition: color 0.32s var(--ease);
 }
-/* 端子记号：前导能量短线，hover 亮起延伸 */
+/* 端子记号：前导能量短线
+ * 固定 22px 占位 + 变换拉伸（常态 14px 视觉长度）：悬浮只改变线的
+ * 拉伸比例，不改变按钮盒宽 —— 相邻端子绝不会被挤压或位移 */
 .sf-terminal::before {
   content: "";
-  width: 14px;
+  width: 22px;
   height: 1px;
   background: rgba(148, 160, 178, 0.4);
-  transition: width 0.32s var(--ease), background 0.32s var(--ease);
+  transform: scaleX(0.636);
+  transform-origin: right center;
+  transition: transform 0.32s var(--ease), background 0.32s var(--ease);
 }
 /* 底部能量丝：hover 从左点亮 */
 .sf-terminal::after {
@@ -240,7 +252,7 @@
   color: var(--accent);
 }
 .sf-terminal:hover:not(:disabled)::before {
-  width: 22px;
+  transform: scaleX(1);
   background: rgba(0, 212, 255, 0.8);
 }
 .sf-terminal:hover:not(:disabled)::after {
@@ -263,6 +275,14 @@
 }
 .sf-terminal--warn:hover:not(:disabled) { color: #ffb056; }
 .sf-terminal--warn:hover:not(:disabled)::before { background: rgba(255, 170, 0, 0.9); }
+/* 更新端子（检查/安装）：青色系，与危险域琥珀区分；无发光无阴影 */
+.sf-terminal--update { color: rgba(0, 212, 255, 0.82); }
+.sf-terminal--update::before { background: rgba(0, 212, 255, 0.48); }
+.sf-terminal--update::after {
+  background: linear-gradient(90deg, rgba(0, 212, 255, 0.78), rgba(0, 255, 170, 0.42));
+}
+.sf-terminal--update:hover:not(:disabled) { color: #6ce7ff; }
+.sf-terminal--update:hover:not(:disabled)::before { background: rgba(0, 212, 255, 0.92); }
 
 /* 端子纵列（GlobalKey 动作区）：带描述微文 */
 .sf-terminal-col {

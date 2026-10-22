@@ -429,6 +429,8 @@ mod tests {
         Request {
             op: op.to_string(),
             path: String::new(),
+            mode: String::new(),
+            target_op: String::new(),
             password: Zeroizing::new(password.to_string()),
             id: 0,
             rtype: 0,

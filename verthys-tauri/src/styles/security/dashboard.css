@@ -2,9 +2,9 @@
    dashboard.css — 安全防护 · 双星系统（引力谱系 · 无底板）
    包含：
      - .security-dashboard 容器 + 环境氛围层（performance/balanced/secure）
-     - .bs-field       双星引力场（扫掠弧星体 + 质心 + 齿轮入口）
+     - .bs-field       双星引力场（扫掠弧星体 + 质心节点）
      - .bs-track       预设谱轨（裸能量丝线 + 菱形锚点 + 渡越体）
-     - .bs-spectra     特性谱线折叠面板（grid 行高过渡，无重排卡顿）
+     - .cus-board      自定义防护（常驻分区：端子排开关 + 时长拖拽虚线）
      - .cap-board      安全防护栏（核心防护清单 · 双列错位端子排）
      - .def-board      动态防护端子排诊断（WP-11 · 7 攻击路径 × 四态语义色）
      - .flow-rail      数据流转轨道（磁盘→内存 · 电路走线 + 数据包流 + 运行状态）
@@ -169,7 +169,7 @@
   color: var(--text-muted);
 }
 
-/* 质心：垂直丝线 + 菱形界标 + 综合评分 + 齿轮入口 */
+/* 质心：垂直丝线 + 菱形界标 + 综合评分 */
 .bs-barycenter {
   position: relative;
   display: flex;
@@ -226,40 +226,6 @@
   text-transform: uppercase;
   color: var(--text-muted);
 }
-/* 齿轮入口（透明圆环节点，open 态旋转 90°） */
-.bs-gear {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 50%;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition:
-    color 0.35s var(--ease),
-    border-color 0.35s var(--ease),
-    transform 0.35s var(--ease);
-}
-.bs-gear-icon { width: 14px; height: 14px; }
-.bs-gear:hover:not(:disabled) {
-  color: var(--accent);
-  border-color: rgba(0, 212, 255, 0.35);
-}
-.bs-gear.active { color: #b794f6; }
-.bs-gear.open {
-  transform: rotate(90deg);
-  color: #b794f6;
-  border-color: rgba(183, 148, 246, 0.35);
-}
-.bs-gear:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
 /* ============================================================
    2. 引力测线 — 非均匀测绘残段 + 游标天平（零阴影零光晕）
    视觉语言：大地测量残迹（非滑轨非胶囊）——
@@ -431,119 +397,205 @@
 }
 
 /* ============================================================
-   3. 特性谱线 — 自定义模板折叠面板（grid 行高过渡，无重排卡顿）
+   3. 自定义防护 — 常驻分区（与安全防护 / 动态防护同构）
+   标题行 + 双列错位端子排（圆点状态位 + 名称 + 状态标签 + 虚线引出线）；
+   无底色 / 无边框 / 无浮层 / 无动画 —— 直接悬浮于背景。
+   空闲锁定时长由谱线长度承载：拖动即改时长，左端最短、右端最长。
    ============================================================ */
-.bs-spectra {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 0.45s var(--ease);
-}
-.bs-spectra.open { grid-template-rows: 1fr; }
-.bs-spectra-panel {
-  overflow: hidden;
-  min-height: 0;
+.cus-board {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding-top: 0;
-  opacity: 0;
-  transform: translateY(-10px);
-  transition:
-    opacity 0.35s var(--ease),
-    transform 0.45s var(--ease),
-    padding 0.45s var(--ease);
+  gap: 13px;
+  padding: 2px 4px;
 }
-.bs-spectra.open .bs-spectra-panel {
-  opacity: 1;
-  transform: translateY(0);
-  padding-top: 4px;
-}
-.bs-spectra-head {
+.cus-head {
   display: flex;
-  align-items: baseline;
-  gap: 14px;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 11px;
 }
-.bs-spectra-title {
-  font-family: var(--font-mono);
+.cus-title {
   font-size: 11px;
-  letter-spacing: 0.28em;
-  text-transform: uppercase;
-  color: #b794f6;
+  letter-spacing: 0.3em;
+  color: var(--text-secondary);
 }
-.bs-spectra-title::before {
-  content: "";
-  display: inline-block;
-  width: 16px;
-  height: 1px;
-  margin-right: 10px;
-  vertical-align: middle;
-  background: rgba(183, 148, 246, 0.6);
-}
-.bs-spectra-hint {
-  font-size: 10px;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
-}
-.bs-spectra-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 2px 30px;
-}
-/* 单条特性谱线：标签 ——— 光谱线 ——— ON/OFF */
-.bs-spectral {
+/* 头部动作端子：位于计数之前，与计数一同靠右
+   组内间距与顶栏动作区（检查更新 / 立即锁定）保持同一值 */
+.cus-actions {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 10px 4px;
+  margin-left: auto;
+}
+/* 头部端子收紧纵向内边距，保持标题行高度与其余分区一致 */
+.cus-actions .sf-terminal {
+  padding: 4px 2px;
+}
+.cus-count {
+  margin-left: 14px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: rgba(183, 148, 246, 0.85);
+}
+/* 双列错位清单：前 3 项左列，后 3 项右列下沉（与核心防护同族排布） */
+.cus-ledger {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(3, auto);
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 46px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.cus-item {
+  min-width: 0;
+}
+.cus-item:nth-child(n + 4) {
+  transform: translateY(13px);
+}
+/* 整行即开关：无盒体、无底色，仅命中区与排印 */
+.cus-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 0;
   background: none;
   border: none;
-  cursor: pointer;
   font-family: inherit;
   text-align: left;
+  cursor: pointer;
 }
-.bs-spec-label {
+.cus-toggle:disabled {
+  cursor: not-allowed;
+}
+.cus-toggle:disabled .cus-name {
+  opacity: 0.5;
+}
+.cus-dot {
   flex: none;
-  font-size: 12px;
-  letter-spacing: 0.1em;
-  color: var(--text-secondary);
-  transition: color 0.3s var(--ease);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--dashboard-accent, var(--accent));
 }
-.bs-spec-line {
+.cus-name {
+  flex: none;
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  /* 启用态名称与「启用」标签同色，状态由颜色直接表达 */
+  color: rgba(0, 212, 255, 0.85);
+}
+.cus-tag {
+  flex: none;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: rgba(0, 212, 255, 0.85);
+}
+/* 虚线引出线：与安全防护 / 动态防护同一步长与尾部刻度 */
+.cus-lead {
   flex: 1;
-  height: 2px;
-  border-radius: 1px;
-  background: rgba(148, 160, 178, 0.16);
-  transition: background 0.4s var(--ease);
+  min-width: 12px;
+  height: 1px;
+  position: relative;
+  background: repeating-linear-gradient(90deg,
+    rgba(148, 160, 178, 0.26) 0 3px,
+    transparent 3px 9px);
 }
-.bs-spec-state {
-  flex: none;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.2em;
+.cus-lead::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: -2px;
+  width: 1px;
+  height: 5px;
+  background: rgba(148, 160, 178, 0.3);
+}
+.cus-item:nth-child(even) .cus-lead {
+  opacity: 0.65;
+}
+/* 关闭态：空心灰点 + 名称/标签降色（如实反映草稿状态） */
+.cus-item.off .cus-dot {
+  background: transparent;
+  border: 1px solid rgba(148, 160, 178, 0.5);
+}
+.cus-item.off .cus-name {
+  color: rgba(148, 160, 178, 0.62);
+}
+.cus-item.off .cus-tag {
   color: rgba(148, 160, 178, 0.55);
-  transition: color 0.3s var(--ease);
 }
-/* 亮谱 = 启用（青→紫能量谱线） */
-.bs-spectral.on .bs-spec-line {
-  background: linear-gradient(90deg,
-    rgba(0, 255, 200, 0.55),
-    rgba(0, 212, 255, 0.8),
-    rgba(139, 92, 246, 0.55));
-}
-.bs-spectral.on .bs-spec-label { color: var(--text-primary); }
-.bs-spectral.on .bs-spec-state { color: rgba(0, 212, 255, 0.9); }
-.bs-spectral:hover .bs-spec-label { color: var(--accent); }
-.bs-spectra-actions {
+
+/* 空闲锁定行：启用/关闭之后的虚线即拖动区
+   外观与其余四行完全一致（默认灰色虚线），仅启用时可拖 */
+.cus-item--idle {
   display: flex;
-  justify-content: flex-end;
-  gap: 24px;
-  padding-top: 4px;
+  align-items: center;
+  gap: 9px;
+}
+.cus-item--idle .cus-toggle {
+  width: auto;
+  flex: none;
+}
+.cus-idle-track {
+  position: relative;
+  flex: 1;
+  min-width: 64px;
+  height: 18px;
+  outline: none;
+  cursor: default;
+}
+.cus-idle-track.enabled {
+  cursor: ew-resize;
+  touch-action: none;
+}
+/* 虚线复用引出线样式，仅叠加定位；颜色与步长保持不变 */
+.cus-idle-rail,
+.cus-idle-lit {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+}
+/* 底轨：与其余四行完全一致的默认灰色虚线（含尾部刻度） */
+.cus-idle-rail {
+  right: 0;
+  background: repeating-linear-gradient(90deg,
+    rgba(148, 160, 178, 0.26) 0 3px,
+    transparent 3px 9px);
+}
+.cus-idle-rail::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: -2px;
+  width: 1px;
+  height: 5px;
+  background: rgba(148, 160, 178, 0.3);
+}
+/* 进度层：彩色虚线，长度即当前时长（无游标） */
+.cus-idle-lit {
+  width: 0;
+  background: repeating-linear-gradient(90deg,
+    rgba(0, 212, 255, 0.95) 0 3px,
+    transparent 3px 9px);
+}
+/* 关闭态：不显示进度层，视觉与其余四行一致 */
+.cus-item--idle.off .cus-idle-lit {
+  display: none;
+}
+.cus-idle-track:focus-visible {
+  outline: 1px solid rgba(0, 212, 255, 0.4);
+  outline-offset: 2px;
 }
 
 /* ============================================================
    4. 安全防护栏 — 核心防护清单（双列错位端子排 · 零阴影零光晕）
-   视觉语言：接线端子排清单 —— 圆点状态位 + 功能名 + 【核心】标签 +
+   视觉语言：接线端子排清单 —— 圆点状态位 + 功能名 + 核心标签 +
    虚线引出线；双列错位排布（第二列整体下沉，非均匀布局）；
    圆点静态实心（状态以颜色区分，无呼吸动画）
    ============================================================ */
@@ -616,7 +668,7 @@
   letter-spacing: 0.12em;
   color: var(--text-secondary);
 }
-/* 【核心】标签：全角括号直接排版（非描边胶囊） */
+/* 核心标签：纯文字排版（非描边胶囊） */
 .cap-tag {
   flex: none;
   font-size: 10px;
@@ -681,14 +733,6 @@
   display: flex;
   align-items: baseline;
   gap: 11px;
-}
-/* 空心圆环徽记（闭环语义，区别于 cap 菱形） */
-.def-glyph {
-  width: 7px;
-  height: 7px;
-  border: 1px solid rgba(0, 212, 255, 0.7);
-  border-radius: 50%;
-  align-self: center;
 }
 .def-title {
   font-size: 11px;

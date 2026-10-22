@@ -5,5 +5,14 @@
 #
 # 格式说明：使用 --cfg=fast_arithmetic="64"（TOML 单引号字面量，保留双引号），
 #   Rust cfg 系统将 "64" 解析为字符串，与 #[cfg(fast_arithmetic = "64")] 匹配。
+# 安全加固：worker 是持有明文与密钥的进程，发布二进制同样启用
+# 控制流保护与高熵 ASLR；路径重映射避免产物泄露本机目录结构。
 [target.'cfg(target_arch = "x86_64")']
-rustflags = ['--cfg=fast_arithmetic="64"']
+rustflags = [
+    '--cfg=fast_arithmetic="64"',
+    '-Ccontrol-flow-guard=yes',
+    '-Clink-arg=/guard:cf',
+    '-Clink-arg=/highentropyva',
+    '--remap-path-prefix=C:\Users\Administrator\Desktop\Verthys=/build/verthys',
+    '--remap-path-prefix=C:\Users\Administrator=/build/home',
+]

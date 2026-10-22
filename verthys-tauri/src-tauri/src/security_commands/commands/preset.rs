@@ -19,6 +19,7 @@ use crate::security_commands::audit::write_security_audit;
 use crate::security_commands::auth::require_session_authorized;
 use crate::security_commands::preset_persistence::{
     delete_preset_persist, read_preset_persist, write_preset_persist, PresetPersist,
+    CUSTOM_SESSION_MINUTES_DEFAULT, CUSTOM_SESSION_MINUTES_MAX, CUSTOM_SESSION_MINUTES_MIN,
 };
 use crate::security_commands::responses::{PresetConfig, PresetFeatures};
 use crate::security_commands::state::SecurityState;
@@ -276,7 +277,7 @@ pub struct PresetLoadStateResponse {
 /// 读取受信持久化的预设状态（启动恢复链权威来源）
 ///
 /// 纯读命令，无会话授权：前端在解锁前即可读取恢复；
-/// 文件内不含敏感材料（仅预设代号 + 特性开关布尔集）。
+/// 文件内不含敏感材料（仅预设代号 + 特性开关布尔集 + 空闲锁定时长）。
 /// 响应携带持久化不一致标记：回滚失败后该标记为真，前端据此提示。
 #[tauri::command]
 pub fn security_load_preset_state(
@@ -298,7 +299,7 @@ pub fn security_load_preset_state(
 /// 链路：会话授权检查 → code 合法域校验 → 原子落盘（受信文件，
 /// 失败即中止）→ 0/1/2 档经 worker switch_preset op → C 层双缓冲
 /// 原子切档（失败补偿回滚落盘至旧档）→ 返回新档真实配置。
-/// CUSTOM(3) 无 C 层档位定义，仅落盘自定义特性并返回其配置。
+/// CUSTOM(3) 无 C 层档位定义，仅落盘自定义特性与空闲锁定时长。
 /// 幂等：切到当前档返回成功。错误码：PERMISSION_DENIED /
 /// E_INVALID_PRESET / E_PERSIST / E_WORKER_COMM / E_WORKER_ERROR。
 #[tauri::command]
@@ -308,6 +309,7 @@ pub async fn security_apply_preset(
     app_state: State<'_, AppState>,
     code: u32,
     features: Option<PresetFeatures>,
+    custom_session_timeout_minutes: Option<u32>,
 ) -> Result<PresetConfig, String> {
     // 授权检查：变更运行时防护配置需已解锁的会话
     if let Err(msg) = require_session_authorized(&app_state) {
@@ -339,6 +341,20 @@ pub async fn security_apply_preset(
         None
     };
 
+    // 自定义档空闲锁定时长：缺省取默认值，越界拒绝（磁盘与运行时恒一致）
+    let custom_session_timeout_minutes = if code == 3 {
+        let minutes = custom_session_timeout_minutes.unwrap_or(CUSTOM_SESSION_MINUTES_DEFAULT);
+        if !(CUSTOM_SESSION_MINUTES_MIN..=CUSTOM_SESSION_MINUTES_MAX).contains(&minutes) {
+            return Err(format!(
+                "E_INVALID_PRESET: 空闲锁定时长必须在 {}~{} 分钟之间（收到 {}）",
+                CUSTOM_SESSION_MINUTES_MIN, CUSTOM_SESSION_MINUTES_MAX, minutes
+            ));
+        }
+        Some(minutes)
+    } else {
+        None
+    };
+
     // 旧档（审计 + 失败补偿回滚目标）；旧受信文件副本用于回滚原样恢复
     let prev = match state.last_applied_preset.lock() {
         Ok(g) => *g,
@@ -350,6 +366,7 @@ pub async fn security_apply_preset(
     let persist = PresetPersist {
         code,
         custom_features: custom_features.clone(),
+        custom_session_timeout_minutes,
     };
     if let Err(e) = write_preset_persist(&app, &persist) {
         let detail = format!("E_PERSIST: 预设配置落盘失败: {}", e);

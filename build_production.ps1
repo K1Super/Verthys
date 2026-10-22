@@ -499,7 +499,29 @@ if (-not $SkipTauri) {
     }
     Write-OK "Rust 编译检查通过"
 
-    # 4.3 Tauri 打包（NSIS 安装包）
+    # 4.3 更新签名密钥注入（createUpdaterArtifacts 必需）
+    #   私钥与密码文件位于用户配置目录，不进入仓库与安装包；
+    #   已显式设置环境变量时以环境变量为准（CI 场景）。
+    if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+        $defaultKeyPath = Join-Path $env:USERPROFILE ".tauri\verthys-updater.key"
+        if (-not (Test-Path $defaultKeyPath)) {
+            Write-Fail "缺少更新私钥: $defaultKeyPath"
+            throw "更新签名私钥缺失，无法生成更新产物"
+        }
+        # 打包器读取 TAURI_SIGNING_PRIVATE_KEY；注入私钥文本，避免依赖路径解析差异
+        $env:TAURI_SIGNING_PRIVATE_KEY = ([System.IO.File]::ReadAllText($defaultKeyPath)).Trim()
+    }
+    if (-not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+        $defaultPassPath = Join-Path $env:USERPROFILE ".tauri\verthys-updater.pass"
+        if (-not (Test-Path $defaultPassPath)) {
+            Write-Fail "缺少更新私钥密码文件: $defaultPassPath"
+            throw "更新签名私钥密码缺失，无法生成更新产物"
+        }
+        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ([System.IO.File]::ReadAllText($defaultPassPath)).Trim()
+    }
+    Write-OK "更新签名密钥已注入"
+
+    # 4.4 Tauri 打包（NSIS 安装包 + 更新签名）
     Write-Step "npm run tauri build"
     Push-Location $VerthysTauriDir
     try {
@@ -531,6 +553,32 @@ if (-not $SkipTauri) {
 } else {
     Write-Stage "阶段 4/4: 跳过 Tauri 打包（-SkipTauri）"
 }
+
+# ========== 阶段 4.5: 发布符号清理与 SBOM ==========
+Write-Stage "阶段 4.5: 发布符号清理与 SBOM"
+
+# 发布目录 PDB 不进入安装包，但残留会被离线审计视为调试符号泄露。
+foreach ($pdbDir in @((Join-Path $SrcTauriDir "target\release"), (Join-Path $WorkerDir "target\release"))) {
+    if (Test-Path $pdbDir) {
+        Get-ChildItem -Path $pdbDir -Filter *.pdb -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+}
+Write-OK "发布目录 PDB 已清理"
+
+$nodeCmd = Get-Command node.exe -ErrorAction SilentlyContinue
+if (-not $nodeCmd) {
+    throw "未找到 node.exe，无法生成 SBOM"
+}
+$sbomScript = Join-Path $ScriptsDir "generate_sbom.mjs"
+if (-not (Test-Path $sbomScript)) {
+    throw "SBOM 生成脚本缺失: $sbomScript"
+}
+& $nodeCmd.Source $sbomScript $ScriptRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "SBOM 生成失败 (exit=$LASTEXITCODE)"
+}
+Write-OK "SBOM 已生成: build\sbom.cdx.json"
 
 # ========== 阶段 5: 产物校验 ==========
 Write-Stage "构建完成 — 产物校验"

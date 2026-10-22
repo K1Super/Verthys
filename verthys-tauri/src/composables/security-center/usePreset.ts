@@ -4,7 +4,7 @@
  * 职责：
  *   1. 预设特性列表定义（presetFeatureList，与 Rust PresetFeatures 字段对齐）
  *   2. 预设应用状态（presetApplying / currentPresetFeatures）
- *   3. 自定义模板配置（customPanelOpen / customFeatures）
+ *   3. 自定义模板配置（customFeatures / customSessionMinutes）
  *   4. 无极轨道滑块状态（orbitSliderPos / orbitAnchors / activeAnchorIdx / orbitDragging）
  *   5. 双环三指标计算（cpuOverhead 后端采样 / securityCoverage 与
  *      overallScore 真实信号双权重合成，纯函数层 presetMetrics）
@@ -12,8 +12,8 @@
  *   7. 核心函数：
  *      - onOrbitSliderInput / onOrbitSliderRelease：滑块拖拽 + 磁性吸附
  *      - snapToAnchor：点击锚点直接吸附并切换
- *      - onToggleGearPanel：齿轮按钮打开/关闭自定义面板
- *      - onToggleCustomFeature / onResetCustom / onApplyCustom：自定义特性管理
+ *      - onToggleCustomFeature / onResetCustom / onSetCustomSessionMinutes /
+ *        onApplyCustom：自定义特性与空闲锁定时长管理
  *      - onApplyPreset：应用三档预设（调用 keyManager.applySecurityPreset）
  *      - loadPresetConfig：加载预设配置（onMounted / 全局密钥就绪后调用）
  *
@@ -39,7 +39,10 @@ import {
   saveSecurityPreset,
   isLockedFeature,
   globalKeyReadyRef,
+  customSessionMinutesRef,
 } from '../../lib/keyManager';
+import { normalizeCustomSessionMinutes } from '../../state/key_state';
+import { CUSTOM_SESSION_MINUTES_DEFAULT } from '../../constants/key_manager_const';
 import {
   securityGetPresetConfig,
   securityLoadPresetState,
@@ -77,14 +80,14 @@ export interface UsePresetOptions {
  * ```ts
  * const {
  *   presetFeatureList, presetApplying, currentPresetFeatures,
- *   customPanelOpen, customFeatures,
+ *   customFeatures, customSessionMinutes,
  *   orbitSliderPos, orbitAnchors, nearestAnchorIdx, activeAnchorIdx, orbitDragging,
  *   cpuOverhead, securityCoverage, overallScore,
  *   presetAmbienceMode,
  *   ringCircumference, ringDashOffset, orbitTrackGradient,
  *   toggleableFeatures, lockedFeatures,
  *   onOrbitSliderInput, onOrbitSliderRelease, snapToAnchor,
- *   onToggleGearPanel, onToggleCustomFeature, onResetCustom, onApplyCustom,
+ *   onToggleCustomFeature, onResetCustom, onSetCustomSessionMinutes, onApplyCustom,
  *   onApplyPreset, loadPresetConfig,
  * } = usePreset({ showError, showToast, resetSession });
  * ```
@@ -100,7 +103,7 @@ export function usePreset(options: UsePresetOptions) {
     { key: "emergency_response", label: "紧急熔断", desc: "异常事件立即熔断销毁" },
     { key: "session_lock_on_idle", label: "空闲锁定", desc: "会话空闲超时自动锁定" },
     { key: "module_patrol", label: "模块巡检", desc: "定期扫描已加载模块签名" },
-    { key: "clip_clear_on_lock", label: "剪贴板防护", desc: "锁定清空恒开 · 开启后监听并清除外部写入" },
+    { key: "clip_clear_on_lock", label: "清除剪贴", desc: "锁定清空恒开 · 开启后监听并清除外部写入" },
     { key: "usb_clone_detect", label: "克隆检测", desc: "序列号哈希比对拒绝克隆外设" },
     { key: "trace_cleanup", label: "痕迹清理", desc: "退出时清理系统最近记录" },
   ];
@@ -114,10 +117,10 @@ export function usePreset(options: UsePresetOptions) {
   const currentPresetFeatures = ref<Record<string, boolean>>({});
 
   /* ===== 自定义模板配置 ===== */
-  /** 自定义面板展开状态 */
-  const customPanelOpen = ref(false);
   /** 自定义特性配置（localStorage 持久化） */
   const customFeatures = ref<PresetFeatures>(loadCustomFeatures());
+  /** 自定义档空闲锁定时长（分钟；后端受信预设文件为权威，落盘由会话层统一执行） */
+  const customSessionMinutes = customSessionMinutesRef;
 
   /* ===== 无极轨道滑块 — 性能↔安全权衡 ===== */
   /** 三个磁性吸附锚点（视觉从左到右；code 为后端档位代号） */
@@ -275,15 +278,6 @@ const orbitTrackGradient = computed(() => ({
       void onApplyPreset(anchor.code).then((ok) => { if (!ok) syncOrbitFromPresetRef(); });
     }
   };
-  /** 齿轮按钮 — 仅打开/关闭自定义面板
-   *
-   * 旧实现在打开面板时立即 applySecurityPreset(3)：用户只是「查看」模板，
-   * 档位却被静默切为自定义（含后端落盘与会话硬化重配）—— 属越权副作用。
-   * 现仅展开面板；切档必须经「保存并应用」显式确认。 */
-  const onToggleGearPanel = () => {
-    customPanelOpen.value = !customPanelOpen.value;
-  };
-
   /* ===== 自定义特性管理 ===== */
   /** 切换自定义特性开关 */
   const onToggleCustomFeature = (key: string) => {
@@ -301,10 +295,16 @@ const orbitTrackGradient = computed(() => ({
     presetFeatureList.forEach(f => {
       (customFeatures.value as any)[f.key] = true;
     });
+    customSessionMinutes.value = CUSTOM_SESSION_MINUTES_DEFAULT;
     options.showToast("已恢复默认配置");
   };
 
-  /** 保存并应用自定义模板 */
+  /** 设置自定义档空闲锁定时长（草稿：仅在「保存应用」时落盘并生效） */
+  const onSetCustomSessionMinutes = (minutes: number) => {
+    customSessionMinutes.value = normalizeCustomSessionMinutes(minutes);
+  };
+
+  /** 保存应用自定义模板 */
   const onApplyCustom = async () => {
     if (presetApplying.value || !globalKeyReadyRef.value) return;
     presetApplying.value = true;
@@ -315,7 +315,7 @@ const orbitTrackGradient = computed(() => ({
       // 单点落盘（本函数不预写），失败路径缓存与前端状态保持一致
       // 8s 超时兜底：预设应用链路阻塞时不得无限 pending 卡死按钮
       const config = await withTimeout(
-        applySecurityPreset(3, undefined, customFeatures.value),
+        applySecurityPreset(3, undefined, customFeatures.value, customSessionMinutes.value),
         8000,
         "应用自定义模板",
       );
@@ -377,6 +377,12 @@ const orbitTrackGradient = computed(() => ({
       if (code === 3 && state.customFeatures) {
         saveCustomFeatures(state.customFeatures);
       }
+      if (code === 3 && state.customSessionTimeoutMinutes != null) {
+        // 后端权威值同步到前端草稿，避免回读后显示与磁盘不一致
+        customSessionMinutes.value = normalizeCustomSessionMinutes(
+          state.customSessionTimeoutMinutes,
+        );
+      }
       securityPresetRef.value = code;
       saveSecurityPreset(code);
       const loaded = await loadPresetConfig();
@@ -422,8 +428,6 @@ const orbitTrackGradient = computed(() => ({
       // 成功后轨道位置与后端权威档位收敛同位（自定义档落中位、清锚点高亮）
       syncOrbitFromPresetRef();
       options.showToast(`已切换至 ${modeNames[code] ?? code} 模式`);
-      // 自定义档自动展开自定义面板
-      if (code === 3) customPanelOpen.value = true;
       return true;
     } catch (e) {
       console.error("[onApplyPreset] 切换预设失败", e);
@@ -490,8 +494,8 @@ const orbitTrackGradient = computed(() => ({
     presetSyncFailed,
     currentPresetFeatures,
     // 自定义模板配置
-    customPanelOpen,
     customFeatures,
+    customSessionMinutes,
     // 无极轨道滑块状态
     orbitSliderPos,
     orbitAnchors,
@@ -515,9 +519,9 @@ const orbitTrackGradient = computed(() => ({
     onOrbitSliderInput,
     onOrbitSliderRelease,
     snapToAnchor,
-    onToggleGearPanel,
     onToggleCustomFeature,
     onResetCustom,
+    onSetCustomSessionMinutes,
     onApplyCustom,
     onApplyPreset,
     loadPresetConfig,

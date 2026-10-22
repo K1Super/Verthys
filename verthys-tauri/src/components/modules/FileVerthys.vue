@@ -60,7 +60,7 @@
       >
         <div class="card-accent"></div>
         <div class="card-head">
-          <span class="file-icon-wrap" v-html="getFileIcon(f.mime)"></span>
+          <SafeSvgIcon class="file-icon-wrap" :source="getFileIcon(f.mime)" />
           <span class="platform" v-tip="f.name">{{ f.name }}</span>
           <span v-if="f.encrypted" class="lock-badge" v-tip="'独立加密'">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
@@ -105,7 +105,7 @@
       >
         <div class="card-accent"></div>
         <div class="card-head">
-          <span class="file-icon-wrap" v-html="getFileIcon(f.mime)"></span>
+          <SafeSvgIcon class="file-icon-wrap" :source="getFileIcon(f.mime)" />
           <span class="platform" v-tip="f.name">{{ f.name }}</span>
           <span v-if="f.encrypted" class="lock-badge" v-tip="'独立加密'">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
@@ -176,7 +176,7 @@
 
         <div class="reg-body">
           <div class="import-file-info">
-            <span class="file-icon-lg" v-html="getFileIcon(pendingMime)"></span>
+            <SafeSvgIcon class="file-icon-lg" :source="getFileIcon(pendingMime)" />
             <div class="file-meta">
               <div class="file-name">{{ pendingName }}</div>
               <template v-if="pendingFiles.length === 1">
@@ -327,6 +327,7 @@ import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ImportProgressOverlay from "../common/cosmic/ImportProgressOverlay.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
+import SafeSvgIcon from "../common/SafeSvgIcon.vue";
 import { useCardShine } from "../../composables/useCardShine";
 import {
   verthysGetRecord, verthysForgetHashes,

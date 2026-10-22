@@ -54,7 +54,7 @@
  */
 
 mod constants;
-mod security;
+pub mod security;
 mod security_commands;
 mod state;
 mod worker;
@@ -317,9 +317,9 @@ fn run_main_ui(
 ) {
     // 构建 Tauri 应用
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .manage(security_commands::SecurityState::new())
         /* ===== 关闭响应优化：窗口级事件处理器 =====
@@ -466,7 +466,6 @@ fn run_main_ui(
             verthys_import_checkpoint,
             verthys_wal_recover,
             verthys_forget_hashes,
-            dev_reset_wal,
             verthys_gc_orphan_chunks,
             verthys_scan_open,
             verthys_scan_next,

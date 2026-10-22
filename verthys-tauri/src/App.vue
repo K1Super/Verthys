@@ -50,6 +50,7 @@ const MainView = defineAsyncComponent(() => import("./components/MainView.vue"))
 import { useAppTransition } from "./composables/useAppTransition";
 import { useSecurityGuard } from "./composables/useSecurityGuard";
 import { useGlobalIdleScheduler } from "./composables/useGlobalIdleScheduler";
+import { useAppUpdater } from "./composables/useAppUpdater";
 import { masterFrameLoop } from "./core/master-frame-loop";
 import { frameBudgetMonitor } from "./core/frame-budget";
 
@@ -71,10 +72,18 @@ const { level } = useGlobalIdleScheduler();
 const idleLevel = computed(() => level.value);
 
 let onMotionChange: ((e: MediaQueryListEvent) => void) | null = null;
+let updateCheckTimer: number | null = null;
+const { checkForUpdate } = useAppUpdater();
+
 onMounted(() => {
   const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
   onMotionChange = (e: MediaQueryListEvent) => { prefersReducedMotion.value = e.matches; };
   mq.addEventListener("change", onMotionChange);
+
+  /* 启动后静默检查更新：不阻塞首屏、不弹窗；结果由管理界面顶部端子展示。 */
+  updateCheckTimer = window.setTimeout(() => {
+    void checkForUpdate(true);
+  }, 10_000);
 
   /* MainView chunk 空闲预取（双缓冲预挂载前置条件）：
    * MainView 为懒加载 chunk，PREWARM_MOUNT（1100ms）预挂载时才触发
@@ -98,6 +107,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   masterFrameLoop.stop();
   frameBudgetMonitor.stop();
+  if (updateCheckTimer !== null) {
+    window.clearTimeout(updateCheckTimer);
+    updateCheckTimer = null;
+  }
   if (onMotionChange) {
     window.matchMedia("(prefers-reduced-motion: reduce)").removeEventListener("change", onMotionChange);
     onMotionChange = null;

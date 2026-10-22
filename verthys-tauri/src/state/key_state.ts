@@ -11,6 +11,10 @@ import {
   MODULE_IDS,
   DEFAULT_CUSTOM_FEATURES,
   CUSTOM_FEATURES_KEY,
+  CUSTOM_SESSION_MINUTES_KEY,
+  CUSTOM_SESSION_MINUTES_DEFAULT,
+  CUSTOM_SESSION_MINUTES_MIN,
+  CUSTOM_SESSION_MINUTES_MAX,
   SECURITY_PRESET_KEY,
   LOCKED_FEATURES,
 } from "../constants/key_manager_const";
@@ -80,6 +84,8 @@ export interface KeyState {
   securityPreset: Ref<SecurityPresetCode>;
   /** 会话空闲锁定开关（false = 不自动锁定；自定义档可关闭此项） */
   sessionLockEnabled: Ref<boolean>;
+  /** 自定义档空闲锁定时长（分钟，仅自定义档生效；后端受信预设文件为权威） */
+  customSessionMinutes: Ref<number>;
   /** 初始化状态 */
   initStatus: Ref<string>;
   /** 状态文件中记录的加密库路径 */
@@ -121,6 +127,7 @@ export const keyState: KeyState = {
   moduleKeyStatusFailed: ref(false),
   securityPreset: ref<SecurityPresetCode>(loadSecurityPreset()),
   sessionLockEnabled: ref(true),
+  customSessionMinutes: ref(loadCustomSessionMinutes()),
   initStatus: ref("none"),
   storedVerthysPath: ref(""),
   lastInitError: ref(""),
@@ -234,4 +241,40 @@ export function saveCustomFeatures(features: PresetFeatures): void {
 /** 判断某项特性是否为 C 层锁定项（不可关闭） */
 export function isLockedFeature(key: string): boolean {
   return LOCKED_FEATURES.has(key);
+}
+
+/* ------------------------------------------------------------------ *
+ * 自定义档空闲锁定时长（分钟）                                        *
+ * ------------------------------------------------------------------ */
+
+/** 归一化自定义空闲锁定时长：非有限数取默认值，超界收敛到边界整数 */
+export function normalizeCustomSessionMinutes(minutes: number): number {
+  if (!Number.isFinite(minutes)) return CUSTOM_SESSION_MINUTES_DEFAULT;
+  return Math.max(
+    CUSTOM_SESSION_MINUTES_MIN,
+    Math.min(CUSTOM_SESSION_MINUTES_MAX, Math.round(minutes)),
+  );
+}
+
+/** 读取本地缓存的自定义空闲锁定时长（非法值回退默认值） */
+export function loadCustomSessionMinutes(): number {
+  try {
+    const raw = localStorage.getItem(CUSTOM_SESSION_MINUTES_KEY);
+    if (raw == null) return CUSTOM_SESSION_MINUTES_DEFAULT;
+    return normalizeCustomSessionMinutes(Number(raw));
+  } catch {
+    return CUSTOM_SESSION_MINUTES_DEFAULT;
+  }
+}
+
+/** 保存自定义空闲锁定时长到本地缓存（仅在应用成功后调用） */
+export function saveCustomSessionMinutes(minutes: number): void {
+  try {
+    localStorage.setItem(
+      CUSTOM_SESSION_MINUTES_KEY,
+      String(normalizeCustomSessionMinutes(minutes)),
+    );
+  } catch (e) {
+    console.warn("[saveCustomSessionMinutes] 保存失败", e);
+  }
 }

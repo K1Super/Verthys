@@ -75,16 +75,59 @@ static void verthys_ctx_registry_add(struct VerthysContext *ctx)
     ReleaseSRWLockExclusive(&s_ctx_registry_lock);
 }
 
-static void verthys_ctx_registry_remove(struct VerthysContext *ctx)
+static int verthys_ctx_registry_remove(struct VerthysContext *ctx)
 {
-    if (!s_ctx_registry_lock_init) return;
+    int removed = 0;
+    if (!s_ctx_registry_lock_init) return 0;
     AcquireSRWLockExclusive(&s_ctx_registry_lock);
     for (int i = 0; i < VERTHYS_MAX_CTXS; i++) {
         if (s_ctx_registry[i] == ctx) {
             s_ctx_registry[i] = NULL;
+            removed = 1;
         }
     }
     ReleaseSRWLockExclusive(&s_ctx_registry_lock);
+    return removed;
+}
+
+/* 句柄是否仍处于活动注册表。
+ *
+ * 公共 API 在解引用调用方传入的 handle 前必须先经本函数确认，
+ * 防止已释放指针被二次传入时形成 Use-After-Free。 */
+static int verthys_ctx_registry_contains(struct VerthysContext *ctx)
+{
+    int found = 0;
+    if (!s_ctx_registry_lock_init) return 0;
+    AcquireSRWLockShared(&s_ctx_registry_lock);
+    for (int i = 0; i < VERTHYS_MAX_CTXS; i++) {
+        if (s_ctx_registry[i] == ctx) {
+            found = 1;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&s_ctx_registry_lock);
+    return found;
+}
+
+/* 注册表是否仍有空位。
+ *
+ * 在 Init 分配任何资源之前检查，避免注册失败后留下无法注销的上下文。 */
+static int verthys_ctx_registry_has_capacity(void)
+{
+    int has = 0;
+    if (!s_ctx_registry_lock_init) {
+        InitializeSRWLock(&s_ctx_registry_lock);
+        s_ctx_registry_lock_init = 1;
+    }
+    AcquireSRWLockShared(&s_ctx_registry_lock);
+    for (int i = 0; i < VERTHYS_MAX_CTXS; i++) {
+        if (s_ctx_registry[i] == NULL) {
+            has = 1;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&s_ctx_registry_lock);
+    return has;
 }
 
 /*
@@ -165,6 +208,8 @@ static void verthys_emergency_lock_all(void)
 VerthysResult Verthys_Init(VerthysHandle *out_handle)
 {
     if (out_handle == NULL) return VERTHYS_ERR_INVALID;
+    /* 先确认注册表有空位，避免分配完成后无法登记而泄漏上下文 */
+    if (!verthys_ctx_registry_has_capacity()) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     /* 阻塞 4 修复：AVX2 软性检测 — 设置全局标志，不拒绝启动
      * libsodium 内部自动选择最优指令集路径，无需项目层硬性要求 */
@@ -323,8 +368,11 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
     if (handle == NULL) return VERTHYS_ERR_INVALID;
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
 
-    /* 先从活动句柄注册表注销（应急处理器不再寻址本句柄） */
-    verthys_ctx_registry_remove(ctx);
+    /* 先原子注销：只有成功移除的调用方才拥有释放权。
+     *
+     * 重复 Deinit 的入参已不在注册表，禁止继续解引用或释放；
+     * 否则会形成双重释放/堆破坏。 */
+    if (!verthys_ctx_registry_remove(ctx)) return VERTHYS_ERR_INVALID;
     /* 停止防转储低频巡逻 */
     memory_guard_patrol_stop();
 
@@ -1183,6 +1231,9 @@ VerthysResult Verthys_AddRecord(VerthysHandle handle,
      * 拒绝。
      */
     if (record->data_len > VERTHYS_RECORD_DATA_MAX_BYTES) return VERTHYS_ERR_INVALID;
+    /* IPC 单条预算：12MiB base64 的 4/3 解码上界为 9MiB；
+     * 超出该值的单条写入无法在 host-worker 协议内往返，入口拒绝。 */
+    if (record->data_len > (9u * 1024u * 1024u)) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
@@ -1249,6 +1300,27 @@ VerthysResult Verthys_GetRecord(VerthysHandle handle,
 #endif
         return rc3;
     }
+}
+
+/* 6.1 显式释放 GetRecord 借用缓存
+ *
+ * 借用指针契约要求调用方在使用完返回记录后主动释放缓存；worker 在把
+ * 记录复制到自有缓冲并完成 base64 后调用本接口，避免 C 层明文跨请求驻留。 */
+VerthysResult Verthys_ClearRecordCache(VerthysHandle handle)
+{
+    if (handle == NULL) return VERTHYS_ERR_INVALID;
+
+    struct VerthysContext *ctx = (struct VerthysContext *)handle;
+    if (!verthys_ctx_registry_contains(ctx)) return VERTHYS_ERR_INVALID;
+
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
+#endif
+    ctx_free_getrecord_cache(ctx);
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
+#endif
+    return VERTHYS_OK;
 }
 
 /* 7. 删除记录 */

@@ -48,6 +48,7 @@
 
       <!-- 模块舞台 -->
       <ModuleStage
+        ref="stageRef"
         :current-module="currentModule"
         @back="currentModule = ''"
         @panel-active="onPanelActive"
@@ -153,7 +154,16 @@ const {
  * 窗口时长取模块渡越总时长（入场 0.35s）之上留余量。 */
 const stageMarginInstant = ref(false);
 let stageMarginTimer: number | undefined;
-watch(currentModule, () => {
+
+/** 模块舞台实例（离场几何钉定的量取入口） */
+const stageRef = ref<InstanceType<typeof ModuleStage> | null>(null);
+
+/* 模块切换：中枢离场前先量取旧舞台几何（pre 阶段 — 本回调先于渲染，
+ * DOM 仍为旧布局；见 ModuleStage.captureOutgoing 的成因说明） */
+watch(currentModule, (m, prev) => {
+  if (prev === "security" && m !== "security") {
+    stageRef.value?.captureOutgoing();
+  }
   stageMarginInstant.value = true;
   window.clearTimeout(stageMarginTimer);
   stageMarginTimer = window.setTimeout(() => {

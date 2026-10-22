@@ -199,3 +199,64 @@
 .qd-module-node.state-off .qd-node-icon { color: rgba(150, 164, 180, 0.55); }
 /* 休眠节点的悬浮只温和提亮（不得读作「已可用」） */
 .qd-module-node.state-off:hover .qd-node-icon { color: rgba(190, 204, 220, 0.78); }
+
+/* ============================================================
+   离场编排：引力内缩（中枢模块渡越 · 只在 .module-switch-leave-active 期生效）
+   ============================================================
+   语义：离开中枢不是「熄灭」，而是一场极短的引力坍缩 —— 场先驻留一息，
+   随后圆环整体向内收束，三个卫星与三条连线随环心同步向核心坠落，
+   最后与整层一起消散。
+
+   几何单一权威：
+     .qd-field-canvas 与 .qd-layer-mid 施加完全相同的 transform，且两者
+     都是 inset:0（盒 = 面板，原点 = 面板中心）。Canvas 侧的吸积盘、连线、
+     卫星环饰与 DOM 侧的三个节点图标因此按同一系数、同一原点内缩 ——
+     全程零相对漂移（环饰与图标不会错位）。
+
+   文字清晰度铁律（styles/text_sharpness.spec.ts）：
+     运动只作用于不含文字的装饰层（画布 / 节点图标层）；
+     承载文字的核心文字簇（.qd-layer-near）只走不透明度，且先于圆环退场
+     —— 视线由「文字退去」自然交给「能量场收束」。
+
+   时长契约：
+     与 ModuleStage 的中枢离场包络共用 --stage-leave-dur-hub（单一权威）；
+     子树时长不得超过根动画 —— Vue 以根 animationend 判定卸载。 */
+.security-center.module-switch-leave-active .qd-field-canvas,
+.security-center.module-switch-leave-active .qd-layer-mid {
+  transform-origin: 50% 50%;
+  animation: qd-collapse var(--stage-leave-dur-hub, 0.42s) linear forwards;
+}
+.security-center.module-switch-leave-active .qd-layer-near {
+  /* 先退 34%：文字在圆环收束中段即已消隐，注意力留在场的内缩上 */
+  animation: qd-core-dissolve calc(var(--stage-leave-dur-hub, 0.42s) * 0.66) linear forwards;
+}
+
+@keyframes qd-collapse {
+  0% {
+    transform: scale(1);
+    /* 前 18% 仅收 0.6%：场先驻留一息，与根包络的驻留段同拍 */
+    animation-timing-function: cubic-bezier(0.4, 0, 0.7, 0.55);
+  }
+  18% {
+    transform: scale(0.994);
+    /* 后段持续加速内缩（不把收缩全部压到尾部 — 高不透明度窗口内
+       就能看见圆环与三卫星向核心坠落），收在 0.9：内缩 10%，克制而有力 */
+    animation-timing-function: cubic-bezier(0.4, 0, 0.6, 1);
+  }
+  100% {
+    transform: scale(0.9);
+  }
+}
+
+@keyframes qd-core-dissolve {
+  0% {
+    opacity: 1;
+    animation-timing-function: cubic-bezier(0.4, 0, 0.7, 0.55);
+  }
+  24% {
+    opacity: 0.94;
+  }
+  100% {
+    opacity: 0;
+  }
+}
