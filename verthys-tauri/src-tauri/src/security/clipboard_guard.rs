@@ -22,14 +22,15 @@
  *      - 移除"写入随机数据再清空"逻辑
  *      - 直接调用 EmptyClipboard 并广播 WM_DESTROYCLIPBOARD
  *      - 写入敏感内容时通过 CF_PRIVATEFIRST 标记防止进入历史记录
- *   6. 启动监听前进行 OLE 初始化与剪贴板能力检查
- *      - start_monitoring 中调用 OleInitialize 并检查返回值
- *      - 监听线程在退出前调用 OleUninitialize
- *      - AddClipboardFormatListener 失败做细化处理（重试 / 降级轮询）
+ *   6. 监听线程内进行 OLE 初始化与剪贴板能力检查
+ *      - 隐藏窗口与消息循环由同一线程创建，保证 WM_CLIPBOARDUPDATE 可达
+ *      - 监听线程启动时调用 OleInitialize，退出前调用 OleUninitialize
+ *   7. 启动幂等：窗口类进程内仅注册一次；重复下发硬化开关直接成功，
+ *      不得因 ERROR_CLASS_ALREADY_EXISTS 误报“剪贴板监听启动失败”
  */
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -38,9 +39,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const WM_CLIPBOARDUPDATE: u32 = 0x031D;
 /// WM_DESTROYCLIPBOARD = 0x030D：EmptyClipboard 时系统发送给剪贴板所有者
 const WM_DESTROYCLIPBOARD: u32 = 0x030D;
-const WM_CLOSE: u32 = 0x0010;
 const WM_DESTROY: u32 = 0x0002;
-const WM_NULL: u32 = 0x0000;
+
+/// 监听窗口类名（进程内仅注册一次）
+#[cfg(target_os = "windows")]
+const LISTENER_CLASS_NAME: &str = "VerthysClipGuard";
+/// ERROR_INVALID_WINDOW_HANDLE：窗口句柄失效（重建窗口重试一次）
+#[cfg(target_os = "windows")]
+const ERROR_INVALID_WINDOW_HANDLE: u32 = 1401;
+/// ERROR_CLASS_ALREADY_EXISTS：窗口类已注册（幂等复用，不视为失败）
+#[cfg(target_os = "windows")]
+const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 
 /// PeekMessage 移除标志 PM_REMOVE = 0x0001
 const PM_REMOVE: u32 = 0x0001;
@@ -173,8 +182,6 @@ extern "system" {
     fn DispatchMessageW(lpMsg: *const Msg) -> isize;
 
     fn RegisterClassExW(lpWndClass: *const WndClassExW) -> u16;
-
-    fn UnregisterClassW(lpClassName: *const u16, hInstance: isize) -> i32;
 }
 
 #[cfg(target_os = "windows")]
@@ -483,27 +490,16 @@ fn do_clear_internal() -> Result<(), String> {
 }
 
 /* ---------- 创建隐藏监听窗口 ---------- */
+/// 创建隐藏监听窗口（窗口归属调用线程，即监听线程）。
+///
+/// 必须先确保窗口类已注册；窗口类为进程级资源，进程内只注册一次。
 #[cfg(target_os = "windows")]
 fn create_listener_window() -> Result<isize, String> {
+    ensure_listener_class()?;
+
     unsafe {
-        let class_name = to_wide("VerthysClipGuard");
+        let class_name = to_wide(LISTENER_CLASS_NAME);
         let hinst = GetModuleHandleW(std::ptr::null());
-
-        let wc = WndClassExW {
-            cbSize: std::mem::size_of::<WndClassExW>() as u32,
-            lpfnWndProc: Some(clipboard_window_proc),
-            hInstance: hinst,
-            lpszClassName: class_name.as_ptr(),
-            ..Default::default()
-        };
-
-        let atom = RegisterClassExW(&wc);
-        if atom == 0 {
-            return Err(format!(
-                "RegisterClassExW 失败: GetLastError={}",
-                GetLastError()
-            ));
-        }
 
         let hwnd = CreateWindowExW(
             0,
@@ -530,49 +526,197 @@ fn create_listener_window() -> Result<isize, String> {
     }
 }
 
-/* ==================================================================== *
- *  监听线程消息循环                        *
- *                                                                        *
- *  - 线程启动时调用 OleInitialize                              *
- *  - 排干窗口消息后检查 PENDING_UPDATE 标志，异步处理          *
- *  - 轮询敏感内容过期（延迟清空）                                  *
- *  - 线程退出前调用 OleUninitialize                            *
- * ==================================================================== */
+/// 注册监听窗口类（进程内严格一次）。
+///
+/// 旧实现每次 `start_monitoring` 都调用 `RegisterClassExW`，第二次返回 1410
+/// （ERROR_CLASS_ALREADY_EXISTS）并被误判为启动失败，导致安全档位恢复链重复
+/// 下发开关时误报“会话硬化未完全生效”。此处以 `OnceLock` 保证仅注册一次；
+/// 并发或历史注册返回 1410 时按“同名同类已存在”处理，不视为失败。
 #[cfg(target_os = "windows")]
-fn run_clipboard_message_loop(_hwnd: isize) {
+fn ensure_listener_class() -> Result<(), String> {
+    static CLASS_READY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if CLASS_READY.get().is_some() {
+        return Ok(());
+    }
+
     unsafe {
-        // OLE 初始化（监听线程）
+        let class_name = to_wide(LISTENER_CLASS_NAME);
+        let hinst = GetModuleHandleW(std::ptr::null());
+
+        let wc = WndClassExW {
+            cbSize: std::mem::size_of::<WndClassExW>() as u32,
+            lpfnWndProc: Some(clipboard_window_proc),
+            hInstance: hinst,
+            lpszClassName: class_name.as_ptr(),
+            ..Default::default()
+        };
+
+        let atom = RegisterClassExW(&wc);
+        if atom == 0 {
+            let err_code = GetLastError();
+            if err_code != ERROR_CLASS_ALREADY_EXISTS {
+                return Err(format!("RegisterClassExW 失败: GetLastError={}", err_code));
+            }
+        }
+
+        let _ = CLASS_READY.set(());
+        Ok(())
+    }
+}
+
+/* ==================================================================== *
+ *  监听线程（窗口创建 + 监听注册 + 消息泵 / 序列号轮询）                 *
+ *                                                                        *
+ *  关键约束：隐藏窗口必须由运行消息循环的线程创建。Win32 窗口消息只投递  *
+ *  到创建该窗口的线程队列；旧实现在命令线程创建窗口、在另一线程跑消息    *
+ *  循环，WM_CLIPBOARDUPDATE 永远无法被监听线程读取，外部写入检测形同虚设。*
+ * ==================================================================== */
+
+/// 创建窗口并注册剪贴板格式监听。
+///
+/// 返回 `(hwnd, format_listener)`：
+///   - `format_listener=true`：WM_CLIPBOARDUPDATE 事件通道可用；
+///   - `format_listener=false`：降级为序列号轮询（窗口已销毁，hwnd=0）。
+#[cfg(target_os = "windows")]
+fn setup_listener() -> Result<(isize, bool), String> {
+    unsafe {
+        let mut hwnd = create_listener_window()?;
+
+        if AddClipboardFormatListener(HWND(hwnd as *mut _)).is_ok() {
+            return Ok((hwnd, true));
+        }
+
+        let err_code = GetLastError();
+        if err_code == ERROR_INVALID_WINDOW_HANDLE {
+            log::warn!(
+                "[clipboard_guard] AddClipboardFormatListener 失败 \
+                 (ERROR_INVALID_WINDOW_HANDLE)，重新创建窗口重试"
+            );
+            let _ = DestroyWindow(hwnd);
+            hwnd = create_listener_window()?;
+            if AddClipboardFormatListener(HWND(hwnd as *mut _)).is_ok() {
+                return Ok((hwnd, true));
+            }
+            let retry_err = GetLastError();
+            let _ = DestroyWindow(hwnd);
+            return Err(format!(
+                "AddClipboardFormatListener 重试仍失败: GetLastError={}",
+                retry_err
+            ));
+        }
+
+        // 权限拒绝或其他错误：降级为定时轮询（序列号变化仍可检测外部写入）
+        log::warn!(
+            "[clipboard_guard] AddClipboardFormatListener 失败: GetLastError={}，\
+             降级为定时轮询模式（仅序列号轮询，无 WM_CLIPBOARDUPDATE）",
+            err_code
+        );
+        let _ = DestroyWindow(hwnd);
+        Ok((0, false))
+    }
+}
+
+/// 监听线程退出前的资源回收（窗口句柄归属本线程，跨线程销毁会失败）
+#[cfg(target_os = "windows")]
+fn cleanup_listener(hwnd: isize, format_listener: bool) {
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        if format_listener {
+            let _ = RemoveClipboardFormatListener(HWND(hwnd as *mut _));
+        }
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
+/// 监听线程主体：创建窗口、上报启动结果、泵消息并轮询剪贴板序列号。
+///
+/// 启动结果通过 `ready` 同步回传：窗口创建/监听注册失败必须返回 Err，
+/// 调用方据此如实上报，绝不制造“已启动”假象。
+#[cfg(target_os = "windows")]
+fn run_listener_thread(
+    ready: std::sync::mpsc::SyncSender<Result<(), String>>,
+    stop: Arc<AtomicBool>,
+) {
+    unsafe {
         let ole_result = OleInitialize(None);
         if ole_result.is_err() {
             log::warn!(
-                "[clipboard_guard] OleInitialize 失败: {:?}，剪贴板操作可能异常",
+                "[clipboard_guard] 监听线程 OleInitialize 失败: {:?}，剪贴板操作可能异常",
                 ole_result
             );
         }
 
+        let (hwnd, format_listener) = match setup_listener() {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = ready.send(Err(e));
+                OleUninitialize();
+                return;
+            }
+        };
+
+        // 原子重置监听状态基线；停止信号与状态写入共用一把锁，
+        // 与 stop 的“先置停止信号、后置 monitoring=false”形成串行化，
+        // 避免停止与启动竞争时把 monitoring 重新置回 true。
+        {
+            let mut state = lock_state();
+            if stop.load(Ordering::SeqCst) {
+                drop(state);
+                cleanup_listener(hwnd, format_listener);
+                OleUninitialize();
+                return;
+            }
+            state.stage = ClipboardStage::Idle;
+            state.last_seq = GetClipboardSequenceNumber();
+            state.expire_at_ms = 0;
+            state.monitoring = true;
+        }
+        PENDING_UPDATE.store(false, Ordering::SeqCst);
+
+        if ready.send(Ok(())).is_err() {
+            // 调用方已放弃本次启动：立即清理退出，避免留下无主监听线程
+            cleanup_listener(hwnd, format_listener);
+            OleUninitialize();
+            return;
+        }
+
+        log::info!(
+            "[clipboard_guard] 剪贴板监听已启动 (hwnd={}, mode={})",
+            hwnd,
+            if format_listener {
+                "format_listener"
+            } else {
+                "polling_only"
+            }
+        );
+
+        let mut last_polled_seq = GetClipboardSequenceNumber();
         loop {
-            // 1. 排干所有待处理窗口消息
+            // 1. 排干窗口消息（WM_CLIPBOARDUPDATE 仅置位 PENDING_UPDATE）
             loop {
-                let mut msg: Msg = Default::default();
-                if PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) != 0 {
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                } else {
+                let mut msg = Msg::default();
+                if PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) == 0 {
                     break;
                 }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
 
-            // 2. 收到停止信号则退出
-            {
-                let state = lock_state();
-                if !state.monitoring {
-                    break;
-                }
+            // 2. 停止信号：主动停止 或 监听状态被置为关闭
+            if stop.load(Ordering::SeqCst) || !lock_state().monitoring {
+                break;
             }
 
-            // 3. 异步处理待处理的剪贴板事件
-            //    （不在窗口过程中执行，避免重入和死锁）
-            if PENDING_UPDATE.swap(false, Ordering::SeqCst) {
+            // 3. 外部写入检测：窗口消息 + 序列号轮询双通道。
+            //    轮询通道同时覆盖 AddClipboardFormatListener 降级场景，
+            //    保证“外部写入即清空”不依赖窗口消息是否可用。
+            let pending = PENDING_UPDATE.swap(false, Ordering::SeqCst);
+            let current = GetClipboardSequenceNumber();
+            let seq_changed = current != last_polled_seq;
+            last_polled_seq = current;
+            if pending || seq_changed {
                 process_clipboard_update();
             }
 
@@ -583,8 +727,10 @@ fn run_clipboard_message_loop(_hwnd: isize) {
             Sleep(POLL_INTERVAL_MS as u32);
         }
 
-        // 线程退出前 OLE 反初始化
+        // 线程退出前回收窗口与监听注册，再反初始化 OLE
+        cleanup_listener(hwnd, format_listener);
         OleUninitialize();
+        log::info!("[clipboard_guard] 剪贴板监听线程已退出");
     }
 }
 
@@ -592,15 +738,47 @@ fn run_clipboard_message_loop(_hwnd: isize) {
  *                        ClipboardGuard 结构体                          *
  * ==================================================================== */
 pub struct ClipboardGuard {
+    /// 监听线程句柄（窗口由该线程创建并销毁）
     join_handle: Option<JoinHandle<()>>,
-    hwnd: isize,
+    /// 当前监听轮次的停止信号（每轮启动独立创建，避免跨轮串扰）
+    stop_flag: Option<Arc<AtomicBool>>,
 }
 
 impl ClipboardGuard {
     pub fn new() -> Self {
         ClipboardGuard {
             join_handle: None,
-            hwnd: 0,
+            stop_flag: None,
+        }
+    }
+
+    /// 停止并回收当前监听线程（有界等待，超时 detach 由进程退出回收）。
+    ///
+    /// 先置停止信号、再置 `monitoring=false`：监听线程在状态锁内检查停止
+    /// 信号后才写入 `monitoring=true`，因此不会出现“停止后又被置回运行”的竞态。
+    #[cfg(target_os = "windows")]
+    fn stop_listener_thread(&mut self) {
+        if let Some(flag) = self.stop_flag.take() {
+            flag.store(true, Ordering::SeqCst);
+        }
+        {
+            let mut state = lock_state();
+            state.monitoring = false;
+        }
+        PENDING_UPDATE.store(false, Ordering::SeqCst);
+
+        if let Some(handle) = self.join_handle.take() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while !handle.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    // 丢弃 JoinHandle 即 detach：线程持有独立停止信号，不会
+                    // 再改写全局监听状态；其窗口资源随线程退出自行回收。
+                    log::warn!("[clipboard_guard] 监听线程 3 秒内未退出，detach（随进程退出回收）");
+                    return;
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let _ = handle.join();
         }
     }
 
@@ -779,97 +957,52 @@ impl ClipboardGuard {
     /* ---------------- 启动监听 ---------------- */
     /// 启动剪贴板格式监听器（AddClipboardFormatListener）+ 监听线程。
     ///
+    /// 幂等语义：监听已在运行时重复启动直接成功。安全档位恢复链会在每次
+    /// 进入中枢时重复下发同一开关，重复启动不得被当作失败上报。
     ///
-    ///   - 调用 OleInitialize 并检查返回值
-    ///   - AddClipboardFormatListener 失败做细化处理（重试 / 降级轮询）
-    ///   - 监听线程在退出前调用 OleUninitialize
+    /// 启动握手：监听线程完成窗口创建与监听注册后回传 Ok/Err；
+    /// 失败必须如实返回，绝不制造“已启动”假象。
     #[cfg(target_os = "windows")]
     pub fn start_monitoring(&mut self) -> Result<(), String> {
-        // OLE 初始化与剪贴板能力检查
-        unsafe {
-            let ole_result = OleInitialize(None);
-            if ole_result.is_err() {
-                log::warn!(
-                    "[clipboard_guard] start_monitoring: OleInitialize 失败: {:?}",
-                    ole_result
-                );
-            }
-        }
-
-        let hwnd = create_listener_window()?;
-
-        // 注册现代剪贴板格式监听器（非旧式 SetClipboardViewer 链）
-        // AddClipboardFormatListener 失败细化处理
-        let listener_result = unsafe { AddClipboardFormatListener(HWND(hwnd as *mut _)) };
-        if let Err(e) = listener_result {
-            unsafe {
-                let _ = DestroyWindow(hwnd);
-            }
-            let err_code = unsafe { GetLastError() };
-
-            // ERROR_INVALID_WINDOW_HANDLE (1401) → 重新创建窗口重试一次
-            if err_code == 1401 {
-                log::warn!(
-                    "[clipboard_guard] AddClipboardFormatListener 失败 (ERROR_INVALID_WINDOW_HANDLE)，\
-                     重新创建窗口重试"
-                );
-                let hwnd2 = create_listener_window()?;
-                let retry_result = unsafe { AddClipboardFormatListener(HWND(hwnd2 as *mut _)) };
-                if let Err(e2) = retry_result {
-                    unsafe {
-                        let _ = DestroyWindow(hwnd2);
-                    }
-                    return Err(format!(
-                        "AddClipboardFormatListener 重试仍失败: {} (GetLastError={})",
-                        e2,
-                        unsafe { GetLastError() }
-                    ));
-                }
-                self.hwnd = hwnd2;
-            } else {
-                // 权限拒绝或其他错误 → 降级为定时轮询模式
-                log::warn!(
-                    "[clipboard_guard] AddClipboardFormatListener 失败: {} (GetLastError={})，\
-                     降级为定时轮询模式（仅序列号轮询，无 WM_CLIPBOARDUPDATE）",
-                    e,
-                    err_code
-                );
-                // 不创建窗口，但仍启动轮询线程
-                self.hwnd = 0;
-            }
-        } else {
-            self.hwnd = hwnd;
-        }
-
-        // 原子重置监听状态基线
+        // 1. 幂等判定：线程仍存活且状态为监听中 → 直接成功
+        if lock_state().monitoring
+            && self
+                .join_handle
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished())
         {
-            let mut state = lock_state();
-            state.stage = ClipboardStage::Idle;
-            state.last_seq = unsafe { GetClipboardSequenceNumber() };
-            state.expire_at_ms = 0;
-            state.monitoring = true;
+            log::info!("[clipboard_guard] 监听已在运行，重复启动按幂等成功处理");
+            return Ok(());
         }
 
-        PENDING_UPDATE.store(false, Ordering::SeqCst);
+        // 2. 回收上一轮残留（线程已退出但句柄未回收 / 状态残留）
+        self.stop_listener_thread();
 
-        let hwnd_for_thread = self.hwnd;
-        self.join_handle = Some(thread::spawn(move || {
-            run_clipboard_message_loop(hwnd_for_thread);
-            // 线程退出后更新状态
-            let mut state = lock_state();
-            state.monitoring = false;
-        }));
+        // 3. 启动监听线程（窗口归属该线程，消息循环与本线程同源）
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop_flag.clone();
 
-        log::info!(
-            "[clipboard_guard] 剪贴板监听已启动 (hwnd={}, mode={})",
-            self.hwnd,
-            if self.hwnd != 0 {
-                "format_listener"
-            } else {
-                "polling_only"
+        let handle = thread::Builder::new()
+            .name("verthys-clipboard-guard".into())
+            .spawn(move || run_listener_thread(ready_tx, thread_stop))
+            .map_err(|e| format!("启动剪贴板监听线程失败: {}", e))?;
+
+        self.join_handle = Some(handle);
+        self.stop_flag = Some(stop_flag);
+
+        // 4. 有界等待启动结果：超时按失败上报并回收线程
+        match ready_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => {
+                self.stop_listener_thread();
+                Err(e)
             }
-        );
-        Ok(())
+            Err(_) => {
+                self.stop_listener_thread();
+                Err("剪贴板监听线程启动超时".into())
+            }
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -878,61 +1011,14 @@ impl ClipboardGuard {
     }
 
     /* ---------------- 停止监听 ---------------- */
+    /// 停止监听：置停止信号 → 有界等待线程自行销毁窗口并退出。
+    ///
+    /// 窗口由监听线程创建，必须由其自身销毁（Win32 跨线程 DestroyWindow 会
+    /// 失败），因此这里不再持有或操作窗口句柄。
     #[cfg(target_os = "windows")]
     pub fn stop_monitoring(&mut self) {
-        // 原子设置 monitoring=false
-        {
-            let mut state = lock_state();
-            if !state.monitoring {
-                return;
-            }
-            state.monitoring = false;
-        }
-
-        // 唤醒消息循环（PostMessageW 唤醒 PeekMessage）
-        if self.hwnd != 0 {
-            unsafe {
-                let _ = RemoveClipboardFormatListener(HWND(self.hwnd as *mut _));
-                let _ = PostMessageW(self.hwnd, WM_NULL, 0, 0);
-                let _ = PostMessageW(self.hwnd, WM_CLOSE, 0, 0);
-            }
-        }
-
-        // 等待监听线程退出（带 2 秒超时兜底，避免永久阻塞）
-        if let Some(handle) = self.join_handle.take() {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            loop {
-                let still_running = lock_state().monitoring;
-                if !still_running {
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    log::warn!(
-                        "[clipboard_guard] 监听线程 2 秒内未退出，放弃 join（线程随进程退出回收）"
-                    );
-                    break;
-                }
-                // 唤醒线程
-                if self.hwnd != 0 {
-                    unsafe {
-                        let _ = PostMessageW(self.hwnd, WM_NULL, 0, 0);
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            let _ = handle.join();
-        }
-
-        // 销毁窗口并注销窗口类
-        if self.hwnd != 0 {
-            unsafe {
-                let _ = DestroyWindow(self.hwnd);
-                let class_name = to_wide("VerthysClipGuard");
-                let hinst = GetModuleHandleW(std::ptr::null());
-                let _ = UnregisterClassW(class_name.as_ptr(), hinst);
-            }
-            self.hwnd = 0;
-        }
+        let was_monitoring = lock_state().monitoring;
+        self.stop_listener_thread();
 
         // 清除敏感内容状态
         {
@@ -941,7 +1027,9 @@ impl ClipboardGuard {
             state.expire_at_ms = 0;
         }
 
-        log::info!("[clipboard_guard] 剪贴板监听已停止");
+        if was_monitoring {
+            log::info!("[clipboard_guard] 剪贴板监听已停止");
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -969,5 +1057,36 @@ impl Default for ClipboardGuard {
 impl Drop for ClipboardGuard {
     fn drop(&mut self) {
         self.stop_monitoring();
+    }
+}
+
+/* ==================================================================== *
+ *  单元测试                                                             *
+ * ==================================================================== */
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    /// 回归：重复启动必须幂等成功，停止后重启必须成功。
+    ///
+    /// 旧实现每次启动都重复 RegisterClassExW，第二次返回 1410
+    /// （ERROR_CLASS_ALREADY_EXISTS）被误判为“剪贴板监听启动失败”，
+    /// 导致中枢误报“会话硬化未完全生效”。
+    #[test]
+    fn clipboard_monitor_start_is_idempotent_and_restartable() {
+        let mut guard = ClipboardGuard::new();
+
+        guard.start_monitoring().expect("首次启动剪贴板监听失败");
+        guard
+            .start_monitoring()
+            .expect("重复启动必须幂等成功（不得因窗口类已注册而失败）");
+        guard.stop_monitoring();
+
+        guard
+            .start_monitoring()
+            .expect("停止后重新启动剪贴板监听失败");
+        guard.stop_monitoring();
+
+        assert!(!lock_state().monitoring, "停止后监听状态必须为关闭");
     }
 }

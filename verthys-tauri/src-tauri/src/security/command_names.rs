@@ -23,8 +23,6 @@ pub mod cmd {
     pub const FORGET_HASHES: &str = "verthys_forget_hashes";
     /// 孤儿外置块 GC：删除台账中未被任何 meta 引用（owner=0）的块记录
     pub const GC_ORPHAN_CHUNKS: &str = "verthys_gc_orphan_chunks";
-    /// 开发用：重置 WAL 与快照（清空续传去重状态）
-    pub const DEV_RESET_WAL: &str = "dev_reset_wal";
     /// 流式导出：创建写入会话（暂存文件）
     pub const WRITE_USER_FILE_STREAM: &str = "write_user_file_stream";
     /// 流式导出：追加原始数据块

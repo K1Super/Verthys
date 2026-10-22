@@ -5,7 +5,7 @@
  */
 
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::runtime::budget::PB_IPC_MAX_RESPONSE_LINE_BYTES;
 
@@ -22,6 +22,12 @@ pub(crate) struct Request {
     pub(crate) op: String,
     #[serde(default)]
     pub(crate) path: String,
+    /// 路径授权的模式（read/write；仅 authorize_path 消费）
+    #[serde(default)]
+    pub(crate) mode: String,
+    /// 路径授权绑定的目标操作（仅 authorize_path 消费）
+    #[serde(default)]
+    pub(crate) target_op: String,
     #[serde(default)]
     pub(crate) password: Zeroizing<String>,
     #[serde(default)]
@@ -79,6 +85,15 @@ pub(crate) struct RecordEntry {
     pub(crate) rtype: u32,
     pub(crate) name: String,
     pub(crate) data: String, // base64
+}
+
+impl Drop for RecordEntry {
+    /* 记录名与 base64 数据都属于敏感明文派生，Drop 时清零堆缓冲，
+     * 避免批量枚举响应在序列化完成后把明文留在分配器中。 */
+    fn drop(&mut self) {
+        self.name.zeroize();
+        self.data.zeroize();
+    }
 }
 
 /* 防御闭环状态报告（与 verthys.h
@@ -170,6 +185,23 @@ pub(crate) struct Response {
 }
 
 impl Response {
+    /// 清零响应中的敏感明文。
+    ///
+    /// 序列化完成后必须调用；批量记录由 `RecordEntry::drop` 负责，
+    /// 此处只处理单条记录名、单条数据与全局主密钥数据。
+    /// 错误文本不含密钥，保留以便诊断。
+    pub(crate) fn scrub(&mut self) {
+        if let Some(name) = self.name.as_mut() {
+            name.zeroize();
+        }
+        if let Some(data) = self.data.as_mut() {
+            data.zeroize();
+        }
+        if let Some(record) = self.global_key_record.as_mut() {
+            record.zeroize();
+        }
+    }
+
     pub(crate) fn ok(op: &str) -> Self {
         Response {
             ok: true,
@@ -305,10 +337,12 @@ pub(crate) const MAX_RESPONSE_LINE_BYTES: usize = PB_IPC_MAX_RESPONSE_LINE_BYTES
 /// @param json 已序列化的响应行
 /// @param op 请求操作名（保留在错误响应中，便于上层定位失败的操作）
 /// @return 可安全写入 stdout 的单行 JSON
-pub(crate) fn bound_response_line(json: String, op: &str) -> String {
+pub(crate) fn bound_response_line(mut json: String, op: &str) -> String {
     if json.len() <= MAX_RESPONSE_LINE_BYTES {
         return json;
     }
+    /* 超限响应可能包含大段记录明文；替换为受控错误行前先清零原缓冲。 */
+    json.zeroize();
     serde_json::json!({
         "ok": false,
         "op": op,

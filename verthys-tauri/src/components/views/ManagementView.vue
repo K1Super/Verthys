@@ -16,10 +16,10 @@
 
   Props: 从 SecurityCenter 顶层 Composable 注入的只读状态 + 函数（透传至子组件）
   defineModel: orbitSliderPos（透传至 SecurityDashboard）
-  Emits: lock-all / open-change-key-dialog / export-bin / toggle-module-key-enabled /
-         open-key-dialog / show-module-key / logout-module / toggle-gear-panel /
-         toggle-custom-feature / reset-custom / apply-custom / orbit-slider-input /
-         orbit-slider-release / snap-to-anchor / panel-active
+  Emits: lock-all / check-update / install-update / open-change-key-dialog / export-bin /
+         toggle-module-key-enabled / open-key-dialog / show-module-key / logout-module /
+         toggle-custom-feature / reset-custom / set-custom-session-minutes / apply-custom /
+         orbit-slider-input / orbit-slider-release / snap-to-anchor / panel-active
 -->
 <template>
   <div class="view-management">
@@ -56,7 +56,14 @@
           :global-key-ready="globalKeyReady"
           :session-remaining="sessionRemaining"
           :idle-lock-enabled="idleLockEnabled"
+          :update-available="updateAvailable"
+          :update-version="updateVersion"
+          :update-checking="updateChecking"
+          :update-installing="updateInstalling"
+          :update-percent="updatePercent"
           @lock-all="$emit('lockAll')"
+          @check-update="$emit('checkUpdate')"
+          @install-update="$emit('installUpdate')"
         />
 
         <!-- 分区 1：全局密钥已就绪状态 + 全局密钥-设备绑定 -->
@@ -91,7 +98,6 @@
         <SecurityDashboard
           v-if="activeSection === 'security'"
           :global-key-ready="globalKeyReady"
-          :security-preset-code="securityPresetCode"
           :preset-applying="presetApplying"
           :preset-ambience-mode="presetAmbienceMode"
           :cpu-overhead="cpuOverhead"
@@ -107,15 +113,15 @@
           :locked-features="lockedFeatures"
           :preset-features="presetFeatures"
           :custom-features="customFeatures"
-          :custom-panel-open="customPanelOpen"
+          :custom-session-minutes="customSessionMinutes"
           :defense-paths="defensePaths"
           :defense-meta="defenseMeta"
           :preset-sync-failed="presetSyncFailed"
           :hardening-failed="hardeningFailed"
           v-model:orbit-slider-pos="orbitSliderPos"
-          @toggle-gear-panel="$emit('toggleGearPanel')"
           @toggle-custom-feature="(key) => $emit('toggleCustomFeature', key)"
           @reset-custom="$emit('resetCustom')"
+          @set-custom-session-minutes="(m) => $emit('setCustomSessionMinutes', m)"
           @apply-custom="$emit('applyCustom')"
           @orbit-slider-input="$emit('orbitSliderInput')"
           @orbit-slider-release="$emit('orbitSliderRelease')"
@@ -146,6 +152,16 @@ const props = defineProps<{
   sessionRemaining: number;
   /** 会话空闲锁定开关（false = 不自动锁定） */
   idleLockEnabled: boolean;
+  /** 是否存在已发现且尚未安装的更新 */
+  updateAvailable: boolean;
+  /** 可安装的更新版本号（无更新时为空串） */
+  updateVersion: string;
+  /** 更新检查进行中 */
+  updateChecking: boolean;
+  /** 更新下载或安装进行中 */
+  updateInstalling: boolean;
+  /** 下载进度百分比（0-100，未知总长时为 0） */
+  updatePercent: number;
   /** 设备绑定校验结果（引导单元视觉形态） */
   deviceCheckResult: DeviceCheckResult;
   /** 设备机器码短显示 */
@@ -168,8 +184,6 @@ const props = defineProps<{
   moduleStateClass: (mid: ModuleId) => string;
   /** 模块状态文本（函数） */
   moduleStateText: (mid: ModuleId) => string;
-  /** 安全预设代码 */
-  securityPresetCode: number;
   /** 预设应用中状态 */
   presetApplying: boolean;
   /** 预设环境光效模式 */
@@ -200,8 +214,8 @@ const props = defineProps<{
   presetFeatures: Record<string, boolean>;
   /** 自定义特性配置 */
   customFeatures: Record<string, boolean>;
-  /** 自定义面板展开状态 */
-  customPanelOpen: boolean;
+  /** 自定义档空闲锁定时长（分钟） */
+  customSessionMinutes: number;
   /** 动态防护路径状态列表（7 攻击路径 × 4 态） */
   defensePaths: DefensePathView[];
   /** 动态防护汇总态势（计数 + 全阻断标志 + 总体态势） */
@@ -221,6 +235,10 @@ const emit = defineEmits<{
   (e: "panel-active", val: boolean): void;
   /** 立即锁定全部并清零内存密钥 */
   (e: "lockAll"): void;
+  /** 手动检查更新 */
+  (e: "checkUpdate"): void;
+  /** 下载并安装已发现的更新 */
+  (e: "installUpdate"): void;
   /** 打开修改全局密钥弹窗 */
   (e: "openChangeKeyDialog"): void;
   /** 导出当前密钥文件备份 */
@@ -233,13 +251,13 @@ const emit = defineEmits<{
   (e: "showModuleKey", mid: ModuleId): void;
   /** 登出模块 */
   (e: "logoutModule", mid: ModuleId): void;
-  /** 切换齿轮（自定义）面板 */
-  (e: "toggleGearPanel"): void;
   /** 切换单个自定义特性 */
   (e: "toggleCustomFeature", key: string): void;
   /** 恢复自定义默认 */
   (e: "resetCustom"): void;
-  /** 保存并应用自定义配置 */
+  /** 设置自定义档空闲锁定时长（分钟） */
+  (e: "setCustomSessionMinutes", minutes: number): void;
+  /** 保存应用自定义配置 */
   (e: "applyCustom"): void;
   /** 轨道滑块输入中 */
   (e: "orbitSliderInput"): void;

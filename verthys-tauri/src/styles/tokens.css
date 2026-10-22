@@ -105,11 +105,16 @@
    *   --stage-reveal-dur 模块根渡越显影时长（短于内容显影 —
    *                     根先成形、内容随后逐级沉积，两层不互相掩盖）
    *   --stage-leave-dur 模块根离场时长（快于入场：让位新模块显影主体）
+   *   --stage-leave-dur-hub 中枢模块离场时长（专属：先驻留后加速消散；
+   *                     量子面板圆环/三卫星的引力内缩编排与之共用同一时长
+   *                     —— 见 security/qd-panel.css，根动画 animationend
+   *                     判定卸载，子树编排必不被截断）
    *   --mgmt-leave-dur  中枢管理视图离场时长（同上口径；入场复用
    *                     --reveal-dur，与模块内容同一包络） */
   --reveal-dur: 0.62s;
   --stage-reveal-dur: 0.4s;
   --stage-leave-dur: 0.18s;
+  --stage-leave-dur-hub: 0.42s;
   --mgmt-leave-dur: 0.34s;
 }
 

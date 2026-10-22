@@ -52,7 +52,7 @@
             class="type-cell"
             @click="choose(def.id)"
           >
-            <span class="type-cell-icon" aria-hidden="true" v-html="resolveVaultIcon(def.icon)"></span>
+            <SafeSvgIcon class="type-cell-icon" :source="resolveVaultIcon(def.icon)" />
             <span class="type-cell-label">{{ def.label }}</span>
           </button>
 
@@ -74,6 +74,7 @@ import { computed, nextTick, ref, watch } from "vue";
 import type { VaultTypeDef } from "../../../constants/vault_item_types";
 import { resolveVaultIcon } from "../../../constants/vault_item_types";
 import VerthysDialog from "../../common/verthys-ui/VerthysDialog.vue";
+import SafeSvgIcon from "../../common/SafeSvgIcon.vue";
 
 const props = defineProps<{
   modelValue: boolean;

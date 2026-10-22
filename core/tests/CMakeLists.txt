@@ -92,3 +92,33 @@ add_custom_command(TARGET verthys_tests POST_BUILD
 )
 
 add_test(NAME verthys_tests COMMAND verthys_tests)
+
+# ACG 专项验证：策略为进程级且不可撤销，必须使用独立进程。
+add_executable(verthys_scd_acg_test
+    security/test_scd_acg.c
+)
+target_link_libraries(verthys_scd_acg_test PRIVATE verthys_core_obj flatccrt user32)
+target_include_directories(verthys_scd_acg_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/core/include
+    ${CMAKE_SOURCE_DIR}/core/src
+    ${VERTHYS_SRC_SUBDIRS}
+)
+if(MSVC)
+    target_compile_options(verthys_scd_acg_test PRIVATE /utf-8)
+endif()
+add_test(NAME verthys_scd_acg COMMAND verthys_scd_acg_test)
+
+# 生产 DLL 端到端验证：独立进程启用 ACG 后加载 verthys.dll，
+# 直接检查 defense_closure 的 IAT/Inline Hook 路径状态。
+add_executable(verthys_scd_dll_acg_test
+    security/test_scd_dll_acg.c
+)
+target_include_directories(verthys_scd_dll_acg_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/core/include
+)
+if(MSVC)
+    target_compile_options(verthys_scd_dll_acg_test PRIVATE /utf-8)
+endif()
+add_dependencies(verthys_scd_dll_acg_test verthys_core)
+add_test(NAME verthys_scd_dll_acg
+    COMMAND verthys_scd_dll_acg_test $<TARGET_FILE:verthys_core>)

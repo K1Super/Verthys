@@ -8,13 +8,14 @@
  *   3. 竞态仲裁：恢复读取期间与恢复应用入口的 epoch 双重校验
  *   4. 自定义档：超时取档位常量、空闲锁定随特性开关启停
  *   5. 空闲锁定关闭时不武装自动锁定计时器；恢复启用后重新武装
+ *   6. 空闲锁定由真实输入活动驱动：活动刷新截止时间，未空闲不得到点锁定
  *
  * 依赖隔离：lib/verthys（IPC 面）、缓存组合层、后台任务全部 mock；
  * key_state（真实 ref）/ 常量 / promise_utils 使用真实实现。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { keyState } from "../state/key_state";
-import { SECURITY_PRESET_KEY, CUSTOM_FEATURES_KEY, PRESET_SESSION_TIMEOUT_MS } from "../constants/key_manager_const";
+import { SECURITY_PRESET_KEY, CUSTOM_FEATURES_KEY, PRESET_SESSION_TIMEOUT_MS, CUSTOM_SESSION_MINUTES_DEFAULT } from "../constants/key_manager_const";
 import {
   applySecurityPreset,
   restoreSecurityPreset,
@@ -24,6 +25,7 @@ import {
   isSessionLockEnabled,
   clearSessionTimer,
   resetSessionTimer,
+  sessionIdleDeadlineRef,
   lockAll,
 } from "./security-session";
 
@@ -114,6 +116,7 @@ beforeEach(() => {
   localStorage.clear();
   keyState.securityPreset.value = 0;
   keyState.globalKeyReady.value = true;
+  keyState.customSessionMinutes.value = CUSTOM_SESSION_MINUTES_DEFAULT;
   setSessionTimeout(PRESET_SESSION_TIMEOUT_MS[0]);
   clearSessionTimer();
   mocks.securityApplyPreset.mockImplementation(async (code: number) => presetConfig(code));
@@ -217,6 +220,29 @@ describe("自定义档会话语义", () => {
     expect(isSessionLockEnabled()).toBe(true);
     expect(getSessionTimeout()).toBe(PRESET_SESSION_TIMEOUT_MS[0]);
   });
+
+  it("自定义档空闲锁定时长按用户设置生效并随应用落盘", async () => {
+    localStorage.setItem(CUSTOM_FEATURES_KEY, JSON.stringify({ ...allTrue(), session_lock_on_idle: true }));
+    keyState.customSessionMinutes.value = 45;
+
+    await applySecurityPreset(3);
+
+    expect(getSessionTimeout()).toBe(45 * 60_000);
+    expect(mocks.securityApplyPreset).toHaveBeenCalledWith(3, expect.anything(), 45);
+  });
+
+  it("恢复链采用后端受信的空闲锁定时长（覆盖本地缓存）", async () => {
+    keyState.customSessionMinutes.value = 20;
+    mocks.securityLoadPresetState.mockResolvedValue({
+      state: { code: 3, customFeatures: allTrue(), customSessionTimeoutMinutes: 50 },
+      persistDirty: false,
+    });
+
+    await restoreSecurityPreset();
+
+    expect(getSessionTimeout()).toBe(50 * 60_000);
+    expect(keyState.customSessionMinutes.value).toBe(50);
+  });
 });
 
 describe("lockAll 重入与代际闸门", () => {
@@ -266,5 +292,38 @@ describe("空闲锁定计时器武装", () => {
     resetSessionTimer();
     await vi.advanceTimersByTimeAsync(PRESET_SESSION_TIMEOUT_MS[1] + 1000);
     expect(mocks.waitForFlush).toHaveBeenCalled();
+  });
+});
+
+describe("空闲锁定的活动驱动语义", () => {
+  it("真实输入活动刷新截止时间：未空闲时到点不得锁定", async () => {
+    vi.useFakeTimers();
+    await applySecurityPreset(1);
+    const armedDeadline = sessionIdleDeadlineRef.value;
+    expect(armedDeadline).toBeGreaterThan(0);
+
+    // 到点前 1 秒产生真实输入（指针活动）
+    await vi.advanceTimersByTimeAsync(PRESET_SESSION_TIMEOUT_MS[1] - 1000);
+    window.dispatchEvent(new Event("pointerdown"));
+
+    // 活动已把空闲起点前移：截止时间必须同步后移
+    expect(sessionIdleDeadlineRef.value).toBeGreaterThan(armedDeadline);
+
+    // 原截止时刻已过：用户未空闲，不得锁定
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mocks.waitForFlush).not.toHaveBeenCalled();
+
+    // 新截止时间到点且期间无任何输入 → 才允许锁定
+    await vi.advanceTimersByTimeAsync(PRESET_SESSION_TIMEOUT_MS[1]);
+    expect(mocks.waitForFlush).toHaveBeenCalled();
+  });
+
+  it("锁定/解除武装：截止时间清零（UI 据此复位显示）", async () => {
+    vi.useFakeTimers();
+    await applySecurityPreset(0);
+    expect(sessionIdleDeadlineRef.value).toBeGreaterThan(0);
+
+    clearSessionTimer();
+    expect(sessionIdleDeadlineRef.value).toBe(0);
   });
 });

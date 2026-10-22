@@ -71,7 +71,6 @@ export default defineConfig(async ({ command }) => ({
             "@tauri-apps/api",
             "@tauri-apps/plugin-dialog",
             "@tauri-apps/plugin-fs",
-            "@tauri-apps/plugin-opener",
             "@tauri-apps/plugin-process",
           ],
           // Vue runtime 独立分包：拆分后主包仅保留首屏组件 + 启动逻辑，

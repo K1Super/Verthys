@@ -28,7 +28,7 @@
     <div class="card-head">
       <span class="card-title" v-tip="headTitle">{{ headTitle }}</span>
       <span class="vault-type-badge" :style="badgeStyle">
-        <span class="badge-icon" aria-hidden="true" v-html="view.icon"></span>
+        <SafeSvgIcon class="badge-icon" :source="view.icon" />
         <span class="badge-name">{{ view.typeLabel }}</span>
       </span>
       <span v-if="locked" class="lock-badge" v-tip="'独立加密'">
@@ -137,6 +137,7 @@ import type { VaultEntry } from "../../../types/verthys";
 import type { VaultCardView } from "../../../lib/vault_item_card";
 import { VAULT_TONE_RGB_VARS, vaultReadoutColorVar } from "../../../lib/vault_item_card";
 import { useCardShine } from "../../../composables/useCardShine";
+import SafeSvgIcon from "../../common/SafeSvgIcon.vue";
 
 /**
  * 卡片次行展示上限（与 172px 虚拟行高对齐）。

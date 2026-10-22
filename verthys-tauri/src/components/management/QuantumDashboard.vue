@@ -46,7 +46,7 @@
                三段非均匀断裂刻度环 + 断口主刻度 + 细刻度扇 + 镜筒细环 +
                内外双自转能量弧 + 状态扇段（正常混合、无大面积软光）。
                DOM 侧只留可交互的导航栏同源图标（无 DOM 描边 → 无 DOM transform）。 -->
-          <span class="qd-node-icon" v-html="MODULE_ICONS[mid]"></span>
+          <SafeSvgIcon class="qd-node-icon" :source="MODULE_ICONS[mid]" />
         </div>
       </div>
     </div>
@@ -79,6 +79,7 @@ import { MODULE_LABELS, type ModuleId } from '../../lib/keyManager';
 import { useQuantumField } from '../../composables/security-center/useQuantumField';
 /* 模块图标（导航栏同一权威源）：节点图标与 Dock 共享同一份 SVG 路径 */
 import { MODULE_ICONS } from '../../composables/useModuleNavigation';
+import SafeSvgIcon from "../common/SafeSvgIcon.vue";
 
 /**
  * QuantumDashboard Props

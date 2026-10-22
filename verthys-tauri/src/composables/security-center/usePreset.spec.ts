@@ -6,7 +6,7 @@
  *   2. 氛围迟滞：进入带 25/75、退出带 31/69 的收敛行为
  *   3. 释放守卫：切档进行中的释放请求回撤视觉且不重复切档
  *   4. 吸附路径复位拖拽标志（轨道渐变不冻结）
- *   5. 自定义档应用后的游标停靠与面板展开
+ *   5. 自定义档应用后的游标停靠与锚点清除
  *   6. 特性快照加载：标准档取后端、自定义档取本地
  *
  * 依赖隔离：keyManager 单例 ref 与 lib/verthys 全部 mock；
@@ -14,7 +14,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { nextTick, ref } from "vue";
-import { securityPresetRef, globalKeyReadyRef } from "../../lib/keyManager";
+import { securityPresetRef, globalKeyReadyRef, customSessionMinutesRef } from "../../lib/keyManager";
 import { usePreset } from "./usePreset";
 
 const mocks = vi.hoisted(() => ({
@@ -33,6 +33,7 @@ vi.mock("../../lib/keyManager", async () => {
   return {
     securityPresetRef: ref(0),
     globalKeyReadyRef: ref(true),
+    customSessionMinutesRef: ref(20),
     applySecurityPreset: mocks.applySecurityPreset,
     bumpPresetEpoch: mocks.bumpPresetEpoch,
     loadCustomFeatures: mocks.loadCustomFeatures,
@@ -100,6 +101,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   securityPresetRef.value = 0;
   globalKeyReadyRef.value = true;
+  customSessionMinutesRef.value = 20;
   mocks.applySecurityPreset.mockResolvedValue({ name: "BALANCED", code: 0, features: allTrue() });
   mocks.loadCustomFeatures.mockReturnValue(allTrue());
   mocks.isLockedFeature.mockImplementation((key: string) => LOCKED_KEYS.includes(key));
@@ -215,21 +217,8 @@ describe("usePreset 吸附与守卫", () => {
   });
 });
 
-describe("usePreset 齿轮面板", () => {
-  it("齿轮仅展开/收起面板，不静默切档（不得产生越权副作用）", () => {
-    const api = usePreset(stubOptions());
-    api.onToggleGearPanel();
-    expect(api.customPanelOpen.value).toBe(true);
-    expect(mocks.applySecurityPreset).not.toHaveBeenCalled();
-
-    api.onToggleGearPanel();
-    expect(api.customPanelOpen.value).toBe(false);
-    expect(mocks.applySecurityPreset).not.toHaveBeenCalled();
-  });
-});
-
 describe("usePreset 自定义档语义", () => {
-  it("应用自定义档：游标停靠中位、清锚点、展开面板", async () => {
+  it("应用自定义档：游标停靠中位、清锚点", async () => {
     const api = usePreset(stubOptions());
     mocks.applySecurityPreset.mockImplementationOnce(async (code: number) => {
       securityPresetRef.value = code as 0 | 1 | 2 | 3;
@@ -240,7 +229,6 @@ describe("usePreset 自定义档语义", () => {
     expect(ok).toBe(true);
     expect(api.orbitSliderPos.value).toBe(50);
     expect(api.activeAnchorIdx.value).toBe(-1);
-    expect(api.customPanelOpen.value).toBe(true);
     expect(api.presetAmbienceMode.value).toBe("balanced");
   });
 });
@@ -258,7 +246,12 @@ describe("usePreset 自定义模板应用链", () => {
     await api.onApplyCustom();
 
     // 特性集显式传参（缓存单一落盘点在会话层，应用成功后才写）
-    expect(mocks.applySecurityPreset).toHaveBeenCalledWith(3, undefined, api.customFeatures.value);
+    expect(mocks.applySecurityPreset).toHaveBeenCalledWith(
+      3,
+      undefined,
+      api.customFeatures.value,
+      api.customSessionMinutes.value,
+    );
     expect(options.showToast).toHaveBeenCalledWith("自定义模板已保存并应用");
   });
 
@@ -272,9 +265,27 @@ describe("usePreset 自定义模板应用链", () => {
     // 应用链失败时不得预写缓存：saveCustomFeatures 已从 usePreset 依赖面
     // 移除（mock 模块不再提供该导出，再引入即类型/导入失败），本地缓存
     // 仅在会话层应用成功后单点写入
-    expect(mocks.applySecurityPreset).toHaveBeenCalledWith(3, undefined, api.customFeatures.value);
+    expect(mocks.applySecurityPreset).toHaveBeenCalledWith(
+      3,
+      undefined,
+      api.customFeatures.value,
+      api.customSessionMinutes.value,
+    );
     expect(options.showError).toHaveBeenCalledWith("应用自定义模板失败");
     expect(options.showToast).not.toHaveBeenCalled();
+  });
+
+  it("空闲锁定时长：越界输入收敛到允许区间", () => {
+    const api = usePreset(stubOptions());
+
+    api.onSetCustomSessionMinutes(0);
+    expect(api.customSessionMinutes.value).toBe(1);
+
+    api.onSetCustomSessionMinutes(99999);
+    expect(api.customSessionMinutes.value).toBe(120);
+
+    api.onSetCustomSessionMinutes(45.6);
+    expect(api.customSessionMinutes.value).toBe(46);
   });
 });
 

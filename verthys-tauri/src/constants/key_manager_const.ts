@@ -56,7 +56,7 @@ export const PRESET_SESSION_TIMEOUT_MS: Record<SecurityPresetCode, number> = {
   0: 30 * 60 * 1000, // BALANCED: 30 分钟
   1: 10 * 60 * 1000, // SECURE: 10 分钟
   2: 60 * 60 * 1000, // PERFORMANCE: 60 分钟
-  3: 20 * 60 * 1000, // CUSTOM: 20 分钟
+  3: 60 * 60 * 1000, // CUSTOM: 60 分钟（兜底值，用户可调）
 };
 
 /* 模块密钥验证器明文 */
@@ -96,6 +96,23 @@ export const CIRCUIT_BREAKER_STORAGE_KEY = "verthys_unlock_circuit_breaker";
 
 /* 自定义特性 localStorage key */
 export const CUSTOM_FEATURES_KEY = "verthys_custom_security_features";
+
+/* 自定义档空闲锁定时长
+ *
+ * 自定义档不沿用固定超时：用户可设置 1~120 分钟（上限 2 小时），
+ * 后端受信预设文件为权威副本，localStorage 仅作解锁前显示缓存。 */
+
+/** 自定义档空闲锁定默认时长（分钟，与自定义档兜底超时一致） */
+export const CUSTOM_SESSION_MINUTES_DEFAULT = 60;
+
+/** 自定义档空闲锁定时长下限（分钟） */
+export const CUSTOM_SESSION_MINUTES_MIN = 1;
+
+/** 自定义档空闲锁定时长上限（分钟，2 小时） */
+export const CUSTOM_SESSION_MINUTES_MAX = 120;
+
+/** 自定义档空闲锁定时长本地缓存键 */
+export const CUSTOM_SESSION_MINUTES_KEY = "verthys_custom_session_minutes";
 
 /* 当前安全预设代号 localStorage key（持久化用户选择的安全模式） */
 export const SECURITY_PRESET_KEY = "verthys_security_preset";

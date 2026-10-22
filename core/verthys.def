@@ -21,6 +21,7 @@ EXPORTS
     Verthys_Lock
     Verthys_AddRecord
     Verthys_GetRecord
+    Verthys_ClearRecordCache
     Verthys_DeleteRecord
     Verthys_DeleteRecords
     Verthys_Export

@@ -16,6 +16,11 @@ project(Verthys
     DESCRIPTION "Private data manager with encrypted .verthys container"
 )
 
+# 直连系统调用 thunk 使用 MASM 编写；仅 MSVC 工具链提供该汇编器。
+if(MSVC)
+    enable_language(ASM_MASM)
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)

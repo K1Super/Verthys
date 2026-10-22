@@ -27,6 +27,10 @@
  */
 
 fn main() {
+    // ===== 首行清除可注入的浏览器启动环境 =====
+    // WebView2 在 Tauri 初始化时才读取这些变量，必须在此之前完成清理。
+    verthys_tauri_lib::security::harden_process_environment();
+
     // ===== main 第一行安装最小化 panic hook =====
     // 在任何其他代码执行前注册，确保从进程启动第一微秒起崩溃均可捕获。
     // 此 hook 仅调用 OutputDebugString + stderr，不依赖日志系统。

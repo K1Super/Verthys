@@ -13,6 +13,7 @@
 #include "verthys_test.h"
 #include "verthys.h"
 #include "verthys_internal.h"
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -379,6 +380,82 @@ TEST(api_lock_unlock_same_file)
     CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "pw", 2, 0), VERTHYS_OK);
     CHECK_EQ(Verthys_GetRecord(h, id, &r), VERTHYS_OK);
 
+    Verthys_Deinit(h);
+    cleanup_tmp();
+    return 0;
+}
+
+/* 重复 Deinit 必须被拒绝：句柄注销后不得再次进入释放路径。 */
+TEST(api_double_deinit_rejected)
+{
+    VerthysHandle h;
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_Deinit(h), VERTHYS_OK);
+
+    /* 第二次注销：注册表已无此句柄，必须在释放前返回 INVALID */
+    CHECK_EQ(Verthys_Deinit(h), VERTHYS_ERR_INVALID);
+
+    /* 注销后仍可正常创建新句柄，确认注册表容量已回收 */
+    VerthysHandle h2;
+    CHECK_EQ(Verthys_Init(&h2), VERTHYS_OK);
+    CHECK(h2 != NULL);
+    CHECK_EQ(Verthys_Deinit(h2), VERTHYS_OK);
+    return 0;
+}
+
+/* 借用缓存显式清除：GetRecord 后调用清除接口，后续查询仍可用。 */
+TEST(api_clear_record_cache)
+{
+    cleanup_tmp();
+    VerthysHandle h;
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS, "pw", 2, VERTHYS_PRESET_BALANCED), VERTHYS_OK);
+
+    VerthysRecord r = {VERTHYS_RECORD_ACCOUNT, "cache", 5, (const uint8_t *)"value", 5};
+    uint64_t id = 0;
+    CHECK_EQ(Verthys_AddRecord(h, &r, &id), VERTHYS_OK);
+
+    VerthysRecord out;
+    CHECK_EQ(Verthys_GetRecord(h, id, &out), VERTHYS_OK);
+    CHECK_EQ(Verthys_ClearRecordCache(h), VERTHYS_OK);
+    /* 幂等：无缓存时再次清除仍返回 OK */
+    CHECK_EQ(Verthys_ClearRecordCache(h), VERTHYS_OK);
+
+    /* 清除后再次查询必须重新取到完整数据 */
+    CHECK_EQ(Verthys_GetRecord(h, id, &out), VERTHYS_OK);
+    CHECK_EQ(out.data_len, 5u);
+    CHECK(memcmp(out.data, "value", 5) == 0);
+
+    CHECK_EQ(Verthys_ClearRecordCache(NULL), VERTHYS_ERR_INVALID);
+
+    Verthys_Deinit(h);
+    cleanup_tmp();
+    return 0;
+}
+
+/* 单条记录超过 9 MiB 解码上限 → RESOURCE_LIMIT。 */
+TEST(api_add_record_oversize_rejected)
+{
+    cleanup_tmp();
+    VerthysHandle h;
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_CreateWithPreset(h, TMP_VERTHYS, "pw", 2, VERTHYS_PRESET_BALANCED), VERTHYS_OK);
+
+    const size_t oversize_len = 9u * 1024u * 1024u + 1u;
+    uint8_t *payload = (uint8_t *)malloc(oversize_len);
+    CHECK(payload != NULL);
+    if (payload == NULL) {
+        Verthys_Deinit(h);
+        cleanup_tmp();
+        return 0;
+    }
+    memset(payload, 0xA5, oversize_len);
+
+    VerthysRecord r = {VERTHYS_RECORD_ACCOUNT, "big", 3, payload, oversize_len};
+    uint64_t id = 0;
+    CHECK_EQ(Verthys_AddRecord(h, &r, &id), VERTHYS_ERR_RESOURCE_LIMIT);
+
+    free(payload);
     Verthys_Deinit(h);
     cleanup_tmp();
     return 0;

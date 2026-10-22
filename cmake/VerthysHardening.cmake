@@ -20,23 +20,23 @@
 #   调用风险大于收益。故保留 /sdl 全部附加检查（初始化引用、栈缓冲
 #   校验等），仅抑制 C4996 劝告升级。/sdl 新增的实际检查项完整生效。
 set(VERTHYS_SAFETY_FLAGS
-    /GS            # 栈缓冲区溢出检测
-    /guard:cf      # 控制流防护
-    /guard:ehcont  # 异常连续性防护
-    /sdl           # SDL 安全附加检查（初始化引用检查等）
-    /wd4996        # 抑制 MSVC 对 ISO C 标准函数的厂商劝告升级（见上注）
-    /utf-8         # 源码 UTF-8
-    /Zc:inline     # COMDAT 折叠
+    $<$<COMPILE_LANGUAGE:C,CXX>:/GS>            # 栈缓冲区溢出检测
+    $<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>      # 控制流防护
+    $<$<COMPILE_LANGUAGE:C,CXX>:/guard:ehcont>  # 异常连续性防护
+    $<$<COMPILE_LANGUAGE:C,CXX>:/sdl>           # SDL 安全附加检查
+    $<$<COMPILE_LANGUAGE:C,CXX>:/wd4996>        # 抑制 ISO C 标准函数的厂商劝告升级
+    $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>         # 源码 UTF-8
+    $<$<COMPILE_LANGUAGE:C,CXX>:/Zc:inline>     # COMDAT 折叠
 )
 
 # Release 优化与符号剥离
 set(VERTHYS_RELEASE_FLAGS
-    /O2            # 最高优化
-    /Oi            # 内联内部函数
-    /Oy            # 省略帧指针
-    /GL            # 全链接优化 LTCG
-    /Gy            # 函数级链接
-    /Gw            # 全局变量级链接
+    $<$<COMPILE_LANGUAGE:C,CXX>:/O2>     # 最高优化
+    $<$<COMPILE_LANGUAGE:C,CXX>:/Oi>     # 内联内部函数
+    $<$<COMPILE_LANGUAGE:C,CXX>:/Oy>     # 省略帧指针
+    $<$<COMPILE_LANGUAGE:C,CXX>:/GL>     # 全链接优化 LTCG
+    $<$<COMPILE_LANGUAGE:C,CXX>:/Gy>     # 函数级链接
+    $<$<COMPILE_LANGUAGE:C,CXX>:/Gw>     # 全局变量级链接
     # 阻塞 4 修复：移除全局 /arch:AVX2
     # 原因：全局 /arch:AVX2 会在非 AVX2 CPU 上触发 SIGILL 崩溃，用户体验不可接受。
     # 改为依赖 libsodium 内部的运行时 CPU 检测（libsodium 自动选择 AVX2/SSE4.2/通用路径）。
@@ -50,6 +50,8 @@ set(VERTHYS_LINK_BASE
     /DYNAMICBASE   # ASLR
     /HIGHENTROPYVA # 高熵 ASLR（x64）
     /NXCOMPAT      # DEP
+    /guard:cf      # 控制流防护：链接器生成 CFG 表并置位 PE 标志
+    /guard:ehcont  # 异常连续性防护表
 )
 
 # x64 专属链接加固（CET 影子栈）
@@ -73,7 +75,8 @@ function(verthys_apply_hardening target)
     #   新引入的编译警告在 Debug 配置即阻断构建——CI 的 Ninja Debug
     #   构建与 clang-tidy 门首先生效；Release 侧待存量告警基线清理
     #   完成后归入全量（避免一次性升级导致发布构建被历史告警阻塞）。
-    target_compile_options(${target} PRIVATE $<$<CONFIG:Debug>:/WX>)
+    target_compile_options(${target} PRIVATE
+        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:C,CXX>>:/WX>)
     target_link_options(${target} PRIVATE ${VERTHYS_LINK_BASE})
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         target_link_options(${target} PRIVATE ${VERTHYS_LINK_X64})

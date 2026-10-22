@@ -26,7 +26,7 @@
  *   #endif
  *
  * ================================================================== */
-#define VERTHYS_API_VERSION 0x000Du
+#define VERTHYS_API_VERSION 0x000Eu
 
 /* ================================================================== *
  * Verthys_Unlock flags 位域定义（API 版本 0x0005）
@@ -613,6 +613,18 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_AddRecord(VerthysHandle handle,
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetRecord(VerthysHandle handle,
                             uint64_t id,
                             VerthysRecord *out_record);
+
+/*
+ * 显式释放 GetRecord 借用缓存。
+ *
+ * 用途：调用方已把 out_record->name/data 深拷贝到自有缓冲后，立即清零并
+ * 释放 C 层缓存，缩短明文在 C 堆中的驻留窗口。
+ *
+ * 前置条件：handle 必须由 Verthys_Init 创建且尚未 Deinit。
+ * 副作用：使上一次 Verthys_GetRecord 返回的借用指针立即失效。
+ * 线程安全：MT-Unsafe，与 Verthys_GetRecord 共享同一缓存锁。
+ */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ClearRecordCache(VerthysHandle handle);
 
 /*
  * 删除单条记录接口使用说明

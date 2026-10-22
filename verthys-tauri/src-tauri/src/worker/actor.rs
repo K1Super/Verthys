@@ -24,13 +24,16 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use zeroize::Zeroize;
+
+use crate::infrastructure::ipc_secure::{Channel, IpcSecureChannel};
 
 use super::graceful::{
     diagnose_exit, mark_child_dead_if_needed, perform_graceful_shutdown, reject_request_after_exit,
 };
 use super::protocol::{
     bounded_read_line, ActorRequest, BoundedLineError, UnlockProgress, MAX_LINE_BYTES,
-    STDERR_DRAIN_FINAL_TIMEOUT, UNLOCK_PROGRESS_IDLE_TIMEOUT, UNLOCK_PROGRESS_OP,
+    STDERR_DRAIN_FINAL_TIMEOUT, UNLOCK_PROGRESS_IDLE_TIMEOUT,
 };
 use super::stderr::{snapshot_stderr, StderrRing};
 
@@ -58,6 +61,7 @@ pub(crate) async fn actor_loop(
     pid: u32,
     child_alive: Arc<AtomicBool>,
     stderr_ring: Arc<StdMutex<StderrRing>>,
+    ipc: Arc<IpcSecureChannel>,
 ) {
     log::info!("[actor] PID={} Actor 任务启动", pid);
 
@@ -95,6 +99,7 @@ pub(crate) async fn actor_loop(
                     &mut child,
                     &stderr_ring,
                     &child_alive,
+                    &ipc,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -113,19 +118,26 @@ pub(crate) async fn actor_loop(
                     &mut child,
                     &stderr_ring,
                     &child_alive,
+                    &ipc,
                 )
                 .await;
                 let _ = reply.send(result);
             }
             ActorRequest::WaitReady { timeout, reply } => {
-                let result =
-                    handle_wait_ready(&mut stdout_reader, timeout, pid, &mut child, &stderr_ring)
-                        .await;
+                let result = handle_wait_ready(
+                    &mut stdout_reader,
+                    timeout,
+                    pid,
+                    &mut child,
+                    &stderr_ring,
+                    &ipc,
+                )
+                .await;
                 let _ = reply.send(result);
             }
             ActorRequest::Shutdown { reply } => {
                 log::info!("[actor] PID={} 收到 Shutdown 请求，执行优雅退出", pid);
-                perform_graceful_shutdown(&mut stdin, &mut child, pid, &child_alive).await;
+                perform_graceful_shutdown(&mut stdin, &mut child, pid, &child_alive, &ipc).await;
                 let _ = reply.send(());
                 break;
             }
@@ -134,7 +146,7 @@ pub(crate) async fn actor_loop(
 
     // 请求通道关闭：执行优雅退出
     log::info!("[actor] PID={} 请求通道关闭，开始优雅退出", pid);
-    perform_graceful_shutdown(&mut stdin, &mut child, pid, &child_alive).await;
+    perform_graceful_shutdown(&mut stdin, &mut child, pid, &child_alive, &ipc).await;
 
     // 等待 stderr 任务结束（短超时，确保最后的 stderr 输出被消费）
     log::info!(
@@ -173,12 +185,15 @@ async fn handle_send(
     child: &mut Child,
     stderr_ring: &Arc<StdMutex<StderrRing>>,
     child_alive: &Arc<AtomicBool>,
+    ipc: &IpcSecureChannel,
 ) -> Result<String, String> {
-    // 写入 stdin
-    if let Err(e) = write_line(stdin, json).await {
+    let (request_seq, mut signed) = ipc.sign_request(json)?;
+    if let Err(e) = write_line(stdin, &signed).await {
+        signed.zeroize();
         mark_child_dead_if_needed(child, child_alive, pid).await;
         return Err(format!("write stdin: {}", e));
     }
+    signed.zeroize();
 
     // 修复：使用 deadline 循环读取，跳过进度行
     // 总超时不变（deadline 固定），每行读取使用剩余时间
@@ -219,34 +234,45 @@ async fn handle_send(
                 return Err(format!("worker 管道关闭: {}", diag));
             }
             Ok(Ok(Some(_n))) => {
-                let trimmed = line.trim().to_string();
+                let mut trimmed = line.trim().to_string();
+                line.zeroize();
                 if trimmed.is_empty() {
                     mark_child_dead_if_needed(child, child_alive, pid).await;
                     let diag = diagnose_exit(child, pid, stderr_ring).await;
                     return Err(format!("worker 返回空行: {}", diag));
                 }
 
-                // 修复：跳过进度行（unlock_progress）
-                // 这些行由 C 层进度消费线程异步写入 stdout，不是当前请求的最终响应。
-                // 解析 JSON 提取 op 字段，若为进度行则继续读取下一行。
-                let is_progress_line = serde_json::from_str::<serde_json::Value>(&trimmed)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("op")
-                            .and_then(|o| o.as_str())
-                            .map(|s| s == UNLOCK_PROGRESS_OP)
-                    })
-                    .unwrap_or(false);
+                let opened = match ipc.open_line(&trimmed) {
+                    Ok(opened) => opened,
+                    Err(e) => {
+                        trimmed.zeroize();
+                        return Err(abort_protocol(child, child_alive, pid, &e));
+                    }
+                };
+                trimmed.zeroize();
 
-                if is_progress_line {
-                    log::debug!(
-                        "[worker] handle_send 跳过进度行（非流式请求中的残留进度）: PID={}",
-                        pid
-                    );
-                    continue; // 读取下一行
+                match opened.channel {
+                    Channel::Progress => {
+                        /* 进度行已通过签名校验；非流式请求只需忽略，
+                         * 不要求其关联号与当前请求一致（可能是上一轮残留）。 */
+                        log::debug!(
+                            "[worker] handle_send 跳过进度行（非流式请求中的残留进度）: PID={}",
+                            pid
+                        );
+                        continue;
+                    }
+                    Channel::Response => {
+                        if opened.reply_to != request_seq {
+                            return Err(abort_protocol(
+                                child,
+                                child_alive,
+                                pid,
+                                "响应关联号与当前请求不一致",
+                            ));
+                        }
+                        return Ok(opened.payload);
+                    }
                 }
-
-                return Ok(trimmed);
             }
             Ok(Err(BoundedLineError::TooLong { limit })) => {
                 // 协议异常：worker 输出单行超过上限。标记子进程死亡，
@@ -306,14 +332,17 @@ async fn handle_streaming_unlock_send(
     child: &mut Child,
     stderr_ring: &Arc<StdMutex<StderrRing>>,
     child_alive: &Arc<AtomicBool>,
+    ipc: &IpcSecureChannel,
 ) -> Result<String, String> {
     let idle_timeout = UNLOCK_PROGRESS_IDLE_TIMEOUT;
 
-    // 写入 stdin
-    if let Err(e) = write_line(stdin, json).await {
+    let (request_seq, mut signed) = ipc.sign_request(json)?;
+    if let Err(e) = write_line(stdin, &signed).await {
+        signed.zeroize();
         mark_child_dead_if_needed(child, child_alive, pid).await;
         return Err(format!("write stdin: {}", e));
     }
+    signed.zeroize();
 
     // 进度感知 deadline：每收到一条进度行即重置
     let mut deadline = Instant::now() + idle_timeout;
@@ -336,44 +365,56 @@ async fn handle_streaming_unlock_send(
                 return Err(format!("解锁期间 worker 管道关闭: {}", diag));
             }
             Ok(Ok(Some(_))) => {
-                let trimmed = line.trim().to_string();
+                let mut trimmed = line.trim().to_string();
+                line.zeroize();
                 if trimmed.is_empty() {
                     // 空行，继续
                     continue;
                 }
 
-                // 解析 op 字段
-                let op = serde_json::from_str::<serde_json::Value>(&trimmed)
-                    .ok()
-                    .and_then(|v| v.get("op").and_then(|o| o.as_str()).map(|s| s.to_string()));
+                let opened = match ipc.open_line(&trimmed) {
+                    Ok(opened) => opened,
+                    Err(e) => {
+                        trimmed.zeroize();
+                        return Err(abort_protocol(child, child_alive, pid, &e));
+                    }
+                };
+                trimmed.zeroize();
 
-                if op.as_deref() == Some(UNLOCK_PROGRESS_OP) {
-                    // 进度行：解析并推送，重置 deadline
-                    match serde_json::from_str::<UnlockProgress>(&trimmed) {
-                        Ok(p) => {
-                            log::info!(
-                                "[worker] 解锁进度: stage={} percent={}% elapsed={}ms msg={}",
-                                p.stage,
-                                p.percent,
-                                p.elapsed_ms,
-                                p.message
-                            );
-                            // 推送到进度通道（best-effort，前端关闭则丢弃）
-                            if progress_tx.send(p).await.is_err() {
-                                log::warn!(
-                                    "[worker] 解锁进度通道已关闭（前端可能已断开）: PID={}",
-                                    pid
+                if opened.reply_to != request_seq {
+                    return Err(abort_protocol(
+                        child,
+                        child_alive,
+                        pid,
+                        "解锁流关联号与当前请求不一致",
+                    ));
+                }
+
+                match opened.channel {
+                    Channel::Progress => {
+                        match serde_json::from_str::<UnlockProgress>(&opened.payload) {
+                            Ok(p) => {
+                                log::info!(
+                                    "[worker] 解锁进度: stage={} percent={}% elapsed={}ms msg={}",
+                                    p.stage,
+                                    p.percent,
+                                    p.elapsed_ms,
+                                    p.message
                                 );
+                                if progress_tx.send(p).await.is_err() {
+                                    log::warn!(
+                                        "[worker] 解锁进度通道已关闭（前端可能已断开）: PID={}",
+                                        pid
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("[worker] 解锁进度载荷解析失败: {}", e);
                             }
                         }
-                        Err(e) => {
-                            log::warn!("[worker] 解锁进度行解析失败: {} | raw={}", e, trimmed);
-                        }
+                        deadline = Instant::now() + idle_timeout;
                     }
-                    deadline = Instant::now() + idle_timeout;
-                } else {
-                    // 非进度行：视为最终响应（op=unlock 或错误）
-                    return Ok(trimmed);
+                    Channel::Response => return Ok(opened.payload),
                 }
             }
             Ok(Err(BoundedLineError::TooLong { limit })) => {
@@ -420,6 +461,7 @@ async fn handle_wait_ready(
     pid: u32,
     child: &mut Child,
     stderr_ring: &Arc<StdMutex<StderrRing>>,
+    ipc: &IpcSecureChannel,
 ) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
 
@@ -456,9 +498,23 @@ async fn handle_wait_ready(
                 return Err(format!("worker 就绪检测失败: 子进程已崩溃 — {}", diag));
             }
             Ok(Ok(Some(_))) => {
-                let trimmed = line.trim();
+                let mut trimmed = line.trim().to_string();
+                line.zeroize();
                 if !trimmed.is_empty() {
-                    log::info!("[worker] 收到就绪信号: {}", trimmed);
+                    let opened = match ipc.open_line(&trimmed) {
+                        Ok(opened) => opened,
+                        Err(e) => {
+                            trimmed.zeroize();
+                            let _ = child.start_kill();
+                            return Err(format!("worker 就绪信号认证失败: {}", e));
+                        }
+                    };
+                    trimmed.zeroize();
+                    if opened.channel != Channel::Response || opened.reply_to != 0 {
+                        let _ = child.start_kill();
+                        return Err("worker 就绪信号通道或关联号非法".to_string());
+                    }
+                    log::info!("[worker] 收到就绪信号: {}", opened.payload);
                     return Ok(());
                 }
                 // 空行，继续读取
@@ -496,6 +552,26 @@ async fn handle_wait_ready(
 /* ------------------------------------------------------------------ *
  * 辅助函数                                                            *
  * ------------------------------------------------------------------ */
+
+/// 认证失败时终止子进程并返回统一错误。
+///
+/// 签名失配、关联号不符、序号断裂都意味着管道对端已不可信，
+/// 继续复用该会话会掩盖协议状态错乱。
+fn abort_protocol(
+    child: &mut Child,
+    child_alive: &Arc<AtomicBool>,
+    pid: u32,
+    reason: &str,
+) -> String {
+    log::error!(
+        "[worker] IPC 认证失败，终止子进程: PID={} reason={}",
+        pid,
+        reason
+    );
+    let _ = child.start_kill();
+    child_alive.store(false, Ordering::SeqCst);
+    format!("IPC 认证失败: {}", reason)
+}
 
 /// 写入一行 JSON 到 stdin（带换行符 + flush）
 pub(crate) async fn write_line(stdin: &mut ChildStdin, json: &str) -> Result<(), String> {

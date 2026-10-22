@@ -3,8 +3,12 @@
   从 MainView.vue 抽离，功能 100% 保留
 -->
 <template>
-  <main class="stage">
-    <transition name="module-switch">
+  <main ref="stageRef" class="stage">
+    <transition
+      name="module-switch"
+      @before-leave="onStageBeforeLeave"
+      @leave-cancelled="onStageLeaveCancelled"
+    >
       <HomeView v-if="!currentModule" key="home" />
       <AccountVerthys v-else-if="currentModule === 'accounts'" key="accounts" />
       <PasswordTools v-else-if="currentModule === 'tools'" key="tools" />
@@ -16,7 +20,7 @@
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, onMounted, provide, toRef } from "vue";
+import { defineAsyncComponent, onBeforeUnmount, onMounted, provide, ref, toRef } from "vue";
 import HomeView from "./HomeView.vue";
 import { MODULE_DIALOG_GUARD_KEY } from "../../composables/useModuleDialogGuard";
 import { TRANSITION } from "../../app/constants";
@@ -41,6 +45,81 @@ defineEmits<{
  *   各模块通过 useModuleDialogGuard inject 并 watch，
  *   切换模块时同步关闭旧模块的所有 Teleport 弹窗，杜绝残留覆盖 */
 provide(MODULE_DIALOG_GUARD_KEY, toRef(props, "currentModule"));
+
+/* ===== 离场几何钉定（根治「中枢离场瞬间横向跳变 + 淡出突兀」） =====
+ *
+ * 成因（结构性）：中枢的面板模式（panel-active）收起 Dock 并让舞台全幅
+ *   （.workspace.dock-floating → .stage margin-left:0）。离开中枢时 Dock 复位，
+ *   舞台左缘在同一帧内收 72px（stage-margin-instant 使其即时生效）。离场元素为
+ *   absolute inset:0，随舞台一起被右移并压窄 —— 量子面板的圆环与三卫星在淡出
+ *   起点就被整体推移/重新居中，读作「突然一跳后消失」，而非「消散」。
+ *
+ * 根治：切换前（DOM 尚未 patch 的 pre 阶段，见 MainView）量取离场元素的视口
+ *   矩形；离场钩子里以 fixed 定位把它钉在原位。此后：
+ *     - 离场编排全程几何恒定（Canvas 的 ResizeObserver 不触发、圆环不重居中）；
+ *     - 新模块按最终布局挂载（自身无跳变，只在交叉淡入中浮现）；
+ *     - 仅「离开中枢」需要钉定（唯一会改变舞台边距的模块），其余切换零额外开销。
+ * 生命周期：leave-cancelled 复位内联样式（快速往返会取消离场并复用该元素）。
+ */
+const stageRef = ref<HTMLElement | null>(null);
+
+interface StagedLeave { el: HTMLElement; rect: DOMRect }
+/** 切换前量取的离场元素与视口矩形（一次性消费） */
+let stagedLeave: StagedLeave | null = null;
+
+/** 由 MainView 在当前模块变化的 pre 阶段调用（此时舞台尚为旧布局） */
+function captureOutgoing(): void {
+  const stage = stageRef.value;
+  if (!stage) return;
+  const children = stage.children;
+  for (let i = 0; i < children.length; i++) {
+    const el = children[i] as HTMLElement;
+    // 跳过仍在离场的旧模块（快速连续切换时舞台内会有多个子元素）
+    if (el.classList.contains("module-switch-leave-active")) continue;
+    stagedLeave = { el, rect: el.getBoundingClientRect() };
+    return;
+  }
+}
+
+/** 离场钩子：把量取到的几何钉死在视口原位（inline 覆盖过渡类的 absolute inset:0） */
+function onStageBeforeLeave(el: Element): void {
+  const staged = stagedLeave;
+  stagedLeave = null;
+  if (!staged || staged.el !== el) return;
+  const s = (el as HTMLElement).style;
+  s.position = "fixed";
+  s.left = `${staged.rect.left}px`;
+  s.top = `${staged.rect.top}px`;
+  s.width = `${staged.rect.width}px`;
+  s.height = `${staged.rect.height}px`;
+  s.right = "auto";
+  s.bottom = "auto";
+  /* 钉定后脱离 .stage 的 overflow 裁剪：复刻舞台圆角。用 clip-path 而非
+     overflow:hidden —— 后者会移除分区视图的纵向滚动条，使内容横向重排
+     （一个像素级跳变），恰好是在消灭的那种突变。clip-path 不参与布局。 */
+  s.borderRadius = "var(--radius)";
+  s.clipPath = "inset(0 round var(--radius))";
+}
+
+/** 离场被取消（元素被复用）：撤销钉定，恢复常规布局参与 */
+function onStageLeaveCancelled(el: Element): void {
+  const s = (el as HTMLElement).style;
+  s.position = "";
+  s.left = "";
+  s.top = "";
+  s.width = "";
+  s.height = "";
+  s.right = "";
+  s.bottom = "";
+  s.borderRadius = "";
+  s.clipPath = "";
+}
+
+onBeforeUnmount(() => {
+  stagedLeave = null;
+});
+
+defineExpose({ captureOutgoing });
 
 /* 首次点击模块延迟根治：挂载后空闲期预热全部分包
  *
@@ -136,5 +215,32 @@ onMounted(() => {
 }
 .module-switch-leave-to {
   opacity: 0;
+}
+
+/* ===== 中枢模块专属离场：先驻留、后加速消散 =====
+ * 通用离场（0.18s linear）对中枢这类「全幅 Canvas 构图」过快：圆环与三卫星
+ * 在不到 11 帧内均匀褪尽，读作硬切。中枢改为专属包络：
+ *   0 → 26%（≈110ms）仅褪去 7% —— 构图先「驻留」一息，让新模块显影在
+ *   其上层展开；随后 26% → 100% 以加速曲线收束，末段速度最大但不留硬边。
+ * 时长与几何钉定（见脚本）配合：离场元素全程停在自己的原位，
+ * 叠加 security/qd-panel.css 的引力内缩（同一 --stage-leave-dur-hub）。
+ * Vue 以根动画 animationend 判定卸载 → 子树编排（≤ 根时长）必不被截断。
+ * 更长的离场窗口内交出命中：旧模块不得拦截新模块的点击。 */
+.module-switch-leave-active.security-center {
+  animation: hub-dissolve-out var(--stage-leave-dur-hub, 0.42s) linear forwards;
+  pointer-events: none;
+}
+@keyframes hub-dissolve-out {
+  0% {
+    opacity: 1;
+    animation-timing-function: cubic-bezier(0.4, 0, 0.7, 0.55);
+  }
+  26% {
+    opacity: 0.93;
+    animation-timing-function: cubic-bezier(0.33, 0, 0.62, 1);
+  }
+  100% {
+    opacity: 0;
+  }
 }
 </style>

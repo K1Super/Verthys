@@ -26,7 +26,7 @@
       :class="{ active: currentModule === m.id }"
       @click="$emit('switch', m.id)"
     >
-      <span class="dock-icon" v-html="m.icon"></span>
+      <SafeSvgIcon class="dock-icon" :source="m.icon" />
       <span class="dock-label">{{ m.label }}</span>
     </button>
   </nav>
@@ -34,6 +34,7 @@
 
 <script setup lang="ts">
 import { modules } from "../../composables/useModuleNavigation";
+import SafeSvgIcon from "../common/SafeSvgIcon.vue";
 
 defineProps<{
   currentModule: string;

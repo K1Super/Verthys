@@ -22,80 +22,46 @@ use crate::dll_hash;
 use crate::util::path::sanitize_path;
 use tauri::Manager;
 
-/// 校验 verthys.dll 的 SHA-256 哈希是否与编译时嵌入值一致
+/// 校验 verthys.dll 的 SHA-256 是否与编译时嵌入值一致。
 ///
-/// 该函数在进程启动时调用，用于检测 DLL 是否被意外替换。
-/// 校验失败仅记录安全警告日志，不阻断启动流程，原因如下：
-/// - 增量编译、代码签名、构建顺序可能导致实际哈希与嵌入值不一致
-/// - 严格阻断会造成生产环境不可用，违背可用性优先原则
-/// - 运维人员应通过日志审计发现异常，而非依赖运行时阻断
+/// 该函数在 worker 启动预检中调用，用于检测 DLL 是否被替换。
+/// Release 构建必须存在嵌入哈希：缺失即视为构建契约失效并拒绝启动；
+/// 开发构建允许未构建 C 核心时跳过，仅记录警告。
 ///
 /// # 参数
 /// - `dll_path`：DLL 文件绝对路径
 ///
 /// # 返回
-/// - `Ok(())`：校验通过或跳过（文件不存在、未嵌入哈希等）
-/// - 不返回错误，所有异常情况均以日志记录并静默通过
+/// - `Ok(())`：摘要一致，或开发构建无可用基线
+/// - `Err(String)`：读取失败、Release 缺少基线或摘要不一致
 pub fn verify_dll_integrity(dll_path: &str) -> Result<(), String> {
     use sha2::{Digest, Sha256};
 
     let embedded_hash = dll_hash::DLL_HASH;
-    if embedded_hash.is_none() {
-        log::warn!("[DLL 校验] 编译时未嵌入 DLL 哈希，跳过校验（可能构建顺序异常）");
-        return Ok(());
-    }
-
-    let expected = embedded_hash.unwrap();
-    let data = match std::fs::read(dll_path) {
-        Ok(d) => d,
-        Err(e) => {
-            log::warn!("[DLL 校验] 读取 DLL 失败，跳过校验: {}", e);
+    let Some(expected) = embedded_hash else {
+        if cfg!(debug_assertions) {
+            log::warn!("[DLL 校验] 编译时未嵌入 DLL 哈希，开发构建跳过校验");
             return Ok(());
         }
+        log::error!("[DLL 校验] Release 构建缺少 DLL 哈希基线，拒绝启动 worker");
+        return Err("DLL 完整性基线缺失，无法校验加密核心".into());
     };
+
+    let data = std::fs::read(dll_path)
+        .map_err(|e| format!("读取 DLL 失败，无法完成完整性校验: {}", e))?;
     let mut hasher = Sha256::new();
     hasher.update(&data);
     let actual = format!("{:x}", hasher.finalize());
 
     if actual != expected {
-        // 修复：dev 环境哈希不匹配强制阻断（根治 worker 0xC0000005 崩溃）
-        //
-        // 原缺陷：哈希不匹配仅 warn 不阻断（return Ok），导致过期 DLL 被加载。
-        //   典型场景：path_resolver 因路径深度错误回退到 target/debug/verthys.dll
-        //   （7/30 构建，VerthysSummaryRecord 80 字节布局，无 slot_state），而 worker
-        //   exe 为最新（88 字节布局，含 slot_state）。FFI 布局不匹配导致
-        //   Verthys_ScanSummaryFetch 返回的结构体字段错位 → rec.name 指针读到垃圾值
-        //   → std::slice::from_raw_parts 解引用 0x0 → worker 0xC0000005 崩溃 →
-        //   后续 verthys_derive_global_key/verthys_verify_global_key IPC 全部失败 →
-        //   用户看到"无法初始化密钥/无法身份验证"。
-        //
-        // 根治策略（分层阻断）：
-        //   - dev 环境（debug_assertions）：哈希不匹配返回 Err，worker_controller
-        //     返回 IntegrityViolation 明确错误，前端展示通用提示，引导重建/同步
-        //     DLL，而非静默加载过期副本导致 worker 崩溃。build.rs 编译时计算
-        //     build/core/Release/verthys.dll 哈希嵌入 exe，dev 环境加载该 DLL
-        //     哈希必然匹配，不匹配即说明加载了过期/错误副本，必须阻断。
-        //   - 生产环境（release）：保持 warn 不阻断。代码签名、构建顺序可能导致
-        //     哈希漂移，严格阻断会造成生产不可用，违背可用性优先原则。
-        if cfg!(debug_assertions) {
-            log::error!(
-                "[DLL 校验] DLL 哈希不匹配（dev 环境强制阻断）expected={} actual={} — \
-                 拒绝加载，防止 FFI 布局不匹配导致 worker 崩溃",
-                expected,
-                actual
-            );
-            // 返回脱敏错误（不含哈希值，符合"禁止输出错误具体信息"约束）
-            return Err(
-                "DLL 完整性校验失败：加载的加密核心与编译时不一致，请重新编译或同步 Release 版本"
-                    .into(),
-            );
-        }
-        log::warn!(
-            "[DLL 校验] DLL 哈希不匹配（安全警告）expected={} actual={} — 已记录，继续启动",
+        // 失败关闭：哈希漂移可能来自替换、损坏或产物不同步，
+        // 三者都无法保证 FFI 布局与协议一致，禁止继续加载。
+        log::error!(
+            "[DLL 校验] DLL 哈希不匹配 expected={} actual={}，拒绝加载",
             expected,
             actual
         );
-        return Ok(());
+        return Err("DLL 完整性校验失败：加密核心与编译时基线不一致".into());
     }
 
     log::info!("[DLL 校验] DLL 哈希校验通过: {}", expected);

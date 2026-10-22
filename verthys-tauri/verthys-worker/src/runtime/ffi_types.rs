@@ -70,6 +70,7 @@ pub(crate) type VerthysAddRecordFn =
     unsafe extern "C" fn(VerthysHandle, *const VerthysRecordC, *mut u64) -> u32;
 pub(crate) type VerthysGetRecordFn =
     unsafe extern "C" fn(VerthysHandle, u64, *mut VerthysRecordC) -> u32;
+pub(crate) type VerthysClearRecordCacheFn = unsafe extern "C" fn(VerthysHandle) -> u32;
 pub(crate) type VerthysDeleteRecordFn = unsafe extern "C" fn(VerthysHandle, u64) -> u32;
 pub(crate) type VerthysDeleteRecordsFn = unsafe extern "C" fn(VerthysHandle, *const u64, usize) -> u32;
 pub(crate) type VerthysExportFn =

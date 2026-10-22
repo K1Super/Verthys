@@ -795,6 +795,14 @@ pub async fn verthys_unlock(
         usb_rebind_confirmed.unwrap_or(false),
     )?;
 
+    // 路径授权：worker 只接受宿主在本次操作前签发的 exact-path 能力。
+    state
+        .authorize_worker_path("unlock", "read", &verthys_path)
+        .map_err(|e| {
+            log::error!("[verthys_unlock] 路径授权失败: {}", e);
+            "打开加密库失败（路径未授权）".to_string()
+        })?;
+
     let req_str = Zeroizing::new(
         serde_json::to_string(&UnlockReq {
             op: "unlock",
@@ -1133,6 +1141,9 @@ pub async fn verthys_create(
             preset_name,
             create_timeout.as_secs()
         );
+        state
+            .authorize_worker_path("create_with_preset", "write", &verthys_path)
+            .map_err(|e| format!("创建加密库失败（路径未授权）: {}", e))?;
         let create_req = Zeroizing::new(
             serde_json::to_string(&CreateWithPresetReq {
                 op: "create_with_preset",
@@ -1196,6 +1207,9 @@ pub async fn verthys_create(
             "[verthys_create] 步骤 3/3: unlock（重新打开, 超时={}s）",
             lock_unlock_timeout.as_secs()
         );
+        state
+            .authorize_worker_path("unlock", "read", &verthys_path)
+            .map_err(|e| format!("创建加密库失败（步骤3路径未授权）: {}", e))?;
         let unlock_req2 = Zeroizing::new(
             serde_json::to_string(&UnlockReq {
                 op: "unlock",
@@ -2011,6 +2025,10 @@ pub async fn verthys_export(
 
     let password = Zeroizing::new(password);
 
+    state
+        .authorize_worker_path("export", "write", &export_path)
+        .map_err(|e| format!("导出路径未授权: {}", e))?;
+
     let req_str = Zeroizing::new(
         serde_json::to_string(&PathPasswordReq {
             op: "export",
@@ -2044,6 +2062,10 @@ pub async fn verthys_import(
     }
 
     let password = Zeroizing::new(password);
+
+    state
+        .authorize_worker_path("import", "read", &import_path)
+        .map_err(|e| format!("导入路径未授权: {}", e))?;
 
     let req_str = Zeroizing::new(
         serde_json::to_string(&PathPasswordReq {

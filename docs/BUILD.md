@@ -8,7 +8,7 @@
 
 ## 1. 仅 Windows 平台
 
-Verthys 4.1.2 仅支持 Windows / MSVC / x64：构建脚本固定使用 `VERTHYS_VS_GENERATOR`（默认 `Visual Studio 18 2026`）+ `-A x64`，产物命名含 `x86_64-pc-windows-msvc`；工作流 `core.yml` 用 `ilammy/msvc-dev-cmd@v1`（`arch: x64`）。不存在其他平台的构建脚本。
+Verthys 4.1.3 仅支持 Windows / MSVC / x64：构建脚本固定使用 `VERTHYS_VS_GENERATOR`（默认 `Visual Studio 18 2026`）+ `-A x64`，产物命名含 `x86_64-pc-windows-msvc`；工作流 `core.yml` 用 `ilammy/msvc-dev-cmd@v1`（`arch: x64`）。不存在其他平台的构建脚本。
 
 ## 2. 构建矩阵（参数抄自 build_production.ps1:22-29）
 

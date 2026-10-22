@@ -2,7 +2,7 @@
 
 > Verthys 全部工程文档的总索引，按角色（新成员/开发者/发布者/安全审计）分组导航，定位任何主题的唯一入口。
 >
-> Last updated: 2026-09-20 · 维护人：K1Super
+> Last updated: 2026-10-22 · 维护人：K1Super
 
 本目录的组织标准由 [DOCUMENTATION_CHECKLIST.md](DOCUMENTATION_CHECKLIST.md)（文档"目录宪法"）定义；工程刚性底线见 [ENGINEERING_CONSTRAINTS.md](ENGINEERING_CONSTRAINTS.md)。历史源稿与交付报告在 [archive/](archive/README.md)，已整合进标准文档，不再直接维护。
 
@@ -33,6 +33,7 @@
 - 构建指南：[BUILD.md](BUILD.md)
 - 部署与打包：[DEPLOYMENT.md](DEPLOYMENT.md)
 - 发版流程：[RELEASE.md](RELEASE.md)
+- 更新系统（权威）：[updater/README.md](updater/README.md)
 - 升级与迁移：[MIGRATION.md](MIGRATION.md)
 - 版本变更记录：[../CHANGELOG.md](../CHANGELOG.md)
 
@@ -71,6 +72,7 @@
 | THIRD_PARTY.md | 依赖与供应链 | P1 |
 | BUILD.md | 构建指南与常见错误 | P1 |
 | RELEASE.md | 发版流程 | P1 |
+| updater/README.md | 更新系统实施文档入口（本机实施 + 服务器部署） | P0 |
 | MIGRATION.md | 升级与迁移 | P1 |
 | GLOSSARY.md | 术语表 | P1 |
 | ../CONTRIBUTING.md | 贡献指南 | P1 |

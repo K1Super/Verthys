@@ -1810,20 +1810,27 @@ export async function securityGetPresetConfig(preset: SecurityPresetCode): Promi
 
 /** 运行时切换安全预设：后端会话授权 → 原子落盘受信文件 → worker →
  *  C 层双缓冲切档（0/1/2 档），成功后返回新档真实配置；失败抛错（明确错误码）。
- *  CUSTOM(3) 无 C 层档位：仅落盘自定义特性并返回其配置，会话层开关由调用方组合。 */
+ *  CUSTOM(3) 无 C 层档位：落盘自定义特性与空闲锁定时长，会话层开关由调用方组合。 */
 export async function securityApplyPreset(
   code: 0 | 1 | 2 | 3,
   features?: PresetFeatures,
+  customSessionTimeoutMinutes?: number,
 ): Promise<PresetConfig> {
-  return await ipc<PresetConfig>("security_apply_preset", { code, features });
+  return await ipc<PresetConfig>("security_apply_preset", {
+    code,
+    features,
+    customSessionTimeoutMinutes,
+  });
 }
 
 /** 受信持久化的预设状态（后端权威副本）
  *  code: 0=BALANCED, 1=SECURE, 2=PERFORMANCE, 3=CUSTOM
- *  customFeatures: 仅 code=3 时存在 */
+ *  customFeatures: 仅 code=3 时存在
+ *  customSessionTimeoutMinutes: 仅 code=3 时存在（空闲锁定时长，分钟） */
 export interface PresetPersistState {
   code: number;
   customFeatures?: PresetFeatures | null;
+  customSessionTimeoutMinutes?: number | null;
 }
 
 /** 受信持久化读取响应：state 为权威副本（无配置时 null）；

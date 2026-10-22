@@ -138,6 +138,8 @@ export {
   touchSession,
   setSessionTimeout,
   getSessionTimeout,
+  getSessionRemainingMs,
+  sessionIdleDeadlineRef,
   setSessionLockEnabled,
   isSessionLockEnabled,
   applySecurityPreset,
@@ -150,6 +152,7 @@ export {
   awaitLockAllIfInProgress,
   securityPresetRef,
   sessionLockEnabledRef,
+  customSessionMinutesRef,
   securityHardeningFailedRef,
 } from "../session/security-session";
 

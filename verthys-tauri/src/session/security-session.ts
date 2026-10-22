@@ -15,9 +15,9 @@ import {
   verthysClearGlobalKey, verthysLock, verthysLockPersist, workerDestroy,
   type SecurityPresetCode, type BruteForceCheckResponse, type PresetFeatures,
 } from "../lib/verthys";
-import { ref } from "vue";
+import { ref, readonly } from "vue";
 import { isTauriEnvironment } from "../utils/tauri_env";
-import { keyState, setCurrentVerthysPath, loadCustomFeatures, saveSecurityPreset, saveCustomFeatures, loadSecurityPreset, resetAllState } from "../state/key_state";
+import { keyState, setCurrentVerthysPath, loadCustomFeatures, saveSecurityPreset, saveCustomFeatures, saveCustomSessionMinutes, normalizeCustomSessionMinutes, loadSecurityPreset, resetAllState } from "../state/key_state";
 import { PRESET_SESSION_TIMEOUT_MS, SECURITY_PRESET_KEY, CUSTOM_FEATURES_KEY } from "../constants/key_manager_const";
 import { withTimeout } from "../utils/promise_utils";
 import type { BruteForceGateResult } from "../types/key_manager";
@@ -30,6 +30,9 @@ export const securityPresetRef = keyState.securityPreset;
 
 // 导出 sessionLockEnabledRef 供 keyManager.ts 再导出（UI 据此展示空闲锁定状态）
 export const sessionLockEnabledRef = keyState.sessionLockEnabled;
+
+// 导出 customSessionMinutesRef 供 keyManager.ts 再导出（自定义档空闲锁定时长，分钟）
+export const customSessionMinutesRef = keyState.customSessionMinutes;
 
 /** 会话硬化 / 会话守卫是否处于降级状态
  *
@@ -45,29 +48,112 @@ export const securityHardeningFailedRef = ref(false);
 /** 会话空闲超时（毫秒），默认 30 分钟 */
 let sessionTimeoutMs = 30 * 60 * 1000;
 
+/** 在途定时器句柄（null = 未武装） */
 let sessionTimer: number | null = null;
 
-function clearSessionTimer(): void {
+/** 会话空闲截止时间（Date.now() 基准时间戳）；0 = 计时器未武装
+ *
+ * 单一事实源：真实锁定裁决与 UI 倒计时同源读取本值，
+ * 消除「真实计时器」与「UI 倒计时」两套时钟各自漂移的问题。 */
+const sessionDeadline = ref(0);
+
+/** 会话空闲截止时间（只读）：UI 倒计时据此同步，0 表示未武装 */
+export const sessionIdleDeadlineRef = readonly(sessionDeadline);
+
+/** 用户输入活动事件（passive 监听，零阻断）
+ *
+ * 会话空闲语义 = 无任何真实输入；焦点变化（focus）不算活动，
+ * 否则用户离开后仅切回窗口即可永久续期。 */
+const SESSION_ACTIVITY_EVENTS: (keyof WindowEventMap)[] = [
+  "pointerdown",
+  "pointermove",
+  "wheel",
+  "keydown",
+  "touchstart",
+];
+
+/** 活动重置节流窗口（毫秒）：高频指针事件每秒最多刷新一次截止时间 */
+const ACTIVITY_TOUCH_THROTTLE_MS = 1000;
+
+let activityWatchInstalled = false;
+let lastActivityTouchAt = 0;
+
+/** 全局输入活动 → 刷新空闲截止时间 */
+function onUserActivity(): void {
+  const now = Date.now();
+  if (now - lastActivityTouchAt < ACTIVITY_TOUCH_THROTTLE_MS) return;
+  lastActivityTouchAt = now;
+  touchSession();
+}
+
+/** 惰性装配全局活动监听（首次武装时装配，单例生命周期） */
+function installActivityWatch(): void {
+  if (activityWatchInstalled || typeof window === "undefined") return;
+  activityWatchInstalled = true;
+  for (const event of SESSION_ACTIVITY_EVENTS) {
+    window.addEventListener(event, onUserActivity, { passive: true });
+  }
+}
+
+/** 清除在途定时器句柄（不改变截止时间） */
+function clearTimerHandle(): void {
   if (sessionTimer !== null) {
     window.clearTimeout(sessionTimer);
     sessionTimer = null;
   }
 }
 
-function resetSessionTimer(): void {
-  clearSessionTimer();
-  // 空闲锁定关闭（自定义档显式关闭）时不武装计时器
-  if (!keyState.sessionLockEnabled.value) return;
+/** 按当前截止时间武装定时器；到点复核真实空闲时长后再执行锁定
+ *
+ * 复核的意义：
+ *   - 计时期间发生过输入 → 截止时间已前移 → 按新截止时间续排
+ *   - 系统休眠/后台节流导致回调延迟 → 真实空闲已达标 → 立即锁定
+ *   - 时钟回拨导致提前触发 → 剩余时间 > 0 → 续排，绝不误锁
+ */
+function armSessionDeadline(): void {
+  clearTimerHandle();
+  const armedDeadline = sessionDeadline.value;
+  if (armedDeadline === 0) return;
   sessionTimer = window.setTimeout(() => {
-    lockAll();
-  }, sessionTimeoutMs);
+    sessionTimer = null;
+    if (sessionDeadline.value === 0) return; // 等待期间已解除武装
+    if (sessionDeadline.value - Date.now() > 0) {
+      armSessionDeadline();
+      return;
+    }
+    void lockAll().catch((e) => {
+      console.error("[session] 空闲锁定执行失败", e);
+    });
+  }, Math.max(0, armedDeadline - Date.now()));
 }
 
-/** 触碰会话（任何用户操作都应调用，重置空闲计时） */
-export function touchSession(): void {
-  if (keyState.globalKeyReady.value) {
-    resetSessionTimer();
+function clearSessionTimer(): void {
+  clearTimerHandle();
+  if (sessionDeadline.value !== 0) sessionDeadline.value = 0;
+}
+
+function resetSessionTimer(): void {
+  if (typeof window === "undefined") return;
+  // 空闲锁定关闭（自定义档显式关闭）或会话未激活时不武装计时器
+  if (!keyState.sessionLockEnabled.value || !keyState.globalKeyReady.value) {
+    clearTimerHandle();
+    if (sessionDeadline.value !== 0) sessionDeadline.value = 0;
+    return;
   }
+  installActivityWatch();
+  sessionDeadline.value = Date.now() + sessionTimeoutMs;
+  armSessionDeadline();
+}
+
+/** 触碰会话（任何真实用户输入都应调用，空闲截止时间从当前时刻重新计算） */
+export function touchSession(): void {
+  resetSessionTimer();
+}
+
+/** 查询会话空闲剩余时间（毫秒）；未武装时返回完整超时 */
+export function getSessionRemainingMs(): number {
+  if (sessionDeadline.value === 0) return sessionTimeoutMs;
+  return Math.max(0, sessionDeadline.value - Date.now());
 }
 
 // 供 global-verthys.ts 调用
@@ -132,6 +218,8 @@ export function isSessionLockEnabled(): boolean {
  *  @param customOverride CUSTOM 档的显式特性集（可选）；缺省时读取本地
  *         缓存。显式传入使"应用自定义模板"链路避免先写缓存再读回的
  *         双写 —— 本地缓存只在后端应用成功后落一次（单一落盘点）。
+ *  @param customMinutesOverride CUSTOM 档空闲锁定时长（分钟，可选）；
+ *         缺省时取本地缓存值。恢复链传入后端受信值，保证与磁盘一致。
  *  @returns 该预设的配置详情（含各特性开关）；被超越时返回 null
  *  @throws 后端切档/落盘失败或超时时抛错（调用方以 withTimeout 兜底并提示）
  */
@@ -139,17 +227,22 @@ export async function applySecurityPreset(
   preset: SecurityPresetCode,
   issuedEpoch?: number,
   customOverride?: PresetFeatures,
+  customMinutesOverride?: number,
 ) {
   // 竞态仲裁：恢复链携带发起时版本号，应用前校验未被用户显式切换超越
   if (issuedEpoch !== undefined && issuedEpoch !== presetEpoch) {
     console.warn("[applySecurityPreset] 恢复结果已被用户切换超越，放弃应用");
     return null;
   }
-  // CUSTOM 档：后端落盘自定义特性（无 C 层档位），会话层开关组合实现
+  // CUSTOM 档：后端落盘自定义特性与空闲锁定时长（无 C 层档位），
+  // 会话层开关组合实现
   if (preset === 3) {
     const custom = customOverride ?? loadCustomFeatures();
+    const customMinutes = normalizeCustomSessionMinutes(
+      customMinutesOverride ?? keyState.customSessionMinutes.value,
+    );
     // 先后端落盘 + 返回权威配置；失败抛错，前端状态不变
-    const config = await securityApplyPreset(3, custom);
+    const config = await securityApplyPreset(3, custom, customMinutes);
 
     // 会话层硬化：剪贴板监听由专用开关独立控制（不再与空闲锁定合并为
     // 单一布尔——两能力互不牵连）；挂起锁定不向自定义档暴露。
@@ -174,8 +267,10 @@ export async function applySecurityPreset(
     keyState.securityPreset.value = preset;
     saveSecurityPreset(preset);
     saveCustomFeatures(custom);
-    // 自定义档：超时取档位常量，空闲锁定由特性开关决定
-    sessionTimeoutMs = PRESET_SESSION_TIMEOUT_MS[preset];
+    keyState.customSessionMinutes.value = customMinutes;
+    saveCustomSessionMinutes(customMinutes);
+    // 自定义档：超时取用户设置值，空闲锁定由特性开关决定
+    sessionTimeoutMs = customMinutes * 60 * 1000;
     setSessionLockEnabled(custom.session_lock_on_idle);
     return config;
   }
@@ -256,11 +351,19 @@ export async function restoreSecurityPreset(): Promise<PresetRestoreReport> {
   }
 
   if (backend && backend.code >= 0 && backend.code <= 3) {
-    // 后端有值：同步 CUSTOM 特性后真实应用（apply 入口按 epoch 做最终裁决）
+    // 后端有值：同步 CUSTOM 特性与空闲锁定时长后真实应用
+    // （apply 入口按 epoch 做最终裁决）
     if (backend.code === 3 && backend.customFeatures) {
       saveCustomFeatures(backend.customFeatures);
     }
-    await applySecurityPreset(backend.code as SecurityPresetCode, epochAtStart);
+    await applySecurityPreset(
+      backend.code as SecurityPresetCode,
+      epochAtStart,
+      undefined,
+      backend.code === 3
+        ? backend.customSessionTimeoutMinutes ?? undefined
+        : undefined,
+    );
     return { persistDirty };
   }
 

@@ -1,26 +1,27 @@
 /**
- * useSessionTimer.ts — 会话超时计时器 Composable
- *
- * 来源：SecurityCenter.vue 原 L1045-L1046, L1454-L1463, L1716（零行为变更提取）
+ * useSessionTimer.ts — 会话倒计时显示 Composable
  *
  * 职责：
- *   1. 管理会话剩余时间显示（sessionRemaining，毫秒，模板用于「会话空闲 N 分钟后自动锁定」）
- *   2. 提供核心函数：
- *      - startSessionTick：启动 1s 间隔计时器（仅显示，实际超时由 keyManager 管理）
- *      - stopSessionTick：停止计时器（供 onBeforeUnmount 调用）
- *      - resetSession：重置剩余时间（锁定后 / 预设切换后调用）
+ *   1. 把会话层的真实空闲截止时间投影为 UI 文本（sessionRemaining）
+ *   2. 1s 节拍仅在非低功耗档推进显示；idle/deep-idle 档暂停逐秒重算
+ *      （恢复瞬间按截止时间立即校正，显示值与真实空闲时间严格一致）
  *
- * 设计说明：
- *   - 计时器仅用于 UI 显示倒计时，不触发实际锁定（实际超时由 keyManager 守护）
- *   - globalKeyReady 为 true 时倒计时；归零后重置为 getSessionTimeout()（循环显示）
- *   - 空闲锁定关闭时倒计时冻结（顶部状态栏据此展示"已关闭"）
- *   - globalKeyReady 为 false 时不倒计时（未验证，无需显示）
+ * 设计（单一事实源）：
+ *   - 实际锁定裁决与显示同源于 security-session 的会话截止时间
+ *   - 用户活动刷新截止时间 → sessionIdleDeadlineRef 变化 → 显示即时同步
+ *   - 本 Composable 不维护本地倒计时计数、不做暂停补偿：
+ *     每次取值都是「截止时间 − 当前时刻」，不存在两套时钟漂移
  *
- * 设计：纯 Composable，globalKeyReady 通过 Ref 注入。计时器生命周期由调用方管理。
+ * 设计：纯 Composable，globalKeyReady / idleLockEnabled 通过 Ref 注入。
+ * 计时器生命周期由调用方管理（onMounted 启动 / onBeforeUnmount 停止）。
  */
 
 import { ref, watch, type Ref } from 'vue';
-import { getSessionTimeout } from '../../lib/keyManager';
+import {
+  getSessionRemainingMs,
+  getSessionTimeout,
+  sessionIdleDeadlineRef,
+} from '../../lib/keyManager';
 import { useGlobalIdleScheduler } from '../useGlobalIdleScheduler';
 
 /**
@@ -28,9 +29,9 @@ import { useGlobalIdleScheduler } from '../useGlobalIdleScheduler';
  * 所有外部依赖通过参数注入，保持 Composable 纯净可测试
  */
 export interface UseSessionTimerOptions {
-  /** 全局密钥是否已就绪（仅就绪时倒计时，归零后重置） */
+  /** 全局密钥是否已就绪（仅就绪时展示真实倒计时） */
   globalKeyReady: Ref<boolean>;
-  /** 会话空闲锁定开关（false = 不自动锁定，倒计时冻结不推进） */
+  /** 会话空闲锁定开关（false = 不自动锁定，显示完整超时） */
   idleLockEnabled: Ref<boolean>;
 }
 
@@ -49,58 +50,46 @@ export interface UseSessionTimerOptions {
  * ```
  */
 export function useSessionTimer(options: UseSessionTimerOptions) {
-  /* ===== 会话剩余时间（仅显示，实际超时由 keyManager 管理） ===== */
+  /* ===== 会话剩余时间（权威截止时间的投影，仅用于显示） ===== */
   const sessionRemaining = ref(getSessionTimeout());
   let sessionTick: number | null = null;
 
-  /* ===== 空闲治理 R5：订阅全局空闲档位 =====
-   * idle / deep-idle 档暂停 UI 倒计时更新（每秒响应式写入归零）；
-   * 恢复 active / settling 瞬间按暂停时长补偿并立即刷新，
-   * 显示值与真实流逝时间严格一致。 */
   const { level: idleLevel } = useGlobalIdleScheduler();
-  let pausedAtMs = 0;
 
-  watch(idleLevel, (newLevel, oldLevel) => {
-    const idleNow = newLevel === 'idle' || newLevel === 'deep-idle';
-    const wasIdle = oldLevel === 'idle' || oldLevel === 'deep-idle';
-    if (wasIdle && !idleNow) {
-      // 恢复：按暂停时长一次性补偿 + 立即刷新（倒计时进行中且已就绪）
-      if (
-        pausedAtMs > 0 &&
-        options.globalKeyReady.value &&
-        sessionRemaining.value > 0
-      ) {
-        const pausedElapsed = performance.now() - pausedAtMs;
-        sessionRemaining.value = Math.max(
-          0,
-          sessionRemaining.value - pausedElapsed,
-        );
-      }
-      pausedAtMs = 0;
-    } else if (!wasIdle && idleNow) {
-      pausedAtMs = performance.now();
+  /** 低功耗档：暂停逐秒重算（恢复时由 watch 立即校正） */
+  const isLowPowerIdle = () =>
+    idleLevel.value === 'idle' || idleLevel.value === 'deep-idle';
+
+  /** 从权威截止时间同步显示值
+   *  - 未就绪 / 空闲锁定关闭：显示完整超时（下一会话的默认值）
+   *  - 已就绪且已武装：按真实截止时间计算剩余 */
+  const syncRemaining = () => {
+    if (!options.globalKeyReady.value || !options.idleLockEnabled.value) {
+      sessionRemaining.value = getSessionTimeout();
+      return;
     }
+    sessionRemaining.value = getSessionRemainingMs();
+  };
+
+  /* 活动重置 / 武装 / 解除武装 → 截止时间变化 → 显示即时同步 */
+  watch(sessionIdleDeadlineRef, syncRemaining);
+
+  /* 会话就绪态或空闲锁定开关变化 → 立即同步 */
+  watch([options.globalKeyReady, options.idleLockEnabled], syncRemaining);
+
+  /* 低功耗档恢复 → 立即按截止时间校正（不依赖暂停时长补偿） */
+  watch(idleLevel, (level) => {
+    if (level !== 'idle' && level !== 'deep-idle') syncRemaining();
   });
 
-  /** 空闲锁定开关切换：恢复启用时按当前超时刷新显示（关闭期间倒计时冻结） */
-  watch(options.idleLockEnabled, (enabled) => {
-    if (enabled) sessionRemaining.value = getSessionTimeout();
-  });
-
-  /** 启动会话计时器（1s 间隔，仅更新 UI 显示；空闲档/锁定关闭时跳过更新）
+  /** 启动会话计时器（1s 间隔，仅更新 UI 显示；低功耗档/锁定关闭时跳过更新）
    *  幂等：重复调用不会叠加第二个 interval（旧实现会叠加，倒计时成倍加速） */
   const startSessionTick = () => {
     if (sessionTick !== null) return;
     sessionTick = window.setInterval(() => {
-      if (idleLevel.value === 'idle' || idleLevel.value === 'deep-idle') {
-        return; // 空闲档暂停 UI 更新（恢复时 watch 立即补偿刷新）
-      }
-      if (!options.idleLockEnabled.value) return; // 空闲锁定关闭：倒计时不推进
-      if (options.globalKeyReady.value && sessionRemaining.value > 0) {
-        sessionRemaining.value = Math.max(0, sessionRemaining.value - 1000);
-      } else if (options.globalKeyReady.value) {
-        sessionRemaining.value = getSessionTimeout();
-      }
+      if (isLowPowerIdle()) return; // 低功耗档暂停 UI 更新（恢复时 watch 立即校正）
+      if (!options.idleLockEnabled.value || !options.globalKeyReady.value) return;
+      sessionRemaining.value = getSessionRemainingMs();
     }, 1000);
   };
 
@@ -112,9 +101,9 @@ export function useSessionTimer(options: UseSessionTimerOptions) {
     }
   };
 
-  /** 重置会话剩余时间（锁定后 / 预设切换后调用，同步本地显示） */
+  /** 立即按权威截止时间校正显示（预设切换 / 锁定后调用） */
   const resetSession = () => {
-    sessionRemaining.value = getSessionTimeout();
+    syncRemaining();
   };
 
   return {

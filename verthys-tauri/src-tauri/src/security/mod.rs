@@ -39,6 +39,45 @@ pub mod trace_cleanup;
 pub mod usb_guard;
 pub mod window_affinity;
 
+/// 清除可被外部注入的 WebView2 启动环境变量。
+///
+/// 必须在 WebView2 初始化之前调用；幂等，可重复调用。
+/// 仅移除进程环境块中的变量，不修改注册表或用户配置。
+pub fn harden_process_environment() {
+    if std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_some() {
+        std::env::remove_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS");
+        log::warn!("[security] 已清除启动环境变量: WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS");
+    }
+    if std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER").is_some() {
+        std::env::remove_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
+        log::warn!("[security] 已清除启动环境变量: WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
+    }
+    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_some() {
+        std::env::remove_var("WEBVIEW2_USER_DATA_FOLDER");
+        log::warn!("[security] 已清除启动环境变量: WEBVIEW2_USER_DATA_FOLDER");
+    }
+    if std::env::var_os("WEBVIEW2_RELEASE_CHANNEL_PREFERENCE").is_some() {
+        std::env::remove_var("WEBVIEW2_RELEASE_CHANNEL_PREFERENCE");
+        log::warn!("[security] 已清除启动环境变量: WEBVIEW2_RELEASE_CHANNEL_PREFERENCE");
+    }
+    if std::env::var_os("WEBVIEW2_CHANNEL_SEARCH_KIND").is_some() {
+        std::env::remove_var("WEBVIEW2_CHANNEL_SEARCH_KIND");
+        log::warn!("[security] 已清除启动环境变量: WEBVIEW2_CHANNEL_SEARCH_KIND");
+    }
+    if std::env::var_os("WEBVIEW2_PREFER_CANARY").is_some() {
+        std::env::remove_var("WEBVIEW2_PREFER_CANARY");
+        log::warn!("[security] 已清除启动环境变量: WEBVIEW2_PREFER_CANARY");
+    }
+    if std::env::var_os("WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER").is_some() {
+        std::env::remove_var("WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER");
+        log::warn!("[security] 已清除启动环境变量: WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER");
+    }
+    if std::env::var_os("WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER").is_some() {
+        std::env::remove_var("WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER");
+        log::warn!("[security] 已清除启动环境变量: WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER");
+    }
+}
+
 /* ====================================================================== *
  *  统一剪贴板清空入口                                *
  *                                                                        *

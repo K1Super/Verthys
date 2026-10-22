@@ -8,6 +8,8 @@
 use std::io::{self, Write};
 use std::os::raw::c_void;
 
+use zeroize::Zeroize;
+
 use super::ffi_types::VerthysUnlockProgressC;
 
 /* 解锁进度回调（C → Rust → stdout JSON 行）
@@ -73,8 +75,17 @@ unsafe fn unlock_progress_cb_inner(progress: *const VerthysUnlockProgressC) {
         r#"{{"ok":true,"op":"unlock_progress","stage":{},"percent":{},"elapsed_ms":{},"message":"{}"}}"#,
         p.stage, p.percent, p.elapsed_ms, message_escaped,
     );
+    /* 进度行必须带会话签名；签名失败时不写出，由宿主空闲超时收敛。 */
+    let mut sealed = match super::ipc_auth::seal_progress(&json) {
+        Ok(line) => line,
+        Err(e) => {
+            crate::log::init_diag!("[worker] 进度签名失败，丢弃本条进度: {}", e);
+            return;
+        }
+    };
     let stdout = io::stdout();
     let mut lock = stdout.lock();
-    let _ = writeln!(lock, "{}", json);
+    let _ = writeln!(lock, "{}", sealed);
     let _ = lock.flush();
+    sealed.zeroize();
 }

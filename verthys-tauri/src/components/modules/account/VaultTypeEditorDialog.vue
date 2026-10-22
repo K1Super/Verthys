@@ -84,7 +84,7 @@
                 v-tip="iconId"
                 @click="active.icon = iconId"
               >
-                <span class="icon-chip-mark" aria-hidden="true" v-html="resolveVaultIcon(iconId)"></span>
+                <SafeSvgIcon class="icon-chip-mark" :source="resolveVaultIcon(iconId)" />
               </button>
             </div>
           </div>
@@ -248,6 +248,7 @@ import { VAULT_TONE_RGB_VARS } from "../../../lib/vault_item_card";
 import { saveCustomVaultTypes, validateVaultTypeDefs } from "../../../lib/vault_item_type_store";
 import VerthysDialog from "../../common/verthys-ui/VerthysDialog.vue";
 import ConfirmDelete from "../../common/verthys-ui/ConfirmDelete.vue";
+import SafeSvgIcon from "../../common/SafeSvgIcon.vue";
 
 /** 卡片次行字段上限（与卡片映射、存储截断同取单一权威源） */
 const MAX_CARD_FIELDS = MAX_VAULT_CARD_FIELDS;
