@@ -209,6 +209,7 @@ fn digest_hex(bytes: &[u8; 32]) -> String {
 ///     构建期基线一致；任一条件不满足即拒绝加载，防止宿主传入路径被替换
 ///     后加载被篡改的模块。
 ///   - Debug：构建期无稳定基线，跳过哈希比对，仅记录摘要。
+///
 /// 返回值为规范化后的绝对路径，后续加载必须使用该路径，避免相对路径重解析。
 /// 副作用：完整读取一次 DLL 字节；不回写、不修改文件。
 fn verify_dll_integrity(dll_path: &str) -> Result<std::path::PathBuf, String> {

@@ -156,7 +156,10 @@ fn resolve_wal_path(verthys_path: &str) -> PathBuf {
             if snapshot.exists() {
                 let snap_primary = container_layout::wal_snapshot_file_for(verthys_path);
                 if let Err(e) = container_layout::migrate_legacy_file(&snapshot, &snap_primary) {
-                    log::warn!("[wal] 旧布局快照迁移失败（快照缺失按全量重放等价处理）: {}", e);
+                    log::warn!(
+                        "[wal] 旧布局快照迁移失败（快照缺失按全量重放等价处理）: {}",
+                        e
+                    );
                 }
             }
             log::info!("[wal] 旧布局 WAL 已收口至附属数据目录");
@@ -664,8 +667,7 @@ pub fn remove_all(verthys_path: &str) -> Result<(), String> {
         "旧布局 WAL 快照临时文件",
     )?;
 
-    let _ =
-        container_layout::remove_dir_if_empty(&container_layout::sidecar_dir_for(verthys_path));
+    let _ = container_layout::remove_dir_if_empty(&container_layout::sidecar_dir_for(verthys_path));
     Ok(())
 }
 
@@ -1336,7 +1338,10 @@ mod tests {
 
         // 删除墓碑：释放 gone 的去重锁
         append_removed(&verthys_path, &["gone".to_string()]).unwrap();
-        assert!(!load(&verthys_path).unwrap().committed_hashes.contains("gone"));
+        assert!(!load(&verthys_path)
+            .unwrap()
+            .committed_hashes
+            .contains("gone"));
 
         // 会话 B：创建（截断 WAL）→ 以失败结束（不 compact，原样保留 WAL）
         let session = ImportSession::new(&verthys_path, "imp-b").unwrap();

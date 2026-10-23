@@ -115,9 +115,7 @@ fn read_preset_at(verthys_path: &str) -> Result<Option<PresetPersist>, String> {
 /// 按指定容器路径读取受信预设配置（解锁期使用：不依赖路径指针，
 /// 避免指针滞后于本次解锁容器导致的读错文件）。
 /// 路径为空或文件不存在返回 Ok(None)；文件损坏返回 Err。
-pub fn read_preset_persist_for_path(
-    verthys_path: &str,
-) -> Result<Option<PresetPersist>, String> {
+pub fn read_preset_persist_for_path(verthys_path: &str) -> Result<Option<PresetPersist>, String> {
     if verthys_path.is_empty() {
         return Ok(None);
     }

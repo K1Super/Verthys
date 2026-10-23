@@ -84,7 +84,7 @@
 
 [package]
 name = "verthys-tauri"
-version = "4.1.3"
+version = "4.1.7"
 description = "Verthys 私密数据管理器"
 authors = ["Verthys"]
 edition = "2021"
@@ -97,6 +97,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 default = []
 # 便携模式：数据目录重定向至 <exe_dir>/data，编译期固化，不可运行时切换。
 portable_mode = []
+# 仅用于本机更新链路自动化验证；正式发布构建不得启用。
+e2e_update = []
 
 # Lint 配置
 # linker_messages：MSVC 为 cdylib 生成导入库/导出对象时固定向 stdout 输出
@@ -141,6 +143,9 @@ windows = { version = "0.58", features = [
     "Win32_System_Ole",
     "Win32_System_Memory",
     "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Security",
@@ -182,6 +187,21 @@ tokio-util = { version = "0.7", features = ["rt"] }  # CancellationToken
 regex = "1.10"                                       # shm_name 白名单校验
 ts-rs = { version = "10", features = ["chrono-impl", "no-serde-warnings"] } # TypeScript 绑定生成
 tauri-plugin-updater = "2"
+# 更新流水线的独立校验依赖：签名复验、语义化版本比较、灰度安装标识
+minisign-verify = "=0.2.5"
+semver = "=1.0.28"
+uuid = { version = "=1.23.4", features = ["v4"] }
+# 安装包下载由本服务自行执行，以便统一超时、上限、取消与重定向策略；
+# TLS 后端与插件保持一致，避免同一进程出现两套证书根。
+reqwest = { version = "=0.13.4", default-features = false, features = [
+    "rustls-no-provider",
+    "stream",
+    "system-proxy",
+] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring"] }
+futures-util = "=0.3.32"
+# 日志导出使用标准 zip 容器；仅存储模式，不引入压缩算法依赖。
+zip = { version = "=4.6.1", default-features = false }
 
 # 修复 LNK1181: 无法打开输入文件 "windows.x.xx.x.lib"
 # 根因：dev profile 默认启用 incremental compilation，与 raw-dylib 导入库

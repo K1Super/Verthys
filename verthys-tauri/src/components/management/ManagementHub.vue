@@ -201,13 +201,14 @@ const FILAMENTS: Array<[number, number, number, number]> = [
 ];
 
 /* ===== 传播仪式节奏配置（单一数据源） =====
- * 传播 + 落定 = 720ms 总仪式时长；视图切换由传播完成事件驱动，
- * 引擎内禁止任何固定延时等待动画。 */
+ * 传播 + 落定 = 600ms 总仪式时长（用户裁定）；点击的即时反馈由光包起爆承担，
+ * 转场观感交由 mgmt-x 显影，仪式只需完成「已接收」的确认。
+ * 视图切换由传播完成事件驱动，引擎内禁止任何固定延时等待动画。 */
 const RITUAL_DURATION = {
   /** 光包传播时长（秒） */
-  propagation: 0.62,
+  propagation: 0.48,
   /** 落定时长（秒，光晕扩散 + 终点锚闪光渐熄） */
-  landing: 0.1,
+  landing: 0.12,
   /** 帧步进钳制上限（秒）：仅用于弹簧/衰减等物理积分，绝不参与进度计算 */
   maxPhysicsStep: 0.05,
 } as const;
@@ -306,6 +307,9 @@ let ctx: CanvasRenderingContext2D | null = null;
 /** 引擎墙钟：未钳制门控 dt 累积（秒），供相位与进度计算，时间流速恒为 1× */
 let clockSec = 0;
 let introTime = 0;
+/* 入场编排总窗（秒）：用户裁定 1s。单元错峰起势、约 0.94s 内全部落位；
+ * 与 mgmt-x 入场（0.40s）部分重叠，不额外增加路径等待。 */
+const INTRO_TOTAL = 1.0;
 let frameCount = 0;
 let avgFrameMs = 16.7;
 /** 上一许可帧墙钟（首帧守卫 — 首帧增量为 0） */
@@ -420,7 +424,7 @@ function onUp(i: number): void {
 }
 
 /* ===== 点击：能量爆发传播 → 进入管理界面 =====
- * 视图切换由传播完成事件驱动（传播 620ms + 落定 100ms 完整呈现后，
+ * 视图切换由传播完成事件驱动（传播 480ms + 落定 120ms 完整呈现后，
  * 双帧约定在落定渲染帧的下一帧 emit enter）；无固定延时。
  * 传播期间重复点击其他引导单元被仪式状态机幂等拒绝。 */
 function activate(i: number): void {
@@ -562,7 +566,7 @@ function frame(frameStep: number, wallClock: number): void {
 
   /* ---- 视差仲裁（hover P1 → 背景视差衰减 50%） ---- */
   const suppress = hoverN > 0 ? 0.5 : 1;
-  const introPar = introTime < 1.6 ? phase(introTime, 0.15, 1.0) : 1;
+  const introPar = introTime < INTRO_TOTAL ? phase(introTime, 0.12, 0.84) : 1;
   const px = parallaxX.v * suppress * introPar;
   const py = parallaxY.v * suppress * introPar;
 
@@ -584,7 +588,7 @@ function frame(frameStep: number, wallClock: number): void {
     springStep(boostSprings[i], dt);
     flash[i] *= Math.exp(-dt * 3.2);
 
-    const ip = introTime < 1.6 ? phase(introTime, 0.08 + i * 0.13, 0.78) : 1;
+    const ip = introTime < INTRO_TOTAL ? phase(introTime, 0.06 + i * 0.11, 0.66) : 1;
     const scale = (0.62 + 0.38 * ip) * scaleSprings[i].v;
     const tx = px * (5 + i * 1.6) + (cursorOn ? dx * 0.035 * prox : 0);
     const ty = py * (5 + i * 1.6) + (cursorOn ? dy * 0.035 * prox : 0);
@@ -603,7 +607,7 @@ function frame(frameStep: number, wallClock: number): void {
   ctx.globalCompositeOperation = 'lighter';
 
   // 尘埃场（多频漂移 + 光标视差 + 呼吸明暗）
-  const dustIntro = introTime < 1.6 ? phase(introTime, 0.1, 1.1) : 1;
+  const dustIntro = introTime < INTRO_TOTAL ? phase(introTime, 0.08, 0.92) : 1;
   for (let i = 0; i < moteActive; i++) {
     const m = motes[i];
     const mx = m.x01 * width + moteDrifts[m.dxi](clockSec) * 16 + px * 6 * m.depth;
@@ -619,7 +623,7 @@ function frame(frameStep: number, wallClock: number): void {
   // 能量丝链（中部向两端的绘制进度 + 闪光增强）
   for (let k = 0; k < FILAMENTS.length; k++) {
     const [, , , segs] = FILAMENTS[k];
-    const drawP = introTime < 1.6 ? phase(introTime, 0.32 + k * 0.1, 0.62) : 1;
+    const drawP = introTime < INTRO_TOTAL ? phase(introTime, 0.26 + k * 0.08, 0.54) : 1;
     if (drawP <= 0.02) continue;
     const half = Math.floor((segs * drawP) / 2);
     const fl = (flash[FILAMENTS[k][0]] + flash[FILAMENTS[k][1]]) * 0.5;

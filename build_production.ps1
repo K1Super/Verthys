@@ -19,7 +19,7 @@
 #   - 任一阶段失败立即终止，不继续后续阶段
 #
 # 用法:
-#   powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-NoPause]
+#   powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-NoPause] [-Profile local|production]
 #
 # 参数:
 #   -Clean       构建前清理所有构建目录
@@ -27,13 +27,26 @@
 #   -SkipWorker  跳过 worker 构建（二进制已存在时使用）
 #   -SkipTauri   跳过 Tauri 打包（仅构建组件时使用）
 #   -NoPause     失败/成功后不暂停等待 Enter（CI 场景使用；双击运行时不传此参数以便查看输出）
+#   -Profile     更新端点配置：local 仅回环验证，production 必须 HTTPS
+#   -UpdaterEndpoint production 清单 URL；也可用 VERTHYS_UPDATER_ENDPOINT
+#   -AllowLocal  允许以 local profile 打包（默认 production）
+#   -ReleaseNotes 更新说明；留空时由发布脚本生成默认说明
+#   -CompatAbiMin 兼容 ABI 下限；桥接发布显式传入，例如 0x000B
+#   -CompatAbiMax 兼容 ABI 上限；留空时使用当前核心 ABI
 
 param(
     [switch]$Clean,
     [switch]$SkipCore,
     [switch]$SkipWorker,
     [switch]$SkipTauri,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [ValidateSet("local", "production")]
+    [string]$Profile = "production",
+    [string]$UpdaterEndpoint = $env:VERTHYS_UPDATER_ENDPOINT,
+    [switch]$AllowLocal,
+    [string]$ReleaseNotes = "",
+    [string]$CompatAbiMin = "",
+    [string]$CompatAbiMax = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -148,6 +161,20 @@ if ($lockFiles) {
     $lockFiles | ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
     Write-Step "已清理 cargo 锁文件"
 }
+
+# ========== Updater boundary gate ==========
+# The updater plugin must stay a Rust-only dependency. If the webview gains its
+# command permissions it can install packages without the lock gate.
+Write-Stage "Stage 0.1: Updater boundary gate"
+$boundaryGate = Join-Path $ScriptRoot "ci\check_updater_boundary.ps1"
+if (-not (Test-Path $boundaryGate)) {
+    throw "Updater boundary gate script is missing: $boundaryGate"
+}
+& $boundaryGate
+if ($LASTEXITCODE -ne 0) {
+    throw "Updater boundary gate failed"
+}
+Write-OK "Updater boundary gate passed"
 
 # ========== 加载构建环境 ==========
 Write-Stage "阶段 0.5: 加载构建环境"
@@ -522,12 +549,54 @@ if (-not $SkipTauri) {
     Write-OK "更新签名密钥已注入"
 
     # 4.4 Tauri 打包（NSIS 安装包 + 更新签名）
-    Write-Step "npm run tauri build"
+    $nodeCmd = Get-Command node.exe -ErrorAction SilentlyContinue
+    if (-not $nodeCmd) {
+        throw "未找到 node.exe，无法校验更新 profile"
+    }
+    if ($Profile -eq "production") {
+        if ([string]::IsNullOrWhiteSpace($UpdaterEndpoint)) {
+            throw "production requires -UpdaterEndpoint or VERTHYS_UPDATER_ENDPOINT"
+        }
+        $endpointUri = $null
+        if (-not [Uri]::TryCreate($UpdaterEndpoint, [UriKind]::Absolute, [ref]$endpointUri) -or $endpointUri.Scheme -ne "https") {
+            throw "UpdaterEndpoint must be an absolute https URL"
+        }
+        $templateConfig = Join-Path $VerthysTauriDir "src-tauri\tauri.production.conf.json"
+        if (-not (Test-Path $templateConfig)) {
+            throw "missing production template: $templateConfig"
+        }
+        $generatedDir = Join-Path $ScriptRoot "build"
+        New-Item -ItemType Directory -Force -Path $generatedDir | Out-Null
+        $profileConfig = Join-Path $generatedDir "tauri.production.generated.conf.json"
+        $config = Get-Content -LiteralPath $templateConfig -Raw | ConvertFrom-Json
+        $config.plugins.updater.endpoints = @($UpdaterEndpoint)
+        $config.plugins.updater.channel = "stable"
+        $config.plugins.updater.dangerousInsecureTransportProtocol = $false
+        $config.plugins.updater.allowedDownloadHosts = @($endpointUri.Host)
+        $config | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $profileConfig -Encoding ASCII
+        $profileGateArgs = @($profileConfig, "--profile", "production", "--endpoint", $UpdaterEndpoint)
+    } else {
+        if (-not $AllowLocal) {
+            throw "local profile requires -AllowLocal"
+        }
+        $profileConfig = Join-Path $VerthysTauriDir "src-tauri\tauri.local.conf.json"
+        if (-not (Test-Path $profileConfig)) {
+            throw "missing local overlay: $profileConfig"
+        }
+        $profileGateArgs = @($profileConfig, "--profile", "local")
+    }
+    & $nodeCmd.Source (Join-Path $ScriptsDir "check_updater_profile.mjs") @profileGateArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "更新 profile 配置校验失败: $Profile"
+    }
+    Write-OK "更新 profile 配置校验通过: $Profile"
+
+    Write-Step "npm run tauri build (profile=$Profile)"
     Push-Location $VerthysTauriDir
     try {
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
-        $output = & npm run tauri build 2>&1
+        $output = & npm run tauri build -- --config $profileConfig 2>&1
         $tauriExit = $LASTEXITCODE
         $ErrorActionPreference = $prevEAP
         foreach ($line in $output) {
@@ -619,6 +688,56 @@ if (Test-Path $nsisDir) {
     if (-not $SkipTauri) {
         Write-Fail "NSIS 输出目录不存在"
         $allOk = $false
+    }
+}
+
+# 更新发布物料：签名清单 + 安装包副本 + 账本
+if (-not $SkipTauri -and $allOk -and (Test-Path $nsisDir)) {
+    # 目录会残留历史安装包；必须按根 VERSION 精确选取，否则会把旧包当作新版本发布。
+    $productVersion = ([System.IO.File]::ReadAllText((Join-Path $ScriptRoot "VERSION"))).Trim()
+    $installerName = "Verthys_${productVersion}_x64-setup.exe"
+    $installer = Get-Item (Join-Path $nsisDir $installerName) -ErrorAction SilentlyContinue
+    $signature = if ($installer) { Get-Item ("{0}.sig" -f $installer.FullName) -ErrorAction SilentlyContinue } else { $null }
+    if (-not $installer -or -not $signature) {
+        Write-Fail "missing installer or signature for release artifacts"
+        $allOk = $false
+    } else {
+        # 生产渠道在客户端强制 Authenticode；发布前先在本机复核系统信任链，
+        # 避免生成一份客户端必然拒绝的物料。
+        if ($Profile -eq "production") {
+            $authSignature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+            if ($authSignature.Status -ne "Valid") {
+                Write-Fail "production installer is not Authenticode trusted: $($authSignature.Status)"
+                $allOk = $false
+            } else {
+                Write-OK "Authenticode 签名有效: $($authSignature.SignerCertificate.Subject)"
+            }
+        }
+        $releaseEndpoint = if ($Profile -eq "production") { $UpdaterEndpoint } else { "http://127.0.0.1:8765/latest.json" }
+        $releaseArgs = @(
+            (Join-Path $ScriptsDir "release_update.mjs"),
+            "--installer", $installer.FullName,
+            "--signature", $signature.FullName,
+            "--endpoint", $releaseEndpoint,
+            "--channel", $(if ($Profile -eq "production") { "stable" } else { "local" }),
+            "--profile", $Profile
+        )
+        if (-not [string]::IsNullOrWhiteSpace($ReleaseNotes)) {
+            $releaseArgs += @("--notes", $ReleaseNotes)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($CompatAbiMin)) {
+            $releaseArgs += @("--compat-abi-min", $CompatAbiMin)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($CompatAbiMax)) {
+            $releaseArgs += @("--compat-abi-max", $CompatAbiMax)
+        }
+        & $nodeCmd.Source @releaseArgs
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "release artifact generation failed"
+            $allOk = $false
+        } else {
+            Write-OK "release artifacts generated"
+        }
     }
 }
 

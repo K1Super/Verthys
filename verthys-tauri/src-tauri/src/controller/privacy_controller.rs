@@ -112,7 +112,10 @@ impl PrivacyError {
             PrivacyError::NoTargetWindow => "未找到可保护的窗口".into(),
             PrivacyError::Affinity(msg) => format!("窗口保护设置失败: {}", msg),
             PrivacyError::VerifyMismatch { expected, actual } => {
-                format!("窗口保护回读不匹配（期望 0x{:X}，实际 0x{:X}）", expected, actual)
+                format!(
+                    "窗口保护回读不匹配（期望 0x{:X}，实际 0x{:X}）",
+                    expected, actual
+                )
             }
             PrivacyError::RolledBack { cause } => {
                 format!("保护失败，已还原到变更前状态（{}）", cause.detail())
@@ -153,7 +156,9 @@ pub struct Lease {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SlotState {
     Empty,
-    PendingAdoption { generation: Generation },
+    PendingAdoption {
+        generation: Generation,
+    },
     Active {
         generation: Generation,
         digest: [u8; 32],
@@ -554,7 +559,9 @@ impl PrivacyCoordinator {
     /// 取锁（锁中毒即取回内部数据继续：状态机自身是自洽的，
     /// 中毒只说明前一个持锁任务 panic，不应让整个保护能力失效）
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// 卡死收尸：过渡任务若异常终止而未落状态，状态机会停在过渡态；
@@ -747,10 +754,7 @@ impl PrivacyCoordinator {
                             self.audit.write(
                                 AuditEventType::PrivacyQuarantine,
                                 AuditResult::Failure,
-                                format!(
-                                    "开启成功后签发凭证失败，进入隔离（{}）",
-                                    cause.detail()
-                                ),
+                                format!("开启成功后签发凭证失败，进入隔离（{}）", cause.detail()),
                                 AuditExtensions::default().transition(my_id),
                             );
                             Err(PrivacyError::Quarantined)
@@ -840,9 +844,7 @@ impl PrivacyCoordinator {
                         AuditEventType::PrivacyModeChange,
                         AuditResult::Failure,
                         format!("保护失败，已还原到变更前状态（{}）", failure.cause.detail()),
-                        AuditExtensions::default()
-                            .transition(my_id)
-                            .rollback(true),
+                        AuditExtensions::default().transition(my_id).rollback(true),
                     );
                     Err(PrivacyError::RolledBack {
                         cause: Box::new(failure.cause),
@@ -1048,7 +1050,11 @@ impl PrivacyCoordinator {
     ///
     /// 所有失败路径统一走还原逻辑（不使用提前返回的错误传播），
     /// 还原以各自快照的原值为准（可能是"仅监视器"，而非"无保护"）。
-    fn apply_atomic(&self, targets: &[WindowTarget], value: u32) -> Result<ApplySuccess, ApplyFailure> {
+    fn apply_atomic(
+        &self,
+        targets: &[WindowTarget],
+        value: u32,
+    ) -> Result<ApplySuccess, ApplyFailure> {
         if targets.is_empty() {
             return Err(ApplyFailure {
                 cause: PrivacyError::NoTargetWindow,
@@ -1152,7 +1158,10 @@ impl PrivacyCoordinator {
             return Err(PrivacyError::NoTargetWindow);
         }
         for target in targets {
-            let step = self.ops.set(target.hwnd, value).and_then(|_| self.ops.get(target.hwnd));
+            let step = self
+                .ops
+                .set(target.hwnd, value)
+                .and_then(|_| self.ops.get(target.hwnd));
             match step {
                 Ok(actual) if actual == value => {}
                 Ok(actual) => {
@@ -1324,14 +1333,22 @@ fn native_retry_dialog(_message: &str) -> bool {
  *  Tauri 命令                                                             *
  * ====================================================================== */
 
-static ENABLE_LIMITER: Mutex<SlidingWindowLimiter> =
-    Mutex::new(SlidingWindowLimiter::new(Duration::from_secs(60), ENABLE_MAX_PER_MINUTE));
-static DISABLE_LIMITER: Mutex<SlidingWindowLimiter> =
-    Mutex::new(SlidingWindowLimiter::new(Duration::from_secs(60), DISABLE_MAX_PER_MINUTE));
-static ADOPT_LIMITER: Mutex<SlidingWindowLimiter> =
-    Mutex::new(SlidingWindowLimiter::new(Duration::from_secs(60), ADOPT_MAX_PER_MINUTE));
-static RECONCILE_LIMITER: Mutex<SlidingWindowLimiter> =
-    Mutex::new(SlidingWindowLimiter::new(Duration::from_secs(60), RECONCILE_MAX_PER_MINUTE));
+static ENABLE_LIMITER: Mutex<SlidingWindowLimiter> = Mutex::new(SlidingWindowLimiter::new(
+    Duration::from_secs(60),
+    ENABLE_MAX_PER_MINUTE,
+));
+static DISABLE_LIMITER: Mutex<SlidingWindowLimiter> = Mutex::new(SlidingWindowLimiter::new(
+    Duration::from_secs(60),
+    DISABLE_MAX_PER_MINUTE,
+));
+static ADOPT_LIMITER: Mutex<SlidingWindowLimiter> = Mutex::new(SlidingWindowLimiter::new(
+    Duration::from_secs(60),
+    ADOPT_MAX_PER_MINUTE,
+));
+static RECONCILE_LIMITER: Mutex<SlidingWindowLimiter> = Mutex::new(SlidingWindowLimiter::new(
+    Duration::from_secs(60),
+    RECONCILE_MAX_PER_MINUTE,
+));
 
 /// 取用限流器名额；超限返回 false
 fn take_rate_limit(slot: &'static Mutex<SlidingWindowLimiter>) -> Result<bool, String> {
@@ -1368,14 +1385,12 @@ pub async fn set_privacy_mode(
             max_per_minute: max,
         };
         log::warn!("[privacy] 频率超限，拒绝 set_privacy_mode({})", enabled);
-        coordinator
-            .audit
-            .write(
-                AuditEventType::PrivacyModeChange,
-                AuditResult::Denied,
-                cause.detail(),
-                AuditExtensions::default(),
-            );
+        coordinator.audit.write(
+            AuditEventType::PrivacyModeChange,
+            AuditResult::Denied,
+            cause.detail(),
+            AuditExtensions::default(),
+        );
         return Ok(PrivacyModeResult::error(cause.code(), cause.detail()));
     }
 
@@ -1417,9 +1432,7 @@ pub async fn set_privacy_mode(
 
 /// 查询防截屏保护状态（只读幂等，不限流）
 #[tauri::command]
-pub fn get_privacy_status(
-    coordinator: State<'_, Arc<PrivacyCoordinator>>,
-) -> PrivacyStatusResult {
+pub fn get_privacy_status(coordinator: State<'_, Arc<PrivacyCoordinator>>) -> PrivacyStatusResult {
     let snapshot = coordinator.status();
     PrivacyStatusResult {
         state: snapshot.state.to_string(),
@@ -1442,9 +1455,7 @@ pub fn adopt_privacy_session(
     }
 
     match coordinator.adopt() {
-        Ok((plaintext, _generation)) => {
-            Ok(PrivacyModeResult::success_with_token(true, &plaintext))
-        }
+        Ok((plaintext, _generation)) => Ok(PrivacyModeResult::success_with_token(true, &plaintext)),
         Err(PrivacyError::AlreadyAdopted) => {
             // 重复采纳不是失败：会话已由其他挂载点接管，前端按"忽略"处理
             Ok(PrivacyModeResult::success(true))
@@ -1616,12 +1627,7 @@ mod tests {
             if self.fail_set.lock().unwrap().contains(&hwnd) {
                 return Err("注入：设置失败".into());
             }
-            if self
-                .fail_set_value
-                .lock()
-                .unwrap()
-                .contains(&(hwnd, value))
-            {
+            if self.fail_set_value.lock().unwrap().contains(&(hwnd, value)) {
                 return Err("注入：该取值的写入失败".into());
             }
             if !self.ignore_set.lock().unwrap().contains(&hwnd) {
@@ -1678,10 +1684,10 @@ mod tests {
             detail: String,
             extensions: AuditExtensions,
         ) {
-            self.events.lock().unwrap().push(RecordedEvent {
-                detail,
-                extensions,
-            });
+            self.events
+                .lock()
+                .unwrap()
+                .push(RecordedEvent { detail, extensions });
         }
     }
 
@@ -1752,7 +1758,10 @@ mod tests {
     fn test_slot_rotate_only_from_empty() {
         let mut slot = TokenSlot::new();
         assert!(slot.rotate().is_ok());
-        assert_eq!(slot.rotate().unwrap_err(), PrivacyError::TokenInvariantViolation);
+        assert_eq!(
+            slot.rotate().unwrap_err(),
+            PrivacyError::TokenInvariantViolation
+        );
     }
 
     #[test]
@@ -1954,9 +1963,7 @@ mod tests {
                 .unwrap_err(),
             PrivacyError::TokenInvalid
         );
-        assert!(coordinator
-            .transition(false, Some(&token), &target)
-            .is_ok());
+        assert!(coordinator.transition(false, Some(&token), &target).is_ok());
     }
 
     /* ---------------- 并发、看门狗与取代 ---------------- */
@@ -1966,9 +1973,7 @@ mod tests {
         let (coordinator, _ops, _sink) = build(&[(WIN_A, 0)], 0x11);
         force_transitioning(&coordinator, 0);
         assert_eq!(
-            coordinator
-                .transition(true, None, &targets())
-                .unwrap_err(),
+            coordinator.transition(true, None, &targets()).unwrap_err(),
             PrivacyError::Busy
         );
     }
@@ -2026,16 +2031,10 @@ mod tests {
                 PrivacyState::Quarantined { .. } => {}
                 other => panic!("状态被过期任务覆盖: {}", other.state_name()),
             }
-            let lease = inner
-                .slot
-                .verify(&token)
-                .expect("取代路径必须释放未决租约");
+            let lease = inner.slot.verify(&token).expect("取代路径必须释放未决租约");
             inner.slot.release(&lease);
         }
-        assert!(sink
-            .details()
-            .iter()
-            .any(|d| d.contains("取代")));
+        assert!(sink.details().iter().any(|d| d.contains("取代")));
     }
 
     /* ---------------- 隔离与对账 ---------------- */
@@ -2060,8 +2059,12 @@ mod tests {
 
         // 全窗口重扫：未列入失败清单的窗口同样被重新加固
         let calls = ops.set_calls();
-        assert!(calls.iter().any(|(hwnd, value)| *hwnd == WIN_A && *value == 0x11));
-        assert!(calls.iter().any(|(hwnd, value)| *hwnd == WIN_B && *value == 0x11));
+        assert!(calls
+            .iter()
+            .any(|(hwnd, value)| *hwnd == WIN_A && *value == 0x11));
+        assert!(calls
+            .iter()
+            .any(|(hwnd, value)| *hwnd == WIN_B && *value == 0x11));
         assert_eq!(ops.value_of(WIN_A), 0x11);
 
         let snapshot = coordinator.status();
@@ -2136,7 +2139,9 @@ mod tests {
     #[test]
     fn test_startup_protect_marks_pending_adoption() {
         let (coordinator, ops, sink) = build(&[(WIN_A, 0), (WIN_B, 0)], 0x11);
-        let generation = coordinator.startup_protect(&targets()).expect("启动保护应成功");
+        let generation = coordinator
+            .startup_protect(&targets())
+            .expect("启动保护应成功");
 
         assert_eq!(ops.value_of(WIN_A), 0x11);
         let snapshot = coordinator.status();
@@ -2225,6 +2230,9 @@ mod tests {
         }
         let snapshot = coordinator.status();
         assert_eq!(snapshot.state, "quarantined");
-        assert_eq!(snapshot.quarantined_reason, Some("token_invariant_violation"));
+        assert_eq!(
+            snapshot.quarantined_reason,
+            Some("token_invariant_violation")
+        );
     }
 }

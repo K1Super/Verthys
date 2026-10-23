@@ -1,6 +1,6 @@
 /*
  * commands/preset.rs — 三档预设命令
- * 
+ *
  * 职责：
  *   预设 Tauri 命令实现：
  *     - security_get_preset_config：获取三档安全预设的配置详情
@@ -189,7 +189,10 @@ fn apply_persisted_preset_impl(app: &tauri::AppHandle, verthys_path: &str) -> Re
                 AuditEventType::SecurityCommand,
                 AuditResult::Denied,
                 None,
-                Some(format!("E_PRESET_APPLY_FAILED: 受信档位读取失败，中止解锁: {}", e)),
+                Some(format!(
+                    "E_PRESET_APPLY_FAILED: 受信档位读取失败，中止解锁: {}",
+                    e
+                )),
             );
             return Err("安全预设配置不可用，已中止解锁（请检查磁盘状态）".to_string());
         }
@@ -547,8 +550,7 @@ pub async fn security_apply_preset(
                         "op": "switch_preset",
                         "preset": revert_code,
                     });
-                    let _ = app_state
-                        .send_with_timeout(&revert.to_string(), APPLY_PRESET_TIMEOUT);
+                    let _ = app_state.send_with_timeout(&revert.to_string(), APPLY_PRESET_TIMEOUT);
                     rollback_preset_persist(&app, &state, prev_persist.clone());
                     let detail =
                         format!("E_PRESET_VERIFY: 特性位回读失败，已回退运行时档位: {}", e);
@@ -621,7 +623,10 @@ mod tests {
         assert!(sec.anti_debug && sec.memory_guard && sec.integrity_check);
 
         let perf = features_from_bits(BITS_PERFORMANCE);
-        assert!(perf.anti_debug && perf.anti_inject, "性能档保留调试检测与注入拦截");
+        assert!(
+            perf.anti_debug && perf.anti_inject,
+            "性能档保留调试检测与注入拦截"
+        );
         assert!(!perf.memory_guard && !perf.integrity_check);
         assert!(!perf.module_patrol && !perf.usb_clone_detect && !perf.trace_cleanup);
         assert!(perf.session_lock_on_idle && !perf.clip_clear_on_lock);

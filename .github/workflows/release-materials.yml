@@ -1,0 +1,142 @@
+# .github/workflows/release-materials.yml
+# 发布物料复现流水线（手动触发）
+#
+# 目的：从源码完整构建 core / worker / Tauri，生成一份自洽的 local 更新物料，
+# 证明发布链路不依赖本机残留文件。签名密钥在运行期临时生成并只注入本次构建，
+# 不进入仓库与工件；production 物料仍需真实证书与受控密钥，走发布机流程。
+name: release-materials
+
+on:
+  workflow_dispatch:
+
+jobs:
+  reproduce:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Version and updater gates
+        shell: pwsh
+        run: |
+          & ".\ci\sync_version.ps1" -CheckOnly
+          if ($LASTEXITCODE -ne 0) { throw "version drift" }
+          node scripts/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local.conf.json --profile local
+          if ($LASTEXITCODE -ne 0) { throw "local updater profile failed" }
+          node --test scripts/make_updater_manifest.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw "manifest contract tests failed" }
+
+      - name: Setup Rust (pinned by rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            verthys-tauri/src-tauri
+            verthys-tauri/verthys-worker
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: verthys-tauri/package-lock.json
+
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build and stage core DLL
+        shell: pwsh
+        run: |
+          cmake -S . -B build_ci -G Ninja -DCMAKE_BUILD_TYPE=Release
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
+          cmake --build build_ci
+          if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
+          $dll = Get-ChildItem -Path build_ci -Recurse -Filter verthys.dll | Select-Object -First 1
+          if (-not $dll) { throw "verthys.dll not found" }
+          Copy-Item $dll.FullName "verthys-tauri/src-tauri/verthys.dll" -Force
+
+      - name: Build and stage worker
+        shell: pwsh
+        run: |
+          cargo build --release --manifest-path verthys-tauri/verthys-worker/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "worker release build failed" }
+          Copy-Item "verthys-tauri/verthys-worker/target/release/verthys-worker.exe" `
+            "verthys-tauri/src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe" -Force
+
+      - name: Install frontend dependencies
+        shell: pwsh
+        working-directory: verthys-tauri
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+
+      - name: Build, sign, and publish local materials
+        shell: pwsh
+        run: |
+          $keyPath = Join-Path $env:RUNNER_TEMP "verthys-ci-updater.key"
+          $password = [Guid]::NewGuid().ToString("N")
+          Push-Location verthys-tauri
+          try {
+            npx tauri signer generate -w $keyPath -p $password --ci
+            if ($LASTEXITCODE -ne 0) { throw "ephemeral signing key generation failed" }
+            $env:TAURI_SIGNING_PRIVATE_KEY = [System.IO.File]::ReadAllText($keyPath)
+            $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $password
+            & (Join-Path $env:GITHUB_WORKSPACE "ci\release_preflight.ps1") -Profile local
+            if ($LASTEXITCODE -ne 0) { throw "release preflight failed" }
+            $env:VERTHYS_CI_PUBKEY = [System.IO.File]::ReadAllText("$keyPath.pub").Trim()
+            node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.plugins.updater.pubkey=process.env.VERTHYS_CI_PUBKEY;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n');"
+            if ($LASTEXITCODE -ne 0) { throw "pubkey injection failed" }
+
+            npm run tauri build -- --config src-tauri/tauri.local.conf.json
+            if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
+          } finally {
+            Pop-Location
+          }
+
+          $installer = Get-ChildItem "verthys-tauri/src-tauri/target/release/bundle/nsis/Verthys_*_x64-setup.exe" |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) { throw "installer not found" }
+          $signature = "$($installer.FullName).sig"
+          node scripts/release_update.mjs `
+            --installer $installer.FullName `
+            --signature $signature `
+            --endpoint http://127.0.0.1:8765/latest.json `
+            --channel local `
+            --profile local `
+            --notes "CI 物料复现"
+          if ($LASTEXITCODE -ne 0) { throw "release materials generation failed" }
+
+      - name: Verify material completeness
+        shell: pwsh
+        run: |
+          $release = Get-ChildItem build/updater/releases -Directory |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $release) { throw "release directory not found" }
+          $names = Get-ChildItem $release.FullName | Select-Object -ExpandProperty Name
+          foreach ($required in @("latest.json", "release-manifest.json", "channel-pointer.json")) {
+            if ($names -notcontains $required) { throw "missing $required" }
+          }
+          if (@($names | Where-Object { $_ -like "*.exe" }).Count -ne 1) { throw "installer copy missing" }
+          if (@($names | Where-Object { $_ -like "*.sig" }).Count -ne 1) { throw "signature copy missing" }
+          $manifest = Get-Content (Join-Path $release.FullName "latest.json") -Raw | ConvertFrom-Json
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($manifest.version -ne $version) { throw "manifest version mismatch" }
+          if ($manifest.platforms.'windows-x86_64'.file_version -ne $version) {
+            throw "file_version mismatch"
+          }
+          Write-Host "[ OK ] release materials: $($release.Name)"
+
+      - name: Upload release materials
+        uses: actions/upload-artifact@v4
+        with:
+          name: verthys-release-materials
+          path: build/updater/releases/*
+          if-no-files-found: error
+          retention-days: 7

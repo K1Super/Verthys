@@ -57,6 +57,7 @@ mod constants;
 pub mod security;
 mod security_commands;
 mod state;
+mod updater;
 mod worker;
 
 // ==== 强制分层架构 ====
@@ -322,6 +323,7 @@ fn run_main_ui(
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .manage(security_commands::SecurityState::new())
+        .manage(updater::UpdaterState::default())
         /* ===== 关闭响应优化：窗口级事件处理器 =====
          *
          * 根因：旧实现前端 `await getCurrentWindow().hide()` 为 IPC 往返，
@@ -339,6 +341,18 @@ fn run_main_ui(
          */
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 更新进入锁库或安装移交后，关闭会与落盘/安装器抢占进程；
+                // 临界区带时限，异常路径不会永久锁住窗口。
+                let critical = window
+                    .app_handle()
+                    .state::<updater::UpdaterState>()
+                    .is_critical();
+                if critical {
+                    api.prevent_close();
+                    let _ = window.app_handle().emit("verthys://close-blocked", ());
+                    return;
+                }
+
                 // 1. 阻止默认关闭（防止 WebView 销毁终止 JS 引擎，导致 lockAll 无法执行）
                 api.prevent_close();
 
@@ -375,9 +389,9 @@ fn run_main_ui(
                  *   2. 成功 / 已还原 → 显示主窗口，前端挂载后采纳会话取得凭证；
                  *   3. 还原失败（窗口取值未知）→ 原生对话框驱动对账，成功才显示窗口。
                  * 本钩子返回前前端命令不会派发，因此启动序列与前端查询无竞态。 */
-                let coordinator = std::sync::Arc::new(PrivacyCoordinator::new(std::sync::Arc::new(
-                    AppAuditSink::new(app_handle.clone()),
-                )));
+                let coordinator = std::sync::Arc::new(PrivacyCoordinator::new(
+                    std::sync::Arc::new(AppAuditSink::new(app_handle.clone())),
+                ));
                 app.manage(std::sync::Arc::clone(&coordinator));
 
                 let show_main_window = match startup_engage(&app_handle, &coordinator) {
@@ -430,6 +444,10 @@ fn run_main_ui(
                 app.manage(patrol);
                 // 启动期程序自完整性核验（完整校验能力执行路径；后台线程，不阻塞启动）
                 security::integrity_check::verify_self_image_async(app_handle.clone());
+                // 启动即审计更新配置；不合法时仅禁用更新，不阻断应用启动。
+                let _ = updater::audit_config(&app_handle);
+                // 更新健康自检的原生兜底：前端在时限内未处理时给出最小恢复路径。
+                updater::spawn_native_watchdog(app_handle.clone());
                 // 启动导入写者心跳看门狗（写者卡死超时自动重建）
                 crate::state::import_writer::spawn_watchdog(
                     app_handle.clone(),
@@ -437,6 +455,17 @@ fn run_main_ui(
                 );
                 // 启动锁持有时间监控任务（死锁兜底）
                 AppState::spawn_lock_monitor(app_handle, shutdown_token_clone);
+
+                // 仅 e2e_update 构建启用：环境变量驱动一次完整更新，不参与正式发布
+                #[cfg(feature = "e2e_update")]
+                if std::env::var("VERTHYS_E2E_UPDATE").as_deref() == Ok("1") {
+                    let handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = updater::run_e2e_update(handle.clone()).await {
+                            log::error!("[e2e] update failed: {error}");
+                        }
+                    });
+                }
                 Ok(())
             }
         })
@@ -537,6 +566,20 @@ fn run_main_ui(
             security_commands::security_get_preset_config,
             security_commands::security_apply_preset,
             security_commands::security_load_preset_state,
+            // 更新服务：检查 / 准备 / 闸门 / 安装 / 标记 / 日志
+            updater::updater_check,
+            updater::updater_prepare,
+            updater::updater_begin_lock,
+            updater::updater_confirm_lock,
+            updater::updater_abort_lock,
+            updater::updater_install,
+            updater::updater_cancel,
+            updater::updater_set_critical,
+            updater::updater_startup_state,
+            updater::updater_run_health,
+            updater::updater_repair_state,
+            updater::updater_run_repair,
+            updater::updater_export_logs,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

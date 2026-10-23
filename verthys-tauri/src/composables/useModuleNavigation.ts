@@ -24,6 +24,7 @@ import {
   type ModuleId,
 } from "../lib/keyManager";
 import { useToastCenter } from "./useToastCenter";
+import { isUpdaterCritical } from "./updater-critical";
 import {
   scheduleBackgroundFlush,
   ensureRecordScan,
@@ -228,6 +229,11 @@ export function useModuleNavigation() {
   }
 
   const switchModule = async (id: string): Promise<void> => {
+    // 锁库与安装移交期间切换模块会与落盘/安装器抢占进程，必须拒绝。
+    if (isUpdaterCritical()) {
+      showError("更新安装准备中，暂不能切换模块");
+      return;
+    }
     // 密码工具、安全管理：直接进入，无需任何密钥
     if (id === "tools" || id === "security") {
       applySwitch(id);

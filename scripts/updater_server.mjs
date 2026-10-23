@@ -123,11 +123,13 @@ const server = createServer((req, res) => {
 
   let realFile;
   let size;
+  let mtimeMs;
   try {
     realFile = realpathSync(candidate);
     const stat = statSync(realFile);
     if (!stat.isFile()) throw new Error("not a file");
     size = stat.size;
+    mtimeMs = stat.mtimeMs;
   } catch {
     res.writeHead(404);
     res.end();
@@ -142,14 +144,57 @@ const server = createServer((req, res) => {
     return;
   }
 
-  const headers = {
-    "Content-Type": CONTENT_TYPE[extname(realFile).toLowerCase()],
-    "Content-Length": String(size),
-    "Cache-Control": "no-store",
+  const extension = extname(realFile).toLowerCase();
+  // 清单必须每次回源；安装包与签名按内容不可变缓存，供边缘节点长期复用。
+  const cacheControl =
+    extension === ".json" || extension === ".txt"
+      ? "no-store"
+      : "public, max-age=31536000, immutable";
+  const etag = `"${size.toString(16)}-${Math.floor(mtimeMs).toString(16)}"`;
+  const baseHeaders = {
+    "Content-Type": CONTENT_TYPE[extension],
+    "Cache-Control": cacheControl,
+    "Accept-Ranges": "bytes",
+    ETag: etag,
     "X-Content-Type-Options": "nosniff",
   };
 
-  res.writeHead(200, headers);
+  const ifNoneMatch = (req.headers["if-none-match"] ?? "")
+    .split(",")
+    .map((item) => item.trim());
+  if (method === "GET" && ifNoneMatch.includes(etag)) {
+    res.writeHead(304, baseHeaders);
+    res.end();
+    logLine(304, method, pathname, 0);
+    return;
+  }
+
+  const range = method === "GET" ? parseRange(req.headers.range, size) : null;
+  if (range?.invalid) {
+    res.writeHead(416, {
+      ...baseHeaders,
+      "Content-Range": `bytes */${size}`,
+    });
+    res.end();
+    logLine(416, method, pathname, 0);
+    return;
+  }
+
+  if (range) {
+    const length = range.end - range.start + 1;
+    res.writeHead(206, {
+      ...baseHeaders,
+      "Content-Length": String(length),
+      "Content-Range": `bytes ${range.start}-${range.end}/${size}`,
+    });
+    const stream = createReadStream(realFile, { start: range.start, end: range.end });
+    stream.on("error", () => res.destroy());
+    stream.pipe(res);
+    logLine(206, method, pathname, length);
+    return;
+  }
+
+  res.writeHead(200, { ...baseHeaders, "Content-Length": String(size) });
   if (method === "HEAD") {
     res.end();
     logLine(200, method, pathname, 0);
@@ -161,6 +206,35 @@ const server = createServer((req, res) => {
   stream.pipe(res);
   logLine(200, method, pathname, size);
 });
+
+/// 只接受单段闭区间或后缀区间；多段与越界统一按不可满足处理。
+function parseRange(header, size) {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match) return null;
+  if (match[1] === "" && match[2] === "") return null;
+  let start;
+  let end;
+  if (match[1] === "") {
+    const suffix = Number(match[2]);
+    if (!Number.isInteger(suffix) || suffix <= 0) return { invalid: true };
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(match[1]);
+    end = match[2] === "" ? size - 1 : Number(match[2]);
+  }
+  if (
+    !Number.isInteger(start) ||
+    !Number.isInteger(end) ||
+    start < 0 ||
+    end < start ||
+    start >= size
+  ) {
+    return { invalid: true };
+  }
+  return { start, end: Math.min(end, size - 1) };
+}
 
 server.on("error", (error) => {
   fail(`服务启动失败: ${error.message}`);

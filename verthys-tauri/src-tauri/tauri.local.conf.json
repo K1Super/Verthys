@@ -1,0 +1,15 @@
+{
+  "plugins": {
+    "updater": {
+      "endpoints": ["http://127.0.0.1:8765/latest.json"],
+      "channel": "local",
+      "dangerousInsecureTransportProtocol": true,
+      "allowedDownloadHosts": ["127.0.0.1", "localhost"],
+      "authenticode": {
+        "require": false,
+        "revocation": false
+      },
+      "allowDowngrades": false
+    }
+  }
+}

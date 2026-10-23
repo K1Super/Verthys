@@ -876,7 +876,10 @@ mod tests {
         let resp = import_session_busy_response();
         assert!(!resp.ok);
         assert_eq!(resp.error_code.as_deref(), Some("E_IMPORT_SESSION_BUSY"));
-        assert_eq!(resp.error.as_deref(), Some("已有导入会话进行中，请先结束当前会话"));
+        assert_eq!(
+            resp.error.as_deref(),
+            Some("已有导入会话进行中，请先结束当前会话")
+        );
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"error_code\":\"E_IMPORT_SESSION_BUSY\""));
     }

@@ -408,7 +408,10 @@ mod tests {
         assert_eq!(normalize_path(prefixed), prefixed);
         let device = r"\\.\C:\data\Vault.verthys";
         assert_eq!(normalize_path(device), device);
-        assert_eq!(normalize_path(r"D:\data\Vault.verthys"), "D:/data/Vault.verthys");
+        assert_eq!(
+            normalize_path(r"D:\data\Vault.verthys"),
+            "D:/data/Vault.verthys"
+        );
     }
 
     #[test]

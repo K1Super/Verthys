@@ -21,7 +21,7 @@ import { keyState, setCurrentVerthysPath, loadCustomFeatures, saveSecurityPreset
 import { PRESET_SESSION_TIMEOUT_MS, SECURITY_PRESET_KEY, CUSTOM_FEATURES_KEY } from "../constants/key_manager_const";
 import { withTimeout } from "../utils/promise_utils";
 import type { BruteForceGateResult } from "../types/key_manager";
-import { clearModuleKeyCache, clearModuleCache, clearRecordScanCache, cancelDebouncedFlush, resetFlushChain, waitForFlush, clearAllCacheTimers, setCacheDirty, clearSummaryCache, clearFullRecordCache } from "../cache/composition/verthys-cache";
+import { clearModuleKeyCache, clearModuleCache, clearRecordScanCache, cancelDebouncedFlush, resetFlushChain, waitForFlush, clearAllCacheTimers, setCacheDirty, isCacheDirty, clearSummaryCache, clearFullRecordCache } from "../cache/composition/verthys-cache";
 // 后台任务 API 直连 core 层（单向化：不再转发 start/stop）
 import { startBackgroundTasks, stopBackgroundTasks } from "../core/background-tasks";
 
@@ -464,6 +464,15 @@ export async function clearBruteForcePurge(): Promise<void> {
  *     worker 销毁后触发重入 lockAll                                   *
  * ------------------------------------------------------------------ */
 
+/** 锁库结果：安装闸门只接受 clean=true，且 clean 由 flushed / dirty / errors 共同决定。 */
+export interface LockOutcome {
+  clean: boolean;
+  flushed: boolean;
+  dirty: boolean;
+  errors: string[];
+  durationMs: number;
+}
+
 /** 重入保护标志：防止 session_guard on_lock 回调与用户操作并发触发 lockAll */
 let lockAllInProgress = false;
 
@@ -480,7 +489,7 @@ let lockAllInProgress = false;
  *   - 等待方 await 的是真实工作（各步均有超时包裹，总时长有界）；
  *   - 破坏性步骤执行前校验代际，任何强制换代都会让旧步骤立即自弃。
  */
-let lockWorkPromise: Promise<void> | null = null;
+let lockWorkPromise: Promise<LockOutcome> | null = null;
 
 /** 锁定代际（单调递增）：每次 lockAll 启动递增；步骤执行前校验 */
 let lockGeneration = 0;
@@ -510,12 +519,11 @@ function withStepTimeout<T>(promise: Promise<T>, ms: number, label: string): Pro
  * 时长治理：不再使用「40s 总超时后释放闸门」的竞速收口 —— 各步骤均有
  * 独立超时包裹，真实工作总时长有界；闸门只在真实工作结束后释放。
  */
-export async function lockAll(onProgress?: (percent: number, message: string) => void): Promise<void> {
+export async function lockAll(onProgress?: (percent: number, message: string) => void): Promise<LockOutcome> {
   // 重入：等待在途真实工作完成（不重复启动销毁链）
   if (lockAllInProgress && lockWorkPromise) {
     console.warn("[lockAll] 已在进行中，等待当前锁定序列完成");
-    await lockWorkPromise;
-    return;
+    return await lockWorkPromise;
   }
   lockAllInProgress = true;
   const generation = ++lockGeneration;
@@ -523,7 +531,7 @@ export async function lockAll(onProgress?: (percent: number, message: string) =>
   lockWorkPromise = work;
 
   try {
-    await work;
+    return await work;
   } finally {
     // 仅当前代次可释放闸门；强制换代时由新代次接管
     if (generation === lockGeneration) {
@@ -564,9 +572,22 @@ export async function awaitLockAllIfInProgress(): Promise<void> {
 async function doLockAll(
   generation: number,
   onProgress?: (percent: number, message: string) => void,
-): Promise<void> {
+): Promise<LockOutcome> {
   /** 当前序列是否仍为权威（否则立即停止后续破坏性步骤） */
   const current = (): boolean => generation === lockGeneration;
+  const startedAt = Date.now();
+  let flushed = true;
+  const errors: string[] = [];
+  const snapshot = (): LockOutcome => {
+    const dirty = isCacheDirty();
+    return {
+      clean: flushed && !dirty && errors.length === 0,
+      flushed,
+      dirty,
+      errors: [...errors],
+      durationMs: Date.now() - startedAt,
+    };
+  };
 
   clearSessionTimer();
 
@@ -577,8 +598,11 @@ async function doLockAll(
 
   // 步骤 1+2：取消防抖定时器 + 阻塞等待全部删除、落盘队列执行完成
   onProgress?.(5, "等待数据落盘");
-  try { await waitForFlush(); } catch { /* */ }
-  if (!current()) return;
+  try { await waitForFlush(); } catch (error) {
+    flushed = false;
+    errors.push(`waitForFlush: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!current()) return snapshot();
 
   // waitForFlush 完成后立即清空所有缓存定时器
   clearAllCacheTimers();
@@ -588,8 +612,10 @@ async function doLockAll(
   //    原缺陷：withStepTimeout 10s 超时过长，用户感知"停止后台任务时间过长"
   //    修复：缩短至 5s（stopBackgroundTasks 3s + 余量），超时后继续后续步骤
   onProgress?.(20, "停止后台任务");
-  try { await withStepTimeout(stopBackgroundTasks(), 5000, "stopBackgroundTasks"); } catch { /* */ }
-  if (!current()) return;
+  try { await withStepTimeout(stopBackgroundTasks(), 5000, "stopBackgroundTasks"); } catch (error) {
+    errors.push(`stopBackgroundTasks: ${String(error)}`);
+  }
+  if (!current()) return snapshot();
   clearModuleKeyCache();
   clearModuleCache();
   clearRecordScanCache();
@@ -598,18 +624,24 @@ async function doLockAll(
 
   // 步骤 3.5：清除 worker 内存中的 GMK
   onProgress?.(35, "清除内存密钥");
-  try { await withStepTimeout(verthysClearGlobalKey(), 8000, "verthysClearGlobalKey"); } catch { /* */ }
-  if (!current()) return;
+  try { await withStepTimeout(verthysClearGlobalKey(), 8000, "verthysClearGlobalKey"); } catch (error) {
+    errors.push(`verthysClearGlobalKey: ${String(error)}`);
+  }
+  if (!current()) return snapshot();
 
   // 步骤 4+5：安全原子落盘 + 等待持久化回执
   onProgress?.(50, "安全落盘");
-  try { await withStepTimeout(verthysLockPersist(), 12000, "verthysLockPersist"); } catch { /* */ }
-  if (!current()) return;
+  try { await withStepTimeout(verthysLockPersist(), 12000, "verthysLockPersist"); } catch (error) {
+    errors.push(`verthysLockPersist: ${String(error)}`);
+  }
+  if (!current()) return snapshot();
 
   // 步骤 6：停止 C 消息线程
   onProgress?.(70, "停止安全会话");
-  try { await withStepTimeout(securitySessionStop(), 5000, "securitySessionStop"); } catch { /* */ }
-  if (!current()) return;
+  try { await withStepTimeout(securitySessionStop(), 5000, "securitySessionStop"); } catch (error) {
+    errors.push(`securitySessionStop: ${String(error)}`);
+  }
+  if (!current()) return snapshot();
 
   // 步骤 7：销毁 worker（根治：verthysLock + workerDestroy 双重销毁）
   //
@@ -635,10 +667,14 @@ async function doLockAll(
   //   不会误报错误。workerDestroy 前端 finally 调用 invalidateWorkerPreload()，
   //   双重保险清空前端缓存。
   onProgress?.(85, "销毁安全核心");
-  try { await withStepTimeout(verthysLock(), 8000, "verthysLock"); } catch { /* */ }
-  if (!current()) return;
-  try { await withStepTimeout(workerDestroy(), 5000, "workerDestroy"); } catch { /* */ }
-  if (!current()) return;
+  try { await withStepTimeout(verthysLock(), 8000, "verthysLock"); } catch (error) {
+    errors.push(`verthysLock: ${String(error)}`);
+  }
+  if (!current()) return snapshot();
+  try { await withStepTimeout(workerDestroy(), 5000, "workerDestroy"); } catch (error) {
+    errors.push(`workerDestroy: ${String(error)}`);
+  }
+  if (!current()) return snapshot();
 
   onProgress?.(100, "清理完成");
 
@@ -661,4 +697,6 @@ async function doLockAll(
   //    必须在 verthysLock 之后：路径为空时 doFlush 会短路，pending flush 无法执行
   setCurrentVerthysPath("");
   resetFlushChain();
+
+  return snapshot();
 }

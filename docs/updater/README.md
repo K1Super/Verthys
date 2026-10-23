@@ -12,6 +12,7 @@
 |---|---|---|
 | [UPDATER_MASTER_PLAN.md](UPDATER_MASTER_PLAN.md) | 本机实施规范：架构决策、Manifest v2、客户端引擎、任务分解、质量门、测试矩阵、发布治理 | 现在；所有更新域代码、脚本、配置、测试与文档以本文为准 |
 | [UPDATER_SERVER_DEPLOYMENT_PLAN.md](UPDATER_SERVER_DEPLOYMENT_PLAN.md) | 服务器部署：HTTPS 分发、签名清单、不可变物料、灰度、暂停 / 撤回、可观测、灾备、Runbook | 达到本机 L0 退出与客户端 readiness 后启用 |
+| [UPDATER_LOCAL_VERIFICATION.md](UPDATER_LOCAL_VERIFICATION.md) | 本机验证记录：自动化门、真实物料签名 / PE、运行期检查与未执行项 | 发布前核对证据 |
 
 ---
 

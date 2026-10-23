@@ -109,7 +109,28 @@ C/Rust 源码的 `getenv` / `std::env::var` 检索确认），也不对 WebView2
 - 便携模式：数据目录由 Cargo feature `portable_mode`（编译期固化，**禁用**运行时环境变量切换 `%LOCALAPPDATA%`），
   仅接受受信命令行参数 `--data-dir`（入口层校验）。命令行参数解析见 `src/main.rs` / `middleware/context.rs`。
 
-## 6. 交叉引用
+## 6. 更新域参数（构建期 / 运行期）
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| 构建 profile | `production` | 默认 production，必须提供 HTTPS 端点；local 需显式 `-AllowLocal`，允许回环明文 |
+| 更新渠道 | 配置值 | 基础配置 `stable`，local 覆盖为 `local`；运行时从配置读取，前端不传参 |
+| 清单端点 | 无（基础配置） | `tauri.local.conf.json` 与 production 注入配置分别提供；运行期审计协议与主机 |
+| Authenticode | production 强制 | `require=true`、`revocation=true`；local 默认关闭，避免未签名开发物料被拒 |
+| 证书钉扎 | 可选 | `authenticode.subject` 与 `authenticode.thumbprint`（40 位十六进制）同时支持 |
+| 下载重试 | 最多 3 次重试（2 / 5 / 10 秒） | 由 Rust 更新服务执行，失败归 `E_UPDATER_NETWORK` |
+| 检查超时 | 30 秒 | 插件检查清单 |
+| 下载连接超时 | 15 秒 | 单次连接 |
+| 下载总超时 | 10 分钟 | 含重试 |
+| 磁盘余量 | 安装包大小 × 2 + 100 MB | 预检阈值 |
+| 健康自检超时 | 20 秒 | worker 就绪；DLL 与 ABI 由 worker 初始化覆盖 |
+| 最大安装包 | 512 MB | 超过即拒绝，避免内存耗尽 |
+| 日志保留 | 7 天 / 单文件 5 MB | 更新事件 JSONL |
+| 发布前置 | `ci/release_preflight.ps1` | production 额外要求 HTTPS 端点可达、证书指纹与干净工作区 |
+| 兼容 ABI | `0x000B ~ 0x000E` | 清单 `compatibility.abi` 必须覆盖当前值 |
+| 兼容容器 | V3 | 清单 `compatibility.container` 必须覆盖当前值 |
+
+## 7. 交叉引用
 
 - 依赖版本与升级：`THIRD_PARTY.md`。
 - 构建产物/部署：根 `build_production.ps1` 注释；`GETTING_STARTED.md`。

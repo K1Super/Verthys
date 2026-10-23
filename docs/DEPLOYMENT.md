@@ -28,17 +28,20 @@ Verthys 2.6.1 仅 Windows（x64）。打包统一由 `build_production.ps1` 阶�
 
 ## 3. 签名现状
 
-当前构建未配置代码签名，属已知缺口：
+当前构建未配置 Authenticode 代码签名，属本机阶段已知缺口：
 
-- `build_production.ps1` 与 `ci/`、`.github/workflows/core.yml` 均无签名（signtool / Authenticode）步骤。
-- `scripts/build_core.release.ps1:69` 注释仅声明“Authenticode 签名（若有）必须在本步骤【之后】进行”（即 `.vsec` 完整性基准注入之后），并未实际执行签名。
+- `build_production.ps1` 与 `ci/`、`.github/workflows/core.yml` 均无 signtool 签名步骤。
+- `scripts/build_core.release.ps1:69` 注释声明 Authenticode 必须在本步骤之后进行，但未实际执行。
+- 本机 `local` profile 接受 Windows 未知发布者提示；外部分发前必须接入 Authenticode，并确保 NSIS 的 Authenticode 先于 updater `.sig` 生成。
 
-建议补全步骤（供后续落地，非当前事实）：用 `signtool sign /fd SHA256 /a /f <证书> /p <密码>` 对 `verthys.dll`、`verthys-worker-x86_64-pc-windows-msvc.exe` 及 NSIS 安装包逐一签名，签名放在 `.vsec` 注入之后、打包之前；并在 CI 中配置 EV 证书的受控下发。
+建议补全步骤（外部分发前）：用 `signtool sign /fd SHA256 /tr <时间戳服务> /td SHA256 /sha1 <证书指纹>` 对 `verthys.dll`、worker、主程序及 NSIS 安装包逐一签名；NSIS 签名后重新生成 updater `.sig`，再生成清单。
 
 ## 4. 分发方式与升级机制
 
-- 分发：NSIS 安装包（`*.exe`），手动分发/安装，无内置下载渠道。
-- 升级机制：无自动更新。`tauri.conf.json` 未配置 updater 插件，`src-tauri/Cargo.toml` 的依赖中无 `tauri-plugin-updater`；升级靠手动安装新版本 NSIS 包，数据迁移语义见 [MIGRATION.md](MIGRATION.md)。
+- 分发：NSIS 安装包（`*.exe`）；本机阶段使用 `build/updater/` 物料与本机回环服务完成更新验证。
+- 升级机制：Tauri updater 插件已注册；`local` profile 从 `http://127.0.0.1:8765/latest.json` 获取清单，安装前完成安装包签名、SHA256、PE 版本、兼容区间与锁库闸门校验。
+- 构建 profile：`build_production.ps1 -Profile local|production`；production 由 `tauri.production.conf.json` 覆盖端点，禁止回环与明文许可；local 由 `tauri.local.conf.json` 覆盖。
+- 更新失败不覆盖旧版程序；健康自检失败时保留旧版物料并提示修复，数据目录不在安装替换范围。数据迁移语义见 [MIGRATION.md](MIGRATION.md)。
 
 ## 5. 安装验证清单
 

@@ -1,5 +1,6 @@
 Verthys_AddRecord
 Verthys_ChangePassword
+Verthys_ClearRecordCache
 Verthys_CreateWithPreset
 Verthys_Deinit
 Verthys_DeleteRecord

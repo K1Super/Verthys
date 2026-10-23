@@ -155,11 +155,11 @@ trait SessionGuardBackend: Send {
 #[cfg(target_os = "windows")]
 mod win_backend {
     use super::{
-        Guid, SessionEvent, SessionGuardBackend, WindowInstanceData, GWLP_USERDATA,
-        MAX_RESTART_ATTEMPTS, NOTIFY_FOR_THIS_SESSION, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE,
-        WATCHDOG_CHECK_SECS, WM_DESTROY, WM_POWERBROADCAST, WM_QUIT, WM_WTSESSION_CHANGE,
-        WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
-        WTS_SESSION_UNLOCK, GUID_CONSOLE_DISPLAY_STATE,
+        Guid, SessionEvent, SessionGuardBackend, WindowInstanceData, GUID_CONSOLE_DISPLAY_STATE,
+        GWLP_USERDATA, MAX_RESTART_ATTEMPTS, NOTIFY_FOR_THIS_SESSION, PBT_APMSUSPEND,
+        PBT_POWERSETTINGCHANGE, WATCHDOG_CHECK_SECS, WM_DESTROY, WM_POWERBROADCAST, WM_QUIT,
+        WM_WTSESSION_CHANGE, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK,
+        WTS_SESSION_LOGOFF, WTS_SESSION_UNLOCK,
     };
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
@@ -708,10 +708,7 @@ mod win_backend {
 
             // 启动新消息循环
             self.start()?;
-            log::warn!(
-                "[session_guard] 消息循环线程已重启 (第 {} 次)",
-                count + 1
-            );
+            log::warn!("[session_guard] 消息循环线程已重启 (第 {} 次)", count + 1);
             Ok(())
         }
 
@@ -794,10 +791,7 @@ mod win_backend {
                     }));
 
                     if let Err(payload) = result {
-                        log::error!(
-                            "[session_guard] 用户回调 panic 已捕获: {:?}",
-                            payload
-                        );
+                        log::error!("[session_guard] 用户回调 panic 已捕获: {:?}", payload);
                     }
 
                     if event == SessionEvent::Shutdown {

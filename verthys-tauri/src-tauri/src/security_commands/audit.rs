@@ -11,7 +11,9 @@
 
 use tauri::Manager;
 
-use crate::util::audit_log::{append_audit, AuditEvent, AuditEventType, AuditExtensions, AuditResult};
+use crate::util::audit_log::{
+    append_audit, AuditEvent, AuditEventType, AuditExtensions, AuditResult,
+};
 
 use super::state::SecurityState;
 

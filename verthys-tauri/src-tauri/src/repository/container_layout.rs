@@ -378,7 +378,10 @@ mod tests {
     fn test_sidecar_dir_and_file_mapping() {
         let p = "D:/data/Vault.verthys";
         assert_eq!(norm(&sidecar_dir_for(p)), "D:/data/Vault.verthys.d");
-        assert_eq!(norm(&state_file_for(p)), "D:/data/Vault.verthys.d/state.json");
+        assert_eq!(
+            norm(&state_file_for(p)),
+            "D:/data/Vault.verthys.d/state.json"
+        );
         assert_eq!(
             norm(&preset_file_for(p)),
             "D:/data/Vault.verthys.d/preset.json"
@@ -392,7 +395,10 @@ mod tests {
             norm(&chunk_ledger_file_for(p)),
             "D:/data/Vault.verthys.d/import.chunks.json"
         );
-        assert_eq!(norm(&idx_cache_file_for(p)), "D:/data/Vault.verthys.d/idx_cache");
+        assert_eq!(
+            norm(&idx_cache_file_for(p)),
+            "D:/data/Vault.verthys.d/idx_cache"
+        );
         assert_eq!(
             norm(&lock_file_for(p)),
             "D:/data/Vault.verthys.d/container.lock"
@@ -402,7 +408,10 @@ mod tests {
     #[test]
     fn test_legacy_mapping() {
         let p = "D:/data/Vault.verthys";
-        assert_eq!(norm(&legacy_state_file_for(p)), "D:/data/Vault.verthys.state");
+        assert_eq!(
+            norm(&legacy_state_file_for(p)),
+            "D:/data/Vault.verthys.state"
+        );
         assert_eq!(
             norm(&legacy_preset_file_for(p)),
             "D:/data/Vault.verthys.preset.json"
@@ -438,7 +447,10 @@ mod tests {
             state_file_for(p).to_string_lossy(),
             r"D:\data\Vault.verthys.d\state.json"
         );
-        assert_eq!(norm(&state_file_for(p)), "D:/data/Vault.verthys.d/state.json");
+        assert_eq!(
+            norm(&state_file_for(p)),
+            "D:/data/Vault.verthys.d/state.json"
+        );
     }
 
     #[test]

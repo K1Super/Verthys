@@ -291,7 +291,11 @@ impl AuditExtensions {
     }
 
     pub fn reconcile(mut self, to_enabled: bool) -> Self {
-        self.reconcile = Some(if to_enabled { "to_enabled".into() } else { "to_disabled".into() });
+        self.reconcile = Some(if to_enabled {
+            "to_enabled".into()
+        } else {
+            "to_disabled".into()
+        });
         self
     }
 }
@@ -643,7 +647,10 @@ mod tests {
                 .rollback(true),
         );
         append_audit(&log_path, hmac_key, event).unwrap();
-        assert!(verify_audit_chain(&log_path, hmac_key).is_ok(), "混合链必须通过");
+        assert!(
+            verify_audit_chain(&log_path, hmac_key).is_ok(),
+            "混合链必须通过"
+        );
 
         // 篡改扩展块取值（世代号）：扩展块必须参与哈希，篡改即失败
         let content = std::fs::read_to_string(&log_path).unwrap();

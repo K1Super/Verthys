@@ -251,12 +251,7 @@ impl WorkerSession {
     ///
     /// `target_op` 限定消费该授权的操作，`mode` 限定读写方向；
     /// worker 只接受与规范化路径完全匹配且未过期的授权。
-    pub fn authorize_path(
-        &self,
-        target_op: &str,
-        mode: &str,
-        path: &str,
-    ) -> Result<(), String> {
+    pub fn authorize_path(&self, target_op: &str, mode: &str, path: &str) -> Result<(), String> {
         let request = serde_json::json!({
             "op": "authorize_path",
             "path": path,
@@ -265,8 +260,8 @@ impl WorkerSession {
         })
         .to_string();
         let response = self.send_json_with_timeout(&request, PATH_AUTH_TIMEOUT)?;
-        let value: serde_json::Value = serde_json::from_str(&response)
-            .map_err(|e| format!("路径授权响应解析失败: {}", e))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&response).map_err(|e| format!("路径授权响应解析失败: {}", e))?;
         if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
             Ok(())
         } else {

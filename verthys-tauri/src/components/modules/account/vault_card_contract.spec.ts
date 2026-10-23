@@ -95,8 +95,10 @@ describe("对话框模态规范", () => {
     expect(dialogSource).toContain('e.key === "Escape"');
   });
 
-  it("请求在途时不得由 Esc 或点击遮罩关闭（否则提交结果无处落点）", () => {
-    expect(dialogSource.match(/if \(props\.saving\) return;/g)?.length).toBe(2);
+  it("请求在途或强制窗口不得由 Esc 或点击遮罩关闭（否则提交结果无处落点）", () => {
+    expect(
+      dialogSource.match(/if \(props\.saving \|\| props\.persistent\) return;/g)?.length,
+    ).toBe(2);
   });
 });
 

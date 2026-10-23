@@ -141,7 +141,11 @@ mod tests {
     #[test]
     fn test_decide_mismatch_blocks_without_confirm() {
         let err = decide_bind_action(Some(HASH_A), HASH_B, false).unwrap_err();
-        assert!(err.starts_with("E_USB_CLONE_SUSPECTED"), "错误码必须可识别: {}", err);
+        assert!(
+            err.starts_with("E_USB_CLONE_SUSPECTED"),
+            "错误码必须可识别: {}",
+            err
+        );
     }
 
     #[test]

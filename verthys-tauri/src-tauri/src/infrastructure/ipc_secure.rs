@@ -95,8 +95,7 @@ impl IpcSecureChannel {
     pub fn new() -> Result<Self, String> {
         let mut master = [0u8; SESSION_KEY_LEN];
         /* 密钥生成失败不得降级为可预测材料，必须失败关闭。 */
-        getrandom::getrandom(&mut master)
-            .map_err(|e| format!("生成 IPC 会话密钥失败: {}", e))?;
+        getrandom::getrandom(&mut master).map_err(|e| format!("生成 IPC 会话密钥失败: {}", e))?;
         Self::from_master(master)
     }
 
@@ -139,8 +138,8 @@ impl IpcSecureChannel {
     /// 校验顺序：字段合法性 → 签名 → 序号连续性。签名先于序号判断，
     /// 避免伪造消息推进接收窗口。
     pub fn open_line(&self, line: &str) -> Result<OpenedLine, String> {
-        let envelope: InEnvelope<'_> = serde_json::from_str(line)
-            .map_err(|e| format!("IPC 信封解析失败: {}", e))?;
+        let envelope: InEnvelope<'_> =
+            serde_json::from_str(line).map_err(|e| format!("IPC 信封解析失败: {}", e))?;
         if envelope.v != PROTOCOL_VERSION {
             return Err("IPC 信封版本不匹配".to_string());
         }
@@ -196,8 +195,7 @@ impl IpcSecureChannel {
         payload: &str,
     ) -> Result<String, String> {
         let mut nonce = [0u8; NONCE_LEN];
-        getrandom::getrandom(&mut nonce)
-            .map_err(|e| format!("生成 IPC nonce 失败: {}", e))?;
+        getrandom::getrandom(&mut nonce).map_err(|e| format!("生成 IPC nonce 失败: {}", e))?;
         let nonce_hex = hex_encode(&nonce);
         let mac_bytes = hmac_sign(
             key,
@@ -353,7 +351,8 @@ mod hex {
         }
         let mut output = Vec::with_capacity(s.len() / 2);
         let bytes = s.as_bytes();
-        for pair in bytes.chunks_exact(2) {
+        let (pairs, _) = bytes.as_chunks::<2>();
+        for pair in pairs {
             let high = (pair[0] as char).to_digit(16).ok_or("非法十六进制字符")?;
             let low = (pair[1] as char).to_digit(16).ok_or("非法十六进制字符")?;
             output.push((high * 16 + low) as u8);
@@ -370,13 +369,7 @@ mod hex {
 mod tests {
     use super::*;
 
-    fn envelope_for(
-        channel: &str,
-        key: &[u8],
-        seq: u64,
-        reply_to: u64,
-        payload: &str,
-    ) -> String {
+    fn envelope_for(channel: &str, key: &[u8], seq: u64, reply_to: u64, payload: &str) -> String {
         let mut nonce = [0u8; NONCE_LEN];
         getrandom::getrandom(&mut nonce).expect("CSPRNG 不可用");
         let nonce_hex = hex_encode(&nonce);
@@ -457,7 +450,13 @@ mod tests {
     #[test]
     fn test_progress_channel_independent_sequence() {
         let host = IpcSecureChannel::new().unwrap();
-        let progress = envelope_for("p", &host.progress_key[..], 1, 7, r#"{"op":"unlock_progress"}"#);
+        let progress = envelope_for(
+            "p",
+            &host.progress_key[..],
+            1,
+            7,
+            r#"{"op":"unlock_progress"}"#,
+        );
         let response = envelope_for("r", &host.response_key[..], 1, 7, r#"{"ok":true}"#);
         let opened_progress = host.open_line(&progress).unwrap();
         let opened_response = host.open_line(&response).unwrap();

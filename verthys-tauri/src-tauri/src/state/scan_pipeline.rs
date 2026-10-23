@@ -402,9 +402,13 @@ fn do_prefetch_blocking<T: ScanRecord>(
         return Err(format!("{} failed: {:?}", T::FETCH_OP, resp.error));
     }
     // fetch 复用 scan_open 创建的共享内存段，使用原有 shm_name 读取并核验 HMAC
-    let (records, exhausted, record_count) =
-        T::read_from_shm(shm_name, Some(&shm_auth_key[..]))?;
-    Ok((records, exhausted, record_count, resp.failed_ids.unwrap_or_default()))
+    let (records, exhausted, record_count) = T::read_from_shm(shm_name, Some(&shm_auth_key[..]))?;
+    Ok((
+        records,
+        exhausted,
+        record_count,
+        resp.failed_ids.unwrap_or_default(),
+    ))
 }
 
 /* ------------------------------------------------------------------ *

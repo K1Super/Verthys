@@ -35,7 +35,7 @@
     "useLocalToolsDir": true,
     "createUpdaterArtifacts": true,
     "windows": {
-      "allowDowngrades": false
+      "allowDowngrades": true
     },
     "icon": [
       "icons/32x32.png",
@@ -54,10 +54,7 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMyRjREMUQ0ODY2NjI5MTMKUldRVEtXYUcxTkgwd2lGeGREZkpvWmhZQjVDelVDR1N0eUhROWRZVWZNZm9RL0xuQ3F5TmdURUUK",
-      "endpoints": [
-        "http://127.0.0.1:8765/latest.json"
-      ],
-      "dangerousInsecureTransportProtocol": true,
+      "channel": "stable",
       "allowDowngrades": false,
       "windows": {
         "installMode": "passive"

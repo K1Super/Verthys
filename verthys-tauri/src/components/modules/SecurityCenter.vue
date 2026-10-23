@@ -76,6 +76,9 @@
       :update-checking="updateChecking"
       :update-installing="updateInstalling || updateFlowActive"
       :update-percent="updatePercent"
+      :update-cancellable="updateCancellable"
+      :update-failed="!!updateLastErrorCode"
+      @export-logs="onExportUpdateLogs"
       :device-check-result="deviceCheckResult"
       :device-fingerprint-short="deviceFingerprintShort"
       :module-ids="moduleIds"
@@ -112,6 +115,7 @@
       @lock-all="onLockAll"
       @check-update="onCheckUpdate"
       @install-update="onInstallUpdate"
+      @cancel-update="onCancelUpdate"
       @open-change-key-dialog="onOpenChangeKeyDialog"
       @export-bin="onExportBin"
       @toggle-module-key-enabled="onToggleModuleKeyEnabled"
@@ -198,6 +202,22 @@
         如确为本人更换介质，可确认后重试：本次仍须通过密码验证，验证通过后才会更新绑定记录。
       </p>
     </VerthysDialog>
+
+    <!-- 更新说明与强制更新入口：手动检查发现版本后展示；强制更新不可关闭 -->
+    <UpdaterAvailableDialog
+      v-model="updateDialogOpen"
+      :current-version="availableUpdate?.currentVersion ?? ''"
+      :version="availableUpdate?.version ?? ''"
+      :notes="availableUpdate?.notes ?? ''"
+      :force-update="availableUpdate?.forceUpdate ?? false"
+      :installing="updateInstalling || updateFlowActive"
+      :percent="updatePercent"
+      :cancellable="updateCancellable"
+      :error-message="updateDialogError"
+      @install="onInstallUpdate"
+      @cancel="onCancelUpdate"
+      @export="onExportUpdateLogs"
+    />
   </div>
 </template>
 
@@ -232,6 +252,7 @@ const DeviceMismatchView = defineAsyncComponent(() => import("../views/DeviceMis
 const ManagementView = defineAsyncComponent(() => import("../views/ManagementView.vue"));
 const ChangeKeyDialog = defineAsyncComponent(() => import("../management/ChangeKeyDialog.vue"));
 const ExportVerifyDialog = defineAsyncComponent(() => import("../management/ExportVerifyDialog.vue"));
+const UpdaterAvailableDialog = defineAsyncComponent(() => import("../dialogs/UpdaterAvailableDialog.vue"));
 import { useToastCenter } from "../../composables/useToastCenter";
 import { useClipToast } from "../../composables/useClipToast";
 import { useViewMode } from "../../composables/security-center/useViewMode";
@@ -246,6 +267,7 @@ import { usePreset } from "../../composables/security-center/usePreset";
 import { useDefenseStatus } from "../../composables/security-center/useDefenseStatus";
 import { useSystemMetrics } from "../../composables/security-center/useSystemMetrics";
 import { useAppUpdater } from "../../composables/useAppUpdater";
+import { updaterErrorMessage } from "../../lib/updater_error";
 import { isCacheDirty } from "../../cache/composition/verthys-cache";
 
 const emit = defineEmits<{ (e: "back"): void; (e: "panel-active", val: boolean): void }>();
@@ -478,10 +500,16 @@ const {
   installing: updateInstalling,
   downloadedBytes: updateDownloadedBytes,
   totalBytes: updateTotalBytes,
-  lastError: updateLastError,
+  lastErrorCode: updateLastErrorCode,
   checkForUpdate,
   downloadUpdate,
+  beginLock: beginUpdateLock,
+  confirmLock: confirmUpdateLock,
+  abortLock: abortUpdateLock,
+  releaseCritical: releaseUpdaterCritical,
   installUpdate: installDownloadedUpdate,
+  cancelUpdate,
+  exportLogs: exportUpdateLogs,
 } = useAppUpdater();
 
 /** 下载进度百分比（0-100；总长未知时保持 0，端子只显示「正在更新…」） */
@@ -493,29 +521,72 @@ const updatePercent = computed(() => {
 /** 安装流程互斥闸门：覆盖下载、锁库与安装全过程，防止重复点击并发启动安装器 */
 const updateFlowActive = ref(false);
 
+/** 用户取消意图：覆盖“准备尚未建立会话”的竞态，失败归因不误导为更新失败。 */
+let updateCancelRequested = false;
+
+/** 仅在下载完成前允许取消；锁库与安装移交一旦开始就不能打断。 */
+const updateCancellable = computed(
+  () => updateFlowActive.value && updatePercent.value < 100,
+);
+
+/** 更新说明窗口：手动检查时打开；强制更新由静默检查直接拉起。 */
+const updateDialogOpen = ref(false);
+
+/** 强制更新在发现的任意时刻都必须展示，普通更新只在手动检查后展示。 */
+watch(
+  availableUpdate,
+  (update) => {
+    if (!update) {
+      updateDialogOpen.value = false;
+      return;
+    }
+    if (update.forceUpdate) updateDialogOpen.value = true;
+  },
+  // 启动静默检查可能先于本组件挂载完成，强制更新必须在首帧可见。
+  { immediate: true },
+);
+
+/** 窗口内错误只显示映射后的文案；取消是用户动作，不按错误呈现。 */
+const updateDialogError = computed(() => {
+  const code = updateLastErrorCode.value;
+  if (!code || code === "E_UPDATER_CANCELLED") return "";
+  return updaterErrorMessage(code);
+});
+
 /** 手动检查更新：区分「已是最新」与「检查失败」两种无更新结果 */
 const onCheckUpdate = async () => {
   if (updateChecking.value || updateInstalling.value || updateFlowActive.value) return;
   const found = await checkForUpdate();
   if (found) {
-    showToast(`发现新版本 ${found.version}`);
-  } else if (updateLastError.value) {
-    showError(`检查更新失败：${updateLastError.value}`);
+    updateDialogOpen.value = true;
+  } else if (updateLastErrorCode.value) {
+    showError(`检查更新失败：${updaterErrorMessage(updateLastErrorCode.value)}`);
   } else {
     showToast("当前已是最新版本");
   }
 };
 
-/** 下载并安装更新：下载完成后先锁库落盘，再交给安装器接管进程 */
+/** 导出更新日志；取消不提示，失败使用统一错误文案。 */
+const onExportUpdateLogs = async () => {
+  const path = await exportUpdateLogs();
+  if (path) {
+    showToast("更新日志已导出");
+  } else if (updateLastErrorCode.value) {
+    showError(updaterErrorMessage(updateLastErrorCode.value));
+  }
+};
+
+/** 下载并安装更新：下载完成后先取挑战、锁库落盘，再兑换回执交给安装器 */
 const onInstallUpdate = async () => {
   if (updateInstalling.value || updateFlowActive.value) return;
   updateFlowActive.value = true;
+  updateCancelRequested = false;
   try {
     if (!availableUpdate.value) {
       const found = await checkForUpdate();
       if (!found) {
-        if (updateLastError.value) {
-          showError(`检查更新失败：${updateLastError.value}`);
+        if (updateLastErrorCode.value) {
+          showError(`检查更新失败：${updaterErrorMessage(updateLastErrorCode.value)}`);
         } else {
           showToast("当前已是最新版本");
         }
@@ -523,20 +594,46 @@ const onInstallUpdate = async () => {
       }
     }
     await downloadUpdate();
-    if (verthysReadyRef.value) {
-      await lockAll();
-      if (isCacheDirty()) {
+    const challenge = await beginUpdateLock();
+    const lockOutcome = await lockAll();
+    if (!lockOutcome.clean) {
+      await abortUpdateLock();
+      if (lockOutcome.dirty) {
         showError("部分数据可能未保存，已中止更新安装");
-        return;
+      } else if (!lockOutcome.flushed) {
+        showError("数据落盘未完成，已中止更新安装");
+      } else {
+        showError("数据锁定状态无法确认，已中止更新安装");
       }
+      return;
     }
-    await installDownloadedUpdate();
+    const receipt = await confirmUpdateLock(lockOutcome, challenge.challenge);
+    await installDownloadedUpdate(receipt.receipt);
   } catch (e) {
+    const code = (e as { code?: string } | null)?.code;
+    if (updateCancelRequested || code === "E_UPDATER_CANCELLED") {
+      showToast("已取消更新");
+      return;
+    }
+    await abortUpdateLock();
     console.error("[updater] 更新安装失败", e);
-    showError(`更新失败：${e instanceof Error ? e.message : String(e)}`);
+    showError(`更新失败：${updaterErrorMessage(updateLastErrorCode.value)}`);
   } finally {
     /* 安装成功时进程由安装器接管退出，不会执行此处；失败或中止时释放闸门 */
+    await releaseUpdaterCritical();
     updateFlowActive.value = false;
+  }
+};
+
+/** 取消下载：Rust 侧中断传输并清理已接收字节。 */
+const onCancelUpdate = async () => {
+  if (!updateCancellable.value) return;
+  updateCancelRequested = true;
+  try {
+    await cancelUpdate();
+  } catch {
+    // 锁库或安装移交阶段不接受取消，撤回意图并保持当前流程。
+    updateCancelRequested = false;
   }
 };
 

@@ -1,6 +1,6 @@
 [package]
 name = "verthys-worker"
-version = "4.1.3"
+version = "4.1.7"
 edition = "2021"
 build = "build.rs"
 
