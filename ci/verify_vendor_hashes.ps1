@@ -1,4 +1,4 @@
-# ci/verify_vendor_hashes.ps1
+﻿# ci/verify_vendor_hashes.ps1
 # 供应链完整性门：
 #   1. 逐文件比对 ci/vendor_hashes.txt 记录的 SHA-256 与磁盘实际哈希
 #   2. 与 git 跟踪集双向核对：跟踪却未入清单 / 清单却未跟踪，均判失败
