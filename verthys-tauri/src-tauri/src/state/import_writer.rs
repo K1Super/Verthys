@@ -234,7 +234,7 @@ fn writer_loop(
         heartbeat.store(now_ms(), Ordering::SeqCst);
         let cmd = match rx.recv_timeout(Duration::from_millis(wconst::WRITER_HEARTBEAT_SWEEP_MS)) {
             Ok(c) => c,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,   /* 空闲保活 */
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue, /* 空闲保活 */
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 log::info!("[import_writer] 写者通道关闭，线程退出");
                 break;
@@ -912,7 +912,11 @@ mod tests {
         std::fs::create_dir_all(&tmp_dir).unwrap();
 
         let err = process_end(&state, true).unwrap_err();
-        assert!(err.contains("台账落盘失败"), "错误应说明台账落盘失败: {}", err);
+        assert!(
+            err.contains("台账落盘失败"),
+            "错误应说明台账落盘失败: {}",
+            err
+        );
         assert!(
             state.lock_import_session().is_some(),
             "落盘失败必须保留会话以支持重试"
@@ -1117,10 +1121,22 @@ mod tests {
         let hash = "d".repeat(64);
 
         // 清藏文件块与照片数据块共用默认前缀；缩略图与块集各有专属前缀
-        assert_eq!(chunk_record_name(TYPE_FILEVERTHYS_CHUNK, &hash), format!("chunk_{hash}"));
-        assert_eq!(chunk_record_name(TYPE_PHOTO_CHUNK, &hash), format!("chunk_{hash}"));
-        assert_eq!(chunk_record_name(TYPE_PHOTO_THUMB, &hash), format!("thumb_{hash}"));
-        assert_eq!(chunk_record_name(TYPE_PHOTO_CHUNK_SET, &hash), format!("cset_{hash}"));
+        assert_eq!(
+            chunk_record_name(TYPE_FILEVERTHYS_CHUNK, &hash),
+            format!("chunk_{hash}")
+        );
+        assert_eq!(
+            chunk_record_name(TYPE_PHOTO_CHUNK, &hash),
+            format!("chunk_{hash}")
+        );
+        assert_eq!(
+            chunk_record_name(TYPE_PHOTO_THUMB, &hash),
+            format!("thumb_{hash}")
+        );
+        assert_eq!(
+            chunk_record_name(TYPE_PHOTO_CHUNK_SET, &hash),
+            format!("cset_{hash}")
+        );
 
         // 记录名不承载来源文件名与分块序号（可追溯性由哈希承担）
         assert!(!chunk_record_name(TYPE_FILEVERTHYS_CHUNK, "e").contains("bin"));

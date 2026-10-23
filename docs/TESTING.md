@@ -103,3 +103,21 @@ cargo test
 Set-Location .\verthys-tauri\verthys-worker
 cargo test
 ```
+
+## 8. 更新域测试
+
+```powershell
+# Rust 更新服务：清单解析、签名复验、PE 版本、标记、灰度桶
+Set-Location .\verthys-tauri\src-tauri
+cargo test updater
+
+# 前端更新状态机与锁库闸门
+Set-Location .\verthys-tauri
+npx vitest run src/composables/useAppUpdater.spec.ts src/session/security-session.spec.ts
+
+# 清单生成脚本与 profile 静态门
+node --check scripts/make_updater_manifest.mjs
+node scripts/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local.conf.json --profile local
+```
+
+更新域 E2E 需要干净 Windows VM、旧版基线安装包、新版物料与本机回环服务；正向升级后必须核对容器可解锁与记录数一致，负向用例必须复核旧版仍可启动。

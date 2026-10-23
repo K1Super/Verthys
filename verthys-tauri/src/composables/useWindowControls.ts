@@ -35,10 +35,7 @@ import { exit } from "@tauri-apps/plugin-process";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { onMounted, onUnmounted } from "vue";
-import {
-  lockAll,
-  verthysReadyRef,
-} from "../lib/keyManager";
+import { useToastCenter } from "./useToastCenter";
 
 /* 环境检测：使用公开 API isTauri() 替代内部实现细节 __TAURI_INTERNALS__
  * isTauri() 检查 window.isTauri 标志，由 Tauri 运行时注入，跨版本稳定 */
@@ -88,8 +85,22 @@ async function performCleanupAndExit(): Promise<void> {
   if (isClosing) return;
   isClosing = true;
 
+  /* 密钥业务层按需加载（架构约束）：
+   * 本组合式函数随「应用级常驻窗控」进入首屏主包 —— 若静态导入
+   * keyManager，会经其依赖链把 verthys/crypto 整个业务层拖入主包，
+   * 破坏「引导页轻首屏 + 业务层异步分包」架构。故仅在关闭事件真正
+   * 抵达时载入（此时后端已隐藏窗口，加载耗时用户不可感知）。 */
+  let keyManager: typeof import("../lib/keyManager");
+  try {
+    keyManager = await import("../lib/keyManager");
+  } catch {
+    // 业务层加载失败：按未初始化处理，直接退出
+    await exitWithFallback();
+    return;
+  }
+
   // 2. verthys 未初始化 → 无需清理，直接退出
-  if (!verthysReadyRef.value) {
+  if (!keyManager.verthysReadyRef.value) {
     await exitWithFallback();
     return;
   }
@@ -98,7 +109,7 @@ async function performCleanupAndExit(): Promise<void> {
   //    窗口已由后端在 CloseRequested 时隐藏（零 IPC 延迟），此处无需再隐藏
   //    lockAll 内部 40s 安全网 + 后端 45s 超时兜底，双保险确保进程退出
   try {
-    await lockAll();
+    await keyManager.lockAll();
   } catch { /* lockAll 内部已吞错，此处兜底 */ }
 
   // 4. 统一退出：exit(0) 优先，3 秒超时后 destroy 兜底
@@ -153,6 +164,7 @@ export function useWindowControls() {
 
   /* ===== 后端清理事件监听器（onMounted 注册，onUnmounted 注销） ===== */
   let unlistenCleanup: UnlistenFn | null = null;
+  let unlistenCloseBlocked: UnlistenFn | null = null;
 
   onMounted(() => {
     if (!isTauriEnv) return;
@@ -168,6 +180,14 @@ export function useWindowControls() {
       }).then((unlisten) => {
         unlistenCleanup = unlisten;
       }).catch(() => { /* 注册失败时忽略，后端 45s 超时兜底 */ });
+
+      // 锁库/安装移交期间后端拒绝关闭并回传该事件；提示层已在首屏主包，
+      // 直接复用，提示失败也不影响后端拦截。
+      listen("verthys://close-blocked", () => {
+        useToastCenter().showError("正在安全落盘，请勿关闭");
+      }).then((unlisten) => {
+        unlistenCloseBlocked = unlisten;
+      }).catch(() => { /* 提示失败不影响后端拦截 */ });
     } catch { /* */ }
   });
 
@@ -175,6 +195,10 @@ export function useWindowControls() {
     if (unlistenCleanup) {
       unlistenCleanup();
       unlistenCleanup = null;
+    }
+    if (unlistenCloseBlocked) {
+      unlistenCloseBlocked();
+      unlistenCloseBlocked = null;
     }
   });
 

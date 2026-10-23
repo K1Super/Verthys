@@ -305,13 +305,16 @@
      前 20% 时长即冲到约七成浓度的 --ease，肉眼读作「直接呈现」，
      正是切换生硬的成因；现改用全局「模块步入编排」两段式包络：
      离场（快于入场，让位新视图显影主体）→ 空窗 → 入场逐级沉积。
+   - 时长专属化：三态互切为高频路径，离场 0.20s + 入场 0.40s =
+     每步 0.60s（用户裁定，--mgmt-leave-dur / --mgmt-enter-dur）——
+     转场只承担衔接，不套用模块级 0.62s 长显影；严格串行结构与包络形状均不变
    - blur 不参与过渡：禁止大面域滤镜在切换期逐帧重绘
    ============================================================ */
 .mgmt-x-enter-active {
-  animation: module-reveal var(--reveal-dur, 0.62s) linear backwards;
+  animation: module-reveal var(--mgmt-enter-dur, 0.4s) linear backwards;
 }
 .mgmt-x-leave-active {
-  animation: module-reveal-out var(--mgmt-leave-dur, 0.34s) linear forwards;
+  animation: module-reveal-out var(--mgmt-leave-dur, 0.2s) linear forwards;
   pointer-events: none;
 }
 .mgmt-x-enter-from {

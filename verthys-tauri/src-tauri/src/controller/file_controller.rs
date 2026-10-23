@@ -878,10 +878,7 @@ fn read_user_file_range_blocking(
                     WRITE_FILE_CHUNK_BYTES,
                     sanitize_path(path)
                 );
-                return Err(format!(
-                    "分片长度超过上限 {} 字节",
-                    WRITE_FILE_CHUNK_BYTES
-                ));
+                return Err(format!("分片长度超过上限 {} 字节", WRITE_FILE_CHUNK_BYTES));
             }
             let end = offset.checked_add(length);
             let in_range = matches!(end, Some(end) if offset <= file_size && end <= file_size);
@@ -988,10 +985,7 @@ fn user_file_stat_blocking(path: &str) -> Result<UserFileStat, String> {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .ok_or_else(|| {
-            log::warn!(
-                "[user_file_stat] 无法获取修改时间: {}",
-                sanitize_path(path)
-            );
+            log::warn!("[user_file_stat] 无法获取修改时间: {}", sanitize_path(path));
             "无法获取文件修改时间".to_string()
         })?;
 
@@ -1306,7 +1300,10 @@ pub async fn user_file_stat(app: tauri::AppHandle, path: String) -> Result<UserF
                 &path,
                 AuditResult::Failure,
                 None,
-                Some(format!("stat 超时 {}s", USER_FILE_CHUNK_OP_TIMEOUT.as_secs())),
+                Some(format!(
+                    "stat 超时 {}s",
+                    USER_FILE_CHUNK_OP_TIMEOUT.as_secs()
+                )),
             );
             Err(ErrorCode::TemporaryFailure.default_message().to_string())
         }
@@ -1430,7 +1427,9 @@ pub async fn check_disk_space(
     let session_path = state.verthys_session_path();
     log::info!(
         "[check_disk_space] 查询磁盘空间: path={} 容器路径={}",
-        path.as_deref().map(sanitize_path).unwrap_or_else(|| "（缺省）".to_string()),
+        path.as_deref()
+            .map(sanitize_path)
+            .unwrap_or_else(|| "（缺省）".to_string()),
         session_path
             .as_deref()
             .map(sanitize_path)
@@ -2232,7 +2231,10 @@ mod tests {
         assert!(existing.free_bytes > 0, "已存在目录必须返回可用空间");
 
         // 目标尚未创建（导出保存位置）：解析父目录后仍可查询
-        let missing = temp.join("not-created-yet.bin").to_string_lossy().to_string();
+        let missing = temp
+            .join("not-created-yet.bin")
+            .to_string_lossy()
+            .to_string();
         let pending = check_disk_space_blocking(Some(&missing), None).unwrap();
         assert!(pending.free_bytes > 0, "未创建目标必须按父目录卷查询");
 

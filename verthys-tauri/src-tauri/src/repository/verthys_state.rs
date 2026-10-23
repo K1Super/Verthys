@@ -349,8 +349,7 @@ fn read_state_at(verthys_path: &str) -> Result<Option<VerthysState>, String> {
 
 /// 解析既有状态文件（调用方保证文件存在）
 fn parse_state_file(file: &std::path::Path) -> Result<VerthysState, String> {
-    let content =
-        std::fs::read_to_string(file).map_err(|e| format!("读取状态文件失败: {}", e))?;
+    let content = std::fs::read_to_string(file).map_err(|e| format!("读取状态文件失败: {}", e))?;
     let state: VerthysState =
         serde_json::from_str(&content).map_err(|e| format!("解析状态文件失败: {}", e))?;
     if state.magic != STATE_MAGIC {

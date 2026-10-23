@@ -40,7 +40,10 @@ pub fn verify_self_image_async(app: tauri::AppHandle) {
             run_boot_verification(&app);
         });
     if let Err(e) = spawn_result {
-        log::error!("[integrity_check] 启动核验线程创建失败（本轮启动无签名核验）: {}", e);
+        log::error!(
+            "[integrity_check] 启动核验线程创建失败（本轮启动无签名核验）: {}",
+            e
+        );
     }
 }
 
@@ -72,7 +75,11 @@ fn run_boot_verification(app: &tauri::AppHandle) {
     if ok {
         report_result(app, true, "主程序镜像签名核验通过".to_string());
     } else {
-        report_result(app, false, "主程序镜像签名核验失败（不阻断启动与解锁）".to_string());
+        report_result(
+            app,
+            false,
+            "主程序镜像签名核验失败（不阻断启动与解锁）".to_string(),
+        );
     }
 }
 

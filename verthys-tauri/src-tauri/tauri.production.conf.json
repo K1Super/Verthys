@@ -1,0 +1,15 @@
+{
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://updates.verthys.example/stable/latest.json"],
+      "channel": "stable",
+      "dangerousInsecureTransportProtocol": false,
+      "allowedDownloadHosts": ["updates.verthys.example"],
+      "authenticode": {
+        "require": true,
+        "revocation": true
+      },
+      "allowDowngrades": false
+    }
+  }
+}

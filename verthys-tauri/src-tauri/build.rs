@@ -153,6 +153,68 @@ fn main() {
     //   3. worker 源码（src/**/*.rs、Cargo.toml）不得晚于 worker release 产物
     //      （源码更新后必须重新 cargo build --release 并同步素材）
     verify_bundle_assets(dll_contract.as_ref());
+
+    // ===== 4. 核心版本常量（清单兼容门的事实来源） =====
+    // 兼容判定若与真实核心版本脱节，会表现为“不兼容也能安装”或“兼容却被拒绝”。
+    // 版本常量在编译期直接来自 C 核心头文件；头文件缺失或格式变化时构建失败，
+    // 不允许回退到任何手写数值。
+    let (core_api_version, core_container_version) = load_core_versions(&repo_root);
+    let core_versions_code = format!(
+        "/// 编译期从核心 API 头文件解析出的当前接口集版本。\n\
+         pub const CORE_API_VERSION: u32 = 0x{:04X};\n\
+         /// 编译期从容器头文件解析出的当前容器格式版本。\n\
+         pub const CORE_CONTAINER_VERSION: u32 = {};\n",
+        core_api_version, core_container_version
+    );
+    fs::write(
+        PathBuf::from(&out_dir).join("core_versions.rs"),
+        core_versions_code,
+    )
+    .expect("写入 core_versions.rs 失败");
+}
+
+/// 读取核心头文件中的版本宏；任一缺失即阻断构建，避免兼容门使用过期数值。
+fn load_core_versions(repo_root: &Path) -> (u32, u32) {
+    let api_header = repo_root.join("core/include/verthys.h");
+    let container_header = repo_root.join("core/src/container/shared/verthys_container_v3.h");
+    println!("cargo:rerun-if-changed={}", api_header.display());
+    println!("cargo:rerun-if-changed={}", container_header.display());
+
+    let api_text = fs::read_to_string(&api_header).unwrap_or_else(|error| {
+        panic!(
+            "无法读取核心 API 版本头文件 {}: {error}",
+            api_header.display()
+        )
+    });
+    let container_text = fs::read_to_string(&container_header).unwrap_or_else(|error| {
+        panic!(
+            "无法读取容器版本头文件 {}: {error}",
+            container_header.display()
+        )
+    });
+
+    let api = parse_define_u32(&api_text, "VERTHYS_API_VERSION")
+        .unwrap_or_else(|| panic!("核心 API 版本宏缺失或格式非法: {}", api_header.display()));
+    let container = parse_define_u32(&container_text, "VERTHYS_V3_VERSION")
+        .unwrap_or_else(|| panic!("容器版本宏缺失或格式非法: {}", container_header.display()));
+    (api, container)
+}
+
+/// 解析形如 `#define NAME 0x000E` 或 `#define NAME 3u` 的整型宏。
+fn parse_define_u32(text: &str, symbol: &str) -> Option<u32> {
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some("#define") || parts.next() != Some(symbol) {
+            continue;
+        }
+        let raw = parts.next()?.trim_end_matches(&['u', 'U'][..]);
+        return if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+            u32::from_str_radix(hex, 16).ok()
+        } else {
+            raw.parse::<u32>().ok()
+        };
+    }
+    None
 }
 
 /// 计算文件 SHA-256（十六进制小写）。文件不可读时返回空串（由调用方处理）。

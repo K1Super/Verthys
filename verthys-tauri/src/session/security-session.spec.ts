@@ -52,6 +52,7 @@ const mocks = vi.hoisted(() => ({
   cancelDebouncedFlush: vi.fn(),
   resetFlushChain: vi.fn(),
   setCacheDirty: vi.fn(),
+  isCacheDirty: vi.fn(),
   startBackgroundTasks: vi.fn(),
   stopBackgroundTasks: vi.fn(),
 }));
@@ -80,6 +81,7 @@ vi.mock("../cache/composition/verthys-cache", () => ({
   waitForFlush: mocks.waitForFlush,
   clearAllCacheTimers: mocks.clearAllCacheTimers,
   setCacheDirty: mocks.setCacheDirty,
+  isCacheDirty: mocks.isCacheDirty,
   clearSummaryCache: mocks.clearSummaryCache,
   clearFullRecordCache: mocks.clearFullRecordCache,
 }));
@@ -113,6 +115,7 @@ function presetConfig(code: number) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.isCacheDirty.mockReturnValue(false);
   localStorage.clear();
   keyState.securityPreset.value = 0;
   keyState.globalKeyReady.value = true;
@@ -270,6 +273,29 @@ describe("lockAll 重入与代际闸门", () => {
 
     expect(mocks.verthysLockPersist).toHaveBeenCalledTimes(2);
     expect(mocks.workerDestroy).toHaveBeenCalledTimes(2);
+  });
+
+  it("干净锁库返回可安装结果", async () => {
+    mocks.waitForFlush.mockResolvedValue(undefined);
+    mocks.verthysClearGlobalKey.mockResolvedValue(undefined);
+    mocks.verthysLockPersist.mockResolvedValue(undefined);
+    mocks.securitySessionStop.mockResolvedValue(undefined);
+    mocks.verthysLock.mockResolvedValue(undefined);
+    mocks.workerDestroy.mockResolvedValue(undefined);
+
+    const outcome = await lockAll();
+
+    expect(outcome).toMatchObject({ clean: true, flushed: true, dirty: false });
+    expect(outcome.errors).toEqual([]);
+  });
+
+  it("脏缓存返回不可安装结果", async () => {
+    mocks.isCacheDirty.mockReturnValue(true);
+
+    const outcome = await lockAll();
+
+    expect(outcome.clean).toBe(false);
+    expect(outcome.dirty).toBe(true);
   });
 });
 

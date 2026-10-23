@@ -117,15 +117,17 @@
   transform: rotate(-90deg);
   transform-origin: 70px 70px;
   transform-box: view-box;
-  transition: stroke-dashoffset 0.6s var(--ease);
+  /* 仪表落值过渡：0.8s（用户裁定）—— 与 mgmt-x 入场（0.40s）重叠后收束，
+     读数扫掠保持可读的仪式感 */
+  transition: stroke-dashoffset 0.8s var(--ease);
   filter: drop-shadow(0 0 3px rgba(0, 212, 255, 0.3));
 }
 .bs-sweep-left { stroke: url(#bs-grad-left); }
 .bs-sweep-right { stroke: url(#bs-grad-right); }
 /* 弧端能量点 */
-.bs-sweep-dot { transition: transform 0.6s var(--ease); }
+.bs-sweep-dot { transition: transform 0.8s var(--ease); }
 /* 拖拽期冻结扫掠弧与能量点过渡：dashoffset 过渡叠加 drop-shadow 滤镜
-   为每帧重绘路径，模型同步（120ms 节拍）会不断重触发 0.6s 过渡形成
+   为每帧重绘路径，模型同步（120ms 节拍）会不断重触发 0.8s 过渡形成
    连续重绘带；冻结后拖拽路径仅剩合成器属性写入 */
 .is-dragging .bs-sweep,
 .is-dragging .bs-sweep-dot { transition: none; }

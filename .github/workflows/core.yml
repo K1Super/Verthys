@@ -68,7 +68,7 @@ jobs:
         run: |
           cmake -S . -B build_tidy -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVERTHYS_ENABLE_CLANG_TIDY=ON
 
-      - name: Build under clang-tidy (WarningsAsErrors: UAF/StackAddressEscape/Malloc)
+      - name: "Build under clang-tidy (WarningsAsErrors: UAF/StackAddressEscape/Malloc)"
         run: |
           cmake --build build_tidy --config Debug
   build-and-test:

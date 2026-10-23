@@ -151,12 +151,17 @@ pub fn security_session_set_hardening(
                 Some(format!(
                     "会话硬化开关: 挂起锁定={}（剪贴板监听{}）",
                     if suspend_lock { "启用" } else { "禁用" },
-                    if clipboard_monitor { "已启动" } else { "已停止" }
+                    if clipboard_monitor {
+                        "已启动"
+                    } else {
+                        "已停止"
+                    }
                 )),
             );
             log::info!(
                 "[security_session_set_hardening] 挂起锁定: {}, 剪贴板监听: {}",
-                suspend_lock, clipboard_monitor
+                suspend_lock,
+                clipboard_monitor
             );
             Ok(SecurityResult::success("会话硬化开关已更新"))
         }
@@ -172,10 +177,7 @@ pub fn security_session_set_hardening(
                     suspend_lock, clipboard_monitor, e
                 )),
             );
-            log::error!(
-                "[security_session_set_hardening] 剪贴板监听启动失败: {}",
-                e
-            );
+            log::error!("[security_session_set_hardening] 剪贴板监听启动失败: {}", e);
             Ok(SecurityResult::error(
                 "CLIPBOARD_MONITOR_FAILED",
                 format!("挂起锁定已设置，但剪贴板监听启动失败: {}", e),

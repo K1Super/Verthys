@@ -45,8 +45,6 @@ pub mod audit;
 pub mod auth;
 /// 解锁命令的服务端暴力熔断桥接（gate 检查 / 失败计数 / 成功重置）
 pub mod brute_force_bridge;
-/// 可移动介质绑定的解锁期接入（检测 / 登记 / 重绑定；服务层契约实现）
-pub mod usb_binding_bridge;
 pub mod commands;
 pub mod path_resolver;
 pub mod persistence;
@@ -54,6 +52,8 @@ pub mod persistence;
 pub mod preset_persistence;
 pub mod responses;
 pub mod state;
+/// 可移动介质绑定的解锁期接入（检测 / 登记 / 重绑定；服务层契约实现）
+pub mod usb_binding_bridge;
 
 pub use commands::brute_force::*;
 pub use commands::cleanup::*;

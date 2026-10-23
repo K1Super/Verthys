@@ -25,7 +25,8 @@ use windows::Win32::System::JobObjects::{
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
+    OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME,
+    PROCESS_TERMINATE,
 };
 
 /// worker 进程提交内存上限（2 GiB）。
@@ -208,8 +209,8 @@ pub(crate) fn verify_install_paths(worker_exe: &str, dll_path: &str) -> Result<(
         let exe_dir = exe
             .parent()
             .ok_or_else(|| "宿主路径缺少父目录".to_string())?;
-        let root = std::fs::canonicalize(exe_dir)
-            .map_err(|e| format!("规范化安装目录失败: {}", e))?;
+        let root =
+            std::fs::canonicalize(exe_dir).map_err(|e| format!("规范化安装目录失败: {}", e))?;
         // 未打包的 release 开发树（target/release）中 worker 与 DLL 分处不同目录，
         // 该布局不是部署形态；安装目录中两者必须同根。
         let root_text = root.display().to_string().to_lowercase();
@@ -217,8 +218,8 @@ pub(crate) fn verify_install_paths(worker_exe: &str, dll_path: &str) -> Result<(
             return Ok(());
         }
         for path in [worker_exe, dll_path] {
-            let canonical =
-                std::fs::canonicalize(path).map_err(|e| format!("规范化路径失败 {}: {}", path, e))?;
+            let canonical = std::fs::canonicalize(path)
+                .map_err(|e| format!("规范化路径失败 {}: {}", path, e))?;
             if !canonical.starts_with(&root) {
                 return Err(format!("路径越界: {} 不在安装目录内", canonical.display()));
             }

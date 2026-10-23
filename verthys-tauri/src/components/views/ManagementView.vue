@@ -61,9 +61,13 @@
           :update-checking="updateChecking"
           :update-installing="updateInstalling"
           :update-percent="updatePercent"
+          :update-cancellable="updateCancellable"
+          :update-failed="updateFailed"
           @lock-all="$emit('lockAll')"
           @check-update="$emit('checkUpdate')"
           @install-update="$emit('installUpdate')"
+          @cancel-update="$emit('cancelUpdate')"
+          @export-logs="$emit('exportLogs')"
         />
 
         <!-- 分区 1：全局密钥已就绪状态 + 全局密钥-设备绑定 -->
@@ -162,6 +166,10 @@ const props = defineProps<{
   updateInstalling: boolean;
   /** 下载进度百分比（0-100，未知总长时为 0） */
   updatePercent: number;
+  /** 下载阶段允许取消；锁库与安装移交期间为 false */
+  updateCancellable: boolean;
+  /** 最近一次更新失败，展示日志导出入口 */
+  updateFailed: boolean;
   /** 设备绑定校验结果（引导单元视觉形态） */
   deviceCheckResult: DeviceCheckResult;
   /** 设备机器码短显示 */
@@ -239,6 +247,10 @@ const emit = defineEmits<{
   (e: "checkUpdate"): void;
   /** 下载并安装已发现的更新 */
   (e: "installUpdate"): void;
+  /** 取消当前下载 */
+  (e: "cancelUpdate"): void;
+  /** 导出更新日志 */
+  (e: "exportLogs"): void;
   /** 打开修改全局密钥弹窗 */
   (e: "openChangeKeyDialog"): void;
   /** 导出当前密钥文件备份 */

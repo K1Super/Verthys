@@ -97,9 +97,7 @@ pub fn harden_process_environment() {
 pub fn clear_clipboard() -> bool {
     match clipboard_guard::clear() {
         Ok(()) => {
-            log::info!(
-                "[security] 剪贴板已清空（EmptyClipboard + WM_DESTROYCLIPBOARD 广播）"
-            );
+            log::info!("[security] 剪贴板已清空（EmptyClipboard + WM_DESTROYCLIPBOARD 广播）");
             true
         }
         Err(e) => {

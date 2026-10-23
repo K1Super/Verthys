@@ -486,7 +486,8 @@ pub fn resolve_volume_for_path(path: &str) -> Result<Option<VolumeInfo>, String>
         return Ok(None);
     }
 
-    let removable = unsafe { GetDriveTypeW(PCWSTR::from_raw(root.as_ptr())) } == DRIVE_TYPE_REMOVABLE;
+    let removable =
+        unsafe { GetDriveTypeW(PCWSTR::from_raw(root.as_ptr())) } == DRIVE_TYPE_REMOVABLE;
 
     let mut label_buf = [0u16; 261];
     let mut serial_number: u32 = 0;

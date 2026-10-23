@@ -6,14 +6,14 @@
   架构：
     骨架组件 MainView.vue（本文件）→ 组合子组件 + 组合式函数
     - main-view/CosmicBackground.vue   宇宙星空背景
-    - main-view/WindowControls.vue     窗口控制按钮
     - main-view/DockNav.vue            浮动 Dock 导航
     - main-view/ModuleStage.vue        模块路由舞台
     - main-view/ModuleKeyDialog.vue    模块密钥登录弹窗
     - main-view/VerthysNotReadyDialog.vue Verthys 未就绪提示
     - composables/useCosmicBackground.ts 视差+星场数据
-    - composables/useWindowControls.ts   窗口控制逻辑
     - composables/useModuleNavigation.ts 模块导航+密钥守卫
+  （窗口控制条 WindowControls 已提升至 App.vue 壳层：启动页起常驻，
+   不随页面交接重建/隐藏；本视图仅保留等高留白）
 -->
 <template>
   <div class="main-view" @mousemove="onParallax">
@@ -30,8 +30,7 @@
       :constellation-lines="constellationLines"
     />
 
-    <!-- 超精简状态条（窗口控制） -->
-    <WindowControls />
+    <!-- 超精简状态条（窗口控制）由 App.vue 壳层常驻承载 -->
 
     <!-- 工作区：Dock + 模块舞台 -->
     <div
@@ -82,7 +81,6 @@
 <script setup lang="ts">
 /* ===== 子组件（静态导入：壳层组件始终需要） ===== */
 import CosmicBackground from "./main-view/CosmicBackground.vue";
-import WindowControls from "./main-view/WindowControls.vue";
 import DockNav from "./main-view/DockNav.vue";
 import ModuleStage from "./main-view/ModuleStage.vue";
 import ModuleKeyDialog from "./main-view/ModuleKeyDialog.vue";
@@ -90,7 +88,6 @@ import VerthysNotReadyDialog from "./main-view/VerthysNotReadyDialog.vue";
 
 /* ===== 组合式函数 ===== */
 import { useCosmicBackground } from "../composables/useCosmicBackground";
-import { useWindowControls } from "../composables/useWindowControls";
 import { useModuleNavigation } from "../composables/useModuleNavigation";
 
 import { onBeforeMount, onBeforeUnmount, ref, watch } from "vue";
@@ -119,9 +116,9 @@ const {
   constellationLines,
 } = useCosmicBackground();
 
-/* ===== 窗口控制 ===== */
-/* useWindowControls 内部注册 onMounted 拦截关闭事件 */
-useWindowControls();
+/* ===== 窗口控制 =====
+ * 已提升至 App.vue 壳层（WindowControls 常驻组件内部注册关闭事件拦截），
+ * 本视图不再重复注册监听。 */
 
 /* ===== 模块导航与密钥守卫 ===== */
 const {
@@ -193,7 +190,8 @@ onBeforeUnmount(() => {
   z-index: 2;
   flex: 1;
   display: flex;
-  padding: 0 16px 16px;
+  /* 顶部 40px = 应用级常驻窗控条高度（与原状态条等高，几何不变） */
+  padding: 40px 16px 16px;
   overflow: hidden;
 }
 

@@ -84,7 +84,12 @@ pub(crate) fn inspect_binding(app: &AppHandle, verthys_path: &str) -> UsbVolumeS
                 drive_letter: String::new(),
                 volume_label: String::new(),
                 registered: false,
-                verdict: if enabled { "not_applicable" } else { "disabled_by_preset" }.into(),
+                verdict: if enabled {
+                    "not_applicable"
+                } else {
+                    "disabled_by_preset"
+                }
+                .into(),
                 enabled_by_preset: enabled,
             };
         }
@@ -126,8 +131,14 @@ pub(crate) fn inspect_binding(app: &AppHandle, verthys_path: &str) -> UsbVolumeS
     };
 
     let (result, detail) = match verdict {
-        "trusted" => (AuditResult::Success, "介质绑定检测通过（卷标 + 序列号哈希匹配）"),
-        "clone_suspected" => (AuditResult::Denied, "介质绑定检测：克隆嫌疑（序列号哈希不匹配）"),
+        "trusted" => (
+            AuditResult::Success,
+            "介质绑定检测通过（卷标 + 序列号哈希匹配）",
+        ),
+        "clone_suspected" => (
+            AuditResult::Denied,
+            "介质绑定检测：克隆嫌疑（序列号哈希不匹配）",
+        ),
         _ => (AuditResult::Success, "介质绑定检测：首次使用（尚未登记）"),
     };
     write_security_audit(
@@ -162,7 +173,10 @@ fn pre_unlock_guard_impl(
         // 不适用（关闭档位 / 固定盘 / 判定不可得）：放行，不制造数据不可达
         Ok(None) => return Ok(UsbBindAction::None),
         Err(e) => {
-            log::warn!("[usb_binding] 介质判定输入不可得，本次未启用绑定校验: {}", e);
+            log::warn!(
+                "[usb_binding] 介质判定输入不可得，本次未启用绑定校验: {}",
+                e
+            );
             write_security_audit(
                 app,
                 &state,

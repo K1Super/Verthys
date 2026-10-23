@@ -43,9 +43,9 @@
  * controller → state / repository / controller::types / util / security / worker
  */
 
+use crate::constants::import_writer as wconst;
 use crate::controller::api_error::ErrorCode;
 use crate::controller::types::{EnumerateBatch, InitStatus, InitStatusResult, VerthysResponse};
-use crate::constants::import_writer as wconst;
 use crate::repository::container_layout;
 use crate::repository::verthys_state::{
     delete_state_file, read_last_verthys_path, read_state_file, try_repair_state_file,
@@ -1115,7 +1115,11 @@ pub async fn verthys_create(
     // 附属数据目录前置保障：目录被同名文件占用、路径超长或不可创建时，
     // 创建流程整体拒绝（不进入 worker 创建，避免产生只带容器的半成品）。
     if let Err(e) = container_layout::ensure_sidecar_dir(&verthys_path) {
-        log::warn!("[verthys_create] 附属数据目录不可用: {} | {}", e, sanitize_path(&verthys_path));
+        log::warn!(
+            "[verthys_create] 附属数据目录不可用: {} | {}",
+            e,
+            sanitize_path(&verthys_path)
+        );
         write_verthys_audit(
             &app,
             AuditEventType::VerthysUnlock,
@@ -1615,9 +1619,7 @@ pub async fn verthys_force_close_import_session(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<VerthysResponse, String> {
-    if let Err(msg) =
-        require_unlocked(&app, &state, "verthys_force_close_import_session")
-    {
+    if let Err(msg) = require_unlocked(&app, &state, "verthys_force_close_import_session") {
         return Ok(VerthysResponse::err(
             "verthys_force_close_import_session",
             &msg,
@@ -1771,7 +1773,10 @@ pub async fn verthys_enumerate_records(
             serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
 
         if !resp.ok {
-            log::warn!("[verthys_enumerate_records] worker 返回失败: {:?}", resp.error);
+            log::warn!(
+                "[verthys_enumerate_records] worker 返回失败: {:?}",
+                resp.error
+            );
             return Ok(resp);
         }
 

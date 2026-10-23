@@ -41,7 +41,8 @@ impl SlidingWindowLimiter {
     /// 返回 false 时不记录，调用方可如实回报"频率受限"并可稍后重试。
     pub fn check_and_record(&mut self) -> bool {
         let now = Instant::now();
-        self.timestamps.retain(|&t| now.duration_since(t) < self.window);
+        self.timestamps
+            .retain(|&t| now.duration_since(t) < self.window);
 
         if self.timestamps.len() >= self.max_calls {
             return false;

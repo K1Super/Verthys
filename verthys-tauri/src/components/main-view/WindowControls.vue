@@ -1,6 +1,6 @@
 <!--
-  WindowControls.vue — 超精简状态条（窗口控制按钮）
-  从 MainView.vue 抽离，功能 100% 保留
+  WindowControls.vue — 应用级常驻窗控条（窗口控制按钮）
+  挂载于 App.vue 壳层：启动页与主界面同一条窗控，页面交接不重建、不闪烁
 -->
 <template>
   <div class="status-bar" data-tauri-drag-region @mousedown="onDragRegionMouseDown">
@@ -59,7 +59,9 @@ const { onMinimize, onToggleMax, onClose, onDragRegionMouseDown } = useWindowCon
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-muted);
+  /* 静息态须清晰可辨：原 --text-muted(#3d4452) 与深空底色几乎同值，
+     实际观感等同按钮被隐藏（用户报告「按钮没有显示」的根因） */
+  color: var(--text-secondary);
   cursor: pointer;
   transition: all var(--dur-fast) var(--ease);
 }
@@ -71,6 +73,10 @@ const { onMinimize, onToggleMax, onClose, onDragRegionMouseDown } = useWindowCon
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.06);
   border-color: var(--border-glass);
+}
+.win-btn:focus-visible {
+  outline: 1px solid var(--border-hover);
+  outline-offset: 2px;
 }
 .win-close:hover {
   color: #fff;

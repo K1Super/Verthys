@@ -264,8 +264,8 @@ mod tests {
         save_chunk_ledger(&verthys_path, &ledger).unwrap();
 
         // 文件内 entries 升序且结构自洽
-        let text =
-            std::fs::read_to_string(container_layout::chunk_ledger_file_for(&verthys_path)).unwrap();
+        let text = std::fs::read_to_string(container_layout::chunk_ledger_file_for(&verthys_path))
+            .unwrap();
         assert!(text.starts_with('{'));
         assert!(text.contains("\"entries\""));
         // 首个键值对应为 (1, 0)

@@ -2,7 +2,7 @@
 # P2-4 修复（2026-09-19）：Rust / 前端 CI 质量门
 #
 # 覆盖（对应 core.yml 注释中"由本工作流承接"的承诺）：
-#   1. Rust 单元测试（src-tauri 314 项 + verthys-worker 18 项）
+#   1. Rust 单元测试（src-tauri + verthys-worker 全部用例）
 #   2. cargo clippy 静态检查（--all-targets -D warnings，零告警门）
 #   3. 前端单元测试（vitest，验证进度感知层状态机核心路径）
 #   4. 前端 TypeScript 类型检查（vue-tsc --noEmit）
@@ -40,6 +40,36 @@ jobs:
           & ".\ci\sync_version.ps1" -CheckOnly
           if ($LASTEXITCODE -ne 0) { throw "version drift: edit root VERSION then run ci\sync_version.ps1" }
 
+      - name: Updater boundary gate
+        shell: pwsh
+        run: |
+          & ".\ci\check_updater_boundary.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "updater boundary gate failed" }
+
+      - name: Updater error code contract
+        shell: pwsh
+        run: |
+          node scripts/check_updater_error_codes.mjs
+
+      - name: Updater profile gate
+        shell: pwsh
+        run: |
+          node scripts/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.production.conf.json --profile production --endpoint https://updates.verthys.com/stable/latest.json
+          if ($LASTEXITCODE -ne 0) { throw "production updater profile failed" }
+          node scripts/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local.conf.json --profile local
+          if ($LASTEXITCODE -ne 0) { throw "local updater profile failed" }
+          node --check scripts/make_updater_manifest.mjs
+          node --check scripts/check_updater_profile.mjs
+          node --check scripts/sign_manifest.mjs
+          node --check scripts/generate_release_manifest.mjs
+          node --check scripts/release_update.mjs
+          node --check scripts/updater_e2e_matrix.mjs
+          node --check scripts/check_updater_origin.mjs
+          node --check scripts/check_cdn_edge.mjs
+          node --check scripts/updater_report.mjs
+          node --test scripts/make_updater_manifest.test.mjs
+          node --test scripts/updater_report.test.mjs
+
       - name: Setup Rust (pinned by rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
 
@@ -66,7 +96,7 @@ jobs:
       - name: Install cargo-deny (locked)
         run: cargo install --locked cargo-deny
 
-      - name: Supply-chain scan (cargo-deny: advisories/licenses/bans/sources)
+      - name: "Supply-chain scan (cargo-deny: advisories/licenses/bans/sources)"
         shell: pwsh
         run: |
           # 仓库无根 workspace：两个独立 crate 分别以各自 manifest 扫描
@@ -214,6 +244,36 @@ jobs:
         run: |
           & ".\ci\sync_version.ps1" -CheckOnly
           if ($LASTEXITCODE -ne 0) { throw "version drift: edit root VERSION then run ci\sync_version.ps1" }
+
+      - name: Updater boundary gate
+        shell: pwsh
+        run: |
+          & ".\ci\check_updater_boundary.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "updater boundary gate failed" }
+
+      - name: Updater error code contract
+        shell: pwsh
+        run: |
+          node scripts/check_updater_error_codes.mjs
+
+      - name: Updater profile gate
+        shell: pwsh
+        run: |
+          node scripts/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.production.conf.json --profile production --endpoint https://updates.verthys.com/stable/latest.json
+          if ($LASTEXITCODE -ne 0) { throw "production updater profile failed" }
+          node scripts/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local.conf.json --profile local
+          if ($LASTEXITCODE -ne 0) { throw "local updater profile failed" }
+          node --check scripts/make_updater_manifest.mjs
+          node --check scripts/check_updater_profile.mjs
+          node --check scripts/sign_manifest.mjs
+          node --check scripts/generate_release_manifest.mjs
+          node --check scripts/release_update.mjs
+          node --check scripts/updater_e2e_matrix.mjs
+          node --check scripts/check_updater_origin.mjs
+          node --check scripts/check_cdn_edge.mjs
+          node --check scripts/updater_report.mjs
+          node --test scripts/make_updater_manifest.test.mjs
+          node --test scripts/updater_report.test.mjs
 
       - name: Setup Rust (pinned by rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master

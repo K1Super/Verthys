@@ -12,7 +12,6 @@
     "core:window:allow-destroy",
     "dialog:allow-open",
     "dialog:allow-save",
-    "process:allow-exit",
-    "updater:default"
+    "process:allow-exit"
   ]
 }

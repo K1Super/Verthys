@@ -30,11 +30,26 @@
       <div class="main-layer" :class="{ prewarm: !entered }">
         <MainView v-if="mainPrewarmed" />
       </div>
+
+      <!-- 应用级常驻窗控条：启动页与主界面共用同一条窗控（最小化/最大化/关闭）。
+           挂载于页面层之上 —— 引导页展示期即可见，交接期不随任一层的淡入淡出
+           而消失/重建，杜绝「进入主界面后按钮隐藏」 -->
+      <div class="app-window-chrome">
+        <WindowControls />
+      </div>
     </div>
 
     <!-- 全局 Toast 渲染层（唯一渲染通道）：单点挂载 + Teleport 至 body，
          层级 = --z-toast（全应用最高层）—— 任何界面不可覆盖提示 -->
     <ToastLayer :idle-level="idleLevel" />
+
+    <!-- 更新自检失败后的恢复入口：启动阶段即可用，不依赖解锁业务层 -->
+    <UpdaterRepairDialog
+      v-model="showRepairDialog"
+      :state="repairState"
+      @repair="onRunRepair"
+      @export="onExportRepairLogs"
+    />
   </div>
 </template>
 
@@ -42,15 +57,23 @@
 import { defineAsyncComponent, ref, computed, onMounted, onBeforeUnmount } from "vue";
 import ParticleBackground from "./components/ParticleBackground.vue";
 import UnlockView from "./components/UnlockView.vue";
+import WindowControls from "./components/main-view/WindowControls.vue";
 // 全局 Toast 渲染层（唯一渲染通道；静态导入：提示须在任何阶段随时可用）
 import ToastLayer from "./components/common/feedback/ToastLayer.vue";
 // 主界面懒加载：MainView 静态导入会拉入 keyManager.ts → verthys.ts 整个业务层，
 // 改为 defineAsyncComponent 后，业务层代码移至独立 chunk，主包体积大幅下降。
 const MainView = defineAsyncComponent(() => import("./components/MainView.vue"));
+// 修复入口只在异常启动时出现，按需加载以免进入首屏主包
+const UpdaterRepairDialog = defineAsyncComponent(
+  () => import("./components/dialogs/UpdaterRepairDialog.vue"),
+);
 import { useAppTransition } from "./composables/useAppTransition";
 import { useSecurityGuard } from "./composables/useSecurityGuard";
 import { useGlobalIdleScheduler } from "./composables/useGlobalIdleScheduler";
-import { useAppUpdater } from "./composables/useAppUpdater";
+import { useAppUpdater, type RepairState } from "./composables/useAppUpdater";
+import { updaterErrorMessage } from "./lib/updater_error";
+import { useToastCenter } from "./composables/useToastCenter";
+import { withTimeout } from "./utils/promise_utils";
 import { masterFrameLoop } from "./core/master-frame-loop";
 import { frameBudgetMonitor } from "./core/frame-budget";
 
@@ -73,7 +96,98 @@ const idleLevel = computed(() => level.value);
 
 let onMotionChange: ((e: MediaQueryListEvent) => void) | null = null;
 let updateCheckTimer: number | null = null;
-const { checkForUpdate } = useAppUpdater();
+const {
+  checkForUpdate,
+  readStartupState,
+  runHealthCheck,
+  readRepairState,
+  runRepair,
+  exportLogs: exportUpdateLogs,
+  lastErrorCode: updateLastErrorCode,
+} = useAppUpdater();
+const { showError, showStatus } = useToastCenter();
+
+const repairState = ref<RepairState | null>(null);
+const showRepairDialog = ref(false);
+
+/** 打开修复入口并刷新可用物料；不阻断用户继续使用旧界面。 */
+const openRepairDialog = async () => {
+  repairState.value = await readRepairState();
+  showRepairDialog.value = true;
+};
+
+/** 启动阶段分流：等待安装、执行 Rust 自检或直接进入修复。 */
+const runUpdaterStartupHealth = async () => {
+  const state = await readStartupState();
+  if (!state) return;
+
+  if (state.phase === "install_in_progress") {
+    showStatus("更新安装可能正在进行，请稍后重启应用");
+    return;
+  }
+  if (state.phase === "repair_confirmed") {
+    showStatus("旧版本已恢复");
+    return;
+  }
+  if (
+    state.phase === "repair_available" ||
+    state.phase === "install_failed" ||
+    state.phase === "marker_invalid"
+  ) {
+    await openRepairDialog();
+    return;
+  }
+  if (state.phase !== "health_check") return;
+
+  // 前端只负责启动 worker；自检结论由 Rust 复核真实会话与 DLL，前端无法伪造。
+  try {
+    const { ensureWorkerReady } = await import("./lib/verthys");
+    const ready = await withTimeout(ensureWorkerReady(), 20_000, "更新健康自检");
+    if (!ready) throw new Error("worker 未就绪");
+  } catch {
+    // 即使前端启动 worker 失败，也让 Rust 给出权威结论并归档标记/落盘修复状态。
+    const report = await runHealthCheck();
+    if (report?.verdict === "health_confirmed") {
+      showStatus("更新已完成并通过自检");
+      return;
+    }
+    await openRepairDialog();
+    showError("更新健康自检未能启动安全核心，请运行修复或重新安装旧版");
+    return;
+  }
+
+  showStatus("正在检查新版本完整性");
+  const report = await runHealthCheck();
+  if (!report) {
+    await openRepairDialog();
+    return;
+  }
+  if (report.verdict === "health_confirmed") {
+    showStatus("更新已完成并通过自检");
+    return;
+  }
+  await openRepairDialog();
+  showError("新版本自检未通过，请运行修复或重新安装旧版");
+};
+
+/** 运行修复：安装器接管后进程退出，未退出即代表启动失败。 */
+const onRunRepair = async () => {
+  try {
+    await runRepair();
+  } catch {
+    showError("无法启动修复安装器，请导出日志后重新安装旧版");
+  }
+};
+
+/** 导出更新日志；修复入口与安全中心共用同一导出通道。 */
+const onExportRepairLogs = async () => {
+  const path = await exportUpdateLogs();
+  if (path) {
+    showStatus("更新日志已导出");
+  } else if (updateLastErrorCode.value) {
+    showError(updaterErrorMessage(updateLastErrorCode.value));
+  }
+};
 
 onMounted(() => {
   const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -84,6 +198,7 @@ onMounted(() => {
   updateCheckTimer = window.setTimeout(() => {
     void checkForUpdate(true);
   }, 10_000);
+  void runUpdaterStartupHealth();
 
   /* MainView chunk 空闲预取（双缓冲预挂载前置条件）：
    * MainView 为懒加载 chunk，PREWARM_MOUNT（1100ms）预挂载时才触发
@@ -148,6 +263,17 @@ onBeforeUnmount(() => {
 .main-layer {
   position: absolute;
   inset: 0;
+}
+
+/* ===== 应用级常驻窗控条 =====
+ * 覆盖于双缓冲页面层之上（z-index 3 > 两层自动层叠）：启动页起即常驻，
+ * 不参与 page-glitch / materialize 任一层的过渡，页面交接全程稳定显示。 */
+.app-window-chrome {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
 }
 
 /* ===== MainView materialize（自星系消散的辉光深处浮现成型） =====

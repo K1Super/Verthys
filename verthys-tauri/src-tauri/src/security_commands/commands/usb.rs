@@ -226,10 +226,7 @@ pub fn security_usb_volume_status(
     app: tauri::AppHandle,
     verthys_path: String,
 ) -> Result<UsbVolumeStatus, String> {
-    Ok(crate::security_commands::usb_binding_bridge::inspect_binding(
-        &app,
-        &verthys_path,
-    ))
+    Ok(crate::security_commands::usb_binding_bridge::inspect_binding(&app, &verthys_path))
 }
 
 /// 登记当前容器所在的可移动介质（登记命令；需已解锁会话）
@@ -258,8 +255,11 @@ pub fn security_usb_register_current(
         ));
     }
 
-    let resolved =
-        crate::security_commands::usb_binding_bridge::resolve_volume_hash(&app, &verthys_path, false)?;
+    let resolved = crate::security_commands::usb_binding_bridge::resolve_volume_hash(
+        &app,
+        &verthys_path,
+        false,
+    )?;
     let (info, hash) = match resolved {
         Some(v) => v,
         None => {

@@ -272,7 +272,7 @@ fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
     }
     let bytes = text.as_bytes();
     let mut output = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let high = (pair[0] as char).to_digit(16).ok_or("非法十六进制字符")?;
         let low = (pair[1] as char).to_digit(16).ok_or("非法十六进制字符")?;
         output.push((high * 16 + low) as u8);

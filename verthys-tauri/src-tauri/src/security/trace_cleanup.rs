@@ -44,8 +44,7 @@ fn is_app_owned_target(target_lower: &str, owned_dirs_lower: &[String]) -> bool 
     if owned_dirs_lower.iter().any(|d| {
         !d.is_empty()
             && target_lower.starts_with(d.as_str())
-            && (target_lower.len() == d.len()
-                || target_lower.as_bytes()[d.len()] == b'\\')
+            && (target_lower.len() == d.len() || target_lower.as_bytes()[d.len()] == b'\\')
     }) {
         return true;
     }
@@ -164,8 +163,8 @@ mod win_impl {
     use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE};
     use windows::Win32::Storage::FileSystem::DeleteFileW;
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-        COINIT_APARTMENTTHREADED, IPersistFile, STGM_READ,
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED, STGM_READ,
     };
     use windows::Win32::UI::Shell::{IShellLinkW, SLGP_RAWPATH};
 
@@ -228,9 +227,12 @@ mod win_impl {
         // SAFETY：COM 已在本线程初始化（ComScope）；接口调用均按
         // COM 契约传参，缓冲区长度显式传递，无跨线程共享。
         unsafe {
-            let shell_link: IShellLinkW =
-                CoCreateInstance(&CLSID_SHELL_LINK, None::<&windows::core::IUnknown>, CLSCTX_INPROC_SERVER)
-                    .ok()?;
+            let shell_link: IShellLinkW = CoCreateInstance(
+                &CLSID_SHELL_LINK,
+                None::<&windows::core::IUnknown>,
+                CLSCTX_INPROC_SERVER,
+            )
+            .ok()?;
             let persist: IPersistFile = shell_link.cast().ok()?;
             persist
                 .Load(windows::core::PCWSTR::from_raw(wide.as_ptr()), STGM_READ)
@@ -271,8 +273,8 @@ mod win_impl {
             .map(|d| normalize_lower(&d.to_string_lossy()))
             .collect();
 
-        let appdata = std::env::var("APPDATA")
-            .map_err(|_| "无法读取 %APPDATA% 环境变量".to_string())?;
+        let appdata =
+            std::env::var("APPDATA").map_err(|_| "无法读取 %APPDATA% 环境变量".to_string())?;
         let recent_dir = Path::new(&appdata).join(r"Microsoft\Windows\Recent");
         let entries = match std::fs::read_dir(&recent_dir) {
             Ok(e) => e,
@@ -335,16 +337,10 @@ mod tests {
     #[test]
     fn test_app_owned_by_extension() {
         let dirs: Vec<String> = vec![];
-        assert!(is_app_owned_target(
-            r"c:\users\x\docs\秘密.verthys",
-            &dirs
-        ));
+        assert!(is_app_owned_target(r"c:\users\x\docs\秘密.verthys", &dirs));
         // 契约：输入已由调用方统一为小写反斜杠（normalize_lower）
         assert!(is_app_owned_target(r"d:\backup\照片.venc", &dirs));
-        assert!(is_app_owned_target(
-            r"c:\users\x\docs\photo.venc",
-            &dirs
-        ));
+        assert!(is_app_owned_target(r"c:\users\x\docs\photo.venc", &dirs));
     }
 
     #[test]
@@ -372,7 +368,10 @@ mod tests {
         // 通用扩展名（.bin 等）不属于应用专属痕迹域，绝不按扩展名删除
         assert!(!is_app_owned_target(r"c:\tools\firmware.bin", &dirs));
         assert!(!is_app_owned_target(r"c:\users\x\docs\报告.docx", &dirs));
-        assert!(!is_app_owned_target(r"c:\windows\system32\drivers\etc\hosts", &dirs));
+        assert!(!is_app_owned_target(
+            r"c:\windows\system32\drivers\etc\hosts",
+            &dirs
+        ));
     }
 
     #[test]
@@ -382,6 +381,9 @@ mod tests {
         // 空目录前缀只对前缀规则无效；扩展名规则独立生效（.verthys 仍命中）
         let dirs_with_empty = vec![String::new()];
         assert!(!is_app_owned_target(r"c:\anything.bin", &dirs_with_empty));
-        assert!(is_app_owned_target(r"c:\anything.verthys", &dirs_with_empty));
+        assert!(is_app_owned_target(
+            r"c:\anything.verthys",
+            &dirs_with_empty
+        ));
     }
 }

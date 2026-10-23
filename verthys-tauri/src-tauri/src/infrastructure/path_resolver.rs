@@ -47,8 +47,8 @@ pub fn verify_dll_integrity(dll_path: &str) -> Result<(), String> {
         return Err("DLL 完整性基线缺失，无法校验加密核心".into());
     };
 
-    let data = std::fs::read(dll_path)
-        .map_err(|e| format!("读取 DLL 失败，无法完成完整性校验: {}", e))?;
+    let data =
+        std::fs::read(dll_path).map_err(|e| format!("读取 DLL 失败，无法完成完整性校验: {}", e))?;
     let mut hasher = Sha256::new();
     hasher.update(&data);
     let actual = format!("{:x}", hasher.finalize());

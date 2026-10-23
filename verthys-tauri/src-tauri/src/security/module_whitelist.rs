@@ -829,6 +829,7 @@ pub fn build_system_baseline() -> HashBaseline {
 ///
 /// 注意：此函数仅对系统目录模块有意义。非系统目录模块应通过签名验证判断。
 #[cfg(target_os = "windows")]
+#[allow(clippy::result_unit_err)]
 pub fn verify_module_against_baseline(
     module_path: &str,
     baseline: &HashBaseline,

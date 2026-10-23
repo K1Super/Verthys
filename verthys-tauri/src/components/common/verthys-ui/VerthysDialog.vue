@@ -68,9 +68,12 @@ const props = withDefaults(defineProps<{
   savingLabel?: string;
   /** 不渲染动作区：纯选择/只读类窗口无保存语义，取消由头部关闭键或遮罩承担 */
   hideActions?: boolean;
+  /** 强制窗口：Esc 与遮罩点击不得关闭，只能由业务动作结束 */
+  persistent?: boolean;
 }>(), {
   layout: "grid",
   savingLabel: "保存中…",
+  persistent: false,
 });
 
 const emit = defineEmits<{
@@ -112,8 +115,8 @@ function onKeydown(e: KeyboardEvent): void {
 
   if (e.key === "Escape") {
     e.preventDefault();
-    // 请求在途时不得关闭：窗口消失会让已提交的写入失去落点提示
-    if (props.saving) return;
+    // 请求在途或强制窗口不得关闭：前者会丢失落点提示，后者必须完成更新。
+    if (props.saving || props.persistent) return;
     emit("update:modelValue", false);
     return;
   }
@@ -151,7 +154,7 @@ function focusInitial(): void {
 }
 
 function onOverlayClick(): void {
-  if (props.saving) return;
+  if (props.saving || props.persistent) return;
   emit("update:modelValue", false);
 }
 
