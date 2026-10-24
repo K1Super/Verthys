@@ -3,29 +3,38 @@
 >
 > Last updated: 2026-09-19 · 维护人：K1Super
 
-本文档覆盖 `scripts/env.load.ps1`（环境变量唯一来源）、根 `build_production.ps1` /
+本文档覆盖 `scripts/lib/env.load.ps1`（环境变量唯一来源）、根 `build_production.ps1` /
 `build_dev.ps1`（参数）、`verthys-tauri/src-tauri/tauri.conf.json`、`verthys-tauri/package.json`
 以及 C/Rust 源码中读写的运行时环境变量。每项标注 **构建期 / 运行期 / 仅 Windows**。
 
-## 1. 构建环境变量（`scripts/env.load.ps1`，零硬编码）
+## 1. 构建环境变量（`scripts/lib/env.load.ps1`，零硬编码）
 
-`env.load.ps1` 只从系统环境变量读取，脚本内不含绝对路径/版本号/密钥/镜像 URL；缺失必需变量立即 fail-fast。
+`env.load.ps1` 只从系统环境变量读取，脚本内不含绝对路径/版本号/密钥/镜像 URL；两种来源均不可用时立即 fail-fast。
 
-### 1.1 必需环境变量（用户系统预设，构建期，仅 Windows）
+### 1.1 环境来源 1：`VERTHYS_*` 显式注入（本机定制安装，构建期，仅 Windows）
 | 变量 | 含义 | 默认值 | 缺失行为 |
 |---|---|---|---|
-| `VERTHYS_VS_ROOT` | Visual Studio 安装根目录 | 无（必需） | 抛出并拒绝构建 |
-| `VERTHYS_MSVC_VER` | MSVC 工具链版本号 | 无（必需） | 抛出并拒绝构建 |
-| `VERTHYS_SDK_ROOT` | Windows SDK 安装目录 | 无（必需） | 抛出并拒绝构建 |
-| `VERTHYS_SDK_VER` | Windows SDK 版本号 | 无（必需） | 抛出并拒绝构建 |
+| `VERTHYS_VS_ROOT` | Visual Studio 安装根目录 | 无（与来源 2 二选一） | 两种来源都缺失时抛出并拒绝构建 |
+| `VERTHYS_MSVC_VER` | MSVC 工具链版本号 | 无（与来源 2 二选一） | 同上 |
+| `VERTHYS_SDK_ROOT` | Windows SDK 安装目录 | 无（与来源 2 二选一） | 同上 |
+| `VERTHYS_SDK_VER` | Windows SDK 版本号 | 无（与来源 2 二选一） | 同上 |
+
+### 1.1.1 环境来源 2：已注入的 MSVC 开发者环境（CI / 开发者命令提示符）
+检测条件：`VCToolsInstallDir` 非空、`INCLUDE` 与 `LIB` 非空、PATH 中可解析
+`cl.exe`。满足时不覆盖 INCLUDE / LIB / PATH，仅反推 VS / MSVC / SDK 路径；
+生成器由 `vswhere` 探测（如 `Visual Studio 17 2022` / `Visual Studio 18 2026`），
+CMake 优先使用 VS 内置副本，缺失时回退 PATH。两种来源按“显式注入优先”选择。
 
 ### 1.2 可选环境变量
 | 变量 | 含义 | 默认值 | 影响 |
 |---|---|---|---|
 | `VERTHYS_GH_MIRROR` | GitHub 镜像（Tauri 下载 NSIS/WiX 工具用，国内可设 ghproxy） | 空（不生效） | 非空时写出 `TAURI_BUNDLER_TOOLS_GITHUB_MIRROR` |
-| `VERTHYS_VS_GENERATOR` | MSVC 生成器名（CMake `-G`） | `Visual Studio 18 2026` | 决定 CMake 生成器 |
+| `VERTHYS_VS_GENERATOR` | MSVC 生成器名（CMake `-G`） | 来源 1：`Visual Studio 18 2026`；来源 2：`vswhere` 探测真实 VS 版本 | `build_core.*.ps1` 的 CMake 生成器；`build_production.ps1` 在注入环境下固定 Ninja，不使用该值 |
 
 ### 1.3 内部派生变量（脚本拼接，非环境输入；仅 Windows）
+
+来源 1 按下表规则拼接；来源 2 直接由已注入环境反推（`MSVC_ROOT` = `VCToolsInstallDir`，CMake 优先 VS 内置、缺失回退 PATH，且不覆盖现成 INCLUDE / LIB / PATH）。
+
 | 变量 | 派生规则 |
 |---|---|
 | `VERTHYS_MSVC_ROOT` | `{VS_ROOT}\VC\Tools\MSVC\{MSVC_VER}` |
@@ -113,10 +122,10 @@ C/Rust 源码的 `getenv` / `std::env::var` 检索确认），也不对 WebView2
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| 构建 profile | `production` | 默认 production，必须提供 HTTPS 端点；local 需显式 `-AllowLocal`，允许回环明文 |
+| 构建 profile | `production` | 默认 production，端点默认 HTTPS；`-AllowInsecureUpdater` 可放行 HTTP + IP；local 需显式 `-AllowLocal`，允许回环明文 |
 | 更新渠道 | 配置值 | 基础配置 `stable`，local 覆盖为 `local`；运行时从配置读取，前端不传参 |
 | 清单端点 | 无（基础配置） | `tauri.local.conf.json` 与 production 注入配置分别提供；运行期审计协议与主机 |
-| Authenticode | production 强制 | `require=true`、`revocation=true`；local 默认关闭，避免未签名开发物料被拒 |
+| Authenticode | 关闭 | 默认 `require=false`；显式开启时校验系统信任链与吊销状态，不依赖付费证书 |
 | 证书钉扎 | 可选 | `authenticode.subject` 与 `authenticode.thumbprint`（40 位十六进制）同时支持 |
 | 下载重试 | 最多 3 次重试（2 / 5 / 10 秒） | 由 Rust 更新服务执行，失败归 `E_UPDATER_NETWORK` |
 | 检查超时 | 30 秒 | 插件检查清单 |
@@ -126,7 +135,7 @@ C/Rust 源码的 `getenv` / `std::env::var` 检索确认），也不对 WebView2
 | 健康自检超时 | 20 秒 | worker 就绪；DLL 与 ABI 由 worker 初始化覆盖 |
 | 最大安装包 | 512 MB | 超过即拒绝，避免内存耗尽 |
 | 日志保留 | 7 天 / 单文件 5 MB | 更新事件 JSONL |
-| 发布前置 | `ci/release_preflight.ps1` | production 额外要求 HTTPS 端点可达、证书指纹与干净工作区 |
+| 发布前置 | `ci/release_preflight.ps1` | production 要求端点可达与干净工作区；HTTP + IP 需 `-AllowInsecureUpdater`，不再要求证书指纹 |
 | 兼容 ABI | `0x000B ~ 0x000E` | 清单 `compatibility.abi` 必须覆盖当前值 |
 | 兼容容器 | V3 | 清单 `compatibility.container` 必须覆盖当前值 |
 

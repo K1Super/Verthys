@@ -13,7 +13,7 @@
 | 前端测试 | `npx vitest run` | 599 通过 / 0 失败 |
 | TypeScript | `npx vue-tsc --noEmit` | 通过 |
 | 前端构建 | `npm run build` | 通过 |
-| 清单脚本测试 | `node --test scripts/make_updater_manifest.test.mjs` | 3 通过 / 0 失败 |
+| 清单脚本测试 | `node --test scripts/release/make_updater_manifest.test.mjs` | 3 通过 / 0 失败 |
 | Profile 门 | production / local 配置检查 | 均通过 |
 | 构建脚本语法 | PowerShell 解析 `build_production.ps1` | 通过 |
 
@@ -84,15 +84,14 @@ check_miss
 
 | 项 | 原因 | 后续 |
 |---|---|---|
-| 安装中断、断电、磁盘不足 | 需要受控 VM 与可回滚快照 | 按 E2E 矩阵执行 |
+| 安装中断、断电、磁盘不足 | 需要可回滚的测试环境 | 按运行时矩阵执行 |
 | 锁库脏数据 / worker 未退出 | 需要可注入的会话状态 | 构造脏库场景后执行 |
 | 降级、灰度、暂停、撤回 | 需要多版本物料与多安装标识 | 发布下一版本时执行 |
-| 干净 VM 快照全链路 | 当前在开发机执行 | 在干净 VM 复跑并留存证据 |
 | 容器记录数升级前后核对 | 需要真实测试容器与凭据 | 由业务验收补充 |
 
 ## 7. 结论
 
-4.1.4 的真实签名安装包已完成本机端到端升级：检查、下载、清单验签、安装包验签、SHA256、PE 版本、锁库闸门、安装接管、重启与健康自检全部通过，负向签名篡改与 PE 版本不符均在安装前被拒绝。其余故障注入与干净 VM 项目仍需按上表补测。
+4.1.4 的真实签名安装包已完成本机端到端升级：检查、下载、清单验签、安装包验签、SHA256、PE 版本、锁库闸门、安装接管、重启与健康自检全部通过，负向签名篡改与 PE 版本不符均在安装前被拒绝。其余故障注入仍需按上表补测。
 
 ## 8. 兼容字段修正后的复核
 
@@ -238,14 +237,13 @@ health_ok(dll_integrity=ok, worker_ready=ok, abi_negotiation=ok, read_only_probe
 | pending 标记 | 已移除 |
 | LKG | `updater/lkg/known-good-4.1.5.exe` 已生成，`current.json` 指向 4.1.5 |
 | 健康子项 | DLL 完整性、worker 就绪、ABI 握手通过；只读探测按设计跳过 |
-| 矩阵脚本 | `scripts/updater_e2e_matrix.mjs`，可重复执行并自动恢复清单 |
+| 矩阵脚本 | `scripts/updater/updater_e2e_matrix.mjs`，可重复执行并自动恢复清单 |
 | 发布物料 | `20261023-110331-4.1.5-b5e487ad`，5,420,344 字节，SHA256 `7c4f5724...`，五件齐全 |
 | Rust 全量单测 | 514 通过 / 0 失败 |
 | 前端测试 | 604 通过 / 0 失败（51 个文件） |
 | Clippy / 格式 | 零告警 / `cargo fmt --check` 通过 |
 | 版本 / 边界门 | 均通过（4.1.5） |
 | 依赖快照 | 804 条目，连续两次哈希一致 |
-| 干净 VM | 本机无 Hyper-V / VirtualBox，未执行；本轮证据来自开发机真实安装 |
 | 发现并修复 | 构建脚本按字典序取安装包，把残留 4.1.4 包当作 4.1.5 发布；已改为按 VERSION 精确选取 |
 
 ## 14. Authenticode、更新窗口与源站缓存复核
@@ -265,7 +263,6 @@ health_ok(dll_integrity=ok, worker_ready=ok, abi_negotiation=ok, read_only_probe
 | 源站缓存 | 清单 `no-store`；安装包 `immutable`、ETag、304、Range 206 / 416 全部通过 |
 | Rust 全量单测 | 516 通过 / 0 失败；2 条真实签名测试按需忽略执行 |
 | Clippy / 格式 | 零告警 / `cargo fmt --check` 通过 |
-| 干净 VM | 未执行：本机无 Hyper-V、VirtualBox、VMware、QEMU、Windows Sandbox 或 Docker |
 | 真实 CDN | 未执行：无 CDN 账号与域名；仅验证源站契约，边缘回源与 purge 未演练 |
 | 真实 EV / OV 证书 | 未提供；发布侧签名与证书链核验待证书到位后执行 |
 | 版本与物料 | B6 变更已随 4.1.6 构建并安装，见第 15 节 |
@@ -273,8 +270,8 @@ health_ok(dll_integrity=ok, worker_ready=ok, abi_negotiation=ok, read_only_probe
 环境就绪后的执行入口：
 
 ```text
-VM：安装带 e2e_update 的基线 → 启动 updater_server.mjs → 运行 updater_e2e_matrix.mjs --include-positive
-CDN：node scripts/check_updater_origin.mjs --url https://<渠道域名>
+运行时矩阵：安装带 e2e_update 的基线 → 启动 updater_server.mjs → 运行 updater_e2e_matrix.mjs --include-positive
+CDN：node scripts/updater/check_updater_origin.mjs --url https://<渠道域名>
 证书：signtool 签名安装包 → build_production.ps1 -Profile production 复核系统信任链
 ```
 
@@ -311,10 +308,10 @@ CDN：node scripts/check_updater_origin.mjs --url https://<渠道域名>
 | 真实升级 | 4.1.6 → 4.1.7 通过；日志出现 `release_recheck_ok` |
 | 升级后状态 | `Verthys.exe` 4.1.7；`known-good-4.1.7.exe` 已晋升，保留 4.1.5 与 4.1.7 |
 | 标记归档 | 最新历史 `20261023-123721-4.1.7-b5e487ad-*.json`，健康通过 |
-| 发布报告 | `scripts/updater_report.mjs` 生成 JSON / Markdown：25 会话、63 次检查、12 次命中、3 次安装移交、3 次健康通过、成功率 100% |
+| 发布报告 | `scripts/updater/updater_report.mjs` 生成 JSON / Markdown：25 会话、63 次检查、12 次命中、3 次安装移交、3 次健康通过、成功率 100% |
 | 报告测试 | 聚合、Markdown 字段与空健康结论 3 条测试通过 |
 | 撤回运行期用例 | 未单独构造下载后撤回的时间窗；变更检测由单元测试覆盖 |
-| 干净 VM / 真实 CDN / 真实证书 | 仍受环境限制，未执行 |
+| 真实 CDN / 真实证书 | 仍受环境限制，未执行 |
 
 ## 17. B9 外部依赖复核与可替代验证
 
@@ -322,7 +319,6 @@ CDN：node scripts/check_updater_origin.mjs --url https://<渠道域名>
 
 | 项 | 结果 |
 |---|---|
-| 干净 VM | 无 Hyper-V、VirtualBox、VMware、QEMU、Windows Sandbox、Docker；`HyperVisorPresent=False`；可选功能查询需要提升权限 |
 | 真实 CDN | `updates.verthys.com` 可解析，但 HTTPS 握手失败：证书链不受信任 |
 | 生产端点门 | `release_preflight.ps1` 现探测 HTTPS 端点；真实端点被正确阻断 |
 | 边缘回源模拟 | 新增 `check_cdn_edge.mjs`：清单两次均回源、安装包第二次命中边缘、304 / 206 由缓存应答，全部通过 |

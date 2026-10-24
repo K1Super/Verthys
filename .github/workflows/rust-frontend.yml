@@ -13,7 +13,7 @@
 #   存在，缺失即 "resource path ... doesn't exist" 编译失败。
 #   二者均为 gitignore 的构建产物，故本工作流先从源码构建并就位：
 #   - C 核心 DLL：Ninja Release 构建（仅满足编译期依赖，不做 .vsec 注入——
-#     发布级 DLL 由 core.yml 的 build_core.release.ps1 产出并上传工件）
+#     发布级 DLL 由 core.yml 的 scripts/build/build_core.release.ps1 产出并上传工件）
 #   - worker：cargo build --release 后复制至 binaries/
 #   dist/ 在 dev profile 下不参与编译（cfg=dev 走 devUrl），无需前置。
 #
@@ -49,26 +49,26 @@ jobs:
       - name: Updater error code contract
         shell: pwsh
         run: |
-          node scripts/check_updater_error_codes.mjs
+          node scripts/gates/check_updater_error_codes.mjs
 
       - name: Updater profile gate
         shell: pwsh
         run: |
-          node scripts/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.production.conf.json --profile production --endpoint https://updates.verthys.com/stable/latest.json
+          node scripts/gates/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.production.conf.json --profile production --endpoint https://updates.verthys.com/stable/latest.json
           if ($LASTEXITCODE -ne 0) { throw "production updater profile failed" }
-          node scripts/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local.conf.json --profile local
+          node scripts/gates/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local.conf.json --profile local
           if ($LASTEXITCODE -ne 0) { throw "local updater profile failed" }
-          node --check scripts/make_updater_manifest.mjs
-          node --check scripts/check_updater_profile.mjs
-          node --check scripts/sign_manifest.mjs
-          node --check scripts/generate_release_manifest.mjs
-          node --check scripts/release_update.mjs
-          node --check scripts/updater_e2e_matrix.mjs
-          node --check scripts/check_updater_origin.mjs
-          node --check scripts/check_cdn_edge.mjs
-          node --check scripts/updater_report.mjs
-          node --test scripts/make_updater_manifest.test.mjs
-          node --test scripts/updater_report.test.mjs
+          node --check scripts/release/make_updater_manifest.mjs
+          node --check scripts/gates/check_updater_profile.mjs
+          node --check scripts/release/sign_manifest.mjs
+          node --check scripts/release/generate_release_manifest.mjs
+          node --check scripts/release/release_update.mjs
+          node --check scripts/updater/updater_e2e_matrix.mjs
+          node --check scripts/updater/check_updater_origin.mjs
+          node --check scripts/updater/check_cdn_edge.mjs
+          node --check scripts/updater/updater_report.mjs
+          node --test scripts/release/make_updater_manifest.test.mjs
+          node --test scripts/updater/updater_report.test.mjs
 
       - name: Setup Rust (pinned by rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
@@ -257,26 +257,26 @@ jobs:
       - name: Updater error code contract
         shell: pwsh
         run: |
-          node scripts/check_updater_error_codes.mjs
+          node scripts/gates/check_updater_error_codes.mjs
 
       - name: Updater profile gate
         shell: pwsh
         run: |
-          node scripts/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.production.conf.json --profile production --endpoint https://updates.verthys.com/stable/latest.json
+          node scripts/gates/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.production.conf.json --profile production --endpoint https://updates.verthys.com/stable/latest.json
           if ($LASTEXITCODE -ne 0) { throw "production updater profile failed" }
-          node scripts/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local.conf.json --profile local
+          node scripts/gates/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local.conf.json --profile local
           if ($LASTEXITCODE -ne 0) { throw "local updater profile failed" }
-          node --check scripts/make_updater_manifest.mjs
-          node --check scripts/check_updater_profile.mjs
-          node --check scripts/sign_manifest.mjs
-          node --check scripts/generate_release_manifest.mjs
-          node --check scripts/release_update.mjs
-          node --check scripts/updater_e2e_matrix.mjs
-          node --check scripts/check_updater_origin.mjs
-          node --check scripts/check_cdn_edge.mjs
-          node --check scripts/updater_report.mjs
-          node --test scripts/make_updater_manifest.test.mjs
-          node --test scripts/updater_report.test.mjs
+          node --check scripts/release/make_updater_manifest.mjs
+          node --check scripts/gates/check_updater_profile.mjs
+          node --check scripts/release/sign_manifest.mjs
+          node --check scripts/release/generate_release_manifest.mjs
+          node --check scripts/release/release_update.mjs
+          node --check scripts/updater/updater_e2e_matrix.mjs
+          node --check scripts/updater/check_updater_origin.mjs
+          node --check scripts/updater/check_cdn_edge.mjs
+          node --check scripts/updater/updater_report.mjs
+          node --test scripts/release/make_updater_manifest.test.mjs
+          node --test scripts/updater/updater_report.test.mjs
 
       - name: Setup Rust (pinned by rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master

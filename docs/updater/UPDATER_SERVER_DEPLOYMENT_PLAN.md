@@ -2,6 +2,7 @@
 
 > 文档编号：VUP-002
 > 状态：**待启用执行方案**（Phase S；本机阶段不执行）
+> 成本口径：支持两种形态——HTTPS（自有域名或免费子域，TLS 免费）与 HTTP + IP（`-AllowInsecureUpdater` 显式放行，无需域名）。Authenticode 为可选层，不再要求购买代码签名证书。
 > 适用对象：Windows x64 客户端；Linux 服务器 / 对象存储 / CDN
 > 前置条件：[UPDATER_MASTER_PLAN.md](UPDATER_MASTER_PLAN.md) Phase L0 退出，且客户端 readiness C01 ~ C12 完成
 > 关联文档：[UPDATER_MASTER_PLAN.md](UPDATER_MASTER_PLAN.md) §8、[../SECURITY_DESIGN.md](../SECURITY_DESIGN.md)、[../DEPLOYMENT.md](../DEPLOYMENT.md)、[../RELEASE.md](../RELEASE.md)
@@ -16,8 +17,8 @@
 
 把当前本机回环更新链路升级为**可对外分发的 HTTPS 更新服务**，满足：
 
-1. 客户端从稳定 HTTPS 端点获取签名清单与安装包。
-2. 清单、安装包、Authenticode 三层校验；任何一层失败即拒绝安装。
+1. 客户端从稳定端点获取签名清单与安装包（默认 HTTPS；HTTP + IP 需显式放行）。
+2. 清单签名、安装包签名、SHA256 / size、PE 版本逐层校验；Authenticode 可选，任何启用的校验层失败即拒绝安装。
 3. stable / beta / internal 三渠道隔离；灰度按比例放量；可暂停、可撤回、可强制升级。
 4. 发布物料不可变、可追溯、可回滚；签名私钥不在 Web 服务器。
 5. 客户端事件可聚合，能计算成功率、验签失败、回滚率；阈值告警可触发暂停。
@@ -60,7 +61,7 @@
 | 目标 | 验收口径 |
 |---|---|
 | 可用性 | stable 清单月可用性 ≥ 99.9%；P95 响应 < 200 ms |
-| 完整性 | 清单签名、安装包签名、SHA256、PE 版本、Authenticode 全部可验证 |
+| 完整性 | 清单签名、安装包签名、SHA256、PE 版本全部可验证；Authenticode 可选 |
 | 可回滚 | 任意发布可在 5 分钟内通过指针切回上一版本 |
 | 可灰度 | 1% → 10% → 50% → 100% 分阶段；阶段门可机器判定 |
 | 可暂停 | `paused=true` 后新检查不再返回更新；已下载未安装的会话在安装前复查 |
@@ -85,10 +86,10 @@
 
 | # | 能力 | 验收 |
 |---|---|---|
-| C01 | `production` profile，HTTPS 端点，无回环 / 明文许可 | 配置门 G2 通过 |
+| C01 | `production` profile，端点默认 HTTPS；HTTP + IP 需显式放行；禁止回环 | 配置门 G2 通过 |
 | C02 | 清单签名验证 + 可信 key 集 | 篡改清单被拒；旧 / 新 key 均可验 |
 | C03 | 安装包签名 + SHA256 + size + PE FileVersion | 负向用例全拒 |
-| C04 | Authenticode 验证（`WinVerifyTrust`） | 未签名 / 错证书包被拒 |
+| C04 | Authenticode 验证（可选，`WinVerifyTrust`） | 开启时未签名 / 错证书包被拒 |
 | C05 | 渠道选择 + `rollout` bucket | 稳定 bucket；比例边界正确 |
 | C06 | `paused` / `revoked_release_ids` / `force_below` | 行为符合 §8 |
 | C07 | 安装前在线复查清单 | 暂停 / 撤回后不再安装 |
@@ -102,10 +103,10 @@
 
 | 项 | 要求 |
 |---|---|
-| 构建 profile | `production`；端点 HTTPS；无 `dangerousInsecureTransportProtocol` |
+| 构建 profile | `production`；端点默认 HTTPS；HTTP + IP 需显式 `-AllowInsecureUpdater` |
 | 安装包签名 | minisign 私钥在受控构建机 / HSM；构建缺失即失败 |
 | 清单签名 | 独立密钥；签名脚本可复现；公钥内置客户端 |
-| Authenticode | EV / OV 证书或云签名服务；时间戳服务可用 |
+| Authenticode | 可选；需要系统信任与 SmartScreen 声誉时再配置证书 |
 | 物料账本 | release manifest、SBOM、安装包 / `.sig` / DLL / worker 哈希 |
 | 可复现 | 同 tag 可重建物料清单；至少哈希可追溯 |
 
@@ -113,7 +114,7 @@
 
 | 项 | 要求 |
 |---|---|
-| 域名 | 已注册、可解析、可签发证书；建议独立子域 |
+| 端点 | HTTPS 需域名（自有或免费子域均可）；HTTP + IP 形态不需要域名 |
 | 值班 | 发布窗口有人值守；告警有接收人 |
 | 审批 | 发布 / 回滚 / 密钥操作至少双人复核 |
 | 回滚演练 | 上线前完成一次指针回滚 + 客户端验证 |
@@ -129,7 +130,7 @@
 3. 客户端没有 marker / 健康自检 / R1 修复。
 4. 没有事件聚合与告警。
 5. 没有可回滚的历史版本与指针切换演练。
-6. 构建机私钥 / 证书保管未成文。
+6. 构建机 minisign / 清单签名私钥保管未成文（Authenticode 证书可选）。
 
 ---
 
@@ -506,7 +507,7 @@ systemctl list-timers | grep certbot
 
 ### 6.2 release_id 与物料命名
 
-格式：`YYYYMMDD-HHMMSS-<version>-<gitsha8>`，例如 `20261022-090000-4.1.4-a1b2c3d4`。
+格式：13 位 Crockford Base32 融合哈希，由安装包 SHA256 前 8 字节派生，例如 `0ppkb4jnzs5ae`。标识只由安装包最终字节决定，不含日期、版本或 git 字面量；历史 `YYYYMMDD-HHMMSS-<version>-<gitsha8>` 标识继续兼容，仅用于存量发布与撤回。
 
 | 物料 | 命名 |
 |---|---|
@@ -558,7 +559,7 @@ systemctl list-timers | grep certbot
     "vendor_hashes": "pass",
     "vitest": "pass",
     "vue_tsc": "pass",
-    "e2e": "20/20"
+    "e2e": "pass"
   },
   "approvals": [
     { "role": "build", "name": "..." },
@@ -671,7 +672,7 @@ curl -fsS https://updates.verthys.example/stable/latest.json | jq .version
 回滚后必须：
 
 1. 从公网下载清单，确认 `release_id` / `version` 正确。
-2. 用干净 VM 客户端检查更新，确认不再返回故障版本。
+2. 用测试客户端检查更新，确认不再返回故障版本。
 3. 记录回滚原因、操作人、时间、影响范围。
 4. 保留故障版本物料至少 90 天用于审计。
 
@@ -1076,7 +1077,7 @@ M1：
 | S-18 | 源站故障 | CDN / 备用源可切换；或明确降级 |
 | S-19 | 证书过期模拟 | 客户端拒绝；告警触发 |
 | S-20 | 密钥轮换 | 新 key 签清单 / 安装包；旧客户端按密钥集验证 |
-| S-21 | 干净 VM E2E | 正向 / 负向 / 回滚 / 暂停 / 撤回全部通过 |
+| S-21 | 客户端 E2E | 正向 / 负向 / 回滚 / 暂停 / 撤回全部通过 |
 | S-22 | 安全扫描 | TLS A 级；无目录列表；无版本泄露；WAF 规则生效 |
 
 ### 11.3 负载与容量测试
@@ -1157,7 +1158,7 @@ curl -fsS https://updates.verthys.example/stable/latest.json | jq '.paused, .rel
 见 §6.6。回滚后：
 
 1. 公网验证清单版本 / release_id。
-2. 干净 VM 客户端检查更新，确认不再返回故障版本。
+2. 测试客户端检查更新，确认不再返回故障版本。
 3. 检查事件大盘，确认安装失败 / 回滚停止上升。
 4. 记录原因、影响、操作人、时间。
 5. 保留故障物料 90 天。
@@ -1254,10 +1255,10 @@ curl -X POST "https://api.cloudflare.com/client/v4/zones/<zone>/purge_cache" \
 
 ### 14.1 客户端
 
-- [ ] production profile，HTTPS，无回环 / 明文许可
+- [ ] production profile，默认 HTTPS；HTTP + IP 已显式放行且无回环
 - [ ] 清单签名 + 密钥集
 - [ ] 安装包签名 + SHA256 + size + PE 版本
-- [ ] Authenticode 验证
+- [ ] Authenticode 验证（可选）
 - [ ] 渠道 + rollout + paused / revoked / force_below
 - [ ] 安装前在线复查
 - [ ] pending marker + 健康自检
@@ -1270,10 +1271,10 @@ curl -X POST "https://api.cloudflare.com/client/v4/zones/<zone>/purge_cache" \
 
 - [ ] 安装包 minisign 私钥受控
 - [ ] 清单签名私钥受控
-- [ ] Authenticode 证书 / 时间戳可用
+- [ ] Authenticode 证书 / 时间戳可用（可选）
 - [ ] release manifest / SBOM 生成
 - [ ] 质量门 G0 ~ G8 全绿
-- [ ] E2E 20/20 + 回归附加
+- [ ] 客户端 E2E 核心用例 + 回归附加
 - [ ] 物料哈希可复核
 
 ### 14.3 服务器
@@ -1331,6 +1332,8 @@ curl -X POST "https://api.cloudflare.com/client/v4/zones/<zone>/purge_cache" \
 ---
 
 ## 附录 A：发布脚本骨架
+
+> 说明：下列脚本是部署服务器上的示例骨架（`scripts/server/` 不在本仓库内），按需复制到服务器后使用。
 
 ```bash
 #!/usr/bin/env bash
@@ -1468,7 +1471,7 @@ echo "[OK] published $RELEASE_ID ($MANIFEST_REVISION) to $CHANNEL"
 - [ ] 原子切换渠道符号链接
 - [ ] 公网验证 `version` / `release_id`
 - [ ] CDN purge 清单
-- [ ] 干净 VM 客户端检查更新
+- [ ] 测试客户端检查更新
 - [ ] 确认故障版本不再返回
 - [ ] 事件大盘确认失败率下降
 - [ ] 记录原因 / 影响 / 操作人 / 时间

@@ -11,7 +11,7 @@
 | 症状 | 可能原因 | 排查步骤 | 解决方法 |
 |---|---|---|---|
 | 双击构建脚本窗口一闪而过、无任何输出（`ParseError`） | 脚本未保存为 UTF-8 with BOM，PowerShell 5.1 按 ANSI/GBK 解码中文注释，破坏字符串/括号配对；解析错误先于任何代码执行 | 用十六进制查看器确认文件头不是 `EF BB BF` | 用支持 BOM 的编辑器另存为 UTF-8 with BOM（`build_production.ps1:3-7`） |
-| 链接报 `LNK2019`：`vswhom_find_visual_studio_and_windows_sdk` 未解析 | `cl.exe` 不在 PATH，cc crate 编译 vswhom-sys 失败 | `Get-Command cl.exe` 无结果 | dot-source 加载 `scripts/env.load.ps1`（设 CC/CXX=cl.exe，见 `build_dev.ps1:30-60`） |
+| 链接报 `LNK2019`：`vswhom_find_visual_studio_and_windows_sdk` 未解析 | `cl.exe` 不在 PATH，cc crate 编译 vswhom-sys 失败 | `Get-Command cl.exe` 无结果 | dot-source 加载 `scripts/lib/env.load.ps1`（设 CC/CXX=cl.exe，见 `build_dev.ps1:30-60`） |
 | `LNK1181`：无法打开输入文件 `windows.0.52.0.lib` | dev profile 增量编译与 raw-dylib 导入库生成竞态 | 清空 `target/` 后复现；缓存失效时发生 | `[profile.dev] incremental=false` + `$env:CARGO_INCREMENTAL=0` + `.cargo/config.toml` 的 `--cfg=windows_raw_dylib`（`build_production.ps1:255-260`；`worker/Cargo.toml:31-37`） |
 | cargo 构建被残留锁文件阻塞 | 上次构建的 `.cargo-lock` 未清理 | `Get-ChildItem src-tauri/target -Filter .cargo-lock -Recurse` | 删除 `.cargo-lock`，或依赖脚本自动清理（`build_production.ps1:146-151`、`:516`） |
 | `keyboard-types-patched 目录缺失` | `[patch.crates-io]` 本地补丁目录缺失/不完整 | 检查 `verthys-tauri/keyboard-types-patched/{Cargo.toml,src/modifiers.rs}` | 补齐补丁目录（`build_production.ps1:193-207`） |
@@ -38,7 +38,7 @@
 
 | 症状 | 可能原因 | 排查步骤 | 解决方法 |
 |---|---|---|---|
-| 构建目录脏、残留旧产物 | `-Clean` 未使用或清理不彻底 | `Get-ChildItem build,build_dev,build_fuzz,verthys-tauri/verthys-worker/target,verthys-tauri/src-tauri/target` | `build_production.ps1 -Clean -NoPause` 或手动 `Remove-Item -Recurse -Force <目录>` |
+| 构建目录脏、残留旧产物 | `-Clean` 未使用或清理不彻底 | `Get-ChildItem build,build_dev,verthys-tauri/verthys-worker/target,verthys-tauri/src-tauri/target` | `build_production.ps1 -Clean -NoPause` 或手动 `Remove-Item -Recurse -Force <目录>` |
 | 卸载后仍有残留进程 | 应用/worker 未退出 | `Get-Process Verthys,verthys-worker` | `Stop-Process -Name Verthys,verthys-worker -Force`（注意用 PowerShell 原生 cmdlet，勿用 taskkill，见 `build_production.ps1:119-126`） |
 
 ## 5. 诊断命令汇总与日志位置
@@ -56,4 +56,4 @@ ctest --test-dir build -C Release --output-on-failure -V
 [System.Environment]::GetEnvironmentVariable('VERTHYS_VS_ROOT','User')
 ```
 
-日志位置：构建错误日志 `verthys-tauri/build_err.log`（脚本阶段 0.6 清理、`build_dev.ps1` 清理后重建）；cargo/前端/tui 详细输出在脚本终端，另见 `.github/workflows/core.yml` 的 fuzz 工件留存策略。
+日志位置：构建错误日志 `verthys-tauri/build_err.log`（脚本阶段 0.6 清理、`build_dev.ps1` 清理后重建）；cargo/前端/tui 详细输出在脚本终端，CI 侧见 `.github/workflows/core.yml` 的工件留存策略。

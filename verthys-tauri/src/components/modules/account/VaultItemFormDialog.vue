@@ -133,16 +133,21 @@
       </section>
     </div>
 
-    <!-- 通用窗口：字段按 kind 渲染，顺序即字段清单顺序 -->
+    <!-- 通用窗口：字段按 kind 渲染；相邻同组字段合为一个分区 -->
     <div v-else-if="def" class="reg-body">
-      <section class="reg-section" :style="{ '--rs': '0' }">
+      <section
+        v-for="(section, sectionIndex) in formSections"
+        :key="`${sectionIndex}-${section.name}`"
+        class="reg-section"
+        :style="{ '--rs': String(sectionIndex) }"
+      >
         <div class="reg-sec-head">
-          <span class="reg-sec-no">01</span>
-          <span class="reg-sec-name">{{ def.label }}</span>
+          <span class="reg-sec-no">{{ sectionNo(sectionIndex) }}</span>
+          <span class="reg-sec-name">{{ section.name }}</span>
           <span class="reg-rule"></span>
         </div>
         <div class="form-fields">
-          <template v-for="field in def.fields" :key="field.id">
+          <template v-for="field in section.fields" :key="field.id">
             <!-- 选项条：整行可点的开关（用户自定义类型可能声明） -->
             <label v-if="field.kind === 'switch'" class="reg-option" :class="{ on: values[field.id] === '1' }">
               <input
@@ -191,7 +196,47 @@
                   <input :id="domId(field)" class="reg-input reg-date" :class="{ 'has-value': values[field.id] }" type="date" v-model="values[field.id]" />
                   <span v-if="!values[field.id]" class="reg-date-ph">未设置</span>
                 </div>
-                <span class="reg-readout" :class="`is-${readoutFor(field.id).tone}`">
+                <!-- 到期读数只属于到期字段：出生日期等普通日期不产生「距到期」语义 -->
+                <span v-if="field.id === expiryFieldId" class="reg-readout" :class="`is-${readoutFor(field.id).tone}`">
+                  <i class="reg-readout-dot"></i>{{ readoutFor(field.id).text }}
+                </span>
+              </div>
+            </div>
+
+            <!-- 日期区间：起止成对呈现（结束日仍是字段 id，到期读数口径不变） -->
+            <div v-else-if="field.kind === 'dateRange'" class="reg-row reg-row-range">
+              <span class="reg-key"><i v-if="field.required" class="reg-req" aria-hidden="true">*</i>{{ field.label }}</span>
+              <div class="reg-range">
+                <div class="reg-range-line">
+                  <span class="reg-range-tag">{{ rangeStartLabelOf(field) }}</span>
+                  <div class="reg-date-wrap" @click="openDatePicker($event)">
+                    <input
+                      :id="`${domId(field)}-start`"
+                      class="reg-input reg-date"
+                      :class="{ 'has-value': values[rangeStartIdOf(field)] }"
+                      type="date"
+                      v-model="values[rangeStartIdOf(field)]"
+                      :max="values[field.id] || undefined"
+                      :aria-label="`${field.label}${rangeStartLabelOf(field)}`"
+                    />
+                    <span v-if="!values[rangeStartIdOf(field)]" class="reg-date-ph">未设置</span>
+                  </div>
+                  <span class="reg-range-sep" aria-hidden="true"></span>
+                  <span class="reg-range-tag">{{ rangeEndLabelOf(field) }}</span>
+                  <div class="reg-date-wrap" @click="openDatePicker($event)">
+                    <input
+                      :id="domId(field)"
+                      class="reg-input reg-date"
+                      :class="{ 'has-value': values[field.id] }"
+                      type="date"
+                      v-model="values[field.id]"
+                      :min="values[rangeStartIdOf(field)] || undefined"
+                      :aria-label="`${field.label}${rangeEndLabelOf(field)}`"
+                    />
+                    <span v-if="!values[field.id]" class="reg-date-ph">未设置</span>
+                  </div>
+                </div>
+                <span v-if="field.id === expiryFieldId" class="reg-readout" :class="`is-${readoutFor(field.id).tone}`">
                   <i class="reg-readout-dot"></i>{{ readoutFor(field.id).text }}
                 </span>
               </div>
@@ -204,6 +249,12 @@
                 <option value="">未指定</option>
                 <option v-for="opt in field.options ?? []" :key="opt" :value="opt">{{ opt }}</option>
               </select>
+            </div>
+
+            <!-- 地区：全国省 / 市 / 区三级联动 -->
+            <div v-else-if="field.kind === 'region'" class="reg-row reg-row-region">
+              <span class="reg-key"><i v-if="field.required" class="reg-req" aria-hidden="true">*</i>{{ field.label }}</span>
+              <VaultRegionPicker v-model="values[field.id]" />
             </div>
 
             <!-- 多行文本 -->
@@ -253,14 +304,15 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { VaultFieldDef, VaultTypeDef, VaultItemPayload } from "../../../constants/vault_item_types";
-import { ACCOUNT_VAULT_TYPE_ID } from "../../../constants/vault_item_types";
+import { ACCOUNT_VAULT_TYPE_ID, VAULT_EXPIRY_FIELD_ID, groupVaultFieldSections, vaultRangeStartFieldId } from "../../../constants/vault_item_types";
 import {
   buildVaultItemData,
   resolveSecretSaveAction,
 } from "../../../lib/vault_item_codec";
-import { vaultExpiryReadout } from "../../../lib/vault_item_card";
+import { vaultExpiryReadout, vaultExpiryTimestamp } from "../../../lib/vault_item_card";
 import { encryptPasswordField } from "../../../lib/verthys";
 import VerthysDialog from "../../common/verthys-ui/VerthysDialog.vue";
+import VaultRegionPicker from "./VaultRegionPicker.vue";
 
 /** 内容舱可导入的文件类型（凭据与配置文本，覆盖证书、密钥与文本材料） */
 const CARRIER_FILE_ACCEPT = ".pem,.crt,.cer,.der,.key,.pub,.json,.txt,.conf,.cfg,.ovpn";
@@ -314,13 +366,47 @@ const panelTitle = computed(() => {
   return isEdit.value ? `编辑${def.value.label}` : def.value.label;
 });
 
+/** 分区清单：与详情窗口共用同一分组规则（constants/vault_item_types） */
+const formSections = computed(() => (def.value ? groupVaultFieldSections(def.value) : []));
+
+/** 分区编号：两位数（01、02…），与账号窗口同一登记台语法 */
+const sectionNo = (index: number): string => String(index + 1).padStart(2, "0");
+
+/** 到期字段 id：只有该字段产生到期读数（与卡片、筛选同一权威源） */
+const expiryFieldId = VAULT_EXPIRY_FIELD_ID;
+
+/** 区间起始字段 id：与落盘投影（lib/vault_item_codec）共用同一回退规则 */
+const rangeStartIdOf = vaultRangeStartFieldId;
+const rangeStartLabelOf = (field: VaultFieldDef): string => field.rangeStartLabel ?? "自";
+const rangeEndLabelOf = (field: VaultFieldDef): string => field.rangeEndLabel ?? "至";
+
+/** 区间起止颠倒（两端都填写且都能解析时才算）：与到期读数共用同一解析口径 */
+const isRangeReversed = (field: VaultFieldDef): boolean => {
+  const start = values.value[rangeStartIdOf(field)] ?? "";
+  const end = values.value[field.id] ?? "";
+  if (!start || !end) return false;
+  const startTime = vaultExpiryTimestamp(start);
+  const endTime = vaultExpiryTimestamp(end);
+  return startTime !== null && endTime !== null && startTime > endTime;
+};
+
 /** 必填但未填写的字段名（保存按钮禁用条件与提交前校验共用） */
 const missingRequired = computed<string[]>(() => {
   const current = def.value;
   if (!current) return [];
-  return current.fields
-    .filter((field) => field.required === true && !(values.value[field.id] ?? "").trim())
-    .map((field) => field.label);
+  const missing: string[] = [];
+  for (const field of current.fields) {
+    if (field.required !== true) continue;
+    if (!(values.value[field.id] ?? "").trim()) {
+      missing.push(field.label);
+      continue;
+    }
+    // 必填的区间要求起止成对：只填到期日属于「有效期未完整登记」
+    if (field.kind === "dateRange" && !(values.value[rangeStartIdOf(field)] ?? "").trim()) {
+      missing.push(field.label);
+    }
+  }
+  return missing;
 });
 
 /* 保存可用性必须与落盘决策同源：
@@ -345,13 +431,20 @@ const saveDisabled = computed(() => {
   return isAccount.value && secretPlan.value.action === "needs-key";
 });
 
-/** 重置表单：以类型字段清单与既有数据初始化（新增时全部为空） */
+/** 重置表单：以类型字段清单与既有数据初始化（新增时取字段默认值） */
 const resetForm = (): void => {
   const current = def.value;
+  const initial = props.initialData;
   const next: Record<string, string> = {};
   if (current) {
     for (const field of current.fields) {
-      next[field.id] = props.initialData?.[field.id] ?? "";
+      /* 默认值只服务新增：编辑既有条目（哪怕缺该键）必须保持空，否则一次
+         保存就会把模板默认值写进历史记录，用户无从察觉。 */
+      next[field.id] = initial ? (initial[field.id] ?? "") : (field.default ?? "");
+      if (field.kind === "dateRange") {
+        const startId = rangeStartIdOf(field);
+        next[startId] = initial ? (initial[startId] ?? "") : "";
+      }
     }
   }
   values.value = next;
@@ -501,6 +594,13 @@ const onSubmit = async (): Promise<void> => {
     return;
   }
 
+  // 起止颠倒属于输入矛盾：放行会把无法成立的有效期落盘，必须在提交前拦下
+  const reversed = current.fields.find((field) => isRangeReversed(field));
+  if (reversed) {
+    formError.value = `「${reversed.label}」的起始日不能晚于到期日`;
+    return;
+  }
+
   emit("submit", { kind: current.id, data: buildVaultItemData(current, values.value) });
 };
 </script>
@@ -515,6 +615,29 @@ const onSubmit = async (): Promise<void> => {
 .reg-row-vault { align-items: start; }
 .reg-row-vault .reg-key { padding-top: 9px; }
 .reg-vault-inline::before { content: none; }
+
+/* 日期区间：起止两枚日期控件同排，到期读数另起一行（宽度不足以并排回显） */
+.reg-row-range { align-items: start; }
+.reg-row-range .reg-key { padding-top: 9px; }
+.reg-range { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.reg-range-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.reg-range-tag {
+  flex-shrink: 0;
+  font-size: 10px; letter-spacing: 1px;
+  color: var(--text-muted); font-family: var(--font);
+  transition: color var(--dur-fast) var(--ease);
+}
+.reg-row:focus-within .reg-range-tag { color: var(--accent); }
+.reg-range-sep {
+  flex-shrink: 0;
+  width: 10px; height: 1px;
+  background: var(--border-glass);
+}
+.reg-row-range .reg-readout { margin-left: 1px; }
+
+/* 地区联动行：标签与三列下拉顶部对齐 */
+.reg-row-region { align-items: start; }
+.reg-row-region .reg-key { padding-top: 9px; }
 
 /* 独立加密缺密钥的内联提示 */
 .reg-hint-inline {

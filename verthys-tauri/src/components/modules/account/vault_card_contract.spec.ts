@@ -17,6 +17,7 @@ const read = (rel: string): string => readFileSync(new URL(rel, import.meta.url)
 const moduleSource = read("../AccountVerthys.vue");
 const cardSource = read("./VaultItemCard.vue");
 const formSource = read("./VaultItemFormDialog.vue");
+const detailSource = read("./VaultItemDetailDialog.vue");
 const editorSource = read("./VaultTypeEditorDialog.vue");
 const searchBarSource = read("../../common/verthys-ui/VerthysSearchBar.vue");
 const confirmSource = read("../../common/verthys-ui/ConfirmDelete.vue");
@@ -83,6 +84,36 @@ describe("类型编辑器草稿隔离", () => {
     expect(editorSource).toContain("cardFields: [...item.cardFields]");
     expect(editorSource).toContain("searchFields: [...item.searchFields]");
     expect(editorSource).toContain("options: [...field.options]");
+  });
+});
+
+describe("卡片尺寸与详情入口", () => {
+  it("普通网格与虚拟路径都固定为旧版实测原始行高 148px，卡片不随内容拉伸", () => {
+    expect(moduleSource).toContain(':item-height="148"');
+    expect(moduleSource).toContain("grid-auto-rows: 148px");
+  });
+
+  it("整卡点击与键盘回车打开详情，操作键以 .stop 阻断冒泡", () => {
+    expect(cardSource).toContain('@click="onCardClick"');
+    expect(cardSource).toContain('@keydown.enter.self.prevent="onCardClick"');
+    expect(cardSource).toContain('@click.stop="$emit(\'edit\')"');
+    expect(cardSource).toContain('@click.stop="$emit(\'remove\')"');
+    expect(cardSource).toContain('@click.stop="$emit(\'toggle\', view.secret.fieldId)"');
+    expect(cardSource).toContain('@click.stop="$emit(\'copy\', view.secret.fieldId)"');
+  });
+
+  it("详情窗口只读复用 VerthysDialog，并由模块在卡片 detail 事件中打开", () => {
+    expect(detailSource).toContain("<VerthysDialog");
+    expect(detailSource).toContain("hide-actions");
+    expect(detailSource).toContain("buildVaultDetailSections");
+    expect(moduleSource).toContain("<VaultItemDetailDialog");
+    expect(moduleSource).toContain('@detail="onDetail(entry)"');
+  });
+
+  it("点击遮罩空白与 Esc 关闭由 VerthysDialog 统一承担（详情窗口不重复实现）", () => {
+    expect(dialogSource).toContain('@click.self="onOverlayClick"');
+    expect(dialogSource).toContain("function onOverlayClick");
+    expect(dialogSource).toContain('e.key === "Escape"');
   });
 });
 

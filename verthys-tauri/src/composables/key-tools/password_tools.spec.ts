@@ -26,6 +26,7 @@ import {
   pickCharset,
   randomKeyFileName,
   sequentialChars,
+  spaceEntropy,
   type RandomSource,
 } from "./password_tools";
 
@@ -105,6 +106,13 @@ describe("随机取样与密码合成", () => {
 });
 
 describe("强度估算", () => {
+  it("生成空间熵按取值空间计算，不含分隔符", () => {
+    expect(spaceEntropy(16, 94)).toBe(105);
+    expect(spaceEntropy(6, 10)).toBe(20);
+    expect(spaceEntropy(0, 94)).toBe(0);
+    expect(spaceEntropy(12, 56)).toBe(70);
+  });
+
   it("空输入为零级", () => {
     expect(calcStrength("")).toEqual({ level: 0, percent: 0, entropy: 0, label: "" });
   });

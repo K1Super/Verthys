@@ -50,12 +50,6 @@ if(VERTHYS_ENABLE_ASAN AND MSVC)
     add_link_options(/fsanitize=address)
 endif()
 
-# 模糊测试构建开关（-DVERTHYS_ENABLE_FUZZ=ON）
-#   5 个 libFuzzer 目标（superblock/partition/extent/sstable/import）
-#   + 插桩核心对象库 + 语料种子生成器。默认 OFF——插桩重编译核心
-#   全量源码，仅模糊测试专项构建开启（scripts/build_core.fuzz.ps1）。
-option(VERTHYS_ENABLE_FUZZ "Build libFuzzer fuzz targets" OFF)
-
 # DLL 诊断输出编译门（-DVERTHYS_DIAG=ON）
 #   生产构建（默认 OFF）：VERTHYS_DIAG_LOG 为空操作，Release DLL 对
 #   调试器/DebugView 完全静默，消除运行时行为指纹泄露面。
@@ -171,10 +165,8 @@ if(MSVC)
     )
 endif()
 
-# 相对路径 → 绝对路径一次性转换。相对源路径按使用处的
-# CMAKE_CURRENT_SOURCE_DIR 解析（非定义处）——tests/fuzz 复用本清单
-# 时（verthys_core_fuzz_obj 插桩重编译）基准错位会报"Cannot find source
-# file"；本目录内 add_library(verthys_core_obj) 用绝对路径行为不变。
+# 相对路径 → 绝对路径一次性转换：跨目录消费时按定义处目录解析，
+# 避免基准错位；本目录内 add_library(verthys_core_obj) 行为不变。
 list(TRANSFORM VERTHYS_CORE_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 
 # 所有子目录加入 include 路径（扁平 include 兼容，如 #include "verthys_crypto.h"）
@@ -213,8 +205,7 @@ set(VERTHYS_SRC_SUBDIRS
     src/security/layer5_sandbox
     src/security/layer6_closure
 )
-# 同 VERTHYS_CORE_SOURCES——子目录作用域（tests/fuzz）复用时
-# 相对基准错位，一次性转绝对路径。
+# 同 VERTHYS_CORE_SOURCES——tests 子目录复用时相对基准不错位。
 list(TRANSFORM VERTHYS_SRC_SUBDIRS PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 
 # schema codegen 自定义命令（flatc -a：reader/builder/verifier 全量）
@@ -372,8 +363,3 @@ add_custom_command(TARGET verthys_core POST_BUILD
 # 测试（enable_testing 上提至根 CMakeLists.txt——构建根需生成
 # CTestTestfile.cmake 供 ctest --test-dir <build_root> 发现测试）
 add_subdirectory(tests)
-
-# 模糊测试子树（默认 OFF；开启时插桩核心 + 5 目标 + 语料种子）
-if(VERTHYS_ENABLE_FUZZ)
-    add_subdirectory(tests/fuzz)
-endif()

@@ -220,8 +220,18 @@ div.dialog.reg-panel:hover {
 
 /* ===== 到期行：日期 + 状态读数（能量点三态：实心/半透/空心） ===== */
 .reg-expiry { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.reg-date-wrap { position: relative; flex: 0 0 150px; cursor: pointer; }
-.reg-date { color: transparent; cursor: pointer; padding-right: 30px; }
+/* 日期控件：只放十位日期与日历指示，宽度按内容收窄并强制封顶 ——
+   flex 子项的 auto 最小尺寸会取原生日期输入的内容宽，仅改 flex-basis
+   根本不生效（框宽仍被撑到原生输入的固有宽度） */
+.reg-date-wrap {
+  position: relative;
+  flex: 0 0 116px;
+  width: 116px;
+  max-width: 116px;
+  min-width: 0;
+  cursor: pointer;
+}
+.reg-date { color: transparent; cursor: pointer; padding-right: 30px; min-width: 0; max-width: 100%; }
 .reg-date.has-value { color: var(--text-primary); }
 .reg-date::-webkit-calendar-picker-indicator {
   position: absolute; right: 9px; top: 50%; transform: translateY(-50%);

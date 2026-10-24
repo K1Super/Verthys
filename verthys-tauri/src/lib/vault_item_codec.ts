@@ -21,7 +21,7 @@
  */
 import type { AccountFields } from "../types/verthys";
 import type { VaultItemPayload, VaultTypeDef } from "../constants/vault_item_types";
-import { ACCOUNT_VAULT_TYPE_ID } from "../constants/vault_item_types";
+import { ACCOUNT_VAULT_TYPE_ID, vaultRangeStartFieldId } from "../constants/vault_item_types";
 import { deserializeFromJsonB64, serializeToJsonB64 } from "../utils/json_codec";
 import { createLogger } from "../utils/logger";
 
@@ -168,6 +168,10 @@ export function decodeVaultItem(b64: string): VaultDecodeResult {
  *
  * transient 字段（如独立密钥）只参与当次窗口交互，不进入数据字典，
  * 以避免密钥材料随记录落盘。
+ *
+ * 日期区间按声明成对写入：字段 id 是结束日，rangeStartId 是起始日。
+ * 两者都是扁平键，故落盘结构与其它字段完全一致 —— 到期读数与筛选
+ * 只需继续按 "expiry" 取值，不必感知区间控件。
  */
 export function buildVaultItemData(
   def: VaultTypeDef,
@@ -177,6 +181,10 @@ export function buildVaultItemData(
   for (const field of def.fields) {
     if (field.transient) continue;
     data[field.id] = values[field.id] ?? "";
+    if (field.kind === "dateRange") {
+      const startId = vaultRangeStartFieldId(field);
+      data[startId] = values[startId] ?? "";
+    }
   }
   return data;
 }

@@ -114,11 +114,11 @@ flowchart LR
 - 优先级：worker 以 `BELOW_NORMAL_PRIORITY_CLASS` + `CREATE_NO_WINDOW` 启动，承载后台长尾任务，避免抢占 UI。
 - 生命周期：spawn 超时 15s、就绪等待超时 5s、健康检查每 10s、销毁前等待 IO 完成（2s）再终止；worker 销毁后主进程侧 `key_lifecycle` 重置为 NoKey（与“worker 内存无 GMK”事实一致）。
 
-线程模型：主进程 Tauri 多线程 tokio 运行时；worker 为单线程主循环（stdin 读行 → dispatch → FFI）承载 DLL；DLL 内部为“主调用线程 + 固定后台线程池（≤4 worker）+ 定时器线程”，总线程数受限（见 [PERFORMANCE.md](PERFORMANCE.md)）。
+线程模型：主进程 Tauri 多线程 tokio 运行时；worker 为单线程主循环（stdin 读行 → dispatch → FFI）承载 DLL；DLL 内部为“主调用线程 + 固定后台线程池（≤4 worker）+ 定时器线程”，总线程数受限。
 
 ## 5. core 与前端边界
 
-- 唯一跨层契约：`core/include/verthys.h`（公共 C ABI，`VERTHYS_API_VERSION 0x000B`）与 Tauri command 清单。前者规范见 [CORE_API.md](CORE_API.md)，后者见 [TAURI_BRIDGE.md](TAURI_BRIDGE.md)。
+- 唯一跨层契约：`core/include/verthys.h`（公共 C ABI，`VERTHYS_API_VERSION 0x000E`）与 Tauri command 清单。前者规范见 [CORE_API.md](CORE_API.md)，后者以 `verthys-tauri` 的 command 注册为准。
 - 数据流约定：前端只能 `invoke` 命令 → worker actor → FFI → C core；反向经 JSON 响应 / SHM / 进度回调。不得绕过 worker 直接加载 DLL。
 - 密钥边界：口令经 worker 传入 `verthys.dll` 后即归属 L2，主进程不落盘、不缓存明文密钥（仅 Rust 侧 `locked_buffer` 短暂持有口令，用后清零）。
 
@@ -152,7 +152,7 @@ core/
 │                           layer6_closure/ memory/ preset/
 ├── tools/                  rhash_gen.c（.rhat 运行时哈希表构建工具）
 └── tests/                  api/ container/ crypto/ index/ perf/ property/ regression/
-                            schema/ security/ transaction/ fuzz/ · test_runner.c
+                            schema/ security/ transaction/ · test_runner.c
 
 verthys-tauri/src-tauri/src/
 ├── controller/             worker_controller · verthys_controller · key_controller ...

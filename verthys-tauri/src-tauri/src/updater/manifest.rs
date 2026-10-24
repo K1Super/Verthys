@@ -308,6 +308,7 @@ fn validate_download_url(
         &update.download_url,
         endpoint.as_deref(),
         &configured,
+        insecure_transport(app),
     )
 }
 
@@ -318,6 +319,7 @@ fn validate_download_url_value(
     plugin_url: &reqwest::Url,
     endpoint_host: Option<&str>,
     configured_hosts: &[String],
+    allow_insecure: bool,
 ) -> Result<(String, Vec<String>), UpdaterError> {
     let parsed = reqwest::Url::parse(raw).map_err(|_| invalid("清单下载地址不是合法 URL"))?;
     if &parsed != plugin_url {
@@ -341,8 +343,13 @@ fn validate_download_url_value(
         return Ok((parsed.to_string(), vec![host]));
     }
 
-    if parsed.scheme() != "https" {
-        return Err(invalid("非本机渠道下载地址必须使用 https"));
+    // 明文许可必须由配置显式开启；未开启时协议判定与 https 要求保持一致，
+    // 避免新增开关悄悄放宽默认渠道的传输边界。
+    let insecure_http = parsed.scheme() == "http" && allow_insecure;
+    if parsed.scheme() != "https" && !insecure_http {
+        return Err(invalid(
+            "非本机渠道下载地址必须使用 https（或显式允许明文）",
+        ));
     }
     let endpoint_ok = endpoint_host.is_some_and(|value| value.eq_ignore_ascii_case(&host));
     let listed = configured_hosts
@@ -378,10 +385,24 @@ pub(crate) fn configured_channel(app: &AppHandle) -> Result<String, UpdaterError
     Ok(channel.to_string())
 }
 
+/// 是否显式允许明文更新传输。
+///
+/// 该开关只影响非本机渠道能否使用 http；开启后仍需通过主机白名单、大小、
+/// 哈希、签名与 PE 版本校验，传输层加密不再是准入前提。
+pub(crate) fn insecure_transport(app: &AppHandle) -> bool {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|value| value.get("dangerousInsecureTransportProtocol"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Authenticode 验证策略。
 ///
-/// 生产渠道必须开启；本机渠道默认关闭，便于回环物料在未做系统签名时仍可验证
-/// 更新链路。指纹与主体为可选的额外钉扎，未配置时只要求系统信任链通过。
+/// 默认不要求，避免分发依赖付费代码签名证书；配置显式开启时才校验系统信任链、
+/// 吊销状态与可选主体 / 指纹钉扎。未开启时不执行系统签名验证。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AuthenticodeConfig {
     pub require: bool,
@@ -511,26 +532,21 @@ pub fn audit_config(app: &AppHandle) -> Result<(), UpdaterError> {
                 return Err(config_invalid("本机 HTTP 端点未开启明文传输许可"));
             }
         } else {
-            if url.scheme() != "https" {
-                return Err(config_invalid("生产更新端点必须使用 https"));
-            }
-            if insecure {
-                return Err(config_invalid("生产环境不允许明文传输开关"));
+            // 默认仍要求 https；只有显式开启明文许可时才接受 http，允许零成本
+            // 自建分发（公网 IP 或内网 IP）而不引入域名与证书成本。
+            if url.scheme() != "https" && !(url.scheme() == "http" && insecure) {
+                return Err(config_invalid(
+                    "生产更新端点使用 http 时必须显式开启明文传输许可",
+                ));
             }
             if is_placeholder_host(&host) {
                 return Err(config_invalid("生产更新端点仍是占位主机"));
             }
         }
     }
-    // 生产渠道必须在系统信任层验证安装包；仅靠 minisign 无法覆盖 SmartScreen
-    // 与外部分发场景。本机渠道允许关闭，避免开发物料因未做系统签名而不可测。
-    let authenticode = authenticode_config(app)?;
-    if channel != "local" && !authenticode.require {
-        return Err(config_invalid("生产更新必须启用 Authenticode"));
-    }
-    if channel != "local" && !authenticode.revocation {
-        return Err(config_invalid("生产更新必须检查证书吊销状态"));
-    }
+    // Authenticode 仅校验配置结构，不再作为生产准入条件：更新完整性由清单
+    // 签名、安装包签名、SHA256 与 PE 版本共同保证，系统签名按需开启。
+    let _ = authenticode_config(app)?;
     Ok(())
 }
 
@@ -645,21 +661,27 @@ mod tests {
     fn download_url_policy_binds_plugin_url_and_channel() {
         let local_url = reqwest::Url::parse("http://127.0.0.1:8765/installer.exe").unwrap();
         let (url, hosts) =
-            validate_download_url_value(local_url.as_str(), "local", &local_url, None, &[])
+            validate_download_url_value(local_url.as_str(), "local", &local_url, None, &[], false)
                 .unwrap();
         assert_eq!(url, local_url.as_str());
         assert_eq!(hosts, vec!["127.0.0.1".to_string()]);
 
         let lan_url = reqwest::Url::parse("http://192.168.1.10/installer.exe").unwrap();
         assert!(
-            validate_download_url_value(lan_url.as_str(), "local", &lan_url, None, &[]).is_err()
+            validate_download_url_value(lan_url.as_str(), "local", &lan_url, None, &[], false)
+                .is_err()
         );
 
         let other_local = reqwest::Url::parse("http://127.0.0.1:8765/other.exe").unwrap();
-        assert!(
-            validate_download_url_value(other_local.as_str(), "local", &local_url, None, &[])
-                .is_err()
-        );
+        assert!(validate_download_url_value(
+            other_local.as_str(),
+            "local",
+            &local_url,
+            None,
+            &[],
+            false
+        )
+        .is_err());
 
         let stable_http = reqwest::Url::parse("http://updates.example.com/installer.exe").unwrap();
         assert!(validate_download_url_value(
@@ -667,7 +689,40 @@ mod tests {
             "stable",
             &stable_http,
             Some("updates.example.com"),
-            &[]
+            &[],
+            false
+        )
+        .is_err());
+        assert!(validate_download_url_value(
+            stable_http.as_str(),
+            "stable",
+            &stable_http,
+            Some("updates.example.com"),
+            &[],
+            true
+        )
+        .is_ok());
+
+        // 生产 HTTP + IP 是零成本自建的目标形态：开启明文许可后必须放行，
+        // 但仍要求下载地址主机与端点主机一致。
+        let ip_http = reqwest::Url::parse("http://192.168.1.10/installer.exe").unwrap();
+        assert!(validate_download_url_value(
+            ip_http.as_str(),
+            "stable",
+            &ip_http,
+            Some("192.168.1.10"),
+            &[],
+            true
+        )
+        .is_ok());
+        let ip_other = reqwest::Url::parse("http://192.168.1.11/installer.exe").unwrap();
+        assert!(validate_download_url_value(
+            ip_other.as_str(),
+            "stable",
+            &ip_other,
+            Some("192.168.1.10"),
+            &[],
+            true
         )
         .is_err());
 
@@ -678,7 +733,8 @@ mod tests {
             "stable",
             &stable_https,
             Some("updates.example.com"),
-            &[]
+            &[],
+            false
         )
         .is_ok());
 
@@ -688,7 +744,8 @@ mod tests {
             "stable",
             &cdn,
             Some("updates.example.com"),
-            &[]
+            &[],
+            false
         )
         .is_err());
         assert!(validate_download_url_value(
@@ -696,7 +753,8 @@ mod tests {
             "stable",
             &cdn,
             Some("updates.example.com"),
-            &["cdn.example.com".to_string()]
+            &["cdn.example.com".to_string()],
+            false
         )
         .is_ok());
     }

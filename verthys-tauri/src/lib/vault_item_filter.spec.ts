@@ -18,11 +18,13 @@ import { getBuiltinVaultType, type VaultTypeDef } from "../constants/vault_item_
 
 const account = getBuiltinVaultType("account")!;
 const idcard = getBuiltinVaultType("idcard")!;
+const bankcard = getBuiltinVaultType("bankcard")!;
 const address = getBuiltinVaultType("address")!;
 
 const DEFS: Record<string, VaultTypeDef> = {
   account,
   idcard,
+  bankcard,
   address,
 };
 const defOf = (kind: string): VaultTypeDef | undefined => DEFS[kind];
@@ -106,6 +108,17 @@ describe("到期维度", () => {
     const result = applyVaultFilter(ENTRIES, withCriteria({ expiry: ["expired", "expiring"] }), defOf);
     expect(result.map((e) => e.data.name)).toEqual(["甲", "乙"]);
   });
+
+  it("类型未声明到期字段时，历史 expiry 残值不参与到期维度", () => {
+    const entries: VaultFilterEntry[] = [
+      // 银行卡模板已移除日期字段：历史载荷即便残留 expiry，也不得算作已设到期
+      { kind: "bankcard", data: { bank: "示例银行", number: "6222", expiry: dayOffset(-5) }, recordId: 8 },
+      { kind: "idcard", data: { name: "甲", number: "1", expiry: dayOffset(-5) }, recordId: 9 },
+    ];
+    expect(applyVaultFilter(entries, withCriteria({ expiry: ["expired"] }), defOf).map((e) => e.recordId)).toEqual([9]);
+    expect(applyVaultFilter(entries, withCriteria({ expiry: ["hasExpiry"] }), defOf).map((e) => e.recordId)).toEqual([9]);
+    expect(applyVaultFilter(entries, withCriteria({ expiry: ["noExpiry"] }), defOf).map((e) => e.recordId)).toEqual([8]);
+  });
 });
 
 describe("保护状态维度", () => {
@@ -116,7 +129,7 @@ describe("保护状态维度", () => {
 
   it("含敏感字段按类型声明判定", () => {
     const result = applyVaultFilter(ENTRIES, withCriteria({ protection: ["sensitive"] }), defOf);
-    // 账号（密码）与身份证（号码）声明了敏感字段；地址类型没有
+    // 账号（密码）与身份证（身份号码）声明了敏感字段；地址类型没有
     expect(result.map((e) => e.kind)).toEqual(["account", "account", "idcard", "idcard"]);
   });
 
@@ -162,6 +175,15 @@ describe("维度叠加与排序", () => {
     expect(result[0].data.name).toBe("甲");
     expect(result[1].data.name).toBe("乙");
     expect(result.slice(2).every((e) => !e.data.expiry)).toBe(true);
+  });
+
+  it("到期排序把未声明到期字段的类型置于末尾（历史 expiry 残值不参与排序）", () => {
+    const entries: VaultFilterEntry[] = [
+      { kind: "bankcard", data: { bank: "乙", expiry: dayOffset(-10) }, recordId: 1 },
+      { kind: "idcard", data: { name: "甲", expiry: dayOffset(10) }, recordId: 2 },
+    ];
+    const sorted = applyVaultFilter(entries, withCriteria({ sort: "expiry" }), defOf);
+    expect(sorted.map((e) => e.recordId)).toEqual([2, 1]);
   });
 
   it("按最近更新排序：记录 id 降序", () => {

@@ -15,7 +15,7 @@
   ─────────────────────────────────────────────────────────
   <VirtualCardGrid
     :items="filteredAccounts"
-    :item-height="172"
+    :item-height="148"
     :min-column-width="300"
     :buffer-rows="4"
   >

@@ -195,6 +195,48 @@ export function charsetSizeOf(pwd: string): number {
   return size;
 }
 
+/** 分档结果（等级、文案、进度百分比） */
+export interface StrengthGrade {
+  /** 1 极弱 … 5 极强 */
+  level: number;
+  /** 中文等级文案 */
+  label: string;
+  /** 进度条填充百分比（20 的整数倍） */
+  percent: number;
+}
+
+/**
+ * 估算位数 → 强度分档。
+ *
+ * 分档阈值为全模块单一来源：字符集模型与引擎模式模型的位数都经此函数评级，
+ * 避免同一口令在生成器与评估面板得到不同等级文案。
+ *
+ * @param entropy 估算位数（bit）
+ * @returns 1~5 档；0 档由调用方为「空输入」保留
+ */
+export function levelFromEntropy(entropy: number): StrengthGrade {
+  if (entropy >= 100) return { level: 5, label: "极强", percent: 100 };
+  if (entropy >= 80) return { level: 4, label: "强", percent: 80 };
+  if (entropy >= 60) return { level: 3, label: "中等", percent: 60 };
+  if (entropy >= 40) return { level: 2, label: "弱", percent: 40 };
+  return { level: 1, label: "极弱", percent: 20 };
+}
+
+/**
+ * 生成空间熵：字符数 × log2(字符池大小)。
+ *
+ * 生成器产出是均匀随机的，熵等于其取值空间大小，不适用「周期重复/顺子扣减」
+ * 那套针对人工口令的折扣——折扣会把偶然出现的 `abc` 误判成用户的选择。
+ *
+ * @param chars 随机字符数（不含分隔符等固定结构）
+ * @param poolSize 每字符的取值空间大小（≥2）
+ * @returns 熵位数（≥1）
+ */
+export function spaceEntropy(chars: number, poolSize: number): number {
+  if (chars <= 0) return 0;
+  return Math.max(1, Math.round(chars * Math.log2(Math.max(poolSize, 2))));
+}
+
 /**
  * 估算密码强度。
  *
@@ -220,14 +262,7 @@ export function calcStrength(pwd: string): Strength {
   // 顺子按全串计（即使周期种子内也属可预测序列）
   const entropy = Math.max(1, Math.round(base - sequentialChars(chars) * SEQUENTIAL_PENALTY_BITS));
 
-  let level = 1;
-  let label = "极弱";
-  let percent = 20;
-  if (entropy >= 40) { level = 2; label = "弱"; percent = 40; }
-  if (entropy >= 60) { level = 3; label = "中等"; percent = 60; }
-  if (entropy >= 80) { level = 4; label = "强"; percent = 80; }
-  if (entropy >= 100) { level = 5; label = "极强"; percent = 100; }
-  return { level, percent, entropy, label };
+  return { ...levelFromEntropy(entropy), entropy };
 }
 
 /** 离线爆破速度假设（10^10 次/秒） */

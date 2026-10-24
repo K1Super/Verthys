@@ -10,10 +10,12 @@ import {
   BUILTIN_VAULT_TYPE_IDS,
   ACCOUNT_VAULT_TYPE_ID,
   CUSTOM_VAULT_TYPE_PREFIX,
+  MAX_VAULT_CARD_FIELDS,
   VAULT_EXPIRY_FIELD_ID,
   DEFAULT_VAULT_ICON_ID,
   buildVaultTypeIndex,
   createCustomFieldId,
+  createCustomRangeStartId,
   createCustomVaultTypeId,
   getBuiltinVaultType,
   isBuiltinVaultTypeId,
@@ -40,7 +42,7 @@ describe("内置类型注册表自洽性", () => {
       expect(def.fields.length, def.id).toBeGreaterThan(0);
       expect(new Set(fieldIds).size, def.id).toBe(fieldIds.length);
       expect(fieldIds, def.id).toContain(def.titleField);
-      expect(def.cardFields.length, def.id).toBeLessThanOrEqual(3);
+      expect(def.cardFields.length, def.id).toBeLessThanOrEqual(MAX_VAULT_CARD_FIELDS);
       for (const fieldId of def.cardFields) expect(fieldIds, def.id).toContain(fieldId);
       expect(def.searchFields.length, def.id).toBeGreaterThan(0);
       for (const fieldId of def.searchFields) expect(fieldIds, def.id).toContain(fieldId);
@@ -79,10 +81,82 @@ describe("内置类型注册表自洽性", () => {
   });
 
   it("到期字段 id 被需要到期语义的类型声明", () => {
-    for (const typeId of ["idcard", "passport", "bankcard", "certificate"]) {
+    for (const typeId of ["idcard", "passport", "certificate"]) {
       const def = getBuiltinVaultType(typeId);
       expect(def!.fields.map((f) => f.id)).toContain(VAULT_EXPIRY_FIELD_ID);
     }
+  });
+
+  it("身份证：身份号码必填，有效期为「自 → 至」区间", () => {
+    const def = getBuiltinVaultType("idcard")!;
+    const number = def.fields.find((field) => field.id === "number")!;
+    expect(number.label).toBe("身份号码");
+    expect(number.required).toBe(true);
+    expect(number.sensitive).toBe(true);
+
+    const expiry = def.fields.find((field) => field.id === VAULT_EXPIRY_FIELD_ID)!;
+    expect(expiry.kind).toBe("dateRange");
+    expect(expiry.rangeStartId).toBe("validFrom");
+    expect(expiry.rangeStartLabel).toBe("自");
+    expect(expiry.rangeEndLabel).toBe("至");
+  });
+
+  it("护照：标准证件字段齐备，有效期为「签发 → 到期」区间", () => {
+    const def = getBuiltinVaultType("passport")!;
+    const ids = def.fields.map((field) => field.id);
+    expect(ids).toEqual(
+      expect.arrayContaining([
+        "name",
+        "number",
+        "type",
+        "country",
+        "nationality",
+        "birthDate",
+        "birthPlace",
+        "gender",
+        "issuePlace",
+        "authority",
+        VAULT_EXPIRY_FIELD_ID,
+        "note",
+      ]),
+    );
+    expect(def.fields.find((field) => field.id === "type")!.options).toContain("普通护照");
+    expect(def.fields.find((field) => field.id === "country")!.default).toBe("中国");
+
+    const expiry = def.fields.find((field) => field.id === VAULT_EXPIRY_FIELD_ID)!;
+    expect(expiry.kind).toBe("dateRange");
+    expect(expiry.rangeStartId).toBe("issueDate");
+    expect(expiry.rangeStartLabel).toBe("签发");
+    expect(expiry.rangeEndLabel).toBe("到期");
+  });
+
+  it("银行卡：标准字段齐备且不含任何日期字段", () => {
+    const def = getBuiltinVaultType("bankcard")!;
+    const ids = def.fields.map((field) => field.id);
+    expect(ids).toEqual(
+      expect.arrayContaining(["bank", "number", "type", "holder", "cvv", "note"]),
+    );
+    expect(ids).not.toContain(VAULT_EXPIRY_FIELD_ID);
+    // 日期控件与日期区间都不得出现（银行卡模板按需求完全移除日期）
+    expect(def.fields.some((field) => field.kind === "date" || field.kind === "dateRange")).toBe(false);
+    expect(def.cardFields).not.toContain(VAULT_EXPIRY_FIELD_ID);
+  });
+
+  it("地址：省市区使用全国三级联动的地区控件，姓名/电话为卡片摘要", () => {
+    const def = getBuiltinVaultType("address")!;
+    const region = def.fields.find((field) => field.id === "region")!;
+    expect(region.kind).toBe("region");
+
+    expect(def.fields.find((field) => field.id === "recipient")!.label).toBe("姓名");
+    expect(def.fields.find((field) => field.id === "phone")!.label).toBe("电话");
+    expect(def.cardFields).toEqual(["region", "recipient", "phone"]);
+  });
+
+  it("卡片摘要字段保持精简：完整字段由详情窗口承载", () => {
+    const passport = getBuiltinVaultType("passport")!;
+    expect(passport.cardFields).toEqual(["type"]);
+    const address = getBuiltinVaultType("address")!;
+    expect(address.cardFields.length).toBe(3);
   });
 });
 
@@ -142,5 +216,13 @@ describe("自定义标识生成", () => {
   it("字段 id 冲突时追加序号，且避开已占用的序号", () => {
     expect(createCustomFieldId("Mail", ["f_mail"])).toBe("f_mail_2");
     expect(createCustomFieldId("Mail", ["f_mail", "f_mail_2"])).toBe("f_mail_3");
+  });
+
+  it("区间起始键由字段 id 派生，并避开已占用的落盘键", () => {
+    expect(createCustomRangeStartId("f_range")).toBe("f_range_start");
+    expect(createCustomRangeStartId("f_range", ["f_range_start"])).toBe("f_range_start_2");
+    expect(createCustomRangeStartId("f_range", ["f_range_start", "f_range_start_2"])).toBe(
+      "f_range_start_3",
+    );
   });
 });

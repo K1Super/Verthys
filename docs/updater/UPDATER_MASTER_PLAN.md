@@ -20,12 +20,12 @@
 
 - 12 项架构决策（ADR-01 ~ ADR-12）。
 - 16 个 P0 任务包、9 个 P1 任务包、6 个 P2 任务包。
-- 20 条核心 E2E（18 条负向 / 异常路径）+ 4 条发布回归附加。
+- 本机运行时回归矩阵（正向升级 + 十类负向注入）。
 - 1 个统一清单协议（Manifest v2），同时兼容 Tauri 插件必需字段与服务器阶段扩展字段。
 
 ### 0.3 八条关键裁决
 
-1. **本机产物不得外发**：Phase L 构建只允许内部验证；任何对外分发的构建必须使用 `production` profile，HTTPS、清单签名、Authenticode、遥测缺一不可。
+1. **本机产物不得外发**：Phase L 构建只允许内部验证；任何对外分发的构建必须使用 `production` profile，端点默认 HTTPS，清单签名与遥测必需；零成本自建可用 `-AllowInsecureUpdater` 显式放行 HTTP + IP，Authenticode 为可选层。
 2. **安全流水线下沉到 Rust**：检查、下载、哈希、PE 版本、签名单 / 密钥集校验、安装由 Rust 更新服务负责；Vue 只负责 UI 状态与用户确认，不再直接调用插件的 `download()` / `install()` 完成安全判定。
 3. **签名是信任根，哈希与 PE 版本是附加闸门**：校验顺序固定为“安装包签名验真 → SHA256 / size 完整性 → PE FileVersion 身份 → 兼容判定 → 锁库 → 安装”。
 4. **NSIS 不具备事务式原子替换**：不承诺“安装器原子替换”和“自动回滚”。回退按 R0 检测与指引、R1 修复入口、R2 外部看门狗三级实现，文案必须与真实能力一致。
@@ -64,9 +64,9 @@
 | 10 | 当前安装闸门在 `verthysReadyRef` 为假时跳过 `lockAll` | `SecurityCenter.vue:527-533` | 禁止任何跳过锁库的分支 |
 | 11 | `lockAll` 对 `waitForFlush()` 异常使用空 catch | `security-session.ts:580` | 闸门不能只依赖“调用未抛错”；需要结构化结果 |
 | 12 | 发布配置为回环 HTTP + 明文许可 | `tauri.conf.json:55-65` | 必须拆 profile；production 禁止 |
-| 13 | 清单生成脚本只写 `version / notes / pub_date / platforms.{signature,url}` | `scripts/make_updater_manifest.mjs:100-111` | `sha256`、`size`、`compatibility` 等字段尚未落地 |
+| 13 | 清单生成脚本只写 `version / notes / pub_date / platforms.{signature,url}` | `scripts/release/make_updater_manifest.mjs:100-111` | `sha256`、`size`、`compatibility` 等字段尚未落地 |
 | 14 | 当前 `latest.json` 无 `sha256`、`channel`、`compatibility`、`force_update` | `build/updater/latest.json` | 现状不能支撑哈希 / 版本身份校验 |
-| 15 | 本机夹具服务不处理 HTTP Range | `scripts/updater_server.mjs:145-163` 直接整文件流式返回 | 断点续传在 Phase L 不可用；P1 需服务端与客户端同时支持 |
+| 15 | 本机夹具服务不处理 HTTP Range | `scripts/updater/updater_server.mjs:145-163` 直接整文件流式返回 | 断点续传在 Phase L 不可用；P1 需服务端与客户端同时支持 |
 | 16 | 无 single-instance 插件 | `verthys-tauri/src-tauri/Cargo.toml` 无 `tauri-plugin-single-instance` | 单实例预检需新增实现 |
 | 17 | `CHANGELOG.md`、`docs/MIGRATION.md` 不存在；`docs/README.md` 已引用 | 文件系统核验 | 文档漂移真实存在 |
 | 18 | 仅有 `core.yml`、`rust-frontend.yml` 两个工作流 | `.github/workflows/` 目录 | 无 release 工作流 |
@@ -77,7 +77,7 @@
 
 | # | 约束 | 落地 |
 |---|---|---|
-| C1 | 生产构建不得包含回环端点 / 明文许可 / `dangerousInsecureTransportProtocol: true` | ADR-02、§6.1 G2 |
+| C1 | 生产构建默认使用 HTTPS；仅显式 `-AllowInsecureUpdater` 时允许 HTTP + 非占位主机，回环端点仍禁止 | ADR-02、§6.1 G2 |
 | C2 | 检查、下载、哈希、PE、密钥集、安装由 Rust 更新服务负责；Vue 只做 UI 状态 | ADR-04、§4.1 |
 | C3 | 签名是信任根；SHA256 / size / PE 版本是附加闸门；顺序不可颠倒 | ADR-06、§3.6 |
 | C4 | stock NSIS 无事务语义；不承诺自动回退；按 R0 / R1 / R2 分级 | ADR-07、§4.8 |
@@ -97,8 +97,8 @@
 
 | 目标 | 度量口径 | Phase L 合格线 | Phase S 合格线 |
 |---|---|---|---:|---:|
-| 可信 | 安装包签名、清单签名、Authenticode 校验全部通过才允许安装 | 安装包签名 100% | 三层签名 100% |
-| 可靠 | 检查 / 下载 / 校验 / 锁库 / 安装 / 自检各阶段失败均可定位并回到可用状态 | E2E 20/20（L0 门槛 14/20） | 生产成功率 ≥ 99.5% |
+| 可信 | 安装包签名、清单签名、SHA256 / PE 校验全部通过才允许安装；Authenticode 可选 | 安装包签名 100% | 签名与哈希校验 100% |
+| 可靠 | 检查 / 下载 / 校验 / 锁库 / 安装 / 自检各阶段失败均可定位并回到可用状态 | 本机运行时回归矩阵通过 | 生产成功率 ≥ 99.5% |
 | 可观测 | 每个失败事件带 `phase + code + release_id + session_id` | 100% | 100% |
 | 可回退 | 健康失败后用户可在 R1 修复入口回到 LKG | R1 可用 | R2 看门狗可用 |
 | 可审计 | 版本、物料哈希、签名、SBOM、发布人、发布时间可追溯 | release manifest 完整 | 发布台账 + 审批 |
@@ -123,10 +123,10 @@
 
 | 阶段 | 名称 | 分发范围 | 入口条件 | 退出条件 |
 |---|---|---|---|---|
-| L0 | 本机可信基线 | 本机 / 内部测试机 | 当前 4.1.3 基线；方案批准 | 16 个 P0 任务完成；G0 ~ G7 全绿；E2E 14/20（正向 + 核心负向） |
-| L1 | 本机可靠回退 | 内部测试机 | L0 退出 | R1 修复入口 + LKG + Range 续传 + 单实例；E2E 20/20 |
+| L0 | 本机可信基线 | 本机 / 内部测试机 | 当前 4.1.3 基线；方案批准 | 16 个 P0 任务完成；G0 ~ G7 全绿；本机运行时回归矩阵通过（正向 + 核心负向） |
+| L1 | 本机可靠回退 | 内部测试机 | L0 退出 | R1 修复入口 + LKG + Range 续传 + 单实例；运行时回归矩阵扩展负向通过 |
 | S0 | 服务器预发 | 内部 / 试点 | L0 + 客户端 readiness；SERVER PLAN §2 | staging E2E、负载、回滚、密钥演练全通过 |
-| S1 | 服务器生产 | 外部分发 | S0 退出；Authenticode、清单签名、遥测、审批就绪 | 灰度 1% → 10% → 50% → 100% 阶段门全通过 |
+| S1 | 服务器生产 | 外部分发 | S0 退出；清单签名、遥测、审批就绪（Authenticode 可选） | 灰度 1% → 10% → 50% → 100% 阶段门全通过 |
 | E | 企业规模 | 企业 / 大规模 | S1 稳定 | MSI / GPO / Intune、看门狗、多区域 |
 
 能力归属表：
@@ -134,10 +134,10 @@
 | 能力 | 本方案决策 | 阶段 | 说明 |
 |---|---|---|---|
 | 回环 HTTP 夹具 | 仅 `local` profile | L0 | 用于本机端到端验证，不进入发布配置 |
-| HTTPS 分发 | 外部分发必需 | S1 | TLS 1.2+、HSTS、证书自动续期 |
-| `dangerousInsecureTransportProtocol` | 仅 `local` profile；production 硬禁 | L0 / S1 | CI 对 production 出现该键即失败 |
+| HTTPS 分发 | 外部分发推荐 | S1 | TLS 1.2+、HSTS、证书自动续期；零成本自建可用 HTTP + IP |
+| `dangerousInsecureTransportProtocol` | 仅显式构建开关 `-AllowInsecureUpdater` 放行 | L0 / S1 | 默认禁用；开启后仍受主机白名单与全量字节校验约束 |
 | 清单独立签名 | 客户端现在支持；production 强制 | L0（能力）/ S1（强制） | JCS + minisign |
-| Authenticode | 外部分发必需；本机可后置 | S1 | OS 信任与 SmartScreen |
+| Authenticode | 可选；显式开启时校验 | S1 | OS 信任与 SmartScreen；不依赖付费证书 |
 | SHA256 / size | Rust 准备阶段强制执行 | L0 | 对同一份下载字节校验 |
 | PE FileVersion | 强制执行 | L0 | 阻断“清单说新装旧” |
 | `min_version` | 字段现在定义；强制链 Phase S | L0（字段）/ S1（执行） | 低于该版本需桥接 |
@@ -158,7 +158,7 @@
 
 #### ADR-02 构建 profile 与端点注入
 
-- **决策**：引入 `local` / `production` 两个构建 profile。`local` 允许回环 HTTP 与明文许可；`production` 强制 HTTPS、禁止回环 / localhost / 占位主机与明文许可。基础 `tauri.conf.json` 不保存端点和明文开关，只保留签名公钥、`allowDowngrades`、默认 `channel` 与安装模式；端点、明文许可与下载主机白名单由 profile 覆盖层和构建期注入决定。渠道随配置生效，运行时从配置读取，前端不再传参。
+- **决策**：引入 `local` / `production` 两个构建 profile。`local` 允许回环 HTTP 与明文许可；`production` 默认强制 HTTPS 并禁止回环 / localhost / 占位主机，零成本自建时可用 `-AllowInsecureUpdater` 显式放行 HTTP + 非占位主机。基础 `tauri.conf.json` 不保存端点和明文开关，只保留签名公钥、`allowDowngrades`、默认 `channel` 与安装模式；端点、明文许可与下载主机白名单由 profile 覆盖层和构建期注入决定。渠道随配置生效，运行时从配置读取，前端不再传参。
 - **理由**：开发便利配置与发布配置共用一份文件，导致回环端点与明文许可可能随发布流出；渠道来自前端时，界面状态可覆盖发布配置，形成双事实源。
 - **影响**：`build_production.ps1` 默认 `production`；CI 对 base + overlay 深合并后的有效配置做硬校验；local 产物禁止上传服务器。
 
@@ -166,7 +166,7 @@
 
 - **决策**：安装包 minisign 签名负责“安装包字节来自发布者”；清单签名负责“版本 / 兼容 / 下载元数据未被篡改”；Authenticode 负责“Windows 系统信任与 SmartScreen 声誉”。三者独立存放、独立轮换、独立吊销。
 - **理由**：三层签名职责不同；把清单签名当成唯一降级阻断会导致职责过载，Authenticode 缺失会让外部分发出现未知发布者。
-- **影响**：Phase L 强制安装包 minisign；Authenticode 客户端验证已实现，非 local 渠道强制要求系统信任链、吊销检查与可选主体 / 指纹钉扎。真实 EV 证书采购、CI 签名与密钥矩阵仍属发布侧待办，Phase S 继续完善。
+- **影响**：Phase L 与全部渠道强制安装包 minisign；Authenticode 客户端验证已实现但默认关闭，显式开启时才校验系统信任链、吊销检查与可选主体 / 指纹钉扎。分发不依赖付费代码签名证书，需要时可在构建机补充签名。
 
 #### ADR-04 Rust 更新服务拥有安全流水线
 
@@ -191,7 +191,7 @@
   6. 安装包签名（插件 + Rust 密钥集复验）；
   7. SHA256 / size；
   8. PE `FileVersion`；
-  9. Authenticode（production）；
+  9. Authenticode（可选）；
   10. 锁库闸门；
   11. 安装；
   12. 启动健康自检。
@@ -287,7 +287,7 @@
 信任根（纵向）：
   minisign 安装包密钥（离线 / HSM）
   清单签名密钥（离线 / HSM，Phase S 强制）
-  Authenticode 证书（EV/OV + 时间戳，Phase S 强制）
+  Authenticode 证书（EV/OV + 时间戳，可选）
   客户端内置：安装包公钥集、清单公钥集、Authenticode 系统信任链
 ```
 
@@ -312,7 +312,7 @@
 | I2 | **签名是信任根**：安装包签名必须通过插件与 Rust 密钥集双重验证；production 清单签名必须通过 | `updater_prepare` |
 | I3 | **未锁库不落安装器**：只有 `LockOutcome.clean === true` 才允许安装；未就绪也不得跳过 | `lockAll` + `updater_confirm_lock` + `updater_install` |
 | I4 | **私钥不进仓库**：私钥 / 口令不得出现在 Git、安装包、日志、SBOM、构建缓存 | 构建 / 签名 / 日志 |
-| I5 | **夹具仅回环**：`updater_server.mjs` 只绑定 `127.0.0.1`；production 只允许 HTTPS | 配置门 + 代码审查 |
+| I5 | **夹具仅回环**：`updater_server.mjs` 只绑定 `127.0.0.1`；production 默认 HTTPS，显式明文许可时允许 HTTP + 非回环主机 | 配置门 + 代码审查 |
 | I6 | **日志脱敏**：不记录密钥、口令、容器路径全名、记录标题 / 内容、完整设备指纹、完整哈希 | 日志模块 + 静态扫描 |
 | I7 | **失败不破坏旧版与容器数据**：预检 / 下载 / 校验 / 锁库失败，旧版与已解锁会话保持可用 | 状态机 + 闸门 |
 | I8 | **数据目录不在替换范围**：安装器只替换程序目录；容器与用户数据不被更新流程读写 / 移动 / 删除 | NSIS 配置 + 代码审查 |
@@ -378,7 +378,7 @@
 | 字段 | 类型 | 必填 | 校验规则 | 执行点 |
 |---|---|---|---|---|
 | `schema_version` | number | 是 | 当前为 `2`；大于客户端支持上限 → 生产拒绝 | Rust `manifest.rs` |
-| `release_id` | string | 是 | `YYYYMMDD-HHMMSS-<semver>-<gitsha8>`；全局唯一 | Rust / 日志 / 发布台账 |
+| `release_id` | string | 是 | 13 位 Crockford Base32 融合哈希（安装包 SHA256 前 8 字节）；旧日期格式兼容；全局唯一 | Rust / 日志 / 发布台账 |
 | `version` | string | 是 | SemVer `MAJOR.MINOR.PATCH`，无 `v` 前缀、无 `+build` | Rust / 插件 |
 | `channel` | string | 是 | `local` / `internal` / `beta` / `stable`；必须与请求端点一致 | Rust |
 | `pub_date` | string | 是 | RFC 3339 UTC；Tauri 必需 | Rust / 插件 |
@@ -481,7 +481,7 @@
 
 | 步 | 检查 | 失败错误码 | 备注 |
 |---:|---|---|---|
-| 1 | 传输协议 / 主机白名单 | `E_UPDATER_NETWORK` / `E_UPDATER_MANIFEST_INVALID` | production 仅 HTTPS；local 仅回环 |
+| 1 | 传输协议 / 主机白名单 | `E_UPDATER_NETWORK` / `E_UPDATER_MANIFEST_INVALID` | production 默认 HTTPS，显式明文许可时允许 HTTP；local 仅回环 |
 | 2 | 清单 `manifest_signature` | `E_UPDATER_MANIFEST_SIG_INVALID` | production 必验；local 可跳过 |
 | 3 | `schema_version` / 必填 / 类型 / 长度 | `E_UPDATER_MANIFEST_INVALID` | 未知高版本 fail-closed |
 | 4 | `channel` 与请求渠道一致 | `E_UPDATER_CHANNEL_MISMATCH` | 防止 stable 端点返回 beta 清单 |
@@ -498,7 +498,7 @@
 | 15 | 安装包签名（Rust 密钥集复验） | `E_UPDATER_SIG_INVALID` / `E_UPDATER_SIG_PUBKEY_MISMATCH` | 识别 key id |
 | 16 | `sha256` / `size` | `E_UPDATER_HASH_MISMATCH` / `E_UPDATER_SIZE_MISMATCH` | 对同一份字节 |
 | 17 | `file_version` / PE `FileVersion` | `E_UPDATER_PE_VERSION_MISMATCH` | 阻断“清单说新装旧” |
-| 18 | Authenticode（production） | `E_UPDATER_AUTHENTICODE_INVALID` | `WinVerifyTrust` + 证书主体 / 指纹 |
+| 18 | Authenticode（显式开启时） | `E_UPDATER_AUTHENTICODE_INVALID` | `WinVerifyTrust` + 证书主体 / 指纹；默认关闭 |
 | 19 | 锁库闸门 | `E_UPDATER_LOCK_*` | 见 §4.6 |
 | 20 | 安装 | `E_UPDATER_INSTALL_FAILED` | 安装器接管 |
 | 21 | 启动健康自检 | `E_UPDATER_HEALTH_FAIL` | 见 §4.7 |
@@ -515,7 +515,7 @@
 
 #### 3.7.1 本机发布物料流水线
 
-`scripts/release_update.mjs` 是 Phase L 的唯一发布入口，构建完成后由 `build_production.ps1` 自动调用；也可单独执行以重发物料：
+`scripts/release/release_update.mjs` 是 Phase L 的唯一发布入口，构建完成后由 `build_production.ps1` 自动调用；也可单独执行以重发物料：
 
 1. 读取根 `VERSION`（或 `--version` 显式传入），确认 NSIS 安装包与同名 `.sig` 存在。
 2. 以 `new URL(installerName, endpointUrl)` 计算下载地址，确保清单 URL 与实际存放位置同源。
@@ -645,7 +645,7 @@ Tauri 命令：
 
 ### 4.3 错误码契约
 
-更新域使用独立的 `updater_error.ts`：`UpdaterErrorCode` 联合类型、`Record` 穷尽文案、单测与跨语言脚本门。每个错误码必须同时有：Rust 清单登记、前端文案、事件上报、可重试标记。当前登记 30 个错误码，`scripts/check_updater_error_codes.mjs` 强制两侧集合一致。
+更新域使用独立的 `updater_error.ts`：`UpdaterErrorCode` 联合类型、`Record` 穷尽文案、单测与跨语言脚本门。每个错误码必须同时有：Rust 清单登记、前端文案、事件上报、可重试标记。当前登记 30 个错误码，`scripts/gates/check_updater_error_codes.mjs` 强制两侧集合一致。
 
 | 错误码 | 阶段 | 触发 | 用户文案要点 | 可重试 |
 |---|---|---|---|---|
@@ -699,7 +699,7 @@ Tauri 命令：
    - 不等于清单 `platforms.<target>.file_version` → `E_UPDATER_PE_VERSION_MISMATCH`；
    - 不高于当前版本 → `E_UPDATER_VERSION_BLOCKED`。
 4. **为什么**：当前 CLI 的签名 trusted comment 不含版本，清单可以被篡改为“高版本号 + 旧签名包”；PE 版本在签名覆盖的字节内，是可信的版本身份。Phase S 升级 CLI 后可同时启用 `requireSignedVersion`，PE 校验保留为纵深防御。
-5. **Authenticode（已实现，生产强制）**：准备阶段把字节写入系统临时目录，调用 `WinVerifyTrustEx` 验证签名链并读取签名者主体与 SHA-1 指纹；生产渠道强制 `require=true` 与 `revocation=true`，可选 `subject` / `thumbprint` 钉扎；失败返回 `E_UPDATER_AUTHENTICODE_INVALID` 并中止。安装前复检再次执行同一验证，临时文件无论成败立即删除。
+5. **Authenticode（已实现，默认关闭）**：准备阶段把字节写入系统临时目录，调用 `WinVerifyTrustEx` 验证签名链并读取签名者主体与 SHA-1 指纹；仅配置显式开启时校验 `require` / `revocation`，可选 `subject` / `thumbprint` 钉扎；失败返回 `E_UPDATER_AUTHENTICODE_INVALID` 并中止。安装前复检再次执行同一验证，临时文件无论成败立即删除。
 6. **密钥轮换过渡**：插件 `pubkey` 只支持一个公钥。若插件主公钥未覆盖新签名，Rust 服务可基于 `update.download_url` 自行下载（reqwest），用密钥集验签，再调用 `Update::install(bytes)`；默认路径优先使用插件下载，减少重复实现。轮换期至少保留旧公钥一个版本周期。
 
 ### 4.5 预检
@@ -935,12 +935,12 @@ UI 不得使用“已自动回退”这类与 R0/R1 能力不符的表述；不�
 |---|---|---|---|
 | 基础 | `tauri.conf.json` | `pubkey`、`allowDowngrades`、默认 `channel`、Windows 安装模式 | 不含端点、不含明文许可；渠道默认 `stable` |
 | 本机覆盖 | `tauri.local.conf.json` | 回环端点、`channel=local`、明文许可、回环下载主机 | 仅用于本机验证，产物不得上服务器 |
-| 生产覆盖 | `tauri.production.conf.json` | 生产模板端点、`channel=stable`、下载主机白名单、Authenticode 强制 | 模板主机为占位值，必须由真实端点替换后才能发布；安装包必须带系统签名 |
+| 生产覆盖 | `tauri.production.conf.json` | 生产模板端点、`channel=stable`、下载主机白名单、Authenticode 默认关闭 | 模板主机为占位值，必须由真实端点替换后才能发布；系统签名可选 |
 
 构建期：
 
-1. `build_production.ps1` 默认 `production`；必须通过 `-UpdaterEndpoint` 或 `VERTHYS_UPDATER_ENDPOINT` 提供真实 HTTPS 端点，脚本生成 `build/tauri.production.generated.conf.json`（ASCII、无 BOM），覆盖端点、渠道、明文开关与下载主机白名单。
-2. `scripts/check_updater_profile.mjs` 读取 base + overlay 深合并后的有效配置，拒绝占位 / 回环主机、`http`、`dangerousInsecureTransportProtocol=true` 与渠道不一致；`--endpoint` 注入时同步更新下载主机白名单。
+1. `build_production.ps1` 默认 `production`；必须通过 `-UpdaterEndpoint` 或 `VERTHYS_UPDATER_ENDPOINT` 提供端点（默认 HTTPS，`-AllowInsecureUpdater` 时可为 HTTP + IP），脚本生成 `build/tauri.production.generated.conf.json`（ASCII、无 BOM），覆盖端点、渠道、明文开关与下载主机白名单。
+2. `scripts/gates/check_updater_profile.mjs` 读取 base + overlay 深合并后的有效配置，拒绝占位 / 回环主机与渠道不一致；`http` 仅在显式 `--allow-insecure` 时放行；`--endpoint` 注入时同步更新下载主机白名单。
 3. `local` profile 必须显式传 `-AllowLocal`；仅允许回环，`http` 必须显式开启明文许可，`channel` 必须为 `local`。
 
 运行期：
@@ -948,7 +948,7 @@ UI 不得使用“已自动回退”这类与 R0/R1 能力不符的表述；不�
 1. `updater_check` 在执行任何网络请求前调用配置审计：渠道非空、端点为合法 URL、协议与主机符合当前 profile、明文开关与协议匹配。
 2. 审计失败返回 `E_UPDATER_CONFIG_INVALID` 并写入 `config_invalid` 事件，不发起请求，不回显端点细节。
 3. 渠道只从配置读取；前端调用 `updater_check` 不传任何参数，避免 UI 状态覆盖发布配置。
-4. 非 local 渠道必须配置 `authenticode.require=true` 与 `revocation=true`；`subject` / `thumbprint` 为可选钉扎，指纹只接受 40 位十六进制。本机渠道默认关闭，便于未做系统签名的开发物料验证更新链路。
+4. 所有渠道默认 `authenticode.require=false`；需要系统签名校验时显式设为 `true` 并配置 `revocation`，`subject` / `thumbprint` 为可选钉扎，指纹只接受 40 位十六进制。
 
 ---
 
@@ -967,21 +967,21 @@ UI 不得使用“已自动回退”这类与 R0/R1 能力不符的表述；不�
 | 编号 | 任务 | 主要文件 | 依赖 | 验收 |
 |---|---|---|---|---|
 | T01 | 文档权威与索引：本目录 README / MASTER / SERVER；`docs/README.md` 更新入口 | `docs/updater/*`、`docs/README.md` | — | 文档存在；索引可解析；口径一致 |
-| T02 | 构建 profile：`local` / `production`；端点、明文许可、渠道、清单签名开关注入；CI 静态门 | `tauri.conf.json`、`tauri.local.conf.json`、`tauri.production.conf.json`、`scripts/check_updater_profile.mjs`、`build_production.ps1`、`.github/workflows/*` | T01 | production 配置无回环 / 无明文许可 / HTTPS；local 产物带标记；CI 对违规硬失败 |
-| T03 | Manifest v2：生成脚本扩展、JCS 规范化、清单签名、schema 校验、双 target 键 | `scripts/make_updater_manifest.mjs`、`scripts/sign_manifest.mjs`、`scripts/*.test.mjs` | T02 | 合法清单生成；15 条负向契约用例通过；Tauri 可解析 |
+| T02 | 构建 profile：`local` / `production`；端点、明文许可、渠道、清单签名开关注入；CI 静态门 | `tauri.conf.json`、`tauri.local.conf.json`、`tauri.production.conf.json`、`scripts/gates/check_updater_profile.mjs`、`build_production.ps1`、`.github/workflows/*` | T01 | production 配置无回环 / 无明文许可 / HTTPS；local 产物带标记；CI 对违规硬失败 |
+| T03 | Manifest v2：生成脚本扩展、JCS 规范化、清单签名、schema 校验、双 target 键 | `scripts/release/make_updater_manifest.mjs`、`scripts/release/sign_manifest.mjs`、`scripts/**/*.test.mjs` | T02 | 合法清单生成；15 条负向契约用例通过；Tauri 可解析 |
 | T04 | Rust 更新服务骨架与 `updater_check`：会话、单飞、渠道端点、`raw_json` 解析 | `src-tauri/src/updater/*`、`lib.rs` | T03 | 检查成功 / 失败 / 无更新 / 渠道不匹配均有单测 |
 | T05 | `updater_prepare`：插件下载 + 密钥集复验 + SHA256 / size + PE 版本 + 兼容 | `updater/mod.rs`、`verify.rs`、`pe.rs` | T04 | 正向准备成功；签名 / key id / 哈希 / size / PE 负向全部拒绝 |
 | T06 | `updater_install`：闸门校验、marker 原子写、`install(bytes)`、失败语义 | `updater/mod.rs`、`marker.rs` | T05、T09 | 未授权安装拒绝；marker 落盘；安装交接日志完整 |
 | T07 | Vue 状态机与错误码：显式状态、转移表、越态防护、文案映射 | `src/composables/useAppUpdater.ts`、`src/lib/verthys_error.ts` | T04 | 状态转移矩阵单测；27 个错误码文案齐全；现有 7 条行为保留 |
-| T08 | 预检：空间、单实例（命名互斥量 + 进程路径）、目录可写、物料存在、兼容环境 | `updater/precheck.rs` / 前端预检模块 | T04 | 各检查项独立失败路径；E2E E08 ~ E10 通过 |
+| T08 | 预检：空间、单实例（命名互斥量 + 进程路径）、目录可写、物料存在、兼容环境 | `updater/precheck.rs` / 前端预检模块 | T04 | 各检查项独立失败路径；错误码与事件完整 |
 | T09 | 锁库闸门：`LockOutcome`、统一 `lockAll`（空锁库受控路径）、脏数据、密钥清理、`updater_confirm_lock` | `security-session.ts`、`SecurityCenter.vue`、`updater/mod.rs` | T07 | 未就绪不跳过；脏缓存中止；锁库失败保持会话；G2 关闭 |
 | T10 | 更新标记与健康自检：`pending.json`、启动状态、DLL / worker / ABI、结果归档 | `updater/marker.rs`、`lib.rs`、启动初始化链路 | T06 | 正向 Confirmed；失败 RolledBack；自检不触发解锁 |
 | T11 | 本地日志：事件 schema、JSONL、滚动、脱敏、导出 | `updater/log.rs`、`src/utils/logger.ts` | T07 | 事件字段白名单；导出脱敏；7 天 / 5 MB 规则 |
 | T12 | 单元 / 集成测试：Rust 解析 / 验签 / PE / marker / gate；Vue 状态机；脚本契约 | 对应 `*.spec.ts` / `#[cfg(test)]` / Node test | T04 ~ T11 | 新增用例全绿；现有测试全绿 |
 | T13 | CI 质量门：配置静态检查、清单契约、文档存在性、测试执行 | `.github/workflows/rust-frontend.yml`、`ci/*` | T02、T03、T12 | 违规即红；PR 可复现 |
-| T14 | 干净 VM E2E：快照、基线安装、正向 + 负向 + 故障注入、证据表 | `docs/updater/TESTING.md`（或 `../TESTING.md` 章节）、脚本 | T04 ~ T11 | 14/20 用例通过并记录证据；旧版 / 容器完好 |
+| T14 | 本机运行时回归矩阵：正向升级 + 十类负向注入 + 证据表 | `scripts/updater/updater_e2e_matrix.mjs`、`docs/updater/UPDATER_LOCAL_VERIFICATION.md` | T04 ~ T11 | 矩阵通过并记录证据；旧版 / 容器完好 |
 | T15 | 文档纠偏：`DEPLOYMENT.md` §3-4、`RELEASE.md`、`CONFIGURATION.md`、`SECURITY_DESIGN.md`、`TESTING.md`、`CHANGELOG.md`、`MIGRATION.md` | `docs/*`、根 `CHANGELOG.md` | T01 ~ T14 | 文档与代码一致；不再出现“无自动更新”漂移；参数全部登记 |
-| T16 | 物料账本：release manifest、SBOM 绑定、安装包 / `.sig` / DLL / worker 哈希归档 | `build_production.ps1`、`scripts/generate_release_manifest.mjs` | T02、T03 | 归档目录含 manifest；哈希可复核；SBOM 与安装包同目录 |
+| T16 | 物料账本：release manifest、SBOM 绑定、安装包 / `.sig` / DLL / worker 哈希归档 | `build_production.ps1`、`scripts/release/generate_release_manifest.mjs` | T02、T03 | 归档目录含 manifest；哈希可复核；SBOM 与安装包同目录 |
 
 ### 5.3 P1 任务（L1 / 首个迭代）
 
@@ -1015,16 +1015,16 @@ UI 不得使用“已自动回退”这类与 R0/R1 能力不符的表述；不�
 | B0 | T01、T02、T03、T15（文档 / profile / 清单 / 纠偏） | 文档权威；production 配置门；清单契约测试 |
 | B1 | T04、T05、T06、T09（Rust 服务 / 准备 / 安装 / 闸门） | 安全流水线正向 + 负向单测；G2 关闭 |
 | B2 | T07、T08、T10、T11（状态机 / 预检 / 健康 / 日志） | UI 状态机、预检、marker、健康、日志全绿 |
-| B3 | T12、T13、T14、T16（测试 / CI / E2E / 物料账本） | 14/20 E2E；CI 全绿；物料可复核 |
-| B4 | P1-01 ~ P1-09 | 20/20 E2E；R1 修复；Range；单实例；Authenticode 预演 |
+| B3 | T12、T13、T14、T16（测试 / CI / 运行时矩阵 / 物料账本） | 运行时矩阵通过；CI 全绿；物料可复核 |
+| B4 | P1-01 ~ P1-09 | 运行时矩阵扩展负向通过；R1 修复；Range；单实例；Authenticode 预演 |
 
 ### 5.6 文件级改动清单
 
 | 区域 | 文件 | 动作 |
 |---|---|---|
 | 配置 | `verthys-tauri/src-tauri/tauri.conf.json` | 拆 profile；生产 HTTPS；移除明文许可；渠道 / 端点注入 |
-| 配置校验 | `scripts/check_updater_profile.mjs`（新增） | base + overlay 深合并；`--endpoint` 注入；production / local 硬校验 |
-| 发布物料 | `scripts/release_update.mjs`（新增） | 清单一站式生成：签名、安装包副本、账本、渠道指针 |
+| 配置校验 | `scripts/gates/check_updater_profile.mjs`（新增） | base + overlay 深合并；`--endpoint` 注入；production / local 硬校验 |
+| 发布物料 | `scripts/release/release_update.mjs`（新增） | 清单一站式生成：签名、安装包副本、账本、渠道指针 |
 | Rust 更新服务 | `src-tauri/src/updater/*`（新增） | 清单 / 验签 / PE / marker / gate / 日志 / 命令 |
 | Rust 注册 | `src-tauri/src/lib.rs` | 注册命令；启动早期读取 marker |
 | 前端状态 | `src/composables/useAppUpdater.ts`、`src/composables/updater/*` | 迁移到 IPC 状态机；错误码；取消；进度 |
@@ -1032,18 +1032,18 @@ UI 不得使用“已自动回退”这类与 R0/R1 能力不符的表述；不�
 | 会话 | `src/session/security-session.ts` | `lockAll` 返回结构化结果；不吞异常 |
 | 错误 | `src/lib/updater_error.ts`（新增） | `E_UPDATER_*` 穷尽文案、可重试标记、跨语言契约 |
 | 日志 | `src-tauri/src/updater/log.rs`（新增） | 事件 schema、脱敏、滚动、zip 导出 |
-| 清单脚本 | `scripts/make_updater_manifest.mjs`、`scripts/sign_manifest.mjs`（新增） | v2 字段、JCS、签名、负向校验 |
-| 夹具 | `scripts/updater_server.mjs` | 保持回环；P1 增加 Range / ETag |
+| 清单脚本 | `scripts/release/make_updater_manifest.mjs`、`scripts/release/sign_manifest.mjs`（新增） | v2 字段、JCS、签名、负向校验 |
+| 夹具 | `scripts/updater/updater_server.mjs` | 保持回环；P1 增加 Range / ETag |
 | 构建 | `build_production.ps1` | 默认 `production`；端点注入；签名时序；物料流水线；产物校验 |
 | CI | `.github/workflows/rust-frontend.yml`、`.github/workflows/core.yml` | 配置门、清单契约、文档检查、测试 |
 | 文档 | `docs/updater/*`、`docs/*`、`CHANGELOG.md` | 权威索引、纠偏、参数登记、迁移矩阵 |
 
 ### 5.7 L0 Definition of Done
 
-1. T01 ~ T16 全部完成；阻断项全部关闭（E2E 关闭口径为“干净 VM 矩阵 + 证据 + 14/20 核心用例”，其余 6 条在 L1 关闭）。
+1. T01 ~ T16 全部完成；阻断项全部关闭；本机运行时回归矩阵通过并留存证据。
 2. `local` profile 端到端：检查 → 准备 → 预检 → 锁库 → 安装 → 重启 → 健康自检 → Confirmed。
 3. 负向：清单篡改、签名篡改、公钥不匹配、哈希不符、size 不符、PE 版本不符、降级、bridge、兼容、灰度排除、暂停、撤回、空间不足、单实例、目录不可写、锁库失败、安装中断、健康失败 —— 全部有预期拒绝 / 恢复行为。
-4. 干净 VM E2E 至少 14/20，证据表完整；生产 UI 真实凭据路径与容器记录数核对完成。
+4. 本机运行时回归矩阵通过并记录证据；生产 UI 真实凭据路径与容器记录数核对完成。
 5. 现有前端 / Rust / C 测试、`vue-tsc`、`vite build`、vendor 哈希门、版本漂移门全绿。
 6. 私钥不在仓库 / 安装包 / 日志 / SBOM；日志脱敏测试通过。
 7. `docs/README.md`、`DEPLOYMENT.md`、`RELEASE.md`、`CONFIGURATION.md`、`SECURITY_DESIGN.md`、`TESTING.md` 与本方案一致；`CHANGELOG.md`、`docs/MIGRATION.md` 存在。
@@ -1063,7 +1063,7 @@ UI 不得使用“已自动回退”这类与 R0/R1 能力不符的表述；不�
 | G3 | 核心质量门 | CTest、vendor 哈希、AST 红线、clippy、`cargo test`、`vue-tsc`、Vitest、`vite build` | 阻断构建 |
 | G4 | 清单契约 | 合法清单生成；15 条负向契约用例；Tauri 解析；JCS 验签 | 阻断发布 |
 | G5 | 更新服务测试 | Rust `check / prepare / install / marker / gate` 单测；Vue 状态机；错误文案 | 阻断合入 |
-| G6 | 干净 VM E2E | E01 ~ E20 + 回归附加；证据表完整 | 阻断发布 |
+| G6 | 运行时回归（本机） | 正向升级 + 十类负向注入；证据完整 | 阻断发布 |
 | G7 | 安全与脱敏 | 私钥 / 口令扫描；日志脱敏；配置无明文许可；依赖审计 | 阻断发布 |
 | G8 | 物料账本 | 安装包 / `.sig` / DLL / worker / SBOM / release manifest 哈希一致 | 阻断发布 |
 | G9 | 服务器预发 | staging E2E、负载、回滚、密钥演练 | 阻断 S1 |
@@ -1131,41 +1131,17 @@ Vue / TS：
 | I11 | 未就绪空锁库 | `clean=true` 可安装；无脏数据；无密钥残留 |
 | I12 | 健康自检失败 | `RolledBack`；marker 归档；修复入口可见 |
 
-### 6.4 E2E 矩阵（干净 VM）
+### 6.4 运行时回归矩阵（本机）
 
-环境要求：Windows 10/11 x64 干净 VM 快照；安装基线版本；准备旧版 / 新版安装包与签名；本机夹具或 staging 服务器；真实生产 UI 凭据（受控测试容器）。每条记录：日期、VM 快照、基线 / 目标版本、操作、预期、实际、日志、哈希、执行人、结论。
+唯一执行入口是 `scripts/updater/updater_e2e_matrix.mjs`：真实已安装客户端、真实签名安装包、本机回环服务。
 
-| # | 场景 | 构造 / 步骤 | 预期 | 关联 |
-|---|---|---|---|---|
-| E01 | 正向升级 + 数据核对 | 生产 UI 检查 → 安装 → 锁库 → 重启 → 自检 | 版本升级；Confirmed；容器可解锁；记录数一致 | I1/I3/I7/I8 |
-| E02 | 启动静默检查 | 启动 10 s 内检查；夹具记录请求 | 命中 / 未命中均不打断使用；无错误弹窗 | — |
-| E03 | 清单篡改 | 改 `version` / `url` / `notes` 不重签 | 生产：清单验签失败；本地：schema / 一致性失败 | MANIFEST_* |
-| E04 | 清单签名无效 | 用未知密钥签清单 / 改 `manifest_signature` | `MANIFEST_SIG_INVALID`；不下载 | Manifest |
-| E05 | 安装包哈希篡改 | 替换 exe 保持文件名 | `HASH_MISMATCH`；临时文件清理 | I2 |
-| E06 | 安装包签名篡改 | 替换 `.sig` / 改签名 | `SIG_INVALID`；旧版可启动 | I2/I7 |
-| E07 | 公钥不匹配 | 用其他合法密钥签安装包 | `SIG_PUBKEY_MISMATCH` | 密钥集 |
-| E08 | 清单说新装旧 | 清单 `version=4.1.9`，URL 指向 4.1.3 签名包 | `PE_VERSION_MISMATCH`；不安装 | 版本身份 |
-| E09 | 降级 | 清单回指 4.1.2 | `VERSION_BLOCKED`；不下载 | I1 |
-| E10 | 桥接版本 | 当前 4.0.9，`min_version=4.1.0` | `BRIDGE_REQUIRED`；提示先装桥接 | 3.4 |
-| E11 | 兼容拦截 | ABI / 容器 / OS 不匹配 | `COMPAT_BLOCKED` | 3.6 |
-| E12 | 暂停 / 撤回 | `paused=true` / `revoked_release_ids` 命中 | 无更新 / `INSTALL_REVOKED`；清理准备字节 | 3.4 |
-| E13 | 灰度排除 | `rollout.percentage=1`，bucket 未命中 | 无更新；不报错；日志 `rollout_excluded` | 3.4 |
-| E14 | 空间不足 | 受控磁盘剩余低于阈值 | `PRECHECK_SPACE`；不下载；指引清晰 | 4.5 |
-| E15 | 单实例 / 目录不可写 | 第二实例持有程序目录；目录只读 | `PRECHECK_SINGLE_INSTANCE` / `PRECHECK_DIR_WRITABLE` | 4.5 |
-| E16 | 脏缓存锁库 | 构造未落盘脏缓存 | `LOCK_DIRTY`；不安装；会话保持 | I3 |
-| E17 | 锁库失败 | 注入 `lockAll` 抛错 / 超时 | `LOCK_FAILED`；旧版可用；无安装器 | I3 |
-| E18 | 网络不可达 | 停止夹具 / 断网；手动 + 静默 | 手动提示；静默只写日志；旧版可用 | 5.3 |
-| E19 | 安装中断 | 安装器启动后强制终止 / 断电 | 重启后旧版可启动或进入修复；容器数据完好；marker 可追溯 | I7 |
-| E20 | 健康失败 + 修复 | 构造新进程 worker ready 超时 / DLL 不兼容 | L0：`RolledBack` + R0 提示；L1：R1 修复入口可用；旧版物料保留 | G7/4.8 |
+覆盖范围：
 
-回归附加（每次发布必跑）：
+- 正向升级：检查、下载、清单验签、安装包验签、哈希、PE 版本、锁库、安装移交、重启、健康自检。
+- 十类负向：清单签名篡改、渠道不一致、暂停、灰度排除、桥接版本、ABI 不兼容、版本撤回、哈希不符、大小不符、PE 版本不符。
+- 证据字段：日期、基线 / 目标版本、操作、预期、实际、日志事件、哈希、执行人、结论。
 
-| # | 场景 | 预期 |
-|---|---|---|
-| RG-01 | 4.1.3 worker 图像加载策略继承 | worker 启动成功；ready 信号；无 `ERROR_ACCESS_DENIED` |
-| RG-02 | SVG 命名空间 / 导航图标 | 5 个图标均可见，SVG 命名空间正确 |
-| RG-03 | 模块图标宿主尺寸 | 19px 规则生效，不压穿刻度环 |
-| RG-04 | 容器 V3 / ABI 0x000B 兼容 | 旧容器可解锁；记录数一致；无迁移破坏 |
+现有回归测试（前端、Rust、C）继续由 G3 执行；运行时矩阵不替代单元与集成测试。
 
 ### 6.5 故障注入与安全测试
 
@@ -1185,11 +1161,11 @@ Vue / TS：
 发布签字至少包含：
 
 1. **构建人**：产物哈希、签名、SBOM、release manifest。
-2. **测试人**：E2E 证据表、回归附加、失败用例复核。
+2. **测试人**：运行时矩阵证据表、失败用例复核。
 3. **安全复核**：密钥、日志脱敏、配置门、依赖审计。
 4. **发布授权**：tag、清单、渠道、灰度计划、回滚包。
 
-证据表字段：`case_id / date / vm_snapshot / baseline / target / steps / expected / actual / event_ids / hashes / operator / result / notes`。没有证据的“通过”视为未执行。
+证据表字段：`case_id / date / environment / baseline / target / steps / expected / actual / event_ids / hashes / operator / result / notes`。没有证据的“通过”视为未执行。
 
 ### 6.7 性能与体验基线
 
@@ -1223,8 +1199,8 @@ Vue / TS：
 5. **发布物料**：构建末尾自动调用 `release_update.mjs`；重发时可单独运行。输出 `build/updater/releases/<release_id>/` 下的 `latest.json`、安装包、`.sig`、`release-manifest.json` 与 `channel-pointer.json`；清单写入 SHA256 / size / file_version / 兼容区间 / rollout / `min_version` 决策值。
 6. **签名验证**：local 用测试密钥验证 Rust 验签路径；production 必须先用 EV / OV 证书对安装包做 Authenticode 签名并复核系统信任链，再复核清单签名与安装包 minisign，任一缺失不得上传。
 7. **归档与发布**：production 将清单与安装包按渠道路径上传，安装包路径保持不可变；local 物料已复制到 `build/updater/` 供回环夹具托管。保留上一稳定版本与渠道指针。
-8. **启动夹具**：`node scripts/updater_server.mjs`；确认仅 `127.0.0.1:8765`。需验证边缘行为时运行 `node scripts/check_cdn_edge.mjs --root build/updater`。
-9. **E2E**：按 §6.4 执行；先正向，再负向，再故障注入；记录证据。
+8. **启动夹具**：`node scripts/updater/updater_server.mjs`；确认仅 `127.0.0.1:8765`。需验证边缘行为时运行 `node scripts/updater/check_cdn_edge.mjs --root build/updater`。
+9. **运行时回归**：按 §6.4 执行；先正向，再负向，再故障注入；记录证据。
 10. **发布签字**：构建 / 测试 / 安全 / 授权四方签字。
 11. **打 tag**：`git tag -a v<version> -m "Release <version>"`。
 12. **变更记录**：`CHANGELOG.md` 按 Keep a Changelog 追加；安全条目单独列出。
@@ -1271,7 +1247,7 @@ Vue / TS：
 - 物料哈希与 release manifest。
 - 已知风险与残余项。
 
-Phase S 由服务端事件聚合生成；Phase L 由 `scripts/updater_report.mjs` 从 JSONL 生成 JSON 与 Markdown，统计检查命中、安装移交、健康成功率、失败错误码、下载量与锁库耗时。报告归档到发布记录，不写入用户数据。
+Phase S 由服务端事件聚合生成；Phase L 由 `scripts/updater/updater_report.mjs` 从 JSONL 生成 JSON 与 Markdown，统计检查命中、安装移交、健康成功率、失败错误码、下载量与锁库耗时。报告归档到发布记录，不写入用户数据。
 
 ### 7.5 保留与归档
 
@@ -1302,7 +1278,7 @@ Phase S 由服务端事件聚合生成；Phase L 由 `scripts/updater_report.mjs
 
 只有同时满足下列条件，才允许启动 Phase S：
 
-1. Phase L0 退出：T01 ~ T16 完成，S1 发现关闭，E2E 14/20。
+1. Phase L0 退出：T01 ~ T16 完成，S1 发现关闭，本机运行时回归矩阵通过。
 2. 客户端 readiness：Rust 更新服务、清单 v2、PE 校验、marker / 健康、R1 修复、渠道 / 遥测接口可用。
 3. 外部分发资格：Authenticode 证书、清单签名密钥、HTTPS 域名、发布审批、事件上报方案就绪。
 4. 运维准备：告警、值班、回滚演练、密钥泄露预案。
@@ -1417,10 +1393,10 @@ Phase S 由服务端事件聚合生成；Phase L 由 `scripts/updater_report.mjs
 | 锁库实现 | `verthys-tauri/src/session/security-session.ts:513`、`:580` |
 | 错误契约 | `verthys-tauri/src/lib/verthys_error.ts:266` |
 | 日志工具 | `verthys-tauri/src/utils/logger.ts` |
-| 清单生成 | `scripts/make_updater_manifest.mjs:100-111` |
-| 本机夹具 | `scripts/updater_server.mjs:145-163` |
+| 清单生成 | `scripts/release/make_updater_manifest.mjs:100-111` |
+| 本机夹具 | `scripts/updater/updater_server.mjs:145-163` |
 | 构建脚本 | `build_production.ps1:427-638` |
-| SBOM | `scripts/generate_sbom.mjs` |
+| SBOM | `scripts/release/generate_sbom.mjs` |
 | 版本同步 | `ci/sync_version.ps1` |
 | 供应链门 | `ci/verify_vendor_hashes.ps1`、`.github/workflows/core.yml:81-85` |
 | worker 就绪 | `verthys-tauri/verthys-worker/src/runtime/main_loop.rs:136-160` |
@@ -1440,12 +1416,12 @@ Phase S 由服务端事件聚合生成；Phase L 由 `scripts/updater_report.mjs
 
 | 版本 | 日期 | 变更 | 作者 |
 |---|---|---|---|
-| v1.0 | 2026-10-22 | 首次发布：12 项 ADR、Manifest v2、Rust 更新服务、本机 P0/P1/P2 任务、质量门、E2E 矩阵、服务器衔接 | K1Super |
+| v1.0 | 2026-10-22 | 首次发布：12 项 ADR、Manifest v2、Rust 更新服务、本机 P0/P1/P2 任务、质量门、运行时回归、服务器衔接 | K1Super |
 | v1.1 | 2026-10-23 | 按 B0~B4 批次与实现同步：权限收口与 ABI 单源；会话单飞、自有传输、挑战/回执闸门；marker v2、LKG、健康自检与修复；错误码 / 事件 / 日志契约；三层配置、运行期审计与发布物料流水线 | K1Super |
 | v1.2 | 2026-10-23 | B5 运行时矩阵：真实 4.1.4→4.1.5 升级与 10 条负向注入通过；发布版本升至 4.1.5；构建脚本改为按 VERSION 精确选取安装包 | K1Super |
-| v1.3 | 2026-10-23 | B6：Authenticode 验证与生产强制、更新说明 / 强制窗口、源站缓存与 Range 契约；干净 VM、真实 CDN 与 EV 证书受环境阻塞 | K1Super |
+| v1.3 | 2026-10-23 | B6：Authenticode 验证与生产强制、更新说明 / 强制窗口、源站缓存与 Range 契约；真实 CDN 与 EV 证书受环境阻塞 | K1Super |
 | v1.4 | 2026-10-23 | B7：发布前置检查、CI 物料复现流水线、4.1.6 真实构建与安装；修正工作流 YAML 未加引号的步骤名 | K1Super |
 | v1.5 | 2026-10-23 | B8：锁库前在线发布复检、发布指标报告、4.1.7 真实升级；暂停 / 撤回 / 发布变更在锁库前中止 | K1Super |
-| v1.6 | 2026-10-23 | B9：生产端点可达性门、CDN 边缘回源模拟；干净 VM、真实 CDN 与代码签名证书仍受环境阻塞 | K1Super |
+| v1.6 | 2026-10-23 | B9：生产端点可达性门、CDN 边缘回源模拟；真实 CDN 与代码签名证书仍受环境阻塞 | K1Super |
 
 

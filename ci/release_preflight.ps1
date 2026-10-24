@@ -1,19 +1,19 @@
 ﻿# ci/release_preflight.ps1 - 发布前置检查
 #
-# 在构建开始前核对版本、配置、签名密钥、Authenticode 证书、工作区与文档。
+# 在构建开始前核对版本、更新配置、签名密钥、工作区与文档；Authenticode 为可选层。
 # production 的任一阻断项都必须先解决；local 仅用于本机复现，证书与端点不强制。
 #
 # 用法:
 #   powershell -File ci\release_preflight.ps1 -Profile local
 #   powershell -File ci\release_preflight.ps1 -Profile production `
 #       -UpdaterEndpoint https://updates.example.com/stable/latest.json `
-#       -AuthenticodeThumbprint <40 位指纹>
+#       [-AllowInsecureUpdater]
 
 param(
     [ValidateSet("local", "production")]
     [string]$Profile = "production",
     [string]$UpdaterEndpoint = $env:VERTHYS_UPDATER_ENDPOINT,
-    [string]$AuthenticodeThumbprint = $env:VERTHYS_AUTHENTICODE_THUMBPRINT,
+    [switch]$AllowInsecureUpdater,
     [switch]$AllowDirty,
     [switch]$SkipEndpointProbe
 )
@@ -72,10 +72,16 @@ if (-not (Test-CommandExists "node")) {
             Add-Blocker "production 必须提供 -UpdaterEndpoint 或 VERTHYS_UPDATER_ENDPOINT"
         } else {
             $uri = $null
-            if (-not [Uri]::TryCreate($UpdaterEndpoint, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne "https") {
-                Add-Blocker "UpdaterEndpoint 必须是绝对 HTTPS URL"
+            $insecureUpdater = [bool]$AllowInsecureUpdater
+            if (-not [Uri]::TryCreate($UpdaterEndpoint, [UriKind]::Absolute, [ref]$uri)) {
+                Add-Blocker "UpdaterEndpoint 必须是绝对 URL"
+            } elseif ($uri.Scheme -ne "https" -and -not ($insecureUpdater -and $uri.Scheme -eq "http")) {
+                Add-Blocker "UpdaterEndpoint 必须使用 HTTPS（或显式允许明文更新）"
             } else {
                 $gateArgs += @("--endpoint", $UpdaterEndpoint)
+                if ($insecureUpdater) {
+                    $gateArgs += "--allow-insecure"
+                }
                 if (-not $SkipEndpointProbe) {
                     try {
                         $probe = Invoke-WebRequest -UseBasicParsing -Method Head -Uri $UpdaterEndpoint -TimeoutSec 10
@@ -89,7 +95,7 @@ if (-not (Test-CommandExists "node")) {
             }
         }
     }
-    & node (Join-Path $Root "scripts\check_updater_profile.mjs") @gateArgs
+    & node (Join-Path $Root "scripts\gates\check_updater_profile.mjs") @gateArgs
     if ($LASTEXITCODE -ne 0) {
         Add-Blocker "有效更新配置校验失败"
     }
@@ -106,44 +112,8 @@ if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) -and -
     Add-Warning "私钥密码未注入且无默认密码文件；无密码密钥可忽略"
 }
 
-# ---- 生产 Authenticode 证书与工具 ----
-if ($Profile -eq "production") {
-    $thumbprint = ($AuthenticodeThumbprint -replace '[\s:]', '').ToUpperInvariant()
-    if ($thumbprint -notmatch '^[0-9A-F]{40}$') {
-        Add-Blocker "production 必须提供有效的 Authenticode 证书指纹"
-    } else {
-        $stores = @("Cert:\CurrentUser\My", "Cert:\LocalMachine\My")
-        $cert = Get-ChildItem -Path $stores -ErrorAction SilentlyContinue |
-            Where-Object { $_.Thumbprint -eq $thumbprint } |
-            Select-Object -First 1
-        if (-not $cert) {
-            Add-Blocker "未找到指纹对应的证书: $thumbprint"
-        } elseif (-not $cert.HasPrivateKey) {
-            Add-Blocker "证书缺少私钥，无法签名: $thumbprint"
-        } else {
-            $codeSigning = $cert.EnhancedKeyUsageList | Where-Object { $_.FriendlyName -eq "Code Signing" }
-            if (-not $codeSigning) {
-                Add-Blocker "证书不含 Code Signing 用途: $thumbprint"
-            }
-        }
-    }
-
-    $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
-    if (-not $signtool) {
-        $kits = @(
-            "C:\Program Files (x86)\Windows Kits\10",
-            "D:\Windows Kits\10"
-        ) | Where-Object { Test-Path $_ }
-        foreach ($kit in $kits) {
-            $found = Get-ChildItem $kit -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if ($found) { $signtool = $found; break }
-        }
-    }
-    if (-not $signtool) {
-        Add-Blocker "未找到 signtool.exe，无法完成 Authenticode 签名"
-    }
-}
+# Authenticode 为可选层：发布不再要求证书与 signtool，更新完整性由
+# 清单签名、安装包签名、SHA256 与 PE 版本保证；需要时仍可在构建机手工签名。
 
 # ---- 文档与构建脚本 ----
 $requiredDocs = @(

@@ -4,7 +4,7 @@
 >
 > Last updated: 2026-09-19 · 维护人：K1Super
 
-本规范整合 `archive/c_layer_coding_spec.md` 并对齐当前代码现状；命名与目录以代码实际符号为准（规范与代码冲突时以代码为事实，差异在文中标注）。提交规范见 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)；刚性底线见 [ENGINEERING_CONSTRAINTS.md](ENGINEERING_CONSTRAINTS.md)。
+本规范整合历史 C 层编码规范并对齐当前代码现状；命名与目录以代码实际符号为准（规范与代码冲突时以代码为事实，差异在文中标注）。提交规范见 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)。
 
 ---
 
@@ -94,7 +94,7 @@
 ### 4.2 编译器与加固
 
 - 编译基线：`/GS /guard:cf /guard:ehcont /sdl /utf-8 /Zc:inline /FS`（+ `/wd4996` 偏差留痕）；Release `/O2 /GL /Gy /Gw`；链接 `/INCREMENTAL:NO /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT` + x64 `/CETCOMPAT`（`cmake/VerthysHardening.cmake`）。
-- ASAN：`-DVERTHYS_ENABLE_ASAN=ON`（CI 门）；fuzz：`-DVERTHYS_ENABLE_FUZZ=ON`（`/fsanitize=fuzzer`，注意 MSVC 下需显式 `address` 与 `fuzzer` 双开关，勿用逗号组合）。
+- ASAN：`-DVERTHYS_ENABLE_ASAN=ON`（CI 门）。
 - **clang-format 核实结果：未配置**——根目录无 `.clang-format` 文件，当前格式靠人工约定 + clang-tidy + 编译警告基线约束（如需引入需先评审，避免与既有 4 空格/大括号风格冲突）。
 
 ---
@@ -121,5 +121,5 @@
 ## 7. 提交规范
 
 - 提交信息、分支策略、PR 流程、代码评审要求见 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)。
-- 文档同步是完成定义（DoD）的一部分：接口/目录/构建/配置/安全边界变更须同 PR 更新对应文档（`DOCUMENTATION_CHECKLIST.md` §4）。
+- 文档同步是完成定义（DoD）的一部分：接口/目录/构建/配置/安全边界变更须同 PR 更新对应文档。
 - 单一事实来源：产品版本以仓库根 `VERSION` 文件为唯一手改点——`CMakeLists.txt` 与 vite（`define` 注入）构建期读取，两个 `Cargo.toml`、`package.json`、`package-lock.json`、`config.ts` 回退值由 `ci/sync_version.ps1` 同步，`tauri.conf.json` 不承载版本（构建期继承 src-tauri crate 版本），CI 门禁校验漂移；依赖版本以 `Cargo.toml`/`package.json`/`dep-versions.txt` 为准，文档只引用不抄录。

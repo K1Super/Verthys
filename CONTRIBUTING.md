@@ -11,7 +11,7 @@
 MSVC 环境的获取顺序（本地一键脚本与 CI 同语义）：
 
 1. 已注入的 MSVC 工具链环境（CI 的 msvc-dev-cmd 或开发者命令提示符：`VCToolsInstallDir` + `INCLUDE` + `LIB` + PATH 中的 `cl.exe` 就绪）→ 构建脚本直接沿用，配 Ninja 单配置构建；
-2. 未注入时 → 构建脚本 dot-source `scripts/env.load.ps1`（本地 Visual Studio 安装 + 4 个 `VERTHYS_*` 自定义环境变量，多配置构建）。
+2. 未注入时 → 构建脚本 dot-source `scripts/lib/env.load.ps1`（本地 Visual Studio 安装 + 4 个 `VERTHYS_*` 自定义环境变量，多配置构建）。
 
 ## 分支策略
 
@@ -27,7 +27,7 @@ MSVC 环境的获取顺序（本地一键脚本与 CI 同语义）：
 ## PR 与评审流程
 
 - 改动以 PR 提交；PR 需通过 CI（见 `.github/workflows/core.yml` 与 `.github/workflows/rust-frontend.yml`）与本地自检。
-- 涉及 `REQUIREMENTS`、`ARCHITECTURE`、`SECURITY_DESIGN`、`CORE_API`（API 类）文档的变更需两人评审（依据 `docs/DOCUMENTATION_CHECKLIST.md` 第 4 节）。
+- 涉及 `REQUIREMENTS`、`ARCHITECTURE`、`SECURITY_DESIGN`、`CORE_API`（API 类）文档的变更需两人评审。
 
 ### 评审 Checklist：存储/事务子域红线不变量
 
@@ -46,7 +46,7 @@ MSVC 环境的获取顺序（本地一键脚本与 CI 同语义）：
 - 核心 DLL 开发构建 + 运行全部 C 测试（Debug）：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build_core.dev.ps1
+powershell -ExecutionPolicy Bypass -File scripts\build\build_core.dev.ps1
 ```
 
 等价地，构建后可用 CTest 运行核心测试：
@@ -58,7 +58,7 @@ ctest --test-dir build_dev -C Debug --output-on-failure
 - 核心 DLL 生产构建（Release，跳过测试）：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build_core.release.ps1
+powershell -ExecutionPolicy Bypass -File scripts\build\build_core.release.ps1
 ```
 
 - 全量生产构建（C 核心 DLL → worker → Tauri NSIS 安装包 → 产物校验）：
@@ -73,11 +73,11 @@ powershell -ExecutionPolicy Bypass -File build_production.ps1
 powershell -ExecutionPolicy Bypass -File ci\run_ci.ps1
 ```
 
-测试分层、覆盖率要求与模糊测试用法见 [docs/TESTING.md](docs/TESTING.md)。
+测试分层与覆盖率要求见 [docs/TESTING.md](docs/TESTING.md)。
 
 ## 文档同步义务
 
-改动接口 / 目录 / 构建 / 配置 / 安全边界时，必须同 PR 更新对应文档（作为完成定义 DoD 之一），依据 `docs/DOCUMENTATION_CHECKLIST.md` 第 4 节：
+改动接口 / 目录 / 构建 / 配置 / 安全边界时，必须同 PR 更新对应文档（作为完成定义 DoD 之一）：
 
 1. 接口、目录、构建、配置、安全边界变更 → 同 PR 更新对应文档。
 2. 每文档末尾 `Last updated` 超过两个版本未更新需复核。

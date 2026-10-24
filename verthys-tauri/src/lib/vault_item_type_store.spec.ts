@@ -22,6 +22,7 @@ import { verthysAddRecord, verthysDeleteRecord } from "./verthys";
 import { serializeToJsonB64 } from "../utils/json_codec";
 import { TYPE_VAULT_TYPES } from "../constants/record_types";
 import type { VaultTypeDef } from "../constants/vault_item_types";
+import { MAX_VAULT_CARD_FIELDS } from "../constants/vault_item_types";
 import {
   VAULT_TYPES_CACHE_KEY,
   loadCustomVaultTypes,
@@ -138,19 +139,21 @@ describe("自定义类型校验", () => {
     );
   });
 
-  it("拒绝超过三项的卡片展示字段与无候选项的选项字段", () => {
+  it("拒绝超过上限的卡片展示字段与无候选项的选项字段", () => {
+    const wideFields = Array.from({ length: MAX_VAULT_CARD_FIELDS + 1 }, (_, index) => ({
+      id: `f_${index}`,
+      label: `字段${index}`,
+      kind: "text" as const,
+    }));
     const wide = makeDef({
-      fields: [
-        { id: "a", label: "甲", kind: "text" },
-        { id: "b", label: "乙", kind: "text" },
-        { id: "c", label: "丙", kind: "text" },
-        { id: "d", label: "丁", kind: "text" },
-      ],
-      titleField: "a",
-      cardFields: ["a", "b", "c", "d"],
-      searchFields: ["a"],
+      fields: wideFields,
+      titleField: wideFields[0].id,
+      cardFields: wideFields.map((field) => field.id),
+      searchFields: [wideFields[0].id],
     });
-    expect(validateVaultTypeDefs([wide])).toContain("演示：卡片展示字段最多 3 项");
+    expect(validateVaultTypeDefs([wide])).toContain(
+      `演示：卡片展示字段最多 ${MAX_VAULT_CARD_FIELDS} 项`,
+    );
 
     const selectNoOptions = makeDef({
       fields: [{ id: "f_a", label: "甲", kind: "select" }],
@@ -164,6 +167,67 @@ describe("自定义类型校验", () => {
     );
     expect(validateVaultTypeDefs([makeDef({ tone: "navy" as VaultTypeDef["tone"] })])).toContain(
       "演示：色调不合法",
+    );
+  });
+
+  it("合法的日期区间与地区声明通过校验", () => {
+    const def = makeDef({
+      fields: [
+        { id: "f_a", label: "甲", kind: "text", required: true },
+        { id: "f_exp", label: "有效期", kind: "dateRange", rangeStartId: "f_from" },
+        { id: "f_region", label: "省市区", kind: "region" },
+      ],
+    });
+    expect(validateVaultTypeDefs([def])).toEqual([]);
+  });
+
+  it("日期区间必须成对声明：缺起始键、与字段 id 相同均被拒绝", () => {
+    const noStart = makeDef({
+      fields: [{ id: "f_exp", label: "有效期", kind: "dateRange" }],
+      titleField: "f_exp",
+      cardFields: [],
+      searchFields: ["f_exp"],
+    });
+    expect(validateVaultTypeDefs([noStart])).toContain(
+      "演示：日期区间字段必须声明起始字段 id（有效期）",
+    );
+
+    const selfStart = makeDef({
+      fields: [{ id: "f_exp", label: "有效期", kind: "dateRange", rangeStartId: "f_exp" }],
+      titleField: "f_exp",
+      cardFields: [],
+      searchFields: ["f_exp"],
+    });
+    expect(validateVaultTypeDefs([selfStart])).toContain(
+      "演示：日期区间起始字段 id 不能与字段 id 相同（有效期）",
+    );
+  });
+
+  it("区间起始键与字段 id 冲突或被两个区间共用时均被拒绝", () => {
+    const collide = makeDef({
+      fields: [
+        { id: "f_a", label: "甲", kind: "text" },
+        { id: "f_exp", label: "有效期", kind: "dateRange", rangeStartId: "f_a" },
+      ],
+      titleField: "f_a",
+      cardFields: [],
+      searchFields: ["f_a"],
+    });
+    expect(validateVaultTypeDefs([collide])).toContain(
+      "演示：日期区间起始字段 id 与其它字段冲突（有效期）",
+    );
+
+    const duplicate = makeDef({
+      fields: [
+        { id: "f_exp", label: "有效期甲", kind: "dateRange", rangeStartId: "f_from" },
+        { id: "f_exp2", label: "有效期乙", kind: "dateRange", rangeStartId: "f_from" },
+      ],
+      titleField: "f_exp",
+      cardFields: [],
+      searchFields: ["f_exp"],
+    });
+    expect(validateVaultTypeDefs([duplicate])).toContain(
+      "演示：日期区间起始字段 id 重复（有效期乙）",
     );
   });
 });
@@ -230,6 +294,64 @@ describe("存储内容降级", () => {
     })!;
     expect(def.fields.map((f) => f.kind)).toEqual(["text", "text", "select"]);
     expect(def.fields[2].options).toEqual(["甲", "乙"]);
+  });
+
+  it("日期区间与地区声明被保留：起止键、端点标签与控件种类", () => {
+    const def = sanitizeVaultTypeDef({
+      id: "custom:x",
+      label: "甲",
+      icon: "note",
+      tone: "warning",
+      titleField: "f_exp",
+      cardFields: [],
+      searchFields: ["f_exp"],
+      fields: [
+        {
+          id: "f_exp",
+          label: "有效期",
+          kind: "dateRange",
+          rangeStartId: "f_from",
+          rangeStartLabel: "自",
+          rangeEndLabel: "至",
+        },
+        { id: "f_region", label: "省市区", kind: "region" },
+      ],
+    })!;
+    expect(def.fields[0]).toMatchObject({
+      kind: "dateRange",
+      rangeStartId: "f_from",
+      rangeStartLabel: "自",
+      rangeEndLabel: "至",
+    });
+    expect(def.fields[1].kind).toBe("region");
+  });
+
+  it("日期区间缺起始键或起始键与字段 id 冲突时降级为单日期", () => {
+    const missing = sanitizeVaultTypeDef({
+      id: "custom:x",
+      label: "甲",
+      titleField: "f_exp",
+      cardFields: [],
+      searchFields: ["f_exp"],
+      fields: [{ id: "f_exp", label: "有效期", kind: "dateRange" }],
+    })!;
+    expect(missing.fields[0].kind).toBe("date");
+    expect(missing.fields[0].rangeStartId).toBeUndefined();
+
+    const collide = sanitizeVaultTypeDef({
+      id: "custom:y",
+      label: "乙",
+      titleField: "f_a",
+      cardFields: [],
+      searchFields: ["f_a"],
+      fields: [
+        { id: "f_a", label: "甲", kind: "text" },
+        { id: "f_exp", label: "有效期", kind: "dateRange", rangeStartId: "f_a" },
+      ],
+    })!;
+    expect(collide.fields[1].kind).toBe("date");
+    expect(collide.fields[1].rangeStartId).toBeUndefined();
+    expect(collide.fields[1].rangeStartLabel).toBeUndefined();
   });
 
   it("数组级降级：逐条丢弃非法项并按 id 去重", () => {

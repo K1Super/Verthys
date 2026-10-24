@@ -68,8 +68,8 @@ include(${CMAKE_SOURCE_DIR}/third_party/Flatcc.cmake)
 #   测试注册上提至根（原在 core/CMakeLists.txt 内）——
 #   enable_testing() 所在目录才生成 CTestTestfile.cmake；置于子目录时
 #   构建根无该文件，ctest --test-dir <build_root> 报 "No tests were
-#   found" 且退出码 0（假绿）。上提后 fuzz 冒烟门（脚本 + CI）从
-#   构建根即可发现全部测试。须在 add_subdirectory(core) 之前调用
+#   found" 且退出码 0（假绿）。上提后 ctest 从构建根即可发现全部测试。
+#   须在 add_subdirectory(core) 之前调用
 #   （仅对其后处理的子目录生效）。
 enable_testing()
 

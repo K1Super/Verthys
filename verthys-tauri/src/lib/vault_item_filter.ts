@@ -109,9 +109,21 @@ export function describeVaultFilter(
   return text ? `${text} +${extra}` : `+${extra}`;
 }
 
+/** 类型是否声明了到期字段（到期维度与到期排序的唯一准入判据） */
+function declaresExpiry(def: VaultTypeDef | undefined): boolean {
+  return def?.fields.some((field) => field.id === VAULT_EXPIRY_FIELD_ID) === true;
+}
+
 /** 条目是否命中到期状态维度（维度内为或关系） */
-function matchExpiry(entry: VaultFilterEntry, wanted: VaultExpiryFilter[]): boolean {
-  const value = entry.data[VAULT_EXPIRY_FIELD_ID] ?? "";
+function matchExpiry(
+  entry: VaultFilterEntry,
+  def: VaultTypeDef | undefined,
+  wanted: VaultExpiryFilter[],
+): boolean {
+  // 未声明到期字段的类型不参与到期维度：历史载荷可能残留 expiry 键
+  // （如已移除日期字段的银行卡模板），按类型声明判定才不会把无日期条目
+  // 归入「已设到期」。
+  const value = declaresExpiry(def) ? (entry.data[VAULT_EXPIRY_FIELD_ID] ?? "") : "";
   const hasValue = value.length > 0;
   return wanted.some((flag) => {
     if (flag === "hasExpiry") return hasValue;
@@ -134,9 +146,10 @@ function matchProtection(entry: VaultFilterEntry, def: VaultTypeDef | undefined,
   });
 }
 
-/** 取条目排序用的到期时间（毫秒；无到期或日期非法返回 null）。
+/** 取条目排序用的到期时间（毫秒；未声明到期字段、无到期或日期非法返回 null）。
  *  与到期读数共用同一解析（纯日期按本地日历日）—— 排序与读数不出现时区分歧 */
-function expiryTimeOf(entry: VaultFilterEntry): number | null {
+function expiryTimeOf(entry: VaultFilterEntry, def: VaultTypeDef | undefined): number | null {
+  if (!declaresExpiry(def)) return null;
   return vaultExpiryTimestamp(entry.data[VAULT_EXPIRY_FIELD_ID] ?? "");
 }
 
@@ -165,7 +178,7 @@ export function applyVaultFilter<T extends VaultFilterEntry>(
   const filtered = entries.filter((entry) => {
     if (criteria.kinds.length > 0 && !criteria.kinds.includes(entry.kind)) return false;
     const def = getDef(entry.kind);
-    if (criteria.expiry.length > 0 && !matchExpiry(entry, criteria.expiry)) return false;
+    if (criteria.expiry.length > 0 && !matchExpiry(entry, def, criteria.expiry)) return false;
     if (criteria.protection.length > 0 && !matchProtection(entry, def, criteria.protection)) return false;
     return true;
   });
@@ -190,8 +203,8 @@ export function applyVaultFilter<T extends VaultFilterEntry>(
       break;
     case "expiry":
       sorted.sort((a, b) => {
-        const at = expiryTimeOf(a);
-        const bt = expiryTimeOf(b);
+        const at = expiryTimeOf(a, getDef(a.kind));
+        const bt = expiryTimeOf(b, getDef(b.kind));
         if (at === null && bt === null) return titleOf(a).localeCompare(titleOf(b), "zh-Hans-CN");
         if (at === null) return 1;
         if (bt === null) return -1;

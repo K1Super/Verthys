@@ -4,7 +4,7 @@
 >
 > Last updated: 2026-10-23 · 维护人：K1Super
 
-当前版本 4.1.7（唯一手改点：仓库根 `VERSION` 文件）。本机更新物料由 `scripts/release_update.mjs` 生成；production 仍需真实 HTTPS 端点与 Authenticode 证书，当前无远程发布渠道。
+当前版本 4.1.7（唯一手改点：仓库根 `VERSION` 文件）。本机更新物料由 `scripts/release/release_update.mjs` 生成；production 默认使用 HTTPS 端点，也可通过 `-AllowInsecureUpdater` 放行 HTTP + IP 自建分发。Authenticode 为可选层，不再强制购买代码签名证书。
 
 ## 1. 版本号规则
 
@@ -23,13 +23,13 @@
 
 ## 2. 发版检查清单（逐项可验收）
 
-1. 代码冻结：合并窗口关闭，`docs/` 与代码同 PR 同步更新（见 [DOCUMENTATION_CHECKLIST.md](DOCUMENTATION_CHECKLIST.md) 第 4 节）。
-2. 发布前置：`powershell -File ci\release_preflight.ps1 -Profile local`；production 追加 `-UpdaterEndpoint https://...` 与 `-AuthenticodeThumbprint <指纹>`，并实际探测端点 HTTPS 可达性。任一阻断项未解决不得构建。
-3. 全量构建：本机验证执行 `build_production.ps1 -Profile local -AllowLocal -Clean -NoPause`；外部分发执行 `-Profile production -UpdaterEndpoint https://...`，构建末尾自动调用 `release_update.mjs`。
+1. 代码冻结：合并窗口关闭，`docs/` 与代码同 PR 同步更新。
+2. 发布前置：`powershell -File ci\release_preflight.ps1 -Profile local`；production 追加 `-UpdaterEndpoint https://...`（HTTP + IP 自建时加 `-AllowInsecureUpdater`），并实际探测端点可达性。任一阻断项未解决不得构建。
+3. 全量构建：本机验证执行 `build_production.ps1 -Profile local -AllowLocal -Clean -NoPause`；外部分发执行 `-Profile production -UpdaterEndpoint https://...`（HTTP + IP 时加 `-AllowInsecureUpdater`），构建末尾自动调用 `release_update.mjs`。
 4. 测试全绿：`ctest --test-dir build -C Release --output-on-failure`；`cargo test`、`npx vitest run`、`npx vue-tsc --noEmit` 全部通过。
 5. 更新物料：确认 `build/updater/releases/<release_id>/` 下 `latest.json`、安装包、`.sig`、`release-manifest.json` 与 `channel-pointer.json` 五件齐全，清单版本与 PE `FileVersion` 一致。
-6. 回环与回源验证：本机启动 `scripts/updater_server.mjs`，执行 `check_updater_origin.mjs`；需要边缘回源时执行 `check_cdn_edge.mjs`；需要真实升级时按 `updater_e2e_matrix.mjs` 执行。
-7. 签名复核：production 安装包在构建后自动复核 Authenticode 系统信任链；未通过不得上传。
+6. 回环与回源验证：本机启动 `scripts/updater/updater_server.mjs`，执行 `check_updater_origin.mjs`；需要边缘回源时执行 `check_cdn_edge.mjs`；需要真实升级时按 `updater_e2e_matrix.mjs` 执行。
+7. 签名复核：production 安装包若带 Authenticode 则复核系统信任链并记录；未签名仅告警，不阻断上传（更新完整性由清单签名与安装包签名保证）。
 8. NSIS 包冒烟：在干净机器安装 `src-tauri/target/release/bundle/nsis/*.exe`，按 [DEPLOYMENT.md](DEPLOYMENT.md) 第 5 节做安装后验证。
 9. 打 tag：`git tag -a v<version> -m "Release <version>"` 并推送远端（命令须与当次版本号一致）。
 10. 更新 CHANGELOG：按 Keep a Changelog（Added/Changed/Fixed/Security）追加版本段，与 tag 对应。
@@ -41,10 +41,10 @@ git tag -a v4.1.7 -m "Release 4.1.7"
 git push origin v4.1.7
 ```
 
-发布物 = `release_update.mjs` 生成的更新物料目录。`.github/workflows/release-materials.yml` 可手动触发，从源码复现 local 物料并上传工件；production 仍由维护人在具备真实证书与受控密钥的发布机执行。tag 为本地仓库标签，产出物由维护人手动分发。
+发布物 = `release_update.mjs` 生成的更新物料目录。`.github/workflows/release-materials.yml` 可手动触发，从源码复现 local 物料并上传工件；production 由维护人在受控密钥的发布机执行，HTTPS 或显式放行的 HTTP + IP 端点均可。tag 为本地仓库标签，产出物由维护人手动分发。
 
 ## 4. 回滚方案
 
 - 版本回退：`git checkout <上一稳定 tag>` 重新走全量构建与上述检查清单产出旧版安装包。
 - 数据兼容声明：数据容器（`.verthys`）的 schema 迁移、旧版本处理、breaking changes 与降级注意事项统一见 [MIGRATION.md](MIGRATION.md)；回滚安装包前先核对目标版本的迁移矩阵，避免退回版本无法读取已被更高版本迁移过的容器。
-- 应急拦截：若回滚源于安全缺陷，走 [SECURITY.md](../SECURITY.md) 的漏洞上报与升级流程（该文件属根目录安全策略）。
+- 应急拦截：若回滚源于安全缺陷，按 [SECURITY_DESIGN.md](SECURITY_DESIGN.md) 的威胁模型与应急响应流程处置。

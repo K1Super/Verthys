@@ -36,7 +36,7 @@
     <VirtualCardGrid
       v-if="filteredAccounts.length >= 200"
       :items="filteredAccounts"
-      :item-height="172"
+      :item-height="148"
       :min-column-width="300"
       :item-key="itemKeyOf"
       v-slot="{ item: entry, index }"
@@ -44,10 +44,10 @@
       <VaultItemCard
         :entry="entry"
         :view="viewOf(entry)"
-        :is-account="entry.kind === accountTypeId"
         :reveal-delay="revealDelayOf(index)"
+        @detail="onDetail(entry)"
         @toggle="toggleSecret(entry)"
-        @copy="copySecret(entry)"
+        @copy="copySecret(entry, $event)"
         @edit="onEdit(entry)"
         @remove="onDelete(entry)"
       />
@@ -58,10 +58,10 @@
         :key="entry.id"
         :entry="entry"
         :view="viewOf(entry)"
-        :is-account="entry.kind === accountTypeId"
         :reveal-delay="revealDelayOf(idx)"
+        @detail="onDetail(entry)"
         @toggle="toggleSecret(entry)"
-        @copy="copySecret(entry)"
+        @copy="copySecret(entry, $event)"
         @edit="onEdit(entry)"
         @remove="onDelete(entry)"
       />
@@ -104,6 +104,15 @@
       :initial-data="formInitial"
       :saving="saving"
       @submit="onPersist"
+    />
+
+    <!-- 条目详情：只读全字段；遮罩空白处 / Esc / 头部关闭键均可关闭 -->
+    <VaultItemDetailDialog
+      v-model="showDetail"
+      :type-def="detailDef"
+      :entry="detailEntry"
+      @toggle="onDetailToggle"
+      @copy="onDetailCopy"
     />
 
     <!-- 解密密钥输入框（显隐切换与表单同语言；显隐只为核对输入，不落盘） -->
@@ -168,12 +177,12 @@ import {
 import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, ensureIndexSourceSafe, getSummaryIdsByType, getRecordIdsByType, invalidateScannedRecord, getRecordsDataB64Batch } from "../../lib/keyManager";
 import { TYPE_ACCOUNT } from "../../constants/record_types";
 import {
-  ACCOUNT_VAULT_TYPE_ID, BUILTIN_VAULT_TYPES,
+  BUILTIN_VAULT_TYPES,
   buildVaultTypeIndex, type VaultItemPayload, type VaultTypeDef,
 } from "../../constants/vault_item_types";
 import { decodeVaultItem, serializeVaultItem } from "../../lib/vault_item_codec";
 import {
-  VAULT_SECRET_MASK, buildVaultCardView, findCardSecretField, vaultSearchText,
+  buildVaultCardView, vaultSearchText,
   type VaultCardView,
 } from "../../lib/vault_item_card";
 import { loadCustomVaultTypes } from "../../lib/vault_item_type_store";
@@ -195,6 +204,7 @@ import VaultCardFilter from "../common/verthys-ui/VaultCardFilter.vue";
 import VaultTypePicker from "./account/VaultTypePicker.vue";
 import VaultTypeEditorDialog from "./account/VaultTypeEditorDialog.vue";
 import VaultItemFormDialog from "./account/VaultItemFormDialog.vue";
+import VaultItemDetailDialog from "./account/VaultItemDetailDialog.vue";
 import VaultItemCard from "./account/VaultItemCard.vue";
 
 /* 瞬时提示（错误，2.5s 自动消失）— 全局 Toast 中心；渲染归 ToastLayer */
@@ -212,9 +222,6 @@ const { showError } = useToastCenter();
 
 /* 非阻塞加载状态（无底板居中展示，加载完成自动消失） */
 const loading = ref(false);
-
-const accountTypeId = ACCOUNT_VAULT_TYPE_ID;
-const secretMask = VAULT_SECRET_MASK;
 
 const searchKey = ref("");
 /* shallowRef 替代 ref，避免 Vue 对条目数组内每条记录深度代理
@@ -252,7 +259,8 @@ const EMPTY_CARD_VIEW: VaultCardView = buildVaultCardView({}, undefined);
 
 /**
  * 由记录数据构造内存条目。
- * 敏感展示初始为掩码（已独立加密时显示"已加密"），明文只在用户显式查看后写入条目。
+ * 敏感字段初始处于掩码态（secretVisible=false），明文只在用户显式查看后写入
+ * plainSecrets；卡片据此统一渲染全部敏感行。
  *
  * @param corrupt 载荷不可读：保留占位条目（不得静默丢弃），不建敏感行
  */
@@ -270,20 +278,15 @@ const makeEntry = (
       kind,
       data: {},
       secretVisible: false,
-      displaySecret: "",
       corrupt: true,
     };
   }
-  const def = typeIndex.value.get(kind);
-  const secretField = def ? findCardSecretField(def) : undefined;
-  const encrypted = data.encrypted === "1";
   return {
     id: memId,
     recordId,
     kind,
     data,
     secretVisible: false,
-    displaySecret: secretField ? (encrypted ? "已加密" : secretMask) : "",
   };
 };
 
@@ -431,34 +434,30 @@ const cardViews = computed<Map<number, VaultCardView>>(() => {
 
 const viewOf = (entry: VaultEntry): VaultCardView => cardViews.value.get(entry.id) ?? EMPTY_CARD_VIEW;
 
-/* 敏感字段显隐：未独立加密的条目直接解开掩码；独立加密的条目需输入独立密钥 */
+/* 敏感字段显隐：未独立加密的条目直接解开掩码；存在独立加密字段时先走密钥窗口 */
 const toggleSecret = (entry: VaultEntry): void => {
-  const secret = viewOf(entry).secret;
-  if (!secret) return;
+  const secrets = viewOf(entry).secrets;
+  if (secrets.length === 0) return;
   const idx = accounts.value.findIndex((e) => e.id === entry.id);
   if (idx < 0) return;
 
   if (!entry.secretVisible) {
-    if (secret.encrypted) {
+    // 任一致密敏感字段需要独立密钥：先走密钥授权，绝不以掩码冒充已解密
+    if (secrets.some((secret) => secret.encrypted)) {
       keyTargetId.value = entry.id;
       keyInput.value = "";
       keyError.value = false;
       showKeyDialog.value = true;
       return;
     }
+    // 非加密字段的 raw 即明文：一次展示全部敏感行
+    const plainSecrets: Record<string, string> = {};
+    for (const secret of secrets) plainSecrets[secret.fieldId] = secret.raw;
     // shallowRef 下直接修改属性不触发更新，必须 updateShallowItem
-    updateShallowItem(accounts, idx, {
-      secretVisible: true,
-      displaySecret: secret.raw,
-      plainSecret: secret.raw,
-    });
+    updateShallowItem(accounts, idx, { secretVisible: true, plainSecrets });
   } else {
     // 隐藏即撤销授权：明文不再留在内存条目上（否则复制会绕过密钥校验）
-    updateShallowItem(accounts, idx, {
-      secretVisible: false,
-      displaySecret: secret.encrypted ? "已加密" : secretMask,
-      plainSecret: "",
-    });
+    updateShallowItem(accounts, idx, { secretVisible: false, plainSecrets: {} });
   }
 };
 
@@ -497,9 +496,8 @@ const confirmKey = async (): Promise<void> => {
     const idx = accounts.value.findIndex((e) => e.id === target.id);
     if (idx >= 0) {
       updateShallowItem(accounts, idx, {
-        plainSecret: plain,
         secretVisible: true,
-        displaySecret: plain,
+        plainSecrets: { [secret.fieldId]: plain },
       });
     }
     showKeyDialog.value = false;
@@ -514,17 +512,20 @@ const confirmKey = async (): Promise<void> => {
 };
 
 /* 复制敏感字段（提示经全局 Toast 中心状态通道轮番渲染：结果 → 清空时间） */
-const { copyWithTimeout } = useClipToast("密码已复制");
+const { copyWithTimeout } = useClipToast("敏感字段已复制");
 
-const copySecret = async (entry: VaultEntry): Promise<void> => {
-  const secret = viewOf(entry).secret;
+const copySecret = async (entry: VaultEntry, fieldId: string): Promise<void> => {
+  const secrets = viewOf(entry).secrets;
+  const secret = secrets.find((item) => item.fieldId === fieldId) ?? secrets[0];
   if (!secret) return;
   // 独立加密且未处于已解锁展示态 → 先走密钥授权，绝不使用残留明文
   if (secret.encrypted && !entry.secretVisible) {
     toggleSecret(entry);
     return;
   }
-  const plain = entry.plainSecret || (secret.encrypted ? "" : secret.raw);
+  const plain = entry.secretVisible
+    ? (entry.plainSecrets?.[secret.fieldId] ?? (secret.encrypted ? "" : secret.raw))
+    : (secret.encrypted ? "" : secret.raw);
   if (!plain) {
     toggleSecret(entry);
     return;
@@ -544,6 +545,43 @@ const editingId = ref<number | null>(null);
 const saving = ref(false);
 /** 待重新指派类型的条目（自定义类型被删后条目类型定义缺失时使用） */
 const reassignEntryId = ref<number | null>(null);
+
+/* ===== 详情查看（只读全字段） ===== */
+const showDetail = ref(false);
+const detailEntryId = ref<number | null>(null);
+/** 详情目标条目：按内存 id 定位，条目被删除/替换时自动失效 */
+const detailEntry = computed(
+  () => accounts.value.find((entry) => entry.id === detailEntryId.value) ?? null,
+);
+/** 详情目标类型：未知类型不提供详情（走重新指派入口） */
+const detailDef = computed(() => {
+  const entry = detailEntry.value;
+  return entry ? (typeIndex.value.get(entry.kind) ?? null) : null;
+});
+
+/** 打开详情：损坏/未知类型不进入（前者不可读，后者需先重新指派） */
+const onDetail = (entry: VaultEntry): void => {
+  if (entry.corrupt) return;
+  if (!typeIndex.value.has(entry.kind)) return;
+  detailEntryId.value = entry.id;
+  showDetail.value = true;
+};
+
+/* 条目在详情打开期间被移除时关闭详情，避免窗口停留在空目标上 */
+watch(detailEntry, (entry) => {
+  if (showDetail.value && !entry) {
+    showDetail.value = false;
+    detailEntryId.value = null;
+  }
+});
+
+/** 详情窗口敏感字段的显隐/复制：复用同一份条目展示态与模块入口 */
+const onDetailToggle = (): void => {
+  if (detailEntry.value) toggleSecret(detailEntry.value);
+};
+const onDetailCopy = (fieldId: string): void => {
+  if (detailEntry.value) void copySecret(detailEntry.value, fieldId);
+};
 
 const pickTitle = computed(() => (reassignEntryId.value !== null ? "重新指派类型" : "选择类型"));
 
@@ -721,6 +759,8 @@ useModuleDialogGuard("accounts", () => {
   showTypeEditor.value = false;
   showKeyDialog.value = false;
   showDeleteConfirm.value = false;
+  showDetail.value = false;
+  detailEntryId.value = null;
   keyInputVisible.value = false;
   reassignEntryId.value = null;
 });
@@ -734,6 +774,10 @@ useModuleDialogGuard("accounts", () => {
    搜索栏以 isolation 自建层叠上下文，其内部的锚定下拉无论 z-index 多大都
    只能在该层内比较，故必须提升承载层本身；层级仍低于模块弹窗与加载遮罩。 */
 .search-layer { position: relative; z-index: 10; }
+
+/* 卡片网格：固定为旧版卡面实测的原始高度（148px = 原卡片自然高度上限），
+   卡片不随内容拉伸；完整信息由整卡点击的详情窗口承载。虚拟路径同高。 */
+.card-grid { grid-auto-rows: 148px; align-items: stretch; }
 
 /* 空结果的清除入口：与空态文字同层，故用绝对定位与空态居中口径对齐 */
 .empty-clear {

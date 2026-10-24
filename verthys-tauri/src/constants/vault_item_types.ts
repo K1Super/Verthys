@@ -21,6 +21,11 @@
  *      卡片到期读数与到期筛选按该 id 取值，类型声明不再重复标注。
  *   7. transient 字段只在编辑窗口采集、不写入条目数据，用于"独立密钥"这类
  *      仅供当次加密使用的输入，避免密钥材料随记录落盘。
+ *   8. 日期区间以「结束键 + 起始键」成对落盘：结束键恒为字段 id（到期语义
+ *      固定取 "expiry"，卡片读数与筛选据此取值），起始键由 rangeStartId
+ *      声明。区间只是一个控件形态，落盘仍是扁平键值，不引入嵌套结构。
+ *   9. 地区字段只存「省/市/区」名称路径，不存行政区划代码：名称路径可直接
+ *      展示与检索，且区划代码随时间调整时不会让既有记录失去可读性。
  *
  * 兼容与副作用：纯常量与纯类型声明，无副作用、无 IO，可安全并发读取。
  *   内置类型不可被用户删除或改写字段语义；自定义类型元数据的持久化由
@@ -35,8 +40,10 @@ export const VAULT_FIELD_KINDS = [
   "text",
   "password",
   "date",
+  "dateRange",
   "multiline",
   "select",
+  "region",
   "switch",
 ] as const;
 
@@ -131,6 +138,26 @@ export interface VaultFieldDef {
   multilineRows?: number;
   /** 字段说明（可选，编辑窗口提示语） */
   hint?: string;
+  /**
+   * 新增条目时的默认取值（编辑既有条目时不覆盖）。
+   * 仅内置标准模板使用：让「护照类型 / 签发国家」这类常选项从可用状态开始，
+   * 同时避免把默认值当作校验兜底（用户仍可清空）。
+   */
+  default?: string;
+  /**
+   * 区间起始字段 id（kind 为 dateRange 时必填）：与 id 成对落盘。
+   * id 承载结束日期，因此到期读数与筛选无需感知区间形态。
+   */
+  rangeStartId?: string;
+  /** 区间起始端标签（缺省「自」） */
+  rangeStartLabel?: string;
+  /** 区间结束端标签（缺省「至」） */
+  rangeEndLabel?: string;
+  /**
+   * 展示分组名：相邻同名字段合为一个分区，缺省归入以类型名命名的单区。
+   * 只影响排版，不参与落盘与校验。
+   */
+  group?: string;
 }
 
 /** 条目类型定义：界面、卡片与搜索的单一驱动来源 */
@@ -174,10 +201,44 @@ export const ACCOUNT_VAULT_TYPE_ID = "account";
 export const VAULT_EXPIRY_FIELD_ID = "expiry";
 
 /**
- * 卡片次行上限（单一权威源）：超出会让卡片内容层高度溢出。
- * 写入侧截断与编辑侧校验同取本常量 —— 两处不得各存一份。
+ * 卡片摘要字段上限（单一权威源）。
+ *
+ * 卡片固定为原始高度，只承载最能识别条目的少数摘要字段；完整字段由详情
+ * 窗口（lib/vault_item_detail）展示。本上限约束卡片排版与类型编辑器的可选
+ * 数量，写入侧截断与编辑侧校验同取本常量 —— 两处不得各存一份。
  */
 export const MAX_VAULT_CARD_FIELDS = 3;
+
+/** 表单/详情共用的展示分区 */
+export interface VaultFieldSection {
+  /** 分区名（相邻同名 group 合并；无 group 时取类型名） */
+  name: string;
+  /** 分区内字段（保持声明顺序） */
+  fields: VaultFieldDef[];
+}
+
+/**
+ * 按字段 group 把声明聚成相邻分区。
+ *
+ * 编辑窗口与详情窗口共用同一份分区规则：两处各写一套分组逻辑，必然会在
+ * 新增字段组时漂移，出现「编辑分三节、详情分两节」的观感断裂。
+ *
+ * @param def 类型定义
+ * @returns 分区清单（相邻同名合并；空类型返回空数组）
+ */
+export function groupVaultFieldSections(def: VaultTypeDef): VaultFieldSection[] {
+  const sections: VaultFieldSection[] = [];
+  let last: VaultFieldSection | null = null;
+  for (const field of def.fields) {
+    const name = field.group ?? def.label;
+    if (!last || last.name !== name) {
+      last = { name, fields: [] };
+      sections.push(last);
+    }
+    last.fields.push(field);
+  }
+  return sections;
+}
 
 /** 自定义类型 id 前缀：区分内置与自定义，便于按前缀路由与校验 */
 export const CUSTOM_VAULT_TYPE_PREFIX = "custom:";
@@ -227,6 +288,42 @@ export function createCustomFieldId(label: string, existing: readonly string[] =
 }
 
 /**
+ * 取日期区间的起始字段 id。
+ *
+ * 声明完整时即为 rangeStartId；声明缺失时退回 `${id}Start`，让控件与落盘
+ * 投影（lib/vault_item_codec）使用同一个键 —— 两处各写一套回退规则会让
+ * 界面采集到的起始日写不进记录。
+ *
+ * @param field 日期区间字段
+ * @returns 起始字段 id（恒非空）
+ */
+export function vaultRangeStartFieldId(field: VaultFieldDef): string {
+  return field.rangeStartId ?? `${field.id}Start`;
+}
+
+/**
+ * 生成日期区间的起始字段 id。
+ *
+ * 起始键与字段 id 共用同一张落盘表：以 `${fieldId}_start` 为基名并避开
+ * 已占用键。只在字段首次切换为日期区间时生成一次，之后不随字段改名。
+ *
+ * @param fieldId 区间结束字段 id
+ * @param existing 已占用的落盘键（字段 id 与其它区间起始键）
+ * @returns 未占用的起始字段 id
+ */
+export function createCustomRangeStartId(
+  fieldId: string,
+  existing: readonly string[] = [],
+): string {
+  const base = `${fieldId}_start`;
+  if (!existing.includes(base)) return base;
+
+  let index = 2;
+  while (existing.includes(`${base}_${index}`)) index += 1;
+  return `${base}_${index}`;
+}
+
+/**
  * 内置类型表（编译期常量，顺序即类型选择台的展示顺序）。
  *
  * 每条类型的字段 id 均为语义化短标识；账号类型的 id 与既有账户载荷键名
@@ -240,7 +337,7 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     icon: "account",
     tone: "accent",
     titleField: "platform",
-    cardFields: ["username"],
+    cardFields: ["username", "note"],
     searchFields: ["platform", "username"],
     fields: [
       { id: "platform", label: "平台", kind: "text", required: true },
@@ -248,6 +345,7 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
       { id: "password", label: "密码", kind: "password", sensitive: true },
       { id: "encrypted", label: "独立加密", kind: "switch", hint: "查看时需二次输入独立密钥" },
       { id: "encKey", label: "密钥", kind: "password", sensitive: true, transient: true },
+      /* 备注与账户半宽同排：两项刚好占满一行，避免卡片栅格出现空列 */
       { id: "note", label: "备注", kind: "multiline", multilineRows: 2 },
     ],
     builtin: true,
@@ -258,13 +356,25 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     icon: "idcard",
     tone: "purple",
     titleField: "name",
-    cardFields: ["number", VAULT_EXPIRY_FIELD_ID],
+    cardFields: ["note"],
     searchFields: ["name", "number"],
     fields: [
-      { id: "name", label: "姓名", kind: "text", required: true },
-      { id: "number", label: "号码", kind: "text", sensitive: true },
-      { id: VAULT_EXPIRY_FIELD_ID, label: "有效期", kind: "date" },
-      { id: "note", label: "备注", kind: "multiline", multilineRows: 2 },
+      { id: "name", label: "姓名", kind: "text", required: true, group: "证件" },
+      /* 身份号码是身份证的唯一定位依据：缺失即无法证明持证身份，故列为必填。
+         字段 id 保持 "number"（落盘键名不可改），只收敛显示名与校验。 */
+      { id: "number", label: "身份号码", kind: "text", required: true, sensitive: true, group: "证件" },
+      /* 法定证件有效期为「签发日 → 到期日」区间：id 仍为 expiry（到期读数
+         与筛选的固定取值键），rangeStartId 承载起始日。 */
+      {
+        id: VAULT_EXPIRY_FIELD_ID,
+        label: "有效期",
+        kind: "dateRange",
+        rangeStartId: "validFrom",
+        rangeStartLabel: "自",
+        rangeEndLabel: "至",
+        group: "证件",
+      },
+      { id: "note", label: "备注", kind: "multiline", multilineRows: 2, group: "附注" },
     ],
     builtin: true,
   },
@@ -274,13 +384,43 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     icon: "passport",
     tone: "purple",
     titleField: "name",
-    cardFields: ["number", VAULT_EXPIRY_FIELD_ID],
-    searchFields: ["name", "number"],
+    cardFields: ["type"],
+    searchFields: ["name", "number", "type", "country", "authority"],
     fields: [
-      { id: "name", label: "姓名", kind: "text", required: true },
-      { id: "number", label: "号码", kind: "text", sensitive: true },
-      { id: VAULT_EXPIRY_FIELD_ID, label: "有效期", kind: "date" },
-      { id: "note", label: "备注", kind: "multiline", multilineRows: 2 },
+      { id: "name", label: "姓名", kind: "text", required: true, group: "证件" },
+      { id: "number", label: "护照号码", kind: "text", sensitive: true, group: "证件" },
+      {
+        id: "type",
+        label: "护照类型",
+        kind: "select",
+        options: ["普通护照", "公务护照", "公务普通护照", "外交护照", "其他"],
+        default: "普通护照",
+        group: "证件",
+      },
+      { id: "country", label: "签发国家", kind: "text", default: "中国", group: "证件" },
+      { id: "nationality", label: "国籍", kind: "text", default: "中国", group: "证件" },
+      { id: "birthDate", label: "出生日期", kind: "date", group: "个人信息" },
+      { id: "birthPlace", label: "出生地点", kind: "text", group: "个人信息" },
+      {
+        id: "gender",
+        label: "性别",
+        kind: "select",
+        options: ["男", "女", "未注明"],
+        group: "个人信息",
+      },
+      { id: "issuePlace", label: "签发地点", kind: "text", group: "签发" },
+      { id: "authority", label: "签发机关", kind: "text", group: "签发" },
+      /* 标准护照的「有效期」即签发日到到期日；起始端沿用签发日的语义标签。 */
+      {
+        id: VAULT_EXPIRY_FIELD_ID,
+        label: "有效期",
+        kind: "dateRange",
+        rangeStartId: "issueDate",
+        rangeStartLabel: "签发",
+        rangeEndLabel: "到期",
+        group: "签发",
+      },
+      { id: "note", label: "备注", kind: "multiline", multilineRows: 2, group: "附注" },
     ],
     builtin: true,
   },
@@ -290,14 +430,23 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     icon: "bankcard",
     tone: "warning",
     titleField: "bank",
-    cardFields: ["number", VAULT_EXPIRY_FIELD_ID],
-    searchFields: ["bank", "number"],
+    cardFields: ["type", "holder"],
+    searchFields: ["bank", "type", "holder"],
     fields: [
-      { id: "bank", label: "银行", kind: "text", required: true },
-      { id: "number", label: "卡号", kind: "text", sensitive: true },
-      { id: VAULT_EXPIRY_FIELD_ID, label: "有效期", kind: "date" },
-      { id: "cvv", label: "安全码", kind: "password", sensitive: true },
-      { id: "note", label: "备注", kind: "multiline", multilineRows: 2 },
+      { id: "bank", label: "银行", kind: "text", required: true, group: "账户" },
+      { id: "number", label: "卡号", kind: "text", sensitive: true, group: "账户" },
+      {
+        id: "type",
+        label: "卡类型",
+        kind: "select",
+        options: ["储蓄卡", "信用卡", "预付卡", "其他"],
+        group: "账户",
+      },
+      { id: "holder", label: "持卡人", kind: "text", group: "账户" },
+      { id: "cvv", label: "安全码", kind: "password", sensitive: true, group: "凭据" },
+      /* 银行卡不设日期字段：卡片有效期以卡面印字为准，且 MM/YY 形态无法由
+         日期控件无损承载；收藏卡号与安全码本身不依赖到期读数。 */
+      { id: "note", label: "备注", kind: "multiline", multilineRows: 2, group: "附注" },
     ],
     builtin: true,
   },
@@ -307,7 +456,7 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     icon: "certificate",
     tone: "success",
     titleField: "name",
-    cardFields: ["certType", VAULT_EXPIRY_FIELD_ID],
+    cardFields: ["certType"],
     searchFields: ["name", "certType"],
     fields: [
       { id: "name", label: "名称", kind: "text", required: true },
@@ -347,13 +496,20 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     icon: "address",
     tone: "accent",
     titleField: "name",
-    cardFields: ["region"],
-    searchFields: ["name", "region", "detail"],
+    cardFields: ["region", "recipient", "phone"],
+    searchFields: ["name", "region", "detail", "recipient"],
     fields: [
-      { id: "name", label: "名称", kind: "text", required: true },
-      { id: "region", label: "省市区", kind: "text" },
-      { id: "detail", label: "详细地址", kind: "multiline", multilineRows: 2 },
-      { id: "note", label: "备注", kind: "multiline", multilineRows: 2 },
+      { id: "name", label: "名称", kind: "text", required: true, group: "地址" },
+      { id: "recipient", label: "姓名", kind: "text", group: "地址" },
+      { id: "phone", label: "电话", kind: "text", group: "地址" },
+      /* 省市区取全国行政区划三级联动；落盘为「省/市/区」名称路径，
+         历史自由文本原样保留，直到用户在联动框中显式重选。 */
+      { id: "region", label: "省市区", kind: "region", group: "地址" },
+      { id: "detail", label: "详细地址", kind: "multiline", multilineRows: 2, group: "地址" },
+      { id: "postalCode", label: "邮政编码", kind: "text", group: "地址" },
+      /* 备注与邮编同排半宽：地址卡要在有限高度内同时呈现邮编与备注，
+         备注只作两行摘要，完整内容在悬浮提示与编辑窗口中查看。 */
+      { id: "note", label: "备注", kind: "multiline", multilineRows: 2, group: "附注" },
     ],
     builtin: true,
   },
@@ -378,7 +534,7 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     icon: "social",
     tone: "purple",
     titleField: "platform",
-    cardFields: ["username"],
+    cardFields: ["username", "note"],
     searchFields: ["platform", "username", "note"],
     fields: [
       { id: "platform", label: "平台", kind: "text", required: true },
@@ -394,7 +550,7 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     icon: "wifi",
     tone: "success",
     titleField: "ssid",
-    cardFields: ["security"],
+    cardFields: ["security", "note"],
     searchFields: ["ssid", "security"],
     fields: [
       { id: "ssid", label: "SSID", kind: "text", required: true },
