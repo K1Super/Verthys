@@ -165,6 +165,24 @@ describe("文字清晰度：入场动画只走 opacity", () => {
     }
   });
 
+  it("漂浮卡片：不建 3D 上下文，静止态不常驻合成层，定位只用 2D 平移", () => {
+    const vue = read("../components/modules/PasswordTools.vue");
+    const styleBlock = vue.slice(vue.indexOf("<style"));
+    /* 舞台不得建透视；卡片子树不得有 3D 上下文、常驻合成层、缩放或旋转 ——
+     * 任何一项都会让文字按重采样后的栅格绘制，静止态即发虚 */
+    expect(ruleBody(vue, ".water-stage"), "舞台不得建透视").not.toMatch(/perspective/i);
+    for (const rule of styleBlock.matchAll(/\.float-card[^{]*\{([^}]*)\}/g)) {
+      expect(stripComments(rule[1]), rule[0].slice(0, 48)).not.toMatch(
+        /transform-style|perspective|will-change|scale\(|rotate\w*\(|translate[Z3]/i,
+      );
+    }
+    /* 控制器：静止落位必须走 left/top（普通绘制层，保留完整字形渲染），
+     * 且不得出现任何纵深 / 旋转 / 缩放写入 */
+    const src = read("../composables/key-tools/useFloatingCards.ts");
+    expect(src, "静止落位须走 left/top").toMatch(/style\.left =/);
+    expect(src, "不得写入纵深/旋转/缩放").not.toMatch(/translateZ|rotateZ|rotateX|rotateY|scale\(/);
+  });
+
   it("量子面板引擎：零视差组恒静态，逐帧变换仅作用于装饰环热区", () => {
     const src = read("../composables/security-center/useQuantumField.ts");
     /* 逐帧 DOM transform 写入仅一处：装饰环热区（缩放）。任何新增写入 ——

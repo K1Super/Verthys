@@ -1,17 +1,27 @@
 <!--
   PasswordTools.vue — 密码安全辅助工具模块
-  四大工具（2x2 栅格布局）：
-    1. 密码生成器（左上）
-    2. 密码安全评估（右上）
-    3. 随机令牌生成器（左下）
-    4. 密钥生成工具（右下）— 支持生成密钥并导出为 .bin 文件
+  三项工具散落在同一透视舞台上：默认按不规则层叠摆放（允许重叠），
+  整张卡片的非交互区域都可起拖，位置每次进入复位：
+    1. 密码生成器（随机字符 / 数字 PIN / 分段字母数字 / 随机令牌 / UUID）
+    2. 密码安全评估（本地模式分析 + Argon2id 单向哈希）
+    3. 密钥生成工具（生成密钥并导出 .bin）
+  定位与运动由 useFloatingCards 承担；本组件只保留卡片内容与舞台结构。
 -->
 <template>
-  <div class="password-tools reveal-host" :class="{ 'is-entering': entering }">
-    <div class="tools-grid">
-      <!-- ===== 密码生成器 ===== -->
-      <section class="tool-section glass gen-section reveal-item" :style="{ '--reveal-delay': revealDelayOf(0) + 'ms' }">
-        <div class="section-header">
+  <div class="password-tools">
+    <div class="water-stage" ref="stageRef">
+      <!-- ===== 密码生成器 =====
+           两层各司其职：float-card 只承接整像素平移（控制器每帧写入），
+           float-card__body 只承载入场淡入。卡片子树内不存在任何缩放 / 旋转 /
+           透视，文字始终按 1:1 栅格绘制，静止与拖拽都不会被重采样 -->
+      <div
+        class="float-card"
+        :ref="(el) => registerCard('generator', el as HTMLElement | null)"
+        :style="{ '--enter-delay': '0ms' }"
+      >
+      <div class="float-card__body">
+      <section class="tool-section glass gen-section">
+        <div class="section-header" data-drag-handle tabindex="0" aria-label="密码生成器，可拖动或用方向键移动">
           <span class="section-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5"/></svg>
           </span>
@@ -197,10 +207,18 @@
           <span class="strength-entropy">{{ tokenBitsText }}</span>
         </div>
       </section>
+      </div>
+      </div>
 
       <!-- ===== 密码安全评估 ===== -->
-      <section class="tool-section glass check-section reveal-item" :style="{ '--reveal-delay': revealDelayOf(1) + 'ms' }">
-        <div class="section-header">
+      <div
+        class="float-card"
+        :ref="(el) => registerCard('assessment', el as HTMLElement | null)"
+        :style="{ '--enter-delay': '70ms' }"
+      >
+      <div class="float-card__body">
+      <section class="tool-section glass check-section">
+        <div class="section-header" data-drag-handle tabindex="0" aria-label="密码安全评估，可拖动或用方向键移动">
           <span class="section-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           </span>
@@ -291,10 +309,18 @@
           </div>
         </div>
       </section>
+      </div>
+      </div>
 
-      <!-- ===== 密钥生成工具（新增，支持 .bin 导出） ===== -->
-      <section class="tool-section glass keygen-section reveal-item" :style="{ '--reveal-delay': revealDelayOf(2) + 'ms' }">
-        <div class="section-header">
+      <!-- ===== 密钥生成工具（支持 .bin 导出） ===== -->
+      <div
+        class="float-card"
+        :ref="(el) => registerCard('keygen', el as HTMLElement | null)"
+        :style="{ '--enter-delay': '140ms' }"
+      >
+      <div class="float-card__body">
+      <section class="tool-section glass keygen-section">
+        <div class="section-header" data-drag-handle tabindex="0" aria-label="密钥生成工具，可拖动或用方向键移动">
           <span class="section-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3"/></svg>
           </span>
@@ -358,6 +384,8 @@
           <span class="keygen-hint">{{ keygenRaw.length ? `当前密钥 ${keygenRaw.length} 字节 · SHA-256: ${keygenHashShort}` : '生成密钥后点击右上角图标导出 .bin 文件' }}</span>
         </div>
       </section>
+      </div>
+      </div>
     </div>
 
     <!-- 瞬时提示（错误/复制/状态）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
@@ -372,7 +400,7 @@ import { argon2id } from "hash-wasm";
 import { writeUserFile } from "../../lib/verthys";
 import { useToastCenter } from "../../composables/useToastCenter";
 import { useClipToast } from "../../composables/useClipToast";
-import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
+import { useFloatingCards } from "../../composables/key-tools/useFloatingCards";
 import {
   ARGON2_PARAMS,
   argonParamsLabel,
@@ -393,9 +421,17 @@ import {
 } from "../../composables/key-tools/password_strength";
 import { usePasswordStrength } from "../../composables/key-tools/usePasswordStrength";
 
-/* 步入窗口：三个工具分区为静态内容 —— 窗口随挂载开启（内容就绪恒为真），
- *   标记与分区同批落地，首帧即入场起点 */
-const { entering } = useModuleEntrance(() => true);
+/* 漂浮舞台阵型：沿左上 → 右下的斜向层叠（与设计稿一致），三卡刻意不共享基准线。
+ *   只用像素偏移与层序制造"散落层叠"——缩放 / 自转 / 纵深三类变换都会让合成器
+ *   重采样文字栅格，静止时也会发虚，故一律不用；
+ *   层序：密码生成器（z 3）在前，压住评估卡右下缘；评估（z 2）居中偏上，
+ *   压住密钥卡右下缘；密钥生成工具（z 1）在左上最深处。
+ *   被压住的部分可用拖拽移出，卡片本身整面可拖，不设固定槽位。 */
+const { stageRef, registerCard } = useFloatingCards([
+  { key: "generator", xOffset: 185, yOffset: 160, zIndex: 3 },
+  { key: "assessment", xOffset: -5, yOffset: -15, zIndex: 2 },
+  { key: "keygen", xOffset: -210, yOffset: -150, zIndex: 1 },
+]);
 
 /* ===== 瞬时提示（错误 / 复制 / 状态）— 全局 Toast 中心；渲染归 ToastLayer ===== */
 const { showError, showStatus } = useToastCenter();
@@ -763,52 +799,90 @@ watch(tokenBytes, () => generateToken());
 .password-tools {
   width: 100%;
   height: 100%;
-  display: flex;
-  /* 四卡固定在模块视口内完整展示：根容器不滚动，滚动条不出现 */
+  /* 卡片可在舞台内自由重叠，根容器不滚动，滚动条不出现 */
   overflow: hidden;
-  /* 卡片高度上限：视口再高也不把卡片撑大（四卡块整体纵向居中） */
-  --tool-card-max: 312px;
 }
 
-/* ===== 2x2 栅格布局 =====
- *   四卡严格填满模块视口：容器高 100%，两行轨各分一半，卡片等高且不滚动。
- *   max-height + 纵向 auto margin：视口很高时卡片不超过上限并整体居中，
- *   避免"卡片被拉得过大"；左右各留 20px 让卡片块不至于贴满舞台。
- *   卡片内容按 312px 上限设计；视口高度不足以容纳内容时由下方的
- *   高度断点切到滚动兜底，宁可滚动也不裁切内容。
- */
-.tools-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  grid-template-rows: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+/* ===== 漂浮舞台 =====
+ *   纯 2D 平面容器：不建透视、不建 3D 渲染上下文。卡片只做整像素平移，
+ *   文字始终按 1:1 栅格绘制（任何 perspective / preserve-3d / translateZ /
+ *   rotate / scale 都会让合成器重采样文字边缘，静止态即发虚）。
+ *   卡片固定 312px 高、宽度取 46%（上限 520px），与内部排版预算一致；
+ *   舞台宽度低于断点时整体让位给单列文档流，控制器同时停止写 transform。 */
+.water-stage {
+  position: relative;
   width: 100%;
   height: 100%;
-  max-height: calc(2 * var(--tool-card-max) + 18px);
-  margin: auto 0;
-  padding: 2px 20px;
+  overflow: hidden;
 }
-/* 视口过矮（低于卡片内容的可读下限）时切滚动：不裁切、不压扁 */
-@media (max-height: 680px) {
-  .password-tools { overflow-y: auto; scrollbar-width: thin; }
-  .tools-grid {
-    height: auto;
-    max-height: none;
-    margin: 0;
-    grid-template-rows: repeat(2, minmax(304px, auto));
-  }
+.float-card {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: min(46%, 520px);
+  height: 312px;
 }
-@media (max-width: 680px) {
+/* 入场只改 opacity。文字层不做任何常驻 transform 动画：连续的小数位移与微旋转
+ * 会让合成器每帧重采样文字边缘，静止时也发虚、拖动时更明显。
+ * 图层提升由控制器按需开关（拖拽 / 惯性 / 推挤期间临时 will-change，静止即撤销），
+ * 常态不常驻合成层，桌面端保留完整文字抗锯齿。
+ * 整卡是抓取面：留白、标题、标签、刻度条都可起拖，故抓取手势挂在这一层；
+ * 按钮/输入/滑杆/复选框标签由控制器按命中选择器排除，并在此恢复各自的 cursor。 */
+.float-card__body {
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  transition: opacity 0.42s var(--ease, ease) var(--enter-delay, 0ms);
+}
+.float-card.is-ready .float-card__body { opacity: 1; }
+.float-card.is-grabbed .float-card__body { cursor: grabbing; }
+/* 抓取反馈只由投影与层序承担：不缩放、不旋转、不抬 Z，文字始终落在同一栅格上 */
+.float-card.is-grabbed .tool-section {
+  border-color: var(--border-hover);
+  box-shadow:
+    0 22px 56px rgba(var(--black-rgb), 0.55),
+    0 0 1px rgba(var(--accent-rgb), 0.18),
+    inset 0 1px 0 rgba(var(--white-rgb), 0.06);
+}
+/* 文本可读/可选中：评估输入框与可复制显示框不因整卡禁选而失去选区能力 */
+.float-card .check-input,
+.float-card .field-box { user-select: text; }
+.float-card .tool-section { width: 100%; height: 100%; min-height: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .float-card__body { transition: none; opacity: 1; }
+}
+
+/* 文档流兜底：窄视口或矮视口下卡片回到文档流，控制器停止写 transform */
+@media (max-width: 680px), (max-height: 700px) {
   .password-tools { overflow-y: auto; scrollbar-width: thin; }
-  .tools-grid {
-    grid-template-columns: 1fr;
-    grid-template-rows: none;
-    grid-auto-rows: minmax(280px, auto);
+  .water-stage {
     height: auto;
-    max-height: none;
-    margin: 0;
+    min-height: 100%;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
   }
-  .tool-section { min-height: 280px; }
+  .float-card {
+    position: relative;
+    width: 100%;
+    transform: none !important;
+  }
+  /* 文档流下卡片不再可拖：交还光标与触屏滚动/文本选择，避免误锁滚动 */
+  .float-card__body {
+    opacity: 1;
+    transition: none;
+    cursor: auto;
+    touch-action: auto;
+    user-select: auto;
+  }
+  /* 头部在桌面是键盘入口并示意可拖；文档流下卡片不可拖，须一并交还触屏滚动与光标 */
+  .float-card .section-header { cursor: auto; touch-action: auto; user-select: auto; }
+  .float-card .tool-section { min-height: 280px; height: auto; }
 }
 
 /* 工具区块通用 */
@@ -822,11 +896,13 @@ watch(tokenBytes, () => generateToken());
   min-height: 0;
   overflow: hidden;
 }
-/* 分区入场已收敛到全局「模块步入编排」（styles/animations.css）：
-   本组件根为步入窗口宿主、四分区为内容条目，错峰由 revealDelayOf 注入 ——
-   包络与错峰曲线不再各自定义 */
-
-.section-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+/* 头部是键盘入口（聚焦后方向键移动卡片）；指针拖拽由整卡承担，此处只保留提示性 cursor */
+.section-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
+  cursor: grab; touch-action: none; user-select: none;
+}
+.section-header:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 4px; }
+.float-card.is-grabbed .section-header { cursor: grabbing; }
 .section-icon { width: 16px; height: 16px; color: var(--accent); }
 .section-icon svg { width: 100%; height: 100%; }
 .section-title { font-size: 12px; color: var(--text-secondary); letter-spacing: 2px; text-transform: uppercase; font-family: var(--font); flex: 1; }
@@ -1026,6 +1102,8 @@ watch(tokenBytes, () => generateToken());
   border: 1px solid var(--border-glass);
   border-radius: var(--radius-sm);
   min-height: 34px;
+  /* role=button：不可点击时也不能显示可抓取光标，否则暗示了不存在的拖拽 */
+  cursor: default;
   transition: border-color 0.3s, background-color 0.3s;
 }
 .argon-result.clickable { cursor: pointer; }
