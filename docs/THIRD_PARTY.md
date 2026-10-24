@@ -2,7 +2,7 @@
 
 > 第三方库清单、版本来源、引入理由、许可证、升级策略与供应链安全关联。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-10-24 · 维护人：K1Super
 
 本文档按“单一事实来源”原则：版本/依赖以 `dep-versions.txt`、`third_party/`
 下实际文件、`verthys-tauri/src-tauri/Cargo.toml`（及 Cargo.lock）、`verthys-tauri/package.json` 为准，
@@ -46,8 +46,36 @@
 
 > 前端 `package.json` 使用 `^` 范围（精确版本见 `package-lock.json`）。
 
+### 4.1 前端内置数据（vendored，非 npm 运行时依赖）
+
+| 数据 | 来源与版本 | 许可证 | 引入理由 | 用途模块 |
+|---|---|---|---|---|
+| 全国省 / 市 / 区县行政区划树 | `china-division` `2.7.0`（<https://github.com/modood/Administrative-divisions-of-China>） | MIT（Copyright (c) 2017 modood） | 地址条目的三级联动候选项；数据随代码内置，运行期零网络请求 | `verthys-tauri/src/constants/china_regions.ts`（文件头注声明来源与许可证）→ `lib/china_region.ts` → `VaultRegionPicker.vue` |
+
+> 该数据只保留名称层级（34 个省级、367 个地级、3439 个区县级，含港澳台；
+> 数据截止 2023-06-30），不含行政区划代码与乡镇以下层级；按需动态
+> `import`，不进入首屏主包。
+
+### 4.2 前端内置代码（vendored，非 npm 运行时依赖）
+
+| 代码 | 来源与版本 | 许可证 | 引入理由 | 用途模块 |
+|---|---|---|---|---|
+| zxcvbn 口令强度引擎 | `zxcvbn` `4.4.2` 的 browserify 构建产物 `dist/zxcvbn.js`（SHA-256 与包装规则见 `verthys-tauri/src/vendor/zxcvbn/PROVENANCE.json`） | MIT（`verthys-tauri/src/vendor/zxcvbn/LICENSE.txt`） | 词典 / 键盘布局 / 重复 / 日期模式的可预测结构检测；字符集熵模型看不见这类弱口令（`Password123!` 字符集口径约 72 位，引擎口径仅 3.6 万次猜测） | `src/vendor/zxcvbn/`（门面）→ `src/workers/password-strength.worker.ts`（唯一调用点）→ `PasswordTools.vue` 密码安全评估面板 |
+
+> 该引擎只在 Worker 内加载与执行：单次分析实测 64 字符约 32ms、128 字符约 740ms，
+> 超过主线程单帧预算，因此由 Worker 承担且主线程只下发前 64 个字符。模式命中的
+> 权重直接采信引擎猜测数，未覆盖字符改按实际字符集空间换算（否则随机口令会与
+> 生成器口径矛盾）。产物在 `vite.config.ts` 的混淆 `exclude` 中整体排除（公开源码
+> 无保密收益，混淆会让构建耗时与体积成倍增加），并随业务代码一并由 `resource_guard`
+> 完整性清单覆盖。未引入新的 npm 运行时依赖，`package.json` 与 `package-lock.json` 无变化。
+
+
 ## 5. 许可证核查结果
-- 已随仓库提供许可证文件：libsodium（ISC）、flatcc（Apache-2.0 + NOTICE）、xxHash（BSD-2-Clause）。
+- 已随仓库提供许可证文件：libsodium（ISC）、flatcc（Apache-2.0 + NOTICE）、xxHash（BSD-2-Clause）、
+  zxcvbn（MIT，`verthys-tauri/src/vendor/zxcvbn/LICENSE.txt`）。
+- 内置行政区划数据 `china_regions.ts` 为 MIT（china-division 2.7.0），完整 MIT
+  许可文本与版权声明随生成文件头注提供；未引入新的 npm 运行时依赖，
+  `package.json` 与 `package-lock.json` 无变化。
 - Rust/npm 依赖为注册表拉取，非 vendored，仓库未随附其许可证文件者标注
   “未随仓库提供许可证文件”；其许可证以其各自 crate/包元数据为准。
 
@@ -71,7 +99,7 @@
   （`BINARY_ARCH_MISMATCH` / `BINARY_LOAD_FAILED` / `INTEGRITY_FAILED`）。
 - 运行时哈希/恶意篡改校验：`core/src/security/integrity/`（runtime_hash.c / integrity.c）与防御闭环
   7 路径（`Verthys_GetSecurityStatus`），详见 `SECURITY_DESIGN.md`。
-- 依赖审查红线：工程刚性约束条款（`docs/ENGINEERING_CONSTRAINTS.md`）要求第三方依赖安全审查、禁引已知高危组件，
+- 依赖审查红线：工程刚性约束条款（见 `docs/REQUIREMENTS.md`）要求第三方依赖安全审查、禁引已知高危组件，
   详见 `SECURITY_DESIGN.md`。
 
 ## 8. 已知观察（照实记录，未改代码）

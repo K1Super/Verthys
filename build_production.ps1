@@ -14,7 +14,7 @@
 #   阶段 5: 产物校验
 #
 # 环境隔离声明：
-#   - 所有工具路径来自系统环境变量（经 scripts/env.load.ps1 注入）
+#   - 所有工具路径来自系统环境变量（经 scripts/lib/env.load.ps1 注入）
 #   - 脚本内零硬编码绝对路径
 #   - 任一阶段失败立即终止，不继续后续阶段
 #
@@ -27,8 +27,10 @@
 #   -SkipWorker  跳过 worker 构建（二进制已存在时使用）
 #   -SkipTauri   跳过 Tauri 打包（仅构建组件时使用）
 #   -NoPause     失败/成功后不暂停等待 Enter（CI 场景使用；双击运行时不传此参数以便查看输出）
-#   -Profile     更新端点配置：local 仅回环验证，production 必须 HTTPS
+#   -Profile     更新端点配置：local 仅回环验证，production 默认 HTTPS
 #   -UpdaterEndpoint production 清单 URL；也可用 VERTHYS_UPDATER_ENDPOINT
+#   -UpdaterArtifactRoot 物料根地址；留空时按 <端点源>/releases 派生
+#   -AllowInsecureUpdater 允许 production 使用 HTTP + IP 端点（零成本自建分发）
 #   -AllowLocal  允许以 local profile 打包（默认 production）
 #   -ReleaseNotes 更新说明；留空时由发布脚本生成默认说明
 #   -CompatAbiMin 兼容 ABI 下限；桥接发布显式传入，例如 0x000B
@@ -43,6 +45,8 @@ param(
     [ValidateSet("local", "production")]
     [string]$Profile = "production",
     [string]$UpdaterEndpoint = $env:VERTHYS_UPDATER_ENDPOINT,
+    [string]$UpdaterArtifactRoot = $env:VERTHYS_UPDATER_ARTIFACT_ROOT,
+    [switch]$AllowInsecureUpdater,
     [switch]$AllowLocal,
     [string]$ReleaseNotes = "",
     [string]$CompatAbiMin = "",
@@ -55,6 +59,9 @@ Set-StrictMode -Version 3.0
 # ========== 路径常量 ==========
 $ScriptRoot  = $PSScriptRoot
 $ScriptsDir  = Join-Path $ScriptRoot "scripts"
+$ScriptsLibDir     = Join-Path $ScriptsDir "lib"
+$ScriptsReleaseDir = Join-Path $ScriptsDir "release"
+$ScriptsGatesDir   = Join-Path $ScriptsDir "gates"
 $VerthysTauriDir = Join-Path $ScriptRoot "verthys-tauri"
 $WorkerDir   = Join-Path $VerthysTauriDir "verthys-worker"
 # externalBin 基准目录：Tauri v2 将 tauri.conf.json 的 externalBin 路径
@@ -203,17 +210,21 @@ if (-not [string]::IsNullOrEmpty($env:VCToolsInstallDir) -and
     $script:effectiveGenerator = "Ninja"
     Write-OK "沿用已注入的 MSVC 工具链环境（Ninja 单配置）"
 } else {
-    . (Join-Path $ScriptsDir "env.load.ps1")
+    . (Join-Path $ScriptsLibDir "env.load.ps1")
     $script:effectiveCmake = $VERTHYS_CMAKE_EXE
     $script:effectiveGenerator = $VERTHYS_VS_GENERATOR
     Write-OK "MSVC 环境已加载（env.load.ps1 本地路径）"
 }
-. (Join-Path $ScriptsDir "cmake.utils.ps1")
+. (Join-Path $ScriptsLibDir "cmake.utils.ps1")
 
-# C 核心 DLL 产物路径：由构建产物契约提供（scripts/artifacts.ps1 读取
+# C 核心 DLL 产物路径：由构建产物契约提供（scripts/lib/artifacts.ps1 读取
 # CMake POST_BUILD 生成的 build/core/verthys.artifacts.json）——消除按
 # 生成器类型猜测子目录的历史分支（Ninja/VS 布局差异曾导致哈希退化为 None）。
 # 契约在构建/跳过决策之后读取：首次构建不会因契约尚未生成而失败。
+# 注入器与契约写入器同样来自 scripts/lib，保证与 build_core.release.ps1
+# 使用完全相同的完整性基准口径。
+. (Join-Path $ScriptsLibDir "artifacts.ps1")
+. (Join-Path $ScriptsLibDir "vsec.ps1")
 
 # ========== 依赖与补丁校验 ==========
 Write-Stage "阶段 0.6: 依赖与补丁校验"
@@ -325,17 +336,36 @@ if (-not $SkipCore) {
     }
 
     # 构建后读取产物契约（POST_BUILD 刚刷新），契约路径即权威 DLL 位置
-    . (Join-Path $ScriptsDir "artifacts.ps1")
     $script:actualCoreDll = Get-VerthysArtifactDll
 
     Assert-FileExists $script:actualCoreDll "verthys.dll"
 } else {
     Write-Stage "阶段 1/4: 跳过 C 核心构建（-SkipCore）"
     # 跳过构建：契约必须来自既有构建；缺失即给明确指引而非继续
-    . (Join-Path $ScriptsDir "artifacts.ps1")
     $script:actualCoreDll = Get-VerthysArtifactDll
     Assert-FileExists $script:actualCoreDll "verthys.dll (已有)"
 }
+
+# ========== 阶段 1.1: .vsec 完整性基准注入 + 契约刷新 ==========
+# 生产 DLL 必须在进入打包前完成 .vsec 签名：运行时 integrity_verify_startup
+# 从磁盘重算 .text / .rdata / .rhat 三节 HMAC 并与 .vsec 基准逐槽比对；
+# 全零 .vsec 会被视为开发构建而跳过验签，等于分发物失去完整性防线。
+# -SkipCore 同样执行（幂等）：既有 DLL 可能来自旧构建或旧脚本，不能在
+# “跳过重编”路径上漏掉安全基准。
+Write-Stage "阶段 1.1/4: .vsec 完整性基准注入"
+Update-VsecBaseline -DllPath $script:actualCoreDll
+# 生成器/配置以现有契约为准：-SkipCore 时构建目录可能是另一种生成器
+# （例如 CI 注入环境用 Ninja、本地显式环境用 Visual Studio）产出，
+# 用当前 shell 的 effectiveGenerator 会让重生成契约的元数据失真。
+$coreManifest = Get-VerthysArtifactManifest
+$script:coreContract = Write-VerthysArtifactContract `
+    -DllPath $script:actualCoreDll `
+    -CmakeExe $script:effectiveCmake `
+    -Generator $coreManifest.generator `
+    -Config $coreManifest.config `
+    -SourceDir $ScriptRoot `
+    -OutPath (Join-Path $CoreBuildDir "core\verthys.artifacts.json")
+Write-OK "完整性基准已注入，产物契约已按最终字节刷新（SHA256 / 生成器 / 配置一致）"
 
 # ========== 阶段 2: 构建 verthys-worker ==========
 if (-not $SkipWorker) {
@@ -553,14 +583,35 @@ if (-not $SkipTauri) {
     if (-not $nodeCmd) {
         throw "未找到 node.exe，无法校验更新 profile"
     }
+    $artifactRootValue = ""
     if ($Profile -eq "production") {
         if ([string]::IsNullOrWhiteSpace($UpdaterEndpoint)) {
             throw "production requires -UpdaterEndpoint or VERTHYS_UPDATER_ENDPOINT"
         }
         $endpointUri = $null
-        if (-not [Uri]::TryCreate($UpdaterEndpoint, [UriKind]::Absolute, [ref]$endpointUri) -or $endpointUri.Scheme -ne "https") {
-            throw "UpdaterEndpoint must be an absolute https URL"
+        if (-not [Uri]::TryCreate($UpdaterEndpoint, [UriKind]::Absolute, [ref]$endpointUri)) {
+            throw "UpdaterEndpoint must be an absolute URL"
         }
+        $insecureUpdater = [bool]$AllowInsecureUpdater
+        if ($endpointUri.Scheme -ne "https" -and -not ($insecureUpdater -and $endpointUri.Scheme -eq "http")) {
+            throw "UpdaterEndpoint must use https (or pass -AllowInsecureUpdater for http)"
+        }
+        # 物料地址必须与清单端点同源：客户端只放行端点主机，跨源会被准入校验拒绝。
+        $artifactRootValue = $UpdaterArtifactRoot
+        if ([string]::IsNullOrWhiteSpace($artifactRootValue)) {
+            $artifactRootValue = $endpointUri.GetLeftPart([System.UriPartial]::Authority) + "/releases"
+        }
+        $artifactUri = $null
+        if (-not [Uri]::TryCreate($artifactRootValue, [UriKind]::Absolute, [ref]$artifactUri)) {
+            throw "UpdaterArtifactRoot must be an absolute URL"
+        }
+        if ($artifactUri.Scheme -ne $endpointUri.Scheme) {
+            throw "UpdaterArtifactRoot scheme must match UpdaterEndpoint"
+        }
+        if ($artifactUri.Host -ne $endpointUri.Host) {
+            throw "UpdaterArtifactRoot host must match UpdaterEndpoint"
+        }
+        $artifactRootValue = $artifactRootValue.TrimEnd([char]'/')
         $templateConfig = Join-Path $VerthysTauriDir "src-tauri\tauri.production.conf.json"
         if (-not (Test-Path $templateConfig)) {
             throw "missing production template: $templateConfig"
@@ -571,10 +622,13 @@ if (-not $SkipTauri) {
         $config = Get-Content -LiteralPath $templateConfig -Raw | ConvertFrom-Json
         $config.plugins.updater.endpoints = @($UpdaterEndpoint)
         $config.plugins.updater.channel = "stable"
-        $config.plugins.updater.dangerousInsecureTransportProtocol = $false
+        $config.plugins.updater.dangerousInsecureTransportProtocol = $insecureUpdater
         $config.plugins.updater.allowedDownloadHosts = @($endpointUri.Host)
         $config | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $profileConfig -Encoding ASCII
-        $profileGateArgs = @($profileConfig, "--profile", "production", "--endpoint", $UpdaterEndpoint)
+        $profileGateArgs = @($profileConfig, "--profile", "production", "--endpoint", $UpdaterEndpoint, "--base", (Join-Path $SrcTauriDir "tauri.conf.json"))
+        if ($insecureUpdater) {
+            $profileGateArgs += "--allow-insecure"
+        }
     } else {
         if (-not $AllowLocal) {
             throw "local profile requires -AllowLocal"
@@ -585,7 +639,7 @@ if (-not $SkipTauri) {
         }
         $profileGateArgs = @($profileConfig, "--profile", "local")
     }
-    & $nodeCmd.Source (Join-Path $ScriptsDir "check_updater_profile.mjs") @profileGateArgs
+    & $nodeCmd.Source (Join-Path $ScriptsGatesDir "check_updater_profile.mjs") @profileGateArgs
     if ($LASTEXITCODE -ne 0) {
         throw "更新 profile 配置校验失败: $Profile"
     }
@@ -639,7 +693,7 @@ $nodeCmd = Get-Command node.exe -ErrorAction SilentlyContinue
 if (-not $nodeCmd) {
     throw "未找到 node.exe，无法生成 SBOM"
 }
-$sbomScript = Join-Path $ScriptsDir "generate_sbom.mjs"
+$sbomScript = Join-Path $ScriptsReleaseDir "generate_sbom.mjs"
 if (-not (Test-Path $sbomScript)) {
     throw "SBOM 生成脚本缺失: $sbomScript"
 }
@@ -658,8 +712,27 @@ $allOk = $true
 if (Test-Path $script:actualCoreDll) {
     $info = Get-Item $script:actualCoreDll
     Write-OK ("verthys.dll: {0} ({1} KB)" -f $info.LastWriteTime, [math]::Round($info.Length / 1KB, 1))
+    if (Test-VsecBaseline -DllPath $script:actualCoreDll) {
+        Write-OK "verthys.dll .vsec 完整性基准校验通过（text+rdata+rhat）"
+    } else {
+        Write-Fail "verthys.dll .vsec 完整性基准缺失或失配"
+        $allOk = $false
+    }
 } else {
     Write-Fail "verthys.dll 缺失"
+    $allOk = $false
+}
+
+# DLL 打包副本（Tauri resources 实际消费的文件）
+if (Test-Path $DllTarget) {
+    if (Test-VsecBaseline -DllPath $DllTarget) {
+        Write-OK "src-tauri/verthys.dll .vsec 完整性基准校验通过"
+    } else {
+        Write-Fail "src-tauri/verthys.dll .vsec 完整性基准缺失或失配"
+        $allOk = $false
+    }
+} else {
+    Write-Fail "DLL 打包副本缺失: $DllTarget"
     $allOk = $false
 }
 
@@ -702,26 +775,28 @@ if (-not $SkipTauri -and $allOk -and (Test-Path $nsisDir)) {
         Write-Fail "missing installer or signature for release artifacts"
         $allOk = $false
     } else {
-        # 生产渠道在客户端强制 Authenticode；发布前先在本机复核系统信任链，
-        # 避免生成一份客户端必然拒绝的物料。
+        # Authenticode 是可选的系统信任层；未签名只提示 SmartScreen 风险，
+        # 更新完整性仍由清单签名、安装包签名、SHA256 与 PE 版本保证。
         if ($Profile -eq "production") {
             $authSignature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
             if ($authSignature.Status -ne "Valid") {
-                Write-Fail "production installer is not Authenticode trusted: $($authSignature.Status)"
-                $allOk = $false
+                Write-Host "  [warn] installer is not Authenticode trusted: $($authSignature.Status)" -ForegroundColor Yellow
             } else {
                 Write-OK "Authenticode 签名有效: $($authSignature.SignerCertificate.Subject)"
             }
         }
         $releaseEndpoint = if ($Profile -eq "production") { $UpdaterEndpoint } else { "http://127.0.0.1:8765/latest.json" }
         $releaseArgs = @(
-            (Join-Path $ScriptsDir "release_update.mjs"),
+            (Join-Path $ScriptsReleaseDir "release_update.mjs"),
             "--installer", $installer.FullName,
             "--signature", $signature.FullName,
             "--endpoint", $releaseEndpoint,
             "--channel", $(if ($Profile -eq "production") { "stable" } else { "local" }),
             "--profile", $Profile
         )
+        if ($Profile -eq "production" -and -not [string]::IsNullOrWhiteSpace($artifactRootValue)) {
+            $releaseArgs += @("--artifact-root", $artifactRootValue)
+        }
         if (-not [string]::IsNullOrWhiteSpace($ReleaseNotes)) {
             $releaseArgs += @("--notes", $ReleaseNotes)
         }

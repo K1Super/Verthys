@@ -28,13 +28,13 @@ Verthys 2.6.1 仅 Windows（x64）。打包统一由 `build_production.ps1` 阶�
 
 ## 3. 签名现状
 
-当前构建未配置 Authenticode 代码签名，属本机阶段已知缺口：
+当前构建未配置 Authenticode 代码签名，这是允许的可选缺口：
 
 - `build_production.ps1` 与 `ci/`、`.github/workflows/core.yml` 均无 signtool 签名步骤。
-- `scripts/build_core.release.ps1:69` 注释声明 Authenticode 必须在本步骤之后进行，但未实际执行。
-- 本机 `local` profile 接受 Windows 未知发布者提示；外部分发前必须接入 Authenticode，并确保 NSIS 的 Authenticode 先于 updater `.sig` 生成。
+- 更新完整性由清单签名、安装包 minisign 签名、SHA256、size 与 PE 版本保证；缺少 Authenticode 不影响更新校验。
+- 未签名安装包会触发 Windows 未知发布者 / SmartScreen 提示，需要时可自愿补签。
 
-建议补全步骤（外部分发前）：用 `signtool sign /fd SHA256 /tr <时间戳服务> /td SHA256 /sha1 <证书指纹>` 对 `verthys.dll`、worker、主程序及 NSIS 安装包逐一签名；NSIS 签名后重新生成 updater `.sig`，再生成清单。
+可选补签步骤：用 `signtool sign /fd SHA256 /tr <时间戳服务> /td SHA256 /sha1 <证书指纹>` 对 `verthys.dll`、worker、主程序及 NSIS 安装包逐一签名；NSIS 签名后重新生成 updater `.sig`，再生成清单。
 
 ## 4. 分发方式与升级机制
 
@@ -57,4 +57,4 @@ Get-FileHash -Algorithm SHA256 ".\verthys-tauri\src-tauri\binaries\verthys-worke
 Get-FileHash -Algorithm SHA256 "<安装目录>\verthys-worker-x86_64-pc-windows-msvc.exe"
 ```
 
-3. 完整性自校验：DLL 内部 `.vsec` 基准（`.text/.rdata/.rhat` 的 HMAC-SHA256）与 `.rhat` 运行时函数哈希由核心 `integrity_verify_startup` / `runtime_hash` 在启动时自检；若被篡改将触发应急响应（详见 [SECURITY_DESIGN.md](SECURITY_DESIGN.md)）。构建期 worker 副本哈希对比如 `build_production.ps1:365-391`（`Get-FileSha256`），可作为“副本未被破坏”的构建侧依据。
+3. 完整性自校验：DLL 内部 `.vsec` 基准（`.text/.rdata/.rhat` 的 HMAC-SHA256）与 `.rhat` 运行时函数哈希由核心 `integrity_verify_startup` / `runtime_hash` 在启动时自检；若被篡改将触发应急响应（详见 [SECURITY_DESIGN.md](SECURITY_DESIGN.md)）。生产链路在打包前由 `scripts/lib/vsec.ps1` 注入 `.vsec` 基准（`build_production.ps1` 阶段 1.1 与 `scripts/build/build_core.release.ps1` 共用同一实现），注入后按最终字节重生成产物契约；构建期 worker 与 DLL 副本哈希对比见 `build_production.ps1` 阶段 3（`Get-FileSha256`），可作为“副本未被破坏”的构建侧依据。

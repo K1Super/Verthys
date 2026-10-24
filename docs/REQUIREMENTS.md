@@ -35,7 +35,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 
 1. **普通用户**：首次新建保险库（`verthys_create`）→ 录入账号/照片 → 锁定/解锁 → 导出备份。
 2. **安全管理员**：配置 SECURE 预设 + 设备绑定 → 观察 SecurityDashboard 防御闭环 7 路径 → 启用剪贴板隔离与 USB 影子。
-3. **开发者**：本地构建 `scripts/build_core.dev.ps1` → 跑 `verthys_tests.exe` 全量 → 对照 `CORE_API.md` 调用 29 个导出符号。
+3. **开发者**：本地构建 `scripts/build/build_core.dev.ps1` → 跑 `verthys_tests.exe` 全量 → 对照 `CORE_API.md` 调用 35 个导出符号（以 `core/verthys.def` 白名单为准）。
 
 ---## 3. 功能需求清单
 
@@ -177,7 +177,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 
 ## 4. 非功能需求清单（NFR）
 
-> 由 `docs/ENGINEERING_CONSTRAINTS.md` 转化而来，括号内标注对应条款号。
+> 由工程约束基线条款转化而来，括号内标注对应条款号。
 
 ### NFR-01 密码学算法安全（刚性条款 2.1）
 
@@ -195,13 +195,13 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 
 - **要求**：外部输入（文件、参数、网络）校验净化，防范注入/路径遍历/越界。
 - **现状佐证**：解析纪律 HMAC→AEAD→flatcc verifier 三层纵深 + 回绕安全分解（`verthys_container_v3.h`、`verthys_extent.c`）。
-- **验收**：fuzz 5 目标（superblock/partition/extent/sstable/import）冒烟零崩溃。
+- **验收**：单元与格式鲁棒性测试用例全量通过（`container/test_format_fuzz.c` 覆盖解析边界）。
 
 ### NFR-04 核心逻辑单元测试覆盖率 ≥ 80%（刚性条款 1.4）
 
 - **要求**：核心逻辑单元测试覆盖率不低于 80%。
-- **现状佐证**：`core/tests/` 六子域镜像 + `test_v3_property.c` 属性测试；全量 250/250 通过。
-- **验收**：`powershell -ExecutionPolicy Bypass -File scripts/build_core.dev.ps1 -NoPause` 全绿；`verthys_tests.exe` 出口码 0。
+- **现状佐证**：`core/tests/` 六子域镜像 + `test_v3_property.c` 属性测试；全量 316/316 通过。
+- **验收**：`powershell -ExecutionPolicy Bypass -File scripts/build/build_core.dev.ps1 -NoPause` 全绿；`verthys_tests.exe` 出口码 0。
 
 ### NFR-05 关键接口常规负载 P95 ≤ 200ms（刚性条款 1.4）
 

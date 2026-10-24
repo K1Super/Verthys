@@ -6,8 +6,8 @@
       "dangerousInsecureTransportProtocol": false,
       "allowedDownloadHosts": ["updates.verthys.example"],
       "authenticode": {
-        "require": true,
-        "revocation": true
+        "require": false,
+        "revocation": false
       },
       "allowDowngrades": false
     }

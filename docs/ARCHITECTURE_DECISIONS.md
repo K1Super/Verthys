@@ -116,7 +116,7 @@
 - **上下文**：enable_testing 置于子目录时，构建根无 CTestTestfile.cmake，`ctest --test-dir <build_root>` 报 "No tests were found" 且退出码 0（假绿）。
 - **备选项**：① 子目录 enable_testing；② 上提根 CMakeLists.txt。
 - **结论**：选 ②，`enable_testing()` 在 `add_subdirectory(core)` 之前调用。
-- **后果**：fuzz 冒烟门与 CI 从构建根即可发现全部测试。佐证：根 `CMakeLists.txt`（WP-10 注释）。
+- **后果**：CI 与本地 ctest 从构建根即可发现全部测试。佐证：根 `CMakeLists.txt`（WP-10 注释）。
 
 ### ADR-014 core 模块化重构（六域 31 组件）
 

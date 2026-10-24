@@ -1,0 +1,9 @@
+{
+  "name": "zxcvbn",
+  "version": "4.4.2",
+  "license": "MIT",
+  "upstreamFile": "dist/zxcvbn.js",
+  "upstreamSha256": "f42c651f40506acb6b662490f338dd47a5951d3312039c4ab8fe5090484f351a",
+  "vendoredSha256": "22732d6e51ca751cd0b320130a7e546f4e109a6d14f2807f5ca4608b7195ed3b",
+  "transform": "删除末尾一行 sourceMappingURL 注释（指向未随包分发的 sourcemap）；在文件首尾各加一行 ESM 包装（局部 module/exports 绑定与默认导出），使同一产物在主线程、Worker 与单测环境都能直接导入，不再依赖全局挂载。除此之外的字节与上游构建产物完全一致。"
+}

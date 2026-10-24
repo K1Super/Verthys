@@ -24,9 +24,9 @@ jobs:
         run: |
           & ".\ci\sync_version.ps1" -CheckOnly
           if ($LASTEXITCODE -ne 0) { throw "version drift" }
-          node scripts/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local.conf.json --profile local
+          node scripts/gates/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local.conf.json --profile local
           if ($LASTEXITCODE -ne 0) { throw "local updater profile failed" }
-          node --test scripts/make_updater_manifest.test.mjs
+          node --test scripts/release/make_updater_manifest.test.mjs
           if ($LASTEXITCODE -ne 0) { throw "manifest contract tests failed" }
 
       - name: Setup Rust (pinned by rust-toolchain.toml)
@@ -63,6 +63,26 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
           $dll = Get-ChildItem -Path build_ci -Recurse -Filter verthys.dll | Select-Object -First 1
           if (-not $dll) { throw "verthys.dll not found" }
+
+          # .vsec 完整性基准注入 + 契约刷新：与生产链路共用 scripts/lib 实现。
+          # 全零 .vsec 会被运行时视为开发构建而跳过启动验签；CI 物料必须与
+          # 发布口径一致，否则“源码复现”产出的安装包缺少完整性防线。
+          $workspace = $env:GITHUB_WORKSPACE
+          . (Join-Path $workspace "scripts\lib\vsec.ps1")
+          . (Join-Path $workspace "scripts\lib\artifacts.ps1")
+          Update-VsecBaseline -DllPath $dll.FullName
+          if (-not (Test-VsecBaseline -DllPath $dll.FullName)) {
+            throw ".vsec baseline verification failed after injection"
+          }
+          $contractPath = Join-Path (Split-Path $dll.FullName -Parent) "verthys.artifacts.json"
+          Write-VerthysArtifactContract `
+            -DllPath $dll.FullName `
+            -CmakeExe (Get-Command cmake.exe).Source `
+            -Generator "Ninja" `
+            -Config "Release" `
+            -SourceDir $workspace `
+            -OutPath $contractPath
+
           Copy-Item $dll.FullName "verthys-tauri/src-tauri/verthys.dll" -Force
 
       - name: Build and stage worker
@@ -107,7 +127,7 @@ jobs:
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $installer) { throw "installer not found" }
           $signature = "$($installer.FullName).sig"
-          node scripts/release_update.mjs `
+          node scripts/release/release_update.mjs `
             --installer $installer.FullName `
             --signature $signature `
             --endpoint http://127.0.0.1:8765/latest.json `
@@ -128,6 +148,12 @@ jobs:
           }
           if (@($names | Where-Object { $_ -like "*.exe" }).Count -ne 1) { throw "installer copy missing" }
           if (@($names | Where-Object { $_ -like "*.sig" }).Count -ne 1) { throw "signature copy missing" }
+          # 打包副本必须带 .vsec 完整性基准（与生产发布口径一致）
+          . (Join-Path $env:GITHUB_WORKSPACE "scripts\lib\vsec.ps1")
+          if (-not (Test-VsecBaseline -DllPath "verthys-tauri/src-tauri/verthys.dll")) {
+            throw "staged verthys.dll has no valid .vsec baseline"
+          }
+
           $manifest = Get-Content (Join-Path $release.FullName "latest.json") -Raw | ConvertFrom-Json
           $version = (Get-Content VERSION -Raw).Trim()
           if ($manifest.version -ne $version) { throw "manifest version mismatch" }

@@ -116,7 +116,7 @@
             <div class="field-row-head">
               <span class="field-index">{{ index + 1 }}</span>
               <input class="reg-input field-label" v-model="field.label" aria-label="字段名" />
-              <select class="reg-input reg-select field-kind" v-model="field.kind" aria-label="控件种类">
+              <select class="reg-input reg-select field-kind" :value="field.kind" aria-label="控件种类" @change="onFieldKindChange(field, $event)">
                 <option v-for="kind in fieldKinds" :key="kind.id" :value="kind.id">{{ kind.label }}</option>
               </select>
               <div class="field-tools">
@@ -240,6 +240,7 @@ import {
   VAULT_FIELD_KINDS,
   VAULT_TONES,
   createCustomFieldId,
+  createCustomRangeStartId,
   createCustomVaultTypeId,
   resolveVaultIcon,
 } from "../../../constants/vault_item_types";
@@ -259,7 +260,9 @@ const fieldKindLabels: Record<VaultFieldKind, string> = {
   password: "密码",
   multiline: "多行文本",
   date: "日期",
+  dateRange: "日期区间",
   select: "选项",
+  region: "地区",
   switch: "开关",
 };
 
@@ -355,9 +358,36 @@ const addType = (): void => {
 const addField = (): void => {
   const current = active.value;
   if (!current) return;
-  const used = current.fields.map((field) => field.id);
+  // 区间起始键与字段 id 共用落盘表：新字段 id 必须同时避开这两类键
+  const used = current.fields
+    .flatMap((field) => [field.id, field.rangeStartId ?? ""])
+    .filter((key) => key.length > 0);
   const field: VaultFieldDef = { id: createCustomFieldId("字段", used), label: "字段", kind: "text" };
   current.fields = [...current.fields, field];
+};
+
+/**
+ * 切换字段控件种类。
+ *
+ * 日期区间必须成对落盘：首次切到区间时生成起始键；离开区间时移除区间专属
+ * 声明，避免留下一对「有起始键却没有控件」的孤儿状态。字段 id 与起始键都
+ * 只在生成时赋值，之后不随字段改名。
+ */
+const onFieldKindChange = (field: VaultFieldDef, event: Event): void => {
+  const kind = (event.target as HTMLSelectElement).value as VaultFieldKind;
+  field.kind = kind;
+  if (kind === "dateRange") {
+    if (!field.rangeStartId) {
+      const used = (active.value?.fields ?? [])
+        .flatMap((item) => [item.id, item.rangeStartId ?? ""])
+        .filter((key) => key.length > 0);
+      field.rangeStartId = createCustomRangeStartId(field.id, used);
+    }
+    return;
+  }
+  delete field.rangeStartId;
+  delete field.rangeStartLabel;
+  delete field.rangeEndLabel;
 };
 
 const removeField = (index: number): void => {

@@ -6,7 +6,7 @@
 
 ---
 
-> 调用链约定：前端控制器 → Tauri command → worker actor（stdin JSON）→ core API（C ABI）→ 容器/密钥模块 → OS/存储。核心 API 契约见 [CORE_API.md](CORE_API.md)，桥接命令见 [TAURI_BRIDGE.md](TAURI_BRIDGE.md)。
+> 调用链约定：前端控制器 → Tauri command → worker actor（stdin JSON）→ core API（C ABI）→ 容器/密钥模块 → OS/存储。核心 API 契约见 [CORE_API.md](CORE_API.md)，桥接命令以 `verthys-tauri` 的 command 注册为准。
 
 ## 1. 解锁流程
 

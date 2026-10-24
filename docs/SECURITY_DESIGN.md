@@ -223,8 +223,8 @@ flowchart TB
 |---|---|---|
 | 安装包 minisign | 证明安装包字节来自发布者 | 内置更新公钥；插件下载阶段与 Rust 复验共用 |
 | 清单签名 | 证明版本、兼容、下载地址与哈希未被篡改 | 清单公钥；production profile 强制 |
-| Authenticode | 建立 Windows 系统信任与 SmartScreen 声誉 | 系统证书链；外部分发前强制 |
-| HTTPS | 保护清单与下载通道 | 系统 TLS 信任链 |
+| Authenticode | 建立 Windows 系统信任与 SmartScreen 声誉（可选） | 开启时使用系统证书链；默认关闭，不依赖付费证书 |
+| HTTPS | 保护清单与下载通道（默认） | 系统 TLS 信任链；零成本自建可显式放行 HTTP + IP |
 
 本机 `local` profile 只使用回环 HTTP 与安装包签名；它防网络、其他账户、误替换与损坏，不防同账户任意写入。production profile 通过 HTTPS、清单签名与鉴权提高门槛。
 

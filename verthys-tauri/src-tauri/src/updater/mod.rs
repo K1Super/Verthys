@@ -492,10 +492,12 @@ pub async fn updater_prepare(
 
     let url = reqwest::Url::parse(&session.manifest.download_url)
         .map_err(|_| UpdaterError::new("E_UPDATER_MANIFEST_INVALID", "下载地址无法解析", false))?;
+    // 明文下载必须由配置显式开启；开启后仍受主机白名单与全部字节校验约束。
+    let allow_insecure = session.channel == "local" || manifest::insecure_transport(&app);
     let spec = transport::DownloadSpec {
         url,
         expected_size: total,
-        allow_http: session.channel == "local",
+        allow_http: allow_insecure,
         allow_loopback: session.channel == "local",
         allowed_hosts: session.manifest.allowed_download_hosts.clone(),
         no_proxy: session.channel == "local",

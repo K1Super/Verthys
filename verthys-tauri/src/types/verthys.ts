@@ -221,12 +221,15 @@ export interface VaultEntry {
   kind: string;
   /** 字段值字典（键为字段 id） */
   data: Record<string, string>;
-  /** 敏感字段是否处于明文展示态 */
+  /** 敏感字段是否处于明文展示态（对条目内全部敏感字段统一生效） */
   secretVisible: boolean;
-  /** 敏感字段当前展示文本（掩码、已加密提示或明文） */
-  displaySecret: string;
-  /** 已解出的明文（供复制使用；未解出时为空） */
-  plainSecret?: string;
+  /**
+   * 已解出的敏感字段明文（键为字段 id）。
+   * 非独立加密字段的明文即载荷取值，不需要写入此表；独立加密字段在用户
+   * 输入密钥解密、或展示态重建后写入。隐藏展示态时必须清空，避免明文
+   * 在内存条目上驻留。
+   */
+  plainSecrets?: Record<string, string>;
   /**
    * 记录载荷不可读（解码失败 / 无任何字段值）。
    *

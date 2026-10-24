@@ -199,10 +199,10 @@
 
 <p style="color:#A8B2C0;margin:0 0 10px">仅构建核心 DLL（Release，跳过测试），并运行核心测试：</p>
 
-<pre style="background:#0E131B;border:1px solid #1E2733;border-radius:10px;padding:14px 18px;color:#C9D4E0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13.5px;line-height:1.7;overflow-x:auto;margin:0 0 16px"><code>powershell -ExecutionPolicy Bypass -File scripts\build_core.release.ps1
+<pre style="background:#0E131B;border:1px solid #1E2733;border-radius:10px;padding:14px 18px;color:#C9D4E0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13.5px;line-height:1.7;overflow-x:auto;margin:0 0 16px"><code>powershell -ExecutionPolicy Bypass -File scripts\build\build_core.release.ps1
 ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
 
-<p style="color:#5D6B80;font-size:13px;margin:0 0 4px">完整流程见 <a href="docs/GETTING_STARTED.md" style="color:#D9A94E;text-decoration:none">docs/GETTING_STARTED.md</a> 与 <a href="docs/BUILD.md" style="color:#D9A94E;text-decoration:none">docs/BUILD.md</a>；模糊测试开启方式见 <a href="docs/TESTING.md" style="color:#D9A94E;text-decoration:none">docs/TESTING.md</a>（<code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">-DVERTHYS_ENABLE_FUZZ=ON</code>）。</p>
+<p style="color:#5D6B80;font-size:13px;margin:0 0 4px">完整流程见 <a href="docs/GETTING_STARTED.md" style="color:#D9A94E;text-decoration:none">docs/GETTING_STARTED.md</a> 与 <a href="docs/BUILD.md" style="color:#D9A94E;text-decoration:none">docs/BUILD.md</a>。</p>
 
 <div style="display:flex;align-items:baseline;gap:16px;border-bottom:1px solid #1E2733;padding-bottom:10px;margin:44px 0 16px">
   <span style="font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;color:#D9A94E;letter-spacing:2px">§ 07</span>
@@ -233,8 +233,8 @@ ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
   </tr>
   <tr>
     <td style="border:1px solid #1E2733;background:#0E131B;padding:11px 16px;color:#E7EBF0">质量</td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:11px 16px;color:#A8B2C0">CTest · libFuzzer · CI（windows-latest）</td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:11px 16px;color:#5D6B80">5 个 fuzz 目标各 10 分钟</td>
+    <td style="border:1px solid #1E2733;background:#0A0D12;padding:11px 16px;color:#A8B2C0">CTest · CI（windows-latest）</td>
+    <td style="border:1px solid #1E2733;background:#0A0D12;padding:11px 16px;color:#5D6B80">全量 C 测试 + 两个 ACG 专项 + 导出面门</td>
   </tr>
 </table>
 
@@ -294,7 +294,7 @@ ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
 <ul style="margin:0 0 4px;padding-left:22px">
   <li style="color:#A8B2C0;margin:6px 0">单分支开发：<code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">v3-upgrade</code> 为当前工作分支，<code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">master</code> 为保留基线。</li>
   <li style="color:#A8B2C0;margin:6px 0">提交规范：Conventional Commits 中文格式 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">type(scope): 摘要</code>。</li>
-  <li style="color:#A8B2C0;margin:6px 0">CI 质量门：core 构建 + 全部 C 测试 · libFuzzer 5 目标持续模糊 · 导出面白名单比对，任一不过即门红。</li>
+  <li style="color:#A8B2C0;margin:6px 0">CI 质量门：core 构建 + 全部 C 测试 · 导出面白名单比对，任一不过即门红。</li>
   <li style="color:#A8B2C0;margin:6px 0">许可：专有软件，© 2026 K1Super（<a href="LICENSE" style="color:#D9A94E;text-decoration:none">LICENSE</a>）；第三方组件清单见 <a href="docs/THIRD_PARTY.md" style="color:#D9A94E;text-decoration:none">docs/THIRD_PARTY.md</a>。</li>
   <li style="color:#A8B2C0;margin:6px 0">贡献与评审流程：<a href="CONTRIBUTING.md" style="color:#D9A94E;text-decoration:none">CONTRIBUTING.md</a>。</li>
 </ul>

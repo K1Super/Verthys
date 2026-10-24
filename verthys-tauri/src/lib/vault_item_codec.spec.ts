@@ -144,6 +144,46 @@ describe("条目数据投影与账号字段映射", () => {
     expect(data).toEqual({ platform: "示例平台", username: "", password: "", encrypted: "", note: "" });
   });
 
+  it("日期区间按声明成对落盘：结束键为字段 id，起始键为 rangeStartId", () => {
+    const idcard = getBuiltinVaultType("idcard")!;
+    const data = buildVaultItemData(idcard, {
+      name: "张三",
+      number: "110101199001010011",
+      validFrom: "2015-01-01",
+      expiry: "2035-01-01",
+      note: "",
+    });
+    expect(data).toEqual({
+      name: "张三",
+      number: "110101199001010011",
+      validFrom: "2015-01-01",
+      expiry: "2035-01-01",
+      note: "",
+    });
+  });
+
+  it("银行卡模板不声明日期字段：历史 expiry 不会被模板带出", () => {
+    const bankcard = getBuiltinVaultType("bankcard")!;
+    const data = buildVaultItemData(bankcard, {
+      bank: "示例银行",
+      number: "6222",
+      type: "储蓄卡",
+      holder: "张三",
+      cvv: "123",
+      note: "",
+      expiry: "2030-01-01",
+    });
+    expect(data).toEqual({
+      bank: "示例银行",
+      number: "6222",
+      type: "储蓄卡",
+      holder: "张三",
+      cvv: "123",
+      note: "",
+    });
+    expect(Object.keys(data)).not.toContain("expiry");
+  });
+
   it("账号字段还原：仅「1」视为已独立加密，缺失键回落空串", () => {
     expect(vaultDataToAccountFields({ platform: "p", username: "u", password: "c", encrypted: "1" })).toEqual({
       platform: "p",

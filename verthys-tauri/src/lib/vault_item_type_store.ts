@@ -105,6 +105,10 @@ function pickExistingFieldIds(value: unknown, existing: ReadonlySet<string>): st
  *
  * 选项缺失的 select 字段回退为文本控件：让界面仍能录入，而不是渲染出
  * 无法选择的空下拉。
+ *
+ * 日期区间缺起始键（或起始键与结束键相同）时降级为单日期控件：
+ * 区间必须成对落盘，残缺的区间声明会让「起始日」无处安放；降级后至少
+ * 保留结束日（到期读数仍可工作）。
  */
 function sanitizeVaultField(raw: unknown): VaultFieldDef | null {
   if (!isPlainObject(raw)) return null;
@@ -119,17 +123,31 @@ function sanitizeVaultField(raw: unknown): VaultFieldDef | null {
   const options = toStringArray(raw.options).filter((opt) => opt.length > 0);
   if (kind === "select" && options.length === 0) kind = "text";
 
+  let rangeStartId = "";
+  if (kind === "dateRange") {
+    rangeStartId = typeof raw.rangeStartId === "string" ? raw.rangeStartId.trim() : "";
+    if (!rangeStartId || rangeStartId === id) kind = "date";
+  }
+
   const field: VaultFieldDef = { id, label, kind };
   if (raw.transient === true) field.transient = true;
   if (raw.carrier === true) field.carrier = true;
   if (raw.required === true) field.required = true;
   if (raw.sensitive === true) field.sensitive = true;
   if (kind === "select" && options.length > 0) field.options = options;
+  if (kind === "dateRange") {
+    field.rangeStartId = rangeStartId;
+    const startLabel = typeof raw.rangeStartLabel === "string" ? raw.rangeStartLabel.trim() : "";
+    const endLabel = typeof raw.rangeEndLabel === "string" ? raw.rangeEndLabel.trim() : "";
+    if (startLabel) field.rangeStartLabel = startLabel;
+    if (endLabel) field.rangeEndLabel = endLabel;
+  }
   if (kind === "multiline") {
     const rows = typeof raw.multilineRows === "number" ? raw.multilineRows : 0;
     field.multilineRows = Number.isInteger(rows) && rows >= 1 && rows <= 12 ? rows : 2;
   }
   if (typeof raw.hint === "string" && raw.hint.length > 0) field.hint = raw.hint;
+  if (typeof raw.group === "string" && raw.group.trim().length > 0) field.group = raw.group.trim();
   return field;
 }
 
@@ -160,6 +178,21 @@ export function sanitizeVaultTypeDef(raw: unknown): VaultTypeDef | null {
     fields.push(field);
   }
   if (fields.length === 0) return null;
+
+  /* 区间起始键与字段 id 共用同一张落盘表：任何键位冲突都会让两个控件写同一个
+     键。字段 id 优先（它是主键），冲突的区间降级为单日期控件。 */
+  const storageKeys = new Set(fields.map((field) => field.id));
+  for (const field of fields) {
+    if (field.kind !== "dateRange" || !field.rangeStartId) continue;
+    if (storageKeys.has(field.rangeStartId)) {
+      field.kind = "date";
+      delete field.rangeStartId;
+      delete field.rangeStartLabel;
+      delete field.rangeEndLabel;
+      continue;
+    }
+    storageKeys.add(field.rangeStartId);
+  }
 
   const icon = typeof raw.icon === "string" && isVaultIconId(raw.icon) ? raw.icon : DEFAULT_VAULT_ICON_ID;
   const tone = VALID_TONES.includes(raw.tone as VaultTone) ? (raw.tone as VaultTone) : "accent";
@@ -269,6 +302,25 @@ export function validateVaultTypeDefs(
       }
       if (field.kind === "select" && (field.options ?? []).length === 0) {
         errors.push(`${who}：选项字段必须提供候选项（${field.label || field.id}）`);
+      }
+    }
+
+    /* 区间起始键与字段 id 共用落盘表，必须逐项查重（此时 fieldIds 已收齐）。 */
+    const rangeStartIds = new Set<string>();
+    for (const field of fields) {
+      if (field.kind !== "dateRange") continue;
+      const startId = typeof field.rangeStartId === "string" ? field.rangeStartId.trim() : "";
+      const fieldName = field.label || field.id;
+      if (!startId) {
+        errors.push(`${who}：日期区间字段必须声明起始字段 id（${fieldName}）`);
+      } else if (startId === field.id) {
+        errors.push(`${who}：日期区间起始字段 id 不能与字段 id 相同（${fieldName}）`);
+      } else if (fieldIds.has(startId)) {
+        errors.push(`${who}：日期区间起始字段 id 与其它字段冲突（${fieldName}）`);
+      } else if (rangeStartIds.has(startId)) {
+        errors.push(`${who}：日期区间起始字段 id 重复（${fieldName}）`);
+      } else {
+        rangeStartIds.add(startId);
       }
     }
 

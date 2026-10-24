@@ -5,9 +5,9 @@
   卡片模板（约 70 行）。两份模板必然漂移 —— 一处改了卡片结构、另一处忘改，
   同一模块内出现两种卡片。抽成单一源后，两条路径只保留容器差异。
 
-  版式安全（对应虚拟滚动固定行高）：次行最多展示 2 项，其余以「+N」并入
-  同一行；操作区由 margin-top:auto 贴底。内容层因此恒在 172px 行高内，
-  不会被虚拟网格的 overflow:hidden 裁掉操作按钮。
+  版式安全：卡片固定为原始高度，摘要行、到期读数与首个敏感行按原版式紧凑
+  排列；完整信息由整卡点击打开的详情窗口呈现。操作区由 margin-top:auto
+  贴底，详情入口与编辑/删除互不抢占。
 
   未知类型与损坏条目的呈现裁定：
     - 类型定义缺失 → 不展示任何字段名与字段值（类型声明是「哪些字段敏感」的
@@ -19,7 +19,14 @@
 <template>
   <div
     class="verthys-card glass reveal-item"
+    :class="{ 'is-clickable': canOpenDetail }"
     :style="{ '--reveal-delay': `${revealDelay}ms` }"
+    :role="canOpenDetail ? 'button' : undefined"
+    :tabindex="canOpenDetail ? 0 : undefined"
+    :aria-label="canOpenDetail ? detailAriaLabel : undefined"
+    @click="onCardClick"
+    @keydown.enter.self.prevent="onCardClick"
+    @keydown.space.self.prevent="onCardClick"
     @mousemove="onCardMove"
     @mouseleave="onCardLeave"
   >
@@ -46,59 +53,28 @@
       原类型已删除 · {{ view.fieldCount }} 项数据待重新指派
     </div>
 
-    <!-- 账号类型：沿用既有版式（平台 / 账户 / 密码行） -->
-    <template v-else-if="isAccount">
-      <div class="username">{{ entry.data.username }}</div>
-      <div class="secret-row">
-        <span class="secret-text">{{ entry.displaySecret }}</span>
-        <div class="secret-actions">
-          <button
-            class="icon-btn"
-            type="button"
-            @click="$emit('toggle')"
-            :aria-label="entry.secretVisible ? '隐藏密码' : '显示密码'"
-            v-tip="entry.secretVisible ? '隐藏' : '显示'"
-          >
-            <svg v-if="!entry.secretVisible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-          </button>
-          <button
-            class="icon-btn"
-            type="button"
-            @click="$emit('copy')"
-            aria-label="复制密码"
-            v-tip="'复制'"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          </button>
-        </div>
-      </div>
-    </template>
-
-    <!-- 其余类型：主标题 + 次行（最多 2 项 + 余量并入）+ 到期读数 + 敏感行 -->
+    <!-- 正常条目：摘要行 + 到期读数 + 首个敏感行；完整信息由整卡详情承载 -->
     <template v-else>
-      <div class="card-lines">
-        <div v-for="(line, i) in shownLines" :key="line.fieldId" class="card-line">
+      <div v-if="view.lines.length > 0 || view.expiry" class="card-lines">
+        <div v-for="line in view.lines" :key="line.fieldId" class="card-line">
           <span class="line-label">{{ line.label }}</span>
-          <span class="line-value">{{ line.value }}</span>
-          <span v-if="i === shownLines.length - 1 && hiddenLineCount > 0" class="line-more">
-            +{{ hiddenLineCount }}
-          </span>
+          <span class="line-value" v-tip="line.value">{{ line.value }}</span>
         </div>
         <div v-if="view.expiry" class="card-line">
           <span class="line-label">{{ view.expiry.label }}</span>
           <span class="card-readout" :style="readoutStyle">{{ view.expiry.text }}</span>
         </div>
       </div>
+
       <div v-if="view.secret" class="secret-row">
         <span class="secret-label">{{ view.secret.label }}</span>
-        <span class="secret-text">{{ entry.displaySecret }}</span>
+        <span class="secret-text">{{ secretDisplay(view.secret) }}</span>
         <div class="secret-actions">
           <button
             class="icon-btn"
             type="button"
-            @click="$emit('toggle')"
-            :aria-label="entry.secretVisible ? '隐藏敏感字段' : '显示敏感字段'"
+            @click.stop="$emit('toggle', view.secret.fieldId)"
+            :aria-label="entry.secretVisible ? `隐藏${view.secret.label}` : `显示${view.secret.label}`"
             v-tip="entry.secretVisible ? '隐藏' : '显示'"
           >
             <svg v-if="!entry.secretVisible" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -107,8 +83,8 @@
           <button
             class="icon-btn"
             type="button"
-            @click="$emit('copy')"
-            aria-label="复制敏感字段"
+            @click.stop="$emit('copy', view.secret.fieldId)"
+            :aria-label="`复制${view.secret.label}`"
             v-tip="'复制'"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -122,9 +98,9 @@
         v-if="!entry.corrupt"
         class="mini-btn"
         type="button"
-        @click="$emit('edit')"
+        @click.stop="$emit('edit')"
       >{{ view.unknown ? "重新指派" : "编辑" }}</button>
-      <button class="mini-btn danger" type="button" @click="$emit('remove')">删除</button>
+      <button class="mini-btn danger" type="button" @click.stop="$emit('remove')">删除</button>
     </div>
 
     <div class="card-shine"></div>
@@ -134,31 +110,28 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { VaultEntry } from "../../../types/verthys";
-import type { VaultCardView } from "../../../lib/vault_item_card";
-import { VAULT_TONE_RGB_VARS, vaultReadoutColorVar } from "../../../lib/vault_item_card";
+import type { VaultCardSecret, VaultCardView } from "../../../lib/vault_item_card";
+import {
+  VAULT_TONE_RGB_VARS,
+  vaultReadoutColorVar,
+  vaultSecretText,
+} from "../../../lib/vault_item_card";
 import { useCardShine } from "../../../composables/useCardShine";
 import SafeSvgIcon from "../../common/SafeSvgIcon.vue";
-
-/**
- * 卡片次行展示上限（与 172px 虚拟行高对齐）。
- * 到期读数与敏感行各占一行，故次行收在 2 项；余量以「+N」并入末行。
- */
-const MAX_CARD_LINES = 2;
 
 const props = defineProps<{
   /** 内存条目（含展示态） */
   entry: VaultEntry;
   /** 预先构建的卡片视图 */
   view: VaultCardView;
-  /** 是否为账号类型（保留既有版式） */
-  isAccount: boolean;
   /** 步入错峰延迟（毫秒） */
   revealDelay: number;
 }>();
 
-defineEmits<{
-  (e: "toggle"): void;
-  (e: "copy"): void;
+const emit = defineEmits<{
+  (e: "detail"): void;
+  (e: "toggle", fieldId: string): void;
+  (e: "copy", fieldId: string): void;
   (e: "edit"): void;
   (e: "remove"): void;
 }>();
@@ -172,14 +145,44 @@ const headTitle = computed(() => {
   return props.view.title;
 });
 
-const locked = computed(() =>
-  props.isAccount
-    ? props.entry.data.encrypted === "1"
-    : props.view.secret?.encrypted === true,
+/* 只有可读且类型已知的条目才承接整卡点击：损坏载荷不可读，未知类型需先
+   重新指派，两者都不存在可展示的完整信息。 */
+const canOpenDetail = computed(() => !props.entry.corrupt && !props.view.unknown);
+const detailAriaLabel = computed(
+  () => `查看${props.view.title || props.view.typeLabel}全部信息`,
 );
 
-const shownLines = computed(() => props.view.lines.slice(0, MAX_CARD_LINES));
-const hiddenLineCount = computed(() => Math.max(0, props.view.lines.length - MAX_CARD_LINES));
+/** 整卡点击/回车打开详情；操作键与敏感键以 .stop 阻断冒泡 */
+const onCardClick = (): void => {
+  if (!canOpenDetail.value) return;
+  // 正在拖选卡面文字时不抢打开详情：用户的意图是选区而非进入详情
+  if (window.getSelection()?.toString().trim()) return;
+  emit("detail");
+};
+
+/* 独立加密徽章：载荷标记与任一敏感行的加密态共同决定（账号密码为唯一
+   可独立加密的字段，其余类型的敏感行恒为明文） */
+const locked = computed(
+  () =>
+    props.entry.data.encrypted === "1" ||
+    props.view.secrets.some((secret) => secret.encrypted),
+);
+
+/**
+ * 敏感行的展示文本。
+ *
+ * 未处于展示态时一律掩码（已加密字段给出「已加密」）；处于展示态时取
+ * 解出的明文（独立加密字段由密钥窗口写入 plainSecrets），非加密字段的
+ * raw 本身就是明文。绝不在未展示态回显 raw —— 那等于把密文或明文直接
+ * 铺在卡面上。
+ */
+const secretDisplay = (secret: VaultCardSecret): string =>
+  vaultSecretText({
+    visible: props.entry.secretVisible,
+    plain: props.entry.plainSecrets?.[secret.fieldId],
+    encrypted: secret.encrypted,
+    raw: secret.raw,
+  });
 
 const badgeStyle = computed<Record<string, string>>(() => ({
   "--tone-rgb": `var(${VAULT_TONE_RGB_VARS[props.view.tone]})`,
@@ -196,11 +199,16 @@ const readoutStyle = computed<Record<string, string>>(() => {
 </script>
 
 <style scoped>
-/* 卡片：撑满虚拟槽位 / 网格行高，操作区贴底 */
+/* 卡片：撑满固定槽位；可读条目整卡可点击查看详情 */
 .verthys-card {
   display: flex;
   flex-direction: column;
   height: 100%;
+}
+.verthys-card.is-clickable { cursor: pointer; }
+.verthys-card.is-clickable:focus-visible {
+  outline: 1px solid var(--border-hover);
+  outline-offset: 2px;
 }
 
 /* 操作区：贴底紧凑簇（贴底由 margin-top:auto 承担，间距显式收紧到 2px） */
@@ -263,14 +271,7 @@ const readoutStyle = computed<Record<string, string>>(() => {
   );
 }
 
-/* 用户名行 */
-.username {
-  font-size: 12px; color: var(--text-secondary);
-  margin-bottom: 8px; font-family: var(--font);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-
-/* 类型化次行：标签 + 取值紧凑排布（最多两行 + 余量标记） */
+/* 类型化摘要行：标签 + 取值紧凑排布（每个字段占一行，超长截断） */
 .card-lines {
   display: flex; flex-direction: column; gap: 4px;
   margin-bottom: 8px;
@@ -287,22 +288,17 @@ const readoutStyle = computed<Record<string, string>>(() => {
   color: var(--text-secondary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
 }
-/* 余量标记：并入末行，不额外占行高 */
-.line-more {
-  flex-shrink: 0; font-size: 10px; font-family: var(--font-mono);
-  color: var(--text-muted);
+
+/* 敏感行标签：类型化卡片的敏感行带字段名 */
+.secret-label {
+  flex-shrink: 0; font-size: 10.5px; letter-spacing: 0.5px;
+  color: var(--text-muted); font-family: var(--font);
 }
 
 /* 未知类型 / 损坏载荷的状态行（不含任何字段取值） */
 .card-state {
   margin-bottom: 8px;
   font-size: 11px; line-height: 1.5; letter-spacing: 0.3px;
-  color: var(--text-muted); font-family: var(--font);
-}
-
-/* 敏感行标签：类型化卡片的敏感行带字段名（账号卡片沿用无标签版式） */
-.secret-label {
-  flex-shrink: 0; font-size: 10.5px; letter-spacing: 0.5px;
   color: var(--text-muted); font-family: var(--font);
 }
 

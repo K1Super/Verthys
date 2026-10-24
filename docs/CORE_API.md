@@ -25,7 +25,7 @@
 - 导出宏：`VERTHYS_API` 在 Windows 下**恒为空**（不再携带 `__declspec(dllexport/dllimport)`）。
   符号导出**唯一**由链接器 `/DEF:verthys.def` 白名单管控；未列入 `.def` 的接口一律不可达。
   消费方（verthys-worker）经 `libloading` 按名运行时解析，不依赖导入库。
-- 版本宏：`VERTHYS_API_VERSION = 0x000Bu`，调用方可用 `#if` 做编译期能力判断。
+- 版本宏：`VERTHYS_API_VERSION = 0x000Eu`，调用方可用 `#if` 做编译期能力判断。
 
 ## 3. 不透明句柄 `VerthysHandle`
 
@@ -373,8 +373,8 @@ if (r != VERTHYS_OK) {
 ## 16. 符号前缀与旧符号残留
 
 - 所有公开符号前缀均为 `Verthys_`。全仓源码/头文件中**未发现**旧 `Vault_` 前缀残留
-  （仅在 `docs/archive/Verthys品牌整改验证交付报告.md` 中出现 4 处历史记录，非代码）。
-- 导出白名单 `core/verthys.def` 共 29 个符号，与头文件声明一一对应。
+  （历史归档报告中出现 4 处历史记录，非代码）。
+- 导出白名单 `core/verthys.def` 共 35 个符号，与头文件声明一一对应。
 - 名称遗留（供整改参考）：`VerthysRecordType` 中 `VERTHYS_RECORD_FILE_VERTHYS` 语义为“文件保险箱类数据”，
   命名冗余但属源码现状，本文档照实记录，未改代码。
 

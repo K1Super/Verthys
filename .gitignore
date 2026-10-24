@@ -1,9 +1,9 @@
-# Build output
-build/
-build_dev/
-build_*/
-out/
-cmake-build-*/
+# Build output (root-anchored: keep nested source dirs such as scripts/build trackable)
+/build/
+/build_dev/
+/build_*/
+/out/
+/cmake-build-*/
 
 # Rust build output
 target/

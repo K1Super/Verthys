@@ -11,7 +11,6 @@ import {
   VAULT_TONE_RGB_VARS,
   VAULT_UNKNOWN_TYPE_LABEL,
   buildVaultCardView,
-  findCardSecretField,
   vaultExpiryReadout,
   vaultReadoutColorVar,
   vaultSearchText,
@@ -20,6 +19,7 @@ import { getBuiltinVaultType, type VaultTypeDef, type VaultTone } from "../const
 
 const account = getBuiltinVaultType("account")!;
 const idcard = getBuiltinVaultType("idcard")!;
+const passport = getBuiltinVaultType("passport")!;
 const bankcard = getBuiltinVaultType("bankcard")!;
 const certificate = getBuiltinVaultType("certificate")!;
 const address = getBuiltinVaultType("address")!;
@@ -55,7 +55,7 @@ describe("卡片视图映射", () => {
     const view = buildVaultCardView({ name: "张三", number: "110101199001010011" }, idcard);
     expect(view.secret).toEqual({
       fieldId: "number",
-      label: "号码",
+      label: "身份号码",
       encrypted: false,
       raw: "110101199001010011",
     });
@@ -71,23 +71,102 @@ describe("卡片视图映射", () => {
     expect(JSON.stringify(view.lines)).not.toContain("110101");
   });
 
-  it("银行卡的敏感行为卡号，安全码不进入卡片视图", () => {
-    expect(findCardSecretField(bankcard)!.id).toBe("number");
+  it("银行卡的敏感行包含卡号与安全码，且安全码不进入明文次行", () => {
     const view = buildVaultCardView(
-      { bank: "示例银行", number: "6222", expiry: "", cvv: "123" },
+      { bank: "示例银行", number: "6222", type: "储蓄卡", holder: "张三", cvv: "123", expiry: "2030-01-01" },
       bankcard,
     );
     expect(view.secret!.fieldId).toBe("number");
-    expect(view.lines).toEqual([]);
-    expect(JSON.stringify(view)).not.toContain("123");
+    expect(view.secrets.map((secret) => secret.fieldId)).toEqual(["number", "cvv"]);
+    expect(view.secrets.map((secret) => secret.label)).toEqual(["卡号", "安全码"]);
+    expect(view.lines).toEqual([
+      { fieldId: "type", label: "卡类型", value: "储蓄卡", sensitive: false },
+      { fieldId: "holder", label: "持卡人", value: "张三", sensitive: false },
+    ]);
+    // 安全码只作为敏感行存在（默认掩码），绝不进入明文次行
+    expect(JSON.stringify(view.lines)).not.toContain("123");
+    // 银行卡模板不声明日期字段：历史载荷即便带有 expiry，也不产生到期读数
+    expect(view.expiry).toBeNull();
+  });
+
+  it("护照标准模板：护照号码为敏感行，类型与国家为次行，有效期取区间结束日", () => {
+    const view = buildVaultCardView(
+      {
+        name: "张三",
+        number: "E12345678",
+        type: "普通护照",
+        country: "中国",
+        issueDate: "2020-03-01",
+        expiry: "2050-03-01",
+      },
+      passport,
+    );
+    expect(view.secret).toMatchObject({ fieldId: "number", label: "护照号码" });
+    expect(view.lines).toEqual([
+      { fieldId: "type", label: "护照类型", value: "普通护照", sensitive: false },
+    ]);
+    // 有效期为「签发 → 到期」区间，卡片读数只看结束日（与筛选、排序同源）
+    expect(view.expiry).toMatchObject({ label: "有效期", tone: "valid" });
+  });
+
+  it("护照卡片只保留摘要字段，完整字段由详情窗口承载", () => {
+    const view = buildVaultCardView(
+      {
+        name: "张三",
+        number: "E12345678",
+        type: "普通护照",
+        country: "中国",
+        nationality: "中国",
+        birthDate: "1990-01-01",
+        gender: "男",
+        birthPlace: "北京市",
+        issuePlace: "北京市",
+        authority: "中华人民共和国公安部出入境管理局",
+        note: "备用证件",
+        expiry: "2050-03-01",
+      },
+      passport,
+    );
+    expect(view.lines.map((line) => line.fieldId)).toEqual(["type"]);
+    expect(view.secrets.map((secret) => secret.fieldId)).toEqual(["number"]);
+  });
+
+  it("地址卡片只保留省市区/姓名/电话摘要，其余字段由详情窗口承载", () => {
+    const view = buildVaultCardView(
+      {
+        name: "家",
+        region: "广东省/深圳市/南山区",
+        recipient: "张三",
+        phone: "13800138000",
+        detail: "科技园南区 8 栋 801",
+        postalCode: "518000",
+        note: "工作日送达",
+      },
+      address,
+    );
+    expect(view.lines.map((line) => line.fieldId)).toEqual([
+      "region",
+      "recipient",
+      "phone",
+    ]);
+    expect(view.lines.find((line) => line.fieldId === "region")).toMatchObject({
+      label: "省市区",
+    });
+    expect(view.lines.find((line) => line.fieldId === "recipient")).toMatchObject({
+      label: "姓名",
+    });
+    expect(view.lines.find((line) => line.fieldId === "phone")).toMatchObject({
+      label: "电话",
+    });
+    expect(view.secrets).toEqual([]);
   });
 
   it("承载长文本凭据的类型以该字段作为敏感行，次行保留其余可直读字段", () => {
-    expect(findCardSecretField(certificate)!.id).toBe("content");
     const view = buildVaultCardView(
       { name: "站点证书", certType: "SSL/TLS", expiry: "", content: "-----BEGIN" },
       certificate,
     );
+    expect(view.secret).toMatchObject({ fieldId: "content", label: "内容" });
     expect(view.lines).toEqual([
       { fieldId: "certType", label: "类型", value: "SSL/TLS", sensitive: false },
     ]);
@@ -121,10 +200,14 @@ describe("卡片视图映射", () => {
     expect(view.fieldCount).toBe(0);
   });
 
-  it("敏感行仅取首个敏感字段，且不取仅用于窗口交互的字段", () => {
+  it("敏感行排除仅用于窗口交互的 transient 字段，全部敏感字段进入 secrets", () => {
     // 账号的独立密钥字段声明为 transient，不得成为卡片敏感行
-    const view = buildVaultCardView({ platform: "p", encKey: "不应出现" }, account);
-    expect(view.secret!.fieldId).toBe("password");
+    const view = buildVaultCardView(
+      { platform: "p", password: "明文密码", encKey: "不应出现" },
+      account,
+    );
+    expect(view.secret).toMatchObject({ fieldId: "password" });
+    expect(view.secrets.map((secret) => secret.fieldId)).toEqual(["password"]);
   });
 });
 
@@ -230,7 +313,12 @@ describe("自定义类型与内置类型同构", () => {
     };
     const view = buildVaultCardView({ title: "甲", sub: "乙", secret: "丙" }, custom);
     expect(view.title).toBe("甲");
-    expect(view.lines[0]).toEqual({ fieldId: "sub", label: "副标题", value: "乙", sensitive: false });
+    expect(view.lines[0]).toEqual({
+      fieldId: "sub",
+      label: "副标题",
+      value: "乙",
+      sensitive: false,
+    });
     expect(view.secret!.raw).toBe("丙");
     expect(view.expiry).toBeNull();
   });
