@@ -193,6 +193,11 @@ typedef enum {
      * 即可成功；区别于 VERTHYS_ERR_LOCKED：后者是容器自身密码学锁定态。
      * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
     VERTHYS_ERR_CONTAINER_BUSY = 0x00000015u,
+    /* 调用方未被授权加载本 DLL（API 版本 0x000E 扩展）：
+     * 宿主进程主模块或 verthys.dll 本身缺少有效的发布者 Authenticode
+     * 签名，Verthys_Init 在任何密钥/文件操作之前即拒绝。
+     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+    VERTHYS_ERR_UNAUTHORIZED = 0x00000016u,
     VERTHYS_ERR_INTERNAL = 0xFFFFFFFFu   /* 未归类的底层内部异常 */
 } VerthysResult;
 

@@ -11,7 +11,7 @@
 import { ref, type Ref, type ShallowRef } from "vue";
 import {
   deleteAndPersistBatch, invalidateSummaryRecord, invalidateFullRecord, invalidateScannedRecord,
-  getSummaryIdsByType, getRecordsDataB64Batch,
+  getSummaryIdsByType, getRecordsDataB64Batch, moduleKeyReadyRef,
 } from "../../lib/keyManager";
 import {
   computeFileHash, bytesToHex, type PhotoMeta,
@@ -31,6 +31,7 @@ import {
   runPhotoRepack, type PhotoMetaLike, type RepackProgress, type RepackSignal,
 } from "./repack";
 import { decryptChunksPreferWorker } from "../../workers/photo-decrypt-bridge";
+import { createSlimFileKeys } from "../../lib/module_crypto";
 import { createLogger } from "../../utils/logger";
 
 const log = createLogger("photo-repack");
@@ -39,8 +40,6 @@ const log = createLogger("photo-repack");
 export interface UsePhotoRepackParams {
   /** 照片列表（迁移完成后原位替换记录引用） */
   photos: ShallowRef<PhotoEntry[]>;
-  /** 照片模块独立密钥 */
-  photoKey: Ref<string>;
   /** 是否处于 Tauri 环境 */
   isTauri: boolean;
   /** 导入流水线（重打包复用其外置写入链路与会话） */
@@ -61,7 +60,7 @@ export interface RepackState {
 }
 
 export function usePhotoRepack(params: UsePhotoRepackParams) {
-  const { photos, photoKey, isTauri, getPipeline, showToast, showError } = params;
+  const { photos, isTauri, getPipeline, showToast, showError } = params;
 
   /** 写入布局开关是否允许重打包（默认关：既有布局下不提供迁移入口） */
   const repackAvailable = ref(PHOTO_WRITE_FMT === PHOTO_FMT_SLIM);
@@ -143,7 +142,7 @@ export function usePhotoRepack(params: UsePhotoRepackParams) {
       showError("写入布局开关未开启（默认既有布局），重打包不可用");
       return;
     }
-    if (!photoKey.value) {
+    if (!moduleKeyReadyRef.value.photo) {
       showError("模块密钥不可用，请重新验证后重试");
       return;
     }
@@ -176,20 +175,21 @@ export function usePhotoRepack(params: UsePhotoRepackParams) {
           listMetaIds: () => getSummaryIdsByType(TYPE_PHOTO_META),
           readRecords: (ids) => getRecordsDataB64Batch(ids),
           decryptMeta: async (metaB64, label) => {
-            const { meta } = await decryptMetaPreferWorker(metaB64, photoKey.value, label);
+            const { meta } = await decryptMetaPreferWorker(metaB64, label);
             return meta;
           },
           decryptChunks: async (metaLike, label) => {
             const meta = metaLike as PhotoMeta;
-            const refs = await resolveChunkRefs(meta, photoKey.value, label);
+            const refs = await resolveChunkRefs(meta, label);
             const { ciphers, missing } = await loadChunkCiphers(refs);
             if (missing > 0 || ciphers.length === 0) {
               throw new Error(`源数据块不完整（缺失 ${missing} 块）`);
             }
-            return decryptChunksPreferWorker(ciphers, photoKey.value, meta.fileHash, label);
+            return decryptChunksPreferWorker(ciphers, meta.fileHash, label);
           },
           writeSlimPhoto: async (metaLike, plainBytes) => {
             const meta = metaLike as PhotoMeta;
+            const keys = await createSlimFileKeys("photo");
             const success = await photoWorkerPool.submitSlimRepack({
               fileBytes: plainBytes,
               request: {
@@ -199,11 +199,14 @@ export function usePhotoRepack(params: UsePhotoRepackParams) {
                 size: meta.size ?? plainBytes.length,
                 createdAt: meta.createdAt ?? Date.now(),
                 thumbB64: meta.thumbB64 ?? "",
-                photoKey: photoKey.value,
+                slim: {
+                  fileSaltB64: keys.saltB64,
+                  wrappedFileKey: keys.wrappedFileKey,
+                },
               },
             });
             return pipeline.writeRepackedPhoto(
-              success, photoKey.value, `meta_${meta.name ?? "photo"}`,
+              success, `meta_${meta.name ?? "photo"}`,
             );
           },
           deleteLegacyRecords,

@@ -560,9 +560,9 @@ const { showError, showStatus, showExportDone, showCopied } = useToastCenter();
 /** 状态提示（拾光既有 2s 口径；子 composable 的 DI 参数名沿用 showToast） */
 const showToast = (msg: string) => showStatus(msg, 2000);
 
-/* ---------- 2. 核心数据层（提供 photos / photoKey / isTauri / 虚拟滚动 / 按需解密） ---------- */
+/* ---------- 2. 核心数据层（提供 photos / isTauri / 虚拟滚动 / 按需解密） ---------- */
 const {
-  photos, photoKey, isTauri, photosLoading,
+  photos, isTauri, photosLoading,
   loadError, failedCount,
   scrollRef, totalHeight, visiblePhotos,
   onScroll,
@@ -596,7 +596,7 @@ watch(failedCount, (n, prev) => {
   }
 });
 
-/* ---------- 3. 查看器层（依赖 usePhotoData 的 photos/photoKey/decryptPhotoMeta） ---------- */
+/* ---------- 3. 查看器层（依赖 usePhotoData 的 photos/decryptPhotoMeta） ---------- */
 const {
   viewer, viewerSrc, viewerName, viewerBlurred, viewerScale,
   viewerOffsetX, viewerOffsetY, viewerDragging, viewerLoading, viewerProgressMsg,
@@ -604,7 +604,7 @@ const {
   onBlur, onFocus,
   cleanup: cleanupViewer,
 } = usePhotoViewer({
-  photos, photoKey, isTauri, ensurePhotoKey, decryptPhotoMeta, showError,
+  photos, isTauri, ensurePhotoKey, decryptPhotoMeta, showError,
 });
 
 /* ---------- 4. 导入层 ---------- */
@@ -618,7 +618,7 @@ const {
   /* Parsed Import：导出 getPipeline 供 usePhotoParse 复用同一流水线实例 */
   getPipeline,
 } = usePhotoImport({
-  photos, photoKey, isTauri, ensurePhotoKey, showError, showToast,
+  photos, isTauri, ensurePhotoKey, showError, showToast,
 });
 
 /* ---------- 5. 导出层 ---------- */
@@ -629,7 +629,7 @@ const {
   deselectAllPhotos, regenerateExportToken, copyExportToken, chooseExportPath,
   doExport,
 } = usePhotoExport({
-  photos, photoKey, isTauri, ensurePhotoKey,
+  photos, isTauri, ensurePhotoKey,
   showError, showExportDone, showCopied,
 });
 
@@ -722,7 +722,7 @@ const {
   importingParsed,
   openParseDialog, closeParseDialog, chooseParseFile, doParse, importParsedPhotos,
 } = usePhotoParse({
-  photos, photoKey, isTauri, ensurePhotoKey, showError, showToast,
+  photos, isTauri, ensurePhotoKey, showError, showToast,
   /* Parsed Import：复用 usePhotoImport 的流水线实例 + 导入状态 refs
      （对话框内复用 QuantumProgressFlow，导入进度实时反馈，UI 不卡死） */
   getPipeline, importing, importProgress, importStatus, importElapsed,
@@ -732,7 +732,7 @@ const {
 const {
   repackAvailable, repackRunning, repackState, startRepack, cancelRepack,
 } = usePhotoRepack({
-  photos, photoKey, isTauri, getPipeline, showToast, showError,
+  photos, isTauri, getPipeline, showToast, showError,
 });
 
 /* ---------- 7. 删除层（依赖 usePhotoViewer 的 onView 用于非选择模式下的照片点击） ---------- */
@@ -746,7 +746,7 @@ const {
   resolveMeta: async (metaId: number) => (await decryptPhotoMeta(metaId))?.meta ?? null,
   // 瘦身布局的逐块 ID 在块集记录内：删除级联前先解析（失败退化为内联引用）
   resolveChunkIds: async (metaId: number, meta) => {
-    const set = await resolveChunkSet(meta, photoKey.value, `删除 #${metaId}`);
+    const set = await resolveChunkSet(meta, `删除 #${metaId}`);
     return set?.ids ?? [];
   },
 });
@@ -869,8 +869,8 @@ const initLifecycle = () => {
       loadError.value = "模块密钥不可用：请返回安全管理验证后重新进入拾光";
     }
   } else {
-    // 浏览器模式：使用占位密钥（仅用于本地演示，不涉及真实加密）
-    photoKey.value = "browser_demo_key";
+    // 浏览器模式没有 Tauri worker，无法在密钥不出渲染进程的前提下导入/解密
+    console.warn("[photo] 浏览器模式不提供加密相册功能");
   }
 };
 
@@ -923,8 +923,7 @@ const cleanupLifecycle = () => {
   // GC 回收整条记录对象图（PhotoEntry + meta + rawBytes + thumb）。
   photos.value = [];
 
-  // 清零模块子密钥（全局密钥由 keyManager 统一管理）
-  photoKey.value = "";
+  // 模块子密钥由 worker 托管并在锁定/登出时统一清除
 
   // 主动触发 GC（dev 环境跳过，仅 release 模式生效）
   tryGc();

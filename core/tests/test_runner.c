@@ -6,6 +6,9 @@
 #include "verthys_crypto.h"
 #include "verthys_container_lock.h"
 #include "verthys_container_v3.h"
+#include "verthys_api_utils.h"
+#include "vty_device_root.h"
+#include "vty_rollback.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -405,6 +408,96 @@ TEST(prop_txn_crash_no_resurrection);
 TEST(prop_txn_rollback_delete_restores_original);
 TEST(prop_txn_crash_discard_delete_restores_original);
 
+/* v4 密钥体系 —— 原语 / 恢复码（test_v4_primitives.c） */
+TEST(v4_blake3_known_vectors);
+TEST(v4_hkdf_rfc5869_case1);
+TEST(v4_hmac_deterministic_and_key_sensitive);
+TEST(v4_argon2id_deterministic_and_salt_sensitive);
+TEST(v4_kdf_param_floor_rejected);
+TEST(v4_wrap_key32_roundtrip_and_tamper);
+TEST(v4_recovery_code_roundtrip);
+TEST(v4_recovery_checksum_error_rejected);
+TEST(v4_recovery_suffix_rejected);
+TEST(v4_keyring_serialize_parse_roundtrip);
+TEST(v4_keyring_parse_invalid_rejected);
+TEST(v4_recovery_slot_seal_open);
+
+/* v4 容器 —— 头部与密钥槽（test_v4_container.c） */
+TEST(v4_header_write_parse_roundtrip);
+TEST(v4_header_tamper_rejected);
+TEST(v4_slot_seal_serialize_parse);
+TEST(v4_slots_parse_all_roundtrip);
+TEST(v4_slot_policy_check);
+
+/* v4 记录 —— 加密与盲索引（test_v4_records.c） */
+TEST(v4_record_roundtrip);
+TEST(v4_record_aad_binding);
+TEST(v4_record_size_guard_rejected);
+TEST(v4_name_index_nfkc_and_separation);
+TEST(v4_record_plaintext_fallback_forbidden);
+
+/* v4 分片与清单（test_v4_chunks.c） */
+TEST(v4_chunk_roundtrip);
+TEST(v4_chunk_aad_binding);
+TEST(v4_chunk_id_unlinkable);
+TEST(v4_manifest_roundtrip);
+TEST(v4_manifest_tamper_rejected);
+TEST(v4_large_file_1gb_roundtrip);
+
+/* v4 库与模块（test_v4_modules.c） */
+TEST(v4_vault_create_open_e2e);
+TEST(v4_vault_wrong_recovery_rejected);
+TEST(v4_vault_rotate_password);
+TEST(v4_vault_header_tamper_rejected);
+TEST(v4_module_create_unlock_roundtrip);
+TEST(v4_module_device_slot_break_fails);
+
+/* v4 熔断（test_v4_lockout.c） */
+TEST(v4_lockout_first_run_and_counting);
+TEST(v4_lockout_tampered_state_locked);
+TEST(v4_lockout_state_replay_rejected);
+TEST(v4_lockout_path_isolation);
+TEST(v4_lockout_pipeline_persistent);
+
+/* v4 库文件回退（test_v4_rollback.c） */
+TEST(v4_rollback_module_monotonic_anchor);
+TEST(v4_rollback_restored_old_copy_rejected);
+TEST(v4_rollback_rotated_copy_rejected);
+TEST(v4_rollback_tampered_anchor_fails_closed);
+TEST(v4_rollback_recovery_resets_anchor);
+TEST(v4_rollback_forged_generation_rejected);
+TEST(v4_rollback_state_replay_rejected);
+TEST(v4_rollback_disabled_allows_old_copy);
+
+/* v4 PCR 槽与解锁策略（test_v4_pcr.c） */
+TEST(v4_pcr_select_validation);
+TEST(v4_pcr_slot_codec);
+TEST(v4_tpm_pcr_key_roundtrip);
+TEST(v4_tpm_pcr_key_wrong_digest_rejected);
+TEST(v4_pcr_create_open_roundtrip);
+TEST(v4_pcr_tampered_digest_fails_closed);
+TEST(v4_pcr_wrong_tpm_key_fails_closed);
+TEST(v4_pcr_foreign_ciphertext_rejected);
+TEST(v4_pcr_recovery_reseal);
+TEST(v4_pcr_enable_disable);
+
+/* TPM 持久化密钥见证（test_v4_witness.c） */
+TEST(v4_witness_rotation_and_verify);
+
+/* v4 崩溃注入（test_v4_crash.c） */
+TEST(v4_crash_injection_100_cuts);
+
+/* v4 解析器模糊（test_v4_fuzz.c） */
+TEST(v4_fuzz_header_parsers_never_crash);
+TEST(v4_fuzz_slot_keyring_parsers_never_crash);
+TEST(v4_fuzz_recovery_and_manifest_never_crash);
+TEST(v4_fuzz_header_bitflip_always_rejected);
+
+/* v4 性能基准（test_v4_perf.c） */
+TEST(v4_perf_chunk_throughput);
+TEST(v4_perf_vault_unlock_latency);
+TEST(v4_perf_module_switch_latency);
+
 /* test_auto_rekey.c — 自动密钥轮换（并入 test_v3_lifecycle 组） */
 
 /* test_pepper_v3.c — 胡椒持久化格式与密钥槽闭环 */
@@ -745,6 +838,13 @@ int main(int argc, char **argv)
     if (verthys_crypto_init() != 0) {
         TEST_FATAL("verthys_crypto_init failed\n");
     }
+
+    /* 持久化熔断的默认状态文件位于真实用户目录，而全套用例包含大量
+     * 错误口令路径；测试进程默认关闭持久化，仅专用用例显式开启并
+     * 注入沙箱状态路径，避免污染本机状态。 */
+    verthys_backoff_set_persistent(0);
+    /* 回退锚点同理会写入用户目录：默认关闭，专用用例开启并注入路径 */
+    vty_rollback_set_enabled(0);
 
     /* rhat 组置于全量首组——真表等价性（构建期文件哈希 ≡ 运行期
      * 内存哈希）若断裂，此处先出显式 CHECK 失败，早于任何 Verthys_Unlock
@@ -1189,6 +1289,109 @@ int main(int argc, char **argv)
     RUN_TEST(prop_txn_rollback_delete_restores_original);
     RUN_TEST(prop_txn_crash_discard_delete_restores_original);
     test_state_checkpoint("v3_property");
+
+    /* v4 密钥体系：原语与恢复码 → 容器槽 → 记录/分片 → 库与模块 → 熔断 */
+    RUN_TEST(v4_blake3_known_vectors);
+    RUN_TEST(v4_hkdf_rfc5869_case1);
+    RUN_TEST(v4_hmac_deterministic_and_key_sensitive);
+    RUN_TEST(v4_argon2id_deterministic_and_salt_sensitive);
+    RUN_TEST(v4_kdf_param_floor_rejected);
+    RUN_TEST(v4_wrap_key32_roundtrip_and_tamper);
+    RUN_TEST(v4_recovery_code_roundtrip);
+    RUN_TEST(v4_recovery_checksum_error_rejected);
+    RUN_TEST(v4_recovery_suffix_rejected);
+    RUN_TEST(v4_keyring_serialize_parse_roundtrip);
+    RUN_TEST(v4_keyring_parse_invalid_rejected);
+    RUN_TEST(v4_recovery_slot_seal_open);
+    test_state_checkpoint("v4_primitives");
+
+    RUN_TEST(v4_header_write_parse_roundtrip);
+    RUN_TEST(v4_header_tamper_rejected);
+    RUN_TEST(v4_slot_seal_serialize_parse);
+    RUN_TEST(v4_slots_parse_all_roundtrip);
+    RUN_TEST(v4_slot_policy_check);
+    test_state_checkpoint("v4_container");
+
+    RUN_TEST(v4_record_roundtrip);
+    RUN_TEST(v4_record_aad_binding);
+    RUN_TEST(v4_record_size_guard_rejected);
+    RUN_TEST(v4_name_index_nfkc_and_separation);
+    RUN_TEST(v4_record_plaintext_fallback_forbidden);
+    test_state_checkpoint("v4_records");
+
+    RUN_TEST(v4_chunk_roundtrip);
+    RUN_TEST(v4_chunk_aad_binding);
+    RUN_TEST(v4_chunk_id_unlinkable);
+    RUN_TEST(v4_manifest_roundtrip);
+    RUN_TEST(v4_manifest_tamper_rejected);
+    RUN_TEST(v4_large_file_1gb_roundtrip);
+    test_state_checkpoint("v4_chunks");
+
+    /* 设备根封装会在进程内建立持久的 CNG 密钥句柄（进程级、一次性）：
+     * 先预热，避免首个 v4 用例把这次初始化误报成句柄泄漏。 */
+    (void)vty_device_root_init();
+    if (vty_device_root_available()) {
+        uint8_t probe[VTY_KEY_BYTES];
+        uint8_t probe_blob[VTY_DEVICE_BLOB_BYTES];
+        size_t probe_len = sizeof(probe_blob);
+        memset(probe, 0, sizeof(probe));
+        if (vty_device_key_seal(probe, probe_blob, &probe_len) == VTY_OK) {
+            (void)vty_device_key_unseal(probe_blob, probe_len, probe);
+        }
+    }
+    RUN_TEST(v4_vault_create_open_e2e);
+    RUN_TEST(v4_vault_wrong_recovery_rejected);
+    RUN_TEST(v4_vault_rotate_password);
+    RUN_TEST(v4_vault_header_tamper_rejected);
+    RUN_TEST(v4_module_create_unlock_roundtrip);
+    RUN_TEST(v4_module_device_slot_break_fails);
+    test_state_checkpoint("v4_vault_module");
+
+    RUN_TEST(v4_lockout_first_run_and_counting);
+    RUN_TEST(v4_lockout_tampered_state_locked);
+    RUN_TEST(v4_lockout_state_replay_rejected);
+    RUN_TEST(v4_lockout_path_isolation);
+    RUN_TEST(v4_lockout_pipeline_persistent);
+    test_state_checkpoint("v4_lockout");
+
+    RUN_TEST(v4_rollback_module_monotonic_anchor);
+    RUN_TEST(v4_rollback_restored_old_copy_rejected);
+    RUN_TEST(v4_rollback_rotated_copy_rejected);
+    RUN_TEST(v4_rollback_tampered_anchor_fails_closed);
+    RUN_TEST(v4_rollback_recovery_resets_anchor);
+    RUN_TEST(v4_rollback_forged_generation_rejected);
+    RUN_TEST(v4_rollback_state_replay_rejected);
+    RUN_TEST(v4_rollback_disabled_allows_old_copy);
+    /* 组内用例会开启回退检测；显式恢复默认关闭，避免影响后续用例 */
+    vty_rollback_set_enabled(0);
+    test_state_checkpoint("v4_rollback");
+
+    RUN_TEST(v4_pcr_select_validation);
+    RUN_TEST(v4_pcr_slot_codec);
+    RUN_TEST(v4_tpm_pcr_key_roundtrip);
+    RUN_TEST(v4_tpm_pcr_key_wrong_digest_rejected);
+    RUN_TEST(v4_pcr_create_open_roundtrip);
+    RUN_TEST(v4_pcr_tampered_digest_fails_closed);
+    RUN_TEST(v4_pcr_wrong_tpm_key_fails_closed);
+    RUN_TEST(v4_pcr_foreign_ciphertext_rejected);
+    RUN_TEST(v4_pcr_recovery_reseal);
+    RUN_TEST(v4_pcr_enable_disable);
+    RUN_TEST(v4_witness_rotation_and_verify);
+    test_state_checkpoint("v4_pcr");
+
+    RUN_TEST(v4_crash_injection_100_cuts);
+    test_state_checkpoint("v4_crash");
+
+    RUN_TEST(v4_fuzz_header_parsers_never_crash);
+    RUN_TEST(v4_fuzz_slot_keyring_parsers_never_crash);
+    RUN_TEST(v4_fuzz_recovery_and_manifest_never_crash);
+    RUN_TEST(v4_fuzz_header_bitflip_always_rejected);
+    test_state_checkpoint("v4_fuzz");
+
+    RUN_TEST(v4_perf_chunk_throughput);
+    RUN_TEST(v4_perf_vault_unlock_latency);
+    RUN_TEST(v4_perf_module_switch_latency);
+    test_state_checkpoint("v4_perf");
 
     TEST_SUMMARY();
     return g_tests_failed > 0 ? 1 : 0;

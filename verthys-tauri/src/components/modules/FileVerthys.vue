@@ -333,15 +333,14 @@ import {
   verthysGetRecord, verthysForgetHashes,
   verthysWalRecover, verthysImportBegin, verthysImportEnd, verthysForceCloseImportSession,
   verthysAddChunkBatch, verthysAddRecordsBatch, verthysGcOrphanChunks,
-  userFileStat, readUserFileChunked, checkDiskSpace, base64ToBytes,
+  userFileStat, readUserFileChunked, checkDiskSpace, base64ToBytes, bytesToBase64,
   decryptPasswordField,
   writeUserFileStream, appendUserFileChunk, finalizeUserFileStream, abortUserFileStream,
 } from "../../lib/verthys";
 import {
-  createFileKeyV2, encryptChunkV2, buildPasswordCheckV2,
-  unlockFileKeyV2, verifyPasswordCheckV2, decryptChunkV2,
+  createFileKdfV2, buildV2Check, verifyV2Check, sealRecord, openRecord,
   type FileKdfV2,
-} from "../../lib/crypto";
+} from "../../lib/module_crypto";
 import { runFileExport } from "../../composables/file-verthys/useFileExport";
 import {
   runFileImport,
@@ -689,9 +688,17 @@ const importDeps: FileImportDeps = {
   statFile: userFileStat,
   readChunk: readUserFileChunked,
   v2: {
-    createFileKey: createFileKeyV2,
-    encryptChunk: encryptChunkV2,
-    buildPasswordCheck: buildPasswordCheckV2,
+    createFileKdf: async () => createFileKdfV2(),
+    encryptChunk: async (plain: Uint8Array, kdf: FileKdfV2, password: string) => {
+      const cipherB64 = await sealRecord("file", "v2_chunk", bytesToBase64(plain), {
+        salt: kdf.saltB64,
+        iterations: kdf.iterations,
+        password,
+      });
+      return base64ToBytes(cipherB64);
+    },
+    buildPasswordCheck: (kdf: FileKdfV2, password: string) =>
+      buildV2Check("file", kdf, password),
   },
   // 容器卷空间预检：path 缺省 = 当前会话容器所在卷
   freeSpaceBytes: async (path) => (await checkDiskSpace(path ?? undefined)).free_bytes,
@@ -1012,11 +1019,19 @@ const doSave = async (f: FileEntry, password: string | null): Promise<boolean> =
       // 当前加密形态：解锁文件密钥并以口令校验块判定（唯一判定点）
       openV2Decryptor: async (entry, pwd) => {
         if (!entry.kdf || !entry.passwordCheck) return null;
-        const key = await unlockFileKeyV2(pwd, entry.kdf);
-        const ok = await verifyPasswordCheckV2(entry.passwordCheck, key);
+        /* 口令判定由 worker 用同一 KDF 参数派生后校验；
+         * worker 只返回布尔结论，不向前端返回密钥。 */
+        const ok = await verifyV2Check("file", entry.kdf, pwd, entry.passwordCheck);
         if (!ok) return null;
         return {
-          decryptChunk: async (b64: string) => decryptChunkV2(base64ToBytes(b64), key),
+          decryptChunk: async (b64: string) => {
+            const opened = await openRecord("file", "v2_chunk", b64, {
+              salt: entry.kdf!.saltB64,
+              iterations: entry.kdf!.iterations,
+              password: pwd,
+            });
+            return base64ToBytes(opened.dataB64);
+          },
         };
       },
       // 历史逐块盐形态：无口令判定点，逐块解密（失败给合并文案）
@@ -1274,7 +1289,7 @@ const loadFiles = async () => {
   if (cached.data && cached.data.length > 0) {
     // 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
     replaceShallowArray(files, cached.data);
-    // 计算缓存中最大的 metaId，作为增量扫描起点（参考 PhotoAlbum）
+    // 计算缓存中最大的 metaId，作为增量扫描起点
     maxRecordId = cached.data.reduce((max, f) => Math.max(max, f.metaId || 0), 0);
     loading.value = false; // 缓存有效，不显示加载动画
   } else {

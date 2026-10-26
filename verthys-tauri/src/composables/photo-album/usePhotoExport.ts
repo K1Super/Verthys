@@ -20,7 +20,6 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { verthysGetRecord, verthysGetRecordDetailed, bytesToBase64, writeUserFile, writeUserFileStream, appendUserFileChunk, finalizeUserFileStream, abortUserFileStream } from "../../lib/verthys";
 import { base64ToBytes } from "../../utils/binary_codec";
 import {
-  encryptChunk,
   computeFileHash, bytesToHex, packVencV2, packVencV2StreamedLazy,
   estimateVencTotalBytes, toLightMeta, computeChunkHashesForB64,
   generateRandomToken, CHUNK_SIZE, VENC_CONTAINER_FIXED_BYTES, vencPhotoFramesBytes,
@@ -88,8 +87,6 @@ export interface ExportOutcome {
 export interface UsePhotoExportParams {
   /** 照片列表（shallowRef，避免深度代理） */
   photos: ShallowRef<PhotoEntry[]>;
-  /** 模块独立密钥 */
-  photoKey: Ref<string>;
   /** 是否处于 Tauri 环境 */
   isTauri: boolean;
   /** 恢复模块密钥（从 keyManager 会话缓存） */
@@ -103,7 +100,7 @@ export interface UsePhotoExportParams {
 }
 
 export function usePhotoExport(params: UsePhotoExportParams) {
-  const { photos, photoKey, isTauri, ensurePhotoKey, showError, showExportDone, showCopied } = params;
+  const { photos, isTauri, ensurePhotoKey, showError, showExportDone, showCopied } = params;
 
   /* ===== 导出对话框状态 ===== */
   const showExportDialog = ref(false);
@@ -373,7 +370,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     if (!meta && ph.metaId && metaB64) {
       try {
         const outcome = await decryptMetaPreferWorker(
-          metaB64, photoKey.value, ph.name || `导出 #${ph.metaId}`,
+          metaB64, ph.name || `导出 #${ph.metaId}`,
         );
         meta = outcome.meta;
       } catch {
@@ -392,14 +389,14 @@ export function usePhotoExport(params: UsePhotoExportParams) {
           return { metaB64, chunkB64List: [], meta: null, chunkHashesForExport: [] };
         }
         const thumbBytes = await decryptThumbPreferWorker(
-          thumbRecord.dataB64, photoKey.value, meta.wrappedFileKey, meta.fileHash,
+          thumbRecord.dataB64, meta.wrappedFileKey, meta.fileHash,
           meta.name || `导出 #${ph.metaId}`,
         );
         meta = { ...meta, thumbB64: bytesToBase64(thumbBytes) };
       }
       // 逐块引用布局分流（瘦身布局取块集记录；既有布局取索引内联引用）
       try {
-        const refs = await resolveChunkRefs(meta, photoKey.value, meta.name || `记录 #${ph.metaId}`);
+        const refs = await resolveChunkRefs(meta, meta.name || `记录 #${ph.metaId}`);
         const { ciphers, missing } = await loadChunkCiphers(refs);
         if (missing > 0) {
           // 任一记录缺失即整体不可靠（块数将少于声明值），清空后由调用方记失败
@@ -429,7 +426,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   const decryptPhotoBytesWithVerify = async (meta: PhotoMeta): Promise<Uint8Array> => {
     const label = meta.name || "导出";
     // 逐块引用布局分流（瘦身布局取块集记录；既有布局取索引内联引用）
-    const refs = await resolveChunkRefs(meta, photoKey.value, label);
+    const refs = await resolveChunkRefs(meta, label);
     const { ciphers: chunkB64List, missing } = await loadChunkCiphers(refs);
     if (missing > 0) throw new Error(`数据块记录缺失 ${missing} 条`);
     if (chunkB64List.length === 0) throw new Error("照片无数据块");
@@ -447,7 +444,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     // 完整性校验随解密任务下沉：逐块密文哈希与整图明文哈希在 Worker 内比对，
     //   主线程不再对兆字节级数据做同步哈希（回退路径保持同等校验标准）。
     const chunks = await decryptChunksPreferWorker(
-      chunkB64List, photoKey.value, meta.fileHash, label, slim,
+      chunkB64List, meta.fileHash, label, slim,
       {
         expectedHashes: refs.hashes.length > 0 ? refs.hashes : undefined,
         expectedFileHash: meta.fileHash,
@@ -493,7 +490,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
       if (!metaB64) return null;
       try {
         const outcome = await decryptMetaPreferWorker(
-          metaB64, photoKey.value, ph.name || `导出 #${ph.metaId}`,
+          metaB64, ph.name || `导出 #${ph.metaId}`,
         );
         meta = outcome.meta;
       } catch {
@@ -539,33 +536,12 @@ export function usePhotoExport(params: UsePhotoExportParams) {
             : computeChunkHashesForB64(chunkB64List);
         const lightMeta = toLightMeta({ ...meta, chunkDataB64: chunkB64List, chunkHashes });
         specs.push({ lightMeta, chunkBytes });
-      } else if (!isTauri && ph.rawBytes) {
-        // 浏览器模式：从内存中的原始字节加密（每块密文即帧负载）
-        const fileHashBytes = computeFileHash(ph.rawBytes);
-        const fileHashHex = bytesToHex(fileHashBytes);
-        const mime = guessMime(ph.name);
-        const totalChunks = Math.ceil(ph.rawBytes.length / CHUNK_SIZE);
-        const b64List: string[] = [];
-        const chunkBytes: Uint8Array[] = [];
-
-        for (let c = 0; c < totalChunks; c++) {
-          const start = c * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, ph.rawBytes.length);
-          const chunkPlain = ph.rawBytes.slice(start, end);
-          const encryptedChunk = await encryptChunk(chunkPlain, photoKey.value, c, totalChunks, fileHashHex);
-          b64List.push(bytesToBase64(encryptedChunk));
-          chunkBytes.push(encryptedChunk);
-        }
-
-        const thumbB64 = ph.thumb.includes("base64,") ? ph.thumb.split("base64,")[1].replace(")", "") : "";
-        const meta: PhotoMeta = {
-          name: ph.name, mime, size: ph.rawBytes.length, thumbB64,
-          chunkIds: [], chunkDataB64: b64List,
-          chunkHashes: computeChunkHashesForB64(b64List),
-          fileHash: fileHashHex, createdAt: Date.now(),
-        };
-        specs.push({ lightMeta: toLightMeta(meta), chunkBytes });
       } else {
+        if (!isTauri && ph.rawBytes) {
+          /* 浏览器模式没有 Tauri worker，无法在密钥不出渲染进程的前提下产出
+           * 密文帧；导出功能只在桌面运行时提供，不回退到在 JS 内派生模块密钥。 */
+          log.warn(`浏览器模式不支持加密容器导出: ${ph.name}`);
+        }
         failures.push({ name: ph.name || `照片 #${ph.id}`, reason: "data-missing" });
       }
     }

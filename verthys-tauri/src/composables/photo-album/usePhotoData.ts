@@ -23,15 +23,15 @@
  */
 import { ref, shallowRef, computed, watch } from "vue";
 import {
-  getModuleKey, getModuleCache, setModuleCache,
+  getModuleCache, setModuleCache,
   ensureSummaryScan, ensureRecordScan, cancelRecordScan, cancelSummaryScan,
   getSummaryIdsByType, getSummaryRecord, getSummaryCacheSize, getRecordIdsByType,
   getRecordsDataB64Batch,
   moduleKeyReadyRef,
 } from "../../lib/keyManager";
-import { clearFileKeyCache, TYPE_PHOTO_META, type PhotoMeta } from "../../lib/crypto";
+import { lockModuleKey } from "../../lib/module_crypto";
+import { TYPE_PHOTO_META, type PhotoMeta } from "../../lib/crypto";
 import { decryptMetaPreferWorker, decryptThumbPreferWorker } from "../../workers/photo-decrypt-bridge";
-import { photoWorkerPool } from "../../workers/photoWorkerPool";
 import { isSlimPhotoMeta } from "../../constants/crypto_const";
 import { scrollPerf } from "../../config/scroll-perf";
 import { rafThrottle } from "../../utils/debounce";
@@ -68,11 +68,10 @@ export function usePhotoData() {
   const photos = shallowRef<PhotoEntry[]>([]);
   const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-  /* ===== 模块独立密钥（由 keyManager 会话缓存提供，用户登录模块时输入） =====
+  /* ===== 模块独立密钥（由 keyManager 会话状态提供，用户登录模块时输入） =====
    *   会话内 15min 闲置超时自动锁定（verthys-cache.ts MODULE_KEY_IDLE_TIMEOUT_MS），
-   *   超时后模块密钥被销毁。photoKey 是会话密钥在本模块内的短时副本，
-   *   由 moduleKeyReady 联动：会话密钥一旦失效必须立即清空副本与已解密内容。 */
-  const photoKey = ref<string>("");
+   *   超时后模块密钥被销毁。模块密钥只交付 worker 托管，本组合式不保留副本；
+   *   moduleKeyReady 一旦失效必须立即释放已解密内容。 */
 
   const photosLoading = ref(false);
 
@@ -98,12 +97,7 @@ export function usePhotoData() {
   let loadAbortRequested = false;
 
   /* ===== 密钥管理 ===== */
-  const ensurePhotoKey = (): boolean => {
-    if (photoKey.value) return true;
-    const k = getModuleKey("photo");
-    if (k) { photoKey.value = k; return true; }
-    return false;
-  };
+  const ensurePhotoKey = (): boolean => moduleKeyReadyRef.value.photo === true;
 
   /* ===== 虚拟滚动（相册列表强制采用虚拟滚动） =====
    *
@@ -360,17 +354,14 @@ export function usePhotoData() {
   /** 按需解密中标记集合（防止同一 vid 重复解密） */
   const decryptingMetaIds = new Set<number>();
 
-  /* 会话密钥失效联动：闲置销毁/登出后立即清空密钥副本与已解密内容。
-   * 旧实现只在组件卸载时清零；密钥销毁后本模块仍持有副本并继续解密照片，
+  /* 会话密钥失效联动：闲置销毁/登出后立即清空已解密内容并清除 worker 托管密钥。
+   * 旧实现只在组件卸载时清理；密钥销毁后本模块仍继续解密照片，
    * 使"闲置自动锁定"形同虚设。 */
   watch(() => moduleKeyReadyRef.value.photo, (ready) => {
     if (ready) return;
-    photoKey.value = "";
     decryptingMetaIds.clear();
-    // 会话密钥失效：连同按盐缓存的文件子密钥一并销毁，避免派生结果跨会话驻留；
-    //   Worker 侧派生缓存由池下发清理标记，于各 Worker 下一任务入口清空
-    clearFileKeyCache();
-    photoWorkerPool.invalidateDerivedKeys();
+    // 会话密钥失效：清除 worker 内模块密钥与派生缓存；已解密内容同步释放
+    void lockModuleKey("photo").catch(() => { /* 锁定失败不阻断界面释放 */ });
     releaseThumbUrls();
     replaceShallowArray(photos, photos.value.map(p => ({
       id: p.id, metaId: p.metaId, name: p.name, thumb: "", size: "", height: 0,
@@ -394,10 +385,11 @@ export function usePhotoData() {
    *  性能修复：prefetchedMetaB64 由 ensureVisiblePhotosDecrypted 批量预取传入（零 IPC）；
    *    未传入时单条批量获取（扫描缓存优先 + 并行 IPC 回退），消除旧 lastUseSummaryPath
    *    分支的逐条 getFullRecord 串行 IPC。
-   *  性能修复：解密下沉 photo-crypto Worker 池（主线程不做密钥派生与 AEAD），
-   *    池基础设施不可用时由桥自动回退主线程实现，两条路径结果一致。 */
+   *  性能修复：解密调度下沉 photo-crypto Worker 池，AEAD 与密钥派生再由
+   *    RPC 转交 Tauri worker；渲染主线程不做载荷解码与哈希。
+   *    池基础设施不可用时由桥自动回退主线程直连，两条路径结果一致。 */
   const decryptPhotoMeta = async (vid: number, prefetchedMetaB64?: string): Promise<DecryptedPhotoMeta | null> => {
-    if (!photoKey.value) return null;
+    if (!moduleKeyReadyRef.value.photo) return null;
     // 性能修复：优先消费批量预取结果；未预取则单条批量获取（扫描缓存优先 + IPC 回退）
     let metaB64: string;
     if (prefetchedMetaB64 !== undefined) {
@@ -410,7 +402,7 @@ export function usePhotoData() {
     }
 
     try {
-      const { meta, thumbBytes } = await decryptMetaPreferWorker(metaB64, photoKey.value, String(vid));
+      const { meta, thumbBytes } = await decryptMetaPreferWorker(metaB64, String(vid));
 
       // 缩略图归一：索引瘦身布局的缩略图在独立记录中，需按其记录 ID 取密文
       // 再解密（扫描缓存命中则零 IPC）；既有布局仍取索引内联的缩略图数据。
@@ -422,7 +414,7 @@ export function usePhotoData() {
         const thumbCipher = thumbMap.get(meta.thumbId) ?? "";
         if (thumbCipher) {
           const bytes = await decryptThumbPreferWorker(
-            thumbCipher, photoKey.value, meta.wrappedFileKey, meta.fileHash, `${vid}:thumb`,
+            thumbCipher, meta.wrappedFileKey, meta.fileHash, `${vid}:thumb`,
           );
           thumbCss = makeThumbCssValueFromBytes(bytes);
         }
@@ -549,7 +541,7 @@ export function usePhotoData() {
    * 滚动静默态（scrollQuiet）期间入口直接拒绝：滚动期不改动解密并发面，
    * 滚动停止后由 exitScrollQuiet 追帧脉冲补齐。 */
   const ensureVisiblePhotosDecrypted = async (visible: VisiblePhoto[]) => {
-    if (!isTauri || !photoKey.value || decryptPaused.value || scrollQuiet.value) return;
+    if (!isTauri || !moduleKeyReadyRef.value.photo || decryptPaused.value || scrollQuiet.value) return;
     const toDecrypt: number[] = [];
     for (const vph of visible) {
       if (vph.loaded || !vph.metaId) continue;
@@ -562,7 +554,7 @@ export function usePhotoData() {
     }
     if (decryptPaused.value) return;
     // 可视区完成后按滚动方向补齐即将进入的行（额度复用同一并发池）
-    if (!photoKey.value) return;
+    if (!moduleKeyReadyRef.value.photo) return;
     const ahead = collectPrefetchMetaIds();
     if (ahead.length > 0) await decryptBatch(ahead);
   };
@@ -844,7 +836,6 @@ export function usePhotoData() {
   return {
     // ===== 状态 =====
     photos,
-    photoKey,
     isTauri,
     photosLoading,
     loadError,

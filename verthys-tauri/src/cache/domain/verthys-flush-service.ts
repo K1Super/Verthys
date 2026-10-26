@@ -42,14 +42,12 @@
  *
  * 依赖关系（避免循环导入）：
  *   - verthys-flush-service.ts → lib/verthys.ts（verthysFlush/verthysDeleteRecords/verthysVerifyDiskPersist）
- *   - verthys-flush-service.ts → constants/key_manager_const.ts（VERTHYS_DEFAULT_PASSWORD）
  *   - verthys-flush-service.ts → lib/verthys_error.ts（VerthysResult，用于 flushVerthysNow）
  *   - currentVerthysPathGetter 由 verthys-flush.ts 构造时注入（state/key_state.ts）
  *   - snapshotProvider 由 verthys-cache.ts 注册（提供 recordScanCache 快照访问，
  *     避免 verthys-flush ↔ verthys-cache 循环导入）
  */
 import { verthysFlush, verthysDeleteRecords, verthysVerifyDiskPersist } from "../../lib/verthys";
-import { VERTHYS_DEFAULT_PASSWORD } from "../../constants/key_manager_const";
 import { createLogger } from "../../utils/logger";
 import { ok, err, VerthysErrorCode, type VerthysResult } from "../../lib/verthys_error";
 import { ref, type Ref } from "vue";
@@ -776,7 +774,7 @@ export class VerthysFlushService {
     const path = this.currentVerthysPathGetter();
     if (!path) return;
     try {
-      const success = await verthysFlush(path, VERTHYS_DEFAULT_PASSWORD);
+      const success = await verthysFlush();
       if (success) {
         // 仅移除已提交删除的 ID，保留未提交部分
         for (const id of this._committedDeletionIds) {
@@ -865,7 +863,7 @@ export class VerthysFlushService {
     for (let attempt = 1; attempt <= FLUSH_MAX_RETRIES; attempt++) {
       // 1. flush（写入侧 fsync）
       const okResult = await Promise.race([
-        verthysFlush(path, VERTHYS_DEFAULT_PASSWORD),
+        verthysFlush(),
         new Promise<boolean>((resolve) => {
           this.trackedSetTimeout(() => {
             log.error(`verthysFlush 超时 ${FLUSH_SINGLE_TIMEOUT_MS}ms`);

@@ -7,8 +7,10 @@
  *
  */
 #include "verthys_api_utils.h"
+#include "vty_lockout.h"
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -35,6 +37,13 @@
 static volatile LONG64 g_brute_failures = 0;   /* 连续失败次数（饱和 32） */
 static volatile LONG64 g_brute_last_fail_ms = 0; /* 最近失败的单调毫秒，0=无 */
 
+/* 持久化熔断开关由 lockout 模块统一持有（vault/module 解锁共用），
+ * 这里仅保留 API 层兼容入口。 */
+void verthys_backoff_set_persistent(int enabled)
+{
+    vty_lockout_set_enabled(enabled);
+}
+
 uint64_t verthys_monotonic_ms(void)
 {
 #ifdef _WIN32
@@ -48,6 +57,13 @@ uint64_t verthys_monotonic_ms(void)
 
 uint64_t verthys_backoff_remaining_ms(void)
 {
+    /* 持久化熔断优先于进程内退避：损坏/机器不匹配/已达阈值一律拒绝，
+     * 且不依赖进程内计数（重启后仍然生效）。 */
+    if (vty_lockout_enabled()) {
+        if (vty_lockout_init() != VTY_OK) return UINT64_MAX;
+        if (vty_lockout_check() == VTY_E_LOCKED) return UINT64_MAX;
+    }
+
     LONG64 k = InterlockedCompareExchange64(&g_brute_failures, 0, 0);
     LONG64 last = InterlockedCompareExchange64(&g_brute_last_fail_ms, 0, 0);
     uint64_t wait_secs;
@@ -64,7 +80,15 @@ uint64_t verthys_backoff_remaining_ms(void)
 
 void verthys_backoff_record_failure(void)
 {
-    LONG64 k = InterlockedIncrement64(&g_brute_failures);
+    LONG64 k;
+
+    /* 持久化计数与进程内计数并行维护：前者跨重启，后者提供即时退避 */
+    if (vty_lockout_enabled()) {
+        (void)vty_lockout_init();
+        (void)vty_lockout_record_failure();
+    }
+
+    k = InterlockedIncrement64(&g_brute_failures);
     if (k > 32) {
         /* 饱和封顶：保持 32，防止长期运行计数溢出移位语义 */
         InterlockedExchange64(&g_brute_failures, 32);
@@ -75,6 +99,10 @@ void verthys_backoff_record_failure(void)
 
 void verthys_backoff_reset(void)
 {
+    if (vty_lockout_enabled()) {
+        (void)vty_lockout_init();
+        (void)vty_lockout_reset();
+    }
     InterlockedExchange64(&g_brute_failures, 0);
     InterlockedExchange64(&g_brute_last_fail_ms, 0);
 }
@@ -152,7 +180,9 @@ int write_file(const char *path, const uint8_t *buf, size_t size)
     FILE *f = fopen(path, "wb");
     if (f == NULL) return -1;
     if (size > 0 && fwrite(buf, 1, size, f) != size) { fclose(f); return -1; }
-    fflush(f);
+    /* fflush/_commit 的错误必须向上传播：调用方（导出/迁移）只有拿到
+     * 成功才能删源或写清单，静默失败会造成“清单在、数据无”。 */
+    if (fflush(f) != 0) { fclose(f); return -1; }
 #ifdef _WIN32
     /* 修复：write_file 后强制 fsync，确保物理落盘
      *
@@ -163,11 +193,11 @@ int write_file(const char *path, const uint8_t *buf, size_t size)
      * "数据不丢"刚性要求：所有持久化写入必须 fsync 物理落盘，
      * 不能依赖 OS 异步刷盘的"最终一致性"——那是数据丢失的温床。
      * _commit 等同 FlushFileBuffers，强制将文件所有缓冲数据写入磁盘。 */
-    _commit(_fileno(f));
+    if (_commit(_fileno(f)) != 0) { fclose(f); return -1; }
 #else
-    fsync(fileno(f));
+    if (fsync(fileno(f)) != 0) { fclose(f); return -1; }
 #endif
-    fclose(f);
+    if (fclose(f) != 0) return -1;
     return 0;
 }
 

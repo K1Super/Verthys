@@ -30,7 +30,7 @@ import {
 // 再导出 Worker 预启动接口，供 SecurityCenter 等上层组件使用
 export { preloadWorker, invalidateWorkerPreload } from "../lib/verthys";
 import { keyState, setCurrentVerthysPath, resetAllState } from "../state/key_state";
-import { TYPE_GLOBAL_KEY, VERTHYS_DEFAULT_PASSWORD, INIT_TIMEOUT_MS, CREATE_TIMEOUT_MS, UNLOCK_SOFT_TIMEOUT_MS, UNLOCK_HARD_TIMEOUT_MS } from "../constants/key_manager_const";
+import { TYPE_GLOBAL_KEY, INIT_TIMEOUT_MS, CREATE_TIMEOUT_MS, UNLOCK_SOFT_TIMEOUT_MS, UNLOCK_HARD_TIMEOUT_MS } from "../constants/key_manager_const";
 import { withTimeout, withGradedTimeout } from "../utils/promise_utils";
 import { isTauriEnvironment } from "../utils/tauri_env";
 import {
@@ -373,7 +373,7 @@ export async function initCreate(
     log.info("步骤 3/4：创建加密库并写盘");
     let ok2: boolean;
     try {
-      ok2 = await withTimeout(verthysCreate(verthysPath, VERTHYS_DEFAULT_PASSWORD), CREATE_TIMEOUT_MS, "verthys_create");
+      ok2 = await withTimeout(verthysCreate(verthysPath), CREATE_TIMEOUT_MS, "verthys_create");
     } catch (e) {
       await resetKeyManagerState();
       return errFromUnknown(e, VerthysErrorCode.E_VERTHYS_CREATE_FAILED);
@@ -600,7 +600,7 @@ export async function initUnlock(
         //
         // 安全边界：verthys.ts 的 completed 标志已在 Promise resolve 后阻断 Channel
         //   残留消息，本包装仅负责进度数值的单调化与区间映射，不影响后端逻辑。
-        verthysUnlock(verthysPath, VERTHYS_DEFAULT_PASSWORD, (p) => {
+        verthysUnlock(verthysPath, (p) => {
           const mapped = Math.min(85, 8 + Math.floor(p.percent * 0.77));
           emit(p.stage, mapped, pickUnlockChannelText(p.percent));
         }, usbRebindConfirmed),

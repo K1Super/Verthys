@@ -17,7 +17,7 @@
  */
 import { MAX_FILE_CHUNK_SIZE_BYTES } from "../../constants/photo_budget.generated";
 import { base64ToBytes } from "../../lib/verthys";
-import type { FileKdfV2 } from "../../lib/crypto";
+import type { FileKdfV2 } from "../../lib/module_crypto";
 import { createBLAKE3 } from "hash-wasm";
 
 /** 导出失败原因分类（调用方据此决定文案与后续动作） */

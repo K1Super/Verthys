@@ -2,14 +2,16 @@
  * photo-decrypt-bridge.spec.ts — 读取侧解密桥策略测试
  *
  * 覆盖：
- * - Worker 池成功：直接返回产物，主线程不执行解密（不下沉就失去意义）
- * - Worker 明确拒绝（TaskRejectedError）：确定性失败，不回退主线程
- * - 池基础设施失败（超时/毒丸/已终止）：回退主线程实现并返回一致结果
- * - 回退路径失败：向上抛出原始错误（不吞异常、不伪造成功）
- * - 数据块路径：明文以视图返回且顺序与输入一致；池故障时逐块回退
+ * - Worker 池成功：直接返回产物，主线程不发起 Tauri 调用
+ * - 池基础设施失败：回退到主线程直连同一组 module 命令
+ * - Worker 明确拒绝：确定性失败直接上抛，不回退主线程重算
+ * - 直连失败：向上抛出原始错误（不吞异常、不伪造成功）
+ * - 数据块路径：明文以视图返回且顺序与输入一致；池故障时逐块直连
+ * - 完整性校验：逐块密文哈希不符在解密前拒绝
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { PhotoMeta } from "../types/crypto";
+import { bytesToBase64 } from "../utils/binary_codec";
 
 vi.mock("./photoWorkerPool", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./photoWorkerPool")>();
@@ -17,22 +19,19 @@ vi.mock("./photoWorkerPool", async (importOriginal) => {
     ...actual,
     photoWorkerPool: {
       submitDecryptMeta: vi.fn(),
+      submitDecryptThumb: vi.fn(),
+      submitDecryptSlimSet: vi.fn(),
       submitDecryptChunks: vi.fn(),
     },
   };
 });
 
-vi.mock("../lib/crypto", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/crypto")>();
-  return {
-    ...actual,
-    decryptMeta: vi.fn(),
-    decryptChunk: vi.fn(),
-  };
-});
+vi.mock("../lib/module_crypto", () => ({
+  openRecord: vi.fn(),
+}));
 
 import { photoWorkerPool, TaskRejectedError, TaskTimeoutError } from "./photoWorkerPool";
-import { decryptMeta, decryptChunk } from "../lib/crypto";
+import { openRecord } from "../lib/module_crypto";
 import { decryptMetaPreferWorker, decryptChunksPreferWorker } from "./photo-decrypt-bridge";
 
 /** 构造完整元数据（字段齐备，避免类型断言掩盖字段缺失） */
@@ -49,67 +48,68 @@ function makeMeta(name = "a.jpg"): PhotoMeta {
   };
 }
 
+function metaB64(meta: PhotoMeta): string {
+  return bytesToBase64(new TextEncoder().encode(JSON.stringify(meta)));
+}
+
 describe("decryptMetaPreferWorker — Worker 优先与回退策略", () => {
   beforeEach(() => {
-    // 重置（而非仅清空调用记录）：避免上一用例的 mock 实现泄漏到下一用例
     vi.resetAllMocks();
   });
 
-  it("池成功：返回解密结果，主线程不执行解密", async () => {
+  it("池成功：返回解密结果，主线程不发起直连调用", async () => {
     const meta = makeMeta();
     vi.mocked(photoWorkerPool.submitDecryptMeta).mockResolvedValue({ id: 1, ok: true, meta });
 
-    await expect(decryptMetaPreferWorker("meta-b64", "key", "42")).resolves.toEqual({ meta });
+    await expect(decryptMetaPreferWorker("meta-b64", "42")).resolves.toEqual({ meta });
     expect(photoWorkerPool.submitDecryptMeta).toHaveBeenCalledWith({
       metaB64: "meta-b64",
-      photoKey: "key",
       label: "42",
-      thumbCipherB64: undefined,
     });
-    expect(decryptMeta).not.toHaveBeenCalled();
+    expect(openRecord).not.toHaveBeenCalled();
   });
 
-  it("索引瘦身布局：缩略图明文随元数据结果一并返回", async () => {
-    const meta = makeMeta();
-    const thumbBytes = new Uint8Array([0xff, 0xd8, 0xff]).buffer;
-    vi.mocked(photoWorkerPool.submitDecryptMeta).mockResolvedValue({
-      id: 1, ok: true, meta, thumbBytes,
-    });
-
-    await expect(
-      decryptMetaPreferWorker("meta-b64", "key", "42", "thumb-cipher"),
-    ).resolves.toEqual({ meta, thumbBytes });
-    expect(photoWorkerPool.submitDecryptMeta).toHaveBeenCalledWith({
-      metaB64: "meta-b64",
-      photoKey: "key",
-      label: "42",
-      thumbCipherB64: "thumb-cipher",
-    });
-  });
-
-  it("Worker 明确拒绝：确定性失败直接抛出，不回退主线程", async () => {
-    const rejection = new TaskRejectedError(1, "元数据标签校验失败");
-    vi.mocked(photoWorkerPool.submitDecryptMeta).mockRejectedValue(rejection);
-
-    await expect(decryptMetaPreferWorker("meta-b64", "key", "42")).rejects.toBe(rejection);
-    expect(decryptMeta).not.toHaveBeenCalled();
-  });
-
-  it("池基础设施失败（超时）：回退主线程并返回结果", async () => {
+  it("池基础设施失败：主线程直连同一命令并解析元数据", async () => {
     vi.mocked(photoWorkerPool.submitDecryptMeta).mockRejectedValue(new TaskTimeoutError(1, 60_000));
     const meta = makeMeta("fallback.jpg");
-    vi.mocked(decryptMeta).mockResolvedValue(meta);
+    vi.mocked(openRecord).mockResolvedValue({ dataB64: metaB64(meta) });
 
-    await expect(decryptMetaPreferWorker("meta-b64", "key", "42")).resolves.toEqual({ meta });
-    expect(decryptMeta).toHaveBeenCalledWith("meta-b64", "key");
+    await expect(decryptMetaPreferWorker("meta-b64", "42")).resolves.toEqual({ meta });
+    expect(openRecord).toHaveBeenCalledWith("photo", "meta", "meta-b64");
   });
 
-  it("回退路径失败：抛出主线程原始错误（不吞异常）", async () => {
+  it("Worker 明确拒绝：确定性失败直接上抛，不回退主线程重算", async () => {
+    const rejected = new TaskRejectedError(7, "标签校验失败");
+    vi.mocked(photoWorkerPool.submitDecryptMeta).mockRejectedValue(rejected);
+
+    await expect(decryptMetaPreferWorker("meta-b64", "42")).rejects.toBe(rejected);
+    expect(openRecord).not.toHaveBeenCalled();
+  });
+
+  it("直连失败：抛出原始错误（不吞异常）", async () => {
     vi.mocked(photoWorkerPool.submitDecryptMeta).mockRejectedValue(new TaskTimeoutError(2, 60_000));
     const fallbackError = new Error("元数据密文过短");
-    vi.mocked(decryptMeta).mockRejectedValue(fallbackError);
+    vi.mocked(openRecord).mockRejectedValue(fallbackError);
 
-    await expect(decryptMetaPreferWorker("meta-b64", "key", "42")).rejects.toBe(fallbackError);
+    await expect(decryptMetaPreferWorker("meta-b64", "42")).rejects.toBe(fallbackError);
+  });
+
+  it("瘦身布局缩略图：元数据解密后按包裹态密钥直连/池解密", async () => {
+    const meta = { ...makeMeta(), fmt: 2, wrappedFileKey: "wrapped", thumbId: 9 };
+    vi.mocked(photoWorkerPool.submitDecryptMeta).mockResolvedValue({ id: 1, ok: true, meta });
+    const thumbBytes = new Uint8Array([0xff, 0xd8, 0xff]).buffer;
+    vi.mocked(photoWorkerPool.submitDecryptThumb).mockResolvedValue({
+      id: 2, ok: true, thumbBytes,
+    });
+
+    const outcome = await decryptMetaPreferWorker("meta-b64", "42", "thumb-cipher");
+    expect(Array.from(new Uint8Array(outcome.thumbBytes!))).toEqual([0xff, 0xd8, 0xff]);
+    expect(photoWorkerPool.submitDecryptThumb).toHaveBeenCalledWith({
+      thumbCipherB64: "thumb-cipher",
+      wrappedFileKey: "wrapped",
+      fileHashHex: meta.fileHash,
+      label: "42:thumb",
+    });
   });
 });
 
@@ -127,74 +127,66 @@ describe("decryptChunksPreferWorker — Worker 优先与回退策略", () => {
       plaintexts: [first, second],
     });
 
-    const result = await decryptChunksPreferWorker(["c1", "c2"], "key", "f".repeat(64), "a.jpg");
-    expect(result).toHaveLength(2);
-    expect(Array.from(result[0])).toEqual([1, 2]);
-    expect(Array.from(result[1])).toEqual([3]);
+    const result = await decryptChunksPreferWorker(["c1", "c2"], "f".repeat(64), "a.jpg");
+    expect(result.map((p) => Array.from(p))).toEqual([[1, 2], [3]]);
     expect(photoWorkerPool.submitDecryptChunks).toHaveBeenCalledWith({
       chunksB64: ["c1", "c2"],
-      photoKey: "key",
       fileHashHex: "f".repeat(64),
       label: "a.jpg",
     });
-    expect(decryptChunk).not.toHaveBeenCalled();
+    expect(openRecord).not.toHaveBeenCalled();
   });
 
-  it("Worker 明确拒绝：不回退主线程", async () => {
-    const rejection = new TaskRejectedError(5, "第 1/2 块解密失败: 标签校验失败");
-    vi.mocked(photoWorkerPool.submitDecryptChunks).mockRejectedValue(rejection);
-
-    await expect(
-      decryptChunksPreferWorker(["c1", "c2"], "key", "f".repeat(64), "a.jpg"),
-    ).rejects.toBe(rejection);
-    expect(decryptChunk).not.toHaveBeenCalled();
-  });
-
-  it("池基础设施失败：回退主线程逐块解密", async () => {
+  it("池失败：逐块直连同一命令并校验位置", async () => {
     vi.mocked(photoWorkerPool.submitDecryptChunks).mockRejectedValue(new TaskTimeoutError(5, 60_000));
-    vi.mocked(decryptChunk)
-      .mockResolvedValueOnce({ plaintext: new Uint8Array([7]), seq: 0, total: 2 })
-      .mockResolvedValueOnce({ plaintext: new Uint8Array([8, 9]), seq: 1, total: 2 });
+    vi.mocked(openRecord)
+      .mockResolvedValueOnce({ dataB64: "Bw==", seq: 0, total: 2 })
+      .mockResolvedValueOnce({ dataB64: "CAk=", seq: 1, total: 2 });
 
-    const result = await decryptChunksPreferWorker(["c1", "c2"], "key", "f".repeat(64), "a.jpg");
+    const result = await decryptChunksPreferWorker(["c1", "c2"], "f".repeat(64), "a.jpg");
     expect(result.map((p) => Array.from(p))).toEqual([[7], [8, 9]]);
-    expect(decryptChunk).toHaveBeenCalledTimes(2);
-    expect(decryptChunk).toHaveBeenNthCalledWith(1, "c1", "key", "f".repeat(64));
+    expect(openRecord).toHaveBeenNthCalledWith(1, "photo", "chunk", "c1", {
+      fileHash: "f".repeat(64),
+    });
   });
 
-  it("回退路径任一块失败：整体失败并携带块序号", async () => {
+  it("直连位置与列表不符：拼接前拒绝", async () => {
     vi.mocked(photoWorkerPool.submitDecryptChunks).mockRejectedValue(new TaskTimeoutError(6, 60_000));
-    vi.mocked(decryptChunk)
-      .mockResolvedValueOnce({ plaintext: new Uint8Array([7]), seq: 0, total: 2 })
-      .mockRejectedValueOnce(new Error("标签校验失败"));
+    vi.mocked(openRecord)
+      .mockResolvedValueOnce({ dataB64: "Bw==", seq: 0, total: 3 })
+      .mockResolvedValueOnce({ dataB64: "CA==", seq: 1, total: 3 });
 
     await expect(
-      decryptChunksPreferWorker(["c1", "c2"], "key", "f".repeat(64), "a.jpg"),
-    ).rejects.toThrow("第 2/2 块解密失败: 标签校验失败");
+      decryptChunksPreferWorker(["c1", "c2"], "f".repeat(64), "a.jpg"),
+    ).rejects.toThrow("数据块顺序校验失败");
   });
 
-  it("回退路径块自描述位置与列表不符：拼接前拒绝（与 Worker 路径同一判定）", async () => {
-    vi.mocked(photoWorkerPool.submitDecryptChunks).mockRejectedValue(new TaskTimeoutError(7, 60_000));
-    // 两块密文彼此自洽（seq/total 连续），但声明总数 3 与列表长度 2 不符：
-    // 属被截断的列表，必须在拼接前拒绝而非产出错误顺序的整图
-    vi.mocked(decryptChunk)
-      .mockResolvedValueOnce({ plaintext: new Uint8Array([7]), seq: 0, total: 3 })
-      .mockResolvedValueOnce({ plaintext: new Uint8Array([8]), seq: 1, total: 3 });
-
-    await expect(
-      decryptChunksPreferWorker(["c1", "c2"], "key", "f".repeat(64), "a.jpg"),
-    ).rejects.toThrow("第 1/2 块解密失败: 数据块顺序校验失败");
-  });
-
-  it("回退路径保持同等校验标准：逐块哈希不符即拒绝（不进入解密）", async () => {
+  it("直连路径保持同等校验标准：逐块哈希不符即拒绝（不进入解密）", async () => {
     vi.mocked(photoWorkerPool.submitDecryptChunks).mockRejectedValue(new TaskTimeoutError(8, 60_000));
 
     await expect(
       decryptChunksPreferWorker(
-        ["Y2g=", "ZGU="], "key", "f".repeat(64), "a.jpg", undefined,
+        ["Y2g=", "ZGU="], "f".repeat(64), "a.jpg", undefined,
         { expectedHashes: ["0".repeat(64), "0".repeat(64)] },
       ),
     ).rejects.toThrow("块密文哈希校验失败");
-    expect(decryptChunk).not.toHaveBeenCalled();
+    expect(openRecord).not.toHaveBeenCalled();
+  });
+
+  it("瘦身布局：解密请求携带包裹态密钥而非句柄", async () => {
+    vi.mocked(photoWorkerPool.submitDecryptChunks).mockRejectedValue(new TaskTimeoutError(9, 60_000));
+    vi.mocked(openRecord).mockResolvedValue({ dataB64: "Bw==" });
+
+    const result = await decryptChunksPreferWorker(
+      ["c1"], "f".repeat(64), "a.jpg",
+      { wrappedFileKey: "wrapped", chunkTotal: 1 },
+    );
+    expect(result.map((p) => Array.from(p))).toEqual([[7]]);
+    expect(openRecord).toHaveBeenCalledWith("photo", "slim_chunk", "c1", {
+      fileHash: "f".repeat(64),
+      seq: 0,
+      total: 1,
+      wrappedKey: "wrapped",
+    });
   });
 });

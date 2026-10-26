@@ -63,9 +63,6 @@ export const PRESET_SESSION_TIMEOUT_MS: Record<SecurityPresetCode, number> = {
 export const MODULE_KEY_VERIFIER_PREFIX = "VERTHYS_MODULE_KEY_";
 export const MODULE_KEY_VERIFIER_SUFFIX = "_v1";
 
-/* Verthys 默认密码 */
-export const VERTHYS_DEFAULT_PASSWORD = "VERTHYS_DEFAULT_PASSWORD_v1";
-
 /* 超时 */
 export const INIT_TIMEOUT_MS = 30 * 1000;
 export const CREATE_TIMEOUT_MS = 120 * 1000;

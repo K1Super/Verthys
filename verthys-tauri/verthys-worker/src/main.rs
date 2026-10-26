@@ -17,9 +17,10 @@ mod defense;
 use crate::log::init_diag;
 
 fn main() {
-    /* 会话密钥必须先于任何 DLL 加载与日志初始化：缺失即失败关闭，
+    /* 会话材料（主密钥、会话标识、挑战值）经 stdin 首行交付，必须先于
+     * 任何 DLL 加载与日志初始化读取：缺失或非法即失败关闭，
      * 禁止 worker 以无认证 IPC 形态运行。 */
-    if let Err(e) = runtime::ipc_auth::init_from_env() {
+    if let Err(e) = runtime::ipc_auth::init_from_stdin() {
         eprintln!("[worker] IPC 认证初始化失败: {}", e);
         std::process::exit(4);
     }
@@ -38,6 +39,9 @@ fn main() {
     log::install_exception_filter();
     // panic 清零器注册：hook 触发时对当前线程 GMK 驻留执行前置清零
     log::register_panic_wiper(runtime::wipe_thread_gmk);
+    /* 内容层密钥与 GMK 分属不同托管表，panic 时必须各自清零，
+     * 任一遗漏都会把解锁态密钥留在崩溃转储里。 */
+    log::register_panic_wiper(runtime::wipe_thread_keys);
 
     // Step 2: 参数解析 — 提取 dll_path
     let args: Vec<String> = std::env::args().collect();

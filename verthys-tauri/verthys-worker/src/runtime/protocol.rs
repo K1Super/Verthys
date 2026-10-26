@@ -47,13 +47,11 @@ pub(crate) struct Request {
     pub(crate) old_password: Zeroizing<String>,
     #[serde(default)]
     pub(crate) new_password: Zeroizing<String>,
-    // GMK 派生相关（#2 敏感操作下沉）
+    // GMK 派生相关
     #[serde(default)]
     pub(crate) bin_data: Zeroizing<String>, // base64 .bin 文件内容
     #[serde(default)]
     pub(crate) bin_password: Zeroizing<String>,
-    #[serde(default)]
-    pub(crate) module_id: String,
     // 安全预设选择（create_with_preset 操作）
     // 0 = BALANCED（日常推荐），1 = SECURE（涉密/合规）
     #[serde(default)]
@@ -76,6 +74,29 @@ pub(crate) struct Request {
     // INDEX 投影的内联数据字节阈值（scan_open；0 = 纯索引，任何记录都不取数）
     #[serde(default)]
     pub(crate) inline_max_bytes: u64,
+    // 内容层加密的模块标识（photo / file）
+    #[serde(default)]
+    pub(crate) module: String,
+    // 内容层加密的具体布局种类（meta / chunk / slim_meta / slim_chunk / thumb / chunkset / v2_chunk / v2_check）
+    #[serde(default)]
+    pub(crate) kind: String,
+    // 文件盐（base64，16 字节）；空串表示由 worker 生成或从密文头部读取
+    #[serde(default)]
+    pub(crate) salt: String,
+    // BLAKE3 文件哈希（64 字符十六进制）
+    #[serde(default)]
+    pub(crate) file_hash: String,
+    // 块序号（0 起）与块总数；seq < total 且 total > 0
+    #[serde(default)]
+    pub(crate) seq: u32,
+    #[serde(default)]
+    pub(crate) total: u32,
+    // 文件块 v2 的 PBKDF2 迭代次数；0 表示采用缺省值
+    #[serde(default)]
+    pub(crate) iterations: u32,
+    // 包裹态文件密钥（base64），可落盘；不含原始文件密钥
+    #[serde(default)]
+    pub(crate) wrapped_key: String,
 }
 
 /// 批量枚举返回的单条记录（用于 enumerate_records / scan_fetch 操作）
@@ -182,6 +203,21 @@ pub(crate) struct Response {
     /// WAL 区起始绝对偏移
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wal_offset: Option<u64>,
+    /// 文件盐 base64（仅 module_file_key 返回；非密钥材料）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) salt: Option<String>,
+    /// 包裹态文件密钥 base64（仅 module_file_key 的创建类操作返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) wrapped_key: Option<String>,
+    /// 文件块 v2 实际使用的迭代次数（仅 module_file_key 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) iterations: Option<u32>,
+    /// 记录型块密文内嵌的块序号（仅 module_open 的 chunk 布局返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) seq: Option<u32>,
+    /// 记录型块密文内嵌的块总数（仅 module_open 的 chunk 布局返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) total: Option<u32>,
 }
 
 impl Response {
@@ -227,6 +263,11 @@ impl Response {
             header_magic: None,
             header_version: None,
             wal_offset: None,
+            salt: None,
+            wrapped_key: None,
+            iterations: None,
+            seq: None,
+            total: None,
         }
     }
     pub(crate) fn err(op: &str, code: u32) -> Self {
@@ -312,6 +353,11 @@ impl Response {
             header_magic: None,
             header_version: None,
             wal_offset: None,
+            salt: None,
+            wrapped_key: None,
+            iterations: None,
+            seq: None,
+            total: None,
         }
     }
 }
@@ -341,15 +387,16 @@ pub(crate) fn bound_response_line(mut json: String, op: &str) -> String {
     if json.len() <= MAX_RESPONSE_LINE_BYTES {
         return json;
     }
-    /* 超限响应可能包含大段记录明文；替换为受控错误行前先清零原缓冲。 */
+    /* 超限响应可能包含大段记录明文；替换为受控错误行前先记录长度，
+     * 再清零原缓冲。清零会截断字符串，先取长度才能给出准确的诊断值。 */
+    let observed = json.len();
     json.zeroize();
     serde_json::json!({
         "ok": false,
         "op": op,
         "error": format!(
             "response payload too large: {} bytes exceeds limit {} bytes",
-            json.len(),
-            MAX_RESPONSE_LINE_BYTES
+            observed, MAX_RESPONSE_LINE_BYTES
         ),
     })
     .to_string()

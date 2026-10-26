@@ -77,6 +77,28 @@ pub(crate) async fn actor_loop(
 
     let mut stdout_reader = BufReader::new(stdout);
 
+    /* 引导行必须最先写入：worker 以 stdin 首行初始化会话密钥、
+     * 会话标识与挑战值，缺失即失败关闭。写入失败视为子进程不可用，
+     * 直接终止并回收，避免后续请求落入无认证通道。 */
+    let bootstrap = match ipc.bootstrap_line() {
+        Ok(line) => line,
+        Err(e) => {
+            log::error!("[actor] PID={} 生成 IPC 引导行失败: {}", pid, e);
+            let _ = child.start_kill();
+            child_alive.store(false, Ordering::SeqCst);
+            let _ = tokio::time::timeout(STDERR_DRAIN_FINAL_TIMEOUT, stderr_task).await;
+            return;
+        }
+    };
+    if let Err(e) = write_line(&mut stdin, bootstrap.as_str()).await {
+        log::error!("[actor] PID={} 写入 IPC 引导行失败: {}", pid, e);
+        let _ = child.start_kill();
+        child_alive.store(false, Ordering::SeqCst);
+        let _ = tokio::time::timeout(STDERR_DRAIN_FINAL_TIMEOUT, stderr_task).await;
+        return;
+    }
+    log::info!("[actor] PID={} IPC 引导行已写入，等待就绪证明", pid);
+
     // 主循环：接收请求并处理
     while let Some(req) = request_rx.recv().await {
         // 子进程已退出：拒绝所有新请求
@@ -510,11 +532,11 @@ async fn handle_wait_ready(
                         }
                     };
                     trimmed.zeroize();
-                    if opened.channel != Channel::Response || opened.reply_to != 0 {
+                    if let Err(e) = ipc.verify_ready(&opened) {
                         let _ = child.start_kill();
-                        return Err("worker 就绪信号通道或关联号非法".to_string());
+                        return Err(format!("worker 就绪信号认证失败: {}", e));
                     }
-                    log::info!("[worker] 收到就绪信号: {}", opened.payload);
+                    log::info!("[worker] 收到就绪信号并通过持有证明校验");
                     return Ok(());
                 }
                 // 空行，继续读取

@@ -97,6 +97,25 @@ set(VERTHYS_CORE_SOURCES
     src/container/partition/verthys_partition.c
     # 内容寻址 Extent（去重 + 完整性）
     src/container/extent/verthys_extent.c
+    # v4 容器格式与密钥体系（双包裹 AND + 恢复码 + 模块 + 分片）
+    src/crypto/v4/vty_util.c
+    src/crypto/v4/vty_blake3.c
+    src/crypto/v4/vty_kdf.c
+    src/crypto/v4/vty_device_root.c
+    src/crypto/v4/vty_recovery.c
+    src/crypto/v4/vty_keymanager_v4.c
+    src/container/v4/vty_format_v4.c
+    src/container/v4/vty_keyslot_v4.c
+    src/container/v4/vty_chunk_v4.c
+    src/container/v4/vty_module_v4.c
+    src/index/v4/vty_record_v4.c
+    src/security/lockout/vty_lockout.c
+    # 库文件版本回退检测（外部单调锚点 + 设备根 MAC）
+    src/security/rollback/vty_rollback.c
+    # TPM 2.0 PCR 读取与 PCR 绑定密钥（P2 高安全模式）
+    src/security/tpm/vty_tpm_pcr.c
+    # TPM 持久化密钥见证（NV 不可用时的回滚/熔断替代）
+    src/security/tpm/vty_tpm_witness.c
     # L2 index/ — 索引与数据管理
     # LSM 索引（MemTable 跳表 + SSTable + Compaction）
     src/index/lsm/verthys_lsm.c
@@ -145,6 +164,8 @@ set(VERTHYS_CORE_SOURCES
     src/security/layer5_sandbox/process_sandbox.c
     #   layer6_closure/ — Layer 6: 闭环防御能力验证
     src/security/layer6_closure/defense_closure.c
+    #   caller_auth/ — 调用方签名校验（Verthys_Init 前置门，A2）
+    src/security/caller_auth/vty_caller_auth.c
     # L5 api/ — 公共 C ABI（瘦门面 + 拆分模块）
     src/api/lifecycle/verthys_api.c
     src/api/shared/verthys_api_utils.c
@@ -183,6 +204,12 @@ set(VERTHYS_SRC_SUBDIRS
     src/container/extent
     src/container/io
     src/container/shared
+    src/container/v4
+    src/crypto/v4
+    src/index/v4
+    src/security/lockout
+    src/security/rollback
+    src/security/tpm
     src/index/lsm
     src/index/warmcache
     src/transaction/wal
@@ -204,6 +231,7 @@ set(VERTHYS_SRC_SUBDIRS
     src/security/layer4_hook_defense
     src/security/layer5_sandbox
     src/security/layer6_closure
+    src/security/caller_auth
 )
 # 同 VERTHYS_CORE_SOURCES——tests 子目录复用时相对基准不错位。
 list(TRANSFORM VERTHYS_SRC_SUBDIRS PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
@@ -264,6 +292,24 @@ endif()
 #   编译前必须完成 schema codegen（此前仅 verthys_tests 声明该依赖，
 #   verthys_core_obj 先于 verthys_tests 构建时生成头尚不存在 → C1083）
 add_dependencies(verthys_core_obj flatcc_generate)
+
+# A2 调用方签名门：默认关闭，只有签名流水线就绪的发布通道才打开。
+# 打开时强制要求发布者指纹；指纹缺失就配置失败，避免“开关打开但所有
+# 调用方都被拒绝”这种只在运行期才暴露的部署事故。
+option(VERTHYS_REQUIRE_CALLER_SIG
+    "Require publisher Authenticode signature for the caller process and verthys.dll" OFF)
+set(VERTHYS_PUBLISHER_SHA256 "" CACHE STRING
+    "SHA-256 fingerprint of the publisher code-signing certificate (64 hex chars)")
+if(VERTHYS_REQUIRE_CALLER_SIG)
+    if(VERTHYS_PUBLISHER_SHA256 STREQUAL "")
+        message(FATAL_ERROR
+            "VERTHYS_REQUIRE_CALLER_SIG=ON requires -DVERTHYS_PUBLISHER_SHA256=<cert sha256>")
+    endif()
+    target_compile_definitions(verthys_core_obj PRIVATE
+        VERTHYS_REQUIRE_CALLER_SIG=1
+        "VERTHYS_PUBLISHER_SHA256=\"${VERTHYS_PUBLISHER_SHA256}\"")
+    message(STATUS "[caller-auth] enforced, publisher=${VERTHYS_PUBLISHER_SHA256}")
+endif()
 # 不定义 VERTHYS_EXPORTS：VERTHYS_API 为空宏，
 #   导出面仅由 /DEF:verthys.def 白名单决定。
 # /FS：允许多个 cl.exe 进程并发写入同一 .PDB 文件（并行编译必需）
@@ -285,7 +331,8 @@ if(WIN32)
     # psapi: 进程/模块信息查询（防注入巡检、栈自校验）
     # bcrypt: CNG (Cryptography Next Generation) — BCryptGenerateSymmetricKey / BCryptDecrypt / BCryptDestroyKey
     # ncrypt: CNG 机器密钥 — NCryptOpenStorageProvider / NCryptCreatePersistedKey / NCryptEncrypt / NCryptDecrypt
-    target_link_libraries(verthys_core_obj PRIVATE user32 wintrust crypt32 shlwapi psapi bcrypt ncrypt)
+    # tbs: TPM Base Services — Tbsi_Context_Create / Tbsip_Submit_Command（PCR 读取）
+    target_link_libraries(verthys_core_obj PRIVATE user32 wintrust crypt32 shlwapi psapi bcrypt ncrypt tbs)
 endif()
 verthys_apply_hardening(verthys_core_obj)
 
@@ -306,7 +353,8 @@ if(WIN32)
     # 与对象库一致的 Windows 依赖（见上方注释）
     # bcrypt: CNG (Cryptography Next Generation) — BCryptGenerateSymmetricKey / BCryptDecrypt / BCryptDestroyKey
     # ncrypt: CNG 机器密钥 — NCryptOpenStorageProvider / NCryptCreatePersistedKey / NCryptEncrypt / NCryptDecrypt
-    target_link_libraries(verthys_core PRIVATE user32 wintrust crypt32 shlwapi psapi bcrypt ncrypt)
+    # tbs: TPM Base Services — PCR 读取
+    target_link_libraries(verthys_core PRIVATE user32 wintrust crypt32 shlwapi psapi bcrypt ncrypt tbs)
 endif()
 target_link_options(verthys_core PRIVATE
     /DEF:${CMAKE_CURRENT_SOURCE_DIR}/verthys.def

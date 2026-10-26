@@ -1,43 +1,56 @@
 /*
- * infrastructure/ipc_secure.rs — 主进程 ↔ worker 认证信道
+ * infrastructure/ipc_secure.rs — 主进程 ↔ worker 认证加密信道
  *
  * 职责边界：
- *   - 生成会话主密钥，派生请求/响应/进度三个方向子密钥；
- *   - 封装/校验带序号、关联号与随机 nonce 的 HMAC-SHA256 信封；
+ *   - 生成会话主密钥、会话标识与握手挑战值，派生请求/响应/进度三个方向子密钥；
+ *   - 生成引导行（密钥经匿名管道交付 worker，不进入进程环境块）；
+ *   - 封装/校验 AES-256-GCM 信封：通道、序号、关联号与会话标识全部进入 AAD；
+ *   - 校验 worker 就无法预知的新鲜挑战给出的持有证明；
  *   - 提供共享内存载荷的认证原语。
  *
  * 安全约束：
  *   - 信封校验失败必须失败关闭，禁止回退到明文透传；
+ *   - 未完成就绪握手前不得发送任何业务请求，避免向未认证对端泄露口令；
  *   - 序号在通道内严格连续，关联号必须匹配当前请求；
+ *   - 会话标识不匹配即拒绝，杜绝跨会话重放；
  *   - 密钥不进入日志、错误文本或进程命令行。
  *
  * 线程安全：
- *   - 序号使用原子变量；本模块无共享可变映射。
+ *   - 序号与握手标志使用原子变量；本模块无共享可变映射。
  */
 
 use crate::util::crypto::{ct_eq, hmac_sign};
-use serde_json::value::RawValue;
-use std::sync::atomic::{AtomicU64, Ordering};
+use base64::Engine as _;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use zeroize::{Zeroize, Zeroizing};
 
 /// 会话主密钥长度（字节）
 pub const SESSION_KEY_LEN: usize = 32;
 
-/// 宿主向 worker 传递主密钥的环境变量名
-pub const ENV_SESSION_KEY: &str = "VERTHYS_IPC_KEY";
+/// 会话标识长度（字节）
+pub const SESSION_ID_LEN: usize = 16;
 
-/// 每条消息的随机 nonce 长度（字节）
-const NONCE_LEN: usize = 16;
+/// 握手挑战值长度（字节）
+const CHALLENGE_LEN: usize = 32;
+
+/// AES-GCM nonce 长度（字节）
+const NONCE_LEN: usize = 12;
 
 /// 信封协议版本
-const PROTOCOL_VERSION: u8 = 1;
+const PROTOCOL_VERSION: u8 = 2;
 
-/// 签名原文固定前缀，隔离其他协议的 HMAC 输入
-const MAC_PREFIX: &[u8] = b"VERTHYS-IPC\x00";
+/// AAD 固定前缀，隔离其他协议的 AEAD 输入
+const AAD_PREFIX: &[u8] = b"VERTHYS-IPC-V2\x00";
+
+/// 就绪证明固定前缀，隔离其他协议的 HMAC 输入
+const READY_PROOF_PREFIX: &[u8] = b"verthys/ipc/ready-proof\x00";
 
 const CH_REQUEST: &str = "q";
 const CH_RESPONSE: &str = "r";
 const CH_PROGRESS: &str = "p";
+
+/// 引导行通道标识（仅首次写入 stdin 使用）
+const CH_BOOTSTRAP: &str = "b";
 
 /// 入站信封所属通道
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +59,7 @@ pub enum Channel {
     Progress,
 }
 
-/// 已通过签名与序号校验的信封
+/// 已通过解密与序号校验的信封
 #[derive(Debug)]
 pub struct OpenedLine {
     pub channel: Channel,
@@ -55,88 +68,143 @@ pub struct OpenedLine {
     pub payload: String,
 }
 
-/// 出站信封。`payload` 以原始 JSON 片段嵌入，避免二次编码膨胀。
+/// 出站信封。载荷为 AES-256-GCM 密文，明文不落在管道上。
 #[derive(serde::Serialize)]
 struct OutEnvelope<'a> {
     v: u8,
     ch: &'a str,
+    sid: &'a str,
     seq: u64,
     re: u64,
     nonce: &'a str,
-    mac: &'a str,
-    payload: &'a RawValue,
+    ct: &'a str,
 }
 
-/// 入站信封。`payload` 借用原始字节，签名校验使用未重编码的内容。
+/// 入站信封。密文与 nonce 以文本形式进入，解密前不做任何业务解析。
 #[derive(serde::Deserialize)]
 struct InEnvelope<'a> {
     v: u8,
     ch: &'a str,
+    sid: &'a str,
     seq: u64,
     re: u64,
     nonce: &'a str,
-    mac: &'a str,
-    payload: &'a RawValue,
+    ct: &'a str,
 }
 
-/// 安全 IPC 信道：持有主密钥、方向子密钥与收发序号。
+/// 就绪证明载荷（worker → 宿主）。
+#[derive(serde::Deserialize)]
+struct ReadyPayload<'a> {
+    ok: bool,
+    op: &'a str,
+    proof: &'a str,
+}
+
+/// 安全 IPC 信道：持有主密钥、方向子密钥、会话标识与收发序号。
 pub struct IpcSecureChannel {
     master: Zeroizing<[u8; SESSION_KEY_LEN]>,
+    session_id: [u8; SESSION_ID_LEN],
+    challenge: Zeroizing<[u8; CHALLENGE_LEN]>,
     request_key: Zeroizing<[u8; SESSION_KEY_LEN]>,
     response_key: Zeroizing<[u8; SESSION_KEY_LEN]>,
     progress_key: Zeroizing<[u8; SESSION_KEY_LEN]>,
     send_seq: AtomicU64,
     last_response_seq: AtomicU64,
     last_progress_seq: AtomicU64,
+    ready_verified: AtomicBool,
 }
 
 impl IpcSecureChannel {
-    /// 创建新会话：CSPRNG 生成主密钥并派生子密钥。
+    /// 创建新会话：CSPRNG 生成主密钥、会话标识与挑战值。
     pub fn new() -> Result<Self, String> {
         let mut master = [0u8; SESSION_KEY_LEN];
-        /* 密钥生成失败不得降级为可预测材料，必须失败关闭。 */
+        let mut session_id = [0u8; SESSION_ID_LEN];
+        let mut challenge = [0u8; CHALLENGE_LEN];
+        /* 随机源失败不得降级为可预测材料，必须失败关闭。 */
         getrandom::getrandom(&mut master).map_err(|e| format!("生成 IPC 会话密钥失败: {}", e))?;
-        Self::from_master(master)
+        getrandom::getrandom(&mut session_id).map_err(|e| format!("生成 IPC 会话标识失败: {}", e))?;
+        getrandom::getrandom(&mut challenge).map_err(|e| format!("生成 IPC 挑战值失败: {}", e))?;
+        Self::from_parts(master, session_id, challenge)
     }
 
-    /// 使用给定主密钥构造信道。
-    ///
-    /// 仅用于测试与恢复场景；调用方负责不在日志中输出密钥。
-    pub fn from_master(mut master: [u8; SESSION_KEY_LEN]) -> Result<Self, String> {
+    fn from_parts(
+        mut master: [u8; SESSION_KEY_LEN],
+        session_id: [u8; SESSION_ID_LEN],
+        mut challenge: [u8; CHALLENGE_LEN],
+    ) -> Result<Self, String> {
         let request_key = derive_key(&master, b"verthys/ipc/request")?;
         let response_key = derive_key(&master, b"verthys/ipc/response")?;
         let progress_key = derive_key(&master, b"verthys/ipc/progress")?;
         let channel = Self {
             master: Zeroizing::new(master),
+            session_id,
+            challenge: Zeroizing::new(challenge),
             request_key: Zeroizing::new(request_key),
             response_key: Zeroizing::new(response_key),
             progress_key: Zeroizing::new(progress_key),
             send_seq: AtomicU64::new(0),
             last_response_seq: AtomicU64::new(0),
             last_progress_seq: AtomicU64::new(0),
+            ready_verified: AtomicBool::new(false),
         };
         master.zeroize();
+        challenge.zeroize();
         Ok(channel)
     }
 
-    /// 主密钥十六进制文本，用于通过子进程环境变量传递。
+    /// 生成引导行：密钥、会话标识与挑战值经匿名管道交付 worker。
     ///
-    /// 调用方必须用可清零容器持有返回值。
-    pub fn master_key_hex(&self) -> Zeroizing<String> {
-        Zeroizing::new(hex_encode(&*self.master))
+    /// 仅可写入一次，且必须先于任何业务信封。返回值必须由调用方清零。
+    pub fn bootstrap_line(&self) -> Result<Zeroizing<String>, String> {
+        let line = serde_json::json!({
+            "v": PROTOCOL_VERSION,
+            "ch": CH_BOOTSTRAP,
+            "sid": hex_encode(&self.session_id),
+            "key": hex_encode(&*self.master),
+            "challenge": hex_encode(&*self.challenge),
+        })
+        .to_string();
+        Ok(Zeroizing::new(line))
     }
 
     /// 封装并签名一条请求，返回分配到的序号与线文本。
+    ///
+    /// 未完成就绪握手时拒绝发送，防止业务口令进入未认证对端。
     pub fn sign_request(&self, payload: &str) -> Result<(u64, String), String> {
+        if !self.ready_verified.load(Ordering::SeqCst) {
+            return Err("IPC 握手未完成，拒绝发送业务请求".to_string());
+        }
         let seq = self.send_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let line = self.seal(CH_REQUEST, &self.request_key[..], seq, 0, payload)?;
         Ok((seq, line))
     }
 
+    /// 校验就绪响应并验证 worker 的密钥持有证明。
+    ///
+    /// 证明覆盖本会话新生成的挑战值：会话开始前录制的就绪行无法通过。
+    /// 校验通过后置位握手标志，业务请求方可发送。
+    pub fn verify_ready(&self, opened: &OpenedLine) -> Result<(), String> {
+        if opened.channel != Channel::Response || opened.reply_to != 0 {
+            return Err("IPC 就绪信号通道或关联号非法".to_string());
+        }
+        let ready: ReadyPayload<'_> =
+            serde_json::from_str(&opened.payload).map_err(|e| format!("IPC 就绪载荷解析失败: {}", e))?;
+        if !ready.ok || ready.op != "ready" {
+            return Err("IPC 就绪载荷语义非法".to_string());
+        }
+        let received = hex_decode_fixed::<32>(ready.proof, "proof")?;
+        let expected = ready_proof(&self.response_key[..], &self.session_id, &self.challenge[..])?;
+        if !ct_eq(&expected, &received) {
+            return Err("IPC 就绪证明校验失败".to_string());
+        }
+        self.ready_verified.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// 校验一条响应或进度消息。
     ///
-    /// 校验顺序：字段合法性 → 签名 → 序号连续性。签名先于序号判断，
-    /// 避免伪造消息推进接收窗口。
+    /// 校验顺序：字段合法性 → 会话标识 → 解密认证 → 序号连续性。
+    /// 解密先于序号判断，避免伪造消息推进接收窗口。
     pub fn open_line(&self, line: &str) -> Result<OpenedLine, String> {
         let envelope: InEnvelope<'_> =
             serde_json::from_str(line).map_err(|e| format!("IPC 信封解析失败: {}", e))?;
@@ -158,20 +226,32 @@ impl IpcSecureChannel {
             _ => return Err("IPC 信封通道非法".to_string()),
         };
 
-        let nonce = hex_decode_fixed::<NONCE_LEN>(envelope.nonce, "nonce")?;
-        let received_mac = hex_decode_fixed::<32>(envelope.mac, "mac")?;
-        let payload_bytes = envelope.payload.get().as_bytes();
-        let expected_mac = mac_input(
-            channel_byte(channel),
-            envelope.seq,
-            envelope.re,
-            &nonce,
-            payload_bytes,
-        );
-        let actual = hmac_sign(&key[..], &expected_mac)?;
-        if !ct_eq(&actual, &received_mac) {
-            return Err("IPC 签名校验失败".to_string());
+        let sid = hex_decode_fixed::<SESSION_ID_LEN>(envelope.sid, "sid")?;
+        if !ct_eq(&sid, &self.session_id) {
+            return Err("IPC 会话标识不匹配".to_string());
         }
+        /* 关联号为 0 的响应只允许作为就绪信号出现一次。 */
+        if channel == Channel::Response
+            && envelope.re == 0
+            && self.ready_verified.load(Ordering::SeqCst)
+        {
+            return Err("IPC 就绪信号重复出现".to_string());
+        }
+        if channel == Channel::Response
+            && envelope.re != 0
+            && !self.ready_verified.load(Ordering::SeqCst)
+        {
+            return Err("IPC 握手未完成，拒绝业务响应".to_string());
+        }
+
+        let nonce = hex_decode_fixed::<NONCE_LEN>(envelope.nonce, "nonce")?;
+        if nonce[4..] != envelope.seq.to_be_bytes() {
+            return Err("IPC nonce 与序号不匹配".to_string());
+        }
+        let ciphertext = decode_b64(envelope.ct, "ct")?;
+        let aad = aad_bytes(channel_byte(channel), &sid, envelope.seq, envelope.re);
+        let payload = decrypt(&key[..], &nonce, &aad, &ciphertext)
+            .map_err(|_| "IPC 信封解密认证失败".to_string())?;
 
         if !accept_sequence(counter, envelope.seq) {
             return Err(format!("IPC 序号失配: {}", envelope.seq));
@@ -181,11 +261,11 @@ impl IpcSecureChannel {
             channel,
             seq: envelope.seq,
             reply_to: envelope.re,
-            payload: envelope.payload.get().to_string(),
+            payload,
         })
     }
 
-    /// 构造并签名一条出站信封。
+    /// 构造并加密一条出站信封。
     fn seal(
         &self,
         channel: &str,
@@ -194,31 +274,20 @@ impl IpcSecureChannel {
         reply_to: u64,
         payload: &str,
     ) -> Result<String, String> {
-        let mut nonce = [0u8; NONCE_LEN];
-        getrandom::getrandom(&mut nonce).map_err(|e| format!("生成 IPC nonce 失败: {}", e))?;
+        let nonce = build_nonce(seq)?;
+        let aad = aad_bytes(channel_byte_of(channel)?, &self.session_id, seq, reply_to);
+        let ciphertext = encrypt(key, &nonce, &aad, payload.as_bytes())?;
+        let sid_hex = hex_encode(&self.session_id);
         let nonce_hex = hex_encode(&nonce);
-        let mac_bytes = hmac_sign(
-            key,
-            &mac_input(
-                channel_byte_of(channel)?,
-                seq,
-                reply_to,
-                &nonce,
-                payload.as_bytes(),
-            ),
-        )?;
-        let mac_hex = hex_encode(&mac_bytes);
-
-        let raw = RawValue::from_string(payload.to_string())
-            .map_err(|e| format!("IPC 载荷封装失败: {}", e))?;
+        let ct_b64 = encode_b64(&ciphertext);
         let envelope = OutEnvelope {
             v: PROTOCOL_VERSION,
             ch: channel,
+            sid: &sid_hex,
             seq,
             re: reply_to,
             nonce: &nonce_hex,
-            mac: &mac_hex,
-            payload: &raw,
+            ct: &ct_b64,
         };
         serde_json::to_string(&envelope).map_err(|e| format!("IPC 信封序列化失败: {}", e))
     }
@@ -227,6 +296,7 @@ impl IpcSecureChannel {
 impl Drop for IpcSecureChannel {
     fn drop(&mut self) {
         self.master.zeroize();
+        self.challenge.zeroize();
         self.request_key.zeroize();
         self.response_key.zeroize();
         self.progress_key.zeroize();
@@ -244,16 +314,68 @@ fn derive_key(
     Ok(key)
 }
 
-/// 签名原文拼接。
-fn mac_input(channel: u8, seq: u64, reply_to: u64, nonce: &[u8], payload: &[u8]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(MAC_PREFIX.len() + 1 + 8 + 8 + nonce.len() + payload.len());
-    data.extend_from_slice(MAC_PREFIX);
+/// 就绪证明：绑定会话标识与本会话挑战值。
+fn ready_proof(key: &[u8], session_id: &[u8], challenge: &[u8]) -> Result<[u8; 32], String> {
+    let mut data = Vec::with_capacity(READY_PROOF_PREFIX.len() + session_id.len() + challenge.len());
+    data.extend_from_slice(READY_PROOF_PREFIX);
+    data.extend_from_slice(session_id);
+    data.extend_from_slice(challenge);
+    let tag = hmac_sign(key, &data)?;
+    data.zeroize();
+    Ok(tag)
+}
+
+/// AEAD 附加认证数据：通道、会话标识、序号与关联号。
+fn aad_bytes(channel: u8, session_id: &[u8], seq: u64, reply_to: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(AAD_PREFIX.len() + 1 + session_id.len() + 16);
+    data.extend_from_slice(AAD_PREFIX);
     data.push(channel);
+    data.extend_from_slice(session_id);
     data.extend_from_slice(&seq.to_be_bytes());
     data.extend_from_slice(&reply_to.to_be_bytes());
-    data.extend_from_slice(nonce);
-    data.extend_from_slice(payload);
     data
+}
+
+/// nonce 构造：4 字节随机前缀 + 8 字节大端序号。
+///
+/// 同一会话内序号严格递增，nonce 因此在 (密钥, nonce) 维度上唯一，
+/// 不依赖随机碰撞概率。
+fn build_nonce(seq: u64) -> Result<[u8; NONCE_LEN], String> {
+    let mut nonce = [0u8; NONCE_LEN];
+    getrandom::getrandom(&mut nonce[..4]).map_err(|e| format!("生成 IPC nonce 失败: {}", e))?;
+    nonce[4..].copy_from_slice(&seq.to_be_bytes());
+    Ok(nonce)
+}
+
+fn encrypt(key: &[u8], nonce: &[u8; NONCE_LEN], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    use aes_gcm::aead::{Aead, Payload};
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "IPC 密钥长度非法".to_string())?;
+    cipher
+        .encrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|_| "IPC 载荷加密失败".to_string())
+}
+
+fn decrypt(key: &[u8], nonce: &[u8; NONCE_LEN], aad: &[u8], ciphertext: &[u8]) -> Result<String, String> {
+    use aes_gcm::aead::{Aead, Payload};
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "IPC 密钥长度非法".to_string())?;
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| "IPC 载荷解密失败".to_string())?;
+    String::from_utf8(plaintext).map_err(|_| "IPC 载荷不是合法 UTF-8".to_string())
 }
 
 fn channel_byte(channel: Channel) -> u8 {
@@ -284,6 +406,16 @@ fn accept_sequence(counter: &AtomicU64, seq: u64) -> bool {
             Err(actual) => current = actual,
         }
     }
+}
+
+fn encode_b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn decode_b64(text: &str, field: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .map_err(|_| format!("IPC 信封字段不是合法 base64: {}", field))
 }
 
 fn hex_decode_fixed<const N: usize>(text: &str, field: &str) -> Result<[u8; N], String> {
@@ -351,8 +483,7 @@ mod hex {
         }
         let mut output = Vec::with_capacity(s.len() / 2);
         let bytes = s.as_bytes();
-        let (pairs, _) = bytes.as_chunks::<2>();
-        for pair in pairs {
+        for pair in bytes.as_chunks::<2>().0 {
             let high = (pair[0] as char).to_digit(16).ok_or("非法十六进制字符")?;
             let low = (pair[1] as char).to_digit(16).ok_or("非法十六进制字符")?;
             output.push((high * 16 + low) as u8);
@@ -369,116 +500,245 @@ mod hex {
 mod tests {
     use super::*;
 
-    fn envelope_for(channel: &str, key: &[u8], seq: u64, reply_to: u64, payload: &str) -> String {
-        let mut nonce = [0u8; NONCE_LEN];
-        getrandom::getrandom(&mut nonce).expect("CSPRNG 不可用");
-        let nonce_hex = hex_encode(&nonce);
-        let mac = hmac_sign(
-            key,
-            &mac_input(
-                channel_byte_of(channel).unwrap(),
-                seq,
-                reply_to,
-                &nonce,
-                payload.as_bytes(),
-            ),
-        )
-        .unwrap();
-        let raw = RawValue::from_string(payload.to_string()).unwrap();
-        serde_json::to_string(&OutEnvelope {
-            v: PROTOCOL_VERSION,
-            ch: channel,
-            seq,
-            re: reply_to,
-            nonce: &nonce_hex,
-            mac: &hex_encode(&mac),
-            payload: &raw,
-        })
-        .unwrap()
+    /// 测试用对端（模拟 worker）：共享同一主密钥/会话标识/挑战值。
+    impl IpcSecureChannel {
+        fn test_peer(&self) -> Self {
+            Self::from_parts(
+                *self.master,
+                self.session_id,
+                *self.challenge,
+            )
+            .expect("测试对端构造失败")
+        }
+
+        /// 模拟 worker 解密请求信封（仅测试）。
+        fn open_request_for_test(&self, line: &str) -> Result<(u64, String), String> {
+            let envelope: InEnvelope<'_> =
+                serde_json::from_str(line).map_err(|e| format!("解析失败: {}", e))?;
+            if envelope.ch != CH_REQUEST || envelope.re != 0 || envelope.v != PROTOCOL_VERSION {
+                return Err("请求信封字段非法".to_string());
+            }
+            let sid = hex_decode_fixed::<SESSION_ID_LEN>(envelope.sid, "sid")?;
+            if !ct_eq(&sid, &self.session_id) {
+                return Err("会话标识不匹配".to_string());
+            }
+            let nonce = hex_decode_fixed::<NONCE_LEN>(envelope.nonce, "nonce")?;
+            let ciphertext = decode_b64(envelope.ct, "ct")?;
+            let aad = aad_bytes(1, &sid, envelope.seq, envelope.re);
+            let payload = decrypt(&self.request_key[..], &nonce, &aad, &ciphertext)?;
+            Ok((envelope.seq, payload))
+        }
+
+        /// 模拟 worker 生成就绪行（仅测试）。
+        fn ready_line_for_test(&self, proof_challenge: &[u8; CHALLENGE_LEN]) -> String {
+            let proof = ready_proof(&self.response_key[..], &self.session_id, proof_challenge)
+                .expect("证明计算失败");
+            let payload = serde_json::json!({
+                "ok": true,
+                "op": "ready",
+                "proof": hex_encode(&proof),
+            })
+            .to_string();
+            self.seal(CH_RESPONSE, &self.response_key[..], 1, 0, &payload)
+                .expect("就绪行封装失败")
+        }
+
+        /// 模拟 worker 生成一条响应（仅测试）。
+        fn response_for_test(&self, seq: u64, reply_to: u64, payload: &str) -> String {
+            self.seal(CH_RESPONSE, &self.response_key[..], seq, reply_to, payload)
+                .expect("响应封装失败")
+        }
+
+        /// 模拟 worker 生成一条进度（仅测试）。
+        fn progress_for_test(&self, seq: u64, reply_to: u64, payload: &str) -> String {
+            self.seal(CH_PROGRESS, &self.progress_key[..], seq, reply_to, payload)
+                .expect("进度封装失败")
+        }
+    }
+
+    /// 构造已完成握手的宿主信道与对端。
+    fn handshaken() -> (IpcSecureChannel, IpcSecureChannel) {
+        let host = IpcSecureChannel::new().unwrap();
+        let peer = host.test_peer();
+        let ready = peer.ready_line_for_test(&host.challenge);
+        let opened = host.open_line(&ready).unwrap();
+        host.verify_ready(&opened).unwrap();
+        (host, peer)
     }
 
     #[test]
-    fn test_request_sign_and_response_verify() {
-        let host = IpcSecureChannel::new().unwrap();
+    fn test_ready_handshake_and_verified() {
+        let (host, peer) = handshaken();
+        assert!(host.ready_verified.load(Ordering::SeqCst));
+
         let (seq, request) = host.sign_request(r#"{"op":"ping"}"#).unwrap();
         assert_eq!(seq, 1);
-
-        let parsed: InEnvelope<'_> = serde_json::from_str(&request).unwrap();
-        assert_eq!(parsed.ch, "q");
-        assert_eq!(parsed.re, 0);
-
-        let response = envelope_for("r", &host.response_key[..], 1, seq, r#"{"ok":true}"#);
-        let opened = host.open_line(&response).unwrap();
-        assert_eq!(opened.channel, Channel::Response);
-        assert_eq!(opened.reply_to, seq);
-        assert_eq!(opened.payload, r#"{"ok":true}"#);
+        let (peer_seq, payload) = peer.open_request_for_test(&request).unwrap();
+        assert_eq!(peer_seq, seq);
+        assert_eq!(payload, r#"{"op":"ping"}"#);
     }
 
     #[test]
-    fn test_reject_tampered_payload() {
+    fn test_ready_rejects_stale_challenge() {
         let host = IpcSecureChannel::new().unwrap();
-        let response = envelope_for("r", &host.response_key[..], 1, 1, r#"{"ok":true}"#);
-        let mut value: serde_json::Value = serde_json::from_str(&response).unwrap();
-        value["payload"] = serde_json::json!({"ok": false});
-        let tampered = serde_json::to_string(&value).unwrap();
-        assert!(host.open_line(&tampered).is_err());
+        let peer = host.test_peer();
+        /* 用会话开始前就固定的挑战值伪造就绪：必须拒绝。 */
+        let stale = [0xAAu8; CHALLENGE_LEN];
+        let ready = peer.ready_line_for_test(&stale);
+        let opened = host.open_line(&ready).unwrap();
+        assert!(host.verify_ready(&opened).is_err());
+        assert!(!host.ready_verified.load(Ordering::SeqCst));
     }
 
     #[test]
-    fn test_reject_wrong_key() {
+    fn test_ready_rejects_tampered_proof() {
         let host = IpcSecureChannel::new().unwrap();
-        let other = IpcSecureChannel::new().unwrap();
-        let response = envelope_for("r", &other.response_key[..], 1, 1, r#"{"ok":true}"#);
+        let peer = host.test_peer();
+        let proof = ready_proof(&peer.response_key[..], &peer.session_id, &host.challenge[..]).unwrap();
+        let mut bad = proof;
+        bad[0] ^= 0xFF;
+        let payload = serde_json::json!({
+            "ok": true,
+            "op": "ready",
+            "proof": hex_encode(&bad),
+        })
+        .to_string();
+        let ready = peer.response_for_test(1, 0, &payload);
+        let opened = host.open_line(&ready).unwrap();
+        assert!(host.verify_ready(&opened).is_err());
+    }
+
+    #[test]
+    fn test_request_refused_before_handshake() {
+        let host = IpcSecureChannel::new().unwrap();
+        assert!(host.sign_request(r#"{"op":"unlock"}"#).is_err());
+    }
+
+    #[test]
+    fn test_business_response_refused_before_handshake() {
+        let host = IpcSecureChannel::new().unwrap();
+        let peer = host.test_peer();
+        let response = peer.response_for_test(1, 1, r#"{"ok":true}"#);
         assert!(host.open_line(&response).is_err());
     }
 
     #[test]
-    fn test_reject_replayed_sequence() {
-        let host = IpcSecureChannel::new().unwrap();
-        let response = envelope_for("r", &host.response_key[..], 1, 1, r#"{"ok":true}"#);
+    fn test_payload_absent_from_wire() {
+        let (host, peer) = handshaken();
+        let (_seq, request) = host.sign_request(r#"{"op":"unlock","password":"TopSecret"}"#).unwrap();
+        assert!(!request.contains("TopSecret"), "请求明文不得出现在线协议中");
+        let (_, payload) = peer.open_request_for_test(&request).unwrap();
+        assert!(payload.contains("TopSecret"));
+    }
+
+    #[test]
+    fn test_reject_replayed_response() {
+        let (host, peer) = handshaken();
+        let (seq, _) = host.sign_request(r#"{"op":"ping"}"#).unwrap();
+        /* 就绪已占用响应序号 1，业务响应从 2 开始。 */
+        let response = peer.response_for_test(2, seq, r#"{"ok":true}"#);
         assert!(host.open_line(&response).is_ok());
+        /* 同一字节序列重放：序号已推进，必须拒绝。 */
         assert!(host.open_line(&response).is_err());
     }
 
     #[test]
     fn test_reject_out_of_order_sequence() {
-        let host = IpcSecureChannel::new().unwrap();
-        let response = envelope_for("r", &host.response_key[..], 3, 1, r#"{"ok":true}"#);
+        let (host, peer) = handshaken();
+        let response = peer.response_for_test(3, 1, r#"{"ok":true}"#);
         assert!(host.open_line(&response).is_err());
     }
 
     #[test]
-    fn test_progress_channel_independent_sequence() {
-        let host = IpcSecureChannel::new().unwrap();
-        let progress = envelope_for(
-            "p",
-            &host.progress_key[..],
-            1,
-            7,
-            r#"{"op":"unlock_progress"}"#,
-        );
-        let response = envelope_for("r", &host.response_key[..], 1, 7, r#"{"ok":true}"#);
-        let opened_progress = host.open_line(&progress).unwrap();
-        let opened_response = host.open_line(&response).unwrap();
-        assert_eq!(opened_progress.channel, Channel::Progress);
-        assert_eq!(opened_response.channel, Channel::Response);
+    fn test_reject_tampered_ciphertext() {
+        let (host, peer) = handshaken();
+        let response = peer.response_for_test(2, 1, r#"{"ok":true}"#);
+        let mut value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let mut ct = value["ct"].as_str().unwrap().to_string();
+        let last = ct.pop().unwrap();
+        ct.push(if last == 'A' { 'B' } else { 'A' });
+        value["ct"] = serde_json::json!(ct);
+        let tampered = serde_json::to_string(&value).unwrap();
+        assert!(host.open_line(&tampered).is_err());
     }
 
     #[test]
-    fn test_reject_wrong_direction_channel() {
-        let host = IpcSecureChannel::new().unwrap();
-        let request = envelope_for("q", &host.request_key[..], 1, 0, r#"{"op":"ping"}"#);
+    fn test_reject_cross_session_envelope() {
+        let (host, _peer) = handshaken();
+        /* 另一会话（不同主密钥/会话标识）的响应不得被接受。 */
+        let other = IpcSecureChannel::new().unwrap();
+        let response = other.test_peer().response_for_test(1, 1, r#"{"ok":true}"#);
+        assert!(host.open_line(&response).is_err());
+
+        /* 相同主密钥但会话标识不同：仍拒绝（会话绑定）。 */
+        let mut sid = host.session_id;
+        sid[0] ^= 0x01;
+        let foreign = IpcSecureChannel::from_parts(*host.master, sid, *host.challenge).unwrap();
+        let response = foreign.test_peer().response_for_test(1, 1, r#"{"ok":true}"#);
+        assert!(host.open_line(&response).is_err());
+    }
+
+    #[test]
+    fn test_reject_wrong_channel_and_version() {
+        let (host, peer) = handshaken();
+        let progress = peer.progress_for_test(1, 1, r#"{"op":"unlock_progress"}"#);
+        let opened = host.open_line(&progress).unwrap();
+        assert_eq!(opened.channel, Channel::Progress);
+
+        let request = peer
+            .seal(CH_REQUEST, &peer.request_key[..], 1, 0, r#"{"op":"ping"}"#)
+            .unwrap();
         assert!(host.open_line(&request).is_err());
+
+        let mut value: serde_json::Value =
+            serde_json::from_str(&peer.response_for_test(2, 1, r#"{"ok":true}"#)).unwrap();
+        value["v"] = serde_json::json!(1);
+        assert!(host.open_line(&serde_json::to_string(&value).unwrap()).is_err());
     }
 
     #[test]
-    fn test_reject_foreign_protocol_version() {
+    fn test_progress_channel_independent_sequence() {
+        let (host, peer) = handshaken();
+        let progress = peer.progress_for_test(1, 7, r#"{"op":"unlock_progress"}"#);
+        let response = peer.response_for_test(2, 7, r#"{"ok":true}"#);
+        assert!(host.open_line(&progress).is_ok());
+        assert!(host.open_line(&response).is_ok());
+    }
+
+    #[test]
+    fn test_reject_duplicate_ready() {
         let host = IpcSecureChannel::new().unwrap();
-        let line = envelope_for("r", &host.response_key[..], 1, 1, r#"{"ok":true}"#);
-        let mut value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        value["v"] = serde_json::json!(2);
-        let mutated = serde_json::to_string(&value).unwrap();
-        assert!(host.open_line(&mutated).is_err());
+        let peer = host.test_peer();
+        let ready = peer.ready_line_for_test(&host.challenge);
+        let opened = host.open_line(&ready).unwrap();
+        host.verify_ready(&opened).unwrap();
+        /* 就绪行重复出现：不得再次推进握手状态。 */
+        assert!(host.open_line(&ready).is_err());
+    }
+
+    #[test]
+    fn test_reject_bad_nonce_binding() {
+        let (host, peer) = handshaken();
+        let response = peer.response_for_test(2, 1, r#"{"ok":true}"#);
+        let mut value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let nonce = value["nonce"].as_str().unwrap().to_string();
+        let mut nonce_bytes = hex_decode(&nonce).unwrap();
+        nonce_bytes[11] ^= 0x01;
+        value["nonce"] = serde_json::json!(hex_encode(&nonce_bytes));
+        assert!(host.open_line(&serde_json::to_string(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn test_bootstrap_carries_session_material() {
+        let host = IpcSecureChannel::new().unwrap();
+        let line = host.bootstrap_line().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["v"], serde_json::json!(2));
+        assert_eq!(value["ch"], serde_json::json!("b"));
+        assert_eq!(value["key"].as_str().unwrap().len(), 64);
+        assert_eq!(value["sid"].as_str().unwrap().len(), 32);
+        assert_eq!(value["challenge"].as_str().unwrap().len(), 64);
+        assert!(!host.bootstrap_line().unwrap().is_empty());
     }
 
     #[test]

@@ -22,6 +22,14 @@ import type { PhotoMeta, SlimChunkSet } from "../types/crypto";
  * 消息类型定义                                                        *
  * ------------------------------------------------------------------ */
 
+/** 索引瘦身布局的文件级密钥组（密钥本体在 worker，此处只带公开参数） */
+export interface SlimWorkerKeys {
+  /** 文件盐 base64（索引密文头部与包裹密钥共用） */
+  fileSaltB64: string;
+  /** 包裹态文件密钥 base64（写入索引 JSON；使用时由 worker 一次性解封） */
+  wrappedFileKey: string;
+}
+
 /** 主线程 → Worker 请求（完整加密） */
 export interface PhotoCryptoRequest {
   /** 任务 ID（用于关联请求与响应） */
@@ -32,8 +40,8 @@ export interface PhotoCryptoRequest {
   mime: string;
   /** 文件原始字节（通过 transferList 零拷贝转让） */
   fileBytes: ArrayBuffer;
-  /** 照片模块独立密钥 */
-  photoKey: string;
+  /** 索引瘦身布局密钥组（缺省 = 既有布局，由 worker 生成随机盐） */
+  slim?: SlimWorkerKeys;
 }
 
 /** 外置块输出（块密文总量超过内联阈值时的成功产物） */
@@ -94,24 +102,16 @@ export interface PhotoCryptoFailure {
   error: string;
 }
 
-/** 索引瘦身布局的加密参数（索引密文盐必须与包裹密钥同盐） */
-export interface SlimMetaParams {
-  /** 文件盐 base64（由加密任务生成并贯穿到索引加密任务） */
-  fileSaltB64: string;
-}
-
 /** 主线程 → Worker 请求（meta-only 加密，解析导入路径） */
 export interface PhotoMetaCryptoRequest {
   /** 任务 ID（用于关联请求与响应） */
   id: number;
   /** 已解密的元数据对象（解析阶段解密，此处重新加密） */
   meta: PhotoMeta;
-  /** 照片模块独立密钥 */
-  photoKey: string;
   /** 记录名（`parsed_${timestamp}_${index}`，由调用方生成保证唯一） */
   recordName: string;
   /** 索引瘦身布局参数（缺省 = 既有布局：按随机盐加密索引） */
-  slim?: SlimMetaParams;
+  slim?: SlimWorkerKeys;
 }
 
 /** 主线程 → Worker 请求（索引瘦身布局：加密缩略图记录载荷） */
@@ -122,12 +122,10 @@ export interface PhotoSlimThumbRequest {
   op: "encrypt_slim_thumb";
   /** 缩略图 base64（明文 JPEG，来自完整加密产物） */
   thumbB64: string;
-  /** 文件盐 base64（索引加密任务共用同一盐） */
-  fileSaltB64: string;
   /** 文件哈希 hex（缩略图 AD 绑定，防跨照片换用） */
   fileHashHex: string;
-  /** 照片模块独立密钥 */
-  photoKey: string;
+  /** 包裹态文件密钥（缩略图由同盐包裹密钥加密） */
+  wrappedFileKey: string;
   /** 定位标识（记录名或照片名，用于日志与错误提示） */
   label: string;
 }
@@ -158,12 +156,10 @@ export interface PhotoSlimSetRequest {
   op: "encrypt_slim_set";
   /** 块集内容（逐块记录 ID 与逐块密文哈希，按序一一对应） */
   set: SlimChunkSet;
-  /** 文件盐 base64（索引加密任务共用同一盐） */
-  fileSaltB64: string;
   /** 文件哈希 hex（块集 AD 绑定，防跨照片换用） */
   fileHashHex: string;
-  /** 照片模块独立密钥 */
-  photoKey: string;
+  /** 包裹态文件密钥（块集由同盐包裹密钥加密） */
+  wrappedFileKey: string;
   /** 定位标识（记录名或照片名，用于日志与错误提示） */
   label: string;
 }
@@ -194,16 +190,12 @@ export interface PhotoDecryptSlimSetRequest {
   op: "decrypt_slim_set";
   /** 块集记录载荷 base64 */
   setCipherB64: string;
-  /** 包裹态文件密钥（含文件盐，与索引同盐） */
+  /** 包裹态文件密钥（块集与索引同盐） */
   wrappedFileKey: string;
   /** 文件哈希 hex（块集 AD 绑定） */
   fileHashHex: string;
-  /** 照片模块独立密钥 */
-  photoKey: string;
   /** 定位标识（记录 ID 或照片名，用于日志与错误提示） */
   label: string;
-  /** 模块密钥失效后由池标记：本次任务先行清空派生缓存再执行 */
-  clearCache?: boolean;
 }
 
 /** Worker → 主线程 响应（块集记录解密成功） */
@@ -234,8 +226,8 @@ export interface PhotoSlimRepackRequest {
   createdAt: number;
   /** 明文缩略图 base64（源索引内解出的展示字段） */
   thumbB64: string;
-  /** 照片模块独立密钥 */
-  photoKey: string;
+  /** 索引瘦身布局的公开参数与包裹态文件密钥（重打包固定写入瘦身布局） */
+  slim: SlimWorkerKeys;
 }
 
 /** meta-only 加密处理产物 */
@@ -278,18 +270,8 @@ export interface PhotoDecryptMetaRequest {
   op: "decrypt_meta";
   /** 加密的元数据 base64（含盐与 nonce） */
   metaB64: string;
-  /** 照片模块独立密钥 */
-  photoKey: string;
   /** 定位标识（记录 ID 或照片名，用于日志与错误提示） */
   label: string;
-  /**
-   * 索引瘦身布局：缩略图记录载荷 base64。
-   * 与元数据同任务解密——索引解密已派生出所需密钥（同盐），省去独立任务的
-   * 第二次密钥派生；缺省表示既有布局（缩略图内联于元数据）。
-   */
-  thumbCipherB64?: string;
-  /** 模块密钥失效后由池标记：本次任务先行清空派生缓存再执行 */
-  clearCache?: boolean;
 }
 
 /** 主线程 → Worker 请求（数据块解密：查看原图） */
@@ -300,8 +282,6 @@ export interface PhotoDecryptChunksRequest {
   op: "decrypt_chunks";
   /** 按序排列的块密文 base64 列表（顺序即块序号，用于 AD 校验） */
   chunksB64: string[];
-  /** 照片模块独立密钥 */
-  photoKey: string;
   /** 文件哈希 hex（块 AD 绑定，校验块归属与顺序） */
   fileHashHex: string;
   /** 定位标识（记录 ID 或照片名，用于日志与错误提示） */
@@ -321,8 +301,6 @@ export interface PhotoDecryptChunksRequest {
    * 不一致即整体失败，避免主线程对整图做同步哈希。
    */
   expectedFileHash?: string;
-  /** 模块密钥失效后由池标记：本次任务先行清空派生缓存再执行 */
-  clearCache?: boolean;
 }
 
 /** 主线程 → Worker 请求（缩略图记录解密：索引瘦身布局的列表路径） */
@@ -333,16 +311,12 @@ export interface PhotoDecryptThumbRequest {
   op: "decrypt_thumb";
   /** 缩略图记录载荷 base64（nonce ‖ 密文+tag） */
   thumbCipherB64: string;
-  /** 包裹态文件密钥（含文件盐，与索引同盐） */
+  /** 包裹态文件密钥（与索引同盐） */
   wrappedFileKey: string;
   /** 文件哈希 hex（缩略图 AD 绑定） */
   fileHashHex: string;
-  /** 照片模块独立密钥 */
-  photoKey: string;
   /** 定位标识（记录 ID 或照片名，用于日志与错误提示） */
   label: string;
-  /** 模块密钥失效后由池标记：本次任务先行清空派生缓存再执行 */
-  clearCache?: boolean;
 }
 
 /** Worker → 主线程 响应（缩略图记录解密成功） */

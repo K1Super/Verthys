@@ -1,0 +1,200 @@
+/*
+ * test_v4_lockout.c — v4 持久化失败计数与熔断验收
+ *
+ * 覆盖：
+ *   - 首次运行（状态文件不存在）放行、失败计数递增
+ *   - 达到阈值后锁定，且不再继续累加
+ *   - 成功解锁后 reset 清零
+ *   - 状态文件被篡改 / 尺寸异常 / 机器绑定失配一律视为锁定
+ *   - 测试注入路径隔离：一个库的锁定不影响另一个状态文件
+ *
+ * 全部状态文件写在测试沙箱相对路径，绝不触碰 %LOCALAPPDATA% 真实状态。
+ */
+#include "verthys_test.h"
+#include "vty_v4_types.h"
+#include "vty_lockout.h"
+#include "vty_device_root.h"
+#include "vty_tpm_witness.h"
+
+#include <stdio.h>
+#include <string.h>
+
+/* v2：header(24) + MAC(32) + 设备 blob(290) + 见证{slot(1), fp(32)} */
+#define V4_LK_FILE_BYTES (24u + 32u + 290u + 1u + 32u)
+
+/* 见证密钥不在沙箱里：同一路径跨轮次复用，必须在用例前后清理 */
+static void lk_clean_witness(const char *path)
+{
+    uint8_t id[VTY_UUID_BYTES];
+    if (vty_tpm_witness_id_from_string(path, id) == VTY_OK) {
+        (void)vty_tpm_witness_delete_all(id);
+    }
+}
+
+static int lk_write_raw(const char *path, const uint8_t *buf, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    size_t n;
+
+    if (f == NULL) return 1;
+    n = fwrite(buf, 1, len, f);
+    fclose(f);
+    return (n == len) ? 0 : 1;
+}
+
+TEST(v4_lockout_first_run_and_counting)
+{
+    uint32_t i;
+
+    CHECK_EQ(vty_device_root_init(), VTY_OK);
+    lk_clean_witness("v4_lockout_a.state");
+    CHECK_EQ(vty_lockout_set_path("v4_lockout_a.state"), VTY_OK);
+    CHECK_EQ(vty_lockout_init(), VTY_OK);
+
+    /* 首次运行：状态文件不存在不得当作锁定 */
+    CHECK_EQ(vty_lockout_check(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 0u);
+
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 1u);
+    CHECK_EQ(vty_lockout_check(), VTY_OK);
+
+    /* 重启不清零：重新 init 后计数仍在（持久化语义） */
+    CHECK_EQ(vty_lockout_init(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 1u);
+
+    /* 成功解锁清零 */
+    CHECK_EQ(vty_lockout_reset(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 0u);
+    CHECK_EQ(vty_lockout_check(), VTY_OK);
+
+    /* 阈值边界：前 4 次只计数，第 5 次返回锁定 */
+    for (i = 0; i < VTY_LOCKOUT_MAX_FAILURES - 1u; i++) {
+        CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    }
+    CHECK_EQ(vty_lockout_record_failure(), VTY_E_LOCKED);
+    CHECK_EQ(vty_lockout_failures(), VTY_LOCKOUT_MAX_FAILURES);
+    CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
+
+    /* 已锁定状态下不再累加 */
+    CHECK_EQ(vty_lockout_record_failure(), VTY_E_LOCKED);
+    CHECK_EQ(vty_lockout_failures(), VTY_LOCKOUT_MAX_FAILURES);
+    lk_clean_witness("v4_lockout_a.state");
+    return 0;
+}
+
+TEST(v4_lockout_tampered_state_locked)
+{
+    uint8_t buf[V4_LK_FILE_BYTES];
+
+    CHECK_EQ(vty_device_root_init(), VTY_OK);
+    lk_clean_witness("v4_lockout_t.state");
+    CHECK_EQ(vty_lockout_set_path("v4_lockout_t.state"), VTY_OK);
+    CHECK_EQ(vty_lockout_init(), VTY_OK);
+
+    /* 全零文件：magic/版本失配 → 锁定，而不是“重置为 0 次” */
+    memset(buf, 0, sizeof(buf));
+    CHECK_EQ(lk_write_raw("v4_lockout_t.state", buf, sizeof(buf)), 0);
+    CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
+    CHECK_EQ(vty_lockout_failures(), VTY_LOCKOUT_MAX_FAILURES);
+    CHECK_EQ(vty_lockout_record_failure(), VTY_E_LOCKED);
+
+    /* 尺寸不符 */
+    CHECK_EQ(lk_write_raw("v4_lockout_t.state", buf, sizeof(buf) - 1u), 0);
+    CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
+
+    /* 先建合法状态，再改计数 → MAC 失配 */
+    remove("v4_lockout_t.state");
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    {
+        FILE *f = fopen("v4_lockout_t.state", "rb");
+        size_t n;
+        CHECK(f != NULL);
+        n = fread(buf, 1, sizeof(buf), f);
+        fclose(f);
+        CHECK_EQ(n, sizeof(buf));
+        buf[8] ^= 0x01u;   /* 失败计数 */
+        CHECK_EQ(lk_write_raw("v4_lockout_t.state", buf, sizeof(buf)), 0);
+    }
+    CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
+    lk_clean_witness("v4_lockout_t.state");
+    return 0;
+}
+
+TEST(v4_lockout_state_replay_rejected)
+{
+    uint8_t s1[V4_LK_FILE_BYTES];
+    uint8_t s2[V4_LK_FILE_BYTES];
+    size_t n1 = 0;
+    size_t n2 = 0;
+    FILE *f;
+    uint8_t id[VTY_UUID_BYTES];
+
+    CHECK_EQ(vty_device_root_init(), VTY_OK);
+    lk_clean_witness("v4_lockout_replay.state");
+    CHECK_EQ(vty_lockout_set_path("v4_lockout_replay.state"), VTY_OK);
+    CHECK_EQ(vty_lockout_init(), VTY_OK);
+    CHECK_EQ(vty_lockout_reset(), VTY_OK);
+
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    f = fopen("v4_lockout_replay.state", "rb");
+    CHECK(f != NULL);
+    n1 = fread(s1, 1, sizeof(s1), f);
+    fclose(f);
+    CHECK_EQ(n1, (size_t)sizeof(s1));
+    CHECK_EQ(vty_lockout_failures(), 1u);
+
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    f = fopen("v4_lockout_replay.state", "rb");
+    CHECK(f != NULL);
+    n2 = fread(s2, 1, sizeof(s2), f);
+    fclose(f);
+    CHECK_EQ(n2, (size_t)sizeof(s2));
+    CHECK_EQ(vty_lockout_failures(), 2u);
+
+    /* 还原上一版状态：计数仅 1（未达阈值），但见证指纹失效 → 锁定 */
+    CHECK_EQ(lk_write_raw("v4_lockout_replay.state", s1, n1), 0);
+    CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
+    CHECK_EQ(vty_lockout_failures(), VTY_LOCKOUT_MAX_FAILURES);
+
+    /* 当前状态仍可校验 */
+    CHECK_EQ(lk_write_raw("v4_lockout_replay.state", s2, n2), 0);
+    CHECK_EQ(vty_lockout_check(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 2u);
+
+    /* 见证密钥删除：fail-closed；恢复路径可重建 */
+    CHECK_EQ(vty_tpm_witness_id_from_string("v4_lockout_replay.state", id), VTY_OK);
+    CHECK_EQ(vty_tpm_witness_delete_all(id), VTY_OK);
+    CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
+    CHECK_EQ(vty_lockout_reset(), VTY_OK);
+    CHECK_EQ(vty_lockout_check(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 0u);
+
+    lk_clean_witness("v4_lockout_replay.state");
+    return 0;
+}
+
+TEST(v4_lockout_path_isolation)
+{
+    CHECK_EQ(vty_device_root_init(), VTY_OK);
+
+    lk_clean_witness("v4_lockout_p1.state");
+    lk_clean_witness("v4_lockout_p2.state");
+    CHECK_EQ(vty_lockout_set_path("v4_lockout_p1.state"), VTY_OK);
+    CHECK_EQ(vty_lockout_init(), VTY_OK);
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 2u);
+
+    /* 切换注入路径：另一个状态文件是独立世界，不得继承失败计数 */
+    CHECK_EQ(vty_lockout_set_path("v4_lockout_p2.state"), VTY_OK);
+    CHECK_EQ(vty_lockout_check(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 0u);
+
+    /* 非法注入路径 */
+    CHECK_EQ(vty_lockout_set_path(NULL), VTY_E_INVALID);
+    CHECK_EQ(vty_lockout_set_path(""), VTY_E_INVALID);
+    lk_clean_witness("v4_lockout_p1.state");
+    lk_clean_witness("v4_lockout_p2.state");
+    return 0;
+}

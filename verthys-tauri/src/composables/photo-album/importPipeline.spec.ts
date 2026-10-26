@@ -101,7 +101,7 @@ vi.mock("../../cache/coordination/batch-cache-coordinator", () => ({
 import { ImportPipeline, importedToPhotoEntries } from "./importPipeline";
 import type { ParsedPhotoPreview } from "./types";
 import type { PhotoMeta } from "../../lib/crypto";
-import { createSlimFileKeys } from "../../lib/crypto";
+import { bytesToBase64 } from "../../utils/binary_codec";
 import { MAX_PHOTO_BYTES, PHOTO_FMT_SLIM } from "../../constants/crypto_const";
 import { photoWorkerPool } from "../../workers/photoWorkerPool";
 import { reactive } from "vue";
@@ -175,7 +175,7 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1));
     const pipe = makePipeline();
 
-    const result = await pipe.runParsed([makePreview(0, "h1")], "key");
+    const result = await pipe.runParsed([makePreview(0, "h1")]);
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(1);
@@ -193,13 +193,14 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1));
     const pipe = makePipeline();
     // 合法包裹态文件密钥（提供文件盐）；缩略图缺失（生成失败）走 thumbId=0 分支
-    const { wrappedFileKey } = await createSlimFileKeys("key");
+    // 包裹态文件密钥只用于提供公开盐：88 字节 = salt(16)+nonce(24)+密文(48)
+    const wrappedFileKey = bytesToBase64(new Uint8Array(88));
     const preview = makePreview(0, "h1");
     preview.meta = {
       ...preview.meta!, fmt: PHOTO_FMT_SLIM, wrappedFileKey, thumbB64: "",
     };
 
-    const result = await pipe.runParsed([preview], "key");
+    const result = await pipe.runParsed([preview]);
 
     expect(result.ok).toBe(true);
     // 缩略图缺失不阻断整张写入：索引以 thumbId=0 明确"无缩略图"
@@ -218,7 +219,7 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(2));
     const pipe = makePipeline();
 
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")], "key");
+    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(2);
@@ -241,7 +242,7 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
     });
     const pipe = makePipeline();
 
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")], "key");
+    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain("存储空间不足");
@@ -268,7 +269,7 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
       error: "写入失败 (ERR_0000000F)",
     });
 
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")], "key");
+    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
 
     expect(result.ok).toBe(false);
     // 首条触发致命错误后，后端写入通道不再被第二张唤起
@@ -280,7 +281,7 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
     const pipe = makePipeline();
     // 请求 2 条：ids=[10,11] 全成功即 ok —— 这里改用单条重试耗尽场景由下一条用例覆盖
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(2));
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")], "key");
+    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
     expect(result.ok).toBe(true);
     expect(importEndMock).toHaveBeenCalledWith(true);
   });
@@ -297,7 +298,7 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
       meta: null,
     };
 
-    const result = await pipe.runParsed([makePreview(0, "h1"), undecryptablePreview], "key");
+    const result = await pipe.runParsed([makePreview(0, "h1"), undecryptablePreview]);
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(1);
@@ -347,7 +348,7 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
         total_count: 2,
         skipped_count: 0,
       });
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")], "key");
+    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(2);
@@ -373,7 +374,7 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
         skipped_count: 0,
       }),
     );
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")], "key");
+    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
 
     expect(result.ok).toBe(false);
     expect(result.imported).toHaveLength(1);
@@ -394,7 +395,7 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
       total_count: 1,
       skipped_count: 1,
     });
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h1")], "key");
+    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h1")]);
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(1);
@@ -407,7 +408,7 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
   it("整批 IPC 异常且重试耗尽：按可重试失败入账，WAL 保留", async () => {
     const pipe = makePipeline({ consumerMaxRetries: 0 });
     addRecordsBatchMock.mockRejectedValue(new Error("ipc transport error"));
-    const result = await pipe.runParsed([makePreview(0, "h1")], "key");
+    const result = await pipe.runParsed([makePreview(0, "h1")]);
 
     expect(result.ok).toBe(false);
     expect(result.imported).toHaveLength(0);
@@ -454,7 +455,7 @@ describe("importPipeline — 大文件外置块路径", () => {
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1, 30));
 
     const pipe = makePipeline();
-    const result = await pipe.runParsed([makeExternalPreview(0, "h1")], "key");
+    const result = await pipe.runParsed([makeExternalPreview(0, "h1")]);
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(1);
@@ -485,7 +486,7 @@ describe("importPipeline — 大文件外置块路径", () => {
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1, 30));
 
     const pipe = makePipeline();
-    const result = await pipe.runParsed([makeExternalPreview(0, "h1")], "key");
+    const result = await pipe.runParsed([makeExternalPreview(0, "h1")]);
 
     expect(result.ok).toBe(false);
     expect(result.imported).toHaveLength(0);
@@ -508,7 +509,7 @@ describe("importPipeline — 大文件外置块路径", () => {
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1, 30));
 
     const pipe = makePipeline();
-    const result = await pipe.runParsed([makeExternalPreview(0, "h1")], "key");
+    const result = await pipe.runParsed([makeExternalPreview(0, "h1")]);
 
     expect(result.ok).toBe(true);
     expect(result.skipped).toBe(1);
@@ -534,7 +535,7 @@ describe("importPipeline — run() 生产者：读取闸门与单文件上限", 
       },
     ];
 
-    const result = await pipe.run(files, "key");
+    const result = await pipe.run(files);
 
     expect(result.ok).toBe(false);
     expect(result.failedRecords).toHaveLength(1);
@@ -558,7 +559,7 @@ describe("importPipeline — run() 生产者：读取闸门与单文件上限", 
       },
     ];
 
-    const result = await pipe.run(files, "key");
+    const result = await pipe.run(files);
 
     expect(waitForCapacityMock).toHaveBeenCalled();
     expect(result.failedRecords[0].reason).toBe("read-failed");
@@ -604,7 +605,7 @@ describe("importPipeline — run() 大文件外置路径（端到端编排）", 
       { name: "大图.jpg", mime: "image/jpeg", readBytes: async () => new Uint8Array(4) },
     ];
 
-    const result = await pipe.run(files, "key");
+    const result = await pipe.run(files);
 
     // 编排正确：块上传 → meta-only 加密 → 批量写入带外置引用
     expect(addChunkBatchMock).toHaveBeenCalledTimes(1);
@@ -636,7 +637,7 @@ describe("importPipeline — 共享会话编排（两路一致的会话语义）
       { name: "a.jpg", mime: "image/jpeg", readBytes: async () => new Uint8Array(4) },
     ];
 
-    const result = await pipe.run(files, "key");
+    const result = await pipe.run(files);
 
     // 生产者异常不吞：会话按"条目已入账失败"收尾（策略未执行，无静默未记账条目）
     expect(result.ok).toBe(false);
@@ -656,7 +657,7 @@ describe("importPipeline — 共享会话编排（两路一致的会话语义）
     );
     const pipe = makePipeline();
 
-    const result = await pipe.runParsed([makePreview(0, "h1")], "key");
+    const result = await pipe.runParsed([makePreview(0, "h1")]);
 
     expect(result.ok).toBe(false);
     expect(result.failedRecords).toHaveLength(1);
@@ -670,10 +671,9 @@ describe("importPipeline — 共享会话编排（两路一致的会话语义）
     // 首条读取挂起：会话保持在进行中状态
     const pending = pipe.run(
       [{ name: "hang.jpg", mime: "image/jpeg", readBytes: () => new Promise<Uint8Array>(() => {}) }],
-      "key",
     );
 
-    const busy = await pipe.runParsed([makePreview(0, "h1")], "key");
+    const busy = await pipe.runParsed([makePreview(0, "h1")]);
 
     expect(busy.ok).toBe(false);
     expect(busy.error).toBe("已有导入任务进行中，请等待完成");
@@ -692,7 +692,7 @@ describe("importPipeline — 共享会话编排（两路一致的会话语义）
       { name: "a.jpg", mime: "image/jpeg", readBytes: async () => new Uint8Array(4) },
     ];
 
-    const result = await pipe.run(files, "key", controller.signal);
+    const result = await pipe.run(files, controller.signal);
 
     expect(result.ok).toBe(false);
     expect(result.error).toBe("ABORTED");
@@ -769,7 +769,7 @@ describe("importPipeline — 响应式代理载荷净化（解析导入 DataClon
     ).toThrow();
 
     const pipe = makePipeline();
-    const result = await pipe.runParsed([polluted], "key");
+    const result = await pipe.runParsed([polluted]);
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(1);

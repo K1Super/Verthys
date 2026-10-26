@@ -9,7 +9,7 @@
  * 消息协议
  * =============================================================================
  * 主线程 → Worker：
- *   { id, fileBytes: ArrayBuffer（transferList 零拷贝转让）, token, photoKey }
+ *   { id, fileBytes: ArrayBuffer（transferList 零拷贝转让）, token }
  * Worker → 主线程：
  *   { id, type: "progress", current, total }            逐张进度
  *   { id, ok: true, previews, undecryptable }           完成
@@ -18,22 +18,19 @@
  * =============================================================================
  * 安全边界
  * =============================================================================
- * - Worker 仅接触容器字节与密钥字符串，不发起 IPC、不触碰 DOM。
- * - 解析产物（每张照片的密文块列表与轻量元数据）回传主线程后进入
- *   导入流水线，密文不在 Worker 之外解密。
+ * - 容器解包使用用户导出令牌（不涉及模块密钥），令牌只在本线程内存中使用。
+ * - 首块可解密预检经主线程 RPC 调用内容层命令：模块密钥与文件密钥始终留在
+ *   Tauri worker 进程内，本线程只拿到“通过/拒绝”的结论。
+ * - 解析产物（每张照片的密文块列表与轻量元数据）回传主线程后进入导入流水线。
  */
 
 /// <reference lib="webworker" />
 
-import {
-  unpackVencV2,
-  decryptChunk,
-  decryptSlimChunk,
-  unwrapSlimFileKey,
-  type PhotoMeta,
-} from "../lib/crypto";
+import { unpackVencV2 } from "../lib/crypto";
+import type { PhotoMeta } from "../types/crypto";
 import { bytesToBase64 } from "../utils/binary_codec";
 import { PARSE_MAX_FRAME_COUNT, PHOTO_FMT_SLIM } from "../constants/crypto_const";
+import { WorkerRpcClient } from "./worker-rpc";
 
 /** 主线程 → Worker 请求 */
 export interface ParseCryptoRequest {
@@ -43,8 +40,6 @@ export interface ParseCryptoRequest {
   fileBytes: ArrayBuffer;
   /** 导出令牌（容器外层封装凭据） */
   token: string;
-  /** 照片模块密钥（可导入性预检用；空串时全部计入不可解密） */
-  photoKey: string;
 }
 
 /** 逐张进度（Worker → 主线程） */
@@ -104,7 +99,12 @@ export type ParseCryptoResponse =
 /** 终态响应（主线程 Promise 的 resolve 类型：进度消息在监听器内消费） */
 export type ParseCryptoCompletion = ParseCryptoSuccess | ParseCryptoFailure;
 
+const workerScope = self as unknown as DedicatedWorkerGlobalScope;
+/** 记录解密 RPC：只用于首块可导入性预检，密钥留在 Tauri worker */
+const workerRpc = new WorkerRpcClient((message) => workerScope.postMessage(message));
+
 self.onmessage = async (e: MessageEvent<ParseCryptoRequest>) => {
+  if (workerRpc.handleMessage(e.data)) return;
   const req = e.data;
 
   try {
@@ -131,20 +131,30 @@ self.onmessage = async (e: MessageEvent<ParseCryptoRequest>) => {
       // 索引瘦身布局：块密文按包裹态文件密钥解封（来源布局随容器携带），
       //   可导入性预检与本地导入采用同一判定口径
       const slim = lm.fmt === PHOTO_FMT_SLIM && typeof lm.wrappedFileKey === "string";
-      if (!isEmptyRecord && req.photoKey && chunkCount === lm.chunkCount) {
+      if (!isEmptyRecord && chunkCount === lm.chunkCount) {
         try {
           // 预检只需首块：先按单块转码，避免为判定而转码整张照片的块列表
           const firstB64 = bytesToBase64(container.chunkBytes[0]);
           if (slim) {
-            const fileKey = await unwrapSlimFileKey(lm.wrappedFileKey!, req.photoKey);
-            try {
-              decryptSlimChunk(firstB64, fileKey, lm.fileHash, 0, lm.chunkCount);
-              importable = true;
-            } finally {
-              fileKey.fill(0);
-            }
+            await workerRpc.request({
+              op: "open",
+              module: "photo",
+              kind: "slim_chunk",
+              data: firstB64,
+              fileHash: lm.fileHash,
+              seq: 0,
+              total: lm.chunkCount,
+              wrappedKey: lm.wrappedFileKey!,
+            });
+            importable = true;
           } else {
-            const first = await decryptChunk(firstB64, req.photoKey, lm.fileHash);
+            const first = await workerRpc.request({
+              op: "open",
+              module: "photo",
+              kind: "chunk",
+              data: firstB64,
+              fileHash: lm.fileHash,
+            });
             importable = first.seq === 0 && first.total === lm.chunkCount;
           }
         } catch {

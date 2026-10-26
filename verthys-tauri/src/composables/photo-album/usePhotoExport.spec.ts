@@ -102,12 +102,20 @@ vi.mock("../../lib/crypto", () => ({
 }));
 
 vi.mock("../../workers/photo-decrypt-bridge", () => ({
-  // 导出层的职责是"把解密交给桥"：本组用例把桥直接委托到被 mock 的加密原语，
-  // 桥自身的回退/拒绝策略由 photo-decrypt-bridge.spec 锁定
-  decryptMetaPreferWorker: vi.fn(async (metaB64: string, photoKey: string) => {
-    const { decryptMeta } = await import("../../lib/crypto");
-    return { meta: await decryptMeta(metaB64, photoKey) };
-  }),
+  // 导出层的职责是"把解密交给桥"：本组用例以固定元数据替代桥产物，
+  // 桥自身的回退/直连策略由 photo-decrypt-bridge.spec 锁定
+  decryptMetaPreferWorker: vi.fn(async () => ({
+    meta: {
+      name: "占位.jpg",
+      mime: "image/jpeg",
+      size: 123,
+      thumbB64: "",
+      chunkIds: [],
+      chunkDataB64: ["Y2g="],
+      fileHash: "2".repeat(64),
+      createdAt: 1,
+    },
+  })),
   decryptThumbPreferWorker: vi.fn(async () => new Uint8Array([0xff, 0xd8, 0xff])),
   decryptChunksPreferWorker: vi.fn(async (chunksB64: string[]) =>
     chunksB64.map(() => new Uint8Array([1, 2, 3])),
@@ -152,13 +160,11 @@ const fakeMetaFactory = (): PhotoMeta => ({
 
 function makeExport(
   photos: PhotoEntry[] = [],
-  overrides: { photoKey?: string } = {},
 ): { api: ReturnType<typeof usePhotoExport>; scope: EffectScope } {
   const scope = effectScope();
   const api = scope.run(() =>
     usePhotoExport({
       photos: shallowRef(photos),
-      photoKey: ref(overrides.photoKey ?? "test-key"),
       isTauri: true,
       ensurePhotoKey: () => true,
       showError: () => {},
@@ -255,16 +261,18 @@ describe("usePhotoExport — 多文件导出的一致性与结果契约", () => 
       return { type: 1, name: `meta_${call++}.jpg`, dataB64: "meta-b64" };
     });
     const fileHashHex = "3".repeat(64);
-    const { decryptMeta } = await import("../../lib/crypto");
-    (decryptMeta as ReturnType<typeof vi.fn>).mockResolvedValue({
-      name: "a/b.jpg",
-      mime: "image/jpeg",
-      size: 1,
-      thumbB64: "",
-      chunkIds: [],
-      chunkDataB64: ["Y2g="],
-      fileHash: fileHashHex,
-      createdAt: 1,
+    const { decryptMetaPreferWorker } = await import("../../workers/photo-decrypt-bridge");
+    (decryptMetaPreferWorker as ReturnType<typeof vi.fn>).mockResolvedValue({
+      meta: {
+        name: "a/b.jpg",
+        mime: "image/jpeg",
+        size: 1,
+        thumbB64: "",
+        chunkIds: [],
+        chunkDataB64: ["Y2g="],
+        fileHash: fileHashHex,
+        createdAt: 1,
+      },
     });
 
     made.api.exportSelectedIds.value = new Set([11, 12]);
@@ -438,9 +446,9 @@ describe("usePhotoExport — PNG 明文导出：解密下沉 Worker 桥", () => 
 
   /** 覆写解密产物（fileHash 与 bytesToHex mock 的 "1"×64 对齐，保证内容校验通过） */
   async function setMeta(meta: Partial<PhotoMeta> = {}): Promise<void> {
-    const { decryptMeta } = await import("../../lib/crypto");
-    (decryptMeta as ReturnType<typeof vi.fn>).mockResolvedValue({
-      ...fakeMetaFactory(), fileHash: "1".repeat(64), ...meta,
+    const { decryptMetaPreferWorker } = await import("../../workers/photo-decrypt-bridge");
+    (decryptMetaPreferWorker as ReturnType<typeof vi.fn>).mockResolvedValue({
+      meta: { ...fakeMetaFactory(), fileHash: "1".repeat(64), ...meta },
     });
   }
 
@@ -457,7 +465,7 @@ describe("usePhotoExport — PNG 明文导出：解密下沉 Worker 桥", () => 
     expect(decryptChunksPreferWorker).toHaveBeenCalledTimes(1);
     // 完整性权威值随解密任务透传：逐块哈希（历史记录可为空）与整图明文哈希
     expect(decryptChunksPreferWorker).toHaveBeenCalledWith(
-      ["Y2g="], "test-key", "1".repeat(64), "占位.jpg", undefined,
+      ["Y2g="], "1".repeat(64), "占位.jpg", undefined,
       { expectedHashes: undefined, expectedFileHash: "1".repeat(64) },
     );
     expect(writeUserFile).toHaveBeenCalledTimes(1);
@@ -475,7 +483,7 @@ describe("usePhotoExport — PNG 明文导出：解密下沉 Worker 桥", () => 
     await made.api.doExport();
 
     expect(decryptChunksPreferWorker).toHaveBeenCalledWith(
-      ["Y2g="], "test-key", "1".repeat(64), "占位.jpg",
+      ["Y2g="], "1".repeat(64), "占位.jpg",
       { wrappedFileKey: "wrapped-key", chunkTotal: 1 },
       { expectedHashes: undefined, expectedFileHash: "1".repeat(64) },
     );

@@ -296,7 +296,9 @@ fn run_process(mode: ProcessMode) {
 
     // 按模式派发
     match mode {
-        ProcessMode::MainUi => run_main_ui(log_sender, shutdown_token, guard, log_daemon),
+        ProcessMode::MainUi => {
+            run_main_ui(log_sender, shutdown_token, guard, log_daemon, app_paths)
+        }
         ProcessMode::SecureWorker => run_secure_worker(log_sender, guard, log_daemon),
         ProcessMode::Inspector => run_inspector_proc(log_sender, guard, log_daemon),
     }
@@ -315,6 +317,7 @@ fn run_main_ui(
     shutdown_token: tokio_util::sync::CancellationToken,
     _guard: ProcessGuard,
     _log_daemon: LogDaemon,
+    app_paths: AppPaths,
 ) {
     // 构建 Tauri 应用
     let app = tauri::Builder::default()
@@ -322,6 +325,10 @@ fn run_main_ui(
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
+        /* 数据目录随模式解析（便携/--data-dir/兜底）后注入托管状态：
+         * 容器口令等持久化文件必须与容器落在同一数据根目录，避免便携模式
+         * 下容器在 U 盘、口令在系统盘导致容器永久无法打开。 */
+        .manage(app_paths)
         .manage(security_commands::SecurityState::new())
         .manage(updater::UpdaterState::default())
         /* ===== 关闭响应优化：窗口级事件处理器 =====
@@ -508,7 +515,6 @@ fn run_main_ui(
             verthys_has_record_by_type,
             verthys_export,
             verthys_import,
-            verthys_change_password,
             // 防御闭环状态查询（7 路径 × 4 状态实时透传）
             verthys_security_status,
             // 系统运行指标采样（CPU 占用率真实差分，安全防护面板数据源）
@@ -517,6 +523,12 @@ fn run_main_ui(
             verthys_derive_and_store_global_key,
             verthys_verify_global_key,
             verthys_clear_global_key,
+            // 内容层加密：模块密钥与记录加解密（原始密钥留在 worker）
+            controller::module_crypto_controller::verthys_module_key_unlock,
+            controller::module_crypto_controller::verthys_module_key_lock,
+            controller::module_crypto_controller::verthys_module_file_key,
+            controller::module_crypto_controller::verthys_module_seal,
+            controller::module_crypto_controller::verthys_module_open,
             verthys_reconcile_key_presence,
             verthys_reset_global_key_state,
             set_privacy_mode,

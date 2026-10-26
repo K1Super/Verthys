@@ -17,9 +17,10 @@ use crate::runtime::ffi_types::{
 };
 use crate::runtime::budget::PB_ENUM_RESPONSE_DATA_BUDGET_BYTES;
 use crate::runtime::path_grants;
+use crate::runtime::module_keys;
 use crate::runtime::gmk::{
     handle_derive_global_key, handle_derive_and_store_global_key, handle_verify_global_key,
-    handle_derive_module_subkey, handle_clear_global_key,
+    handle_clear_global_key,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -384,6 +385,9 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             let r = worker.call_lock();
             diag!("[worker] lock 返回: {:08X}", r);
             if r == VERTHYS_OK {
+                /* 库锁定后内容层密钥必须同时失效：仅清 C 层句柄而保留
+                 * 模块密钥会让锁定态仍可解出记录内容。 */
+                module_keys::lock_all();
                 Response::ok("lock")
             } else {
                 Response::err("lock", r)
@@ -804,8 +808,18 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
         // 原子完成，无跨 IPC 中间态窗口）
         "derive_and_store_global_key" => handle_derive_and_store_global_key(req, worker),
         "verify_global_key" => handle_verify_global_key(req),
-        "derive_module_subkey" => handle_derive_module_subkey(req),
-        "clear_global_key" => handle_clear_global_key(),
+        "clear_global_key" => {
+            /* 全局密钥清除与内容层密钥同源生命周期：宿主清除 GMK 即
+             * 认为会话密钥失效，模块密钥与派生缓存一并清空。 */
+            module_keys::lock_all();
+            handle_clear_global_key()
+        }
+        // 内容层密钥托管与加解密（密钥只在本进程内使用，不经响应返回）
+        "module_key_unlock" => module_keys::handle_key_unlock(req),
+        "module_key_lock" => module_keys::handle_key_lock(req),
+        "module_file_key" => module_keys::handle_file_key(req),
+        "module_seal" => module_keys::handle_seal(req),
+        "module_open" => module_keys::handle_open(req),
         _ => Response {
             ok: false,
             op: req.op.clone(),

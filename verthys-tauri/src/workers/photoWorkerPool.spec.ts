@@ -128,7 +128,7 @@ function makeFileBytes(size = 4): Uint8Array {
 function makeInput(fileBytes: Uint8Array = makeFileBytes()): SubmitInput {
   return {
     fileBytes,
-    request: { fileName: "a.jpg", mime: "image/jpeg", photoKey: "k" },
+    request: { fileName: "a.jpg", mime: "image/jpeg" },
   };
 }
 
@@ -422,8 +422,7 @@ describe("photoWorkerPool — 韧性", () => {
         name: "x.jpg", mime: "image/jpeg", size: 1, thumbB64: "t",
         chunkIds: [], fileHash: "fh", createdAt: 1,
       },
-      photoKey: "k",
-      recordName: "parsed_1",
+            recordName: "parsed_1",
     });
     await flush();
     const w = h.workers[0];
@@ -447,8 +446,7 @@ describe("photoWorkerPool — 韧性", () => {
     };
     const p = h.pool.submitMetaOnly({
       meta: pollutedMeta,
-      photoKey: "k",
-      recordName: "parsed_1",
+            recordName: "parsed_1",
     });
     await flush();
 
@@ -546,7 +544,7 @@ describe("photoWorkerPool — 韧性", () => {
 
   it("解密 meta 任务：结构化克隆提交（无转移副本）、op 装配、结果透传", async () => {
     const h = makePool();
-    const p = h.pool.submitDecryptMeta({ metaB64: "meta-cipher", photoKey: "k", label: "42" });
+    const p = h.pool.submitDecryptMeta({ metaB64: "meta-cipher", label: "42" });
     await flush();
     const w = h.workers[0];
     expect(w.posted.length).toBe(1);
@@ -564,8 +562,7 @@ describe("photoWorkerPool — 韧性", () => {
     const h = makePool();
     const p = h.pool.submitDecryptChunks({
       chunksB64: ["c1", "c2"],
-      photoKey: "k",
-      fileHashHex: "a".repeat(64),
+            fileHashHex: "a".repeat(64),
       label: "a.jpg",
     });
     await flush();
@@ -585,8 +582,7 @@ describe("photoWorkerPool — 韧性", () => {
     const h = makePool();
     const p = h.pool.submitDecryptChunks({
       chunksB64: ["c1", "c2"],
-      photoKey: "k",
-      fileHashHex: "b".repeat(64),
+            fileHashHex: "b".repeat(64),
       label: "a.jpg",
     });
     await flush();
@@ -613,7 +609,7 @@ describe("photoWorkerPool — 韧性", () => {
       queued.push(h.pool.submit(makeInput()).catch(() => { /* 由用例自行收敛 */ }));
     }
     await flush();
-    const decrypt = h.pool.submitDecryptMeta({ metaB64: "m", photoKey: "k", label: "1" });
+    const decrypt = h.pool.submitDecryptMeta({ metaB64: "m", label: "1" });
     await flush();
 
     // 在途加密任务完成 → 下一个投递应为解密任务（插队到两条加密任务之前）
@@ -637,7 +633,7 @@ describe("photoWorkerPool — 韧性", () => {
 
   it("解密任务被 Worker 明确拒绝：以 TaskRejectedError 拒绝（确定性失败）", async () => {
     const h = makePool();
-    const p = h.pool.submitDecryptMeta({ metaB64: "bad", photoKey: "k", label: "7" });
+    const p = h.pool.submitDecryptMeta({ metaB64: "bad", label: "7" });
     await flush();
     h.workers[0].emitFailureLast("元数据标签校验失败（密码错误或数据被篡改）");
 
@@ -667,8 +663,7 @@ describe("photoWorkerPool — 韧性", () => {
     const h = makePool();
     const p = h.pool.submitDecryptChunks({
       chunksB64: ["c1"],
-      photoKey: "k",
-      fileHashHex: "c".repeat(64),
+            fileHashHex: "c".repeat(64),
       label: "a.jpg",
     }).then(
       (v) => ({ ok: true as const, v }),

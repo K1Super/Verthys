@@ -18,6 +18,8 @@ pub mod device_controller;
 pub mod diag_controller;
 pub mod file_controller;
 pub mod key_controller;
+/// 内容层加密命令：模块密钥托管、文件密钥句柄与记录加解密
+pub mod module_crypto_controller;
 pub mod preflight_controller;
 /// 防截屏隐私保护（窗口捕获排除）：凭证槽位 / 原子应用与还原 / 隔离与对账 / 启动序列
 pub mod privacy_controller;
