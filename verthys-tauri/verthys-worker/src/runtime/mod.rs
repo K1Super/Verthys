@@ -22,6 +22,8 @@
  *   - diagnostics   : GetLastError FFI + 错误码格式化
  *   - ipc_auth      : 会话密钥、HMAC 信封、通道序号
  *   - path_grants   : 宿主签发的一次性路径授权表
+ *   - content_crypto: 内容记录加密原语（无状态，布局与既有落盘格式一致）
+ *   - module_keys   : 模块密钥托管、派生缓存与一次性文件密钥解封
  */
 
 mod protocol;
@@ -33,6 +35,8 @@ mod worker;
 mod dispatch;
 mod main_loop;
 mod diagnostics;
+pub(crate) mod content_crypto;
+pub(crate) mod module_keys;
 pub(crate) mod ipc_auth;
 pub(crate) mod path_grants;
 
@@ -50,3 +54,4 @@ pub use main_loop::run;
 pub use diagnostics::{ffi_get_last_error, format_os_error};
 // panic 清零器（log.rs hook 经入口层注册；模块本体保持私有）
 pub(crate) use gmk::wipe_thread_gmk;
+pub(crate) use module_keys::wipe_thread_keys;

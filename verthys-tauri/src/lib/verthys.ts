@@ -308,16 +308,17 @@ export async function verthysInitStatus(): Promise<InitStatusResult> {
  *  流程：create_with_preset（创建新 verthys + 写入预设）→ lock（写盘）→ unlock（重开）
  *  失败自动回滚：删除不完整 .verthys 文件 + 销毁 worker
  *
- *  preset: v2 安全预设
+ *  容器口令由后端本机保管，前端不参与，避免口令出现在界面与 IPC 参数中。
+ *
+ *  preset: 安全预设（VERTHYS_PRESET_*）
  *    - VERTHYS_PRESET_BALANCED (0)：日常推荐（默认）
  *    - VERTHYS_PRESET_SECURE (1)：涉密/合规
  */
 export async function verthysCreate(
   verthysPath: string,
-  password: string,
   preset: VerthysPreset = VERTHYS_PRESET_BALANCED
 ): Promise<boolean> {
-  const r = await ipc<VerthysResponse>("verthys_create", { verthysPath, password, preset });
+  const r = await ipc<VerthysResponse>("verthys_create", { verthysPath, preset });
   if (r.ok) {
     // 修复B：标记 worker 已被使用（create 内部会 unlock 重开）
     // ensureCleanWorkerState 据此判断：下次解锁前若 workerHasBeenUsed=true
@@ -350,8 +351,9 @@ export async function verthysPreheat(verthysPath: string): Promise<boolean> {
  * - 每条进度行通过 Tauri Channel 转发到前端 onProgress 回调
  * - 后端进度感知超时（60s 无进度才判定挂起），无需前端 Promise.race 兜底
  *
+ * 容器口令由后端本机保管，前端不传递任何口令。
+ *
  * @param verthysPath 加密库文件路径
- * @param password 解锁密码
  * @param onProgress 进度回调（在解锁各阶段触发，可选）
  * @param usbRebindConfirmed 介质标识变化确认（可选）：
  *   可移动介质已登记但序列号哈希不匹配时，默认阻止解锁；
@@ -360,7 +362,6 @@ export async function verthysPreheat(verthysPath: string): Promise<boolean> {
  */
 export async function verthysUnlock(
   verthysPath: string,
-  password: string,
   onProgress?: (progress: UnlockProgress) => void,
   usbRebindConfirmed?: boolean,
 ): Promise<VerthysResponse> {
@@ -396,7 +397,6 @@ export async function verthysUnlock(
      * 调用方 initUnlock 直接消费，消除解锁后 probe IPC 链。 */
     const resp = await ipc<VerthysResponse>("verthys_unlock", {
       verthysPath,
-      password,
       onProgress: channel,
       ...(usbRebindConfirmed ? { usbRebindConfirmed: true } : {}),
     });
@@ -434,9 +434,10 @@ export async function verthysLock(): Promise<boolean> {
   }
 }
 
-/** 刷新加密库（lock 写盘 → unlock 重新打开，worker 保持存活） */
-export async function verthysFlush(verthysPath: string, password: string): Promise<boolean> {
-  const r = await ipc<VerthysResponse>("verthys_flush", { verthysPath, password });
+/** 刷新加密库（直接触发 worker 落盘，不清零密钥、不改变解锁状态）
+ *  容器口令由后端本机保管，前端不传递；目标容器由当前解锁会话确定。 */
+export async function verthysFlush(): Promise<boolean> {
+  const r = await ipc<VerthysResponse>("verthys_flush");
   return r.ok;
 }
 
@@ -1122,18 +1123,6 @@ export async function verthysImport(
   return r.ok;
 }
 
-/** 修改主密码 */
-export async function verthysChangePassword(
-  oldPw: string,
-  newPw: string
-): Promise<boolean> {
-  const r = await ipc<VerthysResponse>("verthys_change_password", {
-    oldPassword: oldPw,
-    newPassword: newPw,
-  });
-  return r.ok;
-}
-
 /* ------------------------------------------------------------------ *
  * 动态防护状态查询                                                  *
  *                                                                    *
@@ -1313,6 +1302,104 @@ export async function verthysResetGlobalKeyState(): Promise<boolean> {
 export async function verthysReconcileKeyPresence(hasGlobalKey: boolean): Promise<boolean> {
   const r = await ipc<VerthysResponse>("verthys_reconcile_key_presence", { hasGlobalKey });
   return r.ok;
+}
+
+/* ------------------------------------------------------------------ *
+ * 内容层加密（密钥托管在 worker，前端只传模块名、公开参数与包裹态密钥）
+ * ------------------------------------------------------------------ */
+
+/** 内容记录加解密参数（密文/明文均为 base64，不含原始密钥） */
+export interface ModuleCryptParams {
+  /** 模块标识（photo / file） */
+  module: string;
+  /** 布局种类（meta / chunk / slim_meta / slim_chunk / thumb / chunkset / v2_chunk / v2_check） */
+  kind: string;
+  /** 载荷 base64（写入时为明文，读取时为密文） */
+  data?: string;
+  /** 文件盐 base64（索引瘦身布局必填；既有布局可省略由 worker 生成） */
+  salt?: string;
+  /** BLAKE3 文件哈希（64 字符十六进制） */
+  fileHash?: string;
+  /** 块序号与块总数（chunk / slim_chunk 写入必填） */
+  seq?: number;
+  total?: number;
+  /** 文件块 v2 的 PBKDF2 迭代次数（0/缺省 = worker 缺省值） */
+  iterations?: number;
+  /** 包裹态文件密钥（slim_chunk / thumb / chunkset 必填） */
+  wrappedKey?: string;
+  /** 文件块 v2 的独立口令（v2_chunk / v2_check 必填；密钥由 worker 派生） */
+  password?: string;
+}
+
+/** 文件密钥操作参数（创建瘦身布局的文件级密钥组） */
+export interface ModuleFileKeyParams {
+  module: string;
+  kind: "slim_create";
+  wrappedKey?: string;
+  salt?: string;
+  iterations?: number;
+}
+
+/** 解锁模块密钥：把模块口令一次性交付 worker 托管，前端不再保留 */
+export async function verthysModuleKeyUnlock(
+  module: string,
+  password: string,
+): Promise<VerthysResponse> {
+  return ipc<VerthysResponse>("verthys_module_key_unlock", { module, password });
+}
+
+/** 清除模块密钥；不传 module 表示全部清除（锁定/登出必调） */
+export async function verthysModuleKeyLock(module?: string): Promise<VerthysResponse> {
+  return ipc<VerthysResponse>("verthys_module_key_lock", { module });
+}
+
+/** 创建瘦身布局的文件密钥组（随机文件密钥由 worker 生成并包裹） */
+export async function verthysModuleFileKey(
+  params: ModuleFileKeyParams,
+): Promise<VerthysResponse> {
+  return ipc<VerthysResponse>("verthys_module_file_key", {
+    module: params.module,
+    kind: params.kind,
+    wrappedKey: params.wrappedKey,
+    salt: params.salt,
+    iterations: params.iterations,
+  });
+}
+
+/** 加密内容记录 */
+export async function verthysModuleSeal(
+  params: ModuleCryptParams,
+): Promise<VerthysResponse> {
+  return ipc<VerthysResponse>("verthys_module_seal", {
+    module: params.module,
+    kind: params.kind,
+    data: params.data,
+    salt: params.salt,
+    fileHash: params.fileHash,
+    seq: params.seq,
+    total: params.total,
+    iterations: params.iterations,
+    wrappedKey: params.wrappedKey,
+    password: params.password,
+  });
+}
+
+/** 解密内容记录（chunk 布局额外返回密文内嵌的 seq/total） */
+export async function verthysModuleOpen(
+  params: ModuleCryptParams,
+): Promise<VerthysResponse> {
+  return ipc<VerthysResponse>("verthys_module_open", {
+    module: params.module,
+    kind: params.kind,
+    data: params.data,
+    salt: params.salt,
+    fileHash: params.fileHash,
+    seq: params.seq,
+    total: params.total,
+    iterations: params.iterations,
+    wrappedKey: params.wrappedKey,
+    password: params.password,
+  });
 }
 
 /**

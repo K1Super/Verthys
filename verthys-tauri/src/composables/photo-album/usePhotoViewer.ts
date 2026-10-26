@@ -35,8 +35,6 @@ import { pushModal, popModal } from "../../utils/modal_stack";
 export interface UsePhotoViewerOptions {
   /** 照片列表（shallowRef，避免深度代理） */
   photos: ShallowRef<PhotoEntry[]>;
-  /** 模块独立密钥（按需解密使用） */
-  photoKey: Ref<string>;
   /** 是否处于 Tauri 环境 */
   isTauri: boolean;
   /** 恢复模块密钥（从 keyManager 会话缓存） */
@@ -48,7 +46,7 @@ export interface UsePhotoViewerOptions {
 }
 
 export function usePhotoViewer(options: UsePhotoViewerOptions) {
-  const { photos, photoKey, isTauri, ensurePhotoKey, decryptPhotoMeta, showError } = options;
+  const { photos, isTauri, ensurePhotoKey, decryptPhotoMeta, showError } = options;
 
   /* ===== 内存预览（解密后 Blob URL，不落地） ===== */
   const viewer = ref<boolean>(false);
@@ -181,7 +179,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
       //   （口径统一收敛在 chunk-refs，查看器/导出/删除共用）
       let refs: ChunkRefs;
       try {
-        refs = await resolveChunkRefs(meta, photoKey.value, ph.name);
+        refs = await resolveChunkRefs(meta, ph.name);
       } catch (e) {
         console.error(`[onView] 块集解析失败: ${e instanceof Error ? e.message : String(e)}`);
         showError("照片索引数据不完整，无法读取原图");
@@ -230,7 +228,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
           ? { wrappedFileKey: meta.wrappedFileKey, chunkTotal: cipherB64.length }
           : undefined;
         plaintexts = await decryptChunksPreferWorker(
-          cipherB64, photoKey.value, meta.fileHash, ph.name, slim,
+          cipherB64, meta.fileHash, ph.name, slim,
           refs.hashes.length > 0 ? { expectedHashes: refs.hashes } : undefined,
         );
         setViewerProgress("");

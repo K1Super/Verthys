@@ -1,10 +1,10 @@
-/* gmk.rs — GMK 全局主密钥状态 + 派生命令
+/* gmk.rs — GMK 全局主密钥状态与派生命令
  *
  * 职责：
  *   - GMK thread_local 内存持有（Zeroizing 自动清零）
- *   - VERIFIER_PLAIN / VERIFIER_AD / MODULE_INFO_PREFIX 常量
+ *   - VERIFIER_PLAIN / VERIFIER_AD 常量
  *   - handle_derive_global_key / handle_verify_global_key
- *     / handle_derive_module_subkey / handle_clear_global_key
+ *     / handle_clear_global_key
  *
  * 依赖：std::cell::RefCell、zeroize、protocol（Request/Response/base64）。
  * 被引用方：dispatch.rs（handle_*）、worker.rs（GMK，Drop 时清零）。
@@ -31,8 +31,6 @@ const VERIFIER_PLAIN: &[u8; 32] = b"VERTHYS_GLOBAL_KEY_VERIFIER_v2__";
 /// 验证器 AES-GCM 附加数据
 #[allow(dead_code)]
 const VERIFIER_AD: &[u8] = b"VERTHYS_GLOBAL_VERIFIER_v1";
-/// 模块子密钥 HKDF info 前缀
-const MODULE_INFO_PREFIX: &str = "verthys/module/";
 
 thread_local! {
     /// GMK 内存持有（Zeroizing 保证清零）
@@ -40,10 +38,11 @@ thread_local! {
 }
 
 /* ------------------------------------------------------------------ *
- * GMK 派生命令（#2 敏感操作下沉）                                      *
+ * GMK 派生命令（敏感操作下沉）                                          *
  *                                                                    *
- * 所有密钥派生在 worker 子进程内完成，主进程/前端仅传递参数            *
- * GMK 永远不出 worker，前端通过 derive_module_subkey 获取子密钥        *
+ * 所有密钥派生在 worker 子进程内完成，主进程/前端仅传递参数。          *
+ * 任何响应都不得携带原始密钥字节：GMK 与派生密钥只以密文记录或          *
+ * worker 内部状态存在。                                                *
  * ------------------------------------------------------------------ */
 
 /// 派生全局主密钥 GMK（首次设置）
@@ -355,50 +354,6 @@ pub(crate) fn handle_verify_global_key(req: &Request) -> Response {
     Response::ok("verify_global_key")
 }
 
-/// 派生模块子密钥（HKDF-Expand）
-/// 输入：module_id
-/// 输出：subkey(base64, 32 字节)
-pub(crate) fn handle_derive_module_subkey(req: &Request) -> Response {
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-
-    GMK.with(|g| {
-        let gmk_ref = g.borrow();
-        match gmk_ref.as_ref() {
-            None => Response::err("derive_module_subkey", 0x07), // LOCKED
-            Some(gmk) => {
-                let info = format!("{}{}", MODULE_INFO_PREFIX, req.module_id);
-                let hk = match Hkdf::<Sha256>::from_prk(&gmk[..]) {
-                    Ok(h) => h,
-                    Err(_) => {
-                        return Response {
-                            ok: false,
-                            op: "derive_module_subkey".into(),
-                            error: Some("HKDF from_prk failed".into()),
-                            ..Response::ok("derive_module_subkey")
-                        }
-                    }
-                };
-                // 子密钥 okm 为敏感中间量：Zeroizing 保证 base64 编码消费后
-                // 响应构造完成即 volatile 清零，不驻留栈外可见副本
-                let mut okm = zeroize::Zeroizing::new([0u8; 32]);
-                if hk.expand(info.as_bytes(), &mut okm[..]).is_err() {
-                    return Response {
-                        ok: false,
-                        op: "derive_module_subkey".into(),
-                        error: Some("HKDF expand failed".into()),
-                        ..Response::ok("derive_module_subkey")
-                    };
-                }
-                Response {
-                    data: Some(base64_encode(&okm[..])),
-                    ..Response::ok("derive_module_subkey")
-                }
-            }
-        }
-    })
-}
-
 /// 清零 GMK 内存（lockAll 时调用）
 pub(crate) fn handle_clear_global_key() -> Response {
     GMK.with(|g| *g.borrow_mut() = None);
@@ -441,13 +396,20 @@ mod tests {
             new_password: Zeroizing::new(String::new()),
             bin_data: Zeroizing::new(base64_encode(bin_data)),
             bin_password: Zeroizing::new(bin_password.to_string()),
-            module_id: String::new(),
             preset: 0,
             ids: Vec::new(),
             flags: 0,
             shm_key: String::new(),
             project: String::new(),
             inline_max_bytes: 0,
+            module: String::new(),
+            kind: String::new(),
+            salt: String::new(),
+            file_hash: String::new(),
+            seq: 0,
+            total: 0,
+            iterations: 0,
+            wrapped_key: String::new(),
         }
     }
 
@@ -476,14 +438,6 @@ mod tests {
         );
         let verify_resp = handle_verify_global_key(&verify_req);
         assert!(verify_resp.ok, "同参数 verify 应通过: {:?}", verify_resp.error);
-
-        // 派生后同线程 GMK 可用：子密钥为 32 字节
-        let mut subkey_req = make_request("derive_module_subkey", "", "", b"", "");
-        subkey_req.module_id = "photo-module".into();
-        let subkey_resp = handle_derive_module_subkey(&subkey_req);
-        assert!(subkey_resp.ok, "subkey 应成功: {:?}", subkey_resp.error);
-        let subkey_b64 = subkey_resp.data.expect("subkey 应返回 base64");
-        assert_eq!(base64_decode(&subkey_b64).unwrap().len(), 32);
     }
 
     #[test]
@@ -529,33 +483,5 @@ mod tests {
         );
         let verify_resp = handle_verify_global_key(&verify_req);
         assert!(!verify_resp.ok, "跨派生的 record 必须验证失败");
-    }
-
-    #[test]
-    fn test_subkey_locked_without_gmk() {
-        handle_clear_global_key();
-        let mut req = make_request("derive_module_subkey", "", "", b"", "");
-        req.module_id = "any-module".into();
-        let resp = handle_derive_module_subkey(&req);
-        assert!(!resp.ok, "无 GMK 时子密钥派生必须失败");
-        let err = resp.error.expect("应携带错误码");
-        assert_eq!(err, "ERR_00000007", "锁定态错误码为 LOCKED(0x07)");
-    }
-
-    #[test]
-    fn test_subkey_deterministic_per_module() {
-        handle_derive_global_key(&make_request(
-            "derive_global_key", "determinism-pw", "bin-pw", b"det-bin", "",
-        ));
-
-        let mut req = make_request("derive_module_subkey", "", "", b"", "");
-        req.module_id = "module-x".into();
-        let k1 = handle_derive_module_subkey(&req).data.unwrap();
-        let k2 = handle_derive_module_subkey(&req).data.unwrap();
-        assert_eq!(k1, k2, "同 module_id 子密钥必须确定");
-
-        req.module_id = "module-y".into();
-        let k3 = handle_derive_module_subkey(&req).data.unwrap();
-        assert_ne!(k1, k3, "不同 module_id 子密钥必须不同");
     }
 }

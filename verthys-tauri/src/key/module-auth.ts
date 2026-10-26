@@ -44,6 +44,7 @@ import {
 } from "../cache/composition/verthys-cache";
 import { cacheCoordinator } from "../cache/coordination/cache-coordinator";
 import { touchSession } from "../session/security-session";
+import { lockModuleKey, unlockModuleKey, type CryptoModule } from "../lib/module_crypto";
 import type { ModuleId, ModuleKeyRecord, ModuleKeyConfigRecord } from "../types/key_manager";
 import { ok, err, errFromUnknown, VerthysErrorCode, type VerthysResult } from "../lib/verthys_error";
 import { createLogger } from "../utils/logger";
@@ -611,15 +612,26 @@ export async function setModuleKey(moduleId: ModuleId, key: string): Promise<Ver
   //   杜绝后台加载用旧 verthys 状态覆盖用户刚设置的模块密钥记录状态
   moduleKeyStatusVersion++;
   keyState.hasModuleKeyRecord.value = { ...keyState.hasModuleKeyRecord.value, [moduleId]: true };
+  /* 换钥后旧会话密钥不再对应当前数据：立即登出该模块，要求用新密钥
+   * 重新登录；worker 侧旧密钥与派生缓存由 removeModuleKey 联动清除。 */
+  if (cryptoModuleOf(moduleId)) {
+    removeModuleKey(moduleId);
+  }
   log.info(`模块 ${moduleId} 密钥已设置 (version=${newVersion})`);
   return ok(undefined);
+}
+
+/** 模块 ID 到内容加密模块的映射（仅照片内容由模块密钥派生；
+ *  文件块 v2 使用每文件独立口令，不使用模块密钥） */
+function cryptoModuleOf(moduleId: ModuleId): CryptoModule | null {
+  return moduleId === "photo" ? "photo" : null;
 }
 
 /**
  * 验证模块独立密钥（模块登录时调用）
  *
- * 返回 VerthysResult<void>
- * cacheModuleKey 内部原子地设置 moduleKeyReady=true
+ * 验证成功后先把密钥交付 worker 托管，再登记会话就绪状态：两步顺序
+ * 保证“界面显示已登录”必然对应“内容加解密可用”，避免半可用状态。
  *
  * @returns VerthysResult<void>
  */
@@ -640,6 +652,16 @@ export async function verifyModuleKey(moduleId: ModuleId, key: string): Promise<
     }
   } catch (e) {
     return errFromUnknown(e, VerthysErrorCode.E_MODULE_VERIFY_FAILED);
+  }
+
+  const cryptoModule = cryptoModuleOf(moduleId);
+  if (cryptoModule) {
+    try {
+      await unlockModuleKey(cryptoModule, key);
+    } catch (e) {
+      log.error(`模块 ${moduleId} 密钥交付 worker 失败`, e);
+      return errFromUnknown(e, VerthysErrorCode.E_MODULE_VERIFY_FAILED);
+    }
   }
 
   // cacheModuleKey 内部原子地设置 moduleKeyReady=true

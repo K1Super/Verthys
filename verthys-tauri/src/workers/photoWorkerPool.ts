@@ -30,7 +30,8 @@
  * =============================================================================
  * 安全边界
  * =============================================================================
- * - Worker 仅接收 photoKey + 文件字节（或密文串），不接触 verthys 句柄、不发起 IPC。
+ * - Worker 仅接收文件字节、密文串与公开参数，不接收模块密钥或派生密钥。
+ * - 记录加解密经 RPC 桥转交 Tauri worker；池只负责消息路由与结果回投。
  * - 转移副本（transferList）的所有权在投递时移交给 Worker，Worker 内部
  *   使用后清零；主线程 source 副本在任务 settle 后随引用释放由 GC 回收。
  */
@@ -56,6 +57,7 @@ import type {
   PhotoDecryptChunksSuccess,
 } from "./photo-crypto.worker";
 import { createLogger } from "../utils/logger";
+import { attachRpcBridge } from "./rpc-bridge";
 import {
   MAX_TASK_ATTEMPTS,
   MAX_CONSECUTIVE_SLOT_CRASHES,
@@ -313,11 +315,6 @@ interface WorkerSlot {
   totalCrashes: number;
   /** 是否已永久失效（连续失败超限，不再重建） */
   terminated: boolean;
-  /**
-   * 模块密钥失效后需在该 Worker 的下一次任务入口清空派生缓存。
-   * 新建 Worker 默认 true（启动即干净，首次任务带标记无副作用）。
-   */
-  keyCacheClearPending: boolean;
 }
 
 /**
@@ -459,13 +456,12 @@ export class PhotoWorkerPool {
       consecutiveCrashes: 0,
       totalCrashes: 0,
       terminated: false,
-      keyCacheClearPending: true,
     };
 
-    // 消息处理：接收 Worker 加密结果
-    worker.onmessage = (e: MessageEvent<PhotoCryptoResponse>) => {
-      this.handleWorkerMessage(slot, e.data);
-    };
+    // 消息入口：RPC 请求由桥转发到 Tauri worker，其余为任务响应
+    attachRpcBridge(worker, (data) => {
+      this.handleWorkerMessage(slot, data as PhotoCryptoResponse);
+    });
 
     // 错误处理：Worker 崩溃
     worker.onerror = (e: ErrorEvent) => {
@@ -721,23 +717,14 @@ export class PhotoWorkerPool {
     this.markBusy();
 
     // 无文件字节分支的最终请求体：DataCloneError 自愈重投时复用
-    // （attachClear 已消费的 clearCache 语义与任务 id 都保留其中）
     let plainRetryBody: object | null = null;
 
     try {
-      // 派生缓存清理标记：模块密钥失效后，为每个 Worker 的首次投递附加
-      // "先清空按盐派生缓存"指令（避免失效密钥的派生结果继续驻留工作线程）
-      const attachClear = <T extends object>(body: T): T => {
-        if (!idleSlot.keyCacheClearPending) return body;
-        idleSlot.keyCacheClearPending = false;
-        return { ...body, clearCache: true };
-      };
-
       if (task.payload.source) {
         // 完整加密：从源副本生成全新可转移副本（每次投递零共享）
         const transfer = task.payload.source.slice().buffer;
         const req: PhotoCryptoRequest = {
-          ...attachClear(task.request as PhotoCryptoRequestBody),
+          ...(task.request as PhotoCryptoRequestBody),
           id: task.id,
           fileBytes: transfer,
         };
@@ -746,7 +733,7 @@ export class PhotoWorkerPool {
         // 无文件字节的任务（meta-only 加密 / 解密）：结构化克隆
         // （不转移所有权，天然可重放）
         const req = {
-          ...attachClear(task.request as
+          ...(task.request as
             | PhotoMetaCryptoRequestBody
             | PhotoDecryptMetaRequestBody
             | PhotoDecryptChunksRequestBody),
@@ -982,7 +969,7 @@ export class PhotoWorkerPool {
    * 与索引加密任务共用同一文件盐——池按任务轮转时派生缓存按"口令指纹 + 盐"
    * 命中，故缩略图加密不额外产生 PBKDF2。
    *
-   * @param request 请求体（thumbB64 / fileSaltB64 / fileHashHex / photoKey / label）
+   * @param request 请求体（thumbB64 / fileHashHex / wrappedFileKey / label）
    * @returns 缩略图密文与其 BLAKE3 hex
    */
   async submitEncryptSlimThumb(
@@ -1026,7 +1013,7 @@ export class PhotoWorkerPool {
    *
    * 与索引加密任务共用同一文件盐，派生缓存按盐命中时不额外产生 PBKDF2。
    *
-   * @param request 请求体（set / fileSaltB64 / fileHashHex / photoKey / label）
+   * @param request 请求体（set / fileHashHex / wrappedFileKey / label）
    * @returns 块集密文与其 BLAKE3 hex
    */
   async submitEncryptSlimSet(
@@ -1045,7 +1032,7 @@ export class PhotoWorkerPool {
   /**
    * 提交索引瘦身布局的块集记录解密任务（查看原图 / 导出 / 删除级联补取）
    *
-   * @param request 请求体（setCipherB64 / wrappedFileKey / fileHashHex / photoKey / label）
+   * @param request 请求体（setCipherB64 / wrappedFileKey / fileHashHex / label）
    * @returns 解密后的块集内容（逐块 ID 与哈希，按序一一对应）
    */
   async submitDecryptSlimSet(
@@ -1062,18 +1049,6 @@ export class PhotoWorkerPool {
   }
 
   /**
-   * 标记全部 Worker 清空按盐派生缓存（模块密钥失效/登出时调用）。
-   *
-   * 语义：各 Worker 在收到下一个任务时先清空缓存再执行（避免失效密钥的
-   * 派生结果继续驻留工作线程内存）。新建 Worker 默认带标记，启动即干净。
-   */
-  invalidateDerivedKeys(): void {
-    for (const slot of this.slots) {
-      slot.keyCacheClearPending = true;
-    }
-  }
-
-  /**
    * 提交元数据解密任务到 Worker 池（读取链路：列表按需解密、查看原图回填）
    *
    * 与加密任务共享队列、背压、崩溃恢复与看门狗；请求体为密文 base64 字符串
@@ -1081,7 +1056,7 @@ export class PhotoWorkerPool {
    * 交互。Worker 明确拒绝以 TaskRejectedError 抛出：属确定性失败（数据损坏 /
    * 标签校验不过），调用方不应回退主线程重算。
    *
-   * @param request 解密请求体（metaB64 / photoKey / label，不含 id 与 op）
+   * @param request 解密请求体（metaB64 / label，不含 id 与 op）
    * @returns 解密成功响应（meta 为解密后的元数据）
    */
   async submitDecryptMeta(
@@ -1103,7 +1078,7 @@ export class PhotoWorkerPool {
    * 语义同 submitDecryptMeta：缩略图明文由 Worker 侧 transferList 零拷贝回传；
    * 与元数据共用同一文件盐，若由同一 Worker 服务则派生缓存命中（零 PBKDF2）。
    *
-   * @param request 请求体（thumbCipherB64 / wrappedFileKey / fileHashHex / photoKey / label）
+   * @param request 请求体（thumbCipherB64 / wrappedFileKey / fileHashHex / label）
    * @returns 缩略图原始字节
    */
   async submitDecryptThumb(
@@ -1125,7 +1100,7 @@ export class PhotoWorkerPool {
    * 语义同 submitDecryptMeta：明文由 Worker 侧 transferList 零拷贝回传，
    * 池内不驻留明文；任一块解密失败即整体失败（拒绝产出残缺序列）。
    *
-   * @param request 解密请求体（chunksB64 / photoKey / fileHashHex / label，不含 id 与 op）
+   * @param request 解密请求体（chunksB64 / fileHashHex / label，不含 id 与 op）
    * @returns 解密成功响应（plaintexts 与输入块顺序一致）
    */
   async submitDecryptChunks(

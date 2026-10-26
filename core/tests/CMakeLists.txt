@@ -42,6 +42,19 @@ add_executable(verthys_tests
     property/test_v3_property.c
     crypto/test_auto_rekey.c
     crypto/test_pepper_v3.c
+    crypto/test_v4_primitives.c
+    container/test_v4_container.c
+    index/test_v4_records.c
+    container/test_v4_chunks.c
+    container/test_v4_modules.c
+    security/test_v4_lockout.c
+    security/test_v4_lockout_pipeline.c
+    security/test_v4_rollback.c
+    security/test_v4_pcr.c
+    security/test_v4_witness.c
+    security/test_v4_crash.c
+    security/test_v4_fuzz.c
+    perf/test_v4_perf.c
     security/test_runtime_hash.c
     security/test_syscall_direct.c
     security/test_security_preset.c
@@ -122,3 +135,66 @@ endif()
 add_dependencies(verthys_scd_dll_acg_test verthys_core)
 add_test(NAME verthys_scd_dll_acg
     COMMAND verthys_scd_dll_acg_test $<TARGET_FILE:verthys_core>)
+
+# v4 攻击探针：独立进程直接驱动 v4 原语，供 tests/attack/run.ps1
+# 生成可复核证据（不扩大生产 DLL 导出面）。
+add_executable(vty_probe
+    tools/vty_probe.c
+)
+target_link_libraries(vty_probe PRIVATE verthys_core_obj flatccrt user32)
+target_include_directories(vty_probe PRIVATE
+    ${CMAKE_SOURCE_DIR}/core/include
+    ${CMAKE_SOURCE_DIR}/core/src
+    ${VERTHYS_SRC_SUBDIRS}
+)
+if(MSVC)
+    target_compile_options(vty_probe PRIVATE /utf-8)
+    target_link_options(vty_probe PRIVATE /STACK:16777216)
+endif()
+# 攻击回归以探针为证据来源：构建测试目标即产出探针
+add_dependencies(verthys_tests vty_probe)
+
+# TPM 2.0 能力探针：独立进程经 TBS 读取 PCR 与操作可清理的测试 NV 索引。
+# 产物只供验收机取证，不进入生产 DLL，也不随 verthys_tests 默认构建。
+add_executable(vty_tpm_probe
+    tools/vty_tpm_probe.c
+)
+target_include_directories(vty_tpm_probe PRIVATE
+    ${CMAKE_SOURCE_DIR}/core/include
+)
+if(MSVC)
+    target_compile_options(vty_tpm_probe PRIVATE /utf-8)
+    target_link_libraries(vty_tpm_probe PRIVATE tbs bcrypt)
+endif()
+
+# A8 内存残留测试宿主：hold 解锁并等待转储 / dump 生成完整内存转储 /
+# crash 制造异常退出。与 vty_probe 同一边界（直接链接对象库），
+# 仅存在于测试产物，不扩大生产 DLL 导出面。
+add_executable(vty_mem_host
+    tools/vty_mem_host.c
+)
+target_link_libraries(vty_mem_host PRIVATE verthys_core_obj flatccrt user32 dbghelp)
+target_include_directories(vty_mem_host PRIVATE
+    ${CMAKE_SOURCE_DIR}/core/include
+    ${CMAKE_SOURCE_DIR}/core/src
+    ${VERTHYS_SRC_SUBDIRS}
+)
+if(MSVC)
+    target_compile_options(vty_mem_host PRIVATE /utf-8)
+    target_link_options(vty_mem_host PRIVATE /STACK:16777216)
+endif()
+add_dependencies(verthys_tests vty_mem_host)
+
+# A2 正向对照宿主：链接生产 DLL（而非对象库），只做 Init/Deinit，
+# 用于验证“签名宿主 + 签名 DLL”放行、其余组合拒绝。
+add_executable(vty_signed_host
+    tools/vty_signed_host.c
+)
+target_link_libraries(vty_signed_host PRIVATE verthys_core)
+target_include_directories(vty_signed_host PRIVATE
+    ${CMAKE_SOURCE_DIR}/core/include
+)
+if(MSVC)
+    target_compile_options(vty_signed_host PRIVATE /utf-8)
+endif()
+add_dependencies(verthys_tests vty_signed_host)

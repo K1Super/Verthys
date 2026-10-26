@@ -37,7 +37,7 @@ use super::protocol::{
     ActorRequest, UnlockProgress, DEFAULT_IPC_TIMEOUT, DROP_ACTOR_JOIN_TIMEOUT, READY_CHECK_TIMEOUT,
 };
 use super::stderr::StderrRing;
-use crate::infrastructure::ipc_secure::{IpcSecureChannel, ENV_SESSION_KEY};
+use crate::infrastructure::ipc_secure::IpcSecureChannel;
 
 /// 路径授权签发超时：本地进程内往返，超时即视为失败关闭。
 const PATH_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -132,15 +132,13 @@ impl WorkerSession {
         // 避免解析逻辑被替换后启动目录外二进制。
         verify_install_paths(worker_exe, dll_path)?;
 
-        // 会话密钥：仅通过子进程环境变量传递，避免进程列表泄露；
-        // worker 入口读取后立即删除该变量。
+        // 会话密钥与挑战值经匿名管道首行交付（Actor 启动后写入），
+        // 不进入子进程环境块：环境块可被同用户进程以 PROCESS_VM_READ 读取。
         let ipc_channel = IpcSecureChannel::new()?;
-        let key_hex = ipc_channel.master_key_hex();
 
         // 构建 tokio::process::Command
         let mut cmd = Command::new(worker_exe);
-        cmd.env(ENV_SESSION_KEY, key_hex.as_str())
-            .arg(dll_path)
+        cmd.arg(dll_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

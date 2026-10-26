@@ -570,6 +570,22 @@ pub struct VerthysResponse {
     /// 容器格式版本
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header_version: Option<u32>,
+    /* 内容层加密的公开参数（worker 透传）
+     *
+     * 这些字段不含原始密钥：salt 与 wrapped_key 是落盘公开参数，
+     * 文件密钥在使用点由包裹态密钥一次性解封。 */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub salt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrapped_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<u32>,
+    /// 记录型块密文内嵌的块序号（仅 module_open 的 chunk 布局返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u32>,
+    /// 记录型块密文内嵌的块总数（仅 module_open 的 chunk 布局返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u32>,
 }
 
 impl VerthysResponse {
@@ -607,6 +623,11 @@ impl VerthysResponse {
             mtime_ms: None,
             header_magic: None,
             header_version: None,
+            salt: None,
+            wrapped_key: None,
+            iterations: None,
+            seq: None,
+            total: None,
         }
     }
     /// 结构化错误响应：携带稳定错误码（前端按码分支），文案仅作展示
@@ -649,6 +670,11 @@ impl VerthysResponse {
             mtime_ms: None,
             header_magic: None,
             header_version: None,
+            salt: None,
+            wrapped_key: None,
+            iterations: None,
+            seq: None,
+            total: None,
         }
     }
     pub fn to_json(&self) -> String {

@@ -50,8 +50,6 @@ const ACQUIRE_TIMEOUT_MS = 30_000;
 export interface UsePhotoImportDeps {
   /** 照片列表（shallowRef，避免深度代理） */
   photos: ShallowRef<PhotoEntry[]>;
-  /** 模块独立密钥 */
-  photoKey: Ref<string>;
   /** 是否处于 Tauri 环境 */
   isTauri: boolean;
   /** 恢复模块密钥（从 keyManager 会话缓存） */
@@ -63,7 +61,7 @@ export interface UsePhotoImportDeps {
 }
 
 export function usePhotoImport(deps: UsePhotoImportDeps) {
-  const { photos, photoKey, isTauri, ensurePhotoKey, showError, showToast } = deps;
+  const { photos, isTauri, ensurePhotoKey, showError, showToast } = deps;
 
   /* ===== 导入状态（保持 ref 兼容） ===== */
   const importing = ref(false);
@@ -213,7 +211,7 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
         // ===== Tauri 模式：使用三阶段异步流水线 =====
         try {
           const pipe = getPipeline();
-          const result = await pipe.run(filesToProcess, photoKey.value, activeAbort.signal);
+          const result = await pipe.run(filesToProcess, activeAbort.signal);
 
           if (result.error === "ABORTED") {
             // 取消路径：静默收尾，不弹错误（组件卸载场景无 UI）；

@@ -183,6 +183,7 @@ static void verthys_emergency_lock_all(void)
 }
 #include "process_sandbox.h"
 #include "defense_closure.h"
+#include "vty_caller_auth.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -208,6 +209,10 @@ static void verthys_emergency_lock_all(void)
 VerthysResult Verthys_Init(VerthysHandle *out_handle)
 {
     if (out_handle == NULL) return VERTHYS_ERR_INVALID;
+    /* A2：调用方签名校验必须先于任何初始化副作用。
+     * 否则未授权进程仍可通过 Init 触发环境探测/防御模块初始化，
+     * 把“拒绝”变成“拒绝但已泄漏宿主信息”。 */
+    if (vty_caller_auth_check() != 0) return VERTHYS_ERR_UNAUTHORIZED;
     /* 先确认注册表有空位，避免分配完成后无法登记而泄漏上下文 */
     if (!verthys_ctx_registry_has_capacity()) return VERTHYS_ERR_RESOURCE_LIMIT;
 

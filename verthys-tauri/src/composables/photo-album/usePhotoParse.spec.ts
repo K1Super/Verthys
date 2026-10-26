@@ -97,7 +97,6 @@ function respond(worker: FakeParseWorker, data: ParseCryptoResponse) {
 type ParseDepsOverrides = {
   showError?: (msg: string) => void;
   showToast?: (msg: string) => void;
-  photoKey?: string;
 };
 
 /** 构造预览响应单元（worker 完成消息中的照片项） */
@@ -131,7 +130,6 @@ function makeParse(overrides: ParseDepsOverrides = {}) {
   const api = scope.run(() =>
     usePhotoParse({
       photos,
-      photoKey: ref(overrides.photoKey ?? "module-key"),
       isTauri: true,
       ensurePhotoKey: () => true,
       showError: (msg) => {
@@ -187,7 +185,6 @@ describe("usePhotoParse — 令牌校验与归一化", () => {
     expect(made.workers).toHaveLength(1);
     const req = made.workers[0].requests[0];
     expect(req.token).toBe(VALID_TOKEN);
-    expect(req.photoKey).toBe("module-key");
 
     // 驱动 Worker 完成响应
     respond(made.workers[0], {

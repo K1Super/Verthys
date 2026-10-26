@@ -7,9 +7,9 @@ name: core-build-test
 
 on:
   push:
-    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "build_dev.ps1", "build_production.ps1", ".clang-tidy", "scripts/**", "ci/**", ".github/workflows/core.yml", "verthys-tauri/src-tauri/src/**", "verthys-tauri/verthys-worker/src/**", "VERSION"]
+    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "build_dev.ps1", "build_production.ps1", ".clang-tidy", "scripts/**", "ci/**", "tests/attack/**", ".github/workflows/core.yml", "verthys-tauri/src-tauri/src/**", "verthys-tauri/verthys-worker/src/**", "VERSION"]
   pull_request:
-    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "build_dev.ps1", "build_production.ps1", ".clang-tidy", "scripts/**", "ci/**", ".github/workflows/core.yml", "verthys-tauri/src-tauri/src/**", "verthys-tauri/verthys-worker/src/**", "VERSION"]
+    paths: ["core/**", "cmake/**", "third_party/**", "CMakeLists.txt", "dep-versions.txt", "build_dev.ps1", "build_production.ps1", ".clang-tidy", "scripts/**", "ci/**", "tests/attack/**", ".github/workflows/core.yml", "verthys-tauri/src-tauri/src/**", "verthys-tauri/verthys-worker/src/**", "VERSION"]
 
 jobs:
   ast-redline:
@@ -131,11 +131,26 @@ jobs:
           }
           Write-Host "导出面白名单校验通过：$(@($actual).Count) 个符号"
 
+      - name: Attack regression gate (P0-A: A1/A3/A4/A9 必须全部拒绝)
+        shell: pwsh
+        run: |
+          & ".\tests\attack\run.ps1" -OutJson ".\build\attack-postfix.json"
+          if ($LASTEXITCODE -ne 0) { throw "attack regression failed: A1/A3/A4/A9 not all rejected" }
+
+      - name: Attack harness positive control (公开常量必须被识别为攻击成功)
+        shell: pwsh
+        run: |
+          & ".\tests\attack\run.ps1" -Baseline -OutJson ".\build\attack-baseline.json"
+          if ($LASTEXITCODE -ne 0) { throw "attack baseline control failed: harness cannot detect the known attack" }
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: verthys-dll
-          path: build/core/Release/verthys.dll
+          path: |
+            build/core/Release/verthys.dll
+            build/attack-postfix.json
+            build/attack-baseline.json
           retention-days: 7
 
 

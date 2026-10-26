@@ -9,7 +9,7 @@
  * | 阶段     | 位置           | 职责                                   | 并发模型              |
  * |---------|----------------|----------------------------------------|-----------------------|
  * | 生产者  | 渲染主线程     | 文件读取、哈希去重、分片打包           | 单线程 + 流式读取     |
- * | 传输器  | Worker 线程池  | AES-256-GCM 加密 + 元数据序列化        | 多线程并发（CPU-1）   |
+ * | 传输器  | Web Worker 池  | 哈希/缩略图/分块调度；AEAD 经 RPC 在 Tauri worker 内完成 | 多线程并发（CPU-1）   |
  * | 消费者  | 主进程（IPC）  | 批量写入存储、同步三层缓存、持久化 WAL | 单线程 + 批量事务     |
  *
  * =============================================================================
@@ -67,12 +67,15 @@ import {
   MAX_CHUNKS_PER_IPC,
   MAX_IPC_PAYLOAD_BYTES,
   MAX_PHOTO_BYTES,
+  PHOTO_WRITE_FMT,
   PHOTO_FMT_SLIM,
 } from "../../constants/crypto_const";
 import { estimateBase64Size } from "../../cache/shared/base64-size";
 import { isProxy } from "vue";
 import type { PhotoCryptoSuccess, PhotoMetaCryptoSuccess } from "../../workers/photo-crypto.worker";
+import type { SlimWorkerKeys } from "../../workers/photo-crypto-protocol";
 import { computeChunkHashesForB64, extractSlimFileSalt, type PhotoMeta } from "../../lib/crypto";
+import { createSlimFileKeys } from "../../lib/module_crypto";
 import { bytesToBase64 } from "../../utils/binary_codec";
 import type { PhotoEntry, ParsedPhotoPreview } from "./types";
 import { formatSize, makeThumbCssValue } from "./utils";
@@ -374,7 +377,6 @@ async function uploadSlimRecord(
  * @param thumbB64 明文缩略图 base64（导入产物或解析结果，索引内不保存该数据）
  * @param wrappedFileKey 包裹态文件密钥（提供文件盐，与索引同盐）
  * @param fileHashHex 文件哈希 hex（缩略图 AD 绑定）
- * @param photoKey 照片模块独立密钥
  * @param recordName 记录名（错误提示与日志定位）
  * @returns 缩略图记录 ID
  */
@@ -382,18 +384,15 @@ async function uploadSlimThumb(
   thumbB64: string,
   wrappedFileKey: string,
   fileHashHex: string,
-  photoKey: string,
   recordName: string,
 ): Promise<number> {
   if (!thumbB64) {
     throw new ChunkUploadError("缩略图数据缺失，无法写入缩略图记录");
   }
-  const fileSaltB64 = bytesToBase64(extractSlimFileSalt(wrappedFileKey));
   const { thumbCipherB64, thumbHash } = await photoWorkerPool.submitEncryptSlimThumb({
     thumbB64,
-    fileSaltB64,
     fileHashHex,
-    photoKey,
+    wrappedFileKey,
     label: recordName,
   });
   return uploadSlimRecord(thumbCipherB64, thumbHash, TYPE_PHOTO_THUMB, "缩略图");
@@ -409,7 +408,6 @@ async function uploadSlimThumb(
  * @param chunkHashes 逐块密文哈希（与 chunkIds 等长）
  * @param wrappedFileKey 包裹态文件密钥（提供文件盐，与索引同盐）
  * @param fileHashHex 文件哈希 hex（块集 AD 绑定）
- * @param photoKey 照片模块独立密钥
  * @param recordName 记录名（错误提示与日志定位）
  * @returns 块集记录 ID
  */
@@ -418,15 +416,12 @@ async function uploadSlimChunkSet(
   chunkHashes: string[],
   wrappedFileKey: string,
   fileHashHex: string,
-  photoKey: string,
   recordName: string,
 ): Promise<number> {
-  const fileSaltB64 = bytesToBase64(extractSlimFileSalt(wrappedFileKey));
   const { setCipherB64, setHash } = await photoWorkerPool.submitEncryptSlimSet({
     set: { ids: chunkIds, hashes: chunkHashes },
-    fileSaltB64,
     fileHashHex,
-    photoKey,
+    wrappedFileKey,
     label: recordName,
   });
   return uploadSlimRecord(setCipherB64, setHash, TYPE_PHOTO_CHUNK_SET, "块集");
@@ -498,7 +493,11 @@ interface ProduceContext {
   /** 记一个条目写入/加密失败：按错误类型分类，并完成致命错误收集与归因采集 */
   recordProduceError(error: Error, index: number, name: string): void;
   /** 记一个条目本地拒绝（读取失败 / 超限）：显式原因分类，不进致命集合 */
-  recordLocalFailure(index: number, name: string, reason: "read-failed" | "file-too-large"): void;
+  recordLocalFailure(
+    index: number,
+    name: string,
+    reason: "read-failed" | "file-too-large" | "encrypt-failed",
+  ): void;
   /**
    * 占用在途源字节预算（读取前调用），返回幂等的释放函数。
    *
@@ -563,13 +562,11 @@ export class ImportPipeline {
    * 兜底）全部在 runSession 内实现，本方法只提供文件导入的差异部分。
    *
    * @param files 待导入文件列表
-   * @param photoKey 照片模块独立密钥
    * @param signal 取消信号（中止后停止投喂新文件，已提交批次照常收尾并保留 WAL）
    * @returns 导入结果（含成功列表 / 跳过数 / 失败数 / 耗时）
    */
   async run(
     files: ImportFileInput[],
-    photoKey: string,
     signal?: AbortSignal,
   ): Promise<ImportPipelineResult> {
     const nameOf = (i: number): string => files[i].name;
@@ -579,7 +576,7 @@ export class ImportPipeline {
         total: files.length,
         nameOf,
         signal,
-        produce: (i, ctx) => this.produceFileImportItem(files, i, photoKey, signal, ctx),
+        produce: (i, ctx) => this.produceFileImportItem(files, i, signal, ctx),
       }),
     );
   }
@@ -1084,14 +1081,12 @@ export class ImportPipeline {
    *
    * @param files 待导入文件列表（会话内共享，按索引取用）
    * @param i 条目下标（编排层保证唯一）
-   * @param photoKey 照片模块独立密钥
    * @param signal 取消信号（会话级；读取前被中止则不再读取该文件）
    * @param ctx 生产上下文（记账与入列的唯一通道）
    */
   private async produceFileImportItem(
     files: ImportFileInput[],
     i: number,
-    photoKey: string,
     signal: AbortSignal | undefined,
     ctx: ProduceContext,
   ): Promise<void> {
@@ -1151,6 +1146,22 @@ export class ImportPipeline {
     // 记录提交时间（用于计算单文件加密耗时）
     const submitTime = performance.now();
 
+    /* 索引瘦身布局的文件级密钥组必须由主线程在投递前创建：Worker 崩溃
+     * 重投时复用同一包裹密钥，避免同一任务的重试派生不同文件密钥。 */
+    let slim: SlimWorkerKeys | undefined;
+    if (PHOTO_WRITE_FMT === PHOTO_FMT_SLIM) {
+      try {
+        const keys = await createSlimFileKeys("photo");
+        slim = { fileSaltB64: keys.saltB64, wrappedFileKey: keys.wrappedFileKey };
+      } catch (e) {
+        log.error(`创建文件密钥失败: ${fileInput.name}`, e);
+        ctx.recordLocalFailure(i, fileInput.name, "encrypt-failed");
+        releaseBytes();
+        await yieldToMain();
+        return;
+      }
+    }
+
     // 提交到 Worker 池（传输器阶段，自带背压）
     // 不 await submit()：让加密与下一次文件读取并行（真正的流水线）
     // 池内部拷贝源字节权威副本（可重放），此处以视图零成本传入
@@ -1160,7 +1171,7 @@ export class ImportPipeline {
         request: {
           fileName: fileInput.name,
           mime: fileInput.mime,
-          photoKey,
+          slim,
         },
       })
       .then(async (success: PhotoCryptoSuccess) => {
@@ -1187,7 +1198,6 @@ export class ImportPipeline {
               success.external.chunkHashes,
               success.external.metaTemplate,
               success.thumbB64,
-              photoKey,
               success.name,
             )
           : (() => {
@@ -1227,7 +1237,7 @@ export class ImportPipeline {
    *
    * 与 run() 的区别（全部收敛在 produceParsedItem 一处）：
    *   - 输入：ParsedPhotoPreview[]（已解密的 meta + 已加密的 chunks）
-   *   - 加密：仅重新加密 meta（chunks 已用当前 photoKey 加密，同设备导入）
+   *   - 加密：仅重新加密 meta（chunks 已加密；瘦身布局沿用来源包裹密钥）
    *   - 传输器：使用 submitMetaOnly() 而非 submit()
    *   - 无文件读取、无缩略图生成、无 chunk 加密、无取消信号
    *
@@ -1236,12 +1246,10 @@ export class ImportPipeline {
    * 批量三层缓存同步。
    *
    * @param parsedPhotos 解析预览列表（doParse 阶段产出）
-   * @param photoKey 照片模块独立密钥
    * @returns 导入结果（含成功列表 / 跳过数 / 失败数 / 耗时）
    */
   async runParsed(
     parsedPhotos: ParsedPhotoPreview[],
-    photoKey: string,
   ): Promise<ImportPipelineResult> {
     const nameOf = (i: number): string => parsedPhotos[i].name;
     // 会话级批次时间戳：createdAt 与记录名同源，跨条目共享同一基准
@@ -1251,7 +1259,7 @@ export class ImportPipeline {
         label: "解析导入",
         total: parsedPhotos.length,
         nameOf,
-        produce: (i, ctx) => this.produceParsedItem(parsedPhotos, i, importTimestamp, photoKey, ctx),
+        produce: (i, ctx) => this.produceParsedItem(parsedPhotos, i, importTimestamp, ctx),
       }),
     );
   }
@@ -1266,20 +1274,18 @@ export class ImportPipeline {
    * @param parsedPhotos 解析预览列表（会话内共享，按索引取用）
    * @param i 条目下标（编排层保证唯一）
    * @param importTimestamp 会话级批次时间戳（createdAt 与记录名同源）
-   * @param photoKey 照片模块独立密钥
    * @param ctx 生产上下文（记账与入列的唯一通道）
    */
   private async produceParsedItem(
     parsedPhotos: ParsedPhotoPreview[],
     i: number,
     importTimestamp: number,
-    photoKey: string,
     ctx: ProduceContext,
   ): Promise<void> {
 
     const ph = parsedPhotos[i];
 
-    // 仅处理 meta 非 null 的照片（同设备导入：chunks 已用当前 photoKey 加密）
+    // 仅处理 meta 非 null 的照片（同设备导入：chunks 已用当前模块密钥加密）
     //   meta 为 null 的照片（模块密钥不匹配）计入不可解密分类：
     //   非失败（不可重试也无重试意义）、不写入列表，由调用方展示原因
     if (!ph.meta) {
@@ -1323,6 +1329,15 @@ export class ImportPipeline {
     // 记录名（与旧实现一致：`parsed_${timestamp}_${index}`）
     const recordName = `parsed_${importTimestamp}_${i}`;
 
+    // 来源为瘦身布局时，索引重加密需要同盐与包裹密钥（都是公开数据）
+    const slim: SlimWorkerKeys | undefined =
+      meta.fmt === PHOTO_FMT_SLIM && meta.wrappedFileKey
+        ? {
+            fileSaltB64: bytesToBase64(extractSlimFileSalt(meta.wrappedFileKey)),
+            wrappedFileKey: meta.wrappedFileKey,
+          }
+        : undefined;
+
     // 记录提交时间（用于计算单文件加密耗时）
     const submitTime = performance.now();
 
@@ -1340,7 +1355,6 @@ export class ImportPipeline {
             // 由流水线在缩略图记录落库后回填（来源 ID 在本地无意义）
             { ...meta, chunkDataB64: [], chunkIds: [], thumbId: undefined, createdAt: importTimestamp + i },
             meta.thumbB64 || "",
-            photoKey,
             recordName,
           );
           const fileElapsed = performance.now() - submitTime;
@@ -1368,8 +1382,8 @@ export class ImportPipeline {
               chunkDataB64: [...ph.chunkB64List], // 内联已加密块
               createdAt: importTimestamp + i,     // 保证唯一性
             },
-            photoKey,
             recordName,
+            ...(slim ? { slim } : {}),
           })
           .then(async (success: PhotoMetaCryptoSuccess) => {
             // 计算单文件加密耗时（提交 → 完成）
@@ -1439,7 +1453,6 @@ export class ImportPipeline {
    * @param chunkB64List 加密块 base64 列表（外置块记录载荷）
    * @param chunkHashes 逐块密文哈希（与 chunkB64List 等长）
    * @param metaTemplate 元数据模板（chunkDataB64 已置空，待回填引用）
-   * @param photoKey 照片模块独立密钥
    * @param recordName verthys 记录名
    * @returns 最终写入记录（含外置引用字段）
    */
@@ -1448,7 +1461,6 @@ export class ImportPipeline {
     chunkHashes: string[],
     metaTemplate: PhotoMeta,
     plainThumbB64: string,
-    photoKey: string,
     recordName: string,
   ): Promise<BatchRecordInput> {
     // 索引瘦身布局：缩略图与块集先落独立记录（获得 ID 后回填索引），
@@ -1460,14 +1472,12 @@ export class ImportPipeline {
     //   读取侧据此回落"无缩略图"展示，而不是让整张迁移失败
     const thumbId = slimLayout && plainThumbB64
       ? await uploadSlimThumb(
-          plainThumbB64, metaTemplate.wrappedFileKey!, metaTemplate.fileHash,
-          photoKey, recordName,
+          plainThumbB64, metaTemplate.wrappedFileKey!, metaTemplate.fileHash, recordName,
         )
       : 0;
     const chunkSetId = slimLayout
       ? await uploadSlimChunkSet(
-          chunkIds, chunkHashes, metaTemplate.wrappedFileKey!, metaTemplate.fileHash,
-          photoKey, recordName,
+          chunkIds, chunkHashes, metaTemplate.wrappedFileKey!, metaTemplate.fileHash, recordName,
         )
       : 0;
 
@@ -1488,10 +1498,14 @@ export class ImportPipeline {
 
     const metaFinal = await photoWorkerPool.submitMetaOnly({
       meta: metaForWrite,
-      photoKey,
       recordName,
       ...(slimLayout
-        ? { slim: { fileSaltB64: bytesToBase64(extractSlimFileSalt(metaTemplate.wrappedFileKey!)) } }
+        ? {
+            slim: {
+              fileSaltB64: bytesToBase64(extractSlimFileSalt(metaTemplate.wrappedFileKey!)),
+              wrappedFileKey: metaTemplate.wrappedFileKey!,
+            },
+          }
         : {}),
     });
     return {
@@ -1577,14 +1591,12 @@ export class ImportPipeline {
    * 重打包写入单张：把布局二加密产物经外置写入链路落库，返回新索引记录 ID。
    *
    * @param success 重打包加密产物（外置块 + 元数据模板）
-   * @param photoKey 照片模块独立密钥
    * @param recordName 新记录名
    * @returns 新索引记录 ID（> 0）
    * @throws Error 写入被拒绝（含后端按哈希去重跳过：错误消息为 DUPLICATE_SKIPPED）
    */
   async writeRepackedPhoto(
     success: PhotoCryptoSuccess,
-    photoKey: string,
     recordName: string,
   ): Promise<number> {
     if (!success.external) {
@@ -1595,7 +1607,6 @@ export class ImportPipeline {
       success.external.chunkHashes,
       success.external.metaTemplate,
       success.thumbB64,
-      photoKey,
       recordName,
     );
     const resp = await this.consumeBatch([record]);

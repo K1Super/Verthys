@@ -96,14 +96,15 @@ interface HarnessOptions {
  * 并对派生/加密/校验块生成计数，供"每文件一次派生"等断言。
  */
 function makeSuiteStub(opts: { failCreate?: boolean; failEncrypt?: boolean; failCheck?: boolean } = {}) {
-  const stats = { createFileKey: 0, encryptChunk: 0, buildPasswordCheck: 0 };
+  const stats = { createFileKdf: 0, encryptChunk: 0, buildPasswordCheck: 0 };
   const suite: FileKeySuite = {
-    createFileKey: async () => {
-      stats.createFileKey += 1;
+    createFileKdf: async () => {
+      stats.createFileKdf += 1;
       if (opts.failCreate) throw new Error("注入的派生失败");
       return {
-        key: undefined as unknown as CryptoKey,
-        kdf: { version: 2, saltB64: bytesToBase64(new Uint8Array(16).fill(3)), iterations: 150000 },
+        version: 2,
+        saltB64: bytesToBase64(new Uint8Array(16).fill(3)),
+        iterations: 150000,
       };
     },
     encryptChunk: async (plain) => {
@@ -623,7 +624,7 @@ describe("runFileImport", () => {
     expect(entry.fileHash).not.toBe(await expectedFileHash(plain, false));
 
     // 每文件一次派生；口令校验块一次生成
-    expect(h.suiteStats.createFileKey).toBe(1);
+    expect(h.suiteStats.createFileKdf).toBe(1);
     expect(h.suiteStats.buildPasswordCheck).toBe(1);
   });
 
@@ -677,7 +678,7 @@ describe("runFileImport", () => {
     const result = await runFileImport([fileOf("a.bin"), fileOf("b.bin")], "pwd-123", h.deps);
 
     expect(result.successCount).toBe(2);
-    expect(h.suiteStats.createFileKey).toBe(2);
+    expect(h.suiteStats.createFileKdf).toBe(2);
     expect(h.suiteStats.buildPasswordCheck).toBe(2);
   });
 

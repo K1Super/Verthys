@@ -77,6 +77,17 @@ export interface VerthysResponse {
    * VerthysResponse 保持一致（snake_case）。前端据此做三态判定。 */
   /** C 端 VerPersistStatus 状态码（0=OK / 1=HEADER / 2=SIZE / 3=WAL / 4=IO / 5=INTERNAL） */
   status_code?: number;
+  /* 内容层加密的公开参数（worker 透传，不含原始密钥） */
+  /** 文件盐 base64 */
+  salt?: string;
+  /** 包裹态文件密钥 base64（可落盘） */
+  wrapped_key?: string;
+  /** 文件块 v2 实际使用的 PBKDF2 迭代次数 */
+  iterations?: number;
+  /** 记录型块密文内嵌的块序号（仅 chunk 布局解密返回） */
+  seq?: number;
+  /** 记录型块密文内嵌的块总数（仅 chunk 布局解密返回） */
+  total?: number;
   /** 容器文件字节大小 */
   file_size?: number;
   /** 文件修改时间（Unix 毫秒；不可得为 0） */

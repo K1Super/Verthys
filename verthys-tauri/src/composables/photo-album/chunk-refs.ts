@@ -11,21 +11,19 @@
  */
 import { getRecordsDataB64Batch } from "../../lib/keyManager";
 import { isSlimLayout } from "../../constants/crypto_const";
-import type { PhotoMeta, SlimChunkSet } from "../../lib/crypto";
+import type { PhotoMeta, SlimChunkSet } from "../../types/crypto";
 import { decryptChunkSetPreferWorker } from "../../workers/photo-decrypt-bridge";
 
 /**
  * 解析照片的块集（索引瘦身布局专用）。
  *
  * @param meta 已解密的照片元数据
- * @param photoKey 照片模块独立密钥
  * @param label 定位标识（记录 ID 或照片名，用于日志与错误提示）
  * @returns 块集内容；非瘦身布局或未携带块集引用时返回 null（调用方回落内联引用）
  * @throws Error 块集记录缺失、解密失败或与索引声明项数不一致
  */
 export async function resolveChunkSet(
   meta: PhotoMeta,
-  photoKey: string,
   label: string,
 ): Promise<SlimChunkSet | null> {
   if (!isSlimLayout(meta) || !meta.wrappedFileKey || !meta.chunkSetId) {
@@ -38,7 +36,7 @@ export async function resolveChunkSet(
     throw new Error(`块集记录缺失（id=${meta.chunkSetId}）`);
   }
   const set = await decryptChunkSetPreferWorker(
-    cipherB64, photoKey, meta.wrappedFileKey, meta.fileHash, label,
+    cipherB64, meta.wrappedFileKey, meta.fileHash, label,
   );
   if (typeof meta.chunkCount === "number" && meta.chunkCount !== set.ids.length) {
     throw new Error(
@@ -75,10 +73,9 @@ export interface ChunkRefs {
  */
 export async function resolveChunkRefs(
   meta: PhotoMeta,
-  photoKey: string,
   label: string,
 ): Promise<ChunkRefs> {
-  const set = await resolveChunkSet(meta, photoKey, label);
+  const set = await resolveChunkSet(meta, label);
   if (set) {
     return { ids: set.ids, hashes: set.hashes, inlineCipher: [] };
   }

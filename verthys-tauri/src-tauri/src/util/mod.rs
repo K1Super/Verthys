@@ -18,6 +18,7 @@
  *   - path:      路径处理（输入硬校验 + canonicalize 全解析）
  *   - random:    随机字节生成（改用 getrandom crate，系统 CSPRNG）
  *   - crypto:    密码学工具（PBKDF2/DPAPI/HMAC/ct_eq）
+ *   - container_secret: 本机容器口令生成与 DPAPI 密封保管
  *   - audit_log: 审计日志（HMAC 链式防篡改）
  *   - sandbox:   路径沙箱（白名单基目录 + resolve_and_validate）
  *   - rate_limiter: 滑动窗口频率限制（共用实现，按用途分离实例）
@@ -27,6 +28,8 @@ pub mod audit_log;
 pub mod base64;
 /// 密码学工具（PBKDF2/DPAPI/HMAC/ct_eq）
 pub mod crypto;
+/// 本机容器口令生成与 DPAPI 密封保管
+pub mod container_secret;
 pub mod disk;
 pub mod error;
 /// 日志敏感负载脱敏（白名单字段保留，其余值只留类型与规模）

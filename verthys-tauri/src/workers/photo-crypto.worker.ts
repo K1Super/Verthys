@@ -6,26 +6,23 @@
  * =============================================================================
  * 职责
  * =============================================================================
- * 在独立 Web Worker 线程中执行 CPU 密集型密码学任务，避免阻塞渲染进程主线程：
+ * 在独立 Web Worker 线程中执行 CPU 密集型准备任务，避免阻塞渲染进程主线程：
  *   加密（导入链路）：
  *     1. BLAKE3 文件哈希计算（去重 + AD 绑定）
  *     2. OffscreenCanvas 缩略图生成（400×400 JPEG 0.85）
- *     3. XChaCha20-Poly1305 分块加密（meta + chunks 内联）
- *     4. 元数据加密（encryptMeta）
+ *     3. 分块循环与密文哈希（加解密本身经 RPC 下沉到 Tauri worker）
  *   解密（读取链路：列表按需解密 / 查看原图）：
- *     5. 元数据解密（decrypt_meta）
- *     6. 数据块解密（decrypt_chunks，逐块明文零拷贝回传）
+ *     4. 元数据与数据块的 RPC 调度、完整性校验、明文零拷贝回传
  *
- * 两条链路复用 lib/crypto.ts 的同一套原语（encryptMeta / encryptChunk /
- * computeFileHash / decryptMeta / decryptChunk），字节兼容：不改变加密算法、
- * AD 构造、密钥派生流程与密文布局。
+ * 密钥边界：本线程不接收模块密钥、不执行 PBKDF2/HKDF、不持有任何长驻密钥；
+ * 每次记录加解密都是一次主线程 RPC（WorkerRpcClient），由 Tauri worker
+ * 在其进程内完成派生与 AEAD。
  *
  * =============================================================================
  * 零拷贝传输
  * =============================================================================
  * - 输入：fileBytes 通过 transferList 零所有权转让到 Worker（主线程失去访问权）
- * - 输出：加密后的 chunk bytes 等不再回传（仅回传 base64 字符串 + 元数据）
- *   避免 transferList 反向传输的复杂性，base64 字符串序列化开销可接受
+ * - 输出：加密块仅回传 base64 字符串与元数据
  * - 解密输出：明文块以 transferList 零拷贝回传（主线程是唯一消费方，
  *   Worker 侧转移后即失去访问权，明文不在工作线程多驻留一份）
  *
@@ -33,10 +30,15 @@
  * 消息协议（类型与响应装配集中定义于 photo-crypto-protocol）
  * =============================================================================
  * 主线程 → Worker：
- *   { id, fileName, mime, fileBytes: ArrayBuffer, photoKey: string }
- *   { id, meta, photoKey, recordName }                     （meta-only 加密）
- *   { id, op: "decrypt_meta", metaB64, photoKey, label }   （元数据解密）
- *   { id, op: "decrypt_chunks", chunksB64, photoKey, fileHashHex, label }（数据块解密）
+ *   { id, fileName, mime, fileBytes: ArrayBuffer, slim? }   （完整加密）
+ *   { id, meta, recordName, slim? }                         （meta-only 加密）
+ *   { id, op: "encrypt_slim_thumb", thumbB64, wrappedFileKey, fileHashHex, label }
+ *   { id, op: "encrypt_slim_set", set, wrappedFileKey, fileHashHex, label }
+ *   { id, op: "encrypt_slim_photo", fileBytes, fileHashHex, ..., slim }（重打包）
+ *   { id, op: "decrypt_meta", metaB64, label }               （元数据解密）
+ *   { id, op: "decrypt_thumb", thumbCipherB64, wrappedFileKey, fileHashHex, label }
+ *   { id, op: "decrypt_slim_set", setCipherB64, wrappedFileKey, fileHashHex, label }
+ *   { id, op: "decrypt_chunks", chunksB64, fileHashHex, label, wrappedFileKey? }（数据块解密）
  *
  * Worker → 主线程：
  *   完整加密：{ id, ok: true, hash, thumbB64, metaB64?, external?, name, mime, size }
@@ -51,44 +53,22 @@
  * =============================================================================
  * 安全边界
  * =============================================================================
- * - photoKey 在 Worker 内存中使用后立即 zeroize（由 encryptMeta/encryptChunk 内部完成）
- * - fileBytes 使用后 fill(0) 清零
- * - 解密任务结束清空按盐派生的子密钥缓存，派生结果不跨任务驻留；密钥字符串
- *   本身受 JS 不可变字符串限制无法原地清零，故以"任务内使用、不跨任务持有引用"约束
- * - Worker 不接触 verthys 句柄、不发起 IPC，仅做纯加密计算
+ * - 本线程只处理密文、公开参数与当前任务明文；明文缓冲用毕即时清零
+ * - 模块密钥、文件密钥、派生结果全部留在 Tauri worker 进程内
+ * - Worker 不接触 verthys 句柄；仅通过主线程 RPC 间接使用内容层命令
  */
 
 /// <reference lib="webworker" />
 
 import { blake3 } from "@noble/hashes/blake3";
+import type { PhotoMeta, SlimChunkSet } from "../types/crypto";
 import {
-  encryptMeta,
-  encryptChunk,
-  computeFileHash,
-  decryptMeta,
-  decryptChunk,
-  createSlimFileKeys,
-  encryptSlimMeta,
-  encryptSlimChunk,
-  decryptSlimChunk,
-  encryptSlimThumb,
-  decryptSlimThumb,
-  encryptSlimChunkSet,
-  decryptSlimChunkSet,
-  unwrapSlimFileKey,
-  clearFileKeyCache,
-  bytesToHex,
-  TYPE_PHOTO_META,
-  CHUNK_SIZE,
-  type PhotoMeta,
-  type SlimChunkSet,
-} from "../lib/crypto";
-import {
-  FILE_HASH_LEN, MAX_INLINE_META_BYTES, SALT_LEN,
-  PHOTO_WRITE_FMT, PHOTO_FMT_SLIM,
+  FILE_HASH_LEN, MAX_INLINE_META_BYTES, SALT_LEN, CHUNK_SIZE,
+  PHOTO_FMT_SLIM,
 } from "../constants/crypto_const";
 import { PHOTO_THUMB_MAX_CHARS } from "../constants/photo_budget.generated";
-import { bytesToBase64, base64ToBytes } from "../utils/binary_codec";
+import { bytesToBase64, base64ToBytes, bytesToHex } from "../utils/binary_codec";
+import { WorkerRpcClient } from "./worker-rpc";
 
 /* ------------------------------------------------------------------ *
  * 消息类型与响应装配（集中定义于 photo-crypto-protocol）               *
@@ -120,16 +100,10 @@ import {
   type PhotoSlimThumbRequest,
   type PhotoSlimSetRequest,
   type PhotoSlimRepackRequest,
-  type SlimMetaParams,
   type SlimSetResult,
   type SlimThumbResult,
+  type SlimWorkerKeys,
 } from "./photo-crypto-protocol";
-
-/** 元数据解密产物（缩略图明文为可转移缓冲，既有布局为 undefined） */
-interface PhotoDecryptMetaResult {
-  meta: PhotoMeta;
-  thumbBytes?: ArrayBuffer;
-}
 
 export type {
   PhotoCryptoRequest,
@@ -158,6 +132,9 @@ export type {
 
 /** Worker 全局作用域（DOM lib 下 self 不含 transfer 重载，统一收敛于此） */
 const workerScope = self as unknown as DedicatedWorkerGlobalScope;
+
+/** 记录加解密 RPC：密钥与派生在 Tauri worker 进程内完成 */
+const workerRpc = new WorkerRpcClient((message) => workerScope.postMessage(message));
 
 /* ------------------------------------------------------------------ *
  * OffscreenCanvas 缩略图生成（Worker 兼容，无 DOM 依赖）              *
@@ -250,72 +227,72 @@ async function generateThumbnailWorker(
 }
 
 /* ------------------------------------------------------------------ *
- * 单张照片加密处理（复用 lib/crypto.ts，保证字节兼容）                *
+ * 单张照片加密处理（分块与索引加解密经 RPC，密钥留在 Tauri worker）
  * ------------------------------------------------------------------ */
 
 /**
  * 处理单张照片加密：
  *   1. 计算 BLAKE3 文件哈希
  *   2. 生成缩略图
- *   3. 分块加密（CHUNK_SIZE 切片，XChaCha20-Poly1305）
- *   4. 构造 PhotoMeta + 加密元数据
+ *   3. 经 RPC 逐块加密（密钥与派生在 Tauri worker 进程内）
+ *   4. 构造 PhotoMeta 并加密索引
  *
  * @param fileName 文件名
  * @param mime MIME 类型
  * @param fileBytes 文件原始字节
- * @param photoKey 照片模块独立密钥
+ * @param slim 索引瘦身布局的公开参数与包裹态文件密钥（缺省 = 既有布局）
  * @returns { hash, thumbB64, metaB64, name, mime, size }
  */
 async function processPhoto(
   fileName: string,
   mime: string,
   fileBytes: ArrayBuffer,
-  photoKey: string,
+  slim?: SlimWorkerKeys,
 ): Promise<PhotoProcessResult> {
   const origBytes = new Uint8Array(fileBytes);
   const size = origBytes.length;
 
   // 1. 计算 BLAKE3 文件哈希（去重 + AD 绑定）
-  const fileHashBytes = computeFileHash(origBytes);
-  const fileHashHex = bytesToHex(fileHashBytes);
+  const fileHashHex = bytesToHex(blake3(origBytes, { dkLen: FILE_HASH_LEN }));
 
   // 2. 生成缩略图（OffscreenCanvas，失败返回空字符串）
   const thumbB64 = await generateThumbnailWorker(fileBytes, mime);
 
-  // 3. 分块加密（CHUNK_SIZE 切片，XChaCha20-Poly1305）
+  // 3. 分块加密（CHUNK_SIZE 切片）：布局由调用方给定的瘦身参数决定
   const totalChunks = Math.ceil(size / CHUNK_SIZE);
   const chunkDataB64: string[] = [];
   const chunkHashes: string[] = [];
   let encryptedBytesTotal = 0;
+  const slimLayout = slim !== undefined;
+  // 既有布局一次派生覆盖全文件块：盐由 worker 生成后随每块密文携带
+  const fileSaltB64 = slim?.fileSaltB64
+    ?? bytesToBase64(crypto.getRandomValues(new Uint8Array(SALT_LEN)));
 
-  // 写入布局由开关决定（默认既有布局）：
-  //   既有布局：每文件一个盐派生文件子密钥，块密文携带 salt|seq|total|nonce；
-  //   索引瘦身布局：随机文件密钥包裹后随索引保存，块密文只携带 nonce|密文。
-  const slimLayout = PHOTO_WRITE_FMT === PHOTO_FMT_SLIM;
-  const slimKeys = slimLayout ? await createSlimFileKeys(photoKey) : null;
-  const fileSalt = slimKeys?.fileSalt ?? crypto.getRandomValues(new Uint8Array(SALT_LEN));
-
-  try {
-    for (let c = 0; c < totalChunks; c++) {
-      const start = c * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, size);
-      const chunkPlain = origBytes.slice(start, end);
-
-      const encryptedChunk = slimKeys
-        ? encryptSlimChunk(chunkPlain, slimKeys.fileKey, c, totalChunks, fileHashHex)
-        : await encryptChunk(chunkPlain, photoKey, c, totalChunks, fileHashHex, fileSalt);
-      chunkDataB64.push(bytesToBase64(encryptedChunk));
-      encryptedBytesTotal += encryptedChunk.length;
+  for (let c = 0; c < totalChunks; c++) {
+    const start = c * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, size);
+    const chunkPlain = origBytes.slice(start, end);
+    try {
+      const sealed = await workerRpc.request({
+        op: "seal",
+        module: "photo",
+        kind: slimLayout ? "slim_chunk" : "chunk",
+        data: bytesToBase64(chunkPlain),
+        salt: slimLayout ? undefined : fileSaltB64,
+        fileHash: fileHashHex,
+        seq: c,
+        total: totalChunks,
+        wrappedKey: slim?.wrappedFileKey,
+      });
+      const cipherBytes = base64ToBytes(sealed.dataB64);
+      chunkDataB64.push(sealed.dataB64);
+      encryptedBytesTotal += cipherBytes.length;
       // 每块密文的 BLAKE3：容器导出的逐块完整性校验权威值（与负载同步产生）
-      chunkHashes.push(bytesToHex(blake3(encryptedChunk, { dkLen: FILE_HASH_LEN })));
-
+      chunkHashes.push(bytesToHex(blake3(cipherBytes, { dkLen: FILE_HASH_LEN })));
+    } finally {
       // 安全清零明文块
       chunkPlain.fill(0);
     }
-  } finally {
-    // 文件密钥仅在本次块加密内有效；索引只保存其包裹态。
-    // 文件盐属公开数据（已随包裹态密钥与索引密文头部携带），不参与清零。
-    slimKeys?.fileKey.fill(0);
   }
 
   // 4. 内联/外置判定：块密文总量超过内联阈值 → 外置（块先落独立记录，
@@ -333,8 +310,8 @@ async function processPhoto(
     chunkHashes,
     fileHash: fileHashHex,
     createdAt: Date.now(),
-    ...(slimKeys
-      ? { fmt: PHOTO_FMT_SLIM, wrappedFileKey: slimKeys.wrappedFileKey }
+    ...(slim
+      ? { fmt: PHOTO_FMT_SLIM, wrappedFileKey: slim.wrappedFileKey }
       : {}),
   };
 
@@ -343,15 +320,26 @@ async function processPhoto(
 
   if (!external) {
     // 内联路径：元数据即刻加密回传（与旧行为一致）
-    const metaB64 = await encryptMeta(metaTemplate, photoKey);
-    return {
-      hash: fileHashHex,
-      thumbB64,
-      metaB64,
-      name: `meta_${fileName}`,
-      mime,
-      size,
-    };
+    const metaPlain = new TextEncoder().encode(JSON.stringify(metaTemplate));
+    try {
+      const sealed = await workerRpc.request({
+        op: "seal",
+        module: "photo",
+        kind: slimLayout ? "slim_meta" : "meta",
+        data: bytesToBase64(metaPlain),
+        salt: slim?.fileSaltB64,
+      });
+      return {
+        hash: fileHashHex,
+        thumbB64,
+        metaB64: sealed.dataB64,
+        name: `meta_${fileName}`,
+        mime,
+        size,
+      };
+    } finally {
+      metaPlain.fill(0);
+    }
   }
 
   // 外置路径：块与元数据模板回传主线程——块上传获得记录 ID 后，
@@ -372,13 +360,13 @@ async function processPhoto(
 }
 
 /* ------------------------------------------------------------------ *
- * Parsed Import：meta-only 加密（复用 encryptMeta，不重复加密 chunks）*
+ * Parsed Import：meta-only 加密（只重写索引，不重复处理已加密块）     *
  * ------------------------------------------------------------------ */
 
 /**
  * 处理 meta-only 加密：
  *   1. 从已解密的 PhotoMeta 中提取 fileHash / thumbB64 / name / mime / size
- *   2. 调用 encryptMeta 用当前 photoKey 重新加密元数据
+ *   2. 经 RPC 用 Tauri worker 托管的模块密钥重新加密元数据
  *   3. 返回加密后的 metaB64 + 去重哈希 + 缩略图
  *
  * 与 processPhoto 的区别：
@@ -388,28 +376,36 @@ async function processPhoto(
  *   - 不分块加密 chunks（chunks 已加密，直接内联到新 meta）
  *
  * @param meta 已解密的元数据
- * @param photoKey 照片模块独立密钥
  * @param recordName verthys 记录名
+ * @param slim 索引瘦身布局的公开参数与包裹态文件密钥（来源布局为瘦身时必须沿用）
  * @returns { metaB64, hash, thumbB64, name, mime, size, recordName }
  */
 async function processPhotoMetaOnly(
   meta: PhotoMeta,
-  photoKey: string,
   recordName: string,
-  slim?: SlimMetaParams,
+  slim?: SlimWorkerKeys,
 ): Promise<PhotoMetaProcessResult> {
   // 索引瘦身布局：索引按文件盐加密（与包裹态密钥同盐），且索引内不保留
   //   缩略图数据（缩略图已独立成记录）；既有布局维持原行为。
-  const metaB64 = slim
-    ? await encryptSlimMeta({ ...meta, thumbB64: "" }, photoKey, base64ToBytes(slim.fileSaltB64))
-    : await encryptMeta(meta, photoKey);
-
-  return {
-    metaB64,
-    hash: meta.fileHash,
-    thumbB64: meta.thumbB64 ?? "",
-    recordName,
-  };
+  const payload = slim ? { ...meta, thumbB64: "" } : meta;
+  const metaPlain = new TextEncoder().encode(JSON.stringify(payload));
+  try {
+    const sealed = await workerRpc.request({
+      op: "seal",
+      module: "photo",
+      kind: slim ? "slim_meta" : "meta",
+      data: bytesToBase64(metaPlain),
+      salt: slim?.fileSaltB64,
+    });
+    return {
+      metaB64: sealed.dataB64,
+      hash: meta.fileHash,
+      thumbB64: meta.thumbB64 ?? "",
+      recordName,
+    };
+  } finally {
+    metaPlain.fill(0);
+  }
 }
 
 /**
@@ -421,25 +417,25 @@ async function processPhotoMetaOnly(
  */
 async function processEncryptSlimThumb(
   thumbB64: string,
-  fileSaltB64: string,
+  wrappedFileKey: string,
   fileHashHex: string,
-  photoKey: string,
 ): Promise<SlimThumbResult> {
   if (!thumbB64) {
     throw new Error("缩略图数据缺失，无法加密缩略图记录");
   }
-  const raw = base64ToBytes(thumbB64);
-  try {
-    const cipher = await encryptSlimThumb(
-      raw, photoKey, base64ToBytes(fileSaltB64), fileHashHex,
-    );
-    return {
-      thumbCipherB64: bytesToBase64(cipher),
-      thumbHash: bytesToHex(blake3(cipher, { dkLen: FILE_HASH_LEN })),
-    };
-  } finally {
-    raw.fill(0);
-  }
+  const sealed = await workerRpc.request({
+    op: "seal",
+    module: "photo",
+    kind: "thumb",
+    data: thumbB64,
+    fileHash: fileHashHex,
+    wrappedKey: wrappedFileKey,
+  });
+  const cipher = base64ToBytes(sealed.dataB64);
+  return {
+    thumbCipherB64: sealed.dataB64,
+    thumbHash: bytesToHex(blake3(cipher, { dkLen: FILE_HASH_LEN })),
+  };
 }
 
 /**
@@ -449,17 +445,27 @@ async function processEncryptSlimThumb(
  */
 async function processEncryptSlimSet(
   set: SlimChunkSet,
-  fileSaltB64: string,
+  wrappedFileKey: string,
   fileHashHex: string,
-  photoKey: string,
 ): Promise<SlimSetResult> {
-  const cipher = await encryptSlimChunkSet(
-    set, photoKey, base64ToBytes(fileSaltB64), fileHashHex,
-  );
-  return {
-    setCipherB64: bytesToBase64(cipher),
-    setHash: bytesToHex(blake3(cipher, { dkLen: FILE_HASH_LEN })),
-  };
+  const payload = new TextEncoder().encode(JSON.stringify(set));
+  try {
+    const sealed = await workerRpc.request({
+      op: "seal",
+      module: "photo",
+      kind: "chunkset",
+      data: bytesToBase64(payload),
+      fileHash: fileHashHex,
+      wrappedKey: wrappedFileKey,
+    });
+    const cipher = base64ToBytes(sealed.dataB64);
+    return {
+      setCipherB64: sealed.dataB64,
+      setHash: bytesToHex(blake3(cipher, { dkLen: FILE_HASH_LEN })),
+    };
+  } finally {
+    payload.fill(0);
+  }
 }
 
 /**
@@ -477,7 +483,7 @@ async function processSlimRepack(
   declaredSize: number,
   createdAt: number,
   thumbB64: string,
-  photoKey: string,
+  slim: SlimWorkerKeys,
 ): Promise<PhotoProcessResult> {
   const origBytes = new Uint8Array(fileBytes);
   // 实际字节长度是唯一权威分块口径：源索引声明的 size 可能滞后（历史记录/
@@ -488,29 +494,35 @@ async function processSlimRepack(
   }
   try {
     // 源校验：明文哈希必须与源索引声明一致（不一致即源数据损坏，拒绝重打包）
-    const actualHash = bytesToHex(computeFileHash(origBytes));
+    const actualHash = bytesToHex(blake3(origBytes, { dkLen: FILE_HASH_LEN }));
     if (actualHash !== fileHashHex) {
       throw new Error(`源数据哈希不符（期望 ${fileHashHex}，实际 ${actualHash}），拒绝重打包`);
     }
 
     const totalChunks = Math.ceil(size / CHUNK_SIZE);
-    const slimKeys = await createSlimFileKeys(photoKey);
     const chunkDataB64: string[] = [];
     const chunkHashes: string[] = [];
-    try {
-      for (let c = 0; c < totalChunks; c++) {
-        const start = c * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, size);
-        const chunkPlain = origBytes.slice(start, end);
-        const encryptedChunk = encryptSlimChunk(
-          chunkPlain, slimKeys.fileKey, c, totalChunks, fileHashHex,
-        );
-        chunkDataB64.push(bytesToBase64(encryptedChunk));
-        chunkHashes.push(bytesToHex(blake3(encryptedChunk, { dkLen: FILE_HASH_LEN })));
+    for (let c = 0; c < totalChunks; c++) {
+      const start = c * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, size);
+      const chunkPlain = origBytes.slice(start, end);
+      try {
+        const sealed = await workerRpc.request({
+          op: "seal",
+          module: "photo",
+          kind: "slim_chunk",
+          data: bytesToBase64(chunkPlain),
+          fileHash: fileHashHex,
+          seq: c,
+          total: totalChunks,
+          wrappedKey: slim.wrappedFileKey,
+        });
+        const cipher = base64ToBytes(sealed.dataB64);
+        chunkDataB64.push(sealed.dataB64);
+        chunkHashes.push(bytesToHex(blake3(cipher, { dkLen: FILE_HASH_LEN })));
+      } finally {
         chunkPlain.fill(0);
       }
-    } finally {
-      slimKeys.fileKey.fill(0);
     }
 
     const metaTemplate: PhotoMeta = {
@@ -525,7 +537,7 @@ async function processSlimRepack(
       fileHash: fileHashHex,
       createdAt,
       fmt: PHOTO_FMT_SLIM,
-      wrappedFileKey: slimKeys.wrappedFileKey,
+      wrappedFileKey: slim.wrappedFileKey,
     };
 
     return {
@@ -563,32 +575,86 @@ function toTransferableBuffer(view: Uint8Array): ArrayBuffer {
 }
 
 /**
- * 解密元数据（复用 lib/crypto 的 decryptMeta，与主线程实现字节兼容）。
+ * 解密元数据。
  *
- * 派生缓存跨任务有限驻留：Worker 常驻且池按任务轮转，每任务清空会让
- * "索引 + 缩略图"这类共享同一文件盐的连续解密各付一次 PBKDF2(150k)；
- * 缓存按"口令指纹 + 盐"键控（口令变更不会误命中）、容量有界、淘汰即零填充，
- * 并在模块密钥失效时由池下发标记、于该 Worker 下一任务入口清空。
- * 密钥字符串受 JS 不可变字符串限制无法原地清零，以"不跨会话持有密钥字符串 +
- * 缓存随失效清空"约束其生命周期。
- *
- * @param thumbCipherB64 索引瘦身布局的缩略图密文（提供时同任务解密：
- *   索引解密已派生同一把包裹密钥，缩略图解密不再额外派生）
+ * 摘要派生与 AEAD 全部由主线程 RPC 转交 Tauri worker；本线程只做 base64
+ * 解码与 JSON 解析，明文缓冲用毕立即清零，不持有任何密钥材料。
  */
-async function processDecryptMeta(
-  metaB64: string,
-  photoKey: string,
-  thumbCipherB64?: string,
-): Promise<PhotoDecryptMetaResult> {
-  const meta = await decryptMeta(metaB64, photoKey);
-  if (!thumbCipherB64) return { meta };
-  if (!meta.wrappedFileKey) {
-    throw new Error("索引缺少包裹态文件密钥，无法解密缩略图记录");
+async function processDecryptMeta(metaB64: string): Promise<PhotoMeta> {
+  const opened = await workerRpc.request({
+    op: "open",
+    module: "photo",
+    kind: "meta",
+    data: metaB64,
+  });
+  const plain = base64ToBytes(opened.dataB64);
+  try {
+    return JSON.parse(new TextDecoder().decode(plain)) as PhotoMeta;
+  } catch {
+    throw new Error("解密后的元数据 JSON 解析失败");
+  } finally {
+    plain.fill(0);
   }
-  const thumb = await decryptSlimThumb(
-    thumbCipherB64, photoKey, meta.wrappedFileKey, meta.fileHash,
-  );
-  return { meta, thumbBytes: toTransferableBuffer(thumb) };
+}
+
+/**
+ * 解密瘦身布局的缩略图记录（列表路径的补取）。
+ *
+ * @param wrappedFileKey 包裹态文件密钥（主线程从索引取得）
+ */
+async function processDecryptThumb(
+  thumbCipherB64: string,
+  wrappedFileKey: string,
+  fileHashHex: string,
+): Promise<Uint8Array> {
+  const opened = await workerRpc.request({
+    op: "open",
+    module: "photo",
+    kind: "thumb",
+    data: thumbCipherB64,
+    fileHash: fileHashHex,
+    wrappedKey: wrappedFileKey,
+  });
+  return base64ToBytes(opened.dataB64);
+}
+
+/**
+ * 解密瘦身布局的块集记录并做结构校验。
+ *
+ * 结构来自本机写入，但读取侧仍按外部输入对待：项数不一致或含非法 ID
+ * 即判损坏，避免把错位块序号带入后续 AD 校验。
+ */
+async function processDecryptSlimSet(
+  setCipherB64: string,
+  wrappedFileKey: string,
+  fileHashHex: string,
+): Promise<SlimChunkSet> {
+  const opened = await workerRpc.request({
+    op: "open",
+    module: "photo",
+    kind: "chunkset",
+    data: setCipherB64,
+    fileHash: fileHashHex,
+    wrappedKey: wrappedFileKey,
+  });
+  const plain = base64ToBytes(opened.dataB64);
+  try {
+    const raw = JSON.parse(new TextDecoder().decode(plain)) as SlimChunkSet;
+    if (!raw || !Array.isArray(raw.ids) || !Array.isArray(raw.hashes)) {
+      throw new Error("块集结构非法");
+    }
+    if (raw.ids.length === 0 || raw.ids.length !== raw.hashes.length) {
+      throw new Error(`块集项数不一致（id=${raw.ids.length}，hash=${raw.hashes.length}）`);
+    }
+    for (const id of raw.ids) {
+      if (!Number.isInteger(id) || id <= 0) {
+        throw new Error(`块集包含非法记录 ID: ${id}`);
+      }
+    }
+    return raw;
+  } finally {
+    plain.fill(0);
+  }
 }
 
 /**
@@ -598,17 +664,17 @@ async function processDecryptMeta(
  * 统计失败"的语义一致（两条路径都拒绝产出不完整结果）；错误信息携带块
  * 序号，便于定位损坏块。
  *
- * @param slim 索引瘦身布局参数（包裹态文件密钥与块总数）：提供时先解封
- *   随机文件密钥，再按 nonce|密文 布局逐块解密（AD 绑定由序号位置给出）
+ * @param wrappedFileKey 瘦身布局的包裹态文件密钥：提供时按 nonce|密文
+ *   布局逐块解密（AD 绑定由序号位置给出）
+ * @param chunkTotal 瘦身布局声明的块总数（必须与密文列表长度一致）
  * @param verify 完整性权威值：逐块密文哈希在解密前比对；
- *   整图明文哈希在解密后按序增量比对。任一不符即拒绝该任务，
- *   主线程不再重算（确定性失败）。
+ *   整图明文哈希在解密后按序增量比对。任一不符即拒绝该任务。
  */
 async function processDecryptChunks(
   chunksB64: string[],
-  photoKey: string,
   fileHashHex: string,
-  slim?: { wrappedFileKey: string; chunkTotal: number },
+  wrappedFileKey?: string,
+  chunkTotal?: number,
   verify?: { expectedHashes?: string[]; expectedFileHash?: string },
 ): Promise<ArrayBuffer[]> {
   if (chunksB64.length === 0) {
@@ -620,17 +686,14 @@ async function processDecryptChunks(
       `哈希项数与块数不一致（哈希 ${expectedHashes.length}，块 ${chunksB64.length}）`,
     );
   }
-  if (slim && (!Number.isInteger(slim.chunkTotal) || slim.chunkTotal !== chunksB64.length)) {
-    throw new Error(`块总数与密文数量不一致（声明 ${slim.chunkTotal}，实得 ${chunksB64.length}）`);
+  const slim = wrappedFileKey !== undefined;
+  if (slim && (!Number.isInteger(chunkTotal) || chunkTotal !== chunksB64.length)) {
+    throw new Error(`块总数与密文数量不一致（声明 ${chunkTotal}，实得 ${chunksB64.length}）`);
   }
 
-  let fileKey: Uint8Array | null = null;
   // 已解密的明文块：失败路径必须逐块覆写清零（明文不得留在 Worker 堆中）
   const plaintexts: ArrayBuffer[] = [];
   try {
-    if (slim) {
-      fileKey = await unwrapSlimFileKey(slim.wrappedFileKey, photoKey);
-    }
     // 整图哈希增量计算：不拼接大缓冲，逐块喂入哈希器
     const fileHasher = verify?.expectedFileHash
       ? blake3.create({ dkLen: FILE_HASH_LEN })
@@ -645,23 +708,39 @@ async function processDecryptChunks(
             throw new Error(`块密文哈希校验失败（第 ${c + 1}/${chunksB64.length} 块）`);
           }
         }
-        if (fileKey) {
-          const plaintext = decryptSlimChunk(chunksB64[c], fileKey, fileHashHex, c, chunksB64.length);
-          fileHasher?.update(plaintext);
-          plaintexts.push(toTransferableBuffer(plaintext));
-        } else {
-          const { plaintext, seq, total } = await decryptChunk(chunksB64[c], photoKey, fileHashHex);
+        const opened = await workerRpc.request(
+          slim
+            ? {
+                op: "open",
+                module: "photo",
+                kind: "slim_chunk",
+                data: chunksB64[c],
+                fileHash: fileHashHex,
+                seq: c,
+                total: chunksB64.length,
+                wrappedKey: wrappedFileKey,
+              }
+            : {
+                op: "open",
+                module: "photo",
+                kind: "chunk",
+                data: chunksB64[c],
+                fileHash: fileHashHex,
+              },
+        );
+        if (!slim) {
           // 自描述位置校验：块密文头部声明必须与列表位置一致。乱序/重复/截断
           // 的列表在拼接前即拒绝，避免把错误顺序带入后续整图哈希比对（既有
           // 布局的 seq/total 由加密端写入并被 AD 覆盖，故该判定不受篡改影响）
-          if (seq !== c || total !== chunksB64.length) {
+          if (opened.seq !== c || opened.total !== chunksB64.length) {
             throw new Error(
-              `数据块顺序校验失败（seq=${seq} total=${total}，期望 ${c}/${chunksB64.length}）`,
+              `数据块顺序校验失败（seq=${opened.seq} total=${opened.total}，期望 ${c}/${chunksB64.length}）`,
             );
           }
-          fileHasher?.update(plaintext);
-          plaintexts.push(toTransferableBuffer(plaintext));
         }
+        const plaintext = base64ToBytes(opened.dataB64);
+        fileHasher?.update(plaintext);
+        plaintexts.push(toTransferableBuffer(plaintext));
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new Error(`第 ${c + 1}/${chunksB64.length} 块解密失败: ${msg}`);
@@ -681,8 +760,6 @@ async function processDecryptChunks(
     //   在抛出前就地清零，杜绝明文在 Worker 堆中按 GC 时序残留。
     for (const buf of plaintexts) new Uint8Array(buf).fill(0);
     throw e;
-  } finally {
-    fileKey?.fill(0);
   }
 }
 
@@ -696,7 +773,6 @@ function isMetaOnlyRequest(data: unknown): data is PhotoMetaCryptoRequest {
     typeof data === "object" &&
     data !== null &&
     "meta" in data &&
-    "photoKey" in data &&
     "recordName" in data &&
     !("fileBytes" in data)
   );
@@ -738,24 +814,16 @@ function isSlimRepackRequest(data: unknown): data is PhotoSlimRepackRequest {
 }
 
 self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
+  // RPC 结果由客户端消费；其余消息才是任务请求
+  if (workerRpc.handleMessage(e.data)) return;
   const req = e.data;
-
-  // 模块密钥失效后池会在此标记：本任务先行清空按盐派生缓存，再执行任务
-  // （缓存键含口令指纹，正常换钥不会误命中；此处保证失效即释放）
-  if ((req as { clearCache?: boolean }).clearCache === true) {
-    clearFileKeyCache();
-  }
 
   // ===== 元数据解密路径（列表按需解密 / 查看原图回填） =====
   if (isDecryptMetaRequest(req)) {
-    const { id, metaB64, photoKey, label, thumbCipherB64 } = req;
+    const { id, metaB64, label } = req;
     try {
-      const { meta, thumbBytes } = await processDecryptMeta(metaB64, photoKey, thumbCipherB64);
-      // 缩略图明文随 transferList 零拷贝回传（转移后 Worker 侧失去访问权）
-      workerScope.postMessage(
-        assemblePhotoDecryptMetaSuccess(id, meta, thumbBytes),
-        thumbBytes ? [thumbBytes] : [],
-      );
+      const meta = await processDecryptMeta(metaB64);
+      workerScope.postMessage(assemblePhotoDecryptMetaSuccess(id, meta));
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
       console.error(`[photo-crypto.worker] 元数据解密失败: ${label}`, e);
@@ -767,15 +835,12 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
   // ===== 数据块解密路径（查看原图） =====
   if (isDecryptChunksRequest(req)) {
     const {
-      id, chunksB64, photoKey, fileHashHex, label,
+      id, chunksB64, fileHashHex, label,
       wrappedFileKey, chunkTotal, expectedHashes, expectedFileHash,
     } = req;
     try {
-      const slim = wrappedFileKey !== undefined && chunkTotal !== undefined
-        ? { wrappedFileKey, chunkTotal }
-        : undefined;
       const plaintexts = await processDecryptChunks(
-        chunksB64, photoKey, fileHashHex, slim, { expectedHashes, expectedFileHash },
+        chunksB64, fileHashHex, wrappedFileKey, chunkTotal, { expectedHashes, expectedFileHash },
       );
       // 明文随 transferList 零拷贝回传：转移后 Worker 侧失去访问权，
       // 明文不在工作线程多驻留一份
@@ -790,9 +855,9 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
 
   // ===== 索引瘦身布局：缩略图记录加密（导入链路） =====
   if (isSlimThumbRequest(req)) {
-    const { id, thumbB64, fileSaltB64, fileHashHex, photoKey, label } = req;
+    const { id, thumbB64, fileHashHex, wrappedFileKey, label } = req;
     try {
-      const result = await processEncryptSlimThumb(thumbB64, fileSaltB64, fileHashHex, photoKey);
+      const result = await processEncryptSlimThumb(thumbB64, wrappedFileKey, fileHashHex);
       workerScope.postMessage(assemblePhotoSlimThumbSuccess(id, result));
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
@@ -804,9 +869,9 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
 
   // ===== 索引瘦身布局：缩略图记录解密（列表路径的补取） =====
   if (isDecryptThumbRequest(req)) {
-    const { id, thumbCipherB64, wrappedFileKey, fileHashHex, photoKey, label } = req;
+    const { id, thumbCipherB64, wrappedFileKey, fileHashHex, label } = req;
     try {
-      const thumb = await decryptSlimThumb(thumbCipherB64, photoKey, wrappedFileKey, fileHashHex);
+      const thumb = await processDecryptThumb(thumbCipherB64, wrappedFileKey, fileHashHex);
       const bytes = toTransferableBuffer(thumb);
       workerScope.postMessage(assemblePhotoDecryptThumbSuccess(id, bytes), [bytes]);
     } catch (e) {
@@ -819,9 +884,9 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
 
   // ===== 索引瘦身布局：块集记录加密（导入/重打包链路） =====
   if (isSlimSetRequest(req)) {
-    const { id, set, fileSaltB64, fileHashHex, photoKey, label } = req;
+    const { id, set, fileHashHex, wrappedFileKey, label } = req;
     try {
-      const result = await processEncryptSlimSet(set, fileSaltB64, fileHashHex, photoKey);
+      const result = await processEncryptSlimSet(set, wrappedFileKey, fileHashHex);
       workerScope.postMessage(assemblePhotoSlimSetSuccess(id, result));
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
@@ -833,9 +898,9 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
 
   // ===== 索引瘦身布局：块集记录解密（查看原图 / 导出 / 删除级联） =====
   if (isDecryptSlimSetRequest(req)) {
-    const { id, setCipherB64, wrappedFileKey, fileHashHex, photoKey, label } = req;
+    const { id, setCipherB64, wrappedFileKey, fileHashHex, label } = req;
     try {
-      const set = await decryptSlimChunkSet(setCipherB64, photoKey, wrappedFileKey, fileHashHex);
+      const set = await processDecryptSlimSet(setCipherB64, wrappedFileKey, fileHashHex);
       workerScope.postMessage(assemblePhotoDecryptSlimSetSuccess(id, set));
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
@@ -848,11 +913,11 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
   // ===== 重打包加密路径（既有布局 → 索引瘦身布局） =====
   if (isSlimRepackRequest(req)) {
     const {
-      id, fileBytes, fileHashHex, name, mime, size, createdAt, thumbB64, photoKey,
+      id, fileBytes, fileHashHex, name, mime, size, createdAt, thumbB64, slim,
     } = req;
     try {
       const result = await processSlimRepack(
-        fileBytes, fileHashHex, name, mime, size, createdAt, thumbB64, photoKey,
+        fileBytes, fileHashHex, name, mime, size, createdAt, thumbB64, slim,
       );
       workerScope.postMessage(assemblePhotoCryptoSuccess(id, result));
     } catch (e) {
@@ -865,9 +930,9 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
 
   // ===== meta-only 加密路径（Parsed Import） =====
   if (isMetaOnlyRequest(req)) {
-    const { id, meta, photoKey, recordName, slim } = req;
+    const { id, meta, recordName, slim } = req;
     try {
-      const result = await processPhotoMetaOnly(meta, photoKey, recordName, slim);
+      const result = await processPhotoMetaOnly(meta, recordName, slim);
       const response = assemblePhotoMetaCryptoSuccess(id, result, meta);
       workerScope.postMessage(response);
     } catch (e) {
@@ -880,10 +945,10 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
   }
 
   // ===== 完整加密路径（常规导入） =====
-  const { id, fileName, mime, fileBytes, photoKey } = req as PhotoCryptoRequest;
+  const { id, fileName, mime, fileBytes, slim } = req as PhotoCryptoRequest;
 
   try {
-    const result = await processPhoto(fileName, mime, fileBytes, photoKey);
+    const result = await processPhoto(fileName, mime, fileBytes, slim);
     // 逐字段装箱：产物含外部块输出（external）时必须一并回传，
     // 漏传会让主线程走内联分支并以「加密产物缺少元数据」失败
     const response = assemblePhotoCryptoSuccess(id, result);

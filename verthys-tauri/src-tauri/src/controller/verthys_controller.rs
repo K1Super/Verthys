@@ -3,9 +3,9 @@
  * @brief 加密库 CRUD 与生命周期控制器 - 核心数据管理接口
  *
  * 本模块是应用数据存储的核心入口，提供加密库的创建、解锁、锁定、持久化、
- * 记录增删改查、枚举等完整生命周期管理能力。所有敏感操作（密码处理、
- * 密钥派生、数据加密）均在 worker 子进程中执行，主进程仅负责指令转发与状态
- * 管理，确保密钥明文不接触主进程内存。
+ * 记录增删改查、枚举等完整生命周期管理能力。密钥派生、数据加密等敏感运算
+ * 均在 worker 子进程中执行，主进程仅负责指令转发与状态管理：容器口令仅在
+ * 转发瞬间以 Zeroizing 字符串存在，派生密钥与记录明文不驻留主进程内存。
  *
  * =============================================================================
  * 核心能力
@@ -14,17 +14,17 @@
  * - 预热与零拷贝解锁：用户选择文件后后台预读索引区至页缓存，解锁时验证
  *   预热令牌，启用内存映射零拷贝路径，大幅提升解锁性能。
  * - 加密库创建：支持 BALANCED/SECURE 两种安全预设，原子创建并持久化状态。
- * - 解锁与锁定：解锁时验证密码，建立会话守卫（自动管理文件锁）；锁定
+ * - 解锁与锁定：解锁时由本机保管口令打开容器，建立会话守卫（自动管理文件锁）；锁定
  *   时先持久化落盘再销毁 worker，确保数据不丢失。
  * - 记录管理：支持单条增删改查、批量枚举（含流式分页）、批量删除。
  * - 动态防护状态查询：透传 worker 的安全路径阻断/降级状态。
- * - 导入导出与密码修改：支持完整容器导入导出及主密码变更。
+ * - 导入导出：支持完整容器导出与导入。
  *
  * =============================================================================
  * 安全与性能设计
  * =============================================================================
- * - 密码零化：所有密码参数以 Zeroizing<String> 接收，序列化后立即擦除，
- *   确保明文不驻留。
+ * - 口令零化：容器口令由本机保管模块提供，以 Zeroizing<String> 持有，
+ *   序列化后立即擦除，确保明文不驻留；导入导出口令同样即时擦除。
  * - 预热令牌：预热成功后生成 30 秒有效期的一次性令牌，解锁时需携带，
  *   防止无凭据重复触发零拷贝路径。
  * - RAII 会话守卫：解锁成功后创建 VerthysSessionGuard，持有文件独占锁，
@@ -52,7 +52,7 @@ use crate::repository::verthys_state::{
     validate_verthys_file, write_state_file_atomic, VerthysState,
 };
 use crate::security::file_lock::VerthysFileLock;
-use crate::state::verthys_session::{PreheatToken, VerthysSessionGuard};
+use crate::state::verthys_session::VerthysSessionGuard;
 use crate::state::AppState;
 use crate::util::audit_log::{append_audit, AuditEvent, AuditEventType, AuditResult};
 use crate::util::path::{normalize_path, sanitize_path};
@@ -92,12 +92,25 @@ struct PathPasswordReq<'a> {
     password: &'a str,
 }
 
-/// change_password 请求体
-#[derive(serde::Serialize)]
-struct ChangePasswordReq<'a> {
-    op: &'static str,
-    old_password: &'a str,
-    new_password: &'a str,
+// ===== 容器口令来源 =====
+
+/// 读取本机容器口令（首次使用时生成并密封落盘）。
+///
+/// 容器口令不再经过前端，也不再是编译期常量：口令在本机生成、由 DPAPI
+/// 绑定当前用户保管。存放目录必须与容器一致地遵循应用数据目录规则
+/// （便携模式、--data-dir、只读介质兜底），否则容器与口令分处不同卷，
+/// 便携介质移机后容器将永久无法打开。
+/// 失败必须拒绝操作——把“取不到口令”误当成“口令错误”会让用户反复重试
+/// 并触发熔断。
+fn load_container_password(app: &tauri::AppHandle) -> Result<Zeroizing<String>, String> {
+    use tauri::Manager;
+    let paths = app
+        .try_state::<crate::infrastructure::app_paths::AppPaths>()
+        .ok_or_else(|| "应用数据目录未初始化".to_string())?;
+    crate::util::container_secret::load_or_create(&paths.data_dir).map_err(|e| {
+        log::error!("[container_secret] 容器口令不可用: {}", e);
+        "安全存储不可用，无法访问加密库".to_string()
+    })
 }
 
 /// add_record 请求体（name 与 data 为用户记录明文，一并借用序列化）
@@ -234,7 +247,7 @@ fn state_allows_data_access(state: &AppState) -> bool {
     state.has_verthys_session()
 }
 
-/// 密码复杂度校验：最小长度 8，最大 512，用于创建/修改密码时。
+/// 容器口令复杂度校验：最小长度 8，最大 512，用于创建/解锁前的前置校验。
 /// 当前为 BALANCED 预设，未来可扩展为更严格规则。
 fn validate_password_complexity(password: &str) -> Result<(), String> {
     let len = password.len();
@@ -408,236 +421,15 @@ fn append_alert(detail: &str, repair_alert: &str) -> String {
 }
 
 // ===== 预热 =====
-
-/// 预热 .verthys 文件索引区到 OS 页缓存，并生成预热令牌。
-///
-/// 用户选择文件后调用，后台以 FILE_FLAG_SEQUENTIAL_SCAN 预读索引区
-/// 预热成功后生成 30 秒有效的一次性令牌，解锁时需携带以启用零拷贝路径。
-/// 预热失败仅记录日志，不阻塞后续解锁（降级磁盘读取）。
-///
-/// 安全边界：纯文件 I/O，不涉及 DLL、不解密、不接触密钥。
-/// 返回令牌签名（base64），前端在解锁时传回。
-#[tauri::command]
-pub async fn verthys_preheat(
-    state: State<'_, AppState>,
-    verthys_path: String,
-) -> Result<VerthysResponse, String> {
-    log::info!(
-        "[verthys_preheat] 启动预热: path={}",
-        sanitize_path(&verthys_path)
-    );
-
-    if !std::path::Path::new(&verthys_path).exists() {
-        return Ok(VerthysResponse::ok("preheat"));
-    }
-
-    let path = verthys_path.clone();
-    let preheat_result = tokio::task::spawn_blocking(move || verthys_preheat_blocking(&path)).await;
-
-    use std::sync::atomic::Ordering;
-    match preheat_result {
-        Ok(Ok(())) => {
-            state.prefetch_done.store(true, Ordering::SeqCst);
-            log::info!("[verthys_preheat] 预热完成，prefetch_done=true");
-
-            match PreheatToken::new() {
-                Ok(token) => {
-                    let token_b64 = crate::util::base64::base64_encode(token.signature());
-                    state.preheat_token_store.store(token);
-                    log::info!("[verthys_preheat] 预热令牌已生成（30s 有效）");
-
-                    let mut resp = VerthysResponse::ok("preheat");
-                    resp.data = Some(token_b64);
-                    return Ok(resp);
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[verthys_preheat] 生成预热令牌失败: {}，仅设置 prefetch_done",
-                        e
-                    );
-                }
-            }
-        }
-        Ok(Err(e)) => {
-            state.prefetch_done.store(false, Ordering::SeqCst);
-            log::warn!(
-                "[verthys_preheat] 预热失败: {}，prefetch_done=false（C 层走磁盘读取）",
-                e
-            );
-        }
-        Err(e) => {
-            state.prefetch_done.store(false, Ordering::SeqCst);
-            log::warn!(
-                "[verthys_preheat] spawn_blocking 异常: {}，prefetch_done=false",
-                e
-            );
-        }
-    }
-
-    Ok(VerthysResponse::ok("preheat"))
-}
-
-/// 实际执行预热的同步函数，在 blocking 线程中运行。
-///
-/// 预读目标为 V3 固定布局区（解锁首批读段）与温缓存文件；读段长度固定，
-/// 不依赖容器体积，恶意文件无法借此放大 IO。
-/// 所有失败返回 Err，以便上层正确设置 prefetch_done 标志。
-fn verthys_preheat_blocking(verthys_path: &str) -> Result<(), String> {
-    use std::io::Read;
-
-    let mut header = [0u8; 128];
-    let filled = {
-        let mut file = std::fs::File::open(verthys_path).map_err(|e| {
-            log::warn!(
-                "[verthys_preheat] 打开文件失败: {} | {}",
-                sanitize_path(verthys_path),
-                e
-            );
-            format!("打开文件失败: {}", e)
-        })?;
-        let mut n = 0usize;
-        while n < 128 {
-            match file.read(&mut header[n..]) {
-                Ok(0) => break,
-                Ok(r) => n += r,
-                Err(e) => {
-                    log::warn!("[verthys_preheat] 读取头部失败: {}", e);
-                    return Err(format!("读取头部失败: {}", e));
-                }
-            }
-        }
-        n
-    };
-    if filled < 8 {
-        log::warn!("[verthys_preheat] 文件过短 ({} 字节)，跳过预热", filled);
-        return Err(format!("文件过短 ({} 字节)", filled));
-    }
-
-    // 唯一容器格式为 V3（磁盘偏移 0 为 Replica-0 帧头 'V3RP'）。v1/v2 布局
-    // 时代的索引区偏移解析（旧 header[54..70]）与 V3 无关，已随格式收敛删除，
-    // 避免以旧布局字段误读 V3 容器。
-    const V3_REPLICA_FRAME_MAGIC: [u8; 4] = [0x56, 0x33, 0x52, 0x50]; // 'V3RP' LE
-    if header[0..4] != V3_REPLICA_FRAME_MAGIC {
-        log::warn!("[verthys_preheat] 非 V3 容器帧头，跳过预热");
-        return Err("非 V3 容器帧头".to_string());
-    }
-
-    // V3 预热目标（page cache 进页即用）：
-    //   1. 固定布局区：超块三副本（64KB）+ WAL 区（960KB）+ 分区表（3MB），
-    //      即解锁流水线的首批读段，与 C 层布局契约同源；
-    //   2. 温缓存文件（附属数据目录 idx_cache）：解锁时由 C 层加载的索引缓存。
-    preheat_range_sequential(verthys_path, 0, V3_FIXED_LAYOUT_PREHEAT_BYTES);
-    preheat_cache_file(verthys_path);
-    log::info!(
-        "[verthys_preheat] V3 容器预热完成: path={} (固定布局区 + 温缓存已进页缓存)",
-        sanitize_path(verthys_path)
-    );
-    Ok(())
-}
-
-/// V3 固定布局区字节数：超块三副本（64KB）+ WAL 区（960KB）+ 分区表（3MB）。
-///
-/// 与 C 层布局契约同源（V3 容器固定布局区上界），用于预热预读长度；
-/// 布局调整时需同步本值（C 侧结构测试会先在布局层暴露不一致）。
-const V3_FIXED_LAYOUT_PREHEAT_BYTES: u64 = 4 * 1024 * 1024;
-
-/// 以顺序扫描方式预读文件的指定范围，触发 OS 预读相邻页到缓存。
-fn preheat_range_sequential(path: &str, off: u64, size: u64) {
-    use std::io::{Read, Seek, SeekFrom};
-
-    #[cfg(windows)]
-    let file = {
-        use std::os::windows::fs::OpenOptionsExt;
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(0x08000000)
-            .open(path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("[verthys_preheat] SEQUENTIAL 打开失败: {}", e);
-                return;
-            }
-        }
-    };
-    #[cfg(not(windows))]
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            log::warn!("[verthys_preheat] 打开失败: {}", e);
-            return;
-        }
-    };
-
-    let mut reader = std::io::BufReader::with_capacity(1024 * 1024, file);
-    if let Err(e) = reader.seek(SeekFrom::Start(off)) {
-        log::warn!("[verthys_preheat] seek 失败 off={}: {}", off, e);
-        return;
-    }
-
-    let mut sink = std::io::sink();
-    if let Err(e) = std::io::copy(&mut reader.take(size), &mut sink) {
-        log::warn!("[verthys_preheat] 预读索引区失败: {}", e);
-    }
-}
-
-/// 预读持久化缓存文件（附属数据目录 idx_cache）到页缓存，提升温启动性能。
-///
-/// 附属目录优先，旧布局缓存作为只读回退（升级后首次打开、C 层尚未迁移时
-/// 仍可享受温启动预读）。
-fn preheat_cache_file(verthys_path: &str) {
-    let primary = container_layout::idx_cache_file_for(verthys_path);
-    let cache_path = if primary.exists() {
-        primary
-    } else {
-        let legacy = container_layout::legacy_idx_cache_file_for(verthys_path);
-        if !legacy.exists() {
-            return;
-        }
-        legacy
-    };
-    let cache_path = cache_path.to_string_lossy().to_string();
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        let file = match std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(0x08000000)
-            .open(&cache_path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("[verthys_preheat] 缓存文件打开失败: {}", e);
-                return;
-            }
-        };
-        let mut reader = std::io::BufReader::with_capacity(256 * 1024, file);
-        let mut sink = std::io::sink();
-        let _ = std::io::copy(&mut reader, &mut sink);
-    }
-    #[cfg(not(windows))]
-    {
-        let file = match std::fs::File::open(&cache_path) {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        let mut reader = std::io::BufReader::with_capacity(256 * 1024, file);
-        let mut sink = std::io::sink();
-        let _ = std::io::copy(&mut reader, &mut sink);
-    }
-    log::info!(
-        "[verthys_preheat] 缓存文件已预读: {}",
-        sanitize_path(&cache_path)
-    );
-}
+mod preheat;
+pub use preheat::verthys_preheat;
 
 // ===== 解锁 =====
 
-/// 解锁已存在的 .verthys 文件，验证密码并建立会话。
+/// 解锁已存在的 .verthys 文件，使用本机保管口令并建立会话。
 ///
 /// 解锁过程：
-/// 1. 校验文件存在性及密码复杂度。
+/// 1. 校验文件存在性，读取本机容器口令并校验复杂度。
 /// 2. 持有共享文件锁（读锁）防止其他进程写操作。
 /// 3. 验证预热令牌，若有效则启用零拷贝路径（flags 含 INDEX_PREHEATED）。
 /// 4. 应用受信档位到 C 运行时策略层（fail-closed：失败即中止）。
@@ -645,7 +437,7 @@ fn preheat_cache_file(verthys_path: &str) {
 /// 6. 解锁成功后创建 VerthysSessionGuard（持有独占锁），存入 AppState。
 /// 7. 检查状态文件，若缺失或路径不一致则自动修复/更新。
 ///
-/// 密码在发送后立即擦除，不驻留内存。
+/// 容器口令由本机保管模块提供，不来自前端；发送后立即擦除，不驻留内存。
 /// 解锁失败时文件锁自动释放（RAII）。
 /// 仅支持 V3 容器格式。
 #[tauri::command]
@@ -653,12 +445,10 @@ pub async fn verthys_unlock(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     verthys_path: String,
-    password: String,
     preheat_token: Option<String>,
     usb_rebind_confirmed: Option<bool>,
     on_progress: tauri::ipc::Channel<crate::worker::UnlockProgress>,
 ) -> Result<VerthysResponse, String> {
-    let password = Zeroizing::new(password);
     log::info!(
         "[verthys_unlock] 开始解锁: path={}",
         sanitize_path(&verthys_path)
@@ -727,8 +517,11 @@ pub async fn verthys_unlock(
         return Err("文件不存在，请使用创建而非打开".into());
     }
 
+    // 口令在文件存在性确认之后才读取：空路径/误选路径不应触发口令生成。
+    let password = load_container_password(&app)?;
+
     if let Err(e) = validate_password_complexity(&password) {
-        log::warn!("[verthys_unlock] 密码复杂度校验失败");
+        log::warn!("[verthys_unlock] 容器口令复杂度校验失败");
         write_verthys_audit(
             &app,
             AuditEventType::VerthysUnlock,
@@ -1042,7 +835,7 @@ pub async fn verthys_unlock(
 /// 创建新的加密库（首次初始化）。
 ///
 /// 流程：
-/// 1. 前置校验：目标文件不存在，密码复杂度合格。
+/// 1. 前置校验：目标文件不存在，本机容器口令复杂度合格。
 /// 2. 调用 worker create_with_preset（支持 BALANCED/SECURE），创建 V3 容器。
 /// 3. 发送 lock 指令持久化空 verthys，并释放 worker 侧容器句柄。
 /// 4. 获取主进程独占文件锁（会话哨兵锁，防其他 Verthys 实例打开）。
@@ -1057,17 +850,14 @@ pub async fn verthys_unlock(
 /// worker 释放容器句柄之后获取，否则创建必然失败。
 ///
 /// 任何步骤失败则回滚：删除不完整的 .verthys 文件，销毁 worker，清理状态。
-/// 密码在发送后立即擦除。
+/// 容器口令由本机保管模块提供，发送后立即擦除。
 #[tauri::command]
 pub async fn verthys_create(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     verthys_path: String,
-    password: String,
     preset: Option<u32>,
 ) -> Result<VerthysResponse, String> {
-    let password = Zeroizing::new(password);
-
     let preset_val: u32 = match preset {
         Some(1) => 1,
         _ => 0,
@@ -1098,8 +888,12 @@ pub async fn verthys_create(
         return Err("文件已存在，请使用打开而非创建".into());
     }
 
+    // 首次创建时由本模块生成口令：必须在文件存在性校验之后，
+    // 避免重复创建请求产生无用口令文件。
+    let password = load_container_password(&app)?;
+
     if let Err(e) = validate_password_complexity(&password) {
-        log::warn!("[verthys_create] 密码复杂度校验失败");
+        log::warn!("[verthys_create] 容器口令复杂度校验失败");
         write_verthys_audit(
             &app,
             AuditEventType::VerthysUnlock,
@@ -1484,8 +1278,6 @@ pub async fn verthys_lock(
 pub async fn verthys_flush(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    _verthys_path: String,
-    _password: String,
 ) -> Result<VerthysResponse, String> {
     if let Err(msg) = require_unlocked(&app, &state, "flush") {
         return Ok(VerthysResponse::err("flush", &msg));
@@ -2012,7 +1804,7 @@ pub async fn verthys_has_record_by_type(
     Ok(resp)
 }
 
-// ===== 导入导出与密码变更 =====
+// ===== 导入导出 =====
 
 /// 导出整个容器为加密文件（用新密码加密）。
 /// 密码发送后立即擦除。
@@ -2083,47 +1875,6 @@ pub async fn verthys_import(
 
     // 序列化完成即销毁口令原件，仅保留 Zeroizing 序列化副本直至发送
     drop(password);
-
-    let resp_json = state.send(req_str.as_str())?;
-    drop(req_str);
-    let resp: VerthysResponse =
-        serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
-    Ok(resp)
-}
-
-/// 修改主密码（旧密码验证 → 新密码派生）。
-/// 两个密码均在使用后立即擦除，新密码需满足复杂度要求。
-#[tauri::command]
-pub async fn verthys_change_password(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    old_password: String,
-    new_password: String,
-) -> Result<VerthysResponse, String> {
-    if let Err(msg) = require_unlocked(&app, &state, "change_password") {
-        return Ok(VerthysResponse::err("change_password", &msg));
-    }
-
-    let old_password = Zeroizing::new(old_password);
-    let new_password = Zeroizing::new(new_password);
-
-    if let Err(e) = validate_password_complexity(&new_password) {
-        log::warn!("[verthys_change_password] 新密码复杂度校验失败");
-        return Err(e);
-    }
-
-    let req_str = Zeroizing::new(
-        serde_json::to_string(&ChangePasswordReq {
-            op: "change_password",
-            old_password: &old_password,
-            new_password: &new_password,
-        })
-        .map_err(|e| format!("serialize request: {}", e))?,
-    );
-
-    // 序列化完成即销毁两个口令原件，仅保留 Zeroizing 序列化副本直至发送
-    drop(old_password);
-    drop(new_password);
 
     let resp_json = state.send(req_str.as_str())?;
     drop(req_str);

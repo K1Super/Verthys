@@ -9,12 +9,13 @@
  * - chooseParseFile：Tauri 用 open() + readUserFile；浏览器用 input[type=file]
  *   感知：文件读取过程复用进度条样式
  *     rAF 推进至 90% → 实际完成跳 100%，1.5s 最小感知时长，进度单调递增
- * - doParse：decryptExportFile → unpackVencMultiFile → 遍历用当前密钥 decryptMeta 预览
+ * - doParse：容器解包与逐张首块预检在解析 Worker 内完成（令牌派生、逐帧 AEAD
+ *   与内容层 RPC），主线程只渲染进度并装载预览
  *   感知：解析过程复用中枢初始化窗口进度条样式（非量子动画）
  *     rAF 推进至 90% → 实际完成跳 100%，1.5s 最小感知时长，进度单调递增
  * - importParsedPhotos（重构）：使用 ImportPipeline.runParsed() 三阶段流水线
  *   - 生产者：构造新 meta（内联已加密 chunks）→ submitMetaOnly() 到 Worker 池并行加密
- *   - 传输器：Worker 池并行 encryptMeta（CPU 密集型任务移出主线程，UI 不卡死）
+ *   - 传输器：Worker 池经 RPC 重写索引（密钥派生与 AEAD 留在 Tauri worker）
  *   - 消费者：verthysAddRecordsBatch 批量 IPC + WAL 断点续传 + 三层缓存同步
  *   - 进度：ImportProgressState 逐文件更新 + rAF 帧对齐 → QuantumProgressFlow 实时显示
  *   - 持久化：pipeline 完成后 persistVerthys + 返回值检查
@@ -37,6 +38,7 @@ import type {
   ParseCryptoCompletion,
   ParseCryptoPreview,
 } from "../../workers/parse-crypto.worker";
+import { handleWorkerRpc, isWorkerRpcRequest } from "../../workers/rpc-bridge";
 
 /** 解析 Worker 最小接口（依赖注入：测试以伪实现替代真实 Worker） */
 export interface ParseWorkerLike {
@@ -73,8 +75,6 @@ const containerLimitText = (): string => {
 export interface UsePhotoParseDeps {
   /** 照片列表（shallowRef，避免深度代理） */
   photos: ShallowRef<PhotoEntry[]>;
-  /** 模块独立密钥 */
-  photoKey: Ref<string>;
   /** 是否处于 Tauri 环境 */
   isTauri: boolean;
   /** 恢复模块密钥（从 keyManager 会话缓存） */
@@ -100,7 +100,7 @@ export interface UsePhotoParseDeps {
 
 export function usePhotoParse(deps: UsePhotoParseDeps) {
   const {
-    photos, photoKey, isTauri, ensurePhotoKey, showError, showToast,
+    photos, isTauri, ensurePhotoKey, showError, showToast,
     /* Parsed Import：复用 usePhotoImport 的流水线 + 导入状态 refs */
     getPipeline, importing, importProgress, importStatus, importElapsed,
     parseWorkerFactory = defaultParseWorkerFactory,
@@ -450,7 +450,12 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
       const worker = parseWorkerFactory();
       const finalResponse = new Promise<ParseCryptoCompletion>((resolve) => {
         worker.onmessage = (e) => {
-          const msg: ParseCryptoResponse = e.data;
+          if (isWorkerRpcRequest(e.data)) {
+            // Worker 首块预检的 RPC：主线程转调 Tauri 并把结果回投
+            void handleWorkerRpc(worker, e.data);
+            return;
+          }
+          const msg = e.data as ParseCryptoResponse;
           if (msg.type === "progress") {
             // 真实进度映射（rAF 去重），留 1% 给完成动画
             emitRealProgress(msg.current, msg.total);
@@ -473,7 +478,6 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
           id: 1,
           fileBytes: transferBuffer,
           token,
-          photoKey: photoKey.value,
         } satisfies ParseCryptoRequest,
         [transferBuffer],
       );
@@ -542,7 +546,7 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
       let result;
       try {
         const pipe = getPipeline();
-        result = await pipe.runParsed(parsedPhotos.value, photoKey.value);
+        result = await pipe.runParsed(parsedPhotos.value);
       } catch (e) {
         // 异常路径：重置导入状态，保留 parsedPhotos 供重试，不关闭对话框
         importingParsed.value = false;

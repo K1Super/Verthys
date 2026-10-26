@@ -180,6 +180,7 @@ chrono = { version = "0.4", features = ["serde"] }
 zeroize = { version = "1.4", features = ["alloc"] }   # 敏感内存自动清零
 subtle = "2.5"                                       # 常量时间比较
 hmac = "0.12"                                        # HMAC-SHA256 消息认证
+aes-gcm = "0.10"                                     # IPC 信封认证加密
 pbkdf2 = { version = "0.12", features = ["simple"] } # PBKDF2 密钥派生
 getrandom = "0.2"                                    # 系统 CSPRNG
 base64 = "0.22"                                      # Base64 编解码

@@ -74,9 +74,17 @@ import {
 // 仅注入停止钩子（clearAllVerthysCaches 前置等待后台任务终止）；
 //   startBackgroundTasks 不再由本文件导入或转发
 import { stopBackgroundTasks } from "../../core/background-tasks";
+import { lockModuleKey, type CryptoModule } from "../../lib/module_crypto";
 import { createLogger } from "../../utils/logger";
 
 const log = createLogger("verthys-cache");
+
+/** 模块 ID → 内容加密模块（accounts 无内容加密） */
+function cryptoModuleOf(moduleId: ModuleId): CryptoModule | null {
+  if (moduleId === "photo") return "photo";
+  if (moduleId === "fileverthys") return "file";
+  return null;
+}
 
 // re-export flush 队列 API（统一冲刷队列服务）
 export {
@@ -215,11 +223,18 @@ export function fetchModuleKey(moduleId: ModuleId): string | null {
 /** 移除指定模块的会话密钥缓存（登出模块/闲置超时时调用） */
 export function removeModuleKey(moduleId: ModuleId): void {
   ensureDomain().removeModuleKey(moduleId);
+  /* 会话密钥一旦失效，worker 侧托管密钥与派生缓存必须同步清除；
+   * 失败不阻断本地状态清理，由后续加解密返回 LOCKED 兜底。 */
+  const cryptoModule = cryptoModuleOf(moduleId);
+  if (cryptoModule) {
+    void lockModuleKey(cryptoModule).catch(() => { /* 无 Tauri 环境或 worker 已退出 */ });
+  }
 }
 
 /** 清零全部模块密钥缓存（lockAll 时调用，安全零填充） */
 export function clearModuleKeyCache(): void {
   ensureDomain().clearModuleKeyCache();
+  void lockModuleKey().catch(() => { /* 无 Tauri 环境或 worker 已退出 */ });
 }
 
 /* === 3. 共享记录扫描缓存 === */

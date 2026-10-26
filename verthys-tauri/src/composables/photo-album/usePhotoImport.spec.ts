@@ -86,7 +86,6 @@ const okResult = (): RunResult => ({
 function makeTauri() {
   return usePhotoImport({
     photos: shallowRef([]),
-    photoKey: ref("test-key"),
     isTauri: true,
     ensurePhotoKey: () => true,
     showError: vi.fn(),
@@ -96,7 +95,6 @@ function makeTauri() {
 function makeBrowser() {
   return usePhotoImport({
     photos: shallowRef([]),
-    photoKey: ref("test-key"),
     isTauri: false,
     ensurePhotoKey: () => true,
     showError: vi.fn(),
@@ -241,7 +239,6 @@ describe("usePhotoImport — 导入发起权状态机", () => {
     const photos = shallowRef<PhotoEntry[]>([]);
     const make = () => usePhotoImport({
       photos,
-      photoKey: ref("test-key"),
       isTauri: false,
       ensurePhotoKey: () => true,
       showError: vi.fn(),
@@ -264,7 +261,6 @@ describe("usePhotoImport — 导入发起权状态机", () => {
     const photos = shallowRef<PhotoEntry[]>([]);
     const api = scope.run(() => usePhotoImport({
       photos,
-      photoKey: ref("test-key"),
       isTauri: false,
       ensurePhotoKey: () => true,
       showError,

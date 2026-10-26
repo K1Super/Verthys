@@ -30,7 +30,7 @@ import {
 import { FILE_HASH_LEN } from "../../constants/crypto_const";
 import { TYPE_FILEVERTHYS_CHUNK, TYPE_FILEVERTHYS_META } from "../../constants/record_types";
 import { bytesToBase64, IMPORT_SESSION_BUSY_CODE } from "../../lib/verthys";
-import type { FileKeyV2, FileKdfV2 } from "../../lib/crypto";
+import type { FileKdfV2 } from "../../lib/module_crypto";
 import type {
   AddChunkBatchResult,
   AddRecordsBatchResult,
@@ -192,14 +192,14 @@ export interface FileImportResult {
   sessionWarning?: string;
 }
 
-/** 文件级密钥套件（加密导入的唯一加密路径：每文件一次派生 + 逐块 AES-GCM） */
+/** 文件级密钥套件（加密导入的唯一加密路径：密钥派生与 AEAD 在 worker 内） */
 export interface FileKeySuite {
-  /** 新建文件密钥（随机盐一次派生；每文件调用一次） */
-  createFileKey: (password: string) => Promise<FileKeyV2>;
-  /** 加密单块（返回密文原始字节 `iv‖ct+tag`） */
-  encryptChunk: (plain: Uint8Array, key: FileKeyV2) => Promise<Uint8Array>;
+  /** 生成文件级 KDF 公开参数（随机盐 + 迭代次数；不含密钥） */
+  createFileKdf: () => Promise<FileKdfV2>;
+  /** 加密单块（返回密文原始字节 `iv‖ct+tag`；口令仅用于 worker 内派生） */
+  encryptChunk: (plain: Uint8Array, kdf: FileKdfV2, password: string) => Promise<Uint8Array>;
   /** 生成密码校验块（固定明文 AEAD，口令判定的唯一权威值） */
-  buildPasswordCheck: (key: FileKeyV2) => Promise<string>;
+  buildPasswordCheck: (kdf: FileKdfV2, password: string) => Promise<string>;
 }
 
 /** 导入依赖集合（生产实现见模块装配处；测试以桩替换） */
@@ -489,11 +489,11 @@ async function importOneFile(
     }
   }
 
-  // 文件级密钥：加密条目在只读轮之前派生一次，两轮共用同一句柄
-  let fileKey: FileKeyV2 | null = null;
+  // 文件级 KDF 公开参数：加密条目在只读轮之前生成一次，两轮与后续写入共用
+  let kdf: FileKdfV2 | null = null;
   if (encrypted && password) {
     try {
-      fileKey = await deps.v2.createFileKey(password);
+      kdf = await deps.v2.createFileKdf();
     } catch (e) {
       throw new ImportAbort("E_ENCRYPT_FAILED", `文件密钥派生失败：${errorText(e)}`);
     }
@@ -511,7 +511,8 @@ async function importOneFile(
   const uploaded = await readAndUpload(
     file,
     snapshot,
-    fileKey,
+    kdf,
+    password ?? "",
     encrypted,
     perBatch,
     knownHash,
@@ -526,7 +527,9 @@ async function importOneFile(
     return { kind: "skipped" };
   }
 
-  const entry = await writeMeta(file, snapshot, totalChunks, encrypted, fileKey, uploaded, deps);
+  const entry = await writeMeta(
+    file, snapshot, totalChunks, encrypted, kdf, password ?? "", uploaded, deps,
+  );
   committed.add(uploaded.fileHash);
   if (entry === null) {
     // 后端按会话日志跳过：键已提交，按跳过入账（不计成功、不产生条目）
@@ -637,7 +640,8 @@ async function scanFileHash(
 async function readAndUpload(
   file: ImportSourceFile,
   snapshot: FileSnapshot,
-  fileKey: FileKeyV2 | null,
+  kdf: FileKdfV2 | null,
+  password: string,
   encrypted: boolean,
   perBatch: number,
   knownHash: string | null,
@@ -668,12 +672,12 @@ async function readAndUpload(
       let cipherB64: string;
       let cipherBytes: Uint8Array;
       if (encrypted) {
-        if (!fileKey) {
-          // 加密条目的密钥在文件开始处一次性派生，缺失即编程错误
-          throw new ImportAbort("E_ENCRYPT_FAILED", "文件密钥缺失，导入已中止");
+        if (!kdf) {
+          // KDF 公开参数在文件开始处生成一次，缺失即编程错误
+          throw new ImportAbort("E_ENCRYPT_FAILED", "文件 KDF 参数缺失，导入已中止");
         }
         try {
-          cipherBytes = await deps.v2.encryptChunk(plain, fileKey);
+          cipherBytes = await deps.v2.encryptChunk(plain, kdf, password);
         } catch (e) {
           plain.fill(0);
           throw new ImportAbort("E_ENCRYPT_FAILED", `第 ${index + 1} 块加密失败：${errorText(e)}`);
@@ -756,18 +760,19 @@ async function writeMeta(
   snapshot: FileSnapshot,
   totalChunks: number,
   encrypted: boolean,
-  fileKey: FileKeyV2 | null,
+  kdf: FileKdfV2 | null,
+  password: string,
   uploaded: UploadPassResult,
   deps: FileImportDeps,
 ): Promise<ImportedFileEntry | null> {
   // 口令判定块的唯一权威值：加密条目必携；生成失败即整文件失败
   let passwordCheck: string | undefined;
   if (encrypted) {
-    if (!fileKey) {
-      throw new ImportAbort("E_ENCRYPT_FAILED", "文件密钥缺失，导入已中止");
+    if (!kdf) {
+      throw new ImportAbort("E_ENCRYPT_FAILED", "文件 KDF 参数缺失，导入已中止");
     }
     try {
-      passwordCheck = await deps.v2.buildPasswordCheck(fileKey);
+      passwordCheck = await deps.v2.buildPasswordCheck(kdf, password);
     } catch (e) {
       throw new ImportAbort("E_ENCRYPT_FAILED", `密码校验块生成失败：${errorText(e)}`);
     }
@@ -785,7 +790,7 @@ async function writeMeta(
     encrypted,
     fileHash: uploaded.fileHash,
     // 明文条目无口令校验面：两个字段均不写
-    ...(passwordCheck && fileKey ? { kdf: fileKey.kdf, passwordCheck } : {}),
+    ...(passwordCheck && kdf ? { kdf, passwordCheck } : {}),
   };
   const metaB64 = bytesToBase64(new TextEncoder().encode(JSON.stringify(meta)));
   const metaName = `meta_${file.name}`;
@@ -835,7 +840,7 @@ async function writeMeta(
     chunkHashes: uploaded.chunkHashes,
     chunkSize: CHUNK_SIZE,
     fileHash: uploaded.fileHash,
-    ...(passwordCheck && fileKey ? { kdf: fileKey.kdf, passwordCheck } : {}),
+    ...(passwordCheck && kdf ? { kdf: kdf, passwordCheck } : {}),
   };
 }
 

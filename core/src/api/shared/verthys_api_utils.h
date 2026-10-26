@@ -34,6 +34,10 @@ uint64_t verthys_backoff_remaining_ms(void);
 void verthys_backoff_record_failure(void);
 void verthys_backoff_reset(void);
 
+/* 持久化熔断开关（默认 1）。仅供进程内测试在启动时关闭，
+ * 避免用例中的错误口令写入真实用户状态文件。 */
+void verthys_backoff_set_persistent(int enabled);
+
 /* ---------- 工作线程有界汇合 ----------
  * 以 VERTHYS_JOIN_TIMEOUT_MS 为上限等待线程退出。
  * 返回 WaitForSingleObject 的结果：WAIT_OBJECT_0=已退出；WAIT_TIMEOUT=

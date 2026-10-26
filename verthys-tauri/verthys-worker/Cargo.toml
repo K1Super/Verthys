@@ -20,7 +20,15 @@ sha2 = "0.10"
 hmac = "0.12"
 hkdf = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["simple"] }
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
+# 直接声明 aes 以启用轮密钥清零：aes-gcm 的 zeroize 特性只清 GHASH 子键，
+# AES 轮密钥（含原始密钥）需 aes crate 自身的 zeroize 实现才能随 Drop 清除。
+aes = { version = "0.8", features = ["zeroize"] }
+# 内容记录加密：XChaCha20-Poly1305 与 BLAKE3（与前端落盘布局一致）
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+blake3 = "1"
+# 常量时间比较：会话标识与就绪证明校验
+subtle = "2"
 rand = "0.8"
 # CSPRNG（共享内存随机名与擦除填充；Windows 走 BCryptGenRandom 家族）
 getrandom = "0.2"
