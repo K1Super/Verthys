@@ -16,7 +16,9 @@ int vty_kdf_params_valid(uint32_t mem_kib, uint32_t iters, uint32_t parallel)
 {
     if (mem_kib < VTY_ARGON2_MEM_KIB_MIN) return VTY_E_KDF_WEAK;
     if (mem_kib > VTY_ARGON2_MEM_KIB_MAX) return VTY_E_KDF_WEAK;
-    if (iters < VTY_ARGON2_ITERS_MIN) return VTY_E_KDF_WEAK;
+    if (iters < VTY_ARGON2_ITERS_MIN || iters > VTY_ARGON2_ITERS_MAX) {
+        return VTY_E_KDF_WEAK;
+    }
     if (parallel < VTY_ARGON2_PARALLEL_MIN || parallel > VTY_ARGON2_PARALLEL_MAX) {
         return VTY_E_KDF_WEAK;
     }
@@ -46,8 +48,8 @@ static int argon2id_call(uint8_t out[VTY_KEY_BYTES],
     if (pwd == NULL && pwd_len != 0) return VTY_E_INVALID;
     if (pwd_len > 0xFFFFFFFFu) return VTY_E_INVALID;
     if (mem_kib < 8u || mem_kib > VTY_ARGON2_MEM_KIB_MAX) return VTY_E_INVALID;
-    if (iters < 1u) return VTY_E_INVALID;
-    if (parallel < 1u || parallel > 64u) return VTY_E_INVALID;
+    if (iters < 1u || iters > VTY_ARGON2_ITERS_MAX) return VTY_E_INVALID;
+    if (parallel < 1u || parallel > VTY_ARGON2_PARALLEL_MAX) return VTY_E_INVALID;
 
     /* libsodium 的并行度固定为 1；parallel 仅用于参数合法性记录，
      * 实际内存代价由 mem_kib 与 iters 决定。 */
@@ -79,14 +81,6 @@ int vty_kdf_argon2id(uint8_t out[VTY_KEY_BYTES],
     rc = argon2id_call(out, pwd, pwd_len, salt16, mem_kib, iters, parallel);
     vty_secure_zero(salt16, sizeof(salt16));
     return rc;
-}
-
-int vty_kdf_argon2id_raw16(uint8_t out[VTY_KEY_BYTES],
-                           const uint8_t *pwd, size_t pwd_len,
-                           const uint8_t salt16[16],
-                           uint32_t mem_kib, uint32_t iters, uint32_t parallel)
-{
-    return argon2id_call(out, pwd, pwd_len, salt16, mem_kib, iters, parallel);
 }
 
 int vty_hkdf_expand(uint8_t out[VTY_KEY_BYTES],

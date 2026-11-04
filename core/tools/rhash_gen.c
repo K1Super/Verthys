@@ -43,13 +43,22 @@
 #include <stdint.h>
 #include <stdarg.h>
 
-/* X 清单函数名展开（字符串数组，序号即 x_index） */
-static const char *s_x_names[] = {
+/* X 清单函数名展开（序号即 x_index）。
+ *   --xlist core：产品 DLL（仅 COMMON 段——v3 实现不在产品 map）；
+ *   --xlist full（默认）：测试 exe / legacy DLL（含 v3 实现）。
+ * 红线不变：所选清单任一符号缺失 → 构建失败。 */
+static const char *s_x_names_core[] = {
+#define X(fn) #fn,
+    VERTHYS_RUNTIME_HASH_FUNCS_COMMON(X)
+#undef X
+};
+static const char *s_x_names_full[] = {
 #define X(fn) #fn,
     VERTHYS_RUNTIME_HASH_FUNCS(X)
 #undef X
 };
-#define X_FUNC_COUNT (sizeof(s_x_names) / sizeof(s_x_names[0]))
+static const char **s_x_names = s_x_names_full;
+static size_t s_x_count = sizeof(s_x_names_full) / sizeof(s_x_names_full[0]);
 
 /* ---------- PE 解析结果 ---------- */
 
@@ -558,13 +567,25 @@ int main(int argc, char **argv)
             bin_path = argv[++i];
         } else if (strcmp(argv[i], "--map") == 0 && i + 1 < argc) {
             map_path = argv[++i];
+        } else if (strcmp(argv[i], "--xlist") == 0 && i + 1 < argc) {
+            const char *sel = argv[++i];
+            if (strcmp(sel, "core") == 0) {
+                s_x_names = s_x_names_core;
+                s_x_count = sizeof(s_x_names_core) / sizeof(s_x_names_core[0]);
+            } else if (strcmp(sel, "full") == 0) {
+                s_x_names = s_x_names_full;
+                s_x_count = sizeof(s_x_names_full) / sizeof(s_x_names_full[0]);
+            } else {
+                fprintf(stderr, "未知 --xlist 取值: %s（core|full）\n", sel);
+                return 1;
+            }
         } else {
-            fprintf(stderr, "用法: rhash_gen --patch <binary> [--map <map>]\n");
+            fprintf(stderr, "用法: rhash_gen --patch <binary> [--map <map>] [--xlist core|full]\n");
             return 1;
         }
     }
     if (!bin_path) {
-        fprintf(stderr, "用法: rhash_gen --patch <binary> [--map <map>]\n");
+        fprintf(stderr, "用法: rhash_gen --patch <binary> [--map <map>] [--xlist core|full]\n");
         return 1;
     }
 
@@ -589,8 +610,8 @@ int main(int argc, char **argv)
     collect_file_spots(&pe);
 
     /* X 清单全量命中（红线：缺一即失败） */
-    if (X_FUNC_COUNT > VERTHYS_RUNTIME_HASH_MAX) {
-        die("X 清单 %zu 超表容量 %u", X_FUNC_COUNT, VERTHYS_RUNTIME_HASH_MAX);
+    if (s_x_count > VERTHYS_RUNTIME_HASH_MAX) {
+        die("X 清单 %zu 超表容量 %u", s_x_count, VERTHYS_RUNTIME_HASH_MAX);
     }
 
     VerthysRhatBlob blob;
@@ -600,10 +621,10 @@ int main(int argc, char **argv)
     blob.magic[2] = VERTHYS_RHAT_MAGIC2;
     blob.magic[3] = VERTHYS_RHAT_MAGIC3;
     blob.version  = VERTHYS_RHAT_VERSION;
-    blob.count    = (uint16_t)X_FUNC_COUNT;
+    blob.count    = (uint16_t)s_x_count;
 
     size_t total_bytes = 0;
-    for (size_t xi = 0; xi < X_FUNC_COUNT; xi++) {
+    for (size_t xi = 0; xi < s_x_count; xi++) {
         const char *name = s_x_names[xi];
         const MapSym *sym = find_sym(name);
         if (!sym) die("X 清单符号缺失于 map: %s（禁静默降级）", name);
@@ -638,7 +659,7 @@ int main(int argc, char **argv)
     }
 
     printf("[rhat] .rhat 补丁完成: %s（%zu 函数 / %zu 字节 / %zu 重定位槽位）\n",
-           bin_path, X_FUNC_COUNT, total_bytes, s_spot_count);
+           bin_path, s_x_count, total_bytes, s_spot_count);
 
     free(pe.bytes);
     free(pe.secs);

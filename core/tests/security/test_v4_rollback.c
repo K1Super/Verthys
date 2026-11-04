@@ -25,6 +25,9 @@
 #include "vty_tpm_witness.h"
 
 #define V4_RB_FILE_MAX 4096u
+/* 库文件至少含 A/B 两份 64 KiB 元数据；用 4 KiB 缓冲读取会把副本
+ * 截断成非法文件，测试必须按真实布局取全量。 */
+#define V4_RB_VAULT_MAX (VTY_V4_DATA_OFFSET + 65536u)
 
 static int rb_read_file(const char *path, uint8_t *buf, size_t cap, size_t *len)
 {
@@ -55,6 +58,37 @@ static int rb_enable(const char *state_path)
     vty_rollback_set_enabled(1);
     CHECK_EQ(vty_rollback_set_path(state_path), VTY_OK);
     CHECK_EQ(vty_rollback_init(), VTY_OK);
+    return 0;
+}
+
+/* 创建失败必须删除半成品文件，并把真实错误码（这里是锚点认证失败）
+ * 原样返回；不得因删除时仍有 store 句柄而改写成 E_IO（worker 会把 IO
+ * 统一成 AUTH，上层只能看到误导性的认证失败）。 */
+TEST(v4_create_failure_removes_partial_and_keeps_error)
+{
+    VtyVault *v = NULL;
+    char code[VTY_RECOVERY_TEXT_BUF];
+    uint8_t junk[V4_RB_FILE_MAX];
+    const char *vault = "v4_rb_create_fail.vty";
+    const char *state = "v4_rb_create_fail.state";
+
+    remove(vault);
+    remove(state);
+    memset(code, 0, sizeof(code));
+    memset(junk, 0xA5, sizeof(junk));
+    CHECK_EQ(rb_write_file(state, junk, sizeof(junk)), 0);
+    vty_rollback_set_enabled(1);
+    CHECK_EQ(vty_rollback_set_path(state), VTY_OK);
+    CHECK_EQ(vty_rollback_init(), VTY_OK);
+
+    CHECK_EQ(vty_vault_create(vault, "rb-create-pw", &v, code, sizeof(code)),
+             VTY_E_ROLLBACK);
+    CHECK(v == NULL);
+    CHECK(fopen(vault, "rb") == NULL);
+
+    vty_rollback_set_enabled(0);
+    remove(state);
+    remove(vault);
     return 0;
 }
 
@@ -93,7 +127,7 @@ TEST(v4_rollback_restored_old_copy_rejected)
 {
     VtyVault *v = NULL;
     char code[VTY_RECOVERY_TEXT_BUF];
-    uint8_t old_copy[V4_RB_FILE_MAX];
+    uint8_t old_copy[V4_RB_VAULT_MAX];
     uint8_t uuid[VTY_UUID_BYTES];
     size_t old_len = 0;
 
@@ -177,7 +211,7 @@ TEST(v4_rollback_recovery_resets_anchor)
 {
     VtyVault *v = NULL;
     char code[VTY_RECOVERY_TEXT_BUF];
-    uint8_t old_copy[V4_RB_FILE_MAX];
+    uint8_t old_copy[V4_RB_VAULT_MAX];
     uint8_t uuid[VTY_UUID_BYTES];
     size_t old_len = 0;
 
@@ -219,7 +253,7 @@ TEST(v4_rollback_rotated_copy_rejected)
 {
     VtyVault *v = NULL;
     char code[VTY_RECOVERY_TEXT_BUF];
-    uint8_t old_copy[V4_RB_FILE_MAX];
+    uint8_t old_copy[V4_RB_VAULT_MAX];
     uint8_t uuid[VTY_UUID_BYTES];
     size_t old_len = 0;
 
@@ -232,8 +266,9 @@ TEST(v4_rollback_rotated_copy_rejected)
     memcpy(uuid, v->header.vault_uuid, VTY_UUID_BYTES);
     CHECK_EQ(rb_read_file("v4_rb_rot.vty", old_copy, sizeof(old_copy), &old_len), 0);
     CHECK(old_len > 0);
-    /* 轮换：epoch+1，且 save 使 generation+1 */
-    CHECK_EQ(vty_vault_rotate_password(v, "new-pass", code, sizeof(code)), VTY_OK);
+    /* 轮换：epoch 不变（数据代不变），save 使 generation+1；
+     * 恢复码是独立凭据，改密不再使其失效。 */
+    CHECK_EQ(vty_vault_rotate_password(v, "new-pass"), VTY_OK);
     vty_vault_free(v);
 
     v = NULL;
@@ -255,7 +290,7 @@ TEST(v4_rollback_forged_generation_rejected)
 {
     VtyVault *v = NULL;
     char code[VTY_RECOVERY_TEXT_BUF];
-    uint8_t file[V4_RB_FILE_MAX];
+    uint8_t file[V4_RB_VAULT_MAX];
     uint8_t hash[VTY_HASH_BYTES];
     uint8_t uuid[VTY_UUID_BYTES];
     VtyV4Header h;
@@ -277,17 +312,23 @@ TEST(v4_rollback_forged_generation_rejected)
     vty_vault_free(v);
 
     CHECK_EQ(rb_read_file("v4_rb_f.vty", file, sizeof(file), &file_len), 0);
-    CHECK(file_len > 0);
-    CHECK_EQ(vty_v4_header_parse(file, file_len, &h), VTY_OK);
+    CHECK(file_len >= VTY_V4_DATA_OFFSET);
 
-    /* 把版本号改大并重算无密钥的头哈希：头校验会通过，但 body AAD 失配 */
+    /* 把 A/B 两份的版本号都改大并重算无密钥头哈希：头校验会通过，
+     * 但 body AAD 仍绑定旧 generation，必然失配。 */
     {
-        uint64_t bumped = vty_v4_header_generation(&h) + 100u;
-        vty_put_u64(file + 44, bumped);
-        CHECK_EQ(vty_blake3_32(file, (size_t)h.header_len - VTY_HASH_BYTES,
-                               hash), VTY_OK);
-        memcpy(file + (size_t)h.header_len - VTY_HASH_BYTES, hash,
-               VTY_HASH_BYTES);
+        uint32_t ci;
+        for (ci = 0; ci < VTY_V4_META_COPIES; ci++) {
+            uint8_t *cp = file + (size_t)ci * VTY_V4_META_COPY_BYTES;
+            uint64_t bumped;
+            CHECK_EQ(vty_v4_header_parse(cp, VTY_V4_META_COPY_BYTES, &h), VTY_OK);
+            bumped = vty_v4_header_generation(&h) + 100u;
+            vty_put_u64(cp + VTY_V4_GENERATION_OFFSET, bumped);
+            CHECK_EQ(vty_blake3_32(cp, (size_t)h.header_len - VTY_HASH_BYTES,
+                                   hash), VTY_OK);
+            memcpy(cp + (size_t)h.header_len - VTY_HASH_BYTES, hash,
+                   VTY_HASH_BYTES);
+        }
     }
     CHECK_EQ(rb_write_file("v4_rb_f_forged.vty", file, file_len), 0);
 
@@ -342,7 +383,7 @@ TEST(v4_rollback_disabled_allows_old_copy)
 {
     VtyVault *v = NULL;
     char code[VTY_RECOVERY_TEXT_BUF];
-    uint8_t old_copy[V4_RB_FILE_MAX];
+    uint8_t old_copy[V4_RB_VAULT_MAX];
     size_t old_len = 0;
 
     CHECK_EQ(rb_enable("v4_rb_d.state"), 0);

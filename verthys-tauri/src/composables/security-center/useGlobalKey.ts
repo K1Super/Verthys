@@ -37,7 +37,7 @@
  *      进度状态（unlockProgress*）由 useUnlockFlow 持有并注入，验证视图复用进度条。
  */
 
-import { ref, type Ref } from 'vue';
+import { getCurrentInstance, onBeforeUnmount, ref, type Ref } from 'vue';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import {
   initGlobalKey,
@@ -745,6 +745,47 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
     zeroBytes(binBytes.value);
     binBytes.value = null;
   };
+
+  /* 开发夹具填充：只赋值，不提交；发布构建整段剔除。 */
+  if (import.meta.env.DEV && getCurrentInstance()) {
+    const fixtureFillHandler = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        target?: string;
+        globalPassword?: string;
+        binPassword?: string;
+        binKeyfilePath?: string;
+      }>).detail;
+      if (!detail || detail.target !== 'global') return;
+      if (detail.globalPassword) {
+        initPassword.value = detail.globalPassword;
+        verifyPassword.value = detail.globalPassword;
+      }
+      if (detail.binPassword) binPassword.value = detail.binPassword;
+      if (!detail.binKeyfilePath) return;
+      void (async () => {
+        try {
+          const next = await readBinBytes(detail.binKeyfilePath!);
+          zeroBytes(binBytes.value);
+          binBytes.value = next;
+          binFileName.value =
+            detail.binKeyfilePath!.split(/[\\/]/).pop() || 'fixture.bin';
+        } catch (e) {
+          binFileName.value = '';
+          zeroBytes(binBytes.value);
+          binBytes.value = null;
+          options.showError(
+            e instanceof Error && e.message.includes('大小上限')
+              ? e.message
+              : '夹具密钥文件读取失败，请检查路径与权限',
+          );
+        }
+      })();
+    };
+    window.addEventListener('verthys:devfixture-fill', fixtureFillHandler);
+    onBeforeUnmount(() => {
+      window.removeEventListener('verthys:devfixture-fill', fixtureFillHandler);
+    });
+  }
 
   return {
     // 初始化/验证共享状态

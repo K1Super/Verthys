@@ -261,18 +261,18 @@
     <!-- 删除二次确认弹窗 -->
     <ConfirmDelete
       :show="showDeleteConfirm"
-      :item-name="deleteTargetName"
       @confirm="confirmDelete"
       @cancel="showDeleteConfirm = false"
     />
 
     <!-- 导入进度悬浮覆盖层（统一组件，复用量子能量导流通道）：
-         悬浮模块内容区中央，不挤压下方文件网格；导入中可取消（断点状态保留） -->
+         悬浮模块内容区中央，不挤压下方文件网格；导入中可取消（断点状态保留）
+         通道尺寸与模块子密钥验证态一致（非紧凑），不显示百分比/耗时与块计数 -->
     <ImportProgressOverlay
       :visible="importing"
       :percent="importPercent"
       :message="importingFile"
-      :detail="`${importDone} / ${importTotal} 块 · ${importPercent}%`"
+      :compact="false"
       :show-meta="false"
       :cancelable="!cancelPending"
       cancel-label="取消导入"
@@ -330,7 +330,7 @@ import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 import SafeSvgIcon from "../common/SafeSvgIcon.vue";
 import { useCardShine } from "../../composables/useCardShine";
 import {
-  verthysGetRecord, verthysForgetHashes,
+  verthysGetRecord, verthysForgetImportKeys,
   verthysWalRecover, verthysImportBegin, verthysImportEnd, verthysForceCloseImportSession,
   verthysAddChunkBatch, verthysAddRecordsBatch, verthysGcOrphanChunks,
   userFileStat, readUserFileChunked, checkDiskSpace, base64ToBytes, bytesToBase64,
@@ -356,7 +356,7 @@ import {
   type FileDeleteDeps,
   type FileDeleteResult,
 } from "../../composables/file-verthys/useFileDelete";
-import { persistVerthys, persistVerthysDetailed, deleteAndPersistBatch, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, ensureIndexSourceSafe, getSummaryIdsByType, getRecordIdsByType, invalidateScannedRecord, getRecordsDataB64Batch } from "../../lib/keyManager";
+import { persistVerthys, persistVerthysDetailed, deleteAndPersistBatch, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, resolveTypeIds, invalidateScannedRecord, getRecordsDataB64Batch, getSummaryRecord } from "../../lib/keyManager";
 import { TYPE_FILEVERTHYS_META, TYPE_FILEVERTHYS_META_OLD } from "../../constants/record_types";
 import { MIN_TOKEN_LENGTH } from "../../constants/crypto_const";
 import { estimateBase64Size } from "../../cache/shared/base64-size";
@@ -460,7 +460,8 @@ interface FileEntry {
   chunkDataB64?: string[];
   chunkHashes?: string[];      // 逐块密文哈希（当前写入形态；导出完整性权威值）
   chunkSize?: number;          // 分块口径（meta 声明值；历史记录可能缺省）
-  fileHash?: string;           // 文件级去重键（删除时须释放，否则重导被跳过）
+  fileHash?: string;           // 文件内容哈希（完整性/AD，不作为去重键）
+  entryKey?: string;           // 非内容条目键（删除时释放 WAL 幂等锁）
   kdf?: FileKdfV2;             // 文件级密钥派生参数（加密条目；导出解锁用）
   passwordCheck?: string;      // 口令校验块（加密条目；导出前置判定用）
   /* 元数据不可读（解密或 JSON 解析失败）：条目仍须可见，仅提供删除入口，
@@ -643,8 +644,6 @@ const onImport = async () => {
 
 const importing = ref(false);
 const importingFile = ref("");
-const importDone = ref(0);
-const importTotal = ref(0);
 const importPercent = ref(0);
 
 /* 取消导入：置位后由管道在每个文件与块批边界检查；已提交文件保留，
@@ -673,13 +672,11 @@ const resolveSessionConflict = (allow: boolean) => {
   resolve?.(allow);
 };
 
-/* 管道进度 → 覆盖层状态（百分比按文件完成比例合并；续传形态的只读校验轮占半权重） */
+/* 管道进度 → 覆盖层状态（百分比按文件完成比例合并） */
 const applyImportProgress = (p: ImportProgress) => {
   importingFile.value = p.fileCount === 1
     ? p.fileName
     : `${p.fileName}（${p.fileIndex + 1}/${p.fileCount}）`;
-  importDone.value = p.doneInFile;
-  importTotal.value = p.totalInFile;
   importPercent.value = Math.round(((p.fileIndex + p.fileFraction) / p.fileCount) * 100);
 };
 
@@ -727,8 +724,6 @@ const startImport = async () => {
   importing.value = true;
   importCancelRequested.value = false;
   cancelPending.value = false;
-  importDone.value = 0;
-  importTotal.value = 0;
   importPercent.value = 0;
   // 先关窗再等补释放：补释放要走 IPC，若在关窗前 await，用户会看到
   // "点了开始导入但窗口没反应"的空档（与即时反馈铁律冲突）
@@ -822,8 +817,6 @@ const startImport = async () => {
   } finally {
     importing.value = false;
     importPercent.value = 0;
-    importDone.value = 0;
-    importTotal.value = 0;
     importCancelRequested.value = false;
     cancelPending.value = false;
     pendingFiles.value = [];
@@ -863,6 +856,7 @@ const hydrateFilePayload = async (f: FileEntry): Promise<FileEntry> => {
       chunkHashes: Array.isArray(meta.chunkHashes) ? meta.chunkHashes : undefined,
       chunkSize: typeof meta.chunkSize === "number" ? meta.chunkSize : undefined,
       fileHash: typeof meta.fileHash === "string" ? meta.fileHash : f.fileHash,
+      entryKey: typeof meta.entryKey === "string" ? meta.entryKey : f.entryKey,
       kdf: meta.kdf ?? f.kdf,
       passwordCheck: typeof meta.passwordCheck === "string" ? meta.passwordCheck : f.passwordCheck,
     };
@@ -1084,7 +1078,6 @@ const doSave = async (f: FileEntry, password: string | null): Promise<boolean> =
 
 /* ===== 删除（单次批量事务 + 失败保留与重试） ===== */
 const showDeleteConfirm = ref(false);
-const deleteTargetName = ref("");
 const deleteTarget = ref<FileEntry | null>(null);
 
 /* 条目删除状态：deleting = 删除中（按钮禁用、等待收口）；
@@ -1094,13 +1087,13 @@ const deleteStateOf = (f: FileEntry) => deleteStates.value.get(f.id);
 
 /* 去重键释放待重试队列：删除落盘成功但释放失败时暂存键，
    下次导入开始前自动补释放（避免"删除后重导被静默跳过"残留为永久状态） */
-const dedupeReleaseQueue = createDedupeReleaseQueue(verthysForgetHashes);
+const dedupeReleaseQueue = createDedupeReleaseQueue(verthysForgetImportKeys);
 
 /* 删除管道依赖装配：批量事务删除 + 立即落盘 + 去重键释放 + 缓存失效 + 孤儿回收 */
 const deleteDeps: FileDeleteDeps = {
   deleteRecords: deleteAndPersistBatch,
   persist: persistVerthys,
-  forgetHashes: verthysForgetHashes,
+  forgetImportKeys: verthysForgetImportKeys,
   invalidateRecords: (ids) => {
     // 失效两层缓存（摘要 + 全量）+ 旧扫描缓存兼容，杜绝删除复活
     for (const rid of ids) {
@@ -1110,7 +1103,7 @@ const deleteDeps: FileDeleteDeps = {
     }
   },
   gcOrphanChunks: verthysGcOrphanChunks,
-  enqueuePendingRelease: (hash) => dedupeReleaseQueue.enqueue(hash),
+  enqueuePendingRelease: (entryKey) => dedupeReleaseQueue.enqueue(entryKey),
 };
 
 /** 列表条目 → 删除管道输入 */
@@ -1120,7 +1113,7 @@ const toDeleteSource = (f: FileEntry): DeleteSourceEntry => ({
   metaId: f.metaId,
   chunkIds: f.chunkIds,
   chunkDataB64: f.chunkDataB64,
-  fileHash: f.fileHash,
+  entryKey: f.entryKey,
 });
 
 /** 删除收口：移除列表条目 + 同步模块缓存（仅成功路径调用） */
@@ -1195,7 +1188,6 @@ const onDelete = (f: FileEntry) => {
     return;
   }
   deleteTarget.value = f;
-  deleteTargetName.value = f.name;
   showDeleteConfirm.value = true;
 };
 
@@ -1268,6 +1260,7 @@ const toFileEntry = (id: number, meta: Record<string, unknown>): FileEntry => ({
   chunkHashes: Array.isArray(meta.chunkHashes) ? (meta.chunkHashes as string[]) : undefined,
   chunkSize: typeof meta.chunkSize === "number" ? meta.chunkSize : undefined,
   fileHash: typeof meta.fileHash === "string" ? meta.fileHash : undefined,
+  entryKey: typeof meta.entryKey === "string" ? meta.entryKey : undefined,
   kdf: meta.kdf as FileKdfV2 | undefined,
   passwordCheck: typeof meta.passwordCheck === "string" ? meta.passwordCheck : undefined,
 });
@@ -1302,15 +1295,17 @@ const loadFiles = async () => {
   // 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
   const newItems: FileEntry[] = [];
 
-  // ID 来源：摘要索引优先（仅读索引、不解密数据，不受记录体积影响）；
-  //   摘要缓存整体为空（旧格式容器/熔断静默返回空）时回退记录扫描缓存。
-  //   记录扫描仍会在后台并发触发一次作数据层预热：命中扫描缓存的小体积记录
-  //   在后续批量取数时零 IPC；预热失败不影响列表可用性（取数走并行 IPC 回退）。
-  const useSummaryIds = await ensureIndexSourceSafe();
-  const idsOf = (type: number): number[] =>
-    useSummaryIds ? getSummaryIdsByType(type) : getRecordIdsByType(type);
-
-  let metaIds = idsOf(TYPE_FILEVERTHYS_META);
+  // ID 来源：V4 类型盲索引（权威、跨重启稳定）；枚举失败时
+  //   resolveTypeIds 自动回退全量记录扫描。摘要缓存不参与类型过滤。
+  let metaIds: number[];
+  try {
+    metaIds = await resolveTypeIds(TYPE_FILEVERTHYS_META);
+  } catch (e) {
+    console.error("[loadFiles] 文件类型索引解析失败", e);
+    showError("文件列表加载失败，请重试");
+    loading.value = false;
+    return;
+  }
   // 修复：旧类型 0x05 回退扫描（迁移失败的兜底）
   //
   // 原缺陷：若 migrateRecordTypes 超时/失败，旧 FileVerthys 元数据仍停留在 0x05
@@ -1322,7 +1317,22 @@ const loadFiles = async () => {
   //   该索引与照片块混编，解析失败属预期，不得记为"损坏条目"。
   const legacyFallback = metaIds.length === 0;
   if (legacyFallback) {
-    metaIds = idsOf(TYPE_FILEVERTHYS_META_OLD);
+    try {
+      // 0x05 同时是照片分块记录的旧类型：必须先按摘要元数据过滤，
+      // 只保留小体积的旧文件元数据（名称前缀 meta_ / 不超过 64KiB），
+      // 否则会把 MB 级照片块全部拉进列表缓存。
+      const LEGACY_META_MAX_BYTES = 64 * 1024;
+      const legacyIds = await resolveTypeIds(TYPE_FILEVERTHYS_META_OLD);
+      metaIds = legacyIds.filter((id) => {
+        const summary = getSummaryRecord(id);
+        if (!summary) return false;
+        if (summary.dataSize > LEGACY_META_MAX_BYTES) return false;
+        return summary.name.startsWith("meta_");
+      });
+    } catch (e) {
+      console.warn("[loadFiles] 旧类型 0x05 索引解析失败（按无旧记录继续）", e);
+      metaIds = [];
+    }
   }
 
   // 增量过滤：maxRecordId 是缓存内最大 metaId，大于它的才是本轮新增

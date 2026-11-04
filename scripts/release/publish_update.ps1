@@ -25,7 +25,7 @@ param(
     [string]$ReleaseId = "",
     [ValidateSet("stable", "beta", "internal")]
     [string]$Channel = "stable",
-    [string]$Server = "120.79.122.69",
+    [string]$Server = "update.k1super.xyz",
     [int]$SshPort = 22,
     [string]$SshUser = "root",
     [string]$KeyPath = (Join-Path $env:USERPROFILE ".ssh\k1super.pem"),
@@ -227,7 +227,7 @@ try {
     foreach ($line in $cleanup) { Write-Info ([string]$line) }
 
     Write-Stage "[6/6] Verify public endpoint"
-    if ([string]::IsNullOrWhiteSpace($PublicBaseUrl)) { $PublicBaseUrl = "http://$Server" }
+    if ([string]::IsNullOrWhiteSpace($PublicBaseUrl)) { $PublicBaseUrl = "https://$Server" }
     $baseUrl = $PublicBaseUrl.TrimEnd('/')
     $manifestUrl = "$baseUrl/$Channel/latest.json"
 

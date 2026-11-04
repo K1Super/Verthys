@@ -30,7 +30,14 @@ typedef enum {
     VTY_E_IO                 = 13,  /* 读写失败 */
     VTY_E_CORRUPT            = 14,  /* 结构损坏 / 完整性校验失败 */
     VTY_E_ROLLBACK           = 15,  /* 库文件版本回退（状态锚点拒绝） */
-    VTY_E_CALLER             = 16   /* 调用方未通过发布者签名校验 */
+    VTY_E_CALLER             = 16,  /* 调用方未通过发布者签名校验 */
+    VTY_E_KEYFILE_REQUIRED   = 17,  /* KEYFILE 标志置位但未提供 keyfile */
+    VTY_E_KEYFILE_INVALID    = 18,  /* VKFL 格式/校验失败 */
+    VTY_E_EXISTS             = 19,  /* 目标文件已存在（keyfile 新建必须独占） */
+    VTY_E_ROTATE_PENDING     = 20,  /* D9 DEK 轮换仍在进行（调用方应稍后重试） */
+    VTY_E_MODULE_LOCKED      = 21,  /* 目标模块未解锁，操作被拒绝 */
+    VTY_E_NO_SPACE           = 22,  /* 数据区/文件系统空间不足 */
+    VTY_E_VERIFY             = 23   /* 完整性复核失败（与 AEAD 认证失败区分） */
 } VtyResult;
 
 /* 固定长度 */
@@ -44,10 +51,21 @@ typedef enum {
 /* 容器头部 */
 #define VTY_V4_MAGIC         0x59545256u   /* 小端 0x56 'V' 0x52 'R' 0x54 'T' 0x59 'Y' */
 #define VTY_V4_VERSION_MAJOR 4u
-#define VTY_V4_VERSION_MINOR 0u
+/* 数据区/数据根格式。1 是模块表之前的旧格式；只接受当前值，
+ * 不提供双解析，否则攻击者可在同一文件里诱导解析器走不同语义。 */
+#define VTY_V4_VERSION_MINOR 2u
 #define VTY_V4_HEADER_FIXED_BYTES 76u
 #define VTY_V4_HEADER_HASH_BYTES  32u
 #define VTY_V4_MAX_SLOTS     16u
+
+/* A/B 元数据副本与数据区。每个副本固定 64 KiB，数据区从 128 KiB 起，
+ * 这样保存只需覆盖非活动副本，数据段追加不会触及元数据。 */
+#define VTY_V4_META_COPY_BYTES  65536u
+#define VTY_V4_META_COPIES      2u
+#define VTY_V4_DATA_OFFSET      (VTY_V4_META_COPY_BYTES * VTY_V4_META_COPIES)
+/* 固定头内 generation 的偏移：44..52；其后 24B 保留区必须全零。 */
+#define VTY_V4_GENERATION_OFFSET 44u
+#define VTY_V4_RESERVED_TAIL_BYTES 24u
 
 /* flags 位 */
 #define VTY_FLAG_MODULE_M1       0x0001u
@@ -75,28 +93,72 @@ typedef enum {
 #define VTY_WRAP_AESGCM   2u
 #define VTY_WRAP_RSAOAEP  3u
 
-/* KDF 下限：低于该值拒绝解锁，不提供“兼容降低” */
-#define VTY_ARGON2_MEM_KIB_MIN   65536u   /* 64 MiB */
+/* KDF 区间：低于下限拒绝（不提供“兼容降低”）；高于上限同样拒绝，
+ * 否则恶意文件可用超高内存/迭代把解锁拖入不可控的资源消耗。 */
+#define VTY_ARGON2_MEM_KIB_MIN   65536u          /* 64 MiB */
 #define VTY_ARGON2_ITERS_MIN     3u
 #define VTY_ARGON2_PARALLEL_MIN  1u
-#define VTY_ARGON2_PARALLEL_MAX  64u
-#define VTY_ARGON2_MEM_KIB_MAX   (4u * 1024u * 1024u)
+#define VTY_ARGON2_PARALLEL_MAX  4u
+#define VTY_ARGON2_ITERS_MAX     8u
+#define VTY_ARGON2_MEM_KIB_MAX   (256u * 1024u)  /* 256 MiB */
 
 /* 域分离字符串（唯一且不可互换） */
 #define VTY_DOMAIN_SLOT        "verthys/v4/slot"
+#define VTY_DOMAIN_HEADER      "verthys/v4/header"
 #define VTY_DOMAIN_RECOVERY    "verthys/v4/recovery"
 #define VTY_DOMAIN_RECORD      "verthys/v4/record"
 #define VTY_DOMAIN_NAME        "verthys/v4/name"
 #define VTY_DOMAIN_NAME_INDEX  "verthys/v4/name-index"
+#define VTY_DOMAIN_TYPE_INDEX  "verthys/v4/type-index"
 #define VTY_DOMAIN_CHUNK       "verthys/v4/chunk"
 #define VTY_DOMAIN_CHUNK_ID    "verthys/v4/chunk-id"
 #define VTY_DOMAIN_MANIFEST    "verthys/v4/manifest"
 #define VTY_DOMAIN_KEYRING     "verthys/v4/keyring"
 #define VTY_DOMAIN_MODULE      "verthys/v4/module"
+#define VTY_DOMAIN_MODULE_RECOVERY "verthys/v4/module-recovery"
+#define VTY_DOMAIN_DIR         "verthys/v4/dir"
+#define VTY_DOMAIN_DATA_ROOT   "verthys/v4/data-root"
+#define VTY_DOMAIN_EMPTY_ROOT  "verthys/v4/empty-root"
+#define VTY_DOMAIN_SYSTEM_RECORD "verthys/v4/system-record"
 
-/* 模块 kind（RecoveryKeyring 体内） */
-#define VTY_KEYKIND_KC     1u
-#define VTY_KEYKIND_KG     2u
-#define VTY_KEYKIND_MDEK   3u
+/* Keyring 条目种类。v4 只保留 K_c、MDEK 与 DataRoot；GMK 不再生成，
+ * 以免在“口令 + 设备根”之外多出一条可被单独攻击的密钥层。 */
+#define VTY_KEYKIND_KC        1u
+#define VTY_KEYKIND_MDEK      3u
+#define VTY_KEYKIND_DATA_ROOT 4u
+
+/* 数据区段头：32B 大端，头后紧跟 nonce + 密文。 */
+#define VTY_SEG_MAGIC        0x56345347u  /* 'V' '4' 'S' 'G'（大端字节序） */
+#define VTY_SEG_HEADER_BYTES 32u
+#define VTY_SEG_RECORD       1u
+#define VTY_SEG_CHUNK        2u
+#define VTY_SEG_DIR          3u
+
+/* 目录键空间：0=记录，1=名称，2=类型，3=文件，4=分片，5=模块表。
+ * 分开编号使任何跨空间拼接在字节层就不可互换。 */
+#define VTY_KS_RECORD 0u
+#define VTY_KS_NAME   1u
+#define VTY_KS_TYPE   2u
+#define VTY_KS_FILE   3u
+#define VTY_KS_CHUNK  4u
+#define VTY_KS_MODULE 5u
+
+/* 模块表固定三槽；module_index 是公开枚举（photo/accounts/fileverthys），
+ * 不再依赖 Keyring 条目顺序。 */
+#define VTY_V4_MODULE_COUNT 3u
+#define VTY_MODULE_DESC_FIXED 64u
+#define VTY_MODULE_RECOVERY_BYTES 76u
+#define VTY_MODULE_DESC_MAX 1024u
+#define VTY_MODULE_EPOCH_DISABLED 0u
+#define VTY_MODULE_EPOCH_ENABLED  1u
+#define VTY_MODULE_FLAG_ENABLED   0x01u
+#define VTY_MODULE_FLAG_DELETED   0x02u
+#define VTY_MODULE_SLOT_USER     0u
+#define VTY_MODULE_SLOT_DEVICE   1u
+#define VTY_MODULE_SLOT_RECOVERY 2u
+
+/* DataRoot locator 固定 32B；Keyring 条目 id 缓冲随之为 32B。 */
+#define VTY_DATA_ROOT_BYTES   32u
+#define VTY_KEYRING_ID_MAX    32u
 
 #endif /* VTY_V4_TYPES_H */

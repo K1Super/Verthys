@@ -5,7 +5,7 @@
  * 为什么是源码扫描而非渲染测试：仓库没有组件测试基建（无 @vue/test-utils），
  * 而本文件守护的是一组「结构必须唯一 / 入口必须存在」的静态事实 ——
  * 卡片模板只能有一份、条目 id 只能由分配器给出、不可读记录不得丢弃、
- * 不可逆确认必须写明对象、对话框必须按模态栈处理 Esc。
+ * 删除确认窗不再渲染对象提示行、对话框必须按模态栈处理 Esc。
  * 这些一旦回退，界面上的表现是「悄悄变差」（两份模板漂移、id 撞车、
  * 记录消失、删错对象），静态扫描能在合入前就挡住。
  */
@@ -65,17 +65,12 @@ describe("损坏记录不得静默丢弃", () => {
 });
 
 describe("不可逆操作的可读性", () => {
-  it("确认删除窗渲染待删对象并声明模态语义", () => {
-    expect(moduleSource).toContain(':item-name="deleteTargetName"');
-    expect(confirmSource).toContain('class="cd-target"');
-    expect(confirmSource).toContain('v-if="itemName"');
+  it("确认删除窗声明模态语义，且不渲染删除对象提示行", () => {
     expect(confirmSource).toContain('role="alertdialog"');
     expect(confirmSource).toContain('aria-modal="true"');
-  });
-
-  it("删除目标文案包含类型名或不可读标记", () => {
-    expect(moduleSource).toContain("数据不可读 · 记录 #");
-    expect(moduleSource).toContain("${view.title} · ${view.typeLabel}");
+    expect(confirmSource).not.toContain("cd-target");
+    expect(confirmSource).not.toContain("itemName");
+    expect(moduleSource).not.toContain(":item-name");
   });
 });
 

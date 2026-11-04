@@ -20,7 +20,6 @@ const PHOTO_BAR_KEYS = [
   "privacy-btn",
   "export-top-btn",
   "import-top-btn",
-  "repack-top-btn",
   "del-top-btn",
 ];
 

@@ -34,8 +34,8 @@ export interface DeleteSourceEntry {
   chunkIds?: number[];
   /** 历史内联块密文（旧形态：块密文在元数据记录内，无独立块记录） */
   chunkDataB64?: string[];
-  /** 文件级去重键（删除落盘后须释放，否则重导被跳过；历史条目缺省） */
-  fileHash?: string;
+  /** 文件级非内容条目键（删除落盘后须释放，否则续传会跳过；历史条目缺省） */
+  entryKey?: string;
 }
 
 /** 删除依赖集合（生产实现由模块装配处提供；测试以桩替换） */
@@ -44,14 +44,14 @@ export interface FileDeleteDeps {
   deleteRecords: (ids: number[]) => Promise<boolean>;
   /** 立即落盘（取消防抖并等待落盘完成）；返回数据是否已落盘 */
   persist: () => Promise<boolean>;
-  /** 释放文件级去重键（实现内置一次即时重试，仍失败即抛） */
-  forgetHashes: (hashes: string[]) => Promise<void>;
+  /** 释放文件级续传条目键（实现内置一次即时重试，仍失败即抛） */
+  forgetImportKeys: (entryKeys: string[]) => Promise<void>;
   /** 同步失效摘要 / 全量 / 扫描三层缓存（删除提交后调用，杜绝回填复活） */
   invalidateRecords: (ids: number[]) => void;
   /** 孤儿块回收：返回本次清除条数（best-effort，不改变删除结论） */
   gcOrphanChunks: () => Promise<number>;
-  /** 释放失败（含一次即时重试仍失败）的键转入待重试队列 */
-  enqueuePendingRelease: (hash: string) => void;
+  /** 释放失败（含一次即时重试仍失败）的条目键转入待重试队列 */
+  enqueuePendingRelease: (entryKey: string) => void;
 }
 
 export interface FileDeleteSuccess {
@@ -155,16 +155,16 @@ async function finishAfterDelete(
   }
 
   let warning: string | undefined;
-  const hash = entry.fileHash;
-  if (typeof hash === "string" && hash.length > 0) {
+  const entryKey = entry.entryKey;
+  if (typeof entryKey === "string" && entryKey.length > 0) {
     try {
-      await deps.forgetHashes([hash]);
+      await deps.forgetImportKeys([entryKey]);
     } catch {
-      deps.enqueuePendingRelease(hash);
+      deps.enqueuePendingRelease(entryKey);
       warning = DEFERRED_RELEASE_MESSAGE;
     }
   } else {
-    console.info(`[useFileDelete] 历史条目未携带去重键，跳过释放: ${entry.name}`);
+    console.info(`[useFileDelete] 历史条目未携带续传条目键，跳过释放: ${entry.name}`);
   }
 
   try {
@@ -176,10 +176,10 @@ async function finishAfterDelete(
   return warning === undefined ? { ok: true } : { ok: true, warning };
 }
 
-/** 待重试释放队列：删除落盘成功但释放失败的去重键暂存于此 */
+/** 待重试释放队列：删除落盘成功但释放失败的条目键暂存于此 */
 export interface DedupeReleaseQueue {
-  /** 暂存一个待释放的键 */
-  enqueue(hash: string): void;
+  /** 暂存一个待释放的条目键 */
+  enqueue(entryKey: string): void;
   /** 当前待释放键数 */
   size(): number;
   /** 重试全部待释放键；仍失败的保留在队列等待下次机会 */
@@ -187,7 +187,7 @@ export interface DedupeReleaseQueue {
 }
 
 /**
- * 建立去重键释放待重试队列（进程内）。
+ * 建立条目键释放待重试队列（进程内）。
  *
  * 释放失败会让被删文件重新导入时被静默跳过，因此不以"失败即日志"收场：
  * 暂存的键在下次导入开始前统一补释放，避免该状态在进程内残留为永久。
@@ -196,12 +196,12 @@ export interface DedupeReleaseQueue {
  * 以补释放。
  */
 export function createDedupeReleaseQueue(
-  forgetHashes: (hashes: string[]) => Promise<void>,
+  forgetImportKeys: (entryKeys: string[]) => Promise<void>,
 ): DedupeReleaseQueue {
   const pending = new Set<string>();
   return {
-    enqueue(hash: string): void {
-      pending.add(hash);
+    enqueue(entryKey: string): void {
+      pending.add(entryKey);
     },
     size(): number {
       return pending.size;
@@ -210,10 +210,10 @@ export function createDedupeReleaseQueue(
       if (pending.size === 0) return;
       const batch = [...pending];
       try {
-        await forgetHashes(batch);
-        for (const h of batch) pending.delete(h);
+        await forgetImportKeys(batch);
+        for (const key of batch) pending.delete(key);
       } catch (e) {
-        console.warn("[useFileDelete] 待重试的去重键释放仍失败，保留至下次导入", e);
+        console.warn("[useFileDelete] 待重试的条目键释放仍失败，保留至下次导入", e);
       }
     },
   };

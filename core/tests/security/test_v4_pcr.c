@@ -309,6 +309,8 @@ TEST(v4_pcr_tampered_digest_fails_closed)
     /* 槽内布局：base(6)+params(36) 后是 pcrDigest，首字节翻转让摘要不匹配 */
     buf[off + 6u + 4u] ^= 0x01u;
     CHECK_EQ(vty_v4_header_finalize(buf, h.header_len), VTY_OK);
+    /* A/B 双副本必须一致篡改；否则合法副本会接管，测不到 PCR 门。 */
+    memcpy(buf + VTY_V4_META_COPY_BYTES, buf, VTY_V4_META_COPY_BYTES);
     CHECK_EQ(pcr_write_all("v4_pcr_tamper.vty", buf, len), 0);
     free(buf);
 
@@ -393,6 +395,7 @@ TEST(v4_pcr_foreign_ciphertext_rejected)
     /* ct 位于 base(6)+params(36)+salt(32)+nonce(24)+ct_len(2)=100 字节后 */
     memcpy(buf + off + 100u, ct, VTY_TPM_PCR_CT_BYTES);
     CHECK_EQ(vty_v4_header_finalize(buf, h.header_len), VTY_OK);
+    memcpy(buf + VTY_V4_META_COPY_BYTES, buf, VTY_V4_META_COPY_BYTES);
     CHECK_EQ(pcr_write_all("v4_pcr_foreign.vty", buf, len), 0);
     free(buf);
 

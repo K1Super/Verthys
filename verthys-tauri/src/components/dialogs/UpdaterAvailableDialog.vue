@@ -22,7 +22,7 @@
 
       <div class="update-notes">
         <p v-if="notes.trim()">{{ notes }}</p>
-        <p v-else class="update-empty">本次更新未提供说明。</p>
+        <p v-else class="update-empty">本次更新未提供说明</p>
       </div>
 
       <p v-if="installing" class="update-state">
@@ -34,7 +34,6 @@
         <button v-if="!forceUpdate" class="btn kv-cancel" type="button" @click="open = false">
           稍后
         </button>
-        <button class="btn" type="button" @click="$emit('export')">导出日志</button>
         <button v-if="cancellable" class="btn" type="button" @click="$emit('cancel')">
           取消更新
         </button>
@@ -80,7 +79,6 @@ const emit = defineEmits<{
   (e: "update:modelValue", value: boolean): void;
   (e: "install"): void;
   (e: "cancel"): void;
-  (e: "export"): void;
 }>();
 
 const open = computed({

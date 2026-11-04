@@ -152,3 +152,39 @@ pub fn create_non_inheritable_event(
 
     handle.map_err(|err| format!("CreateEventW 创建事件句柄失败：{}", err))
 }
+
+/// 创建禁止子进程继承的**命名**事件（同会话跨进程同步，auto-reset）。
+#[cfg(windows)]
+pub fn create_named_non_inheritable_event(name: &str) -> Result<HANDLE, String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Threading::CreateEventW;
+
+    let security_attr = non_inheritable_security_attributes();
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0u16)).collect();
+
+    let handle = unsafe {
+        CreateEventW(
+            Some(&security_attr),
+            false,
+            false,
+            PCWSTR(wide.as_ptr()),
+        )
+    };
+    handle.map_err(|err| format!("CreateEventW 创建命名事件失败：{}", err))
+}
+
+/// 置位事件（取消信号）。
+#[cfg(windows)]
+pub fn signal_event(handle: HANDLE) -> Result<(), String> {
+    use windows::Win32::System::Threading::SetEvent;
+
+    unsafe { SetEvent(handle) }.map_err(|err| format!("SetEvent 失败：{}", err))
+}
+
+/// 关闭事件句柄（忽略关闭错误，仅供清理路径）。
+#[cfg(windows)]
+pub fn close_event(handle: HANDLE) {
+    use windows::Win32::Foundation::CloseHandle;
+
+    let _ = unsafe { CloseHandle(handle) };
+}

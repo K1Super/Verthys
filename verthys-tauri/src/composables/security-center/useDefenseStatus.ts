@@ -16,6 +16,8 @@
  * 拉取时机：
  *   - verthysReady 置 true：立即拉取 + 启动轮询（防御状态为进程级事实，
  *     worker 会话存在即有 handle）
+ *   - verthys://runtime-guards：会话守卫位下发完成后立即重采样，消除
+ *     “首次拉取早于守卫接线”导致的一轮可修复降级误判
  *   - verthysReady 置 false（lockAll）：停止轮询 + 清空报告（worker 会话
  *     已销毁，旧报告不再反映当前进程事实）
  *
@@ -26,8 +28,10 @@
  */
 
 import { ref, computed, watch, onBeforeUnmount } from 'vue';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { verthysReadyRef } from '../../lib/keyManager';
 import { verthysGetSecurityStatus, type SecurityStatusReport } from '../../lib/verthys';
+import { isTauriEnvironment } from '../../utils/tauri_env';
 
 /* ------------------------------------------------------------------ *
  * 常量：攻击路径定义 + 状态映射                                      *
@@ -56,6 +60,36 @@ const DEFENSE_STATE_VIEW: Record<number, { label: string; cls: string }> = {
   3: { label: '失败', cls: 'failed' },
 };
 
+/* 判定原因码文案（与 verthys.h VerthysDefenseReason 严格对齐，集中维护；
+ * 前端只做展示映射，不在本地推导安全结论） */
+const DEFENSE_REASON_LABEL: Record<number, string> = {
+  0: '无附加原因',
+  1: '当前无驻留密钥',
+  2: '密钥驻留用户态（隔离堆与转储巡检已加固）',
+  3: '系统休眠已启用',
+  4: '休眠状态无法证明',
+  5: '心跳看门狗已加固（全线程挂起 3 秒内处置）',
+  6: '挂起看门狗未启用（可修复）',
+  7: 'Hook 基线扫描干净',
+  8: 'Hook 扫描不可用/覆盖不全',
+  9: '检测到 Hook 特征',
+  10: 'mitigation 已由 OS 回读确认',
+  11: '部分 mitigation 缺失',
+  12: '无法回读确认 mitigation',
+  13: '双层 Job 隔离有效',
+  14: '设备根/PCR 绑定成立',
+  15: '无可校验的绑定事实',
+  16: '关键防御模块缺失',
+  17: '当前预设关闭该防护',
+  18: '证据超过有效期',
+  19: '用户态加固已生效',
+  20: '系统休眠已禁用',
+};
+
+/* 用户态上限原因：防护措施已加固；绝对阻止能力受平台边界约束。
+ * UI 显示为"已加固"，与可修复缺口严格区分。 */
+const DEFENSE_LIMITED_REASONS = new Set([2, 5]);
+
 /** 轮询间隔：防御状态为进程级事实，变化频率低，60s 刷新足够 */
 const DEFENSE_POLL_INTERVAL_MS = 60_000;
 
@@ -75,8 +109,14 @@ export interface DefensePathView {
   state: number;
   /** 状态中文标签 */
   stateLabel: string;
-  /** 状态样式类（unchecked/blocked/degraded/failed） */
+  /** 状态样式类（unchecked/blocked/degraded/limited/failed） */
   stateClass: string;
+  /** 判定原因码（VerthysDefenseReason，0=无附加原因） */
+  reason: number;
+  /** 原因中文文案（供 tooltip/诊断展示） */
+  reasonLabel: string;
+  /** 是否为用户态上限项（原因 2/5，防护已加固但无法完全阻止） */
+  limited: boolean;
 }
 
 /** 动态防护汇总态势 */
@@ -85,19 +125,25 @@ export interface DefenseMetaView {
   blocked: number;
   /** 降级路径数 */
   degraded: number;
+  /** 已加固的用户态上限项数（degraded 的子集） */
+  limited: number;
   /** 失败路径数 */
   failed: number;
   /** 未校验路径数（含报告缺位时的全量占位） */
   unchecked: number;
   /** 关键路径全阻断标志（worker 透传） */
   allCriticalBlocked: boolean;
-  /** 总体态势：breach（有失败）> degraded（有降级）> partial（部分未校验）
-   *  > ok（全部已阻断且关键路径全阻断）/ pending（未拉取或全未校验） */
-  stance: 'breach' | 'degraded' | 'partial' | 'ok' | 'pending';
+  /** 总体态势：breach（有失败）> degraded（存在可修复降级）> limited（仅已加固
+   *  的用户态上限项）> partial（部分未校验）> ok（全部已阻断）/ pending（未拉取或全未校验） */
+  stance: 'breach' | 'degraded' | 'limited' | 'partial' | 'ok' | 'pending';
   /** 态势中文标签 */
   stanceLabel: string;
   /** 报告陈旧标记（启用轮询后最近一次拉取失败，当前展示的是上一次的报告） */
   stale: boolean;
+  /** 快照采样时间（Unix 毫秒，0=未知） */
+  checkedAtMs: number;
+  /** 采样时间展示文案（本地时间，空串=未知） */
+  checkedAtLabel: string;
 }
 
 /* ------------------------------------------------------------------ *
@@ -167,7 +213,29 @@ export function useDefenseStatus() {
     { immediate: true },
   );
 
-  onBeforeUnmount(stopPolling);
+  /* 守卫位变更事件：session_start 完成 runtime_guards 下发后由后端发出。
+   * 首次拉取可能早于该下发（verthysReady 先于 securitySessionStart），
+   * 若不重采样，首个 60s 周期会把已接线的挂起守卫显示为可修复降级。 */
+  let unlistenRuntimeGuards: UnlistenFn | null = null;
+  if (isTauriEnvironment()) {
+    void listen('verthys://runtime-guards', () => {
+      void refreshDefenseStatus();
+    })
+      .then((unlisten) => {
+        unlistenRuntimeGuards = unlisten;
+      })
+      .catch(() => {
+        /* 事件注册失败不影响 60s 轮询兜底 */
+      });
+  }
+
+  onBeforeUnmount(() => {
+    stopPolling();
+    if (unlistenRuntimeGuards !== null) {
+      unlistenRuntimeGuards();
+      unlistenRuntimeGuards = null;
+    }
+  });
 
   /* ===== 展示视图模型 ===== */
 
@@ -175,18 +243,32 @@ export function useDefenseStatus() {
   const defensePaths = computed<DefensePathView[]>(() =>
     DEFENSE_PATH_DEFS.map((def, i) => {
       const state = defenseReport.value?.path_state?.[i] ?? 0;
-      const view = DEFENSE_STATE_VIEW[state] ?? DEFENSE_STATE_VIEW[0];
-      return { ...def, state, stateLabel: view.label, stateClass: view.cls };
+      const reason = defenseReport.value?.path_reason?.[i] ?? 0;
+      const limited = state === 2 && DEFENSE_LIMITED_REASONS.has(reason);
+      /* 用户态上限项显示"已加固"，强调防护已生效，不与可修复降级混淆。 */
+      const view = limited
+        ? { label: '已加固', cls: 'limited' }
+        : (DEFENSE_STATE_VIEW[state] ?? DEFENSE_STATE_VIEW[0]);
+      return {
+        ...def,
+        state,
+        stateLabel: view.label,
+        stateClass: view.cls,
+        reason,
+        reasonLabel: DEFENSE_REASON_LABEL[reason] ?? '未知原因',
+        limited,
+      };
     }),
   );
 
   /** 汇总态势（报告缺位时 pending 占位）
    *
-   * 旧实现只要 blocked 计数 > 0（或全为 0）就判 ok「关键路径全阻断」，
-   * 忽略 all_critical_blocked 与未校验路径 —— 1 条阻断 + 6 条未校验也
-   * 宣称全阻断，属虚假安全声明。现按真实计数与关键路径标志裁决：
-   *   失败 > 降级 > 全未校验(pending) > 部分未校验(partial)
-   *   > 关键路径未全阻断(degraded) > ok */
+   * 裁决顺序与 C 层原因码对齐：
+   *   失败 > 可修复降级（degraded - limited > 0）> 仅已加固项 > 未校验
+   *   > 全阻断 > 待检测。
+   * limited_count 是 degraded 的子集；把"已加固的用户态上限项"单独展示，
+   * 强调防护已生效，避免误读为未实现的可修复缺陷。
+   */
   const defenseMeta = computed<DefenseMetaView>(() => {
     const total = DEFENSE_PATH_DEFS.length;
     const stale = defenseReportStale.value;
@@ -195,24 +277,54 @@ export function useDefenseStatus() {
       return {
         blocked: 0,
         degraded: 0,
+        limited: 0,
         failed: 0,
         unchecked: total,
         allCriticalBlocked: false,
         stance: 'pending',
         stanceLabel: '待检测',
         stale,
+        checkedAtMs: 0,
+        checkedAtLabel: '',
       };
     }
     const blocked = r.blocked_count;
     const degraded = r.degraded_count;
+    const limited = Math.min(r.limited_count ?? 0, degraded);
     const failed = r.failed_count;
     const unchecked = Math.max(total - blocked - degraded - failed, 0);
-    const base = { blocked, degraded, failed, unchecked, allCriticalBlocked: r.all_critical_blocked, stale };
+    const checkedAtMs = r.checked_at_unix_ms ?? 0;
+    const checkedAtLabel =
+      checkedAtMs > 0
+        ? new Date(checkedAtMs).toLocaleTimeString('zh-CN', { hour12: false })
+        : '';
+    const base = {
+      blocked,
+      degraded,
+      limited,
+      failed,
+      unchecked,
+      allCriticalBlocked: r.all_critical_blocked,
+      stale,
+      checkedAtMs,
+      checkedAtLabel,
+    };
     if (failed > 0) {
       return { ...base, stance: 'breach', stanceLabel: `${failed} 条路径防御失败` };
     }
-    if (degraded > 0) {
-      return { ...base, stance: 'degraded', stanceLabel: `${degraded} 条路径降级` };
+    if (degraded - limited > 0) {
+      return {
+        ...base,
+        stance: 'degraded',
+        stanceLabel: `${degraded - limited} 条可修复降级`,
+      };
+    }
+    if (limited > 0) {
+      return {
+        ...base,
+        stance: 'limited',
+        stanceLabel: `${limited} 项已加固（用户态上限）`,
+      };
     }
     if (blocked + degraded + failed === 0) {
       return { ...base, stance: 'pending', stanceLabel: '待检测' };
@@ -220,10 +332,10 @@ export function useDefenseStatus() {
     if (unchecked > 0) {
       return { ...base, stance: 'partial', stanceLabel: `${blocked}/${total} 条路径已阻断 · 其余待校验` };
     }
-    if (!r.all_critical_blocked) {
-      return { ...base, stance: 'degraded', stanceLabel: '关键路径未全部阻断' };
+    if (blocked === total) {
+      return { ...base, stance: 'ok', stanceLabel: '关键路径全阻断' };
     }
-    return { ...base, stance: 'ok', stanceLabel: '关键路径全阻断' };
+    return { ...base, stance: 'pending', stanceLabel: '待检测' };
   });
 
   return {

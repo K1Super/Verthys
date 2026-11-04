@@ -384,6 +384,10 @@ mod tests {
         Request {
             op: op.to_string(),
             path: String::new(),
+            new_path: String::new(),
+            keep_old: false,
+            cancel_event: String::new(),
+            keyfile_path: String::new(),
             mode: String::new(),
             target_op: String::new(),
             password: Zeroizing::new(password.to_string()),
@@ -392,6 +396,7 @@ mod tests {
             max_count: 0,
             name: String::new(),
             data: Zeroizing::new(record.to_string()),
+            records: Vec::new(),
             old_password: Zeroizing::new(String::new()),
             new_password: Zeroizing::new(String::new()),
             bin_data: Zeroizing::new(base64_encode(bin_data)),
@@ -399,9 +404,15 @@ mod tests {
             preset: 0,
             ids: Vec::new(),
             flags: 0,
+            hb_handle: 0,
             shm_key: String::new(),
             project: String::new(),
             inline_max_bytes: 0,
+            module_id: 0,
+            pcr_select: 0,
+            recovery_code: Zeroizing::new(String::new()),
+            old_recovery: Zeroizing::new(String::new()),
+            confirm: String::new(),
             module: String::new(),
             kind: String::new(),
             salt: String::new(),
@@ -409,7 +420,6 @@ mod tests {
             seq: 0,
             total: 0,
             iterations: 0,
-            wrapped_key: String::new(),
         }
     }
 

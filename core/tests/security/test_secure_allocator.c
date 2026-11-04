@@ -323,3 +323,36 @@ TEST(sec_alloc_destroy_releases_all)
     CHECK(secure_allocator_budget_usage() == base_usage);
     return 0;
 }
+
+/* ---------- 7. 进程级共享单例 ---------- */
+
+/* V4 Vault/Store 使用的进程级分配器：InitOnce 单例、alloc/free 后统计回落。
+ * 该单例无销毁路径，测试只验证行为，不销毁。 */
+TEST(sec_alloc_shared_lifecycle)
+{
+    SecureAllocator *shared = secure_allocator_shared();
+    SecureAllocatorStats st;
+    void *p = NULL;
+    size_t base_live;
+    size_t base_bytes;
+
+    CHECK(shared != NULL);
+    CHECK(secure_allocator_shared() == shared);   /* 单例：重复调用同一实例 */
+
+    secure_allocator_get_stats(shared, &st);
+    base_live  = st.live_count;
+    base_bytes = st.live_bytes;
+
+    CHECK_EQ(secure_allocator_alloc(shared, 256, &p), VERTHYS_OK);
+    secure_allocator_get_stats(shared, &st);
+    CHECK_EQ(st.live_count, base_live + 1u);
+
+    ((uint8_t *)p)[0] = 0x5A;
+    ((uint8_t *)p)[255] = 0xA5;
+
+    CHECK_EQ(secure_allocator_free(shared, p), VERTHYS_OK);
+    secure_allocator_get_stats(shared, &st);
+    CHECK_EQ(st.live_count, base_live);
+    CHECK_EQ(st.live_bytes, base_bytes);
+    return 0;
+}

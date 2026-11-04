@@ -1,21 +1,22 @@
 /**
  * useFileImport 单测 — 导入管道矩阵
  *
- * 覆盖：单遍上传与元数据闭包、续传只读轮去重跳过、元数据失败守卫、块批失败、
- * 用户取消、0 字节文件、批边界身份复查、分片读取长度不符、结束身份复查、
- * 两轮内容不一致、会话冲突确认（允许/拒绝）、加密形态的哈希口径。
+ * 覆盖：单遍上传与元数据闭包、续传非内容条目键去重跳过、同内容不同路径
+ * 各自导入（无内容级去重）、元数据失败守卫、块批失败、用户取消、0 字节文件、
+ * 批边界身份复查、分片读取长度不符、结束身份复查、会话冲突确认（允许/拒绝）、
+ * 加密形态的键口径。
  * 断言口径：成功必以 success 结束会话并触发孤儿回收；失败必以未成功结束
  * 会话且不写元数据；一切"少读/走样"都表现为显式失败而非静默降级。
  */
 import { describe, expect, it } from "vitest";
 import { createBLAKE3 } from "hash-wasm";
+import { sha256 } from "@noble/hashes/sha2";
 import { MAX_FILE_CHUNK_SIZE_BYTES } from "../../constants/photo_budget.generated";
-import { FILE_HASH_LEN } from "../../constants/crypto_const";
 import {
   TYPE_FILEVERTHYS_CHUNK,
   TYPE_FILEVERTHYS_META,
 } from "../../constants/record_types";
-import { base64ToBytes, bytesToBase64 } from "../../utils/binary_codec";
+import { base64ToBytes, bytesToBase64, bytesToHex } from "../../utils/binary_codec";
 import {
   blocksPerBatchBudget,
   fileHashSuffix,
@@ -32,13 +33,6 @@ import type {
 
 const CHUNK = MAX_FILE_CHUNK_SIZE_BYTES;
 
-async function blake3Hex(bytes: Uint8Array): Promise<string> {
-  const h = await createBLAKE3();
-  h.init();
-  h.update(bytes);
-  return h.digest("hex");
-}
-
 async function expectedFileHash(plain: Uint8Array, encrypted: boolean): Promise<string> {
   const h = await createBLAKE3();
   h.init();
@@ -47,14 +41,24 @@ async function expectedFileHash(plain: Uint8Array, encrypted: boolean): Promise<
   return h.digest("hex");
 }
 
+/** 复算生产者口径的非内容条目键（路径 + 长度 + 修改时间） */
+function entryKeyOf(path: string, size: number, mtime: number): string {
+  return bytesToHex(sha256(new TextEncoder().encode(`file|${path}|${size}|${mtime}`)));
+}
+
+/** 复算生产者口径的非内容块键（条目键 + 块序号） */
+function chunkKeyOf(entryKey: string, seq: number): string {
+  return bytesToHex(sha256(new TextEncoder().encode(`chunk|${entryKey}|${seq}`)));
+}
+
 function makeBytes(len: number, fill: number): Uint8Array {
   const b = new Uint8Array(len);
   b.fill(fill);
   return b;
 }
 
-function okBegin(hashes: string[] = []): ImportBeginResult {
-  return { ok: true, import_id: "imp-1", hashes, total_count: 0 };
+function okBegin(entryKeys: string[] = []): ImportBeginResult {
+  return { ok: true, import_id: "imp-1", entry_keys: entryKeys, total_count: 0 };
 }
 
 interface VFile {
@@ -63,8 +67,8 @@ interface VFile {
 }
 
 interface HarnessOptions {
-  /** 遗留会话的已提交哈希集（非空触发续传只读轮） */
-  legacyHashes?: string[];
+  /** 遗留会话的已提交条目键集（命中即续传跳过） */
+  legacyKeys?: string[];
   /** 会话创建返回序列（依次出队；耗尽后返回成功且无遗留集合） */
   beginQueue?: ImportBeginResult[];
   /** 块批写入注入失败 */
@@ -165,8 +169,8 @@ function makeHarness(opts: HarnessOptions = {}) {
       if (opts.freeSpace === null) throw new Error("空间读数不可得");
       return opts.freeSpace ?? Number.MAX_SAFE_INTEGER;
     },
-    walRecover: async () => ({ ok: true, hashes: [] }),
-    importBegin: async () => beginQueue.shift() ?? okBegin(opts.legacyHashes ?? []),
+    walRecover: async () => ({ ok: true, entry_keys: [] }),
+    importBegin: async () => beginQueue.shift() ?? okBegin(opts.legacyKeys ?? []),
     importEnd: async (success) => {
       endCalls.push(success);
       events.push(`end:${success}`);
@@ -280,22 +284,28 @@ describe("runFileImport", () => {
     expect(entry.totalChunks).toBe(3);
     expect(entry.chunkIds).toEqual([1000, 1001, 1002]);
     expect(entry.fileHash).toBe(await expectedFileHash(bytes, false));
+    // 条目键为非内容身份键：路径 + 长度 + 修改时间，与内容摘要无关
+    const entryKey = entryKeyOf("C:\\in\\big.bin", bytes.length, 1000);
+    expect(entry.entryKey).toBe(entryKey);
+    expect(entry.entryKey).not.toBe(entry.fileHash);
 
-    // 块载荷：哈希为密文（此处即明文）摘要，记录角色为清藏文件块
+    // 块载荷：键为条目键 + 序号派生的非内容块键，记录角色为清藏文件块
     const blobs = h.chunkBatches.flat();
-    for (const blob of blobs) {
+    for (let i = 0; i < blobs.length; i++) {
+      const blob = blobs[i];
       expect(blob.rtype).toBe(TYPE_FILEVERTHYS_CHUNK);
-      expect(blob.hash).toBe(await blake3Hex(base64ToBytes(blob.data_b64)));
+      expect(blob.chunk_key).toBe(chunkKeyOf(entryKey, i));
     }
-    expect(blobs.map((b) => b.hash)).toEqual(entry.chunkHashes);
+    expect(new Set(blobs.map((b) => b.chunk_key)).size).toBe(3);
+    // 内容摘要仅留在元数据引用中（完整性校验用），不作块名/去重键
     expect(entry.chunkHashes).toHaveLength(3);
 
-    // 元数据记录：类型 / 名称 / 引用 / 去重键
+    // 元数据记录：类型 / 名称 / 引用 / 条目键
     expect(h.recordBatches).toHaveLength(1);
     const metaRec = h.recordBatches[0][0];
     expect(metaRec.rtype).toBe(TYPE_FILEVERTHYS_META);
     expect(metaRec.name).toBe("meta_big.bin");
-    expect(metaRec.hash).toBe(entry.fileHash);
+    expect(metaRec.entry_key).toBe(entryKey);
     expect(metaRec.chunk_ids).toEqual(entry.chunkIds);
     expect(metaRec.chunk_hashes).toEqual(entry.chunkHashes);
     const metaJson = JSON.parse(new TextDecoder().decode(base64ToBytes(metaRec.data_b64)));
@@ -312,13 +322,13 @@ describe("runFileImport", () => {
     expect(h.statCalls.length).toBe(4);
     // 进度收敛到该文件完成
     expect(h.progress[h.progress.length - 1].fileFraction).toBe(1);
-    expect(h.progress.some((p) => p.phase === "upload")).toBe(true);
+    expect(h.progress.length).toBeGreaterThan(0);
   });
 
-  it("续传只读轮命中：不加密不上传，显式跳过", async () => {
+  it("续传命中同一条目键：不读取不上传，显式跳过", async () => {
     const bytes = makeBytes(CHUNK + 5, 3);
-    const fileHash = await expectedFileHash(bytes, false);
-    const h = makeHarness({ legacyHashes: [fileHash] });
+    const entryKey = entryKeyOf("C:\\in\\dup.bin", bytes.length, 1000);
+    const h = makeHarness({ legacyKeys: [entryKey] });
     h.vfs.set("C:\\in\\dup.bin", { bytes, mtime: 1000 });
 
     const result = await runFileImport([fileOf("dup.bin")], null, h.deps);
@@ -327,13 +337,50 @@ describe("runFileImport", () => {
     expect(result.skipped).toEqual(["dup.bin"]);
     expect(result.entries).toHaveLength(0);
     expect(result.failCount).toBe(0);
-    // 只读轮各块恰好读一次；无块上传、无元数据写入
-    expect(h.readCalls).toBe(2);
+    // 命中条目键后零读取、零块上传、零元数据写入
+    expect(h.readCalls).toBe(0);
     expect(h.chunkBatches).toEqual([]);
     expect(h.recordBatches).toEqual([]);
     expect(h.endCalls).toEqual([true]);
-    // 只读轮占该文件一半进度权重
-    expect(h.progress[h.progress.length - 1].fileFraction).toBe(0.5);
+  });
+
+  it("同内容不同路径：各自导入，不做内容级去重（不构成存在性预言机）", async () => {
+    const bytes = makeBytes(64, 5);
+    const h = makeHarness();
+    h.vfs.set("C:\\in\\a.bin", { bytes, mtime: 1000 });
+    h.vfs.set("C:\\in\\b.bin", { bytes, mtime: 1000 });
+
+    const result = await runFileImport([fileOf("a.bin"), fileOf("b.bin")], null, h.deps);
+
+    expect(result.successCount).toBe(2);
+    expect(result.skippedCount).toBe(0);
+    expect(result.entries.map((e) => e.name)).toEqual(["a.bin", "b.bin"]);
+    // 同内容但不同路径 → 条目键与块键均不同，两次都完整上传
+    const [ea, eb] = result.entries;
+    expect(ea.entryKey).not.toBe(eb.entryKey);
+    expect(h.chunkBatches).toHaveLength(2);
+    expect(h.chunkBatches[0][0].chunk_key).not.toBe(h.chunkBatches[1][0].chunk_key);
+    // 内容摘要一致（完整性口径），但不再作为去重依据
+    expect(ea.fileHash).toBe(eb.fileHash);
+  });
+
+  it("同一会话内同路径/长度/时间重试：第二次按条目键跳过，不重复落库", async () => {
+    const bytes = makeBytes(32, 6);
+    const h = makeHarness();
+    h.vfs.set("C:\\in\\retry.bin", { bytes, mtime: 1000 });
+
+    // 同一文件连续两次进入管道（模拟同批重复选择）
+    const result = await runFileImport(
+      [fileOf("retry.bin"), fileOf("retry.bin")],
+      null,
+      h.deps,
+    );
+
+    expect(result.successCount).toBe(1);
+    expect(result.skippedCount).toBe(1);
+    expect(h.chunkBatches).toHaveLength(1);
+    expect(h.recordBatches).toHaveLength(1);
+    expect(h.readCalls).toBe(1);
   });
 
   it("元数据写入失败：不计成功、不入条目、会话按未成功结束", async () => {
@@ -385,9 +432,8 @@ describe("runFileImport", () => {
     const result = await runFileImport([fileOf("a.bin")], null, h.deps);
 
     expect(result.failCount).toBe(1);
-    const uploadReports = h.progress.filter((p) => p.phase === "upload");
-    expect(uploadReports.length).toBeGreaterThan(0);
-    expect(uploadReports.every((p) => p.doneInFile === 0)).toBe(true);
+    expect(h.progress.length).toBeGreaterThan(0);
+    expect(h.progress.every((p) => p.doneInFile === 0)).toBe(true);
   });
 
   it("未分类异常独立归类为 E_UNKNOWN（不冒充读取失败）", async () => {
@@ -518,30 +564,11 @@ describe("runFileImport", () => {
     expect(h.endCalls).toEqual([false]);
   });
 
-  it("两轮内容不一致（长度与时间戳被还原）：哈希比对中止", async () => {
-    const sameLen = 64;
-    const contentA = makeBytes(sameLen, 1);
-    const contentB = makeBytes(sameLen, 2);
-    const h = makeHarness({
-      legacyHashes: ["00".repeat(FILE_HASH_LEN)],
-      onRead: (callIndex) => (callIndex === 1 ? contentA : contentB),
-    });
-    h.vfs.set("C:\\in\\a.bin", { bytes: contentA, mtime: 1000 });
-
-    const result = await runFileImport([fileOf("a.bin")], null, h.deps);
-
-    expect(result.failCount).toBe(1);
-    expect(result.failures[0].code).toBe("E_FILE_CHANGED");
-    expect(h.chunkBatches).toHaveLength(1);
-    expect(h.recordBatches).toEqual([]);
-    expect(h.endCalls).toEqual([false]);
-  });
-
   it("会话冲突且用户允许结束：结束上一会话后继续导入", async () => {
     const h = makeHarness({
       sessionBusyAllowed: true,
       beginQueue: [
-        { ok: false, import_id: "", hashes: [], total_count: 0, error: "已有导入会话进行中，请先结束当前会话", error_code: "E_IMPORT_SESSION_BUSY" },
+        { ok: false, import_id: "", entry_keys: [], total_count: 0, error: "已有导入会话进行中，请先结束当前会话", error_code: "E_IMPORT_SESSION_BUSY" },
         okBegin(),
       ],
     });
@@ -559,7 +586,7 @@ describe("runFileImport", () => {
     const h = makeHarness({
       sessionBusyAllowed: false,
       beginQueue: [
-        { ok: false, import_id: "", hashes: [], total_count: 0, error: "已有导入会话进行中，请先结束当前会话", error_code: "E_IMPORT_SESSION_BUSY" },
+        { ok: false, import_id: "", entry_keys: [], total_count: 0, error: "已有导入会话进行中，请先结束当前会话", error_code: "E_IMPORT_SESSION_BUSY" },
       ],
     });
     h.vfs.set("C:\\in\\a.bin", { bytes: makeBytes(10, 1), mtime: 1000 });
@@ -576,7 +603,7 @@ describe("runFileImport", () => {
   it("会话冲突判定以结构化错误码为准：无码的初始化失败不做冲突确认", async () => {
     const h = makeHarness({
       beginQueue: [
-        { ok: false, import_id: "", hashes: [], total_count: 0, error: "创建导入会话失败: 磁盘异常" },
+        { ok: false, import_id: "", entry_keys: [], total_count: 0, error: "创建导入会话失败: 磁盘异常" },
       ],
     });
     h.vfs.set("C:\\in\\a.bin", { bytes: makeBytes(10, 1), mtime: 1000 });
@@ -588,7 +615,7 @@ describe("runFileImport", () => {
     expect(h.readCalls).toBe(0);
   });
 
-  it("加密形态：文件级密钥每文件派生一次，块哈希按密文汇算，meta 携派生参数与口令校验块", async () => {
+  it("加密形态：文件级密钥每文件派生一次，块键非内容派生，meta 携派生参数与口令校验块", async () => {
     const plain = Uint8Array.from({ length: 32 }, (_, i) => i + 1);
     const h = makeHarness();
     h.vfs.set("C:\\in\\secret.bin", { bytes: plain, mtime: 1000 });
@@ -611,15 +638,14 @@ describe("runFileImport", () => {
     expect(metaJson.kdf).toEqual(entry.kdf);
     expect(metaJson.passwordCheck).toBe(entry.passwordCheck);
 
-    // 块哈希按密文（桩密文 = iv 占位 ‖ 明文 ‖ 标签占位）汇算，与明文摘要不同
+    // 块键与内容无关：加密形态下同样只由条目键 + 序号派生
     const blobs = h.chunkBatches.flat();
     const cipher = new Uint8Array(12 + plain.length + 16);
     cipher.set(plain, 12);
-    expect(blobs[0].hash).toBe(await blake3Hex(cipher));
-    expect(blobs[0].hash).not.toBe(await blake3Hex(plain));
+    expect(blobs[0].chunk_key).toBe(chunkKeyOf(entry.entryKey, 0));
     expect(blobs[0].data_b64).toBe(bytesToBase64(cipher));
 
-    // 去重键按"内容 + 形态标志"口径（不含任何密钥材料）
+    // 内容摘要按"明文 + 形态标志"口径（不含任何密钥材料），仅用于完整性
     expect(entry.fileHash).toBe(await expectedFileHash(plain, true));
     expect(entry.fileHash).not.toBe(await expectedFileHash(plain, false));
 

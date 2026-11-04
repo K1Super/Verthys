@@ -14,7 +14,7 @@ export const PHOTO_THUMB_MAX_CHARS = 45000;
 export const MAX_IPC_PAYLOAD_BYTES = 12582912;
 
 /** 单次块上传的块数上限 */
-export const MAX_CHUNKS_PER_IPC = 8;
+export const MAX_CHUNKS_PER_IPC = 32;
 
 /** 数据块明文分片大小（字节） */
 export const PAYLOAD_CHUNK_SIZE_BYTES = 1048576;

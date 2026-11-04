@@ -11,15 +11,17 @@
  *
  * 通过判据：
  *   1. ACG 策略写入成功且读回确认；
- *   2. syscall_direct_available() 返回 1；
- *   3. NtQueryInformationProcess 查询的 PEB 与 ntdll 导出一致；
- *   4. NtQuerySystemInformation(SystemBasicInformation) 返回页大小 4096。
+ *   2. process_sandbox_verify_os 从 OS 回读到 ACG 位；
+ *   3. syscall_direct_available() 返回 1；
+ *   4. NtQueryInformationProcess 查询的 PEB 与 ntdll 导出一致；
+ *   5. NtQuerySystemInformation(SystemBasicInformation) 返回页大小 4096。
  *
  * 独立性：
  *   ACG 是进程级且不可撤销的策略，因此本验证使用独立可执行文件，
  *   不与共享测试进程合并。
  */
 #include "syscall_direct.h"
+#include "process_sandbox.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -122,6 +124,24 @@ int main(void)
     if (acg < 0) {
         printf("FAIL: ACG enable error=%lu\n", (unsigned long)error);
         return 1;
+    }
+
+    /* OS 回读必须确认 ACG 位；这是 DLL 劫持路径判据唯一的真实来源。 */
+    {
+        uint32_t verified = 0;
+        if (process_sandbox_verify_os(&verified) != 0) {
+            printf("FAIL: process_sandbox_verify_os query failed\n");
+            return 2;
+        }
+        if ((verified & SANDBOX_ATTR_ACG) == 0) {
+            printf("FAIL: ACG not visible via OS readback (mask=0x%08X)\n",
+                   (unsigned)verified);
+            return 2;
+        }
+        if (process_sandbox_verify_os(NULL) != -1) {
+            printf("FAIL: NULL mask must be rejected\n");
+            return 2;
+        }
     }
 
     syscall_direct_init();

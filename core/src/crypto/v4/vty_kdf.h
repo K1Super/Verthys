@@ -22,13 +22,6 @@ int vty_kdf_argon2id(uint8_t out[VTY_KEY_BYTES],
                      const uint8_t salt[VTY_SALT_BYTES],
                      uint32_t mem_kib, uint32_t iters, uint32_t parallel);
 
-/* 算法向量校验专用：16B 盐、任意合法参数（不做 v4 下限约束）。
- * 仅测试与算法自检调用；槽位路径禁止使用。 */
-int vty_kdf_argon2id_raw16(uint8_t out[VTY_KEY_BYTES],
-                           const uint8_t *pwd, size_t pwd_len,
-                           const uint8_t salt16[16],
-                           uint32_t mem_kib, uint32_t iters, uint32_t parallel);
-
 /* HKDF-SHA256-Expand：prk 32B，info 为域分离标签（可拼接定位字段） */
 int vty_hkdf_expand(uint8_t out[VTY_KEY_BYTES],
                     const uint8_t prk[VTY_KEY_BYTES],

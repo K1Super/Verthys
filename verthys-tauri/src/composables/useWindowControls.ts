@@ -27,7 +27,7 @@
  *     - 窗口在用户点击的瞬间消失（微秒级，Rust 直接调用 Win32 API）
  *     - lockAll 在后台异步执行（数据落盘），用户无感知
  *     - 进程在 lockAll 完成后退出，或 45s 超时后强制退出
- *     - 数据安全铁律：45s 覆盖 lockAll 40s 安全网 + 5s 余量
+ *     - 数据安全铁律：lockAll 各步独立有界，45s 是 worker 卡死时的强制退出上限
  */
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -36,6 +36,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { onMounted, onUnmounted } from "vue";
 import { useToastCenter } from "./useToastCenter";
+import { applyExternalLock } from "../session/security-session";
 
 /* 环境检测：使用公开 API isTauri() 替代内部实现细节 __TAURI_INTERNALS__
  * isTauri() 检查 window.isTauri 标志，由 Tauri 运行时注入，跨版本稳定 */
@@ -70,15 +71,17 @@ async function exitWithFallback(): Promise<void> {
  *
  * 流程：
  *   1. verthys 未初始化 → 无需清理，直接 exit(0)
- *   2. verthys 已初始化 → lockAll 异步清理（waitForFlush 落盘 → 清空缓存 →
- *      verthysLockPersist 原子落盘 → securitySessionStop → verthysLock 销毁 worker）
+ *   2. verthys 已初始化 → lockAll 异步清理（轮换收敛 → waitForFlush 落盘 →
+ *      清空缓存 → verthysLockPersist 原子落盘 → securitySessionStop →
+ *      verthysLock 销毁 worker）
  *   3. lockAll 完成（或异常）后 exit(0)
  *
  * 后端 45s 超时兜底确保进程必然退出（防 worker 卡死导致僵尸进程）。
  *   窗口已由后端在 CloseRequested 时隐藏（Rust 原生调用，微秒级），用户无感知。
  *
- * 数据安全铁律：lockAll 内部 40s 安全网确保 v1 容器 waitForFlush（22s）
- *   + verthysLockPersist（12s）完整执行后再销毁 worker，防止数据丢失。
+ * 数据安全铁律：前置轮换收敛（30s 有界）保证落盘与销毁不会打在仍持有 GMK
+ *   的 worker 上；waitForFlush（22s）+ verthysLockPersist（12s）完整执行后
+ *   才销毁 worker，防止数据丢失。
  */
 async function performCleanupAndExit(): Promise<void> {
   // 1. 互斥检查：防止并发关闭（按钮点击 + Alt+F4 同时触发）
@@ -107,7 +110,8 @@ async function performCleanupAndExit(): Promise<void> {
 
   // 3. verthys 已初始化 → lockAll 异步清理（数据落盘 + 销毁 worker）
   //    窗口已由后端在 CloseRequested 时隐藏（零 IPC 延迟），此处无需再隐藏
-  //    lockAll 内部 40s 安全网 + 后端 45s 超时兜底，双保险确保进程退出
+  //    lockAll 各步独立有界（轮换收敛 → 落盘 → 销毁）；后端 45s 硬超时
+  //    是 worker 卡死时的强制退出兜底
   try {
     await keyManager.lockAll();
   } catch { /* lockAll 内部已吞错，此处兜底 */ }
@@ -165,6 +169,7 @@ export function useWindowControls() {
   /* ===== 后端清理事件监听器（onMounted 注册，onUnmounted 注销） ===== */
   let unlistenCleanup: UnlistenFn | null = null;
   let unlistenCloseBlocked: UnlistenFn | null = null;
+  let unlistenExternalLock: UnlistenFn | null = null;
 
   onMounted(() => {
     if (!isTauriEnv) return;
@@ -188,6 +193,14 @@ export function useWindowControls() {
       }).then((unlisten) => {
         unlistenCloseBlocked = unlisten;
       }).catch(() => { /* 提示失败不影响后端拦截 */ });
+
+      // 系统锁屏/注销/断连/挂起：主进程已完成 worker 锁库与进程销毁，
+      // 前端仅重置密钥状态与视图，禁止再调用任何锁定命令。
+      listen<{ reason: string }>("verthys://external-lock", (event) => {
+        applyExternalLock(event.payload?.reason);
+      }).then((unlisten) => {
+        unlistenExternalLock = unlisten;
+      }).catch(() => { /* 监听失败时后端锁定仍已生效，仅视图未复位 */ });
     } catch { /* */ }
   });
 
@@ -199,6 +212,10 @@ export function useWindowControls() {
     if (unlistenCloseBlocked) {
       unlistenCloseBlocked();
       unlistenCloseBlocked = null;
+    }
+    if (unlistenExternalLock) {
+      unlistenExternalLock();
+      unlistenExternalLock = null;
     }
   });
 

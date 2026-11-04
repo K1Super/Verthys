@@ -1,0 +1,1023 @@
+/*
+ * devdock.css — 黑洞观测台式开发悬浮球与控制台样式
+ *
+ * 视觉语言：事件视界 / 透镜化吸积盘 / 扇区导轨 / 精密刻度。
+ * 层级只由细描边、离散刻度、单线分区与低饱和色相表达；
+ * 不使用阴影、发光、渐变堆积、水波纹或大面积毛玻璃。
+ * 本文件只由 DevDock 导入，生产构建随组件一起剔除。
+ */
+
+.devdock-root {
+  position: fixed;
+  inset: 0;
+  z-index: 10020;
+  pointer-events: none;
+  font-family: var(--font);
+  color: var(--text-primary);
+  --devdock-line: rgba(158, 184, 210, 0.14);
+  --devdock-line-strong: rgba(158, 184, 210, 0.28);
+  --devdock-line-soft: rgba(158, 184, 210, 0.08);
+}
+
+/* 表单控件不继承父级字体：统一锁到项目主字体，后续新增控件不会漏声明 */
+.devdock-root :is(button, input, textarea, select) {
+  font-family: var(--font);
+}
+
+.devdock-cluster {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 56px;
+  height: 56px;
+  pointer-events: none;
+  will-change: transform;
+}
+
+/* ===== 主球：事件视界与透镜化吸积盘 ===== */
+.devdock-orb {
+  --orb-accent-rgb: 172, 212, 246;
+  position: absolute;
+  inset: 0;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font);
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.orb-shell {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: transparent;
+  transition: transform 0.18s var(--ease);
+}
+
+.orb-field {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+/* 纯黑洞图标：倾斜吸积盘、光子环与事件视界；无文字、无外围刻度 */
+.orb-disk {
+  fill: none;
+  stroke: rgba(var(--orb-accent-rgb), 0.56);
+  stroke-width: 1;
+  transition: stroke 0.3s var(--ease);
+}
+
+.orb-photon {
+  fill: none;
+  stroke: rgba(var(--orb-accent-rgb), 0.66);
+  stroke-width: 1;
+  transition: stroke 0.3s var(--ease);
+}
+
+.orb-horizon {
+  fill: #000;
+}
+
+.devdock-orb:hover .orb-disk,
+.devdock-orb.is-on .orb-disk {
+  stroke: rgba(var(--orb-accent-rgb), 0.88);
+}
+
+.devdock-orb:hover .orb-photon,
+.devdock-orb.is-on .orb-photon {
+  stroke: rgba(var(--orb-accent-rgb), 0.96);
+}
+
+.devdock-orb:active .orb-shell {
+  transform: scale(0.95);
+}
+
+.devdock-orb.is-dragging {
+  --orb-accent-rgb: 255, 178, 88;
+}
+
+.devdock-orb.is-dragging .orb-shell {
+  transform: scale(0.92);
+}
+
+.devdock-orb:focus-visible {
+  outline: none;
+}
+
+.devdock-orb:focus-visible .orb-shell {
+  outline: 1px solid rgba(var(--orb-accent-rgb), 0.82);
+  outline-offset: 2px;
+}
+
+/* ===== 四枚轨道卫星 ===== */
+.devdock-sat {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(0.86);
+  transition:
+    transform 0.36s var(--ease),
+    opacity 0.16s linear;
+  will-change: transform, opacity;
+}
+
+/* 轨道系绳：由卫星边缘指向球体，亮度向球体收束，读作引力牵引 */
+.devdock-sat::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--tether-len, 18px);
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 4%,
+    rgba(var(--sat-accent-rgb, 172, 212, 246), 0.44)
+  );
+  transform-origin: 0 50%;
+  transform: rotate(var(--sat-angle, 0rad)) translateX(22px);
+  opacity: 0;
+  transition: opacity 0.3s var(--ease);
+  pointer-events: none;
+}
+
+.devdock-sat.is-visible::before {
+  opacity: 0.62;
+}
+
+.devdock-sat.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform:
+    translate(
+      calc(-50% + var(--fan-x, 0px)),
+      calc(-50% + var(--fan-y, 0px))
+    )
+    scale(1);
+  transition-delay: var(--fan-delay, 0ms);
+}
+
+.sat-node {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid rgba(158, 184, 210, 0.26);
+  border-radius: 50%;
+  background: rgba(6, 9, 14, 0.82);
+  color: var(--sat-accent, rgba(172, 212, 246, 0.9));
+  font-family: var(--font);
+  cursor: pointer;
+  pointer-events: none;
+  transition:
+    border-color 0.24s var(--ease),
+    transform 0.18s var(--ease);
+}
+
+.devdock-sat.is-visible .sat-node {
+  pointer-events: auto;
+}
+
+.sat-node::before {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border: 1px solid transparent;
+  border-top-color: rgba(var(--sat-accent-rgb, 172, 212, 246), 0.48);
+  border-right-color: rgba(var(--sat-accent-rgb, 172, 212, 246), 0.18);
+  border-radius: 50%;
+  opacity: 0.5;
+  transform: rotate(110deg);
+  transition:
+    opacity 0.26s var(--ease),
+    transform 0.42s var(--ease);
+  pointer-events: none;
+}
+
+.sat-node:hover {
+  border-color: var(--sat-accent, rgba(172, 212, 246, 0.9));
+  transform: scale(1.04);
+}
+
+.sat-node:hover::before {
+  opacity: 1;
+  transform: rotate(0deg);
+}
+
+.sat-node:active {
+  transform: scale(0.94);
+}
+
+.sat-node:focus-visible {
+  outline: 1px solid var(--sat-accent, rgba(172, 212, 246, 0.82));
+  outline-offset: 2px;
+}
+
+.sat-glyph {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+
+.sat-short {
+  font-family: var(--font);
+  font-size: 7.5px;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-indent: 0.08em;
+  color: var(--text-secondary);
+  transition: color 0.24s var(--ease);
+  pointer-events: none;
+}
+
+.sat-node:hover .sat-short {
+  color: var(--sat-accent, rgba(172, 212, 246, 0.9));
+}
+
+/* ===== 观测台 ===== */
+.devdock-console {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  max-height: min(78vh, 680px);
+  border: 1px solid rgba(148, 178, 208, 0.22);
+  border-radius: 3px;
+  background:
+    radial-gradient(120% 90% at 82% -10%, rgba(86, 122, 164, 0.1), transparent 56%),
+    radial-gradient(80% 60% at 8% 110%, rgba(112, 96, 170, 0.06), transparent 60%),
+    #07090d;
+  color: var(--text-primary);
+  pointer-events: auto;
+  overflow: hidden;
+  container-type: inline-size;
+  animation: devdock-console-in-right 0.3s var(--ease) backwards;
+}
+
+.devdock-console.is-open-left {
+  animation-name: devdock-console-in-left;
+}
+
+/* 顶部光子发丝：从两端向中心收束，避免整圈发光 */
+.devdock-console::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 36px;
+  right: 36px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(170, 205, 240, 0.34) 28%,
+    rgba(170, 205, 240, 0.34) 72%,
+    transparent
+  );
+  pointer-events: none;
+}
+
+/* 入场只动位置不动不透明度：动画一旦被外部治理暂停，内容仍完整可读 */
+@keyframes devdock-console-in-right {
+  from {
+    transform: translate3d(6px, 0, 0);
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes devdock-console-in-left {
+  from {
+    transform: translate3d(-6px, 0, 0);
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.console-head {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto 24px;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 10px 12px 9px 13px;
+  border-bottom: 1px solid var(--devdock-line);
+}
+
+.console-mark {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+}
+
+.console-mark svg {
+  width: 28px;
+  height: 28px;
+  overflow: visible;
+}
+
+.mark-disk {
+  fill: none;
+  stroke: rgba(172, 212, 246, 0.26);
+  stroke-width: 1;
+}
+
+.mark-photon {
+  fill: none;
+  stroke: rgba(172, 212, 246, 0.68);
+  stroke-width: 1;
+}
+
+.mark-horizon {
+  fill: #000;
+}
+
+.mark-ticks line {
+  stroke: rgba(172, 212, 246, 0.2);
+  stroke-width: 1;
+}
+
+.console-id {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.console-kicker {
+  font-family: var(--font);
+  font-size: 7.5px;
+  line-height: 1.2;
+  letter-spacing: 0.16em;
+  color: rgba(146, 176, 206, 0.62);
+  white-space: nowrap;
+}
+
+.console-title {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.05em;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.console-live {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font);
+  font-size: 7.5px;
+  line-height: 1;
+  letter-spacing: 0.12em;
+  color: rgba(96, 224, 174, 0.68);
+}
+
+.console-signal {
+  width: 4px;
+  height: 4px;
+  background: rgba(96, 224, 174, 0.82);
+}
+
+.console-close {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    border-color 0.2s var(--ease),
+    color 0.2s var(--ease);
+}
+
+.console-close:hover {
+  border-color: rgba(158, 184, 210, 0.3);
+  color: var(--text-primary);
+}
+
+.console-close:focus-visible {
+  outline: 1px solid rgba(172, 212, 246, 0.7);
+  outline-offset: 1px;
+}
+
+.console-frame {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ----- 扇区导轨：纵向分区入口 ----- */
+.console-rail {
+  position: relative;
+  display: flex;
+  flex: 0 0 84px;
+  flex-direction: column;
+  width: 84px;
+  padding: 3px 0;
+  border-right: 1px solid var(--devdock-line);
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.console-tab {
+  flex: 0 1 auto;
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: 34px;
+  min-height: 28px;
+  padding: 6px 8px 6px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    color 0.2s var(--ease),
+    background-color 0.2s var(--ease);
+}
+
+/* 激活扇区：左缘刻度自中线展开，右缘延伸一枚指向舞台的刻度 */
+.console-tab::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--tab-accent, rgba(112, 205, 255, 0.8));
+  transform: scaleY(0);
+  transform-origin: 50% 50%;
+  opacity: 0.9;
+  transition: transform 0.26s var(--ease);
+}
+
+.console-tab::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  top: 50%;
+  width: 10px;
+  height: 1px;
+  background: var(--tab-accent, rgba(112, 205, 255, 0.8));
+  transform: translateY(-50%) scaleX(0);
+  transform-origin: right center;
+  opacity: 0;
+  transition:
+    transform 0.26s var(--ease),
+    opacity 0.2s var(--ease);
+}
+
+.console-tab:hover {
+  background: rgba(255, 255, 255, 0.015);
+  color: var(--text-primary);
+}
+
+.console-tab:hover .tab-glyph {
+  color: var(--tab-accent, rgba(112, 205, 255, 0.8));
+}
+
+.console-tab.is-active {
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-primary);
+}
+
+.console-tab.is-active::before {
+  transform: scaleY(1);
+}
+
+.console-tab.is-active::after {
+  transform: translateY(-50%) scaleX(1);
+  opacity: 0.85;
+}
+
+.console-tab:focus-visible {
+  outline: 1px solid var(--tab-accent, rgba(112, 205, 255, 0.7));
+  outline-offset: -1px;
+}
+
+.tab-glyph {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: rgba(154, 178, 204, 0.72);
+  transition: color 0.2s var(--ease);
+}
+
+.tab-glyph svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+
+.console-tab.is-active .tab-glyph {
+  color: var(--tab-accent, rgba(112, 205, 255, 0.8));
+}
+
+.tab-label {
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ----- 单分区舞台：只渲染当前分区，不堆叠全部分组 ----- */
+.console-stage {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 184, 220, 0.22) transparent;
+}
+
+.console-stage:focus-visible {
+  outline: 1px solid rgba(148, 184, 220, 0.42);
+  outline-offset: -1px;
+}
+
+.stage-section {
+  animation: devdock-stage-in 0.3s var(--ease) backwards;
+}
+
+@keyframes devdock-stage-in {
+  from {
+    transform: translateY(5px);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.stage-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 10px;
+  padding: 14px 16px 11px;
+  border-bottom: 1px solid var(--devdock-line);
+  background: linear-gradient(180deg, rgba(7, 9, 13, 0.985), rgba(7, 9, 13, 0.94));
+}
+
+.stage-ordinal {
+  font-family: var(--font);
+  font-size: 19px;
+  font-weight: 300;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: var(--group-accent, rgba(172, 212, 246, 0.86));
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.stage-kicker {
+  font-family: var(--font);
+  font-size: 7px;
+  line-height: 1.2;
+  letter-spacing: 0.16em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.stage-title {
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: 0.03em;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.stage-count {
+  position: relative;
+  z-index: 1;
+  font-family: var(--font);
+  font-size: 7.5px;
+  line-height: 1;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.stage-watermark {
+  position: absolute;
+  right: 14px;
+  top: 8px;
+  width: 38px;
+  height: 38px;
+  fill: none;
+  stroke: var(--group-accent, rgba(172, 212, 246, 0.8));
+  stroke-width: 1.5;
+  opacity: 0.05;
+  pointer-events: none;
+}
+
+.stage-body {
+  padding: 0 16px 18px;
+}
+
+.stage-body.is-fixture {
+  padding: 0;
+}
+
+.devdock-tool-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 11px;
+  padding: 14px 0 13px;
+  border-bottom: 1px solid var(--devdock-line-soft);
+  animation: devdock-row-in 0.3s var(--ease) backwards;
+  animation-delay: calc(36ms + var(--row-index, 0) * 34ms);
+}
+
+.devdock-tool-row:last-child {
+  padding-bottom: 4px;
+  border-bottom: 0;
+}
+
+@keyframes devdock-row-in {
+  from {
+    transform: translateX(4px);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.tool-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding-top: 1px;
+}
+
+.tool-ordinal {
+  font-family: var(--font);
+  font-size: 7px;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.tool-tick {
+  flex: 1;
+  width: 1px;
+  min-height: 14px;
+  background: var(--devdock-line);
+  transition: background-color 0.2s var(--ease);
+}
+
+.devdock-tool-row:hover .tool-tick {
+  background: var(--group-accent, rgba(172, 212, 246, 0.7));
+}
+
+.tool-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tool-headline {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tool-label {
+  font-size: 12px;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+}
+
+.tool-label.is-danger {
+  color: rgba(255, 146, 146, 0.94);
+}
+
+.tool-tag {
+  font-family: var(--font);
+  font-size: 6.5px;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  color: rgba(122, 136, 154, 0.68);
+  white-space: nowrap;
+}
+
+.tool-tag.is-danger {
+  color: rgba(255, 128, 128, 0.82);
+}
+
+.tool-hint {
+  font-size: 10px;
+  line-height: 1.55;
+  color: rgba(148, 162, 180, 0.8);
+  word-break: break-word;
+}
+
+.readout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 18px;
+  row-gap: 9px;
+  margin-top: 3px;
+  padding-top: 9px;
+  border-top: 1px solid var(--devdock-line-soft);
+}
+
+.readout-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.readout-cell.is-wide {
+  grid-column: 1 / -1;
+}
+
+.readout-key {
+  font-family: var(--font);
+  font-size: 7.5px;
+  line-height: 1.2;
+  letter-spacing: 0.08em;
+  color: rgba(138, 152, 170, 0.74);
+}
+
+.readout-value {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-primary);
+  word-break: break-word;
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-subkeys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.tool-keys {
+  display: flex;
+  align-items: flex-start;
+}
+
+.console-key {
+  box-sizing: border-box;
+  min-height: 28px;
+  padding: 0 11px;
+  border: 1px solid rgba(148, 184, 220, 0.24);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font);
+  font-size: 9.5px;
+  line-height: 1;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    border-color 0.2s var(--ease),
+    background-color 0.2s var(--ease),
+    color 0.2s var(--ease),
+    transform 0.12s var(--ease);
+}
+
+.console-key:hover:not(:disabled) {
+  border-color: rgba(172, 212, 246, 0.56);
+  background: rgba(172, 212, 246, 0.05);
+  color: rgba(236, 246, 255, 0.98);
+}
+
+.console-key:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.console-key:focus-visible {
+  outline: 1px solid rgba(172, 212, 246, 0.72);
+  outline-offset: 1px;
+}
+
+.console-key:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.console-key--sub {
+  min-height: 24px;
+  padding: 0 9px;
+  border-color: rgba(158, 184, 210, 0.16);
+  color: var(--text-secondary);
+  font-size: 8.5px;
+}
+
+.console-key--sub:hover:not(:disabled) {
+  border-color: rgba(172, 212, 246, 0.4);
+  color: var(--text-primary);
+}
+
+.console-key--danger {
+  border-color: rgba(255, 120, 120, 0.34);
+  color: rgba(255, 156, 156, 0.92);
+}
+
+.console-key--danger:hover:not(:disabled) {
+  border-color: rgba(255, 120, 120, 0.62);
+  background: rgba(255, 90, 90, 0.05);
+  color: rgba(255, 184, 184, 0.98);
+}
+
+.console-key--danger:focus-visible {
+  outline-color: rgba(255, 140, 140, 0.74);
+}
+
+.console-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 8px 13px 9px;
+  border-top: 1px solid var(--devdock-line);
+  font-family: var(--font);
+  font-size: 7.5px;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
+
+.foot-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--devdock-line-soft);
+}
+
+/* ===== 窄观测台：导轨转为顶部扇区条，保留分区语义 ===== */
+@container (max-width: 420px) {
+  .console-frame {
+    flex-direction: column;
+  }
+
+  .console-rail {
+    display: flex;
+    flex: none;
+    flex-direction: row;
+    width: auto;
+    padding: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--devdock-line);
+    background: rgba(0, 0, 0, 0.12);
+    scrollbar-width: none;
+  }
+
+  .console-rail::-webkit-scrollbar {
+    display: none;
+  }
+
+  .console-tab {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+    min-height: 42px;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 5px;
+    padding: 8px 8px 7px;
+  }
+
+  .console-tab .tab-glyph {
+    display: none;
+  }
+
+  .console-tab::before {
+    top: auto;
+    bottom: 0;
+    left: 4px;
+    right: 4px;
+    width: auto;
+    height: 1px;
+    transform: scaleX(0);
+    transform-origin: 50% 50%;
+  }
+
+  .console-tab.is-active::before {
+    transform: scaleX(1);
+  }
+
+  .console-tab::after {
+    display: none;
+  }
+
+  .stage-head {
+    padding: 12px 14px 10px;
+  }
+
+  .stage-watermark {
+    right: 12px;
+    top: 6px;
+    width: 34px;
+    height: 34px;
+  }
+
+  .stage-body {
+    padding: 0 14px 16px;
+  }
+
+  .readout {
+    column-gap: 14px;
+  }
+}
+
+/* 帧预算降级会把全站动画统一暂停：观测台的一次性入场动画若冻结在起始帧，
+   打开面板即见空分区；交互触发的短动画必须跑完，内容才可读 */
+body.reduced-motion .devdock-root .devdock-console,
+body.reduced-motion .devdock-root .stage-section,
+body.reduced-motion .devdock-root .devdock-tool-row {
+  animation-play-state: running !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orb-shell,
+  .orb-disk,
+  .orb-photon,
+  .devdock-sat,
+  .devdock-sat::before,
+  .sat-node,
+  .sat-node::before,
+  .sat-short,
+  .console-tab,
+  .console-tab::before,
+  .console-tab::after,
+  .tab-index,
+  .tab-glyph,
+  .tab-count,
+  .devdock-tool-row,
+  .tool-tick,
+  .console-key,
+  .console-close {
+    transition: none;
+  }
+
+  .devdock-console,
+  .stage-section,
+  .devdock-tool-row {
+    animation: none;
+  }
+}

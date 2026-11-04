@@ -30,6 +30,8 @@ export interface PhotoMeta {
   chunkDataB64?: string[];
   /** 各加密块密文的 BLAKE3 hex（与 chunkDataB64 顺序一致，容器导出与完整性校验用） */
   chunkHashes?: string[];
+  /** 非内容续传条目键（可选；不参与内容寻址，仅用于 WAL 幂等） */
+  entryKey?: string;
   /** BLAKE3 文件哈希（hex 编码，32 字节 → 64 字符） */
   fileHash: string;
   /** 创建时间戳（毫秒） */

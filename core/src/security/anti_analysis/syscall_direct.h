@@ -62,6 +62,7 @@ int syscall_direct_init(void);
 
 /*
  * 返回 1 表示映像内 thunk 已激活；0 表示走 GetProcAddress 回退。
+ * 纯读查询，不触发初始化：调用方必须先经 syscall_direct_init。
  * 结果是 defense_closure IAT/Inline Hook 路径的判据之一。
  */
 int syscall_direct_available(void);

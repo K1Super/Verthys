@@ -630,7 +630,8 @@ export class VerthysFlushService {
   /**
    * 将操作加入冲刷队列（不阻塞调用方）。
    *
-   * 用于非关键路径的延迟持久化：initGlobalKey/setModuleKey/setModuleKeyEnabled
+   * 用于非关键路径的延迟持久化：initGlobalKey 等记录写入（模块保护已改由
+   * C 层 v4 事务持久化，不再写 verthys 记录）
    * 调用此方法，不等待落盘完成，立即返回。落盘失败通过 Toast 提醒但不影响内存状态。
    *
    * @param operation 待执行的异步操作（通常为 () => persistVerthys()）

@@ -71,6 +71,12 @@ use tauri::Manager;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+/// 会话代际校验失败：延迟到达的锁定/销毁请求命中了已更换的会话。
+///
+/// 错误文本以稳定码 `E_LOCK_SUPERSEDED` 开头，前端据此中止后续破坏性
+/// 步骤并保留新会话；文本本身只用于日志与排障。
+pub const SESSION_SUPERSEDED: &str = "E_LOCK_SUPERSEDED: 目标会话已被替换，本次锁定已放弃";
+
 /* ------------------------------------------------------------------ *
  * TimedMutexGuard — 带时间戳的锁守卫                       *
  *                                                                    *
@@ -143,6 +149,12 @@ pub struct AppState {
     ///
     /// 通过 read_session()/write_session() 访问，中毒时重置为 None。
     session: RwLock<Option<WorkerSession>>,
+    /// 会话代际（单调递增）
+    ///
+    /// 每次会话变更（建立/替换/销毁）在写锁内递增。锁定与销毁命令在等待
+    /// 轮换收敛前记录代际，等待结束后据此校验：代际已变说明目标会话已被
+    /// 替换（例如用户重新解锁），必须放弃销毁，绝不能命中新会话。
+    session_epoch: AtomicU64,
     /// 并发锁防重：初始化流程进行中拒绝并发请求
     pub init_lock: AtomicBool,
     /// 全量扫描状态（泛型 ScanPipelineState<VerthysRecordEntry>）
@@ -213,6 +225,7 @@ impl AppState {
     pub fn new() -> Self {
         AppState {
             session: RwLock::new(None),
+            session_epoch: AtomicU64::new(0),
             init_lock: AtomicBool::new(false),
             scan_state: Mutex::new(None),
             scan_summary_state: Mutex::new(None),
@@ -488,7 +501,21 @@ impl AppState {
         session.send_json_with_unlock_progress(json, progress_cb)
     }
 
-    /// 原子批量发送（持锁期间不释放，防止 flush 的 lock/unlock 之间插入其他命令）
+    /// 发送全库轮换请求并流式接收进度（v4_rotate_run 专用）
+    pub fn send_with_rotate_progress(
+        &self,
+        json: &str,
+        progress_cb: &dyn Fn(&crate::worker::RotateProgress),
+    ) -> Result<String, String> {
+        let session = {
+            let guard = self.read_session();
+            guard.as_ref().ok_or("worker not initialized")?.clone()
+        };
+        session.send_json_with_rotate_progress(json, progress_cb)
+    }
+
+    /// 顺序批量发送：逐条等待响应，不保证与其它命令原子隔离
+    /// （读取会话后即释放读锁；需要独占语义的调用方必须自行串行化）。
     pub fn send_batch(&self, reqs: &[&str]) -> Result<Vec<String>, String> {
         let session = {
             let guard = self.read_session();
@@ -501,7 +528,7 @@ impl AppState {
         Ok(responses)
     }
 
-    /// 原子批量发送（自定义超时）
+    /// 顺序批量发送（自定义超时）：逐条等待响应，不保证与其它命令原子隔离。
     pub fn send_batch_with_timeout(
         &self,
         reqs: &[&str],
@@ -525,6 +552,31 @@ impl AppState {
     pub fn set_session(&self, session: Option<WorkerSession>) {
         let mut guard = self.write_session();
         *guard = session;
+        // 代际在写锁内递增：代际值与会话内容始终一致，等待方不会读到
+        // “新会话 + 旧代际”的撕裂组合。
+        self.session_epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 读取当前会话代际（用于延迟命令等待结束后的过期校验）
+    pub fn session_epoch(&self) -> u64 {
+        self.session_epoch.load(Ordering::SeqCst)
+    }
+
+    /// 仅当代际仍为 `expected` 时销毁当前会话（检查与销毁原子化）
+    ///
+    /// 返回 `false` 表示等待期间会话已被替换（或已由其它路径销毁后又建立），
+    /// 调用方必须放弃后续破坏性动作。检查与清空都在写锁内完成，避免
+    /// “校验通过 → 新会话建立 → 仍然清空”的 TOCTOU。
+    pub fn clear_session_if_epoch(&self, expected: u64) -> bool {
+        let mut guard = self.write_session();
+        if self.session_epoch.load(Ordering::SeqCst) != expected {
+            return false;
+        }
+        if guard.is_some() {
+            *guard = None;
+            self.session_epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        true
     }
 
     /// 检查 worker 是否已初始化（读操作，使用 read_session 共享锁）
@@ -600,7 +652,7 @@ impl AppState {
             Err(poisoned) => {
                 log::error!("[POISON][import_session] Mutex 中毒，废弃旧导入会话并重置为 None");
                 let mut g = poisoned.into_inner();
-                // 废弃旧会话（WalWriter Drop 关闭文件句柄；committed_hashes 已落盘可恢复）
+                // 废弃旧会话（WalWriter Drop 关闭文件句柄；committed_keys 已落盘可恢复）
                 *g = None;
                 g
             }
@@ -855,6 +907,31 @@ mod tests {
         assert_eq!(
             state.scan_summary_lock_acquired_ms.load(Ordering::SeqCst),
             0
+        );
+    }
+
+    #[test]
+    fn test_session_epoch_rejects_stale_clear() {
+        let state = AppState::new();
+        assert_eq!(state.session_epoch(), 0);
+        let stale = state.session_epoch();
+        // 会话变更（此处为销毁路径的空状态变更）必须推进代际
+        state.set_session(None);
+        assert_eq!(state.session_epoch(), stale + 1);
+        assert!(
+            !state.clear_session_if_epoch(stale),
+            "旧代际的延迟命令必须被拒绝，不得清空当前会话"
+        );
+
+        let current = state.session_epoch();
+        assert!(
+            state.clear_session_if_epoch(current),
+            "当前代际必须允许清空"
+        );
+        assert_eq!(
+            state.session_epoch(),
+            current,
+            "无会话可清空时不得无意义推进代际"
         );
     }
 

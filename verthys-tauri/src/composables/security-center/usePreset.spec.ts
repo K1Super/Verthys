@@ -85,13 +85,17 @@ function stubOptions() {
     defenseMeta: ref({
       blocked: 0,
       degraded: 0,
+      limited: 0,
       failed: 0,
       unchecked: 7,
       allCriticalBlocked: false,
       stance: "pending" as const,
       stanceLabel: "待检测",
       stale: false,
+      checkedAtMs: 0,
+      checkedAtLabel: "",
     }),
+    onSecurePresetApplied: vi.fn(),
   };
 }
 
@@ -217,6 +221,29 @@ describe("usePreset 吸附与守卫", () => {
   });
 });
 
+describe("usePreset 高安全 PCR 引导", () => {
+  it("安全档应用成功触发 PCR 引导；平衡档不触发", async () => {
+    const options = stubOptions();
+    const api = usePreset(options);
+
+    mocks.applySecurityPreset.mockResolvedValueOnce({
+      name: "SECURE",
+      code: 1,
+      features: allTrue(),
+    });
+    await api.onApplyPreset(1);
+    expect(options.onSecurePresetApplied).toHaveBeenCalledTimes(1);
+
+    mocks.applySecurityPreset.mockResolvedValueOnce({
+      name: "BALANCED",
+      code: 0,
+      features: allTrue(),
+    });
+    await api.onApplyPreset(0);
+    expect(options.onSecurePresetApplied).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("usePreset 自定义档语义", () => {
   it("应用自定义档：游标停靠中位、清锚点", async () => {
     const api = usePreset(stubOptions());
@@ -233,59 +260,119 @@ describe("usePreset 自定义档语义", () => {
   });
 });
 
-describe("usePreset 自定义模板应用链", () => {
-  it("应用自定义模板：特性显式传入应用链并提示成功", async () => {
-    const options = stubOptions();
-    const api = usePreset(options);
+describe("usePreset 自定义防护自动保存", () => {
+  it("非自定义档切换开关：快照当前真实特性与真实时长后以自定义档保存", async () => {
+    securityPresetRef.value = 1; // 高安全：空闲锁定 10 分钟
+    const api = usePreset(stubOptions());
+    await api.loadPresetConfig();
     mocks.applySecurityPreset.mockResolvedValueOnce({
       name: "CUSTOM",
       code: 3,
-      features: allTrue(),
+      features: { ...allTrue(), module_patrol: false },
     });
 
-    await api.onApplyCustom();
+    await api.onToggleCustomFeature("module_patrol");
 
-    // 特性集显式传参（缓存单一落盘点在会话层，应用成功后才写）
     expect(mocks.applySecurityPreset).toHaveBeenCalledWith(
       3,
       undefined,
-      api.customFeatures.value,
-      api.customSessionMinutes.value,
+      expect.objectContaining({ module_patrol: false, anti_debug: true }),
+      10,
     );
-    expect(options.showToast).toHaveBeenCalledWith("自定义模板已保存并应用");
+    expect(api.customFeatures.value.module_patrol).toBe(false);
   });
 
-  it("应用失败：可见报错且不提示成功", async () => {
+  it("自动保存失败：自定义档回滚到最近一次已落盘配置并可见报错", async () => {
+    securityPresetRef.value = 3;
     const options = stubOptions();
     const api = usePreset(options);
-    mocks.applySecurityPreset.mockRejectedValueOnce(new Error("backend unavailable"));
+    await api.loadPresetConfig();
+    mocks.applySecurityPreset.mockRejectedValueOnce(new Error("ipc down"));
 
-    await api.onApplyCustom();
+    await api.onToggleCustomFeature("module_patrol");
 
-    // 应用链失败时不得预写缓存：saveCustomFeatures 已从 usePreset 依赖面
-    // 移除（mock 模块不再提供该导出，再引入即类型/导入失败），本地缓存
-    // 仅在会话层应用成功后单点写入
+    expect(api.customFeatures.value.module_patrol).toBe(true);
+    expect(options.showError).toHaveBeenCalledWith("自定义防护保存失败");
+  });
+
+  it("非自定义档自动保存失败：草稿恢复为转换前模板", async () => {
+    securityPresetRef.value = 1;
+    const options = stubOptions();
+    const api = usePreset(options);
+    await api.loadPresetConfig();
+    const before = { ...api.customFeatures.value };
+    mocks.applySecurityPreset.mockRejectedValueOnce(new Error("ipc down"));
+
+    await api.onToggleCustomFeature("module_patrol");
+
+    expect(api.customFeatures.value).toEqual(before);
+    expect(options.showError).toHaveBeenCalledWith("自定义防护保存失败");
+  });
+
+  it("恢复默认：全开 + 默认时长并自动保存", async () => {
+    securityPresetRef.value = 3;
+    const options = stubOptions();
+    const api = usePreset(options);
+    await api.loadPresetConfig();
+
+    await api.onResetCustom();
+
     expect(mocks.applySecurityPreset).toHaveBeenCalledWith(
       3,
       undefined,
-      api.customFeatures.value,
-      api.customSessionMinutes.value,
+      expect.objectContaining({
+        module_patrol: true,
+        clip_clear_on_lock: true,
+        trace_cleanup: true,
+      }),
+      60,
     );
-    expect(options.showError).toHaveBeenCalledWith("应用自定义模板失败");
-    expect(options.showToast).not.toHaveBeenCalled();
+    expect(options.showToast).toHaveBeenCalledWith("已恢复默认配置");
   });
 
-  it("空闲锁定时长：越界输入收敛到允许区间", () => {
+  it("空闲锁定时长：越界收敛且停手后仅自动保存一次终值", async () => {
+    vi.useFakeTimers();
+    try {
+      securityPresetRef.value = 3;
+      const api = usePreset(stubOptions());
+      await api.loadPresetConfig();
+
+      api.onSetCustomSessionMinutes(0);
+      expect(api.customSessionMinutes.value).toBe(1);
+      api.onSetCustomSessionMinutes(99999);
+      expect(api.customSessionMinutes.value).toBe(120);
+      api.onSetCustomSessionMinutes(45.6);
+      expect(api.customSessionMinutes.value).toBe(46);
+
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(mocks.applySecurityPreset).toHaveBeenCalledTimes(1);
+      expect(mocks.applySecurityPreset).toHaveBeenCalledWith(
+        3,
+        undefined,
+        expect.any(Object),
+        46,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("档位真实空闲时长与自定义档标识", () => {
     const api = usePreset(stubOptions());
 
-    api.onSetCustomSessionMinutes(0);
-    expect(api.customSessionMinutes.value).toBe(1);
+    expect(api.isCustomPreset.value).toBe(false);
+    expect(api.activeIdleMinutes.value).toBe(30); // 平衡
 
-    api.onSetCustomSessionMinutes(99999);
-    expect(api.customSessionMinutes.value).toBe(120);
+    securityPresetRef.value = 1;
+    expect(api.activeIdleMinutes.value).toBe(10); // 高安全
 
-    api.onSetCustomSessionMinutes(45.6);
-    expect(api.customSessionMinutes.value).toBe(46);
+    securityPresetRef.value = 2;
+    expect(api.activeIdleMinutes.value).toBe(60); // 性能
+
+    securityPresetRef.value = 3;
+    expect(api.isCustomPreset.value).toBe(true);
+    expect(api.activeIdleMinutes.value).toBe(20); // 自定义草稿
   });
 });
 
@@ -299,6 +386,15 @@ describe("usePreset 特性快照加载", () => {
     expect(mocks.securityGetPresetConfig).toHaveBeenCalledWith(1);
     expect(api.currentPresetFeatures.value.anti_debug).toBe(true);
     expect(api.orbitSliderPos.value).toBe(100);
+  });
+
+  it("核心防护文案映射真实能力：key_separation 显示 V4 密钥隔离", () => {
+    const api = usePreset(stubOptions());
+    const item = api.lockedFeatures.value.find((f) => f.key === "key_separation");
+    expect(item).toBeTruthy();
+    expect(item?.label).toBe("密钥隔离");
+    expect(item?.desc).toContain("V4");
+    expect(item?.desc).not.toContain("三权分立");
   });
 
   it("自定义档取本地配置", async () => {

@@ -11,6 +11,7 @@
 #include "vty_v4_types.h"
 #include "vty_keymanager_v4.h"
 #include "vty_module_v4.h"
+#include "vty_store_v4.h"
 #include "vty_record_v4.h"
 #include "vty_chunk_v4.h"
 #include "vty_recovery.h"
@@ -147,21 +148,52 @@ static int cmd_a5(const char *dir)
     return report("A5", 1, "无明文泄露；错误 seq/epoch 还原失败");
 }
 
+/* 破坏容器内模块 0 的 device 槽 RSA 密文（描述符在 K_dir 加密目录内，
+ * 通过 store 读改写；DataRoot/meta 提交后重新打开验证）。 */
+static int break_module_device(VtyVault *v)
+{
+    uint8_t key = 0u;
+    uint8_t *val = NULL;
+    size_t len = 0;
+    size_t uoff = VTY_MODULE_DESC_FIXED;
+    size_t doff, ct_off;
+    uint16_t up, uct, dp, dct;
+    int rc;
+
+    rc = vty_store_get(v->store, VTY_KS_MODULE, &key, 1u, &val, &len);
+    if (rc != VTY_OK) return rc;
+    if (len < VTY_MODULE_DESC_FIXED + 6u) { vty_free(val, len); return VTY_E_CORRUPT; }
+
+    up = vty_get_u16(val + uoff + 4u);
+    if (len < uoff + 6u + up + 32u + 24u + 2u) { vty_free(val, len); return VTY_E_CORRUPT; }
+    uct = vty_get_u16(val + uoff + 6u + up + 32u + 24u);
+    doff = uoff + 6u + up + 32u + 24u + 2u + uct;
+    if (len < doff + 6u + 32u + 24u + 2u) { vty_free(val, len); return VTY_E_CORRUPT; }
+    dp = vty_get_u16(val + doff + 4u);
+    if (len < doff + 6u + dp + 32u + 24u + 2u) { vty_free(val, len); return VTY_E_CORRUPT; }
+    dct = vty_get_u16(val + doff + 6u + dp + 32u + 24u);
+    ct_off = doff + 6u + dp + 32u + 24u + 2u;
+    if (dct == 0u || len < ct_off + dct) { vty_free(val, len); return VTY_E_CORRUPT; }
+
+    val[ct_off] ^= 0x01u;
+    rc = vty_store_put(v->store, VTY_KS_MODULE, &key, 1u, val, len);
+    vty_free(val, len);
+    if (rc != VTY_OK) return rc;
+    return vty_vault_save(v);
+}
+
 /* A6b：同机错误模块口令达到阈值后熔断；A14：设备槽破坏后 fail-closed */
 static int cmd_a6b(const char *dir, int break_device)
 {
     VtyVault *v = NULL;
     char code[VTY_RECOVERY_TEXT_BUF];
-    char vpath[1024], mpath[1024], spath[1024];
-    uint8_t uuid0[VTY_UUID_BYTES];
-    uint8_t mdek[VTY_KEY_BYTES];
+    char vpath[1024], spath[1024];
     int rc, pass = 1;
     int i;
 
     mkpath(vpath, sizeof(vpath), dir, "a6b.verthys");
-    mkpath(mpath, sizeof(mpath), dir, "a6b.mod");
     mkpath(spath, sizeof(spath), dir, "a6b.state");
-    remove(vpath); remove(mpath); remove(spath);
+    remove(vpath); remove(spath);
 
     vty_lockout_set_enabled(1);
     if (vty_lockout_set_path(spath) != VTY_OK || vty_lockout_init() != VTY_OK ||
@@ -169,29 +201,14 @@ static int cmd_a6b(const char *dir, int break_device)
 
     if (vty_vault_create(vpath, "probe-vault-pass", &v, code, sizeof(code)) != VTY_OK)
         return report("A6b", 0, "vault create");
-    if (vty_vault_module_uuid(v, 0, uuid0) != VTY_OK)
-        return report("A6b", 0, "module uuid");
-    if (vty_module_create(mpath, v, uuid0, "module-pass",
-                          VTY_ARGON2_MEM_KIB_MIN, 3, 1) != VTY_OK)
-        return report("A6b", 0, "module create");
-    if (vty_module_unlock(mpath, v, uuid0, "module-pass", mdek) != VTY_OK)
-        return report("A6b", 0, "correct unlock");
+    if (vty_module_enable(v, 0u, "module-pass", NULL) != VTY_OK) {
+        vty_vault_free(v);
+        return report("A6b", 0, "module enable");
+    }
 
     if (break_device) {
-        uint8_t *buf = (uint8_t *)vty_alloc(1 << 20);
-        size_t len = 0;
-        uint8_t hash[VTY_HASH_BYTES];
-        if (buf == NULL || probe_read(mpath, buf, 1 << 20, &len) != 0 ||
-            len < 32 + 273) {
-            vty_free(buf, 1 << 20);
-            return report("A14", 0, "module read");
-        }
-        buf[272] ^= 0x01u;   /* 设备槽 RSA 密文 */
-        vty_blake3_32(buf, len - 32, hash);
-        memcpy(buf + len - 32, hash, sizeof(hash));
-        (void)probe_write(mpath, buf, len);
-        vty_free(buf, 1 << 20);
-        rc = vty_module_unlock(mpath, v, uuid0, "module-pass", mdek);
+        rc = break_module_device(v);
+        if (rc == VTY_OK) rc = vty_module_unlock(v, 0u, "module-pass");
         vty_vault_free(v);
         vty_lockout_set_enabled(0);
         return report("A14", rc == VTY_E_TPM,
@@ -200,14 +217,14 @@ static int cmd_a6b(const char *dir, int break_device)
     }
 
     for (i = 0; i < 5; i++) {
-        rc = vty_module_unlock(mpath, v, uuid0, "wrong-pass", mdek);
+        rc = vty_module_unlock(v, 0u, "wrong-pass");
         if (rc != VTY_E_KEY_INVALID) {
             pass = 0;
             break;
         }
     }
     if (pass) {
-        rc = vty_module_unlock(mpath, v, uuid0, "module-pass", mdek);
+        rc = vty_module_unlock(v, 0u, "module-pass");
         pass = (rc == VTY_E_LOCKED);
     }
     vty_vault_free(v);
@@ -360,6 +377,48 @@ static int cmd_a15(const char *dir)
                                     : "恢复码流程异常");
 }
 
+/* A16：v4 只接受自身格式；v3 文件在 v4 解析器必须返回版本错误 */
+static int cmd_a16(const char *dir)
+{
+    VtyVault *v = NULL;
+    char code[VTY_RECOVERY_TEXT_BUF];
+    char vpath[1024], v3path[1024];
+    uint8_t *fake;
+    int rc;
+    int pass = 1;
+
+    mkpath(vpath, sizeof(vpath), dir, "a16.verthys");
+    mkpath(v3path, sizeof(v3path), dir, "a16_v3.verthys");
+    remove(vpath);
+    remove(v3path);
+
+    if (vty_vault_create(vpath, "a16-pass", &v, code, sizeof(code)) != VTY_OK) {
+        return report("A16", 0, "create v4");
+    }
+    vty_vault_free(v);
+
+    /* 128 KiB 的伪 v3 头：长度足够进入 v4 元数据解析，magic 明确不是 VRTY */
+    fake = (uint8_t *)calloc(1, VTY_V4_DATA_OFFSET);
+    if (fake == NULL) return report("A16", 0, "alloc");
+    memcpy(fake, "V3RP", 4);
+    if (probe_write(v3path, fake, VTY_V4_DATA_OFFSET) != 0) pass = 0;
+    free(fake);
+
+    if (pass) {
+        v = NULL;
+        rc = vty_vault_open(v3path, "a16-pass", &v);
+        if (rc != VTY_E_VERSION) pass = 0;
+        if (v != NULL) vty_vault_free(v);
+    }
+    if (pass) {
+        v = NULL;
+        if (vty_vault_open(vpath, "a16-pass", &v) != VTY_OK) pass = 0;
+        if (v != NULL) vty_vault_free(v);
+    }
+    return report("A16", pass, pass ? "v4 接受、v3 返回 E_VERSION"
+                                    : "v3/v4 格式门异常");
+}
+
 /* A12：整体还原旧库文件 → 外部锚点拒绝；恢复码可重设锚点；锚点篡改 fail-closed */
 static int cmd_a12(const char *dir)
 {
@@ -368,7 +427,7 @@ static int cmd_a12(const char *dir)
     char code[VTY_RECOVERY_TEXT_BUF];
     char vpath[1024], opath[1024], spath[1024];
     uint8_t uuid[VTY_UUID_BYTES];
-    uint8_t old_copy[65536];
+    uint8_t old_copy[VTY_V4_DATA_OFFSET + 65536u];
     uint8_t state[4096];
     size_t old_len = 0;
     size_t state_len = 0;
@@ -527,32 +586,26 @@ static int cmd_a6(const char *dir)
 {
     VtyVault *v = NULL;
     char code[VTY_RECOVERY_TEXT_BUF];
-    char vpath[1024], mpath[1024];
-    uint8_t uuid0[VTY_UUID_BYTES];
-    uint8_t mdek[VTY_KEY_BYTES];
+    char vpath[1024];
     int rc_open, rc_mod, rc_create, level, provider, hits;
 
     mkpath(vpath, sizeof(vpath), dir, "a6.verthys");
-    mkpath(mpath, sizeof(mpath), dir, "a6.mod");
     remove(vpath);
-    remove(mpath);
 
-    /* A6 验证设备根绑定，与回滚锚点无关，避免两个模块互相干扰 */
+    /* A6 验证设备根绑定，与回滚锚点/熔断计数无关：
+     * 共享状态（其他用例留下的锁定）会掩盖 E_TPM，必须隔离。 */
     vty_rollback_set_enabled(0);
+    vty_lockout_set_enabled(0);
 
     rc_create = vty_vault_create(vpath, "probe-vault-pass", &v, code, sizeof(code));
     if (rc_create != VTY_OK) return report("A6", 0, "vault create failed");
 
-    if (vty_vault_module_uuid(v, 0, uuid0) != VTY_OK) {
+    /* 模块槽在容器内：启用即轮换 MDEK 并移出 Keyring。 */
+    if (vty_module_enable(v, 0u, "module-pass", NULL) != VTY_OK) {
         vty_vault_free(v);
-        return report("A6", 0, "module uuid failed");
+        return report("A6", 0, "module enable failed");
     }
-    if (vty_module_create(mpath, v, uuid0, "module-pass",
-                          VTY_ARGON2_MEM_KIB_MIN, 3, 1) != VTY_OK) {
-        vty_vault_free(v);
-        return report("A6", 0, "module create failed");
-    }
-    rc_mod = vty_module_unlock(mpath, v, uuid0, "module-pass", mdek);
+    rc_mod = vty_module_unlock(v, 0u, "module-pass");
     vty_vault_free(v);
     v = NULL;
 
@@ -561,10 +614,6 @@ static int cmd_a6(const char *dir)
 
     probe_device_slot(&level, &provider);
     hits = probe_plaintext_hits(vpath);
-    if (hits >= 0) {
-        int mh = probe_plaintext_hits(mpath);
-        hits = mh < 0 ? -1 : hits + mh; /* 任一文件读失败都不能报告 0 命中 */
-    }
 
     printf("A6 device_level=%d device_provider=%d vault_open=%d module_unlock=%d plaintext_hits=%d\n",
            level, provider, rc_open, rc_mod, hits);
@@ -579,41 +628,217 @@ static int cmd_a6(const char *dir)
 static int cmd_a6run(const char *dir)
 {
     VtyVault *v = NULL;
-    char vpath[1024], mpath[1024];
-    uint8_t uuid0[VTY_UUID_BYTES];
-    uint8_t mdek[VTY_KEY_BYTES];
-    uint8_t filebuf[4096];
-    size_t flen = 0;
+    char vpath[1024];
     int rc_open, rc_mod = -1, level, provider, hits = 0;
 
     mkpath(vpath, sizeof(vpath), dir, "a6.verthys");
-    mkpath(mpath, sizeof(mpath), dir, "a6.mod");
 
+    /* 与源机一致：关掉回滚锚点与熔断计数，避免目标机残留状态把 E_TPM
+     * 掩盖成 E_LOCKED，造成假阴性。设备根必须先初始化：生产入口在
+     * Verthys_Init 完成该步骤，探针只调 verthys_crypto_init，漏掉会让
+     * 同机重开也返回 E_TPM，把 A6 变成“任何机器都通过”的无效证据。 */
     vty_rollback_set_enabled(0);
-
-    /* 模块文件头：uuid(16)@8、module_uuid(16)@24，不依赖解锁状态 */
-    if (probe_read(mpath, filebuf, sizeof(filebuf), &flen) != 0 || flen < 40) {
-        printf("A6RUN FAIL module_missing\n");
-        return 2;
-    }
-    memcpy(uuid0, filebuf + 24, VTY_UUID_BYTES);
+    vty_lockout_set_enabled(0);
+    (void)vty_device_root_init();
 
     rc_open = vty_vault_open(vpath, "probe-vault-pass", &v);
     if (rc_open == VTY_OK && v != NULL) {
-        rc_mod = vty_module_unlock(mpath, v, uuid0, "module-pass", mdek);
+        rc_mod = vty_module_unlock(v, 0u, "module-pass");
         vty_vault_free(v);
     }
 
     probe_device_slot(&level, &provider);
     hits = probe_plaintext_hits(vpath);
-    if (hits >= 0) {
-        int mh = probe_plaintext_hits(mpath);
-        hits = mh < 0 ? -1 : hits + mh;
-    }
 
     printf("A6RUN device_level=%d device_provider=%d vault_open=%d module_unlock=%d plaintext_hits=%d\n",
            level, provider, rc_open, rc_mod, hits);
     return 0;
+}
+
+/* 文件复制（A18 备份/还原用） */
+static int probe_copy_file(const char *src, const char *dst)
+{
+    FILE *in = fopen(src, "rb");
+    FILE *out;
+    uint8_t buf[4096];
+    size_t n;
+    int ok = 1;
+
+    if (in == NULL) return 1;
+    out = fopen(dst, "wb");
+    if (out == NULL) {
+        fclose(in);
+        return 1;
+    }
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            ok = 0;
+            break;
+        }
+    }
+    fclose(in);
+    fclose(out);
+    return ok ? 0 : 1;
+}
+
+/* A18 用：清除两份元数据副本的 KEYFILE 标志位；repair_hash=1 时同步
+ * 重算头哈希（模拟“攻击者知道格式”的降级尝试）。 */
+static int probe_strip_keyfile_flag(const char *path, int repair_hash)
+{
+    uint8_t copy[VTY_V4_META_COPY_BYTES];
+    uint8_t digest[VTY_HASH_BYTES];
+    FILE *f = fopen(path, "r+b");
+    size_t base;
+    int ok = 1;
+
+    if (f == NULL) return 1;
+    for (base = 0; base < VTY_V4_DATA_OFFSET; base += VTY_V4_META_COPY_BYTES) {
+        uint16_t header_len;
+
+        if (fseek(f, (long)base, SEEK_SET) != 0 ||
+            fread(copy, 1, sizeof(copy), f) != sizeof(copy)) {
+            ok = 0;
+            break;
+        }
+        header_len = vty_get_u16(copy + 8);
+        if (header_len < VTY_V4_HEADER_FIXED_BYTES + VTY_V4_HEADER_HASH_BYTES ||
+            header_len > VTY_V4_META_COPY_BYTES) {
+            ok = 0;
+            break;
+        }
+        vty_put_u16(copy + 10, (uint16_t)(vty_get_u16(copy + 10) &
+                                          (uint16_t)~VTY_FLAG_KEYFILE));
+        if (repair_hash) {
+            (void)vty_blake3_32(copy, header_len - VTY_V4_HEADER_HASH_BYTES,
+                                digest);
+            memcpy(copy + header_len - VTY_V4_HEADER_HASH_BYTES, digest,
+                   VTY_HASH_BYTES);
+        }
+        if (fseek(f, (long)base, SEEK_SET) != 0 ||
+            fwrite(copy, 1, header_len, f) != header_len) {
+            ok = 0;
+            break;
+        }
+    }
+    fclose(f);
+    return ok ? 0 : 1;
+}
+
+/* A18：keyfile 因子（D3）攻击矩阵——缺失/坏文件/换文件/剥标志/关闭 */
+/* 失败只置 pass=0，保持单行 RESULT 输出契约（步骤号仅用于本地复核）。 */
+#define A18_FAIL(step, got, want) \
+    do { (void)(step); (void)(got); (void)(want); pass = 0; } while (0)
+static int cmd_a18(const char *dir)
+{
+    VtyVault *v = NULL;
+    char code[VTY_RECOVERY_TEXT_BUF];
+    char vpath[1024], kpath[1024], kpath2[1024], bak[1024];
+    uint8_t blob[VTY_KEYFILE_BLOB_BYTES];
+    int rc;
+    int pass = 1;
+
+    mkpath(vpath, sizeof(vpath), dir, "a18.verthys");
+    mkpath(kpath, sizeof(kpath), dir, "a18.vkf");
+    mkpath(kpath2, sizeof(kpath2), dir, "a18_other.vkf");
+    mkpath(bak, sizeof(bak), dir, "a18_backup.bin");
+    remove(vpath);
+    remove(kpath);
+    remove(kpath2);
+    remove(bak);
+    memset(code, 0, sizeof(code));
+    /* 攻击用例会故意制造多次解锁失败；探针必须关闭熔断计数，
+     * 否则失败尝试本身会把后续步骤统一挡在 E_LOCKED（假阴性）。 */
+    vty_lockout_set_enabled(0);
+
+    /* 1. 用 keyfile 文件创建库 */
+    if (vty_vault_create_keyfile_file(vpath, "a18-pass", kpath, &v, code,
+                                      sizeof(code)) != VTY_OK) {
+        return report("A18", 0, "create with keyfile");
+    }
+    vty_vault_free(v);
+    v = NULL;
+
+    /* 2. 缺 keyfile：KEYFILE 标志置位 → 显式 REQUIRED */
+    rc = vty_vault_open(vpath, "a18-pass", &v);
+    if (rc != VTY_E_KEYFILE_REQUIRED) A18_FAIL(2, rc, VTY_E_KEYFILE_REQUIRED);
+    if (v != NULL) { vty_vault_free(v); v = NULL; }
+
+    /* 3. 文件不存在 / 不是 VKFL → INVALID（不是 AUTH） */
+    rc = vty_vault_open_keyfile(vpath, "a18-pass", "a18-missing.vkf", &v);
+    if (rc != VTY_E_KEYFILE_INVALID) A18_FAIL(3, rc, VTY_E_KEYFILE_INVALID);
+    if (v != NULL) { vty_vault_free(v); v = NULL; }
+
+    /* 4. 合法 VKFL 但 secret 不对 → 统一 KEY_INVALID（与口令错不可区分） */
+    if (vty_keyfile_generate(blob) != VTY_OK ||
+        probe_write(kpath2, blob, sizeof(blob)) != 0) {
+        pass = 0;
+    } else {
+        rc = vty_vault_open_keyfile(vpath, "a18-pass", kpath2, &v);
+        if (rc != VTY_E_KEY_INVALID) A18_FAIL(4, rc, VTY_E_KEY_INVALID);
+    }
+    if (v != NULL) { vty_vault_free(v); v = NULL; }
+
+    /* 5. 正确 keyfile 解锁 */
+    rc = vty_vault_open_keyfile(vpath, "a18-pass", kpath, &v);
+    if (rc != VTY_OK) A18_FAIL(5, rc, 0);
+    if (v != NULL) { vty_vault_free(v); v = NULL; }
+
+    /* 6. 轮换 keyfile：旧文件必须失效，新文件可用。轮换目标必须是
+     *    尚未存在的路径，先清掉第 4 步生成的“错误但合法”文件。 */
+    remove(kpath2);
+    rc = vty_vault_open_keyfile(vpath, "a18-pass", kpath, &v);
+    if (rc != VTY_OK) {
+        A18_FAIL(6, rc, 0);
+    } else {
+        rc = vty_vault_keyfile_enable_file(v, "a18-pass", kpath2);
+        if (rc != VTY_OK) A18_FAIL(61, rc, 0);
+        vty_vault_free(v);
+        v = NULL;
+    }
+    rc = vty_vault_open_keyfile(vpath, "a18-pass", kpath, &v);
+    if (rc == VTY_OK) A18_FAIL(62, rc, -1);
+    if (v != NULL) { vty_vault_free(v); v = NULL; }
+    rc = vty_vault_open_keyfile(vpath, "a18-pass", kpath2, &v);
+    if (rc != VTY_OK) A18_FAIL(63, rc, 0);
+    if (v != NULL) { vty_vault_free(v); v = NULL; }
+
+    /* 7. 剥 KEYFILE 标志且不修头哈希 → 两副本都失效，fail-closed */
+    if (probe_copy_file(vpath, bak) != 0) pass = 0;
+    if (probe_strip_keyfile_flag(vpath, 0) != 0) pass = 0;
+    rc = vty_vault_open_keyfile(vpath, "a18-pass", kpath2, &v);
+    if (rc == VTY_OK) A18_FAIL(7, rc, -1);
+    if (v != NULL) { vty_vault_free(v); v = NULL; }
+    if (probe_copy_file(bak, vpath) != 0) pass = 0;
+
+    /* 8. 剥标志并重算头哈希（模拟懂格式的攻击者）→ 用户槽 KDF 混合
+     *    仍应 fail-closed（口令单独喂入无法解开槽） */
+    if (probe_strip_keyfile_flag(vpath, 1) != 0) pass = 0;
+    rc = vty_vault_open(vpath, "a18-pass", &v);
+    if (rc != VTY_E_KEY_INVALID) A18_FAIL(8, rc, VTY_E_KEY_INVALID);
+    if (v != NULL) { vty_vault_free(v); v = NULL; }
+    if (probe_copy_file(bak, vpath) != 0) pass = 0;
+
+    /* 9. 关闭 keyfile：校验当前文件后回到仅口令解锁 */
+    rc = vty_vault_open_keyfile(vpath, "a18-pass", kpath2, &v);
+    if (rc != VTY_OK) {
+        A18_FAIL(9, rc, 0);
+    } else {
+        rc = vty_vault_keyfile_disable(v, "a18-pass", kpath2);
+        if (rc != VTY_OK) A18_FAIL(91, rc, 0);
+        vty_vault_free(v);
+        v = NULL;
+    }
+    rc = vty_vault_open(vpath, "a18-pass", &v);
+    if (rc != VTY_OK) A18_FAIL(92, rc, 0);
+    if (v != NULL) { vty_vault_free(v); v = NULL; }
+
+    remove(vpath);
+    remove(kpath);
+    remove(kpath2);
+    remove(bak);
+    return report("A18", pass,
+                  pass ? "缺/坏/换 keyfile 均 fail-closed；剥标志（含修哈希）仍拒绝；关闭后仅口令可开"
+                       : "keyfile 攻击矩阵存在绕过");
 }
 
 int main(int argc, char **argv)
@@ -626,7 +851,7 @@ int main(int argc, char **argv)
      * 与测试进程“副作用模块默认关闭”的约定一致。 */
     vty_rollback_set_enabled(0);
     if (argc < 3) {
-        printf("usage: vty_probe <a5|a6|a6run|a6b|a7|a10|a11|a12|a13|a14|a15> <dir|path> [...]\n");
+        printf("usage: vty_probe <a5|a6|a6run|a6b|a7|a10|a11|a12|a13|a14|a15|a16|a18> <dir|path> [...]\n");
         return 2;
     }
 
@@ -641,6 +866,8 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "a12") == 0) return cmd_a12(argv[2]);
     if (strcmp(argv[1], "a13") == 0) return cmd_a13();
     if (strcmp(argv[1], "a15") == 0) return cmd_a15(argv[2]);
+    if (strcmp(argv[1], "a16") == 0) return cmd_a16(argv[2]);
+    if (strcmp(argv[1], "a18") == 0) return cmd_a18(argv[2]);
 
     printf("RESULT UNKNOWN FAIL unsupported command\n");
     return 2;

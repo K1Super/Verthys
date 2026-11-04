@@ -38,10 +38,8 @@ fn main() {
     log::install_panic_hook();
     log::install_exception_filter();
     // panic 清零器注册：hook 触发时对当前线程 GMK 驻留执行前置清零
+    // （内容层分片密钥只存在于 C 层句柄，worker 侧无驻留密钥需要清零）
     log::register_panic_wiper(runtime::wipe_thread_gmk);
-    /* 内容层密钥与 GMK 分属不同托管表，panic 时必须各自清零，
-     * 任一遗漏都会把解锁态密钥留在崩溃转储里。 */
-    log::register_panic_wiper(runtime::wipe_thread_keys);
 
     // Step 2: 参数解析 — 提取 dll_path
     let args: Vec<String> = std::env::args().collect();

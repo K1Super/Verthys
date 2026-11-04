@@ -22,3 +22,6 @@ pub mod preset_source;
 
 /* 可移动介质绑定的服务层契约（依赖反转：实现由 security_commands 注册） */
 pub mod usb_binding;
+
+/* v4 D9 全库 DEK 轮换的服务层契约（依赖反转：实现由 security_commands 注册） */
+pub mod vault_rotate;

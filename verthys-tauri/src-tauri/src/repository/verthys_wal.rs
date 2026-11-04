@@ -5,10 +5,10 @@
 //! =============================================================================
 //! 设计目标
 //! =============================================================================
-//! 在每条加密记录进入缓存缓冲器**之前**，先将 {hash, status} 写入本地 WAL，
+//! 在每条加密记录进入缓存缓冲器**之前**，先将 {entry_key, status} 写入本地 WAL，
 //! 批量刷新成功后标记为 committed。崩溃/关闭后重启，扫描 WAL 即可：
-//!   - 已 committed 的哈希 → 已落盘（v2 add_record 即时 fsync），续传时直接跳过
-//!   - pending 但未 committed → 未落盘，续传时重新加密入库（哈希未变，幂等）
+//!   - 已 committed 的条目键 → 已落盘（v2 add_record 即时 fsync），续传时直接跳过
+//!   - pending 但未 committed → 未落盘，续传时重新加密入库（条目键未变，幂等）
 //! 重做量不超过一个批次（检查点粒度）。
 //!
 //! =============================================================================
@@ -16,9 +16,10 @@
 //! =============================================================================
 //! 每行一个 JSON 对象，以 `\n` 分隔。条目类型：
 //!   {"kind":"begin","import_id":"<uuid>","ts":<unix_ms>}
-//!   {"kind":"pending","import_id":"<uuid>","batch_id":<n>,"hash":"<blake3 hex>","name":"<file>","idx":<i>}
-//!   {"kind":"committed","import_id":"<uuid>","batch_id":<n>,"hash":"<blake3 hex>","verthys_id":<lid>,"name":"<file>","chunk_ids":<[lid]|缺省>}
+//!   {"kind":"pending","import_id":"<uuid>","batch_id":<n>,"entry_key":"<非内容键>","name":"<file>","idx":<i>}
+//!   {"kind":"committed","import_id":"<uuid>","batch_id":<n>,"entry_key":"<非内容键>","verthys_id":<lid>,"name":"<file>","chunk_ids":<[lid]|缺省>}
 //!   {"kind":"checkpoint","import_id":"<uuid>","batch_id":<n>,"committed_count":<x>}
+//!   {"kind":"removed","keys":["<非内容键>"],"at":<unix_ms>}
 //!   {"kind":"end","import_id":"<uuid>","success":<bool>}
 //!
 //! `chunk_ids` 为显式声明的外置块引用集合（缺省表示历史条目、引用不可推断）；
@@ -29,16 +30,16 @@
 //! =============================================================================
 //! 恢复语义
 //! =============================================================================
-//! - load(): 全量重放 WAL，构建 committed 哈希集合 + 最后检查点。
-//! - 已 committed 哈希进入 `committed_hashes`，续传时生产者据此去重（幂等）。
-//! - pending 未 committed：不入 committed_hashes，续传时重新处理（哈希未变 → 重新加密入库）。
-//! - compact(): 导入成功结束后，将 committed 哈希合并写入一个 begin/checkpoint/end
+//! - load(): 全量重放 WAL，构建 committed 条目键集合 + 最后检查点。
+//! - 已 committed 条目键进入 `committed_keys`，续传时生产者据此去重（幂等）。
+//! - pending 未 committed：不入 committed_keys，续传时重新处理（键未变 → 重新加密入库）。
+//! - compact(): 导入成功结束后，将 committed 条目键合并写入一个 begin/checkpoint/end
 //!   原子替换文件，缩减 WAL 体积；失败/中断保留原 WAL 供下次续传。
 //!
 //! =============================================================================
 //! 安全边界
 //! =============================================================================
-//! - 仅记录哈希（BLAKE3 hex）与文件名，不含密钥、不含明文、不含密文。
+//! - 仅记录非内容条目键（调用方派生）与文件名，不含密钥、不含明文、不含密文。
 //! - WAL 文件位于容器附属数据目录（受 VerthysFileLock 独占锁保护，防并发写）。
 //! - 所有 IO 失败向上传播为 Err（持久层不吞异常），由控制器决定降级策略。
 //!
@@ -74,7 +75,9 @@ pub enum WalEntry {
     Pending {
         import_id: String,
         batch_id: u64,
-        hash: String,
+        /// 非内容键：调用方生成的导入项身份键（用于会话内幂等/WAL 续传）
+        #[serde(default)]
+        entry_key: String,
         name: String,
         idx: u64,
     },
@@ -87,7 +90,9 @@ pub enum WalEntry {
     Committed {
         import_id: String,
         batch_id: u64,
-        hash: String,
+        /// 非内容键：与 Pending 同源的导入项身份键
+        #[serde(default)]
+        entry_key: String,
         verthys_id: u64,
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,7 +108,8 @@ pub enum WalEntry {
     /// 删除墓碑：照片删除后释放去重锁（删除后可重新导入）
     #[serde(rename = "removed")]
     Removed {
-        hashes: Vec<String>,
+        /// 被删除条目的非内容身份键（释放续传幂等锁）
+        keys: Vec<String>,
         /// 写入时刻（Unix 毫秒）
         at: u64,
     },
@@ -115,15 +121,15 @@ pub enum WalEntry {
 /// WAL 恢复后的快照
 #[derive(Debug, Clone, Default)]
 pub struct WalSnapshot {
-    /// 所有已 committed 的内容哈希（BLAKE3 hex）— 续传去重依据
-    pub committed_hashes: HashSet<String>,
+    /// 所有已 committed 的非内容条目键 — 续传幂等依据
+    pub committed_keys: HashSet<String>,
     /// 最后一个检查点已提交计数
     pub last_committed_count: u64,
     /// 最后一个检查点的批次 ID
     pub last_batch_id: u64,
     /// 当前活跃的 import_id（若 WAL 未 end）
     pub active_import_id: Option<String>,
-    /// 已 committed 的 {hash → verthys_id} 映射（供调试/审计）
+    /// 已 committed 的 {entry_key → verthys_id} 映射（供调试/审计）
     pub committed_ids: std::collections::HashMap<String, u64>,
     /// 已 committed 条目显式声明的外置块归属：{块记录 ID → 拥有者记录 ID}
     ///
@@ -217,7 +223,10 @@ fn snapshot_path_for(wal_path: &Path) -> PathBuf {
 /// 增量条目；恢复 = 快照基线 + WAL 增量重放，加载成本 O(1) + O(增量)。
 #[derive(Serialize, Deserialize, Default)]
 struct WalSetSnapshot {
-    committed_hashes: Vec<String>,
+    /// v1 快照中的旧去重字段被忽略：内容哈希不得再作为去重键。
+    #[serde(default)]
+    committed_keys: Vec<String>,
+    #[serde(default)]
     committed_ids: Vec<(String, u64)>,
 }
 
@@ -233,11 +242,11 @@ fn write_snapshot_file(wal_path: &Path, snapshot: &WalSnapshot) -> Result<(), St
     tmp.set_file_name(name);
 
     let payload = WalSetSnapshot {
-        committed_hashes: snapshot.committed_hashes.iter().cloned().collect(),
+        committed_keys: snapshot.committed_keys.iter().cloned().collect(),
         committed_ids: snapshot
             .committed_ids
             .iter()
-            .map(|(hash, id)| (hash.clone(), *id))
+            .map(|(key, id)| (key.clone(), *id))
             .collect(),
     };
     let json = serde_json::to_string(&payload).map_err(|e| format!("WAL 快照序列化失败: {}", e))?;
@@ -257,6 +266,34 @@ fn write_snapshot_file(wal_path: &Path, snapshot: &WalSnapshot) -> Result<(), St
     Ok(())
 }
 
+/// 截断前检测 v1 条目（内容哈希作去重键）并备份为 `<wal>.v1.bak`。
+///
+/// v1 WAL 的 `hash` 字段不再承载去重语义；备份仅用于回滚到旧代码时恢复
+/// 原有状态，不参与新版本的任何判定。备份已存在时不覆盖（保留最早副本）。
+fn backup_legacy_wal_if_needed(wal_path: &Path) -> Result<(), String> {
+    if !wal_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(wal_path)
+        .map_err(|e| format!("WAL 旧格式检查读取失败: {}", e))?;
+    let has_v1 = content.lines().any(|line| {
+        (line.contains("\"kind\":\"pending\"") || line.contains("\"kind\":\"committed\""))
+            && line.contains("\"hash\":")
+    });
+    if !has_v1 {
+        return Ok(());
+    }
+    let backup = PathBuf::from(format!("{}.v1.bak", wal_path.to_string_lossy()));
+    if backup.exists() {
+        return Ok(());
+    }
+    std::fs::copy(wal_path, &backup)
+        .map(|_| ())
+        .map_err(|e| format!("WAL v1 备份失败: {}", e))?;
+    log::info!("[wal] v1 WAL 已备份（内容哈希去重语义不再复用）");
+    Ok(())
+}
+
 /// WAL 写入句柄（持有打开的文件句柄，append-only）
 pub struct WalWriter {
     file: File,
@@ -268,10 +305,12 @@ impl WalWriter {
     /// 若存在遗留 WAL（未 end 的旧会话），调用方应先 load() 恢复再决定是否覆盖。
     ///
     /// 全部写路径固定为附属数据目录；截断成功后旧布局 WAL 与快照被 best-effort
-    /// 回收（其去重集合已由调用方在此之前载入）。
+    /// 回收（其去重集合已由调用方在此之前载入）。截断前若检测到 v1 条目
+    /// （内容哈希作去重键），先备份为 `<wal>.v1.bak` 供回滚。
     pub fn create(verthys_path: &str, import_id: &str) -> Result<Self, String> {
         container_layout::ensure_sidecar_dir(verthys_path)?;
         let path = container_layout::wal_file_for(verthys_path);
+        backup_legacy_wal_if_needed(&path)?;
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -324,7 +363,7 @@ impl WalWriter {
             import_id: import_id.to_string(),
             success,
         })?;
-        // success=true：保留 WAL 供下次去重（committed_hashes 仍需可恢复），
+        // success=true：保留 WAL 供下次去重（committed_keys 仍需可恢复），
         // 但通过 compact 缩减体积。failure：原样保留供续传。
         if success {
             writer.compact(import_id)?;
@@ -369,7 +408,7 @@ impl WalWriter {
             let ckpt = serde_json::to_string(&WalEntry::Checkpoint {
                 import_id: import_id.to_string(),
                 batch_id: snapshot.last_batch_id,
-                committed_count: snapshot.committed_hashes.len() as u64,
+                committed_count: snapshot.committed_keys.len() as u64,
             })
             .map_err(|e| format!("WAL 序列化失败: {}", e))?;
             writeln!(tmp, "{}", ckpt).map_err(|e| format!("WAL 写入失败: {}", e))?;
@@ -417,13 +456,15 @@ fn load_from_path(path: &Path) -> Result<WalSnapshot, String> {
             std::fs::read_to_string(&snap_path).map_err(|e| format!("WAL 快照读取失败: {}", e))?;
         let base: WalSetSnapshot =
             serde_json::from_str(&text).map_err(|e| format!("WAL 快照解析失败: {}", e))?;
-        for hash in base.committed_hashes {
-            snapshot.committed_hashes.insert(hash);
+        for key in base.committed_keys {
+            if !key.is_empty() {
+                snapshot.committed_keys.insert(key);
+            }
         }
-        for (hash, id) in base.committed_ids {
-            snapshot.committed_ids.insert(hash, id);
+        for (key, id) in base.committed_ids {
+            snapshot.committed_ids.insert(key, id);
         }
-        snapshot.last_committed_count = snapshot.committed_hashes.len() as u64;
+        snapshot.last_committed_count = snapshot.committed_keys.len() as u64;
     }
 
     // 2. 增量重放（快照之后追加的 WAL 条目；无 WAL 则仅快照有效）
@@ -454,17 +495,19 @@ fn load_from_path(path: &Path) -> Result<WalSnapshot, String> {
                 snapshot.last_batch_id = 0;
             }
             WalEntry::Pending { .. } => {
-                // pending 不进入 committed_hashes，续传时重新处理
+                // pending 不进入 committed_keys，续传时重新处理
             }
             WalEntry::Committed {
-                hash,
+                entry_key,
                 verthys_id,
                 import_id,
                 chunk_ids,
                 ..
             } => {
-                snapshot.committed_hashes.insert(hash.clone());
-                snapshot.committed_ids.insert(hash, verthys_id);
+                if !entry_key.is_empty() {
+                    snapshot.committed_keys.insert(entry_key.clone());
+                    snapshot.committed_ids.insert(entry_key, verthys_id);
+                }
                 match chunk_ids {
                     Some(ids) => {
                         for chunk_id in ids {
@@ -486,20 +529,20 @@ fn load_from_path(path: &Path) -> Result<WalSnapshot, String> {
                 snapshot.last_committed_count = committed_count;
                 snapshot.active_import_id = Some(import_id);
             }
-            WalEntry::Removed { hashes, .. } => {
-                // 删除墓碑：从去重集合移除（删除后可重新导入语义），并撤销
+            WalEntry::Removed { keys, .. } => {
+                // 删除墓碑：从续传幂等集合移除（删除后可重新导入语义），并撤销
                 // 该记录声明过的块归属，避免把已删除记录的块结算成有效归属
-                for hash in &hashes {
-                    if let Some(owner_id) = snapshot.committed_ids.remove(hash) {
+                for key in &keys {
+                    if let Some(owner_id) = snapshot.committed_ids.remove(key) {
                         snapshot
                             .committed_chunk_owners
                             .retain(|_, owner| *owner != owner_id);
                     }
-                    snapshot.committed_hashes.remove(hash);
+                    snapshot.committed_keys.remove(key);
                 }
             }
             WalEntry::End { .. } => {
-                // 会话结束：保留已构建的 committed_hashes 供下次去重
+                // 会话结束：保留已构建的 committed_keys 供下次去重
                 snapshot.active_import_id = None;
             }
         }
@@ -607,14 +650,14 @@ pub fn exists(verthys_path: &str) -> bool {
         || container_layout::legacy_wal_file_for(verthys_path).exists()
 }
 
-/// 追加删除墓碑（照片删除后释放去重锁，删除后可重新导入）。
+/// 追加删除墓碑（照片删除后释放续传幂等锁，删除后可重新导入）。
 ///
 /// 以 append 模式写入既有 WAL（含 fsync）；WAL 不存在时为无操作
-/// （去重集合本为空，无可释放）。墓碑独立于导入会话：恢复重放时
-/// 与条目位置无关地从 committed 集合移除哈希，且下一次会话创建在
+/// （幂等集合本为空，无可释放）。墓碑独立于导入会话：恢复重放时
+/// 与条目位置无关地从 committed 集合移除条目键，且下一次会话创建在
 /// 截断 WAL 前先完成重放，移除效果在截断后由内存集合继续承载。
-pub fn append_removed(verthys_path: &str, hashes: &[String]) -> Result<(), String> {
-    if hashes.is_empty() {
+pub fn append_removed(verthys_path: &str, keys: &[String]) -> Result<(), String> {
+    if keys.is_empty() {
         return Ok(());
     }
     let path = resolve_wal_path(verthys_path);
@@ -626,7 +669,7 @@ pub fn append_removed(verthys_path: &str, hashes: &[String]) -> Result<(), Strin
         .open(&path)
         .map_err(|e| format!("WAL 追加打开失败: {}", e))?;
     let entry = WalEntry::Removed {
-        hashes: hashes.to_vec(),
+        keys: keys.to_vec(),
         at: now_ms(),
     };
     let line = serde_json::to_string(&entry).map_err(|e| format!("WAL 序列化失败: {}", e))?;
@@ -680,7 +723,7 @@ fn now_ms() -> u64 {
 
 /// 导入会话状态（贯穿整个导入生命周期，由 AppState 持有）
 ///
-/// 绑定一个 WAL 写入句柄 + 已提交哈希集合（去重）+ 批次计数器。
+/// 绑定一个 WAL 写入句柄 + 已提交条目键集合（续传幂等）+ 批次计数器。
 /// 通过 AppState::lock_import_session() 访问，单 verthys 同一时刻仅一个活跃会话。
 pub struct ImportSession {
     /// WAL 写入句柄（append-only，持文件句柄）
@@ -691,14 +734,14 @@ pub struct ImportSession {
     pub verthys_path: String,
     /// 下一个批次 ID（从 1 递增）
     pub next_batch_id: u64,
-    /// 已 committed 的内容哈希集合（生产者据此去重，保证幂等）
-    pub committed_hashes: HashSet<String>,
+    /// 已 committed 的非内容条目键集合（生产者据此跳过，保证幂等）
+    pub committed_keys: HashSet<String>,
     /// 累计已 committed 记录数（检查点）
     pub total_committed: u64,
-    /// 累计因哈希去重跳过的记录数（进度反馈用，不入 WAL）
+    /// 累计因条目键去重跳过的记录数（进度反馈用，不入 WAL）
     pub total_skipped: u64,
-    /// 外置块哈希 → 记录 ID 映射（本会话已上传块，重试幂等去重）
-    pub chunk_ids_by_hash: HashMap<String, u64>,
+    /// 外置块键 → 记录 ID 映射（本会话已上传块，重试幂等复用）
+    pub chunk_ids_by_key: HashMap<String, u64>,
     /// 本会话已成功上传的外置块记录 ID 集合（meta 引用的权威判定集）
     pub issued_chunk_ids: HashSet<u64>,
     /// 外置块台账（块记录 ID → 拥有者 meta ID，0 = 未被引用）
@@ -714,17 +757,17 @@ pub struct ImportSession {
 }
 
 impl ImportSession {
-    /// 创建新会话：初始化 WAL + 从既有快照恢复 committed_hashes（续传去重）
+    /// 创建新会话：初始化 WAL + 从既有快照恢复 committed_keys（续传去重）
     /// 并加载外置块台账（缺失即空，损坏则向上传播失败）。
     ///
     /// 建会话前必须完成台账结算：把上一会话已提交记录的块归属写回台账，
     /// 冻结无法证明归属的历史条目。结算落盘失败即会话创建失败——绝不允许
     /// 在「台账可能把已被引用的块判成孤儿」的状态下开始新一轮写入。
     pub fn new(verthys_path: &str, import_id: &str) -> Result<Self, String> {
-        // 先加载既有 WAL 快照（若存在遗留 WAL，恢复 committed_hashes 实现续传去重）
+        // 先加载既有 WAL 快照（若存在遗留 WAL，恢复 committed_keys 实现续传去重）
         let snapshot = load(verthys_path)?;
-        let committed_hashes = snapshot.committed_hashes.clone();
-        let total_committed = snapshot.committed_hashes.len() as u64;
+        let committed_keys = snapshot.committed_keys.clone();
+        let total_committed = snapshot.committed_keys.len() as u64;
 
         // 加载外置块台账（在截断 WAL 之前：台账损坏时直接失败，避免已截断
         // WAL 却未能建立会话的半成品状态）
@@ -759,29 +802,29 @@ impl ImportSession {
             import_id: import_id.to_string(),
             verthys_path: verthys_path.to_string(),
             next_batch_id: 1,
-            committed_hashes,
+            committed_keys,
             total_committed,
             total_skipped: 0,
-            chunk_ids_by_hash: HashMap::new(),
+            chunk_ids_by_key: HashMap::new(),
             issued_chunk_ids: HashSet::new(),
             chunk_ledger,
             ledger_dirty: false,
         })
     }
 
-    /// 检查哈希是否已 committed（去重）
-    pub fn is_committed(&self, hash: &str) -> bool {
-        self.committed_hashes.contains(hash)
+    /// 检查条目键是否已 committed（会话内/WAL 续传幂等）
+    pub fn is_committed(&self, entry_key: &str) -> bool {
+        self.committed_keys.contains(entry_key)
     }
 
-    /// 标记一条记录为已 committed（更新去重集合 + 计数）
-    pub fn mark_committed(&mut self, hash: &str) {
-        if self.committed_hashes.insert(hash.to_string()) {
+    /// 标记一条记录为已 committed（更新幂等集合 + 计数）
+    pub fn mark_committed(&mut self, entry_key: &str) {
+        if self.committed_keys.insert(entry_key.to_string()) {
             self.total_committed += 1;
         }
     }
 
-    /// 标记一条记录因哈希去重跳过（仅累计计数，不入 WAL）
+    /// 标记一条记录因条目键幂等跳过（仅累计计数，不入 WAL）
     pub fn mark_skipped(&mut self) {
         self.total_skipped += 1;
     }
@@ -793,14 +836,14 @@ impl ImportSession {
         id
     }
 
-    /// 查询已上传外置块（同哈希复用记录 ID，批次重试幂等）
-    pub fn lookup_chunk(&self, hash: &str) -> Option<u64> {
-        self.chunk_ids_by_hash.get(hash).copied()
+    /// 查询已上传外置块（同块键复用记录 ID，批次重试幂等）
+    pub fn lookup_chunk(&self, chunk_key: &str) -> Option<u64> {
+        self.chunk_ids_by_key.get(chunk_key).copied()
     }
 
-    /// 记账已上传外置块（幂等去重映射 + 发放集合两处同步）
-    pub fn remember_chunk(&mut self, hash: &str, id: u64) {
-        self.chunk_ids_by_hash.insert(hash.to_string(), id);
+    /// 记账已上传外置块（幂等映射 + 发放集合两处同步）
+    pub fn remember_chunk(&mut self, chunk_key: &str, id: u64) {
+        self.chunk_ids_by_key.insert(chunk_key.to_string(), id);
         self.issued_chunk_ids.insert(id);
     }
 
@@ -813,12 +856,12 @@ impl ImportSession {
         ids.iter().all(|id| self.issued_chunk_ids.contains(id))
     }
 
-    /// 删除照片后释放去重锁（内存集合即时生效）
+    /// 删除照片后释放续传幂等锁（内存集合即时生效）
     ///
     /// 持久化由 WAL 删除墓碑承担（跨会话恢复时移除）；本方法仅同步
-    /// 本会话内存集合与累计计数。返回 true 表示确实移除了已记账哈希。
-    pub fn forget_committed(&mut self, hash: &str) -> bool {
-        if self.committed_hashes.remove(hash) {
+    /// 本会话内存集合与累计计数。返回 true 表示确实移除了已记账条目键。
+    pub fn forget_committed(&mut self, entry_key: &str) -> bool {
+        if self.committed_keys.remove(entry_key) {
             self.total_committed = self.total_committed.saturating_sub(1);
             true
         } else {
@@ -868,7 +911,7 @@ mod tests {
             .append(&WalEntry::Pending {
                 import_id: "imp-1".into(),
                 batch_id: 1,
-                hash: "abc".into(),
+                entry_key: "abc".into(),
                 name: "a.jpg".into(),
                 idx: 0,
             })
@@ -877,7 +920,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-1".into(),
                 batch_id: 1,
-                hash: "abc".into(),
+                entry_key: "abc".into(),
                 verthys_id: 42,
                 name: "a.jpg".into(),
                 chunk_ids: Some(Vec::new()),
@@ -886,7 +929,7 @@ mod tests {
         writer.finish("imp-1", true).unwrap();
 
         let snap = load(&verthys_path).unwrap();
-        assert!(snap.committed_hashes.contains("abc"));
+        assert!(snap.committed_keys.contains("abc"));
         assert_eq!(snap.committed_ids.get("abc"), Some(&42));
         assert!(snap.active_import_id.is_none(), "end 后应无活跃会话");
     }
@@ -902,7 +945,7 @@ mod tests {
             .append(&WalEntry::Pending {
                 import_id: "imp-2".into(),
                 batch_id: 1,
-                hash: "dup".into(),
+                entry_key: "dup".into(),
                 name: "b.jpg".into(),
                 idx: 0,
             })
@@ -911,7 +954,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-2".into(),
                 batch_id: 1,
-                hash: "ok".into(),
+                entry_key: "ok".into(),
                 verthys_id: 7,
                 name: "c.jpg".into(),
                 chunk_ids: Some(Vec::new()),
@@ -921,9 +964,9 @@ mod tests {
         drop(writer);
 
         let snap = load(&verthys_path).unwrap();
-        assert!(snap.committed_hashes.contains("ok"));
+        assert!(snap.committed_keys.contains("ok"));
         assert!(
-            !snap.committed_hashes.contains("dup"),
+            !snap.committed_keys.contains("dup"),
             "pending 未 committed 不应进入去重集合"
         );
         assert!(snap.active_import_id.is_some(), "未 end 应保留活跃会话");
@@ -940,7 +983,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-3".into(),
                 batch_id: 1,
-                hash: "h1".into(),
+                entry_key: "h1".into(),
                 verthys_id: 1,
                 name: "x".into(),
                 chunk_ids: Some(Vec::new()),
@@ -949,7 +992,7 @@ mod tests {
         writer.finish("imp-3", true).unwrap();
 
         let snap = load(&verthys_path).unwrap();
-        assert!(snap.committed_hashes.contains("h1"));
+        assert!(snap.committed_keys.contains("h1"));
     }
 
     #[test]
@@ -963,7 +1006,7 @@ mod tests {
                 .append(&WalEntry::Pending {
                     import_id: "imp-4".into(),
                     batch_id: 1,
-                    hash: format!("h{}", i),
+                    entry_key: format!("h{}", i),
                     name: format!("f{}", i),
                     idx: i,
                 })
@@ -972,7 +1015,7 @@ mod tests {
                 .append(&WalEntry::Committed {
                     import_id: "imp-4".into(),
                     batch_id: 1,
-                    hash: format!("h{}", i),
+                    entry_key: format!("h{}", i),
                     verthys_id: 100 + i,
                     name: format!("f{}", i),
                     chunk_ids: Some(Vec::new()),
@@ -985,7 +1028,7 @@ mod tests {
         let snap = load(&verthys_path).unwrap();
         for i in 0..50 {
             assert!(
-                snap.committed_hashes.contains(&format!("h{}", i)),
+                snap.committed_keys.contains(&format!("h{}", i)),
                 "compact 后哈希 h{} 应保留",
                 i
             );
@@ -997,7 +1040,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let verthys_path = make_verthys_path(dir.path());
         let snap = load(&verthys_path).unwrap();
-        assert!(snap.committed_hashes.is_empty());
+        assert!(snap.committed_keys.is_empty());
     }
 
     #[test]
@@ -1012,7 +1055,7 @@ mod tests {
             .append_deferred(&WalEntry::Pending {
                 import_id: "imp-d".into(),
                 batch_id: 1,
-                hash: "p1".into(),
+                entry_key: "p1".into(),
                 name: "a.jpg".into(),
                 idx: 0,
             })
@@ -1021,7 +1064,7 @@ mod tests {
             .append_deferred(&WalEntry::Pending {
                 import_id: "imp-d".into(),
                 batch_id: 1,
-                hash: "p2".into(),
+                entry_key: "p2".into(),
                 name: "b.jpg".into(),
                 idx: 1,
             })
@@ -1033,8 +1076,8 @@ mod tests {
         assert_eq!(text.lines().count(), 3, "begin + 2 条 pending 应全部落盘");
 
         let snap = load(&verthys_path).unwrap();
-        assert!(!snap.committed_hashes.contains("p1"));
-        assert!(!snap.committed_hashes.contains("p2"));
+        assert!(!snap.committed_keys.contains("p1"));
+        assert!(!snap.committed_keys.contains("p2"));
     }
 
     #[test]
@@ -1048,7 +1091,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-r".into(),
                 batch_id: 1,
-                hash: "h1".into(),
+                entry_key: "h1".into(),
                 verthys_id: 5,
                 name: "a.jpg".into(),
                 chunk_ids: Some(Vec::new()),
@@ -1059,7 +1102,7 @@ mod tests {
         append_removed(&verthys_path, &["h1".to_string()]).unwrap();
 
         let snap = load(&verthys_path).unwrap();
-        assert!(!snap.committed_hashes.contains("h1"), "墓碑应释放去重锁");
+        assert!(!snap.committed_keys.contains("h1"), "墓碑应释放去重锁");
         assert!(!snap.committed_ids.contains_key("h1"));
     }
 
@@ -1083,7 +1126,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-s".into(),
                 batch_id: 1,
-                hash: "hs".into(),
+                entry_key: "hs".into(),
                 verthys_id: 9,
                 name: "s.jpg".into(),
                 chunk_ids: Some(Vec::new()),
@@ -1094,7 +1137,7 @@ mod tests {
         // WAL 文件被移除（模拟外部清理/损坏），快照仍提供去重集合
         std::fs::remove_file(wal_file(&verthys_path)).unwrap();
         let snap = load(&verthys_path).unwrap();
-        assert!(snap.committed_hashes.contains("hs"));
+        assert!(snap.committed_keys.contains("hs"));
         assert_eq!(snap.committed_ids.get("hs"), Some(&9));
     }
 
@@ -1152,7 +1195,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-a".into(),
                 batch_id: 1,
-                hash: "h1".into(),
+                entry_key: "h1".into(),
                 verthys_id: 1,
                 name: String::new(),
                 chunk_ids: Some(Vec::new()),
@@ -1162,7 +1205,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-a".into(),
                 batch_id: 1,
-                hash: "h2".into(),
+                entry_key: "h2".into(),
                 verthys_id: 2,
                 name: String::new(),
                 chunk_ids: Some(Vec::new()),
@@ -1183,7 +1226,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-b".into(),
                 batch_id: 1,
-                hash: "h3".into(),
+                entry_key: "h3".into(),
                 verthys_id: 3,
                 name: String::new(),
                 chunk_ids: Some(Vec::new()),
@@ -1200,12 +1243,12 @@ mod tests {
 
         let snap = load(&verthys_path).unwrap();
         assert!(
-            snap.committed_hashes.contains("h1"),
+            snap.committed_keys.contains("h1"),
             "快照基线哈希 h1 跨会话必须保留"
         );
-        assert!(snap.committed_hashes.contains("h2"));
-        assert!(snap.committed_hashes.contains("h3"));
-        assert_eq!(snap.committed_hashes.len(), 3);
+        assert!(snap.committed_keys.contains("h2"));
+        assert!(snap.committed_keys.contains("h3"));
+        assert_eq!(snap.committed_keys.len(), 3);
     }
 
     #[test]
@@ -1221,7 +1264,7 @@ mod tests {
                 .append(&WalEntry::Committed {
                     import_id: "imp-m".into(),
                     batch_id: 1,
-                    hash: format!("h{}", i),
+                    entry_key: format!("h{}", i),
                     verthys_id: 100 + i,
                     name: String::new(),
                     chunk_ids: Some(Vec::new()),
@@ -1246,8 +1289,8 @@ mod tests {
         );
 
         let snap = load(&verthys_path).unwrap();
-        assert_eq!(snap.committed_hashes.len(), 50, "快照承载全部 50 个哈希");
-        assert!(snap.committed_hashes.contains("h49"));
+        assert_eq!(snap.committed_keys.len(), 50, "快照承载全部 50 个哈希");
+        assert!(snap.committed_keys.contains("h49"));
     }
 
     #[test]
@@ -1261,7 +1304,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-t".into(),
                 batch_id: 1,
-                hash: "keep".into(),
+                entry_key: "keep".into(),
                 verthys_id: 1,
                 name: String::new(),
                 chunk_ids: Some(Vec::new()),
@@ -1271,7 +1314,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-t".into(),
                 batch_id: 1,
-                hash: "gone".into(),
+                entry_key: "gone".into(),
                 verthys_id: 2,
                 name: String::new(),
                 chunk_ids: Some(Vec::new()),
@@ -1289,9 +1332,9 @@ mod tests {
         append_removed(&verthys_path, &["gone".to_string()]).unwrap();
 
         let snap = load(&verthys_path).unwrap();
-        assert!(snap.committed_hashes.contains("keep"));
+        assert!(snap.committed_keys.contains("keep"));
         assert!(
-            !snap.committed_hashes.contains("gone"),
+            !snap.committed_keys.contains("gone"),
             "墓碑须移除快照基线内的哈希"
         );
     }
@@ -1311,7 +1354,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-a".into(),
                 batch_id: 1,
-                hash: "keep".into(),
+                entry_key: "keep".into(),
                 verthys_id: 1,
                 name: String::new(),
                 chunk_ids: Some(Vec::new()),
@@ -1321,7 +1364,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-a".into(),
                 batch_id: 1,
-                hash: "gone".into(),
+                entry_key: "gone".into(),
                 verthys_id: 2,
                 name: String::new(),
                 chunk_ids: Some(Vec::new()),
@@ -1340,7 +1383,7 @@ mod tests {
         append_removed(&verthys_path, &["gone".to_string()]).unwrap();
         assert!(!load(&verthys_path)
             .unwrap()
-            .committed_hashes
+            .committed_keys
             .contains("gone"));
 
         // 会话 B：创建（截断 WAL）→ 以失败结束（不 compact，原样保留 WAL）
@@ -1353,9 +1396,9 @@ mod tests {
         session.writer.finish("imp-b", false).unwrap();
 
         let snap = load(&verthys_path).unwrap();
-        assert!(snap.committed_hashes.contains("keep"));
+        assert!(snap.committed_keys.contains("keep"));
         assert!(
-            !snap.committed_hashes.contains("gone"),
+            !snap.committed_keys.contains("gone"),
             "墓碑必须跨会话创建持久化（失败结束路径）"
         );
 
@@ -1367,7 +1410,7 @@ mod tests {
             .append(&WalEntry::Committed {
                 import_id: "imp-c".into(),
                 batch_id: 1,
-                hash: "fresh".into(),
+                entry_key: "fresh".into(),
                 verthys_id: 3,
                 name: String::new(),
                 chunk_ids: Some(Vec::new()),
@@ -1376,10 +1419,10 @@ mod tests {
         session.writer.finish("imp-c", true).unwrap();
 
         let snap = load(&verthys_path).unwrap();
-        assert!(snap.committed_hashes.contains("keep"));
-        assert!(snap.committed_hashes.contains("fresh"));
+        assert!(snap.committed_keys.contains("keep"));
+        assert!(snap.committed_keys.contains("fresh"));
         assert!(
-            !snap.committed_hashes.contains("gone"),
+            !snap.committed_keys.contains("gone"),
             "墓碑必须跨会话创建持久化（成功压缩路径）"
         );
     }
@@ -1531,6 +1574,46 @@ mod tests {
     }
 
     #[test]
+    fn test_v1_wal_keys_ignored_and_backed_up_before_truncation() {
+        // v1 以内容哈希作去重键：加载时忽略；会话创建截断前备份原始文件
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+        write_wal_text(
+            &verthys_path,
+            concat!(
+                "{\"kind\":\"begin\",\"import_id\":\"imp-v1\",\"ts\":1}\n",
+                "{\"kind\":\"pending\",\"import_id\":\"imp-v1\",\"batch_id\":1,",
+                "\"hash\":\"legacy-pending\",\"name\":\"a.jpg\",\"idx\":0}\n",
+                "{\"kind\":\"committed\",\"import_id\":\"imp-v1\",\"batch_id\":1,",
+                "\"hash\":\"legacy-committed\",\"verthys_id\":11,\"name\":\"a.jpg\",\"chunk_ids\":[]}\n",
+                "{\"kind\":\"end\",\"import_id\":\"imp-v1\",\"success\":true}\n"
+            ),
+        );
+
+        let snap = load(&verthys_path).unwrap();
+        assert!(
+            snap.committed_keys.is_empty(),
+            "v1 内容哈希不得进入恢复集"
+        );
+
+        let session = ImportSession::new(&verthys_path, "imp-v2").unwrap();
+        assert!(!session.is_committed("legacy-committed"));
+        drop(session);
+
+        let bak = PathBuf::from(format!(
+            "{}.v1.bak",
+            wal_file(&verthys_path).to_string_lossy()
+        ));
+        assert!(bak.exists(), "截断前必须备份 v1 WAL");
+        let backup_text = std::fs::read_to_string(&bak).unwrap();
+        assert!(backup_text.contains("legacy-committed"));
+
+        let fresh = std::fs::read_to_string(wal_file(&verthys_path)).unwrap();
+        assert!(!fresh.contains("\"hash\":"), "新 WAL 不得再写内容哈希字段");
+        assert!(fresh.contains("imp-v2"));
+    }
+
+    #[test]
     fn test_legacy_wal_and_snapshot_migrated_on_read() {
         // 旧布局 WAL + 快照在首次读取时被原子搬迁到附属目录
         let dir = tempdir().unwrap();
@@ -1543,12 +1626,12 @@ mod tests {
         )
         .unwrap();
         let mut baseline = WalSnapshot::default();
-        baseline.committed_hashes.insert("hl".to_string());
+        baseline.committed_keys.insert("hl".to_string());
         baseline.committed_ids.insert("hl".to_string(), 11);
         write_snapshot_file(&legacy_wal, &baseline).unwrap();
 
         let snap = load(&verthys_path).unwrap();
-        assert!(snap.committed_hashes.contains("hl"));
+        assert!(snap.committed_keys.contains("hl"));
         assert_eq!(snap.committed_ids.get("hl"), Some(&11));
 
         assert!(!legacy_wal.exists(), "旧布局 WAL 必须被搬走");

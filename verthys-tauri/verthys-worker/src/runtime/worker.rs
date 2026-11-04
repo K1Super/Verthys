@@ -12,16 +12,28 @@
 
 use libloading::{Library, Symbol};
 use sha2::{Digest, Sha256};
+use std::ffi::CStr;
 use std::io::Read;
 use std::os::raw::c_char;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
+use zeroize::Zeroize;
 
 use crate::log::{diag, init_diag};
 use crate::runtime::ffi_types::*;
 use crate::runtime::format_os_error;
+use crate::runtime::progress_cb::{unlock_progress_cb, vty_rotate_progress_cb};
 #[cfg(windows)]
 use crate::runtime::scan_shm;
-use crate::runtime::progress_cb::unlock_progress_cb;
 use crate::runtime::protocol::SecurityStatusReport;
+
+#[cfg(windows)]
+extern "system" {
+    /// 仅用于父进程注入的匿名事件脉冲；句柄值来自签名 IPC 下发。
+    fn SetEvent(h_event: *mut std::ffi::c_void) -> i32;
+}
 use crate::runtime::gmk::GMK;
 
 /* ------------------------------------------------------------------ *
@@ -121,6 +133,57 @@ impl Drop for SummaryBatchGuard {
 }
 
 /* ------------------------------------------------------------------ *
+ * v4 容器入口白名单                                                   *
+ * ------------------------------------------------------------------ */
+
+/// 只接受 v4 容器 magic `VRTY`。
+///
+/// 产品解锁入口不得依赖 C 层按文件头分发：通用 `Verthys_Unlock` 仍保留
+/// v3 分支，任何把 v3 文件交给产品入口的路径都必须在这里被拒绝。
+/// 返回错误码与 C 层一致：0x05=FORMAT，0x08=IO。
+pub(crate) fn check_v4_magic(path: &str) -> Result<(), u32> {
+    const VERTHYS_ERR_IO: u32 = 0x00000008;
+    const VERTHYS_ERR_FORMAT: u32 = 0x00000005;
+    const V4_MAGIC: &[u8; 4] = b"VRTY";
+
+    let mut file = std::fs::File::open(path).map_err(|_| VERTHYS_ERR_IO)?;
+    let mut header = [0u8; 8];
+    let read = file.read(&mut header).map_err(|_| VERTHYS_ERR_IO)?;
+    if read < V4_MAGIC.len() || &header[..V4_MAGIC.len()] != V4_MAGIC {
+        return Err(VERTHYS_ERR_FORMAT);
+    }
+    Ok(())
+}
+
+/* ------------------------------------------------------------------ *
+ * 轮换取消命名事件（Windows）                                         *
+ *                                                                    *
+ * 父进程（Tauri 主进程）创建命名事件，Run 请求只携带事件名；worker   *
+ * 打开事件并在进度回调中节流检查。事件为 auto-reset：一次置位只被    *
+ * 消费一次，不会影响后续轮换。                                       *
+ * ------------------------------------------------------------------ */
+
+#[cfg(windows)]
+fn open_rotate_cancel_event(name: &str) -> Option<windows_sys::Win32::Foundation::HANDLE> {
+    use windows_sys::Win32::System::Threading::OpenEventW;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0u16)).collect();
+    let handle = unsafe { OpenEventW(SYNCHRONIZE, 0, wide.as_ptr()) };
+    if handle.is_null() { None } else { Some(handle) }
+}
+
+#[cfg(windows)]
+fn rotate_cancel_signaled(handle: windows_sys::Win32::Foundation::HANDLE) -> bool {
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    unsafe { WaitForSingleObject(handle, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn close_rotate_cancel_event(handle: windows_sys::Win32::Foundation::HANDLE) {
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+}
+
+/* ------------------------------------------------------------------ *
  * Worker：持有 DLL + 句柄                                             *
  * ------------------------------------------------------------------ */
 
@@ -177,6 +240,14 @@ pub(crate) struct Worker {
     /// 共享内存传输段（游标扫描专用）
     #[cfg(windows)]
     scan_shm: Option<scan_shm::ScanShm>,
+    /// 运行时守卫完整掩码（bit0=心跳运行 bit1=挂起守卫接线）。
+    /// 心跳位由心跳线程启动后置位；挂起位由主进程经 runtime_guards op 下发。
+    runtime_guards: AtomicU32,
+    /// 旧 DLL 缺少 Verthys_NotifyRuntimeGuards 时只记录一次诊断，不阻断主循环。
+    guards_symbol_warned: AtomicBool,
+    /// 心跳线程停止标志与句柄（arm_heartbeat 成功后存在）。
+    heartbeat_stop: Option<Arc<AtomicBool>>,
+    heartbeat_thread: Option<JoinHandle<()>>,
 }
 
 // 构建期生成的 DLL 完整性基线（Release 必存在，Debug 允许占位）
@@ -351,7 +422,7 @@ impl Worker {
              * VerthysContainerInfo 前 8 字节——该头部在任何容器状态均可读，
              * stateless 且无副作用。预检失败时进程随即退出，已初始化句柄
              * 由进程回收，无驻留窗口。 */
-            const WORKER_KNOWN_API_VERSION: u32 = 0x000E;
+            const WORKER_KNOWN_API_VERSION: u32 = 0x0014;
             const WORKER_EXPECTED_FMT_V3: u16 = 3;
             let get_info: Symbol<VerthysGetContainerInfoFn> =
                 lib.get(b"Verthys_GetContainerInfo").map_err(|e| {
@@ -396,22 +467,34 @@ impl Worker {
                 probe.fmt_version
             );
 
-            Ok(Worker { _lib: lib, handle, scan_cursor: None, #[cfg(windows)] scan_shm: None })
+            Ok(Worker {
+                _lib: lib,
+                handle,
+                scan_cursor: None,
+                #[cfg(windows)]
+                scan_shm: None,
+                runtime_guards: AtomicU32::new(0),
+                guards_symbol_warned: AtomicBool::new(false),
+                heartbeat_stop: None,
+                heartbeat_thread: None,
+            })
         }
     }
 
-    pub(crate) fn call_unlock(&self, path: &str, password: &str, flags: u32) -> u32 {
+    /// v4 专用解锁入口：先做 magic 白名单，再调用 `Verthys_V4Unlock`。
+    ///
+    /// `flags` 参数保留在签名中以兼容现有调用点，但 v4 解锁不接受 v3
+    /// 的预热位域；C 层 v4 路径始终重新读取元数据。
+    pub(crate) fn call_unlock(&self, path: &str, password: &str, _flags: u32) -> u32 {
+        if let Err(rc) = check_v4_magic(path) {
+            return rc;
+        }
         unsafe {
             let lib = &self._lib;
 
-            /* 在 Verthys_Unlock 之前注册进度回调
-             *
-             * unlock_progress_cb 在 C DLL 各阶段被同步调用，向 stdout 写入
-             * {"ok":true,"op":"unlock_progress",...} 进度行。父进程
-             * send_json_with_unlock_progress 识别进度行并转发前端。
-             *
-             * 兼容性：若 DLL 未导出 Verthys_RegisterUnlockProgressCallback（旧 DLL），
-             * 静默跳过注册，解锁仍正常执行（仅无进度反馈）。 */
+            /* v4 解锁当前不产生分阶段进度事件；回调注册保留为向前兼容：
+             * 若后续 C 层在 v4 路径接入进度环，worker 无需再改加载逻辑。
+             * DLL 未导出该符号时静默跳过。 */
             if let Ok(register_fn) = lib.get::<VerthysRegisterUnlockProgressFn>(
                 b"Verthys_RegisterUnlockProgressCallback\0",
             ) {
@@ -424,7 +507,7 @@ impl Worker {
                 });
             }
 
-            let func: Symbol<VerthysUnlockFn> = match lib.get(b"Verthys_Unlock") {
+            let func: Symbol<VerthysV4UnlockFn> = match lib.get(b"Verthys_V4Unlock") {
                 Ok(f) => f,
                 Err(_) => return 0xFFFFFFFF,
             };
@@ -433,46 +516,12 @@ impl Worker {
                 Err(_) => return 0xFFFFFFFF,
             };
             let pw_bytes = password.as_bytes();
-            /* 透传 flags 参数（预热状态位域）给 C 层 Verthys_Unlock */
             ffi_call(|| {
                 func(
                     self.handle,
                     path_c.as_ptr(),
                     pw_bytes.as_ptr() as *const c_char,
                     pw_bytes.len(),
-                    flags,
-                )
-            })
-            .unwrap_or(0xFFFFFFFF)
-        }
-    }
-
-    /// 显式创建新 verthys（V3，可选预设）
-    /// preset: 0=BALANCED, 1=SECURE
-    pub(crate) fn call_create_with_preset(&self, path: &str, password: &str, preset: u32) -> u32 {
-        unsafe {
-            let lib = &self._lib;
-            let func: Symbol<VerthysCreateWithPresetFn> =
-                match lib.get(b"Verthys_CreateWithPreset") {
-                    Ok(f) => f,
-                    Err(_) => return 0xFFFFFFFF,
-                };
-            let path_c = match std::ffi::CString::new(path) {
-                Ok(c) => c,
-                Err(_) => {
-                    // 嵌入 NUL 的路径：日志只记字节长度，不回显原始内容（防日志注入）
-                    diag!("[worker] create_with_preset: 路径含内嵌 NUL，length={}", path.len());
-                    return 0xFFFFFFFF;
-                }
-            };
-            let pw_bytes = password.as_bytes();
-            ffi_call(|| {
-                func(
-                    self.handle,
-                    path_c.as_ptr(),
-                    pw_bytes.as_ptr() as *const c_char,
-                    pw_bytes.len(),
-                    preset,
                 )
             })
             .unwrap_or(0xFFFFFFFF)
@@ -605,6 +654,30 @@ impl Worker {
             let r = ffi_call(|| { func(self.handle, &rec, &mut id) }).unwrap_or(0xFFFFFFFF);
             if r == VERTHYS_OK {
                 Ok(id)
+            } else {
+                Err(r)
+            }
+        }
+    }
+
+    /// 批量新增记录（API 0x0013）：单次 C 层事务提交，返回与输入等长的 ID 列表。
+    ///
+    /// 调用方（dispatch）负责构造稳定的 CString 与数据缓冲，并保证切片内的
+    /// 指针在调用期间有效；本方法只负责 FFI 调用与错误码转换。
+    pub(crate) fn call_add_records(&self, records: &[VerthysRecordC]) -> Result<Vec<u64>, u32> {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysAddRecordsFn> = match lib.get(b"Verthys_AddRecords") {
+                Ok(f) => f,
+                Err(_) => return Err(0xFFFFFFFF),
+            };
+            let mut ids = vec![0u64; records.len()];
+            let r = ffi_call(|| {
+                func(self.handle, records.as_ptr(), records.len() as u32, ids.as_mut_ptr())
+            })
+            .unwrap_or(0xFFFFFFFF);
+            if r == VERTHYS_OK {
+                Ok(ids)
             } else {
                 Err(r)
             }
@@ -1100,6 +1173,42 @@ impl Worker {
         }
     }
 
+    /// 按类型分页枚举记录 ID（V4 类型盲索引，API 0x0012）。
+    /// 不读取记录密文；out_ids 长度必须 >= max_count。
+    pub(crate) fn call_list_ids_by_type(
+        &self,
+        rtype: u8,
+        after_id: u64,
+        max_count: u64,
+        out_ids: &mut [u64],
+        out_count: &mut u64,
+        out_exhausted: &mut u8,
+    ) -> u32 {
+        if max_count == 0u64 || (out_ids.len() as u64) < max_count {
+            return 0xFFFFFFFF;
+        }
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysListIdsByTypeFn> =
+                match lib.get(b"Verthys_ListIdsByType") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    rtype,
+                    after_id,
+                    max_count,
+                    out_ids.as_mut_ptr(),
+                    out_count as *mut u64,
+                    out_exhausted as *mut u8,
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
     pub(crate) fn call_export(&self, path: &str, password: &str) -> u32 {
         unsafe {
             let lib = &self._lib;
@@ -1179,6 +1288,887 @@ impl Worker {
     }
 
     /* ================================================================ *
+     * v4 模块 M1 会话 FFI                                              *
+     *                                                                *
+     * 只转发模块索引与口令/恢复码；MDEK 与任何派生密钥都由 C 层持有，   *
+     * worker 不缓存模块口令，也不在响应中返回密钥。                    *
+     * ================================================================ */
+
+    pub(crate) fn call_v4_module_enable(
+        &self,
+        module_id: u32,
+        password: &str,
+        recovery_code: Option<&str>,
+    ) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ModuleEnableFn> =
+                match lib.get(b"Verthys_V4ModuleEnable") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let pw = password.as_bytes();
+            /* C 层按 NUL 结尾读取恢复码（strlen）；Rust &str 不带 NUL，
+             * 直接把 as_ptr 交给 C 会越过字符串末尾读取，导致随机拒绝。 */
+            let rec = match recovery_code {
+                Some(text) => match std::ffi::CString::new(text) {
+                    Ok(c) => Some(c),
+                    Err(_) => return 0x00000001u32,
+                },
+                None => None,
+            };
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    module_id,
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                    rec.as_ref()
+                        .map_or(std::ptr::null(), |c| c.as_ptr()),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_module_unlock(&self, module_id: u32, password: &str) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ModuleUnlockFn> =
+                match lib.get(b"Verthys_V4ModuleUnlock") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let pw = password.as_bytes();
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    module_id,
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_module_lock(&self, module_id: u32) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ModuleLockFn> =
+                match lib.get(b"Verthys_V4ModuleLock") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            ffi_call(|| func(self.handle, module_id)).unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_module_rotate_password(
+        &self,
+        module_id: u32,
+        old_password: &str,
+        new_password: &str,
+    ) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ModuleRotatePasswordFn> =
+                match lib.get(b"Verthys_V4ModuleRotatePassword") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let old = old_password.as_bytes();
+            let new = new_password.as_bytes();
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    module_id,
+                    old.as_ptr() as *const c_char,
+                    old.len(),
+                    new.as_ptr() as *const c_char,
+                    new.len(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_module_disable(&self, module_id: u32, password: &str) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ModuleDisableFn> =
+                match lib.get(b"Verthys_V4ModuleDisable") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let pw = password.as_bytes();
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    module_id,
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_module_delete(
+        &self,
+        module_id: u32,
+        password: Option<&str>,
+        confirm: &str,
+    ) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ModuleDeleteFn> =
+                match lib.get(b"Verthys_V4ModuleDelete") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let pw = password.map(|s| s.as_bytes());
+            let pw_ptr = pw.map(|b| b.as_ptr() as *const c_char);
+            let pw_len = pw.map(|b| b.len()).unwrap_or(0);
+            /* confirm 由 C 层 strcmp 校验，必须 NUL 结尾。 */
+            let confirm_c = match std::ffi::CString::new(confirm) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    module_id,
+                    pw_ptr.unwrap_or(std::ptr::null()),
+                    pw_len,
+                    confirm_c.as_ptr(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_module_bind_recovery(
+        &self,
+        module_id: u32,
+        password: &str,
+        recovery_code: &str,
+    ) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ModuleBindRecoveryFn> =
+                match lib.get(b"Verthys_V4ModuleBindRecovery") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let pw = password.as_bytes();
+            /* C 层按 NUL 结尾读取恢复码；Rust &str 不含 NUL。 */
+            let rec = match std::ffi::CString::new(recovery_code) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    module_id,
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                    rec.as_ptr(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_module_reseal_device(&self, module_id: u32, password: &str) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ModuleResealDeviceFn> =
+                match lib.get(b"Verthys_V4ModuleResealDevice") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let pw = password.as_bytes();
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    module_id,
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_module_status(
+        &self,
+        module_id: u32,
+    ) -> Result<VerthysModuleStatusC, u32> {
+        let mut st: VerthysModuleStatusC = unsafe { std::mem::zeroed() };
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ModuleStatusFn> =
+                match lib.get(b"Verthys_V4ModuleStatus") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let rc = ffi_call(|| func(self.handle, module_id, &mut st)).unwrap_or(0xFFFFFFFF);
+            if rc == VERTHYS_OK { Ok(st) } else { Err(rc) }
+        }
+    }
+
+    pub(crate) fn call_v4_recovery_rotate(
+        &self,
+        password: &str,
+        old_recovery: &str,
+    ) -> Result<String, u32> {
+        let mut out = [0u8; 80];
+        let rc = unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4RecoveryRotateFn> =
+                match lib.get(b"Verthys_V4RecoveryRotate") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let pw = password.as_bytes();
+            /* C 层按 NUL 结尾读取旧恢复码（strlen）；Rust &str 不含 NUL。 */
+            let old = match std::ffi::CString::new(old_recovery) {
+                Ok(c) => c,
+                Err(_) => return Err(0x00000001u32),
+            };
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                    old.as_ptr(),
+                    out.as_mut_ptr() as *mut c_char,
+                    out.len(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        };
+        if rc != VERTHYS_OK {
+            out.zeroize();
+            return Err(rc);
+        }
+        let text = unsafe { CStr::from_ptr(out.as_ptr() as *const c_char) }
+            .to_string_lossy()
+            .into_owned();
+        out.zeroize();
+        Ok(text)
+    }
+
+    /* ================================================================ *
+     * v4 D9 全库 DEK 轮换（作业式五段入口）                            *
+     *                                                                *
+     * 口令/恢复码只在本次调用内以字节切片透传，worker 不缓存、不写日志； *
+     * Run 通过同步进度回调写 stdout 进度行，主线程在 FFI 期间不持锁。   *
+     * ================================================================ */
+
+    pub(crate) fn call_v4_rotate_begin(
+        &self,
+        new_path: &str,
+        password: &str,
+        flags: u32,
+    ) -> Result<VerthysRotateInfoC, u32> {
+        let mut info: VerthysRotateInfoC = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4RotateBeginFn> =
+                match lib.get(b"Verthys_V4RotateBegin") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let path_c = match std::ffi::CString::new(new_path) {
+                Ok(c) => c,
+                Err(_) => return Err(0x00000001u32),
+            };
+            let pw = password.as_bytes();
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    path_c.as_ptr(),
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                    flags,
+                    &mut info,
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        };
+        if rc == VERTHYS_OK { Ok(info) } else { Err(rc) }
+    }
+
+    pub(crate) fn call_v4_rotate_attach_keyfile(
+        &self,
+        keyfile_path: &str,
+        password: &str,
+    ) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4RotateAttachKeyfileFn> =
+                match lib.get(b"Verthys_V4RotateAttachKeyfile") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let path_c = match std::ffi::CString::new(keyfile_path) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            let pw = password.as_bytes();
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    path_c.as_ptr(),
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_rotate_unlock_module(
+        &self,
+        module_id: u32,
+        password: &str,
+        recovery_code: Option<&str>,
+    ) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4RotateUnlockModuleFn> =
+                match lib.get(b"Verthys_V4RotateUnlockModule") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let pw = password.as_bytes();
+            /* 恢复码可选：C 层按 NULL/空串跳过二次校验。 */
+            let rec = match recovery_code {
+                Some(code) => match std::ffi::CString::new(code) {
+                    Ok(c) => Some(c),
+                    Err(_) => return 0x00000001u32,
+                },
+                None => None,
+            };
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    module_id,
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                    rec.as_ref()
+                        .map(|c| c.as_ptr())
+                        .unwrap_or(std::ptr::null()),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_rotate_run(&self, cancel_event: Option<&str>) -> u32 {
+        /* 取消信号：父进程创建命名事件并把名称放进 Run 请求；worker 在此
+         * 打开事件，进度回调按 200ms 节流检查。Run 返回即关闭句柄。 */
+        #[cfg(windows)]
+        let mut cancel_handle: Option<windows_sys::Win32::Foundation::HANDLE> = None;
+        #[cfg(windows)]
+        if let Some(name) = cancel_event {
+            let handle = match open_rotate_cancel_event(name) {
+                Some(h) => h,
+                None => {
+                    diag!("[worker] 轮换取消事件打开失败，拒绝 Run（fail-closed）");
+                    return 0x00000001u32;
+                }
+            };
+            /* Run 前已置位：直接按取消返回，避免空库无进度回调时取消失效。 */
+            if rotate_cancel_signaled(handle) {
+                close_rotate_cancel_event(handle);
+                diag!("[worker] 轮换在 Run 前收到取消信号");
+                return 0x00000017u32;
+            }
+            super::progress_cb::set_rotate_cancel_handle(handle);
+            cancel_handle = Some(handle);
+        }
+        #[cfg(not(windows))]
+        let _ = cancel_event;
+
+        let rc = unsafe {
+            let lib = &self._lib;
+            /* 符号查找失败也必须走统一清理出口：否则取消句柄泄漏到全局，
+             * 下一次无取消事件的 Run 可能读到残留的置位状态。 */
+            match lib.get::<VerthysV4RotateRunFn>(b"Verthys_V4RotateRun") {
+                Ok(func) => ffi_call(|| {
+                    func(
+                        self.handle,
+                        Some(vty_rotate_progress_cb),
+                        std::ptr::null_mut(),
+                    )
+                })
+                .unwrap_or(0xFFFFFFFF),
+                Err(_) => 0xFFFFFFFF,
+            }
+        };
+
+        #[cfg(windows)]
+        {
+            super::progress_cb::clear_rotate_cancel_handle();
+            if let Some(handle) = cancel_handle.take() {
+                close_rotate_cancel_event(handle);
+            }
+        }
+        rc
+    }
+
+    pub(crate) fn call_v4_rotate_commit(&self, keep_old: bool) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4RotateCommitFn> =
+                match lib.get(b"Verthys_V4RotateCommit") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            ffi_call(|| func(self.handle, u32::from(keep_old))).unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_rotate_abort(&self) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4RotateAbortFn> =
+                match lib.get(b"Verthys_V4RotateAbort") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            ffi_call(|| func(self.handle)).unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    /* ================================================================ *
+     * v4 容器创建/恢复与 PCR 策略 FFI                                  *
+     *                                                                *
+     * 恢复码只经本次调用返回给宿主，worker 不落盘、不写日志；            *
+     * PCR 入口只传位图与恢复码，密钥仍全部由 C 层持有。                 *
+     * ================================================================ */
+
+    pub(crate) fn call_v4_create(
+        &self,
+        path: &str,
+        password: &str,
+    ) -> Result<String, u32> {
+        let mut rec = [0u8; 80];
+        let rc = unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4CreateFn> =
+                match lib.get(b"Verthys_V4Create") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let path_c = match std::ffi::CString::new(path) {
+                Ok(c) => c,
+                Err(_) => {
+                    diag!("[worker] v4_create: 路径含内嵌 NUL，length={}", path.len());
+                    return Err(0x00000001u32);
+                }
+            };
+            let pw = password.as_bytes();
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    path_c.as_ptr(),
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                    rec.as_mut_ptr() as *mut c_char,
+                    rec.len(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        };
+        if rc != VERTHYS_OK {
+            rec.zeroize();
+            return Err(rc);
+        }
+        let text = unsafe { CStr::from_ptr(rec.as_ptr() as *const c_char) }
+            .to_string_lossy()
+            .into_owned();
+        rec.zeroize();
+        Ok(text)
+    }
+
+    pub(crate) fn call_v4_unlock_recovery(&self, path: &str, recovery_code: &str) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4UnlockRecoveryFn> =
+                match lib.get(b"Verthys_V4UnlockRecovery") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let path_c = match std::ffi::CString::new(path) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            let rec_c = match std::ffi::CString::new(recovery_code) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            ffi_call(|| func(self.handle, path_c.as_ptr(), rec_c.as_ptr()))
+                .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_pcr_status(&self) -> Result<(u32, u32), u32> {
+        let mut enabled: u32 = 0;
+        let mut select: u32 = 0;
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4PcrStatusFn> =
+                match lib.get(b"Verthys_V4PcrStatus") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let rc = ffi_call(|| func(self.handle, &mut enabled, &mut select))
+                .unwrap_or(0xFFFFFFFF);
+            if rc == VERTHYS_OK { Ok((enabled, select)) } else { Err(rc) }
+        }
+    }
+
+    pub(crate) fn call_v4_pcr_enable(&self, pcr_select: u32, recovery_code: &str) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4PcrEnableFn> =
+                match lib.get(b"Verthys_V4PcrEnable") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let rec = match std::ffi::CString::new(recovery_code) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            ffi_call(|| func(self.handle, pcr_select, rec.as_ptr())).unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_pcr_disable(&self, recovery_code: &str) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4PcrDisableFn> =
+                match lib.get(b"Verthys_V4PcrDisable") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let rec = match std::ffi::CString::new(recovery_code) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            ffi_call(|| func(self.handle, rec.as_ptr())).unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_pcr_reseal(&self, recovery_code: &str) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4PcrResealFn> =
+                match lib.get(b"Verthys_V4PcrReseal") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let rec = match std::ffi::CString::new(recovery_code) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            ffi_call(|| func(self.handle, rec.as_ptr())).unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    /* ================================================================ *
+     * v4 keyfile 因子 FFI（D3）                                        *
+     *                                                                *
+     * keyfile 路径经 IPC 传入，文件内容只在 C 层读取/生成；worker 不   *
+     * 持有 keyfile 字节，也不缓存其摘要。                              *
+     * ================================================================ */
+
+    pub(crate) fn call_v4_create_keyfile(
+        &self,
+        path: &str,
+        password: &str,
+        keyfile_path: &str,
+    ) -> Result<String, u32> {
+        let mut rec = [0u8; 80];
+        let rc = unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4CreateKeyfileFn> =
+                match lib.get(b"Verthys_V4CreateKeyfile") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let path_c = match std::ffi::CString::new(path) {
+                Ok(c) => c,
+                Err(_) => return Err(0x00000001u32),
+            };
+            let kf_c = match std::ffi::CString::new(keyfile_path) {
+                Ok(c) => c,
+                Err(_) => return Err(0x00000001u32),
+            };
+            let pw = password.as_bytes();
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    path_c.as_ptr(),
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                    kf_c.as_ptr(),
+                    rec.as_mut_ptr() as *mut c_char,
+                    rec.len(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        };
+        if rc != VERTHYS_OK {
+            rec.zeroize();
+            return Err(rc);
+        }
+        let text = unsafe { CStr::from_ptr(rec.as_ptr() as *const c_char) }
+            .to_string_lossy()
+            .into_owned();
+        rec.zeroize();
+        Ok(text)
+    }
+
+    pub(crate) fn call_v4_unlock_keyfile(
+        &self,
+        path: &str,
+        password: &str,
+        keyfile_path: &str,
+    ) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4UnlockKeyfileFn> =
+                match lib.get(b"Verthys_V4UnlockKeyfile") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let path_c = match std::ffi::CString::new(path) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            let kf_c = match std::ffi::CString::new(keyfile_path) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            let pw = password.as_bytes();
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    path_c.as_ptr(),
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                    kf_c.as_ptr(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_keyfile_enable(
+        &self,
+        password: &str,
+        new_keyfile_path: &str,
+    ) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4KeyfileEnableFn> =
+                match lib.get(b"Verthys_V4KeyfileEnable") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let kf_c = match std::ffi::CString::new(new_keyfile_path) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            let pw = password.as_bytes();
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                    kf_c.as_ptr(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_keyfile_disable(
+        &self,
+        password: &str,
+        keyfile_path: &str,
+    ) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4KeyfileDisableFn> =
+                match lib.get(b"Verthys_V4KeyfileDisable") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let kf_c = match std::ffi::CString::new(keyfile_path) {
+                Ok(c) => c,
+                Err(_) => return 0x00000001u32,
+            };
+            let pw = password.as_bytes();
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                    kf_c.as_ptr(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    pub(crate) fn call_v4_keyfile_status(&self) -> Result<(bool, bool), u32> {
+        let mut enabled: u32 = 0;
+        let mut recovery_mode: u32 = 0;
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4KeyfileStatusFn> =
+                match lib.get(b"Verthys_V4KeyfileStatus") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let rc = ffi_call(|| func(self.handle, &mut enabled, &mut recovery_mode))
+                .unwrap_or(0xFFFFFFFF);
+            if rc == VERTHYS_OK {
+                Ok((enabled != 0, recovery_mode != 0))
+            } else {
+                Err(rc)
+            }
+        }
+    }
+
+    /// 恢复会话重绑容器 user/device 槽。keyfile_path 为空表示容器未启用
+    /// keyfile；启用但未提供时由 C 层返回 KEYFILE_REQUIRED。
+    pub(crate) fn call_v4_reseal_device(
+        &self,
+        password: &str,
+        keyfile_path: &str,
+    ) -> u32 {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ResealDeviceFn> =
+                match lib.get(b"Verthys_V4ResealDevice") {
+                    Ok(f) => f,
+                    Err(_) => return 0xFFFFFFFF,
+                };
+            let pw = zeroize::Zeroizing::new(password.as_bytes().to_vec());
+            let kf_c = match std::ffi::CString::new(keyfile_path) {
+                Ok(c) => c,
+                Err(_) => return 0xFFFFFFFF,
+            };
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    pw.as_ptr() as *const c_char,
+                    pw.len(),
+                    kf_c.as_ptr(),
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    /* ================================================================ *
+     * v4 内容分片/清单 FFI                                             *
+     *                                                                *
+     * 密钥只由 C 层用模块 MDEK 派生；worker 只持有密文/明文缓冲，       *
+     * 调用返回后立即清零。                                             *
+     * ================================================================ */
+
+    pub(crate) fn call_v4_chunk_seal(
+        &self,
+        module_id: u32,
+        file_uuid: &[u8; 16],
+        seq: u32,
+        total: u32,
+        plain: &[u8],
+    ) -> Result<Vec<u8>, u32> {
+        let cap = plain.len() + 128;
+        let mut out = vec![0u8; cap];
+        let mut out_len: usize = 0;
+        let rc = unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ChunkSealFn> =
+                match lib.get(b"Verthys_V4ChunkSeal") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    module_id,
+                    file_uuid.as_ptr(),
+                    seq,
+                    total,
+                    plain.as_ptr(),
+                    plain.len(),
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut out_len,
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        };
+        if rc != VERTHYS_OK {
+            out.zeroize();
+            return Err(rc);
+        }
+        out.truncate(out_len);
+        Ok(out)
+    }
+
+    pub(crate) fn call_v4_chunk_open(
+        &self,
+        module_id: u32,
+        file_uuid: &[u8; 16],
+        seq: u32,
+        total: u32,
+        cipher: &[u8],
+    ) -> Result<Vec<u8>, u32> {
+        let mut out = vec![0u8; cipher.len()];
+        let mut out_len: usize = 0;
+        let rc = unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ChunkOpenFn> =
+                match lib.get(b"Verthys_V4ChunkOpen") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            ffi_call(|| {
+                func(
+                    self.handle,
+                    module_id,
+                    file_uuid.as_ptr(),
+                    seq,
+                    total,
+                    cipher.as_ptr(),
+                    cipher.len(),
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut out_len,
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        };
+        if rc != VERTHYS_OK {
+            out.zeroize();
+            return Err(rc);
+        }
+        out.truncate(out_len);
+        Ok(out)
+    }
+
+    /* ================================================================ *
      * 动态防护 7 路径状态实时查询               *
      *                                                                *
      * FFI 调用 Verthys_GetSecurityStatus（RUNTIME 级实时复检，非 BOOT     *
@@ -1209,7 +2199,91 @@ impl Worker {
             failed_count: st.failed_count,
             all_critical_blocked: st.all_critical_blocked != 0,
             has_degraded: st.has_degraded != 0,
+            path_reason: st.path_reason,
+            limited_count: st.limited_count,
+            policy_flags: st.policy_flags,
+            checked_at_unix_ms: st.checked_at_unix_ms,
         })
+    }
+
+    /// 合并并下发运行时守卫位（完整掩码语义）。
+    ///
+    /// 心跳位一旦由心跳线程置位便保持；挂起位跟随主进程下发值（停止守卫
+    /// 下发 0）。合并结果写入进程级原子并立即通知 C 层，状态查询据此
+    /// 区分"看门狗已接线"与"可修复缺口"。
+    pub(crate) fn update_runtime_guards(&self, suspend_lock: bool) -> Result<(), u32> {
+        let heartbeat = self.runtime_guards.load(Ordering::Relaxed) & 0x01;
+        let next = heartbeat | if suspend_lock { 0x02 } else { 0 };
+        self.runtime_guards.store(next, Ordering::Relaxed);
+        self.push_runtime_guards()
+    }
+
+    /// 启用心跳线程（句柄由父进程 DuplicateHandle 注入本进程）。
+    ///
+    /// 独立线程每 500ms SetEvent，与 IPC 主循环解耦：即使主循环在执行长
+    /// FFI（导入/轮换），脉冲仍持续，父进程可区分"忙"与"被挂起"。
+    /// 成功后置 bit0 并通知 C 层；C 首次看到心跳位时刷新反注入线程基线
+    ///（心跳线程起始地址在 worker EXE，不在 verthys.dll，必须纳入基线）。
+    pub(crate) fn arm_heartbeat(&mut self, handle: u64) -> Result<(), u32> {
+        if handle == 0 {
+            return Err(VERTHYS_ERR_INVALID);
+        }
+        if self.heartbeat_thread.is_some() {
+            return Ok(());
+        }
+
+        #[cfg(windows)]
+        {
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_for_thread = stop.clone();
+            let thread = std::thread::Builder::new()
+                .name("verthys-heartbeat".into())
+                .spawn(move || {
+                    let h = handle as *mut std::ffi::c_void;
+                    while !stop_for_thread.load(Ordering::Relaxed) {
+                        unsafe {
+                            let _ = SetEvent(h);
+                        }
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
+                })
+                .map_err(|_| 0xFFFFFFFFu32)?;
+            self.heartbeat_stop = Some(stop);
+            self.heartbeat_thread = Some(thread);
+        }
+        #[cfg(not(windows))]
+        {
+            return Err(0xFFFFFFFFu32);
+        }
+
+        let flags = self.runtime_guards.load(Ordering::Relaxed) | 0x01;
+        self.runtime_guards.store(flags, Ordering::Relaxed);
+        self.push_runtime_guards()
+    }
+
+    /// 将当前完整掩码推送到 C 层；旧 DLL 缺少该导出时仅诊断一次。
+    fn push_runtime_guards(&self) -> Result<(), u32> {
+        let flags = self.runtime_guards.load(Ordering::Relaxed);
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysNotifyRuntimeGuardsFn> =
+                match lib.get(b"Verthys_NotifyRuntimeGuards") {
+                    Ok(f) => f,
+                    Err(_) => {
+                        if !self.guards_symbol_warned.swap(true, Ordering::Relaxed) {
+                            init_diag!(
+                                "[worker] DLL 缺少 Verthys_NotifyRuntimeGuards（旧版），守卫位仅本地记录"
+                            );
+                        }
+                        return Ok(());
+                    }
+                };
+            let rc = ffi_call(|| { func(flags) }).unwrap_or(0xFFFFFFFF);
+            if rc != VERTHYS_OK {
+                return Err(rc);
+            }
+        }
+        Ok(())
     }
 
     /* ----------------------------------------------------------------
@@ -1254,6 +2328,13 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
+        // 先停心跳线程，避免其在锁库/析构期间继续脉冲
+        if let Some(stop) = self.heartbeat_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(thread) = self.heartbeat_thread.take() {
+            let _ = thread.join();
+        }
         // 清理扫描游标 + 共享内存
         let _ = self.call_scan_close();
         // 安全清理：Lock → Deinit + 清零 GMK
@@ -1377,5 +2458,60 @@ mod tests {
         assert_eq!(g.rows().len(), 2);
         assert_eq!(g.rows()[1].0, 2);
         assert_eq!(g.rows()[1].3.len(), 2);
+    }
+
+    /* ------------------------------------------------------------------ *
+     * P0-3：产品入口只接受 v4 magic                                      *
+     * ------------------------------------------------------------------ */
+
+    fn write_magic_file(case: &str, magic: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "verthys_worker_magic_{}_{}_{}.bin",
+            std::process::id(),
+            case,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, magic).expect("写 magic 样本失败");
+        path
+    }
+
+    #[test]
+    fn check_v4_magic_rejects_v3rp() {
+        let path = write_magic_file("v3rp", &[0x56, 0x33, 0x52, 0x50]);
+        let rc = check_v4_magic(path.to_str().unwrap()).expect_err("v3 容器必须被拒绝");
+        assert_eq!(rc, 0x00000005, "v3 容器应返回 FORMAT");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn check_v4_magic_accepts_vrty() {
+        let path = write_magic_file("vrty", &[0x56, 0x52, 0x54, 0x59]);
+        check_v4_magic(path.to_str().unwrap()).expect("v4 容器应通过 magic 白名单");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn check_v4_magic_rejects_truncated_header() {
+        let path = write_magic_file("short", &[0x56, 0x52]);
+        let rc = check_v4_magic(path.to_str().unwrap()).expect_err("截断头必须被拒绝");
+        assert_eq!(rc, 0x00000005, "截断头应返回 FORMAT");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn check_v4_magic_missing_file_is_io() {
+        let path = std::env::temp_dir().join(format!(
+            "verthys_worker_magic_missing_{}_{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        let rc = check_v4_magic(path.to_str().unwrap()).expect_err("不存在文件必须失败");
+        assert_eq!(rc, 0x00000008, "读取失败应返回 IO");
     }
 }

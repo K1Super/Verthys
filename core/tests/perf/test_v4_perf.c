@@ -107,8 +107,6 @@ TEST(v4_perf_module_switch_latency)
 {
     VtyVault *v = NULL;
     char code[VTY_RECOVERY_TEXT_BUF];
-    uint8_t uuid0[VTY_UUID_BYTES];
-    uint8_t mdek[VTY_KEY_BYTES];
     uint64_t max_ms = 0;
     uint32_t i;
 
@@ -116,14 +114,13 @@ TEST(v4_perf_module_switch_latency)
     remove(PERF_MODULE);
     CHECK_EQ(vty_vault_create(PERF_VAULT, "perf-pass", &v, code, sizeof(code)),
              VTY_OK);
-    CHECK_EQ(vty_vault_module_uuid(v, 0, uuid0), VTY_OK);
-    CHECK_EQ(vty_module_create(PERF_MODULE, v, uuid0, "mod-pass",
-                               VTY_ARGON2_MEM_KIB_MIN, 3, 1), VTY_OK);
+    /* 模块槽在容器内：启用一次后测重复解锁（口令 KDF 路径） */
+    CHECK_EQ(vty_module_enable(v, 0u, "mod-pass", NULL), VTY_OK);
 
     for (i = 0; i < 5; i++) {
         uint64_t t0 = verthys_monotonic_ms();
-        CHECK_EQ(vty_module_unlock(PERF_MODULE, v, uuid0, "mod-pass", mdek),
-                 VTY_OK);
+        vty_module_lock(v, 0u);
+        CHECK_EQ(vty_module_unlock(v, 0u, "mod-pass"), VTY_OK);
         {
             uint64_t ms = verthys_monotonic_ms() - t0;
             if (ms > max_ms) max_ms = ms;

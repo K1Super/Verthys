@@ -98,6 +98,50 @@ struct ChunkLedgerFile {
     entries: Vec<(u64, u64)>,
 }
 
+/// 台账追加日志单条变更（JSON Lines；c=块 ID，o=拥有者 ID）
+///
+/// 追加日志把每次块上传/meta 认领的落盘成本降为 O(变更数 + fsync)，
+/// 避免大会话中反复重写整份台账导致的 O(n²) 磁盘写放大。
+#[derive(Serialize, Deserialize)]
+struct ChunkLedgerChange {
+    c: u64,
+    o: u64,
+}
+
+/// 把追加日志重放到内存台账。
+///
+/// 崩溃可能截断最后一行：仅当最后一行无换行且解析失败时按撕裂写忽略，
+/// 其余损坏一律向上传播，保持「台账不可信就拒绝 GC」的保守语义。
+fn apply_journal_file(path: &Path, ledger: &mut ChunkLedger) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("块台账日志读取失败: {}", e))?;
+    let lines: Vec<&str> = text.lines().collect();
+    let ends_with_newline = text.ends_with('\n');
+    for (idx, line) in lines.iter().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<ChunkLedgerChange>(line) {
+            Ok(change) => {
+                ledger.entries.insert(change.c, change.o);
+            }
+            Err(e) => {
+                let is_last = idx + 1 == lines.len();
+                if is_last && !ends_with_newline {
+                    log::warn!("[chunk_ledger] 忽略截断的日志尾行: {}", e);
+                    break;
+                }
+                return Err(format!("块台账日志解析失败: {}", e));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 解析既有台账文件（调用方保证文件存在）
 ///
 /// 解析失败（JSON 损坏、字段类型不符）向上传播为 Err，不静默吞掉：
@@ -118,24 +162,67 @@ fn parse_ledger_file(path: &Path) -> Result<ChunkLedger, String> {
 /// 附属目录优先，旧布局命中即懒迁移（先解析成功再搬迁；搬迁失败不阻断读取）。
 pub fn load_chunk_ledger(verthys_path: &str) -> Result<ChunkLedger, String> {
     let primary = container_layout::chunk_ledger_file_for(verthys_path);
-    if primary.exists() {
-        return parse_ledger_file(&primary);
-    }
+    let mut ledger = if primary.exists() {
+        parse_ledger_file(&primary)?
+    } else {
+        let legacy = container_layout::legacy_chunk_ledger_file_for(verthys_path);
+        if legacy.exists() {
+            let legacy_ledger = parse_ledger_file(&legacy)?;
+            match container_layout::migrate_legacy_file(&legacy, &primary) {
+                Ok(()) => log::info!("[chunk_ledger] 旧布局台账已收口至附属数据目录"),
+                Err(e) => log::warn!(
+                    "[chunk_ledger] 旧布局台账迁移失败（保持原位置，下次访问重试）: {}",
+                    e
+                ),
+            }
+            legacy_ledger
+        } else {
+            ChunkLedger::default()
+        }
+    };
 
-    let legacy = container_layout::legacy_chunk_ledger_file_for(verthys_path);
-    if !legacy.exists() {
-        return Ok(ChunkLedger::default());
-    }
-
-    let ledger = parse_ledger_file(&legacy)?;
-    match container_layout::migrate_legacy_file(&legacy, &primary) {
-        Ok(()) => log::info!("[chunk_ledger] 旧布局台账已收口至附属数据目录"),
-        Err(e) => log::warn!(
-            "[chunk_ledger] 旧布局台账迁移失败（保持原位置，下次访问重试）: {}",
-            e
-        ),
-    }
+    let journal = container_layout::chunk_ledger_journal_file_for(verthys_path);
+    apply_journal_file(&journal, &mut ledger)?;
     Ok(ledger)
+}
+
+/// 追加台账变更（块上传 owner=0 / meta 认领 owner>0）。
+///
+/// **不逐批 fsync**：日志写入系统页缓存即返回。日志是孤儿回收的辅助账，
+/// 不是数据权威；进程/断电丢失尾部只会让未落账的块保守地不被回收，
+/// 已提交记录引用的块由 WAL 结算重新绑定，不会误删。会话结束的全量快照
+/// （`save_chunk_ledger`）负责真正持久化并清理日志，稳态文件数量有界。
+///
+/// 不逐批刷盘同时消除了导入热路径上「每批块一次 FlushFileBuffers」的
+/// 分钟级磁盘停顿风险（慢盘/实时扫描下这是实测的首要卡顿来源）。
+pub fn append_chunk_ledger_entries(
+    verthys_path: &str,
+    entries: &[(u64, u64)],
+) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    container_layout::ensure_sidecar_dir(verthys_path)?;
+    let journal = container_layout::chunk_ledger_journal_file_for(verthys_path);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&journal)
+        .map_err(|e| format!("块台账日志打开失败: {}", e))?;
+    let mut buf = String::with_capacity(entries.len() * 24);
+    for (chunk_id, owner_id) in entries {
+        let change = ChunkLedgerChange {
+            c: *chunk_id,
+            o: *owner_id,
+        };
+        let line = serde_json::to_string(&change)
+            .map_err(|e| format!("块台账日志序列化失败: {}", e))?;
+        buf.push_str(&line);
+        buf.push('\n');
+    }
+    file.write_all(buf.as_bytes())
+        .map_err(|e| format!("块台账日志写入失败: {}", e))?;
+    Ok(())
 }
 
 /// 原子写出台账（tmp 文件 + write_all + sync_all + rename，沿用 WAL 的
@@ -172,6 +259,15 @@ pub fn save_chunk_ledger(verthys_path: &str, ledger: &ChunkLedger) -> Result<(),
             .map_err(|e| format!("块台账 fsync 失败: {}", e))?;
     }
     std::fs::rename(&tmp, &path).map_err(|e| format!("块台账 rename 失败: {}", e))?;
+
+    /* 快照已持久，日志可安全删除；删除失败时保留日志也无害——
+     * 重放是幂等的，下次压缩仍会清理。 */
+    let journal = container_layout::chunk_ledger_journal_file_for(verthys_path);
+    if let Err(e) = std::fs::remove_file(&journal) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("[chunk_ledger] 快照后清理日志失败（保留，重放幂等）: {}", e);
+        }
+    }
     Ok(())
 }
 
@@ -320,5 +416,87 @@ mod tests {
             container_layout::chunk_ledger_file_for(&verthys_path).to_string_lossy()
         ));
         assert!(!tmp.exists(), "不得遗留台账临时文件");
+    }
+
+    #[test]
+    fn test_journal_replayed_without_snapshot() {
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        append_chunk_ledger_entries(&verthys_path, &[(10, 0), (20, 99), (10, 88)]).unwrap();
+
+        let loaded = load_chunk_ledger(&verthys_path).unwrap();
+        // 后写覆盖先写（重放顺序即追加顺序）
+        assert_eq!(loaded.entries.len(), 2);
+        assert_eq!(loaded.owner_of(10), Some(88));
+        assert_eq!(loaded.owner_of(20), Some(99));
+    }
+
+    #[test]
+    fn test_journal_torn_tail_ignored() {
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        append_chunk_ledger_entries(&verthys_path, &[(1, 0)]).unwrap();
+        let journal = container_layout::chunk_ledger_journal_file_for(&verthys_path);
+        // 崩溃窗口：最后一行无换行且被截断
+        let mut text = std::fs::read_to_string(&journal).unwrap();
+        text.push_str("{\"c\":2,\"o");
+        std::fs::write(&journal, text).unwrap();
+
+        let loaded = load_chunk_ledger(&verthys_path).unwrap();
+        assert_eq!(loaded.owner_of(1), Some(0), "完整行必须生效");
+        assert_eq!(loaded.owner_of(2), None, "截断尾行不得生效");
+    }
+
+    #[test]
+    fn test_journal_mid_file_corruption_rejected() {
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let journal = container_layout::chunk_ledger_journal_file_for(&verthys_path);
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        // 中间行损坏且后续仍有完整行：不得按撕裂尾行宽容，必须失败
+        std::fs::write(&journal, b"{\"c\":1,\"o\":0}\nnot-json\n{\"c\":3,\"o\":5}\n").unwrap();
+
+        assert!(load_chunk_ledger(&verthys_path).is_err());
+    }
+
+    #[test]
+    fn test_save_compacts_and_removes_journal() {
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        append_chunk_ledger_entries(&verthys_path, &[(1, 0), (2, 0)]).unwrap();
+        append_chunk_ledger_entries(&verthys_path, &[(2, 55)]).unwrap();
+
+        let mut ledger = load_chunk_ledger(&verthys_path).unwrap();
+        ledger.set_owner(3, 77);
+        save_chunk_ledger(&verthys_path, &ledger).unwrap();
+
+        let journal = container_layout::chunk_ledger_journal_file_for(&verthys_path);
+        assert!(!journal.exists(), "快照落盘后日志必须被清理");
+
+        // 快照已包含全部重放结果，重新加载不依赖日志
+        let loaded = load_chunk_ledger(&verthys_path).unwrap();
+        assert_eq!(loaded.owner_of(1), Some(0));
+        assert_eq!(loaded.owner_of(2), Some(55));
+        assert_eq!(loaded.owner_of(3), Some(77));
+    }
+
+    #[test]
+    fn test_journal_idempotent_replay_after_snapshot() {
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let mut ledger = ChunkLedger::default();
+        ledger.set_owner(1, 0);
+        ledger.set_owner(2, 55);
+        save_chunk_ledger(&verthys_path, &ledger).unwrap();
+
+        // 模拟「快照写入成功但日志清理失败」：重复重放不得产生冲突或新增
+        append_chunk_ledger_entries(&verthys_path, &[(1, 0), (2, 55)]).unwrap();
+        let loaded = load_chunk_ledger(&verthys_path).unwrap();
+        assert_eq!(loaded.entries, ledger.entries);
     }
 }

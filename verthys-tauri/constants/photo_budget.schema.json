@@ -11,7 +11,7 @@
     "meta_index_overhead_chars": 4096,
     "photo_thumb_max_chars": 45000,
     "ipc_max_payload": 12582912,
-    "max_chunks_per_ipc": 8,
+    "max_chunks_per_ipc": 32,
     "payload_chunk_size": 1048576,
     "ipc_max_request_line": 16777216,
     "ipc_max_response_line": 25165824,

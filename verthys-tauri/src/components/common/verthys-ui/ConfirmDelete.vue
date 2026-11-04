@@ -5,7 +5,6 @@
   用法：
     <ConfirmDelete
       :show="showConfirm"
-      :item-name="targetName"
       title=""
       desc=""
       @confirm="doDelete"
@@ -54,10 +53,8 @@
               <div class="cd-core-photon"></div>
             </div>
 
-            <!-- 标题 + 删除对象 + 描述 -->
+            <!-- 标题 + 描述 -->
             <div class="cd-title">{{ title }}</div>
-            <!-- 对象名是二次确认的核心信息：不可逆操作必须让用户看清「删的是哪一条」 -->
-            <div v-if="itemName" class="cd-target" :title="itemName">{{ itemName }}</div>
             <div id="cd-desc-text" class="cd-desc">{{ desc }}</div>
 
             <!-- 操作按钮（默认焦点落在取消：误按回车不得执行删除） -->
@@ -84,13 +81,11 @@ import { isTopModal, popModal, pushModal } from "../../../utils/modal_stack";
 
 interface Props {
   show: boolean;
-  itemName?: string;
   title?: string;
   desc?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  itemName: "",
   title: "确认删除",
   desc: "此操作不可撤销，删除后数据将永久丢失",
 });
@@ -469,26 +464,6 @@ const fragments = Array.from({ length: 20 }, (_, i) => {
   line-height: 1.6;
   margin-bottom: 20px;
   letter-spacing: 0.5px;
-}
-
-/* 删除对象：本次操作的作用目标（不可逆操作的核心确认信息） */
-.cd-target {
-  position: relative;
-  z-index: 2;
-  margin: -2px auto 8px;
-  max-width: 100%;
-  padding: 6px 10px;
-  border: 1px solid rgba(255, 71, 87, 0.24);
-  border-radius: 6px;
-  background: rgba(255, 71, 87, 0.05);
-  color: rgba(255, 177, 184, 0.92);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  letter-spacing: 0.4px;
-  text-align: center;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* ===== 操作按钮 ===== */

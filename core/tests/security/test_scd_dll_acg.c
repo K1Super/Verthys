@@ -3,7 +3,9 @@
  *
  * 目标：
  *   在启用 ACG 的独立进程中加载 verthys.dll，调用 Verthys_Init 与
- *   Verthys_GetSecurityStatus，确认 IAT/Inline Hook 路径达到 BLOCKED。
+ *   Verthys_GetSecurityStatus，确认状态查询可用且不产生虚假阻断：
+ *   干净环境下 Hook 基线扫描必须给出有效证据，IAT/Inline Hook 路径
+ *   在 TLS 与直连系统调用同时成立时达到 BLOCKED。
  *
  * 前置条件：
  *   - 输入参数为 verthys.dll 的绝对路径；
@@ -12,7 +14,7 @@
  * 通过判据：
  *   1. ACG 策略写入成功且读回确认；
  *   2. DLL 加载、Verthys_Init、状态查询均成功；
- *   3. path_state 的 IAT/Inline Hook 项为 BLOCKED。
+ *   3. path_state 的 IAT/Inline Hook 项为 BLOCKED，且无 FAILED 路径。
  *
  * 独立性：
  *   本程序不链接核心对象库，只通过导出符号驱动生产 DLL，
@@ -149,6 +151,12 @@ int wmain(int argc, wchar_t **argv)
         (void)deinit(handle);
         FreeLibrary(dll);
         return 7;
+    }
+    if (st.failed_count != 0u) {
+        printf("FAIL: unexpected FAILED paths=%u\n", (unsigned)st.failed_count);
+        (void)deinit(handle);
+        FreeLibrary(dll);
+        return 8;
     }
 
     printf("PASS: production DLL under ACG reports IAT/Inline Hook BLOCKED\n");

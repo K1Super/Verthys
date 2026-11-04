@@ -41,13 +41,13 @@ vi.mock("../../lib/verthys", () => ({
   verthysImportBegin: vi.fn(async () => ({
     ok: true,
     import_id: "imp-test",
-    hashes: [],
+    entry_keys: [],
     total_count: 0,
   })),
   verthysAddRecordsBatch: addRecordsBatchMock,
   verthysAddChunkBatch: addChunkBatchMock,
   verthysImportEnd: importEndMock,
-  verthysWalRecover: vi.fn(async () => ({ ok: true, hashes: [], total_count: 0 })),
+  verthysWalRecover: vi.fn(async () => ({ ok: true, entry_keys: [], total_count: 0 })),
   // 孤儿块 GC：会话成功收尾时 fire-and-forget，测试环境给出已清理 0 条的成功回执
   verthysGcOrphanChunks: vi.fn(async () => 0),
 }));
@@ -101,10 +101,21 @@ vi.mock("../../cache/coordination/batch-cache-coordinator", () => ({
 import { ImportPipeline, importedToPhotoEntries } from "./importPipeline";
 import type { ParsedPhotoPreview } from "./types";
 import type { PhotoMeta } from "../../lib/crypto";
-import { bytesToBase64 } from "../../utils/binary_codec";
+import { bytesToBase64, bytesToHex } from "../../utils/binary_codec";
 import { MAX_PHOTO_BYTES, PHOTO_FMT_SLIM } from "../../constants/crypto_const";
 import { photoWorkerPool } from "../../workers/photoWorkerPool";
 import { reactive } from "vue";
+import { sha256 } from "@noble/hashes/sha2";
+
+/** 复算流水线口径的非内容条目键（域标识 + 各分量以 `|` 连接后 SHA-256） */
+function entryKeyOf(...parts: Array<string | number>): string {
+  return bytesToHex(sha256(new TextEncoder().encode(parts.join("|"))));
+}
+
+/** 解析导入条目键：展示名 + 大小 + 序号 */
+function parsedKeyOf(name: string, size: number, i: number): string {
+  return entryKeyOf("parsed", name, size, i);
+}
 
 /** 构造最小可用的解析预览项（meta 非 null 即可被流水线选中） */
 function makePreview(i: number, hash: string): ParsedPhotoPreview {
@@ -160,7 +171,7 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
     importEndMock.mockResolvedValue({ ok: true, total_count: 0, import_id: "imp-test" });
     // 恒定外置存储：解析导入的每张照片都先上传分块记录，默认返回成功 id
     let chunkIdSeed = 900;
-    addChunkBatchMock.mockImplementation(async (chunks: Array<{ hash: string }>) => ({
+    addChunkBatchMock.mockImplementation(async (chunks: Array<{ chunk_key: string }>) => ({
       ok: true,
       ids: chunks.map(() => chunkIdSeed++),
       batch_id: 1,
@@ -314,7 +325,7 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
     importEndMock.mockResolvedValue({ ok: true, total_count: 0, import_id: "imp-test" });
     // 恒定外置存储：解析导入的每张照片都先上传分块记录，默认返回成功 id
     let chunkIdSeed = 700;
-    addChunkBatchMock.mockImplementation(async (chunks: Array<{ hash: string }>) => ({
+    addChunkBatchMock.mockImplementation(async (chunks: Array<{ chunk_key: string }>) => ({
       ok: true,
       ids: chunks.map(() => chunkIdSeed++),
       batch_id: 1,
@@ -354,21 +365,22 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
     expect(result.imported).toHaveLength(2);
     expect(addRecordsBatchMock).toHaveBeenCalledTimes(2);
     // 重试子批次只含失败的那一条
-    const retryPayload = addRecordsBatchMock.mock.calls[1][0] as Array<{ hash: string }>;
+    const retryPayload = addRecordsBatchMock.mock.calls[1][0] as Array<{ entry_key: string }>;
     expect(retryPayload).toHaveLength(1);
-    expect(retryPayload[0].hash).toBe("h2");
+    expect(retryPayload[0].entry_key).toBe(parsedKeyOf("照片1.jpg", 1024, 1));
     expect(importEndMock).toHaveBeenCalledWith(true);
   });
 
   it("重试耗尽：失败项按服务端拒绝入账，整体 ok=false 且 WAL 保留", async () => {
-    // 只允许 1 次重试：两次尝试均对 h2 返回失败（响应与请求等长，模拟真实后端逐条映射）
+    // 只允许 1 次重试：两次尝试均对第 2 条返回失败（响应与请求等长，模拟真实后端逐条映射）
+    const failKey = parsedKeyOf("照片1.jpg", 1024, 1);
     const pipe = makePipeline({ consumerMaxRetries: 1 });
     addRecordsBatchMock.mockImplementation(
-      async (records: Array<{ hash: string }>) => ({
+      async (records: Array<{ entry_key: string }>) => ({
         ok: true,
-        ids: records.map((r) => (r.hash === "h1" ? 10 : 0)),
+        ids: records.map((r) => (r.entry_key === failKey ? 0 : 10)),
         batch_id: 1,
-        failed_indices: records.flatMap((r, i) => (r.hash === "h1" ? [] : [i])),
+        failed_indices: records.flatMap((r, i) => (r.entry_key === failKey ? [i] : [])),
         processed_count: records.length,
         total_count: 1,
         skipped_count: 0,
@@ -448,10 +460,12 @@ describe("importPipeline — 大文件外置块路径", () => {
     };
   }
 
-  it("外置：块分批上传（8+1 两批）→ meta 携带 chunkIds 引用提交", async () => {
-    addChunkBatchMock
-      .mockResolvedValueOnce({ ok: true, ids: [1, 2, 3, 4, 5, 6, 7, 8], failed_indices: [] })
-      .mockResolvedValueOnce({ ok: true, ids: [9], failed_indices: [] });
+  it("外置：9 块在单批上限内一次上传 → meta 携带 chunkIds 引用提交", async () => {
+    addChunkBatchMock.mockResolvedValueOnce({
+      ok: true,
+      ids: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+      failed_indices: [],
+    });
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1, 30));
 
     const pipe = makePipeline();
@@ -459,12 +473,10 @@ describe("importPipeline — 大文件外置块路径", () => {
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(1);
-    // 两批上传：8 + 1（每批 ≤ 8 条上限）
-    expect(addChunkBatchMock).toHaveBeenCalledTimes(2);
+    // 跨层上限 32 块，且 9MB 载荷在单批预算内 → 仅一次上传
+    expect(addChunkBatchMock).toHaveBeenCalledTimes(1);
     const firstBatch = addChunkBatchMock.mock.calls[0][0] as Array<{ hash: string; data_b64: string }>;
-    const secondBatch = addChunkBatchMock.mock.calls[1][0] as Array<{ hash: string; data_b64: string }>;
-    expect(firstBatch).toHaveLength(8);
-    expect(secondBatch).toHaveLength(1);
+    expect(firstBatch).toHaveLength(9);
     // meta 记录携带完整引用
     const record = addRecordsBatchMock.mock.calls[0][0][0] as {
       chunk_ids: number[];
@@ -498,12 +510,12 @@ describe("importPipeline — 大文件外置块路径", () => {
   });
 
   it("外置已 committed 文件：前置去重跳过，无块上传无加密提交", async () => {
-    // begin 返回的 hashes 含该文件 → 生产者直接跳过
+    // begin 返回的 entry_keys 含该文件的非内容条目键 → 生产者直接跳过
     const { verthysImportBegin } = await import("../../lib/verthys");
     (verthysImportBegin as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       ok: true,
       import_id: "imp-test",
-      hashes: ["h1"],
+      entry_keys: [parsedKeyOf("大图0.jpg", 9 * 750_000, 0)],
       total_count: 1,
     });
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1, 30));
@@ -611,10 +623,12 @@ describe("importPipeline — run() 大文件外置路径（端到端编排）", 
     expect(addChunkBatchMock).toHaveBeenCalledTimes(1);
     const record = addRecordsBatchMock.mock.calls[0][0][0] as {
       chunk_ids: number[];
-      hash: string;
+      entry_key: string;
     };
     expect(record.chunk_ids).toEqual([41, 42]);
-    expect(record.hash).toBe(fileHash);
+    // 条目键为来源非内容口径（名称/大小/修改时间），不是内容哈希
+    expect(record.entry_key).toBe(entryKeyOf("file", "大图.jpg", 0, 0));
+    expect(record.entry_key).not.toBe(fileHash);
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(1);
     expect(result.failedRecords).toHaveLength(0);
@@ -639,11 +653,13 @@ describe("importPipeline — 共享会话编排（两路一致的会话语义）
 
     const result = await pipe.run(files);
 
-    // 生产者异常不吞：会话按"条目已入账失败"收尾（策略未执行，无静默未记账条目）
+    // 生产者异常不吞：会话按"条目未产出"兜底入账（按真实下标与文件名登记，
+    // 不再用计数差伪造 unknown 索引），WAL 保留以支持续传
     expect(result.ok).toBe(false);
     expect(result.failedRecords).toHaveLength(1);
-    expect(result.failedRecords[0].name).toBe("unknown");
-    expect(result.failedRecords[0].reason).toBe("encrypt-failed");
+    expect(result.failedRecords[0].index).toBe(0);
+    expect(result.failedRecords[0].name).toBe("a.jpg");
+    expect(result.failedRecords[0].reason).toBe("unknown");
     expect(result.failedRecords[0].retryable).toBe(true);
     // WAL 保留（非成功语义）
     expect(importEndMock).toHaveBeenCalledWith(false);
@@ -737,7 +753,7 @@ describe("importPipeline — 响应式代理载荷净化（解析导入 DataClon
     importEndMock.mockResolvedValue({ ok: true, total_count: 0, import_id: "imp-test" });
     // 恒定外置存储：解析导入的每张照片都先上传分块记录，默认返回成功 id
     let chunkIdSeed = 900;
-    addChunkBatchMock.mockImplementation(async (chunks: Array<{ hash: string }>) => ({
+    addChunkBatchMock.mockImplementation(async (chunks: Array<{ chunk_key: string }>) => ({
       ok: true,
       ids: chunks.map(() => chunkIdSeed++),
       batch_id: 1,

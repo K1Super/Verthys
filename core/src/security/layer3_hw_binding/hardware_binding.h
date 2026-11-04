@@ -47,6 +47,13 @@ int hardware_binding_init(void);
 int hardware_binding_get_hash(uint8_t hash[HW_INSTANCE_HASH_BYTES]);
 
 /*
+ * 查询指纹是否已就绪（纯读，不触发初始化）。
+ * 返回 1=已初始化且指纹可用，0=未初始化或初始化失败。
+ * 供状态查询使用：状态查询不得调用 hardware_binding_init。
+ */
+int hardware_binding_is_ready(void);
+
+/*
  * 获取当前绑定模式。
  */
 HwBindMode hardware_binding_get_mode(void);

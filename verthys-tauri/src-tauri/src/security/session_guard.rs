@@ -94,16 +94,41 @@ const MAX_RESTART_ATTEMPTS: u32 = 3;
  *  完全消除全局裸指针和 UAF 风险。                                       *
  * ==================================================================== */
 
+/// 会话锁定原因（外部锁定事件载荷）
+///
+/// 与前端 `applyExternalLock(reason)` 的字符串约定对齐：
+/// session-lock / logoff / disconnect / suspend / display-off。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLockReason {
+    SessionLock,
+    Logoff,
+    Disconnect,
+    Suspend,
+    DisplayOff,
+}
+
+impl SessionLockReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionLockReason::SessionLock => "session-lock",
+            SessionLockReason::Logoff => "logoff",
+            SessionLockReason::Disconnect => "disconnect",
+            SessionLockReason::Suspend => "suspend",
+            SessionLockReason::DisplayOff => "display-off",
+        }
+    }
+}
+
 /// 会话事件（通过 mpsc 通道传递）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionEvent {
-    /// 系统锁屏 / 注销 / 会话断开
-    Lock,
+    /// 系统锁屏 / 注销 / 会话断开（携带具体原因）
+    Lock(SessionLockReason),
     /// 系统解锁
     Unlock,
-    /// 电源挂起（高安全模式下等同于 Lock）
+    /// 电源挂起（恒触发锁定；原因在回调内固定为 Suspend）
     PowerSuspend,
-    /// 显示器关闭（高安全模式下等同于 Lock；源自
+    /// 显示器关闭（高安全模式下触发锁定；源自
     /// GUID_CONSOLE_DISPLAY_STATE 电源设置广播）
     DisplayOff,
     /// 关闭信号（stop 时发送，工作线程退出）
@@ -155,11 +180,11 @@ trait SessionGuardBackend: Send {
 #[cfg(target_os = "windows")]
 mod win_backend {
     use super::{
-        Guid, SessionEvent, SessionGuardBackend, WindowInstanceData, GUID_CONSOLE_DISPLAY_STATE,
-        GWLP_USERDATA, MAX_RESTART_ATTEMPTS, NOTIFY_FOR_THIS_SESSION, PBT_APMSUSPEND,
-        PBT_POWERSETTINGCHANGE, WATCHDOG_CHECK_SECS, WM_DESTROY, WM_POWERBROADCAST, WM_QUIT,
-        WM_WTSESSION_CHANGE, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK,
-        WTS_SESSION_LOGOFF, WTS_SESSION_UNLOCK,
+        Guid, SessionEvent, SessionGuardBackend, SessionLockReason, WindowInstanceData,
+        GUID_CONSOLE_DISPLAY_STATE, GWLP_USERDATA, MAX_RESTART_ATTEMPTS,
+        NOTIFY_FOR_THIS_SESSION, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, WATCHDOG_CHECK_SECS,
+        WM_DESTROY, WM_POWERBROADCAST, WM_QUIT, WM_WTSESSION_CHANGE, WTS_CONSOLE_DISCONNECT,
+        WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF, WTS_SESSION_UNLOCK,
     };
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
@@ -391,10 +416,11 @@ mod win_backend {
             WM_WTSESSION_CHANGE => {
                 let code = wparam as u32;
                 let event = match code {
-                    WTS_SESSION_LOCK
-                    | WTS_SESSION_LOGOFF
-                    | WTS_REMOTE_DISCONNECT
-                    | WTS_CONSOLE_DISCONNECT => Some(SessionEvent::Lock),
+                    WTS_SESSION_LOCK => Some(SessionEvent::Lock(SessionLockReason::SessionLock)),
+                    WTS_SESSION_LOGOFF => Some(SessionEvent::Lock(SessionLockReason::Logoff)),
+                    WTS_REMOTE_DISCONNECT | WTS_CONSOLE_DISCONNECT => {
+                        Some(SessionEvent::Lock(SessionLockReason::Disconnect))
+                    }
                     WTS_SESSION_UNLOCK => Some(SessionEvent::Unlock),
                     _ => None,
                 };
@@ -758,7 +784,7 @@ mod win_backend {
 
     fn worker_loop(
         receiver: mpsc::Receiver<SessionEvent>,
-        on_lock: Arc<dyn Fn() + Send + Sync>,
+        on_lock: Arc<dyn Fn(SessionLockReason) + Send + Sync>,
         on_unlock: Arc<dyn Fn() + Send + Sync>,
         message_loop_state: Arc<MessageLoopState>,
         stop_flag: Arc<AtomicBool>,
@@ -775,13 +801,17 @@ mod win_backend {
                     // catch_unwind 防止 panic 跨 FFI
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         match event {
-                            SessionEvent::Lock => on_lock(),
+                            SessionEvent::Lock(reason) => on_lock(reason),
                             SessionEvent::Unlock => on_unlock(),
-                            // 挂起与显示器关闭同属"环境不可视"硬化事件：
-                            // 仅高安全模式下执行锁定（与矩阵门控一致）
-                            SessionEvent::PowerSuspend | SessionEvent::DisplayOff => {
+                            /* 挂起必须无条件锁库：挂起窗口是内存镜像落盘
+                             *（hiberfil）的唯一入口，不能由可关闭的高安全
+                             * 开关决定。显示器关闭仍按高安全档门控。 */
+                            SessionEvent::PowerSuspend => {
+                                on_lock(SessionLockReason::Suspend);
+                            }
+                            SessionEvent::DisplayOff => {
                                 if high_security.load(Ordering::SeqCst) {
-                                    on_lock();
+                                    on_lock(SessionLockReason::DisplayOff);
                                 }
                             }
                             SessionEvent::Shutdown => {
@@ -829,14 +859,16 @@ mod win_backend {
         stop_flag: Arc<AtomicBool>,
         message_loop_state: Option<Arc<MessageLoopState>>,
         worker_thread: Option<JoinHandle<()>>,
-        on_lock: Option<Arc<dyn Fn() + Send + Sync>>,
-        on_unlock: Option<Arc<dyn Fn() + Send + Sync>>,
+        /* 回调以共享 Arc 持有而非 take 消费：停止后重新启动（含替换回调）
+         * 仍能复用同一份回调，不会退化为空操作。 */
+        on_lock: Arc<dyn Fn(SessionLockReason) + Send + Sync>,
+        on_unlock: Arc<dyn Fn() + Send + Sync>,
         running: bool,
     }
 
     impl WindowsBackend {
         pub fn new(
-            on_lock: Arc<dyn Fn() + Send + Sync>,
+            on_lock: Arc<dyn Fn(SessionLockReason) + Send + Sync>,
             on_unlock: Arc<dyn Fn() + Send + Sync>,
             high_security: bool,
         ) -> Self {
@@ -845,8 +877,8 @@ mod win_backend {
                 stop_flag: Arc::new(AtomicBool::new(false)),
                 message_loop_state: None,
                 worker_thread: None,
-                on_lock: Some(on_lock),
-                on_unlock: Some(on_unlock),
+                on_lock,
+                on_unlock,
                 running: false,
             }
         }
@@ -879,8 +911,8 @@ mod win_backend {
             let mls_for_worker = message_loop_state.clone();
             let stop_flag_for_worker = self.stop_flag.clone();
             let high_security_for_worker = self.high_security.clone();
-            let on_lock = self.on_lock.take().unwrap_or_else(|| Arc::new(|| {}));
-            let on_unlock = self.on_unlock.take().unwrap_or_else(|| Arc::new(|| {}));
+            let on_lock = self.on_lock.clone();
+            let on_unlock = self.on_unlock.clone();
 
             let worker_handle = thread::Builder::new()
                 .name("verthys-session-worker".into())
@@ -1013,7 +1045,7 @@ mod noop_backend {
 pub struct SessionGuard {
     backend: Backend,
     #[allow(dead_code)]
-    on_lock: Arc<dyn Fn() + Send + Sync>,
+    on_lock: Arc<dyn Fn(SessionLockReason) + Send + Sync>,
     #[allow(dead_code)]
     on_unlock: Arc<dyn Fn() + Send + Sync>,
     high_security_mode: bool,
@@ -1030,10 +1062,10 @@ impl SessionGuard {
     ///
     /// 回调存储为 Arc<dyn Fn()>，可跨 start/stop 周期复用。
     pub fn new(
-        on_lock: Box<dyn Fn() + Send + Sync>,
+        on_lock: Box<dyn Fn(SessionLockReason) + Send + Sync>,
         on_unlock: Box<dyn Fn() + Send + Sync>,
     ) -> Self {
-        let on_lock: Arc<dyn Fn() + Send + Sync> = Arc::from(on_lock);
+        let on_lock: Arc<dyn Fn(SessionLockReason) + Send + Sync> = Arc::from(on_lock);
         let on_unlock: Arc<dyn Fn() + Send + Sync> = Arc::from(on_unlock);
 
         SessionGuard {
@@ -1045,6 +1077,45 @@ impl SessionGuard {
             on_unlock,
             high_security_mode: false,
         }
+    }
+
+    /// 替换锁定/解锁回调（保留运行状态与高安全开关）
+    ///
+    /// 启动期以 no-op 占位，避免 SecurityState 构建阶段依赖 AppHandle；
+    /// lib.rs setup 完成后经本方法安装真实回调。若守卫正在运行，先停止
+    /// 旧后端再以新回调重启，保证事件处理路径立即切换到真实锁库序列。
+    pub fn replace_callbacks(
+        &mut self,
+        on_lock: Box<dyn Fn(SessionLockReason) + Send + Sync>,
+        on_unlock: Box<dyn Fn() + Send + Sync>,
+    ) -> Result<(), String> {
+        let was_running = self.backend.is_running();
+        if was_running {
+            self.backend.stop();
+        }
+
+        let on_lock: Arc<dyn Fn(SessionLockReason) + Send + Sync> = Arc::from(on_lock);
+        let on_unlock: Arc<dyn Fn() + Send + Sync> = Arc::from(on_unlock);
+        self.on_lock = on_lock.clone();
+        self.on_unlock = on_unlock.clone();
+
+        #[cfg(target_os = "windows")]
+        {
+            self.backend = win_backend::WindowsBackend::new(
+                on_lock,
+                on_unlock,
+                self.high_security_mode,
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.backend = noop_backend::NoopBackend::new(self.high_security_mode);
+        }
+
+        if was_running {
+            self.backend.start()?;
+        }
+        Ok(())
     }
 
     /// 设置高安全模式（实例级，非全局）

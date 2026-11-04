@@ -97,6 +97,67 @@ flowchart TB
 台账与回收的完整性语义（会话结算、GC 前置守卫、删除事务化）见 [DATA_FLOW.md](DATA_FLOW.md) §5
 与 [ARCHITECTURE.md](ARCHITECTURE.md) §3.1。
 
+### 2.6 v4 全库 DEK 轮换（D9，API 版本 0x0011）
+
+v4 容器以 `K_c` 作为全库数据密钥：口令 + 设备根（AND）解封 user/device 槽；
+恢复槽独立承载同一 `K_c`（由恢复码派生的 `K_recovery` 包裹）。全库轮换
+不是原地重写，而是“新文件全量重建 + 原子替换”：
+
+- **前置**：仅恢复码会话可作为源库（`recovery_mode=1` 且持有 `K_recovery`）；
+  非恢复会话返回 `POLICY`。
+- **重建**：保留 `vault_uuid`，生成新 `K_c`，`epoch = source.epoch + 1`、
+  `generation = source.generation + 1`；恢复槽复用源槽 salt/Argon2id 参数、
+  换新 nonce 后用同一 `K_recovery` 重封新 `K_c`，因此**旧恢复码继续有效**；
+  user/device 槽按调用方提供的当前容器口令（可选 keyfile 摘要）重封。
+- **模块**：每个已启用模块必须先以模块口令登记（解锁源 MDEK），新库按同一
+  口令重新启用模块并重封模块恢复槽；未登记即 Run 返回 `MODULE_LOCKED`。
+- **Keyfile 补录**：容器启用 KEYFILE 但恢复会话未携带 keyfile 时，宿主可提交
+  当前 keyfile 路径 + 容器口令，C 层读取 VKFL 摘要并用其验证 user 槽；认证
+  通过才把摘要写入会话缓存，失败不修改任何会话字段。
+- **PCR**：旧库有 PCR 槽且 TPM 可用时，在替换前重封新库；TPM 不可用时
+  Begin 返回 `TPM`，调用方显式置 `DROP_PCR` 才允许移除绑定；高安全模式
+  且未启用 keyfile 时，即使置位 `DROP_PCR` 也返回 `POLICY`（不得失去第二因子）。
+  PCR 密钥名只由 `vault_uuid` 派生，重封即覆盖旧私钥——这是刻意的反回滚
+  设计，旧槽位 + 旧副本无法继续通过 PCR 门。为覆盖“重封后、原子替换前”
+  的进程崩溃窗口，提交在覆盖密钥前先落盘 `<库路径>.vtyrotj` 恢复日志：
+  日志绑定库 UUID、源代与 PCR 策略摘要；下次口令解锁若 PCR 门失败，只有
+  当日志与当前文件代、位图、策略摘要完全一致且平台 PCR 仍等于策略摘要时，
+  才用口令解出的 `K_c` 重封并重新验证。平台状态变化时绝不自动重绑，否则
+  等于用一次崩溃恢复绕过 PCR 策略。
+- **keep_old + PCR**：保留的 `.old-*` 备份与源库同时被新密钥覆盖，其普通
+  口令解锁会被 PCR 门拒绝，只能用恢复码打开；UI 在勾选保留备份且容器启用
+  PCR 时给出该警示。
+- **口令复核与熔断**：Begin / AttachKeyfile 的 user 槽验证与普通解锁共用
+  持久化失败计数与退避窗口；失败按认证失败记账，成功清零。
+- **只读与失败态**：作业期间源库 `rotate_pending=1`，所有写入口返回
+  `ROTATE_PENDING`；复制失败进入 `FAILED`，只能 `Abort` 丢弃临时库。
+- **取消**：宿主通过命名事件置位取消请求，worker 在 Run 前与进度回调中
+  节流检查；回调在模块/记录/分片/文件边界触发，返回非 0 使 C 层进入
+  `FAILED`，随后只能 `Abort`。
+- **锁定/退出互斥**：lockAll 在任何破坏性步骤（清 GMK / 落盘 / 销毁 worker）
+  之前调用 `verthys_prepare_lock`，由宿主先请求取消并等待全部轮换操作
+  （Begin/解锁模块/Run/补录/Commit/Abort）在途计数归零（有界 30s）；
+  仅等待 Run 会漏掉“换名与 PCR 重封期间销毁 worker”的窗口。
+  失败则整体放弃本次锁定并保留会话与空闲计时。`verthys_lock` / `worker_destroy`
+  内部保留同一闸门作为最后防线。等待期间会话可能被替换，销毁前用会话代际
+  （`session_epoch`）在写锁内原子校验：代际已变返回 `E_LOCK_SUPERSEDED`，
+  绝不清空新会话；若代际已变且当前无任何会话，则补全释放孤儿哨兵锁/文件锁。
+  进程级硬退出路径无法被闸门拦截，其崩溃窗口由上述 PCR 恢复日志兜底。
+- **空闲锁定抑制**：仅在轮换命令在途（前端 `processing`）时暂停空闲锁定；
+  作业进入 ready / failed 后抑制解除，超时会话不得因对话框停留而永久驻留
+  GMK（锁定会中止未提交作业，源库保持完整）。该抑制不是安全边界，Rust
+  闸门独立生效。
+- **超时回收**：worker 流式/普通 IPC 超时后强制终止子进程并标记死亡，
+  避免残留旧序号进度/响应让下一次请求被误判为协议或认证故障。
+- **提交**：复制完成后复核记录数/文件数/分片数，关闭源库与新库数据区句柄，
+  用 `ReplaceFileW` 单次原子替换（源路径任一时刻都存在且内容完整，旧库
+  同事务落为备份），再推进回退锚点；`keep_old=0` 时删除备份，删除失败
+  不伪装成功。提交失败时同样用 `ReplaceFileW` 原子回滚。提交后句柄指向
+  新会话，恢复标记清零。替换与锚点均完成后删除 PCR 恢复日志；若在删除前
+  崩溃，下次解锁在 PCR 门通过（无需恢复）后清理该陈旧日志。
+- **密钥边界**：`K_c`/`K_recovery`/模块 MDEK 只在 C 层与 CNG/安全内存中存在；
+  worker 仅转发口令字节并回传统计计数，前端只拿到阶段与记录/文件/分片计数。
+
 ## 3. 解锁流程数据流
 
 以 `verthys_unlock_pipeline.h` 的 S0–S6 为准（与《解锁.md》一致）。
@@ -141,7 +202,7 @@ flowchart TB
     subgraph B["B. 运行时内存补丁校验（解锁后 + 周期性）"]
         B1["runtime_hash_verify()：解锁成功后立即一次"]
         B2["runtime_hash_verify_periodic()：每 30 分钟，写路径 API 入口"]
-        B3["解析自身 .reloc，掩码重定位槽位后重算 32 关键函数 BLAKE2b"]
+        B3["解析自身 .reloc，掩码重定位槽位后重算关键函数 BLAKE2b（产品 15 项 / 测试与 legacy 全量 40 项）"]
         B4["与 .rhat 节（VRHT 表，构建期 rhash_gen 补丁）比对"]
         B5["失配 → EMERG_SIG_PROCESS_TAMPER → KILL"]
     end
@@ -150,10 +211,10 @@ flowchart TB
     B2 --> B3
 ```
 
-- **校验什么**：A 校验 DLL 文件 `.text`/`.rdata`（含 `.rhat`）未能被替换/篡改；B 校验 32 个关键函数（加解密主路径、密钥组生命周期、轮换、超块事务、分区表、WAL、六 Phase 事务、LSM、解锁流水线、应急、完整性、`runtime_hash_scan` 自身）的**内存映像**未被 hotpatch。
-- **何时执行**：A 在 `Verthys_Init`（`integrity_verify_startup`）；B 在解锁成功后一次 + 之后每次写路径 API（Add/Delete/Import/ChangePassword/Flush）经 `runtime_hash_verify_periodic` 时间门控重算（30 分钟间隔）。
+- **校验什么**：A 校验 DLL 文件 `.text`/`.rdata`（含 `.rhat`）未能被替换/篡改；B 校验关键函数（v4 库创建/解锁/分片/记录/模块、共享密码学/应急/完整性、v3 密钥组/轮换/超块事务/分区表/WAL/六 Phase 事务/LSM/解锁流水线、`runtime_hash_scan` 自身）的**内存映像**未被 hotpatch。v3 源码拆分后清单分两级：产品 DLL 含共享段 15 项（v4 主路径实现 + 共享安全函数，v3 符号不在产品 map），测试/legacy 构建使用全量 40 项。
+- **何时执行**：A 在解锁入口（`Verthys_Unlock` / `Verthys_V4Unlock` / `V4UnlockKeyfile` / `V4UnlockRecovery`，`integrity_verify_startup`）；B 在解锁成功后一次 + 之后每次写路径 API（Add/Delete/Import/ChangePassword/Flush）经 `runtime_hash_verify_periodic` 时间门控重算（30 分钟间隔）。
 - **惩罚**：失配即 `emergency_report(KILL, ...)` → 内存绝育 + 终止进程；`.rhat` 表自身纳入 `.vsec` HMAC（防文件级改表）。
-- 构建闭环：`core/tools/rhash_gen.c --patch <dll|exe>` 解析 map 文件（符号 RVA）+ `.pdata`（函数边界）+ `.reloc`（重定位表），对 X 清单函数计算 BLAKE2b 补丁 `.rhat`；清单以 X-macro 单源定义，删改任一符号即构建失败（禁静默降级）。
+- 构建闭环：`core/tools/rhash_gen.c --patch <dll|exe> [--xlist core|full]` 解析 map 文件（符号 RVA）+ `.pdata`（函数边界）+ `.reloc`（重定位表），对所选 X 清单函数计算 BLAKE2b 补丁 `.rhat`；清单以 X-macro 单源定义，删改任一符号即构建失败（禁静默降级）。
 
 ## 5. 威胁建模（STRIDE 摘要）
 
@@ -162,11 +223,27 @@ flowchart TB
 | Spoofing 欺骗 | 伪冒合法进程/调用方 | brute_force（限流 + 一次性 auth_token）、session 守卫 | 解锁尝试限流，敏感命令需令牌 |
 | Tampering 篡改 | 改 DLL/改 .verthys/内存补丁 | integrity（.vsec+.rhat）、superblock HMAC、Merkle、partition AEAD | 三类篡改各有信号（INTEGRITY_FAIL / PROCESS_TAMPER / SUPERBLOCK_HMAC） |
 | Repudiation 抵赖 | 操作无痕 | util/audit_log.rs + security_commands/audit.rs | 安全命令写入审计日志（AEAD 保护） |
-| Information Disclosure 泄露 | 读内存/转储/冷启动 | CNG 内核托管 + memory_guard + secure_allocator + key_separation | 密钥内核态不可读；明文缓冲用后清零 |
+| Information Disclosure 泄露 | 读内存/转储/冷启动 | memory_guard + secure_allocator + 进程隔离 | V4 密钥驻留独立隔离堆并在锁定/应急时清零；内核态密钥托管暂缓（用户态加固已生效，见 5.1） |
 | Denial of Service 拒绝服务 | 资源耗尽/暴力爆破 | emergency（分级响应）+ 资源上限（512MB/句柄/线程）+ brute_force | 达到预算拒绝新操作、熔断 |
 | Elevation of Privilege 提权 | 注入/Hook/进程镂空 | layer1 job_isolation、layer4 tls_loader+syscall_direct、layer5 process_sandbox、anti_inject | 进程级 mitigation + Job ACL 等效 PPL |
 
 7 攻击路径闭环（`verthys.h VerthysDefensePath` = 内部 `DefensePath`）：挂起绕过 / 内存 Dump / 休眠取证 / IAT-Inline Hook / DLL 劫持·反射注入 / 进程读取 / 跨设备迁移，分别由 `layer1_process_guard`、`memory`、`layer4_hook_defense`、`layer5_sandbox + anti_analysis`、`layer3_hw_binding` 承接，`layer6_closure` 统一 BOOT/RUNTIME 校验（`Verthys_GetSecurityStatus` 反映 7 路径实时状态）。
+
+### 5.1 七路径事实判定矩阵（API 0x0014）
+
+判定输入统一为 `DefenseFacts`（会话事实 + 进程事实），不再以“模块已初始化”代替可观测证据。每条路径输出 `path_state` 与 `path_reason`；`Verthys_GetSecurityStatus` 追加 `path_reason[7]`、`limited_count`、`policy_flags`、`checked_at_unix_ms`（48 字节前缀保持不变，总 104 字节）。
+
+| 路径 | 判定证据 |
+|---|---|
+| 挂起绕过 | 驻留密钥会话数 > 0 即 `DEGRADED`，原因 `SUSPEND_UNPREVENTABLE`；看门狗未接线追加 `SUSPEND_GUARD_INACTIVE`。主进程心跳（worker 每 500ms `SetEvent`）+ 3s 超时 + 全线程挂起确认后终止 worker 并触发外部锁定 |
+| 内存 Dump | 解锁态存在 V4 驻留密钥即 `DEGRADED`（内核托管暂缓），锁定态 `BLOCKED` |
+| 休眠取证 | `HKLM\SYSTEM\CurrentControlSet\Control\Power` 休眠状态：禁用 `BLOCKED`、启用 `DEGRADED`、未知 `UNCHECKED` |
+| IAT-Inline Hook | 磁盘 ntdll 导出基线 + 内存入口字节比较 + IAT 槽校验；首次异常仅遥测，连续两次异常 `KILL`；自身 IAT 被改写且无直连系统调用证据时 `BLOCKED` |
+| DLL 劫持 | `GetProcessMitigationPolicy` 回读 ChildProcess/ImageLoad/DynamicCode/StrictHandle/ExtensionPoint，核心位缺失即 `FAILED`；worker 自报 attrs 不再作为判据 |
+| 进程读取 | 进程 Job/ACL 隔离与自我调试权限检查 |
+| 跨设备迁移 | TPM PCR / 设备根 / 锚点绑定可用性 |
+
+用户态上限项（`limited_count` 仅统计原因 2/5）与真实缺口严格分离：解锁态 `内存 Dump`、管理员可执行的挂起已启用用户态缓解（隔离堆/转储巡检、3 秒心跳看门狗处置），UI 显示“已加固（用户态上限）”，不显示为“未生效”；扫描不可用、证据陈旧、TLS 缺失等属可修复降级，不进入 `limited_count`。
 
 ## 6. 审计点清单
 
@@ -184,6 +261,7 @@ flowchart TB
 | 自完整性核验 | `integrity_check::verify_self_image_async`（启动主镜像 WinVerifyTrust）+ 后台巡检抽样复核；结果写 `INTEGRITY_CHECK` 审计事件 |
 | 痕迹清理 | `trace_cleanup::run_locked_cleanup_async`（锁定/退出触发）；仅删除指向应用自身痕迹域（`.verthys`/`.venc` 扩展名 + 应用自有目录前缀）的最近记录条目，写 `TRACE_CLEANUP` 审计事件 |
 | 介质绑定 | `pre_unlock_guard`（解锁前卷序列号哈希比对，克隆嫌疑 fail-closed 拒绝）+ `post_unlock_commit`（DPAPI 持久化登记/重绑定） |
+| 私有目录 ACL | 启动期对 `<data>/logs` 与 `<data>/tmp` 调用 `harden_private_dir`（仅当前用户/SYSTEM/管理员可访问），失败仅告警不阻断启动 |
 
 ## 7. 安全防护档位与特性契约
 
@@ -191,13 +269,13 @@ flowchart TB
 
 ### 7.1 特性位契约（11 位，位序跨层禁止重排）
 
-位序：0=anti_debug，1=anti_inject，2=integrity_check，3=memory_guard，4=key_separation，5=emergency_response，6=session_lock_on_idle，7=module_patrol，8=clipboard_guard，9=usb_clone_detect，10=trace_cleanup；有效掩码 `0x7FF`。
+位序：0=anti_debug，1=anti_inject，2=integrity_check，3=memory_guard，4=key_separation（V3 遗留键名；V4 映射密钥隔离堆），5=emergency_response，6=session_lock_on_idle，7=module_patrol，8=clipboard_guard，9=usb_clone_detect，10=trace_cleanup；有效掩码 `0x7FF`。
 
 档位值：BALANCED `0x6FF`、SECURE `0x7FF`、PERFORMANCE `0x073`。C 层投影接口 `security_preset_feature_bits` / `security_active_preset` 为唯一口径；应用侧镜像 `app_feature_gate`（AtomicU32）按回读结果更新，未应用预设时按保守全开处理——任何异常路径朝"防护更严"方向失败。
 
 ### 7.2 红线能力（全档恒定，不随档位或用户开关关闭）
 
-调试检测（anti_debug 全档恒开，性能档不减负）、注入拦截、密钥三权分立（CNG）、应急熔断（`emergency.c` 无条件 KILL 级）、锁定清空剪贴板、系统锁屏/注销/断连即锁定（WTS 事件）、全局密钥导出二次验证。`key_separation` / `emergency_response` 两位由红线常量提供。
+调试检测（anti_debug 全档恒开，性能档不减负）、注入拦截、V4 密钥驻留隔离堆（`secure_allocator`，解锁态不可导出）、应急熔断（`emergency.c` 无条件 KILL 级）、锁定清空剪贴板、系统锁屏/注销/断连/挂起即锁定（WTS + 电源事件）、全局密钥导出二次验证。`key_separation` / `emergency_response` 两位由红线常量提供；其中 `key_separation` 为 V3 遗留位，产品 v4-only 构建不再链接该实现，V4 密钥由隔离堆承接。
 
 ### 7.3 特性执行路径（能力真实性）
 
@@ -214,7 +292,7 @@ flowchart TB
 
 解锁流程在凭据验证前按受信文件（`<verthys_path>.preset.json`，按本次容器路径派生）应用档位并回读校验，失败中止解锁（fail-closed）；本地 localStorage 仅作迁移来源与只读缓存，任何路径不得以其覆盖受信文件；运行期唯一写路径是用户显式切换（落盘 → 切档 → 回读 → 成功才更新 UI，并递增竞态版本号）。
 
-显示器关闭锁定（display-off）：会话守卫注册 `GUID_CONSOLE_DISPLAY_STATE` 电源设置通知，仅高安全（SECURE）模式下显示器关闭执行锁定；通知注册失败退化为既有挂起监听。
+显示器关闭锁定（display-off）：会话守卫注册 `GUID_CONSOLE_DISPLAY_STATE` 电源设置通知，仅高安全（SECURE）模式下显示器关闭执行锁定；`PowerSuspend` 不再受档位门控，始终触发锁库与 worker 销毁。通知注册失败仅降级为既有挂起监听。
 ## 8. 更新系统信任链
 
 更新系统与业务密钥链路隔离，不读取容器内容，也不参与解锁与密钥派生。

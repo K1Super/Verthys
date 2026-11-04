@@ -42,6 +42,8 @@ export interface PhotoCryptoRequest {
   fileBytes: ArrayBuffer;
   /** 索引瘦身布局密钥组（缺省 = 既有布局，由 worker 生成随机盐） */
   slim?: SlimWorkerKeys;
+  /** 非内容续传条目键（写入加密 meta，供删除时释放 WAL 幂等锁） */
+  entryKey?: string;
 }
 
 /** 外置块输出（块密文总量超过内联阈值时的成功产物） */
@@ -112,6 +114,8 @@ export interface PhotoMetaCryptoRequest {
   recordName: string;
   /** 索引瘦身布局参数（缺省 = 既有布局：按随机盐加密索引） */
   slim?: SlimWorkerKeys;
+  /** 非内容续传条目键（覆盖 meta.entryKey，供删除时释放 WAL 幂等锁） */
+  entryKey?: string;
 }
 
 /** 主线程 → Worker 请求（索引瘦身布局：加密缩略图记录载荷） */

@@ -13,9 +13,8 @@
  *   - record_auth_success：成功重置连续失败计数 + 持久化 + 审计。
  *
  * 语义约定：
- *   - 计数与 DPAPI 持久化、审计行为与 security_brute_record_failure /
- *     security_brute_record_success 命令完全一致（同一守卫、同一持久化层），
- *     区别仅在调用方为服务端自身，无需会话授权检查。
+ *   - 计数、DPAPI 持久化与审计统一由本桥接层执行（同一守卫、同一持久化层）；
+ *     记录命令已下线，前端不再直接触发失败/成功计数。
  *   - 桥接层不做二次决策：record_failure 的 RateLimited/Frozen 语义
  *     由守卫内部消化，仅透传审计。
  */

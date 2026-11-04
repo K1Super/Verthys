@@ -1,5 +1,6 @@
 # core/tests/CMakeLists.txt
-# 测试 exe：链接 verthys_core_obj 对象，直接调用实现（不走 DLL 边界）
+# 测试 exe：链接共享对象库 + v3 容器对象库 + 测试 API 对象库（V3 分支启用），
+# 直接调用实现（不走 DLL 边界）；产品 verthys_core_obj（v4-only）不参与测试链接。
 # 模块化重构：测试区按被测子域镜像组织（api/container/crypto/index/
 #   property/regression/schema/security/transaction/perf），test_runner.c
 #   与 verthys_test.h 保留在 tests 根作为测试入口与框架。
@@ -39,12 +40,26 @@ add_executable(verthys_tests
     index/test_sstable_budget.c
     index/test_warmcache_v3.c
     api/test_v3_lifecycle.c
+    api/test_v4_api.c
     property/test_v3_property.c
     crypto/test_auto_rekey.c
     crypto/test_pepper_v3.c
     crypto/test_v4_primitives.c
+    crypto/test_v4_keyfile.c
     container/test_v4_container.c
     index/test_v4_records.c
+    index/test_v4_store.c
+    index/test_v4_repo.c
+    index/test_v4_repo_scan.c
+    api/test_v4_api_v4.c
+    api/test_v4_api_modules.c
+    api/test_v4_api_pcr.c
+    api/test_v4_reseal_device.c
+    api/test_v4_api_content.c
+    api/test_v4_api_product.c
+    api/test_v4_error_map.c
+    api/test_v4_transfer.c
+    api/test_v4_rotate.c
     container/test_v4_chunks.c
     container/test_v4_modules.c
     security/test_v4_lockout.c
@@ -59,14 +74,19 @@ add_executable(verthys_tests
     security/test_syscall_direct.c
     security/test_security_preset.c
     security/test_defense_closure.c
+    security/test_hibernation_state.c
+    security/test_hook_scan.c
     security/test_anti_inject.c
     security/test_system32_loader.c
 )
-target_link_libraries(verthys_tests PRIVATE verthys_core_obj)
+target_link_libraries(verthys_tests PRIVATE
+    verthys_core_shared_obj
+    verthys_core_v3_obj
+    verthys_core_legacy_api_obj)
 # flatcc 运行时（demo schema 编解码验收）+ codegen 顺序依赖
 target_link_libraries(verthys_tests PRIVATE flatccrt)
 add_dependencies(verthys_tests flatcc_generate)
-# 状态快照 GetGuiResources 需要 user32（verthys_core_obj 为
+# 状态快照 GetGuiResources 需要 user32（对象库为
 # PRIVATE 链接不传递，此处显式补齐）
 target_link_libraries(verthys_tests PRIVATE user32)
 # 模块化重构：源子目录 include 表复用 core/CMakeLists.txt 的
@@ -110,7 +130,9 @@ add_test(NAME verthys_tests COMMAND verthys_tests)
 add_executable(verthys_scd_acg_test
     security/test_scd_acg.c
 )
-target_link_libraries(verthys_scd_acg_test PRIVATE verthys_core_obj flatccrt user32)
+target_link_libraries(verthys_scd_acg_test PRIVATE
+    verthys_core_shared_obj verthys_core_v3_obj verthys_core_legacy_api_obj
+    flatccrt user32)
 target_include_directories(verthys_scd_acg_test PRIVATE
     ${CMAKE_SOURCE_DIR}/core/include
     ${CMAKE_SOURCE_DIR}/core/src
@@ -141,7 +163,9 @@ add_test(NAME verthys_scd_dll_acg
 add_executable(vty_probe
     tools/vty_probe.c
 )
-target_link_libraries(vty_probe PRIVATE verthys_core_obj flatccrt user32)
+target_link_libraries(vty_probe PRIVATE
+    verthys_core_shared_obj verthys_core_v3_obj verthys_core_legacy_api_obj
+    flatccrt user32)
 target_include_directories(vty_probe PRIVATE
     ${CMAKE_SOURCE_DIR}/core/include
     ${CMAKE_SOURCE_DIR}/core/src
@@ -173,7 +197,9 @@ endif()
 add_executable(vty_mem_host
     tools/vty_mem_host.c
 )
-target_link_libraries(vty_mem_host PRIVATE verthys_core_obj flatccrt user32 dbghelp)
+target_link_libraries(vty_mem_host PRIVATE
+    verthys_core_shared_obj verthys_core_v3_obj verthys_core_legacy_api_obj
+    flatccrt user32 dbghelp)
 target_include_directories(vty_mem_host PRIVATE
     ${CMAKE_SOURCE_DIR}/core/include
     ${CMAKE_SOURCE_DIR}/core/src

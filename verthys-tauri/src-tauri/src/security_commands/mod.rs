@@ -54,6 +54,8 @@ pub mod responses;
 pub mod state;
 /// 可移动介质绑定的解锁期接入（检测 / 登记 / 重绑定；服务层契约实现）
 pub mod usb_binding_bridge;
+/// 全库 DEK 轮换的宿主能力桥接（服务层契约实现）
+pub mod vault_rotate_bridge;
 
 pub use commands::brute_force::*;
 pub use commands::cleanup::*;

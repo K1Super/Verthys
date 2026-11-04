@@ -113,6 +113,11 @@ int hardware_binding_get_hash(uint8_t hash[HW_INSTANCE_HASH_BYTES])
     return 0;
 }
 
+int hardware_binding_is_ready(void)
+{
+    return s_initialized ? 1 : 0;
+}
+
 HwBindMode hardware_binding_get_mode(void)
 {
     return s_mode;

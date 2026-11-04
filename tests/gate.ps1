@@ -6,9 +6,21 @@
  *   pwsh tests/gate.ps1 -Stage P0-G -Full
  *   pwsh tests/gate.ps1 -Stage P0-C -SkipBuild
  *   pwsh tests/gate.ps1 -Stage P2
+ *   pwsh tests/gate.ps1 -Stage V4-PI
+ *   pwsh tests/gate.ps1 -Stage V4-PI-2
+ *   pwsh tests/gate.ps1 -Stage V4-PI-3
+ *   pwsh tests/gate.ps1 -Stage V4-PI-4
+ *   pwsh tests/gate.ps1 -Stage V4-PI-5
  *
  * P2 额外要求：PCR 读取、PCR 绑定密钥的正控与负控必须同时成立；
  * TBS 授权会话与 TPM NV 的可用性写入报告（平台不支持时记录为能力边界）。
+ * V4-PI 要求：v4 数据区/目录/DataRoot、公共会话入口与 v3 拒绝用例
+ * （A16）通过；现有 P0/P2 用例不得回退。
+ * V4-PI-2 要求：记录仓库/扫描/摘要/删除/导出导入与公共 API v4 分支
+ * （A4/A5/A9/A11/A13）全绿；V4-PI 的格式与会话用例不得回退。
+ * V4-PI-3 要求：模块表/启用重写/分片/恢复/回滚/API 用例全绿；
+ * A6b/A8/A14/A15 与 A4/A5/A9/A11/A12/A13 通过；Rust worker 与前端
+ * vitest 必须同时零失败；旧 V4-PI-2/V4-PI/P0-B/P0-F/P2 不得回退。
  *
  * 判定口径：
  *   - 全量单元/集成测试必须 0 失败；
@@ -20,7 +32,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('P0-B', 'P0-C', 'P0-D', 'P0-E', 'P0-F', 'P0-G', 'P2')]
+    [ValidateSet('P0-B', 'P0-C', 'P0-D', 'P0-E', 'P0-F', 'P0-G', 'P2', 'V4-PI', 'V4-PI-2', 'V4-PI-3', 'V4-PI-4', 'V4-PI-5')]
     [string]$Stage = 'P0-G',
     [switch]$Full,
     [switch]$SkipBuild,
@@ -32,6 +44,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+
+# 测试卫生闸门：LOCALAPPDATA 隔离只能挡住 rollback.state 落盘，挡不住 CNG
+# 持久化见证密钥按库 UUID 累积；这里在整轮门禁前后做快照差集回收，并在
+# 结束时校验真实锚点状态未被任何测试路径改写。
+Import-Module (Join-Path $PSScriptRoot 'lib/VerthysTestHygiene.psm1') -Force
+$hygiene = Start-VerthysTestHygiene
+
 $buildDir = Join-Path $repoRoot 'build'
 $testsExe = Join-Path $buildDir 'core/tests/Release/verthys_tests.exe'
 $cmake = $null
@@ -62,11 +81,25 @@ $stageChecks = @{
     'P0-D' = @{ Tests = @('v4_chunk', 'v4_manifest'); Attacks = @('A5') }
     'P0-E' = @{ Tests = @('v4_module'); Attacks = @('A6', 'A6b') }
     'P0-F' = @{ Tests = @('v4_lockout'); Attacks = @('A7', 'A8') }
-    'P0-G' = @{ Tests = @('v4_'); Attacks = @('PC-1', 'A1', 'A1b', 'A2', 'A3', 'A4', 'A5', 'A6', 'A6b', 'A7', 'A8', 'A9', 'A10', 'A11', 'A12', 'A13', 'A14', 'A15') }
+    'P0-G' = @{ Tests = @('v4_'); Attacks = @('PC-1', 'A1', 'A1b', 'A2', 'A3', 'A4', 'A5', 'A6', 'A6b', 'A7', 'A8', 'A9', 'A10', 'A11', 'A12', 'A13', 'A14', 'A15', 'A16', 'A17', 'A19') }
     'P2'   = @{ Tests = @('v4_pcr', 'v4_tpm_pcr', 'v4_witness'); Attacks = @('PC-1', 'A7', 'A8', 'A12', 'A14') }
+    'V4-PI' = @{ Tests = @('v4_store_', 'v4_api_', 'v4_header_', 'v4_slot_', 'v4_data_root_', 'v4_segment_', 'v4_rollback', 'v4_witness'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A12', 'A14', 'A15', 'A16') }
+    'V4-PI-2' = @{ Tests = @('v4_repo', 'v4_api_records', 'v4_transfer', 'v4_store_', 'v4_crash_record'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A11', 'A13') }
+    'V4-PI-3' = @{ Tests = @('v4_module_table', 'v4_module_m1', 'v4_module_delete', 'v4_module_recovery', 'v4_module_crash', 'v4_api_modules', 'v4_api_module_delete', 'v4_api_recovery_rotate', 'v4_repo', 'v4_store_'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A11', 'A12', 'A13', 'A6b', 'A8', 'A14', 'A15') }
+    'V4-PI-4' = @{ Tests = @('v4_api_pcr', 'v4_pcr_', 'v4_api_product', 'v4_api_module', 'v4_recovery', 'v4_api_records', 'v4_module_', 'v4_store_', 'v4_reseal_device_'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A11', 'A12', 'A13', 'A6b', 'A8', 'A14', 'A15', 'A16', 'A17', 'A19', 'A20', 'A20b') }
+    'V4-PI-5' = @{ Tests = @('v4_repo_system_', 'v4_api_', 'v4_module_'); Attacks = @('PC-1', 'A4', 'A9', 'A11', 'A13', 'A20', 'A20b') }
 }
 
 $checks = $stageChecks[$Stage]
+
+# 所有测试与攻击回归都在这层 try/finally 内执行：无论中途提前 exit 还是
+# 抛错，都会走统一回收，避免半途退出把见证密钥留在机器上。
+try {
+
+# V4-PI-5 的验收证据固定落到 reports/（可由 -OutJson 覆盖）
+if ($Stage -eq 'V4-PI-5' -and -not $OutJson) {
+    $OutJson = Join-Path $repoRoot 'reports/gate-v4-pi-5.json'
+}
 
 if (-not $SkipBuild) {
     & $cmake --build $buildDir --config Release --target verthys_tests | Out-Null
@@ -179,6 +212,70 @@ if ($Stage -eq 'P2') {
     }
 }
 
+# 3b) V4-PI-3：模块事务涉及 worker 会话与渲染层密钥面移除，
+#     该阶段必须同时跑 Rust worker 单测与前端 vitest（零失败）。
+if ($Stage -in @('V4-PI-3', 'V4-PI-4')) {
+    $workerDir = Join-Path $repoRoot 'verthys-tauri/verthys-worker'
+    Push-Location $workerDir
+    try { & cargo test --release | Out-Null; $workerTestExit = $LASTEXITCODE }
+    finally { Pop-Location }
+    if ($workerTestExit -ne 0) { $testFailures.Add('worker cargo test 失败') }
+
+    $frontDir = Join-Path $repoRoot 'verthys-tauri'
+    Push-Location $frontDir
+    try { & npm test | Out-Null; $frontTestExit = $LASTEXITCODE }
+    finally { Pop-Location }
+    if ($frontTestExit -ne 0) { $testFailures.Add('前端 vitest 失败') }
+
+    if ($Stage -eq 'V4-PI-4') {
+        Push-Location $frontDir
+        try { & npx vue-tsc --noEmit | Out-Null; $tscExit = $LASTEXITCODE }
+        finally { Pop-Location }
+        if ($tscExit -ne 0) { $testFailures.Add('前端类型检查失败') }
+
+        $e2eScript = Join-Path $PSScriptRoot 'e2e/v4-product.ps1'
+        & pwsh -NoProfile -File $e2eScript -SkipBuild | Out-Null
+        if ($LASTEXITCODE -ne 0) { $testFailures.Add('v4 产品链 e2e 失败') }
+
+        $workerE2e = Join-Path $PSScriptRoot 'e2e/v4-worker-smoke.ps1'
+        & pwsh -NoProfile -File $workerE2e | Out-Null
+        if ($LASTEXITCODE -ne 0) { $testFailures.Add('v4 worker IPC e2e 失败') }
+
+        # 宿主层全库轮换：真实 AppHandle/AppState/worker/DLL，覆盖
+        # Begin→UnlockModule→Run→Abort/Commit 与提交后记录读回。
+        # 依赖可用的 Windows 桌面会话（WebView2）；以隐藏窗口运行。
+        $rotateHostE2e = Join-Path $PSScriptRoot 'e2e/v4-rotate-host.ps1'
+        & pwsh -NoProfile -File $rotateHostE2e | Out-Null
+        if ($LASTEXITCODE -ne 0) { $testFailures.Add('v4 全库轮换宿主层 e2e 失败') }
+    }
+}
+
+# 3c) V4-PI-4/V4-PI-5：P1-1 身份键门禁 —— 生产代码禁止内容哈希作为去重/寻址键。
+#     旧字段名（已删除）不得复活；A20/A20b 回归用例必须在场（由全量 vitest 执行）。
+if ($Stage -in @('V4-PI-4', 'V4-PI-5')) {
+    $idKeyRoots = @(
+        (Join-Path $repoRoot 'verthys-tauri/src'),
+        (Join-Path $repoRoot 'verthys-tauri/src-tauri/src')
+    )
+    $idKeyHits = @(foreach ($root in $idKeyRoots) {
+            if (Test-Path -LiteralPath $root) {
+                Get-ChildItem -LiteralPath $root -Recurse -Include *.ts,*.vue,*.rs -File -ErrorAction SilentlyContinue |
+                    Select-String -Pattern 'committed_hashes|chunk_ids_by_hash|chunk_<hash>' -ErrorAction SilentlyContinue
+            }
+        })
+    if ($idKeyHits.Count -gt 0) {
+        $testFailures.Add("内容哈希身份键残留 $($idKeyHits.Count) 处")
+        foreach ($hit in ($idKeyHits | Select-Object -First 5)) {
+            Write-Host ("  [KEY ] {0}:{1}" -f $hit.Path, $hit.LineNumber) -ForegroundColor Red
+        }
+    }
+    $a20File = Join-Path $repoRoot 'verthys-tauri/src/composables/file-verthys/useFileImport.spec.ts'
+    $a20Text = if (Test-Path -LiteralPath $a20File) { Get-Content -LiteralPath $a20File -Raw } else { '' }
+    if ($a20Text -notmatch '同内容不同路径' -or $a20Text -notmatch '同一会话内同路径') {
+        $testFailures.Add('A20/A20b 回归用例缺失（同内容不同路径 / 同条目键重试）')
+    }
+}
+
 # 4) 汇总
 $total = $checks.Tests.Count + $checks.Attacks.Count
 $bad = $testFailures.Count + $attackFailures.Count
@@ -216,3 +313,8 @@ if ($OutJson) {
 
 Remove-Item -LiteralPath $attackJson -Force -ErrorAction SilentlyContinue
 exit $(if ($verdict -eq 'PASS') { 0 } else { 1 })
+
+}
+finally {
+    Complete-VerthysTestHygiene -Scope $hygiene
+}

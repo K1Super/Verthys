@@ -248,6 +248,7 @@ async function processPhoto(
   mime: string,
   fileBytes: ArrayBuffer,
   slim?: SlimWorkerKeys,
+  entryKey?: string,
 ): Promise<PhotoProcessResult> {
   const origBytes = new Uint8Array(fileBytes);
   const size = origBytes.length;
@@ -309,6 +310,7 @@ async function processPhoto(
     chunkDataB64: external ? [] : chunkDataB64,
     chunkHashes,
     fileHash: fileHashHex,
+    entryKey,
     createdAt: Date.now(),
     ...(slim
       ? { fmt: PHOTO_FMT_SLIM, wrappedFileKey: slim.wrappedFileKey }
@@ -384,10 +386,13 @@ async function processPhotoMetaOnly(
   meta: PhotoMeta,
   recordName: string,
   slim?: SlimWorkerKeys,
+  entryKey?: string,
 ): Promise<PhotoMetaProcessResult> {
   // 索引瘦身布局：索引按文件盐加密（与包裹态密钥同盐），且索引内不保留
   //   缩略图数据（缩略图已独立成记录）；既有布局维持原行为。
-  const payload = slim ? { ...meta, thumbB64: "" } : meta;
+  const payload = slim
+    ? { ...meta, thumbB64: "", ...(entryKey ? { entryKey } : {}) }
+    : { ...meta, ...(entryKey ? { entryKey } : {}) };
   const metaPlain = new TextEncoder().encode(JSON.stringify(payload));
   try {
     const sealed = await workerRpc.request({
@@ -930,9 +935,9 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
 
   // ===== meta-only 加密路径（Parsed Import） =====
   if (isMetaOnlyRequest(req)) {
-    const { id, meta, recordName, slim } = req;
+    const { id, meta, recordName, slim, entryKey } = req;
     try {
-      const result = await processPhotoMetaOnly(meta, recordName, slim);
+      const result = await processPhotoMetaOnly(meta, recordName, slim, entryKey);
       const response = assemblePhotoMetaCryptoSuccess(id, result, meta);
       workerScope.postMessage(response);
     } catch (e) {
@@ -945,10 +950,10 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
   }
 
   // ===== 完整加密路径（常规导入） =====
-  const { id, fileName, mime, fileBytes, slim } = req as PhotoCryptoRequest;
+  const { id, fileName, mime, fileBytes, slim, entryKey } = req as PhotoCryptoRequest;
 
   try {
-    const result = await processPhoto(fileName, mime, fileBytes, slim);
+    const result = await processPhoto(fileName, mime, fileBytes, slim, entryKey);
     // 逐字段装箱：产物含外部块输出（external）时必须一并回传，
     // 漏传会让主线程走内联分支并以「加密产物缺少元数据」失败
     const response = assemblePhotoCryptoSuccess(id, result);

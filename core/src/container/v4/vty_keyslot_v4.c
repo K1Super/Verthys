@@ -386,9 +386,14 @@ int vty_slot_policy_check(const VtySlot *slots, uint32_t count, uint16_t flags)
         return VTY_E_SLOT_UNKNOWN;
     }
 
+    /* D3 keyfile 是用户槽 KDF 第二输入，不写独立槽；若出现 type 5 槽，
+     * 说明文件来自未批准的旧设计或伪造，直接拒绝。 */
+    if (vty_slot_find(slots, count, VTY_SLOT_KEYFILE) >= 0) {
+        return VTY_E_SLOT_UNKNOWN;
+    }
+
     if ((flags & VTY_FLAG_HIGH_SECURITY) != 0) {
-        if (vty_slot_find(slots, count, VTY_SLOT_KEYFILE) < 0 &&
-            pcr_slots == 0) {
+        if ((flags & VTY_FLAG_KEYFILE) == 0 && pcr_slots == 0) {
             return VTY_E_SLOT_MISSING;
         }
     }

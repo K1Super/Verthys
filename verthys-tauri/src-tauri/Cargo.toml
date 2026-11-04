@@ -84,7 +84,7 @@
 
 [package]
 name = "verthys-tauri"
-version = "4.1.8"
+version = "4.2.8"
 description = "Verthys 私密数据管理器"
 authors = ["Verthys"]
 edition = "2021"
@@ -99,6 +99,8 @@ default = []
 portable_mode = []
 # 仅用于本机更新链路自动化验证；正式发布构建不得启用。
 e2e_update = []
+# 仅用于宿主层全库 DEK 轮换集成验证；正式发布构建不得启用。
+e2e_rotate = []
 
 # Lint 配置
 # linker_messages：MSVC 为 cdylib 生成导入库/导出对象时固定向 stdout 输出

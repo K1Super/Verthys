@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
 /*
- * ManagementTopBar.spec.ts — 更新端子机械量表契约
+ * ManagementTopBar.spec.ts — 更新节点环形机械量表契约
  *
  * 覆盖：
- *   1. 非下载态不渲染量表，避免常驻刻度干扰端子基线
+ *   1. 非下载态不渲染量表，避免常驻刻度干扰节点基线
  *   2. 下载态固定 30 刻度、首尾端桩与每五格主刻度，点亮数量按整格推进
  *   3. 100% 补满末格
  *   4. 颜色沿全量程固定映射，首格青色、末格青绿色
@@ -35,7 +35,6 @@ function mountTopBar(updateInstalling: boolean, updatePercent: number) {
     updateInstalling,
     updatePercent,
     updateCancellable: false,
-    updateFailed: false,
   });
   const app = createApp({ render: () => h(ManagementTopBar, state) });
   app.directive("tip", { mounted() {} });
@@ -44,11 +43,17 @@ function mountTopBar(updateInstalling: boolean, updatePercent: number) {
   return { container, state };
 }
 
-describe("更新端子机械量表", () => {
+describe("更新节点环形机械量表", () => {
+  it("不渲染日志与诊断导出动作节点", () => {
+    const { container } = mountTopBar(false, 42);
+
+    expect(container.querySelector('button[aria-label*="导出"]')).toBeNull();
+  });
+
   it("非下载态不渲染量表", () => {
     const { container } = mountTopBar(false, 42);
 
-    expect(container.querySelector(".sf-update-scale")).toBeNull();
+    expect(container.querySelector(".sf-update-dial")).toBeNull();
   });
 
   it("下载态固定 30 刻度并按整格推进", async () => {
@@ -92,7 +97,6 @@ describe("更新端子机械量表", () => {
       updateInstalling: true,
       updatePercent: 42,
       updateCancellable: true,
-      updateFailed: false,
       onCancelUpdate: cancelled,
     });
     const app = createApp({ render: () => h(ManagementTopBar, state) });
@@ -100,10 +104,24 @@ describe("更新端子机械量表", () => {
     app.mount(container);
     mounted.push({ app, container });
 
-    const button = container.querySelector(".sf-terminal--update") as HTMLButtonElement;
-    expect(button.textContent).toContain("取消更新");
+    // 纯图标契约：取消语义只经提示与无障碍名称暴露，按钮内无可见文字
+    const button = container.querySelector(".sf-act--update") as HTMLButtonElement;
+    expect(button.textContent?.trim()).toBe("");
+    expect(button.getAttribute("aria-label")).toContain("取消下载");
     button.click();
 
     expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it("动作区纯图标渲染，每个节点均具备无障碍名称", () => {
+    const { container } = mountTopBar(false, 0);
+    const buttons = Array.from(container.querySelectorAll(".sf-meridian-actions .sf-act"));
+
+    // 无更新失败时动作区为 更新 / 锁定 两枚节点
+    expect(buttons.length).toBe(2);
+    for (const button of buttons) {
+      expect(button.textContent?.trim()).toBe("");
+      expect(button.getAttribute("aria-label")).toBeTruthy();
+    }
   });
 });

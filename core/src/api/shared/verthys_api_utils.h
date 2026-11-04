@@ -58,15 +58,30 @@ char *dup_string(const char *s);
 /* 释放 GetRecord 借用指针缓存（安全清零 + 释放） */
 void ctx_free_getrecord_cache(struct VerthysContext *ctx);
 
+/* ---------- V4 会话生命周期（进程级原子计数） ----------
+ * ctx->v4 的赋值/释放必须统一经以下辅助函数，禁止散落手动释放与赋值：
+ *   attach                       NULL→v 计数 +1；替换非 NULL 旧值时释放旧值、
+ *                                计数不变（先释放后赋值）。
+ *   detach                       v→NULL 释放并计数 −1。
+ *   replace_externally_freed     仅用于 Verthys_V4RotateCommit：vty_rotate_commit
+ *                                已释放旧库并返回新库，只赋值、计数不变。
+ * 计数口径 = 进程内持有存活 V4 会话的上下文数，供防御状态查询读取；
+ * 不遍历上下文、不读裸指针。 */
+void v4_session_attach(struct VerthysContext *ctx, struct VtyVault *v);
+void v4_session_detach(struct VerthysContext *ctx);
+void v4_session_replace_externally_freed(struct VerthysContext *ctx,
+                                         struct VtyVault *v);
+uint32_t v4_session_resident_count(void);
+
 /* 清除上下文中的所有敏感材料（CNG 内核密钥组 + 借用缓存），不动 file_path。
  * 前置条件：调用方已先行收口 V3 子系统（verthys_v3_ctx_subsystems_close——
  * 后台线程汇合后内核句柄方可安全销毁）。退避记账为进程级模块全局，
  * 与上下文生命周期无关。 */
 void ctx_zero_sensitive(struct VerthysContext *ctx);
 
-/* ---------- 格式检测（V3-only）----------
- * 读取文件头 8 字节判断格式：V3 超级块首副本帧头 magic "V3RP"。
- * 非 V3 一律返回 VERTHYS_ERR_FORMAT。 */
+/* ---------- 格式检测 ----------
+ * 读取文件头 8 字节判断格式：V3 帧头 "V3RP" 或 v4 固定头 "VRTY"。
+ * 未知格式返回 VERTHYS_FMT_NONE，由调用方拒绝。 */
 VerthysContainerVersion detect_format(const uint8_t *buf, size_t size);
 
 int verthys_check_avx2_support(void);

@@ -12,8 +12,8 @@
  *   7. 核心函数：
  *      - onOrbitSliderInput / onOrbitSliderRelease：滑块拖拽 + 磁性吸附
  *      - snapToAnchor：点击锚点直接吸附并切换
- *      - onToggleCustomFeature / onResetCustom / onSetCustomSessionMinutes /
- *        onApplyCustom：自定义特性与空闲锁定时长管理
+ *      - onToggleCustomFeature / onResetCustom / onSetCustomSessionMinutes：
+ *        自定义防护自动保存（非自定义档先快照当前真实状态再转自定义）
  *      - onApplyPreset：应用三档预设（调用 keyManager.applySecurityPreset）
  *      - loadPresetConfig：加载预设配置（onMounted / 全局密钥就绪后调用）
  *
@@ -42,7 +42,10 @@ import {
   customSessionMinutesRef,
 } from '../../lib/keyManager';
 import { normalizeCustomSessionMinutes } from '../../state/key_state';
-import { CUSTOM_SESSION_MINUTES_DEFAULT } from '../../constants/key_manager_const';
+import {
+  CUSTOM_SESSION_MINUTES_DEFAULT,
+  PRESET_SESSION_TIMEOUT_MS,
+} from '../../constants/key_manager_const';
 import {
   securityGetPresetConfig,
   securityLoadPresetState,
@@ -68,6 +71,8 @@ export interface UsePresetOptions {
   cpuUsage: Ref<number>;
   /** 动态防护汇总态势（真实运行时报告） */
   defenseMeta: Ref<DefenseMetaView>;
+  /** 切到安全（高安全）预设成功后触发：用于提示启用默认 PCR[7,11] */
+  onSecurePresetApplied?: () => void;
 }
 
 /**
@@ -87,19 +92,23 @@ export interface UsePresetOptions {
  *   ringCircumference, ringDashOffset, orbitTrackGradient,
  *   toggleableFeatures, lockedFeatures,
  *   onOrbitSliderInput, onOrbitSliderRelease, snapToAnchor,
- *   onToggleCustomFeature, onResetCustom, onSetCustomSessionMinutes, onApplyCustom,
+ *   onToggleCustomFeature, onResetCustom, onSetCustomSessionMinutes,
  *   onApplyPreset, loadPresetConfig,
  * } = usePreset({ showError, showToast, resetSession });
  * ```
  */
 export function usePreset(options: UsePresetOptions) {
-  /* ===== 预设特性列表（与 Rust PresetFeatures 字段对齐） ===== */
+  /* ===== 预设特性列表（与 Rust PresetFeatures 字段对齐） =====
+   * 注意：`key_separation` 是 11 位契约中的遗留键名。产品 v4-only 构建不再
+   * 链接 V3 CNG 三权分立实现，该位映射到真实生效的 V4 密钥隔离堆
+   * （secure_allocator + memory_guard + 锁定/应急清零），展示文案必须描述
+   * 实际能力，不得继续宣称 V3 三权分立。 */
   const presetFeatureList: { key: keyof PresetFeatures; label: string; desc: string }[] = [
     { key: "anti_debug", label: "调试检测", desc: "调试器检测与反附加" },
     { key: "anti_inject", label: "注入拦截", desc: "DLL 注入与搜索顺序加固" },
     { key: "integrity_check", label: "完整校验", desc: "启动镜像签名核验 · 运行期模块抽检" },
     { key: "memory_guard", label: "内存保护", desc: "内存锁定与防转储" },
-    { key: "key_separation", label: "密钥分立", desc: "密钥分段隔离存储" },
+    { key: "key_separation", label: "密钥隔离", desc: "V4 密钥隔离堆 · 锁定/应急清零" },
     { key: "emergency_response", label: "紧急熔断", desc: "异常事件立即熔断销毁" },
     { key: "session_lock_on_idle", label: "空闲锁定", desc: "会话空闲超时自动锁定" },
     { key: "module_patrol", label: "模块巡检", desc: "定期扫描已加载模块签名" },
@@ -121,6 +130,15 @@ export function usePreset(options: UsePresetOptions) {
   const customFeatures = ref<PresetFeatures>(loadCustomFeatures());
   /** 自定义档空闲锁定时长（分钟；后端受信预设文件为权威，落盘由会话层统一执行） */
   const customSessionMinutes = customSessionMinutesRef;
+
+  /* 自动保存的落盘事实：最近一次成功应用的自定义配置。
+   * 失败回滚只回到已落盘值，绝不把未保存草稿当作生效状态展示。 */
+  const appliedCustomFeatures = ref<PresetFeatures | null>(null);
+  const appliedCustomMinutes = ref<number>(CUSTOM_SESSION_MINUTES_DEFAULT);
+  /** 非自定义档首次改动前的模板备份：转换失败时恢复用户原有草稿 */
+  let preConvertDraft: { features: PresetFeatures; minutes: number } | null = null;
+  /** 自动保存合并计时器：连续拖拽/键盘调节只在停手后落盘一次 */
+  let customApplyTimer: ReturnType<typeof setTimeout> | null = null;
 
   /* ===== 无极轨道滑块 — 性能↔安全权衡 ===== */
   /** 三个磁性吸附锚点（视觉从左到右；code 为后端档位代号） */
@@ -241,6 +259,17 @@ const orbitTrackGradient = computed(() => ({
     presetFeatureList.filter(f => isLockedFeature(f.key))
   );
 
+  /* ===== 自定义防护展示态 =====
+   * 面板只在自定义档展示模板草稿；其余档位展示当前档位真实生效快照，
+   * 避免把“真实开启”渲染成关闭。 */
+  const isCustomPreset = computed(() => securityPresetRef.value === 3);
+  /** 当前档位真实空闲锁定时长（分钟；自定义档取草稿/已应用值） */
+  const activeIdleMinutes = computed(() =>
+    securityPresetRef.value === 3
+      ? customSessionMinutes.value
+      : Math.round(PRESET_SESSION_TIMEOUT_MS[securityPresetRef.value] / 60000),
+  );
+
   /* ===== 滑块拖拽 + 磁性吸附 ===== */
   /** 滑块拖拽输入处理 — 实时更新视觉，松手时磁性吸附 */
   const onOrbitSliderInput = () => {
@@ -278,58 +307,178 @@ const orbitTrackGradient = computed(() => ({
       void onApplyPreset(anchor.code).then((ok) => { if (!ok) syncOrbitFromPresetRef(); });
     }
   };
-  /* ===== 自定义特性管理 ===== */
-  /** 切换自定义特性开关 */
-  const onToggleCustomFeature = (key: string) => {
-    if (isLockedFeature(key)) return;
-    customFeatures.value = {
-      ...customFeatures.value,
-      [key]: !customFeatures.value[key as keyof PresetFeatures],
-    };
-  };
+  /* ===== 自定义防护：展示态与自动保存 =====
+   * 非自定义档展示当前档位真实快照；用户改动任意端子时，先快照该档
+   * 真实特性与真实空闲时长，再叠加本次改动并立即以自定义档落盘。
+   * 失败只回滚到已落盘事实（自定义档）或用户原草稿（转换前），
+   * 界面永不保留未生效的伪状态。 */
+  const PRESET_FEATURE_KEYS: (keyof PresetFeatures)[] = presetFeatureList.map(f => f.key);
 
-  /** 恢复自定义默认配置 */
-  const onResetCustom = () => {
-    customFeatures.value = loadCustomFeatures(); // 重新加载（含默认值合并）
-    // 强制重置为全开默认值
-    presetFeatureList.forEach(f => {
-      (customFeatures.value as any)[f.key] = true;
+  /** 当前档位真实特性快照；键不全视为未同步，禁止据此转换 */
+  const activeFeatureSnapshot = (): PresetFeatures | null => {
+    const record = currentPresetFeatures.value;
+    if (!PRESET_FEATURE_KEYS.every(k => typeof record[k] === 'boolean')) return null;
+    const snapshot = {} as PresetFeatures;
+    PRESET_FEATURE_KEYS.forEach(k => {
+      snapshot[k] = record[k];
     });
-    customSessionMinutes.value = CUSTOM_SESSION_MINUTES_DEFAULT;
-    options.showToast("已恢复默认配置");
+    return snapshot;
   };
 
-  /** 设置自定义档空闲锁定时长（草稿：仅在「保存应用」时落盘并生效） */
-  const onSetCustomSessionMinutes = (minutes: number) => {
-    customSessionMinutes.value = normalizeCustomSessionMinutes(minutes);
+  const cancelScheduledApply = () => {
+    if (customApplyTimer === null) return;
+    clearTimeout(customApplyTimer);
+    customApplyTimer = null;
   };
 
-  /** 保存应用自定义模板 */
-  const onApplyCustom = async () => {
-    if (presetApplying.value || !globalKeyReadyRef.value) return;
+  /** 切档优先：丢弃尚未落盘的草稿改动，并恢复到上一份生效事实 */
+  const discardPendingCustomDraft = () => {
+    const pending = customApplyTimer !== null || preConvertDraft !== null;
+    if (!pending) return;
+    cancelScheduledApply();
+    if (securityPresetRef.value === 3) {
+      if (appliedCustomFeatures.value) {
+        customFeatures.value = { ...appliedCustomFeatures.value };
+      }
+      customSessionMinutes.value = appliedCustomMinutes.value;
+    } else if (preConvertDraft) {
+      customFeatures.value = { ...preConvertDraft.features };
+      customSessionMinutes.value = normalizeCustomSessionMinutes(preConvertDraft.minutes);
+    }
+    preConvertDraft = null;
+  };
+
+  const rollbackCustomDraft = () => {
+    if (securityPresetRef.value === 3) {
+      if (appliedCustomFeatures.value) {
+        customFeatures.value = { ...appliedCustomFeatures.value };
+      }
+      customSessionMinutes.value = appliedCustomMinutes.value;
+      return;
+    }
+    if (preConvertDraft) {
+      customFeatures.value = { ...preConvertDraft.features };
+      customSessionMinutes.value = normalizeCustomSessionMinutes(preConvertDraft.minutes);
+      preConvertDraft = null;
+    }
+  };
+
+  /** 以当前草稿提交自定义档；成功后草稿即生效事实，失败按档位回滚 */
+  const commitCustomDraft = async (): Promise<boolean> => {
+    if (presetApplying.value || !globalKeyReadyRef.value) return false;
+    const features = { ...customFeatures.value };
+    const minutes = normalizeCustomSessionMinutes(customSessionMinutes.value);
     presetApplying.value = true;
     // 竞态仲裁：用户显式切换递增版本，使在途恢复链自弃
     bumpPresetEpoch();
     try {
-      // 自定义特性显式传入应用链：本地缓存在后端应用成功后由会话层
-      // 单点落盘（本函数不预写），失败路径缓存与前端状态保持一致
-      // 8s 超时兜底：预设应用链路阻塞时不得无限 pending 卡死按钮
+      // 8s 超时兜底：自动保存链路阻塞时不得无限 pending
       const config = await withTimeout(
-        applySecurityPreset(3, undefined, customFeatures.value, customSessionMinutes.value),
+        applySecurityPreset(3, undefined, features, minutes),
         8000,
         "应用自定义模板",
       );
-      if (config) {
-        currentPresetFeatures.value = { ...config.features };
-      }
+      if (!config) return false;
+      currentPresetFeatures.value = { ...config.features };
+      appliedCustomFeatures.value = { ...config.features };
+      appliedCustomMinutes.value = minutes;
+      preConvertDraft = null;
+      syncOrbitFromPresetRef();
       options.resetSession();
-      options.showToast("自定义模板已保存并应用");
+      return true;
     } catch (e) {
-      console.error("[onApplyCustom] 应用失败", e);
-      options.showError("应用自定义模板失败");
+      console.error("[commitCustomDraft] 自动保存失败", e);
+      rollbackCustomDraft();
+      options.showError("自定义防护保存失败");
+      return false;
     } finally {
       presetApplying.value = false;
     }
+  };
+
+  /** 时长连续调节合并落盘：停手 260ms 后提交；在途任务结束后自动补交 */
+  const scheduleCustomApply = () => {
+    cancelScheduledApply();
+    customApplyTimer = setTimeout(() => {
+      customApplyTimer = null;
+      if (presetApplying.value) {
+        scheduleCustomApply();
+        return;
+      }
+      void commitCustomDraft();
+    }, 260);
+  };
+
+  /** 切换自定义特性开关：任意档位点击都会自动转为自定义并保存 */
+  const onToggleCustomFeature = async (key: string) => {
+    const featKey = key as keyof PresetFeatures;
+    if (isLockedFeature(key) || presetApplying.value || !globalKeyReadyRef.value) return;
+    cancelScheduledApply();
+    let base: PresetFeatures;
+    let minutes: number;
+    if (securityPresetRef.value === 3) {
+      base = { ...customFeatures.value };
+      minutes = customSessionMinutes.value;
+    } else {
+      const snapshot = activeFeatureSnapshot();
+      if (!snapshot) {
+        options.showError("当前档位配置尚未同步，暂不能修改自定义防护");
+        return;
+      }
+      if (!preConvertDraft) {
+        preConvertDraft = {
+          features: { ...customFeatures.value },
+          minutes: customSessionMinutes.value,
+        };
+      }
+      base = snapshot;
+      minutes = activeIdleMinutes.value;
+    }
+    base[featKey] = !base[featKey];
+    customFeatures.value = base;
+    customSessionMinutes.value = normalizeCustomSessionMinutes(minutes);
+    await commitCustomDraft();
+  };
+
+  /** 恢复自定义默认配置（全开 + 默认时长）并自动保存 */
+  const onResetCustom = async () => {
+    if (presetApplying.value || !globalKeyReadyRef.value) return;
+    cancelScheduledApply();
+    if (securityPresetRef.value !== 3 && !preConvertDraft) {
+      preConvertDraft = {
+        features: { ...customFeatures.value },
+        minutes: customSessionMinutes.value,
+      };
+    }
+    const defaults = { ...customFeatures.value };
+    presetFeatureList.forEach(f => {
+      (defaults as any)[f.key] = true;
+    });
+    customFeatures.value = defaults;
+    customSessionMinutes.value = CUSTOM_SESSION_MINUTES_DEFAULT;
+    const ok = await commitCustomDraft();
+    if (ok) options.showToast("已恢复默认配置");
+  };
+
+  /** 设置空闲锁定时长：草稿即时更新，停手后自动保存 */
+  const onSetCustomSessionMinutes = (minutes: number) => {
+    if (presetApplying.value || !globalKeyReadyRef.value) return;
+    if (securityPresetRef.value !== 3) {
+      const snapshot = activeFeatureSnapshot();
+      if (!snapshot) {
+        options.showError("当前档位配置尚未同步，暂不能修改自定义防护");
+        return;
+      }
+      if (!preConvertDraft) {
+        preConvertDraft = {
+          features: { ...customFeatures.value },
+          minutes: customSessionMinutes.value,
+        };
+      }
+      customFeatures.value = snapshot;
+    }
+    customSessionMinutes.value = normalizeCustomSessionMinutes(minutes);
+    scheduleCustomApply();
   };
 
   /* ===== 切档状态收口 ===== */
@@ -357,6 +506,7 @@ const orbitTrackGradient = computed(() => ({
       clearTimeout(applyToastTimer);
       applyToastTimer = null;
     }
+    cancelScheduledApply();
   });
 
   /** 判定是否为前端兜底超时（与 withTimeout 的文案契约一致） */
@@ -405,6 +555,8 @@ const orbitTrackGradient = computed(() => ({
    * 返回值：true = 已发起且成功；false = 守卫拒绝或失败（调用方负责视觉回撤） */
   const onApplyPreset = async (code: SecurityPresetCode): Promise<boolean> => {
     if (presetApplying.value || !globalKeyReadyRef.value) return false;
+    // 切档优先：丢弃尚未落盘的自定义草稿自动保存，避免切档后被旧草稿反超
+    discardPendingCustomDraft();
     presetApplying.value = true;
     // 竞态仲裁：用户显式切换递增版本，使在途恢复链自弃
     bumpPresetEpoch();
@@ -428,6 +580,10 @@ const orbitTrackGradient = computed(() => ({
       // 成功后轨道位置与后端权威档位收敛同位（自定义档落中位、清锚点高亮）
       syncOrbitFromPresetRef();
       options.showToast(`已切换至 ${modeNames[code] ?? code} 模式`);
+      /* 高安全预设：默认引导启用 PCR[7,11]；是否真正启用仍由用户以恢复码确认。 */
+      if (code === 1) {
+        options.onSecurePresetApplied?.();
+      }
       return true;
     } catch (e) {
       console.error("[onApplyPreset] 切换预设失败", e);
@@ -465,6 +621,8 @@ const orbitTrackGradient = computed(() => ({
       const code = securityPresetRef.value;
       if (code === 3) {
         currentPresetFeatures.value = { ...customFeatures.value };
+        appliedCustomFeatures.value = { ...customFeatures.value };
+        appliedCustomMinutes.value = normalizeCustomSessionMinutes(customSessionMinutes.value);
       } else {
         const config = await securityGetPresetConfig(code);
         // 加载期间档位可能已切换：仅当仍为同一档位时采纳结果
@@ -496,6 +654,9 @@ const orbitTrackGradient = computed(() => ({
     // 自定义模板配置
     customFeatures,
     customSessionMinutes,
+    // 自定义防护展示态（非自定义档取当前档位真实快照）
+    isCustomPreset,
+    activeIdleMinutes,
     // 无极轨道滑块状态
     orbitSliderPos,
     orbitAnchors,
@@ -522,7 +683,6 @@ const orbitTrackGradient = computed(() => ({
     onToggleCustomFeature,
     onResetCustom,
     onSetCustomSessionMinutes,
-    onApplyCustom,
     onApplyPreset,
     loadPresetConfig,
   };

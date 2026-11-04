@@ -23,7 +23,7 @@ export default defineConfig(async ({ command }) => ({
             // 构建耗时与产物体积成倍增加，且对公开源码没有保密收益。
             exclude: ["node_modules/**", "**/src/vendor/**"],
             // 性能审计修订：安全责任由 Rust/C 层承担（core/ 六层防护：
-            //   anti_debug_v2 / anti_inject / integrity / tamper_destroy 等），
+            //   anti_debug_v2 / anti_inject / integrity / hook_scan 等），
             //   前端混淆仅保留静态不可执行期保护（标识符重命名 + 压缩）。
             // 移除的高开销运行时选项及其代价：
             //   - debugProtection(interval 2000)：每 2s 常驻反调试轮询（隐藏周期性 CPU 任务）

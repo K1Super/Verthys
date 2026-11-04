@@ -5,8 +5,8 @@
  *
  * 设计要点：
  * - shallowRef 操作必须用 shallow-array 工具函数触发 triggerRef
- * - 列表装载走"摘要优先"：摘要缓存仅含索引（不解密数据），可毫秒级渲染带名称的列表；
- *   缩略图与真实尺寸由可视区按需解密回填，避免进入模块即触发全量数据扫描
+ * - 列表装载走"类型盲索引优先"：按 TYPE_PHOTO_META 枚举记录 ID，不解密数据；
+ *   摘要缓存仅补名称，缩略图与真实尺寸由可视区按需解密回填，避免进入模块即触发全量数据扫描
  * - 扫描失败必须可见：加载错误经 loadError 上报，禁止把失败折叠成"暂无照片"
  * - 模块密钥失效（闲置销毁/登出）必须联动：清除已解密内容并提示重新验证
  * - ensureVisiblePhotosDecrypted 并发上限 4，批量预取 meta dataB64
@@ -24,9 +24,9 @@
 import { ref, shallowRef, computed, watch } from "vue";
 import {
   getModuleCache, setModuleCache,
-  ensureSummaryScan, ensureRecordScan, cancelRecordScan, cancelSummaryScan,
-  getSummaryIdsByType, getSummaryRecord, getSummaryCacheSize, getRecordIdsByType,
-  getRecordsDataB64Batch,
+  ensureRecordScan, cancelRecordScan,
+  getSummaryRecord, getRecordIdsByType,
+  getRecordsDataB64Batch, ensureTypeIds, clearTypeIdCache,
   moduleKeyReadyRef,
 } from "../../lib/keyManager";
 import { lockModuleKey } from "../../lib/module_crypto";
@@ -340,8 +340,8 @@ export function usePhotoData() {
   /* ===== 按需解密（完整元数据与缩略图严格按需加载） =====
    *
    * 架构：三阶段加载
-   *   阶段1（loadPhotos）：列表 ID 来自摘要缓存（仅索引，不解密数据），创建占位项
-   *                        （id/metaId/名称），立即渲染列表骨架 —— 上万照片瞬间呈现。
+   *   阶段1（loadPhotos）：列表 ID 来自类型盲索引（不解密记录），创建占位项
+   *                        （id/metaId，名称由摘要缓存可选补齐），立即渲染列表骨架。
    *   阶段2（ensureVisiblePhotosDecrypted）：watch(visiblePhotos) 监听可视区变化，
    *                        先 getRecordsDataB64Batch 批量预取可视区 meta dataB64
    *                        （扫描缓存命中零 IPC，未命中并行 IPC 回退），再并发解密。
@@ -628,40 +628,44 @@ export function usePhotoData() {
     scheduleVisibleDecrypt(v);
   }, { flush: 'post' });
 
-  /* ===== 加载照片列表（摘要优先：索引渲染列表，数据按需解密） ===== */
+  /* ===== 加载照片列表（类型索引渲染列表，数据按需解密） ===== */
 
-  /** 列表 ID 来源：摘要缓存（仅索引）优先，失败回退增量记录扫描 */
-  type IdListSource = "summary" | "record";
+  /** 列表 ID 来源：权威类型盲索引优先，失败回退增量记录扫描 */
+  type IdListSource = "typed" | "record";
   interface IdListResult {
     ok: boolean;
     ids: number[];
     source: IdListSource;
-    /** true 表示走了回退路径（摘要不可用），列表可能不含全部元数据 */
+    /** true 表示走了回退路径，列表可能不含全部元数据 */
     degraded: boolean;
     error?: string;
   }
 
   /** 获取照片 meta 记录 ID 列表。
-   *  摘要扫描只读索引、不解密数据，是列表装载的最轻路径；
-   *  摘要不可用（旧格式容器等）时回退增量记录扫描并标记降级。
+   *  权威路径：V4 类型盲索引（ensureTypeIds），不读记录密文、跨重启稳定；
+   *  不可用时回退增量记录扫描并标记降级。摘要缓存不参与 ID 过滤。
    *
    *  回退扫描的增量回调此前只服务于进度卡；进度卡移除后回调仅保留为
    *  协作式取消的批次检查点（取消入口据此停止更重的后续阶段）。 */
   const loadIdList = async (): Promise<IdListResult> => {
+    loadStage.value = "index";
     try {
-      loadStage.value = "index";
-      await ensureSummaryScan();
-      const ids = getSummaryIdsByType(TYPE_PHOTO_META);
-      // 摘要扫描在旧格式容器/熔断场景下会"静默返回空"，此时缓存整体为空；
-      // 需要与"确实没有照片"区分：只有缓存有内容才认定摘要结果可信。
-      if (ids.length > 0 || getSummaryCacheSize() > 0) {
-        return { ok: true, ids, source: "summary", degraded: false };
-      }
-      console.warn("[loadPhotos] 摘要缓存为空，回退记录索引扫描");
+      const ids = await ensureTypeIds(TYPE_PHOTO_META);
+      return { ok: true, ids, source: "typed", degraded: false };
     } catch (e) {
-      console.warn("[loadPhotos] 摘要扫描不可用，回退记录索引扫描", e);
+      // 用户取消会令类型枚举代际失效：这是主动取消，不是索引故障，
+      // 不得再启动更重的全量扫描。
+      if (loadAbortRequested) {
+        return {
+          ok: true,
+          ids: getRecordIdsByType(TYPE_PHOTO_META),
+          source: "record",
+          degraded: true,
+        };
+      }
+      console.warn("[loadPhotos] 类型盲索引枚举失败，回退记录索引扫描", e);
     }
-    // 用户已请求取消：摘要阶段之后的回退扫描（更重）不得再启动，
+    // 用户已请求取消：回退扫描（更重）不得再启动，
     //   以当前缓存内容呈现列表（可能为空），由重试入口继续。
     if (loadAbortRequested) {
       return { ok: true, ids: getRecordIdsByType(TYPE_PHOTO_META), source: "record", degraded: false };
@@ -687,9 +691,9 @@ export function usePhotoData() {
     }
   };
 
-  /** 占位项构造：摘要来源可带名称（记录名前缀剥离），解密后由真实名称覆盖 */
-  const buildPlaceholder = (metaId: number, source: IdListSource): PhotoEntry => {
-    const recordName = source === "summary" ? getSummaryRecord(metaId)?.name ?? "" : "";
+  /** 占位项构造：摘要缓存有名称则优先展示，解密后由真实名称覆盖 */
+  const buildPlaceholder = (metaId: number): PhotoEntry => {
+    const recordName = getSummaryRecord(metaId)?.name ?? "";
     return {
       id: metaId,
       metaId,
@@ -703,14 +707,14 @@ export function usePhotoData() {
   };
 
   /** 把最新 ID 列表合并进当前列表（集合差集，不依赖 ID 单调分配） */
-  const mergeIds = (ids: number[], source: IdListSource): void => {
+  const mergeIds = (ids: number[]): void => {
     const known = new Set<number>();
     for (const p of photos.value) {
       if (p.metaId) known.add(p.metaId);
     }
     const newIds = diffNewIds(ids, known);
     if (newIds.length > 0) {
-      pushShallowItems(photos, newIds.map(id => buildPlaceholder(id, source)));
+      pushShallowItems(photos, newIds.map(id => buildPlaceholder(id)));
       // 保持按记录 ID 升序（增量项可能插入到中间：ID 复用场景）
       replaceShallowArray(photos, sortByMetaId(photos.value));
     }
@@ -747,10 +751,10 @@ export function usePhotoData() {
         loadError.value = list.error ?? "照片列表加载失败，请重试";
         return;
       }
-      mergeIds(list.ids, list.source);
+      mergeIds(list.ids);
       if (list.degraded && !loadAbortRequested) {
         // 取消场景保留取消提示（不得被降级提示覆盖）
-        loadError.value = "索引摘要不可用，已降级加载：列表可能不含完整信息";
+        loadError.value = "类型索引不可用，已降级加载：列表可能不含完整信息";
       }
       recountFailures();
     } finally {
@@ -780,7 +784,8 @@ export function usePhotoData() {
   const cancelLoad = (): void => {
     loadAbortRequested = true;
     if (loadStage.value === "index") {
-      cancelSummaryScan();
+      // 类型盲索引枚举的分页循环由代际令牌中止；缓存下次进入时重建。
+      clearTypeIdCache(TYPE_PHOTO_META);
     }
     if (loadStage.value === "index" || loadStage.value === "records") {
       cancelRecordScan();

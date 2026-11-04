@@ -49,13 +49,13 @@ pub const PB_CHUNK_SET_RECORD_B64_MAX: u64 = 10_696;
 pub const PB_IPC_MAX_PAYLOAD_BYTES: u64 = 12_582_912;
 
 /// 单次块上传的块数上限
-pub const PB_MAX_CHUNKS_PER_IPC: u64 = 8;
+pub const PB_MAX_CHUNKS_PER_IPC: u64 = 32;
 
 /// 数据块明文分片大小（字节）
 pub const PB_PAYLOAD_CHUNK_SIZE_BYTES: u64 = 1_048_576;
 
 /// 单批块上传载荷上限（字节，base64 口径）
-pub const PB_MAX_CHUNK_BATCH_B64: u64 = 11_185_504;
+pub const PB_MAX_CHUNK_BATCH_B64: u64 = 12_578_816;
 
 /// 单条记录 chunk 密文 base64 长度上限
 pub const PB_CHUNK_RECORD_B64_MAX: u64 = 1_398_188;

@@ -3,7 +3,8 @@
  *
  * 覆盖：
  *   - 首次运行（状态文件不存在）放行、失败计数递增
- *   - 达到阈值后锁定，且不再继续累加
+ *   - 达到阈值后进入退避窗口；窗口满允许重试，计数不清零
+ *   - 阈值后继续失败会累加计数并延长窗口（上限 1 小时）
  *   - 成功解锁后 reset 清零
  *   - 状态文件被篡改 / 尺寸异常 / 机器绑定失配一律视为锁定
  *   - 测试注入路径隔离：一个库的锁定不影响另一个状态文件
@@ -68,7 +69,7 @@ TEST(v4_lockout_first_run_and_counting)
     CHECK_EQ(vty_lockout_failures(), 0u);
     CHECK_EQ(vty_lockout_check(), VTY_OK);
 
-    /* 阈值边界：前 4 次只计数，第 5 次返回锁定 */
+    /* 阈值边界：前 4 次只计数，第 5 次进入退避 */
     for (i = 0; i < VTY_LOCKOUT_MAX_FAILURES - 1u; i++) {
         CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
     }
@@ -76,10 +77,64 @@ TEST(v4_lockout_first_run_and_counting)
     CHECK_EQ(vty_lockout_failures(), VTY_LOCKOUT_MAX_FAILURES);
     CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
 
-    /* 已锁定状态下不再累加 */
+    /* 阈值后继续失败：计数继续累加，退避窗口随次数增长（上限 1 小时） */
     CHECK_EQ(vty_lockout_record_failure(), VTY_E_LOCKED);
-    CHECK_EQ(vty_lockout_failures(), VTY_LOCKOUT_MAX_FAILURES);
+    CHECK_EQ(vty_lockout_failures(), VTY_LOCKOUT_MAX_FAILURES + 1u);
+    CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
+    CHECK_EQ(vty_lockout_backoff_secs(VTY_LOCKOUT_MAX_FAILURES), 32u);
+    CHECK_EQ(vty_lockout_backoff_secs(11u), 2048u);
+    CHECK_EQ(vty_lockout_backoff_secs(12u), 3600u);
+    CHECK_EQ(vty_lockout_backoff_secs(32u), 3600u);
     lk_clean_witness("v4_lockout_a.state");
+    return 0;
+}
+
+/* 退避窗口语义：窗口内锁定、窗口满放行，且每次失败刷新时间戳。 */
+TEST(v4_lockout_backoff_window)
+{
+    const uint64_t base = 1700000000u;
+
+    CHECK_EQ(vty_device_root_init(), VTY_OK);
+    lk_clean_witness("v4_lockout_w.state");
+    CHECK_EQ(vty_lockout_set_path("v4_lockout_w.state"), VTY_OK);
+    CHECK_EQ(vty_lockout_init(), VTY_OK);
+    CHECK_EQ(vty_lockout_reset(), VTY_OK);
+    CHECK_EQ(vty_lockout_set_test_clock(base), 0);
+
+    /* 第 5 次失败：窗口 32 秒 */
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    CHECK_EQ(vty_lockout_record_failure(), VTY_E_LOCKED);
+    CHECK_EQ(vty_lockout_failures(), 5u);
+    CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
+
+    CHECK_EQ(vty_lockout_set_test_clock(base + 31u), 0);
+    CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
+    CHECK_EQ(vty_lockout_set_test_clock(base + 32u), 0);
+    CHECK_EQ(vty_lockout_check(), VTY_OK);
+
+    /* 窗口满后再失败一次：窗口翻倍到 64 秒 */
+    CHECK_EQ(vty_lockout_record_failure(), VTY_E_LOCKED);
+    CHECK_EQ(vty_lockout_failures(), 6u);
+    CHECK_EQ(vty_lockout_set_test_clock(base + 32u + 63u), 0);
+    CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
+    CHECK_EQ(vty_lockout_set_test_clock(base + 32u + 64u), 0);
+    CHECK_EQ(vty_lockout_check(), VTY_OK);
+    CHECK_EQ(vty_lockout_backoff_secs(6u), 64u);
+
+    /* 时钟回拨视为锁定（fail-closed） */
+    CHECK_EQ(vty_lockout_set_test_clock(base), 0);
+    CHECK_EQ(vty_lockout_check(), VTY_E_LOCKED);
+
+    /* 成功解锁清零后立即放行 */
+    CHECK_EQ(vty_lockout_reset(), VTY_OK);
+    CHECK_EQ(vty_lockout_check(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 0u);
+
+    CHECK_EQ(vty_lockout_set_test_clock(0), 0);
+    lk_clean_witness("v4_lockout_w.state");
     return 0;
 }
 

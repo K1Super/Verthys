@@ -93,7 +93,6 @@
     <VaultTypeEditorDialog
       v-model="showTypeEditor"
       :types="customTypes"
-      :entry-count-of="entryCountOf"
       @saved="onTypesSaved"
     />
 
@@ -157,7 +156,6 @@
     <!-- 删除二次确认弹窗 -->
     <ConfirmDelete
       :show="showDeleteConfirm"
-      :item-name="deleteTargetName"
       @confirm="confirmDelete"
       @cancel="showDeleteConfirm = false"
     />
@@ -174,7 +172,7 @@ import {
   updateShallowItem, pushShallowItems, replaceShallowArray,
   clearShallowArray, removeShallowItems,
 } from "../../utils/shallow-array";
-import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, ensureIndexSourceSafe, getSummaryIdsByType, getRecordIdsByType, invalidateScannedRecord, getRecordsDataB64Batch } from "../../lib/keyManager";
+import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, resolveTypeIds, invalidateScannedRecord, getRecordsDataB64Batch } from "../../lib/keyManager";
 import { TYPE_ACCOUNT } from "../../constants/record_types";
 import {
   BUILTIN_VAULT_TYPES,
@@ -320,15 +318,17 @@ const loadAccounts = async (): Promise<void> => {
   // 1. 类型定义先就位：条目的敏感行与掩码展示依赖类型声明
   await loadVaultTypes();
 
-  // 2. ID 来源：摘要索引优先（仅读索引、不解密数据，不受记录体积影响）；
-  //    摘要缓存整体为空（旧格式容器/熔断静默返回空）时回退记录扫描缓存。
-  //    记录扫描仍会在后台并发触发一次作数据层预热：命中扫描缓存的小体积记录
-  //    在后续批量取数时零 IPC；预热失败不影响列表可用性（取数走并行 IPC 回退）。
-  const useSummaryIds = await ensureIndexSourceSafe();
-  const idsOf = (type: number): number[] =>
-    useSummaryIds ? getSummaryIdsByType(type) : getRecordIdsByType(type);
-
-  const allIds = idsOf(TYPE_ACCOUNT);
+  // 2. ID 来源：V4 类型盲索引（权威、跨重启稳定）；枚举失败时
+  //    resolveTypeIds 自动回退全量记录扫描。摘要缓存不参与类型过滤。
+  let allIds: number[];
+  try {
+    allIds = await resolveTypeIds(TYPE_ACCOUNT);
+  } catch (e) {
+    console.error("[loadAccounts] 账户类型索引解析失败", e);
+    showError("账户列表加载失败，请重试");
+    loading.value = false;
+    return;
+  }
   const newIds = allIds.filter((id) => id > maxRecordId);
 
   const found: { recordId: number; kind: string; data: Record<string, string>; corrupt: boolean }[] = [];
@@ -585,9 +585,6 @@ const onDetailCopy = (fieldId: string): void => {
 
 const pickTitle = computed(() => (reassignEntryId.value !== null ? "重新指派类型" : "选择类型"));
 
-/** 指定类型的已加载条目数（类型编辑器删除类型时用于提示影响范围） */
-const entryCountOf = (kind: string): number => accounts.value.filter((e) => e.kind === kind).length;
-
 const onAdd = (): void => {
   reassignEntryId.value = null;
   showPicker.value = true;
@@ -709,16 +706,9 @@ const onPersist = async (payload: VaultItemPayload): Promise<void> => {
 
 /* ===== 删除二次确认 ===== */
 const showDeleteConfirm = ref(false);
-const deleteTargetName = ref("");
 const deleteTargetId = ref<number | null>(null);
 const onDelete = (entry: VaultEntry): void => {
   deleteTargetId.value = entry.id;
-  const view = viewOf(entry);
-  if (entry.corrupt) {
-    deleteTargetName.value = `数据不可读 · 记录 #${entry.recordId ?? "—"}`;
-  } else {
-    deleteTargetName.value = view.typeLabel ? `${view.title} · ${view.typeLabel}` : view.title;
-  }
   showDeleteConfirm.value = true;
 };
 const confirmDelete = async (): Promise<void> => {
@@ -792,9 +782,16 @@ useModuleDialogGuard("accounts", () => {
 .empty-clear:hover { color: var(--accent); border-color: var(--border-hover); }
 .empty-clear:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 1px; }
 
-/* 解密密钥对话框 */
+/* 解密密钥对话框：显隐端子内嵌输入框右侧，图标即控件 */
 .key-target { font-size: 12px; color: var(--text-secondary); font-family: var(--font); margin-bottom: 14px; }
-.key-field { display: flex; align-items: center; gap: 8px; }
-.key-field .input { flex: 1; min-width: 0; }
+.key-field { position: relative; }
+.key-field .input { width: 100%; min-width: 0; padding-right: 36px; }
+.key-field .icon-btn {
+  position: absolute; right: 4px; top: 50%;
+  width: 24px; height: 24px; transform: translateY(-50%);
+  border: 0; border-radius: 0; background: transparent;
+}
+.key-field .icon-btn:hover { border-color: transparent; background: transparent; color: var(--accent); }
+.key-field .icon-btn:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 1px; }
 .key-error { font-size: 11px; color: var(--danger); margin-top: 6px; }
 </style>

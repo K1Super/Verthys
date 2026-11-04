@@ -28,10 +28,13 @@ int vty_lockout_set_path(const char *path);
 void vty_lockout_set_enabled(int enabled);
 int vty_lockout_enabled(void);
 
-/* 是否处于锁定；损坏 / 机器不匹配 / 见证缺失或不符一律返回 VTY_E_LOCKED */
+/* 是否处于锁定；损坏 / 机器不匹配 / 见证缺失或不符一律返回 VTY_E_LOCKED。
+ * 达到阈值后按失败次数指数退避（2^failures 秒，上限 1 小时）：窗口内
+ * 返回 E_LOCKED，窗口满允许重试；计数只有成功解锁才清零。 */
 int vty_lockout_check(void);
 
-/* 记录一次失败；达到阈值或见证/状态写入失败返回 VTY_E_LOCKED */
+/* 记录一次失败；达到阈值或见证/状态写入失败返回 VTY_E_LOCKED。
+ * 阈值后计数继续累加（32 封顶）并刷新退避时间戳。 */
 int vty_lockout_record_failure(void);
 
 /* 库解锁 / 恢复码解锁成功后清零；模块解锁成功不清零（否则可用已知模块
@@ -40,6 +43,13 @@ int vty_lockout_record_failure(void);
 int vty_lockout_reset(void);
 
 uint32_t vty_lockout_failures(void);
+
+/* 阈值后的退避窗口（秒）：2^failures，上限 3600。
+ * 与进程内退避公式一致，供测试与诊断使用。 */
+uint32_t vty_lockout_backoff_secs(uint32_t failures);
+
+/* 测试注入：覆写当前 UTC 秒；0 = 使用系统时间。生产路径不得调用。 */
+int vty_lockout_set_test_clock(uint64_t now_secs);
 
 #ifdef __cplusplus
 }

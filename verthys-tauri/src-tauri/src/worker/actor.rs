@@ -10,7 +10,7 @@
 //!   - 进度感知超时用 select! 循环每条进度行重置超时
 //!
 //! 流式响应处理
-//!   - 内部 handle_streaming_unlock_send 处理解锁进度流
+//!   - 内部 handle_streaming_progress_send 处理解锁 / 轮换进度流
 //!
 //! 本模块对外提供：
 //!   - actor_loop：Actor 主循环（被 session::spawn 调用）
@@ -29,11 +29,13 @@ use zeroize::Zeroize;
 use crate::infrastructure::ipc_secure::{Channel, IpcSecureChannel};
 
 use super::graceful::{
-    diagnose_exit, mark_child_dead_if_needed, perform_graceful_shutdown, reject_request_after_exit,
+    diagnose_exit, mark_child_dead_if_needed, perform_graceful_shutdown,
+    reject_request_after_exit, terminate_child,
 };
 use super::protocol::{
-    bounded_read_line, ActorRequest, BoundedLineError, UnlockProgress, MAX_LINE_BYTES,
-    STDERR_DRAIN_FINAL_TIMEOUT, UNLOCK_PROGRESS_IDLE_TIMEOUT,
+    bounded_read_line, ActorRequest, BoundedLineError, ProgressEvent, RotateProgress,
+    MAX_LINE_BYTES, ROTATE_PROGRESS_IDLE_TIMEOUT, STDERR_DRAIN_FINAL_TIMEOUT,
+    UNLOCK_PROGRESS_IDLE_TIMEOUT,
 };
 use super::stderr::{snapshot_stderr, StderrRing};
 
@@ -131,11 +133,34 @@ pub(crate) async fn actor_loop(
                 reply,
                 progress_tx,
             } => {
-                let result = handle_streaming_unlock_send(
+                let result = handle_streaming_progress_send(
                     &mut stdin,
                     &mut stdout_reader,
                     &json,
                     &progress_tx,
+                    "解锁",
+                    UNLOCK_PROGRESS_IDLE_TIMEOUT,
+                    pid,
+                    &mut child,
+                    &stderr_ring,
+                    &child_alive,
+                    &ipc,
+                )
+                .await;
+                let _ = reply.send(result);
+            }
+            ActorRequest::SendStreamingRotate {
+                json,
+                reply,
+                progress_tx,
+            } => {
+                let result = handle_streaming_progress_send::<RotateProgress>(
+                    &mut stdin,
+                    &mut stdout_reader,
+                    &json,
+                    &progress_tx,
+                    "轮换",
+                    ROTATE_PROGRESS_IDLE_TIMEOUT,
                     pid,
                     &mut child,
                     &stderr_ring,
@@ -321,8 +346,11 @@ async fn handle_send(
                     crate::util::log_sanitizer::json_log_summary(json, &["op"]),
                     stderr_snippet
                 );
+                /* 超时后 worker 仍可能写出旧响应；不回收会让下一次请求读到
+                 * 不匹配的关联号并误判为协议篡改。 */
+                terminate_child(child, child_alive, pid).await;
                 return Err(format!(
-                    "worker 响应超时（{}s）— 子进程 PID={} 可能已挂起 | 诊断: {}",
+                    "worker 响应超时（{}s）— 子进程 PID={} 已强制回收 | 诊断: {}",
                     timeout.as_secs(),
                     pid,
                     stderr_snippet
@@ -332,32 +360,32 @@ async fn handle_send(
     }
 }
 
-/// 处理解锁流式进度请求
+/// 处理流式进度请求（解锁 / 全库轮换共用）
 ///
 /// 进度行解析、推送与日志格式化。
 /// 进度感知超时，每收到一条进度行重置 deadline。
 ///
 /// 协议：
-///   - worker 在 call_unlock 阻塞期间，由 C 回调向 stdout 写入
-///     多条 {"op":"unlock_progress",...} 进度行
-///   - C 函数返回后写入最终 {"op":"unlock",...} 终止行
+///   - worker 在阻塞 FFI 期间（解锁 / 轮换 Run），由回调向 stdout 写入
+///     多条进度行（op="unlock_progress" / "v4_rotate_progress"）
+///   - FFI 返回后写入最终终止行
 ///   - 本函数识别进度行并推送 progress_tx，遇到终止行返回
 // 说明：同 handle_send——进度流式 IPC 的完整上下文清单，参数语义独立，
 // 保留显式列表以保证可审计性，豁免参数数量检查。
 #[allow(clippy::too_many_arguments)]
-async fn handle_streaming_unlock_send(
+async fn handle_streaming_progress_send<T: ProgressEvent>(
     stdin: &mut ChildStdin,
     stdout: &mut BufReader<ChildStdout>,
     json: &str,
-    progress_tx: &mpsc::Sender<UnlockProgress>,
+    progress_tx: &mpsc::Sender<T>,
+    label: &str,
+    idle_timeout: Duration,
     pid: u32,
     child: &mut Child,
     stderr_ring: &Arc<StdMutex<StderrRing>>,
     child_alive: &Arc<AtomicBool>,
     ipc: &IpcSecureChannel,
 ) -> Result<String, String> {
-    let idle_timeout = UNLOCK_PROGRESS_IDLE_TIMEOUT;
-
     let (request_seq, mut signed) = ipc.sign_request(json)?;
     if let Err(e) = write_line(stdin, &signed).await {
         signed.zeroize();
@@ -384,7 +412,7 @@ async fn handle_streaming_unlock_send(
                 // EOF — 子进程已退出
                 mark_child_dead_if_needed(child, child_alive, pid).await;
                 let diag = diagnose_exit(child, pid, stderr_ring).await;
-                return Err(format!("解锁期间 worker 管道关闭: {}", diag));
+                return Err(format!("{}期间 worker 管道关闭: {}", label, diag));
             }
             Ok(Ok(Some(_))) => {
                 let mut trimmed = line.trim().to_string();
@@ -408,30 +436,25 @@ async fn handle_streaming_unlock_send(
                         child,
                         child_alive,
                         pid,
-                        "解锁流关联号与当前请求不一致",
+                        &format!("{}流关联号与当前请求不一致", label),
                     ));
                 }
 
                 match opened.channel {
                     Channel::Progress => {
-                        match serde_json::from_str::<UnlockProgress>(&opened.payload) {
+                        match serde_json::from_str::<T>(&opened.payload) {
                             Ok(p) => {
-                                log::info!(
-                                    "[worker] 解锁进度: stage={} percent={}% elapsed={}ms msg={}",
-                                    p.stage,
-                                    p.percent,
-                                    p.elapsed_ms,
-                                    p.message
-                                );
+                                log::info!("[worker] {}进度: {}", label, p.log_summary());
                                 if progress_tx.send(p).await.is_err() {
                                     log::warn!(
-                                        "[worker] 解锁进度通道已关闭（前端可能已断开）: PID={}",
+                                        "[worker] {}进度通道已关闭（前端可能已断开）: PID={}",
+                                        label,
                                         pid
                                     );
                                 }
                             }
                             Err(e) => {
-                                log::warn!("[worker] 解锁进度载荷解析失败: {}", e);
+                                log::warn!("[worker] {}进度载荷解析失败: {}", label, e);
                             }
                         }
                         deadline = Instant::now() + idle_timeout;
@@ -440,10 +463,11 @@ async fn handle_streaming_unlock_send(
                 }
             }
             Ok(Err(BoundedLineError::TooLong { limit })) => {
-                // 协议异常：解锁流中 worker 输出单行超过上限
+                // 协议异常：流中 worker 输出单行超过上限
                 mark_child_dead_if_needed(child, child_alive, pid).await;
                 log::error!(
-                    "[worker] 解锁流输出单行超过上限（{} 字节），协议断开: PID={}",
+                    "[worker] {}流输出单行超过上限（{} 字节），协议断开: PID={}",
+                    label,
                     limit,
                     pid
                 );
@@ -457,13 +481,19 @@ async fn handle_streaming_unlock_send(
                 // 超时
                 let stderr_snippet = snapshot_stderr(stderr_ring);
                 log::error!(
-                    "[worker] 解锁进度超时（{}s 无进度）: PID={} | stderr: {}",
+                    "[worker] {}进度超时（{}s 无进度）: PID={} | stderr: {}",
+                    label,
                     idle_timeout.as_secs(),
                     pid,
                     stderr_snippet
                 );
+                /* 只返回错误会让仍在运行的 worker 继续写出旧序号进度；下一次
+                 * 请求会把残留行误判为协议篡改。必须回收子进程，让下一次请求
+                 * 从全新 worker 开始。 */
+                terminate_child(child, child_alive, pid).await;
                 return Err(format!(
-                    "解锁进度超时（{}s 无进度）— 子进程 PID={} 可能已挂起 | 诊断: {}",
+                    "{}进度超时（{}s 无进度）— 子进程 PID={} 已强制回收 | 诊断: {}",
+                    label,
                     idle_timeout.as_secs(),
                     pid,
                     stderr_snippet

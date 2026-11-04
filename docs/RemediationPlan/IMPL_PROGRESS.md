@@ -1,7 +1,7 @@
 # 缺陷修复工程进度记录（Remediation IMPL_PROGRESS）
 
-> 本文件为 Verthys 修复工作唯一变更台账（Wave 0~58）；历史方案/审查清单文档已归档删除，批次契约锚点以各 Wave『关键约束』小节为准。
-> 编号（FIX-x-y、P1-x 等）仅存在于工程文档，按项目硬约束不得进入代码注释。最新交接见文末 **Wave 58**（安全防护面板修复计划终结）。
+> 本文件为 Verthys 修复工作唯一变更台账（Wave 0~72）；历史方案/审查清单文档已归档删除，批次契约锚点以各 Wave『关键约束』小节为准。
+> 编号（FIX-x-y、P1-x 等）仅存在于工程文档，按项目硬约束不得进入代码注释。最新交接见文末 **Wave 72**（轮换崩溃安全与全阶段收敛闸门）。
 
 #### Wave 26 收尾交接清单（残段）
 1. 无 FFI/API 面变更，worker 与 src-tauri 无需重编绑定；release DLL 已重编，Tauri 打包素材哈希需在生产构建流程刷新（构建脚本自动比对）。
@@ -96,7 +96,7 @@
 
 #### 变更点概览
 - WAL 新增 Removed 删除墓碑（恢复重放时从 committed 集合/ID 映射移除哈希）；快照文件（.snapshot，tmp+rename 原子写）承载 compacted committed 集合，恢复 = 快照 O(1) 基线 + WAL 增量重放（WAL 缺失时快照独立承载去重集合）；append_removed / remove_all / forget_committed。
-- 命令：verthys_forget_hashes（闸门 + spawn_blocking 落墓碑 + 活跃会话内存即时移除）与 dev_reset_wal（仅无活跃会话可用）；前端批量删除成功后 best-effort verthysForgetHashes（失败仅影响再导入去重、不影响删除结果）。
+- 命令：verthys_forget_import_keys（原 verthys_forget_hashes；P1-1 起参数语义为非内容条目键）与 dev_reset_wal（仅无活跃会话可用）；前端批量删除成功后 best-effort verthysForgetImportKeys（失败仅影响再导入幂等、不影响删除结果）。
 
 #### 能力边界（必须明示）
 - 原方案「store 持久化 alive_hashes 索引」无法落地：内容哈希位于客户端加密 meta 密文内部，store 侧（worker/C 层）不具备任何哈希语义，且删除是唯一变更存活集的路径、必经前端——以「前端删除成功后写 Removed 墓碑」等价闭环；若未来引入后端可解析哈希的存储形态再补 store 侧索引。
@@ -160,7 +160,7 @@
 #### 变更点概览
 - 块集记录（类型 0x09）：逐块引用与逐块哈希移出索引，索引体积与照片大小解耦；加密规格与缩略图一致（包裹密钥 + 文件盐 + 文件哈希 AD）；Worker 新增 encrypt_slim_set / decrypt_slim_set；写入经 verthys_add_chunk_batch 外置载荷通道（Rust 角色白名单 {5,7,9}，按角色命名 chunk_/thumb_/cset_）。
 - 索引字段收口：新写入索引只含 thumbId / chunkSetId / chunkCount；缩略图缺失时 thumbId=0；布局判定（isSlimLayout）与缩略图判定（isSlimPhotoMeta）分离；逐块引用分流收敛于 photo-album/chunk-refs.ts（块集优先 → 索引内联回落 → 索引内联块密文；块集解析校验 chunkCount === ids.length）。
-- 后台重打包（存量布局一 → 布局二）：repack.ts 引擎（依赖注入、幂等单元=单张、整图 BLAKE3 前置校验、取消在张边界生效、DUPLICATE_SKIPPED 计跳过）+ usePhotoRepack 编排（列表原位替换 + 缩略图 URL 吊销 + 三层缓存失效）；入口由 PHOTO_WRITE_FMT 控制（默认关 → 入口不出现）。
+- 后台重打包（存量布局一 → 布局二）：repack.ts 引擎（依赖注入、幂等单元=单张、整图 BLAKE3 前置校验、取消在张边界生效、DUPLICATE_SKIPPED 计跳过）+ usePhotoRepack 编排（列表原位替换 + 缩略图 URL 吊销 + 三层缓存失效）；入口由 PHOTO_WRITE_FMT 控制（默认关 → 入口不出现）。**后续变更（2026-10-29）：写入开关与重打包入口已移除，布局二仅保留读取/来源布局保留兼容；包裹文件密钥不再新建。**
 - 预算单源更新：生成器派生 photo_index_plain_max=2656、chunk_set_plain_max=7964（最大 100 块）；11 条不变式；Rust 同源常量 4 个 PB_* + 编译期断言。
 
 #### 关键约束（改动时勿破坏）
@@ -803,6 +803,297 @@
 - 边界复核：`w ≥ 715px` 且 `h > 700px`（浮动态）时三卡均不被钳制；窄视口仍走文档流兜底。
 
 门禁：vue-tsc 0 错 / vitest 56 文件 698 例全绿 / `vite build` 通过（PasswordTools 34.05KB JS + 14.36KB CSS）。
+
+### 2026-11-01 Wave 65：D9 全库 DEK 轮换 C1~C3 收口（worker / 命令 / 前端 / 验收）
+
+#### 变更点概览
+- C/API：`VERTHYS_API_VERSION` 0x000F→0x0010；5 个 `Verthys_V4Rotate*` 接口与错误码 0x1C~0x1F 进入导出白名单（63 符号）。
+- worker：新增旋转 FFI 类型与 5 个调用封装；Begin 返回统计，Run 以 200ms 节流回写签名进度行；协议新增 `new_path`/`keep_old` 与 `rotate_*` 响应字段；0x1C~0x1F 不再折叠为 AUTH。
+- Tauri：`service::vault_rotate` 依赖反转契约 + 宿主能力桥接；5 个命令（begin / unlock_module / run / commit / abort）；流式进度空闲超时 600s；begin/commit/abort 与 run 失败写入 `VERTHYS_ROTATE` 审计（只落路径哈希与错误码，不落口令/恢复码）；提交成功后重建会话哨兵锁并清前端恢复态。
+- 前端：恢复会话横幅入口 + `VaultRotateDialog`（路径选择、保留备份/移除 PCR、已启用模块口令逐项登记、进度、Commit/Abort/失败强制中止）；`verthys.ts` API 封装与 `RotateProgress` Channel。
+- 验收：新增 `e2e_rotate` 特性与宿主层集成用例（真实 `AppHandle/AppState/worker/DLL`），覆盖非恢复会话拒绝、目标已存在、模块未登记、作业期间写阻塞、Run→Abort、Run→Commit、提交后记录读回；脚本已纳入 V4-PI-4 门禁。
+
+#### 边界回归（宿主层实测）
+- 普通会话 Begin → `ERR_00000017`；目标已存在 → `ERR_00000004`；未登记模块口令 Run → `ERR_0000001D`；作业期间 add_record → `ERR_0000001C`；Abort 后源库记录仍可读；Commit 后临时库消失且记录内容一致。
+
+门禁：C 439/0；攻击 PC-1/A4/A5/A9/A11/A12/A13/A6b/A8/A14/A15/A16/A17/A19/A20/A20b 全 PASS；worker 65/0；src-tauri 552/0（2 ignored）；前端 vitest 713/0（64 文件）；vue-tsc 0 错；vite build 通过；V4-PI-4 报告 `reports/gate-v4-pi-4-d9-c3.json`；宿主轮换 e2e 报告 `reports/e2e-v4-rotate-host-d9-c3.json`。
+
+遗留：Keyfile 恢复会话未持有 keyfile 时 Begin 仍返回 POLICY（UI 已提示，无补录入口）；Run 未暴露取消回调；宿主 e2e 不覆盖 Tauri 命令参数反序列化层；A6 离机证据待执行。
+
+### 2026-11-01 Wave 66：D9 补强 — Keyfile 恢复会话补录 + 全库轮换 Run 取消
+
+#### 变更点概览
+- C/API：`VERTHYS_API_VERSION` 0x0010→0x0011；新增 `Verthys_V4RotateAttachKeyfile`（导出 63→64）。
+  - `vty_vault_attach_keyfile`：读取 VKFL 摘要 + 当前容器口令验证 user 槽，认证通过才写入会话缓存；失败不修改会话字段。
+  - Run 回调非 0 取消语义新增 C 用例 `v4_rotate_run_cancel_callback`（轮换用例 8/0）。
+- worker：新增 attach_keyfile FFI/op（keyfile 路径只读授权）；Run 请求新增 `cancel_event`；Windows 命名事件打开 + Run 前检查 + 进度回调 200ms 节流检查；版本预检 0x0011。
+- Tauri：service 新增 `attach_keyfile`/`cancel`；Begin 创建命名事件（nonce 名），Run 下发事件名，Commit/Abort 释放；`handle_factory` 新增命名事件创建 / SetEvent / 关闭；控制器新增 2 命令，审计 `action=attach_keyfile` 与 `action=cancel`。
+- 前端：容器启用 keyfile 时必须选择当前 keyfile 并先补录再 Begin；解锁模块 / 复制阶段显示“取消轮换”，取消后 Run 收敛自动 Abort；新增 2 条 vitest。
+- 宿主 e2e：新增取消作业（Begin→Cancel→Run 收敛 POLICY→Abort）与 keyfile 场景（创建 keyfile 库→恢复解锁无摘要 Begin POLICY→错误补录 KEYFILE_INVALID→正确补录→Begin→Abort）。
+
+门禁：C 440/0；攻击 PC-1/A4/A5/A9/A11/A12/A13/A6b/A8/A14/A15/A16/A17/A19/A20/A20b 全 PASS；worker 66/0；src-tauri 552/0（2 ignored）；前端 vitest 715/0（64 文件）；vue-tsc 0 错；vite build 通过；宿主 e2e PASS（含 `rotate_cancel` / `rotate_keyfile_attach`）；报告 `reports/gate-v4-pi-4-d9-c3.json` 与 `reports/e2e-v4-rotate-host-d9-c3.json`。
+
+遗留：取消仅覆盖 Begin 后到 Run 返回前（Run 返回后只能 Commit/Abort）；keyfile 补录要求用户持有当前 keyfile；A6 离机证据仍待执行。
+
+### 2026-11-01 Wave 67：D9 发布素材同步（V4-PI-5 证据刷新 + .vsec/worker 一致）
+
+#### 变更点概览
+- V4-PI-5 门禁按最终代码重跑：覆盖 0x0011 API、64 导出符号与新增补录/取消用例；报告 `reports/gate-v4-pi-5.json`。
+- `build/core/Release/verthys.dll` 注入 `.vsec` v2 完整性基准（text+rdata+rhat HMAC-SHA256），并按最终字节刷新 `build/core/verthys.artifacts.json` 契约。
+- worker 按注入后 DLL 哈希重新 release 构建，确保加载期完整性基线一致。
+- 同步打包素材：`src-tauri/verthys.dll`、`src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe`，以及 Tauri target 下的 worker 副本；`cargo check` 不再出现“打包素材过期/worker 源码未重建”告警。
+- 哈希一致性：DLL `742e219d…f59854`（源/打包/契约三方一致）；worker `77e58ec8…449683`（源/打包一致）。
+- 注入后宿主轮换 e2e 全量复跑 PASS（含 `rotate_cancel` / `rotate_keyfile_attach`），报告 `reports/e2e-v4-rotate-host-d9-c3.json`。
+
+门禁：V4-PI-5 C 440/0；攻击 PC-1/A4/A9/A11/A13/A20/A20b 全 PASS；宿主 e2e PASS；`Test-VsecBaseline` 通过。
+
+遗留：无新增；A6 离机证据待执行。
+
+### 2026-11-01 Wave 68：A6 离机验证落地（Windows Sandbox 作为目标机）
+
+#### 变更点概览
+- `tests/attack/offmachine/run.ps1`
+  - prepare 阶段写入 `build_binding`：core DLL / worker / probe 的 SHA-256、git commit、signer，随 `a6-manifest.json` 复制到目标机。
+  - verify 阶段把绑定字段与 `generated_at` 写入报告顶层；绑定缺失、哈希不符或早于当前 DLL 构建时间的报告不再被攻击门禁接受（此前只认 `verdict=PASS`）。
+  - 修复包位于浅层目录（如 `C:\A6`）时 `$repoRoot` 连续取父目录得到空串、`Split-Path` 参数绑定失败的问题：改为逐级上溯、到顶停止。
+- 包内新增 `launch.cmd` 作为 LogonCommand 包装，把 verify 的标准输出与退出码落到 `verify-out.txt` / `logon-started.txt`，目标机无需交互即可排障。
+
+#### 执行
+- 源机正控 `vty_probe a6`：`device_level=1 device_provider=2 vault_open=0 module_unlock=0 plaintext_hits=0`。
+- 目标机：Windows Sandbox（`Microsoft Windows 11 企业版 10.0.22621`），独立 MachineGuid、无 TPM；宿主启用可选功能 `Containers-DisposableClientVM` 并重启。
+- 目标机 `vty_probe a6run`：`device_level=1 device_provider=2 vault_open=9 module_unlock=-1 plaintext_hits=0`。
+
+#### 证据
+- `reports/a6-20261101-0505.json`：`is_offmachine=true`；源/目标 MachineGuid 哈希不同；`vault_open=9(E_TPM)`；`module_unlock=-1`；`plaintext_hits=0`；`artifacts_verified=true`。
+- 构建绑定与当前构建一致：DLL `742e219d…f59854`、probe `c726f644…15bd`、worker `77e58ec8…449683`、commit `2f6be65`；`generated_at=2026-11-01T05:08:51+08:00` 晚于 DLL 构建时间。
+- 攻击回归 `reports/attack-a6-20261101.json`：25 PASS / 0 FAIL / 0 SKIP，A6 由 SKELETON 转 PASS。
+
+门禁：V4-PI-4 `-SkipBuild` 复跑 `Verdict=PASS`、`Failures=0`；C 测试 440/0；攻击 A6 行 `Observed=PASS / Verdict=PASS`（证据 `reports/a6-20261101-0505.json`，绑定当前 DLL/probe/worker）；worker 单测、前端 vitest、vue-tsc 与 v4 产品链 / 宿主轮换 e2e 零失败；报告 `reports/gate-v4-pi-4-d9-c3-a6.json`。
+
+#### 遗留
+- 该目标机无 TPM，`vault_open=9` 同时包含“无设备根”与“设备绑定失效”两种成因；若要单独证明设备绑定，需再用带 vTPM 的异机做一次对照。
+
+### 2026-11-01 Wave 69：D9 轮换 / A6 证据链彻底修复（审查发现全量闭环）
+
+#### 变更点概览
+- C 核心（`vty_rotate_v4.c` / `vty_keymanager_v4.c` / `verthys_api_v4.c`）
+  - 提交与回滚改为 `ReplaceFileW` 单次原子替换：源路径任一时刻都存在且内容完整，旧库同事务落为备份；提交失败原子回滚，恢复失败时保留双份完整文件并锁定会话。
+  - `Abort` 改为返回状态：临时库删除重试 3 次，失败返回 `IO` 并由 API 透传，不再伪装成功。
+  - 分片级进度回调：大文件复制期间可在分片边界响应取消，不再等整文件结束。
+  - Begin / AttachKeyfile 的 user 槽口令验证接入持久化 lockout（检查、失败记账、成功清零）。
+  - 删除只写不读的 `ready_mask`；备份删除失败重试并保留现场。
+- worker：`v4_rotate_run` 符号查找失败也走统一清理出口，杜绝取消句柄与全局状态泄漏。
+- Tauri：Begin 成功后才清理上一轮取消信号（重复 Begin 不再误关活动作业事件）；请求序列化直接写 `Zeroizing<String>`，去掉 `serde_json::Value` 的口令副本；提交后哨兵锁改为“先建后换 + 3 次重试”，失败写审计 `guard=degraded`；锁库时释放取消信号。
+- 前端：取消仅在“取消置位 + `ERR_00000017`”时视为中止；Run 成功但已取消强制 Abort；Abort 删除失败（`ERR_00000008`）按“作业已释放 + 残留提示”处理；新增 6 条用例。
+- 脚本：门禁 `generated_at` 改为从原始 JSON 用 `DateTimeOffset` 解析（原实现丢失 `+08:00` 偏移 8 小时）；`.vsec` 注入幂等（字节未变跳过写、保留 DLL mtime）；A6 prepare 自动生成 `launch.cmd` / `.wsb` 并纳入清单；释放账本注入 `git_commit` / `git_tag` / `builder`。
+- 文档：CORE_API / ARCHITECTURE / SECURITY_DESIGN / DATA_FLOW 同步原子替换、取消粒度、lockout 与 Abort 语义。
+
+#### 证据
+- 构建：`build_production.ps1 -Profile production` 退出 0；DLL `d637d1b7…e7ae2`（mtime 16:24:10）、worker `214a0b7f…5b11b7`、最终安装包 `4f668d49…beef5e3`（release `9xk8tj971w0ng`，`git_commit=2f6be65`、`git_tag=2f6be65-dirty`、`builder=Administrator`）。
+- C：443 passed / 0 failed（含 3 条新用例：`keep_old` 备份、分片取消、lockout 入口）。
+- worker：66/0；前端 vitest 门禁内通过（新增 RATE 用例后该 spec 13/13，上次全量 721/0）、`vue-tsc` 0 错；宿主轮换 e2e PASS（cancel / keyfile / commit）。
+- A6：`reports/a6-20261101-1638.json` PASS；离机 `vault_open=9`、`module_unlock=-1`、`plaintext_hits=0`，绑定当前 DLL / probe / worker。
+- 攻击回归：`reports/attack-a6-20261101-1638.json` 25 PASS / 0 FAIL / 0 SKIP，A6 PASS。
+- `.vsec` 幂等实测：重复注入 mtime 未变化。
+
+门禁：V4-PI-4 `-SkipBuild` 复跑 `Verdict=PASS`、`Failures=0`；C 443/0；攻击 A6 行 PASS；worker / 前端 vitest / vue-tsc / v4 产品链与宿主轮换 e2e 零失败；报告 `reports/gate-v4-pi-4-d9-c3-fix.json`。
+
+### 2026-11-01 Wave 70：综合复审缺陷修复（D9 / A6 全链路）
+
+#### 变更点概览
+- 仓储 / 轮换
+  - 源库 fileverthys 已删除时，Run 跳过文件/分片复制，改用不依赖模块密钥的存活叶统计；存在存活叶即 `CORRUPT`。
+  - 复制增加逐条回读自检：每条记录与每个分片写入新库后重新解密比对，不一致返回 `VERIFY`。
+  - 保留源库 `next_id` 水位：已删除的高位 ID 不会被轮换后的新库复用。
+  - 合法墓碑容忍扩展到 `module_rekey`（rekey_chunks）、`file_manifest`、`module_purge`、清单扫描；模块“删除→重建→再删除”不再误判 `CORRUPT`。
+  - `vty_record_open` 失败路径按真实分配长度清零释放，不再用 0 长度释放明文。
+- worker：`0x1C`（轮换中只读）/`0x1D`（模块未解锁）保留原错误码，不再折叠成 `ERR_00000001`。
+- Tauri
+  - `v4_rotate_run` 维护 Run 运行态；`verthys_lock` / `worker_destroy` 先请求取消并等待 Run 收敛（30s 上限），超时拒绝锁定。
+  - `cancel()` 在取消信号锁内 `SetEvent`，消除与 `CloseHandle` 的并发窗口。
+  - 流式与普通 IPC 超时统一强制回收 worker 并标记死亡，避免旧序号残留导致后续请求误判协议/认证失败。
+  - `forward` 从 `ERR_XXXXXXXX` 补齐 `error_code`，前端可按码分支。
+- 前端
+  - 轮换作业期间暂停空闲锁定（Rust 闸门仍为安全边界）；提交/失败/卸载恢复。
+  - attach / Begin / unlock / Run / commit / abort 失败路径立即清空模块口令与 keyfile 路径缓存。
+  - 取消判定与错误提示优先使用 `error_code`。
+  - 提交后 `bumpVerthysState()` 触发 Keyfile / PCR 面板重查，并刷新模块密钥状态。
+- 文档：CORE_API / ARCHITECTURE / SECURITY_DESIGN / DATA_FLOW 同步删除模块轮换、回读自检、ID 水位、锁定收敛与 IPC 超时语义。
+- 注释：修正 `send_batch` 的并发语义描述（顺序发送、非原子隔离；无行为变化）。
+
+#### 证据
+- C：446 passed / 0 failed（新增 3 条用例：删除 file 模块后轮换、墓碑重建后二次删除、ID 水位保留）。
+- worker：67/0（新增 `0x1C/0x1D` 映射与保留码用例）。
+- Tauri：553 passed / 0 failed（2 ignored），新增锁定闸门等待/超时用例。
+- 前端：`vue-tsc` 0 错；轮换 dialog 13/13、DevicePcrPanel 6/6。
+- 构建：`build_production.ps1 -Profile production` 退出 0；DLL `778373d1…cd46e`、worker `49d72bf9…0aa5`、最终安装包 `eb18770…1b3cb`（release `xcc7e1nq0t4zr`，git 字段完整）。
+- 宿主 e2e：`reports/e2e-v4-rotate-host-wave70b.json` PASS（`rotate_cancel` / `rotate_run_abort` / `rotate_run_commit` / `rotate_keyfile_attach`）。
+- A6：`reports/a6-20261101-1822.json` PASS（离机 `vault_open=9`、`module_unlock=-1`、`plaintext_hits=0`，绑定本次 DLL/probe/worker）。
+- 攻击回归：`reports/attack-wave70-20261101.json` 25 PASS / 0 FAIL / 0 SKIP，A6 PASS。
+- V4-PI-5：`reports/gate-v4-pi-5-wave70.json` PASS（446/0，攻击 PC-1/A4/A9/A11/A13/A20/A20b 全 PASS）。
+- V4-PI-4：`reports/gate-v4-pi-4-wave70-final.json` PASS（446/0、Failures=0、A6=PASS；含 worker/前端/宿主轮换 e2e）。
+
+### 2026-11-01 Wave 71：锁定链时序 / 会话代际 / RAII 收口
+
+#### 根因
+- 前端 `lockAll` 对 `verthysLock` / `workerDestroy` 使用 8s / 5s 超时，小于后端
+  等待轮换 Run 收敛的 30s 闸门：前端先放弃并 `resetAllState`，延迟到达的销毁
+  命令随后落在**新会话**上（新 worker 被销毁、新状态被抹掉）。
+- `lockAll` 只在步骤内部等待，没有“先收敛再执行破坏性步骤”的显式前置点；
+  失败路径仍会清 GMK、重置前端状态，形成“界面已锁定、worker 仍持有 GMK”。
+- 空闲锁定抑制条件为 `jobActive || processing`：轮换作业进入 ready / failed 后
+  worker 已空闲，但对话框停留会让已超时会话永久驻留 GMK。
+- `RUN_RUNNING` 手动置位/复位，Run 内 panic 展开会让标志永久为真，锁定闸门死锁。
+- `withStepTimeout` 的 `Promise.race` 超时定时器从不清理：步骤完成后定时器仍会
+  `setCacheDirty(true)`，把干净缓存误标为脏。
+- `vty_record_open` / `vty_record_open_name` 的明文暂存区与失败路径输出缓冲区
+  直接 `vty_free`，未清零。
+
+#### 变更点概览
+- Tauri
+  - 新增 `verthys_prepare_lock`：仅执行“请求取消 + 等待 Run 收敛（30s）”，
+    供前端在任何破坏性步骤前调用；失败即整体放弃锁定。
+  - `AppState.session_epoch`：`set_session` 在写锁内递增；新增
+    `clear_session_if_epoch` 写锁内原子校验并清空。`verthys_lock` /
+    `worker_destroy` 在等待前后校验代际，已变更返回 `E_LOCK_SUPERSEDED`，
+    绝不清空新会话。
+  - `RUN_RUNNING` 改为 RAII 守卫（Drop 复位 + `CANCEL_ENABLED` 关闭 + 唤醒），
+    Mutex / Condvar 中毒按纯布尔状态恢复，一次 panic 不再永久封死锁定链。
+- 前端
+  - `lockAll` 新增步骤 0：`verthysPrepareLock()`（35s 上限）。失败保留会话、
+    密钥与空闲计时，并按真实截止时间重新武装（空闲锁定自动重试）。
+  - `LockOutcome.locked`：仅当会话销毁链真正执行完成才为 true；`clean` 同时
+    要求 `locked`。管理面板“立即锁定 / 返回解锁”不再在未锁定时宣称已锁定。
+  - `withStepTimeout` 在步骤完成时清除定时器；`verthysLock` / `workerDestroy`
+    超时上限提升到 45s / 35s，覆盖后端闸门（30s）+ IO 收敛（10s/2s）与清理余量。
+  - 收到 `E_LOCK_SUPERSEDED` 立即停止后续破坏性步骤，不执行 `resetAllState`。
+  - 轮换空闲锁定抑制收敛为仅 `processing`（命令在途）；ready / failed 解除。
+- C：`vty_record_open` / `vty_record_open_name` 明文暂存区与失败路径输出缓冲区
+  清零后释放。
+- 文档 / 注释：SECURITY_DESIGN、DATA_FLOW、关闭流程硬超时说明同步前置闸门、
+  会话代际与抑制语义。
+- 测试门禁：`tests/e2e/v4-rotate-host.ps1` 隔离 `%LOCALAPPDATA%`。C 层
+  lockout / rollback / 设备源状态跨进程累积会让 create 在连续复跑时误报
+  `AUTH`（0x02）；隔离后与 `v4-worker-smoke` 口径一致。隔离运行复跑 PASS，
+  未隔离必现 FAIL，证明为测试环境状态污染而非产品回归。
+
+#### 证据
+- C：446 passed / 0 failed（`build_core.dev.ps1`）。
+- Tauri：555 passed / 0 failed / 2 ignored；新增 `test_session_epoch_rejects_stale_clear`、
+  `run_guard_resets_state_even_on_panic`。
+- 前端：`vue-tsc` 0 错；vitest 64 文件 / 726 tests 全通过；security-session 23/23、
+  VaultRotateDialog 14/14（新增前置闸门失败、代际冲突中止、超时定时器清理、
+  空闲抑制仅命令在途用例）。
+- 构建：`build_production.ps1 -Profile production` 全量构建后，以
+  `-SkipCore -SkipWorker` 重新打包 Tauri（包含锁定链收敛与代际校验）；
+  DLL `1243dce7…833f5`、worker `1f2b1d00…3cd752`、安装包
+  `16280477…605b58`（release `2rm08xs5722fj`）。
+- A6：`reports/a6-20261101-2041.json` PASS（Windows Sandbox 离机
+  `vault_open=9`、`module_unlock=-1`、`plaintext_hits=0`，报告绑定本次
+  DLL/probe/worker 哈希）。
+- 宿主 e2e：`reports/e2e-v4-rotate-host-wave71.json` PASS（13 步：create /
+  add / 拒绝非恢复码 / 模块启用 / 锁定 / 恢复解锁 / MODULE_LOCKED /
+  cancel / abort / commit / cleanup / keyfile attach）。
+- V4-PI-4：`reports/gate-v4-pi-4-wave71.json` PASS（446/0、Failures=0、
+  攻击 25 PASS / 0 FAIL / 0 SKIP、A6 PASS；含 worker / 前端 / 产品链 /
+  worker smoke / 宿主轮换 e2e）。
+- V4-PI-5：`reports/gate-v4-pi-5-wave71.json` PASS（446/0、Failures=0；
+  攻击 PC-1/A4/A9/A11/A13/A20/A20b 全 PASS）。
+
+### 2026-11-01 Wave 72：轮换崩溃安全 / 全阶段收敛闸门 / 代际孤儿锁 / 锚点表污染定位
+
+#### 根因
+- PCR 密钥名只由 `vault_uuid` 派生（刻意反回滚：重封覆盖旧私钥，旧槽位 +
+  旧副本无法再过 PCR 门）。Commit 在原子替换前重封；进程若在“重封后、
+  替换前”被杀，源库口令解锁会卡在 PCR 门，只剩恢复码可用。
+- 宿主锁定闸门只跟踪 Run。Begin / UnlockModule / AttachKeyfile / Commit /
+  Abort 在途时仍可销毁 worker，正好命中上述崩溃窗口。
+- `verthys_lock` 代际冲突分支直接返回：若另一路径只清了 worker 会话而未释放
+  哨兵锁，旧 `VerthysSessionGuard` / 文件锁成为无归属孤儿。
+- 宿主 e2e 未隔离 `%LOCALAPPDATA%` 时 create 报 `ERR_00000002`（AUTH）：
+  实测定位为回退锚点表已满（状态头 `count=64`，等于
+  `VTY_ROLLBACK_MAX_ENTRIES`），新库登记失败后 create 失败路径先删文件、
+  后关 store 句柄，`DeleteFileW` 因共享读写句柄失败并把真实错误改写为
+  `E_IO`；worker 再把 IO/CORRUPT 统一成 AUTH。复制有效但条目未满的状态
+  （含仅含 lockout.state 的空锚点表）均可复现为 PASS，证明结论。
+  lockout.state 单独存在时 create 第 1 步成功、第 3 步按预期返回 RATE 熔断，
+  与锚点表缺陷不是同一问题。
+
+#### 变更点概览
+- C
+  - 新增轮换恢复日志 `<库路径>.vtyrotj`（72 字节：魔数/UUID/源代/PCR 位图/
+    策略摘要）。Commit 在覆盖 PCR 密钥前以独占句柄（共享模式 0）落盘并
+    `FlushFileBuffers`；源库重封成功或提交完成后删除，重封失败则保留。
+  - `vty_vault_open_internal`：PCR 门失败时，仅当日志与当前文件代、位图、
+    策略摘要完全一致且当前平台 PCR 仍等于策略摘要，才推迟到会话建立后
+    用口令解出的 `K_c` 重封并重新验证；任一不满足维持 fail-closed。
+    PCR 门通过的正常解锁会清理陈旧日志。
+  - create 失败路径改为“先释放会话（关闭 store 句柄）再删除半成品文件”，
+    删除失败不再覆盖原始错误码；失败不再留下不可打开的孤儿库。
+- Rust
+  - `vault_rotate`：`Run` 单布尔改为全阶段在途计数 + Condvar，RAII 守卫覆盖
+    Begin / UnlockModule / Run / AttachKeyfile / Commit / Abort；
+    `prepare_for_lock` 等待计数归零（30s 有界），Run 取消开关独立 RAII。
+    进程级硬退出路径不可拦截，由 C 恢复日志兜底（注释显式声明）。
+  - `verthys_lock`：代际冲突且当前无任何会话时，补全释放无归属的
+    `VerthysSessionGuard` 与旧文件锁；有新会话时绝不动其资源。
+- 前端
+  - `VaultRotateDialog` 读取 `verthysPcrStatus`；勾选保留旧备份且容器启用
+    PCR 时提示“旧备份只能用恢复码打开”。
+  - `global-verthys` 两处陈旧注释由“lockAll 40s 超时 / 等待最多 45s”改为
+    “后台收敛、不设提前返回”；`useAppUpdater.LockOutcome` 收敛为会话层
+    结果类型的字段子集，消除同名接口漂移。
+- 文档：SECURITY_DESIGN 第 2.6 节与 CORE_API 轮换契约补充恢复日志、
+  keep_old+PCR 语义、全阶段收敛闸门与代际孤儿清理。
+
+#### 关键约束（改动时勿破坏）
+- 不得把 `pcr_key_name` 改成代际命名：UUID-only 覆盖旧私钥是反回滚本体。
+  恢复日志只修崩溃窗口，不得放宽为“平台 PCR 变化时自动重绑”。
+- 日志匹配必须同时校验 UUID、文件代、PCR 位图、策略摘要与当前平台 PCR；
+  缺任一项即 fail-closed。日志内容不是密钥材料。
+- create 失败路径必须先关闭 store 句柄再删文件；错误码以原始失败原因优先。
+- 锁定闸门必须覆盖全部轮换 IPC；只等待 Run 会重新引入换名/重封窗口。
+- 代际冲突时只有“无任何会话”才可释放孤儿锁；有新会话时释放会破坏新会话。
+
+#### 证据
+- Rust：`cargo test --lib` 556 passed / 0 failed / 2 ignored；新增
+  `orphan_lock_cleanup_releases_session_guard_and_file_lock`，并将锁定闸门
+  用例改为在途计数语义（panic 展开后计数归零）。
+- 前端：`vue-tsc --noEmit` 0 错；vitest 64 文件 / 727 例全绿（新增
+  keepOld+PCR 备份警示 1 例）。
+- C：449 passed / 0 failed（`build_core.dev.ps1`）。新增/加强：
+  `v4_rotate_pcr_journal_crash_recovery`（日志 + 覆盖后密钥 → 口令解锁自愈；
+  无日志同状态 fail-closed）、`v4_rotate_keep_old_pcr_backup_requires_recovery`
+  （备份口令 E_TPM、恢复码可开）、`v4_create_failure_removes_partial_and_keeps_error`
+  （失败不留孤儿文件且保留 E_ROLLBACK）。
+- 构建：`build_production.ps1 -Profile production` 全绿；桥接注释清理后以
+  `-SkipCore -SkipWorker` 重新打包 Tauri。DLL `d25be0f5…e6ebe81e`、worker
+  `4ed75f74…f0459de`、安装包 `Verthys_4.1.8_x64-setup.exe`（6,084,037 字节 /
+  sha256 `1212e9b8…bd6830` / release `289eke7sxqm8p`）。
+- 宿主 e2e：`reports/e2e-v4-rotate-host-wave72.json` PASS（13 步全过）。
+- 锚点表污染修复验证：Release DLL 直调 + 复制本机已满 `rollback.state`
+  （count=64）→ create 返回 `VERTHYS_ERR_ROLLBACK`（0x19）且库文件不存在；
+  修复前同条件返回 IO 并被 worker 统一为 AUTH 且残留半成品文件。
+- 攻击回归：`reports/attack-wave72-20261101.json` 25 PASS / 0 FAIL / 0 SKIP，
+  A6 PASS。A6：`reports/a6-20261101-2341.json` PASS（离机
+  `vault_open=9`、`module_unlock=-1`、`plaintext_hits=0`，绑定本次
+  DLL/probe/worker 哈希）。
+- V4-PI-4：`reports/gate-v4-pi-4-wave72.json` PASS（449/0、Failures=0、
+  攻击 25 PASS / 0 FAIL / 0 SKIP；含 worker / 前端 / 宿主轮换 e2e）。
+- V4-PI-5：`reports/gate-v4-pi-5-wave72.json` PASS（449/0、Failures=0；
+  攻击 PC-1/A4/A9/A11/A13/A20/A20b 全 PASS）。
+- `cargo clippy --lib --tests -- -D warnings` 0 告警（顺带修正轮换桥接中
+  两处存量冗余字段名）。
+
+观察项（非本轮缺陷，未改）：`ci/run_ci.ps1` 的常量消费门报
+`PHOTO_INDEX_MAX_BYTES` 无消费点；AST 二级报 8 条存量 controller →
+state/infrastructure 反向导入（基线按行号登记，前序 Wave 改动导致行号漂移）。
+两项均与本轮改动无关（本轮未新增导入，也未触碰 PHOTO 常量），未刷新基线以
+免掩盖存量违规，留待专项治理。
+
+
+
+
 
 
 

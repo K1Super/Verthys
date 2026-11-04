@@ -149,6 +149,20 @@ function Update-VsecBaseline {
     [Array]::Copy($snapshot.TextHash, 0, $blob, 8, 32)
     [Array]::Copy($snapshot.RdataHash, 0, $blob, 40, 32)
     [Array]::Copy($snapshot.RhatHash, 0, $blob, 72, 32)
+
+    # 幂等：基准未变化时不改写文件。改写会刷新 DLL mtime，使绑定
+    # “报告晚于 DLL 构建时间”的离机证据被误判为过期。
+    $existing = New-Object byte[] 128
+    [Array]::Copy($snapshot.Bytes, $snapshot.VsecRawPtr, $existing, 0, 128)
+    $changed = $false
+    for ($i = 0; $i -lt 128; $i++) {
+        if ($existing[$i] -ne $blob[$i]) { $changed = $true; break }
+    }
+    if (-not $changed) {
+        Write-Host "[vsec] 完整性基准未变化，跳过改写（保留 DLL 时间戳）" -ForegroundColor Cyan
+        return
+    }
+
     [Array]::Copy($blob, 0, $snapshot.Bytes, $snapshot.VsecRawPtr, 128)
 
     [System.IO.File]::WriteAllBytes($DllPath, $snapshot.Bytes)

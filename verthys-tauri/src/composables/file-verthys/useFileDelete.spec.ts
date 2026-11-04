@@ -18,13 +18,13 @@ import {
 
 /** 外置形态条目：两个块记录 + 元数据记录，单次批量调用的期望 ID 集合 */
 const IDS = [101, 102, 7];
-const FILE_HASH = "9f2c4d1e8a3b5c7d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d";
+const FILE_KEY = "9f2c4d1e8a3b5c7d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d";
 const ENTRY: DeleteSourceEntry = {
   id: 7,
   name: "report.pdf",
   metaId: 7,
   chunkIds: [101, 102],
-  fileHash: FILE_HASH,
+  entryKey: FILE_KEY,
 };
 
 interface HarnessOptions {
@@ -37,7 +37,7 @@ interface HarnessOptions {
   /** 去重键释放依次返回（最后一项重复生效；false = 抛出） */
   forgetResults?: boolean[];
   /** 会话日志中已提交的去重键集合（重导判定的模拟口径） */
-  committedHashes?: string[];
+  committedKeys?: string[];
 }
 
 /** 顺序取值：队列仅剩一项时重复生效（模拟"随后恢复正常"的故障注入） */
@@ -58,7 +58,7 @@ function makeHarness(opts: HarnessOptions = {}) {
     gc: 0,
     enqueued: [] as string[],
   };
-  const committed = new Set<string>(opts.committedHashes ?? []);
+  const committed = new Set<string>(opts.committedKeys ?? []);
 
   /* 释放行为：管道直连与队列补释放共用同一实现（与生产装配一致） */
   const releaseHashes = async (hashes: string[]): Promise<void> => {
@@ -78,7 +78,7 @@ function makeHarness(opts: HarnessOptions = {}) {
       calls.persist += 1;
       return nextFrom(persistQueue);
     },
-    forgetHashes: releaseHashes,
+    forgetImportKeys: releaseHashes,
     invalidateRecords: (ids) => {
       calls.invalidate.push([...ids]);
     },
@@ -140,34 +140,34 @@ describe("runFileDelete", () => {
     // 删除步骤不重放；落盘、释放、回收按序补做
     expect(h.calls.delete).toEqual([IDS]);
     expect(h.calls.persist).toBe(2);
-    expect(h.calls.forget).toEqual([[FILE_HASH]]);
+    expect(h.calls.forget).toEqual([[FILE_KEY]]);
     expect(h.calls.gc).toBe(1);
   });
 
   it("去重键释放：成功后重导不再跳过；释放失败转待重试队列，下次导入前补释放清除", async () => {
     // 正常释放：删除完成即释放，重导判定集合同步移除
-    const h1 = makeHarness({ committedHashes: [FILE_HASH] });
+    const h1 = makeHarness({ committedKeys: [FILE_KEY] });
     const ok = await runFileDelete(ENTRY, h1.deps);
     expect(ok).toEqual({ ok: true });
-    expect(h1.calls.forget).toEqual([[FILE_HASH]]);
-    expect(h1.committed.has(FILE_HASH)).toBe(false);
+    expect(h1.calls.forget).toEqual([[FILE_KEY]]);
+    expect(h1.committed.has(FILE_KEY)).toBe(false);
 
     // 释放失败：删除结论不变 + 告警 + 入队；补释放成功后集合移除
-    const h2 = makeHarness({ committedHashes: [FILE_HASH], forgetResults: [false, true] });
+    const h2 = makeHarness({ committedKeys: [FILE_KEY], forgetResults: [false, true] });
     const deferred = await runFileDelete(ENTRY, h2.deps);
     expect(deferred).toMatchObject({ ok: true, warning: expect.stringContaining("去重") });
-    expect(h2.calls.enqueued).toEqual([FILE_HASH]);
+    expect(h2.calls.enqueued).toEqual([FILE_KEY]);
     expect(h2.releaseQueue.size()).toBe(1);
-    expect(h2.committed.has(FILE_HASH)).toBe(true);
+    expect(h2.committed.has(FILE_KEY)).toBe(true);
 
     await h2.releaseQueue.flush();
     expect(h2.releaseQueue.size()).toBe(0);
-    expect(h2.committed.has(FILE_HASH)).toBe(false);
+    expect(h2.committed.has(FILE_KEY)).toBe(false);
 
     // 历史条目无去重键：跳过释放，不产生告警
     const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
     const h3 = makeHarness();
-    const legacy = await runFileDelete({ ...ENTRY, fileHash: undefined }, h3.deps);
+    const legacy = await runFileDelete({ ...ENTRY, entryKey: undefined }, h3.deps);
     infoSpy.mockRestore();
     expect(legacy).toEqual({ ok: true });
     expect(h3.calls.forget).toEqual([]);
@@ -175,7 +175,7 @@ describe("runFileDelete", () => {
   });
 
   it("成功路径：块引用与元数据合并单次调用、缓存失效、孤儿回收；删除后可重导", async () => {
-    const h = makeHarness({ committedHashes: [FILE_HASH] });
+    const h = makeHarness({ committedKeys: [FILE_KEY] });
     const result = await runFileDelete(ENTRY, h.deps);
 
     expect(result).toEqual({ ok: true });
@@ -183,9 +183,9 @@ describe("runFileDelete", () => {
     expect(h.calls.delete).toEqual([IDS]);
     expect(h.calls.invalidate).toEqual([IDS]);
     expect(h.calls.persist).toBe(1);
-    expect(h.calls.forget).toEqual([[FILE_HASH]]);
+    expect(h.calls.forget).toEqual([[FILE_KEY]]);
     expect(h.calls.gc).toBe(1);
-    expect(h.committed.has(FILE_HASH)).toBe(false);
+    expect(h.committed.has(FILE_KEY)).toBe(false);
 
     // 历史内联形态：块密文在元数据记录内，仅删元数据
     const inline = makeHarness();

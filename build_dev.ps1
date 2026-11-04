@@ -28,7 +28,7 @@ $workerReleaseExe = Join-Path $workerDir "target\release\verthys-worker.exe"
 $workerDebugExe   = Join-Path $workerDir "target\debug\verthys-worker.exe"
 $buildProdScript  = Join-Path $PSScriptRoot "build_production.ps1"
 
-$processNames = @("Verthys", "verthys-worker")
+$processNames = @("Verthys", "verthys-worker", "verthys-tauri")
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan

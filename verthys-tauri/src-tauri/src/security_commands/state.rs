@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use crate::security::{
     brute_force::BruteForceGuard,
     clipboard_guard::ClipboardGuard,
-    session_guard::SessionGuard,
+    session_guard::{SessionGuard, SessionLockReason},
     usb_guard::{ShadowSleep, UsbRegistry},
 };
 
@@ -62,8 +62,11 @@ impl SecurityState {
         SecurityState {
             brute_force: Mutex::new(BruteForceGuard::new()),
             session_guard: Mutex::new(SessionGuard::new(
-                Box::new(|| {
-                    log::info!("[session_guard] 系统锁屏事件触发");
+                Box::new(|reason: SessionLockReason| {
+                    log::info!(
+                        "[session_guard] 系统锁定事件（占位回调，真实锁库尚未安装）: {:?}",
+                        reason
+                    );
                 }),
                 Box::new(|| {
                     log::info!("[session_guard] 系统解锁事件触发");
@@ -86,6 +89,20 @@ impl SecurityState {
     /// 获取会话标识
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// 安装真实的会话锁定/解锁回调（启动期由 lib.rs setup 调用）。
+    ///
+    /// SecurityState 构建早于 AppHandle 可用，因此初始回调只能是占位日志；
+    /// setup 完成后必须调用本方法替换为真实锁库序列，否则系统锁屏/挂起
+    /// 只会留下日志而不会销毁工作进程。
+    pub(crate) fn replace_session_guard(
+        &self,
+        on_lock: Box<dyn Fn(SessionLockReason) + Send + Sync>,
+        on_unlock: Box<dyn Fn() + Send + Sync>,
+    ) -> Result<(), String> {
+        let mut guard = lock_session_guard_or_recover(self)?;
+        guard.replace_callbacks(on_lock, on_unlock)
     }
 
     /// 启停剪贴板监听与"外部写入即清空"标志

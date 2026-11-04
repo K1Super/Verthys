@@ -81,8 +81,12 @@ pub(crate) fn consume(target_op: &str, mode: &str, raw_path: &str) -> bool {
 /// 预定义操作与模式组合。
 fn is_allowed_pair(target_op: &str, mode: &str) -> bool {
     match target_op {
-        "unlock" | "import" => mode == MODE_READ,
-        "create_with_preset" | "export" => mode == MODE_WRITE,
+        "unlock" | "import" | "v4_unlock_recovery" | "v4_unlock_keyfile"
+        | "v4_keyfile_disable" | "v4_reseal_device"
+        | "v4_rotate_attach_keyfile" => mode == MODE_READ,
+        "v4_create" | "v4_create_keyfile"
+        | "v4_keyfile_enable" | "export"
+        | "v4_rotate_begin" => mode == MODE_WRITE,
         _ => false,
     }
 }
@@ -126,6 +130,24 @@ mod tests {
     fn temp_target(name: &str) -> String {
         let dir = std::env::temp_dir();
         dir.join(name).to_string_lossy().to_string()
+    }
+
+    /// 全库轮换临时库路径只允许写授权；读授权必须被拒绝。
+    #[test]
+    fn grant_rotate_begin_only_accepts_write() {
+        let path = temp_target("verthys-rotate-grant.tmp");
+        authorize("v4_rotate_begin", MODE_WRITE, &path).unwrap();
+        assert!(consume("v4_rotate_begin", MODE_WRITE, &path));
+        assert!(authorize("v4_rotate_begin", MODE_READ, &path).is_err());
+    }
+
+    /// 轮换 keyfile 补录只接受读授权。
+    #[test]
+    fn grant_rotate_attach_keyfile_only_accepts_read() {
+        let path = temp_target("verthys-rotate-keyfile-grant.tmp");
+        authorize("v4_rotate_attach_keyfile", MODE_READ, &path).unwrap();
+        assert!(consume("v4_rotate_attach_keyfile", MODE_READ, &path));
+        assert!(authorize("v4_rotate_attach_keyfile", MODE_WRITE, &path).is_err());
     }
 
     #[test]

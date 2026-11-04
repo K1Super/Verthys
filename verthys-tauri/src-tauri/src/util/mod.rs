@@ -35,6 +35,8 @@ pub mod error;
 /// 日志敏感负载脱敏（白名单字段保留，其余值只留类型与规模）
 pub mod log_sanitizer;
 pub mod path;
+/// 日志导出的路径与长哈希脱敏（应用日志/更新日志共用）
+pub mod redaction;
 pub mod random;
 /// 滑动窗口频率限制（共用实现，按用途分离实例）
 pub mod rate_limiter;

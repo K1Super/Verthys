@@ -60,6 +60,8 @@ pub mod device_fingerprint;
 pub mod handle_factory;
 /// 主进程 ↔ Worker 安全 IPC 与 SHM 载荷认证（会话密钥 + HMAC 信封 + SHM 认证标签）
 pub mod ipc_secure;
+/// 应用诊断日志导出（脱敏 zip；审计 HMAC 链不在范围内）
+pub mod log_export;
 pub mod log_pipe;
 pub mod path_resolver;
 pub mod process_guard;

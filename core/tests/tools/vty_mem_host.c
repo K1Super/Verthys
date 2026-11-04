@@ -80,11 +80,9 @@ static char *secret_line(const char *label, const uint8_t *key)
 static void emit_secrets(VtyVault *v)
 {
     char *kc = secret_line("kc", v->kc);
-    char *kg = secret_line("kg", v->kg);
     uint32_t i;
 
     if (kc != NULL) { puts(kc); }
-    if (kg != NULL) { puts(kg); }
     for (i = 0; i < v->keyring.count; i++) {
         if (v->keyring.entries[i].kind != VTY_KEYKIND_MDEK) continue;
         {
@@ -101,7 +99,7 @@ static void emit_secrets(VtyVault *v)
     }
     /* 临时副本用完即清；父进程已通过管道拿到内容 */
     if (kc != NULL) { vty_secure_zero(kc, strlen(kc)); free(kc); }
-    if (kg != NULL) { vty_secure_zero(kg, strlen(kg)); free(kg); }
+
     fflush(stdout);
 }
 
@@ -110,7 +108,6 @@ static int run_hold(const char *vault_path)
     char pw[256];
     char pw2[300];
     char code[VTY_RECOVERY_TEXT_BUF];
-    char code2[VTY_RECOVERY_TEXT_BUF];
     char order[64];
     VtyVault *v = NULL;
     int rc;
@@ -124,7 +121,8 @@ static int run_hold(const char *vault_path)
         return 3;
     }
     rc = vty_vault_save(v);
-    if (rc == VTY_OK) rc = vty_vault_rotate_password(v, pw2, code2, sizeof(code2));
+    /* 改密不再轮换恢复码；原码继续作为独立凭据被 A8 扫描。 */
+    if (rc == VTY_OK) rc = vty_vault_rotate_password(v, pw2);
     vty_vault_free(v);
     v = NULL;
     if (rc != VTY_OK) {
@@ -139,7 +137,7 @@ static int run_hold(const char *vault_path)
     }
 
     printf("SECRET password %s\n", pw2);
-    printf("SECRET recovery %s\n", code2);
+    printf("SECRET recovery %s\n", code);
     emit_secrets(v);
     printf("READY %lu\n", (unsigned long)GetCurrentProcessId());
     fflush(stdout);
@@ -151,7 +149,6 @@ static int run_hold(const char *vault_path)
             vty_secure_zero(pw, sizeof(pw));
             vty_secure_zero(pw2, sizeof(pw2));
             vty_secure_zero(code, sizeof(code));
-            vty_secure_zero(code2, sizeof(code2));
             puts("LOCKED");
             fflush(stdout);
         } else if (strcmp(order, "EXIT") == 0) {
@@ -162,7 +159,6 @@ static int run_hold(const char *vault_path)
     vty_secure_zero(pw, sizeof(pw));
     vty_secure_zero(pw2, sizeof(pw2));
     vty_secure_zero(code, sizeof(code));
-    vty_secure_zero(code2, sizeof(code2));
     return 0;
 }
 

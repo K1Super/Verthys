@@ -34,10 +34,24 @@ int vty_record_open(const uint8_t mdek[VTY_KEY_BYTES],
                     uint8_t **name, size_t *name_len,
                     uint8_t **data, size_t *data_len);
 
+/* 只解密名称（名称 AEAD 独立）：摘要扫描不读数据，避免为元数据付出
+ * 全量数据解密代价；数据段结构仍做长度校验，防止半截记录被接受。 */
+int vty_record_open_name(const uint8_t mdek[VTY_KEY_BYTES],
+                         const uint8_t module_uuid[VTY_UUID_BYTES],
+                         uint64_t epoch,
+                         const uint8_t *in, size_t in_len,
+                         uint8_t **name, size_t *name_len);
+
 /* 盲索引：对 NFKC 归一化后的名称做 HMAC-SHA256 */
 int vty_name_index(const uint8_t mdek[VTY_KEY_BYTES],
                    const uint8_t module_uuid[VTY_UUID_BYTES],
                    const uint8_t *name, size_t name_len,
+                   uint8_t out[VTY_HASH_BYTES]);
+
+/* 类型令牌：TK 绑定模块与 epoch，令牌只暴露类型等价关系，不暴露类型值 */
+int vty_type_token(const uint8_t mdek[VTY_KEY_BYTES],
+                   const uint8_t module_uuid[VTY_UUID_BYTES],
+                   uint64_t epoch, uint8_t type,
                    uint8_t out[VTY_HASH_BYTES]);
 
 /* 显式拒绝明文回退请求（上层适配时统一调用） */

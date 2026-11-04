@@ -46,7 +46,7 @@
  * 保持 Composable 纯净、可测试，并符合单向数据流原则。
  */
 
-import { ref } from 'vue';
+import { getCurrentInstance, onBeforeUnmount, ref } from 'vue';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import {
   initCreate,
@@ -59,6 +59,7 @@ import {
 import {
   verthysPreheat,
   verthysPreflight,
+  verthysKeyfileStatus,
   preloadWorker,
   type UnlockProgress,
 } from '../../lib/verthys';
@@ -145,6 +146,8 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
   const verthysPath = ref('');
   const unlocking = ref(false);
   const pendingIsCreate = ref(false);
+  /** 当前会话是否由恢复码打开：恢复会话必须重绑本机设备槽后才能日常解锁 */
+  const recoveryMode = ref(false);
 
   /** 进度反馈：当前阶段描述 */
   const unlockProgressMsg = ref('');
@@ -174,6 +177,18 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
    * onUnlockProgress 检查并丢弃后续所有消息，保证 UI 稳定。
    */
   const unlockProgressDone = ref(false);
+
+  /**
+   * 一次性恢复码（仅新建成功时出现）。
+   *
+   * 安全约束：只驻留内存，由恢复码弹窗展示并强制抄写确认；确认/关闭后
+   * 必须调用 clearRecoveryCode() 清零，禁止写入 localStorage、日志或状态文件。
+   */
+  const pendingRecoveryCode = ref<string | null>(null);
+
+  const clearRecoveryCode = () => {
+    pendingRecoveryCode.value = null;
+  };
 
   /* ===== 文件选择方法 ===== */
 
@@ -230,6 +245,43 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
   };
 
   /**
+   * D3 keyfile 因子：创建时是否启用 keyfile 保护（由解锁页勾选）。
+   *
+   * 只保存路径，keyfile 字节由 C 层生成；前端不接触文件内容。
+   */
+  const keyfileCreateEnabled = ref(false);
+  /** 已选 keyfile 路径（创建时为新文件保存位置，解锁时为用户选择的已有文件） */
+  const keyfilePath = ref('');
+
+  /** 打开 keyfile 文件选择对话框（解锁路径） */
+  const pickExistingKeyfile = async (): Promise<string | null> => {
+    try {
+      const selected = await open({
+        title: '选择 keyfile 文件',
+        multiple: false,
+      });
+      return typeof selected === 'string' && selected ? selected : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /** 选择 keyfile 保存位置（创建/启用路径） */
+  const pickKeyfileSavePath = async (): Promise<string | null> => {
+    try {
+      const target = await save({
+        title: '保存 keyfile 文件',
+        filters: [{ name: 'Verthys keyfile', extensions: ['vkf'] }],
+        defaultPath: 'Verthys.keyfile.vkf',
+      });
+      if (!target) return null;
+      return target.toLowerCase().endsWith('.vkf') ? target : `${target}.vkf`;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
    * 执行解锁或创建操作。
    *
    * 根据 isCreate 决定调用 initCreate 或 initUnlock。
@@ -261,18 +313,46 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
       let result: VerthysResult<void>;
       /** 是否真正新建了文件（E_PATH_EXISTS 回退成功时为 false） */
       let createdNew = false;
+      /** 新建成功返回的一次性恢复码（仅内存；确认后清零） */
+      let createdRecoveryCode: string | null = null;
       if (isCreate) {
-        result = await withFrontendTimeout(
-          initCreate(path, undefined, onUnlockProgress),
+        /* D3：创建时勾选 keyfile → 先选保存位置（C 层生成 VKFL 文件）。 */
+        let kfForCreate: string | undefined;
+        if (keyfileCreateEnabled.value) {
+          if (!keyfilePath.value) {
+            const chosen = await pickKeyfileSavePath();
+            if (!chosen) {
+              options.showError('已启用 keyfile 保护，请先选择 keyfile 保存位置');
+              return;
+            }
+            keyfilePath.value = chosen;
+          }
+          kfForCreate = keyfilePath.value;
+        }
+        const createResult = await withFrontendTimeout(
+          initCreate(path, undefined, onUnlockProgress, kfForCreate),
           '创建文件',
           CREATE_FRONTEND_TIMEOUT_MS,
         );
-        if (!result.ok && result.code === VerthysErrorCode.E_PATH_EXISTS) {
+        result = createResult.ok
+          ? { ok: true, value: undefined }
+          : createResult;
+        if (createResult.ok) {
+          createdNew = true;
+          createdRecoveryCode = createResult.value;
+        } else if (createResult.code === VerthysErrorCode.E_PATH_EXISTS) {
           try {
             const preflight = await verthysPreflight(path);
             if (preflight.file_exists) {
               result = await withFrontendTimeout(
-                initUnlock(path, undefined, onUnlockProgress, usbRebindConfirmed),
+                initUnlock(
+                  path,
+                  undefined,
+                  onUnlockProgress,
+                  usbRebindConfirmed,
+                  undefined,
+                  keyfilePath.value || undefined,
+                ),
                 '打开文件',
                 UNLOCK_FRONTEND_TIMEOUT_MS,
               );
@@ -280,19 +360,47 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
           } catch {
             // preflight 失败，保留原错误
           }
-        } else if (result.ok) {
-          createdNew = true;
         }
       } else {
-        result = await withFrontendTimeout(
-          initUnlock(path, undefined, onUnlockProgress, usbRebindConfirmed),
-          '打开文件',
-          UNLOCK_FRONTEND_TIMEOUT_MS,
-        );
+        /* D3：keyfile 库（无 keyfile 路径时）返回 E_KEYFILE_REQUIRED；
+         * 立即引导选择文件并重试一次，不让用户手点两次。 */
+        let allowedRetry = 1;
+        for (;;) {
+          result = await withFrontendTimeout(
+            initUnlock(
+              path,
+              undefined,
+              onUnlockProgress,
+              usbRebindConfirmed,
+              undefined,
+              keyfilePath.value || undefined,
+            ),
+            '打开文件',
+            UNLOCK_FRONTEND_TIMEOUT_MS,
+          );
+          if (
+            result.ok ||
+            result.code !== VerthysErrorCode.E_KEYFILE_REQUIRED ||
+            allowedRetry <= 0
+          ) {
+            break;
+          }
+          allowedRetry -= 1;
+          const chosen = await pickExistingKeyfile();
+          if (!chosen) break;
+          keyfilePath.value = chosen;
+        }
+        /* 选错文件时不保留错误路径，下次确认重新弹出选择。 */
+        if (!result.ok && result.code === VerthysErrorCode.E_KEYFILE_INVALID) {
+          keyfilePath.value = '';
+        }
       }
 
       if (result.ok) {
         unlockProgressDone.value = true;
+        /* 普通口令解锁：会话不是恢复会话；清除可能残留的重绑提示状态。 */
+        recoveryMode.value = false;
+        if (createdRecoveryCode) pendingRecoveryCode.value = createdRecoveryCode;
         // 提示必须与实际路径一致：创建回退到「打开已有文件」时不得宣称已创建
         options.showToast(createdNew ? '文件已创建' : '文件已加载');
         if (hasGlobalKeyRecordRef.value) {
@@ -315,6 +423,61 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
       } else {
         options.showError(e instanceof Error && e.message ? e.message : '操作失败');
       }
+    } finally {
+      unlocking.value = false;
+    }
+  };
+
+  /**
+   * 用恢复码解锁（换机/灾难恢复）。
+   *
+   * 与口令解锁共用 initUnlock 的会话初始化与状态机；恢复码只作为一次性
+   * 参数传入，不进入前端状态、日志或持久化。
+   */
+  const doRecoveryUnlock = async (path: string, code: string): Promise<boolean> => {
+    if (unlocking.value || !code) return false;
+    unlocking.value = true;
+    unlockProgressMsg.value = '验证恢复码';
+    unlockProgressPercent.value = 0;
+    unlockProgressElapsed.value = 0;
+    unlockProgressDone.value = false;
+
+    const onUnlockProgress = (p: UnlockProgress) => {
+      if (unlockProgressDone.value) return;
+      unlockProgressMsg.value = p.message;
+      unlockProgressPercent.value = p.percent;
+      unlockProgressElapsed.value = p.elapsed_ms;
+    };
+
+    try {
+      const result = await withFrontendTimeout(
+        initUnlock(path, undefined, onUnlockProgress, false, code),
+        '恢复解锁',
+        UNLOCK_FRONTEND_TIMEOUT_MS,
+      );
+      if (result.ok) {
+        unlockProgressDone.value = true;
+        /* 恢复会话必须提示重绑；以 C 层 status 为权威，查询失败时按恢复
+         * 会话展示（误提示可被 C 层 POLICY 拒绝，不会造成数据变更）。 */
+        try {
+          const status = await verthysKeyfileStatus();
+          recoveryMode.value = status.ok && status.recovery_mode === true;
+        } catch {
+          recoveryMode.value = true;
+        }
+        options.showToast('已使用恢复码打开');
+        if (hasGlobalKeyRecordRef.value) {
+          void options.checkDevice().catch((e) => {
+            console.warn('[doRecoveryUnlock] 设备校验失败（非致命）:', e);
+          });
+        }
+        return true;
+      } else {
+        return false;
+      }
+    } catch (e) {
+      console.error('[doRecoveryUnlock] 异常', e);
+      return false;
     } finally {
       unlocking.value = false;
     }
@@ -345,19 +508,49 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
     options.showError('已取消介质更换确认，解锁保持阻止状态');
   };
 
+  /* 开发夹具填充：只写入路径与 keyfile，不触发解锁；发布构建整段剔除。 */
+  if (import.meta.env.DEV && getCurrentInstance()) {
+    const fixtureFillHandler = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        target?: string;
+        containerPath?: string;
+        containerKeyfilePath?: string;
+      }>).detail;
+      if (!detail || detail.target !== 'unlock') return;
+      if (detail.containerPath) {
+        verthysPath.value = detail.containerPath;
+        pendingIsCreate.value = false;
+      }
+      if (detail.containerKeyfilePath) {
+        keyfilePath.value = detail.containerKeyfilePath;
+        keyfileCreateEnabled.value = true;
+      }
+    };
+    window.addEventListener('verthys:devfixture-fill', fixtureFillHandler);
+    onBeforeUnmount(() => {
+      window.removeEventListener('verthys:devfixture-fill', fixtureFillHandler);
+    });
+  }
+
   return {
     verthysPath,
     unlocking,
     pendingIsCreate,
+    keyfileCreateEnabled,
+    keyfilePath,
     unlockProgressMsg,
     unlockProgressPercent,
     unlockProgressElapsed,
     unlockProgressDone,
+    pendingRecoveryCode,
+    recoveryMode,
+    clearRecoveryCode,
     usbRebindPrompt,
     usbRebindSaving,
     openExistingVerthys,
     createNewVerthys,
     doUnlock,
+    doRecoveryUnlock,
     confirmUsbRebind,
     cancelUsbRebind,
   };

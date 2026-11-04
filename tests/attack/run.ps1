@@ -3,8 +3,9 @@
  *
  * 用法：
  *   pwsh tests/attack/run.ps1                          # 修复后期望：A1/A3/A4/A9 全部拒绝
- *   pwsh tests/attack/run.ps1 -Vault <旧副本> -Baseline  # 旧格式基线：A1 应能攻击成功
+ *   pwsh tests/attack/run.ps1 -Vault <旧副本> -Baseline [-LegacyDll <verthys_legacy.dll>]  # 旧格式基线
  *   pwsh tests/attack/run.ps1 -OutJson <路径>            # 输出机器可读证据
+ *   pwsh tests/attack/run.ps1 -A6EvidenceDir <目录>      # A6 离机报告目录（默认自动查找）
  *
  * 判定口径：
  *   PASS      = 实际结果符合该模式下的期望
@@ -22,26 +23,48 @@ param(
     [string]$Vault,
     [switch]$Baseline,
     [string]$DllPath,
+    [string]$LegacyDll,
     [string]$OutJson,
-    [switch]$KeepWork
+    [switch]$KeepWork,
+    # A6 离机证据目录（默认 <repo>/reports 与同级 AttackTest/reports）；仅接受合格报告
+    [string]$A6EvidenceDir
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'VerthysHarness.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot '../lib/VerthysTestHygiene.psm1') -Force
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-if (-not $DllPath) {
-    $DllPath = Join-Path $repoRoot 'build/core/Release/verthys.dll'
+
+# 必须在改写 LOCALAPPDATA 之前抓取真实锚点指纹与见证快照，否则差集把
+# 隔离目录当成真实目录，回收对象会出错。
+$hygiene = Start-VerthysTestHygiene
+if ($Baseline) {
+    if (-not $Vault) {
+        throw 'Baseline 模式必须提供 -Vault 历史 v3 样本；产品构建不再生成 v3 容器。'
+    }
+    if (-not $LegacyDll) {
+        $LegacyDll = Join-Path $repoRoot 'build/core/Release/verthys_legacy.dll'
+    }
+    if (-not (Test-Path -LiteralPath $LegacyDll -PathType Leaf)) {
+        throw "Legacy DLL 不存在: $LegacyDll（请构建 verthys_core_legacy 目标）"
+    }
+    $DllPath = Initialize-VerthysNative -DllPath $LegacyDll -Mode Legacy
 }
-$DllPath = Initialize-VerthysNative -DllPath $DllPath
+else {
+    if (-not $DllPath) {
+        $DllPath = Join-Path $repoRoot 'build/core/Release/verthys.dll'
+    }
+    $DllPath = Initialize-VerthysNative -DllPath $DllPath -Mode Product
+}
 # v4 攻击探针：独立进程直接驱动 v4 原语（不扩大生产 DLL 导出面）。
 # 构建目标 verthys_tests 依赖 vty_probe，正常构建后必然存在。
 $probePath = Join-Path $repoRoot 'build/core/tests/Release/vty_probe.exe'
 
 if ($Vault -and -not $Baseline) {
-    throw '传入 -Vault 时必须同时指定 -Baseline：非基线模式使用自生成的随机口令容器，避免误判他人副本。'
+    throw '传入 -Vault 时必须同时指定 -Baseline：非基线模式使用自生成的 v4 随机口令容器，避免误判他人副本。'
 }
 if ($Vault) {
     $Vault = (Resolve-Path -LiteralPath $Vault).Path
@@ -197,6 +220,145 @@ function Add-ProbeResult {
         -Evidence ("$EvidencePrefix exit=$($Probe.Exit); $($Probe.Detail)")
 }
 
+function Find-A6Evidence {
+    # 只认离机报告中的结构化字段，不认 verdict 单一字段：缺项、同机、
+    # 模块密钥仍可解、明文命中或清单不完整一律拒绝，保持 SKELETON。
+    # P1-5：报告必须绑定当前构建（DLL/probe/worker 哈希 + 生成时间），
+    # 哈希不符或早于当前 DLL 构建时间即 STALE，不得计为 PASS。
+    param([string]$Dir)
+    $roots = New-Object System.Collections.Generic.List[string]
+    if ($Dir) {
+        $roots.Add($Dir)
+    }
+    else {
+        $roots.Add((Join-Path $repoRoot 'reports'))
+        $roots.Add((Join-Path (Split-Path -Parent $repoRoot) 'AttackTest/reports'))
+    }
+
+    # 当前构建指纹（用于判定报告是否绑定本次产物）
+    $currentDllHash = if (Test-Path -LiteralPath $DllPath) {
+        (Get-FileHash -LiteralPath $DllPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    } else { '' }
+    $currentProbeHash = if (Test-Path -LiteralPath $probePath) {
+        (Get-FileHash -LiteralPath $probePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    } else { '' }
+    $workerExePath = Join-Path $repoRoot 'verthys-tauri/verthys-worker/target/release/verthys-worker.exe'
+    $currentWorkerHash = if (Test-Path -LiteralPath $workerExePath) {
+        (Get-FileHash -LiteralPath $workerExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    } else { '' }
+    $dllBuiltAt = if (Test-Path -LiteralPath $DllPath) {
+        (Get-Item -LiteralPath $DllPath).LastWriteTimeUtc
+    } else { [datetime]::MinValue }
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    $staleReasons = New-Object System.Collections.Generic.List[string]
+    foreach ($root in $roots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        foreach ($file in @(Get-ChildItem -LiteralPath $root -Filter 'a6-*.json' -File -ErrorAction SilentlyContinue)) {
+            try {
+                # 保留原始 JSON 文本：ConvertFrom-Json 会把 ISO 日期转成
+                # 本机 DateTime 并丢失时区偏移，直接 [string] 后再解析会把
+                # +08:00 当 UTC（偏差 8 小时）。
+                $raw = Get-Content -LiteralPath $file.FullName -Raw
+                $report = $raw | ConvertFrom-Json
+                if ($report.case -ne 'A6' -or $report.verdict -ne 'PASS') { continue }
+                $envObj = $report.environment
+                if ($null -eq $envObj -or $envObj.is_offmachine -ne $true) { continue }
+                $src = [string]$envObj.source_machine_guid_sha256
+                $dst = [string]$envObj.machine_guid_sha256
+                if ($src -eq '' -or $dst -eq '' -or $dst -eq $src) { continue }
+
+                $obs = $report.observed
+                if ($null -eq $obs) { continue }
+                $hasFields = $true
+                foreach ($field in @('vault_open', 'module_unlock', 'plaintext_hits', 'artifacts_verified')) {
+                    if (-not $obs.PSObject.Properties[$field]) { $hasFields = $false; break }
+                }
+                if (-not $hasFields) { continue }
+                if ([int]$obs.vault_open -ne 9) { continue }
+                if ([int]$obs.module_unlock -eq 0) { continue }
+                if ([int]$obs.plaintext_hits -ne 0) { continue }
+                if ($obs.artifacts_verified -ne $true) { continue }
+
+                $hashes = $report.artifacts_sha256
+                if ($null -eq $hashes) { continue }
+                $hasArtifacts = $true
+                foreach ($name in @('a6.verthys', 'vty_probe.exe')) {
+                    if (-not $hashes.PSObject.Properties[$name]) { $hasArtifacts = $false; break }
+                }
+                if (-not $hasArtifacts) { continue }
+
+                # P1-5 构建绑定：字段齐全 + 与当前产物哈希一致 + 晚于 DLL 构建
+                $bindingFields = @('core_dll_sha256', 'probe_sha256', 'worker_sha256',
+                    'git_commit', 'generated_at', 'signer')
+                $missingBinding = $false
+                foreach ($field in $bindingFields) {
+                    # StrictMode 下读取不存在的属性会抛异常：必须先判属性存在
+                    if (-not $report.PSObject.Properties[$field]) {
+                        $missingBinding = $true
+                        break
+                    }
+                    if ([string]::IsNullOrWhiteSpace([string]$report.$field)) {
+                        $missingBinding = $true
+                        break
+                    }
+                }
+                if ($missingBinding) {
+                    $staleReasons.Add("$($file.Name): 构建绑定字段缺失")
+                    continue
+                }
+                if ([string]$report.core_dll_sha256 -ne $currentDllHash) {
+                    $staleReasons.Add("$($file.Name): core_dll_sha256 与当前 verthys.dll 不一致")
+                    continue
+                }
+                if ([string]$report.probe_sha256 -ne $currentProbeHash) {
+                    $staleReasons.Add("$($file.Name): probe_sha256 与当前 vty_probe.exe 不一致")
+                    continue
+                }
+                if ([string]$report.worker_sha256 -ne $currentWorkerHash) {
+                    $staleReasons.Add("$($file.Name): worker_sha256 与当前 worker 不一致")
+                    continue
+                }
+                $generatedText = ''
+                $dateMatch = [regex]::Match($raw,
+                    '"generated_at"\s*:\s*"([^"]+)"')
+                if ($dateMatch.Success) {
+                    $generatedText = $dateMatch.Groups[1].Value
+                }
+                $generatedAt = [datetimeoffset]::MinValue
+                if (-not [datetimeoffset]::TryParse($generatedText,
+                        [Globalization.CultureInfo]::InvariantCulture,
+                        [Globalization.DateTimeStyles]::None,
+                        [ref]$generatedAt)) {
+                    $staleReasons.Add("$($file.Name): generated_at 无法解析")
+                    continue
+                }
+                if ($generatedAt.UtcDateTime -lt $dllBuiltAt) {
+                    $staleReasons.Add("$($file.Name): 报告早于当前 DLL 构建时间")
+                    continue
+                }
+
+                $candidates.Add([pscustomobject]@{
+                        Path     = $file.FullName
+                        Observed = $obs
+                        Written  = $file.LastWriteTime
+                    })
+            }
+            catch {
+                # 报告缺字段/类型异常：视为不合格，保持 SKELETON，不中断攻击回归
+                continue
+            }
+        }
+    }
+    if ($candidates.Count -eq 0) {
+        if ($staleReasons.Count -gt 0) {
+            return [pscustomobject]@{ StaleReason = $staleReasons[0] }
+        }
+        return $null
+    }
+    return ($candidates | Sort-Object Written -Descending | Select-Object -First 1)
+}
+
 function Invoke-UnlockAfterCooldown {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -218,14 +380,14 @@ try {
     if ($Vault) {
         Copy-Item -LiteralPath $Vault -Destination $vaultPath -Force
         $containerSecret = 'VERTHYS_DEFAULT_PASSWORD_v1'
-        $vaultOrigin = 'copied'
+        $vaultOrigin = 'copied-legacy'
     }
     else {
-        $containerSecret = if ($Baseline) { 'VERTHYS_DEFAULT_PASSWORD_v1' } else { New-ContainerSecret }
+        $containerSecret = New-ContainerSecret
         New-TestVault -Path $vaultPath -Password (New-Utf8Bytes -Text $containerSecret) -Preset 0 -Records @(
             @{ Name = $nameMarker; Data = $accountJson; Type = 2 }
         )
-        $vaultOrigin = 'generated'
+        $vaultOrigin = 'generated-v4'
     }
 
     if ($Vault -and $Baseline) {
@@ -286,6 +448,61 @@ try {
         -Verdict $(if ($postFailure.Code -eq 0) { 'PASS' } else { 'FAIL' }) `
         -Evidence "rc=$($postFailure.Code); 冷却等待=$($postFailure.Waited)s; 失败尝试未写盘=$($hashAfterOpen -eq $hashAfter); 创建后总变化=$($hashBefore -ne $hashAfter)"
 
+    # A19 产品 DLL 导出面：v3 入口必须不存在；Legacy 测试 DLL 必须保留
+    $hasV3Unlock = Test-NativeExport -Name 'Verthys_Unlock'
+    $hasV3Create = Test-NativeExport -Name 'Verthys_CreateWithPreset'
+    if ($Baseline) {
+        Add-Result -Id 'A19' -Name 'Legacy DLL 保留 v3 入口' -Expected '两个导出均存在' `
+            -Observed "unlock=$hasV3Unlock create=$hasV3Create" `
+            -Verdict $(if ($hasV3Unlock -and $hasV3Create) { 'PASS' } else { 'FAIL' }) `
+            -Evidence "legacy=$DllPath"
+    }
+    else {
+        Add-Result -Id 'A19' -Name '产品 DLL 拒绝 v3 入口' -Expected '两个导出均不存在' `
+            -Observed "unlock=$hasV3Unlock create=$hasV3Create" `
+            -Verdict $(if ((-not $hasV3Unlock) -and (-not $hasV3Create)) { 'PASS' } else { 'FAIL' }) `
+            -Evidence "product=$DllPath"
+    }
+
+    # A20/A20b 导入身份键去内容化（P1-1）：生产代码无内容哈希身份键，
+    # 且同内容不同路径/同条目键重试的回归用例在场（行为由 vitest/宿主单测执行）。
+    $typeFile = Join-Path $repoRoot 'verthys-tauri/src/types/verthys.ts'
+    $fvSpec = Join-Path $repoRoot 'verthys-tauri/src/composables/file-verthys/useFileImport.spec.ts'
+    $hostWriter = Join-Path $repoRoot 'verthys-tauri/src-tauri/src/state/import_writer.rs'
+    $idKeyForbidden = @()
+    foreach ($rel in @(
+            'verthys-tauri/src-tauri/src/controller/types.rs',
+            'verthys-tauri/src-tauri/src/repository/verthys_wal.rs',
+            'verthys-tauri/src-tauri/src/state/import_writer.rs',
+            'verthys-tauri/src/composables/photo-album/importPipeline.ts',
+            'verthys-tauri/src/composables/file-verthys/useFileImport.ts'
+        )) {
+        $p = Join-Path $repoRoot $rel
+        if (Test-Path -LiteralPath $p) {
+            $idKeyForbidden += @(Select-String -LiteralPath $p -Pattern 'committed_hashes|chunk_ids_by_hash|chunk_<hash>' -ErrorAction SilentlyContinue)
+        }
+    }
+    $typeHasKeys = (Test-Path -LiteralPath $typeFile) -and
+        (@(Select-String -LiteralPath $typeFile -Pattern 'entry_key' -ErrorAction SilentlyContinue).Count -gt 0) -and
+        (@(Select-String -LiteralPath $typeFile -Pattern 'chunk_key' -ErrorAction SilentlyContinue).Count -gt 0)
+    $a20Pass = ($idKeyForbidden.Count -eq 0) -and $typeHasKeys
+    Add-Result -Id 'A20' -Name '导入身份键不含内容哈希' `
+        -Expected '生产代码零内容哈希身份键；entry_key/chunk_key 已定义' `
+        -Observed $(if ($a20Pass) { 'PASS' } else { "残留 $($idKeyForbidden.Count) 处 / 类型缺键" }) `
+        -Verdict $(if ($a20Pass) { 'PASS' } else { 'FAIL' }) `
+        -Evidence "forbidden=$($idKeyForbidden.Count); entry_key/chunk_key=$typeHasKeys"
+
+    $fvSpecText = if (Test-Path -LiteralPath $fvSpec) { Get-Content -LiteralPath $fvSpec -Raw } else { '' }
+    $hostWriterText = if (Test-Path -LiteralPath $hostWriter) { Get-Content -LiteralPath $hostWriter -Raw } else { '' }
+    $a20bPass = ($fvSpecText -match '同内容不同路径') -and
+        ($fvSpecText -match '同一会话内同路径') -and
+        ($hostWriterText -match 'test_process_append_pending_dedup_skips_committed')
+    Add-Result -Id 'A20b' -Name '同条目键重试幂等' `
+        -Expected '前端同内容不同路径/同键重试用例与宿主 dedup 用例在场' `
+        -Observed $(if ($a20bPass) { 'PASS' } else { '用例缺失' }) `
+        -Verdict $(if ($a20bPass) { 'PASS' } else { 'FAIL' }) `
+        -Evidence 'vitest useFileImport.spec.ts；host import_writer::test_process_append_pending_dedup_skips_committed'
+
     # A3 未解锁枚举：新句柄直接读记录必须 LOCKED
     $lockedCode = Test-LockedRecordAccess -Path $vaultPath
     Add-Result -Id 'A3' -Name '未解锁枚举记录' -Expected 'LOCKED' `
@@ -329,10 +546,10 @@ try {
             -Evidence ($(if ($nameHits.Count -eq 0) { 'marker 未出现在任何文件' } else { ($nameHits | Select-Object -First 3) -join '; ' }))
     }
 
-    # v4 攻击探针：A5/A6b/A7/A10/A11/A12/A13/A14/A15 由独立进程直接驱动 v4 原语，
-    # 工件全部写入临时目录，不触碰活动库。
+    # v4 攻击探针：A5/A6b/A7/A10/A11/A12/A13/A14/A15/A16/A18 由独立进程直接驱动
+    # v4 原语，工件全部写入临时目录，不触碰活动库。
     $probeRoot = Join-Path $workDir 'probe'
-    foreach ($sub in @('a5', 'a6b', 'a14', 'a15', 'a10', 'a12')) {
+    foreach ($sub in @('a5', 'a6b', 'a14', 'a15', 'a10', 'a12', 'a16', 'a18')) {
         New-Item -ItemType Directory -Path (Join-Path $probeRoot $sub) -Force | Out-Null
     }
 
@@ -361,14 +578,48 @@ try {
         -Probe (Invoke-ProbeRaw -Id 'A13' -Arguments @('a13', (Join-Path $probeRoot 'a10')))
     Add-ProbeResult -Id 'A15' -Name '恢复码流程' -Expected '正向成功、错误恢复码拒绝' `
         -Probe (Invoke-ProbeRaw -Id 'A15' -Arguments @('a15', (Join-Path $probeRoot 'a15')))
+    Add-ProbeResult -Id 'A16' -Name 'v3 旧格式注入 v4' -Expected '拒绝（E_VERSION）' `
+        -Probe (Invoke-ProbeRaw -Id 'A16' -Arguments @('a16', (Join-Path $probeRoot 'a16')))
+    # D3 keyfile 因子：缺失/坏文件/换文件/剥 KEYFILE 标志（含修头哈希）/关闭
+    Add-ProbeResult -Id 'A18' -Name 'keyfile 因子绕过' `
+        -Expected '缺/坏/换 keyfile 均 fail-closed；剥标志仍拒绝；关闭后仅口令可开' `
+        -Probe (Invoke-ProbeRaw -Id 'A18' -Arguments @('a18', (Join-Path $probeRoot 'a18')))
 
     Add-ProbeResult -Id 'A2' -Name '任意进程加载 DLL' -Expected '未签名/异发布者/篡改/未签名 DLL 全部拒绝；签名宿主放行' `
         -Probe (Invoke-A2Probe) -EvidencePrefix 'tests/attack/a2.ps1'
-    # 尚未实现的攻击面：登记目标阶段，避免“未覆盖”被误解为“已通过”
-    Add-Result -Id 'A6' -Name '离机 + 已知模块口令' -Expected '失败' -Observed '未实现' -Verdict 'SKELETON' `
-        -Evidence '探针与离机脚本已就绪（vty_probe a6/a6run、tests/attack/offmachine/run.ps1）；异机 Tier 2 未执行'
+    # 渲染进程模块内容密钥材料扫描（静态源码 + dist 构建产物）
+    Add-ProbeResult -Id 'A17' -Name '渲染进程模块密钥派生' `
+        -Expected '源码与构建产物均无 MDEK/域标签/HKDF/原生 v4 符号' `
+        -Probe (Invoke-ResultScript 'a17-renderer-keys.ps1' 'A17') `
+        -EvidencePrefix 'tests/attack/a17-renderer-keys.ps1'
+    # A6 依赖异机人工演练：只有合格报告才升级为 PASS，否则保持 SKELETON。
+    # 不接受仅改 verdict 的报告；报告路径与关键观测一并留档。
+    $a6Evidence = Find-A6Evidence -Dir $A6EvidenceDir
+    if ($null -ne $a6Evidence -and $a6Evidence.PSObject.Properties['StaleReason']) {
+        Add-Result -Id 'A6' -Name '离机 + 已知模块口令' -Expected '失败（E_TPM）' `
+            -Observed 'STALE' -Verdict 'SKELETON' `
+            -Evidence ("报告存在但未绑定当前构建：" + $a6Evidence.StaleReason +
+                "；需在当前 DLL/worker 上重新执行离机演练")
+    }
+    elseif ($null -ne $a6Evidence) {
+        Add-Result -Id 'A6' -Name '离机 + 已知模块口令' -Expected '失败（E_TPM）' `
+            -Observed 'PASS' -Verdict 'PASS' `
+            -Evidence ("$($a6Evidence.Path); is_offmachine=true vault_open=9 " +
+                "module_unlock=$($a6Evidence.Observed.module_unlock) plaintext_hits=0 artifacts_verified=true " +
+                "binding=current-dll/probe/worker")
+    }
+    else {
+        Add-Result -Id 'A6' -Name '离机 + 已知模块口令' -Expected '失败（E_TPM）' `
+            -Observed '未实现' -Verdict 'SKELETON' `
+            -Evidence '未找到合格离机报告（需 is_offmachine=true、vault_open=9、module_unlock≠0、plaintext_hits=0、产物哈希完整）；先运行 tests/attack/offmachine/run.ps1 -Mode prepare/verify'
+    }
     Add-ProbeResult -Id 'A8' -Name '密钥内存/日志' -Expected '重启/锁定后转储 0 命中；解锁态正控必须命中' `
         -Probe (Invoke-A8Probe) -EvidencePrefix 'tests/attack/a8.ps1 + tests/attack/a8-worker.ps1'
+    # A18S：方案原编号 A18 已被 keyfile 因子用例占用，挂起看门狗使用独立编号。
+    Add-ProbeResult -Id 'A18S' -Name 'worker 挂起处置' `
+        -Expected '健康期无误杀；挂起全部线程后 3s 级触发处置并终止 worker' `
+        -Probe (Invoke-ResultScript 'a18-suspend.ps1' 'A18S') `
+        -EvidencePrefix 'tests/attack/a18-suspend.ps1'
     Add-ProbeResult -Id 'A12' -Name '回滚旧副本' -Expected '旧副本被锚点拒绝；恢复码可重设；锚点篡改 fail-closed' `
         -Probe (Invoke-ProbeRaw -Id 'A12' -Arguments @('a12', (Join-Path $probeRoot 'a12')))
 }
@@ -380,6 +631,7 @@ finally {
     if (-not $KeepWork) {
         Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
     }
+    Complete-VerthysTestHygiene -Scope $hygiene
 }
 
 Write-Host ""

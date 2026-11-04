@@ -19,8 +19,8 @@ pub mod cmd {
     pub const IMPORT_CHECKPOINT: &str = "verthys_import_checkpoint";
     /// 批量导入：结束导入会话
     pub const IMPORT_END: &str = "verthys_import_end";
-    /// 删除后释放去重锁（WAL 删除墓碑）
-    pub const FORGET_HASHES: &str = "verthys_forget_hashes";
+    /// 删除后释放续传幂等锁（WAL 删除墓碑）
+    pub const FORGET_IMPORT_KEYS: &str = "verthys_forget_import_keys";
     /// 孤儿外置块 GC：删除台账中未被任何 meta 引用（owner=0）的块记录
     pub const GC_ORPHAN_CHUNKS: &str = "verthys_gc_orphan_chunks";
     /// 流式导出：创建写入会话（暂存文件）

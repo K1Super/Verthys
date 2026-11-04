@@ -12,7 +12,7 @@ import {
   securityBruteClearPurge, securityBruteStatus,
   securitySessionStart, securitySessionStop, securitySessionSetHardening,
   securityApplyPreset, securityLoadPresetState,
-  verthysClearGlobalKey, verthysLock, verthysLockPersist, workerDestroy,
+  verthysClearGlobalKey, verthysPrepareLock, verthysLock, verthysLockPersist, workerDestroy,
   type SecurityPresetCode, type BruteForceCheckResponse, type PresetFeatures,
 } from "../lib/verthys";
 import { ref, readonly } from "vue";
@@ -78,6 +78,15 @@ const ACTIVITY_TOUCH_THROTTLE_MS = 1000;
 let activityWatchInstalled = false;
 let lastActivityTouchAt = 0;
 
+/** 全库轮换等长任务期间暂停自动锁定，避免把“已锁定”做在仍持有 GMK 的
+ * worker 上；Rust 侧 verthys_lock 仍有独立闸门，渲染层抑制不是安全边界。 */
+let idleLockSuppressed = false;
+
+export function setSessionLockSuppressed(suppressed: boolean): void {
+  idleLockSuppressed = suppressed;
+  if (!suppressed) armSessionDeadline();
+}
+
 /** 全局输入活动 → 刷新空闲截止时间 */
 function onUserActivity(): void {
   const now = Date.now();
@@ -117,6 +126,11 @@ function armSessionDeadline(): void {
   sessionTimer = window.setTimeout(() => {
     sessionTimer = null;
     if (sessionDeadline.value === 0) return; // 等待期间已解除武装
+    if (idleLockSuppressed) {
+      /* 轮换进行中：推迟锁定，解除抑制后按真实截止时间重新判定。 */
+      sessionTimer = window.setTimeout(() => armSessionDeadline(), 30_000);
+      return;
+    }
     if (sessionDeadline.value - Date.now() > 0) {
       armSessionDeadline();
       return;
@@ -389,6 +403,44 @@ export async function restoreSecurityPreset(): Promise<PresetRestoreReport> {
   return { persistDirty };
 }
 
+/** 外部锁定原因（与 Rust `SessionLockReason::as_str` 严格一致） */
+export type ExternalLockReason =
+  | "session-lock"
+  | "logoff"
+  | "disconnect"
+  | "suspend"
+  | "display-off";
+
+/**
+ * 应用主进程已完成的外部锁定（锁屏 / 注销 / 断连 / 挂起 / 显示器关闭）
+ *
+ * 前置事实：Rust 侧 `perform_external_lock` 已完成 worker 锁库与进程销毁，
+ * 密钥已随子进程消亡。本函数只重置前端密钥状态、缓存与视图，**禁止**再
+ * 调用 verthysLock / workerDestroy / securitySessionStop —— 这些命令会对
+ * 已销毁会话重复操作，并与新会话产生竞态。
+ */
+export function applyExternalLock(reason?: string): void {
+  clearSessionTimer();
+  void stopBackgroundTasks().catch(() => { /* 后台任务停止失败不阻断视图重置 */ });
+
+  keyState.verthysReady.value = false;
+  keyState.globalKeyReady.value = false;
+  keyState.moduleKeyReady.value = { photo: false, accounts: false, fileverthys: false };
+
+  clearModuleKeyCache();
+  clearModuleCache();
+  clearRecordScanCache();
+  clearSummaryCache();
+  clearFullRecordCache();
+  resetAllState();
+  setCurrentVerthysPath("");
+  resetFlushChain();
+
+  console.warn(
+    `[session] 外部锁定已应用（worker 已由主进程销毁）: ${reason ?? "unknown"}`,
+  );
+}
+
 /* ------------------------------------------------------------------ *
  * 暴力拦截门禁                                                        *
  *                                                                    *
@@ -444,10 +496,11 @@ export async function clearBruteForcePurge(): Promise<void> {
 /* ------------------------------------------------------------------ *
  * lockAll 锁定全部                                                    *
  *                                                                    *
- * 四层根治设计·第四层（全局应用生命周期兜底）— 7 步流程：           *
+ * 四层根治设计·第四层（全局应用生命周期兜底）— 8 步流程：           *
  *                                                                    *
+ *   步骤 0：等待全库轮换 Run 收敛（verthysPrepareLock，后端 30s 闸门）*
  *   步骤 1：取消防抖定时器（在 waitForFlush 内部完成）                *
- *   步骤 2：阻塞等待全部删除、落盘队列执行完成（waitForFlush 12s）    *
+ *   步骤 2：阻塞等待全部删除、落盘队列执行完成（waitForFlush 22s）    *
  *   步骤 3：清空所有内存缓存（模块数据+会话密钥+记录扫描缓存）        *
  *   步骤 3.5：清除 worker 内存中的 GMK（verthysClearGlobalKey）          *
  *   步骤 4+5：通知 Rust 层执行安全原子落盘 + 等待持久化回执            *
@@ -456,6 +509,11 @@ export async function clearBruteForcePurge(): Promise<void> {
  *   步骤 7：销毁 Verthys 工作线程、释放全局锁内存（verthysLock）           *
  *                                                                    *
  * 顺序不可颠倒：                                                      *
+ *   - 步骤 0 必须在所有破坏性步骤之前：轮换 Run 未收敛时清 GMK/销毁     *
+ *     worker 会留下“界面已锁定、worker 仍持有 GMK”的假象；失败必须     *
+ *     整体放弃本次锁定并保留会话与空闲计时                            *
+ *   - 步骤 0 在 waitForFlush 之前：Run 占用 worker 时落盘队列只能排队， *
+ *     先收敛再等待落盘，才不会把可完成的落盘误判为超时并重置队列       *
  *   - waitForFlush 必须在清空缓存之前：pending delete 的 ID 复用校验   *
  *     需要读取扫描缓存，清空后校验失效                                *
  *   - verthysLockPersist 必须在 securitySessionStop 之前：lock 指令      *
@@ -464,13 +522,26 @@ export async function clearBruteForcePurge(): Promise<void> {
  *     worker 销毁后触发重入 lockAll                                   *
  * ------------------------------------------------------------------ */
 
-/** 锁库结果：安装闸门只接受 clean=true，且 clean 由 flushed / dirty / errors 共同决定。 */
+/** 锁库结果：安装闸门只接受 clean=true，且 clean 由 locked / flushed / dirty / errors 共同决定。 */
 export interface LockOutcome {
+  /** 会话销毁链是否真正完成（false = 前置闸门失败或被新会话接管，会话仍存活） */
+  locked: boolean;
   clean: boolean;
   flushed: boolean;
   dirty: boolean;
   errors: string[];
   durationMs: number;
+}
+
+/** 会话代际冲突错误码（Rust `SESSION_SUPERSEDED` 的稳定前缀）
+ *
+ * 延迟到达的锁定/销毁命令若发现会话已被替换会返回该码：前端必须立即
+ * 停止后续破坏性步骤，绝不能把新会话 reset 掉。 */
+const LOCK_SUPERSEDED_CODE = "E_LOCK_SUPERSEDED";
+
+function isLockSuperseded(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.includes(LOCK_SUPERSEDED_CODE);
 }
 
 /** 重入保护标志：防止 session_guard on_lock 回调与用户操作并发触发 lockAll */
@@ -494,23 +565,33 @@ let lockWorkPromise: Promise<LockOutcome> | null = null;
 /** 锁定代际（单调递增）：每次 lockAll 启动递增；步骤执行前校验 */
 let lockGeneration = 0;
 
-/** 单步超时包装：防止单个 IPC 调用卡死 */
+/** 单步超时包装：防止单个 IPC 调用卡死
+ *
+ * 步骤先完成时必须清除超时定时器：否则定时器会在锁定结束后才触发并
+ * 把干净缓存误标为脏，污染后续每次锁定结果。 */
 function withStepTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | undefined> {
-  return Promise.race([
-    promise,
-    new Promise<undefined>((resolve) => {
-      setTimeout(() => {
-        console.warn(`[lockAll] ${label} 超时 ${ms}ms，继续执行后续步骤`);
-        // 任一步超时都意味着落盘/清理可能不完整：如实标记缓存脏数据
-        setCacheDirty(true);
-        resolve(undefined);
-      }, ms);
-    }),
-  ]);
+  return new Promise<T | undefined>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      console.warn(`[lockAll] ${label} 超时 ${ms}ms，继续执行后续步骤`);
+      // 任一步超时都意味着落盘/清理可能不完整：如实标记缓存脏数据
+      setCacheDirty(true);
+      resolve(undefined);
+    }, ms);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 /**
- * 锁定全部：按 7 步流程串行执行，确保删除数据落盘后再销毁 worker。
+ * 锁定全部：按 8 步流程串行执行，确保轮换作业收敛、删除数据落盘后再销毁 worker。
  *
  * 重入保护：lockAllInProgress 闸门防止 session_guard on_lock 回调与
  * 用户操作（关闭按钮/手动锁定）并发触发；已在执行时本调用只等待真实
@@ -562,7 +643,7 @@ export async function awaitLockAllIfInProgress(): Promise<void> {
   await ongoing;
 }
 
-/** 7 步流程实际实现
+/** 8 步流程实际实现
  *
  * 修复：接受 onProgress 回调，每步推送进度
  *
@@ -577,17 +658,44 @@ async function doLockAll(
   const current = (): boolean => generation === lockGeneration;
   const startedAt = Date.now();
   let flushed = true;
+  let sessionDestroyed = false;
   const errors: string[] = [];
   const snapshot = (): LockOutcome => {
     const dirty = isCacheDirty();
     return {
-      clean: flushed && !dirty && errors.length === 0,
+      locked: sessionDestroyed,
+      clean: sessionDestroyed && flushed && !dirty && errors.length === 0,
       flushed,
       dirty,
       errors: [...errors],
       durationMs: Date.now() - startedAt,
     };
   };
+
+  // 步骤 0：锁定前置闸门 —— 轮换 Run 收敛前不得执行任何破坏性步骤
+  //
+  // 后端 verthys_lock / worker_destroy 也有同一闸门，但前端必须先行收敛：
+  // 若等销毁命令内部等待 30s 而前端按旧超时（8s/5s）提前放弃，延迟命令
+  // 会落在新会话上。此处失败即整体放弃，会话/密钥/空闲计时全部保持原状。
+  onProgress?.(5, "等待轮换作业收敛");
+  try {
+    const ready = await withTimeout(verthysPrepareLock(), 35000, "等待轮换作业收敛");
+    if (!ready) {
+      errors.push("verthysPrepareLock: 后端拒绝锁定前置闸门");
+      flushed = false;
+      armSessionDeadline();
+      return snapshot();
+    }
+  } catch (error) {
+    errors.push(
+      `verthysPrepareLock: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    flushed = false;
+    // 保留会话与空闲计时：到点后按真实截止时间重新尝试
+    armSessionDeadline();
+    return snapshot();
+  }
+  if (!current()) return snapshot();
 
   clearSessionTimer();
 
@@ -597,7 +705,7 @@ async function doLockAll(
   keyState.moduleKeyReady.value = { photo: false, accounts: false, fileverthys: false };
 
   // 步骤 1+2：取消防抖定时器 + 阻塞等待全部删除、落盘队列执行完成
-  onProgress?.(5, "等待数据落盘");
+  onProgress?.(15, "等待数据落盘");
   try { await waitForFlush(); } catch (error) {
     flushed = false;
     errors.push(`waitForFlush: ${error instanceof Error ? error.message : String(error)}`);
@@ -666,12 +774,30 @@ async function doLockAll(
   // 安全性：worker_destroy 后端对不存在的 worker 为空操作（WorkerState=None 时跳过），
   //   不会误报错误。workerDestroy 前端 finally 调用 invalidateWorkerPreload()，
   //   双重保险清空前端缓存。
+  //
+  // 超时与代际：超时上限覆盖后端闸门（30s）+ IO 收敛（10s/2s）+ 清理余量。
+  // 若后端返回 E_LOCK_SUPERSEDED（等待期间已有新会话接管），立即停止
+  // 后续步骤并保留新会话状态，绝不 resetAllState 覆盖新会话。
   onProgress?.(85, "销毁安全核心");
-  try { await withStepTimeout(verthysLock(), 8000, "verthysLock"); } catch (error) {
+  try {
+    const ok = await withStepTimeout(verthysLock(), 45000, "verthysLock");
+    if (ok === true) sessionDestroyed = true;
+  } catch (error) {
+    if (isLockSuperseded(error)) {
+      console.warn("[lockAll] 锁定命令命中了新会话，停止后续销毁步骤");
+      return snapshot();
+    }
     errors.push(`verthysLock: ${String(error)}`);
   }
   if (!current()) return snapshot();
-  try { await withStepTimeout(workerDestroy(), 5000, "workerDestroy"); } catch (error) {
+  try {
+    const ok = await withStepTimeout(workerDestroy(), 35000, "workerDestroy");
+    if (ok === true) sessionDestroyed = true;
+  } catch (error) {
+    if (isLockSuperseded(error)) {
+      console.warn("[lockAll] 销毁命令命中了新会话，停止后续销毁步骤");
+      return snapshot();
+    }
     errors.push(`workerDestroy: ${String(error)}`);
   }
   if (!current()) return snapshot();

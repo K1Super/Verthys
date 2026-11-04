@@ -149,10 +149,22 @@ export enum VerthysErrorCode {
   E_MODULE_CONFIG_SAVE_FAILED = "E_MODULE_CONFIG_SAVE_FAILED",
   E_MODULE_NOT_READY = "E_MODULE_NOT_READY",
   E_MODULE_VERTHYS_NOT_READY = "E_MODULE_VERTHYS_NOT_READY",
+  /** 当前会话或模块状态不允许该操作（如非恢复会话重密封设备槽） */
+  E_MODULE_POLICY = "E_MODULE_POLICY",
 
   // ===== 可移动介质绑定 =====
   /** 介质标识与登记记录不一致（克隆嫌疑），解锁被阻止；用户确认更换介质后可重试 */
   E_USB_CLONE_SUSPECTED = "E_USB_CLONE_SUSPECTED",
+
+  // ===== v4 设备环境 / 回滚 =====
+  /** TPM/PCR 不可用或 PCR 策略不匹配（引导恢复码重密封） */
+  E_TPM = "E_TPM",
+  /** 回退锚点拒绝旧副本（文件回退） */
+  E_ROLLBACK = "E_ROLLBACK",
+  /** 加密库已启用 keyfile 因子，但本次未提供 keyfile 文件 */
+  E_KEYFILE_REQUIRED = "E_KEYFILE_REQUIRED",
+  /** 提供的 keyfile 文件不是合法 VKFL（长度/magic/版本/校验和非法） */
+  E_KEYFILE_INVALID = "E_KEYFILE_INVALID",
 }
 
 /**
@@ -381,7 +393,7 @@ const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
   [VerthysErrorCode.E_MODULE_VERIFY_FAILED]: {
     title: "模块验证失败",
     message: "模块独立密钥验证未通过。",
-    guidance: "请输入正确的模块访问密钥。若忘记密码，可通过全局主密码重置模块密钥。",
+    guidance: "请输入正确的模块口令。若已忘记模块口令，只能在绑定过恢复码槽时通过恢复会话重密封设备槽；未绑定恢复槽的模块数据不可恢复。",
   },
   [VerthysErrorCode.E_MODULE_KEY_SET_FAILED]: {
     title: "模块密钥设置失败",
@@ -403,12 +415,39 @@ const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
     message: "加密库尚未解锁，模块功能不可用。",
     guidance: "请先解锁加密库后再使用模块功能。",
   },
+  [VerthysErrorCode.E_MODULE_POLICY]: {
+    title: "当前会话不允许该操作",
+    message: "重密封设备槽只能在恢复码解锁的会话中执行。",
+    guidance: "请先在解锁页使用恢复码解锁，再回到模块恢复槽执行重密封。",
+  },
 
   // ===== 可移动介质绑定 =====
   [VerthysErrorCode.E_USB_CLONE_SUSPECTED]: {
     title: "介质标识变化",
     message: "加密库所在可移动介质的标识与登记记录不一致，已阻止解锁。",
     guidance: "如确为本人更换介质，请确认更换介质后重试；否则请检查介质是否为克隆盘。",
+  },
+
+  // ===== v4 设备环境 / 回滚 =====
+  [VerthysErrorCode.E_TPM]: {
+    title: "设备环境已变化",
+    message: "TPM/PCR 策略与当前设备环境不匹配，已拒绝解锁。",
+    guidance: "请使用恢复码解锁后，在「设备与 PCR」中重密封；若设备硬件已更换，请确认恢复码可用。",
+  },
+  [VerthysErrorCode.E_ROLLBACK]: {
+    title: "检测到文件回退",
+    message: "当前加密库文件早于安全锚点记录，可能被替换为旧副本。",
+    guidance: "请勿继续使用该副本；如确需恢复旧版本，请使用恢复码并确认数据丢失范围。",
+  },
+  [VerthysErrorCode.E_KEYFILE_REQUIRED]: {
+    title: "需要 keyfile 文件",
+    message: "该加密库已启用 keyfile 保护，解锁必须同时提供 keyfile 文件。",
+    guidance: "请选择创建时保存的 .vkf keyfile 文件后重试；若 keyfile 已丢失，只能用恢复码解锁后重新绑定。",
+  },
+  [VerthysErrorCode.E_KEYFILE_INVALID]: {
+    title: "keyfile 文件无效",
+    message: "所选文件不是 Verthys 生成的合法 keyfile（VKFL v1）。",
+    guidance: "请确认选择的是创建时由 Verthys 保存的 keyfile 文件，不要手工编辑或复制其他文件。",
   },
 };
 

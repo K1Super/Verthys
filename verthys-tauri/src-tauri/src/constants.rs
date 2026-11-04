@@ -160,11 +160,20 @@ pub mod import_writer {
     };
 
     /// 命令层向写者通道发送的超时（通道背压满时兜底）
-    pub const WRITER_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+    ///
+    /// 取 15s 而非 5s：慢盘上一次容器事务可达数秒，5s 会在正常背压下
+    /// 产生伪失败并把命令遗弃在阻塞线程中。发送超时只用于识别真正的
+    /// 通道卡死，不用于表达业务繁忙。
+    pub const WRITER_SEND_TIMEOUT: Duration = Duration::from_secs(15);
     /// 响应层等待写者命令完成的超时
     pub const WRITER_CMD_TIMEOUT: Duration = Duration::from_secs(60);
+    /// 写者命令通道容量（有界队列；容量大于 1 才不会把正常背压误判为超时）
+    pub const WRITER_CHANNEL_CAPACITY: usize = 4;
     /// 写者线程心跳超时阈值（毫秒，超过判定写者卡死触发重建）
-    pub const WRITER_HEARTBEAT_TIMEOUT_MS: u64 = 15_000;
+    ///
+    /// 30s 覆盖“单次 8 块事务在慢盘上落盘”的最坏耗时；心跳在每条记录 /
+    /// 每块处理时刷新，正常批次不会误判。
+    pub const WRITER_HEARTBEAT_TIMEOUT_MS: u64 = 30_000;
     /// 心跳看门狗巡检周期（毫秒）
     pub const WRITER_HEARTBEAT_SWEEP_MS: u64 = 5_000;
     /// 单条 IPC 载荷上限（字节，与前端同一跨层预算取值）
@@ -175,7 +184,7 @@ pub mod import_writer {
     pub const MAX_CHUNKS_PER_IPC: usize = PB_MAX_CHUNKS_PER_IPC as usize;
     /// 单条记录名称长度上限（UTF-8 字节，与实现侧 `name.len()` 按字节比较的口径一致）
     pub const MAX_RECORD_NAME_LEN: usize = PB_MAX_RECORD_NAME_BYTES as usize;
-    /// 单条记录内容哈希长度上限（字符）
+    /// 单条记录身份键（entry_key / chunk_key）长度上限（字符）
     pub const MAX_RECORD_HASH_LEN: usize = 256;
 }
 

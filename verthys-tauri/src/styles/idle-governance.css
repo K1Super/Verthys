@@ -156,6 +156,23 @@ body.reduced-motion :is(
   animation-play-state: running !important;
 }
 
+/* 宇宙遮罩的一次性入场（幕层淡入 / 顶缘过光缝 / 左缘刻度写入）：
+ * 冻结在起始帧等于整段缺失 —— 幕层停在透明会丢掉全屏视图的遮罩底色，
+ * 写入停在零宽则等下一次交互才整段补播（所见「事后忽然扫过」）。
+ * 三者成形后零持续开销，故并入核心保留集；
+ * 无障碍静止仍由 .reduce-motion 的 animation: none 接管，不在此豁免。 */
+.idle-idle .cb-veil,
+.idle-deep-idle .cb-veil,
+body.reduced-motion .cb-veil,
+.idle-idle .cd-aperture,
+.idle-deep-idle .cd-aperture,
+body.reduced-motion .cd-aperture,
+.idle-idle .cd-scale-tick,
+.idle-deep-idle .cd-scale-tick,
+body.reduced-motion .cd-scale-tick {
+  animation-play-state: running !important;
+}
+
 /* ===== 3.2 idle：步入编排与过渡活动动画豁免（一次性显现 · 语义不失真） =====
  *   涵盖三类一次性动画，冻结即语义受损：
  *     1) 步入编排元素（.module-reveal / .reveal-item）：backwards 填充使其

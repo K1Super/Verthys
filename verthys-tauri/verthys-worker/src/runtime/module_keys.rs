@@ -1,44 +1,52 @@
-/* module_keys.rs — 模块密钥托管与内容加解密操作
+/* module_keys.rs — 内容层加解密入口（照片 / 文件）
  *
- * 职责边界：持有本进程内的模块密钥与按盐派生缓存；对外只暴露
- * “模块名 + 公开参数/包裹密钥 + 密文”形态的操作。原始模块密钥、
- * 派生密钥与解封后的文件密钥都不进入请求/响应载荷，也不写日志。
+ * 职责边界：把前端的“模块名 + 布局 + 公开参数 + 载荷”映射到 C 层的
+ * v4 分片接口（`Verthys_V4ChunkSeal/Open`）。分片密钥（MDEK）只在 C 层
+ * 持有：worker 不保存模块口令、不派生模块密钥、不缓存任何文件密钥，
+ * 内容路径的密钥面完全由 C 层 M1 状态机约束（未启用→Keyring，
+ * 启用未解锁→POLICY/LOCKED，解锁后→可用）。
  *
- * 无句柄设计：所有文件密钥在使用点由包裹态密钥一次性解封并立即丢弃。
- * 句柄表需要随文件数量增长并依赖调用方释放，长批量导入会耗尽容量；
- * 解封成本被按盐派生缓存吸收（每文件一次 PBKDF2），逐块只做一次
- * XChaCha 解封，代价可忽略，换来无容量上限与无释放时序缺陷。
+ * 文件块 v2 保持每文件口令语义：内层 AES-256-GCM 由文件口令派生，
+ * 外层仍由模块 MDEK 封装；口令只在本函数调用期内驻留。
  *
- * 生命周期约束：库锁定、进程退出、panic 三类事件必须清空全部模块密钥
- * 与派生缓存。并发：worker 主循环单线程消费请求，状态放 thread_local；
- * 若未来改为多线程消费，必须替换为带锁结构并保持同一清零语义。
+ * 布局种类（kind）在 v4 外层明文中绑定（域标签 + 种类码）：
+ * C 分片的 AAD 只覆盖 module/uuid/seq/total/pt_len，不区分内容种类；
+ * 若不做绑定，具备记录写权限的攻击者可在同模块内互换 meta / thumb /
+ * chunk 密文，把一种记录当作另一种记录解出。域标签让种类错配在
+ * 外层认证通过后立即失败。
+ *
+ * 清单（manifest）：产品内容不使用独立清单记录。分片集合由 meta 内的
+ * BLAKE3 逐块哈希表与 chunkset 记录共同认证，二者本身已被 v4 分片
+ * 封装；C 层清单仅服务于模块重写事务，不进入内容路径。
  */
-
-use std::cell::RefCell;
 
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use super::budget::PB_IPC_MAX_PAYLOAD_BYTES;
 use super::content_crypto::{
-    self, VencError, CHUNK_SET_AD, FILE_HASH_LEN, KEY_LEN, NONCE_LEN, PBKDF2_ITER, SALT_LEN,
-    THUMB_AD, V2_IV_LEN, V2_MAX_ITERATIONS, V2_MIN_ITERATIONS,
+    self, VencError, KEY_LEN, PBKDF2_ITER, SALT_LEN, V2_MAX_ITERATIONS, V2_MIN_ITERATIONS,
 };
 use super::protocol::{base64_decode, base64_encode, Request, Response};
+use super::worker::Worker;
 
 /// 单次内容载荷的 base64 字符上限（跨层预算常量为字符口径）
 const MAX_PAYLOAD_CHARS: usize = PB_IPC_MAX_PAYLOAD_BYTES as usize;
 /// 与字符上限对应的解码后字节上限（base64 每 4 字符解出 3 字节）
 const MAX_PAYLOAD_DECODED_BYTES: usize = MAX_PAYLOAD_CHARS / 4 * 3;
+/// 文件口令长度上限：超长输入按非法处理
+const MAX_SECRET_BYTES: usize = 4096;
 
-/// 派生缓存容量：覆盖一次相册翻页的活跃文件，同时限制密钥常驻面
-const CACHE_CAPACITY: usize = 8;
-/// 模块密钥长度上限：模块口令是短文本，超长输入按非法处理
-const MAX_MODULE_SECRET_BYTES: usize = 4096;
+/// v4 分片头长度：file_uuid(16) + seq(4) + total(4) + pt_len(4)
+const CHUNK_PREFIX_LEN: usize = 16 + 4 + 4 + 4;
+/// 分片 nonce 长度（C 层 VTY_NONCE_BYTES）
+const CHUNK_NONCE_LEN: usize = 24;
+/// 分片认证标签长度（C 层 VTY_TAG_BYTES）
+const CHUNK_TAG_LEN: usize = 16;
 
-/* ------------------------------------------------------------------ *
- * 模块与派生方式                                                      *
- * ------------------------------------------------------------------ */
+/// 内容种类域标签：`VT4C` + 版本 + 种类码
+const CONTENT_TAG_MAGIC: &[u8; 5] = b"VT4C\x01";
+const CONTENT_TAG_LEN: usize = CONTENT_TAG_MAGIC.len() + 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModuleId {
@@ -56,164 +64,125 @@ impl ModuleId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Derivation {
-    /// 照片：PBKDF2 主密钥 → HKDF 文件子密钥（包裹密钥）
-    PhotoFileKey,
-    /// 文件块 v2：PBKDF2 直接作为 AES-256-GCM 密钥
-    V2Raw,
+fn module_index(module: ModuleId) -> u32 {
+    match module {
+        ModuleId::Photo => 0,
+        ModuleId::File => 2,
+    }
+}
+
+/// 内容种类码：与前端布局一一对应；未知种类直接拒绝。
+fn kind_code(kind: &str) -> Option<u8> {
+    match kind {
+        "meta" => Some(1),
+        "slim_meta" => Some(2),
+        "chunk" => Some(3),
+        "slim_chunk" => Some(4),
+        "thumb" => Some(5),
+        "chunkset" => Some(6),
+        "v2_chunk" => Some(7),
+        "v2_check" => Some(8),
+        _ => None,
+    }
+}
+
+fn tag_content(kind: u8, payload: &[u8]) -> Zeroizing<Vec<u8>> {
+    let mut out = Vec::with_capacity(CONTENT_TAG_LEN + payload.len());
+    out.extend_from_slice(CONTENT_TAG_MAGIC);
+    out.push(kind);
+    out.extend_from_slice(payload);
+    Zeroizing::new(out)
+}
+
+/// 校验并剥离域标签；种类错配与标签篡改一律按认证失败处理。
+fn untag_content(kind: u8, opened: &mut Zeroizing<Vec<u8>>) -> Result<(), VencError> {
+    if opened.len() < CONTENT_TAG_LEN
+        || &opened[..CONTENT_TAG_MAGIC.len()] != CONTENT_TAG_MAGIC
+        || opened[CONTENT_TAG_MAGIC.len()] != kind
+    {
+        return Err(VencError::Auth);
+    }
+    let rest = opened.len() - CONTENT_TAG_LEN;
+    opened.copy_within(CONTENT_TAG_LEN.., 0);
+    opened.truncate(rest);
+    Ok(())
+}
+
+/// 解析并预检 v4 分片头：结构不自洽的输入在进入 FFI 之前拒绝。
+fn parse_chunk_header(bytes: &[u8]) -> Result<([u8; 16], u32, u32), VencError> {
+    const MIN_LEN: usize = CHUNK_PREFIX_LEN + CHUNK_NONCE_LEN + CHUNK_TAG_LEN;
+    if bytes.len() < MIN_LEN {
+        return Err(VencError::Corrupt);
+    }
+    let mut uuid = [0u8; 16];
+    uuid.copy_from_slice(&bytes[..16]);
+    let seq = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let total = u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    let pt_len = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+    if total == 0 || seq >= total {
+        return Err(VencError::Corrupt);
+    }
+    let expected = CHUNK_PREFIX_LEN
+        .checked_add(CHUNK_NONCE_LEN)
+        .and_then(|v| v.checked_add(pt_len as usize))
+        .and_then(|v| v.checked_add(CHUNK_TAG_LEN));
+    if expected != Some(bytes.len()) {
+        return Err(VencError::Corrupt);
+    }
+    Ok((uuid, seq, total))
+}
+
+/// 照片内容的分片域标识：优先键控文件哈希，其次文件盐，最后随机。
+/// 域标识不是寻址键；读取侧从 v4 分片头解析，不依赖调用方重复提供。
+fn photo_file_uuid(req: &Request) -> Result<[u8; 16], VencError> {
+    if !req.file_hash.is_empty() {
+        let hash = content_crypto::parse_hash_hex(&req.file_hash)?;
+        let mut h = Sha256::new();
+        h.update(b"verthys/v4/file-uuid/photo");
+        h.update(hash);
+        let d = h.finalize();
+        let mut out = [0u8; 16];
+        out.copy_from_slice(&d[..16]);
+        return Ok(out);
+    }
+    if !req.salt.is_empty() {
+        return required_salt(&req.salt);
+    }
+    content_crypto::random_bytes()
+}
+
+/// 文件块 v2 的分片域标识：文件盐即域标识（公开参数）。
+fn v2_password_key(req: &Request) -> Result<Zeroizing<[u8; KEY_LEN]>, VencError> {
+    let salt = required_salt(&req.salt)?;
+    let iterations = if req.iterations == 0 {
+        PBKDF2_ITER
+    } else {
+        req.iterations
+    };
+    if !(V2_MIN_ITERATIONS..=V2_MAX_ITERATIONS).contains(&iterations) {
+        return Err(VencError::Invalid);
+    }
+    let password = req.password.as_bytes();
+    if password.is_empty() || password.len() > MAX_SECRET_BYTES {
+        return Err(VencError::Invalid);
+    }
+    content_crypto::derive_master_key(password, &salt, iterations)
+        .map_err(|_| VencError::Invalid)
+}
+
+fn v4_position(kind: &str, req: &Request) -> Result<(u32, u32), VencError> {
+    match kind {
+        "chunk" | "slim_chunk" => {
+            validate_position(req.seq, req.total)?;
+            Ok((req.seq, req.total))
+        }
+        _ => Ok((0, 1)),
+    }
 }
 
 /* ------------------------------------------------------------------ *
- * 会话状态                                                            *
+ * 栈区残留擦除                                                        *
  * ------------------------------------------------------------------ */
-
-struct CacheEntry {
-    module: ModuleId,
-    salt: [u8; SALT_LEN],
-    derivation: Derivation,
-    iterations: u32,
-    /// 文件块 v2 的口令指纹；照片派生为 None
-    fingerprint: Option<[u8; 32]>,
-    key: Zeroizing<[u8; KEY_LEN]>,
-}
-
-struct Session {
-    photo_secret: Option<Zeroizing<Vec<u8>>>,
-    file_secret: Option<Zeroizing<Vec<u8>>>,
-    cache: Vec<CacheEntry>,
-}
-
-impl Session {
-    const fn new() -> Self {
-        Self {
-            photo_secret: None,
-            file_secret: None,
-            cache: Vec::new(),
-        }
-    }
-
-    fn clear_module(&mut self, module: ModuleId) {
-        match module {
-            ModuleId::Photo => self.photo_secret = None,
-            ModuleId::File => self.file_secret = None,
-        }
-        self.cache.retain(|entry| entry.module != module);
-    }
-
-    fn clear_all(&mut self) {
-        self.photo_secret = None;
-        self.file_secret = None;
-        self.cache.clear();
-    }
-
-    fn set_secret(&mut self, module: ModuleId, secret: Vec<u8>) {
-        /* 旧密钥与旧缓存必须同时失效：否则换口令后仍可能用旧派生密钥
-         * 解新数据。 */
-        self.clear_module(module);
-        let secret = Zeroizing::new(secret);
-        match module {
-            ModuleId::Photo => self.photo_secret = Some(secret),
-            ModuleId::File => self.file_secret = Some(secret),
-        }
-    }
-
-    fn derive(
-        &mut self,
-        module: ModuleId,
-        salt: &[u8; SALT_LEN],
-        derivation: Derivation,
-        iterations: u32,
-        password: Option<&[u8]>,
-    ) -> Result<Zeroizing<[u8; KEY_LEN]>, VencError> {
-        /* 文件块 v2 的密钥由文件口令派生而非模块密钥；缓存必须按口令指纹区分，
-         * 否则同一盐下的不同文件口令会命中彼此的派生结果。 */
-        let fingerprint = match derivation {
-            Derivation::V2Raw => {
-                let password = password.ok_or(VencError::Invalid)?;
-                if password.is_empty() {
-                    return Err(VencError::Invalid);
-                }
-                Some(password_fingerprint(salt, iterations, password))
-            }
-            Derivation::PhotoFileKey => None,
-        };
-
-        if let Some(pos) = self.cache.iter().position(|e| {
-            e.module == module
-                && e.salt == *salt
-                && e.derivation == derivation
-                && e.iterations == iterations
-                && e.fingerprint == fingerprint
-        }) {
-            let entry = self.cache.remove(pos);
-            let key = entry.key.clone();
-            self.cache.insert(0, entry);
-            return Ok(key);
-        }
-
-        let key = match derivation {
-            Derivation::PhotoFileKey => {
-                let secret = match module {
-                    ModuleId::Photo => self.photo_secret.as_ref(),
-                    ModuleId::File => self.file_secret.as_ref(),
-                }
-                .ok_or(VencError::Locked)?;
-                let master = content_crypto::derive_master_key(secret, salt, PBKDF2_ITER)?;
-                content_crypto::derive_file_key(&master, salt)?
-            }
-            Derivation::V2Raw => {
-                if !(V2_MIN_ITERATIONS..=V2_MAX_ITERATIONS).contains(&iterations) {
-                    return Err(VencError::Invalid);
-                }
-                let password = password.ok_or(VencError::Invalid)?;
-                content_crypto::derive_master_key(password, salt, iterations)?
-            }
-        };
-
-        if self.cache.len() >= CACHE_CAPACITY {
-            /* 容量满时淘汰最久未用项；被淘汰条目的 Zeroizing 字段即时清零。 */
-            self.cache.pop();
-        }
-        self.cache.insert(
-            0,
-            CacheEntry {
-                module,
-                salt: *salt,
-                derivation,
-                iterations,
-                fingerprint,
-                key: key.clone(),
-            },
-        );
-        Ok(key)
-    }
-}
-
-/// 口令指纹：盐、迭代次数与口令的 SHA-256，仅用于缓存索引，不可逆。
-fn password_fingerprint(
-    salt: &[u8; SALT_LEN],
-    iterations: u32,
-    password: &[u8],
-) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"VERTHYS-V2-PW\0");
-    hasher.update(salt);
-    hasher.update(iterations.to_be_bytes());
-    hasher.update(password);
-    let digest = hasher.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
-    out
-}
-
-thread_local! {
-    static SESSION: RefCell<Session> = const { RefCell::new(Session::new()) };
-}
-
-fn with_session<R>(f: impl FnOnce(&mut Session) -> R) -> R {
-    SESSION.with(|cell| f(&mut cell.borrow_mut()))
-}
 
 /// 栈区残留擦除。
 ///
@@ -232,59 +201,17 @@ fn scrub_stack() {
 }
 
 /* ------------------------------------------------------------------ *
- * 对外生命周期接口                                                    *
+ * 生产加密入口                                                        *
  * ------------------------------------------------------------------ */
 
-/// 清空全部模块密钥与派生缓存。
-///
-/// 库锁定与进程退出必须调用；调用后任何加密操作返回 Locked。
-pub(crate) fn lock_all() {
-    with_session(|session| session.clear_all());
-}
-
-/// panic 钩子使用的清零入口；与 lock_all 同义，单独命名以表达触发场景。
-pub(crate) fn wipe_thread_keys() {
-    lock_all();
-}
-
-/* ------------------------------------------------------------------ *
- * 操作实现                                                            *
- * ------------------------------------------------------------------ */
-
-pub(crate) fn handle_key_unlock(req: &Request) -> Response {
-    let result = (|| -> Result<(), VencError> {
-        let module = ModuleId::parse(&req.module)?;
-        let secret = req.password.as_bytes();
-        if secret.is_empty() || secret.len() > MAX_MODULE_SECRET_BYTES {
-            return Err(VencError::Invalid);
-        }
-        /* 模块口令的正确性由宿主在模块解锁链路中判定；此处只做保管，
-         * 不引入可被离线猜测的校验块，避免多一个口令验证预言机。 */
-        with_session(|session| session.set_secret(module, secret.to_vec()));
-        Ok(())
-    })();
-    result.map_or_else(|e| fail("module_key_unlock", e), |_| Response::ok("module_key_unlock"))
-}
-
-pub(crate) fn handle_key_lock(req: &Request) -> Response {
-    let result = (|| -> Result<(), VencError> {
-        if req.module.is_empty() {
-            lock_all();
-            return Ok(());
-        }
-        let module = ModuleId::parse(&req.module)?;
-        with_session(|session| session.clear_module(module));
-        Ok(())
-    })();
-    result.map_or_else(|e| fail("module_key_lock", e), |_| Response::ok("module_key_lock"))
-}
-
-pub(crate) fn handle_seal(req: &Request) -> Response {
-    let resp = match seal_inner(req) {
+/// 加密入口：文件块 v2 先做每文件口令内层封装，再统一由 C 层以模块
+/// MDEK 封装为 v4 分片。
+pub(crate) fn handle_seal_v4(req: &Request, worker: &Worker) -> Response {
+    let resp = match seal_v4_inner(req, worker) {
         Ok(out) => {
-            let mut resp = Response::ok("module_seal");
-            resp.data = Some(base64_encode(&out));
-            resp
+            let mut r = Response::ok("module_seal");
+            r.data = Some(base64_encode(&out));
+            r
         }
         Err(e) => fail("module_seal", e),
     };
@@ -292,20 +219,57 @@ pub(crate) fn handle_seal(req: &Request) -> Response {
     resp
 }
 
-pub(crate) fn handle_open(req: &Request) -> Response {
-    let resp = match open_inner(req) {
+fn seal_v4_inner(req: &Request, worker: &Worker) -> Result<Vec<u8>, VencError> {
+    let module = ModuleId::parse(&req.module)?;
+    let kind = req.kind.as_str();
+    let code = kind_code(kind).ok_or(VencError::Invalid)?;
+
+    /* v2_check 的明文由 worker 固定，不接收调用方数据；其余布局必须携带
+     * 非空明文，避免把“空记录”写盘后无法区分读取失败与零长度。 */
+    let payload = if kind == "v2_check" {
+        Zeroizing::new(Vec::new())
+    } else {
+        let data = decode_payload(&req.data)?;
+        if data.is_empty() {
+            return Err(VencError::Invalid);
+        }
+        data
+    };
+
+    let (uuid, seq, total, inner) = if kind.starts_with("v2_") {
+        let uuid = required_salt(&req.salt)?;
+        let key = v2_password_key(req)?;
+        let sealed = if kind == "v2_check" {
+            content_crypto::build_v2_check(&key[..], &content_crypto::random_bytes()?)?
+        } else {
+            content_crypto::seal_v2_chunk(&key[..], &content_crypto::random_bytes()?, &payload)?
+        };
+        (uuid, 0, 1, tag_content(code, &sealed))
+    } else {
+        let uuid = photo_file_uuid(req)?;
+        let (seq, total) = v4_position(kind, req)?;
+        (uuid, seq, total, tag_content(code, &payload))
+    };
+
+    worker
+        .call_v4_chunk_seal(module_index(module), &uuid, seq, total, &inner)
+        .map_err(map_ffi_error)
+}
+
+/// 解密入口：从 v4 分片头解析域标识与位置，由 C 层解封后校验种类标签；
+/// v2 内容继续用每文件口令校验内层。
+pub(crate) fn handle_open_v4(req: &Request, worker: &Worker) -> Response {
+    let resp = match open_v4_inner(req, worker) {
         Ok((plaintext, seq_total)) => {
-            let mut resp = Response::ok("module_open");
-            /* v2_check 只返回判定结果，空明文不写入 data，避免调用方把
-             * “校验通过”误判为“解出空内容”。 */
+            let mut r = Response::ok("module_open");
             if !plaintext.is_empty() {
-                resp.data = Some(base64_encode(&plaintext));
+                r.data = Some(base64_encode(&plaintext));
             }
             if let Some((seq, total)) = seq_total {
-                resp.seq = Some(seq);
-                resp.total = Some(total);
+                r.seq = Some(seq);
+                r.total = Some(total);
             }
-            resp
+            r
         }
         Err(e) => fail("module_open", e),
     };
@@ -313,222 +277,55 @@ pub(crate) fn handle_open(req: &Request) -> Response {
     resp
 }
 
-/// 文件级密钥操作：只返回可落盘的公开参数与包裹态密钥。
-pub(crate) fn handle_file_key(req: &Request) -> Response {
-    let resp = match file_key_inner(req) {
-        Ok(resp) => resp,
-        Err(e) => fail("module_file_key", e),
-    };
-    scrub_stack();
-    resp
-}
+/// 解密结果：明文与（分块布局）密文内嵌的位置。
+type OpenedContent = (Zeroizing<Vec<u8>>, Option<(u32, u32)>);
 
-fn file_key_inner(req: &Request) -> Result<Response, VencError> {
-    let module = ModuleId::parse(&req.module)?;
-    match req.kind.as_str() {
-        "slim_create" => {
-            let salt: [u8; SALT_LEN] = content_crypto::random_bytes()?;
-            let nonce: [u8; NONCE_LEN] = content_crypto::random_bytes()?;
-            let wrap_key = with_session(|session| {
-                session.derive(module, &salt, Derivation::PhotoFileKey, PBKDF2_ITER, None)
-            })?;
-            let file_key = Zeroizing::new(content_crypto::random_bytes::<KEY_LEN>()?);
-            let wrapped =
-                content_crypto::seal_wrapped_file_key(&wrap_key[..], &salt, &nonce, &file_key)?;
-            let mut resp = Response::ok("module_file_key");
-            resp.salt = Some(base64_encode(&salt));
-            resp.wrapped_key = Some(base64_encode(&wrapped));
-            Ok(resp)
-        }
-        /* 文件块 v2 不需要服务端句柄：盐与迭代次数是公开参数，调用方在
-         * 每次加解密时随请求携带，派生结果由缓存命中。 */
-        _ => Err(VencError::Invalid),
-    }
-}
-
-fn seal_inner(req: &Request) -> Result<Vec<u8>, VencError> {
+fn open_v4_inner(req: &Request, worker: &Worker) -> Result<OpenedContent, VencError> {
     let module = ModuleId::parse(&req.module)?;
     let kind = req.kind.as_str();
-    /* v2_check 的输入是固定明文，不接收调用方数据；其余布局必须携带
-     * 非空明文，避免把“空记录”写盘后无法区分读取失败与零长度。 */
-    let plaintext = if kind == "v2_check" {
-        Zeroizing::new(Vec::new())
-    } else {
-        let payload = decode_payload(&req.data)?;
-        if payload.is_empty() {
-            return Err(VencError::Invalid);
-        }
-        payload
-    };
+    let code = kind_code(kind).ok_or(VencError::Invalid)?;
 
-    match kind {
-        "meta" => {
-            let salt = optional_salt(&req.salt)?;
-            let nonce: [u8; NONCE_LEN] = content_crypto::random_bytes()?;
-            let key = derive_photo_key(module, &salt)?;
-            content_crypto::seal_meta(&key[..], &salt, &nonce, &plaintext)
-        }
-        "chunk" => {
-            let salt = optional_salt(&req.salt)?;
-            let nonce: [u8; NONCE_LEN] = content_crypto::random_bytes()?;
-            let hash = required_hash(&req.file_hash)?;
-            validate_position(req.seq, req.total)?;
-            let key = derive_photo_key(module, &salt)?;
-            content_crypto::seal_chunk(
-                &key[..], &salt, &nonce, req.seq, req.total, &hash, &plaintext,
-            )
-        }
-        "slim_meta" => {
-            let salt = required_salt(&req.salt)?;
-            let nonce: [u8; NONCE_LEN] = content_crypto::random_bytes()?;
-            let key = derive_photo_key(module, &salt)?;
-            content_crypto::seal_slim_meta(&key[..], &salt, &nonce, &plaintext)
-        }
-        "slim_chunk" => {
-            let hash = required_hash(&req.file_hash)?;
-            validate_position(req.seq, req.total)?;
-            let file_key = resolve_slim_file_key(module, &req.wrapped_key)?;
-            let nonce: [u8; NONCE_LEN] = content_crypto::random_bytes()?;
-            content_crypto::seal_slim_chunk(
-                &file_key[..], &nonce, req.seq, req.total, &hash, &plaintext,
-            )
-        }
-        "thumb" | "chunkset" => {
-            let hash = required_hash(&req.file_hash)?;
-            let prefix = if kind == "thumb" { THUMB_AD } else { CHUNK_SET_AD };
-            let wrap_key = resolve_wrap_key(module, &req.wrapped_key)?;
-            let nonce: [u8; NONCE_LEN] = content_crypto::random_bytes()?;
-            content_crypto::seal_bound_record(&wrap_key[..], &nonce, prefix, &hash, &plaintext)
-        }
-        "v2_chunk" => {
-            let iv: [u8; V2_IV_LEN] = content_crypto::random_bytes()?;
-            let key = derive_v2_key(module, req)?;
-            content_crypto::seal_v2_chunk(&key[..], &iv, &plaintext)
-        }
-        "v2_check" => {
-            let iv: [u8; V2_IV_LEN] = content_crypto::random_bytes()?;
-            let key = derive_v2_key(module, req)?;
-            content_crypto::build_v2_check(&key[..], &iv)
-        }
-        _ => Err(VencError::Invalid),
-    }
-}
-
-/// 解密产物：明文，以及记录型块密文内嵌的 (seq, total)。
-type OpenedRecord = (Zeroizing<Vec<u8>>, Option<(u32, u32)>);
-
-fn open_inner(req: &Request) -> Result<OpenedRecord, VencError> {
-    let module = ModuleId::parse(&req.module)?;
     let combined = decode_payload(&req.data)?;
-    if combined.is_empty() {
-        return Err(VencError::Invalid);
-    }
-    let kind = req.kind.as_str();
+    let (uuid, seq, total) = parse_chunk_header(&combined)?;
+    let opened = worker
+        .call_v4_chunk_open(module_index(module), &uuid, seq, total, &combined)
+        .map_err(map_ffi_error)?;
+    let mut opened = Zeroizing::new(opened);
+    untag_content(code, &mut opened)?;
 
     match kind {
-        "meta" => {
-            let salt = content_crypto::extract_meta_salt(&combined)?;
-            let key = derive_photo_key(module, &salt)?;
-            Ok((content_crypto::open_meta(&key[..], &combined)?, None))
-        }
-        "chunk" => {
-            let salt = content_crypto::extract_meta_salt(&combined)?;
-            let hash = required_hash(&req.file_hash)?;
-            let key = derive_photo_key(module, &salt)?;
-            let (seq, total, plaintext) = content_crypto::open_chunk(&key[..], &combined, &hash)?;
-            Ok((plaintext, Some((seq, total))))
-        }
-        "slim_meta" => {
-            let salt = content_crypto::extract_meta_salt(&combined)?;
-            let key = derive_photo_key(module, &salt)?;
-            Ok((content_crypto::open_slim_meta(&key[..], &combined)?, None))
-        }
-        "slim_chunk" => {
-            let hash = required_hash(&req.file_hash)?;
-            validate_position(req.seq, req.total)?;
-            let file_key = resolve_slim_file_key(module, &req.wrapped_key)?;
-            Ok((
-                content_crypto::open_slim_chunk(
-                    &file_key[..], &combined, req.seq, req.total, &hash,
-                )?,
-                None,
-            ))
-        }
-        "thumb" | "chunkset" => {
-            let hash = required_hash(&req.file_hash)?;
-            let prefix = if kind == "thumb" { THUMB_AD } else { CHUNK_SET_AD };
-            let wrap_key = resolve_wrap_key(module, &req.wrapped_key)?;
-            Ok((
-                content_crypto::open_bound_record(&wrap_key[..], &combined, prefix, &hash)?,
-                None,
-            ))
-        }
+        "chunk" => Ok((opened, Some((seq, total)))),
         "v2_chunk" => {
-            let key = derive_v2_key(module, req)?;
-            Ok((content_crypto::open_v2_chunk(&key[..], &combined)?, None))
+            let key = v2_password_key(req)?;
+            Ok((content_crypto::open_v2_chunk(&key[..], &opened)?, None))
         }
         "v2_check" => {
-            let key = derive_v2_key(module, req)?;
-            if !content_crypto::verify_v2_check(&key[..], &combined)? {
+            let key = v2_password_key(req)?;
+            if !content_crypto::verify_v2_check(&key[..], &opened)? {
                 return Err(VencError::Auth);
             }
             Ok((Zeroizing::new(Vec::new()), None))
         }
+        "meta" | "slim_meta" | "slim_chunk" | "thumb" | "chunkset" => Ok((opened, None)),
         _ => Err(VencError::Invalid),
     }
 }
 
-/* ------------------------------------------------------------------ *
- * 密钥解析辅助                                                        *
- * ------------------------------------------------------------------ */
-
-fn derive_photo_key(
-    module: ModuleId,
-    salt: &[u8; SALT_LEN],
-) -> Result<Zeroizing<[u8; KEY_LEN]>, VencError> {
-    with_session(|session| {
-        session.derive(module, salt, Derivation::PhotoFileKey, PBKDF2_ITER, None)
-    })
-}
-
-/// 由包裹态文件密钥解出块级文件密钥；解封结果只在本函数调用期内驻留。
-fn resolve_slim_file_key(
-    module: ModuleId,
-    wrapped_b64: &str,
-) -> Result<Zeroizing<[u8; KEY_LEN]>, VencError> {
-    let wrapped = decode_wrapped(wrapped_b64)?;
-    let salt = content_crypto::extract_wrapped_salt(&wrapped)?;
-    let wrap_key = derive_photo_key(module, &salt)?;
-    content_crypto::open_wrapped_file_key(&wrap_key[..], &wrapped)
-}
-
-/// 由包裹态文件密钥的盐派生记录级包裹密钥（缩略图 / 块集）。
-fn resolve_wrap_key(
-    module: ModuleId,
-    wrapped_b64: &str,
-) -> Result<Zeroizing<[u8; KEY_LEN]>, VencError> {
-    let wrapped = decode_wrapped(wrapped_b64)?;
-    let salt = content_crypto::extract_wrapped_salt(&wrapped)?;
-    derive_photo_key(module, &salt)
-}
-
-fn derive_v2_key(
-    module: ModuleId,
-    req: &Request,
-) -> Result<Zeroizing<[u8; KEY_LEN]>, VencError> {
-    let salt = required_salt(&req.salt)?;
-    let iterations = if req.iterations == 0 {
-        PBKDF2_ITER
-    } else {
-        req.iterations
-    };
-    let password = req.password.as_bytes();
-    if password.is_empty() || password.len() > MAX_MODULE_SECRET_BYTES {
-        return Err(VencError::Invalid);
+fn map_ffi_error(rc: u32) -> VencError {
+    match rc {
+        /* AUTH 与 KEY_INVALID 统一为认证失败：不区分口令错误、密钥不匹配
+         * 与密文篡改。 */
+        0x00000002 => VencError::Auth,
+        /* FORMAT / CORRUPT：结构或完整性损坏，对外仍归入 AUTH。 */
+        0x00000005 | 0x00000009 => VencError::Corrupt,
+        /* LOCKED / POLICY：容器锁定或策略拒绝。 */
+        0x00000007 | 0x00000017 => VencError::Locked,
+        /* D9：轮换作业期间源库只读。 */
+        0x0000001C => VencError::RotatePending,
+        /* 模块已启用但本会话未解锁：需要先输入模块口令。 */
+        0x0000001D => VencError::ModuleLocked,
+        _ => VencError::Invalid,
     }
-    with_session(|session| {
-        session.derive(module, &salt, Derivation::V2Raw, iterations, Some(password))
-    })
 }
 
 /* ------------------------------------------------------------------ *
@@ -548,29 +345,11 @@ fn decode_payload(text: &str) -> Result<Zeroizing<Vec<u8>>, VencError> {
     Ok(Zeroizing::new(bytes))
 }
 
-fn decode_wrapped(text: &str) -> Result<Vec<u8>, VencError> {
-    if text.len() > MAX_PAYLOAD_CHARS {
-        return Err(VencError::Invalid);
-    }
-    let bytes = decode_b64(text)?;
-    if bytes.len() > MAX_PAYLOAD_DECODED_BYTES {
-        return Err(VencError::Invalid);
-    }
-    Ok(bytes)
-}
-
 fn decode_b64(text: &str) -> Result<Vec<u8>, VencError> {
     if text.is_empty() {
         return Err(VencError::Invalid);
     }
     base64_decode(text).map_err(|_| VencError::Invalid)
-}
-
-fn optional_salt(text: &str) -> Result<[u8; SALT_LEN], VencError> {
-    if text.is_empty() {
-        return content_crypto::random_bytes();
-    }
-    required_salt(text)
 }
 
 fn required_salt(text: &str) -> Result<[u8; SALT_LEN], VencError> {
@@ -581,13 +360,6 @@ fn required_salt(text: &str) -> Result<[u8; SALT_LEN], VencError> {
     let mut salt = [0u8; SALT_LEN];
     salt.copy_from_slice(&bytes);
     Ok(salt)
-}
-
-fn required_hash(text: &str) -> Result<[u8; FILE_HASH_LEN], VencError> {
-    if text.is_empty() {
-        return Err(VencError::Invalid);
-    }
-    content_crypto::parse_hash_hex(text)
 }
 
 fn validate_position(seq: u32, total: u32) -> Result<(), VencError> {
@@ -601,6 +373,8 @@ fn fail(op: &str, err: VencError) -> Response {
     let code = match err {
         VencError::Invalid => 0x01,
         VencError::Locked => 0x07,
+        VencError::RotatePending => 0x1C,
+        VencError::ModuleLocked => 0x1D,
         /* Auth / Corrupt / Internal 一律映射为 AUTH：对外不可区分
          * 口令错误、数据篡改与内部异常。 */
         _ => 0x02,
@@ -610,253 +384,201 @@ fn fail(op: &str, err: VencError) -> Response {
 
 /* ------------------------------------------------------------------ *
  * 单元测试                                                            *
+ *
+ * v4 分片的真实加解密由 C 层承担，worker 单测覆盖不依赖 FFI 的
+ * 编排与边界：分片头预检、种类标签绑定、参数校验、错误码映射。
+ * 端到端往返（真实 MDEK、锁定/解锁、v2 口令）由
+ * tests/e2e/v4-worker-smoke.ps1 覆盖。
  * ------------------------------------------------------------------ */
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn request(value: serde_json::Value) -> Request {
+    fn request(mut value: serde_json::Value) -> Request {
+        // op 字段只用于路由，参数级测试不需要逐条重复书写
+        if value.get("op").is_none() {
+            value["op"] = serde_json::json!("test");
+        }
         serde_json::from_value(value).expect("测试请求必须可反序列化")
     }
 
-    fn unlocked(module: &str, secret: &str) {
-        let resp = handle_key_unlock(&request(serde_json::json!({
-            "op": "module_key_unlock",
-            "module": module,
-            "password": secret,
-        })));
-        assert!(resp.ok, "模块解锁失败: {:?}", resp.error);
-    }
-
-    fn data_of(resp: &Response) -> Vec<u8> {
-        base64_decode(resp.data.as_deref().expect("响应缺少 data")).expect("data 必须是 base64")
-    }
-
-    fn hash_of(data: &[u8]) -> String {
-        content_crypto::hex_encode(&content_crypto::file_hash(data).expect("哈希输入非空"))
+    fn chunk_bytes(uuid: [u8; 16], seq: u32, total: u32, pt_len: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&uuid);
+        out.extend_from_slice(&seq.to_le_bytes());
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&pt_len.to_le_bytes());
+        out.resize(CHUNK_PREFIX_LEN + CHUNK_NONCE_LEN + pt_len as usize + CHUNK_TAG_LEN, 0xAA);
+        out
     }
 
     #[test]
-    fn unlock_required_and_lock_clears() {
-        lock_all();
-        let resp = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "photo", "kind": "meta", "data": "YWJj",
-        })));
-        assert!(!resp.ok);
-        assert_eq!(resp.error.as_deref(), Some("ERR_00000007"));
-
-        unlocked("photo", "photo-pass");
-        let ok = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "photo", "kind": "meta", "data": "YWJj",
-        })));
-        assert!(ok.ok);
-
-        let locked = handle_key_lock(&request(serde_json::json!({
-            "op": "module_key_lock", "module": "photo",
-        })));
-        assert!(locked.ok);
-        let after = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "photo", "kind": "meta", "data": "YWJj",
-        })));
-        assert_eq!(after.error.as_deref(), Some("ERR_00000007"));
-        lock_all();
+    fn rotate_and_module_locked_codes_are_preserved() {
+        assert_eq!(map_ffi_error(0x0000001C), VencError::RotatePending);
+        assert_eq!(map_ffi_error(0x0000001D), VencError::ModuleLocked);
+        let rotate = fail("module_seal", VencError::RotatePending);
+        assert_eq!(rotate.error.as_deref(), Some("ERR_0000001C"));
+        let locked = fail("module_open", VencError::ModuleLocked);
+        assert_eq!(locked.error.as_deref(), Some("ERR_0000001D"));
     }
 
     #[test]
-    fn meta_roundtrip_and_salt_binding() {
-        lock_all();
-        unlocked("photo", "module-secret");
-        let sealed = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "photo", "kind": "meta",
-            "data": base64_encode(b"{\"name\":\"a.jpg\"}"),
-        })));
-        assert!(sealed.ok);
-        let cipher = data_of(&sealed);
-
-        let opened = handle_open(&request(serde_json::json!({
-            "op": "module_open", "module": "photo", "kind": "meta",
-            "data": base64_encode(&cipher),
-        })));
-        assert!(opened.ok);
-        assert_eq!(data_of(&opened), b"{\"name\":\"a.jpg\"}");
-
-        // 篡改必须认证失败，且错误码不区分篡改与口令错误
-        let mut tampered = cipher.clone();
-        let last = tampered.len() - 1;
-        tampered[last] ^= 0x01;
-        let bad = handle_open(&request(serde_json::json!({
-            "op": "module_open", "module": "photo", "kind": "meta",
-            "data": base64_encode(&tampered),
-        })));
-        assert_eq!(bad.error.as_deref(), Some("ERR_00000002"));
-        lock_all();
+    fn kind_codes_cover_every_layout_once() {
+        let kinds = [
+            "meta", "slim_meta", "chunk", "slim_chunk", "thumb", "chunkset", "v2_chunk",
+            "v2_check",
+        ];
+        let mut codes = Vec::new();
+        for kind in kinds {
+            codes.push(kind_code(kind).expect("已知布局必须有种类码"));
+        }
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), kinds.len(), "种类码不得重复");
+        assert_eq!(kind_code("plaintext"), None);
+        assert_eq!(kind_code(""), None);
     }
 
     #[test]
-    fn chunk_roundtrip_binds_position_and_hash() {
-        lock_all();
-        unlocked("photo", "module-secret");
-        let hash = hash_of(b"chunk");
-        let sealed = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "photo", "kind": "chunk",
-            "data": base64_encode(b"chunk"), "seq": 1, "total": 3, "file_hash": hash,
-        })));
-        assert!(sealed.ok);
+    fn content_tag_binds_kind_and_strips_cleanly() {
+        let tagged = tag_content(3, b"payload");
+        assert_eq!(&tagged[..CONTENT_TAG_MAGIC.len()], CONTENT_TAG_MAGIC);
 
-        let opened = handle_open(&request(serde_json::json!({
-            "op": "module_open", "module": "photo", "kind": "chunk",
-            "data": sealed.data, "file_hash": hash,
-        })));
-        assert!(opened.ok);
-        assert_eq!((opened.seq, opened.total), (Some(1), Some(3)));
-        assert_eq!(data_of(&opened), b"chunk");
+        let mut opened = tagged.clone();
+        untag_content(3, &mut opened).expect("匹配种类必须解出");
+        assert_eq!(opened.as_slice(), b"payload");
 
-        let bad = handle_open(&request(serde_json::json!({
-            "op": "module_open", "module": "photo", "kind": "chunk",
-            "data": sealed.data, "file_hash": hash_of(b"other"),
-        })));
-        assert_eq!(bad.error.as_deref(), Some("ERR_00000002"));
-        lock_all();
+        // 种类错配 → 认证失败（在 FFI 之后仍不可跨布局解释）
+        let mut mismatch = tagged.clone();
+        assert_eq!(
+            untag_content(5, &mut mismatch).unwrap_err(),
+            VencError::Auth
+        );
+
+        // 标签篡改 → 认证失败
+        let mut tampered = tagged.clone();
+        tampered[0] ^= 0x01;
+        assert_eq!(untag_content(3, &mut tampered).unwrap_err(), VencError::Auth);
+
+        // 短于标签长度 → 认证失败（不得越界切片）
+        let mut short = Zeroizing::new(vec![0u8; CONTENT_TAG_LEN - 1]);
+        assert_eq!(untag_content(1, &mut short).unwrap_err(), VencError::Auth);
+
+        // 空载荷（v2_check）标签剥离后长度为 0
+        let mut empty = tag_content(8, b"");
+        untag_content(8, &mut empty).expect("空载荷必须可剥离");
+        assert!(empty.is_empty());
     }
 
     #[test]
-    fn slim_flow_keeps_keys_inside_worker_without_handles() {
-        lock_all();
-        unlocked("photo", "module-secret");
-        let created = handle_file_key(&request(serde_json::json!({
-            "op": "module_file_key", "module": "photo", "kind": "slim_create",
-        })));
-        assert!(created.ok);
-        let wrapped = created.wrapped_key.clone().expect("必须返回包裹密钥");
-        assert!(created.salt.is_some());
+    fn chunk_header_rejects_truncated_and_inconsistent_input() {
+        let uuid = [0x11u8; 16];
+        let ok = chunk_bytes(uuid, 1, 3, 8);
+        assert_eq!(parse_chunk_header(&ok).unwrap(), (uuid, 1, 3));
 
-        let hash = hash_of(b"block");
-        let sealed = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "photo", "kind": "slim_chunk",
-            "wrapped_key": wrapped, "seq": 0, "total": 2, "file_hash": hash,
-            "data": base64_encode(b"block"),
-        })));
-        assert!(sealed.ok);
-
-        let opened = handle_open(&request(serde_json::json!({
-            "op": "module_open", "module": "photo", "kind": "slim_chunk",
-            "wrapped_key": wrapped, "seq": 0, "total": 2, "file_hash": hash,
-            "data": sealed.data,
-        })));
-        assert!(opened.ok);
-        assert_eq!(data_of(&opened), b"block");
-
-        // 缩略图与块集只要求包裹密钥，不要求文件密钥句柄
-        let thumb = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "photo", "kind": "thumb",
-            "wrapped_key": wrapped, "file_hash": hash, "data": base64_encode(b"thumb"),
-        })));
-        assert!(thumb.ok);
-        let thumb_open = handle_open(&request(serde_json::json!({
-            "op": "module_open", "module": "photo", "kind": "thumb",
-            "wrapped_key": wrapped, "file_hash": hash, "data": thumb.data,
-        })));
-        assert!(thumb_open.ok);
-        assert_eq!(data_of(&thumb_open), b"thumb");
-
-        // 错误模块口令不得解封
-        lock_all();
-        unlocked("photo", "wrong-secret");
-        let bad = handle_open(&request(serde_json::json!({
-            "op": "module_open", "module": "photo", "kind": "slim_chunk",
-            "wrapped_key": wrapped, "seq": 0, "total": 2, "file_hash": hash,
-            "data": sealed.data,
-        })));
-        assert_eq!(bad.error.as_deref(), Some("ERR_00000002"));
-        lock_all();
+        // 短输入
+        assert_eq!(
+            parse_chunk_header(&[0u8; CHUNK_PREFIX_LEN]).unwrap_err(),
+            VencError::Corrupt
+        );
+        // seq 越界 / total 为 0
+        let bad_seq = chunk_bytes(uuid, 3, 3, 8);
+        assert_eq!(parse_chunk_header(&bad_seq).unwrap_err(), VencError::Corrupt);
+        let zero_total = chunk_bytes(uuid, 0, 0, 8);
+        assert_eq!(parse_chunk_header(&zero_total).unwrap_err(), VencError::Corrupt);
+        // 长度与头内 pt_len 不一致（截断/追加都必须检出）
+        let mut truncated = chunk_bytes(uuid, 0, 1, 8);
+        truncated.pop();
+        assert_eq!(parse_chunk_header(&truncated).unwrap_err(), VencError::Corrupt);
+        let mut extended = chunk_bytes(uuid, 0, 1, 8);
+        extended.push(0);
+        assert_eq!(parse_chunk_header(&extended).unwrap_err(), VencError::Corrupt);
+        // pt_len 极大（溢出检查）
+        let huge = chunk_bytes(uuid, 0, 1, 0);
+        let mut huge = huge;
+        huge[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(parse_chunk_header(&huge).unwrap_err(), VencError::Corrupt);
     }
 
     #[test]
-    fn v2_flow_derives_from_per_file_password_without_module_secret() {
-        lock_all();
-        /* 文件块 v2 的口令是每个文件独立的用户输入，与模块密钥无关：
-         * 未解锁任何模块也必须能加密/解密与校验。 */
-        let salt_b64 = base64_encode(&[0x11u8; SALT_LEN]);
-        let password = "file-pass-一号";
+    fn photo_uuid_is_stable_per_hash_and_rejects_bad_input() {
+        let hash = content_crypto::hex_encode(&content_crypto::file_hash(b"x").unwrap());
+        let a = photo_file_uuid(&request(serde_json::json!({ "file_hash": hash }))).unwrap();
+        let b = photo_file_uuid(&request(serde_json::json!({ "file_hash": hash }))).unwrap();
+        assert_eq!(a, b, "同一文件哈希必须稳定映射到同一域标识");
+        assert_ne!(a, [0u8; 16], "域标识不得全零");
 
-        let sealed = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "file", "kind": "v2_chunk",
-            "salt": salt_b64, "password": password, "data": base64_encode(b"file-block"),
-        })));
-        assert!(sealed.ok);
-        let opened = handle_open(&request(serde_json::json!({
-            "op": "module_open", "module": "file", "kind": "v2_chunk",
-            "salt": salt_b64, "password": password, "data": sealed.data,
-        })));
-        assert!(opened.ok);
-        assert_eq!(data_of(&opened), b"file-block");
+        assert!(photo_file_uuid(&request(serde_json::json!({ "file_hash": "xyz" }))).is_err());
 
-        let check = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "file", "kind": "v2_check",
-            "salt": salt_b64, "password": password,
-        })));
-        assert!(check.ok);
-        let verified = handle_open(&request(serde_json::json!({
-            "op": "module_open", "module": "file", "kind": "v2_check",
-            "salt": salt_b64, "password": password, "data": check.data,
-        })));
-        assert!(verified.ok);
+        let salt = base64_encode(&[0x22u8; SALT_LEN]);
+        let from_salt =
+            photo_file_uuid(&request(serde_json::json!({ "salt": salt }))).unwrap();
+        assert_eq!(from_salt, [0x22u8; 16]);
 
-        // 另一个文件口令派生结果不得通过校验（同盐不同口令不得命中共缓存）
-        let bad = handle_open(&request(serde_json::json!({
-            "op": "module_open", "module": "file", "kind": "v2_check",
-            "salt": salt_b64, "password": "another-pass", "data": check.data,
-        })));
-        assert_eq!(bad.error.as_deref(), Some("ERR_00000002"));
-
-        // 缺少口令即非法：不允许退回模块密钥派生
-        let missing = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "file", "kind": "v2_chunk",
-            "salt": salt_b64, "data": base64_encode(b"x"),
-        })));
-        assert_eq!(missing.error.as_deref(), Some("ERR_00000001"));
-        lock_all();
+        // 无哈希且无盐：随机域标识，但必须非零且两次不同
+        let r1 = photo_file_uuid(&request(serde_json::json!({}))).unwrap();
+        let r2 = photo_file_uuid(&request(serde_json::json!({}))).unwrap();
+        assert_ne!(r1, [0u8; 16]);
+        assert_ne!(r1, r2);
     }
 
     #[test]
-    fn cache_is_bounded_and_evicts_oldest() {
-        lock_all();
-        unlocked("photo", "photo-secret");
-        with_session(|session| {
-            let mut salts = Vec::new();
-            for i in 0..(CACHE_CAPACITY + 3) {
-                let mut salt = [0u8; SALT_LEN];
-                salt[0] = i as u8;
-                session
-                    .derive(ModuleId::Photo, &salt, Derivation::PhotoFileKey, PBKDF2_ITER, None)
-                    .expect("派生必须成功");
-                salts.push(salt);
-            }
-            assert_eq!(session.cache.len(), CACHE_CAPACITY);
-            session
-                .derive(ModuleId::Photo, &salts[0], Derivation::PhotoFileKey, PBKDF2_ITER, None)
-                .expect("重新派生必须成功");
-            assert_eq!(session.cache.len(), CACHE_CAPACITY);
-        });
-        lock_all();
+    fn v2_password_requires_salt_password_and_sane_iterations() {
+        let salt = base64_encode(&[0x33u8; SALT_LEN]);
+        let ok = request(serde_json::json!({
+            "salt": salt, "password": "file-pass", "iterations": V2_MIN_ITERATIONS,
+        }));
+        assert!(v2_password_key(&ok).is_ok());
+
+        let no_password = request(serde_json::json!({ "salt": salt, "password": "" }));
+        assert_eq!(v2_password_key(&no_password).unwrap_err(), VencError::Invalid);
+        let no_salt = request(serde_json::json!({ "password": "file-pass" }));
+        assert_eq!(v2_password_key(&no_salt).unwrap_err(), VencError::Invalid);
+        let weak = request(serde_json::json!({
+            "salt": salt, "password": "file-pass", "iterations": V2_MIN_ITERATIONS - 1,
+        }));
+        assert_eq!(v2_password_key(&weak).unwrap_err(), VencError::Invalid);
+        let huge = request(serde_json::json!({
+            "salt": salt, "password": "file-pass", "iterations": V2_MAX_ITERATIONS + 1,
+        }));
+        assert_eq!(v2_password_key(&huge).unwrap_err(), VencError::Invalid);
+        let overlong = request(serde_json::json!({
+            "salt": salt, "password": "a".repeat(MAX_SECRET_BYTES + 1),
+        }));
+        assert_eq!(v2_password_key(&overlong).unwrap_err(), VencError::Invalid);
     }
 
     #[test]
-    fn invalid_positions_and_bad_hashes_are_rejected() {
-        lock_all();
-        unlocked("photo", "photo-secret");
-        let bad_pos = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "photo", "kind": "chunk",
-            "data": base64_encode(b"x"), "seq": 3, "total": 3, "file_hash": "00".repeat(32),
-        })));
-        assert_eq!(bad_pos.error.as_deref(), Some("ERR_00000001"));
+    fn ffi_error_mapping_keeps_lock_and_policy_distinct() {
+        assert_eq!(map_ffi_error(0x02), VencError::Auth);
+        assert_eq!(map_ffi_error(0x05), VencError::Corrupt);
+        assert_eq!(map_ffi_error(0x09), VencError::Corrupt);
+        assert_eq!(map_ffi_error(0x07), VencError::Locked);
+        assert_eq!(map_ffi_error(0x17), VencError::Locked);
+        assert_eq!(map_ffi_error(0x01), VencError::Invalid);
 
-        let bad_hash = handle_seal(&request(serde_json::json!({
-            "op": "module_seal", "module": "photo", "kind": "chunk",
-            "data": base64_encode(b"x"), "seq": 0, "total": 1, "file_hash": "xyz",
-        })));
-        assert_eq!(bad_hash.error.as_deref(), Some("ERR_00000001"));
-        lock_all();
+        assert_eq!(fail("x", VencError::Locked).error.as_deref(), Some("ERR_00000007"));
+        assert_eq!(fail("x", VencError::Invalid).error.as_deref(), Some("ERR_00000001"));
+        assert_eq!(fail("x", VencError::Auth).error.as_deref(), Some("ERR_00000002"));
+        assert_eq!(fail("x", VencError::Corrupt).error.as_deref(), Some("ERR_00000002"));
+    }
+
+    #[test]
+    fn payload_gate_rejects_empty_oversize_and_invalid_base64() {
+        assert!(decode_payload("YWJj").is_ok());
+        assert_eq!(decode_payload("").unwrap_err(), VencError::Invalid);
+        assert_eq!(decode_payload("!!!").unwrap_err(), VencError::Invalid);
+        let oversize = "a".repeat(MAX_PAYLOAD_CHARS + 1);
+        assert_eq!(decode_payload(&oversize).unwrap_err(), VencError::Invalid);
+    }
+
+    #[test]
+    fn positions_are_validated_before_sealing() {
+        assert_eq!(v4_position("chunk", &request(serde_json::json!({ "seq": 0, "total": 1 }))).unwrap(), (0, 1));
+        assert!(v4_position("chunk", &request(serde_json::json!({ "seq": 1, "total": 1 }))).is_err());
+        assert!(v4_position("slim_chunk", &request(serde_json::json!({ "seq": 0, "total": 0 }))).is_err());
+        // 非分块布局固定 (0,1)：meta/thumb 不占用位置
+        assert_eq!(v4_position("meta", &request(serde_json::json!({}))).unwrap(), (0, 1));
     }
 }

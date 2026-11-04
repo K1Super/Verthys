@@ -171,7 +171,7 @@
   <li style="color:#A8B2C0;margin:6px 0">不透明句柄 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">VerthysHandle</code> 隔离内部上下文，密钥与运行状态对上层不可见。</li>
   <li style="color:#A8B2C0;margin:6px 0">统一 32 位状态码，不对外输出内部调试信息与异常详情。</li>
   <li style="color:#A8B2C0;margin:6px 0">导出面唯一由 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">verthys.def</code> 白名单管控；CI 以 dumpbin 导出面清单比对基线，任何新增符号都会让门变红（P0-A 回归门）。</li>
-  <li style="color:#A8B2C0;margin:6px 0"><code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">VERTHYS_API_VERSION 0x000B</code>，调用方编译期按宏版本协商能力。</li>
+  <li style="color:#A8B2C0;margin:6px 0"><code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">VERTHYS_API_VERSION 0x0014</code>，调用方编译期按宏版本协商能力。</li>
   <li style="color:#A8B2C0;margin:6px 0">消费方 verthys-worker 经 libloading 按名运行时解析，不依赖导入库。</li>
 </ul>
 

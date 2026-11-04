@@ -85,7 +85,7 @@ if ($fmtMagic) {
 
 # 锚点 4：批量导入域全部数据命令必须挂接解锁闸门（防回退）。
 # 导入/删除/GC 均为写入型数据域命令，闸门挂接不得少于 7 处
-# （begin / add_records / add_chunk / forget_hashes /
+# （begin / add_records / add_chunk / forget_import_keys /
 #   import_end / import_checkpoint / gc_orphan_chunks 各一）。
 $batchCtrl = Join-Path $projectRoot "verthys-tauri\src-tauri\src\controller\verthys_batch_controller.rs"
 if (Test-Path $batchCtrl) {
@@ -147,6 +147,21 @@ if ($cHits) {
     Write-Host "[锚点门][RED] 旧格式写保护字符串分支禁止复活（全前端整串禁入）："
     $cHits | ForEach-Object { Write-Host ("  {0}:{1}" -f $_.Path, $_.LineNumber) }
     $anchorRed = $true
+}
+
+# 锚点 9：Tauri 自定义协议 IPC 必须被 CSP 放行（防回退）。
+# 生产 WebView 的 invoke 走 fetch(http://ipc.localhost)；connect-src 缺少
+# ipc: / http://ipc.localhost 时 Tauri 静默退化为 postMessage，raw body 与
+# x-path 请求头全部丢失，所有二进制写命令（密钥 .bin / 照片导出）必然失败。
+$tauriConf = Join-Path $projectRoot "verthys-tauri\src-tauri\tauri.conf.json"
+if (Test-Path $tauriConf) {
+    $confRaw = Get-Content -LiteralPath $tauriConf -Raw
+    $cspMatch = [regex]::Match($confRaw, '"csp"\s*:\s*"([^"]*)"')
+    $cspValue = if ($cspMatch.Success) { $cspMatch.Groups[1].Value } else { "" }
+    if ($cspValue -notmatch 'connect-src' -or $cspValue -notmatch 'ipc:' -or $cspValue -notmatch 'ipc\.localhost') {
+        Write-Host "[锚点门][RED] tauri.conf.json CSP 未放行 Tauri IPC 通道（connect-src 必须包含 ipc: 与 http://ipc.localhost）"
+        $anchorRed = $true
+    }
 }
 
 if ($anchorRed) {

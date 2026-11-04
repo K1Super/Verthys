@@ -64,9 +64,16 @@ const ERROR_CODE_MESSAGES: Record<VerthysErrorCode, string> = {
   [VerthysErrorCode.E_MODULE_CONFIG_SAVE_FAILED]: "持久化失败，已回滚",
   [VerthysErrorCode.E_MODULE_NOT_READY]: "模块未就绪，请先登录",
   [VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY]: "加密库未解锁",
+  [VerthysErrorCode.E_MODULE_POLICY]: "当前会话不允许该操作，请先用恢复码解锁",
 
   // ===== 可移动介质绑定 =====
   [VerthysErrorCode.E_USB_CLONE_SUSPECTED]: "介质标识与登记记录不一致，已阻止解锁（可确认更换介质后重试）",
+
+  // ===== v4 设备环境 / 回滚 =====
+  [VerthysErrorCode.E_TPM]: "设备环境已变化，请使用恢复码解锁并重密封 PCR",
+  [VerthysErrorCode.E_ROLLBACK]: "检测到文件回退，已拒绝打开",
+  [VerthysErrorCode.E_KEYFILE_REQUIRED]: "该加密库已启用 keyfile，请选择 keyfile 文件后重试",
+  [VerthysErrorCode.E_KEYFILE_INVALID]: "keyfile 文件无效，请选择创建时保存的 keyfile",
 };
 
 /**

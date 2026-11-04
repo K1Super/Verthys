@@ -10,6 +10,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 import { markUpdaterCritical } from "./updater-critical";
+import type { LockOutcome as SessionLockOutcome } from "../session/security-session";
 
 /** Rust 侧更新检查结果，字段与命令返回值一一对应。 */
 export interface AvailableUpdate {
@@ -35,14 +36,14 @@ export interface PreparedUpdate {
   fileVersion: string;
 }
 
-/** 锁库结果由会话层返回，安装闸门只接受 clean=true。 */
-export interface LockOutcome {
-  clean: boolean;
-  flushed: boolean;
-  dirty: boolean;
-  errors: string[];
-  durationMs: number;
-}
+/** 锁库结果由会话层返回，安装闸门只接受 clean=true。
+ *
+ * 只声明 Rust 复核需要的字段子集：会话层的 `locked` 是前端解除链状态，
+ * 不属于安装闸门的证据，避免两处同名接口悄悄漂移。 */
+export type LockOutcome = Pick<
+  SessionLockOutcome,
+  "clean" | "flushed" | "dirty" | "errors" | "durationMs"
+>;
 
 /** Rust 在锁库前签发的挑战；只能兑换一次安装回执。 */
 export interface LockChallenge {

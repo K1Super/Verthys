@@ -23,6 +23,15 @@
 int anti_inject_init(void);
 
 /*
+ * 重新采样外部线程基线（仅启动期/心跳线程建立后调用）。
+ *
+ * 基线在 init 时记录；若合法内部线程（如 worker 心跳线程）晚于 init
+ * 创建，必须刷新基线，否则周期巡检会把常驻线程误判为远程注入。
+ * 未初始化时为无操作。
+ */
+void anti_inject_refresh_baseline(void);
+
+/*
  * 执行入口基因修复（DLL 搜索顺序加固）。
  * 在 WinMain/main 第一行调用。
  * Windows: SetDllDirectoryW(L"") + SetSearchPathMode

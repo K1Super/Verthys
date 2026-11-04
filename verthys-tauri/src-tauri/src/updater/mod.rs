@@ -1443,6 +1443,14 @@ pub fn spawn_native_watchdog(app: AppHandle) {
 /// 导出脱敏日志 zip 到用户选择的路径；返回最终文件路径。
 #[tauri::command]
 pub fn updater_export_logs(app: AppHandle, target_path: String) -> Result<String, UpdaterError> {
+    /* 该入口只服务开发悬浮球；发布态直接拒绝，避免用户侧或外部 IPC 调用。 */
+    if !cfg!(debug_assertions) {
+        return Err(UpdaterError::new(
+            "E_UPDATER_INTERNAL",
+            "更新日志导出仅在开发构建可用",
+            false,
+        ));
+    }
     log::export(&app, &target_path)
 }
 

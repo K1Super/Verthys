@@ -59,7 +59,7 @@ extern "C" {
 #define VERTHYS_RHASH_LABEL "verthys/runtime-hash-v1"
 
 /* 表容量上限（X 清单 ≤ 此值；节大小 = 头 16B + 48B × 此值） */
-#define VERTHYS_RUNTIME_HASH_MAX 40u
+#define VERTHYS_RUNTIME_HASH_MAX 48u
 
 /* 周期重算间隔（每 30 分钟） */
 #define VERTHYS_RUNTIME_HASH_INTERVAL_MS (30u * 60u * 1000u)
@@ -75,7 +75,7 @@ extern "C" {
 #define VERTHYS_RHAT_VERSION 1u
 
 /*
- * 关键函数清单（X-macro，~30 个）
+ * 关键函数清单（X-macro：COMMON 15 项 + V3 25 项，全量 40 项）
  * 约束：
  *   - 仅限非 static 外部符号（map "Publics by Value" 可见）；
  *   - 增删条目 = 构建期 rhash_gen 与运行期两侧同步（同一宏展开）；
@@ -84,10 +84,32 @@ extern "C" {
  *     下小函数会被跨模块内联进调用方，本体随后被 /OPT:REF 丢弃——
  *     map 缺符号即 rhash_gen 报错暴露；且内联副本不受 .rhat 保护，
  *     noinline 是"被哈希代码体 = 实际执行代码体"的语义前提）。
- * 覆盖面：加解密主路径 / 密钥组生命周期 / 轮换 / 超块事务 / 分区表 /
- * WAL / 六阶段事务 / LSM / 解锁流水线 / 应急 / 完整性 / 本模块自身。
+ * 清单分两级（v3 源码拆分后产品二进制不再包含 v3 实现）：
+ *   COMMON — 产品与测试/legacy 均保留的共享关键函数；
+ *   V3     — v3 容器实现（仅测试/legacy 链接）。产品 DLL 的 .rhat
+ *            由 rhash_gen --xlist core 仅生成 COMMON 段；V3 段只
+ *            出现在 --xlist full（测试 exe / legacy DLL）的表中。
+ * 覆盖面：v4 库创建/解锁/分片/记录/模块 + 共享密码学/应急/完整性 +
+ * v3 密钥组/轮换/超块事务/分区表/WAL/六阶段事务/LSM/解锁流水线/本模块自身。
  */
-#define VERTHYS_RUNTIME_HASH_FUNCS(X) \
+#define VERTHYS_RUNTIME_HASH_FUNCS_COMMON(X) \
+    X(verthys_random_bytes) \
+    X(verthys_generichash) \
+    X(verthys_hmac_sha256) \
+    X(integrity_verify_startup) \
+    X(emergency_report) \
+    X(emergency_trigger) \
+    X(runtime_hash_scan) \
+    X(vty_vault_create_internal) \
+    X(vty_vault_open_internal) \
+    X(vty_vault_open_recovery) \
+    X(vty_chunk_seal) \
+    X(vty_chunk_open) \
+    X(vty_repo_add) \
+    X(vty_repo_read) \
+    X(vty_module_unlock)
+
+#define VERTHYS_RUNTIME_HASH_FUNCS_V3(X) \
     X(verthys_cng_aead_encrypt) \
     X(verthys_cng_aead_decrypt) \
     X(verthys_cng_aead_import_key) \
@@ -95,9 +117,6 @@ extern "C" {
     X(verthys_cng_km_wrap_key) \
     X(verthys_cng_km_rotate_abc) \
     X(verthys_rekey_auto_rotate) \
-    X(verthys_random_bytes) \
-    X(verthys_generichash) \
-    X(verthys_hmac_sha256) \
     X(vsb_txn_v3_begin) \
     X(vsb_txn_v3_commit) \
     X(vsb_txn_v3_rollback) \
@@ -115,11 +134,12 @@ extern "C" {
     X(verthys_lsm_flush) \
     X(verthys_lsm_compact) \
     X(verthys_unlock_pipeline_run) \
-    X(verthys_v3_open_existing) \
-    X(integrity_verify_startup) \
-    X(emergency_report) \
-    X(emergency_trigger) \
-    X(runtime_hash_scan)
+    X(verthys_v3_open_existing)
+
+/* 全量清单（测试 exe / legacy DLL；40 项覆盖） */
+#define VERTHYS_RUNTIME_HASH_FUNCS(X) \
+    VERTHYS_RUNTIME_HASH_FUNCS_COMMON(X) \
+    VERTHYS_RUNTIME_HASH_FUNCS_V3(X)
 
 /* ---------- .rhat 节二进制布局（构建工具 rhash_gen 与运行期共享） ----------
  * 单一事实源：两侧必须逐字节一致（pack(1)；修改任意字段 = 两侧同步）。

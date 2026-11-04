@@ -5,7 +5,7 @@
   语义：类型集合作为单条设置记录整体保存（先写新记录、再删除被替换的旧记录）；
         删除类型不删除条目——既有条目按未知类型兜底展示并可在之后重新指派类型。
   用法:
-    <VaultTypeEditorDialog v-model="showEditor" :types="customTypes" :entry-count-of="countOf" @saved="reloadTypes" />
+    <VaultTypeEditorDialog v-model="showEditor" :types="customTypes" @saved="reloadTypes" />
 -->
 <template>
   <VerthysDialog
@@ -215,10 +215,9 @@
     </template>
   </VerthysDialog>
 
-  <!-- 删除类型二次确认：已有该类型条目时给出条目数，说明条目不会被删除 -->
+  <!-- 删除类型二次确认：条目保留规则已在编辑区就地说明 -->
   <ConfirmDelete
     :show="showRemoveConfirm"
-    :item-name="removeConfirmName"
     @confirm="confirmRemoveType"
     @cancel="showRemoveConfirm = false"
   />
@@ -287,8 +286,6 @@ const props = defineProps<{
   modelValue: boolean;
   /** 当前容器内的自定义类型定义（打开时作为编辑初值） */
   types: readonly VaultTypeDef[];
-  /** 指定类型的条目数量（删除类型时用于提示影响范围） */
-  entryCountOf: (kind: string) => number;
 }>();
 
 const emit = defineEmits<{
@@ -443,14 +440,6 @@ const toggleSearchField = (id: string): void => {
   if (!current) return;
   current.searchFields = toggledMember(current.searchFields, id);
 };
-
-const removeConfirmName = computed(() => {
-  const current = active.value;
-  if (!current) return "";
-  const count = props.entryCountOf(current.id);
-  if (count > 0) return `${current.label} · 该类型下 ${count} 条条目将保留`;
-  return current.label;
-});
 
 const askRemoveType = (): void => {
   if (!active.value) return;

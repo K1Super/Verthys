@@ -7,8 +7,8 @@
 
 use super::marker;
 use super::UpdaterError;
+use crate::util::redaction::redact_value;
 use chrono::Utc;
-use regex::Regex;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -272,7 +272,7 @@ fn write_archive(source: &Path, target: &Path) -> Result<(), UpdaterError> {
             };
             let redacted = payload
                 .lines()
-                .map(redact_line)
+                .map(crate::util::redaction::redact_json_line)
                 .collect::<Vec<_>>()
                 .join("\n");
             zip.start_file(name, options).map_err(zip_error)?;
@@ -332,55 +332,9 @@ fn zip_error(error: zip::result::ZipError) -> UpdaterError {
     UpdaterError::new("E_UPDATER_INTERNAL", format!("日志打包失败: {error}"), true)
 }
 
-fn redact_line(line: &str) -> String {
-    match serde_json::from_str::<Value>(line) {
-        Ok(mut value) => {
-            redact_value(&mut value);
-            serde_json::to_string(&value).unwrap_or_else(|_| redact_text(line))
-        }
-        Err(_) => redact_text(line),
-    }
-}
-
-fn redact_value(value: &mut Value) {
-    match value {
-        Value::String(text) => *text = redact_text(text),
-        Value::Array(items) => {
-            for item in items {
-                redact_value(item);
-            }
-        }
-        Value::Object(map) => {
-            for item in map.values_mut() {
-                redact_value(item);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn redact_text(text: &str) -> String {
-    static PATH_RE: OnceLock<Regex> = OnceLock::new();
-    static HASH_RE: OnceLock<Regex> = OnceLock::new();
-    let path_re = PATH_RE.get_or_init(|| {
-        Regex::new(
-            r#"(?i)(?:[a-z]:\\|\\\\\?\\|\\\\[^\\\s]+\\[^\\\s]+|/(?:home|users|root|tmp)/)[^"]*"#,
-        )
-        .expect("路径脱敏正则必须合法")
-    });
-    let hash_re =
-        HASH_RE.get_or_init(|| Regex::new(r"\b[0-9a-fA-F]{64}\b").expect("哈希脱敏正则必须合法"));
-    let without_paths = path_re.replace_all(text, "<path>");
-    hash_re
-        .replace_all(&without_paths, |captures: &regex::Captures| {
-            format!("{}…", &captures[0][..12])
-        })
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{build_record, redact_text, EVENTS};
+    use super::{build_record, EVENTS};
     use regex::Regex;
     use serde_json::json;
     use std::collections::BTreeSet;
@@ -412,21 +366,6 @@ mod tests {
         ] {
             assert!(record.get(key).is_some(), "缺少字段 {key}");
         }
-    }
-
-    #[test]
-    fn redaction_removes_full_hash_and_paths() {
-        let hash = "a".repeat(64);
-        let redacted_hash = redact_text(&hash);
-        assert!(!redacted_hash.contains(&hash));
-        assert!(redacted_hash.contains("aaaaaaaaaaaa…"));
-
-        assert_eq!(redact_text(r"C:\Users\alice\Verthys\data.bin"), "<path>");
-        assert_eq!(
-            redact_text(r"C:\Users\Alice Smith\Verthys\data.bin"),
-            "<path>"
-        );
-        assert_eq!(redact_text(r"\\server\share\data.bin"), "<path>");
     }
 
     #[test]

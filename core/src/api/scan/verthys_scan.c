@@ -22,6 +22,9 @@
  * verthys_v3_lifecycle.h 传递包含 verthys_lsm.h（scan_open/next/close）/
  * verthys_extent.h（extent_get / extent_index_find）/ VerthysContextV3 全套接口。 */
 #include "verthys_v3_lifecycle.h"
+/* v4 扫描：目录叶游标 + 记录段解密/名称解密。 */
+#include "vty_repo_v4.h"
+#include "verthys_api_v4.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -61,8 +64,14 @@ struct VerthysScanCursor {
     VerthysContextV3     *v3_owner;         /* 借用实例身份锚点：容器 Lock/再解锁
                                              后 ctx->v3 更换实例 → 本游标即刻
                                              失效（借用的 f/分区不可再用） */
+
+    /* === v4 目录叶游标（COW 快照；与 v3 字段互斥使用） === */
+    struct VerthysContext *v4_ctx;          /* 借用句柄（共享锁/存活性检测） */
+    struct VtyVault     *v4_owner;          /* 借用实例身份锚点，Lock 后失配 */
+    VtyRepoIter         *v4_iter;
 };
 
+#if defined(VERTHYS_V3_SUPPORT)
 /* ------------------------------------------------------------------ *
  * V3 扫描游标辅助段                                                    *
  *                                                                    *
@@ -470,6 +479,244 @@ static VerthysResult scan_v3_find_by_type(struct VerthysContext *ctx,
     verthys_lsm_scan_close(it);
     return rc;
 }
+#endif /* VERTHYS_V3_SUPPORT（V3 扫描游标辅助段） */
+
+/* ------------------------------------------------------------------ *
+ * v4 扫描游标辅助段
+ *
+ * 目录叶在打开瞬间固定根节点（store COW 快照）；游标借用 VtyVault
+ * 实例，Lock/再解锁后实例失配即作废，杜绝悬挂 store 句柄。
+ * ------------------------------------------------------------------ */
+static int scan_v4_alive(const VerthysScanCursor *cursor)
+{
+    const struct VerthysContext *ctx;
+
+    if (cursor == NULL || cursor->v4_owner == NULL) return 0;
+    ctx = cursor->v4_ctx;
+    return ctx != NULL &&
+           ctx->fmt_version == VERTHYS_FMT_V4 &&
+           ctx->v4 == cursor->v4_owner &&
+           ctx->v4->unlocked &&
+           ctx->v4->store != NULL;
+}
+
+static uint8_t *scan_dup_bytes(const uint8_t *src, size_t n)
+{
+    uint8_t *p;
+
+    if (n == 0) return NULL;
+    p = (uint8_t *)malloc(n);
+    if (p != NULL) memcpy(p, src, n);
+    return p;
+}
+
+static VerthysResult scan_v4_open(struct VerthysContext *ctx,
+                                  uint64_t start_lid,
+                                  uint64_t batch_size,
+                                  uint32_t project,
+                                  uint64_t index_inline_max_bytes,
+                                  uint64_t max_batch_bytes,
+                                  const char *guard_label,
+                                  VerthysScanCursor **out_cursor)
+{
+    VerthysScanCursor *cursor;
+    int rc;
+
+    *out_cursor = NULL;
+    if (ctx->v4 == NULL || !ctx->v4->unlocked || ctx->v4->store == NULL) {
+        return VERTHYS_ERR_LOCKED;
+    }
+
+    cursor = (VerthysScanCursor *)calloc(1, sizeof(VerthysScanCursor));
+    if (cursor == NULL) return VERTHYS_ERR_INTERNAL;
+
+    cursor->v3_ctx = ctx;
+    cursor->v4_ctx = ctx;
+    cursor->v4_owner = ctx->v4;
+    cursor->start_lid = start_lid;
+    cursor->batch_size = (batch_size > 0) ? batch_size : 500;
+    cursor->project = project;
+    cursor->index_inline_max_bytes = index_inline_max_bytes;
+    cursor->max_batch_bytes = max_batch_bytes;
+
+    rc = vty_repo_iter_open(ctx->v4, start_lid, &cursor->v4_iter);
+    if (rc != VTY_OK) {
+        free(cursor);
+        return verthys_api_v4_map(rc);
+    }
+
+    if (verthys_lock_memory(cursor, sizeof(*cursor)) == 0) {
+        cursor->mem_locked = 1;
+    }
+    memory_guard_register(cursor, sizeof(*cursor), guard_label);
+
+    *out_cursor = cursor;
+    return VERTHYS_OK;
+}
+
+static VerthysResult scan_v4_fetch(VerthysScanCursor *cursor,
+                                   VerthysRecord *out_records,
+                                   uint64_t *out_lids,
+                                   uint64_t max_count,
+                                   uint64_t *out_count,
+                                   uint64_t *out_failed_lids,
+                                   uint64_t *out_failed_count)
+{
+    uint64_t count = 0;
+    uint64_t failed = 0;
+    uint64_t batch_bytes = 0;
+
+    if (!scan_v4_alive(cursor)) {
+        cursor->invalidated = 1;
+        return VERTHYS_ERR_LOCKED;
+    }
+
+    *out_count = 0;
+    if (out_failed_count != NULL) *out_failed_count = 0;
+    if (cursor->exhausted || max_count == 0) return VERTHYS_OK;
+
+    while (count < max_count) {
+        VtyRepoLeaf leaf;
+        VtyRepoRecord rec;
+        int done = 0;
+        int rc;
+
+        rc = vty_repo_iter_next(cursor->v4_iter, &leaf, &done);
+        if (rc != VTY_OK) return verthys_api_v4_map(rc);
+        if (done) { cursor->exhausted = 1; break; }
+        if (leaf.record_id < cursor->start_lid) continue;
+
+        {
+            int inline_data = (cursor->project == VERTHYS_SCAN_PROJECT_FULL) ||
+                              ((uint64_t)leaf.plain_size <= cursor->index_inline_max_bytes);
+            uint8_t *name = NULL;
+            uint8_t *data = NULL;
+            size_t name_len = 0;
+            size_t data_len = 0;
+
+            memset(&rec, 0, sizeof(rec));
+            if (inline_data) {
+                rc = vty_repo_read(cursor->v4_owner, &leaf, &rec);
+                if (rc != VTY_OK) {
+                    if (out_failed_lids != NULL && failed < max_count) {
+                        out_failed_lids[failed] = leaf.record_id;
+                    }
+                    failed++;
+                    continue;
+                }
+                name = rec.name;
+                name_len = rec.name_len;
+                data = rec.data;
+                data_len = rec.data_len;
+            } else {
+                rc = vty_repo_read_name(cursor->v4_owner, &leaf, &name, &name_len);
+                if (rc != VTY_OK) {
+                    if (out_failed_lids != NULL && failed < max_count) {
+                        out_failed_lids[failed] = leaf.record_id;
+                    }
+                    failed++;
+                    continue;
+                }
+            }
+
+            {
+                uint8_t *name_copy = scan_dup_bytes(name, name_len);
+                uint8_t *data_copy = scan_dup_bytes(data, data_len);
+                if ((name_len != 0 && name_copy == NULL) ||
+                    (data_len != 0 && data_copy == NULL)) {
+                    free(name_copy);
+                    free(data_copy);
+                    if (name != NULL) vty_free(name, name_len != 0 ? name_len : 1u);
+                    if (data != NULL) vty_free(data, data_len != 0 ? data_len : 1u);
+                    *out_count = count;
+                    if (out_failed_count != NULL) *out_failed_count = failed;
+                    return VERTHYS_ERR_INTERNAL;
+                }
+                if (name != NULL) vty_free(name, name_len != 0 ? name_len : 1u);
+                if (data != NULL) vty_free(data, data_len != 0 ? data_len : 1u);
+
+                out_lids[count] = leaf.record_id;
+                out_records[count].type = (VerthysRecordType)(inline_data ? rec.type : 0);
+                out_records[count].name = (const char *)name_copy;
+                out_records[count].name_len = name_len;
+                out_records[count].data = data_copy;
+                out_records[count].data_len = data_len;
+                batch_bytes += (uint64_t)name_len + (uint64_t)data_len;
+                count++;
+            }
+        }
+
+        if (cursor->max_batch_bytes > 0 && batch_bytes > cursor->max_batch_bytes) break;
+    }
+
+    *out_count = count;
+    if (out_failed_count != NULL) *out_failed_count = failed;
+    return VERTHYS_OK;
+}
+
+static VerthysResult scan_v4_summary_fetch(VerthysScanCursor *cursor,
+                                           VerthysSummaryRecord *out_records,
+                                           uint64_t *out_lids,
+                                           uint64_t max_count,
+                                           uint64_t *out_count)
+{
+    uint64_t count = 0;
+
+    if (!scan_v4_alive(cursor)) {
+        cursor->invalidated = 1;
+        return VERTHYS_ERR_LOCKED;
+    }
+    *out_count = 0;
+    if (cursor->exhausted || max_count == 0) return VERTHYS_OK;
+
+    while (count < max_count) {
+        VtyRepoLeaf leaf;
+        uint8_t *name = NULL;
+        size_t name_len = 0;
+        int done = 0;
+        int rc;
+
+        rc = vty_repo_iter_next(cursor->v4_iter, &leaf, &done);
+        if (rc != VTY_OK) return verthys_api_v4_map(rc);
+        if (done) { cursor->exhausted = 1; break; }
+        if (leaf.record_id < cursor->start_lid) continue;
+
+        rc = vty_repo_read_name(cursor->v4_owner, &leaf, &name, &name_len);
+        if (rc != VTY_OK) {
+            /* 单条不可读（模块未解锁 / 记录段损坏）不得中止整个摘要扫描：
+             * 摘要只负责名称与索引元数据，类型由类型盲索引提供。跳过名称
+             * 解密但保留 lid/大小/偏移/哈希，列表仍能靠 ID 渲染并由按需
+             * 解密补齐名称。 */
+            name = NULL;
+            name_len = 0;
+            rc = VTY_OK;
+        }
+        /* 空名称在记录层带 1 字节占位分配；摘要输出用 NULL/0 表示，
+         * 与 v3 语义一致（释放接口按 name_len>0 判定）。 */
+        if (name_len == 0 && name != NULL) {
+            vty_free(name, 1u);
+            name = NULL;
+        }
+
+        out_lids[count] = leaf.record_id;
+        out_records[count].lid = leaf.record_id;
+        /* 摘要不读数据：类型在记录密文内（首字节），不可在不解密数据
+         * 的前提下得出；如实返回未知类型，而不是猜测。 */
+        out_records[count].type = 0;
+        out_records[count].name = (const char *)name;
+        out_records[count].name_len = name_len;
+        out_records[count].data_size = leaf.plain_size;
+        out_records[count].physical_offset = leaf.data_offset;
+        memcpy(out_records[count].merkle_leaf, leaf.data_hash,
+               sizeof(out_records[count].merkle_leaf));
+        out_records[count].created_time = leaf.created_time;
+        out_records[count].slot_state = VERTHYS_SLOT_VALID;
+        count++;
+    }
+
+    *out_count = count;
+    return VERTHYS_OK;
+}
 
 /* ------------------------------------------------------------------ *
  * 对外导出接口：打开全量解密扫描游标                                   *
@@ -509,8 +756,9 @@ VerthysResult Verthys_ScanOpenEx(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* V3-only：非 V3 容器一律拒绝（全系统仅注册 V3 链接路径） */
-    if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
+    /* v3/v4 之外的容器一律拒绝（无扫描语义） */
+    if (ctx->fmt_version != VERTHYS_FMT_V3 &&
+        ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
 
     /* 全局应急安全机制触发时拒绝创建游标 */
     if (emergency_is_triggered()) {
@@ -545,9 +793,22 @@ VerthysResult Verthys_ScanOpenEx(VerthysHandle handle,
 #endif
     }
 
-    rc = scan_v3_open(ctx, start_lid, batch_size,
-                      (uint32_t)project, index_inline_max_bytes, max_batch_bytes,
-                      "scan_cursor", out_cursor);
+    if (ctx->fmt_version == VERTHYS_FMT_V4) {
+        rc = scan_v4_open(ctx, start_lid, batch_size,
+                          (uint32_t)project, index_inline_max_bytes,
+                          max_batch_bytes, "scan_cursor", out_cursor);
+    }
+#if defined(VERTHYS_V3_SUPPORT)
+    else {
+        rc = scan_v3_open(ctx, start_lid, batch_size,
+                          (uint32_t)project, index_inline_max_bytes, max_batch_bytes,
+                          "scan_cursor", out_cursor);
+    }
+#else
+    else {
+        rc = VERTHYS_ERR_FORMAT;
+    }
+#endif
 
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
@@ -591,8 +852,20 @@ VerthysResult Verthys_ScanFetch(VerthysScanCursor *cursor,
         AcquireSRWLockShared(ctx->api_mutex);
     }
 #endif
-    rc = scan_v3_fetch(cursor, out_records, out_lids, max_count,
-                       out_count, out_failed_lids, out_failed_count);
+    if (cursor->v4_owner != NULL) {
+        rc = scan_v4_fetch(cursor, out_records, out_lids, max_count,
+                           out_count, out_failed_lids, out_failed_count);
+    }
+#if defined(VERTHYS_V3_SUPPORT)
+    else {
+        rc = scan_v3_fetch(cursor, out_records, out_lids, max_count,
+                           out_count, out_failed_lids, out_failed_count);
+    }
+#else
+    else {
+        rc = VERTHYS_ERR_FORMAT;
+    }
+#endif
 #ifdef _WIN32
     if (ctx != NULL && ctx->api_mutex != NULL) {
         ReleaseSRWLockShared(ctx->api_mutex);
@@ -634,10 +907,17 @@ VerthysResult Verthys_ScanClose(VerthysScanCursor *cursor)
 {
     if (cursor == NULL) return VERTHYS_ERR_INVALID;
 
+    /* 先释放快照迭代器（v3 LSM 或 v4 目录叶游标），再清零游标本身 */
+    if (cursor->v4_iter != NULL) {
+        vty_repo_iter_close(cursor->v4_iter);
+        cursor->v4_iter = NULL;
+    }
+#if defined(VERTHYS_V3_SUPPORT)
     /* 先释放 LSM 快照迭代器堆实例（其借用 cursor 字段定位，必须先于
      * 游标内存清零与释放执行；幂等） */
     verthys_lsm_scan_close(cursor->v3_iter);
     cursor->v3_iter = NULL;
+#endif
 
     /* 从内存防护管理器注销注册 */
     memory_guard_unregister(cursor);
@@ -680,7 +960,8 @@ VerthysResult Verthys_ScanSummaryOpen(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
+    if (ctx->fmt_version != VERTHYS_FMT_V3 &&
+        ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
 
     if (emergency_is_triggered()) {
         return VERTHYS_ERR_LOCKED;
@@ -691,13 +972,25 @@ VerthysResult Verthys_ScanSummaryOpen(VerthysHandle handle,
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
-    /* 与全量扫描共用 scan_v3_open 骨架；摘要/全量差异仅在 Fetch 路径
-     * ——元数据直读 vs Extent 解密。guard_label 区分内存防护注册标识。
-     * 摘要 Fetch 不消费投影与预算，按 FULL/0/0 建立游标（语义等价于原行为）。 */
+    /* 摘要/全量差异仅在 Fetch 路径：元数据直读 vs 记录段解密。
+     * v4 摘要只解密名称，不读数据段。 */
     {
-        VerthysResult rc = scan_v3_open(ctx, start_lid, batch_size,
-                                        VERTHYS_SCAN_PROJECT_FULL, 0, 0,
-                                        "scan_summary_cursor", out_cursor);
+        VerthysResult rc;
+#if defined(VERTHYS_V3_SUPPORT)
+        rc = (ctx->fmt_version == VERTHYS_FMT_V4)
+            ? scan_v4_open(ctx, start_lid, batch_size,
+                           VERTHYS_SCAN_PROJECT_FULL, 0, 0,
+                           "scan_summary_cursor", out_cursor)
+            : scan_v3_open(ctx, start_lid, batch_size,
+                           VERTHYS_SCAN_PROJECT_FULL, 0, 0,
+                           "scan_summary_cursor", out_cursor);
+#else
+        rc = (ctx->fmt_version == VERTHYS_FMT_V4)
+            ? scan_v4_open(ctx, start_lid, batch_size,
+                           VERTHYS_SCAN_PROJECT_FULL, 0, 0,
+                           "scan_summary_cursor", out_cursor)
+            : VERTHYS_ERR_FORMAT;
+#endif
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif
@@ -737,8 +1030,18 @@ VerthysResult Verthys_ScanSummaryFetch(VerthysScanCursor *cursor,
             AcquireSRWLockShared(ctx->api_mutex);
         }
 #endif
-        rc = scan_v3_summary_fetch(cursor, out_records, out_lids,
-                                   max_count, out_count);
+#if defined(VERTHYS_V3_SUPPORT)
+        rc = (cursor->v4_owner != NULL)
+            ? scan_v4_summary_fetch(cursor, out_records, out_lids,
+                                    max_count, out_count)
+            : scan_v3_summary_fetch(cursor, out_records, out_lids,
+                                    max_count, out_count);
+#else
+        rc = (cursor->v4_owner != NULL)
+            ? scan_v4_summary_fetch(cursor, out_records, out_lids,
+                                    max_count, out_count)
+            : VERTHYS_ERR_FORMAT;
+#endif
 #ifdef _WIN32
         if (ctx != NULL && ctx->api_mutex != NULL) {
             ReleaseSRWLockShared(ctx->api_mutex);
@@ -793,9 +1096,15 @@ VerthysResult Verthys_HasRecordByType(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
+    if (ctx->fmt_version != VERTHYS_FMT_V3 &&
+        ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
 
-    if (ctx->v3 == NULL || !ctx->v3->subsystems_open) {
+    if (ctx->fmt_version == VERTHYS_FMT_V3 &&
+        (ctx->v3 == NULL || !ctx->v3->subsystems_open)) {
+        return VERTHYS_ERR_LOCKED;
+    }
+    if (ctx->fmt_version == VERTHYS_FMT_V4 &&
+        (ctx->v4 == NULL || !ctx->v4->unlocked || ctx->v4->store == NULL)) {
         return VERTHYS_ERR_LOCKED;
     }
 
@@ -804,13 +1113,26 @@ VerthysResult Verthys_HasRecordByType(VerthysHandle handle,
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* 共享锁覆盖：LSM 快照迭代器打开与推进（内部经 lsm->lock 串行化
-     * 读同一 FILE*）+ ctx->v3 实例解引用。锁内单出口，与写路径互斥。 */
+    /* 共享锁覆盖：v3 LSM 快照迭代 / v4 类型索引游标 + 实例解引用。
+     * 锁内单出口，与写路径互斥。 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
     {
-        VerthysResult rc = scan_v3_find_by_type(ctx, rtype, out_found, NULL);
+        VerthysResult rc;
+        if (ctx->fmt_version == VERTHYS_FMT_V4) {
+            rc = verthys_api_v4_map(
+                vty_repo_find_by_type(ctx->v4, rtype, out_found, NULL));
+        }
+#if defined(VERTHYS_V3_SUPPORT)
+        else {
+            rc = scan_v3_find_by_type(ctx, rtype, out_found, NULL);
+        }
+#else
+        else {
+            rc = VERTHYS_ERR_FORMAT;
+        }
+#endif
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif
@@ -853,19 +1175,100 @@ VerthysResult Verthys_FindFirstLidByType(VerthysHandle handle,
         return VERTHYS_ERR_LOCKED;
     }
 
-    if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
+    if (ctx->fmt_version != VERTHYS_FMT_V3 &&
+        ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
 
-    if (ctx->v3 == NULL || !ctx->v3->subsystems_open) {
+    if (ctx->fmt_version == VERTHYS_FMT_V3 &&
+        (ctx->v3 == NULL || !ctx->v3->subsystems_open)) {
+        return VERTHYS_ERR_LOCKED;
+    }
+    if (ctx->fmt_version == VERTHYS_FMT_V4 &&
+        (ctx->v4 == NULL || !ctx->v4->unlocked || ctx->v4->store == NULL)) {
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* 共享锁覆盖：LSM 快照迭代器打开与推进 + ctx->v3 实例解引用
+    /* 共享锁覆盖：v3 LSM 快照迭代 / v4 类型索引游标 + 实例解引用
      * （与 Verthys_HasRecordByType 同一纪律，锁内单出口）。 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
     {
-        VerthysResult rc = scan_v3_find_by_type(ctx, rtype, out_found, out_lid);
+        VerthysResult rc;
+        if (ctx->fmt_version == VERTHYS_FMT_V4) {
+            rc = verthys_api_v4_map(
+                vty_repo_find_by_type(ctx->v4, rtype, out_found, out_lid));
+        }
+#if defined(VERTHYS_V3_SUPPORT)
+        else {
+            rc = scan_v3_find_by_type(ctx, rtype, out_found, out_lid);
+        }
+#else
+        else {
+            rc = VERTHYS_ERR_FORMAT;
+        }
+#endif
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#endif
+        return rc;
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * 按类型分页枚举记录 ID（V4 类型盲索引，API 版本 0x0012）
+ *
+ * 为什么不复用摘要扫描：V4 摘要不读记录密文，type 恒为未知 0；
+ * 业务类型在写入时已进入 VTY_KS_TYPE 盲索引，枚举该索引既准确
+ * 又不需要解密记录段，且对历史 V4 容器天然兼容。
+ * ------------------------------------------------------------------ */
+VerthysResult Verthys_ListIdsByType(VerthysHandle handle,
+                                    uint8_t rtype,
+                                    uint64_t after_id,
+                                    uint64_t max_count,
+                                    uint64_t *out_ids,
+                                    uint64_t *out_count,
+                                    uint8_t *out_exhausted)
+{
+    struct VerthysContext *ctx;
+
+    if (handle == NULL || out_ids == NULL || out_count == NULL ||
+        out_exhausted == NULL) {
+        return VERTHYS_ERR_INVALID;
+    }
+    *out_count = 0;
+    *out_exhausted = 1;
+    if (max_count == 0u || max_count > VERTHYS_TYPE_ID_BATCH_MAX) {
+        return VERTHYS_ERR_INVALID;
+    }
+    if (after_id == UINT64_MAX) return VERTHYS_ERR_INVALID;
+
+    ctx = (struct VerthysContext *)handle;
+    if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
+    if (emergency_is_triggered()) return VERTHYS_ERR_LOCKED;
+    if (ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
+    if (ctx->v4 == NULL || !ctx->v4->unlocked || ctx->v4->store == NULL) {
+        return VERTHYS_ERR_LOCKED;
+    }
+
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
+#endif
+    {
+        /* 锁内复检会话存活性：检查与取锁之间可能发生 Lock/Deinit 或应急
+         * 熔断，ctx->v4 会被释放；在共享锁下重新读取实例再调用，避免把
+         * 已释放的 VtyVault 交给仓库层（UAF）。 */
+        VtyVault *v4 = (ctx->state == VERTHYS_STATE_UNLOCKED &&
+                        ctx->fmt_version == VERTHYS_FMT_V4)
+            ? ctx->v4 : NULL;
+        VerthysResult rc;
+        if (emergency_is_triggered() || v4 == NULL ||
+            !v4->unlocked || v4->store == NULL) {
+            rc = VERTHYS_ERR_LOCKED;
+        } else {
+            rc = verthys_api_v4_map(
+                vty_repo_list_ids_by_type(v4, rtype, after_id, max_count,
+                                          out_ids, out_count, out_exhausted));
+        }
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif

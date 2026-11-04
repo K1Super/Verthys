@@ -28,6 +28,10 @@
      由 .clip-toast / .error-toast 叠加 */
   --toast-surface: linear-gradient(168deg, rgba(16, 21, 33, 0.34), rgba(9, 12, 20, 0.22));
 
+  /* 常驻横幅玻璃基面（单源）：比瞬时提示更通透 —— 填充压到近无（0.10→0.05），
+     通透感由更强的背衬折射承担；横幅面积大且常驻，填充一浓即退化为实心色块 */
+  --banner-surface: linear-gradient(168deg, rgba(18, 24, 36, 0.10), rgba(8, 11, 18, 0.05));
+
   /* RGB 三元组：供 rgba(var(--xxx-rgb), alpha) 动态组合，消除重复色值 */
   --accent-rgb: 0, 212, 255;
   --accent-dim-rgb: 0, 106, 133;
@@ -82,11 +86,17 @@
   --dur-slow: 0.8s;
 
   /* 分层序（全局唯一权威源，按绘制序升序）：
-     Dock 50 → 模块弹窗 1000 → 查看器 2000 → 二次确认 3000 →
+     Dock 50 → 应用内容 1（.app-shell）→ 全屏视图遮罩 900
+     （Unlock/Init/Verify 的 CosmicBackdrop.layer="view"）→
+     模块弹窗 1000 → 查看器 2000 → 二次确认 3000 →
      导出对话框 4000 → 扫描线 9998（body::after 混合层）→
-     背景遮罩 / 加载态 9999 → Toast 层 100000（全应用最高层 —
-     任何界面不得覆盖提示；提示层持有者 = .toast-layer，
-     提示本体不得再声明 z-index） */
+     Cosmic 弹窗遮罩 / 加载态 9999 →
+     需覆盖全屏视图的弹窗 10000（恢复码展示/解锁，VerthysDialog overlayZ）→
+     常驻窗控条 10050（最小化/最大化/关闭必须永远可点，高于全部视图与弹窗）→
+     Toast 层 100000（全应用最高层 — 任何界面不得覆盖提示；
+     提示层持有者 = .toast-layer，提示本体不得再声明 z-index） */
+  --z-view-overlay: 900;
+  --z-chrome: 10050;
   --z-toast: 100000;
 
   /* 页面专属动效时长（App.vue 双缓冲层引用 — 与渡越序列引擎对齐，

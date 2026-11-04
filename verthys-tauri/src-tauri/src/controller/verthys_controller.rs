@@ -54,7 +54,7 @@ use crate::repository::verthys_state::{
 use crate::security::file_lock::VerthysFileLock;
 use crate::state::verthys_session::VerthysSessionGuard;
 use crate::state::AppState;
-use crate::util::audit_log::{append_audit, AuditEvent, AuditEventType, AuditResult};
+use crate::util::audit_log::{append_audit, keyfile_path_tag, AuditEvent, AuditEventType, AuditResult};
 use crate::util::path::{normalize_path, sanitize_path};
 use tauri::State;
 use zeroize::Zeroizing;
@@ -75,13 +75,61 @@ struct UnlockReq<'a> {
     flags: Option<u32>,
 }
 
-/// create_with_preset 请求体
+/// v4 recovery 解锁请求体
 #[derive(serde::Serialize)]
-struct CreateWithPresetReq<'a> {
+struct RecoveryUnlockReq<'a> {
+    op: &'static str,
+    path: &'a str,
+    recovery_code: &'a str,
+}
+
+/// v4 恢复码轮换请求体（当前容器口令由宿主注入）
+#[derive(serde::Serialize)]
+struct RecoveryRotateReq<'a> {
+    op: &'static str,
+    password: &'a str,
+    old_recovery: &'a str,
+}
+
+/// v4_create 请求体
+#[derive(serde::Serialize)]
+struct V4CreateReq<'a> {
     op: &'static str,
     path: &'a str,
     password: &'a str,
-    preset: u32,
+}
+
+/// v4 keyfile 路径请求体（status 不需要路径）
+#[derive(serde::Serialize)]
+struct KeyfilePathReq<'a> {
+    op: &'static str,
+    keyfile_path: &'a str,
+}
+
+/// v4 keyfile 启用/关闭请求体（口令由宿主注入，前端不参与）
+#[derive(serde::Serialize)]
+struct KeyfilePasswordReq<'a> {
+    op: &'static str,
+    password: &'a str,
+    keyfile_path: &'a str,
+}
+
+/// v4 keyfile 解锁请求体（库路径 + keyfile 路径）
+#[derive(serde::Serialize)]
+struct KeyfileUnlockReq<'a> {
+    op: &'static str,
+    path: &'a str,
+    password: &'a str,
+    keyfile_path: &'a str,
+}
+
+/// v4 keyfile 创建请求体（库路径 + keyfile 路径）
+#[derive(serde::Serialize)]
+struct KeyfileCreateReq<'a> {
+    op: &'static str,
+    path: &'a str,
+    password: &'a str,
+    keyfile_path: &'a str,
 }
 
 /// export / import 请求体（共用 path + password 两字段结构）
@@ -102,7 +150,7 @@ struct PathPasswordReq<'a> {
 /// 便携介质移机后容器将永久无法打开。
 /// 失败必须拒绝操作——把“取不到口令”误当成“口令错误”会让用户反复重试
 /// 并触发熔断。
-fn load_container_password(app: &tauri::AppHandle) -> Result<Zeroizing<String>, String> {
+pub(crate) fn load_container_password(app: &tauri::AppHandle) -> Result<Zeroizing<String>, String> {
     use tauri::Manager;
     let paths = app
         .try_state::<crate::infrastructure::app_paths::AppPaths>()
@@ -176,7 +224,7 @@ fn get_audit_hmac_key() -> Option<[u8; 32]> {
 
 /// 写入 verthys 相关审计事件，路径哈希化存储，不记录明文。
 /// 写入失败仅警告，不阻塞业务流程。
-fn write_verthys_audit(
+pub(crate) fn write_verthys_audit(
     app: &tauri::AppHandle,
     event_type: AuditEventType,
     verthys_path: &str,
@@ -245,6 +293,68 @@ pub(crate) fn require_unlocked(
 /// 策略。
 fn state_allows_data_access(state: &AppState) -> bool {
     state.has_verthys_session()
+}
+
+/// keyfile 创建目标的前置校验。
+///
+/// keyfile 是创建流程的附属产物，但目标路径来自前端选择。若目标已存在，
+/// C 层 `write_keyfile_file` 会返回 `VTY_E_EXISTS` 且不写入、不删除；宿主
+/// 若把该路径当作“本次创建产物”在回滚时删除，就形成了任意文件删除原语。
+/// 因此在进入 worker 前必须拒绝任何已存在的目标、错误扩展名与相对路径。
+fn validate_keyfile_create_target(
+    verthys_path: &str,
+    keyfile_path: &str,
+) -> Result<(), String> {
+    let kf = std::path::Path::new(keyfile_path);
+    if !kf.is_absolute() {
+        return Err("keyfile 路径必须是绝对路径".into());
+    }
+    let ext_ok = kf
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("vkf"))
+        .unwrap_or(false);
+    if !ext_ok {
+        return Err("keyfile 路径必须以 .vkf 结尾".into());
+    }
+    if let Some(parent) = kf.parent() {
+        if !parent.is_dir() {
+            return Err("keyfile 父目录不存在或不是目录".into());
+        }
+    } else {
+        return Err("keyfile 路径缺少父目录".into());
+    }
+    if normalize_path(keyfile_path).to_lowercase()
+        == normalize_path(verthys_path).to_lowercase()
+    {
+        return Err("keyfile 路径不能与容器路径相同".into());
+    }
+    match std::fs::symlink_metadata(kf) {
+        Ok(_) => Err("keyfile 目标已存在，拒绝覆盖或删除".into()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("无法检查 keyfile 目标: {}", err)),
+    }
+}
+
+/// 创建失败回滚：仅当本次流程确实由 C 层创建了 keyfile 时才删除。
+///
+/// 响应超时/解析失败时调用方必须传 `keyfile_created=false`：宁可留下
+/// 孤儿 keyfile，也不删除来源不明的文件。
+fn cleanup_created_keyfile(
+    keyfile_path: Option<&str>,
+    keyfile_created: bool,
+) -> Result<(), String> {
+    if !keyfile_created {
+        return Ok(());
+    }
+    let Some(kf) = keyfile_path else {
+        return Ok(());
+    };
+    match std::fs::remove_file(kf) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("keyfile 回滚删除失败: {}", err)),
+    }
 }
 
 /// 容器口令复杂度校验：最小长度 8，最大 512，用于创建/解锁前的前置校验。
@@ -439,7 +549,12 @@ pub use preheat::verthys_preheat;
 ///
 /// 容器口令由本机保管模块提供，不来自前端；发送后立即擦除，不驻留内存。
 /// 解锁失败时文件锁自动释放（RAII）。
-/// 仅支持 V3 容器格式。
+/// 口令解锁 v4 容器；也接受一次性恢复码通道（见 verthys_unlock_recovery）。
+///
+/// 参数数量即 Tauri IPC 的线格式契约：前置校验令牌、USB 重绑确认、
+/// 恢复码、keyfile 路径与进度通道均为独立可选输入。收拢为结构体会
+/// 破坏前端调用与既有测试快照，故在此保留唯一、受控的 lint 例外。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn verthys_unlock(
     app: tauri::AppHandle,
@@ -447,8 +562,17 @@ pub async fn verthys_unlock(
     verthys_path: String,
     preheat_token: Option<String>,
     usb_rebind_confirmed: Option<bool>,
+    recovery_code: Option<String>,
+    keyfile_path: Option<String>,
     on_progress: tauri::ipc::Channel<crate::worker::UnlockProgress>,
 ) -> Result<VerthysResponse, String> {
+    /* 恢复码通道复用同一命令：不读取本机口令、不走口令熔断计数，
+     * 直接交给恢复专用实现；其余参数不参与决定。 */
+    if let Some(code) = recovery_code {
+        if !code.is_empty() {
+            return verthys_unlock_recovery(app, state, verthys_path, code).await;
+        }
+    }
     log::info!(
         "[verthys_unlock] 开始解锁: path={}",
         sanitize_path(&verthys_path)
@@ -589,20 +713,51 @@ pub async fn verthys_unlock(
     )?;
 
     // 路径授权：worker 只接受宿主在本次操作前签发的 exact-path 能力。
+    /* D3：keyfile 库必须走 v4_unlock_keyfile；两条路径都要授权。
+     * keyfile 内容只在 worker/C 进程内读取，主进程与前端只传路径。 */
+    let keyfile_path = keyfile_path
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    if let Some(kf) = &keyfile_path {
+        if !std::path::Path::new(kf).is_absolute() {
+            return Err("keyfile 路径必须是绝对路径".into());
+        }
+    }
+    let unlock_op = if keyfile_path.is_some() {
+        "v4_unlock_keyfile"
+    } else {
+        "unlock"
+    };
     state
-        .authorize_worker_path("unlock", "read", &verthys_path)
+        .authorize_worker_path(unlock_op, "read", &verthys_path)
         .map_err(|e| {
             log::error!("[verthys_unlock] 路径授权失败: {}", e);
             "打开加密库失败（路径未授权）".to_string()
         })?;
 
     let req_str = Zeroizing::new(
-        serde_json::to_string(&UnlockReq {
-            op: "unlock",
-            path: &verthys_path,
-            password: &password,
-            flags: Some(flags),
-        })
+        match keyfile_path.as_deref() {
+            Some(kf) => {
+                state
+                    .authorize_worker_path(unlock_op, "read", kf)
+                    .map_err(|e| {
+                        log::error!("[verthys_unlock] keyfile 路径授权失败: {}", e);
+                        "打开加密库失败（keyfile 路径未授权）".to_string()
+                    })?;
+                serde_json::to_string(&KeyfileUnlockReq {
+                    op: unlock_op,
+                    path: &verthys_path,
+                    password: &password,
+                    keyfile_path: kf,
+                })
+            }
+            None => serde_json::to_string(&UnlockReq {
+                op: unlock_op,
+                path: &verthys_path,
+                password: &password,
+                flags: Some(flags),
+            }),
+        }
         .map_err(|e| {
             log::error!("[verthys_unlock] 请求序列化失败: {}", e);
             "打开加密库失败".to_string()
@@ -681,8 +836,33 @@ pub async fn verthys_unlock(
             AuditResult::Failure,
             resp.error.clone().or(Some("解锁失败".into())),
         );
+        if let Some(kf) = keyfile_path.as_deref() {
+            write_verthys_audit(
+                &app,
+                AuditEventType::KeyfileFactor,
+                &verthys_path,
+                AuditResult::Failure,
+                Some(format!(
+                    "action=unlock;path_hash={}",
+                    keyfile_path_tag(kf)
+                )),
+            );
+        }
     } else {
         log::info!("[verthys_unlock] 解锁成功");
+
+        if let Some(kf) = keyfile_path.as_deref() {
+            write_verthys_audit(
+                &app,
+                AuditEventType::KeyfileFactor,
+                &verthys_path,
+                AuditResult::Success,
+                Some(format!(
+                    "action=unlock;path_hash={}",
+                    keyfile_path_tag(kf)
+                )),
+            );
+        }
 
         // 服务端强制成功重置：连续失败计数归零
         //（解锁响应 ok=true 已确认成功，服务端直调闸门契约，无需会话授权检查）
@@ -830,13 +1010,236 @@ pub async fn verthys_unlock(
     Ok(resp)
 }
 
-// ===== 创建 =====
+/// 恢复码解锁（换机/灾难恢复）。
+///
+/// 与口令解锁的差异：不读取本机容器口令、不经过口令熔断计数、不做介质
+/// 绑定校验；恢复码本身是高熵一次性凭证，成功即建立等价会话。文件锁、
+/// 路径授权、会话守卫与状态文件维护仍与口令解锁一致，防止恢复路径成为
+/// 绕过单写者约束的后门。
+pub(crate) async fn verthys_unlock_recovery(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    verthys_path: String,
+    recovery_code: String,
+) -> Result<VerthysResponse, String> {
+    log::info!(
+        "[verthys_unlock_recovery] 开始恢复解锁: path={}",
+        sanitize_path(&verthys_path)
+    );
+    if recovery_code.is_empty() || recovery_code.len() > 256 {
+        return Ok(VerthysResponse::err(
+            "v4_unlock_recovery",
+            "恢复码格式非法",
+        ));
+    }
+    if !std::path::Path::new(&verthys_path).exists() {
+        write_verthys_audit(
+            &app,
+            AuditEventType::VerthysUnlock,
+            &verthys_path,
+            AuditResult::Failure,
+            Some("恢复解锁：文件不存在".into()),
+        );
+        return Ok(VerthysResponse::err(
+            "v4_unlock_recovery",
+            "文件不存在，请确认路径",
+        ));
+    }
 
+    let _read_lock = VerthysFileLock::lock_shared(&verthys_path).map_err(|e| {
+        log::warn!("[verthys_unlock_recovery] 文件锁失败: {}", e);
+        "加密库正在被另一个程序使用".to_string()
+    })?;
+
+    state
+        .authorize_worker_path("v4_unlock_recovery", "read", &verthys_path)
+        .map_err(|e| {
+            log::error!("[verthys_unlock_recovery] 路径授权失败: {}", e);
+            "恢复解锁失败（路径未授权）".to_string()
+        })?;
+
+    let code = Zeroizing::new(recovery_code);
+    let req_str = Zeroizing::new(
+        serde_json::to_string(&RecoveryUnlockReq {
+            op: "v4_unlock_recovery",
+            path: &verthys_path,
+            recovery_code: code.as_str(),
+        })
+        .map_err(|e| {
+            log::error!("[verthys_unlock_recovery] 请求序列化失败: {}", e);
+            "恢复解锁失败".to_string()
+        })?,
+    );
+    let resp_json = Zeroizing::new(
+        state
+            .send_with_timeout(req_str.as_str(), std::time::Duration::from_secs(120))
+            .map_err(|e| {
+                log::error!("[verthys_unlock_recovery] send 失败: {}", e);
+                "恢复解锁失败（通信失败）".to_string()
+            })?,
+    );
+    let resp: VerthysResponse = serde_json::from_str(&resp_json)
+        .map_err(|e| format!("恢复解锁失败（响应解析失败）: {}", e))?;
+
+    if !resp.ok {
+        write_verthys_audit(
+            &app,
+            AuditEventType::VerthysUnlock,
+            &verthys_path,
+            AuditResult::Failure,
+            resp.error.clone().or(Some("恢复码解锁失败".into())),
+        );
+        return Ok(resp);
+    }
+
+    log::info!("[verthys_unlock_recovery] 恢复解锁成功");
+    write_verthys_audit(
+        &app,
+        AuditEventType::VerthysUnlock,
+        &verthys_path,
+        AuditResult::Success,
+        Some("恢复码解锁成功".into()),
+    );
+
+    /* 与口令解锁一致：v4 废弃的是 C 层 GMK，产品层 global-key 记录仍决定
+     * 初始化/验证视图。恢复会话先复位，再按 worker 进程内探测结果推进，
+     * 固定停在 NoKey 会让恢复解锁后的验证必然报状态不匹配。 */
+    state.key_lifecycle.reset_to_no_key();
+    if resp.has_global_key == Some(true) {
+        match state.key_lifecycle.transition_to_locked() {
+            Ok(()) => log::info!(
+                "[verthys_unlock_recovery] key_lifecycle → Locked（有全局密钥记录）"
+            ),
+            Err(e) => log::warn!(
+                "[verthys_unlock_recovery] key_lifecycle 状态转移失败: {}",
+                e
+            ),
+        }
+    } else {
+        log::info!("[verthys_unlock_recovery] key_lifecycle → NoKey（无全局密钥记录）");
+    }
+
+    drop(_read_lock);
+    let session_id = format!(
+        "pid-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    match VerthysSessionGuard::new(&verthys_path, &session_id) {
+        Ok(guard) => {
+            let mut session_guard = state.lock_verthys_session();
+            *session_guard = Some(guard);
+            log::info!(
+                "[verthys_unlock_recovery] VerthysSessionGuard 已创建（session={}）",
+                session_id
+            );
+        }
+        Err(e) => {
+            log::error!(
+                "[verthys_unlock_recovery] VerthysSessionGuard 创建失败: {}",
+                e
+            );
+            write_verthys_audit(
+                &app,
+                AuditEventType::VerthysUnlock,
+                &verthys_path,
+                AuditResult::Failure,
+                Some(format!("VerthysSessionGuard 创建失败: {}", e)),
+            );
+        }
+    }
+
+    match read_state_file(&app) {
+        Ok(Some(existing_state)) => {
+            if existing_state.verthys_path != normalize_path(&verthys_path) {
+                let new_state = VerthysState::new(&verthys_path);
+                if let Err(e) = write_state_file_atomic(&app, &new_state) {
+                    log::warn!(
+                        "[verthys_unlock_recovery] 状态文件更新失败（不阻塞解锁）: {}",
+                        e
+                    );
+                }
+            }
+        }
+        Ok(None) => {
+            let new_state = VerthysState::new(&verthys_path);
+            if let Err(e) = write_state_file_atomic(&app, &new_state) {
+                log::warn!(
+                    "[verthys_unlock_recovery] 状态文件创建失败（不阻塞解锁）: {}",
+                    e
+                );
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "[verthys_unlock_recovery] 状态文件读取失败，重建: {}",
+                e
+            );
+            let new_state = VerthysState::new(&verthys_path);
+            if let Err(e) = write_state_file_atomic(&app, &new_state) {
+                log::warn!(
+                    "[verthys_unlock_recovery] 状态文件重建失败（不阻塞解锁）: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    Ok(resp)
+}
+
+/// 轮换一次性恢复码（当前容器口令由宿主注入 + 用户提供旧恢复码）。
+///
+/// 成功响应含新恢复码；宿主不落盘、不写日志，前端展示确认后必须清零。
+#[tauri::command]
+pub async fn verthys_recovery_rotate(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    old_recovery_code: String,
+) -> Result<VerthysResponse, String> {
+    if let Err(msg) = require_unlocked(&app, &state, "recovery_rotate") {
+        return Ok(VerthysResponse::err("v4_recovery_rotate", &msg));
+    }
+    if old_recovery_code.is_empty() || old_recovery_code.len() > 256 {
+        return Ok(VerthysResponse::err(
+            "v4_recovery_rotate",
+            "旧恢复码格式非法",
+        ));
+    }
+    let password = load_container_password(&app)?;
+    let old_code = Zeroizing::new(old_recovery_code);
+    let req_str = Zeroizing::new(
+        serde_json::to_string(&RecoveryRotateReq {
+            op: "v4_recovery_rotate",
+            password: &password,
+            old_recovery: old_code.as_str(),
+        })
+        .map_err(|e| format!("恢复码轮换失败（序列化失败）: {}", e))?,
+    );
+    let resp_json = Zeroizing::new(
+        state
+            .send_with_timeout(req_str.as_str(), std::time::Duration::from_secs(60))
+            .map_err(|e| format!("恢复码轮换失败（通信失败）: {}", e))?,
+    );
+    let resp: VerthysResponse = serde_json::from_str(&resp_json)
+        .map_err(|e| format!("恢复码轮换失败（响应解析失败）: {}", e))?;
+    if resp.ok {
+        log::info!("[verthys_recovery_rotate] 恢复码轮换成功");
+    } else {
+        log::warn!("[verthys_recovery_rotate] 恢复码轮换失败: {:?}", resp.error);
+    }
+    Ok(resp)
+}
+
+// ===== 创建 =====
 /// 创建新的加密库（首次初始化）。
 ///
 /// 流程：
 /// 1. 前置校验：目标文件不存在，本机容器口令复杂度合格。
-/// 2. 调用 worker create_with_preset（支持 BALANCED/SECURE），创建 V3 容器。
+/// 2. 调用 worker v4_create 创建 v4 容器并取得一次性恢复码。
 /// 3. 发送 lock 指令持久化空 verthys，并释放 worker 侧容器句柄。
 /// 4. 获取主进程独占文件锁（会话哨兵锁，防其他 Verthys 实例打开）。
 /// 5. 再次 unlock 重新打开，保持会话。
@@ -857,6 +1260,7 @@ pub async fn verthys_create(
     state: State<'_, AppState>,
     verthys_path: String,
     preset: Option<u32>,
+    keyfile_path: Option<String>,
 ) -> Result<VerthysResponse, String> {
     let preset_val: u32 = match preset {
         Some(1) => 1,
@@ -867,10 +1271,20 @@ pub async fn verthys_create(
     } else {
         "BALANCED"
     };
+    /* D3：keyfile 路径只用于传参；文件由 C 层生成/读取，前端不接触字节。 */
+    let keyfile_path = keyfile_path
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    if let Some(kf) = &keyfile_path {
+        if !std::path::Path::new(kf).is_absolute() {
+            return Err("keyfile 路径必须是绝对路径".into());
+        }
+    }
     log::info!(
-        "[verthys_create] 开始创建: path={} preset={}",
+        "[verthys_create] 开始创建: path={} preset={} keyfile={}",
         sanitize_path(&verthys_path),
-        preset_name
+        preset_name,
+        keyfile_path.is_some()
     );
 
     if std::path::Path::new(&verthys_path).exists() {
@@ -886,6 +1300,22 @@ pub async fn verthys_create(
             Some("文件已存在，拒绝创建".into()),
         );
         return Err("文件已存在，请使用打开而非创建".into());
+    }
+
+    /* keyfile 目标必须先于 worker 调用校验：目标已存在时 C 层拒绝写入，
+     * 宿主若在回滚时无条件删除会把该路径变成任意文件删除原语。 */
+    if let Some(kf) = &keyfile_path {
+        if let Err(e) = validate_keyfile_create_target(&verthys_path, kf) {
+            log::warn!("[verthys_create] keyfile 目标校验失败: {}", e);
+            write_verthys_audit(
+                &app,
+                AuditEventType::KeyfileFactor,
+                &verthys_path,
+                AuditResult::Denied,
+                Some(format!("action=create;{}", e)),
+            );
+            return Err(e);
+        }
     }
 
     // 首次创建时由本模块生成口令：必须在文件存在性校验之后，
@@ -905,6 +1335,7 @@ pub async fn verthys_create(
     }
 
     let path_for_rollback = verthys_path.clone();
+    let keyfile_for_rollback = keyfile_path.clone();
 
     // 附属数据目录前置保障：目录被同名文件占用、路径超长或不可创建时，
     // 创建流程整体拒绝（不进入 worker 创建，避免产生只带容器的半成品）。
@@ -932,23 +1363,43 @@ pub async fn verthys_create(
     let lock_unlock_timeout = std::time::Duration::from_secs(30);
 
     let mut file_lock: Option<VerthysFileLock> = None;
+    /* 只有 worker 明确返回创建成功时，keyfile 才是本次流程的产物；
+     * 超时/解析失败/创建失败一律保持 false，回滚不得删除未知来源文件。 */
+    let mut keyfile_created = false;
 
     let create_result: Result<VerthysResponse, String> = (|| {
         log::info!(
-            "[verthys_create] 步骤 1/3: create_with_preset（preset={}, 超时={}s）",
-            preset_name,
+            "[verthys_create] 步骤 1/3: {}（超时={}s）",
+            if keyfile_path.is_some() { "v4_create_keyfile" } else { "v4_create" },
             create_timeout.as_secs()
         );
+        let create_op = if keyfile_path.is_some() {
+            "v4_create_keyfile"
+        } else {
+            "v4_create"
+        };
         state
-            .authorize_worker_path("create_with_preset", "write", &verthys_path)
+            .authorize_worker_path(create_op, "write", &verthys_path)
             .map_err(|e| format!("创建加密库失败（路径未授权）: {}", e))?;
         let create_req = Zeroizing::new(
-            serde_json::to_string(&CreateWithPresetReq {
-                op: "create_with_preset",
-                path: &verthys_path,
-                password: &password,
-                preset: preset_val,
-            })
+            match keyfile_path.as_deref() {
+                Some(kf) => {
+                    state
+                        .authorize_worker_path(create_op, "write", kf)
+                        .map_err(|e| format!("创建加密库失败（keyfile 路径未授权）: {}", e))?;
+                    serde_json::to_string(&KeyfileCreateReq {
+                        op: create_op,
+                        path: &verthys_path,
+                        password: &password,
+                        keyfile_path: kf,
+                    })
+                }
+                None => serde_json::to_string(&V4CreateReq {
+                    op: create_op,
+                    path: &verthys_path,
+                    password: &password,
+                }),
+            }
             .map_err(|e| format!("创建加密库失败（步骤1序列化失败）: {}", e))?,
         );
         let resp_json = state
@@ -968,7 +1419,35 @@ pub async fn verthys_create(
             log::error!("[verthys_create] 步骤 1/3 失败: error={}", detail);
             return Err(format!("创建加密库失败（步骤1）: {}", detail));
         }
-        log::info!("[verthys_create] 步骤 1/3: create_with_preset 成功");
+        log::info!("[verthys_create] 步骤 1/3: v4_create 成功");
+        /* C 层只有 keyfile 写入且库创建成功后才返回 OK；此处是
+         * “keyfile 确由本次流程创建”的权威时点。 */
+        keyfile_created = keyfile_path.is_some();
+        /* 恢复码只在本响应中透传一次；缺失即 fail-closed 并回滚，
+         * 禁止留下“无法恢复”的库。 */
+        let recovery_code = create_resp.recovery_code.clone();
+        if recovery_code.as_deref().unwrap_or("").is_empty() {
+            return Err("创建加密库失败（缺少一次性恢复码）".to_string());
+        }
+
+        /* v4 容器格式不含预设字段；创建时选择的档位作为运行时防护档应用，
+         * 不能静默忽略。切换失败视为创建失败并回滚文件。 */
+        if preset_val != 0 {
+            let preset_req = Zeroizing::new(
+                serde_json::json!({ "op": "switch_preset", "preset": preset_val })
+                    .to_string(),
+            );
+            let preset_resp_json = state
+                .send_with_timeout(preset_req.as_str(), lock_unlock_timeout)
+                .map_err(|e| format!("创建加密库失败（预设应用通信失败）: {}", e))?;
+            let preset_resp: VerthysResponse = serde_json::from_str(&preset_resp_json)
+                .map_err(|e| format!("创建加密库失败（预设应用响应解析失败）: {}", e))?;
+            if !preset_resp.ok {
+                let detail = preset_resp.error.unwrap_or_else(|| "未知错误".to_string());
+                return Err(format!("创建加密库失败（预设应用）: {}", detail));
+            }
+            log::info!("[verthys_create] 运行时预设 {}", preset_name);
+        }
 
         // 锁序：先由 lock 指令让 worker 落盘并释放容器句柄（FILE_SHARE_READ
         // 单写者句柄存续期间，本进程以 GENERIC_WRITE 打开会被内核拒绝），
@@ -1002,19 +1481,40 @@ pub async fn verthys_create(
         log::info!("[verthys_create] 会话哨兵锁已获取");
 
         log::info!(
-            "[verthys_create] 步骤 3/3: unlock（重新打开, 超时={}s）",
+            "[verthys_create] 步骤 3/3: {}（重新打开, 超时={}s）",
+            if keyfile_path.is_some() { "v4_unlock_keyfile" } else { "unlock" },
             lock_unlock_timeout.as_secs()
         );
+        let unlock_op = if keyfile_path.is_some() {
+            "v4_unlock_keyfile"
+        } else {
+            "unlock"
+        };
         state
-            .authorize_worker_path("unlock", "read", &verthys_path)
+            .authorize_worker_path(unlock_op, "read", &verthys_path)
             .map_err(|e| format!("创建加密库失败（步骤3路径未授权）: {}", e))?;
         let unlock_req2 = Zeroizing::new(
-            serde_json::to_string(&UnlockReq {
-                op: "unlock",
-                path: &verthys_path,
-                password: &password,
-                flags: None,
-            })
+            match keyfile_path.as_deref() {
+                Some(kf) => {
+                    state
+                        .authorize_worker_path(unlock_op, "read", kf)
+                        .map_err(|e| {
+                            format!("创建加密库失败（步骤3 keyfile 路径未授权）: {}", e)
+                        })?;
+                    serde_json::to_string(&KeyfileUnlockReq {
+                        op: unlock_op,
+                        path: &verthys_path,
+                        password: &password,
+                        keyfile_path: kf,
+                    })
+                }
+                None => serde_json::to_string(&UnlockReq {
+                    op: unlock_op,
+                    path: &verthys_path,
+                    password: &password,
+                    flags: None,
+                }),
+            }
             .map_err(|e| format!("创建加密库失败（步骤3序列化失败）: {}", e))?,
         );
         let resp_json2 = state
@@ -1028,11 +1528,19 @@ pub async fn verthys_create(
         if !unlock_resp2.ok {
             let detail = unlock_resp2.error.unwrap_or_else(|| "未知错误".to_string());
             log::error!("[verthys_create] 步骤 3/3 失败: error={}", detail);
+            /* 0x0A = VERTHYS_ERR_RATE：本机持久熔断处于指数退避窗口。
+             * 创建本身已成功，这里失败的是紧随其后的自检解锁；直接透出
+             * 错误码会让用户误以为文件没建成并反复重试。 */
+            if detail == "ERR_0000000A" {
+                return Err("创建加密库失败（步骤3重开失败）：本机处于安全熔断退避窗口（最长 1 小时），请稍后重试；也可用恢复码解锁任一已有库以清零计数".into());
+            }
             return Err(format!("创建加密库失败（步骤3重开失败）: {}", detail));
         }
         log::info!("[verthys_create] 步骤 3/3: unlock 成功");
 
-        Ok(unlock_resp2)
+        let mut final_resp = unlock_resp2;
+        final_resp.recovery_code = recovery_code;
+        Ok(final_resp)
     })();
 
     drop(password);
@@ -1040,6 +1548,26 @@ pub async fn verthys_create(
     if let Err(ref e) = create_result {
         drop(file_lock.take());
         let _ = std::fs::remove_file(&path_for_rollback);
+        /* 只删除本次流程确实由 C 层创建的 keyfile；已存在目标/超时
+         * 响应一律不碰，避免任意文件删除。 */
+        if let Err(cleanup_err) = cleanup_created_keyfile(
+            keyfile_for_rollback.as_deref(),
+            keyfile_created,
+        ) {
+            log::error!("[verthys_create] {}", cleanup_err);
+            if let Some(kf) = keyfile_for_rollback.as_deref() {
+                write_verthys_audit(
+                    &app,
+                    AuditEventType::KeyfileFactor,
+                    &path_for_rollback,
+                    AuditResult::Failure,
+                    Some(format!(
+                        "action=create;path_hash={};cleanup=delete_failed",
+                        keyfile_path_tag(kf)
+                    )),
+                );
+            }
+        }
         state.set_session(None);
         delete_state_file(&app);
         // 附属数据有界清理：只删本次流程可能产生的已知附属文件（state / idx_cache /
@@ -1059,6 +1587,18 @@ pub async fn verthys_create(
             AuditResult::Failure,
             Some(format!("创建失败已回滚: {}", e)),
         );
+        if let Some(kf) = keyfile_for_rollback.as_deref() {
+            write_verthys_audit(
+                &app,
+                AuditEventType::KeyfileFactor,
+                &path_for_rollback,
+                AuditResult::Failure,
+                Some(format!(
+                    "action=create;path_hash={}",
+                    keyfile_path_tag(kf)
+                )),
+            );
+        }
         return create_result;
     }
 
@@ -1135,6 +1675,20 @@ pub async fn verthys_create(
         sanitize_path(&path_for_rollback)
     );
 
+    /* D3 审计：keyfile 路径只落域分离哈希，不写明文 */
+    if let Some(kf) = keyfile_path.as_deref() {
+        write_verthys_audit(
+            &app,
+            AuditEventType::KeyfileFactor,
+            &path_for_rollback,
+            AuditResult::Success,
+            Some(format!(
+                "action=create;path_hash={}",
+                keyfile_path_tag(kf)
+            )),
+        );
+    }
+
     if let Some(lock) = file_lock {
         let session_id = format!(
             "pid-{}-{}",
@@ -1208,24 +1762,89 @@ pub async fn verthys_lock_persist(state: State<'_, AppState>) -> Result<VerthysR
 
 // ===== 锁定（销毁 worker） =====
 
+/// 锁定前置闸门：请求取消并等待全库轮换 Run 收敛（后端有界 30s）。
+///
+/// 前端在任何破坏性锁定步骤（清 GMK / 落盘 / 销毁 worker）之前调用。
+/// 失败表示轮换仍在执行，本次锁定必须整体放弃并保留会话与空闲计时；
+/// 前端超时结果不能作为安全边界 —— `verthys_lock` / `worker_destroy`
+/// 内部仍保留同一闸门与代际校验作为最后防线。
+#[tauri::command]
+pub async fn verthys_prepare_lock() -> Result<VerthysResponse, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        crate::service::vault_rotate::prepare_for_lock(std::time::Duration::from_secs(30))
+    })
+    .await
+    .map_err(|e| format!("锁定闸门执行失败: {e}"))??;
+    Ok(VerthysResponse::ok("prepare_lock"))
+}
+
+/// 释放无会话归属的锁定资源（代际冲突路径）。
+///
+/// 只在确认当前没有任何 worker 会话时调用：此时残留的哨兵锁与旧文件锁
+/// 不属于任何活动会话，必须回收，否则下一次解锁会命中过期锁。若存在新
+/// 会话，这些资源归新会话所有，不得在此释放。
+fn release_orphan_lock_resources(state: &AppState) {
+    crate::service::vault_rotate::reset_on_lock();
+    if let Some(guard) = state.lock_verthys_session().take() {
+        log::info!("[verthys_lock] 清理无会话归属的 VerthysSessionGuard");
+        drop(guard);
+    }
+    if let Some(lock_guard) = state.lock_verthys_file().take() {
+        log::info!("[verthys_lock] 清理无会话归属的 verthys_file_lock");
+        drop(lock_guard);
+    }
+}
+
 /// 销毁 worker 子进程并清理资源（剪贴板、文件锁）。
 ///
 /// 调用前应先执行 verthys_lock_persist 确保持久化完成。
 /// 销毁前等待所有进行中的 IO 操作完成（最长 10 秒），超时则强制销毁。
 /// 销毁后状态回到 Uninitialized，VerthysSessionGuard Drop 自动释放文件锁。
+///
+/// 代际校验：等待轮换收敛与 IO 收敛期间会话可能被替换（新解锁）。命令
+/// 入口记录代际，实际销毁前用 `clear_session_if_epoch` 原子校验并清空；
+/// 代际已变则返回 `SESSION_SUPERSEDED`，绝不把锁定打在**新会话**上。
 #[tauri::command]
 pub async fn verthys_lock(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<VerthysResponse, String> {
     let session_path = state.verthys_session_path();
+    let epoch = state.session_epoch();
+
+    /* 轮换 Run 在 worker 内执行时，锁请求只能排队；直接销毁会话会让
+     * worker 继续持有 GMK。先请求取消并等待 Run 收敛（有界），超时则
+     * 拒绝本次锁定，避免“已锁定但密钥仍驻留”的假象。等待使用阻塞线程，
+     * 不占用异步执行器。 */
+    tauri::async_runtime::spawn_blocking(|| {
+        crate::service::vault_rotate::prepare_for_lock(std::time::Duration::from_secs(30))
+    })
+    .await
+    .map_err(|e| format!("锁定闸门执行失败: {e}"))??;
 
     let _ = state
         .wait_io_complete(std::time::Duration::from_secs(10))
         .await;
 
-    state.set_session(None);
-    // 修复：worker 销毁后 GMK 已消失，重置密钥生命周期为 NoKey
+    /* 检查与销毁在写锁内原子完成：若等待期间已有新会话接管，立即放弃，
+     * 后续的密钥生命周期重置、剪贴板清理与文件锁释放都不得执行。 */
+    if !state.clear_session_if_epoch(epoch) {
+        log::warn!("[verthys_lock] 等待期间会话代际已变更，放弃本次锁定");
+        /* 代际已变但当前没有任何会话：说明另一路径（如 worker_destroy）
+         * 只清了 worker 会话而未释放哨兵锁。此时补全孤儿清理，避免旧
+         * VerthysSessionGuard/文件锁泄漏到下一次解锁；若确有新会话存在，
+         * 那些资源归新会话所有，绝不在这里释放。 */
+        if !state.has_session() {
+            release_orphan_lock_resources(&state);
+        }
+        return Err(crate::state::SESSION_SUPERSEDED.to_string());
+    }
+
+    /* C 层会话销毁会中止轮换作业；宿主侧的取消事件与“可取消”状态
+     * 必须同步释放，不能跨会话残留。 */
+    crate::service::vault_rotate::reset_on_lock();
+
+    // worker 已随会话销毁，GMK 已消失，重置密钥生命周期为 NoKey
     state.key_lifecycle.reset_to_no_key();
 
     if !crate::security::clear_clipboard() {
@@ -1269,10 +1888,9 @@ pub async fn verthys_lock(
 // ===== 刷新（Verthys_Flush） =====
 
 /// 刷盘：调用 Verthys_Flush 提交未完成事务，保持 worker 会话不中断。
-/// V3 的 add_record 已通过 vtxn_commit 即时落盘，此函数主要用于：
-///   - 提交 pending 事务（若有）
-///   - 清除 dirty 标志
-///   - 触发异步缓存写入
+/// V4 的 add_record 已提交 DataRoot，此函数再次执行幂等保存，确保
+/// 目录脏状态/待提交段与元数据一致。失败必须向上传播，不得把
+/// “未确认落盘”伪装成成功。
 /// 不清零密钥、不改变 worker 状态（始终 UNLOCKED），无 lock+unlock 竞态风险。
 #[tauri::command]
 pub async fn verthys_flush(
@@ -1301,38 +1919,32 @@ pub async fn verthys_flush(
     //   - 不重新加载索引（避免大 verthys 的索引加载超时）
     //   - 单次 IPC，无 lock+unlock 的竞态风险
     //
-    // 【错误传播策略（V3-only）】
-    //   所有容器均为 V3 分区格式：AddRecord 已通过 vtxn_commit 即时落盘
-    //   （含 fflush + fsync），flush op 失败/IPC 失败不影响数据持久性
-    //   → 返回成功 + warn 日志（避免误报"持久化失败"）。
+    // 【错误传播策略】
+    //   AddRecord 已即时提交，但 flush 负责再次确认 DataRoot/元数据与
+    //   目录脏状态一致；flush op 失败或 IPC 失败时必须返回 err，
+    //   让上层区分“已确认落盘”与“未确认落盘”，不得吞错报成功。
     state.begin_io();
     let result = (|| {
         let req = serde_json::json!({"op": "flush"}).to_string();
         match state.send_with_timeout(&req, std::time::Duration::from_secs(15)) {
-            Ok(resp_json) => {
-                let resp: VerthysResponse = serde_json::from_str(&resp_json)
-                    .map_err(|e| format!("parse flush response: {}", e))?;
-                if resp.ok {
-                    return Ok(resp);
+            Ok(resp_json) => match serde_json::from_str::<VerthysResponse>(&resp_json) {
+                Ok(resp) => {
+                    if !resp.ok {
+                        log::warn!(
+                            "[verthys_flush] flush op 返回失败: {:?}",
+                            resp.error
+                        );
+                    }
+                    Ok(resp)
                 }
-                // flush op 失败（旧 worker 无 flush op / Verthys_Flush 符号缺失）
-                // V3：数据已通过 add_record → vtxn_commit 即时落盘，返回成功
-                log::warn!(
-                    "[verthys_flush] flush op 返回失败(ok=false, error={:?})，\
-                     V3 数据已通过 add_record 即时落盘，返回成功",
-                    resp.error
-                );
-                Ok(VerthysResponse::ok("flush"))
-            }
+                Err(e) => {
+                    log::error!("[verthys_flush] flush 响应解析失败: {}", e);
+                    Ok(VerthysResponse::err("flush", "flush response parse failed"))
+                }
+            },
             Err(e) => {
-                // IPC 层面失败（worker 未响应 / 超时）
-                // V3：数据已通过 add_record → vtxn_commit 即时落盘，返回成功
-                log::warn!(
-                    "[verthys_flush] flush IPC 失败: {}，\
-                     V3 数据已通过 add_record 即时落盘，返回成功",
-                    e
-                );
-                Ok(VerthysResponse::ok("flush"))
+                log::error!("[verthys_flush] flush IPC 失败: {}", e);
+                Ok(VerthysResponse::err("flush", "flush ipc failed"))
             }
         }
     })();
@@ -1941,6 +2553,31 @@ mod tests {
         assert_eq!(msg, "密钥状态不匹配");
     }
 
+    #[test]
+    fn orphan_lock_cleanup_releases_session_guard_and_file_lock() {
+        let state = AppState::new();
+        let path = temp_container_path("orphan_lock_cleanup");
+        make_v3_container(&path).unwrap();
+        let guard = VerthysSessionGuard::new(path.to_str().unwrap(), "orphan-lock-test")
+            .expect("会话守卫创建失败");
+        *state.lock_verthys_session() = Some(guard);
+        let file_lock = VerthysFileLock::lock_shared(path.to_str().unwrap())
+            .expect("文件锁创建失败");
+        *state.lock_verthys_file() = Some(file_lock);
+
+        release_orphan_lock_resources(&state);
+
+        assert!(
+            state.lock_verthys_session().is_none(),
+            "代际冲突且无会话时必须释放哨兵锁"
+        );
+        assert!(
+            state.lock_verthys_file().is_none(),
+            "代际冲突且无会话时必须释放旧文件锁"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     /* ------------------------------------------------------------------ *
      * V3 容器构造辅助（容器会话闸门测试使用）                            *
      *                                                                    *
@@ -1974,5 +2611,114 @@ mod tests {
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0)
         ))
+    }
+
+    /* ------------------------------------------------------------------ *
+     * P0-1：keyfile 创建目标与回滚边界                                *
+     * ------------------------------------------------------------------ */
+
+    fn temp_keyfile_case_dir(case: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "verthys_kf_{}_{}_{}",
+            std::process::id(),
+            case,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("创建临时目录失败");
+        dir
+    }
+
+    #[test]
+    fn keyfile_target_validation_rejects_existing_file() {
+        let dir = temp_keyfile_case_dir("exists");
+        let vault = dir.join("v.verthys");
+        let kf = dir.join("existing.vkf");
+        std::fs::write(&kf, b"sentinel-content").expect("写 sentinel 失败");
+
+        let err = validate_keyfile_create_target(
+            vault.to_str().unwrap(),
+            kf.to_str().unwrap(),
+        )
+        .expect_err("已存在目标必须被拒绝");
+        assert!(err.contains("已存在"), "错误文案应说明目标已存在: {err}");
+        assert_eq!(
+            std::fs::read(&kf).expect("sentinel 必须仍可读"),
+            b"sentinel-content",
+            "校验失败不得修改目标文件"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyfile_target_validation_rejects_wrong_extension() {
+        let dir = temp_keyfile_case_dir("ext");
+        let vault = dir.join("v.verthys");
+        let kf = dir.join("not-a-keyfile.txt");
+
+        let err = validate_keyfile_create_target(
+            vault.to_str().unwrap(),
+            kf.to_str().unwrap(),
+        )
+        .expect_err("错误扩展名必须被拒绝");
+        assert!(err.contains(".vkf"), "错误文案应说明扩展名: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyfile_target_validation_rejects_relative_path() {
+        let dir = temp_keyfile_case_dir("rel");
+        let vault = dir.join("v.verthys");
+        let err = validate_keyfile_create_target(vault.to_str().unwrap(), "keys/a.vkf")
+            .expect_err("相对路径必须被拒绝");
+        assert!(err.contains("绝对路径"), "错误文案应说明绝对路径: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyfile_target_validation_accepts_absent_vkf() {
+        let dir = temp_keyfile_case_dir("absent");
+        let vault = dir.join("v.verthys");
+        let kf = dir.join("new.vkf");
+        validate_keyfile_create_target(vault.to_str().unwrap(), kf.to_str().unwrap())
+            .expect("不存在的 .vkf 目标应通过校验");
+        assert!(!kf.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyfile_target_validation_rejects_same_path_as_container() {
+        let dir = temp_keyfile_case_dir("same");
+        let vault = dir.join("same.vkf");
+        let err = validate_keyfile_create_target(
+            vault.to_str().unwrap(),
+            vault.to_str().unwrap(),
+        )
+        .expect_err("keyfile 与容器同路径必须被拒绝");
+        assert!(err.contains("不能与容器路径相同"), "错误文案不符: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rollback_deletes_keyfile_only_when_created() {
+        let dir = temp_keyfile_case_dir("rollback");
+        let kf = dir.join("created.vkf");
+        std::fs::write(&kf, b"not-created-by-this-flow").expect("写 sentinel 失败");
+
+        cleanup_created_keyfile(Some(kf.to_str().unwrap()), false)
+            .expect("未创建时必须为空操作");
+        assert_eq!(
+            std::fs::read(&kf).expect("文件必须仍在"),
+            b"not-created-by-this-flow",
+            "keyfile_created=false 时不得删除目标"
+        );
+        assert!(kf.exists());
+
+        cleanup_created_keyfile(Some(kf.to_str().unwrap()), true)
+            .expect("本次创建的文件必须可删除");
+        assert!(!kf.exists(), "keyfile_created=true 时应删除本次产物");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -14,15 +14,19 @@
 #>
 Set-StrictMode -Version Latest
 
+$script:LegacyV3 = $false
+
 function Initialize-VerthysNative {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)][string]$DllPath
+        [Parameter(Mandatory = $true)][string]$DllPath,
+        [ValidateSet('Product', 'Legacy')][string]$Mode = 'Product'
     )
 
     if (-not (Test-Path -LiteralPath $DllPath -PathType Leaf)) {
         throw "核心 DLL 不存在: $DllPath"
     }
+    $script:LegacyV3 = ($Mode -eq 'Legacy')
     $resolved = (Resolve-Path -LiteralPath $DllPath).Path
 
     if ('VerthysAttackNative' -as [type]) {
@@ -54,6 +58,30 @@ public static class VerthysAttackNative
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
     public static extern int Verthys_Deinit(IntPtr handle);
 
+    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibraryW(string path);
+
+    [DllImport("kernel32", CharSet = CharSet.Ansi, SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr module, string name);
+
+    [DllImport("kernel32")]
+    private static extern bool FreeLibrary(IntPtr module);
+
+    /// 查询当前加载 DLL 是否导出指定符号（用于验证 v3 入口已从产品 DLL 移除）。
+    public static bool HasExport(string name)
+    {
+        IntPtr module = LoadLibraryW(Dll);
+        if (module == IntPtr.Zero) return false;
+        try
+        {
+            return GetProcAddress(module, name) != IntPtr.Zero;
+        }
+        finally
+        {
+            FreeLibrary(module);
+        }
+    }
+
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
     public static extern int Verthys_Lock(IntPtr handle);
 
@@ -74,6 +102,22 @@ public static class VerthysAttackNative
         uint flags);
 
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int Verthys_V4Create(
+        IntPtr handle,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        [MarshalAs(UnmanagedType.LPArray)] byte[] password,
+        UIntPtr password_len,
+        byte[] recovery_text,
+        UIntPtr recovery_cap);
+
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int Verthys_V4Unlock(
+        IntPtr handle,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        [MarshalAs(UnmanagedType.LPArray)] byte[] password,
+        UIntPtr password_len);
+
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
     private static extern int Verthys_AddRecord(
         IntPtr handle,
         ref Record record,
@@ -91,10 +135,24 @@ public static class VerthysAttackNative
             new UIntPtr((uint)password.Length), preset);
     }
 
+    public static int CreateV4(IntPtr handle, string path, byte[] password,
+        byte[] recoveryText)
+    {
+        return Verthys_V4Create(handle, path, password,
+            new UIntPtr((uint)password.Length), recoveryText,
+            new UIntPtr((uint)recoveryText.Length));
+    }
+
     public static int Unlock(IntPtr handle, string path, byte[] password)
     {
         return Verthys_Unlock(handle, path, password,
             new UIntPtr((uint)password.Length), 0u);
+    }
+
+    public static int UnlockV4(IntPtr handle, string path, byte[] password)
+    {
+        return Verthys_V4Unlock(handle, path, password,
+            new UIntPtr((uint)password.Length));
     }
 
     public static int AddRecord(IntPtr handle, int type, byte[] name, byte[] data)
@@ -211,11 +269,16 @@ function New-TestVault {
         [hashtable[]]$Records = @()
     )
 
+    if ($script:LegacyV3) {
+        throw "Legacy 模式不得生成 v4 主样本；Baseline 必须使用 -Vault 历史样本"
+    }
     $handle = Open-VerthysHandle
     try {
-        $rc = [VerthysAttackNative]::Create($handle, $Path, $Password, $Preset)
+        # 恢复码缓冲 >= VTY_RECOVERY_TEXT_BUF；攻击回归不使用恢复通道。
+        $recovery = New-Object byte[] 128
+        $rc = [VerthysAttackNative]::CreateV4($handle, $Path, $Password, $recovery)
         if ($rc -ne 0) {
-            throw "Verthys_CreateWithPreset 失败: rc=$rc"
+            throw "Verthys_V4Create 失败: rc=$rc"
         }
 
         $index = 0
@@ -237,6 +300,13 @@ function New-TestVault {
     finally {
         Close-VerthysHandle -Handle $handle
     }
+
+    # 句柄释放后再读 magic：C 容器单写者锁会阻止 ReadAllBytes 的 FileShare.Read。
+    $magic = [System.IO.File]::ReadAllBytes($Path)[0..3]
+    $magicText = [System.Text.Encoding]::ASCII.GetString($magic)
+    if ($magicText -ne 'VRTY') {
+        throw "攻击主样本不是 v4 容器: magic=$magicText"
+    }
 }
 
 function Add-TestRecordToVault {
@@ -249,7 +319,11 @@ function Add-TestRecordToVault {
 
     $handle = Open-VerthysHandle
     try {
-        $rc = [VerthysAttackNative]::Unlock($handle, $Path, $Password)
+        $rc = if ($script:LegacyV3) {
+            [VerthysAttackNative]::Unlock($handle, $Path, $Password)
+        } else {
+            [VerthysAttackNative]::UnlockV4($handle, $Path, $Password)
+        }
         if ($rc -ne 0) {
             return $rc
         }
@@ -270,7 +344,10 @@ function Test-VaultUnlock {
 
     $handle = Open-VerthysHandle
     try {
-        return [VerthysAttackNative]::Unlock($handle, $Path, $Password)
+        if ($script:LegacyV3) {
+            return [VerthysAttackNative]::Unlock($handle, $Path, $Password)
+        }
+        return [VerthysAttackNative]::UnlockV4($handle, $Path, $Password)
     }
     finally {
         Close-VerthysHandle -Handle $handle
@@ -304,6 +381,11 @@ function Get-MarkerHitFiles {
     return $hits
 }
 
+function Test-NativeExport {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    return [VerthysAttackNative]::HasExport($Name)
+}
+
 function ConvertTo-VerthysResultName {
     param([int]$Code)
     switch ($Code) {
@@ -325,4 +407,4 @@ function ConvertTo-VerthysResultName {
 
 Export-ModuleMember -Function Initialize-VerthysNative, New-Utf8Bytes, New-ContainerSecret,
     New-TestVault, Add-TestRecordToVault, Test-VaultUnlock, Test-LockedRecordAccess,
-    Get-MarkerHitFiles, ConvertTo-VerthysResultName
+    Get-MarkerHitFiles, Test-NativeExport, ConvertTo-VerthysResultName

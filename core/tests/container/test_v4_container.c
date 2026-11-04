@@ -256,7 +256,128 @@ TEST(v4_slot_policy_check)
              VTY_E_SLOT_UNKNOWN);
     CHECK_EQ(vty_slot_policy_check(slots, 4,
                                    VTY_FLAG_HIGH_SECURITY | VTY_FLAG_PCR), VTY_OK);
+    /* D3：keyfile 是用户槽 KDF 第二输入，不再写独立槽；出现 type 5 槽
+     * 一律拒绝。高安全由 KEYFILE flag 或 PCR 槽满足。 */
     slots[3].slot_type = VTY_SLOT_KEYFILE;
-    CHECK_EQ(vty_slot_policy_check(slots, 4, VTY_FLAG_HIGH_SECURITY), VTY_OK);
+    CHECK_EQ(vty_slot_policy_check(slots, 4, VTY_FLAG_HIGH_SECURITY),
+             VTY_E_SLOT_UNKNOWN);
+    CHECK_EQ(vty_slot_policy_check(slots, 3,
+                                   VTY_FLAG_HIGH_SECURITY | VTY_FLAG_KEYFILE), VTY_OK);
+    CHECK_EQ(vty_slot_policy_check(slots, 4,
+                                   VTY_FLAG_HIGH_SECURITY | VTY_FLAG_KEYFILE),
+             VTY_E_SLOT_UNKNOWN);
+    return 0;
+}
+
+TEST(v4_header_generation_and_minor_frozen)
+{
+    VtyV4Header h;
+    VtyV4Header back;
+    uint8_t buf[V4_T_HDR_MIN];
+    uint8_t digest1[VTY_HASH_BYTES];
+    uint8_t digest2[VTY_HASH_BYTES];
+
+    hdr_init(&h, 1);
+    h.header_len = (uint16_t)sizeof(buf);
+    h.generation = 7;
+    memset(buf, 0, sizeof(buf));
+    CHECK_EQ(vty_v4_header_write_fixed(&h, buf, sizeof(buf)), VTY_OK);
+    CHECK_EQ(vty_v4_header_finalize(buf, sizeof(buf)), VTY_OK);
+    CHECK_EQ(vty_v4_header_parse(buf, sizeof(buf), &back), VTY_OK);
+    CHECK_EQ(vty_v4_header_generation(&back), 7u);
+    CHECK_EQ(buf[VTY_V4_GENERATION_OFFSET + 8u], 0u);
+
+    CHECK_EQ(vty_v4_header_digest(buf, sizeof(buf), digest1), VTY_OK);
+    h.generation = 8;
+    CHECK_EQ(vty_v4_header_write_fixed(&h, buf, sizeof(buf)), VTY_OK);
+    CHECK_EQ(vty_v4_header_finalize(buf, sizeof(buf)), VTY_OK);
+    CHECK_EQ(vty_v4_header_digest(buf, sizeof(buf), digest2), VTY_OK);
+    CHECK(memcmp(digest1, digest2, VTY_HASH_BYTES) != 0);
+
+    /* minor 0 与其它值都不接受：不存在双解析路径 */
+    h.version_minor = 0;
+    CHECK_EQ(vty_v4_header_write_fixed(&h, buf, sizeof(buf)), VTY_E_VERSION);
+    memcpy(buf, "\x56\x52\x54\x59", 4);
+    vty_put_u16(buf + 4, VTY_V4_VERSION_MAJOR);
+    vty_put_u16(buf + 6, 0);
+    CHECK_EQ(vty_v4_header_parse(buf, sizeof(buf), &back), VTY_E_VERSION);
+
+    /* 保留区非零必须拒绝，不能当成未来字段带进认证范围 */
+    h.version_minor = VTY_V4_VERSION_MINOR;
+    CHECK_EQ(vty_v4_header_write_fixed(&h, buf, sizeof(buf)), VTY_OK);
+    buf[VTY_V4_GENERATION_OFFSET + 9u] = 1u;
+    CHECK_EQ(vty_v4_header_finalize(buf, sizeof(buf)), VTY_OK);
+    CHECK_EQ(vty_v4_header_parse(buf, sizeof(buf), &back), VTY_E_SLOT_UNKNOWN);
+    return 0;
+}
+
+TEST(v4_data_root_locator_codec)
+{
+    VtyDataRootLocator loc;
+    VtyDataRootLocator back;
+    uint8_t enc[VTY_DATA_ROOT_BYTES];
+
+    memset(&loc, 0, sizeof(loc));
+    loc.version = 1;
+    loc.root_node_id = 0;
+    loc.data_end = VTY_V4_DATA_OFFSET;
+    CHECK_EQ(vty_data_root_encode(&loc, enc), VTY_OK);
+    CHECK_EQ(vty_data_root_decode(enc, &back), VTY_OK);
+    CHECK_EQ(back.data_end, VTY_V4_DATA_OFFSET);
+    CHECK_EQ(back.root_node_id, 0u);
+
+    loc.root_node_id = VTY_V4_DATA_OFFSET;
+    loc.root_offset = VTY_V4_DATA_OFFSET;
+    loc.root_len = 128;
+    loc.level = 2;
+    loc.data_end = VTY_V4_DATA_OFFSET + 128;
+    CHECK_EQ(vty_data_root_encode(&loc, enc), VTY_OK);
+    CHECK_EQ(vty_data_root_decode(enc, &back), VTY_OK);
+    CHECK_EQ(back.root_offset, VTY_V4_DATA_OFFSET);
+
+    /* data_end 不得低于数据区起点，空根不得带偏移 */
+    loc.data_end = VTY_V4_DATA_OFFSET - 1u;
+    CHECK_EQ(vty_data_root_encode(&loc, enc), VTY_E_INVALID);
+    loc.data_end = VTY_V4_DATA_OFFSET;
+    loc.root_node_id = 0;
+    loc.root_offset = VTY_V4_DATA_OFFSET;
+    CHECK_EQ(vty_data_root_encode(&loc, enc), VTY_OK);
+    CHECK_EQ(vty_data_root_decode(enc, &back), VTY_E_CORRUPT);
+    return 0;
+}
+
+TEST(v4_segment_header_codec)
+{
+    VtySegmentHeader h;
+    VtySegmentHeader back;
+    uint8_t buf[VTY_SEG_HEADER_BYTES];
+
+    memset(&h, 0, sizeof(h));
+    h.type = VTY_SEG_DIR;
+    h.payload_len = 4096;
+    h.seq = VTY_V4_DATA_OFFSET;
+    h.id = 2;
+    CHECK_EQ(vty_segment_header_write(&h, buf), VTY_OK);
+    CHECK_EQ(buf[0], 0x56u);
+    CHECK_EQ(buf[1], 0x34u);
+    CHECK_EQ(buf[2], 0x53u);
+    CHECK_EQ(buf[3], 0x47u);
+    CHECK_EQ(vty_segment_header_parse(buf, &back), VTY_OK);
+    CHECK_EQ(back.seq, VTY_V4_DATA_OFFSET);
+    CHECK_EQ(back.id, 2u);
+    CHECK_EQ(back.payload_len, 4096u);
+
+    /* 段头保留位/填充非零或未知类型都必须拒绝 */
+    buf[6] = 1u;
+    CHECK_EQ(vty_segment_header_parse(buf, &back), VTY_E_CORRUPT);
+    buf[6] = 0u;
+    buf[28] = 1u;
+    CHECK_EQ(vty_segment_header_parse(buf, &back), VTY_E_CORRUPT);
+    buf[28] = 0u;
+    buf[4] = 9u;
+    CHECK_EQ(vty_segment_header_parse(buf, &back), VTY_E_CORRUPT);
+    buf[4] = VTY_SEG_DIR;
+    h.payload_len = 0;
+    CHECK_EQ(vty_segment_header_write(&h, buf), VTY_E_INVALID);
     return 0;
 }

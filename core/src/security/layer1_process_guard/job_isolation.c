@@ -456,7 +456,7 @@ int job_isolation_is_active(void)
 }
 
 /*
- * 主动断开 Job 隔离链路（仅 tamper_destroy 应急销毁路径调用）。
+ * 主动断开 Job 隔离链路（仅应急销毁路径调用）。
  *
  * 资源释放流程：
  *   1. TerminateJobObject(外层, 退出码) —— 瞬间终止 Job 层级内所有进程

@@ -1,23 +1,21 @@
 /*
  * defense_closure.h — 最终闭环防御能力验证（内部模块，不导出）
  *
- *
- * 设计原理：
- *   本模块作为整个安全体系的"总装校验"，负责：
- *     1. 在 Worker 进程启动时按 7 项攻击路径逐项验证各防御模块是否就绪
- *     2. 任一关键防御模块未就绪 → 启动失败，进程拒绝运行
- *     3. 运行时支持周期性自检（可选，由调用方驱动）
- *     4. 提供详细的防御状态查询接口（用于诊断与日志）
+ * 判据模型：
+ *   每条攻击路径的状态必须绑定"当前进程 / 当前会话可验证的事实"，而不是
+ *   防御模块的 init() 返回值。模块初始化成功只说明代码跑起来了，不说明
+ *   攻击面被关闭；把 init 成功当作 BLOCKED 会产生无法解释的虚假阻断。
  *
  * 状态机：
- *   每项攻击路径有独立的状态：
- *     DEFENSE_STATE_NOT_CHECKED = 未校验
- *     DEFENSE_STATE_BLOCKED     = 已阻断（防御模块就绪）
- *     DEFENSE_STATE_DEGRADED    = 降级（部分防御模块未生效，业务可继续）
- *     DEFENSE_STATE_FAILED      = 失败（关键防御模块缺失，应拒绝启动）
+ *   NOT_CHECKED = 未采样
+ *   BLOCKED     = 攻击面已真实闭合，或当前无资产可被攻击（锁定时无驻留密钥）
+ *   DEGRADED    = 防护能力缺失 / 被策略关闭 / 受架构限制，必须携带原因码
+ *   FAILED      = 关键防御缺失或检测到确定性入侵（BOOT 模式拒绝启动）
  *
- *   全局状态：所有路径非 FAILED 时整体通过。
- *             降级路径需调用方明确确认是否继续。
+ * 会话事实（unlocked / 绑定）由调用方在持句柄锁的临界区内复制，
+ * 进程事实（休眠 / 沙盒回读 / Hook 扫描 / 守卫位 / 采样时间）由
+ * defense_closure_fill_process_facts 填充。检查过程只读 facts，
+ * 不初始化任何模块、不创建句柄、不启动定时器。
  */
 #ifndef VERTHYS_DEFENSE_CLOSURE_H
 #define VERTHYS_DEFENSE_CLOSURE_H
@@ -45,25 +43,72 @@ typedef enum {
 /* 防御状态 */
 typedef enum {
     DEFENSE_STATE_NOT_CHECKED = 0,
-    DEFENSE_STATE_BLOCKED     = 1,  /* 完全阻断（关键防御已就绪） */
-    DEFENSE_STATE_DEGRADED    = 2,  /* 降级（次要防御缺失，可继续运行） */
-    DEFENSE_STATE_FAILED      = 3   /* 失败（关键防御缺失，应拒绝启动） */
+    DEFENSE_STATE_BLOCKED     = 1,  /* 攻击面已真实闭合 / 无资产可窃取 */
+    DEFENSE_STATE_DEGRADED    = 2,  /* 防护缺失或受架构限制（业务可继续） */
+    DEFENSE_STATE_FAILED      = 3   /* 关键防御缺失 / 确定性入侵（拒绝启动） */
 } DefenseState;
+
+/* 判定原因码（数值与公共 enum VerthysDefenseReason 严格镜像） */
+typedef enum {
+    DEFENSE_REASON_NONE                     = 0,
+    DEFENSE_REASON_NO_RESIDENT_KEY          = 1,
+    DEFENSE_REASON_V4_KEYS_USER_RESIDENT    = 2,
+    DEFENSE_REASON_HIBERNATION_ENABLED      = 3,
+    DEFENSE_REASON_HIBERNATION_UNKNOWN      = 4,
+    DEFENSE_REASON_SUSPEND_UNPREVENTABLE    = 5,
+    DEFENSE_REASON_SUSPEND_GUARD_INACTIVE   = 6,
+    DEFENSE_REASON_HOOK_SCAN_CLEAN          = 7,
+    DEFENSE_REASON_HOOK_SCAN_UNAVAILABLE    = 8,
+    DEFENSE_REASON_HOOK_DETECTED            = 9,
+    DEFENSE_REASON_SANDBOX_VERIFIED         = 10,
+    DEFENSE_REASON_SANDBOX_PARTIAL          = 11,
+    DEFENSE_REASON_SANDBOX_UNVERIFIED       = 12,
+    DEFENSE_REASON_JOB_ACTIVE               = 13,
+    DEFENSE_REASON_DEVICE_BOUND             = 14,
+    DEFENSE_REASON_NO_SESSION_FACTS         = 15,
+    DEFENSE_REASON_MODULE_INIT_FAILED       = 16,
+    DEFENSE_REASON_POLICY_DISABLED          = 17,
+    DEFENSE_REASON_EVIDENCE_STALE           = 18,
+    DEFENSE_REASON_ARCH_LIMIT_KERNEL_DEFERRED = 19,
+    DEFENSE_REASON_HIBERNATION_DISABLED     = 20
+} DefenseReason;
+
+/* 运行时守卫位（policy_flags / Verthys_NotifyRuntimeGuards） */
+#define DEFENSE_GUARD_HEARTBEAT     0x01u
+#define DEFENSE_GUARD_SUSPEND_LOCK  0x02u
+#define DEFENSE_POLICY_ANTI_DUMP    0x04u
+
+/* 判定事实：只读快照。会话字段由调用方复制，进程字段由 fill 填充；
+ * 检查过程不得在本结构构建之外产生任何副作用。 */
+typedef struct {
+    uint32_t any_unlocked_v4;       /* 进程内任一 V4 会话已解锁 */
+    uint32_t queried_unlocked_v4;   /* 被查询句柄的会话已解锁 */
+    uint32_t queried_device_bound;  /* 设备根槽存在 */
+    uint32_t queried_pcr_bound;     /* PCR 槽存在 */
+    uint32_t hibernation_state;     /* 0=禁用 1=启用 2=未知 */
+    uint32_t sandbox_verified_mask; /* OS 回读后的 mitigation 位 */
+    uint32_t hook_scan_state;       /* 0=不可用 1=干净 2=异常 3=过期 */
+    uint32_t policy_flags;          /* DEFENSE_GUARD_* | DEFENSE_POLICY_ANTI_DUMP */
+    uint64_t now_ms;                /* Unix 毫秒 */
+} DefenseFacts;
 
 /* 校验级别 */
 typedef enum {
-    DEFENSE_CHECK_BOOT   = 0,  /* 启动校验（严格：FAILED 路径拒绝启动） */
+    DEFENSE_CHECK_BOOT   = 0,  /* 启动校验（严格：任一 FAILED 路径拒绝启动） */
     DEFENSE_CHECK_RUNTIME = 1  /* 运行时校验（宽松：仅记录状态） */
 } DefenseCheckMode;
 
 /* 全局防御状态汇总 */
 typedef struct {
     DefenseState path_state[DEFENSE_PATH_COUNT];
-    int          all_critical_blocked;  /* 1=全部 7 条路径 BLOCKED（无 FAILED 且无 DEGRADED），0=非全阻断 */
+    DefenseReason path_reason[DEFENSE_PATH_COUNT];
+    int          all_critical_blocked;  /* 1=全部 7 条路径 BLOCKED（无 FAILED 且无 DEGRADED） */
     int          has_degraded;         /* 1=存在 DEGRADED，0=无 */
     uint32_t     blocked_count;        /* BLOCKED 路径数 */
     uint32_t     degraded_count;       /* DEGRADED 路径数 */
     uint32_t     failed_count;         /* FAILED 路径数 */
+    uint32_t     limited_count;        /* 架构限制导致的 DEGRADED 路径数 */
+    uint64_t     checked_at_unix_ms;   /* 本次快照采样时间 */
 } DefenseStatusReport;
 
 /* ---------- 公共接口 ---------- */
@@ -75,23 +120,40 @@ typedef struct {
 int defense_closure_init(void);
 
 /*
- * 执行完整闭环防御校验。
- *   mode: 校验级别（BOOT / RUNTIME）
- *   out_report: 输出详细状态报告（NULL=不输出）
- * 返回 0=全部关键路径阻断，非 0=存在 FAILED 或 DEGRADED（需调用方决策）。
- *
- * 内部按 7 项攻击路径逐一调用各防御模块的 is_active() / get_active_attrs() 等
- * 查询接口，汇总状态。
- *
- * BOOT 模式：任一关键路径 FAILED → 返回非零
- * RUNTIME 模式：仅更新状态，不阻断（返回 0）
+ * 执行完整闭环防御校验（无会话事实兼容包装，供 BOOT 与既有测试使用）。
  */
 int defense_closure_check(DefenseCheckMode mode,
                           DefenseStatusReport *out_report);
 
 /*
+ * 执行完整闭环防御校验（带会话/运行时事实）。
+ * facts 必须为非 NULL；函数只读 facts，不修改调用方状态。
+ */
+int defense_closure_check_facts(DefenseCheckMode mode,
+                                const DefenseFacts *facts,
+                                DefenseStatusReport *out_report);
+
+/*
+ * 填充进程级事实（休眠状态 / 沙盒回读 / Hook 扫描 / 策略位 / 采样时间）。
+ * 会话字段保持不变，由调用方在持锁快照内填充。
+ */
+void defense_closure_fill_process_facts(DefenseFacts *facts);
+
+/*
+ * 设置/读取运行时守卫位（heartbeat / suspend_lock），完整掩码语义。
+ * 只接受 DEFENSE_GUARD_* 位，未知位丢弃。
+ */
+void defense_closure_set_runtime_guards(uint32_t flags);
+uint32_t defense_closure_get_runtime_guards(void);
+
+/*
+ * 获取原因码名称（日志/诊断，不含敏感数据）。
+ */
+const char *defense_closure_reason_name(DefenseReason reason);
+
+/*
  * 查询单项攻击路径的防御状态。
- *   必须在 defense_closure_check 之后调用，否则返回 NOT_CHECKED。
+ *   必须在 defense_closure_check* 之后调用，否则返回 NOT_CHECKED。
  */
 DefenseState defense_closure_get_path_state(DefensePath path);
 

@@ -1,23 +1,34 @@
 <!--
   CosmicOverlay.vue — 可复用宇宙主题弹窗遮罩
-  v3: 背景层由通用组件 CosmicBackdrop 提供，底板由 CosmicDialog 提供
-  与 SecurityCenter 等模块共享统一背景 + 底板规范
+  背景层由 CosmicBackdrop 提供，底板由 CosmicDialog 提供；
+  遮罩底色与星野装饰收在 CosmicBackdrop 的幕层（.cb-veil）内，
+  与底板并列而不在其祖先链上 —— 入场/退场的不透明度只落在幕层与底板自身，
+  遮罩根节点恒为不透明，底板的背衬折射不会在淡入期被边界截断。
+  高优先窗口可传 teleport + overlayZ，脱离应用堆叠上下文并提升层级。
 -->
 <template>
-  <Transition name="cosmic">
-    <CosmicBackdrop v-if="show" fixed @backdrop="onBackdrop">
-      <div ref="hostRef" class="cosmic-overlay-host">
-        <CosmicDialog
-          :width="width"
-          role="dialog"
-          aria-modal="true"
-          :aria-label="ariaLabel"
-        >
-          <slot />
-        </CosmicDialog>
-      </div>
-    </CosmicBackdrop>
-  </Transition>
+  <Teleport to="body" :disabled="!teleport">
+    <Transition name="cosmic">
+      <CosmicBackdrop
+        v-if="show"
+        fixed
+        veil="lucent"
+        :z-index="overlayZ"
+        @backdrop="onBackdrop"
+      >
+        <div ref="hostRef" class="cosmic-overlay-host">
+          <CosmicDialog
+            :width="width"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="ariaLabel"
+          >
+            <slot />
+          </CosmicDialog>
+        </div>
+      </CosmicBackdrop>
+    </Transition>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -32,12 +43,18 @@ interface Props {
   backdropClose?: boolean;
   /** 弹窗无障碍名称（读屏播报；无可见标题关联时的兜底） */
   ariaLabel?: string;
+  /** 是否将遮罩 teleport 到 body：高优先窗口需逃离应用堆叠上下文 */
+  teleport?: boolean;
+  /** 遮罩层级（默认沿用 Cosmic 弹窗层 9999；高优先窗口可提升到 10000） */
+  overlayZ?: number;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   width: "400px",
   backdropClose: true,
   ariaLabel: "对话框",
+  teleport: false,
+  overlayZ: 9999,
 });
 
 const emit = defineEmits<{ (e: "close"): void }>();
@@ -131,34 +148,52 @@ onBeforeUnmount(() => {
 </style>
 
 <style scoped>
-/* ===== 进场 / 退场动画（针对子组件根元素） ===== */
+/* ===== 进场 / 退场动画 =====
+ * 透明度只允许落在幕层与底板自身，且两者互不为祖先 ——
+ * 底板的背衬折射因此从首帧起就与页面衬底连通。
+ * 遮罩根节点只登记过渡时长（Vue 以根元素的时长决定活动类的撤除时刻），
+ * 自身永不改变不透明度：根节点一旦 opacity 小于 1 就会成为折射的根边界，
+ * 折射在整段淡入期内被截断、结束帧才一次性接上，观感即「扫过后突变」。
+ * 承载文字的底板仍只走不透明度：位移会把字形提升为合成层，收尾回落主层时
+ * 重新子像素化，观感即「忽然模糊、随即清晰」；光的运动归底板内的 1px 装饰层。 */
 .cosmic-enter-active {
-  transition: opacity 0.3s var(--ease);
+  transition: opacity 0.46s var(--ease);
+}
+.cosmic-enter-active :deep(.cb-veil) {
+  transition: opacity 0.36s var(--ease);
 }
 .cosmic-enter-active :deep(.cosmic-dialog) {
-  transition: opacity 0.45s var(--ease), transform 0.45s var(--ease);
+  transition: opacity 0.46s var(--ease);
 }
 .cosmic-leave-active {
-  transition: opacity 0.2s var(--ease);
+  transition: opacity 0.22s var(--ease);
+}
+.cosmic-leave-active :deep(.cb-veil) {
+  transition: opacity 0.22s var(--ease);
 }
 .cosmic-leave-active :deep(.cosmic-dialog) {
-  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
+  transition: opacity 0.18s var(--ease);
 }
-.cosmic-enter-from {
+.cosmic-enter-from :deep(.cb-veil) {
   opacity: 0;
 }
-/* 遮罩与弹窗渡越只走 2D 平移与不透明度：弹窗内含文字与矢量标识，
- * scale 会使内容纹理按非 1 比例缩放、结束帧再重栅格化，出现中即
- * "模糊 → 清晰"跳变 — 方向感由平移承担，不依赖缩放。 */
 .cosmic-enter-from :deep(.cosmic-dialog) {
   opacity: 0;
-  transform: translateY(20px);
 }
-.cosmic-leave-to {
+.cosmic-leave-to :deep(.cb-veil) {
   opacity: 0;
 }
 .cosmic-leave-to :deep(.cosmic-dialog) {
   opacity: 0;
-  transform: translateY(8px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .cosmic-enter-active,
+  .cosmic-enter-active :deep(.cb-veil),
+  .cosmic-enter-active :deep(.cosmic-dialog),
+  .cosmic-leave-active,
+  .cosmic-leave-active :deep(.cb-veil),
+  .cosmic-leave-active :deep(.cosmic-dialog) {
+    transition-duration: 0.01s;
+  }
 }
 </style>

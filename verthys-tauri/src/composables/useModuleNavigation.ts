@@ -10,7 +10,7 @@
  * 从 MainView.vue 抽离，功能 100% 保留。
  */
 
-import { ref, computed, watch, type Ref } from "vue";
+import { getCurrentInstance, onBeforeUnmount, ref, computed, watch, type Ref } from "vue";
 import {
   touchSession,
   hasModuleKeyRecordRef,
@@ -31,7 +31,6 @@ import {
 } from "../cache/composition/verthys-cache";
 import { scheduleGc } from "../utils/gc";
 import { withTimeout } from "../utils/promise_utils";
-import { masterFrameLoop } from "../core/master-frame-loop";
 
 /* ------------------------------------------------------------------ *
  * 安全守卫修复：等待布尔 Ref 变为 false（带超时兜底）
@@ -176,23 +175,13 @@ export function useModuleNavigation() {
   const pendingModule = ref("");
   const moduleKeyInput = ref("");
   const moduleKeyVerifying = ref(false);
-  /* 验证进度条（1.5s 感知时长，复用 QuantumProgressFlow 通道样式，非量子动画） */
-  const moduleKeyVerifyPercent = ref(0);
-  const moduleKeyVerifyMsg = ref("");
+  /* 验证保持 1.5s 感知时长；不再维护进度百分比与提示词状态 */
   /* 感知：验证错误状态标记（触发密码框抖动 + 红色边框，错误密码绝不放行） */
   const moduleKeyVerifyError = ref(false);
   /* 用户重新输入时清除错误状态（红色边框 + 抖动复位） */
   watch(moduleKeyInput, (v) => {
     if (v && moduleKeyVerifyError.value) moduleKeyVerifyError.value = false;
   });
-  /* 验证进度节拍器注销函数（主循环 throttled 注册；无注册 = 未运行） */
-  let verifyTickerStop: (() => void) | null = null;
-
-  /** 停止验证进度节拍器（幂等） */
-  const stopVerifyTicker = () => {
-    verifyTickerStop?.();
-    verifyTickerStop = null;
-  };
 
   /* 待登录模块的 ModuleId（用于查询 hasModuleKeyRecordRef） */
   const pendingModuleId = computed<ModuleId>(() => MODULE_ID_MAP[pendingModule.value] || "accounts");
@@ -306,8 +295,8 @@ export function useModuleNavigation() {
   };
 
   /* ===== 模块密钥登录对话框确认/取消 ===== */
-  /* 1.5s 感知时长：主循环帧节拍推进进度条至 90%，实际验证完成后跳 100%，
-   *   保证用户感知
+  /* 1.5s 感知时长：验证期间以禁用态与输入框星轨应答，不渲染进度条；
+   *   星轨单圈 1.4s，先完成一圈，再由结果接管
    * 安全修复（刚性约束）：
    *   - verifyModuleKey 返回 VerthysResult<void> 判别联合对象，必须用 result.ok 判断
    *     旧代码 `const ok = await ...; if (!ok)` 判断对象引用（永远 truthy），
@@ -321,33 +310,20 @@ export function useModuleNavigation() {
     if (!pendingModule.value || !moduleKeyInput.value || moduleKeyVerifying.value) return;
     moduleKeyVerifying.value = true;
     moduleKeyVerifyError.value = false;
-    moduleKeyVerifyPercent.value = 0;
-    moduleKeyVerifyMsg.value = "正在验证密钥";
-    /* 感知节拍器：throttled 注册 — ratio 达 1 时自注销；进度由墙钟
-     * 计算，档位降频只影响刷新粒度、不影响时长语义 */
     const t0 = performance.now();
-    stopVerifyTicker();
-    verifyTickerStop = masterFrameLoop.register(() => {
-      const elapsed = performance.now() - t0;
-      const ratio = Math.min(elapsed / VERIFY_DURATION, 1);
-      moduleKeyVerifyPercent.value = Math.round(ratio * 90);
-      if (ratio >= 1) stopVerifyTicker();
-    }, { type: "throttled", label: "module-key-verify-ticker" });
 
     /* 感知：无论成功/失败，都保证 1.5s 最小感知时长
      * 错误密码也不能立即返回，必须让用户感知到完整验证过程 */
     const ensureMinDuration = async () => {
       const remaining = VERIFY_DURATION - (performance.now() - t0);
       if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
-      stopVerifyTicker();
     };
 
     /* 感知：验证失败统一处理
-     * 跑完感知动画 → 标记错误状态 → 顶部红条 → 清空密码 → 保持弹窗开启
+     * 跑完感知时长 → 标记错误状态 → 顶部红条 → 清空密码 → 保持弹窗开启
      * 绝不消失弹窗，让用户重试 */
     const handleVerifyError = async (msg: string) => {
       await ensureMinDuration();
-      moduleKeyVerifyMsg.value = "验证失败";
       moduleKeyVerifyError.value = true;
       showError(msg);
       moduleKeyInput.value = "";
@@ -368,11 +344,8 @@ export function useModuleNavigation() {
         await handleVerifyError("密钥错误，请重试");
         return;
       }
-      // 验证成功 → 跳 100% + 进入目标模块
+      // 验证成功 → 转完一圈后直接进入目标模块
       await ensureMinDuration();
-      moduleKeyVerifyPercent.value = 100;
-      moduleKeyVerifyMsg.value = "验证完成";
-      await new Promise((r) => setTimeout(r, 200));
       const target = pendingModule.value;
       showModuleKeyVerify.value = false;
       pendingModule.value = "";
@@ -383,13 +356,11 @@ export function useModuleNavigation() {
        * 避免把系统故障误导为用户口令错误。 */
       await handleVerifyError(verthysReadyRef.value ? "验证异常，请重试" : "会话已锁定，请重新解锁");
     } finally {
-      stopVerifyTicker();
       moduleKeyVerifying.value = false;
     }
   };
 
   const cancelModuleKeyVerify = () => {
-    stopVerifyTicker();
     moduleKeyVerifyError.value = false;
     showModuleKeyVerify.value = false;
     pendingModule.value = "";
@@ -402,6 +373,35 @@ export function useModuleNavigation() {
     pendingModule.value = "";
     applySwitch("security");
   };
+
+  /* 开发夹具填充：缓存整份模块密钥，弹窗每次打开或切换时按 pendingModuleId
+     取对应值；不再依赖“点击填充时弹窗恰好已打开”。发布构建整段剔除。 */
+  if (import.meta.env.DEV && getCurrentInstance()) {
+    let fixtureModuleKeys: Record<string, string> = {};
+    const applyPendingModuleKey = () => {
+      if (!showModuleKeyVerify.value || !pendingModule.value) return;
+      const value = fixtureModuleKeys[pendingModuleId.value];
+      if (typeof value === "string" && value) moduleKeyInput.value = value;
+    };
+    const fixtureFillHandler = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        target?: string;
+        moduleKeys?: Record<string, string>;
+      }>).detail;
+      if (!detail || detail.target !== "module") return;
+      fixtureModuleKeys = { ...(detail.moduleKeys ?? {}) };
+      applyPendingModuleKey();
+    };
+    const stopFixtureWatch = watch(
+      [showModuleKeyVerify, pendingModuleId],
+      applyPendingModuleKey,
+    );
+    window.addEventListener("verthys:devfixture-fill", fixtureFillHandler);
+    onBeforeUnmount(() => {
+      stopFixtureWatch();
+      window.removeEventListener("verthys:devfixture-fill", fixtureFillHandler);
+    });
+  }
 
   return {
     /* 模块状态 */
@@ -417,8 +417,6 @@ export function useModuleNavigation() {
     pendingModule,
     moduleKeyInput,
     moduleKeyVerifying,
-    moduleKeyVerifyPercent,
-    moduleKeyVerifyMsg,
     moduleKeyVerifyError,
     pendingModuleId,
     pendingModuleLabel,

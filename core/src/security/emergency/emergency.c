@@ -405,10 +405,13 @@ void emergency_trigger(void)
     memory_guard_emergency_purge();
 
     /*
-     * 销毁 CNG 内核密钥句柄（A/B/C 三权分立密钥，
-     * 唯一密钥存放位置；内核释放密钥材料，用户态无任何路径可达）。
+     * 销毁 CNG 内核密钥句柄（A/B/C 三权分立密钥）。
+     * 该密钥体系仅 V3 容器路径使用；产品 v4-only 构建不链接
+     * key_separation 实现，因此清钥调用随 V3 分支编译剔除。
      */
+#if defined(VERTHYS_V3_SUPPORT)
     key_separation_purge_all();
+#endif
 
     /* ---- c) 故障码上报 ---- */
     code = select_fault_code(signals_snapshot);

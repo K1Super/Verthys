@@ -145,3 +145,90 @@ describe("useUnlockFlow 介质绑定确认", () => {
     expect(options.showError).toHaveBeenCalled();
   });
 });
+
+describe("useUnlockFlow keyfile 因子（D3）", () => {
+  /** 动态取到被 mock 的 open，避免顶部静态 import 与 hoist 冲突 */
+  async function openMock() {
+    const mod = await import("@tauri-apps/plugin-dialog");
+    return mod.open as unknown as ReturnType<typeof vi.fn>;
+  }
+
+  it("缺 keyfile：弹出选择并把路径作为第六参数重试一次", async () => {
+    mocks.initUnlock
+      .mockResolvedValueOnce({
+        ok: false as const,
+        code: VerthysErrorCode.E_KEYFILE_REQUIRED,
+        message: "该加密库已启用 keyfile",
+      })
+      .mockResolvedValueOnce(okResult());
+    const open = await openMock();
+    open.mockResolvedValueOnce("C:\\keys\\vault.vkf");
+    const options = stubOptions();
+    const api = useUnlockFlow(options);
+
+    await api.doUnlock("/tmp/kf.verthys", false);
+
+    expect(mocks.initUnlock).toHaveBeenCalledTimes(2);
+    expect(mocks.initUnlock.mock.calls[1][5]).toBe("C:\\keys\\vault.vkf");
+    expect(api.keyfilePath.value).toBe("C:\\keys\\vault.vkf");
+    expect(options.showError).not.toHaveBeenCalled();
+  });
+
+  it("缺 keyfile 但用户取消选择：只调用一次并明确报错", async () => {
+    mocks.initUnlock.mockResolvedValueOnce({
+      ok: false as const,
+      code: VerthysErrorCode.E_KEYFILE_REQUIRED,
+      message: "该加密库已启用 keyfile",
+    });
+    const open = await openMock();
+    open.mockResolvedValueOnce(null);
+    const options = stubOptions();
+    const api = useUnlockFlow(options);
+
+    await api.doUnlock("/tmp/kf.verthys", false);
+
+    expect(mocks.initUnlock).toHaveBeenCalledTimes(1);
+    expect(options.showError).toHaveBeenCalled();
+  });
+
+});
+
+describe("useUnlockFlow 恢复码链路", () => {
+  it("新建成功：一次性恢复码进入待确认状态，清零后消失", async () => {
+    mocks.initCreate.mockResolvedValueOnce({ ok: true, value: "AAAA-BBBB" });
+    const options = stubOptions();
+    const api = useUnlockFlow(options);
+
+    await api.doUnlock("/tmp/new.verthys", true);
+    expect(api.pendingRecoveryCode.value).toBe("AAAA-BBBB");
+    expect(api.unlocking.value).toBe(false);
+
+    api.clearRecoveryCode();
+    expect(api.pendingRecoveryCode.value).toBeNull();
+  });
+
+  it("恢复解锁：恢复码作为第五参数传递且成功返回 true", async () => {
+    mocks.initUnlock.mockResolvedValueOnce(okResult());
+    const options = stubOptions();
+    const api = useUnlockFlow(options);
+
+    const ok = await api.doRecoveryUnlock("/tmp/v.verthys", "CODE-1234");
+    expect(ok).toBe(true);
+    expect(mocks.initUnlock.mock.calls[0][4]).toBe("CODE-1234");
+  });
+
+  it("恢复解锁失败：返回 false 且不显示成功提示", async () => {
+    mocks.initUnlock.mockResolvedValueOnce({
+      ok: false,
+      code: VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED,
+      message: "失败",
+    });
+    const options = stubOptions();
+    const api = useUnlockFlow(options);
+
+    const ok = await api.doRecoveryUnlock("/tmp/v.verthys", "CODE-1234");
+    expect(ok).toBe(false);
+    expect(options.showToast).not.toHaveBeenCalled();
+    expect(api.unlocking.value).toBe(false);
+  });
+});

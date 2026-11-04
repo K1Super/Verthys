@@ -15,7 +15,7 @@
   Emits: openChangeKeyDialog / exportBin
 -->
 <template>
-  <div class="sf-zone">
+  <div class="sf-zone sf-zone--main-font sf-zone--compact-title">
     <!-- 谱系坐标头 -->
     <header class="sf-head">
       <span class="sf-ghost" aria-hidden="true">01</span>
@@ -39,12 +39,12 @@
         </defs>
 
         <!-- 主开放弧（120°，顺时针慢旋） -->
-        <g class="sf-arc-spin-a">
+        <g class="sf-spin-cw sf-arc-spin-a">
           <path class="sf-singularity-arc" stroke="url(#sf-arc-a)" stroke-width="2.2"
             d="M 46 96 A 46 46 0 0 1 88 52" />
         </g>
         <!-- 次开放弧（80°，逆时针差速） -->
-        <g class="sf-arc-spin-b">
+        <g class="sf-spin-ccw sf-arc-spin-b">
           <path class="sf-singularity-arc" stroke="url(#sf-arc-b)" stroke-width="1.1"
             d="M 92 108 A 32 32 0 0 0 124 88" />
         </g>
@@ -83,38 +83,41 @@
         </div>
 
         <div class="sf-terminal-col">
-          <button
-            class="sf-terminal-block"
-            @click="$emit('openChangeKeyDialog')"
+          <ActionTerminal
+            label="修改全局密钥"
+            desc="更换全局访问密钥与密钥文件口令"
+            icon="key"
             :disabled="!globalKeyReady"
             v-tip="'修改全局访问密钥和密钥文件'"
-          >
-            <span class="sf-tb-label">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5"/></svg>
-              修改全局密钥
-            </span>
-            <span class="sf-tb-desc">更换全局访问密钥与密钥文件口令</span>
-          </button>
-          <button
-            class="sf-terminal-block"
-            @click="$emit('exportBin')"
+            @action="$emit('openChangeKeyDialog')"
+          />
+          <ActionTerminal
+            label="导出密钥文件"
+            desc="导出当前密钥文件至本地安全备份"
+            icon="download"
             :disabled="!globalKeyReady"
             v-tip="'导出当前密钥文件备份'"
-          >
-            <span class="sf-tb-label">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              导出密钥文件
-            </span>
-            <span class="sf-tb-desc">导出当前密钥文件至本地安全备份</span>
-          </button>
+            @action="$emit('exportBin')"
+          />
         </div>
       </div>
     </div>
+
+    <!-- 设备与 PCR / 恢复码策略（数据自包含；新恢复码交给 SecurityCenter 统一展示） -->
+    <DevicePcrPanel @recovery-rotated="onRecoveryRotated" />
+    <!-- keyfile 因子（D3）：启用/轮换/关闭，自包含数据与文件对话框 -->
+    <KeyfilePanel />
+    <!-- v4 模块不可逆删除（状态查询 + 二次确认） -->
+    <ModuleDangerZone />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from "vue";
+import ActionTerminal from "./ActionTerminal.vue";
+import DevicePcrPanel from "./DevicePcrPanel.vue";
+import KeyfilePanel from "./KeyfilePanel.vue";
+import ModuleDangerZone from "./ModuleDangerZone.vue";
 
 /**
  * GlobalKeySection Props
@@ -136,24 +139,27 @@ const segments = computed<string[]>(() => {
 /**
  * GlobalKeySection Emits
  */
-defineEmits<{
+const emit = defineEmits<{
   /** 打开修改全局密钥弹窗 */
   (e: "openChangeKeyDialog"): void;
   /** 导出当前密钥文件备份 */
   (e: "exportBin"): void;
+  /** 恢复码轮换成功：新码交由 SecurityCenter 顶层统一展示 */
+  (e: "recoveryRotated", code: string): void;
 }>();
+
+const onRecoveryRotated = (code: string) => {
+  emit("recoveryRotated", code);
+};
 </script>
 
 <style scoped>
-/* 弧流差速旋转（氛围动画 — idle-governance 通配治理覆盖） */
+/* 弧流差速旋转：共享关键帧由 section-field.css 承载，
+ * 本区只声明各自时长；原点沿用默认 84px 84px（idle-governance 通配治理覆盖） */
 .sf-arc-spin-a {
-  transform-origin: 84px 84px;
-  animation: sf-arc-cw 16s linear infinite;
+  --sf-spin-duration: 16s;
 }
 .sf-arc-spin-b {
-  transform-origin: 84px 84px;
-  animation: sf-arc-ccw 10s linear infinite;
+  --sf-spin-duration: 10s;
 }
-@keyframes sf-arc-cw { to { transform: rotate(360deg); } }
-@keyframes sf-arc-ccw { to { transform: rotate(-360deg); } }
 </style>

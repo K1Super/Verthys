@@ -424,12 +424,11 @@ int syscall_direct_init(void)
 }
 
 /*
- * 激活状态查询。
- * 读取发生在初始化屏障之后；激活标志只在初始化期间单向置位，此后不再变化。
+ * 激活状态查询（纯读，不触发初始化）。
+ * 调用方必须先经 syscall_direct_init 完成初始化；状态查询路径禁止产生副作用。
  */
 int syscall_direct_available(void)
 {
-    syscall_direct_init();
     return (InterlockedCompareExchange(&s_active, 0, 0) != 0) ? 1 : 0;
 }
 

@@ -21,13 +21,34 @@
  */
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+
+/// 应用日志大小轮转策略
+///
+/// 审计日志（`audit.log`）是 HMAC 链式防篡改文件，不在本策略范围内；
+/// 本策略只约束 `logs/<process>.log` 的结构化应用日志。
+#[derive(Debug, Clone, Copy)]
+pub struct LogRotation {
+    /// 单个日志文件达到该字节数后轮转
+    pub max_bytes: u64,
+    /// 保留的历史文件数量（不含当前文件）
+    pub keep_files: usize,
+}
+
+impl Default for LogRotation {
+    fn default() -> Self {
+        Self {
+            max_bytes: 8 * 1024 * 1024,
+            keep_files: 4,
+        }
+    }
+}
 
 /// 日志等级，JSON序列化为大写字符串，区分不同投递策略
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -108,11 +129,20 @@ impl LogDaemon {
     /// 创建日志守护器并启动后台IO消费线程
     /// capacity：有界队列容量；log_path：日志最终落盘路径
     pub fn new(capacity: usize, log_path: PathBuf) -> Self {
+        Self::new_with_rotation(capacity, log_path, LogRotation::default())
+    }
+
+    /// 创建日志守护器并指定轮转策略（测试注入小阈值，生产使用默认值）
+    pub(crate) fn new_with_rotation(
+        capacity: usize,
+        log_path: PathBuf,
+        rotation: LogRotation,
+    ) -> Self {
         let (sender, receiver) = bounded::<LogEntry>(capacity);
 
         let handle = thread::Builder::new()
             .name("log-consumer".to_string())
-            .spawn(move || Self::consumer_loop(receiver, log_path))
+            .spawn(move || Self::consumer_loop(receiver, log_path, rotation))
             .expect("启动日志消费后台线程失败");
 
         let inner = LogDaemonInner {
@@ -158,36 +188,35 @@ impl LogDaemon {
     }
 
     /// 后台消费循环：持续读取队列、序列化JSON、追加写入文件
-    /// 文件写入失败会尝试重新打开句柄，主路径失效自动降级临时目录文件
-    fn consumer_loop(receiver: Receiver<LogEntry>, log_path: PathBuf) {
+    /// 文件写入失败会尝试重新打开句柄，主路径失效自动降级临时目录文件；
+    /// 达到轮转阈值时关闭句柄、滚动历史文件后重新打开当前文件。
+    fn consumer_loop(receiver: Receiver<LogEntry>, log_path: PathBuf, rotation: LogRotation) {
         if let Some(parent) = log_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .ok();
+        let mut active_path = log_path.clone();
+        let mut file = open_append(&active_path);
+        let mut written = file
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .map(|m| m.len())
+            .unwrap_or(0);
 
         // 主文件打开失败，降级到系统临时目录备用日志
         if file.is_none() {
-            let fallback = std::env::temp_dir().join(
-                log_path
-                    .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("verthys_fallback.log")),
-            );
-            let _ = std::fs::create_dir_all(fallback.parent().unwrap());
-            file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&fallback)
-                .ok();
+            active_path = fallback_log_path(&log_path);
+            file = open_append(&active_path);
+            written = file
+                .as_ref()
+                .and_then(|f| f.metadata().ok())
+                .map(|m| m.len())
+                .unwrap_or(0);
 
             #[cfg(windows)]
             output_debug_string(&format!(
                 "主日志文件打开失败，降级路径：{}",
-                fallback.display()
+                active_path.display()
             ));
         }
 
@@ -197,25 +226,51 @@ impl LogDaemon {
             };
             let line = format!("{}\n", json_str);
 
-            match &mut file {
-                Some(f) => {
-                    if f.write_all(line.as_bytes()).is_err() {
-                        file = OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&log_path)
-                            .ok();
+            // 写入前轮转：保留当前文件历史，避免单文件无限增长
+            if rotation.max_bytes > 0
+                && written > 0
+                && written.saturating_add(line.len() as u64) > rotation.max_bytes
+            {
+                // 先释放当前句柄：Windows 不允许重命名打开中的文件
+                drop(file.take());
+                if rotate_log(&active_path, rotation.keep_files) {
+                    written = 0;
+                }
+                file = open_append(&active_path);
+            }
+
+            if file.is_none() {
+                file = open_append(&active_path);
+                if file.is_none() && active_path != log_path {
+                    file = open_append(&log_path);
+                    if file.is_some() {
+                        active_path = log_path.clone();
+                        written = file
+                            .as_ref()
+                            .and_then(|f| f.metadata().ok())
+                            .map(|m| m.len())
+                            .unwrap_or(0);
                     }
                 }
-                None => {
-                    file = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&log_path)
-                        .ok();
-                    if let Some(f) = &mut file {
-                        let _ = f.write_all(line.as_bytes());
+                if file.is_none() {
+                    let fallback = fallback_log_path(&log_path);
+                    file = open_append(&fallback);
+                    if file.is_some() {
+                        active_path = fallback;
+                        written = file
+                            .as_ref()
+                            .and_then(|f| f.metadata().ok())
+                            .map(|m| m.len())
+                            .unwrap_or(0);
                     }
+                }
+            }
+
+            if let Some(f) = &mut file {
+                if f.write_all(line.as_bytes()).is_ok() {
+                    written = written.saturating_add(line.len() as u64);
+                } else {
+                    file = None;
                 }
             }
         }
@@ -225,6 +280,62 @@ impl LogDaemon {
             let _ = f.flush();
         }
     }
+}
+
+/// 打开追加写日志文件；失败返回 None 由调用方降级
+fn open_append(path: &Path) -> Option<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+}
+
+/// 主路径不可写时的临时目录备用文件
+fn fallback_log_path(log_path: &Path) -> PathBuf {
+    std::env::temp_dir().join(
+        log_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("verthys_fallback.log")),
+    )
+}
+
+/// 滚动日志文件：`app.log` → `app.1.log` → `app.2.log` …
+///
+/// 调用方必须先关闭当前文件句柄（Windows 不允许重命名打开中的文件）。
+/// 返回 true 表示当前文件已成功转为历史文件；失败时调用方应继续追加当前文件，
+/// 不因轮转失败丢失任何日志。
+fn rotate_log(path: &Path, keep_files: usize) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    if keep_files == 0 {
+        return std::fs::remove_file(path).is_ok();
+    }
+
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("log");
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("log");
+    let rotated = |index: usize| {
+        path.with_file_name(format!("{}.{}.{}", stem, index, ext))
+    };
+
+    let _ = std::fs::remove_file(rotated(keep_files));
+    for index in (1..keep_files).rev() {
+        let from = rotated(index);
+        if from.exists() {
+            let _ = std::fs::rename(from, rotated(index + 1));
+        }
+    }
+    std::fs::rename(path, rotated(1)).is_ok()
 }
 
 impl Clone for LogDaemon {
@@ -411,5 +522,67 @@ mod tests {
         let e = LogEntry::new(LogLevel::Debug, "core", "test msg");
         assert_eq!(e.level, LogLevel::Debug);
         assert_eq!(e.module, "core");
+    }
+
+    #[test]
+    fn test_log_rotation_bounds_file_count() {
+        let dir = std::env::temp_dir().join(format!(
+            "verthys_log_rotation_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("main.log");
+        let rotation = LogRotation {
+            max_bytes: 200,
+            keep_files: 2,
+        };
+        let daemon = LogDaemon::new_with_rotation(128, log_path.clone(), rotation);
+        let sender = daemon.sender();
+
+        for index in 0..20 {
+            sender.info("rotation", format!("message-{index}-{}", "x".repeat(40)));
+        }
+        thread::sleep(Duration::from_millis(200));
+        assert!(daemon.flush_and_shutdown(Duration::from_secs(2)));
+        // 队列清空不代表消费线程已写完最后一行；留出落盘窗口
+        thread::sleep(Duration::from_millis(100));
+
+        let logs: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("log"))
+            .collect();
+        // 当前文件 + 两个历史文件；更老的已删除
+        assert_eq!(logs.len(), 3, "轮转后文件数应受 keep_files 约束: {logs:?}");
+        assert!(log_path.exists(), "当前文件必须继续存在");
+        assert!(dir.join("main.1.log").exists(), "最近历史文件必须存在");
+        assert!(dir.join("main.2.log").exists(), "第二历史文件必须存在");
+        assert!(
+            !dir.join("main.3.log").exists(),
+            "超出 keep_files 的历史文件必须被删除"
+        );
+
+        let current = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(
+            current.lines().all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok()),
+            "轮转不得破坏 JSON 行结构"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_rotate_log_keep_zero_truncates() {
+        let dir = std::env::temp_dir().join(format!(
+            "verthys_log_rotation_zero_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.log");
+        std::fs::write(&path, b"payload").unwrap();
+        assert!(rotate_log(&path, 0));
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -71,18 +71,17 @@
  * 与 ntddk.h / winnt.h 的最新定义保持二进制兼容（结构布局稳定）。
  */
 
-/* ProcessMitigationPolicy 枚举值（与 winnt.h 一致） */
+/* ProcessMitigationPolicy 枚举值（与 winnt.h / PROCESS_MITIGATION_POLICY 一致）。
+ * 数值错位会把结构体传给另一策略：轻则 ERROR_INVALID_PARAMETER，重则
+ * 启用了完全不同的策略（历史上此处曾把 ChildProcess 写成 6、ImageLoad
+ * 写成 8，实际对应 ExtensionPointDisable 与 SignaturePolicy）。 */
 typedef enum _PROCESS_MITIGATION_POLICY_VERTHYS {
-    ProcessDEPPolicy_VERTHYS                = 0,
-    ProcessASLRPolicy_VERTHYS               = 1,
     ProcessDynamicCodePolicy_VERTHYS        = 2,
     ProcessStrictHandleCheckPolicy_VERTHYS  = 3,
-    ProcessSystemCallDisablePolicy_VERTHYS  = 4,  /* Win10 1709+ */
-    ProcessExtensionPointDisablePolicy_VERTHYS = 5,
-    ProcessChildProcessPolicy_VERTHYS       = 6,  /* Win10 1709+ */
-    ProcessPayloadOverridePolicy_VERTHYS    = 7,
-    ProcessImageLoadPolicy_VERTHYS          = 8,  /* Win10 1709+ */
-    ProcessMaxMitigationPolicy_VERTHYS      = 9
+    ProcessSystemCallDisablePolicy_VERTHYS  = 4,
+    ProcessExtensionPointDisablePolicy_VERTHYS = 6,
+    ProcessImageLoadPolicy_VERTHYS          = 10,
+    ProcessChildProcessPolicy_VERTHYS       = 13
 } PROCESS_MITIGATION_POLICY_VERTHYS;
 
 /* ProcessSystemCallDisablePolicy 结构（4 字节联合体） */
@@ -119,6 +118,43 @@ typedef struct _PROCESS_MITIGATION_IMAGE_LOAD_POLICY_VERTHYS {
         };
     };
 } PROCESS_MITIGATION_IMAGE_LOAD_POLICY_VERTHYS;
+
+/* ProcessDynamicCodePolicy 结构（4 字节联合体） */
+typedef struct _PROCESS_MITIGATION_DYNAMIC_CODE_POLICY_VERTHYS {
+    union {
+        DWORD Flags;
+        struct {
+            DWORD ProhibitDynamicCode            : 1;
+            DWORD AllowThreadOptOut              : 1;
+            DWORD AllowRemoteDowngrade           : 1;
+            DWORD AuditProhibitDynamicCode       : 1;
+            DWORD ReservedFlags                  : 28;
+        };
+    };
+} PROCESS_MITIGATION_DYNAMIC_CODE_POLICY_VERTHYS;
+
+/* ProcessStrictHandleCheckPolicy 结构（4 字节联合体） */
+typedef struct _PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY_VERTHYS {
+    union {
+        DWORD Flags;
+        struct {
+            DWORD RaiseExceptionOnInvalidHandleReference : 1;
+            DWORD HandleExceptionsPermanentlyEnabled     : 1;
+            DWORD ReservedFlags                          : 30;
+        };
+    };
+} PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY_VERTHYS;
+
+/* ProcessExtensionPointDisablePolicy 结构（4 字节联合体） */
+typedef struct _PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY_VERTHYS {
+    union {
+        DWORD Flags;
+        struct {
+            DWORD DisableExtensionPoints : 1;
+            DWORD ReservedFlags          : 31;
+        };
+    };
+} PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY_VERTHYS;
 
 /* SetDefaultDllDirectories 标志 */
 #ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
@@ -375,4 +411,74 @@ void process_sandbox_set_active_attrs(uint32_t attrs)
      */
     s_active_attrs = attrs;
     s_initialized = 1;
+}
+
+int process_sandbox_verify_os(uint32_t *out_verified_mask)
+{
+    uint32_t mask = 0;
+    PROCESS_MITIGATION_CHILD_PROCESS_POLICY_VERTHYS child;
+    PROCESS_MITIGATION_IMAGE_LOAD_POLICY_VERTHYS image_load;
+    PROCESS_MITIGATION_DYNAMIC_CODE_POLICY_VERTHYS dynamic_code;
+    PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY_VERTHYS strict_handle;
+    PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY_VERTHYS extension_point;
+
+    if (out_verified_mask == NULL) return -1;
+    *out_verified_mask = 0;
+
+    memset(&child, 0, sizeof(child));
+    memset(&image_load, 0, sizeof(image_load));
+    memset(&dynamic_code, 0, sizeof(dynamic_code));
+    memset(&strict_handle, 0, sizeof(strict_handle));
+    memset(&extension_point, 0, sizeof(extension_point));
+
+    /* 任一项查询失败即视为“无法确认”：部分结果不得用于宣称阻断。
+     * System32 优先由 SetDefaultDllDirectories 固定，系统不提供回读，
+     * 因此不在本函数结果中。 */
+    if (!GetProcessMitigationPolicy(GetCurrentProcess(),
+                                    ProcessChildProcessPolicy_VERTHYS,
+                                    &child, sizeof(child))) {
+        return -1;
+    }
+    if (!GetProcessMitigationPolicy(GetCurrentProcess(),
+                                    ProcessImageLoadPolicy_VERTHYS,
+                                    &image_load, sizeof(image_load))) {
+        return -1;
+    }
+    if (!GetProcessMitigationPolicy(GetCurrentProcess(),
+                                    ProcessDynamicCodePolicy_VERTHYS,
+                                    &dynamic_code, sizeof(dynamic_code))) {
+        return -1;
+    }
+    if (!GetProcessMitigationPolicy(GetCurrentProcess(),
+                                    ProcessStrictHandleCheckPolicy_VERTHYS,
+                                    &strict_handle, sizeof(strict_handle))) {
+        return -1;
+    }
+    if (!GetProcessMitigationPolicy(GetCurrentProcess(),
+                                    ProcessExtensionPointDisablePolicy_VERTHYS,
+                                    &extension_point, sizeof(extension_point))) {
+        return -1;
+    }
+
+    if (child.NoChildProcessCreation) {
+        mask |= SANDBOX_ATTR_PROCESS_CREATE_DISABLE;
+    }
+    if (image_load.NoRemoteImages) {
+        mask |= SANDBOX_ATTR_IMAGE_NO_REMOTE;
+    }
+    if (image_load.NoLowMandatoryLabelImages) {
+        mask |= SANDBOX_ATTR_IMAGE_NO_LOW_LABEL;
+    }
+    if (dynamic_code.ProhibitDynamicCode) {
+        mask |= SANDBOX_ATTR_ACG;
+    }
+    if (strict_handle.RaiseExceptionOnInvalidHandleReference) {
+        mask |= SANDBOX_ATTR_STRICT_HANDLE;
+    }
+    if (extension_point.DisableExtensionPoints) {
+        mask |= SANDBOX_ATTR_EXTENSION_POINT;
+    }
+
+    *out_verified_mask = mask;
+    return 0;
 }

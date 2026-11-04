@@ -30,17 +30,16 @@ typedef enum {
  * Unlock 格式门禁对非 V3 头一律 VERTHYS_ERR_FORMAT（"V3 不读 V2 文件"）。 */
 typedef enum {
     VERTHYS_FMT_NONE = 0,  /* 未挂载容器（Init 零态）或未知/非法格式 */
-    VERTHYS_FMT_V3   = 3   /* V3：CNG 内核托管 + LSM + 法定人数超级块 */
+    VERTHYS_FMT_V3   = 3,  /* V3：CNG 内核托管 + LSM + 法定人数超级块 */
+    VERTHYS_FMT_V4   = 4   /* V4：双包裹 AND + A/B 元数据 + 追加数据区 */
 } VerthysContainerVersion;
 
 /* 前向声明：V3 运行时上下文（api/verthys_v3_lifecycle.h） */
 struct VerthysContextV3;
-
-/* 安全分配器（VerthysContext 密钥相关字段）
- * 密钥相关结构专用隔离堆：VirtualAlloc 区段 + PAGE_GUARD 边界页 +
- * VirtualLock 锁页 + 释放前清零；全局预算记账。
- * Verthys_Init 创建 / Verthys_Deinit 销毁。 */
-typedef struct SecureAllocator SecureAllocator;
+/* 前向声明：v4 会话（crypto/v4/vty_keymanager_v4.h） */
+struct VtyVault;
+/* 前向声明：D9 轮换作业（crypto/v4/vty_rotate_v4.h） */
+struct VtyRotateJob;
 
 /* 记录名称长度上限（API 边界钳制，杜绝 uint16 截断导致的
  * 密钥派生/索引存储分裂） */
@@ -76,16 +75,20 @@ struct VerthysContext {
      * 实例身份锚点检测失效。 */
     struct VerthysContextV3 *v3;
 
+    /* v4 会话（堆实例）。fmt_version == VERTHYS_FMT_V4 且已解锁时非 NULL；
+     * Lock/Deinit 负责清零并释放。v4 路径不借用 v3 的 LSM/Extent。 */
+    struct VtyVault *v4;
+
+    /* D9 全库 DEK 轮换作业（堆实例）。非 NULL 时 v4 源库处于只读态；
+     * Lock/Deinit/紧急熔断/adopt 必须调用 vty_rotate_abort 释放。 */
+    struct VtyRotateJob *rotate;
+
     /* CNG 内核托管密钥组（目标态密钥层次）
      * MEK/A/B/C 全部经 BCryptGenerateSymmetricKey 导入内核，用户态仅持
      * BCRYPT_KEY_HANDLE 句柄（不可导出）。经 verthys_cng_km_* 接口访问；
      * Lock/Deinit/紧急熔断 → verthys_cng_km_destroy_all（内核态密钥
      * 不可恢复）。 */
     VerthysCngKeyManager cng_keys;    /* CNG 内核密钥组 + 生命周期状态机 */
-
-    /* 密钥相关结构专用隔离堆（目标态）。
-     * Init 创建 / Deinit 销毁。 */
-    SecureAllocator *secure_alloc;
 
     /* 用户预设（公共枚举 VerthysPreset；V3 权威值持久化于超级块扩展 TLV，
      * 解锁时裁决回填——GetContainerInfo 数据源） */

@@ -11,11 +11,9 @@
    命名空间 sf-*（spectrum field）：
      .sf-zone      分区根（无底板，主线 + 左轨留位）
      .sf-head      谱系坐标头（幽灵序号 + 坐标 + 标题 + 摘要）
-     .sf-meridian  会话谱线（顶栏：状态脉动 + 端子，水平丝线收尾）
-     .sf-terminal  接线端子（无底色文字动作，hover 能量丝点亮）
-     .sf-node      图标节点（透明圆环，hover 亮起）
-     .sf-orbit     轨道条目（模块行 = 能量丝上的轨道体）
-     .sf-toggle    能级跃迁开关（节点沿能级轨道滑移，非盒子开关）
+     .sf-meridian  会话谱线（顶栏：状态脉动 + 动作节点，水平丝线收尾）
+     .sf-act       动作节点（纯图标机械刻度键，hover 双环校准）
+     .sf-orbit     轨道条目（模块行 = 双行标识 + 分段读数 + 动作节点组）
      .sf-anchor    奇点锚定布局（星座 SVG + 数据 + 端子纵列）
 
    配套：useGlobalIdleScheduler 档位类（idle-governance.css）；
@@ -61,6 +59,16 @@
   background-position: center 12%, center 50%, center 88%;
   background-repeat: no-repeat;
   pointer-events: none;
+}
+
+/* 主字体分区（用户裁定）：本分区内坐标、序号与状态一律使用项目主字体，
+ * 仅标记分区生效；其余分区保留既有 mono 数据语义 */
+.sf-zone--main-font :is(.sf-ghost, .sf-coord, .sf-orbit-idx, .sf-orbit-status) {
+  font-family: var(--font);
+}
+/* 紧凑标题分区：分区标题字号与子分区标题（设备与 PCR 等）保持同一级 */
+.sf-zone--compact-title .sf-title {
+  font-size: 13px;
 }
 
 /* ============================================================
@@ -162,7 +170,7 @@
 .sf-meridian-actions {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 8px;
   flex: none;
 }
 /* 状态脉动点：青绿呼吸（就绪）/ 琥珀静止（未就绪） */
@@ -206,129 +214,197 @@
 }
 
 /* ============================================================
-   接线端子 — 无底色文字动作（hover 能量丝点亮）
-   ============================================================ */
-.sf-terminal {
+   动作节点 — 纯图标机械刻度键（悬浮双环校准）
+   ============================================================
+   无底色 / 无阴影 / 无渐变：28px 圆形命中区，外环为上下两段离散
+   弧线，悬浮旋入 90° 并转为强调色；内环四分之一弧由内向外落位，
+   构成加工件刻度盘式的对位感。按压只做 0.94 缩放落位，
+   不产生水波纹、光晕或背景块。 */
+/* 动作节点槽：原生禁用控件不派发指针事件，悬浮提示由外层槽位接收，
+ * 使不可用阶段仍能解释节点语义 */
+.sf-act-slot {
   display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  padding: 7px 2px;
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12px;
-  letter-spacing: 0.12em;
-  color: var(--text-muted);
-  position: relative;
-  transition: color 0.32s var(--ease);
-}
-/* 端子记号：前导能量短线
- * 固定 22px 占位 + 变换拉伸（常态 14px 视觉长度）：悬浮只改变线的
- * 拉伸比例，不改变按钮盒宽 —— 相邻端子绝不会被挤压或位移 */
-.sf-terminal::before {
-  content: "";
-  width: 22px;
-  height: 1px;
-  background: rgba(148, 160, 178, 0.4);
-  transform: scaleX(0.636);
-  transform-origin: right center;
-  transition: transform 0.32s var(--ease), background 0.32s var(--ease);
-}
-/* 底部能量丝：hover 从左点亮 */
-.sf-terminal::after {
-  content: "";
-  position: absolute;
-  left: 2px;
-  bottom: 2px;
-  width: calc(100% - 4px);
-  height: 1px;
-  background: linear-gradient(90deg, rgba(0, 212, 255, 0.75), rgba(0, 255, 170, 0.4));
-  transform: scaleX(0);
-  transform-origin: left center;
-  transition: transform 0.38s var(--ease);
-}
-.sf-terminal:hover:not(:disabled) {
-  color: var(--accent);
-}
-.sf-terminal:hover:not(:disabled)::before {
-  transform: scaleX(1);
-  background: rgba(0, 212, 255, 0.8);
-}
-.sf-terminal:hover:not(:disabled)::after {
-  transform: scaleX(1);
-}
-.sf-terminal:disabled {
-  opacity: 0.32;
-  cursor: not-allowed;
-}
-.sf-terminal svg {
-  width: 14px;
-  height: 14px;
   flex: none;
 }
-/* 危险域端子（立即锁定）：琥珀系 */
-.sf-terminal--warn { color: rgba(255, 178, 88, 0.8); }
-.sf-terminal--warn::before { background: rgba(255, 170, 0, 0.45); }
-.sf-terminal--warn::after {
-  background: linear-gradient(90deg, rgba(255, 170, 0, 0.7), rgba(255, 120, 80, 0.4));
+.sf-act-slot:has(> .sf-act:disabled) {
+  cursor: not-allowed;
 }
-.sf-terminal--warn:hover:not(:disabled) { color: #ffb056; }
-.sf-terminal--warn:hover:not(:disabled)::before { background: rgba(255, 170, 0, 0.9); }
-/* 更新端子（检查/安装）：青色系，与危险域琥珀区分；无发光无阴影 */
-.sf-terminal--update { color: rgba(0, 212, 255, 0.82); }
-.sf-terminal--update::before { background: rgba(0, 212, 255, 0.48); }
-.sf-terminal--update::after {
-  background: linear-gradient(90deg, rgba(0, 212, 255, 0.78), rgba(0, 255, 170, 0.42));
+.sf-act {
+  --sf-act-accent: rgba(0, 212, 255, 0.85);
+  --sf-act-line: rgba(148, 160, 178, 0.32);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  /* 纯图标失去文字提示后需保持静息可辨，取次文字色而非 muted */
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color 0.3s var(--ease), transform 0.18s var(--ease);
 }
-.sf-terminal--update:hover:not(:disabled) { color: #6ce7ff; }
-.sf-terminal--update:hover:not(:disabled)::before { background: rgba(0, 212, 255, 0.92); }
+/* 外环：上下两段离散弧（非闭合描边），悬浮旋转对位 */
+.sf-act::before {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  border-top-color: var(--sf-act-line);
+  border-bottom-color: var(--sf-act-line);
+  transition: transform 0.46s var(--ease), border-color 0.3s var(--ease);
+  pointer-events: none;
+}
+/* 内环：单段四分之一弧，悬浮时由内向外落位 */
+.sf-act::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  border-left-color: var(--sf-act-accent);
+  opacity: 0;
+  transform: rotate(-38deg) scale(0.82);
+  transition: opacity 0.34s var(--ease), transform 0.46s var(--ease);
+  pointer-events: none;
+}
+.sf-act:hover:not(:disabled) {
+  color: var(--sf-act-accent);
+}
+.sf-act:hover:not(:disabled)::before {
+  border-top-color: var(--sf-act-accent);
+  border-bottom-color: var(--sf-act-accent);
+  transform: rotate(90deg);
+}
+.sf-act:hover:not(:disabled)::after {
+  opacity: 0.75;
+  transform: rotate(0deg) scale(1);
+}
+.sf-act:active:not(:disabled) {
+  transform: scale(0.94);
+}
+.sf-act:focus-visible {
+  outline: 1px solid var(--sf-act-accent);
+  outline-offset: 2px;
+}
+.sf-act:disabled {
+  opacity: 0.3;
+  pointer-events: none;
+}
+/* 进行中不可取消：保持满亮以便读取量表；仅禁用交互 */
+.sf-act.is-progressing { opacity: 1; cursor: not-allowed; }
+/* 检查 / 移交阶段：保留可感知的活动亮度 */
+.sf-act.is-busy { opacity: 0.6; cursor: not-allowed; }
+.sf-act svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+/* 更新节点：青色系，与危险域琥珀区分 */
+.sf-act--update {
+  color: rgba(0, 212, 255, 0.82);
+  --sf-act-line: rgba(0, 212, 255, 0.3);
+}
+/* 取消下载：动作转为中止语义，强调色切至琥珀 */
+.sf-act--update.is-cancel {
+  color: rgba(255, 178, 88, 0.9);
+  --sf-act-accent: rgba(255, 170, 0, 0.88);
+  --sf-act-line: rgba(255, 150, 0, 0.36);
+}
+/* 危险域节点（立即锁定）：琥珀系 */
+.sf-act--warn {
+  color: rgba(255, 178, 88, 0.8);
+  --sf-act-accent: rgba(255, 178, 88, 0.92);
+  --sf-act-line: rgba(255, 170, 0, 0.34);
+}
+/* 不可逆销毁节点（删除模块）：危险红，与警示琥珀区分 */
+.sf-act--danger {
+  color: rgba(255, 120, 120, 0.82);
+  --sf-act-accent: rgba(255, 71, 87, 0.9);
+  --sf-act-line: rgba(255, 71, 87, 0.32);
+}
+/* 成功语义节点：青绿系（保存应用 / 恢复槽已绑定） */
+.sf-act--success {
+  --sf-act-accent: rgba(0, 255, 180, 0.85);
+  --sf-act-line: rgba(0, 255, 170, 0.26);
+}
+/* 常驻点亮：稳定状态（恢复槽已绑定 / 密钥保护开启）不依赖悬浮表达 */
+.sf-act.is-latched {
+  color: var(--sf-act-accent);
+}
+.sf-act.is-latched::before {
+  border-top-color: var(--sf-act-accent);
+  border-bottom-color: var(--sf-act-accent);
+  opacity: 0.75;
+}
+/* 更新可用标记：右上角微点，仅呼吸透明度，无光晕 */
+.sf-act-badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: rgba(0, 212, 255, 0.95);
+  animation: sf-act-badge 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes sf-act-badge {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+.sf-act .is-spinning {
+  animation: sf-act-spin 1.5s linear infinite;
+}
+@keyframes sf-act-spin {
+  to { transform: rotate(360deg); }
+}
 
-/* 下载进度量表：主刻度 4px / 次刻度 2px，沿端子下沿等距分布。
- * 固定 30 刻度且整格点亮 —— 刻度身份不随百分比增长重排，
+/* 环形机械量表：30 枚径向刻度绕图标排布。
+ * 固定角度与整格点亮 —— 刻度身份不随百分比增长沿圆周重排，
  * 首尾端桩与每五格主刻度构成节拍；颜色沿全量程固定映射，
  * 避免连续填充形成液态进度条与逐帧变色。 */
-.sf-update-scale {
+.sf-update-dial {
   position: absolute;
-  left: 2px;
-  right: 2px;
-  bottom: 0;
-  height: 4px;
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
+  inset: -3px;
   pointer-events: none;
-  animation: sf-scale-in 160ms ease-out both;
+  animation: sf-dial-in 0.18s ease-out both;
 }
 .sf-update-tick {
+  position: absolute;
+  left: 50%;
+  top: 50%;
   width: 1px;
-  height: 2px;
+  height: 3px;
+  margin: -1.5px 0 0 -0.5px;
   background-color: rgba(148, 160, 178, 0.22);
-  transform: scaleY(0.6);
-  transform-origin: bottom;
-  transition: background-color 160ms linear, transform 200ms cubic-bezier(0.2, 1, 0.34, 1);
+  transform: rotate(var(--sf-tick-angle)) translateY(-14.5px) scaleY(0.55);
+  transition: background-color 0.16s linear, transform 0.2s cubic-bezier(0.2, 1, 0.34, 1);
 }
 .sf-update-tick.is-major {
   height: 4px;
+  margin-top: -2px;
   background-color: rgba(148, 160, 178, 0.3);
 }
 .sf-update-tick.is-lit {
   background-color: var(--sf-tick-color, rgba(0, 212, 255, 0.8));
-  transform: scaleY(1);
+  transform: rotate(var(--sf-tick-angle)) translateY(-14.5px) scaleY(1);
 }
-/* 下载中解除禁用态的整键压暗，进度刻度与百分比必须保持可读 */
-.sf-terminal--update.is-progressing {
-  opacity: 1;
-  color: rgba(0, 212, 255, 0.92);
-  cursor: not-allowed;
-}
-.sf-terminal--update.is-progressing::after { transform: scaleX(0); }
-@keyframes sf-scale-in {
+@keyframes sf-dial-in {
   from { opacity: 0; }
   to { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .sf-update-scale { animation: none; }
+  .sf-act,
+  .sf-act::before,
+  .sf-act::after { transition: none; }
+  .sf-act .is-spinning,
+  .sf-act-badge,
+  .sf-update-dial { animation: none; }
   .sf-update-tick { transition: none; }
 }
 
@@ -395,33 +471,7 @@
 .sf-terminal-block svg { width: 14px; height: 14px; flex: none; }
 
 /* ============================================================
-   图标节点 — 透明圆环，hover 亮起
-   ============================================================ */
-.sf-node {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background: none;
-  border: 1px solid transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: color 0.3s var(--ease), border-color 0.3s var(--ease);
-}
-.sf-node svg { width: 14px; height: 14px; }
-.sf-node:hover:not(:disabled) {
-  color: var(--accent);
-  border-color: rgba(0, 212, 255, 0.38);
-}
-.sf-node:disabled {
-  opacity: 0.28;
-  cursor: not-allowed;
-}
-
-/* ============================================================
-   轨道条目 — 模块行 = 能量丝上的轨道体（无行底色）
+   轨道条目 — 模块行 = 双行标识 + 分段读数 + 动作节点组
    ============================================================ */
 .sf-formation {
   display: flex;
@@ -431,8 +481,8 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 14px 4px 14px 0;
+  gap: 18px;
+  padding: 12px 4px 12px 0;
   cursor: default;
 }
 /* 轨道丝线：条目底部微光水平丝（装饰性能量丝，非卡片边框） */
@@ -463,115 +513,85 @@
   );
 }
 .sf-orbit:last-child::after { background: none; }
-/* 模块索引：等宽两位数（轨道序号） */
+/* 模块索引：mono 坐标，hover 点亮 */
 .sf-orbit-idx {
+  width: 18px;
   font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.18em;
-  color: var(--text-muted);
-  transition: color 0.3s var(--ease);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: rgba(148, 160, 178, 0.42);
   flex: none;
+  transition: color 0.3s var(--ease);
 }
-.sf-orbit:hover .sf-orbit-idx { color: rgba(0, 212, 255, 0.85); }
+.sf-orbit:hover .sf-orbit-idx { color: rgba(0, 212, 255, 0.82); }
+/* 双行标识：名称 + 状态读数（不再用竖标切分名称与状态） */
+.sf-orbit-id {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
 .sf-orbit-name {
   font-size: 13px;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.14em;
+  line-height: 1.2;
   color: var(--text-primary);
   flex: none;
 }
-/* 状态光谱刻度：短竖标 + mono 状态文 */
-.sf-orbit-state {
+/* 状态读数：离散菱标 + 主状态词 + 密级/恢复槽分段，段间以间隙分组 */
+.sf-orbit-status {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.12em;
+  line-height: 1.1;
+}
+.sf-status-mark {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  transform: rotate(45deg);
+  background: rgba(148, 160, 178, 0.4);
+  transition: background 0.4s var(--ease);
+}
+.sf-orbit-state-word {
   color: var(--text-muted);
+  transition: color 0.4s var(--ease);
 }
-.sf-state-tick {
-  width: 2px;
-  height: 12px;
-  border-radius: 1px;
-  background: rgba(148, 160, 178, 0.5);
-  transition: background 0.4s var(--ease), box-shadow 0.4s var(--ease);
+.sf-orbit-state-meta {
+  color: rgba(148, 160, 178, 0.5);
+  transition: color 0.4s var(--ease);
 }
-/* 状态色语义（与量子面板/引导区一致） */
-.sf-orbit.state-active .sf-state-tick {
-  background: #00ffaa;
-  box-shadow: 0 0 5px rgba(0, 255, 170, 0.55);
-}
-.sf-orbit.state-active .sf-orbit-state { color: rgba(0, 255, 170, 0.85); }
-.sf-orbit.state-set .sf-state-tick {
-  background: #00d4ff;
-  box-shadow: 0 0 5px rgba(0, 212, 255, 0.5);
-}
-.sf-orbit.state-set .sf-orbit-state { color: rgba(0, 212, 255, 0.85); }
-.sf-orbit.state-empty .sf-state-tick { background: #ffaa00; }
-.sf-orbit.state-empty .sf-orbit-state { color: rgba(255, 170, 0, 0.85); }
-.sf-orbit.state-off .sf-state-tick { background: rgba(148, 160, 178, 0.5); }
+/* 恢复槽已绑定 / 未绑定：青绿与琥珀只落在恢复槽读数上 */
+.sf-orbit-state-meta.is-ok { color: rgba(0, 255, 170, 0.62); }
+.sf-orbit-state-meta.is-alert { color: rgba(255, 170, 0, 0.78); }
+/* 状态语义：菱标与主状态词同步，不引入辉光 */
+.sf-orbit.state-active .sf-status-mark { background: #00ffaa; }
+.sf-orbit.state-active .sf-orbit-state-word { color: rgba(0, 255, 170, 0.82); }
+.sf-orbit.state-set .sf-status-mark { background: #00d4ff; }
+.sf-orbit.state-set .sf-orbit-state-word { color: rgba(0, 212, 255, 0.82); }
+.sf-orbit.state-empty .sf-status-mark { background: #ffaa00; }
+.sf-orbit.state-empty .sf-orbit-state-word { color: rgba(255, 170, 0, 0.82); }
+.sf-orbit.state-off .sf-status-mark { background: rgba(148, 160, 178, 0.42); }
+.sf-orbit.state-off .sf-orbit-state-word { color: rgba(148, 160, 178, 0.62); }
 
 .sf-orbit-actions {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex: none;
 }
 
-/* ============================================================
-   能级跃迁开关 — 节点沿能级轨道滑移（非盒子开关）
-   ============================================================ */
-.sf-toggle {
-  position: relative;
-  display: inline-block;
-  width: 38px;
-  height: 20px;
-  cursor: pointer;
-  user-select: none;
-}
-.sf-toggle.disabled { opacity: 0.38; cursor: not-allowed; }
-.sf-toggle input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
-/* 能级轨道：水平微光线（非盒子） */
-.sf-toggle-track {
-  position: absolute;
-  left: 2px;
-  right: 2px;
-  top: 9px;
-  height: 2px;
-  border-radius: 1px;
-  background: rgba(148, 160, 178, 0.28);
-  transition: background 0.4s var(--ease);
-}
-/* 跃迁节点：能级间滑移的量子点 */
-.sf-toggle-node {
-  position: absolute;
-  left: 0;
-  top: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: rgba(148, 160, 178, 0.75);
-  transition:
-    transform 0.42s cubic-bezier(0.34, 1.4, 0.44, 1),
-    background 0.4s var(--ease);
-}
-/* 激活：轨道充能渐变 + 节点跃迁至高能级（纯色节点，无辉光阴影） */
-.sf-toggle input:checked ~ .sf-toggle-track {
-  background: linear-gradient(90deg, rgba(0, 212, 255, 0.15), rgba(0, 212, 255, 0.65));
-}
-.sf-toggle input:checked ~ .sf-toggle-node {
-  transform: translateX(20px);
-  background: #00d4ff;
-}
-/* 键盘焦点：轨道外轮廓显式可见（不依赖被隐藏的原生 checkbox 焦点样式） */
-.sf-toggle input:focus-visible ~ .sf-toggle-track {
-  outline: 1px solid var(--accent);
-  outline-offset: 3px;
+/* 状态读数减弱动效：色相切换瞬时到位，不保留过渡 */
+@media (prefers-reduced-motion: reduce) {
+  .sf-status-mark,
+  .sf-orbit-state-word,
+  .sf-orbit-state-meta {
+    transition: none;
+  }
 }
 
 /* ============================================================
@@ -602,14 +622,14 @@
   min-width: 0;
   flex: 1;
 }
-/* 数据基准（设备机器码）：mono 分段显示 */
+/* 数据基准（设备机器码）：分段显示 */
 .sf-datum {
   display: flex;
   flex-direction: column;
   gap: 7px;
 }
 .sf-datum-label {
-  font-family: var(--font-mono);
+  font-family: var(--font);
   font-size: 10px;
   letter-spacing: 0.3em;
   text-transform: uppercase;
@@ -622,7 +642,7 @@
   flex-wrap: wrap;
 }
 .sf-datum-seg {
-  font-family: var(--font-mono);
+  font-family: var(--font);
   font-size: 13px;
   letter-spacing: 0.22em;
   color: rgba(0, 212, 255, 0.88);
@@ -633,6 +653,288 @@
   height: 3px;
   border-radius: 50%;
   background: rgba(0, 212, 255, 0.4);
+}
+
+/* ============================================================
+   子分区体系（GlobalKeySection 内嵌：设备与 PCR / keyfile 因子 / 模块销毁）
+   ============================================================
+   与奇点锚定同一维度：无底板、坐标头、左星座 + 右数据与端子；
+   子分区上缘横贯能量丝与分区主线交汇，替代卡片边界。
+   命名空间 sf-sub-*：子分区根 / 坐标头 / 星座双栏 / 数据基准 / 输入谱线 /
+   端子纵列 / 注记尾栏。 */
+.sf-sub {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 36px;
+  padding-top: 28px;
+}
+/* 子分区上缘能量丝：自分区主线（x = 16px）横贯发出，右端渐隐 */
+.sf-sub::before {
+  content: "";
+  position: absolute;
+  left: -28px;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    rgba(0, 212, 255, 0.5),
+    rgba(0, 212, 255, 0.18) 16%,
+    rgba(139, 92, 246, 0.14) 46%,
+    rgba(0, 255, 170, 0.08) 72%,
+    transparent
+  );
+  pointer-events: none;
+}
+.sf-sub-head {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.sf-sub-coord {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font);
+  font-size: 10px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: rgba(0, 212, 255, 0.62);
+}
+.sf-sub-coord::before {
+  content: "";
+  width: 12px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(0, 212, 255, 0.12), rgba(0, 212, 255, 0.7));
+}
+/* 危险域坐标：红字直陈（模块销毁） */
+.sf-sub-coord.is-danger {
+  color: rgba(255, 120, 120, 0.6);
+}
+.sf-sub-coord.is-danger::before {
+  background: linear-gradient(90deg, rgba(255, 71, 87, 0.1), rgba(255, 71, 87, 0.65));
+}
+.sf-sub-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.24em;
+  color: var(--text-primary);
+}
+.sf-sub-digest {
+  margin: 0;
+  max-width: 560px;
+  font-size: 10.5px;
+  line-height: 1.8;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+/* 星座双栏：与 .sf-anchor 同构的不对称结构（左形态，右数据与端子） */
+.sf-sub-grid {
+  display: flex;
+  align-items: center;
+  gap: 42px;
+  flex-wrap: wrap;
+}
+.sf-sub-svg {
+  flex: none;
+  width: 188px;
+  height: 152px;
+  overflow: visible;
+}
+.sf-sub-info {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  flex: 1;
+  min-width: 280px;
+}
+/* 数据基准：标签 + 数据行（列表 / 值 / 刷新端子） */
+.sf-sub-datum {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.sf-sub-datum-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+/* 数据行动作节点（刷新）靠右收束，与动作节点组同一外距 */
+.sf-sub-datum-row > .sf-act-slot {
+  margin-left: auto;
+}
+.sf-sub-datum-list {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.sf-sub-datum-value {
+  font-family: var(--font);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: rgba(0, 212, 255, 0.55);
+}
+.sf-sub-datum-void {
+  font-family: var(--font);
+  font-size: 13px;
+  letter-spacing: 0.22em;
+  color: var(--text-muted);
+}
+.sf-datum-seg.is-dim {
+  color: rgba(148, 160, 178, 0.42);
+}
+/* 输入谱线：无盒体，仅下缘一条细线；聚焦时能量线点亮 */
+.sf-ports {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 30px;
+}
+.sf-port {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.sf-port-label {
+  font-family: var(--font);
+  font-size: 10px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.sf-port-input {
+  width: 100%;
+  padding: 3px 0 7px;
+  border: none;
+  border-bottom: 1px solid rgba(148, 160, 178, 0.22);
+  border-radius: 0;
+  background: none;
+  color: #cfeeff;
+  font-family: var(--font);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  outline: none;
+  transition: border-color 0.3s var(--ease), color 0.3s var(--ease);
+}
+.sf-port-input:focus {
+  border-bottom-color: rgba(0, 212, 255, 0.55);
+  color: #e6fbff;
+}
+.sf-port-input:disabled {
+  opacity: 0.34;
+  cursor: not-allowed;
+}
+/* 输入提示文案不由占位符承载（占位符一律透明） */
+.sf-port-input::placeholder {
+  color: transparent;
+}
+/* 轮换二次确认：端子转琥珀警示语义（沿用锚点端子按钮形态） */
+.sf-terminal-block.is-armed .sf-tb-label {
+  color: rgba(255, 177, 90, 0.95);
+}
+.sf-terminal-block.is-armed .sf-tb-label::before {
+  width: 26px;
+  background: rgba(255, 170, 0, 0.6);
+}
+.sf-terminal-block.is-armed::after {
+  background: linear-gradient(90deg, rgba(255, 170, 0, 0.5), transparent 72%);
+}
+/* 警示态在悬浮时仍保持琥珀语义（不得被通用青色悬浮态覆盖） */
+.sf-terminal-block.is-armed:hover:not(:disabled) .sf-tb-label {
+  color: rgba(255, 177, 90, 0.95);
+}
+.sf-terminal-block.is-armed:hover:not(:disabled) .sf-tb-label::before {
+  width: 26px;
+  background: rgba(255, 170, 0, 0.8);
+}
+/* 键盘可达性：外部细描边，不依赖全局按钮焦点皮肤 */
+.sf-terminal-block:focus-visible {
+  outline: 1px solid rgba(0, 212, 255, 0.55);
+  outline-offset: 4px;
+}
+/* 注记尾栏：上缘细线分隔；正文用次级文字色保证安全说明可读 */
+.sf-sub-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 13px;
+  border-top: 1px solid rgba(148, 160, 178, 0.12);
+}
+.sf-sub-note {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.8;
+  letter-spacing: 0.05em;
+  color: rgba(108, 118, 137, 0.92);
+}
+.sf-sub-note.is-warn {
+  color: rgba(255, 177, 90, 0.82);
+}
+.sf-sub-error {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  line-height: 1.7;
+  color: var(--danger);
+}
+@media (max-width: 720px) {
+  .sf-sub-grid {
+    gap: 28px;
+  }
+  .sf-ports {
+    grid-template-columns: 1fr;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sf-sub-svg * {
+    animation: none !important;
+  }
+}
+
+/* ============================================================
+   星座氛围弧 — 四面板共享（单一来源）
+   ============================================================
+   仅保留 2 组关键帧；各面板只声明 --sf-spin-duration / --sf-spin-origin，
+   不再各自复制 keyframes。空闲/降级治理由 animation-play-state 与下方
+   reduced-motion 规则统一接管。 */
+.sf-constellation-arc {
+  fill: none;
+  stroke-linecap: round;
+}
+.sf-spin-cw {
+  transform-origin: var(--sf-spin-origin, 84px 84px);
+  animation-name: sf-orbit-cw;
+  animation-duration: var(--sf-spin-duration, 16s);
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+.sf-spin-ccw {
+  transform-origin: var(--sf-spin-origin, 84px 84px);
+  animation-name: sf-orbit-ccw;
+  animation-duration: var(--sf-spin-duration, 16s);
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+@keyframes sf-orbit-cw {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes sf-orbit-ccw {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sf-spin-cw,
+  .sf-spin-ccw {
+    animation: none !important;
+  }
 }
 
 /* ============================================================
