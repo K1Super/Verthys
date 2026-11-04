@@ -24,8 +24,9 @@
 //!       - 删除 diagnose_crash 清空句柄副作用
 //!
 //!   4. 流式响应处理：
-//!       - 内部 handle_streaming_unlock_send 处理解锁进度流
+//!       - 内部 handle_streaming_progress_send 处理解锁 / 轮换进度流
 //!       - 公共 API 保留 send_json_with_unlock_progress 兼容签名
+//!       - 新增 send_json_with_rotate_progress（v4 D9 全库轮换）
 //!
 //!   5. 彻底杜绝 stderr 管道阻塞：
 //!       - Actor 在独立 tokio::task 中持续异步读取 stderr
@@ -65,5 +66,5 @@ pub mod session;
 pub mod stderr;
 
 pub use platform::kill_orphan_workers;
-pub use protocol::UnlockProgress;
+pub use protocol::{RotateProgress, UnlockProgress};
 pub use session::WorkerSession;

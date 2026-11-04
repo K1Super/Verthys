@@ -41,6 +41,8 @@ pub const FILE_WAL: &str = "import.wal";
 pub const FILE_WAL_SNAPSHOT: &str = "import.wal.snapshot";
 /// 目录内文件名：块归属台账
 pub const FILE_CHUNK_LEDGER: &str = "import.chunks.json";
+/// 目录内文件名：块归属台账追加日志（O(1) 变更落盘，会话结束压缩为快照）
+pub const FILE_CHUNK_LEDGER_JOURNAL: &str = "import.chunks.journal";
 /// 目录内文件名：温启动缓存（C 层读写，命名必须与 C 层一致）
 pub const FILE_IDX_CACHE: &str = "idx_cache";
 /// 目录内文件名：锁持有者诊断旁路（C 层读写，命名必须与 C 层一致）
@@ -53,12 +55,13 @@ const KNOWN_FILE_NAMES: &[&str] = &[
     FILE_WAL,
     FILE_WAL_SNAPSHOT,
     FILE_CHUNK_LEDGER,
+    FILE_CHUNK_LEDGER_JOURNAL,
     FILE_IDX_CACHE,
     FILE_CONTAINER_LOCK,
 ];
 
 /// 派生路径相对容器路径的最长增量（目录后缀 + 分隔符 + 最长文件名）
-const MAX_DERIVED_EXTRA: usize = 2 + 1 + 19;
+const MAX_DERIVED_EXTRA: usize = 2 + 1 + 21;
 
 /// 旧布局后缀：容器状态（仅用于只读回退与一次性迁移）
 pub const LEGACY_STATE_SUFFIX: &str = ".state";
@@ -151,6 +154,11 @@ pub fn wal_snapshot_file_for(verthys_path: &str) -> PathBuf {
 /// 块归属台账（附属目录内 import.chunks.json）
 pub fn chunk_ledger_file_for(verthys_path: &str) -> PathBuf {
     sidecar_file_for(verthys_path, FILE_CHUNK_LEDGER)
+}
+
+/// 块归属台账追加日志路径（附属目录内，受容器锁保护）
+pub fn chunk_ledger_journal_file_for(verthys_path: &str) -> PathBuf {
+    sidecar_file_for(verthys_path, FILE_CHUNK_LEDGER_JOURNAL)
 }
 
 /// 温启动缓存（附属目录内 idx_cache；构造规则必须与 C 层命中同一文件）
@@ -394,6 +402,10 @@ mod tests {
         assert_eq!(
             norm(&chunk_ledger_file_for(p)),
             "D:/data/Vault.verthys.d/import.chunks.json"
+        );
+        assert_eq!(
+            norm(&chunk_ledger_journal_file_for(p)),
+            "D:/data/Vault.verthys.d/import.chunks.journal"
         );
         assert_eq!(
             norm(&idx_cache_file_for(p)),

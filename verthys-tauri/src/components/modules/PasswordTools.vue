@@ -736,6 +736,12 @@ const keygenHashShort = computed(() => {
   return Array.from(h.slice(0, 6)).map(b => b.toString(16).padStart(2, "0")).join("");
 });
 
+/** 提取可展示的失败原因（后端只返回标准化文案，不含内部路径） */
+const describeExportError = (e: unknown): string => {
+  const message = e instanceof Error ? e.message : String(e);
+  return message.trim() || "未知错误";
+};
+
 /** 导出 .bin 文件（密钥副本用后清零；失败如实告知） */
 const exportBin = async () => {
   if (keygenRaw.value.length === 0 || exportingKey.value) return;
@@ -745,18 +751,26 @@ const exportBin = async () => {
 
   try {
     if (isTauri) {
+      let target: string | null;
       try {
-        const target = await save({
+        target = await save({
           filters: [{ name: "密钥文件", extensions: ["bin"] }],
           defaultPath: suggestedName,
         });
-        if (target) {
-          await writeUserFile(target, data);
-          showToast(`已导出密钥文件：${target.split(/[\\/]/).pop()}`);
-        }
-      } catch {
-        showError("导出失败");
+      } catch (e) {
+        console.error("[keygen-export] 打开保存对话框失败", e);
+        showError(`导出失败：${describeExportError(e)}`);
+        return;
       }
+      if (!target) return; // 用户取消：不是失败，不提示
+      try {
+        await writeUserFile(target, data);
+      } catch (e) {
+        console.error("[keygen-export] 写入密钥文件失败", e);
+        showError(`导出失败：${describeExportError(e)}`);
+        return;
+      }
+      showToast(`已导出密钥文件：${target.split(/[\\/]/).pop()}`);
       return;
     }
     // 浏览器模式：Blob 下载
@@ -769,10 +783,12 @@ const exportBin = async () => {
       document.body.appendChild(a);
       a.click();
       a.remove();
-      URL.revokeObjectURL(url);
+      // 立即 revoke 会让尚未开始的下载被取消（部分浏览器行为），延后释放
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
       showToast(`已导出 ${suggestedName}`);
-    } catch {
-      showError("导出失败");
+    } catch (e) {
+      console.error("[keygen-export] 浏览器下载失败", e);
+      showError(`导出失败：${describeExportError(e)}`);
     }
   } finally {
     // 内存中的密钥副本不驻留

@@ -17,16 +17,48 @@
   Props: 从 SecurityCenter 顶层 Composable 注入的只读状态 + 函数（透传至子组件）
   defineModel: orbitSliderPos（透传至 SecurityDashboard）
   Emits: lock-all / check-update / install-update / open-change-key-dialog / export-bin /
-         toggle-module-key-enabled / open-key-dialog / show-module-key / logout-module /
-         toggle-custom-feature / reset-custom / set-custom-session-minutes / apply-custom /
+         toggle-module-key-enabled / open-key-dialog / logout-module /
+         toggle-custom-feature / reset-custom / set-custom-session-minutes /
          orbit-slider-input / orbit-slider-release / snap-to-anchor / panel-active
 -->
 <template>
   <div class="view-management">
+    <!-- 恢复码会话提示浮层：绝对定位在管理视图之上，不参与布局 ——
+         横幅出现/消失绝不挤压视图内容；浮层本身不拦截指针，仅横幅实体可交互 -->
+    <div
+      v-if="recoveryResealNeeded || (recoveryMode && !rotateCommitted)"
+      class="recovery-banner-float"
+    >
+      <!-- 恢复码会话必须重绑本机设备槽，否则下次普通解锁失败 -->
+      <StatusBanner
+        v-if="recoveryResealNeeded"
+        tone="warning"
+        action-label="重绑本机设备"
+        @action="$emit('reseal-device')"
+      >
+        当前为恢复码会话：尚未重绑本机设备槽，下次普通解锁将失败。
+      </StatusBanner>
+
+      <!-- 恢复码会话可执行全库 DEK 轮换（提交后本会话不再是恢复态，横幅隐藏） -->
+      <StatusBanner
+        v-if="recoveryMode && !rotateCommitted"
+        action-label="全库密钥轮换"
+        @action="showRotateDialog = true"
+      >
+        恢复码会话可执行全库密钥轮换：重建容器 DEK，当前恢复码继续有效。
+      </StatusBanner>
+    </div>
+
+    <VaultRotateDialog
+      :show="showRotateDialog"
+      @close="showRotateDialog = false"
+      @committed="onRotateCommitted"
+    />
+
     <!-- ===== 单一编排控制器：三态视图共用同一 Transition（out-in 严格串行）
        ===== 离场动画完成前入场不挂载 — 离场 Canvas / 入场挂载 / 模糊重绘
        ===== 绝不并行争抢主线程与合成器。key 保证三态间过渡触发。 -->
-    <Transition name="mgmt-x" mode="out-in">
+    <Transition name="mgmt-x" mode="out-in" @after-enter="onStageAfterEnter">
       <!-- 量子态势面板（进入中枢首屏） -->
       <QuantumDashboard
         v-if="mgmtView === 'dashboard'"
@@ -62,12 +94,10 @@
           :update-installing="updateInstalling"
           :update-percent="updatePercent"
           :update-cancellable="updateCancellable"
-          :update-failed="updateFailed"
           @lock-all="$emit('lockAll')"
           @check-update="$emit('checkUpdate')"
           @install-update="$emit('installUpdate')"
           @cancel-update="$emit('cancelUpdate')"
-          @export-logs="$emit('exportLogs')"
         />
 
         <!-- 分区 1：全局密钥已就绪状态 + 全局密钥-设备绑定 -->
@@ -77,6 +107,7 @@
           :device-fingerprint-short="deviceFingerprintShort"
           @open-change-key-dialog="$emit('openChangeKeyDialog')"
           @export-bin="$emit('exportBin')"
+          @recovery-rotated="onRecoveryRotated"
         />
 
         <!-- 分区 2：模块独立密钥管理 -->
@@ -88,13 +119,11 @@
           :module-key-enabled="moduleKeyEnabled"
           :has-module-key-record="hasModuleKeyRecord"
           :module-key-ready="moduleKeyReady"
-          :has-module-key="hasModuleKey"
-          :is-module-ready="isModuleReady"
+          :module-has-recovery="moduleHasRecovery"
           :module-state-class="moduleStateClass"
           :module-state-text="moduleStateText"
           @toggle-module-key-enabled="(mid, enabled) => $emit('toggleModuleKeyEnabled', mid, enabled)"
           @open-key-dialog="(mid) => $emit('openKeyDialog', mid)"
-          @show-module-key="(mid) => $emit('showModuleKey', mid)"
           @logout-module="(mid) => $emit('logoutModule', mid)"
         />
 
@@ -117,6 +146,8 @@
           :locked-features="lockedFeatures"
           :preset-features="presetFeatures"
           :custom-features="customFeatures"
+          :custom-mode="customMode"
+          :preset-idle-minutes="presetIdleMinutes"
           :custom-session-minutes="customSessionMinutes"
           :defense-paths="defensePaths"
           :defense-meta="defenseMeta"
@@ -126,7 +157,6 @@
           @toggle-custom-feature="(key) => $emit('toggleCustomFeature', key)"
           @reset-custom="$emit('resetCustom')"
           @set-custom-session-minutes="(m) => $emit('setCustomSessionMinutes', m)"
-          @apply-custom="$emit('applyCustom')"
           @orbit-slider-input="$emit('orbitSliderInput')"
           @orbit-slider-release="$emit('orbitSliderRelease')"
           @snap-to-anchor="(idx) => $emit('snapToAnchor', idx)"
@@ -137,16 +167,31 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { ModuleId } from "../../lib/keyManager";
 import type { DeviceCheckResult } from "../../composables/security-center/useViewMode";
 import type { DefensePathView, DefenseMetaView } from "../../composables/security-center/useDefenseStatus";
+import StatusBanner from "../common/feedback/StatusBanner.vue";
 import QuantumDashboard from "../management/QuantumDashboard.vue";
 import ManagementHub from "../management/ManagementHub.vue";
 import ManagementTopBar from "../management/ManagementTopBar.vue";
 import GlobalKeySection from "../management/GlobalKeySection.vue";
 import ModuleKeyList from "../management/ModuleKeyList.vue";
 import SecurityDashboard from "../management/SecurityDashboard.vue";
+import VaultRotateDialog from "../management/VaultRotateDialog.vue";
+
+/** 全库轮换弹窗可见性；提交成功后隐藏恢复会话横幅（本会话已非恢复态） */
+const showRotateDialog = ref(false);
+const rotateCommitted = ref(false);
+const onRotateCommitted = () => {
+  rotateCommitted.value = true;
+  showRotateDialog.value = false;
+  emit("rotateCommitted");
+};
+
+const onRecoveryRotated = (code: string) => {
+  emit("recoveryRotated", code);
+};
 
 /* ===== Props 接口定义（从 SecurityCenter 顶层 Composable 注入，透传至子组件） ===== */
 const props = defineProps<{
@@ -168,8 +213,6 @@ const props = defineProps<{
   updatePercent: number;
   /** 下载阶段允许取消；锁库与安装移交期间为 false */
   updateCancellable: boolean;
-  /** 最近一次更新失败，展示日志导出入口 */
-  updateFailed: boolean;
   /** 设备绑定校验结果（引导单元视觉形态） */
   deviceCheckResult: DeviceCheckResult;
   /** 设备机器码短显示 */
@@ -184,10 +227,12 @@ const props = defineProps<{
   hasModuleKeyRecord: Record<string, boolean>;
   /** 模块密钥就绪（已登录）状态 */
   moduleKeyReady: Record<string, boolean>;
-  /** 检查模块是否有密钥（函数） */
-  hasModuleKey: (mid: ModuleId) => boolean;
-  /** 检查模块是否就绪（函数） */
-  isModuleReady: (mid: ModuleId) => boolean;
+  /** 各模块恢复槽绑定状态 */
+  moduleHasRecovery: Record<string, boolean>;
+  /** 当前为恢复码会话且尚未重绑本机设备槽 */
+  recoveryResealNeeded: boolean;
+  /** 当前会话是否由恢复码打开（全库轮换仅在恢复码会话可用） */
+  recoveryMode: boolean;
   /** 模块状态指示条样式类（函数） */
   moduleStateClass: (mid: ModuleId) => string;
   /** 模块状态文本（函数） */
@@ -220,8 +265,12 @@ const props = defineProps<{
   lockedFeatures: Array<{ key: string; label: string; desc: string }>;
   /** 已应用预设特性开关快照（后端权威配置，能力状态栏真实状态源） */
   presetFeatures: Record<string, boolean>;
-  /** 自定义特性配置 */
+  /** 自定义特性草稿（仅自定义档编辑时使用） */
   customFeatures: Record<string, boolean>;
+  /** 当前是否为自定义档 */
+  customMode: boolean;
+  /** 非自定义档真实空闲锁定时长（分钟） */
+  presetIdleMinutes: number;
   /** 自定义档空闲锁定时长（分钟） */
   customSessionMinutes: number;
   /** 动态防护路径状态列表（7 攻击路径 × 4 态） */
@@ -239,6 +288,10 @@ const orbitSliderPos = defineModel<number>("orbitSliderPos", { default: 50 });
 
 /* ===== Emits 定义（所有用户操作转发至 SecurityCenter，由 Composable 处理） ===== */
 const emit = defineEmits<{
+  /** 恢复码会话请求重绑本机容器设备槽 */
+  (e: "reseal-device"): void;
+  /** 全库轮换提交成功：C 层已把会话恢复标记清零 */
+  (e: "rotateCommitted"): void;
   /** 面板激活状态变化（dashboard=true / detail=false） */
   (e: "panel-active", val: boolean): void;
   /** 立即锁定全部并清零内存密钥 */
@@ -249,18 +302,16 @@ const emit = defineEmits<{
   (e: "installUpdate"): void;
   /** 取消当前下载 */
   (e: "cancelUpdate"): void;
-  /** 导出更新日志 */
-  (e: "exportLogs"): void;
   /** 打开修改全局密钥弹窗 */
   (e: "openChangeKeyDialog"): void;
   /** 导出当前密钥文件备份 */
   (e: "exportBin"): void;
+  /** 恢复码轮换成功：新码交由 SecurityCenter 顶层统一展示 */
+  (e: "recoveryRotated", code: string): void;
   /** 切换模块密钥保护开关 */
   (e: "toggleModuleKeyEnabled", mid: ModuleId, enabled: boolean): void;
   /** 打开模块密钥编辑弹窗 */
   (e: "openKeyDialog", mid: ModuleId): void;
-  /** 查看/复制模块密钥 */
-  (e: "showModuleKey", mid: ModuleId): void;
   /** 登出模块 */
   (e: "logoutModule", mid: ModuleId): void;
   /** 切换单个自定义特性 */
@@ -269,8 +320,6 @@ const emit = defineEmits<{
   (e: "resetCustom"): void;
   /** 设置自定义档空闲锁定时长（分钟） */
   (e: "setCustomSessionMinutes", minutes: number): void;
-  /** 保存应用自定义配置 */
-  (e: "applyCustom"): void;
   /** 轨道滑块输入中 */
   (e: "orbitSliderInput"): void;
   /** 轨道滑块释放（磁性吸附） */
@@ -332,6 +381,42 @@ const enterHubSection = (section: "globalKey" | "moduleKeys" | "security") => {
  */
 const detailRef = ref<HTMLElement | null>(null);
 
+/* ===== 外部直达「设备与 PCR」 =====
+ * 管理视图的 mgmtView / activeSection 是内部编排状态，外部不直接改写；
+ * 安全预设提示的「前往」经 openPcrBinding 进入全局密钥分区，并把滚动
+ * 落在 PCR 子面板上。detail 需等 out-in 离场结束才挂载，因此跨态跳转
+ * 登记 pendingPcrJump，由入场完成事件兑现。 */
+const pendingPcrJump = ref(false);
+
+const scrollToPcrPanel = () => {
+  const target = detailRef.value?.querySelector<HTMLElement>(
+    '.sf-sub[aria-label="设备与 PCR"]',
+  );
+  if (!target) return;
+  const reduced =
+    window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
+  target.scrollIntoView({ block: "start", behavior: reduced ? "auto" : "smooth" });
+};
+
+const onStageAfterEnter = () => {
+  if (!pendingPcrJump.value) return;
+  pendingPcrJump.value = false;
+  void nextTick(scrollToPcrPanel);
+};
+
+const openPcrBinding = () => {
+  activeSection.value = "globalKey";
+  if (mgmtView.value === "detail") {
+    pendingPcrJump.value = false;
+    void nextTick(scrollToPcrPanel);
+    return;
+  }
+  pendingPcrJump.value = true;
+  mgmtView.value = "detail";
+};
+
+defineExpose({ openPcrBinding });
+
 /** 判定节点是否位于指定祖先元素之内（祖先链上溯，O(深度)） */
 function isWithin(node: Node | null, ancestor: Element): boolean {
   let cur: Node | null = node;
@@ -353,6 +438,10 @@ const onDetailBlankClick = (e: MouseEvent) => {
    *    DOM 上仍是 shell 后代 —— 遮罩/卡片点击归弹窗交互域所有
    *    （遮罩点击=关弹窗），严禁同时触发返回引导 */
   if (e.target.closest(".cosmic-backdrop")) return;
+
+  /* 0.1 常驻横幅浮层豁免：浮层横跨三种管理视图，动作点击归横幅自身；
+   *     不加此豁免会被判为「分区外空白」，点一次动作即被带回引导区 */
+  if (e.target.closest(".recovery-banner-float")) return;
 
   /* 1. 外壳包含判定：仅响应管理外壳内的点击（导航 dock 等外部元素忽略） */
   const shell = root.closest(".security-center") ?? root;
@@ -377,8 +466,42 @@ const onDetailBlankClick = (e: MouseEvent) => {
 onMounted(() => document.addEventListener("click", onDetailBlankClick, true));
 onBeforeUnmount(() => document.removeEventListener("click", onDetailBlankClick, true));
 
+/* 新恢复会话重新允许轮换（提交后同一会话不再显示横幅） */
+watch(
+  () => props.recoveryMode,
+  (mode) => {
+    if (mode) rotateCommitted.value = false;
+  },
+);
+
 /* 面板激活状态同步给父组件（收起导航坞）：管理三态均视为面板激活，
  * 导航坞悬浮 Dock 区域才展开 —— 与首屏量子面板行为一致，
  * 避免进入引导区/分区详情后导航坞常驻弹出 */
 watch(mgmtView, () => emit("panel-active", true), { immediate: true });
 </script>
+
+<style scoped>
+/* 常驻横幅浮层：脱离文档流（position: absolute），管理三态内容始终保持
+   完整可用高度，横幅出现/消失不产生任何布局位移。
+   纵向坐标三态统一（不随 dashboard / hub / detail 变化）—— 位置漂移会让
+   常驻告知读作另一个层级的元素；64px 落在会话谱线（实测 52px）之下，
+   分区详情里不遮挡顶栏右侧动作，仪表盘与引导区同样只压住内容顶缘。
+   居中用左右偏移 + 自动外边距，不用 transform —— 文字承载层不得进入
+   合成层，否则字体抗锯齿会在主层与合成层之间切换。
+   浮层整体不拦截指针，避免两个横幅宽度差形成的空白区吃掉底层点击 */
+.recovery-banner-float {
+  position: absolute;
+  top: 64px;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: calc(100% - 32px);
+  margin-inline: auto;
+  pointer-events: none;
+}
+</style>

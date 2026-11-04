@@ -76,9 +76,15 @@ pub enum AuditEventType {
     SecureDelete,
     HardenPrivateDir,
     CleanupCrashResidue,
-    // Verthys 操作
+    /// Verthys 操作
     VerthysUnlock,
     VerthysLock,
+    /// 全库 DEK 轮换作业（begin / run 失败 / commit / abort）
+    /// 审计只记录结果与路径哈希，不记录口令、恢复码或临时库路径明文
+    VerthysRotate,
+    /// keyfile 因子操作（创建/解锁/启用/轮换/关闭/恢复会话重绑）
+    /// 审计只记录路径哈希，不记录路径明文
+    KeyfileFactor,
     /// 历史审计数据反序列化兼容位：旧版本曾写入该事件，现版本已无产生路径。
     /// 保留变体使旧日志文件的反序列化与 HMAC 链验证可字节级复原，
     /// 删除会导致含该事件的历史行链验证误报篡改。不得用于写入新事件。
@@ -134,6 +140,8 @@ impl AuditEventType {
             AuditEventType::CleanupCrashResidue => "CLEANUP_CRASH_RESIDUE",
             AuditEventType::VerthysUnlock => "VERTHYS_UNLOCK",
             AuditEventType::VerthysLock => "VERTHYS_LOCK",
+            AuditEventType::VerthysRotate => "VERTHYS_ROTATE",
+            AuditEventType::KeyfileFactor => "KEYFILE_FACTOR",
             AuditEventType::ContainerIdMismatch => "CONTAINER_ID_MISMATCH",
             AuditEventType::DeviceBind => "DEVICE_BIND",
             AuditEventType::DeviceUnbind => "DEVICE_UNBIND",
@@ -152,6 +160,22 @@ impl AuditEventType {
             AuditEventType::TraceCleanup => "TRACE_CLEANUP",
         }
     }
+}
+
+/// keyfile 路径审计标签。
+///
+/// 只输出域分离 SHA-256 的前 16 位十六进制，绝不输出路径明文；
+/// 用于审计中关联“同一 keyfile 文件”的事件，同时避免把本地路径写进
+/// 可导出的审计链。
+pub fn keyfile_path_tag(path: &str) -> String {
+    // Windows 路径大小写不敏感：统一小写并归一分隔符，保证同一文件同标签。
+    let normalized = path.replace('/', "\\").to_ascii_lowercase();
+    let mut hasher = Sha256::new();
+    hasher.update(b"verthys/audit/keyfile-path");
+    hasher.update(normalized.as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().take(8).map(|b| format!("{:02x}", b)).collect();
+    format!("sha256:{hex}")
 }
 
 /// 审计事件结果
@@ -545,6 +569,17 @@ mod tests {
         assert_eq!(h1, h2); // 相同输入相同哈希
         assert_ne!(h1, h3); // 不同输入不同哈希
         assert_eq!(h1.len(), 16); // 前 16 字符
+    }
+
+    #[test]
+    fn test_keyfile_path_tag_hides_path() {
+        let tag = keyfile_path_tag("C:\\Users\\alice\\vault.vkf");
+        assert!(tag.starts_with("sha256:"));
+        assert_eq!(tag.len(), "sha256:".len() + 16);
+        assert!(!tag.to_ascii_lowercase().contains("alice"));
+        // Windows 大小写/分隔符归一：同一文件同一标签
+        assert_eq!(tag, keyfile_path_tag("c:/users/alice/vault.vkf"));
+        assert_ne!(tag, keyfile_path_tag("C:\\Users\\alice\\other.vkf"));
     }
 
     #[test]

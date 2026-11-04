@@ -17,27 +17,7 @@ import type { ModuleId } from "../types/key_manager";
  * 此处改为 re-export，保持现有 import 路径向后兼容（module-auth.ts /
  * global-verthys.ts / keyManager.ts 等无需修改 import 语句）。
  */
-export {
-  TYPE_GLOBAL_KEY,
-  TYPE_MODULE_KEY,
-  TYPE_MODULE_KEY_CONFIG,
-} from "./record_types";
-
-/* 模块密钥记录版本化常量 */
-
-/** 模块密钥记录当前版本号（每次 setModuleKey 写入此值）
- *
- * 旧记录（无 version 字段）反序列化时视为 v0。
- * 新记录写入 MODULE_KEY_RECORD_VERSION，每次更新递增。
- */
-export const MODULE_KEY_RECORD_VERSION = 1;
-
-/** 自愈清理任务的单次最大清理记录数（防止极端情况下批量清理阻塞）
- *
- * findModuleKeyRecord 发现多条同 moduleId 记录时，
- * 异步触发清理旧版本记录，单次最多清理此数量。
- */
-export const MODULE_KEY_SELF_HEAL_BATCH = 10;
+export { TYPE_GLOBAL_KEY } from "./record_types";
 
 /* 模块枚举 */
 export const MODULE_IDS: ModuleId[] = ["photo", "accounts", "fileverthys"];
@@ -46,6 +26,18 @@ export const MODULE_LABELS: Record<ModuleId, string> = {
   photo: "拾光",
   accounts: "存签",
   fileverthys: "清藏",
+};
+
+/**
+ * 模块列表缓存键（与各模块组件 setModuleCache 使用的键一致）。
+ *
+ * 登出/闲置锁定一个模块时必须按此表清掉对应列表缓存；映射集中在此，
+ * 避免调用方各自硬编码模块键导致漏清。
+ */
+export const MODULE_CACHE_KEY: Record<ModuleId, string> = {
+  photo: "photos",
+  accounts: "accounts",
+  fileverthys: "fileverthys",
 };
 
 /* 会话超时 */
@@ -58,10 +50,6 @@ export const PRESET_SESSION_TIMEOUT_MS: Record<SecurityPresetCode, number> = {
   2: 60 * 60 * 1000, // PERFORMANCE: 60 分钟
   3: 60 * 60 * 1000, // CUSTOM: 60 分钟（兜底值，用户可调）
 };
-
-/* 模块密钥验证器明文 */
-export const MODULE_KEY_VERIFIER_PREFIX = "VERTHYS_MODULE_KEY_";
-export const MODULE_KEY_VERIFIER_SUFFIX = "_v1";
 
 /* 超时 */
 export const INIT_TIMEOUT_MS = 30 * 1000;
@@ -114,7 +102,8 @@ export const CUSTOM_SESSION_MINUTES_KEY = "verthys_custom_session_minutes";
 /* 当前安全预设代号 localStorage key（持久化用户选择的安全模式） */
 export const SECURITY_PRESET_KEY = "verthys_security_preset";
 
-/** 核心防护特性（不随自定义模板逐项开关；各档位取值以 C 权威矩阵投影为准） */
+/** 核心防护特性（不随自定义模板逐项开关；各档位取值以 C 权威矩阵投影为准）
+ *  注意：`key_separation` 为 11 位契约遗留键名，产品映射 V4 密钥隔离堆。 */
 export const LOCKED_FEATURES: ReadonlySet<string> = new Set([
   "anti_debug",
   "anti_inject",

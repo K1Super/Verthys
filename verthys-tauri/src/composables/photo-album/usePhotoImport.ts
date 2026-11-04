@@ -46,6 +46,16 @@ type ImportPhase =
 /** acquiring 阶段看门狗阈值：防止文件对话框异常挂起导致状态机永久停留在该阶段 */
 const ACQUIRE_TIMEOUT_MS = 30_000;
 
+/**
+ * 文件预检并发上限。
+ *
+ * 旧实现 `Promise.all(paths.map(stat))` 会对全部选中文件同时发起一次
+ * Tauri 命令：1000 张即 1000 个并发 IPC + 阻塞线程池任务，在“准备导入”
+ * 阶段形成数秒级排队，且与总张数线性增长。控制器是有界并发：固定
+ * 16 路 worker 轮询取下标，顺序由结果数组保序，失败仍按未知大小继续。
+ */
+const STAT_PREFLIGHT_CONCURRENCY = 16;
+
 /** usePhotoImport 依赖注入接口 */
 export interface UsePhotoImportDeps {
   /** 照片列表（shallowRef，避免深度代理） */
@@ -166,27 +176,46 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
         // 读前预检：readUserFile 会整文件搬进内存，超限文件若「读后才拒」，
         //   内存峰值与读取耗时已经付出。stat 失败不影响导入（按未知大小继续，
         //   后续仍受流水线的单文件上限与字节预算双重约束）。
-        const checked = await Promise.all(paths.map(async (path) => {
-          try {
-            const stat = await userFileStat(path);
-            return { path, size: stat.size };
-          } catch (e) {
-            console.warn("[onImport] 文件预检失败，按未知大小继续", path, e);
-            return { path, size: undefined as number | undefined };
+        //   有界并发：避免 1000 张选择一次性压入 1000 个 stat IPC。
+        const checked: Array<{
+          path: string;
+          size: number | undefined;
+          mtime: number | undefined;
+        }> = new Array(paths.length);
+        let statCursor = 0;
+        const statWorker = async (): Promise<void> => {
+          while (true) {
+            const index = statCursor++;
+            if (index >= paths.length) return;
+            const path = paths[index];
+            try {
+              const stat = await userFileStat(path);
+              checked[index] = { path, size: stat.size, mtime: stat.mtime_ms };
+            } catch (e) {
+              console.warn("[onImport] 文件预检失败，按未知大小继续", path, e);
+              checked[index] = { path, size: undefined, mtime: undefined };
+            }
           }
-        }));
+        };
+        await Promise.all(
+          Array.from(
+            { length: Math.min(STAT_PREFLIGHT_CONCURRENCY, paths.length) },
+            () => statWorker(),
+          ),
+        );
         const accepted = checked.filter((f) => f.size === undefined || f.size <= MAX_PHOTO_BYTES);
         const rejected = checked.length - accepted.length;
         if (rejected > 0) {
           showError(`${rejected} 个文件超过单文件大小上限，已跳过`);
         }
         if (accepted.length === 0) return;
-        filesToProcess = accepted.map(({ path, size }) => {
+        filesToProcess = accepted.map(({ path, size, mtime }) => {
           const fileName = path.split(/[\\/]/).pop() || "photo";
           return {
             name: fileName,
             mime: guessMime(fileName),
             size,
+            lastModified: mtime,
             readBytes: () => readUserFile(path),
           };
         });
@@ -197,6 +226,8 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
         filesToProcess = browserFiles.map((f) => ({
           name: f.name,
           mime: guessMime(f.name),
+          size: f.size,
+          lastModified: f.lastModified,
           readBytes: () => f.arrayBuffer().then((buf) => new Uint8Array(buf)),
         }));
       }

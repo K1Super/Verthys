@@ -54,12 +54,12 @@ export const UPDATER_ERROR_COPY: Record<UpdaterErrorCode, UpdaterErrorCopy> = {
   },
   E_UPDATER_MANIFEST_INVALID: {
     title: "更新信息无效",
-    guidance: "请稍后重试；若持续出现请导出更新日志",
+    guidance: "请稍后重试；若持续出现请联系维护人",
     retryable: true,
   },
   E_UPDATER_MANIFEST_SIG_INVALID: {
     title: "更新信息校验失败",
-    guidance: "已阻止安装；请导出日志并联系维护人",
+    guidance: "已阻止安装；请重新安装或联系维护人",
     retryable: false,
   },
   E_UPDATER_CHANNEL_MISMATCH: {
@@ -124,17 +124,17 @@ export const UPDATER_ERROR_COPY: Record<UpdaterErrorCode, UpdaterErrorCopy> = {
   },
   E_UPDATER_SIG_INVALID: {
     title: "安装包签名无效",
-    guidance: "已阻止安装；请导出日志并联系维护人",
+    guidance: "已阻止安装；请重新安装或联系维护人",
     retryable: false,
   },
   E_UPDATER_SIG_PUBKEY_MISMATCH: {
     title: "安装包签名密钥不匹配",
-    guidance: "已阻止安装；请导出日志并联系维护人",
+    guidance: "已阻止安装；请重新安装或联系维护人",
     retryable: false,
   },
   E_UPDATER_AUTHENTICODE_INVALID: {
     title: "安装包数字签名无效",
-    guidance: "已阻止安装；请导出日志并联系维护人",
+    guidance: "已阻止安装；请重新安装或联系维护人",
     retryable: false,
   },
   E_UPDATER_LOCK_DIRTY: {
@@ -144,7 +144,7 @@ export const UPDATER_ERROR_COPY: Record<UpdaterErrorCode, UpdaterErrorCopy> = {
   },
   E_UPDATER_LOCK_FAILED: {
     title: "安全锁库未完成",
-    guidance: "请重试；若持续失败请导出更新日志",
+    guidance: "请重试；若持续失败请重启应用",
     retryable: true,
   },
   E_UPDATER_LOCK_UNKNOWN: {
@@ -154,7 +154,7 @@ export const UPDATER_ERROR_COPY: Record<UpdaterErrorCode, UpdaterErrorCopy> = {
   },
   E_UPDATER_INSTALL_FAILED: {
     title: "安装未能启动",
-    guidance: "请重试或导出更新日志",
+    guidance: "请重试或重新安装旧版",
     retryable: true,
   },
   E_UPDATER_HEALTH_FAIL: {
@@ -164,7 +164,7 @@ export const UPDATER_ERROR_COPY: Record<UpdaterErrorCode, UpdaterErrorCopy> = {
   },
   E_UPDATER_MARKER_INVALID: {
     title: "更新状态记录异常",
-    guidance: "请运行修复并导出更新日志",
+    guidance: "请运行修复或重新安装旧版",
     retryable: false,
   },
   E_UPDATER_ROLLBACK_MATERIAL_MISSING: {
@@ -194,7 +194,7 @@ export const UPDATER_ERROR_COPY: Record<UpdaterErrorCode, UpdaterErrorCopy> = {
   },
   E_UPDATER_INTERNAL: {
     title: "更新出现异常",
-    guidance: "请导出更新日志后重试",
+    guidance: "请重试或重启应用",
     retryable: true,
   },
 };
@@ -206,7 +206,7 @@ export function updaterErrorCopy(code?: string | null): UpdaterErrorCopy {
   }
   return {
     title: "更新出现异常",
-    guidance: "请导出更新日志后重试",
+    guidance: "请重试或重启应用",
     retryable: true,
   };
 }

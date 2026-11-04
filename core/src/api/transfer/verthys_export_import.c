@@ -27,6 +27,9 @@
 #include "keymanager.h"
 #include "anti_debug_v2.h"   /* 高危入口反调试检测 */
 #include "runtime_hash.h"   /* 写路径周期运行时函数哈希校验 */
+#include "vty_repo_v4.h"    /* v4 记录仓库（导出/导入/计数） */
+#include "vty_record_v4.h"  /* v4 单条明文上限 */
+#include "verthys_api_v4.h" /* v4 错误码映射与改密适配 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -156,6 +159,7 @@ static int verthys_validate_transfer_path(const char *path)
  * 安全性：明文数据用完即刻 verthys_secure_zero 清零释放，最小化明文驻留窗口。
  */
 
+#if defined(VERTHYS_V3_SUPPORT)
 /* v3 导出条目快照：LSM 迭代器单遍收集的 Extent 寻址字段
  *（get_data 回调按需解密的最小集；name/type 等元数据在 fmt_recs 中） */
 typedef struct {
@@ -219,6 +223,190 @@ static void verthys_export_v3_release_data(uint16_t idx,
     if (size > 0) verthys_secure_zero(data, size);
     free(data);
 }
+#endif /* VERTHYS_V3_SUPPORT（v3 导出回调） */
+
+/* ------------------------------------------------------------------ *
+ * v4 流式导出
+ *
+ * 元数据收集需要 type（记录密文首字节）与名称；数据本身不在收集阶段
+ * 驻留，get_data 回调按 record_id 重新读取并解密单条记录，峰值内存
+ * 与记录总数解耦。导出文件仍是 v1 交换格式（跨设备契约不变）。
+ * ------------------------------------------------------------------ */
+typedef struct {
+    VtyVault *v;
+    const uint64_t *ids;
+    uint16_t count;
+} VerthysV4ExportCtx;
+
+static int verthys_export_v4_get_data(uint16_t idx,
+                                      uint8_t **out_data, size_t *out_size,
+                                      void *user_data)
+{
+    VerthysV4ExportCtx *sc = (VerthysV4ExportCtx *)user_data;
+    VtyRepoRecord rec;
+    int rc;
+
+    if (sc == NULL || out_data == NULL || out_size == NULL ||
+        idx >= sc->count) {
+        return -1;
+    }
+    memset(&rec, 0, sizeof(rec));
+    rc = vty_repo_get(sc->v, sc->ids[idx], &rec);
+    if (rc != VTY_OK) return -1;
+    if (rec.name != NULL) {
+        vty_free(rec.name, rec.name_len != 0 ? rec.name_len : 1u);
+    }
+    if (rec.data_len == 0) {
+        uint8_t *dummy = (uint8_t *)calloc(1, 1);
+        if (dummy == NULL) return -1;
+        *out_data = dummy;
+        *out_size = 0;
+    } else {
+        *out_data = rec.data;
+        *out_size = rec.data_len;
+    }
+    return 0;
+}
+
+static void verthys_export_v4_release_data(uint16_t idx,
+                                           uint8_t *data, size_t size,
+                                           void *user_data)
+{
+    (void)idx;
+    (void)user_data;
+    if (data == NULL) return;
+    if (size > 0) verthys_secure_zero(data, size);
+    free(data);
+}
+
+static VerthysResult verthys_export_v4_locked(struct VerthysContext *ctx,
+                                              const char *export_path,
+                                              const char *password,
+                                              size_t password_len)
+{
+    VtyVault *v = ctx->v4;
+    VtyRepoIter *it = NULL;
+    VerthysFmtRecord *fmt_recs = NULL;
+    uint64_t *ids = NULL;
+    uint64_t total = 0;
+    uint16_t count = 0;
+    uint8_t salt[VERTHYS_SALT_BYTES], mek[VERTHYS_KEY_BYTES], dek[VERTHYS_KEY_BYTES];
+    VerthysV4ExportCtx sc;
+    int rc;
+
+    memset(salt, 0, sizeof(salt));
+    memset(mek, 0, sizeof(mek));
+    memset(dek, 0, sizeof(dek));
+    if (v == NULL || !v->unlocked || v->store == NULL) return VERTHYS_ERR_LOCKED;
+
+    rc = vty_repo_count(v, &total);
+    if (rc != VTY_OK) return verthys_api_v4_map(rc);
+    if (total > 65535u) return VERTHYS_ERR_EXPORT_TOO_MANY;
+
+    if (total > 0) {
+        fmt_recs = (VerthysFmtRecord *)calloc((size_t)total, sizeof(VerthysFmtRecord));
+        ids = (uint64_t *)calloc((size_t)total, sizeof(uint64_t));
+        if (fmt_recs == NULL || ids == NULL) {
+            free(fmt_recs);
+            free(ids);
+            return VERTHYS_ERR_INTERNAL;
+        }
+    }
+
+    rc = vty_repo_iter_open(v, 0, &it);
+    if (rc != VTY_OK) {
+        free(fmt_recs);
+        free(ids);
+        return verthys_api_v4_map(rc);
+    }
+    for (;;) {
+        VtyRepoLeaf leaf;
+        VtyRepoRecord rec;
+        int done = 0;
+
+        rc = vty_repo_iter_next(it, &leaf, &done);
+        if (rc != VTY_OK) break;
+        if (done) break;
+        if (count >= total) { rc = VTY_E_CORRUPT; break; }
+
+        memset(&rec, 0, sizeof(rec));
+        rc = vty_repo_read(v, &leaf, &rec);
+        if (rc != VTY_OK) break;
+
+        fmt_recs[count].type = rec.type;
+        fmt_recs[count].name_len = (uint16_t)rec.name_len;
+        fmt_recs[count].name =
+            (uint8_t *)malloc(rec.name_len > 0 ? rec.name_len : 1u);
+        if (fmt_recs[count].name == NULL) {
+            vty_free(rec.name, rec.name_len != 0 ? rec.name_len : 1u);
+            vty_free(rec.data, rec.data_len != 0 ? rec.data_len : 1u);
+            rc = VTY_E_RESOURCE;
+            break;
+        }
+        if (rec.name_len > 0) memcpy(fmt_recs[count].name, rec.name, rec.name_len);
+        fmt_recs[count].data_size = (uint32_t)rec.data_len;
+        fmt_recs[count].data = NULL;
+        ids[count] = leaf.record_id;
+
+        vty_free(rec.name, rec.name_len != 0 ? rec.name_len : 1u);
+        vty_free(rec.data, rec.data_len != 0 ? rec.data_len : 1u);
+        count++;
+    }
+    vty_repo_iter_close(it);
+
+    if (rc != VTY_OK || count != (uint16_t)total) {
+        VerthysResult err = (rc != VTY_OK)
+            ? verthys_api_v4_map(rc) : VERTHYS_ERR_CORRUPT;
+        for (uint16_t i = 0; i < count; i++) {
+            if (fmt_recs[i].name != NULL) {
+                verthys_secure_zero(fmt_recs[i].name, fmt_recs[i].name_len);
+                free(fmt_recs[i].name);
+            }
+        }
+        free(fmt_recs);
+        free(ids);
+        return err;
+    }
+
+    verthys_random_bytes(salt, sizeof salt);
+    if (keymanager_derive_master_export(mek, (const uint8_t *)password,
+                                        password_len, salt) != 0) {
+        for (uint16_t i = 0; i < count; i++) {
+            if (fmt_recs[i].name != NULL) {
+                verthys_secure_zero(fmt_recs[i].name, fmt_recs[i].name_len);
+                free(fmt_recs[i].name);
+            }
+        }
+        free(fmt_recs);
+        free(ids);
+        verthys_secure_zero(mek, sizeof mek);
+        verthys_secure_zero(salt, sizeof salt);
+        return VERTHYS_ERR_INTERNAL;
+    }
+    keymanager_generate_dek(dek);
+
+    sc.v = v;
+    sc.ids = ids;
+    sc.count = count;
+    rc = vfmt_write_streaming(salt, v->mem_kib, v->iters, v->parallel,
+                              mek, dek, fmt_recs, count,
+                              verthys_export_v4_get_data,
+                              verthys_export_v4_release_data,
+                              &sc, export_path);
+
+    for (uint16_t i = 0; i < count; i++) {
+        if (fmt_recs[i].name != NULL) {
+            verthys_secure_zero(fmt_recs[i].name, fmt_recs[i].name_len);
+            free(fmt_recs[i].name);
+        }
+    }
+    free(fmt_recs);
+    free(ids);
+    verthys_secure_zero(salt, sizeof salt);
+    verthys_secure_zero(mek, sizeof mek);
+    verthys_secure_zero(dek, sizeof dek);
+    return rc == 0 ? VERTHYS_OK : (rc < 0 ? VERTHYS_ERR_INTERNAL : VERTHYS_ERR_IO);
+}
 
 VerthysResult Verthys_Export(VerthysHandle handle,
                          const char *export_path,
@@ -226,6 +414,7 @@ VerthysResult Verthys_Export(VerthysHandle handle,
                          size_t      password_len)
 {
     struct VerthysContext *ctx;
+#if defined(VERTHYS_V3_SUPPORT)
     VerthysContextV3 *v;
     VerthysLsmScanIter *it = NULL;
     VerthysV3ExportEntry *snap = NULL;
@@ -234,6 +423,7 @@ VerthysResult Verthys_Export(VerthysHandle handle,
     uint16_t count = 0;
     uint8_t salt[VERTHYS_SALT_BYTES], mek[VERTHYS_KEY_BYTES], dek[VERTHYS_KEY_BYTES];
     int rc;
+#endif
 
     if (handle == NULL || export_path == NULL) return VERTHYS_ERR_INVALID;
     if (password == NULL && password_len != 0) return VERTHYS_ERR_INVALID;
@@ -246,7 +436,8 @@ VerthysResult Verthys_Export(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
+    if (ctx->fmt_version != VERTHYS_FMT_V3 &&
+        ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
 
     /* 导出属高危入口，执行反调试检测（命中即 KILL 上报） */
     if (anti_debug_v2_check() != DBG_THREAT_NONE) {
@@ -258,6 +449,17 @@ VerthysResult Verthys_Export(VerthysHandle handle,
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
 
+    /* v4：v1 交换格式流式导出（记录段解密按需进行） */
+    if (ctx->fmt_version == VERTHYS_FMT_V4) {
+        VerthysResult rc4 = verthys_export_v4_locked(ctx, export_path,
+                                                     password, password_len);
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#endif
+        return rc4;
+    }
+
+#if defined(VERTHYS_V3_SUPPORT)
     /* 导出始终使用 v1 交换格式（独立派生密钥，跨设备迁移） */
     verthys_random_bytes(salt, sizeof salt);
     if (keymanager_derive_master_export(mek, (const uint8_t *)password,
@@ -470,6 +672,13 @@ VerthysResult Verthys_Export(VerthysHandle handle,
     if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif
     return rc == 0 ? VERTHYS_OK : (rc < 0 ? VERTHYS_ERR_INTERNAL : VERTHYS_ERR_IO);
+#else
+    /* 产品（v4-only）：v3 容器不存在可达路径 */
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#endif
+    return VERTHYS_ERR_FORMAT;
+#endif
 }
 
 /* 9. 导入（v1 交换格式文件，合并到当前加密库） */
@@ -485,6 +694,7 @@ VerthysResult Verthys_Export(VerthysHandle handle,
  * 同口径）——预检将坏文件挡在 BEGIN 前（FORMAT 拒绝，零副作用），
  * 杜绝半途回滚的无谓开销。api_mutex 已由公共入口独占持有。
  */
+#if defined(VERTHYS_V3_SUPPORT)
 static VerthysResult verthys_api_v3_import(struct VerthysContext *ctx,
                                         const VerthysFmtRecord *fmt_recs,
                                         uint16_t count)
@@ -525,6 +735,45 @@ static VerthysResult verthys_api_v3_import(struct VerthysContext *ctx,
      * confirm 失败由下次 open 的崩溃恢复幂等收尾——错误直接上抛） */
     return verthys_v3_txn_finish(v);
 }
+#endif /* VERTHYS_V3_SUPPORT（v3 单事务导入） */
+
+/* v4 导入：逐条写仓库，末尾一次 DataRoot/元数据提交。 */
+static VerthysResult verthys_api_v4_import(struct VerthysContext *ctx,
+                                           const VerthysFmtRecord *fmt_recs,
+                                           uint16_t count)
+{
+    VtyRepoInput *in = NULL;
+    uint16_t i;
+    int rc;
+
+    if (ctx->v4 == NULL || !ctx->v4->unlocked || ctx->v4->store == NULL) {
+        return VERTHYS_ERR_LOCKED;
+    }
+    if (count == 0) return VERTHYS_OK;
+    for (i = 0; i < count; i++) {
+        if (fmt_recs[i].name_len > VERTHYS_NAME_MAX_BYTES) {
+            return VERTHYS_ERR_FORMAT;
+        }
+        /* 记录层单条明文上限：超过即拒绝（格式层 u32 允许更大，但 v4
+         * 记录 AEAD 预算不允许），避免半途失败被映射成 NOTFOUND。 */
+        if (fmt_recs[i].data_size >= (uint64_t)VTY_RECORD_MAX_DATA) {
+            return VERTHYS_ERR_FORMAT;
+        }
+    }
+
+    in = (VtyRepoInput *)calloc(count, sizeof(VtyRepoInput));
+    if (in == NULL) return VERTHYS_ERR_INTERNAL;
+    for (i = 0; i < count; i++) {
+        in[i].type = fmt_recs[i].type;
+        in[i].name = fmt_recs[i].name;
+        in[i].name_len = fmt_recs[i].name_len;
+        in[i].data = fmt_recs[i].data;
+        in[i].data_len = fmt_recs[i].data_size;
+    }
+    rc = vty_repo_add_many(ctx->v4, in, count, NULL);
+    free(in);
+    return verthys_api_v4_map(rc);
+}
 
 VerthysResult Verthys_Import(VerthysHandle handle,
                          const char *import_path,
@@ -552,7 +801,8 @@ VerthysResult Verthys_Import(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
+    if (ctx->fmt_version != VERTHYS_FMT_V3 &&
+        ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
 
     /* 递归互斥锁保护 */
 #ifdef _WIN32
@@ -622,8 +872,16 @@ VerthysResult Verthys_Import(VerthysHandle handle,
     verthys_secure_zero(mek, sizeof mek);
     verthys_secure_zero(dek, sizeof dek);
 
-    /* 单事务批量导入（六阶段收口，原子性由 abort 路径保证） */
-    import_rc = verthys_api_v3_import(ctx, fmt_recs, count);
+#if defined(VERTHYS_V3_SUPPORT)
+    /* v3 单事务批量 / v4 单次提交批量 */
+    import_rc = (ctx->fmt_version == VERTHYS_FMT_V4)
+        ? verthys_api_v4_import(ctx, fmt_recs, count)
+        : verthys_api_v3_import(ctx, fmt_recs, count);
+#else
+    import_rc = (ctx->fmt_version == VERTHYS_FMT_V4)
+        ? verthys_api_v4_import(ctx, fmt_recs, count)
+        : VERTHYS_ERR_FORMAT;
+#endif
 
     vfmt_free_records(fmt_recs, count);
 #ifdef _WIN32
@@ -660,7 +918,8 @@ VerthysResult Verthys_ChangePassword(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    if (ctx->fmt_version != VERTHYS_FMT_V3) return VERTHYS_ERR_FORMAT;
+    if (ctx->fmt_version != VERTHYS_FMT_V3 &&
+        ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
 
     /* 改密属高危入口，执行反调试检测（命中即 KILL 上报） */
     if (anti_debug_v2_check() != DBG_THREAT_NONE) {
@@ -681,10 +940,22 @@ VerthysResult Verthys_ChangePassword(VerthysHandle handle,
     /* 写路径周期运行时哈希校验（30min 门控） */
     runtime_hash_verify_periodic();
 
-    rc = (ctx->v3 == NULL)
-        ? VERTHYS_ERR_LOCKED
-        : verthys_v3_change_password(ctx->v3, old_pw, old_len,
-                                   new_pw, new_len);
+    if (ctx->fmt_version == VERTHYS_FMT_V4) {
+        rc = verthys_api_v4_change_password(ctx, old_pw, old_len,
+                                            new_pw, new_len);
+    }
+#if defined(VERTHYS_V3_SUPPORT)
+    else {
+        rc = (ctx->v3 == NULL)
+            ? VERTHYS_ERR_LOCKED
+            : verthys_v3_change_password(ctx->v3, old_pw, old_len,
+                                       new_pw, new_len);
+    }
+#else
+    else {
+        rc = VERTHYS_ERR_FORMAT;
+    }
+#endif
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif

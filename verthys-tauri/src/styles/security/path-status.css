@@ -57,6 +57,8 @@
   text-align: left;
 }
 .path-status.active .ps-path { color: rgba(0, 212, 255, 0.82); }
+/* 空态文案为中文提示：等宽栈缺中文字形会回退到另一字族，改用主字体保持排印统一 */
+.ps-path--empty { font-family: var(--font); }
 
 /* ===== 锁定刻痕组（选中即亮 — 静态确认；撤销即灭） ===== */
 .ps-lock {

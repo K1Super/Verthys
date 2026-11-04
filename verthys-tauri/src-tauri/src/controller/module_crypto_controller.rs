@@ -1,13 +1,18 @@
 /* module_crypto_controller.rs — 内容层加密命令（前端 → 主进程 → worker）
  *
  * 职责：校验模块、布局与尺寸边界，把请求转发给 worker 的 module_* 操作，
- * 并把句柄与公开参数透传前端。模块密钥与文件密钥始终只存在于 worker
- * 进程内；本层请求/响应不含原始密钥。
+ * 并把公开参数透传前端。分片密钥（MDEK）只存在于 C 层句柄内；本层
+ * 请求/响应不含任何原始密钥。
+ *
+ * 模块解锁/锁定在 v4 语义下是 C 层 M1 状态机操作：
+ *   - 模块未启用 → MDEK 在 Keyring，内容路径可用，解锁为幂等空操作；
+ *   - 模块已启用 → 必须把模块口令交给 C 层解锁 user 槽；
+ *   - 锁定 → 清空 C 层模块会话缓存（不涉及口令）。
  *
  * 安全约束：
  *   - 仅接受白名单模块与布局，未知取值直接拒绝；
  *   - 消耗模块密钥的操作要求容器已解锁；
- *   - 锁定命令不设解锁闸门，保证锁定态下仍能清理 worker 驻留密钥；
+ *   - 锁定命令不设解锁闸门，保证锁定态下仍能清理 C 层驻留密钥；
  *   - 请求载荷按跨层预算上限前置拒绝，避免超限请求打断 worker 行协议。
  *
  * 依赖方向：controller → state / worker 会话（经 AppState::send）。
@@ -32,17 +37,15 @@ const MAX_WRAPPED_KEY_CHARS: usize = 4096;
 const MAX_SALT_CHARS: usize = 64;
 /// 单次内容载荷的 base64 字符上限：跨层预算常量即字符口径，直接对齐
 const MAX_DATA_CHARS: usize = PB_IPC_MAX_PAYLOAD_BYTES as usize;
-/// 文件块 v2 迭代次数下限：低于此值视为参数被篡改
-const V2_MIN_ITERATIONS: u32 = 10_000;
-/// 文件块 v2 迭代次数上限：拒绝超长派生拖垮 worker
-const V2_MAX_ITERATIONS: u32 = 10_000_000;
-/// 首次派生需要 PBKDF2 150000 轮，留出冷启动余量
+
+/// 模块索引通配值（C 层 VERTHYS_MODULE_ALL）：仅锁定命令接受
+const MODULE_ALL: u32 = 0xFFFF_FFFF;
+/// 模块解锁/锁定是 C 层槽位操作，按短操作预算
 const KEY_OP_TIMEOUT: Duration = Duration::from_secs(30);
 /// 内容加解密超时：单块上限 1MiB，30 秒覆盖极端机器抖动
 const CRYPT_OP_TIMEOUT: Duration = Duration::from_secs(30);
 
 const MODULE_WHITELIST: [&str; 2] = ["photo", "file"];
-const FILE_KEY_KINDS: [&str; 1] = ["slim_create"];
 const CRYPT_KINDS: [&str; 8] = [
     "meta",
     "chunk",
@@ -54,12 +57,29 @@ const CRYPT_KINDS: [&str; 8] = [
     "v2_check",
 ];
 
-fn ensure_module(module: &str) -> Result<(), String> {
-    if MODULE_WHITELIST.contains(&module) {
-        Ok(())
-    } else {
-        Err("模块标识非法".into())
+/// 内容模块 → v4 模块索引（0=photo，2=fileverthys）。
+/// 内容层只承载照片与文件保险箱两类数据；accounts 的记录由 C 层记录层
+/// 直接管理，不经过内容加解密命令。
+fn content_module_index(module: &str) -> Result<u32, String> {
+    match module {
+        "photo" => Ok(0),
+        "file" => Ok(2),
+        _ => Err("模块标识非法".into()),
     }
+}
+
+/// 会话模块（解锁/锁定）→ v4 模块索引：0=photo，1=accounts，2=fileverthys。
+fn module_index(module: &str) -> Result<u32, String> {
+    match module {
+        "photo" => Ok(0),
+        "accounts" => Ok(1),
+        "file" | "fileverthys" => Ok(2),
+        _ => Err("模块标识非法".into()),
+    }
+}
+
+fn ensure_module(module: &str) -> Result<(), String> {
+    content_module_index(module).map(|_| ())
 }
 
 fn ensure_kind(kind: &str, allowed: &[&str]) -> Result<(), String> {
@@ -108,9 +128,11 @@ fn forward(
     serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))
 }
 
-/// 解锁模块密钥：把模块口令一次性交付 worker 托管。
+/// 解锁模块：把模块口令一次性交付 C 层，解封该模块 MDEK 的 user 槽。
 ///
-/// 口令正确性由模块解锁链路判定；本命令不引入可离线验证的校验块。
+/// 模块未启用时 MDEK 在 Keyring，本命令返回幂等成功（enabled=false）：
+/// 调用方据此知道内容路径无需口令，但不得据此关闭模块保护。
+/// 已删除模块直接拒绝：删除后的数据叶已清除，解锁无意义。
 #[tauri::command]
 pub async fn verthys_module_key_unlock(
     app: tauri::AppHandle,
@@ -121,83 +143,67 @@ pub async fn verthys_module_key_unlock(
     if let Err(msg) = require_unlocked(&app, &state, "module_key_unlock") {
         return Ok(VerthysResponse::err("module_key_unlock", &msg));
     }
-    ensure_module(&module)?;
     if password.is_empty() || password.len() > MAX_MODULE_SECRET_BYTES {
         return Ok(VerthysResponse::err("module_key_unlock", "模块口令长度非法"));
     }
+    let module_id = module_index(&module)?;
+
+    let status = forward(
+        &state,
+        &json!({ "op": "v4_module_status", "module_id": module_id }),
+        KEY_OP_TIMEOUT,
+    )?;
+    if !status.ok {
+        /* 状态查询失败按解锁失败返回：不把 v4_module_status 的 op 名透出，
+         * 保持调用方只看到 module_key_unlock 的结果语义。 */
+        return Ok(VerthysResponse::err(
+            "module_key_unlock",
+            status.error.as_deref().unwrap_or("模块状态查询失败"),
+        ));
+    }
+    if status.deleted == Some(true) {
+        return Ok(VerthysResponse::err("module_key_unlock", "模块已删除"));
+    }
+    if status.enabled != Some(true) {
+        /* 未启用：MDEK 在 Keyring，内容加解密不依赖模块口令。 */
+        let mut ok = VerthysResponse::ok("module_key_unlock");
+        ok.enabled = Some(false);
+        ok.unlocked = Some(false);
+        ok.deleted = Some(false);
+        return Ok(ok);
+    }
+
     let password = Zeroizing::new(password);
     let req = json!({
-        "op": "module_key_unlock",
-        "module": module,
+        "op": "v4_module_unlock",
+        "module_id": module_id,
         "password": password.as_str(),
     });
     forward(&state, &req, KEY_OP_TIMEOUT)
 }
 
-/// 清除模块密钥；module 为空表示全部清除。
+/// 清除模块会话密钥；module 为空表示全部模块。
 ///
-/// 不设解锁闸门：锁定态必须先清空 worker 驻留密钥，闸门会阻断清理。
+/// 不设解锁闸门：锁定态必须先清空 C 层模块会话缓存，闸门会阻断清理。
 #[tauri::command]
 pub async fn verthys_module_key_lock(
     state: State<'_, AppState>,
     module: Option<String>,
 ) -> Result<VerthysResponse, String> {
     let module = module.unwrap_or_default();
-    if !module.is_empty() {
-        ensure_module(&module)?;
-    }
+    let module_id = if module.is_empty() {
+        MODULE_ALL
+    } else {
+        module_index(&module)?
+    };
     let req = json!({
-        "op": "module_key_lock",
-        "module": module,
+        "op": "v4_module_lock",
+        "module_id": module_id,
     });
     forward(&state, &req, KEY_OP_TIMEOUT)
 }
 
-/// 创建瘦身布局的文件密钥组。
-///
-/// 返回文件盐与包裹态文件密钥（均为可落盘的公开参数）；随机文件密钥由
-/// worker 生成并立即包裹，不经响应返回，调用方后续只用包裹态密钥引用。
-#[tauri::command]
-pub async fn verthys_module_file_key(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    module: String,
-    kind: String,
-    wrapped_key: Option<String>,
-    salt: Option<String>,
-    iterations: Option<u32>,
-) -> Result<VerthysResponse, String> {
-    if let Err(msg) = require_unlocked(&app, &state, "module_file_key") {
-        return Ok(VerthysResponse::err("module_file_key", &msg));
-    }
-    ensure_module(&module)?;
-    ensure_kind(&kind, &FILE_KEY_KINDS)?;
-
-    let wrapped_key = wrapped_key.unwrap_or_default();
-    let salt = salt.unwrap_or_default();
-    if wrapped_key.len() > MAX_WRAPPED_KEY_CHARS || salt.len() > MAX_SALT_CHARS {
-        return Ok(VerthysResponse::err("module_file_key", "密钥参数超出上限"));
-    }
-    if kind == "slim_create" && (!wrapped_key.is_empty() || !salt.is_empty()) {
-        return Ok(VerthysResponse::err("module_file_key", "创建文件密钥不需要外部密钥参数"));
-    }
-    let iterations = iterations.unwrap_or(0);
-    if iterations != 0 && !(V2_MIN_ITERATIONS..=V2_MAX_ITERATIONS).contains(&iterations) {
-        return Ok(VerthysResponse::err("module_file_key", "迭代次数非法"));
-    }
-
-    let req = json!({
-        "op": "module_file_key",
-        "module": module,
-        "kind": kind,
-        "wrapped_key": wrapped_key,
-        "salt": salt,
-        "iterations": iterations,
-    });
-    forward(&state, &req, KEY_OP_TIMEOUT)
-}
-
-/// 加密内容记录；密钥来自 worker 内的模块密钥或包裹态文件密钥。
+/// 加密内容记录；密钥来自 worker 内的模块会话密钥。
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn verthys_module_seal(
@@ -324,7 +330,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn module_and_kind_whitelists_reject_unknown_values() {
+    fn session_module_index_accepts_all_session_modules() {
+        assert_eq!(module_index("photo").unwrap(), 0);
+        assert_eq!(module_index("accounts").unwrap(), 1);
+        assert_eq!(module_index("file").unwrap(), 2);
+        assert_eq!(module_index("fileverthys").unwrap(), 2);
+        assert!(module_index("").is_err());
+        assert!(module_index("unknown").is_err());
+    }
+
+    #[test]
+    fn content_module_and_kind_whitelists_reject_unknown_values() {
         assert!(ensure_module("photo").is_ok());
         assert!(ensure_module("file").is_ok());
         assert!(ensure_module("accounts").is_err());

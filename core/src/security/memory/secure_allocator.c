@@ -167,6 +167,55 @@ static void budget_unaccount(size_t region_bytes)
     }
 }
 
+/* ---------- 崩溃转储排除（WER，尽力而为） ----------
+ *
+ * WerRegisterExcludedMemoryBlock 让 WER 在生成崩溃转储时排除指定区段，
+ * 降低密钥块进入 .dmp 的概率。API 仅在 wer.dll 中提供，且不是所有
+ * Windows 版本都可用；解析或调用失败只记诊断，不改变分配语义，
+ * 也不作为安全失败上报。 */
+typedef BOOL (WINAPI *WerRegisterExcludedMemoryBlock_t)(PVOID, DWORD);
+typedef BOOL (WINAPI *WerUnregisterExcludedMemoryBlock_t)(PVOID);
+
+static INIT_ONCE s_wer_once = INIT_ONCE_STATIC_INIT;
+static WerRegisterExcludedMemoryBlock_t s_wer_register = NULL;
+static WerUnregisterExcludedMemoryBlock_t s_wer_unregister = NULL;
+
+static BOOL CALLBACK wer_init_cb(PINIT_ONCE once, PVOID param, PVOID *ctx)
+{
+    HMODULE wer = NULL;
+    (void)once; (void)param; (void)ctx;
+
+    /* 不 FreeLibrary：区段在进程生命周期内可能持续分配/释放。 */
+    wer = LoadLibraryW(L"wer.dll");
+    if (wer != NULL) {
+        s_wer_register = (WerRegisterExcludedMemoryBlock_t)
+            GetProcAddress(wer, "WerRegisterExcludedMemoryBlock");
+        s_wer_unregister = (WerUnregisterExcludedMemoryBlock_t)
+            GetProcAddress(wer, "WerUnregisterExcludedMemoryBlock");
+    }
+    return TRUE;
+}
+
+static void wer_ensure_init(void)
+{
+    InitOnceExecuteOnce(&s_wer_once, wer_init_cb, NULL, NULL);
+}
+
+static void wer_register_block(void *data, size_t bytes)
+{
+    wer_ensure_init();
+    if (s_wer_register != NULL && data != NULL && bytes != 0) {
+        (void)s_wer_register(data, (DWORD)bytes);
+    }
+}
+
+static void wer_unregister_block(void *data)
+{
+    if (s_wer_unregister != NULL && data != NULL) {
+        (void)s_wer_unregister(data);
+    }
+}
+
 /* ---------- 实例生命周期 ---------- */
 
 SecureAllocator *secure_allocator_create(void)
@@ -176,6 +225,23 @@ SecureAllocator *secure_allocator_create(void)
     InitializeSRWLock(&alloc->lock);
     alloc->next_magic = 0x9E3779B97F4A7C15ull;  /* 黄金分割常数种子 */
     return alloc;
+}
+
+/* 进程级共享单例：InitOnce 懒初始化；无销毁路径。 */
+static INIT_ONCE s_shared_once = INIT_ONCE_STATIC_INIT;
+static SecureAllocator *s_shared_alloc = NULL;
+
+static BOOL CALLBACK shared_init_cb(PINIT_ONCE once, PVOID param, PVOID *ctx)
+{
+    (void)once; (void)param; (void)ctx;
+    s_shared_alloc = secure_allocator_create();
+    return TRUE;
+}
+
+SecureAllocator *secure_allocator_shared(void)
+{
+    InitOnceExecuteOnce(&s_shared_once, shared_init_cb, NULL, NULL);
+    return s_shared_alloc;
 }
 
 /* 注册表容量倍增；返回 0 成功 */
@@ -204,6 +270,8 @@ static void region_release(SecureRegionMeta *meta)
     if (meta == NULL || meta->region_base == NULL) return;
 
     if (meta->data_base != NULL && meta->data_bytes > 0) {
+        /* 先撤销 WER 排除登记，再清零与解锁（登记期间区段仍须有效）。 */
+        wer_unregister_block(meta->data_base);
         SecureZeroMemory(meta->data_base, meta->data_bytes);
         VirtualUnlock(meta->data_base, meta->data_bytes);
     }
@@ -321,6 +389,10 @@ VerthysResult secure_allocator_alloc(SecureAllocator *alloc, size_t size,
         VirtualFree(region, 0, MEM_RELEASE);
         return VERTHYS_ERR_INTERNAL;
     }
+
+    /* 尽力将密钥块从 WER 崩溃转储排除；失败仅影响取证门槛，不改变
+     * 分配结果。 */
+    wer_register_block(data, data_bytes);
 
     *out_ptr = data;
     return VERTHYS_OK;

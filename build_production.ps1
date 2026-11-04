@@ -33,7 +33,8 @@
 #   -AllowInsecureUpdater 允许 production 使用 HTTP + IP 端点（零成本自建分发）
 #   -AllowLocal  允许以 local profile 打包（默认 production）
 #   -ReleaseNotes 更新说明；留空时由发布脚本生成默认说明
-#   -CompatAbiMin 兼容 ABI 下限；桥接发布显式传入，例如 0x000B
+#   -CompatAbiMin 兼容 ABI 下限；默认 0x000B，覆盖 4.1.x 及之后的旧客户端
+#                 传入空字符串可退回仅当前核心 ABI 的严格清单
 #   -CompatAbiMax 兼容 ABI 上限；留空时使用当前核心 ABI
 
 param(
@@ -49,7 +50,7 @@ param(
     [switch]$AllowInsecureUpdater,
     [switch]$AllowLocal,
     [string]$ReleaseNotes = "",
-    [string]$CompatAbiMin = "",
+    [string]$CompatAbiMin = "0x000B",
     [string]$CompatAbiMax = ""
 )
 
@@ -182,6 +183,25 @@ if ($LASTEXITCODE -ne 0) {
     throw "Updater boundary gate failed"
 }
 Write-OK "Updater boundary gate passed"
+
+# ========== 版本载体同步 ==========
+# 根 VERSION 是唯一手改点；构建前写入 Cargo.toml / package.json / package-lock.json
+# / config.ts 等载体，避免 Tauri 按旧版本打包后与产物校验使用的根版本不一致，
+# 导致整轮构建在最后一步才失败。同步后立即做 -CheckOnly 复核，结构性问题仍然阻断。
+Write-Stage "阶段 0.2: 版本载体同步"
+$syncVersionScript = Join-Path $ScriptRoot "ci\sync_version.ps1"
+if (-not (Test-Path -LiteralPath $syncVersionScript)) {
+    throw "Version sync script is missing: $syncVersionScript"
+}
+& $syncVersionScript
+if ($LASTEXITCODE -ne 0) {
+    throw "Version carrier sync failed"
+}
+& $syncVersionScript -CheckOnly
+if ($LASTEXITCODE -ne 0) {
+    throw "Version carrier verification failed after sync"
+}
+Write-OK "版本载体已与根 VERSION 同步"
 
 # ========== 加载构建环境 ==========
 Write-Stage "阶段 0.5: 加载构建环境"

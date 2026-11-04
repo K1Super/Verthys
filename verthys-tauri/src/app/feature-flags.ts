@@ -41,8 +41,8 @@ const DEFAULT_FLAGS: PerfFlags = {
   cssAnimAlternatives: true,
 };
 
-/** localStorage 覆盖键（命名空间前缀防碰撞） */
-const FLAGS_STORAGE_KEY = "Verthys:perf-flags";
+/** localStorage 覆盖键（命名空间前缀防碰撞；开发工具需清除同一键） */
+export const PERF_FLAGS_STORAGE_KEY = "Verthys:perf-flags";
 
 /** 已知 flag 字段集合（覆盖解析白名单 — 未知字段静默丢弃） */
 const KNOWN_FLAG_KEYS = new Set<keyof PerfFlags>([
@@ -67,7 +67,7 @@ function resolveFlags(): PerfFlags {
   }
 
   try {
-    const raw = window.localStorage.getItem(FLAGS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(PERF_FLAGS_STORAGE_KEY);
     if (!raw) return flags;
 
     const overrides: unknown = JSON.parse(raw);

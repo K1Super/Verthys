@@ -27,6 +27,7 @@ import {
   resetSessionTimer,
   sessionIdleDeadlineRef,
   lockAll,
+  applyExternalLock,
 } from "./security-session";
 
 const mocks = vi.hoisted(() => ({
@@ -39,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   securityBruteClearPurge: vi.fn(),
   securityBruteStatus: vi.fn(),
   verthysClearGlobalKey: vi.fn(),
+  verthysPrepareLock: vi.fn(),
   verthysLock: vi.fn(),
   verthysLockPersist: vi.fn(),
   workerDestroy: vi.fn(),
@@ -67,6 +69,7 @@ vi.mock("../lib/verthys", () => ({
   securityApplyPreset: mocks.securityApplyPreset,
   securityLoadPresetState: mocks.securityLoadPresetState,
   verthysClearGlobalKey: mocks.verthysClearGlobalKey,
+  verthysPrepareLock: mocks.verthysPrepareLock,
   verthysLock: mocks.verthysLock,
   verthysLockPersist: mocks.verthysLockPersist,
   workerDestroy: mocks.workerDestroy,
@@ -127,11 +130,51 @@ beforeEach(() => {
   mocks.securityLoadPresetState.mockResolvedValue({ state: null, persistDirty: false });
   mocks.waitForFlush.mockResolvedValue(undefined);
   mocks.clearRecordScanCache.mockReturnValue(undefined);
+  mocks.verthysPrepareLock.mockResolvedValue(true);
+  // lockAll 各步骤真实实现均返回 Promise；mock 必须同构，否则会暴露与生产不同的时序
+  mocks.stopBackgroundTasks.mockResolvedValue(undefined);
+  mocks.verthysClearGlobalKey.mockResolvedValue(undefined);
+  mocks.verthysLockPersist.mockResolvedValue(undefined);
+  mocks.securitySessionStop.mockResolvedValue(undefined);
+  mocks.verthysLock.mockResolvedValue(true);
+  mocks.workerDestroy.mockResolvedValue(true);
 });
 
 afterEach(() => {
   clearSessionTimer();
   vi.useRealTimers();
+});
+
+describe("外部锁定视图复位（applyExternalLock）", () => {
+  it("只重置前端状态与缓存，不再调用任何锁库/销毁命令", async () => {
+    keyState.verthysReady.value = true;
+    keyState.globalKeyReady.value = true;
+    keyState.moduleKeyReady.value = { photo: true, accounts: true, fileverthys: true };
+
+    applyExternalLock("suspend");
+    await Promise.resolve();
+
+    expect(keyState.verthysReady.value).toBe(false);
+    expect(keyState.globalKeyReady.value).toBe(false);
+    expect(keyState.moduleKeyReady.value).toEqual({
+      photo: false,
+      accounts: false,
+      fileverthys: false,
+    });
+    expect(mocks.clearModuleKeyCache).toHaveBeenCalled();
+    expect(mocks.clearModuleCache).toHaveBeenCalled();
+    expect(mocks.clearRecordScanCache).toHaveBeenCalled();
+    expect(mocks.clearSummaryCache).toHaveBeenCalled();
+    expect(mocks.clearFullRecordCache).toHaveBeenCalled();
+    expect(mocks.resetFlushChain).toHaveBeenCalled();
+    expect(mocks.stopBackgroundTasks).toHaveBeenCalled();
+
+    // 主进程已完成销毁：前端不得再触发二次锁库命令
+    expect(mocks.verthysLock).not.toHaveBeenCalled();
+    expect(mocks.workerDestroy).not.toHaveBeenCalled();
+    expect(mocks.securitySessionStop).not.toHaveBeenCalled();
+    expect(mocks.verthysPrepareLock).not.toHaveBeenCalled();
+  });
 });
 
 describe("标准档应用与恢复", () => {
@@ -251,8 +294,8 @@ describe("自定义档会话语义", () => {
 describe("lockAll 重入与代际闸门", () => {
   it("并发重入：只跑一条真实销毁链，两方均等待其完成", async () => {
     mocks.verthysLockPersist.mockResolvedValue(undefined);
-    mocks.verthysLock.mockResolvedValue(undefined);
-    mocks.workerDestroy.mockResolvedValue(undefined);
+    mocks.verthysLock.mockResolvedValue(true);
+    mocks.workerDestroy.mockResolvedValue(true);
 
     const first = lockAll();
     const second = lockAll();
@@ -265,8 +308,8 @@ describe("lockAll 重入与代际闸门", () => {
 
   it("闸门释放：前一序列完成后可再次完整锁定", async () => {
     mocks.verthysLockPersist.mockResolvedValue(undefined);
-    mocks.verthysLock.mockResolvedValue(undefined);
-    mocks.workerDestroy.mockResolvedValue(undefined);
+    mocks.verthysLock.mockResolvedValue(true);
+    mocks.workerDestroy.mockResolvedValue(true);
 
     await lockAll();
     await lockAll();
@@ -280,13 +323,56 @@ describe("lockAll 重入与代际闸门", () => {
     mocks.verthysClearGlobalKey.mockResolvedValue(undefined);
     mocks.verthysLockPersist.mockResolvedValue(undefined);
     mocks.securitySessionStop.mockResolvedValue(undefined);
-    mocks.verthysLock.mockResolvedValue(undefined);
-    mocks.workerDestroy.mockResolvedValue(undefined);
+    mocks.verthysLock.mockResolvedValue(true);
+    mocks.workerDestroy.mockResolvedValue(true);
 
     const outcome = await lockAll();
 
-    expect(outcome).toMatchObject({ clean: true, flushed: true, dirty: false });
+    expect(outcome).toMatchObject({ locked: true, clean: true, flushed: true, dirty: false });
     expect(outcome.errors).toEqual([]);
+  });
+
+  it("轮换未收敛：整体放弃锁定，保留会话与空闲计时", async () => {
+    keyState.verthysReady.value = true;
+    mocks.verthysPrepareLock.mockRejectedValueOnce(new Error("等待轮换作业收敛 超时（35s）"));
+
+    const outcome = await lockAll();
+
+    // 前置闸门失败后不得执行任何破坏性步骤
+    expect(mocks.waitForFlush).not.toHaveBeenCalled();
+    expect(mocks.verthysClearGlobalKey).not.toHaveBeenCalled();
+    expect(mocks.verthysLockPersist).not.toHaveBeenCalled();
+    expect(mocks.verthysLock).not.toHaveBeenCalled();
+    expect(mocks.workerDestroy).not.toHaveBeenCalled();
+    expect(outcome.locked).toBe(false);
+    expect(outcome.clean).toBe(false);
+    // 会话状态不得被清零，否则界面会显示“已锁定”而 worker 仍持有 GMK
+    expect(keyState.globalKeyReady.value).toBe(true);
+    expect(keyState.verthysReady.value).toBe(true);
+  });
+
+  it("锁定命令命中新会话：立即停止后续销毁步骤", async () => {
+    mocks.verthysLock.mockRejectedValueOnce(
+      new Error("E_LOCK_SUPERSEDED: 目标会话已被替换，本次锁定已放弃"),
+    );
+
+    const outcome = await lockAll();
+
+    expect(mocks.workerDestroy).not.toHaveBeenCalled();
+    expect(outcome.locked).toBe(false);
+    expect(outcome.clean).toBe(false);
+  });
+
+  it("步骤完成即清除超时定时器：锁定后不得把缓存误标为脏", async () => {
+    vi.useFakeTimers();
+
+    const outcome = await lockAll();
+    expect(outcome.clean).toBe(true);
+
+    // 旧实现 Promise.race 的超时定时器不会清除，60s 后会把干净缓存标脏，
+    // 污染后续每次锁定结果（并可能让退出流程误判为脏数据）。
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mocks.setCacheDirty).not.toHaveBeenCalled();
   });
 
   it("脏缓存返回不可安装结果", async () => {

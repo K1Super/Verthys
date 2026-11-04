@@ -1,202 +1,268 @@
 /*
  * defense_closure.c — 闭环防御能力验证状态机实现
  *
-
- * 原实现缺陷：BLOCKED 的判定是"模块 init 成功"
- * 而非"攻击路径被阻断"——例如 check_mem_dump 的 BLOCKED 只说明
- * key_drift/working_set 定时器启动（注册表为空，什么都没保护）。
+ * 判据来源（全部为当前进程 / 当前会话的可验证事实）：
+ *   0 挂起绕过 — 无驻留密钥时 BLOCKED；有密钥时 DEGRADED，看门狗未接线
+ *                 记 SUSPEND_GUARD_INACTIVE（可修复），接线后仅剩管理员
+ *                 挂起这一架构限制（SUSPEND_UNPREVENTABLE）。
+ *   1 内存转储 — 无驻留密钥时 BLOCKED；V4 密钥驻留用户态时 DEGRADED。
+ *   2 休眠取证 — 无驻留密钥或系统休眠关闭时 BLOCKED；休眠启用/状态未知
+ *                 且有驻留密钥时 DEGRADED。
+ *   3 接口挂钩 — TLS 加载标志缺失为 FAILED；扫描异常为 FAILED；扫描
+ *                 不可用/过期或直连系统调用未激活为 DEGRADED；扫描干净
+ *                 且直连可用为 BLOCKED。
+ *   4 动态劫持 — 只采信 OS 回读的 mitigation 位：核心位齐备 BLOCKED，
+ *                 部分/无法确认 DEGRADED。
+ *   5 进程读取 — 双层 Job Object 生效时 BLOCKED，否则 FAILED。
+ *   6 跨设备迁移 — 被查询会话已解锁、绑定槽存在、机器密钥可用且硬件
+ *                 指纹就绪时 BLOCKED；否则 DEGRADED（无事实/不可用）。
  *
- * 新语义：每个路径的 BLOCKED 必须有真实可验证的条件；保护未落地处
- * 如实报告 DEGRADED（BOOT 模式允许降级启动并记录，FAILED 才拒绝）：
- *   1. SUSPEND_BYPASS   — 反调试模块就绪（入口检测 + Init 校验）
- *   2. MEM_DUMP         — 密钥已进入 CNG 内核托管（key_separation 三权分立
- *                          或 V3 keymanager_cng 密钥组，任一成立即 BLOCKED）
- *   3. HIBERNATION      — 判据重构：密钥 CNG 内核托管（与 MEM_DUMP
- *                          同源判据——休眠取证窃取的是用户态页内密钥，
- *                          密钥不落地则 hiberfil.sys 无密钥可取）+
- *                          memory_guard 注册区锁页（在用数据防换出）
- *   4. IAT_INLINE_HOOK  — TLS 回调标志已验证 + 完整性模块就绪 +
- *                          判据升级（直接系统调用激活），
- *                          检测器 NT 查询绕开可被用户态 Hook 的 ntdll 导出
- *   5. DLL_HIJACK       — System32 优先加载 + 沙盒镜像加载策略生效
- *   6. PROCESS_READ     — 双层 Job Object 隔离已建立
- *   7. CROSS_DEVICE     — CNG 机器密钥可用 + 硬件绑定指纹就绪
- *
- * check 全程持 SRWLOCK 串行化——BOOT（Verthys_Init）与 RUNTIME
- *   （Verthys_GetSecurityStatus）可能并发到达，静态报告缓存 s_last_report
- *   的写读必须互斥。
+ * 检查全程持 SRWLOCK 串行化——BOOT（Verthys_Init）与 RUNTIME
+ * （Verthys_GetSecurityStatus）可能并发到达，静态报告缓存 s_last_report
+ * 的写读必须互斥。检查过程不调用任何 *_init，不创建句柄与定时器。
  */
 #include "defense_closure.h"
 
 /* Layer 1: 进程不可触碰化 */
 #include "job_isolation.h"
 
-/* 密钥托管状态（MEM_DUMP 判据：key_separation 三权分立 +
- * keymanager_cng CNG 内核托管双分支） */
-#include "key_separation.h"
-#include "keymanager_cng.h"
-
-/* Layer 3: 固件与硬件绑定 */
+/* Layer 3: 固件与硬件绑定（只读可用性查询） */
 #include "cng_machine_key.h"
-#include "system32_loader.h"
 #include "hardware_binding.h"
 
-/* Layer 4: Hook 对抗（TLS 标志 + 联动销毁） */
+/* Layer 4: Hook 对抗（TLS 加载标志） */
 #include "tls_loader.h"
-#include "tamper_destroy.h"
 
-/* Layer 5: 进程无菌沙盒 */
+/* Layer 5: 进程无菌沙盒（事实位由 fill_process_facts 写入） */
 #include "process_sandbox.h"
 
-/* 完整性模块（基准验签） */
-#include "integrity.h"
+/* 预设策略（anti_dump 开关进入 policy_flags，仅用于 UI 提示） */
+#include "security_preset.h"
 
-/* 反调试模块（SUSPEND_BYPASS 判据） */
-#include "anti_debug_v2.h"
+/* 休眠状态（hiberfil 取证判据） */
+#include "hibernation_state.h"
 
-/* HIBERNATION 判据——memory_guard 注册区锁页（显式包含，
- * 此前经传递包含隐式依赖） */
-#include "memory_guard.h"
+/* Inline Hook / IAT 基线扫描结论 */
+#include "hook_scan.h"
 
-/* P4 判据升级——直接系统调用激活状态（落地收口） */
+/* P4 判据——直接系统调用激活状态（只读查询） */
 #include "syscall_direct.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <windows.h>   /* InterlockedCompareExchange（g_tls_init_marker 原子读） */
+#include <windows.h>   /* InterlockedCompareExchange / FILETIME / SRWLOCK */
 
 #include <string.h>
 
 /* ---------- 模块状态 ---------- */
 
-static int                s_initialized   = 0;
+static INIT_ONCE         s_init_once     = INIT_ONCE_STATIC_INIT;
 static DefenseStatusReport s_last_report;
-static int                s_has_check     = 0;
+static int               s_has_check     = 0;
 /* 校验串行化锁——静态初始化（SRWLOCK_INIT），无需析构 */
-static SRWLOCK            s_check_lock    = SRWLOCK_INIT;
+static SRWLOCK           s_check_lock    = SRWLOCK_INIT;
+/* 运行时守卫位：bit0=心跳运行 bit1=挂起守卫接线；完整掩码语义 */
+static volatile LONG     s_runtime_guards = 0;
+
+static BOOL CALLBACK dcl_init_once(PINIT_ONCE once, PVOID param, PVOID *ctx)
+{
+    (void)once;
+    (void)param;
+    (void)ctx;
+
+    memset(&s_last_report, 0, sizeof(s_last_report));
+    for (int i = 0; i < DEFENSE_PATH_COUNT; i++) {
+        s_last_report.path_state[i]  = DEFENSE_STATE_NOT_CHECKED;
+        s_last_report.path_reason[i] = DEFENSE_REASON_NONE;
+    }
+    s_has_check = 0;
+    return TRUE;
+}
+
+/* 沙盒核心 mitigation 位：仅接受 OS 可回读确认的项——子进程创建 /
+ * 远程与低完整性镜像 / ACG。System32 优先由 worker 在加载 DLL 之前
+ * 固定，Windows 不提供回读接口，故不把不可证明的项塞进核心位。
+ * 判定只接受 OS 回读结果（sandbox_verified_mask），worker 自报位不参与。 */
+#define DCL_SANDBOX_CORE_MASK (SANDBOX_ATTR_PROCESS_CREATE_DISABLE | \
+                               SANDBOX_ATTR_IMAGE_NO_REMOTE | \
+                               SANDBOX_ATTR_IMAGE_NO_LOW_LABEL | \
+                               SANDBOX_ATTR_ACG)
 
 /* ---------- 各攻击路径状态检查 ---------- */
 
 /*
- * 1. 管理员调试挂起绕过
- *    依赖：anti_debug_v2（Init + 高危入口检测，无独立线程可挂起）
+ * 0. 管理员调试挂起绕过
+ *    无驻留密钥时没有可窃取资产，按 BLOCKED；有密钥时管理员挂起无法
+ *    从根本上阻止，只能靠看门狗缩短暴露窗口，故恒为 DEGRADED。
  */
-static DefenseState check_suspend_bypass(void)
+static DefenseState check_suspend_bypass(const DefenseFacts *facts,
+                                         DefenseReason *reason)
 {
-    if (anti_debug_v2_init() == 0) return DEFENSE_STATE_BLOCKED;
-    return DEFENSE_STATE_FAILED;
-}
-
-/*
- * 2. 内存 Dump / 冷启动
- *    依赖：key_separation（CNG 内核托管）。
- *    密钥已安装进内核 → BLOCKED；模块就绪但密钥仍在用户态 → DEGRADED；
- *    模块不可用 → FAILED。
- */
-static DefenseState check_mem_dump(void)
-{
-    if (key_separation_init() != 0) return DEFENSE_STATE_FAILED;
-    /* key_separation 三权分立托管 或 keymanager_cng CNG 内核托管，
-     * 任一成立即 BLOCKED */
-    if (key_separation_any_installed()) return DEFENSE_STATE_BLOCKED;
-    if (verthys_cng_km_global_handle_total() > 0) return DEFENSE_STATE_BLOCKED;
-    /* 接线完成前置位：密钥在用户态，防 Dump 降级 */
+    if (facts->any_unlocked_v4 == 0) {
+        *reason = DEFENSE_REASON_NO_RESIDENT_KEY;
+        return DEFENSE_STATE_BLOCKED;
+    }
+    /* 心跳与挂起守卫必须同时接线才认为看门狗生效；只接一半等于没有
+     * 处置路径，仍按可修复缺口报告。 */
+    if ((facts->policy_flags &
+         (DEFENSE_GUARD_HEARTBEAT | DEFENSE_GUARD_SUSPEND_LOCK)) ==
+        (DEFENSE_GUARD_HEARTBEAT | DEFENSE_GUARD_SUSPEND_LOCK)) {
+        *reason = DEFENSE_REASON_SUSPEND_UNPREVENTABLE;
+    } else {
+        *reason = DEFENSE_REASON_SUSPEND_GUARD_INACTIVE;
+    }
     return DEFENSE_STATE_DEGRADED;
 }
 
 /*
- * 3. 休眠文件取证
- *    判定重构（目标态 7/7 BLOCKED 收口）：
- *    休眠取证窃取的是"进程用户态地址空间中的密钥"。判据与 MEM_DUMP
- *    同源——密钥已 CNG 内核托管（key_separation 三权分立 或 V3
- *    keymanager_cng 密钥组）⟹ worker 用户态页无密钥可供 hiberfil.sys
- *    取证；叠加 memory_guard 注册区锁页（在用数据防换出），两者齐备
- *    即 BLOCKED。
- *    原实现（工作集驱逐体系删除后恒 DEGRADED）的前置残余——"密钥在
- *    用户态"——已由 CNG 托管接线实质消除。
+ * 1. 内存 Dump / 冷启动
+ *    V4 内容密钥驻留用户态堆，解锁进程可被完整转储；内核托管暂缓前
+ *    该路径只能诚实报告降级。policy_flags 中的 anti_dump 仅用于 UI
+ *    提示，不改变判据。
  */
-static DefenseState check_hibernation(void)
+static DefenseState check_mem_dump(const DefenseFacts *facts,
+                                   DefenseReason *reason)
 {
-    int guard_ok = (memory_guard_init() == 0) ? 1 : 0;
-    int keys_kernel_custody = (key_separation_any_installed() ||
-                               verthys_cng_km_global_handle_total() > 0) ? 1 : 0;
-
-    if (guard_ok && keys_kernel_custody) return DEFENSE_STATE_BLOCKED;
-    if (guard_ok || keys_kernel_custody) return DEFENSE_STATE_DEGRADED;
-    return DEFENSE_STATE_FAILED;
-}
-
-/*
- * 4. IAT Hook / Inline Hook
- *    依赖：TLS 回调标志已验证（tls_loader_init 已在 Verthys_Init 执行）
- *          + 完整性模块就绪（构建期基准验签）
- *          + 判据升级（直接系统调用激活）：反调试/内存防护检测器的 NT 查询经自建 stub 页直达内核，
- *            ntdll 导出入口的用户态 Inline Hook 无法再致盲检测器。
- *            stub 未激活（SSN 提取失败降级回 GetProcAddress）时，
- *            检测器查询重新暴露于可 Hook 路径，诚实降级。
- */
-static DefenseState check_iat_inline_hook(void)
-{
-    int tls_ok  = (InterlockedCompareExchange(&g_tls_init_marker, 0, 0) == 1) ? 1 : 0;
-    int intg_ok = (integrity_init() == 0) ? 1 : 0;
-    int syscall_ok = (syscall_direct_init() == 0 && syscall_direct_available()) ? 1 : 0;
-
-    if (tls_ok && intg_ok && syscall_ok) return DEFENSE_STATE_BLOCKED;
-    if (intg_ok || syscall_ok)           return DEFENSE_STATE_DEGRADED;
-    return DEFENSE_STATE_FAILED;
-}
-
-/*
- * 5. DLL 劫持 / 反射注入
- *    依赖：system32_loader（System32 优先）+
- *          process_sandbox（NoRemoteImages / NoLowMandatoryLabelImages，
- *          由 worker 经 Verthys_NotifySandboxAttrs 注入）
- */
-static DefenseState check_dll_hijack(void)
-{
-    int sysloader_ok = (system32_loader_init() == 0) ? 1 : 0;
-
-    uint32_t sandbox_attrs = process_sandbox_get_active_attrs();
-    int sandbox_remote_ok = (sandbox_attrs & SANDBOX_ATTR_IMAGE_NO_REMOTE) ? 1 : 0;
-    int sandbox_low_ok     = (sandbox_attrs & SANDBOX_ATTR_IMAGE_NO_LOW_LABEL) ? 1 : 0;
-
-    if (sysloader_ok && sandbox_remote_ok && sandbox_low_ok) {
+    if (facts->any_unlocked_v4 == 0) {
+        *reason = DEFENSE_REASON_NO_RESIDENT_KEY;
         return DEFENSE_STATE_BLOCKED;
     }
-    if (sysloader_ok || sandbox_remote_ok || sandbox_low_ok) {
+    *reason = DEFENSE_REASON_V4_KEYS_USER_RESIDENT;
+    return DEFENSE_STATE_DEGRADED;
+}
+
+/*
+ * 2. 休眠文件取证
+ *    休眠文件保存的是物理内存镜像。无驻留密钥时无可取证资产；系统休眠
+ *    已禁用时 hiberfil 不存在，同样无可取证资产——两种情况均按 BLOCKED。
+ *    休眠启用或状态无法证明且存在驻留密钥时，按降级如实上报。
+ */
+static DefenseState check_hibernation(const DefenseFacts *facts,
+                                      DefenseReason *reason)
+{
+    if (facts->any_unlocked_v4 == 0) {
+        *reason = DEFENSE_REASON_NO_RESIDENT_KEY;
+        return DEFENSE_STATE_BLOCKED;
+    }
+    if (facts->hibernation_state == 0) {
+        *reason = DEFENSE_REASON_HIBERNATION_DISABLED;
+        return DEFENSE_STATE_BLOCKED;
+    }
+    if (facts->hibernation_state == 1) {
+        *reason = DEFENSE_REASON_HIBERNATION_ENABLED;
         return DEFENSE_STATE_DEGRADED;
     }
+    *reason = DEFENSE_REASON_HIBERNATION_UNKNOWN;
+    return DEFENSE_STATE_DEGRADED;
+}
+
+/*
+ * 3. IAT Hook / Inline Hook
+ *    TLS 加载标志缺失说明 DLL 加载路径被改写（可能被剥除 TLS 目录重打包），
+ *    按 FAILED。扫描结果分三档：异常 FAILED、过期/不可用 DEGRADED、
+ *    干净且直连系统调用激活 BLOCKED。直连未激活时检测器的 NT 查询重新
+ *    暴露于可 Hook 的 ntdll 导出，不能算闭合。
+ */
+static DefenseState check_iat_inline_hook(const DefenseFacts *facts,
+                                          DefenseReason *reason)
+{
+    int tls_ok = (InterlockedCompareExchange(&g_tls_init_marker, 0, 0) == 1)
+                     ? 1 : 0;
+    int syscall_ok = syscall_direct_available() ? 1 : 0;
+
+    if (!tls_ok) {
+        *reason = DEFENSE_REASON_MODULE_INIT_FAILED;
+        return DEFENSE_STATE_FAILED;
+    }
+
+    switch (facts->hook_scan_state) {
+        case 2:  /* 扫描发现 Hook 特征 */
+            *reason = DEFENSE_REASON_HOOK_DETECTED;
+            return DEFENSE_STATE_FAILED;
+        case 3:  /* 证据超过有效期 */
+            *reason = DEFENSE_REASON_EVIDENCE_STALE;
+            return DEFENSE_STATE_DEGRADED;
+        case 1:  /* 最近一次扫描干净 */
+            if (syscall_ok) {
+                *reason = DEFENSE_REASON_HOOK_SCAN_CLEAN;
+                return DEFENSE_STATE_BLOCKED;
+            }
+            *reason = DEFENSE_REASON_HOOK_SCAN_UNAVAILABLE;
+            return DEFENSE_STATE_DEGRADED;
+        default: /* 0=不可用 / 未知值按不可用处理 */
+            *reason = DEFENSE_REASON_HOOK_SCAN_UNAVAILABLE;
+            return DEFENSE_STATE_DEGRADED;
+    }
+}
+
+/*
+ * 4. DLL 劫持 / 反射注入
+ *    mitigation 位只能由 OS 回读确认；worker 自报位可能被伪造或过时，
+ *    不进入判据。核心位齐备 BLOCKED，缺位或无法回读 DEGRADED。
+ */
+static DefenseState check_dll_hijack(const DefenseFacts *facts,
+                                     DefenseReason *reason)
+{
+    uint32_t verified = facts->sandbox_verified_mask;
+
+    if (verified == 0) {
+        *reason = DEFENSE_REASON_SANDBOX_UNVERIFIED;
+        return DEFENSE_STATE_DEGRADED;
+    }
+    if ((verified & DCL_SANDBOX_CORE_MASK) == DCL_SANDBOX_CORE_MASK) {
+        *reason = DEFENSE_REASON_SANDBOX_VERIFIED;
+        return DEFENSE_STATE_BLOCKED;
+    }
+    *reason = DEFENSE_REASON_SANDBOX_PARTIAL;
+    return DEFENSE_STATE_DEGRADED;
+}
+
+/*
+ * 5. 进程打开/读取内存
+ *    双层 Job Object + 白名单 DACL 是真实的内核级隔离；未生效说明关键
+ *    防御缺失，按 FAILED（BOOT 模式拒绝启动）。
+ */
+static DefenseState check_process_read(const DefenseFacts *facts,
+                                       DefenseReason *reason)
+{
+    (void)facts;
+
+    if (job_isolation_is_active()) {
+        *reason = DEFENSE_REASON_JOB_ACTIVE;
+        return DEFENSE_STATE_BLOCKED;
+    }
+    *reason = DEFENSE_REASON_MODULE_INIT_FAILED;
     return DEFENSE_STATE_FAILED;
 }
 
 /*
- * 6. 进程打开/读取内存
- *    依赖：job_isolation（双层 Job Object + 白名单 DACL 隔离）
+ * 6. 跨设备迁移解密
+ *    只有被查询会话已解锁且设备根/PCR 槽存在时，绑定事实才成立；机器
+ *    密钥与硬件指纹是绑定能落地的先决条件。硬件指纹不可用说明初始化
+ *    失败（FAILED）；机器密钥不可用或没有绑定事实按 DEGRADED。
  */
-static DefenseState check_process_read(void)
+static DefenseState check_cross_device(const DefenseFacts *facts,
+                                       DefenseReason *reason)
 {
-    int job_active = job_isolation_is_active();
-
-    if (job_active) return DEFENSE_STATE_BLOCKED;
-    return DEFENSE_STATE_FAILED;
-}
-
-/*
- * 7. 跨设备迁移解密
- *    依赖：cng_machine_key（CNG 机器密钥 + RSA-OAEP 包装 pepper）+
- *          hardware_binding（MachineGuid 指纹）
- */
-static DefenseState check_cross_device(void)
-{
-    /* cng_machine_key_init 优雅降级恒返回 0；可用性经 is_available 查询 */
-    cng_machine_key_init();
-    int cng_ok     = cng_machine_key_is_available() ? 1 : 0;
-    int hwbind_ok  = (hardware_binding_init() == 0) ? 1 : 0;
-
-    if (cng_ok && hwbind_ok) return DEFENSE_STATE_BLOCKED;
-    if (cng_ok || hwbind_ok) return DEFENSE_STATE_DEGRADED;
-    return DEFENSE_STATE_FAILED;
+    if (facts->queried_unlocked_v4 == 0) {
+        *reason = DEFENSE_REASON_NO_SESSION_FACTS;
+        return DEFENSE_STATE_DEGRADED;
+    }
+    if (!hardware_binding_is_ready()) {
+        *reason = DEFENSE_REASON_MODULE_INIT_FAILED;
+        return DEFENSE_STATE_FAILED;
+    }
+    if (!cng_machine_key_is_available()) {
+        *reason = DEFENSE_REASON_NO_SESSION_FACTS;
+        return DEFENSE_STATE_DEGRADED;
+    }
+    if (facts->queried_device_bound || facts->queried_pcr_bound) {
+        *reason = DEFENSE_REASON_DEVICE_BOUND;
+        return DEFENSE_STATE_BLOCKED;
+    }
+    *reason = DEFENSE_REASON_NO_SESSION_FACTS;
+    return DEFENSE_STATE_DEGRADED;
 }
 
 /* ---------- 报告汇总 ---------- */
@@ -208,6 +274,7 @@ static void aggregate_report(DefenseStatusReport *report)
     report->blocked_count  = 0;
     report->degraded_count = 0;
     report->failed_count   = 0;
+    report->limited_count  = 0;
     report->has_degraded   = 0;
 
     for (int i = 0; i < DEFENSE_PATH_COUNT; i++) {
@@ -218,6 +285,15 @@ static void aggregate_report(DefenseStatusReport *report)
             case DEFENSE_STATE_DEGRADED:
                 report->degraded_count++;
                 report->has_degraded = 1;
+                /* 架构限制只统计两项：内核托管暂缓（密钥驻留用户态）与
+                 * 管理员挂起不可阻止。其余降级属于可修复缺口，不得混入
+                 * "受架构限制"口径。 */
+                if (report->path_reason[i] ==
+                        DEFENSE_REASON_V4_KEYS_USER_RESIDENT ||
+                    report->path_reason[i] ==
+                        DEFENSE_REASON_SUSPEND_UNPREVENTABLE) {
+                    report->limited_count++;
+                }
                 break;
             case DEFENSE_STATE_FAILED:
                 report->failed_count++;
@@ -228,8 +304,8 @@ static void aggregate_report(DefenseStatusReport *report)
     }
 
     /* all_critical_blocked 语义：全部 7 条关键路径均 BLOCKED 才算全阻断。
-     * 旧实现仅判 failed_count==0，会把"存在 DEGRADED"误报为全阻断；
-     * 此处收紧为三条件齐备（无 FAILED、无 DEGRADED、且 BLOCKED 满 7 条）。 */
+     * 存在 DEGRADED 一律为 0——未实施内核托管前解锁态必然为 0，这是
+     * 诚实结果，不得为面板好看放宽语义。 */
     report->all_critical_blocked =
         (report->failed_count   == 0 &&
          report->degraded_count == 0 &&
@@ -242,42 +318,91 @@ static void aggregate_report(DefenseStatusReport *report)
 
 int defense_closure_init(void)
 {
-    if (s_initialized) return 0;
-    memset(&s_last_report, 0, sizeof(s_last_report));
-    for (int i = 0; i < DEFENSE_PATH_COUNT; i++) {
-        s_last_report.path_state[i] = DEFENSE_STATE_NOT_CHECKED;
-    }
-    s_initialized = 1;
-    s_has_check   = 0;
+    InitOnceExecuteOnce(&s_init_once, dcl_init_once, NULL, NULL);
     return 0;
 }
 
-int defense_closure_check(DefenseCheckMode mode,
-                          DefenseStatusReport *out_report)
+void defense_closure_set_runtime_guards(uint32_t flags)
 {
-    if (!s_initialized) {
-        if (defense_closure_init() != 0) {
-            return -1;
+    LONG masked = (LONG)(flags &
+                        (DEFENSE_GUARD_HEARTBEAT | DEFENSE_GUARD_SUSPEND_LOCK));
+    InterlockedExchange(&s_runtime_guards, masked);
+}
+
+uint32_t defense_closure_get_runtime_guards(void)
+{
+    return (uint32_t)InterlockedCompareExchange(&s_runtime_guards, 0, 0);
+}
+
+void defense_closure_fill_process_facts(DefenseFacts *facts)
+{
+    SecurityConfig cfg;
+    FILETIME ft;
+    uint64_t filetime;
+
+    if (facts == NULL) return;
+
+    /* 休眠状态从注册表读取（禁用/启用/未知三态）；读取失败按未知降级。
+     * Hook 扫描结论来自最近一次有效扫描（超过 120s 自动转 STALE）。 */
+    facts->hibernation_state = hibernation_state_query();
+    facts->hook_scan_state   = hook_scan_get_state();
+
+    /* mitigation 只能由 OS 回读确认：查询失败按“无法确认”置 0，
+     * 查询成功则使用系统返回的实际生效位；自报位不进入事实。 */
+    {
+        uint32_t verified = 0;
+        if (process_sandbox_verify_os(&verified) == 0) {
+            facts->sandbox_verified_mask = verified;
+        } else {
+            facts->sandbox_verified_mask = 0;
         }
     }
 
+    memset(&cfg, 0, sizeof(cfg));
+    (void)security_config_snapshot(&cfg);
+    facts->policy_flags = defense_closure_get_runtime_guards();
+    if (cfg.anti_dump) {
+        facts->policy_flags |= DEFENSE_POLICY_ANTI_DUMP;
+    }
+
+    /* FILETIME（1601 纪元，100ns）→ Unix 毫秒 */
+    GetSystemTimeAsFileTime(&ft);
+    filetime = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    facts->now_ms = filetime / 10000u - 11644473600000ull;
+}
+
+int defense_closure_check_facts(DefenseCheckMode mode,
+                                const DefenseFacts *facts,
+                                DefenseStatusReport *out_report)
+{
     DefenseStatusReport local;
+
+    if (facts == NULL) return -1;
+    (void)defense_closure_init();
+
     memset(&local, 0, sizeof(local));
 
     /* 全程持排他锁——BOOT（Verthys_Init）与 RUNTIME
      * （Verthys_GetSecurityStatus）并发调用时，s_last_report 写读互斥；
-     * 各 check_* 仅读已初始化模块的稳定状态，锁内无回调重入。 */
+     * 各 check_* 仅读调用方已复制的 facts 与只读模块状态，锁内无回调重入。 */
     AcquireSRWLockExclusive(&s_check_lock);
 
-    /* 逐项检查 7 条攻击路径 */
-    local.path_state[DEFENSE_PATH_SUSPEND_BYPASS]  = check_suspend_bypass();
-    local.path_state[DEFENSE_PATH_MEM_DUMP]        = check_mem_dump();
-    local.path_state[DEFENSE_PATH_HIBERNATION]     = check_hibernation();
-    local.path_state[DEFENSE_PATH_IAT_INLINE_HOOK] = check_iat_inline_hook();
-    local.path_state[DEFENSE_PATH_DLL_HIJACK]      = check_dll_hijack();
-    local.path_state[DEFENSE_PATH_PROCESS_READ]    = check_process_read();
-    local.path_state[DEFENSE_PATH_CROSS_DEVICE]    = check_cross_device();
+    local.path_state[DEFENSE_PATH_SUSPEND_BYPASS] =
+        check_suspend_bypass(facts, &local.path_reason[DEFENSE_PATH_SUSPEND_BYPASS]);
+    local.path_state[DEFENSE_PATH_MEM_DUMP] =
+        check_mem_dump(facts, &local.path_reason[DEFENSE_PATH_MEM_DUMP]);
+    local.path_state[DEFENSE_PATH_HIBERNATION] =
+        check_hibernation(facts, &local.path_reason[DEFENSE_PATH_HIBERNATION]);
+    local.path_state[DEFENSE_PATH_IAT_INLINE_HOOK] =
+        check_iat_inline_hook(facts, &local.path_reason[DEFENSE_PATH_IAT_INLINE_HOOK]);
+    local.path_state[DEFENSE_PATH_DLL_HIJACK] =
+        check_dll_hijack(facts, &local.path_reason[DEFENSE_PATH_DLL_HIJACK]);
+    local.path_state[DEFENSE_PATH_PROCESS_READ] =
+        check_process_read(facts, &local.path_reason[DEFENSE_PATH_PROCESS_READ]);
+    local.path_state[DEFENSE_PATH_CROSS_DEVICE] =
+        check_cross_device(facts, &local.path_reason[DEFENSE_PATH_CROSS_DEVICE]);
 
+    local.checked_at_unix_ms = facts->now_ms;
     aggregate_report(&local);
 
     /* 缓存到 s_last_report */
@@ -305,29 +430,49 @@ int defense_closure_check(DefenseCheckMode mode,
     return (local.failed_count > 0) ? -1 : 0;
 }
 
+int defense_closure_check(DefenseCheckMode mode,
+                          DefenseStatusReport *out_report)
+{
+    DefenseFacts facts;
+
+    memset(&facts, 0, sizeof(facts));
+    defense_closure_fill_process_facts(&facts);
+    /* 兼容包装不持有句柄：会话事实全部为 0（BOOT 语义）。 */
+    return defense_closure_check_facts(mode, &facts, out_report);
+}
+
 DefenseState defense_closure_get_path_state(DefensePath path)
 {
-    if (!s_has_check) {
-        return DEFENSE_STATE_NOT_CHECKED;
-    }
+    DefenseState state = DEFENSE_STATE_NOT_CHECKED;
+
     if (path < 0 || path >= DEFENSE_PATH_COUNT) {
         return DEFENSE_STATE_NOT_CHECKED;
     }
-    return s_last_report.path_state[path];
+
+    AcquireSRWLockShared(&s_check_lock);
+    if (s_has_check) {
+        state = s_last_report.path_state[path];
+    }
+    ReleaseSRWLockShared(&s_check_lock);
+    return state;
 }
 
 int defense_closure_get_summary(void)
 {
-    if (!s_has_check) {
-        return 3;  /* 未校验 */
+    int summary = 3;  /* 未校验 */
+
+    AcquireSRWLockShared(&s_check_lock);
+    if (s_has_check) {
+        if (s_last_report.failed_count > 0) {
+            summary = 2;  /* 有 FAILED */
+        } else if (s_last_report.has_degraded) {
+            summary = 1;  /* 有 DEGRADED */
+        } else {
+            summary = 0;  /* 全部 BLOCKED */
+        }
     }
-    if (s_last_report.failed_count > 0) {
-        return 2;  /* 有 FAILED */
-    }
-    if (s_last_report.has_degraded) {
-        return 1;  /* 有 DEGRADED */
-    }
-    return 0;  /* 全部 BLOCKED */
+    ReleaseSRWLockShared(&s_check_lock);
+    return summary;
 }
 
 const char *defense_closure_path_name(DefensePath path)
@@ -352,5 +497,33 @@ const char *defense_closure_state_name(DefenseState state)
         case DEFENSE_STATE_DEGRADED:    return "DEGRADED";
         case DEFENSE_STATE_FAILED:      return "FAILED";
         default:                        return "UNKNOWN";
+    }
+}
+
+const char *defense_closure_reason_name(DefenseReason reason)
+{
+    switch (reason) {
+        case DEFENSE_REASON_NONE:                      return "NONE";
+        case DEFENSE_REASON_NO_RESIDENT_KEY:           return "NO_RESIDENT_KEY";
+        case DEFENSE_REASON_V4_KEYS_USER_RESIDENT:     return "V4_KEYS_USER_RESIDENT";
+        case DEFENSE_REASON_HIBERNATION_ENABLED:       return "HIBERNATION_ENABLED";
+        case DEFENSE_REASON_HIBERNATION_UNKNOWN:       return "HIBERNATION_UNKNOWN";
+        case DEFENSE_REASON_SUSPEND_UNPREVENTABLE:     return "SUSPEND_UNPREVENTABLE";
+        case DEFENSE_REASON_SUSPEND_GUARD_INACTIVE:    return "SUSPEND_GUARD_INACTIVE";
+        case DEFENSE_REASON_HOOK_SCAN_CLEAN:           return "HOOK_SCAN_CLEAN";
+        case DEFENSE_REASON_HOOK_SCAN_UNAVAILABLE:     return "HOOK_SCAN_UNAVAILABLE";
+        case DEFENSE_REASON_HOOK_DETECTED:             return "HOOK_DETECTED";
+        case DEFENSE_REASON_SANDBOX_VERIFIED:          return "SANDBOX_VERIFIED";
+        case DEFENSE_REASON_SANDBOX_PARTIAL:           return "SANDBOX_PARTIAL";
+        case DEFENSE_REASON_SANDBOX_UNVERIFIED:        return "SANDBOX_UNVERIFIED";
+        case DEFENSE_REASON_JOB_ACTIVE:                return "JOB_ACTIVE";
+        case DEFENSE_REASON_DEVICE_BOUND:              return "DEVICE_BOUND";
+        case DEFENSE_REASON_NO_SESSION_FACTS:          return "NO_SESSION_FACTS";
+        case DEFENSE_REASON_MODULE_INIT_FAILED:        return "MODULE_INIT_FAILED";
+        case DEFENSE_REASON_POLICY_DISABLED:            return "POLICY_DISABLED";
+        case DEFENSE_REASON_EVIDENCE_STALE:            return "EVIDENCE_STALE";
+        case DEFENSE_REASON_ARCH_LIMIT_KERNEL_DEFERRED: return "ARCH_LIMIT_KERNEL_DEFERRED";
+        case DEFENSE_REASON_HIBERNATION_DISABLED:      return "HIBERNATION_DISABLED";
+        default:                                       return "UNKNOWN";
     }
 }

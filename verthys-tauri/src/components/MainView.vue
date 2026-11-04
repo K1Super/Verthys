@@ -61,8 +61,6 @@
       :has-module-key-record="hasModuleKeyRecordRef[pendingModuleId]"
       v-model:module-key-input="moduleKeyInput"
       :module-key-verifying="moduleKeyVerifying"
-      :module-key-verify-percent="moduleKeyVerifyPercent"
-      :module-key-verify-msg="moduleKeyVerifyMsg"
       :module-key-verify-error="moduleKeyVerifyError"
       @close="cancelModuleKeyVerify"
       @confirm="confirmModuleKeyVerify"
@@ -131,8 +129,6 @@ const {
   showVerthysNotReadyHint,
   moduleKeyInput,
   moduleKeyVerifying,
-  moduleKeyVerifyPercent,
-  moduleKeyVerifyMsg,
   moduleKeyVerifyError,
   pendingModuleId,
   pendingModuleLabel,

@@ -1,6 +1,6 @@
 # DATA_FLOW — Verthys 关键数据流
 
-> 用时序图说明解锁、加解密、导出、更新/完整性校验四类跨层数据流，标注各方参与模块。
+> 用时序图说明解锁、加解密、导出、更新/完整性校验、导入域与全库 DEK 轮换六类跨层数据流，标注各方参与模块。
 >
 > Last updated: 2026-09-28 · 维护人：K1Super
 
@@ -146,16 +146,89 @@ sequenceDiagram
     TC->>LG: 回收 owner 为空且已结算的块
 ```
 
-### 5.2 去重跳过与删除释放
+### 5.2 续传幂等与删除释放
 
-- **去重键**：`fileHash = BLAKE3(明文 ‖ 格式版本 ‖ 形态标志)`；键集合持久于会话日志。
-- **导入**：键命中即文件级"去重跳过"（不计失败、不入列表、显式报告）；
-  块级重传不保证幂等（加密形态每块随机 IV，密文互异）。
-- **删除**：记录批量删除并落盘成功后执行 `forget_hashes`（日志追加删除墓碑）释放键，
-  同一文件即可重新导入；释放失败转入待重试队列，由下次导入开始前补释放。
+- **条目键**：`entry_key = SHA-256(source_path | size | mtime)`（解析导入为展示名/大小/序号）；
+  非内容哈希，只用于断点续传幂等，不做内容寻址或存在性判定。键集合持久于会话日志。
+- **块键**：`chunk_key = SHA-256("chunk" | entry_key | seq)`；记录名为 `chunk_<chunk_key>`，
+  同一条目重试复用 ID，不同路径同内容各自落块。
+- **导入**：条目键命中即"续传跳过"（不计失败、不入列表、显式报告）；
+  不做内容级去重，同内容不同路径会分别导入。
+- **删除**：记录批量删除并落盘成功后执行 `verthys_forget_import_keys`（日志追加删除墓碑）
+  释放条目键，同一来源文件即可重新导入；释放失败转入待重试队列，由下次导入开始前补释放。
 - **清藏删除**：块引用与元数据合并单次批量事务删除；删除提交后立即失效三层缓存
   并落盘。失败语义：删除失败保持原状可重试（零副作用）；落盘失败保持条目并提供
   "仅重放落盘"的重试入口（批量删除对缺失条目整体拒绝，删除步骤不可重放）；
   去重释放失败不改变删除结论。
 - **内存口径**：分片读取上界 4MiB/次（越界即报错），块载荷在进程间层为 base64
   但受批量预算约束（≤11.19MiB/批）；导入/导出内存占用与文件大小无关。
+
+## 6. 全库 DEK 轮换数据流（v4 D9，API 版本 0x0010）
+
+仅恢复码会话可发起；源库作业期间只读。轮换在新文件中全量重建后原子替换，
+旧恢复码继续有效。
+
+```mermaid
+sequenceDiagram
+    participant FE as VaultRotateDialog
+    participant TC as vault_rotate_controller / service
+    participant WK as verthys-worker
+    participant DLL as verthys.dll（vty_rotate_v4）
+    participant FS as 文件系统
+    FE->>TC: attach_keyfile(path)（容器启用 KEYFILE 且会话无摘要时）
+    TC->>WK: {op:v4_rotate_attach_keyfile}
+    WK->>DLL: 读取 VKFL + 口令验证 user 槽，缓存摘要
+    FE->>TC: begin(new_path, flags)（容器口令由宿主注入）
+    TC->>WK: {op:v4_rotate_begin}
+    WK->>DLL: Verthys_V4RotateBegin
+    DLL->>FS: 创建临时新库（新 K_c / epoch+1 / 恢复槽重封）
+    DLL-->>FE: 统计( stage=BEGUN, modules_ready, records… )
+    FE->>TC: unlock_module(module_id, 模块口令)
+    TC->>WK: {op:v4_rotate_unlock_module}
+    WK->>DLL: 校验模块口令并解锁源 MDEK
+    FE->>TC: run(onProgress, cancel_event)
+    TC->>WK: {op:v4_rotate_run}
+    WK->>DLL: Verthys_V4RotateRun(cb)
+    loop 逐模块/逐记录/逐分片/逐文件
+        DLL->>FS: 复制并以新 K_c 重新加密
+        DLL-->>WK: 进度回调（统计；取消事件置位时返回 1）
+        WK-->>FE: 签名进度行（200ms 节流）
+    end
+    DLL->>DLL: 记录数/文件数/分片数完整性复核
+    DLL-->>FE: stage=COPIED
+    FE->>TC: commit(keep_old) 或 abort()
+    TC->>WK: {op:v4_rotate_commit | v4_rotate_abort}
+    WK->>DLL: Verthys_V4RotateCommit / Abort
+    DLL->>FS: （提交·PCR）覆盖前落盘 <库路径>.vtyrotj 恢复日志
+    DLL->>FS: （提交）ReplaceFileW 单次原子替换（旧库→备份）+ 回退锚点推进
+    DLL->>FS: （提交·PCR）删除恢复日志
+    DLL->>DLL: （中止）删除临时库；删除失败返回 IO，源库不变
+```
+
+关键约束：
+
+- **只读窗口**：Begin 成功后源库 `rotate_pending=1`，记录/文件/模块/口令/PCR/keyfile
+  写入口统一返回 `ROTATE_PENDING`；宿主 UI 不得在此期间放行写操作。
+- **已删除文件模块**：源库 fileverthys `deleted` 时跳过文件/分片复制，仅允许
+  墓碑；记录复制与提交照常，`next_id` 水位保留，已删除高位 ID 不复用。
+- **复制自检**：记录/文件/分片写入新库后逐条回读比对，任何偏差返回 `VERIFY`，
+  提交前不会把“计数相同但内容漂移”当成成功。
+- **锁定/退出**：lockAll 先调用 `verthys_prepare_lock` 请求取消并等待全部轮换
+  操作（Begin/解锁模块/Run/补录/Commit/Abort）在途计数归零（30s 上限），
+  失败整体放弃锁定并保留会话；`verthys_lock`/`worker_destroy`
+  内部保留同一闸门，并以会话代际（`session_epoch`）原子校验，代际已变返回
+  `E_LOCK_SUPERSEDED`，延迟命令不得清空新会话；代际已变且无任何会话时
+  补全释放无归属的哨兵锁与旧文件锁。空闲锁定仅在轮换命令在途时
+  抑制（ready/failed 解除），安全边界在 Rust。进程级硬退出路径不可拦截，
+  其崩溃窗口由 PCR 恢复日志兜底。
+- **PCR 崩溃恢复**：Commit 在覆盖 PCR 密钥前落盘恢复日志；若进程在重封后、
+  替换前退出，下次口令解锁仅当“日志与当前文件代/位图/策略摘要一致且平台
+  PCR 未变”时用当前 `K_c` 重封并重新验证，否则 fail-closed（恢复码仍可打开）。
+- **IPC 超时**：流式或普通请求超时后强制回收 worker（kill + 标记死亡），
+  下一次请求从新进程开始，不读取旧序号残留行。
+- **口令边界**：容器口令由主进程保管模块读取；模块口令只经本次 IPC 透传，worker
+  不缓存、不写日志；恢复码不进入普通轮换请求。
+- **失败态**：复制/复核失败进入 `FAILED`，只能 `Abort`；`Abort` 删除临时库并释放作业，
+  源库保持原状。
+- **提交后状态**：C 句柄指向新会话、恢复标记清零；宿主重建会话哨兵锁，前端同步
+  收起恢复会话提示。

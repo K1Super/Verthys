@@ -7,17 +7,16 @@
   职责：
     1. 谱系坐标头（ORBITAL FORMATION / 模块独立密钥管理 / 摘要）
     2. 遍历 moduleIds，为每个模块渲染 ModuleKeyRow（传入轨道索引）
-    3. 预计算每个模块的状态值（stateClass/stateText/hasKey/isReady）传入
+    3. 预计算每个模块的状态值（stateClass/stateText）传入
     4. 转发 ModuleKeyRow 的事件，携带 mid 上抛至 ManagementView
 
   Props: globalKeyReady / moduleIds / moduleLabels / moduleKeyEnabled /
-         hasModuleKeyRecord / moduleKeyReady / hasModuleKey(fn) / isModuleReady(fn) /
+         hasModuleKeyRecord / moduleKeyReady /
          moduleStateClass(fn) / moduleStateText(fn)
-  Emits: toggleModuleKeyEnabled(mid, enabled) / openKeyDialog(mid) /
-         showModuleKey(mid) / logoutModule(mid)
+  Emits: toggleModuleKeyEnabled(mid, enabled) / openKeyDialog(mid) / logoutModule(mid)
 -->
 <template>
-  <div class="sf-zone">
+  <div class="sf-zone sf-zone--main-font">
     <!-- 谱系坐标头 -->
     <header class="sf-head">
       <span class="sf-ghost" aria-hidden="true">02</span>
@@ -38,13 +37,11 @@
         :enabled="moduleKeyEnabled[mid]"
         :has-record="hasModuleKeyRecord[mid]"
         :ready="moduleKeyReady[mid]"
+        :has-recovery="moduleHasRecovery[mid]"
         :state-class="moduleStateClass(mid)"
         :state-text="moduleStateText(mid)"
-        :has-key="hasModuleKey(mid)"
-        :is-ready="isModuleReady(mid)"
         @toggle-enabled="(checked: boolean) => $emit('toggleModuleKeyEnabled', mid, checked)"
         @open-key-dialog="$emit('openKeyDialog', mid)"
-        @show-module-key="$emit('showModuleKey', mid)"
         @logout-module="$emit('logoutModule', mid)"
       />
     </div>
@@ -57,7 +54,7 @@ import type { ModuleId } from "../../lib/keyManager";
 
 /**
  * ModuleKeyList Props
- * 函数类型 props（hasModuleKey / isModuleReady / moduleStateClass / moduleStateText）
+ * 函数类型 props（moduleStateClass / moduleStateText）
  * 用于在模板中为每个 mid 预计算状态值，扁平化后传入 ModuleKeyRow
  */
 defineProps<{
@@ -73,10 +70,8 @@ defineProps<{
   hasModuleKeyRecord: Record<string, boolean>;
   /** 模块密钥就绪（已登录）状态 */
   moduleKeyReady: Record<string, boolean>;
-  /** 检查模块是否有密钥（函数） */
-  hasModuleKey: (mid: ModuleId) => boolean;
-  /** 检查模块是否就绪（函数） */
-  isModuleReady: (mid: ModuleId) => boolean;
+  /** 各模块恢复槽绑定状态 */
+  moduleHasRecovery: Record<string, boolean>;
   /** 模块状态指示条样式类（函数） */
   moduleStateClass: (mid: ModuleId) => string;
   /** 模块状态文本（函数） */
@@ -92,8 +87,6 @@ defineEmits<{
   (e: "toggleModuleKeyEnabled", mid: ModuleId, enabled: boolean): void;
   /** 打开模块密钥编辑弹窗 */
   (e: "openKeyDialog", mid: ModuleId): void;
-  /** 查看/复制模块密钥 */
-  (e: "showModuleKey", mid: ModuleId): void;
   /** 登出模块 */
   (e: "logoutModule", mid: ModuleId): void;
 }>();

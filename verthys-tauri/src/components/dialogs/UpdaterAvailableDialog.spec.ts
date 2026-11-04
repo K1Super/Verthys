@@ -40,7 +40,8 @@ function mountDialog(
   const app = createApp({ render: () => h(UpdaterAvailableDialog, props) });
   app.mount(container);
   mounted.push({ app, container });
-  return container;
+  /* VerthysDialog 默认 teleport 到 body，查询根同步为 body */
+  return document.body;
 }
 
 function buttonByText(container: HTMLElement, text: string): HTMLButtonElement | undefined {
@@ -50,11 +51,12 @@ function buttonByText(container: HTMLElement, text: string): HTMLButtonElement |
 }
 
 describe("更新说明窗口", () => {
-  it("展示版本跨度与发布说明", () => {
+  it("展示版本跨度与发布说明，且不提供导出日志入口", () => {
     const container = mountDialog();
 
     expect(container.textContent).toContain("4.1.4 → 4.1.5");
     expect(container.textContent).toContain("修复更新校验问题");
+    expect(buttonByText(container, "导出日志")).toBeUndefined();
   });
 
   it("普通更新可以稍后处理", async () => {

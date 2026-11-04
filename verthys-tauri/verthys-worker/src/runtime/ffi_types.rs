@@ -12,6 +12,8 @@ pub(crate) type VerthysHandle = *mut c_void;
 
 /// 标准化错误码
 pub(crate) const VERTHYS_OK: u32 = 0x00000000;
+/// 入参非法 / 句柄无效（与 verthys.h VERTHYS_ERR_INVALID 对齐）
+pub(crate) const VERTHYS_ERR_INVALID: u32 = 0x00000001;
 
 /// 落盘自查成功状态码（对齐 C 端 VerPersistStatus::VERTHYS_PERSIST_OK）
 pub(crate) const VERTHYS_PERSIST_OK: i32 = 0;
@@ -30,6 +32,8 @@ pub(crate) struct VerthysRecordC {
 pub(crate) type VerthysInitFn = unsafe extern "C" fn(*mut VerthysHandle) -> u32;
 /// 通知 DLL 当前 Worker 已应用的沙盒属性位掩码
 pub(crate) type VerthysNotifySandboxAttrsFn = unsafe extern "C" fn(u32) -> u32;
+/// 通知 DLL 运行时守卫完整掩码（bit0=心跳运行 bit1=挂起守卫接线）
+pub(crate) type VerthysNotifyRuntimeGuardsFn = unsafe extern "C" fn(u32) -> u32;
 /// 容器版本探测结构：仅映射 C 端 VerthysContainerInfo 的前 8 字节
 /// （api_version u32 + fmt_version u16 + preset u16）。前导字段布局为
 /// ABI 固定契约，加载方据此在布局敏感调用之前校准版本兼容性；
@@ -43,15 +47,9 @@ pub(crate) struct VerthysContainerInfoProbeC {
 pub(crate) type VerthysGetContainerInfoFn =
     unsafe extern "C" fn(VerthysHandle, *mut VerthysContainerInfoProbeC) -> u32;
 pub(crate) type VerthysDeinitFn = unsafe extern "C" fn(VerthysHandle) -> u32;
-pub(crate) type VerthysUnlockFn =
-    unsafe extern "C" fn(VerthysHandle, *const c_char, *const c_char, usize, u32) -> u32;
-pub(crate) type VerthysCreateWithPresetFn = unsafe extern "C" fn(
-    VerthysHandle,
-    *const c_char,
-    *const c_char,
-    usize,
-    u32, /* VerthysPreset */
-) -> u32;
+/// v4 专用解锁：只接受 VRTY 容器，内部强制 magic 校验（无 flags 参数）。
+pub(crate) type VerthysV4UnlockFn =
+    unsafe extern "C" fn(VerthysHandle, *const c_char, *const c_char, usize) -> u32;
 /// 运行时切换安全预设（双缓冲原子发布，立即生效）
 pub(crate) type VerthysSwitchSecurityPresetFn = unsafe extern "C" fn(VerthysHandle, u32) -> u32;
 /// 查询活跃安全预设档位（快照读取，供切档回读校验）
@@ -68,6 +66,9 @@ pub(crate) type VerthysLockFn = unsafe extern "C" fn(VerthysHandle) -> u32;
 pub(crate) type VerthysFlushFn = unsafe extern "C" fn(VerthysHandle) -> u32;
 pub(crate) type VerthysAddRecordFn =
     unsafe extern "C" fn(VerthysHandle, *const VerthysRecordC, *mut u64) -> u32;
+/// 批量新增（API 0x0013）：单次事务提交，count ∈ [1, 512]。
+pub(crate) type VerthysAddRecordsFn =
+    unsafe extern "C" fn(VerthysHandle, *const VerthysRecordC, u32, *mut u64) -> u32;
 pub(crate) type VerthysGetRecordFn =
     unsafe extern "C" fn(VerthysHandle, u64, *mut VerthysRecordC) -> u32;
 pub(crate) type VerthysClearRecordCacheFn = unsafe extern "C" fn(VerthysHandle) -> u32;
@@ -84,6 +85,186 @@ pub(crate) type VerthysChangePasswordFn = unsafe extern "C" fn(
     *const c_char,
     usize,
 ) -> u32;
+
+/* v4 模块 M1 会话接口（与 verthys.h VerthysModuleStatus / Verthys_V4Module* 对齐） */
+
+/// 模块状态投影：不含任何密钥材料
+#[repr(C)]
+pub(crate) struct VerthysModuleStatusC {
+    pub(crate) enabled: u32,
+    pub(crate) unlocked: u32,
+    pub(crate) has_recovery: u32,
+    pub(crate) deleted: u32,
+}
+
+pub(crate) type VerthysV4ModuleEnableFn = unsafe extern "C" fn(
+    VerthysHandle,
+    u32,
+    *const c_char,
+    usize,
+    *const c_char,
+) -> u32;
+pub(crate) type VerthysV4ModuleUnlockFn =
+    unsafe extern "C" fn(VerthysHandle, u32, *const c_char, usize) -> u32;
+pub(crate) type VerthysV4ModuleLockFn = unsafe extern "C" fn(VerthysHandle, u32) -> u32;
+pub(crate) type VerthysV4ModuleRotatePasswordFn = unsafe extern "C" fn(
+    VerthysHandle,
+    u32,
+    *const c_char,
+    usize,
+    *const c_char,
+    usize,
+) -> u32;
+pub(crate) type VerthysV4ModuleDisableFn =
+    unsafe extern "C" fn(VerthysHandle, u32, *const c_char, usize) -> u32;
+pub(crate) type VerthysV4ModuleDeleteFn = unsafe extern "C" fn(
+    VerthysHandle,
+    u32,
+    *const c_char,
+    usize,
+    *const c_char,
+) -> u32;
+pub(crate) type VerthysV4ModuleBindRecoveryFn = unsafe extern "C" fn(
+    VerthysHandle,
+    u32,
+    *const c_char,
+    usize,
+    *const c_char,
+) -> u32;
+pub(crate) type VerthysV4ModuleResealDeviceFn =
+    unsafe extern "C" fn(VerthysHandle, u32, *const c_char, usize) -> u32;
+pub(crate) type VerthysV4ModuleStatusFn =
+    unsafe extern "C" fn(VerthysHandle, u32, *mut VerthysModuleStatusC) -> u32;
+pub(crate) type VerthysV4RecoveryRotateFn = unsafe extern "C" fn(
+    VerthysHandle,
+    *const c_char,
+    usize,
+    *const c_char,
+    *mut c_char,
+    usize,
+) -> u32;
+
+/* v4 D9 全库 DEK 轮换（API 版本 0x0010，与 verthys.h Verthys_V4Rotate* 对齐）
+ *
+ * 作业式接口：Begin 创建临时新库并登记作业，UnlockModule 逐模块登记口令，
+ * Run 全量复制并回调进度，Commit 原子替换，Abort 丢弃临时库。
+ * 轮换期间源库只读，所有写入口在 C 层返回 ROTATE_PENDING。 */
+
+/// 轮换进度/统计投影（与 C 端 VerthysRotateInfo 对齐）
+#[repr(C)]
+pub(crate) struct VerthysRotateInfoC {
+    pub(crate) stage: u32,
+    pub(crate) modules_ready: u32,
+    pub(crate) records: u64,
+    pub(crate) files: u64,
+    pub(crate) chunks: u64,
+    pub(crate) bytes: u64,
+    pub(crate) reserved: [u32; 4],
+}
+
+/// 进度回调：在 Run 内同步调用；返回非 0 取消本次 Run。
+pub(crate) type VerthysRotateProgressC =
+    unsafe extern "C" fn(*mut c_void, *const VerthysRotateInfoC) -> i32;
+
+pub(crate) type VerthysV4RotateBeginFn = unsafe extern "C" fn(
+    VerthysHandle,
+    *const c_char,
+    *const c_char,
+    usize,
+    u32,
+    *mut VerthysRotateInfoC,
+) -> u32;
+/// 恢复会话补录 keyfile（API 0x0011）：路径只转发，字节由 C 层进程内读取。
+pub(crate) type VerthysV4RotateAttachKeyfileFn =
+    unsafe extern "C" fn(VerthysHandle, *const c_char, *const c_char, usize) -> u32;
+pub(crate) type VerthysV4RotateUnlockModuleFn = unsafe extern "C" fn(
+    VerthysHandle,
+    u32,
+    *const c_char,
+    usize,
+    *const c_char,
+) -> u32;
+pub(crate) type VerthysV4RotateRunFn = unsafe extern "C" fn(
+    VerthysHandle,
+    Option<VerthysRotateProgressC>,
+    *mut c_void,
+) -> u32;
+pub(crate) type VerthysV4RotateCommitFn = unsafe extern "C" fn(VerthysHandle, u32) -> u32;
+pub(crate) type VerthysV4RotateAbortFn = unsafe extern "C" fn(VerthysHandle) -> u32;
+
+/* v4 容器创建/恢复与 PCR 策略（与 verthys.h 对应入口对齐） */
+pub(crate) type VerthysV4CreateFn = unsafe extern "C" fn(
+    VerthysHandle,
+    *const c_char,
+    *const c_char,
+    usize,
+    *mut c_char,
+    usize,
+) -> u32;
+pub(crate) type VerthysV4UnlockRecoveryFn =
+    unsafe extern "C" fn(VerthysHandle, *const c_char, *const c_char) -> u32;
+
+/* v4 keyfile 因子（D3，API 版本 0x000F）：只传路径，keyfile 字节由 C 层
+ * 在 worker 进程内读取/生成，不经过 IPC。 */
+pub(crate) type VerthysV4CreateKeyfileFn = unsafe extern "C" fn(
+    VerthysHandle,
+    *const c_char,
+    *const c_char,
+    usize,
+    *const c_char,
+    *mut c_char,
+    usize,
+) -> u32;
+pub(crate) type VerthysV4UnlockKeyfileFn = unsafe extern "C" fn(
+    VerthysHandle,
+    *const c_char,
+    *const c_char,
+    usize,
+    *const c_char,
+) -> u32;
+pub(crate) type VerthysV4KeyfileEnableFn =
+    unsafe extern "C" fn(VerthysHandle, *const c_char, usize, *const c_char) -> u32;
+pub(crate) type VerthysV4KeyfileDisableFn =
+    unsafe extern "C" fn(VerthysHandle, *const c_char, usize, *const c_char) -> u32;
+pub(crate) type VerthysV4KeyfileStatusFn =
+    unsafe extern "C" fn(VerthysHandle, *mut u32, *mut u32) -> u32;
+/// 恢复会话容器 user/device 槽重绑（password + 可选 keyfile_path）
+pub(crate) type VerthysV4ResealDeviceFn =
+    unsafe extern "C" fn(VerthysHandle, *const c_char, usize, *const c_char) -> u32;
+pub(crate) type VerthysV4PcrStatusFn =
+    unsafe extern "C" fn(VerthysHandle, *mut u32, *mut u32) -> u32;
+pub(crate) type VerthysV4PcrEnableFn =
+    unsafe extern "C" fn(VerthysHandle, u32, *const c_char) -> u32;
+pub(crate) type VerthysV4PcrDisableFn =
+    unsafe extern "C" fn(VerthysHandle, *const c_char) -> u32;
+pub(crate) type VerthysV4PcrResealFn =
+    unsafe extern "C" fn(VerthysHandle, *const c_char) -> u32;
+pub(crate) type VerthysV4ChunkSealFn = unsafe extern "C" fn(
+    VerthysHandle,
+    u32,
+    *const u8,
+    u32,
+    u32,
+    *const u8,
+    usize,
+    *mut u8,
+    usize,
+    *mut usize,
+) -> u32;
+pub(crate) type VerthysV4ChunkOpenFn = unsafe extern "C" fn(
+    VerthysHandle,
+    u32,
+    *const u8,
+    u32,
+    u32,
+    *const u8,
+    usize,
+    *mut u8,
+    usize,
+    *mut usize,
+) -> u32;
+/* 说明：v4 清单（manifest）只服务于 C 层模块重写事务，产品内容路径不调用；
+ * 分片集合的完整性由 meta 内 BLAKE3 哈希表 + chunkset 记录认证。 */
 
 /* 解锁进度回调 FFI 绑定（与 verthys.h 中 VerthysUnlockProgress /
  * VerthysUnlockProgressCallback / Verthys_RegisterUnlockProgressCallback 严格对齐）
@@ -198,10 +379,13 @@ pub(crate) type VerthysScanSummaryRecordFreeFn = unsafe extern "C" fn(*mut Verth
 /// scan_summary 路径实际调用）——保留对应 FFI 绑定额。
 pub(crate) type VerthysGetSummaryCountFn = unsafe extern "C" fn(VerthysHandle, *mut u64) -> u32;
 
-/* 动态防护状态查询 FFI 绑定
+/* 动态防护状态查询 FFI 绑定（API 0x0014 追加式扩展）
  * 与 verthys.h VerthysSecurityStatus 严格对齐（C enum 为 int = 4 字节）：
  *   [u32 path_state; 7][u32 blocked][u32 degraded][u32 failed]
- *   [u8 all_critical_blocked][u8 has_degraded][u8 reserved; 6] = 48B / align 4 */
+ *   [u8 all_critical_blocked][u8 has_degraded][u8 reserved; 6] = 48B
+ *   [u32 path_reason; 7][u32 limited][u32 policy_flags][u32 reserved2] = 40B
+ *   [u64 checked_at_unix_ms][u32 reserved3; 2] = 16B
+ *   合计 104B / align 8 */
 #[repr(C)]
 pub(crate) struct VerthysSecurityStatusC {
     /// 逐路径防御状态（下标 = VerthysDefensePath；值 = VerthysDefenseState）
@@ -212,6 +396,16 @@ pub(crate) struct VerthysSecurityStatusC {
     pub(crate) all_critical_blocked: u8,
     pub(crate) has_degraded: u8,
     pub(crate) reserved: [u8; 6],
+    /// 逐路径判定原因码（VerthysDefenseReason）
+    pub(crate) path_reason: [u32; 7],
+    /// 架构限制导致的降级路径数
+    pub(crate) limited_count: u32,
+    /// 运行时守卫与策略位
+    pub(crate) policy_flags: u32,
+    pub(crate) reserved2: u32,
+    /// 快照采样时间（Unix 毫秒）
+    pub(crate) checked_at_unix_ms: u64,
+    pub(crate) reserved3: [u32; 2],
 }
 
 pub(crate) type VerthysGetSecurityStatusFn =
@@ -229,6 +423,20 @@ pub(crate) type VerthysHasRecordByTypeFn = unsafe extern "C" fn(VerthysHandle, u
  *   （不报 FORMAT，避免前端 probe 抛异常）
  *   用于解锁成功后进程内探测全局主密钥记录，消除解锁后 3~4 次 IPC 往返 */
 pub(crate) type VerthysFindFirstLidByTypeFn = unsafe extern "C" fn(VerthysHandle, u8, *mut u8, *mut u64) -> u32;
+
+/* 按类型分页枚举记录 ID FFI 绑定（API 0x0012）
+ * 签名：VerthysResult Verthys_ListIdsByType(
+ *   handle, rtype, after_id, max_count, out_ids, out_count, out_exhausted)
+ * 走 V4 类型盲索引，不读取记录密文；max_count 上限由 C 层校验。 */
+pub(crate) type VerthysListIdsByTypeFn = unsafe extern "C" fn(
+    VerthysHandle,
+    u8,
+    u64,
+    u64,
+    *mut u64,
+    *mut u64,
+    *mut u8,
+) -> u32;
 
 /* 落盘自查 FFI 绑定（与 verthys.h Verthys_VerifyPersist 严格对齐）
  *
@@ -256,3 +464,15 @@ pub(crate) struct VerPersistVerifyResultC {
 
 pub(crate) type VerthysVerifyPersistFn =
     unsafe extern "C" fn(VerthysHandle, *mut VerPersistVerifyResultC) -> i32;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 跨语言 ABI 布局锁定：任何字段增删/重排都必须同步 C 结构体。
+    #[test]
+    fn security_status_c_layout_matches_c_abi() {
+        assert_eq!(std::mem::size_of::<VerthysSecurityStatusC>(), 104);
+        assert_eq!(std::mem::align_of::<VerthysSecurityStatusC>(), 8);
+    }
+}

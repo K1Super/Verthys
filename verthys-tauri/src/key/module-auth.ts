@@ -1,371 +1,179 @@
 /*
- * key/module-auth.ts — 模块独立密钥认证层
+ * key/module-auth.ts — 模块 M1 保护层（C 层 v4 模块状态机的前端投影）
  *
  * 职责：
- *   1. 模块密钥 CRUD（generateModuleKey / setModuleKey / verifyModuleKey / getModuleKey）
- *   2. 模块状态查询（hasModuleKey / isModuleReady / isModuleKeyEnabled / loadModuleKeyStatus）
- *   3. 模块登出（logoutModule）
- *   4. 模块密钥保护开关（setModuleKeyEnabled）
+ *   1. 模块保护生命周期（setModuleKey / disableModuleProtection）
+ *      —— 启用/轮换/关闭全部由 C 层事务完成，前端不保存任何密钥材料。
+ *   2. 模块登录（verifyModuleKey / logoutModule）
+ *      —— 口令一次性交给 C 层解封 MDEK user 槽，本层只登记会话就绪标志。
+ *   3. 模块状态查询（hasModuleKey / isModuleReady / isModuleKeyEnabled /
+ *      loadModuleKeyStatus）——权威来源是 C 层 `v4_module_status`，
+ *      不再读写 verthys 内的 v3 校验器/开关记录。
  *
- * 架构优化目标：
- *   - 统一错误契约 — 所有公共函数返回 Promise<VerthysResult<T>>
- *   - CacheCoordinator — 缓存操作由单一协调器管理，消除遗漏风险
- *   - 版本化 + 自愈 — findModuleKeyRecord 返回 version 最大者，发现多条记录触发后台清理
- *   - 增量状态加载 — loadModuleKeyStatus 使用摘要缓存，O(N) → O(1)
- *   - 会话状态原子化 — cacheModuleKey/removeModuleKey 内部原子更新 moduleKeyReady
- *   - 延迟冲刷 — setModuleKey/setModuleKeyEnabled 使用 flushVerthysAsync(false)
+ * 语义：
+ *   - 启用保护 = `v4_module_enable`：MDEK 从 Keyring 移入 user/device 槽，
+ *     并单事务重写该模块的全部记录/分片；不是"写一条校验记录"。
+ *   - 关闭保护 = `v4_module_disable`：保留 MDEK 与数据，MDEK 回到 Keyring；
+ *     必须提供模块口令，口令正确性由 C 层判定。
+ *   - 修改口令 = `v4_module_rotate_password`：只重封 user 槽，不重写数据。
+ *   - 模块未启用时内容路径不需要口令（MDEK 在 Keyring），解锁为幂等空操作。
+ *
+ * 并发：模块状态加载与用户开关存在竞态，loadModuleKeyStatus 以版本号
+ * 提交（乐观并发）：加载期间发生任何保护变更，本次加载结果整体丢弃，
+ * 绝不用旧状态覆盖用户刚完成的操作。
  */
-import {
-  verthysAddRecord, verthysDeleteRecord,
-  bytesToBase64,
-  encryptPasswordField, decryptPasswordField,
-  verthysGetRecord,
-} from "../lib/verthys";
 import { keyState } from "../state/key_state";
+import { MODULE_CACHE_KEY, MODULE_IDS } from "../constants/key_manager_const";
 import {
-  TYPE_MODULE_KEY, TYPE_MODULE_KEY_CONFIG,
-  MODULE_KEY_RECORD_VERSION,
-  MODULE_KEY_SELF_HEAL_BATCH,
-} from "../constants/key_manager_const";
-import {
-  serializeModuleKeyRecord, deserializeModuleKeyRecord,
-  serializeModuleKeyConfigRecord, deserializeModuleKeyConfigRecord,
-  moduleVerifierPlain,
-} from "../utils/serialization";
-import { scanVerthysRecords } from "../utils/verthys_traversal";
-import {
-  cacheModuleKey, fetchModuleKey, removeModuleKey,
-  ensureRecordScan,
-  getSummaryIdsByType,
-  getRecordIdsByType,
-  getRecordFromScan,
-  deleteAndPersist,
-  persistVerthys,
+  clearModuleCache,
+  clearRecordScanCache,
+  markModuleReady,
+  removeModuleKey,
 } from "../cache/composition/verthys-cache";
-import { cacheCoordinator } from "../cache/coordination/cache-coordinator";
 import { touchSession } from "../session/security-session";
-import { lockModuleKey, unlockModuleKey, type CryptoModule } from "../lib/module_crypto";
-import type { ModuleId, ModuleKeyRecord, ModuleKeyConfigRecord } from "../types/key_manager";
-import { ok, err, errFromUnknown, VerthysErrorCode, type VerthysResult } from "../lib/verthys_error";
+import {
+  verthysModuleKeyUnlock,
+  verthysV4ModuleBindRecovery,
+  verthysV4ModuleDisable,
+  verthysV4ModuleEnable,
+  verthysV4ModuleResealDevice,
+  verthysV4ModuleRotatePassword,
+  verthysV4ModuleStatus,
+  type VerthysResponse,
+} from "../lib/verthys";
+import type { ModuleId } from "../types/key_manager";
+import {
+  ok,
+  err,
+  errFromUnknown,
+  VerthysErrorCode,
+  type VerthysResult,
+} from "../lib/verthys_error";
 import { createLogger } from "../utils/logger";
+import { bytesToBase64 } from "../utils/binary_codec";
 
 const log = createLogger("module-auth");
 
 /* ------------------------------------------------------------------ *
- * 修复修复6：模块密钥状态乐观并发控制                          *
- *                                                                    *
- * 原缺陷（"开关直接影响全局"根因）：                                   *
- *   loadModuleKeyStatus 会整体覆盖 keyState.moduleKeyEnabled 全部模块  *
- *   状态。若后台加载（修复4将 loadModuleKeyStatus 移至后台）与用户开关  *
- *   操作并发，时序如下：                                               *
- *     1. initUnlock 后台启动 loadModuleKeyStatus（读取 verthys 旧状态）  *
- *     2. 用户切换某模块开关 → setModuleKeyEnabled 持久化 + 更新状态    *
- *     3. 后台 loadModuleKeyStatus 完成 → 用步骤1读取的旧状态整体覆盖   *
- *        → 用户刚切换的开关被回滚，全部模块状态被还原为旧值            *
- *   此即用户反馈的"开启或关闭密钥存在严重缺陷，直接影响全局"。         *
- *                                                                    *
- * 修复：乐观并发版本号（Optimistic Concurrency Control）              *
- *   - moduleKeyStatusVersion：全局单调递增版本号                       *
- *   - loadModuleKeyStatus 启动时捕获 startVersion，完成后校验：        *
- *       startVersion === moduleKeyStatusVersion → 无并发修改，提交     *
- *       startVersion !== moduleKeyStatusVersion → 有并发修改，丢弃     *
- *   - setModuleKeyEnabled / setModuleKey 在更新状态前递增版本号        *
- *   - 确保后台加载永远不会覆盖用户主动操作的最新状态                   *
+ * 模块索引与状态                                                      *
  * ------------------------------------------------------------------ */
+
+/** 前端模块 ID → C 层模块索引（0=photo，1=accounts，2=fileverthys） */
+const MODULE_INDEX: Record<ModuleId, number> = {
+  photo: 0,
+  accounts: 1,
+  fileverthys: 2,
+};
+
+/** worker 错误码：认证失败（口令错误或数据校验未通过） */
+const WORKER_ERR_AUTH = "ERR_00000002";
+/** worker 错误码：加密库锁定或模块未解锁 */
+const WORKER_ERR_LOCKED = "ERR_00000007";
+/** worker 错误码：策略拒绝（如非恢复会话重密封设备槽） */
+const WORKER_ERR_POLICY = "ERR_00000017";
+
+/**
+ * 模块密文状态变化后的缓存失效。
+ *
+ * M1 保护的记录在模块锁定期间不可读：扫描若在锁定窗口内执行会部分失败并
+ * 记住已扫到的最大 ID；解锁/重写/关闭后必须从零重扫，否则失败区段之后的
+ * 记录会被增量游标永久跳过。模块列表缓存里的密文也会随重写/清除失效。
+ */
+function invalidateModuleCaches(moduleId: ModuleId, dropModuleList: boolean): void {
+  clearRecordScanCache();
+  if (dropModuleList) {
+    clearModuleCache(MODULE_CACHE_KEY[moduleId]);
+  }
+}
+
+/** 模块状态快照（C 层权威值） */
+interface ModuleStatus {
+  /** M1 保护是否启用（已删除模块恒为 false） */
+  enabled: boolean;
+  /** 本会话 MDEK 是否已解锁 */
+  unlocked: boolean;
+  /** 模块是否已被删除（数据叶已清除） */
+  deleted: boolean;
+  /** 是否已绑定恢复槽 */
+  hasRecovery: boolean;
+}
+
+/**
+ * 模块状态加载版本号（乐观并发控制）
+ *
+ * 加载开始时捕获 startVersion，完成后校验：期间发生 setModuleKey /
+ * disableModuleProtection / verifyModuleKey → 版本递增 → 丢弃本次结果。
+ */
 let moduleKeyStatusVersion = 0;
 
 /* ------------------------------------------------------------------ *
- * verthys 记录查找（版本化 + 自愈清理）                                  *
- *                                                                    *
- * 版本化 + 自愈清理：
- *   findModuleKeyRecord 收集全部同 moduleId 的记录，                 *
- *   返回 version 最大者（即使删除失败导致新旧记录共存，也能正确返回   *
- *   最新记录）。发现多条记录时触发后台自愈清理。                      *
+ * 状态加载                                                            *
  * ------------------------------------------------------------------ */
 
-/**
- * 通用模块记录查找（用于 config 记录，无版本化需求）。
- */
-async function findModuleRecord<T>(
-  type: number,
-  moduleId: ModuleId,
-  deserialize: (b64: string) => T | null,
-  matchModule: (rec: T) => boolean,
-): Promise<{ id: number; rec: T } | null> {
-  try { await ensureRecordScan(); } catch { /* scanVerthysRecords 内部会回退到逐条 IPC */ }
-  let result: { id: number; rec: T } | null = null;
-  await scanVerthysRecords((entry) => {
-    if (entry.type === type) {
-      const rec = deserialize(entry.dataB64);
-      if (rec && matchModule(rec)) {
-        result = { id: entry.id, rec };
-        return true; // 找到第一条即停止（config 记录无需版本化）
-      }
-    }
-    return false;
-  });
-  return result;
+/** 解析单模块状态响应；失败返回 null（调用方按 fail-closed 处理） */
+function parseStatus(resp: VerthysResponse): ModuleStatus | null {
+  if (!resp.ok) return null;
+  const deleted = resp.deleted === true;
+  const enabled = resp.enabled === true && !deleted;
+  return {
+    enabled,
+    unlocked: enabled && resp.unlocked === true,
+    deleted,
+    hasRecovery: enabled && resp.has_recovery === true,
+  };
 }
 
 /**
- * 在 verthys 中查找指定模块的密钥验证器记录
+ * 从 C 层加载全部模块的 M1 状态，更新 hasModuleKeyRecord / moduleKeyEnabled /
+ * moduleKeyReady。
  *
- * 版本化 + 自愈清理
- *
- * 行为：
- *   1. 查找全部同 moduleId 的记录
- *   2. 返回 version 最大者（即使删除失败导致新旧记录共存，也能正确返回最新记录）
- *   3. 若发现多条记录 → 触发后台自愈清理（删除旧版本记录）
- *
- * @param moduleId 模块 ID
- * @returns { id, rec } 或 null
- */
-async function findModuleKeyRecord(
-  moduleId: ModuleId,
-): Promise<{ id: number; rec: ModuleKeyRecord } | null> {
-  // 收集全部同 moduleId 的记录（不提前终止）
-  const candidates: Array<{ id: number; rec: ModuleKeyRecord }> = [];
-
-  // 优先使用摘要缓存增量加载（O(1) IPC，模块记录极少）
-  const keyIds = getSummaryIdsByType(TYPE_MODULE_KEY);
-  if (keyIds.length > 0) {
-    // 摘要缓存已就绪 → 逐条 verthysGetRecord（常数次 IPC）
-    for (const id of keyIds) {
-      try {
-        const r = await verthysGetRecord(id);
-        if (r) {
-          const rec = deserializeModuleKeyRecord(r.dataB64);
-          if (rec && rec.moduleId === moduleId) {
-            candidates.push({ id, rec });
-          }
-        }
-      } catch (e) {
-        log.warn(`findModuleKeyRecord: verthysGetRecord(${id}) 失败`, e);
-      }
-    }
-  } else {
-    // 摘要缓存未就绪 → 回退到全量扫描
-    try { await ensureRecordScan(); } catch { /* */ }
-    await scanVerthysRecords((entry) => {
-      if (entry.type === TYPE_MODULE_KEY) {
-        const rec = deserializeModuleKeyRecord(entry.dataB64);
-        if (rec && rec.moduleId === moduleId) {
-          candidates.push({ id: entry.id, rec });
-        }
-      }
-      return false; // 不提前终止，收集全部候选
-    });
-  }
-
-  if (candidates.length === 0) return null;
-
-  // 按 version 降序排序，取最大者
-  candidates.sort((a, b) => (b.rec.version ?? 0) - (a.rec.version ?? 0));
-  const latest = candidates[0];
-
-  // 自愈：发现多条记录 → 后台清理旧版本
-  if (candidates.length > 1) {
-    const staleIds = candidates.slice(1).map((c) => c.id);
-    log.info(`模块 ${moduleId} 发现 ${candidates.length} 条记录，触发自愈清理: ${staleIds.join(",")}`);
-    // 异步清理（不阻塞当前查询）
-    selfHealCleanupStaleRecords(staleIds).catch((e) => {
-      log.warn(`模块 ${moduleId} 自愈清理失败`, e);
-    });
-  }
-
-  return latest;
-}
-
-/**
- * 自愈清理：删除指定 ID 的旧版本记录
- *
- * 使用 deleteAndPersist 入队（防抖合并 flush），失败不阻塞主流程。
- * 单次最多清理 MODULE_KEY_SELF_HEAL_BATCH 条，防止极端情况阻塞。
- */
-async function selfHealCleanupStaleRecords(ids: number[]): Promise<void> {
-  const batch = ids.slice(0, MODULE_KEY_SELF_HEAL_BATCH);
-  for (const id of batch) {
-    try {
-      await deleteAndPersist(async () => {
-        await verthysDeleteRecord(id);
-        return true;
-      }, id);
-      log.info(`自愈清理：已删除旧记录 ID=${id}`);
-    } catch (e) {
-      log.warn(`自愈清理：删除记录 ${id} 失败`, e);
-    }
-  }
-}
-
-/**
- * 在 verthys 中查找指定模块的密钥保护开关记录
- *
- * 版本化 + 自愈（与模块密钥记录同口径）：
- *   配置记录写入顺序为「先添新、后删旧」，历史中断/删除失败会留下多条；
- *   读取一律取 version 最大者为权威，并后台清理旧版本 —— 禁止 first-match
- *   读到旧开关（否则表现为「设置被遗忘 / 开关回滚」）。
- */
-async function findModuleKeyConfigRecord(
-  moduleId: ModuleId,
-): Promise<{ id: number; rec: ModuleKeyConfigRecord } | null> {
-  const candidates: Array<{ id: number; rec: ModuleKeyConfigRecord }> = [];
-  // 优先使用摘要缓存（O(1) IPC，模块配置记录极少）
-  const configIds = getSummaryIdsByType(TYPE_MODULE_KEY_CONFIG);
-  if (configIds.length > 0) {
-    for (const id of configIds) {
-      try {
-        const r = await verthysGetRecord(id);
-        if (r) {
-          const rec = deserializeModuleKeyConfigRecord(r.dataB64);
-          if (rec && rec.moduleId === moduleId) {
-            candidates.push({ id, rec });
-          }
-        }
-      } catch (e) {
-        log.warn(`findModuleKeyConfigRecord: verthysGetRecord(${id}) 失败`, e);
-      }
-    }
-  } else {
-    // 回退：摘要缓存未就绪 → 全量扫描（仅极端情况触发）
-    try { await ensureRecordScan(); } catch { /* */ }
-    await scanVerthysRecords((entry) => {
-      if (entry.type === TYPE_MODULE_KEY_CONFIG) {
-        const rec = deserializeModuleKeyConfigRecord(entry.dataB64);
-        if (rec && rec.moduleId === moduleId) {
-          candidates.push({ id: entry.id, rec });
-        }
-      }
-      return false;
-    });
-  }
-
-  if (candidates.length === 0) return null;
-
-  candidates.sort((a, b) => (b.rec.version ?? 0) - (a.rec.version ?? 0));
-  const latest = candidates[0];
-  if (candidates.length > 1) {
-    const staleIds = candidates.slice(1).map((c) => c.id);
-    log.info(`模块 ${moduleId} 配置记录存在 ${candidates.length} 条，触发自愈清理: ${staleIds.join(",")}`);
-    selfHealCleanupStaleRecords(staleIds).catch((e) => {
-      log.warn(`模块 ${moduleId} 配置记录自愈清理失败`, e);
-    });
-  }
-  return latest;
-}
-
-/* ------------------------------------------------------------------ *
- * 模块状态加载（增量加载，O(N) → O(1)）                               *
- * ------------------------------------------------------------------ */
-
-/**
- * 扫描 verthys 中所有模块密钥记录与开关配置，更新 hasModuleKeyRecord 和 moduleKeyEnabled
- *
- * 增量状态加载
- *   不再全量扫描，而是利用摘要缓存 getSummaryIdsByType 快速获取 ID 列表，
- *   然后逐个 verthysGetRecord 获取数据（模块记录极少，仅常数次 IPC）。
- *   若摘要未就绪，回退到原有扫描。将 O(N) 降为 O(1)。
- *
- * @returns VerthysResult<void>
+ * 任一模块查询失败即整体失败（fail-closed）：不把"查询失败"降级为
+ * "保护关闭"，否则守卫会直接放行未验证的模块入口。
  */
 export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
-  // 捕获启动版本号，用于完成后并发校验
   const startVersion = moduleKeyStatusVersion;
-  // 标记后台加载进行中（供模块组件/SecurityCenter 守卫）
   keyState.moduleKeyStatusLoading.value = true;
-  /* 新一轮加载开始：先清失败标志，守卫按「加载中」等待本轮结果；
-   * 失败时再置 true 并保持 loaded=false（fail-closed）。 */
   keyState.moduleKeyStatusFailed.value = false;
   try {
-    const status: Record<ModuleId, boolean> = { photo: false, accounts: false, fileverthys: false };
-    // 修复修复：enabled 默认 false（安全默认）
-    //
-    // 原缺陷：默认 true 意味着"保护开关开启"=所有模块需密钥验证。
-    // 当 verthys 中无 TYPE_MODULE_KEY_CONFIG 记录时（用户从未配置过保护开关），
-    // enabled 保持 true → 全部模块显示为已开启保护，与用户实际设置不符。
-    // 用户反馈"本来我设置两个模块需要密钥验证但是现在全部模块被自动开启了"。
-    //
-    // 修复：默认 false（无配置记录=不开启保护）。
-    // 仅当 verthys 中存在 TYPE_MODULE_KEY_CONFIG 记录且 cfg.enabled=true 时才开启。
+    const hasRecord: Record<ModuleId, boolean> = { photo: false, accounts: false, fileverthys: false };
     const enabled: Record<ModuleId, boolean> = { photo: false, accounts: false, fileverthys: false };
+    const ready: Record<ModuleId, boolean> = { photo: false, accounts: false, fileverthys: false };
+    const hasRecovery: Record<ModuleId, boolean> = { photo: false, accounts: false, fileverthys: false };
 
-    // 修复修复：主动触发摘要扫描确保缓存就绪
-    //
-    // 原缺陷：直接调用 getSummaryIdsByType 读取摘要缓存，若摘要扫描未完成
-    // （startBackgroundTasks 有 2.5s 延迟），返回空数组 → 回退到全量解密扫描。
-    // 模块密钥记录极少（最多 4 条），但回退路径会全量解密所有记录（含照片），
-    // 造成 20-30s 延迟。
-    //
-    // 性能根治：移除冗余 ensureSummaryScan 调用
-    //
-    // initUnlock/initCreate 在调用 loadModuleKeyStatus 之前已调用 ensureSummaryScan（行 560/353），
-    // 此处重复调用浪费 IPC（v1 格式下还会静默失败）。
-    // 直接读取 getSummaryIdsByType，若为空则进入 fallback（已由 ensureRecordScan 兜底）。
-
-    // 增量加载：优先使用摘要缓存（O(1) IPC）
-    const keyIds = getSummaryIdsByType(TYPE_MODULE_KEY);
-    const configIds = getSummaryIdsByType(TYPE_MODULE_KEY_CONFIG);
-
-    if (keyIds.length === 0 && configIds.length === 0) {
-      // 摘要缓存未就绪或为空（v1 格式 / 无模块密钥记录）→ 回退到全量扫描
-      await loadModuleKeyStatusFallback(status, enabled);
-    } else {
-      // 摘要缓存已就绪 → 逐条 verthysGetRecord（模块记录极少，常数次 IPC）
-      for (const id of keyIds) {
-        try {
-          const r = await verthysGetRecord(id);
-          if (r) {
-            const rec = deserializeModuleKeyRecord(r.dataB64);
-            if (rec) {
-              const mid = rec.moduleId as ModuleId;
-              if (mid in status) status[mid] = true;
-            }
-          }
-        } catch (e) {
-          log.warn(`loadModuleKeyStatus: verthysGetRecord(${id}) 失败`, e);
-        }
+    for (const moduleId of MODULE_IDS) {
+      const resp = await verthysV4ModuleStatus(MODULE_INDEX[moduleId]);
+      const status = parseStatus(resp);
+      if (!status) {
+        throw new Error(resp.error ?? "模块状态查询失败");
       }
-      for (const id of configIds) {
-        try {
-          const r = await verthysGetRecord(id);
-          if (r) {
-            const cfg = deserializeModuleKeyConfigRecord(r.dataB64);
-            if (cfg) {
-              const mid = cfg.moduleId as ModuleId;
-              if (mid in enabled) enabled[mid] = cfg.enabled;
-            }
-          }
-        } catch (e) {
-          log.warn(`loadModuleKeyStatus: verthysGetRecord(${id}) 失败 (config)`, e);
-        }
-      }
+      hasRecord[moduleId] = status.enabled;
+      enabled[moduleId] = status.enabled;
+      hasRecovery[moduleId] = status.hasRecovery;
+      /* ready 的语义是“内容路径可用”：未启用模块的 MDEK 在 Keyring，
+       * 不需要口令即可加解密；启用模块必须已解锁 user 槽；已删除模块
+       * 数据叶已清除，任何情况下都不标记可用。 */
+      ready[moduleId] = status.deleted
+        ? false
+        : status.enabled
+          ? status.unlocked
+          : true;
     }
 
-    // 修复修复6：乐观并发提交校验
-    //
-    // 加载期间若用户切换了任一模块的密钥开关（setModuleKeyEnabled/setModuleKey），
-    // moduleKeyStatusVersion 会递增 → startVersion !== moduleKeyStatusVersion。
-    // 此时丢弃本次加载结果，避免用旧 verthys 状态覆盖用户最新操作。
-    //
-    // 典型时序（修复前缺陷）：
-    //   T0: 后台 loadModuleKeyStatus 启动（startVersion=0），开始读取 verthys
-    //   T1: 用户切换 photo 开关 → setModuleKeyEnabled 递增 version=1 + 更新状态
-    //   T2: 后台 loadModuleKeyStatus 完成读取（旧状态 photo=false）
-    //   T3: 校验 0 !== 1 → 丢弃，不覆盖 → 用户 photo=true 保留
     if (startVersion !== moduleKeyStatusVersion) {
       log.info(
-        `loadModuleKeyStatus: 检测到并发修改（startVersion=${startVersion}, current=${moduleKeyStatusVersion}），丢弃本次加载结果，保留用户最新操作`,
+        `loadModuleKeyStatus: 检测到并发保护变更（start=${startVersion}, current=${moduleKeyStatusVersion}），丢弃本次加载结果`,
       );
       keyState.moduleKeyStatusLoading.value = false;
-      // 安全守卫根治：标记已加载完成（虽丢弃结果，但 setModuleKeyEnabled 已更新状态，状态已知）
       keyState.moduleKeyStatusLoaded.value = true;
       keyState.moduleKeyStatusFailed.value = false;
       return ok(undefined);
     }
 
-    keyState.hasModuleKeyRecord.value = status;
+    keyState.hasModuleKeyRecord.value = hasRecord;
     keyState.moduleKeyEnabled.value = enabled;
+    keyState.moduleHasRecovery.value = hasRecovery;
+    keyState.moduleKeyReady.value = ready;
     keyState.moduleKeyStatusLoading.value = false;
-    // 安全守卫根治：标记已加载完成（switchModule 守卫据此放行/拦截）
     keyState.moduleKeyStatusLoaded.value = true;
     keyState.moduleKeyStatusFailed.value = false;
     return ok(undefined);
@@ -373,332 +181,283 @@ export async function loadModuleKeyStatus(): Promise<VerthysResult<void>> {
     log.error("loadModuleKeyStatus 失败", e);
     keyState.moduleKeyStatusLoading.value = false;
     /* 失败不等于"无保护"：loaded 保持 false（fail-closed），并置 failed
-     * 供守卫跳过超时等待、直接要求密钥验证，避免每次切换模块空等 10s。 */
+     * 供守卫跳过超时等待、直接要求口令验证。 */
     keyState.moduleKeyStatusLoaded.value = false;
     keyState.moduleKeyStatusFailed.value = true;
     return errFromUnknown(e, VerthysErrorCode.E_INIT_FAILED);
   }
 }
 
-/** 回退路径：摘要缓存未就绪时复用 ensureRecordScan 缓存（消除重复全量枚举）
- *
- * 性能根治：复用 ensureRecordScan 缓存，替代直接 verthysEnumerateRecords
- *
- * 原缺陷：
- *   loadModuleKeyStatusFallback 直接调用 verthysEnumerateRecords(1) 全量枚举，
- *   结果不缓存。模块组件挂载时又调用 ensureRecordScanSafe() → ensureRecordScan()
- *   → v1 fallback → verthysEnumerateRecords(1)，重复全量枚举，加剧 worker 争抢。
- *
- * 修复：
- *   1. 调用 ensureRecordScan()（v1 fallback 到 verthysEnumerateRecords，结果缓存到 recordScanCache）
- *   2. 用 getRecordIdsByType(TYPE_MODULE_KEY/TYPE_MODULE_KEY_CONFIG) 查询 ID（零 IPC，O(1) 索引）
- *   3. 用 getRecordFromScan(id) 读取数据（零 IPC，从缓存读取）
- *   4. 全量枚举只执行一次，结果被模块组件的 ensureRecordScanSafe() 复用（scanInProgress 去重）
- *
- * 收益：消除 loadModuleKeyStatus 与模块组件的重复全量枚举，worker 通道争抢减半。 */
-async function loadModuleKeyStatusFallback(
-  status: Record<ModuleId, boolean>,
-  enabled: Record<ModuleId, boolean>,
-): Promise<void> {
-  // 复用 ensureRecordScan 缓存：全量枚举只执行一次，结果供模块组件复用
-  try { await ensureRecordScan(); } catch { /* ensureRecordScan 内部已回退兜底 */ }
+/* ------------------------------------------------------------------ *
+ * 错误映射                                                            *
+ * ------------------------------------------------------------------ */
 
-  // 从扫描缓存按类型查询 ID（零 IPC，O(1) 索引查询）
-  const keyIds = getRecordIdsByType(TYPE_MODULE_KEY);
-  for (const id of keyIds) {
-    const entry = getRecordFromScan(id);
-    if (entry?.dataB64) {
-      const rec = deserializeModuleKeyRecord(entry.dataB64);
-      if (rec) {
-        const mid = rec.moduleId as ModuleId;
-        if (mid in status) status[mid] = true;
-      }
-    }
+/** 把 worker/C 层失败响应映射为结构化错误；错误码不做文案匹配 */
+function moduleFailure(
+  resp: VerthysResponse,
+  action: string,
+  fallback: VerthysErrorCode,
+): VerthysResult<never> {
+  const code = resp.error_code ?? resp.error ?? "";
+  if (code === WORKER_ERR_LOCKED) {
+    return err(VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY, `${action}失败：加密库或模块已锁定`);
   }
-
-  const configIds = getRecordIdsByType(TYPE_MODULE_KEY_CONFIG);
-  for (const id of configIds) {
-    const entry = getRecordFromScan(id);
-    if (entry?.dataB64) {
-      const cfg = deserializeModuleKeyConfigRecord(entry.dataB64);
-      if (cfg) {
-        const mid = cfg.moduleId as ModuleId;
-        if (mid in enabled) enabled[mid] = cfg.enabled;
-      }
-    }
+  if (code === WORKER_ERR_AUTH) {
+    return err(VerthysErrorCode.E_MODULE_VERIFY_FAILED, `${action}失败：口令不正确或数据校验未通过`);
   }
+  if (code === WORKER_ERR_POLICY) {
+    return err(VerthysErrorCode.E_MODULE_POLICY, `${action}失败：当前会话或模块状态不允许该操作`);
+  }
+  return err(fallback, `${action}失败（${code || "未知错误"}）`);
 }
 
 /* ------------------------------------------------------------------ *
- * 模块密钥保护开关                                                    *
+ * 模块口令与保护开关                                                  *
  * ------------------------------------------------------------------ */
 
-/**
- * 设置模块密钥保护开关（持久化到 verthys）。
- *
- * 返回 VerthysResult<void>
- * 通过 CacheCoordinator 统一同步缓存
- * 使用 flushVerthysAsync(false) 延迟冲刷
- *
- * 写入顺序：先添加新记录，成功后再删除旧记录（先添后删）。
- *
- * @returns VerthysResult<void>
- */
-export async function setModuleKeyEnabled(moduleId: ModuleId, enabled: boolean): Promise<VerthysResult<void>> {
-  if (!keyState.verthysReady.value) {
-    return err(VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY, "verthys 未解锁");
-  }
-
-  // 1. 查找旧记录（取最新版本，供版本递增 + 后续删除）
-  const existing = await findModuleKeyConfigRecord(moduleId);
-  const rec: ModuleKeyConfigRecord = {
-    moduleId,
-    enabled,
-    version: (existing?.rec.version ?? 0) + 1,
-  };
-  const dataB64 = serializeModuleKeyConfigRecord(rec);
-
-  // 2. 先添加新记录
-  const name = `module-key-config-${moduleId}`;
-  const id = await verthysAddRecord(TYPE_MODULE_KEY_CONFIG, name, dataB64);
-  if (id === null) {
-    return err(VerthysErrorCode.E_MODULE_CONFIG_SAVE_FAILED, "写入 verthys 失败");
-  }
-
-  // 通过 CacheCoordinator 统一同步缓存（消除手动调用遗漏风险）
-  cacheCoordinator.addRecord({
-    id, type: TYPE_MODULE_KEY_CONFIG, name, dataB64, dataSize: dataB64.length,
-  });
-
-  /* 3. 新记录先确认落盘，再删除旧记录。
-   *    旧实现先删旧再持久化：落盘失败/中断会让磁盘既无新记录也无旧记录，
-   *    重启后保护开关回退默认关闭 —— 属不可见的安全降级。 */
-  const flushOk = await persistVerthys();
-  if (!flushOk) {
-    log.error(`setModuleKeyEnabled: 模块 ${moduleId} 新配置落盘失败，回滚新记录`);
-    try {
-      await verthysDeleteRecord(id);
-      cacheCoordinator.removeRecord(id);
-    } catch (e) {
-      log.warn(`setModuleKeyEnabled: 回滚新配置记录失败（保留旧记录为权威）`, e);
-    }
-    return err(VerthysErrorCode.E_MODULE_CONFIG_SAVE_FAILED, "配置落盘失败，请重试");
-  }
-
-  // 4. 新记录已持久化 → 删除旧记录（失败仅影响冗余，读取按版本取新）
-  let deletedOld = false;
-  if (existing) {
-    try {
-      deletedOld = await verthysDeleteRecord(existing.id);
-      if (deletedOld) cacheCoordinator.removeRecord(existing.id);
-      else log.warn(`setModuleKeyEnabled: 旧配置记录 ${existing.id} 删除失败（读取按版本取新）`);
-    } catch (e) {
-      log.warn(`setModuleKeyEnabled: 旧配置记录 ${existing.id} 删除异常（读取按版本取新）`, e);
-    }
-    if (deletedOld) await persistVerthys();
-  }
-
-  // 更新状态（数据已确认落盘）
-  // 递增版本号，使进行中的 loadModuleKeyStatus 丢弃其旧结果
-  //   杜绝后台加载用旧 verthys 状态覆盖用户刚切换的开关（"开关直接影响全局"根因）
-  moduleKeyStatusVersion++;
-  keyState.moduleKeyEnabled.value = { ...keyState.moduleKeyEnabled.value, [moduleId]: enabled };
-  log.info(`模块 ${moduleId} 保护开关已${enabled ? "开启" : "关闭"}`);
-  return ok(undefined);
-}
-
-/** 查询模块密钥保护是否开启
- *
- * 修复修复：兜底默认 false（与 key_state 初始化默认一致）
- *
- * 原缺陷：兜底 true，当 moduleKeyEnabled 未被 loadModuleKeyStatus 正确填充时，
- * 任何模块查询都返回 true（保护开启），导致"全部模块被自动开启密钥"。
- */
-export function isModuleKeyEnabled(moduleId: ModuleId): boolean {
-  return keyState.moduleKeyEnabled.value[moduleId] ?? false;
-}
-
-/* ------------------------------------------------------------------ *
- * 模块密钥 CRUD                                                       *
- * ------------------------------------------------------------------ */
-
-/** 生成随机模块密钥（32 字节 base64） */
+/** 生成随机模块口令（32 字节 base64；与用户自设口令等价，仅含可见 ASCII） */
 export function generateModuleKey(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return bytesToBase64(bytes);
 }
 
-/**
- * 设置模块独立密钥（首次设置或修改）
- *
- * 返回 VerthysResult<void>
- * 通过 CacheCoordinator 统一同步缓存
- * 版本递增（每次 setModuleKey 递增 version）
- * 使用 flushVerthysAsync(false) 延迟冲刷
- *
- * 写入顺序：先添加新记录（带递增 version），成功后再删除旧记录。
- *
- * @returns VerthysResult<void>
- */
-export async function setModuleKey(moduleId: ModuleId, key: string): Promise<VerthysResult<void>> {
-  if (!keyState.verthysReady.value) {
-    return err(VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY, "verthys 未解锁");
-  }
-
-  // 1. 用模块密钥加密验证器明文
-  const plain = moduleVerifierPlain(moduleId);
-  let verifierB64: string;
-  try {
-    verifierB64 = await encryptPasswordField(plain, key);
-  } catch (e) {
-    return errFromUnknown(e, VerthysErrorCode.E_MODULE_KEY_SET_FAILED);
-  }
-
-  // 2. 查找旧记录（用于版本号递增 + 后续删除）
-  const existing = await findModuleKeyRecord(moduleId);
-  // 版本递增
-  const newVersion = (existing?.rec.version ?? 0) + 1;
-
-  // 3. 构造记录（带 version）
-  const rec: ModuleKeyRecord = {
-    moduleId,
-    verifierB64,
-    version: newVersion,
-  };
-  const dataB64 = serializeModuleKeyRecord(rec);
-
-  // 4. 先添加新记录
-  const name = `module-key-${moduleId}`;
-  const id = await verthysAddRecord(TYPE_MODULE_KEY, name, dataB64);
-  if (id === null) {
-    return err(VerthysErrorCode.E_MODULE_KEY_SET_FAILED, "写入 verthys 失败");
-  }
-
-  // 通过 CacheCoordinator 统一同步缓存
-  cacheCoordinator.addRecord({
-    id, type: TYPE_MODULE_KEY, name, dataB64, dataSize: dataB64.length,
-  });
-
-  /* 5. 新密钥先确认落盘，再删除旧记录。
-   *    旧实现先删旧再持久化：落盘失败/中断会同时失去新旧两份密钥记录，
-   *    模块加密数据将永久无法解密 —— 不可逆数据损失。 */
-  const flushOk = await persistVerthys();
-  if (!flushOk) {
-    log.error(`setModuleKey: 模块 ${moduleId} 新密钥落盘失败，回滚新记录`);
-    try {
-      await verthysDeleteRecord(id);
-      cacheCoordinator.removeRecord(id);
-    } catch (e) {
-      log.warn(`setModuleKey: 回滚新密钥记录失败（旧记录仍为权威）`, e);
-    }
-    return err(VerthysErrorCode.E_MODULE_KEY_SET_FAILED, "密钥落盘失败，请重试");
-  }
-
-  // 6. 新密钥已持久化 → 删除旧记录（失败仅影响冗余，读取按版本取新）
-  let deletedOld = false;
-  if (existing) {
-    try {
-      deletedOld = await verthysDeleteRecord(existing.id);
-      if (deletedOld) cacheCoordinator.removeRecord(existing.id);
-      else log.warn(`setModuleKey: 旧密钥记录 ${existing.id} 删除失败（读取按版本取新）`);
-    } catch (e) {
-      log.warn(`setModuleKey: 旧密钥记录 ${existing.id} 删除异常（读取按版本取新）`, e);
-    }
-    if (deletedOld) await persistVerthys();
-  }
-
-  // 6. 更新状态（数据已确认落盘）
-  // 递增版本号，使进行中的 loadModuleKeyStatus 丢弃其旧结果
-  //   杜绝后台加载用旧 verthys 状态覆盖用户刚设置的模块密钥记录状态
-  moduleKeyStatusVersion++;
-  keyState.hasModuleKeyRecord.value = { ...keyState.hasModuleKeyRecord.value, [moduleId]: true };
-  /* 换钥后旧会话密钥不再对应当前数据：立即登出该模块，要求用新密钥
-   * 重新登录；worker 侧旧密钥与派生缓存由 removeModuleKey 联动清除。 */
-  if (cryptoModuleOf(moduleId)) {
-    removeModuleKey(moduleId);
-  }
-  log.info(`模块 ${moduleId} 密钥已设置 (version=${newVersion})`);
-  return ok(undefined);
+/** 查询模块保护是否开启（C 层状态缓存） */
+export function isModuleKeyEnabled(moduleId: ModuleId): boolean {
+  return keyState.moduleKeyEnabled.value[moduleId] ?? false;
 }
 
-/** 模块 ID 到内容加密模块的映射（仅照片内容由模块密钥派生；
- *  文件块 v2 使用每文件独立口令，不使用模块密钥） */
-function cryptoModuleOf(moduleId: ModuleId): CryptoModule | null {
-  return moduleId === "photo" ? "photo" : null;
-}
-
-/**
- * 验证模块独立密钥（模块登录时调用）
- *
- * 验证成功后先把密钥交付 worker 托管，再登记会话就绪状态：两步顺序
- * 保证“界面显示已登录”必然对应“内容加解密可用”，避免半可用状态。
- *
- * @returns VerthysResult<void>
- */
-export async function verifyModuleKey(moduleId: ModuleId, key: string): Promise<VerthysResult<void>> {
-  if (!keyState.verthysReady.value) {
-    return err(VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY, "verthys 未解锁");
-  }
-
-  const found = await findModuleKeyRecord(moduleId);
-  if (!found) {
-    return err(VerthysErrorCode.E_MODULE_KEY_NOT_FOUND, "模块密钥未设置");
-  }
-
-  try {
-    const plain = await decryptPasswordField(found.rec.verifierB64, key);
-    if (plain !== moduleVerifierPlain(moduleId)) {
-      return err(VerthysErrorCode.E_MODULE_VERIFY_FAILED, "原独立密钥验证失败");
-    }
-  } catch (e) {
-    return errFromUnknown(e, VerthysErrorCode.E_MODULE_VERIFY_FAILED);
-  }
-
-  const cryptoModule = cryptoModuleOf(moduleId);
-  if (cryptoModule) {
-    try {
-      await unlockModuleKey(cryptoModule, key);
-    } catch (e) {
-      log.error(`模块 ${moduleId} 密钥交付 worker 失败`, e);
-      return errFromUnknown(e, VerthysErrorCode.E_MODULE_VERIFY_FAILED);
-    }
-  }
-
-  // cacheModuleKey 内部原子地设置 moduleKeyReady=true
-  //   消除「先缓存密钥后置状态」的不一致窗口
-  cacheModuleKey(moduleId, key);
-  touchSession();
-  log.info(`模块 ${moduleId} 验证成功`);
-  return ok(undefined);
-}
-
-/**
- * 获取会话中缓存的模块密钥（模块内加密/解密数据时调用）
- * @returns 模块密钥字符串，若未登录返回 null
- */
-export function getModuleKey(moduleId: ModuleId): string | null {
-  if (!keyState.moduleKeyReady.value[moduleId]) return null;
-  return fetchModuleKey(moduleId);
-}
-
-/** 检查模块是否已设置独立密钥（持久化在 verthys 中） */
+/** 检查模块是否已启用保护（等价于 v4 enabled） */
 export function hasModuleKey(moduleId: ModuleId): boolean {
   return keyState.hasModuleKeyRecord.value[moduleId] ?? false;
 }
 
-/** 检查模块是否已登录（会话中密钥已验证） */
+/** 检查模块是否已登录（本会话 MDEK 已解锁） */
 export function isModuleReady(moduleId: ModuleId): boolean {
   return keyState.moduleKeyReady.value[moduleId] ?? false;
 }
 
 /**
- * 登出模块（清除会话密钥缓存，不影响持久化记录）
+ * 设置/修改模块口令，并启用模块保护。
  *
- * 会话状态原子化
- *   removeModuleKey 内部原子地同时清空密钥字节 + 置 moduleKeyReady=false，
- *   消除「先清缓存再置状态」的不一致窗口。
+ * - 未启用：`v4_module_enable`（MDEK 移出 Keyring + 单事务重写模块数据）
+ * - 已启用：`v4_module_rotate_password`（必须提供 oldKey，只重封 user 槽）
+ *
+ * 成功后 C 层保持该模块解锁（MDEK 已在会话内），因此同步登记 ready。
+ */
+export async function setModuleKey(
+  moduleId: ModuleId,
+  key: string,
+  oldKey?: string,
+  recoveryCode?: string,
+): Promise<VerthysResult<void>> {
+  if (!keyState.verthysReady.value) {
+    return err(VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY, "verthys 未解锁");
+  }
+  if (!key) {
+    return err(VerthysErrorCode.E_MODULE_KEY_SET_FAILED, "模块口令不能为空");
+  }
+  const index = MODULE_INDEX[moduleId];
+  const rotating = isModuleKeyEnabled(moduleId);
+  if (rotating && !oldKey) {
+    return err(VerthysErrorCode.E_MODULE_KEY_SET_FAILED, "修改模块口令必须提供原口令");
+  }
+
+  try {
+    const resp = rotating
+      ? await verthysV4ModuleRotatePassword(index, oldKey as string, key)
+      : recoveryCode
+        ? await verthysV4ModuleEnable(index, key, recoveryCode)
+        : await verthysV4ModuleEnable(index, key);
+    if (!resp.ok) {
+      return moduleFailure(
+        resp,
+        rotating ? "轮换模块口令" : "启用模块保护",
+        VerthysErrorCode.E_MODULE_KEY_SET_FAILED,
+      );
+    }
+
+    moduleKeyStatusVersion++;
+    keyState.hasModuleKeyRecord.value = { ...keyState.hasModuleKeyRecord.value, [moduleId]: true };
+    keyState.moduleKeyEnabled.value = { ...keyState.moduleKeyEnabled.value, [moduleId]: true };
+    keyState.moduleHasRecovery.value = {
+      ...keyState.moduleHasRecovery.value,
+      [moduleId]: resp.has_recovery === true,
+    };
+    keyState.moduleKeyReady.value = { ...keyState.moduleKeyReady.value, [moduleId]: true };
+    /* 启用会在 C 层重写该模块全部记录（密文与 ID 可能变化）：列表缓存与
+     * 增量扫描游标都必须从零重建；轮换口令不改写数据，只需保留列表缓存。 */
+    invalidateModuleCaches(moduleId, !rotating);
+    touchSession();
+    log.info(`模块 ${moduleId} 保护已${rotating ? "轮换口令" : "启用"}`);
+    return ok(undefined);
+  } catch (e) {
+    return errFromUnknown(e, VerthysErrorCode.E_MODULE_KEY_SET_FAILED);
+  }
+}
+
+/**
+ * 验证模块口令（模块登录入口）。
+ *
+ * 保护未启用时无口令可验：返回成功但不登记 ready（内容路径不依赖口令）。
+ * 已启用时由 C 层解封 user 槽；认证失败统一映射为 E_MODULE_VERIFY_FAILED。
+ */
+export async function verifyModuleKey(
+  moduleId: ModuleId,
+  key: string,
+): Promise<VerthysResult<void>> {
+  if (!keyState.verthysReady.value) {
+    return err(VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY, "verthys 未解锁");
+  }
+  if (!isModuleKeyEnabled(moduleId)) {
+    return ok(undefined);
+  }
+  if (!key) {
+    return err(VerthysErrorCode.E_MODULE_VERIFY_FAILED, "请输入模块口令");
+  }
+
+  try {
+    const resp = await verthysModuleKeyUnlock(moduleId, key);
+    if (!resp.ok) {
+      return moduleFailure(resp, "验证模块口令", VerthysErrorCode.E_MODULE_VERIFY_FAILED);
+    }
+    markModuleReady(moduleId);
+    /* 解锁前扫描可能因模块锁定只完成了一部分；清缓存让下一次扫描从零覆盖。 */
+    invalidateModuleCaches(moduleId, false);
+    touchSession();
+    log.info(`模块 ${moduleId} 口令验证成功`);
+    return ok(undefined);
+  } catch (e) {
+    return errFromUnknown(e, VerthysErrorCode.E_MODULE_VERIFY_FAILED);
+  }
+}
+
+/**
+ * 关闭模块保护：必须提供当前模块口令，口令正确性由 C 层判定。
+ *
+ * 关闭保留 MDEK 与全部数据（MDEK 回到 Keyring），不会删除内容；
+ * 需要删除数据请使用模块删除（不可逆）。
+ */
+export async function disableModuleProtection(
+  moduleId: ModuleId,
+  password: string,
+): Promise<VerthysResult<void>> {
+  if (!keyState.verthysReady.value) {
+    return err(VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY, "verthys 未解锁");
+  }
+  if (!password) {
+    return err(VerthysErrorCode.E_MODULE_VERIFY_FAILED, "请输入模块口令");
+  }
+
+  try {
+    const resp = await verthysV4ModuleDisable(MODULE_INDEX[moduleId], password);
+    if (!resp.ok) {
+      return moduleFailure(resp, "关闭模块保护", VerthysErrorCode.E_MODULE_VERIFY_FAILED);
+    }
+    moduleKeyStatusVersion++;
+    keyState.hasModuleKeyRecord.value = { ...keyState.hasModuleKeyRecord.value, [moduleId]: false };
+    keyState.moduleKeyEnabled.value = { ...keyState.moduleKeyEnabled.value, [moduleId]: false };
+    keyState.moduleHasRecovery.value = { ...keyState.moduleHasRecovery.value, [moduleId]: false };
+    /* removeModuleKey 原子清空会话就绪标志并联动 C 层锁定该模块缓存；
+     * 关闭保护后 MDEK 已回 Keyring，内容路径无需口令，ready 立即恢复为可用。 */
+    removeModuleKey(moduleId);
+    keyState.moduleKeyReady.value = { ...keyState.moduleKeyReady.value, [moduleId]: true };
+    invalidateModuleCaches(moduleId, false);
+    touchSession();
+    log.info(`模块 ${moduleId} 保护已关闭（数据保留）`);
+    return ok(undefined);
+  } catch (e) {
+    return errFromUnknown(e, VerthysErrorCode.E_MODULE_VERIFY_FAILED);
+  }
+}
+
+/**
+ * 绑定模块恢复槽：模块口令解封 share，容器恢复码包裹 device share。
+ *
+ * 绑定后该模块可在换机时用同一恢复码替代设备因子（仍需模块口令）。
+ * 绑定不重写记录/分片，但会解锁该模块，故仍需清一次扫描缓存。
+ */
+export async function bindModuleRecovery(
+  moduleId: ModuleId,
+  password: string,
+  recoveryCode: string,
+): Promise<VerthysResult<void>> {
+  if (!keyState.verthysReady.value) {
+    return err(VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY, "verthys 未解锁");
+  }
+  if (!isModuleKeyEnabled(moduleId)) {
+    return err(VerthysErrorCode.E_MODULE_KEY_SET_FAILED, "模块保护未启用，无法绑定恢复槽");
+  }
+  if (!password) {
+    return err(VerthysErrorCode.E_MODULE_VERIFY_FAILED, "请输入模块口令");
+  }
+  const code = recoveryCode.trim();
+  if (!code) {
+    return err(VerthysErrorCode.E_MODULE_KEY_SET_FAILED, "请输入容器恢复码");
+  }
+
+  try {
+    const resp = await verthysV4ModuleBindRecovery(MODULE_INDEX[moduleId], password, code);
+    if (!resp.ok) {
+      return moduleFailure(resp, "绑定模块恢复槽", VerthysErrorCode.E_MODULE_KEY_SET_FAILED);
+    }
+    moduleKeyStatusVersion++;
+    keyState.moduleHasRecovery.value = {
+      ...keyState.moduleHasRecovery.value,
+      [moduleId]: true,
+    };
+    keyState.moduleKeyReady.value = { ...keyState.moduleKeyReady.value, [moduleId]: true };
+    invalidateModuleCaches(moduleId, false);
+    touchSession();
+    log.info(`模块 ${moduleId} 恢复槽已绑定`);
+    return ok(undefined);
+  } catch (e) {
+    return errFromUnknown(e, VerthysErrorCode.E_MODULE_KEY_SET_FAILED);
+  }
+}
+
+/**
+ * 换机后重密封模块设备槽。
+ *
+ * 只有恢复码解锁的会话能通过 C 层策略；普通会话调用返回策略拒绝，
+ * 由 UI 明确提示"请先用恢复码解锁"。
+ */
+export async function resealModuleDevice(
+  moduleId: ModuleId,
+  password: string,
+): Promise<VerthysResult<void>> {
+  if (!keyState.verthysReady.value) {
+    return err(VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY, "verthys 未解锁");
+  }
+  if (!isModuleKeyEnabled(moduleId)) {
+    return err(VerthysErrorCode.E_MODULE_KEY_SET_FAILED, "模块保护未启用，无法重密封设备槽");
+  }
+  if (!password) {
+    return err(VerthysErrorCode.E_MODULE_VERIFY_FAILED, "请输入模块口令");
+  }
+
+  try {
+    const resp = await verthysV4ModuleResealDevice(MODULE_INDEX[moduleId], password);
+    if (!resp.ok) {
+      return moduleFailure(resp, "重密封模块设备槽", VerthysErrorCode.E_MODULE_KEY_SET_FAILED);
+    }
+    moduleKeyStatusVersion++;
+    keyState.moduleKeyReady.value = { ...keyState.moduleKeyReady.value, [moduleId]: true };
+    invalidateModuleCaches(moduleId, false);
+    touchSession();
+    log.info(`模块 ${moduleId} 设备槽已重密封`);
+    return ok(undefined);
+  } catch (e) {
+    return errFromUnknown(e, VerthysErrorCode.E_MODULE_KEY_SET_FAILED);
+  }
+}
+
+/**
+ * 登出模块：清除会话就绪状态并锁定 C 层模块缓存。
+ *
+ * 不影响持久化的模块口令与数据；再次进入时需重新验证口令。
  */
 export function logoutModule(moduleId: ModuleId): void {
-  removeModuleKey(moduleId); // 内部原子地清空 key + 置 ready=false
+  /* removeModuleKey 原子清空会话就绪标志并联动 C 层锁定该模块。 */
+  removeModuleKey(moduleId);
   log.info(`模块 ${moduleId} 已登出`);
 }

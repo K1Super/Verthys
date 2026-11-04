@@ -155,6 +155,51 @@ pub struct UnlockProgress {
     pub message: String,
 }
 
+/// v4 D9 全库 DEK 轮换进度（从 worker 的 v4_rotate_progress JSON 行反序列化）
+///
+/// 字段与 worker 侧 VerthysRotateInfo 投影一一对应：阶段 + 已登记模块数 +
+/// 已复制记录/文件/分片/字节计数。仅统计值，不含记录名与明文。
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct RotateProgress {
+    pub stage: u32,
+    pub modules_ready: u32,
+    pub records: u64,
+    pub files: u64,
+    pub chunks: u64,
+    pub bytes: u64,
+}
+
+/// 流式进度载荷的日志投影
+///
+/// Actor 的流式接收器对两类进度（解锁 / 轮换）共用同一套读行、验签、
+/// 关联号校验与超时重置逻辑；各类型只需给出自己的诊断摘要。
+pub(crate) trait ProgressEvent: serde::de::DeserializeOwned {
+    fn log_summary(&self) -> String;
+}
+
+impl ProgressEvent for UnlockProgress {
+    fn log_summary(&self) -> String {
+        format!(
+            "stage={} percent={}% elapsed={}ms msg={}",
+            self.stage, self.percent, self.elapsed_ms, self.message
+        )
+    }
+}
+
+impl ProgressEvent for RotateProgress {
+    fn log_summary(&self) -> String {
+        format!(
+            "stage={} modules={} records={} files={} chunks={} bytes={}",
+            self.stage,
+            self.modules_ready,
+            self.records,
+            self.files,
+            self.chunks,
+            self.bytes
+        )
+    }
+}
+
 /* ------------------------------------------------------------------ *
  * Actor 请求/响应协议                                                  *
  *                                                                    *
@@ -180,6 +225,12 @@ pub(crate) enum ActorRequest {
         reply: oneshot::Sender<Result<String, String>>,
         progress_tx: mpsc::Sender<UnlockProgress>,
     },
+    /// v4 D9 全库轮换流式请求（send_json_with_rotate_progress）
+    SendStreamingRotate {
+        json: String,
+        reply: oneshot::Sender<Result<String, String>>,
+        progress_tx: mpsc::Sender<RotateProgress>,
+    },
     /// 就绪检测（wait_for_ready_signal）
     WaitReady {
         timeout: Duration,
@@ -196,6 +247,13 @@ pub(crate) enum ActorRequest {
 /// 60 秒裕量覆盖极端情况（低端 CPU + 杀毒扫描），避免误判超时。
 pub(crate) const UNLOCK_PROGRESS_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 全库轮换进度感知空闲超时（每收到一条进度行重置）
+///
+/// 轮换在 Run 内逐记录/逐文件回调，但在“启用新库模块”阶段单次写盘
+/// 可能持续数分钟且无进度事件（100GB 模块约 2 分钟量级）。空闲预算取
+/// 模块事务同样的 10 分钟，避免把健康的长任务误判为挂起。
+pub(crate) const ROTATE_PROGRESS_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +263,29 @@ mod tests {
     #[test]
     fn test_unlock_progress_idle_timeout() {
         assert_eq!(UNLOCK_PROGRESS_IDLE_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(ROTATE_PROGRESS_IDLE_TIMEOUT, Duration::from_secs(600));
+    }
+
+    /// 验证轮换进度反序列化（worker 进度行含 op/ok 前缀字段，须被忽略）
+    #[test]
+    fn test_rotate_progress_deserialize() {
+        let json = r#"{
+            "ok": true,
+            "op": "v4_rotate_progress",
+            "stage": 1,
+            "modules_ready": 2,
+            "records": 120,
+            "files": 3,
+            "chunks": 40,
+            "bytes": 998877
+        }"#;
+        let p: RotateProgress = serde_json::from_str(json).unwrap();
+        assert_eq!(p.stage, 1);
+        assert_eq!(p.modules_ready, 2);
+        assert_eq!(p.records, 120);
+        assert_eq!(p.files, 3);
+        assert_eq!(p.chunks, 40);
+        assert_eq!(p.bytes, 998877);
     }
 
     /// 跨层载荷预算：最大合法记录响应行必须落在读取上限内

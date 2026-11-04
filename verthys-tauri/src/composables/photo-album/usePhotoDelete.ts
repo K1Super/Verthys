@@ -14,7 +14,7 @@
  * - shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
  */
 import { ref, computed, type ShallowRef } from "vue";
-import { verthysForgetHashes, verthysGcOrphanChunks } from "../../lib/verthys";
+import { verthysForgetImportKeys, verthysGcOrphanChunks } from "../../lib/verthys";
 import {
   persistVerthysDetailed, deleteAndPersistBatch, setModuleCache,
   invalidateSummaryRecord, invalidateFullRecord, invalidateScannedRecord,
@@ -63,8 +63,6 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
 
   /* ===== 删除二次确认（复用 ConfirmDelete 弹窗） ===== */
   const showDeleteConfirm = ref(false);
-  /** 待确认删除的照片数量（确认窗口文案数据源，仅在确认弹窗打开期间有意义） */
-  const deleteConfirmCount = ref(0);
 
   /** 是否全选 */
   const allSelected = computed(() => {
@@ -116,7 +114,6 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
   const onDeleteSelected = () => {
     // 空选时按钮处于禁用态，此处为事件兜底
     if (selectedPhotoIds.value.size === 0) return;
-    deleteConfirmCount.value = selectedPhotoIds.value.size;
     showDeleteConfirm.value = true;
   };
 
@@ -256,19 +253,18 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
         showToast(`删除操作已落盘（校验警告）：${outcome.reason}`);
       }
 
-      // 删除成功后释放去重锁（WAL 删除墓碑）：被删照片可重新导入。
-      // 覆盖已加载 meta 与本次强制解密的 meta；best-effort——失败仅
-      // 影响「再导入去重」（会被视为已导入而跳过），不影响删除结果本身
-      const forgetHashes: string[] = [];
+      // 删除成功后释放续传幂等锁（WAL 删除墓碑）：被删照片可重新导入。
+      // 条目键来自加密 meta；历史记录缺失键时跳过释放（不影响删除结果）。
+      const forgetKeys: string[] = [];
       for (const ph of photosToRemove) {
-        const fh = ph.meta?.fileHash ?? resolvedMetaMap.get(ph.metaId!)?.fileHash;
-        if (typeof fh === "string" && fh.length > 0) forgetHashes.push(fh);
+        const key = ph.meta?.entryKey ?? resolvedMetaMap.get(ph.metaId!)?.entryKey;
+        if (typeof key === "string" && key.length > 0) forgetKeys.push(key);
       }
-      if (forgetHashes.length > 0) {
+      if (forgetKeys.length > 0) {
         try {
-          await verthysForgetHashes(forgetHashes);
+          await verthysForgetImportKeys(forgetKeys);
         } catch (e) {
-          console.warn("[executeBatchDelete] 去重锁释放失败（不影响删除结果）", e);
+          console.warn("[executeBatchDelete] 续传幂等锁释放失败（不影响删除结果）", e);
         }
       }
 
@@ -331,7 +327,6 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
     onDeleteBtn,
     onDeleteSelected,
     showDeleteConfirm,
-    deleteConfirmCount,
     confirmDelete,
     cancelDeleteConfirm,
     onPhotoClick,

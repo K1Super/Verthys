@@ -26,7 +26,7 @@
  *   #endif
  *
  * ================================================================== */
-#define VERTHYS_API_VERSION 0x000Eu
+#define VERTHYS_API_VERSION 0x0014u
 
 /* ================================================================== *
  * Verthys_Unlock flags 位域定义（API 版本 0x0005）
@@ -198,6 +198,38 @@ typedef enum {
      * 签名，Verthys_Init 在任何密钥/文件操作之前即拒绝。
      * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
     VERTHYS_ERR_UNAUTHORIZED = 0x00000016u,
+    /* 策略拒绝：模块未启用、模块未解锁、恢复会话缺少 recovery 槽等。
+     * 与 AUTH 区分，调用方可给出“先解锁模块/先绑定恢复码”的指引。 */
+    VERTHYS_ERR_POLICY = 0x00000017u,
+    /* v4：TPM/PCR 不可用或 PCR 策略不匹配。与 AUTH 区分，供调用方
+     * 引导恢复码重密封；仍不区分具体槽/TPM 内部状态。 */
+    VERTHYS_ERR_TPM = 0x00000018u,
+    /* v4：回退锚点拒绝旧副本。与 CORRUPT 区分，供调用方提示文件回退。 */
+    VERTHYS_ERR_ROLLBACK = 0x00000019u,
+    /* v4 D3（API 版本 0x000F 扩展）：
+     * KEYFILE 标志置位但调用方未提供 keyfile（或该操作要求 keyfile）。
+     * 与 AUTH 区分：此时口令尚未参与判定，调用方应引导用户选择
+     * keyfile 文件后重试，而不是提示“口令错误”。
+     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+    VERTHYS_ERR_KEYFILE_REQUIRED = 0x0000001Au,
+    /* v4 D3（API 版本 0x000F 扩展）：
+     * 提供的 keyfile 不是合法 VKFL v1（长度/magic/version/flags/checksum
+     * 任一不符）。注意“VKFL 合法但 secret 不对”仍统一返回
+     * VERTHYS_ERR_AUTH，不泄露口令/密钥判定细节。
+     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+    VERTHYS_ERR_KEYFILE_INVALID = 0x0000001Bu,
+    /* v4 D9（API 版本 0x0010 扩展）：DEK 全库轮换仍在进行，调用方可稍后重试。
+     * 与 CONTAINER_BUSY（外部进程占用）区分：此处是库内轮换事务未收敛。 */
+    VERTHYS_ERR_ROTATE_PENDING = 0x0000001Cu,
+    /* v4：目标模块未解锁（模块保护已启用且当前会话未持有该模块密钥）。
+     * 与 POLICY 区分：调用方可直接引导“先解锁模块”，而不是检查策略配置。 */
+    VERTHYS_ERR_MODULE_LOCKED = 0x0000001Du,
+    /* v4：数据区/文件系统空间不足。与 RESOURCE_LIMIT（内存预算）区分，
+     * 调用方可引导用户清理磁盘后重试。 */
+    VERTHYS_ERR_NO_SPACE = 0x0000001Eu,
+    /* v4：完整性复核失败（Merkle/摘要不一致）。与 AUTH（AEAD 认证失败）
+     * 区分：前者表示结构完整性受损，后者表示密钥/密文不匹配。 */
+    VERTHYS_ERR_VERIFY = 0x0000001Fu,
     VERTHYS_ERR_INTERNAL = 0xFFFFFFFFu   /* 未归类的底层内部异常 */
 } VerthysResult;
 
@@ -238,7 +270,10 @@ typedef enum {
  */
 typedef struct {
     uint64_t lid;                 /* 数据逻辑唯一编号 */
-    uint8_t  type;                /* 记录业务类型 */
+    /* 记录业务类型：V3 从索引直接取得真实值；V4 摘要路径不读记录密文，
+     * 固定为 0（未知）。需要按类型取记录 ID 时必须使用
+     * Verthys_ListIdsByType（走类型盲索引），不得依赖本字段过滤。 */
+    uint8_t  type;
     uint16_t name_len;            /* 名称字节长度 */
     const uint8_t *name;          /* UTF-8名称字符串 */
     uint64_t data_size;           /* 原始二进制数据占用大小 */
@@ -270,7 +305,8 @@ typedef struct {
     uint8_t  container_id[16];      /* 容器唯一标识ID（非敏感标识） */
     uint8_t  warm_cache_enabled;    /* 温缓存策略是否开启 */
     uint8_t  merkle_pending;        /* Merkle树是否等待后台重建完成 */
-    uint8_t  reserved[7];           /* 预留字节，用于后续版本结构体对齐与扩展 */
+    uint8_t  has_keyfile;           /* v4：keyfile 因子已启用（仅解锁态可读） */
+    uint8_t  reserved[6];           /* 预留字节，用于后续版本结构体对齐与扩展 */
 } VerthysContainerInfo;
 
 /* ================================================================== *
@@ -382,7 +418,6 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_Init(VerthysHandle *out_handle);
  * 线程安全：MT-Safe（Init 前单线程调用）
  * ================================================================== */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_NotifySandboxAttrs(uint32_t attrs);
-
 /* 销毁容器上下文，安全擦除内存敏感数据后释放资源
  * 线程安全：MT-Unsafe，同一句柄不可在多线程同时执行销毁与其他操作 */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_Deinit(VerthysHandle handle);
@@ -508,6 +543,359 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_CreateWithPreset(VerthysHandle ha
                                     size_t      password_len,
                                     VerthysPreset preset);
 
+/* ================================================================== *
+ * v4 容器会话接口（V4-PI-1）
+ *
+ * v4 使用“口令 + 设备根”双包裹与 A/B 元数据副本；这些入口只接受
+ * v4 magic（VRTY），v3 文件一律返回 VERTHYS_ERR_FORMAT，不提供
+ * 原地迁移。创建成功后句柄即处于解锁态，恢复码只在本次调用返回，
+ * 调用方展示并确认后必须自行清零缓冲。
+ * ================================================================== */
+
+/* 创建 v4 容器；recovery_text 容量必须 >= 80 字节。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4Create(VerthysHandle handle,
+                                    const char *verthys_path,
+                                    const char *password,
+                                    size_t      password_len,
+                                    char       *recovery_text,
+                                    size_t      recovery_cap);
+
+/* 标准解锁：口令 + 设备根（AND）。仅接受 v4 文件。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4Unlock(VerthysHandle handle,
+                                    const char *verthys_path,
+                                    const char *password,
+                                    size_t      password_len);
+
+/* 恢复码解锁：仅用于换机/灾难恢复；不撤销旧设备。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4UnlockRecovery(
+                                    VerthysHandle handle,
+                                    const char *verthys_path,
+                                    const char *recovery_text);
+
+/* ================================================================== *
+ * v4 keyfile 因子接口（D3，API 版本 0x000F）
+ *
+ * keyfile 是用户口令槽的 KDF 第二输入（不新增槽、不进入 WebView）：
+ *   keyfile_digest = BLAKE3("verthys/v4/keyfile" | secret)
+ *   KDF_input      = u32_le(pw_len) | password | u32_le(32) | digest
+ * 只接受产品生成的 VKFL v1（72B）文件；keyfile 路径经调用方传入，
+ * 文件内容由 C 层在本进程内读取/生成，字节不进入 IPC 载荷。
+ *
+ * 错误语义：
+ *   - KEYFILE 已启用但未传路径：VERTHYS_ERR_KEYFILE_REQUIRED
+ *   - 文件不是合法 VKFL：VERTHYS_ERR_KEYFILE_INVALID
+ *   - 文件合法但 secret 不对：VERTHYS_ERR_AUTH（与口令错不可区分）
+ * ================================================================== */
+
+/* 创建 v4 容器并生成 VKFL keyfile 到 keyfile_path（目标必须不存在）。
+ * 库创建失败时不留下 keyfile 文件；恢复码只在本次调用返回，处理规则
+ * 同 Verthys_V4Create。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4CreateKeyfile(
+                                    VerthysHandle handle,
+                                    const char *verthys_path,
+                                    const char *password,
+                                    size_t      password_len,
+                                    const char *keyfile_path,
+                                    char       *recovery_text,
+                                    size_t      recovery_cap);
+
+/* 带 keyfile 解锁：口令 + keyfile + 设备根（AND）。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4UnlockKeyfile(
+                                    VerthysHandle handle,
+                                    const char *verthys_path,
+                                    const char *password,
+                                    size_t      password_len,
+                                    const char *keyfile_path);
+
+/* 在已解锁库上启用/轮换 keyfile：生成新 VKFL 到 new_keyfile_path，
+ * 用当前口令重封用户槽。目标文件已存在返回 VERTHYS_ERR_EXISTS。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4KeyfileEnable(
+                                    VerthysHandle handle,
+                                    const char *password,
+                                    size_t      password_len,
+                                    const char *new_keyfile_path);
+
+/* 关闭 keyfile：需当前口令 + 当前 keyfile；成功后恢复“仅口令”解锁。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4KeyfileDisable(
+                                    VerthysHandle handle,
+                                    const char *password,
+                                    size_t      password_len,
+                                    const char *keyfile_path);
+
+/* 查询 keyfile 是否启用与当前会话是否为恢复码会话（解锁态）。
+ * 恢复会话下可用 Verthys_V4KeyfileEnable/Disable 重绑/关闭 keyfile
+ * （keyfile 丢失逃生）；普通会话的 Disable 必须提供当前 keyfile。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4KeyfileStatus(
+                                    VerthysHandle handle,
+                                    uint32_t   *out_enabled,
+                                    uint32_t   *out_recovery_mode);
+
+/* 恢复会话重绑本机设备槽与用户槽（换机恢复后恢复日常解锁）。
+ * 仅恢复码会话可用；普通会话返回 POLICY。
+ * keyfile_path 仅在容器启用 keyfile 时必填，未启用时忽略。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ResealDevice(
+                                    VerthysHandle handle,
+                                    const char *password,
+                                    size_t      password_len,
+                                    const char *keyfile_path);
+
+
+/* ================================================================== *
+ * v4 PCR 策略接口
+ *
+ * 启用/关闭/重密封都要求恢复码二次认证；恢复会话已由恢复码认证，
+ * 可传 NULL/空串。状态查询不需要恢复码。PCR 槽与 K_c 的绑定关系在
+ * 会话解锁时由 C 层强制校验，这些入口只变更策略，不返回任何密钥。
+ * ================================================================== */
+
+/* 查询 PCR 状态：enabled=1 时 out_select 为 PCR0–23 位图。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4PcrStatus(
+    VerthysHandle handle,
+    uint32_t *out_enabled,
+    uint32_t *out_select);
+
+/* 在已解锁库上启用 PCR 绑定；已启用或 pcr_select 非法返回 POLICY/INVALID。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4PcrEnable(
+    VerthysHandle handle,
+    uint32_t pcr_select,
+    const char *recovery_code);
+
+/* 关闭 PCR 绑定（保留设备根槽）。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4PcrDisable(
+    VerthysHandle handle,
+    const char *recovery_code);
+
+/* 用当前 PCR 重新绑定；通常在恢复码解锁后、PCR 环境变化时调用。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4PcrReseal(
+    VerthysHandle handle,
+    const char *recovery_code);
+
+/* ================================================================== *
+ * v4 内容分片 / 清单接口
+ *
+ * 分片与清单由 C 层用模块 MDEK 直接加密，worker 只转发密文；模块必须
+ * 已启用且本会话已解锁，否则返回 POLICY。file_uuid 为 16B 调用方随机/
+ * 键控标识；seq < total 且 total > 0。输出缓冲不足返回 RESOURCE_LIMIT，
+ * 并把所需长度写入 out_len。
+ * ================================================================== */
+
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ChunkSeal(
+    VerthysHandle handle,
+    uint32_t module_id,
+    const uint8_t file_uuid[16],
+    uint32_t seq,
+    uint32_t total,
+    const uint8_t *plain,
+    size_t plain_len,
+    uint8_t *out,
+    size_t out_cap,
+    size_t *out_len);
+
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ChunkOpen(
+    VerthysHandle handle,
+    uint32_t module_id,
+    const uint8_t file_uuid[16],
+    uint32_t seq,
+    uint32_t total,
+    const uint8_t *in,
+    size_t in_len,
+    uint8_t *out,
+    size_t out_cap,
+    size_t *out_len);
+
+/* ================================================================== *
+ * v4 模块 M1 会话接口
+ *
+ * 模块索引固定：0=photo，1=accounts，2=fileverthys。启用后该模块的
+ * MDEK 从 Keyring 移出，只有模块解锁成功后会话才持有；未解锁的
+ * 模块记录访问返回 VERTHYS_ERR_POLICY。所有口令/恢复码参数只在本次
+ * 调用内使用，调用方负责清零自己的缓冲。
+ * ================================================================== */
+
+typedef enum {
+    VERTHYS_MODULE_PHOTO = 0,
+    VERTHYS_MODULE_ACCOUNTS = 1,
+    VERTHYS_MODULE_FILEVERTHYS = 2
+} VerthysModuleId;
+
+#define VERTHYS_MODULE_ALL 0xFFFFFFFFu
+
+typedef struct {
+    uint32_t enabled;      /* 模块加密已启用 */
+    uint32_t unlocked;     /* 本会话已解锁 */
+    uint32_t has_recovery; /* 已绑定恢复码槽 */
+    uint32_t deleted;      /* 已删除：无 MDEK/无数据，可重新启用重建 */
+} VerthysModuleStatus;
+
+/* 启用模块：轮换 MDEK 并单事务重写该模块全部记录。recovery_code 可空；
+ * 非空时必须与当前容器恢复码一致，用于同时绑定恢复槽。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ModuleEnable(
+    VerthysHandle handle,
+    uint32_t module_id,
+    const char *password,
+    size_t password_len,
+    const char *recovery_code);
+
+/* 解锁/锁定模块。Lock 接受 VERTHYS_MODULE_ALL 清除全部模块缓存。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ModuleUnlock(
+    VerthysHandle handle,
+    uint32_t module_id,
+    const char *password,
+    size_t password_len);
+
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ModuleLock(
+    VerthysHandle handle,
+    uint32_t module_id);
+
+/* 模块口令轮换：只重封 user 槽，不重写数据。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ModuleRotatePassword(
+    VerthysHandle handle,
+    uint32_t module_id,
+    const char *old_password,
+    size_t old_len,
+    const char *new_password,
+    size_t new_len);
+
+/* 禁用模块：保留 MDEK 与数据，MDEK 回到 body Keyring。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ModuleDisable(
+    VerthysHandle handle,
+    uint32_t module_id,
+    const char *password,
+    size_t password_len);
+
+/* 删除模块：密码学销毁 MDEK、清除记录/文件/分片叶，模块进入 deleted 状态并
+ * 轮换 UUID；之后可由 ModuleEnable 重建空模块。password 是当前容器口令
+ * （不是模块口令）；恢复会话可传 NULL/空串。confirm 必须严格为 "DELETE"。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ModuleDelete(
+    VerthysHandle handle,
+    uint32_t module_id,
+    const char *password,
+    size_t password_len,
+    const char *confirm);
+
+/* 绑定/更新模块恢复槽：要求模块口令 + 当前容器恢复码。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ModuleBindRecovery(
+    VerthysHandle handle,
+    uint32_t module_id,
+    const char *password,
+    size_t password_len,
+    const char *recovery_code);
+
+/* 恢复会话中把模块设备槽重绑到当前设备根。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ModuleResealDevice(
+    VerthysHandle handle,
+    uint32_t module_id,
+    const char *password,
+    size_t password_len);
+
+/* 查询模块状态；不返回任何密钥。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4ModuleStatus(
+    VerthysHandle handle,
+    uint32_t module_id,
+    VerthysModuleStatus *out_status);
+
+/* 恢复码轮换：当前口令 + 旧恢复码；新码只在成功时写入 out_recovery，
+ * 容量必须 >= 80 字节，调用方展示确认后必须清零。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4RecoveryRotate(
+    VerthysHandle handle,
+    const char *password,
+    size_t password_len,
+    const char *old_recovery,
+    char *out_recovery,
+    size_t out_cap);
+
+/* ================================================================== *
+ * v4 D9 全库 DEK 轮换（作业式接口，API 版本 0x0010）
+ *
+ * 仅恢复码会话可作为源库。轮换在新文件中全量重建：保留 vault_uuid，
+ * 生成新 K_c，epoch+1；恢复槽用同一恢复码 KEK 重封（旧恢复码继续
+ * 有效），用户/设备槽用调用方重新输入的容器口令重封。新库构建完成
+ * 后原子替换源文件。
+ *
+ * 典型顺序：
+ *   Begin(new_path, password, flags, &info)
+ *   → 对每个已启用模块调用 RotateUnlockModule（模块口令）
+ *   → Run(progress, user)
+ *   → Commit(keep_old)    // 成功：句柄指向新会话
+ *   → 失败/取消：Abort()
+ *
+ * 注意：
+ *   - new_path 必须不存在且与源库同目录（同卷原子替换）。
+ *   - 作业期间源库只读：记录/文件/模块/口令/PCR/keyfile 等写操作返回
+ *     VERTHYS_ERR_ROTATE_PENDING。
+ *   - KEYFILE 已启用但恢复会话未持有 keyfile 摘要时 Begin 返回 POLICY。
+ *   - PCR 绑定：TPM 不可用且 flags 未置 DROP_PCR 时返回 TPM；
+ *     显式置位且旧库为高安全模式、无 keyfile 时返回 POLICY。
+ * ================================================================== */
+
+#define VERTHYS_V4_ROTATE_STAGE_BEGUN     1u
+#define VERTHYS_V4_ROTATE_STAGE_COPIED    2u
+#define VERTHYS_V4_ROTATE_STAGE_COMMITTED 3u
+#define VERTHYS_V4_ROTATE_STAGE_FAILED    4u
+
+/* Begin flags：允许在 TPM/PCR 不可用时移除 PCR 绑定。 */
+#define VERTHYS_V4_ROTATE_FLAG_DROP_PCR   0x00000001u
+
+typedef struct {
+    uint32_t stage;          /* VERTHYS_V4_ROTATE_STAGE_* */
+    uint32_t modules_ready;  /* 已登记口令的已启用模块数 */
+    uint64_t records;        /* 已复制记录数 */
+    uint64_t files;          /* 已复制文件数 */
+    uint64_t chunks;         /* 已复制分片数 */
+    uint64_t bytes;          /* 已复制记录（名称+数据）字节数 */
+    uint32_t reserved[4];    /* 预留，必须为 0 */
+} VerthysRotateInfo;
+
+/* 进度回调：在 Run 内同步调用（持有句柄内部锁，禁止重入 Verthys API）。
+ * 返回非 0 取消本次 Run；作业进入失败态，只能 Abort。 */
+typedef int (VERTHYS_CALL *VerthysRotateProgress)(void *user,
+                                                  const VerthysRotateInfo *info);
+
+/* 开始轮换：校验恢复会话与容器口令，创建临时新库。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4RotateBegin(
+    VerthysHandle handle,
+    const char *new_path,
+    const char *password,
+    size_t password_len,
+    uint32_t flags,
+    VerthysRotateInfo *out_info);
+
+/* 恢复会话补录 keyfile（API 版本 0x0011）：
+ * 容器已启用 KEYFILE 且当前恢复会话未持有 keyfile 摘要时，用当前容器口令
+ * + keyfile 路径验证 user 槽；成功后摘要驻留会话（锁定即清零），Begin 可
+ * 继续执行。keyfile 字节只由 C 层在 worker 进程内读取，不经过 IPC。
+ * 返回：OK / INVALID（入参）/ POLICY（未解锁或容器未启用 keyfile）/
+ *       KEYFILE_INVALID（VKFL 非法）/ AUTH（keyfile 或口令不匹配）。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4RotateAttachKeyfile(
+    VerthysHandle handle,
+    const char *keyfile_path,
+    const char *password,
+    size_t password_len);
+
+/* 登记一个已启用模块的口令（并解锁源模块）。所有已启用模块都必须
+ * 在 Run 前登记；recovery_code 非空时先做一次恢复码二次校验。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4RotateUnlockModule(
+    VerthysHandle handle,
+    uint32_t module_id,
+    const char *password,
+    size_t password_len,
+    const char *recovery_code);
+
+/* 全量复制并提供进度。成功后才能 Commit。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4RotateRun(
+    VerthysHandle handle,
+    VerthysRotateProgress progress,
+    void *user);
+
+/* 原子替换并推进回退锚点。keep_old 非 0 时保留 .old-* 备份。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4RotateCommit(
+    VerthysHandle handle,
+    uint32_t keep_old);
+
+/* 丢弃临时库并释放作业；成功后句柄仍指向原库。 */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4RotateAbort(
+    VerthysHandle handle);
+
 /*
  * 运行时切换安全预设档位（BALANCED / SECURE / PERFORMANCE）
  *
@@ -545,8 +933,8 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetSecurityPreset(VerthysHandle h
  *
  * 位序（禁止重排）：
  *   0 anti_debug / 1 anti_inject / 2 integrity_check / 3 memory_guard /
- *   4 key_separation / 5 emergency_response / 6 session_lock_on_idle /
- *   7 module_patrol / 8 clipboard_guard / 9 usb_clone_detect /
+ *   4 key_separation（V3 遗留位；V4 产品映射密钥隔离堆）/ 5 emergency_response /
+ *   6 session_lock_on_idle / 7 module_patrol / 8 clipboard_guard / 9 usb_clone_detect /
  *   10 trace_cleanup
  * 其中 2/6/7/8/9/10 为应用侧策略位（宿主按位执行），其余为 C 层消费能力。
  * 该投影是档位矩阵的唯一权威输出，宿主展示与执行均以此为准。
@@ -588,6 +976,29 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_AddRecord(VerthysHandle handle,
                             const VerthysRecord *record,
                             uint64_t *out_id);
 
+/* 批量新增业务记录（API 版本 0x0013）
+ *
+ * 语义：单次事务提交，全部记录共享一次 DataRoot/元数据落盘；任一条失败
+ * 整体回滚到调用前的根（未提交的记录段保持不可达），out_ids 全部置 0。
+ * 这是大文件导入的唯一高效写入口：逐条调用 AddRecord 会产生记录条数 ×
+ * 提交/fsync 的开销，批量接口把落盘成本压到与批内条数无关的单次提交。
+ *
+ * 契约：
+ *   - count ∈ [1, VERTHYS_ADD_RECORDS_MAX]，records 与 out_ids 必须非 NULL；
+ *   - 每条记录按 Verthys_AddRecord 同一规则校验（名称/数据指针、长度上限、
+ *     单条 IPC 预算），任一非法即整批拒绝且不产生任何写入；
+ *   - 仅 V4 容器可用；非 V4 返回 VERTHYS_ERR_FORMAT；
+ *   - out_ids[i] 与 records[i] 一一对应，成功时均 > 0；
+ *   - 写操作使既有 GetRecord 借用指针失效（与 AddRecord 同一纪律）。
+ *
+ * 线程安全：MT-Safe，内部事务锁保证并发写入安全。 */
+#define VERTHYS_ADD_RECORDS_MAX 512u
+
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_AddRecords(VerthysHandle handle,
+                            const VerthysRecord *records,
+                            uint32_t count,
+                            uint64_t *out_ids);
+
 /* 按ID读取完整记录数据，返回结构体指针为内部借用内存
  *
  * API 契约加固：指针生命周期契约
@@ -601,6 +1012,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_AddRecord(VerthysHandle handle,
  *    以下任一接口被调用后，本次返回的借用指针【立即失效】（缓存被安全
  *    清零并释放），继续访问将构成 Use-After-Free：
  *      - Verthys_AddRecord       新增记录
+ *      - Verthys_AddRecords      批量新增记录
  *      - Verthys_DeleteRecord    删除单条
  *      - Verthys_DeleteRecords   批量删除
  *      - Verthys_Import          导入容器
@@ -865,6 +1277,37 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_FindFirstLidByType(VerthysHandle 
                                                   uint8_t *out_found,
                                                   uint64_t *out_lid);
 
+/* ================================================================== *
+ * 按类型分页枚举记录 ID（API 版本 0x0012）                             *
+ *                                                                    *
+ * 权威类型来源：V4 容器的类型盲索引（VTY_KS_TYPE），不读取记录密文，   *
+ * 不依赖摘要扫描的 type 字段，跨重启稳定生效。                          *
+ *                                                                    *
+ * 参数：                                                              *
+ *   handle        : 已解锁的 Verthys 句柄                              *
+ *   rtype         : 目标记录业务类型                                    *
+ *   after_id      : 上一页最后一个 ID；首页传 0                          *
+ *   max_count     : 本页上限（1..VERTHYS_TYPE_ID_BATCH_MAX）            *
+ *   out_ids       : 调用方缓冲区，至少 max_count 个 uint64              *
+ *   out_count     : 本页实际返回条数                                    *
+ *   out_exhausted : 1=该类型已无更多记录；0=可能还有下一页              *
+ *                                                                    *
+ * 返回值：                                                            *
+ *   VERTHYS_OK / VERTHYS_ERR_INVALID / VERTHYS_ERR_LOCKED /            *
+ *   VERTHYS_ERR_FORMAT（非 V4 容器）                                   *
+ *                                                                    *
+ * 线程安全：MT-Const（只读索引游标）                                    *
+ * ================================================================== */
+#define VERTHYS_TYPE_ID_BATCH_MAX 4096u
+
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ListIdsByType(VerthysHandle handle,
+                                              uint8_t rtype,
+                                              uint64_t after_id,
+                                              uint64_t max_count,
+                                              uint64_t *out_ids,
+                                              uint64_t *out_count,
+                                              uint8_t *out_exhausted);
+
 
 
 /* ================================================================== *
@@ -902,10 +1345,43 @@ typedef enum {
     VERTHYS_DEFENSE_FAILED      = 3      /* 失败（关键防御缺失，应拒绝启动） */
 } VerthysDefenseState;
 
+/* 判定原因码（API 版本 0x0014；值域与内部 DefenseReason 镜像对齐，
+ * 调用方按码映射文案，不得解析名称文本） */
+typedef enum {
+    VERTHYS_DEFENSE_REASON_NONE                      = 0,
+    VERTHYS_DEFENSE_REASON_NO_RESIDENT_KEY           = 1,
+    VERTHYS_DEFENSE_REASON_V4_KEYS_USER_RESIDENT     = 2,
+    VERTHYS_DEFENSE_REASON_HIBERNATION_ENABLED       = 3,
+    VERTHYS_DEFENSE_REASON_HIBERNATION_UNKNOWN       = 4,
+    VERTHYS_DEFENSE_REASON_SUSPEND_UNPREVENTABLE     = 5,
+    VERTHYS_DEFENSE_REASON_SUSPEND_GUARD_INACTIVE    = 6,
+    VERTHYS_DEFENSE_REASON_HOOK_SCAN_CLEAN           = 7,
+    VERTHYS_DEFENSE_REASON_HOOK_SCAN_UNAVAILABLE     = 8,
+    VERTHYS_DEFENSE_REASON_HOOK_DETECTED             = 9,
+    VERTHYS_DEFENSE_REASON_SANDBOX_VERIFIED          = 10,
+    VERTHYS_DEFENSE_REASON_SANDBOX_PARTIAL           = 11,
+    VERTHYS_DEFENSE_REASON_SANDBOX_UNVERIFIED        = 12,
+    VERTHYS_DEFENSE_REASON_JOB_ACTIVE                = 13,
+    VERTHYS_DEFENSE_REASON_DEVICE_BOUND              = 14,
+    VERTHYS_DEFENSE_REASON_NO_SESSION_FACTS          = 15,
+    VERTHYS_DEFENSE_REASON_MODULE_INIT_FAILED        = 16,
+    VERTHYS_DEFENSE_REASON_POLICY_DISABLED           = 17,
+    VERTHYS_DEFENSE_REASON_EVIDENCE_STALE            = 18,
+    VERTHYS_DEFENSE_REASON_ARCH_LIMIT_KERNEL_DEFERRED = 19,
+    VERTHYS_DEFENSE_REASON_HIBERNATION_DISABLED      = 20
+} VerthysDefenseReason;
+
+/* 运行时守卫位（policy_flags） */
+#define VERTHYS_DEFENSE_GUARD_HEARTBEAT     0x01u  /* worker 心跳线程已运行 */
+#define VERTHYS_DEFENSE_GUARD_SUSPEND_LOCK  0x02u  /* 挂起守卫已接线 */
+#define VERTHYS_DEFENSE_POLICY_ANTI_DUMP    0x04u  /* 当前预设启用防转储巡检 */
+
 /*
- * 动态防护状态报告（API 版本 0x000B）
+ * 动态防护状态报告（API 版本 0x000B；0x0014 追加原因码与采样时间）
  *
  * 所有字段均为非敏感运行时状态元数据，不含密钥、句柄或模块内部地址。
+ * 追加字段位于既有 reserved[6] 之后：旧调用方按 0x000B 结构读取时
+ * 前缀布局不变；新调用方可读取原因码、架构限制计数与采样时间。
  */
 typedef struct {
     /* 逐路径防御状态（维度 VERTHYS_DEFENSE_PATH_COUNT，下标 = VerthysDefensePath） */
@@ -915,7 +1391,14 @@ typedef struct {
     uint32_t failed_count;           /* FAILED 路径数 */
     uint8_t  all_critical_blocked;   /* 1 = 全部 7 条路径 BLOCKED（无 FAILED 且无 DEGRADED） */
     uint8_t  has_degraded;           /* 1 = 存在 DEGRADED 路径 */
-    uint8_t  reserved[6];            /* 预留对齐（调用方必须置零传递，回填后忽略） */
+    uint8_t  reserved[6];            /* 既有预留（保持不动） */
+    /* ---- 追加（API 版本 0x0014） ---- */
+    uint32_t path_reason[VERTHYS_DEFENSE_PATH_COUNT]; /* 逐路径判定原因码 */
+    uint32_t limited_count;          /* 架构限制导致的 DEGRADED 路径数 */
+    uint32_t policy_flags;           /* VERTHYS_DEFENSE_GUARD_* | POLICY_ANTI_DUMP */
+    uint32_t reserved2;              /* 预留（调用方忽略） */
+    uint64_t checked_at_unix_ms;     /* 本次快照采样时间（Unix 毫秒） */
+    uint32_t reserved3[2];           /* 预留（调用方忽略） */
 } VerthysSecurityStatus;
 
 /*
@@ -939,6 +1422,17 @@ typedef struct {
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetSecurityStatus(
     VerthysHandle handle,
     VerthysSecurityStatus *out_status);
+
+/*
+ * 通知运行时守卫状态（API 版本 0x0014）
+ *
+ * 写入进程级完整掩码（非累加 OR）：bit0=心跳已运行，bit1=挂起守卫已接线。
+ * worker 在心跳线程启动后置 bit0，主进程经内部 op 下发 bit1；停止守卫时
+ * 下发 0。未知位被丢弃。状态查询中的 policy_flags 同步反映该掩码。
+ *
+ * 返回值：VERTHYS_OK。无句柄参数——守卫为进程级事实。
+ */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_NotifyRuntimeGuards(uint32_t flags);
 
 /* ================================================================== *
  * 落盘持久化自查接口（API 版本 0x000C）

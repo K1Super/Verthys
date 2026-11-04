@@ -4,6 +4,8 @@
 #include "vty_util.h"
 #include "verthys_internal.h"
 #include "verthys_crypto.h"
+#include "secure_allocator.h"
+#include "memory_guard.h"
 
 #include <stdlib.h>
 
@@ -78,6 +80,37 @@ void vty_free(void *p, size_t n)
     if (p == NULL) return;
     vty_secure_zero(p, n);
     free(p);
+}
+
+void *vty_secure_alloc(size_t n, const char *guard_name)
+{
+    SecureAllocator *alloc;
+    void *p = NULL;
+
+    if (n == 0) return NULL;
+    alloc = secure_allocator_shared();
+    if (alloc == NULL) return NULL;
+    if (secure_allocator_alloc(alloc, n, &p) != VERTHYS_OK) return NULL;
+
+    /* 注册失败意味着应急 KILL 无法覆盖该区域；按分配失败处理，
+     * 不留下"未受应急保护的密钥块"。 */
+    if (memory_guard_register(p, n, guard_name) != 0) {
+        (void)secure_allocator_free(alloc, p);
+        return NULL;
+    }
+    return p;
+}
+
+void vty_secure_free(void *p)
+{
+    SecureAllocator *alloc;
+
+    if (p == NULL) return;
+    (void)memory_guard_unregister(p);
+    alloc = secure_allocator_shared();
+    if (alloc != NULL) {
+        (void)secure_allocator_free(alloc, p);
+    }
 }
 
 void vty_random(uint8_t *p, size_t n)

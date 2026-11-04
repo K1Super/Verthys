@@ -149,14 +149,6 @@ export const TYPE_FILEVERTHYS_CHUNK = 0x04;
 /** 全局主密钥记录，存储加密后的主密钥及其派生参数。 */
 export const TYPE_GLOBAL_KEY = 0x10;
 
-/** 模块独立密钥记录，用于特定模块（如子密钥）的加密。 */
-export const TYPE_MODULE_KEY = 0x12;
-
-/**
- * 模块密钥保护开关配置记录，存储每个模块的密钥保护策略（如是否启用双因素）。
- */
-export const TYPE_MODULE_KEY_CONFIG = 0x13;
-
 /* === 迁移辅助：旧值映射（仅用于迁移识别，不可用于新建） === */
 
 /**

@@ -280,13 +280,14 @@ function pickUnlockChannelText(rawPercent: number): string {
  *
  * @param verthysPath .verthys 文件路径
  * @param preflightResult 调用方已执行的路径预检结果（可选）
- * @returns VerthysResult<void>
+ * @returns VerthysResult<string>：成功值为一次性恢复码，调用方展示确认后必须丢弃
  */
 export async function initCreate(
   verthysPath: string,
   preflightResult?: PreflightResult,
   onProgress?: (progress: UnlockProgress) => void,
-): Promise<VerthysResult<void>> {
+  keyfilePath?: string,
+): Promise<VerthysResult<string>> {
   // 修复（Issue 2：新建 verthys 进度条无响应）
   //
   // 原缺陷：initCreate 完全不接受 onProgress，也不推送任何进度。创建流程
@@ -316,14 +317,15 @@ export async function initCreate(
     // 修复D：确保创建前 worker 处于干净状态
     //
     // 根治"回退重选 verthys 卡死"根因：
-    //   用户回退 → goBackToUnlock → lockAll（异步，40s 超时）→
+    //   用户回退 → goBackToUnlock → lockAll（异步，后台收敛，不设提前返回）→
     //   doLockAll 同步置 verthysReady=false → UI 立即显示解锁视图 →
     //   用户重选 verthys → doUnlock → initCreate → ensureWorkerReady
     //   复用旧 workerReadyPromise → verthys_create IPC 发往正在被 lockAll
     //   销毁的 worker → 永久卡死。
     //
     // 双重防护：
-    //   1. awaitLockAllIfInProgress：等待正在进行的 lockAll 完成（最多 45s）
+    //   1. awaitLockAllIfInProgress：等待正在进行的 lockAll 真正完成
+    //      （不设提前返回，各破坏性步骤自带超时）
     //      确保 worker 销毁、缓存清空、状态重置全部落地
     //   2. ensureCleanWorkerState：兜底清理 — 即使 lockAll 超时未完成，
     //      若 workerHasBeenUsed=true 且预启动缓存残留，强制销毁旧 worker
@@ -368,19 +370,35 @@ export async function initCreate(
       return err(VerthysErrorCode.E_WORKER_INIT_FAILED, "安全核心启动失败");
     }
 
-    // 3. verthys_create
+    // 3. verthys_create（v4 容器 + 一次性恢复码）
     emit(2, 10, "创建加密库");
     log.info("步骤 3/4：创建加密库并写盘");
-    let ok2: boolean;
+    let recoveryCode: string;
     try {
-      ok2 = await withTimeout(verthysCreate(verthysPath), CREATE_TIMEOUT_MS, "verthys_create");
+      const createResp = await withTimeout(
+        verthysCreate(verthysPath, undefined, keyfilePath),
+        CREATE_TIMEOUT_MS,
+        "verthys_create",
+      );
+      if (!createResp.ok) {
+        await resetKeyManagerState();
+        return err(
+          VerthysErrorCode.E_VERTHYS_CREATE_FAILED,
+          createResp.error ?? "创建加密库失败",
+        );
+      }
+      /* 恢复码只在本响应内存在；缺失即 fail-closed，禁止创建出无法恢复的库。 */
+      if (!createResp.recovery_code) {
+        await resetKeyManagerState();
+        return err(
+          VerthysErrorCode.E_VERTHYS_CREATE_FAILED,
+          "创建响应缺少一次性恢复码",
+        );
+      }
+      recoveryCode = createResp.recovery_code;
     } catch (e) {
       await resetKeyManagerState();
       return errFromUnknown(e, VerthysErrorCode.E_VERTHYS_CREATE_FAILED);
-    }
-    if (!ok2) {
-      await resetKeyManagerState();
-      return err(VerthysErrorCode.E_VERTHYS_CREATE_FAILED, "创建加密库失败");
     }
 
     // 4. 检查全局密钥记录 + 更新状态
@@ -428,7 +446,7 @@ export async function initCreate(
     keyState.verthysReady.value = true;
     startBackgroundTasks().catch(() => { /* 后台任务失败不影响创建 */ });
     log.info("创建成功");
-    return ok(undefined);
+    return ok(recoveryCode);
   } catch (e) {
     log.error("initCreate 未捕获异常", e);
     await resetKeyManagerState();
@@ -454,6 +472,8 @@ export async function initUnlock(
   preflightResult?: PreflightResult,
   onProgress?: (progress: UnlockProgress) => void,
   usbRebindConfirmed?: boolean,
+  recoveryCode?: string,
+  keyfilePath?: string,
 ): Promise<VerthysResult<void>> {
   // 修复6：全流程进度反馈 — 前端各阶段直接调用 onProgress 推送进度
   // 不依赖 Tauri Channel（Channel 仅在 verthysUnlock 阶段由后端推送），
@@ -487,14 +507,15 @@ export async function initUnlock(
     // 修复D：确保解锁前 worker 处于干净状态
     //
     // 根治"回退重选 verthys 卡死"根因：
-    //   用户回退 → goBackToUnlock → lockAll（异步，40s 超时）→
+    //   用户回退 → goBackToUnlock → lockAll（异步，后台收敛，不设提前返回）→
     //   doLockAll 同步置 verthysReady=false → UI 立即显示解锁视图 →
     //   用户重选 verthys → doUnlock → initUnlock → ensureWorkerReady
     //   复用旧 workerReadyPromise → verthys_unlock IPC 发往正在被 lockAll
     //   销毁的 worker → 永久卡死在"正在解锁加密库…"。
     //
     // 双重防护：
-    //   1. awaitLockAllIfInProgress：等待正在进行的 lockAll 完成（最多 45s）
+    //   1. awaitLockAllIfInProgress：等待正在进行的 lockAll 真正完成
+    //      （不设提前返回，各破坏性步骤自带超时）
     //      确保 worker 销毁、缓存清空、状态重置全部落地
     //   2. ensureCleanWorkerState：兜底清理 — 即使 lockAll 超时未完成，
     //      若 workerHasBeenUsed=true 且预启动缓存残留，强制销毁旧 worker
@@ -603,7 +624,7 @@ export async function initUnlock(
         verthysUnlock(verthysPath, (p) => {
           const mapped = Math.min(85, 8 + Math.floor(p.percent * 0.77));
           emit(p.stage, mapped, pickUnlockChannelText(p.percent));
-        }, usbRebindConfirmed),
+        }, usbRebindConfirmed, recoveryCode, keyfilePath),
         UNLOCK_SOFT_TIMEOUT_MS,
         UNLOCK_HARD_TIMEOUT_MS,
         "verthys_unlock",
@@ -627,7 +648,28 @@ export async function initUnlock(
       return errFromUnknown(e, VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED);
     }
     if (!unlockResp.ok) {
+      const raw = unlockResp.error ?? "";
+      /* keyfile 缺失/无效不属于认证失败：保留 worker 进程与会话状态，
+       * 直接引导用户重选 keyfile 后重试（不得折叠为 AUTH）。 */
+      if (raw.includes("0000001A")) {
+        return err(
+          VerthysErrorCode.E_KEYFILE_REQUIRED,
+          "该加密库已启用 keyfile，请选择 keyfile 文件后重试",
+        );
+      }
+      if (raw.includes("0000001B")) {
+        return err(
+          VerthysErrorCode.E_KEYFILE_INVALID,
+          "keyfile 文件无效，请选择创建时保存的 keyfile",
+        );
+      }
       await resetKeyManagerState();
+      if (raw.includes("00000018")) {
+        return err(VerthysErrorCode.E_TPM, "设备环境已变化，请使用恢复码解锁并重密封");
+      }
+      if (raw.includes("00000019")) {
+        return err(VerthysErrorCode.E_ROLLBACK, "检测到文件回退，已拒绝打开");
+      }
       return err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, "打开加密库失败");
     }
 
@@ -826,10 +868,10 @@ export async function initUnlock(
     // 根治：
     //   loadModuleKeyStatus 移回关键路径，在 verthysReady=true 之前同步完成。
     //   此时 ensureSummaryScan 已就绪（558 行），loadModuleKeyStatus 内部用
-    //   getSummaryIdsByType O(1) 查询 + ≤8 次 verthysGetRecord（模块密钥/config 记录），
-    //   正常 <100ms，2s 超时兜底（非致命，失败用安全默认 false + switchModule 防御守卫兜底）。
+    //   三次 v4_module_status 查询（C 层 M1 状态，无记录读取/解密），
+    //   正常 <100ms，2s 超时兜底（非致命，失败 fail-closed + switchModule 守卫兜底）。
     //   与 moduleKeyStatusVersion 乐观并发安全：关键路径 verthysReady=false，UI 不渲染，
-    //   用户无法触发 setModuleKeyEnabled/setModuleKey，startVersion===current 必然成立。
+    //   用户无法触发 setModuleKey/disableModuleProtection，startVersion===current 必然成立。
     //
     // 模块内容即时预加载（修复5保留）：verthysReady=true 后立即后台启动 ensureRecordScan，
     //   静默填充全量记录扫描缓存（含 dataB64，最多 64KB/条），用户进入模块时零 IPC 读取。
@@ -891,9 +933,9 @@ export async function initUnlock(
  * 智能初始化：自动判断创建或解锁
  * 基于路径预检的 file_exists 字段决定调用 initCreate 或 initUnlock
  *
- * 返回 VerthysResult<void>
+ * 返回 VerthysResult<string | void>：新建时为一次性恢复码，解锁时为 void
  */
-export async function initAndUnlock(verthysPath: string): Promise<VerthysResult<void>> {
+export async function initAndUnlock(verthysPath: string): Promise<VerthysResult<string | void>> {
   try {
     const preflight = await withTimeout(verthysPreflight(verthysPath), 5000, "路径预检");
     if (!preflight.ok) {
@@ -1330,8 +1372,8 @@ export async function verifyGlobalKey(
   //   用户反馈"正在初始化安全会话…时间太久"。
   //
   // 修复：移除此冗余调用。initUnlock 已确保状态就绪，此处无需重载。
-  //   若用户在解锁后修改了模块密钥（setModuleKeyEnabled），状态已由该函数
-  //   原子更新（await persistVerthys → 更新 keyState.moduleKeyEnabled），无需重载。
+  //   若用户在解锁后修改了模块保护（setModuleKey/disableModuleProtection），状态已由该函数
+  //   原子更新（C 层事务成功后更新 keyState.moduleKeyEnabled），无需重载。
   resetSessionTimer();
   // 启动会话守卫（加超时兜底 5s，防止 IPC 挂起卡死）
   try {

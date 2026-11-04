@@ -58,7 +58,7 @@ export interface VerthysResponse {
    *   - ids：本批次每条记录分配的 verthys ID（0 表示去重跳过或失败）
    *   - batch_id：本批次 ID（从 1 递增，前端据此对齐检查点）
    *   - failed_indices：本批次失败记录的下标列表（加密/入库异常）
-   *   - hashes：已 committed 的内容哈希列表（verthys_import_begin / verthys_wal_recover 返回，供生产者去重）
+   *   - entry_keys：已 committed 的非内容条目键列表（verthys_import_begin / verthys_wal_recover 返回，供生产者续传幂等）
    *   - import_id：导入会话 ID（verthys_import_begin 生成，贯穿整个导入生命周期）
    *   - processed_count：本批次实际处理（含去重跳过）的记录数
    *   - total_count：导入会话累计已 committed 记录数（检查点）
@@ -66,7 +66,7 @@ export interface VerthysResponse {
   ids?: number[];
   batch_id?: number;
   failed_indices?: number[];
-  hashes?: string[];
+  entry_keys?: string[];
   import_id?: string;
   processed_count?: number;
   total_count?: number;
@@ -96,6 +96,50 @@ export interface VerthysResponse {
   header_magic?: number;
   /** 容器格式版本 */
   header_version?: number;
+  /** v4 一次性恢复码（仅 v4_create 返回；确认后前端必须清零） */
+  recovery_code?: string;
+  /** PCR 是否已启用（仅 v4_pcr_status 返回） */
+  pcr_enabled?: boolean;
+  /** PCR 位图（PCR0–23，仅 v4_pcr_status 返回） */
+  pcr_select?: number;
+  /** v4 keyfile 因子是否已启用（仅 v4_keyfile_status/enable/disable 返回） */
+  keyfile_enabled?: boolean;
+  /** 当前会话是否由恢复码打开（仅 v4_keyfile_status 返回；恢复会话可重绑/关闭 keyfile） */
+  recovery_mode?: boolean;
+  /** v4 模块加密是否已启用（仅 v4_module_status 返回） */
+  enabled?: boolean;
+  /** v4 模块本会话是否已解锁（仅 v4_module_status 返回） */
+  unlocked?: boolean;
+  /** v4 模块是否已绑定恢复码槽（仅 v4_module_status 返回） */
+  has_recovery?: boolean;
+  /** v4 模块是否已删除（仅 v4_module_status 返回） */
+  deleted?: boolean;
+  /* 全库 DEK 轮换统计（仅 v4_rotate_begin 返回）
+   *
+   * 与 worker/controller 的 rotate_* 字段一一对应；均为统计计数，
+   * 不含记录名、明文或密钥。 */
+  rotate_stage?: number;
+  rotate_modules_ready?: number;
+  rotate_records?: number;
+  rotate_files?: number;
+  rotate_chunks?: number;
+  rotate_bytes?: number;
+}
+
+/**
+ * 全库 DEK 轮换进度（Tauri Channel 流式推送）
+ *
+ * 与后端 worker/controller RotateProgress 严格对齐（snake_case）。
+ * stage：1=已开始 2=复制完成 3=已提交 4=失败；
+ * 其余字段为已登记模块与已复制记录/文件/分片/字节计数。
+ */
+export interface RotateProgress {
+  stage: number;
+  modules_ready: number;
+  records: number;
+  files: number;
+  chunks: number;
+  bytes: number;
 }
 
 /**
@@ -137,6 +181,10 @@ export interface UnlockProgress {
  *
  * 路径状态值（VerthysDefenseState）：
  *   0=未校验 1=已阻断 2=降级 3=校验失败
+ *
+ * 0x0014 追加：path_reason（VerthysDefenseReason 0–20）、limited_count
+ * （已加固的用户态上限项数）、policy_flags（bit0=心跳 bit1=挂起守卫 bit2=防转储）、
+ * checked_at_unix_ms（快照采样时间）。
  */
 export interface SecurityStatusReport {
   /** 7 条攻击路径各自的状态（0=未校验 1=已阻断 2=降级 3=失败） */
@@ -151,6 +199,14 @@ export interface SecurityStatusReport {
   all_critical_blocked: boolean;
   /** 是否存在降级路径（环境不支持部分防护时为 true） */
   has_degraded: boolean;
+  /** 逐路径判定原因码（VerthysDefenseReason，0=无附加原因） */
+  path_reason: number[];
+  /** 已加固的用户态上限路径数（UI 显示"已加固"，与可修复降级区分） */
+  limited_count: number;
+  /** 运行时守卫与策略位（bit0=心跳 bit1=挂起守卫 bit2=防转储巡检） */
+  policy_flags: number;
+  /** 快照采样时间（Unix 毫秒，用于标识证据新鲜度） */
+  checked_at_unix_ms: number;
 }
 
 /** 批量枚举返回的单条记录（与后端 VerthysRecordEntry 对齐） */
@@ -422,8 +478,8 @@ export interface BatchRecordInput {
   rtype: number;
   /** 记录名称（如 `meta_xxx.jpg`） */
   name: string;
-  /** 原始文件内容的 BLAKE3 hex（用于去重 + WAL 幂等） */
-  hash: string;
+  /** 调用方生成的非内容身份键（用于会话内幂等/WAL 续传） */
+  entry_key: string;
   /** 已加密的记录数据 base64（前端 XChaCha20-Poly1305 加密产物） */
   data_b64: string;
   /** 外置块记录 ID 列表（大文件外置模式携带；后端校验块已上传） */
@@ -439,8 +495,8 @@ export interface BatchRecordInput {
  * 块先经 verthys_add_chunk_batch 落为独立记录，meta 再引用其 ID。
  */
 export interface ChunkBlobInput {
-  /** 块密文的 BLAKE3 hex（本会话内幂等去重依据） */
-  hash: string;
+  /** 调用方生成的非内容块键（记录名与会话内幂等依据） */
+  chunk_key: string;
   /** 块密文 base64（前端 XChaCha20-Poly1305 加密产物） */
   data_b64: string;
   /**
@@ -493,8 +549,8 @@ export interface ImportBeginResult {
   ok: boolean;
   /** 导入会话 ID（贯穿整个导入生命周期） */
   import_id: string;
-  /** 已 committed 的内容哈希列表（生产者据此去重，保证幂等） */
-  hashes: string[];
+  /** 已 committed 的非内容条目键列表（生产者据此续传幂等） */
+  entry_keys: string[];
   /** 续传起始的累计 committed 计数（检查点） */
   total_count: number;
   /** 错误信息（ok=false 时有值；仅作展示） */
@@ -526,13 +582,13 @@ export interface AddRecordsBatchResult {
 }
 
 /**
- * verthys_wal_recover 返回结果（断点续传去重哈希集）
+ * verthys_wal_recover 返回结果（断点续传条目键集）
  */
 export interface WalRecoverResult {
   /** 是否成功 */
   ok: boolean;
-  /** 已 committed 的内容哈希列表（续传去重依据） */
-  hashes: string[];
+  /** 已 committed 的非内容条目键列表（续传幂等依据） */
+  entry_keys: string[];
   /** 累计 committed 计数 */
   total_count: number;
   /** 活跃的 import_id（WAL 未 end 时有值，表示上次崩溃未完成） */

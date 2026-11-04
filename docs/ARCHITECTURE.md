@@ -45,7 +45,7 @@ flowchart TB
 `lsm/` 实现 V3 LSM 索引：`verthys_lsm.c` 主控、`verthys_lsm_memtable.c` 跳表 MemTable、`verthys_lsm_sstable.c` SSTable 读写 + 布隆过滤器、`verthys_lsm_compaction.c` 分级合并压缩。`warmcache/verthys_warmcache_v3.c` 实现温启动缓存（附属数据目录 `<容器>.d/idx_cache`）读写。
 
 ### 2.5 security/ — 纵深防御
-六层防线：`layer1_process_guard/job_isolation.c`（Job Object 隔离）、`layer3_hw_binding/`（cng_machine_key / hardware_binding / system32_loader，机器绑定）、`layer4_hook_defense/`（tls_loader / tls_callbacks / tamper_destroy，防 Hook）、`layer5_sandbox/process_sandbox.c`（进程 mitigation policy）、`layer6_closure/defense_closure.c`（7 路径闭环校验）；另有 `anti_analysis/`（anti_debug_v2 / anti_inject / syscall_direct 直接系统调用）、`memory/`（memory_guard / key_separation / secure_allocator）、`integrity/`（.vsec 验签 + .rhat 运行时哈希）、`emergency/`（三级应急响应）、`preset/`（安全预设双缓冲切换）。
+六层防线：`layer1_process_guard/job_isolation.c`（Job Object 隔离）、`layer3_hw_binding/`（cng_machine_key / hardware_binding / system32_loader，机器绑定）、`layer4_hook_defense/`（tls_loader / tls_callbacks / hook_scan，防 Hook）、`layer5_sandbox/process_sandbox.c`（进程 mitigation policy + OS 回读）、`layer6_closure/defense_closure.c`（基于 `DefenseFacts` 的 7 路径事实校验）；另有 `anti_analysis/`（anti_debug_v2 / anti_inject / syscall_direct 直接系统调用）、`memory/`（memory_guard / secure_allocator / hibernation_state；`key_separation` 仅随 V3 源码构建）、`integrity/`（.vsec 验签 + .rhat 运行时哈希）、`emergency/`（三级应急响应）、`preset/`（安全预设双缓冲切换）。
 
 ### 2.6 transaction/ — 事务与一致性
 `wal/verthys_wal.c` 提供 WAL 预写日志（环形区 + 崩溃恢复回放）；`txn/verthys_transaction_v3.c` 实现六阶段事务（BEGIN → WRITE_EXTENT → UPDATE_INDEX → PREPARE → COMMIT → CONFIRM）与 vsb_txn 超级块事务原语（begin/commit/rollback），配合超级块法定人数保证崩溃一致性。GC 以 Extent 引用计数 + 标记回收内嵌于 container/transaction 实现，无独立源文件（源稿列出的 `verthys_garbage.c` 实际不存在）。
@@ -118,7 +118,7 @@ flowchart LR
 
 ## 5. core 与前端边界
 
-- 唯一跨层契约：`core/include/verthys.h`（公共 C ABI，`VERTHYS_API_VERSION 0x000E`）与 Tauri command 清单。前者规范见 [CORE_API.md](CORE_API.md)，后者以 `verthys-tauri` 的 command 注册为准。
+- 唯一跨层契约：`core/include/verthys.h`（公共 C ABI，`VERTHYS_API_VERSION 0x0014`）与 Tauri command 清单。前者规范见 [CORE_API.md](CORE_API.md)，后者以 `verthys-tauri` 的 command 注册为准。
 - 数据流约定：前端只能 `invoke` 命令 → worker actor → FFI → C core；反向经 JSON 响应 / SHM / 进度回调。不得绕过 worker 直接加载 DLL。
 - 密钥边界：口令经 worker 传入 `verthys.dll` 后即归属 L2，主进程不落盘、不缓存明文密钥（仅 Rust 侧 `locked_buffer` 短暂持有口令，用后清零）。
 
@@ -134,6 +134,7 @@ flowchart LR
 | D-4 | 关键防御检测器走 `Nt*` 直接系统调用（syscall_direct）绕过用户态 Hook |
 | D-5 | 密钥自动轮换（时间/操作计数/手动/异常触发），内核态完成 |
 | D-6 | 密钥相关结构走专用安全分配器（VirtualAlloc + 锁页 + 清零） |
+| D-9 | 全库 DEK 轮换走“恢复码会话新库重建 + ReplaceFileW 单次原子替换（旧库同事务备份）”，旧恢复码继续有效；作业期间源库只读；keyfile 可按路径补录，Run 可跨进程取消；复制逐条回读校验，ID 分配器水位与已删除 file 模块场景均保真 |
 
 ## 7. 目录结构速览
 

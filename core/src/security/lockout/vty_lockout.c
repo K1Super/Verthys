@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 #define LK_MAGIC          0x4B4C5456u   /* 'VTLK'（小端） */
 #define LK_VERSION        2u
@@ -37,6 +38,31 @@ static int g_initialized = 0;
 static int g_enabled = 1;
 static uint8_t g_witness_id[VTY_UUID_BYTES];
 static int g_witness_id_ready = 0;
+/* 测试注入时钟（UTC 秒）；0 = 使用系统时间。生产路径不得设置。 */
+static uint64_t g_test_now_secs = 0;
+
+int vty_lockout_set_test_clock(uint64_t now_secs)
+{
+    g_test_now_secs = now_secs;
+    return VTY_OK;
+}
+
+static uint64_t lockout_now_secs(void)
+{
+    return (g_test_now_secs != 0) ? g_test_now_secs : (uint64_t)time(NULL);
+}
+
+/* 达到阈值后的退避窗口：2^failures 秒，上限 1 小时。
+ * 与进程内退避（verthys_backoff_remaining_ms）保持同一公式，避免
+ * 持久层与进程层给出两个互相矛盾的等待时间。 */
+uint32_t vty_lockout_backoff_secs(uint32_t failures)
+{
+    uint32_t secs;
+
+    if (failures >= 12u) return 3600u;
+    secs = 1u << failures;
+    return (secs > 3600u) ? 3600u : secs;
+}
 
 void vty_lockout_set_enabled(int enabled)
 {
@@ -387,10 +413,23 @@ int vty_lockout_check(void)
     int legacy = 0;
     int rc = load_authenticated(buf, &is_new, &legacy);
     uint32_t failures;
+    uint64_t last_fail;
+    uint64_t now;
     if (rc != VTY_OK) return VTY_E_LOCKED;
     if (is_new) return VTY_OK;
     failures = vty_get_u32(buf + 8);
-    return failures >= VTY_LOCKOUT_MAX_FAILURES ? VTY_E_LOCKED : VTY_OK;
+    if (failures < VTY_LOCKOUT_MAX_FAILURES) return VTY_OK;
+
+    /* 阈值后按次数指数退避，窗口满允许重试；计数只有成功解锁才清零。
+     * 缺时间戳/时钟回拨一律 fail-closed，避免删字段即绕过等待。 */
+    last_fail = vty_get_u64(buf + 12);
+    if (last_fail == 0) return VTY_E_LOCKED;
+    now = lockout_now_secs();
+    if (now < last_fail) return VTY_E_LOCKED;
+    if (now - last_fail >= (uint64_t)vty_lockout_backoff_secs(failures)) {
+        return VTY_OK;
+    }
+    return VTY_E_LOCKED;
 }
 
 uint32_t vty_lockout_failures(void)
@@ -411,8 +450,6 @@ int vty_lockout_record_failure(void)
     int is_new = 0;
     int legacy = 0;
     uint32_t failures;
-    FILETIME ft;
-    ULARGE_INTEGER u;
     int rc;
     int current_slot = -1;
     int next_slot = 0;
@@ -428,10 +465,6 @@ int vty_lockout_record_failure(void)
         return VTY_E_LOCKED;
     }
     failures = vty_get_u32(buf + 8);
-    if (failures >= VTY_LOCKOUT_MAX_FAILURES) {
-        unlock_state(lock);
-        return VTY_E_LOCKED;
-    }
     if (!is_new && !legacy && buf[LK_WITNESS_OFFSET] < VTY_TPM_WITNESS_SLOTS) {
         current_slot = (int)buf[LK_WITNESS_OFFSET];
     }
@@ -440,12 +473,11 @@ int vty_lockout_record_failure(void)
         unlock_state(lock);
         return VTY_E_LOCKED;
     }
-    failures++;
+    /* 阈值后继续累加（32 封顶），让退避窗口随次数增长并刷新时间戳；
+     * 若在此停止累加，窗口永远停在 2^5 且后续失败不再延时。 */
+    if (failures < 32u) failures++;
     vty_put_u32(buf + 8, failures);
-    GetSystemTimeAsFileTime(&ft);
-    u.LowPart = ft.dwLowDateTime;
-    u.HighPart = ft.dwHighDateTime;
-    vty_put_u64(buf + 12, (uint64_t)(u.QuadPart / 10000000ull) - 11644473600ull);
+    vty_put_u64(buf + 12, lockout_now_secs());
     vty_put_u32(buf + 20, 0);
     rc = store(buf);
     if (rc != VTY_OK) {

@@ -6,7 +6,7 @@
  *
  * 五大缓存
  *   1. 模块数据缓存 moduleDataCache（跨路由/模块切换持久化）
- *   2. 模块独立密钥会话缓存 moduleKeyCache（明文，Uint8Array 可零填充，
+ *   2. 模块登录状态（不缓存原始密钥；密钥只在 worker 内）
  *      闲置 15 分钟自动销毁，lockAll 时清零）
  *   3. 共享记录扫描缓存 recordScanCache（LRU-5000 + 64KB 大体积管控）
  *   4. 摘要缓存 summaryCache（第一层：常驻内存，永久存在，无淘汰）
@@ -67,8 +67,8 @@ import { AsyncMutex } from "../concurrency/async-mutex";
 import { LRUCache } from "../concurrency/lru-cache";
 import { TypedEventEmitter } from "../concurrency/typed-event-emitter";
 import { estimateBase64Size } from "../shared/base64-size";
-// MODULE_IDS：权威模块表（constants 层零依赖，新增模块自动纳入密钥重置）
-import { MODULE_IDS } from "../../constants/key_manager_const";
+// MODULE_IDS / MODULE_CACHE_KEY：权威模块表（constants 层零依赖，新增模块自动纳入密钥重置）
+import { MODULE_CACHE_KEY, MODULE_IDS } from "../../constants/key_manager_const";
 // 快照注册通道：经 verthys-flush 绑定层的 setSnapshotProvider 单向注入
 //   （verthys-flush → verthys-flush-service，无任何指向本文件的回边，无循环依赖）
 import { setSnapshotProvider } from "../composition/verthys-flush";
@@ -114,6 +114,8 @@ export interface VerthysCacheApi {
   scanSummaryNext(batchSize: number): Promise<{ records: SummaryRecord[]; exhausted: boolean }>;
   /** 关闭摘要扫描游标 */
   scanSummaryClose(): Promise<boolean>;
+  /** 按类型分页枚举记录 ID（V4 类型盲索引，不读记录密文） */
+  listIdsByType(type: number, afterId: number, maxCount: number): Promise<{ ids: number[]; exhausted: boolean }>;
   /** 读取单条完整记录（返回 base64 数据） */
   getRecord(id: number): Promise<{ type: number; name: string; dataB64: string } | null>;
 }
@@ -197,6 +199,8 @@ const FULL_RECORD_CACHE_CAPACITY = 50;
 const SCAN_BATCH_SIZE = 200;
 /** 摘要早停扫描迭代上限：100 批 × 200 条 = 20,000 条，防后端异常导致无限循环 */
 const EARLY_STOP_MAX_BATCHES = 100;
+/** 类型 ID 分页大小：类型盲索引单页 1000 条，平衡 IPC 次数与单包体积 */
+const TYPE_ID_BATCH_SIZE = 1000;
 /** 模块密钥闲置超时：15 分钟（不依赖手动锁屏清空） */
 const MODULE_KEY_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -204,8 +208,6 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   // === 缓存存储 ===
   /** 模块数据缓存（跨路由/模块切换持久化，消除"先空后有"闪烁） */
   private moduleDataCache = new Map<string, { data: unknown; recordId: number | null }>();
-  /** 模块独立密钥会话缓存（Uint8Array 存储，可安全零填充） */
-  private moduleKeyCache = new Map<ModuleId, Uint8Array>();
   /** 每模块独立的闲置超时计时器 */
   private moduleKeyTimers = new Map<ModuleId, ReturnType<typeof setTimeout>>();
   /** 记录扫描缓存（LRU-5000，淘汰时同步移除类型索引） */
@@ -250,6 +252,18 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   private recordIndexByType = new Map<number, Set<number>>();
   private summaryIndexByType = new Map<number, Set<number>>();
 
+  // === 权威类型 ID 缓存（V4 类型盲索引，跨重启稳定） ===
+  /** 每个业务类型的完整 ID 列表（升序）；key 存在即代表该类型已成功枚举 */
+  private typeIdCache = new Map<number, number[]>();
+  /** 同类型并发枚举复用同一 Promise，避免重复分页 IPC */
+  private typeIdScanInProgress = new Map<number, Promise<number[]>>();
+  /** 类型 ID 缓存绑定的容器路径：路径变化即整体失效 */
+  private typeIdCachePath: string | null = null;
+  /** 全量代际令牌：清空/路径切换时递增，丢弃在途旧结果 */
+  private typeIdCacheGeneration = 0;
+  /** 单类型代际令牌：只失效指定类型的在途枚举，不误伤其他类型 */
+  private typeIdGenerationByType = new Map<number, number>();
+
   // === 加载器（防并发重复 IPC：同 ID 多次请求复用同一 Promise） ===
   private fullRecordLoaders = new Map<number, Promise<ScannedRecord | null>>();
 
@@ -260,10 +274,6 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   private readonly getCurrentVerthysPath: () => string | null;
   private readonly shouldAbortBackgroundWork: () => boolean;
   private readonly stopBackgroundTasksHook: () => Promise<void>;
-
-  /** TextEncoder/TextDecoder 单例（模块密钥转换用，避免重复创建） */
-  private keyTextEncoder = new TextEncoder();
-  private keyTextDecoder = new TextDecoder();
 
   constructor(
     verthysApi: VerthysCacheApi,
@@ -348,65 +358,37 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     this.moduleKeyTimers.set(moduleId, timer);
   }
 
-  /** 安全零填充 Uint8Array（覆写内存：0 → 0xFF → 0） */
-  private secureZeroBytes(bytes: Uint8Array): void {
-    bytes.fill(0);
-    bytes.fill(0xFF);
-    bytes.fill(0);
-  }
-
-  /** 缓存模块独立密钥到会话（验证成功后调用） */
-  cacheModuleKey(moduleId: ModuleId, key: string): void {
-    // 将字符串密钥转换为 Uint8Array 存储
-    const keyBytes = this.keyTextEncoder.encode(key);
-    this.moduleKeyCache.set(moduleId, keyBytes);
-    // 原子地设置 moduleKeyReady=true（原缺陷修复：遗漏会导致重复验证弹窗）
+  /** 标记模块已登录（口令已交付 worker；渲染层不保存原始密钥） */
+  markModuleReady(moduleId: ModuleId): void {
     this.keyState.moduleKeyReady.value[moduleId] = true;
     // 启动/重置闲置计时器
     this.resetModuleKeyTimer(moduleId);
   }
 
-  /** 获取会话中缓存的模块密钥（未登录返回 null） */
-  fetchModuleKey(moduleId: ModuleId): string | null {
-    const keyBytes = this.moduleKeyCache.get(moduleId);
-    if (!keyBytes) return null;
-    // 访问时重置闲置计时器
-    this.resetModuleKeyTimer(moduleId);
-    // Uint8Array → 字符串（瞬时转换，用后即弃）
-    return this.keyTextDecoder.decode(keyBytes);
-  }
-
-  /** 移除指定模块的会话密钥缓存（登出模块/闲置超时时调用） */
+  /** 登出模块（清除登录状态、闲置计时器与该模块的全部明文缓存） */
   removeModuleKey(moduleId: ModuleId): void {
-    // 安全零填充后删除
-    const keyBytes = this.moduleKeyCache.get(moduleId);
-    if (keyBytes) {
-      this.secureZeroBytes(keyBytes);
-    }
-    this.moduleKeyCache.delete(moduleId);
-    // 原子地设置 moduleKeyReady=false（超时后状态与缓存同步清除）
     this.keyState.moduleKeyReady.value[moduleId] = false;
-    // 清除闲置计时器
     const timer = this.moduleKeyTimers.get(moduleId);
     if (timer) {
       clearTimeout(timer);
       this.moduleKeyTimers.delete(moduleId);
     }
+    /* 模块锁定后其记录不再可解，渲染层不能继续持有任何明文副本：
+     * 列表缓存、扫描/摘要/全量记录缓存都可能包含该模块条目。扫描游标
+     * 一并重置，解锁后从零重扫，避免锁定窗口内的失败区段被增量跳过。
+     * 清理范围覆盖其他模块的同构缓存，属安全优先的过度清理，代价是
+     * 下次进入模块重新扫描一次。 */
+    this.clearModuleCache(MODULE_CACHE_KEY[moduleId]);
+    this.clearRecordScanCache();
+    this.clearSummaryCache();
+    this.clearFullRecordCache();
   }
 
-  /** 清零全部模块密钥缓存（lockAll 时调用） */
+  /** 清空全部模块登录状态（lockAll 时调用） */
   clearModuleKeyCache(): void {
-    // 逐个安全零填充所有密钥字节
-    for (const keyBytes of this.moduleKeyCache.values()) {
-      this.secureZeroBytes(keyBytes);
-    }
-    this.moduleKeyCache.clear();
-    // 评审 #4 落实：以 MODULE_IDS 权威模块表驱动重置——新增模块自动
-    //   纳入覆盖，杜绝硬编码列表遗漏；逐键置 false 保持响应式精确更新
     for (const moduleId of MODULE_IDS) {
       this.keyState.moduleKeyReady.value[moduleId] = false;
     }
-    // 清除所有闲置计时器
     for (const timer of this.moduleKeyTimers.values()) {
       clearTimeout(timer);
     }
@@ -731,6 +713,9 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 永远扫描不到复用 ID 的新记录 → 缓存永久缺失数据。
    */
   invalidateScannedRecord(id: number): void {
+    /* 删除/编辑后类型索引已变化：保守失效全部类型 ID 缓存，下一次
+     * 列表加载重新走后端类型盲索引，杜绝已删 ID 从缓存复活。 */
+    this.clearTypeIdCache();
     const rec = this.recordScanCache.peek(id);
     if (rec) {
       this.removeFromIndex(id, rec.type);
@@ -763,6 +748,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 统一经 setScanCacheEntry 写入（LRU + 大体积管控）。
    */
   addRecordToScan(id: number, type: number, name: string, dataB64: string): void {
+    this.clearTypeIdCache(type);
     this.setScanCacheEntry(id, type, name, dataB64);
   }
 
@@ -967,11 +953,115 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     }
   }
 
+  /* ==================== 权威类型 ID（V4 类型盲索引） ==================== */
+
+  /**
+   * 枚举并缓存指定业务类型的完整记录 ID 列表。
+   *
+   * 为什么不能读摘要 type：V4 摘要不读记录密文，type 恒为未知 0；
+   * 业务类型在写入时已进入 VTY_KS_TYPE 盲索引，本方法分页读取该索引，
+   * 不依赖解密，跨重启稳定。
+   *
+   * 并发：同类型在途枚举复用同一 Promise；路径切换或 clearTypeIdCache
+   * 会递增代际令牌，旧结果不得写回缓存。
+   */
+  async ensureTypeIds(type: number): Promise<number[]> {
+    const path = this.getCurrentVerthysPath();
+    if (!path) throw new Error("容器未解锁，无法枚举类型 ID");
+
+    if (this.typeIdCachePath !== path) {
+      this.clearTypeIdCacheInternal();
+      this.typeIdCachePath = path;
+    }
+    const cached = this.typeIdCache.get(type);
+    if (cached !== undefined) return cached;
+    const existing = this.typeIdScanInProgress.get(type);
+    if (existing) return existing;
+
+    const generation = this.typeIdCacheGeneration;
+    const typeGeneration = this.typeIdGenerationByType.get(type) ?? 0;
+    const pending = this.fetchTypeIds(type, path, generation, typeGeneration);
+    this.typeIdScanInProgress.set(type, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.typeIdScanInProgress.get(type) === pending) {
+        this.typeIdScanInProgress.delete(type);
+      }
+    }
+  }
+
+  /** 实际分页枚举（调用方保证同类型单飞） */
+  private async fetchTypeIds(
+    type: number,
+    path: string,
+    generation: number,
+    typeGeneration: number,
+  ): Promise<number[]> {
+    const ids: number[] = [];
+    let afterId = 0;
+    let exhausted = false;
+
+    while (!exhausted) {
+      const page = await this.verthysApi.listIdsByType(
+        type,
+        afterId,
+        TYPE_ID_BATCH_SIZE,
+      );
+      if (
+        generation !== this.typeIdCacheGeneration ||
+        typeGeneration !== (this.typeIdGenerationByType.get(type) ?? 0) ||
+        path !== this.getCurrentVerthysPath()
+      ) {
+        throw new Error("类型 ID 枚举代际失效（容器已切换或缓存已清空）");
+      }
+
+      let last = afterId;
+      for (const id of page.ids) {
+        if (!Number.isSafeInteger(id) || id <= last) {
+          throw new Error("类型 ID 枚举返回非单调 ID");
+        }
+        last = id;
+        if (!this.pendingDeletionIds.has(id)) ids.push(id);
+      }
+      exhausted = page.exhausted;
+      if (!exhausted && page.ids.length === 0) {
+        throw new Error("类型 ID 枚举返回空页但未标记结束");
+      }
+      afterId = last;
+    }
+
+    this.typeIdCache.set(type, ids);
+    return ids;
+  }
+
+  /** 清空类型 ID 缓存；传 type 只失效该类型。 */
+  clearTypeIdCache(type?: number): void {
+    if (type !== undefined) {
+      this.typeIdCache.delete(type);
+      this.typeIdScanInProgress.delete(type);
+      this.typeIdGenerationByType.set(
+        type,
+        (this.typeIdGenerationByType.get(type) ?? 0) + 1,
+      );
+      return;
+    }
+    this.clearTypeIdCacheInternal();
+  }
+
+  private clearTypeIdCacheInternal(): void {
+    this.typeIdCache.clear();
+    this.typeIdScanInProgress.clear();
+    this.typeIdGenerationByType.clear();
+    this.typeIdCachePath = null;
+    this.typeIdCacheGeneration += 1;
+  }
+
   /**
    * 从摘要缓存中按类型获取记录 ID 列表（O(1) 索引查询，已排序）。
    *
-   * 列表渲染专用：基于常驻 summaryCache，1-2 秒内渲染完整列表，
-   * 不解密任何数据块，不受 64KB 截断影响。
+   * 仅保留给历史迁移/诊断路径。V4 摘要 type 恒为 0，业务列表必须使用
+   * ensureTypeIds；不得把本方法作为新代码的类型 ID 来源。
    */
   getSummaryIdsByType(type: number): number[] {
     const set = this.summaryIndexByType.get(type);
@@ -1093,6 +1183,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * 确保 ensureSummaryScan 增量扫描不遗漏新记录。
    */
   addSummaryRecord(rec: SummaryRecord): void {
+    this.clearTypeIdCache(rec.type);
     this.setSummaryCacheEntry(rec);
   }
 
@@ -1103,6 +1194,8 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
    * ID 复用缺陷修复：同 invalidateScannedRecord（删除最大 ID 时重算）。
    */
   invalidateSummaryRecord(id: number): void {
+    /* 摘要失效通常来自删除/编辑，类型索引可能变化：失效全部类型 ID。 */
+    this.clearTypeIdCache();
     const rec = this.summaryCache.get(id);
     if (rec) {
       this.removeSummaryFromIndex(id, rec.type);
@@ -1243,6 +1336,8 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     // 1. 写入全量记录缓存（含 LRU 淘汰）
     const rec: ScannedRecord = { id, type, name, dataB64 };
     this.fullRecordCache.set(id, rec);
+    // 类型盲索引已新增该 ID：失效该类型的旧枚举结果。
+    this.clearTypeIdCache(type);
 
     // 2. 同步更新摘要缓存（physicalOffset/merkleLeaf 为占位值，
     //    下次 ensureSummaryScan 会从后端读取真实值覆盖）
@@ -1360,6 +1455,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     //   lockAll 统一清空入口的安全闭环（明文密钥不残留内存）
     this.clearModuleKeyCache();
     this.clearSummaryCache();
+    this.clearTypeIdCache();
     this.clearFullRecordCache();
     this.clearRecordScanCache();
     this.clearModuleCache();

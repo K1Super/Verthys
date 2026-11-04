@@ -36,6 +36,8 @@ const baseProps = {
   lockedFeatures: [{ key: "anti_debug", label: "调试检测", desc: "调试器检测与反附加" }],
   presetFeatures: { anti_debug: true },
   customFeatures: { session_lock_on_idle: true },
+  customMode: true,
+  presetIdleMinutes: 10,
   customSessionMinutes: 10,
   presetSyncFailed: false,
   hardeningFailed: false,
@@ -47,17 +49,23 @@ const baseProps = {
       state: 1,
       stateLabel: "已阻断",
       stateClass: "blocked",
+      reason: 1,
+      reasonLabel: "当前无驻留密钥",
+      limited: false,
     },
   ],
   defenseMeta: {
     blocked: 1,
     degraded: 0,
+    limited: 0,
     failed: 0,
     unchecked: 6,
     allCriticalBlocked: true,
     stance: "ok" as const,
     stanceLabel: "关键路径全阻断",
     stale: false,
+    checkedAtMs: 1700000000000,
+    checkedAtLabel: "12:00:00",
   },
 };
 
@@ -162,6 +170,58 @@ describe("SecurityDashboard 视觉状态契约", () => {
       await nextTick();
       expect(readVar(container, "--pos")).toBe("0.000");
       expect(readVar(container, "--posw")).toBe("0.00%");
+    } finally {
+      teardown();
+    }
+  });
+
+  it("非自定义档：端子显示当前档位真实状态而非模板草稿", () => {
+    const model = ref(100);
+    const { teardown, container } = mountDashboard(model, {
+      customMode: false,
+      presetIdleMinutes: 10,
+      presetFeatures: { session_lock_on_idle: true },
+      customFeatures: { session_lock_on_idle: false },
+    });
+    try {
+      expect(container.querySelector(".cus-tag")?.textContent?.trim()).toBe("启用");
+      expect(container.querySelector(".cus-count")?.textContent?.trim()).toBe("1/1");
+      const toggle = container.querySelector(".cus-toggle") as HTMLButtonElement;
+      expect(toggle.disabled).toBe(false);
+      expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    } finally {
+      teardown();
+    }
+  });
+
+  it("档位快照未确认：端子显示未确认且不可操作，不伪装成关闭", () => {
+    const model = ref(0);
+    const { teardown, container } = mountDashboard(model, {
+      customMode: false,
+      presetSyncFailed: true,
+      presetFeatures: { session_lock_on_idle: false },
+    });
+    try {
+      expect(container.querySelector(".cus-tag")?.textContent?.trim()).toBe("未确认");
+      expect(container.querySelector(".cus-count")?.textContent?.trim()).toBe("未确认");
+      const toggle = container.querySelector(".cus-toggle") as HTMLButtonElement;
+      expect(toggle.disabled).toBe(true);
+    } finally {
+      teardown();
+    }
+  });
+
+  it("非自定义档：空闲谱线展示当前档位真实时长而非模板草稿", () => {
+    const model = ref(100);
+    const { teardown, container } = mountDashboard(model, {
+      customMode: false,
+      presetIdleMinutes: 10,
+      customSessionMinutes: 45,
+    });
+    try {
+      const track = container.querySelector(".cus-idle-track") as HTMLElement | null;
+      expect(track?.getAttribute("aria-valuenow")).toBe("10");
+      expect(track?.getAttribute("aria-valuetext")).toBe("10 分钟");
     } finally {
       teardown();
     }

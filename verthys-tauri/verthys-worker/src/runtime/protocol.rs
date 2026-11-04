@@ -13,6 +13,15 @@ use crate::runtime::budget::PB_IPC_MAX_RESPONSE_LINE_BYTES;
  * JSON 协议                                                           *
  * ------------------------------------------------------------------ */
 
+/// 批量写入的单条记录（仅 add_records 消费；data 为 base64）
+#[derive(Deserialize)]
+pub(crate) struct BatchAddRecord {
+    pub(crate) rtype: u32,
+    pub(crate) name: String,
+    /// base64 密文载荷；Zeroizing 保证解码后原始串随请求释放时清零
+    pub(crate) data: Zeroizing<String>,
+}
+
 /// 口令/记录明文字段统一使用 Zeroizing<String>：
 /// Drop 时自动 volatile 清零堆缓冲，主循环 line 缓冲与请求字段
 /// 的口令明文在处理完成后不驻留内存。
@@ -22,6 +31,16 @@ pub(crate) struct Request {
     pub(crate) op: String,
     #[serde(default)]
     pub(crate) path: String,
+    /// v4 D9 轮换临时新库路径（仅 v4_rotate_begin 消费）。
+    /// 必须不存在且与源库同目录；worker 只转发，具体校验由 C 层完成。
+    #[serde(default)]
+    pub(crate) new_path: String,
+    /// v4 D9 轮换提交时是否保留旧库备份（仅 v4_rotate_commit 消费）
+    #[serde(default)]
+    pub(crate) keep_old: bool,
+    /// v4 D9 轮换 Run 的取消事件名（父进程创建的命名事件；仅 v4_rotate_run 消费）
+    #[serde(default)]
+    pub(crate) cancel_event: String,
     /// 路径授权的模式（read/write；仅 authorize_path 消费）
     #[serde(default)]
     pub(crate) mode: String,
@@ -38,6 +57,9 @@ pub(crate) struct Request {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) data: Zeroizing<String>, // base64
+    /// 批量写入记录列表（仅 add_records 消费；单次上限由 dispatch 校验）
+    #[serde(default)]
+    pub(crate) records: Vec<BatchAddRecord>,
     // 枚举/扫描批量上限（enumerate_records / scan_open / scan_summary_open）：
     // 0 = 使用各操作缺省值。与 rtype（记录类型）语义分离——曾共用 rtype
     // 字段承载"批量上限"，同名字段双语义导致调用点可读性差，现拆分。
@@ -63,6 +85,10 @@ pub(crate) struct Request {
     // 0x01 = 索引区已预热，0x02 = 允许加载持久化缓存
     #[serde(default)]
     pub(crate) flags: u32,
+    /// 父进程心跳事件句柄值（仅 arm_heartbeat 消费；该句柄由父进程
+    /// DuplicateHandle 注入 worker 进程，worker 只调用 SetEvent）。
+    #[serde(default)]
+    pub(crate) hb_handle: u64,
     // SHM 载荷认证密钥（base64 编码的一次性 32 字节随机 key；空串=未提供）
     // 仅 scan_fetch / scan_summary_fetch 使用：提供时 worker 写入 SHM 认证块
     #[serde(default)]
@@ -74,6 +100,26 @@ pub(crate) struct Request {
     // INDEX 投影的内联数据字节阈值（scan_open；0 = 纯索引，任何记录都不取数）
     #[serde(default)]
     pub(crate) inline_max_bytes: u64,
+    // v4 模块 M1 的模块索引（0=photo/1=accounts/2=fileverthys；
+    // 0xFFFFFFFF 仅 v4_module_lock 表示全部）
+    #[serde(default)]
+    pub(crate) module_id: u32,
+    // v4 PCR 位图（PCR0–23），仅 v4_pcr_enable 消费
+    #[serde(default)]
+    pub(crate) pcr_select: u32,
+    // v4 模块启用/绑定恢复槽时的当前容器恢复码（可空）
+    #[serde(default)]
+    pub(crate) recovery_code: Zeroizing<String>,
+    // v4 keyfile 因子（D3）：VKFL 文件绝对路径（仅 keyfile 系列 op 消费）。
+    // 只传路径；文件内容由 C 层在 worker 进程内读取，不进入 IPC 载荷。
+    #[serde(default)]
+    pub(crate) keyfile_path: String,
+    // v4 恢复码轮换时的旧恢复码
+    #[serde(default)]
+    pub(crate) old_recovery: Zeroizing<String>,
+    // v4 模块删除的二次确认字面量（必须为 "DELETE"，非密钥）
+    #[serde(default)]
+    pub(crate) confirm: String,
     // 内容层加密的模块标识（photo / file）
     #[serde(default)]
     pub(crate) module: String,
@@ -94,9 +140,9 @@ pub(crate) struct Request {
     // 文件块 v2 的 PBKDF2 迭代次数；0 表示采用缺省值
     #[serde(default)]
     pub(crate) iterations: u32,
-    // 包裹态文件密钥（base64），可落盘；不含原始文件密钥
-    #[serde(default)]
-    pub(crate) wrapped_key: String,
+    /* 注意：旧版 module_seal/open 的 wrapped_key 参数已随 v3 内容路径退役。
+     * 请求里若仍携带该字段，serde 按未知字段忽略——它不是密钥材料，
+     * v4 分片的外层密钥由 C 层 MDEK 持有。 */
 }
 
 /// 批量枚举返回的单条记录（用于 enumerate_records / scan_fetch 操作）
@@ -119,7 +165,8 @@ impl Drop for RecordEntry {
 
 /* 防御闭环状态报告（与 verthys.h
  * VerthysSecurityStatus 字段一一对应；path_state 下标 = VerthysDefensePath，
- * 值域 = VerthysDefenseState：0=未校验 1=已阻断 2=降级 3=失败） */
+ * 值域 = VerthysDefenseState：0=未校验 1=已阻断 2=降级 3=失败）。
+ * 0x0014 追加 path_reason/limited_count/policy_flags/checked_at_unix_ms。 */
 #[derive(Serialize)]
 pub(crate) struct SecurityStatusReport {
     /// 逐路径防御状态（7 项：挂起绕过/内存转储/休眠取证/Hook/DLL劫持/进程读取/跨设备）
@@ -129,6 +176,14 @@ pub(crate) struct SecurityStatusReport {
     pub(crate) failed_count: u32,
     pub(crate) all_critical_blocked: bool,
     pub(crate) has_degraded: bool,
+    /// 逐路径判定原因码（VerthysDefenseReason）
+    pub(crate) path_reason: [u32; 7],
+    /// 架构限制导致的降级路径数
+    pub(crate) limited_count: u32,
+    /// 运行时守卫与策略位（bit0=心跳 bit1=挂起守卫 bit2=防转储巡检）
+    pub(crate) policy_flags: u32,
+    /// 快照采样时间（Unix 毫秒）
+    pub(crate) checked_at_unix_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -182,6 +237,9 @@ pub(crate) struct Response {
     /// 据此把对应条目标记为损坏，与"记录不存在"区分开。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) failed_ids: Option<Vec<u64>>,
+    /// 按类型枚举返回的记录 ID 列表（仅 list_ids_by_type 操作返回）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ids: Vec<u64>,
     /* 落盘自查结果（仅 verify_persist 操作返回）：
      * 主机侧命令消费这些字段做三态判定（OK / 可重试 IO / 结构性失败）。
      * 均为非敏感结构元数据，不含密钥或明文。 */
@@ -203,21 +261,54 @@ pub(crate) struct Response {
     /// WAL 区起始绝对偏移
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wal_offset: Option<u64>,
-    /// 文件盐 base64（仅 module_file_key 返回；非密钥材料）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) salt: Option<String>,
-    /// 包裹态文件密钥 base64（仅 module_file_key 的创建类操作返回）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) wrapped_key: Option<String>,
-    /// 文件块 v2 实际使用的迭代次数（仅 module_file_key 返回）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) iterations: Option<u32>,
     /// 记录型块密文内嵌的块序号（仅 module_open 的 chunk 布局返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) seq: Option<u32>,
     /// 记录型块密文内嵌的块总数（仅 module_open 的 chunk 布局返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) total: Option<u32>,
+    /// v4 模块加密是否已启用（仅 v4_module_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled: Option<bool>,
+    /// v4 模块本会话是否已解锁（仅 v4_module_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unlocked: Option<bool>,
+    /// v4 模块是否已绑定恢复码槽（仅 v4_module_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) has_recovery: Option<bool>,
+    /// v4 模块是否已删除（仅 v4_module_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) deleted: Option<bool>,
+    /// PCR 是否已启用（仅 v4_pcr_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pcr_enabled: Option<bool>,
+    /// PCR 位图（PCR0–23，仅 v4_pcr_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pcr_select: Option<u32>,
+    /// v4 keyfile 因子是否已启用（仅 v4_keyfile_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) keyfile_enabled: Option<bool>,
+    /// 当前会话是否由恢复码打开（仅 v4_keyfile_status 返回）；
+    /// 恢复会话允许重绑/关闭 keyfile（丢失逃生）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery_mode: Option<bool>,
+    /// v4 恢复码轮换成功后的新码（仅本条响应内有效，序列化后立即清零）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery_code: Option<String>,
+    /* v4 D9 全库 DEK 轮换统计（仅 v4_rotate_begin 返回）。
+     * 字段前缀 rotate_ 避免与既有 records（批量记录列表）语义冲突。 */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rotate_stage: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rotate_modules_ready: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rotate_records: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rotate_files: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rotate_chunks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rotate_bytes: Option<u64>,
 }
 
 impl Response {
@@ -235,6 +326,9 @@ impl Response {
         }
         if let Some(record) = self.global_key_record.as_mut() {
             record.zeroize();
+        }
+        if let Some(code) = self.recovery_code.as_mut() {
+            code.zeroize();
         }
     }
 
@@ -257,17 +351,30 @@ impl Response {
             global_key_record: None,
             security_status: None,
             failed_ids: None,
+            ids: Vec::new(),
             status_code: None,
             file_size: None,
             mtime_ms: None,
             header_magic: None,
             header_version: None,
             wal_offset: None,
-            salt: None,
-            wrapped_key: None,
-            iterations: None,
             seq: None,
             total: None,
+            enabled: None,
+            unlocked: None,
+            has_recovery: None,
+            deleted: None,
+            pcr_enabled: None,
+            pcr_select: None,
+            keyfile_enabled: None,
+            recovery_mode: None,
+            recovery_code: None,
+            rotate_stage: None,
+            rotate_modules_ready: None,
+            rotate_records: None,
+            rotate_files: None,
+            rotate_chunks: None,
+            rotate_bytes: None,
         }
     }
     pub(crate) fn err(op: &str, code: u32) -> Self {
@@ -306,6 +413,15 @@ impl Response {
         const VERTHYS_ERR_UNSUPPORTED: u32 = 0x00000013;
         const VERTHYS_ERR_NONCE_EXHAUSTED: u32 = 0x00000014;
         const VERTHYS_ERR_CONTAINER_BUSY: u32 = 0x00000015;
+        const VERTHYS_ERR_POLICY: u32 = 0x00000017;
+        const VERTHYS_ERR_TPM: u32 = 0x00000018;
+        const VERTHYS_ERR_ROLLBACK: u32 = 0x00000019;
+        const VERTHYS_ERR_KEYFILE_REQUIRED: u32 = 0x0000001A;
+        const VERTHYS_ERR_KEYFILE_INVALID: u32 = 0x0000001B;
+        const VERTHYS_ERR_ROTATE_PENDING: u32 = 0x0000001C;
+        const VERTHYS_ERR_MODULE_LOCKED: u32 = 0x0000001D;
+        const VERTHYS_ERR_NO_SPACE: u32 = 0x0000001E;
+        const VERTHYS_ERR_VERIFY: u32 = 0x0000001F;
 
         let unified_code = match code {
             VERTHYS_ERR_INVALID
@@ -323,7 +439,16 @@ impl Response {
             | VERTHYS_ERR_TIMEOUT
             | VERTHYS_ERR_UNSUPPORTED
             | VERTHYS_ERR_NONCE_EXHAUSTED
-            | VERTHYS_ERR_CONTAINER_BUSY => code,
+            | VERTHYS_ERR_CONTAINER_BUSY
+            | VERTHYS_ERR_POLICY
+            | VERTHYS_ERR_TPM
+            | VERTHYS_ERR_ROLLBACK
+            | VERTHYS_ERR_KEYFILE_REQUIRED
+            | VERTHYS_ERR_KEYFILE_INVALID
+            | VERTHYS_ERR_ROTATE_PENDING
+            | VERTHYS_ERR_MODULE_LOCKED
+            | VERTHYS_ERR_NO_SPACE
+            | VERTHYS_ERR_VERIFY => code,
             // AUTH(0x02)/FORMAT(0x05)/IO(0x08)/CORRUPT(0x09)/INTERNAL(0xFFFFFFFF)
             // 及未知码全部统一为 AUTH（反信息泄露）
             _ => VERTHYS_ERR_AUTH,
@@ -347,17 +472,30 @@ impl Response {
             global_key_record: None,
             security_status: None,
             failed_ids: None,
+            ids: Vec::new(),
             status_code: None,
             file_size: None,
             mtime_ms: None,
             header_magic: None,
             header_version: None,
             wal_offset: None,
-            salt: None,
-            wrapped_key: None,
-            iterations: None,
             seq: None,
             total: None,
+            enabled: None,
+            unlocked: None,
+            has_recovery: None,
+            deleted: None,
+            pcr_enabled: None,
+            pcr_select: None,
+            keyfile_enabled: None,
+            recovery_mode: None,
+            recovery_code: None,
+            rotate_stage: None,
+            rotate_modules_ready: None,
+            rotate_records: None,
+            rotate_files: None,
+            rotate_chunks: None,
+            rotate_bytes: None,
         }
     }
 }
@@ -481,7 +619,10 @@ pub(crate) fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64_decode, base64_encode, bound_response_line, Request, MAX_RESPONSE_LINE_BYTES};
+    use super::{
+        base64_decode, base64_encode, bound_response_line, Request, Response,
+        MAX_RESPONSE_LINE_BYTES,
+    };
 
     // 扫描投影请求字段：缺省（不传该字段的既有调用方）必须等价于
     // FULL 投影 + 无内联阈值，语义与历史行为一致
@@ -575,5 +716,68 @@ mod tests {
             worst_case,
             MAX_RESPONSE_LINE_BYTES
         );
+    }
+
+    // 模块策略拒绝必须保留 0x17，不得折叠为 AUTH：调用方需要区分
+    // “模块未解锁/未绑定恢复码”和“口令错误”。
+    #[test]
+    fn policy_error_not_collapsed_to_auth() {
+        let resp = Response::err("v4_module_unlock", 0x00000017);
+        assert_eq!(resp.error.as_deref(), Some("ERR_00000017"));
+        let auth = Response::err("v4_module_unlock", 0x00000002);
+        assert_eq!(auth.error.as_deref(), Some("ERR_00000002"));
+    }
+
+    // 恢复码轮换响应只能存活到序列化完成；scrub 后不得残留。
+    #[test]
+    fn recovery_code_response_is_scrubbed() {
+        let mut resp = Response::ok("v4_recovery_rotate");
+        resp.recovery_code = Some("ABCD-EFGH".into());
+        resp.scrub();
+        let code = resp.recovery_code.as_deref().unwrap_or("");
+        assert!(code.chars().all(|c| c == '\0'), "恢复码必须被清零");
+    }
+
+    // TPM/回滚错误必须保留 0x18/0x19：UI 需要引导恢复码重密封或提示文件回退，
+    // 折叠为 AUTH 会让这两类可行动错误退化成“口令错误”。
+    #[test]
+    fn tpm_and_rollback_errors_not_collapsed_to_auth() {
+        let tpm = Response::err("v4_pcr_enable", 0x00000018);
+        assert_eq!(tpm.error.as_deref(), Some("ERR_00000018"));
+        let rollback = Response::err("unlock", 0x00000019);
+        assert_eq!(rollback.error.as_deref(), Some("ERR_00000019"));
+    }
+
+    // 轮换作业错误必须保留原码：调用方需要区分“作业进行中/模块未解锁/
+    // 空间不足/完整性复核失败”，折叠为 AUTH 会使这四类可行动错误退化。
+    #[test]
+    fn rotate_errors_not_collapsed_to_auth() {
+        for code in [0x0000001Cu32, 0x0000001D, 0x0000001E, 0x0000001F] {
+            let resp = Response::err("v4_rotate_run", code);
+            let expected = format!("ERR_{:08X}", code);
+            assert_eq!(resp.error.as_deref(), Some(expected.as_str()));
+        }
+    }
+
+    // v4 模块请求字段：缺省值必须兼容既有调用方，显式字段可解析。
+    #[test]
+    fn request_v4_module_fields_parse() {
+        let req: Request = serde_json::from_str(r#"{"op":"v4_module_unlock"}"#)
+            .expect("无模块字段的请求必须可解析");
+        assert_eq!(req.module_id, 0);
+        assert!(req.recovery_code.is_empty());
+        assert!(req.old_recovery.is_empty());
+
+        let req2: Request = serde_json::from_str(
+            r#"{"op":"v4_module_enable","module_id":2,"password":"pw","recovery_code":"CODE"}"#,
+        )
+        .expect("模块请求必须可解析");
+        assert_eq!(req2.module_id, 2);
+        assert_eq!(req2.recovery_code.as_str(), "CODE");
+
+        let pcr: Request =
+            serde_json::from_str(r#"{"op":"v4_pcr_enable","pcr_select":2176}"#)
+                .expect("PCR 请求必须可解析");
+        assert_eq!(pcr.pcr_select, 2176);
     }
 }

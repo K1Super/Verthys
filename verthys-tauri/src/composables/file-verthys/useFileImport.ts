@@ -5,22 +5,22 @@
  * 保证「要么完整成功、要么可续传重试」，且内存占用与文件大小无关。
  *
  * 设计要点：
- * - 单遍优先：会话无遗留去重集合时单遍处理（读分片 → 可选文件级加密 → 上传块 →
- *   汇算文件哈希 → 写元数据）；有遗留集合时先做整轮只读哈希（只读轮）判定
- *   是否重复，未重复再走上传轮——中断续传的重试因此只有只读开销；
+ * - 单遍处理：每个文件一次读取上传（读分片 → 可选文件级加密 → 上传块 →
+ *   汇算内容摘要 → 写元数据），不做只读预扫描轮；
+ * - 续传幂等：以非内容条目键（路径/长度/修改时间）判定是否已提交，命中即
+ *   跳过；该键不随内容变化，也不能用于确认内容存在性（不构成存在性预言机）；
  * - 来源身份稳定：文件开始、每个块批边界、文件结束三处复查（长度与修改时间），
  *   收尾断言已读总字节等于初始长度，任一不符即中止该文件；
- * - 两轮一致：续传形态的上传轮重算文件哈希并与只读轮比对，两轮读到不同
- *   内容即中止（长度与时间戳被还原的隐性改写因此仍可暴露）；
  * - 完整性前置：块引用全部确认后才写元数据；元数据写入失败即失败，
  *   不计成功、不进列表，已上传块留台账由孤儿回收处理；
- * - 去重语义：文件级——同内容且同加密形态的文件命中即跳过并显式报告；
- *   块级重传不保证幂等（加密形态每块随机盐使密文互异），重复导入的载荷
- *   增长由文件级跳过阻断；
+ * - 去重语义：仅按条目键做续传幂等，不做内容级去重；同内容不同路径各自
+ *   导入并各自落块（块键由条目键 + 块序号派生，同一导入重试稳定）；
  * - 批预算：单批块数由跨层预算常量推导（载荷上限与块数上限双约束）；
  * - 明文缓冲用后清零；依赖注入，便于单测。
  */
 import { createBLAKE3 } from "hash-wasm";
+import { sha256 } from "@noble/hashes/sha2";
+import { bytesToHex } from "../../utils/binary_codec";
 import {
   MAX_CHUNKS_PER_IPC,
   MAX_FILE_CHUNK_SIZE_BYTES,
@@ -145,6 +145,8 @@ export interface ImportedFileEntry {
   chunkHashes: string[];
   chunkSize: number;
   fileHash: string;
+  /** 非内容续传条目键（删除时释放 WAL 幂等锁） */
+  entryKey: string;
   /** 文件级密钥派生参数（加密条目必携；明文条目缺省） */
   kdf?: FileKdfV2;
   /** 密码校验块（加密条目必携；口令判定的唯一权威值） */
@@ -167,9 +169,7 @@ export interface ImportProgress {
   doneInFile: number;
   /** 当前文件块总数（0 字节文件为 0） */
   totalInFile: number;
-  /** "scan" = 续传形态的只读校验轮；"upload" = 上传轮 */
-  phase: "scan" | "upload";
-  /** 当前文件的整体完成比例（0~1；续传形态下只读轮占前一半权重） */
+  /** 当前文件的整体完成比例（0~1） */
   fileFraction: number;
 }
 
@@ -212,8 +212,8 @@ export interface FileImportDeps {
   v2: FileKeySuite;
   /** 查询可用空间（字节）：path 为空表示容器卷（导入前预检用） */
   freeSpaceBytes: (path: string | null) => Promise<number>;
-  /** 扫描遗留会话日志（断点去重集合；失败不阻断） */
-  walRecover: () => Promise<{ ok: boolean; hashes: string[] }>;
+  /** 扫描遗留会话日志（断点条目键集合；失败不阻断） */
+  walRecover: () => Promise<{ ok: boolean; entry_keys: string[] }>;
   /** 创建导入会话 */
   importBegin: () => Promise<ImportBeginResult>;
   /** 结束导入会话（成功语义触发日志压缩） */
@@ -266,10 +266,22 @@ interface UploadPassResult {
   fileHash: string;
 }
 
-/** 会话建立结果（成功携带去重集合，失败携带原因） */
+/** 会话建立结果（成功携带续传条目键集合，失败携带原因） */
 type SessionStart =
-  | { ok: true; hashes: string[] }
+  | { ok: true; entry_keys: string[] }
   | { ok: false; error: string };
+
+/** 生成非内容条目键：路径/长度/修改时间的 SHA-256。 */
+function makeEntryKey(file: ImportSourceFile, snapshot: FileSnapshot): string {
+  return bytesToHex(
+    sha256(new TextEncoder().encode(`file|${file.path}|${snapshot.size}|${snapshot.mtime_ms}`)),
+  );
+}
+
+/** 由条目键与块序号派生非内容块键。 */
+function makeChunkKey(entryKey: string, seq: number): string {
+  return bytesToHex(sha256(new TextEncoder().encode(`chunk|${entryKey}|${seq}`)));
+}
 
 /**
  * 执行导入。
@@ -308,11 +320,7 @@ export async function runFileImport(
   }
 
   /** 会话级去重集合（遗留集合 + 本轮已提交文件；文件级跳过判定依据） */
-  const committed = new Set<string>(session.hashes);
-  // 去重集合为容器级共享：只要容器内发生过任何批量导入（含照片链路），
-  // 集合即非空，本轮按"只读轮 + 上传轮"两遍形态执行——续传场景的跳过
-  // 正确性优先于一轮额外读取的开销；两侧去重键的构造域不同，不会互相误跳过。
-  const twoPass = session.hashes.length > 0;
+  const committed = new Set<string>(session.entry_keys);
 
   for (let i = 0; i < files.length; i++) {
     if (deps.isCancelled()) {
@@ -324,14 +332,12 @@ export async function runFileImport(
       fileIndex: i,
       fileCount: files.length,
       fileName: file.name,
-      scanShare: twoPass ? 0.5 : 0,
     });
     try {
       const outcome = await importOneFile(
         file,
         password,
         encrypted,
-        twoPass,
         perBatch,
         committed,
         report,
@@ -400,7 +406,7 @@ async function beginSession(deps: FileImportDeps): Promise<SessionStart> {
   if (!begin.ok) {
     return { ok: false, error: begin.error ?? "导入初始化失败" };
   }
-  return { ok: true, hashes: begin.hashes };
+  return { ok: true, entry_keys: begin.entry_keys };
 }
 
 /** 结束导入会话：失败重试一次，仍失败则强制清理残留（断点状态保留） */
@@ -420,24 +426,21 @@ async function endSessionSafely(deps: FileImportDeps, success: boolean): Promise
   return false;
 }
 
-/** 构造进度上报函数（把两轮形态的完成度折算为单一文件比例） */
+/** 构造进度上报函数（按块完成度折算为单一文件比例） */
 function makeProgressReporter(
   deps: FileImportDeps,
-  meta: { fileIndex: number; fileCount: number; fileName: string; scanShare: number },
-): (done: number, total: number, phase: "scan" | "upload") => void {
-  return (done, total, phase) => {
+  meta: { fileIndex: number; fileCount: number; fileName: string },
+): (done: number, total: number) => void {
+  return (done, total) => {
     if (!deps.onProgress) return;
     const inner = total === 0 ? 1 : done / total;
-    const base = phase === "scan" ? 0 : meta.scanShare;
-    const share = phase === "scan" ? meta.scanShare : 1 - meta.scanShare;
     deps.onProgress({
       fileIndex: meta.fileIndex,
       fileCount: meta.fileCount,
       fileName: meta.fileName,
       doneInFile: done,
       totalInFile: total,
-      phase,
-      fileFraction: Math.max(0, Math.min(1, base + inner * share)),
+      fileFraction: Math.max(0, Math.min(1, inner)),
     });
   };
 }
@@ -452,13 +455,13 @@ async function importOneFile(
   file: ImportSourceFile,
   password: string | null,
   encrypted: boolean,
-  twoPass: boolean,
   perBatch: number,
   committed: Set<string>,
-  report: (done: number, total: number, phase: "scan" | "upload") => void,
+  report: (done: number, total: number) => void,
   deps: FileImportDeps,
 ): Promise<{ kind: "imported"; entry: ImportedFileEntry } | { kind: "skipped" }> {
   const snapshot = await takeSnapshot(file, deps);
+  const entryKey = makeEntryKey(file, snapshot);
   // 体量预检：超限文件在读取任何分片之前拒绝（上限为跨层预算常量单一权威来源）
   if (snapshot.size > USER_FILE_SIZE_LIMIT) {
     throw new ImportAbort(
@@ -467,7 +470,12 @@ async function importOneFile(
     );
   }
   const totalChunks = snapshot.size === 0 ? 0 : Math.ceil(snapshot.size / CHUNK_SIZE);
-  report(0, totalChunks, twoPass ? "scan" : "upload");
+  report(0, totalChunks);
+
+  /* 非内容条目键决定是否续传跳过；不是内容哈希，不能确认内容存在性。 */
+  if (committed.has(entryKey)) {
+    return { kind: "skipped" };
+  }
 
   // 容器卷空间预检：不足即前置拒绝（不读块、不建块记录）。
   // 读数不可得时不阻断（前置预检为尽力而为；真实写入失败仍会在写者处以
@@ -489,22 +497,13 @@ async function importOneFile(
     }
   }
 
-  // 文件级 KDF 公开参数：加密条目在只读轮之前生成一次，两轮与后续写入共用
+  // 文件级 KDF 公开参数：每个加密文件生成一次，块加密与元数据写入共用
   let kdf: FileKdfV2 | null = null;
   if (encrypted && password) {
     try {
       kdf = await deps.v2.createFileKdf();
     } catch (e) {
       throw new ImportAbort("E_ENCRYPT_FAILED", `文件密钥派生失败：${errorText(e)}`);
-    }
-  }
-
-  // 重复判定：仅当会话存在遗留去重集合时才值得先做整轮只读哈希
-  let knownHash: string | null = null;
-  if (twoPass) {
-    knownHash = await scanFileHash(file, snapshot, encrypted, perBatch, report, deps);
-    if (committed.has(knownHash)) {
-      return { kind: "skipped" };
     }
   }
 
@@ -515,22 +514,16 @@ async function importOneFile(
     password ?? "",
     encrypted,
     perBatch,
-    knownHash,
+    entryKey,
     report,
     deps,
   );
-  report(totalChunks, totalChunks, "upload");
-
-  // 单遍形态下上传完成才知文件哈希：同轮重复内容显式跳过（块已上传，
-  // 无口令时同哈希复用既有块记录，有口令时的多余块由孤儿回收处理）
-  if (committed.has(uploaded.fileHash)) {
-    return { kind: "skipped" };
-  }
+  report(totalChunks, totalChunks);
 
   const entry = await writeMeta(
-    file, snapshot, totalChunks, encrypted, kdf, password ?? "", uploaded, deps,
+    file, snapshot, totalChunks, encrypted, kdf, password ?? "", uploaded, entryKey, deps,
   );
-  committed.add(uploaded.fileHash);
+  committed.add(entryKey);
   if (entry === null) {
     // 后端按会话日志跳过：键已提交，按跳过入账（不计成功、不产生条目）
     return { kind: "skipped" };
@@ -592,50 +585,9 @@ async function readChunkExact(
 }
 
 /**
- * 整轮只读哈希：逐块读取并汇算去重键，不做加密与上传。
+ * 读取并上传整轮：逐块读取 → 可选文件级加密 → 上传块批 → 汇算内容摘要。
  *
- * 用于续传场景的重复判定；结束前做总字节断言与身份复查。
- */
-async function scanFileHash(
-  file: ImportSourceFile,
-  snapshot: FileSnapshot,
-  encrypted: boolean,
-  perBatch: number,
-  report: (done: number, total: number, phase: "scan" | "upload") => void,
-  deps: FileImportDeps,
-): Promise<string> {
-  const totalChunks = snapshot.size === 0 ? 0 : Math.ceil(snapshot.size / CHUNK_SIZE);
-  const hasher = await createBLAKE3();
-  hasher.init();
-
-  let bytesRead = 0;
-  for (let i = 0; i < totalChunks; i++) {
-    if (deps.isCancelled()) throw new ImportCancelled();
-    const offset = i * CHUNK_SIZE;
-    const length = Math.min(CHUNK_SIZE, snapshot.size - offset);
-    const plain = await readChunkExact(file, offset, length, i, deps);
-    hasher.update(plain);
-    plain.fill(0);
-    bytesRead += length;
-    report(i + 1, totalChunks, "scan");
-    if ((i + 1) % perBatch === 0) {
-      await checkIdentity(file, snapshot, deps);
-    }
-  }
-
-  await checkIdentity(file, snapshot, deps);
-  if (bytesRead !== snapshot.size) {
-    throw new ImportAbort("E_FILE_CHANGED", "已读字节数与文件长度不符，本次导入已中止");
-  }
-  hasher.update(fileHashSuffix(encrypted));
-  return hasher.digest("hex");
-}
-
-/**
- * 读取并上传整轮：逐块读取 → 可选文件级加密 → 上传块批 → 汇算文件哈希。
- *
- * @param knownHash 只读轮已算出的去重键；为空表示单遍形态（本轮汇算）。
- *                  非空时本轮重算并与该值比对，两轮内容不一致即中止。
+ * @param entryKey 非内容条目键（块键由其与块序号派生）
  */
 async function readAndUpload(
   file: ImportSourceFile,
@@ -644,8 +596,8 @@ async function readAndUpload(
   password: string,
   encrypted: boolean,
   perBatch: number,
-  knownHash: string | null,
-  report: (done: number, total: number, phase: "scan" | "upload") => void,
+  entryKey: string,
+  report: (done: number, total: number) => void,
   deps: FileImportDeps,
 ): Promise<UploadPassResult> {
   const totalChunks = snapshot.size === 0 ? 0 : Math.ceil(snapshot.size / CHUNK_SIZE);
@@ -688,13 +640,17 @@ async function readAndUpload(
         cipherBytes = plain;
       }
 
-      // 文件哈希按明文汇算：与加密形态解耦，同内容同形态命中去重键
+      // 内容摘要按明文汇算：仅作完整性口径，不参与去重/寻址
       fileHasher.update(plain);
       chunkHasher.init();
       chunkHasher.update(cipherBytes);
       const chunkHash = chunkHasher.digest("hex");
       batchHashes.push(chunkHash);
-      blobs.push({ hash: chunkHash, data_b64: cipherB64, rtype: TYPE_FILEVERTHYS_CHUNK });
+      blobs.push({
+        chunk_key: makeChunkKey(entryKey, index),
+        data_b64: cipherB64,
+        rtype: TYPE_FILEVERTHYS_CHUNK,
+      });
 
       // 明文与密文缓冲用后清零（无口令时两者为同一缓冲，单次清零即可）
       plain.fill(0);
@@ -721,7 +677,7 @@ async function readAndUpload(
     chunkIds.push(...resp.ids);
     chunkHashes.push(...batchHashes);
     // 进度在整批落库成功后才上报：批写入失败时进度不得先走到 100%
-    report(upper, totalChunks, "upload");
+    report(upper, totalChunks);
 
     await checkIdentity(file, snapshot, deps);
   }
@@ -733,10 +689,6 @@ async function readAndUpload(
 
   fileHasher.update(fileHashSuffix(encrypted));
   const fileHash = fileHasher.digest("hex");
-  if (knownHash !== null && fileHash !== knownHash) {
-    // 两轮读到不同内容：长度与时间戳被还原的隐性改写在此暴露
-    throw new ImportAbort("E_FILE_CHANGED", "源文件在导入过程中被修改，本次导入已中止");
-  }
 
   return { chunkIds, chunkHashes, fileHash };
 }
@@ -763,6 +715,7 @@ async function writeMeta(
   kdf: FileKdfV2 | null,
   password: string,
   uploaded: UploadPassResult,
+  entryKey: string,
   deps: FileImportDeps,
 ): Promise<ImportedFileEntry | null> {
   // 口令判定块的唯一权威值：加密条目必携；生成失败即整文件失败
@@ -789,6 +742,7 @@ async function writeMeta(
     totalChunks,
     encrypted,
     fileHash: uploaded.fileHash,
+    entryKey,
     // 明文条目无口令校验面：两个字段均不写
     ...(passwordCheck && kdf ? { kdf, passwordCheck } : {}),
   };
@@ -797,7 +751,7 @@ async function writeMeta(
   const record: BatchRecordInput = {
     rtype: TYPE_FILEVERTHYS_META,
     name: metaName,
-    hash: uploaded.fileHash,
+    entry_key: entryKey,
     data_b64: metaB64,
     chunk_ids: uploaded.chunkIds,
     chunk_hashes: uploaded.chunkHashes,
@@ -840,6 +794,7 @@ async function writeMeta(
     chunkHashes: uploaded.chunkHashes,
     chunkSize: CHUNK_SIZE,
     fileHash: uploaded.fileHash,
+    entryKey,
     ...(passwordCheck && kdf ? { kdf: kdf, passwordCheck } : {}),
   };
 }

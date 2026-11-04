@@ -55,6 +55,8 @@ export interface KeyState {
   hasModuleKeyRecord: Ref<Record<ModuleId, boolean>>;
   /** 各模块密钥保护开关 */
   moduleKeyEnabled: Ref<Record<ModuleId, boolean>>;
+  /** 各模块是否已绑定恢复槽（换机恢复该模块的前提） */
+  moduleHasRecovery: Ref<Record<ModuleId, boolean>>;
   /** 修复：模块密钥状态后台加载标志（修复4）
    *
    * initUnlock 将 loadModuleKeyStatus 移至后台非阻塞执行（根治"正在加载密钥配置…"卡慢）。
@@ -98,6 +100,8 @@ export interface KeyState {
    * 当 repair_fail_count >= 3 时携带"状态文件写入异常"告警，
    * 引导用户检查磁盘空间与权限。 */
   initDetail: Ref<string>;
+  /** 会话级状态版本：轮换提交等全局状态变化后自增，面板据此重查权威状态 */
+  verthysStateVersion: Ref<number>;
 }
 
 export const keyState: KeyState = {
@@ -109,16 +113,12 @@ export const keyState: KeyState = {
   globalKeyRecordId: ref(0),
   moduleKeyReady: ref({ photo: false, accounts: false, fileverthys: false }),
   hasModuleKeyRecord: ref({ photo: false, accounts: false, fileverthys: false }),
-  // 修复修复：moduleKeyEnabled 默认 false（安全默认）
-  //
-  // 原缺陷：默认 true 意味着"保护开关开启"=所有模块需密钥验证。
-  // 当 loadModuleKeyStatus 失败/未调用时，全部模块显示为已开启保护，
-  // 用户看到"全部模块被自动开启了密钥"——与实际 verthys 配置不符。
-  //
-  // 修复：默认 false（无配置记录时不开启保护）。
-  // 仅当 verthys 中存在 TYPE_MODULE_KEY_CONFIG 记录且 enabled=true 时才开启。
-  // 这确保"未被用户显式配置的模块"不会自动启用密钥验证。
+  /* moduleKeyEnabled 默认 false（安全默认）。
+   * 权威来源是 C 层 v4 模块状态（`v4_module_status`）：只有 M1 保护真正
+   * 启用（MDEK 已移出 Keyring）的模块才置 true。查询失败时守卫按
+   * moduleKeyStatusFailed fail-closed，不把"未知"当成"保护关闭"。 */
   moduleKeyEnabled: ref({ photo: false, accounts: false, fileverthys: false }),
+  moduleHasRecovery: ref({ photo: false, accounts: false, fileverthys: false }),
   // 修复修复4：模块密钥状态后台加载标志（初始 false，解锁后置 true）
   moduleKeyStatusLoading: ref(false),
   // 安全守卫根治：模块密钥状态已加载完成标志（初始 false，loadModuleKeyStatus 完成时置 true）
@@ -132,6 +132,7 @@ export const keyState: KeyState = {
   storedVerthysPath: ref(""),
   lastInitError: ref(""),
   initDetail: ref(""),
+  verthysStateVersion: ref(0),
 };
 
 /* ------------------------------------------------------------------ *
@@ -147,6 +148,11 @@ export function getCurrentVerthysPath(): string {
 
 export function setCurrentVerthysPath(path: string): void {
   _currentVerthysPath = path;
+}
+
+/** 通知自包含面板重查权威状态（轮换提交后恢复态/模块态可能变化）。 */
+export function bumpVerthysState(): void {
+  keyState.verthysStateVersion.value += 1;
 }
 
 /* ------------------------------------------------------------------ *
@@ -167,10 +173,10 @@ export function resetAllState(): void {
   keyState.globalKeyRecordB64.value = "";
   keyState.globalKeyRecordId.value = 0;
   _currentVerthysPath = "";
-  // moduleKeyCache is in cache/composition/verthys-cache.ts, cleared via clearModuleCache there
   keyState.moduleKeyReady.value = { photo: false, accounts: false, fileverthys: false };
   // 修复修复：重置为安全默认 false（与初始化默认一致）
   keyState.moduleKeyEnabled.value = { photo: false, accounts: false, fileverthys: false };
+  keyState.moduleHasRecovery.value = { photo: false, accounts: false, fileverthys: false };
   keyState.hasModuleKeyRecord.value = { photo: false, accounts: false, fileverthys: false };
   // 修复修复4：重置后台加载标志
   keyState.moduleKeyStatusLoading.value = false;

@@ -7,9 +7,9 @@
  * （尾分隔符/结尾边界）必须通过。修复前 _wcsnicmp 纯前缀比较会使旁路
  * 路径误通过（该路径加载的 DLL 被当作可信 System32 模块接受）。
  *
- * 测试经 system32_loader_dir_prefix_test 白盒直取判定函数（初始化后），
- * 并辅以真实 system32_loader_load 完整链路（真实 System32 DLL 加载通过、
- * 路径校验不误拒）。
+ * 测试经 system32_loader_dir_prefix_test 白盒直取判定函数（初始化后）。
+ * 加载函数 system32_loader_load 无生产调用点，已随 WP-12 删除，
+ * 对应完整链路用例一并移除。
  */
 #include "verthys_test.h"
 #include "system32_loader.h"
@@ -69,26 +69,4 @@ TEST(sys32_prefix_boundary_rejects_sibling)
     return 0;
 }
 
-/* 完整加载链路：真实 System32 DLL 经 system32_loader_load 通过（校验不误拒） */
-TEST(sys32_load_real_system32_dll)
-{
-    void *h = NULL;
-    int rc = -1;
-
-    CHECK_EQ(system32_loader_init(), 0);
-
-    /* advapi32 已由进程加载：LoadLibraryEx 返回既有句柄，路径校验走全链路 */
-    rc = system32_loader_load(L"advapi32.dll", &h);
-    CHECK_EQ(rc, 0);
-    if (h != NULL) FreeLibrary((HMODULE)h);
-    return 0;
-}
-
-/* 非法参数：路径分隔符 / NULL 显式拒绝（既有契约回归） */
-TEST(sys32_load_rejects_path_and_null)
-{
-    CHECK_EQ(system32_loader_init(), 0);
-    CHECK(system32_loader_load(L"..\\evil.dll", NULL) != 0);
-    CHECK(system32_loader_load(NULL, NULL) != 0);
-    return 0;
-}
+/* 完整加载链路与参数校验用例随 system32_loader_load 删除一并移除。 */

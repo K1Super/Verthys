@@ -1,14 +1,16 @@
 <!--
   ManagementTopBar.vue — 管理界面会话谱线（无卡片顶栏）
-  设计：引力谱系 · sf-meridian —— 状态脉动点 + 行内文本 + 接线端子，
+  设计：引力谱系 · sf-meridian —— 状态脉动点 + 行内文本 + 机械刻度动作节点，
   水平能量丝线收尾（零底板/零边框/零阴影）
 
   职责：
     1. 全局密钥状态脉动点（on=青绿呼吸 / 琥珀静止）
     2. 状态文本（标题 + 子标题含会话空闲倒计时，mono 微文）
-    3. 更新端子（无可用更新=检查；有可用更新=更新到指定版本）
-    4. 更新下载中：端子下沿分段刻度按格点亮，主/次刻度构成机械量表
-    5. 立即锁定端子（sf-terminal--warn，禁用条件：!globalKeyReady）
+    3. 动作节点（更新 / 立即锁定）：纯图标机械刻度键，
+       语义全部由悬浮提示与 aria-label 承载
+    4. 更新进行中：图标旋转 + 环形刻度量表按格点亮，
+       不可取消阶段保持量表可读
+    5. 立即锁定节点（sf-act--warn，禁用条件：!globalKeyReady）
 
   Props: globalKeyReady / sessionRemaining / idleLockEnabled
          / updateAvailable / updateVersion / updateChecking / updateInstalling
@@ -31,49 +33,69 @@
       </div>
     </div>
     <div class="sf-meridian-actions">
-      <button
-        class="sf-terminal sf-terminal--update"
-        :class="{ 'is-progressing': updateInstalling }"
+      <SfActionNode
+        :label="updateTooltip"
+        tone="update"
         :disabled="updateChecking || (updateInstalling && !updateCancellable)"
+        :busy="updateChecking || (updateInstalling && !updateCancellable)"
+        :progressing="updateInstalling"
+        :cancel="updateCancellable"
         @click="onUpdateClick"
-        v-tip="updateTooltip"
       >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v4h-4"/></svg>
-        {{ updateLabel }}
-        <span v-if="updateInstalling" class="sf-update-scale" aria-hidden="true">
-          <span
-            v-for="tick in updateTicks"
-            :key="tick.index"
-            class="sf-update-tick"
-            :class="{ 'is-major': tick.major, 'is-lit': tick.lit }"
-            :style="{ '--sf-tick-color': tick.color }"
-          ></span>
-        </span>
-      </button>
-      <button
-        v-if="updateFailed"
-        class="sf-terminal"
-        @click="$emit('exportLogs')"
-        v-tip="'导出更新日志用于排查'"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg>
-        日志
-      </button>
-      <button
-        class="sf-terminal sf-terminal--warn"
-        @click="$emit('lockAll')"
+        <svg
+          v-if="updateCancellable"
+          class="sf-act-icon"
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+        ><path d="M6 6l12 12M18 6 6 18"/></svg>
+        <svg
+          v-else
+          class="sf-act-icon"
+          :class="{ 'is-spinning': updateChecking || updateInstalling }"
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+        ><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v4h-4"/></svg>
+        <template #overlay>
+          <span v-if="updateAvailable && !updateInstalling" class="sf-act-badge" aria-hidden="true"></span>
+          <span v-if="updateInstalling" class="sf-update-dial" aria-hidden="true">
+            <span
+              v-for="tick in updateTicks"
+              :key="tick.index"
+              class="sf-update-tick"
+              :class="{ 'is-major': tick.major, 'is-lit': tick.lit }"
+              :style="{ '--sf-tick-angle': `${tick.angle}deg`, '--sf-tick-color': tick.color }"
+            ></span>
+          </span>
+        </template>
+      </SfActionNode>
+      <SfActionNode
+        label="锁定全部并清零内存密钥"
+        tone="warn"
         :disabled="!globalKeyReady"
-        v-tip="'锁定全部并清零内存密钥'"
+        @click="$emit('lockAll')"
       >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-        立即锁定
-      </button>
+        <svg
+          class="sf-act-icon"
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+        ><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      </SfActionNode>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from "vue";
+import SfActionNode from "./SfActionNode.vue";
 
 /**
  * ManagementTopBar Props
@@ -97,8 +119,6 @@ const props = defineProps<{
   updatePercent: number;
   /** 下载阶段允许取消；锁库与安装移交期间为 false */
   updateCancellable: boolean;
-  /** 最近一次更新失败，展示日志导出入口 */
-  updateFailed: boolean;
 }>();
 
 /**
@@ -113,25 +133,18 @@ const emit = defineEmits<{
   (e: "installUpdate"): void;
   /** 取消当前下载 */
   (e: "cancelUpdate"): void;
-  /** 导出更新日志 */
-  (e: "exportLogs"): void;
 }>();
 
-/** 端子文案：取消下载 / 更新中（含进度）/ 检查中 / 更新到指定版本 */
-const updateLabel = computed(() => {
-  if (props.updateCancellable) return "取消更新";
+/** 纯图标节点的语义入口：覆盖检查 / 下载 / 安装 / 取消全阶段，
+ * 同时作为 aria-label 与悬浮提示，避免图标在不可取消阶段失去可解释性 */
+const updateTooltip = computed(() => {
+  if (props.updateCancellable) return "取消下载并清理已接收数据";
   if (props.updateInstalling) {
     return props.updatePercent > 0 ? `正在更新 ${props.updatePercent}%` : "正在更新…";
   }
-  if (props.updateChecking) return "检查中…";
-  return props.updateAvailable ? `更新到 ${props.updateVersion}` : "检查更新";
-});
-
-/** 取消态使用独立提示，避免用户把取消误解为再次安装 */
-const updateTooltip = computed(() => {
-  if (props.updateCancellable) return "取消下载并清理已接收数据";
+  if (props.updateChecking) return "正在检查更新…";
   return props.updateAvailable
-    ? "下载并安装新版本（安装前自动落盘并锁定）"
+    ? `更新到 ${props.updateVersion}（安装前自动落盘并锁定）`
     : "检查是否有可用更新";
 });
 
@@ -148,7 +161,8 @@ function onUpdateClick(): void {
   }
 }
 
-/** 机械量表刻度数；固定数量保证文案宽度变化时刻度间距稳定重排，不改变刻度身份 */
+/** 环形量表刻度数；固定数量与角度保证进度推进时刻度身份不变，
+ * 不会出现刻度沿圆周重排的旋涡感 */
 const UPDATE_TICK_COUNT = 30;
 
 /** 首尾端桩与每五格主刻度同高，构成可读的量表节拍 */
@@ -173,6 +187,7 @@ const litTickCount = computed(() => {
 const updateTicks = computed(() =>
   Array.from({ length: UPDATE_TICK_COUNT }, (_, index) => ({
     index,
+    angle: (index / UPDATE_TICK_COUNT) * 360,
     major: isMajorTick(index),
     lit: index < litTickCount.value,
     color: UPDATE_TICK_COLORS[index],

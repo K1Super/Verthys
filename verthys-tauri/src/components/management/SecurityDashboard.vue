@@ -8,7 +8,8 @@
                   点亮=能量进程）+ 基准桩锚点（错落桩高，端点锚兼作
                   左高右低终点桩）+ 游标天平（速度感应摆锤，欠阻尼弹簧）
     3. cus-board  自定义防护：常驻分区（标题行 + 双列错位端子排 +
-                  空闲锁定时长拖拽谱线），与安全防护/动态防护同构
+                  空闲锁定时长拖拽谱线）；非自定义档展示当前档位真实
+                  生效状态，改动即自动保存为自定义档
     4. cap-board  安全防护栏：双列错位端子排清单（圆点状态位 +
                   功能名称 + 核心标签 + 虚线引出线）
     5. def-board  动态防护：七攻击路径端子排诊断（四态语义色
@@ -21,7 +22,7 @@
     1. 双星引力场（左星 CPU 占用 + 质心综合评分 + 右星 安全覆盖）
     2. 引力测线滑块（三基准桩磁性吸附 + 潮汐亮层 + 游标天平）
     3. 自定义防护（toggleableFeatures 开关端子排 + 空闲锁定时长拖拽虚线 +
-       toast 反馈 + 恢复默认/保存应用）
+       toast 反馈 + 恢复默认；改动自动保存，无独立保存按钮）
     4. 安全防护栏（lockedFeatures 清单：圆点 + 名称 + 核心）
     5. 动态防护状态（defensePaths：7 攻击路径 × 4 态 + defenseMeta 态势）
     6. 数据流转轨道（磁盘→内存走线 + 站点 + 运行状态文字）
@@ -30,10 +31,10 @@
          cpuOverhead / securityCoverage / overallScore / ringCircumference /
          ringDashOffset(fn) / orbitAnchors / nearestAnchorIdx / activeAnchorIdx /
          orbitTrackGradient / toggleableFeatures / lockedFeatures / customFeatures /
-         customSessionMinutes / defensePaths / defenseMeta
+         customMode / presetIdleMinutes / customSessionMinutes / defensePaths / defenseMeta
   Model: orbitSliderPos
-  Emits: toggleCustomFeature / resetCustom / applyCustom /
-         setCustomSessionMinutes / orbitSliderInput / orbitSliderRelease / snapToAnchor(idx)
+  Emits: toggleCustomFeature / resetCustom / setCustomSessionMinutes /
+         orbitSliderInput / orbitSliderRelease / snapToAnchor(idx)
 
   拖拽性能架构：
     - 连续浮点 pointer 驱动：抛弃 range 整数步进，pointermove 按测线
@@ -225,20 +226,22 @@
           <span class="cap-glyph" aria-hidden="true"></span>
           <span class="cus-title">自定义防护</span>
           <div class="cus-actions">
-            <button
-              class="sf-terminal"
+            <SfActionNode
+              label="恢复自定义防护的默认配置"
               :disabled="!globalKeyReady || presetApplying"
               @click="$emit('resetCustom')"
-            >恢复默认</button>
-            <button
-              class="sf-terminal"
-              :disabled="!globalKeyReady || presetApplying"
-              @click="$emit('applyCustom')"
             >
-              {{ presetApplying ? '应用中…' : '保存应用' }}
-            </button>
+              <svg
+                class="sf-act-icon"
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+              ><path d="M4 12a8 8 0 1 1 2.34 5.66"/><path d="M4 4v4h4"/></svg>
+            </SfActionNode>
           </div>
-          <span class="cus-count">{{ customEnabledCount }}/{{ toggleableFeatures.length }}</span>
+          <span class="cus-count">{{ customCountText }}</span>
         </div>
         <ul class="cus-ledger">
           <li
@@ -248,7 +251,8 @@
             :class="[
               `cus-item-${i}`,
               {
-                off: !customFeatures[feat.key],
+                off: featureState(feat.key) === 'off',
+                unknown: featureState(feat.key) === 'unknown',
                 'cus-item--idle': feat.key === 'session_lock_on_idle',
               },
             ]"
@@ -259,22 +263,22 @@
             <template v-if="feat.key === 'session_lock_on_idle'">
               <button
                 class="cus-toggle"
-                :disabled="!globalKeyReady || presetApplying"
-                :aria-pressed="!!customFeatures[feat.key]"
+                :disabled="!globalKeyReady || presetApplying || featureState(feat.key) === 'unknown'"
+                :aria-pressed="featureState(feat.key) === 'on'"
                 v-tip="feat.desc"
                 @click="$emit('toggleCustomFeature', feat.key)"
               >
                 <span class="cus-dot" aria-hidden="true"></span>
                 <span class="cus-name">{{ feat.label }}</span>
-                <span class="cus-tag">{{ customFeatures[feat.key] ? '启用' : '关闭' }}</span>
+                <span class="cus-tag">{{ featureTag(feat.key) }}</span>
               </button>
               <div
                 :ref="bindTimeoutTrack"
                 class="cus-idle-track"
-                :class="{ enabled: customFeatures[feat.key] }"
+                :class="{ enabled: featureState(feat.key) === 'on' }"
                 role="slider"
-                :tabindex="customFeatures[feat.key] ? 0 : -1"
-                :aria-disabled="!customFeatures[feat.key]"
+                :tabindex="featureState(feat.key) === 'on' && !presetApplying ? 0 : -1"
+                :aria-disabled="featureState(feat.key) !== 'on' || presetApplying"
                 :aria-label="'空闲锁定时长（分钟）'"
                 :aria-valuemin="CUSTOM_SESSION_MINUTES_MIN"
                 :aria-valuemax="CUSTOM_SESSION_MINUTES_MAX"
@@ -291,14 +295,14 @@
             <button
               v-else
               class="cus-toggle"
-              :disabled="!globalKeyReady || presetApplying"
-              :aria-pressed="!!customFeatures[feat.key]"
+              :disabled="!globalKeyReady || presetApplying || featureState(feat.key) === 'unknown'"
+              :aria-pressed="featureState(feat.key) === 'on'"
               v-tip="feat.desc"
               @click="$emit('toggleCustomFeature', feat.key)"
             >
               <span class="cus-dot" aria-hidden="true"></span>
               <span class="cus-name">{{ feat.label }}</span>
-              <span class="cus-tag">{{ customFeatures[feat.key] ? '启用' : '关闭' }}</span>
+              <span class="cus-tag">{{ featureTag(feat.key) }}</span>
               <span class="cus-lead" aria-hidden="true"></span>
             </button>
           </li>
@@ -345,7 +349,7 @@
             :key="p.key"
             class="def-item"
             :class="`def-item--${p.stateClass}`"
-            v-tip="p.desc"
+            v-tip="p.reason ? `${p.desc} · ${p.reasonLabel}` : p.desc"
           >
             <span class="def-dot" aria-hidden="true"></span>
             <span class="def-name">{{ p.label }}</span>
@@ -357,12 +361,9 @@
         <div
           v-if="defenseMeta.stance !== 'ok' || defenseMeta.stale"
           class="def-stance"
-          :class="`def-stance--${defenseMeta.stance}`"
         >
-          <span class="def-stance-mark" aria-hidden="true"></span>
-          <span class="def-stance-text">{{ defenseMeta.stanceLabel }}</span>
           <span class="def-stance-detail">
-            阻断 {{ defenseMeta.blocked }} · 降级 {{ defenseMeta.degraded }} · 失败 {{ defenseMeta.failed }}{{ defenseMeta.stale ? ' · 数据陈旧' : '' }}
+            阻断 {{ defenseMeta.blocked }} · 降级 {{ defenseMeta.degraded }} · 失败 {{ defenseMeta.failed }}{{ defenseMeta.checkedAtLabel ? ` · 采样 ${defenseMeta.checkedAtLabel}` : '' }}{{ defenseMeta.stale ? ' · 数据陈旧' : '' }}
           </span>
         </div>
       </div>
@@ -425,6 +426,7 @@ import {
   CUSTOM_SESSION_MINUTES_MIN,
   CUSTOM_SESSION_MINUTES_MAX,
 } from "../../constants/key_manager_const";
+import SfActionNode from "./SfActionNode.vue";
 
 /**
  * SecurityDashboard Props
@@ -460,8 +462,12 @@ const props = defineProps<{
   lockedFeatures: Array<{ key: string; label: string; desc: string }>;
   /** 已应用预设特性开关快照（后端权威配置 —— 能力状态栏真实状态源） */
   presetFeatures: Record<string, boolean>;
-  /** 自定义特性配置（谱线开关状态） */
+  /** 自定义特性配置（仅自定义档用于编辑的草稿） */
   customFeatures: Record<string, boolean>;
+  /** 当前是否为自定义档；false 时自定义防护展示当前档位真实生效状态 */
+  customMode: boolean;
+  /** 非自定义档空闲锁定时长（分钟，当前档位真实值，只读展示） */
+  presetIdleMinutes: number;
   /** 自定义档空闲锁定时长（分钟，仅自定义档生效） */
   customSessionMinutes: number;
   /** 动态防护路径状态列表（7 攻击路径 × 4 态端子排） */
@@ -505,8 +511,6 @@ const emit = defineEmits<{
   (e: "toggleCustomFeature", key: string): void;
   /** 恢复自定义默认 */
   (e: "resetCustom"): void;
-  /** 保存应用自定义配置 */
-  (e: "applyCustom"): void;
   /** 设置自定义档空闲锁定时长（分钟） */
   (e: "setCustomSessionMinutes", minutes: number): void;
   /** 轨道滑块输入中 */
@@ -527,10 +531,34 @@ const { showStatus } = useToastCenter();
    时长通过统一 toast 反馈，关闭态不显示进度层且不可拖动。
    ============================================================ */
 
-/** 当前启用特性数（标题行计数） */
-const customEnabledCount = computed(
-  () => props.toggleableFeatures.filter((f) => props.customFeatures[f.key]).length,
+/** 自定义防护展示态：自定义档读草稿，其余档位读当前档位真实快照 */
+const featureState = (key: string): "on" | "off" | "unknown" => {
+  if (props.customMode) return props.customFeatures[key] ? "on" : "off";
+  if (props.presetSyncFailed) return "unknown";
+  const value = props.presetFeatures[key];
+  return value === true ? "on" : value === false ? "off" : "unknown";
+};
+
+const featureTag = (key: string): string => {
+  const state = featureState(key);
+  return state === "on" ? "启用" : state === "off" ? "关闭" : "未确认";
+};
+
+/** 谱线展示的空闲锁定时长：自定义档读草稿，其余档位读当前档位真实值 */
+const displayIdleMinutes = computed(() =>
+  props.customMode ? props.customSessionMinutes : props.presetIdleMinutes,
 );
+
+/** 当前启用特性数（标题行计数；未确认与在途应用都不得伪装成具体计数） */
+const customCountText = computed(() => {
+  if (props.presetApplying) return "同步中";
+  const unknown = props.toggleableFeatures.some((f) => featureState(f.key) === "unknown");
+  if (unknown) return "未确认";
+  const enabled = props.toggleableFeatures.filter(
+    (f) => featureState(f.key) === "on",
+  ).length;
+  return `${enabled}/${props.toggleableFeatures.length}`;
+});
 
 /** 时长轨道与彩色进度层（函数式 ref：元素位于 v-for 内，模板 ref 会被收集成数组） */
 let timeoutTrackEl: HTMLElement | null = null;
@@ -544,7 +572,7 @@ const bindTimeoutLit = (el: unknown) => {
 
 /** 拖拽中标志与当前读数（非响应式：拖拽不触发组件重渲染） */
 let timeoutDragging = false;
-let dragMinutes = props.customSessionMinutes;
+let dragMinutes = displayIdleMinutes.value;
 /** 按下时缓存的轨道几何（拖拽期零布局读取） */
 let trackLeft = 0;
 let trackWidth = 1;
@@ -577,12 +605,14 @@ const applyTimeoutVisual = (minutes: number) => {
   }
 };
 
-/* 挂载播种 + 父层草稿变化同步（拖拽期以拖拽读数为准，不被覆盖） */
-onMounted(() => applyTimeoutVisual(props.customSessionMinutes));
+/* 挂载播种 + 数据源变化同步（拖拽期以拖拽读数为准，不被覆盖）
+ * presetApplying 落回 false 时强制重播一次：自动保存失败的回滚或
+ * 非自定义档未切换成功，都必须让谱线回到真实时长而非停在拖动值。 */
+onMounted(() => applyTimeoutVisual(displayIdleMinutes.value));
 watch(
-  () => props.customSessionMinutes,
-  (minutes) => {
-    if (!timeoutDragging) applyTimeoutVisual(minutes);
+  () => [displayIdleMinutes.value, props.customMode, props.presetApplying] as const,
+  ([minutes, , applying]) => {
+    if (!timeoutDragging && !applying) applyTimeoutVisual(minutes);
   },
 );
 
@@ -612,8 +642,8 @@ const minutesFromPointer = (clientX: number): number => {
 
 const onTimeoutPointerDown = (e: PointerEvent) => {
   if (!props.globalKeyReady || props.presetApplying) return;
-  // 关闭态只展示默认虚线，不接受拖动
-  if (!props.customFeatures.session_lock_on_idle) return;
+  // 关闭或未确认态只展示虚线，不接受拖动
+  if (featureState("session_lock_on_idle") !== "on") return;
   if (e.button !== undefined && e.button !== 0) return;
   const el = timeoutTrackEl;
   if (!el) return;
@@ -654,8 +684,8 @@ const onTimeoutPointerUp = (e: PointerEvent) => {
 /** 键盘调节：方向键 ±1 分钟，Shift ±10，PageUp/PageDown ±10，Home/End 直达端点 */
 const onTimeoutKeydown = (e: KeyboardEvent) => {
   if (!props.globalKeyReady || props.presetApplying) return;
-  if (!props.customFeatures.session_lock_on_idle) return;
-  let next = props.customSessionMinutes;
+  if (featureState("session_lock_on_idle") !== "on") return;
+  let next = displayIdleMinutes.value;
   switch (e.key) {
     case "ArrowLeft":
     case "ArrowDown":

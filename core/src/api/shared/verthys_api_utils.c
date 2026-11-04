@@ -8,6 +8,8 @@
  */
 #include "verthys_api_utils.h"
 #include "vty_lockout.h"
+#include "vty_keymanager_v4.h"
+#include "vty_rotate_v4.h"
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -209,6 +211,51 @@ char *dup_string(const char *s)
     return copy;
 }
 
+/* ---------- V4 会话生命周期（进程级原子计数） ---------- */
+
+static volatile LONG s_v4_resident = 0;
+
+void v4_session_attach(struct VerthysContext *ctx, struct VtyVault *v)
+{
+    if (ctx == NULL || v == NULL) return;
+
+    if (ctx->v4 != NULL) {
+        /* 替换：旧库必须先释放，计数保持 1（会话始终存活）。 */
+        vty_vault_free(ctx->v4);
+    } else {
+        InterlockedIncrement(&s_v4_resident);
+    }
+    ctx->v4 = v;
+}
+
+void v4_session_detach(struct VerthysContext *ctx)
+{
+    if (ctx == NULL || ctx->v4 == NULL) return;
+
+    vty_vault_free(ctx->v4);
+    ctx->v4 = NULL;
+    InterlockedDecrement(&s_v4_resident);
+}
+
+void v4_session_replace_externally_freed(struct VerthysContext *ctx,
+                                         struct VtyVault *v)
+{
+    if (ctx == NULL || v == NULL) return;
+
+    /* 前置条件：旧库已由 vty_rotate_commit 清零释放，本函数只接管新库。
+     * 若旧指针为空（异常路径，正常轮换不应发生），按 attach 语义补计
+     * 一次，避免计数与实际驻留会话数漂移。 */
+    if (ctx->v4 == NULL) {
+        InterlockedIncrement(&s_v4_resident);
+    }
+    ctx->v4 = v;
+}
+
+uint32_t v4_session_resident_count(void)
+{
+    return (uint32_t)InterlockedCompareExchange(&s_v4_resident, 0, 0);
+}
+
 /* 释放 GetRecord 借用指针缓存（安全清零 + 释放） */
 void ctx_free_getrecord_cache(struct VerthysContext *ctx)
 {
@@ -237,29 +284,42 @@ void ctx_free_getrecord_cache(struct VerthysContext *ctx)
  * 亦不在本函数清零范围。 */
 void ctx_zero_sensitive(struct VerthysContext *ctx)
 {
+    /* D9 作业持有源/新库引用，必须先释放，避免 v4 被释放后悬空。 */
+    if (ctx->rotate != NULL) {
+        (void)vty_rotate_abort(ctx->rotate);
+        ctx->rotate = NULL;
+    }
+
+    /* v4 会话（若仍存活）先按锁定语义清零并释放。 */
+    v4_session_detach(ctx);
+
     /* 释放 GetRecord 借用指针缓存（明文数据/名称安全清零 + 释放） */
     ctx_free_getrecord_cache(ctx);
 
     /* 销毁 CNG 内核密钥组（BCryptDestroyKey，
-     * 内核态密钥材料不可恢复——Lock/Deinit/紧急熔断统一收口路径） */
+     * 内核态密钥材料不可恢复——Lock/Deinit/紧急熔断统一收口路径）。
+     * 产品（v4-only）不编译 v3 密钥组实现；v4 会话密钥由上方
+     * vty_vault_free 清零释放。 */
+#if defined(VERTHYS_V3_SUPPORT)
     verthys_cng_km_destroy_all(&ctx->cng_keys);
+#endif
 
     /* 格式版本复位：上下文回归 Init 零态（fmt 待下次 Unlock 重新裁决） */
     ctx->fmt_version = VERTHYS_FMT_NONE;
 }
 
-/* ---------- 格式检测（V3-only）----------
- * 读取文件头判断格式：V3 超级块首副本帧头 magic "V3RP" (0x56 0x33 0x52 0x50)。
- *
- */
+/* ---------- 格式检测 ----------
+ * 读取文件头判断格式：V3 超级块首副本帧头 magic "V3RP" (0x56 0x33 0x52 0x50)；
+ * v4 固定头 magic "VRTY" (0x56 0x52 0x54 0x59)。本函数只做路由，
+ * 版本/槽区/头哈希的深度校验归各自解锁路径。 */
 VerthysContainerVersion detect_format(const uint8_t *buf, size_t size)
 {
     if (buf == NULL || size < 8) return VERTHYS_FMT_NONE;
-    /* V3 超级块首副本帧头 magic 'V3RP'（帧惯例
-     * [u32 magic][u32 payload_len]，verthys_container_v3.h）。本函数仅做
-     * 格式路由，帧结构/法定人数深度校验归解锁流水线 S0-S3。 */
     if (buf[0] == 0x56 && buf[1] == 0x33 && buf[2] == 0x52 && buf[3] == 0x50) {
         return VERTHYS_FMT_V3;
+    }
+    if (buf[0] == 0x56 && buf[1] == 0x52 && buf[2] == 0x54 && buf[3] == 0x59) {
+        return VERTHYS_FMT_V4;
     }
     return VERTHYS_FMT_NONE;
 }

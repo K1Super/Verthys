@@ -48,6 +48,7 @@ use crate::infrastructure::path_resolver::{
 use crate::state::{AppState, InitLockGuard, SetupCache, WorkerLifecycleState};
 use crate::util::path::sanitize_path;
 use crate::worker::{kill_orphan_workers, WorkerSession};
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
 
@@ -394,6 +395,34 @@ pub async fn worker_init(
         Ok(Ok(Ok(()))) => {
             // 就绪检测通过
             log::info!("[worker_init] 子进程启动成功且就绪检测通过");
+
+            /* 挂起看门狗接线：心跳启用失败只降级（状态面板显示
+             * SUSPEND_GUARD_INACTIVE），不阻断启动。看门狗命中后由主进程
+             * 直接执行外部锁定序列，不依赖 WebView 调度。 */
+            let suspend_app = app.clone();
+            let suspend_handler: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                let app = suspend_app.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::security_commands::commands::session::perform_external_lock(
+                        app, "suspend",
+                    )
+                    .await;
+                });
+            });
+            match session.arm_heartbeat() {
+                Ok(()) => match session.start_suspend_watchdog(suspend_handler) {
+                    Ok(()) => log::info!("[worker_init] 心跳与挂起看门狗已接线"),
+                    Err(e) => log::warn!(
+                        "[worker_init] 挂起看门狗启动失败（守卫降级）: {}",
+                        e
+                    ),
+                },
+                Err(e) => log::warn!(
+                    "[worker_init] 心跳启用失败（挂起守卫降级）: {}",
+                    e
+                ),
+            }
+
             state.set_session(Some(session));
 
             // 转移到 Ready 状态
@@ -485,26 +514,49 @@ fn classify_ready_failure(err_msg: &str) -> WorkerInitError {
 /// 销毁 worker 子进程并清理状态。
 ///
 /// 该命令由前端调用（通常为退出或重新初始化前），执行以下操作：
-/// 1. 状态机转移至 ShuttingDown。
-/// 2. 等待任何进行中的 IO 操作完成（最长 2 秒）。
-/// 3. 终止子进程（通过 Drop WorkerSession 自动 kill）。
+/// 1. 等待任何进行中的 IO 操作完成（最长 2 秒），按会话代际原子销毁会话
+///    （Drop WorkerSession 自动 kill 子进程）。
+/// 2. 状态机转移至 ShuttingDown。
+/// 3. 重置密钥生命周期为 NoKey。
 /// 4. 状态机回到 Uninitialized。
 ///
 /// # 返回
 /// `VerthysResponse` 表示操作成功（即使子进程已不存在也视为成功）。
 #[tauri::command]
 pub async fn worker_destroy(state: State<'_, AppState>) -> Result<VerthysResponse, String> {
+    let epoch = state.session_epoch();
+    /* 与锁库同一约束：轮换 Run 未收敛时不得直接销毁 worker，否则 C 层
+     * Abort 不执行、GMK 驻留且临时库可能残留。 */
+    tauri::async_runtime::spawn_blocking(|| {
+        crate::service::vault_rotate::prepare_for_lock(std::time::Duration::from_secs(30))
+    })
+    .await
+    .map_err(|e| format!("轮换锁定闸门执行失败: {e}"))??;
+
+    /* 等待轮换收敛期间会话可能已被替换（新解锁）：此时销毁会命中新
+     * 会话。先做一次廉价校验，实际清空再用写锁内的代际原子校验。
+     * 仅“当前仍有会话”才判定为被新会话接管；代际变化且已无会话，说明
+     * 会话已被其它锁定路径清空，仍需完成生命周期收敛（否则残留 Ready
+     * 状态会阻断下一次 worker_init）。 */
+    if state.session_epoch() != epoch && state.has_session() {
+        log::warn!("[worker_destroy] 等待期间会话代际已变更，放弃本次销毁");
+        return Err(crate::state::SESSION_SUPERSEDED.to_string());
+    }
+
+    if state.has_session() {
+        let _ = state.wait_io_complete(Duration::from_secs(2)).await;
+        if !state.clear_session_if_epoch(epoch) && state.has_session() {
+            log::warn!("[worker_destroy] IO 等待期间会话代际已变更，放弃本次销毁");
+            return Err(crate::state::SESSION_SUPERSEDED.to_string());
+        }
+    }
+
     state
         .worker_lifecycle
         .with_lock(|lc| {
             lc.transition_to_shutting_down().ok();
         })
         .await;
-
-    if state.has_session() {
-        let _ = state.wait_io_complete(Duration::from_secs(2)).await;
-        state.set_session(None);
-    }
 
     // 修复：worker 销毁后 GMK 已从内存消失，重置密钥生命周期为 NoKey
     //

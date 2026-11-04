@@ -23,7 +23,7 @@
 <template>
   <div class="view-init">
     <Teleport to="body">
-    <CosmicBackdrop fixed @backdrop="$emit('back')">
+    <CosmicBackdrop fixed layer="view" @backdrop="$emit('back')">
     <LevitationField width="330px" class="ff-field--stable">
 
       <div class="ff-node ff-node--brand">

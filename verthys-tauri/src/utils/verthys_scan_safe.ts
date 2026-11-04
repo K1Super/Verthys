@@ -26,7 +26,7 @@
  *   verthys_traversal.ts → verthys-cache.ts（ensureRecordScan / getRecordFromScan）
  *   无反向依赖，不构成循环
  */
-import { ensureRecordScan, ensureSummaryScan, clearRecordScanCache, addRecordToScan, clearSummaryCache, getSummaryCacheSize } from "../cache/composition/verthys-cache";
+import { ensureRecordScan, ensureSummaryScan, clearRecordScanCache, addRecordToScan, clearSummaryCache } from "../cache/composition/verthys-cache";
 import { scanVerthysRecords } from "./verthys_traversal";
 
 /**
@@ -80,9 +80,9 @@ export async function ensureRecordScanSafe(): Promise<void> {
  *
  * 调用方（Vue 组件）只需：
  *   await ensureSummaryScanSafe();
- *   const ids = getSummaryIdsByType(TYPE_XXX);
+ *   const ids = await resolveTypeIds(TYPE_XXX);  // 权威类型盲索引
  *   for (const id of ids) {
- *     const summary = getSummaryRecord(id);     // 元数据（名称/类型/大小）
+ *     const summary = getSummaryRecord(id);     // 名称/大小（可选）
  *     const full = await getFullRecord(id);     // 完整数据（按需加载）
  *   }
  *
@@ -109,27 +109,6 @@ export async function ensureSummaryScanSafe(): Promise<void> {
   }
 }
 
-/**
- * 准备记录 ID 索引源：摘要缓存优先，记录扫描仅作数据层预热。
- *
- * Why：记录扫描需要解密并搬运每条记录的完整数据，照片等 MB 级记录会让
- *   单批载荷越过共享内存窗口而整批失败；此时列表若依赖它就会静默为空。
- *   摘要扫描只读索引（不解密数据），不受记录体积影响，适合作为列表 ID 来源。
- *
- * 数据层预热：摘要路径下并发触发一次记录扫描（不等待），命中扫描缓存的小体积
- *   记录在后续批量取数时零 IPC；预热失败不影响列表可用性——取数会自动走
- *   并行 IPC 回退。
- *
- * @returns true 表示 ID 应读自摘要缓存（getSummaryIdsByType）；
- *          false 表示摘要缓存整体为空（旧格式容器/熔断静默返回空），
- *          调用方应改读记录扫描缓存（getRecordIdsByType）
- */
-export async function ensureIndexSourceSafe(): Promise<boolean> {
-  await ensureSummaryScanSafe();
-  if (getSummaryCacheSize() > 0) {
-    void ensureRecordScanSafe();
-    return true;
-  }
-  await ensureRecordScanSafe();
-  return false;
-}
+/* 业务列表 ID 解析已收敛到 cache/composition 的 resolveTypeIds：
+ * 权威类型盲索引优先，失败回退全量扫描。摘要缓存只承担名称/元数据，
+ * 不再作为类型 ID 来源（V4 摘要 type 恒为未知 0）。 */

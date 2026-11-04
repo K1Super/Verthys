@@ -33,16 +33,14 @@ import { TYPE_VAULT_TYPES } from "../constants/record_types";
 import {
   addFullRecord,
   getModuleCache,
-  getRecordIdsByType,
   getRecordsDataB64Batch,
-  getSummaryIdsByType,
   invalidateFullRecord,
   invalidateScannedRecord,
   invalidateSummaryRecord,
   persistVerthys,
+  resolveTypeIds,
   setModuleCache,
 } from "../cache/composition/verthys-cache";
-import { ensureIndexSourceSafe } from "../utils/verthys_scan_safe";
 import { verthysAddRecord, verthysDeleteRecord } from "./verthys";
 import { deserializeFromJsonB64, serializeToJsonB64 } from "../utils/json_codec";
 import { createLogger } from "../utils/logger";
@@ -364,8 +362,10 @@ function parseVaultTypesRecord(b64: string): VaultTypeDef[] | null {
 /**
  * 收集当前容器内全部类型定义记录 id（升序）。
  *
- * 三个来源互补：模块缓存记录 id（最近一次写入）、扫描缓存、摘要索引。
- * 扫描失败时保留已收集到的 id，不因一次扫描异常丢失删除依据。
+ * 来源互补：模块缓存记录 id（最近一次写入）+ V4 类型盲索引（权威；
+ * 枚举失败时 resolveTypeIds 自动回退全量记录扫描）。不读摘要 type
+ * （V4 摘要 type 恒为未知 0）。扫描失败时保留已收集到的 id，不因一次
+ * 扫描异常丢失删除依据。
  */
 async function collectVaultTypeRecordIds(): Promise<number[]> {
   const ids = new Set<number>();
@@ -373,17 +373,9 @@ async function collectVaultTypeRecordIds(): Promise<number[]> {
   const cached = getModuleCache<VaultTypeDef[]>(VAULT_TYPES_CACHE_KEY);
   if (cached.recordId !== null) ids.add(cached.recordId);
 
-  let useSummary = false;
-  try {
-    useSummary = await ensureIndexSourceSafe();
-  } catch (e) {
-    log.warn("索引源准备失败，改用已收集的记录 id", e);
-  }
-
-  if (useSummary) {
-    for (const id of getSummaryIdsByType(TYPE_VAULT_TYPES)) ids.add(id);
-  }
-  for (const id of getRecordIdsByType(TYPE_VAULT_TYPES)) ids.add(id);
+  /* 权威来源：V4 类型盲索引；失败时 resolveTypeIds 已回退全量扫描。
+   * 不再读摘要 type（V4 摘要 type 恒为未知 0）。 */
+  for (const id of await resolveTypeIds(TYPE_VAULT_TYPES)) ids.add(id);
 
   return [...ids].sort((a, b) => a - b);
 }
@@ -469,7 +461,14 @@ export async function saveCustomVaultTypes(
 
   addFullRecord(newId, TYPE_VAULT_TYPES, VAULT_TYPES_RECORD_NAME, dataB64, dataB64.length);
 
-  const staleIds = await collectVaultTypeRecordIds();
+  /* 新记录已写入：旧记录收集失败只影响清理，不得让整个保存流程失败。
+   * 下一次保存会再次收集并清理残留旧记录。 */
+  let staleIds: number[] = [];
+  try {
+    staleIds = await collectVaultTypeRecordIds();
+  } catch (e) {
+    log.warn("保存自定义类型：旧记录 ID 收集失败（跳过清理）", e);
+  }
   for (const staleId of staleIds) {
     if (staleId === newId) continue;
     try {

@@ -67,6 +67,13 @@ derived.chunk_set_record_b64_max = recordB64(
   derived.chunk_set_plain_max,
   L.meta_crypto_overhead,
 );
+/* 单批块上传的实际载荷上限由运行期按字节预算切批；条数上限与字节上限
+ * 相互独立。此处取二者较小值，既允许“多张小图合并为一批”，又保证
+ * 最坏情况不越过单次 IPC 载荷。 */
+derived.chunk_batch_b64_max = Math.min(
+  derived.chunk_record_b64_max * C.max_chunks_per_ipc,
+  C.ipc_max_payload - L.json_frame_overhead,
+);
 
 const checks = [
   {
@@ -94,7 +101,7 @@ const checks = [
   {
     name: "单批块上传（base64 口径）+ JSON 头 不超过单次载荷上限",
     ok:
-      derived.chunk_record_b64_max * C.max_chunks_per_ipc + L.json_frame_overhead
+      derived.chunk_batch_b64_max + L.json_frame_overhead
       <= C.ipc_max_payload,
   },
   {
@@ -270,7 +277,7 @@ pub const PB_MAX_CHUNKS_PER_IPC: u64 = ${rs(C.max_chunks_per_ipc)};
 pub const PB_PAYLOAD_CHUNK_SIZE_BYTES: u64 = ${rs(C.payload_chunk_size)};
 
 /// 单批块上传载荷上限（字节，base64 口径）
-pub const PB_MAX_CHUNK_BATCH_B64: u64 = ${rs(derived.chunk_record_b64_max * C.max_chunks_per_ipc)};
+pub const PB_MAX_CHUNK_BATCH_B64: u64 = ${rs(derived.chunk_batch_b64_max)};
 
 /// 单条记录 chunk 密文 base64 长度上限
 pub const PB_CHUNK_RECORD_B64_MAX: u64 = ${rs(derived.chunk_record_b64_max)};

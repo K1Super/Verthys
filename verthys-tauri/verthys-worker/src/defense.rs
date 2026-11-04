@@ -120,6 +120,9 @@ const SANDBOX_ATTR_PROCESS_CREATE_DISABLE: u32 = 0x02;
 const SANDBOX_ATTR_IMAGE_PREFER_SYS32: u32 = 0x04;
 const SANDBOX_ATTR_IMAGE_NO_REMOTE: u32 = 0x08;
 const SANDBOX_ATTR_IMAGE_NO_LOW_LABEL: u32 = 0x10;
+const SANDBOX_ATTR_ACG: u32 = 0x20;
+const SANDBOX_ATTR_STRICT_HANDLE: u32 = 0x40;
+const SANDBOX_ATTR_EXTENSION_POINT: u32 = 0x80;
 
 static ACTIVE_ATTRS: AtomicU32 = AtomicU32::new(0);
 
@@ -340,6 +343,7 @@ pub fn apply_process_sandbox() -> Result<u32, String> {
         ) {
             return Err("ACG 动态代码禁用失败".to_string());
         }
+        attrs |= SANDBOX_ATTR_ACG;
 
         /* 严格句柄校验：非法句柄引用立即异常，阻断句柄复用/猜测攻击。 */
         if !apply_mitigation(
@@ -348,6 +352,7 @@ pub fn apply_process_sandbox() -> Result<u32, String> {
         ) {
             return Err("严格句柄校验启用失败".to_string());
         }
+        attrs |= SANDBOX_ATTR_STRICT_HANDLE;
 
         /* 禁用旧式扩展点，降低第三方 DLL 注入面。 */
         if !apply_mitigation(
@@ -356,6 +361,7 @@ pub fn apply_process_sandbox() -> Result<u32, String> {
         ) {
             return Err("扩展点禁用失败".to_string());
         }
+        attrs |= SANDBOX_ATTR_EXTENSION_POINT;
 
         ACTIVE_ATTRS.store(attrs, Ordering::SeqCst);
         Ok(attrs)

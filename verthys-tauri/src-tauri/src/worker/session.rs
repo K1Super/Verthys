@@ -34,7 +34,8 @@ use super::platform::verify_install_paths;
 #[cfg(target_os = "windows")]
 use super::platform::{harden_suspended_worker, JobHandle};
 use super::protocol::{
-    ActorRequest, UnlockProgress, DEFAULT_IPC_TIMEOUT, DROP_ACTOR_JOIN_TIMEOUT, READY_CHECK_TIMEOUT,
+    ActorRequest, RotateProgress, UnlockProgress, DEFAULT_IPC_TIMEOUT, DROP_ACTOR_JOIN_TIMEOUT,
+    READY_CHECK_TIMEOUT,
 };
 use super::stderr::StderrRing;
 use crate::infrastructure::ipc_secure::IpcSecureChannel;
@@ -44,7 +45,114 @@ const PATH_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 // Windows CloseHandle 用于 Drop 中显式关闭 Job Object 句柄
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Foundation::{
+    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE,
+};
+
+/// 父进程心跳事件句柄包装（HANDLE 不满足 Send/Sync，经 Arc 共享给看门狗线程）
+#[cfg(target_os = "windows")]
+struct HeartbeatEvent(HANDLE);
+#[cfg(target_os = "windows")]
+unsafe impl Send for HeartbeatEvent {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for HeartbeatEvent {}
+
+/// 创建匿名心跳事件并 DuplicateHandle 注入 worker 进程。
+///
+/// 返回 (父进程事件句柄, worker 进程内句柄值)。句柄值仅在 worker 内有效，
+/// 父进程不得 CloseHandle 它；worker 退出时由其句柄表统一回收。
+#[cfg(target_os = "windows")]
+fn create_heartbeat_event(
+    child: &tokio::process::Child,
+) -> Option<(HeartbeatEvent, u64)> {
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    let event = crate::infrastructure::handle_factory::create_non_inheritable_event(false, false)
+        .ok()?;
+    let raw = child.raw_handle()?;
+    let child_handle = HANDLE(raw as *mut core::ffi::c_void);
+    let mut worker_handle = HANDLE::default();
+    let dup = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            event,
+            child_handle,
+            &mut worker_handle,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if dup.is_err() {
+        let _ = unsafe { CloseHandle(event) };
+        return None;
+    }
+    Some((HeartbeatEvent(event), worker_handle.0 as u64))
+}
+
+/// 判断 worker 进程的全部线程是否都处于挂起态。
+///
+/// 使用 SuspendThread 的返回值读取"挂起前计数"：prev=0 说明线程此前可运行，
+/// 立即 ResumeThread 恢复并以"存在运行线程"返回；prev>0 说明线程已挂起，
+/// 同样 ResumeThread 一次恢复到原计数。短暂挂起仅在心跳已缺失 3s 后发生，
+/// 对健康进程无影响。任一 OpenThread/枚举失败按"无法确认"返回 false（保守放行）。
+#[cfg(target_os = "windows")]
+fn worker_all_threads_suspended(pid: u32) -> bool {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
+        TH32CS_SNAPTHREAD,
+    };
+    use windows::Win32::System::Threading::{
+        OpenThread, ResumeThread, SuspendThread, THREAD_SUSPEND_RESUME,
+    };
+
+    let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) } {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    if unsafe { Thread32First(snapshot, &mut entry) }.is_err() {
+        let _ = unsafe { CloseHandle(snapshot) };
+        return false;
+    }
+
+    let mut found = false;
+    let mut any_running = false;
+    loop {
+        if entry.th32OwnerProcessID == pid {
+            found = true;
+            match unsafe {
+                OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
+            } {
+                Ok(thread) => {
+                    let previous = unsafe { SuspendThread(thread) };
+                    if previous == u32::MAX {
+                        // 查询失败：无法确认，按可运行处理（不终止）
+                        any_running = true;
+                    } else {
+                        if previous == 0 {
+                            any_running = true;
+                        }
+                        // 恢复到调用前计数（prev>0 时恢复后仍保持原挂起计数）
+                        let _ = unsafe { ResumeThread(thread) };
+                    }
+                    let _ = unsafe { CloseHandle(thread) };
+                }
+                Err(_) => {
+                    any_running = true;
+                }
+            }
+        }
+        if unsafe { Thread32Next(snapshot, &mut entry) }.is_err() {
+            break;
+        }
+    }
+    let _ = unsafe { CloseHandle(snapshot) };
+    found && !any_running
+}
 
 /// WorkerSession 改为异步 Actor 模型
 ///
@@ -90,6 +198,15 @@ pub(crate) struct SessionInner {
     ///   None 表示 Job Object 创建失败，回退到 kill_on_drop 兜底
     #[cfg(target_os = "windows")]
     job_handle: StdMutex<Option<JobHandle>>,
+    /// 父进程心跳事件（worker 每 500ms SetEvent；未创建时 None → 守卫降级）
+    #[cfg(target_os = "windows")]
+    heartbeat_event: Option<Arc<HeartbeatEvent>>,
+    /// worker 进程内的心跳事件句柄值（经签名 IPC 下发）
+    #[cfg(target_os = "windows")]
+    heartbeat_worker_handle: u64,
+    /// 挂起看门狗停止标志与线程句柄
+    suspend_stop: Arc<AtomicBool>,
+    suspend_thread: StdMutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl SessionInner {
@@ -177,6 +294,18 @@ impl WorkerSession {
             }
         };
 
+        // 心跳事件必须在 child 移交给 Actor 之前创建并复制到 worker 进程。
+        #[cfg(target_os = "windows")]
+        let heartbeat = create_heartbeat_event(&child);
+        #[cfg(target_os = "windows")]
+        let (heartbeat_event, heartbeat_worker_handle) = match heartbeat {
+            Some((event, handle)) => (Some(Arc::new(event)), handle),
+            None => {
+                log::warn!("[watchdog] 心跳事件创建失败，挂起看门狗降级");
+                (None, 0)
+            }
+        };
+
         let stdin = child.stdin.take().ok_or_else(|| "no stdin".to_string())?;
         let stdout = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
         let stderr = child.stderr.take().ok_or_else(|| "no stderr".to_string())?;
@@ -219,8 +348,115 @@ impl WorkerSession {
                 child_alive,
                 #[cfg(target_os = "windows")]
                 job_handle: StdMutex::new(Some(hardened_job)),
+                #[cfg(target_os = "windows")]
+                heartbeat_event,
+                #[cfg(target_os = "windows")]
+                heartbeat_worker_handle,
+                suspend_stop: Arc::new(AtomicBool::new(false)),
+                suspend_thread: StdMutex::new(None),
             }),
         })
+    }
+
+    /// 启用 worker 心跳（在就绪握手通过后调用）。
+    ///
+    /// 句柄值经签名 IPC 下发；worker 独立线程每 500ms SetEvent。
+    pub fn arm_heartbeat(&self) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        {
+            let handle = self.inner.heartbeat_worker_handle;
+            if handle == 0 {
+                return Err("心跳事件不可用（创建或注入失败）".into());
+            }
+            let request = format!(
+                r#"{{"op":"arm_heartbeat","hb_handle":{}}}"#,
+                handle
+            );
+            let response = self.send_json_with_timeout(&request, Duration::from_secs(3))?;
+            let value: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|e| format!("arm_heartbeat 响应解析失败: {}", e))?;
+            if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                return Ok(());
+            }
+            return Err(value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("worker 拒绝启用心跳")
+                .to_string());
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Err("非 Windows 平台不支持心跳看门狗".into())
+        }
+    }
+
+    /// 启动挂起看门狗（在心跳启用后调用）。
+    ///
+    /// 每 1s 等待心跳；连续 3 次缺失（3s）后枚举 worker 线程，仅当全部
+    /// 线程处于挂起态才调用 handler（避免把极端卡顿误判为挂起）。
+    /// 线程异常/无法查询时保守放行，不终止。
+    pub fn start_suspend_watchdog(
+        &self,
+        handler: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        {
+            let event = self
+                .inner
+                .heartbeat_event
+                .clone()
+                .ok_or_else(|| "心跳事件不可用".to_string())?;
+            let stop = self.inner.suspend_stop.clone();
+            let pid = self.inner.pid;
+            let mut slot = self
+                .inner
+                .suspend_thread
+                .lock()
+                .map_err(|e| format!("挂起看门狗锁中毒: {}", e))?;
+            if slot.is_some() {
+                return Ok(());
+            }
+            let thread = std::thread::Builder::new()
+                .name("verthys-suspend-watchdog".into())
+                .spawn(move || {
+                    use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+                    use windows::Win32::System::Threading::WaitForSingleObject;
+                    let mut misses = 0u32;
+                    while !stop.load(Ordering::SeqCst) {
+                        let rc = unsafe { WaitForSingleObject(event.0, 1000) };
+                        if rc == WAIT_TIMEOUT {
+                            misses += 1;
+                            if misses >= 3 {
+                                if stop.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                if worker_all_threads_suspended(pid) {
+                                    log::error!(
+                                        "[watchdog] worker PID={} 全部线程挂起且心跳缺失 3s，触发外部锁定",
+                                        pid
+                                    );
+                                    handler();
+                                    break;
+                                }
+                                misses = 0;
+                            }
+                        } else if rc == WAIT_OBJECT_0 {
+                            misses = 0;
+                        } else {
+                            log::warn!("[watchdog] 心跳等待返回异常状态，看门狗退出");
+                            break;
+                        }
+                    }
+                })
+                .map_err(|e| format!("启动挂起看门狗线程失败: {}", e))?;
+            *slot = Some(thread);
+            Ok(())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = handler;
+            Err("非 Windows 平台不支持挂起看门狗".into())
+        }
     }
 
     /// 获取子进程 PID（看门狗）
@@ -386,6 +622,62 @@ impl WorkerSession {
         })
     }
 
+    /// 发送全库轮换请求并流式接收进度（v4_rotate_run 专用）
+    ///
+    /// 与解锁流式协议同构：worker 在 Run 阻塞期间写多条
+    /// `{"op":"v4_rotate_progress",...}` 进度行，FFI 返回后写最终响应行。
+    /// - `json`：v4_rotate_run 请求 JSON
+    /// - `progress_cb`：每收到一条轮换进度行时调用
+    ///
+    /// 返回最终响应行的原始 JSON 字符串。
+    pub fn send_json_with_rotate_progress(
+        &self,
+        json: &str,
+        progress_cb: &dyn Fn(&RotateProgress),
+    ) -> Result<String, String> {
+        let json_owned = json.to_string();
+        let request_tx = self
+            .inner
+            .clone_sender()
+            .ok_or_else(|| "worker actor 已退出（通道已关闭）".to_string())?;
+        let runtime_handle = self.inner.runtime_handle.clone();
+
+        block_on_with_handle(&runtime_handle, async move {
+            let (reply_tx, mut reply_rx) = oneshot::channel();
+            let (progress_tx, mut progress_rx) = mpsc::channel::<RotateProgress>(64);
+
+            request_tx
+                .send(ActorRequest::SendStreamingRotate {
+                    json: json_owned,
+                    reply: reply_tx,
+                    progress_tx,
+                })
+                .await
+                .map_err(|_| "worker actor 已退出（通道发送失败）".to_string())?;
+
+            loop {
+                tokio::select! {
+                    result = &mut reply_rx => {
+                        /* 与解锁流一致：最终响应就绪后先排空已入队进度，
+                         * 保证前端收到最后一条统计后再看到完成响应。 */
+                        while let Ok(p) = progress_rx.try_recv() {
+                            progress_cb(&p);
+                        }
+                        return match result {
+                            Ok(r) => r,
+                            Err(_) => Err("worker actor 通道关闭（任务已终止）".to_string()),
+                        };
+                    }
+                    progress = progress_rx.recv() => {
+                        if let Some(p) = progress {
+                            progress_cb(&p);
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     /// 就绪检测：等待 worker 主动推送的 ready 信号
     ///
     /// worker 在进入主循环前会主动写入 {"ok":true,"op":"ready"} 到 stdout。
@@ -482,6 +774,15 @@ impl Drop for SessionInner {
     fn drop(&mut self) {
         let pid = self.pid;
         log::info!("[actor] WorkerSession 析构开始: PID={}", pid);
+
+        // 0. 停止挂起看门狗（WaitForSingleObject 每秒醒来检查停止标志，
+        //    join 最多等待约 1 秒，不阻塞锁定响应）
+        self.suspend_stop.store(true, Ordering::SeqCst);
+        if let Ok(mut slot) = self.suspend_thread.lock() {
+            if let Some(thread) = slot.take() {
+                let _ = thread.join();
+            }
+        }
 
         // 1. 关闭请求通道，触发 Actor 主循环退出
         //    take() 取出 Sender 并 drop，所有 recv() 返回 None
@@ -581,5 +882,150 @@ mod tests {
             "错误信息应提及 tokio runtime，实际: {}",
             err
         );
+    }
+
+    /// A18S 端到端用例：真实 worker + 心跳 + 挂起看门狗。
+    ///
+    /// 由 tests/attack/a18-suspend.ps1 设置 VERTHYS_A18=1 后驱动；常规
+    /// `cargo test` 不执行进程级实验，避免无产物环境下的偶发失败。
+    ///
+    /// 判定：健康期不得误杀；挂起全部线程后 3s 级触发处置并终止 worker。
+    #[cfg(target_os = "windows")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn suspend_watchdog_terminates_suspended_worker() {
+        use std::path::{Path, PathBuf};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        if std::env::var("VERTHYS_A18").ok().as_deref() != Some("1") {
+            eprintln!("A18S 跳过：未设置 VERTHYS_A18=1");
+            return;
+        }
+
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("无法定位仓库根目录");
+        let worker = std::env::var("VERTHYS_A18_WORKER")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                repo.join("verthys-tauri/verthys-worker/target/release/verthys-worker.exe")
+            });
+        let dll = std::env::var("VERTHYS_A18_DLL")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo.join("build/core/Release/verthys.dll"));
+        assert!(
+            worker.is_file(),
+            "A18S 缺少 worker 产物: {}",
+            worker.display()
+        );
+        assert!(dll.is_file(), "A18S 缺少 DLL 产物: {}", dll.display());
+
+        /// 挂起目标进程的全部线程并保持挂起，返回成功挂起的线程数。
+        fn suspend_all_threads(pid: u32) -> usize {
+            use windows::Win32::System::Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
+                TH32CS_SNAPTHREAD,
+            };
+            use windows::Win32::System::Threading::{
+                OpenThread, SuspendThread, THREAD_SUSPEND_RESUME,
+            };
+
+            let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) } {
+                Ok(h) => h,
+                Err(_) => return 0,
+            };
+            let mut entry = THREADENTRY32 {
+                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            if unsafe { Thread32First(snapshot, &mut entry) }.is_err() {
+                let _ = unsafe { CloseHandle(snapshot) };
+                return 0;
+            }
+            let mut suspended = 0usize;
+            loop {
+                if entry.th32OwnerProcessID == pid {
+                    if let Ok(thread) =
+                        unsafe { OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID) }
+                    {
+                        if unsafe { SuspendThread(thread) } != u32::MAX {
+                            suspended += 1;
+                        }
+                        let _ = unsafe { CloseHandle(thread) };
+                    }
+                }
+                if unsafe { Thread32Next(snapshot, &mut entry) }.is_err() {
+                    break;
+                }
+            }
+            let _ = unsafe { CloseHandle(snapshot) };
+            suspended
+        }
+
+        let session = WorkerSession::spawn(
+            &worker.to_string_lossy(),
+            &dll.to_string_lossy(),
+        )
+        .expect("spawn worker 失败");
+        session.wait_for_ready_signal().expect("worker 就绪失败");
+        session.arm_heartbeat().expect("启用心跳失败");
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let suspended_at = Arc::new(StdMutex::new(None::<Instant>));
+        let elapsed_ms = Arc::new(AtomicU64::new(0));
+        let handler_session = session.clone();
+        let handler_fired = fired.clone();
+        let handler_at = suspended_at.clone();
+        let handler_elapsed = elapsed_ms.clone();
+        session
+            .start_suspend_watchdog(Arc::new(move || {
+                let ms = handler_at
+                    .lock()
+                    .ok()
+                    .and_then(|t| *t)
+                    .map(|t| t.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+                handler_elapsed.store(ms, Ordering::SeqCst);
+                handler_fired.store(true, Ordering::SeqCst);
+                handler_session.kill();
+            }))
+            .expect("启动挂起看门狗失败");
+
+        // 健康期观察：心跳正常时看门狗不得触发。
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "健康 worker 被看门狗误杀"
+        );
+
+        let suspended = suspend_all_threads(session.pid());
+        assert!(suspended > 0, "未能挂起 worker 线程");
+        if let Ok(mut slot) = suspended_at.lock() {
+            *slot = Some(Instant::now());
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < deadline && !fired.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "worker 挂起 3s 后看门狗未触发处置"
+        );
+        let measured = elapsed_ms.load(Ordering::SeqCst);
+        println!("A18S_ELAPSED_MS={}", measured);
+        assert!(
+            (2000..=5000).contains(&measured),
+            "处置延迟越界: {}ms（期望 3s 级）",
+            measured
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && session.is_alive() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!session.is_alive(), "看门狗触发后 worker 未终止");
     }
 }

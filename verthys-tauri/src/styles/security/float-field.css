@@ -291,8 +291,12 @@
     opacity 0.35s ease;
   pointer-events: none;
 }
-.ff-field .pw-row:focus-within::after,
-.ff-field .path-row:focus-within::after {
+/* 光谱轨只应答文本输入聚焦：行内动作按钮（打开/新建/浏览）不属于
+ * 输入聚焦，而原生文件对话框关闭后按钮仍持有焦点 — 沿用
+ * :focus-within 会在存储位置指示器下方点亮一条与输入状态无关的
+ * 悬浮横线（与提交按钮势能线同形，误读为多出的确认控件） */
+.ff-field .pw-row:has(.sc-input:focus)::after,
+.ff-field .path-row:has(.sc-input:focus)::after {
   transform: scaleX(1);
   opacity: 1;
 }

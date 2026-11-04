@@ -22,7 +22,11 @@
       :unlock-progress-elapsed="unlockProgressElapsed"
       :init-status-ref="initStatusRef"
       :init-detail-ref="initDetailRef"
+      :is-create="pendingIsCreate"
+      :can-recover="canRecoverVault"
+      v-model:keyfile-create-enabled="keyfileCreateEnabled"
       @unlock="doUnlock(verthysPath, pendingIsCreate)"
+      @recovery="openRecoveryUnlock"
       @back="goBack"
       @open-existing="openExistingVerthys"
       @create-new="createNewVerthys"
@@ -68,6 +72,7 @@
     <!-- ===== 管理主界面 ===== -->
     <ManagementView
       v-else
+      ref="managementViewRef"
       :global-key-ready="globalKeyReadyRef"
       :session-remaining="sessionRemaining"
       :idle-lock-enabled="sessionLockEnabledRef"
@@ -77,8 +82,6 @@
       :update-installing="updateInstalling || updateFlowActive"
       :update-percent="updatePercent"
       :update-cancellable="updateCancellable"
-      :update-failed="!!updateLastErrorCode"
-      @export-logs="onExportUpdateLogs"
       :device-check-result="deviceCheckResult"
       :device-fingerprint-short="deviceFingerprintShort"
       :module-ids="moduleIds"
@@ -86,8 +89,9 @@
       :module-key-enabled="moduleKeyEnabledRef"
       :has-module-key-record="hasModuleKeyRecordRef"
       :module-key-ready="moduleKeyReadyRef"
-      :has-module-key="hasModuleKey"
-      :is-module-ready="isModuleReady"
+      :module-has-recovery="moduleHasRecoveryRef"
+      :recovery-reseal-needed="recoveryMode && !resealDone"
+      :recovery-mode="recoveryMode"
       :module-state-class="moduleStateClass"
       :module-state-text="moduleStateText"
       :preset-applying="presetApplying"
@@ -107,6 +111,8 @@
       :locked-features="lockedFeatures"
       :preset-features="currentPresetFeatures"
       :custom-features="customFeatures"
+      :custom-mode="isCustomPreset"
+      :preset-idle-minutes="activeIdleMinutes"
       :custom-session-minutes="customSessionMinutes"
       :defense-paths="defensePaths"
       :defense-meta="defenseMeta"
@@ -118,14 +124,15 @@
       @cancel-update="onCancelUpdate"
       @open-change-key-dialog="onOpenChangeKeyDialog"
       @export-bin="onExportBin"
+      @recovery-rotated="onRotatedRecovery"
+      @reseal-device="onResealDevice"
+      @rotate-committed="onVaultRotateCommitted"
       @toggle-module-key-enabled="onToggleModuleKeyEnabled"
       @open-key-dialog="onOpenKeyDialog"
-      @show-module-key="onShowModuleKey"
       @logout-module="onLogoutModule"
       @toggle-custom-feature="onToggleCustomFeature"
       @reset-custom="onResetCustom"
       @set-custom-session-minutes="onSetCustomSessionMinutes"
-      @apply-custom="onApplyCustom"
       @orbit-slider-input="onOrbitSliderInput"
       @orbit-slider-release="onOrbitSliderRelease"
       @snap-to-anchor="snapToAnchor"
@@ -139,6 +146,8 @@
       :key-dialog-processing="keyDialogProcessing"
       v-model:editing-key-value="editingKeyValue"
       v-model:editing-old-key-value="editingOldKeyValue"
+      v-model:editing-recovery-code="editingRecoveryCode"
+      v-model:skip-recovery-binding="skipRecoveryBinding"
       @close="onCloseKeyDialog"
       @random-key="onRandomKey"
       @confirm="onConfirmKeyDialog"
@@ -152,6 +161,22 @@
       v-model:disable-verify-key="disableVerifyKey"
       @close="onCancelDisableVerify"
       @confirm="onConfirmDisableVerify"
+    />
+
+    <!-- 高安全预设：默认 PCR[7,11] 提示（不在弹窗内收集恢复码） -->
+    <SecurePcrDialog
+      :show="showSecurePcrDialog"
+      :pcr-enabled="securePcrEnabled"
+      @close="onSecurePcrDialogClose"
+      @goto="onGotoSecurePcr"
+    />
+
+    <!-- 高安全预设：默认 keyfile 第二因子引导（PCR 引导之后） -->
+    <SecureKeyfileDialog
+      :show="showSecureKeyfileDialog"
+      :busy="secureKeyfileBusy"
+      @close="showSecureKeyfileDialog = false"
+      @confirm="onConfirmSecureKeyfile"
     />
 
     <!-- 修改全局密钥弹窗 -->
@@ -192,6 +217,8 @@
       saving-label="重试解锁中…"
       :saving="usbRebindSaving"
       :save-disabled="unlocking"
+      :overlay-z="10000"
+      teleport
       @update:model-value="onUsbRebindDialogToggle"
       @save="confirmUsbRebind"
     >
@@ -202,6 +229,23 @@
         如确为本人更换介质，可确认后重试：本次仍须通过密码验证，验证通过后才会更新绑定记录。
       </p>
     </VerthysDialog>
+
+    <!-- 一次性恢复码展示与确认（新建 / 轮换共用；确认/关闭即清零） -->
+    <RecoveryCodeDialog
+      :show="activeRecoveryCode !== null"
+      :code="activeRecoveryCode ?? ''"
+      @confirmed="onRecoveryCodeDialogClose"
+      @close="onRecoveryCodeDialogClose"
+    />
+
+    <!-- 恢复码解锁（换机/灾难恢复） -->
+    <RecoveryUnlockDialog
+      :show="recoveryUnlockOpen"
+      :submitting="unlocking"
+      :error="recoveryUnlockError"
+      @submit="onRecoveryUnlockSubmit"
+      @close="closeRecoveryUnlock"
+    />
 
     <!-- 更新说明与强制更新入口：手动检查发现版本后展示；强制更新不可关闭 -->
     <UpdaterAvailableDialog
@@ -216,7 +260,6 @@
       :error-message="updateDialogError"
       @install="onInstallUpdate"
       @cancel="onCancelUpdate"
-      @export="onExportUpdateLogs"
     />
   </div>
 </template>
@@ -225,10 +268,9 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch, defineAsyncComponent } from "vue";
 import {
   lockAll,
-  hasModuleKey, isModuleReady,
   verthysReadyRef, globalKeyReadyRef, hasGlobalKeyRecordRef,
   initStatusRef, initDetailRef,
-  hasModuleKeyRecordRef, moduleKeyReadyRef, moduleKeyEnabledRef,
+  hasModuleKeyRecordRef, moduleKeyReadyRef, moduleKeyEnabledRef, moduleHasRecoveryRef,
   MODULE_IDS, MODULE_LABELS,
   restoreSecurityPreset,
   sessionLockEnabledRef,
@@ -237,10 +279,22 @@ import {
 } from "../../lib/keyManager";
 import {
   verthysPreheat,
+  verthysPreflight,
+  verthysPcrStatus,
+  verthysKeyfileStatus,
+  verthysKeyfileEnable,
+  verthysResealDevice,
   preloadWorker, workerDestroy,
 } from "../../lib/verthys";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { bumpVerthysState } from "../../state/key_state";
+import { loadModuleKeyStatus } from "../../key/module-auth";
 import KeyEditDialog from "../dialogs/KeyEditDialog.vue";
 import DisableVerifyDialog from "../dialogs/DisableVerifyDialog.vue";
+import SecurePcrDialog from "../dialogs/SecurePcrDialog.vue";
+import SecureKeyfileDialog from "../dialogs/SecureKeyfileDialog.vue";
+import RecoveryCodeDialog from "../dialogs/RecoveryCodeDialog.vue";
+import RecoveryUnlockDialog from "../dialogs/RecoveryUnlockDialog.vue";
 import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
 /* 视图级懒加载：拆分中枢首挂载成本 — 首次进入仅执行 UnlockView
  * （最常见入口视图，保持同步渲染零等待），其余视图/弹窗按需拉取
@@ -254,7 +308,6 @@ const ChangeKeyDialog = defineAsyncComponent(() => import("../management/ChangeK
 const ExportVerifyDialog = defineAsyncComponent(() => import("../management/ExportVerifyDialog.vue"));
 const UpdaterAvailableDialog = defineAsyncComponent(() => import("../dialogs/UpdaterAvailableDialog.vue"));
 import { useToastCenter } from "../../composables/useToastCenter";
-import { useClipToast } from "../../composables/useClipToast";
 import { useViewMode } from "../../composables/security-center/useViewMode";
 // useDeviceBinding 必须在 useViewMode / useUnlockFlow 之前调用（提供 deviceCheckResult / checkDevice 注入）
 import { useDeviceBinding } from "../../composables/security-center/useDeviceBinding";
@@ -314,15 +367,20 @@ const {
   verthysPath,
   unlocking,
   pendingIsCreate,
+  keyfileCreateEnabled,
   unlockProgressMsg,
   unlockProgressPercent,
   unlockProgressElapsed,
   unlockProgressDone,
+  pendingRecoveryCode,
+  recoveryMode,
+  clearRecoveryCode,
   usbRebindPrompt,
   usbRebindSaving,
   openExistingVerthys,
   createNewVerthys,
   doUnlock,
+  doRecoveryUnlock,
   confirmUsbRebind,
   cancelUsbRebind,
 } = useUnlockFlow({
@@ -331,6 +389,165 @@ const {
   showToast,
   checkDevice,
 });
+
+/* ===== 选中路径是否已有容器 =====
+ * 恢复码只对“已存在的容器”有意义：新建模式或目标文件不存在时，
+ * 解锁页不得出现恢复码入口（否则会在初始化页展示无意义的恢复动作）。
+ * 以 worker 预检 file_exists 为准；预检失败时退回初始化状态兜底，
+ * 既不误藏既有库入口，也不会在新建模式下显示。 */
+const selectedVaultExists = ref(false);
+/** 预检失败标记：worker 尚未就绪时用初始化状态兜底，避免误藏恢复入口 */
+const preflightFailed = ref(false);
+
+watch(
+  [verthysPath, pendingIsCreate] as const,
+  async ([path, isCreate]) => {
+    preflightFailed.value = false;
+    if (!path || isCreate) {
+      selectedVaultExists.value = false;
+      return;
+    }
+    try {
+      const preflight = await verthysPreflight(path);
+      selectedVaultExists.value = preflight.ok === true && preflight.file_exists === true;
+    } catch {
+      selectedVaultExists.value = false;
+      preflightFailed.value = true;
+    }
+  },
+  { immediate: true },
+);
+
+/** 解锁页恢复码入口显示条件：已有容器且非新建。
+ *  预检失败时退回 initStatus=ready（状态文件记录过既有库），仍不掩盖新建模式。 */
+const canRecoverVault = computed(
+  () =>
+    !pendingIsCreate.value &&
+    !!verthysPath.value &&
+    (selectedVaultExists.value ||
+      (preflightFailed.value && initStatusRef.value === 'ready')),
+);
+
+/* ===== 恢复码解锁弹层 =====
+ * 恢复码只在提交时一次性传给 useUnlockFlow → initUnlock → Tauri → worker；
+ * 失败文案不区分“恢复码错/槽缺失/TPM 状态”，避免泄露细分原因。 */
+const recoveryUnlockOpen = ref(false);
+const recoveryUnlockError = ref("");
+/** 恢复会话已完成本机重绑：隐藏提示卡片（会话仍是恢复会话）。 */
+const resealDone = ref(false);
+
+watch(recoveryMode, (active) => {
+  if (!active) resealDone.value = false;
+});
+
+/**
+ * 全库轮换提交成功：C 层已把新库会话的恢复标记清零，本会话不再需要
+ * 重绑设备槽；前端同步收起恢复码会话提示，避免误导用户继续重绑。
+ */
+const onVaultRotateCommitted = () => {
+  recoveryMode.value = false;
+  /* 面板各自持有恢复态/模块态：提交后必须重查权威状态，否则仍显示
+   * “恢复会话”并允许空码操作（C 层会拒绝，但提示错误）。 */
+  bumpVerthysState();
+  void loadModuleKeyStatus().catch((e) => {
+    console.warn("[rotate] 提交后刷新模块状态失败", e);
+  });
+};
+
+/**
+ * 恢复会话重绑本机容器槽。
+ * keyfile 启用时必须选择当前 keyfile；未启用时不传路径。
+ * 是否恢复会话由 C 层判定，前端只负责收集可选路径。
+ */
+const onResealDevice = async () => {
+  let kf: string | undefined;
+  try {
+    const status = await verthysKeyfileStatus();
+    if (status.ok && status.keyfile_enabled === true) {
+      const chosen = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Keyfile", extensions: ["vkf"] }],
+      });
+      if (typeof chosen !== "string") return;
+      kf = chosen;
+    }
+  } catch {
+    // 状态查询失败时按无 keyfile 继续；C 层会以 KEYFILE_REQUIRED 拒绝并提示
+  }
+  const resp = await verthysResealDevice(kf);
+  if (resp.ok) {
+    resealDone.value = true;
+    showToast("本机普通解锁已恢复");
+  } else {
+    showError("重绑失败：请在恢复会话中操作，并确认 keyfile 与设备环境");
+  }
+};
+
+const openRecoveryUnlock = () => {
+  /* 恢复码解锁只属于 unlock 视图且必须已有容器；init/新建下不得出现 */
+  if (viewMode.value !== 'unlock' || !canRecoverVault.value) return;
+  recoveryUnlockError.value = "";
+  recoveryUnlockOpen.value = true;
+};
+
+/** 视图一旦离开 unlock，强制关闭恢复解锁弹层（防止残留到初始化页面） */
+watch(viewMode, (mode) => {
+  if (mode === 'unlock') return;
+  recoveryUnlockOpen.value = false;
+  recoveryUnlockError.value = "";
+});
+
+const closeRecoveryUnlock = () => {
+  if (unlocking.value) return;
+  recoveryUnlockOpen.value = false;
+  recoveryUnlockError.value = "";
+};
+
+const onRecoveryUnlockSubmit = async (code: string) => {
+  recoveryUnlockError.value = "";
+  const ok = await doRecoveryUnlock(verthysPath.value, code);
+  if (ok) {
+    /* 每次恢复会话都要重新评估重绑状态，不能被上一轮隐藏标记残留。 */
+    resealDone.value = false;
+    recoveryUnlockOpen.value = false;
+  } else {
+    recoveryUnlockError.value = "恢复码无效或当前设备环境不可用";
+  }
+};
+
+/* ===== 一次性恢复码统一展示 =====
+ * 新建成功的恢复码与「设备与 PCR」轮换出的新码都交给此处的单一弹窗展示：
+ *   1. 只有一个 RecoveryCodeDialog 实例，避免两处实例的 z-index/焦点冲突；
+ *   2. 轮换码来自 ManagementView 事件，不依赖 GlobalKeySection 的 v-if 存续，
+ *      切换分区不会丢失尚未抄写的新码；
+ *   3. 弹窗关闭（确认或二次放弃）后统一清零，再放行被暂缓的高安全引导。 */
+const rotatedRecoveryCode = ref<string | null>(null);
+const securePromptDeferred = ref(false);
+
+const activeRecoveryCode = computed<string | null>(
+  () => pendingRecoveryCode.value ?? rotatedRecoveryCode.value,
+);
+
+const onRotatedRecovery = (code: string) => {
+  rotatedRecoveryCode.value = code;
+};
+
+const onRecoveryCodeDialogClose = () => {
+  clearRecoveryCode();
+  rotatedRecoveryCode.value = null;
+  if (securePromptDeferred.value) {
+    securePromptDeferred.value = false;
+    void handleSecurePresetApplied();
+  }
+};
+
+/** 恢复码尚未抄写确认时，暂缓高安全引导，避免叠窗与“先要码后给码”的死锁 */
+const deferWhileRecoveryCodeOpen = (): boolean => {
+  if (activeRecoveryCode.value === null) return false;
+  securePromptDeferred.value = true;
+  return true;
+};
 
 /** 介质确认弹层显隐：仅允许关闭路径（确认动作走 @save → confirmUsbRebind） */
 const onUsbRebindDialogToggle = (visible: boolean) => {
@@ -393,40 +610,6 @@ const { sessionRemaining, startSessionTick, stopSessionTick, resetSession } = us
   idleLockEnabled: sessionLockEnabledRef,
 });
 
-/* ===== 剪贴板工具（模块密钥复制；生命周期归 useClipToast） =====
- * 复制结果与清空时间轮番提示（先结果、后清空时间），默认 1 分钟后静默清空；
- * 写入失败如实返回，由调用方红字直陈 —— 禁止无条件提示「已复制」。 */
-const writeViaTextarea = async (content: string): Promise<boolean> => {
-  const prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  const ta = document.createElement("textarea");
-  try {
-    ta.value = content;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.left = "-9999px";
-    ta.style.top = "0";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    return document.execCommand("copy");
-  } catch {
-    return false;
-  } finally {
-    ta.remove();
-    prevFocus?.focus?.();
-  }
-};
-const { copyWithTimeout: copySecure } = useClipToast("模块密钥已复制", { write: writeViaTextarea });
-
-/** 复制敏感文本（失败不得静默；成功/清空时间由安全通道轮番提示） */
-const onCopyText = async (text: string): Promise<boolean> => {
-  if (!text) return false;
-  const ok = await copySecure(text);
-  if (!ok) showError("复制失败：剪贴板不可用或权限被拒绝");
-  return ok;
-};
-
 /* ===== 模块独立密钥管理 ===== */
 const {
   moduleStateClass,
@@ -435,6 +618,8 @@ const {
   editingModuleId,
   editingKeyValue,
   editingOldKeyValue,
+  editingRecoveryCode,
+  skipRecoveryBinding,
   keyDialogProcessing,
   pendingEnableModuleId,
   showDisableVerifyDialog,
@@ -448,9 +633,8 @@ const {
   onCloseKeyDialog,
   onRandomKey,
   onConfirmKeyDialog,
-  onShowModuleKey,
   onLogoutModule,
-} = useModuleKeys({ showError, showToast, onCopyText });
+} = useModuleKeys({ showError, showToast });
 
 /* ===== 动态防护状态（消费出口：verthys 就绪即拉取 + 60s 轮询） =====
  * 先于 usePreset 装配：defenseMeta 作为真实信号注入预设指标合成 */
@@ -459,6 +643,87 @@ const { defensePaths, defenseMeta } = useDefenseStatus();
 /* ===== 系统运行指标（CPU 占用率真实采样，就绪期 2s 轮询） ===== */
 const { cpuUsage } = useSystemMetrics(globalKeyReadyRef);
 
+/* ===== 高安全预设默认第二因子引导 =====
+ * 顺序：先 PCR[7,11]（现有 D14），再 keyfile（D3/K2）。两者都未启用时
+ * 只弹一个，避免同时叠窗；PCR 提示只说明策略与恢复码前提，绑定本身
+ * 仍在「设备与 PCR」面板中用当前恢复码完成。 */
+const showSecurePcrDialog = ref(false);
+/** 弹窗展示时的 PCR 绑定状态；null 表示读取失败，不假定未绑定 */
+const securePcrEnabled = ref<boolean | null>(null);
+const showSecureKeyfileDialog = ref(false);
+const secureKeyfileBusy = ref(false);
+
+/** 管理视图内部编排不对外写入：跨态跳转只经其公开的 openPcrBinding */
+const managementViewRef = ref<{ openPcrBinding: () => void } | null>(null);
+
+const maybePromptSecureKeyfile = async () => {
+  if (deferWhileRecoveryCodeOpen()) return;
+  try {
+    const status = await verthysKeyfileStatus();
+    if (status.ok && status.keyfile_enabled === true) return;
+  } catch {
+    // 状态读取失败仍提示用户手动确认，不静默假定已启用
+  }
+  showSecureKeyfileDialog.value = true;
+};
+
+const handleSecurePresetApplied = async () => {
+  if (deferWhileRecoveryCodeOpen()) return;
+  securePcrEnabled.value = null;
+  try {
+    const status = await verthysPcrStatus();
+    if (status.ok) {
+      securePcrEnabled.value =
+        status.pcr_enabled === true ? true : status.pcr_enabled === false ? false : null;
+      if (securePcrEnabled.value === true) {
+        await maybePromptSecureKeyfile();
+        return;
+      }
+    }
+  } catch {
+    // 状态读取失败仍提示用户手动确认，不静默假定已启用
+  }
+  showSecurePcrDialog.value = true;
+};
+
+/** PCR 提示关闭：继续检查 keyfile 引导 */
+const onSecurePcrDialogClose = () => {
+  showSecurePcrDialog.value = false;
+  void maybePromptSecureKeyfile();
+};
+
+/** PCR 提示「前往」：直达设备与 PCR 面板，本次不再叠加 keyfile 引导 */
+const onGotoSecurePcr = () => {
+  showSecurePcrDialog.value = false;
+  managementViewRef.value?.openPcrBinding();
+};
+
+/** 选择 .vkf 保存位置并启用 keyfile（使用本机保管的容器口令） */
+const onConfirmSecureKeyfile = async () => {
+  if (secureKeyfileBusy.value) return;
+  secureKeyfileBusy.value = true;
+  try {
+    const target = await save({
+      title: "保存 keyfile 文件",
+      filters: [{ name: "Verthys keyfile", extensions: ["vkf"] }],
+      defaultPath: "Verthys.keyfile.vkf",
+    });
+    if (!target) return; // 取消保存：保持弹窗，方便重新选择
+    const path = target.toLowerCase().endsWith(".vkf") ? target : `${target}.vkf`;
+    const resp = await verthysKeyfileEnable(path);
+    if (!resp.ok) {
+      showError("启用 keyfile 失败：请确认当前库已解锁且路径可写");
+      return;
+    }
+    showSecureKeyfileDialog.value = false;
+    showToast("已启用 keyfile 第二因子");
+  } catch {
+    showError("启用 keyfile 异常");
+  } finally {
+    secureKeyfileBusy.value = false;
+  }
+};
+
 /* ===== 安全防护预设 ===== */
 const {
   presetApplying,
@@ -466,6 +731,8 @@ const {
   currentPresetFeatures,
   customFeatures,
   customSessionMinutes,
+  isCustomPreset,
+  activeIdleMinutes,
   orbitSliderPos,
   orbitAnchors,
   nearestAnchorIdx,
@@ -485,9 +752,15 @@ const {
   onToggleCustomFeature,
   onResetCustom,
   onSetCustomSessionMinutes,
-  onApplyCustom,
   loadPresetConfig,
-} = usePreset({ showError, showToast, resetSession, cpuUsage, defenseMeta });
+} = usePreset({
+  showError,
+  showToast,
+  resetSession,
+  cpuUsage,
+  defenseMeta,
+  onSecurePresetApplied: handleSecurePresetApplied,
+});
 
 /* ===== 应用更新 =====
  * 状态与启动静默检查共享同一单例；安装分两段执行：
@@ -509,7 +782,6 @@ const {
   releaseCritical: releaseUpdaterCritical,
   installUpdate: installDownloadedUpdate,
   cancelUpdate,
-  exportLogs: exportUpdateLogs,
 } = useAppUpdater();
 
 /** 下载进度百分比（0-100；总长未知时保持 0，端子只显示「正在更新…」） */
@@ -563,16 +835,6 @@ const onCheckUpdate = async () => {
     showError(`检查更新失败：${updaterErrorMessage(updateLastErrorCode.value)}`);
   } else {
     showToast("当前已是最新版本");
-  }
-};
-
-/** 导出更新日志；取消不提示，失败使用统一错误文案。 */
-const onExportUpdateLogs = async () => {
-  const path = await exportUpdateLogs();
-  if (path) {
-    showToast("更新日志已导出");
-  } else if (updateLastErrorCode.value) {
-    showError(updaterErrorMessage(updateLastErrorCode.value));
   }
 };
 
@@ -654,13 +916,16 @@ const goBackToUnlock = async () => {
   resetInitVerifyForm();
   // 锁定 verthys，重置所有状态 → viewMode 自动回到 "unlock"
   try {
-    await lockAll((percent, message) => {
+    const outcome = await lockAll((percent, message) => {
       unlockProgressPercent.value = percent;
       unlockProgressMsg.value = message;
       unlockProgressElapsed.value = Date.now() - lockStart;
     });
-    // 返回解锁页时也检查脏数据状态
-    if (isCacheDirty()) {
+    if (!outcome.locked) {
+      // 前置闸门失败（轮换仍在执行）：会话仍存活，不得回到解锁页
+      showError("锁定未执行：安全核心仍在使用中，请稍后重试");
+    } else if (isCacheDirty()) {
+      // 返回解锁页时也检查脏数据状态
       showError("部分数据可能未保存，请检查最近操作");
     }
   } catch (e) {
@@ -673,10 +938,13 @@ const goBackToUnlock = async () => {
 
 /* ===== 立即锁定 ===== */
 const onLockAll = async () => {
-  await lockAll();
-  // lockAll 完成后检查脏数据状态
-  //    40s 超时或 22s waitForFlush 超时可能标记 cacheDirty
-  if (isCacheDirty()) {
+  const outcome = await lockAll();
+  // lockAll 完成后检查会话是否真的销毁
+  //    轮换收敛失败会整体放弃锁定（locked=false），此时会话与 GMK 仍存活
+  //    落盘/清理超时可能标记 cacheDirty
+  if (!outcome.locked) {
+    showError("锁定未执行：安全核心仍在使用中，请稍后重试");
+  } else if (isCacheDirty()) {
     showError("部分数据可能未保存，请检查最近操作");
   } else {
     showToast("已锁定全部并清零内存密钥");

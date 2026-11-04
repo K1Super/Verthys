@@ -4,8 +4,8 @@
 
   职责：
     1. 弹窗标题含模块名拼接（关闭「xxx」密钥保护）
-    2. 提示文案（关闭后该模块可直接访问无需密钥，需验证原独立密钥）
-    3. 原独立密钥输入框（disableVerifyKey，v-model 双向绑定）
+    2. 提示文案（关闭后模块解除密钥访问限制，操作需核验独立密钥）
+    3. 模块独立密钥输入框（disableVerifyKey，v-model 双向绑定）
     4. 确认关闭按钮（禁用条件：disableVerifyKey 为空 / 处理中）
 
   Props: show / moduleLabel / disableVerifyProcessing
@@ -15,14 +15,14 @@
 <template>
   <CosmicOverlay :show="show" width="440px" :backdrop-close="!disableVerifyProcessing" @close="$emit('close')">
     <div class="kv-title">关闭「{{ moduleLabel }}」密钥保护</div>
-    <div class="kv-desc">关闭后该模块可直接访问无需密钥。为防止误操作，请验证原独立密钥。</div>
+    <div class="kv-desc">关闭后模块解除密钥访问限制，操作需核验模块独立密钥</div>
     <div class="kd-old-key-row">
-      <div class="kd-old-key-label">原独立密钥</div>
+      <div class="kd-old-key-label">模块独立密钥</div>
       <input
         class="kv-input"
         v-model="disableVerifyKey"
         type="password"
-        placeholder="请输入原独立密钥以确认关闭"
+        placeholder="请输入模块独立密钥以确认关闭"
         @keydown.enter="$emit('confirm')"
       />
     </div>
@@ -51,7 +51,7 @@ defineProps<{
 }>();
 
 /**
- * DisableVerifyDialog Model（原独立密钥双向绑定）
+ * DisableVerifyDialog Model（模块独立密钥双向绑定）
  */
 const disableVerifyKey = defineModel<string>("disableVerifyKey", { default: "" });
 
@@ -61,7 +61,7 @@ const disableVerifyKey = defineModel<string>("disableVerifyKey", { default: "" }
 defineEmits<{
   /** 关闭弹窗（取消或点击遮罩） */
   (e: "close"): void;
-  /** 确认关闭（验证原独立密钥） */
+  /** 确认关闭（验证模块独立密钥） */
   (e: "confirm"): void;
 }>();
 </script>

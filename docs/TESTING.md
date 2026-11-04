@@ -2,9 +2,9 @@
 
 > 测试分层、全量/单项跑法、覆盖率现状与要求、关键场景用例与 Rust 侧测试。
 >
-> Last updated: 2026-09-22 · 维护人：K1Super
+> Last updated: 2026-11-03 · 维护人：K1Super
 
-C 核心测试为单一聚合可执行文件 `verthys_tests`（`core/tests/CMakeLists.txt` 的 `add_executable` 编译 43 个测试源文件），与两个独立进程的 ACG 专项共注册为 3 个 ctest 测试项（主测试 + `verthys_scd_acg` + `verthys_scd_dll_acg`）；主测试内含 316 个 `TEST()` 用例（`test_runner.c` 中 316 个 `RUN_TEST` 与之一一对应）。
+C 核心测试为单一聚合可执行文件 `verthys_tests`（`core/tests/CMakeLists.txt` 的 `add_executable` 编译 73 个测试源文件），与两个独立进程的 ACG 专项共注册为 3 个 ctest 测试项（主测试 + `verthys_scd_acg` + `verthys_scd_dll_acg`）；主测试内含 472 个 `TEST()` 用例（`test_runner.c` 中 472 个 `RUN_TEST` 与之一一对应）。
 
 ## 1. 测试分层（按 `core/tests/` 实际目录）
 
@@ -15,16 +15,18 @@ C 核心测试为单一聚合可执行文件 `verthys_tests`（`core/tests/CMake
 | `container/` | L1 容器格式：format/superblock/partition/extent | `v3sb_serialize_parse_roundtrip`、`v3part_encrypt_decrypt_roundtrip`、`v3ext_put_get_roundtrip` |
 | `index/` | L2 索引：LSM（MemTable+SSTable+Compaction） | `v3lsm_put_get_roundtrip`、`v3lsm_wal_crash_recovery` |
 | `transaction/` | L3 事务一致：WAL 环形双区 + 六阶段事务 | `inject_sb_ciphertext_bitflip_rejected` |
-| `security/` | L6 深度安全：预设/完整性/反调试/内存/应急/六层防御 | `keysep_aead_roundtrip`、`rhat_virtualprotect_patch_detected`、`dcl_all_seven_blocked_when_unlocked` |
+| `security/` | L6 深度安全：预设/完整性/反调试/内存/应急/六层防御/休眠/挂钩扫描 | `keysep_install_consumes_and_reports`、`rhat_virtualprotect_patch_detected`、`dcl_facts_locked_matrix`、`hook_scan_evaluate_hook_two_strikes`、`hibernation_state_parse_map` |
 | `property/` | 属性测试（自研 harness，无外部框架）：随机序列 + 不变式断言 | `prop_lsm_insert_find_delete`、`prop_txn_commit_rollback_consistency` |
 | `perf/` | 性能基准与回归 | `perf_baseline_unlock_write_read`、`perf_warm_cache_hit_on_second_unlock` |
 | `regression/` | 缺陷回归（最终修复方案 §6.1） | `repair_pool_extend_boundary` |
 | `schema/` | vendored flatcc 工具链全链路 | `flatcc_demo_roundtrip` |
 
+前端全量：`Set-Location verthys-tauri; npx vitest run`（当前 74 文件 / 788 用例）。
+
 ## 2. 如何跑全部测试
 
 ```powershell
-# 生产构建目录（Release）：3 个 ctest 测试项（主测试 316 用例 + 两个 ACG 专项）
+# 生产构建目录（Release）：3 个 ctest 测试项（主测试 472 用例 + 两个 ACG 专项）
 ctest --test-dir build -C Release --output-on-failure
 
 # 或直接运行测试 exe（Release 配置，输出以 "=== Summary: N passed, M failed ===" 结尾）
@@ -69,16 +71,19 @@ ctest --test-dir build -C Release -R verthys_tests
 | 场景 | 用例 |
 |---|---|
 | 解锁（成功/失败/锁定/温缓存） | `api_wrong_password`、`api_lock_unlock_same_file`、`v3life_unlock_minimal_first`、`v3life_warmcache_hit_miss_tamper` |
-| 加解密（AEAD/CNG/密钥派生/篡改） | `aead_roundtrip`、`aead_tamper_fails`、`cng_aead_roundtrip`、`keysep_aead_roundtrip`、`master_key_derive_deterministic` |
+| 加解密（AEAD/CNG/密钥派生/篡改） | `aead_roundtrip`、`aead_tamper_fails`、`cng_aead_roundtrip`、`keysep_install_consumes_and_reports`、`master_key_derive_deterministic` |
 | 事务提交/回滚 | `v3sb_txn_commit_rollback`、`prop_txn_commit_rollback_consistency` |
 | WAL 重放 | `v3lsm_wal_crash_recovery`、`v3life_crash_committed_replayed`、`v3life_crash_uncommitted_discarded` |
 | 容器魔数/schema 校验 | `format_bad_magic_rejected`、`v3sb_parse_garbage_rejected`、`inject_bad_magic_rejected` |
 | 完整性/防篡改 | `integrity_verify_unconfigured_passes`、`v3life_verify_integrity_tamper`、`rhat_virtualprotect_patch_detected` |
+| 七路径事实判定 | `dcl_facts_locked_matrix`、`dcl_facts_suspend_and_mem_matrix`、`dcl_facts_hibernation_matrix`、`dcl_facts_hook_scan_matrix`、`dcl_facts_sandbox_matrix`、`dcl_facts_cross_device_matrix`、`dcl_facts_limited_count` |
+| Hook 扫描状态机 | `hook_scan_evaluate_clean`、`hook_scan_evaluate_baseline_unavailable`、`hook_scan_evaluate_stale_stub`、`hook_scan_evaluate_hook_two_strikes`、`hook_scan_real_baseline_smoke` |
+| 挂起看门狗 | `suspend_watchdog_terminates_suspended_worker`（A18S，需 `VERTHYS_A18=1`） |
 
 ## 7. Rust 侧测试
 
 ```powershell
-# 主应用 crate（src-tauri）：单元测试分布于 controller/*、service/*、util/* 等
+# 主应用 crate（src-tauri）：569 个测试（567 通过 + 2 ignored），分布于 controller/*、service/*、util/* 等
 Set-Location .\verthys-tauri\src-tauri
 cargo test
 ```
@@ -86,10 +91,19 @@ cargo test
 主应用 Rust 单元测试含 `verthys_wal.rs` 断点续传/压缩/续传去重（需 `[dev-dependencies] tempfile`，`src-tauri/Cargo.toml:196-199`）。
 
 ```powershell
-# verthys-worker：18 个测试用例（#[cfg(test)] mod tests，分布于 runtime/gmk、main_loop、scan_shm、worker）
+# verthys-worker：68 个测试用例（#[cfg(test)] mod tests，分布于 runtime/gmk、main_loop、scan_shm、worker）
 Set-Location .\verthys-tauri\verthys-worker
 cargo test
 ```
+
+## 7.1 挂起看门狗端到端用例（A18S）
+
+```powershell
+# 真实 worker + 心跳 + 挂起看门狗；健康期不得误杀，挂起全部线程后 3s 级触发处置并终止 worker
+pwsh -NoProfile -File tests/attack/a18-suspend.ps1
+```
+
+该脚本设置 `VERTHYS_A18=1` 后驱动 `suspend_watchdog_terminates_suspended_worker`，输出 `RESULT A18S PASS|FAIL <detail>` 与实测毫秒；常规 `cargo test` 不执行该进程级实验。
 
 ## 8. 更新域测试
 
@@ -108,3 +122,14 @@ node scripts/gates/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local
 ```
 
 更新域 E2E 使用本机运行时矩阵：旧版基线安装包、新版真实签名物料、本机回环服务与 `scripts/updater/updater_e2e_matrix.mjs`；正向升级后必须核对容器可解锁与记录数一致，负向用例必须复核旧版仍可启动。
+
+## 9. 攻击回归
+
+```powershell
+# 全量攻击回归（A1/A2/A3/A4/A5/A6b/A7/A8/A9/A10~A19/A20/A20b/A18S），输出机器可读证据
+pwsh -NoProfile -File tests/attack/run.ps1 -OutJson build/attack-final.json
+```
+
+- `A18` 为 keyfile 因子绕过，`A18S` 为 worker 挂起处置；两者编号独立，避免覆盖。
+- `A18S` 使用真实 worker + 心跳 + 挂起看门狗，健康期误杀与 3s 级处置均纳入判定。
+- `A6`（离机 + 已知模块口令）只有绑定当前 DLL/worker 哈希的合格报告才计 PASS，否则保持 SKELETON。

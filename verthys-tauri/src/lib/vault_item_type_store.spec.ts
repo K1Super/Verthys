@@ -8,16 +8,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   addFullRecord,
   getModuleCache,
-  getRecordIdsByType,
   getRecordsDataB64Batch,
-  getSummaryIdsByType,
   invalidateFullRecord,
   invalidateScannedRecord,
   invalidateSummaryRecord,
   persistVerthys,
+  resolveTypeIds,
   setModuleCache,
 } from "../cache/composition/verthys-cache";
-import { ensureIndexSourceSafe } from "../utils/verthys_scan_safe";
 import { verthysAddRecord, verthysDeleteRecord } from "./verthys";
 import { serializeToJsonB64 } from "../utils/json_codec";
 import { TYPE_VAULT_TYPES } from "../constants/record_types";
@@ -35,18 +33,13 @@ import {
 vi.mock("../cache/composition/verthys-cache", () => ({
   addFullRecord: vi.fn(),
   getModuleCache: vi.fn(() => ({ data: null, recordId: null })),
-  getRecordIdsByType: vi.fn(() => []),
   getRecordsDataB64Batch: vi.fn(async () => new Map<number, string>()),
-  getSummaryIdsByType: vi.fn(() => []),
   invalidateFullRecord: vi.fn(),
   invalidateScannedRecord: vi.fn(),
   invalidateSummaryRecord: vi.fn(),
   persistVerthys: vi.fn(async () => true),
+  resolveTypeIds: vi.fn(async () => [] as number[]),
   setModuleCache: vi.fn(),
-}));
-
-vi.mock("../utils/verthys_scan_safe", () => ({
-  ensureIndexSourceSafe: vi.fn(async () => true),
 }));
 
 vi.mock("./verthys", () => ({
@@ -60,10 +53,8 @@ const persistMock = vi.mocked(persistVerthys);
 const cacheMock = vi.mocked(getModuleCache);
 const setCacheMock = vi.mocked(setModuleCache);
 const addFullRecordMock = vi.mocked(addFullRecord);
-const summaryIdsMock = vi.mocked(getSummaryIdsByType);
-const scanIdsMock = vi.mocked(getRecordIdsByType);
+const typeIdsMock = vi.mocked(resolveTypeIds);
 const batchMock = vi.mocked(getRecordsDataB64Batch);
-const indexSourceMock = vi.mocked(ensureIndexSourceSafe);
 
 function makeDef(over: Partial<VaultTypeDef> = {}): VaultTypeDef {
   return {
@@ -83,9 +74,7 @@ function makeDef(over: Partial<VaultTypeDef> = {}): VaultTypeDef {
 beforeEach(() => {
   vi.clearAllMocks();
   cacheMock.mockReturnValue({ data: null, recordId: null });
-  indexSourceMock.mockResolvedValue(true);
-  summaryIdsMock.mockReturnValue([]);
-  scanIdsMock.mockReturnValue([]);
+  typeIdsMock.mockResolvedValue([]);
   batchMock.mockResolvedValue(new Map<number, string>());
   addRecordMock.mockResolvedValue(1);
   deleteRecordMock.mockResolvedValue(true);
@@ -370,7 +359,7 @@ describe("读取自定义类型", () => {
     const cached = [makeDef()];
     cacheMock.mockReturnValue({ data: cached, recordId: 3 });
     expect(await loadCustomVaultTypes()).toEqual({ types: cached, failed: false });
-    expect(indexSourceMock).not.toHaveBeenCalled();
+    expect(typeIdsMock).not.toHaveBeenCalled();
     expect(batchMock).not.toHaveBeenCalled();
   });
 
@@ -381,24 +370,23 @@ describe("读取自定义类型", () => {
 
   it("有记录时解析并回填模块缓存（含记录 id）", async () => {
     const defs = [makeDef()];
-    summaryIdsMock.mockReturnValue([7]);
+    typeIdsMock.mockResolvedValue([7]);
     batchMock.mockResolvedValue(new Map([[7, serializeToJsonB64(defs)]]));
     expect(await loadCustomVaultTypes()).toEqual({ types: defs, failed: false });
     expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, defs, 7);
   });
 
-  it("摘要为空时改用扫描缓存取数", async () => {
+  it("类型盲索引返回多个候选 ID 时按大到小解析", async () => {
     const defs = [makeDef()];
-    indexSourceMock.mockResolvedValue(false);
-    scanIdsMock.mockReturnValue([5]);
-    batchMock.mockResolvedValue(new Map([[5, serializeToJsonB64(defs)]]));
+    typeIdsMock.mockResolvedValue([5, 7]);
+    batchMock.mockResolvedValue(new Map([[7, serializeToJsonB64(defs)]]));
     expect(await loadCustomVaultTypes()).toEqual({ types: defs, failed: false });
-    expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, defs, 5);
+    expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, defs, 7);
   });
 
   it("损坏记录被跳过，改用较大 id 之外的可解析记录", async () => {
     const defs = [makeDef()];
-    summaryIdsMock.mockReturnValue([7, 9]);
+    typeIdsMock.mockResolvedValue([7, 9]);
     batchMock.mockResolvedValue(
       new Map([
         [9, "%%%损坏%%%"],
@@ -411,7 +399,7 @@ describe("读取自定义类型", () => {
 
   it("结构不是数组的记录被跳过并继续回退更早的记录", async () => {
     const defs = [makeDef()];
-    summaryIdsMock.mockReturnValue([7, 9]);
+    typeIdsMock.mockResolvedValue([7, 9]);
     batchMock.mockResolvedValue(
       new Map([
         [9, serializeToJsonB64({ kind: "not-an-array" })],
@@ -423,17 +411,14 @@ describe("读取自定义类型", () => {
   });
 
   it("取数异常时按读取失败返回，不清空已缓存的可用类型", async () => {
-    summaryIdsMock.mockReturnValue([7]);
+    typeIdsMock.mockResolvedValue([7]);
     batchMock.mockRejectedValue(new Error("ipc failed"));
     expect(await loadCustomVaultTypes()).toEqual({ types: [], failed: true });
     expect(setCacheMock).not.toHaveBeenCalled();
   });
 
   it("记录 id 收集失败时同样按读取失败返回且不写缓存", async () => {
-    indexSourceMock.mockRejectedValue(new Error("index unavailable"));
-    vi.mocked(getRecordIdsByType).mockImplementation(() => {
-      throw new Error("scan unavailable");
-    });
+    typeIdsMock.mockRejectedValue(new Error("index unavailable"));
     expect(await loadCustomVaultTypes()).toEqual({ types: [], failed: true });
     expect(setCacheMock).not.toHaveBeenCalled();
   });
@@ -442,7 +427,7 @@ describe("读取自定义类型", () => {
 describe("写入自定义类型（缓存一致性契约）", () => {
   it("写入后回填全量缓存与模块缓存，并删除被替换的旧记录且失效其三层缓存", async () => {
     addRecordMock.mockResolvedValue(42);
-    summaryIdsMock.mockReturnValue([7, 42]);
+    typeIdsMock.mockResolvedValue([7, 42]);
     const result = await saveCustomVaultTypes([makeDef()]);
 
     expect(result).toEqual({ ok: true, persisted: true });
@@ -463,6 +448,15 @@ describe("写入自定义类型（缓存一致性契约）", () => {
     expect(persistMock).toHaveBeenCalledTimes(1);
   });
 
+  it("旧记录收集失败不影响新定义生效与落盘", async () => {
+    addRecordMock.mockResolvedValue(42);
+    typeIdsMock.mockRejectedValue(new Error("type index unavailable"));
+    const result = await saveCustomVaultTypes([makeDef()]);
+    expect(result).toEqual({ ok: true, persisted: true });
+    expect(deleteRecordMock).not.toHaveBeenCalled();
+    expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, [makeDef()], 42);
+  });
+
   it("新记录写入失败时中止，不写缓存也不落盘", async () => {
     addRecordMock.mockResolvedValue(null);
     const result = await saveCustomVaultTypes([makeDef()]);
@@ -474,7 +468,7 @@ describe("写入自定义类型（缓存一致性契约）", () => {
 
   it("旧记录删除失败不阻断新定义生效，仍失效其缓存", async () => {
     addRecordMock.mockResolvedValue(42);
-    summaryIdsMock.mockReturnValue([7, 42]);
+    typeIdsMock.mockResolvedValue([7, 42]);
     deleteRecordMock.mockRejectedValue(new Error("delete failed"));
     const result = await saveCustomVaultTypes([makeDef()]);
     expect(result.ok).toBe(true);
@@ -490,8 +484,7 @@ describe("写入自定义类型（缓存一致性契约）", () => {
 
   it("写入内容经过归一化，落盘形态与模块缓存一致", async () => {
     addRecordMock.mockResolvedValue(42);
-    indexSourceMock.mockResolvedValue(false);
-    scanIdsMock.mockReturnValue([3]);
+    typeIdsMock.mockResolvedValue([3]);
     await saveCustomVaultTypes([makeDef({ icon: "nope" as VaultTypeDef["icon"] })]);
 
     const cachedDefs = setCacheMock.mock.calls[0][1] as VaultTypeDef[];

@@ -27,3 +27,35 @@ pub fn log_fatal(entry: String) {
     };
     log::error!("[frontend-fatal] {}", snippet);
 }
+
+/// 导出应用诊断日志（脱敏 zip）
+///
+/// 仅打包 `AppPaths.log_dir` 下的普通 `.log` 文件（含轮转历史），导出前
+/// 统一脱敏路径与长哈希。审计日志 `audit.log` 是 HMAC 链式文件，不在导出
+/// 范围内，也不做轮转。
+#[tauri::command]
+pub fn diagnostics_export_logs(
+    app: tauri::AppHandle,
+    target_path: String,
+) -> Result<String, String> {
+    /* 该入口只服务开发悬浮球；发布态直接拒绝，避免用户侧或外部 IPC 调用。
+       采用编译期常量而非条件注册，避免复制整张命令表带来的漂移风险。 */
+    if !cfg!(debug_assertions) {
+        return Err("诊断导出仅在开发构建可用".to_string());
+    }
+
+    use tauri::Manager;
+    let paths = app
+        .try_state::<crate::infrastructure::app_paths::AppPaths>()
+        .ok_or_else(|| "应用数据目录未初始化".to_string())?;
+    let audit_log = app
+        .path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join("audit.log"));
+    crate::infrastructure::log_export::export(
+        &paths.log_dir,
+        audit_log.as_deref(),
+        &target_path,
+    )
+}

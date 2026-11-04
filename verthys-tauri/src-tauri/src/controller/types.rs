@@ -442,7 +442,8 @@ impl Zeroize for VerthysSummaryEntry {
  * path_state 下标 = VerthysDefensePath（verthys.h）：
  *   0=挂起绕过 1=内存转储 2=休眠取证 3=IAT/Inline Hook
  *   4=DLL 劫持 5=进程读取 6=跨设备迁移
- * 值域 = VerthysDefenseState：0=未校验 1=已阻断 2=降级 3=失败 */
+ * 值域 = VerthysDefenseState：0=未校验 1=已阻断 2=降级 3=失败
+ * path_reason 值域 = VerthysDefenseReason（0x0014 追加）。 */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityStatusReport {
     pub path_state: [u32; 7],
@@ -451,6 +452,10 @@ pub struct SecurityStatusReport {
     pub failed_count: u32,
     pub all_critical_blocked: bool,
     pub has_degraded: bool,
+    pub path_reason: [u32; 7],
+    pub limited_count: u32,
+    pub policy_flags: u32,
+    pub checked_at_unix_ms: u64,
 }
 
 /// 统一 JSON 响应结构（已废弃，新代码使用 ApiResponse<T> 或结构化响应类型）
@@ -526,14 +531,14 @@ pub struct VerthysResponse {
      * 返回分配的 verthys ID 列表 + 失败索引 + 检查点信息。WAL 保证断点续传幂等。
      *
      * 字段语义（仅 verthys_add_records_batch / verthys_import_begin / verthys_import_checkpoint 返回）：
-     *   - ids：本批次每条记录分配的 verthys ID（0 表示去重跳过或失败）
+     *   - ids：本批次每条记录分配的 verthys ID（0 表示幂等跳过或失败）
      *   - batch_id：本批次 ID（从 1 递增，前端据此对齐检查点）
      *   - failed_indices：本批次失败记录的下标列表（加密/入库异常）
-     *   - hashes：已 committed 的内容哈希列表（verthys_import_begin / verthys_wal_recover 返回，供生产者去重）
+     *   - entry_keys：已 committed 的非内容条目键列表（verthys_import_begin / verthys_wal_recover 返回，供生产者续传幂等）
      *   - import_id：导入会话 ID（verthys_import_begin 生成，贯穿整个导入生命周期）
-     *   - processed_count：本批次实际处理（含去重跳过）的记录数
+     *   - processed_count：本批次实际处理（含幂等跳过）的记录数
      *   - total_count：导入会话累计已 committed 记录数（检查点）
-     *   - skipped_count：本批次因哈希去重跳过的记录数 */
+     *   - skipped_count：本批次因条目键幂等跳过的记录数 */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ids: Option<Vec<u64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -541,7 +546,7 @@ pub struct VerthysResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_indices: Option<Vec<u64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hashes: Option<Vec<String>>,
+    pub entry_keys: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub import_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -586,6 +591,50 @@ pub struct VerthysResponse {
     /// 记录型块密文内嵌的块总数（仅 module_open 的 chunk 布局返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u32>,
+    /// v4 一次性恢复码（仅 v4_create 返回；展示确认后前端必须清零）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_code: Option<String>,
+    /// PCR 是否已启用（仅 v4_pcr_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pcr_enabled: Option<bool>,
+    /// PCR 位图（PCR0–23，仅 v4_pcr_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pcr_select: Option<u32>,
+    /// v4 keyfile 因子是否已启用（仅 v4_keyfile_status / enable / disable 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyfile_enabled: Option<bool>,
+    /// 当前会话是否由恢复码打开（仅 v4_keyfile_status 返回）；
+    /// 恢复会话可重绑/关闭 keyfile（keyfile 丢失逃生）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_mode: Option<bool>,
+    /// v4 模块加密是否已启用（仅 v4_module_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// v4 模块本会话是否已解锁（仅 v4_module_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unlocked: Option<bool>,
+    /// v4 模块是否已绑定恢复码槽（仅 v4_module_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_recovery: Option<bool>,
+    /// v4 模块是否已删除（仅 v4_module_status 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
+    /* 全库 DEK 轮换统计（仅 v4_rotate_begin 返回）
+     *
+     * 与 worker protocol.rs rotate_* 字段一一对应；均为统计计数，
+     * 不含记录名、明文或密钥。 */
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotate_stage: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotate_modules_ready: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotate_records: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotate_files: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotate_chunks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotate_bytes: Option<u64>,
 }
 
 impl VerthysResponse {
@@ -613,7 +662,7 @@ impl VerthysResponse {
             ids: None,
             batch_id: None,
             failed_indices: None,
-            hashes: None,
+            entry_keys: None,
             import_id: None,
             processed_count: None,
             total_count: None,
@@ -628,6 +677,21 @@ impl VerthysResponse {
             iterations: None,
             seq: None,
             total: None,
+            recovery_code: None,
+            pcr_enabled: None,
+            pcr_select: None,
+            keyfile_enabled: None,
+            recovery_mode: None,
+            enabled: None,
+            unlocked: None,
+            has_recovery: None,
+            deleted: None,
+            rotate_stage: None,
+            rotate_modules_ready: None,
+            rotate_records: None,
+            rotate_files: None,
+            rotate_chunks: None,
+            rotate_bytes: None,
         }
     }
     /// 结构化错误响应：携带稳定错误码（前端按码分支），文案仅作展示
@@ -660,7 +724,7 @@ impl VerthysResponse {
             ids: None,
             batch_id: None,
             failed_indices: None,
-            hashes: None,
+            entry_keys: None,
             import_id: None,
             processed_count: None,
             total_count: None,
@@ -675,6 +739,21 @@ impl VerthysResponse {
             iterations: None,
             seq: None,
             total: None,
+            recovery_code: None,
+            pcr_enabled: None,
+            pcr_select: None,
+            keyfile_enabled: None,
+            recovery_mode: None,
+            enabled: None,
+            unlocked: None,
+            has_recovery: None,
+            deleted: None,
+            rotate_stage: None,
+            rotate_modules_ready: None,
+            rotate_records: None,
+            rotate_files: None,
+            rotate_chunks: None,
+            rotate_bytes: None,
         }
     }
     pub fn to_json(&self) -> String {
@@ -806,7 +885,7 @@ pub struct EnumerateBatch {
 /// 字段语义：
 ///   - rtype：记录类型（与 verthys_add_record 一致）
 ///   - name：记录名称（如 `meta_xxx.jpg`）
-///   - hash：原始文件内容的 BLAKE3 hex（用于去重 + WAL 幂等）
+///   - entry_key：调用方生成的非内容身份键（用于会话内幂等/WAL 续传）
 ///   - data_b64：已加密的记录数据 base64（前端 XChaCha20-Poly1305 加密产物）
 ///   - chunk_ids / chunk_hashes：外置块引用（仅大文件外置模式携带；
 ///     导入时校验块在本会话已成功上传，防止悬空引用）
@@ -814,7 +893,8 @@ pub struct EnumerateBatch {
 pub struct BatchRecordInput {
     pub rtype: u32,
     pub name: String,
-    pub hash: String,
+    #[serde(default)]
+    pub entry_key: String,
     pub data_b64: String,
     #[serde(default)]
     pub chunk_ids: Option<Vec<u64>>,
@@ -825,14 +905,16 @@ pub struct BatchRecordInput {
 /// 单条外置加密块输入（verthys_add_chunk_batch 载荷元素）
 ///
 /// 字段语义：
-///   - hash：块密文的 BLAKE3 hex（本会话内幂等去重依据）
+///   - chunk_key：调用方生成的非内容块键（记录名与会话内幂等依据；
+///     不得由内容哈希派生）
 ///   - data_b64：块密文 base64（前端 XChaCha20-Poly1305 加密产物）
 ///   - rtype：记录类型（外置载荷角色）。缺省为照片数据块；索引瘦身布局的
 ///     缩略图记录显式指定缩略图类型，写者据此分配记录名与类型，二者共用
-///     同一上传通道、台账与幂等去重
+///     同一上传通道、台账与幂等映射
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChunkBlob {
-    pub hash: String,
+    #[serde(default)]
+    pub chunk_key: String,
     pub data_b64: String,
     #[serde(default)]
     pub rtype: Option<u32>,
@@ -846,13 +928,13 @@ pub struct ChunkBlob {
 pub struct ImportBatchProgress {
     /// 本批次 ID（从 1 递增，前端据此对齐检查点）
     pub batch_id: u64,
-    /// 本批次已处理记录数（含去重跳过 + 失败）
+    /// 本批次已处理记录数（含幂等跳过 + 失败）
     pub processed_in_batch: u64,
     /// 本批次总记录数
     pub total_in_batch: u64,
     /// 导入会话累计已 committed 记录数（检查点）
     pub total_committed: u64,
-    /// 导入会话累计因哈希去重跳过的记录数
+    /// 导入会话累计因条目键幂等跳过的记录数
     pub total_skipped: u64,
     /// 本批次已耗时（毫秒，自批次开始累计）
     pub elapsed_ms: u64,

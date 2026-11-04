@@ -833,35 +833,47 @@ export class PhotoWorkerPool {
     }
   }
 
-  /** 通知背压等待者（pending 减少，可能释放配额） */
+  /** 通知背压等待者（pending 减少，可能释放配额）。 */
   private notifyDrainWaiters(): void {
-    while (this.drainWaiters.length > 0 && this.pendingCount < this.maxPendingTasks) {
-      const waiter = this.drainWaiters.shift();
-      if (waiter) waiter();
+    if (this.terminated) {
+      // 终止收敛：所有等待者都必须被唤醒，否则 submit 会永久挂起
+      while (this.drainWaiters.length > 0) {
+        const waiter = this.drainWaiters.shift();
+        if (waiter) waiter();
+      }
+      return;
     }
+    /* 每次配额释放只唤醒一个等待者：被唤醒者在 waitForCapacity /
+     * awaitAdmission 的循环中重新检查 pending 后才占位。批量唤醒会让
+     * 多个提交同时越过闸门，实际 pending 超出 maxPendingTasks 上限。 */
+    const waiter = this.drainWaiters.shift();
+    if (waiter) waiter();
   }
 
   /**
    * 等待背压释放（读取闸门）。
    *
    * 在途任务数低于阈值时立即 resolve；否则等待既有任务 settle 后唤醒。
-   * 调用方（导入生产者）据此在读取下一个文件前等待配额，避免把全部源
-   * 文件字节一次性读入内存（读取后即被在途任务引用，直到 settle 才释放）。
-   *
-   * 保证：pending 每次减少都会唤醒等待者；池终止或耗尽时 drainAll 亦唤醒
-   * （调用方在唤醒后经 submit 重新检查终止/耗尽状态并得到明确错误）。
+   * 循环重检：被唤醒后若配额已被其他提交占用则重新排队，保证不会在
+   * 唤醒瞬间越过阈值。池终止时 waiters 由 drainAll 全部唤醒，循环退出后
+   * 由调用方经 submit 的终止检查得到明确错误。
    */
   async waitForCapacity(): Promise<void> {
-    if (this.pendingCount < this.maxPendingTasks) {
-      return;
+    while (!this.terminated && this.pendingCount >= this.maxPendingTasks) {
+      await new Promise<void>((resolve) => {
+        this.drainWaiters.push(resolve);
+      });
     }
-    return new Promise<void>((resolve) => {
-      this.drainWaiters.push(resolve);
-    });
   }
 
   /**
-   * 提交前置流程（全部提交入口共用）：终止检查 → 池自愈 → 背压等待 → 二次终止检查。
+   * 提交前置流程（全部提交入口共用）：终止检查 → 池自愈 → 背压等待 →
+   * 配额预占 → 二次终止检查。
+   *
+   * 配额预占：等待结束后在同一同步块内自增 pendingCount，随后由
+   * enqueueTask 直接入队（不再自增）。若把自增留在 enqueueTask，多个
+   * 并发提交会在 await 恢复间隙同时通过检查，导致 pending 超出上限。
+   * 预占后任何提前失败路径必须经 releaseAdmission() 归还配额。
    *
    * 池自愈：全部槽位永久失效时废弃旧槽位（下次调度冷启动新 Worker）。历史实现
    * 在提交时直接抛 PoolExhaustedError，使一次崩溃风暴后导入功能在本次会话内
@@ -873,14 +885,28 @@ export class PhotoWorkerPool {
       throw new PoolTerminatedError();
     }
     this.reviveExhaustedPool();
-    await this.waitForCapacity();
+    while (!this.terminated && this.pendingCount >= this.maxPendingTasks) {
+      await new Promise<void>((resolve) => {
+        this.drainWaiters.push(resolve);
+      });
+    }
     if (this.terminated) {
       throw new PoolTerminatedError();
     }
+    this.pendingCount++;
+  }
+
+  /** 归还未被 enqueueTask 消费的预占配额（提交在入队前失败时调用） */
+  private releaseAdmission(): void {
+    this.pendingCount = Math.max(0, this.pendingCount - 1);
+    this.notifyDrainWaiters();
   }
 
   /**
    * 任务入队（全部提交入口共用）：装配任务对象并交由调度。
+   *
+   * 调用前必须已经由 awaitAdmission 预占一个 pending 配额；本方法不再自增，
+   * 只在池已被终止时归还预占并拒绝（终止可与提交在同一事件循环边界交错）。
    *
    * @param request 请求体（不含 id，由池分配；op 已由提交入口按操作类型补齐）
    * @param source 源字节权威副本（无文件字节的任务传 null，走结构化克隆）
@@ -896,6 +922,12 @@ export class PhotoWorkerPool {
     priority: boolean,
   ): Promise<PhotoTaskSuccess> {
     return new Promise<PhotoTaskSuccess>((resolve, reject) => {
+      if (this.terminated) {
+        this.releaseAdmission();
+        reject(new PoolTerminatedError());
+        return;
+      }
+
       const task: PendingTask = {
         id: this.nextTaskId++,
         request,
@@ -912,8 +944,16 @@ export class PhotoWorkerPool {
       } else {
         this.taskQueue.push(task);
       }
-      this.pendingCount++;
-      this.dispatchNextTask();
+      try {
+        this.dispatchNextTask();
+      } catch (e) {
+        /* 调度异常（典型：Worker 构造失败）：任务尚未投递，必须从队列移除
+         * 并归还预占配额，否则该配额永久占用、后续提交逐步饿死。 */
+        const queued = this.taskQueue.indexOf(task);
+        if (queued >= 0) this.taskQueue.splice(queued, 1);
+        this.releaseAdmission();
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
     });
   }
 
@@ -931,7 +971,14 @@ export class PhotoWorkerPool {
     await this.awaitAdmission();
 
     // 源权威副本：任务 settle 前由 task.payload 持有
-    const source = input.fileBytes.slice();
+    let source: Uint8Array;
+    try {
+      source = input.fileBytes.slice();
+    } catch (e) {
+      // 预占配额必须归还，否则后续提交会被永久压到阈值之下
+      this.releaseAdmission();
+      throw e;
+    }
 
     return (await this.enqueueTask(
       input.request,
@@ -999,7 +1046,13 @@ export class PhotoWorkerPool {
     request: Omit<PhotoSlimRepackRequest, "id" | "op" | "fileBytes">;
   }): Promise<PhotoCryptoSuccess> {
     await this.awaitAdmission();
-    const source = input.fileBytes.slice();
+    let source: Uint8Array;
+    try {
+      source = input.fileBytes.slice();
+    } catch (e) {
+      this.releaseAdmission();
+      throw e;
+    }
     return (await this.enqueueTask(
       { ...input.request, op: "encrypt_slim_photo" },
       source,

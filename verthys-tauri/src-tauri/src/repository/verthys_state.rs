@@ -243,13 +243,18 @@ fn try_migrate_from_legacy_state(app: &tauri::AppHandle) -> Option<VerthysState>
 /* ------------------------------------------------------------------ *
  * .verthys 文件格式合法性校验                                           *
  *                                                                    *
- * V3 布局：文件偏移 0 起为超级块副本 0，帧头 8 字节                     *
- *   [u32 帧 magic 'V3RP'][u32 payload_len]，后随 FlatBuffers 载荷。   *
- * 校验与 C 层副本读取前置校验同源（帧 magic + 载荷长度边界），         *
- * 防止非 Verthys 文件误写入状态文件；完整认证由解锁流程执行。          *
+ * 必须同时识别当前产品格式与历史格式，否则状态文件修复/迁移会把合法     *
+ * V4 容器误判为损坏（ready=false 分支甚至会删除容器）。                 *
+ *                                                                    *
+ * V4 布局：偏移 0 起为 64 KiB 元数据副本 A，固定头 76B，                *
+ *   [u32 magic 0x59545256 ('VRTY')][u16 version_major][u16 version_minor] *
+ * V3 布局：偏移 0 起为超级块副本 0，帧头 8 字节                         *
+ *   [u32 帧 magic 'V3RP'][u32 payload_len]                             *
+ *                                                                    *
+ * 本函数只做轻量结构探测，不代替解锁流程的密钥认证与完整性校验。        *
  * ------------------------------------------------------------------ */
 
-/// 校验 .verthys 文件格式合法性（V3 副本帧头探测）
+/// 校验 .verthys 文件格式合法性（V4 固定头 / V3 副本帧头）
 pub fn validate_verthys_file(verthys_path: &str) -> bool {
     use std::io::Read;
 
@@ -257,6 +262,11 @@ pub fn validate_verthys_file(verthys_path: &str) -> bool {
     const V3_FRAME_MAGIC: [u8; 4] = [0x56, 0x33, 0x52, 0x50]; // 'V3RP'
     const V3_FRAME_HEADER_BYTES: usize = 8;
     const V3_REPLICA_BYTES: usize = 16 * 1024;
+    // V4 固定头（与 core/src/crypto/v4/vty_v4_types.h 同源）
+    const V4_MAGIC: u32 = 0x5954_5256; // 小端字节 'V' 'R' 'T' 'Y'
+    const V4_VERSION_MAJOR: u16 = 4;
+    const V4_VERSION_MINOR: u16 = 2;
+    const V4_MIN_FILE_BYTES: u64 = 128 * 1024; // A/B 元数据副本下限
 
     let mut file = match std::fs::File::open(verthys_path) {
         Ok(f) => f,
@@ -264,12 +274,37 @@ pub fn validate_verthys_file(verthys_path: &str) -> bool {
     };
     let mut frame = [0u8; V3_FRAME_HEADER_BYTES];
     if let Err(e) = file.read_exact(&mut frame) {
-        log::warn!("[state] 读取 V3 帧头失败: {}", e);
+        log::warn!("[state] 读取容器帧头失败: {}", e);
         return false;
     }
+
+    /* 先判 V4：magic 与版本字段同时匹配；文件长度必须覆盖 A/B 元数据区。 */
+    let magic_le = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
+    if magic_le == V4_MAGIC {
+        let major = u16::from_le_bytes([frame[4], frame[5]]);
+        let minor = u16::from_le_bytes([frame[6], frame[7]]);
+        let size = std::fs::metadata(verthys_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if major == V4_VERSION_MAJOR
+            && minor == V4_VERSION_MINOR
+            && size >= V4_MIN_FILE_BYTES
+        {
+            return true;
+        }
+        log::warn!(
+            "[state] V4 容器头非法: version={}.{} size={}",
+            major,
+            minor,
+            size
+        );
+        return false;
+    }
+
+    /* 再判 V3：帧 magic + 有界载荷长度。 */
     if frame[..4] != V3_FRAME_MAGIC {
         log::warn!(
-            "[state] 文件帧 magic 校验失败: {:02X?} (期望 'V3RP')",
+            "[state] 文件帧 magic 校验失败: {:02X?} (期望 'V3RP' 或 'VRTY')",
             &frame[..4]
         );
         return false;
@@ -498,10 +533,47 @@ mod tests {
         h
     }
 
+    /// 构建 V4 容器：magic 0x59545256 + major/minor + 128KiB 文件体
+    fn write_v4_file(
+        name: &str,
+        major: u16,
+        minor: u16,
+        size: usize,
+    ) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("{}_{}", name, std::process::id()));
+        let mut body = vec![0u8; size];
+        body[0..4].copy_from_slice(&0x5954_5256u32.to_le_bytes());
+        body[4..6].copy_from_slice(&major.to_le_bytes());
+        body[6..8].copy_from_slice(&minor.to_le_bytes());
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
     #[test]
     fn test_validate_verthys_file_accepts_v3_frame() {
         let path = write_frame_file("verthys_state_t_v3", &v3_frame(64));
         assert!(validate_verthys_file(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_validate_verthys_file_accepts_v4_header() {
+        let path = write_v4_file("verthys_state_t_v4", 4, 2, 128 * 1024);
+        assert!(validate_verthys_file(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_validate_verthys_file_rejects_v4_wrong_version() {
+        let path = write_v4_file("verthys_state_t_v4_ver", 4, 1, 128 * 1024);
+        assert!(!validate_verthys_file(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_validate_verthys_file_rejects_v4_short_body() {
+        let path = write_v4_file("verthys_state_t_v4_short", 4, 2, 64 * 1024);
+        assert!(!validate_verthys_file(path.to_str().unwrap()));
         let _ = std::fs::remove_file(&path);
     }
 

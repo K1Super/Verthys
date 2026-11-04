@@ -33,7 +33,9 @@ use super::stderr::{snapshot_stderr, truncate_utf8, StderrRing};
 pub(crate) fn reject_request_after_exit(req: ActorRequest, pid: u32) {
     let err = Err(format!("worker 子进程 PID={} 已退出", pid));
     match req {
-        ActorRequest::Send { reply, .. } | ActorRequest::SendStreamingUnlock { reply, .. } => {
+        ActorRequest::Send { reply, .. }
+        | ActorRequest::SendStreamingUnlock { reply, .. }
+        | ActorRequest::SendStreamingRotate { reply, .. } => {
             let _ = reply.send(err);
         }
         ActorRequest::WaitReady { reply, .. } => {
@@ -133,6 +135,23 @@ pub(crate) async fn perform_graceful_shutdown(
     }
 
     child_alive.store(false, Ordering::SeqCst);
+}
+
+/// 超时/失步时的强制回收：终止子进程并标记死亡。
+///
+/// 不能只标记 `child_alive=false` 而让进程继续运行：worker 之后写出的旧序号
+/// 进度/响应会污染下一次请求，触发“关联号不一致/认证失败”的误判。
+pub(crate) async fn terminate_child(
+    child: &mut Child,
+    child_alive: &Arc<AtomicBool>,
+    pid: u32,
+) {
+    if let Err(e) = child.kill().await {
+        log::warn!("[actor] PID={} 超时回收 kill 失败: {}", pid, e);
+    }
+    let _ = child.wait().await;
+    child_alive.store(false, Ordering::SeqCst);
+    log::warn!("[actor] PID={} 因超时/协议失步被强制回收", pid);
 }
 
 /// 检查子进程是否已退出，若已退出则标记 child_alive = false

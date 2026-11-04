@@ -3,7 +3,7 @@
  *
  * 重构后的分层架构：
  *   Layer 0: types/key_manager.ts + constants/key_manager_const.ts + lib/key_error.ts
- *   Layer 1: utils/serialization.ts + utils/verthys_traversal.ts + utils/promise_utils.ts + state/key_state.ts
+ *   Layer 1: utils/verthys_traversal.ts + utils/promise_utils.ts + state/key_state.ts
  *   Layer 2: cache/composition/verthys-cache.ts（模块缓存 + 扫描缓存 + flush 队列）
  *   Layer 3a: session/security-session.ts（会话计时 + 预设 + 暴力拦截 + lockAll）
  *   Layer 3b: key/global-verthys.ts（加密库 init + GMK CRUD + 设备绑定）
@@ -16,8 +16,6 @@
 /* ===== 常量再导出 ===== */
 export {
   TYPE_GLOBAL_KEY,
-  TYPE_MODULE_KEY,
-  TYPE_MODULE_KEY_CONFIG,
   MODULE_IDS,
   MODULE_LABELS,
   SESSION_PRESET_MINUTES,
@@ -56,6 +54,7 @@ export const globalKeyRecordLoadingRef = keyState.globalKeyRecordLoading;
 export const moduleKeyReadyRef = keyState.moduleKeyReady;
 export const hasModuleKeyRecordRef = keyState.hasModuleKeyRecord;
 export const moduleKeyEnabledRef = keyState.moduleKeyEnabled;
+export const moduleHasRecoveryRef = keyState.moduleHasRecovery;
 /* 安全守卫修复：导出 moduleKeyStatusLoadingRef，供 useModuleNavigation.switchModule
  *   防御性守卫消费——解锁关键路径若仍在加载模块密钥状态，切换模块前需等待完成，
  *   杜绝"加载窗口内 moduleKeyEnabled 为默认 false → 守卫误判保护已关闭 → 直接放行"漏洞 */
@@ -123,13 +122,16 @@ export {
    *   新实现总耗时 < 2.5s。 */
   getRecordsDataB64Batch,
   clearAllVerthysCaches,
+  ensureTypeIds,
+  clearTypeIdCache,
+  resolveTypeIds,
 } from "../cache/composition/verthys-cache";
 /* 后台任务 API 直连 core 层再导出（单向化，下游导入路径保持不变） */
 export { startBackgroundTasks, stopBackgroundTasks } from "../core/background-tasks";
 export type { SummaryRecord } from "../lib/verthys";
 
 /* ===== 安全扫描包装（永不抛出，Vue 组件专用） ===== */
-export { ensureRecordScanSafe, ensureSummaryScanSafe, ensureIndexSourceSafe } from "../utils/verthys_scan_safe";
+export { ensureRecordScanSafe, ensureSummaryScanSafe } from "../utils/verthys_scan_safe";
 /* 扫描进度快照类型（信号层消费；仅类型，无运行时代码） */
 export type { ScanProgress } from "../cache/composition/verthys-cache";
 
@@ -176,11 +178,10 @@ export {
   generateModuleKey,
   setModuleKey,
   verifyModuleKey,
-  getModuleKey,
   hasModuleKey,
   isModuleReady,
   logoutModule,
-  setModuleKeyEnabled,
+  disableModuleProtection,
   isModuleKeyEnabled,
   loadModuleKeyStatus,
 } from "../key/module-auth";

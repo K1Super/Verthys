@@ -19,7 +19,7 @@
  *
  * 依赖关系（避免循环导入）：
  *   - background-tasks.ts → cache/composition/verthys-cache.ts（ensureRecordScan / prefetchFullRecords /
- *     getAllSummaryIds / getSummaryIdsByType / hasFullRecord）
+ *     getAllSummaryIds / ensureTypeIds / hasFullRecord）
  *   - background-tasks.ts → lib/verthys.ts（verthysGetRecord）
  *   - background-tasks.ts → utils/logger.ts（日志）
  *   - cache/composition/verthys-cache.ts（组合根）→ 本模块：仅注入 stopBackgroundTasks 钩子
@@ -38,7 +38,7 @@ import {
   ensureRecordScan,
   prefetchFullRecords,
   getAllSummaryIds,
-  getSummaryIdsByType,
+  ensureTypeIds,
   getSummaryRecord,
   getScanFailedIds,
   hasFullRecord,
@@ -222,7 +222,7 @@ export async function startBackgroundTasks(): Promise<void> {
    * 性能根治：启动前 yieldIfFrontendBusy，前端活跃时让出 worker 通道。
    */
   if (!controller.cancelled) {
-    const visibleIds = collectVisibleRecordIds(20);
+    const visibleIds = await collectVisibleRecordIds(20);
     if (visibleIds.length > 0) {
       const prefetchTask = startGate
         .then(async () => {
@@ -353,15 +353,20 @@ export function isBackgroundTasksRunning(): boolean {
  * @param perType 每种类型取前 N 条
  * @returns 去重后的 ID 列表（按类型优先级分组、组内按 ID 升序）
  */
-function collectVisibleRecordIds(perType: number): number[] {
+async function collectVisibleRecordIds(perType: number): Promise<number[]> {
   const ids: number[] = [];
   for (const type of TYPE_PRIORITY) {
     if (BACKGROUND_SKIP_TYPES.has(type)) continue;
-    const typeIds = getSummaryIdsByType(type);
-    if (typeIds.length === 0) continue;
-    // 取前 perType 条（已按 ID 升序排序）
-    const subset = typeIds.slice(0, perType);
-    ids.push(...subset);
+    try {
+      const typeIds = await ensureTypeIds(type);
+      if (typeIds.length === 0) continue;
+      // 取前 perType 条（类型盲索引按 ID 升序返回）
+      const subset = typeIds.slice(0, perType);
+      ids.push(...subset);
+    } catch (e) {
+      // 预加载是旁路优化：单一类型枚举失败不影响其他类型与前台
+      log.warn(`后台预加载：类型 0x${type.toString(16)} ID 枚举失败`, e);
+    }
   }
   return ids;
 }

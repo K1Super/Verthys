@@ -13,33 +13,35 @@
     - class/style 等 attrs 透传至面板（.dialog），供模块定制皮肤
 -->
 <template>
-  <div v-if="modelValue" class="dialog-overlay" @click.self="onOverlayClick">
-    <div
-      ref="panelRef"
-      v-bind="$attrs"
-      class="dialog glass"
-      role="dialog"
-      aria-modal="true"
-      :aria-label="title || undefined"
-      tabindex="-1"
-      :style="width ? { minWidth: width, maxWidth: width } : undefined"
-    >
-      <slot name="header">
-        <div class="dialog-title">{{ title }}</div>
-      </slot>
-      <div v-if="layout === 'grid'" class="form-grid">
-        <slot />
-      </div>
-      <slot v-else />
-      <slot name="error" />
-      <div v-if="!hideActions" class="dialog-actions">
-        <button class="btn kv-cancel" @click="$emit('update:modelValue', false)" :disabled="saving">取消</button>
-        <button class="btn btn-primary kv-confirm" @click="$emit('save')" :disabled="saveDisabled || saving">
-          {{ saving ? savingLabel : (saveLabel || '保存') }}
-        </button>
+  <Teleport to="body" :disabled="!teleport">
+    <div v-if="modelValue" class="dialog-overlay" :style="{ zIndex: overlayZ }" @click.self="onOverlayClick">
+      <div
+        ref="panelRef"
+        v-bind="$attrs"
+        class="dialog glass"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="title || undefined"
+        tabindex="-1"
+        :style="width ? { minWidth: width, maxWidth: width } : undefined"
+      >
+        <slot name="header">
+          <div class="dialog-title">{{ title }}</div>
+        </slot>
+        <div v-if="layout === 'grid'" class="form-grid">
+          <slot />
+        </div>
+        <slot v-else />
+        <slot name="error" />
+        <div v-if="!hideActions" class="dialog-actions">
+          <button class="btn kv-cancel" @click="$emit('update:modelValue', false)" :disabled="saving">{{ cancelLabel }}</button>
+          <button class="btn btn-primary kv-confirm" @click="$emit('save')" :disabled="saveDisabled || saving">
+            {{ saving ? savingLabel : (saveLabel || '保存') }}
+          </button>
+        </div>
       </div>
     </div>
-  </div>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -60,6 +62,8 @@ const props = withDefaults(defineProps<{
   saveDisabled?: boolean;
   saving?: boolean;
   saveLabel?: string;
+  /** 取消/关闭按钮文案（默认「取消」；需二次确认时由调用方改写文案） */
+  cancelLabel?: string;
   /** 对话框宽度（如 "420px"），不传则使用默认 min-width: 460px */
   width?: string;
   /** 内容容器布局：grid = 双列网格（默认）；plain = 不套用容器，调用方自组排版 */
@@ -70,10 +74,21 @@ const props = withDefaults(defineProps<{
   hideActions?: boolean;
   /** 强制窗口：Esc 与遮罩点击不得关闭，只能由业务动作结束 */
   persistent?: boolean;
+  /** 遮罩层级（默认 1000）。需覆盖全屏 Cosmic 视图（9999）时由调用方上调 */
+  overlayZ?: number;
+  /** 是否 Teleport 到 body（默认 true）。全屏 Cosmic 视图（Unlock/Init/Verify）
+   *  由 body 级 z-index 堆叠，驻留在 .app-shell（z-index:1 堆叠上下文）内的
+   *  弹窗即使 overlayZ 再高也会被遮罩压住；模态窗口一律脱离应用堆叠上下文，
+   *  保证始终相对视口居中且可覆盖全屏视图。测试可显式传 false 保持内联。 */
+  teleport?: boolean;
 }>(), {
   layout: "grid",
+  saveLabel: "",
+  cancelLabel: "取消",
   savingLabel: "保存中…",
   persistent: false,
+  overlayZ: 1000,
+  teleport: true,
 });
 
 const emit = defineEmits<{

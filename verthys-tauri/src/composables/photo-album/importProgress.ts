@@ -125,6 +125,8 @@ export class ImportProgressState {
   private normalBatchStreak = 0;
   /** 是否卡顿 */
   private stalled = false;
+  /** 会话是否已成功收尾（完成文案只在真实提交后展示） */
+  private finished = false;
   /** 最近一次速率骤降后的最新单条耗时（卡顿期间 ETA 基于此值） */
   private stallPerItemMs = 0;
 
@@ -188,6 +190,7 @@ export class ImportProgressState {
     this.etaMs.value = total > 0 ? 0 : 0;
     this.rate.value = 0;
     this.isStalled.value = false;
+    this.finished = false;
     this.text.value = total > 0 ? `准备导入 ${total} 张照片…` : "";
 
     log.info(`进度追踪开始: total=${total}`);
@@ -352,7 +355,11 @@ export class ImportProgressState {
     if (this.processed === 0) {
       text = `准备导入 ${this.total} 张照片…`;
     } else if (this.processed >= this.total) {
-      text = `完成：${this.total} 张照片已导入`;
+      /* 处理（读取/加密）已全部完成，但最终批次可能仍在落盘：
+       * 会话结束前不得宣称“已导入”，避免完成文案早于真实提交。 */
+      text = this.finished
+        ? `完成：${this.total} 张照片已导入`
+        : `正在写入剩余记录…${this.total} 张`;
     } else if (this.stalled) {
       text = `加密中…${this.processed}/${this.total}（速率波动，优化中）`;
     } else {
@@ -392,6 +399,7 @@ export class ImportProgressState {
     }
 
     if (ok) {
+      this.finished = true;
       this.percent.value = 100;
       this.text.value = `已导入 ${this.total} 张照片`;
     } else {
@@ -403,6 +411,16 @@ export class ImportProgressState {
       `进度追踪结束: ok=${ok}, processed=${this.processed}, skipped=${this.skipped}, ` +
         `elapsed=${this.elapsedMs.value}ms`,
     );
+  }
+
+  /**
+   * 设置阶段性文案（不推进计数）。
+   *
+   * 用于会话恢复 / 首批读取等“有实际工作但尚无条目完成”的阶段，
+   * 避免进度文本长时间停在“准备导入”。下一条 update 会自然覆盖。
+   */
+  note(text: string): void {
+    this.text.value = text;
   }
 
   /** 重置进度状态（用于异常恢复后重新开始） */
@@ -431,6 +449,7 @@ export class ImportProgressState {
     this.etaMs.value = 0;
     this.rate.value = 0;
     this.isStalled.value = false;
+    this.finished = false;
     this.text.value = "";
   }
 }

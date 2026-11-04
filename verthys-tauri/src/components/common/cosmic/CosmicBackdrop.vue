@@ -1,5 +1,5 @@
 <!--
-  CosmicBackdrop.vue — 通用宇宙主题背景层（深空巡天场 v2）
+  CosmicBackdrop.vue — 通用宇宙主题背景层（深空巡天场）
   反大众化重构（与 CosmicBackground/HomeAtlas 同源引力视觉语法）：
     - 根除：正中心 conic 光晕环（刻板圆环+辉光泛滥）、对称闪烁星点、
       同轨迹模板流星
@@ -12,27 +12,39 @@
   用法：
     <CosmicBackdrop>...</CosmicBackdrop>          ← position: absolute（模块内视图）
     <CosmicBackdrop fixed>...</CosmicBackdrop>    ← position: fixed（全屏遮罩）
+    <CosmicBackdrop fixed veil="lucent">...</CosmicBackdrop>  ← 弹窗遮罩（留出可折射的衬底结构）
     <CosmicBackdrop @backdrop="onClose">...</CosmicBackdrop>  ← 点击背景触发
 -->
 <template>
-  <div class="cosmic-backdrop" :class="{ fixed }" :style="nebulaTexVars" @click.self="onBackdropClick">
-    <!-- 动态星云背景层（blur 烘焙进贴图，运行时零实时滤镜） -->
-    <div class="cosmic-bg">
-      <div class="cb-nebula cb-nebula-1"></div>
-      <div class="cb-nebula cb-nebula-2"></div>
-      <div class="cb-nebula cb-nebula-3"></div>
-      <div class="cb-nebula cb-nebula-4"></div>
-      <div class="cb-stars">
-        <span
-          v-for="s in stars"
-          :key="s.id"
-          class="cb-star"
-          :style="s.style"
-        ></span>
+  <div
+    class="cosmic-backdrop"
+    :class="{ fixed, 'view-layer': layer === 'view', 'veil-lucent': veil === 'lucent' }"
+    :style="backdropStyle"
+    @click.self="onBackdropClick"
+  >
+    <!-- 幕层：遮罩底色与氛围装饰的唯一载体，且恒为底板的兄弟节点而非祖先 ——
+         入场透明度必须落在本层：元素一旦 opacity 小于 1 就成为背衬折射的
+         根边界，折射只能采样边界之内的画面，底板会在整段淡入期内失去
+         页面衬底、结束帧才一次性接上 -->
+    <div class="cb-veil" aria-hidden="true">
+      <!-- 动态星云背景层（blur 烘焙进贴图，运行时零实时滤镜） -->
+      <div class="cosmic-bg">
+        <div class="cb-nebula cb-nebula-1"></div>
+        <div class="cb-nebula cb-nebula-2"></div>
+        <div class="cb-nebula cb-nebula-3"></div>
+        <div class="cb-nebula cb-nebula-4"></div>
+        <div class="cb-stars">
+          <span
+            v-for="s in stars"
+            :key="s.id"
+            class="cb-star"
+            :style="s.style"
+          ></span>
+        </div>
+        <!-- 流星划过（差化轨迹 — 两颗角度/矢量/周期/相位全异） -->
+        <div class="cb-meteor cb-meteor-1"></div>
+        <div class="cb-meteor cb-meteor-2"></div>
       </div>
-      <!-- 流星划过（差化轨迹 — 两颗角度/矢量/周期/相位全异） -->
-      <div class="cb-meteor cb-meteor-1"></div>
-      <div class="cb-meteor cb-meteor-2"></div>
     </div>
     <slot />
   </div>
@@ -44,10 +56,20 @@ import { computed } from "vue";
 interface Props {
   /** 是否使用 position: fixed（全屏遮罩模式） */
   fixed?: boolean;
+  /** 层级角色：view = 全屏业务视图（Unlock/Init/Verify，低于模块弹窗）；
+   *  modal = 弹窗遮罩（默认，高于视图、低于窗控条） */
+  layer?: "view" | "modal";
+  /** 遮罩密度：deep = 深场（视图默认）；lucent = 留出衬底结构，
+   *  供弹窗底板的折射有内容可折射 */
+  veil?: "deep" | "lucent";
+  /** 显式遮罩层级：仅高优先弹窗传入；不传时沿用样式表中的层级 */
+  zIndex?: number;
 }
 
-withDefaults(defineProps<Props>(), {
+const props = withDefaults(defineProps<Props>(), {
   fixed: false,
+  layer: "modal",
+  veil: "deep",
 });
 
 const emit = defineEmits<{ (e: "backdrop"): void }>();
@@ -60,7 +82,7 @@ const onBackdropClick = () => emit("backdrop");
  * 与 CosmicBackground 同手法：浏览器将 data-URI SVG 背景图栅格化一次并缓存
  * 为纹理，运行时不再执行实时重栅格化（星云 drift 动画只驱动
  * transform/opacity，纯合成）。
- * v2 色板收敛：粉 (255,110,180) → 金 (255,217,160)、薄荷 (0,255,200) →
+ * 色板收敛：粉 (255,110,180) → 金 (255,217,160)、薄荷 (0,255,200) →
  *   银 (205,224,244) — 与品牌谱线/引力星图同源深空冷调四色体系。
  */
 const svgUrl = (svg: string): string =>
@@ -102,6 +124,12 @@ const nebulaTexVars = computed<Record<string, string>>(() => ({
   ),
 }));
 
+/* 层级只有高优先弹窗显式传入：视图遮罩仍由样式表的 view-layer 层级接管 */
+const backdropStyle = computed<Record<string, string>>(() => ({
+  ...nebulaTexVars.value,
+  ...(props.zIndex !== undefined ? { zIndex: String(props.zIndex) } : {}),
+}));
+
 /* ============================================================================
  * 预生成闪烁星点（构建期一次求值 — 避免每帧随机）。
  * 色板：白 / 银青 / 淡紫 / 暖金（深空巡天场四色 — 与主界面 CosmicBackground
@@ -123,7 +151,9 @@ const stars = Array.from({ length: 26 }, (_, i) => ({
 </script>
 
 <style scoped>
-/* ===== 背景层（默认 absolute，可切换为 fixed） ===== */
+/* ===== 背景层（默认 absolute，可切换为 fixed） =====
+ * 根节点只负责定位与居中：底色与装饰全部归幕层 —— 根节点不得承载
+ * 不透明度或滤镜，否则会成为底板的背衬折射边界，把页面衬底挡在边界之外 */
 .cosmic-backdrop {
   position: absolute;
   inset: 0;
@@ -131,18 +161,49 @@ const stars = Array.from({ length: 26 }, (_, i) => ({
   display: flex;
   align-items: center;
   justify-content: center;
-  /* 性能根治：全屏 backdrop-filter 叠在 60fps WebGL 粒子画布上 =
-   * 合成器每帧对整个视口做 14px 模糊重采样（GPU 击穿主因）。
-   * 去实时毛玻璃 → 遮罩底色加深补偿（背后本就是弥散星空，
-   * 0.86 暗化层的视觉等效模糊后的景深压暗）；遮罩自身的
-   * 星云/星点/流星装饰层（纯合成器 transform/opacity）不受影响 */
-  background: rgba(2, 4, 10, 0.86);
   overflow: hidden;
+}
+/* 幕层：遮罩底色与星野装饰的唯一载体
+ * 性能根治：全屏 backdrop-filter 叠在 60fps WebGL 粒子画布上 =
+ * 合成器每帧对整个视口做 14px 模糊重采样（GPU 击穿主因）。
+ * 去实时毛玻璃 → 遮罩底色加深补偿（背后本就是弥散星空，
+ * 0.86 暗化层的视觉等效模糊后的景深压暗）；遮罩自身的
+ * 星云/星点/流星装饰层（纯合成器 transform/opacity）不受影响 */
+.cb-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  /* 点击穿透：遮罩的点击语义归根节点（@click.self） */
+  pointer-events: none;
+  background: rgba(2, 4, 10, 0.86);
 }
 .cosmic-backdrop.fixed {
   position: fixed;
+  /* 弹窗遮罩：高于全屏视图，低于窗控条（--z-chrome = 10050） */
   z-index: 9999;
+}
+/* 全屏业务视图没有 overlay 的过渡通道，由幕层自身承担一次性淡入；
+ * 弹窗路径的淡入归 CosmicOverlay 的过渡，两者不叠加同一属性 */
+.cosmic-backdrop.fixed.view-layer .cb-veil {
   animation: cb-fade-in 0.3s var(--ease);
+}
+/* 弹窗遮罩的浅色变体：遮罩仍承担聚焦，但不把衬底压成死黑 ——
+ * 底板是折射体，背后必须留有可被折射的星野结构，
+ * 透过去的星点与色相正是「半透明」可被看见的证据 */
+.cosmic-backdrop.fixed.veil-lucent .cb-veil {
+  background: radial-gradient(
+    120% 100% at 50% 34%,
+    rgba(3, 5, 11, 0.56),
+    rgba(1, 3, 8, 0.76) 78%
+  );
+}
+.cosmic-backdrop.fixed.veil-lucent .cosmic-bg {
+  opacity: 0.72;
+}
+/* 全屏业务视图（Unlock / Init / Verify）：低于模块弹窗（1000），
+ * 使视图之上仍可正常显示对话框；窗控条（10050）恒在其上。 */
+.cosmic-backdrop.fixed.view-layer {
+  z-index: var(--z-view-overlay, 900);
 }
 @keyframes cb-fade-in {
   from { opacity: 0; }

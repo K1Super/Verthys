@@ -127,12 +127,8 @@ export const PHOTO_FMT_LEGACY = 1;
 /** 布局标记：索引瘦身布局（缩略图独立记录 + 包裹文件密钥 + 块仅 nonce|密文） */
 export const PHOTO_FMT_SLIM = 2;
 
-/** 照片写入布局开关（新导入采用；默认既有布局）。
- *
- *  Why 默认关：布局二改变落盘结构，切换前必须完成双布局读写验证；
- *  显式切换是"可回退"的前提（回退开关后新导入回到既有布局，
- *  已写入的布局二数据仍由读取侧分流解析，不产生不可读窗口）。 */
-export const PHOTO_WRITE_FMT: number = PHOTO_FMT_LEGACY;
+/* 新导入固定写入布局一（自包含记录）；布局二只保留读取与来源保留路径，
+ * 不再提供写入开关，避免在缺少包裹文件密钥创建入口时产生半瘦身数据。 */
 
 /** 判断索引记录是否采用索引瘦身布局（缩略图独立、块密钥包裹） */
 export function isSlimPhotoMeta(meta: { fmt?: number; thumbId?: number }): boolean {

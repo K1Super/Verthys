@@ -64,7 +64,7 @@ const log = createLogger("cache-coordinator");
 export interface RecordUpdate {
   /** 记录 ID */
   id: number;
-  /** 记录类型（TYPE_GLOBAL_KEY / TYPE_MODULE_KEY / TYPE_MODULE_KEY_CONFIG / 业务类型） */
+  /** 记录类型（TYPE_GLOBAL_KEY / 业务类型） */
   type: number;
   /** 记录名称 */
   name: string;

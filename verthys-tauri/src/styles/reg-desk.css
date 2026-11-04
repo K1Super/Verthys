@@ -205,9 +205,42 @@ div.dialog.reg-panel:hover {
   min-height: 52px; max-height: 150px;
   line-height: 1.65;
 }
-/* 控件组：输入 + 尾部图标按钮（如密钥显隐），按钮用全局 icon-btn 词汇 */
-.reg-input-group { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.reg-input-group .reg-input { flex: 1; }
+/* 控件组：显隐端子内嵌输入框右侧 —— 图标即控件，不占输入框外的水平槽位 */
+.reg-input-group {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.reg-input-group .reg-input {
+  flex: 1;
+  padding-right: 36px;
+}
+/* 内嵌端子去底板：与输入框共用同一凹槽边界，只保留图标本身 */
+.reg-input-group .icon-btn {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.reg-input-group .icon-btn:hover {
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent);
+}
+.reg-input-group .icon-btn:focus-visible {
+  outline: 1px solid var(--border-hover);
+  outline-offset: 1px;
+}
+.reg-input-group .icon-btn svg {
+  width: 13px;
+  height: 13px;
+}
 .reg-select {
   appearance: none;
   padding-right: 30px;

@@ -541,6 +541,82 @@
   color: var(--text-muted);
 }
 
+/* ===== 原生密码控件清理 =====
+ * Edge / WebView2 会在密码框有内容时注入原生显隐按钮，
+ * 与项目自绘显隐端子重复；全局移除，显隐入口只保留项目控件。 */
+input[type="password"]::-ms-reveal {
+  display: none;
+}
+
+/* ===== 选择指示格（keyfile 保护 / 暂不绑定恢复槽共用）=====
+ * 原生勾选框只保留键盘与焦点语义，视觉由 13px 指示格承接；
+ * 选中态是离散充能块：纯色、无渐变、无阴影、无辉光。
+ * 默认居中服务解锁页的悬浮场；对话框内由 .kd-skip 修饰为左对齐。 */
+.kf-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  letter-spacing: 0.04em;
+  color: rgba(148, 160, 178, 0.72);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.3s var(--ease);
+}
+/* 选中态仅提亮文字：状态语义由指示格承载，不叠加辉光 */
+.kf-toggle--on {
+  color: rgba(205, 224, 244, 0.9);
+}
+/* 隐藏原生勾选框：视觉全部由 .kf-box 承接，仅保留键盘与焦点语义 */
+.kf-toggle input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+/* 指示格：深空静默底 + hairline 边框 */
+.kf-box {
+  position: relative;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  box-sizing: border-box;
+  border: 1px solid rgba(205, 224, 244, 0.22);
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.34);
+  transition:
+    border-color 0.3s var(--ease),
+    background 0.3s var(--ease);
+}
+/* 内嵌充能块：选中即离散点亮（纯色，无渐变无阴影） */
+.kf-box::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  background: var(--accent);
+  opacity: 0;
+  transform: scale(0.4);
+  transition:
+    opacity 0.28s var(--ease),
+    transform 0.36s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.kf-toggle input:checked ~ .kf-box {
+  border-color: rgba(0, 212, 255, 0.62);
+  background: rgba(0, 212, 255, 0.07);
+}
+.kf-toggle input:checked ~ .kf-box::after {
+  opacity: 1;
+  transform: scale(1);
+}
+/* 键盘焦点：焦点环落在指示格上（原生输入已隐没，不能依赖其轮廓） */
+.kf-toggle input:focus-visible ~ .kf-box {
+  outline: 1px solid rgba(0, 212, 255, 0.6);
+  outline-offset: 2px;
+}
+
 /* ===== 通用弹窗内部元素样式（kv-* = key verify）=====
  * 统一 MainView 模块密钥登录弹窗与 SecurityCenter 密钥编辑弹窗的内部视觉
  * 外壳（遮罩层 + 弹窗底板）由 CosmicOverlay.vue 提供
@@ -580,6 +656,12 @@
   margin-top: 1px;
   opacity: 0.8;
 }
+/* 长事务已耗时：不可逆/耗时操作必须让用户看到进度仍在推进 */
+.kd-elapsed {
+  margin: 0 0 12px;
+  font-size: 11px;
+  color: var(--accent);
+}
 .kv-input {
   width: 100%;
   background: rgba(var(--black-rgb), 0.3);
@@ -588,6 +670,8 @@
   padding: 10px 12px;
   color: var(--text-primary);
   font-size: 13px;
+  /* 表单控件不继承祖先字体，显式对齐项目主字体（含占位文本） */
+  font-family: var(--font);
   outline: none;
   /* 精确属性过渡（禁 transition: all — 同 .input 防御性根治） */
   transition:

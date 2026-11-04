@@ -15,13 +15,13 @@ extern "C" {
 #define VTY_CHUNK_MAX_PT (16u * 1024u * 1024u)
 #define VTY_MANIFEST_MAX_CHUNKS (1u << 20)
 
-int vty_chunk_seal(const uint8_t mdek[VTY_KEY_BYTES],
+__declspec(noinline) int vty_chunk_seal(const uint8_t mdek[VTY_KEY_BYTES],
                    const uint8_t file_uuid[VTY_UUID_BYTES],
                    uint32_t seq, uint32_t total, uint64_t epoch,
                    const uint8_t *pt, size_t pt_len,
                    uint8_t **out, size_t *out_len);
 
-int vty_chunk_open(const uint8_t mdek[VTY_KEY_BYTES],
+__declspec(noinline) int vty_chunk_open(const uint8_t mdek[VTY_KEY_BYTES],
                    const uint8_t file_uuid[VTY_UUID_BYTES],
                    uint32_t seq, uint32_t total, uint64_t epoch,
                    const uint8_t *in, size_t in_len,

@@ -138,7 +138,9 @@ int security_preset_feature_bits(SecurityPreset preset, uint32_t *out_bits)
     if (c.anti_debug)  bits |= SEC_FEAT_ANTI_DEBUG;
     if (c.anti_inject) bits |= SEC_FEAT_ANTI_INJECT;
     if (c.memory_lock && c.anti_dump) bits |= SEC_FEAT_MEMORY_GUARD;
-    /* 密钥三权分立与应急熔断为红线恒定能力，不随档位关闭 */
+    /* 密钥隔离与应急熔断为红线恒定能力，不随档位关闭。
+     * 4 号位键名为 V3 遗留 key_separation；产品 v4-only 构建映射到
+     * secure_allocator 密钥隔离堆，宿主展示按实际能力解释。 */
     bits |= SEC_FEAT_KEY_SEPARATION | SEC_FEAT_EMERGENCY_RESPONSE;
 
     *out_bits = bits & SEC_FEAT_VALID_MASK;

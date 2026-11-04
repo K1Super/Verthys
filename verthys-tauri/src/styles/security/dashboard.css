@@ -422,17 +422,13 @@
   letter-spacing: 0.3em;
   color: var(--text-secondary);
 }
-/* 头部动作端子：位于计数之前，与计数一同靠右
+/* 头部动作节点：位于计数之前，与计数一同靠右
    组内间距与顶栏动作区（检查更新 / 立即锁定）保持同一值 */
 .cus-actions {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 8px;
   margin-left: auto;
-}
-/* 头部端子收紧纵向内边距，保持标题行高度与其余分区一致 */
-.cus-actions .sf-terminal {
-  padding: 4px 2px;
 }
 .cus-count {
   margin-left: 14px;
@@ -529,6 +525,15 @@
 }
 .cus-item.off .cus-tag {
   color: rgba(148, 160, 178, 0.55);
+}
+/* 未确认态：快照缺失/同步失败时不得伪装成关闭，只用低对比空心点标识 */
+.cus-item.unknown .cus-dot {
+  background: transparent;
+  border: 1px solid rgba(148, 160, 178, 0.32);
+}
+.cus-item.unknown .cus-name,
+.cus-item.unknown .cus-tag {
+  color: rgba(148, 160, 178, 0.45);
 }
 
 /* 空闲锁定行：启用/关闭之后的虚线即拖动区
@@ -750,6 +755,7 @@
   color: rgba(0, 212, 255, 0.8);
 }
 .def-count--degraded { color: rgba(255, 165, 2, 0.9); }
+.def-count--limited { color: rgba(255, 165, 2, 0.62); }
 .def-count--partial { color: rgba(var(--warning-rgb), 0.85); }
 .def-count--breach { color: var(--danger); }
 /* 双列清单：按列流向（前 4 项左列，后 3 项右列下沉错位） */
@@ -788,6 +794,11 @@
   background: rgba(255, 165, 2, 0.5);
   border: 1px solid rgba(255, 165, 2, 0.8);
 }
+/* 已加固的用户态上限项：与可修复降级同色系但降低饱和度，语义上不制造告警压力 */
+.def-item--limited .def-dot {
+  background: rgba(255, 165, 2, 0.18);
+  border: 1px solid rgba(255, 165, 2, 0.55);
+}
 .def-item--failed .def-dot {
   background: var(--danger);
 }
@@ -809,6 +820,7 @@
 }
 .def-item--blocked .def-tag { color: rgba(0, 212, 255, 0.85); }
 .def-item--degraded .def-tag { color: rgba(255, 165, 2, 0.9); }
+.def-item--limited .def-tag { color: rgba(255, 165, 2, 0.62); }
 .def-item--failed .def-tag { color: var(--danger); }
 /* 虚线引出线（与 cap-lead 同族质感） */
 .def-lead {
@@ -830,33 +842,13 @@
   background: rgba(148, 160, 178, 0.3);
 }
 .def-item:nth-child(even) .def-lead { opacity: 0.65; }
-/* 总体态势行：方形状态位 + 态势文字 + mono 计数明细 */
+/* 总体态势行：mono 计数明细 */
 .def-stance {
   display: flex;
   align-items: baseline;
   gap: 10px;
   padding: 0 4px;
 }
-.def-stance-mark {
-  flex: none;
-  width: 5px;
-  height: 5px;
-  align-self: center;
-  background: rgba(148, 160, 178, 0.55);
-}
-.def-stance--ok .def-stance-mark { background: var(--dashboard-accent, var(--accent)); }
-.def-stance--degraded .def-stance-mark { background: rgba(255, 165, 2, 0.85); }
-.def-stance--partial .def-stance-mark { background: rgba(var(--warning-rgb), 0.7); }
-.def-stance--breach .def-stance-mark { background: var(--danger); }
-.def-stance-text {
-  font-size: 11px;
-  letter-spacing: 0.18em;
-  color: rgba(148, 160, 178, 0.75);
-}
-.def-stance--ok .def-stance-text { color: rgba(0, 212, 255, 0.9); }
-.def-stance--degraded .def-stance-text { color: rgba(255, 165, 2, 0.9); }
-.def-stance--partial .def-stance-text { color: rgba(var(--warning-rgb), 0.9); }
-.def-stance--breach .def-stance-text { color: var(--danger); }
 .def-stance-detail {
   margin-left: auto;
   font-family: var(--font-mono);
@@ -986,14 +978,7 @@
 @keyframes bs-rot-cw { to { transform: rotate(360deg); } }
 @keyframes bs-rot-ccw { to { transform: rotate(-360deg); } }
 
-/* ===== 密钥编辑弹窗（特定布局：输入行+随机按钮；通用样式由全局 kv-* 提供） ===== */
-.kd-input-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 10px;
-}
-.kd-input-row .kv-input { flex: 1; }
+/* ===== 密钥编辑弹窗（输入框内嵌端子；通用样式由全局 kv-* 提供） ===== */
 /* 原密钥验证行（修改/关闭保护时） */
 .kd-old-key-row {
   margin-bottom: 14px;
@@ -1005,30 +990,20 @@
   margin-bottom: 6px;
   font-family: var(--font);
 }
-.kd-random {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 8px 12px;
+/* 模块恢复槽绑定（首次启用默认展示） */
+.kd-recovery-row {
+  margin-bottom: 14px;
 }
-.kd-random svg { width: 13px; height: 13px; }
-/* 密钥显隐端子（图标，无底板；与输入行等高） */
-.kd-eye {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  padding: 0;
+/* 暂不绑定恢复槽：沿用全局 kf-toggle 指示格，仅修正为表单左对齐 */
+.kf-toggle.kd-skip {
+  justify-content: flex-start;
+  margin-top: 9px;
 }
-.kd-eye:hover { color: var(--accent); }
-.kd-eye svg { width: 14px; height: 14px; }
+.kd-error {
+  margin: 0 0 10px;
+  color: #ff9c9c;
+  font-size: 11px;
+}
 
 /* 密钥警告 */
 .derive-warn {

@@ -5,15 +5,14 @@
  * Web Worker 的 RPC 桥复用。本模块只传递模块名、公开参数与 base64 载荷，
  * 不派生、不缓存任何密钥。
  *
- * 文件密钥不在前端保存：瘦身布局的随机文件密钥只在首次创建时由 worker
- * 生成并立即包裹，后续每次加解密由 worker 用包裹态密钥一次性解封；
- * 文件块 v2 的盐与迭代次数是公开参数，随每次请求携带。
+ * 密钥不在前端保存：内容密钥只存在于 worker/C 层会话内，前端只传递公开
+ * 参数（文件盐、迭代次数与布局种类）。瘦身布局仅保留读取兼容，不再新建
+ * 包裹文件密钥。
  *
  * 错误语义：worker 失败统一抛 ModuleCryptoError，保留 worker 错误码字符串
  * （ERR_XXXXXXXX），调用方可据 LOCKED / AUTH 分支处理，不做文案匹配。
  */
 import {
-  verthysModuleFileKey,
   verthysModuleKeyLock,
   verthysModuleKeyUnlock,
   verthysModuleOpen,
@@ -73,15 +72,7 @@ function ensureOk(resp: VerthysResponse, action: string): VerthysResponse {
   return resp;
 }
 
-/** 文件级密钥组（索引瘦身布局）：盐与包裹态密钥都是公开数据 */
-export interface SlimFileKeys {
-  /** 文件盐 base64 */
-  saltB64: string;
-  /** 包裹态文件密钥 base64（可随索引长期保存） */
-  wrappedFileKey: string;
-}
-
-/** 把模块口令一次性交付 worker；前端不再持有该口令 */
+/** 把模块口令一次性交付 C 层解封 MDEK user 槽；前端不再持有该口令 */
 export async function unlockModuleKey(module: CryptoModule, key: string): Promise<void> {
   ensureOk(await verthysModuleKeyUnlock(module, key), "解锁模块密钥");
 }
@@ -89,18 +80,6 @@ export async function unlockModuleKey(module: CryptoModule, key: string): Promis
 /** 清除模块密钥（不传 module 表示全部清除） */
 export async function lockModuleKey(module?: CryptoModule): Promise<void> {
   ensureOk(await verthysModuleKeyLock(module), "清除模块密钥");
-}
-
-/** 创建索引瘦身布局的文件级密钥组（随机文件密钥只在 worker 内生成并包裹） */
-export async function createSlimFileKeys(module: CryptoModule = "photo"): Promise<SlimFileKeys> {
-  const r = ensureOk(
-    await verthysModuleFileKey({ module, kind: "slim_create" }),
-    "创建文件密钥",
-  );
-  if (!r.salt || !r.wrapped_key) {
-    throw new ModuleCryptoError("创建文件密钥响应缺少盐或包裹密钥", "");
-  }
-  return { saltB64: r.salt, wrappedFileKey: r.wrapped_key };
 }
 
 /** 生成文件块 v2 的随机 KDF 参数（盐是公开数据） */

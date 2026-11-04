@@ -266,15 +266,17 @@ static void keyring_fill(VtyKeyring *kr)
     kr->count = 4;
     kr->entries[0].kind = VTY_KEYKIND_KC;
     memset(kr->entries[0].key, 0xa1, VTY_KEY_BYTES);
-    kr->entries[1].kind = VTY_KEYKIND_KG;
-    memset(kr->entries[1].key, 0xa2, VTY_KEY_BYTES);
+    kr->entries[1].kind = VTY_KEYKIND_DATA_ROOT;
+    kr->entries[1].id_len = VTY_DATA_ROOT_BYTES;
+    memset(kr->entries[1].id, 0xa2, VTY_DATA_ROOT_BYTES);
+    memset(kr->entries[1].key, 0xa7, VTY_KEY_BYTES);
     kr->entries[2].kind = VTY_KEYKIND_MDEK;
-    kr->entries[2].module_uuid_len = VTY_KEYRING_MODULE_ID_MAX;
-    memset(kr->entries[2].module_uuid, 0xa3, VTY_KEYRING_MODULE_ID_MAX);
+    kr->entries[2].id_len = VTY_UUID_BYTES;
+    memset(kr->entries[2].id, 0xa3, VTY_UUID_BYTES);
     memset(kr->entries[2].key, 0xa4, VTY_KEY_BYTES);
     kr->entries[3].kind = VTY_KEYKIND_MDEK;
-    kr->entries[3].module_uuid_len = VTY_KEYRING_MODULE_ID_MAX;
-    memset(kr->entries[3].module_uuid, 0xa5, VTY_KEYRING_MODULE_ID_MAX);
+    kr->entries[3].id_len = VTY_UUID_BYTES;
+    memset(kr->entries[3].id, 0xa5, VTY_UUID_BYTES);
     memset(kr->entries[3].key, 0xa6, VTY_KEY_BYTES);
 }
 
@@ -297,12 +299,22 @@ TEST(v4_keyring_serialize_parse_roundtrip)
     CHECK_EQ(vty_keyring_find(&back, VTY_KEYKIND_KC, NULL, 0, key), VTY_OK);
     CHECK_EQ(key[0], 0xa1u);
     CHECK_EQ(vty_keyring_find(&back, VTY_KEYKIND_MDEK,
-                              kr.entries[3].module_uuid, VTY_UUID_BYTES,
+                              kr.entries[3].id, VTY_UUID_BYTES,
                               key), VTY_OK);
     CHECK_EQ(key[0], 0xa6u);
     CHECK(vty_keyring_find(&back, VTY_KEYKIND_MDEK,
-                           kr.entries[2].module_uuid, VTY_UUID_BYTES,
+                           kr.entries[2].id, VTY_UUID_BYTES,
                            key) == VTY_OK);
+
+    /* DataRoot 必须能取到完整 32B locator，而不是只剩 key */
+    {
+        VtyKeyEntry e;
+        memset(&e, 0, sizeof(e));
+        CHECK_EQ(vty_keyring_find_entry(&back, VTY_KEYKIND_DATA_ROOT, NULL, 0, &e),
+                 VTY_OK);
+        CHECK_EQ(e.id_len, VTY_DATA_ROOT_BYTES);
+        CHECK_EQ(memcmp(e.id, kr.entries[1].id, VTY_DATA_ROOT_BYTES), 0);
+    }
     return 0;
 }
 
@@ -364,27 +376,31 @@ TEST(v4_recovery_slot_seal_open)
 
     keyring_fill(&kr);
     CHECK_EQ(vty_recovery_generate(code, text, sizeof(text)), VTY_OK);
-    CHECK_EQ(vty_recovery_slot_seal(&slot, &kr, code, &h, 2,
+    CHECK_EQ(vty_recovery_slot_seal(&slot, kr.entries[0].key, code, &h, 2,
                                     VTY_ARGON2_MEM_KIB_MIN,
-                                    VTY_ARGON2_ITERS_MIN, 1), VTY_OK);
+                                    VTY_ARGON2_ITERS_MIN, 1, NULL), VTY_OK);
     CHECK_EQ(slot.slot_type, VTY_SLOT_RECOVERY);
-    CHECK(slot.ct_len > VTY_TAG_BYTES);
+    CHECK_EQ(slot.ct_len, VTY_RECOVERY_PLAIN_BYTES + VTY_TAG_BYTES);
 
-    CHECK_EQ(vty_recovery_slot_open(&slot, text, &h, 2, &back), VTY_OK);
-    CHECK_EQ(back.count, kr.count);
-    CHECK_EQ(memcmp(back.entries, kr.entries,
-                    sizeof(VtyKeyEntry) * kr.count), 0);
+    /* 恢复槽只允许 K_c：不能顺带恢复 MDEK 或 DataRoot */
+    CHECK_EQ(vty_recovery_slot_open(&slot, text, &h, 2, &back, NULL), VTY_OK);
+    CHECK_EQ(back.count, 1u);
+    CHECK_EQ(back.entries[0].kind, VTY_KEYKIND_KC);
+    CHECK_EQ(memcmp(back.entries[0].key, kr.entries[0].key, VTY_KEY_BYTES), 0);
+
+    /* AAD 绑定槽下标：换到别的下标必须失败 */
+    CHECK(vty_recovery_slot_open(&slot, text, &h, 3, &back, NULL) != VTY_OK);
 
     /* 格式合法但内容不同的恢复码：不能靠“格式通过”就解包成功 */
     CHECK_EQ(vty_recovery_generate(other, other_text, sizeof(other_text)),
              VTY_OK);
-    CHECK(vty_recovery_slot_open(&slot, other_text, &h, 2, &back) != VTY_OK);
+    CHECK(vty_recovery_slot_open(&slot, other_text, &h, 2, &back, NULL) != VTY_OK);
 
     /* AAD 绑定 vault uuid / epoch：换头部字段必须解包失败 */
     h.epoch = 8;
-    CHECK(vty_recovery_slot_open(&slot, text, &h, 2, &back) != VTY_OK);
+    CHECK(vty_recovery_slot_open(&slot, text, &h, 2, &back, NULL) != VTY_OK);
     h.epoch = 7;
     h.vault_uuid[0] ^= 0x01u;
-    CHECK(vty_recovery_slot_open(&slot, text, &h, 2, &back) != VTY_OK);
+    CHECK(vty_recovery_slot_open(&slot, text, &h, 2, &back, NULL) != VTY_OK);
     return 0;
 }

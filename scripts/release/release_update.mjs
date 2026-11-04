@@ -75,6 +75,19 @@ function run(script, args) {
   }
 }
 
+/**
+ * 读取仓库版本标识：账本必须能追溯到具体提交，否则审计无法复现发布物。
+ * git 不可用或非仓库目录时返回空串（调用方按缺失处理，不阻塞构包）。
+ */
+function gitValue(args) {
+  const result = spawnSync("git", ["-C", root, ...args], {
+    encoding: "utf8",
+    timeout: 15000,
+    windowsHide: true,
+  });
+  return result.error || result.status !== 0 ? "" : result.stdout.trim();
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const installerArg = (args.installer ?? "").trim();
@@ -195,6 +208,12 @@ function main() {
     if (existsSync(sbom)) {
       ledgerArgs.push("--sbom", sbom);
     }
+    const gitCommit = gitValue(["rev-parse", "HEAD"]);
+    const gitTag = gitValue(["describe", "--tags", "--always", "--dirty"]);
+    const builder = (process.env.USERNAME || process.env.USER || "").trim();
+    if (gitCommit) ledgerArgs.push("--git-commit", gitCommit);
+    if (gitTag) ledgerArgs.push("--git-tag", gitTag);
+    if (builder) ledgerArgs.push("--builder", builder);
     run("generate_release_manifest.mjs", ledgerArgs);
 
     writeFileSync(

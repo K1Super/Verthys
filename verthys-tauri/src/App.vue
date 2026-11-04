@@ -33,22 +33,28 @@
 
       <!-- 应用级常驻窗控条：启动页与主界面共用同一条窗控（最小化/最大化/关闭）。
            挂载于页面层之上 —— 引导页展示期即可见，交接期不随任一层的淡入淡出
-           而消失/重建，杜绝「进入主界面后按钮隐藏」 -->
-      <div class="app-window-chrome">
-        <WindowControls />
-      </div>
+           而消失/重建，杜绝「进入主界面后按钮隐藏」。
+           Teleport 到 body：全屏 Cosmic 视图由 body 级层级绘制，驻留
+           .app-shell（z-index:1 堆叠上下文）内会让窗控被遮罩盖住。 -->
+      <Teleport to="body">
+        <div class="app-window-chrome">
+          <WindowControls />
+        </div>
+      </Teleport>
     </div>
 
     <!-- 全局 Toast 渲染层（唯一渲染通道）：单点挂载 + Teleport 至 body，
          层级 = --z-toast（全应用最高层）—— 任何界面不可覆盖提示 -->
     <ToastLayer :idle-level="idleLevel" />
 
+    <!-- 开发工具悬浮球：DEV 分支动态加载，生产构建不存在该组件 -->
+    <component :is="DevDock" v-if="DevDock" />
+
     <!-- 更新自检失败后的恢复入口：启动阶段即可用，不依赖解锁业务层 -->
     <UpdaterRepairDialog
       v-model="showRepairDialog"
       :state="repairState"
       @repair="onRunRepair"
-      @export="onExportRepairLogs"
     />
   </div>
 </template>
@@ -67,11 +73,14 @@ const MainView = defineAsyncComponent(() => import("./components/MainView.vue"))
 const UpdaterRepairDialog = defineAsyncComponent(
   () => import("./components/dialogs/UpdaterRepairDialog.vue"),
 );
+/* 开发工具悬浮球：仅在 Vite dev 构建加载；生产构建该分支为 null，动态 import 被静态剔除 */
+const DevDock = import.meta.env.DEV
+  ? defineAsyncComponent(() => import("./devtools/DevDock.vue"))
+  : null;
 import { useAppTransition } from "./composables/useAppTransition";
 import { useSecurityGuard } from "./composables/useSecurityGuard";
 import { useGlobalIdleScheduler } from "./composables/useGlobalIdleScheduler";
 import { useAppUpdater, type RepairState } from "./composables/useAppUpdater";
-import { updaterErrorMessage } from "./lib/updater_error";
 import { useToastCenter } from "./composables/useToastCenter";
 import { withTimeout } from "./utils/promise_utils";
 import { masterFrameLoop } from "./core/master-frame-loop";
@@ -102,8 +111,6 @@ const {
   runHealthCheck,
   readRepairState,
   runRepair,
-  exportLogs: exportUpdateLogs,
-  lastErrorCode: updateLastErrorCode,
 } = useAppUpdater();
 const { showError, showStatus } = useToastCenter();
 
@@ -175,17 +182,7 @@ const onRunRepair = async () => {
   try {
     await runRepair();
   } catch {
-    showError("无法启动修复安装器，请导出日志后重新安装旧版");
-  }
-};
-
-/** 导出更新日志；修复入口与安全中心共用同一导出通道。 */
-const onExportRepairLogs = async () => {
-  const path = await exportUpdateLogs();
-  if (path) {
-    showStatus("更新日志已导出");
-  } else if (updateLastErrorCode.value) {
-    showError(updaterErrorMessage(updateLastErrorCode.value));
+    showError("无法启动修复安装器，请重新安装旧版");
   }
 };
 
@@ -266,14 +263,15 @@ onBeforeUnmount(() => {
 }
 
 /* ===== 应用级常驻窗控条 =====
- * 覆盖于双缓冲页面层之上（z-index 3 > 两层自动层叠）：启动页起即常驻，
- * 不参与 page-glitch / materialize 任一层的过渡，页面交接全程稳定显示。 */
+ * Teleport 到 body 后必须 fixed 贴合视口；层级 = --z-chrome（10050），
+ * 高于全屏视图 900 / 弹窗 1000 / 提升弹窗 10000，低于 Toast 100000。
+ * 最小化 / 最大化 / 关闭在任何视图、任何弹窗下都必须可见且可点。 */
 .app-window-chrome {
-  position: absolute;
+  position: fixed;
   top: 0;
   left: 0;
   right: 0;
-  z-index: 3;
+  z-index: var(--z-chrome, 10050);
 }
 
 /* ===== MainView materialize（自星系消散的辉光深处浮现成型） =====

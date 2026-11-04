@@ -925,6 +925,13 @@ int anti_inject_add_trusted_path(const char *path)
     return 0;
 }
 
+void anti_inject_refresh_baseline(void)
+{
+    if (!s_initialized) return;
+    int te = count_external_threads(GetCurrentProcessId());
+    s_baseline_external_thread_count = (te > 0) ? te : 0;
+}
+
 /*
  * 初始化防注入模块（幂等）。
  * 执行 DLL 搜索顺序加固，记录基线线程数。
@@ -945,9 +952,8 @@ int anti_inject_init(void)
     /* 记录基线外部线程数（起始地址不在本库自身模块内的线程），
      * 用于 APC 注入的线程数异常比较。自身模块内线程（preheat / 进度消费等）
      * 不计入，避免解锁期合法内部线程增长超过 2× 被误判为注入。 */
-    int te = count_external_threads(GetCurrentProcessId());
-    s_baseline_external_thread_count = (te > 0) ? te : 0;
-
     s_initialized = 1;
+    anti_inject_refresh_baseline();
+
     return 0;
 }

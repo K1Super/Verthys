@@ -15,6 +15,7 @@
 #include "vty_keyslot_v4.h"
 #include "vty_recovery.h"
 #include "vty_chunk_v4.h"
+#include "vty_keyfile.h"
 #include "vty_util.h"
 
 #include <string.h>
@@ -59,6 +60,7 @@ TEST(v4_fuzz_slot_keyring_parsers_never_crash)
     memset(&h, 0, sizeof(h));
     h.magic = VTY_V4_MAGIC;
     h.version_major = VTY_V4_VERSION_MAJOR;
+    h.version_minor = VTY_V4_VERSION_MINOR;
     h.epoch = 1;
     h.slot_count = 1;
 
@@ -74,6 +76,50 @@ TEST(v4_fuzz_slot_keyring_parsers_never_crash)
 
         (void)vty_keyring_parse(buf, len, &kr);
     }
+    return 0;
+}
+
+TEST(v4_fuzz_keyfile_parser_never_crash)
+{
+    uint8_t secret[VTY_KEYFILE_SECRET_BYTES];
+    uint8_t good[VTY_KEYFILE_BLOB_BYTES];
+    uint8_t buf[128];
+    uint32_t iter;
+    uint32_t i;
+    int rc;
+
+    /* 随机长度/内容：只有恰好 72B 的合法 VKFL 才可能成功，其余必须 INVALID */
+    for (iter = 0; iter < 3000; iter++) {
+        uint32_t len = fuzz_next() % (uint32_t)sizeof(buf);
+
+        for (i = 0; i < len; i++) buf[i] = (uint8_t)fuzz_next();
+        memset(secret, 0, sizeof(secret));
+        rc = vty_keyfile_parse(buf, len, secret);
+        if (len != VTY_KEYFILE_BLOB_BYTES) {
+            CHECK_EQ(rc, VTY_E_KEYFILE_INVALID);
+        } else {
+            CHECK(rc == VTY_OK || rc == VTY_E_KEYFILE_INVALID);
+        }
+        vty_secure_zero(secret, sizeof(secret));
+    }
+
+    /* 合法 VKFL 逐字节翻转：必须一律被 checksum 拒绝 */
+    CHECK_EQ(vty_keyfile_generate(good), VTY_OK);
+    memcpy(buf, good, sizeof(good));
+    for (i = 0; i < VTY_KEYFILE_BLOB_BYTES; i++) {
+        uint8_t saved = buf[i];
+        buf[i] = (uint8_t)(saved ^ 0x01u);
+        memset(secret, 0, sizeof(secret));
+        rc = vty_keyfile_parse(buf, VTY_KEYFILE_BLOB_BYTES, secret);
+        CHECK_EQ(rc, VTY_E_KEYFILE_INVALID);
+        vty_secure_zero(secret, sizeof(secret));
+        buf[i] = saved;
+    }
+
+    /* 正常 VKFL 仍可解析（正控） */
+    memset(secret, 0, sizeof(secret));
+    CHECK_EQ(vty_keyfile_parse(good, sizeof(good), secret), VTY_OK);
+    vty_secure_zero(secret, sizeof(secret));
     return 0;
 }
 
@@ -130,6 +176,7 @@ TEST(v4_fuzz_header_bitflip_always_rejected)
     memset(&h, 0, sizeof(h));
     h.magic = VTY_V4_MAGIC;
     h.version_major = VTY_V4_VERSION_MAJOR;
+    h.version_minor = VTY_V4_VERSION_MINOR;
     h.epoch = 1;
     h.slot_count = 1;
     h.header_len = (uint16_t)sizeof(buf);

@@ -59,6 +59,12 @@ mod security_commands;
 mod state;
 mod updater;
 mod worker;
+/// 开发夹具配置与路径守卫（仅开发构建可用）
+mod devfixture;
+
+/// 宿主层全库 DEK 轮换集成用例（仅 e2e_rotate 特性构建启用）
+#[cfg(feature = "e2e_rotate")]
+mod e2e_rotate;
 
 // ==== 强制分层架构 ====
 #[allow(dead_code)]
@@ -92,9 +98,14 @@ use tauri::{Emitter, Manager};
 // 控制器命令引用
 use controller::clipboard_controller::*;
 use controller::device_controller::*;
+use controller::devfixture_controller::*;
 use controller::diag_controller::*;
 use controller::file_controller::*;
 use controller::key_controller::*;
+use controller::pcr_controller::*;
+use controller::keyfile_controller::*;
+use controller::v4_module_controller::*;
+use controller::vault_rotate_controller::*;
 use controller::preflight_controller::*;
 use controller::scan_controller::*;
 use controller::verthys_batch_controller::*;
@@ -118,13 +129,17 @@ use middleware::panic_hook;
 /* ------------------------------------------------------------------ *
  * 关闭流程硬超时（数据安全优先，根治"退出后数据丢失"）            *
  * ------------------------------------------------------------------ *
- * 45000ms 覆盖 lockAll 内部 40s 安全网 + 5s 余量，确保：
- *   1. waitForFlush（22s）：pending 删除/写入全部落盘（v1 唯一持久化路径）
- *   2. verthysLockPersist（12s）：v1 原子落盘 + 文件锁释放
- *   3. securitySessionStop / verthysLock / workerDestroy：清理 worker
+ * 45000ms 是关闭流程的强制退出上限：正常路径 lockAll 完成即前端
+ * exit(0)，本值只决定 "worker 卡死" 时隐藏窗口的最长等待：
+ *   1. verthysPrepareLock：请求取消并等待轮换 Run 收敛（后端 30s 上限）
+ *   2. waitForFlush（22s）：pending 删除/写入全部落盘（v1 唯一持久化路径）
+ *   3. verthysLockPersist（12s）：v1 原子落盘 + 文件锁释放
+ *   4. securitySessionStop / verthysLock / workerDestroy：清理 worker
  * 窗口已在 CloseRequested 第一行隐藏（Rust 原生调用），用户无感知；
  * lockAll 提前完成则前端 exit(0) 立即退出，不空等满 45s。
- * 超时（极罕见，仅当 worker 卡死）后后端强制 app_handle.exit(0)。 */
+ * 超时（极罕见，仅当轮换取消或 worker 卡死）后后端强制 exit(0)；worker
+ * 位于 KILL_ON_JOB_CLOSE Job 内随宿主终止，源库 rotate_pending 为进程内
+ * 状态，下次启动可直接解锁（残留临时库不影响源库）。 */
 const CLOSE_HARD_TIMEOUT_MS: u64 = 45000;
 
 /* ------------------------------------------------------------------ *
@@ -230,6 +245,21 @@ fn run_process(mode: ProcessMode) {
     let app_paths = AppPaths::resolve(config.data_dir.as_deref());
     if let Err(e) = app_paths.ensure_dirs() {
         eprintln!("[VERTHYS] 数据目录创建失败（将降级日志）: {}", e);
+    }
+
+    /* 私有目录 ACL 加固（启动期，先于日志文件创建）：日志与临时目录仅允许
+     * 当前用户、SYSTEM 与内置管理员访问。数据根目录可能由 --data-dir 指向
+     * 用户共享/便携路径，不在启动期改写其 ACL，避免越权影响用户既有权限。 */
+    for dir in [&app_paths.log_dir, &app_paths.tmp_dir] {
+        if let Err(e) = crate::security::file_lock::harden_private_dir(
+            &dir.to_string_lossy(),
+        ) {
+            eprintln!(
+                "[VERTHYS] 私有目录 ACL 加固失败 {}: {}",
+                dir.display(),
+                e
+            );
+        }
     }
 
     // 创建日志管道
@@ -412,7 +442,15 @@ fn run_main_ui(
                     }
                 };
 
-                if show_main_window {
+                /* 宿主层轮换集成用例以无界面方式运行：不显示主窗口，避免
+                 * 自动化测试打断用户桌面；正式构建该常量恒为 false。 */
+                #[cfg(feature = "e2e_rotate")]
+                let e2e_rotate_mode =
+                    std::env::var("VERTHYS_E2E_ROTATE").as_deref() == Ok("1");
+                #[cfg(not(feature = "e2e_rotate"))]
+                let e2e_rotate_mode = false;
+
+                if show_main_window && !e2e_rotate_mode {
                     match app.get_webview_window("main") {
                         Some(window) => {
                             if let Err(e) = window.show() {
@@ -426,7 +464,7 @@ fn run_main_ui(
                             return Ok(());
                         }
                     }
-                } else {
+                } else if !e2e_rotate_mode {
                     // 用户在对账对话框中确认退出：不显示任何窗口，直接结束事件循环
                     log::warn!("[privacy] 启动恢复被拒绝，进程退出且不显示窗口");
                     app_handle.exit(0);
@@ -440,6 +478,59 @@ fn run_main_ui(
                 security_commands::install_preset_source();
                 // 注册可移动介质绑定实现到服务层契约（同一分层红线约束）
                 security_commands::usb_binding_bridge::install_usb_binding();
+                // 注册全库 DEK 轮换的宿主能力实现到服务层契约（同一分层红线约束）
+                security_commands::vault_rotate_bridge::install_vault_rotate();
+
+                /* 会话守卫真实回调：SecurityState 构建期不允许依赖 AppHandle，
+                 * 此处安装锁库序列。系统锁屏/注销/断连/挂起事件直接在主进程
+                 * 完成"worker 锁库 → 销毁会话 → 通知前端"，不依赖 WebView
+                 * 调度，覆盖屏幕不可见期间的事件投递。 */
+                {
+                    let app_for_session_lock = app_handle.clone();
+                    let security_state =
+                        app.state::<security_commands::SecurityState>();
+                    match security_state.replace_session_guard(
+                        Box::new(move |reason| {
+                            let app = app_for_session_lock.clone();
+                            tauri::async_runtime::spawn(async move {
+                                security_commands::commands::session::
+                                    perform_external_lock(app, reason.as_str()).await;
+                            });
+                        }),
+                        Box::new(|| {
+                            log::info!(
+                                "[session_guard] 系统解锁事件：不自动解锁容器"
+                            );
+                        }),
+                    ) {
+                        Ok(()) => {
+                            log::info!("[session_guard] 真实锁库回调已安装");
+                            /* worker 已存在的窗口期立即下发守卫位；未就绪时
+                             * 失败仅诊断，由 security_session_start 再次补发。 */
+                            let app_state = app.state::<AppState>();
+                            security_commands::commands::session::
+                                notify_runtime_guards(&app_state, true);
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "[session_guard] 真实锁库回调安装失败: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+
+                /* 宿主层轮换集成用例：特性 + 环境变量双重门禁。
+                 * 用例直接调用控制器与服务层入口，走真实 AppState/worker/DLL，
+                 * 结果写文件后退出进程；正式构建不含本分支。 */
+                #[cfg(feature = "e2e_rotate")]
+                if std::env::var("VERTHYS_E2E_ROTATE").as_deref() == Ok("1") {
+                    let handle = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        e2e_rotate::run_and_report(handle).await;
+                    });
+                    return Ok(());
+                }
                 let install_dir = std::env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
@@ -485,6 +576,34 @@ fn run_main_ui(
             verthys_preheat,
             verthys_unlock,
             verthys_create,
+            verthys_recovery_rotate,
+            // v4 PCR 策略：状态 / 启用 / 关闭 / 重密封
+            verthys_pcr_status,
+            verthys_pcr_enable,
+            verthys_pcr_disable,
+            verthys_pcr_reseal,
+            // v4 keyfile 因子（D3）：状态 / 启用 / 关闭
+            verthys_keyfile_status,
+            verthys_keyfile_enable,
+            verthys_keyfile_disable,
+            verthys_reseal_device,
+            // v4 模块 M1：状态 / 启用 / 口令轮换 / 关闭 / 恢复槽 / 不可逆删除
+            verthys_v4_module_status,
+            verthys_v4_module_enable,
+            verthys_v4_module_rotate_password,
+            verthys_v4_module_disable,
+            verthys_v4_module_bind_recovery,
+            verthys_v4_module_reseal_device,
+            verthys_v4_module_delete,
+            // v4 D9 全库 DEK 轮换：开始 / keyfile 补录 / 模块口令登记 / 执行 / 取消 / 提交 / 中止
+            verthys_v4_rotate_begin,
+            verthys_v4_rotate_attach_keyfile,
+            verthys_v4_rotate_unlock_module,
+            verthys_v4_rotate_run,
+            verthys_v4_rotate_cancel,
+            verthys_v4_rotate_commit,
+            verthys_v4_rotate_abort,
+            verthys_prepare_lock,
             verthys_lock,
             verthys_lock_persist,
             verthys_flush,
@@ -501,7 +620,7 @@ fn run_main_ui(
             verthys_import_end,
             verthys_import_checkpoint,
             verthys_wal_recover,
-            verthys_forget_hashes,
+            verthys_forget_import_keys,
             verthys_gc_orphan_chunks,
             verthys_scan_open,
             verthys_scan_next,
@@ -509,6 +628,7 @@ fn run_main_ui(
             verthys_scan_summary_open,
             verthys_scan_summary_next,
             verthys_scan_summary_close,
+            verthys_list_ids_by_type,
             verthys_delete_record,
             verthys_delete_records,
             verthys_get_summary_count,
@@ -526,7 +646,6 @@ fn run_main_ui(
             // 内容层加密：模块密钥与记录加解密（原始密钥留在 worker）
             controller::module_crypto_controller::verthys_module_key_unlock,
             controller::module_crypto_controller::verthys_module_key_lock,
-            controller::module_crypto_controller::verthys_module_file_key,
             controller::module_crypto_controller::verthys_module_seal,
             controller::module_crypto_controller::verthys_module_open,
             verthys_reconcile_key_presence,
@@ -551,8 +670,6 @@ fn run_main_ui(
             set_device_binding,
             check_device_binding,
             security_commands::security_brute_check,
-            security_commands::security_brute_record_failure,
-            security_commands::security_brute_record_success,
             security_commands::security_brute_clear_purge,
             security_commands::security_brute_status,
             security_commands::security_session_start,
@@ -592,6 +709,13 @@ fn run_main_ui(
             updater::updater_repair_state,
             updater::updater_run_repair,
             updater::updater_export_logs,
+            // 应用诊断日志导出（脱敏 zip；不含审计 HMAC 链）
+            controller::diag_controller::diagnostics_export_logs,
+            // 开发夹具配置：状态 / 读取 / 保存 / 清空（发布构建调用必败）
+            devfixture_status,
+            devfixture_profile_get,
+            devfixture_profile_save,
+            devfixture_profile_clear,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

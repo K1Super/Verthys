@@ -1,11 +1,11 @@
 {
   "name": "verthys-tauri",
   "private": true,
-"version": "4.1.8",
+"version": "4.2.8",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vue-tsc --noEmit && vite build && node scripts/verify-devtools-excluded.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "tauri": "tauri"

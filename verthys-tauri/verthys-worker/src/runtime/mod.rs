@@ -37,6 +37,8 @@ mod main_loop;
 mod diagnostics;
 pub(crate) mod content_crypto;
 pub(crate) mod module_keys;
+pub(crate) mod module_session;
+pub(crate) mod pcr_session;
 pub(crate) mod ipc_auth;
 pub(crate) mod path_grants;
 
@@ -54,4 +56,3 @@ pub use main_loop::run;
 pub use diagnostics::{ffi_get_last_error, format_os_error};
 // panic 清零器（log.rs hook 经入口层注册；模块本体保持私有）
 pub(crate) use gmk::wipe_thread_gmk;
-pub(crate) use module_keys::wipe_thread_keys;

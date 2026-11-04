@@ -99,23 +99,6 @@
           v-tip="importing ? `加密中…${importProgress}%` : '导入照片'"
           @click="onImport"
         />
-        <!-- 重打包入口（仅写入布局开关开启时出现）：后台迁移旧布局照片 -->
-        <ActionButton
-          v-if="repackAvailable && !repackRunning"
-          primary
-          class="repack-top-btn"
-          aria-label="迁移旧布局照片"
-          v-tip="'迁移旧布局照片（后台任务，可取消）'"
-          @click="startRepack"
-        >
-          <template #icon>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <polyline points="23 4 23 10 17 10"/>
-              <polyline points="1 20 1 14 7 14"/>
-              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-            </svg>
-          </template>
-        </ActionButton>
         <ActionButton
           primary
           class="del-top-btn"
@@ -131,74 +114,68 @@
       </div>
     </div>
 
-    <!-- 重打包进度（后台任务运行中）：提供取消入口 -->
-    <div v-if="repackRunning && repackState" class="photo-load-banner glass">
-      <span class="toast-dot"></span>
-      <span class="photo-load-text">{{ repackState.message }}</span>
-      <button class="photo-load-retry" type="button" @click="cancelRepack">取消迁移</button>
-    </div>
-
-    <!-- 加载恢复条（常驻，直至用户处置）：
-         失败与暂停都要有可执行的恢复入口——一次性 toast 会随时间消失，
-         用户错过即无路可走，只能退出重进。错误语义按模块规范以状态红
-         文字直陈，不加底色方框、不加图标；暂停为中性信息，用常规文字色。 -->
-    <div v-if="loadError || decryptPaused" class="photo-recover-bar" role="status">
-      <span class="photo-recover-text" :class="{ 'is-error': loadError }">
+    <!-- 照片区外壳（定位锚）：恢复条悬浮在照片区之上，绝不挤压网格布局 -->
+    <div class="masonry-shell">
+      <!-- 加载恢复条（常驻，直至用户处置）：
+           失败与暂停都要有可执行的恢复入口——一次性 toast 会随时间消失，
+           用户错过即无路可走，只能退出重进。载体统一为全局 StatusBanner：
+           失败走 danger、暂停走 info；语义色只落文字与动作键，不铺底色。 -->
+      <StatusBanner
+        v-if="loadError || decryptPaused"
+        class="photo-recover-banner"
+        :tone="loadError ? 'danger' : 'info'"
+        :actions="recoverActions"
+        :dismissible="!!loadError && !decryptPaused"
+        @action="onRecoverAction"
+        @dismiss="dismissLoadError"
+      >
         {{ loadError || '首批解密已暂停，其余缩略图待补齐' }}
-      </span>
-      <button v-if="loadError" class="photo-recover-action" type="button" @click="onRetryLoad">重试</button>
-      <button v-if="decryptPaused" class="photo-recover-action" type="button" @click="onResumeLoad">继续解密</button>
-      <button
-        v-if="loadError && !decryptPaused"
-        class="photo-recover-dismiss"
-        type="button"
-        aria-label="关闭提示"
-        @click="dismissLoadError"
-      >×</button>
-    </div>
+      </StatusBanner>
 
-    <!-- Masonry 瀑布流（滚动容器与列布局分离，确保滚轮垂直滚动正常） -->
-    <div class="masonry-scroll" ref="scrollRef" @scroll="onScroll">
-      <!-- 导入进度悬浮覆盖层（统一组件）：悬浮照片区中央，不挤压网格布局 -->
-      <ImportProgressOverlay
-        :visible="importing"
-        :percent="importProgress"
-        :message="importStatus"
-        :elapsed="importElapsed"
-        :show-meta="true"
-      />
+      <!-- Masonry 瀑布流（滚动容器与列布局分离，确保滚轮垂直滚动正常） -->
+      <div class="masonry-scroll" ref="scrollRef" @scroll="onScroll">
+        <!-- 导入进度悬浮覆盖层（统一组件）：悬浮照片区中央，不挤压网格布局
+             通道尺寸与模块子密钥验证态一致（非紧凑），不显示百分比/耗时 -->
+        <ImportProgressOverlay
+          :visible="importing"
+          :percent="importProgress"
+          :message="importStatus"
+          :compact="false"
+          :show-meta="false"
+        />
 
-      <!-- 虚拟滚动容器（相册列表强制采用虚拟滚动）：
-           行窗口模型：滚动位置的唯一量化状态是行窗口，像素级移动不产生重建；
-           渲染数组引用稳定（未变化的项复用对象），上万照片也只渲染数十 DOM 节点。
-           容器高度 = 总行数 × 行高，撑开滚动条；每个 masonry-item 用 translate3d 精确定位。 -->
-      <div v-if="photos.length > 0" class="masonry-cols" :style="{ height: totalHeight + 'px' }">
-        <div
-          v-for="(ph, vi) in visiblePhotos"
-          :key="ph.id"
-          class="masonry-item"
-          :class="{ selected: selectMode && selectedPhotoIds.has(ph.id) }"
-          :style="[ph._style, { '--reveal-delay': revealDelayOf(vi) + 'ms' }]"
-          role="button"
-          tabindex="0"
-          :aria-label="ph.name || '照片'"
-          :aria-pressed="selectMode ? selectedPhotoIds.has(ph.id) : undefined"
-          @mousemove="onCardMove($event)"
-          @mouseleave="onCardLeave($event)"
-          @click="onPhotoClick(ph)"
-          @keydown.enter.prevent="onPhotoClick(ph)"
-          @keydown.space.prevent="onPhotoClick(ph)"
-        >
-          <!-- 文字清晰度铁律：文字层（overlay）与图像层平级分离——
-               图像层只保留静态滤镜（照片 3D 倾斜已移除），
-               文字祖先链上无 filter / 3D 变换 / 缩放，恒走静态栅格化清晰路径。 -->
-          <div class="photo-card glass reveal-item">
-            <div class="photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
-            <div class="photo-overlay">
-              <span class="photo-name">{{ ph.name }}</span>
-              <span class="photo-size">{{ ph.size }}</span>
+        <!-- 虚拟滚动容器（相册列表强制采用虚拟滚动）：
+             行窗口模型：滚动位置的唯一量化状态是行窗口，像素级移动不产生重建；
+             渲染数组引用稳定（未变化的项复用对象），上万照片也只渲染数十 DOM 节点。
+             容器高度 = 总行数 × 行高，撑开滚动条；每个 masonry-item 用 translate3d 精确定位。 -->
+        <div v-if="photos.length > 0" class="masonry-cols" :style="{ height: totalHeight + 'px' }">
+          <div
+            v-for="(ph, vi) in visiblePhotos"
+            :key="ph.id"
+            class="masonry-item"
+            :class="{ selected: selectMode && selectedPhotoIds.has(ph.id) }"
+            :style="[ph._style, { '--reveal-delay': revealDelayOf(vi) + 'ms' }]"
+            role="button"
+            tabindex="0"
+            :aria-label="ph.name || '照片'"
+            :aria-pressed="selectMode ? selectedPhotoIds.has(ph.id) : undefined"
+            @mousemove="onCardMove($event)"
+            @mouseleave="onCardLeave($event)"
+            @click="onPhotoClick(ph)"
+            @keydown.enter.prevent="onPhotoClick(ph)"
+            @keydown.space.prevent="onPhotoClick(ph)"
+          >
+            <!-- 文字清晰度铁律：文字层（overlay）与图像层平级分离——
+                 图像层只保留静态滤镜（照片 3D 倾斜已移除），
+                 文字祖先链上无 filter / 3D 变换 / 缩放，恒走静态栅格化清晰路径。 -->
+            <div class="photo-card glass reveal-item">
+              <div class="photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
+              <div class="photo-overlay">
+                <span class="photo-name">{{ ph.name }}</span>
+                <span class="photo-size">{{ ph.size }}</span>
+              </div>
+              <div class="photo-shine"></div>
             </div>
-            <div class="photo-shine"></div>
           </div>
         </div>
       </div>
@@ -239,9 +216,8 @@
           @mousedown="onViewerMouseDown"
           @dblclick.prevent="onViewerDoubleClick"
         />
-        <!-- 原图准备中：统一加载环 + 真实阶段文案（读取原图/元数据/解密中）；
-             原图本身即解密产物，不设缩略图占位 -->
-        <CosmicRingLoader v-else-if="viewerLoading" :text="viewerProgressMsg || '解密中'" />
+        <!-- 原图准备中：仅统一加载环；原图本身即解密产物，不设缩略图占位 -->
+        <CosmicRingLoader v-else-if="viewerLoading" />
       </div>
     </div>
 
@@ -438,7 +414,7 @@
       <template v-else>
         <div class="parse-file-row">
           <input class="kv-input parse-file-input" :value="parseFileName" readonly placeholder="请选择 .venc 文件" />
-          <button class="btn btn-sm parse-browse-btn" @click="chooseParseFile" v-tip="'打开文件'">
+          <button class="parse-browse-btn" @click="chooseParseFile" v-tip="'打开文件'" aria-label="打开文件">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/></svg>
           </button>
         </div>
@@ -482,8 +458,6 @@
     <!-- 删除二次确认弹窗（复用全局 ConfirmDelete，与存签/清藏的删除确认一致） -->
     <ConfirmDelete
       :show="showDeleteConfirm"
-      :item-name="`已选 ${deleteConfirmCount} 张照片`"
-      :desc="`即将删除已选 ${deleteConfirmCount} 张照片，此操作不可撤销，删除后数据将永久丢失`"
       @confirm="confirmDelete"
       @cancel="cancelDeleteConfirm"
     />
@@ -520,6 +494,7 @@ import StarlitSky from "../common/cosmic/StarlitSky.vue";
 import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
+import StatusBanner, { type BannerAction } from "../common/feedback/StatusBanner.vue";
 import ActionButton from "../common/verthys-ui/ActionButton.vue";
 import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
 import type { PhotoEntry } from "../../composables/photo-album/types";
@@ -537,7 +512,6 @@ import { usePhotoImport } from "../../composables/photo-album/usePhotoImport";
 import { usePhotoExport } from "../../composables/photo-album/usePhotoExport";
 import { usePhotoViewer } from "../../composables/photo-album/usePhotoViewer";
 import { usePhotoParse } from "../../composables/photo-album/usePhotoParse";
-import { usePhotoRepack } from "../../composables/photo-album/usePhotoRepack";
 import { usePhotoDelete } from "../../composables/photo-album/usePhotoDelete";
 import { useCardShine } from "../../composables/useCardShine";
 import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
@@ -582,11 +556,22 @@ const { entering } = useModuleEntrance(() => photos.value.length > 0);
  *  互斥第一道防线必须在 UI（前端先拦），后端拒绝（导入管线重入守卫）仅作兜底；
  *  解析导入期间若不拦，用户会付出"选文件/加密"成本后才被拒绝。 */
 const albumBusy = computed(() =>
-  importing.value || parsing.value || importingParsed.value || exporting.value || repackRunning.value,
+  importing.value || parsing.value || importingParsed.value || exporting.value,
 );
 /** 加载/暂停恢复条的动作入口（提示常驻到用户处置，不再依赖一次性 toast） */
 const onRetryLoad = () => retryLoad();
 const onResumeLoad = () => resumeLoad();
+/** 动作清单随状态派生：失败给重试、暂停给继续解密，两者并存时同屏呈现 */
+const recoverActions = computed<BannerAction[]>(() => {
+  const list: BannerAction[] = [];
+  if (loadError.value) list.push({ key: "retry", label: "重试" });
+  if (decryptPaused.value) list.push({ key: "resume", label: "继续解密" });
+  return list;
+});
+const onRecoverAction = (key: string) => {
+  if (key === "retry") onRetryLoad();
+  else if (key === "resume") onResumeLoad();
+};
 /** 关闭仅清除提示，不改变已装载内容（已解密条目保持原状） */
 const dismissLoadError = () => { loadError.value = ""; };
 /** 解密失败计数：首次出现时经 toast 如实告知（便于用户察觉部分照片未就绪） */
@@ -599,7 +584,7 @@ watch(failedCount, (n, prev) => {
 /* ---------- 3. 查看器层（依赖 usePhotoData 的 photos/decryptPhotoMeta） ---------- */
 const {
   viewer, viewerSrc, viewerName, viewerBlurred, viewerScale,
-  viewerOffsetX, viewerOffsetY, viewerDragging, viewerLoading, viewerProgressMsg,
+  viewerOffsetX, viewerOffsetY, viewerDragging, viewerLoading,
   onView, closeViewer, onViewerWheel, onViewerMouseDown, onViewerDoubleClick,
   onBlur, onFocus,
   cleanup: cleanupViewer,
@@ -728,18 +713,11 @@ const {
   getPipeline, importing, importProgress, importStatus, importElapsed,
 });
 
-/* ---------- 6b. 重打包层（后台迁移旧布局照片；复用导入流水线写入链路） ---------- */
-const {
-  repackAvailable, repackRunning, repackState, startRepack, cancelRepack,
-} = usePhotoRepack({
-  photos, isTauri, getPipeline, showToast, showError,
-});
-
 /* ---------- 7. 删除层（依赖 usePhotoViewer 的 onView 用于非选择模式下的照片点击） ---------- */
 const {
   selectMode, selectedPhotoIds, allSelected,
   toggleSelectAll, cancelSelectMode, onDeleteBtn, onDeleteSelected, onPhotoClick,
-  showDeleteConfirm, deleteConfirmCount, confirmDelete, cancelDeleteConfirm,
+  showDeleteConfirm, confirmDelete, cancelDeleteConfirm,
 } = usePhotoDelete({
   photos, isTauri, onView, showError, showToast,
   // 占位项删除兜底：meta 未解密时强制解密，补齐 chunk 级联与去重锁释放
@@ -894,9 +872,6 @@ const cleanupLifecycle = () => {
   // 取消进行中的导入：中止投喂新文件，已提交批次收尾并保留 WAL 续传
   abortImport();
 
-  // 取消进行中的重打包：当前一张收尾后停止（源记录不会半途删除，可再次续跑）
-  cancelRepack();
-
   // 取消 rafThrottle 未触发的回调
   onScroll.cancel();
   cancelShine();
@@ -980,52 +955,28 @@ useModuleDialogGuard("photos", () => {
   color: var(--text-muted);
 }
 
-/* 后台进度横幅（重打包）：进度文案 + 取消迁移入口 */
-.photo-load-banner {
-  display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
-  margin: 0 4px; padding: 8px 14px;
-  font-size: 12px; color: var(--text-muted); font-family: var(--font);
-  position: relative; z-index: 2;
+/* 照片区外壳：为恢复条提供定位锚，自身完整占满剩余高度；
+   恢复条不参与其布局，网格始终拿到全部可用高度 */
+.masonry-shell {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
-.photo-load-banner .toast-dot { --mark-c: var(--accent); }
-.photo-load-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.photo-load-retry {
-  flex: 0 0 auto; padding: 4px 12px; font-size: 12px; font-family: var(--font);
-  color: var(--accent); background: transparent; border: 1px solid var(--border-glass);
-  border-radius: var(--radius); cursor: pointer;
-  transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease);
-}
-.photo-load-retry:hover { background: rgba(var(--accent-rgb), 0.08); border-color: rgba(var(--accent-rgb), 0.35); }
-.photo-load-retry:active { background: rgba(var(--accent-rgb), 0.14); }
-.photo-load-retry:focus-visible { outline: 1px solid rgba(var(--accent-rgb), 0.55); outline-offset: 2px; }
 
-/* 加载恢复条：常驻单行，无底色方框、无图标；
-   失败以状态红文字直陈，暂停为中性信息（常规文字色）。 */
-.photo-recover-bar {
-  display: flex; align-items: center; gap: 12px; flex: 0 0 auto;
-  margin: 0 4px; padding: 8px 14px;
-  font-size: 12px; font-family: var(--font); color: var(--text-muted);
-  position: relative; z-index: 2;
+/* 恢复条浮层：绝对定位在照片区顶部居中，宽度随内容收敛；
+   出现/消失不改变网格高度与滚动位置，也不挤压任何照片内容 */
+.photo-recover-banner {
+  position: absolute;
+  top: 10px;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  width: fit-content;
+  max-width: calc(100% - 20px);
+  margin-inline: auto;
 }
-.photo-recover-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.photo-recover-text.is-error { color: var(--danger); }
-.photo-recover-action {
-  flex: 0 0 auto; padding: 4px 12px; font-size: 12px; font-family: var(--font);
-  color: var(--accent); background: transparent; border: 1px solid var(--border-glass);
-  border-radius: var(--radius); cursor: pointer;
-  transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease);
-}
-.photo-recover-action:hover { background: rgba(var(--accent-rgb), 0.08); border-color: rgba(var(--accent-rgb), 0.35); }
-.photo-recover-action:active { background: rgba(var(--accent-rgb), 0.14); }
-.photo-recover-action:focus-visible { outline: 1px solid rgba(var(--accent-rgb), 0.55); outline-offset: 2px; }
-.photo-recover-dismiss {
-  flex: 0 0 auto; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
-  padding: 0; font-size: 14px; line-height: 1; color: var(--text-muted);
-  background: transparent; border: none; border-radius: var(--radius); cursor: pointer;
-  transition: color 0.2s var(--ease);
-}
-.photo-recover-dismiss:hover { color: var(--text-primary); }
-.photo-recover-dismiss:focus-visible { outline: 1px solid rgba(var(--accent-rgb), 0.55); outline-offset: 2px; }
 
 /* 选择模式操作栏：悬浮层——绝对定位在照片区底部中央，脱离文档流不挤压网格。
    动画仅 opacity/transform（合成器友好）；玻璃底 + 零阴影与模块整体语言一致 */
@@ -1288,13 +1239,20 @@ useModuleDialogGuard("photos", () => {
 }
 
 /* ===== 解析对话框（外壳复用 CosmicOverlay + kv-* 全局样式，仅保留解析特有元素） ===== */
-.parse-file-row { display: flex; gap: 8px; }
-.parse-file-input { flex: 1; }
-/* 打开文件图标钮：34px 正方形、透明底 + 保留方框边框
-   （覆盖 .btn 基础底色与内边距），悬浮仅图标与边框提亮 */
-.parse-browse-btn { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; background: transparent; flex-shrink: 0; }
-.parse-browse-btn:hover { background: transparent; border-color: var(--border-hover); color: var(--accent); }
-.parse-browse-btn svg { width: 15px; height: 15px; }
+.parse-file-row { position: relative; display: flex; align-items: center; }
+.parse-file-input { --kv-input-pad-right: 42px; flex: 1; }
+/* 打开文件图标端子：内嵌文件框右侧，无独立底板；悬浮只提亮图标 */
+.parse-browse-btn {
+  position: absolute; right: 5px; top: 50%;
+  width: 26px; height: 26px; transform: translateY(-50%);
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; border: 0; background: transparent;
+  color: var(--text-muted); cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+}
+.parse-browse-btn:hover { background: transparent; border-color: transparent; color: var(--accent); }
+.parse-browse-btn:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 1px; }
+.parse-browse-btn svg { width: 14px; height: 14px; }
 /* 密钥输入沿用全局字体（与全局输入一致，不再使用等宽体） */
 .parse-token-input { width: 100%; color: var(--accent); }
 .parse-result { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }

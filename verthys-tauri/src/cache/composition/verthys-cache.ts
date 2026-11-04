@@ -55,6 +55,7 @@ import {
   verthysScanOpen, verthysScanNext, verthysScanClose,
   verthysEnumerateRecords, verthysEnumerateRecordsStream,
   verthysScanSummaryOpen, verthysScanSummaryNext, verthysScanSummaryClose,
+  verthysListIdsByType,
   verthysGetRecord,
 } from "../../lib/verthys";
 import type { SummaryRecord } from "../../lib/verthys";
@@ -74,17 +75,10 @@ import {
 // 仅注入停止钩子（clearAllVerthysCaches 前置等待后台任务终止）；
 //   startBackgroundTasks 不再由本文件导入或转发
 import { stopBackgroundTasks } from "../../core/background-tasks";
-import { lockModuleKey, type CryptoModule } from "../../lib/module_crypto";
+import { verthysModuleKeyLock } from "../../lib/verthys";
 import { createLogger } from "../../utils/logger";
 
 const log = createLogger("verthys-cache");
-
-/** 模块 ID → 内容加密模块（accounts 无内容加密） */
-function cryptoModuleOf(moduleId: ModuleId): CryptoModule | null {
-  if (moduleId === "photo") return "photo";
-  if (moduleId === "fileverthys") return "file";
-  return null;
-}
 
 // re-export flush 队列 API（统一冲刷队列服务）
 export {
@@ -147,6 +141,7 @@ export function initVerthysCache(): void {
     scanSummaryOpen: verthysScanSummaryOpen,
     scanSummaryNext: verthysScanSummaryNext,
     scanSummaryClose: verthysScanSummaryClose,
+    listIdsByType: verthysListIdsByType,
     getRecord: verthysGetRecord,
   };
 
@@ -208,33 +203,27 @@ export function clearModuleCache(key?: string): void {
   ensureDomain().clearModuleCache(key);
 }
 
-/* === 2. 模块独立密钥会话缓存 === */
+/* === 2. 模块登录状态（不保存原始密钥） === */
 
-/** 缓存模块独立密钥到会话（验证成功后调用；Uint8Array 存储 + 闲置 15min 自动销毁） */
-export function cacheModuleKey(moduleId: ModuleId, key: string): void {
-  ensureDomain().cacheModuleKey(moduleId, key);
+/** 标记模块已登录；口令已交付 worker，渲染层仅保留状态位 */
+export function markModuleReady(moduleId: ModuleId): void {
+  ensureDomain().markModuleReady(moduleId);
 }
 
-/** 获取会话中缓存的模块密钥（未登录返回 null） */
-export function fetchModuleKey(moduleId: ModuleId): string | null {
-  return ensureDomain().fetchModuleKey(moduleId);
-}
-
-/** 移除指定模块的会话密钥缓存（登出模块/闲置超时时调用） */
+/** 登出模块（清除登录状态与 C 层模块会话密钥） */
 export function removeModuleKey(moduleId: ModuleId): void {
   ensureDomain().removeModuleKey(moduleId);
-  /* 会话密钥一旦失效，worker 侧托管密钥与派生缓存必须同步清除；
-   * 失败不阻断本地状态清理，由后续加解密返回 LOCKED 兜底。 */
-  const cryptoModule = cryptoModuleOf(moduleId);
-  if (cryptoModule) {
-    void lockModuleKey(cryptoModule).catch(() => { /* 无 Tauri 环境或 worker 已退出 */ });
-  }
+  /* 会话密钥一旦失效，C 层 MDEK 会话缓存必须同步清除（三个模块都要清，
+   * accounts 的记录同样受 M1 保护）。失败不阻断本地状态清理，由后续
+   * 加解密返回 LOCKED 兜底。 */
+  void verthysModuleKeyLock(moduleId).catch(() => { /* 无 Tauri 环境或 worker 已退出 */ });
 }
 
 /** 清零全部模块密钥缓存（lockAll 时调用，安全零填充） */
 export function clearModuleKeyCache(): void {
   ensureDomain().clearModuleKeyCache();
-  void lockModuleKey().catch(() => { /* 无 Tauri 环境或 worker 已退出 */ });
+  /* 不传模块 = v4_module_lock(ALL)：容器锁定时清空全部模块会话密钥。 */
+  void verthysModuleKeyLock().catch(() => { /* 无 Tauri 环境或 worker 已退出 */ });
 }
 
 /* === 3. 共享记录扫描缓存 === */
@@ -306,9 +295,39 @@ export function ensureSummaryScan(): Promise<void> {
   return ensureDomain().ensureSummaryScan();
 }
 
-/** 从摘要缓存中按类型获取记录 ID 列表（O(1) 索引查询，已排序） */
+/** 从摘要缓存中按类型获取记录 ID 列表（O(1) 索引查询，已排序）
+ *
+ * 仅用于历史迁移/诊断：V4 摘要 type 恒为未知 0，业务列表请使用
+ * ensureTypeIds / resolveTypeIds。
+ */
 export function getSummaryIdsByType(type: number): number[] {
   return ensureDomain().getSummaryIdsByType(type);
+}
+
+/* === 4.1 权威类型 ID（V4 类型盲索引） === */
+
+/** 枚举并缓存指定类型的完整 ID 列表（跨重启稳定，不依赖摘要 type） */
+export function ensureTypeIds(type: number): Promise<number[]> {
+  return ensureDomain().ensureTypeIds(type);
+}
+
+/** 清空类型 ID 缓存；传 type 只失效该类型 */
+export function clearTypeIdCache(type?: number): void {
+  ensureDomain().clearTypeIdCache(type);
+}
+
+/**
+ * 业务列表统一 ID 解析入口：权威类型盲索引优先；枚举失败时回退
+ * 全量记录扫描，保证旧容器/异常环境下仍能拿到类型 ID。
+ */
+export async function resolveTypeIds(type: number): Promise<number[]> {
+  try {
+    return await ensureTypeIds(type);
+  } catch (e) {
+    log.warn("类型 ID 枚举失败，回退全量记录扫描", e);
+    await ensureRecordScan();
+    return getRecordIdsByType(type);
+  }
 }
 
 /** 按类型查找首条记录 LID（早停扫描，关键路径专用；与全量摘要扫描互斥） */

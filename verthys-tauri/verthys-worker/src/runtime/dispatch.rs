@@ -13,11 +13,14 @@ use crate::runtime::worker::Worker;
 use crate::runtime::worker::clamp_enum_count;
 use crate::runtime::protocol::{Request, Response, RecordEntry, base64_encode, base64_decode};
 use crate::runtime::ffi_types::{
-    VERTHYS_OK, VERTHYS_PERSIST_OK, VERTHYS_SCAN_PROJECT_FULL, VERTHYS_SCAN_PROJECT_INDEX,
+    VerthysRecordC, VERTHYS_OK, VERTHYS_PERSIST_OK, VERTHYS_SCAN_PROJECT_FULL,
+    VERTHYS_SCAN_PROJECT_INDEX,
 };
 use crate::runtime::budget::PB_ENUM_RESPONSE_DATA_BUDGET_BYTES;
 use crate::runtime::path_grants;
 use crate::runtime::module_keys;
+use crate::runtime::module_session;
+use crate::runtime::pcr_session;
 use crate::runtime::gmk::{
     handle_derive_global_key, handle_derive_and_store_global_key, handle_verify_global_key,
     handle_clear_global_key,
@@ -291,7 +294,8 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             if let Some(denied) = require_path_grant("unlock", "read", &req.path) {
                 return denied;
             }
-            /* 透传 flags（预热状态位域）给 C 层 Verthys_Unlock */
+            /* 产品解锁只接受 v4：worker 先做 VRTY magic 白名单，
+             * 再调用 Verthys_V4Unlock；v3 容器直接 FORMAT 拒绝。 */
             /* VERTHYS_ERR_PARTIAL_UNLOCK 表示容器已进入
              * 最小可操作状态（超级块验证 + 密钥导入 + 分区表加载完成，索引
              * 预热后台进行中），与 verthys_api.c Unlock 成功分支语义一致——
@@ -312,13 +316,13 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 /* 修复（D-STATE-RECOVERY）：级联 INVALID 状态恢复
                  *
                  * 场景：前一次解锁因 stdout 死锁导致父进程 60 秒超时退出，
-                 * 但 worker 进程仍在运行且 Verthys_Unlock FFI 已成功完成，
+                 * 但 worker 进程仍在运行且 Verthys_V4Unlock FFI 已成功完成，
                  * ctx->state 停留在 VERTHYS_STATE_UNLOCKED。后续解锁请求调用
-                 * Verthys_Unlock 时命中 `if (ctx->state == VERTHYS_STATE_UNLOCKED)
+                 * Verthys_V4Unlock 时命中 `if (ctx->state == VERTHYS_STATE_UNLOCKED)
                  * return VERTHYS_ERR_INVALID` 立即失败。
                  *
                  * 恢复策略：检测到 INVALID 时先调用 Verthys_Lock（将状态从
-                 * UNLOCKED 切换到 LOCKED），再重试 Verthys_Unlock。仅当 verthys
+                 * UNLOCKED 切换到 LOCKED），再重试 Verthys_V4Unlock。仅当 verthys
                  * 确实处于 UNLOCKED 状态时 Lock 才会成功，其他 INVALID 原因
                  * （handle NULL / path NULL）Lock 也会失败，不影响安全语义。 */
                 const VERTHYS_ERR_INVALID: u32 = 0x00000001;
@@ -345,49 +349,13 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("unlock", r)
             }
         }
-        "create_with_preset" => {
-            if let Some(denied) = require_path_grant("create_with_preset", "write", &req.path) {
-                return denied;
-            }
-            // 路径为前端可控字符串：日志只记字节长度与 preset，
-            // 不回显原始内容（防内嵌 NUL/控制符日志注入）
-            diag!("[worker] call_create_with_preset: path_bytes={} preset={}", req.path.len(), req.preset);
-            let r = worker.call_create_with_preset(&req.path, &req.password, req.preset);
-            diag!("[worker] create_with_preset 返回: {:08X}", r);
-            if r == VERTHYS_OK {
-                Response::ok("create_with_preset")
-            } else {
-                /* 修复（D-STATE-RECOVERY）：级联 INVALID 状态恢复
-                 *
-                 * 与 unlock 对称：前一次操作可能将 ctx->state 停留在 UNLOCKED，
-                 * 导致 Verthys_CreateWithPreset 命中 `if (ctx->state ==
-                 * VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_INVALID`。
-                 * 先 Lock 再重试 create_with_preset。 */
-                const VERTHYS_ERR_INVALID: u32 = 0x00000001;
-                if r == VERTHYS_ERR_INVALID {
-                    diag!("[worker] create_with_preset 返回 INVALID，尝试状态恢复（lock → retry）");
-                    let lock_r = worker.call_lock();
-                    diag!("[worker] 状态恢复 lock 返回: {:08X}", lock_r);
-                    if lock_r == VERTHYS_OK {
-                        let r2 = worker.call_create_with_preset(&req.path, &req.password, req.preset);
-                        diag!("[worker] 状态恢复 retry create 返回: {:08X}", r2);
-                        if r2 == VERTHYS_OK {
-                            return Response::ok("create_with_preset");
-                        }
-                        return Response::err("create_with_preset", r2);
-                    }
-                }
-                Response::err("create_with_preset", r)
-            }
-        }
         "lock" => {
             diag!("[worker] call_lock");
             let r = worker.call_lock();
             diag!("[worker] lock 返回: {:08X}", r);
             if r == VERTHYS_OK {
-                /* 库锁定后内容层密钥必须同时失效：仅清 C 层句柄而保留
-                 * 模块密钥会让锁定态仍可解出记录内容。 */
-                module_keys::lock_all();
+                /* 内容层密钥（MDEK）只存在于 C 层句柄内：call_lock 已清空
+                 * C 侧模块缓存，worker 侧不存在需要额外清理的口令/派生缓存。 */
                 Response::ok("lock")
             } else {
                 Response::err("lock", r)
@@ -507,6 +475,102 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Err(code) => Response::err("add_record", code),
             };
             data.zeroize();
+            result
+        }
+        "add_records" => {
+            /* 批量新增（API 0x0013）：单次 C 层事务提交。
+             * 上限与 C 端 VERTHYS_ADD_RECORDS_MAX 对齐；聚合载荷按单次
+             * IPC 预算约束，解码前先按 base64 字符数拦截。 */
+            const MAX_ADD_RECORDS: usize = 512;
+            let count = req.records.len();
+            if count == 0 || count > MAX_ADD_RECORDS {
+                return Response {
+                    ok: false,
+                    op: "add_records".into(),
+                    error: Some(format!(
+                        "records count out of range: {} (allowed 1..={})",
+                        count, MAX_ADD_RECORDS
+                    )),
+                    ..Response::ok("add_records")
+                };
+            }
+            let mut total_bytes: usize = 0;
+            for r in &req.records {
+                if r.data.len() > crate::runtime::budget::PB_IPC_MAX_PAYLOAD_BYTES as usize {
+                    return Response {
+                        ok: false,
+                        op: "add_records".into(),
+                        error: Some("record payload exceeds ipc budget".into()),
+                        ..Response::ok("add_records")
+                    };
+                }
+                total_bytes = total_bytes
+                    .saturating_add(r.data.len())
+                    .saturating_add(r.name.len());
+            }
+            if total_bytes > crate::runtime::budget::PB_IPC_MAX_PAYLOAD_BYTES as usize {
+                return Response {
+                    ok: false,
+                    op: "add_records".into(),
+                    error: Some("batch payload exceeds ipc budget".into()),
+                    ..Response::ok("add_records")
+                };
+            }
+
+            let mut names: Vec<std::ffi::CString> = Vec::with_capacity(count);
+            let mut datas: Vec<Vec<u8>> = Vec::with_capacity(count);
+            for r in &req.records {
+                match std::ffi::CString::new(r.name.as_str()) {
+                    Ok(c) => names.push(c),
+                    Err(_) => {
+                        diag!("[worker] add_records: 名称含内嵌 NUL，length={}", r.name.len());
+                        return Response {
+                            ok: false,
+                            op: "add_records".into(),
+                            error: Some("invalid record name".into()),
+                            ..Response::ok("add_records")
+                        };
+                    }
+                }
+                match base64_decode(&r.data) {
+                    Ok(d) => datas.push(d),
+                    Err(_) => {
+                        return Response {
+                            ok: false,
+                            op: "add_records".into(),
+                            error: Some("base64 decode failed".into()),
+                            ..Response::ok("add_records")
+                        };
+                    }
+                }
+            }
+
+            // 指针绑定：names/datas 已定型（不再 push），切片地址稳定
+            let records: Vec<VerthysRecordC> = names
+                .iter()
+                .zip(datas.iter())
+                .enumerate()
+                .map(|(i, (name, data))| VerthysRecordC {
+                    rtype: req.records[i].rtype,
+                    name: name.as_ptr(),
+                    name_len: name.as_bytes().len(),
+                    data: data.as_ptr(),
+                    data_len: data.len(),
+                })
+                .collect();
+
+            let result = match worker.call_add_records(&records) {
+                Ok(ids) => Response {
+                    ok: true,
+                    op: "add_records".into(),
+                    ids,
+                    ..Response::ok("add_records")
+                },
+                Err(code) => Response::err("add_records", code),
+            };
+            for data in datas.iter_mut() {
+                data.zeroize();
+            }
             result
         }
         "get_record" => match worker.call_get_record(req.id) {
@@ -761,6 +825,44 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("has_record_by_type", rc)
             }
         }
+        /* 按类型分页枚举记录 ID（API 0x0012）：走 V4 类型盲索引，
+         * 不读取记录密文；响应 ids 为升序 ID，exhausted 标记末页。
+         * max_count 在分配前先按 C 层同源上限拦截，避免超大请求
+         * 触发无界内存分配。 */
+        "list_ids_by_type" => {
+            const LIST_IDS_BATCH_MAX: u32 = 4096;
+            let rtype_u8 = req.rtype as u8;
+            if req.rtype > 0xFFu32 ||
+                req.max_count == 0u32 ||
+                req.max_count > LIST_IDS_BATCH_MAX {
+                return Response::err("list_ids_by_type", 0x00000001);
+            }
+            let max_count = req.max_count as u64;
+            let mut ids = vec![0u64; max_count as usize];
+            let mut out_count: u64 = 0;
+            let mut out_exhausted: u8 = 1;
+            let rc = worker.call_list_ids_by_type(
+                rtype_u8,
+                req.id,
+                max_count,
+                &mut ids,
+                &mut out_count,
+                &mut out_exhausted,
+            );
+            if rc == VERTHYS_OK {
+                let used = out_count as usize;
+                if used > ids.len() {
+                    return Response::err("list_ids_by_type", 0xFFFFFFFF);
+                }
+                ids.truncate(used);
+                let mut resp = Response::ok("list_ids_by_type");
+                resp.ids = ids;
+                resp.exhausted = Some(out_exhausted != 0);
+                resp
+            } else {
+                Response::err("list_ids_by_type", rc)
+            }
+        }
         "export" => {
             if let Some(denied) = require_path_grant("export", "write", &req.path) {
                 return denied;
@@ -802,24 +904,310 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
             Err(code) => Response::err("security_status", code),
         },
+        // 运行时守卫位下发（API 0x0014）：主进程安装/停止挂起守卫时同步
+        // bit1，worker 与心跳位合并后通知 C 层；flags=0 表示停止守卫。
+        "runtime_guards" => {
+            let suspend_lock = (req.flags & 0x02) != 0;
+            match worker.update_runtime_guards(suspend_lock) {
+                Ok(()) => Response::ok("runtime_guards"),
+                Err(code) => Response::err("runtime_guards", code),
+            }
+        }
+        // 启用心跳线程：句柄值由父进程经 DuplicateHandle 注入，本次请求
+        // 走签名 IPC 下发；worker 只持有句柄值并周期 SetEvent。
+        "arm_heartbeat" => match worker.arm_heartbeat(req.hb_handle) {
+            Ok(()) => Response::ok("arm_heartbeat"),
+            Err(code) => Response::err("arm_heartbeat", code),
+        },
         // GMK 派生命令（#2 敏感操作下沉）
         "derive_global_key" => handle_derive_global_key(req),
         // 派生并持久化（首次初始化专用：存储+读回验证在 worker 进程内
         // 原子完成，无跨 IPC 中间态窗口）
         "derive_and_store_global_key" => handle_derive_and_store_global_key(req, worker),
         "verify_global_key" => handle_verify_global_key(req),
-        "clear_global_key" => {
-            /* 全局密钥清除与内容层密钥同源生命周期：宿主清除 GMK 即
-             * 认为会话密钥失效，模块密钥与派生缓存一并清空。 */
-            module_keys::lock_all();
-            handle_clear_global_key()
+        "clear_global_key" => handle_clear_global_key(),
+        // 内容层加解密（分片密钥只在 C 层持有，worker 不缓存模块口令）
+        "module_seal" => module_keys::handle_seal_v4(req, worker),
+        "module_open" => module_keys::handle_open_v4(req, worker),
+        // v4 模块 M1 会话（口令只转发 C，MDEK 不进入 worker）
+        "v4_create" => {
+            if let Some(denied) = require_path_grant("v4_create", "write", &req.path) {
+                return denied;
+            }
+            diag!("[worker] call_v4_create: path_bytes={}", req.path.len());
+            match worker.call_v4_create(&req.path, &req.password) {
+                Ok(recovery_code) => Response {
+                    recovery_code: Some(recovery_code),
+                    ..Response::ok("v4_create")
+                },
+                Err(rc) => Response::err("v4_create", rc),
+            }
         }
-        // 内容层密钥托管与加解密（密钥只在本进程内使用，不经响应返回）
-        "module_key_unlock" => module_keys::handle_key_unlock(req),
-        "module_key_lock" => module_keys::handle_key_lock(req),
-        "module_file_key" => module_keys::handle_file_key(req),
-        "module_seal" => module_keys::handle_seal(req),
-        "module_open" => module_keys::handle_open(req),
+        "v4_unlock_recovery" => {
+            if let Some(denied) =
+                require_path_grant("v4_unlock_recovery", "read", &req.path)
+            {
+                return denied;
+            }
+            let rc = worker.call_v4_unlock_recovery(&req.path, &req.recovery_code);
+            if rc == VERTHYS_OK {
+                /* 恢复解锁与口令解锁共用同一记录层：v4 废弃的是 C 层 GMK，
+                 * 产品层的 global-key 记录仍由 AddRecord 写入并决定
+                 * 初始化/验证视图。必须执行同一条进程内探测，返回固定
+                 * false 会把有记录的库误导向初始化视图。 */
+                let (has_gmk, gmk_id, gmk_record) = probe_global_key_inproc(worker);
+                Response {
+                    has_global_key: has_gmk,
+                    global_key_id: gmk_id,
+                    global_key_record: gmk_record,
+                    recovery_mode: Some(true),
+                    ..Response::ok("v4_unlock_recovery")
+                }
+            } else {
+                Response::err("v4_unlock_recovery", rc)
+            }
+        }
+        "v4_pcr_status" => pcr_session::handle_pcr_status(req, worker),
+        "v4_pcr_enable" => pcr_session::handle_pcr_enable(req, worker),
+        "v4_pcr_disable" => pcr_session::handle_pcr_disable(req, worker),
+        "v4_pcr_reseal" => pcr_session::handle_pcr_reseal(req, worker),
+        /* v4 keyfile 因子（D3）：两条路径都要先授权（库路径 + keyfile 路径），
+         * keyfile 内容只在 C 层读取/生成。 */
+        "v4_create_keyfile" => {
+            if req.keyfile_path.is_empty() {
+                return Response::err("v4_create_keyfile", 0x0000001A);
+            }
+            if let Some(denied) =
+                require_path_grant("v4_create_keyfile", "write", &req.path)
+            {
+                return denied;
+            }
+            if let Some(denied) =
+                require_path_grant("v4_create_keyfile", "write", &req.keyfile_path)
+            {
+                return denied;
+            }
+            match worker.call_v4_create_keyfile(
+                &req.path,
+                &req.password,
+                &req.keyfile_path,
+            ) {
+                Ok(recovery_code) => Response {
+                    recovery_code: Some(recovery_code),
+                    ..Response::ok("v4_create_keyfile")
+                },
+                Err(rc) => Response::err("v4_create_keyfile", rc),
+            }
+        }
+        "v4_unlock_keyfile" => {
+            if req.keyfile_path.is_empty() {
+                return Response::err("v4_unlock_keyfile", 0x0000001A);
+            }
+            if let Some(denied) =
+                require_path_grant("v4_unlock_keyfile", "read", &req.path)
+            {
+                return denied;
+            }
+            if let Some(denied) =
+                require_path_grant("v4_unlock_keyfile", "read", &req.keyfile_path)
+            {
+                return denied;
+            }
+            let rc = worker.call_v4_unlock_keyfile(
+                &req.path,
+                &req.password,
+                &req.keyfile_path,
+            );
+            if rc == VERTHYS_OK {
+                /* 与 v4_unlock_recovery 同一契约：keyfile 只影响容器解锁因子，
+                 * 不改变记录层。固定 false 会让启用 keyfile 的库在每次解锁后
+                 * 都进入初始化视图，掩盖已存在的 global-key 记录。 */
+                let (has_gmk, gmk_id, gmk_record) = probe_global_key_inproc(worker);
+                Response {
+                    has_global_key: has_gmk,
+                    global_key_id: gmk_id,
+                    global_key_record: gmk_record,
+                    ..Response::ok("v4_unlock_keyfile")
+                }
+            } else {
+                Response::err("v4_unlock_keyfile", rc)
+            }
+        }
+        "v4_keyfile_status" => match worker.call_v4_keyfile_status() {
+            Ok((enabled, recovery_mode)) => Response {
+                keyfile_enabled: Some(enabled),
+                recovery_mode: Some(recovery_mode),
+                ..Response::ok("v4_keyfile_status")
+            },
+            Err(rc) => Response::err("v4_keyfile_status", rc),
+        },
+        "v4_reseal_device" => {
+            if !req.keyfile_path.is_empty() {
+                if let Some(denied) =
+                    require_path_grant("v4_reseal_device", "read", &req.keyfile_path)
+                {
+                    return denied;
+                }
+            }
+            let rc = worker.call_v4_reseal_device(&req.password, &req.keyfile_path);
+            if rc == VERTHYS_OK {
+                Response {
+                    recovery_mode: Some(true),
+                    ..Response::ok("v4_reseal_device")
+                }
+            } else {
+                Response::err("v4_reseal_device", rc)
+            }
+        }
+        "v4_keyfile_enable" => {
+            if req.keyfile_path.is_empty() {
+                return Response::err("v4_keyfile_enable", 0x0000001A);
+            }
+            if let Some(denied) =
+                require_path_grant("v4_keyfile_enable", "write", &req.keyfile_path)
+            {
+                return denied;
+            }
+            let rc = worker.call_v4_keyfile_enable(&req.password, &req.keyfile_path);
+            if rc == VERTHYS_OK {
+                Response {
+                    keyfile_enabled: Some(true),
+                    ..Response::ok("v4_keyfile_enable")
+                }
+            } else {
+                Response::err("v4_keyfile_enable", rc)
+            }
+        }
+        "v4_keyfile_disable" => {
+            /* 空路径仅恢复码会话可用（keyfile 丢失逃生），由 C 层
+             * 按会话模式判定；非空路径才需要路径授权。 */
+            if !req.keyfile_path.is_empty() {
+                if let Some(denied) =
+                    require_path_grant("v4_keyfile_disable", "read", &req.keyfile_path)
+                {
+                    return denied;
+                }
+            }
+            let rc = worker.call_v4_keyfile_disable(&req.password, &req.keyfile_path);
+            if rc == VERTHYS_OK {
+                Response {
+                    keyfile_enabled: Some(false),
+                    ..Response::ok("v4_keyfile_disable")
+                }
+            } else {
+                Response::err("v4_keyfile_disable", rc)
+            }
+        }
+        "v4_module_enable" => module_session::handle_enable(req, worker),
+        "v4_module_unlock" => module_session::handle_unlock(req, worker),
+        "v4_module_lock" => module_session::handle_lock(req, worker),
+        "v4_module_rotate_password" => module_session::handle_rotate_password(req, worker),
+        "v4_module_disable" => module_session::handle_disable(req, worker),
+        "v4_module_delete" => module_session::handle_delete(req, worker),
+        "v4_module_bind_recovery" => module_session::handle_bind_recovery(req, worker),
+        "v4_module_reseal_device" => module_session::handle_reseal_device(req, worker),
+        "v4_module_status" => module_session::handle_status(req, worker),
+        "v4_recovery_rotate" => module_session::handle_recovery_rotate(req, worker),
+        /* v4 D9 全库 DEK 轮换：作业式五段命令。
+         * Begin 需要 new_path，路径授权与源库解锁授权独立签发；
+         * 口令由宿主注入，Rust 侧不缓存、不写日志。 */
+        "v4_rotate_begin" => {
+            if req.new_path.is_empty() {
+                return Response::err("v4_rotate_begin", 0x00000001);
+            }
+            if let Some(denied) =
+                require_path_grant("v4_rotate_begin", "write", &req.new_path)
+            {
+                return denied;
+            }
+            match worker.call_v4_rotate_begin(
+                &req.new_path,
+                &req.password,
+                req.flags,
+            ) {
+                Ok(info) => Response {
+                    rotate_stage: Some(info.stage),
+                    rotate_modules_ready: Some(info.modules_ready),
+                    rotate_records: Some(info.records),
+                    rotate_files: Some(info.files),
+                    rotate_chunks: Some(info.chunks),
+                    rotate_bytes: Some(info.bytes),
+                    ..Response::ok("v4_rotate_begin")
+                },
+                Err(rc) => Response::err("v4_rotate_begin", rc),
+            }
+        }
+        "v4_rotate_attach_keyfile" => {
+            if req.keyfile_path.is_empty() {
+                return Response::err("v4_rotate_attach_keyfile", 0x00000001);
+            }
+            if let Some(denied) = require_path_grant(
+                "v4_rotate_attach_keyfile",
+                "read",
+                &req.keyfile_path,
+            ) {
+                return denied;
+            }
+            let rc = worker.call_v4_rotate_attach_keyfile(
+                &req.keyfile_path,
+                &req.password,
+            );
+            if rc == VERTHYS_OK {
+                Response::ok("v4_rotate_attach_keyfile")
+            } else {
+                Response::err("v4_rotate_attach_keyfile", rc)
+            }
+        }
+        "v4_rotate_unlock_module" => {
+            const MODULE_COUNT: u32 = 3;
+            if req.module_id >= MODULE_COUNT || req.password.is_empty() {
+                return Response::err("v4_rotate_unlock_module", 0x00000001);
+            }
+            let recovery_code = if req.recovery_code.is_empty() {
+                None
+            } else {
+                Some(req.recovery_code.as_str())
+            };
+            let rc = worker.call_v4_rotate_unlock_module(
+                req.module_id,
+                &req.password,
+                recovery_code,
+            );
+            if rc == VERTHYS_OK {
+                Response::ok("v4_rotate_unlock_module")
+            } else {
+                Response::err("v4_rotate_unlock_module", rc)
+            }
+        }
+        "v4_rotate_run" => {
+            let cancel_event = if req.cancel_event.is_empty() {
+                None
+            } else {
+                Some(req.cancel_event.as_str())
+            };
+            let rc = worker.call_v4_rotate_run(cancel_event);
+            if rc == VERTHYS_OK {
+                Response::ok("v4_rotate_run")
+            } else {
+                Response::err("v4_rotate_run", rc)
+            }
+        }
+        "v4_rotate_commit" => {
+            let rc = worker.call_v4_rotate_commit(req.keep_old);
+            if rc == VERTHYS_OK {
+                Response::ok("v4_rotate_commit")
+            } else {
+                Response::err("v4_rotate_commit", rc)
+            }
+        }
+        "v4_rotate_abort" => {
+            let rc = worker.call_v4_rotate_abort();
+            if rc == VERTHYS_OK {
+                Response::ok("v4_rotate_abort")
+            } else {
+                Response::err("v4_rotate_abort", rc)
+            }
+        }
         _ => Response {
             ok: false,
             op: req.op.clone(),

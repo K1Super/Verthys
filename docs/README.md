@@ -20,6 +20,8 @@
 
 - 核心 DLL 接口契约：[CORE_API.md](CORE_API.md)
 - 编码与命名规范：[CODING_STANDARDS.md](CODING_STANDARDS.md)
+- 工程与注释规范附录：[references/engineering-standards.md](references/engineering-standards.md)、[references/comment-standards.md](references/comment-standards.md)
+- 代码审查维度附录：[references/review-standards.md](references/review-standards.md)
 - 测试分层与跑法：[TESTING.md](TESTING.md)
 - 密钥与解锁数据流：[DATA_FLOW.md](DATA_FLOW.md)
 - 配置项与环境变量：[CONFIGURATION.md](CONFIGURATION.md)
@@ -72,6 +74,10 @@
 | ARCHITECTURE_DECISIONS.md | ADR 索引 | P2 |
 | ProductionAudit/00_总览与阅读指南.md | 全量审计与分片发现入口 | P2 |
 | RemediationPlan/IMPL_PROGRESS.md | 缺陷修复工程进度（Wave 分批，中断恢复入口） | P2 |
+| references/engineering-standards.md | 工程规范附录（AI 工程人格） | P2 |
+| references/comment-standards.md | 注释规范附录（AI 工程人格） | P2 |
+| references/review-standards.md | 代码审查维度附录（AI 审查人格） | P2 |
+| references/acceptance-cases.md | 人格行为验收用例（仅回归用，禁止注入任务上下文） | P2 |
 
 ## 维护约定
 

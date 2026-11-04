@@ -2,7 +2,7 @@
   UpdaterRepairDialog — 更新健康自检失败后的恢复入口
 
   只在启动自检失败或安装未完成时出现；修复物料存在时允许一键运行旧版安装器，
-  缺失时如实说明并保留日志导出。视觉沿用既有对话框外壳与按钮语言，不新增阴影。
+  缺失时如实说明。视觉沿用既有对话框外壳与按钮语言，不新增阴影。
 -->
 <template>
   <VerthysDialog
@@ -30,7 +30,6 @@
 
       <div class="repair-actions">
         <button class="btn kv-cancel" type="button" @click="open = false">关闭</button>
-        <button class="btn" type="button" @click="$emit('export')">导出日志</button>
         <button
           class="btn btn-primary"
           type="button"
@@ -57,7 +56,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "update:modelValue", value: boolean): void;
   (e: "repair"): void;
-  (e: "export"): void;
 }>();
 
 const open = computed({

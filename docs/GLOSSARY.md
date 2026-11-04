@@ -45,7 +45,7 @@
 | 中文术语 | 英文/标识符 | 定义 | 主要出处 |
 |---|---|---|---|
 | .vsec | 构建期签名节（magic `'VESC'`） | `.text`/`.rdata` 文件内容 HMAC-SHA256 构建期签名（128B），启动验签 | `core/src/security/integrity/integrity.c` |
-| .rhat 运行时哈希 | runtime hash（magic `'VRHT'`） | 32 关键函数 BLAKE2b-256 运行时哈希，失配 = KILL | `core/src/security/integrity/runtime_hash.c` + `core/tools/rhash_gen.c` |
+| .rhat 运行时哈希 | runtime hash（magic `'VRHT'`） | 关键函数 BLAKE2b-256 运行时哈希（产品 15 项 / 全量 40 项），失配 = KILL | `core/src/security/integrity/runtime_hash.c` + `core/tools/rhash_gen.c` |
 | 解锁管线 | unlock_pipeline / S0-S6 | 解锁 S0-S6 流水线 + 渐进式（`VERTHYS_ERR_PARTIAL_UNLOCK`） | `core/src/api/unlock/verthys_unlock_pipeline.c` |
 | 层 1-6 防御 | layer1..6 | 进程守卫/硬件绑定/钩子防御/沙箱/闭环的分层纵深防御 | `core/src/security/layer*_*` |
 | 防御闭环 | defense closure / 7 路径 | 7 条攻击路径状态机（BLOCKED/DEGRADED/FAILED） | `core/src/security/layer6_closure/defense_closure.c` |
