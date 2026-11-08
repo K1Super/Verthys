@@ -6,7 +6,7 @@
  *   - 零明文结构：除文件头外全部加密或认证
  *
  * 两类测试：
- *   1. 端到端（通过 Verthys_Unlock）：header 级变异，不需 Argon2id
+ *   1. 端到端（通过 Verthys_V4Unlock）：header 级变异，不需 Argon2id
  *   2. 格式级（通过 vfmt_* 内部函数 + 已知密钥）：加密区变异，不需 Argon2id
  */
 #include "verthys_test.h"
@@ -14,7 +14,6 @@
 #include "verthys_format.h"
 #include "verthys_crypto.h"
 #include "keymanager.h"
-#include "verthys_container_v3.h"   /* V3 三副本布局（帧头字段翻转） */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,13 +22,15 @@
 
 static void cleanup_tmp(void) { remove(TMP_VERTHYS); }
 
-/* 辅助：创建有效 verthys 文件（通过公共 API，含 1 次 Argon2id） */
+/* 辅助：创建有效 容器（通过公共 API，含 1 次 Argon2id） */
 static int create_valid_verthys_file(const char *password, size_t pw_len)
 {
     cleanup_tmp();
     VerthysHandle h;
+    char recovery[80];
     if (Verthys_Init(&h) != VERTHYS_OK) return -1;
-    if (Verthys_CreateWithPreset(h, TMP_VERTHYS, password, pw_len, VERTHYS_PRESET_BALANCED) != VERTHYS_OK) {
+    if (Verthys_V4Create(h, TMP_VERTHYS, password, pw_len,
+                         recovery, sizeof recovery) != VERTHYS_OK) {
         Verthys_Deinit(h);
         return -1;
     }
@@ -83,7 +84,7 @@ TEST(fuzz_empty_file)
 
     VerthysHandle h;
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
-    CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "pw", 2, 0), VERTHYS_ERR_FORMAT);
+    CHECK_EQ(Verthys_V4Unlock(h, TMP_VERTHYS, "pw", 2), VERTHYS_ERR_FORMAT);
     Verthys_Deinit(h);
     cleanup_tmp();
     return 0;
@@ -100,7 +101,7 @@ TEST(fuzz_too_small)
 
     VerthysHandle h;
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
-    CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "pw", 2, 0), VERTHYS_ERR_FORMAT);
+    CHECK_EQ(Verthys_V4Unlock(h, TMP_VERTHYS, "pw", 2), VERTHYS_ERR_FORMAT);
     Verthys_Deinit(h);
     cleanup_tmp();
     return 0;
@@ -115,7 +116,7 @@ TEST(fuzz_all_zero_file)
 
     VerthysHandle h;
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
-    CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "pw", 2, 0), VERTHYS_ERR_FORMAT);
+    CHECK_EQ(Verthys_V4Unlock(h, TMP_VERTHYS, "pw", 2), VERTHYS_ERR_FORMAT);
     Verthys_Deinit(h);
     cleanup_tmp();
     return 0;
@@ -131,7 +132,7 @@ TEST(fuzz_random_garbage)
 
     VerthysHandle h;
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
-    CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "pw", 2, 0), VERTHYS_ERR_FORMAT);
+    CHECK_EQ(Verthys_V4Unlock(h, TMP_VERTHYS, "pw", 2), VERTHYS_ERR_FORMAT);
     Verthys_Deinit(h);
     cleanup_tmp();
     return 0;
@@ -153,38 +154,7 @@ TEST(fuzz_bit_flip_magic)
 
     VerthysHandle h;
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
-    CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "pw", 2, 0), VERTHYS_ERR_FORMAT);
-    Verthys_Deinit(h);
-    cleanup_tmp();
-    return 0;
-}
-
-/* 版本号翻转 → 拒绝 */
-TEST(fuzz_bit_flip_version)
-{
-    CHECK_EQ(create_valid_verthys_file("pw", 2), 0);
-
-    uint8_t *buf = NULL;
-    size_t size = 0;
-    CHECK_EQ(read_file_to_buf(TMP_VERTHYS, &buf, &size), 0);
-
-    /* V3 适配（法定人数语义）：V3 无明文文件头，超块版本在 FlatBuffers 载荷
-     * 内部（偏移随 schema 演化，不可稳定定位）。等价的头部字段变异 =
-     * 三副本帧头 payload_len LSB（+4/+0x4004/+0x8004）各翻一位：帧结构
-     * 仍合法（verifier 容忍尾部字节），但 HMAC 计算域随长度漂移 → 3 副本
-     * 全败 → 口令正确探针判真损坏 → 拒绝（CORRUPT）。单副本翻转会被
-     * 2/3 多数派票决出局、解锁照常成功——那是法定人数设计容错而非缺陷。 */
-    for (unsigned rep = 0; rep < VERTHYS_V3_SB_REPLICA_COUNT; rep++) {
-        buf[(size_t)(rep * 0x4000u) + 4u] ^= 0x01;
-    }
-    CHECK_EQ(write_buf_to_file(TMP_VERTHYS, buf, size), 0);
-    free(buf);
-
-    VerthysHandle h;
-    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
-    VerthysResult rc = Verthys_Unlock(h, TMP_VERTHYS, "pw", 2, 0);
-    CHECK(rc == VERTHYS_ERR_AUTH || rc == VERTHYS_ERR_CORRUPT ||
-          rc == VERTHYS_ERR_FORMAT);
+    CHECK_EQ(Verthys_V4Unlock(h, TMP_VERTHYS, "pw", 2), VERTHYS_ERR_FORMAT);
     Verthys_Deinit(h);
     cleanup_tmp();
     return 0;
@@ -205,7 +175,12 @@ TEST(fuzz_truncated_header)
 
     VerthysHandle h;
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
-    CHECK_EQ(Verthys_Unlock(h, TMP_VERTHYS, "pw", 2, 0), VERTHYS_ERR_FORMAT);
+    /* 头解析对截断文件返回 FORMAT（结构长度不足）或 INVALID（头字段非法），
+     * 二者都代表“拒绝解锁”，不得返回 OK。 */
+    {
+        VerthysResult rc = Verthys_V4Unlock(h, TMP_VERTHYS, "pw", 2);
+        CHECK(rc == VERTHYS_ERR_FORMAT || rc == VERTHYS_ERR_INVALID);
+    }
     Verthys_Deinit(h);
     cleanup_tmp();
     return 0;

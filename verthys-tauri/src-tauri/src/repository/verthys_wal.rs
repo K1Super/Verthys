@@ -7,7 +7,7 @@
 //! =============================================================================
 //! 在每条加密记录进入缓存缓冲器**之前**，先将 {entry_key, status} 写入本地 WAL，
 //! 批量刷新成功后标记为 committed。崩溃/关闭后重启，扫描 WAL 即可：
-//!   - 已 committed 的条目键 → 已落盘（v2 add_record 即时 fsync），续传时直接跳过
+//!   - 已 committed 的条目键 → 已落盘（add_record 即时 fsync），续传时直接跳过
 //!   - pending 但未 committed → 未落盘，续传时重新加密入库（条目键未变，幂等）
 //! 重做量不超过一个批次（检查点粒度）。
 //!
@@ -44,13 +44,9 @@
 //! - 所有 IO 失败向上传播为 Err（持久层不吞异常），由控制器决定降级策略。
 //!
 //! =============================================================================
-//! 附属目录与旧布局迁移
+//! 附属目录布局
 //! =============================================================================
 //! - 权威写路径：附属数据目录内 import.wal（快照同目录，后缀 .snapshot）。
-//! - 旧布局 <verthys_path>.import.wal（及快照）仅作只读回退：读取入口先尝试
-//!   原子搬迁，搬迁失败时本次读取沿用旧位置（数据连续性优先），下次访问重试。
-//! - 会话创建（截断 WAL）后旧布局文件被 best-effort 回收；去重集合已在建会话
-//!   前载入内存，回收不丢失语义。
 //!
 //! 依赖方向：repository → util（单向，禁止引用 controller/service/entry）
 
@@ -142,62 +138,9 @@ pub struct WalSnapshot {
     pub has_unsettleable_commits: bool,
 }
 
-/// 解析 WAL 数据位置：附属目录优先，旧布局命中时先尝试原子迁移。
-///
-/// 迁移失败（重命名被占用、权限异常等）不中断调用方：返回旧路径作为本次
-/// 数据位置（数据连续性优先），后续访问自动重试迁移；任何情况下都不会把
-/// 同一份数据同时写到两处。
+/// 解析 WAL 数据位置（附属目录）。
 fn resolve_wal_path(verthys_path: &str) -> PathBuf {
-    let primary = container_layout::wal_file_for(verthys_path);
-    if primary.exists() {
-        return primary;
-    }
-    let legacy = container_layout::legacy_wal_file_for(verthys_path);
-    if !legacy.exists() {
-        return primary;
-    }
-    match container_layout::migrate_legacy_file(&legacy, &primary) {
-        Ok(()) => {
-            let snapshot = container_layout::legacy_wal_snapshot_file_for(verthys_path);
-            if snapshot.exists() {
-                let snap_primary = container_layout::wal_snapshot_file_for(verthys_path);
-                if let Err(e) = container_layout::migrate_legacy_file(&snapshot, &snap_primary) {
-                    log::warn!(
-                        "[wal] 旧布局快照迁移失败（快照缺失按全量重放等价处理）: {}",
-                        e
-                    );
-                }
-            }
-            log::info!("[wal] 旧布局 WAL 已收口至附属数据目录");
-            primary
-        }
-        Err(e) => {
-            log::warn!(
-                "[wal] 旧布局 WAL 迁移失败（本次沿用原位置，下次访问重试）: {}",
-                e
-            );
-            legacy
-        }
-    }
-}
-
-/// 回收旧布局 WAL 相关文件（best-effort）。
-///
-/// 仅在会话创建（WAL 已截断）之后调用：此刻旧 WAL 承载的去重集合已在建会话
-/// 前载入内存，回收不丢失语义；残留文件在下次访问或显式删除时再被清理。
-fn discard_legacy_wal_files(verthys_path: &str) {
-    for path in [
-        container_layout::legacy_wal_file_for(verthys_path),
-        container_layout::legacy_wal_snapshot_file_for(verthys_path),
-    ] {
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
-        }
-        let tmp = PathBuf::from(format!("{}.tmp", path.to_string_lossy()));
-        if tmp.exists() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
+    container_layout::wal_file_for(verthys_path)
 }
 
 /// 删除既有文件；不存在视为成功，其余错误上抛。
@@ -266,34 +209,6 @@ fn write_snapshot_file(wal_path: &Path, snapshot: &WalSnapshot) -> Result<(), St
     Ok(())
 }
 
-/// 截断前检测 v1 条目（内容哈希作去重键）并备份为 `<wal>.v1.bak`。
-///
-/// v1 WAL 的 `hash` 字段不再承载去重语义；备份仅用于回滚到旧代码时恢复
-/// 原有状态，不参与新版本的任何判定。备份已存在时不覆盖（保留最早副本）。
-fn backup_legacy_wal_if_needed(wal_path: &Path) -> Result<(), String> {
-    if !wal_path.exists() {
-        return Ok(());
-    }
-    let content = std::fs::read_to_string(wal_path)
-        .map_err(|e| format!("WAL 旧格式检查读取失败: {}", e))?;
-    let has_v1 = content.lines().any(|line| {
-        (line.contains("\"kind\":\"pending\"") || line.contains("\"kind\":\"committed\""))
-            && line.contains("\"hash\":")
-    });
-    if !has_v1 {
-        return Ok(());
-    }
-    let backup = PathBuf::from(format!("{}.v1.bak", wal_path.to_string_lossy()));
-    if backup.exists() {
-        return Ok(());
-    }
-    std::fs::copy(wal_path, &backup)
-        .map(|_| ())
-        .map_err(|e| format!("WAL v1 备份失败: {}", e))?;
-    log::info!("[wal] v1 WAL 已备份（内容哈希去重语义不再复用）");
-    Ok(())
-}
-
 /// WAL 写入句柄（持有打开的文件句柄，append-only）
 pub struct WalWriter {
     file: File,
@@ -303,14 +218,9 @@ pub struct WalWriter {
 impl WalWriter {
     /// 创建/截断 WAL 文件并写入 begin 条目（新导入会话起始）
     /// 若存在遗留 WAL（未 end 的旧会话），调用方应先 load() 恢复再决定是否覆盖。
-    ///
-    /// 全部写路径固定为附属数据目录；截断成功后旧布局 WAL 与快照被 best-effort
-    /// 回收（其去重集合已由调用方在此之前载入）。截断前若检测到 v1 条目
-    /// （内容哈希作去重键），先备份为 `<wal>.v1.bak` 供回滚。
     pub fn create(verthys_path: &str, import_id: &str) -> Result<Self, String> {
         container_layout::ensure_sidecar_dir(verthys_path)?;
         let path = container_layout::wal_file_for(verthys_path);
-        backup_legacy_wal_if_needed(&path)?;
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -324,7 +234,6 @@ impl WalWriter {
             ts: now_ms(),
         })?;
         writer.flush_sync()?;
-        discard_legacy_wal_files(verthys_path);
         Ok(writer)
     }
 
@@ -625,8 +534,7 @@ pub fn settle_chunk_owners(verthys_path: &str) -> Result<SettlementOutcome, Stri
 
 /// 删除 WAL 文件（导入彻底完成且无需续传去重时调用）
 ///
-/// 新布局与旧布局两处 WAL 及其临时文件一并清理（总清）；快照保留
-/// （去重基线仍由快照承载），与既有语义一致。
+/// WAL 及其临时文件清理；快照保留（去重基线仍由快照承载）。
 pub fn remove(verthys_path: &str) -> Result<(), String> {
     let primary = container_layout::wal_file_for(verthys_path);
     remove_file_if_exists(&primary, "WAL")?;
@@ -634,35 +542,40 @@ pub fn remove(verthys_path: &str) -> Result<(), String> {
         &PathBuf::from(format!("{}.tmp", primary.to_string_lossy())),
         "WAL 临时文件",
     )?;
-
-    let legacy = container_layout::legacy_wal_file_for(verthys_path);
-    remove_file_if_exists(&legacy, "旧布局 WAL")?;
-    remove_file_if_exists(
-        &PathBuf::from(format!("{}.tmp", legacy.to_string_lossy())),
-        "旧布局 WAL 临时文件",
-    )?;
     Ok(())
 }
 
-/// 判断 WAL 文件是否存在（新布局与旧布局任一命中，用于决定是否触发恢复流程）
+/// 判断 WAL 文件是否存在（用于决定是否触发恢复流程）
 pub fn exists(verthys_path: &str) -> bool {
     container_layout::wal_file_for(verthys_path).exists()
-        || container_layout::legacy_wal_file_for(verthys_path).exists()
 }
 
 /// 追加删除墓碑（照片删除后释放续传幂等锁，删除后可重新导入）。
 ///
-/// 以 append 模式写入既有 WAL（含 fsync）；WAL 不存在时为无操作
+/// 以 append 模式写入既有 WAL（含 fsync）；WAL 与快照均不存在时为无操作
 /// （幂等集合本为空，无可释放）。墓碑独立于导入会话：恢复重放时
 /// 与条目位置无关地从 committed 集合移除条目键，且下一次会话创建在
 /// 截断 WAL 前先完成重放，移除效果在截断后由内存集合继续承载。
+/// 仅快照存在（WAL 已被清理）时创建最小 WAL 承载墓碑，避免快照基线
+/// 在下次会话创建时复活已删除条目键。
 pub fn append_removed(verthys_path: &str, keys: &[String]) -> Result<(), String> {
     if keys.is_empty() {
         return Ok(());
     }
     let path = resolve_wal_path(verthys_path);
     if !path.exists() {
-        return Ok(());
+        /* 无 WAL 但存在快照基线：去重集合仍可由快照承载，墓碑必须持久化。
+         * 否则下次会话创建会把「快照 + 无增量」的旧集合重新固化，已删除
+         * 条目键复活，重新导入被静默跳过。 */
+        if !snapshot_path_for(&path).exists() {
+            return Ok(());
+        }
+        container_layout::ensure_sidecar_dir(verthys_path)?;
+        let mut writer = WalWriter::create(verthys_path, "prune")?;
+        return writer.append(&WalEntry::Removed {
+            keys: keys.to_vec(),
+            at: now_ms(),
+        });
     }
     let mut file = OpenOptions::new()
         .append(true)
@@ -680,38 +593,48 @@ pub fn append_removed(verthys_path: &str, keys: &[String]) -> Result<(), String>
     Ok(())
 }
 
-/// 删除 WAL 与快照文件（开发用重置入口：清空续传去重状态）
+/// 按记录 ID 解析已 committed 的条目键（只读映射，不改变去重集合）。
 ///
-/// 新布局与旧布局两处一并清理，尾部回收空目录（仅当目录内无其他附属数据）。
-pub fn remove_all(verthys_path: &str) -> Result<(), String> {
-    let primary = container_layout::wal_file_for(verthys_path);
-    remove_file_if_exists(&primary, "WAL")?;
-    remove_file_if_exists(
-        &PathBuf::from(format!("{}.tmp", primary.to_string_lossy())),
-        "WAL 临时文件",
-    )?;
-    let snap = snapshot_path_for(&primary);
-    remove_file_if_exists(&snap, "WAL 快照")?;
-    remove_file_if_exists(
-        &PathBuf::from(format!("{}.tmp", snap.to_string_lossy())),
-        "WAL 快照临时文件",
-    )?;
+/// 删除流程即使无法解密 meta（模块密钥轮换/历史损坏），也能凭记录 ID
+/// 释放续传幂等锁：WAL committed 行同时记录 `entry_key` 与 `verthys_id`。
+pub fn keys_for_ids(verthys_path: &str, ids: &[u64]) -> Result<Vec<String>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let snapshot = load(verthys_path)?;
+    let wanted: HashSet<u64> = ids.iter().copied().filter(|id| *id != 0).collect();
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(snapshot
+        .committed_ids
+        .into_iter()
+        .filter(|(_, id)| wanted.contains(id))
+        .map(|(key, _)| key)
+        .collect())
+}
 
-    let legacy = container_layout::legacy_wal_file_for(verthys_path);
-    remove_file_if_exists(&legacy, "旧布局 WAL")?;
-    remove_file_if_exists(
-        &PathBuf::from(format!("{}.tmp", legacy.to_string_lossy())),
-        "旧布局 WAL 临时文件",
-    )?;
-    let legacy_snap = container_layout::legacy_wal_snapshot_file_for(verthys_path);
-    remove_file_if_exists(&legacy_snap, "旧布局 WAL 快照")?;
-    remove_file_if_exists(
-        &PathBuf::from(format!("{}.tmp", legacy_snap.to_string_lossy())),
-        "旧布局 WAL 快照临时文件",
-    )?;
-
-    let _ = container_layout::remove_dir_if_empty(&container_layout::sidecar_dir_for(verthys_path));
-    Ok(())
+/// 收敛失效去重键：已 committed 记录 ID 不再存在于容器时移除对应条目键。
+///
+/// 删除墓碑可能因历史缺陷或崩溃缺失（例如删除时 meta 已不可解密，前端
+/// 拿不到条目键）。已删除记录不再有 ID，其去重键必须视为失效，否则同一
+/// 来源文件重新导入会被静默全部跳过。
+pub fn prune_missing_commits(verthys_path: &str, live_ids: &HashSet<u64>) -> Result<u64, String> {
+    let snapshot = load(verthys_path)?;
+    if snapshot.committed_ids.is_empty() {
+        return Ok(0);
+    }
+    let stale: Vec<String> = snapshot
+        .committed_ids
+        .into_iter()
+        .filter(|(_, id)| !live_ids.contains(id))
+        .map(|(key, _)| key)
+        .collect();
+    if stale.is_empty() {
+        return Ok(0);
+    }
+    append_removed(verthys_path, &stale)?;
+    Ok(stale.len() as u64)
 }
 
 fn now_ms() -> u64 {
@@ -736,6 +659,8 @@ pub struct ImportSession {
     pub next_batch_id: u64,
     /// 已 committed 的非内容条目键集合（生产者据此跳过，保证幂等）
     pub committed_keys: HashSet<String>,
+    /// 已 committed 条目键 → 记录 ID 映射（按记录 ID 释放去重锁的权威依据）
+    pub committed_ids: HashMap<String, u64>,
     /// 累计已 committed 记录数（检查点）
     pub total_committed: u64,
     /// 累计因条目键去重跳过的记录数（进度反馈用，不入 WAL）
@@ -767,6 +692,7 @@ impl ImportSession {
         // 先加载既有 WAL 快照（若存在遗留 WAL，恢复 committed_keys 实现续传去重）
         let snapshot = load(verthys_path)?;
         let committed_keys = snapshot.committed_keys.clone();
+        let committed_ids = snapshot.committed_ids.clone();
         let total_committed = snapshot.committed_keys.len() as u64;
 
         // 加载外置块台账（在截断 WAL 之前：台账损坏时直接失败，避免已截断
@@ -803,6 +729,7 @@ impl ImportSession {
             verthys_path: verthys_path.to_string(),
             next_batch_id: 1,
             committed_keys,
+            committed_ids,
             total_committed,
             total_skipped: 0,
             chunk_ids_by_key: HashMap::new(),
@@ -817,10 +744,13 @@ impl ImportSession {
         self.committed_keys.contains(entry_key)
     }
 
-    /// 标记一条记录为已 committed（更新幂等集合 + 计数）
-    pub fn mark_committed(&mut self, entry_key: &str) {
+    /// 标记一条记录为已 committed（更新幂等集合 + 计数 + ID 映射）
+    pub fn mark_committed(&mut self, entry_key: &str, verthys_id: u64) {
         if self.committed_keys.insert(entry_key.to_string()) {
             self.total_committed += 1;
+        }
+        if verthys_id != 0 {
+            self.committed_ids.insert(entry_key.to_string(), verthys_id);
         }
     }
 
@@ -861,12 +791,21 @@ impl ImportSession {
     /// 持久化由 WAL 删除墓碑承担（跨会话恢复时移除）；本方法仅同步
     /// 本会话内存集合与累计计数。返回 true 表示确实移除了已记账条目键。
     pub fn forget_committed(&mut self, entry_key: &str) -> bool {
+        self.committed_ids.remove(entry_key);
         if self.committed_keys.remove(entry_key) {
             self.total_committed = self.total_committed.saturating_sub(1);
             true
         } else {
             false
         }
+    }
+
+    /// 按记录 ID 查询条目键（删除流程在 meta 不可解密时仍可释放去重锁）
+    pub fn key_for_id(&self, verthys_id: u64) -> Option<&str> {
+        self.committed_ids
+            .iter()
+            .find(|(_, id)| **id == verthys_id)
+            .map(|(key, _)| key.as_str())
     }
 }
 
@@ -1116,6 +1055,91 @@ mod tests {
     }
 
     #[test]
+    fn test_append_removed_by_ids_releases_keys() {
+        // 删除流程按记录 ID 释放去重键（meta 不可解密时仍可闭环）
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let mut writer = WalWriter::create(&verthys_path, "imp-id").unwrap();
+        writer
+            .append(&WalEntry::Committed {
+                import_id: "imp-id".into(),
+                batch_id: 1,
+                entry_key: "old".into(),
+                verthys_id: 77,
+                name: "a.jpg".into(),
+                chunk_ids: Some(Vec::new()),
+            })
+            .unwrap();
+        writer.finish("imp-id", true).unwrap();
+
+        let released = keys_for_ids(&verthys_path, &[77]).unwrap();
+        assert_eq!(released.len(), 1);
+        append_removed(&verthys_path, &released).unwrap();
+
+        let snap = load(&verthys_path).unwrap();
+        assert!(!snap.committed_keys.contains("old"));
+        assert!(!snap.committed_ids.contains_key("old"));
+    }
+
+    #[test]
+    fn test_prune_missing_commits_drops_only_absent_ids() {
+        // 记录仍存活时保留去重键；记录已删除（ID 不存在）时键失效
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let mut writer = WalWriter::create(&verthys_path, "imp-prune").unwrap();
+        for (key, id) in [("keep", 11u64), ("gone", 22u64)] {
+            writer
+                .append(&WalEntry::Committed {
+                    import_id: "imp-prune".into(),
+                    batch_id: 1,
+                    entry_key: key.into(),
+                    verthys_id: id,
+                    name: String::new(),
+                    chunk_ids: Some(Vec::new()),
+                })
+                .unwrap();
+        }
+        writer.finish("imp-prune", true).unwrap();
+
+        let live: HashSet<u64> = [11u64].into_iter().collect();
+        let pruned = prune_missing_commits(&verthys_path, &live).unwrap();
+        assert_eq!(pruned, 1);
+
+        let snap = load(&verthys_path).unwrap();
+        assert!(snap.committed_keys.contains("keep"));
+        assert!(!snap.committed_keys.contains("gone"));
+    }
+
+    #[test]
+    fn test_append_removed_with_snapshot_but_no_wal_persists() {
+        // WAL 已被清理但快照仍承载去重集合：墓碑必须落盘，否则下次会话
+        // 创建会从快照基线复活已删除条目键
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+
+        let mut writer = WalWriter::create(&verthys_path, "imp-snap").unwrap();
+        writer
+            .append(&WalEntry::Committed {
+                import_id: "imp-snap".into(),
+                batch_id: 1,
+                entry_key: "h1".into(),
+                verthys_id: 5,
+                name: String::new(),
+                chunk_ids: Some(Vec::new()),
+            })
+            .unwrap();
+        writer.finish("imp-snap", true).unwrap();
+        std::fs::remove_file(wal_file(&verthys_path)).unwrap();
+
+        append_removed(&verthys_path, &["h1".to_string()]).unwrap();
+
+        let snap = load(&verthys_path).unwrap();
+        assert!(!snap.committed_keys.contains("h1"), "墓碑必须跨快照生效");
+    }
+
+    #[test]
     fn test_snapshot_survives_wal_absence() {
         // 快照文件独立承载 committed 集合：WAL 文件缺失时仍可恢复去重
         let dir = tempdir().unwrap();
@@ -1170,8 +1194,8 @@ mod tests {
         let verthys_path = make_verthys_path(dir.path());
 
         let mut session = ImportSession::new(&verthys_path, "imp-f").unwrap();
-        session.mark_committed("h1");
-        session.mark_committed("h2");
+        session.mark_committed("h1", 42);
+        session.mark_committed("h2", 43);
         assert_eq!(session.total_committed, 2);
 
         assert!(session.forget_committed("h1"));
@@ -1404,7 +1428,7 @@ mod tests {
 
         // 会话 C：再次创建 → 以成功结束（compact 重写快照）
         let mut session = ImportSession::new(&verthys_path, "imp-c").unwrap();
-        session.mark_committed("fresh");
+        session.mark_committed("fresh", 3);
         session
             .writer
             .append(&WalEntry::Committed {
@@ -1571,92 +1595,5 @@ mod tests {
             wal_after.contains("imp-s3"),
             "会话创建失败时 WAL 必须保持原样（含归属声明）"
         );
-    }
-
-    #[test]
-    fn test_v1_wal_keys_ignored_and_backed_up_before_truncation() {
-        // v1 以内容哈希作去重键：加载时忽略；会话创建截断前备份原始文件
-        let dir = tempdir().unwrap();
-        let verthys_path = make_verthys_path(dir.path());
-        write_wal_text(
-            &verthys_path,
-            concat!(
-                "{\"kind\":\"begin\",\"import_id\":\"imp-v1\",\"ts\":1}\n",
-                "{\"kind\":\"pending\",\"import_id\":\"imp-v1\",\"batch_id\":1,",
-                "\"hash\":\"legacy-pending\",\"name\":\"a.jpg\",\"idx\":0}\n",
-                "{\"kind\":\"committed\",\"import_id\":\"imp-v1\",\"batch_id\":1,",
-                "\"hash\":\"legacy-committed\",\"verthys_id\":11,\"name\":\"a.jpg\",\"chunk_ids\":[]}\n",
-                "{\"kind\":\"end\",\"import_id\":\"imp-v1\",\"success\":true}\n"
-            ),
-        );
-
-        let snap = load(&verthys_path).unwrap();
-        assert!(
-            snap.committed_keys.is_empty(),
-            "v1 内容哈希不得进入恢复集"
-        );
-
-        let session = ImportSession::new(&verthys_path, "imp-v2").unwrap();
-        assert!(!session.is_committed("legacy-committed"));
-        drop(session);
-
-        let bak = PathBuf::from(format!(
-            "{}.v1.bak",
-            wal_file(&verthys_path).to_string_lossy()
-        ));
-        assert!(bak.exists(), "截断前必须备份 v1 WAL");
-        let backup_text = std::fs::read_to_string(&bak).unwrap();
-        assert!(backup_text.contains("legacy-committed"));
-
-        let fresh = std::fs::read_to_string(wal_file(&verthys_path)).unwrap();
-        assert!(!fresh.contains("\"hash\":"), "新 WAL 不得再写内容哈希字段");
-        assert!(fresh.contains("imp-v2"));
-    }
-
-    #[test]
-    fn test_legacy_wal_and_snapshot_migrated_on_read() {
-        // 旧布局 WAL + 快照在首次读取时被原子搬迁到附属目录
-        let dir = tempdir().unwrap();
-        let verthys_path = make_verthys_path(dir.path());
-
-        let legacy_wal = container_layout::legacy_wal_file_for(&verthys_path);
-        std::fs::write(
-            &legacy_wal,
-            "{\"kind\":\"begin\",\"import_id\":\"imp-l\",\"ts\":1}\n",
-        )
-        .unwrap();
-        let mut baseline = WalSnapshot::default();
-        baseline.committed_keys.insert("hl".to_string());
-        baseline.committed_ids.insert("hl".to_string(), 11);
-        write_snapshot_file(&legacy_wal, &baseline).unwrap();
-
-        let snap = load(&verthys_path).unwrap();
-        assert!(snap.committed_keys.contains("hl"));
-        assert_eq!(snap.committed_ids.get("hl"), Some(&11));
-
-        assert!(!legacy_wal.exists(), "旧布局 WAL 必须被搬走");
-        assert!(
-            !container_layout::legacy_wal_snapshot_file_for(&verthys_path).exists(),
-            "旧布局快照必须被搬走"
-        );
-        assert!(container_layout::wal_file_for(&verthys_path).exists());
-        assert!(container_layout::wal_snapshot_file_for(&verthys_path).exists());
-    }
-
-    #[test]
-    fn test_create_recycles_legacy_after_truncate() {
-        // 会话创建截断 WAL 后，旧布局 WAL 与快照被回收（去重集合已载入内存）
-        let dir = tempdir().unwrap();
-        let verthys_path = make_verthys_path(dir.path());
-        let legacy_wal = container_layout::legacy_wal_file_for(&verthys_path);
-        let legacy_snap = container_layout::legacy_wal_snapshot_file_for(&verthys_path);
-        std::fs::write(&legacy_wal, "stale").unwrap();
-        std::fs::write(&legacy_snap, "stale").unwrap();
-
-        let _writer = WalWriter::create(&verthys_path, "imp-c").unwrap();
-
-        assert!(!legacy_wal.exists(), "旧布局 WAL 必须被回收");
-        assert!(!legacy_snap.exists(), "旧布局快照必须被回收");
-        assert!(container_layout::wal_file_for(&verthys_path).exists());
     }
 }

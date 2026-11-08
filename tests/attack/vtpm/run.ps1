@@ -1,4 +1,4 @@
-# tests/attack/vtpm/run.ps1 — vTPM 能力验收（P2-A 平台差异确认）
+# tests/attack/vtpm/run.ps1 — vTPM 能力验收（平台差异确认）
 #
 # 用途：在 VM/vTPM 来宾系统中运行 `vty_tpm_probe.exe`，采集 PCR 读取、
 # TBS 授权会话与 TPM NV 计数器的可用性，产出可复核证据。
@@ -6,7 +6,7 @@
 # 判定：
 #   - 探针必须成功运行；PCR 读取与 PCP PCR 绑定正/负控必须成立；
 #   - `TbsSessions` / `TbsNvCounter` 如实记录：两者为 true 才说明该平台
-#     具备实现 P2-A（NV 单调计数器）的条件。
+#     具备实现 NV 单调计数器的条件。
 #
 # 输出契约：
 #   RESULT VTPM PASS|BLOCKED|FAIL <detail>

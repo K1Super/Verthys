@@ -1,7 +1,7 @@
 /*
  * runtime_hash.h — 运行时函数级哈希校验（内部模块，不导出）
  *
- * V3 升级：防运行时代码补丁（hotpatching）攻击。
+ * 防运行时代码补丁（hotpatching）攻击。
  *   与 .vsec 全节校验互补（函数粒度 vs 节粒度）：
  *   - .vsec：启动时从磁盘重算 .text/.rdata 文件内容 HMAC —— 防分发篡改；
  *   - .rhat：解锁成功后 + 每 30 分钟重算关键函数【内存映像】哈希
@@ -40,7 +40,7 @@
  *     u32 x_index    X 清单序号（诊断用）
  *     u8  hash[32]  BLAKE2b-256(标签 ‖ 掩码后函数字节)
  *
- * 表自身防篡改：.rhat 节纳入 .vsec v2 校验范围（HMAC 第三槽，
+ * 表自身防篡改：.rhat 节纳入 .vsec（版本 2）校验范围（HMAC 第三槽，
  * integrity 完整性模块扩展）——攻击者文件级改表 = 分发篡改 = 启动拒绝。
  */
 #ifndef VERTHYS_RUNTIME_HASH_H
@@ -75,7 +75,7 @@ extern "C" {
 #define VERTHYS_RHAT_VERSION 1u
 
 /*
- * 关键函数清单（X-macro：COMMON 15 项 + V3 25 项，全量 40 项）
+ * 关键函数清单（X-macro：15 项，产品与测试共用同一份）
  * 约束：
  *   - 仅限非 static 外部符号（map "Publics by Value" 可见）；
  *   - 增删条目 = 构建期 rhash_gen 与运行期两侧同步（同一宏展开）；
@@ -84,15 +84,9 @@ extern "C" {
  *     下小函数会被跨模块内联进调用方，本体随后被 /OPT:REF 丢弃——
  *     map 缺符号即 rhash_gen 报错暴露；且内联副本不受 .rhat 保护，
  *     noinline 是"被哈希代码体 = 实际执行代码体"的语义前提）。
- * 清单分两级（v3 源码拆分后产品二进制不再包含 v3 实现）：
- *   COMMON — 产品与测试/legacy 均保留的共享关键函数；
- *   V3     — v3 容器实现（仅测试/legacy 链接）。产品 DLL 的 .rhat
- *            由 rhash_gen --xlist core 仅生成 COMMON 段；V3 段只
- *            出现在 --xlist full（测试 exe / legacy DLL）的表中。
- * 覆盖面：v4 库创建/解锁/分片/记录/模块 + 共享密码学/应急/完整性 +
- * v3 密钥组/轮换/超块事务/分区表/WAL/六阶段事务/LSM/解锁流水线/本模块自身。
+ * 覆盖面：库创建/解锁/分片/记录/模块 + 共享密码学/应急/完整性。
  */
-#define VERTHYS_RUNTIME_HASH_FUNCS_COMMON(X) \
+#define VERTHYS_RUNTIME_HASH_FUNCS(X) \
     X(verthys_random_bytes) \
     X(verthys_generichash) \
     X(verthys_hmac_sha256) \
@@ -108,38 +102,6 @@ extern "C" {
     X(vty_repo_add) \
     X(vty_repo_read) \
     X(vty_module_unlock)
-
-#define VERTHYS_RUNTIME_HASH_FUNCS_V3(X) \
-    X(verthys_cng_aead_encrypt) \
-    X(verthys_cng_aead_decrypt) \
-    X(verthys_cng_aead_import_key) \
-    X(verthys_cng_km_import_batch) \
-    X(verthys_cng_km_wrap_key) \
-    X(verthys_cng_km_rotate_abc) \
-    X(verthys_rekey_auto_rotate) \
-    X(vsb_txn_v3_begin) \
-    X(vsb_txn_v3_commit) \
-    X(vsb_txn_v3_rollback) \
-    X(verthys_partition_table_save) \
-    X(verthys_partition_table_load) \
-    X(verthys_wal_append) \
-    X(verthys_wal_replay_ex) \
-    X(verthys_txn_v3_begin) \
-    X(verthys_txn_v3_commit) \
-    X(verthys_txn_v3_confirm) \
-    X(verthys_txn_v3_rollback) \
-    X(verthys_txn_v3_recover) \
-    X(verthys_lsm_put) \
-    X(verthys_lsm_get) \
-    X(verthys_lsm_flush) \
-    X(verthys_lsm_compact) \
-    X(verthys_unlock_pipeline_run) \
-    X(verthys_v3_open_existing)
-
-/* 全量清单（测试 exe / legacy DLL；40 项覆盖） */
-#define VERTHYS_RUNTIME_HASH_FUNCS(X) \
-    VERTHYS_RUNTIME_HASH_FUNCS_COMMON(X) \
-    VERTHYS_RUNTIME_HASH_FUNCS_V3(X)
 
 /* ---------- .rhat 节二进制布局（构建工具 rhash_gen 与运行期共享） ----------
  * 单一事实源：两侧必须逐字节一致（pack(1)；修改任意字段 = 两侧同步）。
@@ -185,7 +147,7 @@ int runtime_hash_configured(void);
  * 生产校验入口：scan + 失配 → KILL 级应急响应
  * （emergency_report(EMERG_LEVEL_KILL, EMERG_SIG_PROCESS_TAMPER)，
  *  进程终止由应急模块执行，本函数不返回错误——进程不再继续运行）。
- * 接线：Verthys_Unlock 成功后。
+ * 接线：Verthys_V4Unlock 成功后。
  */
 void runtime_hash_verify(void);
 

@@ -4,7 +4,7 @@
  *
  *
  * 命令分组：
- *   1. 暴力拦截（brute_force）：check / record_failure / record_success / clear_purge / status
+ *   1. 暴力拦截（brute_force）：check / status（只读查询；计数由口令入口权威执行）
  *   2. 会话守卫（session_guard）：start / stop / set_high_security
  *   3. 模块巡检（module_whitelist）：patrol / add_trusted_path / clear_trusted_paths
  *   4. 痕迹清理（cleanup）：clear_recent / secure_delete / cleanup_crash_residue
@@ -20,6 +20,7 @@ pub mod cleanup;
 pub mod file_lock;
 pub mod module_whitelist;
 pub mod preset;
+pub mod security_service;
 pub mod session;
 pub mod system_metrics;
 pub mod usb;

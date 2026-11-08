@@ -399,6 +399,13 @@ const FIXTURE_META: GroupMeta & { label: string } = {
 
 const { showError, showStatus } = useToastCenter();
 
+function describeError(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  const text = String(error ?? "").trim();
+  return text || fallback;
+}
+
 /** 前三枚卫星保留分组入口，第四枚固定为填充动作。 */
 const SATELLITE_GROUPS = DEV_TOOL_GROUPS.slice(0, 3);
 
@@ -791,7 +798,7 @@ async function runFixtureFillAction(): Promise<void> {
     dispatchFill(profile);
     showStatus("已填充表单");
   } catch (error) {
-    showError(error instanceof Error ? error.message : "填充失败");
+    showError(describeError(error, "填充失败"));
   } finally {
     fixtureFillBusy.value = false;
   }
@@ -824,7 +831,7 @@ async function execute(toolId: string, run: () => Promise<void> | void): Promise
   try {
     await run();
   } catch (error) {
-    showError(error instanceof Error ? error.message : "开发工具执行失败");
+    showError(describeError(error, "开发工具执行失败"));
   } finally {
     busyId.value = "";
   }

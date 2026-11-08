@@ -607,11 +607,6 @@ impl UsbRegistry {
         self.known_devices.get(volume_label).cloned()
     }
 
-    /// 移除已注册设备
-    pub fn unregister_device(&mut self, volume_label: &str) -> bool {
-        self.known_devices.remove(volume_label).is_some()
-    }
-
     /// 清空所有已注册设备
     pub fn clear(&mut self) {
         self.known_devices.clear();

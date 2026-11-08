@@ -30,7 +30,7 @@ import {
   moduleKeyReadyRef,
 } from "../../lib/keyManager";
 import { lockModuleKey } from "../../lib/module_crypto";
-import { TYPE_PHOTO_META, type PhotoMeta } from "../../lib/crypto";
+import { TYPE_PHOTO_META } from "../../lib/crypto";
 import { decryptMetaPreferWorker, decryptThumbPreferWorker } from "../../workers/photo-decrypt-bridge";
 import { isSlimPhotoMeta } from "../../constants/crypto_const";
 import { scrollPerf } from "../../config/scroll-perf";
@@ -47,7 +47,7 @@ import {
 } from "./utils";
 import {
   computeRowWindow, buildVisibleWindow,
-  type RowWindow, type VisibleCacheEntry,
+  type VisibleCacheEntry,
 } from "./visible-window";
 
 /** 可视区解密并发上限（限制同时进行的 IPC/解密数量，避免通道与主线程拥塞） */
@@ -289,9 +289,9 @@ export function usePhotoData() {
 
   /** 初始化虚拟滚动布局：测量容器尺寸 + 启动 ResizeObserver
    *  入口文件 onMounted 调用，将生命周期管理收敛至数据层（单一职责）。
-   *  滚动本身不做任何 JS 接管：滚轮走浏览器原生合成器路径（红线级结论——
+   *  滚动本身不做任何 JS 接管：滚轮走浏览器原生合成器路径（红线级结论：
    *  主线程插值 / scrollBy smooth 两代平滑实现均在快速滚轮下劣化滚动，
-   *  已整体移除，见修复文档"第三轮红线处置"）。 */
+   *  已整体移除）。 */
   const initVirtualScroll = () => {
     updateLayout();
     if (scrollRef.value && typeof ResizeObserver !== "undefined") {
@@ -642,7 +642,7 @@ export function usePhotoData() {
   }
 
   /** 获取照片 meta 记录 ID 列表。
-   *  权威路径：V4 类型盲索引（ensureTypeIds），不读记录密文、跨重启稳定；
+   *  权威路径：类型盲索引（ensureTypeIds），不读记录密文、跨重启稳定；
    *  不可用时回退增量记录扫描并标记降级。摘要缓存不参与 ID 过滤。
    *
    *  回退扫描的增量回调此前只服务于进度卡；进度卡移除后回调仅保留为

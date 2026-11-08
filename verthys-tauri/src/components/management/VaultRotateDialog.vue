@@ -1,5 +1,5 @@
 <!--
-  VaultRotateDialog.vue — 全库 DEK 轮换向导（v4 D9-C2）
+  VaultRotateDialog.vue — 全库 DEK 轮换向导
 
   职责：
     1. 仅在恢复码会话可用：配置新库位置、备份/PCR 选项与已启用模块口令；

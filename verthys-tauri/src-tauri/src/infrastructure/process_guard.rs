@@ -3,8 +3,7 @@
  * @brief 多进程资源隔离封装 - 强制进程私有资源属地化管理与自动清理
  *
  * 本模块提供进程级资源守卫（ProcessGuard），用于统一管理进程生命周期内
- * 持有的所有私有资源（包括 Rust 对象和 C 语言分配的堆内存/句柄），
- * 确保进程退出时所有资源被自动释放，防止资源泄漏。
+ * 持有的 Rust 对象资源，确保进程退出时所有资源被自动释放，防止资源泄漏。
  *
  * =============================================================================
  * 设计原则
@@ -13,14 +12,10 @@
  *    跨进程传递仅允许通过管道传递纯字节流数据，禁止传递内核对象句柄。
  * 2. 自动清理：进程正常或异常退出时，ProcessGuard 的 Drop 实现会按
  *    注册逆序（LIFO）释放所有已注册资源，无需手动干预。
- * 3. 双重资源支持：同时支持 Rust 资源（实现 DropResource trait）和
- *    C 资源（通过函数指针调用释放函数），兼容混合语言项目。
  *
  * =============================================================================
  * 安全约束
  * =============================================================================
- * - 所有 C 资源指针必须保证有效性，释放函数必须与分配方式匹配
- *   （如 malloc/free、LocalAlloc/LocalFree、CloseHandle 等）。
  * - 注册到 ProcessGuard 的资源不得在其他地方手动释放，防止 double-free。
  * - 子进程创建时强制 bInheritHandles=FALSE，阻断句柄继承通道。
  *
@@ -39,14 +34,12 @@
 /// 该守卫应作为进程上下文的成员，保证在整个进程生命周期内有效。
 ///
 /// # 资源注册
-/// - Rust 资源：通过 `register_rust` 注册，需实现 `DropResource` trait。
-/// - C 资源：通过 `register_c_resource` 注册，传入释放函数指针。
+/// 资源通过 `register_rust` 注册，需实现 `DropResource` trait。
 ///
 /// # 释放顺序
 /// 所有资源按注册顺序的逆序（后注册先释放）清理，避免资源间依赖问题。
 pub struct ProcessGuard {
     rust_resources: Vec<Box<dyn DropResource>>,
-    c_resources: Vec<CResourceEntry>,
 }
 
 /// Rust 资源析构接口
@@ -61,19 +54,6 @@ pub trait DropResource: Send {
     fn cleanup(&mut self);
 }
 
-/// C 资源条目
-///
-/// 封装 C 语言分配的堆内存或句柄，以及对应的释放函数。
-/// 守卫 Drop 时调用 `deleter(ptr)` 执行释放。
-struct CResourceEntry {
-    name: String,
-    ptr: *mut std::ffi::c_void,
-    deleter: unsafe extern "C" fn(*mut std::ffi::c_void),
-}
-
-// CResourceEntry 包含裸指针，需显式标记 Send 以允许跨线程传递（仅在单线程进程中使用）。
-unsafe impl Send for CResourceEntry {}
-
 impl ProcessGuard {
     /// 创建新的空资源守卫。
     ///
@@ -83,7 +63,6 @@ impl ProcessGuard {
     pub fn new() -> Self {
         ProcessGuard {
             rust_resources: Vec::new(),
-            c_resources: Vec::new(),
         }
     }
 
@@ -95,45 +74,10 @@ impl ProcessGuard {
         self.rust_resources.push(resource);
     }
 
-    /// 注册一个 C 资源。
-    ///
-    /// # 参数
-    /// - `name`：资源名称（用于调试）
-    /// - `ptr`：C 分配的内存/句柄指针
-    /// - `deleter`：C 释放函数，签名为 `unsafe extern "C" fn(*mut c_void)`
-    ///
-    /// # 安全要求
-    /// - `ptr` 必须指向有效资源，且未被其他方释放。
-    /// - `deleter` 必须与资源分配方式匹配（如 free、CloseHandle 等）。
-    /// - 守卫 Drop 时会调用 `deleter(ptr)`，调用者需确保此操作安全。
-    pub fn register_c_resource(
-        &mut self,
-        name: impl Into<String>,
-        ptr: *mut std::ffi::c_void,
-        deleter: unsafe extern "C" fn(*mut std::ffi::c_void),
-    ) {
-        self.c_resources.push(CResourceEntry {
-            name: name.into(),
-            ptr,
-            deleter,
-        });
-    }
-
-    /// 返回已注册的资源总数（Rust + C）。
-    pub fn resource_count(&self) -> usize {
-        self.rust_resources.len() + self.c_resources.len()
-    }
 }
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        // 按注册逆序释放 C 资源（后注册先释放）
-        while let Some(entry) = self.c_resources.pop() {
-            unsafe {
-                (entry.deleter)(entry.ptr);
-            }
-        }
-
         // 按注册逆序释放 Rust 资源
         while let Some(mut resource) = self.rust_resources.pop() {
             resource.cleanup();

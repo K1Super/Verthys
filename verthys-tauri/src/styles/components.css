@@ -828,12 +828,14 @@ input[type="password"]::-ms-reveal {
     inset 0 1px 0 rgba(var(--white-rgb), 0.05);
   font-family: var(--font);
   font-size: 12px;
+  line-height: 1.55;
   color: var(--text-primary);
   letter-spacing: 0.5px;
-  max-width: 240px;
-  white-space: nowrap;
+  /* 长文案按内容换行完整呈现：上限仅防视口溢出，不再截断文字 */
+  max-width: min(420px, calc(100vw - 32px));
+  white-space: normal;
+  overflow-wrap: break-word;
   overflow: hidden;
-  text-overflow: ellipsis;
   /* 揭示只走 opacity：承载文字的层不做任何 transform/滤波 ——
      位移或缩放会把文字提升为合成层（改用灰度抗锯齿），动画结束回落主层时
      字形再度子像素化，观感即"忽然模糊、随即变清晰"；汇聚上升的动感交由

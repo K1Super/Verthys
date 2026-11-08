@@ -447,6 +447,13 @@ pub async fn worker_init(
             session.kill();
 
             let msg = err.to_message();
+            /* N2：Verthys_Init 的安全状态目录预检失败以 0x20 上报；保留专用
+             * 错误码，前端给出目录加固指引，而不是“安全核心启动失败”。 */
+            let resp = if e.contains("00000020") {
+                VerthysResponse::err_code("worker_init", "E_SECURITY_STATE", &msg)
+            } else {
+                VerthysResponse::err("worker_init", &msg)
+            };
             state
                 .worker_lifecycle
                 .with_lock(|lc| {
@@ -454,7 +461,7 @@ pub async fn worker_init(
                 })
                 .await;
 
-            Ok(VerthysResponse::err("worker_init", &msg))
+            Ok(resp)
         }
         Ok(Err(join_e)) => {
             // spawn_blocking 任务 panic

@@ -111,4 +111,4 @@ export async function ensureSummaryScanSafe(): Promise<void> {
 
 /* 业务列表 ID 解析已收敛到 cache/composition 的 resolveTypeIds：
  * 权威类型盲索引优先，失败回退全量扫描。摘要缓存只承担名称/元数据，
- * 不再作为类型 ID 来源（V4 摘要 type 恒为未知 0）。 */
+ * 不再作为类型 ID 来源（摘要 type 恒为未知 0）。 */

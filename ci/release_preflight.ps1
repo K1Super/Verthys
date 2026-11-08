@@ -1,6 +1,6 @@
 ﻿# ci/release_preflight.ps1 - 发布前置检查
 #
-# 在构建开始前核对版本、更新配置、签名密钥、工作区与文档；Authenticode 为可选层。
+# 在构建开始前核对版本、更新配置、发布者证书、签名密钥、工作区与文档。
 # production 的任一阻断项都必须先解决；local 仅用于本机复现，证书与端点不强制。
 #
 # 用法:
@@ -45,6 +45,12 @@ if (-not (Test-Path -LiteralPath $versionPath)) {
     if ($LASTEXITCODE -ne 0) {
         Add-Blocker "版本载体不一致（运行 ci\sync_version.ps1）"
     }
+}
+
+# ---- 版本命名守卫 ----
+$naming = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "check_version_naming.ps1") 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Add-Blocker "版本命名守卫失败（代际文件名/退役 V3 构建/版本常量非单一来源）"
 }
 
 # ---- 工作区状态 ----
@@ -112,8 +118,20 @@ if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) -and -
     Add-Warning "私钥密码未注入且无默认密码文件；无密码密钥可忽略"
 }
 
-# Authenticode 为可选层：发布不再要求证书与 signtool，更新完整性由
-# 清单签名、安装包签名、SHA256 与 PE 版本保证；需要时仍可在构建机手工签名。
+# ---- 发布者代码签名与调用方认证 ----
+# production 构建会把证书 SHA-256 钉扎进 DLL，并对三个可执行产物做
+# Authenticode 签名；证书缺失时产物会在运行期拒绝启动，必须在构建前阻断。
+. (Join-Path $Root "scripts\lib\release_signing.ps1")
+if ($Profile -eq "production") {
+    try {
+        $signing = Resolve-VerthysReleaseSigning -Required
+        Write-Host "  [ OK ] 发布者证书可用，SHA-256=$($signing.PublisherSha256)"
+    } catch {
+        Add-Blocker "发布者代码签名不可用: $($_.Exception.Message)"
+    }
+} else {
+    Add-Warning "local 复现不启用调用方认证与 Authenticode；产物禁止作为正式发布件"
+}
 
 # ---- 文档与构建脚本 ----
 $requiredDocs = @(

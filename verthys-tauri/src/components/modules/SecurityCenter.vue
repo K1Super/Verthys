@@ -18,7 +18,8 @@
       :verthys-path="verthysPath"
       :unlocking="unlocking"
       :unlock-progress-msg="unlockProgressMsg"
-      :unlock-progress-percent="unlockProgressPercent"
+      :unlock-progress-percent="progressRhythm.visualPercent.value"
+      :dimmed="progressRhythm.dimmed.value"
       :unlock-progress-elapsed="unlockProgressElapsed"
       :init-status-ref="initStatusRef"
       :init-detail-ref="initDetailRef"
@@ -40,8 +41,8 @@
       :bin-file-name="binFileName"
       :processing="processing"
       :unlock-progress-msg="unlockProgressMsg"
-      :visual-percent="verifyRhythm.visualPercent.value"
-      :dimmed="verifyRhythm.dimmed.value"
+      :visual-percent="progressRhythm.visualPercent.value"
+      :dimmed="progressRhythm.dimmed.value"
       @init="onInitKey"
       @back="goBackToUnlock"
       @browse-bin="browseBin"
@@ -55,8 +56,8 @@
       :bin-file-name="binFileName"
       :processing="processing"
       :unlock-progress-msg="unlockProgressMsg"
-      :visual-percent="verifyRhythm.visualPercent.value"
-      :dimmed="verifyRhythm.dimmed.value"
+      :visual-percent="progressRhythm.visualPercent.value"
+      :dimmed="progressRhythm.dimmed.value"
       @verify="onVerify"
       @back="goBackToUnlock"
       @browse-bin="browseBin"
@@ -321,7 +322,6 @@ import { useDefenseStatus } from "../../composables/security-center/useDefenseSt
 import { useSystemMetrics } from "../../composables/security-center/useSystemMetrics";
 import { useAppUpdater } from "../../composables/useAppUpdater";
 import { updaterErrorMessage } from "../../lib/updater_error";
-import { isCacheDirty } from "../../cache/composition/verthys-cache";
 
 const emit = defineEmits<{ (e: "back"): void; (e: "panel-active", val: boolean): void }>();
 
@@ -346,21 +346,10 @@ const postVerifyAnim = ref(false);
  *  缺此保持位时，初始化成功会在收束完成前抢跳视图（表现为「点击后直接放行」）。 */
 const postInitAnim = ref(false);
 
-/* ===== 验证进度感知层（信号层 → 感知层 → 呈现层 的中间层） ===== */
-const verifyRhythm = useVerifyRhythm();
-
-/* ===== 视图模式（五态严格互斥） =====
- *   移除 "loading" 态。worker 解锁成功后进程内即时完成
- *   全局密钥记录探测，结果内联到 unlock 响应，前端零异步扫描阶段。
- *   解锁完成即确定 hasGlobalKeyRecord，直接进入 init 或 verify，无中间态。 */
-const { viewMode } = useViewMode({
-  verthysReady: verthysReadyRef,
-  hasGlobalKeyRecord: hasGlobalKeyRecordRef,
-  globalKeyReady: globalKeyReadyRef,
-  deviceCheckResult,
-  postVerifyAnim,
-  postInitAnim,
-});
+/* ===== 安全中心进度感知层（信号层 → 感知层 → 呈现层 的中间层） =====
+ * 解锁/创建/验证/初始化/会话清理共用同一实例：业务层只推送真实阶段进度，
+ * 本层统一负责平滑、软上限与成功收束，杜绝各流程各自实现节奏。 */
+const progressRhythm = useVerifyRhythm();
 
 /* ===== 解锁/创建逻辑 ===== */
 const {
@@ -388,6 +377,23 @@ const {
   showError,
   showToast,
   checkDevice,
+  rhythm: progressRhythm,
+});
+
+/* ===== 视图模式（五态严格互斥） =====
+ *   移除 "loading" 态。worker 解锁成功后进程内即时完成
+ *   全局密钥记录探测，结果内联到 unlock 响应，前端零异步扫描阶段。
+ *   解锁完成即确定 hasGlobalKeyRecord，直接进入 init 或 verify，无中间态。
+ *   unlockInProgress 保持位：解锁/创建在收束补满 100% 前锁定解锁视图，
+ *   避免底层状态先翻转导致进度条在收尾前被卸载（与 postInitAnim 同理）。 */
+const { viewMode } = useViewMode({
+  verthysReady: verthysReadyRef,
+  hasGlobalKeyRecord: hasGlobalKeyRecordRef,
+  globalKeyReady: globalKeyReadyRef,
+  deviceCheckResult,
+  postVerifyAnim,
+  postInitAnim,
+  unlockInProgress: unlocking,
 });
 
 /* ===== 选中路径是否已有容器 =====
@@ -556,7 +562,7 @@ const onUsbRebindDialogToggle = (visible: boolean) => {
 
 /* ===== 全局密钥管理 =====
  * 依赖注入：postVerifyAnim（useViewMode 读取 / onVerify 写入）
- *   + verifyRhythm（验证进度感知层实例）
+ *   + progressRhythm（安全中心统一进度感知层实例）
  *   + unlockProgress*（来自 useUnlockFlow，作为真实进度信号注入验证复用） */
 const {
   initPassword,
@@ -594,7 +600,7 @@ const {
   showToast,
   postVerifyAnim,
   postInitAnim,
-  verifyRhythm,
+  verifyRhythm: progressRhythm,
   unlockProgressMsg,
   unlockProgressPercent,
   unlockProgressElapsed,
@@ -621,7 +627,6 @@ const {
   editingRecoveryCode,
   skipRecoveryBinding,
   keyDialogProcessing,
-  pendingEnableModuleId,
   showDisableVerifyDialog,
   disableVerifyModuleId,
   disableVerifyKey,
@@ -644,7 +649,7 @@ const { defensePaths, defenseMeta } = useDefenseStatus();
 const { cpuUsage } = useSystemMetrics(globalKeyReadyRef);
 
 /* ===== 高安全预设默认第二因子引导 =====
- * 顺序：先 PCR[7,11]（现有 D14），再 keyfile（D3/K2）。两者都未启用时
+ * 顺序：先 PCR[7,11]（现有设备校验），再 keyfile。两者都未启用时
  * 只弹一个，避免同时叠窗；PCR 提示只说明策略与恢复码前提，绑定本身
  * 仍在「设备与 PCR」面板中用当前恢复码完成。 */
 const showSecurePcrDialog = ref(false);
@@ -908,6 +913,7 @@ const goBackToUnlock = async () => {
   //   lockAll 完成后 finally 释放 UI 锁，允许用户重选 verthys。
   unlocking.value = true;
   const lockStart = Date.now();
+  progressRhythm.start();
   unlockProgressMsg.value = "清理会话";
   unlockProgressPercent.value = 0;
   unlockProgressElapsed.value = 0;
@@ -915,22 +921,40 @@ const goBackToUnlock = async () => {
   unlockProgressDone.value = true;
   resetInitVerifyForm();
   // 锁定 verthys，重置所有状态 → viewMode 自动回到 "unlock"
+  let sealed = false;
   try {
     const outcome = await lockAll((percent, message) => {
       unlockProgressPercent.value = percent;
       unlockProgressMsg.value = message;
       unlockProgressElapsed.value = Date.now() - lockStart;
+      /* 终值由收束事件交付，避免 ACTIVE 期推送 100% 的协议异常 */
+      if (percent < 100) progressRhythm.pushRealProgress(percent / 100);
     });
     if (!outcome.locked) {
       // 前置闸门失败（轮换仍在执行）：会话仍存活，不得回到解锁页
       showError("锁定未执行：安全核心仍在使用中，请稍后重试");
-    } else if (isCacheDirty()) {
+    } else if (outcome.dirty) {
       // 返回解锁页时也检查脏数据状态
       showError("部分数据可能未保存，请检查最近操作");
+    } else if (!outcome.flushed) {
+      showError("数据落盘未完成，请重启应用后确认数据完整");
+    } else if (outcome.errors.length > 0) {
+      showError("安全清理未完全确认，建议重启应用后重新解锁");
+    }
+    // 仅完全干净的清理才收束补满；其余走冻结降级，语义与结果一致
+    if (outcome.locked && outcome.clean) {
+      progressRhythm.seal();
+      try {
+        await progressRhythm.waitForComplete();
+        sealed = true;
+      } catch (e) {
+        console.warn("[goBackToUnlock] 收束等待被中断，按已完成处理", e);
+      }
     }
   } catch (e) {
     console.error("[goBackToUnlock] lockAll 异常", e);
   } finally {
+    if (!sealed) progressRhythm.halt();
     unlocking.value = false;
     unlockProgressDone.value = false;
   }
@@ -944,8 +968,12 @@ const onLockAll = async () => {
   //    落盘/清理超时可能标记 cacheDirty
   if (!outcome.locked) {
     showError("锁定未执行：安全核心仍在使用中，请稍后重试");
-  } else if (isCacheDirty()) {
+  } else if (outcome.dirty) {
     showError("部分数据可能未保存，请检查最近操作");
+  } else if (!outcome.flushed) {
+    showError("数据落盘未完成，请重启应用后确认数据完整");
+  } else if (outcome.errors.length > 0) {
+    showError("安全清理未完全确认，建议重启应用后重新解锁");
   } else {
     showToast("已锁定全部并清零内存密钥");
   }
@@ -1041,7 +1069,7 @@ watch(globalKeyReadyRef, (ready) => {
 onBeforeUnmount(() => {
   stopSessionTick();
   // 清理感知层动画帧调度（中断策略：取消调度并冻结状态）
-  verifyRhythm.dispose();
+  progressRhythm.dispose();
   // 清理预启动但未使用的 worker，防止僵尸进程
   //    场景：用户选定文件触发了 preloadWorker，但未点击「确认」就切走模块
   //    若 verthys 已解锁（verthysReadyRef=true），worker 仍在使用中，不销毁

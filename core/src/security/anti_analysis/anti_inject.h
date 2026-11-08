@@ -77,12 +77,6 @@ int anti_inject_check_modules(void);
 int anti_inject_check_all(void);
 
 /*
- * 添加受信任模块路径（白名单）。
- * 用于注册已知安全的第三方 DLL（如 Tauri 运行时依赖）。
- */
-int anti_inject_add_trusted_path(const char *path);
-
-/*
  * 判断线程起始地址是否位于本库自身模块（verthys.dll / 测试 exe）内。
  * 自身模块内起始的线程（preheat / 进度消费等合法内部线程）不计入 APC
  * 线程增长检测的可疑计数。返回 1=在自身模块内，0=不在。

@@ -1,5 +1,5 @@
 # .github/workflows/rust-frontend.yml
-# P2-4 修复（2026-09-19）：Rust / 前端 CI 质量门
+# Rust / 前端 CI 质量门
 #
 # 覆盖（对应 core.yml 注释中"由本工作流承接"的承诺）：
 #   1. Rust 单元测试（src-tauri + verthys-worker 全部用例）

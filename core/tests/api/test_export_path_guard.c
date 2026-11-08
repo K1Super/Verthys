@@ -25,7 +25,14 @@
 #define PG_VERTHYS  "test_pg.verthys"
 #define PG_PW       "pg-pass-2026"
 #define PG_PW_LEN   (sizeof(PG_PW) - 1)
-#define PG_PRESET   VERTHYS_PRESET_PERFORMANCE
+
+/* 创建 容器（恢复码在测试内一次性丢弃） */
+static VerthysResult pg_create(VerthysHandle h)
+{
+    char recovery[80];
+    return Verthys_V4Create(h, PG_VERTHYS, PG_PW, PG_PW_LEN,
+                            recovery, sizeof recovery);
+}
 
 /* 返回系统目录（System32，如 C:\Windows\System32），失败返回空串 */
 static void pg_get_system32(char *buf, size_t cap)
@@ -58,7 +65,7 @@ TEST(pg_export_rejects_dotdot_path)
     remove(PG_VERTHYS);
     VerthysResult rc_init   = Verthys_Init(&h);
     VerthysResult rc_create = (rc_init == VERTHYS_OK)
-        ? Verthys_CreateWithPreset(h, PG_VERTHYS, PG_PW, PG_PW_LEN, PG_PRESET)
+        ? pg_create(h)
         : VERTHYS_ERR_INTERNAL;
     VerthysResult rc_export = (rc_create == VERTHYS_OK && evil_path[0] != '\0')
         ? Verthys_Export(h, evil_path, "epw", 3)
@@ -91,7 +98,7 @@ TEST(pg_export_rejects_system_dir_path)
     remove(PG_VERTHYS);
     VerthysResult rc_init   = Verthys_Init(&h);
     VerthysResult rc_create = (rc_init == VERTHYS_OK)
-        ? Verthys_CreateWithPreset(h, PG_VERTHYS, PG_PW, PG_PW_LEN, PG_PRESET)
+        ? pg_create(h)
         : VERTHYS_ERR_INTERNAL;
     VerthysResult rc_export = (rc_create == VERTHYS_OK && evil_path[0] != '\0')
         ? Verthys_Export(h, evil_path, "epw", 3)
@@ -125,7 +132,7 @@ TEST(pg_import_rejects_system_dir_path)
     remove(PG_VERTHYS);
     VerthysResult rc_init   = Verthys_Init(&h);
     VerthysResult rc_create = (rc_init == VERTHYS_OK)
-        ? Verthys_CreateWithPreset(h, PG_VERTHYS, PG_PW, PG_PW_LEN, PG_PRESET)
+        ? pg_create(h)
         : VERTHYS_ERR_INTERNAL;
     VerthysResult rc_import = (rc_create == VERTHYS_OK && sys_path[0] != '\0')
         ? Verthys_Import(h, sys_path, PG_PW, PG_PW_LEN)
@@ -161,7 +168,7 @@ TEST(pg_export_accepts_temp_path)
     remove(PG_VERTHYS);
     VerthysResult rc_init   = Verthys_Init(&h);
     VerthysResult rc_create = (rc_init == VERTHYS_OK)
-        ? Verthys_CreateWithPreset(h, PG_VERTHYS, PG_PW, PG_PW_LEN, PG_PRESET)
+        ? pg_create(h)
         : VERTHYS_ERR_INTERNAL;
     VerthysResult rc_export = (rc_create == VERTHYS_OK && tmp_path[0] != '\0')
         ? Verthys_Export(h, tmp_path, "epw", 3)

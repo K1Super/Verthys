@@ -63,13 +63,13 @@ import type { VerifyRhythm } from './useVerifyRhythm';
  * 均严格大于内部单步上界（INIT_TIMEOUT_MS 30s / derive_verify 15s），
  * 避免前端先于后端收口 —— 否则会出现「前端报超时、后端仍在跑」的
  * 假失败与状态错配。超时后一律回查权威状态，不直接断言失败。 */
-export const INIT_KEY_FRONTEND_TIMEOUT_MS = 90 * 1000;
-export const VERIFY_KEY_FRONTEND_TIMEOUT_MS = 90 * 1000;
-export const CHANGE_KEY_FRONTEND_TIMEOUT_MS = 150 * 1000;
-export const EXPORT_VERIFY_FRONTEND_TIMEOUT_MS = 90 * 1000;
+const INIT_KEY_FRONTEND_TIMEOUT_MS = 90 * 1000;
+const VERIFY_KEY_FRONTEND_TIMEOUT_MS = 90 * 1000;
+const CHANGE_KEY_FRONTEND_TIMEOUT_MS = 150 * 1000;
+const EXPORT_VERIFY_FRONTEND_TIMEOUT_MS = 90 * 1000;
 
 /** .bin 密钥文件字节上限（密钥文件为小体积记录，超限拒绝读取） */
-export const MAX_BIN_FILE_BYTES = 64 * 1024;
+const MAX_BIN_FILE_BYTES = 64 * 1024;
 
 /** 密钥文件读取前端超时（后端 read_user_file 自身 10s 超时） */
 const BIN_READ_TIMEOUT_MS = 15 * 1000;
@@ -333,7 +333,8 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       options.unlockProgressMsg.value = p.message;
       options.unlockProgressPercent.value = p.percent;
       options.unlockProgressElapsed.value = p.elapsed_ms;
-      options.verifyRhythm.pushRealProgress(p.percent / 100);
+      /* 终值由收束事件交付，100 不推向感知层 */
+      if (p.percent < 100) options.verifyRhythm.pushRealProgress(p.percent / 100);
     };
 
     let result: VerthysResult<void> | null = null;
@@ -360,6 +361,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
 
     if (result?.ok || recovered) {
       // 成功：收束补满 100% 后释放视图（与验证成功路径同构）
+      options.unlockProgressMsg.value = '初始化完成';
       options.verifyRhythm.seal();
       try {
         await options.verifyRhythm.waitForComplete();
@@ -445,8 +447,8 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
       options.unlockProgressMsg.value = p.message;
       options.unlockProgressPercent.value = p.percent;
       options.unlockProgressElapsed.value = p.elapsed_ms;
-      // 真实进度作为信号推送感知层（0-1），呈现层只消费感知层视觉值
-      options.verifyRhythm.pushRealProgress(p.percent / 100);
+      // 真实进度作为信号推送感知层（0-1）；终值由收束事件交付，100 不推送
+      if (p.percent < 100) options.verifyRhythm.pushRealProgress(p.percent / 100);
     };
 
     let result: VerthysResult<void> | null = null;
@@ -823,6 +825,3 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
     resetInitVerifyForm,
   };
 }
-
-/** useGlobalKey 返回值类型（便于显式标注） */
-export type UseGlobalKeyReturn = ReturnType<typeof useGlobalKey>;

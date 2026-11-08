@@ -12,7 +12,7 @@
 
 | 域 | 事实来源文件 |
 |---|---|
-| C/C++ vendored 源码 | `third_party/libsodium`、`third_party/flatcc`、`third_party/xxhash/xxhash.h` |
+| C/C++ vendored 源码 | `third_party/libsodium`、`third_party/flatcc` |
 | Rust 锁定版本 | `verthys-tauri/src-tauri/Cargo.toml`（直接依赖 `=x.y.z` 锁定）+ `verthys-tauri/src-tauri/Cargo.lock` 及根 `dep-versions.txt`（Cargo.lock 镜像，`version = 4` 为 lock 格式版本） |
 | 前端依赖 | `verthys-tauri/package.json`（+ `package-lock.json`） |
 
@@ -22,8 +22,8 @@
 | 依赖 | 版本（来源） | 许可证（随仓库文件） | 引入理由 | 用途模块 |
 |---|---|---|---|---|
 | libsodium | `1.0.20`（`third_party/Libsodium.cmake` `VERSION` 与 `SODIUM_LIBRARY_VERSION_MAJOR=26/MINOR=2`） | ISC（`third_party/libsodium/LICENSE`） | XSalsa20-Poly1305 / Argon2 / 常数时间原语，静态链入 `verthys.dll` | `core/src/crypto/`（cipher/keymanager/pepper） |
-| flatcc | commit `a2515daa948c1ae42ba95b3a904363169dff147c`（`third_party/Flatcc.cmake` 注释） | Apache-2.0（`third_party/flatcc/LICENSE` + `NOTICE`） | V3 容器 FlatBuffers 编解码运行时（flatccrt）；`flatc` 为 schema codegen 宿主工具（不进产物） | `core/schema/` 生成头 + `core/src/container/` |
-| xxHash | `v0.8.3`（tag `e626a72bc2321cd320e953a0ccf1584cad60f363`，`third_party/Flatcc.cmake` 注释，含 SHA-256） | BSD-2-Clause（`third_party/xxhash/LICENSE`） | LSM Bloom Filter 哈希（单头文件 `XXH_INLINE_ALL`） | `core/src/index/lsm/` |
+| flatcc | commit `a2515daa948c1ae42ba95b3a904363169dff147c`（`third_party/Flatcc.cmake` 注释） | Apache-2.0（`third_party/flatcc/LICENSE` + `NOTICE`） | 交换信封/容器 schema 的 FlatBuffers 编解码运行时（flatccrt）；`flatc` 为 schema codegen 宿主工具（不进产物） | `core/schema/` 生成头 + `core/src/container/` |
+| xxHash（flatcc 内置） | flatcc `external/hash/xxhash.h`（随 flatcc 版本） | BSD-2-Clause（`third_party/flatcc/external/hash/`） | flatcc 编译器内部哈希；产品 C 代码不直接使用 | `third_party/flatcc/` |
 
 ## 3. Rust 依赖（`src-tauri/Cargo.toml` 直接依赖，节选大类）
 | 类别 | 依赖（版本来源） | 引入理由 |
@@ -83,14 +83,13 @@
 - **cargo**：直接依赖在 `Cargo.toml` 用 `=x.y.z` 钉死；补丁类升级后执行
   `cargo update -p keyboard-types`（`build_production.ps1` / `build_dev.ps1` 阶段 0.6 已内置该步骤重新锁定
   Cargo.lock）；升级前须评估 `patches/` 与 `.cargo/config.toml` 的 rustflags 是否仍需保留（见 Cargo.toml 注释）。
-- **vendored（libsodium/flatcc/xxHash）**：
+- **vendored（libsodium/flatcc）**：
   - libsodium：`Libsodium.cmake` 照搬官方 MSVC 构建（SSE2、SODIUM_STATIC、RtlGenRandom）；升级须同步
     `version.h.in` 渲染参数（`VERSION` / `SODIUM_LIBRARY_VERSION_MAJOR` / `SODIUM_LIBRARY_VERSION_MINOR`）。
   - flatcc：`Flatcc.cmake` **直接定义目标**，不复用其自带 CMakeLists（避免污染全局 `CMAKE_C_FLAGS`、
     `CMAKE_DEBUG_POSTFIX`、`LIBRARY_OUTPUT_PATH`）；升级须同步源文件清单与编译定义
     （`FLATCC_PORTABLE` / `FLATCC_REFLECTION=1` / `_CRT_SECURE_NO_WARNINGS`），并复核 `flatc` 生成的
     `core/schema/generated/*` 是否需重新 codegen。
-  - xxHash：单头文件升级后须更新 `Flatcc.cmake` 中的版本 tag 与 SHA-256 注释，并回归 LSM Bloom Filter 测试。
 
 ## 7. 供应链安全关联
 - 启动期前端资源完整性：`resource_guard::verify_resource_hashes()`（release 阻断、dev 警告），哈希清单由

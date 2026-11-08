@@ -93,10 +93,4 @@ int cng_machine_key_unwrap_known(const uint8_t cipher[CMK_RSA_CIPHER_BYTES],
                                  const uint8_t label[CMK_OAEP_LABEL_BYTES],
                                  int key_level, int key_provider);
 
-/*
- * 释放全部槽位句柄（仅销毁句柄，不删除持久化密钥；
- * 持久化密钥用于下次会话恢复；仅在应急销毁时调用 NCryptDeleteKey）。
- */
-void cng_machine_key_destroy(void);
-
 #endif /* VERTHYS_CNG_MACHINE_KEY_H */

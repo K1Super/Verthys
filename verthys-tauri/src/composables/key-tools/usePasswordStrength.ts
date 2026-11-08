@@ -18,7 +18,7 @@ import {
 } from "./password_strength";
 
 /** 输入防抖窗口（毫秒）：大于键入间隔，避免每个按键都触发一次分析 */
-export const STRENGTH_DEBOUNCE_MS = 140;
+const STRENGTH_DEBOUNCE_MS = 140;
 
 /** 组合式配置 */
 export interface UsePasswordStrengthOptions {

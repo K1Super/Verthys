@@ -338,8 +338,8 @@ import {
   writeUserFileStream, appendUserFileChunk, finalizeUserFileStream, abortUserFileStream,
 } from "../../lib/verthys";
 import {
-  createFileKdfV2, buildV2Check, verifyV2Check, sealRecord, openRecord,
-  type FileKdfV2,
+  createFileKdf, buildModuleCheck, verifyModuleCheck, sealRecord, openRecord,
+  type FileKdf,
 } from "../../lib/module_crypto";
 import { runFileExport } from "../../composables/file-verthys/useFileExport";
 import {
@@ -462,7 +462,7 @@ interface FileEntry {
   chunkSize?: number;          // 分块口径（meta 声明值；历史记录可能缺省）
   fileHash?: string;           // 文件内容哈希（完整性/AD，不作为去重键）
   entryKey?: string;           // 非内容条目键（删除时释放 WAL 幂等锁）
-  kdf?: FileKdfV2;             // 文件级密钥派生参数（加密条目；导出解锁用）
+  kdf?: FileKdf;             // 文件级密钥派生参数（加密条目；导出解锁用）
   passwordCheck?: string;      // 口令校验块（加密条目；导出前置判定用）
   /* 元数据不可读（解密或 JSON 解析失败）：条目仍须可见，仅提供删除入口，
      否则记录在列表中静默消失，用户既不知道丢了什么也无法清理 */
@@ -685,8 +685,8 @@ const importDeps: FileImportDeps = {
   statFile: userFileStat,
   readChunk: readUserFileChunked,
   v2: {
-    createFileKdf: async () => createFileKdfV2(),
-    encryptChunk: async (plain: Uint8Array, kdf: FileKdfV2, password: string) => {
+    createFileKdf: async () => createFileKdf(),
+    encryptChunk: async (plain: Uint8Array, kdf: FileKdf, password: string) => {
       const cipherB64 = await sealRecord("file", "v2_chunk", bytesToBase64(plain), {
         salt: kdf.saltB64,
         iterations: kdf.iterations,
@@ -694,8 +694,8 @@ const importDeps: FileImportDeps = {
       });
       return base64ToBytes(cipherB64);
     },
-    buildPasswordCheck: (kdf: FileKdfV2, password: string) =>
-      buildV2Check("file", kdf, password),
+    buildPasswordCheck: (kdf: FileKdf, password: string) =>
+      buildModuleCheck("file", kdf, password),
   },
   // 容器卷空间预检：path 缺省 = 当前会话容器所在卷
   freeSpaceBytes: async (path) => (await checkDiskSpace(path ?? undefined)).free_bytes,
@@ -1011,11 +1011,11 @@ const doSave = async (f: FileEntry, password: string | null): Promise<boolean> =
         return r ? { dataB64: r.dataB64 } : null;
       },
       // 当前加密形态：解锁文件密钥并以口令校验块判定（唯一判定点）
-      openV2Decryptor: async (entry, pwd) => {
+      openContentDecryptor: async (entry, pwd) => {
         if (!entry.kdf || !entry.passwordCheck) return null;
         /* 口令判定由 worker 用同一 KDF 参数派生后校验；
          * worker 只返回布尔结论，不向前端返回密钥。 */
-        const ok = await verifyV2Check("file", entry.kdf, pwd, entry.passwordCheck);
+        const ok = await verifyModuleCheck("file", entry.kdf, pwd, entry.passwordCheck);
         if (!ok) return null;
         return {
           decryptChunk: async (b64: string) => {
@@ -1261,7 +1261,7 @@ const toFileEntry = (id: number, meta: Record<string, unknown>): FileEntry => ({
   chunkSize: typeof meta.chunkSize === "number" ? meta.chunkSize : undefined,
   fileHash: typeof meta.fileHash === "string" ? meta.fileHash : undefined,
   entryKey: typeof meta.entryKey === "string" ? meta.entryKey : undefined,
-  kdf: meta.kdf as FileKdfV2 | undefined,
+  kdf: meta.kdf as FileKdf | undefined,
   passwordCheck: typeof meta.passwordCheck === "string" ? meta.passwordCheck : undefined,
 });
 
@@ -1295,7 +1295,7 @@ const loadFiles = async () => {
   // 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
   const newItems: FileEntry[] = [];
 
-  // ID 来源：V4 类型盲索引（权威、跨重启稳定）；枚举失败时
+  // ID 来源：类型盲索引（权威、跨重启稳定）；枚举失败时
   //   resolveTypeIds 自动回退全量记录扫描。摘要缓存不参与类型过滤。
   let metaIds: number[];
   try {

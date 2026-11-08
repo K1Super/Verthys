@@ -1,5 +1,5 @@
 /*
- * verthys_scan.c — 游标式批量数据扫描底层实现模块（V3-only）
+ * verthys_scan.c — 游标式批量数据扫描底层实现模块
  *
  * 三段式标准游标调用范式：打开游标 Open → 循环批量拉取 Fetch →
  * 关闭释放 Close。彻底规避单条记录循环查询带来的 LSM 重复查找开销，
@@ -18,13 +18,9 @@
 #include "memory_guard.h"
 #include "emergency.h"
 #include "verthys_diag.h"
-/* V3 扫描游标（LSM 快照迭代器 + Extent 解密）。
- * verthys_v3_lifecycle.h 传递包含 verthys_lsm.h（scan_open/next/close）/
- * verthys_extent.h（extent_get / extent_index_find）/ VerthysContextV3 全套接口。 */
-#include "verthys_v3_lifecycle.h"
-/* v4 扫描：目录叶游标 + 记录段解密/名称解密。 */
-#include "vty_repo_v4.h"
-#include "verthys_api_v4.h"
+/* 扫描：目录叶游标 + 记录段解密/名称解密。 */
+#include "vty_repo.h"
+#include "verthys_api_container.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +34,7 @@
 #endif
 
 /* ------------------------------------------------------------------ *
- * 扫描游标内部结构体定义（V3-only）                                    *
+ * 扫描游标内部结构体定义                                              *
  * ------------------------------------------------------------------ */
 struct VerthysScanCursor {
     uint64_t            start_lid;       /* 遍历起始逻辑记录ID（迭代器 lid 升序，
@@ -55,449 +51,31 @@ struct VerthysScanCursor {
     int                 mem_locked;      /* 标记游标结构体内存是否已执行页锁定 */
     int                 invalidated;     /* 标记游标是否被应急熔断机制强制作废 */
 
-    /* === V3 LSM 快照迭代上下文 === */
-    VerthysLsmScanIter   *v3_iter;          /* LSM 全量快照迭代器（open 时深拷贝，
-                                             并发 put/flush/compaction 不影响，
-                                             快照隔离由 LSM 结构性保证） */
-    struct VerthysContext *v3_ctx;          /* 借用：VerthysContext（Fetch 时经
-                                             ctx->v3 取 f/ext_idx/extent 分区） */
-    VerthysContextV3     *v3_owner;         /* 借用实例身份锚点：容器 Lock/再解锁
-                                             后 ctx->v3 更换实例 → 本游标即刻
-                                             失效（借用的 f/分区不可再用） */
 
-    /* === v4 目录叶游标（COW 快照；与 v3 字段互斥使用） === */
-    struct VerthysContext *v4_ctx;          /* 借用句柄（共享锁/存活性检测） */
-    struct VtyVault     *v4_owner;          /* 借用实例身份锚点，Lock 后失配 */
-    VtyRepoIter         *v4_iter;
+    /* === 目录叶游标（COW 快照） === */
+    struct VerthysContext *vault_ctx;          /* 借用句柄（共享锁/存活性检测） */
+    struct VtyVault     *vault_owner;          /* 借用实例身份锚点，Lock 后失配 */
+    VtyRepoIter         *vault_iter;
 };
 
-#if defined(VERTHYS_V3_SUPPORT)
-/* ------------------------------------------------------------------ *
- * V3 扫描游标辅助段                                                    *
- *                                                                    *
- * 数据通路：VerthysLsmScanIter（lid 升序全量快照——open 时深拷贝        *
- * MemTable 编码流 + SSTable 元数据/块迭代器，跨层归并去重 + 墓碑     *
- * 跳过）→ ScanFetch 经 verthys_extent_get 内核态解密（AEAD + BLAKE2b  *
- * 双重校验）→ 深拷贝输出（借用契约，调用方 ScanRecordFree 释放）。   *
- *                                                                    *
- * 实例身份锚点（v3_owner）：容器 Lock/再解锁后 ctx->v3 更换堆实例，   *
- * 游标借用的 f/分区/索引即刻悬挂——Fetch 入口经 scan_v3_alive 检测    *
- * 实例一致性，失配即作废游标（invalidated），杜绝悬挂引用解引用。    *
- *                                                                    *
- * 并发纪律：游标生命周期内禁止并发 Lock/容器循环；迭代器内部逐条持   *
- * lsm 独占锁推进（vio_pread64 定位互斥），长扫描不阻塞写者。应急熔断：*
- * Fetch 入口 emergency_is_triggered 检测 + 游标结构体托管内存防护     *
- * 管理器（紧急清零后 Fetch 拒绝服务）。                              *
- *
- * api_mutex 共享锁纪律：全部游标读路径（Open/Fetch 系列、按类型查找）
- * 持 ctx->api_mutex 共享锁执行核心读——与写路径（AddRecord 等独占持
- * api_mutex 后经同一 FILE* 落盘）互斥，杜绝 vio_pread64 的
- * fseek+fread 非原子对与写者 fseek+fwrite 在共享 FILE* 上交错（定位
- * 竞争→错位读写）。锁序恒为 api_mutex → lsm 内部锁（与写路径同向，
- * 单向不逆）；持锁区间内不得调用任何获取 api_mutex 的函数。
- * ------------------------------------------------------------------ */
-
-/*
- * V3 游标存活性校验：容器实例未循环（ctx->v3 == v3_owner）且子系统
- * 在位。0 = 存活可继续；非 0 = 已失效（调用方置 invalidated 并拒绝）。
- */
-static int scan_v3_alive(const VerthysScanCursor *cursor)
-{
-    const struct VerthysContext *ctx;
-
-    if (cursor == NULL) return 0;
-    ctx = cursor->v3_ctx;
-    return ctx != NULL &&
-           ctx->fmt_version == VERTHYS_FMT_V3 &&
-           ctx->v3 != NULL &&
-           ctx->v3 == cursor->v3_owner &&
-           ctx->v3->subsystems_open;
-}
-
-/*
- * V3 游标创建（ScanOpen / ScanSummaryOpen 共用骨架）：
- * 分配 + LSM 快照迭代器打开 + 内存防护三件套（页锁定 / 内存防护
- * 管理器注册 / 零初始化）。
- * label 传入内存防护注册标识（区分全量/摘要游标）。
- * project / index_inline_max_bytes / max_batch_bytes 为全量 Fetch 的投影
- * 与取批预算（摘要 Fetch 不消费投影，传 FULL/0/0 即保持原语义）。
- */
-static VerthysResult scan_v3_open(struct VerthysContext *ctx,
-                                uint64_t start_lid,
-                                uint64_t batch_size,
-                                uint32_t project,
-                                uint64_t index_inline_max_bytes,
-                                uint64_t max_batch_bytes,
-                                const char *guard_label,
-                                VerthysScanCursor **out_cursor)
-{
-    VerthysScanCursor *cursor = NULL;
-    VerthysResult rc;
-
-    *out_cursor = NULL;
-
-    if (ctx->v3 == NULL || !ctx->v3->subsystems_open) return VERTHYS_ERR_LOCKED;
-
-    cursor = (VerthysScanCursor *)calloc(1, sizeof(VerthysScanCursor));
-    if (cursor == NULL) return VERTHYS_ERR_INTERNAL;
-
-    cursor->v3_ctx     = ctx;
-    cursor->v3_owner   = ctx->v3;
-    cursor->start_lid  = start_lid;
-    cursor->batch_size = (batch_size > 0) ? batch_size : 500;
-    cursor->exhausted  = 0;
-    cursor->invalidated = 0;
-    cursor->project    = project;
-    cursor->index_inline_max_bytes = index_inline_max_bytes;
-    cursor->max_batch_bytes = max_batch_bytes;
-
-    rc = verthys_lsm_scan_open(ctx->v3->lsm, &cursor->v3_iter);
-    if (rc != VERTHYS_OK) {
-        free(cursor);
-        return rc;
-    }
-
-    /* 内存页锁定，避免游标结构体被交换至磁盘文件 */
-    if (verthys_lock_memory(cursor, sizeof(*cursor)) == 0) {
-        cursor->mem_locked = 1;
-    }
-
-    /* 注册至内存防护管理器，紧急清零时自动覆写游标内存 */
-    memory_guard_register(cursor, sizeof(*cursor), guard_label);
-
-    *out_cursor = cursor;
-    return VERTHYS_OK;
-}
-
-/*
- * V3 全量拉取（ScanFetch 路径）：
- * LSM 快照迭代器逐条（lid 升序，墓碑已被迭代器跳过）→ start_lid 定位
- * → 有效槽位过滤 → 投影判定 → Extent 内核态解密（AEAD + BLAKE2b 双重
- * 完整性）→ 深拷贝输出（借用契约，调用方 ScanRecordFree 释放）。
- *
- * 投影（cursor->project）：
- *   - FULL：全部记录解密并返回数据（历史行为）；
- *   - INDEX：仅 plaintext_size <= index_inline_max_bytes 的记录解密，
- *     超出阈值的记录仍按序返回索引条目（data=NULL/data_len=0），
- *     使"只取索引"的调用不为搬运 MB 级载荷付出解密与内存代价。
- *
- * 取批预算（cursor->max_batch_bytes，软水位线）：累计输出字节（名称 + 数据）
- * 越过预算即收批——本条已写入输出，批次最多超出预算一条记录的大小。迭代器
- * 不可回退，"先量后收"会使越预算的条目既未输出又已被消费（静默丢记录），
- * 故取"越过即停"。调用方按传输窗口（如共享内存段）尺寸扣除单条最大记录后
- * 设定预算，即可保证单批载荷不超窗口、扫描恒完整推进。
- *
- * 失败语义：单条解密/索引不变量背离不中止整体扫描，记入 failed
- * 清单输出 lid（上层可做损坏条目提示与修复）；迭代器自身损坏
- * （INTERNAL）为不可恢复错误，直接上抛。
- */
-static VerthysResult scan_v3_fetch(VerthysScanCursor *cursor,
-                                 VerthysRecord *out_records,
-                                 uint64_t *out_lids,
-                                 uint64_t max_count,
-                                 uint64_t *out_count,
-                                 uint64_t *out_failed_lids,
-                                 uint64_t *out_failed_count)
-{
-    VerthysContextV3 *v;
-    VerthysLsmEntry e;
-    uint8_t name_buf[VERTHYS_NAME_MAX_BYTES];
-    uint64_t count = 0;
-    uint64_t failed = 0;
-    uint64_t batch_bytes = 0;   /* 本批累计输出字节（名称 + 数据） */
-    size_t name_len = 0;
-    VerthysResult rc;
-
-    /* 实例存活性：容器 Lock/再解锁后 ctx->v3 更换实例 → 游标即刻作废 */
-    if (!scan_v3_alive(cursor)) {
-        cursor->invalidated = 1;
-        return VERTHYS_ERR_LOCKED;
-    }
-    v = cursor->v3_ctx->v3;
-
-    if (cursor->exhausted || max_count == 0) {
-        *out_count = 0;
-        if (out_failed_count != NULL) *out_failed_count = 0;
-        return VERTHYS_OK;
-    }
-
-    while (count < max_count) {
-        uint8_t *data;
-        uint8_t *name = NULL;
-        size_t cap;
-        int inline_data;
-        uint64_t rec_bytes;
-
-        rc = verthys_lsm_scan_next(cursor->v3_iter, &e, name_buf,
-                                 sizeof(name_buf), &name_len);
-        if (rc == VERTHYS_ERR_NOTFOUND) {
-            cursor->exhausted = 1;
-            break;
-        }
-        if (rc != VERTHYS_OK) {
-            /* INTERNAL：迭代器失效（块解码失败等），后续 Fetch 持续同错 */
-            *out_count = count;
-            if (out_failed_count != NULL) *out_failed_count = failed;
-            return rc;
-        }
-
-        /* start_lid 定位（迭代器 lid 升序）：未达起始点条目直接跳过 */
-        if (e.lid < cursor->start_lid) continue;
-
-        /* 仅读取有效槽位（跳过空闲/待回收/写入中/损坏） */
-        if (e.slot_state != VERTHYS_SLOT_VALID) continue;
-
-        /* 索引不变量（与 verthys_api_v3_get 同源）：Extent 明文长度 ==
-         * 记录数据长度；背离 = LSM/Extent 索引交叉损坏 → 记入 failed */
-        if (e.data_size != (uint64_t)e.plaintext_size) {
-            if (out_failed_lids != NULL && failed < max_count) {
-                out_failed_lids[failed] = e.lid;
-            }
-            failed++;
-            continue;
-        }
-
-        /* 投影判定：INDEX 投影仅对不超过内联阈值的记录解密取数 */
-        inline_data = (cursor->project == VERTHYS_SCAN_PROJECT_FULL) ||
-                      (e.plaintext_size <= cursor->index_inline_max_bytes);
-
-        rec_bytes = (uint64_t)e.name_len + (inline_data ? e.plaintext_size : 0u);
-
-        if (inline_data) {
-            /* Extent 解密缓冲（契约要求 pt 非 NULL：空数据走 1 字节哑缓冲，
-             * 成功后清零丢弃，输出 data=NULL / data_len=0） */
-            cap = (e.plaintext_size > 0) ? (size_t)e.plaintext_size : 1u;
-            data = (uint8_t *)malloc(cap);
-            if (data == NULL) {
-                *out_count = count;
-                if (out_failed_count != NULL) *out_failed_count = failed;
-                return VERTHYS_ERR_INTERNAL;
-            }
-
-            rc = verthys_extent_get(v->f, v->txn.extent_part, v->ext_idx, e.hash,
-                                  data, &cap);
-            if (rc != VERTHYS_OK || cap != (size_t)e.plaintext_size) {
-                /* 解密失败（AUTH/CORRUPT/IO）或长度背离：failed 记账，扫描继续 */
-                verthys_secure_zero(data, cap);
-                free(data);
-                if (out_failed_lids != NULL && failed < max_count) {
-                    out_failed_lids[failed] = e.lid;
-                }
-                failed++;
-                continue;
-            }
-        } else {
-            /* 投影跳过：不解密、不分配数据缓冲，仅返回索引条目 */
-            data = NULL;
-            cap = 0;
-        }
-
-        /* 名称深拷贝（e.name/name_buf 为迭代器内借用缓冲，跨迭代复用） */
-        if (e.name_len > 0) {
-            name = (uint8_t *)malloc(e.name_len);
-            if (name == NULL) {
-                if (data != NULL) {
-                    verthys_secure_zero(data, cap);
-                    free(data);
-                }
-                *out_count = count;
-                if (out_failed_count != NULL) *out_failed_count = failed;
-                return VERTHYS_ERR_INTERNAL;
-            }
-            memcpy(name, name_buf, e.name_len);
-        }
-
-        out_lids[count]             = e.lid;
-        out_records[count].type     = (VerthysRecordType)e.type;
-        out_records[count].name     = (const char *)name;
-        out_records[count].name_len = e.name_len;
-        if (data != NULL && cap > 0) {
-            out_records[count].data     = data;
-            out_records[count].data_len = cap;
-        } else {
-            /* 空数据语义（与 verthys_api_v3_get 一致）：哑缓冲即刻回收 */
-            if (data != NULL) {
-                verthys_secure_zero(data, cap);
-                free(data);
-            }
-            out_records[count].data     = NULL;
-            out_records[count].data_len = 0;
-        }
-        batch_bytes += rec_bytes;
-        count++;
-
-        /* 取批预算（软水位线）：累计输出字节越过预算即收批。本条已取出并
-         * 写入输出，批次最多超出预算一条记录的大小——迭代器不可回退，
-         * "先量后收"会让越预算的条目既未被输出又已被消费（静默丢记录），
-         * 故采用"越过即停"。调用方按传输窗口尺寸扣除单条最大记录后设定
-         * 预算，即可保证单批载荷不超窗口。 */
-        if (cursor->max_batch_bytes > 0 && batch_bytes > cursor->max_batch_bytes) {
-            break;
-        }
-    }
-
-    *out_count = count;
-    if (out_failed_count != NULL) *out_failed_count = failed;
-    return VERTHYS_OK;
-}
-
-/*
- * V3 摘要拉取（ScanSummaryFetch 路径）：
- * 仅读取 LSM 条目元数据 + Extent 索引内存回查（无数据块 IO 与解密），
- * 遍历性能为内存索引直读级。
- *
- * 字段映射（语义对等）：
- *   - merkle_leaf   ← BLAKE2b-256 内容寻址哈希（单记录完整性锚点）
- *   - physical_offset ← Extent 分区数据区内绝对偏移（分区基址 +
- *                    索引帧区 + 条目数据区相对偏移）
- *   - slot_state    ← LSM 条目槽位状态原样透传（前端展示样式用）
- *
- * 交叉异常（LSM 有键但 Extent 索引无对应哈希）= 索引结构不一致，
- * 坦诚直报 INTERNAL，不静默填 0 掩盖数据损坏。
- */
-static VerthysResult scan_v3_summary_fetch(VerthysScanCursor *cursor,
-                                         VerthysSummaryRecord *out_records,
-                                         uint64_t *out_lids,
-                                         uint64_t max_count,
-                                         uint64_t *out_count)
-{
-    VerthysContextV3 *v;
-    VerthysLsmEntry e;
-    uint8_t name_buf[VERTHYS_NAME_MAX_BYTES];
-    uint64_t count = 0;
-    size_t name_len = 0;
-    VerthysResult rc;
-
-    if (!scan_v3_alive(cursor)) {
-        cursor->invalidated = 1;
-        return VERTHYS_ERR_LOCKED;
-    }
-    v = cursor->v3_ctx->v3;
-
-    if (cursor->exhausted || max_count == 0) {
-        *out_count = 0;
-        return VERTHYS_OK;
-    }
-
-    while (count < max_count) {
-        uint8_t *name = NULL;
-        VerthysExtent ext;
-
-        rc = verthys_lsm_scan_next(cursor->v3_iter, &e, name_buf,
-                                 sizeof(name_buf), &name_len);
-        if (rc == VERTHYS_ERR_NOTFOUND) {
-            cursor->exhausted = 1;
-            break;
-        }
-        if (rc != VERTHYS_OK) {
-            *out_count = count;
-            return rc;
-        }
-
-        if (e.lid < cursor->start_lid) continue;
-
-        /* 摘要透传全部非空闲槽位（待删除、写入中条目均返回并透传
-         * 状态给前端展示；墓碑已被迭代器跳过） */
-        if (e.slot_state == VERTHYS_SLOT_FREE) continue;
-
-        /* 权威 Extent 索引回查：物理偏移定位（纯内存查找，无 IO）。
-         * 去重命中时多条记录共用同一 Extent 条目（内容寻址语义） */
-        rc = verthys_extent_index_find(v->ext_idx, e.hash, &ext);
-        if (rc != VERTHYS_OK) {
-            *out_count = count;
-            return VERTHYS_ERR_INTERNAL;
-        }
-
-        if (e.name_len > 0) {
-            name = (uint8_t *)malloc(e.name_len);
-            if (name == NULL) {
-                *out_count = count;
-                return VERTHYS_ERR_INTERNAL;
-            }
-            memcpy(name, name_buf, e.name_len);
-        }
-
-        out_lids[count]                    = e.lid;
-        out_records[count].lid             = e.lid;
-        out_records[count].type            = e.type;
-        out_records[count].name            = name;
-        out_records[count].name_len        = e.name_len;
-        out_records[count].data_size       = e.data_size;
-        out_records[count].physical_offset = v->txn.extent_part->offset
-                                           + VERTHYS_EXTENT_INDEX_REGION_BYTES
-                                           + ext.offset;
-        memcpy(out_records[count].merkle_leaf, e.hash, sizeof(e.hash));
-        out_records[count].created_time    = e.created_time;
-        out_records[count].slot_state      = e.slot_state;
-        count++;
-    }
-
-    *out_count = count;
-    return VERTHYS_OK;
-}
-
-/*
- * V3 按类型查找（HasRecordByType / FindFirstLidByType 共用骨架）：
- * LSM 快照迭代器全量扫描，type 匹配即早停（轻量路径：仅元数据读取，
- * 无数据块 IO 与解密，无 name 堆分配）。
- * out_lid 可为 NULL（仅存在性探测）。found=0 时 *out_lid 不变更。
- */
-static VerthysResult scan_v3_find_by_type(struct VerthysContext *ctx,
-                                         uint8_t rtype,
-                                         uint8_t *out_found,
-                                         uint64_t *out_lid)
-{
-    VerthysLsmScanIter *it = NULL;
-    VerthysLsmEntry e;
-    uint8_t name_buf[VERTHYS_NAME_MAX_BYTES];
-    size_t name_len = 0;
-    VerthysResult rc;
-
-    *out_found = 0;
-
-    rc = verthys_lsm_scan_open(ctx->v3->lsm, &it);
-    if (rc != VERTHYS_OK) return rc;
-
-    for (;;) {
-        rc = verthys_lsm_scan_next(it, &e, name_buf, sizeof(name_buf), &name_len);
-        if (rc == VERTHYS_ERR_NOTFOUND) {
-            rc = VERTHYS_OK;    /* 全量遍历完成，未找到匹配类型 */
-            break;
-        }
-        if (rc != VERTHYS_OK) break;
-
-        /* 非空闲槽位均参与匹配（待回收/写入中条目仍存在） */
-        if (e.slot_state == VERTHYS_SLOT_FREE) continue;
-
-        if (e.type == rtype) {
-            *out_found = 1;
-            if (out_lid != NULL) *out_lid = e.lid;
-            break;
-        }
-    }
-
-    verthys_lsm_scan_close(it);
-    return rc;
-}
-#endif /* VERTHYS_V3_SUPPORT（V3 扫描游标辅助段） */
 
 /* ------------------------------------------------------------------ *
- * v4 扫描游标辅助段
+ * 扫描游标辅助段
  *
  * 目录叶在打开瞬间固定根节点（store COW 快照）；游标借用 VtyVault
  * 实例，Lock/再解锁后实例失配即作废，杜绝悬挂 store 句柄。
  * ------------------------------------------------------------------ */
-static int scan_v4_alive(const VerthysScanCursor *cursor)
+static int scan_alive(const VerthysScanCursor *cursor)
 {
     const struct VerthysContext *ctx;
 
-    if (cursor == NULL || cursor->v4_owner == NULL) return 0;
-    ctx = cursor->v4_ctx;
+    if (cursor == NULL || cursor->vault_owner == NULL) return 0;
+    ctx = cursor->vault_ctx;
     return ctx != NULL &&
-           ctx->fmt_version == VERTHYS_FMT_V4 &&
-           ctx->v4 == cursor->v4_owner &&
-           ctx->v4->unlocked &&
-           ctx->v4->store != NULL;
+           ctx->fmt_version == VERTHYS_FMT_CONTAINER &&
+           ctx->vault == cursor->vault_owner &&
+           ctx->vault->unlocked &&
+           ctx->vault->store != NULL;
 }
 
 static uint8_t *scan_dup_bytes(const uint8_t *src, size_t n)
@@ -510,7 +88,7 @@ static uint8_t *scan_dup_bytes(const uint8_t *src, size_t n)
     return p;
 }
 
-static VerthysResult scan_v4_open(struct VerthysContext *ctx,
+static VerthysResult scan_open(struct VerthysContext *ctx,
                                   uint64_t start_lid,
                                   uint64_t batch_size,
                                   uint32_t project,
@@ -523,26 +101,25 @@ static VerthysResult scan_v4_open(struct VerthysContext *ctx,
     int rc;
 
     *out_cursor = NULL;
-    if (ctx->v4 == NULL || !ctx->v4->unlocked || ctx->v4->store == NULL) {
+    if (ctx->vault == NULL || !ctx->vault->unlocked || ctx->vault->store == NULL) {
         return VERTHYS_ERR_LOCKED;
     }
 
     cursor = (VerthysScanCursor *)calloc(1, sizeof(VerthysScanCursor));
     if (cursor == NULL) return VERTHYS_ERR_INTERNAL;
 
-    cursor->v3_ctx = ctx;
-    cursor->v4_ctx = ctx;
-    cursor->v4_owner = ctx->v4;
+    cursor->vault_ctx = ctx;
+    cursor->vault_owner = ctx->vault;
     cursor->start_lid = start_lid;
     cursor->batch_size = (batch_size > 0) ? batch_size : 500;
     cursor->project = project;
     cursor->index_inline_max_bytes = index_inline_max_bytes;
     cursor->max_batch_bytes = max_batch_bytes;
 
-    rc = vty_repo_iter_open(ctx->v4, start_lid, &cursor->v4_iter);
+    rc = vty_repo_iter_open(ctx->vault, start_lid, &cursor->vault_iter);
     if (rc != VTY_OK) {
         free(cursor);
-        return verthys_api_v4_map(rc);
+        return verthys_api_container_map(rc);
     }
 
     if (verthys_lock_memory(cursor, sizeof(*cursor)) == 0) {
@@ -554,7 +131,7 @@ static VerthysResult scan_v4_open(struct VerthysContext *ctx,
     return VERTHYS_OK;
 }
 
-static VerthysResult scan_v4_fetch(VerthysScanCursor *cursor,
+static VerthysResult scan_fetch(VerthysScanCursor *cursor,
                                    VerthysRecord *out_records,
                                    uint64_t *out_lids,
                                    uint64_t max_count,
@@ -566,7 +143,7 @@ static VerthysResult scan_v4_fetch(VerthysScanCursor *cursor,
     uint64_t failed = 0;
     uint64_t batch_bytes = 0;
 
-    if (!scan_v4_alive(cursor)) {
+    if (!scan_alive(cursor)) {
         cursor->invalidated = 1;
         return VERTHYS_ERR_LOCKED;
     }
@@ -581,8 +158,8 @@ static VerthysResult scan_v4_fetch(VerthysScanCursor *cursor,
         int done = 0;
         int rc;
 
-        rc = vty_repo_iter_next(cursor->v4_iter, &leaf, &done);
-        if (rc != VTY_OK) return verthys_api_v4_map(rc);
+        rc = vty_repo_iter_next(cursor->vault_iter, &leaf, &done);
+        if (rc != VTY_OK) return verthys_api_container_map(rc);
         if (done) { cursor->exhausted = 1; break; }
         if (leaf.record_id < cursor->start_lid) continue;
 
@@ -596,7 +173,7 @@ static VerthysResult scan_v4_fetch(VerthysScanCursor *cursor,
 
             memset(&rec, 0, sizeof(rec));
             if (inline_data) {
-                rc = vty_repo_read(cursor->v4_owner, &leaf, &rec);
+                rc = vty_repo_read(cursor->vault_owner, &leaf, &rec);
                 if (rc != VTY_OK) {
                     if (out_failed_lids != NULL && failed < max_count) {
                         out_failed_lids[failed] = leaf.record_id;
@@ -609,7 +186,7 @@ static VerthysResult scan_v4_fetch(VerthysScanCursor *cursor,
                 data = rec.data;
                 data_len = rec.data_len;
             } else {
-                rc = vty_repo_read_name(cursor->v4_owner, &leaf, &name, &name_len);
+                rc = vty_repo_read_name(cursor->vault_owner, &leaf, &name, &name_len);
                 if (rc != VTY_OK) {
                     if (out_failed_lids != NULL && failed < max_count) {
                         out_failed_lids[failed] = leaf.record_id;
@@ -654,7 +231,7 @@ static VerthysResult scan_v4_fetch(VerthysScanCursor *cursor,
     return VERTHYS_OK;
 }
 
-static VerthysResult scan_v4_summary_fetch(VerthysScanCursor *cursor,
+static VerthysResult scan_summary_fetch(VerthysScanCursor *cursor,
                                            VerthysSummaryRecord *out_records,
                                            uint64_t *out_lids,
                                            uint64_t max_count,
@@ -662,7 +239,7 @@ static VerthysResult scan_v4_summary_fetch(VerthysScanCursor *cursor,
 {
     uint64_t count = 0;
 
-    if (!scan_v4_alive(cursor)) {
+    if (!scan_alive(cursor)) {
         cursor->invalidated = 1;
         return VERTHYS_ERR_LOCKED;
     }
@@ -676,12 +253,12 @@ static VerthysResult scan_v4_summary_fetch(VerthysScanCursor *cursor,
         int done = 0;
         int rc;
 
-        rc = vty_repo_iter_next(cursor->v4_iter, &leaf, &done);
-        if (rc != VTY_OK) return verthys_api_v4_map(rc);
+        rc = vty_repo_iter_next(cursor->vault_iter, &leaf, &done);
+        if (rc != VTY_OK) return verthys_api_container_map(rc);
         if (done) { cursor->exhausted = 1; break; }
         if (leaf.record_id < cursor->start_lid) continue;
 
-        rc = vty_repo_read_name(cursor->v4_owner, &leaf, &name, &name_len);
+        rc = vty_repo_read_name(cursor->vault_owner, &leaf, &name, &name_len);
         if (rc != VTY_OK) {
             /* 单条不可读（模块未解锁 / 记录段损坏）不得中止整个摘要扫描：
              * 摘要只负责名称与索引元数据，类型由类型盲索引提供。跳过名称
@@ -691,8 +268,8 @@ static VerthysResult scan_v4_summary_fetch(VerthysScanCursor *cursor,
             name_len = 0;
             rc = VTY_OK;
         }
-        /* 空名称在记录层带 1 字节占位分配；摘要输出用 NULL/0 表示，
-         * 与 v3 语义一致（释放接口按 name_len>0 判定）。 */
+        /* 空名称在记录层带 1 字节占位分配；摘要输出用 NULL/0 表示
+         * （释放接口按 name_len>0 判定）。 */
         if (name_len == 0 && name != NULL) {
             vty_free(name, 1u);
             name = NULL;
@@ -756,18 +333,16 @@ VerthysResult Verthys_ScanOpenEx(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* v3/v4 之外的容器一律拒绝（无扫描语义） */
-    if (ctx->fmt_version != VERTHYS_FMT_V3 &&
-        ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
+    /* 非容器格式一律拒绝（无扫描语义） */
+    if (ctx->fmt_version != VERTHYS_FMT_CONTAINER) return VERTHYS_ERR_FORMAT;
 
     /* 全局应急安全机制触发时拒绝创建游标 */
     if (emergency_is_triggered()) {
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* 共享锁覆盖：ctx->v3 实例解引用（并发 Lock 换实例的 TOCTOU）+
-     * LSM 快照打开（内部经 lsm->lock 串行化读同一 FILE*）。锁内
-     * 单出口，与写路径（独占锁）互斥。 */
+    /* 共享锁覆盖：会话实例解引用（并发 Lock 换实例的 TOCTOU）+
+     * 目录叶快照打开。锁内单出口，与写路径（独占锁）互斥。 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
@@ -793,22 +368,9 @@ VerthysResult Verthys_ScanOpenEx(VerthysHandle handle,
 #endif
     }
 
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
-        rc = scan_v4_open(ctx, start_lid, batch_size,
-                          (uint32_t)project, index_inline_max_bytes,
-                          max_batch_bytes, "scan_cursor", out_cursor);
-    }
-#if defined(VERTHYS_V3_SUPPORT)
-    else {
-        rc = scan_v3_open(ctx, start_lid, batch_size,
-                          (uint32_t)project, index_inline_max_bytes, max_batch_bytes,
-                          "scan_cursor", out_cursor);
-    }
-#else
-    else {
-        rc = VERTHYS_ERR_FORMAT;
-    }
-#endif
+    rc = scan_open(ctx, start_lid, batch_size,
+                      (uint32_t)project, index_inline_max_bytes,
+                      max_batch_bytes, "scan_cursor", out_cursor);
 
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
@@ -843,29 +405,20 @@ VerthysResult Verthys_ScanFetch(VerthysScanCursor *cursor,
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* 共享锁覆盖核心读路径：Extent 解密（verthys_extent_get 经共享
-     * FILE* 的 vio_pread64）+ LSM 快照推进 + ctx->v3 实例存活性检测
-     * （并发 Lock 换实例的 TOCTOU）。锁内单出口。 */
-    ctx = cursor->v3_ctx;
+    /* 共享锁覆盖核心读路径：记录段解密 + 目录叶游标推进 +
+     * 实例存活性检测（并发 Lock 换实例的 TOCTOU）。锁内单出口。 */
+    ctx = cursor->vault_ctx;
 #ifdef _WIN32
     if (ctx != NULL && ctx->api_mutex != NULL) {
         AcquireSRWLockShared(ctx->api_mutex);
     }
 #endif
-    if (cursor->v4_owner != NULL) {
-        rc = scan_v4_fetch(cursor, out_records, out_lids, max_count,
+    if (cursor->vault_owner != NULL) {
+        rc = scan_fetch(cursor, out_records, out_lids, max_count,
                            out_count, out_failed_lids, out_failed_count);
-    }
-#if defined(VERTHYS_V3_SUPPORT)
-    else {
-        rc = scan_v3_fetch(cursor, out_records, out_lids, max_count,
-                           out_count, out_failed_lids, out_failed_count);
-    }
-#else
-    else {
+    } else {
         rc = VERTHYS_ERR_FORMAT;
     }
-#endif
 #ifdef _WIN32
     if (ctx != NULL && ctx->api_mutex != NULL) {
         ReleaseSRWLockShared(ctx->api_mutex);
@@ -907,17 +460,11 @@ VerthysResult Verthys_ScanClose(VerthysScanCursor *cursor)
 {
     if (cursor == NULL) return VERTHYS_ERR_INVALID;
 
-    /* 先释放快照迭代器（v3 LSM 或 v4 目录叶游标），再清零游标本身 */
-    if (cursor->v4_iter != NULL) {
-        vty_repo_iter_close(cursor->v4_iter);
-        cursor->v4_iter = NULL;
+    /* 先释放 目录叶游标快照迭代器，再清零游标本身 */
+    if (cursor->vault_iter != NULL) {
+        vty_repo_iter_close(cursor->vault_iter);
+        cursor->vault_iter = NULL;
     }
-#if defined(VERTHYS_V3_SUPPORT)
-    /* 先释放 LSM 快照迭代器堆实例（其借用 cursor 字段定位，必须先于
-     * 游标内存清零与释放执行；幂等） */
-    verthys_lsm_scan_close(cursor->v3_iter);
-    cursor->v3_iter = NULL;
-#endif
 
     /* 从内存防护管理器注销注册 */
     memory_guard_unregister(cursor);
@@ -960,37 +507,24 @@ VerthysResult Verthys_ScanSummaryOpen(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    if (ctx->fmt_version != VERTHYS_FMT_V3 &&
-        ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
+    if (ctx->fmt_version != VERTHYS_FMT_CONTAINER) return VERTHYS_ERR_FORMAT;
 
     if (emergency_is_triggered()) {
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* 共享锁覆盖：ctx->v3 实例解引用（并发 Lock 换实例的 TOCTOU）+
-     * LSM 快照打开（与 Verthys_ScanOpen 同一纪律，锁内单出口）。 */
+    /* 共享锁覆盖：实例解引用（并发 Lock 换实例的 TOCTOU）+
+     * 目录叶快照打开（与 Verthys_ScanOpen 同一纪律，锁内单出口）。 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
     /* 摘要/全量差异仅在 Fetch 路径：元数据直读 vs 记录段解密。
-     * v4 摘要只解密名称，不读数据段。 */
+     * 摘要只解密名称，不读数据段。 */
     {
         VerthysResult rc;
-#if defined(VERTHYS_V3_SUPPORT)
-        rc = (ctx->fmt_version == VERTHYS_FMT_V4)
-            ? scan_v4_open(ctx, start_lid, batch_size,
-                           VERTHYS_SCAN_PROJECT_FULL, 0, 0,
-                           "scan_summary_cursor", out_cursor)
-            : scan_v3_open(ctx, start_lid, batch_size,
-                           VERTHYS_SCAN_PROJECT_FULL, 0, 0,
-                           "scan_summary_cursor", out_cursor);
-#else
-        rc = (ctx->fmt_version == VERTHYS_FMT_V4)
-            ? scan_v4_open(ctx, start_lid, batch_size,
-                           VERTHYS_SCAN_PROJECT_FULL, 0, 0,
-                           "scan_summary_cursor", out_cursor)
-            : VERTHYS_ERR_FORMAT;
-#endif
+        rc = scan_open(ctx, start_lid, batch_size,
+                          VERTHYS_SCAN_PROJECT_FULL, 0, 0,
+                          "scan_summary_cursor", out_cursor);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif
@@ -1019,29 +553,20 @@ VerthysResult Verthys_ScanSummaryFetch(VerthysScanCursor *cursor,
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* 共享锁覆盖核心读路径：LSM 快照推进 + Extent 索引回查（内存表
-     * 遍历，与写路径的 flush/compaction 互斥）+ ctx->v3 实例存活性
-     * 检测。与 Verthys_ScanFetch 同一纪律，锁内单出口。 */
+    /* 共享锁覆盖核心读路径：目录叶游标推进 + 实例存活性检测。
+     * 与 Verthys_ScanFetch 同一纪律，锁内单出口。 */
     {
-        struct VerthysContext *ctx = cursor->v3_ctx;
+        struct VerthysContext *ctx = cursor->vault_ctx;
         VerthysResult rc;
 #ifdef _WIN32
         if (ctx != NULL && ctx->api_mutex != NULL) {
             AcquireSRWLockShared(ctx->api_mutex);
         }
 #endif
-#if defined(VERTHYS_V3_SUPPORT)
-        rc = (cursor->v4_owner != NULL)
-            ? scan_v4_summary_fetch(cursor, out_records, out_lids,
-                                    max_count, out_count)
-            : scan_v3_summary_fetch(cursor, out_records, out_lids,
-                                    max_count, out_count);
-#else
-        rc = (cursor->v4_owner != NULL)
-            ? scan_v4_summary_fetch(cursor, out_records, out_lids,
+        rc = (cursor->vault_owner != NULL)
+            ? scan_summary_fetch(cursor, out_records, out_lids,
                                     max_count, out_count)
             : VERTHYS_ERR_FORMAT;
-#endif
 #ifdef _WIN32
         if (ctx != NULL && ctx->api_mutex != NULL) {
             ReleaseSRWLockShared(ctx->api_mutex);
@@ -1096,15 +621,9 @@ VerthysResult Verthys_HasRecordByType(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    if (ctx->fmt_version != VERTHYS_FMT_V3 &&
-        ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
+    if (ctx->fmt_version != VERTHYS_FMT_CONTAINER) return VERTHYS_ERR_FORMAT;
 
-    if (ctx->fmt_version == VERTHYS_FMT_V3 &&
-        (ctx->v3 == NULL || !ctx->v3->subsystems_open)) {
-        return VERTHYS_ERR_LOCKED;
-    }
-    if (ctx->fmt_version == VERTHYS_FMT_V4 &&
-        (ctx->v4 == NULL || !ctx->v4->unlocked || ctx->v4->store == NULL)) {
+    if (ctx->vault == NULL || !ctx->vault->unlocked || ctx->vault->store == NULL) {
         return VERTHYS_ERR_LOCKED;
     }
 
@@ -1113,26 +632,15 @@ VerthysResult Verthys_HasRecordByType(VerthysHandle handle,
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* 共享锁覆盖：v3 LSM 快照迭代 / v4 类型索引游标 + 实例解引用。
+    /* 共享锁覆盖：类型索引游标 + 实例解引用。
      * 锁内单出口，与写路径互斥。 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
     {
         VerthysResult rc;
-        if (ctx->fmt_version == VERTHYS_FMT_V4) {
-            rc = verthys_api_v4_map(
-                vty_repo_find_by_type(ctx->v4, rtype, out_found, NULL));
-        }
-#if defined(VERTHYS_V3_SUPPORT)
-        else {
-            rc = scan_v3_find_by_type(ctx, rtype, out_found, NULL);
-        }
-#else
-        else {
-            rc = VERTHYS_ERR_FORMAT;
-        }
-#endif
+        rc = verthys_api_container_map(
+            vty_repo_find_by_type(ctx->vault, rtype, out_found, NULL));
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif
@@ -1146,12 +654,12 @@ VerthysResult Verthys_HasRecordByType(VerthysHandle handle,
  * 与 Verthys_HasRecordByType 的关键差异：                                *
  *   同时返回 found 标志与匹配记录的 lid（单次遍历，轻量探测无解密 IO）  *
  *                                                                    *
- * 历史背景（v1 时代）：unlock 后 UI 卡死根因为 v1 容器调用             *
+ * 历史背景：unlock 后 UI 卡死根因为早期容器调用                         *
  * Verthys_HasRecordByType 返回 VERTHYS_ERR_FORMAT → 前端 probe 抛异常 →   *
  * 进异步确认 loading 视图 → viewMode 永久卡 "loading"。本函数将       *
  * "是否存在全局密钥记录 + lid"下沉到 worker 进程内执行，彻底消除      *
- * unlock 后 probe IPC 链。V3-only 时代语义保持：未找到返回 VERTHYS_OK    *
- * + out_found=0（不报 FORMAT，避免前端 probe 抛异常）。               *
+ * unlock 后 probe IPC 链。未找到返回 VERTHYS_OK + out_found=0          *
+ * （不报 FORMAT，避免前端 probe 抛异常）。                            *
  * ------------------------------------------------------------------ */
 VerthysResult Verthys_FindFirstLidByType(VerthysHandle handle,
                                      uint8_t rtype,
@@ -1175,38 +683,21 @@ VerthysResult Verthys_FindFirstLidByType(VerthysHandle handle,
         return VERTHYS_ERR_LOCKED;
     }
 
-    if (ctx->fmt_version != VERTHYS_FMT_V3 &&
-        ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
+    if (ctx->fmt_version != VERTHYS_FMT_CONTAINER) return VERTHYS_ERR_FORMAT;
 
-    if (ctx->fmt_version == VERTHYS_FMT_V3 &&
-        (ctx->v3 == NULL || !ctx->v3->subsystems_open)) {
-        return VERTHYS_ERR_LOCKED;
-    }
-    if (ctx->fmt_version == VERTHYS_FMT_V4 &&
-        (ctx->v4 == NULL || !ctx->v4->unlocked || ctx->v4->store == NULL)) {
+    if (ctx->vault == NULL || !ctx->vault->unlocked || ctx->vault->store == NULL) {
         return VERTHYS_ERR_LOCKED;
     }
 
-    /* 共享锁覆盖：v3 LSM 快照迭代 / v4 类型索引游标 + 实例解引用
+    /* 共享锁覆盖：类型索引游标 + 实例解引用
      * （与 Verthys_HasRecordByType 同一纪律，锁内单出口）。 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
     {
         VerthysResult rc;
-        if (ctx->fmt_version == VERTHYS_FMT_V4) {
-            rc = verthys_api_v4_map(
-                vty_repo_find_by_type(ctx->v4, rtype, out_found, out_lid));
-        }
-#if defined(VERTHYS_V3_SUPPORT)
-        else {
-            rc = scan_v3_find_by_type(ctx, rtype, out_found, out_lid);
-        }
-#else
-        else {
-            rc = VERTHYS_ERR_FORMAT;
-        }
-#endif
+        rc = verthys_api_container_map(
+            vty_repo_find_by_type(ctx->vault, rtype, out_found, out_lid));
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif
@@ -1215,11 +706,11 @@ VerthysResult Verthys_FindFirstLidByType(VerthysHandle handle,
 }
 
 /* ------------------------------------------------------------------ *
- * 按类型分页枚举记录 ID（V4 类型盲索引，API 版本 0x0012）
+ * 按类型分页枚举记录 ID（类型盲索引，API 版本 0x0012）
  *
- * 为什么不复用摘要扫描：V4 摘要不读记录密文，type 恒为未知 0；
+ * 为什么不复用摘要扫描：摘要不读记录密文，type 恒为未知 0；
  * 业务类型在写入时已进入 VTY_KS_TYPE 盲索引，枚举该索引既准确
- * 又不需要解密记录段，且对历史 V4 容器天然兼容。
+ * 又不需要解密记录段，且对历史 容器天然兼容。
  * ------------------------------------------------------------------ */
 VerthysResult Verthys_ListIdsByType(VerthysHandle handle,
                                     uint8_t rtype,
@@ -1245,8 +736,8 @@ VerthysResult Verthys_ListIdsByType(VerthysHandle handle,
     ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
     if (emergency_is_triggered()) return VERTHYS_ERR_LOCKED;
-    if (ctx->fmt_version != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
-    if (ctx->v4 == NULL || !ctx->v4->unlocked || ctx->v4->store == NULL) {
+    if (ctx->fmt_version != VERTHYS_FMT_CONTAINER) return VERTHYS_ERR_FORMAT;
+    if (ctx->vault == NULL || !ctx->vault->unlocked || ctx->vault->store == NULL) {
         return VERTHYS_ERR_LOCKED;
     }
 
@@ -1255,18 +746,18 @@ VerthysResult Verthys_ListIdsByType(VerthysHandle handle,
 #endif
     {
         /* 锁内复检会话存活性：检查与取锁之间可能发生 Lock/Deinit 或应急
-         * 熔断，ctx->v4 会被释放；在共享锁下重新读取实例再调用，避免把
+         * 熔断，ctx->vault 会被释放；在共享锁下重新读取实例再调用，避免把
          * 已释放的 VtyVault 交给仓库层（UAF）。 */
-        VtyVault *v4 = (ctx->state == VERTHYS_STATE_UNLOCKED &&
-                        ctx->fmt_version == VERTHYS_FMT_V4)
-            ? ctx->v4 : NULL;
+        VtyVault *vault = (ctx->state == VERTHYS_STATE_UNLOCKED &&
+                        ctx->fmt_version == VERTHYS_FMT_CONTAINER)
+            ? ctx->vault : NULL;
         VerthysResult rc;
-        if (emergency_is_triggered() || v4 == NULL ||
-            !v4->unlocked || v4->store == NULL) {
+        if (emergency_is_triggered() || vault == NULL ||
+            !vault->unlocked || vault->store == NULL) {
             rc = VERTHYS_ERR_LOCKED;
         } else {
-            rc = verthys_api_v4_map(
-                vty_repo_list_ids_by_type(v4, rtype, after_id, max_count,
+            rc = verthys_api_container_map(
+                vty_repo_list_ids_by_type(vault, rtype, after_id, max_count,
                                           out_ids, out_count, out_exhausted));
         }
 #ifdef _WIN32

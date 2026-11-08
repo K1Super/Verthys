@@ -61,7 +61,7 @@ powershell -ExecutionPolicy Bypass -File build_production.ps1 -Clean -NoPause
 powershell -ExecutionPolicy Bypass -File build_dev.ps1
 ```
 
-该脚本（`build_dev.ps1`）依次：加载 MSVC 环境（修复 vswhom LNK2019，见脚本 `:30-60`）→ 清理残留进程 → 检查端口 1420 → 校验依赖与补丁 → 预检核心二进制（`verthys.dll` + `verthys-worker.exe` 缺失时自动回调 `build_production.ps1 -SkipTauri -NoPause`）→ 最后执行 `npx tauri dev`。
+该脚本（`build_dev.ps1`）依次：加载 MSVC 环境（修复 vswhom LNK2019，见脚本 `:30-60`）→ 清理残留进程 → 检查端口 1420 → 校验依赖与补丁 → 预检核心二进制（缺失或为生产构建时自动重建为测试钩子 core 并同步重建 worker）→ 设置仅本开发进程树生效的 `VERTHYS_TEST_MACHINE_LIMITER_BYPASS=1` → 最后执行 `npx tauri dev`。生产构建不包含该旁路。
 
 ### 步骤 3：验证构建成功（最小命令组）
 
@@ -84,8 +84,9 @@ Test-Path ".\verthys-tauri\src-tauri\target\release\bundle\nsis\*.exe"
 
 - 开发模式前端地址：`http://localhost:1420`（`verthys-tauri/src-tauri/tauri.conf.json` 的 `devUrl`）。
 - Vite 端口：`1420`，`strictPort: true`（`verthys-tauri/vite.config.ts`，HMR WebSocket 用 `1421`）。
-- 直接启动开发：在 `verthys-tauri/` 下执行 `npx tauri dev`（`build_dev.ps1` 末尾即此命令；它已处理残留进程与端口 1420 占用）。
-- 开发模式下核心二进制解析规则（`build_dev.ps1` 注释 `:12-19`）：`verthys.dll` 固定用 `build/core/Release/verthys.dll`（始终 Release）；worker 优先用 `verthys-worker/target/{release,debug}/verthys-worker.exe`（release 优先）。
+- 直接启动开发：在 `verthys-tauri/` 下执行 `npx tauri dev`（`build_dev.ps1` 末尾即此命令；它已处理残留进程与端口 1420 占用）。直接运行 `npx tauri dev` 不会设置 P2 开发旁路；本机未安装 `VerthysSecuritySvc` 时创建/解锁会按设计 fail-closed（`ERR_0000000A`）。生产 perMachine 安装包会随应用安装该服务。
+- 开发模式下核心二进制解析规则（`build_dev.ps1` 注释 `:12-20`）：`verthys.dll` 固定用 `build/core/Release/verthys.dll`（Release 测试钩子构建）；worker 优先用 `verthys-worker/target/{release,debug}/verthys-worker.exe`（release 优先）。
+- P2 服务是生产强制依赖。开发机若残留旧版熔断状态（如 `%LOCALAPPDATA%\Verthys\Security\lockout.state` 为 v2/379 字节），当前 v3 代码按损坏 fail-closed；项目无旧版用户，直接归档该文件后重试，不提供迁移路径。
 
 ## 4. 常见首次构建问题
 

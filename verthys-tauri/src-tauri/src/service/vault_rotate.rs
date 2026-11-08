@@ -1,5 +1,5 @@
 /*
- * service/vault_rotate.rs — v4 D9 全库 DEK 轮换的服务层契约
+ * service/vault_rotate.rs — 全库 DEK 轮换的服务层契约
  *
  * 为什么契约放在 service 层：轮换控制器按单向依赖规则只允许引用
  * service / repository / util / constants；而口令注入、路径授权、

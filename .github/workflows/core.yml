@@ -25,6 +25,12 @@ jobs:
           & ".\ci\sync_version.ps1" -CheckOnly
           if ($LASTEXITCODE -ne 0) { throw "version drift: edit root VERSION then run ci\sync_version.ps1" }
 
+      - name: Version naming gate (no generation suffixes / retired V3 build)
+        shell: pwsh
+        run: |
+          & ".\ci\check_version_naming.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "version naming gate failed" }
+
       - name: Setup Rust (pinned by rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
         with:
@@ -94,7 +100,8 @@ jobs:
 
       - name: Configure (Ninja)
         run: |
-          cmake -S . -B build_ci -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          # 测试隔离钩子只影响测试构建；生产发布构建显式 OFF。
+          cmake -S . -B build_ci -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVERTHYS_TEST_HOOKS=ON
 
       - name: Build (Debug + tests)
         run: |
@@ -105,7 +112,9 @@ jobs:
 
       - name: Build (Release + .vsec integrity baseline injection)
         run: |
-          & ".\scripts\build\build_core.release.ps1" -NoPause
+          # 攻击回归需要测试态路径钩子；生产发布构建（build_production.ps1）
+          # 显式 OFF，绝不带此钩子。
+          & ".\scripts\build\build_core.release.ps1" -TestHooks -NoPause
           if ($LASTEXITCODE -ne 0) { throw "Release build failed" }
         shell: pwsh
 

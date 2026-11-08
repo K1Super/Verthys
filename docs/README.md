@@ -40,8 +40,6 @@
 
 - 安全设计与信任模型：[SECURITY_DESIGN.md](SECURITY_DESIGN.md)
 - 依赖与供应链：[THIRD_PARTY.md](THIRD_PARTY.md)
-- 全量审计与分片发现：[ProductionAudit/00_总览与阅读指南.md](ProductionAudit/00_总览与阅读指南.md)
-- 缺陷修复工程进度：[RemediationPlan/IMPL_PROGRESS.md](RemediationPlan/IMPL_PROGRESS.md)
 
 ### 问题排查
 
@@ -72,8 +70,6 @@
 | GLOSSARY.md | 术语表 | P1 |
 | ../CONTRIBUTING.md | 贡献指南 | P1 |
 | ARCHITECTURE_DECISIONS.md | ADR 索引 | P2 |
-| ProductionAudit/00_总览与阅读指南.md | 全量审计与分片发现入口 | P2 |
-| RemediationPlan/IMPL_PROGRESS.md | 缺陷修复工程进度（Wave 分批，中断恢复入口） | P2 |
 | references/engineering-standards.md | 工程规范附录（AI 工程人格） | P2 |
 | references/comment-standards.md | 注释规范附录（AI 工程人格） | P2 |
 | references/review-standards.md | 代码审查维度附录（AI 审查人格） | P2 |

@@ -15,25 +15,22 @@ sequenceDiagram
     participant FE as 前端控制器（Vue3）
     participant TC as Tauri command（verthys_controller.rs）
     participant WK as verthys-worker（dispatch→FFI）
-    participant API as core API（Verthys_Unlock）
-    participant KM as 密钥模块（keymanager/pepper/CNG）
-    participant CT as 容器模块（superblock/partition/lsm/wal）
-    participant OS as OS/CNG 内核
+    participant API as core API（Verthys_V4Unlock）
+    participant KM as 密钥模块（vty_keymanager/vty_keyslot/device_root）
+    participant CT as 容器模块（vty_format/vty_store/vty_repo）
+    participant OS as OS/CNG
     FE->>TC: invoke unlock
     TC->>WK: {op:unlock}（stdin JSON，含 password）
-    WK->>API: Verthys_Unlock(handle, path, pw, flags)
-    API->>API: S0 前置检查 + pepper 快速失败
-    par 并行
-        API->>CT: S1 读 3 副本超级块
-        API->>KM: S2 DKM=Argon2id(pw‖pepper)→MEK=HKDF
-    end
-    API->>KM: S3 pepper/CNG 机器密钥 + MEK 导入内核
-    API->>OS: BCryptGenerateSymmetricKey（MEK/A/B/C 句柄）
-    API->>CT: S3 副本 HMAC 法定人数裁决
-    API->>CT: S4 分区表加载
-    API->>CT: S5 LSM 温缓存/冷启动 + WAL 恢复
-    API->>API: S6 最终校验
-    API-->>WK: VERTHYS_OK / PARTIAL_UNLOCK
+    WK->>WK: VRTY magic 预检
+    WK->>API: Verthys_V4Unlock(handle, path, pw, len)
+    API->>API: 前置检查 + emergency 门控 + pepper 快速失败 + .vsec 验签
+    API->>CT: A/B 元数据择一（magic/版本/头哈希）
+    API->>KM: KDF=Argon2id(pw‖pepper,salt) → user 槽解封
+    API->>OS: 设备根解封 device 槽（AND 双包裹）
+    API->>KM: Keyring 解包 K_c/MDEK
+    API->>CT: DataRoot 挂载 + 根段摘要校验
+    API->>API: 状态切换 UNLOCKED（单阶段原子）
+    API-->>WK: VERTHYS_OK / AUTH / FORMAT
     WK-->>TC: {op:unlock, ok}
     TC-->>FE: 解锁结果
 ```
@@ -46,25 +43,21 @@ sequenceDiagram
     participant TC as Tauri command（verthys_batch_controller.rs）
     participant WK as verthys-worker
     participant API as core API（Verthys_AddRecord/GetRecord）
-    participant TX as 事务模块（txn/wal）
-    participant IDX as 索引模块（LSM）
-    participant EXT as Extent/分区模块
-    participant KM as 密钥模块（CNG 内核）
+    participant REPO as 记录仓库（vty_repo/vty_record）
+    participant ST as 数据区（vty_store COW 目录 + 追加段）
+    participant KM as 密钥模块（vty_keyslot/vty_keymanager）
     participant OS as OS/磁盘
     FE->>TC: invoke add_record
     TC->>WK: {op:add_record, name, data(base64)}
     WK->>API: Verthys_AddRecord
-    API->>TX: txn begin（txid+1，WAL BEGIN）
-    API->>EXT: 明文→BLAKE2b（内容寻址哈希/查重）
-    API->>KM: CNG 内核态 AEAD 加密（分区 B 密钥）
-    API->>EXT: 追加写入 Extent 分区
-    API->>IDX: MemTable 插入（key→extent 引用）
-    API->>TX: PREPARE → COMMIT（超级块法定人数）
-    TX->>OS: WAL + 超级块副本落盘（fsync）
+    API->>KM: 记录密钥派生（HKDF(K_c, lid)）+ AEAD 加密
+    API->>REPO: 写记录叶 + 名称盲索引 + 类型盲索引（水位/墓碑）
+    API->>ST: 追加段写记录密文 + COW 目录树快照
+    API->>OS: 单次提交（DataRoot + A/B 元数据原子落盘）
     API-->>WK: VERTHYS_OK + lid
     WK-->>TC: {op:add_record, ok, id}
     TC-->>FE: 新记录 lid
-    Note over FE,OS: 读取：GetRecord → LSM 查引用 → Extent 定位 → CNG 内核解密 → 校验 BLAKE2b
+    Note over FE,OS: 读取：GetRecord → COW 目录叶定位 → 记录段 AEAD 解密 → 名称/类型索引一致
 ```
 
 ## 3. 数据导出流程
@@ -99,18 +92,17 @@ sequenceDiagram
 sequenceDiagram
     participant API as core API
     participant INT as 完整性模块（integrity/runtime_hash）
-    participant CT as 容器模块（superblock/extent/merkle）
-    participant KM as 密钥模块（CNG 内核）
+    participant CT as 容器模块（vty_format/vty_store/vty_repo）
+    participant KM as 密钥模块（vty_keyslot/vty_record）
     participant OS as OS/磁盘
-    Note over API,OS: 更新 = 写入事务（同 §2 的 BEGIN→…→COMMIT）；更新后防回滚：
-    API->>CT: 超级块 txid 单调递增 + state_chain 防回滚
-    API->>CT: partition nonce 计数器防重用/防回退
+    Note over API,OS: 更新 = 记录仓库写入（COW 目录 + 追加段）后单次提交；防回滚：
+    API->>CT: 元数据 epoch/txid 单调递增 + 回退锚点校验
+    API->>CT: DataRoot 快照原子切换（A/B 副本）
     API->>INT: runtime_hash_verify_periodic（写路径入口，30 分钟门控）
     INT->>INT: 关键函数内存映像 BLAKE2b 与 .rhat 比对
     Note over API,OS: 完整性校验 = Verthys_VerifyIntegrity：
-    API->>CT: 遍历全部数据块
-    CT->>KM: 逐块 CNG AEAD 标签校验
-    CT->>CT: Merkle 树哈希校验（merkle_leaf）
+    API->>CT: 遍历 COW 目录叶与记录段
+    CT->>KM: 逐条记录 AEAD 解封与摘要比对
     CT-->>API: 输出损坏 lid 列表 + 损坏数
     API->>INT: 启动期 integrity_verify_startup（.text/.rdata/.rhat HMAC）
 ```
@@ -163,7 +155,7 @@ sequenceDiagram
 - **内存口径**：分片读取上界 4MiB/次（越界即报错），块载荷在进程间层为 base64
   但受批量预算约束（≤11.19MiB/批）；导入/导出内存占用与文件大小无关。
 
-## 6. 全库 DEK 轮换数据流（v4 D9，API 版本 0x0010）
+## 6. 全库 DEK 轮换数据流（D9，API 版本 0x0010）
 
 仅恢复码会话可发起；源库作业期间只读。轮换在新文件中全量重建后原子替换，
 旧恢复码继续有效。

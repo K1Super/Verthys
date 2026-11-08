@@ -1,7 +1,7 @@
 /* module_keys.rs — 内容层加解密入口（照片 / 文件）
  *
  * 职责边界：把前端的“模块名 + 布局 + 公开参数 + 载荷”映射到 C 层的
- * v4 分片接口（`Verthys_V4ChunkSeal/Open`）。分片密钥（MDEK）只在 C 层
+ * 分片接口（`Verthys_V4ChunkSeal/Open`）。分片密钥（MDEK）只在 C 层
  * 持有：worker 不保存模块口令、不派生模块密钥、不缓存任何文件密钥，
  * 内容路径的密钥面完全由 C 层 M1 状态机约束（未启用→Keyring，
  * 启用未解锁→POLICY/LOCKED，解锁后→可用）。
@@ -9,14 +9,14 @@
  * 文件块 v2 保持每文件口令语义：内层 AES-256-GCM 由文件口令派生，
  * 外层仍由模块 MDEK 封装；口令只在本函数调用期内驻留。
  *
- * 布局种类（kind）在 v4 外层明文中绑定（域标签 + 种类码）：
+ * 布局种类（kind）在 外层明文中绑定（域标签 + 种类码）：
  * C 分片的 AAD 只覆盖 module/uuid/seq/total/pt_len，不区分内容种类；
  * 若不做绑定，具备记录写权限的攻击者可在同模块内互换 meta / thumb /
  * chunk 密文，把一种记录当作另一种记录解出。域标签让种类错配在
  * 外层认证通过后立即失败。
  *
  * 清单（manifest）：产品内容不使用独立清单记录。分片集合由 meta 内的
- * BLAKE3 逐块哈希表与 chunkset 记录共同认证，二者本身已被 v4 分片
+ * BLAKE3 逐块哈希表与 chunkset 记录共同认证，二者本身已被 分片
  * 封装；C 层清单仅服务于模块重写事务，不进入内容路径。
  */
 
@@ -37,7 +37,7 @@ const MAX_PAYLOAD_DECODED_BYTES: usize = MAX_PAYLOAD_CHARS / 4 * 3;
 /// 文件口令长度上限：超长输入按非法处理
 const MAX_SECRET_BYTES: usize = 4096;
 
-/// v4 分片头长度：file_uuid(16) + seq(4) + total(4) + pt_len(4)
+/// 分片头长度：file_uuid(16) + seq(4) + total(4) + pt_len(4)
 const CHUNK_PREFIX_LEN: usize = 16 + 4 + 4 + 4;
 /// 分片 nonce 长度（C 层 VTY_NONCE_BYTES）
 const CHUNK_NONCE_LEN: usize = 24;
@@ -108,7 +108,7 @@ fn untag_content(kind: u8, opened: &mut Zeroizing<Vec<u8>>) -> Result<(), VencEr
     Ok(())
 }
 
-/// 解析并预检 v4 分片头：结构不自洽的输入在进入 FFI 之前拒绝。
+/// 解析并预检 分片头：结构不自洽的输入在进入 FFI 之前拒绝。
 fn parse_chunk_header(bytes: &[u8]) -> Result<([u8; 16], u32, u32), VencError> {
     const MIN_LEN: usize = CHUNK_PREFIX_LEN + CHUNK_NONCE_LEN + CHUNK_TAG_LEN;
     if bytes.len() < MIN_LEN {
@@ -133,7 +133,7 @@ fn parse_chunk_header(bytes: &[u8]) -> Result<([u8; 16], u32, u32), VencError> {
 }
 
 /// 照片内容的分片域标识：优先键控文件哈希，其次文件盐，最后随机。
-/// 域标识不是寻址键；读取侧从 v4 分片头解析，不依赖调用方重复提供。
+/// 域标识不是寻址键；读取侧从 分片头解析，不依赖调用方重复提供。
 fn photo_file_uuid(req: &Request) -> Result<[u8; 16], VencError> {
     if !req.file_hash.is_empty() {
         let hash = content_crypto::parse_hash_hex(&req.file_hash)?;
@@ -170,7 +170,7 @@ fn v2_password_key(req: &Request) -> Result<Zeroizing<[u8; KEY_LEN]>, VencError>
         .map_err(|_| VencError::Invalid)
 }
 
-fn v4_position(kind: &str, req: &Request) -> Result<(u32, u32), VencError> {
+fn module_position(kind: &str, req: &Request) -> Result<(u32, u32), VencError> {
     match kind {
         "chunk" | "slim_chunk" => {
             validate_position(req.seq, req.total)?;
@@ -205,9 +205,9 @@ fn scrub_stack() {
  * ------------------------------------------------------------------ */
 
 /// 加密入口：文件块 v2 先做每文件口令内层封装，再统一由 C 层以模块
-/// MDEK 封装为 v4 分片。
+/// MDEK 封装为 分片。
 pub(crate) fn handle_seal_v4(req: &Request, worker: &Worker) -> Response {
-    let resp = match seal_v4_inner(req, worker) {
+    let resp = match seal_inner(req, worker) {
         Ok(out) => {
             let mut r = Response::ok("module_seal");
             r.data = Some(base64_encode(&out));
@@ -219,7 +219,7 @@ pub(crate) fn handle_seal_v4(req: &Request, worker: &Worker) -> Response {
     resp
 }
 
-fn seal_v4_inner(req: &Request, worker: &Worker) -> Result<Vec<u8>, VencError> {
+fn seal_inner(req: &Request, worker: &Worker) -> Result<Vec<u8>, VencError> {
     let module = ModuleId::parse(&req.module)?;
     let kind = req.kind.as_str();
     let code = kind_code(kind).ok_or(VencError::Invalid)?;
@@ -247,19 +247,19 @@ fn seal_v4_inner(req: &Request, worker: &Worker) -> Result<Vec<u8>, VencError> {
         (uuid, 0, 1, tag_content(code, &sealed))
     } else {
         let uuid = photo_file_uuid(req)?;
-        let (seq, total) = v4_position(kind, req)?;
+        let (seq, total) = module_position(kind, req)?;
         (uuid, seq, total, tag_content(code, &payload))
     };
 
     worker
-        .call_v4_chunk_seal(module_index(module), &uuid, seq, total, &inner)
+        .call_chunk_seal(module_index(module), &uuid, seq, total, &inner)
         .map_err(map_ffi_error)
 }
 
-/// 解密入口：从 v4 分片头解析域标识与位置，由 C 层解封后校验种类标签；
+/// 解密入口：从 分片头解析域标识与位置，由 C 层解封后校验种类标签；
 /// v2 内容继续用每文件口令校验内层。
 pub(crate) fn handle_open_v4(req: &Request, worker: &Worker) -> Response {
-    let resp = match open_v4_inner(req, worker) {
+    let resp = match open_inner(req, worker) {
         Ok((plaintext, seq_total)) => {
             let mut r = Response::ok("module_open");
             if !plaintext.is_empty() {
@@ -280,7 +280,7 @@ pub(crate) fn handle_open_v4(req: &Request, worker: &Worker) -> Response {
 /// 解密结果：明文与（分块布局）密文内嵌的位置。
 type OpenedContent = (Zeroizing<Vec<u8>>, Option<(u32, u32)>);
 
-fn open_v4_inner(req: &Request, worker: &Worker) -> Result<OpenedContent, VencError> {
+fn open_inner(req: &Request, worker: &Worker) -> Result<OpenedContent, VencError> {
     let module = ModuleId::parse(&req.module)?;
     let kind = req.kind.as_str();
     let code = kind_code(kind).ok_or(VencError::Invalid)?;
@@ -288,7 +288,7 @@ fn open_v4_inner(req: &Request, worker: &Worker) -> Result<OpenedContent, VencEr
     let combined = decode_payload(&req.data)?;
     let (uuid, seq, total) = parse_chunk_header(&combined)?;
     let opened = worker
-        .call_v4_chunk_open(module_index(module), &uuid, seq, total, &combined)
+        .call_chunk_open(module_index(module), &uuid, seq, total, &combined)
         .map_err(map_ffi_error)?;
     let mut opened = Zeroizing::new(opened);
     untag_content(code, &mut opened)?;
@@ -320,7 +320,7 @@ fn map_ffi_error(rc: u32) -> VencError {
         0x00000005 | 0x00000009 => VencError::Corrupt,
         /* LOCKED / POLICY：容器锁定或策略拒绝。 */
         0x00000007 | 0x00000017 => VencError::Locked,
-        /* D9：轮换作业期间源库只读。 */
+        /* 轮换作业期间源库只读。 */
         0x0000001C => VencError::RotatePending,
         /* 模块已启用但本会话未解锁：需要先输入模块口令。 */
         0x0000001D => VencError::ModuleLocked,
@@ -385,10 +385,10 @@ fn fail(op: &str, err: VencError) -> Response {
 /* ------------------------------------------------------------------ *
  * 单元测试                                                            *
  *
- * v4 分片的真实加解密由 C 层承担，worker 单测覆盖不依赖 FFI 的
+ * 分片的真实加解密由 C 层承担，worker 单测覆盖不依赖 FFI 的
  * 编排与边界：分片头预检、种类标签绑定、参数校验、错误码映射。
  * 端到端往返（真实 MDEK、锁定/解锁、v2 口令）由
- * tests/e2e/v4-worker-smoke.ps1 覆盖。
+ * tests/e2e/worker-smoke.ps1 覆盖。
  * ------------------------------------------------------------------ */
 
 #[cfg(test)]
@@ -575,10 +575,10 @@ mod tests {
 
     #[test]
     fn positions_are_validated_before_sealing() {
-        assert_eq!(v4_position("chunk", &request(serde_json::json!({ "seq": 0, "total": 1 }))).unwrap(), (0, 1));
-        assert!(v4_position("chunk", &request(serde_json::json!({ "seq": 1, "total": 1 }))).is_err());
-        assert!(v4_position("slim_chunk", &request(serde_json::json!({ "seq": 0, "total": 0 }))).is_err());
+        assert_eq!(module_position("chunk", &request(serde_json::json!({ "seq": 0, "total": 1 }))).unwrap(), (0, 1));
+        assert!(module_position("chunk", &request(serde_json::json!({ "seq": 1, "total": 1 }))).is_err());
+        assert!(module_position("slim_chunk", &request(serde_json::json!({ "seq": 0, "total": 0 }))).is_err());
         // 非分块布局固定 (0,1)：meta/thumb 不占用位置
-        assert_eq!(v4_position("meta", &request(serde_json::json!({}))).unwrap(), (0, 1));
+        assert_eq!(module_position("meta", &request(serde_json::json!({}))).unwrap(), (0, 1));
     }
 }

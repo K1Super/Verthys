@@ -70,16 +70,6 @@ export function invalidInput(message: string, cause?: unknown): CryptoError {
   return new CryptoError(CryptoErrorKind.INVALID_INPUT, message, cause);
 }
 
-/** 构造密钥派生失败错误 */
-export function keyDerivationFailed(message: string, cause?: unknown): CryptoError {
-  return new CryptoError(CryptoErrorKind.KEY_DERIVATION_FAILED, message, cause);
-}
-
-/** 构造标签校验失败错误 */
-export function tagVerificationFailed(message: string, cause?: unknown): CryptoError {
-  return new CryptoError(CryptoErrorKind.TAG_VERIFICATION_FAILED, message, cause);
-}
-
 /** 构造格式损坏错误 */
 export function formatCorrupted(message: string, cause?: unknown): CryptoError {
   return new CryptoError(CryptoErrorKind.FORMAT_CORRUPTED, message, cause);

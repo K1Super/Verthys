@@ -110,15 +110,14 @@ if (r != VERTHYS_OK) {
 | MT-Const | 只读安全，只读接口可并发，禁止与写操作并行 |
 | MT-Handle | 句柄级安全，不同句柄可并发，同一句柄禁止并发 |
 
-并发度注记（与实现对齐）：索引读路径（单记录读取、类型探测）因 SSTable
-元数据惰性加载需互斥，内部以独占锁串行化读者——调用安全但读者不并行；
-扫描游标类只读遍历持共享锁，读者可真正并行。
+并发度注记（与实现对齐）：记录读取与扫描沿 COW 目录树持共享锁，读者可并行；
+写操作经 `api_mutex` 串行化。
 
-## 7. 接口分组总览（v4 扩展分组见 §18；完整导出面以 `verthys.def` 为准）
+## 7. 接口分组总览（扩展分组见 §18；完整导出面以 `verthys.def` 为准）
 
 | # | 功能域 | 函数 |
 |---|---|---|
-| 1 | 生命周期 | Verthys_Init / Verthys_NotifySandboxAttrs / Verthys_Deinit / Verthys_Unlock / Verthys_RegisterUnlockProgressCallback / Verthys_CreateWithPreset / Verthys_Lock / Verthys_Flush |
+| 1 | 生命周期 | Verthys_Init / Verthys_NotifySandboxAttrs / Verthys_Deinit / Verthys_V4Create / Verthys_V4Unlock / Verthys_V4UnlockKeyfile / Verthys_V4UnlockRecovery / Verthys_Lock / Verthys_Flush |
 | 2 | 记录 CRUD | Verthys_AddRecord / Verthys_AddRecords / Verthys_GetRecord / Verthys_DeleteRecord / Verthys_DeleteRecords |
 | 3 | 导入导出 / 改密 | Verthys_Export / Verthys_Import / Verthys_ChangePassword |
 | 4 | 容器诊断 | Verthys_GetContainerInfo / Verthys_VerifyIntegrity / Verthys_GetDiagnostics / Verthys_GetSecurityStatus |
@@ -153,38 +152,25 @@ if (r != VERTHYS_OK) {
 - 内存：释放句柄全部资源；调用方不得再使用该句柄。
 - 线程安全：MT-Unsafe（同一句柄不可与其它操作并发销毁）。
 
-### Verthys_Unlock
-`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_Unlock(VerthysHandle handle, const char *verthys_path, const char *password, size_t password_len, uint32_t flags);`
+### Verthys_V4Unlock
+`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4Unlock(VerthysHandle handle, const char *verthys_path, const char *password, size_t password_len);`
 - 参数：
   - `verthys_path` — 已有容器文件路径；文件不存在返回 IO 错误，**不会**自动创建容器。
-  - `password` / `password_len` — 主密码（UTF-8，非零结尾，长度由 `password_len` 指定）。
-  - `flags` — 位域：`VERTHYS_UNLOCK_FLAG_INDEX_PREHEATED (0x01)`（索引已预热，走内存映射）、
-    `VERTHYS_UNLOCK_FLAG_ALLOW_CACHE (0x02)`（允许加载持久化缓存）、
-    `VERTHYS_UNLOCK_FLAG_MINIMAL_FIRST (0x04)`（渐进式解锁：最小可操作优先）；`flags=0` 为旧版同步读取。
-- 返回（源码未逐条注释，据 verthys_api.c 与 unlock pipeline 实现推断）：
-  `VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_RATE`（限流）/ `VERTHYS_ERR_IO`（文件不存在或读失败）/
-  `VERTHYS_ERR_AUTH`（密码错误）/ `VERTHYS_ERR_PEPPER_SOURCE` / `VERTHYS_ERR_FORMAT` / `VERTHYS_ERR_CORRUPT` /
-  `VERTHYS_ERR_CNG_UNAVAILABLE` / `VERTHYS_ERR_QUORUM_FAILED` / `VERTHYS_ERR_PARTIAL_UNLOCK` / `VERTHYS_ERR_TIMEOUT` / `VERTHYS_ERR_INTERNAL`。
-- 内存：解锁成功后句柄进入可读写就绪态；路径/密码由库内部拷贝使用，调用方可用栈上/临时缓冲。
+  - `password` / `password_len` — 主密码（UTF-8，长度由 `password_len` 指定）。
+- 语义：校验 `VRTY` 固定头 → pepper 快速失败 → `.vsec` 验签 → 口令 + 设备根双槽解封 `K_c` →
+  元数据与 DataRoot 挂载；全部成功后才进入 UNLOCKED，不存在部分解锁中间态。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_RATE`（限流）/ `VERTHYS_ERR_IO` /
+  `VERTHYS_ERR_AUTH`（口令错误）/ `VERTHYS_ERR_PEPPER_SOURCE` / `VERTHYS_ERR_FORMAT`（异种格式）/
+  `VERTHYS_ERR_CORRUPT` / `VERTHYS_ERR_CNG_UNAVAILABLE` / `VERTHYS_ERR_TPM` / `VERTHYS_ERR_INTERNAL`。
+- 内存：解锁成功后句柄进入可读写就绪态；路径/口令由库内部拷贝使用，调用方可用栈上/临时缓冲。
 - 线程安全：MT-Unsafe（同一句柄禁止并发解锁）。
 
-### Verthys_RegisterUnlockProgressCallback
-`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RegisterUnlockProgressCallback(VerthysHandle handle, VerthysUnlockProgressCallback callback, void *user_data);`
-- 参数：
-  - `callback` — `void (VERTHYS_CALL *)(const VerthysUnlockProgress *progress, void *user_data)`；NULL 取消通知。
-  - `user_data` — 原样透传；DLL 不解析其内容。
-- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID`（handle 为 NULL）。
-- 语义：注册后对当前句柄的 `Verthys_Unlock` / `Verthys_CreateWithPreset` 各阶段回调进度；
-  `message` 为 DLL 内部只读字面量（UTF-8、NULL 终结），仅在回调调用期间有效。
-- 内存：`VerthysUnlockProgress` 由 DLL 栈上构造，回调返回后失效；调用方不得保存 `message` 指针。
-- 线程安全：MT-Unsafe（同一句柄不可并发注册/解锁）。
-
-### Verthys_CreateWithPreset
-`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_CreateWithPreset(VerthysHandle handle, const char *verthys_path, const char *password, size_t password_len, VerthysPreset preset);`
-- 参数：`preset` — `VERTHYS_PRESET_BALANCED(0) / SECURE(1) / PERFORMANCE(2) / CUSTOM(3)`。
-- 语义：全新创建容器；路径必须不存在（否则返回 `VERTHYS_ERR_EXISTS`）；创建即解锁；预设持久写入超级块；唯一合法新建入口。
-- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_EXISTS` /（V3 路径经 `verthys_api_v3_create` 返回 `VERTHYS_ERR_IO` / `VERTHYS_ERR_PEPPER_SOURCE` / `VERTHYS_ERR_INTERNAL`）。（据实现推断）
-- 内存：同 `Verthys_Unlock`。
+### Verthys_V4Create
+`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4Create(VerthysHandle handle, const char *verthys_path, const char *password, size_t password_len, char *recovery_text, size_t recovery_cap);`
+- 参数：`recovery_text` — 输出恢复码的缓冲区（容量必须 >= 80 字节）；`recovery_cap` — 缓冲区容量。
+- 语义：全新创建容器；路径必须不存在（否则返回 `VERTHYS_ERR_EXISTS`）；创建即解锁；预设参数持久写入容器元数据。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_EXISTS` / `VERTHYS_ERR_IO` / `VERTHYS_ERR_PEPPER_SOURCE` / `VERTHYS_ERR_INTERNAL`。
+- 内存：同 `Verthys_V4Unlock`；恢复码缓冲区由调用方负责清零。
 - 线程安全：MT-Unsafe。
 
 ### Verthys_Lock
@@ -217,7 +203,7 @@ if (r != VERTHYS_OK) {
 - 参数：`records` — 记录数组；`count` — 条数（1..`VERTHYS_ADD_RECORDS_MAX`=512）；`out_ids` — 与输入等长的 ID 输出数组。
 - 语义：全部记录在**单次事务**中提交，共享一次 DataRoot/元数据落盘；任一条失败整体回滚到调用前的根，`out_ids` 全置 0。大文件导入据此把落盘成本从「记录条数 × 提交」压到「子批 × 提交」。
 - 校验：每条按 `Verthys_AddRecord` 同一规则校验；任一非法即整批拒绝且不产生写入。
-- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_FORMAT`（非 V4 容器）/ `VERTHYS_ERR_RESOURCE_LIMIT`（单条载荷超出 IPC 预算）。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_FORMAT`（非当前容器格式）/ `VERTHYS_ERR_RESOURCE_LIMIT`（单条载荷超出 IPC 预算）。
 - 借用指针：与其他写操作相同，使既有 `Verthys_GetRecord` 借用指针失效。
 - 线程安全：MT-Safe。
 
@@ -267,7 +253,7 @@ if (r != VERTHYS_OK) {
 `VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ChangePassword(VerthysHandle handle, const char *old_pw, size_t old_len, const char *new_pw, size_t new_len);`
 - 语义：仅重加密数据密钥（不重加密业务数据）；改密前自动提交未完成事务。
 - 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_AUTH`（旧密码错误）/
-  `VERTHYS_ERR_FORMAT` / `VERTHYS_ERR_INTERNAL` /（V3 专属：`VERTHYS_ERR_UNSUPPORTED`、`VERTHYS_ERR_PEPPER_SOURCE`，据实现推断）。
+  `VERTHYS_ERR_FORMAT` / `VERTHYS_ERR_INTERNAL`。
 - 线程安全：MT-Safe。---
 
 ## 11. 容器诊断
@@ -323,7 +309,7 @@ if (r != VERTHYS_OK) {
 |---|---|---|
 | 0 | NONE | 无附加原因 |
 | 1 | NO_RESIDENT_KEY | 无驻留密钥（锁定/未挂载态的正常阻断理由） |
-| 2 | V4_KEYS_USER_RESIDENT | V4 密钥驻留用户态（用户态上限，防护已加固，计入 `limited_count`） |
+| 2 | V4_KEYS_USER_RESIDENT | 密钥驻留用户态（用户态上限，防护已加固，计入 `limited_count`） |
 | 3 | HIBERNATION_ENABLED | 系统休眠启用，休眠镜像可能含密钥 |
 | 4 | HIBERNATION_UNKNOWN | 休眠状态不可判定 |
 | 5 | SUSPEND_UNPREVENTABLE | 管理员挂起不可阻止（用户态上限，看门狗已生效，计入 `limited_count`） |
@@ -386,8 +372,8 @@ if (r != VERTHYS_OK) {
 
 ### Verthys_ScanSummaryFetch
 `VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ScanSummaryFetch(VerthysScanCursor *cursor, VerthysSummaryRecord *out_records, uint64_t *out_lids, uint64_t max_count, uint64_t *out_count);`
-- 语义：批量拉取摘要元数据（`lid`/`type`/`name_len`/`name`/`data_size`/`physical_offset`/`merkle_leaf[32]`/`created_time`/`slot_state`）。V3 无解密；V4 仅解密名称，不读记录数据段。
-- 类型字段：V3 返回真实业务类型；V4 摘要不读记录密文，`type` 恒为 0（未知）。需要按业务类型取记录 ID 时必须使用 `Verthys_ListIdsByType`（类型盲索引），不得依赖摘要 `type` 过滤。
+- 语义：批量拉取摘要元数据（`lid`/`type`/`name_len`/`name`/`data_size`/`physical_offset`/`merkle_leaf[32]`/`created_time`/`slot_state`）。仅解密名称，不读记录数据段。
+- 类型字段：摘要不读记录密文，`type` 恒为 0（未知）。需要按业务类型取记录 ID 时必须使用 `Verthys_ListIdsByType`（类型盲索引），不得依赖摘要 `type` 过滤。
 - `name` 字段为堆拷贝，须 `Verthys_ScanSummaryRecordFree` 释放。返回 `VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_SNAPSHOT`。（据实现推断）
 - 线程安全：MT-Const。
 
@@ -420,8 +406,8 @@ if (r != VERTHYS_OK) {
 ### Verthys_ListIdsByType（API 0x0012）
 `VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ListIdsByType(VerthysHandle handle, uint8_t rtype, uint64_t after_id, uint64_t max_count, uint64_t *out_ids, uint64_t *out_count, uint8_t *out_exhausted);`
 - 参数：`after_id` — 上一页最后一个 ID，首页传 0；`max_count` — 1..`VERTHYS_TYPE_ID_BATCH_MAX`（4096）。
-- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_FORMAT`（非 V4 容器）。
-- 语义：走 V4 类型盲索引 `VTY_KS_TYPE` 分页枚举业务类型 ID，严格升序、跳过墓碑；不读取记录密文，不依赖摘要 `type`。`out_exhausted=1` 表示该类型无更多记录。线程安全：MT-Const。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_FORMAT`（非当前容器格式）。
+- 语义：走类型盲索引 `VTY_KS_TYPE` 分页枚举业务类型 ID，严格升序、跳过墓碑；不读取记录密文，不依赖摘要 `type`。`out_exhausted=1` 表示该类型无更多记录。线程安全：MT-Const。
 
 ---
 
@@ -436,13 +422,12 @@ if (r != VERTHYS_OK) {
 | `VerthysContainerInfo` | 容器只读统计 | 调用方结构体，库填充 |
 | `VerthysDiagnostics` | 运行时性能指标 | 调用方结构体，库填充 |
 | `VerthysSecurityStatus` | 防御闭环 7 路径状态（104 字节） | `path_state[7]` + 计数 + `path_reason[7]` + `limited_count` + `policy_flags` + `checked_at_unix_ms` |
-| `VerthysUnlockProgress` | 解锁进度 | 栈上构造，回调返回即失效 |
 
 ## 16. 符号前缀与旧符号残留
 
 - 所有公开符号前缀均为 `Verthys_`。全仓源码/头文件中**未发现**旧 `Vault_` 前缀残留
   （历史归档报告中出现 4 处历史记录，非代码）。
-- 导出白名单 `core/verthys.def` 共 67 个符号（v4 模块/轮换（含 keyfile 补录）/PCR/keyfile 等扩展已并入，
+- 导出白名单 `core/verthys.def` 共 68 个符号（模块/轮换（含 keyfile 补录）/PCR/keyfile 等扩展已并入，
   0x0014 追加 `Verthys_NotifyRuntimeGuards`），与头文件声明一一对应。
 - 名称遗留（供整改参考）：`VerthysRecordType` 中 `VERTHYS_RECORD_FILE_VERTHYS` 语义为“文件保险箱类数据”，
   命名冗余但属源码现状，本文档照实记录，未改代码。
@@ -454,7 +439,7 @@ if (r != VERTHYS_OK) {
 - 构建/配置：见 `CONFIGURATION.md` 与根 `build_production.ps1`。
 - 术语：见 `GLOSSARY.md`。
 
-## 18. v4 全库 DEK 轮换（API 版本 0x0011）
+## 18. 全库 DEK 轮换（API 版本 0x0011）
 
 作业式接口：仅恢复码会话可作为源库；轮换在新文件中全量重建（保留
 `vault_uuid`、生成新 K_c、`epoch+1`、恢复槽用同一恢复码 KEK 重封），

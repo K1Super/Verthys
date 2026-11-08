@@ -108,6 +108,3 @@ export function useDeviceBinding(options: UseDeviceBindingOptions) {
     refreshDeviceFingerprint,
   };
 }
-
-/** useDeviceBinding 返回值类型（便于显式标注） */
-export type UseDeviceBindingReturn = ReturnType<typeof useDeviceBinding>;

@@ -47,6 +47,7 @@ use crate::constants::import_writer as wconst;
 use crate::controller::api_error::ErrorCode;
 use crate::controller::types::{EnumerateBatch, InitStatus, InitStatusResult, VerthysResponse};
 use crate::repository::container_layout;
+use crate::repository::verthys_chunks;
 use crate::repository::verthys_state::{
     delete_state_file, read_last_verthys_path, read_state_file, try_repair_state_file,
     validate_verthys_file, write_state_file_atomic, VerthysState,
@@ -56,6 +57,7 @@ use crate::state::verthys_session::VerthysSessionGuard;
 use crate::state::AppState;
 use crate::util::audit_log::{append_audit, keyfile_path_tag, AuditEvent, AuditEventType, AuditResult};
 use crate::util::path::{normalize_path, sanitize_path};
+use std::collections::HashSet;
 use tauri::State;
 use zeroize::Zeroizing;
 
@@ -65,17 +67,15 @@ use zeroize::Zeroizing;
 // 不产生 serde_json::Value 的 owned 明文拷贝；序列化结果立即进入
 // Zeroizing 容器，随敏感原件在发送后统一擦除。
 
-/// unlock 请求体（flags=None 时省略字段，与无 flags 的线格式兼容）
+/// unlock 请求体
 #[derive(serde::Serialize)]
 struct UnlockReq<'a> {
     op: &'static str,
     path: &'a str,
     password: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    flags: Option<u32>,
 }
 
-/// v4 recovery 解锁请求体
+/// recovery 解锁请求体
 #[derive(serde::Serialize)]
 struct RecoveryUnlockReq<'a> {
     op: &'static str,
@@ -83,7 +83,7 @@ struct RecoveryUnlockReq<'a> {
     recovery_code: &'a str,
 }
 
-/// v4 恢复码轮换请求体（当前容器口令由宿主注入）
+/// 恢复码轮换请求体（当前容器口令由宿主注入）
 #[derive(serde::Serialize)]
 struct RecoveryRotateReq<'a> {
     op: &'static str,
@@ -99,22 +99,7 @@ struct V4CreateReq<'a> {
     password: &'a str,
 }
 
-/// v4 keyfile 路径请求体（status 不需要路径）
-#[derive(serde::Serialize)]
-struct KeyfilePathReq<'a> {
-    op: &'static str,
-    keyfile_path: &'a str,
-}
-
-/// v4 keyfile 启用/关闭请求体（口令由宿主注入，前端不参与）
-#[derive(serde::Serialize)]
-struct KeyfilePasswordReq<'a> {
-    op: &'static str,
-    password: &'a str,
-    keyfile_path: &'a str,
-}
-
-/// v4 keyfile 解锁请求体（库路径 + keyfile 路径）
+/// keyfile 解锁请求体（库路径 + keyfile 路径）
 #[derive(serde::Serialize)]
 struct KeyfileUnlockReq<'a> {
     op: &'static str,
@@ -123,7 +108,7 @@ struct KeyfileUnlockReq<'a> {
     keyfile_path: &'a str,
 }
 
-/// v4 keyfile 创建请求体（库路径 + keyfile 路径）
+/// keyfile 创建请求体（库路径 + keyfile 路径）
 #[derive(serde::Serialize)]
 struct KeyfileCreateReq<'a> {
     op: &'static str,
@@ -549,22 +534,19 @@ pub use preheat::verthys_preheat;
 ///
 /// 容器口令由本机保管模块提供，不来自前端；发送后立即擦除，不驻留内存。
 /// 解锁失败时文件锁自动释放（RAII）。
-/// 口令解锁 v4 容器；也接受一次性恢复码通道（见 verthys_unlock_recovery）。
+/// 口令解锁 容器；也接受一次性恢复码通道（见 verthys_unlock_recovery）。
 ///
-/// 参数数量即 Tauri IPC 的线格式契约：前置校验令牌、USB 重绑确认、
-/// 恢复码、keyfile 路径与进度通道均为独立可选输入。收拢为结构体会
-/// 破坏前端调用与既有测试快照，故在此保留唯一、受控的 lint 例外。
-#[allow(clippy::too_many_arguments)]
+/// 参数数量即 Tauri IPC 的线格式契约：USB 重绑确认、恢复码与
+/// keyfile 路径均为独立可选输入。收拢为结构体会破坏前端调用与
+/// 既有测试快照，故保持当前形状。
 #[tauri::command]
 pub async fn verthys_unlock(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     verthys_path: String,
-    preheat_token: Option<String>,
     usb_rebind_confirmed: Option<bool>,
     recovery_code: Option<String>,
     keyfile_path: Option<String>,
-    on_progress: tauri::ipc::Channel<crate::worker::UnlockProgress>,
 ) -> Result<VerthysResponse, String> {
     /* 恢复码通道复用同一命令：不读取本机口令、不走口令熔断计数，
      * 直接交给恢复专用实现；其余参数不参与决定。 */
@@ -578,12 +560,14 @@ pub async fn verthys_unlock(
         sanitize_path(&verthys_path)
     );
 
-    // 服务端强制暴力熔断闸门：锁定/清空状态下，口令不进入任何
+    // 服务端强制暴力熔断闸门：锁定/过频状态下，口令不进入任何
     // 业务逻辑（不触文件锁、不触 FFI）。计数由后端权威维护，
     // 不依赖前端行为；前端仅负责查询展示锁定态。
     // 经 service 层契约调用（实现由 security_commands 启动时注册）。
-    use crate::service::unlock_gate::{gate_check, UnlockGate};
-    match gate_check(&app) {
+    use crate::service::unlock_gate::{
+        gate_check, GateDomain, UnlockGate, E_CNG_UNAVAILABLE, E_RATE_LIMITED,
+    };
+    match gate_check(&app, GateDomain::Unlock) {
         UnlockGate::Allowed => {}
         UnlockGate::Locked(secs) => {
             log::warn!(
@@ -600,18 +584,34 @@ pub async fn verthys_unlock(
                     secs
                 )),
             );
-            return Err(format!("尝试次数过多，已锁定 {} 秒，请稍后再试", secs));
+            return Ok(VerthysResponse::err_code_retry(
+                "unlock",
+                E_RATE_LIMITED,
+                &format!("尝试次数过多，已锁定 {} 秒，请稍后再试", secs),
+                secs,
+            ));
         }
-        UnlockGate::PurgeRequired => {
-            log::warn!("[verthys_unlock] 暴力熔断清空态，拒绝尝试");
+        UnlockGate::RateLimited { retry_after_secs } => {
+            log::warn!(
+                "[verthys_unlock] 最小尝试间隔未满足（剩余 {}s），拒绝尝试",
+                retry_after_secs
+            );
             write_verthys_audit(
                 &app,
                 AuditEventType::VerthysUnlock,
                 &verthys_path,
                 AuditResult::Denied,
-                Some("BRUTE_FORCE_PURGE: 需执行索引清空与完整性校验（服务端强制）".into()),
+                Some(format!(
+                    "RATE_LIMITED: 最小尝试间隔未满足（剩余 {} 秒）",
+                    retry_after_secs
+                )),
             );
-            return Err("失败次数已达上限，需完成安全清理与完整性校验后重试".into());
+            return Ok(VerthysResponse::err_code_retry(
+                "unlock",
+                E_RATE_LIMITED,
+                &format!("请求过于频繁，请 {} 秒后再试", retry_after_secs),
+                retry_after_secs,
+            ));
         }
         UnlockGate::Unavailable => {
             log::error!("[verthys_unlock] 熔断守卫不可用（fail-closed 拒绝）");
@@ -622,7 +622,11 @@ pub async fn verthys_unlock(
                 AuditResult::Denied,
                 Some("熔断守卫不可用，fail-closed 拒绝解锁".into()),
             );
-            return Err("安全模块暂时不可用，请重启应用后重试".into());
+            return Ok(VerthysResponse::err_code(
+                "unlock",
+                E_CNG_UNAVAILABLE,
+                "安全门禁暂时不可用，请重启应用后重试",
+            ));
         }
     }
 
@@ -668,37 +672,6 @@ pub async fn verthys_unlock(
         "加密库正在被另一个程序使用".to_string()
     })?;
 
-    let mut flags: u32 = 0x02;
-    if let Some(token_b64) = preheat_token.as_deref() {
-        match crate::util::base64::base64_decode(token_b64) {
-            Ok(token_sig) => match state.preheat_token_store.verify_and_consume(&token_sig) {
-                Some(true) => {
-                    flags |= 0x01;
-                    log::info!("[verthys_unlock] PreheatToken 验证成功，启用零拷贝路径");
-                }
-                Some(false) => {
-                    log::warn!("[verthys_unlock] PreheatToken 无效/超时/已消费，降级磁盘读取");
-                }
-                None => {
-                    log::info!("[verthys_unlock] 无 PreheatToken（未预热），降级磁盘读取");
-                }
-            },
-            Err(e) => {
-                log::warn!(
-                    "[verthys_unlock] PreheatToken base64 解码失败: {}，降级磁盘读取",
-                    e
-                );
-            }
-        }
-    } else {
-        use std::sync::atomic::Ordering;
-        if state.prefetch_done.load(Ordering::SeqCst) {
-            flags |= 0x01;
-            log::info!("[verthys_unlock] prefetch_done=true（旧前端兼容路径），启用零拷贝");
-        }
-    }
-    log::info!("[verthys_unlock] flags=0x{:02x}", flags);
-
     // 解锁前应用受信档位（经服务层契约调用，实现由安全模块启动时注册；
     // fail-closed：失败即中止，禁止降级解锁）
     crate::service::preset_source::apply_persisted_preset_before_unlock(&app, &verthys_path)?;
@@ -713,7 +686,7 @@ pub async fn verthys_unlock(
     )?;
 
     // 路径授权：worker 只接受宿主在本次操作前签发的 exact-path 能力。
-    /* D3：keyfile 库必须走 v4_unlock_keyfile；两条路径都要授权。
+    /* keyfile 库必须走 v4_unlock_keyfile；两条路径都要授权。
      * keyfile 内容只在 worker/C 进程内读取，主进程与前端只传路径。 */
     let keyfile_path = keyfile_path
         .map(|p| p.trim().to_string())
@@ -755,7 +728,6 @@ pub async fn verthys_unlock(
                 op: unlock_op,
                 path: &verthys_path,
                 password: &password,
-                flags: Some(flags),
             }),
         }
         .map_err(|e| {
@@ -765,20 +737,16 @@ pub async fn verthys_unlock(
     );
 
     let resp_json = {
-        let result = state.send_with_unlock_progress(req_str.as_str(), &|progress| {
-            if let Err(e) = on_progress.send(progress.clone()) {
-                log::warn!("[verthys_unlock] 进度推送失败（前端可能已关闭）: {}", e);
-            }
-        });
+        let result = state.send(req_str.as_str());
         match result {
             Ok(json) => json,
             Err(e) => {
                 log::error!("[verthys_unlock] send 失败: {}", e);
-                /* 修复（D-WORKER-RESET）：超时/通信失败时销毁 worker 子进程
+                /* 修复（D-WORKER-RESET）：通信失败时销毁 worker 子进程
                  *
-                 * 场景：unlock 进度死锁或 FFI 调用耗时超过 60 秒空闲超时后，
-                 * 父进程放弃等待但 worker 子进程仍在运行。Verthys_Unlock FFI 可能
-                 * 已成功完成（ctx->state = UNLOCKED），但响应未被父进程接收。
+                 * 场景：FFI 调用超时或通信失败后，父进程放弃等待但 worker
+                 * 子进程仍在运行。解锁 FFI 可能已成功完成
+                 * （ctx->state = UNLOCKED），但响应未被父进程接收。
                  * 若不销毁 worker，后续 unlock/create 请求会命中 stale UNLOCKED
                  * 状态，返回 VERTHYS_ERR_INVALID 级联失败。
                  *
@@ -802,7 +770,7 @@ pub async fn verthys_unlock(
     drop(req_str);
     drop(password);
 
-    let resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
+    let mut resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
         log::error!(
             "[verthys_unlock] 解析响应失败: {} | raw={}",
             e,
@@ -817,6 +785,7 @@ pub async fn verthys_unlock(
         );
         "打开加密库失败".to_string()
     })?;
+    resp.adopt_worker_error_code();
 
     if !resp.ok {
         log::warn!("[verthys_unlock] 解锁失败: {:?}", resp.error);
@@ -895,21 +864,6 @@ pub async fn verthys_unlock(
             log::info!("[verthys_unlock] key_lifecycle → NoKey（无全局密钥记录）");
         }
 
-        // 修复修复：释放共享锁后再创建会话守卫（消除自死锁）
-        //
-        // 原缺陷（死锁根因）：_read_lock（共享锁，line 634 lock_shared 获取）在
-        // 整个函数作用域内存活直到 line 829 返回才 Drop。VerthysSessionGuard::new
-        // 内部（verthys_session.rs line 76）对同一 verthys_path 同一字节偏移
-        // (SENTINEL_OFFSET=0x7FFFFFFF) 请求独占锁（LockFileEx +
-        // LOCKFILE_EXCLUSIVE_LOCK）。Windows LockFileEx 独占锁要求该字节范围
-        // 无任何其他锁（含同进程），且未设 LOCKFILE_FAIL_IMMEDIATELY → 永久阻塞。
-        // 表现：解锁成功日志输出后 verthys_unlock 命令挂起 35s，前端
-        // withGradedTimeout 硬超时触发 resetKeyManagerState 销毁 worker，
-        // 用户看到"卡在解锁完成…一直到超时"。
-        //
-        // 修复：参照 verthys_create（line 1037 显式 drop(lock)）的正确做法，
-        // 在 VerthysSessionGuard::new 之前显式释放共享锁。此时解锁请求已完成
-        // （send_with_unlock_progress 已返回），共享锁不再需要保护文件读取。
         drop(_read_lock);
 
         let session_id = format!(
@@ -1101,7 +1055,7 @@ pub(crate) async fn verthys_unlock_recovery(
         Some("恢复码解锁成功".into()),
     );
 
-    /* 与口令解锁一致：v4 废弃的是 C 层 GMK，产品层 global-key 记录仍决定
+    /* 与口令解锁一致：废弃的是 C 层 GMK，产品层 global-key 记录仍决定
      * 初始化/验证视图。恢复会话先复位，再按 worker 进程内探测结果推进，
      * 固定停在 NoKey 会让恢复解锁后的验证必然报状态不匹配。 */
     state.key_lifecycle.reset_to_no_key();
@@ -1239,7 +1193,7 @@ pub async fn verthys_recovery_rotate(
 ///
 /// 流程：
 /// 1. 前置校验：目标文件不存在，本机容器口令复杂度合格。
-/// 2. 调用 worker v4_create 创建 v4 容器并取得一次性恢复码。
+/// 2. 调用 worker v4_create 创建 容器并取得一次性恢复码。
 /// 3. 发送 lock 指令持久化空 verthys，并释放 worker 侧容器句柄。
 /// 4. 获取主进程独占文件锁（会话哨兵锁，防其他 Verthys 实例打开）。
 /// 5. 再次 unlock 重新打开，保持会话。
@@ -1271,7 +1225,7 @@ pub async fn verthys_create(
     } else {
         "BALANCED"
     };
-    /* D3：keyfile 路径只用于传参；文件由 C 层生成/读取，前端不接触字节。 */
+    /* keyfile 路径只用于传参；文件由 C 层生成/读取，前端不接触字节。 */
     let keyfile_path = keyfile_path
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty());
@@ -1430,7 +1384,7 @@ pub async fn verthys_create(
             return Err("创建加密库失败（缺少一次性恢复码）".to_string());
         }
 
-        /* v4 容器格式不含预设字段；创建时选择的档位作为运行时防护档应用，
+        /* 容器格式不含预设字段；创建时选择的档位作为运行时防护档应用，
          * 不能静默忽略。切换失败视为创建失败并回滚文件。 */
         if preset_val != 0 {
             let preset_req = Zeroizing::new(
@@ -1512,7 +1466,6 @@ pub async fn verthys_create(
                     op: unlock_op,
                     path: &verthys_path,
                     password: &password,
-                    flags: None,
                 }),
             }
             .map_err(|e| format!("创建加密库失败（步骤3序列化失败）: {}", e))?,
@@ -1528,11 +1481,12 @@ pub async fn verthys_create(
         if !unlock_resp2.ok {
             let detail = unlock_resp2.error.unwrap_or_else(|| "未知错误".to_string());
             log::error!("[verthys_create] 步骤 3/3 失败: error={}", detail);
-            /* 0x0A = VERTHYS_ERR_RATE：本机持久熔断处于指数退避窗口。
-             * 创建本身已成功，这里失败的是紧随其后的自检解锁；直接透出
-             * 错误码会让用户误以为文件没建成并反复重试。 */
+            /* 0x0A = VERTHYS_ERR_RATE：机器预算服务不可用（未安装/不可达/
+             * fail-closed）或本机持久熔断处于指数退避窗口。创建本身已成功，
+             * 这里失败的是紧随其后的自检解锁；直接透出错误码会让用户误以为
+             * 文件没建成并反复重试。 */
             if detail == "ERR_0000000A" {
-                return Err("创建加密库失败（步骤3重开失败）：本机处于安全熔断退避窗口（最长 1 小时），请稍后重试；也可用恢复码解锁任一已有库以清零计数".into());
+                return Err("创建加密库失败（步骤3重开失败）：本机安全服务不可用或处于安全熔断退避窗口。请确认 VerthysSecuritySvc 已安装并运行，或稍后重试；也可用恢复码解锁任一已有库以清零计数".into());
             }
             return Err(format!("创建加密库失败（步骤3重开失败）: {}", detail));
         }
@@ -1570,7 +1524,7 @@ pub async fn verthys_create(
         }
         state.set_session(None);
         delete_state_file(&app);
-        // 附属数据有界清理：只删本次流程可能产生的已知附属文件（state / idx_cache /
+        // 附属数据有界清理：只删本次流程可能产生的已知附属文件（state /
         // lock / tmp），目录清空即回收；目录含未知文件时保留目录本体。
         let report = container_layout::cleanup_container_sidecars(&path_for_rollback);
         log::error!(
@@ -1644,8 +1598,6 @@ pub async fn verthys_create(
         file_size
     );
 
-    // 修复：重置 key_lifecycle 到 NoKey
-    //
     // verthys_create 通过 raw worker IPC 完成 create→lock→unlock，
     // 绕过了 verthys_unlock Tauri 命令的 key_lifecycle 状态管理代码（843-851 行）。
     // 新建 verthys 无全局密钥记录，后端状态必须为 NoKey，
@@ -1675,7 +1627,7 @@ pub async fn verthys_create(
         sanitize_path(&path_for_rollback)
     );
 
-    /* D3 审计：keyfile 路径只落域分离哈希，不写明文 */
+    /* 审计：keyfile 路径只落域分离哈希，不写明文 */
     if let Some(kf) = keyfile_path.as_deref() {
         write_verthys_audit(
             &app,
@@ -1888,7 +1840,7 @@ pub async fn verthys_lock(
 // ===== 刷新（Verthys_Flush） =====
 
 /// 刷盘：调用 Verthys_Flush 提交未完成事务，保持 worker 会话不中断。
-/// V4 的 add_record 已提交 DataRoot，此函数再次执行幂等保存，确保
+/// 的 add_record 已提交 DataRoot，此函数再次执行幂等保存，确保
 /// 目录脏状态/待提交段与元数据一致。失败必须向上传播，不得把
 /// “未确认落盘”伪装成成功。
 /// 不清零密钥、不改变 worker 状态（始终 UNLOCKED），无 lock+unlock 竞态风险。
@@ -1901,17 +1853,7 @@ pub async fn verthys_flush(
         return Ok(VerthysResponse::err("flush", &msg));
     }
 
-    // 修复：直接调用 Verthys_Flush，不再使用 lock+unlock 模式
-    //
-    // 【旧实现致命缺陷】
-    //   旧实现发送 lock + unlock 两条 IPC 模拟 flush：
-    //   1. lock 调用 Verthys_Lock → 清零密钥(ctx_zero_sensitive) + state=LOCKED
-    //   2. unlock 调用 Verthys_Unlock → 重新派生密钥 + 重新加载索引
-    //   3. send_batch_with_timeout 非原子（逐条发送），lock 成功后若 unlock
-    //      超时(8s)或失败，worker 永久卡在 LOCKED 状态
-    //   4. 后续所有 get_record 返回 VERTHYS_ERR_LOCKED → 前端 verthysGetRecord 返回 null
-    //   5. decryptPhotoMeta 返回 null → 照片无法解密 → 用户看到"照片全部损坏"
-    //
+
     // 【新实现】
     //   直接发送 {"op":"flush"} → worker call_flush → C Verthys_Flush
     //   - commit 未完成事务（add_record 已 vtxn_commit，通常 no-op）
@@ -1919,7 +1861,6 @@ pub async fn verthys_flush(
     //   - 不重新加载索引（避免大 verthys 的索引加载超时）
     //   - 单次 IPC，无 lock+unlock 的竞态风险
     //
-    // 【错误传播策略】
     //   AddRecord 已即时提交，但 flush 负责再次确认 DataRoot/元数据与
     //   目录脏状态一致；flush op 失败或 IPC 失败时必须返回 err，
     //   让上层区分“已确认落盘”与“未确认落盘”，不得吞错报成功。
@@ -1961,7 +1902,7 @@ pub async fn verthys_flush(
 /// `std::fs::File::open` 新开句柄读取该区间恒被 ERROR_LOCK_VIOLATION
 /// （os error 33）拒绝，旧实现因此恒判失败，是"持久化失败"误报与
 /// 解析导入被阻断的根因。故校验必须下沉到持有会话句柄的 worker 子进程，
-/// 由该进程用 C 层持锁句柄（ctx->v3->f）完成自查（Verthys_VerifyPersist）。
+/// 由该进程用 C 层会话持锁句柄完成自查（Verthys_VerifyPersist）。
 ///
 /// 命令名保持不变（前端契约）；新增结构化字段（status_code/file_size/
 /// mtime_ms/header_magic/header_version）随响应同名字段透传，前端据此做
@@ -2331,6 +2272,20 @@ pub async fn verthys_enumerate_records_stream(
     })
 }
 
+/// 批量删除的单次 IPC 超时：基础 15s + 每千条 2s，上限 300s。
+///
+/// 删除是单事务提交，耗时随记录数增长但远低于线性；上限用于防止
+/// worker 挂死时永久阻塞。前端不设超时，等待本命令的真实结果。
+const DELETE_BATCH_BASE_TIMEOUT_SECS: u64 = 15;
+const DELETE_BATCH_TIMEOUT_PER_1K: u64 = 2;
+const DELETE_BATCH_MAX_TIMEOUT_SECS: u64 = 300;
+
+pub(crate) fn delete_batch_timeout(count: usize) -> std::time::Duration {
+    let scaled = DELETE_BATCH_BASE_TIMEOUT_SECS
+        .saturating_add((count as u64 / 1000).saturating_mul(DELETE_BATCH_TIMEOUT_PER_1K));
+    std::time::Duration::from_secs(scaled.min(DELETE_BATCH_MAX_TIMEOUT_SECS))
+}
+
 /// 删除单条记录。
 #[tauri::command]
 pub async fn verthys_delete_record(
@@ -2353,7 +2308,11 @@ pub async fn verthys_delete_record(
 }
 
 /// 批量删除记录，一次性传递 ID 列表，worker 在单次事务内完成删除。
-/// 无论删除多少条，磁盘写入量恒定（仅一次重加密和 HMAC 更新）。
+///
+/// 级联展开：输入通常是索引记录 ID（照片/文件 meta）。其外置块记录
+/// （含瘦身布局的缩略图/块集）由外置块台账按 owner 反查补齐，前端无需
+/// 为删除逐条解密 meta。台账不可用时退化为仅删除输入 ID 并记录告警，
+/// 不阻断用户删除。
 #[tauri::command]
 pub async fn verthys_delete_records(
     app: tauri::AppHandle,
@@ -2365,14 +2324,88 @@ pub async fn verthys_delete_records(
         return Ok(VerthysResponse::err("delete_records", &msg));
     }
 
-    log::info!("[verthys_delete_records] 批量删除 {} 条记录", ids.len());
+    let mut all_ids: Vec<u64> = ids.into_iter().filter(|id| *id != 0).collect();
+    all_ids.sort_unstable();
+    all_ids.dedup();
+    if all_ids.is_empty() {
+        return Ok(VerthysResponse::ok("delete_records"));
+    }
+
+    /* 级联展开：索引记录 → 其外置块。活跃导入会话的台账在写者内存中，
+     * 优先读取会话视图；否则加载磁盘台账（spawn_blocking 隔离同步 IO）。 */
+    let mut ledger_for_cleanup: Option<verthys_chunks::ChunkLedger> = None;
+    if let Some(vpath) = state.verthys_session_path() {
+        let owners: HashSet<u64> = all_ids.iter().copied().collect();
+        if state.has_import_session() {
+            let guard = state.lock_import_session();
+            if let Some(session) = guard.as_ref() {
+                all_ids.extend(session.chunk_ledger.chunk_ids_for_owners(&owners));
+            }
+        } else {
+            let load_path = vpath.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                verthys_chunks::load_chunk_ledger(&load_path)
+            })
+            .await
+            {
+                Ok(Ok(ledger)) => {
+                    all_ids.extend(ledger.chunk_ids_for_owners(&owners));
+                    ledger_for_cleanup = Some(ledger);
+                }
+                Ok(Err(e)) => log::warn!(
+                    "[verthys_delete_records] 块台账不可用，仅删除输入记录（外置块可能残留）: {}",
+                    e
+                ),
+                Err(e) => log::warn!(
+                    "[verthys_delete_records] 块台账加载任务异常，仅删除输入记录: {}",
+                    e
+                ),
+            }
+        }
+        all_ids.sort_unstable();
+        all_ids.dedup();
+    }
+
+    let timeout = delete_batch_timeout(all_ids.len());
+    log::info!(
+        "[verthys_delete_records] 批量删除 {} 条记录（超时 {}s）",
+        all_ids.len(),
+        timeout.as_secs()
+    );
     let req = serde_json::json!({
         "op": "delete_records",
-        "ids": ids,
+        "ids": all_ids,
     });
-    let resp_json = state.send(&req.to_string())?;
-    let resp: VerthysResponse =
+    let resp_json = state.send_with_timeout(&req.to_string(), timeout)?;
+    let mut resp: VerthysResponse =
         serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
+    if resp.ok {
+        resp.processed_count = Some(all_ids.len() as u64);
+        /* 删除成功后收敛台账：移除已删除块条目，避免台账随删除无限增长。
+         * 落盘失败不改变删除结论（残留条目只影响后续 GC 判定面）。 */
+        if let Some(mut ledger) = ledger_for_cleanup {
+            if let Some(vpath) = state.verthys_session_path() {
+                let removed = ledger.remove_many(&all_ids);
+                if removed > 0 {
+                    match tauri::async_runtime::spawn_blocking(move || {
+                        verthys_chunks::save_chunk_ledger(&vpath, &ledger)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => log::warn!(
+                            "[verthys_delete_records] 块台账收敛落盘失败（删除已生效）: {}",
+                            e
+                        ),
+                        Err(e) => log::warn!(
+                            "[verthys_delete_records] 块台账收敛任务异常（删除已生效）: {}",
+                            e
+                        ),
+                    }
+                }
+            }
+        }
+    }
     Ok(resp)
 }
 
@@ -2534,7 +2567,7 @@ mod tests {
         // 建立容器会话：放行（生命周期保持 NoKey —— 数据域仅依赖
         // 容器解锁，不依赖全局密钥验证状态）
         let path = temp_container_path("gate_session");
-        make_v3_container(&path).unwrap();
+        make_container_fixture(&path).unwrap();
         let guard = VerthysSessionGuard::new(path.to_str().unwrap(), "gate-session-test")
             .expect("会话守卫创建失败");
         *state.lock_verthys_session() = Some(guard);
@@ -2557,7 +2590,7 @@ mod tests {
     fn orphan_lock_cleanup_releases_session_guard_and_file_lock() {
         let state = AppState::new();
         let path = temp_container_path("orphan_lock_cleanup");
-        make_v3_container(&path).unwrap();
+        make_container_fixture(&path).unwrap();
         let guard = VerthysSessionGuard::new(path.to_str().unwrap(), "orphan-lock-test")
             .expect("会话守卫创建失败");
         *state.lock_verthys_session() = Some(guard);
@@ -2579,31 +2612,20 @@ mod tests {
     }
 
     /* ------------------------------------------------------------------ *
-     * V3 容器构造辅助（容器会话闸门测试使用）                            *
+     * 容器会话闸门测试辅助                                                *
      *                                                                    *
-     * 旧 verify_disk_persist_blocking 纯函数及其结构校验回归用例已随落盘  *
-     * 校验下沉 C 层而删除：落盘结构校验现由 worker 进程内 C 层持锁句柄     *
-     * （ctx->v3->f）自查承担（Verthys_VerifyPersist），对应 C 测试见      *
-     * core/tests/api/test_v3_lifecycle.c::v3life_verify_persist_selfcheck。*
-     * 此处仅保留最小容器构造辅助。                                        *
+     * 测试只依赖文件锁与路径，不解析容器内容，因此构造空文件即可。         *
      * ------------------------------------------------------------------ */
 
-    /// 构造最小合法 V3 容器文件：64KB 超级块区 + 'V3RP' 帧头。
-    /// payload_len 取 64（区间 (0, 16KB-8] 内合法值）。
-    fn make_v3_container(path: &std::path::Path) -> std::io::Result<()> {
-        use std::io::Write;
-        let mut buf = vec![0u8; 64 * 1024];
-        buf[0..4].copy_from_slice(&[0x56, 0x33, 0x52, 0x50]); // 'V3RP' LE
-        buf[4..8].copy_from_slice(&64u32.to_le_bytes());
-        let mut f = std::fs::File::create(path)?;
-        f.write_all(&buf)?;
-        Ok(())
+    /// 构造空容器文件（供文件锁/会话守卫使用）。
+    fn make_container_fixture(path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::File::create(path).map(|_| ())
     }
 
     /// 临时文件路径（进程 id + 用例名隔离，避免并行测试冲突）
     fn temp_container_path(case: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "verthys_vdp_{}_{}_{}.v3",
+            "verthys_vdp_{}_{}_{}.verthys",
             std::process::id(),
             case,
             std::time::SystemTime::now()
@@ -2612,10 +2634,6 @@ mod tests {
                 .unwrap_or(0)
         ))
     }
-
-    /* ------------------------------------------------------------------ *
-     * P0-1：keyfile 创建目标与回滚边界                                *
-     * ------------------------------------------------------------------ */
 
     fn temp_keyfile_case_dir(case: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(

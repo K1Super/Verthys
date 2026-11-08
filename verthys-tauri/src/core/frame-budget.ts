@@ -55,7 +55,7 @@ export interface FrameMetrics {
 }
 
 /** 降级档位总数（0 完整 / 1 轻度 / 2 中度 / 3 重度） */
-export const DEGRADATION_MAX_LEVEL = 3;
+const DEGRADATION_MAX_LEVEL = 3;
 
 /** 各档位粒子密度（1 / 0.8 / 0.5 / 0.2） */
 const DENSITY_BY_LEVEL: readonly number[] = [1, 0.8, 0.5, 0.2];

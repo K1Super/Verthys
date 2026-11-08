@@ -229,20 +229,6 @@ impl Context {
     }
 }
 
-/// 上下文初始化结果
-///
-/// 包含上下文和所有需由入口层管理的资源句柄。
-/// 入口层负责持有这些句柄，进程退出时自动释放。
-pub struct ContextBundle {
-    /// 进程上下文（传递至控制器层）
-    pub ctx: Context,
-    /// 后台资源句柄（入口层持有，Drop 时自动清理）
-    ///
-    /// 使用 Box<dyn Drop> 确保所有资源在进程退出时被正确释放。
-    /// 这包括：数据库连接池、CNG 算法提供者、IPC 管道实例等。
-    pub resources: Vec<Box<dyn std::any::Any>>,
-}
-
 /// 从命令行参数解析强类型 StartupConfig
 ///
 /// 支持的参数：

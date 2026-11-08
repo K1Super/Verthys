@@ -1,6 +1,6 @@
 <!--
-  QuantumCoreLoader.vue — 脉冲星磁层辐射加载动画（v3 全新体系）
-  与被否决的轨道旋转族（v1 同心环七层 / v2 倾斜椭圆 dash 差速流）
+  QuantumCoreLoader.vue — 脉冲星磁层辐射加载动画（当前视觉体系）
+  与被否决的轨道旋转族（同心环七层 / 倾斜椭圆 dash 差速流）
     完全不同的构造机制 — 零轨道、零圆环、零 dash 巡行、零旋转 transform：
 
     构造：脉冲双星系统（lighthouse 灯塔效应）
@@ -60,9 +60,9 @@ import { onBeforeUnmount, onMounted, ref } from "vue";
 import { masterFrameLoop, type FrameStep } from "../../../core/master-frame-loop";
 
 /**
- * QuantumCoreLoader — 脉冲星磁层辐射加载动画（v3 全新体系）
+ * QuantumCoreLoader — 脉冲星磁层辐射加载动画（当前视觉体系）
  *
- * v1（同心环七层）与 v2（倾斜椭圆 dash 差速流）均被否决 — 本版
+ * 早期方案（同心环七层 / 倾斜椭圆 dash 差速流）均被否决 — 本版
  * 彻底更换构造机制：脉冲星灯塔效应，主循环帧任务逐帧驱动 SVG 几何实时重算。
  *
  * 几何模型（viewBox 96×96，中心 48,48）：
@@ -271,7 +271,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 /* ============================================================
-   QuantumCoreLoader.vue 样式引用（ql-loader.css v3 — 脉冲星磁层辐射）
+   QuantumCoreLoader.vue 样式引用（ql-loader.css — 脉冲星磁层辐射）
    ============================================================ */
 @import '../../../styles/security/ql-loader.css';
 

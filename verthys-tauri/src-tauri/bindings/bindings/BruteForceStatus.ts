@@ -3,4 +3,8 @@
 /**
  * 暴力拦截状态快照
  */
-export type BruteForceStatus = { consecutive_failures: number, total_failures: number, remaining_lock_secs: number, purge_required: boolean, };
+export type BruteForceStatus = { consecutive_failures: number, 
+/**
+ * 累计失败次数（仅审计，不参与闸门判定）
+ */
+total_failures: number, remaining_lock_secs: number, };

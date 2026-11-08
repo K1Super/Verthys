@@ -28,8 +28,8 @@ foreach ($raw in Get-Content $listPath) {
 if ($badLines.Count -gt 0) { throw "清单存在 $($badLines.Count) 行格式错误，首行: $($badLines[0])" }
 if ($manifest.Count -eq 0) { throw '清单为空' }
 
-# ---- git 跟踪集（vendored 三目录）----
-$tracked = @(git ls-files third_party/flatcc third_party/libsodium third_party/xxhash)
+# ---- git 跟踪集（vendored 目录）----
+$tracked = @(git ls-files third_party/flatcc third_party/libsodium)
 if ($tracked.Count -eq 0) { throw 'git 未跟踪任何 vendored 文件（third_party 缺失？）' }
 
 $failures = New-Object System.Collections.Generic.List[string]

@@ -252,53 +252,6 @@ int memory_guard_init(void)
     return 0;
 }
 
-int memory_guard_lock(void *ptr, size_t len)
-{
-    if (ptr == NULL || len == 0) return 0;
-
-    /* 性能模式（memory_lock=0）：返回 0 但不实际调用 VirtualLock */
-    SecurityConfig cfg;
-    (void)security_config_snapshot(&cfg);
-    if (!cfg.memory_lock) {
-        return 0;
-    }
-
-    /* 第一次尝试（verthys_lock_memory 内部调用 VirtualLock） */
-    if (verthys_lock_memory(ptr, len) == 0) {
-        return 0;
-    }
-
-    /*
-     * 失败处理：VirtualLock 受进程最小/最大工作集配额约束，
-     * 常因 ERROR_WORKING_SET_QUOTA 失败。尝试 SetProcessWorkingSetSize
-     * 增大配额（按 len 页对齐 + 64KiB 余量）后重试。
-     */
-    SIZE_T min_ws = 0, max_ws = 0;
-    if (GetProcessWorkingSetSize(GetCurrentProcess(), &min_ws, &max_ws)) {
-        SIZE_T need = (len + 0xFFF) & ~((SIZE_T)0xFFF);  /* 页对齐向上 */
-        SIZE_T headroom = 64 * 1024;                      /* 64 KiB 余量 */
-        SIZE_T new_min = min_ws + need + headroom;
-        SIZE_T new_max = max_ws + need + headroom;
-        if (new_min > new_max) new_min = new_max;         /* 防御性钳制 */
-
-        if (SetProcessWorkingSetSize(GetCurrentProcess(), new_min, new_max)) {
-            if (verthys_lock_memory(ptr, len) == 0) {
-                return 0;
-            }
-        }
-    }
-
-    return 1;  /* 锁定失败 */
-}
-
-int memory_guard_unlock(void *ptr, size_t len)
-{
-    if (ptr == NULL || len == 0) return 0;
-
-    /* 性能模式下未实际锁页，但仍调用 VirtualUnlock（幂等，失败不影响） */
-    return verthys_unlock_memory(ptr, len);
-}
-
 void memory_guard_secure_zero(void *ptr, size_t len)
 {
     if (ptr == NULL || len == 0) return;

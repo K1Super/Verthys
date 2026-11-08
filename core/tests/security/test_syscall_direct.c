@@ -9,12 +9,12 @@
  *   3. NtQuerySystemInformation(SystemBasicInformation) 成功且字段合理
  *   4. 错误码穿透：零长缓冲返回 STATUS_INFO_LENGTH_MISMATCH
  *      （证明 NTSTATUS 完整经过 stub RAX 返回，无吞没/改写）
- *   5. 检测器接线回归：anti_debug_v2 / memory_guard 经新传输在
+ *   5. 检测器接线回归：anti_debug / memory_guard 经新传输在
  *      干净环境下零误报（既有测试自动覆盖，此处补直接断言）
  */
 #include "verthys_test.h"
 #include "syscall_direct.h"
-#include "anti_debug_v2.h"
+#include "anti_debug.h"
 #include "memory_guard.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -125,8 +125,8 @@ TEST(scd_error_code_passthrough)
 /* 检测器接线回归：新传输下干净环境零误报 */
 TEST(scd_detector_wiring_clean)
 {
-    CHECK_EQ(anti_debug_v2_init(), 0);
-    CHECK_EQ(anti_debug_v2_check(), DBG_THREAT_NONE);
+    CHECK_EQ(anti_debug_init(), 0);
+    CHECK_EQ(anti_debug_check(), DBG_THREAT_NONE);
 
     /* memory_guard 句柄表扫描经直接系统调用（干净环境返回 0；
      * test_memory_safety.c 亦有覆盖，此处从传输视角复验） */

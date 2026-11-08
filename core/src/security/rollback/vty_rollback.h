@@ -7,14 +7,16 @@
  * 让已删除的数据复活。
  *
  * 锚点文件带机器绑定 MAC：篡改或挪到其它机器一律 fail-closed（拒绝打开），
- * 而不是被当作“首次运行”。v2 起追加 TPM 持久化密钥指纹见证：还原旧状态、
- * 删除状态文件、删除见证密钥均 fail-closed；只有状态与两槽见证密钥同时
- * 不存在才视为首次运行（残余删除向量）。见证不可用时同样 fail-closed。
+ * 而不是被当作“首次运行”。见证身份为“设备根哈希 + 容器 UUID”，与状态
+ * 文件路径无关。状态缺失时，任一见证仍存在或容器 generation >= 2（已建立
+ * 锚点）均 fail-closed，只有状态、见证都不存在且容器 generation < 2 才视为
+ * 首次运行。见证不可用时同样 fail-closed。旧布局与旧路径不再支持，按损坏
+ * 拒绝。
  */
 #ifndef VTY_ROLLBACK_H
 #define VTY_ROLLBACK_H
 
-#include "vty_v4_types.h"
+#include "vty_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,8 +27,9 @@ extern "C" {
 /* 必须在使用前调用一次；返回 VTY_OK 或 VTY_E_TPM */
 int vty_rollback_init(void);
 
-/* 测试注入：指定状态文件路径；生产环境使用默认用户目录 */
-int vty_rollback_set_path(const char *path);
+/* 测试注入：指定状态文件路径；生产环境固定使用 KnownFolder 安全目录，
+ * 禁止任何生产路径调用。 */
+int vty_rollback_set_path_for_test(const char *path);
 
 /* 开关（默认 1）。单元测试进程启动时关闭，避免普通用例写真实用户状态；
  * 专用用例显式开启并注入沙箱路径。 */

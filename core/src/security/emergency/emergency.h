@@ -33,7 +33,7 @@ typedef enum {
 /* 高危信号枚举（位掩码） */
 typedef enum {
     EMERG_SIG_NONE             = 0x0000,
-    EMERG_SIG_SUPERBLOCK_HMAC  = 0x0001,  /* 超级块 HMAC 校验失败 */
+    EMERG_SIG_CONTAINER_HMAC   = 0x0001,  /* 容器元数据 HMAC 校验失败 */
     EMERG_SIG_FRIDA_INJECTION  = 0x0002,  /* frida 注入痕迹 */
     EMERG_SIG_MTIME_ROLLBACK   = 0x0004,  /* 外部 mtime 被回拨 */
     EMERG_SIG_HARDWARE_BP      = 0x0008,  /* 硬件断点 DR0-DR3 */

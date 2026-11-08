@@ -13,10 +13,10 @@
 ```mermaid
 flowchart TB
     subgraph T4["边界 4：持久化层（不可信磁盘/外设）"]
-        V[" .verthys 容器 · pepper.bin · 附属数据目录 .d（idx_cache 等）"]
+        V[" .verthys 容器 · pepper.bin · 附属数据目录 .d（状态/预设/导入日志等）"]
     end
     subgraph T3["边界 3：核心 DLL 层（信任根，进程内）"]
-        C["verthys.dll<br/>api/crypto/container/index/transaction/security<br/>CNG 内核密钥托管"]
+        C["verthys.dll<br/>api/crypto/container/index/security<br/>用户态隔离密钥堆"]
     end
     subgraph T2["边界 2：verthys-worker 子进程"]
         W["单线程 FFI · mitigation policy · 进程级沙盒"]
@@ -32,28 +32,21 @@ flowchart TB
 
 - 边界 1↔2：跨此边界的唯一敏感数据是**口令**（调用后即清零）；传输走子进程管道。
 - 边界 2↔3：只有 `verthys.h` 白名单 ABI 可进入 DLL；worker 加载 DLL 前完成进程级 mitigation 与 DLL SHA-256 预检。
-- 边界 3↔4：落盘一律密文（分区 AEAD + 超级块 HMAC + Merkle）；只读回验，篡改即报应急。
-- 密钥与明文只存在于边界 3 内（且密钥主体在 CNG 内核态），上两层为“零密钥接触”。
+- 边界 3↔4：落盘一律密文（分片 AEAD + A/B 元数据 MAC + Merkle）；只读回验，篡改即报应急。
+- 密钥与明文只存在于边界 3 内（且密钥主体由 vty_vault 会话受控驻留），上两层为“零密钥接触”。
 
 ## 2. 密钥存储与派生链路
 
-### 2.1 V3 密钥层级（以 `keymanager.h`/`keymanager_cng.h`/`verthys_v3_lifecycle.c` 为准）
+### 2.1 密钥层级（以 `vty_keymanager.c` / `vty_keyslot.c` / `vty_module.c` 为准）
 
-```mermaid
-flowchart TB
-    PW["L1 口令 password（用户输入，不落盘）"]
-    DKM["L2 DKM = Argon2id(password ‖ pepper, salt, 超级块参数)<br/>32B 瞬时，派生后立即清零"]
-    MEK["L3 MEK = HKDF-Expand(DKM, verthys/master-key-v3)<br/>32B，导入 CNG 内核后清零"]
-    IK["integrity_key = HKDF-Expand(MEK, verthys/integrity-key-v3)<br/>32B，超级块/温缓存 HMAC 用"]
-    ABC["L4 子密钥 A/B/C：各 32B 随机（OS CSPRNG）<br/>由 MEK 内核态 AEAD 包裹为 60B，存超级块"]
-    PW --> DKM --> MEK
-    MEK --> IK
-    MEK -->|"内核态 wrap（12B nonce‖32B ct‖16B tag）"| ABC
-```
+- **全库数据密钥 `K_c`**：口令经 Argon2id 派生后解封 user 槽；设备根参与 device 槽；两个槽同时通过才得到 `K_c`（AND 语义）。
+- **恢复通道**：恢复码经独立 KDF 解封 recovery 槽，承载同一 `K_c`；恢复码是显式逃生通道。
+- **Keyfile 因子**：可选因子，独立验证后参与 user 槽解封；不改变 `K_c` 语义。
+- **模块密钥 `MDEK`**：每个模块独立口令解封；模块失败不污染库级密钥与熔断。
+- **生命周期**：`K_c` / `MDEK` 只在 `VtyVault` 会话内驻留；锁定、Deinit、应急清零统一经 `vty_vault_free` 释放。
 
-- DKM 与 MEK 仅在解锁流水线 S2→S3 栈帧瞬态存在；`verthys_cng_aead_import_key` 是唯一允许密钥明文进入用户态栈帧的点，导入后 `SecureZeroMemory`。
-- A/B/C 包装密钥经 CNG 内核态解包，解包输出为栈上瞬态，立即导入对应角色句柄并清零；进程终止时 CNG 自动回收内核态密钥，与“锁库即杀进程”语义一致。
-- 记录级隔离：V3 数据经分区 B 密钥 AEAD 加密；v1/v2 遗留方案另派生 `record_key = HKDF(key_b, record_id)` 实现逐条隔离。
+具体派生参数、槽布局与 MAC 覆盖范围以代码为准；版本常量见
+[`core/include/verthys_version.h`](../core/include/verthys_version.h)。
 
 ### 2.2 胡椒（pepper）三层来源
 
@@ -73,7 +66,7 @@ flowchart TB
 
 ### 2.4 关于 “.vsec / .rhat”
 
-澄清：`.vsec`（DLL 只读节，构建期签名基线）与 `.rhat`（DLL 只读节，运行时函数哈希表）是**完整性校验数据**，不是密钥存储；密钥的“拆分存储”体现为 V3 超级块内 `wrapped_key_a/b/c` 三份包装密钥与 3 副本超级块，而非文件级拆分。详见 §4 与 [ARCHITECTURE.md](ARCHITECTURE.md) §2.5。
+澄清：`.vsec`（DLL 只读节，构建期签名基线）与 `.rhat`（DLL 只读节，运行时函数哈希表）是**完整性校验数据**，不是密钥存储；密钥拆分体现为容器内 user/device/recovery 密钥槽与模块槽，而非文件级拆分。详见 §4 与 [ARCHITECTURE.md](ARCHITECTURE.md) §2.5。
 
 ### 2.5 文件记录口令派生（文件级 KDF，2026-09-28 收口）
 
@@ -97,9 +90,9 @@ flowchart TB
 台账与回收的完整性语义（会话结算、GC 前置守卫、删除事务化）见 [DATA_FLOW.md](DATA_FLOW.md) §5
 与 [ARCHITECTURE.md](ARCHITECTURE.md) §3.1。
 
-### 2.6 v4 全库 DEK 轮换（D9，API 版本 0x0011）
+### 2.6 全库 DEK 轮换（D9，API 版本 0x0011）
 
-v4 容器以 `K_c` 作为全库数据密钥：口令 + 设备根（AND）解封 user/device 槽；
+容器以 `K_c` 作为全库数据密钥：口令 + 设备根（AND）解封 user/device 槽；
 恢复槽独立承载同一 `K_c`（由恢复码派生的 `K_recovery` 包裹）。全库轮换
 不是原地重写，而是“新文件全量重建 + 原子替换”：
 
@@ -158,31 +151,36 @@ v4 容器以 `K_c` 作为全库数据密钥：口令 + 设备根（AND）解封 
 - **密钥边界**：`K_c`/`K_recovery`/模块 MDEK 只在 C 层与 CNG/安全内存中存在；
   worker 仅转发口令字节并回传统计计数，前端只拿到阶段与记录/文件/分片计数。
 
+### 2.7 熔断与回滚状态：固定位置、ACL 与身份绑定
+
+- **位置**：状态文件固定为 `SHGetKnownFolderPath(FOLDERID_LocalAppData)\Verthys\Security\{lockout,rollback}.state`，禁止读取 `LOCALAPPDATA` 等可改写环境变量；目录使用 protected DACL（当前用户与 SYSTEM 完全控制、Administrators 只读、继承 ACE 清零），并拒绝重解析点与非当前用户 owner。
+- **身份**：见证域 ID 由设备根哈希（MachineGuid HMAC）与主体派生，输出 SHA-256 前 16 字节。熔断主体为当前用户 SID 哈希，回滚主体为容器 UUID；状态文件路径不再参与身份。
+- **缺失状态**：任一见证域仍有密钥即 fail-closed；回滚额外要求容器 `generation >= 2`（成功创建至少一次 `save_meta`）也 fail-closed。只有状态、两套见证都不存在且 `generation < 2` 才视为首次运行；恢复码是显式逃生通道。
+- **升级迁移**：旧路径见证（熔断）与裸 UUID 见证（回滚）只允许迁移期验证；验证通过后轮换到新 ID 并删除旧键。旧键的指纹是特定 TPM 密钥的公钥，删除后无法重建同一指纹，旧状态不可重放。迁移失败不静默清零。
+- **残余边界**：同一用户进程仍可删除状态与见证，形成首次运行；ACL 只能隔离其它用户。TPM NV 在当前 Windows 平台被驱动阻断（实测 `0x80280400`），不作为方案依赖；严格机器级隔离预留在 `vty_machine_limiter` 接口，由后续 SYSTEM 服务在 ProgramData 维护机器级预算。
+
 ## 3. 解锁流程数据流
 
-以 `verthys_unlock_pipeline.h` 的 S0–S6 为准（与《解锁.md》一致）。
+以 `vty_vault_open`（`core/src/crypto/vty_keymanager.c`）为准。
 
 ```mermaid
 sequenceDiagram
     participant FE as 前端控制器
     participant MAIN as 主进程 worker_controller/verthys_controller
     participant WK as verthys-worker
-    participant DLL as verthys.dll（unlock pipeline）
+    participant DLL as verthys.dll（容器会话）
     participant OS as OS/CNG
     FE->>MAIN: invoke unlock(path, password)
     MAIN->>WK: {op:unlock}（stdin JSON）
-    WK->>DLL: Verthys_Unlock(handle, path, pw, flags)
-    DLL->>DLL: S0 前置检查（状态机/emergency 门控/pepper 快速失败）
-    par S1 与 S2 并行
-        DLL->>DLL: S1 读 3 副本超级块 + 无校验结构解析（50ms 预算）
-        DLL->>DLL: S2 DKM=Argon2id(pw‖pepper,salt) → MEK=HKDF(DKM)
-    end
-    DLL->>OS: S3 CNG 批量导入 MEK/A/B/C（内核态句柄）
-    DLL->>DLL: S3 3 副本 HMAC 验证 + 法定人数裁决
-    DLL->>DLL: S4 分区表加载
-    DLL->>DLL: S5 索引预热（温缓存优先，否则冷启动+WAL恢复）
-    DLL->>DLL: S6 最终校验 + 状态切换
-    DLL-->>WK: VERTHYS_OK（或 PARTIAL_UNLOCK）
+    WK->>WK: VRTY magic 预检（非本格式立即 FORMAT）
+    WK->>DLL: Verthys_V4Unlock(handle, path, pw, len)
+    DLL->>DLL: 前置门（状态机/emergency/pepper 快速失败/.vsec 验签）
+    DLL->>DLL: A/B 元数据择一（magic/版本/头哈希校验）
+    DLL->>DLL: KDF=Argon2id(pw‖pepper,salt) → 解封 user 槽
+    DLL->>OS: 设备根解封 device 槽（AND 双包裹）
+    DLL->>DLL: Keyring 解包 K_c/MDEK + DataRoot 根段摘要校验
+    DLL->>DLL: 状态切换 UNLOCKED（单阶段原子）
+    DLL-->>WK: VERTHYS_OK（或 AUTH/FORMAT/...）
     WK-->>MAIN: {op:unlock, ok:true}（stdout JSON）
     MAIN-->>FE: 解锁成功
 ```
@@ -211,8 +209,8 @@ flowchart TB
     B2 --> B3
 ```
 
-- **校验什么**：A 校验 DLL 文件 `.text`/`.rdata`（含 `.rhat`）未能被替换/篡改；B 校验关键函数（v4 库创建/解锁/分片/记录/模块、共享密码学/应急/完整性、v3 密钥组/轮换/超块事务/分区表/WAL/六 Phase 事务/LSM/解锁流水线、`runtime_hash_scan` 自身）的**内存映像**未被 hotpatch。v3 源码拆分后清单分两级：产品 DLL 含共享段 15 项（v4 主路径实现 + 共享安全函数，v3 符号不在产品 map），测试/legacy 构建使用全量 40 项。
-- **何时执行**：A 在解锁入口（`Verthys_Unlock` / `Verthys_V4Unlock` / `V4UnlockKeyfile` / `V4UnlockRecovery`，`integrity_verify_startup`）；B 在解锁成功后一次 + 之后每次写路径 API（Add/Delete/Import/ChangePassword/Flush）经 `runtime_hash_verify_periodic` 时间门控重算（30 分钟间隔）。
+- **校验什么**：A 校验 DLL 文件 `.text`/`.rdata`（含 `.rhat`）未能被替换/篡改；B 校验关键函数（容器创建/解锁/分片/记录/模块/轮换、共享密码学/应急/完整性、`runtime_hash_scan` 自身）的**内存映像**未被 hotpatch。清单分两级：产品 DLL 含共享段 15 项（主路径实现 + 共享安全函数），测试构建使用全量 40 项。
+- **何时执行**：A 在容器解锁入口（`Verthys_V4Unlock` / `Verthys_V4UnlockKeyfile` / `Verthys_V4UnlockRecovery` / `Verthys_V4Create`，`integrity_verify_startup`）；B 在解锁成功后一次 + 之后每次写路径 API（Add/Delete/Import/ChangePassword/Flush）经 `runtime_hash_verify_periodic` 时间门控重算（30 分钟间隔）。
 - **惩罚**：失配即 `emergency_report(KILL, ...)` → 内存绝育 + 终止进程；`.rhat` 表自身纳入 `.vsec` HMAC（防文件级改表）。
 - 构建闭环：`core/tools/rhash_gen.c --patch <dll|exe> [--xlist core|full]` 解析 map 文件（符号 RVA）+ `.pdata`（函数边界）+ `.reloc`（重定位表），对所选 X 清单函数计算 BLAKE2b 补丁 `.rhat`；清单以 X-macro 单源定义，删改任一符号即构建失败（禁静默降级）。
 
@@ -221,9 +219,9 @@ flowchart TB
 | 威胁类别 | 攻击示例 | 防线模块 | 说明 |
 |---|---|---|---|
 | Spoofing 欺骗 | 伪冒合法进程/调用方 | brute_force（限流 + 一次性 auth_token）、session 守卫 | 解锁尝试限流，敏感命令需令牌 |
-| Tampering 篡改 | 改 DLL/改 .verthys/内存补丁 | integrity（.vsec+.rhat）、superblock HMAC、Merkle、partition AEAD | 三类篡改各有信号（INTEGRITY_FAIL / PROCESS_TAMPER / SUPERBLOCK_HMAC） |
+| Tampering 篡改 | 改 DLL/改 .verthys/内存补丁 | integrity（.vsec+.rhat）、容器元数据 HMAC、DataRoot 摘要、记录/分片 AEAD | 三类篡改各有信号（INTEGRITY_FAIL / PROCESS_TAMPER / CONTAINER_HMAC） |
 | Repudiation 抵赖 | 操作无痕 | util/audit_log.rs + security_commands/audit.rs | 安全命令写入审计日志（AEAD 保护） |
-| Information Disclosure 泄露 | 读内存/转储/冷启动 | memory_guard + secure_allocator + 进程隔离 | V4 密钥驻留独立隔离堆并在锁定/应急时清零；内核态密钥托管暂缓（用户态加固已生效，见 5.1） |
+| Information Disclosure 泄露 | 读内存/转储/冷启动 | memory_guard + secure_allocator + 进程隔离 | 密钥驻留独立隔离堆并在锁定/应急时清零；内核态密钥托管暂缓（用户态加固已生效，见 5.1） |
 | Denial of Service 拒绝服务 | 资源耗尽/暴力爆破 | emergency（分级响应）+ 资源上限（512MB/句柄/线程）+ brute_force | 达到预算拒绝新操作、熔断 |
 | Elevation of Privilege 提权 | 注入/Hook/进程镂空 | layer1 job_isolation、layer4 tls_loader+syscall_direct、layer5 process_sandbox、anti_inject | 进程级 mitigation + Job ACL 等效 PPL |
 
@@ -236,7 +234,7 @@ flowchart TB
 | 路径 | 判定证据 |
 |---|---|
 | 挂起绕过 | 驻留密钥会话数 > 0 即 `DEGRADED`，原因 `SUSPEND_UNPREVENTABLE`；看门狗未接线追加 `SUSPEND_GUARD_INACTIVE`。主进程心跳（worker 每 500ms `SetEvent`）+ 3s 超时 + 全线程挂起确认后终止 worker 并触发外部锁定 |
-| 内存 Dump | 解锁态存在 V4 驻留密钥即 `DEGRADED`（内核托管暂缓），锁定态 `BLOCKED` |
+| 内存 Dump | 解锁态存在驻留密钥即 `DEGRADED`（内核托管暂缓），锁定态 `BLOCKED` |
 | 休眠取证 | `HKLM\SYSTEM\CurrentControlSet\Control\Power` 休眠状态：禁用 `BLOCKED`、启用 `DEGRADED`、未知 `UNCHECKED` |
 | IAT-Inline Hook | 磁盘 ntdll 导出基线 + 内存入口字节比较 + IAT 槽校验；首次异常仅遥测，连续两次异常 `KILL`；自身 IAT 被改写且无直连系统调用证据时 `BLOCKED` |
 | DLL 劫持 | `GetProcessMitigationPolicy` 回读 ChildProcess/ImageLoad/DynamicCode/StrictHandle/ExtensionPoint，核心位缺失即 `FAILED`；worker 自报 attrs 不再作为判据 |
@@ -249,14 +247,14 @@ flowchart TB
 
 | 关键路径 | 审计点（函数/位置） |
 |---|---|
-| 解锁 | `Verthys_Unlock` → `verthys_unlock_pipeline_run`（S0–S6）；`keymanager_derive_master_v3`（DKM/MEK 派生即清零）；`verthys_cng_km_import_batch`（MEK 导入后清零） |
-| 密钥注入/解包 | `verthys_cng_aead_import_key`、`verthys_cng_km_wrap_key`、`verthys_cng_km_rotate_abc` |
+| 解锁 | `Verthys_V4Unlock` → `vty_vault_open`（口令/设备根双槽解封 `K_c`） |
+| 密钥注入/解包 | `vty_vault_open` / `vty_keyslot_unseal` / `vty_module_unlock` |
 | pepper 来源 | `verthys_pepper_init / load_from_os`（来源错误置 `PEPPER_SOURCE`）、`pepper_source_error` |
-| 改密/轮换 | `verthys_cng_km_verify_mek / rekey / rotate_mek`、`vsb_txn_v3_commit` |
+| 改密/轮换 | `vty_keymanager` 改密路径、`vty_rotate_*` 全库 DEK 重建与原子替换 |
 | 导出 | `Verthys_Export`（流式、明文经用户态缓冲，用后清零）；导出密码不混胡椒 |
 | 完整性校验 | `integrity_verify_startup`、`runtime_hash_verify(_periodic)`、`Verthys_VerifyIntegrity` |
 | 应急自毁 | `emergency_report / emergency_trigger`（TELEMETRY/DEGRADE/KILL 三级） |
-| 事务提交 | `vsb_v3_commit_quorum`（3 副本 2/3 成功）、WAL 回放 |
+| 提交一致性 | A/B 元数据双副本原子提交；`index/vty_store.c` 数据区游标推进 |
 | 预设切档 | `security_apply_preset`（授权 → 原子落盘 → worker 切档 → C 投影回读，不一致回滚并报 `E_PRESET_VERIFY`）；落盘失败回滚置 `preset_persist_dirty` 阻断后续切档 |
 | 自完整性核验 | `integrity_check::verify_self_image_async`（启动主镜像 WinVerifyTrust）+ 后台巡检抽样复核；结果写 `INTEGRITY_CHECK` 审计事件 |
 | 痕迹清理 | `trace_cleanup::run_locked_cleanup_async`（锁定/退出触发）；仅删除指向应用自身痕迹域（`.verthys`/`.venc` 扩展名 + 应用自有目录前缀）的最近记录条目，写 `TRACE_CLEANUP` 审计事件 |
@@ -269,13 +267,13 @@ flowchart TB
 
 ### 7.1 特性位契约（11 位，位序跨层禁止重排）
 
-位序：0=anti_debug，1=anti_inject，2=integrity_check，3=memory_guard，4=key_separation（V3 遗留键名；V4 映射密钥隔离堆），5=emergency_response，6=session_lock_on_idle，7=module_patrol，8=clipboard_guard，9=usb_clone_detect，10=trace_cleanup；有效掩码 `0x7FF`。
+位序：0=anti_debug，1=anti_inject，2=integrity_check，3=memory_guard，4=key_separation（历史遗留键名；映射密钥隔离堆），5=emergency_response，6=session_lock_on_idle，7=module_patrol，8=clipboard_guard，9=usb_clone_detect，10=trace_cleanup；有效掩码 `0x7FF`。
 
 档位值：BALANCED `0x6FF`、SECURE `0x7FF`、PERFORMANCE `0x073`。C 层投影接口 `security_preset_feature_bits` / `security_active_preset` 为唯一口径；应用侧镜像 `app_feature_gate`（AtomicU32）按回读结果更新，未应用预设时按保守全开处理——任何异常路径朝"防护更严"方向失败。
 
 ### 7.2 红线能力（全档恒定，不随档位或用户开关关闭）
 
-调试检测（anti_debug 全档恒开，性能档不减负）、注入拦截、V4 密钥驻留隔离堆（`secure_allocator`，解锁态不可导出）、应急熔断（`emergency.c` 无条件 KILL 级）、锁定清空剪贴板、系统锁屏/注销/断连/挂起即锁定（WTS + 电源事件）、全局密钥导出二次验证。`key_separation` / `emergency_response` 两位由红线常量提供；其中 `key_separation` 为 V3 遗留位，产品 v4-only 构建不再链接该实现，V4 密钥由隔离堆承接。
+调试检测（anti_debug 全档恒开，性能档不减负）、注入拦截、密钥驻留隔离堆（`secure_allocator`，解锁态不可导出）、应急熔断（`emergency.c` 无条件 KILL 级）、锁定清空剪贴板、系统锁屏/注销/断连/挂起即锁定（WTS + 电源事件）、全局密钥导出二次验证。`key_separation` / `emergency_response` 两位由红线常量提供；其中 `key_separation` 为历史遗留位，产品构建不再链接旧三权分立实现，密钥由隔离堆承接。
 
 ### 7.3 特性执行路径（能力真实性）
 
@@ -307,3 +305,19 @@ flowchart TB
 本机 `local` profile 只使用回环 HTTP 与安装包签名；它防网络、其他账户、误替换与损坏，不防同账户任意写入。production profile 通过 HTTPS、清单签名与鉴权提高门槛。
 
 安装前必须完成锁库落盘与脏数据检查；安装器只替换程序目录，用户容器不在替换范围。更新日志只记录阶段、错误码、耗时、版本与哈希前缀。
+
+## 9. P2 机器级安全服务
+
+P2 以独立 SYSTEM 服务提供机器级失败预算；服务是强制依赖，未安装、不可达、状态损坏或验签失败一律 fail-closed，不保留仅本地熔断的兼容路径。
+
+| 组件 | 信任边界 | 关键约束 |
+|---|---|---|
+| `VerthysSecuritySvc.exe` | LocalSystem | 只在 `%ProgramData%\Verthys\Security` 维护令牌桶；不接触口令、容器或用户密钥 |
+| `verthys.dll` P2 客户端 | 当前用户 | 只读 HKLM 公钥、连接命名管道、校验 ECDSA 响应签名；不持有私钥 |
+| `VerthysSecuritySvc.exe`（`/install` 等子命令） | 应用安装器提升管理员上下文 | 只做安装/升级/卸载/修复；不生成私钥 |
+
+协议为定长 64 字节请求 / 128 字节响应，小端二进制；服务端校验客户端映像与已加载 `verthys.dll` 的 Authenticode 发布者指纹，客户端校验服务端 ECDSA P-256 响应签名。服务已安装但不可达、状态缺失/损坏、签名失败一律 fail-closed；`reset` 只记录成功审计，不恢复机器预算。
+
+客户端门禁位于认证收口：`vty_vault_open_internal`（V4 口令/keyfile 解锁）、`vty_vault_open_recovery`（恢复码解锁）、`vty_vault_verify_user_password` / `vty_vault_attach_keyfile`（改密、轮换、keyfile 复核）与 `desc_open_shares`（全部模块口令认证）。`check` 先于 P1 熔断与 Argon2id；失败同时记账 P1 与机器预算，成功同时 reset。
+
+状态目录 ACL 为 SYSTEM 完全控制、Administrators 只读、Users 无权限；状态文件带 HMAC-SHA256，容量与 schema 不匹配按损坏拒绝。明确残余边界：同一用户拥有代码执行能力时仍可 patch 客户端跳过调用；管理员/内核攻击者超出威胁模型。完整威胁模型与决策见 `docs/P2_SECURITY_SERVICE_PLAN.md`。

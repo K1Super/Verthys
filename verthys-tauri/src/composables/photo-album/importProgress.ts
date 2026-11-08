@@ -130,8 +130,6 @@ export class ImportProgressState {
   /** 最近一次速率骤降后的最新单条耗时（卡顿期间 ETA 基于此值） */
   private stallPerItemMs = 0;
 
-  /** 帧对齐：待刷新标志 */
-  private dirty = false;
   /** 帧对齐：最近一次 UI 刷新时间戳 */
   private lastFlushAt = 0;
   /** 帧对齐：requestAnimationFrame 句柄 */
@@ -178,7 +176,6 @@ export class ImportProgressState {
     this.normalBatchStreak = 0;
     this.stalled = false;
     this.stallPerItemMs = 0;
-    this.dirty = false;
     this.lastFlushAt = 0;
     this.forceFlush = false;
 
@@ -220,7 +217,6 @@ export class ImportProgressState {
     //   EWMA 随之下探，紧随其后的正常批次就会被误判成「速率骤降」。
     const timedCount = processedInBatch - skippedInBatch;
     if (timedCount <= 0) {
-      this.dirty = true;
       this.requestFlush();
       return;
     }
@@ -249,8 +245,7 @@ export class ImportProgressState {
     // 速率骤降检测
     this.detectStall(perItemMs);
 
-    // 标记 dirty，请求帧对齐刷新
-    this.dirty = true;
+    // 请求帧对齐刷新
     this.requestFlush();
   }
 
@@ -313,7 +308,6 @@ export class ImportProgressState {
     }
 
     this.lastFlushAt = now;
-    this.dirty = false;
     this.forceFlush = false;
 
     // 计算当前快照
@@ -438,7 +432,6 @@ export class ImportProgressState {
     this.normalBatchStreak = 0;
     this.stalled = false;
     this.stallPerItemMs = 0;
-    this.dirty = false;
     this.lastFlushAt = 0;
     this.forceFlush = false;
 

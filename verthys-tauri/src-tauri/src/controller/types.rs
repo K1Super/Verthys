@@ -44,9 +44,6 @@ impl RecordType {
     pub fn new(t: u32) -> Self {
         RecordType(t)
     }
-    pub fn as_u32(&self) -> u32 {
-        self.0
-    }
 }
 
 impl From<u32> for RecordType {
@@ -479,6 +476,9 @@ pub struct VerthysResponse {
     /// 结构化错误码（前端按码分支控制流与引导文案，不做文案判定）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// 锁定/限流的建议等待秒数（仅锁定类错误返回，前端展示动态倒计时）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
     /// 批量枚举记录列表（仅 enumerate_records 操作返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub records: Option<Vec<VerthysRecordEntry>>,
@@ -591,7 +591,7 @@ pub struct VerthysResponse {
     /// 记录型块密文内嵌的块总数（仅 module_open 的 chunk 布局返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u32>,
-    /// v4 一次性恢复码（仅 v4_create 返回；展示确认后前端必须清零）
+    /// 一次性恢复码（仅 v4_create 返回；展示确认后前端必须清零）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery_code: Option<String>,
     /// PCR 是否已启用（仅 v4_pcr_status 返回）
@@ -600,23 +600,23 @@ pub struct VerthysResponse {
     /// PCR 位图（PCR0–23，仅 v4_pcr_status 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pcr_select: Option<u32>,
-    /// v4 keyfile 因子是否已启用（仅 v4_keyfile_status / enable / disable 返回）
+    /// keyfile 因子是否已启用（仅 v4_keyfile_status / enable / disable 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyfile_enabled: Option<bool>,
     /// 当前会话是否由恢复码打开（仅 v4_keyfile_status 返回）；
     /// 恢复会话可重绑/关闭 keyfile（keyfile 丢失逃生）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery_mode: Option<bool>,
-    /// v4 模块加密是否已启用（仅 v4_module_status 返回）
+    /// 模块加密是否已启用（仅 v4_module_status 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// v4 模块本会话是否已解锁（仅 v4_module_status 返回）
+    /// 模块本会话是否已解锁（仅 v4_module_status 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unlocked: Option<bool>,
-    /// v4 模块是否已绑定恢复码槽（仅 v4_module_status 返回）
+    /// 模块是否已绑定恢复码槽（仅 v4_module_status 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_recovery: Option<bool>,
-    /// v4 模块是否已删除（仅 v4_module_status 返回）
+    /// 模块是否已删除（仅 v4_module_status 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted: Option<bool>,
     /* 全库 DEK 轮换统计（仅 v4_rotate_begin 返回）
@@ -648,6 +648,7 @@ impl VerthysResponse {
             data: None,
             error: None,
             error_code: None,
+            retry_after_secs: None,
             records: None,
             summary_records: None,
             exhausted: None,
@@ -700,6 +701,26 @@ impl VerthysResponse {
         resp.error_code = Some(code.into());
         resp
     }
+    /// 结构化锁定/限流错误响应：附建议等待秒数
+    pub fn err_code_retry(op: &str, code: &str, msg: &str, retry_after_secs: u64) -> Self {
+        let mut resp = Self::err_code(op, code, msg);
+        resp.retry_after_secs = Some(retry_after_secs);
+        resp
+    }
+    /// worker 响应把稳定错误码放在 error 字段（ERR_XXXXXXXX）；解析后补齐
+    /// error_code，让前端按码分支而不是匹配文案。
+    pub fn adopt_worker_error_code(&mut self) {
+        if self.ok || self.error_code.is_some() {
+            return;
+        }
+        if let Some(err) = self.error.as_deref() {
+            if let Some(hex) = err.strip_prefix("ERR_") {
+                if hex.len() == 8 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    self.error_code = Some(err.to_string());
+                }
+            }
+        }
+    }
     pub fn err(op: &str, msg: &str) -> Self {
         VerthysResponse {
             ok: false,
@@ -710,6 +731,7 @@ impl VerthysResponse {
             data: None,
             error: Some(msg.into()),
             error_code: None,
+            retry_after_secs: None,
             records: None,
             summary_records: None,
             exhausted: None,
@@ -755,9 +777,6 @@ impl VerthysResponse {
             rotate_chunks: None,
             rotate_bytes: None,
         }
-    }
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| r#"{"ok":false,"op":"error"}"#.into())
     }
 }
 

@@ -318,7 +318,7 @@ const loadAccounts = async (): Promise<void> => {
   // 1. 类型定义先就位：条目的敏感行与掩码展示依赖类型声明
   await loadVaultTypes();
 
-  // 2. ID 来源：V4 类型盲索引（权威、跨重启稳定）；枚举失败时
+  // 2. ID 来源：类型盲索引（权威、跨重启稳定）；枚举失败时
   //    resolveTypeIds 自动回退全量记录扫描。摘要缓存不参与类型过滤。
   let allIds: number[];
   try {

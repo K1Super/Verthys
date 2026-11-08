@@ -156,20 +156,6 @@ export function removeShallowItems<T>(
 }
 
 /**
- * 通过索引移除单条记录，并触发响应式更新
- *
- * @param arr shallowRef 持有的数组
- * @param index 待移除记录的索引
- * @returns 是否移除成功
- */
-export function removeShallowItemAt<T>(arr: ShallowRef<T[]>, index: number): boolean {
-  if (index < 0 || index >= arr.value.length) return false;
-  arr.value.splice(index, 1);
-  triggerRef(arr);
-  return true;
-}
-
-/**
  * 清空数组（shallowRef 赋值本身即触发更新）
  *
  * @param arr shallowRef 持有的数组

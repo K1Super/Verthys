@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ref } from "vue";
 import { VerthysErrorCode } from "../../lib/verthys_error";
+import type { VerifyRhythm } from "./useVerifyRhythm";
 
 const mocks = vi.hoisted(() => ({
   initUnlock: vi.fn(),
@@ -51,6 +52,29 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 import { useUnlockFlow } from "./useUnlockFlow";
 
+/** 进度感知层桩：记录业务层推送与收束/冻结指令 */
+function stubRhythm() {
+  return {
+    visualValue: ref(0),
+    visualPercent: ref(0),
+    dimmed: ref(false),
+    phase: ref<'IDLE'>('IDLE'),
+    start: vi.fn(),
+    pushRealProgress: vi.fn(),
+    seal: vi.fn(),
+    halt: vi.fn(),
+    waitForComplete: vi.fn(async () => {}),
+    waitForHaltMin: vi.fn(async () => {}),
+    dispose: vi.fn(),
+  } as unknown as VerifyRhythm & {
+    start: ReturnType<typeof vi.fn>;
+    pushRealProgress: ReturnType<typeof vi.fn>;
+    seal: ReturnType<typeof vi.fn>;
+    halt: ReturnType<typeof vi.fn>;
+    waitForComplete: ReturnType<typeof vi.fn>;
+  };
+}
+
 /** 依赖注入桩 */
 function stubOptions() {
   return {
@@ -58,6 +82,7 @@ function stubOptions() {
     showError: vi.fn(),
     showToast: vi.fn(),
     checkDevice: vi.fn(async () => {}),
+    rhythm: stubRhythm(),
   };
 }
 
@@ -191,6 +216,58 @@ describe("useUnlockFlow keyfile 因子（D3）", () => {
     expect(options.showError).toHaveBeenCalled();
   });
 
+});
+
+describe("useUnlockFlow 进度感知层集成", () => {
+  it("阶段进度推送感知层，100 仅作完成提示，成功后收束补满", async () => {
+    type Progress = {
+      stage: number;
+      percent: number;
+      elapsed_ms: number;
+      message: string;
+    };
+    mocks.initUnlock.mockImplementationOnce(
+      async (
+        _path: string,
+        _pre: unknown,
+        onProgress?: (p: Progress) => void,
+      ) => {
+        onProgress?.({ stage: 1, percent: 2, elapsed_ms: 5, message: "检查存储路径" });
+        onProgress?.({ stage: 5, percent: 88, elapsed_ms: 20, message: "建立摘要索引" });
+        onProgress?.({ stage: 8, percent: 100, elapsed_ms: 30, message: "解锁完成" });
+        return okResult();
+      },
+    );
+    const options = stubOptions();
+    const api = useUnlockFlow(options);
+
+    await api.doUnlock("/tmp/v.verthys", false);
+
+    expect(options.rhythm.start).toHaveBeenCalledTimes(1);
+    // 终值 100 不推送：进度补满由收束事件负责
+    expect(options.rhythm.pushRealProgress.mock.calls.map(([v]) => v)).toEqual([
+      0.02,
+      0.88,
+    ]);
+    expect(options.rhythm.seal).toHaveBeenCalledTimes(1);
+    expect(options.rhythm.waitForComplete).toHaveBeenCalledTimes(1);
+    expect(api.unlockProgressMsg.value).toBe("解锁完成");
+  });
+
+  it("失败路径冻结感知层，不伪装完成", async () => {
+    mocks.initUnlock.mockResolvedValueOnce({
+      ok: false as const,
+      code: VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED,
+      message: "打开加密库失败",
+    });
+    const options = stubOptions();
+    const api = useUnlockFlow(options);
+
+    await api.doUnlock("/tmp/v.verthys", false);
+
+    expect(options.rhythm.halt).toHaveBeenCalled();
+    expect(options.rhythm.seal).not.toHaveBeenCalled();
+  });
 });
 
 describe("useUnlockFlow 恢复码链路", () => {

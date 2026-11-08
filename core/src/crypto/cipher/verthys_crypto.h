@@ -98,25 +98,6 @@ int verthys_argon2id_derive_raw(uint8_t out[VERTHYS_KEY_BYTES],
                               const uint8_t salt[VERTHYS_SALT_BYTES]);
 
 /* ================================================================== *
- * Argon2id 动态校准（创建期跑分选参）
- * ================================================================== *
- * 以 mem_kib 固定、迭代次数为变量的两次探测（初始测量 + 换算确认），
- * 选择使单次派生耗时最接近 target_ms 的迭代次数，钳制在
- * [min_iters, max_iters]。选参结果由调用方写入超级块（解锁时按参数派生，
- * 与基准监控共用存储）。SECURE 预设不使用本函数（合规确定性要求，
- * 参数固定 64MiB/3/1）。
- *
- * 返回 0 成功（out_iters 写入选定迭代数），非 0 失败。
- */
-int verthys_argon2_calibrate(const uint8_t *password, size_t pw_len,
-                           const uint8_t salt[VERTHYS_SALT_BYTES],
-                           const uint8_t pepper[VERTHYS_KEY_BYTES],
-                           uint32_t mem_kib,
-                           uint32_t target_ms,
-                           uint32_t min_iters, uint32_t max_iters,
-                           uint32_t *out_iters);
-
-/* ================================================================== *
  * 完全参数化的密钥派生接口
  *                                                                    *
  * 设计目标：                                                          *
@@ -163,7 +144,7 @@ __declspec(noinline) int verthys_hmac_sha256(uint8_t out[VERTHYS_HMAC_BYTES],
                       const uint8_t key[VERTHYS_KEY_BYTES],
                       const uint8_t *data, size_t data_len);
 
-/* ---------- BLAKE2b-256 通用哈希（V3 内容寻址） ----------
+/* ---------- BLAKE2b-256 通用哈希 ----------
  * libsodium crypto_generichash（BLAKE2b-256，无密钥模式）。
  * out：32 字节 digest；data 可为 NULL（仅当 data_len==0）。
  * 返回 0 成功，非 0 失败。

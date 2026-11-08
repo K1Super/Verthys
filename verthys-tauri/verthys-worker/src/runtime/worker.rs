@@ -24,7 +24,7 @@ use zeroize::Zeroize;
 use crate::log::{diag, init_diag};
 use crate::runtime::ffi_types::*;
 use crate::runtime::format_os_error;
-use crate::runtime::progress_cb::{unlock_progress_cb, vty_rotate_progress_cb};
+use crate::runtime::progress_cb::vty_rotate_progress_cb;
 #[cfg(windows)]
 use crate::runtime::scan_shm;
 use crate::runtime::protocol::SecurityStatusReport;
@@ -133,23 +133,23 @@ impl Drop for SummaryBatchGuard {
 }
 
 /* ------------------------------------------------------------------ *
- * v4 容器入口白名单                                                   *
+ * 容器入口白名单                                                   *
  * ------------------------------------------------------------------ */
 
-/// 只接受 v4 容器 magic `VRTY`。
+/// 只接受 VRTY 容器 magic。
 ///
-/// 产品解锁入口不得依赖 C 层按文件头分发：通用 `Verthys_Unlock` 仍保留
-/// v3 分支，任何把 v3 文件交给产品入口的路径都必须在这里被拒绝。
+/// 产品解锁入口不依赖 C 层按文件头分发，非 VRTY magic 的容器必须在
+/// 进入 C 层前被拒绝。
 /// 返回错误码与 C 层一致：0x05=FORMAT，0x08=IO。
-pub(crate) fn check_v4_magic(path: &str) -> Result<(), u32> {
+pub(crate) fn check_container_magic(path: &str) -> Result<(), u32> {
     const VERTHYS_ERR_IO: u32 = 0x00000008;
     const VERTHYS_ERR_FORMAT: u32 = 0x00000005;
-    const V4_MAGIC: &[u8; 4] = b"VRTY";
+    const CONTAINER_MAGIC: &[u8; 4] = b"VRTY";
 
     let mut file = std::fs::File::open(path).map_err(|_| VERTHYS_ERR_IO)?;
     let mut header = [0u8; 8];
     let read = file.read(&mut header).map_err(|_| VERTHYS_ERR_IO)?;
-    if read < V4_MAGIC.len() || &header[..V4_MAGIC.len()] != V4_MAGIC {
+    if read < CONTAINER_MAGIC.len() || &header[..CONTAINER_MAGIC.len()] != CONTAINER_MAGIC {
         return Err(VERTHYS_ERR_FORMAT);
     }
     Ok(())
@@ -417,13 +417,12 @@ impl Worker {
             init_diag!("[worker] Verthys_Init 成功（六层动态防护已就绪），进入主循环");
 
             /* DLL 版本预检：布局敏感调用（Unlock/Scan 系列携带跨边界结构体）
-             * 之前校准接口与容器格式版本。版本错位的旧 DLL 在此被显式拒绝，
+             * 之前校准 DLL 接口版本。版本错位的旧 DLL 在此被显式拒绝，
              * 而不是在后续 FFI 结构体解析时以栈损坏形式崩溃。预检读取的是
              * VerthysContainerInfo 前 8 字节——该头部在任何容器状态均可读，
              * stateless 且无副作用。预检失败时进程随即退出，已初始化句柄
              * 由进程回收，无驻留窗口。 */
             const WORKER_KNOWN_API_VERSION: u32 = 0x0014;
-            const WORKER_EXPECTED_FMT_V3: u16 = 3;
             let get_info: Symbol<VerthysGetContainerInfoFn> =
                 lib.get(b"Verthys_GetContainerInfo").map_err(|e| {
                     init_diag!("[worker] DLL 缺少 Verthys_GetContainerInfo 导出（版本过旧），拒绝加载: {}", e);
@@ -439,17 +438,6 @@ impl Worker {
                 init_diag!("[worker] DLL 版本预检调用失败: code={:08X}", probe_r);
                 return Err(format!("Verthys_GetContainerInfo failed: {:08X}", probe_r));
             }
-            if probe.fmt_version != WORKER_EXPECTED_FMT_V3 {
-                init_diag!(
-                    "[worker] DLL 容器格式版本不匹配: dll_fmt={}, expected={}，拒绝加载",
-                    probe.fmt_version,
-                    WORKER_EXPECTED_FMT_V3
-                );
-                return Err(format!(
-                    "DLL format version mismatch: {} != {}",
-                    probe.fmt_version, WORKER_EXPECTED_FMT_V3
-                ));
-            }
             if probe.api_version > WORKER_KNOWN_API_VERSION {
                 init_diag!(
                     "[worker] DLL 接口版本超前于 worker: dll_api={:04X}, worker={:04X}，拒绝加载",
@@ -461,6 +449,8 @@ impl Worker {
                     probe.api_version, WORKER_KNOWN_API_VERSION
                 ));
             }
+            /* 容器格式版本由 C 层编译期能力上报（当前 4）；worker 不在加载期
+             * 与固定字面量比较——避免把“单一格式”版本演进绑死在 worker 侧。 */
             init_diag!(
                 "[worker] DLL 版本预检通过: api={:04X}, fmt={}",
                 probe.api_version,
@@ -481,31 +471,14 @@ impl Worker {
         }
     }
 
-    /// v4 专用解锁入口：先做 magic 白名单，再调用 `Verthys_V4Unlock`。
-    ///
-    /// `flags` 参数保留在签名中以兼容现有调用点，但 v4 解锁不接受 v3
-    /// 的预热位域；C 层 v4 路径始终重新读取元数据。
-    pub(crate) fn call_unlock(&self, path: &str, password: &str, _flags: u32) -> u32 {
-        if let Err(rc) = check_v4_magic(path) {
+    /// 专用解锁入口：先做 magic 白名单，再调用容器解锁入口。
+    /// C 层路径始终重新读取元数据。
+    pub(crate) fn call_unlock(&self, path: &str, password: &str) -> u32 {
+        if let Err(rc) = check_container_magic(path) {
             return rc;
         }
         unsafe {
             let lib = &self._lib;
-
-            /* v4 解锁当前不产生分阶段进度事件；回调注册保留为向前兼容：
-             * 若后续 C 层在 v4 路径接入进度环，worker 无需再改加载逻辑。
-             * DLL 未导出该符号时静默跳过。 */
-            if let Ok(register_fn) = lib.get::<VerthysRegisterUnlockProgressFn>(
-                b"Verthys_RegisterUnlockProgressCallback\0",
-            ) {
-                let _ = ffi_call(|| {
-                    register_fn(
-                        self.handle,
-                        Some(unlock_progress_cb),
-                        std::ptr::null_mut(),
-                    )
-                });
-            }
 
             let func: Symbol<VerthysV4UnlockFn> = match lib.get(b"Verthys_V4Unlock") {
                 Ok(f) => f,
@@ -601,7 +574,7 @@ impl Worker {
     /// 修复：调用 Verthys_Flush 显式刷盘
     ///
     /// 替代旧 verthys_flush 的 lock+unlock 模式（有 worker 卡在 LOCKED 状态的风险）。
-    /// Verthys_Flush 语义（V3-only）：
+    /// Verthys_Flush 语义：
     ///   - MemTable 强制 flush（冻结落盘 L0 SSTable → Manifest 原子提交 → WAL 复位）
     ///   - 空 MemTable 为 no-op，不清零密钥、不改 state
     ///
@@ -1157,7 +1130,7 @@ impl Worker {
     /// 返回 (rc, found, lid)：rc=0 成功（found=0/1），rc!=0 失败
     /// 与 call_has_record_by_type 的关键差异：
     ///   1. 同时返回 lid，省去二次 find_lid IPC 往返
-    ///   2. V3-only：fmt!=V3 时 C 层返回 FORMAT（无旧格式兼容分支）
+    ///   2. 格式不符时 C 层返回 FORMAT（无旧格式兼容分支）
     pub(crate) fn call_find_first_lid_by_type(&self, rtype: u8) -> (u32, bool, u64) {
         let mut found: u8 = 0;
         let mut lid: u64 = 0;
@@ -1173,7 +1146,7 @@ impl Worker {
         }
     }
 
-    /// 按类型分页枚举记录 ID（V4 类型盲索引，API 0x0012）。
+    /// 按类型分页枚举记录 ID（类型盲索引，API 0x0012）。
     /// 不读取记录密文；out_ids 长度必须 >= max_count。
     pub(crate) fn call_list_ids_by_type(
         &self,
@@ -1288,13 +1261,13 @@ impl Worker {
     }
 
     /* ================================================================ *
-     * v4 模块 M1 会话 FFI                                              *
+     * 模块 M1 会话 FFI                                              *
      *                                                                *
      * 只转发模块索引与口令/恢复码；MDEK 与任何派生密钥都由 C 层持有，   *
      * worker 不缓存模块口令，也不在响应中返回密钥。                    *
      * ================================================================ */
 
-    pub(crate) fn call_v4_module_enable(
+    pub(crate) fn call_module_enable(
         &self,
         module_id: u32,
         password: &str,
@@ -1331,7 +1304,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_module_unlock(&self, module_id: u32, password: &str) -> u32 {
+    pub(crate) fn call_module_unlock(&self, module_id: u32, password: &str) -> u32 {
         unsafe {
             let lib = &self._lib;
             let func: Symbol<VerthysV4ModuleUnlockFn> =
@@ -1352,7 +1325,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_module_lock(&self, module_id: u32) -> u32 {
+    pub(crate) fn call_module_lock(&self, module_id: u32) -> u32 {
         unsafe {
             let lib = &self._lib;
             let func: Symbol<VerthysV4ModuleLockFn> =
@@ -1364,7 +1337,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_module_rotate_password(
+    pub(crate) fn call_module_rotate_password(
         &self,
         module_id: u32,
         old_password: &str,
@@ -1393,7 +1366,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_module_disable(&self, module_id: u32, password: &str) -> u32 {
+    pub(crate) fn call_module_disable(&self, module_id: u32, password: &str) -> u32 {
         unsafe {
             let lib = &self._lib;
             let func: Symbol<VerthysV4ModuleDisableFn> =
@@ -1414,7 +1387,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_module_delete(
+    pub(crate) fn call_module_delete(
         &self,
         module_id: u32,
         password: Option<&str>,
@@ -1448,7 +1421,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_module_bind_recovery(
+    pub(crate) fn call_module_bind_recovery(
         &self,
         module_id: u32,
         password: &str,
@@ -1480,7 +1453,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_module_reseal_device(&self, module_id: u32, password: &str) -> u32 {
+    pub(crate) fn call_module_reseal_device(&self, module_id: u32, password: &str) -> u32 {
         unsafe {
             let lib = &self._lib;
             let func: Symbol<VerthysV4ModuleResealDeviceFn> =
@@ -1501,7 +1474,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_module_status(
+    pub(crate) fn call_module_status(
         &self,
         module_id: u32,
     ) -> Result<VerthysModuleStatusC, u32> {
@@ -1518,7 +1491,33 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_recovery_rotate(
+    /// 只读查询模块锁剩余秒数；查询不可用时返回 None（不改变错误链）。
+    pub(crate) fn call_module_lockout_remaining(&self, module_id: u32) -> Option<u64> {
+        let mut secs: u32 = 0;
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysV4ModuleLockoutRemainingFn> = lib
+                .get(b"Verthys_V4ModuleLockoutRemaining")
+                .ok()?;
+            let rc = ffi_call(|| func(self.handle, module_id, &mut secs)).unwrap_or(0xFFFFFFFF);
+            if rc == VERTHYS_OK { Some(secs as u64) } else { None }
+        }
+    }
+
+    /// 只读查询库级熔断剩余秒数；查询不可用时返回 None（不改变错误链）。
+    pub(crate) fn call_get_lib_lockout_remaining(&self) -> Option<u64> {
+        let mut secs: u32 = 0;
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysGetLibLockoutRemainingFn> = lib
+                .get(b"Verthys_GetLibLockoutRemaining")
+                .ok()?;
+            let rc = ffi_call(|| func(&mut secs)).unwrap_or(0xFFFFFFFF);
+            if rc == VERTHYS_OK { Some(secs as u64) } else { None }
+        }
+    }
+
+    pub(crate) fn call_recovery_rotate(
         &self,
         password: &str,
         old_recovery: &str,
@@ -1561,13 +1560,13 @@ impl Worker {
     }
 
     /* ================================================================ *
-     * v4 D9 全库 DEK 轮换（作业式五段入口）                            *
+     * 全库 DEK 轮换（作业式五段入口）                            *
      *                                                                *
      * 口令/恢复码只在本次调用内以字节切片透传，worker 不缓存、不写日志； *
      * Run 通过同步进度回调写 stdout 进度行，主线程在 FFI 期间不持锁。   *
      * ================================================================ */
 
-    pub(crate) fn call_v4_rotate_begin(
+    pub(crate) fn call_rotate_begin(
         &self,
         new_path: &str,
         password: &str,
@@ -1601,7 +1600,7 @@ impl Worker {
         if rc == VERTHYS_OK { Ok(info) } else { Err(rc) }
     }
 
-    pub(crate) fn call_v4_rotate_attach_keyfile(
+    pub(crate) fn call_rotate_attach_keyfile(
         &self,
         keyfile_path: &str,
         password: &str,
@@ -1630,7 +1629,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_rotate_unlock_module(
+    pub(crate) fn call_rotate_unlock_module(
         &self,
         module_id: u32,
         password: &str,
@@ -1667,7 +1666,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_rotate_run(&self, cancel_event: Option<&str>) -> u32 {
+    pub(crate) fn call_rotate_run(&self, cancel_event: Option<&str>) -> u32 {
         /* 取消信号：父进程创建命名事件并把名称放进 Run 请求；worker 在此
          * 打开事件，进度回调按 200ms 节流检查。Run 返回即关闭句柄。 */
         #[cfg(windows)]
@@ -1720,7 +1719,7 @@ impl Worker {
         rc
     }
 
-    pub(crate) fn call_v4_rotate_commit(&self, keep_old: bool) -> u32 {
+    pub(crate) fn call_rotate_commit(&self, keep_old: bool) -> u32 {
         unsafe {
             let lib = &self._lib;
             let func: Symbol<VerthysV4RotateCommitFn> =
@@ -1732,7 +1731,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_rotate_abort(&self) -> u32 {
+    pub(crate) fn call_rotate_abort(&self) -> u32 {
         unsafe {
             let lib = &self._lib;
             let func: Symbol<VerthysV4RotateAbortFn> =
@@ -1745,13 +1744,13 @@ impl Worker {
     }
 
     /* ================================================================ *
-     * v4 容器创建/恢复与 PCR 策略 FFI                                  *
+     * 容器创建/恢复与 PCR 策略 FFI                                  *
      *                                                                *
      * 恢复码只经本次调用返回给宿主，worker 不落盘、不写日志；            *
      * PCR 入口只传位图与恢复码，密钥仍全部由 C 层持有。                 *
      * ================================================================ */
 
-    pub(crate) fn call_v4_create(
+    pub(crate) fn call_create(
         &self,
         path: &str,
         password: &str,
@@ -1795,7 +1794,7 @@ impl Worker {
         Ok(text)
     }
 
-    pub(crate) fn call_v4_unlock_recovery(&self, path: &str, recovery_code: &str) -> u32 {
+    pub(crate) fn call_unlock_recovery(&self, path: &str, recovery_code: &str) -> u32 {
         unsafe {
             let lib = &self._lib;
             let func: Symbol<VerthysV4UnlockRecoveryFn> =
@@ -1816,7 +1815,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_pcr_status(&self) -> Result<(u32, u32), u32> {
+    pub(crate) fn call_pcr_status(&self) -> Result<(u32, u32), u32> {
         let mut enabled: u32 = 0;
         let mut select: u32 = 0;
         unsafe {
@@ -1832,7 +1831,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_pcr_enable(&self, pcr_select: u32, recovery_code: &str) -> u32 {
+    pub(crate) fn call_pcr_enable(&self, pcr_select: u32, recovery_code: &str) -> u32 {
         unsafe {
             let lib = &self._lib;
             let func: Symbol<VerthysV4PcrEnableFn> =
@@ -1848,7 +1847,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_pcr_disable(&self, recovery_code: &str) -> u32 {
+    pub(crate) fn call_pcr_disable(&self, recovery_code: &str) -> u32 {
         unsafe {
             let lib = &self._lib;
             let func: Symbol<VerthysV4PcrDisableFn> =
@@ -1864,7 +1863,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_pcr_reseal(&self, recovery_code: &str) -> u32 {
+    pub(crate) fn call_pcr_reseal(&self, recovery_code: &str) -> u32 {
         unsafe {
             let lib = &self._lib;
             let func: Symbol<VerthysV4PcrResealFn> =
@@ -1881,13 +1880,13 @@ impl Worker {
     }
 
     /* ================================================================ *
-     * v4 keyfile 因子 FFI（D3）                                        *
+     * keyfile 因子 FFI                                               *
      *                                                                *
      * keyfile 路径经 IPC 传入，文件内容只在 C 层读取/生成；worker 不   *
      * 持有 keyfile 字节，也不缓存其摘要。                              *
      * ================================================================ */
 
-    pub(crate) fn call_v4_create_keyfile(
+    pub(crate) fn call_create_keyfile(
         &self,
         path: &str,
         password: &str,
@@ -1934,7 +1933,7 @@ impl Worker {
         Ok(text)
     }
 
-    pub(crate) fn call_v4_unlock_keyfile(
+    pub(crate) fn call_unlock_keyfile(
         &self,
         path: &str,
         password: &str,
@@ -1969,7 +1968,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_keyfile_enable(
+    pub(crate) fn call_keyfile_enable(
         &self,
         password: &str,
         new_keyfile_path: &str,
@@ -1998,7 +1997,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_keyfile_disable(
+    pub(crate) fn call_keyfile_disable(
         &self,
         password: &str,
         keyfile_path: &str,
@@ -2027,7 +2026,7 @@ impl Worker {
         }
     }
 
-    pub(crate) fn call_v4_keyfile_status(&self) -> Result<(bool, bool), u32> {
+    pub(crate) fn call_keyfile_status(&self) -> Result<(bool, bool), u32> {
         let mut enabled: u32 = 0;
         let mut recovery_mode: u32 = 0;
         unsafe {
@@ -2049,7 +2048,7 @@ impl Worker {
 
     /// 恢复会话重绑容器 user/device 槽。keyfile_path 为空表示容器未启用
     /// keyfile；启用但未提供时由 C 层返回 KEYFILE_REQUIRED。
-    pub(crate) fn call_v4_reseal_device(
+    pub(crate) fn call_reseal_device(
         &self,
         password: &str,
         keyfile_path: &str,
@@ -2079,13 +2078,13 @@ impl Worker {
     }
 
     /* ================================================================ *
-     * v4 内容分片/清单 FFI                                             *
+     * 内容分片/清单 FFI                                             *
      *                                                                *
      * 密钥只由 C 层用模块 MDEK 派生；worker 只持有密文/明文缓冲，       *
      * 调用返回后立即清零。                                             *
      * ================================================================ */
 
-    pub(crate) fn call_v4_chunk_seal(
+    pub(crate) fn call_chunk_seal(
         &self,
         module_id: u32,
         file_uuid: &[u8; 16],
@@ -2127,7 +2126,7 @@ impl Worker {
         Ok(out)
     }
 
-    pub(crate) fn call_v4_chunk_open(
+    pub(crate) fn call_chunk_open(
         &self,
         module_id: u32,
         file_uuid: &[u8; 16],
@@ -2461,7 +2460,7 @@ mod tests {
     }
 
     /* ------------------------------------------------------------------ *
-     * P0-3：产品入口只接受 v4 magic                                      *
+     * 产品入口只接受 magic                                           *
      * ------------------------------------------------------------------ */
 
     fn write_magic_file(case: &str, magic: &[u8]) -> std::path::PathBuf {
@@ -2479,30 +2478,30 @@ mod tests {
     }
 
     #[test]
-    fn check_v4_magic_rejects_v3rp() {
-        let path = write_magic_file("v3rp", &[0x56, 0x33, 0x52, 0x50]);
-        let rc = check_v4_magic(path.to_str().unwrap()).expect_err("v3 容器必须被拒绝");
-        assert_eq!(rc, 0x00000005, "v3 容器应返回 FORMAT");
+    fn check_magic_rejects_foreign_format() {
+        let path = write_magic_file("foreign", &[0x46, 0x4D, 0x54, 0x58]);
+        let rc = check_container_magic(path.to_str().unwrap()).expect_err("异种格式必须被拒绝");
+        assert_eq!(rc, 0x00000005, "异种格式应返回 FORMAT");
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn check_v4_magic_accepts_vrty() {
+    fn check_magic_accepts_vrty() {
         let path = write_magic_file("vrty", &[0x56, 0x52, 0x54, 0x59]);
-        check_v4_magic(path.to_str().unwrap()).expect("v4 容器应通过 magic 白名单");
+        check_container_magic(path.to_str().unwrap()).expect("容器应通过 magic 白名单");
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn check_v4_magic_rejects_truncated_header() {
+    fn check_magic_rejects_truncated_header() {
         let path = write_magic_file("short", &[0x56, 0x52]);
-        let rc = check_v4_magic(path.to_str().unwrap()).expect_err("截断头必须被拒绝");
+        let rc = check_container_magic(path.to_str().unwrap()).expect_err("截断头必须被拒绝");
         assert_eq!(rc, 0x00000005, "截断头应返回 FORMAT");
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn check_v4_magic_missing_file_is_io() {
+    fn check_magic_missing_file_is_io() {
         let path = std::env::temp_dir().join(format!(
             "verthys_worker_magic_missing_{}_{}.bin",
             std::process::id(),
@@ -2511,7 +2510,7 @@ mod tests {
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0)
         ));
-        let rc = check_v4_magic(path.to_str().unwrap()).expect_err("不存在文件必须失败");
+        let rc = check_container_magic(path.to_str().unwrap()).expect_err("不存在文件必须失败");
         assert_eq!(rc, 0x00000008, "读取失败应返回 IO");
     }
 }

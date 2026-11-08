@@ -134,7 +134,7 @@ if (Test-Path $fvImport) {
 }
 
 # 锚点 8（C）：旧格式写保护字符串分支禁止复活（T-1 收口，判定范围为全前端）。
-# 该字符串在核心与进程间层无生产者（非 V3 容器在解锁即被格式门禁拒绝，
+# 该字符串在核心与进程间层无生产者（非当前格式容器在解锁即被格式门禁拒绝，
 # 不存在"已解锁但格式需升级"的状态），前端消费分支属死代码，已全量删除；
 # 按整串禁入以覆盖等式 / 包含 / 变量判等等全部复活形态。
 $srcRoot = Join-Path $projectRoot "verthys-tauri\src"
@@ -256,6 +256,31 @@ if ($symDiff) {
 } else {
     Write-Host "[导出契约门] 通过：$($defSyms.Count) 个符号一致"
 }
+
+# ===== Rust 死代码门 =====
+# lib.rs 禁止以 #[allow(dead_code)] 压制整个模块；两个 crate 以
+# `-D dead_code` 运行 clippy，任何未使用项即红。
+Write-Host ""
+Write-Host "[死代码门] 校验 Rust 未使用项..."
+$rustDeadRed = $false
+$deadAllow = Select-String -Path (Join-Path $projectRoot "verthys-tauri\src-tauri\src\lib.rs") `
+    -Pattern '^\s*#\[allow\(dead_code\)\]\s*$' -Context 0,1 |
+    Where-Object { $_.Context.PostContext -match '^\s*pub\s+mod\s' }
+if ($deadAllow) {
+    Write-Host "[死代码门][RED] lib.rs 存在模块级 #[allow(dead_code)]："
+    $deadAllow | ForEach-Object { Write-Host ("  " + $_.Line.Trim()) }
+    $rustDeadRed = $true
+}
+foreach ($crateDir in @("verthys-tauri\src-tauri", "verthys-tauri\verthys-worker")) {
+    Push-Location (Join-Path $projectRoot $crateDir)
+    & cargo clippy --all-targets --quiet -- -D dead_code 2>&1 | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[死代码门][RED] $crateDir 存在未使用项"
+        $rustDeadRed = $true
+    }
+    Pop-Location
+}
+if ($rustDeadRed) { $exitCode = 1 } else { Write-Host "[死代码门] 通过：Rust 无未使用项" }
 
 # ===== 第一级：快速正则过滤 =====
 if (-not $Level2Only) {

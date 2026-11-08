@@ -3,7 +3,6 @@
  */
 #include "verthys_crypto.h"
 #include "verthys_internal.h"  /* verthys_secure_zero */
-#include "verthys_api_utils.h" /* verthys_monotonic_ms（校准计时） */
 
 #include <sodium.h>
 #include <string.h>   /* memcpy（sodium.h 不保证传递性暴露） */
@@ -225,65 +224,4 @@ int verthys_generichash(uint8_t out[VERTHYS_GENERICHASH_BYTES],
 }
 
 
-/* ================================================================== *
- * Argon2id 动态校准实现
- * ================================================================== *
- * 两段式探测（总开销 = 2 次派生）：
- *   1. 初始测量：以 min_iters 派生一次，得 t_probe；
- *   2. 线性换算：iters_scaled = min_iters * target / t_probe，钳制到
- *      [min_iters, max_iters]；
- *   3. 确认测量：以换算结果派生一次，若换算误差 ≥ 1 迭代则二次修正
- *      （仅修正，不再测量——误差来源主要是固定开销项，一次修正足够）。
- * 全程不落任何密钥材料（派生输出即算即弃）。
- */
-int verthys_argon2_calibrate(const uint8_t *password, size_t pw_len,
-                           const uint8_t salt[VERTHYS_SALT_BYTES],
-                           const uint8_t pepper[VERTHYS_KEY_BYTES],
-                           uint32_t mem_kib,
-                           uint32_t target_ms,
-                           uint32_t min_iters, uint32_t max_iters,
-                           uint32_t *out_iters)
-{
-    if (out_iters == NULL || salt == NULL) return -1;
-    if (password == NULL && pw_len != 0) return -1;
-    if (min_iters < 1u || max_iters < min_iters) return -1;
-    if (target_ms == 0) return -1;
-    if (mem_kib < 8u || mem_kib > 4u * 1024u * 1024u) return -1;
 
-    uint8_t scratch[VERTHYS_KEY_BYTES];
-
-    /* 1. 初始测量 */
-    uint64_t t0 = verthys_monotonic_ms();
-    if (verthys_argon2id_derive_ex(scratch, password, pw_len, salt, pepper,
-                                 mem_kib, min_iters, 1u) != 0) {
-        verthys_secure_zero(scratch, sizeof scratch);
-        return -1;
-    }
-    uint64_t t_probe = verthys_monotonic_ms() - t0;
-    verthys_secure_zero(scratch, sizeof scratch);
-    if (t_probe == 0) t_probe = 1;  /* 防除零（时钟粒度粗于单次派生时） */
-
-    /* 2. 线性换算 + 钳制 */
-    uint64_t scaled = ((uint64_t)min_iters * (uint64_t)target_ms + t_probe - 1) / t_probe;
-    if (scaled < min_iters) scaled = min_iters;
-    if (scaled > max_iters) scaled = max_iters;
-
-    /* 3. 确认测量（换算结果的派生同时充当创建基准的一次采样） */
-    t0 = verthys_monotonic_ms();
-    if (verthys_argon2id_derive_ex(scratch, password, pw_len, salt, pepper,
-                                 mem_kib, (uint32_t)scaled, 1u) != 0) {
-        verthys_secure_zero(scratch, sizeof scratch);
-        return -1;
-    }
-    uint64_t t_confirm = verthys_monotonic_ms() - t0;
-    verthys_secure_zero(scratch, sizeof scratch);
-    if (t_confirm == 0) t_confirm = 1;
-
-    /* 二次修正：确认耗时偏离目标时按同一比例修正一次（不再测量） */
-    uint64_t refined = ((uint64_t)scaled * (uint64_t)target_ms + t_confirm - 1) / t_confirm;
-    if (refined < min_iters) refined = min_iters;
-    if (refined > max_iters) refined = max_iters;
-
-    *out_iters = (uint32_t)refined;
-    return 0;
-}

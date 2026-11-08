@@ -398,17 +398,6 @@ impl KeyLifecycle {
         inner.consecutive_failures
     }
 
-    /// 获取冷却剩余秒数（未冷却返回 0）
-    pub fn remaining_cooldown_secs(&self) -> u64 {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(until) = inner.cooldown_until {
-            let now = Instant::now();
-            if now < until {
-                return (until - now).as_secs();
-            }
-        }
-        0
-    }
 }
 
 impl Default for KeyLifecycle {

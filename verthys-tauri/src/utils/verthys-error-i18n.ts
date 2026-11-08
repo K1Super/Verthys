@@ -35,6 +35,10 @@ const ERROR_CODE_MESSAGES: Record<VerthysErrorCode, string> = {
   [VerthysErrorCode.E_RECORD_NOT_FOUND]: "记录不存在",
   [VerthysErrorCode.E_PERSIST_FAILED]: "持久化失败，请重试",
   [VerthysErrorCode.E_FLUSH_TIMEOUT]: "落盘超时，请重试",
+  [VerthysErrorCode.E_RATE_LIMITED]: "尝试次数过多，请稍后再试",
+  [VerthysErrorCode.E_MODULE_LOCKED]: "模块已锁定，请稍后再试",
+  [VerthysErrorCode.E_CNG_UNAVAILABLE]: "安全门禁暂时不可用，请重启应用后重试",
+  [VerthysErrorCode.E_SECURITY_STATE]: "无法加固安全状态目录，请检查目录位置与权限",
 
   // ===== 初始化 =====
   [VerthysErrorCode.E_INIT_FAILED]: "初始化失败",
@@ -69,7 +73,7 @@ const ERROR_CODE_MESSAGES: Record<VerthysErrorCode, string> = {
   // ===== 可移动介质绑定 =====
   [VerthysErrorCode.E_USB_CLONE_SUSPECTED]: "介质标识与登记记录不一致，已阻止解锁（可确认更换介质后重试）",
 
-  // ===== v4 设备环境 / 回滚 =====
+  // ===== 设备环境 / 回滚 =====
   [VerthysErrorCode.E_TPM]: "设备环境已变化，请使用恢复码解锁并重密封 PCR",
   [VerthysErrorCode.E_ROLLBACK]: "检测到文件回退，已拒绝打开",
   [VerthysErrorCode.E_KEYFILE_REQUIRED]: "该加密库已启用 keyfile，请选择 keyfile 文件后重试",
@@ -95,6 +99,25 @@ const ERROR_CODE_MESSAGES: Record<VerthysErrorCode, string> = {
  *   3. 若 result.message 为空，返回 "操作失败"
  */
 export function translateVerthysError(result: VerthysErrorResult): string {
+  /* 锁定/限流类错误必须展示后端动态信息（“已锁定 X 秒”），不得被固定
+   * 文案覆盖，否则用户无法区分“口令错”与“正在熔断等待”。 */
+  if (
+    result.code === VerthysErrorCode.E_RATE_LIMITED ||
+    result.code === VerthysErrorCode.E_MODULE_LOCKED ||
+    result.code === VerthysErrorCode.E_CNG_UNAVAILABLE ||
+    result.code === VerthysErrorCode.E_SECURITY_STATE
+  ) {
+    if (result.message && result.message.trim().length > 0) {
+      return result.message;
+    }
+    const secs = Math.ceil(result.retryAfterSecs ?? 0);
+    if (result.code === VerthysErrorCode.E_RATE_LIMITED) {
+      return secs > 0 ? `尝试次数过多，已锁定 ${secs} 秒，请稍后再试` : "请求过于频繁，请稍后再试";
+    }
+    if (result.code === VerthysErrorCode.E_MODULE_LOCKED) {
+      return secs > 0 ? `模块已锁定 ${secs} 秒，请稍后再试` : "模块已锁定，请稍后再试";
+    }
+  }
   // 优先使用映射表中的标准消息
   const mapped = ERROR_CODE_MESSAGES[result.code];
   if (mapped) {
@@ -108,30 +131,3 @@ export function translateVerthysError(result: VerthysErrorResult): string {
   return "操作失败";
 }
 
-/**
- * 判断给定错误码是否属于「用户可重试」类（非致命）
- *
- * 用于决定是否在 UI 上展示「重试」按钮：
- *   - 设备绑定失败、持久化失败、落盘超时 → 可重试
- *   - 路径不存在、密钥验证失败、模块未就绪 → 不可重试（需用户主动纠正）
- *
- * @param code VerthysErrorCode
- * @returns true 表示可重试，false 表示需用户纠正后才能继续
- */
-export function isRetryableError(code: VerthysErrorCode): boolean {
-  switch (code) {
-    case VerthysErrorCode.E_DEVICE_BIND_FAILED:
-    case VerthysErrorCode.E_PERSIST_FAILED:
-    case VerthysErrorCode.E_FLUSH_TIMEOUT:
-    case VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED:
-    case VerthysErrorCode.E_MODULE_CONFIG_SAVE_FAILED:
-    case VerthysErrorCode.E_MODULE_KEY_SET_FAILED:
-    case VerthysErrorCode.E_WORKER_INIT_FAILED:
-    case VerthysErrorCode.E_VERTHYS_CREATE_FAILED:
-    case VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED:
-    case VerthysErrorCode.E_GLOBAL_KEY_DERIVE_FAILED:
-      return true;
-    default:
-      return false;
-  }
-}

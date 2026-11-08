@@ -2,7 +2,6 @@
 //
 // 目的：跑通 flatcc codegen（schema → generated/*.h）→ 链接 flatccrt →
 // builder/verifier/reader 编解码闭环
-// V3 业务 schema（superblock_v3/partition/extent/sstable）
 
 table ToolchainDemo {
     magic: uint32;      // 格式魔数

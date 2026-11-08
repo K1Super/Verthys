@@ -47,7 +47,9 @@ use crate::security::command_names::cmd;
 use crate::state::{file_streams::FileStreamState, AppState};
 use crate::util::audit_log::{append_audit, AuditEvent, AuditEventType, AuditResult};
 use crate::util::path::sanitize_path;
-use crate::util::sandbox::{resolve_and_validate, SandboxError};
+use crate::util::sandbox::resolve_and_validate;
+#[cfg(test)]
+use crate::util::sandbox::SandboxError;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -239,6 +241,7 @@ fn build_whitelist(app: &tauri::AppHandle) -> Vec<String> {
 }
 
 /// 将沙箱校验错误映射为前端可用的错误码（脱敏）。
+#[cfg(test)]
 fn sandbox_error_to_code(err: &SandboxError) -> ErrorCode {
     match err {
         SandboxError::InvalidPath(_) => ErrorCode::InvalidPath,

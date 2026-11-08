@@ -1,5 +1,5 @@
 /*
- * key/module-auth.spec.ts — v4 模块 M1 前端投影契约
+ * key/module-auth.spec.ts — 模块 M1 前端投影契约
  *
  * 覆盖：
  *   1. loadModuleKeyStatus 以 C 层状态为权威（enabled/unlocked/deleted）
@@ -71,7 +71,7 @@ function resetModuleState(): void {
   keyState.moduleKeyStatusFailed.value = false;
 }
 
-describe("module-auth（v4 模块 M1）", () => {
+describe("module-auth（模块 M1）", () => {
   beforeAll(() => {
     // markModuleReady / removeModuleKey 依赖缓存域单例；测试只验证状态投影
     initVerthysCache();

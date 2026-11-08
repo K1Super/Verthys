@@ -70,7 +70,6 @@ async function runGuarded(
   }
 }
 
-export const privacyStatus = computed(() => status.value);
 /** 保护是否启用（乐观态优先：点击后立即反映目标值，避免按钮迟滞感） */
 export const privacyEnabled = computed(
   () => optimisticEnabled.value ?? status.value?.state === "enabled",
@@ -80,7 +79,6 @@ export const privacyBusy = computed(
   () => inFlight.value || status.value?.state === "transitioning",
 );
 export const privacyQuarantined = computed(() => status.value?.state === "quarantined");
-export const privacyProtectedCount = computed(() => status.value?.protected_count ?? 0);
 /** 凭证丢失：后端已启用且槽位生效，而本会话不持有凭证（签发响应丢失或热更新） */
 export const privacyTokenLost = computed(
   () =>

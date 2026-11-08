@@ -1,6 +1,6 @@
-# tests/attack/offmachine/run.ps1 — A6 离机验证（两阶段）
+# tests/attack/offmachine/run.ps1 — 离机验证（两阶段）
 #
-# 阶段 1（源机）：在隔离目录生成 v4 库 + 模块密钥文件，跑正控，
+# 阶段 1（源机）：在隔离目录生成 库 + 模块密钥文件，跑正控，
 #   记录产物 SHA-256 与源机 MachineGuid 的 SHA-256（不记录明文 GUID）。
 # 阶段 2（目标机/VM）：把整个目录复制过去后执行 verify，
 #   要求 MachineGuid 哈希不同（否则是假阴性），并断言：

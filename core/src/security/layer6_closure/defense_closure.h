@@ -52,7 +52,7 @@ typedef enum {
 typedef enum {
     DEFENSE_REASON_NONE                     = 0,
     DEFENSE_REASON_NO_RESIDENT_KEY          = 1,
-    DEFENSE_REASON_V4_KEYS_USER_RESIDENT    = 2,
+    DEFENSE_REASON_KEYS_USER_RESIDENT    = 2,
     DEFENSE_REASON_HIBERNATION_ENABLED      = 3,
     DEFENSE_REASON_HIBERNATION_UNKNOWN      = 4,
     DEFENSE_REASON_SUSPEND_UNPREVENTABLE    = 5,
@@ -81,8 +81,8 @@ typedef enum {
 /* 判定事实：只读快照。会话字段由调用方复制，进程字段由 fill 填充；
  * 检查过程不得在本结构构建之外产生任何副作用。 */
 typedef struct {
-    uint32_t any_unlocked_v4;       /* 进程内任一 V4 会话已解锁 */
-    uint32_t queried_unlocked_v4;   /* 被查询句柄的会话已解锁 */
+    uint32_t any_unlocked_session;       /* 进程内任一 会话已解锁 */
+    uint32_t queried_unlocked_session;   /* 被查询句柄的会话已解锁 */
     uint32_t queried_device_bound;  /* 设备根槽存在 */
     uint32_t queried_pcr_bound;     /* PCR 槽存在 */
     uint32_t hibernation_state;     /* 0=禁用 1=启用 2=未知 */
@@ -145,33 +145,6 @@ void defense_closure_fill_process_facts(DefenseFacts *facts);
  */
 void defense_closure_set_runtime_guards(uint32_t flags);
 uint32_t defense_closure_get_runtime_guards(void);
-
-/*
- * 获取原因码名称（日志/诊断，不含敏感数据）。
- */
-const char *defense_closure_reason_name(DefenseReason reason);
-
-/*
- * 查询单项攻击路径的防御状态。
- *   必须在 defense_closure_check* 之后调用，否则返回 NOT_CHECKED。
- */
-DefenseState defense_closure_get_path_state(DefensePath path);
-
-/*
- * 查询最后一次校验的汇总状态。
- *   返回 0=全部 BLOCKED，1=有 DEGRADED，2=有 FAILED，3=未校验
- */
-int defense_closure_get_summary(void);
-
-/*
- * 获取路径名称（用于日志/UI，不含敏感数据）。
- */
-const char *defense_closure_path_name(DefensePath path);
-
-/*
- * 获取状态名称（用于日志/UI）。
- */
-const char *defense_closure_state_name(DefenseState state);
 
 #ifdef __cplusplus
 }

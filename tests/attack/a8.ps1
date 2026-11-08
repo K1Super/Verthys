@@ -1,12 +1,12 @@
-# tests/attack/a8.ps1 — A8 密钥内存/日志零残留自动化
+# tests/attack/a8.ps1 — 密钥内存/日志零残留自动化
 #
-# A8-1 文件/状态目录：口令、恢复码、K_c/K_g/MDEK 以 UTF-8、UTF-16LE、
+# 文件/状态目录：口令、恢复码、K_c/K_g/MDEK 以 UTF-8、UTF-16LE、
 #      hex、base64 四种表示均 0 命中；
-# A8-2 解锁态完整内存转储：密钥必须命中（正控，证明扫描器有效）；
-# A8-3 Lock 后内存转储：同一批 secret 0 命中；
-# A8-4 异常退出后 WER/CrashDumps 转储：0 命中。
+# 解锁态完整内存转储：密钥必须命中（正控，证明扫描器有效）；
+# Lock 后内存转储：同一批 secret 0 命中；
+# 异常退出后 WER/CrashDumps 转储：0 命中。
 #
-# 输出契约：RESULT A8 PASS|FAIL <detail>，并为 run.ps1/gate.ps1 提供 JSON。
+# 输出契约：供 run.ps1/gate.ps1 解析的单行结果与 JSON。
 # 证据只记录命中次数，不落任何口令/恢复码/密钥内容。
 param(
     [string]$OutJson
@@ -27,7 +27,7 @@ New-Item -ItemType Directory -Path $workDir -Force | Out-Null
 $memHostRun = Join-Path $workDir 'vty_mem_host.exe'
 Copy-Item -LiteralPath $memHost -Destination $memHostRun -Force
 # 熔断/回滚状态默认写用户目录：隔离到本次工作目录，既避免污染真实状态，
-# 也让状态文件进入 A8-1 的落盘扫描范围。
+# 也让状态文件进入落盘扫描范围。
 $env:LOCALAPPDATA = Join-Path $workDir 'localappdata'
 New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
 
@@ -150,7 +150,7 @@ try {
         Add-TextPatterns 'recovery' $hold.Secrets['recovery']
     }
 
-    # ---------- A8-2：解锁态转储（正控必须命中） ----------
+    # ---------- 解锁态转储（正控必须命中） ----------
     & $memHostRun dump $hold.Proc.Id $dumpUnlocked | Out-Null
     if (-not (Test-Path $dumpUnlocked)) { throw '解锁态转储生成失败' }
     $positiveHits = Measure-AllHits $dumpUnlocked $patterns
@@ -159,7 +159,7 @@ try {
         $detail = 'A8-2 正控未命中（扫描器或转储无效）'
     }
 
-    # ---------- A8-3：Lock 后转储（必须 0 命中） ----------
+    # ---------- Lock 后转储（必须 0 命中） ----------
     if ($pass) {
         $hold.Proc.StandardInput.WriteLine('LOCK')
         $hold.Proc.StandardInput.Flush()
@@ -183,7 +183,7 @@ try {
         [void]$hold.Proc.WaitForExit(10000)
     }
 
-    # ---------- A8-1：落盘文件与状态目录（必须 0 命中） ----------
+    # ---------- 落盘文件与状态目录（必须 0 命中） ----------
     if ($pass) {
         $files = Get-ChildItem -LiteralPath $workDir -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -ne $dumpUnlocked -and $_.FullName -ne $dumpLocked }
@@ -196,7 +196,7 @@ try {
         }
     }
 
-    # ---------- A8-4：异常退出后的 WER/CrashDumps ----------
+    # ---------- 异常退出后的 WER/CrashDumps ----------
     if ($pass) {
         $crashStart = Get-Date
         $crash = Start-MemHost 'crash' $vault $hold.Secrets['password']

@@ -1,7 +1,7 @@
 /* content_crypto.rs — 文件块 v2 的密码学原语（AES-256-GCM + PBKDF2）
  *
  * 职责边界：只承载无状态的密码学运算与布局编解码。照片/文件内容的外层
- * 加密由 C 层 v4 分片（Verthys_V4ChunkSeal/Open）承担，本模块只保留
+ * 加密由 C 层 分片（Verthys_V4ChunkSeal/Open）承担，本模块只保留
  * "每个文件独立口令"的内层封装：
  *   - 派生：PBKDF2-SHA256(文件口令, 文件盐, iterations) → 32 字节 AES 密钥
  *   - 布局：iv(12) ‖ 密文+tag（AES-256-GCM，无附加数据）

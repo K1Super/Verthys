@@ -2,18 +2,18 @@
  * tests/attack/a17-renderer-keys.ps1 — 渲染进程模块内容密钥扫描
  *
  * 口径（静态源码 + 构建产物）：
- *   1. 前端源码不得出现 v4 内容密钥派生元素：MDEK 标识、v4 域分离字符串、
- *      HKDF 调用、原生 v4 分片/清单导出符号；
+ *   1. 前端源码不得出现 内容密钥派生元素：MDEK 标识、域分离字符串、
+ *      HKDF 调用、原生 分片/清单导出符号；
  *   2. WebCrypto 派生接口与 @noble/ciphers 只允许出现在导出容器实现
  *      （lib/crypto.ts）。导出容器是用户令牌驱动的独立信封，与库内模块
  *      内容密钥无关，属登记例外；
- *   3. dist 构建产物不得出现上述 v4 内容密钥/域标签字符串，确保打包后
+ *   3. dist 构建产物不得出现上述 内容密钥/域标签字符串，确保打包后
  *      渲染层仍无模块密钥派生材料。
  *
  * 说明：本扫描不读取运行时内存，也不检查 worker/C 层；模块内容密钥派生
  * 必须集中在 worker，该边界由源码结构约束与 e2e 往返共同证明。
  *
- * 输出：RESULT A17 PASS/FAIL <摘要>；退出码 0/1。
+ * 输出：单行 RESULT PASS/FAIL <摘要>；退出码 0/1。
 #>
 [CmdletBinding()]
 param(
@@ -40,15 +40,15 @@ $cryptoAllowlist = @('verthys-tauri/src/lib/crypto.ts')
 
 $sourceForbidden = @(
     @{ Id = 'MDEK'; Pattern = '\bMDEK\b' },
-    @{ Id = 'v4-domain'; Pattern = 'verthys/v4/(record|name|chunk|manifest|type-index|name-index|file-uuid)' },
-    @{ Id = 'v4-ffi'; Pattern = 'Verthys_V4(Chunk|Manifest)(Seal|Open)' },
+    @{ Id = 'domain'; Pattern = 'verthys/v4/(record|name|chunk|manifest|type-index|name-index|file-uuid)' },
+    @{ Id = 'ffi'; Pattern = 'Verthys_V4(Chunk|Manifest)(Seal|Open)' },
     @{ Id = 'HKDF'; Pattern = '(?i)\bhkdf\b' }
 )
 
 $distForbidden = @(
     @{ Id = 'MDEK'; Pattern = '\bMDEK\b' },
-    @{ Id = 'v4-domain'; Pattern = 'verthys/v4/(record|name|chunk|manifest|type-index|name-index|file-uuid)' },
-    @{ Id = 'v4-ffi'; Pattern = 'Verthys_V4(Chunk|Manifest)(Seal|Open)' }
+    @{ Id = 'domain'; Pattern = 'verthys/v4/(record|name|chunk|manifest|type-index|name-index|file-uuid)' },
+    @{ Id = 'ffi'; Pattern = 'Verthys_V4(Chunk|Manifest)(Seal|Open)' }
 )
 
 function Remove-Comments {
@@ -128,5 +128,5 @@ if ($findings.Count -gt 0) {
     exit 1
 }
 
-Write-Host ("RESULT A17 PASS 源码={0} dist={1} 无 MDEK/域标签/HKDF/原生 v4 符号；导出容器例外仅 lib/crypto.ts" -f $sourceCount, $distCount)
+Write-Host ("RESULT A17 PASS 源码={0} dist={1} 无 MDEK/域标签/HKDF/原生 符号；导出容器例外仅 lib/crypto.ts" -f $sourceCount, $distCount)
 exit 0

@@ -13,11 +13,10 @@
 #
 # 业务分层（依赖方向 L5→L0 单向，无循环）：
 #
-#   L5  api/           公共 C ABI（lifecycle/unlock/scan/transfer/progress/shared）
-#   L3  transaction/   事务一致（wal/txn — 六 Phase + WAL 环形双区）
-#   L2  index/         索引数据（lsm 四件套 + warmcache）
-#   L1  container/     容器格式（format/superblock/partition/extent/io/shared）
-#   L0  crypto/        密码学原语（cipher/keymanager/pepper/rekey）
+#   L5  api/           公共 C ABI（lifecycle/scan/transfer/progress/shared）
+#   L2  index/         记录仓库、COW 目录树与追加数据区
+#   L1  container/     容器格式（format/密钥槽/模块/分片/shared）
+#   L0  crypto/        密码学原语（cipher/keymanager/pepper/kdf）
 #   L6  security/      深度安全防护（精简后的模块集）
 #                      preset/       — 三档安全预设
 #                      integrity/    — 完整性校验（构建期基准验签）
@@ -32,20 +31,18 @@
 #
 #
 # 构建策略：
-#   - verthys_core_shared_obj：OBJECT 库，v4 + 共享安全/密码学基础设施
-#   - verthys_core_obj：OBJECT 库，产品 API（v4-only，V3 分支编译期剔除）
-#   - verthys_core_v3_obj：OBJECT 库，v3 容器实现（产品不链接）
-#   - verthys_core_legacy_api_obj：OBJECT 库，测试/legacy API（V3 分支启用）
+#   - verthys_core_shared_obj：OBJECT 库，共享安全/密码学基础设施
+#   - verthys_core_obj：OBJECT 库，产品 API
 #   - verthys_core：SHARED DLL，共享对象库 + 产品 API + .def（仅导出公共函数）
-#   - verthys_core_legacy：SHARED DLL，共享 + v3 + 测试 API（仅攻击回归）
-#   - verthys_tests：测试 exe，链接共享 + v3 + 测试 API（直接调用实现）
+#   - verthys_tests：测试 exe，链接共享 + 产品 API（直接调用实现）
 # .def 文件在链接器层面强制最小接口，确保内部符号不泄露。
 
 # 容器格式版本（构建契约与运行时唯一事实值）。
 # 该常量写入构建产物契约（build/core/verthys.artifacts.json），并须与
-# 容器层头文件的版本常量 `VERTHYS_FMT_V3` 保持同步——契约消费方按此
-# 校验 DLL 与主程序/worker 的格式兼容性，不一致即为契约失效。
-set(VERTHYS_FMT_VERSION 3)
+# core/include/verthys_version.h 的 `VERTHYS_CONTAINER_FORMAT_VERSION`
+# 保持同步——契约消费方按此校验 DLL 与主程序/worker 的格式兼容性，
+# 不一致即为契约失效。
+set(VERTHYS_FMT_VERSION 4)
 
 # ASAN 构建开关（-DVERTHYS_ENABLE_ASAN=ON）
 option(VERTHYS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
@@ -81,42 +78,42 @@ endif()
 #   src/ 各子域内按功能组件拆分子目录（组件实现 + 私有头同目录），
 #   模块内子目录不再平铺源文件；公共接口唯一保留 include/verthys.h。
 #
-# 对象库边界（v3 源码拆分）：
-#   VERTHYS_SHARED_SOURCES  v4 + 共享安全/密码学基础设施 —— 产品与测试/legacy 共用
-#   VERTHYS_V3_SOURCES      v3 容器实现（LSM/WAL/事务/超块/分区/Extent/解锁流水线）
-#                           —— 仅 verthys_tests 与 verthys_core_legacy 链接
-#   VERTHYS_API_SOURCES     API 门面（v3/v4 双分支）—— 编译两次：
-#                             verthys_core_obj（产品，v4-only，不定义 VERTHYS_V3_SUPPORT）
-#                             verthys_core_legacy_api_obj（测试/legacy，定义 VERTHYS_V3_SUPPORT）
+# 对象库边界：
+#   VERTHYS_SHARED_SOURCES  共享安全/密码学基础设施 —— 产品与测试共用
+#   VERTHYS_API_SOURCES     API 门面
 set(VERTHYS_SHARED_SOURCES
     # L0 crypto/ — 密码学原语（AEAD/HMAC/随机数/Argon2id/HKDF/密钥包裹）
     src/crypto/cipher/verthys_crypto.c
     src/crypto/cipher/secure_mem.c
     src/crypto/keymanager/keymanager.c
     src/crypto/pepper/verthys_pepper.c
-    # L1 container/ — v1 交换信封（v3/v4 导出导入共用）
+    # L1 container/ — 交换信封（导出/导入共用）
     src/container/format/verthys_format.c
-    # v4 容器格式与密钥体系（双包裹 AND + 恢复码 + 模块 + 分片）
-    src/crypto/v4/vty_util.c
-    src/crypto/v4/vty_blake3.c
-    src/crypto/v4/vty_kdf.c
-    src/crypto/v4/vty_device_root.c
-    src/crypto/v4/vty_recovery.c
-    src/crypto/v4/vty_keyfile.c
-    src/crypto/v4/vty_keymanager_v4.c
+    # 容器格式与密钥体系（双包裹 AND + 恢复码 + 模块 + 分片）
+    src/crypto/vty_util.c
+    src/crypto/vty_blake3.c
+    src/crypto/vty_kdf.c
+    src/crypto/vty_device_root.c
+    src/crypto/vty_recovery.c
+    src/crypto/vty_keyfile.c
+    src/crypto/vty_keymanager.c
     # D9 全库 DEK 轮换作业（新文件全量重建 + 原子替换）
-    src/crypto/v4/vty_rotate_v4.c
-    src/container/v4/vty_format_v4.c
-    src/container/v4/vty_keyslot_v4.c
-    src/container/v4/vty_chunk_v4.c
-    src/container/v4/vty_module_v4.c
-    src/index/v4/vty_record_v4.c
-    src/index/v4/vty_store_v4.c
-    src/index/v4/vty_repo_v4.c
+    src/crypto/vty_rotate.c
+    src/container/vty_format.c
+    src/container/vty_keyslot.c
+    src/container/vty_chunk.c
+    src/container/vty_module.c
+    src/index/vty_record.c
+    src/index/vty_store.c
+    src/index/vty_repo.c
     src/security/lockout/vty_lockout.c
     # 库文件版本回退检测（外部单调锚点 + 设备根 MAC）
     src/security/rollback/vty_rollback.c
-    # TPM 2.0 PCR 读取与 PCR 绑定密钥（P2 高安全模式）
+    # 安全状态固定位置/ACL/见证身份派生（KnownFolder + 设备根）
+    src/security/state/vty_secure_state.c
+    # 机器级速率限制扩展点（经特权服务实现）
+    src/security/state/vty_machine_limiter.c
+    # TPM 2.0 PCR 读取与 PCR 绑定密钥（高安全模式）
     src/security/tpm/vty_tpm_pcr.c
     # TPM 持久化密钥见证（NV 不可用时的回滚/熔断替代）
     src/security/tpm/vty_tpm_witness.c
@@ -128,10 +125,10 @@ set(VERTHYS_SHARED_SOURCES
     # 运行时函数级哈希校验（.rhat 表，防内存补丁）
     src/security/integrity/runtime_hash.c
     #   anti_analysis/ — 反调试 + 反注入
-    src/security/anti_analysis/anti_debug_v2.c
+    src/security/anti_analysis/anti_debug.c
     src/security/anti_analysis/anti_inject.c
     # 直接系统调用（SSN 排序法提取 + 映像内 thunk +
-    #   优雅降级；anti_debug_v2 / memory_guard 检测器唯一 NT 查询传输）
+    #   优雅降级；anti_debug / memory_guard 检测器唯一 NT 查询传输）
     src/security/anti_analysis/syscall_direct.c
     #   memory/ — 内存防护 + 三权分立密钥
     src/security/memory/memory_guard.c
@@ -158,48 +155,12 @@ set(VERTHYS_SHARED_SOURCES
     src/security/layer6_closure/defense_closure.c
     #   caller_auth/ — 调用方签名校验（Verthys_Init 前置门，A2）
     src/security/caller_auth/vty_caller_auth.c
-    # L5 api/ — 非容器格式相关的公共模块（两格式共用）
-    src/api/progress/verthys_progress.c
-    src/api/v4/verthys_api_v4.c
+    # L5 api/ — 非容器格式相关的公共模块
+    src/api/verthys_api_container.c
     src/api/lifecycle/dllmain.c
 )
 
-# v3 容器实现：产品 DLL 不链接本对象库（无 v3 实现、无 v3 可达路径）。
-set(VERTHYS_V3_SOURCES
-    # CNG 内核态 AEAD 封装 + V3 密钥组生命周期（仅 V3 容器路径消费）
-    src/crypto/cipher/verthys_crypto_cng.c
-    src/crypto/keymanager/keymanager_cng.c
-    # 三权分立密钥（CNG 内核托管；仅 V3 事务提交与应急清钥路径消费）
-    src/security/memory/key_separation.c
-    # 自动密钥轮换状态机（90 天/10k ops/DEGRADE 触发，V3 密钥组）
-    src/crypto/rekey/verthys_rekey_auto.c
-    # L1 container/ — V3 容器 IO 与布局
-    src/container/io/verthys_io.c
-    # 容器跨进程互斥打开（单写者 + 超级块区独占锁）
-    src/container/io/verthys_container_lock.c
-    # V3 超级块（多副本法定人数）+ 分区管理
-    src/container/superblock/verthys_superblock_v3.c
-    src/container/partition/verthys_partition.c
-    # 内容寻址 Extent（去重 + 完整性）
-    src/container/extent/verthys_extent.c
-    # L2 index/ — 索引与数据管理
-    # LSM 索引（MemTable 跳表 + SSTable + Compaction）
-    src/index/lsm/verthys_lsm.c
-    src/index/lsm/verthys_lsm_memtable.c
-    src/index/lsm/verthys_lsm_sstable.c
-    src/index/lsm/verthys_lsm_compaction.c
-    # 温启动缓存 V3（'V3IC'，HMAC+txid 双校验）
-    src/index/warmcache/verthys_warmcache_v3.c
-    # L3 transaction/ — 事务与一致性
-    # 事务 WAL（环形 512KB×2）+ transaction_v3（六 Phase）
-    src/transaction/wal/verthys_wal.c
-    src/transaction/txn/verthys_transaction_v3.c
-    # V3 生命周期 + 解锁流水线（S0-S6）
-    src/api/lifecycle/verthys_v3_lifecycle.c
-    src/api/unlock/verthys_unlock_pipeline.c
-)
-
-# API 门面：按 VERTHYS_V3_SUPPORT 编译两次（产品 v4-only / 测试 legacy 全量）
+# API 门面（产品与测试共用同一编译定义）
 set(VERTHYS_API_SOURCES
     src/api/lifecycle/verthys_api.c
     src/api/shared/verthys_api_utils.c
@@ -218,40 +179,29 @@ endif()
 # 相对路径 → 绝对路径一次性转换：跨目录消费时按定义处目录解析，
 # 避免基准错位。
 list(TRANSFORM VERTHYS_SHARED_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-list(TRANSFORM VERTHYS_V3_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 list(TRANSFORM VERTHYS_API_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 
 # 所有子目录加入 include 路径（扁平 include 兼容，如 #include "verthys_crypto.h"）
 # 目录表随组件拆分更新——新增组件目录即在此登记；
 #   源代码 #include "xxx.h" 全部保持扁平形式零改动。
 set(VERTHYS_SRC_SUBDIRS
+    src/crypto
     src/crypto/cipher
     src/crypto/keymanager
     src/crypto/pepper
-    src/crypto/rekey
+    src/container
     src/container/format
-    src/container/superblock
-    src/container/partition
-    src/container/extent
-    src/container/io
     src/container/shared
-    src/container/v4
-    src/crypto/v4
-    src/index/v4
+    src/index
     src/security/lockout
     src/security/rollback
+    src/security/state
     src/security/tpm
-    src/index/lsm
-    src/index/warmcache
-    src/transaction/wal
-    src/transaction/txn
+    src/api
     src/api/lifecycle
-    src/api/unlock
     src/api/scan
     src/api/transfer
-    src/api/progress
     src/api/shared
-    src/api/v4
     src/security
     src/security/preset
     src/security/integrity
@@ -274,32 +224,13 @@ list(TRANSFORM VERTHYS_SRC_SUBDIRS PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 set(VERTHYS_SCHEMA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/schema)
 set(VERTHYS_SCHEMA_GEN_DIR ${VERTHYS_SCHEMA_DIR}/generated)
 file(MAKE_DIRECTORY ${VERTHYS_SCHEMA_GEN_DIR})
-# superblock_v3 / partition 业务 schema 加入 codegen
-# extent（内容寻址索引）schema 加入 codegen
-# sstable（SSTable Footer/Index Block + LSM Manifest）schema 加入 codegen
 set(VERTHYS_SCHEMA_FILES
     ${VERTHYS_SCHEMA_DIR}/demo.fbs
-    ${VERTHYS_SCHEMA_DIR}/superblock_v3.fbs
-    ${VERTHYS_SCHEMA_DIR}/partition.fbs
-    ${VERTHYS_SCHEMA_DIR}/extent.fbs
-    ${VERTHYS_SCHEMA_DIR}/sstable.fbs
 )
 set(VERTHYS_SCHEMA_GEN_FILES
     ${VERTHYS_SCHEMA_GEN_DIR}/demo_reader.h
     ${VERTHYS_SCHEMA_GEN_DIR}/demo_builder.h
     ${VERTHYS_SCHEMA_GEN_DIR}/demo_verifier.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/superblock_v3_reader.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/superblock_v3_builder.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/superblock_v3_verifier.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/partition_reader.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/partition_builder.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/partition_verifier.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/extent_reader.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/extent_builder.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/extent_verifier.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/sstable_reader.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/sstable_builder.h
-    ${VERTHYS_SCHEMA_GEN_DIR}/sstable_verifier.h
     ${VERTHYS_SCHEMA_GEN_DIR}/flatbuffers_common_reader.h
     ${VERTHYS_SCHEMA_GEN_DIR}/flatbuffers_common_builder.h
 )
@@ -313,24 +244,17 @@ add_custom_command(
 )
 add_custom_target(flatcc_generate DEPENDS ${VERTHYS_SCHEMA_GEN_FILES})
 
-# ---------- 对象库（v3 源码拆分边界） ----------
-# 共享对象库：v4 + 安全/密码学基础设施（产品与测试/legacy 共用）
+# ---------- 对象库 ----------
+# 共享对象库：安全/密码学基础设施（产品与测试共用）
 add_library(verthys_core_shared_obj OBJECT ${VERTHYS_SHARED_SOURCES})
-# 产品 API 对象库：V3 分支在编译期剔除（v4-only 产品二进制）
+# 产品 API 对象库
 add_library(verthys_core_obj OBJECT ${VERTHYS_API_SOURCES})
-# v3 容器对象库：仅 verthys_tests 与 verthys_core_legacy 链接
-add_library(verthys_core_v3_obj OBJECT ${VERTHYS_V3_SOURCES})
-# 测试/legacy API 对象库：启用 V3 分支（与产品 API 同一源码、不同编译定义）
-add_library(verthys_core_legacy_api_obj OBJECT ${VERTHYS_API_SOURCES})
-target_compile_definitions(verthys_core_legacy_api_obj PRIVATE VERTHYS_V3_SUPPORT=1)
 
-# 四个对象库共用编译/链接设置：任一新增对象库必须经本循环，
+# 两个对象库共用编译/链接设置：任一新增对象库必须经本循环，
 # 避免 include 路径或加固旗标在某个库上静默缺失。
 foreach(_verthys_obj
         verthys_core_shared_obj
-        verthys_core_obj
-        verthys_core_v3_obj
-        verthys_core_legacy_api_obj)
+        verthys_core_obj)
     # 仅当构建包含 MASM thunk 时才允许 C 代码引用该符号，
     # 避免其他工具链在链接阶段出现未解析外部符号。
     if(MSVC)
@@ -346,8 +270,8 @@ foreach(_verthys_obj
         PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                 ${VERTHYS_SRC_SUBDIRS}
+                ${CMAKE_SOURCE_DIR}/security-service/include
                 ${VERTHYS_SCHEMA_GEN_DIR}
-                ${VERTHYS_XXHASH_INCLUDE_DIR}   # LSM Bloom Filter（xxHash64 双重哈希）
     )
     target_link_libraries(${_verthys_obj} PRIVATE flatccrt libsodium)
     if(WIN32)
@@ -370,6 +294,15 @@ endforeach()
 # 定义落在 shared 对象库（vty_caller_auth.c 所在库）。
 option(VERTHYS_REQUIRE_CALLER_SIG
     "Require publisher Authenticode signature for the caller process and verthys.dll" OFF)
+# 测试隔离钩子：仅攻击回归测试构建使用。打开后允许
+# VERTHYS_TEST_STATE_DIR 覆盖熔断/回滚状态目录；生产构建必须显式 OFF。
+option(VERTHYS_TEST_HOOKS
+    "Enable test-only state path override (never enable for production)" OFF)
+if(VERTHYS_TEST_HOOKS)
+    target_compile_definitions(verthys_core_shared_obj PRIVATE
+        VERTHYS_TEST_HOOKS=1)
+    message(STATUS "[test-hooks] state path override enabled")
+endif()
 set(VERTHYS_PUBLISHER_SHA256 "" CACHE STRING
     "SHA-256 fingerprint of the publisher code-signing certificate (64 hex chars)")
 if(VERTHYS_REQUIRE_CALLER_SIG)
@@ -384,9 +317,7 @@ if(VERTHYS_REQUIRE_CALLER_SIG)
 endif()
 
 # 生产 DLL：仅导出 .def 列出的公共函数。
-# 链接边界：共享对象库（v4 + 安全基础设施）+ 产品 API（v4-only）。
-# 不链接 verthys_core_v3_obj / verthys_core_legacy_api_obj——
-# v3 容器实现及其 API 分支不进入产品二进制。
+# 链接边界：共享对象库（安全基础设施）+ 产品 API。
 add_library(verthys_core SHARED
     $<TARGET_OBJECTS:verthys_core_shared_obj>
     $<TARGET_OBJECTS:verthys_core_obj>)
@@ -394,6 +325,7 @@ target_include_directories(verthys_core
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${VERTHYS_SRC_SUBDIRS}
+            ${CMAKE_SOURCE_DIR}/security-service/include
 )
 set_target_properties(verthys_core PROPERTIES
     OUTPUT_NAME verthys
@@ -412,9 +344,7 @@ target_link_options(verthys_core PRIVATE
     /DEF:${CMAKE_CURRENT_SOURCE_DIR}/verthys.def
 )
 verthys_apply_hardening(verthys_core)
-# 产品二进制已无 v3 实现：/OPT:REF 可按引用裁剪，无需 /OPT:NOREF。
-# .rhat 生成仅覆盖产品实际保留的共享关键函数（--xlist core，
-# v3 符号清单只用于测试/legacy 构建）。
+# .rhat 生成仅覆盖产品实际保留的共享关键函数（--xlist core）。
 
 # ===================================================================== *
 # rhash_gen 构建期 .rhat 补丁工具 + POST_BUILD 接线
@@ -429,8 +359,7 @@ verthys_apply_hardening(verthys_core)
 # 依赖：/INCREMENTAL:NO（VERTHYS_LINK_BASE 基线已含）——增量链接的 ILT
 #   thunk 会让符号 RVA 指向跳板而非函数体，掩码归一失去意义。
 # 红线：X 清单任一符号缺失 → rhash_gen 退出码 1 → 构建失败（禁静默降级）。
-#   --xlist core：产品 DLL 的共享关键函数清单（v3 符号不在产品 map）；
-#   --xlist full：测试/legacy 构建的完整清单（含 v3 实现）。
+#   --xlist core：产品 DLL 的共享关键函数清单。
 # ===================================================================== *
 add_executable(rhash_gen tools/rhash_gen.c)
 target_include_directories(rhash_gen PRIVATE
@@ -463,43 +392,6 @@ add_custom_command(TARGET verthys_core POST_BUILD
         -DVER_SOURCE_DIR=${CMAKE_SOURCE_DIR}
         -P ${CMAKE_SOURCE_DIR}/cmake/write_artifacts.cmake
     COMMENT "[rhash] rhash_gen: verthys.dll .rhat 运行时哈希表补丁 + 产物契约生成"
-    VERBATIM
-)
-
-# --------------------------------------------------------------------- *
-# 测试专用 legacy DLL：仅保留 v3 历史样本攻击回归所需入口。
-# 产品 verthys.dll 不导出 Verthys_Unlock / Verthys_CreateWithPreset；
-# 该目标不进入安装包与 worker 加载路径。
-# 链接边界：共享对象库 + v3 容器对象库 + 测试 API 对象库（V3 分支启用）。
-# --------------------------------------------------------------------- *
-add_library(verthys_core_legacy SHARED
-    $<TARGET_OBJECTS:verthys_core_shared_obj>
-    $<TARGET_OBJECTS:verthys_core_v3_obj>
-    $<TARGET_OBJECTS:verthys_core_legacy_api_obj>)
-target_include_directories(verthys_core_legacy
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
-            ${VERTHYS_SRC_SUBDIRS}
-)
-set_target_properties(verthys_core_legacy PROPERTIES
-    OUTPUT_NAME verthys_legacy
-    PREFIX ""
-)
-target_link_libraries(verthys_core_legacy PRIVATE flatccrt libsodium)
-if(WIN32)
-    target_link_libraries(verthys_core_legacy PRIVATE
-        user32 wintrust crypt32 shlwapi psapi bcrypt ncrypt tbs)
-endif()
-target_link_options(verthys_core_legacy PRIVATE
-    /DEF:${CMAKE_CURRENT_SOURCE_DIR}/verthys.legacy.def
-    /MAP:$<TARGET_FILE_DIR:verthys_core_legacy>/verthys_legacy.map
-)
-verthys_apply_hardening(verthys_core_legacy)
-add_dependencies(verthys_core_legacy rhash_gen)
-add_custom_command(TARGET verthys_core_legacy POST_BUILD
-    COMMAND $<TARGET_FILE:rhash_gen> --patch $<TARGET_FILE:verthys_core_legacy>
-            --xlist full
-    COMMENT "[rhash] legacy DLL .rhat 补丁（v3 基线攻击回归专用）"
     VERBATIM
 )
 

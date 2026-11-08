@@ -1,4 +1,4 @@
-/* module_session.rs — v4 模块 M1 会话命令（worker 转发层）
+/* module_session.rs — 模块 M1 会话命令（worker 转发层）
  *
  * 职责：把 v4_module_* 请求映射到 C 层 Verthys_V4Module*，只回传状态位
  * 与（恢复码轮换时的）新恢复码。模块口令/恢复码不缓存、不写日志，
@@ -10,6 +10,26 @@ use crate::runtime::protocol::{Request, Response};
 use crate::runtime::worker::Worker;
 
 const VERTHYS_MODULE_ALL: u32 = 0xFFFFFFFF;
+const VERTHYS_ERR_RATE: u32 = 0x0000000A;
+const VERTHYS_ERR_MODULE_LOCKED: u32 = 0x0000001D;
+
+/// 模块口令路径失败响应：模块锁命中时附带剩余秒数。
+fn module_error(op: &str, rc: u32, worker: &Worker, module_id: u32) -> Response {
+    if rc == VERTHYS_ERR_MODULE_LOCKED {
+        let secs = worker.call_module_lockout_remaining(module_id).unwrap_or(0);
+        return Response::err_with_retry(op, rc, secs);
+    }
+    Response::err(op, rc)
+}
+
+/// 容器口令路径失败响应（如模块删除）：库锁命中时附带剩余秒数。
+fn library_error(op: &str, rc: u32, worker: &Worker) -> Response {
+    if rc == VERTHYS_ERR_RATE {
+        let secs = worker.call_get_lib_lockout_remaining().unwrap_or(0);
+        return Response::err_with_retry(op, rc, secs);
+    }
+    Response::err(op, rc)
+}
 
 fn valid_module(module_id: u32) -> bool {
     module_id <= 2
@@ -27,7 +47,7 @@ fn delete_password(recovery_mode: bool, password: &str) -> Option<&str> {
 
 /// 成功响应附带模块状态；状态查询失败不影响主操作结果。
 fn with_status(mut resp: Response, worker: &Worker, module_id: u32) -> Response {
-    if let Ok(st) = worker.call_v4_module_status(module_id) {
+    if let Ok(st) = worker.call_module_status(module_id) {
         resp.enabled = Some(st.enabled != 0);
         resp.unlocked = Some(st.unlocked != 0);
         resp.has_recovery = Some(st.has_recovery != 0);
@@ -40,7 +60,7 @@ pub(crate) fn handle_enable(req: &Request, worker: &Worker) -> Response {
     if !valid_module(req.module_id) || req.password.is_empty() {
         return Response::err("v4_module_enable", 0x00000001);
     }
-    let rc = worker.call_v4_module_enable(
+    let rc = worker.call_module_enable(
         req.module_id,
         req.password.as_str(),
         optional_code(req.recovery_code.as_str()),
@@ -55,9 +75,9 @@ pub(crate) fn handle_unlock(req: &Request, worker: &Worker) -> Response {
     if !valid_module(req.module_id) || req.password.is_empty() {
         return Response::err("v4_module_unlock", 0x00000001);
     }
-    let rc = worker.call_v4_module_unlock(req.module_id, req.password.as_str());
+    let rc = worker.call_module_unlock(req.module_id, req.password.as_str());
     if rc != VERTHYS_OK {
-        return Response::err("v4_module_unlock", rc);
+        return module_error("v4_module_unlock", rc, worker, req.module_id);
     }
     with_status(Response::ok("v4_module_unlock"), worker, req.module_id)
 }
@@ -66,7 +86,7 @@ pub(crate) fn handle_lock(req: &Request, worker: &Worker) -> Response {
     if req.module_id != VERTHYS_MODULE_ALL && !valid_module(req.module_id) {
         return Response::err("v4_module_lock", 0x00000001);
     }
-    let rc = worker.call_v4_module_lock(req.module_id);
+    let rc = worker.call_module_lock(req.module_id);
     if rc == VERTHYS_OK {
         Response::ok("v4_module_lock")
     } else {
@@ -81,13 +101,13 @@ pub(crate) fn handle_rotate_password(req: &Request, worker: &Worker) -> Response
     {
         return Response::err("v4_module_rotate_password", 0x00000001);
     }
-    let rc = worker.call_v4_module_rotate_password(
+    let rc = worker.call_module_rotate_password(
         req.module_id,
         req.old_password.as_str(),
         req.new_password.as_str(),
     );
     if rc != VERTHYS_OK {
-        return Response::err("v4_module_rotate_password", rc);
+        return module_error("v4_module_rotate_password", rc, worker, req.module_id);
     }
     with_status(
         Response::ok("v4_module_rotate_password"),
@@ -100,9 +120,9 @@ pub(crate) fn handle_disable(req: &Request, worker: &Worker) -> Response {
     if !valid_module(req.module_id) || req.password.is_empty() {
         return Response::err("v4_module_disable", 0x00000001);
     }
-    let rc = worker.call_v4_module_disable(req.module_id, req.password.as_str());
+    let rc = worker.call_module_disable(req.module_id, req.password.as_str());
     if rc != VERTHYS_OK {
-        return Response::err("v4_module_disable", rc);
+        return module_error("v4_module_disable", rc, worker, req.module_id);
     }
     with_status(Response::ok("v4_module_disable"), worker, req.module_id)
 }
@@ -114,12 +134,12 @@ pub(crate) fn handle_delete(req: &Request, worker: &Worker) -> Response {
     /* 恢复会话已由恢复码根认证，C 层只允许空口令删除；普通会话仍必须
      * 用宿主注入的容器口令验证 user 槽。会话模式以 C 层状态为权威，
      * 查询失败 fail-closed，不把“是否恢复会话”降级为前端判断。 */
-    let recovery_mode = match worker.call_v4_keyfile_status() {
+    let recovery_mode = match worker.call_keyfile_status() {
         Ok((_enabled, recovery)) => recovery,
         Err(rc) => return Response::err("v4_module_delete", rc),
     };
     let password = delete_password(recovery_mode, req.password.as_str());
-    let rc = worker.call_v4_module_delete(
+    let rc = worker.call_module_delete(
         req.module_id,
         password,
         req.confirm.as_str(),
@@ -133,7 +153,7 @@ pub(crate) fn handle_delete(req: &Request, worker: &Worker) -> Response {
             req.password.len(),
             req.confirm.len()
         );
-        return Response::err("v4_module_delete", rc);
+        return library_error("v4_module_delete", rc, worker);
     }
     with_status(Response::ok("v4_module_delete"), worker, req.module_id)
 }
@@ -145,13 +165,13 @@ pub(crate) fn handle_bind_recovery(req: &Request, worker: &Worker) -> Response {
     {
         return Response::err("v4_module_bind_recovery", 0x00000001);
     }
-    let rc = worker.call_v4_module_bind_recovery(
+    let rc = worker.call_module_bind_recovery(
         req.module_id,
         req.password.as_str(),
         req.recovery_code.as_str(),
     );
     if rc != VERTHYS_OK {
-        return Response::err("v4_module_bind_recovery", rc);
+        return module_error("v4_module_bind_recovery", rc, worker, req.module_id);
     }
     with_status(
         Response::ok("v4_module_bind_recovery"),
@@ -164,9 +184,9 @@ pub(crate) fn handle_reseal_device(req: &Request, worker: &Worker) -> Response {
     if !valid_module(req.module_id) || req.password.is_empty() {
         return Response::err("v4_module_reseal_device", 0x00000001);
     }
-    let rc = worker.call_v4_module_reseal_device(req.module_id, req.password.as_str());
+    let rc = worker.call_module_reseal_device(req.module_id, req.password.as_str());
     if rc != VERTHYS_OK {
-        return Response::err("v4_module_reseal_device", rc);
+        return module_error("v4_module_reseal_device", rc, worker, req.module_id);
     }
     with_status(
         Response::ok("v4_module_reseal_device"),
@@ -179,7 +199,7 @@ pub(crate) fn handle_status(req: &Request, worker: &Worker) -> Response {
     if !valid_module(req.module_id) {
         return Response::err("v4_module_status", 0x00000001);
     }
-    match worker.call_v4_module_status(req.module_id) {
+    match worker.call_module_status(req.module_id) {
         Ok(st) => {
             let mut resp = Response::ok("v4_module_status");
             resp.enabled = Some(st.enabled != 0);
@@ -196,7 +216,7 @@ pub(crate) fn handle_recovery_rotate(req: &Request, worker: &Worker) -> Response
     if req.password.is_empty() || req.old_recovery.is_empty() {
         return Response::err("v4_recovery_rotate", 0x00000001);
     }
-    match worker.call_v4_recovery_rotate(req.password.as_str(), req.old_recovery.as_str()) {
+    match worker.call_recovery_rotate(req.password.as_str(), req.old_recovery.as_str()) {
         Ok(code) => {
             let mut resp = Response::ok("v4_recovery_rotate");
             resp.recovery_code = Some(code);

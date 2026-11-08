@@ -18,7 +18,7 @@
  * - 批量构建 importedItems 后一次性 pushShallowItems，避免循环内多次触发响应式
  * - persistVerthys + 返回值检查 + setModuleCache 更新缓存
  */
-import { ref, watch, onScopeDispose, type ShallowRef, type Ref } from "vue";
+import { ref, watch, onScopeDispose, type ShallowRef } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readUserFile, userFileStat } from "../../lib/verthys";
 import { persistVerthysDetailed, setModuleCache } from "../../lib/keyManager";

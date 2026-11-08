@@ -39,6 +39,18 @@ const MAX_ENUM_RECORDS: u64 = 100_000;
 /// 调用方的缓存管控阈值远小于此上限，本夹层只用于阻断协议层的越界取值。
 const SCAN_INDEX_INLINE_MAX_BYTES: u64 = crate::runtime::budget::PB_SCAN_INDEX_INLINE_MAX_BYTES;
 
+/// C 层库锁错误码（映射为 worker 0x0A RATE）
+const VERTHYS_ERR_RATE: u32 = 0x0000000A;
+
+/// 解锁失败响应：库锁命中时附带剩余秒数，供 UI 展示“已锁定 X 秒”。
+fn unlock_error(worker: &Worker, rc: u32) -> Response {
+    if rc == VERTHYS_ERR_RATE {
+        let secs = worker.call_get_lib_lockout_remaining().unwrap_or(0);
+        return Response::err_with_retry("unlock", rc, secs);
+    }
+    Response::err("unlock", rc)
+}
+
 /// 解析扫描投影请求字段 → C 层 VerthysScanProject 取值
 ///
 /// 缺省（空串）与显式 "full" 等价（既有调用方语义不变）；未知取值显式
@@ -59,18 +71,7 @@ fn parse_inline_max_bytes(raw: u64) -> u64 {
     raw.min(SCAN_INDEX_INLINE_MAX_BYTES)
 }
 
-/* 修复----------------------------------------------------------- *
- * 根治：解锁成功后进程内探测全局主密钥记录                  *
- *                                                                    *
- * 原缺陷：解锁成功后前端需发起 3~4 次 IPC 往返                        *
- *   (verthysHasRecordByType → findLidByTypeEarlyStop → verthysGetRecord) *
- * 才能判断是否存在全局主密钥记录并取回数据。该链路存在两类致命问题：   *
- *   1. v1 容器：Verthys_HasRecordByType 返回 VERTHYS_ERR_FORMAT 假阴性，  *
- *      前端 probe 抛异常 → globalKeyRecordLoadingRef 永驻 true        *
- *      → UI 卡死在 "loading" 视图，无法进入身份验证窗口               *
- *   2. IPC 竞态：多次往返任意一环超时/失败均导致 initUnlock 永不完成   *
- *                                                                    *
- * 根治策略：将探测逻辑下沉到 worker 解锁成功分支进程内一次性完成，     *
+/* ----------------------------------------------------------- *
  * 结果内联到 unlock 响应的 has_global_key/global_key_id/              *
  * global_key_record 三字段，彻底消除前端 IPC 链路。                   *
  *                                                                    *
@@ -294,17 +295,15 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             if let Some(denied) = require_path_grant("unlock", "read", &req.path) {
                 return denied;
             }
-            /* 产品解锁只接受 v4：worker 先做 VRTY magic 白名单，
-             * 再调用 Verthys_V4Unlock；v3 容器直接 FORMAT 拒绝。 */
+            /* 产品解锁只接受 VRTY：worker 先做 magic 白名单，再调用
+             * Verthys_V4Unlock。 */
             /* VERTHYS_ERR_PARTIAL_UNLOCK 表示容器已进入
              * 最小可操作状态（超级块验证 + 密钥导入 + 分区表加载完成，索引
              * 预热后台进行中），与 verthys_api.c Unlock 成功分支语义一致——
              * 按成功处理，正常执行 GMK 探测并返回。 */
             const VERTHYS_ERR_PARTIAL_UNLOCK: u32 = 0x00000011;
-            let r = worker.call_unlock(&req.path, &req.password, req.flags);
+            let r = worker.call_unlock(&req.path, &req.password);
             if r == VERTHYS_OK || r == VERTHYS_ERR_PARTIAL_UNLOCK {
-                /* 根治：解锁成功后进程内探测全局主密钥记录，
-                 * 结果内联到响应三字段，消除前端 IPC 链路与 v1 假阴性死锁。 */
                 let (has_gmk, gmk_id, gmk_record) = probe_global_key_inproc(worker);
                 Response {
                     has_global_key: has_gmk,
@@ -313,8 +312,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                     ..Response::ok("unlock")
                 }
             } else {
-                /* 修复（D-STATE-RECOVERY）：级联 INVALID 状态恢复
-                 *
+                /*
                  * 场景：前一次解锁因 stdout 死锁导致父进程 60 秒超时退出，
                  * 但 worker 进程仍在运行且 Verthys_V4Unlock FFI 已成功完成，
                  * ctx->state 停留在 VERTHYS_STATE_UNLOCKED。后续解锁请求调用
@@ -331,7 +329,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                     let lock_r = worker.call_lock();
                     diag!("[worker] 状态恢复 lock 返回: {:08X}", lock_r);
                     if lock_r == VERTHYS_OK {
-                        let r2 = worker.call_unlock(&req.path, &req.password, req.flags);
+                        let r2 = worker.call_unlock(&req.path, &req.password);
                         diag!("[worker] 状态恢复 retry unlock 返回: {:08X}", r2);
                         if r2 == VERTHYS_OK || r2 == VERTHYS_ERR_PARTIAL_UNLOCK {
                             let (has_gmk, gmk_id, gmk_record) =
@@ -343,10 +341,10 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                                 ..Response::ok("unlock")
                             };
                         }
-                        return Response::err("unlock", r2);
+                        return unlock_error(worker, r2);
                     }
                 }
-                Response::err("unlock", r)
+                unlock_error(worker, r)
             }
         }
         "lock" => {
@@ -395,12 +393,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Err(code) => Response::err("get_preset_features", code),
             }
         }
-        // 根治：Verthys_Flush 显式刷盘
-        //   替代旧 verthys_flush 的 lock+unlock 模式。
-        //   旧模式缺陷：lock 清零密钥 + state=LOCKED，若 unlock 超时/失败，
-        //   worker 永久卡在 LOCKED 状态，所有后续 get_record 返回 VERTHYS_ERR_LOCKED，
-        //   前端照片全部无法读取（表现为"照片损坏/元数据丢失"）。
-        //   Verthys_Flush 不改变 state、不清零密钥，安全且高效。
+
         "flush" => {
             diag!("[worker] call_flush");
             let r = worker.call_flush();
@@ -825,7 +818,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("has_record_by_type", rc)
             }
         }
-        /* 按类型分页枚举记录 ID（API 0x0012）：走 V4 类型盲索引，
+        /* 按类型分页枚举记录 ID（API 0x0012）：走 类型盲索引，
          * 不读取记录密文；响应 ids 为升序 ID，exhausted 标记末页。
          * max_count 在分配前先按 C 层同源上限拦截，避免超大请求
          * 触发无界内存分配。 */
@@ -929,13 +922,13 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
         // 内容层加解密（分片密钥只在 C 层持有，worker 不缓存模块口令）
         "module_seal" => module_keys::handle_seal_v4(req, worker),
         "module_open" => module_keys::handle_open_v4(req, worker),
-        // v4 模块 M1 会话（口令只转发 C，MDEK 不进入 worker）
+        // 模块 M1 会话（口令只转发 C，MDEK 不进入 worker）
         "v4_create" => {
             if let Some(denied) = require_path_grant("v4_create", "write", &req.path) {
                 return denied;
             }
-            diag!("[worker] call_v4_create: path_bytes={}", req.path.len());
-            match worker.call_v4_create(&req.path, &req.password) {
+            diag!("[worker] call_create: path_bytes={}", req.path.len());
+            match worker.call_create(&req.path, &req.password) {
                 Ok(recovery_code) => Response {
                     recovery_code: Some(recovery_code),
                     ..Response::ok("v4_create")
@@ -949,9 +942,9 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             {
                 return denied;
             }
-            let rc = worker.call_v4_unlock_recovery(&req.path, &req.recovery_code);
+            let rc = worker.call_unlock_recovery(&req.path, &req.recovery_code);
             if rc == VERTHYS_OK {
-                /* 恢复解锁与口令解锁共用同一记录层：v4 废弃的是 C 层 GMK，
+                /* 恢复解锁与口令解锁共用同一记录层：废弃的是 C 层 GMK，
                  * 产品层的 global-key 记录仍由 AddRecord 写入并决定
                  * 初始化/验证视图。必须执行同一条进程内探测，返回固定
                  * false 会把有记录的库误导向初始化视图。 */
@@ -971,7 +964,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
         "v4_pcr_enable" => pcr_session::handle_pcr_enable(req, worker),
         "v4_pcr_disable" => pcr_session::handle_pcr_disable(req, worker),
         "v4_pcr_reseal" => pcr_session::handle_pcr_reseal(req, worker),
-        /* v4 keyfile 因子（D3）：两条路径都要先授权（库路径 + keyfile 路径），
+        /* keyfile 因子：两条路径都要先授权（库路径 + keyfile 路径），
          * keyfile 内容只在 C 层读取/生成。 */
         "v4_create_keyfile" => {
             if req.keyfile_path.is_empty() {
@@ -987,7 +980,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             {
                 return denied;
             }
-            match worker.call_v4_create_keyfile(
+            match worker.call_create_keyfile(
                 &req.path,
                 &req.password,
                 &req.keyfile_path,
@@ -1013,7 +1006,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             {
                 return denied;
             }
-            let rc = worker.call_v4_unlock_keyfile(
+            let rc = worker.call_unlock_keyfile(
                 &req.path,
                 &req.password,
                 &req.keyfile_path,
@@ -1033,7 +1026,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("v4_unlock_keyfile", rc)
             }
         }
-        "v4_keyfile_status" => match worker.call_v4_keyfile_status() {
+        "v4_keyfile_status" => match worker.call_keyfile_status() {
             Ok((enabled, recovery_mode)) => Response {
                 keyfile_enabled: Some(enabled),
                 recovery_mode: Some(recovery_mode),
@@ -1049,7 +1042,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                     return denied;
                 }
             }
-            let rc = worker.call_v4_reseal_device(&req.password, &req.keyfile_path);
+            let rc = worker.call_reseal_device(&req.password, &req.keyfile_path);
             if rc == VERTHYS_OK {
                 Response {
                     recovery_mode: Some(true),
@@ -1068,7 +1061,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             {
                 return denied;
             }
-            let rc = worker.call_v4_keyfile_enable(&req.password, &req.keyfile_path);
+            let rc = worker.call_keyfile_enable(&req.password, &req.keyfile_path);
             if rc == VERTHYS_OK {
                 Response {
                     keyfile_enabled: Some(true),
@@ -1088,7 +1081,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                     return denied;
                 }
             }
-            let rc = worker.call_v4_keyfile_disable(&req.password, &req.keyfile_path);
+            let rc = worker.call_keyfile_disable(&req.password, &req.keyfile_path);
             if rc == VERTHYS_OK {
                 Response {
                     keyfile_enabled: Some(false),
@@ -1108,7 +1101,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
         "v4_module_reseal_device" => module_session::handle_reseal_device(req, worker),
         "v4_module_status" => module_session::handle_status(req, worker),
         "v4_recovery_rotate" => module_session::handle_recovery_rotate(req, worker),
-        /* v4 D9 全库 DEK 轮换：作业式五段命令。
+        /* 全库 DEK 轮换：作业式五段命令。
          * Begin 需要 new_path，路径授权与源库解锁授权独立签发；
          * 口令由宿主注入，Rust 侧不缓存、不写日志。 */
         "v4_rotate_begin" => {
@@ -1120,7 +1113,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             {
                 return denied;
             }
-            match worker.call_v4_rotate_begin(
+            match worker.call_rotate_begin(
                 &req.new_path,
                 &req.password,
                 req.flags,
@@ -1148,7 +1141,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             ) {
                 return denied;
             }
-            let rc = worker.call_v4_rotate_attach_keyfile(
+            let rc = worker.call_rotate_attach_keyfile(
                 &req.keyfile_path,
                 &req.password,
             );
@@ -1168,7 +1161,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             } else {
                 Some(req.recovery_code.as_str())
             };
-            let rc = worker.call_v4_rotate_unlock_module(
+            let rc = worker.call_rotate_unlock_module(
                 req.module_id,
                 &req.password,
                 recovery_code,
@@ -1185,7 +1178,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             } else {
                 Some(req.cancel_event.as_str())
             };
-            let rc = worker.call_v4_rotate_run(cancel_event);
+            let rc = worker.call_rotate_run(cancel_event);
             if rc == VERTHYS_OK {
                 Response::ok("v4_rotate_run")
             } else {
@@ -1193,7 +1186,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
         }
         "v4_rotate_commit" => {
-            let rc = worker.call_v4_rotate_commit(req.keep_old);
+            let rc = worker.call_rotate_commit(req.keep_old);
             if rc == VERTHYS_OK {
                 Response::ok("v4_rotate_commit")
             } else {
@@ -1201,7 +1194,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
         }
         "v4_rotate_abort" => {
-            let rc = worker.call_v4_rotate_abort();
+            let rc = worker.call_rotate_abort();
             if rc == VERTHYS_OK {
                 Response::ok("v4_rotate_abort")
             } else {

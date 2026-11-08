@@ -6,7 +6,29 @@
 
 ### Added
 
+- P2 SYSTEM 机器级安全服务：独立 `security-service/` 工程、命名管道 v1、令牌桶与每用户配额、HMAC 状态、ECDSA P-256 响应签名。
+- 单安装包随应用安装：应用安装器改为 perMachine，一次 UAC 内完成应用、服务与根 CA；服务安装/卸载/修复逻辑并入 `VerthysSecuritySvc.exe` 子命令，不再交付独立 `VerthysSecurityServiceSetup.exe`。取消 UAC 零残留；卸载清理服务、机器状态、事件源与根 CA。
+- core 机器级预算客户端接入 `vty_machine_limiter`；门禁/记账位于 V4 库解锁（口令/keyfile/恢复码）、模块解锁与口令复核收口；服务为强制依赖，未安装/不可达/状态损坏/验签失败一律 fail-closed，不保留旧版本兼容路径。旧 `Verthys_Unlock` 与 `verthys_backoff_*` 死路径已删除。
+- P2 测试矩阵：服务单元 U1–U12、控制台集成 I0–I12、攻击回归 S-A3/A4/A5/A6/A8/A9、core 客户端 C1–C8，以及 V4 解锁/模块解锁接入级回归（服务未安装、管道不可达、预算耗尽均返回 RATE）。
+- 事件日志消息表由 `mc.exe` 编译进服务 exe，安装器注册 `EventMessageFile`，Event Viewer 可解析全部事件描述。
+- `build_production.ps1` 阶段 3.6 在 Tauri 打包之前构建并分发 P2 服务二进制、根 CA 与服务/根 CA 双 SHA-256，确保 perMachine 安装包携带本次构建的服务载荷。
+- 生产安装：应用安装器在一次 UAC 内完成应用、服务与根 CA；服务 `/install` 在自检前按编译期指纹导入根 CA，修复自签名链下服务 Event 3003“self signature verification failed”导致的启动失败。应用内不再有首启 UAC 安装引导。
+
+### Fixed
+
+- 修复主程序在安装包内 Authenticode `HashMismatch`：签名改由 Tauri `bundle.windows.signCommand` 在 bundle type 补丁之后执行，覆盖主程序、NSIS 卸载器、安装包与 NSIS 插件副本。
+- NSIS 安装包签名后自动重新生成 updater `.sig`，构建收尾以钉扎指纹复核安装包 Authenticode。
+- 修复 Tauri 签名钩子在 Windows PowerShell 5.1 子进程中继承 PowerShell 7 `PSModulePath` 导致 `Cert:` 驱动器缺失、发布签名必然失败的问题。
+- 开发启动器自动使用测试钩子 core 并仅为本进程树启用机器预算旁路；生产构建仍 fail-closed。
+- E2E worker/rotate 脚本补齐 `VERTHYS_TEST_MACHINE_LIMITER_BYPASS` 与 `VERTHYS_TEST_STATE_DIR` 隔离，避免改写真实熔断/回滚状态。
+
+### Security
+
+- 服务状态目录 ACL 仅 SYSTEM 完全控制、Administrators 只读；非管理员无法删除或篡改机器预算。
+- 服务端校验客户端 Authenticode 发布者指纹与已加载 `verthys.dll`；客户端校验服务端 ECDSA 响应签名，双向认证不共享秘密。
+- `reset` 不恢复机器预算，只能随时间恢复；单用户配额防止单账户抽干全局令牌。
 - 发布前置增加 production 端点 HTTPS 可达性探测，TLS 或代理异常在构建前阻断。
+- 根 CA 在构建期钉扎 DER SHA-256；服务 `/install` 先校验指纹再导入，卸载按锚点/载荷指纹移除；应用不再从用户可写目录提权执行安装器。
 - CDN 边缘回源模拟：验证清单不回源缓存、安装包边缘命中、304 / 206 由缓存应答。
 
 ## [4.1.7] - 2026-10-23

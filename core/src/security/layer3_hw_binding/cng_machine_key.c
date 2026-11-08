@@ -465,25 +465,3 @@ int cng_machine_key_unwrap_known(const uint8_t cipher[CMK_RSA_CIPHER_BYTES],
     return unwrap_via_slot(s, cipher, salt, label);
 }
 
-void cng_machine_key_destroy(void)
-{
-    for (int i = 0; i < 4; i++) {
-        CmkSlot *s = &s_slots[i];
-        /* 注意：仅销毁句柄，不删除持久化密钥
-         * （持久化密钥用于下次会话恢复）
-         * 仅在应急销毁时调用 NCryptDeleteKey */
-        if (s->hKey) {
-            NCryptFreeObject(s->hKey);
-            s->hKey = 0;
-        }
-        if (s->hProv) {
-            /* ncrypt.dll 不导出 NCryptCloseStorageProvider，使用 NCryptFreeObject */
-            NCryptFreeObject(s->hProv);
-            s->hProv = 0;
-        }
-        s->prov_open = 0;
-        s->key_open = 0;
-        s->create_blocked = 0;
-    }
-    s_initialized = 0;
-}

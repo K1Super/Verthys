@@ -388,12 +388,12 @@ describe("usePreset 特性快照加载", () => {
     expect(api.orbitSliderPos.value).toBe(100);
   });
 
-  it("核心防护文案映射真实能力：key_separation 显示 V4 密钥隔离", () => {
+  it("核心防护文案映射真实能力：key_separation 显示 密钥隔离", () => {
     const api = usePreset(stubOptions());
     const item = api.lockedFeatures.value.find((f) => f.key === "key_separation");
     expect(item).toBeTruthy();
     expect(item?.label).toBe("密钥隔离");
-    expect(item?.desc).toContain("V4");
+    expect(item?.desc).toContain("密钥隔离堆");
     expect(item?.desc).not.toContain("三权分立");
   });
 

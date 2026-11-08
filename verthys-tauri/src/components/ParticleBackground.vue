@@ -81,7 +81,7 @@
  */
 import { ref, onMounted, onBeforeUnmount, watch } from "vue";
 import * as THREE from "three";
-import { useGlobalIdleScheduler, type IdleLevel } from "../composables/useGlobalIdleScheduler";
+import { useGlobalIdleScheduler } from "../composables/useGlobalIdleScheduler";
 import { useFrameGate } from "../composables/useFrameGate";
 import { useTransitionEngine } from "../composables/useTransitionEngine";
 import { frameBudgetMonitor } from "../core/frame-budget";
@@ -221,7 +221,6 @@ let idleFraction = DENSITY_BY_IDLE[idleLevel.value];
 
 /* ===== DPR 档位切换状态（200ms 防抖 + 豁免优先契约） ===== */
 let dprTimer: number | null = null;
-let pendingDpr: number | null = null;
 
 /* ===== 渡越豁免状态（残影层可见性与 DPR 满配联动锚点） ===== */
 let transitionToken: ExemptionToken | null = null;
@@ -590,13 +589,11 @@ onMounted(() => {
     renderer.render(scene, camera); // 切换后立即渲染一帧，避免空白
   };
   const scheduleDpr = (target: number): void => {
-    pendingDpr = target;
     if (dprTimer !== null) window.clearTimeout(dprTimer);
     dprTimer = window.setTimeout(() => {
       dprTimer = null;
       /* 豁免优先：豁免激活期内未决 DPR 目标被丢弃，不得被应用 */
       if (exemptionActive) return;
-      pendingDpr = null;
       applyDprNow(target);
     }, DPR_SWITCH_DEBOUNCE_MS);
   };
@@ -610,7 +607,6 @@ onMounted(() => {
       window.clearTimeout(dprTimer);
       dprTimer = null;
     }
-    pendingDpr = null; // 未决降档值丢弃
     applyDprNow(deviceDpr); // 直接满配，不等待防抖
   };
   /* 渡越结束沿：豁免释放 + 按当前空闲档位重新调度 DPR（200ms 防抖） */
@@ -872,7 +868,6 @@ onBeforeUnmount(() => {
     window.clearTimeout(dprTimer);
     dprTimer = null;
   }
-  pendingDpr = null;
 
   /* 帧预算监控注销：控制器引用的 geometry 随下方登记制释放 —
    * 先解除监控器持有，杜绝降级回调触达已释放资源 */

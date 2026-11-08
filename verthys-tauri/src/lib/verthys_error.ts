@@ -33,22 +33,22 @@ export class VerthysError extends Error {
 }
 
 /** 进程异常（worker 崩溃/未初始化/通信中断） */
-export function processError(message: string, cause?: unknown): VerthysError {
+function processError(message: string, cause?: unknown): VerthysError {
   return new VerthysError(message, VerthysErrorKind.PROCESS_ERROR, cause);
 }
 
 /** 文件不存在（verthys 文件/bin 文件缺失） */
-export function fileNotFound(message: string, cause?: unknown): VerthysError {
+function fileNotFound(message: string, cause?: unknown): VerthysError {
   return new VerthysError(message, VerthysErrorKind.FILE_NOT_FOUND, cause);
 }
 
 /** 权限不足（目录不可写/系统保护目录） */
-export function permissionDenied(message: string, cause?: unknown): VerthysError {
+function permissionDenied(message: string, cause?: unknown): VerthysError {
   return new VerthysError(message, VerthysErrorKind.PERMISSION_DENIED, cause);
 }
 
 /** 参数非法（入参校验失败/格式错误） */
-export function invalidParam(message: string, cause?: unknown): VerthysError {
+function invalidParam(message: string, cause?: unknown): VerthysError {
   return new VerthysError(message, VerthysErrorKind.INVALID_PARAM, cause);
 }
 
@@ -120,6 +120,14 @@ export enum VerthysErrorCode {
   E_RECORD_NOT_FOUND = "E_RECORD_NOT_FOUND",
   E_PERSIST_FAILED = "E_PERSIST_FAILED",
   E_FLUSH_TIMEOUT = "E_FLUSH_TIMEOUT",
+  /** 暴力熔断锁定/尝试过频（message 或 retryAfterSecs 携带动态等待时间） */
+  E_RATE_LIMITED = "E_RATE_LIMITED",
+  /** 模块锁定（message 或 retryAfterSecs 携带动态等待时间） */
+  E_MODULE_LOCKED = "E_MODULE_LOCKED",
+  /** 安全门禁不可用（CNG/守卫内部异常，fail-closed） */
+  E_CNG_UNAVAILABLE = "E_CNG_UNAVAILABLE",
+  /** 安全状态目录预检失败（目录 ACL/位置不可用） */
+  E_SECURITY_STATE = "E_SECURITY_STATE",
 
   // ===== 初始化 =====
   E_INIT_FAILED = "E_INIT_FAILED",
@@ -156,7 +164,7 @@ export enum VerthysErrorCode {
   /** 介质标识与登记记录不一致（克隆嫌疑），解锁被阻止；用户确认更换介质后可重试 */
   E_USB_CLONE_SUSPECTED = "E_USB_CLONE_SUSPECTED",
 
-  // ===== v4 设备环境 / 回滚 =====
+  // ===== 设备环境 / 回滚 =====
   /** TPM/PCR 不可用或 PCR 策略不匹配（引导恢复码重密封） */
   E_TPM = "E_TPM",
   /** 回退锚点拒绝旧副本（文件回退） */
@@ -175,7 +183,7 @@ export enum VerthysErrorCode {
  */
 export type VerthysResult<T> =
   | { ok: true; value: T }
-  | { ok: false; code: VerthysErrorCode; message: string; cause?: unknown };
+  | { ok: false; code: VerthysErrorCode; message: string; cause?: unknown; retryAfterSecs?: number };
 
 /** VerthysResult 失败值的具体类型（用于类型守卫返回值） */
 export type VerthysErrorResult = {
@@ -183,6 +191,7 @@ export type VerthysErrorResult = {
   code: VerthysErrorCode;
   message: string;
   cause?: unknown;
+  retryAfterSecs?: number;
 };
 
 /** 成功构造器 */
@@ -190,13 +199,14 @@ export function ok<T>(value: T): VerthysResult<T> {
   return { ok: true, value };
 }
 
-/** 失败构造器（无值） */
+/** 失败构造器（无值）；retryAfterSecs 仅锁定/限流类错误使用。 */
 export function err(
   code: VerthysErrorCode,
   message: string,
   cause?: unknown,
+  retryAfterSecs?: number,
 ): VerthysResult<never> {
-  return { ok: false, code, message, cause };
+  return { ok: false, code, message, cause, retryAfterSecs };
 }
 
 /** 失败构造器（从 VerthysError 转换） */
@@ -301,6 +311,26 @@ const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
     title: "数据同步超时",
     message: "加密库数据同步到磁盘超时，可能因存储设备响应缓慢。",
     guidance: "请关闭占用磁盘的其他程序后重试。若使用 USB 设备，请检查连接稳定性。",
+  },
+  [VerthysErrorCode.E_RATE_LIMITED]: {
+    title: "请稍后再试",
+    message: "尝试次数过多，已触发安全熔断。",
+    guidance: "请等待锁定时间结束后再重试；界面会显示剩余等待秒数。",
+  },
+  [VerthysErrorCode.E_MODULE_LOCKED]: {
+    title: "模块已锁定",
+    message: "该模块口令连续校验失败，已进入退避窗口。",
+    guidance: "请等待锁定结束后再输入模块口令；其它模块与加密库解锁不受影响。",
+  },
+  [VerthysErrorCode.E_CNG_UNAVAILABLE]: {
+    title: "安全门禁不可用",
+    message: "安全门禁（CNG/守卫）暂时不可用，已按安全策略拒绝操作。",
+    guidance: "请重启应用后重试；若持续出现，请检查系统密码服务是否正常。",
+  },
+  [VerthysErrorCode.E_SECURITY_STATE]: {
+    title: "安全状态目录不可用",
+    message: "无法加固安全状态目录，可能位于网络位置、非 NTFS 盘或权限受限目录。",
+    guidance: "请将用户数据放在本地 NTFS 目录，或联系管理员完成目录 ACL 预检后重试。",
   },
 
   // ===== 初始化 =====
@@ -428,7 +458,7 @@ const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
     guidance: "如确为本人更换介质，请确认更换介质后重试；否则请检查介质是否为克隆盘。",
   },
 
-  // ===== v4 设备环境 / 回滚 =====
+  // ===== 设备环境 / 回滚 =====
   [VerthysErrorCode.E_TPM]: {
     title: "设备环境已变化",
     message: "TPM/PCR 策略与当前设备环境不匹配，已拒绝解锁。",
@@ -483,14 +513,75 @@ export function translateVerthysError(
   };
 }
 
+/* ------------------------------------------------------------------ *
+ * 锁定/限流类错误统一映射                                            *
+ *                                                                    *
+ * 后端可能返回三类码：语义码（E_RATE_LIMITED / E_MODULE_LOCKED /  *
+ * E_CNG_UNAVAILABLE / E_SECURITY_STATE）或 worker 十六进制码          *
+ * （ERR_0000000A / ERR_0000001D / ERR_0000000E / ERR_00000020）。    *
+ * 本函数把两者统一为 VerthysResult 失败值，并保留 retryAfterSecs 与  *
+ * 后端动态文案（不再用固定“打开加密库失败/密钥错误”覆盖）。          *
+ * ------------------------------------------------------------------ */
+
+/** worker 十六进制码 → 语义错误码 */
+const WORKER_GATE_CODES: Record<string, VerthysErrorCode> = {
+  ERR_0000000A: VerthysErrorCode.E_RATE_LIMITED,
+  ERR_0000001D: VerthysErrorCode.E_MODULE_LOCKED,
+  ERR_0000000E: VerthysErrorCode.E_CNG_UNAVAILABLE,
+  ERR_00000020: VerthysErrorCode.E_SECURITY_STATE,
+};
+
+/** 锁定类错误默认文案（后端未给出可读 message 时使用） */
+function gateFallbackMessage(code: VerthysErrorCode, secs: number): string {
+  switch (code) {
+    case VerthysErrorCode.E_RATE_LIMITED:
+      return secs > 0
+        ? `尝试次数过多，已锁定 ${secs} 秒，请稍后再试`
+        : "请求过于频繁，请稍后再试";
+    case VerthysErrorCode.E_MODULE_LOCKED:
+      return secs > 0
+        ? `模块已锁定 ${secs} 秒，请稍后再试`
+        : "模块已锁定，请稍后再试";
+    case VerthysErrorCode.E_CNG_UNAVAILABLE:
+      return "安全门禁暂时不可用，请重启应用后重试";
+    case VerthysErrorCode.E_SECURITY_STATE:
+      return "无法加固安全状态目录：请将用户数据放在本地 NTFS 目录，或联系管理员完成目录预检";
+    default:
+      return "操作失败";
+  }
+}
+
 /**
- * 从 VerthysResult 失败值提取用户友好文案（便捷方法）
+ * 把后端锁定类错误映射为结构化失败值；非锁定类返回 null。
  *
- * @param result VerthysResult 失败值（result.ok === false）
- * @returns VerthysUserErrorText 结构化用户文案
+ * @param rawCode 后端 error_code 或 worker error（可能为 ERR_XXXXXXXX）
+ * @param retryAfterSecs 后端建议等待秒数
+ * @param backendMessage 后端可读文案（是 ERR_ 码或空串时忽略）
  */
-export function translateVerthysResult<T>(
-  result: { ok: false; code: VerthysErrorCode; message: string; cause?: unknown },
-): VerthysUserErrorText {
-  return translateVerthysError(result.code, result.message);
+export function gateErrorResult(
+  rawCode: string | null | undefined,
+  retryAfterSecs?: number | null,
+  backendMessage?: string | null,
+): VerthysErrorResult | null {
+  if (!rawCode) return null;
+  const code = (WORKER_GATE_CODES[rawCode] ?? rawCode) as VerthysErrorCode;
+  if (
+    code !== VerthysErrorCode.E_RATE_LIMITED &&
+    code !== VerthysErrorCode.E_MODULE_LOCKED &&
+    code !== VerthysErrorCode.E_CNG_UNAVAILABLE &&
+    code !== VerthysErrorCode.E_SECURITY_STATE
+  ) {
+    return null;
+  }
+  const secs = Math.max(0, Math.ceil(retryAfterSecs ?? 0));
+  const readable =
+    backendMessage && !backendMessage.startsWith("ERR_") && backendMessage.trim().length > 0
+      ? backendMessage
+      : gateFallbackMessage(code, secs);
+  return {
+    ok: false,
+    code,
+    message: readable,
+    ...(secs > 0 ? { retryAfterSecs: secs } : {}),
+  };
 }

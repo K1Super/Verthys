@@ -295,10 +295,10 @@ mod tests {
     fn test_debug_in_derived_struct_redacts_content() {
         #[derive(Debug)]
         struct Sample {
-            name: SecuredString,
+            _name: SecuredString,
         }
         let s = Sample {
-            name: SecuredString::from_str("record_secret_name"),
+            _name: SecuredString::from_str("record_secret_name"),
         };
         let dbg = format!("{:?}", s);
         assert!(!dbg.contains("record_secret_name"));

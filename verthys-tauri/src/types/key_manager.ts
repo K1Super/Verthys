@@ -28,13 +28,12 @@ export interface ScannedRecord {
 export type BruteForceGateResult =
   | { allowed: true }
   | { allowed: false; reason: "locked"; remainingSecs: number }
-  | { allowed: false; reason: "purge_required" }
   | { allowed: false; reason: "gate_unavailable" };
 
 /** verifyGlobalKeyWithBruteForce 返回类型 */
 export type VerifyGlobalKeyResult =
   | { ok: true }
-  | { ok: false; reason: "wrong_key" | "locked" | "purge_required" | "gate_locked" | "gate_purge_required" | "gate_unavailable"; remainingSecs?: number };
+  | { ok: false; reason: "wrong_key" | "locked" | "gate_locked" | "gate_unavailable"; remainingSecs?: number };
 
 // Re-export verthys types for convenience
 export type { SecurityPresetCode, BruteForceCheckResponse, PresetFeatures };

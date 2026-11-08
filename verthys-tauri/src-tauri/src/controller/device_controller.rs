@@ -12,7 +12,7 @@
  * - 设备绑定：将设备组件序列化后经 DPAPI 加密，存储于状态文件，支持首次绑定和重新绑定。
  * - 设备校验：解密存储的组件，与当前设备进行权重匹配（CPU 25%、主板 35%、磁盘 40%），
  *   匹配度 ≥80% 视为部分匹配，允许有限恢复；低于阈值视为不匹配。
- * - 状态管理：状态文件缺失时返回未绑定状态；支持从旧版明文指纹向后兼容。
+ * - 状态管理：状态文件缺失时返回未绑定状态，绑定数据经 DPAPI 加密存储。
  * - 异步超时与熔断：指纹采集使用 spawn_blocking + 2 秒超时，避免阻塞主线程。
  * - 审计日志：绑定、重新绑定、校验失败等事件记录于防篡改审计日志。
  *
@@ -242,7 +242,7 @@ pub async fn set_device_binding(
     // 读取或创建状态文件
     let mut verthys_state = match read_state_file(&app) {
         Ok(Some(s)) => {
-            if !s.device_binding_blob.is_empty() || !s.device_fingerprint.is_empty() {
+            if !s.device_binding_blob.is_empty() {
                 log::info!("[device] 检测到已有绑定，执行重新绑定");
                 write_device_audit(
                     &app,
@@ -278,7 +278,6 @@ pub async fn set_device_binding(
 
     // 存储绑定数据
     verthys_state.device_binding_blob = binding_blob;
-    verthys_state.device_fingerprint = components.combined_hash.clone();
 
     write_state_file_atomic(&app, &verthys_state).map_err(|e| {
         write_device_audit(
@@ -322,9 +321,8 @@ pub async fn check_device_binding(
     };
 
     let has_binding_blob = !stored_state.device_binding_blob.is_empty();
-    let has_legacy_fingerprint = !stored_state.device_fingerprint.is_empty();
 
-    if !has_binding_blob && !has_legacy_fingerprint {
+    if !has_binding_blob {
         return Ok(DeviceBindingResult {
             status: DeviceBindingStatus::Unbound,
             detail: "设备未绑定".into(),
@@ -370,77 +368,55 @@ pub async fn check_device_binding(
         }
     };
 
-    // 优先使用 DPAPI 绑定数据
-    if has_binding_blob {
-        match unseal_device_components(&stored_state.device_binding_blob) {
-            Some(stored_components) => {
-                let (score, match_info) =
-                    calculate_match_score(&stored_components, &current_components);
+    match unseal_device_components(&stored_state.device_binding_blob) {
+        Some(stored_components) => {
+            let (score, match_info) =
+                calculate_match_score(&stored_components, &current_components);
 
-                log::info!(
-                    "[device] 权重匹配 score={}%, cpu={}, mb={}, disk={}",
+            log::info!(
+                "[device] 权重匹配 score={}%, cpu={}, mb={}, disk={}",
+                score,
+                match_info.cpu_match,
+                match_info.motherboard_match,
+                match_info.disk_match
+            );
+
+            if score == 100 {
+                Ok(DeviceBindingResult {
+                    status: DeviceBindingStatus::Match,
+                    detail: "设备匹配".into(),
+                    error_code: None,
+                    match_score: Some(100),
+                })
+            } else if score >= MATCH_THRESHOLD_PERCENT {
+                log::warn!(
+                    "[device] 部分匹配 {}%（超阈值 {}%），允许有限恢复",
                     score,
-                    match_info.cpu_match,
-                    match_info.motherboard_match,
-                    match_info.disk_match
+                    MATCH_THRESHOLD_PERCENT
                 );
-
-                if score == 100 {
-                    Ok(DeviceBindingResult {
-                        status: DeviceBindingStatus::Match,
-                        detail: "设备匹配".into(),
-                        error_code: None,
-                        match_score: Some(100),
-                    })
-                } else if score >= MATCH_THRESHOLD_PERCENT {
-                    log::warn!(
-                        "[device] 部分匹配 {}%（超阈值 {}%），允许有限恢复",
-                        score,
-                        MATCH_THRESHOLD_PERCENT
-                    );
-                    Ok(DeviceBindingResult {
-                        status: DeviceBindingStatus::PartialMatch,
-                        detail: format!("设备部分匹配（{}%），可能硬件已变更，建议重新绑定", score),
-                        error_code: None,
-                        match_score: Some(score),
-                    })
-                } else {
-                    Ok(DeviceBindingResult {
-                        status: DeviceBindingStatus::Mismatch,
-                        detail: format!(
-                            "设备不匹配（匹配度 {}%，低于阈值 {}%）",
-                            score, MATCH_THRESHOLD_PERCENT
-                        ),
-                        error_code: Some(ErrorCode::DeviceMismatch.as_str().to_string()),
-                        match_score: Some(score),
-                    })
-                }
-            }
-            None => {
-                log::warn!("[device] DPAPI 解密失败，状态文件可能来自其他机器");
+                Ok(DeviceBindingResult {
+                    status: DeviceBindingStatus::PartialMatch,
+                    detail: format!("设备部分匹配（{}%），可能硬件已变更，建议重新绑定", score),
+                    error_code: None,
+                    match_score: Some(score),
+                })
+            } else {
                 Ok(DeviceBindingResult {
                     status: DeviceBindingStatus::Mismatch,
-                    detail: "设备绑定数据无法解密（可能来自其他机器）".into(),
+                    detail: format!(
+                        "设备不匹配（匹配度 {}%，低于阈值 {}%）",
+                        score, MATCH_THRESHOLD_PERCENT
+                    ),
                     error_code: Some(ErrorCode::DeviceMismatch.as_str().to_string()),
-                    match_score: None,
+                    match_score: Some(score),
                 })
             }
         }
-    } else {
-        // 向后兼容：旧版明文指纹比较
-        log::info!("[device] 使用旧版明文指纹比较（向后兼容）");
-        let current_hash = current_components.combined_hash;
-        if current_hash == stored_state.device_fingerprint {
-            Ok(DeviceBindingResult {
-                status: DeviceBindingStatus::Match,
-                detail: "设备匹配（旧版绑定）".into(),
-                error_code: None,
-                match_score: Some(100),
-            })
-        } else {
+        None => {
+            log::warn!("[device] DPAPI 解密失败，状态文件可能来自其他机器");
             Ok(DeviceBindingResult {
                 status: DeviceBindingStatus::Mismatch,
-                detail: "设备不匹配（旧版绑定）".into(),
+                detail: "设备绑定数据无法解密（可能来自其他机器）".into(),
                 error_code: Some(ErrorCode::DeviceMismatch.as_str().to_string()),
                 match_score: None,
             })

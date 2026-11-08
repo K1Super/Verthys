@@ -115,6 +115,3 @@ export function useSessionTimer(options: UseSessionTimerOptions) {
     resetSession,
   };
 }
-
-/** useSessionTimer 返回值类型（便于显式标注） */
-export type UseSessionTimerReturn = ReturnType<typeof useSessionTimer>;

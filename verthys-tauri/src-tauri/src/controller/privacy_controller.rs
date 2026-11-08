@@ -449,7 +449,6 @@ enum PrivacyState {
     },
     Transitioning {
         transition_id: u64,
-        target: bool,
         previous: StableState,
         started_at: Instant,
     },
@@ -457,6 +456,7 @@ enum PrivacyState {
         previous: StableState,
         reason: QuarantineReason,
         /// 仅还原失败路径非空：未能回到原值的窗口现场（对账不依赖它，只入审计）
+        #[allow(dead_code)]
         stuck: Vec<WindowSnapshot>,
     },
 }
@@ -682,7 +682,6 @@ impl PrivacyCoordinator {
             let my_id = inner.next_transition_id;
             inner.state = PrivacyState::Transitioning {
                 transition_id: my_id,
-                target,
                 previous,
                 started_at: Instant::now(),
             };
@@ -1590,10 +1589,6 @@ mod tests {
             self.fail_set_value.lock().unwrap().insert((hwnd, value));
         }
 
-        fn fail_get_on(&self, hwnd: isize) {
-            self.fail_get.lock().unwrap().insert(hwnd);
-        }
-
         fn ignore_set_on(&self, hwnd: isize) {
             self.ignore_set.lock().unwrap().insert(hwnd);
         }
@@ -1654,10 +1649,6 @@ mod tests {
     }
 
     impl RecordingSink {
-        fn count(&self) -> usize {
-            self.events.lock().unwrap().len()
-        }
-
         fn details(&self) -> Vec<String> {
             self.events
                 .lock()
@@ -1725,7 +1716,6 @@ mod tests {
         inner.next_transition_id += 1;
         inner.state = PrivacyState::Transitioning {
             transition_id: inner.next_transition_id,
-            target: false,
             previous: StableState::Enabled,
             started_at: Instant::now() - Duration::from_secs(elapsed_secs),
         };

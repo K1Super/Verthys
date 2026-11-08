@@ -55,14 +55,16 @@ function makeHarness(opts: HarnessOptions = {}) {
     invalidate: [] as number[][],
     persist: 0,
     forget: [] as string[][],
+    forgetIds: [] as number[][],
     gc: 0,
     enqueued: [] as string[],
   };
   const committed = new Set<string>(opts.committedKeys ?? []);
 
   /* 释放行为：管道直连与队列补释放共用同一实现（与生产装配一致） */
-  const releaseHashes = async (hashes: string[]): Promise<void> => {
+  const releaseHashes = async (hashes: string[], recordIds: number[] = []): Promise<void> => {
     calls.forget.push([...hashes]);
+    calls.forgetIds.push([...recordIds]);
     if (!nextFrom(forgetQueue)) throw new Error("注入的释放失败");
     for (const h of hashes) committed.delete(h);
   };
@@ -170,7 +172,9 @@ describe("runFileDelete", () => {
     const legacy = await runFileDelete({ ...ENTRY, entryKey: undefined }, h3.deps);
     infoSpy.mockRestore();
     expect(legacy).toEqual({ ok: true });
-    expect(h3.calls.forget).toEqual([]);
+    // 历史条目无条目键：仍按记录 ID 释放（后端按 WAL committed 映射反查）
+    expect(h3.calls.forget).toEqual([[]]);
+    expect(h3.calls.forgetIds).toEqual([[7]]);
     expect(h3.calls.enqueued).toEqual([]);
   });
 

@@ -24,7 +24,7 @@
  *     globalKeyReadyRef）直接从 keyManager 导入，与 SecurityCenter.vue 原实现一致
  *   - 外部依赖通过参数注入：showError / showToast / onCopyText（剪贴板工具，
  *     由 SecurityCenter 顶层持有，含 toast 反馈；未来可提取为 useClipboard）
- *   - 乐观更新策略：UI 立即响应，后台 v4 模块事务失败时回滚
+ *   - 乐观更新策略：UI 立即响应，后台 模块事务失败时回滚
  *
  * 返回契约（模块状态由 C 层 M1 承担）：
  *   - setModuleKey（启用/轮换口令）返回 VerthysResult<void>
@@ -39,7 +39,6 @@ import {
   generateModuleKey,
   setModuleKey,
   hasModuleKey,
-  isModuleReady,
   logoutModule,
   disableModuleProtection,
   verifyModuleKey,
@@ -137,7 +136,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
 
   /* ===== 切换模块密钥保护开关（乐观更新 — 立即响应，后台持久化） =====
    *
-   * 流程（v4）：开启保护已由 setModuleKey → v4_module_enable 完成；
+   * 流程：开启保护已由 setModuleKey → v4_module_enable 完成；
    * 此处只维护开关显示，不产生额外后端写入。
    *
    * 流程：
@@ -174,7 +173,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
       showDisableVerifyDialog.value = true;
       return; // 等待验证弹窗确认
     }
-    /* 开启保护：v4 语义下"已设置口令"与"保护已启用"是同一状态，
+    /* 开启保护：语义下"已设置口令"与"保护已启用"是同一状态，
      * 走到这里说明保护已经开启，开关本身不会产生新的后端写入。
      * 关闭保护必须经口令验证弹窗（上方分支），不在此处直接执行。 */
     moduleKeyEnabledRef.value = { ...moduleKeyEnabledRef.value, [mid]: enabled };
@@ -377,6 +376,3 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
     onLogoutModule,
   };
 }
-
-/** useModuleKeys 返回值类型（便于显式标注） */
-export type UseModuleKeysReturn = ReturnType<typeof useModuleKeys>;

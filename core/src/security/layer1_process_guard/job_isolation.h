@@ -70,12 +70,4 @@ int job_isolation_init(void);
  */
 int job_isolation_is_active(void);
 
-/*
- * 主动断开 Job 隔离链路（仅应急销毁路径调用）。
- * 调用 TerminateJobObject(外层) 立即终止 Job 层级内所有进程，
- * 随后 CloseHandle 释放内层和外层句柄（外层句柄不设置 PROTECT_FROM_CLOSE）。
- * 调用后进程不可恢复，应仅在检测到致命篡改时使用。
- */
-void job_isolation_break(void);
-
 #endif /* VERTHYS_JOB_ISOLATION_H */

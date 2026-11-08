@@ -37,7 +37,6 @@ const mocks = vi.hoisted(() => ({
   securitySessionStart: vi.fn(),
   securitySessionStop: vi.fn(),
   securityBruteCheck: vi.fn(),
-  securityBruteClearPurge: vi.fn(),
   securityBruteStatus: vi.fn(),
   verthysClearGlobalKey: vi.fn(),
   verthysPrepareLock: vi.fn(),
@@ -61,7 +60,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../lib/verthys", () => ({
   securityBruteCheck: mocks.securityBruteCheck,
-  securityBruteClearPurge: mocks.securityBruteClearPurge,
   securityBruteStatus: mocks.securityBruteStatus,
   securitySessionStart: mocks.securitySessionStart,
   securitySessionStop: mocks.securitySessionStop,
@@ -330,6 +328,27 @@ describe("lockAll 重入与代际闸门", () => {
 
     expect(outcome).toMatchObject({ locked: true, clean: true, flushed: true, dirty: false });
     expect(outcome.errors).toEqual([]);
+  });
+
+  it("干净锁定：仅在全部清理与状态复位后宣告清理完成", async () => {
+    const progress = vi.fn<(percent: number, message: string) => void>();
+
+    const outcome = await lockAll(progress);
+
+    expect(outcome.clean).toBe(true);
+    // 终态必须晚于销毁核心节点，且仅在完全干净时出现
+    expect(progress).toHaveBeenLastCalledWith(100, "清理完成");
+  });
+
+  it("锁定成功但缓存脏：不宣告清理完成", async () => {
+    mocks.isCacheDirty.mockReturnValue(true);
+    const progress = vi.fn<(percent: number, message: string) => void>();
+
+    const outcome = await lockAll(progress);
+
+    expect(outcome.locked).toBe(true);
+    expect(outcome.clean).toBe(false);
+    expect(progress).not.toHaveBeenCalledWith(100, "清理完成");
   });
 
   it("轮换未收敛：整体放弃锁定，保留会话与空闲计时", async () => {

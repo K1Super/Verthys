@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 /*
- * ModuleDangerZone.spec.ts — v4 模块删除二次确认契约
+ * ModuleDangerZone.spec.ts — 模块删除二次确认契约
  *
  * 覆盖：状态展示、已删除禁用、DELETE 字面量校验、删除成功后刷新。
  */

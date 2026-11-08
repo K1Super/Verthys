@@ -51,7 +51,7 @@ interface PendingRpc {
 }
 
 /** 判定结果消息（宿主 dispatch 不应处理这类消息） */
-export function isWorkerRpcResult(data: unknown): data is WorkerRpcResultMessage {
+function isWorkerRpcResult(data: unknown): data is WorkerRpcResultMessage {
   return (
     typeof data === "object" &&
     data !== null &&

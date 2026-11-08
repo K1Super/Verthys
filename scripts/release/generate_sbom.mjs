@@ -82,7 +82,6 @@ add(
   "pkg:github/dvidelabs/flatcc@a2515daa948c1ae42ba95b3a904363169dff147c",
   "required",
 );
-add("library", "xxhash", "0.8.3", "pkg:github/Cyan4973/xxHash@v0.8.3", "required");
 
 const sorted = [...components.values()].sort((a, b) =>
   a.name === b.name ? a.version.localeCompare(b.version) : a.name.localeCompare(b.name),

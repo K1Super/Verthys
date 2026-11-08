@@ -43,12 +43,6 @@ export const TAG_LEN = 16;
  * 数据块结构长度                                                      *
  * ------------------------------------------------------------------ */
 
-/** 块序号长度（4 字节大端） */
-export const SEQ_LEN = 4;
-
-/** 总块数长度（4 字节大端） */
-export const TOTAL_LEN = 4;
-
 /** 单块大小（1 MiB，取跨层预算常量：写入侧分片口径与解析侧一致） */
 export const CHUNK_SIZE = PAYLOAD_CHUNK_SIZE_BYTES;
 
@@ -83,32 +77,6 @@ export const MAX_TASK_ATTEMPTS = 3;
 export const MAX_CONSECUTIVE_SLOT_CRASHES = 5;
 
 /* ------------------------------------------------------------------ *
- * AEAD 附加数据（AD）文本标识                                         *
- *                                                                    *
- * AD 用于绑定上下文，防止重放攻击：                                    *
- *   - 元数据 AD：固定文本，标识元数据加密上下文                        *
- *   - 块 AD 前缀：与块序号 + 总块数 + 文件哈希拼接，绑定块顺序        *
- * ------------------------------------------------------------------ */
-
-/** 元数据加密 AD 文本 */
-export const META_AD_TEXT = "VERTHYSPHOTO_META_v1";
-
-/** 数据块 AD 前缀文本（后接 seq + total + fileHash） */
-export const CHUNK_AD_PREFIX_TEXT = "VERTHYSPHOTO_CHUNK_v1";
-
-/** 文件子密钥 HKDF info 文本 */
-export const FILE_KEY_INFO_TEXT = "VERTHYSPHOTO_FILE_KEY_v1";
-
-/** 缩略图记录加密 AD 文本（后接 fileHash，绑定缩略图归属，防跨照片换用） */
-export const THUMB_AD_TEXT = "VERTHYSPHOTO_THUMB_v1";
-
-/** 文件密钥包裹 AD 文本（包裹态文件密钥的解封上下文标识） */
-export const FILE_KEY_WRAP_AD_TEXT = "VERTHYSPHOTO_FILEKEY_v1";
-
-/** 块集记录加密 AD 文本（后接 fileHash，绑定块集归属，防跨照片换用） */
-export const CHUNK_SET_AD_TEXT = "VERTHYSPHOTO_CHUNKSET_v1";
-
-/* ------------------------------------------------------------------ *
  * 照片布局标记与写入开关                                              *
  *                                                                    *
  * 布局一（既有）：每条记录自包含（索引密文携带缩略图；块密文携带       *
@@ -120,9 +88,6 @@ export const CHUNK_SET_AD_TEXT = "VERTHYSPHOTO_CHUNKSET_v1";
  * 开关决定新导入采用哪种布局。容器导入按来源布局保留——块密文无法在     *
  * 缺少来源密钥时重写，保留布局是数据保真的唯一正确做法。                *
  * ------------------------------------------------------------------ */
-
-/** 布局标记：既有布局 */
-export const PHOTO_FMT_LEGACY = 1;
 
 /** 布局标记：索引瘦身布局（缩略图独立记录 + 包裹文件密钥 + 块仅 nonce|密文） */
 export const PHOTO_FMT_SLIM = 2;

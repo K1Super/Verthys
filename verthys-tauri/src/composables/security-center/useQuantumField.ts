@@ -9,7 +9,7 @@
  *   1. 实时响应：pointermove 直接更新目标值，rAF 单帧内消费（≤16.7ms）
  *   2. 物理阻尼与惯性：所有状态过渡由弹簧-阻尼二阶系统驱动（半隐式欧拉，
  *      帧率无关），无 CSS transition 突变、无瞬时复位、无生硬回弹
- *   3. 交互优先级：节点/核心 hover（P1）> 面板视差（P2）——hover 期间视差
+ *   3. 交互优先级：节点/核心 hover > 面板视差——hover 期间视差
  *      目标衰减 50%，状态切换全程弹簧连续过渡，无断层无冲突
  *   4. 自然衰减梯度：鼠标力场对粒子/连线的影响采用高斯核 exp(-d²/2σ²)
  *      平滑衰减，无硬边界
@@ -320,7 +320,7 @@ export function clamp01(v: number): number {
 }
 
 /** 复合入场曲线：smoothstep(35%) + smootherstep(65%) 加权混合 */
-export function introEase(t: number): number {
+function introEase(t: number): number {
   const c1 = t * t * (3 - 2 * t);
   const c2 = t * t * t * (t * (t * 6 - 15) + 10);
   return c1 * 0.35 + c2 * 0.65;
@@ -338,7 +338,7 @@ export function phase(t: number, delay: number, dur: number): number {
  * 读作自中心涌出、再在环沿落定的连续流体。曲线只作用于归一化进度，
  * 故推进仍纯由墙钟累积量决定：帧率无关、总时长不变、端点不变。
  */
-export function flowHeadEase(p: number): number {
+function flowHeadEase(p: number): number {
   const t = clamp01(p);
   return t * t * (3 - 2 * t);
 }
@@ -530,7 +530,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
   /** 上一帧墙钟（首帧守卫 — 首帧 wStep=0 不推进时间轴，避免跳变） */
   let lastWallClock = -1;
 
-  /* ---------- G-7 统一帧门控（useFrameGate） ----------
+  /* ---------- 统一帧门控（useFrameGate） ----------
    * 帧率档位由全局空闲状态机唯一决定（active 60 / settling 30 /
    * idle 5 / deep-idle 1 fps）；dt 由门控按累积时间供给（跳帧不推进
    * 基准 → 物理时间连续），本引擎不再维护私有空闲判定与全局交互监听。 */
@@ -559,7 +559,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
   const parallaxY = makeSpring(34, 0.82);
   // 力场强度（进入 1 / 离开 0，过阻尼无过冲）
   const fieldPower = makeSpring(24, 1.15);
-  // hover 让位仲裁弹簧：P1（节点/核心 hover）期间视差幅度衰减至 50% —
+  // hover 让位仲裁弹簧：节点/核心 hover 期间视差幅度衰减至 50% —
   // 原实现对视差输出乘 0.5/1.0 硬步进，pointerenter 瞬间近层位移
   // 一次跳变最多 11px（"内容突然跳位放大"突兀感主因）→ 弹簧连续过渡
   const hoverSuppress = makeSpring(26, 1.1, 1);
@@ -568,7 +568,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
   const coreHover = makeSpring(24, 1.1);
   // 核心就绪度（色相/能量过渡）
   const coreReadySpring = makeSpring(10, 1.2);
-  // hover 仲裁：任一节点/核心 hover 时抑制视差（交互优先级 P1 > P2）
+  // hover 仲裁：任一节点/核心 hover 时抑制视差（hover 优先于视差）
   const hoverCount = { n: 0 };
 
   /* ---------- 噪声通道（各视差层独立漂移相位 — 仅尘埃与碎片仍带视差） ---------- */
@@ -907,7 +907,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
     parallaxY.target = 0;
   }
 
-  /** 绑定节点 hover（P1 优先级：抑制视差 + 弹簧缩放 + 连线增益）
+  /** 绑定节点 hover（高优先级交互：抑制视差 + 弹簧缩放 + 连线增益）
    * 经 AbortController signal 注册，destroy 时统一移除 */
   function bindNodeHover(el: HTMLElement, idx: number): void {
     const signal = listenerAbort?.signal;
@@ -1184,7 +1184,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
     // 编排总时长（最后窗口 0.45+3*0.12+0.7 ≈ 2.2s），结束后各系数恒 1（免重复求值）
     const introRunning = it < 2.4;
 
-    /* ---- 交互优先级仲裁：hover（P1）期间视差幅度衰减至 50%（P2 让位） ----
+    /* ---- 交互优先级仲裁：hover 期间视差幅度衰减至 50%（视差让位） ----
        让位系数由 hoverSuppress 弹簧连续过渡 — 原对输出乘 0.5/1.0
        硬步进，pointerenter 瞬间产生最多 ~11px 的层位移跳变（突兀主因）；
        入场期间视差幅度随 introPar 渐起（挂载瞬间无大幅位移跳变） */
@@ -1480,7 +1480,7 @@ export function useQuantumField(options: QuantumFieldOptions) {
    * 生命周期（启动/暂停/销毁，资源全释放无泄漏）
    * ============================================================ */
 
-  /* G-7：rAF 调度/空闲门控/失焦暂停全部由 useFrameGate 承担，
+  /* rAF 调度/空闲门控/失焦暂停全部由 useFrameGate 承担，
      start/stop 仅为门控代理（档位与恢复时机全局一致）。 */
   const { start: startGate, stop: stopGate } = useFrameGate(idleLevel, frame);
 
@@ -1545,12 +1545,12 @@ export function useQuantumField(options: QuantumFieldOptions) {
     const sig = listenerAbort.signal;
 
     // 事件绑定（passive 提升滚动/指针性能）
-    // G-7：visibilitychange 暂停与全局交互恢复满帧已由全局空闲调度器
+    // visibilitychange 暂停与全局交互恢复满帧已由全局空闲调度器
     //    （useGlobalIdleScheduler）统一处理，此处仅保留面板级指针事件。
     panelEl.addEventListener('pointermove', onPointerMove, { passive: true, signal: sig });
     panelEl.addEventListener('pointerleave', onPointerLeave, { passive: true, signal: sig });
 
-    // 节点/核心 hover 绑定（P1 交互优先级）
+    // 节点/核心 hover 绑定（高优先级交互）
     nodeEls.forEach((el, i) => bindNodeHover(el, i));
     bindCoreHover();
 
@@ -1600,6 +1600,3 @@ export function useQuantumField(options: QuantumFieldOptions) {
 
   return { init, destroy, playFlow };
 }
-
-/** useQuantumField 返回值类型 */
-export type UseQuantumFieldReturn = ReturnType<typeof useQuantumField>;

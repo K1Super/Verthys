@@ -25,66 +25,6 @@ pub fn non_inheritable_security_attributes() -> SECURITY_ATTRIBUTES {
     }
 }
 
-/// 创建禁止子进程继承的文件内核句柄
-/// 封装CreateFileW系统调用，强制注入不可继承安全属性，避免文件句柄被子进程长期占用无法释放
-#[cfg(windows)]
-pub fn create_non_inheritable_file(
-    path: &str,
-    access: u32,
-    share_mode: windows::Win32::Storage::FileSystem::FILE_SHARE_MODE,
-    creation_disposition: windows::Win32::Storage::FileSystem::FILE_CREATION_DISPOSITION,
-    flags: windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
-) -> Result<HANDLE, String> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::CreateFileW;
-
-    let wide_path: Vec<u16> = OsStr::new(path)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-
-    let security_attr = non_inheritable_security_attributes();
-
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(wide_path.as_ptr()),
-            access,
-            share_mode,
-            Some(&security_attr),
-            creation_disposition,
-            flags,
-            HANDLE::default(),
-        )
-    };
-
-    handle.map_err(|err| format!("CreateFileW 创建文件句柄失败：{}", err))
-}
-
-/// 创建禁止继承的匿名管道读写句柄对
-/// 用于父子进程IPC通信，规避管道句柄意外继承导致的管道无法正常关闭、读写阻塞问题
-#[cfg(windows)]
-pub fn create_non_inheritable_pipe(buffer_size: u32) -> Result<(HANDLE, HANDLE), String> {
-    use windows::Win32::System::Pipes::CreatePipe;
-
-    let security_attr = non_inheritable_security_attributes();
-    let mut read_handle = HANDLE::default();
-    let mut write_handle = HANDLE::default();
-
-    unsafe {
-        CreatePipe(
-            &mut read_handle,
-            &mut write_handle,
-            Some(&security_attr),
-            buffer_size,
-        )
-    }
-    .map_err(|err| format!("CreatePipe 创建匿名管道失败：{}", err))?;
-
-    Ok((read_handle, write_handle))
-}
-
 /// 子进程启动阶段句柄继承合规自检
 /// 安全兜底校验：检查标准输入输出错误句柄是否被标记为可继承，发现违规直接返回错误终止进程初始化，防止违规句柄扩散
 #[cfg(windows)]

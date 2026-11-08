@@ -22,11 +22,11 @@ pub mod file_controller;
 pub mod key_controller;
 /// 内容层加密命令：模块密钥托管、文件密钥句柄与记录加解密
 pub mod module_crypto_controller;
-/// v4 PCR 策略命令：状态 / 启用 / 关闭 / 重密封
+/// PCR 策略命令：状态 / 启用 / 关闭 / 重密封
 pub mod pcr_controller;
 pub mod keyfile_controller;
-/// v4 模块状态与不可逆删除
-pub mod v4_module_controller;
+/// 模块状态与不可逆删除
+pub mod module_controller;
 pub mod vault_rotate_controller;
 pub mod preflight_controller;
 /// 防截屏隐私保护（窗口捕获排除）：凭证槽位 / 原子应用与还原 / 隔离与对账 / 启动序列

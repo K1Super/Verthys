@@ -44,8 +44,9 @@ export interface FileDeleteDeps {
   deleteRecords: (ids: number[]) => Promise<boolean>;
   /** 立即落盘（取消防抖并等待落盘完成）；返回数据是否已落盘 */
   persist: () => Promise<boolean>;
-  /** 释放文件级续传条目键（实现内置一次即时重试，仍失败即抛） */
-  forgetImportKeys: (entryKeys: string[]) => Promise<void>;
+  /** 释放文件级续传条目键（实现内置一次即时重试，仍失败即抛）；
+   *  recordIds 供 meta 不可读/历史条目缺键时由后端按记录 ID 反查 */
+  forgetImportKeys: (entryKeys: string[], recordIds?: number[]) => Promise<void>;
   /** 同步失效摘要 / 全量 / 扫描三层缓存（删除提交后调用，杜绝回填复活） */
   invalidateRecords: (ids: number[]) => void;
   /** 孤儿块回收：返回本次清除条数（best-effort，不改变删除结论） */
@@ -156,11 +157,17 @@ async function finishAfterDelete(
 
   let warning: string | undefined;
   const entryKey = entry.entryKey;
-  if (typeof entryKey === "string" && entryKey.length > 0) {
+  const recordIds = typeof entry.metaId === "number" && entry.metaId > 0 ? [entry.metaId] : [];
+  if ((typeof entryKey === "string" && entryKey.length > 0) || recordIds.length > 0) {
     try {
-      await deps.forgetImportKeys([entryKey]);
+      await deps.forgetImportKeys(
+        typeof entryKey === "string" && entryKey.length > 0 ? [entryKey] : [],
+        recordIds,
+      );
     } catch {
-      deps.enqueuePendingRelease(entryKey);
+      if (typeof entryKey === "string" && entryKey.length > 0) {
+        deps.enqueuePendingRelease(entryKey);
+      }
       warning = DEFERRED_RELEASE_MESSAGE;
     }
   } else {

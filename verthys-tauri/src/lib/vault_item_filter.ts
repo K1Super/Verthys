@@ -96,14 +96,14 @@ export function countActiveVaultFilters(criteria: VaultFilterCriteria): number {
  *
  * @param criteria 筛选条件
  * @param labelOf 类型 id → 类型显示名
- * @returns 摘要文本（如「账号 · 银行卡 +1」）；无筛选时返回空串
+ * @returns 摘要文本（如「账号，银行卡 +1」）；无筛选时返回空串
  */
 export function describeVaultFilter(
   criteria: VaultFilterCriteria,
   labelOf: (kind: string) => string,
 ): string {
   const parts: string[] = criteria.kinds.map((kind) => labelOf(kind));
-  const text = parts.join(" · ");
+  const text = parts.join("，");
   const extra = countActiveVaultFilters(criteria) - criteria.kinds.length;
   if (extra <= 0) return text;
   return text ? `${text} +${extra}` : `+${extra}`;

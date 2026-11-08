@@ -12,18 +12,16 @@
 
 | 中文术语 | 英文/标识符 | 定义（一句话，可验收/可定位） | 主要出处 |
 |---|---|---|---|
-| Verthys 容器 | .verthys / V3 container（`VERTHYS_V3_SB_MAGIC` `'V3SB'`） | 唯一现役的 V3 加密容器文件，分区认证 + 内容寻址 Extent + LSM 索引 | `core/src/container/shared/verthys_container_v3.h` |
-| 超级块 | superblock / `SuperBlockV3` / `VsbTxnV3` | 3 副本 × 16KB 帧 + 法定人数提交的容器根元数据与事务原语 | `core/src/container/superblock/verthys_superblock_v3.c` |
-| 法定人数 | quorum / `VERTHYS_ERR_QUORUM_FAILED` | 超级块写 3 副本 ≥2 成功=提交；读取取 txid 最高且 ≥2 副本一致 | `verthys_container_v3.h` |
-| 分区 | partition / `nonce_counter` | 每分区独立 AEAD 密钥 + 12B 单调 nonce 计数器（防 GCM nonce 重用，E-7） | `core/src/container/partition/verthys_partition.c` |
-| Extent | extent / 内容寻址（BLAKE2b-256） | 以内容哈希寻址的数据区，同内容去重零重写 + 引用计数 | `core/src/container/extent/verthys_extent.c` |
-| WAL | 预写日志 / WAL（`verthys_wal_reset`） | 事务先写日志后提交、崩溃可精确重放的预写日志（环形 960KB） | `core/src/transaction/wal/verthys_wal.c` |
-| 事务 v3 | txn v3 / 六 Phase | BEGIN→WRITE→PREPARE→COMMIT→CONFIRM→CLEANUP 六阶段原子提交 | `core/src/transaction/txn/verthys_transaction_v3.c` |
-| LSM 索引 | LSM / MemTable / SSTable / Compaction | 跳表 MemTable → 分层 SSTable（Bloom xxHash64）+ 后台压实的日志结构索引 | `core/src/index/lsm/verthys_lsm.c` |
-| 墓碑 | tombstone | LSM 删除标记，查询按墓碑感知，压实阶段物理删除 | `core/src/index/lsm/verthys_lsm_memtable.c` |
-| 温缓存 | warmcache（`verthys_warmcache_v3`） | V3 温启动缓存，独占句柄写 .tmp → `MoveFileExW` 原子替换 | `core/src/index/warmcache/verthys_warmcache_v3.c` |
+| Verthys 容器 | .verthys / 当前容器格式（`VTY_MAGIC` `'VRTY'`） | 唯一现役的加密容器文件，A/B 元数据 + 追加数据区 + 双包裹密钥 + 模块槽 | `core/src/container/vty_format.c`、`core/include/verthys_version.h` |
+| 容器格式版本 | `VERTHYS_CONTAINER_FORMAT_VERSION` | 落盘格式身份，当前为 4；只作为常量/版本字段存在，不进入文件名 | `core/include/verthys_version.h` |
+| 元数据副本 | metadata A/B | 双副本原子提交的容器根元数据，单副本损坏不阻断打开 | `core/src/container/vty_format.c` |
+| 密钥槽 | key slot | 口令/恢复码/keyfile 等因子的包裹槽位 | `core/src/container/vty_keyslot.c` |
+| 模块槽 | module slot | 相册/账号/清藏模块的独立密钥与启用状态 | `core/src/container/vty_module.c` |
+| 内容分片 | chunk | 大对象切分后的加密数据块，经 Rust 单写者通道落盘 | `core/src/container/vty_chunk.c` |
+| 记录 | record | 容器内的类型化条目（账号、照片元数据等） | `core/src/index/vty_record.c` |
+| 仓库 | repo / store | 记录读写、类型盲索引与数据区存储 | `core/src/index/vty_repo.c`、`vty_store.c` |
 | 交换信封 | exchange envelope | 导出/导入用的独立加密文件包（不继承应用胡椒） | `core/src/container/format/verthys_format.c` |
-| FlatBuffers | flatcc / schema 驱动 | V3 容器序列化运行时（vendored flatcc，构建期 `flatc -a` codegen） | `core/schema/*.fbs` + `third_party/Flatcc.cmake` |
+| 导入 WAL | import.wal | 导入断点续传日志（Rust 仓储层，附属目录内） | `verthys-tauri/src-tauri/src/repository/verthys_wal.rs` |
 
 ## 2. 密码与密钥
 
@@ -46,13 +44,13 @@
 |---|---|---|---|
 | .vsec | 构建期签名节（magic `'VESC'`） | `.text`/`.rdata` 文件内容 HMAC-SHA256 构建期签名（128B），启动验签 | `core/src/security/integrity/integrity.c` |
 | .rhat 运行时哈希 | runtime hash（magic `'VRHT'`） | 关键函数 BLAKE2b-256 运行时哈希（产品 15 项 / 全量 40 项），失配 = KILL | `core/src/security/integrity/runtime_hash.c` + `core/tools/rhash_gen.c` |
-| 解锁管线 | unlock_pipeline / S0-S6 | 解锁 S0-S6 流水线 + 渐进式（`VERTHYS_ERR_PARTIAL_UNLOCK`） | `core/src/api/unlock/verthys_unlock_pipeline.c` |
+| 容器解锁 | vty_vault_open | 单阶段原子解锁：口令 + 设备根双槽解封 `K_c` → 元数据与 DataRoot 挂载；全部成功才进入 UNLOCKED | `core/src/crypto/vty_keymanager.c` |
 | 层 1-6 防御 | layer1..6 | 进程守卫/硬件绑定/钩子防御/沙箱/闭环的分层纵深防御 | `core/src/security/layer*_*` |
 | 防御闭环 | defense closure / 7 路径 | 7 条攻击路径状态机（BLOCKED/DEGRADED/FAILED） | `core/src/security/layer6_closure/defense_closure.c` |
 | 应急分级响应 | emergency / TELEMETRY·DEGRADE·KILL | 三级信号模型，检测与响应解耦 | `core/src/security/emergency/emergency.c` |
 | 直接系统调用 | syscall_direct / SSN | SSN 排序法提取 + W^X stub 页，失败优雅降级 | `core/src/security/anti_analysis/syscall_direct.c` |
 | 安全分配器 | secure_allocator | 密钥专用 VirtualAlloc 隔离堆 + 全局内存预算记账 | `core/src/security/memory/secure_allocator.c` |
-| 渐进式解锁 | progressive unlock / `VERTHYS_ERR_PARTIAL_UNLOCK`(0x11) | 最小可操作优先，索引预热转后台 | `core/include/verthys.h` |
+| 部分解锁返回码（保留） | `VERTHYS_ERR_PARTIAL_UNLOCK`(0x11) | 冻结 ABI 保留码；当前解锁为单阶段原子完成，不产生该返回 | `core/include/verthys.h` |
 
 ## 4. 进程与工程
 

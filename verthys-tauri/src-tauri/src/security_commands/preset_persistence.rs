@@ -2,8 +2,7 @@
  * security_commands/preset_persistence.rs — 安全预设受信持久化
  *
  * 单一事实源：预设与自定义特性配置的权威副本。
- * 文件位于容器附属数据目录（目录内 preset.json），随附属目录整体迁移。
- * 旧布局 <verthys_path>.preset.json 仅作只读回退与一次性迁移的旧位置。
+ * 文件位于容器附属数据目录（目录内 preset.json）。
  *
  * 写入契约：
  *   - 原子提交：先写唯一命名临时文件，fsync 落盘后再 rename 覆盖
@@ -86,30 +85,13 @@ fn parse_preset_file(file: &std::path::Path) -> Result<PresetPersist, String> {
     Ok(parsed)
 }
 
-/// 读取指定容器的受信预设配置（附属目录优先，旧布局命中即懒迁移）。
-///
-/// 迁移纪律：旧文件先解析成功再搬移；解析失败不搬移且原样保留（保留现场），
-/// 搬移失败不阻断本次读取（下次访问自动重试）。
+/// 读取指定容器的受信预设配置（附属目录）。
 fn read_preset_at(verthys_path: &str) -> Result<Option<PresetPersist>, String> {
     let primary = container_layout::preset_file_for(verthys_path);
     if primary.exists() {
         return parse_preset_file(&primary).map(Some);
     }
-
-    let legacy = container_layout::legacy_preset_file_for(verthys_path);
-    if !legacy.exists() {
-        return Ok(None);
-    }
-
-    let parsed = parse_preset_file(&legacy)?;
-    match container_layout::migrate_legacy_file(&legacy, &primary) {
-        Ok(()) => log::info!("[preset_persist] 旧布局预设文件已收口至附属数据目录"),
-        Err(e) => log::warn!(
-            "[preset_persist] 旧布局预设文件迁移失败（保持原位置，下次访问重试）: {}",
-            e
-        ),
-    }
-    Ok(Some(parsed))
+    Ok(None)
 }
 
 /// 按指定容器路径读取受信预设配置（解锁期使用：不依赖路径指针，
@@ -189,16 +171,12 @@ pub fn write_preset_persist(app: &tauri::AppHandle, persist: &PresetPersist) -> 
 }
 
 /// 删除受信预设配置文件（回滚至"无配置"状态时调用，best-effort）。
-/// 同时清理新布局与旧布局两处主文件及其残留临时文件（异常退出可能遗留）。
+/// 清理主文件及其残留临时文件，附属目录仅在因此清空时回收。
 pub fn delete_preset_persist(app: &tauri::AppHandle) {
     if let Ok(Some(verthys_path)) = read_last_verthys_path(app) {
         let file = container_layout::preset_file_for(&verthys_path);
         let _ = std::fs::remove_file(&file);
         remove_stray_tmp_files(&file);
-
-        let legacy = container_layout::legacy_preset_file_for(&verthys_path);
-        let _ = std::fs::remove_file(&legacy);
-        remove_stray_tmp_files(&legacy);
 
         let _ = container_layout::remove_dir_if_empty(&container_layout::sidecar_dir_for(
             &verthys_path,
@@ -365,39 +343,6 @@ mod tests {
             .expect("历史超限值不得阻断读取")
             .expect("文件应当存在");
         assert_eq!(loaded.custom_session_timeout_minutes, Some(600));
-    }
-
-    #[test]
-    fn test_legacy_preset_migrated_on_read() {
-        let container = temp_container_path("legacy_migrate");
-        let path_str = container.to_string_lossy().to_string();
-        let legacy = container_layout::legacy_preset_file_for(&path_str);
-        std::fs::write(&legacy, r#"{"code":2}"#).unwrap();
-
-        let loaded = read_preset_persist_for_path(&path_str)
-            .expect("读取应当成功")
-            .expect("旧布局文件应当被读取");
-        assert_eq!(loaded.code, 2);
-
-        assert!(!legacy.exists(), "旧布局文件必须被搬走");
-        assert!(
-            container_layout::preset_file_for(&path_str).exists(),
-            "搬移目标必须落在附属数据目录"
-        );
-    }
-
-    #[test]
-    fn test_legacy_preset_corrupted_not_migrated() {
-        let container = temp_container_path("legacy_corrupted");
-        let path_str = container.to_string_lossy().to_string();
-        let legacy = container_layout::legacy_preset_file_for(&path_str);
-        std::fs::write(&legacy, r#"{"code":9}"#).unwrap();
-
-        let result = read_preset_persist_for_path(&path_str);
-
-        assert!(result.is_err(), "损坏的旧布局文件必须上抛错误");
-        assert!(legacy.exists(), "解析失败不得搬移（保留现场）");
-        assert!(!container_layout::preset_file_for(&path_str).exists());
     }
 
     #[test]

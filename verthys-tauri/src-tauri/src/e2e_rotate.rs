@@ -22,11 +22,11 @@ use tauri::Manager;
 use zeroize::Zeroizing;
 
 use crate::controller::types::VerthysResponse;
-use crate::controller::v4_module_controller::verthys_v4_module_enable;
+use crate::controller::module_controller::verthys_module_enable;
 use crate::controller::vault_rotate_controller::{
-    verthys_v4_rotate_abort, verthys_v4_rotate_attach_keyfile, verthys_v4_rotate_begin,
-    verthys_v4_rotate_cancel, verthys_v4_rotate_commit, verthys_v4_rotate_run,
-    verthys_v4_rotate_unlock_module,
+    verthys_rotate_abort, verthys_rotate_attach_keyfile, verthys_rotate_begin,
+    verthys_rotate_cancel, verthys_rotate_commit, verthys_rotate_run,
+    verthys_rotate_unlock_module,
 };
 use crate::controller::verthys_controller::{
     verthys_add_record, verthys_create, verthys_get_record, verthys_lock, verthys_lock_persist,
@@ -146,14 +146,14 @@ async fn run_e2e(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     /* 边界 1：普通（非恢复码）会话发起轮换必须被策略拒绝，且不产生作业。 */
     expect_err_code(
         "rotate_begin(normal session)",
-        verthys_v4_rotate_begin(app.clone(), new_a_str.clone(), Some(0x01)).await,
+        verthys_rotate_begin(app.clone(), new_a_str.clone(), Some(0x01)).await,
         "ERR_00000017",
     )?;
     passed.push("rotate_reject_non_recovery".to_string());
 
     expect_ok(
         "module_enable",
-        verthys_v4_module_enable(
+        verthys_module_enable(
             app.clone(),
             state(app),
             0,
@@ -193,7 +193,7 @@ async fn run_e2e(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     let existing_str = existing.to_string_lossy().to_string();
     expect_err_code(
         "rotate_begin(existing target)",
-        verthys_v4_rotate_begin(app.clone(), existing_str.clone(), Some(0x01)).await,
+        verthys_rotate_begin(app.clone(), existing_str.clone(), Some(0x01)).await,
         "ERR_00000004",
     )?;
     std::fs::remove_file(&existing).map_err(|e| format!("清理占位文件失败: {}", e))?;
@@ -201,17 +201,17 @@ async fn run_e2e(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     /* 边界 3：已启用模块未登记口令就 Run → MODULE_LOCKED，作业只能 Abort。 */
     expect_ok(
         "rotate_begin(missing module)",
-        verthys_v4_rotate_begin(app.clone(), new_a_str.clone(), Some(0x01)).await,
+        verthys_rotate_begin(app.clone(), new_a_str.clone(), Some(0x01)).await,
     )?;
     let channel_missing = tauri::ipc::Channel::<RotateProgress>::new(|_body| Ok(()));
     expect_err_code(
         "rotate_run(missing module)",
-        verthys_v4_rotate_run(app.clone(), channel_missing).await,
+        verthys_rotate_run(app.clone(), channel_missing).await,
         "ERR_0000001D",
     )?;
     expect_ok(
         "rotate_abort(missing module)",
-        verthys_v4_rotate_abort(app.clone()).await,
+        verthys_rotate_abort(app.clone()).await,
     )?;
     if Path::new(&new_a_str).exists() {
         return Err("rotate_abort(missing module): 临时库仍然存在".into());
@@ -221,15 +221,15 @@ async fn run_e2e(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     /* 边界 5：Begin 后先置位取消信号，Run 必须按取消收敛（POLICY）并 Abort。 */
     expect_ok(
         "rotate_begin(cancel)",
-        verthys_v4_rotate_begin(app.clone(), new_a_str.clone(), Some(0x01)).await,
+        verthys_rotate_begin(app.clone(), new_a_str.clone(), Some(0x01)).await,
     )?;
     expect_ok(
         "rotate_cancel",
-        verthys_v4_rotate_cancel(app.clone()).await,
+        verthys_rotate_cancel(app.clone()).await,
     )?;
     expect_ok(
         "rotate_unlock_module(cancel)",
-        verthys_v4_rotate_unlock_module(
+        verthys_rotate_unlock_module(
             app.clone(),
             0,
             MODULE_PASSWORD.to_string(),
@@ -240,12 +240,12 @@ async fn run_e2e(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     let channel_cancel = tauri::ipc::Channel::<RotateProgress>::new(|_body| Ok(()));
     expect_err_code(
         "rotate_run(cancel)",
-        verthys_v4_rotate_run(app.clone(), channel_cancel).await,
+        verthys_rotate_run(app.clone(), channel_cancel).await,
         "ERR_00000017",
     )?;
     expect_ok(
         "rotate_abort(cancel)",
-        verthys_v4_rotate_abort(app.clone()).await,
+        verthys_rotate_abort(app.clone()).await,
     )?;
     if Path::new(&new_a_str).exists() {
         return Err("rotate_abort(cancel): 临时库仍然存在".into());
@@ -255,7 +255,7 @@ async fn run_e2e(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     /* 边界 4：作业期间写操作 → ROTATE_PENDING；Abort 后源库记录仍可读。 */
     let begin_pending = expect_ok(
         "rotate_begin(pending)",
-        verthys_v4_rotate_begin(app.clone(), new_a_str.clone(), Some(0x01)).await,
+        verthys_rotate_begin(app.clone(), new_a_str.clone(), Some(0x01)).await,
     )?;
     if begin_pending.rotate_stage != Some(1) {
         return Err(format!(
@@ -265,7 +265,7 @@ async fn run_e2e(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     }
     expect_ok(
         "rotate_unlock_module(pending)",
-        verthys_v4_rotate_unlock_module(
+        verthys_rotate_unlock_module(
             app.clone(),
             0,
             MODULE_PASSWORD.to_string(),
@@ -294,14 +294,14 @@ async fn run_e2e(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     });
     expect_ok(
         "rotate_run(pending)",
-        verthys_v4_rotate_run(app.clone(), channel).await,
+        verthys_rotate_run(app.clone(), channel).await,
     )?;
     if progress_count.load(Ordering::SeqCst) == 0 {
         return Err("rotate_run(pending): 未收到任何进度事件".into());
     }
     expect_ok(
         "rotate_abort(pending)",
-        verthys_v4_rotate_abort(app.clone()).await,
+        verthys_rotate_abort(app.clone()).await,
     )?;
     if Path::new(&new_a_str).exists() {
         return Err("rotate_abort(pending): 临时库仍然存在".into());
@@ -318,11 +318,11 @@ async fn run_e2e(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     /* 轮换 B：Run 后 Commit，记录必须随新库保留且可读回。 */
     expect_ok(
         "rotate_begin(B)",
-        verthys_v4_rotate_begin(app.clone(), new_b_str.clone(), Some(0x01)).await,
+        verthys_rotate_begin(app.clone(), new_b_str.clone(), Some(0x01)).await,
     )?;
     expect_ok(
         "rotate_unlock_module(B)",
-        verthys_v4_rotate_unlock_module(
+        verthys_rotate_unlock_module(
             app.clone(),
             0,
             MODULE_PASSWORD.to_string(),
@@ -338,14 +338,14 @@ async fn run_e2e(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     });
     expect_ok(
         "rotate_run(B)",
-        verthys_v4_rotate_run(app.clone(), channel_b).await,
+        verthys_rotate_run(app.clone(), channel_b).await,
     )?;
     if progress_count_b.load(Ordering::SeqCst) == 0 {
         return Err("rotate_run(B): 未收到任何进度事件".into());
     }
     expect_ok(
         "rotate_commit(B)",
-        verthys_v4_rotate_commit(app.clone(), Some(false)).await,
+        verthys_rotate_commit(app.clone(), Some(false)).await,
     )?;
     if Path::new(&new_b_str).exists() {
         return Err("rotate_commit(B): 临时库未被原子替换".into());
@@ -425,25 +425,25 @@ async fn run_e2e(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
 
     expect_err_code(
         "rotate_begin(kf without digest)",
-        verthys_v4_rotate_begin(app.clone(), new_kf_str.clone(), Some(0x01)).await,
+        verthys_rotate_begin(app.clone(), new_kf_str.clone(), Some(0x01)).await,
         "ERR_00000017",
     )?;
     expect_err_code(
         "rotate_attach_keyfile(missing)",
-        verthys_v4_rotate_attach_keyfile(app.clone(), missing_kf_str).await,
+        verthys_rotate_attach_keyfile(app.clone(), missing_kf_str).await,
         "ERR_0000001B",
     )?;
     expect_ok(
         "rotate_attach_keyfile",
-        verthys_v4_rotate_attach_keyfile(app.clone(), keyfile_str.clone()).await,
+        verthys_rotate_attach_keyfile(app.clone(), keyfile_str.clone()).await,
     )?;
     expect_ok(
         "rotate_begin(after attach)",
-        verthys_v4_rotate_begin(app.clone(), new_kf_str.clone(), Some(0x01)).await,
+        verthys_rotate_begin(app.clone(), new_kf_str.clone(), Some(0x01)).await,
     )?;
     expect_ok(
         "rotate_abort(after attach)",
-        verthys_v4_rotate_abort(app.clone()).await,
+        verthys_rotate_abort(app.clone()).await,
     )?;
     if Path::new(&new_kf_str).exists() {
         return Err("rotate_abort(after attach): 临时库仍然存在".into());

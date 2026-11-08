@@ -125,13 +125,7 @@ typedef struct _MY_THREAD_BASIC_INFORMATION {
 
 /* ---------- 模块状态 ---------- */
 
-#define MAX_TRUSTED_PATHS 64
-
 static int s_initialized = 0;
-
-/* 受信任路径白名单（宽字符，规范化为大写、无尾部分隔符） */
-static wchar_t s_trusted_paths[MAX_TRUSTED_PATHS][MAX_PATH];
-static int s_trusted_path_count = 0;
 
 /* 初始化时记录的"外部线程"基线数（起始地址不在本库自身模块内的线程），
  * 用于 APC 注入的线程数异常比较。自身模块内线程（preheat / 进度消费等合法
@@ -241,17 +235,6 @@ static int address_in_trusted_module(const void *addr,
         trusted = 1;
     } else if (syswow64_dir != NULL && _wcsnicmp(upper_path, syswow64_dir, wcslen(syswow64_dir)) == 0) {
         trusted = 1;
-    }
-
-    /* 检查受信任路径白名单 */
-    if (!trusted) {
-        for (int i = 0; i < s_trusted_path_count; i++) {
-            if (_wcsnicmp(upper_path, s_trusted_paths[i],
-                          wcslen(s_trusted_paths[i])) == 0) {
-                trusted = 1;
-                break;
-            }
-        }
     }
 
     verthys_secure_zero(upper_path, sizeof(upper_path));
@@ -821,19 +804,11 @@ int anti_inject_check_modules(void)
                 continue;
             }
 
-            /* b) 无签名：按位置信任（System32 / SysWOW64 / 安装目录 / 白名单） */
+            /* b) 无签名：按位置信任（System32 / SysWOW64 / 安装目录） */
             int in_trusted_location =
                 dir_prefix_matches(install_dir, upper_path) ||
                 dir_prefix_matches(system32_dir, upper_path) ||
                 dir_prefix_matches(syswow64_dir, upper_path);
-            if (!in_trusted_location) {
-                for (int i = 0; i < s_trusted_path_count; i++) {
-                    if (dir_prefix_matches(s_trusted_paths[i], upper_path)) {
-                        in_trusted_location = 1;
-                        break;
-                    }
-                }
-            }
 
             if (!in_trusted_location) {
                 /* c) 无签名且路径不受信任 → 未知第三方 DLL（TELEMETRY） */
@@ -891,37 +866,6 @@ int anti_inject_harden_search_path(void)
      */
     SetSearchPathMode(BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE);
 
-    return 0;
-}
-
-/*
- * 添加受信任模块路径（白名单）。
- * 用于注册已知安全的第三方 DLL（如 Tauri 运行时依赖）。
- * 路径以 UTF-8 传入，内部转为宽字符并规范化（大写、去尾部分隔符）。
- */
-int anti_inject_add_trusted_path(const char *path)
-{
-    if (path == NULL) return -1;
-    if (s_trusted_path_count >= MAX_TRUSTED_PATHS) return -1;
-
-    wchar_t wpath[MAX_PATH];
-    int len = MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH);
-    if (len == 0) return -1;
-
-    normalize_path_upper(wpath);
-
-    /* 检查重复 */
-    for (int i = 0; i < s_trusted_path_count; i++) {
-        if (_wcsicmp(wpath, s_trusted_paths[i]) == 0) {
-            verthys_secure_zero(wpath, sizeof(wpath));
-            return 0;  /* 已存在，幂等返回 */
-        }
-    }
-
-    wcscpy_s(s_trusted_paths[s_trusted_path_count], MAX_PATH, wpath);
-    s_trusted_path_count++;
-
-    verthys_secure_zero(wpath, sizeof(wpath));
     return 0;
 }
 

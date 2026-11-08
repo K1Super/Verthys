@@ -513,7 +513,7 @@ mod tests {
         let state = state();
         state.current_request.store(9, Ordering::SeqCst);
         let response = state.seal(CH_RESPONSE, 9, r#"{"ok":true}"#).unwrap();
-        let progress = state.seal(CH_PROGRESS, 9, r#"{"op":"unlock_progress"}"#).unwrap();
+        let progress = state.seal(CH_PROGRESS, 9, r#"{"op":"v4_rotate_progress"}"#).unwrap();
         assert!(!response.contains(r#""ok":true"#), "响应明文不得出现在线协议中");
         let (seq, re, payload) = host_open(&state, &response).unwrap();
         assert_eq!(seq, 1);
@@ -521,7 +521,7 @@ mod tests {
         assert_eq!(payload, r#"{"ok":true}"#);
         let (_, re, payload) = host_open(&state, &progress).unwrap();
         assert_eq!(re, 9);
-        assert_eq!(payload, r#"{"op":"unlock_progress"}"#);
+        assert_eq!(payload, r#"{"op":"v4_rotate_progress"}"#);
     }
 
     #[test]

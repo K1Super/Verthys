@@ -160,7 +160,7 @@ pub(super) fn lock_brute_force_or_recover(
             // Rust 的 Mutex 中毒后，into_inner() 已取出数据，
             // 但 Mutex 本身仍可用（下次 lock 返回 Ok）
             // 需要手动重置内部状态
-            // 由于 BruteForceGuard 的 inner 是私有的，我们通过 clear_purge 重置
+            // 由于 BruteForceGuard 的 inner 是私有的，无法在原位重建
             // 实际上 into_inner() 已经拿走了 BruteForceGuard，Mutex 现在是空的
             // 这是一个边界情况：Mutex 中毒后数据已被取出，需要重新放入新实例
 

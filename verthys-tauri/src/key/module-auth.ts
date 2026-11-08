@@ -1,5 +1,5 @@
 /*
- * key/module-auth.ts — 模块 M1 保护层（C 层 v4 模块状态机的前端投影）
+ * key/module-auth.ts — 模块 M1 保护层（C 层 模块状态机的前端投影）
  *
  * 职责：
  *   1. 模块保护生命周期（setModuleKey / disableModuleProtection）
@@ -8,7 +8,7 @@
  *      —— 口令一次性交给 C 层解封 MDEK user 槽，本层只登记会话就绪标志。
  *   3. 模块状态查询（hasModuleKey / isModuleReady / isModuleKeyEnabled /
  *      loadModuleKeyStatus）——权威来源是 C 层 `v4_module_status`，
- *      不再读写 verthys 内的 v3 校验器/开关记录。
+ *      不再读写 verthys 内的旧校验器/开关记录。
  *
  * 语义：
  *   - 启用保护 = `v4_module_enable`：MDEK 从 Keyring 移入 user/device 槽，
@@ -69,6 +69,12 @@ const MODULE_INDEX: Record<ModuleId, number> = {
 const WORKER_ERR_AUTH = "ERR_00000002";
 /** worker 错误码：加密库锁定或模块未解锁 */
 const WORKER_ERR_LOCKED = "ERR_00000007";
+/** worker 错误码：暴力熔断/尝试过频 */
+const WORKER_ERR_RATE = "ERR_0000000A";
+/** worker 错误码：安全门禁不可用 */
+const WORKER_ERR_CNG_UNAVAILABLE = "ERR_0000000E";
+/** worker 错误码：模块锁（模块口令失败退避） */
+const WORKER_ERR_MODULE_LOCKED = "ERR_0000001D";
 /** worker 错误码：策略拒绝（如非恢复会话重密封设备槽） */
 const WORKER_ERR_POLICY = "ERR_00000017";
 
@@ -199,6 +205,28 @@ function moduleFailure(
   fallback: VerthysErrorCode,
 ): VerthysResult<never> {
   const code = resp.error_code ?? resp.error ?? "";
+  const secs = Math.max(0, Math.ceil(resp.retry_after_secs ?? 0));
+  const moduleLocked = code === WORKER_ERR_MODULE_LOCKED || code === VerthysErrorCode.E_MODULE_LOCKED;
+  const rateLimited = code === WORKER_ERR_RATE || code === VerthysErrorCode.E_RATE_LIMITED;
+  if (moduleLocked) {
+    return err(
+      VerthysErrorCode.E_MODULE_LOCKED,
+      secs > 0 ? `模块已锁定 ${secs} 秒，请稍后再试` : "模块已锁定，请稍后再试",
+      undefined,
+      secs,
+    );
+  }
+  if (rateLimited) {
+    return err(
+      VerthysErrorCode.E_RATE_LIMITED,
+      secs > 0 ? `尝试次数过多，已锁定 ${secs} 秒，请稍后再试` : "请求过于频繁，请稍后再试",
+      undefined,
+      secs,
+    );
+  }
+  if (code === WORKER_ERR_CNG_UNAVAILABLE || code === VerthysErrorCode.E_CNG_UNAVAILABLE) {
+    return err(VerthysErrorCode.E_CNG_UNAVAILABLE, "安全门禁暂时不可用，请重启应用后重试");
+  }
   if (code === WORKER_ERR_LOCKED) {
     return err(VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY, `${action}失败：加密库或模块已锁定`);
   }
@@ -226,7 +254,7 @@ export function isModuleKeyEnabled(moduleId: ModuleId): boolean {
   return keyState.moduleKeyEnabled.value[moduleId] ?? false;
 }
 
-/** 检查模块是否已启用保护（等价于 v4 enabled） */
+/** 检查模块是否已启用保护（等价于 enabled） */
 export function hasModuleKey(moduleId: ModuleId): boolean {
   return keyState.hasModuleKeyRecord.value[moduleId] ?? false;
 }

@@ -22,14 +22,17 @@
  * =============================================================================
  * 1. 进程内探测即时完成：hasGlobalKeyRecord 在解锁响应中内联返回，
  *    无需前端额外扫描，彻底移除原 "loading" 中间态。
- * 2. 进度单调闸门：unlockProgressDone 标志阻止 Tauri Channel 残留消息
- *    在 Promise resolve 后覆盖 UI 最终状态（如 "解锁完成" 被心跳覆盖）。
+ * 2. 进度单调闸门：unlockProgressDone 标志阻止残留进度回调
+ *    在 Promise resolve 后覆盖 UI 最终状态（如 "解锁完成" 被旧阶段覆盖）。
  * 3. 三层超时防护：前端超时 > 后端硬超时，确保前端永不早于后端完成，
  *    避免状态不一致（如前端超时报错但后端继续执行并改变 verthysReady）。
  * 4. 设备校验 fire-and-forget：不阻塞主流程，校验失败仅记录日志，
  *    由 viewMode 根据 deviceCheckResult 动态切换拦截视图。
  * 5. 选择即预热/预启动：用户选择文件后立即异步启动后台任务（索引预读、
  *    worker 子进程），与用户输入密码时间重叠，显著缩短感知等待时间。
+ * 6. 进度感知统一：真实阶段进度只注入安全中心共享的进度感知层，
+ *    由感知层完成平滑与收束；终值 100% 一律由收束事件交付，
+ *    业务层不得自行跳变或伪造完成。
  *
  * =============================================================================
  * 超时策略
@@ -63,6 +66,7 @@ import {
   preloadWorker,
   type UnlockProgress,
 } from '../../lib/verthys';
+import type { VerifyRhythm } from './useVerifyRhythm';
 
 /* ===== 前端超时兜底常量 ===== */
 
@@ -70,13 +74,13 @@ import {
  * 通用 IPC 操作的前端超时（35s），比后端默认超时略长，
  * 作为最后一道防线阻止永久卡死。
  */
-export const FRONTEND_TIMEOUT_MS = 35 * 1000;
+const FRONTEND_TIMEOUT_MS = 35 * 1000;
 
 /**
  * 创建操作前端超时（150s），覆盖 initCreate 内部的三步流程（create→lock→unlock）
  * 加上额外余量，避免误判。
  */
-export const CREATE_FRONTEND_TIMEOUT_MS = 150 * 1000;
+const CREATE_FRONTEND_TIMEOUT_MS = 150 * 1000;
 
 /**
  * 解锁操作前端超时（200s）。
@@ -86,7 +90,7 @@ export const CREATE_FRONTEND_TIMEOUT_MS = 150 * 1000;
  * 造成 verthysReady 状态突变。现留出充足余量，确保前端超时永不先于
  * 后端完成触发。
  */
-export const UNLOCK_FRONTEND_TIMEOUT_MS = 200 * 1000;
+const UNLOCK_FRONTEND_TIMEOUT_MS = 200 * 1000;
 
 /**
  * 为异步 IPC 操作添加前端超时保护。
@@ -132,6 +136,9 @@ export interface UseUnlockFlowOptions {
   showToast: (msg: string) => void;
   /** 设备机器码校验回调（fire-and-forget 调用） */
   checkDevice: () => Promise<void>;
+  /** 进度感知层（安全中心统一实例：解锁/创建/验证/初始化/清理共用，
+   *  信号层只推送真实阶段进度，本层负责平滑与收束） */
+  rhythm: VerifyRhythm;
 }
 
 /**
@@ -245,7 +252,7 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
   };
 
   /**
-   * D3 keyfile 因子：创建时是否启用 keyfile 保护（由解锁页勾选）。
+   * keyfile 因子：创建时是否启用 keyfile 保护（由解锁页勾选）。
    *
    * 只保存路径，keyfile 字节由 C 层生成；前端不接触文件内容。
    */
@@ -297,7 +304,8 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
   const doUnlock = async (path: string, isCreate: boolean, usbRebindConfirmed = false) => {
     if (unlocking.value) return;
     unlocking.value = true;
-    unlockProgressMsg.value = '准备就绪';
+    options.rhythm.start();
+    unlockProgressMsg.value = '准备安全环境';
     unlockProgressPercent.value = 0;
     unlockProgressElapsed.value = 0;
     unlockProgressDone.value = false;
@@ -307,6 +315,9 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
       unlockProgressMsg.value = p.message;
       unlockProgressPercent.value = p.percent;
       unlockProgressElapsed.value = p.elapsed_ms;
+      /* 终值由收束事件交付：100 只作为完成提示，不推向感知层，
+       * 避免 ACTIVE 期出现“真实进度已满但未收束”的协议异常 */
+      if (p.percent < 100) options.rhythm.pushRealProgress(p.percent / 100);
     };
 
     try {
@@ -316,7 +327,7 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
       /** 新建成功返回的一次性恢复码（仅内存；确认后清零） */
       let createdRecoveryCode: string | null = null;
       if (isCreate) {
-        /* D3：创建时勾选 keyfile → 先选保存位置（C 层生成 VKFL 文件）。 */
+        /* 创建时勾选 keyfile → 先选保存位置（C 层生成 VKFL 文件）。 */
         let kfForCreate: string | undefined;
         if (keyfileCreateEnabled.value) {
           if (!keyfilePath.value) {
@@ -362,7 +373,7 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
           }
         }
       } else {
-        /* D3：keyfile 库（无 keyfile 路径时）返回 E_KEYFILE_REQUIRED；
+        /* keyfile 库（无 keyfile 路径时）返回 E_KEYFILE_REQUIRED；
          * 立即引导选择文件并重试一次，不让用户手点两次。 */
         let allowedRetry = 1;
         for (;;) {
@@ -398,6 +409,14 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
 
       if (result.ok) {
         unlockProgressDone.value = true;
+        /* 成功收束：补满 100% 后交付结果，视图切换由收束完成事件驱动，
+         * 不猜测动画时长（与验证/初始化路径统一） */
+        options.rhythm.seal();
+        try {
+          await options.rhythm.waitForComplete();
+        } catch (e) {
+          console.warn('[doUnlock] 收束等待被中断，按已完成处理', e);
+        }
         /* 普通口令解锁：会话不是恢复会话；清除可能残留的重绑提示状态。 */
         recoveryMode.value = false;
         if (createdRecoveryCode) pendingRecoveryCode.value = createdRecoveryCode;
@@ -424,6 +443,8 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
         options.showError(e instanceof Error && e.message ? e.message : '操作失败');
       }
     } finally {
+      /* 失败/提前返回：冻结并降级；成功路径已进入 DONE，halt 为幂等空操作 */
+      options.rhythm.halt();
       unlocking.value = false;
     }
   };
@@ -437,7 +458,8 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
   const doRecoveryUnlock = async (path: string, code: string): Promise<boolean> => {
     if (unlocking.value || !code) return false;
     unlocking.value = true;
-    unlockProgressMsg.value = '验证恢复码';
+    options.rhythm.start();
+    unlockProgressMsg.value = '准备恢复解锁';
     unlockProgressPercent.value = 0;
     unlockProgressElapsed.value = 0;
     unlockProgressDone.value = false;
@@ -447,6 +469,7 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
       unlockProgressMsg.value = p.message;
       unlockProgressPercent.value = p.percent;
       unlockProgressElapsed.value = p.elapsed_ms;
+      if (p.percent < 100) options.rhythm.pushRealProgress(p.percent / 100);
     };
 
     try {
@@ -457,6 +480,13 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
       );
       if (result.ok) {
         unlockProgressDone.value = true;
+        /* 成功收束：补满 100% 后交付结果（与口令解锁路径统一） */
+        options.rhythm.seal();
+        try {
+          await options.rhythm.waitForComplete();
+        } catch (e) {
+          console.warn('[doRecoveryUnlock] 收束等待被中断，按已完成处理', e);
+        }
         /* 恢复会话必须提示重绑；以 C 层 status 为权威，查询失败时按恢复
          * 会话展示（误提示可被 C 层 POLICY 拒绝，不会造成数据变更）。 */
         try {
@@ -479,6 +509,7 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
       console.error('[doRecoveryUnlock] 异常', e);
       return false;
     } finally {
+      options.rhythm.halt();
       unlocking.value = false;
     }
   };
@@ -555,5 +586,3 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
     cancelUsbRebind,
   };
 }
-
-export type UseUnlockFlowReturn = ReturnType<typeof useUnlockFlow>;

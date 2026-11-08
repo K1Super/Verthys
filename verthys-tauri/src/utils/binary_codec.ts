@@ -13,29 +13,6 @@
  * ------------------------------------------------------------------ */
 
 /**
- * 将十六进制字符串转换为 Uint8Array
- * @param hex 十六进制字符串（长度必须为偶数）
- * @returns 对应的字节数组
- * @throws Error 如果 hex 非法（空串、奇数长度、非 hex 字符）
- */
-export function hexToBytes(hex: string): Uint8Array {
-  if (!hex || hex.length === 0) {
-    throw new Error("hex 字符串为空");
-  }
-  if (hex.length % 2 !== 0) {
-    throw new Error(`hex 长度非法（奇数）: ${hex.length}`);
-  }
-  if (!/^[0-9a-fA-F]*$/.test(hex)) {
-    throw new Error("hex 包含非法字符");
-  }
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
-  }
-  return bytes;
-}
-
-/**
  * 将 Uint8Array 转换为十六进制字符串
  * @param bytes 字节数组
  * @returns 小写十六进制字符串

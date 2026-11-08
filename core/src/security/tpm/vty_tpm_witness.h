@@ -15,7 +15,7 @@
 #ifndef VTY_TPM_WITNESS_H
 #define VTY_TPM_WITNESS_H
 
-#include "vty_v4_types.h"
+#include "vty_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,9 +46,12 @@ int vty_tpm_witness_any(const uint8_t id[VTY_UUID_BYTES]);
 /* 删除两个槽（测试清理/状态重建） */
 int vty_tpm_witness_delete_all(const uint8_t id[VTY_UUID_BYTES]);
 
-/* 从稳定字符串（状态文件路径等）派生见证域 id */
+/* 测试专用：由任意字符串派生见证 ID（SHA-256），仅供测试隔离钩子使用；
+ * 生产构建不编译此函数。 */
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
 int vty_tpm_witness_id_from_string(const char *text,
                                    uint8_t id[VTY_UUID_BYTES]);
+#endif
 
 #ifdef __cplusplus
 }

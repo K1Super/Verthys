@@ -25,7 +25,6 @@
  */
 #include "emergency.h"
 #include "memory_guard.h"
-#include "key_separation.h"
 #include "security_preset.h"
 #include "verthys_crypto.h"     /* verthys_random_bytes（事件名随机后缀） */
 #include "verthys_internal.h"  /* verthys_secure_zero */
@@ -152,8 +151,8 @@ static uint32_t select_fault_code(uint32_t signals)
     int categories = 0;
     uint32_t code = 0;
 
-    /* 类别 1：索引损坏 —— 超级块 HMAC 校验失败 */
-    if (signals & EMERG_SIG_SUPERBLOCK_HMAC) {
+    /* 类别 1：索引/容器元数据损坏 —— 元数据 HMAC 校验失败 */
+    if (signals & EMERG_SIG_CONTAINER_HMAC) {
         code = EMERGENCY_CODE_INDEX_CORRUPTION;
         categories++;
     }
@@ -403,15 +402,6 @@ void emergency_trigger(void)
      * memory_guard 内部对每个注册区域执行覆写清零。
      */
     memory_guard_emergency_purge();
-
-    /*
-     * 销毁 CNG 内核密钥句柄（A/B/C 三权分立密钥）。
-     * 该密钥体系仅 V3 容器路径使用；产品 v4-only 构建不链接
-     * key_separation 实现，因此清钥调用随 V3 分支编译剔除。
-     */
-#if defined(VERTHYS_V3_SUPPORT)
-    key_separation_purge_all();
-#endif
 
     /* ---- c) 故障码上报 ---- */
     code = select_fault_code(signals_snapshot);

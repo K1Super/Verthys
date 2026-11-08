@@ -1,24 +1,25 @@
 /*
- * vty_probe.c — v4 安全核心攻击探针（仅测试用，不进入生产 DLL 导出面）
+ * vty_probe.c — 安全核心攻击探针（仅测试用，不进入生产 DLL 导出面）
  *
- * 用途：让 tests/attack/run.ps1 能以独立进程直接驱动 v4 原语，
- * 为 A5/A6b/A7/A10/A11/A13/A14/A15 生成可复核证据。
+ * 用途：让 tests/attack/run.ps1 能以独立进程直接驱动 原语，
+ * 为分片、熔断、封装、重放、恢复码与格式边界等攻击面生成可复核证据。
  *
  * 输出契约：单行 `RESULT <id> PASS|FAIL <detail>`，退出码 0=PASS。
  * 所有工件写入调用方给出的临时目录，绝不触碰活动库。
  */
 #include "verthys_crypto.h"
-#include "vty_v4_types.h"
-#include "vty_keymanager_v4.h"
-#include "vty_module_v4.h"
-#include "vty_store_v4.h"
-#include "vty_record_v4.h"
-#include "vty_chunk_v4.h"
+#include "vty_types.h"
+#include "vty_keymanager.h"
+#include "vty_module.h"
+#include "vty_store.h"
+#include "vty_record.h"
+#include "vty_chunk.h"
 #include "vty_recovery.h"
-#include "vty_format_v4.h"
-#include "vty_keyslot_v4.h"
+#include "vty_format.h"
+#include "vty_keyslot.h"
 #include "vty_lockout.h"
 #include "vty_rollback.h"
+#include "vty_secure_state.h"
 #include "vty_tpm_witness.h"
 #include "vty_device_root.h"
 #include "vty_blake3.h"
@@ -72,7 +73,7 @@ static int report(const char *id, int pass, const char *detail)
     return pass ? 0 : 1;
 }
 
-/* A5：v4 分片文件不得泄露明文，且不能按旧格式解析成功 */
+/* 分片文件不得泄露明文，且不能按旧格式解析成功 */
 static int cmd_a5(const char *dir)
 {
     uint8_t mdek[VTY_KEY_BYTES];
@@ -122,13 +123,11 @@ static int cmd_a5(const char *dir)
     }
 
     if (probe_read(cpath, file, 1 << 20, &file_len) ||
-        contains(file, file_len, marker) ||
-        (file_len >= 4 && file[0] == 'V' && file[1] == '3' &&
-         file[2] == 'S' && file[3] == 'B')) {
+        contains(file, file_len, marker)) {
         vty_free(file, 1 << 20); vty_free(ct, ct_len); vty_free(mct, mct_len);
-        return report("A5", 0, "chunk 文件泄露标记或出现 V3SB 头");
+        return report("A5", 0, "chunk 文件泄露明文标记");
     }
-    /* 用错误的 seq/total 与旧格式入口都不能“还原”出该分片 */
+    /* 用错误的 seq/total 不能“还原”出该分片 */
     if (vty_chunk_open(mdek, uuid, 1, 1, 1, file, file_len, &out, &out_len)
         == VTY_OK) {
         vty_free(file, 1 << 20); vty_free(ct, ct_len); vty_free(mct, mct_len);
@@ -182,7 +181,7 @@ static int break_module_device(VtyVault *v)
     return vty_vault_save(v);
 }
 
-/* A6b：同机错误模块口令达到阈值后熔断；A14：设备槽破坏后 fail-closed */
+/* 同机错误模块口令达到阈值后熔断；设备槽破坏后 fail-closed */
 static int cmd_a6b(const char *dir, int break_device)
 {
     VtyVault *v = NULL;
@@ -196,7 +195,7 @@ static int cmd_a6b(const char *dir, int break_device)
     remove(vpath); remove(spath);
 
     vty_lockout_set_enabled(1);
-    if (vty_lockout_set_path(spath) != VTY_OK || vty_lockout_init() != VTY_OK ||
+    if (vty_lockout_set_path_for_test(spath) != VTY_OK || vty_lockout_init() != VTY_OK ||
         vty_lockout_reset() != VTY_OK) return report("A6b", 0, "lockout init");
 
     if (vty_vault_create(vpath, "probe-vault-pass", &v, code, sizeof(code)) != VTY_OK)
@@ -233,14 +232,14 @@ static int cmd_a6b(const char *dir, int break_device)
                                      : "未按阈值熔断");
 }
 
-/* A7：跨进程持久化熔断（phase1 制造锁定，phase2 新进程复核） */
+/* 跨进程持久化熔断（phase1 制造锁定，phase2 新进程复核） */
 static int cmd_a7(const char *state, const char *phase)
 {
     int locked;
     int i;
 
     vty_lockout_set_enabled(1);
-    if (vty_lockout_set_path(state) != VTY_OK || vty_lockout_init() != VTY_OK)
+    if (vty_lockout_set_path_for_test(state) != VTY_OK || vty_lockout_init() != VTY_OK)
         return report("A7", 0, "lockout init");
 
     if (strcmp(phase, "phase1") == 0) {
@@ -256,14 +255,14 @@ static int cmd_a7(const char *state, const char *phase)
     locked = (vty_lockout_check() == VTY_E_LOCKED);
     {
         uint8_t id[VTY_UUID_BYTES];
-        if (vty_tpm_witness_id_from_string(state, id) == VTY_OK) {
+        if (vty_secure_state_identity_lockout(id) == VTY_OK) {
             (void)vty_tpm_witness_delete_all(id);
         }
     }
     return report("A7", locked, locked ? "重启后仍锁定" : "重启后可绕过");
 }
 
-/* A10：同一明文重复封装不得复用 nonce/密文 */
+/* 同一明文重复封装不得复用 nonce/密文 */
 static int cmd_a10(const char *dir)
 {
     uint8_t mdek[VTY_KEY_BYTES];
@@ -298,10 +297,10 @@ static int cmd_a10(const char *dir)
     return report("A10", dup == 0, dup ? "出现重复封装" : "256 次封装无重复");
 }
 
-/* A11：槽序进入 AAD；跨模块记录不可重放 */
+/* 槽序进入 AAD；跨模块记录不可重放 */
 static int cmd_a11(void)
 {
-    VtyV4Header h;
+    VtyHeader h;
     VtySlot s;
     uint8_t key[VTY_KEY_BYTES];
     uint8_t back[VTY_KEY_BYTES];
@@ -339,7 +338,7 @@ static int cmd_a11(void)
                                     : "重放被接受");
 }
 
-/* A13：明文回退开关必须被显式拒绝 */
+/* 明文回退开关必须被显式拒绝 */
 static int cmd_a13(void)
 {
     int r0 = vty_record_reject_plaintext(0);
@@ -349,7 +348,7 @@ static int cmd_a13(void)
                                     : "明文回退未被拒绝");
 }
 
-/* A15：恢复码正向成功、错误恢复码拒绝 */
+/* 恢复码正向成功、错误恢复码拒绝 */
 static int cmd_a15(const char *dir)
 {
     VtyVault *v = NULL;
@@ -377,36 +376,36 @@ static int cmd_a15(const char *dir)
                                     : "恢复码流程异常");
 }
 
-/* A16：v4 只接受自身格式；v3 文件在 v4 解析器必须返回版本错误 */
+/* 只接受自身格式；异种 magic 文件在解析器必须返回版本错误 */
 static int cmd_a16(const char *dir)
 {
     VtyVault *v = NULL;
     char code[VTY_RECOVERY_TEXT_BUF];
-    char vpath[1024], v3path[1024];
+    char vpath[1024], foreign[1024];
     uint8_t *fake;
     int rc;
     int pass = 1;
 
     mkpath(vpath, sizeof(vpath), dir, "a16.verthys");
-    mkpath(v3path, sizeof(v3path), dir, "a16_v3.verthys");
+    mkpath(foreign, sizeof(foreign), dir, "a16_foreign.verthys");
     remove(vpath);
-    remove(v3path);
+    remove(foreign);
 
     if (vty_vault_create(vpath, "a16-pass", &v, code, sizeof(code)) != VTY_OK) {
-        return report("A16", 0, "create v4");
+        return report("A16", 0, "create");
     }
     vty_vault_free(v);
 
-    /* 128 KiB 的伪 v3 头：长度足够进入 v4 元数据解析，magic 明确不是 VRTY */
-    fake = (uint8_t *)calloc(1, VTY_V4_DATA_OFFSET);
+    /* 128 KiB 的伪头：长度足够进入元数据解析，magic 明确不是 VRTY */
+    fake = (uint8_t *)calloc(1, VTY_DATA_OFFSET);
     if (fake == NULL) return report("A16", 0, "alloc");
-    memcpy(fake, "V3RP", 4);
-    if (probe_write(v3path, fake, VTY_V4_DATA_OFFSET) != 0) pass = 0;
+    memcpy(fake, "FMTX", 4);
+    if (probe_write(foreign, fake, VTY_DATA_OFFSET) != 0) pass = 0;
     free(fake);
 
     if (pass) {
         v = NULL;
-        rc = vty_vault_open(v3path, "a16-pass", &v);
+        rc = vty_vault_open(foreign, "a16-pass", &v);
         if (rc != VTY_E_VERSION) pass = 0;
         if (v != NULL) vty_vault_free(v);
     }
@@ -415,11 +414,11 @@ static int cmd_a16(const char *dir)
         if (vty_vault_open(vpath, "a16-pass", &v) != VTY_OK) pass = 0;
         if (v != NULL) vty_vault_free(v);
     }
-    return report("A16", pass, pass ? "v4 接受、v3 返回 E_VERSION"
-                                    : "v3/v4 格式门异常");
+    return report("A16", pass, pass ? "本格式接受、异种格式返回 E_VERSION"
+                                    : "格式门异常");
 }
 
-/* A12：整体还原旧库文件 → 外部锚点拒绝；恢复码可重设锚点；锚点篡改 fail-closed */
+/* 整体还原旧库文件 → 外部锚点拒绝；恢复码可重设锚点；锚点篡改 fail-closed */
 static int cmd_a12(const char *dir)
 {
     VtyVault *v = NULL;
@@ -427,7 +426,7 @@ static int cmd_a12(const char *dir)
     char code[VTY_RECOVERY_TEXT_BUF];
     char vpath[1024], opath[1024], spath[1024];
     uint8_t uuid[VTY_UUID_BYTES];
-    uint8_t old_copy[VTY_V4_DATA_OFFSET + 65536u];
+    uint8_t old_copy[VTY_DATA_OFFSET + 65536u];
     uint8_t state[4096];
     size_t old_len = 0;
     size_t state_len = 0;
@@ -443,7 +442,7 @@ static int cmd_a12(const char *dir)
     /* 该探针只用正确口令：关掉熔断，避免任何失败路径写状态 */
     vty_lockout_set_enabled(0);
     vty_rollback_set_enabled(1);
-    if (vty_rollback_set_path(spath) != VTY_OK || vty_rollback_init() != VTY_OK) {
+    if (vty_rollback_set_path_for_test(spath) != VTY_OK || vty_rollback_init() != VTY_OK) {
         vty_rollback_set_enabled(0);
         return report("A12", 0, "rollback init");
     }
@@ -523,6 +522,12 @@ static int cmd_a12(const char *dir)
     }
 
     vty_rollback_set_enabled(0);
+    {
+        uint8_t derived[VTY_UUID_BYTES];
+        if (vty_secure_state_identity_rollback(uuid, derived) == VTY_OK) {
+            (void)vty_tpm_witness_delete_all(derived);
+        }
+    }
     (void)vty_tpm_witness_delete_all(uuid);
     return report("A12", pass, detail);
 }
@@ -581,7 +586,7 @@ static int probe_plaintext_hits(const char *path)
     return hits;
 }
 
-/* A6：源机建库/建模块并做正控（离机复核由 a6run 完成） */
+/* 源机建库/建模块并做正控（离机复核由 a6run 完成） */
 static int cmd_a6(const char *dir)
 {
     VtyVault *v = NULL;
@@ -592,7 +597,7 @@ static int cmd_a6(const char *dir)
     mkpath(vpath, sizeof(vpath), dir, "a6.verthys");
     remove(vpath);
 
-    /* A6 验证设备根绑定，与回滚锚点/熔断计数无关：
+    /* 该用例验证设备根绑定，与回滚锚点/熔断计数无关：
      * 共享状态（其他用例留下的锁定）会掩盖 E_TPM，必须隔离。 */
     vty_rollback_set_enabled(0);
     vty_lockout_set_enabled(0);
@@ -623,7 +628,7 @@ static int cmd_a6(const char *dir)
                       : "源机正控失败");
 }
 
-/* A6 离机复核：只报告返回码，由 offmachine/run.ps1 判定
+/* 离机复核：只报告返回码，由 offmachine/run.ps1 判定
  * （异机期望 vault_open=E_TPM 且无法取得模块密钥）。 */
 static int cmd_a6run(const char *dir)
 {
@@ -636,7 +641,7 @@ static int cmd_a6run(const char *dir)
     /* 与源机一致：关掉回滚锚点与熔断计数，避免目标机残留状态把 E_TPM
      * 掩盖成 E_LOCKED，造成假阴性。设备根必须先初始化：生产入口在
      * Verthys_Init 完成该步骤，探针只调 verthys_crypto_init，漏掉会让
-     * 同机重开也返回 E_TPM，把 A6 变成“任何机器都通过”的无效证据。 */
+     * 同机重开也返回 E_TPM，把离机用例变成“任何机器都通过”的无效证据。 */
     vty_rollback_set_enabled(0);
     vty_lockout_set_enabled(0);
     (void)vty_device_root_init();
@@ -655,7 +660,7 @@ static int cmd_a6run(const char *dir)
     return 0;
 }
 
-/* 文件复制（A18 备份/还原用） */
+/* 文件复制（keyfile 用例备份/还原用） */
 static int probe_copy_file(const char *src, const char *dst)
 {
     FILE *in = fopen(src, "rb");
@@ -681,18 +686,18 @@ static int probe_copy_file(const char *src, const char *dst)
     return ok ? 0 : 1;
 }
 
-/* A18 用：清除两份元数据副本的 KEYFILE 标志位；repair_hash=1 时同步
+/* keyfile 用例：清除两份元数据副本的 KEYFILE 标志位；repair_hash=1 时同步
  * 重算头哈希（模拟“攻击者知道格式”的降级尝试）。 */
 static int probe_strip_keyfile_flag(const char *path, int repair_hash)
 {
-    uint8_t copy[VTY_V4_META_COPY_BYTES];
+    uint8_t copy[VTY_META_COPY_BYTES];
     uint8_t digest[VTY_HASH_BYTES];
     FILE *f = fopen(path, "r+b");
     size_t base;
     int ok = 1;
 
     if (f == NULL) return 1;
-    for (base = 0; base < VTY_V4_DATA_OFFSET; base += VTY_V4_META_COPY_BYTES) {
+    for (base = 0; base < VTY_DATA_OFFSET; base += VTY_META_COPY_BYTES) {
         uint16_t header_len;
 
         if (fseek(f, (long)base, SEEK_SET) != 0 ||
@@ -701,17 +706,17 @@ static int probe_strip_keyfile_flag(const char *path, int repair_hash)
             break;
         }
         header_len = vty_get_u16(copy + 8);
-        if (header_len < VTY_V4_HEADER_FIXED_BYTES + VTY_V4_HEADER_HASH_BYTES ||
-            header_len > VTY_V4_META_COPY_BYTES) {
+        if (header_len < VTY_HEADER_FIXED_BYTES + VTY_HEADER_HASH_BYTES ||
+            header_len > VTY_META_COPY_BYTES) {
             ok = 0;
             break;
         }
         vty_put_u16(copy + 10, (uint16_t)(vty_get_u16(copy + 10) &
                                           (uint16_t)~VTY_FLAG_KEYFILE));
         if (repair_hash) {
-            (void)vty_blake3_32(copy, header_len - VTY_V4_HEADER_HASH_BYTES,
+            (void)vty_blake3_32(copy, header_len - VTY_HEADER_HASH_BYTES,
                                 digest);
-            memcpy(copy + header_len - VTY_V4_HEADER_HASH_BYTES, digest,
+            memcpy(copy + header_len - VTY_HEADER_HASH_BYTES, digest,
                    VTY_HASH_BYTES);
         }
         if (fseek(f, (long)base, SEEK_SET) != 0 ||
@@ -724,7 +729,7 @@ static int probe_strip_keyfile_flag(const char *path, int repair_hash)
     return ok ? 0 : 1;
 }
 
-/* A18：keyfile 因子（D3）攻击矩阵——缺失/坏文件/换文件/剥标志/关闭 */
+/* keyfile 因子攻击矩阵：缺失/坏文件/换文件/剥标志/关闭 */
 /* 失败只置 pass=0，保持单行 RESULT 输出契约（步骤号仅用于本地复核）。 */
 #define A18_FAIL(step, got, want) \
     do { (void)(step); (void)(got); (void)(want); pass = 0; } while (0)
@@ -847,7 +852,7 @@ int main(int argc, char **argv)
         printf("RESULT INIT FAIL crypto_init\n");
         return 2;
     }
-    /* 探针默认不写用户目录：回退锚点只在 A12 用例里显式开启并注入沙箱路径，
+    /* 探针默认不写用户目录：回退锚点只在回滚用例里显式开启并注入沙箱路径，
      * 与测试进程“副作用模块默认关闭”的约定一致。 */
     vty_rollback_set_enabled(0);
     if (argc < 3) {

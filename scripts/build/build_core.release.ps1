@@ -12,12 +12,17 @@
 #   - 所有工具路径来自系统环境变量（经 env.load.ps1 注入），脚本内零硬编码
 #   - Release 构建跳过测试（测试已在开发环境完成），仅产出加固后的 DLL
 #
-# 用法: powershell -ExecutionPolicy Bypass -File scripts\build\build_core.release.ps1 [-Clean] [-NoPause]
-#   -Clean    构建前清理 build 目录
-#   -NoPause  失败/成功后不暂停等待 Enter（CI 场景使用；双击运行时不传此参数以便查看输出）
+# 用法: powershell -ExecutionPolicy Bypass -File scripts\build\build_core.release.ps1 [-Clean] [-NoPause] [-ReleaseSigning] [-TestHooks]
+#   -Clean           构建前清理 build 目录
+#   -NoPause         失败/成功后不暂停等待 Enter（CI 场景使用；双击运行时不传此参数以便查看输出）
+#   -ReleaseSigning  启用调用方认证并对 DLL 做 Authenticode 签名（需要发布者证书环境变量）
+#   -TestHooks       仅攻击回归测试使用：允许 VERTHYS_TEST_STATE_DIR 覆盖熔断/回滚状态目录；
+#                    不可与 -ReleaseSigning 同时使用，生产构建禁止开启
 param(
     [switch]$Clean,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$ReleaseSigning,
+    [switch]$TestHooks
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,11 +41,33 @@ try {
 . (Join-Path $PSScriptRoot "..\lib\vsec.ps1")
 # 产物契约读取/重生成（注入改写 DLL 字节后必须刷新）
 . (Join-Path $PSScriptRoot "..\lib\artifacts.ps1")
+# 发布者签名：证书解析、指纹钉扎、Authenticode 签名与复核
+. (Join-Path $PSScriptRoot "..\lib\release_signing.ps1")
 
 $root       = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 # 生产环境固定构建目录：build/（Tauri 打包配置消费 build/core/Release/verthys.dll）
 $buildDir   = Join-Path $root "build"
 $config     = "Release"
+
+# 签名上下文：只有显式 -ReleaseSigning 才启用；避免开发者环境中残留证书变量
+# 让 CI 口径的未签名构建意外变成签名构建（签名 DLL 会让未签名测试宿主被拒绝）。
+$signing = [pscustomobject]@{
+    Enabled         = $false
+    Certificate     = $null
+    PublisherSha256 = ""
+    TimestampServer = ""
+}
+if ($ReleaseSigning -and $TestHooks) {
+    throw "-TestHooks 与 -ReleaseSigning 互斥：测试钩子构建不得带发布者签名"
+}
+if ($ReleaseSigning) {
+    $signing = Resolve-VerthysReleaseSigning -Required
+} elseif (
+    -not [string]::IsNullOrEmpty((Read-VerthysSigningEnv "VERTHYS_SIGNING_THUMBPRINT")) -or
+    -not [string]::IsNullOrEmpty((Read-VerthysSigningEnv "VERTHYS_SIGNING_PFX"))
+) {
+    Write-Host "[sign] 已检测到发布者证书，但未传 -ReleaseSigning：本次保持未签名构建" -ForegroundColor Yellow
+}
 
 if ($Clean -and (Test-Path $buildDir)) {
     Write-Host "[clean] 移除 $buildDir" -ForegroundColor Yellow
@@ -57,8 +84,16 @@ Clear-StaleCMakeCache -BuildDir $buildDir -SourceDir $root
 Write-Host "[configure] 生产环境 Release 构建" -ForegroundColor Cyan
 Write-Host "  生成器: $VERTHYS_VS_GENERATOR"
 Write-Host "  构建目录: $buildDir"
+Write-Host ("  调用方认证: {0}" -f $(if ($signing.Enabled) { "ON（发布者指纹已钉扎）" } else { "OFF" }))
 
-& $VERTHYS_CMAKE_EXE -S $root -B $buildDir -G $VERTHYS_VS_GENERATOR -A x64
+# 缓存变量每轮显式写出，避免上一轮 ON/OFF 状态被 CMake 缓存继承。
+$callerSigState = if ($signing.Enabled) { "ON" } else { "OFF" }
+$publisherShaValue = if ($signing.Enabled) { $signing.PublisherSha256 } else { "" }
+$testHooksState = if ($TestHooks) { "ON" } else { "OFF" }
+& $VERTHYS_CMAKE_EXE -S $root -B $buildDir -G $VERTHYS_VS_GENERATOR -A x64 `
+    "-DVERTHYS_REQUIRE_CALLER_SIG=$callerSigState" `
+    "-DVERTHYS_PUBLISHER_SHA256=$publisherShaValue" `
+    "-DVERTHYS_TEST_HOOKS=$testHooksState"
 if ($LASTEXITCODE -ne 0) { throw "configure 失败" }
 
 Write-Host "[build] $config（安全加固：/O2 /GL /GS /guard:cf，剥离符号）" -ForegroundColor Cyan
@@ -74,9 +109,23 @@ if (-not (Test-Path $dllPath)) {
 # ========== .vsec 完整性基准注入 ==========
 # 注入实现位于 scripts/lib/vsec.ps1（与 build_production.ps1 共用同一份逻辑，
 # 避免两条生产链路出现基准口径漂移）。时序红线：
-#   链接 + rhash_gen .rhat 补丁 → .vsec 注入 → 产物契约按最终字节重生成 →
-#   Authenticode 签名（若有）→ 打包。
+#   链接 + rhash_gen .rhat 补丁 → .vsec 注入 → Authenticode 签名 →
+#   产物契约按最终字节重生成 → 打包。
 Update-VsecBaseline -DllPath $dllPath
+
+# Authenticode 在 .vsec 注入之后、契约刷新之前完成：签名只追加 PE 安全目录，
+# 不改写 .vsec 覆盖的节；契约必须记录签名后的交付字节。
+if ($signing.Enabled) {
+    Invoke-VerthysAuthenticodeSign `
+        -Path $dllPath `
+        -Certificate $signing.Certificate `
+        -TimestampServer $signing.TimestampServer
+    Assert-VerthysAuthenticodeSignature `
+        -Path $dllPath `
+        -ExpectedSha256 $signing.PublisherSha256 | Out-Null
+    Write-Host "[sign] verthys.dll 已签名，发布者指纹=$($signing.PublisherSha256)" -ForegroundColor Cyan
+}
+
 if (-not (Test-VsecBaseline -DllPath $dllPath)) {
     throw ".vsec 注入后独立验证失败：交付字节未被完整性基准覆盖"
 }

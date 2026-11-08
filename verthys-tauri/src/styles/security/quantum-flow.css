@@ -64,7 +64,9 @@
   box-shadow:
     0 0 8px rgba(0, 212, 255, 0.25),
     inset 0 1px 0 rgba(255, 255, 255, 0.15);
-  transition: width 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  /* 感知层已按帧平滑输出，短线性过渡只吸收离散采样间隙；
+     过长过渡会让收束补满滞后于视图切换 */
+  transition: width 0.22s linear;
   overflow: hidden;
 }
 

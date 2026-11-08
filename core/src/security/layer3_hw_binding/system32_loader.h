@@ -8,7 +8,7 @@
  *
  *   模块同时保留 System32 目录前缀判定（带分隔符边界）供白盒测试，
  *   防止“同前缀旁路目录”被误判为可信位置。加载函数本身已无生产调用点，
- *   随 V4 收口删除。
+ *   随 收口删除。
  */
 #ifndef VERTHYS_SYSTEM32_LOADER_H
 #define VERTHYS_SYSTEM32_LOADER_H

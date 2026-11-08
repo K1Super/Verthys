@@ -755,7 +755,7 @@
   color: rgba(0, 212, 255, 0.8);
 }
 .def-count--degraded { color: rgba(255, 165, 2, 0.9); }
-.def-count--limited { color: rgba(255, 165, 2, 0.62); }
+.def-count--limited { color: rgba(255, 165, 2, 0.9); }
 .def-count--partial { color: rgba(var(--warning-rgb), 0.85); }
 .def-count--breach { color: var(--danger); }
 /* 双列清单：按列流向（前 4 项左列，后 3 项右列下沉错位） */
@@ -820,7 +820,7 @@
 }
 .def-item--blocked .def-tag { color: rgba(0, 212, 255, 0.85); }
 .def-item--degraded .def-tag { color: rgba(255, 165, 2, 0.9); }
-.def-item--limited .def-tag { color: rgba(255, 165, 2, 0.62); }
+.def-item--limited .def-tag { color: rgba(255, 165, 2, 0.9); }
 .def-item--failed .def-tag { color: var(--danger); }
 /* 虚线引出线（与 cap-lead 同族质感） */
 .def-lead {

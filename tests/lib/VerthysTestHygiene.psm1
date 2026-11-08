@@ -1,9 +1,9 @@
-# 测试卫生：隔离真实回退锚点状态，并回收测试创建的 TPM 见证密钥。
+# 测试卫生：隔离真实熔断/回退状态，并回收测试创建的 TPM 见证密钥。
 #
-# 为什么需要回收见证密钥：LOCALAPPDATA 只控制 rollback.state / lockout.state
-# 的落盘位置，见证明文密钥由 CNG Platform Crypto Provider 按库 UUID 持久化，
-# 不受目录隔离影响。测试每创建一个 v4 库就会留下一把见证密钥，长期复跑会把
-# 机器上的 TPM 持久化键空间堆满。这里按“运行前快照 + 运行后差集”回收，
+# 为什么需要回收见证密钥：状态文件位置（旧 LOCALAPPDATA 路径或
+# KnownFolder\Verthys\Security）不决定见证域；新代码的见证绑定设备根 +
+# 用户 SID / 容器 UUID。测试每创建一个 库就可能留下见证密钥，长期复跑
+# 会把 TPM 持久化键空间堆满。这里按“运行前快照 + 运行后差集”回收，
 # 只删除本次测试新增的键，不触碰运行前已存在的真实用户见证。
 
 if (-not ('VerthysWitnessStore' -as [type])) {
@@ -143,20 +143,31 @@ function Get-VerthysWitnessNames {
 function Get-VerthysRealAnchorFingerprint {
     <#
     .SYNOPSIS
-    计算真实回退锚点状态文件的指纹；文件不存在返回 'missing'。
-    必须在脚本改写 LOCALAPPDATA 之前调用，才能覆盖真实用户目录。
+    计算真实熔断/回退状态文件的联合指纹；文件不存在记 missing。
+    覆盖旧路径与 KnownFolder\Verthys\Security 新路径，必须在脚本改写
+    LOCALAPPDATA 之前调用。
     #>
     [CmdletBinding()]
     param(
         [string]$LocalAppData = $env:LOCALAPPDATA
     )
 
-    $statePath = Join-Path $LocalAppData 'Verthys/rollback.state'
-    if (-not (Test-Path -LiteralPath $statePath)) {
-        return 'missing'
+    $paths = @(
+        (Join-Path $LocalAppData 'Verthys/rollback.state'),
+        (Join-Path $LocalAppData 'Verthys/lockout.state'),
+        (Join-Path $LocalAppData 'Verthys/Security/rollback.state'),
+        (Join-Path $LocalAppData 'Verthys/Security/lockout.state')
+    )
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($statePath in $paths) {
+        if (-not (Test-Path -LiteralPath $statePath)) {
+            $parts.Add("$statePath=missing")
+            continue
+        }
+        $hash = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
+        $parts.Add("$statePath=sha256:$hash")
     }
-    $hash = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
-    return "sha256:$hash"
+    return ($parts -join '|')
 }
 
 function Start-VerthysTestHygiene {
@@ -231,7 +242,8 @@ function Complete-VerthysTestHygiene {
 
     $after = Get-VerthysRealAnchorFingerprint -LocalAppData $Scope.LocalAppData
     if ($after -ne $Scope.AnchorFingerprint) {
-        throw "测试污染了真实回退锚点状态：$($Scope.LocalAppData)\Verthys\rollback.state"
+        throw ("测试污染了真实熔断/回退状态（旧路径或 Verthys\Security）：$($Scope.LocalAppData)`n" +
+            "before=$($Scope.AnchorFingerprint)`nafter=$after")
     }
     if ($failures.Count -gt 0) {
         throw "见证密钥回收失败：$($failures -join '; ')"

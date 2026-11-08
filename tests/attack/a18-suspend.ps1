@@ -1,18 +1,16 @@
-# tests/attack/a18-suspend.ps1 — A18S：worker 挂起看门狗端到端验证
-#
-# 说明：方案原编号 A18 已被 keyfile 因子用例占用，本用例使用 A18S 避免覆盖。
+# tests/attack/a18-suspend.ps1 — worker 挂起看门狗端到端验证
 #
 # 覆盖：
-#   A18S-1 健康期：真实 worker 心跳正常，看门狗不得误杀；
-#   A18S-2 挂起全部 worker 线程后 3s 级触发处置（实测毫秒落盘）；
-#   A18S-3 处置后 worker 进程终止（会话密钥随进程消亡）。
+#   健康期：真实 worker 心跳正常，看门狗不得误杀；
+#   挂起全部 worker 线程后 3s 级触发处置（实测毫秒落盘）；
+#   处置后 worker 进程终止（会话密钥随进程消亡）。
 #
 # 实现边界：看门狗与心跳均为产品代码（src-tauri worker/session.rs +
 # worker runtime）。脚本只负责设置环境、驱动受门控的 Rust 用例并核对结果，
 # 不在 PowerShell 中模拟产品逻辑。UI 锁定路径由 security-session.spec 与
 # M2 手工锁屏/挂起验证覆盖。
 #
-# 输出契约：RESULT A18S PASS|FAIL <detail>
+# 输出契约：单行 RESULT PASS|FAIL <detail>
 param(
     [string]$OutJson,
     [string]$Worker = '',
