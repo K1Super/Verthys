@@ -75,7 +75,7 @@ export function markFrontendIpcActive(): void {
  *
  * @returns true 表示前端在 800ms 内有 IPC 活动，后台任务应让出
  */
-export function isFrontendIpcBusy(): boolean {
+function isFrontendIpcBusy(): boolean {
   return Date.now() - lastFrontendActiveTime < FRONTEND_BUSY_WINDOW_MS;
 }
 

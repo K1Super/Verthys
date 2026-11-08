@@ -6,7 +6,7 @@
  *   激活时由映像内 thunk 直接执行 syscall 指令；未激活时回退 ntdll 导出。
  *
  * 覆盖入口：
- *   - NtQueryInformationProcess — anti_debug_v2 调试器探测与 memory_guard 父进程识别
+ *   - NtQueryInformationProcess — anti_debug 调试器探测与 memory_guard 父进程识别
  *   - NtQuerySystemInformation  — memory_guard 系统句柄表扫描
  *   新增入口需要同步增加目标表项、SSN 数据槽与 thunk；数量一致性由编译期断言约束。
  *

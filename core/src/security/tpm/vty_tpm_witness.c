@@ -167,6 +167,9 @@ int vty_tpm_witness_delete(const uint8_t id[VTY_UUID_BYTES], uint8_t slot)
         return not_found_status(st) ? VTY_OK : VTY_E_TPM;
     }
     if (NCryptDeleteKey(key, 0) == 0) {
+        /* NCryptDeleteKey 删除持久化键但不释放调用方持有的 key 句柄，
+         * 必须显式 NCryptFreeObject，否则每次轮换泄漏一个句柄（N5）。 */
+        NCryptFreeObject(key);
         NCryptFreeObject(prov);
         return VTY_OK;
     }
@@ -214,6 +217,7 @@ int vty_tpm_witness_delete_all(const uint8_t id[VTY_UUID_BYTES])
     return VTY_OK;
 }
 
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
 int vty_tpm_witness_id_from_string(const char *text,
                                    uint8_t id[VTY_UUID_BYTES])
 {
@@ -225,3 +229,4 @@ int vty_tpm_witness_id_from_string(const char *text,
     vty_secure_zero(digest, sizeof(digest));
     return VTY_OK;
 }
+#endif

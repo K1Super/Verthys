@@ -30,17 +30,13 @@ pub struct VerthysState {
     pub verthys_path: String,
     pub created_at: u64,
     pub version: u32,
-    /// 已绑定的设备机器码（SHA-256 hex），首次初始化全局密钥时绑定
-    #[serde(default)]
-    pub device_fingerprint: String,
     /// DPAPI 加密的设备组件数据（base64）
     ///
     /// 存储 DeviceComponents 经 DPAPI CryptProtectData 加密后的密文（base64）。
     /// DPAPI 密封使状态文件离机失效（无法在其他机器解密）。
-    /// 空字符串表示旧版状态文件（使用 device_fingerprint 明文哈希向后兼容）。
     #[serde(default)]
     pub device_binding_blob: String,
-    /// ：连续修复失败计数器
+    /// 连续修复失败计数器
     /// 每次主动修复失败递增，成功时清零。
     /// 连续失败 3 次触发前端告警（通过 verthys_init_status 返回 detail）。
     #[serde(default)]
@@ -58,7 +54,6 @@ impl VerthysState {
                 .unwrap_or_default()
                 .as_secs(),
             version: STATE_VERSION,
-            device_fingerprint: String::new(),
             device_binding_blob: String::new(),
             repair_fail_count: 0,
         }
@@ -109,217 +104,68 @@ fn write_last_verthys_path(app: &tauri::AppHandle, verthys_path: &str) -> Result
 }
 
 /* ------------------------------------------------------------------ *
- * ：旧版状态文件迁移                                       *
- *                                                                    *
- * 旧版状态文件存放在 app_config_dir/.verthys_state（与 .verthys 分离）。   *
- * 新版改为附属数据目录（<verthys_path>.d/state.json）+ 路径指针。           *
- *                                                                    *
- * 升级场景：用户从旧版升级后，路径指针不存在但旧状态文件存在。         *
- * 若不迁移，verthys_init_status 会误判为全新用户，显示"初始化密钥"界面。  *
- *                                                                    *
- * 迁移流程：                                                          *
- *   1. 读取旧 app_config_dir/.verthys_state                             *
- *   2. 校验 magic + verthys_path 字段                                   *
- *   3. 校验 .verthys 文件存在且 magic 合法                              *
- *   4. 写入新路径指针 + 新状态文件                                    *
- *   5. 删除旧状态文件（迁移成功后清理）                                *
- * ------------------------------------------------------------------ */
-
-/// 尝试从旧版状态文件迁移到新版格式
-///
-/// 在 read_state_file 中路径指针不存在时调用。
-/// 迁移成功返回 Some(VerthysState)，无需迁移或迁移失败返回 None。
-fn try_migrate_from_legacy_state(app: &tauri::AppHandle) -> Option<VerthysState> {
-    let dir = match get_state_dir(app) {
-        Ok(d) => d,
-        Err(e) => {
-            log::warn!("[state] 迁移失败：获取配置目录失败: {}", e);
-            return None;
-        }
-    };
-    let legacy_state_file = dir.join(".verthys_state");
-    if !legacy_state_file.exists() {
-        // 无旧版状态文件，无需迁移
-        return None;
-    }
-
-    log::info!(
-        "[state] 检测到旧版状态文件，开始迁移: {}",
-        legacy_state_file.display()
-    );
-
-    // 1. 读取旧版状态文件
-    let content = match std::fs::read_to_string(&legacy_state_file) {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("[state] 迁移失败：读取旧版状态文件失败: {}", e);
-            return None;
-        }
-    };
-
-    // 2. 解析旧版状态文件（JSON 格式，结构与 VerthysState 兼容）
-    let legacy_state: VerthysState = match serde_json::from_str(&content) {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!("[state] 迁移失败：解析旧版状态文件失败: {}", e);
-            return None;
-        }
-    };
-
-    // 3. 校验 magic
-    if legacy_state.magic != STATE_MAGIC {
-        log::warn!(
-            "[state] 迁移失败：旧版状态文件 magic 不匹配: {}",
-            legacy_state.magic
-        );
-        return None;
-    }
-
-    // 4. 校验 verthys_path 非空
-    let verthys_path = legacy_state.verthys_path.trim().to_string();
-    if verthys_path.is_empty() {
-        log::warn!("[state] 迁移失败：旧版状态文件 verthys_path 为空");
-        return None;
-    }
-
-    // 5. 校验 .verthys 文件存在
-    if !std::path::Path::new(&verthys_path).exists() {
-        log::warn!(
-            "[state] 迁移失败：旧版状态文件指向的 .verthys 不存在: {}",
-            crate::util::path::sanitize_path(&verthys_path)
-        );
-        // .verthys 不存在 → 清理旧版状态文件，按全新用户处理
-        let _ = std::fs::remove_file(&legacy_state_file);
-        return None;
-    }
-
-    // 6. 校验 .verthys 文件格式合法（防止迁移无效文件）
-    if !validate_verthys_file(&verthys_path) {
-        log::warn!("[state] 迁移失败：旧版状态文件指向的文件格式不合法");
-        return None;
-    }
-
-    // 7. 写入新路径指针
-    if let Err(e) = write_last_verthys_path(app, &verthys_path) {
-        log::warn!("[state] 迁移失败：写入路径指针失败: {}", e);
-        return None;
-    }
-
-    // 8. 写入新状态文件（<verthys_path>.state）
-    //    保留旧版状态文件的 ready/device_fingerprint 字段，重置 repair_fail_count
-    let new_state = VerthysState {
-        magic: STATE_MAGIC.into(),
-        ready: legacy_state.ready,
-        verthys_path: normalize_path(&verthys_path),
-        created_at: legacy_state.created_at,
-        version: STATE_VERSION,
-        device_fingerprint: legacy_state.device_fingerprint.clone(),
-        device_binding_blob: String::new(),
-        repair_fail_count: 0,
-    };
-    if let Err(e) = write_state_file_atomic(app, &new_state) {
-        log::warn!("[state] 迁移失败：写入新状态文件失败: {}", e);
-        return None;
-    }
-
-    // 9. 删除旧版状态文件（迁移成功后清理）
-    let _ = std::fs::remove_file(&legacy_state_file);
-    log::info!(
-        "[state] 旧版状态文件迁移成功: verthys_path={}",
-        crate::util::path::sanitize_path(&verthys_path)
-    );
-    Some(new_state)
-}
-
-/* ------------------------------------------------------------------ *
  * 状态文件路径：容器附属数据目录                                        *
  *                                                                    *
  * verthys_path = "D:/data/verthys.verthys"                            *
  * state_path   = "D:/data/verthys.verthys.d/state.json"               *
- *                                                                    *
- * 旧布局 "D:/data/verthys.verthys.state" 仅作只读回退与一次性迁移的旧位置。    *
  * ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ *
  * .verthys 文件格式合法性校验                                           *
  *                                                                    *
- * 必须同时识别当前产品格式与历史格式，否则状态文件修复/迁移会把合法     *
- * V4 容器误判为损坏（ready=false 分支甚至会删除容器）。                 *
+ * 只识别当前 格式，旧格式一律按损坏处理。                            *
  *                                                                    *
- * V4 布局：偏移 0 起为 64 KiB 元数据副本 A，固定头 76B，                *
+ * 布局：偏移 0 起为 64 KiB 元数据副本 A，固定头 76B，                *
  *   [u32 magic 0x59545256 ('VRTY')][u16 version_major][u16 version_minor] *
- * V3 布局：偏移 0 起为超级块副本 0，帧头 8 字节                         *
- *   [u32 帧 magic 'V3RP'][u32 payload_len]                             *
  *                                                                    *
  * 本函数只做轻量结构探测，不代替解锁流程的密钥认证与完整性校验。        *
  * ------------------------------------------------------------------ */
 
-/// 校验 .verthys 文件格式合法性（V4 固定头 / V3 副本帧头）
+/// 校验 .verthys 文件格式合法性（仅固定头）
 pub fn validate_verthys_file(verthys_path: &str) -> bool {
     use std::io::Read;
 
-    // V3 副本帧头常量（与 C 层 V3 副本布局一致，小端）
-    const V3_FRAME_MAGIC: [u8; 4] = [0x56, 0x33, 0x52, 0x50]; // 'V3RP'
-    const V3_FRAME_HEADER_BYTES: usize = 8;
-    const V3_REPLICA_BYTES: usize = 16 * 1024;
-    // V4 固定头（与 core/src/crypto/v4/vty_v4_types.h 同源）
-    const V4_MAGIC: u32 = 0x5954_5256; // 小端字节 'V' 'R' 'T' 'Y'
-    const V4_VERSION_MAJOR: u16 = 4;
-    const V4_VERSION_MINOR: u16 = 2;
-    const V4_MIN_FILE_BYTES: u64 = 128 * 1024; // A/B 元数据副本下限
+    // 固定头（与 core/src/crypto/vty_types.h 同源）
+    const CONTAINER_MAGIC: u32 = 0x5954_5256; // 小端字节 'V' 'R' 'T' 'Y'
+    const CONTAINER_VERSION_MAJOR: u16 = 4;
+    const CONTAINER_VERSION_MINOR: u16 = 2;
+    const CONTAINER_MIN_FILE_BYTES: u64 = 128 * 1024; // A/B 元数据副本下限
+    const CONTAINER_HEADER_BYTES: usize = 8;
 
     let mut file = match std::fs::File::open(verthys_path) {
         Ok(f) => f,
         Err(_) => return false,
     };
-    let mut frame = [0u8; V3_FRAME_HEADER_BYTES];
+    let mut frame = [0u8; CONTAINER_HEADER_BYTES];
     if let Err(e) = file.read_exact(&mut frame) {
         log::warn!("[state] 读取容器帧头失败: {}", e);
         return false;
     }
 
-    /* 先判 V4：magic 与版本字段同时匹配；文件长度必须覆盖 A/B 元数据区。 */
+    /* magic 与版本字段同时匹配；文件长度必须覆盖 A/B 元数据区。 */
     let magic_le = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
-    if magic_le == V4_MAGIC {
-        let major = u16::from_le_bytes([frame[4], frame[5]]);
-        let minor = u16::from_le_bytes([frame[6], frame[7]]);
-        let size = std::fs::metadata(verthys_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        if major == V4_VERSION_MAJOR
-            && minor == V4_VERSION_MINOR
-            && size >= V4_MIN_FILE_BYTES
-        {
-            return true;
-        }
+    if magic_le != CONTAINER_MAGIC {
         log::warn!(
-            "[state] V4 容器头非法: version={}.{} size={}",
-            major,
-            minor,
-            size
-        );
-        return false;
-    }
-
-    /* 再判 V3：帧 magic + 有界载荷长度。 */
-    if frame[..4] != V3_FRAME_MAGIC {
-        log::warn!(
-            "[state] 文件帧 magic 校验失败: {:02X?} (期望 'V3RP' 或 'VRTY')",
+            "[state] 文件帧 magic 校验失败: {:02X?} (期望 'VRTY')",
             &frame[..4]
         );
         return false;
     }
-    let payload_len = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]) as usize;
-    let max_payload = V3_REPLICA_BYTES - V3_FRAME_HEADER_BYTES;
-    if payload_len == 0 || payload_len > max_payload {
-        log::warn!(
-            "[state] 帧载荷长度非法: {} (期望 1..={})",
-            payload_len,
-            max_payload
-        );
-        return false;
+    let major = u16::from_le_bytes([frame[4], frame[5]]);
+    let minor = u16::from_le_bytes([frame[6], frame[7]]);
+    let size = std::fs::metadata(verthys_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if major == CONTAINER_VERSION_MAJOR && minor == CONTAINER_VERSION_MINOR && size >= CONTAINER_MIN_FILE_BYTES {
+        return true;
     }
-    true
+    log::warn!(
+        "[state] 容器头非法: version={}.{} size={}",
+        major,
+        minor,
+        size
+    );
+    false
 }
 
 /* ------------------------------------------------------------------ *
@@ -330,56 +176,30 @@ pub fn validate_verthys_file(verthys_path: &str) -> bool {
 ///
 /// 流程：
 ///   1. 读取路径指针获取 verthys_path
-///   2. 读取附属目录状态文件；缺失时回退旧布局并懒迁移
-///   3. 路径指针不存在 → None（全新用户，含旧版应用级状态文件迁移）
+///   2. 读取附属目录状态文件
+///   3. 路径指针不存在 → None（全新用户）
 ///   4. 状态文件不存在 → None（跨设备复制未携带状态文件）
 pub fn read_state_file(app: &tauri::AppHandle) -> Result<Option<VerthysState>, String> {
     let verthys_path = match read_last_verthys_path(app)? {
         Some(p) => p,
-        None => {
-            // 路径指针不存在 → 尝试从旧版状态文件迁移
-            // 旧版状态文件存放在 app_config_dir/.verthys_state，升级后需要迁移到新格式
-            // 若迁移成功，返回迁移后的状态；否则返回 None（全新用户）
-            if let Some(migrated) = try_migrate_from_legacy_state(app) {
-                return Ok(Some(migrated));
-            }
-            return Ok(None); // 全新用户，无路径指针
-        }
+        None => return Ok(None),
     };
     read_state_at(&verthys_path)
 }
 
-/// 读取指定容器的状态文件（附属目录优先，旧布局命中即懒迁移）
-///
-/// 迁移纪律：旧文件先解析成功再搬移；解析失败不搬移且原样保留（保留现场），
-/// 搬移失败不阻断本次读取（下次访问自动重试）。
+/// 读取指定容器的状态文件（附属目录）。
 fn read_state_at(verthys_path: &str) -> Result<Option<VerthysState>, String> {
     let primary = container_layout::state_file_for(verthys_path);
     if primary.exists() {
         return parse_state_file(&primary).map(Some);
     }
-
-    let legacy = container_layout::legacy_state_file_for(verthys_path);
-    if !legacy.exists() {
-        // 路径指针存在但状态文件不存在
-        // 可能原因：跨设备复制 .verthys 时未携带状态文件
-        // 返回 None，让 verthys_init_status / verthys_unlock 主动修复
-        log::info!(
-            "[state] 状态文件不存在（可能跨设备复制未携带）: verthys_path={}",
-            crate::util::path::sanitize_path(verthys_path)
-        );
-        return Ok(None);
-    }
-
-    let state = parse_state_file(&legacy)?;
-    match container_layout::migrate_legacy_file(&legacy, &primary) {
-        Ok(()) => log::info!("[state] 旧布局状态文件已收口至附属数据目录"),
-        Err(e) => log::warn!(
-            "[state] 旧布局状态文件迁移失败（保持原位置，下次访问重试）: {}",
-            e
-        ),
-    }
-    Ok(Some(state))
+    // 路径指针存在但状态文件不存在：可能跨设备复制时未携带状态文件。
+    // 返回 None，由 verthys_init_status / verthys_unlock 主动修复。
+    log::info!(
+        "[state] 状态文件不存在（可能跨设备复制未携带）: verthys_path={}",
+        crate::util::path::sanitize_path(verthys_path)
+    );
+    Ok(None)
 }
 
 /// 解析既有状态文件（调用方保证文件存在）
@@ -399,7 +219,7 @@ fn parse_state_file(file: &std::path::Path) -> Result<VerthysState, String> {
 ///   1. <verthys_path>.d/state.json — 状态文件（随附属目录迁移）
 ///   2. app_config_dir/.verthys_last_path — 路径指针（记录上次路径）
 ///
-/// 目录保障失败返回明确错误（只读介质 / 同名文件占用），不做旧布局回退写。
+/// 目录保障失败返回明确错误（只读介质 / 同名文件占用）。
 pub fn write_state_file_atomic(app: &tauri::AppHandle, state: &VerthysState) -> Result<(), String> {
     use crate::util::path::sanitize_path;
     container_layout::ensure_sidecar_dir(&state.verthys_path)?;
@@ -434,20 +254,15 @@ pub fn write_state_file_atomic(app: &tauri::AppHandle, state: &VerthysState) -> 
 
 /// 删除状态文件 + 路径指针（回滚时调用）
 ///
-/// 删除范围为状态文件本体及其临时文件（新布局与旧布局两处），
+/// 删除范围为状态文件本体及其临时文件（附属目录），
 /// 附属目录仅在因此清空时回收；其余附属数据由调用方按需清理。
 pub fn delete_state_file(app: &tauri::AppHandle) {
-    // 删除状态文件（附属目录 + 旧布局两处，含各自临时文件）
+    // 删除状态文件（附属目录，含临时文件）
     if let Ok(Some(verthys_path)) = read_last_verthys_path(app) {
         let state_file = container_layout::state_file_for(&verthys_path);
         let tmp_file = std::path::PathBuf::from(format!("{}.tmp", state_file.to_string_lossy()));
         let _ = std::fs::remove_file(&state_file);
         let _ = std::fs::remove_file(&tmp_file);
-
-        let legacy = container_layout::legacy_state_file_for(&verthys_path);
-        let legacy_tmp = std::path::PathBuf::from(format!("{}.tmp", legacy.to_string_lossy()));
-        let _ = std::fs::remove_file(&legacy);
-        let _ = std::fs::remove_file(&legacy_tmp);
 
         let _ = container_layout::remove_dir_if_empty(&container_layout::sidecar_dir_for(
             &verthys_path,
@@ -457,16 +272,11 @@ pub fn delete_state_file(app: &tauri::AppHandle) {
     if let Ok(dir) = get_state_dir(app) {
         let pointer = dir.join(".verthys_last_path");
         let _ = std::fs::remove_file(&pointer);
-        // 兼容旧版本：清理 app_config_dir/.verthys_state
-        let old_state = dir.join(".verthys_state");
-        let old_tmp = dir.join(".verthys_state.tmp");
-        let _ = std::fs::remove_file(&old_state);
-        let _ = std::fs::remove_file(&old_tmp);
     }
 }
 
 /* ------------------------------------------------------------------ *
- * ：主动修复                                              *
+ * 主动修复                                                              *
  *                                                                    *
  * 在 verthys_init_status 中调用，启动阶段主动修复状态文件：             *
  *   - 状态文件不存在但 .verthys 存在且格式合法 → 重建状态文件           *
@@ -516,25 +326,9 @@ pub fn try_repair_state_file(app: &tauri::AppHandle, verthys_path: &str) -> Opti
 #[cfg(test)]
 mod tests {
     use super::validate_verthys_file;
-    use std::io::Write;
 
-    /// 在临时目录创建测试文件，写入帧头字节
-    fn write_frame_file(name: &str, header: &[u8]) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!("{}_{}", name, std::process::id()));
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(header).unwrap();
-        path
-    }
-
-    /// 构建 V3 帧头：'V3RP' + payload_len（小端）
-    fn v3_frame(payload_len: u32) -> Vec<u8> {
-        let mut h = vec![0x56, 0x33, 0x52, 0x50];
-        h.extend_from_slice(&payload_len.to_le_bytes());
-        h
-    }
-
-    /// 构建 V4 容器：magic 0x59545256 + major/minor + 128KiB 文件体
-    fn write_v4_file(
+    /// 构建 容器：magic 0x59545256 + major/minor + 指定大小文件体
+    fn write_container_file(
         name: &str,
         major: u16,
         minor: u16,
@@ -550,58 +344,35 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_verthys_file_accepts_v3_frame() {
-        let path = write_frame_file("verthys_state_t_v3", &v3_frame(64));
+    fn test_validate_verthys_file_accepts_header() {
+        let path = write_container_file("verthys_state_t", 4, 2, 128 * 1024);
         assert!(validate_verthys_file(path.to_str().unwrap()));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn test_validate_verthys_file_accepts_v4_header() {
-        let path = write_v4_file("verthys_state_t_v4", 4, 2, 128 * 1024);
-        assert!(validate_verthys_file(path.to_str().unwrap()));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_validate_verthys_file_rejects_v4_wrong_version() {
-        let path = write_v4_file("verthys_state_t_v4_ver", 4, 1, 128 * 1024);
+    fn test_validate_verthys_file_rejects_wrong_version() {
+        let path = write_container_file("verthys_state_t_badver", 4, 1, 128 * 1024);
         assert!(!validate_verthys_file(path.to_str().unwrap()));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn test_validate_verthys_file_rejects_v4_short_body() {
-        let path = write_v4_file("verthys_state_t_v4_short", 4, 2, 64 * 1024);
+    fn test_validate_verthys_file_rejects_short_body() {
+        let path = write_container_file("verthys_state_t_short", 4, 2, 64 * 1024);
         assert!(!validate_verthys_file(path.to_str().unwrap()));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn test_validate_verthys_file_rejects_vert_magic() {
-        let path = write_frame_file("verthys_state_t_vert", b"VERT\x40\x00\x00\x00");
-        assert!(!validate_verthys_file(path.to_str().unwrap()));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_validate_verthys_file_rejects_zero_payload() {
-        let path = write_frame_file("verthys_state_t_zero", &v3_frame(0));
-        assert!(!validate_verthys_file(path.to_str().unwrap()));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_validate_verthys_file_rejects_oversized_payload() {
-        // 载荷长度超出副本槽位容量（16KB - 8B 帧头）
-        let path = write_frame_file("verthys_state_t_over", &v3_frame(16 * 1024));
-        assert!(!validate_verthys_file(path.to_str().unwrap()));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_validate_verthys_file_rejects_short_file() {
-        let path = write_frame_file("verthys_state_t_short", &[0x56, 0x33, 0x52]);
+    fn test_validate_verthys_file_rejects_foreign_magic() {
+        let path = write_container_file("verthys_state_t_foreign", 4, 2, 128 * 1024);
+        // 改写 magic 为非 VRTY 值
+        let mut body = vec![0u8; 128 * 1024];
+        body[0..4].copy_from_slice(b"VERT");
+        body[4..6].copy_from_slice(&4u16.to_le_bytes());
+        body[6..8].copy_from_slice(&2u16.to_le_bytes());
+        std::fs::write(&path, body).unwrap();
         assert!(!validate_verthys_file(path.to_str().unwrap()));
         let _ = std::fs::remove_file(&path);
     }

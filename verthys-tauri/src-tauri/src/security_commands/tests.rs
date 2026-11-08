@@ -10,7 +10,9 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-use crate::security::brute_force::{BruteForceConfig, BruteForceGuard, BruteForcePersistedState};
+use crate::security::brute_force::{
+    BruteForceConfig, BruteForceGuard, BruteForcePersistedState, STATE_SCHEMA_VERSION,
+};
 use crate::security::usb_guard::ShadowSleep;
 
 use super::responses::SecurityResult;
@@ -34,20 +36,19 @@ fn test_security_result_error() {
 #[test]
 fn test_brute_force_persisted_state_serde() {
     let state = BruteForcePersistedState {
+        schema_version: STATE_SCHEMA_VERSION,
         consecutive_failures: 5,
         total_failures: 10,
         lock_remaining_secs: 300,
-        purge_triggered: false,
-        last_purge_total: 0,
     };
 
     let json = serde_json::to_string(&state).unwrap();
     let restored: BruteForcePersistedState = serde_json::from_str(&json).unwrap();
 
+    assert_eq!(restored.schema_version, STATE_SCHEMA_VERSION);
     assert_eq!(restored.consecutive_failures, 5);
     assert_eq!(restored.total_failures, 10);
     assert_eq!(restored.lock_remaining_secs, 300);
-    assert!(!restored.purge_triggered);
 }
 
 #[test]

@@ -551,7 +551,3 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/* ==================== 导出单例 ==================== */
-
-/** 导出便捷单例（导入流水线专用，每次导入 begin/end 控制生命周期） */
-export const batchCacheCoordinator = new BatchCacheCoordinator();

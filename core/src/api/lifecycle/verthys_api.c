@@ -17,24 +17,16 @@
 
 /* 拆分后的内部模块头 */
 #include "verthys_api_utils.h"      /* 共享底层工具 */
-#include "verthys_progress.h"       /* 进度回调环形缓冲区 */
-/* V3：V3 容器生命周期 + 运行时上下文（传递包含
- * transaction_v3 / lsm / extent / wal / partition 全套接口）。
- * 类型声明在产品构建中仍需要（VerthysContext.v3 字段解引用/存活性
- * 判定）；实现代码全部由 VERTHYS_V3_SUPPORT 门控，不进入产品二进制。 */
-#include "verthys_v3_lifecycle.h"
-#if defined(VERTHYS_V3_SUPPORT)
-#include "verthys_rekey_auto.h"      /* DEGRADE 强制轮换标志持久化 */
-#include "verthys_container_lock.h"  /* 容器跨进程单写者打开/关闭 */
-#endif
-#include "vty_keymanager_v4.h"       /* v4 会话（A/B 元数据 + 数据区） */
-#include "vty_rotate_v4.h"           /* D9 全库 DEK 轮换作业 */
-#include "verthys_api_v4.h"          /* v4 记录/计数/校验/改密适配 */
+#include "vty_lockout.h"            /* 库级熔断只读查询 */
+#include "vty_secure_state.h"       /* N2：安全状态目录预检 */
+#include "vty_keymanager.h"       /* 会话（A/B 元数据 + 数据区） */
+#include "vty_rotate.h"           /* 全库 DEK 轮换作业 */
+#include "verthys_api_container.h"          /* 记录/计数/校验/改密适配 */
 
 /* 项目头 */
 #include "verthys_crypto.h"
 #include "verthys_pepper.h"
-#include "anti_debug_v2.h"
+#include "anti_debug.h"
 #include "tls_loader.h"
 #include "secure_allocator.h"   /* ctx 隔离堆生命周期 */
 #include "job_isolation.h"
@@ -44,7 +36,7 @@
 #include "emergency.h"
 #include "anti_inject.h"
 #include "memory_guard.h"
-#include "integrity.h"         /* 解锁入口 .vsec 验签（v3/v4 共用） */
+#include "integrity.h"         /* 解锁入口 .vsec 验签 */
 #include "runtime_hash.h"      /* 解锁后 + 周期运行时函数哈希校验 */
 #include "hook_scan.h"         /* ntdll 导出基线/Hook 扫描（BOOT 判据） */
 #include "security_preset.h"   /* 运行时预设切换（双缓冲原子发布） */
@@ -63,7 +55,7 @@ static VOID CALLBACK verthys_security_periodic_cb(PVOID param, BOOLEAN fired)
     (void)fired;
 
     if (emergency_is_triggered()) return;
-    (void)anti_debug_v2_check();
+    (void)anti_debug_check();
     tick = InterlockedIncrement(&s_sec_periodic_tick);
     if (tick % 5 == 0) {
         (void)anti_inject_check_all();
@@ -183,17 +175,9 @@ static int verthys_ctx_registry_has_capacity(void)
  * 应急 DEGRADE 降级处理器（emergency_set_degrade_handler 注入）。
  *
  * 语义：对全部已解锁句柄执行"密钥与明文立即清零 + 状态置 LOCKED"，
- * 进程保持存活。不执行任何磁盘写入（与 Verthys_Lock 的差异：跳过事务
- * 提交与缓存刷盘——降级路径优先保证敏感数据不落盘）；耗时以后台
- * 预热线程汇合为上界（停止标志 + 读取消后毫秒级）；
- * 未完成事务由下次解锁的 WAL 崩溃恢复路径接管，数据安全
- * 由事务日志与法定人数超级块保障）。恢复方式：用户正常 Verthys_Unlock。
- *
- * 唯一例外：清钥前 verthys_rekey_auto_note_degrade 持久化强制
- * 轮换标志（超级块 TLV 非敏感 HMAC 元数据，~ms 级 3 副本写）——
- * 旧 wrapped 形态可能已随内存泄露继续暴露，标志必须落盘方能在下次
- * 解锁兑现强制轮换；失败静默（轮换属纵深防御层，降级锁库语义不受
- * 影响，下次解锁按盘面缺省态处理）。
+ * 进程保持存活。不执行任何磁盘写入（与 Verthys_Lock 的差异：跳过
+ * 会话提交与缓存刷盘——降级路径优先保证敏感数据不落盘）。
+ * 恢复方式：用户正常 Verthys_V4Unlock。
  */
 static void verthys_emergency_lock_all(void)
 {
@@ -208,17 +192,6 @@ static void verthys_emergency_lock_all(void)
         }
 #endif
         if (ctx->state == VERTHYS_STATE_UNLOCKED) {
-#if defined(VERTHYS_V3_SUPPORT)
-            if (ctx->v3 != NULL) {
-                /* DEGRADE 强制轮换标志持久化（清钥前，best-effort） */
-                (void)verthys_rekey_auto_note_degrade(ctx->v3);
-                /* V3：V3 容器密钥清除（DEGRADE 红线——内核态句柄
-                 * 销毁 + 驻留密钥清零 + LSM 中止式关闭不落盘）。后台预热线程
-                 * 经 subsystems_close 内部汇合（线程持 ptable 内核句柄解密，
-                 * 先销毁句柄将引发线程内 BCrypt 句柄 UAF——汇合是唯一安全序）。 */
-                verthys_v3_ctx_subsystems_close(ctx->v3);
-            }
-#endif
             ctx_zero_sensitive(ctx);
             ctx->state = VERTHYS_STATE_LOCKED;
         }
@@ -246,7 +219,7 @@ static void verthys_emergency_lock_all(void)
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
-#include <fcntl.h>               /* _O_RDWR/_O_BINARY（V3 创建路径 fd 转换） */
+#include <fcntl.h>               /* _O_RDWR/_O_BINARY */
 #else
 #include <unistd.h>
 #endif
@@ -258,12 +231,16 @@ static void verthys_emergency_lock_all(void)
 VerthysResult Verthys_Init(VerthysHandle *out_handle)
 {
     if (out_handle == NULL) return VERTHYS_ERR_INVALID;
-    /* A2：调用方签名校验必须先于任何初始化副作用。
+    /* 调用方签名校验必须先于任何初始化副作用。
      * 否则未授权进程仍可通过 Init 触发环境探测/防御模块初始化，
      * 把“拒绝”变成“拒绝但已泄漏宿主信息”。 */
     if (vty_caller_auth_check() != 0) return VERTHYS_ERR_UNAUTHORIZED;
     /* 先确认注册表有空位，避免分配完成后无法登记而泄漏上下文 */
     if (!verthys_ctx_registry_has_capacity()) return VERTHYS_ERR_RESOURCE_LIMIT;
+
+    /* N2：安全状态目录预检必须先于任何状态相关副作用。失败返回专用错误码，
+     * 避免运行期把“目录不可加固”折叠成通用的“安全模块不可用”。 */
+    if (vty_secure_state_preflight() != VTY_OK) return VERTHYS_ERR_SECURITY_STATE;
 
     /* 阻塞 4 修复：AVX2 软性检测 — 设置全局标志，不拒绝启动
      * libsodium 内部自动选择最优指令集路径，无需项目层硬性要求 */
@@ -292,10 +269,10 @@ VerthysResult Verthys_Init(VerthysHandle *out_handle)
         return VERTHYS_ERR_INTERNAL;
     }
 
-    if (anti_debug_v2_init() != 0) {
+    if (anti_debug_init() != 0) {
         return VERTHYS_ERR_INTERNAL;
     }
-    if (anti_debug_v2_check() != 0) {
+    if (anti_debug_check() != 0) {
         /* 检测到调试器（高置信度）：KILL 信号已在 check 内部上报，
          * 此处不再作为初始化失败——应急体系将接管进程处置 */
         return VERTHYS_ERR_INTERNAL;
@@ -380,7 +357,7 @@ VerthysResult Verthys_Init(VerthysHandle *out_handle)
     verthys_pepper_init();
 
     /* 密钥相关结构专用安全分配器的进程级预算。
-     * 分配器实例由 V4 密钥对象经 secure_allocator_shared 懒创建：
+     * 分配器实例由 密钥对象经 secure_allocator_shared 懒创建：
      * 会话生命周期可能跨越 Deinit，不能绑定到单个上下文。 */
     (void)secure_allocator_budget_init(SECURE_ALLOC_DEFAULT_BUDGET_BYTES,
                                        NULL, NULL);
@@ -459,35 +436,13 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
     /* 停止反调试/反注入周期巡检（等待在途回调退出） */
     verthys_security_periodic_stop();
 
-#if defined(VERTHYS_V3_SUPPORT)
-    /* V3：V3 上下文收口（先于 ctx_zero_sensitive——后者销毁
-     * CNG 密钥组，而 verthys_v3_lock 需密钥在位完成事务收尾/LSM flush/温缓存）。
-     *
-     * UNLOCKED 态走完整锁定路径（数据完整性收尾 + 温缓存写入 + 子系统
-     * 安全销毁）；LOCKED 态残留实例（应急 DEGRADE 遗留）子系统已收口，
-     * 直接销毁。verthys_v3_lock 失败不阻断 Deinit：V3 崩溃一致性由 WAL
-     * 重放兜底（下次 open 幂等恢复），销毁仍完整执行（密钥零残留红线）。
-     * 文件句柄所有权：ctx3->f 为借用引用，本处统一经
-     * verthys_container_close_exclusive 关闭（释放独占锁 + 清理旁路）。 */
-    if (ctx->v3 != NULL) {
-        FILE *f_v3 = ctx->v3->f;
-        if (ctx->state == VERTHYS_STATE_UNLOCKED) {
-            (void)verthys_v3_lock(ctx->v3);
-        }
-        verthys_v3_ctx_destroy(ctx->v3);
-        ctx->v3 = NULL;
-        if (f_v3 != NULL) {
-            verthys_container_close_exclusive(f_v3, ctx->file_path);
-        }
-    }
-#endif
 
-    /* v4 会话收口：先释放 D9 作业（其持有库引用），再清零并释放会话。 */
+    /* 会话收口：先释放轮换作业（其持有库引用），再清零并释放会话。 */
     if (ctx->rotate != NULL) {
         vty_rotate_abort(ctx->rotate);
         ctx->rotate = NULL;
     }
-    v4_session_detach(ctx);
+    vault_session_detach(ctx);
 
     if (ctx->state == VERTHYS_STATE_UNLOCKED) {
         ctx_zero_sensitive(ctx);
@@ -502,519 +457,15 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
         free(ctx->api_mutex);
         ctx->api_mutex = NULL;
     }
-    /* 销毁进度回调环形缓冲区 + 停止消费线程
-     *   等待消费线程最多 3 秒退出，确保残留进度条目消费完毕 */
-    if (ctx->progress_ring != NULL) {
-        verthys_progress_ring_destroy((VerthysProgressRing *)ctx->progress_ring);
-        ctx->progress_ring = NULL;
-    }
 #endif
 
     verthys_secure_zero(ctx, sizeof(*ctx));
     free(ctx);
     return VERTHYS_OK;
 }
-/* 注册解锁进度回调（公共 API，对应 verthys.h 声明）
- *
- * 注册后对当前句柄的所有后续 Verthys_Unlock / Verthys_CreateWithPreset 调用生效。
- * 传 NULL callback 可取消进度通知。
- *
- * 首次注册时创建无锁环形缓冲区 + 启动独立消费线程，
- *   verthys_emit_unlock_progress 写入缓冲区（O(1) <1μs），
- *   消费线程异步调用回调，主解锁链路零阻塞。
- *   重复注册时仅更新回调指针（消费线程读取新值）。
- *   创建失败时回退到同步回调模式（兼容性保障）。
- *
- * 线程安全：MT-Unsafe（与 Unlock 共享同一调用线程语义） */
-VerthysResult Verthys_RegisterUnlockProgressCallback(VerthysHandle handle,
-                                                 VerthysUnlockProgressCallback callback,
-                                                 void *user_data)
-{
-    if (handle == NULL) return VERTHYS_ERR_INVALID;
-    struct VerthysContext *ctx = (struct VerthysContext *)handle;
-
-#ifdef _WIN32
-    if (ctx->progress_ring != NULL) {
-        /* 环形缓冲区已存在：更新回调指针（消费线程会读取新值）
-         * MemoryBarrier 确保指针更新对消费线程可见 */
-        VerthysProgressRing *ring = (VerthysProgressRing *)ctx->progress_ring;
-        ring->user_data = user_data;
-        MemoryBarrier();
-        ring->callback = callback;
-    } else if (callback != NULL) {
-        /* 首次注册：创建环形缓冲区 + 启动消费线程 */
-        ctx->progress_ring = verthys_progress_ring_create(callback, user_data);
-        /* 创建失败时 progress_ring == NULL，下方同步回退生效 */
-    }
-    /* 同步回退字段：progress_ring == NULL 时 verthys_emit_unlock_progress 使用 */
-#endif
-
-    ctx->unlock_progress_cb        = callback;
-    ctx->unlock_progress_user_data = user_data;
-    /* unlock_progress_start_ms 在每次 Unlock 入口处重置，此处不设置 */
-    return VERTHYS_OK;
-}
-
-#if defined(VERTHYS_V3_SUPPORT)
-/* ================================================================== *
- * V3：V3 分发辅助段                                        *
- *                                                                    *
- * 编排层级：本段为 V3 容器的 API 层业务封装，六阶段事务语义     *
- * 由 transaction_v3 模块承担，本段只做：                           *
- *   1. 进度回调适配（流水线 S0-S6 → 公共 VerthysUnlockStage 映射）；    *
- *   2. 单调用事务骨架（BEGIN→…→CONFIRM 全链 + 失败回滚收口）；         *
- *   3. Unlock/Create 的上下文装配与文件句柄所有权管理。                *
- *                                                                    *
- * 文件句柄所有权纪律（红线）：ctx3->f 为借用引用——失败路径由本段     *
- * fclose，成功路径所有权延伸至 Lock/Deinit（那时统一 fclose）。       *
- * ================================================================== */
-
-/*
- * 流水线进度适配器（pipeline progress_cb → verthys_emit_unlock_progress）。
- * user 恒为 VerthysContext*（注册点经本文件保证）。
- * 阶段映射（S0-S6 → 公共 VerthysUnlockStage，语义最近邻）：
- *   S0 前置检查     → READ_SUPERBLOCK（5%）
- *   S1 超级块读取   → READ_SUPERBLOCK（5%）
- *   S2 Argon2id     → ARGON2_START（10%）
- *   S3 CNG+法定人数 → ARGON2_DONE（50%）
- *   S4 分区表加载   → CACHE_CHECK（55%）
- *   S5 索引预热     → BTREE_DECRYPT（60%）
- *   S6 最终校验     → BTREE_DONE（85%）
- */
-static void verthys_api_v3_progress_cb(uint32_t stage, uint32_t percent, void *user)
-{
-    static const uint32_t stage_map[UNLOCK_STAGE_COUNT] = {
-        VERTHYS_UNLOCK_STAGE_READ_SUPERBLOCK,   /* S0 */
-        VERTHYS_UNLOCK_STAGE_READ_SUPERBLOCK,   /* S1 */
-        VERTHYS_UNLOCK_STAGE_ARGON2_START,      /* S2 */
-        VERTHYS_UNLOCK_STAGE_ARGON2_DONE,       /* S3 */
-        VERTHYS_UNLOCK_STAGE_CACHE_CHECK,       /* S4 */
-        VERTHYS_UNLOCK_STAGE_BTREE_DECRYPT,     /* S5 */
-        VERTHYS_UNLOCK_STAGE_BTREE_DONE,        /* S6 */
-    };
-    struct VerthysContext *ctx = (struct VerthysContext *)user;
-
-    if (ctx == NULL || stage >= UNLOCK_STAGE_COUNT) return;
-    verthys_emit_unlock_progress(ctx, stage_map[stage], percent,
-                               "V3 unlock pipeline");
-}
-
-/*
- * V3：V3 残留上下文清理（Unlock / Create 入口统一收口）。
- *
- * 残留来源：应急 DEGRADE（subsystems_close 后 state=LOCKED，堆实例与
- * 文件句柄仍挂在 ctx->v3）。本函数在装配新 V3 上下文前销毁残留实例
- * 并关闭其文件句柄，杜绝堆/句柄泄漏与悬挂引用。幂等（无残留 = no-op）；
- * destroy 内部对已关闭子系统为幂等收口。
- */
-static void verthys_api_v3_residual_cleanup(struct VerthysContext *ctx)
-{
-    FILE *f;
-
-    if (ctx->v3 == NULL) return;
-
-    f = ctx->v3->f;                       /* 借用引用，本函数负责关闭 */
-    verthys_v3_ctx_destroy(ctx->v3);
-    ctx->v3 = NULL;
-    if (f != NULL) {
-        verthys_container_close_exclusive(f, ctx->file_path);
-    }
-}
-
-/*
- * V3 解锁编排（Verthys_Unlock 的 V3 分支目标；调用方已持 api_mutex 独占）：
- *   1. 单写者独占打开容器（解锁后可读写，跨进程互斥）；
- *   2. 装配 VerthysContextV3（借用 ctx->cng_keys 与文件句柄）；
- *   3. verthys_v3_open_existing → 解锁流水线 S0-S6 全权承担；
- *   4. 成功（含 PARTIAL_UNLOCK——渐进式解锁的最小可操作态）：上下文移交
- *      （fmt_version=V3 / v3 挂载 / state=UNLOCKED / backoff 复位）；
- *   5. 失败：ctx3 完整销毁 + 文件句柄关闭（可重试初态），AUTH 失败计入
- *      退避（与 v2 路径同一治理）。
- */
-static VerthysResult verthys_api_v3_unlock(struct VerthysContext *ctx,
-                                       const char *verthys_path,
-                                       const char *password, size_t pw_len,
-                                       uint32_t flags)
-{
-    FILE *f = NULL;
-    VerthysContextV3 *v3 = NULL;
-    VerthysResult rc;
-
-    /* 残留清理（应急 DEGRADE 遗留实例：销毁 + 关闭其文件句柄） */
-    verthys_api_v3_residual_cleanup(ctx);
-
-    /* 单写者独占打开（跨进程互斥）：
-     * 共享模式 FILE_SHARE_READ + 超级块区独占锁二层互斥——第二进程
-     * 以写访问打开同容器即被内核拒绝（CONTAINER_BUSY），杜绝双进程
-     * 并发写导致的超级块/WAL/extent 结构互覆（AEAD+HMAC 只能事后
-     * 检出篡改，无法阻止字节级并发写）。会话句柄关闭必须走
-     * verthys_container_close_exclusive（释放锁 + 清理 PID 旁路）。 */
-    {
-        rc = verthys_container_open_exclusive(verthys_path, 0, &f);
-        if (rc != VERTHYS_OK) return rc;
-    }
-
-    /* 结构尺寸下限：V3 固定布局区（超块 64KB +
-     * WAL 960KB + 分区表 3MB = 4MB）为容器必备结构，文件小于该下限
-     * 即不可能为合法 V3 容器。detect_format 仅校验首帧头 8 字节——
-     * 截断文件（如 fuzz_truncated_header 的 56 字节样本）会携带合法
-     * 帧头进入流水线，S1 三副本读取全败后按 "0 有效"语义返回
-     * CORRUPT；但"从未具备固定布局结构"属格式非法而非内容损坏，
-     * 应在进入流水线前以 FORMAT 拒绝（与 v2 读侧截断语义对齐）。 */
-    {
-        int64_t fsz;
-        if (vio_fseek64(f, 0, SEEK_END) != 0 ||
-            (fsz = vio_ftell64(f)) < 0 ||
-            (uint64_t)fsz < VERTHYS_V3_PARTITION_TABLE_END ||
-            vio_fseek64(f, 0, SEEK_SET) != 0) {
-            verthys_container_close_exclusive(f, verthys_path);
-            return VERTHYS_ERR_FORMAT;
-        }
-    }
-
-    v3 = verthys_v3_ctx_create(&ctx->cng_keys, f, verthys_path);
-    if (v3 == NULL) {
-        verthys_container_close_exclusive(f, verthys_path);
-        return VERTHYS_ERR_INTERNAL;
-    }
-
-    rc = verthys_v3_open_existing(v3, password, pw_len, flags,
-                                verthys_api_v3_progress_cb, ctx);
-    if (rc == VERTHYS_OK || rc == VERTHYS_ERR_PARTIAL_UNLOCK) {
-        free(ctx->file_path);
-        ctx->file_path = dup_string(verthys_path);
-        ctx->fmt_version = VERTHYS_FMT_V3;
-        ctx->v3 = v3;
-        ctx->preset = v3->preset;   /* 容器头档位（GetContainerInfo 元数据源） */
-        /* 温缓存按运行时策略判定（宿主在解锁前已应用受信档位）；
-         * 容器头档位仅作创建基线记录，不作为策略来源 */
-        ctx->warm_cache_enabled =
-            !verthys_v3_warmcache_disabled_by_preset((VerthysPreset)security_runtime_preset());
-        ctx->state = VERTHYS_STATE_UNLOCKED;
-        verthys_backoff_reset();
-        /* 诊断映射（GetDiagnostics 的 V3 数据源）：
-         * unlock_derive_ms ← 流水线 S2 Argon2id 实测耗时（测试
-         * perf_diagnostics_metrics_complete 契约：派生耗时必 >0），
-         * argon2_last_derive_ms ← 同源（漂移监控）。 */
-        ctx->diag_unlock_total_ms = v3->diag_unlock_total_ms;
-        ctx->diag_unlock_derive_ms = v3->diag_argon2_last_ms;
-        ctx->diag_cache_load_ms   = v3->diag_cache_load_ms;
-        ctx->diag_warm_cache_hits  = v3->diag_warm_cache_hits;
-        ctx->diag_warm_cache_misses = v3->diag_warm_cache_misses;
-        ctx->argon2_last_derive_ms = v3->diag_argon2_last_ms;
-        return rc;
-    }
-
-    /* 失败路径可重试初态：ctx3 销毁（内含密钥清零 + 子系统
-     * abort 式关闭）后关闭文件句柄（借用引用，本函数拥有） */
-    if (rc == VERTHYS_ERR_AUTH) verthys_backoff_record_failure();
-    verthys_v3_ctx_destroy(v3);
-    verthys_container_close_exclusive(f, verthys_path);
-    return rc;
-}
-
-/*
- * V3 创建编排（Verthys_CreateWithPreset 目标；系统唯一合法新建入口，
- * 新建一律 V3——唯一容器格式）：
- *   1. CreateFileA(CREATE_NEW) 原子创建（TOCTOU 防护）；
- *   2. 装配 VerthysContextV3 → verthys_v3_create_new（三档校准 + 密钥组生成
- *      + 法定人数提交 + 分区创建 + 子系统空态初始化）；
- *   3. 成功：容器即处于解锁态（subsystems_open=1），上下文移交同 unlock。
- */
-static VerthysResult verthys_api_v3_create(struct VerthysContext *ctx,
-                                       const char *verthys_path,
-                                       const char *password, size_t pw_len,
-                                       VerthysPreset preset)
-{
-    FILE *f = NULL;
-    VerthysContextV3 *v3 = NULL;
-    VerthysResult rc;
-
-    /* 残留清理（应急 DEGRADE 遗留实例：销毁 + 关闭其文件句柄） */
-    verthys_api_v3_residual_cleanup(ctx);
-
-    /* 单写者独占打开（跨进程互斥，语义同解锁路径）：
-     * CREATE_NEW 原子性由内核保证（TOCTOU 防护），叠加超级块区
-     * 独占锁——新建文件无并发持有者，锁仅为统一契约的组成部分。 */
-    {
-        rc = verthys_container_open_exclusive(verthys_path, 1, &f);
-        if (rc != VERTHYS_OK) return rc;
-    }
-
-    v3 = verthys_v3_ctx_create(&ctx->cng_keys, f, verthys_path);
-    if (v3 == NULL) {
-        verthys_container_close_exclusive(f, verthys_path);
-        return VERTHYS_ERR_INTERNAL;
-    }
-
-    /* 进度契约（CreateWithPreset 亦受注册回调约束）：
-     * create_new 为整体调用（内部 Argon2id 校准约占时长），编排层
-     * 发射起 / 终两级；阶段细分归流水线（unlock 路径）。 */
-    ctx->unlock_progress_start_ms = verthys_monotonic_ms();
-    verthys_emit_unlock_progress(ctx, VERTHYS_UNLOCK_STAGE_READ_SUPERBLOCK, 5,
-                               "正在创建 V3 容器");
-
-    rc = verthys_v3_create_new(v3, password, pw_len, preset);
-    if (rc == VERTHYS_OK) {
-        free(ctx->file_path);
-        ctx->file_path = dup_string(verthys_path);
-        ctx->fmt_version = VERTHYS_FMT_V3;
-        ctx->preset = preset;       /* 创建基线（GetContainerInfo 源） */
-        /* 创建会话按创建基线判定温缓存（运行策略由宿主在创建后应用） */
-        ctx->warm_cache_enabled =
-            !verthys_v3_warmcache_disabled_by_preset(preset);
-        ctx->v3 = v3;
-        ctx->state = VERTHYS_STATE_UNLOCKED;
-        verthys_emit_unlock_progress(ctx, VERTHYS_UNLOCK_STAGE_MERKLE_DONE, 100,
-                                   "V3 容器创建完成");
-        return VERTHYS_OK;
-    }
-
-    /* 失败路径：半写文件留待调用方决策（创建失败不删除——上层可提示
-     * 重试或手动清理；盘面由法定人数 + HMAC + WAL 兜底不可误开）。 */
-    verthys_v3_ctx_destroy(v3);
-    verthys_container_close_exclusive(f, verthys_path);
-    return rc;
-}
-
-/*
- * V3 单调用事务收口 / 失败收口：公共实现已上移至 verthys_v3_lifecycle
- *（verthys_v3_txn_finish / verthys_v3_txn_abort，export/import 复用）。
- */
-
-/*
- * V3 子系统就绪断言（调用方已持 api_mutex；未就绪 = 状态机违规） */
-static int verthys_api_v3_ready(const struct VerthysContext *ctx,
-                               VerthysContextV3 **out)
-{
-    if (ctx->fmt_version != VERTHYS_FMT_V3 || ctx->v3 == NULL) return 0;
-    if (!ctx->v3->subsystems_open) return 0;
-    *out = ctx->v3;
-    return 1;
-}
-
-/*
- * V3 精确存活记录数（归并快照计数，调用方已持 api_mutex）：
- * verthys_lsm_estimate_records 为近似值（SSTable 逐表计数 + MemTable 非墓碑，
- * 不做跨层遮蔽归并——MemTable 墓碑遮蔽 SSTable 条目、L0 重叠表同键多版本
- * 均重复计入），record_count / GetSummaryCount 契约要求精确值，此处以与
- * Export 第一遍相同的快照迭代器归并计数（迭代器内建"最新版本胜出 +
- * 墓碑消费全源"语义）。索引结构级损坏整体上抛，不返回部分计数。
- */
-static VerthysResult verthys_api_v3_count_records(VerthysContextV3 *v,
-                                              uint64_t *out_count)
-{
-    VerthysLsmScanIter *it = NULL;
-    VerthysResult rc;
-    uint64_t n = 0;
-
-    rc = verthys_lsm_scan_open(v->lsm, &it);
-    if (rc != VERTHYS_OK) return rc;
-    for (;;) {
-        rc = verthys_lsm_scan_next(it, NULL, NULL, 0, NULL);
-        if (rc == VERTHYS_ERR_NOTFOUND) break;    /* 全源耗尽 */
-        if (rc != VERTHYS_OK) {
-            verthys_lsm_scan_close(it);
-            return rc;
-        }
-        n++;
-    }
-    verthys_lsm_scan_close(it);
-    *out_count = n;
-    return VERTHYS_OK;
-}
-
-/* ================================================================== *
- * V3：V3 CRUD 编排（api_mutex 已由公共入口独占持有）       *
- *                                                                    *
- * 单调用事务骨架：BEGIN → WRITE_EXTENT → UPDATE_INDEX → PREPARE →    *
- * COMMIT → CONFIRM，失败路径按事务状态机精确收口（rollback / confirm *
- * 兜底（verthys_v3_txn_abort）。尺寸/哈希等 Extent 布局知识经       *
- * verthys_extent_index_find 权威回查——本层不复述密文布局（高内聚）。    *
- * ================================================================== */
-
-/*
- * 新增记录（V3）：单调用事务骨架——BEGIN → verthys_v3_add_record_in_txn
- *（WRITE_EXTENT + UPDATE_INDEX，LID = max_lid + 1 顺序
- * 分配，LID 永不复用红线语义；数据经内容寻址去重，同明文零重写）→
- * PREPARE → COMMIT → CONFIRM。单记录写入逻辑与 Import 批量路径共用
- *（verthys_v3_add_record_in_txn，）。
- */
-static VerthysResult verthys_api_v3_add(struct VerthysContext *ctx,
-                                    const VerthysRecord *record,
-                                    uint64_t *out_id)
-{
-    VerthysContextV3 *v;
-    VerthysResult rc;
-    uint64_t lid = 0;
-
-    if (!verthys_api_v3_ready(ctx, &v)) return VERTHYS_ERR_LOCKED;
-
-    rc = verthys_txn_v3_begin(&v->txn);
-    if (rc != VERTHYS_OK) return rc;
-
-    rc = verthys_v3_add_record_in_txn(v, (uint8_t)record->type,
-                                    (const uint8_t *)record->name,
-                                    record->name_len,
-                                    record->data, record->data_len, &lid);
-    if (rc != VERTHYS_OK) {
-        verthys_v3_txn_abort(v);
-        return rc;
-    }
-
-    /* PREPARE → COMMIT → CONFIRM（COMMIT 后不可回滚，
-     * confirm 失败由下次 open 的崩溃恢复幂等收尾——错误直接上抛） */
-    rc = verthys_v3_txn_finish(v);
-    if (rc != VERTHYS_OK) return rc;
-
-    *out_id = lid;
-    return VERTHYS_OK;
-}
-
-/*
- * 读取记录（V3）：LSM 索引查找（MemTable → L0 → L1..，墓碑遮蔽旧值）
- * → Extent 内核态解密（双重完整性：AEAD 认证 + BLAKE2b 内容哈希）。
- * 深拷贝结果缓存于 ctx（借用指针契约与 v1/v2 一致：下次 GetRecord /
- * 写操作 / Lock 前有效）。
- */
-static VerthysResult verthys_api_v3_get(struct VerthysContext *ctx,
-                                    uint64_t id, VerthysRecord *out_record)
-{
-    VerthysContextV3 *v;
-    VerthysLsmEntry e;
-    uint8_t name_buf[VERTHYS_NAME_MAX_BYTES];
-    uint8_t *data = NULL;
-    uint8_t *name = NULL;
-    size_t name_len = 0;
-    size_t cap;
-    VerthysResult rc;
-
-    if (!verthys_api_v3_ready(ctx, &v)) return VERTHYS_ERR_LOCKED;
-
-    rc = verthys_lsm_get(v->lsm, id, &e, name_buf, sizeof(name_buf), &name_len);
-    if (rc != VERTHYS_OK) return rc;   /* NOTFOUND 透传；AUTH/CORRUPT/IO 原样 */
-
-    /* 索引不变量：Extent 明文长度 == 记录数据长度（AddRecord 写入约定；
-     * 背离 = 索引/Extent 交叉损坏 → CORRUPT，杜绝向调用方返回越界长度） */
-    if (e.data_size != (uint64_t)e.plaintext_size) return VERTHYS_ERR_CORRUPT;
-
-    /* 解密缓冲（extent_get 契约要求 pt 非 NULL：空数据走 1 字节哑缓冲，
-     * 成功后清零丢弃，输出 data=NULL / data_len=0，与 v1/v2 语义一致） */
-    cap = (e.plaintext_size > 0) ? (size_t)e.plaintext_size : 1u;
-    data = (uint8_t *)malloc(cap);
-    if (data == NULL) return VERTHYS_ERR_INTERNAL;
-
-    rc = verthys_extent_get(v->f, v->txn.extent_part, v->ext_idx, e.hash,
-                          data, &cap);
-    if (rc != VERTHYS_OK) {
-        verthys_secure_zero(data, cap);
-        free(data);
-        return rc;
-    }
-    if (cap != (size_t)e.plaintext_size) {
-        verthys_secure_zero(data, cap);
-        free(data);
-        return VERTHYS_ERR_CORRUPT;
-    }
-
-    if (e.name_len > 0) {
-        name = (uint8_t *)malloc(e.name_len);
-        if (name == NULL) {
-            verthys_secure_zero(data, cap);
-            free(data);
-            return VERTHYS_ERR_INTERNAL;
-        }
-        memcpy(name, name_buf, e.name_len);
-    }
-
-    /* 借用指针缓存交接（公共入口持 api_mutex，缓存指针仅此处变更；
-     * 先备妥新缓存再整体替换——替换原子于锁内，无中间窗口） */
-    ctx_free_getrecord_cache(ctx);
-    if (e.plaintext_size > 0) {
-        ctx->last_getrecord_data       = data;
-        ctx->last_getrecord_data_size  = cap;
-    } else {
-        verthys_secure_zero(data, cap);          /* 哑缓冲清零后丢弃 */
-        free(data);
-        ctx->last_getrecord_data       = NULL;
-        ctx->last_getrecord_data_size  = 0;
-    }
-    ctx->last_getrecord_name      = name;
-    ctx->last_getrecord_name_len  = e.name_len;
-
-    out_record->type     = (VerthysRecordType)e.type;
-    out_record->name     = (const char *)name;
-    out_record->name_len = e.name_len;
-    out_record->data     = (e.plaintext_size > 0) ? data : NULL;
-    out_record->data_len = cap;    /* == plaintext_size == data_size（上方校验） */
-    return VERTHYS_OK;
-}
-
-/*
- * 删除记录（V3）：先探测存在性（API 契约 NOTFOUND；LSM 墓碑本身幂等），
- * 单事务 DELETE（现值 Extent 引用释放 + 墓碑写入 + WAL INDEX 记录）。
- * 同事务内重复删除同一 LID 安全（第二次查找命中墓碑 → NOTFOUND 容忍，
- * 不重复释放引用（verthys_txn_v3_delete）。
- */
-static VerthysResult verthys_api_v3_delete(struct VerthysContext *ctx, uint64_t id)
-{
-    VerthysContextV3 *v;
-    VerthysResult rc;
-
-    if (!verthys_api_v3_ready(ctx, &v)) return VERTHYS_ERR_LOCKED;
-
-    rc = verthys_lsm_get(v->lsm, id, NULL, NULL, 0, NULL);
-    if (rc != VERTHYS_OK) return rc;   /* NOTFOUND 透传（契约语义） */
-
-    rc = verthys_txn_v3_begin(&v->txn);
-    if (rc != VERTHYS_OK) return rc;
-
-    rc = verthys_txn_v3_delete(&v->txn, id);
-    if (rc != VERTHYS_OK) {
-        verthys_v3_txn_abort(v);
-        return rc;
-    }
-
-    return verthys_v3_txn_finish(v);
-}
-
-/*
- * 批量删除（V3，单次 flush 刚性要求）：先全量探测（任一不存在 → 整体
- * NOTFOUND，零副作用返回），单事务内逐条 DELETE，一次 PREPARE → COMMIT
- * → CONFIRM 收口——磁盘写入量与条目数解耦（与 v2 批量语义对齐）。
- */
-static VerthysResult verthys_api_v3_delete_many(struct VerthysContext *ctx,
-                                            const uint64_t *ids, size_t count)
-{
-    VerthysContextV3 *v;
-    VerthysResult rc;
-
-    if (!verthys_api_v3_ready(ctx, &v)) return VERTHYS_ERR_LOCKED;
-
-    /* 预探测（读快照；探测与删除间无并发写者——单写者纪律 + api_mutex） */
-    for (size_t i = 0; i < count; i++) {
-        rc = verthys_lsm_get(v->lsm, ids[i], NULL, NULL, 0, NULL);
-        if (rc != VERTHYS_OK) return rc;   /* 任一 NOTFOUND → 整体拒绝 */
-    }
-
-    rc = verthys_txn_v3_begin(&v->txn);
-    if (rc != VERTHYS_OK) return rc;
-
-    for (size_t i = 0; i < count; i++) {
-        rc = verthys_txn_v3_delete(&v->txn, ids[i]);
-        if (rc != VERTHYS_OK) {
-            verthys_v3_txn_abort(v);
-            return rc;
-        }
-    }
-
-    return verthys_v3_txn_finish(v);
-}
-#endif /* VERTHYS_V3_SUPPORT（v3 分发辅助段） */
-
-/* v4 内部错误码 → 公共返回码。对外不区分“口令错/缺槽/TPM 状态”，
+/* 内部错误码 → 公共返回码。对外不区分“口令错/缺槽/TPM 状态”，
  * 只把可行动的类别（格式、损坏、IO、限流）暴露给调用方。 */
-static VerthysResult verthys_v4_map(int rc)
+static VerthysResult verthys_container_map(int rc)
 {
     switch (rc) {
     case VTY_OK:                  return VERTHYS_OK;
@@ -1042,9 +493,9 @@ static VerthysResult verthys_v4_map(int rc)
     }
 }
 
-/* 公共 API 接受显式长度；v4 层按 NUL 终结串取口令，长度不符时复制一份，
+/* 公共 API 接受显式长度；本层按 NUL 终结串取口令，长度不符时复制一份，
  * 避免调用方传入的长度与内存内容不一致导致越界或截断语义漂移。 */
-static char *v4_password_copy(const char *password, size_t len)
+static char *password_copy(const char *password, size_t len)
 {
     char *copy;
 
@@ -1056,14 +507,14 @@ static char *v4_password_copy(const char *password, size_t len)
     return copy;
 }
 
-static void v4_password_free(char *copy, size_t len)
+static void password_free(char *copy, size_t len)
 {
     if (copy == NULL) return;
     verthys_secure_zero(copy, len + 1u);
     free(copy);
 }
 
-static VerthysResult verthys_api_v4_adopt(struct VerthysContext *ctx,
+static VerthysResult verthys_api_container_adopt(struct VerthysContext *ctx,
                                          const char *path, VtyVault *v)
 {
     char *new_path;
@@ -1071,11 +522,6 @@ static VerthysResult verthys_api_v4_adopt(struct VerthysContext *ctx,
     if (ctx->rotate != NULL) {
         vty_rotate_abort(ctx->rotate);
         ctx->rotate = NULL;
-    }
-    if (ctx->v3 != NULL) {
-        /* 同一句柄不允许同时持有两种格式的会话 */
-        vty_vault_free(v);
-        return VERTHYS_ERR_INVALID;
     }
     /* 先准备新路径再替换会话：路径分配失败时旧会话保持完整，不出现
      * "库已释放但挂载点未更新"的中间态。 */
@@ -1086,17 +532,17 @@ static VerthysResult verthys_api_v4_adopt(struct VerthysContext *ctx,
     }
     free(ctx->file_path);
     ctx->file_path = new_path;
-    v4_session_attach(ctx, v);
-    ctx->fmt_version = VERTHYS_FMT_V4;
+    vault_session_attach(ctx, v);
+    ctx->fmt_version = VERTHYS_FMT_CONTAINER;
     ctx->preset = VERTHYS_PRESET_BALANCED;
     ctx->warm_cache_enabled = 0;
     ctx->state = VERTHYS_STATE_UNLOCKED;
     return VERTHYS_OK;
 }
 
-/* V4 专用入口必须先确认 magic：把 v3 文件交给 v4 解析器会产生
+/* 容器专用入口必须先确认 magic：把异种格式文件交给解析器会产生
  * 误导性的槽错误，而且不利于把“拒绝旧格式”作为独立攻击面验证。 */
-static VerthysResult verthys_api_v4_require_magic(const char *path)
+static VerthysResult verthys_api_container_require_magic(const char *path)
 {
     FILE *peek;
     uint8_t header[8];
@@ -1108,11 +554,11 @@ static VerthysResult verthys_api_v4_require_magic(const char *path)
     n = fread(header, 1, sizeof(header), peek);
     fclose(peek);
     if (n < sizeof(header)) return VERTHYS_ERR_FORMAT;
-    if (detect_format(header, n) != VERTHYS_FMT_V4) return VERTHYS_ERR_FORMAT;
+    if (detect_format(header, n) != VERTHYS_FMT_CONTAINER) return VERTHYS_ERR_FORMAT;
     return VERTHYS_OK;
 }
 
-static VerthysResult verthys_api_v4_unlock(struct VerthysContext *ctx,
+static VerthysResult verthys_api_container_unlock(struct VerthysContext *ctx,
                                            const char *path,
                                            const char *password, size_t len,
                                            const char *keyfile_path)
@@ -1123,20 +569,20 @@ static VerthysResult verthys_api_v4_unlock(struct VerthysContext *ctx,
 
     if (password == NULL || len == 0) return VERTHYS_ERR_INVALID;
     /* 公共契约只保证 password 指向 len 字节，不保证 NUL 终结；
-     * v4 层按 NUL 串取口令，必须先复制再调用，避免越界读。 */
-    pw = v4_password_copy(password, len);
+     * 本层按 NUL 串取口令，必须先复制再调用，避免越界读。 */
+    pw = password_copy(password, len);
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
     /* keyfile 由 C 层在本进程内读取；路径只是入参，字节不进入调用方。 */
     rc = (keyfile_path != NULL)
              ? vty_vault_open_keyfile(path, pw, keyfile_path, &v)
              : vty_vault_open(path, pw, &v);
-    v4_password_free(pw, len);
-    if (rc != VTY_OK) return verthys_v4_map(rc);
-    return verthys_api_v4_adopt(ctx, path, v);
+    password_free(pw, len);
+    if (rc != VTY_OK) return verthys_container_map(rc);
+    return verthys_api_container_adopt(ctx, path, v);
 }
 
 /*
- * 解锁入口二进制验签（v3/v4 共用）。
+ * 解锁入口二进制验签。
  * 构建期 .vsec 基准比对：进程内按自身文件元数据指纹缓存结论，
  * 指纹不变直接回放（解锁热路径零节 I/O），指纹变化（自更新/篡改）
  * 强制重算。未配置（开发构建）时为空操作；验签失败 = 二进制被篡改
@@ -1149,7 +595,7 @@ static VerthysResult verthys_api_unlock_integrity_precheck(void)
 }
 
 /*
- * 解锁成功后的进程级安全钩子（v3/v4 共用）：
+ * 解锁成功后的进程级安全钩子：
  * 运行时函数级哈希全量校验（.rhat 真表，防内存补丁注入跳转）。
  * 失配 = 进程内存被篡改（高置信度）→ KILL 级应急（进程终止，
  * 绝不带着已解锁密钥继续运行）。置于信号复位之前：篡改态不做任何
@@ -1165,169 +611,7 @@ static void verthys_api_unlock_post_hooks(void)
     memory_guard_patrol_start();
 }
 
-#if defined(VERTHYS_V3_SUPPORT)
-/* 3. 解锁（通用入口：v4 分支 + V3 流水线；产品 v4-only 构建不编译） */
-VerthysResult Verthys_Unlock(VerthysHandle handle,
-                         const char *verthys_path,
-                         const char *password,
-                         size_t      password_len,
-                         uint32_t    flags)
-{
-    if (handle == NULL || verthys_path == NULL) return VERTHYS_ERR_INVALID;
-    if (password == NULL && password_len != 0) return VERTHYS_ERR_INVALID;
-    /* 空口令策略（禁止）：password_len==0 显式拒绝——产品不支持
-     * "无口令/纯硬件绑定"形态，空口令容器一律视为不合法输入（含
-     * password==NULL 且 len==0）。此策略与前端提交校验一致。 */
-    if (password_len == 0) return VERTHYS_ERR_INVALID;
-
-    struct VerthysContext *ctx = (struct VerthysContext *)handle;
-    if (ctx->state == VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_INVALID;
-    if (verthys_backoff_remaining_ms() > 0) return VERTHYS_ERR_RATE;
-
-    /* pepper 来源已确定失败时快速失败（跳过 Argon2id 重计算），
-     * 前端得到 VERTHYS_ERR_PEPPER_SOURCE → 提示"保险库安全源已变更"。 */
-    if (verthys_pepper_source_error()) return VERTHYS_ERR_PEPPER_SOURCE;
-
-    /* 分发二进制验签（构建期 .vsec 签名比对，v3/v4 共用）。
-     * 验签失败 = 二进制被篡改（高置信度）→ KILL 级上报已发出，
-     * 此处返回 VERTHYS_ERR_CORRUPT 拒绝解锁。 */
-    {
-        VerthysResult ir = verthys_api_unlock_integrity_precheck();
-        if (ir != VERTHYS_OK) return ir;
-    }
-
-    /* 记录本次解锁起始时间戳（单调时钟），供进度回调计算 elapsed_ms
-     * 即使未注册回调也无开销（仅一次 64 位赋值） */
-    ctx->unlock_progress_start_ms = verthys_monotonic_ms();
-
-    /* （API 版本 0x0005）：解析 flags 位域，设置预热状态
-     * 上层 Rust 调度层通过 flags 透传预热完成状态，C 层据此选择最优读取路径：
-     *   - prefetch_done=1：索引区已在 OS 页缓存中，可走内存映射零拷贝路径
-     *   - prefetch_done=0：未预热，走原有磁盘同步读取路径（向下兼容）
-     * 同时更新诊断指标的预热状态枚举。 */
-    ctx->unlock_flags = flags;
-    ctx->prefetch_done = (flags & VERTHYS_UNLOCK_FLAG_INDEX_PREHEATED) ? 1 : 0;
-    ctx->diag_preheat_status = ctx->prefetch_done ? 2 : 0;  /* 2=预热完成, 0=未预热 */
-
-    /* 递归互斥锁保护，防止并发重入
-     * 埋点采集读写锁等待耗时（diag_lock_wait_ms） */
-#ifdef _WIN32
-    if (ctx->api_mutex != NULL) {
-        uint64_t _lock_wait_start = verthys_monotonic_ms();
-        AcquireSRWLockExclusive(ctx->api_mutex);
-        ctx->diag_lock_wait_ms = verthys_monotonic_ms() - _lock_wait_start;
-    }
-#endif
-
-    VerthysContainerVersion fmt;
-
-    {
-        FILE *peek = fopen(verthys_path, "rb");
-        if (peek == NULL) {
-#ifdef _WIN32
-            if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-            return VERTHYS_ERR_IO;
-        }
-        uint8_t header[128];
-        size_t hdr_read = fread(header, 1, sizeof(header), peek);
-        fclose(peek);
-
-        if (hdr_read == 0) {
-#ifdef _WIN32
-            if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-            return VERTHYS_ERR_FORMAT;
-        }
-        fmt = detect_format(header, hdr_read);
-    }
-
-    /* v4：独立会话路径（A/B 元数据 + 数据区），不进入 v3 流水线。 */
-    if (fmt == VERTHYS_FMT_V4) {
-        VerthysResult rc4 = verthys_api_v4_unlock(ctx, verthys_path,
-                                                  password, password_len,
-                                                  NULL);
-        if (rc4 == VERTHYS_OK) {
-            verthys_api_unlock_post_hooks();
-        }
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return rc4;
-    }
-
-    /* 非 V3/V4 容器 → FORMAT 拒绝。 */
-    if (fmt != VERTHYS_FMT_V3) {
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return VERTHYS_ERR_FORMAT;
-    }
-
-    /* V3：V3 解锁编排 — 流水线 S0-S6（api_mutex 已持，
-     * 由 verthys_api_v3_unlock 路径负责释放）。检测头之外零冗余 I/O：
-     * 流水线 S1 线程自读 3 副本法定人数裁决。 */
-    {
-        VerthysResult rc = verthys_api_v3_unlock(ctx, verthys_path, password,
-                                             password_len, flags);
-        /* 解锁成功（含渐进式 PARTIAL_UNLOCK——最小可操作态）触发
-         * 进程级安全钩子：运行时哈希全量校验 + 应急信号复位 +
-         * 模块巡检 + 防转储巡逻。 */
-        if (rc == VERTHYS_OK || rc == VERTHYS_ERR_PARTIAL_UNLOCK) {
-            verthys_api_unlock_post_hooks();
-        }
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-        /* 修复修复：排空进度环形缓冲区，防止陈旧心跳消息
-         * 在最终响应之后到达 stdout 污染 IPC 通信 */
-        if (ctx->progress_ring != NULL) {
-            verthys_progress_ring_flush((VerthysProgressRing *)ctx->progress_ring);
-        }
-#endif
-        return rc;
-    }
-}
-
-/* 3a. 显式创建新加密库（V3，可选预设） */
-/*
- * V3 新建（新建一律走 V3 路径）：
- * 本接口为系统唯一合法新建入口，新建容器全部走 V3 编排
- * （CNG 内核托管密钥组 + LSM 索引 + 六阶段事务 + 法定人数超级块）。
- */
-VerthysResult Verthys_CreateWithPreset(VerthysHandle handle,
-                                    const char *verthys_path,
-                                    const char *password,
-                                    size_t      password_len,
-                                    VerthysPreset preset)
-{
-    if (handle == NULL || verthys_path == NULL) return VERTHYS_ERR_INVALID;
-    if (password == NULL && password_len != 0) return VERTHYS_ERR_INVALID;
-    /* 空口令策略（禁止）：与解锁入口一致，password_len==0 显式拒绝 */
-    if (password_len == 0) return VERTHYS_ERR_INVALID;
-    /* 预设合法域：BALANCED / SECURE / PERFORMANCE（V3 三档校准的
-     * 三级目标态）。CUSTOM 需安全中心逐项配置，非本接口合法入参。 */
-    if (preset != VERTHYS_PRESET_BALANCED && preset != VERTHYS_PRESET_SECURE &&
-        preset != VERTHYS_PRESET_PERFORMANCE) {
-        return VERTHYS_ERR_INVALID;
-    }
-
-    struct VerthysContext *ctx = (struct VerthysContext *)handle;
-    if (ctx->state == VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_INVALID;
-
-    /* 此 fopen("rb") 仅作 UX 快速失败（避免无谓进入 Argon2id 派生），
-     * 真正的 TOCTOU 防护由 verthys_api_v3_create 内的 CreateFileA(CREATE_NEW) 原子创建保障。
-     * 即使此处检查通过后恶意进程抢占创建同名文件，原子创建仍会返回 ERROR_FILE_EXISTS。 */
-    FILE *probe = fopen(verthys_path, "rb");
-    if (probe != NULL) {
-        fclose(probe);
-        return VERTHYS_ERR_EXISTS;
-    }
-
-    return verthys_api_v3_create(ctx, verthys_path, password, password_len, preset);
-}
-#endif /* VERTHYS_V3_SUPPORT（Verthys_Unlock / Verthys_CreateWithPreset） */
-
-/* v4 新建：只创建 v4 容器，不进入 v3 生命周期。恢复码在创建响应里
+/* 新建：只创建 容器。恢复码在创建响应里
  * 一次性返回，调用方确认后必须清零自己的副本。 */
 VerthysResult Verthys_V4Create(VerthysHandle handle,
                                const char *verthys_path,
@@ -1358,13 +642,13 @@ VerthysResult Verthys_V4Create(VerthysHandle handle,
         return VERTHYS_ERR_EXISTS;
     }
 
-    /* 同 Unlock：显式长度参数不保证 NUL 终结，统一复制后再进入 v4 层。 */
-    pw = v4_password_copy(password, password_len);
+    /* 同 Unlock：显式长度参数不保证 NUL 终结，统一复制后再进入 层。 */
+    pw = password_copy(password, password_len);
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
     rc = vty_vault_create(verthys_path, pw, &v, recovery_text, recovery_cap);
-    v4_password_free(pw, password_len);
-    if (rc != VTY_OK) return verthys_v4_map(rc);
-    return verthys_api_v4_adopt(ctx, verthys_path, v);
+    password_free(pw, password_len);
+    if (rc != VTY_OK) return verthys_container_map(rc);
+    return verthys_api_container_adopt(ctx, verthys_path, v);
 }
 
 VerthysResult Verthys_V4CreateKeyfile(VerthysHandle handle,
@@ -1398,13 +682,13 @@ VerthysResult Verthys_V4CreateKeyfile(VerthysHandle handle,
         return VERTHYS_ERR_EXISTS;
     }
 
-    pw = v4_password_copy(password, password_len);
+    pw = password_copy(password, password_len);
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
     rc = vty_vault_create_keyfile_file(verthys_path, pw, keyfile_path, &v,
                                        recovery_text, recovery_cap);
-    v4_password_free(pw, password_len);
-    if (rc != VTY_OK) return verthys_v4_map(rc);
-    return verthys_api_v4_adopt(ctx, verthys_path, v);
+    password_free(pw, password_len);
+    if (rc != VTY_OK) return verthys_container_map(rc);
+    return verthys_api_container_adopt(ctx, verthys_path, v);
 }
 
 VerthysResult Verthys_V4Unlock(VerthysHandle handle,
@@ -1429,9 +713,9 @@ VerthysResult Verthys_V4Unlock(VerthysHandle handle,
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
-    rc = verthys_api_v4_require_magic(verthys_path);
+    rc = verthys_api_container_require_magic(verthys_path);
     if (rc == VERTHYS_OK) {
-        rc = verthys_api_v4_unlock(ctx, verthys_path, password, password_len,
+        rc = verthys_api_container_unlock(ctx, verthys_path, password, password_len,
                                    NULL);
         if (rc == VERTHYS_OK) {
             verthys_api_unlock_post_hooks();
@@ -1466,9 +750,9 @@ VerthysResult Verthys_V4UnlockKeyfile(VerthysHandle handle,
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
-    rc = verthys_api_v4_require_magic(verthys_path);
+    rc = verthys_api_container_require_magic(verthys_path);
     if (rc == VERTHYS_OK) {
-        rc = verthys_api_v4_unlock(ctx, verthys_path, password, password_len,
+        rc = verthys_api_container_unlock(ctx, verthys_path, password, password_len,
                                    keyfile_path);
         if (rc == VERTHYS_OK) {
             verthys_api_unlock_post_hooks();
@@ -1502,7 +786,7 @@ VerthysResult Verthys_V4UnlockRecovery(VerthysHandle handle,
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
-    rc = verthys_api_v4_require_magic(verthys_path);
+    rc = verthys_api_container_require_magic(verthys_path);
     if (rc != VERTHYS_OK) {
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
@@ -1510,8 +794,8 @@ VerthysResult Verthys_V4UnlockRecovery(VerthysHandle handle,
         return rc;
     }
     vrc = vty_vault_open_recovery(verthys_path, recovery_text, &v);
-    rc = (vrc == VTY_OK) ? verthys_api_v4_adopt(ctx, verthys_path, v)
-                         : verthys_v4_map(vrc);
+    rc = (vrc == VTY_OK) ? verthys_api_container_adopt(ctx, verthys_path, v)
+                         : verthys_container_map(vrc);
     if (rc == VERTHYS_OK) {
         verthys_api_unlock_post_hooks();
     }
@@ -1566,6 +850,19 @@ VerthysResult Verthys_GetSecurityPreset(VerthysHandle handle, uint32_t *out_pres
     return VERTHYS_OK;
 }
 
+/* 只读查询库级熔断剩余秒数：供宿主在 VERTHYS_ERR_RATE 响应后展示
+ * “已锁定 X 秒”。不消耗尝试额度、不改变计数；查询失败按 0 返回，不
+ * 改变既有错误链。 */
+VerthysResult Verthys_GetLibLockoutRemaining(uint32_t *out_secs)
+{
+    if (out_secs == NULL) return VERTHYS_ERR_INVALID;
+    *out_secs = 0;
+    if (!vty_lockout_enabled()) return VERTHYS_OK;
+    if (vty_lockout_init() != VTY_OK) return VERTHYS_ERR_TPM;
+    (void)vty_lockout_remaining_secs(out_secs);
+    return VERTHYS_OK;
+}
+
 /* 运行时查询指定预设档位的特性位投影（11 位跨层特性契约）。
  *
  * 投影是档位矩阵的唯一权威输出：宿主展示与执行均以此为准，
@@ -1591,15 +888,14 @@ VerthysResult Verthys_GetPresetFeatureBits(VerthysHandle handle,
     return VERTHYS_OK;
 }
 
-/* 4. 锁定（V3-only） */
+/* 4. 锁定 */
 /*
- * Lock 同步路径的三项必要操作（数据完整性 / 下次解锁性能 / 安全）：
- *   1. 事务收尾（CONFIRM 兜底 / 回滚——数据完整性，必须同步）；
- *   2. LSM 正常关闭 + 温缓存落盘（下次解锁性能，必须同步）；
- *   3. 敏感内存清零（内核态密钥句柄销毁 + 驻留密钥清零，必须同步）。
+ * Lock 同步路径的必要操作：
+ *   1. 释放轮换作业（其持有库引用）；
+ *   2. 会话释放（密钥与明文清零——安全，必须同步）；
+ *   3. 借用指针缓存释放。
  *
- * 耗时任务（碎片整理 / 全盘校验）不在 Lock 同步路径——V3 中前者由
- * LSM compaction 后台线程常态承担，后者经 Verthys_VerifyIntegrity 按需执行。
+ * 耗时任务（全盘校验）不在 Lock 同步路径——经 Verthys_VerifyIntegrity 按需执行。
  *
  * 关闭响应指标：窗口隐藏≤100ms，后台完整退出≤1.5s（UI 层配合 window.hide()）
  */
@@ -1610,18 +906,11 @@ VerthysResult Verthys_Lock(VerthysHandle handle)
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
     if (ctx->file_path == NULL) return VERTHYS_ERR_INVALID;
 
-    /* V3：V3 锁定路径。
-     *
-     * verthys_v3_lock 全权承担：
-     *   1. 后台预热线程汇合（渐进式解锁场景）；
-     *   2. 事务收尾（CONFIRM 兜底 / 回滚——数据完整性，必须同步）；
-     *   3. LSM 正常关闭（MemTable flush + Manifest 终态）+
-     *      温缓存写入（下次解锁性能，必须同步；SECURE 预设跳过）+
-     *      子系统销毁（内核态密钥句柄 + 驻留密钥清零——安全，必须同步）。
-     * 返回事务收尾结果（r_txn）：锁定动作本身无条件完成（密钥清除不可
-     * 逆转），错误上抛供上层感知数据完整性异常（坦诚直报原则）。
-     */
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
+    /* 锁定路径：
+     *   1. 释放轮换作业（其持有库引用）；
+     *   2. 会话释放（密钥与明文清零）；
+     *   3. GetRecord 借用指针缓存释放。 */
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) {
             AcquireSRWLockExclusive(ctx->api_mutex);
@@ -1631,7 +920,7 @@ VerthysResult Verthys_Lock(VerthysHandle handle)
             vty_rotate_abort(ctx->rotate);
             ctx->rotate = NULL;
         }
-        v4_session_detach(ctx);
+        vault_session_detach(ctx);
         ctx_free_getrecord_cache(ctx);
         ctx->state = VERTHYS_STATE_LOCKED;
 #ifdef _WIN32
@@ -1641,36 +930,6 @@ VerthysResult Verthys_Lock(VerthysHandle handle)
 #endif
         return VERTHYS_OK;
     }
-
-#if defined(VERTHYS_V3_SUPPORT)
-    if (ctx->fmt_version == VERTHYS_FMT_V3) {
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) {
-            AcquireSRWLockExclusive(ctx->api_mutex);
-        }
-#endif
-        VerthysResult rc = VERTHYS_OK;
-        if (ctx->v3 != NULL) {
-            FILE *f = ctx->v3->f;              /* 借用引用，本分支负责关闭 */
-            rc = verthys_v3_lock(ctx->v3);
-            verthys_v3_ctx_destroy(ctx->v3);     /* 幂等（子系统已收口） */
-            ctx->v3 = NULL;
-            if (f != NULL) {
-                verthys_container_close_exclusive(f, ctx->file_path);
-            }
-        }
-        /* GetRecord 借用指针缓存释放（V3 密钥清理已由 subsystems_close
-         * 完成，此处仅清缓存） */
-        ctx_free_getrecord_cache(ctx);
-        ctx->state = VERTHYS_STATE_LOCKED;
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) {
-            ReleaseSRWLockExclusive(ctx->api_mutex);
-        }
-#endif
-        return rc;
-    }
-#endif /* VERTHYS_V3_SUPPORT（Lock V3 分支） */
 
     return VERTHYS_ERR_FORMAT;
 }
@@ -1708,7 +967,7 @@ VerthysResult Verthys_AddRecord(VerthysHandle handle,
 
     /* 写路径入口反调试复检（60s 周期之外的高价值动作补点）。
      * check 内部命中高置信度调试器时已上报 KILL；此处不改变返回语义。 */
-    (void)anti_debug_v2_check();
+    (void)anti_debug_check();
 
     /* 递归互斥锁保护 */
 #ifdef _WIN32
@@ -1721,40 +980,20 @@ VerthysResult Verthys_AddRecord(VerthysHandle handle,
      * 统一收口缓存销毁，写入事务提交前强制清空历史查询缓存。 */
     ctx_free_getrecord_cache(ctx);
 
-    /* V3 写路径周期重算关键函数
+    /* 写路径周期重算关键函数
      * 运行时哈希（时间门控，距上次全量 <30min 直接返回；首调立即全量）。 */
     runtime_hash_verify_periodic();
 
-    /* v4：仓库写入 + 单次 DataRoot/元数据提交（api_mutex 已持有） */
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
-        VerthysResult rc4 = verthys_api_v4_add(ctx, record, out_id);
+    /* 仓库写入 + 单次 DataRoot/元数据提交（api_mutex 已持有） */
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
+        VerthysResult rc_vault = verthys_api_container_add(ctx, record, out_id);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
-        return rc4;
+        return rc_vault;
     }
-#if defined(VERTHYS_V3_SUPPORT)
-    /* V3：V3 新增走六阶段事务编排（api_mutex 已持有） */
-    if (ctx->fmt_version != VERTHYS_FMT_V3) {
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return VERTHYS_ERR_INTERNAL;
-    }
-    {
-        VerthysResult rc = verthys_api_v3_add(ctx, record, out_id);
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return rc;
-    }
-#else
-    /* 产品（v4-only）：非 v4 容器不存在可写路径 */
-#ifdef _WIN32
-    if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
+    /* 非容器格式不存在可写路径 */
     return VERTHYS_ERR_FORMAT;
-#endif
 }
 
 /* 5.1 批量新增记录（API 版本 0x0013）：单次事务提交，全有或全无 */
@@ -1791,15 +1030,15 @@ VerthysResult Verthys_AddRecords(VerthysHandle handle,
     ctx_free_getrecord_cache(ctx);
     runtime_hash_verify_periodic();
 
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
-        VerthysResult rc4 = verthys_api_v4_add_many(ctx, records, count, out_ids);
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
+        VerthysResult rc_vault = verthys_api_container_add_many(ctx, records, count, out_ids);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
-        return rc4;
+        return rc_vault;
     }
 
-    /* 产品（v4-only）：批量入口不提供 V3 退化路径，避免逐条语义与原子性漂移 */
+    /* 非容器格式无批量写入路径，避免逐条语义与原子性漂移 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
@@ -1821,37 +1060,16 @@ VerthysResult Verthys_GetRecord(VerthysHandle handle,
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
 
-    /* v4：目录叶查找 + 记录段校验/AEAD 解密，结果复制进借用缓存 */
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
-        VerthysResult rc4 = verthys_api_v4_get(ctx, id, out_record);
+    /* 目录叶查找 + 记录段校验/AEAD 解密，结果复制进借用缓存 */
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
+        VerthysResult rc_vault = verthys_api_container_get(ctx, id, out_record);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
-        return rc4;
+        return rc_vault;
     }
-#if defined(VERTHYS_V3_SUPPORT)
-    /* V3：V3 分发——LSM 索引查找 + Extent 内核态解密；
-     * 深拷贝结果经 ctx 借用指针缓存（契约保持，辅助层内
-     * 先失效旧缓存再整体替换） */
-    if (ctx->fmt_version != VERTHYS_FMT_V3) {
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return VERTHYS_ERR_INTERNAL;
-    }
-    {
-        VerthysResult rc3 = verthys_api_v3_get(ctx, id, out_record);
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return rc3;
-    }
-#else
-#ifdef _WIN32
-    if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
+    /* 非容器格式无读取路径 */
     return VERTHYS_ERR_FORMAT;
-#endif
 }
 
 /* 6.1 显式释放 GetRecord 借用缓存
@@ -1890,50 +1108,25 @@ VerthysResult Verthys_DeleteRecord(VerthysHandle handle, uint64_t id)
 
     /* 写操作入口统一失效查询缓存，防止 UAF */
     ctx_free_getrecord_cache(ctx);
-    /* V3：写路径周期运行时哈希校验（30min 门控） */
+    /* 写路径周期运行时哈希校验（30min 门控） */
     runtime_hash_verify_periodic();
 
-    /* v4：记录叶/名称/类型三处墓碑 + 单次提交 */
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
-        VerthysResult rc4 = verthys_api_v4_delete(ctx, id);
+    /* 记录叶/名称/类型三处墓碑 + 单次提交 */
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
+        VerthysResult rc_vault = verthys_api_container_delete(ctx, id);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
-        return rc4;
+        return rc_vault;
     }
-#if defined(VERTHYS_V3_SUPPORT)
-    /* V3：V3 分发——单事务 DELETE（Extent 引用释放 +
-     * LSM 墓碑 + WAL INDEX 记录）；NOTFOUND 契约语义由辅助层透传 */
-    if (ctx->fmt_version != VERTHYS_FMT_V3) {
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return VERTHYS_ERR_INTERNAL;
-    }
-    {
-        VerthysResult rc3 = verthys_api_v3_delete(ctx, id);
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return rc3;
-    }
-#else
-#ifdef _WIN32
-    if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
+    /* 非容器格式无删除路径 */
     return VERTHYS_ERR_FORMAT;
-#endif
 }
 
-/* 7a. 批量删除记录（单次 flush 刚性要求）
+/* 7a. 批量删除记录（单次提交刚性要求）
  *
- * 核心收益（V3 语义）：N 条删除仅触发一次事务收口（一次 PREPARE →
- *   COMMIT → CONFIRM），而非 N 次。无论删除多少条记录，磁盘写入量
- *   恒定，仅与索引结构大小相关——连续单条 DeleteRecord 是 N 次完整
- *   事务提交（WAL + 超级块法定人数 + LSM 提交），是 IO 风暴的直接根因。
- *
- * 本函数在单次事务内循环 verthys_txn_v3_delete（墓碑写入 + Extent 引用
- * 释放 + WAL INDEX 记录），最后一次 CONFIRM 统一收口，彻底消除 IO 风暴。
+ * 本函数在单事务内统一写墓碑，末尾一次 DataRoot/元数据提交收口，
+ * 磁盘写入量与条目数解耦。
  *
  * @param handle  Verthys 句柄
  * @param ids     待删除记录 ID 数组
@@ -1956,47 +1149,24 @@ VerthysResult Verthys_DeleteRecords(VerthysHandle handle, const uint64_t *ids, s
 
     /* 写操作入口统一失效查询缓存，防止 UAF */
     ctx_free_getrecord_cache(ctx);
-    /* V3：写路径周期运行时哈希校验（30min 门控） */
+    /* 写路径周期运行时哈希校验（30min 门控） */
     runtime_hash_verify_periodic();
 
-    /* v4：先全量探测再统一写墓碑，一次提交收口 */
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
-        VerthysResult rc4 = verthys_api_v4_delete_many(ctx, ids, count);
+    /* 先全量探测再统一写墓碑，一次提交收口 */
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
+        VerthysResult rc_vault = verthys_api_container_delete_many(ctx, ids, count);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
-        return rc4;
+        return rc_vault;
     }
-#if defined(VERTHYS_V3_SUPPORT)
-    /* V3：V3 分发——单事务批量 DELETE（一次 PREPARE → COMMIT
-     * → CONFIRM 收口，磁盘写入量与条目数解耦；
-     * 任一 ID 不存在 → 整体 NOTFOUND 零副作用返回） */
-    if (ctx->fmt_version != VERTHYS_FMT_V3) {
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return VERTHYS_ERR_INTERNAL;
-    }
-    {
-        VerthysResult rc3 = verthys_api_v3_delete_many(ctx, ids, count);
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return rc3;
-    }
-#else
-#ifdef _WIN32
-    if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
+    /* 非容器格式无批量删除路径 */
     return VERTHYS_ERR_FORMAT;
-#endif
 }
 
-/* 获取存活记录总数（V3-only）
+/* 获取存活记录总数
  *
- * V3 语义：LSM 归并快照精确计数（无摘要缓存，现值直读，与
- * GetContainerInfo.record_count 同源同值）。前端可据此直接渲染列表。
- * 索引结构级损坏整体拒绝，不返回部分计数。
+ * 语义：目录叶全量遍历精确计数（跳过分配器与墓碑）。
  */
 VerthysResult Verthys_GetSummaryCount(VerthysHandle handle, uint64_t *out_count)
 {
@@ -2004,48 +1174,26 @@ VerthysResult Verthys_GetSummaryCount(VerthysHandle handle, uint64_t *out_count)
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-    /* v4：目录叶全量遍历精确计数（跳过分配器与墓碑） */
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
-        VerthysResult rc4;
+    /* 目录叶全量遍历精确计数（跳过分配器与墓碑） */
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
+        VerthysResult rc_vault;
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
-        rc4 = verthys_api_v4_count(ctx, out_count);
+        rc_vault = verthys_api_container_count(ctx, out_count);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif
-        return rc4;
+        return rc_vault;
     }
 
-#if defined(VERTHYS_V3_SUPPORT)
-    /* 收尾：LSM 归并快照精确计数（无摘要缓存，现值直读，与
-     * GetContainerInfo.record_count 同源同值）。索引结构级损坏整体
-     * 拒绝，不返回部分计数。 */
-    {
-        VerthysContextV3 *v = ctx->v3;
-        uint64_t live = 0;
-        VerthysResult rc;
-        if (v == NULL || !v->subsystems_open) return VERTHYS_ERR_INTERNAL;
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
-#endif
-        rc = verthys_api_v3_count_records(v, &live);
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
-        if (rc != VERTHYS_OK) return rc;
-        *out_count = live;
-        return VERTHYS_OK;
-    }
-#else
     return VERTHYS_ERR_FORMAT;
-#endif
 }
 
 /* ================================================================== *
  * 内建诊断接口             *
  *                                                                    *
- * 返回结构化性能与状态指标（解锁耗时分解/缓存命中率/GC 触发次数等）， *
+ * 返回 运行时采集的结构化状态指标（扫描游标/锁等待/预热状态），   *
  * 供安全中心展示和问题定位。所有指标均为非敏感数据。                  *
  *                                                                    *
  * 线程安全：MT-Const（只读操作，可与其它只读操作并发）               *
@@ -2063,47 +1211,13 @@ VerthysResult Verthys_GetDiagnostics(VerthysHandle handle, VerthysDiagnostics *o
 
     memset(out_diag, 0, sizeof(*out_diag));
 
-    /* 解锁耗时分解（最近一次解锁） */
-    out_diag->unlock_total_ms       = ctx->diag_unlock_total_ms;
-    out_diag->unlock_read_ms        = ctx->diag_unlock_read_ms;
-    out_diag->unlock_derive_ms      = ctx->diag_unlock_derive_ms;
-    out_diag->unlock_index_load_ms  = ctx->diag_unlock_index_load_ms;
-    out_diag->unlock_summary_load_ms= ctx->diag_unlock_summary_load_ms;
-    out_diag->unlock_merkle_ms      = ctx->diag_unlock_merkle_ms;
-
-    /* 缓存指标 */
-    out_diag->warm_cache_hits       = ctx->diag_warm_cache_hits;
-    out_diag->warm_cache_misses     = ctx->diag_warm_cache_misses;
-    out_diag->warm_cache_evictions  = ctx->diag_warm_cache_evictions;
-
-    /* 事务与 GC 指标 */
-    out_diag->gc_trigger_count      = ctx->diag_gc_trigger_count;
-    out_diag->gc_reclaimed_slots    = ctx->diag_gc_reclaimed_slots;
-    out_diag->commit_count          = ctx->diag_commit_count;
-    out_diag->rollback_count        = ctx->diag_rollback_count;
-
     /* 扫描指标 */
     out_diag->scan_open_count       = ctx->diag_scan_open_count;
-    out_diag->scan_snapshot_stale   = ctx->diag_scan_snapshot_stale;
-
     /* 胡椒来源（诊断，不暴露胡椒值） */
     out_diag->pepper_source         = (uint8_t)verthys_pepper_get_source();
-
-    /* 可观测性指标扩展（5 项新增指标） */
+    /* 可观测性指标 */
     out_diag->lock_wait_ms          = ctx->diag_lock_wait_ms;
-    out_diag->cache_load_ms         = ctx->diag_cache_load_ms;
-    out_diag->disk_bytes_read       = ctx->diag_disk_bytes_read;
-    out_diag->page_cache_hit_ratio  = (uint32_t)ctx->diag_page_cache_hit_ratio;
-    out_diag->preheat_status        = ctx->diag_preheat_status;
-
-    /* 索引内存映射失败告警累计指标（运维可观测性闭环） */
-    out_diag->idx_mmap_fallback_count = ctx->diag_idx_mmap_fallback_count;
-
-    /* 自适应 Argon2id 漂移监控指标 */
-    out_diag->argon2_baseline_ms    = ctx->argon2_baseline_ms;
-    out_diag->argon2_last_derive_ms = ctx->argon2_last_derive_ms;
-    out_diag->argon2_drift_count    = ctx->argon2_drift_count;
-    out_diag->argon2_auto_degraded  = (uint32_t)ctx->argon2_auto_degraded;
+    /* preheat_status 保留 ABI 字段；当前容器格式无预热状态，保持 0。 */
 
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
@@ -2112,8 +1226,7 @@ VerthysResult Verthys_GetDiagnostics(VerthysHandle handle, VerthysDiagnostics *o
 }
 
 /* ================================================================== *
- * V3（API 版本 0x000B）：
- * 动态防护状态查询
+ * 动态防护状态查询（API 版本 0x000B）：
  *
  * 每次调用执行 RUNTIME 级实时复检（defense_closure_check 内部
  * SRWLOCK 串行化，并发调用安全）；防御状态为进程级事实，不依赖
@@ -2135,7 +1248,7 @@ _Static_assert((int)VERTHYS_DEFENSE_REASON_NONE == (int)DEFENSE_REASON_NONE &&
                (int)VERTHYS_DEFENSE_REASON_NO_RESIDENT_KEY ==
                    (int)DEFENSE_REASON_NO_RESIDENT_KEY &&
                (int)VERTHYS_DEFENSE_REASON_V4_KEYS_USER_RESIDENT ==
-                   (int)DEFENSE_REASON_V4_KEYS_USER_RESIDENT &&
+                   (int)DEFENSE_REASON_KEYS_USER_RESIDENT &&
                (int)VERTHYS_DEFENSE_REASON_HIBERNATION_ENABLED ==
                    (int)DEFENSE_REASON_HIBERNATION_ENABLED &&
                (int)VERTHYS_DEFENSE_REASON_HIBERNATION_UNKNOWN ==
@@ -2204,7 +1317,7 @@ VerthysResult Verthys_GetSecurityStatus(VerthysHandle handle,
     /* 快照锁序：registry → ctx。
      *
      * registry 共享锁保证 Verthys_Deinit 的注销与释放不会发生在复制期间
-     *（注销本身持 registry 独占锁）；ctx 共享锁保证 v4 会话指针与绑定
+     *（注销本身持 registry 独占锁）；ctx 共享锁保证 会话指针与绑定
      * 事实一致。复制完成后立即释放两把锁，随后才获取 defense_closure
      * 的检查锁——禁止嵌套 ctx 锁与检查锁。
      *
@@ -2230,11 +1343,11 @@ VerthysResult Verthys_GetSecurityStatus(VerthysHandle handle,
     }
 #endif
 
-    facts.any_unlocked_v4 = v4_session_resident_count();
-    if (ctx->fmt_version == VERTHYS_FMT_V4 && ctx->v4 != NULL) {
+    facts.any_unlocked_session = vault_session_resident_count();
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER && ctx->vault != NULL) {
         VtyVaultBindingInfo binding;
-        if (vty_vault_binding_info(ctx->v4, &binding) == VTY_OK) {
-            facts.queried_unlocked_v4  = binding.unlocked;
+        if (vty_vault_binding_info(ctx->vault, &binding) == VTY_OK) {
+            facts.queried_unlocked_session  = binding.unlocked;
             facts.queried_device_bound = binding.device_bound;
             facts.queried_pcr_bound    = binding.pcr_bound;
         }
@@ -2278,8 +1391,7 @@ VerthysResult Verthys_GetSecurityStatus(VerthysHandle handle,
  * 在不锁定的情况下主动将内存中的索引变更刷写到磁盘，                *
  * 保证崩溃恢复一致性。                                               *
  *                                                                    *
- * V3（V3-only）：MemTable 强制 flush（冻结落盘 L0 SSTable → Manifest  *
- * 原子提交 → WAL 复位，全链 _commit 物理落盘）；空 MemTable 为 no-op  *
+ * 提交 DataRoot/元数据变更并物理落盘。                          *
  *                                                                    *
  * 线程安全：MT-Safe（内部递归互斥锁保护）                            *
  * ================================================================== */
@@ -2296,66 +1408,18 @@ VerthysResult Verthys_Flush(VerthysHandle handle)
 
     /* 写操作入口统一失效查询缓存，防止 UAF */
     ctx_free_getrecord_cache(ctx);
-    /* V3：写路径周期运行时哈希校验（30min 门控） */
+    /* 写路径周期运行时哈希校验（30min 门控） */
     runtime_hash_verify_periodic();
 
-    /* V3：V3 刷盘路径。
-     *
-     * V3 无长事务（单调用事务以 CONFIRM 收口），Flush 的持久化对象是
-     * LSM MemTable 中已提交条目：verthys_lsm_flush 冻结当前表 → 落盘 L0
-     * SSTable（fsync）→ Manifest 原子提交（fsync）→ WAL 复位（提交
-     * 边界语义同 verthys_lsm.h）；空 MemTable 幂等 no-op。
-     * 事务状态机保护：ACTIVE 态调用 Flush = 调用方在事务中途触碰
-     * 独立入口（API 单调用事务契约下不可达），拒绝并保持现场。 */
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
-        VerthysResult rc4 = verthys_api_v4_flush(ctx);
+    /* 刷盘：DataRoot/元数据提交（api_mutex 已持有）。 */
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
+        VerthysResult rc_vault = verthys_api_container_flush(ctx);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
-        return rc4;
+        return rc_vault;
     }
-#if defined(VERTHYS_V3_SUPPORT)
-    if (ctx->fmt_version != VERTHYS_FMT_V3) {
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return VERTHYS_ERR_INTERNAL;
-    }
-    {
-        VerthysResult rc3;
-        VerthysContextV3 *v3 = ctx->v3;
-
-        if (v3 == NULL || !v3->subsystems_open) {
-#ifdef _WIN32
-            if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-            return VERTHYS_ERR_LOCKED;
-        }
-        /* 事务状态机保护：仅拒绝事务中途态（ACTIVE/PREPARED/COMMITTED——
-         * 调用方在单调用事务未收口时触碰独立入口，API 契约下不可达）。
-         * 静息态（IDLE/CONFIRMED/ABORTED）与 verthys_txn_v3_begin 的可开新
-         * 事务状态集一致：CONFIRMED 是已确认事务的正常终态（begin 接受），
-         * MemTable 中已提交条目正是 Flush 的持久化对象。 */
-        {
-            VerthysTxnV3State st = verthys_txn_v3_state(&v3->txn);
-            if (st != VERTHYS_TXN_V3_IDLE && st != VERTHYS_TXN_V3_CONFIRMED &&
-                st != VERTHYS_TXN_V3_ABORTED) {
-#ifdef _WIN32
-                if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-                return VERTHYS_ERR_INTERNAL;
-            }
-        }
-
-        rc3 = verthys_lsm_flush(v3->lsm);
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
-#endif
-        return rc3;
-    }
-#else
     return VERTHYS_ERR_FORMAT;
-#endif
 }
 
 /* ================================================================== *
@@ -2382,9 +1446,8 @@ VerthysResult Verthys_GetContainerInfo(VerthysHandle handle, VerthysContainerInf
 
     memset(out_info, 0, sizeof(*out_info));
     out_info->api_version = VERTHYS_API_VERSION;
-    out_info->fmt_version = (ctx->fmt_version == VERTHYS_FMT_V4)
-                                ? (uint16_t)VERTHYS_FMT_V4
-                                : (uint16_t)VERTHYS_FMT_V3;
+    /* 编译期能力：本实现唯一支持的容器格式版本。 */
+    out_info->fmt_version = (uint16_t)VERTHYS_CONTAINER_FORMAT_VERSION;
     out_info->preset = (uint16_t)ctx->preset;
     out_info->last_fullscan_time = ctx->last_fullscan_time;
     out_info->warm_cache_enabled = (uint8_t)ctx->warm_cache_enabled;
@@ -2398,22 +1461,22 @@ VerthysResult Verthys_GetContainerInfo(VerthysHandle handle, VerthysContainerInf
         return VERTHYS_OK;
     }
 
-    /* v4：数据区尚未提交记录（PI-1 只交付格式与会话），统计字段按
+    /* 数据区尚未提交记录（当前只交付格式与会话），统计字段按
      * DataRoot 高水位如实报告，不伪造 record_count。 */
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
-        if (ctx->v4 == NULL) {
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
+        if (ctx->vault == NULL) {
 #ifdef _WIN32
             if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif
             return VERTHYS_ERR_INTERNAL;
         }
-        out_info->txid = ctx->v4->header.generation;
+        out_info->txid = ctx->vault->header.generation;
         out_info->data_region_size =
-            ctx->v4->data_root.data_end - VTY_V4_DATA_OFFSET;
+            ctx->vault->data_root.data_end - VTY_DATA_OFFSET;
         out_info->data_used_bytes = out_info->data_region_size;
         {
             uint64_t live = 0;
-            VerthysResult cr = verthys_api_v4_count(ctx, &live);
+            VerthysResult cr = verthys_api_container_count(ctx, &live);
             if (cr != VERTHYS_OK) {
 #ifdef _WIN32
                 if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
@@ -2427,8 +1490,8 @@ VerthysResult Verthys_GetContainerInfo(VerthysHandle handle, VerthysContainerInf
         out_info->cumulative_write_bytes = 0;
         out_info->merkle_pending = 0;
         out_info->has_keyfile =
-            (uint8_t)((ctx->v4->header.flags & VTY_FLAG_KEYFILE) != 0);
-        memcpy(out_info->container_id, ctx->v4->header.vault_uuid,
+            (uint8_t)((ctx->vault->header.flags & VTY_FLAG_KEYFILE) != 0);
+        memcpy(out_info->container_id, ctx->vault->header.vault_uuid,
                VTY_UUID_BYTES);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
@@ -2436,67 +1499,7 @@ VerthysResult Verthys_GetContainerInfo(VerthysHandle handle, VerthysContainerInf
         return VERTHYS_OK;
     }
 
-#if defined(VERTHYS_V3_SUPPORT)
-    /* 收尾：V3 唯一数据通路——超级块/LSM/分区表为权威数据源
-     * （无 ctx 镜像字段依赖，全部现值直读，杜绝解锁时快照过期）。
-     * 就绪断言与 CRUD 同规：UNLOCKED 且 subsystems_open 方可报告。 */
-    {
-        VerthysContextV3 *v = ctx->v3;
-        uint64_t live = 0;
-        if (v == NULL || !v->subsystems_open || v->lsm == NULL) {
-#ifdef _WIN32
-            if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
-            return VERTHYS_ERR_INTERNAL;
-        }
-        out_info->txid = v->sb.txid;
-        /* record_count：归并快照精确计数（estimate 为近似值，见
-         * verthys_api_v3_count_records 注记）；索引结构级损坏整体拒绝 */
-        {
-            VerthysResult cr = verthys_api_v3_count_records(v, &live);
-            if (cr != VERTHYS_OK) {
-#ifdef _WIN32
-                if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
-                return cr;
-            }
-        }
-        out_info->record_count = live;
-        out_info->index_region_size = v->sb.index_partition_size;
-        out_info->data_region_size = v->sb.extent_partition_size;
-        /* Extent 分区已用字节（含待 GC 回收块，与 v2 data_used_bytes 语义
-         * 对齐：写路径随追加推进，GC 前单调不减） */
-        out_info->data_used_bytes =
-            (v->txn.extent_part != NULL) ? v->txn.extent_part->used : 0;
-        /* last_modified_time：sb.updated_at（FILETIME，事务提交点更新）
-         * → Unix 秒。FILETIME(1601 纪元,100ns) → Unix(1970 纪元,秒)。 */
-        out_info->last_modified_time =
-            (v->sb.updated_at > UINT64_C(116444736000000000))
-                ? (v->sb.updated_at - UINT64_C(116444736000000000))
-                      / UINT64_C(10000000)
-                : 0;
-        /* V3 无 mount_count / cumulative_write_bytes 记账（挂载审计属
-         * Audit 分区职责；防回滚由超级块 state_chain 密码学承担）——
-         * 如实报告 0，不伪造数据。merkle_pending 同理为 0：V3 超级块
-         * merkle_root 为提交点同步锚定，无后台重建窗口。 */
-        out_info->mount_count = 0;
-        out_info->cumulative_write_bytes = 0;
-        out_info->merkle_pending = 0;
-        /* container_id：V3 为 32B（VERTHYS_V3_CONTAINER_ID_BYTES），公共
-         * 结构体契约 16B——截取前 16B（展示标识，非完整性键） */
-        memcpy(out_info->container_id, v->sb.container_id, 16);
-    }
-#else
-#ifdef _WIN32
-    if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
     return VERTHYS_ERR_FORMAT;
-#endif
-
-#ifdef _WIN32
-    if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
-    return VERTHYS_OK;
 }
 
 /* ================================================================== *
@@ -2528,162 +1531,35 @@ VerthysResult Verthys_VerifyIntegrity(VerthysHandle handle,
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
     if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
 
-#if defined(VERTHYS_V3_SUPPORT)
-    uint64_t local_failed_count = 0;
-#endif
-
     /* 递归互斥锁保护（遍历期间阻止并发写） */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
 
-    /* v4：目录/DataRoot 结构校验 + 逐条记录段 hash/AEAD 校验。
+    /* 目录/DataRoot 结构校验 + 逐条记录段 hash/AEAD 校验。
      * 单条损坏记入 failed_lids，结构级损坏整体拒绝。 */
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
-        VerthysResult rc4 = verthys_api_v4_verify(ctx, out_failed_lids,
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
+        VerthysResult rc_vault = verthys_api_container_verify(ctx, out_failed_lids,
                                                   max_failed,
                                                   out_failed_count);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif
-        return rc4;
-    }
-#if defined(VERTHYS_V3_SUPPORT)
-    if (ctx->fmt_version != VERTHYS_FMT_V3) {
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
-        return VERTHYS_ERR_INTERNAL;
+        return rc_vault;
     }
 
-    /* 收尾：V3 唯一数据通路——LSM 快照全量遍历 + 逐条 Extent 双重
-     * 完整性验证（AEAD 认证 + BLAKE2b 内容哈希，verthys_extent_get
-     * 内建）。语义（检查类 API 惯例）：
-     *   - 单条数据损坏（AUTH/CORRUPT/NOTFOUND/长度不符/索引不变量
-     *     破坏）→ 记入 failed LID，遍历继续（检查类 API 惯例：
-     *     返回 VERTHYS_OK，损坏经 out_failed_count 表明）；
-     *   - 索引结构级损坏（迭代器中途 AUTH/IO，无法继续枚举）→
-     *     整体拒绝上抛（与 Export 同纪律：杜绝静默不完整校验）。 */
-    {
-        VerthysContextV3 *v = ctx->v3;
-        VerthysLsmScanIter *it = NULL;
-        VerthysResult src;
-        if (v == NULL || !v->subsystems_open || v->lsm == NULL ||
-            v->ext_idx == NULL || v->txn.extent_part == NULL) {
-#ifdef _WIN32
-            if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
-            return VERTHYS_ERR_INTERNAL;
-        }
-
-        src = verthys_lsm_scan_open(v->lsm, &it);
-        if (src != VERTHYS_OK) {
-#ifdef _WIN32
-            if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
-            return src;
-        }
-        {
-            VerthysLsmEntry e;
-            uint8_t name_buf[VERTHYS_NAME_MAX_BYTES];
-            size_t name_len = 0;
-            for (;;) {
-                src = verthys_lsm_scan_next(it, &e, name_buf,
-                                          sizeof(name_buf), &name_len);
-                if (src == VERTHYS_ERR_NOTFOUND) break;    /* 全源耗尽 */
-                if (src != VERTHYS_OK) {
-                    /* 结构级损坏：校验未完成，不可伪报干净结果 */
-                    verthys_lsm_scan_close(it);
-#ifdef _WIN32
-                    if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
-                    return src;
-                }
-                /* FREE 槽位跳过（与 v2 分支 / FindFirstLidByType 同规） */
-                if (e.slot_state == VERTHYS_SLOT_FREE) continue;
-
-                /* 索引不变量（与 GetRecord 同规）：背离即索引/Extent
-                 * 交叉损坏，按损坏条目记账 */
-                if (e.data_size != (uint64_t)e.plaintext_size) {
-                    if (out_failed_lids != NULL &&
-                        local_failed_count < max_failed) {
-                        out_failed_lids[local_failed_count] = e.lid;
-                    }
-                    local_failed_count++;
-                    continue;
-                }
-                {
-                    /* 解密缓冲（extent_get 契约 pt 非 NULL：空数据走
-                     * 1 字节哑缓冲，与 GetRecord 同规） */
-                    size_t alloc_len =
-                        (e.plaintext_size > 0) ? (size_t)e.plaintext_size : 1u;
-                    size_t cap = alloc_len;
-                    uint8_t *data = (uint8_t *)malloc(alloc_len);
-                    VerthysResult r2;
-                    if (data == NULL) {
-                        verthys_lsm_scan_close(it);
-#ifdef _WIN32
-                        if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
-                        return VERTHYS_ERR_INTERNAL;
-                    }
-                    r2 = verthys_extent_get(v->f, v->txn.extent_part,
-                                          v->ext_idx, e.hash, data, &cap);
-                    if (r2 != VERTHYS_OK || cap != (size_t)e.plaintext_size) {
-                        if (out_failed_lids != NULL &&
-                            local_failed_count < max_failed) {
-                            out_failed_lids[local_failed_count] = e.lid;
-                        }
-                        local_failed_count++;
-                    }
-                    /* 仅校验不留存：明文即读即清（敏感数据不驻留） */
-                    verthys_secure_zero(data, alloc_len);
-                    free(data);
-                }
-            }
-        }
-        verthys_lsm_scan_close(it);
-        it = NULL;
-
-        /* 更新全量校验时间戳（Verthys_VerifyIntegrity 提交点记账） */
-        ctx->last_fullscan_tx = v->sb.txid;
-        ctx->last_fullscan_time = (uint64_t)time(NULL);
-        ctx->incremental_count = 0;
-    }
-
-#ifdef _WIN32
-    if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
-
-    if (out_failed_count != NULL) {
-        *out_failed_count = local_failed_count;
-    }
-
-    /* 检查类 API 惯例
-     * 校验操作本身成功完成即返回 VERTHYS_OK；
-     * 是否发现损坏由 *out_failed_count > 0 表明（调用方必填此参数）。
-     * 不再返回 VERTHYS_ERR_CORRUPT，该错误码保留给读取类接口使用。 */
-    return VERTHYS_OK;
-#else
-    /* 产品（v4-only）：v3 容器不存在可达路径 */
+    /* 非容器格式无校验路径 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif
     return VERTHYS_ERR_FORMAT;
-#endif
 }
 
 /* ================================================================== *
  * Verthys_VerifyPersist 落盘自查接口
  *
- * 为什么必须由 C 层实现：Windows 字节范围锁为强制锁——会话期内 C 层
- * 以独占方式持有超级块区 [0,64KB)。同进程内只有持锁句柄本身可自由
- * 读写该区间；任何"外部新开句柄"读取都会被内核以 ERROR_LOCK_VIOLATION
- * 拒绝（os error 33），这正是主机侧 std::fs::File::open 校验恒失败的
- * 根因。故本接口全部结构读取都走会话持锁句柄 ctx->v3->f。
- *
- * 幂等、只读、无副作用：不改会话状态、不写盘、不 fflush；仅一次流游标
- * 复位（不影响任何后续显式 seek 的调用方）。
+ * 会话在解锁态持有 库句柄；自查读取 DataRoot 指向的根段并复核摘要，
+ * 不改会话状态、不写盘、无副作用。
  * ================================================================== */
 /* 写入静态错误文案：last_error 仅承载稳定短文案（no printf family——
  * 数值细节由结构体的 header_magic / header_version / file_size /
@@ -2702,14 +1578,6 @@ VerPersistStatus Verthys_VerifyPersist(VerthysHandle handle,
                                        VerPersistVerifyResult *out_result)
 {
     struct VerthysContext *ctx;
-#if defined(VERTHYS_V3_SUPPORT)
-    VerthysContextV3 *v;
-    FILE *f;
-    uint8_t hdr[128];
-    uint8_t wal_probe[16];
-    uint32_t magic, plen;
-    int64_t fsz;
-#endif
 
     if (out_result == NULL) return VERTHYS_PERSIST_E_INTERNAL;
     memset(out_result, 0, sizeof(*out_result));
@@ -2723,22 +1591,22 @@ VerPersistStatus Verthys_VerifyPersist(VerthysHandle handle,
         return out_result->status;
     }
 
-    /* v4：校验会话 DataRoot 指向的根段仍在盘上且摘要一致。
-     * 与 v3 的 WAL/超级块自查同语义，只是持久化对象换成 DataRoot。 */
-    if (ctx->fmt_version == VERTHYS_FMT_V4) {
+    /* 校验会话 DataRoot 指向的根段仍在盘上且摘要一致。
+     * 旧实现以 WAL/超级块自查达成同语义，当前持久化对象为 DataRoot。 */
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
         VtyPersistCheck chk;
         int rc;
 
         memset(&chk, 0, sizeof(chk));
-        if (ctx->v4 == NULL || !ctx->v4->unlocked || ctx->v4->store == NULL) {
+        if (ctx->vault == NULL || !ctx->vault->unlocked || ctx->vault->store == NULL) {
             out_result->status = VERTHYS_PERSIST_E_INTERNAL;
-            ver_persist_set_error(out_result, "no active v4 session");
+            ver_persist_set_error(out_result, "no active session");
             return out_result->status;
         }
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
 #endif
-        rc = vty_vault_verify_persist(ctx->v4, &chk);
+        rc = vty_vault_verify_persist(ctx->vault, &chk);
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif
@@ -2754,7 +1622,7 @@ VerPersistStatus Verthys_VerifyPersist(VerthysHandle handle,
             ver_persist_set_error(out_result, "data root read io failed");
         } else if (rc == VTY_E_CORRUPT) {
             out_result->status =
-                (chk.file_size < ctx->v4->data_root.data_end)
+                (chk.file_size < ctx->vault->data_root.data_end)
                     ? VERTHYS_PERSIST_E_SIZE_MISMATCH
                     : VERTHYS_PERSIST_E_HEADER_INVALID;
             ver_persist_set_error(out_result, "data root verification failed");
@@ -2765,112 +1633,8 @@ VerPersistStatus Verthys_VerifyPersist(VerthysHandle handle,
         return out_result->status;
     }
 
-#if defined(VERTHYS_V3_SUPPORT)
-    if (ctx->v3 == NULL || ctx->v3->f == NULL) {
-        out_result->status = VERTHYS_PERSIST_E_INTERNAL;
-        ver_persist_set_error(out_result, "no active v3 session");
-        return out_result->status;
-    }
-    v = ctx->v3;
-    f = v->f;
-
-#ifdef _WIN32
-    if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
-#endif
-
-    /* 1. 头部 128 字节可读（偏移 0，持锁句柄） */
-    if (vio_fseek64(f, 0, SEEK_SET) != 0) {
-        out_result->status = VERTHYS_PERSIST_E_IO;
-        ver_persist_set_error(out_result, "fseek(0) failed");
-        goto verify_done;
-    }
-    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
-        out_result->status = VERTHYS_PERSIST_E_HEADER_INVALID;
-        ver_persist_set_error(out_result, "header read shorter than 128 bytes");
-        goto verify_done;
-    }
-
-    /* 2. 副本帧头：磁盘偏移 0 为 Replica-0，布局 [u32 magic 'V3RP'][u32 payload_len] */
-    magic = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) |
-            ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
-    plen  = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) |
-            ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
-    out_result->header_magic = magic;
-    /* 格式版本：磁盘帧头本身仅含 magic + payload_len，版本字段位于
-     * FlatBuffers 载荷内；此处复用会话 S1-S3 已裁决（HMAC + 法定人数）
-     * 的超级块版本，避免在自查路径重做一遍重解析。 */
-    out_result->header_version = (uint32_t)v->sb.version;
-
-    if (magic != VERTHYS_V3_REPLICA_FRAME_MAGIC) {
-        out_result->status = VERTHYS_PERSIST_E_HEADER_INVALID;
-        ver_persist_set_error(out_result, "frame magic mismatch");
-        goto verify_done;
-    }
-    if (plen == 0 || plen > VERTHYS_V3_SB_REPLICA_BYTES - 8u) {
-        out_result->status = VERTHYS_PERSIST_E_HEADER_INVALID;
-        ver_persist_set_error(out_result, "frame payload_len out of range");
-        goto verify_done;
-    }
-
-    /* 3. 文件大小不低于 V3 固定布局区下限（分区表结束 = 4MB） */
-    if (vio_fseek64(f, 0, SEEK_END) != 0) {
-        out_result->status = VERTHYS_PERSIST_E_IO;
-        ver_persist_set_error(out_result, "fseek(END) failed");
-        goto verify_done;
-    }
-    fsz = vio_ftell64(f);
-    if (fsz < 0) {
-        out_result->status = VERTHYS_PERSIST_E_IO;
-        ver_persist_set_error(out_result, "ftell failed");
-        goto verify_done;
-    }
-    out_result->file_size = (uint64_t)fsz;
-    if (out_result->file_size < VERTHYS_V3_PARTITION_TABLE_END) {
-        out_result->status = VERTHYS_PERSIST_E_SIZE_MISMATCH;
-        ver_persist_set_error(out_result, "file_size below layout floor");
-        goto verify_done;
-    }
-
-    /* 文件修改时间（非关键元数据，取不到如实留 0，不判失败） */
-#ifdef _WIN32
-    {
-        struct _stat64 st;
-        if (_fstat64(_fileno(f), &st) == 0 && st.st_mtime > 0) {
-            out_result->mtime_ms = (uint64_t)st.st_mtime * 1000u;
-        }
-    }
-#else
-    {
-        struct stat st;
-        if (fstat(fileno(f), &st) == 0 && st.st_mtime > 0) {
-            out_result->mtime_ms = (uint64_t)st.st_mtime * 1000u;
-        }
-    }
-#endif
-
-    /* 4. WAL 区起始偏移处可读（文件大小已过 4MB，此读必落在文件内） */
-    out_result->wal_offset = VERTHYS_V3_WAL_REGION_OFFSET;
-    if (vio_pread64(f, out_result->wal_offset, wal_probe,
-                    sizeof(wal_probe)) != 0) {
-        out_result->status = VERTHYS_PERSIST_E_WAL_REGION;
-        ver_persist_set_error(out_result, "wal region unreadable");
-        goto verify_done;
-    }
-
-    out_result->status = VERTHYS_PERSIST_OK;
-
-verify_done:
-    /* 复位流游标至文件头：自查是穿插在会话 IO 之间的旁路读，复位可避免
-     * 依赖"调用方总会先 seek"的隐式假设（非会话状态变更，无写盘副作用）。 */
-    (void)vio_fseek64(f, 0, SEEK_SET);
-#ifdef _WIN32
-    if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
-#endif
-    return out_result->status;
-#else
-    /* 产品（v4-only）：无 v3 会话，受锁句柄自查不可用 */
+    /* 非容器格式无持久化自查路径 */
     out_result->status = VERTHYS_PERSIST_E_INTERNAL;
     ver_persist_set_error(out_result, "no active unlocked session");
     return out_result->status;
-#endif
 }

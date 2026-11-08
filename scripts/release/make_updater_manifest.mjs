@@ -13,14 +13,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
-const CORE_API_HEADER = resolve(REPO_ROOT, "core", "include", "verthys.h");
-const CORE_CONTAINER_HEADER = resolve(
+const CORE_VERSION_HEADER = resolve(
   REPO_ROOT,
   "core",
-  "src",
-  "container",
-  "shared",
-  "verthys_container_v3.h",
+  "include",
+  "verthys_version.h",
 );
 const DEFAULT_OUT = resolve(REPO_ROOT, "build", "updater", "latest.json");
 const DEFAULT_TARGET = "windows-x86_64";
@@ -89,9 +86,10 @@ export function parseDefineU32(source, symbol) {
 
 /** 读取当前核心的 ABI 与容器格式版本。 */
 export function readCoreVersions() {
+  const source = readFileSync(CORE_VERSION_HEADER, "utf8");
   return {
-    api: parseDefineU32(readFileSync(CORE_API_HEADER, "utf8"), "VERTHYS_API_VERSION"),
-    container: parseDefineU32(readFileSync(CORE_CONTAINER_HEADER, "utf8"), "VERTHYS_V3_VERSION"),
+    api: parseDefineU32(source, "VERTHYS_API_VERSION"),
+    container: parseDefineU32(source, "VERTHYS_CONTAINER_FORMAT_VERSION"),
   };
 }
 

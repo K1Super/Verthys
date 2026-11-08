@@ -212,7 +212,7 @@ pub(crate) fn handle_derive_and_store_global_key(req: &Request, worker: &Worker)
         }
     }
 
-    // 2. 写入新记录（V3 单调用事务：WAL 逐帧 _commit + 超块法定人数即时落盘）
+    // 2. 写入新记录（单调用原子写入）
     let id = match worker.call_add_record(TYPE_GLOBAL_KEY as u32, GLOBAL_KEY_NAME, &record) {
         Ok(id) => id,
         Err(code) => {

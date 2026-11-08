@@ -228,16 +228,6 @@ impl ApiError {
         }
     }
 
-    /// 创建自定义消息的错误（仍须保证脱敏）。
-    pub fn with_message(code: ErrorCode, message: impl Into<String>) -> Self {
-        let message = message.into();
-        ApiError {
-            code,
-            message,
-            details: None,
-        }
-    }
-
     /// 创建带内部详情的错误，详情不发送至前端。
     pub fn with_details(
         code: ErrorCode,
@@ -297,16 +287,6 @@ impl<T> ApiResponse<T> {
         }
     }
 
-    /// 创建空成功响应（无数据）。
-    pub fn success_empty() -> Self {
-        ApiResponse {
-            api_version: API_VERSION,
-            ok: true,
-            data: None,
-            error: None,
-        }
-    }
-
     /// 创建错误响应。
     pub fn error(err: ApiError) -> Self {
         ApiResponse {
@@ -317,10 +297,6 @@ impl<T> ApiResponse<T> {
         }
     }
 
-    /// 根据错误码快捷创建错误响应（自动填充默认消息）。
-    pub fn from_error_code(code: ErrorCode) -> Self {
-        Self::error(ApiError::new(code))
-    }
 }
 
 // ===== 各操作特化响应类型 =====
@@ -343,43 +319,4 @@ pub struct ScanOpenResponse {
     pub exhausted: bool,
 }
 
-/// `scan_next` 操作的响应数据。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScanNextResponse {
-    /// 本次返回的记录数
-    pub record_count: u64,
-    /// 是否已完成全部遍历
-    pub exhausted: bool,
-}
 
-/// `derive_global_key` 操作的响应数据。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeriveKeyResponse {
-    /// 派生是否成功
-    pub derived: bool,
-}
-
-/// `verify_global_key` 操作的响应数据。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifyKeyResponse {
-    /// 验证是否成功（密码正确）
-    pub verified: bool,
-}
-
-/// `verthys_unlock` 操作的响应数据。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnlockResponse {
-    /// 解锁是否成功
-    pub unlocked: bool,
-}
-
-/// `enumerate_records` 操作的响应数据。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnumerateResponse {
-    /// 记录列表
-    pub records: Vec<crate::controller::types::VerthysRecordEntry>,
-    /// 本批最后一条记录的 ID（0 表示无记录）
-    pub last_id: u64,
-    /// 是否已遍历完毕
-    pub exhausted: bool,
-}

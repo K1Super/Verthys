@@ -31,14 +31,14 @@ pub(crate) struct Request {
     pub(crate) op: String,
     #[serde(default)]
     pub(crate) path: String,
-    /// v4 D9 轮换临时新库路径（仅 v4_rotate_begin 消费）。
+    /// 轮换临时新库路径（仅 v4_rotate_begin 消费）。
     /// 必须不存在且与源库同目录；worker 只转发，具体校验由 C 层完成。
     #[serde(default)]
     pub(crate) new_path: String,
-    /// v4 D9 轮换提交时是否保留旧库备份（仅 v4_rotate_commit 消费）
+    /// 轮换提交时是否保留旧库备份（仅 v4_rotate_commit 消费）
     #[serde(default)]
     pub(crate) keep_old: bool,
-    /// v4 D9 轮换 Run 的取消事件名（父进程创建的命名事件；仅 v4_rotate_run 消费）
+    /// 轮换 Run 的取消事件名（父进程创建的命名事件；仅 v4_rotate_run 消费）
     #[serde(default)]
     pub(crate) cancel_event: String,
     /// 路径授权的模式（read/write；仅 authorize_path 消费）
@@ -100,24 +100,24 @@ pub(crate) struct Request {
     // INDEX 投影的内联数据字节阈值（scan_open；0 = 纯索引，任何记录都不取数）
     #[serde(default)]
     pub(crate) inline_max_bytes: u64,
-    // v4 模块 M1 的模块索引（0=photo/1=accounts/2=fileverthys；
+    // 模块 M1 的模块索引（0=photo/1=accounts/2=fileverthys；
     // 0xFFFFFFFF 仅 v4_module_lock 表示全部）
     #[serde(default)]
     pub(crate) module_id: u32,
-    // v4 PCR 位图（PCR0–23），仅 v4_pcr_enable 消费
+    // PCR 位图（PCR0–23），仅 v4_pcr_enable 消费
     #[serde(default)]
     pub(crate) pcr_select: u32,
-    // v4 模块启用/绑定恢复槽时的当前容器恢复码（可空）
+    // 模块启用/绑定恢复槽时的当前容器恢复码（可空）
     #[serde(default)]
     pub(crate) recovery_code: Zeroizing<String>,
-    // v4 keyfile 因子（D3）：VKFL 文件绝对路径（仅 keyfile 系列 op 消费）。
+    // keyfile 因子：VKFL 文件绝对路径（仅 keyfile 系列 op 消费）。
     // 只传路径；文件内容由 C 层在 worker 进程内读取，不进入 IPC 载荷。
     #[serde(default)]
     pub(crate) keyfile_path: String,
-    // v4 恢复码轮换时的旧恢复码
+    // 恢复码轮换时的旧恢复码
     #[serde(default)]
     pub(crate) old_recovery: Zeroizing<String>,
-    // v4 模块删除的二次确认字面量（必须为 "DELETE"，非密钥）
+    // 模块删除的二次确认字面量（必须为 "DELETE"，非密钥）
     #[serde(default)]
     pub(crate) confirm: String,
     // 内容层加密的模块标识（photo / file）
@@ -140,9 +140,6 @@ pub(crate) struct Request {
     // 文件块 v2 的 PBKDF2 迭代次数；0 表示采用缺省值
     #[serde(default)]
     pub(crate) iterations: u32,
-    /* 注意：旧版 module_seal/open 的 wrapped_key 参数已随 v3 内容路径退役。
-     * 请求里若仍携带该字段，serde 按未知字段忽略——它不是密钥材料，
-     * v4 分片的外层密钥由 C 层 MDEK 持有。 */
 }
 
 /// 批量枚举返回的单条记录（用于 enumerate_records / scan_fetch 操作）
@@ -200,6 +197,9 @@ pub(crate) struct Response {
     pub(crate) data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+    /// 锁定/限流的建议等待秒数（0x0A RATE / 0x1D MODULE_LOCKED 响应携带）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) retry_after_secs: Option<u64>,
     /// 批量枚举记录列表（仅 enumerate_records / scan_fetch 操作返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) records: Option<Vec<RecordEntry>>,
@@ -267,16 +267,16 @@ pub(crate) struct Response {
     /// 记录型块密文内嵌的块总数（仅 module_open 的 chunk 布局返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) total: Option<u32>,
-    /// v4 模块加密是否已启用（仅 v4_module_status 返回）
+    /// 模块加密是否已启用（仅 v4_module_status 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) enabled: Option<bool>,
-    /// v4 模块本会话是否已解锁（仅 v4_module_status 返回）
+    /// 模块本会话是否已解锁（仅 v4_module_status 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unlocked: Option<bool>,
-    /// v4 模块是否已绑定恢复码槽（仅 v4_module_status 返回）
+    /// 模块是否已绑定恢复码槽（仅 v4_module_status 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) has_recovery: Option<bool>,
-    /// v4 模块是否已删除（仅 v4_module_status 返回）
+    /// 模块是否已删除（仅 v4_module_status 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) deleted: Option<bool>,
     /// PCR 是否已启用（仅 v4_pcr_status 返回）
@@ -285,17 +285,17 @@ pub(crate) struct Response {
     /// PCR 位图（PCR0–23，仅 v4_pcr_status 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pcr_select: Option<u32>,
-    /// v4 keyfile 因子是否已启用（仅 v4_keyfile_status 返回）
+    /// keyfile 因子是否已启用（仅 v4_keyfile_status 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) keyfile_enabled: Option<bool>,
     /// 当前会话是否由恢复码打开（仅 v4_keyfile_status 返回）；
     /// 恢复会话允许重绑/关闭 keyfile（丢失逃生）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) recovery_mode: Option<bool>,
-    /// v4 恢复码轮换成功后的新码（仅本条响应内有效，序列化后立即清零）
+    /// 恢复码轮换成功后的新码（仅本条响应内有效，序列化后立即清零）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) recovery_code: Option<String>,
-    /* v4 D9 全库 DEK 轮换统计（仅 v4_rotate_begin 返回）。
+    /* 全库 DEK 轮换统计（仅 v4_rotate_begin 返回）。
      * 字段前缀 rotate_ 避免与既有 records（批量记录列表）语义冲突。 */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rotate_stage: Option<u32>,
@@ -341,6 +341,7 @@ impl Response {
             name: None,
             data: None,
             error: None,
+            retry_after_secs: None,
             records: None,
             exhausted: None,
             shm_name: None,
@@ -422,6 +423,7 @@ impl Response {
         const VERTHYS_ERR_MODULE_LOCKED: u32 = 0x0000001D;
         const VERTHYS_ERR_NO_SPACE: u32 = 0x0000001E;
         const VERTHYS_ERR_VERIFY: u32 = 0x0000001F;
+        const VERTHYS_ERR_SECURITY_STATE: u32 = 0x00000020;
 
         let unified_code = match code {
             VERTHYS_ERR_INVALID
@@ -448,7 +450,8 @@ impl Response {
             | VERTHYS_ERR_ROTATE_PENDING
             | VERTHYS_ERR_MODULE_LOCKED
             | VERTHYS_ERR_NO_SPACE
-            | VERTHYS_ERR_VERIFY => code,
+            | VERTHYS_ERR_VERIFY
+            | VERTHYS_ERR_SECURITY_STATE => code,
             // AUTH(0x02)/FORMAT(0x05)/IO(0x08)/CORRUPT(0x09)/INTERNAL(0xFFFFFFFF)
             // 及未知码全部统一为 AUTH（反信息泄露）
             _ => VERTHYS_ERR_AUTH,
@@ -462,6 +465,7 @@ impl Response {
             name: None,
             data: None,
             error: Some(format!("ERR_{:08X}", unified_code)),
+            retry_after_secs: None,
             records: None,
             exhausted: None,
             shm_name: None,
@@ -497,6 +501,15 @@ impl Response {
             rotate_chunks: None,
             rotate_bytes: None,
         }
+    }
+
+    /// 锁定/限流错误响应：附建议等待秒数（仅 0x0A / 0x1D 路径使用）。
+    pub(crate) fn err_with_retry(op: &str, code: u32, retry_after_secs: u64) -> Self {
+        let mut resp = Self::err(op, code);
+        if retry_after_secs > 0 {
+            resp.retry_after_secs = Some(retry_after_secs);
+        }
+        resp
     }
 }
 
@@ -759,9 +772,9 @@ mod tests {
         }
     }
 
-    // v4 模块请求字段：缺省值必须兼容既有调用方，显式字段可解析。
+    // 模块请求字段：缺省值必须兼容既有调用方，显式字段可解析。
     #[test]
-    fn request_v4_module_fields_parse() {
+    fn request_module_fields_parse() {
         let req: Request = serde_json::from_str(r#"{"op":"v4_module_unlock"}"#)
             .expect("无模块字段的请求必须可解析");
         assert_eq!(req.module_id, 0);

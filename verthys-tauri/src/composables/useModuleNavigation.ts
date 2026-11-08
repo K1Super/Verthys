@@ -16,51 +16,20 @@ import {
   hasModuleKeyRecordRef,
   verifyModuleKey, isModuleReady, isModuleKeyEnabled,
   verthysReadyRef,
-  moduleKeyStatusLoadingRef,
   moduleKeyStatusLoadedRef,
   moduleKeyStatusFailedRef,
-  moduleKeyEnabledRef,
   MODULE_LABELS,
+  VerthysErrorCode,
   type ModuleId,
 } from "../lib/keyManager";
 import { useToastCenter } from "./useToastCenter";
 import { isUpdaterCritical } from "./updater-critical";
+import { translateVerthysError } from "../utils/verthys-error-i18n";
 import {
   scheduleBackgroundFlush,
   ensureRecordScan,
 } from "../cache/composition/verthys-cache";
 import { scheduleGc } from "../utils/gc";
-import { withTimeout } from "../utils/promise_utils";
-
-/* ------------------------------------------------------------------ *
- * 安全守卫修复：等待布尔 Ref 变为 false（带超时兜底）
- *
- * 用于 switchModule 防御性守卫——解锁关键路径若仍在加载模块密钥状态
- * （moduleKeyStatusLoading=true），切换业务模块前必须等待其完成，
- * 否则 isModuleKeyEnabled 读到默认 false 会误判「保护已关闭」直接放行。
- *
- * 实现：watch 监听 flag，已 false 立即 resolve；变 false 时 resolve；
- *       withTimeout 兜底防止永久等待（lockAll 等异常场景）。
- * ------------------------------------------------------------------ */
-function waitForFlagFalse(flag: Ref<boolean>, timeoutMs: number): Promise<void> {
-  if (!flag.value) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    let done = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      unwatch();
-      if (timer !== null) clearTimeout(timer);
-      resolve();
-    };
-    const unwatch = watch(flag, (v) => {
-      if (!v) finish();
-    });
-    // 超时兜底：无论 flag 是否变 false 都 resolve（调用方事后重检 verthysReady）
-    timer = setTimeout(finish, timeoutMs);
-  });
-}
 
 /* 安全守卫根治：等待布尔 Ref 变为 true（带超时兜底）
  *
@@ -341,7 +310,12 @@ export function useModuleNavigation() {
        * 必须用 result.ok 判断成功/失败，旧代码 `if (!ok)` 判断对象引用永远为 false */
       const result = await verifyModuleKey(moduleId, moduleKeyInput.value);
       if (!result.ok) {
-        await handleVerifyError("密钥错误，请重试");
+        /* 展示后端动态信息：模块锁定/限流时给出剩余秒数，口令错误时
+         * 保留原有“密钥错误”语义。 */
+        const msg = result.code === VerthysErrorCode.E_MODULE_VERIFY_FAILED
+          ? "密钥错误，请重试"
+          : translateVerthysError(result);
+        await handleVerifyError(msg);
         return;
       }
       // 验证成功 → 转完一圈后直接进入目标模块

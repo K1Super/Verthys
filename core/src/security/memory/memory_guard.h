@@ -15,23 +15,6 @@
 int memory_guard_init(void);
 
 /*
- * 锁定内存页（禁止交换到磁盘）。
- *   ptr: 内存区域起始地址
- *   len: 区域长度
- * Windows: VirtualLock
- * Linux: mlock
- * 返回 0 成功，非 0 失败。
- */
-int memory_guard_lock(void *ptr, size_t len);
-
-/*
- * 解锁内存页。
- *   ptr: 内存区域起始地址
- *   len: 区域长度
- */
-int memory_guard_unlock(void *ptr, size_t len);
-
-/*
  * 安全多轮覆写零化（0x00 → 0xFF → 0x00）。
  *   ptr: 内存区域起始地址
  *   len: 区域长度

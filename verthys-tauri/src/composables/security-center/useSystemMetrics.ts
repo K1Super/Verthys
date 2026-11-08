@@ -16,7 +16,7 @@ import { ref, watch, onBeforeUnmount, type Ref } from "vue";
 import { verthysGetSystemSnapshot } from "../../lib/verthys";
 
 /** 轮询间隔（毫秒）：采样差分窗口，兼顾时效与 IPC 频率 */
-export const SYSTEM_METRICS_POLL_MS = 2000;
+const SYSTEM_METRICS_POLL_MS = 2000;
 
 /**
  * @param enabled 轮询启用开关（false 时停表；切换为 true 立即首采）

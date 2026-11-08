@@ -87,7 +87,7 @@ SecureAllocator *secure_allocator_create(void);
 
 /*
  * 进程级共享分配器（InitOnce 懒初始化，进程生命周期单例）。
- * 供 V4 Vault/Store/轮换口令等长期密钥材料使用：这些对象的生命周期
+ * 供 Vault/Store/轮换口令等长期密钥材料使用：这些对象的生命周期
  * 可能跨越 Verthys_Deinit，不能依赖每上下文分配器。
  * 预算沿用全局预算（默认 512MB）；本单例无销毁路径，进程退出统一回收。
  * 测试隔离场景仍使用 secure_allocator_create。

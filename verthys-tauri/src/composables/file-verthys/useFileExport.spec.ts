@@ -36,11 +36,11 @@ interface HarnessOptions {
   savePath?: string | null;
   finalizeFails?: boolean;
   /** v2 解密会话（undefined = 未装配该依赖；null = 口令不匹配） */
-  v2Session?: FileDecryptSession | null;
-  /** v2 装配标志：true 时注入 openV2Decryptor */
-  withV2?: boolean;
+  contentSession?: FileDecryptSession | null;
+  /** v2 装配标志：true 时注入 openContentDecryptor */
+  withContentDecryptor?: boolean;
   /** 会话解密注入失败 */
-  v2DecryptThrows?: boolean;
+  contentDecryptThrows?: boolean;
   /** 目标卷可用空间注入（缺省=充裕；null=读数不可得） */
   freeSpace?: number | null;
 }
@@ -54,25 +54,25 @@ function makeHarness(opts: HarnessOptions = {}) {
   const finalized: string[] = [];
   const opened: string[] = [];
   const picked: string[] = [];
-  const stats = { decrypt: 0, v2Open: 0 };
+  const stats = { decrypt: 0, contentOpen: 0 };
 
   const deps: FileExportDeps = {
     getRecord: async (id) => {
       const value = opts.records?.get(id);
       return value === undefined ? null : { dataB64: value };
     },
-    ...(opts.withV2
+    ...(opts.withContentDecryptor
       ? {
-          openV2Decryptor: async () => {
-            stats.v2Open += 1;
-            if (opts.v2Session === null) return null;
+          openContentDecryptor: async () => {
+            stats.contentOpen += 1;
+            if (opts.contentSession === null) return null;
             const session: FileDecryptSession = {
               decryptChunk: async (b64) => {
-                if (opts.v2DecryptThrows) throw new Error("注入的块解密失败");
+                if (opts.contentDecryptThrows) throw new Error("注入的块解密失败");
                 return base64ToBytes(b64);
               },
             };
-            return opts.v2Session ?? session;
+            return opts.contentSession ?? session;
           },
         }
       : {}),
@@ -127,7 +127,7 @@ function entryOf(size: number, ids: number[]): ExportSourceEntry {
 }
 
 /** 当前加密形态条目（携文件级派生参数与口令校验块） */
-function entryV2(size: number, ids: number[]): ExportSourceEntry {
+function entryVenc(size: number, ids: number[]): ExportSourceEntry {
   return {
     ...entryOf(size, ids),
     encrypted: true,
@@ -316,16 +316,16 @@ describe("runFileExport", () => {
 
   it("v2 错误口令：passwordCheck 前置失败，不消费保存路径选择、不落 v1 解密", async () => {
     const records = new Map<number, string>([[10, bytesToBase64(chunkBuffer(1, 8))]]);
-    const h = makeHarness({ records, withV2: true, v2Session: null });
+    const h = makeHarness({ records, withContentDecryptor: true, contentSession: null });
 
-    const result = await runFileExport(entryV2(8, [10]), "wrong", h.deps);
+    const result = await runFileExport(entryVenc(8, [10]), "wrong", h.deps);
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.code).toBe("E_PWD_WRONG");
       expect(result.message).toBe("密码错误");
     }
-    expect(h.stats.v2Open).toBe(1);
+    expect(h.stats.contentOpen).toBe(1);
     expect(h.stats.decrypt).toBe(0);
     expect(h.picked).toEqual([]);
     expect(h.opened).toEqual([]);
@@ -333,9 +333,9 @@ describe("runFileExport", () => {
 
   it("v2 口令正确但块损坏：报数据损坏（不得报密码错）", async () => {
     const records = new Map<number, string>([[10, bytesToBase64(chunkBuffer(1, 8))]]);
-    const h = makeHarness({ records, withV2: true, v2DecryptThrows: true });
+    const h = makeHarness({ records, withContentDecryptor: true, contentDecryptThrows: true });
 
-    const result = await runFileExport(entryV2(8, [10]), "right", h.deps);
+    const result = await runFileExport(entryVenc(8, [10]), "right", h.deps);
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -349,9 +349,9 @@ describe("runFileExport", () => {
   it("v2 正常导出：会话逐块解密参与写出，末尾一次 finalize", async () => {
     const cipher = chunkBuffer(1, 8);
     const records = new Map<number, string>([[10, bytesToBase64(cipher)]]);
-    const h = makeHarness({ records, withV2: true });
+    const h = makeHarness({ records, withContentDecryptor: true });
 
-    const result = await runFileExport(entryV2(8, [10]), "right", h.deps);
+    const result = await runFileExport(entryVenc(8, [10]), "right", h.deps);
 
     expect(result).toEqual({ ok: true, bytes: 8 });
     // 桩会话为恒等解密：写出字节即记录载荷字节
@@ -363,7 +363,7 @@ describe("runFileExport", () => {
   it("v2 条目但解密装配缺失：报形态不符（不得退化为密码错误）", async () => {
     const h = makeHarness({ records: new Map([[10, bytesToBase64(chunkBuffer(1, 8))]]) });
 
-    const result = await runFileExport(entryV2(8, [10]), "right", h.deps);
+    const result = await runFileExport(entryVenc(8, [10]), "right", h.deps);
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("E_LAYOUT_INVALID");
@@ -545,13 +545,13 @@ describe("runFileExport — 明文生命周期与可观测性", () => {
   it("v2 解锁装配抛错按形态不符归类（不得退化为密码错误）", async () => {
     const h = makeHarness({
       records: new Map([[10, bytesToBase64(chunkBuffer(1, 4))]]),
-      withV2: true,
+      withContentDecryptor: true,
     });
-    h.deps.openV2Decryptor = async () => {
+    h.deps.openContentDecryptor = async () => {
       throw new Error("文件盐长度非法");
     };
 
-    const result = await runFileExport(entryV2(4, [10]), "pwd", h.deps);
+    const result = await runFileExport(entryVenc(4, [10]), "pwd", h.deps);
 
     expect(result.ok).toBe(false);
     if (!result.ok) {

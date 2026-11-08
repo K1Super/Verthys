@@ -14,7 +14,7 @@
 #ifndef VTY_TPM_PCR_H
 #define VTY_TPM_PCR_H
 
-#include "vty_v4_types.h"
+#include "vty_types.h"
 
 #ifdef __cplusplus
 extern "C" {

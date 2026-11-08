@@ -53,7 +53,7 @@ pub use scan_pipeline::{
     ScanSessionState,
 };
 #[allow(unused_imports)]
-pub use verthys_session::{PreheatToken, PreheatTokenStore, VerthysSessionGuard};
+pub use verthys_session::VerthysSessionGuard;
 #[allow(unused_imports)]
 pub use worker_lifecycle::{
     spawn_health_checker, SetupCache, WorkerLifecycle, WorkerLifecycleHandle, WorkerLifecycleState,
@@ -61,7 +61,7 @@ pub use worker_lifecycle::{
 
 use crate::controller::types::{VerthysRecordEntry, VerthysSummaryEntry};
 use crate::security::file_lock::VerthysFileLock;
-// 注意：PreheatTokenStore / VerthysSessionGuard 已通过上方 pub use 重导出，
+// 注意：VerthysSessionGuard 已通过上方 pub use 重导出，
 // 此处不再重复 use，避免 E0252 重复定义错误。
 use crate::worker::WorkerSession;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -139,7 +139,7 @@ fn now_ms() -> u64 {
 /// 所有控制器通过 `State<'_, AppState>` 访问。
 ///
 /// 字段可见性：
-///   - `init_lock` / `prefetch_done`：pub（AtomicBool，无中毒风险，直接访问）
+///   - `init_lock`：pub（AtomicBool，无中毒风险，直接访问）
 ///   - `session` / `scan_state` / `scan_summary_state` / `verthys_file_lock`：
 ///     私有（通过锁中毒恢复方法访问
 ///   - `pending_io_count` / `io_notify` / `*_lock_acquired_ms`：
@@ -174,8 +174,6 @@ pub struct AppState {
     ///
     /// end_io 调 notify_one，wait_io_complete 调 notified().await。
     io_notify: Notify,
-    /// 索引区预热完成标志
-    pub prefetch_done: AtomicBool,
     /// scan_state 锁获取时间戳（Unix 毫秒，0 = 未持有）
     scan_lock_acquired_ms: AtomicU64,
     /// scan_summary_state 锁获取时间戳
@@ -185,11 +183,6 @@ pub struct AppState {
     /// worker_controller 的 init/destroy 通过此句柄检查状态转移，
     /// 消除并发竞态。健康检查器每 10s 检查 Ready 状态的子进程存活。
     pub worker_lifecycle: WorkerLifecycleHandle,
-    /// 预热令牌存储（PreheatToken 一次性凭证）
-    ///
-    /// verthys_preheat 生成令牌，verthys_unlock 验证并消费令牌才启用零拷贝。
-    /// 令牌 30s 超时失效 + 一次性消费，防止前端无凭据重复触发。
-    pub preheat_token_store: PreheatTokenStore,
     /// Verthys 会话 RAII 守卫
     ///
     /// verthys_unlock 成功后创建（Some），verthys_lock 时销毁（None）。
@@ -232,11 +225,9 @@ impl AppState {
             verthys_file_lock: Mutex::new(None),
             pending_io_count: AtomicU64::new(0),
             io_notify: Notify::new(),
-            prefetch_done: AtomicBool::new(false),
             scan_lock_acquired_ms: AtomicU64::new(0),
             scan_summary_lock_acquired_ms: AtomicU64::new(0),
             worker_lifecycle: WorkerLifecycleHandle::new(),
-            preheat_token_store: PreheatTokenStore::new(),
             verthys_session: Mutex::new(None),
             key_lifecycle: KeyLifecycle::new(),
             import_session: Mutex::new(None),
@@ -488,19 +479,6 @@ impl AppState {
         session.send_json_with_timeout(json, timeout)
     }
 
-    /// 发送解锁请求并流式接收进度
-    pub fn send_with_unlock_progress(
-        &self,
-        json: &str,
-        progress_cb: &dyn Fn(&crate::worker::UnlockProgress),
-    ) -> Result<String, String> {
-        let session = {
-            let guard = self.read_session();
-            guard.as_ref().ok_or("worker not initialized")?.clone()
-        };
-        session.send_json_with_unlock_progress(json, progress_cb)
-    }
-
     /// 发送全库轮换请求并流式接收进度（v4_rotate_run 专用）
     pub fn send_with_rotate_progress(
         &self,
@@ -512,37 +490,6 @@ impl AppState {
             guard.as_ref().ok_or("worker not initialized")?.clone()
         };
         session.send_json_with_rotate_progress(json, progress_cb)
-    }
-
-    /// 顺序批量发送：逐条等待响应，不保证与其它命令原子隔离
-    /// （读取会话后即释放读锁；需要独占语义的调用方必须自行串行化）。
-    pub fn send_batch(&self, reqs: &[&str]) -> Result<Vec<String>, String> {
-        let session = {
-            let guard = self.read_session();
-            guard.as_ref().ok_or("worker not initialized")?.clone()
-        };
-        let mut responses = Vec::with_capacity(reqs.len());
-        for req in reqs {
-            responses.push(session.send_json(req)?);
-        }
-        Ok(responses)
-    }
-
-    /// 顺序批量发送（自定义超时）：逐条等待响应，不保证与其它命令原子隔离。
-    pub fn send_batch_with_timeout(
-        &self,
-        reqs: &[&str],
-        timeout: Duration,
-    ) -> Result<Vec<String>, String> {
-        let session = {
-            let guard = self.read_session();
-            guard.as_ref().ok_or("worker not initialized")?.clone()
-        };
-        let mut responses = Vec::with_capacity(reqs.len());
-        for req in reqs {
-            responses.push(session.send_json_with_timeout(req, timeout)?);
-        }
-        Ok(responses)
     }
 
     /// 设置 worker 会话（写操作，使用 write_session 独占锁）
@@ -902,7 +849,6 @@ mod tests {
         assert!(!state.has_session());
         assert_eq!(state.get_pending_io_count(), 0);
         assert!(!state.init_lock.load(Ordering::SeqCst));
-        assert!(!state.prefetch_done.load(Ordering::SeqCst));
         assert_eq!(state.scan_lock_acquired_ms.load(Ordering::SeqCst), 0);
         assert_eq!(
             state.scan_summary_lock_acquired_ms.load(Ordering::SeqCst),

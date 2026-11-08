@@ -31,6 +31,20 @@ CMake 优先使用 VS 内置副本，缺失时回退 PATH。两种来源按“�
 | `VERTHYS_GH_MIRROR` | GitHub 镜像（Tauri 下载 NSIS/WiX 工具用，国内可设 ghproxy） | 空（不生效） | 非空时写出 `TAURI_BUNDLER_TOOLS_GITHUB_MIRROR` |
 | `VERTHYS_VS_GENERATOR` | MSVC 生成器名（CMake `-G`） | 来源 1：`Visual Studio 18 2026`；来源 2：`vswhere` 探测真实 VS 版本 | `build_core.*.ps1` 的 CMake 生成器；`build_production.ps1` 在注入环境下固定 Ninja，不使用该值 |
 
+### 1.2.1 发布签名环境变量（构建期，仅 Windows）
+
+production 构建必须能解析发布者证书，否则在 CMake 配置前 fail-fast；local 构建未提供时不启用调用方认证并告警。
+
+| 变量 | 含义 | 默认值 | 影响 |
+|---|---|---|---|
+| `VERTHYS_SIGNING_THUMBPRINT` | 发布者证书指纹（`CurrentUser\My` / `LocalMachine\My`，需含私钥） | 空 | 与 PFX 二选一；指纹由证书 DER 派生并注入 DLL |
+| `VERTHYS_SIGNING_PFX` | 发布者证书 PFX 路径 | 空 | 与指纹二选一；私钥经 `EphemeralKeySet` 只驻留进程内存 |
+| `VERTHYS_SIGNING_PFX_PASSWORD` | PFX 口令 | 空 | 仅 PFX 模式使用；不落盘、不打印 |
+| `VERTHYS_PUBLISHER_SHA256` | 显式钉扎指纹（64 位十六进制） | 空 | 非空时必须与证书 DER SHA-256 完全一致，否则构建失败 |
+| `VERTHYS_SIGNING_TIMESTAMP_URL` | RFC 3161 时间戳服务地址 | 空 | 非空时签名附带可信时间戳；为空时告警 |
+
+自建 CA 场景：`VERTHYS_SIGNING_THUMBPRINT` 指向叶证书，构建机必须先把根证书安装到 `Cert:\CurrentUser\Root`（管理员可用 `LocalMachine\Root`）；建议同时设置 `VERTHYS_SIGNING_TIMESTAMP_URL`，否则证书到期后签名失效。
+
 ### 1.3 内部派生变量（脚本拼接，非环境输入；仅 Windows）
 
 来源 1 按下表规则拼接；来源 2 直接由已注入环境反推（`MSVC_ROOT` = `VCToolsInstallDir`，CMake 优先 VS 内置、缺失回退 PATH，且不覆盖现成 INCLUDE / LIB / PATH）。
@@ -53,28 +67,34 @@ CMake 优先使用 VS 内置副本，缺失时回退 PATH。两种来源按“�
 | `CMAKE_C_COMPILER` / `CMAKE_CXX_COMPILER` | `VERTHYS_CL_EXE` | CMake 编译器固定 |
 | `TAURI_BUNDLER_TOOLS_GITHUB_MIRROR` | `VERTHYS_GH_MIRROR`（非空时） | Tauri bundler 工具下载镜像 |
 
-> 注：`VERTHYS_CMAKE_EXE` 是**派生**变量（非用户直接设置），由 `build_production.ps1:232` 以
+> 注：`VERTHYS_CMAKE_EXE` 是**派生**变量（非用户直接设置），由 `build_production.ps1` 的 CMake 配置步骤以
 > `& $VERTHYS_CMAKE_EXE -S ... -B ... -G $VERTHYS_VS_GENERATOR -A x64` 消费。
 
 ## 2. 构建脚本参数
 
 ### 2.1 `build_production.ps1`（生产一键构建，构建期）
-用法：`powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-NoPause]`
+用法：`powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-NoPause] [-Profile local|production]`
 | 参数 | 含义 |
 |---|---|
 | `-Clean` | 构建前清理所有构建目录（build/、worker target/、src-tauri/target/） |
 | `-SkipCore` | 跳过 C 核心 DLL 构建（DLL 已存在时） |
-| `-SkipWorker` | 跳过 worker 构建（二进制已存在时） |
+| `-SkipWorker` | 跳过 worker 构建（二进制已存在时）；启用发布签名时禁止使用 |
 | `-SkipTauri` | 跳过 Tauri 打包（仅构建组件时） |
 | `-NoPause` | 失败/成功不暂停等待 Enter（CI 场景） |
+| `-Profile production` | 默认值；要求发布者证书，启用调用方认证与三件签名 |
+| `-Profile local` | 本机复现；未提供证书时显式关闭调用方认证并告警 |
 
-流程：阶段 0 清进程 → 0.5 加载 env → 0.6 依赖/补丁校验 → 1 C 核心 DLL → 2 worker（release+debug）
-→ 3 部署二进制 + 哈希校验 → 4 Tauri（NSIS）→ 5 产物校验。构建期额外设置 `$env:CARGO_INCREMENTAL="0"`（纵深防御 LNK1181）。
+流程：阶段 0 清进程 → 0.5 加载 env → 0.6 依赖/补丁校验 → 1 C 核心 DLL → 1.1 `.vsec` 注入 + DLL 签名 + 契约刷新 → 1.2 调用方认证功能门禁 → 2 worker（基线绑定签名后 DLL，构建后签名）→ 3 部署二进制 + 哈希校验 → 4 Tauri（打包前签名主程序 + NSIS）→ 5 产物校验。构建期额外设置 `$env:CARGO_INCREMENTAL="0"`（纵深防御 LNK1181）与 `$env:VERTHYS_DLL_PATH`（worker 完整性基线唯一来源）。
 
 ### 2.2 `build_dev.ps1`（开发启动器，构建期 + 运行期）
 无命令行参数。步骤：加载 env → 清残留进程 → 检查端口 1420 → 校验依赖/补丁 → 校验核心二进制
-（缺失时回退 `build_production.ps1 -SkipTauri -NoPause`）→ `npx tauri dev`。
+（缺失时回退 `build_production.ps1 -Profile local -AllowLocal -SkipTauri -NoPause`）→ `npx tauri dev`。
 开发运行期消费生产构建产物：`build/core/Release/verthys.dll` 与 `verthys-worker/target/{release,debug}`。
+
+### 2.3 `scripts/build/build_core.release.ps1`（独立 Release DLL，构建期）
+用法：`powershell -ExecutionPolicy Bypass -File scripts/build/build_core.release.ps1 [-Clean] [-NoPause] [-ReleaseSigning] [-TestHooks]`
+`-ReleaseSigning` 启用调用方认证并对 DLL 做 Authenticode 签名，需要与 `build_production.ps1` 相同的证书环境变量；未传时始终产出未签名 DLL（即使环境里残留证书变量，也只提示不启用），保证 CI 质量门的未签名口径不漂移。
+`-TestHooks` 仅用于攻击回归测试：允许 `VERTHYS_TEST_STATE_DIR` 覆盖熔断/回滚状态目录，测试见证域按该目录派生；不可与 `-ReleaseSigning` 同时使用。生产构建（`build_production.ps1`）显式传 `VERTHYS_TEST_HOOKS=OFF`，生产 DLL 不含该代码。
 
 ## 3. Tauri 配置（`src-tauri/tauri.conf.json`）
 
@@ -137,7 +157,7 @@ C/Rust 源码的 `getenv` / `std::env::var` 检索确认），也不对 WebView2
 | 日志保留 | 7 天 / 单文件 5 MB | 更新事件 JSONL |
 | 发布前置 | `ci/release_preflight.ps1` | production 要求端点可达与干净工作区；HTTP + IP 需 `-AllowInsecureUpdater`，不再要求证书指纹 |
 | 兼容 ABI | `0x000B ~ 0x000E` | 清单 `compatibility.abi` 必须覆盖当前值 |
-| 兼容容器 | V3 | 清单 `compatibility.container` 必须覆盖当前值 |
+| 兼容容器 | 当前格式（`VERTHYS_CONTAINER_FORMAT_VERSION=4`） | 清单 `compatibility.container` 必须覆盖当前值 |
 
 ## 7. 交叉引用
 

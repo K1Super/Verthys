@@ -2,5 +2,7 @@
 
 /**
  * 暴力拦截检查结果（序列化给前端）
+ *
+ * 纯查询结果：不包含尝试节流态（节流只影响后端入口，前端不感知）。
  */
-export type BruteForceCheckResponse = { "kind": "Allow" } | { "kind": "Locked", remaining_secs: number, } | { "kind": "PurgeRequired" };
+export type BruteForceCheckResponse = { "kind": "Allow" } | { "kind": "Locked", remaining_secs: number, };

@@ -121,14 +121,14 @@ pub fn run(dll_path: &str) -> i32 {
     // 修复（D-STDOUT-DEADLOCK）：不再跨 handle_request 持有 stdout 锁
     //
     // 原实现：`let mut stdout_handle = stdout.lock();` 在整个主循环期间持有 stdout 锁。
-    // 当 handle_request 调用 call_unlock → Verthys_Unlock（阻塞 FFI）时，主线程被阻塞
-    // 但仍持有 stdout 锁。C 层进度消费线程（verthys_progress_consumer_thread）调用
-    // unlock_progress_cb → io::stdout().lock() 尝试获取同一锁 → 永久阻塞。
-    // 结果：进度回调全部死锁，父进程 60 秒空闲超时后报错退出。
+    // 当 handle_request 调用 call_rotate_run（阻塞 FFI）时，主线程被阻塞
+    // 但仍持有 stdout 锁。C 层轮换进度回调 vty_rotate_progress_cb →
+    // io::stdout().lock() 尝试获取同一锁 → 永久阻塞。
+    // 结果：进度回调全部死锁，父进程空闲超时后报错退出。
     //
     // 修复：每次写入 stdout 时临时获取锁，写入+flush 后立即释放。
     // handle_request（可能阻塞在 FFI）执行期间不持有 stdout 锁，
-    // 进度消费线程可正常获取锁写入进度行。
+    // 进度回调可正常获取锁写入进度行。
     //
     // 线程安全：io::stdout() 内部 ReentrantMutex 保证多次 lock() 调用串行化，
     // 主线程与消费线程的 stdout 写入不会交错。

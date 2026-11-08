@@ -1,5 +1,5 @@
 /*
- * vty_mem_host.c — A8 内存零残留测试宿主
+ * vty_mem_host.c — 内存零残留测试宿主
  *
  * 角色：
  *   hold  <vault>  从 stdin 读取口令，建库→保存→轮换→解锁，把密钥材料
@@ -10,10 +10,10 @@
  *   dump  <pid> <file>  用 MiniDumpWriteDump 生成完整内存转储（不依赖 procdump）。
  *
  * 该工具与其它测试一样直接链接核心对象库（不走 DLL 边界），口令只经
- * stdin 传递，不进入命令行，避免 argv 中的明文让 A8-3 产生假阳性。
+ * stdin 传递，不进入命令行，避免 argv 中的明文让“锁定后转储”用例产生假阳性。
  */
-#include "vty_keymanager_v4.h"
-#include "vty_v4_types.h"
+#include "vty_keymanager.h"
+#include "vty_types.h"
 #include "vty_rollback.h"
 #include "vty_util.h"
 
@@ -121,7 +121,7 @@ static int run_hold(const char *vault_path)
         return 3;
     }
     rc = vty_vault_save(v);
-    /* 改密不再轮换恢复码；原码继续作为独立凭据被 A8 扫描。 */
+    /* 改密不再轮换恢复码；原码继续作为独立凭据被内存扫描覆盖。 */
     if (rc == VTY_OK) rc = vty_vault_rotate_password(v, pw2);
     vty_vault_free(v);
     v = NULL;

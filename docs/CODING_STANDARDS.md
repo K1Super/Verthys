@@ -24,12 +24,12 @@
 
 | 类别 | 规则 | 实例 | 来源 |
 |---|---|---|---|
-| 公共函数 | `Verthys_` + `PascalCase` | `Verthys_Init`、`Verthys_Unlock`、`Verthys_AddRecord` | `core/include/verthys.h` |
+| 公共函数 | `Verthys_` + `PascalCase` | `Verthys_Init`、`Verthys_V4Unlock`、`Verthys_AddRecord` | `core/include/verthys.h` |
 | 公共类型 | `Verthys` + `PascalCase`（无 `_t` 后缀） | `VerthysHandle`、`VerthysRecord`、`VerthysResult`、`VerthysSecurityStatus` | `core/include/verthys.h` |
-| 公共枚举常量/宏 | `VERTHYS_` + `UPPER_SNAKE` | `VERTHYS_OK`、`VERTHYS_ERR_AUTH`、`VERTHYS_API_VERSION`、`VERTHYS_UNLOCK_FLAG_MINIMAL_FIRST` | `core/include/verthys.h` |
-| 内部函数 | `snake_case`，`verthys_` 或组件语义前缀 | `verthys_cng_aead_import_key`、`verthys_lsm_insert`、`vsb_txn_v3_begin`、`memtable_rebuild_locked` | `core/src/**` |
-| 内部类型 | `PascalCase`（无 `_t` 后缀） | `VerthysCngAead`、`VsbTxnV3`、`VerthysSuperBlockV3`、`SecureAllocator` | `core/src/**` |
-| 内部宏/常量 | `UPPER_SNAKE` | `VERTHYS_V3_SB_MAGIC`、`VERTHYS_KEY_BYTES`、`VERTHYS_V3_REPLICA_FRAME_MAGIC` | `core/src/container/shared/verthys_container_v3.h` |
+| 公共枚举常量/宏 | `VERTHYS_` + `UPPER_SNAKE` | `VERTHYS_OK`、`VERTHYS_ERR_AUTH`、`VERTHYS_API_VERSION`、`VERTHYS_MODULE_ALL` | `core/include/verthys.h` |
+| 内部函数 | `snake_case`，`verthys_` 或组件语义前缀 | `vty_module_unlock`、`vty_repo_read`、`vty_keymanager_open`、`verthys_secure_zero` | `core/src/**` |
+| 内部类型 | `PascalCase`（无 `_t` 后缀） | `VtyVault`、`VtyModule`、`VerthysContext`、`SecureAllocator` | `core/src/**` |
+| 内部宏/常量 | `UPPER_SNAKE` | `VTY_MAGIC`、`VERTHYS_KEY_BYTES`、`VTY_SEG_MAGIC` | `core/src/container/shared/verthys_internal.h`、`core/src/crypto/vty_types.h` |
 
 > 说明：任务线索中曾拟「`模块_组件_名称_t` 类型」命名法，但 `core/include/verthys.h` 与 `core/src` 实际未使用 `_t` 后缀——公开类型统一 `Verthys` 前缀 PascalCase，内部类型组件语义 PascalCase。本规范以代码现状为准，不引入 `_t` 后缀。
 
@@ -37,16 +37,17 @@
 
 ### 2.2 目录硬约束（以 core 现状验证）
 
-- **子域 → 功能组件两级拆分**：`core/src/` 下六大域（crypto/container/index/transaction/security/api）+ 31 组件目录，源清单唯一事实源为 `core/CMakeLists.txt` 的 `VERTHYS_SRC_SUBDIRS`。
-- **目录全小写蛇形**，示例：`core/src/crypto/keymanager/`、`core/src/security/layer6_closure/`。
+- **子域 → 功能组件两级拆分**：`core/src/` 下五大域（crypto/container/index/security/api）+ 组件目录，源清单唯一事实源为 `core/CMakeLists.txt` 的 `VERTHYS_SRC_SUBDIRS`。
+- **目录全小写蛇形**，示例：`core/src/crypto/`、`core/src/security/layer6_closure/`。
 - **单个组件目录 3-10 文件、层级 ≤4**（以 `src/` 为基准：域/组件/文件共 3 层）。
-- **禁空泛目录名 utils/common/misc/helper**：`core/src` 下无此类目录；`core/src/api/shared/`、`core/src/container/shared/` 为「域内共享契约」组件（承载 `verthys_api_utils.h`、`verthys_container_v3.h` 等契约头），非空泛工具目录。
+- **禁空泛目录名 utils/common/misc/helper**：`core/src` 下无此类目录；`core/src/api/shared/`、`core/src/container/shared/` 为「域内共享契约」组件（承载 `verthys_api_utils.h`、`verthys_internal.h` 等契约头），非空泛工具目录。
 - **已知偏差（如实记录）**：Rust 侧存在 `verthys-tauri/src-tauri/src/util/`（audit_log/base64/crypto/ffi 等 11 文件）为历史结构，未按 C 层该条约束整改；C 侧文件名 `verthys_api_utils.c` 含 `utils` 为历史遗留命名。
 
 ### 2.3 公共/私有头物理隔离
 
 - 公共接口仅 `core/include/verthys.h`，`core/src` 下私有实现头不得被外部 include。
-- 包含守卫统一 `#ifndef VERTHYS_XXX_H / #define / #endif`（见 `verthys.h`、`verthys_crypto.h`、`verthys_container_v3.h`）。
+- 包含守卫统一 `#ifndef VERTHYS_XXX_H / #define / #endif`（见 `verthys.h`、`verthys_crypto.h`、`verthys_version.h`）。
+- 版本号命名规则见 [references/versioning.md](references/versioning.md)：文件名/目录名/内部符号禁止出现 `v2/v3/v4`。
 - 导出标记：`VERTHYS_API` 为**空宏**（不携带 dllexport/dllimport），导出唯一由 `core/verthys.def` 白名单决定——禁止重新启用 `VERTHYS_EXPORTS` 全量导出（红线，见 [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md) ADR-011）。
 - C++ 互操作用 `extern "C"` 包裹（`verthys.h` 已有）。
 

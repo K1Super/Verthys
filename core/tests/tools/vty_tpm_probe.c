@@ -1841,7 +1841,7 @@ int main(void)
 
     if (probe_pcr_read() != 0) rc = 1;
     /* NV 计数器依赖平台允许带授权区的 TPM 2.0 命令；本机不支持时只记录，
-     * 不作为 P2 PCR 门禁的失败条件。 */
+     * 不作为 PCR 门禁的失败条件。 */
     {
         int nv = probe_nv_roundtrip();
         printf("[RESULT-NV] %s\n", nv == 0 ? "SUPPORTED" : "BLOCKED");

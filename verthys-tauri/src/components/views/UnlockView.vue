@@ -69,11 +69,11 @@
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7.5" cy="15.5" r="3.5"/><line x1="10" y1="13" x2="20" y2="3"/><line x1="16.5" y1="6.5" x2="19" y2="9"/></svg>
                 </button>
                 <span v-if="canRecover" class="ps-divider"></span>
-                <button class="ps-btn" type="button" aria-label="打开已有存储文件" @click="$emit('openExisting')" :disabled="unlocking" v-tip="'打开'">
+                <button class="ps-btn" type="button" aria-label="打开已有存储文件" @click="$emit('openExisting')" :disabled="unlocking" v-tip="'打开已有存储文件'">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z"/></svg>
                 </button>
                 <span class="ps-divider"></span>
-                <button class="ps-btn" type="button" aria-label="新建存储文件" @click="$emit('createNew')" :disabled="unlocking" v-tip="'新建'">
+                <button class="ps-btn" type="button" aria-label="新建存储文件" @click="$emit('createNew')" :disabled="unlocking" v-tip="'新建存储文件'">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                 </button>
               </div>
@@ -82,7 +82,7 @@
         </div>
       </div>
 
-      <!-- 创建时 keyfile 因子（D3）：仅新建模式显示；勾选后创建前选择保存位置 -->
+      <!-- 创建时 keyfile 因子：仅新建模式显示；勾选后创建前选择保存位置 -->
       <div v-if="!unlocking && isCreate" class="ff-node ff-node--body">
         <label class="kf-toggle" :class="{ 'kf-toggle--on': keyfileCreateEnabled }">
           <input
@@ -123,6 +123,7 @@
           :loading="unlocking"
           :percent="unlockProgressPercent"
           :message="unlockProgressMsg"
+          :dimmed="dimmed"
         />
       </div>
 
@@ -150,8 +151,10 @@ const props = defineProps<{
   unlocking: boolean;
   /** 解锁进度消息（阶段描述） */
   unlockProgressMsg: string;
-  /** 解锁进度百分比 */
+  /** 解锁进度百分比（感知层输出的平滑视觉值，非后端离散跳变值） */
   unlockProgressPercent: number;
+  /** 失败冻结降级标识（进度条降级呈现） */
+  dimmed?: boolean;
   /** 解锁进度累计耗时 */
   unlockProgressElapsed: number;
   /** 初始化状态（none/ready/broken） */

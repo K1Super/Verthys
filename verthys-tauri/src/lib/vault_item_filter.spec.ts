@@ -211,7 +211,7 @@ describe("条件摘要与计数", () => {
 
   it("类型名以分隔符连接，其余维度压缩为增量计数", () => {
     const criteria = withCriteria({ kinds: ["account", "idcard"], expiry: ["expired"] });
-    expect(describeVaultFilter(criteria, labelOf)).toBe("账号 · 身份证 +1");
+    expect(describeVaultFilter(criteria, labelOf)).toBe("账号，身份证 +1");
     expect(countActiveVaultFilters(criteria)).toBe(3);
   });
 

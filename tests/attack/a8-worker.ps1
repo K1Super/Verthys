@@ -1,15 +1,15 @@
-# tests/attack/a8-worker.ps1 — A8 扩展：Rust worker 内容层密钥内存零残留
+# tests/attack/a8-worker.ps1 — Rust worker 内容层密钥内存零残留
 #
-# 覆盖（V4-PI-4b 内容层迁移后）：
-#   A8W-1 正控：worker 处理过的容器路径文本必须能在转储中命中（证明转储与扫描有效）；
-#   A8W-1 负控：解锁态转储中模块口令/文件口令/包裹密钥/文件块 v2 派生密钥 0 命中
+# 覆盖内容层迁移后的行为：
+#   正控：worker 处理过的容器路径文本必须能在转储中命中（证明转储与扫描有效）；
+#   负控：解锁态转储中模块口令/文件口令/包裹密钥/文件块 v2 派生密钥 0 命中
 #         —— 内容层密钥已全部收敛到 C 层 MDEK，worker 不再缓存口令与派生密钥；
-#   A8W-2 v4_module_lock（全部）后同一批 secret 仍 0 命中，且内容操作返回 LOCKED；
-#   A8W-3 进程 stdout/stderr 捕获文本 0 命中（日志不落密钥）。
+#   v4_module_lock（全部）后同一批 secret 仍 0 命中，且内容操作返回 LOCKED；
+#   进程 stdout/stderr 捕获文本 0 命中（日志不落密钥）。
 #
 # 协议：与 build/ipc-smoke.ps1 相同的 IPC v2 引导行 + AEAD 信封；
 #       密钥只在本脚本内存中用于计算扫描模式，不写入命令行或磁盘。
-# 输出契约：RESULT A8W PASS|FAIL <detail>，可选 -OutJson 证据文件。
+# 输出契约：供 run.ps1 解析的单行结果，可选 -OutJson 证据文件。
 param(
     [string]$OutJson,
     [string]$Worker = '',
@@ -300,13 +300,13 @@ try {
         return Read-Response $sent
     }
 
-    # 创建 v4 容器（宿主同路径：先路径授权，再单次创建）
+    # 创建 容器（宿主同路径：先路径授权，再单次创建）
     $auth = Invoke-Op @{ op = 'authorize_path'; target_op = 'v4_create'; mode = 'write'; path = $work }
     if (-not $auth.ok) { throw 'v4_create 路径授权失败' }
     $created = Invoke-Op @{ op = 'v4_create'; path = $work; password = $containerPass }
-    if (-not $created.ok) { throw "v4 容器创建失败: $($created.error)" }
+    if (-not $created.ok) { throw "容器创建失败: $($created.error)" }
 
-    # D3 keyfile：启用后从生成的 VKFL 读取 secret 作为密钥面负控模式；
+    # keyfile：启用后从生成的 VKFL 读取 secret 作为密钥面负控模式；
     # secret 只在本脚本内存中用于扫描，不写入日志或证据文件。
     $kfPath = Join-Path $workDir 'a8w.vkf'
     $kfAuth = Invoke-Op @{
@@ -394,9 +394,9 @@ try {
             $pass = $false
             $detail = 'A8W-2 锁定后内容加密未被拒绝（MDEK 未清除）'
         }
-        # v4 lock：清零 K_c/Keyring/DataRoot 与 keyfile_digest，再转储
+        # lock：清零 K_c/Keyring/DataRoot 与 keyfile_digest，再转储
         $vaultLock = Invoke-Op @{ op = 'lock' }
-        if (-not $vaultLock.ok) { throw 'v4 lock 失败' }
+        if (-not $vaultLock.ok) { throw 'lock 失败' }
         Start-Sleep -Milliseconds 1500
         & $memHost dump $proc.Id $dumpLocked | Out-Null
         if (-not (Test-Path -LiteralPath $dumpLocked)) { throw '锁定态 worker 转储生成失败' }
@@ -418,7 +418,7 @@ try {
             $needle = [Text.Encoding]::Latin1.GetString($pat.Bytes)
             if ($log.Contains($needle)) { $logHits++ }
         }
-        # keyfile 路径不得出现在输出流（D3 约束：路径不落日志）
+        # keyfile 路径不得出现在输出流（路径不落日志）
         $kfPathU8 = [Text.Encoding]::UTF8.GetBytes($kfPath)
         $kfPathPatterns = @(
             $kfPathU8,
@@ -472,7 +472,7 @@ if ($OutJson) {
             'v4_module_enable photo (module password) + seal(meta, fixed salt)',
             'seal(file v2_chunk, fixed salt, 150000, file password)',
             'MiniDumpWriteDump worker (path positive control + key negative control)',
-            'v4_module_lock(all) → LOCKED probe → v4 lock → 1.5s → MiniDumpWriteDump worker',
+            'v4_module_lock(all) → LOCKED probe → lock → 1.5s → MiniDumpWriteDump worker',
             'scan worker stdout/stderr capture (secrets + keyfile path)'
         )
         observed = [ordered]@{

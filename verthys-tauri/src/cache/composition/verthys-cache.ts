@@ -45,7 +45,7 @@
  *     消费方直接导入，不再经本文件转发。
  *
  * 初始化契约：
- *   - initVerthysCache() 幂等，由 MainView.onBeforeMount 调用（v3 懒加载
+ *   - initVerthysCache() 幂等，由 MainView.onBeforeMount 调用（懒加载
  *     架构修复：bootstrap 静态导入会将业务层拖入 index 主包 — 已迁出；
  *     父先于子挂载时序保证先于全部子组件消费方）；
  *   - 全部对外 API 经 ensureDomain() 守卫：未初始化时 fail-fast 抛出
@@ -297,14 +297,14 @@ export function ensureSummaryScan(): Promise<void> {
 
 /** 从摘要缓存中按类型获取记录 ID 列表（O(1) 索引查询，已排序）
  *
- * 仅用于历史迁移/诊断：V4 摘要 type 恒为未知 0，业务列表请使用
+ * 仅用于历史迁移/诊断：摘要 type 恒为未知 0，业务列表请使用
  * ensureTypeIds / resolveTypeIds。
  */
 export function getSummaryIdsByType(type: number): number[] {
   return ensureDomain().getSummaryIdsByType(type);
 }
 
-/* === 4.1 权威类型 ID（V4 类型盲索引） === */
+/* === 4.1 权威类型 ID（类型盲索引） === */
 
 /** 枚举并缓存指定类型的完整 ID 列表（跨重启稳定，不依赖摘要 type） */
 export function ensureTypeIds(type: number): Promise<number[]> {

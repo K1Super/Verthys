@@ -53,16 +53,4 @@ int hardware_binding_get_hash(uint8_t hash[HW_INSTANCE_HASH_BYTES]);
  */
 int hardware_binding_is_ready(void);
 
-/*
- * 获取当前绑定模式。
- */
-HwBindMode hardware_binding_get_mode(void);
-
-/*
- * 验证给定哈希是否匹配当前机器。
- *   expected: 期望的 32 字节哈希
- * 返回 0=匹配，非 0=不匹配（迁移失败）。
- */
-int hardware_binding_verify(const uint8_t expected[HW_INSTANCE_HASH_BYTES]);
-
 #endif /* VERTHYS_HARDWARE_BINDING_H */

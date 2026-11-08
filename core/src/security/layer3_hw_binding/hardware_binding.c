@@ -118,18 +118,4 @@ int hardware_binding_is_ready(void)
     return s_initialized ? 1 : 0;
 }
 
-HwBindMode hardware_binding_get_mode(void)
-{
-    return s_mode;
-}
 
-int hardware_binding_verify(const uint8_t expected[HW_INSTANCE_HASH_BYTES])
-{
-    if (!s_initialized) return -1;
-    /* 常量时间比较，防止侧信道 */
-    uint8_t diff = 0;
-    for (size_t i = 0; i < HW_INSTANCE_HASH_BYTES; i++) {
-        diff |= (uint8_t)(s_instance_hash[i] ^ expected[i]);
-    }
-    return diff == 0 ? 0 : -1;
-}

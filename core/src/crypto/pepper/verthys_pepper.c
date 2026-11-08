@@ -81,7 +81,7 @@ void verthys_pepper_set_storage_path_override(const char *path)
 #define VERTHYS_PEPPER_FILE_BYTES    308u
 #define VERTHYS_PEPPER_FP_BYTES      8u
 
-/* V3 头部字段偏移（字节） */
+/* 持久化文件头部字段偏移（字节） */
 #define VERTHYS_PEPPER_OFF_MAGIC        0
 #define VERTHYS_PEPPER_OFF_VERSION      4
 #define VERTHYS_PEPPER_OFF_SOURCE       6
@@ -135,7 +135,7 @@ int pepper_file_fingerprint(const uint8_t meta[8],
 
 /* OS 托管胡椒持久化文件魔数与版本 */
 #define VERTHYS_PEPPER_FILE_MAGIC    0x50505656u  /* "VVPP" 小端 */
-/* V3 布局（308B）：magic(4) + version(2) + source_type(2) +
+/* 持久化布局（308B，版本字段 3）：magic(4) + version(2) + source_type(2) +
  *                key_level(1) + key_provider(1) + reserved(2) +
  *                fingerprint(8) + label(32) + cipher(256)
  *   - source_type：生成时的胡椒来源（VerthysPepperSource 取值）
@@ -311,7 +311,7 @@ int verthys_pepper_load_from_os(void)
     size_t rd = fread(buf, 1, sizeof(buf), f);
     fclose(f);
     if (rd != VERTHYS_PEPPER_FILE_BYTES) {
-        /* 尺寸门：只接受 V3 完整尺寸，历史格式与截断文件一律来源错误 */
+        /* 尺寸门：只接受当前完整尺寸，其它尺寸与截断文件一律来源错误 */
         verthys_secure_zero(buf, sizeof(buf));
         return VERTHYS_PEPPER_LOAD_SOURCE_ERR;
     }
@@ -414,7 +414,7 @@ int verthys_pepper_save_to_os(void)
         return -1;
     }
 
-    /* 序列化到文件（V3 布局，308B） */
+    /* 序列化到文件（当前布局，308B） */
     uint8_t buf[VERTHYS_PEPPER_FILE_BYTES];
     memset(buf, 0, sizeof(buf));
     buf[VERTHYS_PEPPER_OFF_MAGIC]     = (uint8_t)(VERTHYS_PEPPER_FILE_MAGIC & 0xFF);

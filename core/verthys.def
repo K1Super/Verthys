@@ -36,6 +36,8 @@ EXPORTS
     Verthys_V4ModuleBindRecovery
     Verthys_V4ModuleResealDevice
     Verthys_V4ModuleStatus
+    Verthys_V4ModuleLockoutRemaining
+    Verthys_GetLibLockoutRemaining
     Verthys_V4RecoveryRotate
     Verthys_V4RotateBegin
     Verthys_V4RotateAttachKeyfile
@@ -46,7 +48,6 @@ EXPORTS
     Verthys_SwitchSecurityPreset
     Verthys_GetSecurityPreset
     Verthys_GetPresetFeatureBits
-    Verthys_RegisterUnlockProgressCallback
     Verthys_Lock
     Verthys_AddRecord
     Verthys_AddRecords

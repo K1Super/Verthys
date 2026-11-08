@@ -140,11 +140,11 @@ const emit = defineEmits<{
 const updateTooltip = computed(() => {
   if (props.updateCancellable) return "取消下载并清理已接收数据";
   if (props.updateInstalling) {
-    return props.updatePercent > 0 ? `正在更新 ${props.updatePercent}%` : "正在更新…";
+    return props.updatePercent > 0 ? `正在更新 ${props.updatePercent}%` : "正在更新";
   }
-  if (props.updateChecking) return "正在检查更新…";
+  if (props.updateChecking) return "正在检查更新";
   return props.updateAvailable
-    ? `更新到 ${props.updateVersion}（安装前自动落盘并锁定）`
+    ? `更新到 ${props.updateVersion}，安装前自动落盘并锁定`
     : "检查是否有可用更新";
 });
 

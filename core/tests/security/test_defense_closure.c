@@ -5,27 +5,27 @@
  *   - 公共状态查询参数校验与句柄校验（NULL / 已注销句柄）
  *   - BOOT 语义：Verthys_Init 成功 ⟹ 无 FAILED 路径
  *   - 锁定态：无驻留密钥 ⟹ 挂起/内存转储/休眠取证 BLOCKED + NO_RESIDENT_KEY
- *   - 解锁态：V4 密钥驻留用户态 ⟹ 上述路径如实降级，不得虚假阻断
+ *   - 解锁态：密钥驻留用户态 ⟹ 上述路径如实降级，不得虚假阻断
  *   - 七路径判定矩阵（合成 facts，不依赖真实容器）：休眠三态、Hook 扫描
  *     四态、沙盒回读三态、跨设备绑定事实
  *   - limited_count 只统计架构限制原因（2/5），不混入可修复降级
  *   - 沙盒自报位不进入判据（DLL 劫持不得因 Verthys_NotifySandboxAttrs 变 BLOCKED）
- *   - V4 驻留会话计数在创建/锁定/轮换提交/销毁四个节点保持一致
+ *   - 驻留会话计数在创建/锁定/轮换提交/销毁四个节点保持一致
  *   - 状态查询与 Lock/Deinit 并发无死锁、无 UAF
  */
 #include "verthys_test.h"
 #include "verthys.h"
 #include "defense_closure.h"
-#include "verthys_api_utils.h"   /* v4_session_resident_count */
+#include "verthys_api_utils.h"   /* vault_session_resident_count */
 #include "process_sandbox.h"     /* SANDBOX_ATTR_* */
 #include "syscall_direct.h"      /* 合成 IAT 用例的守卫条件 */
 #include "tls_loader.h"          /* g_tls_init_marker：TLS 缺失用例 */
 #include "hardware_binding.h"
 #include "cng_machine_key.h"
 #include "vty_lockout.h"         /* 轮换用例关闭持久化熔断 */
-#include "secure_allocator.h"    /* V4 安全分配统计 */
+#include "secure_allocator.h"    /* 安全分配统计 */
 #include "memory_guard.h"        /* 应急零化覆盖 Vault/Store */
-#include "vty_keymanager_v4.h"   /* VtyVault 字段（安全分配/清钥断言） */
+#include "vty_keymanager.h"   /* VtyVault 字段（安全分配/清钥断言） */
 #include "hibernation_state.h"   /* 真实休眠状态下的期望值裁决 */
 #include "hook_scan.h"           /* 真实 Hook 证据下的期望值裁决 */
 
@@ -266,11 +266,11 @@ TEST(dcl_facts_suspend_and_mem_matrix)
 
     /* 有驻留密钥：挂起绕过/内存转储降级，内存转储计入架构限制。 */
     dcl_facts_init(&f);
-    f.any_unlocked_v4 = 1;
+    f.any_unlocked_session = 1;
     CHECK_EQ(dcl_run_facts(&f, &r), 0);
     CHECK_EQ(r.path_state[DEFENSE_PATH_MEM_DUMP], DEFENSE_STATE_DEGRADED);
     CHECK_EQ(r.path_reason[DEFENSE_PATH_MEM_DUMP],
-             DEFENSE_REASON_V4_KEYS_USER_RESIDENT);
+             DEFENSE_REASON_KEYS_USER_RESIDENT);
     CHECK_EQ(r.path_state[DEFENSE_PATH_SUSPEND_BYPASS], DEFENSE_STATE_DEGRADED);
     CHECK_EQ(r.path_reason[DEFENSE_PATH_SUSPEND_BYPASS],
              DEFENSE_REASON_SUSPEND_GUARD_INACTIVE);
@@ -292,7 +292,7 @@ TEST(dcl_facts_hibernation_matrix)
 
     /* 解锁 + 休眠禁用：hiberfil 不存在，休眠取证 BLOCKED（原因 20）。 */
     dcl_facts_init(&f);
-    f.any_unlocked_v4 = 1;
+    f.any_unlocked_session = 1;
     f.hibernation_state = 0;
     CHECK_EQ(dcl_run_facts(&f, &r), 0);
     CHECK_EQ(r.path_state[DEFENSE_PATH_HIBERNATION], DEFENSE_STATE_BLOCKED);
@@ -399,14 +399,14 @@ TEST(dcl_facts_cross_device_matrix)
 
     dcl_facts_init(&f);
 
-    f.queried_unlocked_v4 = 1;
+    f.queried_unlocked_session = 1;
     f.queried_device_bound = 1;
     CHECK_EQ(dcl_run_facts(&f, &r), 0);
     CHECK_EQ(r.path_state[DEFENSE_PATH_CROSS_DEVICE], DEFENSE_STATE_BLOCKED);
     CHECK_EQ(r.path_reason[DEFENSE_PATH_CROSS_DEVICE], DEFENSE_REASON_DEVICE_BOUND);
 
     /* 会话未解锁：没有可校验的绑定事实 */
-    f.queried_unlocked_v4 = 0;
+    f.queried_unlocked_session = 0;
     f.queried_device_bound = 0;
     CHECK_EQ(dcl_run_facts(&f, &r), 0);
     CHECK_EQ(r.path_state[DEFENSE_PATH_CROSS_DEVICE], DEFENSE_STATE_DEGRADED);
@@ -414,7 +414,7 @@ TEST(dcl_facts_cross_device_matrix)
              DEFENSE_REASON_NO_SESSION_FACTS);
 
     /* 解锁但无设备根/PCR 槽：绑定事实不成立 */
-    f.queried_unlocked_v4 = 1;
+    f.queried_unlocked_session = 1;
     CHECK_EQ(dcl_run_facts(&f, &r), 0);
     CHECK_EQ(r.path_state[DEFENSE_PATH_CROSS_DEVICE], DEFENSE_STATE_DEGRADED);
     CHECK_EQ(r.path_reason[DEFENSE_PATH_CROSS_DEVICE],
@@ -434,8 +434,8 @@ TEST(dcl_facts_limited_count)
     int syscall_ok;
 
     dcl_facts_init(&f);
-    f.any_unlocked_v4 = 1;
-    f.queried_unlocked_v4 = 1;
+    f.any_unlocked_session = 1;
+    f.queried_unlocked_session = 1;
     f.queried_device_bound = 1;
     f.hibernation_state = 0;
     f.hook_scan_state = 1;
@@ -479,9 +479,9 @@ TEST(dcl_sandbox_self_report_not_trusted)
     return 0;
 }
 
-/* ================== 6. V4 驻留会话计数与轮换接管 ================== */
+/* ================== 6. 驻留会话计数与轮换接管 ================== */
 
-TEST(dcl_v4_session_count_lifecycle)
+TEST(dcl_session_count_lifecycle)
 {
     VerthysHandle h;
     VerthysRotateInfo info;
@@ -495,32 +495,32 @@ TEST(dcl_v4_session_count_lifecycle)
     memset(&info, 0, sizeof(info));
 
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
-    CHECK_EQ(v4_session_resident_count(), 0u);
+    CHECK_EQ(vault_session_resident_count(), 0u);
 
     CHECK_EQ(Verthys_V4Create(h, DCL_ROTATE, DCL_PW, DCL_PW_LEN,
                               code, sizeof(code)), VERTHYS_OK);
-    CHECK_EQ(v4_session_resident_count(), 1u);
+    CHECK_EQ(vault_session_resident_count(), 1u);
 
-    /* D9 轮换只允许从恢复会话发起：先锁定再用恢复码打开。 */
+    /* 全库轮换只允许从恢复会话发起：先锁定再用恢复码打开。 */
     CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
-    CHECK_EQ(v4_session_resident_count(), 0u);
+    CHECK_EQ(vault_session_resident_count(), 0u);
     CHECK_EQ(Verthys_V4UnlockRecovery(h, DCL_ROTATE, code), VERTHYS_OK);
-    CHECK_EQ(v4_session_resident_count(), 1u);
+    CHECK_EQ(vault_session_resident_count(), 1u);
 
     /* RotateCommit：vty_rotate_commit 已释放旧库并返回新库，计数必须保持 1；
      * 若误用 attach 会 +1 漂移，误用旧指针会二次释放。 */
-    before = v4_session_resident_count();
+    before = vault_session_resident_count();
     CHECK_EQ(Verthys_V4RotateBegin(h, DCL_ROTATE_TMP, DCL_PW, DCL_PW_LEN,
                                    0u, &info), VERTHYS_OK);
     CHECK_EQ(Verthys_V4RotateRun(h, NULL, NULL), VERTHYS_OK);
     CHECK_EQ(Verthys_V4RotateCommit(h, 0u), VERTHYS_OK);
-    CHECK_EQ(v4_session_resident_count(), before);
+    CHECK_EQ(vault_session_resident_count(), before);
 
     CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
-    CHECK_EQ(v4_session_resident_count(), 0u);
+    CHECK_EQ(vault_session_resident_count(), 0u);
 
     CHECK_EQ(Verthys_Deinit(h), VERTHYS_OK);
-    CHECK_EQ(v4_session_resident_count(), 0u);
+    CHECK_EQ(vault_session_resident_count(), 0u);
 
     remove(DCL_ROTATE);
     remove(DCL_ROTATE_TMP);
@@ -580,9 +580,9 @@ TEST(dcl_runtime_guards_flag)
     return 0;
 }
 
-/* ================== 8. V4 密钥安全分配与应急清钥 ================== */
+/* ================== 8. 密钥安全分配与应急清钥 ================== */
 
-TEST(dcl_v4_secure_alloc_lifecycle)
+TEST(dcl_secure_alloc_lifecycle)
 {
     VerthysHandle h;
     struct VerthysContext *ctx;
@@ -607,7 +607,7 @@ TEST(dcl_v4_secure_alloc_lifecycle)
 
     /* Vault + Store 必须经进程级安全分配器（普通堆不再承载密钥块）。 */
     ctx = (struct VerthysContext *)h;
-    CHECK(ctx != NULL && ctx->v4 != NULL);
+    CHECK(ctx != NULL && ctx->vault != NULL);
     secure_allocator_get_stats(shared, &st);
     CHECK_EQ(st.live_count, base_live + 2u);
     CHECK(st.live_bytes > base_bytes);
@@ -623,7 +623,7 @@ TEST(dcl_v4_secure_alloc_lifecycle)
     return 0;
 }
 
-TEST(dcl_v4_secure_alloc_failure)
+TEST(dcl_secure_alloc_failure)
 {
     VerthysHandle h;
     char code[256];
@@ -651,7 +651,7 @@ TEST(dcl_v4_secure_alloc_failure)
     return 0;
 }
 
-TEST(dcl_emergency_purge_v4)
+TEST(dcl_emergency_purge)
 {
     VerthysHandle h;
     struct VerthysContext *ctx;
@@ -678,8 +678,8 @@ TEST(dcl_emergency_purge_v4)
                               code, sizeof(code)), VERTHYS_OK);
 
     ctx = (struct VerthysContext *)h;
-    CHECK(ctx != NULL && ctx->v4 != NULL);
-    v = ctx->v4;
+    CHECK(ctx != NULL && ctx->vault != NULL);
+    v = ctx->vault;
     saved_store = v->store;
     CHECK(saved_store != NULL);
     /* Store 结构不透明：以首字节（路径字符串）证明该页已写入；应急

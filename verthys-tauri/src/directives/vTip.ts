@@ -49,6 +49,9 @@ function positionTip(el: HTMLDivElement, target: HTMLElement): void {
   if (left + tipRect.width > window.innerWidth - 8)
     left = window.innerWidth - tipRect.width - 8;
   if (top < 8) top = rect.bottom + 10; // 空间不足时显示在下方
+  // 纵向夹紧：换行后的多行提示在视口底部仍完整可见
+  if (top + tipRect.height > window.innerHeight - 8)
+    top = Math.max(8, window.innerHeight - tipRect.height - 8);
 
   el.style.left = `${left}px`;
   el.style.top = `${top}px`;
@@ -99,7 +102,7 @@ function hideTip(): void {
 }
 
 /** 从元素读取提示文本（优先 v-tip 值，回退到 title 属性） */
-function readTipText(el: HTMLElement, bindingValue: unknown): string {
+function readTipText(_el: HTMLElement, bindingValue: unknown): string {
   if (typeof bindingValue === "string") return bindingValue;
   // 动态绑定值为函数时调用
   if (typeof bindingValue === "function") {

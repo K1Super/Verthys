@@ -8,7 +8,6 @@ import { ref, type Ref } from "vue";
 import type { SecurityPresetCode, PresetFeatures } from "../types/verthys";
 import type { ModuleId } from "../types/key_manager";
 import {
-  MODULE_IDS,
   DEFAULT_CUSTOM_FEATURES,
   CUSTOM_FEATURES_KEY,
   CUSTOM_SESSION_MINUTES_KEY,
@@ -114,7 +113,7 @@ export const keyState: KeyState = {
   moduleKeyReady: ref({ photo: false, accounts: false, fileverthys: false }),
   hasModuleKeyRecord: ref({ photo: false, accounts: false, fileverthys: false }),
   /* moduleKeyEnabled 默认 false（安全默认）。
-   * 权威来源是 C 层 v4 模块状态（`v4_module_status`）：只有 M1 保护真正
+   * 权威来源是 C 层 模块状态（`v4_module_status`）：只有 M1 保护真正
    * 启用（MDEK 已移出 Keyring）的模块才置 true。查询失败时守卫按
    * moduleKeyStatusFailed fail-closed，不把"未知"当成"保护关闭"。 */
   moduleKeyEnabled: ref({ photo: false, accounts: false, fileverthys: false }),
@@ -263,7 +262,7 @@ export function normalizeCustomSessionMinutes(minutes: number): number {
 }
 
 /** 读取本地缓存的自定义空闲锁定时长（非法值回退默认值） */
-export function loadCustomSessionMinutes(): number {
+function loadCustomSessionMinutes(): number {
   try {
     const raw = localStorage.getItem(CUSTOM_SESSION_MINUTES_KEY);
     if (raw == null) return CUSTOM_SESSION_MINUTES_DEFAULT;

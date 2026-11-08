@@ -37,12 +37,6 @@ extern volatile LONG g_tls_init_marker;
 int tls_loader_init(void);
 
 /*
- * 兼容接口：原 IAT 状态查询随 IAT 校验体系一并删除，恒返回 0（通过）。
- * 保留符号以稳定内部调用方（defense_closure），新代码禁止使用。
- */
-int tls_loader_iat_status(void);
-
-/*
  * 原混淆种子刷新与定时器体系已删除；此接口保留为空操作以兼容
  * DllMain detach 路径，新代码禁止使用。
  */

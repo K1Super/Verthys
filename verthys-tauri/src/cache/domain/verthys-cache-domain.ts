@@ -114,7 +114,7 @@ export interface VerthysCacheApi {
   scanSummaryNext(batchSize: number): Promise<{ records: SummaryRecord[]; exhausted: boolean }>;
   /** 关闭摘要扫描游标 */
   scanSummaryClose(): Promise<boolean>;
-  /** 按类型分页枚举记录 ID（V4 类型盲索引，不读记录密文） */
+  /** 按类型分页枚举记录 ID（类型盲索引，不读记录密文） */
   listIdsByType(type: number, afterId: number, maxCount: number): Promise<{ ids: number[]; exhausted: boolean }>;
   /** 读取单条完整记录（返回 base64 数据） */
   getRecord(id: number): Promise<{ type: number; name: string; dataB64: string } | null>;
@@ -252,7 +252,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   private recordIndexByType = new Map<number, Set<number>>();
   private summaryIndexByType = new Map<number, Set<number>>();
 
-  // === 权威类型 ID 缓存（V4 类型盲索引，跨重启稳定） ===
+  // === 权威类型 ID 缓存（类型盲索引，跨重启稳定） ===
   /** 每个业务类型的完整 ID 列表（升序）；key 存在即代表该类型已成功枚举 */
   private typeIdCache = new Map<number, number[]>();
   /** 同类型并发枚举复用同一 Promise，避免重复分页 IPC */
@@ -953,12 +953,12 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     }
   }
 
-  /* ==================== 权威类型 ID（V4 类型盲索引） ==================== */
+  /* ==================== 权威类型 ID（类型盲索引） ==================== */
 
   /**
    * 枚举并缓存指定业务类型的完整记录 ID 列表。
    *
-   * 为什么不能读摘要 type：V4 摘要不读记录密文，type 恒为未知 0；
+   * 为什么不能读摘要 type：摘要不读记录密文，type 恒为未知 0；
    * 业务类型在写入时已进入 VTY_KS_TYPE 盲索引，本方法分页读取该索引，
    * 不依赖解密，跨重启稳定。
    *
@@ -1060,7 +1060,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   /**
    * 从摘要缓存中按类型获取记录 ID 列表（O(1) 索引查询，已排序）。
    *
-   * 仅保留给历史迁移/诊断路径。V4 摘要 type 恒为 0，业务列表必须使用
+   * 仅保留给历史迁移/诊断路径。摘要 type 恒为 0，业务列表必须使用
    * ensureTypeIds；不得把本方法作为新代码的类型 ID 来源。
    */
   getSummaryIdsByType(type: number): number[] {
@@ -1420,7 +1420,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
   }
 
   /** fullRecordCache 淘汰回调：安全覆写 dataB64（缩短明文暴露窗口） */
-  private onFullRecordEvict(id: number, rec: ScannedRecord): void {
+  private onFullRecordEvict(_id: number, rec: ScannedRecord): void {
     rec.dataB64 = "";
   }
 

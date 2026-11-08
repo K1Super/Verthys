@@ -12,7 +12,7 @@
  *            使用 spawn_blocking，Mutex 仅保护快速状态读写。
  *   4. 锁中毒自愈：获取锁时检测中毒，into_inner() 取出后废弃，
  *            重置为新实例并记录严重告警。
- *   5. 命令权限分级：敏感操作（record_success/clear_purge/
+ *   5. 命令权限分级：敏感操作（record_success/
  *            set_hardening / 白名单变更 / USB 注册）要求已解锁会话，
  *            由 auth::require_session_authorized 按密钥生命周期统一裁决。
  *   6. 使用 base64 crate 替换自编 Base64 实现。
@@ -29,7 +29,7 @@
  *   - audit：结构化审计日志
  *   - path_resolver：路径白名单解析
  *   - commands：Tauri 命令分组
- *       1. brute_force：check / record_failure / record_success / clear_purge / status
+ *       1. brute_force：check / status（只读查询；计数由口令入口权威执行）
  *       2. session：start / stop / set_hardening
  *       3. module_whitelist：patrol / add_trusted_path / clear_trusted_paths
  *       4. cleanup：clear_recent / secure_delete / cleanup_crash_residue
@@ -62,6 +62,7 @@ pub use commands::cleanup::*;
 pub use commands::file_lock::*;
 pub use commands::module_whitelist::*;
 pub use commands::preset::*;
+pub use commands::security_service::*;
 pub use commands::session::*;
 pub use commands::system_metrics::*;
 pub use commands::usb::*;

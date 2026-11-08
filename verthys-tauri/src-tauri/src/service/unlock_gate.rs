@@ -24,6 +24,22 @@ use tauri::AppHandle;
 /// 防止非口令因素被误判为暴破。
 pub(crate) const AUTH_DOMAIN_ERROR: &str = "ERR_00000002";
 
+/// 熔断/尝试过频错误码（前端按码展示“已锁定 X 秒/请求过于频繁”）
+pub(crate) const E_RATE_LIMITED: &str = "E_RATE_LIMITED";
+/// 安全门禁不可用错误码（守卫内部异常，fail-closed）
+pub(crate) const E_CNG_UNAVAILABLE: &str = "E_CNG_UNAVAILABLE";
+
+/// 口令域：各域的最小尝试间隔独立计时，失败计数共享。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GateDomain {
+    /// 容器口令解锁
+    Unlock,
+    /// 全局主密钥验证
+    GlobalKey,
+    /// 密钥派生类命令
+    Derive,
+}
+
 /// 口令类命令入口的熔断判定结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UnlockGate {
@@ -31,14 +47,14 @@ pub(crate) enum UnlockGate {
     Allowed,
     /// 熔断锁定中，携带剩余秒数
     Locked(u64),
-    /// 失败次数已达清空阈值，要求先执行索引清空与完整性校验
-    PurgeRequired,
+    /// 同一口令域尝试间隔不足，携带建议等待秒数
+    RateLimited { retry_after_secs: u64 },
     /// 守卫状态不可用（锁中毒等内部异常）：fail-closed，拒绝放行
     Unavailable,
 }
 
 /// 闸门判定实现签名（由 security_commands 在启动阶段注册）
-pub(crate) type GateFn = fn(&AppHandle) -> UnlockGate;
+pub(crate) type GateFn = fn(&AppHandle, GateDomain) -> UnlockGate;
 
 /// 认证失败/成功记账实现签名
 pub(crate) type AuthRecordFn = fn(&AppHandle);
@@ -57,9 +73,9 @@ pub(crate) fn install(gate: GateFn, on_failure: AuthRecordFn, on_success: AuthRe
 /// 口令类命令入口熔断检查（在口令进入任何业务逻辑之前调用）。
 ///
 /// fail-closed：实现未注册（启动异常）时返回 [`UnlockGate::Unavailable`]。
-pub(crate) fn gate_check(app: &AppHandle) -> UnlockGate {
+pub(crate) fn gate_check(app: &AppHandle, domain: GateDomain) -> UnlockGate {
     match GATE_IMPL.get() {
-        Some(f) => f(app),
+        Some(f) => f(app, domain),
         None => UnlockGate::Unavailable,
     }
 }

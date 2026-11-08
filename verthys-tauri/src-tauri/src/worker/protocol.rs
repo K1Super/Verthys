@@ -132,30 +132,7 @@ pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
     }
 }
 
-/* ------------------------------------------------------------------ *
- * 解锁进度数据结构（与 worker runtime.rs 中 unlock_progress_cb
- *   写入的 JSON 行对齐，与 verthys.h 中 VerthysUnlockProgress 公共结构对齐）
- *
- * 用于 send_json_with_unlock_progress 解析进度行并转发给前端。
- * ------------------------------------------------------------------ */
-
-/// 解锁进度信息（从 worker 的 unlock_progress JSON 行反序列化）
-///
-/// 字段严格对齐 verthys.h 中 VerthysUnlockProgress 公共结构：
-///   - stage：VerthysUnlockStage 枚举值（1=读超级块 2=Argon2开始 3=Argon2完成
-///     4=缓存检查 5=索引解密 6=B+树完成 7=摘要完成 8=Merkle完成）
-///   - percent：0~100 累计进度百分比
-///   - elapsed_ms：自解锁开始累计耗时（毫秒）
-///   - message：UTF-8 阶段描述（供前端直接展示）
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-pub struct UnlockProgress {
-    pub stage: u32,
-    pub percent: u32,
-    pub elapsed_ms: u64,
-    pub message: String,
-}
-
-/// v4 D9 全库 DEK 轮换进度（从 worker 的 v4_rotate_progress JSON 行反序列化）
+/// 全库 DEK 轮换进度（从 worker 的 v4_rotate_progress JSON 行反序列化）
 ///
 /// 字段与 worker 侧 VerthysRotateInfo 投影一一对应：阶段 + 已登记模块数 +
 /// 已复制记录/文件/分片/字节计数。仅统计值，不含记录名与明文。
@@ -171,19 +148,10 @@ pub struct RotateProgress {
 
 /// 流式进度载荷的日志投影
 ///
-/// Actor 的流式接收器对两类进度（解锁 / 轮换）共用同一套读行、验签、
-/// 关联号校验与超时重置逻辑；各类型只需给出自己的诊断摘要。
+/// Actor 的流式接收器负责读行、验签、关联号校验与超时重置；
+/// 各类型只需给出自己的诊断摘要。
 pub(crate) trait ProgressEvent: serde::de::DeserializeOwned {
     fn log_summary(&self) -> String;
-}
-
-impl ProgressEvent for UnlockProgress {
-    fn log_summary(&self) -> String {
-        format!(
-            "stage={} percent={}% elapsed={}ms msg={}",
-            self.stage, self.percent, self.elapsed_ms, self.message
-        )
-    }
 }
 
 impl ProgressEvent for RotateProgress {
@@ -219,13 +187,7 @@ pub(crate) enum ActorRequest {
         timeout: Duration,
         reply: oneshot::Sender<Result<String, String>>,
     },
-    /// 解锁流式请求（send_json_with_unlock_progress）
-    SendStreamingUnlock {
-        json: String,
-        reply: oneshot::Sender<Result<String, String>>,
-        progress_tx: mpsc::Sender<UnlockProgress>,
-    },
-    /// v4 D9 全库轮换流式请求（send_json_with_rotate_progress）
+    /// 全库轮换流式请求（send_json_with_rotate_progress）
     SendStreamingRotate {
         json: String,
         reply: oneshot::Sender<Result<String, String>>,
@@ -241,12 +203,6 @@ pub(crate) enum ActorRequest {
     Shutdown { reply: oneshot::Sender<()> },
 }
 
-/// 解锁进度感知空闲超时（每收到一条进度行重置）
-///
-/// Argon2id SECURE 预设（64MiB/3/1）单次派生 6~15s，期间无进度事件，
-/// 60 秒裕量覆盖极端情况（低端 CPU + 杀毒扫描），避免误判超时。
-pub(crate) const UNLOCK_PROGRESS_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// 全库轮换进度感知空闲超时（每收到一条进度行重置）
 ///
 /// 轮换在 Run 内逐记录/逐文件回调，但在“启用新库模块”阶段单次写盘
@@ -259,10 +215,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// 验证解锁进度空闲超时
+    /// 验证轮换进度空闲超时
     #[test]
-    fn test_unlock_progress_idle_timeout() {
-        assert_eq!(UNLOCK_PROGRESS_IDLE_TIMEOUT, Duration::from_secs(60));
+    fn test_rotate_progress_idle_timeout() {
         assert_eq!(ROTATE_PROGRESS_IDLE_TIMEOUT, Duration::from_secs(600));
     }
 
@@ -303,22 +258,6 @@ mod tests {
             worst_case,
             MAX_LINE_BYTES
         );
-    }
-
-    /// 验证 UnlockProgress 反序列化
-    #[test]
-    fn test_unlock_progress_deserialize() {
-        let json = r#"{
-            "stage": 3,
-            "percent": 45,
-            "elapsed_ms": 8000,
-            "message": "Argon2id 派生完成"
-        }"#;
-        let p: UnlockProgress = serde_json::from_str(json).unwrap();
-        assert_eq!(p.stage, 3);
-        assert_eq!(p.percent, 45);
-        assert_eq!(p.elapsed_ms, 8000);
-        assert_eq!(p.message, "Argon2id 派生完成");
     }
 
     /// 验证 ActorRequest 枚举通道通信

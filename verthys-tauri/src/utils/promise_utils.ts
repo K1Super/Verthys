@@ -151,7 +151,7 @@ function saveCircuitBreakerState(state: CircuitBreakerState): void {
  *
  * @returns 若处于熔断锁定状态，返回剩余锁定毫秒数；否则返回 0
  */
-export function checkCircuitBreaker(): number {
+function checkCircuitBreaker(): number {
   const state = loadCircuitBreakerState();
   if (state.lockedUntil !== null) {
     const now = Date.now();
@@ -171,7 +171,7 @@ export function checkCircuitBreaker(): number {
  *
  * 必须在 verthysUnlock 成功返回后调用，确保正常解锁后熔断状态清零。
  */
-export function resetCircuitBreaker(): void {
+function resetCircuitBreaker(): void {
   saveCircuitBreakerState({ consecutiveHardTimeouts: 0, lockedUntil: null });
 }
 
@@ -205,11 +205,8 @@ export function withGradedTimeout<T>(
   }
 
   return new Promise<T>((resolve, reject) => {
-    let softTimerFired = false;
-
     /* 软超时定时器：触发 onSoftTimeout 回调，但 Promise 继续等待 */
     const softTimer = setTimeout(() => {
-      softTimerFired = true;
       if (onSoftTimeout) {
         try {
           onSoftTimeout();
@@ -244,7 +241,7 @@ export function withGradedTimeout<T>(
       (v) => {
         clearTimeout(softTimer);
         clearTimeout(hardTimer);
-        /* 解锁成功：重置熔断计数（softTimerFired 不影响重置） */
+        /* 解锁成功：重置熔断计数 */
         resetCircuitBreaker();
         resolve(v);
       },

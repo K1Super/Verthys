@@ -1,6 +1,6 @@
 # ARCHITECTURE — Verthys 总体架构
 
-> 梳理 Verthys 四层架构、core 六大子域职责、进程模型与 core/前端边界，作为全仓技术蓝图。
+> 梳理 Verthys 四层架构、core 五大子域职责、进程模型与 core/前端边界，作为全仓技术蓝图。
 >
 > Last updated: 2026-09-28 · 维护人：K1Super
 
@@ -14,11 +14,11 @@ Verthys 采用四层单向依赖架构。密钥与明文仅存在于核心 DLL �
 flowchart TB
     L4["L4 UI 交互层<br/>Tauri + Vue3（verthys-tauri/）<br/>纯渲染/交互，零密钥接触"]
     L3["L3 应用调度层<br/>src-tauri Rust 控制器 + verthys-worker 子进程<br/>进程编排 / 会话策略 / 安全命令，零密钥接触"]
-    L2["L2 核心 DLL 层<br/>core（C）→ verthys.dll<br/>api / crypto / container / index / transaction / security"]
-    L1["L1 持久化层<br/>.verthys 加密容器 + pepper.bin + .idx_cache 温缓存"]
+    L2["L2 核心 DLL 层<br/>core（C）→ verthys.dll<br/>api / crypto / container / index / security"]
+    L1["L1 持久化层<br/>.verthys 加密容器 + pepper.bin + 附属数据目录"]
     L4 -->|"Tauri IPC / invoke + Channel"| L3
     L3 -->|"子进程 stdin/stdout JSON-lines + 共享内存"| L2
-    L2 -->|"原子写 / RoW / 分区 AEAD"| L1
+    L2 -->|"原子写 / COW 目录 / 记录 AEAD"| L1
 ```
 
 要点：
@@ -26,29 +26,29 @@ flowchart TB
 - L4 纯渲染，仅通过 Tauri `invoke` 调用命令，口令、密钥不出前端。
 - L3 由 `verthys-tauri`（Tauri 主进程）负责进程编排；具体 C 调用全部下沉到独立子进程 `verthys-worker`，主进程与 worker 间用 `stdin/stdout` JSON 行协议通信，扫描结果经命名共享内存零拷贝传输。
 - L2 是对外黑盒：仅暴露 `verthys.h` 白名单 ABI（导出面由 `verthys.def` 白名单管控），加密算法、容器格式、内存防护均内部封装。
-- L1 是磁盘持久化：`.verthys` 为唯一容器格式；pepper 由 OS 加密存储（`%APPDATA%\Verthys\pepper.bin`）；容器附属数据（状态 / 预设 / WAL / 台账 / 温缓存 / 锁诊断）统一落在附属数据目录 `<容器路径>.d/`，其中温缓存为 `idx_cache`。
+- L1 是磁盘持久化：`.verthys` 为唯一容器格式；pepper 由 OS 加密存储（`%APPDATA%\Verthys\pepper.bin`）；容器附属数据（`state.json` / `preset.json` / `import.wal` / `import.wal.snapshot` / 块台账 / `container.lock`）统一落在附属数据目录 `<容器路径>.d/`。
 
-## 2. core 六大子域职责
+## 2. core 五大子域职责
 
 > 以实际目录 `core/src/*` 为准。代码采用模块化镜像子目录（如 `api/lifecycle/`），非扁平单文件；与源稿《TARGET_ARCHITECTURE_V5.md》的扁平布局不同。
 
 ### 2.1 api/ — 公共 ABI 门面
-`lifecycle/verthys_api.c` 承载全部 `Verthys_*` 导出；`lifecycle/verthys_v3_lifecycle.c` 负责 V3 创建/解锁/改密；`transfer/verthys_export_import.c` 负责导出/导入；`scan/verthys_scan.c` 提供扫描游标；`progress/verthys_progress.c` 提供解锁进度环形缓冲；`lifecycle/dllmain.c` 维护 TLS 标志；`unlock/verthys_unlock_pipeline.c` 实现 S0–S6 解锁流水线。
+`lifecycle/verthys_api.c` 承载通用 `Verthys_*` 导出与状态机分发；`verthys_api_container.c` 实现容器创建/解锁/恢复、keyfile、PCR、模块与全库轮换入口；`transfer/verthys_export_import.c` 负责导出/导入/改密；`scan/verthys_scan.c` 提供扫描游标；`lifecycle/dllmain.c` 维护 TLS 标志。
 
 ### 2.2 crypto/ — 密码原语与密钥管理
-`cipher/verthys_crypto.c` 提供 AEAD / Argon2id / HKDF / HMAC 等原语；`keymanager/` 维护四级密钥体系（口令 → DKM → MEK → A/B/C 子密钥，见 [SECURITY_DESIGN.md](SECURITY_DESIGN.md)）；`cipher/verthys_crypto_cng.c` 封装 CNG AES-256-GCM 内核态 AEAD；`keymanager/keymanager_cng.c` 管理内核态密钥句柄生命周期（KERNEL_RESIDENT / REKEYING / DESTROYED 状态机）；`pepper/verthys_pepper.c` 维护胡椒三层来源与 Shamir 恢复卡；`rekey/verthys_rekey_auto.c` 实现自动密钥轮换；`cipher/secure_mem.c` 提供安全内存。
+`cipher/verthys_crypto.c` 提供 AEAD / Argon2id / HKDF / HMAC 等原语；`cipher/secure_mem.c` 提供安全内存；`pepper/verthys_pepper.c` 维护胡椒三层来源与恢复卡；`vty_keymanager.c` 实现容器会话与双包裹密钥体系；`vty_rotate.c` 实现全库 DEK 轮换作业；`vty_kdf.c` / `vty_device_root.c` / `vty_recovery.c` / `vty_keyfile.c` / `vty_blake3.c` / `vty_util.c` 提供派生、设备根、恢复码、keyfile、哈希与工具原语。
 
-### 2.3 container/ — V3 容器格式
-`shared/verthys_container_v3.h` 是 V3 常量与结构体单一事实源（`V3SB` 魔数、3 副本、法定人数）；`superblock/verthys_superblock_v3.c` 实现 3 副本超级块 + 法定人数提交/读取；`partition/verthys_partition.c` 管理分区与独立 AEAD 密钥；`extent/verthys_extent.c` 实现内容寻址 Extent（去重 + 引用计数）；`io/verthys_io.c` 是统一 64 位 I/O 层；`format/verthys_format.c` 兼容 v1/v2 格式读取。
+### 2.3 container/ — 容器格式
+`vty_format.c` 实现 A/B 元数据双副本与原子提交；`vty_keyslot.c` 管理密钥槽；`vty_chunk.c` 实现内容分片；`vty_module.c` 管理模块密钥与模块槽；`shared/verthys_internal.h` 定义运行时上下文；`format/verthys_format.c` 负责导出/导入交换信封。
 
 ### 2.4 index/ — 索引
-`lsm/` 实现 V3 LSM 索引：`verthys_lsm.c` 主控、`verthys_lsm_memtable.c` 跳表 MemTable、`verthys_lsm_sstable.c` SSTable 读写 + 布隆过滤器、`verthys_lsm_compaction.c` 分级合并压缩。`warmcache/verthys_warmcache_v3.c` 实现温启动缓存（附属数据目录 `<容器>.d/idx_cache`）读写。
+`vty_record.c` 记录编解码；`vty_store.c` 数据区/索引存储；`vty_repo.c` 仓库级读写与类型盲索引。
 
 ### 2.5 security/ — 纵深防御
-六层防线：`layer1_process_guard/job_isolation.c`（Job Object 隔离）、`layer3_hw_binding/`（cng_machine_key / hardware_binding / system32_loader，机器绑定）、`layer4_hook_defense/`（tls_loader / tls_callbacks / hook_scan，防 Hook）、`layer5_sandbox/process_sandbox.c`（进程 mitigation policy + OS 回读）、`layer6_closure/defense_closure.c`（基于 `DefenseFacts` 的 7 路径事实校验）；另有 `anti_analysis/`（anti_debug_v2 / anti_inject / syscall_direct 直接系统调用）、`memory/`（memory_guard / secure_allocator / hibernation_state；`key_separation` 仅随 V3 源码构建）、`integrity/`（.vsec 验签 + .rhat 运行时哈希）、`emergency/`（三级应急响应）、`preset/`（安全预设双缓冲切换）。
+六层防线：`layer1_process_guard/job_isolation.c`（Job Object 隔离）、`layer3_hw_binding/`（cng_machine_key / hardware_binding / system32_loader，机器绑定）、`layer4_hook_defense/`（tls_loader / tls_callbacks / hook_scan，防 Hook）、`layer5_sandbox/process_sandbox.c`（进程 mitigation policy + OS 回读）、`layer6_closure/defense_closure.c`（基于 `DefenseFacts` 的 7 路径事实校验）；另有 `anti_analysis/`（anti_debug / anti_inject / syscall_direct 直接系统调用）、`memory/`（memory_guard / secure_allocator / hibernation_state）、`integrity/`（.vsec 验签 + .rhat 运行时哈希）、`emergency/`（三级应急响应）、`preset/`（安全预设双缓冲切换）、`lockout/`、`rollback/`、`state/`、`tpm/`、`caller_auth/`。
 
-### 2.6 transaction/ — 事务与一致性
-`wal/verthys_wal.c` 提供 WAL 预写日志（环形区 + 崩溃恢复回放）；`txn/verthys_transaction_v3.c` 实现六阶段事务（BEGIN → WRITE_EXTENT → UPDATE_INDEX → PREPARE → COMMIT → CONFIRM）与 vsb_txn 超级块事务原语（begin/commit/rollback），配合超级块法定人数保证崩溃一致性。GC 以 Extent 引用计数 + 标记回收内嵌于 container/transaction 实现，无独立源文件（源稿列出的 `verthys_garbage.c` 实际不存在）。
+### 2.6 事务与一致性
+C 层容器采用 A/B 元数据双副本 + 追加数据区，提交原子性由 `container/vty_format.c` 与 `index/vty_store.c` 保证。导入断点续传的 WAL、块归属台账与 GC 结算位于 Rust 仓储层（`repository/verthys_wal.rs` / `verthys_chunks.rs`），不进入 C 容器格式。
 
 ## 3. Tauri 调度层职责
 
@@ -108,7 +108,7 @@ flowchart LR
 关键事实（读 `worker_controller.rs` / `worker/session.rs` / `verthys-worker/src`）：
 
 - 通信方式：主进程以 `tokio::process::Command` spawn 子进程，`stdin/stdout/stderr` 均 piped；请求/响应走 **stdin/stdout 单行 JSON 协议**（`protocol.rs` 的 `Request`/`Response`，`data`/`bin_data` 字段 base64）。就绪信号 `{"op":"ready"}` 由 worker 主动写入 stdout。
-- 串行化：`WorkerSession` 内部为异步 Actor 模型，`mpsc` 请求通道 + 单 Actor 任务保证管道串行；解锁进度经 `unlock_progress` 行流式回传。
+- 串行化：`WorkerSession` 内部为异步 Actor 模型，`mpsc` 请求通道 + 单 Actor 任务保证管道串行；全库轮换进度经 `v4_rotate_progress` 行流式回传。
 - 扫描零拷贝：`scan_open`/`scan_fetch` 用随机命名共享内存（`VirtualLock`）传输记录明文，避免 JSON/base64 膨胀；`scansummary` 用 4MB 摘要 SHM。
 - 进程隔离/沙盒：worker 启动前（加载 DLL 前）先应用进程级 mitigation policy（`WIN32K_SYSTEM_CALL_DISABLE`、`PROCESS_CREATION_DISABLED`、`IMAGE_LOAD_PREFER_SYSTEM32`、`IMAGE_LOAD_NO_REMOTE`，经 `Verthys_NotifySandboxAttrs` 通知 DLL）；子进程挂入带 `KILL_ON_JOB_CLOSE` 的 Job Object，父进程退出即回收。
 - 优先级：worker 以 `BELOW_NORMAL_PRIORITY_CLASS` + `CREATE_NO_WINDOW` 启动，承载后台长尾任务，避免抢占 UI。
@@ -119,7 +119,7 @@ flowchart LR
 ## 5. core 与前端边界
 
 - 唯一跨层契约：`core/include/verthys.h`（公共 C ABI，`VERTHYS_API_VERSION 0x0014`）与 Tauri command 清单。前者规范见 [CORE_API.md](CORE_API.md)，后者以 `verthys-tauri` 的 command 注册为准。
-- 数据流约定：前端只能 `invoke` 命令 → worker actor → FFI → C core；反向经 JSON 响应 / SHM / 进度回调。不得绕过 worker 直接加载 DLL。
+- 数据流约定：前端只能 `invoke` 命令 → worker actor → FFI → C core；反向经 JSON 响应 / SHM / 轮换进度回调。不得绕过 worker 直接加载 DLL。
 - 密钥边界：口令经 worker 传入 `verthys.dll` 后即归属 L2，主进程不落盘、不缓存明文密钥（仅 Rust 侧 `locked_buffer` 短暂持有口令，用后清零）。
 
 ## 6. 关键设计决策（ADR 摘要）
@@ -129,8 +129,8 @@ flowchart LR
 | 编号 | 一句话结论 |
 |---|---|
 | D-1 | 派生密钥经 CNG 内核托管，用户态仅持不可导出句柄，密钥明文不在用户态常驻 |
-| D-2 | 采用 V3 容器（分区独立认证 + 内容寻址 Extent + LSM 索引），无历史兼容包袱 |
-| D-3 | 超级块 3 副本法定人数（2/3）提交，消除单点损坏 |
+| D-2 | 采用当前容器（双包裹 AND + A/B 元数据 + 追加数据区 + 模块槽），无历史格式兼容包袱 |
+| D-3 | A/B 元数据双副本原子提交，单副本损坏不阻断打开 |
 | D-4 | 关键防御检测器走 `Nt*` 直接系统调用（syscall_direct）绕过用户态 Hook |
 | D-5 | 密钥自动轮换（时间/操作计数/手动/异常触发），内核态完成 |
 | D-6 | 密钥相关结构走专用安全分配器（VirtualAlloc + 锁页 + 清零） |
@@ -143,17 +143,15 @@ core/
 ├── include/                verthys.h（公共 ABI）
 ├── schema/                 FlatBuffers schema（flatcc 编译，generated/）
 ├── src/
-│   ├── api/                lifecycle/ transfer/ scan/ progress/ unlock/ shared/
-│   ├── crypto/             cipher/ keymanager/ pepper/ rekey/
-│   ├── container/          shared/ superblock/ partition/ extent/ io/ format/
-│   ├── index/              lsm/ warmcache/
-│   ├── transaction/        txn/ wal/
-│   └── security/           anti_analysis/ emergency/ integrity/ layer1_process_guard/
+│   ├── api/                lifecycle/ transfer/ scan/ progress/ shared/ verthys_api_container.c
+│   ├── crypto/             cipher/ pepper/ vty_keymanager · vty_rotate · vty_kdf ...
+│   ├── container/          shared/ format/ vty_format · vty_keyslot · vty_chunk · vty_module
+│   ├── index/              vty_record · vty_store · vty_repo
+│   ├── security/           anti_analysis/ emergency/ integrity/ layer1_process_guard/
 │                           layer3_hw_binding/ layer4_hook_defense/ layer5_sandbox/
 │                           layer6_closure/ memory/ preset/
 ├── tools/                  rhash_gen.c（.rhat 运行时哈希表构建工具）
-└── tests/                  api/ container/ crypto/ index/ perf/ property/ regression/
-                            schema/ security/ transaction/ · test_runner.c
+└── tests/                  api/ container/ crypto/ index/ perf/ schema/ security/ · test_runner.c
 
 verthys-tauri/src-tauri/src/
 ├── controller/             worker_controller · verthys_controller · key_controller ...

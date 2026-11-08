@@ -10,7 +10,7 @@
           <line x1="5" y1="12" x2="19" y2="12" />
         </svg>
       </button>
-      <button class="win-btn" @click="onToggleMax" v-tip="'最大化/还原'">
+      <button class="win-btn" @click="onToggleMax" v-tip="'最大化或还原窗口'">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <rect x="5" y="5" width="14" height="14" rx="1" />
         </svg>

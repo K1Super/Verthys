@@ -16,6 +16,7 @@
  * =============================================================================
  * 五态互斥规则（按优先级从高到低）
  * =============================================================================
+ * 0. unlockInProgress（可选保持位）          → "unlock"          （解锁收束中）
  * 1. !verthysReady                          → "unlock"          （verthys 未解锁）
  * 2. !hasGlobalKeyRecord || postInitAnim   → "init"            （无全局密钥记录，或初始化收束中）
  * 3. deviceCheckResult === "mismatch"     → "device_mismatch" （设备机器码不匹配拦截）
@@ -78,6 +79,10 @@ export interface UseViewModeOptions {
    *  视图会在收束完成前抢跳（表现为「点击初始化后直接放行」）；
    *  收束完成事件触发后由 onInitKey 复位。 */
   postInitAnim: Ref<boolean>;
+  /** 解锁/创建进行中：收束补满 100% 前保持 unlock 视图。
+   *  initUnlock 在返回前即翻转 verthysReady/hasGlobalKeyRecord，若无此保持位，
+   *  解锁视图会在进度收尾前被卸载，用户看不到完成态。 */
+  unlockInProgress?: Ref<boolean>;
 }
 
 /**
@@ -104,6 +109,8 @@ export function useViewMode(options: UseViewModeOptions): {
   viewMode: ComputedRef<ViewMode>;
 } {
   const viewMode = computed<ViewMode>(() => {
+    // 优先级 0：解锁/创建收束中 → 保持解锁视图（进度必须跑到 100% 再切换）
+    if (options.unlockInProgress?.value) return 'unlock';
     // 优先级 1：verthys 未解锁 → 解锁视图
     if (!options.verthysReady.value) return 'unlock';
     // 优先级 2：无全局密钥记录（或初始化收束中）→ 初始化视图

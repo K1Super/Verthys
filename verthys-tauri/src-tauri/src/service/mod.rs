@@ -12,8 +12,6 @@
  *
  * 依赖方向：service → repository / util（单向，禁止反向）
  */
-pub mod verthys_service;
-
 /* 口令类入口暴力熔断的服务层契约（依赖反转：实现由 security_commands 注册） */
 pub mod unlock_gate;
 
@@ -23,5 +21,5 @@ pub mod preset_source;
 /* 可移动介质绑定的服务层契约（依赖反转：实现由 security_commands 注册） */
 pub mod usb_binding;
 
-/* v4 D9 全库 DEK 轮换的服务层契约（依赖反转：实现由 security_commands 注册） */
+/* 全库 DEK 轮换的服务层契约（依赖反转：实现由 security_commands 注册） */
 pub mod vault_rotate;

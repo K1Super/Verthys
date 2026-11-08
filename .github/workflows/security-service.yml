@@ -1,0 +1,109 @@
+# .github/workflows/security-service.yml
+# SYSTEM 安全服务独立构建、单元测试、控制台集成与攻击回归。
+name: security-service
+
+on:
+  push:
+    paths:
+      - "security-service/**"
+      - "core/src/security/state/**"
+      - "scripts/build/build_security_service.ps1"
+      - "tests/service/**"
+      - "ci/check_version_naming.ps1"
+      - "docs/P2_SECURITY_SERVICE_PLAN.md"
+      - ".github/workflows/security-service.yml"
+  pull_request:
+    paths:
+      - "security-service/**"
+      - "core/src/security/state/**"
+      - "scripts/build/build_security_service.ps1"
+      - "tests/service/**"
+      - "ci/check_version_naming.ps1"
+      - "docs/P2_SECURITY_SERVICE_PLAN.md"
+      - ".github/workflows/security-service.yml"
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Version naming gate
+        shell: pwsh
+        run: |
+          & ".\ci\check_version_naming.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "version naming gate failed" }
+
+      - name: Configure and build (test hooks)
+        shell: pwsh
+        run: |
+          . .\scripts\lib\env.load.ps1
+          & $script:VERTHYS_CMAKE_EXE -S security-service -B build_security_service_ci `
+            -G $script:VERTHYS_VS_GENERATOR -A x64 `
+            -DVERTHYS_SERVICE_TEST_HOOKS=ON -DVERTHYS_REQUIRE_SERVICE_SIG=OFF
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          & $script:VERTHYS_CMAKE_EXE --build build_security_service_ci --config Debug `
+            --target verthys_service_tests verthys_security_svc `
+            verthys_service_probe verthys_fake_service
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+
+      - name: Unit tests
+        shell: pwsh
+        run: |
+          . .\scripts\lib\env.load.ps1
+          $ctest = Join-Path (Split-Path -Parent $script:VERTHYS_CMAKE_EXE) "ctest.exe"
+          & $ctest --test-dir build_security_service_ci -C Debug --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { throw "unit tests failed" }
+
+      - name: Console integration I0–I12
+        shell: pwsh
+        run: |
+          & .\tests\service\integration.ps1 -BuildDir build_security_service_ci
+          if ($LASTEXITCODE -ne 0) { throw "integration tests failed" }
+
+      - name: Attack regression (console subset)
+        shell: pwsh
+        run: |
+          & .\tests\service\attack.ps1 -BuildDir build_security_service_ci
+          if ($LASTEXITCODE -ne 0) { throw "attack regression failed" }
+
+      - name: Production build without test hooks
+        shell: pwsh
+        run: |
+          . .\scripts\lib\env.load.ps1
+          & $script:VERTHYS_CMAKE_EXE -S security-service -B build_security_service_prod `
+            -G $script:VERTHYS_VS_GENERATOR -A x64 `
+            -DVERTHYS_SERVICE_TEST_HOOKS=OFF -DVERTHYS_REQUIRE_SERVICE_SIG=OFF
+          if ($LASTEXITCODE -ne 0) { throw "production configure failed" }
+          & $script:VERTHYS_CMAKE_EXE --build build_security_service_prod --config Release `
+            --target verthys_security_svc
+          if ($LASTEXITCODE -ne 0) { throw "production build failed" }
+
+      - name: No test hooks in production binaries
+        shell: pwsh
+        run: |
+          $exes = @(
+            "build_security_service_prod\Release\VerthysSecuritySvc.exe"
+          )
+          $patterns = @(
+            "--test-console", "--test-state-dir", "--test-ignore-client-auth",
+            "VERTHYS_TEST_SERVICE_INSTALLED", "VERTHYS_TEST_SERVICE_PIPE",
+            "VERTHYS_TEST_SERVICE_PUBKEY_PATH", "--test-allow-unsigned"
+          )
+          foreach ($exe in $exes) {
+            $bytes = [IO.File]::ReadAllBytes((Join-Path (Get-Location) $exe))
+            $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+            $unicode = [Text.Encoding]::Unicode.GetString($bytes)
+            foreach ($pattern in $patterns) {
+              if ($ascii.Contains($pattern) -or $unicode.Contains($pattern)) {
+                throw "test hook string '$pattern' leaked into $exe"
+              }
+            }
+          }

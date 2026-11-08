@@ -175,28 +175,21 @@ fn main() {
 
 /// 读取核心头文件中的版本宏；任一缺失即阻断构建，避免兼容门使用过期数值。
 fn load_core_versions(repo_root: &Path) -> (u32, u32) {
-    let api_header = repo_root.join("core/include/verthys.h");
-    let container_header = repo_root.join("core/src/container/shared/verthys_container_v3.h");
-    println!("cargo:rerun-if-changed={}", api_header.display());
-    println!("cargo:rerun-if-changed={}", container_header.display());
+    // 版本语义唯一事实源：API 版本与容器格式版本同处 verthys_version.h。
+    let version_header = repo_root.join("core/include/verthys_version.h");
+    println!("cargo:rerun-if-changed={}", version_header.display());
 
-    let api_text = fs::read_to_string(&api_header).unwrap_or_else(|error| {
+    let text = fs::read_to_string(&version_header).unwrap_or_else(|error| {
         panic!(
-            "无法读取核心 API 版本头文件 {}: {error}",
-            api_header.display()
-        )
-    });
-    let container_text = fs::read_to_string(&container_header).unwrap_or_else(|error| {
-        panic!(
-            "无法读取容器版本头文件 {}: {error}",
-            container_header.display()
+            "无法读取核心版本头文件 {}: {error}",
+            version_header.display()
         )
     });
 
-    let api = parse_define_u32(&api_text, "VERTHYS_API_VERSION")
-        .unwrap_or_else(|| panic!("核心 API 版本宏缺失或格式非法: {}", api_header.display()));
-    let container = parse_define_u32(&container_text, "VERTHYS_V3_VERSION")
-        .unwrap_or_else(|| panic!("容器版本宏缺失或格式非法: {}", container_header.display()));
+    let api = parse_define_u32(&text, "VERTHYS_API_VERSION")
+        .unwrap_or_else(|| panic!("核心 API 版本宏缺失或格式非法: {}", version_header.display()));
+    let container = parse_define_u32(&text, "VERTHYS_CONTAINER_FORMAT_VERSION")
+        .unwrap_or_else(|| panic!("容器格式版本宏缺失或格式非法: {}", version_header.display()));
     (api, container)
 }
 
@@ -232,7 +225,7 @@ fn sha256_file(path: &Path) -> String {
 /// 契约结构差异识别的阈值：当前产物契约仅接受 schema 1。
 const CONTRACT_SCHEMA: u32 = 1;
 /// 容器格式版本：与 C 核心构建侧写入契约的格式版本常量一致，不匹配即契约失效。
-const CONTRACT_FMT_VERSION: u32 = 3;
+const CONTRACT_FMT_VERSION: u32 = 4;
 
 /// C 核心构建产物契约（由 CMake 在 DLL 链接完成后生成）。
 #[derive(serde::Deserialize)]

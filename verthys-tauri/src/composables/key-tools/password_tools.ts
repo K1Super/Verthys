@@ -47,7 +47,7 @@ export interface CharsetOptions {
 }
 
 /** 去掉易混淆字符 */
-export function excludeSimilar(charset: string): string {
+function excludeSimilar(charset: string): string {
   return charset.split("").filter((c) => !PASSWORD_CHARSETS.similar.includes(c)).join("");
 }
 

@@ -311,11 +311,11 @@ fn precheck_derive_request(ctx: DerivePrecheckCtx<'_>) -> Result<Zeroizing<Strin
         bin_data_b64,
         bin_password,
     } = ctx;
-    // 1. 服务端强制熔断闸门：锁定/清空状态下拒绝一切口令类操作。
+    // 1. 服务端强制熔断闸门：锁定/过频状态下拒绝一切口令类操作。
     //    派生失败本身不计数——NoKey 态是首次设置新秘密，无既有秘密可暴破。
     //    经 service 层契约调用（实现由 security_commands 启动时注册）。
-    use crate::service::unlock_gate::{gate_check, UnlockGate};
-    match gate_check(app) {
+    use crate::service::unlock_gate::{gate_check, GateDomain, UnlockGate};
+    match gate_check(app, GateDomain::Derive) {
         UnlockGate::Allowed => {}
         UnlockGate::Locked(secs) => {
             write_key_audit(
@@ -329,14 +329,17 @@ fn precheck_derive_request(ctx: DerivePrecheckCtx<'_>) -> Result<Zeroizing<Strin
             );
             return Err(format!("尝试次数过多，已锁定 {} 秒，请稍后再试", secs));
         }
-        UnlockGate::PurgeRequired => {
+        UnlockGate::RateLimited { retry_after_secs } => {
             write_key_audit(
                 app,
                 AuditEventType::KeyDerive,
                 AuditResult::Denied,
-                Some("BRUTE_FORCE_PURGE: 需执行索引清空与完整性校验（服务端强制）".into()),
+                Some(format!(
+                    "RATE_LIMITED: 最小尝试间隔未满足（剩余 {} 秒）",
+                    retry_after_secs
+                )),
             );
-            return Err("失败次数已达上限，需完成安全清理与完整性校验后重试".to_string());
+            return Err(format!("请求过于频繁，请 {} 秒后再试", retry_after_secs));
         }
         UnlockGate::Unavailable => {
             write_key_audit(
@@ -538,13 +541,14 @@ pub async fn verthys_verify_global_key(
     let password = Zeroizing::new(password);
     log::info!("[verthys_verify_global_key] 开始验证 GMK");
 
-    // 服务端强制熔断闸门：锁定/清空状态下拒绝一切口令类操作（fail-closed）。
+    // 服务端强制熔断闸门：锁定/过频状态下拒绝一切口令类操作（fail-closed）。
     // 与 unlock 共享同一守卫：两处口令入口的失败计数累加，成功任一即重置。
     // 经 service 层契约调用（实现由 security_commands 启动时注册）。
     use crate::service::unlock_gate::{
-        gate_check, record_auth_failure, record_auth_success, UnlockGate,
+        gate_check, record_auth_failure, record_auth_success, GateDomain, UnlockGate,
+        E_CNG_UNAVAILABLE, E_RATE_LIMITED,
     };
-    match gate_check(&app) {
+    match gate_check(&app, GateDomain::GlobalKey) {
         UnlockGate::Allowed => {}
         UnlockGate::Locked(secs) => {
             log::warn!(
@@ -560,22 +564,32 @@ pub async fn verthys_verify_global_key(
                     secs
                 )),
             );
-            return Ok(VerthysResponse::err(
+            return Ok(VerthysResponse::err_code_retry(
                 "verify_global_key",
+                E_RATE_LIMITED,
                 &format!("尝试次数过多，已锁定 {} 秒，请稍后再试", secs),
+                secs,
             ));
         }
-        UnlockGate::PurgeRequired => {
-            log::warn!("[verthys_verify_global_key] 暴力熔断清空态，拒绝尝试");
+        UnlockGate::RateLimited { retry_after_secs } => {
+            log::warn!(
+                "[verthys_verify_global_key] 最小尝试间隔未满足（剩余 {}s），拒绝尝试",
+                retry_after_secs
+            );
             write_key_audit(
                 &app,
                 AuditEventType::KeyVerify,
                 AuditResult::Denied,
-                Some("BRUTE_FORCE_PURGE: 需执行索引清空与完整性校验（服务端强制）".into()),
+                Some(format!(
+                    "RATE_LIMITED: 最小尝试间隔未满足（剩余 {} 秒）",
+                    retry_after_secs
+                )),
             );
-            return Ok(VerthysResponse::err(
+            return Ok(VerthysResponse::err_code_retry(
                 "verify_global_key",
-                "失败次数已达上限，需完成安全清理与完整性校验后重试",
+                E_RATE_LIMITED,
+                &format!("请求过于频繁，请 {} 秒后再试", retry_after_secs),
+                retry_after_secs,
             ));
         }
         UnlockGate::Unavailable => {
@@ -586,9 +600,10 @@ pub async fn verthys_verify_global_key(
                 AuditResult::Denied,
                 Some("熔断守卫不可用，fail-closed 拒绝验证".into()),
             );
-            return Ok(VerthysResponse::err(
+            return Ok(VerthysResponse::err_code(
                 "verify_global_key",
-                "安全模块暂时不可用，请重启应用后重试",
+                E_CNG_UNAVAILABLE,
+                "安全门禁暂时不可用，请重启应用后重试",
             ));
         }
     }
@@ -736,7 +751,7 @@ pub async fn verthys_verify_global_key(
     drop(bin_data_b64);
     drop(password);
 
-    let resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
+    let mut resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
         log::error!(
             "[verthys_verify_global_key] 解析响应失败: {} | raw={}",
             e,
@@ -750,6 +765,7 @@ pub async fn verthys_verify_global_key(
         );
         "验证密钥失败".to_string()
     })?;
+    resp.adopt_worker_error_code();
 
     if resp.ok {
         // 口令验证成功即重置熔断计数：无论后续状态转移是否成功，

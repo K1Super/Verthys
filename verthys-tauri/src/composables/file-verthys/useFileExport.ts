@@ -17,7 +17,7 @@
  */
 import { MAX_FILE_CHUNK_SIZE_BYTES } from "../../constants/photo_budget.generated";
 import { base64ToBytes } from "../../lib/verthys";
-import type { FileKdfV2 } from "../../lib/module_crypto";
+import type { FileKdf } from "../../lib/module_crypto";
 import { createBLAKE3 } from "hash-wasm";
 
 /** 导出失败原因分类（调用方据此决定文案与后续动作） */
@@ -33,7 +33,7 @@ export type FileExportErrorCode =
   | "CANCELLED";
 
 /** v1（无口令判定点）解密失败的合并文案：区分不了口令错误与数据损坏，
-    按方案口径给出可执行引导（先核对口令，确认无误则按损坏处置）。 */
+    给出可执行引导（先核对口令，确认无误则按损坏处置）。 */
 const V1_PWD_OR_CORRUPT_MESSAGE =
   "密码错误或数据已损坏：请先核对密码；若密码确认无误，则文件数据可能已损坏，建议从备份恢复或联系支持";
 
@@ -56,7 +56,7 @@ export interface ExportSourceEntry {
   /** 逐块密文哈希（写入侧生成的完整性权威值；历史记录缺省） */
   chunkHashes?: string[];
   /** 文件级密钥派生参数（当前加密形态必携；历史逐块盐形态缺省） */
-  kdf?: FileKdfV2;
+  kdf?: FileKdf;
   /** 密码校验块（口令判定的唯一权威值；历史逐块盐形态缺省） */
   passwordCheck?: string;
 }
@@ -72,7 +72,7 @@ export interface FileExportDeps {
   /** 按记录 ID 取回块密文（base64）；记录不存在返回 null */
   getRecord: (id: number) => Promise<{ dataB64: string } | null>;
   /** 解锁 v2 文件密钥并校验口令；口令不匹配返回 null（选路径之前完成） */
-  openV2Decryptor?: (
+  openContentDecryptor?: (
     entry: ExportSourceEntry,
     password: string,
   ) => Promise<FileDecryptSession | null>;
@@ -246,12 +246,12 @@ export async function runFileExport(
       return { ok: false, code: "E_PWD_OR_CORRUPT", message: "需要文件访问密码" };
     }
     if (entry.passwordCheck && entry.kdf) {
-      if (!deps.openV2Decryptor) {
+      if (!deps.openContentDecryptor) {
         // 装配缺失属内部错误：不得退化为"密码错误"误导用户
         return { ok: false, code: "E_LAYOUT_INVALID", message: "文件加密形态与当前版本不符，无法导出" };
       }
       try {
-        session = await deps.openV2Decryptor(entry, password);
+        session = await deps.openContentDecryptor(entry, password);
       } catch (e) {
         // 口令错误由 passwordCheck 判定（依赖方返回 null）；此处的抛出只可能
         // 来自派生参数非法 / 密钥导入失败，属元数据或装配错误，不得报"密码错误"

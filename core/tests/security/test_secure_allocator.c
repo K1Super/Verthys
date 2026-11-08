@@ -326,7 +326,7 @@ TEST(sec_alloc_destroy_releases_all)
 
 /* ---------- 7. 进程级共享单例 ---------- */
 
-/* V4 Vault/Store 使用的进程级分配器：InitOnce 单例、alloc/free 后统计回落。
+/* Vault/Store 使用的进程级分配器：InitOnce 单例、alloc/free 后统计回落。
  * 该单例无销毁路径，测试只验证行为，不销毁。 */
 TEST(sec_alloc_shared_lifecycle)
 {

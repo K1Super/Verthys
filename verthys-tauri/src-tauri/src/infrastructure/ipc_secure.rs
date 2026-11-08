@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn test_reject_wrong_channel_and_version() {
         let (host, peer) = handshaken();
-        let progress = peer.progress_for_test(1, 1, r#"{"op":"unlock_progress"}"#);
+        let progress = peer.progress_for_test(1, 1, r#"{"op":"v4_rotate_progress"}"#);
         let opened = host.open_line(&progress).unwrap();
         assert_eq!(opened.channel, Channel::Progress);
 
@@ -699,7 +699,7 @@ mod tests {
     #[test]
     fn test_progress_channel_independent_sequence() {
         let (host, peer) = handshaken();
-        let progress = peer.progress_for_test(1, 7, r#"{"op":"unlock_progress"}"#);
+        let progress = peer.progress_for_test(1, 7, r#"{"op":"v4_rotate_progress"}"#);
         let response = peer.response_for_test(2, 7, r#"{"ok":true}"#);
         assert!(host.open_line(&progress).is_ok());
         assert!(host.open_line(&response).is_ok());

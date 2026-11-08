@@ -77,6 +77,7 @@ impl LogLevel {
     }
 
     /// 是否为需要可靠投递的严重日志
+    #[cfg(test)]
     fn is_critical(&self) -> bool {
         matches!(self, LogLevel::Error | LogLevel::Fatal)
     }
@@ -115,8 +116,6 @@ struct LogDaemonInner {
     sender: Sender<LogEntry>,
     /// 防止重复执行关闭流程
     shutdown_called: AtomicBool,
-    /// 后台消费线程句柄
-    consumer_handle: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 /// 日志守护器顶层对象，管理队列与后台写入线程生命周期
@@ -140,7 +139,7 @@ impl LogDaemon {
     ) -> Self {
         let (sender, receiver) = bounded::<LogEntry>(capacity);
 
-        let handle = thread::Builder::new()
+        thread::Builder::new()
             .name("log-consumer".to_string())
             .spawn(move || Self::consumer_loop(receiver, log_path, rotation))
             .expect("启动日志消费后台线程失败");
@@ -148,7 +147,6 @@ impl LogDaemon {
         let inner = LogDaemonInner {
             sender,
             shutdown_called: AtomicBool::new(false),
-            consumer_handle: std::sync::Mutex::new(Some(handle)),
         };
 
         Self {
@@ -353,10 +351,6 @@ pub struct LogSender {
 }
 
 impl LogSender {
-    pub(crate) fn new(sender: Sender<LogEntry>) -> Self {
-        Self { sender }
-    }
-
     /// 可丢弃非阻塞发送：普通级别日志使用，队列满直接丢弃不阻塞业务
     pub fn send_allow_drop(&self, entry: LogEntry) -> Result<(), TrySendError<LogEntry>> {
         self.sender.try_send(entry)

@@ -34,12 +34,6 @@ int tls_loader_init(void)
     return 0;
 }
 
-int tls_loader_iat_status(void)
-{
-    /* IAT 基准校验体系已删除（见头注），恒返回通过以稳定旧调用方 */
-    return 0;
-}
-
 void tls_loader_shutdown(void)
 {
     /* 原定时器/种子体系已删除；保留空实现兼容 DllMain detach 路径 */

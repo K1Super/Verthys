@@ -10,7 +10,6 @@
 #define VERTHYS_INTERNAL_H
 
 #include "verthys.h"
-#include "keymanager_cng.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -27,18 +26,15 @@ typedef enum {
 } VerthysState;
 
 /* 容器格式版本（运行时检测）。
- * Unlock 格式门禁对非 V3 头一律 VERTHYS_ERR_FORMAT（"V3 不读 V2 文件"）。 */
+ * Unlock 格式门禁对非 VRTY 固定头一律 VERTHYS_ERR_FORMAT。 */
 typedef enum {
     VERTHYS_FMT_NONE = 0,  /* 未挂载容器（Init 零态）或未知/非法格式 */
-    VERTHYS_FMT_V3   = 3,  /* V3：CNG 内核托管 + LSM + 法定人数超级块 */
-    VERTHYS_FMT_V4   = 4   /* V4：双包裹 AND + A/B 元数据 + 追加数据区 */
+    VERTHYS_FMT_CONTAINER   = 4   /* 双包裹 AND + A/B 元数据 + 追加数据区 */
 } VerthysContainerVersion;
 
-/* 前向声明：V3 运行时上下文（api/verthys_v3_lifecycle.h） */
-struct VerthysContextV3;
-/* 前向声明：v4 会话（crypto/v4/vty_keymanager_v4.h） */
+/* 前向声明：会话（crypto/vty_keymanager.h） */
 struct VtyVault;
-/* 前向声明：D9 轮换作业（crypto/v4/vty_rotate_v4.h） */
+/* 前向声明：轮换作业（crypto/vty_rotate.h） */
 struct VtyRotateJob;
 
 /* 记录名称长度上限（API 边界钳制，杜绝 uint16 截断导致的
@@ -48,17 +44,17 @@ struct VtyRotateJob;
 /* 单条记录明文数据长度上限（字节，API 边界钳制）。
  * 与二次序列化能力对齐：导出/导入格式的 data_len 为 32 位字段
  *（容量上限 0xFFFFFFFF），入口侧提前拒绝超限写入，避免"写入成功
- * 但永久不可导出"的不可弥补不一致；下沉层（V3 事务写入）复用同
+ * 但永久不可导出"的不可弥补不一致；下沉层（记录仓库写入）复用同
  * 常量做纵深校验。 */
 #define VERTHYS_RECORD_DATA_MAX_BYTES ((size_t)0xFFFFFFFFu)
 
 /*
  * VerthysContext — 句柄背后的真实结构。
- * 所有敏感字段在 Lock/Deinit 时经 verthys_secure_zero / CNG 句柄销毁清理。
+ * 所有敏感字段在 Lock/Deinit 时经 verthys_secure_zero 清零。
  *
- * V3 数据源纪律：超级块 / LSM / Extent / 分区表 / 事务全部位于
- * ctx->v3（VerthysContextV3 堆实例），本结构不持有任何容器数据镜像——
- * GetContainerInfo / GetDiagnostics 类接口一律现值直读权威源。
+ * 容器会话数据全部位于 ctx->vault（VtyVault 堆实例），本结构不持有任何
+ * 容器数据镜像——GetContainerInfo / GetDiagnostics 类接口一律现值直读
+ * 权威源。
  */
 struct VerthysContext {
     VerthysState state;
@@ -68,33 +64,18 @@ struct VerthysContext {
 
     VerthysContainerVersion fmt_version;
 
-    /* V3 运行时上下文（堆实例）。
-     * fmt_version == VERTHYS_FMT_V3 时非 NULL；Init 分配 / Deinit 释放
-     * （verthys_v3_ctx_create / verthys_v3_ctx_destroy）。
-     * 容器 Lock/再解锁后本指针更换堆实例——借用方（扫描游标等）经
-     * 实例身份锚点检测失效。 */
-    struct VerthysContextV3 *v3;
+    /* 容器会话（堆实例）。fmt_version == VERTHYS_FMT_CONTAINER 且已解锁时非 NULL；
+     * Lock/Deinit 负责清零并释放。 */
+    struct VtyVault *vault;
 
-    /* v4 会话（堆实例）。fmt_version == VERTHYS_FMT_V4 且已解锁时非 NULL；
-     * Lock/Deinit 负责清零并释放。v4 路径不借用 v3 的 LSM/Extent。 */
-    struct VtyVault *v4;
-
-    /* D9 全库 DEK 轮换作业（堆实例）。非 NULL 时 v4 源库处于只读态；
+    /* 全库 DEK 轮换作业（堆实例）。非 NULL 时源库处于只读态；
      * Lock/Deinit/紧急熔断/adopt 必须调用 vty_rotate_abort 释放。 */
     struct VtyRotateJob *rotate;
 
-    /* CNG 内核托管密钥组（目标态密钥层次）
-     * MEK/A/B/C 全部经 BCryptGenerateSymmetricKey 导入内核，用户态仅持
-     * BCRYPT_KEY_HANDLE 句柄（不可导出）。经 verthys_cng_km_* 接口访问；
-     * Lock/Deinit/紧急熔断 → verthys_cng_km_destroy_all（内核态密钥
-     * 不可恢复）。 */
-    VerthysCngKeyManager cng_keys;    /* CNG 内核密钥组 + 生命周期状态机 */
-
-    /* 用户预设（公共枚举 VerthysPreset；V3 权威值持久化于超级块扩展 TLV，
-     * 解锁时裁决回填——GetContainerInfo 数据源） */
+    /* 用户预设（公共枚举 VerthysPreset） */
     VerthysPreset preset;
 
-    /* 温启动缓存启用标志（V3：由预设裁决——SECURE 禁用） */
+    /* 温启动缓存启用标志（容器会话固定 0，保留字段供 ContainerInfo 回读） */
     int warm_cache_enabled;
 
     /* 全量校验状态（Verthys_VerifyIntegrity 提交点记账） */
@@ -103,7 +84,7 @@ struct VerthysContext {
     uint64_t incremental_count;     /* 自上次全量校验以来的增量提交次数 */
 
     /* GetRecord 借用指针缓存（API 契约：下次调用或 Lock 前有效）
-     * V3 路径返回深拷贝数据，缓存在此，下次 GetRecord 或 Lock 时释放。
+     * 返回深拷贝数据，缓存在此，下次 GetRecord 或 Lock 时释放。
      * 借用指针语义要求 GetRecord 独占访问（api_mutex 写锁）。 */
     uint8_t *last_getrecord_data;   /* 上次 GetRecord 返回的数据（heap） */
     size_t   last_getrecord_data_size;
@@ -121,7 +102,7 @@ struct VerthysContext {
      *   独占写锁（AcquireSRWLockExclusive，排他阻塞）：
      *     - Verthys_AddRecord / Verthys_DeleteRecord / Verthys_DeleteRecords
      *     - Verthys_Flush / Verthys_Import / Verthys_ChangePassword
-     *     - Verthys_Unlock / Verthys_Lock（状态切换）
+     *     - Verthys_V4Unlock / Verthys_Lock（状态切换）
      *
      *   特殊独占读（AcquireSRWLockExclusive）：
      *     - Verthys_GetRecord — 借用指针缓存（ctx->last_getrecord_data）
@@ -131,89 +112,17 @@ struct VerthysContext {
      *           Verthys_Deinit 时直接释放（SRWLOCK 无需 Delete）。 */
 #ifdef _WIN32
     SRWLOCK *api_mutex;          /* 读写锁（heap 分配，SRWLOCK） */
-    /* 进度回调无锁环形缓冲区（异步解耦）
-     *   verthys_emit_unlock_progress 写入环形缓冲区（O(1) <1μs），
-     *   独立低优先级消费线程读取并调用 unlock_progress_cb。
-     *   主解锁链路零阻塞。
-     *   NULL = 未注册回调或非 Windows 平台（verthys_emit_unlock_progress 为空操作）。 */
-    void *progress_ring;         /* VerthysProgressRing*（opaque，定义在 verthys_api.c） */
 #endif
 
-    /* 诊断指标 + 性能遥测
+    /* 诊断指标 + 性能遥测（实际采集项）
      *
-     * 解锁耗时分解：每次 Verthys_Unlock 时采集，Verthys_GetDiagnostics
-     * 返回给安全中心展示。计数器在事务提交/回滚/扫描时递增，供性能
-     * 分析与问题定位。全部为非敏感指标，不含任何密钥或用户数据。 */
-    uint64_t diag_unlock_total_ms;        /* 解锁总耗时 */
-    uint64_t diag_unlock_read_ms;         /* 文件读取耗时 */
-    uint64_t diag_unlock_derive_ms;       /* 密钥派生耗时 */
-    uint64_t diag_unlock_index_load_ms;   /* 索引加载耗时 */
-    uint64_t diag_unlock_summary_load_ms; /* 摘要索引加载耗时 */
-    uint64_t diag_unlock_merkle_ms;       /* Merkle 树创建耗时 */
-    uint64_t diag_warm_cache_hits;        /* 温缓存命中次数 */
-    uint64_t diag_warm_cache_misses;      /* 温缓存未命中次数 */
-    uint64_t diag_warm_cache_evictions;   /* 温缓存淘汰次数 */
-    uint64_t diag_gc_trigger_count;       /* GC 触发次数 */
-    uint64_t diag_gc_reclaimed_slots;     /* GC 回收槽位总数 */
-    uint64_t diag_commit_count;           /* 事务提交总次数 */
-    uint64_t diag_rollback_count;         /* 事务回滚次数 */
+     * 扫描游标打开次数与读写锁等待耗时在解锁/扫描路径埋点采集，
+     * Verthys_GetDiagnostics 返回给安全中心展示。全部为非敏感指标，
+     * 不含任何密钥或用户数据。 */
     uint64_t diag_scan_open_count;        /* 扫描游标打开次数 */
-    uint64_t diag_scan_snapshot_stale;    /* 快照过期次数 */
 
-    /* 解锁进度回调（API 版本 0x0004）
-     *
-     * 由 Verthys_RegisterUnlockProgressCallback 注册，在解锁流水线
-     * 各阶段经环形缓冲区异步调用。回调函数指针与 user_data 透传，
-     * DLL 不解析 user_data 内容。
-     *
-     * 生命周期：Verthys_Init 时 calloc 清零（NULL），Verthys_Deinit 时随 ctx 释放。
-     * 注册后对所有后续 Unlock / CreateWithPreset 调用生效，传 NULL 取消通知。
-     *
-     * 线程安全：与 Unlock 共享同一调用线程，无需额外同步（MT-Unsafe 语义保证）。 */
-    VerthysUnlockProgressCallback unlock_progress_cb;   /* 进度回调函数（NULL=不通知） */
-    void                       *unlock_progress_user_data;  /* 透传用户数据 */
-    uint64_t                    unlock_progress_start_ms;   /* 本次解锁起始时间戳（单调时钟） */
-
-    /* 预热状态跨层透传（API 版本 0x0005）
-     *
-     * 由 Verthys_Unlock 的 flags 参数设置，记录上层调度层的预热状态，
-     * 供解锁流水线选择预热线程参数。
-     *
-     * 生命周期：每次 Verthys_Unlock 入口重置，由 flags 参数设置。 */
-    uint32_t unlock_flags;           /* 本次解锁的 flags 位域（VERTHYS_UNLOCK_FLAG_*） */
-    int      prefetch_done;          /* 索引区是否已预热（flags & 0x01），1=是 0=否 */
-
-    /* 可观测性指标扩展（5 项新增指标）
-     *
-     * 在解锁路径埋点采集，Verthys_GetDiagnostics 输出。 */
-    uint64_t diag_page_cache_hit_ratio;   /* 页缓存命中率（百分比，0~100） */
+    /* 可观测性指标（当前容器实际采集项） */
     uint64_t diag_lock_wait_ms;           /* 读写锁平均等待耗时（毫秒） */
-    uint64_t diag_cache_load_ms;          /* 持久化缓存加载耗时（毫秒） */
-    uint64_t diag_disk_bytes_read;        /* 本次解锁磁盘实际读取字节数 */
-    uint32_t diag_preheat_status;         /* 预热状态枚举（0=未预热/1=预热中/2=预热完成/3=预热失败） */
-
-    /* 索引内存映射失败告警计数（跨多次解锁累计）
-     *
-     * 预热完成但映射失败回退同步读取时递增，上报
-     * idx_mmap_fallback_count 字段（环境异常的运维可观测性闭环）。 */
-    uint32_t diag_idx_mmap_fallback_count;  /* 索引内存映射失败回退次数（累计） */
-
-    /* 自适应 Argon2id 运行时漂移监控
-     *
-     * 基准值从容器参数读取（创建时跑分记录）。
-     * 每次解锁记录 Argon2id 派生耗时，与基准比较：
-     *   - 超基准 30%（elapsed * 100 > baseline * 130）：drift_count++
-     *   - 连续 VERTHYS_ARGON2_DRIFT_THRESHOLD(3) 次漂移：标记 auto_degraded=1
-     *   - 连续 VERTHYS_ARGON2_RECOVER_THRESHOLD(3) 次达标：清除 auto_degraded
-     *
-     * auto_degraded=1 时通过 Verthys_GetDiagnostics 上报安全中心，
-     * 建议下次创建容器使用更低档位（SECURE→BALANCED→PERFORMANCE）。
-     * 不改变当前容器的 Argon2id 参数（密钥派生结果不变，安全性不降级）。 */
-    uint32_t argon2_baseline_ms;          /* 基准派生耗时（毫秒，0=未建立） */
-    uint32_t argon2_last_derive_ms;       /* 最近一次 Argon2id 派生耗时（毫秒） */
-    uint32_t argon2_drift_count;          /* 连续漂移次数（超基准 30%） */
-    uint32_t argon2_normal_count;         /* 连续达标次数（用于恢复判定） */
-    int      argon2_auto_degraded;        /* 自动降级标志（0=正常, 1=已降级） */
 };
 
 /* ---------- 内部安全内存工具（不导出） ---------- */

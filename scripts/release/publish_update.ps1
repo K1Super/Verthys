@@ -71,9 +71,14 @@ function Invoke-Upload([string]$LocalPath, [string]$RemoteDirectory) {
     $exe = $script:ScpExe
     $scpArgs = $script:ScpArgs
     $destination = "$($SshUser)@$($Server):$RemoteDirectory/"
+    $name = Split-Path -Leaf $LocalPath
+    $sizeMb = [math]::Round((Get-Item -LiteralPath $LocalPath).Length / 1MB, 2)
+    Write-Info "uploading $name ($sizeMb MB)"
+    $watch = [Diagnostics.Stopwatch]::StartNew()
     $output = & $exe @scpArgs $LocalPath $destination 2>&1
     foreach ($line in $output) { Write-Info ([string]$line) }
     if ($LASTEXITCODE -ne 0) { throw "upload failed: $LocalPath" }
+    Write-Info "finished in $([math]::Round($watch.Elapsed.TotalSeconds,1))s"
 }
 
 $exitCode = 0
@@ -175,13 +180,19 @@ try {
         "-p", "$SshPort",
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=15",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=4",
         "$SshUser@$Server"
     )
     $script:ScpArgs = @(
         "-i", $KeyPath,
         "-P", "$SshPort",
         "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=accept-new"
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=15",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=4"
     )
 
     $sshExe = $script:SshExe
@@ -249,6 +260,7 @@ try {
     Assert ([string]$head.Headers["Accept-Ranges"] -eq "bytes") "installer must accept byte ranges"
 
     $tempInstaller = Join-Path $env:TEMP ("verthys-verify-" + [Guid]::NewGuid().ToString("N") + ".exe")
+    Write-Info "downloading published installer for hash verification"
     try {
         Invoke-WebRequest -UseBasicParsing -Uri $platform.url -OutFile $tempInstaller -TimeoutSec 300
         $remoteSha = (Get-FileHash -LiteralPath $tempInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -278,7 +290,7 @@ catch {
     $exitCode = 1
 }
 finally {
-    if (-not $NoPause) {
+    if ((-not $NoPause) -and ($exitCode -ne 0) -and (-not [Console]::IsInputRedirected)) {
         Write-Host ""
         Read-Host "Press Enter to exit" | Out-Null
     }

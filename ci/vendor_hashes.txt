@@ -2,15 +2,12 @@
 # 用途：CI/本地校验 vendored 源码未被篡改（供应链完整性）
 # 校验：./ci/verify_vendor_hashes.ps1（逐文件 SHA-256 比对 + 与 git 跟踪集双向核对）
 # 再生成：依赖升级后重新生成本清单：
-#   $files = git ls-files third_party/flatcc third_party/libsodium third_party/xxhash
+#   $files = git ls-files third_party/flatcc third_party/libsodium
 #   foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash, ($f -replace '/','\') } | Out-File ci\vendor_hashes.txt
 #
 # [flatcc] vendored @ commit a2515daa948c1ae42ba95b3a904363169dff147c
-# 用途：V3 容器 FlatBuffers 编解码运行时（flatccrt，链入 verthys.dll）
+# 用途：交换信封/容器 schema 的 FlatBuffers 编解码运行时（flatccrt，链入 verthys.dll）
 #       + schema codegen 编译器（flatcc_cli -> flatc.exe，构建宿主工具）
-#
-# [xxhash] vendored 单头
-# 用途：XXH64 非密码学哈希，容器/索引块校验和
 #
 # [libsodium] vendored @ commit 93a7d0d41fe2e32409b5d00386946f491750b7de
 # 用途：Argon2id/XChaCha20-Poly1305/随机数等全部密码学原语，静态链入 verthys.dll
@@ -832,5 +829,3 @@ CF8CC8665534F4DF323F72DBBC034152EDAC7E4842A17A049A7CBBD3A2228A94  third_party\li
 8CC9D522FB611616325C15930E409FCEA9AE73A8781B5D43B8F5056FBAC0AB9B  third_party\libsodium\test\default\wintest.bat
 8F8EDB06244B0D498CBA83370D2388AA4DB2DBEC381CC8C52EF19DD8BD43CB28  third_party\libsodium\test\default\xchacha20.c
 B792EEAB35A1FFD7A4F020719097E07BDA6A6E8933BE2DE554884A5E89840503  third_party\libsodium\test\quirks\quirks.h
-6FFEDBC0F7878612D2B23589F1FF2AB15633E1DF7963A5D9FC750EC5500C7E7A  third_party\xxhash\LICENSE
-17973C0DC49D9854CA26CAA191F0E12F7A424B68858D9A78DE3860D959D85E4B  third_party\xxhash\xxhash.h

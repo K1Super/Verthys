@@ -455,41 +455,4 @@ int job_isolation_is_active(void)
     return isJob ? 1 : 0;
 }
 
-/*
- * 主动断开 Job 隔离链路（仅应急销毁路径调用）。
- *
- * 资源释放流程：
- *   1. TerminateJobObject(外层, 退出码) —— 瞬间终止 Job 层级内所有进程
- *   2. CloseHandle(内层) —— 释放内层句柄
- *   3. CloseHandle(外层) —— 释放外层句柄（不设置 PROTECT_FROM_CLOSE，可直接关闭）
- *
- * 注意：TerminateJobObject(外层) 会终止当前进程，后续 CloseHandle 在当前进程内
- *       不会执行，但内核在进程退出时会自动清理句柄表。CloseHandle 代码保留作为
- *       TerminateJobObject 失败时的兜底清理路径。
- *
- * 调用后进程不可恢复，应仅在检测到致命篡改时使用。
- */
-void job_isolation_break(void)
-{
-    DWORD gle = 0;
 
-    if (s_hOuterJob != NULL) {
-        if (!TerminateJobObject(s_hOuterJob, 1)) {
-            gle = GetLastError();
-            job_diag("TerminateJobObject(outer, break) failed", gle);
-            /* TerminateJobObject 失败时，尝试关闭句柄触发 KILL_ON_JOB_CLOSE */
-        }
-    }
-
-    /* 兜底清理：仅在 TerminateJobObject 失败或进程未死时执行 */
-    if (s_hInnerJob != NULL) {
-        CloseHandle(s_hInnerJob);
-        s_hInnerJob = NULL;
-    }
-    if (s_hOuterJob != NULL) {
-        CloseHandle(s_hOuterJob);
-        s_hOuterJob = NULL;
-    }
-
-    s_active = 0;
-}

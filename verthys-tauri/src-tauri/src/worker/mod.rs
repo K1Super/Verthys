@@ -24,9 +24,8 @@
 //!       - 删除 diagnose_crash 清空句柄副作用
 //!
 //!   4. 流式响应处理：
-//!       - 内部 handle_streaming_progress_send 处理解锁 / 轮换进度流
-//!       - 公共 API 保留 send_json_with_unlock_progress 兼容签名
-//!       - 新增 send_json_with_rotate_progress（v4 D9 全库轮换）
+//!       - 内部 handle_streaming_progress_send 处理轮换进度流
+//!       - 公共 API 提供 send_json_with_rotate_progress（全库轮换）
 //!
 //!   5. 彻底杜绝 stderr 管道阻塞：
 //!       - Actor 在独立 tokio::task 中持续异步读取 stderr
@@ -40,7 +39,7 @@
 //!       - 主线程 drop Sender，Actor 侦测通道关闭自动触发退出序列
 //!
 //! 模块拆分：
-//!   - protocol: 协议数据结构、常量、ActorRequest 与解锁进度流常量
+//!   - protocol: 协议数据结构、常量、ActorRequest 与轮换进度流常量
 //!   - stderr:   stderr 环形缓冲区与持续排空任务
 //!   - platform: 平台特定代码（Windows Job Object + 孤儿进程清理）
 //!   - graceful: 优雅退出与诊断
@@ -49,7 +48,7 @@
 //!
 //! 公共 API 兼容策略：
 //!   保留 spawn/send_json/send_json_with_timeout/
-//!   send_json_with_unlock_progress/wait_for_ready_signal/pid/elapsed_secs/
+//!   send_json_with_rotate_progress/wait_for_ready_signal/pid/elapsed_secs/
 //!   is_alive/kill/Clone/Drop 签名，内部通过 Handle::block_on + block_in_place
 //!   包装为同步返回，使 state.rs 与控制器无需立即改签名即可编译。
 //!
@@ -66,5 +65,5 @@ pub mod session;
 pub mod stderr;
 
 pub use platform::kill_orphan_workers;
-pub use protocol::{RotateProgress, UnlockProgress};
+pub use protocol::RotateProgress;
 pub use session::WorkerSession;

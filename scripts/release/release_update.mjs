@@ -13,7 +13,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -54,11 +54,19 @@ function parseArgs(argv) {
 function authenticodeStatus(path) {
   if (process.platform !== "win32") return "";
   const script = "(Get-AuthenticodeSignature -LiteralPath $env:VERTHYS_AUTH_FILE).Status";
+  // 构建父进程可能是 PowerShell 7；Windows PowerShell 5.1 子进程继承 7 的
+  // PSModulePath 时无法加载 Microsoft.PowerShell.Security，Cert: 不存在，
+  // 签名状态会误报为空。这里显式恢复 5.1 的模块路径。
+  const psModulePath = [
+    join(process.env.USERPROFILE ?? "", "Documents", "WindowsPowerShell", "Modules"),
+    join(process.env.ProgramFiles ?? "", "WindowsPowerShell", "Modules"),
+    join(process.env.WINDIR ?? "C:\\Windows", "system32", "WindowsPowerShell", "v1.0", "Modules"),
+  ].join(";");
   const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
     encoding: "utf8",
     timeout: 60000,
     windowsHide: true,
-    env: { ...process.env, VERTHYS_AUTH_FILE: path },
+    env: { ...process.env, VERTHYS_AUTH_FILE: path, PSModulePath: psModulePath },
   });
   return result.status === 0 ? result.stdout.trim() : "";
 }

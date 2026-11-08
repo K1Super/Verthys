@@ -1,5 +1,5 @@
 /*
- * pcr_controller.rs — v4 PCR 策略命令（前端 → 主进程 → worker → C）
+ * pcr_controller.rs — PCR 策略命令（前端 → 主进程 → worker → C）
  *
  * 职责边界：只做参数边界与解锁态检查，恢复码二次认证与 PCR 槽持久化
  * 由 C 层完成；本层不缓存恢复码、不写日志、不返回任何密钥。

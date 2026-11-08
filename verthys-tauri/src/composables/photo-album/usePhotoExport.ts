@@ -15,15 +15,15 @@
  * - 结果契约：成功计数 / 失败明细，完成文案仅由成功计数派生
  * - 导出文件名经 sanitizeFileName 净化 + uniqueFileName 批次内唯一化
  */
-import { ref, watch, onScopeDispose, type Ref, type ShallowRef } from "vue";
+import { ref, watch, onScopeDispose, type ShallowRef } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { verthysGetRecord, verthysGetRecordDetailed, bytesToBase64, writeUserFile, writeUserFileStream, appendUserFileChunk, finalizeUserFileStream, abortUserFileStream } from "../../lib/verthys";
 import { base64ToBytes } from "../../utils/binary_codec";
 import {
-  computeFileHash, bytesToHex, packVencV2, packVencV2StreamedLazy,
+  packVenc, packVencStreamedLazy,
   estimateVencTotalBytes, toLightMeta, computeChunkHashesForB64,
-  generateRandomToken, CHUNK_SIZE, VENC_CONTAINER_FIXED_BYTES, vencPhotoFramesBytes,
-  type PhotoMeta, type VencPhotoSpecV2,
+  generateRandomToken, VENC_CONTAINER_FIXED_BYTES, vencPhotoFramesBytes,
+  type PhotoMeta, type VencPhotoSpec,
 } from "../../lib/crypto";
 import {
   decryptMetaPreferWorker, decryptThumbPreferWorker, decryptChunksPreferWorker,
@@ -147,7 +147,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
    * 只有当前这一张的块密文被解码为字节，帧写出后引用即失效 —— 这是单文件
    * 导出内存峰值与容器总字节解耦的关键。
    */
-  const loadPhotoSpec = async (ph: PhotoEntry): Promise<VencPhotoSpecV2 | null> => {
+  const loadPhotoSpec = async (ph: PhotoEntry): Promise<VencPhotoSpec | null> => {
     const { metaB64, chunkB64List, meta, chunkHashesForExport } = await getPhotoVerthysData(ph);
     if (!metaB64 || !meta || chunkB64List.length === 0) return null;
     const chunkBytes = chunkB64List.map((cb) => base64ToBytes(cb));
@@ -180,7 +180,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     let produced = VENC_CONTAINER_FIXED_BYTES;
     let packed = 0;
     try {
-      await packVencV2StreamedLazy(
+      await packVencStreamedLazy(
         selected.length,
         exportToken.value,
         async (index) => {
@@ -517,8 +517,8 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   const collectPhotoSpecs = async (
     selected: PhotoEntry[],
     failures: ExportFailure[],
-  ): Promise<VencPhotoSpecV2[]> => {
-    const specs: VencPhotoSpecV2[] = [];
+  ): Promise<VencPhotoSpec[]> => {
+    const specs: VencPhotoSpec[] = [];
     for (const ph of selected) {
       if (isTauri && ph.metaId) {
         // 修复：基于 metaId 判断（非 meta），重启后占位项也能导出
@@ -643,7 +643,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
             }
             exportStatus.value = "逐帧加密打包…";
             exportProgress.value = 50;
-            const vencBytes = await packVencV2(specs, exportToken.value);
+            const vencBytes = await packVenc(specs, exportToken.value);
             downloadBlob(vencBytes, `verthys_${Date.now()}.venc`);
           }
           exportProgress.value = 100;
@@ -753,7 +753,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
                     ? chunkHashesForExport
                     : computeChunkHashesForB64(chunkB64List);
                 const lightMeta = toLightMeta({ ...meta, chunkDataB64: chunkB64List, chunkHashes });
-                const vencBytes = await packVencV2([{ lightMeta, chunkBytes }], exportToken.value);
+                const vencBytes = await packVenc([{ lightMeta, chunkBytes }], exportToken.value);
                 const displayName = meta.name || ph.name;
                 const fileName = sanitizeWithExtension(displayName, ".venc");
                 await writeVencFile(`${dir}/${uniqueFileName(fileName, usedNames)}`, vencBytes);
@@ -772,7 +772,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
 
               const specs = await collectPhotoSpecs([ph], failures);
               if (specs.length > 0) {
-                const vencBytes = await packVencV2(specs, exportToken.value);
+                const vencBytes = await packVenc(specs, exportToken.value);
                 downloadBlob(vencBytes, sanitizeWithExtension(ph.name, ".venc"));
                 successCount++;
                 // 防止浏览器拦截多下载

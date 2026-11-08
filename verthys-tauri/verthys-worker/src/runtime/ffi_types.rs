@@ -47,7 +47,7 @@ pub(crate) struct VerthysContainerInfoProbeC {
 pub(crate) type VerthysGetContainerInfoFn =
     unsafe extern "C" fn(VerthysHandle, *mut VerthysContainerInfoProbeC) -> u32;
 pub(crate) type VerthysDeinitFn = unsafe extern "C" fn(VerthysHandle) -> u32;
-/// v4 专用解锁：只接受 VRTY 容器，内部强制 magic 校验（无 flags 参数）。
+/// 专用解锁：只接受 VRTY 容器，内部强制 magic 校验（无 flags 参数）。
 pub(crate) type VerthysV4UnlockFn =
     unsafe extern "C" fn(VerthysHandle, *const c_char, *const c_char, usize) -> u32;
 /// 运行时切换安全预设（双缓冲原子发布，立即生效）
@@ -86,7 +86,7 @@ pub(crate) type VerthysChangePasswordFn = unsafe extern "C" fn(
     usize,
 ) -> u32;
 
-/* v4 模块 M1 会话接口（与 verthys.h VerthysModuleStatus / Verthys_V4Module* 对齐） */
+/* 模块 M1 会话接口（与 verthys.h VerthysModuleStatus / Verthys_V4Module* 对齐） */
 
 /// 模块状态投影：不含任何密钥材料
 #[repr(C)]
@@ -135,6 +135,11 @@ pub(crate) type VerthysV4ModuleResealDeviceFn =
     unsafe extern "C" fn(VerthysHandle, u32, *const c_char, usize) -> u32;
 pub(crate) type VerthysV4ModuleStatusFn =
     unsafe extern "C" fn(VerthysHandle, u32, *mut VerthysModuleStatusC) -> u32;
+/// 只读查询模块锁剩余秒数（0x1D 响应携带）
+pub(crate) type VerthysV4ModuleLockoutRemainingFn =
+    unsafe extern "C" fn(VerthysHandle, u32, *mut u32) -> u32;
+/// 只读查询库级熔断剩余秒数（0x0A 响应携带；无需句柄）
+pub(crate) type VerthysGetLibLockoutRemainingFn = unsafe extern "C" fn(*mut u32) -> u32;
 pub(crate) type VerthysV4RecoveryRotateFn = unsafe extern "C" fn(
     VerthysHandle,
     *const c_char,
@@ -144,7 +149,7 @@ pub(crate) type VerthysV4RecoveryRotateFn = unsafe extern "C" fn(
     usize,
 ) -> u32;
 
-/* v4 D9 全库 DEK 轮换（API 版本 0x0010，与 verthys.h Verthys_V4Rotate* 对齐）
+/* 全库 DEK 轮换（API 版本 0x0010，与 verthys.h Verthys_V4Rotate* 对齐）
  *
  * 作业式接口：Begin 创建临时新库并登记作业，UnlockModule 逐模块登记口令，
  * Run 全量复制并回调进度，Commit 原子替换，Abort 丢弃临时库。
@@ -192,7 +197,7 @@ pub(crate) type VerthysV4RotateRunFn = unsafe extern "C" fn(
 pub(crate) type VerthysV4RotateCommitFn = unsafe extern "C" fn(VerthysHandle, u32) -> u32;
 pub(crate) type VerthysV4RotateAbortFn = unsafe extern "C" fn(VerthysHandle) -> u32;
 
-/* v4 容器创建/恢复与 PCR 策略（与 verthys.h 对应入口对齐） */
+/* 容器创建/恢复与 PCR 策略（与 verthys.h 对应入口对齐） */
 pub(crate) type VerthysV4CreateFn = unsafe extern "C" fn(
     VerthysHandle,
     *const c_char,
@@ -204,7 +209,7 @@ pub(crate) type VerthysV4CreateFn = unsafe extern "C" fn(
 pub(crate) type VerthysV4UnlockRecoveryFn =
     unsafe extern "C" fn(VerthysHandle, *const c_char, *const c_char) -> u32;
 
-/* v4 keyfile 因子（D3，API 版本 0x000F）：只传路径，keyfile 字节由 C 层
+/* keyfile 因子（API 版本 0x000F）：只传路径，keyfile 字节由 C 层
  * 在 worker 进程内读取/生成，不经过 IPC。 */
 pub(crate) type VerthysV4CreateKeyfileFn = unsafe extern "C" fn(
     VerthysHandle,
@@ -263,38 +268,8 @@ pub(crate) type VerthysV4ChunkOpenFn = unsafe extern "C" fn(
     usize,
     *mut usize,
 ) -> u32;
-/* 说明：v4 清单（manifest）只服务于 C 层模块重写事务，产品内容路径不调用；
+/* 说明：清单（manifest）只服务于 C 层模块重写事务，产品内容路径不调用；
  * 分片集合的完整性由 meta 内 BLAKE3 哈希表 + chunkset 记录认证。 */
-
-/* 解锁进度回调 FFI 绑定（与 verthys.h 中 VerthysUnlockProgress /
- * VerthysUnlockProgressCallback / Verthys_RegisterUnlockProgressCallback 严格对齐）
- *
- * 流式进度协议（与 migrate_progress 一致）：
- *   - worker 在 call_unlock 阻塞期间，由 C 回调直接向 stdout 写入
- *     {"ok":true,"op":"unlock_progress",...} 进度行
- *   - C 函数 Verthys_Unlock 返回后，worker 写入最终 {"ok":true,"op":"unlock",...} 终止行
- *   - 父进程 send_json_with_unlock_progress 区分进度行与终止行 */
-
-/// repr(C) 解锁进度结构（与 C 端 VerthysUnlockProgress 对齐）
-/// 布局：u32(4) + u32(4) + u64(8) + ptr(8) = 24B（x64 下 8 字节对齐）
-#[repr(C)]
-pub(crate) struct VerthysUnlockProgressC {
-    pub(crate) stage: u32,       /* VerthysUnlockStage 枚举值 */
-    pub(crate) percent: u32,     /* 0~100 累计百分比 */
-    pub(crate) elapsed_ms: u64,  /* 累计耗时（毫秒） */
-    pub(crate) message: *const c_char,  /* UTF-8 阶段描述（只读，回调期间有效） */
-}
-
-/// C 回调函数指针类型：void (*)(const VerthysUnlockProgress*, void*)
-pub(crate) type VerthysUnlockProgressCallbackC =
-    unsafe extern "C" fn(*const VerthysUnlockProgressC, *mut c_void);
-
-/// Verthys_RegisterUnlockProgressCallback 函数指针类型
-pub(crate) type VerthysRegisterUnlockProgressFn = unsafe extern "C" fn(
-    VerthysHandle,
-    Option<VerthysUnlockProgressCallbackC>,  /* callback */
-    *mut c_void,                           /* user_data */
-) -> u32;
 
 /* 游标批量扫描函数指针类型 */
 /// VerthysScanCursor 不透明指针
@@ -419,7 +394,7 @@ pub(crate) type VerthysHasRecordByTypeFn = unsafe extern "C" fn(VerthysHandle, u
  *   与 verthys.h 中 Verthys_FindFirstLidByType 严格对齐
  *   签名：VerthysResult Verthys_FindFirstLidByType(VerthysHandle, uint8_t rtype,
  *                                              uint8_t *out_found, uint64_t *out_lid)
- *   V3-only：容器格式非 V3 时返回 FORMAT；V3 容器内未找到返回 OK + found=0
+ *   容器未解锁或格式不符时返回 FORMAT；容器内未找到返回 OK + found=0
  *   （不报 FORMAT，避免前端 probe 抛异常）
  *   用于解锁成功后进程内探测全局主密钥记录，消除解锁后 3~4 次 IPC 往返 */
 pub(crate) type VerthysFindFirstLidByTypeFn = unsafe extern "C" fn(VerthysHandle, u8, *mut u8, *mut u64) -> u32;
@@ -427,7 +402,7 @@ pub(crate) type VerthysFindFirstLidByTypeFn = unsafe extern "C" fn(VerthysHandle
 /* 按类型分页枚举记录 ID FFI 绑定（API 0x0012）
  * 签名：VerthysResult Verthys_ListIdsByType(
  *   handle, rtype, after_id, max_count, out_ids, out_count, out_exhausted)
- * 走 V4 类型盲索引，不读取记录密文；max_count 上限由 C 层校验。 */
+ * 走 类型盲索引，不读取记录密文；max_count 上限由 C 层校验。 */
 pub(crate) type VerthysListIdsByTypeFn = unsafe extern "C" fn(
     VerthysHandle,
     u8,
@@ -449,8 +424,8 @@ pub(crate) type VerthysListIdsByTypeFn = unsafe extern "C" fn(
  *
  * Why 走 worker 而非主机主进程：容器会话在 C 层子进程内以独占方式
  * 持有超级块区 [0,64KB) 字节范围锁（Windows 强制锁），主进程新开句柄
- * 读取恒被 ERROR_LOCK_VIOLATION 拒绝；只有持锁子进程内的持锁句柄
- * （ctx->v3->f）能完成自查。 */
+ * 读取恒被 ERROR_LOCK_VIOLATION 拒绝；只有持锁子进程内的会话持锁句柄
+ * 能完成自查。 */
 #[repr(C)]
 pub(crate) struct VerPersistVerifyResultC {
     pub(crate) status: i32,

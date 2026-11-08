@@ -138,7 +138,7 @@ export function vaultReadoutColorVar(readout: VaultExpiryReadout): string | null
 }
 
 /** 临期阈值（天）：剩余天数小于该值按临期呈现 */
-export const VAULT_EXPIRY_WARN_DAYS = 30;
+const VAULT_EXPIRY_WARN_DAYS = 30;
 
 /** 一天的毫秒数（本地日历日换算用） */
 const DAY_MS = 86_400_000;

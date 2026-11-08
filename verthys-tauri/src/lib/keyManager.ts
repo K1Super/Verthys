@@ -50,7 +50,6 @@ export const globalKeyReadyRef = keyState.globalKeyReady;
 export const hasGlobalKeyRecordRef = keyState.hasGlobalKeyRecord;
 /* 全局密钥记录 id：修改密钥成功后更新；超时回查据此确认后端真实结果 */
 export const globalKeyRecordIdRef = keyState.globalKeyRecordId;
-export const globalKeyRecordLoadingRef = keyState.globalKeyRecordLoading;
 export const moduleKeyReadyRef = keyState.moduleKeyReady;
 export const hasModuleKeyRecordRef = keyState.hasModuleKeyRecord;
 export const moduleKeyEnabledRef = keyState.moduleKeyEnabled;
@@ -66,8 +65,6 @@ export const moduleKeyStatusLoadedRef = keyState.moduleKeyStatusLoaded;
 /* 模块密钥状态加载失败标志：守卫据此立即 fail-closed（不再空等超时窗口） */
 export const moduleKeyStatusFailedRef = keyState.moduleKeyStatusFailed;
 export const initStatusRef = keyState.initStatus;
-export const storedVerthysPathRef = keyState.storedVerthysPath;
-export const lastInitErrorRef = keyState.lastInitError;
 export const initDetailRef = keyState.initDetail;
 
 /* ===== 自定义特性持久化 ===== */
@@ -149,7 +146,6 @@ export {
   bumpPresetEpoch,
   checkBruteForceGate,
   getBruteForceStatus,
-  clearBruteForcePurge,
   lockAll,
   awaitLockAllIfInProgress,
   securityPresetRef,

@@ -51,7 +51,7 @@ const log = createLogger("vault-item-type-store");
 export const VAULT_TYPES_CACHE_KEY = "vault_types";
 
 /** 自定义类型定义记录的显示名（记录列表中的可读标识） */
-export const VAULT_TYPES_RECORD_NAME = "vault-types";
+const VAULT_TYPES_RECORD_NAME = "vault-types";
 
 /** 合法字段控件种类（单一权威源派生 — 校验集合与类型声明同源） */
 const VALID_FIELD_KINDS: readonly VaultFieldKind[] = VAULT_FIELD_KINDS;
@@ -362,9 +362,9 @@ function parseVaultTypesRecord(b64: string): VaultTypeDef[] | null {
 /**
  * 收集当前容器内全部类型定义记录 id（升序）。
  *
- * 来源互补：模块缓存记录 id（最近一次写入）+ V4 类型盲索引（权威；
+ * 来源互补：模块缓存记录 id（最近一次写入）+ 类型盲索引（权威；
  * 枚举失败时 resolveTypeIds 自动回退全量记录扫描）。不读摘要 type
- * （V4 摘要 type 恒为未知 0）。扫描失败时保留已收集到的 id，不因一次
+ * （摘要 type 恒为未知 0）。扫描失败时保留已收集到的 id，不因一次
  * 扫描异常丢失删除依据。
  */
 async function collectVaultTypeRecordIds(): Promise<number[]> {
@@ -373,8 +373,8 @@ async function collectVaultTypeRecordIds(): Promise<number[]> {
   const cached = getModuleCache<VaultTypeDef[]>(VAULT_TYPES_CACHE_KEY);
   if (cached.recordId !== null) ids.add(cached.recordId);
 
-  /* 权威来源：V4 类型盲索引；失败时 resolveTypeIds 已回退全量扫描。
-   * 不再读摘要 type（V4 摘要 type 恒为未知 0）。 */
+  /* 权威来源：类型盲索引；失败时 resolveTypeIds 已回退全量扫描。
+   * 不再读摘要 type（摘要 type 恒为未知 0）。 */
   for (const id of await resolveTypeIds(TYPE_VAULT_TYPES)) ids.add(id);
 
   return [...ids].sort((a, b) => a - b);

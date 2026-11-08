@@ -19,7 +19,7 @@
  * - 拖拽时光标变化反馈（grab / grabbing）
  * - 窗口失焦/聚焦时 viewer 模糊控制（隐私保护）
  */
-import { ref, type Ref, type ShallowRef } from "vue";
+import { ref, type ShallowRef } from "vue";
 import { decryptChunksPreferWorker } from "../../workers/photo-decrypt-bridge";
 import { isSlimLayout } from "../../constants/crypto_const";
 import { updateShallowItem } from "../../utils/shallow-array";

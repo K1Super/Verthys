@@ -12,7 +12,7 @@
  * 不过）属确定性失败，直接向上传播，不在主线程重复解密。
  */
 import type { PhotoMeta, SlimChunkSet } from "../types/crypto";
-import { bytesToBase64, base64ToBytes, bytesToHex } from "../utils/binary_codec";
+import { base64ToBytes, bytesToHex } from "../utils/binary_codec";
 import { blake3 } from "@noble/hashes/blake3";
 import { FILE_HASH_LEN } from "../constants/crypto_const";
 import { createLogger } from "../utils/logger";

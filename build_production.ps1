@@ -19,13 +19,14 @@
 #   - 任一阶段失败立即终止，不继续后续阶段
 #
 # 用法:
-#   powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-NoPause] [-Profile local|production]
+#   powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-SkipService] [-NoPause] [-Profile local|production]
 #
 # 参数:
 #   -Clean       构建前清理所有构建目录
 #   -SkipCore    跳过 C 核心构建（DLL 已存在时使用）
 #   -SkipWorker  跳过 worker 构建（二进制已存在时使用）
 #   -SkipTauri   跳过 Tauri 打包（仅构建组件时使用）
+#   -SkipService 跳过独立安全服务构建
 #   -NoPause     失败/成功后不暂停等待 Enter（CI 场景使用；双击运行时不传此参数以便查看输出）
 #   -Profile     更新端点配置：local 仅回环验证，production 默认 HTTPS
 #   -UpdaterEndpoint production 清单 URL；也可用 VERTHYS_UPDATER_ENDPOINT
@@ -42,6 +43,7 @@ param(
     [switch]$SkipCore,
     [switch]$SkipWorker,
     [switch]$SkipTauri,
+    [switch]$SkipService,
     [switch]$NoPause,
     [ValidateSet("local", "production")]
     [string]$Profile = "production",
@@ -111,6 +113,120 @@ function Assert-FileExists {
     }
     $info = Get-Item $Path
     Write-OK ("{0}: {1} ({2} KB)" -f $Description, $info.LastWriteTime, [math]::Round($info.Length / 1KB, 1))
+}
+
+# 以独立进程运行签名宿主并捕获输出。初始化可能写入用户态持久状态，
+# 门禁把 LOCALAPPDATA 指向临时目录，避免污染真实用户配置。
+function Invoke-VerthysHostProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$LocalAppData
+    )
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $ExePath
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.EnvironmentVariables["LOCALAPPDATA"] = $LocalAppData
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    try {
+        # 初始化卡死同样属于“未按预期拒绝/放行”，必须显式失败而不是挂住构建。
+        if (-not $proc.WaitForExit(30000)) {
+            try { $proc.Kill() } catch { }
+            return [pscustomobject]@{ ExitCode = -1; Output = "TIMEOUT" }
+        }
+        $out = $proc.StandardOutput.ReadToEnd()
+        [void]$proc.StandardError.ReadToEnd()
+        return [pscustomobject]@{ ExitCode = $proc.ExitCode; Output = $out.Trim() }
+    } finally {
+        $proc.Dispose()
+    }
+}
+
+# 定位签名宿主。缺失时按既有产物契约记录的生成器补建该测试目标，
+# 避免 -SkipCore 路径上无法执行调用方认证功能门禁。
+function Get-VerthysSignedHostPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BuildDir,
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$CmakeExe
+    )
+    $candidates = @(
+        (Join-Path $BuildDir "core\tests\Release\vty_signed_host.exe"),
+        (Join-Path $BuildDir "core\tests\vty_signed_host.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+
+    Write-Step "构建 vty_signed_host（调用方认证门禁需要签名宿主）"
+    if ([string]$Manifest.generator -eq "Ninja") {
+        & $CmakeExe --build $BuildDir --target vty_signed_host
+    } else {
+        & $CmakeExe --build $BuildDir --config ([string]$Manifest.config) --target vty_signed_host
+    }
+    if ($LASTEXITCODE -ne 0) { throw "构建 vty_signed_host 失败" }
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    throw "构建后仍未找到 vty_signed_host.exe"
+}
+
+# 调用方认证功能门禁：
+#   负向：未签名宿主 + 签名 DLL 必须返回 UNAUTHORIZED（0x00000016）；
+#   正向：目标发布者签名宿主 + 签名 DLL 必须 Init 成功（0x00000000）。
+# 正向宿主使用发布者证书签名的临时副本，验证钉扎指纹与真实产物一致；
+# 临时目录在结束时删除，签名副本不进入仓库与交付物。
+function Invoke-VerthysCallerAuthGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$DllPath,
+        [Parameter(Mandatory = $true)][string]$HostPath,
+        [Parameter(Mandatory = $true)]$Signing
+    )
+    $workDir = Join-Path $env:TEMP ("verthys_caller_gate_" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+    try {
+        $localAppData = Join-Path $workDir "localappdata"
+        New-Item -ItemType Directory -Path $localAppData -Force | Out-Null
+
+        $unsignedDir = Join-Path $workDir "unsigned"
+        New-Item -ItemType Directory -Path $unsignedDir -Force | Out-Null
+        Copy-Item -LiteralPath $HostPath -Destination (Join-Path $unsignedDir "vty_signed_host.exe") -Force
+        Copy-Item -LiteralPath $DllPath -Destination (Join-Path $unsignedDir "verthys.dll") -Force
+
+        $negative = Invoke-VerthysHostProcess `
+            -ExePath (Join-Path $unsignedDir "vty_signed_host.exe") `
+            -WorkingDirectory $unsignedDir `
+            -LocalAppData $localAppData
+        if ($negative.Output -notmatch "INIT result=0x00000016") {
+            throw "未签名宿主未被拒绝（期望 0x00000016）: exit=$($negative.ExitCode) output=$($negative.Output)"
+        }
+        Write-OK "未签名宿主被拒绝（UNAUTHORIZED）"
+
+        $signedDir = Join-Path $workDir "signed"
+        New-Item -ItemType Directory -Path $signedDir -Force | Out-Null
+        $signedHost = Join-Path $signedDir "vty_signed_host.exe"
+        Copy-Item -LiteralPath $HostPath -Destination $signedHost -Force
+        # 门禁只验证钉扎指纹，临时宿主不引入时间戳网络依赖。
+        Invoke-VerthysAuthenticodeSign -Path $signedHost -Certificate $Signing.Certificate | Out-Null
+        Copy-Item -LiteralPath $DllPath -Destination (Join-Path $signedDir "verthys.dll") -Force
+
+        $positive = Invoke-VerthysHostProcess `
+            -ExePath $signedHost `
+            -WorkingDirectory $signedDir `
+            -LocalAppData $localAppData
+        if ($positive.ExitCode -ne 0 -or $positive.Output -notmatch "INIT result=0x00000000") {
+            throw "目标发布者签名宿主未放行: exit=$($positive.ExitCode) output=$($positive.Output)"
+        }
+        Write-OK "目标发布者签名宿主放行（Init 成功）"
+    } finally {
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # ========== 预清理 ==========
@@ -245,6 +361,8 @@ if (-not [string]::IsNullOrEmpty($env:VCToolsInstallDir) -and
 # 使用完全相同的完整性基准口径。
 . (Join-Path $ScriptsLibDir "artifacts.ps1")
 . (Join-Path $ScriptsLibDir "vsec.ps1")
+# Release 发布签名：证书解析、指纹钉扎、Authenticode 签名与复核
+. (Join-Path $ScriptsLibDir "release_signing.ps1")
 
 # ========== 依赖与补丁校验 ==========
 Write-Stage "阶段 0.6: 依赖与补丁校验"
@@ -322,6 +440,17 @@ if ($patchBlock.Value -match '(?m)^source\s*=') {
 }
 Write-OK "Cargo.lock 补丁已确认（本地 path 补丁生效）"
 
+# ========== 发布签名与调用方认证解析 ==========
+# production 必须有可用发布者证书；local 缺少证书时显式关闭调用方认证，
+# 产物标记为不可分发，禁止把未签名构建当成发布候选。
+$script:signing = Resolve-VerthysReleaseSigning -Required:($Profile -eq "production")
+if (-not $script:signing.Enabled) {
+    Write-Host "[sign] local profile 未提供签名证书：本次产物不启用调用方认证、不含 Authenticode，禁止分发" -ForegroundColor Yellow
+}
+if ($script:signing.Enabled -and $SkipWorker) {
+    throw "启用发布签名的构建不允许 -SkipWorker：worker 的 Release 完整性基线必须绑定签名后的 DLL"
+}
+
 # ========== 阶段 1: 构建 C 核心 DLL ==========
 if (-not $SkipCore) {
     Write-Stage "阶段 1/4: 构建 C 核心安全 DLL（verthys.dll）"
@@ -333,11 +462,20 @@ if (-not $SkipCore) {
     # 自动清理构建目录并全量重建，保证任意路径变更后一键构建仍可用。
     Clear-StaleCMakeCache -BuildDir $CoreBuildDir -SourceDir $ScriptRoot
 
-    Write-Step "CMake Configure (Release, x64)"
+    Write-Step ("CMake Configure (Release, x64, caller_sig={0})" -f $(if ($script:signing.Enabled) { "ON" } else { "OFF" }))
+    # 两个缓存变量必须每轮显式写出：CMake 会保留上一次配置的缓存值，
+    # 省略会把上一轮的 ON/OFF 状态带进本轮产物。
+    $callerSigState = if ($script:signing.Enabled) { "ON" } else { "OFF" }
+    $publisherShaValue = if ($script:signing.Enabled) { $script:signing.PublisherSha256 } else { "" }
+    $callerSigArgs = @(
+        "-DVERTHYS_REQUIRE_CALLER_SIG=$callerSigState",
+        "-DVERTHYS_PUBLISHER_SHA256=$publisherShaValue",
+        "-DVERTHYS_TEST_HOOKS=OFF"
+    )
     if ($script:msvcInjected) {
-        & $script:effectiveCmake -S $ScriptRoot -B $CoreBuildDir -G Ninja -DCMAKE_BUILD_TYPE=Release
+        & $script:effectiveCmake -S $ScriptRoot -B $CoreBuildDir -G Ninja -DCMAKE_BUILD_TYPE=Release @callerSigArgs
     } else {
-        & $script:effectiveCmake -S $ScriptRoot -B $CoreBuildDir -G $script:effectiveGenerator -A x64
+        & $script:effectiveCmake -S $ScriptRoot -B $CoreBuildDir -G $script:effectiveGenerator -A x64 @callerSigArgs
     }
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "CMake 配置失败"
@@ -374,6 +512,19 @@ if (-not $SkipCore) {
 # “跳过重编”路径上漏掉安全基准。
 Write-Stage "阶段 1.1/4: .vsec 完整性基准注入"
 Update-VsecBaseline -DllPath $script:actualCoreDll
+
+# Authenticode 必须在 .vsec 注入之后：签名只追加 PE 安全目录，
+# 不改写 .text/.rdata/.rhat，因此 .vsec 基准保持有效。
+if ($script:signing.Enabled) {
+    Invoke-VerthysAuthenticodeSign `
+        -Path $script:actualCoreDll `
+        -Certificate $script:signing.Certificate `
+        -TimestampServer $script:signing.TimestampServer
+    Assert-VerthysAuthenticodeSignature `
+        -Path $script:actualCoreDll `
+        -ExpectedSha256 $script:signing.PublisherSha256 | Out-Null
+    Write-OK "verthys.dll 已签名，发布者指纹=$($script:signing.PublisherSha256)"
+}
 # 生成器/配置以现有契约为准：-SkipCore 时构建目录可能是另一种生成器
 # （例如 CI 注入环境用 Ninja、本地显式环境用 Visual Studio）产出，
 # 用当前 shell 的 effectiveGenerator 会让重生成契约的元数据失真。
@@ -387,9 +538,31 @@ $script:coreContract = Write-VerthysArtifactContract `
     -OutPath (Join-Path $CoreBuildDir "core\verthys.artifacts.json")
 Write-OK "完整性基准已注入，产物契约已按最终字节刷新（SHA256 / 生成器 / 配置一致）"
 
+# ========== 阶段 1.2: 调用方认证功能门禁 ==========
+# 用真实发布证书对临时签名宿主做正负对照：未签名宿主必须被拒绝，
+# 目标发布者签名宿主必须放行。契约哈希来自签名后字节，门禁与交付物同源。
+if ($script:signing.Enabled) {
+    Write-Stage "阶段 1.2/4: 调用方认证功能门禁"
+    $signedHostPath = Get-VerthysSignedHostPath `
+        -BuildDir $CoreBuildDir `
+        -Manifest $coreManifest `
+        -CmakeExe $script:effectiveCmake
+    Invoke-VerthysCallerAuthGate `
+        -DllPath $script:actualCoreDll `
+        -HostPath $signedHostPath `
+        -Signing $script:signing
+} else {
+    Write-Stage "阶段 1.2/4: 跳过调用方认证门禁（未启用发布签名）"
+}
+
 # ========== 阶段 2: 构建 verthys-worker ==========
 if (-not $SkipWorker) {
     Write-Stage "阶段 2/4: 构建 verthys-worker 子进程（Rust release）"
+
+    # worker 的 Release 完整性基线必须绑定最终签名字节；否则运行期
+    # 全文件 SHA-256 比对必然失败，表现为 worker 拒绝加载 DLL。
+    # 契约路径是唯一权威来源，禁止 worker 构建自行猜测生成器目录。
+    $env:VERTHYS_DLL_PATH = $script:actualCoreDll
 
     # 纵深防御：禁用增量编译（defense-in-depth）
     # 根因：dev profile 增量编译与 raw-dylib 导入库生成存在竞态，导致
@@ -425,6 +598,19 @@ if (-not $SkipWorker) {
     }
 
     Assert-FileExists $WorkerReleaseExe "verthys-worker.exe (release)"
+
+    # 签名必须发生在 worker 完整性基线生成之后、复制打包之前：
+    # 基线绑定的是 DLL，签名改写的是 worker 自身字节，两者互不冲突。
+    if ($script:signing.Enabled) {
+        Invoke-VerthysAuthenticodeSign `
+            -Path $WorkerReleaseExe `
+            -Certificate $script:signing.Certificate `
+            -TimestampServer $script:signing.TimestampServer
+        Assert-VerthysAuthenticodeSignature `
+            -Path $WorkerReleaseExe `
+            -ExpectedSha256 $script:signing.PublisherSha256 | Out-Null
+        Write-OK "verthys-worker.exe 已签名，发布者指纹=$($script:signing.PublisherSha256)"
+    }
 
     # 同时构建 debug 版本（开发环境使用）
     Write-Step "cargo build (debug, 供开发环境)"
@@ -527,6 +713,80 @@ foreach ($target in @($WorkerBundledExe, $tauriReleaseTarget, $tauriDebugTarget)
             throw "worker 二进制哈希不一致: $target"
         }
     }
+}
+
+# ========== 阶段 3.6: 构建并分发 P2 独立安全服务 ==========
+# 必须在 Tauri 打包之前完成：resources 在 cargo build 时校验并被打入 NSIS，
+# 否则安装包拿到的是上一轮残留的服务资源。
+if (-not $SkipService) {
+    Write-Stage "阶段 3.6: 构建 P2 独立安全服务"
+
+    $serviceBuildDir = Join-Path $ScriptRoot "build_security_service"
+    $serviceBuildScript = Join-Path $ScriptsDir "build\build_security_service.ps1"
+    if (-not (Test-Path -LiteralPath $serviceBuildScript)) {
+        throw "P2 安全服务构建脚本缺失: $serviceBuildScript"
+    }
+    Push-Location $ScriptRoot
+    try {
+        if ($Profile -eq "production") {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+                -File "scripts\build\build_security_service.ps1" `
+                -BuildDir "build_security_service" -Profile production
+        } elseif ($script:signing.Enabled) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+                -File "scripts\build\build_security_service.ps1" `
+                -BuildDir "build_security_service" -Profile local
+        } else {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+                -File "scripts\build\build_security_service.ps1" `
+                -BuildDir "build_security_service" -Profile local -NoSign
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "P2 安全服务构建失败 (exit=$LASTEXITCODE)"
+        }
+    } finally {
+        Pop-Location
+    }
+
+    $serviceArtifactDir = Join-Path $serviceBuildDir "artifacts"
+    $serviceDistDir = Join-Path $ScriptRoot "build\security-service"
+    if (Test-Path -LiteralPath $serviceDistDir) {
+        Remove-Item -LiteralPath $serviceDistDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $serviceDistDir -Force | Out-Null
+    foreach ($name in @("VerthysSecuritySvc.exe", "security-service.artifacts.json",
+                        "VerthysRootCA.cer")) {
+        $source = Join-Path $serviceArtifactDir $name
+        if (-not (Test-Path -LiteralPath $source)) {
+            if ($name -eq "VerthysRootCA.cer" -and -not $script:signing.Enabled) { continue }
+            throw "P2 安全服务产物缺失: $source"
+        }
+        Copy-Item -LiteralPath $source -Destination $serviceDistDir -Force
+    }
+    Write-OK "P2 安全服务产物: build\security-service"
+
+    # 载荷目录：服务 exe + 根 CA。目录名与服务安装目录 SecurityService 区分，
+    # 避免 Windows 大小写不敏感路径冲突（安装器中从载荷目录调用 /install）。
+    $serviceResourceDir = Join-Path $ScriptRoot "verthys-tauri\src-tauri\service-payload"
+    $legacyResourceDir = Join-Path $ScriptRoot "verthys-tauri\src-tauri\security-service"
+    if (Test-Path -LiteralPath $legacyResourceDir) {
+        Remove-Item -LiteralPath $legacyResourceDir -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $serviceResourceDir) {
+        Remove-Item -LiteralPath $serviceResourceDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $serviceResourceDir -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $serviceDistDir "VerthysSecuritySvc.exe") `
+        -Destination (Join-Path $serviceResourceDir "VerthysSecuritySvc.exe") -Force
+    $rootCertSource = Join-Path $serviceDistDir "VerthysRootCA.cer"
+    if (Test-Path -LiteralPath $rootCertSource) {
+        Copy-Item -LiteralPath $rootCertSource -Destination (Join-Path $serviceResourceDir "VerthysRootCA.cer") -Force
+    } elseif ($script:signing.Enabled) {
+        throw "P2 根 CA 载荷缺失: $rootCertSource"
+    }
+    Write-OK "P2 服务载荷: src-tauri\service-payload"
+} else {
+    Write-Stage "阶段 3.6: 跳过 P2 独立安全服务（-SkipService）"
 }
 
 # ========== 阶段 4: 构建 Tauri 应用 ==========
@@ -644,7 +904,6 @@ if (-not $SkipTauri) {
         $config.plugins.updater.channel = "stable"
         $config.plugins.updater.dangerousInsecureTransportProtocol = $insecureUpdater
         $config.plugins.updater.allowedDownloadHosts = @($endpointUri.Host)
-        $config | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $profileConfig -Encoding ASCII
         $profileGateArgs = @($profileConfig, "--profile", "production", "--endpoint", $UpdaterEndpoint, "--base", (Join-Path $SrcTauriDir "tauri.conf.json"))
         if ($insecureUpdater) {
             $profileGateArgs += "--allow-insecure"
@@ -653,12 +912,55 @@ if (-not $SkipTauri) {
         if (-not $AllowLocal) {
             throw "local profile requires -AllowLocal"
         }
-        $profileConfig = Join-Path $VerthysTauriDir "src-tauri\tauri.local.conf.json"
-        if (-not (Test-Path $profileConfig)) {
-            throw "missing local overlay: $profileConfig"
+        $templateConfig = Join-Path $VerthysTauriDir "src-tauri\tauri.local.conf.json"
+        if (-not (Test-Path $templateConfig)) {
+            throw "missing local overlay: $templateConfig"
         }
-        $profileGateArgs = @($profileConfig, "--profile", "local")
+        $generatedDir = Join-Path $ScriptRoot "build"
+        New-Item -ItemType Directory -Force -Path $generatedDir | Out-Null
+        $profileConfig = Join-Path $generatedDir "tauri.local.generated.conf.json"
+        $config = Get-Content -LiteralPath $templateConfig -Raw | ConvertFrom-Json
+        $profileGateArgs = @($profileConfig, "--profile", "local", "--base", (Join-Path $SrcTauriDir "tauri.conf.json"))
     }
+
+    # 主程序签名必须由打包器在“二进制补丁之后”执行：打包器先写入 bundle type
+    # 信息（改写 PE、使已有签名失效），再按 package type 调用 signCommand 重签，
+    # 最后生成安装包。beforeBundleCommand 早于补丁，在那里签名必然产生
+    # HashMismatch，禁止回退。signCommand 同时覆盖 NSIS 卸载器。
+    if ($script:signing.Enabled) {
+        $signHook = Join-Path $ScriptsDir "build\sign_release_binaries.ps1"
+        if (-not (Test-Path -LiteralPath $signHook)) {
+            throw "签名入口缺失: $signHook"
+        }
+        $signCommand = [pscustomobject]@{
+            cmd  = "powershell.exe"
+            args = @(
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", $signHook,
+                "-ExePath", "%1"
+            )
+        }
+        $bundleSection = $config.PSObject.Properties['bundle']
+        if ($null -eq $bundleSection) {
+            $config | Add-Member -NotePropertyName bundle -NotePropertyValue ([pscustomobject]@{
+                windows = [pscustomobject]@{ signCommand = $signCommand }
+            }) -Force
+        } else {
+            $windowsSection = $bundleSection.Value.PSObject.Properties['windows']
+            if ($null -eq $windowsSection) {
+                $bundleSection.Value | Add-Member -NotePropertyName windows `
+                    -NotePropertyValue ([pscustomobject]@{ signCommand = $signCommand }) -Force
+            } else {
+                $windowsSection.Value | Add-Member -NotePropertyName signCommand `
+                    -NotePropertyValue $signCommand -Force
+            }
+        }
+        Write-OK "已注入打包器 signCommand（补丁后签名主程序与卸载器）"
+    }
+    # UTF-8 无 BOM：路径可能包含非 ASCII 字符，ASCII 编码会截断；BOM 会让 JSON 解析失败。
+    $configJson = $config | ConvertTo-Json -Depth 12
+    [System.IO.File]::WriteAllText($profileConfig, $configJson, [System.Text.UTF8Encoding]::new($false))
     & $nodeCmd.Source (Join-Path $ScriptsGatesDir "check_updater_profile.mjs") @profileGateArgs
     if ($LASTEXITCODE -ne 0) {
         throw "更新 profile 配置校验失败: $Profile"
@@ -693,8 +995,71 @@ if (-not $SkipTauri) {
         Write-Fail "Tauri 构建失败 (exit=$tauriExit)"
         throw "Tauri 构建失败 (exit=$tauriExit)"
     }
+
+    # 打包器 signCommand 的签名输出会进入构建日志。主程序必须在 bundle type
+    # 补丁之后重签，否则安装包内嵌的是未签名或签名失效的主程序，运行期
+    # 调用方认证会拒绝启动。signCommand 被忽略时构建必须在此终止。
+    if ($script:signing.Enabled) {
+        $mainSigned = $output | Where-Object {
+            $text = $_.ToString()
+            ($text -match '\[sign\]') -and
+            ($text -match '已签名并复核|已由目标发布者签名') -and
+            ($text -match 'Verthys\.exe')
+        } | Select-Object -First 1
+        if ($null -eq $mainSigned) {
+            throw "打包器未对主程序执行签名：signCommand 未生效或被跳过"
+        }
+        Write-OK "主程序已在 bundle type 补丁后签名"
+    }
 } else {
     Write-Stage "阶段 4/4: 跳过 Tauri 打包（-SkipTauri）"
+}
+
+# ========== 阶段 4.4b: 安装包 Authenticode 签名 + 更新签名重生成 ==========
+# Tauri 生成的 .sig 覆盖打包时的安装包字节；Authenticode 签名会改写安装包，
+# 必须先签名，再用同一更新私钥重新生成 .sig，顺序不可交换。
+if (-not $SkipTauri -and $script:signing.Enabled) {
+    $productVersion = ([System.IO.File]::ReadAllText((Join-Path $ScriptRoot "VERSION"))).Trim()
+    $installerName = "Verthys_${productVersion}_x64-setup.exe"
+    $installerPath = Join-Path $VerthysTauriDir "src-tauri\target\release\bundle\nsis\$installerName"
+    if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
+        Write-Fail "安装包缺失，无法签名: $installerPath"
+        throw "安装包缺失，无法签名: $installerPath"
+    }
+
+    Write-Step "NSIS 安装包 Authenticode 签名"
+    Invoke-VerthysAuthenticodeSign `
+        -Path $installerPath `
+        -Certificate $script:signing.Certificate `
+        -TimestampServer $script:signing.TimestampServer
+    Assert-VerthysAuthenticodeSignature `
+        -Path $installerPath `
+        -ExpectedSha256 $script:signing.PublisherSha256 | Out-Null
+    Write-OK "安装包 Authenticode 签名复核通过"
+
+    Write-Step "重新生成更新签名 (.sig)"
+    $signaturePath = "$installerPath.sig"
+    if (Test-Path -LiteralPath $signaturePath) {
+        Remove-Item -LiteralPath $signaturePath -Force
+    }
+    Push-Location $VerthysTauriDir
+    try {
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $sigOutput = & npx tauri signer sign $installerPath 2>&1
+        $sigExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+    } finally {
+        Pop-Location
+    }
+    if ($sigExit -ne 0) {
+        $sigOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        throw "更新签名生成失败 (exit=$sigExit)"
+    }
+    if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+        throw "更新签名未生成: $signaturePath"
+    }
+    Write-OK "更新签名已重新生成: $signaturePath"
 }
 
 # ========== 阶段 4.5: 发布符号清理与 SBOM ==========
@@ -722,6 +1087,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "SBOM 生成失败 (exit=$LASTEXITCODE)"
 }
 Write-OK "SBOM 已生成: build\sbom.cdx.json"
+
+# ========== 阶段 4.6: 独立安全服务 ==========
+# P2 独立安全服务的构建已前移到 Tauri 打包阶段之前，确保安装包携带
+# 本次构建的安装器/服务二进制/根 CA，而不是上一轮残留产物。
 
 # ========== 阶段 5: 产物校验 ==========
 Write-Stage "构建完成 — 产物校验"
@@ -751,6 +1120,25 @@ if (Test-Path $DllTarget) {
         Write-Fail "src-tauri/verthys.dll .vsec 完整性基准缺失或失配"
         $allOk = $false
     }
+    # 打包副本必须与契约记录的交付字节完全一致：签名后契约按最终字节重算，
+    # 任何复制期改写都会让运行期 DLL 哈希校验与签名同时失效。
+    $sourceDllHash = (Get-FileHash -LiteralPath $script:actualCoreDll -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stagedDllHash = (Get-FileHash -LiteralPath $DllTarget -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($sourceDllHash -ne $stagedDllHash) {
+        Write-Fail "DLL 打包副本哈希漂移: source=$($sourceDllHash.Substring(0,12)) staged=$($stagedDllHash.Substring(0,12))"
+        $allOk = $false
+    }
+    if ($script:signing.Enabled) {
+        try {
+            Assert-VerthysAuthenticodeSignature `
+                -Path $DllTarget `
+                -ExpectedSha256 $script:signing.PublisherSha256 | Out-Null
+            Write-OK "src-tauri/verthys.dll Authenticode 签名复核通过"
+        } catch {
+            Write-Fail "src-tauri/verthys.dll 签名复核失败: $($_.Exception.Message)"
+            $allOk = $false
+        }
+    }
 } else {
     Write-Fail "DLL 打包副本缺失: $DllTarget"
     $allOk = $false
@@ -760,9 +1148,92 @@ if (Test-Path $DllTarget) {
 if (Test-Path $WorkerBundledExe) {
     $info = Get-Item $WorkerBundledExe
     Write-OK ("verthys-worker-x86_64-pc-windows-msvc.exe: {0} ({1} KB)" -f $info.LastWriteTime, [math]::Round($info.Length / 1KB, 1))
+    if ($script:signing.Enabled) {
+        try {
+            Assert-VerthysAuthenticodeSignature `
+                -Path $WorkerBundledExe `
+                -ExpectedSha256 $script:signing.PublisherSha256 | Out-Null
+            Write-OK "verthys-worker.exe Authenticode 签名复核通过"
+        } catch {
+            Write-Fail "verthys-worker.exe 签名复核失败: $($_.Exception.Message)"
+            $allOk = $false
+        }
+    }
 } else {
     Write-Fail "verthys-worker 二进制缺失"
     $allOk = $false
+}
+
+# 独立安全服务产物与载荷
+if (-not $SkipService) {
+    $p2Dir = Join-Path $ScriptRoot "build\security-service"
+    $serviceNames = @("VerthysSecuritySvc.exe", "security-service.artifacts.json")
+    if ($script:signing.Enabled) { $serviceNames += "VerthysRootCA.cer" }
+    foreach ($name in $serviceNames) {
+        $path = Join-Path $p2Dir $name
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $info = Get-Item -LiteralPath $path
+            Write-OK ("P2 产物: {0} ({1} KB)" -f $name, [math]::Round($info.Length / 1KB, 1))
+        } else {
+            Write-Fail "P2 安全服务产物缺失: $path"
+            $allOk = $false
+        }
+    }
+    if ($script:signing.Enabled) {
+        $servicePath = Join-Path $p2Dir "VerthysSecuritySvc.exe"
+        if (Test-Path -LiteralPath $servicePath -PathType Leaf) {
+            try {
+                Assert-VerthysAuthenticodeSignature `
+                    -Path $servicePath `
+                    -ExpectedSha256 $script:signing.PublisherSha256 | Out-Null
+                Write-OK "VerthysSecuritySvc.exe Authenticode 签名复核通过"
+            } catch {
+                Write-Fail "VerthysSecuritySvc.exe 签名复核失败: $($_.Exception.Message)"
+                $allOk = $false
+            }
+        }
+    }
+
+    # 载荷与 artifacts 必须逐字节一致；安装器只从 service-payload 调用服务。
+    $payloadDir = Join-Path $SrcTauriDir "service-payload"
+    $artifactsPath = Join-Path $p2Dir "security-service.artifacts.json"
+    if (Test-Path -LiteralPath $artifactsPath -PathType Leaf) {
+        $p2Artifacts = Get-Content -LiteralPath $artifactsPath -Raw | ConvertFrom-Json
+        $payloadService = Join-Path $payloadDir "VerthysSecuritySvc.exe"
+        $payloadCa = Join-Path $payloadDir "VerthysRootCA.cer"
+        if (-not (Test-Path -LiteralPath $payloadService -PathType Leaf)) {
+            Write-Fail "服务载荷缺失: $payloadService"
+            $allOk = $false
+        } elseif ((Get-FileHash -LiteralPath $payloadService -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+                  [string]$p2Artifacts.service.sha256) {
+            Write-Fail "服务载荷哈希与 artifacts 不一致"
+            $allOk = $false
+        }
+        if ($script:signing.Enabled) {
+            if (-not (Test-Path -LiteralPath $payloadCa -PathType Leaf)) {
+                Write-Fail "根 CA 载荷缺失: $payloadCa"
+                $allOk = $false
+            } elseif ((Get-FileHash -LiteralPath $payloadCa -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+                      [string]$p2Artifacts.rootCa.sha256) {
+                Write-Fail "根 CA 载荷哈希与 artifacts 不一致"
+                $allOk = $false
+            }
+        }
+        Write-OK "P2 载荷与 artifacts 哈希一致"
+    }
+
+    $legacySetup = @(
+        @(
+            (Join-Path $payloadDir "VerthysSecurityServiceSetup.exe"),
+            (Join-Path $SrcTauriDir "security-service\VerthysSecurityServiceSetup.exe")
+        ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    )
+    if ($legacySetup.Count -gt 0) {
+        Write-Fail "安装资源仍包含独立安装器: $($legacySetup[0])"
+        $allOk = $false
+    } else {
+        Write-OK "应用包内无独立服务安装器"
+    }
 }
 
 # NSIS 安装包
@@ -795,43 +1266,46 @@ if (-not $SkipTauri -and $allOk -and (Test-Path $nsisDir)) {
         Write-Fail "missing installer or signature for release artifacts"
         $allOk = $false
     } else {
-        # Authenticode 是可选的系统信任层；未签名只提示 SmartScreen 风险，
-        # 更新完整性仍由清单签名、安装包签名、SHA256 与 PE 版本保证。
         if ($Profile -eq "production") {
-            $authSignature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
-            if ($authSignature.Status -ne "Valid") {
-                Write-Host "  [warn] installer is not Authenticode trusted: $($authSignature.Status)" -ForegroundColor Yellow
-            } else {
-                Write-OK "Authenticode 签名有效: $($authSignature.SignerCertificate.Subject)"
+            try {
+                Assert-VerthysAuthenticodeSignature `
+                    -Path $installer.FullName `
+                    -ExpectedSha256 $script:signing.PublisherSha256 | Out-Null
+                Write-OK "安装包 Authenticode 签名与发布者指纹复核通过"
+            } catch {
+                Write-Fail "安装包 Authenticode 签名复核失败: $($_.Exception.Message)"
+                $allOk = $false
             }
         }
-        $releaseEndpoint = if ($Profile -eq "production") { $UpdaterEndpoint } else { "http://127.0.0.1:8765/latest.json" }
-        $releaseArgs = @(
-            (Join-Path $ScriptsReleaseDir "release_update.mjs"),
-            "--installer", $installer.FullName,
-            "--signature", $signature.FullName,
-            "--endpoint", $releaseEndpoint,
-            "--channel", $(if ($Profile -eq "production") { "stable" } else { "local" }),
-            "--profile", $Profile
-        )
-        if ($Profile -eq "production" -and -not [string]::IsNullOrWhiteSpace($artifactRootValue)) {
-            $releaseArgs += @("--artifact-root", $artifactRootValue)
-        }
-        if (-not [string]::IsNullOrWhiteSpace($ReleaseNotes)) {
-            $releaseArgs += @("--notes", $ReleaseNotes)
-        }
-        if (-not [string]::IsNullOrWhiteSpace($CompatAbiMin)) {
-            $releaseArgs += @("--compat-abi-min", $CompatAbiMin)
-        }
-        if (-not [string]::IsNullOrWhiteSpace($CompatAbiMax)) {
-            $releaseArgs += @("--compat-abi-max", $CompatAbiMax)
-        }
-        & $nodeCmd.Source @releaseArgs
-        if ($LASTEXITCODE -ne 0) {
-            Write-Fail "release artifact generation failed"
-            $allOk = $false
-        } else {
-            Write-OK "release artifacts generated"
+        if ($allOk) {
+            $releaseEndpoint = if ($Profile -eq "production") { $UpdaterEndpoint } else { "http://127.0.0.1:8765/latest.json" }
+            $releaseArgs = @(
+                (Join-Path $ScriptsReleaseDir "release_update.mjs"),
+                "--installer", $installer.FullName,
+                "--signature", $signature.FullName,
+                "--endpoint", $releaseEndpoint,
+                "--channel", $(if ($Profile -eq "production") { "stable" } else { "local" }),
+                "--profile", $Profile
+            )
+            if ($Profile -eq "production" -and -not [string]::IsNullOrWhiteSpace($artifactRootValue)) {
+                $releaseArgs += @("--artifact-root", $artifactRootValue)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($ReleaseNotes)) {
+                $releaseArgs += @("--notes", $ReleaseNotes)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($CompatAbiMin)) {
+                $releaseArgs += @("--compat-abi-min", $CompatAbiMin)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($CompatAbiMax)) {
+                $releaseArgs += @("--compat-abi-max", $CompatAbiMax)
+            }
+            & $nodeCmd.Source @releaseArgs
+            if ($LASTEXITCODE -ne 0) {
+                Write-Fail "release artifact generation failed"
+                $allOk = $false
+            } else {
+                Write-OK "release artifacts generated"
+            }
         }
     }
 }
@@ -844,6 +1318,9 @@ if ($allOk) {
     Write-Host "========================================" -ForegroundColor Green
     Write-Host "  全部构建成功！" -ForegroundColor Green
     Write-Host "========================================" -ForegroundColor Green
+    if ($script:signing.Enabled -and $SkipTauri) {
+        Write-Host "  [warn] -SkipTauri：未生成/签名 Verthys.exe，本次产物不是可分发发布件" -ForegroundColor Yellow
+    }
 } else {
     Write-Host "========================================" -ForegroundColor Red
     Write-Host "  构建存在缺失产物，请检查上方日志" -ForegroundColor Red

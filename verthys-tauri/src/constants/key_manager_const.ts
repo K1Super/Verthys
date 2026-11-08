@@ -103,7 +103,7 @@ export const CUSTOM_SESSION_MINUTES_KEY = "verthys_custom_session_minutes";
 export const SECURITY_PRESET_KEY = "verthys_security_preset";
 
 /** 核心防护特性（不随自定义模板逐项开关；各档位取值以 C 权威矩阵投影为准）
- *  注意：`key_separation` 为 11 位契约遗留键名，产品映射 V4 密钥隔离堆。 */
+ *  注意：`key_separation` 为 11 位契约遗留键名，产品映射 密钥隔离堆。 */
 export const LOCKED_FEATURES: ReadonlySet<string> = new Set([
   "anti_debug",
   "anti_inject",

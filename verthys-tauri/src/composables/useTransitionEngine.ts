@@ -38,7 +38,7 @@
 import { ENTER_T_MS, INTRO_T_MS } from "../app/constants";
 
 /** 启动逆渡时长（秒）：唯一权威源 = app/constants INTRO_T_MS */
-export const INTRO_T = INTRO_T_MS / 1000;
+const INTRO_T = INTRO_T_MS / 1000;
 /** 点击正渡时长（秒）：唯一权威源 = app/constants ENTER_T_MS */
 export const ENTER_T = ENTER_T_MS / 1000;
 

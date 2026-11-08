@@ -1,18 +1,21 @@
 /*
  * vty_rollback.c — 库文件版本回退检测实现
  *
- * 状态布局（v2）：header(16) + N×{uuid(16), generation(8), witnessSlot(1),
+ * 状态布局（版本字段 2）：header(16) + N×{uuid(16), generation(8), witnessSlot(1),
  * witnessFp(32)} + MAC(32) + 设备根 blob(290)。
  *
  * MAC 密钥由设备根封装，覆盖 header、条目与 blob——篡改任意字节或把状态
  * 文件拷到其它机器都会解封/比对失败，从而 fail-closed。
  *
- * v2 额外用 TPM 持久化密钥作为“不可回滚见证”：每次提交创建另一槽的新
- * 密钥并记录公钥指纹，旧密钥随后删除。还原旧状态文件时其指纹指向已被
- * 覆盖的旧密钥，校验失败即拒绝。TPM NV 在本机不可用，这是可用的最强
- * 替代；残余缺口见偏差登记。
+ * 见证身份：SHA-256(domain || 设备根哈希 || 容器 UUID)，与状态文件路径无关。
+ *
+ * 状态文件固定落在 KnownFolder\Verthys\Security；旧布局与旧路径一律按
+ * 损坏 fail-closed，不做迁移。
+ * 状态缺失时：见证域仍有密钥，或容器 generation >= 2（已建立锚点），
+ * 均按回退拒绝；只有 generation < 2 且无见证才视为首次运行。
  */
 #include "vty_rollback.h"
+#include "vty_secure_state.h"
 #include "vty_util.h"
 #include "vty_kdf.h"
 #include "vty_device_root.h"
@@ -24,10 +27,8 @@
 
 #define RB_MAGIC          0x42525456u   /* 'VTRB'（小端） */
 #define RB_VERSION        2u
-#define RB_VERSION_LEGACY 1u
 #define RB_HDR_BYTES      16u
 #define RB_ENTRY_BYTES    57u
-#define RB_ENTRY_BYTES_V1 24u
 #define RB_MAC_BYTES      32u
 #define RB_KEY_BYTES      VTY_KEY_BYTES
 #define RB_BLOB_BYTES     VTY_DEVICE_BLOB_BYTES
@@ -36,18 +37,23 @@
 #define RB_ENTRY_FP_OFFSET      (RB_ENTRY_WITNESS_OFFSET + 1u)
 
 #define RB_ENTRIES_BYTES    (VTY_ROLLBACK_MAX_ENTRIES * RB_ENTRY_BYTES)
-#define RB_ENTRIES_BYTES_V1 (VTY_ROLLBACK_MAX_ENTRIES * RB_ENTRY_BYTES_V1)
 #define RB_MAC_OFFSET       (RB_HDR_BYTES + RB_ENTRIES_BYTES)
 #define RB_BLOB_OFFSET      (RB_MAC_OFFSET + RB_MAC_BYTES)
 #define RB_TOTAL_BYTES      (RB_BLOB_OFFSET + RB_BLOB_BYTES)
 #define RB_MSG_BYTES        (RB_HDR_BYTES + RB_ENTRIES_BYTES + RB_BLOB_BYTES)
 
-#define RB_MAC_OFFSET_V1 (RB_HDR_BYTES + RB_ENTRIES_BYTES_V1)
-#define RB_BLOB_OFFSET_V1 (RB_MAC_OFFSET_V1 + RB_MAC_BYTES)
-#define RB_TOTAL_BYTES_V1 (RB_BLOB_OFFSET_V1 + RB_BLOB_BYTES)
+/* 容器已建立回滚锚点的最小代：创建成功后至少有一次 save_meta，
+ * 磁盘代 >= 2；generation == 1 是未完成创建，允许首次运行。 */
+#define RB_ANCHOR_MIN_GENERATION 2u
 
-static char g_state_path[1024];
-static char g_default_path[1024];
+/* 测试隔离钩子：仅 VERTHYS_TEST_HOOKS=1 的攻击回归构建编译。
+ * 生产构建不包含此代码，状态路径不可由环境变量改写。 */
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+static int g_test_env_hook = 0;
+#endif
+
+static char g_state_path[VTY_SECURE_STATE_PATH_BYTES];
+static int g_test_path = 0;
 static int g_initialized = 0;
 static int g_enabled = 1;
 
@@ -76,24 +82,40 @@ static wchar_t *to_wide(const char *s)
     return w;
 }
 
-static int build_default_path(void)
+static int validate_path(const char *path, int allow_missing)
 {
-    char base[768];
-    DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", base, (DWORD)sizeof(base));
+    if (g_test_path) return VTY_OK;
+    return vty_secure_state_validate_path(path, allow_missing);
+}
 
-    if (n == 0 || n >= sizeof(base)) return VTY_E_POLICY;
-    if (sprintf_s(g_default_path, sizeof(g_default_path), "%s\\Verthys", base) < 0) {
-        return VTY_E_INVALID;
+static int resolve_paths(void)
+{
+    int rc;
+
+    if (g_state_path[0] != '\0') return VTY_OK;
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    {
+        char test_dir[VTY_SECURE_STATE_PATH_BYTES];
+        DWORD test_len = GetEnvironmentVariableA("VERTHYS_TEST_STATE_DIR",
+                                                 test_dir, sizeof(test_dir));
+        if (test_len > 0 && test_len < sizeof(test_dir)) {
+            if (sprintf_s(g_state_path, sizeof(g_state_path),
+                          "%s\\rollback.state", test_dir) < 0) {
+                return VTY_E_INVALID;
+            }
+            g_test_path = 1;
+            g_test_env_hook = 1;
+            return VTY_OK;
+        }
     }
-    CreateDirectoryA(g_default_path, NULL);
-    if (sprintf_s(g_default_path, sizeof(g_default_path),
-                  "%s\\Verthys\\rollback.state", base) < 0) {
-        return VTY_E_INVALID;
-    }
+#endif
+    rc = vty_secure_state_file_path("rollback.state", g_state_path,
+                                    sizeof(g_state_path));
+    if (rc != VTY_OK) return rc;
     return VTY_OK;
 }
 
-int vty_rollback_set_path(const char *path)
+int vty_rollback_set_path_for_test(const char *path)
 {
     size_t len;
 
@@ -101,26 +123,56 @@ int vty_rollback_set_path(const char *path)
     len = strlen(path);
     if (len == 0 || len >= sizeof(g_state_path)) return VTY_E_INVALID;
     memcpy(g_state_path, path, len + 1);
+    g_test_path = 1;
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    g_test_env_hook = 0;
+#endif
     return VTY_OK;
 }
+
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+/* 若测试环境在首次默认解析之后才注入状态目录，把已解析的默认路径
+ * 丢弃并重新按注入目录解析；显式 set_path_for_test 不受影响。 */
+static void maybe_apply_test_dir(void)
+{
+    char dir[VTY_SECURE_STATE_PATH_BYTES];
+    DWORD n;
+
+    if (g_test_env_hook || g_test_path) return;
+    n = GetEnvironmentVariableA("VERTHYS_TEST_STATE_DIR", dir, sizeof(dir));
+    if (n == 0 || n >= sizeof(dir)) return;
+    g_state_path[0] = '\0';
+    (void)resolve_paths();
+}
+#endif
 
 int vty_rollback_init(void)
 {
     int rc = vty_device_root_init();
 
     if (rc != VTY_OK) return rc;
-    if (g_state_path[0] == '\0') {
-        rc = build_default_path();
-        if (rc != VTY_OK) return rc;
-        memcpy(g_state_path, g_default_path, strlen(g_default_path) + 1);
-    }
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    maybe_apply_test_dir();
+#endif
+    rc = resolve_paths();
+    if (rc != VTY_OK) return rc;
     g_initialized = 1;
     return VTY_OK;
 }
 
-/* 读取状态；legacy=1 表示 v1 布局。文件不存在时 missing=1。 */
-static int read_state(uint8_t buf[RB_TOTAL_BYTES], int *missing, int *legacy)
+static int witness_id(const uint8_t vault_uuid[VTY_UUID_BYTES],
+                      uint8_t id[VTY_UUID_BYTES])
 {
+    /* 见证身份始终绑定设备根 + 容器 UUID；测试隔离只改状态目录，
+     * 不改身份，否则同一次运行内创建/保存会落到不同见证域。 */
+    return vty_secure_state_identity_rollback(vault_uuid, id);
+}
+
+/* 读取状态；文件不存在时 missing=1。只接受当前布局，其它尺寸一律
+ * 按损坏处理（fail-closed），不做旧版本迁移。 */
+static int read_state(uint8_t buf[RB_TOTAL_BYTES], int *missing)
+{
+    const char *path = g_state_path;
     wchar_t *w;
     HANDLE h;
     DWORD got = 0;
@@ -128,10 +180,11 @@ static int read_state(uint8_t buf[RB_TOTAL_BYTES], int *missing, int *legacy)
     int rc = VTY_OK;
 
     *missing = 0;
-    *legacy = 0;
     memset(buf, 0, RB_TOTAL_BYTES);
     if (!g_initialized) return VTY_E_POLICY;
-    w = to_wide(g_state_path);
+    rc = validate_path(path, 1);
+    if (rc != VTY_OK) return VTY_E_CORRUPT;
+    w = to_wide(path);
     if (w == NULL) return VTY_E_INVALID;
     h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                     FILE_ATTRIBUTE_NORMAL, NULL);
@@ -150,17 +203,12 @@ static int read_state(uint8_t buf[RB_TOTAL_BYTES], int *missing, int *legacy)
         CloseHandle(h);
         return VTY_E_CORRUPT;
     }
-    if (size.QuadPart == (LONGLONG)RB_TOTAL_BYTES) {
-        *legacy = 0;
-    } else if (size.QuadPart == (LONGLONG)RB_TOTAL_BYTES_V1) {
-        *legacy = 1;
-    } else {
+    if (size.QuadPart != (LONGLONG)RB_TOTAL_BYTES) {
         CloseHandle(h);
         return VTY_E_CORRUPT;
     }
-    if (!ReadFile(h, buf, (DWORD)(*legacy ? RB_TOTAL_BYTES_V1 : RB_TOTAL_BYTES),
-                  &got, NULL) ||
-        got != (DWORD)(*legacy ? RB_TOTAL_BYTES_V1 : RB_TOTAL_BYTES)) {
+    if (!ReadFile(h, buf, (DWORD)RB_TOTAL_BYTES, &got, NULL) ||
+        got != (DWORD)RB_TOTAL_BYTES) {
         rc = VTY_E_IO;
     }
     CloseHandle(h);
@@ -171,23 +219,32 @@ static int write_state(const uint8_t buf[RB_TOTAL_BYTES])
 {
     wchar_t *w = NULL;
     wchar_t *wt = NULL;
-    char temp[1100];
-    HANDLE h;
+    char temp[1200];
+    HANDLE h = INVALID_HANDLE_VALUE;
     DWORD written = 0;
+    DWORD tag = GetTickCount();
+    int attempt;
     int rc = VTY_OK;
 
     if (!g_initialized) return VTY_E_POLICY;
-    if (strlen(g_state_path) + 32 >= sizeof(temp)) return VTY_E_INVALID;
-    sprintf_s(temp, sizeof(temp), "%s.tmp%08lx", g_state_path,
-              (unsigned long)GetCurrentProcessId());
-    wt = to_wide(temp);
-    if (wt == NULL) return VTY_E_INVALID;
-    h = CreateFileW(wt, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                    FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) {
+    if (validate_path(g_state_path, 1) != VTY_OK) return VTY_E_IO;
+    if (strlen(g_state_path) + 40 >= sizeof(temp)) return VTY_E_INVALID;
+
+    for (attempt = 0; attempt < 4; attempt++) {
+        sprintf_s(temp, sizeof(temp), "%s.tmp%08lx%08lx", g_state_path,
+                  (unsigned long)GetCurrentProcessId(),
+                  (unsigned long)(tag + (DWORD)attempt));
+        wt = to_wide(temp);
+        if (wt == NULL) return VTY_E_INVALID;
+        h = CreateFileW(wt, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                        FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) break;
         free(wt);
-        return VTY_E_IO;
+        wt = NULL;
+        if (GetLastError() != ERROR_FILE_EXISTS) return VTY_E_IO;
     }
+    if (h == INVALID_HANDLE_VALUE) return VTY_E_IO;
+
     if (!WriteFile(h, buf, RB_TOTAL_BYTES, &written, NULL) ||
         written != RB_TOTAL_BYTES) {
         rc = VTY_E_IO;
@@ -230,32 +287,9 @@ static int compute_mac(const uint8_t key[RB_KEY_BYTES],
     return rc;
 }
 
-/* 把已通过 MAC 校验的 v1 布局提升为 v2 布局（旧条目与 blob 原样保留） */
-static void promote_v1_to_v2(uint8_t buf[RB_TOTAL_BYTES])
-{
-    uint8_t tmp[RB_TOTAL_BYTES];
-    uint32_t count = vty_get_u32(buf + 8);
-    uint32_t i;
-
-    memset(tmp, 0, sizeof(tmp));
-    memcpy(tmp, buf, RB_HDR_BYTES);
-    vty_put_u32(tmp + 4, RB_VERSION);
-    if (count > VTY_ROLLBACK_MAX_ENTRIES) count = 0;
-    for (i = 0; i < count; i++) {
-        const uint8_t *src = buf + RB_ENTRIES_OFFSET + (size_t)i * RB_ENTRY_BYTES_V1;
-        uint8_t *dst = tmp + RB_ENTRIES_OFFSET + (size_t)i * RB_ENTRY_BYTES;
-        memcpy(dst, src, VTY_UUID_BYTES + 8u);
-        dst[RB_ENTRY_WITNESS_OFFSET] = 0xFFu;   /* 0xFF=尚未建立见证 */
-    }
-    memcpy(tmp + RB_BLOB_OFFSET, buf + RB_BLOB_OFFSET_V1, RB_BLOB_BYTES);
-    memcpy(buf, tmp, sizeof(tmp));
-    vty_secure_zero(tmp, sizeof(tmp));
-}
-
 /* 读取并认证；文件不存在时 is_new=1。任何异常都返回 VTY_E_ROLLBACK，
- * 调用方据此 fail-closed。legacy 输出原始布局是否为 v1。 */
-static int load_authenticated(uint8_t buf[RB_TOTAL_BYTES], int *is_new,
-                              int *legacy)
+ * 调用方据此 fail-closed。 */
+static int load_authenticated(uint8_t buf[RB_TOTAL_BYTES], int *is_new)
 {
     uint8_t key[RB_KEY_BYTES];
     uint8_t mac[RB_MAC_BYTES];
@@ -263,8 +297,7 @@ static int load_authenticated(uint8_t buf[RB_TOTAL_BYTES], int *is_new,
     int rc;
 
     *is_new = 0;
-    *legacy = 0;
-    rc = read_state(buf, &missing, legacy);
+    rc = read_state(buf, &missing);
     if (rc == VTY_E_IO && missing) {
         *is_new = 1;
         memset(buf, 0, RB_TOTAL_BYTES);
@@ -273,43 +306,29 @@ static int load_authenticated(uint8_t buf[RB_TOTAL_BYTES], int *is_new,
     if (rc != VTY_OK) return VTY_E_ROLLBACK;
 
     if (vty_get_u32(buf) != RB_MAGIC ||
-        vty_get_u32(buf + 4) != (*legacy ? RB_VERSION_LEGACY : RB_VERSION)) {
+        vty_get_u32(buf + 4) != RB_VERSION) {
         return VTY_E_ROLLBACK;
     }
     if (vty_get_u32(buf + 8) > VTY_ROLLBACK_MAX_ENTRIES ||
         vty_get_u32(buf + 12) != 0) {
         return VTY_E_ROLLBACK;
     }
-    rc = vty_device_key_unseal(buf + (*legacy ? RB_BLOB_OFFSET_V1 : RB_BLOB_OFFSET),
-                               RB_BLOB_BYTES, key);
+    rc = vty_device_key_unseal(buf + RB_BLOB_OFFSET, RB_BLOB_BYTES, key);
     if (rc != VTY_OK) {
         vty_secure_zero(key, sizeof(key));
         return VTY_E_ROLLBACK;
     }
-    if (*legacy) {
-        uint8_t msg[RB_HDR_BYTES + RB_ENTRIES_BYTES_V1 + RB_BLOB_BYTES];
-        memcpy(msg, buf, RB_HDR_BYTES + RB_ENTRIES_BYTES_V1);
-        memcpy(msg + RB_HDR_BYTES + RB_ENTRIES_BYTES_V1,
-               buf + RB_BLOB_OFFSET_V1, RB_BLOB_BYTES);
-        rc = vty_hmac_sha256(mac, key, RB_KEY_BYTES, msg, sizeof(msg));
-        if (rc != VTY_OK ||
-            vty_ct_equal(mac, buf + RB_MAC_OFFSET_V1, RB_MAC_BYTES) != 0) {
-            rc = VTY_E_ROLLBACK;
-        }
-        vty_secure_zero(msg, sizeof(msg));
-    } else {
-        rc = compute_mac(key, buf, mac);
-        if (rc != VTY_OK ||
-            vty_ct_equal(mac, buf + RB_MAC_OFFSET, RB_MAC_BYTES) != 0) {
-            rc = VTY_E_ROLLBACK;
-        }
+    rc = compute_mac(key, buf, mac);
+    if (rc != VTY_OK ||
+        vty_ct_equal(mac, buf + RB_MAC_OFFSET, RB_MAC_BYTES) != 0) {
+        rc = VTY_E_ROLLBACK;
     }
     vty_secure_zero(key, sizeof(key));
     vty_secure_zero(mac, sizeof(mac));
     return (rc == VTY_OK) ? VTY_OK : VTY_E_ROLLBACK;
 }
 
-/* 按 v2 布局写入；调用前缓冲必须已是 v2 布局 */
+/* 按当前布局写入；调用前缓冲必须已是当前布局 */
 static int store(uint8_t buf[RB_TOTAL_BYTES])
 {
     uint8_t key[RB_KEY_BYTES];
@@ -419,8 +438,6 @@ static int upsert(uint8_t buf[RB_TOTAL_BYTES],
     return VTY_OK;
 }
 
-/* 状态文件是“读-改-写”：多个进程同时打开不同库会互相覆盖条目，
- * 丢失的条目会让旧副本重新可用。用会话内命名互斥量串行化提交。 */
 static HANDLE lock_state(void)
 {
     HANDLE mutex = CreateMutexW(NULL, FALSE, L"Local\\Verthys.RollbackState");
@@ -439,31 +456,29 @@ static void unlock_state(HANDLE mutex)
     CloseHandle(mutex);
 }
 
-/* 选择另一槽并创建新见证；成功返回指纹与下一槽编号 */
-static int rotate_witness(const uint8_t uuid[VTY_UUID_BYTES], int current_slot,
+static int rotate_witness(const uint8_t wid[VTY_UUID_BYTES], int current_slot,
                           int *next_slot,
                           uint8_t fp[VTY_TPM_WITNESS_FP_BYTES])
 {
     int next = (current_slot == 0) ? 1 : 0;
 
-    if (vty_tpm_witness_create(uuid, (uint8_t)next, fp) != VTY_OK) {
+    if (vty_tpm_witness_create(wid, (uint8_t)next, fp) != VTY_OK) {
         return VTY_E_ROLLBACK;
     }
     *next_slot = next;
     return VTY_OK;
 }
 
-/* 成功写入后回收旧槽与可能残留的另一个槽，缩小旧状态可重放窗口 */
-static void drop_stale_witness(const uint8_t uuid[VTY_UUID_BYTES],
+static void drop_stale_witness(const uint8_t wid[VTY_UUID_BYTES],
                                int current_slot, int next_slot)
 {
     int stale = 1 - next_slot;
 
     if (stale != current_slot && stale >= 0) {
-        (void)vty_tpm_witness_delete(uuid, (uint8_t)stale);
+        (void)vty_tpm_witness_delete(wid, (uint8_t)stale);
     }
     if (current_slot >= 0) {
-        (void)vty_tpm_witness_delete(uuid, (uint8_t)current_slot);
+        (void)vty_tpm_witness_delete(wid, (uint8_t)current_slot);
     }
 }
 
@@ -471,71 +486,58 @@ int vty_rollback_check(const uint8_t vault_uuid[VTY_UUID_BYTES],
                        uint64_t generation)
 {
     uint8_t buf[RB_TOTAL_BYTES];
+    uint8_t wid[VTY_UUID_BYTES];
     int is_new = 0;
-    int legacy = 0;
     int idx;
     uint64_t stored;
     int rc = VTY_OK;
-    int any;
+    int any_new;
     HANDLE lock;
-
     if (!g_enabled) return VTY_OK;
     if (vault_uuid == NULL) return VTY_E_INVALID;
+    if (witness_id(vault_uuid, wid) != VTY_OK) return VTY_E_ROLLBACK;
     if (vty_rollback_init() != VTY_OK) return VTY_E_ROLLBACK;
 
     lock = lock_state();
     if (lock == NULL) return VTY_E_ROLLBACK;
 
-    rc = load_authenticated(buf, &is_new, &legacy);
+    rc = load_authenticated(buf, &is_new);
     if (rc != VTY_OK) goto out;
-    if (is_new) {
-        /* 状态文件缺失但见证密钥仍在：视为被删除/回滚，拒绝 */
-        any = vty_tpm_witness_any(vault_uuid);
-        rc = (any == 0) ? VTY_OK : VTY_E_ROLLBACK;
-        goto out;
-    }
 
-    if (legacy) {
-        /* v1 无见证：只要出现该库的见证密钥就说明状态被降级/回滚 */
-        any = vty_tpm_witness_any(vault_uuid);
-        if (any != 0) {
+    any_new = vty_tpm_witness_any(wid);
+    if (is_new) {
+        /* 状态缺失：见证仍在 = 删除/回滚；容器已有锚点（generation>=2）
+         * 即使见证也被删除，仍拒绝，恢复码是唯一逃生通道。 */
+        if (any_new != 0 || generation >= (uint64_t)RB_ANCHOR_MIN_GENERATION) {
             rc = VTY_E_ROLLBACK;
-            goto out;
         }
-        /* 认证后的 v1 布局提升为 v2，仅用于读取 generation */
-        promote_v1_to_v2(buf);
-    } else {
-        idx = find_entry(buf, vault_uuid);
-        if (idx >= 0) {
-            const uint8_t *e = entry_at(buf, (uint32_t)idx);
-            if (entry_witness_valid(e)) {
-                if (vty_tpm_witness_verify(vault_uuid, e[RB_ENTRY_WITNESS_OFFSET],
-                                           e + RB_ENTRY_FP_OFFSET) != VTY_OK) {
-                    rc = VTY_E_ROLLBACK;
-                    goto out;
-                }
-            } else {
-                /* 从 v1 整体迁移的条目：尚未为该库建立见证。MAC 有效时
-                 * 只允许在没有任何见证密钥的情况下按老库规则放行，首次
-                 * commit 会补建见证；出现密钥则说明状态被降级/回滚。 */
-                any = vty_tpm_witness_any(vault_uuid);
-                if (any != 0) {
-                    rc = VTY_E_ROLLBACK;
-                    goto out;
-                }
-            }
-        } else {
-            any = vty_tpm_witness_any(vault_uuid);
-            rc = (any == 0) ? VTY_OK : VTY_E_ROLLBACK;
-            goto out;
-        }
+        goto out;
     }
 
     idx = find_entry(buf, vault_uuid);
-    if (idx < 0) {
+    if (idx >= 0) {
+        const uint8_t *e = entry_at(buf, (uint32_t)idx);
+        if (entry_witness_valid(e)) {
+            if (vty_tpm_witness_verify(wid, e[RB_ENTRY_WITNESS_OFFSET],
+                                       e + RB_ENTRY_FP_OFFSET) != VTY_OK) {
+                rc = VTY_E_ROLLBACK;
+                goto out;
+            }
+        } else if (any_new != 0) {
+            /* 条目尚未建立见证；出现密钥即拒绝 */
+            rc = VTY_E_ROLLBACK;
+            goto out;
+        }
+    } else {
+        /* 状态存在但该库没有条目：等同缺失状态 */
+        if (any_new != 0 || generation >= (uint64_t)RB_ANCHOR_MIN_GENERATION) {
+            rc = VTY_E_ROLLBACK;
+            goto out;
+        }
         rc = VTY_OK;
         goto out;
     }
+
     stored = entry_gen(entry_at(buf, (uint32_t)idx));
     rc = (generation < stored) ? VTY_E_ROLLBACK : VTY_OK;
 
@@ -548,46 +550,46 @@ int vty_rollback_commit(const uint8_t vault_uuid[VTY_UUID_BYTES],
                         uint64_t generation)
 {
     uint8_t buf[RB_TOTAL_BYTES];
+    uint8_t wid[VTY_UUID_BYTES];
     int is_new = 0;
-    int legacy = 0;
     int changed = 0;
     int idx;
     int rc;
     int current_slot = -1;
     int next_slot = 0;
     int had_witness = 0;
-    int any;
+    int any_new;
     uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
     HANDLE lock;
 
     if (!g_enabled) return VTY_OK;
     if (vault_uuid == NULL) return VTY_E_INVALID;
+    if (witness_id(vault_uuid, wid) != VTY_OK) return VTY_E_ROLLBACK;
     if (vty_rollback_init() != VTY_OK) return VTY_E_ROLLBACK;
 
     lock = lock_state();
     if (lock == NULL) return VTY_E_ROLLBACK;
 
     memset(fp, 0, sizeof(fp));
-    rc = load_authenticated(buf, &is_new, &legacy);
+    rc = load_authenticated(buf, &is_new);
     if (rc != VTY_OK) {
         unlock_state(lock);
         return rc;
     }
-    if (legacy) promote_v1_to_v2(buf);
 
+    any_new = vty_tpm_witness_any(wid);
     idx = find_entry(buf, vault_uuid);
     if (idx < 0) {
         /* 新登记的库：不允许已有见证密钥（否则状态被删/回滚） */
-        any = vty_tpm_witness_any(vault_uuid);
-        if (any != 0) {
+        if (any_new != 0) {
             unlock_state(lock);
             return VTY_E_ROLLBACK;
         }
     } else {
         const uint8_t *e = entry_at(buf, (uint32_t)idx);
-        had_witness = !legacy && entry_witness_valid(e);
+        had_witness = entry_witness_valid(e);
         if (had_witness) {
-            if (vty_tpm_witness_verify(vault_uuid, e[RB_ENTRY_WITNESS_OFFSET],
+            if (vty_tpm_witness_verify(wid, e[RB_ENTRY_WITNESS_OFFSET],
                                        e + RB_ENTRY_FP_OFFSET) != VTY_OK) {
                 unlock_state(lock);
                 return VTY_E_ROLLBACK;
@@ -607,7 +609,7 @@ int vty_rollback_commit(const uint8_t vault_uuid[VTY_UUID_BYTES],
 
     /* 先建新键，再写状态，最后删旧键：写失败时旧状态仍指向旧键，
      * 不会把库永久锁死。 */
-    rc = rotate_witness(vault_uuid, current_slot, &next_slot, fp);
+    rc = rotate_witness(wid, current_slot, &next_slot, fp);
     if (rc != VTY_OK) {
         unlock_state(lock);
         return rc;
@@ -615,11 +617,11 @@ int vty_rollback_commit(const uint8_t vault_uuid[VTY_UUID_BYTES],
     rc = upsert(buf, vault_uuid, generation, 0, next_slot, fp, &changed);
     if (rc == VTY_OK) rc = store(buf);
     if (rc != VTY_OK) {
-        (void)vty_tpm_witness_delete(vault_uuid, (uint8_t)next_slot);
+        (void)vty_tpm_witness_delete(wid, (uint8_t)next_slot);
         unlock_state(lock);
         return VTY_E_ROLLBACK;
     }
-    drop_stale_witness(vault_uuid, current_slot, next_slot);
+    drop_stale_witness(wid, current_slot, next_slot);
     unlock_state(lock);
     return VTY_OK;
 }
@@ -628,39 +630,48 @@ int vty_rollback_reset_anchor(const uint8_t vault_uuid[VTY_UUID_BYTES],
                               uint64_t generation)
 {
     uint8_t buf[RB_TOTAL_BYTES];
+    uint8_t wid[VTY_UUID_BYTES];
     int is_new = 0;
-    int legacy = 0;
     int changed = 0;
     int idx;
     int rc;
     int current_slot = -1;
     int next_slot = 0;
+    int had_witness = 0;
     uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
     HANDLE lock;
 
     if (!g_enabled) return VTY_OK;
     if (vault_uuid == NULL) return VTY_E_INVALID;
+    if (witness_id(vault_uuid, wid) != VTY_OK) return VTY_E_ROLLBACK;
     if (vty_rollback_init() != VTY_OK) return VTY_E_ROLLBACK;
 
     lock = lock_state();
     if (lock == NULL) return VTY_E_ROLLBACK;
 
     memset(fp, 0, sizeof(fp));
-    rc = load_authenticated(buf, &is_new, &legacy);
+    rc = load_authenticated(buf, &is_new);
     if (rc != VTY_OK) {
         unlock_state(lock);
         return rc;
     }
-    if (legacy) promote_v1_to_v2(buf);
 
     idx = find_entry(buf, vault_uuid);
-    if (idx >= 0 && !legacy) {
+    if (idx >= 0) {
         const uint8_t *e = entry_at(buf, (uint32_t)idx);
-        if (entry_witness_valid(e)) current_slot = (int)e[RB_ENTRY_WITNESS_OFFSET];
+        had_witness = entry_witness_valid(e);
+        if (had_witness) {
+            if (vty_tpm_witness_verify(wid, e[RB_ENTRY_WITNESS_OFFSET],
+                                       e + RB_ENTRY_FP_OFFSET) != VTY_OK) {
+                unlock_state(lock);
+                return VTY_E_ROLLBACK;
+            }
+            current_slot = (int)e[RB_ENTRY_WITNESS_OFFSET];
+        }
     }
 
     /* 恢复流程每次重设锚点都轮换见证，使此前所有状态副本失效 */
-    rc = rotate_witness(vault_uuid, current_slot, &next_slot, fp);
+    rc = rotate_witness(wid, current_slot, &next_slot, fp);
     if (rc != VTY_OK) {
         unlock_state(lock);
         return rc;
@@ -668,11 +679,13 @@ int vty_rollback_reset_anchor(const uint8_t vault_uuid[VTY_UUID_BYTES],
     rc = upsert(buf, vault_uuid, generation, 1, next_slot, fp, &changed);
     if (rc == VTY_OK) rc = store(buf);
     if (rc != VTY_OK) {
-        (void)vty_tpm_witness_delete(vault_uuid, (uint8_t)next_slot);
+        (void)vty_tpm_witness_delete(wid, (uint8_t)next_slot);
         unlock_state(lock);
         return VTY_E_ROLLBACK;
     }
-    drop_stale_witness(vault_uuid, current_slot, next_slot);
+    drop_stale_witness(wid, current_slot, next_slot);
     unlock_state(lock);
     return VTY_OK;
 }
+
+

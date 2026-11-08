@@ -12,14 +12,13 @@
 /// 容器附属数据目录命名契约（路径派生 / 懒迁移 / 有界清理）
 ///
 /// 附属数据（状态 / 预设 / WAL / 台账 / 温缓存 / 锁诊断）的统一落盘位置
-/// 与派生规则的唯一权威定义；idx_cache 与 container.lock 的命名与 C 层保持一致。
+/// 与派生规则的唯一权威定义；container.lock 的命名与 C 层保持一致。
 pub mod container_layout;
 /// 照片导入外置块台账（ChunkLedger，孤儿块 GC 判定依据）
 ///
 /// 持久化「块记录 ID → 拥有者 meta ID」映射，支撑崩溃后未引用块回收。
 /// 只存纯数字 ID 映射，只由导入单写者线程读写，GC 命令在无活跃会话时接触。
 pub mod verthys_chunks;
-pub mod verthys_repository;
 pub mod verthys_state;
 /// 照片导入 Write-Ahead Log（断点续传持久层）
 ///

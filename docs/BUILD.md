@@ -44,26 +44,35 @@ cmake --build build
 
 编译加固 `/O2 /GL /GS /guard:cf`；`rhash_gen` POST_BUILD 注入 `.rhat` 运行时哈希表。DLL 位置由 `build/core/verthys.artifacts.json` 契约给出（Ninja 为 `build/core/verthys.dll`，Visual Studio 为 `build/core/Release/verthys.dll`），脚本不按生成器猜路径。
 
-### 阶段 1.1：.vsec 完整性基准注入 + 契约刷新
+### 阶段 1.1：.vsec 完整性基准注入 + Authenticode 签名 + 契约刷新
 
-`build_production.ps1` 在 DLL 产出后统一调用 `scripts/lib/vsec.ps1` 的 `Update-VsecBaseline`（与 `scripts/build/build_core.release.ps1` 共用同一实现），把 `.text / .rdata / .rhat` 的文件内容 HMAC-SHA256 写入 DLL 的 `.vsec` 只读节。注入改写 DLL 字节，因此随后由 `scripts/lib/artifacts.ps1` 的 `Write-VerthysArtifactContract` 按最终字节重生成产物契约，并校验 SHA256、版本、格式版本与生成器一致。
+`build_production.ps1` 在 DLL 产出后统一调用 `scripts/lib/vsec.ps1` 的 `Update-VsecBaseline`（与 `scripts/build/build_core.release.ps1` 共用同一实现），把 `.text / .rdata / .rhat` 的文件内容 HMAC-SHA256 写入 DLL 的 `.vsec` 只读节。启用发布签名时，随后由 `scripts/lib/release_signing.ps1` 对 DLL 做 Authenticode 签名并复核签名者指纹；签名只追加 PE 安全目录，不改写 `.vsec` 覆盖的节。最后按最终字节重生成产物契约（`scripts/lib/artifacts.ps1` 的 `Write-VerthysArtifactContract`），校验 SHA256、版本、格式版本与生成器一致。
 
-`.vsec` 全零会被运行时视为开发构建而跳过验签，所以生产链路不允许跳过此步；`-SkipCore` 同样执行（注入幂等）。Authenticode 签名（若有）必须在注入之后进行。两条生产链路（一键打包与独立 core Release 脚本）使用同一注入器与同一契约写入器，口径完全一致。
+`.vsec` 全零会被运行时视为开发构建而跳过验签，所以生产链路不允许跳过此步；`-SkipCore` 同样执行（注入幂等）。两条生产链路（一键打包与独立 core Release 脚本）使用同一注入器、同一签名实现与同一契约写入器，口径完全一致。
+
+### 阶段 1.2：调用方认证功能门禁
+
+启用发布签名时，构建在契约刷新后执行正负对照：未签名宿主加载签名 DLL 必须返回 `INIT result=0x00000016`（UNAUTHORIZED）；用发布者证书签名的临时宿主副本必须返回 `INIT result=0x00000000`。临时宿主只用于门禁，结束后删除，不进入仓库与交付物。
+
+### 状态隔离与攻击回归
+
+熔断/回滚状态固定落在 `SHGetKnownFolderPath(FOLDERID_LocalAppData)\Verthys\Security`，生产构建不接受任何环境变量改写。攻击回归使用 `build_core.release.ps1 -TestHooks` 构建的测试 DLL，由 `tests/attack/run.ps1` 设置 `VERTHYS_TEST_STATE_DIR` 指向临时目录；测试见证域按该目录派生，多个攻击子进程共享同一轮测试域、不同轮次互不影响。生产构建显式传 `-DVERTHYS_TEST_HOOKS=OFF`，生产 DLL 中不存在该代码路径（可用字符串扫描复核）。
 
 ### 阶段 2：verthys-worker（Rust release + debug）
 
 ```powershell
 $env:CARGO_INCREMENTAL = "0"
+$env:VERTHYS_DLL_PATH  = <产物契约记录的最终 DLL 绝对路径>
 cargo build --release      # 阶段 2 主线
 cargo build                # debug（开发环境用，失败仅告警不影响打包）
 ```
 
-`$env:CARGO_INCREMENTAL = "0"` 为阶段 2 内的纵深防御，与 `Cargo.toml [profile.dev] incremental=false` 共同规避 LNK1181。
+`$env:CARGO_INCREMENTAL = "0"` 为阶段 2 内的纵深防御，与 `Cargo.toml [profile.dev] incremental=false` 共同规避 LNK1181。`VERTHYS_DLL_PATH` 必须指向签名后的最终 DLL：worker 在 Release 下把该文件的 SHA-256 固化为加载前置校验，路径滞后会导致运行期拒绝加载。worker 构建完成后、复制打包前完成 Authenticode 签名。
 
 ### 阶段 3：部署复制 + 哈希校验
 
-- 复制 `verthys-worker.exe` → `src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe`（Tauri `externalBin` 基准目录）。
-- 复制 `verthys.dll` → `src-tauri/verthys.dll`：副本是已完成 `.vsec` 注入与契约刷新的最终字节（Tauri `resources` 从 `src-tauri/` 查找）。
+- 复制已签名的 `verthys-worker.exe` → `src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe`（Tauri `externalBin` 基准目录）。
+- 复制已签名的 `verthys.dll` → `src-tauri/verthys.dll`：副本是已完成 `.vsec` 注入、Authenticode 签名与契约刷新的最终字节（Tauri `resources` 从 `src-tauri/` 查找）。
 - 同步 worker 到 Tauri `target/{release,debug}/`（防旧副本“worker 就绪超时”）。
 - `Get-FileSha256` 比对 binaries/ 与 target 副本，哈希漂移即失败。
 
@@ -72,6 +81,20 @@ cargo build                # debug（开发环境用，失败仅告警不影响�
 1. 前端类型检查：`npx vue-tsc --noEmit`。
 2. Rust 编译检查：`cargo check`（在 `src-tauri/`）。
 3. Tauri 打包：`npm run tauri build`，NSIS 安装包落到 `src-tauri/target/release/bundle/nsis/*.exe`。
+4. 启用发布签名时，生成的 profile 覆盖层注入 `bundle.windows.signCommand`：打包器在写入 bundle type 补丁（会改写 PE、使既有签名失效）之后，按 package type 调用发布者签名入口，对主程序、NSIS 卸载器、安装包与 NSIS 插件副本签名并复核，随后生成 updater `.sig`。构建完成后，`build_production.ps1` 再以钉扎指纹复核安装包 Authenticode，并在安装包被改写时重新生成 `.sig`。禁止改用 `beforeBundleCommand`：它早于补丁执行，签名必然在安装包内变为 `HashMismatch`。
+
+### 发布签名前置条件
+
+production 构建必须能解析发布者代码签名证书，缺失即 fail-fast；local 构建未提供证书时显式关闭调用方认证并告警，产物禁止作为发布候选。
+
+| 环境变量 | 用途 |
+|---|---|
+| `VERTHYS_SIGNING_THUMBPRINT` | 证书库指纹（`CurrentUser\My` 或 `LocalMachine\My`，需含私钥），推荐方式 |
+| `VERTHYS_SIGNING_PFX` + `VERTHYS_SIGNING_PFX_PASSWORD` | PFX 路径与口令；私钥经 `EphemeralKeySet` 只驻留进程内存 |
+| `VERTHYS_PUBLISHER_SHA256` | 可选显式钉扎；必须与证书 DER SHA-256 完全一致，不一致即失败 |
+| `VERTHYS_SIGNING_TIMESTAMP_URL` | 可选 RFC 3161 时间戳服务；未设置时签名无时间戳并在构建日志告警 |
+
+证书必须被目标系统信任：运行期调用方校验使用 `WinVerifyTrust`，链不受信会按 fail-closed 拒绝启动。
 
 ## 4. 产物落点与命名
 
@@ -98,9 +121,32 @@ cargo build                # debug（开发环境用，失败仅告警不影响�
 | 前端 vite 构建报“文件被另一进程占用” | `node`/`esbuild` 残留进程持有 `dist/` 或缓存文件句柄 | 定位占用进程并结束：`Get-Process node,esbuild`，找到后 `Stop-Process -Id <PID> -Force`，再重试；与阶段 0 杀死僵尸进程同源机制 | 通用诊断法；关联 `build_production.ps1` 阶段 0 |
 | dev 模式“worker 就绪信号超时” | `src-tauri/target/{debug,release}/` 下存在旧版 worker 副本被旧 `resolve_worker_path` 优先匹配 | 阶段 3 已把新 worker 同步到 target 树并做哈希校验，覆盖 fallback 路径 | `build_production.ps1` 阶段 3 |
 | CI 构建与本地行为差异 | CI 的 core Release 步骤走 `build_core.release.ps1` → Visual Studio 多配置（`build/core/Release/verthys.dll`）；`build_production.ps1` 注入环境走 Ninja；本地 `VERTHYS_*` 路径为 Visual Studio 多配置；测试 exe 布局随生成器不同 | 按各自上下文使用对应命令；产物路径一律以 `build/core/verthys.artifacts.json` 为准 | `.github/workflows/core.yml`；`scripts/lib/env.load.ps1` 来源 2 |
+| worker 启动报 `DLL 摘要不匹配` | worker Release 基线绑定的是旧 DLL（签名或重建后未重新编译 worker） | 用 `build_production.ps1` 重建；脚本注入 `VERTHYS_DLL_PATH` 指向签名后 DLL，并禁止签名发布使用 `-SkipWorker` | `build_production.ps1`；`verthys-worker/build.rs` |
+| production 构建提示“生产签名缺少发布者证书” | 未注入 `VERTHYS_SIGNING_THUMBPRINT` / `VERTHYS_SIGNING_PFX` | 按发布签名前置条件注入证书后重试；local 复现可改用 `-Profile local` | `scripts/lib/release_signing.ps1` |
+| 自建 CA 签名复核返回 `UnknownError` / `NotTrusted` | 构建机未安装 Verthys 根证书，证书链无法验证 | 安装根证书到 `Cert:\CurrentUser\Root`（管理员可用 `LocalMachine\Root`）后重建 | `scripts/signing/Install-VerthysRootTrust.ps1` |
 
 ## 6. 相关文档
 
 - 依赖安装：`GETTING_STARTED.md`
 - 打包/分发/签名现状：`DEPLOYMENT.md`
 - 测试分层与跑法：`TESTING.md`
+
+## 7. P2 安全服务构建与随包安装
+
+```powershell
+# 本地测试构建（测试钩子 + 单元测试 + 探针）
+pwsh -NoProfile -File scripts/build/build_security_service.ps1 `
+  -BuildDir build_security_service_ci -Profile local -TestHooks -RunTests -NoSign
+
+# 生产构建（强制发布者证书、根 CA 指纹与签名）
+pwsh -NoProfile -File scripts/build/build_security_service.ps1 -Profile production
+```
+
+- 独立 CMake 工程 `security-service/`，不进入根 `add_subdirectory`；静态 CRT、`/guard:cf`、`/NXCOMPAT`、CET 等加固由 `cmake/VerthysHardening.cmake` 统一施加。
+- 生产构建已接入 `build_production.ps1` 阶段 3.6（Tauri 打包之前）：构建并签名服务 exe，导出根 CA，计算服务/根 CA 双 SHA-256 并写 artifacts；`-SkipService` 可显式跳过。
+- 服务安装逻辑（`/install`、`/uninstall`、`/repair`、`/reset-state`、`/repair-keys`、`/status`）编入 `VerthysSecuritySvc.exe`；不再构建 `VerthysSecurityServiceSetup.exe`。
+- 阶段 3.6 将 `VerthysSecuritySvc.exe` 与 `VerthysRootCA.cer` 复制到 `src-tauri/service-payload`；Tauri perMachine 安装器通过 `installer-hooks.nsh` 在 POSTINSTALL 调用 `/install /quiet`，PREUNINSTALL 调用 `/uninstall /quiet`。
+- 事件日志消息表由 `mc.exe` 编译进服务 exe；构建机需具备 Windows SDK `mc.exe`。
+- 产物落点 `build_security_service/<Config>/`；分发副本与带 `service`、`rootCa`、`rootCaSha256` 的 `security-service.artifacts.json` 在 `build_security_service/artifacts/`。
+- 生产构建禁止 `-NoSign`；服务 exe 使用发布者证书与时间戳签名，根 CA 指纹在 CMake 配置前注入。
+- 应用安装包内不得包含独立服务安装器；阶段 5 会校验 payload 哈希、根 CA 哈希与“无 setup exe”。

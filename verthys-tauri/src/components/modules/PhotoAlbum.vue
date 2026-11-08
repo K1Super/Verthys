@@ -96,7 +96,7 @@
           :loading="importing"
           :disabled="albumBusy"
           :aria-label="importing ? `正在导入照片 ${importProgress}%` : '导入照片'"
-          v-tip="importing ? `加密中…${importProgress}%` : '导入照片'"
+          v-tip="importing ? `正在加密 ${importProgress}%` : '导入照片'"
           @click="onImport"
         />
         <ActionButton
@@ -269,7 +269,7 @@
                   @click="togglePhotoSelect(ph.id)"
                   @keydown.enter.prevent="togglePhotoSelect(ph.id)"
                   @keydown.space.prevent="togglePhotoSelect(ph.id)"
-                  v-tip="`${ph.name} · ${ph.size}`"
+                  v-tip="`${ph.name}，${ph.size}`"
                 >
                   <div class="ed-photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
                   <span class="ed-photo-name">{{ ph.name }}</span>
@@ -516,7 +516,6 @@ import { usePhotoDelete } from "../../composables/photo-album/usePhotoDelete";
 import { useCardShine } from "../../composables/useCardShine";
 import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
 import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
-import { resolveChunkSet } from "../../composables/photo-album/chunk-refs";
 // 防截屏保护：应用级会话单例（能力归属应用而非组件，模块卸载不关闭保护）
 import {
   ensureAdopted as ensurePrivacyAdopted,
@@ -556,7 +555,7 @@ const { entering } = useModuleEntrance(() => photos.value.length > 0);
  *  互斥第一道防线必须在 UI（前端先拦），后端拒绝（导入管线重入守卫）仅作兜底；
  *  解析导入期间若不拦，用户会付出"选文件/加密"成本后才被拒绝。 */
 const albumBusy = computed(() =>
-  importing.value || parsing.value || importingParsed.value || exporting.value,
+  importing.value || parsing.value || importingParsed.value || exporting.value || deleting.value,
 );
 /** 加载/暂停恢复条的动作入口（提示常驻到用户处置，不再依赖一次性 toast） */
 const onRetryLoad = () => retryLoad();
@@ -715,18 +714,11 @@ const {
 
 /* ---------- 7. 删除层（依赖 usePhotoViewer 的 onView 用于非选择模式下的照片点击） ---------- */
 const {
-  selectMode, selectedPhotoIds, allSelected,
+  selectMode, selectedPhotoIds, allSelected, deleting,
   toggleSelectAll, cancelSelectMode, onDeleteBtn, onDeleteSelected, onPhotoClick,
   showDeleteConfirm, confirmDelete, cancelDeleteConfirm,
 } = usePhotoDelete({
   photos, isTauri, onView, showError, showToast,
-  // 占位项删除兜底：meta 未解密时强制解密，补齐 chunk 级联与去重锁释放
-  resolveMeta: async (metaId: number) => (await decryptPhotoMeta(metaId))?.meta ?? null,
-  // 瘦身布局的逐块 ID 在块集记录内：删除级联前先解析（失败退化为内联引用）
-  resolveChunkIds: async (metaId: number, meta) => {
-    const set = await resolveChunkSet(meta, `删除 #${metaId}`);
-    return set?.ids ?? [];
-  },
 });
 
 /* ---------- 8. 防截屏保护层（应用级会话单例，界面只做状态映射与提示） ---------- */
@@ -742,7 +734,7 @@ const privacyButtonDisabled = computed(
 /** 按钮提示：如实反映当前能力状态，隔离态引导进入修复 */
 const privacyTip = computed(() => {
   if (!isTauri) return "防截屏保护仅在桌面端生效";
-  if (privacyBusy.value) return "保护状态变更中…";
+  if (privacyBusy.value) return "正在变更保护状态";
   if (privacyQuarantined.value) return "保护状态异常，点击修复";
   if (privacyTokenLost.value) return "会话凭证丢失，重启应用可重新接管";
   return privacyMode.value ? "关闭防截屏" : "开启防截屏";
@@ -1066,7 +1058,7 @@ useModuleDialogGuard("photos", () => {
 .photo-card:hover { transform: translateY(-6px); }
 /* 提亮层（替代 hover 的 filter 提亮）：白色叠加层仅 opacity 过渡（合成器）。
    强度 0.08 ≈ 原 brightness(0.9→1) 的观感差；饱和度不随 hover 提升
-   （合成器约束下无法等价实现 saturate 增益，观感差异记录于修复文档） */
+   （合成器约束下无法等价实现 saturate 增益） */
 .photo-card::before {
   content: ''; position: absolute; inset: 0; z-index: 2; border-radius: inherit;
   pointer-events: none; background: rgba(255,255,255,0.08); opacity: 0;

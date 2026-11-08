@@ -107,6 +107,10 @@
         </button>
       </div>
 
+      <div v-if="lastError" class="fixture-error" role="alert">
+        {{ lastError }}
+      </div>
+
       <footer class="fixture-meta">
         <span>PROFILE {{ status.profileExists ? "SET" : "EMPTY" }}</span>
         <span v-if="fingerprints.global !== '—'">FP {{ fingerprints.global }}</span>
@@ -140,6 +144,7 @@ const loading = ref(true);
 const busy = ref<"" | "save" | "fill" | "clear">("");
 const clearArmed = ref(false);
 const status = ref<DevFixtureStatus | null>(null);
+const lastError = ref("");
 const lastSaved = ref("");
 const lastSavedLabel = computed(() => {
   const seconds = Number(lastSaved.value);
@@ -178,8 +183,16 @@ function resetForm(): void {
   form.updatedAt = "";
 }
 
+function describeError(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  const text = String(error ?? "").trim();
+  return text || fallback;
+}
+
 async function refresh(): Promise<void> {
   loading.value = true;
+  lastError.value = "";
   try {
     status.value = await getFixtureStatus();
     if (!status.value.enabled) return;
@@ -192,7 +205,8 @@ async function refresh(): Promise<void> {
       lastSaved.value = view.profile.updatedAt;
     }
   } catch (error) {
-    showError(error instanceof Error ? error.message : "读取填充配置失败");
+    lastError.value = describeError(error, "读取填充配置失败");
+    showError(lastError.value);
   } finally {
     loading.value = false;
   }
@@ -201,6 +215,7 @@ async function refresh(): Promise<void> {
 async function save(): Promise<void> {
   if (busy.value) return;
   busy.value = "save";
+  lastError.value = "";
   try {
     const outcome = await saveFixtureProfile({
       ...form,
@@ -212,7 +227,8 @@ async function save(): Promise<void> {
     if (status.value) status.value.profileExists = true;
     showStatus("填充配置已加密保存");
   } catch (error) {
-    showError(error instanceof Error ? error.message : "保存配置失败");
+    lastError.value = describeError(error, "保存配置失败");
+    showError(lastError.value);
   } finally {
     busy.value = "";
   }
@@ -240,6 +256,7 @@ async function clear(): Promise<void> {
   }
   clearArmed.value = false;
   busy.value = "clear";
+  lastError.value = "";
   try {
     await clearFixtureProfile();
     resetForm();
@@ -248,7 +265,8 @@ async function clear(): Promise<void> {
     if (status.value) status.value.profileExists = false;
     showStatus("填充配置已清空");
   } catch (error) {
-    showError(error instanceof Error ? error.message : "清空配置失败");
+    lastError.value = describeError(error, "清空配置失败");
+    showError(lastError.value);
   } finally {
     busy.value = "";
   }
@@ -314,6 +332,17 @@ onMounted(() => {
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.55;
+}
+
+.fixture-error {
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 120, 120, 0.38);
+  border-radius: 2px;
+  background: rgba(255, 90, 90, 0.06);
+  color: rgba(255, 176, 176, 0.96);
+  font-size: 10px;
+  line-height: 1.55;
+  word-break: break-all;
 }
 
 .fixture-blocked-title {

@@ -270,8 +270,11 @@ TEST(scan_concurrent_readers_vs_writer)
     memset(&st, 0, sizeof(st));
 
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
-    CHECK_EQ(Verthys_CreateWithPreset(h, SC_PATH, SC_PW, SC_PW_LEN,
-                                      VERTHYS_PRESET_PERFORMANCE), VERTHYS_OK);
+    {
+        char recovery[80];
+        CHECK_EQ(Verthys_V4Create(h, SC_PATH, SC_PW, SC_PW_LEN,
+                                  recovery, sizeof recovery), VERTHYS_OK);
+    }
     st.h = h;
 
     /* 预置唯一记录（探测线程依赖至少一条 ACCOUNT 记录存在；

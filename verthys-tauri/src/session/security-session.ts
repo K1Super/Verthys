@@ -4,13 +4,12 @@
  * 职责：
  *   1. 会话空闲计时（touchSession / resetSessionTimer / clearSessionTimer）
  *   2. 三档安全预设适配（applySecurityPreset / setSessionTimeout / getSessionTimeout）
- *   3. 暴力拦截门禁（checkBruteForceGate / getBruteForceStatus / clearBruteForcePurge）
+ *   3. 暴力拦截门禁（checkBruteForceGate / getBruteForceStatus）
  *   4. lockAll 锁定全部（清零缓存 + worker GMK + 重置状态）
  */
 import {
-  securityBruteCheck,
-  securityBruteClearPurge, securityBruteStatus,
-  securitySessionStart, securitySessionStop, securitySessionSetHardening,
+  securityBruteCheck, securityBruteStatus,
+  securitySessionStop, securitySessionSetHardening,
   securityApplyPreset, securityLoadPresetState,
   verthysClearGlobalKey, verthysPrepareLock, verthysLock, verthysLockPersist, workerDestroy,
   type SecurityPresetCode, type BruteForceCheckResponse, type PresetFeatures,
@@ -21,9 +20,9 @@ import { keyState, setCurrentVerthysPath, loadCustomFeatures, saveSecurityPreset
 import { PRESET_SESSION_TIMEOUT_MS, SECURITY_PRESET_KEY, CUSTOM_FEATURES_KEY } from "../constants/key_manager_const";
 import { withTimeout } from "../utils/promise_utils";
 import type { BruteForceGateResult } from "../types/key_manager";
-import { clearModuleKeyCache, clearModuleCache, clearRecordScanCache, cancelDebouncedFlush, resetFlushChain, waitForFlush, clearAllCacheTimers, setCacheDirty, isCacheDirty, clearSummaryCache, clearFullRecordCache } from "../cache/composition/verthys-cache";
+import { clearModuleKeyCache, clearModuleCache, clearRecordScanCache, resetFlushChain, waitForFlush, clearAllCacheTimers, setCacheDirty, isCacheDirty, clearSummaryCache, clearFullRecordCache } from "../cache/composition/verthys-cache";
 // 后台任务 API 直连 core 层（单向化：不再转发 start/stop）
-import { startBackgroundTasks, stopBackgroundTasks } from "../core/background-tasks";
+import { stopBackgroundTasks } from "../core/background-tasks";
 
 // 导出 securityPresetRef 供 keyManager.ts 再导出
 export const securityPresetRef = keyState.securityPreset;
@@ -403,14 +402,6 @@ export async function restoreSecurityPreset(): Promise<PresetRestoreReport> {
   return { persistDirty };
 }
 
-/** 外部锁定原因（与 Rust `SessionLockReason::as_str` 严格一致） */
-export type ExternalLockReason =
-  | "session-lock"
-  | "logoff"
-  | "disconnect"
-  | "suspend"
-  | "display-off";
-
 /**
  * 应用主进程已完成的外部锁定（锁屏 / 注销 / 断连 / 挂起 / 显示器关闭）
  *
@@ -448,7 +439,6 @@ export function applyExternalLock(reason?: string): void {
  * 前端仅做纯查询：                                                    *
  *   1. checkBruteForceGate — 调用前预检，避免锁定态进入长运算流程      *
  *   2. getBruteForceStatus — UI 展示失败次数/锁定剩余时间             *
- *   3. clearBruteForcePurge — PurgeRequired 处理完成后清除           *
  * ------------------------------------------------------------------ */
 
 /** 检查当前是否允许尝试解锁（暴力拦截门禁）
@@ -459,10 +449,7 @@ export async function checkBruteForceGate(): Promise<BruteForceGateResult> {
   try {
     const r: BruteForceCheckResponse = await securityBruteCheck();
     if (r.kind === "Allow") return { allowed: true };
-    if (r.kind === "Locked") {
-      return { allowed: false, reason: "locked", remainingSecs: r.remaining_secs };
-    }
-    return { allowed: false, reason: "purge_required" };
+    return { allowed: false, reason: "locked", remainingSecs: r.remaining_secs };
   } catch (e) {
     console.warn("[checkBruteForceGate] 查询失败", e);
     if (isTauriEnvironment()) {
@@ -481,15 +468,6 @@ export async function getBruteForceStatus() {
   } catch (e) {
     console.warn("[getBruteForceStatus] 查询失败", e);
     return null;
-  }
-}
-
-/** 清除熔断状态（PurgeRequired 处理完成后调用） */
-export async function clearBruteForcePurge(): Promise<void> {
-  try {
-    await securityBruteClearPurge();
-  } catch (e) {
-    console.warn("[clearBruteForcePurge] 清除失败", e);
   }
 }
 
@@ -802,8 +780,6 @@ async function doLockAll(
   }
   if (!current()) return snapshot();
 
-  onProgress?.(100, "清理完成");
-
   // 修复修复：步骤 7.5 — 补全状态重置
   //
   // 原缺陷：doLockAll 仅重置 verthysReady/globalKeyReady/moduleKeyReady 三个状态，
@@ -824,5 +800,12 @@ async function doLockAll(
   setCurrentVerthysPath("");
   resetFlushChain();
 
-  return snapshot();
+  // 完成态裁决必须在全部清理与状态复位之后：
+  // 仅当会话确已销毁、落盘完成、缓存干净且无步骤错误时，才宣告"清理完成"；
+  // 否则保留最后一条真实阶段文案，由调用方按失败语义冻结降级。
+  const final = snapshot();
+  if (final.locked && final.clean) {
+    onProgress?.(100, "清理完成");
+  }
+  return final;
 }

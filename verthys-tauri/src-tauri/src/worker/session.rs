@@ -17,7 +17,7 @@
 //!
 //! 公共 API 兼容策略：
 //!   保留 spawn/send_json/send_json_with_timeout/
-//!   send_json_with_unlock_progress/wait_for_ready_signal/pid/elapsed_secs/
+//!   send_json_with_rotate_progress/wait_for_ready_signal/pid/elapsed_secs/
 //!   is_alive/kill/Clone/Drop 签名，内部通过 Handle::block_on + block_in_place
 //!   包装为同步返回，使 state.rs 与控制器无需立即改签名即可编译。
 
@@ -34,8 +34,7 @@ use super::platform::verify_install_paths;
 #[cfg(target_os = "windows")]
 use super::platform::{harden_suspended_worker, JobHandle};
 use super::protocol::{
-    ActorRequest, RotateProgress, UnlockProgress, DEFAULT_IPC_TIMEOUT, DROP_ACTOR_JOIN_TIMEOUT,
-    READY_CHECK_TIMEOUT,
+    ActorRequest, RotateProgress, DEFAULT_IPC_TIMEOUT, DROP_ACTOR_JOIN_TIMEOUT, READY_CHECK_TIMEOUT,
 };
 use super::stderr::StderrRing;
 use crate::infrastructure::ipc_secure::IpcSecureChannel;
@@ -537,90 +536,6 @@ impl WorkerSession {
         })
     }
 
-    /* ---------------------------------------------------------------- *
-     * 解锁进度流式协议                                          *
-     *                                                                  *
-     * send_json_with_unlock_progress 专为 Verthys_Unlock 设计：           *
-     *   - worker 在 call_unlock 阻塞期间，由 C 回调向 stdout 写入       *
-     *     多条 {"op":"unlock_progress",...} 进度行                     *
-     *   - C 函数返回后写入最终 {"op":"unlock",...} 终止行               *
-     *   - 本方法识别进度行并调用 progress_cb，遇到终止行返回           *
-     *                                                                  *
-     * 超时策略（进度感知）：                                            *
-     *   - 每收到一条进度行即重置 deadline（Argon2id 阶段无进度事件，   *
-     *     需足够长的 idle timeout 覆盖 SECURE 预设 6~15s 派生时间）    *
-     *   - 连续 idle_timeout 无进度视为挂起                              *
-     *   - 初始等待也使用 idle_timeout                                  *
-     * ---------------------------------------------------------------- */
-
-    /// 发送解锁请求并流式接收进度
-    ///
-    /// - `json`：unlock 请求 JSON
-    /// - `progress_cb`：每收到一条 unlock_progress 行时调用
-    ///
-    /// 返回最终 unlock 行的原始 JSON 字符串。
-    ///
-    /// 内部复用通用 handle_streaming_send<T> 泛型方法。
-    pub fn send_json_with_unlock_progress(
-        &self,
-        json: &str,
-        progress_cb: &dyn Fn(&UnlockProgress),
-    ) -> Result<String, String> {
-        let json_owned = json.to_string();
-        let request_tx = self
-            .inner
-            .clone_sender()
-            .ok_or_else(|| "worker actor 已退出（通道已关闭）".to_string())?;
-        let runtime_handle = self.inner.runtime_handle.clone();
-
-        block_on_with_handle(&runtime_handle, async move {
-            let (reply_tx, mut reply_rx) = oneshot::channel();
-            let (progress_tx, mut progress_rx) = mpsc::channel::<UnlockProgress>(64);
-
-            request_tx
-                .send(ActorRequest::SendStreamingUnlock {
-                    json: json_owned,
-                    reply: reply_tx,
-                    progress_tx,
-                })
-                .await
-                .map_err(|_| "worker actor 已退出（通道发送失败）".to_string())?;
-
-            loop {
-                tokio::select! {
-                    result = &mut reply_rx => {
-                        /* 修复修复：drain progress_rx 残留进度消息
-                         *
-                         * 根因：tokio::select! 的公平性导致 reply_rx（最终响应）可能
-                         * 在 progress_rx 中所有进度消息被处理完之前被选中。此时
-                         * return 会 drop progress_rx，残留进度消息被丢弃，前端
-                         * Tauri Channel 收到的最后一条消息可能是中间阶段的心跳
-                         * （如"密钥计算较慢"），而非 100%"解锁完成"。
-                         *
-                         * 修复：reply_rx 就绪后，先 try_recv 排空 progress_rx 中
-                         * 已入队的进度消息（同步调用 progress_cb 推送到 Tauri Channel），
-                         * 确保所有进度消息按顺序到达前端，再返回最终响应。
-                         *
-                         * 注意：try_recv 是非阻塞的，仅排空已入队消息，不会等待
-                         * Actor 推送新消息（Actor 此时已返回 handle_streaming_send
-                         * 结果，不会再推送新进度）。 */
-                        while let Ok(p) = progress_rx.try_recv() {
-                            progress_cb(&p);
-                        }
-                        return match result {
-                            Ok(r) => r,
-                            Err(_) => Err("worker actor 通道关闭（任务已终止）".to_string()),
-                        };
-                    }
-                    progress = progress_rx.recv() => {
-                        if let Some(p) = progress {
-                            progress_cb(&p);
-                        }
-                    }
-                }
-            }
-        })
-    }
 
     /// 发送全库轮换请求并流式接收进度（v4_rotate_run 专用）
     ///
@@ -884,7 +799,7 @@ mod tests {
         );
     }
 
-    /// A18S 端到端用例：真实 worker + 心跳 + 挂起看门狗。
+    /// worker 挂起看门狗端到端用例：真实 worker + 心跳 + 挂起看门狗。
     ///
     /// 由 tests/attack/a18-suspend.ps1 设置 VERTHYS_A18=1 后驱动；常规
     /// `cargo test` 不执行进程级实验，避免无产物环境下的偶发失败。

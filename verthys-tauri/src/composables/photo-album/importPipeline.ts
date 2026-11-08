@@ -409,7 +409,7 @@ async function uploadSlimThumb(
   if (!thumbB64) {
     throw new ChunkUploadError("缩略图数据缺失，无法写入缩略图记录");
   }
-  const { thumbCipherB64, thumbHash } = await photoWorkerPool.submitEncryptSlimThumb({
+  const { thumbCipherB64 } = await photoWorkerPool.submitEncryptSlimThumb({
     thumbB64,
     fileHashHex,
     wrappedFileKey,
@@ -439,7 +439,7 @@ async function uploadSlimChunkSet(
   recordName: string,
   chunkKey: string,
 ): Promise<number> {
-  const { setCipherB64, setHash } = await photoWorkerPool.submitEncryptSlimSet({
+  const { setCipherB64 } = await photoWorkerPool.submitEncryptSlimSet({
     set: { ids: chunkIds, hashes: chunkHashes },
     fileHashHex,
     wrappedFileKey,
@@ -953,16 +953,16 @@ export class ImportPipeline {
         abort: () => { aborted = true; },
       };
 
-      // P0+P1 修复：生产者并行化 + yieldToMain 让出主线程
+      // 导入性能修复：生产者并行化 + yieldToMain 让出主线程
       //
       // 根因：旧实现 for 循环内 await 逐条串行处理，主线程被永久阻塞，
       //       requestAnimationFrame 回调被挤压在任务队列末尾，进度条冻结。
       //
       // 修复：
-      //   1. P1：N 个并发生产者（默认核心数折半并钳制在 2..8），并行读取与提交；
+      //   1. 并发生产：N 个并发生产者（默认核心数折半并钳制在 2..8），并行读取与提交；
       //      读取并发不按 2×核心数放大：磁盘与单写者吞吐是瓶颈，过量读取
       //      只会放大内存驻留与命令队列压力
-      //   2. P0：每处理完 N 个条目后 yieldToMain()，强制让出主线程，
+      //   2. 让出主线程：每处理完 N 个条目后 yieldToMain()，强制让出主线程，
       //          保证 rAF 进度回调得到执行机会
       //   3. 进度逐条目更新（per-item），而非逐 IPC 批次更新，
       //          用户感知到「真实加密进度」而非「IPC 写入进度」
@@ -1747,8 +1747,6 @@ export class ImportPipeline {
 
   /** 消费者：批量写入 N 条已加密记录到后端 */
   private async consumeBatch(records: BatchRecordInput[]): Promise<AddRecordsBatchResult> {
-    const batchStartAt = performance.now();
-
     // 通过 Tauri Channel 接收后端流式进度
     // 但我们在批次级别也更新进度，这里仅记录日志
     const onProgress = (prog: ImportBatchProgress) => {

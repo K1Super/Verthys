@@ -43,6 +43,13 @@
       </Teleport>
     </div>
 
+    <!-- P2 安全服务首次安装引导：生产构建中服务未安装时阻断进入 -->
+    <SecurityServiceGate
+      :visible="serviceGateVisible"
+      :error="serviceGateError"
+      @retry="refreshSecurityServiceStatus"
+    />
+
     <!-- 全局 Toast 渲染层（唯一渲染通道）：单点挂载 + Teleport 至 body，
          层级 = --z-toast（全应用最高层）—— 任何界面不可覆盖提示 -->
     <ToastLayer :idle-level="idleLevel" />
@@ -64,6 +71,7 @@ import { defineAsyncComponent, ref, computed, onMounted, onBeforeUnmount } from 
 import ParticleBackground from "./components/ParticleBackground.vue";
 import UnlockView from "./components/UnlockView.vue";
 import WindowControls from "./components/main-view/WindowControls.vue";
+import SecurityServiceGate from "./components/SecurityServiceGate.vue";
 // 全局 Toast 渲染层（唯一渲染通道；静态导入：提示须在任何阶段随时可用）
 import ToastLayer from "./components/common/feedback/ToastLayer.vue";
 // 主界面懒加载：MainView 静态导入会拉入 keyManager.ts → verthys.ts 整个业务层，
@@ -82,6 +90,7 @@ import { useSecurityGuard } from "./composables/useSecurityGuard";
 import { useGlobalIdleScheduler } from "./composables/useGlobalIdleScheduler";
 import { useAppUpdater, type RepairState } from "./composables/useAppUpdater";
 import { useToastCenter } from "./composables/useToastCenter";
+import { useSecurityServiceBootstrap } from "./composables/useSecurityServiceBootstrap";
 import { withTimeout } from "./utils/promise_utils";
 import { masterFrameLoop } from "./core/master-frame-loop";
 import { frameBudgetMonitor } from "./core/frame-budget";
@@ -113,6 +122,11 @@ const {
   runRepair,
 } = useAppUpdater();
 const { showError, showStatus } = useToastCenter();
+const {
+  visible: serviceGateVisible,
+  error: serviceGateError,
+  refresh: refreshSecurityServiceStatus,
+} = useSecurityServiceBootstrap();
 
 const repairState = ref<RepairState | null>(null);
 const showRepairDialog = ref(false);

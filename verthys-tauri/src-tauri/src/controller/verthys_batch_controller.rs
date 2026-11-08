@@ -30,7 +30,7 @@
  * =============================================================================
  * 每条记录进入缓存缓冲器之前先写 WAL pending；worker add_record 成功后写 WAL committed；
  * 每批次结束写 WAL checkpoint。崩溃/关闭后重启：
- *   - 已 committed 条目键 → 已落盘（v2 add_record 即时 fsync），续传时跳过（幂等）
+ *   - 已 committed 条目键 → 已落盘（add_record 即时 fsync），续传时跳过（幂等）
  *   - pending 未 committed → 未落盘，续传时重新入库（条目键未变，幂等）
  * 重做量不超过一个批次（检查点粒度）。
  *
@@ -47,7 +47,7 @@
 
 use crate::constants::import_writer::{WRITER_CMD_TIMEOUT, WRITER_SEND_TIMEOUT};
 use crate::controller::types::{BatchRecordInput, ChunkBlob, ImportBatchProgress, VerthysResponse};
-use crate::controller::verthys_controller::require_unlocked;
+use crate::controller::verthys_controller::{delete_batch_timeout, require_unlocked};
 use crate::repository::verthys_wal::{self, ImportSession};
 use crate::security::command_names::cmd;
 use crate::state::import_writer::{
@@ -55,6 +55,7 @@ use crate::state::import_writer::{
 };
 use crate::state::AppState;
 use crate::util::path::sanitize_path;
+use std::collections::HashSet;
 use std::time::SystemTime;
 use tauri::{Manager, State};
 
@@ -68,6 +69,60 @@ const IMPORT_SESSION_BUSY_CODE: &str = "E_IMPORT_SESSION_BUSY";
 
 /// 结构化错误码：加密库未就绪（未解锁/路径缺失；前端据此给出重新解锁引导）
 const VERTHYS_NOT_READY_CODE: &str = "E_VERTHYS_NOT_READY";
+
+/// 去重键存在性收敛时枚举的记录类型：照片索引、文件索引。
+/// 导入会话的 committed 记录只可能是索引型记录（块记录不入 WAL）；
+/// 不枚举块类型，避免大批量相册在每次导入前扫描全部块 ID。
+const IMPORT_INDEX_RTYPES: [u32; 2] = [0x01u32, 0x08u32];
+/// 单次类型 ID 枚举上限（与 C 层同源）
+const TYPE_LIST_PAGE_MAX: u64 = 4096;
+
+/// 枚举容器内仍然存活的索引型记录 ID（走类型盲索引，不读记录密文）。
+fn collect_live_record_ids(app: &tauri::AppHandle) -> Result<HashSet<u64>, String> {
+    let state = app.state::<AppState>();
+    let mut live = HashSet::new();
+    for rtype in IMPORT_INDEX_RTYPES {
+        let mut after = 0u64;
+        loop {
+            let req = serde_json::json!({
+                "op": "list_ids_by_type",
+                "rtype": rtype,
+                "id": after,
+                "max_count": TYPE_LIST_PAGE_MAX,
+            });
+            let resp_json = state.send(&req.to_string())?;
+            let resp: VerthysResponse = serde_json::from_str(&resp_json)
+                .map_err(|e| format!("记录 ID 枚举响应解析失败: {}", e))?;
+            if !resp.ok {
+                return Err(resp.error.unwrap_or_else(|| "记录 ID 枚举失败".to_string()));
+            }
+            let ids = resp.ids.unwrap_or_default();
+            let Some(last) = ids.last().copied() else {
+                break;
+            };
+            live.extend(ids);
+            if last <= after {
+                break; // 防御：游标不前进即终止
+            }
+            after = last;
+        }
+    }
+    Ok(live)
+}
+
+/// 收敛 WAL 去重集合：已 committed 记录 ID 已不在容器内即释放条目键。
+///
+/// 删除流程在 meta 不可解密时无法提供条目键（历史缺陷），墓碑因此缺失；
+/// 失效条目键会让重新导入同一来源文件被静默全部跳过。记录 ID 删除后不会
+/// 复用，「ID 不存在 ⇒ 去重键失效」是安全判据。
+fn reconcile_import_keys(app: &tauri::AppHandle, vpath: &str) -> Result<u64, String> {
+    let snapshot = verthys_wal::load(vpath)?;
+    if snapshot.committed_ids.is_empty() {
+        return Ok(0);
+    }
+    let live = collect_live_record_ids(app)?;
+    verthys_wal::prune_missing_commits(vpath, &live)
+}
 
 /// 构造「已有导入会话」拒绝响应（导入域防重入的唯一出口）
 fn import_session_busy_response() -> VerthysResponse {
@@ -161,7 +216,16 @@ pub async fn verthys_import_begin(
     // 会话创建含快照载入与 WAL 截断，属同步 IO，移出异步运行时线程执行
     let session_vpath = vpath.clone();
     let session_id = import_id.clone();
+    let reconcile_app = app.clone();
     let session = match tauri::async_runtime::spawn_blocking(move || {
+        /* 自愈：先按记录存在性收敛失效去重键。删除墓碑缺失（历史缺陷）
+         * 会让已删记录的条目键永久占用，重新导入被静默全部跳过。
+         * 收敛失败不阻断导入：仍可凭墓碑正常续传。 */
+        match reconcile_import_keys(&reconcile_app, &session_vpath) {
+            Ok(0) => {}
+            Ok(n) => log::info!("[verthys_import_begin] 已释放失效去重键: {} 条", n),
+            Err(e) => log::warn!("[verthys_import_begin] 去重键收敛失败（继续导入）: {}", e),
+        }
         ImportSession::new(&session_vpath, &session_id)
     })
     .await
@@ -429,21 +493,27 @@ pub async fn verthys_add_chunk_batch(
 /// 前端批量删除照片成功后调用：后端向 WAL 追加删除墓碑（含 fsync），
 /// 恢复重放时从 committed 集合移除非内容条目键，实现「删除后可重新导入」。
 /// 若存在活跃导入会话，同步更新会话内存集合与计数（本会话立即生效）。
-/// WAL 不存在时为无操作（去重集合本为空）。
+/// WAL 与快照均不存在时为无操作（去重集合本为空）。
 ///
-/// 说明：条目键由前端以来源元数据派生（非内容哈希），后端不重算；
-/// 删除是唯一变更存活集的路径且必经前端，故以前端删除成功后的
-/// 墓碑写入作为等价闭环。
+/// 条目键来源：`entry_keys` 由前端以来源元数据派生（非内容哈希）；meta
+/// 不可解密或历史条目缺键时，前端传入 `record_ids`，后端据 WAL committed
+/// 映射（entry_key → verthys_id）反查条目键。删除后记录 ID 不复用，
+/// 按 ID 释放不会误伤仍存活的导入项。
 #[tauri::command]
 pub async fn verthys_forget_import_keys(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     entry_keys: Vec<String>,
+    record_ids: Option<Vec<u64>>,
 ) -> Result<VerthysResponse, String> {
     if let Err(msg) = require_unlocked(&app, &state, cmd::FORGET_IMPORT_KEYS) {
         return Ok(VerthysResponse::err(cmd::FORGET_IMPORT_KEYS, &msg));
     }
-    if entry_keys.is_empty() {
+    let mut ids: Vec<u64> = record_ids.unwrap_or_default();
+    ids.retain(|id| *id > 0);
+    ids.sort_unstable();
+    ids.dedup();
+    if entry_keys.is_empty() && ids.is_empty() {
         return Ok(VerthysResponse::err(cmd::FORGET_IMPORT_KEYS, "条目键列表不能为空"));
     }
     if entry_keys
@@ -471,6 +541,7 @@ pub async fn verthys_forget_import_keys(
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
         let cmd = WriterCommand::AppendRemoved {
             keys: entry_keys.clone(),
+            record_ids: ids.clone(),
             reply: reply_tx,
         };
         if let Err(e) = submit_writer_cmd(&writer, cmd, reply_rx).await {
@@ -479,8 +550,9 @@ pub async fn verthys_forget_import_keys(
         }
 
         log::info!(
-            "[verthys_forget_import_keys] 墓碑已落盘: {} 条目键（经写者通道，会话内即时移除）",
-            entry_keys.len()
+            "[verthys_forget_import_keys] 墓碑已落盘: {} 条目键 + {} 记录 ID（经写者通道，会话内即时移除）",
+            entry_keys.len(),
+            ids.len()
         );
 
         let mut resp = VerthysResponse::ok(cmd::FORGET_IMPORT_KEYS);
@@ -501,15 +573,23 @@ pub async fn verthys_forget_import_keys(
 
     let vpath_clone = vpath.clone();
     let entry_keys_clone = entry_keys.clone();
+    let ids_clone = ids.clone();
     let write_result = tokio::time::timeout(
         WRITER_SEND_TIMEOUT,
         tokio::task::spawn_blocking(move || {
-            verthys_wal::append_removed(&vpath_clone, &entry_keys_clone)
+            // 记录 ID → 条目键：meta 不可解密时仍可释放续传幂等锁
+            let resolved = verthys_wal::keys_for_ids(&vpath_clone, &ids_clone)?;
+            let mut all_keys = entry_keys_clone;
+            all_keys.extend(resolved);
+            all_keys.sort_unstable();
+            all_keys.dedup();
+            verthys_wal::append_removed(&vpath_clone, &all_keys)?;
+            Ok::<usize, String>(all_keys.len())
         }),
     )
     .await;
 
-    match write_result {
+    let released = match write_result {
         Err(_) => {
             log::error!("[verthys_forget_import_keys] 墓碑写入超时");
             return Ok(VerthysResponse::err(cmd::FORGET_IMPORT_KEYS, "去重锁释放超时"));
@@ -522,16 +602,16 @@ pub async fn verthys_forget_import_keys(
             log::error!("[verthys_forget_import_keys] 墓碑写入失败: {}", e);
             return Ok(VerthysResponse::err(cmd::FORGET_IMPORT_KEYS, &e));
         }
-        Ok(Ok(Ok(()))) => {}
-    }
+        Ok(Ok(Ok(n))) => n,
+    };
 
     log::info!(
         "[verthys_forget_import_keys] 墓碑已落盘: {} 条目键（无活跃会话，恢复期生效）",
-        entry_keys.len()
+        released
     );
 
     let mut resp = VerthysResponse::ok(cmd::FORGET_IMPORT_KEYS);
-    resp.processed_count = Some(entry_keys.len() as u64);
+    resp.processed_count = Some(released as u64);
     Ok(resp)
 }
 
@@ -590,8 +670,9 @@ pub async fn verthys_gc_orphan_chunks(
 
     let gc_vpath = vpath.clone();
     let gc_app = app.clone();
-    // 单次 GC 的整体超时上界：删除经 worker 往返，取发送超时的两倍兜底
-    let gc_timeout = WRITER_SEND_TIMEOUT * 2;
+    // 单次 GC 的整体超时上界：覆盖删除命令的最大超时 + 台账结算/落盘余量
+    let gc_timeout =
+        delete_batch_timeout(usize::MAX).saturating_add(std::time::Duration::from_secs(30));
 
     let outcome = tokio::time::timeout(
         gc_timeout,
@@ -618,7 +699,7 @@ pub async fn verthys_gc_orphan_chunks(
             let req = serde_json::json!({"op": "delete_records", "ids": garbage.clone()});
             let state = gc_app.state::<AppState>();
             let resp_json = state
-                .send(&req.to_string())
+                .send_with_timeout(&req.to_string(), delete_batch_timeout(garbage.len()))
                 .map_err(|e| format!("worker 通信失败: {}", e))?;
             let resp: VerthysResponse = serde_json::from_str(&resp_json)
                 .map_err(|e| format!("delete_records 响应解析失败: {}", e))?;

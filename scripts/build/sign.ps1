@@ -1,7 +1,7 @@
 # scripts/build/sign.ps1 — Authenticode 签名（发布者证书）
 #
 # 用测试/发布证书给 DLL 与宿主签名，并在签名前保留未签名副本
-# （A2 负向用例需要“真未签名”的样本；复制已签名文件无法得到该状态）。
+# （调用方验签负向用例需要“真未签名”的样本；复制已签名文件无法得到该状态）。
 # 使用 Set-AuthenticodeSignature 而非 signtool：开发机不要求安装 Windows SDK。
 #
 # 用法：
@@ -24,7 +24,7 @@ foreach ($file in $Files) {
     if (-not $NoBackup) {
         # 只把“当前确实未签名”的二进制留作副本：
         # 若文件已是签名态（重复执行本脚本）就保留原副本，否则会把签名态
-        # 当成“未签名样本”，让 A2-5 变成假阴性。
+        # 当成“未签名样本”，让“签名宿主 + 未签名 DLL”用例变成假阴性。
         $backup = $file + '.unsigned'
         $current = Get-AuthenticodeSignature -FilePath $file
         if ($current.Status -ne 'Valid') {

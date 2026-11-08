@@ -99,21 +99,21 @@ export interface UsePresetOptions {
  */
 export function usePreset(options: UsePresetOptions) {
   /* ===== 预设特性列表（与 Rust PresetFeatures 字段对齐） =====
-   * 注意：`key_separation` 是 11 位契约中的遗留键名。产品 v4-only 构建不再
-   * 链接 V3 CNG 三权分立实现，该位映射到真实生效的 V4 密钥隔离堆
+   * 注意：`key_separation` 是 11 位契约中的遗留键名。产品构建不再
+   * 链接旧 CNG 三权分立实现，该位映射到真实生效的密钥隔离堆
    * （secure_allocator + memory_guard + 锁定/应急清零），展示文案必须描述
-   * 实际能力，不得继续宣称 V3 三权分立。 */
+   * 实际能力，不得继续宣称三权分立。 */
   const presetFeatureList: { key: keyof PresetFeatures; label: string; desc: string }[] = [
-    { key: "anti_debug", label: "调试检测", desc: "调试器检测与反附加" },
-    { key: "anti_inject", label: "注入拦截", desc: "DLL 注入与搜索顺序加固" },
-    { key: "integrity_check", label: "完整校验", desc: "启动镜像签名核验 · 运行期模块抽检" },
-    { key: "memory_guard", label: "内存保护", desc: "内存锁定与防转储" },
-    { key: "key_separation", label: "密钥隔离", desc: "V4 密钥隔离堆 · 锁定/应急清零" },
+    { key: "anti_debug", label: "调试检测", desc: "检测调试器并阻断附加" },
+    { key: "anti_inject", label: "注入拦截", desc: "拦截 DLL 注入并加固搜索顺序" },
+    { key: "integrity_check", label: "完整校验", desc: "核验启动镜像签名，抽检运行期模块" },
+    { key: "memory_guard", label: "内存保护", desc: "锁定关键内存并阻止转储" },
+    { key: "key_separation", label: "密钥隔离", desc: "密钥隔离堆驻留，支持锁定与应急清零" },
     { key: "emergency_response", label: "紧急熔断", desc: "异常事件立即熔断销毁" },
     { key: "session_lock_on_idle", label: "空闲锁定", desc: "会话空闲超时自动锁定" },
     { key: "module_patrol", label: "模块巡检", desc: "定期扫描已加载模块签名" },
-    { key: "clip_clear_on_lock", label: "清除剪贴", desc: "锁定清空恒开 · 开启后监听并清除外部写入" },
-    { key: "usb_clone_detect", label: "克隆检测", desc: "序列号哈希比对拒绝克隆外设" },
+    { key: "clip_clear_on_lock", label: "清除剪贴", desc: "锁定时清空剪贴板，开启后监听并清除外部写入" },
+    { key: "usb_clone_detect", label: "克隆检测", desc: "以序列号哈希比对拒绝克隆外设" },
     { key: "trace_cleanup", label: "痕迹清理", desc: "退出时清理系统最近记录" },
   ];
 
@@ -687,6 +687,3 @@ const orbitTrackGradient = computed(() => ({
     loadPresetConfig,
   };
 }
-
-/** usePreset 返回值类型（便于显式标注） */
-export type UsePresetReturn = ReturnType<typeof usePreset>;

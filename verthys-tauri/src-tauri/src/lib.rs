@@ -67,19 +67,11 @@ mod devfixture;
 mod e2e_rotate;
 
 // ==== 强制分层架构 ====
-#[allow(dead_code)]
 pub mod controller;
-#[allow(dead_code)]
-pub mod entry_template;
-#[allow(dead_code)]
 pub mod infrastructure;
-#[allow(dead_code)]
 pub mod middleware;
-#[allow(dead_code)]
 pub mod repository;
-#[allow(dead_code)]
 pub mod service;
-#[allow(dead_code)]
 pub mod util;
 
 // 启动资源哈希校验：由 build.rs 生成 dist 目录 SHA-256 清单
@@ -104,7 +96,7 @@ use controller::file_controller::*;
 use controller::key_controller::*;
 use controller::pcr_controller::*;
 use controller::keyfile_controller::*;
-use controller::v4_module_controller::*;
+use controller::module_controller::*;
 use controller::vault_rotate_controller::*;
 use controller::preflight_controller::*;
 use controller::scan_controller::*;
@@ -577,32 +569,32 @@ fn run_main_ui(
             verthys_unlock,
             verthys_create,
             verthys_recovery_rotate,
-            // v4 PCR 策略：状态 / 启用 / 关闭 / 重密封
+            // PCR 策略：状态 / 启用 / 关闭 / 重密封
             verthys_pcr_status,
             verthys_pcr_enable,
             verthys_pcr_disable,
             verthys_pcr_reseal,
-            // v4 keyfile 因子（D3）：状态 / 启用 / 关闭
+            // keyfile 因子：状态 / 启用 / 关闭
             verthys_keyfile_status,
             verthys_keyfile_enable,
             verthys_keyfile_disable,
             verthys_reseal_device,
-            // v4 模块 M1：状态 / 启用 / 口令轮换 / 关闭 / 恢复槽 / 不可逆删除
-            verthys_v4_module_status,
-            verthys_v4_module_enable,
-            verthys_v4_module_rotate_password,
-            verthys_v4_module_disable,
-            verthys_v4_module_bind_recovery,
-            verthys_v4_module_reseal_device,
-            verthys_v4_module_delete,
-            // v4 D9 全库 DEK 轮换：开始 / keyfile 补录 / 模块口令登记 / 执行 / 取消 / 提交 / 中止
-            verthys_v4_rotate_begin,
-            verthys_v4_rotate_attach_keyfile,
-            verthys_v4_rotate_unlock_module,
-            verthys_v4_rotate_run,
-            verthys_v4_rotate_cancel,
-            verthys_v4_rotate_commit,
-            verthys_v4_rotate_abort,
+            // 模块 M1：状态 / 启用 / 口令轮换 / 关闭 / 恢复槽 / 不可逆删除
+            verthys_module_status,
+            verthys_module_enable,
+            verthys_module_rotate_password,
+            verthys_module_disable,
+            verthys_module_bind_recovery,
+            verthys_module_reseal_device,
+            verthys_module_delete,
+            // 全库 DEK 轮换：开始 / keyfile 补录 / 模块口令登记 / 执行 / 取消 / 提交 / 中止
+            verthys_rotate_begin,
+            verthys_rotate_attach_keyfile,
+            verthys_rotate_unlock_module,
+            verthys_rotate_run,
+            verthys_rotate_cancel,
+            verthys_rotate_commit,
+            verthys_rotate_abort,
             verthys_prepare_lock,
             verthys_lock,
             verthys_lock_persist,
@@ -670,11 +662,11 @@ fn run_main_ui(
             set_device_binding,
             check_device_binding,
             security_commands::security_brute_check,
-            security_commands::security_brute_clear_purge,
             security_commands::security_brute_status,
             security_commands::security_session_start,
             security_commands::security_session_stop,
             security_commands::security_session_set_hardening,
+            security_commands::security_service_status,
             security_commands::security_module_patrol,
             security_commands::security_add_trusted_path,
             security_commands::security_clear_trusted_paths,

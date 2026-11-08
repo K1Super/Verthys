@@ -35,7 +35,6 @@ use super::graceful::{
 use super::protocol::{
     bounded_read_line, ActorRequest, BoundedLineError, ProgressEvent, RotateProgress,
     MAX_LINE_BYTES, ROTATE_PROGRESS_IDLE_TIMEOUT, STDERR_DRAIN_FINAL_TIMEOUT,
-    UNLOCK_PROGRESS_IDLE_TIMEOUT,
 };
 use super::stderr::{snapshot_stderr, StderrRing};
 
@@ -128,27 +127,6 @@ pub(crate) async fn actor_loop(
                 .await;
                 let _ = reply.send(result);
             }
-            ActorRequest::SendStreamingUnlock {
-                json,
-                reply,
-                progress_tx,
-            } => {
-                let result = handle_streaming_progress_send(
-                    &mut stdin,
-                    &mut stdout_reader,
-                    &json,
-                    &progress_tx,
-                    "解锁",
-                    UNLOCK_PROGRESS_IDLE_TIMEOUT,
-                    pid,
-                    &mut child,
-                    &stderr_ring,
-                    &child_alive,
-                    &ipc,
-                )
-                .await;
-                let _ = reply.send(result);
-            }
             ActorRequest::SendStreamingRotate {
                 json,
                 reply,
@@ -216,10 +194,8 @@ pub(crate) async fn actor_loop(
 ///   替代 PeekNamedPipe + thread::sleep(50ms) 轮询。
 /// 只读诊断，不清空句柄。
 /// 修复：跳过进度行，防止协议污染
-///   当 worker 的进度回调已注册（前一次 unlock 注册）且当前非流式请求
-///   触发 FFI 调用 emit progress 时，进度行会混入 stdout。
-///   handle_send 必须跳过 op="unlock_progress" 行，
-///   只返回真正的最终响应，否则响应解析失败。
+///   上一轮流式请求可能残留进度行；handle_send 必须跳过
+///   Progress 通道的行，只返回真正的最终响应，否则响应解析失败。
 // 说明：IPC 管道操作所需的完整上下文（句柄/超时/存活标志），参数语义独立，
 // 保留显式列表以保证可审计性，豁免参数数量检查。
 #[allow(clippy::too_many_arguments)]
@@ -360,14 +336,14 @@ async fn handle_send(
     }
 }
 
-/// 处理流式进度请求（解锁 / 全库轮换共用）
+/// 处理全库轮换流式进度请求
 ///
 /// 进度行解析、推送与日志格式化。
 /// 进度感知超时，每收到一条进度行重置 deadline。
 ///
 /// 协议：
-///   - worker 在阻塞 FFI 期间（解锁 / 轮换 Run），由回调向 stdout 写入
-///     多条进度行（op="unlock_progress" / "v4_rotate_progress"）
+///   - worker 在轮换 Run 阻塞期间，由回调向 stdout 写入
+///     多条 `v4_rotate_progress` 进度行
 ///   - FFI 返回后写入最终终止行
 ///   - 本函数识别进度行并推送 progress_tx，遇到终止行返回
 // 说明：同 handle_send——进度流式 IPC 的完整上下文清单，参数语义独立，

@@ -15,6 +15,8 @@ export interface VerthysResponse {
   error?: string;
   /** 结构化错误码（前端按码分支控制流与引导文案，不做文案判定） */
   error_code?: string | null;
+  /** 锁定/限流的建议等待秒数（仅 0x0A / 0x1D 等锁定类错误返回） */
+  retry_after_secs?: number | null;
   /** 批量枚举记录列表（仅 enumerate_records 操作返回） */
   records?: VerthysRecordEntry[];
   /** 摘要扫描记录列表（仅 scan_summary_open / scan_summary_next 操作返回） */
@@ -96,23 +98,23 @@ export interface VerthysResponse {
   header_magic?: number;
   /** 容器格式版本 */
   header_version?: number;
-  /** v4 一次性恢复码（仅 v4_create 返回；确认后前端必须清零） */
+  /** 一次性恢复码（仅 v4_create 返回；确认后前端必须清零） */
   recovery_code?: string;
   /** PCR 是否已启用（仅 v4_pcr_status 返回） */
   pcr_enabled?: boolean;
   /** PCR 位图（PCR0–23，仅 v4_pcr_status 返回） */
   pcr_select?: number;
-  /** v4 keyfile 因子是否已启用（仅 v4_keyfile_status/enable/disable 返回） */
+  /** keyfile 因子是否已启用（仅 v4_keyfile_status/enable/disable 返回） */
   keyfile_enabled?: boolean;
   /** 当前会话是否由恢复码打开（仅 v4_keyfile_status 返回；恢复会话可重绑/关闭 keyfile） */
   recovery_mode?: boolean;
-  /** v4 模块加密是否已启用（仅 v4_module_status 返回） */
+  /** 模块加密是否已启用（仅 v4_module_status 返回） */
   enabled?: boolean;
-  /** v4 模块本会话是否已解锁（仅 v4_module_status 返回） */
+  /** 模块本会话是否已解锁（仅 v4_module_status 返回） */
   unlocked?: boolean;
-  /** v4 模块是否已绑定恢复码槽（仅 v4_module_status 返回） */
+  /** 模块是否已绑定恢复码槽（仅 v4_module_status 返回） */
   has_recovery?: boolean;
-  /** v4 模块是否已删除（仅 v4_module_status 返回） */
+  /** 模块是否已删除（仅 v4_module_status 返回） */
   deleted?: boolean;
   /* 全库 DEK 轮换统计（仅 v4_rotate_begin 返回）
    *
@@ -143,24 +145,16 @@ export interface RotateProgress {
 }
 
 /**
- * 解锁进度信息
+ * 前端解锁流程进度信息
  *
- * 与后端 Rust worker::UnlockProgress 严格对齐（字段名保持 snake_case）。
- * 解锁期间通过 Tauri Channel 流式推送，在解锁各阶段触发：
- *   - stage=1 读超级块（5%）
- *   - stage=2 Argon2id 开始（10%）
- *   - stage=3 Argon2id 完成（50%）
- *   - stage=4 缓存检查（55%）
- *   - stage=5 索引解密（60%）
- *   - stage=6 B+树完成（85%）
- *   - stage=7 摘要完成（95%）
- *   - stage=8 Merkle完成（100%）
+ * 由 initCreate / initUnlock / initGlobalKey / verifyGlobalKey 在前端
+ * 阶段边界直接推送，不经后端 C 回调。字段名保持 snake_case。
  *
  * 字段含义：
- *   - stage：VerthysUnlockStage 枚举值（1~8）
+ *   - stage：前端阶段编号
  *   - percent：0~100 累计进度百分比
- *   - elapsed_ms：自解锁开始累计耗时（毫秒）
- *   - message：UTF-8 阶段描述（供前端直接展示）
+ *   - elapsed_ms：自流程开始累计耗时（毫秒）
+ *   - message：阶段描述（供前端直接展示）
  */
 export interface UnlockProgress {
   stage: number;
@@ -399,18 +393,19 @@ export type VerthysPreset = 0 | 1;
 /** 三档预设代号（3 = CUSTOM 自定义模板，仅前端处理） */
 export type SecurityPresetCode = 0 | 1 | 2 | 3;
 
-/** 暴力拦截检查结果（与 Rust BruteForceCheckResponse 对齐，tag=kind） */
+/** 暴力拦截检查结果（与 Rust BruteForceCheckResponse 对齐，tag=kind）
+ *
+ * 纯查询：仅返回是否允许尝试与锁定剩余秒数；尝试过频仅由后端入口判定。 */
 export type BruteForceCheckResponse =
   | { kind: "Allow" }
-  | { kind: "Locked"; remaining_secs: number }
-  | { kind: "PurgeRequired" };
+  | { kind: "Locked"; remaining_secs: number };
 
 /** 暴力拦截状态快照 */
 export interface BruteForceStatus {
   consecutive_failures: number;
+  /** 累计失败次数（仅审计，不参与闸门判定） */
   total_failures: number;
   remaining_lock_secs: number;
-  purge_required: boolean;
 }
 
 /** 模块巡检中的未知/可疑模块 */

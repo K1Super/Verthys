@@ -28,7 +28,7 @@ use super::state::SecurityState;
  *  状态文件路径：app_config_dir/.brute_force_state                        *
  *  格式：DPAPI( JSON BruteForcePersistedState )                           *
  *  应用启动时首次访问 brute_force 命令时自动加载。                        *
- *  每次 record_failure / record_success / clear_purge 后自动持久化。      *
+ *  每次 record_failure / record_success 后自动持久化。                   *
  * ====================================================================== */
 
 /// 获取暴力拦截状态文件路径
@@ -82,10 +82,10 @@ pub(super) fn persist_brute_force_state(app: &tauri::AppHandle, guard: &BruteFor
     }
 
     log::debug!(
-        "[brute_force] 第 13.2.2 项：状态已持久化 (consecutive={}, total={}, purge={})",
+        "[brute_force] 状态已持久化 (schema={}, consecutive={}, total={})",
+        persisted.schema_version,
         persisted.consecutive_failures,
-        persisted.total_failures,
-        persisted.purge_triggered
+        persisted.total_failures
     );
 }
 

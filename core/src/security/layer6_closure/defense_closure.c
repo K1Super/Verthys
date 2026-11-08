@@ -5,7 +5,7 @@
  *   0 挂起绕过 — 无驻留密钥时 BLOCKED；有密钥时 DEGRADED，看门狗未接线
  *                 记 SUSPEND_GUARD_INACTIVE（可修复），接线后仅剩管理员
  *                 挂起这一架构限制（SUSPEND_UNPREVENTABLE）。
- *   1 内存转储 — 无驻留密钥时 BLOCKED；V4 密钥驻留用户态时 DEGRADED。
+ *   1 内存转储 — 无驻留密钥时 BLOCKED；密钥驻留用户态时 DEGRADED。
  *   2 休眠取证 — 无驻留密钥或系统休眠关闭时 BLOCKED；休眠启用/状态未知
  *                 且有驻留密钥时 DEGRADED。
  *   3 接口挂钩 — TLS 加载标志缺失为 FAILED；扫描异常为 FAILED；扫描
@@ -99,7 +99,7 @@ static BOOL CALLBACK dcl_init_once(PINIT_ONCE once, PVOID param, PVOID *ctx)
 static DefenseState check_suspend_bypass(const DefenseFacts *facts,
                                          DefenseReason *reason)
 {
-    if (facts->any_unlocked_v4 == 0) {
+    if (facts->any_unlocked_session == 0) {
         *reason = DEFENSE_REASON_NO_RESIDENT_KEY;
         return DEFENSE_STATE_BLOCKED;
     }
@@ -117,18 +117,18 @@ static DefenseState check_suspend_bypass(const DefenseFacts *facts,
 
 /*
  * 1. 内存 Dump / 冷启动
- *    V4 内容密钥驻留用户态堆，解锁进程可被完整转储；内核托管暂缓前
+ *    内容密钥驻留用户态堆，解锁进程可被完整转储；内核托管暂缓前
  *    该路径只能诚实报告降级。policy_flags 中的 anti_dump 仅用于 UI
  *    提示，不改变判据。
  */
 static DefenseState check_mem_dump(const DefenseFacts *facts,
                                    DefenseReason *reason)
 {
-    if (facts->any_unlocked_v4 == 0) {
+    if (facts->any_unlocked_session == 0) {
         *reason = DEFENSE_REASON_NO_RESIDENT_KEY;
         return DEFENSE_STATE_BLOCKED;
     }
-    *reason = DEFENSE_REASON_V4_KEYS_USER_RESIDENT;
+    *reason = DEFENSE_REASON_KEYS_USER_RESIDENT;
     return DEFENSE_STATE_DEGRADED;
 }
 
@@ -141,7 +141,7 @@ static DefenseState check_mem_dump(const DefenseFacts *facts,
 static DefenseState check_hibernation(const DefenseFacts *facts,
                                       DefenseReason *reason)
 {
-    if (facts->any_unlocked_v4 == 0) {
+    if (facts->any_unlocked_session == 0) {
         *reason = DEFENSE_REASON_NO_RESIDENT_KEY;
         return DEFENSE_STATE_BLOCKED;
     }
@@ -245,7 +245,7 @@ static DefenseState check_process_read(const DefenseFacts *facts,
 static DefenseState check_cross_device(const DefenseFacts *facts,
                                        DefenseReason *reason)
 {
-    if (facts->queried_unlocked_v4 == 0) {
+    if (facts->queried_unlocked_session == 0) {
         *reason = DEFENSE_REASON_NO_SESSION_FACTS;
         return DEFENSE_STATE_DEGRADED;
     }
@@ -289,7 +289,7 @@ static void aggregate_report(DefenseStatusReport *report)
                  * 管理员挂起不可阻止。其余降级属于可修复缺口，不得混入
                  * "受架构限制"口径。 */
                 if (report->path_reason[i] ==
-                        DEFENSE_REASON_V4_KEYS_USER_RESIDENT ||
+                        DEFENSE_REASON_KEYS_USER_RESIDENT ||
                     report->path_reason[i] ==
                         DEFENSE_REASON_SUSPEND_UNPREVENTABLE) {
                     report->limited_count++;
@@ -439,91 +439,4 @@ int defense_closure_check(DefenseCheckMode mode,
     defense_closure_fill_process_facts(&facts);
     /* 兼容包装不持有句柄：会话事实全部为 0（BOOT 语义）。 */
     return defense_closure_check_facts(mode, &facts, out_report);
-}
-
-DefenseState defense_closure_get_path_state(DefensePath path)
-{
-    DefenseState state = DEFENSE_STATE_NOT_CHECKED;
-
-    if (path < 0 || path >= DEFENSE_PATH_COUNT) {
-        return DEFENSE_STATE_NOT_CHECKED;
-    }
-
-    AcquireSRWLockShared(&s_check_lock);
-    if (s_has_check) {
-        state = s_last_report.path_state[path];
-    }
-    ReleaseSRWLockShared(&s_check_lock);
-    return state;
-}
-
-int defense_closure_get_summary(void)
-{
-    int summary = 3;  /* 未校验 */
-
-    AcquireSRWLockShared(&s_check_lock);
-    if (s_has_check) {
-        if (s_last_report.failed_count > 0) {
-            summary = 2;  /* 有 FAILED */
-        } else if (s_last_report.has_degraded) {
-            summary = 1;  /* 有 DEGRADED */
-        } else {
-            summary = 0;  /* 全部 BLOCKED */
-        }
-    }
-    ReleaseSRWLockShared(&s_check_lock);
-    return summary;
-}
-
-const char *defense_closure_path_name(DefensePath path)
-{
-    switch (path) {
-        case DEFENSE_PATH_SUSPEND_BYPASS:  return "Admin Suspend Bypass";
-        case DEFENSE_PATH_MEM_DUMP:        return "Memory Dump / Cold Boot";
-        case DEFENSE_PATH_HIBERNATION:     return "Hibernation Forensics";
-        case DEFENSE_PATH_IAT_INLINE_HOOK: return "IAT / Inline Hook";
-        case DEFENSE_PATH_DLL_HIJACK:      return "DLL Hijack / Reflective";
-        case DEFENSE_PATH_PROCESS_READ:    return "Process Memory Read";
-        case DEFENSE_PATH_CROSS_DEVICE:    return "Cross-Device Migration";
-        default:                           return "Unknown";
-    }
-}
-
-const char *defense_closure_state_name(DefenseState state)
-{
-    switch (state) {
-        case DEFENSE_STATE_NOT_CHECKED: return "NOT_CHECKED";
-        case DEFENSE_STATE_BLOCKED:     return "BLOCKED";
-        case DEFENSE_STATE_DEGRADED:    return "DEGRADED";
-        case DEFENSE_STATE_FAILED:      return "FAILED";
-        default:                        return "UNKNOWN";
-    }
-}
-
-const char *defense_closure_reason_name(DefenseReason reason)
-{
-    switch (reason) {
-        case DEFENSE_REASON_NONE:                      return "NONE";
-        case DEFENSE_REASON_NO_RESIDENT_KEY:           return "NO_RESIDENT_KEY";
-        case DEFENSE_REASON_V4_KEYS_USER_RESIDENT:     return "V4_KEYS_USER_RESIDENT";
-        case DEFENSE_REASON_HIBERNATION_ENABLED:       return "HIBERNATION_ENABLED";
-        case DEFENSE_REASON_HIBERNATION_UNKNOWN:       return "HIBERNATION_UNKNOWN";
-        case DEFENSE_REASON_SUSPEND_UNPREVENTABLE:     return "SUSPEND_UNPREVENTABLE";
-        case DEFENSE_REASON_SUSPEND_GUARD_INACTIVE:    return "SUSPEND_GUARD_INACTIVE";
-        case DEFENSE_REASON_HOOK_SCAN_CLEAN:           return "HOOK_SCAN_CLEAN";
-        case DEFENSE_REASON_HOOK_SCAN_UNAVAILABLE:     return "HOOK_SCAN_UNAVAILABLE";
-        case DEFENSE_REASON_HOOK_DETECTED:             return "HOOK_DETECTED";
-        case DEFENSE_REASON_SANDBOX_VERIFIED:          return "SANDBOX_VERIFIED";
-        case DEFENSE_REASON_SANDBOX_PARTIAL:           return "SANDBOX_PARTIAL";
-        case DEFENSE_REASON_SANDBOX_UNVERIFIED:        return "SANDBOX_UNVERIFIED";
-        case DEFENSE_REASON_JOB_ACTIVE:                return "JOB_ACTIVE";
-        case DEFENSE_REASON_DEVICE_BOUND:              return "DEVICE_BOUND";
-        case DEFENSE_REASON_NO_SESSION_FACTS:          return "NO_SESSION_FACTS";
-        case DEFENSE_REASON_MODULE_INIT_FAILED:        return "MODULE_INIT_FAILED";
-        case DEFENSE_REASON_POLICY_DISABLED:            return "POLICY_DISABLED";
-        case DEFENSE_REASON_EVIDENCE_STALE:            return "EVIDENCE_STALE";
-        case DEFENSE_REASON_ARCH_LIMIT_KERNEL_DEFERRED: return "ARCH_LIMIT_KERNEL_DEFERRED";
-        case DEFENSE_REASON_HIBERNATION_DISABLED:      return "HIBERNATION_DISABLED";
-        default:                                       return "UNKNOWN";
-    }
 }

@@ -30,10 +30,10 @@ import {
   TYPE_PHOTO_META, TYPE_PHOTO_CHUNK,
 } from "../constants/crypto_const";
 import type {
-  PhotoMeta, LightMeta, VencPhotoSpecV2,
+  PhotoMeta, LightMeta, VencPhotoSpec,
 } from "../types/crypto";
 import {
-  CryptoError, CryptoErrorKind,
+  CryptoErrorKind,
   invalidInput, formatCorrupted, unsupportedVersion, wrapAsCryptoError,
 } from "./crypto_error";
 
@@ -201,7 +201,7 @@ function encryptFrame(
 }
 
 /** 容器照片输入的结构前置校验（打包侧防御，避免容量字段自相矛盾或发出即损坏） */
-function assertVencPhotoShape(photo: VencPhotoSpecV2): void {
+function assertVencPhotoShape(photo: VencPhotoSpec): void {
   const lm = photo.lightMeta;
   if (!lm || !photo.chunkBytes) {
     throw invalidInput("照片容器数据字段缺失");
@@ -273,18 +273,18 @@ function assertChunkHashesMatched(photo: { lightMeta: LightMeta; chunkBytes: Uin
  * 将照片容器数据打包为 .venc v2 加密文件。
  *
  * 收集全部输出段后一次性拼接返回；大文件单文件导出应改用
- * {@link packVencV2Streamed} 流式产出以压低内存峰值。
+ * {@link packVencStreamed} 流式产出以压低内存峰值。
  *
  * @param photos 照片容器数据（轻量头 + 加密块字节）
  * @param token 导出令牌（外层内容密钥封装的凭据）
  * @returns .venc v2 完整字节（头部 + 封装密钥 + 帧序列 + 尾部校验帧）
  */
-export async function packVencV2(
-  photos: VencPhotoSpecV2[],
+export async function packVenc(
+  photos: VencPhotoSpec[],
   token: string,
 ): Promise<Uint8Array> {
   const parts: Uint8Array[] = [];
-  await packVencV2Internal(photos, token, async (part) => {
+  await packVencInternal(photos, token, async (part) => {
     parts.push(part);
   });
   let total = 0;
@@ -298,24 +298,24 @@ export async function packVencV2(
 /**
  * 将照片容器数据流式打包为 .venc v2 加密文件，逐段交给写入回调。
  *
- * 与 {@link packVencV2} 共享同一打包核心：不缓存帧序列，每产生一段
+ * 与 {@link packVenc} 共享同一打包核心：不缓存帧序列，每产生一段
  * （首段为头部 + 封装密钥，其后为单个加密帧，末尾为尾部校验帧）即
  * `await emit(part)`，由调用方决定落盘 / 拼接策略；回调返回 Promise
  * 以支持背压（如流式追加落盘）。回调抛错即中止打包并向上传播。
  *
  * 注意：本入口要求全部块字节已在内存（`photos[*].chunkBytes`）。容器体积
- * 与内存同阶；GB 级单文件导出应改用 {@link packVencV2StreamedLazy}。
+ * 与内存同阶；GB 级单文件导出应改用 {@link packVencStreamedLazy}。
  *
  * @param photos 照片容器数据（轻量头 + 加密块字节）
  * @param token 导出令牌（外层内容密钥封装的凭据）
  * @param emit 分段写出回调（按容器字节顺序调用）
  */
-export async function packVencV2Streamed(
-  photos: VencPhotoSpecV2[],
+export async function packVencStreamed(
+  photos: VencPhotoSpec[],
   token: string,
   emit: (part: Uint8Array) => Promise<void>,
 ): Promise<void> {
-  await packVencV2Internal(photos, token, emit);
+  await packVencInternal(photos, token, emit);
 }
 
 /**
@@ -339,16 +339,16 @@ export async function packVencV2Streamed(
  * @param loadPhoto 按序号加载该照片的完整容器数据（含块字节）；返回 null 表示跳过
  * @param emit 分段写出回调（按容器字节顺序调用）
  */
-export async function packVencV2StreamedLazy(
+export async function packVencStreamedLazy(
   count: number,
   token: string,
-  loadPhoto: (index: number) => Promise<VencPhotoSpecV2 | null>,
+  loadPhoto: (index: number) => Promise<VencPhotoSpec | null>,
   emit: (part: Uint8Array) => Promise<void>,
 ): Promise<void> {
   if (!Number.isInteger(count) || count <= 0) {
     throw invalidInput("照片数据列表不能为空");
   }
-  await packVencV2Core(
+  await packVencCore(
     count,
     async (index) => {
       const spec = await loadPhoto(index);
@@ -362,7 +362,7 @@ export async function packVencV2StreamedLazy(
 }
 
 /** 预估 .venc v2 容器总字节数（打包前进度分母）。 */
-export function estimateVencTotalBytes(photos: VencPhotoSpecV2[]): number {
+export function estimateVencTotalBytes(photos: VencPhotoSpec[]): number {
   const frameOverhead = VENC_FRAME_HEADER_BYTES + NONCE_LEN + TAG_LEN;
   let total = VENC_OUTER_HEADER_BYTES + VENC_WRAPPED_KEY_BYTES;
   for (const photo of photos) {
@@ -410,8 +410,8 @@ export function vencPhotoFramesBytes(
  * @param token 导出令牌
  * @param emit 分段写出回调
  */
-async function packVencV2Internal(
-  photos: VencPhotoSpecV2[],
+async function packVencInternal(
+  photos: VencPhotoSpec[],
   token: string,
   emit: (part: Uint8Array) => Promise<void>,
 ): Promise<void> {
@@ -419,7 +419,7 @@ async function packVencV2Internal(
     throw invalidInput("照片数据列表不能为空");
   }
   for (const photo of photos) assertVencPhotoShape(photo);
-  await packVencV2Core(photos.length, async (index) => photos[index], token, emit);
+  await packVencCore(photos.length, async (index) => photos[index], token, emit);
 }
 
 /**
@@ -429,9 +429,9 @@ async function packVencV2Internal(
  * 照片数据经 `loadPhoto` 逐张取用：惰性入口因此只驻留当前照片的块字节，
  * 帧写出后即由作用域释放。
  */
-async function packVencV2Core(
+async function packVencCore(
   count: number,
-  loadPhoto: (index: number) => Promise<VencPhotoSpecV2 | null>,
+  loadPhoto: (index: number) => Promise<VencPhotoSpec | null>,
   token: string,
   emit: (part: Uint8Array) => Promise<void>,
 ): Promise<void> {
@@ -526,10 +526,10 @@ async function packVencV2Core(
  * @param token 导出令牌
  * @returns 照片容器数据数组（轻量头 + 加密块字节）
  */
-export async function unpackVencV2(
+export async function unpackVenc(
   encoded: Uint8Array,
   token: string,
-): Promise<VencPhotoSpecV2[]> {
+): Promise<VencPhotoSpec[]> {
   if (!encoded || encoded.length === 0) {
     throw formatCorrupted("venc 数据为空");
   }
@@ -766,4 +766,4 @@ export async function decryptPasswordField(b64: string, passphrase: string): Pro
 
 export { CHUNK_SIZE, TYPE_PHOTO_META, TYPE_PHOTO_CHUNK };
 export { bytesToHex };
-export type { PhotoMeta, LightMeta, VencPhotoSpecV2 };
+export type { PhotoMeta, LightMeta, VencPhotoSpec };

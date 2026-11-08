@@ -1,4 +1,4 @@
-/* 调用方签名校验实现（A2）。
+/* 调用方签名校验实现。
  *
  * 判定顺序：
  *   1) 本 DLL 自身签名（防止替换未签名的 verthys.dll 绕过宿主校验）；
@@ -9,7 +9,7 @@
  * 指纹固定比对比信任链更严格：中间 CA 被攻破也不会放行非发布者证书。
  */
 #include "vty_caller_auth.h"
-#include "vty_v4_types.h"
+#include "vty_types.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

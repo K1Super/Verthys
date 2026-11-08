@@ -15,6 +15,8 @@ use ts_rs::TS;
  * ====================================================================== */
 
 /// 暴力拦截检查结果（序列化给前端）
+///
+/// 纯查询结果：不包含尝试节流态（节流只影响后端入口，前端不感知）。
 #[derive(serde::Serialize, TS)]
 #[serde(tag = "kind")]
 #[ts(export, export_to = "bindings/")]
@@ -26,8 +28,6 @@ pub enum BruteForceCheckResponse {
         #[ts(type = "number")]
         remaining_secs: u64,
     },
-    /// 需要清空索引并触发完整性校验
-    PurgeRequired,
 }
 
 /// 暴力拦截状态快照
@@ -35,10 +35,10 @@ pub enum BruteForceCheckResponse {
 #[ts(export, export_to = "bindings/")]
 pub struct BruteForceStatus {
     pub consecutive_failures: u32,
+    /// 累计失败次数（仅审计，不参与闸门判定）
     pub total_failures: u32,
     #[ts(type = "number")]
     pub remaining_lock_secs: u64,
-    pub purge_required: bool,
 }
 
 /// 模块巡检结果中的未知模块

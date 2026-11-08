@@ -80,7 +80,7 @@ fn audit_rotate(
 /// 同目录与不存在性由 C 层最终裁决（本层不预判存在性，避免 TOCTOU 假象）；
 /// flags 仅允许显式移除 PCR 绑定位。
 #[tauri::command]
-pub async fn verthys_v4_rotate_begin(
+pub async fn verthys_rotate_begin(
     app: tauri::AppHandle,
     new_path: String,
     flags: Option<u32>,
@@ -115,7 +115,7 @@ pub async fn verthys_v4_rotate_begin(
 /// password 是**模块口令**，不是容器口令；recovery_code 可空，提供时
 /// C 层先做一次恢复码二次校验。
 #[tauri::command]
-pub async fn verthys_v4_rotate_unlock_module(
+pub async fn verthys_rotate_unlock_module(
     app: tauri::AppHandle,
     module_id: u32,
     password: String,
@@ -156,7 +156,7 @@ pub async fn verthys_v4_rotate_unlock_module(
 
 /// 全量复制并提供进度；成功后才能提交，失败只能中止。
 #[tauri::command]
-pub async fn verthys_v4_rotate_run(
+pub async fn verthys_rotate_run(
     app: tauri::AppHandle,
     on_progress: tauri::ipc::Channel<RotateProgress>,
 ) -> Result<VerthysResponse, String> {
@@ -173,7 +173,7 @@ pub async fn verthys_v4_rotate_run(
 
 /// 原子替换源库并推进回退锚点；成功后重建会话哨兵锁。
 #[tauri::command]
-pub async fn verthys_v4_rotate_commit(
+pub async fn verthys_rotate_commit(
     app: tauri::AppHandle,
     keep_old: Option<bool>,
 ) -> Result<VerthysResponse, String> {
@@ -198,7 +198,7 @@ pub async fn verthys_v4_rotate_commit(
 /// keyfile 路径只作为参数转发；文件内容由 C 层在 worker 进程内读取，
 /// 不进入主进程与 WebView。
 #[tauri::command]
-pub async fn verthys_v4_rotate_attach_keyfile(
+pub async fn verthys_rotate_attach_keyfile(
     app: tauri::AppHandle,
     keyfile_path: String,
 ) -> Result<VerthysResponse, String> {
@@ -221,7 +221,7 @@ pub async fn verthys_v4_rotate_attach_keyfile(
 
 /// 请求取消正在进行的轮换 Run（仅解锁模块与复制阶段可用）。
 #[tauri::command]
-pub async fn verthys_v4_rotate_cancel(
+pub async fn verthys_rotate_cancel(
     app: tauri::AppHandle,
 ) -> Result<VerthysResponse, String> {
     let resp = forward(vault_rotate::cancel());
@@ -231,7 +231,7 @@ pub async fn verthys_v4_rotate_cancel(
 
 /// 丢弃临时库并释放作业；成功后句柄仍指向原库。
 #[tauri::command]
-pub async fn verthys_v4_rotate_abort(
+pub async fn verthys_rotate_abort(
     app: tauri::AppHandle,
 ) -> Result<VerthysResponse, String> {
     let resp = forward(vault_rotate::abort(&app));

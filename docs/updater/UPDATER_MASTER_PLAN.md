@@ -252,7 +252,7 @@
 
 - `.sig` 覆盖最终 NSIS 字节；**任何在 `.sig` 生成后修改 NSIS 的动作都会使签名失效**。
 - 禁止“先 minisign 再 Authenticode NSIS”；如果只能手工后签 NSIS，必须删除旧 `.sig`，重新用 minisign 签最终字节，并重新生成清单。
-- Tauri `signCommand` 只负责它识别的二进制；DLL / worker 仍需 `beforeBundleCommand` 或构建脚本单独签名。
+- Tauri `signCommand` 只负责它识别的二进制；DLL / worker 仍需构建脚本在打包前单独签名。
 - 签完的 DLL / worker / 主程序不得再被替换或改写；构建脚本应在签名后计算哈希并锁定。
 - **哈希时序**：worker 副本哈希漂移门在签名前执行；Authenticode 后必须重新计算最终（已签名）DLL / worker / 主程序哈希，release manifest 以最终哈希为准；不得把签名前哈希当作发布哈希。
 
@@ -991,7 +991,7 @@ UI 不得使用“已自动回退”这类与 R0/R1 能力不符的表述；不�
 | P1-02 | HTTP Range 断点续传 | 本机夹具 + 服务端支持 Range；客户端续传前重新校验 | 断网恢复续传；缓存哈希不符重下 |
 | P1-03 | 单实例增强 | 用 `tauri-plugin-single-instance` 替换 P0 的命名互斥量 / 进程探测，统一行为 | 第二实例激活已有窗口；预检与启动行为一致 |
 | P1-04 | 密钥轮换 / 密钥集 | 新旧安装包公钥、清单公钥并行；key id 识别 | 旧客户端验新签名包通过；泄露演练可吊销 |
-| P1-05 | Authenticode 接入预演 | `beforeBundleCommand` 签 DLL / worker / 主程序；Tauri `signCommand` / 手工签 NSIS；确保 `.sig` 在 NSIS 签名后生成；时间戳 | 干净机器无未知发布者；`Get-AuthenticodeSignature` 全部 Valid；`.sig` 可验证 |
+| P1-05 | Authenticode 接入预演 | 构建脚本签 DLL / worker；Tauri `bundle.windows.signCommand` 在 bundle type 补丁后签主程序 / 卸载器 / 安装包 / NSIS 插件；确保 `.sig` 覆盖签名后的 NSIS 字节；时间戳 | 干净机器无未知发布者；`Get-AuthenticodeSignature` 全部 Valid；`.sig` 可验证 |
 | P1-06 | Release 工作流 | tag 触发、质量门、签名、清单、物料账本、归档 | 发布可复现；不覆盖已发布清单 |
 | P1-07 | E2E 自动化 | `tauri-driver` / WebDriver 或脚本化 UI 路径 | 核心用例可自动执行；人工仅做确认 |
 | P1-08 | 本机指标报告 | 从 JSONL 生成成功率 / 失败 TOP / 耗时 | 每次发布附报告 |

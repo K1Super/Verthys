@@ -115,20 +115,6 @@ export const TYPE_ACCOUNT_LEGACY = 0x03;
  */
 export const TYPE_VAULT_TYPES = 0x0A;
 
-/* === 证书模块（已停用：模块已下线，常量仅为历史兼容保留，不得改作它用） === */
-
-/**
- * 独立证书记录（每条证书一条 verthys 记录），用于存储 X.509 证书信息。
- * 已停用：原证书模块移除后不再新建该类型记录；值保留以免与历史记录冲突。
- */
-export const TYPE_CERT = 0x11;
-
-/** 旧版证书列表记录（仅用于迁移读取）。已停用：模块移除后不再读写。 */
-export const TYPE_CERT_LIST = 0x21;
-
-/** 更旧版单条证书记录（仅用于迁移读取）。已停用：模块移除后不再读写。 */
-export const TYPE_CERT_LEGACY = 0x06;
-
 /* === 文件保险箱模块 === */
 
 /**

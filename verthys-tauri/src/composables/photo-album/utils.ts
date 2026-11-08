@@ -28,12 +28,6 @@ export const guessMime = (name: string): string => {
   return map[ext] || "application/octet-stream";
 };
 
-/** 从文件名中提取不含扩展名的 basename */
-export const getBaseName = (name: string): string => {
-  const idx = name.lastIndexOf(".");
-  return idx > 0 ? name.substring(0, idx) : name;
-};
-
 /** 跨平台文件名非法字符（Windows 保留字符 + 路径分隔符 + 控制字符） */
 const INVALID_FILENAME_CHARS = /[<>:"/\\|?*\u0000-\u001f]/g;
 

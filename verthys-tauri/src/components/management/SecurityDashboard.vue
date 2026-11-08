@@ -349,7 +349,7 @@
             :key="p.key"
             class="def-item"
             :class="`def-item--${p.stateClass}`"
-            v-tip="p.reason ? `${p.desc} · ${p.reasonLabel}` : p.desc"
+            v-tip="p.reason ? `${p.desc}，${p.reasonLabel}` : p.desc"
           >
             <span class="def-dot" aria-hidden="true"></span>
             <span class="def-name">{{ p.label }}</span>

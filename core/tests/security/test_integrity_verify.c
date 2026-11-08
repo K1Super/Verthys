@@ -3,10 +3,10 @@
  *
  * 覆盖：
  *   - 开发/测试构建（.vsec 全零未配置）：integrity_verify_startup 空操作通过
- *   - integrity_init 幂等就绪（defense_closure HOOK 路径判据）
+ *   - 自身文件验签缓存回放与指纹失效重算
  *
  * Release 构建的 .vsec 注入由 build_core.release.ps1 完成并在生产链路
- * 验证（Verthys_Unlock 入口）；测试进程的 .vsec 恒为未配置态，验签必须
+ * 验证（Verthys_V4Unlock 入口）；测试进程的 .vsec 恒为未配置态，验签必须
  * 返回 0（跳过），此行为本身即是契约的一部分。
  */
 #include "verthys_test.h"
@@ -22,33 +22,6 @@ TEST(integrity_verify_unconfigured_passes)
 {
     /* 测试构建无基准注入 → 跳过校验返回 0（不得误报） */
     CHECK_EQ(integrity_verify_startup(), 0);
-    return 0;
-}
-
-TEST(integrity_init_idempotent)
-{
-    CHECK_EQ(integrity_init(), 0);
-    CHECK_EQ(integrity_init(), 0);  /* 幂等 */
-    return 0;
-}
-
-/* 三态可区分：HMAC 计算失败（测试注入）→ INCOMPLETE 而非 PASS，且计数递增。
- * 验证基础设施异常不再被静默当作"通过"，且与"哈希不匹配"可区分。 */
-TEST(integrity_anchor_incomplete_not_pass)
-{
-    long before = integrity_incomplete_count();
-
-    integrity_test_force_fail(1);
-    int r = integrity_check_anchor(ANCHOR_OPEN_SETTINGS);
-    integrity_test_force_fail(0);   /* 先复位注入，再统一断言 */
-
-    long after = integrity_incomplete_count();
-
-    CHECK_EQ(r, INTEGRITY_RESULT_INCOMPLETE);   /* 未完成，非通过 */
-    CHECK(after >= before + 1);                  /* 计数证据：异常被观测 */
-
-    /* 复位后同锚点（基准未配置）恢复为 PASS，且非 MISMATCH */
-    CHECK_EQ(integrity_check_anchor(ANCHOR_OPEN_SETTINGS), INTEGRITY_RESULT_PASS);
     return 0;
 }
 

@@ -11,7 +11,7 @@
  *   解密/完整性失败归因为 decrypt-failed（不与格式转换失败混淆）
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { effectScope, ref, shallowRef, type EffectScope } from "vue";
+import { effectScope, shallowRef, type EffectScope } from "vue";
 import { installBase64Polyfill } from "../../test-utils/base64-polyfill";
 
 // node 环境无 atob/btoa：base64 编解码（v2 容器块转换）依赖，测试时补齐
@@ -60,10 +60,10 @@ vi.mock("../../lib/crypto", () => ({
   decryptChunk: vi.fn(async () => ({ plaintext: new Uint8Array([1, 2, 3]), seq: 0, total: 1 })),
   computeFileHash: vi.fn(() => new Uint8Array(32).fill(1)),
   bytesToHex: vi.fn(() => "1".repeat(64)),
-  packVencV2: vi.fn(async () => new Uint8Array([9, 9])),
+  packVenc: vi.fn(async () => new Uint8Array([9, 9])),
   // 惰性逐张供给：逐条取规格并产出帧段（真实实现由 lib/crypto 契约测试锁定，
   // 本层用例只验证「建会话 → 逐段追加 → finalize / abort」的编排）
-  packVencV2StreamedLazy: vi.fn(
+  packVencStreamedLazy: vi.fn(
     async (
       count: number,
       _token: string,

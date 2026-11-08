@@ -10,6 +10,7 @@ Verthys_FindFirstLidByType
 Verthys_Flush
 Verthys_GetContainerInfo
 Verthys_GetDiagnostics
+Verthys_GetLibLockoutRemaining
 Verthys_GetPresetFeatureBits
 Verthys_GetRecord
 Verthys_GetSecurityPreset
@@ -22,7 +23,6 @@ Verthys_ListIdsByType
 Verthys_Lock
 Verthys_NotifyRuntimeGuards
 Verthys_NotifySandboxAttrs
-Verthys_RegisterUnlockProgressCallback
 Verthys_ScanClose
 Verthys_ScanFetch
 Verthys_ScanOpen
@@ -44,6 +44,7 @@ Verthys_V4ModuleDelete
 Verthys_V4ModuleDisable
 Verthys_V4ModuleEnable
 Verthys_V4ModuleLock
+Verthys_V4ModuleLockoutRemaining
 Verthys_V4ModuleResealDevice
 Verthys_V4ModuleRotatePassword
 Verthys_V4ModuleStatus

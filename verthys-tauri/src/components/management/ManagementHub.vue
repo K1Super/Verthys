@@ -25,7 +25,7 @@
       两单元定向爆发传播（能量扩散仪式）后进入管理界面
 
   交互引擎（与 useQuantumField 同规范）：
-    单帧响应 / 弹簧阻尼（先积分后消费）/ 优先级仲裁（hover P1 抑制视差）/
+    单帧响应 / 弹簧阻尼（先积分后消费）/ 优先级仲裁（hover 抑制视差）/
     高斯衰减梯度（σ 随容器缩放）/ 错峰入场编排（复合曲线）/
     尺寸自适应（ResizeObserver + 布局变量重算）/ 零 GC 池化 /
     帧率自适应（EMA 帧时间 → 尘埃密度动态增减）/ 页面隐藏暂停
@@ -315,7 +315,7 @@ let avgFrameMs = 16.7;
 /** 上一许可帧墙钟（首帧守卫 — 首帧增量为 0） */
 let lastWallClock = -1;
 
-/* G-8 统一帧门控（useFrameGate → 主渲染循环注册层）：帧率档位由
+/* 统一帧门控（useFrameGate → 主渲染循环注册层）：帧率档位由
    全局空闲状态机唯一决定（active 60 / settling 30 / idle 5 /
    deep-idle 1 fps），帧步进由主循环供给（钳制 50ms），墙钟增量
    供相位与进度；本引擎不再维护私有空闲判定、visibilitychange
@@ -564,7 +564,7 @@ function frame(frameStep: number, wallClock: number): void {
     panel.style.setProperty('--row-delta', `${rowDelta.toFixed(1)}px`);
   }
 
-  /* ---- 视差仲裁（hover P1 → 背景视差衰减 50%） ---- */
+  /* ---- 视差仲裁（hover → 背景视差衰减 50%） ---- */
   const suppress = hoverN > 0 ? 0.5 : 1;
   const introPar = introTime < INTRO_TOTAL ? phase(introTime, 0.12, 0.84) : 1;
   const px = parallaxX.v * suppress * introPar;
@@ -736,7 +736,7 @@ function frame(frameStep: number, wallClock: number): void {
   }
 }
 
-/* G-8：rAF 调度/空闲门控/失焦暂停全部由 useFrameGate 承担，
+/* rAF 调度/空闲门控/失焦暂停全部由 useFrameGate 承担，
    档位与恢复时机与全局各引擎一致。 */
 const { start: startGate, stop: stopGate } = useFrameGate(idleLevel, frame);
 

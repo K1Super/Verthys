@@ -14,19 +14,15 @@
 #>
 Set-StrictMode -Version Latest
 
-$script:LegacyV3 = $false
-
 function Initialize-VerthysNative {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)][string]$DllPath,
-        [ValidateSet('Product', 'Legacy')][string]$Mode = 'Product'
+        [Parameter(Mandatory = $true)][string]$DllPath
     )
 
     if (-not (Test-Path -LiteralPath $DllPath -PathType Leaf)) {
         throw "核心 DLL 不存在: $DllPath"
     }
-    $script:LegacyV3 = ($Mode -eq 'Legacy')
     $resolved = (Resolve-Path -LiteralPath $DllPath).Path
 
     if ('VerthysAttackNative' -as [type]) {
@@ -67,7 +63,7 @@ public static class VerthysAttackNative
     [DllImport("kernel32")]
     private static extern bool FreeLibrary(IntPtr module);
 
-    /// 查询当前加载 DLL 是否导出指定符号（用于验证 v3 入口已从产品 DLL 移除）。
+    /// 查询当前加载 DLL 是否导出指定符号（用于验证旧代入口已从产品 DLL 移除）。
     public static bool HasExport(string name)
     {
         IntPtr module = LoadLibraryW(Dll);
@@ -84,22 +80,6 @@ public static class VerthysAttackNative
 
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
     public static extern int Verthys_Lock(IntPtr handle);
-
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-    private static extern int Verthys_CreateWithPreset(
-        IntPtr handle,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
-        [MarshalAs(UnmanagedType.LPArray)] byte[] password,
-        UIntPtr password_len,
-        int preset);
-
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-    private static extern int Verthys_Unlock(
-        IntPtr handle,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
-        [MarshalAs(UnmanagedType.LPArray)] byte[] password,
-        UIntPtr password_len,
-        uint flags);
 
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
     private static extern int Verthys_V4Create(
@@ -129,24 +109,12 @@ public static class VerthysAttackNative
         ulong id,
         out Record record);
 
-    public static int Create(IntPtr handle, string path, byte[] password, int preset)
-    {
-        return Verthys_CreateWithPreset(handle, path, password,
-            new UIntPtr((uint)password.Length), preset);
-    }
-
     public static int CreateV4(IntPtr handle, string path, byte[] password,
         byte[] recoveryText)
     {
         return Verthys_V4Create(handle, path, password,
             new UIntPtr((uint)password.Length), recoveryText,
             new UIntPtr((uint)recoveryText.Length));
-    }
-
-    public static int Unlock(IntPtr handle, string path, byte[] password)
-    {
-        return Verthys_Unlock(handle, path, password,
-            new UIntPtr((uint)password.Length), 0u);
     }
 
     public static int UnlockV4(IntPtr handle, string path, byte[] password)
@@ -265,13 +233,9 @@ function New-TestVault {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][byte[]]$Password,
-        [int]$Preset = 0,
         [hashtable[]]$Records = @()
     )
 
-    if ($script:LegacyV3) {
-        throw "Legacy 模式不得生成 v4 主样本；Baseline 必须使用 -Vault 历史样本"
-    }
     $handle = Open-VerthysHandle
     try {
         # 恢复码缓冲 >= VTY_RECOVERY_TEXT_BUF；攻击回归不使用恢复通道。
@@ -305,7 +269,7 @@ function New-TestVault {
     $magic = [System.IO.File]::ReadAllBytes($Path)[0..3]
     $magicText = [System.Text.Encoding]::ASCII.GetString($magic)
     if ($magicText -ne 'VRTY') {
-        throw "攻击主样本不是 v4 容器: magic=$magicText"
+        throw "攻击主样本不是 容器: magic=$magicText"
     }
 }
 
@@ -319,11 +283,7 @@ function Add-TestRecordToVault {
 
     $handle = Open-VerthysHandle
     try {
-        $rc = if ($script:LegacyV3) {
-            [VerthysAttackNative]::Unlock($handle, $Path, $Password)
-        } else {
-            [VerthysAttackNative]::UnlockV4($handle, $Path, $Password)
-        }
+        $rc = [VerthysAttackNative]::UnlockV4($handle, $Path, $Password)
         if ($rc -ne 0) {
             return $rc
         }
@@ -344,9 +304,6 @@ function Test-VaultUnlock {
 
     $handle = Open-VerthysHandle
     try {
-        if ($script:LegacyV3) {
-            return [VerthysAttackNative]::Unlock($handle, $Path, $Password)
-        }
         return [VerthysAttackNative]::UnlockV4($handle, $Path, $Password)
     }
     finally {

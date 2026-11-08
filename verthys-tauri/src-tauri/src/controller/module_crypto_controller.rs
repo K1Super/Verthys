@@ -4,7 +4,7 @@
  * 并把公开参数透传前端。分片密钥（MDEK）只存在于 C 层句柄内；本层
  * 请求/响应不含任何原始密钥。
  *
- * 模块解锁/锁定在 v4 语义下是 C 层 M1 状态机操作：
+ * 模块解锁/锁定在 语义下是 C 层 M1 状态机操作：
  *   - 模块未启用 → MDEK 在 Keyring，内容路径可用，解锁为幂等空操作；
  *   - 模块已启用 → 必须把模块口令交给 C 层解锁 user 槽；
  *   - 锁定 → 清空 C 层模块会话缓存（不涉及口令）。
@@ -45,7 +45,6 @@ const KEY_OP_TIMEOUT: Duration = Duration::from_secs(30);
 /// 内容加解密超时：单块上限 1MiB，30 秒覆盖极端机器抖动
 const CRYPT_OP_TIMEOUT: Duration = Duration::from_secs(30);
 
-const MODULE_WHITELIST: [&str; 2] = ["photo", "file"];
 const CRYPT_KINDS: [&str; 8] = [
     "meta",
     "chunk",
@@ -57,7 +56,7 @@ const CRYPT_KINDS: [&str; 8] = [
     "v2_check",
 ];
 
-/// 内容模块 → v4 模块索引（0=photo，2=fileverthys）。
+/// 内容模块 → 模块索引（0=photo，2=fileverthys）。
 /// 内容层只承载照片与文件保险箱两类数据；accounts 的记录由 C 层记录层
 /// 直接管理，不经过内容加解密命令。
 fn content_module_index(module: &str) -> Result<u32, String> {
@@ -68,7 +67,7 @@ fn content_module_index(module: &str) -> Result<u32, String> {
     }
 }
 
-/// 会话模块（解锁/锁定）→ v4 模块索引：0=photo，1=accounts，2=fileverthys。
+/// 会话模块（解锁/锁定）→ 模块索引：0=photo，1=accounts，2=fileverthys。
 fn module_index(module: &str) -> Result<u32, String> {
     match module {
         "photo" => Ok(0),
@@ -125,7 +124,10 @@ fn forward(
 ) -> Result<VerthysResponse, String> {
     let line = Zeroizing::new(req.to_string());
     let resp_json = Zeroizing::new(state.send_with_timeout(line.as_str(), timeout)?);
-    serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))
+    let mut resp: VerthysResponse =
+        serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
+    resp.adopt_worker_error_code();
+    Ok(resp)
 }
 
 /// 解锁模块：把模块口令一次性交付 C 层，解封该模块 MDEK 的 user 槽。

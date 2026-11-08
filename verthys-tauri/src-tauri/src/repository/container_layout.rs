@@ -9,17 +9,17 @@
  *   附属数据目录 = 容器路径末组件追加 ".d"
  *   目录内文件（短名，身份由目录名承载）：
  *     state.json / preset.json / import.wal / import.wal.snapshot /
- *     import.chunks.json / idx_cache / container.lock
+ *     import.chunks.json / container.lock
  *
  * 跨语言一致性约束：
- *   idx_cache 与 container.lock 由 C 层生成，其路径构造必须与本模块命中同一文件；
+ *   container.lock 由 C 层生成，其路径构造必须与本模块命中同一文件；
  *   修改任一命名常量必须同步 C 层实现与其契约测试，否则温缓存与锁诊断会落到不同位置。
  *   分隔符纪律：派生路径只允许在容器路径之后追加，不改写原字符——Win32 对
  *   `\\?\` / `\\.\` 前缀路径不做正斜杠归一，改写输入会导致容器附属文件不可达。
  *
  * 线程与幂等：
- *   本模块全部为无状态纯函数；仅 ensure_sidecar_dir / migrate_legacy_file /
- *   cleanup_container_sidecars 触达文件系统，三者均按幂等设计，可安全重入。
+ *   本模块全部为无状态纯函数；仅 ensure_sidecar_dir / cleanup_container_sidecars
+ *   触达文件系统，两者均按幂等设计，可安全重入。
  *
  * 依赖边界：仅依赖 util::path（仓储层不得反向引用上层模块）。
  */
@@ -43,8 +43,6 @@ pub const FILE_WAL_SNAPSHOT: &str = "import.wal.snapshot";
 pub const FILE_CHUNK_LEDGER: &str = "import.chunks.json";
 /// 目录内文件名：块归属台账追加日志（O(1) 变更落盘，会话结束压缩为快照）
 pub const FILE_CHUNK_LEDGER_JOURNAL: &str = "import.chunks.journal";
-/// 目录内文件名：温启动缓存（C 层读写，命名必须与 C 层一致）
-pub const FILE_IDX_CACHE: &str = "idx_cache";
 /// 目录内文件名：锁持有者诊断旁路（C 层读写，命名必须与 C 层一致）
 pub const FILE_CONTAINER_LOCK: &str = "container.lock";
 
@@ -56,43 +54,16 @@ const KNOWN_FILE_NAMES: &[&str] = &[
     FILE_WAL_SNAPSHOT,
     FILE_CHUNK_LEDGER,
     FILE_CHUNK_LEDGER_JOURNAL,
-    FILE_IDX_CACHE,
     FILE_CONTAINER_LOCK,
 ];
 
 /// 派生路径相对容器路径的最长增量（目录后缀 + 分隔符 + 最长文件名）
 const MAX_DERIVED_EXTRA: usize = 2 + 1 + 21;
 
-/// 旧布局后缀：容器状态（仅用于只读回退与一次性迁移）
-pub const LEGACY_STATE_SUFFIX: &str = ".state";
-/// 旧布局后缀：安全预设
-pub const LEGACY_PRESET_SUFFIX: &str = ".preset.json";
-/// 旧布局后缀：导入 WAL
-pub const LEGACY_WAL_SUFFIX: &str = ".import.wal";
-/// 旧布局后缀：WAL 去重快照
-pub const LEGACY_WAL_SNAPSHOT_SUFFIX: &str = ".import.wal.snapshot";
-/// 旧布局后缀：块归属台账
-pub const LEGACY_CHUNK_LEDGER_SUFFIX: &str = ".import.chunks.json";
-/// 旧布局后缀：温启动缓存
-pub const LEGACY_IDX_CACHE_SUFFIX: &str = ".idx_cache";
-/// 旧布局后缀：锁诊断旁路
-pub const LEGACY_CONTAINER_LOCK_SUFFIX: &str = ".lock";
-
-/// 全部旧布局后缀（清理与迁移的遍历清单）
-const LEGACY_SUFFIXES: &[&str] = &[
-    LEGACY_STATE_SUFFIX,
-    LEGACY_PRESET_SUFFIX,
-    LEGACY_WAL_SUFFIX,
-    LEGACY_WAL_SNAPSHOT_SUFFIX,
-    LEGACY_CHUNK_LEDGER_SUFFIX,
-    LEGACY_IDX_CACHE_SUFFIX,
-    LEGACY_CONTAINER_LOCK_SUFFIX,
-];
-
 /// 有界清理结果（观测用，不参与控制流判定）
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CleanupReport {
-    /// 已删除的附属文件数量（含新布局与旧布局）
+    /// 已删除的附属文件数量
     pub removed_files: u32,
     /// 附属目录是否被回收（目录清空后才回收）
     pub removed_dir: bool,
@@ -161,58 +132,13 @@ pub fn chunk_ledger_journal_file_for(verthys_path: &str) -> PathBuf {
     sidecar_file_for(verthys_path, FILE_CHUNK_LEDGER_JOURNAL)
 }
 
-/// 温启动缓存（附属目录内 idx_cache；构造规则必须与 C 层命中同一文件）
-pub fn idx_cache_file_for(verthys_path: &str) -> PathBuf {
-    sidecar_file_for(verthys_path, FILE_IDX_CACHE)
-}
-
 /// 锁诊断旁路（附属目录内 container.lock；构造规则必须与 C 层命中同一文件）
 pub fn lock_file_for(verthys_path: &str) -> PathBuf {
     sidecar_file_for(verthys_path, FILE_CONTAINER_LOCK)
 }
 
-/// 旧布局文件路径构造：`<容器路径><后缀>`（纯追加，保持旧版行为）
-fn legacy_file_for(verthys_path: &str, suffix: &str) -> PathBuf {
-    PathBuf::from(format!("{}{}", verthys_path, suffix))
-}
-
-/// 旧布局状态文件：`<容器>.state`
-pub fn legacy_state_file_for(verthys_path: &str) -> PathBuf {
-    legacy_file_for(verthys_path, LEGACY_STATE_SUFFIX)
-}
-
-/// 旧布局预设文件：`<容器>.preset.json`
-pub fn legacy_preset_file_for(verthys_path: &str) -> PathBuf {
-    legacy_file_for(verthys_path, LEGACY_PRESET_SUFFIX)
-}
-
-/// 旧布局 WAL：`<容器>.import.wal`
-pub fn legacy_wal_file_for(verthys_path: &str) -> PathBuf {
-    legacy_file_for(verthys_path, LEGACY_WAL_SUFFIX)
-}
-
-/// 旧布局 WAL 快照：`<容器>.import.wal.snapshot`
-pub fn legacy_wal_snapshot_file_for(verthys_path: &str) -> PathBuf {
-    legacy_file_for(verthys_path, LEGACY_WAL_SNAPSHOT_SUFFIX)
-}
-
-/// 旧布局台账：`<容器>.import.chunks.json`
-pub fn legacy_chunk_ledger_file_for(verthys_path: &str) -> PathBuf {
-    legacy_file_for(verthys_path, LEGACY_CHUNK_LEDGER_SUFFIX)
-}
-
-/// 旧布局温缓存：`<容器>.idx_cache`
-pub fn legacy_idx_cache_file_for(verthys_path: &str) -> PathBuf {
-    legacy_file_for(verthys_path, LEGACY_IDX_CACHE_SUFFIX)
-}
-
-/// 旧布局锁诊断旁路：`<容器>.lock`
-pub fn legacy_lock_file_for(verthys_path: &str) -> PathBuf {
-    legacy_file_for(verthys_path, LEGACY_CONTAINER_LOCK_SUFFIX)
-}
-
 /* ------------------------------------------------------------------ *
- * 目录保障 / 迁移 / 有界清理                                          *
+ * 目录保障 / 有界清理                                                  *
  * ------------------------------------------------------------------ */
 
 /// 确保附属数据目录存在。
@@ -250,40 +176,6 @@ pub fn ensure_sidecar_dir(verthys_path: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// 将旧布局文件原子迁移到新布局。
-///
-/// 幂等语义：
-///   - 旧文件不存在 → Ok（无需迁移）；
-///   - 目标已存在 → 旧文件为被取代的遗留副本，best-effort 删除后 Ok；
-///   - 其余情况：确保目录存在后 rename；失败返回 Err 且不改动旧文件
-///     （调用方保持读取旧位置，下次访问自动重试）。
-///
-/// 并发：同目录 rename 为原子操作；并发调用下的失败方按"已迁移"语义重读目标路径。
-pub fn migrate_legacy_file(legacy: &Path, primary: &Path) -> Result<(), String> {
-    if !legacy.exists() {
-        return Ok(());
-    }
-    if let Some(parent) = primary.parent() {
-        // 相对路径（父组件为空）无需建目录：目标与旧文件同处当前目录
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("创建附属数据目录失败 [{}]: {}", parent.display(), e))?;
-        }
-    }
-    if primary.exists() {
-        let _ = std::fs::remove_file(legacy);
-        return Ok(());
-    }
-    std::fs::rename(legacy, primary).map_err(|e| {
-        format!(
-            "附属文件迁移失败 [{}] → [{}]: {}",
-            legacy.display(),
-            primary.display(),
-            e
-        )
-    })
-}
-
 /// 目录为空时回收目录本体；非空或其他异常返回 false。
 pub fn remove_dir_if_empty(dir: &Path) -> bool {
     std::fs::remove_dir(dir).is_ok()
@@ -309,8 +201,7 @@ fn is_known_sidecar_entry(name: &str) -> bool {
 ///
 /// 删除范围严格限定：
 ///   1. 附属目录内：已知附属文件及其 `.tmp` 临时文件；
-///   2. 容器同级：已知旧布局文件及其 `.tmp` 临时文件；
-///   3. 清理后目录若为空则回收目录本体。
+///   2. 清理后目录若为空则回收目录本体。
 ///
 /// 安全边界：目录内存在未知文件时只删已知文件、保留目录本体，绝不递归删除
 /// 未知内容（防误删用户数据）。全部删除为 best-effort，失败不中断流程。
@@ -333,35 +224,6 @@ pub fn cleanup_container_sidecars(verthys_path: &str) -> CleanupReport {
         }
         if !report.kept_unknown_files && remove_dir_if_empty(&dir) {
             report.removed_dir = true;
-        }
-    }
-
-    // 旧布局残留：仅删除"容器文件名 + 已知后缀"派生的文件与其 .tmp 临时文件，
-    // 其余同名前缀文件一律不动（避免误删用户自建备份）。
-    let container_path = Path::new(verthys_path);
-    if let Some(container_name) = container_path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-    {
-        let container_name = format!("{}.", container_name);
-        if let Some(parent) = container_path.parent() {
-            if let Ok(entries) = std::fs::read_dir(parent) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if !name.starts_with(&container_name) {
-                        continue;
-                    }
-                    let rest = &name[container_name.len()..];
-                    let matched = LEGACY_SUFFIXES.iter().any(|suffix| {
-                        rest == &suffix[1..]
-                            || (rest.starts_with(&format!("{}.", &suffix[1..]))
-                                && rest.ends_with(".tmp"))
-                    });
-                    if matched && std::fs::remove_file(entry.path()).is_ok() {
-                        report.removed_files += 1;
-                    }
-                }
-            }
         }
     }
 
@@ -408,43 +270,9 @@ mod tests {
             "D:/data/Vault.verthys.d/import.chunks.journal"
         );
         assert_eq!(
-            norm(&idx_cache_file_for(p)),
-            "D:/data/Vault.verthys.d/idx_cache"
-        );
-        assert_eq!(
             norm(&lock_file_for(p)),
             "D:/data/Vault.verthys.d/container.lock"
         );
-    }
-
-    #[test]
-    fn test_legacy_mapping() {
-        let p = "D:/data/Vault.verthys";
-        assert_eq!(
-            norm(&legacy_state_file_for(p)),
-            "D:/data/Vault.verthys.state"
-        );
-        assert_eq!(
-            norm(&legacy_preset_file_for(p)),
-            "D:/data/Vault.verthys.preset.json"
-        );
-        assert_eq!(
-            norm(&legacy_wal_file_for(p)),
-            "D:/data/Vault.verthys.import.wal"
-        );
-        assert_eq!(
-            norm(&legacy_wal_snapshot_file_for(p)),
-            "D:/data/Vault.verthys.import.wal.snapshot"
-        );
-        assert_eq!(
-            norm(&legacy_chunk_ledger_file_for(p)),
-            "D:/data/Vault.verthys.import.chunks.json"
-        );
-        assert_eq!(
-            norm(&legacy_idx_cache_file_for(p)),
-            "D:/data/Vault.verthys.idx_cache"
-        );
-        assert_eq!(norm(&legacy_lock_file_for(p)), "D:/data/Vault.verthys.lock");
     }
 
     #[test]
@@ -551,42 +379,6 @@ mod tests {
     }
 
     #[test]
-    fn test_migrate_legacy_missing_source_is_ok() {
-        let dir = tempdir().unwrap();
-        let p = container_in(dir.path(), "Vault.verthys");
-        let legacy = legacy_state_file_for(&p);
-        let primary = state_file_for(&p);
-        migrate_legacy_file(&legacy, &primary).expect("源缺失应视为无需迁移");
-        assert!(!primary.exists());
-    }
-
-    #[test]
-    fn test_migrate_legacy_moves_file_and_creates_dir() {
-        let dir = tempdir().unwrap();
-        let p = container_in(dir.path(), "Vault.verthys");
-        let legacy = legacy_state_file_for(&p);
-        let primary = state_file_for(&p);
-        std::fs::write(&legacy, b"payload").unwrap();
-        migrate_legacy_file(&legacy, &primary).expect("迁移应成功");
-        assert!(!legacy.exists(), "旧文件必须被搬走");
-        assert_eq!(std::fs::read(&primary).unwrap(), b"payload");
-    }
-
-    #[test]
-    fn test_migrate_legacy_superseded_copy_removed() {
-        let dir = tempdir().unwrap();
-        let p = container_in(dir.path(), "Vault.verthys");
-        let legacy = legacy_state_file_for(&p);
-        let primary = state_file_for(&p);
-        ensure_sidecar_dir(&p).unwrap();
-        std::fs::write(&primary, b"new").unwrap();
-        std::fs::write(&legacy, b"old").unwrap();
-        migrate_legacy_file(&legacy, &primary).expect("已迁移场景应成功");
-        assert!(!legacy.exists(), "被取代的旧副本必须回收");
-        assert_eq!(std::fs::read(&primary).unwrap(), b"new");
-    }
-
-    #[test]
     fn test_cleanup_removes_known_and_keeps_unknown() {
         let dir = tempdir().unwrap();
         let p = container_in(dir.path(), "Vault.verthys");
@@ -595,10 +387,8 @@ mod tests {
         std::fs::write(sidecar.join(FILE_STATE), b"s").unwrap();
         std::fs::write(sidecar.join("state.json.tmp"), b"t").unwrap();
         std::fs::write(sidecar.join("preset.json.123.0.tmp"), b"t").unwrap();
-        std::fs::write(sidecar.join(FILE_IDX_CACHE), b"c").unwrap();
+        std::fs::write(sidecar.join(FILE_CONTAINER_LOCK), b"pid").unwrap();
         std::fs::write(sidecar.join("user_note.txt"), b"keep").unwrap();
-        let legacy = legacy_preset_file_for(&p);
-        std::fs::write(&legacy, b"lp").unwrap();
 
         let report = cleanup_container_sidecars(&p);
 
@@ -606,8 +396,7 @@ mod tests {
         assert!(sidecar.is_dir(), "含未知文件时目录本体必须保留");
         assert!(sidecar.join("user_note.txt").exists());
         assert!(!sidecar.join(FILE_STATE).exists());
-        assert!(!sidecar.join(FILE_IDX_CACHE).exists());
-        assert!(!legacy.exists(), "旧布局附属文件必须一并回收");
+        assert!(!sidecar.join(FILE_CONTAINER_LOCK).exists());
         assert!(report.removed_files >= 4);
     }
 

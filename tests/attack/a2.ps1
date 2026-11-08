@@ -1,28 +1,30 @@
-# tests/attack/a2.ps1 — A2 任意进程加载 DLL 调用 Init
+﻿# tests/attack/a2.ps1 — 任意进程加载 DLL 调用 Init
 #
-# 判定矩阵（见 08 补测方案 §2.3）：
-#   A2-1 未签名宿主                      → Init 拒绝
-#   A2-2 其他发布者签名的宿主            → Init 拒绝（指纹不匹配）
-#   A2-3 已签名但被改 1 字节的宿主        → Init 拒绝（签名失效）
-#   A2-4 受信发布者签名的宿主 + 签名 DLL  → Init 成功（正向对照）
-#   A2-5 签名宿主 + 未签名 DLL            → Init 拒绝（自身签名）
+# 判定矩阵：
+#   未签名宿主                      → Init 拒绝
+#   其他发布者签名的宿主            → Init 拒绝（指纹不匹配）
+#   已签名但被改 1 字节的宿主        → Init 拒绝（签名失效）
+#   受信发布者签名的宿主 + 签名 DLL  → Init 成功（正向对照）
+#   签名宿主 + 未签名 DLL            → Init 拒绝（自身签名）
 #
 # 使用独立构建目录 build/a2（VERTHYS_REQUIRE_CALLER_SIG=ON），
 # 不影响主构建目录的普通回归；证书为测试专用自签证书。
-# 输出契约：RESULT A2 PASS|FAIL <detail>
+# 输出契约：单行 RESULT PASS|FAIL <detail>
 param(
     [string]$OutJson
 )
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$cmakeCandidates = @(
-    'D:/IDE/Visual Studio 2026/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe',
-    (Join-Path ${env:ProgramFiles} 'Microsoft Visual Studio/2026/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe')
-)
-$cmake = $null
-foreach ($c in $cmakeCandidates) { if (Test-Path -LiteralPath $c) { $cmake = $c; break } }
-if (-not $cmake) { throw '找不到 cmake' }
+# 工具链与生成器统一由环境加载器解析：本机显式注入与 CI 注入环境两条路径
+# 共用同一探测逻辑，禁止在测试脚本里写死 VS 版本或安装路径。
+. (Join-Path $repoRoot 'scripts/lib/env.load.ps1')
+. (Join-Path $repoRoot 'scripts/lib/cmake.utils.ps1')
+$cmake = $VERTHYS_CMAKE_EXE
+$generator = $VERTHYS_VS_GENERATOR
+if (-not (Test-Path -LiteralPath $cmake -PathType Leaf)) {
+    throw "找不到 cmake（env.load 解析结果: $cmake）"
+}
 
 $expectedReject = 'INIT result=0x00000016'
 $workDir = Join-Path $env:TEMP ('verthys_a2_' + [guid]::NewGuid().ToString('N'))
@@ -64,21 +66,42 @@ try {
     if ($publisherLine.Count -ne 1) { throw '测试证书创建失败' }
     $publisherSha = $publisherLine[0].Split(' ')[3]
 
-    $gen = 'Visual Studio 18 2026'
-    $cache = Join-Path $repoRoot 'build/CMakeCache.txt'
-    if (Test-Path -LiteralPath $cache) {
-        $m = Select-String -Path $cache -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)$' | Select-Object -First 1
-        if ($m) { $gen = $m.Matches[0].Groups[1].Value }
-    }
     $a2Build = Join-Path $repoRoot 'build/a2'
-    & $cmake -S $repoRoot -B $a2Build -G $gen -A x64 `
+    # 生成器变更后缓存不可复用：不同生成器的产物布局与配置语义不同，
+    # 沿用旧缓存会让产物路径解析落到不存在的目录。
+    $cacheFile = Join-Path $a2Build 'CMakeCache.txt'
+    if (Test-Path -LiteralPath $cacheFile) {
+        $cachedGenerator = Select-String -LiteralPath $cacheFile -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)$' |
+            Select-Object -First 1
+        if ($cachedGenerator -and $cachedGenerator.Matches[0].Groups[1].Value -ne $generator) {
+            Remove-Item -LiteralPath $a2Build -Recurse -Force
+        } else {
+            Clear-StaleCMakeCache -BuildDir $a2Build -SourceDir $repoRoot
+        }
+    }
+    & $cmake -S $repoRoot -B $a2Build -G $generator -A x64 `
         '-DVERTHYS_REQUIRE_CALLER_SIG=ON' "-DVERTHYS_PUBLISHER_SHA256=$publisherSha" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'A2 构建配置失败' }
     & $cmake --build $a2Build --config Release --target verthys_core vty_signed_host | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'A2 构建失败' }
 
-    $dll = Join-Path $a2Build 'core/Release/verthys.dll'
-    $hostExe = Join-Path $a2Build 'core/tests/Release/vty_signed_host.exe'
+    # 产物路径以本轮构建契约与固定候选为准，不再假设单一生成器布局。
+    $contractPath = Join-Path $a2Build 'core/verthys.artifacts.json'
+    if (-not (Test-Path -LiteralPath $contractPath)) {
+        throw "A2 产物契约缺失: $contractPath"
+    }
+    $contract = Get-Content -LiteralPath $contractPath -Raw | ConvertFrom-Json
+    if ($null -eq $contract.dll -or [string]::IsNullOrEmpty($contract.dll)) {
+        throw "A2 产物契约缺少 dll 字段: $contractPath"
+    }
+    $dll = Join-Path $repoRoot ($contract.dll -replace '/', '\')
+    $hostCandidates = @(
+        (Join-Path $a2Build 'core/tests/Release/vty_signed_host.exe'),
+        (Join-Path $a2Build 'core/tests/vty_signed_host.exe')
+    )
+    $hostExe = $hostCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+    if (-not $hostExe) { throw 'A2 宿主产物缺失: vty_signed_host.exe' }
     foreach ($f in @($dll, $hostExe)) {
         if (-not (Test-Path -LiteralPath $f)) { throw "A2 产物缺失: $f" }
     }
@@ -100,23 +123,23 @@ try {
         New-Item -ItemType Directory -Path $dirs[$name] -Force | Out-Null
     }
 
-    # A2-1：未签名宿主
+    # 未签名宿主
     Copy-Item -LiteralPath $unsignedHost -Destination (Join-Path $dirs['a1'] 'vty_signed_host.exe')
     Copy-Item -LiteralPath $dll -Destination (Join-Path $dirs['a1'] 'verthys.dll')
-    # A2-3：已签名宿主改 1 字节（DOS stub，仍可加载，但 Authenticode 摘要失效）
+    # 已签名宿主改 1 字节（DOS stub，仍可加载，但 Authenticode 摘要失效）
     $tamper = Join-Path $dirs['a3'] 'vty_signed_host.exe'
     Copy-Item -LiteralPath $hostExe -Destination $tamper
     $bytes = [IO.File]::ReadAllBytes($tamper)
     $bytes[0x40] = $bytes[0x40] -bxor 0x01
     [IO.File]::WriteAllBytes($tamper, $bytes)
     Copy-Item -LiteralPath $dll -Destination (Join-Path $dirs['a3'] 'verthys.dll')
-    # A2-4：签名宿主 + 签名 DLL
+    # 签名宿主 + 签名 DLL
     Copy-Item -LiteralPath $hostExe -Destination (Join-Path $dirs['a4'] 'vty_signed_host.exe')
     Copy-Item -LiteralPath $dll -Destination (Join-Path $dirs['a4'] 'verthys.dll')
-    # A2-5：签名宿主 + 未签名 DLL
+    # 签名宿主 + 未签名 DLL
     Copy-Item -LiteralPath $hostExe -Destination (Join-Path $dirs['a5'] 'vty_signed_host.exe')
     Copy-Item -LiteralPath $unsignedDll -Destination (Join-Path $dirs['a5'] 'verthys.dll')
-    # A2-2：用 Other-Publisher 对未签名宿主签名（签名有效但指纹不同）
+    # 用 Other-Publisher 对未签名宿主签名（签名有效但指纹不同）
     Copy-Item -LiteralPath $unsignedHost -Destination (Join-Path $dirs['a2'] 'vty_signed_host.exe')
     & $signScript -Files @((Join-Path $dirs['a2'] 'vty_signed_host.exe')) -Subject 'CN=Other-Publisher' -NoBackup | Out-Null
     Copy-Item -LiteralPath $dll -Destination (Join-Path $dirs['a2'] 'verthys.dll')

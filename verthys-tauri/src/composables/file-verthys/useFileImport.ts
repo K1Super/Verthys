@@ -30,7 +30,7 @@ import {
 import { FILE_HASH_LEN } from "../../constants/crypto_const";
 import { TYPE_FILEVERTHYS_CHUNK, TYPE_FILEVERTHYS_META } from "../../constants/record_types";
 import { bytesToBase64, IMPORT_SESSION_BUSY_CODE } from "../../lib/verthys";
-import type { FileKdfV2 } from "../../lib/module_crypto";
+import type { FileKdf } from "../../lib/module_crypto";
 import type {
   AddChunkBatchResult,
   AddRecordsBatchResult,
@@ -52,7 +52,7 @@ const FILE_IMPORT_DISK_HEADROOM = 1.05;
 const FILE_HASH_FORMAT_VER = 1;
 
 /** 无密码文件的指纹域字节（固定值，不随内容变化） */
-export const FILE_FINGERPRINT_PLAIN = 0x00;
+const FILE_FINGERPRINT_PLAIN = 0x00;
 
 /**
  * 有密码文件的指纹域字节（固定值）。
@@ -62,7 +62,7 @@ export const FILE_FINGERPRINT_PLAIN = 0x00;
  * （会让续传重试重复导入已提交文件）。同内容不同口令因此共用一键，
  * 换口令导入须先删除原条目（删除会释放去重键）。
  */
-export const FILE_FINGERPRINT_ENCRYPTED = 0x01;
+const FILE_FINGERPRINT_ENCRYPTED = 0x01;
 
 /**
  * 文件去重键的尾缀（域标识 + 指纹域）。
@@ -148,7 +148,7 @@ export interface ImportedFileEntry {
   /** 非内容续传条目键（删除时释放 WAL 幂等锁） */
   entryKey: string;
   /** 文件级密钥派生参数（加密条目必携；明文条目缺省） */
-  kdf?: FileKdfV2;
+  kdf?: FileKdf;
   /** 密码校验块（加密条目必携；口令判定的唯一权威值） */
   passwordCheck?: string;
 }
@@ -195,11 +195,11 @@ export interface FileImportResult {
 /** 文件级密钥套件（加密导入的唯一加密路径：密钥派生与 AEAD 在 worker 内） */
 export interface FileKeySuite {
   /** 生成文件级 KDF 公开参数（随机盐 + 迭代次数；不含密钥） */
-  createFileKdf: () => Promise<FileKdfV2>;
+  createFileKdf: () => Promise<FileKdf>;
   /** 加密单块（返回密文原始字节 `iv‖ct+tag`；口令仅用于 worker 内派生） */
-  encryptChunk: (plain: Uint8Array, kdf: FileKdfV2, password: string) => Promise<Uint8Array>;
+  encryptChunk: (plain: Uint8Array, kdf: FileKdf, password: string) => Promise<Uint8Array>;
   /** 生成密码校验块（固定明文 AEAD，口令判定的唯一权威值） */
-  buildPasswordCheck: (kdf: FileKdfV2, password: string) => Promise<string>;
+  buildPasswordCheck: (kdf: FileKdf, password: string) => Promise<string>;
 }
 
 /** 导入依赖集合（生产实现见模块装配处；测试以桩替换） */
@@ -498,7 +498,7 @@ async function importOneFile(
   }
 
   // 文件级 KDF 公开参数：每个加密文件生成一次，块加密与元数据写入共用
-  let kdf: FileKdfV2 | null = null;
+  let kdf: FileKdf | null = null;
   if (encrypted && password) {
     try {
       kdf = await deps.v2.createFileKdf();
@@ -592,7 +592,7 @@ async function readChunkExact(
 async function readAndUpload(
   file: ImportSourceFile,
   snapshot: FileSnapshot,
-  kdf: FileKdfV2 | null,
+  kdf: FileKdf | null,
   password: string,
   encrypted: boolean,
   perBatch: number,
@@ -712,7 +712,7 @@ async function writeMeta(
   snapshot: FileSnapshot,
   totalChunks: number,
   encrypted: boolean,
-  kdf: FileKdfV2 | null,
+  kdf: FileKdf | null,
   password: string,
   uploaded: UploadPassResult,
   entryKey: string,

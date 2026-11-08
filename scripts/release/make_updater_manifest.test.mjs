@@ -65,10 +65,13 @@ test("核心版本宏解析支持十六进制与十进制后缀", () => {
     0x000e,
   );
   assert.equal(
-    parseDefineU32("#define VERTHYS_V3_VERSION                3u", "VERTHYS_V3_VERSION"),
-    3,
+    parseDefineU32(
+      "#define VERTHYS_CONTAINER_FORMAT_VERSION 4u",
+      "VERTHYS_CONTAINER_FORMAT_VERSION",
+    ),
+    4,
   );
-  assert.equal(parseDefineU32("#define OTHER 1", "VERTHYS_V3_VERSION"), null);
+  assert.equal(parseDefineU32("#define OTHER 1", "VERTHYS_CONTAINER_FORMAT_VERSION"), null);
 });
 
 test("核心版本可从仓库头文件读取", () => {
@@ -83,15 +86,15 @@ test("ABI 文本固定为四位十六进制", () => {
 });
 
 test("兼容区间必须覆盖当前核心", () => {
-  const core = { api: 0x000e, container: 3 };
-  assert.equal(compatibilityRangeError("0x000E", "0x000E", 3, 3, core), null);
-  assert.equal(compatibilityRangeError("0x000B", "0x000E", 3, 3, core), null);
+  const core = { api: 0x000e, container: 4 };
+  assert.equal(compatibilityRangeError("0x000E", "0x000E", 4, 4, core), null);
+  assert.equal(compatibilityRangeError("0x000B", "0x000E", 4, 4, core), null);
   assert.equal(
-    compatibilityRangeError("0x000B", "0x000B", 3, 3, core),
+    compatibilityRangeError("0x000B", "0x000B", 4, 4, core),
     "兼容 ABI 区间不包含当前核心 ABI",
   );
   assert.equal(
-    compatibilityRangeError("0x000E", "0x000E", 2, 2, core),
+    compatibilityRangeError("0x000E", "0x000E", 3, 3, core),
     "容器兼容区间不包含当前容器版本",
   );
 });

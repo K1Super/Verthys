@@ -1,5 +1,5 @@
 /*
- * keyfile_controller.rs — v4 keyfile 因子命令（D3，前端 → 主进程 → worker → C）
+ * keyfile_controller.rs — keyfile 因子命令（前端 → 主进程 → worker → C）
  *
  * 职责边界：
  *   - 只做参数边界（绝对路径、空值）与解锁态检查；

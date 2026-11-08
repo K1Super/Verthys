@@ -8,7 +8,7 @@
  * - 先落盘后入列：persistVerthys 失败时列表与模块缓存均不写入
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { effectScope, ref, shallowRef, type EffectScope } from "vue";
+import { effectScope, ref, shallowRef } from "vue";
 import { installBase64Polyfill } from "../../test-utils/base64-polyfill";
 
 // node 环境无 atob/btoa：预览块 base64 转换依赖，测试时补齐

@@ -3,11 +3,11 @@
  *
  *
  * 职责：
- *   为口令进入 FFI 的服务端命令（verthys_unlock / verthys_verify_global_key）
- *   提供强制暴力熔断接入点，由服务端权威计数：前端不再承担失败计数
- *   职责，仅查询展示锁定态。
+ *   为口令进入 FFI 的服务端命令（verthys_unlock / verthys_verify_global_key
+ *   / 密钥派生）提供强制暴力熔断接入点，由服务端权威计数：前端不再承担
+ *   失败计数职责，仅查询展示锁定态。
  *
- *   - gate_check：入口闸门。锁定/清空状态下，口令不进入任何
+ *   - gate_check：入口闸门。锁定/尝试过频状态下，口令不进入任何
  *     业务逻辑（不触 FFI、不触文件锁）。
  *   - record_auth_failure：认证域失败计数 + 持久化 + 审计。
  *   - record_auth_success：成功重置连续失败计数 + 持久化 + 审计。
@@ -15,14 +15,13 @@
  * 语义约定：
  *   - 计数、DPAPI 持久化与审计统一由本桥接层执行（同一守卫、同一持久化层）；
  *     记录命令已下线，前端不再直接触发失败/成功计数。
- *   - 桥接层不做二次决策：record_failure 的 RateLimited/Frozen 语义
- *     由守卫内部消化，仅透传审计。
+ *   - 每次认证失败都计数；认证成功无条件重置；累计计数仅审计。
  */
 
 use tauri::{AppHandle, Manager};
 
-use crate::security::brute_force::{AttemptResult, BruteForceCheck};
-use crate::service::unlock_gate::{self, UnlockGate};
+use crate::security::brute_force::{AttemptDomain, AttemptResult, BruteForceCheck};
+use crate::service::unlock_gate::{self, GateDomain, UnlockGate};
 use crate::util::audit_log::{AuditEventType, AuditResult};
 
 use super::audit::write_security_audit;
@@ -47,8 +46,17 @@ fn state_of(app: &AppHandle) -> tauri::State<'_, SecurityState> {
     app.state::<SecurityState>()
 }
 
-fn adapter_gate_check(app: &AppHandle) -> UnlockGate {
-    gate_check(app, &state_of(app))
+/// 服务层口令域 → 守卫内部尝试域
+fn attempt_domain(domain: GateDomain) -> AttemptDomain {
+    match domain {
+        GateDomain::Unlock => AttemptDomain::Unlock,
+        GateDomain::GlobalKey => AttemptDomain::GlobalKey,
+        GateDomain::Derive => AttemptDomain::Derive,
+    }
+}
+
+fn adapter_gate_check(app: &AppHandle, domain: GateDomain) -> UnlockGate {
+    gate_check(app, &state_of(app), domain)
 }
 
 fn adapter_record_failure(app: &AppHandle) {
@@ -60,7 +68,13 @@ fn adapter_record_success(app: &AppHandle) {
 }
 
 /// 口令类命令入口熔断检查（在口令进入任何业务逻辑之前调用）。
-pub(crate) fn gate_check(app: &AppHandle, state: &SecurityState) -> UnlockGate {
+///
+/// 锁定时直接拒绝；同一口令域在最小尝试间隔内重复调用按过频拒绝。
+pub(crate) fn gate_check(
+    app: &AppHandle,
+    state: &SecurityState,
+    domain: GateDomain,
+) -> UnlockGate {
     ensure_brute_force_loaded(app, state);
 
     let guard = match lock_brute_force_or_recover(state) {
@@ -71,16 +85,18 @@ pub(crate) fn gate_check(app: &AppHandle, state: &SecurityState) -> UnlockGate {
         }
     };
 
-    match guard.check() {
+    match guard.begin_attempt(attempt_domain(domain)) {
         BruteForceCheck::Allow => UnlockGate::Allowed,
         BruteForceCheck::Locked(secs) => UnlockGate::Locked(secs),
-        BruteForceCheck::PurgeRequired => UnlockGate::PurgeRequired,
+        BruteForceCheck::RateLimited { retry_after_ms } => UnlockGate::RateLimited {
+            retry_after_secs: ((retry_after_ms + 999) / 1000).max(1),
+        },
     }
 }
 
 /// 记录一次服务端观察到的认证域失败（口令错误等）。
 ///
-/// 审计事件类型随触发结果变化：达到锁定/清空阈值时记为
+/// 审计事件类型随触发结果变化：达到锁定阈值时记为
 /// BruteForceLockout，普通失败记为 SecurityCommand。
 pub(crate) fn record_auth_failure(app: &AppHandle, state: &SecurityState) {
     ensure_brute_force_loaded(app, state);
@@ -102,15 +118,6 @@ pub(crate) fn record_auth_failure(app: &AppHandle, state: &SecurityState) {
             AuditResult::Failure,
             Some(format!("BRUTE_FORCE_LOCKOUT: 界面锁定 {} 秒", secs)),
         ),
-        AttemptResult::FailurePurgeRequired => (
-            AuditResult::Failure,
-            Some("BRUTE_FORCE_PURGE: 触发索引清空 + 完整性校验".into()),
-        ),
-        AttemptResult::Success => (AuditResult::Success, None),
-        AttemptResult::RateLimited => (
-            AuditResult::Denied,
-            Some("RATE_LIMITED: unlock 失败计数速率超限".into()),
-        ),
         AttemptResult::Frozen(secs) => (
             AuditResult::Denied,
             Some(format!("FROZEN: unlock 计数接口冻结 (剩余 {} 秒)", secs)),
@@ -118,9 +125,7 @@ pub(crate) fn record_auth_failure(app: &AppHandle, state: &SecurityState) {
     };
 
     let event_type = match &result {
-        AttemptResult::FailureLocked(_) | AttemptResult::FailurePurgeRequired => {
-            AuditEventType::BruteForceLockout
-        }
+        AttemptResult::FailureLocked(_) => AuditEventType::BruteForceLockout,
         _ => AuditEventType::SecurityCommand,
     };
     write_security_audit(app, state, event_type, audit_result, None, audit_detail);
@@ -164,28 +169,25 @@ mod tests {
     /// 契约（具体阈值以 BruteForceGuard 内部配置为准）。
     #[test]
     fn 连续失败后锁定_成功后重置() {
-        // 禁用速率限制（紧密循环下限流会吞掉计数），速率限制语义
-        // 由 security::brute_force::tests::test_rate_limiting 独立覆盖。
+        // 禁用尝试节流（紧密循环下限流会拒绝调用），尝试门禁语义
+        // 由 security::brute_force::tests::test_begin_attempt_rate_limits_per_domain 独立覆盖。
         let guard = BruteForceGuard::with_config(BruteForceConfig {
             rate_limit_ms: 0,
             ..BruteForceConfig::default()
         });
 
-        // 连续失败直至触发锁定或清空（达到任一熔断态即停）
+        // 连续失败直至触发锁定（阈值由配置决定）
         let mut locked = false;
         for _ in 0..64 {
             let r = guard.record_failure();
-            if matches!(
-                r,
-                AttemptResult::FailureLocked(_) | AttemptResult::FailurePurgeRequired
-            ) {
+            if matches!(r, AttemptResult::FailureLocked(_)) {
                 locked = true;
                 break;
             }
         }
         assert!(
             locked,
-            "连续失败 64 次后必须进入锁定或清空熔断态，实际 check={:?}",
+            "连续失败 64 次后必须进入锁定态，实际 check={:?}",
             guard.check()
         );
         assert!(

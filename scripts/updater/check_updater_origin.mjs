@@ -9,6 +9,7 @@
  *   node scripts/updater/check_updater_origin.mjs [--url http://127.0.0.1:8765]
  */
 const DEFAULT_BASE = "http://127.0.0.1:8765";
+const TIMEOUT_MS = 20000;
 
 function fail(message) {
   console.error(`[FAIL] ${message}`);
@@ -46,7 +47,10 @@ async function main() {
   const base = new URL(args.url ?? DEFAULT_BASE);
   const manifestUrl = new URL("latest.json", base);
 
-  const manifestResponse = await fetch(manifestUrl, { cache: "no-store" });
+  const manifestResponse = await fetch(manifestUrl, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
   if (!manifestResponse.ok) fail(`清单不可访问: ${manifestResponse.status}`);
   const manifestCache = header(manifestResponse, "cache-control");
   if (!manifestCache.includes("no-store")) {
@@ -57,7 +61,10 @@ async function main() {
   if (!platform?.url) fail("清单缺少 windows-x86_64 下载地址");
   const installerUrl = new URL(platform.url, base);
 
-  const head = await fetch(installerUrl, { method: "HEAD" });
+  const head = await fetch(installerUrl, {
+    method: "HEAD",
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
   if (!head.ok) fail(`安装包不可访问: ${head.status}`);
   const installerCache = header(head, "cache-control");
   if (!installerCache.includes("immutable") || !installerCache.includes("max-age=31536000")) {
@@ -73,11 +80,13 @@ async function main() {
 
   const cached = await fetch(installerUrl, {
     headers: { "If-None-Match": etag },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (cached.status !== 304) fail(`条件请求应返回 304，当前为: ${cached.status}`);
 
   const ranged = await fetch(installerUrl, {
     headers: { Range: "bytes=0-99" },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (ranged.status !== 206) fail(`范围请求应返回 206，当前为: ${ranged.status}`);
   const contentRange = header(ranged, "content-range");
@@ -89,6 +98,7 @@ async function main() {
 
   const unsatisfiable = await fetch(installerUrl, {
     headers: { Range: `bytes=${size}-` },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (unsatisfiable.status !== 416) {
     fail(`越界范围应返回 416，当前为: ${unsatisfiable.status}`);

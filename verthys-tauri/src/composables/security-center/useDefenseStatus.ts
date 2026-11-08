@@ -43,13 +43,13 @@ import { isTauriEnvironment } from '../../utils/tauri_env';
 
 /** 攻击路径展示定义（下标即 C 层枚举值，禁止重排） */
 const DEFENSE_PATH_DEFS: { key: string; label: string; desc: string }[] = [
-  { key: 'suspend_bypass', label: '挂起绕过', desc: '管理员调试挂起绕过防护' },
-  { key: 'mem_dump', label: '内存转储', desc: '内存 Dump / 冷启动取证防护' },
-  { key: 'hibernation', label: '休眠取证', desc: '休眠文件取证残留防护' },
-  { key: 'iat_hook', label: '接口挂钩', desc: 'IAT / Inline Hook 检测' },
-  { key: 'dll_hijack', label: '动态劫持', desc: 'DLL 劫持 / 反射注入防护' },
-  { key: 'process_read', label: '进程读取', desc: '进程打开 / 读取内存防护' },
-  { key: 'cross_device', label: '跨端设备', desc: '跨设备迁移解密防护' },
+  { key: 'suspend_bypass', label: '挂起绕过', desc: '防范管理员调试挂起绕过' },
+  { key: 'mem_dump', label: '内存转储', desc: '防范内存转储与冷启动取证' },
+  { key: 'hibernation', label: '休眠取证', desc: '防范休眠文件取证残留' },
+  { key: 'iat_hook', label: '接口挂钩', desc: '检测 IAT 与内联 Hook 篡改' },
+  { key: 'dll_hijack', label: '动态劫持', desc: '防范 DLL 劫持与反射注入' },
+  { key: 'process_read', label: '进程读取', desc: '防范进程越权打开与内存读取' },
+  { key: 'cross_device', label: '跨端设备', desc: '防范跨设备迁移解密' },
 ];
 
 /** 防御状态视图映射（值域与 VerthysDefenseState 镜像） */
@@ -65,19 +65,19 @@ const DEFENSE_STATE_VIEW: Record<number, { label: string; cls: string }> = {
 const DEFENSE_REASON_LABEL: Record<number, string> = {
   0: '无附加原因',
   1: '当前无驻留密钥',
-  2: '密钥驻留用户态（隔离堆与转储巡检已加固）',
+  2: '密钥驻留用户态，隔离堆与转储巡检已加固',
   3: '系统休眠已启用',
   4: '休眠状态无法证明',
-  5: '心跳看门狗已加固（全线程挂起 3 秒内处置）',
-  6: '挂起看门狗未启用（可修复）',
+  5: '心跳看门狗已加固，全线程挂起 3 秒内处置',
+  6: '挂起看门狗未启用，可修复',
   7: 'Hook 基线扫描干净',
-  8: 'Hook 扫描不可用/覆盖不全',
+  8: 'Hook 扫描不可用，覆盖不全',
   9: '检测到 Hook 特征',
-  10: 'mitigation 已由 OS 回读确认',
-  11: '部分 mitigation 缺失',
-  12: '无法回读确认 mitigation',
+  10: '缓解措施已由系统回读确认',
+  11: '部分缓解措施缺失',
+  12: '无法回读确认缓解措施',
   13: '双层 Job 隔离有效',
-  14: '设备根/PCR 绑定成立',
+  14: '设备根与 PCR 绑定成立',
   15: '无可校验的绑定事实',
   16: '关键防御模块缺失',
   17: '当前预设关闭该防护',

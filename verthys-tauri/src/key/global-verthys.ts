@@ -20,7 +20,7 @@ import {
   verthysScanSummaryOpen, verthysScanSummaryNext, verthysScanSummaryClose,
   bytesToBase64, readUserFile,
   setDeviceBinding, checkDeviceBinding, getDeviceFingerprint,
-  securityBruteCheck,
+  securityBruteCheck, getWorkerInitFailure,
   securitySessionStart, securitySessionStop,
   type PreflightResult, type InitStatusResult,
   type BruteForceCheckResponse,
@@ -37,15 +37,15 @@ import {
   persistVerthys, clearModuleKeyCache, clearRecordScanCache, resetFlushChain,
   clearSummaryCache, clearFullRecordCache,
   findLidByTypeEarlyStop,
-  enqueueFlush, flushVerthysNow,
-  ensureSummaryScan, ensureRecordScan,
+  flushVerthysNow,
+  ensureSummaryScan,
 } from "../cache/composition/verthys-cache";
 // 后台任务 API 直连 core 层（单向化：不再转发 start/stop）
 import { startBackgroundTasks, stopBackgroundTasks } from "../core/background-tasks";
 import {
   ok, err, errFromUnknown,
   VerthysErrorCode, type VerthysResult,
-  wrapAsVerthysError,
+  wrapAsVerthysError, gateErrorResult,
 } from "../lib/verthys_error";
 import { resetSessionTimer, clearSessionTimer, checkBruteForceGate, awaitLockAllIfInProgress, securityHardeningFailedRef } from "../session/security-session";
 import type { VerifyGlobalKeyResult } from "../types/key_manager";
@@ -54,6 +54,24 @@ import { migrateRecordTypes, isAccountRecordB64 } from "./type-migration";
 import { createLogger } from "../utils/logger";
 
 const log = createLogger("global-verthys");
+
+/**
+ * 启动系统会话守卫（锁屏/挂起/显示器关闭锁定）。
+ *
+ * 任何成功建立会话（新建或解锁）都必须调用；不能只在全局密钥验证
+ * 路径调用，否则无全局密钥的库在解锁后不会接线下发挂起守卫位，
+ * 防御面板会如实显示「挂起绕过 · 降级（挂起看门狗未启用）」。
+ * 守卫启动失败时置位 hardening 降级标志并继续，不阻断解锁。
+ */
+async function startSessionGuard(): Promise<void> {
+  try {
+    await withTimeout(securitySessionStart(), 5000, "securitySessionStart");
+    securityHardeningFailedRef.value = false;
+  } catch (e) {
+    securityHardeningFailedRef.value = true;
+    log.warn("启动会话守卫失败/超时（非致命）", e);
+  }
+}
 
 /* ------------------------------------------------------------------ *
  * 内部工具                                                            *
@@ -120,28 +138,6 @@ async function findGlobalKeyRecord(): Promise<{ id: number; recordB64: string } 
  * findGlobalKeyRecord 保留，仅供 initCreate / changeGlobalKey /        *
  * verifyGlobalKey 缓存未命中回退使用（单函数调用，非多步 IPC 链路）。  *
  * ------------------------------------------------------------------ */
-
-/**
- * 异步冲刷（不阻塞调用方）
- *
- * 用于非关键路径的延迟持久化：initGlobalKey 调用此方法，
- * 不等待落盘完成，立即返回。落盘失败通过日志记录；
- * 数据已在 worker 内存中，应用退出时 waitForFlush 兜底。
- *
- * @param immediate true=立即同步冲刷（flushVerthysNow），false=异步入队
- * @returns VerthysResult<void>
- */
-async function flushVerthysAsync(immediate: boolean): Promise<VerthysResult<void>> {
-  if (immediate) {
-    return flushVerthysNow();
-  }
-  // 非阻塞：入队 persistVerthys，立即返回 ok
-  // persistVerthys 内部通过 flushChain 串行执行，防抖合并
-  void persistVerthys().catch((e) => {
-    log.warn("异步 flush 失败（数据已在内存，后续 waitForFlush 兜底）", e);
-  });
-  return ok(undefined);
-}
 
 /**
  * 重置密钥管理器全部状态（异步原子化版本）
@@ -225,44 +221,6 @@ export async function checkInitStatus(): Promise<InitStatusResult> {
 }
 
 /**
- * 解锁 Channel 进度提示词精准映射（单一数据源）
- *
- * 后端 C DLL（core/src/api/verthys_v2_lifecycle.c verthys_emit_unlock_progress）
- * emit 的 p.message 不可控（可能英文/冗长），基于后端原始 p.percent 精准
- * 映射为精简高级文案，消除前后端提示词不一致问题。
- *
- * 后端 C 层 percent 节点：
- *   5%  - 读取超级块
- *   10% - Argon2 派生开始（含心跳至 45%）
- *   50% - Argon2 完成 / 索引映射
- *   60% - B+树解密开始
- *   85% - B+树完成
- *   95% - 摘要完成
- *   100% - Merkle 校验完成
- *
- * @param rawPercent 后端 C 层 emit 的原始 percent（0~100）
- * @returns 精简高级文案
- */
-const UNLOCK_CHANNEL_TEXT_MAP: ReadonlyArray<readonly [number, string]> = [
-  [0, '读取加密头'],
-  [5, '读取加密头'],
-  [10, '派生密钥'],
-  [50, '映射索引'],
-  [60, '解密数据'],
-  [85, '重建索引'],
-  [95, '生成摘要'],
-  [100, '校验完成'],
-];
-
-function pickUnlockChannelText(rawPercent: number): string {
-  let text = UNLOCK_CHANNEL_TEXT_MAP[0][1];
-  for (const [threshold, t] of UNLOCK_CHANNEL_TEXT_MAP) {
-    if (rawPercent >= threshold) text = t;
-  }
-  return text;
-}
-
-/**
  * 首次创建加密库（严格遵循「先落地、后状态」原则）
  *
  * 返回 VerthysResult<void>，携带结构化错误码
@@ -329,11 +287,14 @@ export async function initCreate(
     //      确保 worker 销毁、缓存清空、状态重置全部落地
     //   2. ensureCleanWorkerState：兜底清理 — 即使 lockAll 超时未完成，
     //      若 workerHasBeenUsed=true 且预启动缓存残留，强制销毁旧 worker
+    /* 收敛旧会话：等待在途锁定真正结束并清理预启动缓存，
+     *  这是用户可见的真实阶段，必须先于路径检查呈现 */
+    emit(0, 1, "清理上一会话");
     await awaitLockAllIfInProgress();
     await ensureCleanWorkerState();
 
     // 1. 路径预检
-    emit(1, 2, "校验路径");
+    emit(1, 2, "检查存储路径");
     let preflight: PreflightResult;
     if (preflightResult) {
       preflight = preflightResult;
@@ -356,7 +317,7 @@ export async function initCreate(
     }
 
     // 2. ensureWorkerReady
-    emit(1, 5, "启动安全核心");
+    emit(2, 5, "启动安全核心");
     log.info("步骤 2/4：启动 worker 子进程");
     let ok1: boolean;
     try {
@@ -367,11 +328,19 @@ export async function initCreate(
     }
     if (!ok1) {
       await resetKeyManagerState();
+      /* N2：安全状态目录预检失败给出专用码与修复指引；其余启动失败保持原语义。 */
+      const failure = getWorkerInitFailure();
+      if (failure?.code === VerthysErrorCode.E_SECURITY_STATE) {
+        return err(
+          VerthysErrorCode.E_SECURITY_STATE,
+          failure.message || "无法加固安全状态目录：请将用户数据放在本地 NTFS 目录，或联系管理员完成目录预检",
+        );
+      }
       return err(VerthysErrorCode.E_WORKER_INIT_FAILED, "安全核心启动失败");
     }
 
-    // 3. verthys_create（v4 容器 + 一次性恢复码）
-    emit(2, 10, "创建加密库");
+    // 3. verthys_create（容器 + 一次性恢复码）
+    emit(3, 10, "创建加密库");
     log.info("步骤 3/4：创建加密库并写盘");
     let recoveryCode: string;
     try {
@@ -402,7 +371,7 @@ export async function initCreate(
     }
 
     // 4. 检查全局密钥记录 + 更新状态
-    emit(3, 70, "检查密钥记录");
+    emit(4, 70, "检查全局密钥记录");
     log.info("步骤 4/4：检查全局密钥记录");
     setCurrentVerthysPath(verthysPath);
     const existing = await findGlobalKeyRecord();
@@ -429,21 +398,23 @@ export async function initCreate(
     // 虽然新 verthys 通常无模块密钥，但确保状态一致性仍需调用。
     //
     // 修复：始终填充摘要缓存 + 加载模块状态（即使为空也写入默认值）。
-    emit(4, 80, "加载摘要");
+    emit(5, 80, "建立摘要索引");
     try {
       await ensureSummaryScan();
     } catch (e) {
       log.warn("initCreate: 摘要扫描失败（非致命）", e);
     }
-    emit(5, 90, "加载密钥配置");
+    emit(6, 90, "加载模块密钥");
     try {
       await loadModuleKeyStatus();
     } catch (e) {
       log.warn("initCreate: 加载模块密钥状态失败（非致命）", e);
     }
 
-    emit(6, 100, "创建完成");
+    emit(7, 99, "启动会话守卫");
     keyState.verthysReady.value = true;
+    await startSessionGuard();
+    emit(8, 100, "创建完成");
     startBackgroundTasks().catch(() => { /* 后台任务失败不影响创建 */ });
     log.info("创建成功");
     return ok(recoveryCode);
@@ -476,15 +447,14 @@ export async function initUnlock(
   keyfilePath?: string,
 ): Promise<VerthysResult<void>> {
   // 修复6：全流程进度反馈 — 前端各阶段直接调用 onProgress 推送进度
-  // 不依赖 Tauri Channel（Channel 仅在 verthysUnlock 阶段由后端推送），
-  // 前端阶段（ensureWorkerReady / findGlobalKeyRecord）通过直接调用 onProgress 实现
+  // verthys_unlock 为单次 IPC（内部无子阶段回调），阶段之间的连续推进
+  // 由前端感知层负责平滑；本层只保证阶段节点与文案真实准确。
   const t0 = Date.now();
-  // 修复：进度条单调递增，防止从 100% 回退到 90%
+  // 修复：进度条单调递增，防止阶段进度回退
   //
   // 原缺陷：
-  //   后端 C DLL 解锁阶段通过 Tauri Channel emit 100%（MERKLE_DONE）作为最终进度。
-  //   verthysUnlock 返回后，前端 emit(7, 90, "正在加载密钥配置…") 会将进度条
-  //   从 100% 回退到 90%，造成视觉上的"倒退"。
+  //   解锁阶段先推送接近完成的进度，verthysUnlock 返回后前端
+  //   emit(5, 88, "建立摘要索引") 会将进度条从高位回退到 88%，造成视觉"倒退"。
   //
   // 修复：
   //   记录已推送的最大百分比，后续 emit 的百分比不得低于已推送值。
@@ -511,7 +481,7 @@ export async function initUnlock(
     //   doLockAll 同步置 verthysReady=false → UI 立即显示解锁视图 →
     //   用户重选 verthys → doUnlock → initUnlock → ensureWorkerReady
     //   复用旧 workerReadyPromise → verthys_unlock IPC 发往正在被 lockAll
-    //   销毁的 worker → 永久卡死在"正在解锁加密库…"。
+    //   销毁的 worker → 永久卡死在"解锁加密库"。
     //
     // 双重防护：
     //   1. awaitLockAllIfInProgress：等待正在进行的 lockAll 真正完成
@@ -519,11 +489,14 @@ export async function initUnlock(
     //      确保 worker 销毁、缓存清空、状态重置全部落地
     //   2. ensureCleanWorkerState：兜底清理 — 即使 lockAll 超时未完成，
     //      若 workerHasBeenUsed=true 且预启动缓存残留，强制销毁旧 worker
+    /* 收敛旧会话：等待在途锁定真正结束并清理预启动缓存，
+     *  这是用户可见的真实阶段，必须先于路径检查呈现 */
+    emit(0, 1, "清理上一会话");
     await awaitLockAllIfInProgress();
     await ensureCleanWorkerState();
 
     // 1. 路径预检
-    emit(1, 2, "校验路径");
+    emit(1, 2, "检查存储路径");
     let preflight: PreflightResult;
     if (preflightResult) {
       preflight = preflightResult;
@@ -545,7 +518,7 @@ export async function initUnlock(
     }
 
     // 2. ensureWorkerReady
-    emit(1, 5, "启动安全核心");
+    emit(2, 5, "启动安全核心");
     let ok1: boolean;
     try {
       ok1 = await withTimeout(ensureWorkerReady(), INIT_TIMEOUT_MS, "worker_init");
@@ -555,6 +528,14 @@ export async function initUnlock(
     }
     if (!ok1) {
       await resetKeyManagerState();
+      /* N2：安全状态目录预检失败给出专用码与修复指引；其余启动失败保持原语义。 */
+      const failure = getWorkerInitFailure();
+      if (failure?.code === VerthysErrorCode.E_SECURITY_STATE) {
+        return err(
+          VerthysErrorCode.E_SECURITY_STATE,
+          failure.message || "无法加固安全状态目录：请将用户数据放在本地 NTFS 目录，或联系管理员完成目录预检",
+        );
+      }
       return err(VerthysErrorCode.E_WORKER_INIT_FAILED, "安全核心启动失败");
     }
 
@@ -563,74 +544,45 @@ export async function initUnlock(
     // 服务端在 unlock 入口已强制熔断（fail-closed）；此处仅提前拦截，
     // 避免锁定态进入 Argon2id 长运算流程浪费用户等待。Tauri 环境下查询
     // 失败按 fail-closed 拒绝（无法确认门禁状态不得进入认证流程）。
+    emit(3, 6, "检查安全门禁");
     const unlockGate = await checkBruteForceGate();
     if (!unlockGate.allowed) {
       await resetKeyManagerState();
       if (unlockGate.reason === "locked") {
-        return err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, `尝试次数过多，已锁定 ${Math.ceil(unlockGate.remainingSecs ?? 0)} 秒，请稍后再试`);
+        const secs = Math.max(1, Math.ceil(unlockGate.remainingSecs ?? 0));
+        return err(
+          VerthysErrorCode.E_RATE_LIMITED,
+          `尝试次数过多，已锁定 ${secs} 秒，请稍后再试`,
+          undefined,
+          secs,
+        );
       }
-      if (unlockGate.reason === "gate_unavailable") {
-        return err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, "无法确认安全门禁状态，请稍后重试");
-      }
-      return err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, "失败次数已达上限，需完成安全清理与完整性校验后重试");
+      return err(VerthysErrorCode.E_CNG_UNAVAILABLE, "无法确认安全门禁状态，请稍后重试");
     }
 
     // 3. verthys_unlock — 修复：返回完整 VerthysResponse
     //
-    // 后端各阶段进度通过 Channel 流式推送，经 emit 闸门单调递增转发前端
-    // 后端会推送 10%~100% 的进度（v1 和 v2 路径均已覆盖），映射到 8%~85% 子区间
+    // 解锁进度由本层 emit 闸门直接推送（单调递增）
     // 分级超时熔断（软 15s 提示 / 硬 35s 降级 / 连续 3 次熔断锁定）
     //   - 软超时 15s：Argon2id 派生耗时过长，前端提示「密钥计算较慢，请耐心等待」继续执行
     //   - 硬超时 35s：整体解锁未完成，触发降级校验，仅保障核心数据可读
     //   - 连续 3 次硬超时自动锁定容器 30 分钟（withGradedTimeout 内部处理）
     //
-    // 修复：worker 在 Verthys_Unlock 成功后进程内一次性完成
+    // 修复：worker 在 Verthys_V4Unlock 成功后进程内一次性完成
     //   Verthys_FindFirstLidByType(0x10) + Verthys_GetRecord(lid)，
     //   结果内联到响应 has_global_key/global_key_id/global_key_record 三字段。
     //   前端直接消费，零解锁后 IPC 往返，消除 probe 链竞态与 v1 假阴性死锁。
-    emit(2, 8, "解锁加密库");
+    emit(4, 8, "解锁加密库");
     let unlockResp;
     try {
       unlockResp = await withGradedTimeout(
-        // 修复：后端 Channel 进度统一经 emit 单调递增闸门
-        //
-        // 原缺陷（Issue 1：进度条 100%→90% 回退）：
-        //   此前直接透传 onProgress 给 verthysUnlock。后端 C DLL 在 MERKLE_DONE 阶段
-        //   通过 Tauri Channel emit 100% 作为解锁最终进度，该 100% 直达 UI，
-        //   完全绕过 emit 的 lastEmittedPercent 单调闸门（闸门只在 emit 调用时更新）。
-        //   verthysUnlock 返回后 emit(7,90,"正在加载密钥配置…") 因 lastEmittedPercent
-        //   仍为 0 → 推送 90% → 进度条从 100% 回退到 90%，用户看到"进度倒退"。
-        //
-        // 修复（双重）：
-        //   1. 后端进度统一经 emit 闸门：lastEmittedPercent 据后端进度实时抬升，
-        //      后续 emit(7,90) 被 Math.max(90, lastEmittedPercent) 钳制，永不回退
-        //   2. 后端 0~100 映射到 8%~85% 区间，预留 86%~100% 给前端后处理阶段
-        //      （摘要扫描 90% / 解锁完成 100%）。既消除回退，又避免后端提前触达
-        //      100% 后前端长时间"卡在 100% 假完成"的错觉
-        //
-        // 提示词精准映射：C DLL emit 的 p.message 不可控（可能英文/冗长），
-        //   基于后端原始 p.percent 精准映射为精简高级文案（单一数据源）
-        //   后端 C 层 percent 节点（core/src/api/verthys_v2_lifecycle.c）：
-        //     5%  - 读取超级块
-        //     10% - Argon2 派生开始（含心跳至 45%）
-        //     50% - Argon2 完成 / 索引映射
-        //     60% - B+树解密开始
-        //     85% - B+树完成
-        //     95% - 摘要完成
-        //     100% - Merkle 校验完成
-        //
-        // 安全边界：verthys.ts 的 completed 标志已在 Promise resolve 后阻断 Channel
-        //   残留消息，本包装仅负责进度数值的单调化与区间映射，不影响后端逻辑。
-        verthysUnlock(verthysPath, (p) => {
-          const mapped = Math.min(85, 8 + Math.floor(p.percent * 0.77));
-          emit(p.stage, mapped, pickUnlockChannelText(p.percent));
-        }, usbRebindConfirmed, recoveryCode, keyfilePath),
+        verthysUnlock(verthysPath, usbRebindConfirmed, recoveryCode, keyfilePath),
         UNLOCK_SOFT_TIMEOUT_MS,
         UNLOCK_HARD_TIMEOUT_MS,
         "verthys_unlock",
         () => {
           /* 软超时回调：Argon2id 派生耗时较长，提示用户耐心等待，不中断解锁 */
-          emit(2, 30, "密钥运算中");
+          emit(4, 30, "派生密钥并解锁");
           log.warn("verthys_unlock 软超时（15s）：Argon2id 派生耗时较长，已提示用户耐心等待");
         },
       );
@@ -648,6 +600,14 @@ export async function initUnlock(
       return errFromUnknown(e, VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED);
     }
     if (!unlockResp.ok) {
+      /* 锁定/限流/门禁错误：展示后端动态信息（已锁定 X 秒），不得折叠为
+       * 固定“打开加密库失败”。 */
+      const gateResult = gateErrorResult(
+        unlockResp.error_code ?? unlockResp.error,
+        unlockResp.retry_after_secs,
+        unlockResp.error,
+      );
+      if (gateResult) return gateResult;
       const raw = unlockResp.error ?? "";
       /* keyfile 缺失/无效不属于认证失败：保留 worker 进程与会话状态，
        * 直接引导用户重选 keyfile 后重试（不得折叠为 AUTH）。 */
@@ -721,7 +681,7 @@ export async function initUnlock(
     //   1. 早期版本解锁后不调用 loadModuleKeyStatus → moduleKeyEnabled 保持默认值
     //      → "全部模块被自动开启密钥" / "原有密钥记录被遗忘"
     //   2. 后续修复将 loadModuleKeyStatus 放入关键路径同步 await（10s 超时兜底）
-    //      → 阻塞 verthysReady=true → "正在加载密钥配置…时间太久"
+    //      → 阻塞 verthysReady=true → "建立摘要索引…时间太久"
     //
     // 当前处理：
     //   步骤 A（关键路径）：await ensureSummaryScan() — 填充摘要缓存
@@ -734,7 +694,7 @@ export async function initUnlock(
     //
     // 时序保证：ensureSummaryScan 在 verthysReady=true 之前完成（列表渲染依赖）；
     //           loadModuleKeyStatus 在后台异步完成，状态响应式更新。
-    emit(7, 90, "加载密钥配置");
+    emit(5, 88, "建立摘要索引");
     try {
       // 修复：摘要扫描超时兜底（10s），防止 IPC 挂起导致卡死
       await withTimeout(ensureSummaryScan(), 10000, "摘要扫描");
@@ -762,7 +722,7 @@ export async function initUnlock(
     let migrationMigrated = 0;
     try {
       // 修复：整体超时兜底（15s），防止单条记录 IPC 挂起导致
-      //   initUnlock 永远停在"正在加载密钥配置…"阶段。
+      //   initUnlock 永远停在"建立摘要索引"阶段。
       //   超时后继续加载（迁移幂等，下次解锁重试）
       const migrationResult = await withTimeout(
         migrateRecordTypes(),
@@ -780,7 +740,7 @@ export async function initUnlock(
     // 修复：迁移后重新校验缓存的全局密钥记录（消除 probe 竞态） 
     //
     // 原缺陷（竞态根因）：
-    //   worker 内联 probe 在 Verthys_Unlock 成功后立即调用
+    //   worker 内联 probe 在 Verthys_V4Unlock 成功后立即调用
     //   Verthys_FindFirstLidByType(0x10) 搜索全局密钥记录（同 worker runtime.rs
     //   probe_global_key_inproc）。但类型迁移（migrateRecordTypes）在此之后
     //   才执行——如果 verthys 中存在旧账户记录（type=0x10，与 TYPE_GLOBAL_KEY
@@ -849,6 +809,7 @@ export async function initUnlock(
     //   - 不涉及密钥材料，不接触 worker，仅修正状态机
     //   - verthysReady=true 之前调用，此时 UI 未渲染，无用户交互竞态
     //   - 幂等：状态已匹配时后端无操作
+    emit(5, 92, "同步密钥状态");
     try {
       await verthysReconcileKeyPresence(keyState.hasGlobalKeyRecord.value);
       log.info(`initUnlock: 后端 key_lifecycle 已同步（hasGlobalKeyRecord=${keyState.hasGlobalKeyRecord.value}）`);
@@ -875,6 +836,7 @@ export async function initUnlock(
     //
     // 模块内容即时预加载（修复5保留）：verthysReady=true 后立即后台启动 ensureRecordScan，
     //   静默填充全量记录扫描缓存（含 dataB64，最多 64KB/条），用户进入模块时零 IPC 读取。
+    emit(6, 95, "加载模块密钥");
     keyState.moduleKeyStatusLoading.value = true;
     // 安全守卫根治：loadModuleKeyStatus 在 verthysReady=true 之前同步完成
     //
@@ -901,8 +863,10 @@ export async function initUnlock(
       lmkPromise.catch(() => { /* loadModuleKeyStatus 内部已处理 moduleKeyStatusLoading/moduleKeyStatusLoaded */ });
     }
 
-    emit(8, 100, "解锁完成");
+    emit(7, 99, "启动会话守卫");
     keyState.verthysReady.value = true;
+    await startSessionGuard();
+    emit(8, 100, "解锁完成");
 
     // 性能根治：移除 verthysReady 后立即 ensureRecordScan（消除 worker 队头阻塞）
     //
@@ -987,8 +951,8 @@ async function ipcRetry(fn: () => Promise<boolean>): Promise<boolean> {
  *   用户可立即重试，杜绝"派生成功但记录丢失"的中间态死锁。
  *
  * 落盘确认采用内容级读回验证（GetRecord 读回 == 写入值）：
- *   V3 的 AddRecord 经 WAL 单调用事务即时落盘（逐帧 _commit + 超块
- *   法定人数），读回命中即记录已持久；不依赖 flush 后的 mtime 等
+ *   AddRecord 单调用即时落盘（一次提交收口），读回命中即记录已持久；
+ *   不依赖 flush 后的 mtime 等
  *   间接判据（该启发式对 no-op flush 恒可误报）。
  *
  * @param globalPassword 全局访问密钥
@@ -1104,8 +1068,8 @@ async function initGlobalKeyInner(
  *      "仅旧记录"，用户以旧密钥重新验证即可重试——杜绝两条并存、杜绝
  *      状态机中间态死锁。
  *
- * 落盘确认采用内容级读回验证（同 initGlobalKey：V3 单调用事务即时落盘，
- * 读回命中即持久；flush 仅作 LSM 归并兜底，失败不阻断）。
+ * 落盘确认采用内容级读回验证（同 initGlobalKey：单调用即时落盘，
+ * 读回命中即持久；flush 仅作归并兜底，失败不阻断）。
  *
  * @returns VerthysResult<void>
  */
@@ -1343,7 +1307,7 @@ export async function verifyGlobalKey(
   }
 
   // 修复4：验证阶段进度反馈
-  emit(3, 40, "验证量子签名");
+  emit(3, 40, "验证全局密钥");
   const binDataB64 = bytesToBase64(binBytes);
   let verifyOk: boolean;
   try {
@@ -1353,6 +1317,12 @@ export async function verifyGlobalKey(
       "verify_global_key"
     );
   } catch (e) {
+    const gateResult = gateErrorResult(
+      (e as { errorCode?: string } | null)?.errorCode,
+      (e as { retryAfterSecs?: number } | null)?.retryAfterSecs,
+      e instanceof Error ? e.message : null,
+    );
+    if (gateResult) return gateResult;
     return errFromUnknown(e, VerthysErrorCode.E_GLOBAL_KEY_VERIFY_FAILED);
   }
   if (!verifyOk) {
@@ -1375,18 +1345,12 @@ export async function verifyGlobalKey(
   //   若用户在解锁后修改了模块保护（setModuleKey/disableModuleProtection），状态已由该函数
   //   原子更新（C 层事务成功后更新 keyState.moduleKeyEnabled），无需重载。
   resetSessionTimer();
-  // 启动会话守卫（加超时兜底 5s，防止 IPC 挂起卡死）
-  try {
-    await withTimeout(securitySessionStart(), 5000, "securitySessionStart");
-    securityHardeningFailedRef.value = false;
-  } catch (e) {
-    // 系统锁屏会话守卫未启动成功：属可见的安全降级（面板如实标注）
-    securityHardeningFailedRef.value = true;
-    log.warn("启动会话守卫失败/超时（非致命）", e);
-  }
+  // 会话守卫已在 initCreate / initUnlock 启动；此处为幂等重试（首次启动
+  // 失败时给全局密钥验证路径一次修复机会）。
+  await startSessionGuard();
   // 运行档位不在解锁收尾应用：恢复链以受信配置为唯一权威（读取→应用），
   // 本地缓存值禁止回写权威文件，此处的缓存 apply 会与恢复链竞态并覆盖受信副本。
-  emit(8, 100, "验证完成");
+  emit(5, 100, "验证完成");
   return ok(undefined);
 }
 
@@ -1416,10 +1380,7 @@ export async function verifyGlobalKeyWithBruteForce(
     if (gate.reason === "locked") {
       return { ok: false, reason: "gate_locked", remainingSecs: gate.remainingSecs };
     }
-    if (gate.reason === "gate_unavailable") {
-      return { ok: false, reason: "gate_unavailable" };
-    }
-    return { ok: false, reason: "gate_purge_required" };
+    return { ok: false, reason: "gate_unavailable" };
   }
 
   // 2. 实际验证（修复4：透传 onProgress 进度回调）
@@ -1428,15 +1389,20 @@ export async function verifyGlobalKeyWithBruteForce(
     return { ok: true };
   }
 
-  // 3. 失败后查询服务端计数结果（纯查询，不计数）：将锁定/清空态
-  //    映射给 UI 展示；查询失败不影响既有错误语义
+  /* 服务端闸门已给出结构化锁定/门禁码：直接映射，不再二次查询把信息折叠。 */
+  if (result.code === VerthysErrorCode.E_RATE_LIMITED) {
+    return { ok: false, reason: "locked", remainingSecs: Math.max(1, result.retryAfterSecs ?? 1) };
+  }
+  if (result.code === VerthysErrorCode.E_CNG_UNAVAILABLE) {
+    return { ok: false, reason: "gate_unavailable" };
+  }
+
+  // 3. 失败后查询服务端计数结果（纯查询，不计数）：将锁定态映射给 UI 展示；
+  //    查询失败不影响既有错误语义
   try {
     const r: BruteForceCheckResponse = await securityBruteCheck();
     if (r.kind === "Locked") {
       return { ok: false, reason: "locked", remainingSecs: r.remaining_secs };
-    }
-    if (r.kind === "PurgeRequired") {
-      return { ok: false, reason: "purge_required" };
     }
   } catch { /* 查询失败按普通失败处理 */ }
   return { ok: false, reason: "wrong_key" };

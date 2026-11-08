@@ -1,4 +1,4 @@
-/* A2 正向对照宿主：只加载生产 DLL 并调用 Verthys_Init / Verthys_Deinit。
+/* 调用方验签正向对照宿主：只加载生产 DLL 并调用 Verthys_Init / Verthys_Deinit。
  *
  * 与其它测试工具不同，本程序链接 verthys.dll 而非对象库，这样调用方
  * 签名校验才会校验“宿主主模块 + DLL 自身”两条路径。退出码约定：

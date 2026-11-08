@@ -10,14 +10,14 @@
 
 ## 1. 背景与目标
 
-Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密数据管理器**，采用 Tauri + Vue3 轻量化架构，基于 Argon2id、XChaCha20-Poly1305、AES-256-GCM 等商用级加密体系，加密存储账号密码、私密照片、证书、文件等敏感数据。数据仅以密文落地，无明文缓存残留；密钥由 CNG 内核托管，容器采用 V3 格式（分区认证 + 内容寻址 Extent + LSM 索引 + 超级块法定人数提交）。
+Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密数据管理器**，采用 Tauri + Vue3 轻量化架构，基于 Argon2id、XChaCha20-Poly1305、AES-256-GCM 等商用级加密体系，加密存储账号密码、私密照片、证书、文件等敏感数据。数据仅以密文落地，无明文缓存残留；容器采用当前格式（双包裹 AND + A/B 元数据 + 追加数据区 + 模块槽）。
 
 **目标**：抵御同机非特权用户态攻击者（恶意软件、浏览器漏洞落地 payload），达到"民用最高安全水位"；核心安全逻辑收敛在 `verthys.dll`（C11），密钥明文只在受限栈帧瞬态存在。
 
 | 维度 | 边界 |
 |---|---|
 | 技术栈 | 核心 C11 DLL（MSVC）+ Tauri(Rust) + Vue3/TypeScript |
-| 容器格式 | V3（FlatBuffers schema 驱动），`.verthys` |
+| 容器格式 | 当前格式（A/B 元数据 + 追加数据区 + 模块槽；交换信封使用 FlatBuffers schema），`.verthys` |
 | 版本 | 4.1.3 |
 | 威胁模型 | 同机非特权用户态攻击者（严于普通桌面应用） |
 
@@ -43,33 +43,34 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 
 ### FR-01 新建保险库
 
-- **描述**：通过安全预设创建新 `.verthys` 容器，路径不存在才允许，创建即完成解锁，Argon2id 参数按预设/校准写入超级块。
-- **验收标准**：前端 SecurityCenter 新建成功后进入 management 态；C 层对已存在路径返回 `VERTHYS_ERR_EXISTS`（0x4）。命令级：`verthys_tests.exe v3life` 全绿。
-- **实现佐证**：前端 `src-tauri/src/controller/verthys_controller.rs`(verthys_create) → worker `verthys-tauri/verthys-worker/src/runtime/dispatch.rs`(`create_with_preset`) → C `core/src/api/lifecycle/verthys_v3_lifecycle.c`。
+- **描述**：通过安全预设创建新 `.verthys` 容器，路径不存在才允许，创建即完成解锁，Argon2id 参数按预设/校准写入元数据。
+- **验收标准**：前端 SecurityCenter 新建成功后进入 management 态；C 层对已存在路径返回 `VERTHYS_ERR_EXISTS`（0x4）。
+- **实现佐证**：前端 `src-tauri/src/controller/verthys_controller.rs`(verthys_create) → worker `verthys-tauri/verthys-worker/src/runtime/dispatch.rs`(`create`) → C `Verthys_V4Create` / `core/src/crypto/vty_keymanager.c`(`vty_vault_create`)。
 
 ### FR-02 打开/解锁保险库
 
-- **描述**：解锁已有容器，pepper 快速失败 → `.vsec` 验签 → 解锁流水线 S0-S6；非 V3 文件在 C 层 open 即拒绝（`VERTHYS_ERR_FORMAT`）。
-- **验收标准**：解锁成功进入 management 态并可读记录；非 V3 容器返回 `VERTHYS_ERR_FORMAT`（0x5）。
-- **实现佐证**：`core/src/api/unlock/verthys_unlock_pipeline.c` + `core/src/api/lifecycle/verthys_v3_lifecycle.c` + `core/src/api/lifecycle/verthys_api.c`。
+- **描述**：解锁已有容器，pepper 快速失败 → `.vsec` 验签 → worker 调 `Verthys_V4Unlock`；非当前格式文件在 worker magic 预检或 C 层格式门即拒绝（`VERTHYS_ERR_FORMAT`）。
+- **验收标准**：解锁成功进入 management 态并可读记录；非当前格式容器返回 `VERTHYS_ERR_FORMAT`（0x5）。
+- **实现佐证**：`core/src/api/lifecycle/verthys_api.c` + `core/src/crypto/vty_keymanager.c`(`vty_vault_open`) + `verthys-worker/src/runtime/worker.rs`(`check_container_magic`)。
 
-### FR-03 渐进式解锁
+### FR-03 解锁原子性
 
-- **描述**：`VERTHYS_UNLOCK_FLAG_MINIMAL_FIRST`（0x04）下，超块+密钥+分区表完成后即返回 `VERTHYS_ERR_PARTIAL_UNLOCK`，索引预热转后台。
-- **验收标准**：解锁中途态返回 `0x11`（PARTIAL_UNLOCK），worker/前端按成功分支处理，后台完成预热。
-- **实现佐证**：`core/include/verthys.h`(flags bit2) + `dispatch.rs`(PARTIAL_UNLOCK 按成功处理) + `verthys.ts`(has_global_key 三字段内联探测)。
+- **描述**：容器解锁为单阶段原子完成：密钥校验、元数据提交与仓库挂载全部成功后才进入 UNLOCKED；不存在部分解锁中间态。
+- **验收标准**：解锁失败时句柄保持 LOCKED，不暴露半初始化会话；成功后可立即读写。
+- **实现佐证**：`core/src/crypto/vty_keymanager.c`(`vty_vault_open`) + `core/src/api/lifecycle/verthys_api.c`。
 
 ### FR-04 解锁进度回传
 
-- **描述**：解锁各阶段经进度回调异步推送，防止前端"卡死"错觉。
-- **验收标准**：解锁过程前端可见 8 阶段进度回调推进至 100%；注册 `NULL` 回调可取消通知。
-- **实现佐证**：`core/src/api/progress/verthys_progress.c/.h` + `Verthys_RegisterUnlockProgressCallback`（verthys.h）。
+- **描述**：解锁流程在关键阶段由前端推送进度事件，防止界面"卡死"错觉。
+- **验收标准**：解锁过程前端可见阶段进度推进至 100%；后端 C 层不产生分阶段进度事件。
+- **实现佐证**：`verthys-tauri/src/key/global-verthys.ts`（initUnlock emit）+
+  `verthys-tauri/src/composables/security-center/useUnlockFlow.ts`（进度状态消费）。
 
 ### FR-05 预热加速
 
-- **描述**：支持解锁前预热索引与持久化温缓存加载，加速二次解锁。
-- **验收标准**：预热后解锁走内存映射零拷贝路径；`Verthys_GetDiagnostics` 上报 `preheat_status` 与 `page_cache_hit_ratio`。
-- **实现佐证**：`core/src/index/warmcache/verthys_warmcache_v3.c` + `verthys_api.c`(预热位透传)。
+- **描述**：解锁前对容器元数据区做页缓存预热，缩短首次读取延迟。
+- **验收标准**：预热失败不阻断解锁；解锁不依赖预热令牌。
+- **实现佐证**：`src-tauri/src/controller/verthys_controller/preheat.rs`。
 
 ### FR-06 全局密钥初始化/验证/修改
 
@@ -104,7 +105,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 ### FR-11 安全预设（三档+自定义）
 
 - **描述**：BALANCED/SECURE/PERFORMANCE/CUSTOM 三档预设+自定义，双缓冲原子切换，防重复守卫。
-- **验收标准**：`VerthysPreset` 枚举 4 值；`applyPreset` 重复应用被守卫拒绝；预设持久写入超级块。
+- **验收标准**：`VerthysPreset` 枚举 4 值；`applyPreset` 重复应用被守卫拒绝；预设持久写入容器元数据。
 - **实现佐证**：`core/src/security/preset/security_preset.c` + 前端 `usePreset.ts`。
 
 ### FR-12 隐私模式（防截屏）与剪贴板隔离
@@ -147,15 +148,15 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 
 ### FR-17 修改主密码
 
-- **描述**：仅重加密数据密钥（不重加密业务数据），改密经 VsbTxnV3 法定人数保护。
+- **描述**：仅重加密数据密钥（不重加密业务数据），改密经容器密钥槽与元数据原子提交保护。
 - **验收标准**：`verthys_change_password` 命令实现（command 2013、worker op 474）；改密后旧密码解锁失败、新密码成功。
-- **实现佐证**：`core/src/api/transfer/verthys_export_import.c`(Verthys_ChangePassword) + `core/src/container/superblock/verthys_superblock_v3.c`。
+- **实现佐证**：`core/src/api/transfer/verthys_export_import.c`(Verthys_ChangePassword) + `core/src/container/vty_keyslot.c`。
 
 ### FR-18 完整性校验
 
 - **描述**：全量遍历 AEAD 标签 + 哈希校验，输出损坏 lid 列表，禁止与写并发。
 - **验收标准**：`Verthys_VerifyIntegrity` 输出损坏计数；篡改容器后校验能识别。
-- **实现佐证**：`core/src/api/lifecycle/verthys_api.c`(VerifyIntegrity) + `core/src/container/extent/verthys_extent.c`(读路径三重校验)。
+- **实现佐证**：`core/src/api/lifecycle/verthys_api.c`(VerifyIntegrity) + `core/src/index/vty_repo.c` / `vty_store.c`(读路径三重校验)。
 
 ### FR-19 全量/摘要扫描
 
@@ -194,13 +195,13 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 ### NFR-03 全链路入参校验（刚性条款 2.1 / 3.4）
 
 - **要求**：外部输入（文件、参数、网络）校验净化，防范注入/路径遍历/越界。
-- **现状佐证**：解析纪律 HMAC→AEAD→flatcc verifier 三层纵深 + 回绕安全分解（`verthys_container_v3.h`、`verthys_extent.c`）。
-- **验收**：单元与格式鲁棒性测试用例全量通过（`container/test_format_fuzz.c` 覆盖解析边界）。
+- **现状佐证**：解析纪律 AEAD→结构校验→仓库层语义校验三层纵深 + 回绕安全分解（`core/src/container/vty_format.c`、`core/src/index/vty_repo.c`）。
+- **验收**：单元与格式鲁棒性测试用例全量通过（`container/test_fuzz.c` 覆盖解析边界）。
 
 ### NFR-04 核心逻辑单元测试覆盖率 ≥ 80%（刚性条款 1.4）
 
 - **要求**：核心逻辑单元测试覆盖率不低于 80%。
-- **现状佐证**：`core/tests/` 六子域镜像 + `test_v3_property.c` 属性测试；全量 316/316 通过。
+- **现状佐证**：`core/tests/` 按 api/container/crypto/index/perf/schema/security 子域镜像；当前 C 全量 270/270 通过。
 - **验收**：`powershell -ExecutionPolicy Bypass -File scripts/build/build_core.dev.ps1 -NoPause` 全绿；`verthys_tests.exe` 出口码 0。
 
 ### NFR-05 关键接口常规负载 P95 ≤ 200ms（刚性条款 1.4）
@@ -225,13 +226,13 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 
 - **要求**：Windows x64 首发，架构预留跨平台；工具链 VS 2026 / MSVC 14.51。
 - **现状佐证**：`CMakeLists.txt`（C11，MSVC）+ Tauri NSIS 打包；`cmake/VerthysHardening.cmake`。
-- **验收**：Release 构建产出 `build/core/Release/verthys.dll` 且 `dumpbin -exports` 与 `ci/export_baseline.txt` 逐一相等（当前 32 符号，由 CI 导出契约门自动校验）。
+- **验收**：Release 构建产出 `build/core/Release/verthys.dll` 且 `dumpbin -exports` 与 `ci/export_baseline.txt` 逐一相等（当前 68 符号，由 CI 导出契约门自动校验）。
 
 ### NFR-09 导出面最小化
 
 - **要求**：导出面唯一由 `.def` 白名单管控，无全量导出。
-- **现状佐证**：`core/verthys.def` 32 符号 = `ci/export_baseline.txt`；`VERTHYS_API` 为空宏。
-- **验收**：`dumpbin -exports build/core/Release/verthys.dll` 数出 32 个导出。
+- **现状佐证**：`core/verthys.def` 68 符号 = `ci/export_baseline.txt`；`VERTHYS_API` 为空宏。
+- **验收**：`dumpbin -exports build/core/Release/verthys.dll` 数出 68 个导出。
 
 ---
 
@@ -239,7 +240,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 
 | 项 | 说明 |
 |---|---|
-| V1/V2 旧容器迁移 | 彻底抛弃旧容器，只认 V3，不提供 `.vault`/旧魔数迁移路径（方针见 `archive/应用功能全量核验报告.md` §7） |
+| 旧容器迁移 | 彻底抛弃旧格式，只认当前容器格式，不提供旧魔数/旧布局迁移路径（见 [references/versioning.md](references/versioning.md)） |
 | 内核态/硬件攻击防护 | 威胁模型止于"内核之下"；驱动级恶意软件、DMA/冷启动不在防护范围 |
 | 云同步/多端协作 | 本地单机私密数据管理器，不提供云存储、多设备实时同步 |
 | 密码找回 | 忘记主密码无法恢复（零知识设计，无后门） |

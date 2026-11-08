@@ -26,7 +26,7 @@
 
 /// <reference lib="webworker" />
 
-import { unpackVencV2 } from "../lib/crypto";
+import { unpackVenc } from "../lib/crypto";
 import type { PhotoMeta } from "../types/crypto";
 import { bytesToBase64 } from "../utils/binary_codec";
 import { PARSE_MAX_FRAME_COUNT, PHOTO_FMT_SLIM } from "../constants/crypto_const";
@@ -109,7 +109,7 @@ self.onmessage = async (e: MessageEvent<ParseCryptoRequest>) => {
 
   try {
     // 1. 解包 .venc 容器（令牌派生 + 逐帧 AEAD + 全链路校验）
-    const containers = await unpackVencV2(new Uint8Array(req.fileBytes), req.token);
+    const containers = await unpackVenc(new Uint8Array(req.fileBytes), req.token);
 
     // 2. 逐张预览还原 + 可导入性预检（模块密钥匹配时首块可解且 total 吻合）
     const previews: ParseCryptoPreview[] = [];

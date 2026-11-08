@@ -30,17 +30,17 @@ export interface CoverageInputs {
 }
 
 /** 防御路径总数（与 useDefenseStatus 的 7 条路径定义、C 层枚举镜像） */
-export const DEFENSE_PATH_TOTAL = 7;
+const DEFENSE_PATH_TOTAL = 7;
 /** 覆盖度合成权重：特性占比份额 */
-export const COVERAGE_FEATURE_WEIGHT = 0.55;
+const COVERAGE_FEATURE_WEIGHT = 0.55;
 /** 覆盖度合成权重：防御路径份额 */
-export const COVERAGE_DEFENSE_WEIGHT = 0.45;
+const COVERAGE_DEFENSE_WEIGHT = 0.45;
 /** 降级路径在防御得分中的折算权重（部分防护有效） */
-export const DEGRADED_PATH_WEIGHT = 0.5;
+const DEGRADED_PATH_WEIGHT = 0.5;
 /** 综合评分权重：覆盖率份额 */
-export const OVERALL_COVERAGE_WEIGHT = 0.6;
+const OVERALL_COVERAGE_WEIGHT = 0.6;
 /** 综合评分权重：低负载份额 */
-export const OVERALL_LOAD_WEIGHT = 0.4;
+const OVERALL_LOAD_WEIGHT = 0.4;
 
 /**
  * 合成安全覆盖度百分比（0~100 整数）

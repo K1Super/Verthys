@@ -1,9 +1,14 @@
 # core/tests/CMakeLists.txt
-# 测试 exe：链接共享对象库 + v3 容器对象库 + 测试 API 对象库（V3 分支启用），
-# 直接调用实现（不走 DLL 边界）；产品 verthys_core_obj（v4-only）不参与测试链接。
+# 测试 exe：链接共享对象库 + 产品 API 对象库，
+# 直接调用实现（不走 DLL 边界）。
 # 模块化重构：测试区按被测子域镜像组织（api/container/crypto/index/
-#   property/regression/schema/security/transaction/perf），test_runner.c
+#   perf/schema/security/tools），test_runner.c
 #   与 verthys_test.h 保留在 tests 根作为测试入口与框架。
+
+set(VERTHYS_P2_CLIENT_TEST_SOURCES "")
+if(VERTHYS_TEST_HOOKS)
+    list(APPEND VERTHYS_P2_CLIENT_TEST_SOURCES security/test_machine_limiter.c)
+endif()
 
 add_executable(verthys_tests
     test_runner.c
@@ -11,65 +16,42 @@ add_executable(verthys_tests
     crypto/test_crypto.c
     crypto/test_keymanager.c
     container/test_verthys_format.c
-    api/test_verthys_api.c
-    api/test_verthys_export.c
     api/test_export_path_guard.c
     api/test_scan_concurrent.c
     api/test_join_bounded.c
-    security/test_memory_safety.c
-    container/test_format_fuzz.c
-    perf/test_perf_prefetch.c
-    security/test_key_separation.c
     security/test_emergency.c
     security/test_integrity_verify.c
-    transaction/test_txn_recovery_inject.c
-    transaction/test_txn_delete_retry.c
-    transaction/test_txn_force_abort.c
-    transaction/test_txn_extent_reloc.c
-    perf/test_perf_baseline.c
-    regression/test_final_repair.c
+    perf/test_perf.c
     schema/test_flatcc_demo.c
-    crypto/test_cng_kernel.c
     security/test_secure_allocator.c
-    security/test_backoff_process_wide.c
-    container/test_v3_container.c
-    container/test_container_lock.c
-    container/test_v3_partition.c
-    container/test_v3_extent.c
-    index/test_v3_lsm.c
-    index/test_sstable_budget.c
-    index/test_warmcache_v3.c
-    api/test_v3_lifecycle.c
-    api/test_v4_api.c
-    property/test_v3_property.c
-    crypto/test_auto_rekey.c
-    crypto/test_pepper_v3.c
-    crypto/test_v4_primitives.c
-    crypto/test_v4_keyfile.c
-    container/test_v4_container.c
-    index/test_v4_records.c
-    index/test_v4_store.c
-    index/test_v4_repo.c
-    index/test_v4_repo_scan.c
-    api/test_v4_api_v4.c
-    api/test_v4_api_modules.c
-    api/test_v4_api_pcr.c
-    api/test_v4_reseal_device.c
-    api/test_v4_api_content.c
-    api/test_v4_api_product.c
-    api/test_v4_error_map.c
-    api/test_v4_transfer.c
-    api/test_v4_rotate.c
-    container/test_v4_chunks.c
-    container/test_v4_modules.c
-    security/test_v4_lockout.c
-    security/test_v4_lockout_pipeline.c
-    security/test_v4_rollback.c
-    security/test_v4_pcr.c
-    security/test_v4_witness.c
-    security/test_v4_crash.c
-    security/test_v4_fuzz.c
-    perf/test_v4_perf.c
+    api/test_api.c
+    crypto/test_pepper.c
+    crypto/test_primitives.c
+    crypto/test_keyfile.c
+    container/test_container.c
+    index/test_records.c
+    index/test_store.c
+    index/test_repo.c
+    index/test_repo_scan.c
+    api/test_api_container.c
+    api/test_api_modules.c
+    api/test_api_pcr.c
+    api/test_reseal_device.c
+    api/test_api_content.c
+    api/test_api_product.c
+    api/test_error_map.c
+    api/test_transfer.c
+    api/test_rotate.c
+    container/test_chunks.c
+    container/test_modules.c
+    security/test_lockout.c
+    security/test_lockout_pipeline.c
+    security/test_rollback.c
+    security/test_secure_state.c
+    security/test_pcr.c
+    security/test_witness.c
+    security/test_crash.c
+    security/test_fuzz.c
     security/test_runtime_hash.c
     security/test_syscall_direct.c
     security/test_security_preset.c
@@ -78,23 +60,25 @@ add_executable(verthys_tests
     security/test_hook_scan.c
     security/test_anti_inject.c
     security/test_system32_loader.c
+    container/test_format_fuzz.c
+    ${VERTHYS_P2_CLIENT_TEST_SOURCES}
 )
 target_link_libraries(verthys_tests PRIVATE
     verthys_core_shared_obj
-    verthys_core_v3_obj
-    verthys_core_legacy_api_obj)
+    verthys_core_obj)
 # flatcc 运行时（demo schema 编解码验收）+ codegen 顺序依赖
 target_link_libraries(verthys_tests PRIVATE flatccrt)
 add_dependencies(verthys_tests flatcc_generate)
 # 状态快照 GetGuiResources 需要 user32（对象库为
 # PRIVATE 链接不传递，此处显式补齐）
-target_link_libraries(verthys_tests PRIVATE user32)
+target_link_libraries(verthys_tests PRIVATE user32 bcrypt)
 # 模块化重构：源子目录 include 表复用 core/CMakeLists.txt 的
 #   VERTHYS_SRC_SUBDIRS（单一事实源——目录结构调整只改一处）
 target_include_directories(verthys_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/core/include
     ${CMAKE_SOURCE_DIR}/core/src
     ${VERTHYS_SRC_SUBDIRS}
+    ${CMAKE_SOURCE_DIR}/security-service/include
     ${CMAKE_SOURCE_DIR}/core/schema/generated
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -126,12 +110,18 @@ add_custom_command(TARGET verthys_tests POST_BUILD
 
 add_test(NAME verthys_tests COMMAND verthys_tests)
 
+# 测试源码与共享对象使用同一测试钩子开关：OFF 构建不编译也不注册
+# 依赖 VERTHYS_TEST_STATE_DIR 的用例，避免误触真实用户状态。
+if(VERTHYS_TEST_HOOKS)
+    target_compile_definitions(verthys_tests PRIVATE VERTHYS_TEST_HOOKS=1)
+endif()
+
 # ACG 专项验证：策略为进程级且不可撤销，必须使用独立进程。
 add_executable(verthys_scd_acg_test
     security/test_scd_acg.c
 )
 target_link_libraries(verthys_scd_acg_test PRIVATE
-    verthys_core_shared_obj verthys_core_v3_obj verthys_core_legacy_api_obj
+    verthys_core_shared_obj verthys_core_obj
     flatccrt user32)
 target_include_directories(verthys_scd_acg_test PRIVATE
     ${CMAKE_SOURCE_DIR}/core/include
@@ -158,13 +148,13 @@ add_dependencies(verthys_scd_dll_acg_test verthys_core)
 add_test(NAME verthys_scd_dll_acg
     COMMAND verthys_scd_dll_acg_test $<TARGET_FILE:verthys_core>)
 
-# v4 攻击探针：独立进程直接驱动 v4 原语，供 tests/attack/run.ps1
+# 攻击探针：独立进程直接驱动容器原语，供 tests/attack/run.ps1
 # 生成可复核证据（不扩大生产 DLL 导出面）。
 add_executable(vty_probe
     tools/vty_probe.c
 )
 target_link_libraries(vty_probe PRIVATE
-    verthys_core_shared_obj verthys_core_v3_obj verthys_core_legacy_api_obj
+    verthys_core_shared_obj verthys_core_obj
     flatccrt user32)
 target_include_directories(vty_probe PRIVATE
     ${CMAKE_SOURCE_DIR}/core/include
@@ -198,7 +188,7 @@ add_executable(vty_mem_host
     tools/vty_mem_host.c
 )
 target_link_libraries(vty_mem_host PRIVATE
-    verthys_core_shared_obj verthys_core_v3_obj verthys_core_legacy_api_obj
+    verthys_core_shared_obj verthys_core_obj
     flatccrt user32 dbghelp)
 target_include_directories(vty_mem_host PRIVATE
     ${CMAKE_SOURCE_DIR}/core/include

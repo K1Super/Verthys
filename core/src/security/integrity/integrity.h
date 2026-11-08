@@ -1,84 +1,14 @@
 /*
- * integrity.h — 惰性关键段完整性校验 + 分散式校验锚点（内部模块，不导出）
+ * integrity.h — 程序镜像完整性验签（.vsec）（内部模块，不导出）
  *
- *
- * 技术要点：
- *   - 启动校验：BLAKE3 哈希计算 DLL .text 段 + EXE 前 1MB，与编译期预置值比对
- *   - 分散锚点：每个锚点校验不同区段（.text 子区间 / .rdata / PE 头），
- *     避免攻击者通过单点 patch 绕过全部校验
- *   - 校验失败不弹出提示，静默进入应急流程（同 emergency.h）
+ * 构建期在 DLL 只读节 .vsec 写入 .text/.rdata/.rhat 的 HMAC 基准；
+ * 运行时从磁盘读取自身 PE 文件重算并比对，失败即拒绝解锁。
  */
 #ifndef VERTHYS_INTEGRITY_H
 #define VERTHYS_INTEGRITY_H
 
 #include <stdint.h>
 #include <stddef.h>
-
-/* 校验锚点 ID（分散式校验点，每个对应不同功能入口） */
-typedef enum {
-    ANCHOR_STARTUP        = 0,  /* 程序入口：DLL .text + EXE 头部1MB */
-    ANCHOR_OPEN_SETTINGS  = 1,  /* 打开设置页：DLL .rdata 段 */
-    ANCHOR_SWITCH_TREE    = 2,  /* 切换目录树：DLL .text 后半段 */
-    ANCHOR_EXPORT_FILE    = 3,  /* 导出文件：EXE PE 头 + 入口表 */
-    ANCHOR_IMPORT_FILE    = 4,  /* 导入文件：DLL 导出表 */
-    ANCHOR_CHANGE_PASSWORD= 5,  /* 修改密码：DLL .text 前半段 */
-    ANCHOR_UNLOCK         = 6,  /* 解锁操作：EXE .text 段抽样 */
-    ANCHOR_COUNT
-} IntegrityAnchor;
-
-/*
- * 校验结果三态。基础设施异常（HMAC 计算失败 / PE 解析失败 / 初始化失败）
- * 与"哈希不匹配（篡改）"必须可区分：前者是校验未完成，不得当作通过，
- * 也不得当作篡改报警。
- */
-typedef enum {
-    INTEGRITY_RESULT_PASS       = 0,  /* 校验完成：基准未配置（跳过）或哈希匹配 */
-    INTEGRITY_RESULT_MISMATCH   = 1,  /* 校验完成：哈希不匹配（检测到篡改） */
-    INTEGRITY_RESULT_INCOMPLETE = 2   /* 校验未完成（基础设施异常） */
-} IntegrityResult;
-
-/*
- * 初始化完整性校验模块。
- * 计算并缓存各锚点的基准哈希值（首次调用时）。
- * 返回 0 成功，非 0 失败。
- */
-int integrity_init(void);
-
-/*
- * 执行指定锚点的完整性校验。
- *   anchor: 校验锚点 ID
- * 返回 IntegrityResult：PASS=通过（含基准未配置跳过）；MISMATCH=哈希不匹配
- * （应触发应急流程）；INCOMPLETE=基础设施异常未完成校验（可观测，不当作通过）。
- */
-IntegrityResult integrity_check_anchor(IntegrityAnchor anchor);
-
-/*
- * 启动时惰性校验（仅校验 DLL .text + EXE 头部1MB）。
- * 等价于 integrity_check_anchor(ANCHOR_STARTUP)，但独立暴露以便入口点调用。
- */
-IntegrityResult integrity_check_startup(void);
-
-/*
- * 设置预置哈希基准值（post-build 工具调用）。
- *   anchor: 锚点 ID
- *   hash:   32 字节哈希值（BLAKE3 或 SHA-256）
- * 全零 = 未配置 = 跳过校验。
- */
-void integrity_set_baseline(IntegrityAnchor anchor, const uint8_t hash[32]);
-
-/*
- * 查询累计的"校验未完成（基础设施异常）"次数。
- * 供诊断与测试观测：因异常未完成校验的行为须显式可见而非静默当作通过。
- */
-long integrity_incomplete_count(void);
-
-/* ---------- 测试白盒（仅 tests 链接使用，生产代码禁调） ---------- */
-
-/*
- * 强制后续锚点校验走"未完成"态（模拟 HMAC 计算失败），用于单元验证
- * 三态可区分性。enabled=1 生效，0 恢复。测试 teardown 必须复位。
- */
-void integrity_test_force_fail(int enabled);
 
 /*
  * 自身文件验签缓存白盒（仅 tests 使用）：
@@ -94,7 +24,7 @@ void integrity_verify_cache_reset(void);
  * ===================================================================== */
 
 /*
- * 启动时一次性验签（Verthys_Unlock 入口调用）。
+ * 启动时一次性验签（Verthys_V4Unlock 入口调用）。
  *
  * 机制：构建脚本（build_core.release.ps1）在链接完成后计算 .text 与
  * .rdata 节的文件内容 HMAC-SHA256（固定域密钥，同时编译进 DLL 与脚本），

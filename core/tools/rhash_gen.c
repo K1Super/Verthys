@@ -1,5 +1,5 @@
 /*
- * rhash_gen.c — 构建期 .rhat 运行时哈希表生成器（V3 升级）
+ * rhash_gen.c — 构建期 .rhat 运行时哈希表生成器
  *
  * 用法：rhash_gen --patch <binary> [--map <mapfile>]
  *   <binary>  链接完成的 PE（verthys.dll / verthys_tests.exe）
@@ -44,12 +44,13 @@
 #include <stdarg.h>
 
 /* X 清单函数名展开（序号即 x_index）。
- *   --xlist core：产品 DLL（仅 COMMON 段——v3 实现不在产品 map）；
- *   --xlist full（默认）：测试 exe / legacy DLL（含 v3 实现）。
+ *   --xlist core：产品 DLL；
+ *   --xlist full（默认）：测试 exe。
+ * 两份清单当前内容一致；保留选择参数以维持既有构建调用。
  * 红线不变：所选清单任一符号缺失 → 构建失败。 */
 static const char *s_x_names_core[] = {
 #define X(fn) #fn,
-    VERTHYS_RUNTIME_HASH_FUNCS_COMMON(X)
+    VERTHYS_RUNTIME_HASH_FUNCS(X)
 #undef X
 };
 static const char *s_x_names_full[] = {

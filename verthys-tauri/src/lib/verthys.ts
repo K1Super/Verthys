@@ -37,11 +37,8 @@ import { markFrontendIpcActive } from "../core/frontend-ipc-priority";
 
 import type {
   VerthysResponse,
-  VerthysRecordEntry,
-  VerthysSummaryEntry,
   EnumerateBatch,
   AccountFields,
-  RecordEntry,
   PreflightResult,
   InitStatusResult,
   VerthysPreset,
@@ -54,7 +51,6 @@ import type {
   PresetConfig,
   PresetFeatures,
   SecurityStatusReport,
-  UnlockProgress,
   RotateProgress,
   ClipboardResult,
   PrivacyModeResult,
@@ -180,9 +176,25 @@ export { bytesToBase64, base64ToBytes } from "../utils/binary_codec";
  *  注意：调用方应优先使用 ensureWorkerReady() / preloadWorker() 以复用预启动会话，
  *  避免重复 spawn 子进程。直接调用本函数会绕过 memoization 缓存。
  */
+/** 最近一次 worker_init 失败的结构化信息（供上层给出专用文案） */
+let workerInitFailure: { code?: string; message: string } | null = null;
+
+/** 读取最近一次 worker_init 失败信息（成功时为 null） */
+export function getWorkerInitFailure(): { code?: string; message: string } | null {
+  return workerInitFailure;
+}
+
 export async function workerInit(dllPath: string = ""): Promise<boolean> {
   const r = await ipc<VerthysResponse>("worker_init", { dllPath });
-  return r.ok;
+  if (r.ok) {
+    workerInitFailure = null;
+    return true;
+  }
+  workerInitFailure = {
+    code: r.error_code ?? undefined,
+    message: r.error ?? "",
+  };
+  return false;
 }
 
 /** 销毁 worker 子进程（杀死进程，销毁所有句柄与密钥） */
@@ -215,16 +227,6 @@ export async function workerDestroy(): Promise<boolean> {
 /** 当前 worker_init 的 memoized Promise（null 表示无预启动进行中/已完成） */
 let workerReadyPromise: Promise<boolean> | null = null;
 
-/** 修复：worker 是否已被使用（unlock/create 成功过）
- *
- * 用于 ensureCleanWorkerState 区分两种 workerReadyPromise !== null 场景：
- *   - workerHasBeenUsed=false：worker 仅预启动，尚未解锁 → 预启动有效，复用
- *   - workerHasBeenUsed=true：worker 曾解锁过，可能因 lockAll 未完成而残留 → 强制销毁重建
- *
- * verthysUnlock/verthysCreate 成功后置 true；
- * verthysLock/workerDestroy/invalidateWorkerPreload 置 false。 */
-let workerHasBeenUsed = false;
-
 /** 预启动 Worker 子进程（幂等，可安全多次调用）
  *  不阻塞：返回 Promise，调用方可选 await 或 fire-and-forget
  *  场景：用户选定 .verthys 文件后立即调用，与用户阅读路径、点击确认的时间重叠
@@ -250,7 +252,7 @@ export async function ensureWorkerReady(): Promise<boolean> {
 /** 作废预启动缓存（worker 已销毁或用户取消时调用） */
 export function invalidateWorkerPreload(): void {
   workerReadyPromise = null;
-  workerHasBeenUsed = false;
+  workerInitFailure = null;
 }
 
 /* ------------------------------------------------------------------ *
@@ -277,10 +279,8 @@ export function invalidateWorkerPreload(): void {
 export async function ensureCleanWorkerState(): Promise<void> {
   // 修复：无条件销毁 worker，消除"状态仍为 Ready"导致的 worker_init 失败
   //
-  // 原实现仅在 workerReadyPromise !== null && workerHasBeenUsed 时销毁，
-  // 但 lockAll 的 verthysLock()/workerDestroy() 会在 finally 中调用
-  // invalidateWorkerPreload() 清空 workerReadyPromise 和 workerHasBeenUsed，
-  // 导致此处的条件不满足，无法兜底销毁后端 worker。
+  // 原实现仅在预启动缓存非空且 worker 曾解锁过时销毁；lockAll 会在 finally
+  // 调用 invalidateWorkerPreload() 清空缓存，使该条件不满足，无法兜底销毁。
   //
   // 新实现无条件调用 worker_destroy（5s 超时兜底），后端对不存在的 worker 为空操作。
   // 这确保任何路径下（包括 lockAll 超时/失败/部分完成）worker 都被彻底清理。
@@ -307,7 +307,7 @@ export async function verthysInitStatus(): Promise<InitStatusResult> {
 }
 
 /** 创建新加密库（首次初始化专用，与 unlock 分离）
- *  流程：v4_create（创建 v4 容器并返回一次性恢复码）→ lock（写盘）→ unlock（重开）
+ *  流程：v4_create（创建 容器并返回一次性恢复码）→ lock（写盘）→ unlock（重开）
  *  失败自动回滚：删除不完整 .verthys 文件 + 销毁 worker
  *
  *  容器口令由后端本机保管，前端不参与，避免口令出现在界面与 IPC 参数中。
@@ -329,12 +329,6 @@ export async function verthysCreate(
     preset,
     ...(keyfilePath ? { keyfilePath } : {}),
   });
-  if (r.ok) {
-    // 修复B：标记 worker 已被使用（create 内部会 unlock 重开）
-    // ensureCleanWorkerState 据此判断：下次解锁前若 workerHasBeenUsed=true
-    // 且预启动缓存残留 → 强制销毁旧 worker，防止复用被 lockAll 销毁中的死 worker
-    workerHasBeenUsed = true;
-  }
   return r;
 }
 
@@ -354,17 +348,11 @@ export async function verthysPreheat(verthysPath: string): Promise<boolean> {
   return r.ok;
 }
 
-/** 解锁已有加密库（worker 内调用 Verthys_Unlock）
- *
- * 新增 onProgress 可选回调，流式接收解锁进度
- * - worker 在解锁期间推送多条 unlock_progress 进度行
- * - 每条进度行通过 Tauri Channel 转发到前端 onProgress 回调
- * - 后端进度感知超时（60s 无进度才判定挂起），无需前端 Promise.race 兜底
+/** 解锁已有加密库（worker 内调用容器解锁入口）
  *
  * 容器口令由后端本机保管，前端不传递任何口令。
  *
  * @param verthysPath 加密库文件路径
- * @param onProgress 进度回调（在解锁各阶段触发，可选）
  * @param usbRebindConfirmed 介质标识变化确认（可选）：
  *   可移动介质已登记但序列号哈希不匹配时，默认阻止解锁；
  *   用户确认"合法更换介质"后置 true 重试——重绑定在凭据验证通过后落实。
@@ -372,68 +360,28 @@ export async function verthysPreheat(verthysPath: string): Promise<boolean> {
  */
 export async function verthysUnlock(
   verthysPath: string,
-  onProgress?: (progress: UnlockProgress) => void,
   usbRebindConfirmed?: boolean,
   recoveryCode?: string,
   keyfilePath?: string,
 ): Promise<VerthysResponse> {
-  // 创建 Tauri Channel 用于流式接收进度
-  const channel = new Channel<UnlockProgress>();
-
-  /* 修复修复：阻止 Promise resolve 后的 Channel 残留进度消息
-   *
-   * 根因：Tauri Channel 的 onmessage 是异步处理的。当 verthys_unlock 命令返回
-   * （Promise resolve）时，Channel 队列中可能仍有未消费的进度消息（如 Argon2id
-   * 心跳"密钥计算较慢"）。这些残留消息会在 Promise resolve 后继续被 onmessage
-   * 处理，覆盖 initUnlock 中 emit(8,100,"解锁完成…") 设置的 UI 状态，
-   * 导致 UI 从"解锁完成"变回"密钥计算较慢"，用户误以为解锁卡住。
-   *
-   * 修复：使用 completed 标志，Promise resolve/reject 后阻止 onProgress 回调。
-   *   - resolve 前：正常转发进度消息
-   *   - resolve 后：静默丢弃残留消息（initUnlock 的 emit 已负责最终 UI 状态）
-   *
-   * 安全边界：仅影响前端进度 UI 展示，不影响后端解锁逻辑。
-   *           后端 send_json_with_unlock_progress 同步返回最终结果。 */
-  let completed = false;
-  if (onProgress) {
-    channel.onmessage = (p: UnlockProgress) => {
-      if (!completed) {
-        onProgress(p);
-      }
-    };
-  }
-
-  try {
-    /* 修复：返回完整 VerthysResponse，含 worker 进程内探测的
-     * has_global_key/global_key_id/global_key_record 三字段。
-     * 调用方 initUnlock 直接消费，消除解锁后 probe IPC 链。 */
-    const resp = await ipc<VerthysResponse>("verthys_unlock", {
-      verthysPath,
-      onProgress: channel,
-      ...(usbRebindConfirmed ? { usbRebindConfirmed: true } : {}),
-      ...(recoveryCode ? { recoveryCode } : {}),
-      ...(keyfilePath ? { keyfilePath } : {}),
-    });
-    if (resp.ok) {
-      // 修复B：标记 worker 已被使用（unlock 成功）
-      // ensureCleanWorkerState 据此判断：下次解锁前若 workerHasBeenUsed=true
-      // 且预启动缓存残留 → 强制销毁旧 worker，防止复用被 lockAll 销毁中的死 worker
-      workerHasBeenUsed = true;
-    }
-    return resp;
-  } finally {
-    /* 关键：Promise resolve/reject 后立即置位，阻止后续 Channel 残留消息
-     * 覆盖 UI 状态。finally 块在 return/throw 前执行，确保标志及时生效。 */
-    completed = true;
-  }
+  /* 修复：返回完整 VerthysResponse，含 worker 进程内探测的
+   * has_global_key/global_key_id/global_key_record 三字段。
+   * 调用方 initUnlock 直接消费，消除解锁后 probe IPC 链。 */
+  const resp = await ipc<VerthysResponse>("verthys_unlock", {
+    verthysPath,
+    ...(usbRebindConfirmed ? { usbRebindConfirmed: true } : {}),
+    ...(recoveryCode ? { recoveryCode } : {}),
+    ...(keyfilePath ? { keyfilePath } : {}),
+  });
+  return resp;
 }
 
-/** v4 PCR 状态查询（不返回密钥；未解锁返回 ok=false） */
+/** PCR 状态查询（不返回密钥；未解锁返回 ok=false） */
 export async function verthysPcrStatus(): Promise<VerthysResponse> {
   return await ipc<VerthysResponse>("verthys_pcr_status", {});
 }
 
-/** v4 keyfile 因子状态（仅已解锁会话可查询） */
+/** keyfile 因子状态（仅已解锁会话可查询） */
 export async function verthysKeyfileStatus(): Promise<VerthysResponse> {
   return await ipc<VerthysResponse>("verthys_keyfile_status", {});
 }
@@ -483,51 +431,51 @@ export async function verthysRecoveryRotate(
   return await ipc<VerthysResponse>("verthys_recovery_rotate", { oldRecoveryCode });
 }
 
-/** 查询 v4 模块状态（不含密钥） */
+/** 查询 模块状态（不含密钥） */
 export async function verthysV4ModuleStatus(moduleId: number): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_module_status", { moduleId });
+  return await ipc<VerthysResponse>("verthys_module_status", { moduleId });
 }
 
-/** 启用 v4 模块保护（password 为模块口令；recoveryCode 可选，用于绑定恢复槽） */
+/** 启用 模块保护（password 为模块口令；recoveryCode 可选，用于绑定恢复槽） */
 export async function verthysV4ModuleEnable(
   moduleId: number,
   password: string,
   recoveryCode?: string,
 ): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_module_enable", {
+  return await ipc<VerthysResponse>("verthys_module_enable", {
     moduleId,
     password,
     ...(recoveryCode ? { recoveryCode } : {}),
   });
 }
 
-/** 轮换 v4 模块口令（只重封 user 槽，不重写数据） */
+/** 轮换 模块口令（只重封 user 槽，不重写数据） */
 export async function verthysV4ModuleRotatePassword(
   moduleId: number,
   oldPassword: string,
   newPassword: string,
 ): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_module_rotate_password", {
+  return await ipc<VerthysResponse>("verthys_module_rotate_password", {
     moduleId,
     oldPassword,
     newPassword,
   });
 }
 
-/** 关闭 v4 模块保护（保留 MDEK 与数据，MDEK 回到 Keyring） */
+/** 关闭 模块保护（保留 MDEK 与数据，MDEK 回到 Keyring） */
 export async function verthysV4ModuleDisable(
   moduleId: number,
   password: string,
 ): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_module_disable", { moduleId, password });
+  return await ipc<VerthysResponse>("verthys_module_disable", { moduleId, password });
 }
 
-/** 删除 v4 模块（不可逆；confirm 必须为 "DELETE"） */
+/** 删除 模块（不可逆；confirm 必须为 "DELETE"） */
 export async function verthysV4ModuleDelete(
   moduleId: number,
   confirm: string,
 ): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_module_delete", { moduleId, confirm });
+  return await ipc<VerthysResponse>("verthys_module_delete", { moduleId, confirm });
 }
 
 /** 绑定模块恢复槽（模块口令 + 容器恢复码）；绑定后支持换机恢复该模块 */
@@ -536,7 +484,7 @@ export async function verthysV4ModuleBindRecovery(
   password: string,
   recoveryCode: string,
 ): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_module_bind_recovery", {
+  return await ipc<VerthysResponse>("verthys_module_bind_recovery", {
     moduleId,
     password,
     recoveryCode,
@@ -548,13 +496,13 @@ export async function verthysV4ModuleResealDevice(
   moduleId: number,
   password: string,
 ): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_module_reseal_device", {
+  return await ipc<VerthysResponse>("verthys_module_reseal_device", {
     moduleId,
     password,
   });
 }
 
-/* ===== v4 D9 全库 DEK 轮换（作业式五段） ===== */
+/* ===== 全库 DEK 轮换（作业式五段） ===== */
 
 /** 开始全库轮换：仅恢复码会话可用；flags bit0=移除 PCR 绑定。
  *  newPath 必须是不存在且与源库同目录的绝对路径（由 C 层最终裁决）。 */
@@ -562,7 +510,7 @@ export async function verthysV4RotateBegin(
   newPath: string,
   flags = 0,
 ): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_rotate_begin", { newPath, flags });
+  return await ipc<VerthysResponse>("verthys_rotate_begin", { newPath, flags });
 }
 
 /** 登记一个已启用模块的轮换口令（password 为模块口令，不是容器口令） */
@@ -571,7 +519,7 @@ export async function verthysV4RotateUnlockModule(
   password: string,
   recoveryCode?: string,
 ): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_rotate_unlock_module", {
+  return await ipc<VerthysResponse>("verthys_rotate_unlock_module", {
     moduleId,
     password,
     ...(recoveryCode ? { recoveryCode } : {}),
@@ -591,7 +539,7 @@ export async function verthysV4RotateRun(
     };
   }
   try {
-    return await ipc<VerthysResponse>("verthys_v4_rotate_run", {
+    return await ipc<VerthysResponse>("verthys_rotate_run", {
       onProgress: channel,
     });
   } finally {
@@ -601,7 +549,7 @@ export async function verthysV4RotateRun(
 
 /** 原子替换源库并推进回退锚点；keepOld=true 保留 .old-* 备份 */
 export async function verthysV4RotateCommit(keepOld = false): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_rotate_commit", { keepOld });
+  return await ipc<VerthysResponse>("verthys_rotate_commit", { keepOld });
 }
 
 /** 恢复会话补录 keyfile：容器启用 KEYFILE 且会话未持有摘要时使用。
@@ -609,17 +557,17 @@ export async function verthysV4RotateCommit(keepOld = false): Promise<VerthysRes
 export async function verthysV4RotateAttachKeyfile(
   keyfilePath: string,
 ): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_rotate_attach_keyfile", { keyfilePath });
+  return await ipc<VerthysResponse>("verthys_rotate_attach_keyfile", { keyfilePath });
 }
 
 /** 请求取消正在进行的轮换 Run（仅解锁模块与复制阶段可用）。 */
 export async function verthysV4RotateCancel(): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_rotate_cancel");
+  return await ipc<VerthysResponse>("verthys_rotate_cancel");
 }
 
 /** 丢弃临时库并释放作业；成功后句柄仍指向原库 */
 export async function verthysV4RotateAbort(): Promise<VerthysResponse> {
-  return await ipc<VerthysResponse>("verthys_v4_rotate_abort", {});
+  return await ipc<VerthysResponse>("verthys_rotate_abort", {});
 }
 
 /** 持久化落盘（发送 lock 指令并等待响应，不销毁 worker）— 7步流程步骤4+5 */
@@ -682,7 +630,7 @@ export interface VerifyDiskPersistResult {
  *  why 不在主进程读盘：容器会话在 C 层子进程内以独占方式持有超级块区
  *  [0,64KB) 字节范围锁（Windows 强制锁），主进程新开句柄读取恒被
  *  ERROR_LOCK_VIOLATION 拒绝。故校验经 worker 的 verify_persist op 下发到
- *  持锁子进程，由 C 层用持锁句柄（ctx->v3->f）自查盘面结构（头部帧头、
+ *  持锁子进程，由 C 层用会话持锁句柄自查盘面结构（头部帧头、
  *  文件大小下限、WAL 区可达性）。
  *
  *  返回判别式结果：statusCode 供上层区分"可重试 IO 失败"与"结构性失败"。
@@ -861,15 +809,20 @@ export async function verthysAddChunkBatch(
  * 删除照片后释放续传幂等锁（后端 WAL 追加删除墓碑，删除后可重新导入）。
  *
  * @param entryKeys 已删除照片的非内容条目键（来源元数据派生）
+ * @param recordIds 已删除的记录 ID（meta 不可解密/历史条目缺键时按 ID 释放）
  */
-export async function verthysForgetImportKeys(entryKeys: string[]): Promise<void> {
-  if (entryKeys.length === 0) return;
+export async function verthysForgetImportKeys(
+  entryKeys: string[],
+  recordIds: number[] = [],
+): Promise<void> {
+  if (entryKeys.length === 0 && recordIds.length === 0) return;
   // 幂等锁释放失败会让被删文件在重新导入时被静默跳过（用户只看到"导入 0 张"
   // 且无任何失败提示）：失败重试一次，仍失败则上抛，由调用方记录或提示，
   // 不再吞掉返回值。
   for (let attempt = 1; attempt <= 2; attempt++) {
     const r = await ipc<VerthysResponse>("verthys_forget_import_keys", {
       entryKeys,
+      recordIds,
     });
     if (r.ok) return;
     if (attempt === 2) {
@@ -1328,14 +1281,14 @@ export async function verthysHasRecordByType(rtype: number): Promise<boolean> {
 
 /** 按类型分页枚举记录 ID（API 0x0012）
  *
- *  权威来源：V4 类型盲索引（VTY_KS_TYPE），不读取记录密文，跨重启稳定。
- *  摘要扫描的 type 在 V4 恒为未知 0，禁止用它过滤业务类型。
+ *  权威来源：类型盲索引（VTY_KS_TYPE），不读取记录密文，跨重启稳定。
+ *  摘要扫描的 type 在 恒为未知 0，禁止用它过滤业务类型。
  *
  *  @param rtype 记录业务类型
  *  @param afterId 上一页最后一个 ID；首页传 0
  *  @param maxCount 本页上限（1..4096）
  *  @returns { ids, exhausted }：ids 严格升序；exhausted=true 表示末页
- *  @throws worker 失败 / 参数非法 / 非 V4 容器时抛异常
+ *  @throws worker 失败 / 参数非法 / 非容器格式时抛异常
  */
 export async function verthysListIdsByType(
   rtype: number,
@@ -1515,7 +1468,15 @@ export async function verthysVerifyGlobalKey(
     recordB64,
   });
   if (!r.ok) {
-    throw new Error(r.error || "验证全局密钥失败");
+    /* 保留结构化错误码与锁定秒数：调用方据此展示“已锁定 X 秒”或门禁
+     * 不可用提示，不再折叠为布尔值。 */
+    const e = new Error(r.error || "验证全局密钥失败") as Error & {
+      errorCode?: string;
+      retryAfterSecs?: number;
+    };
+    e.errorCode = r.error_code ?? r.error ?? undefined;
+    e.retryAfterSecs = r.retry_after_secs ?? undefined;
+    throw e;
   }
   return true;
 }
@@ -1945,12 +1906,7 @@ export async function securityBruteCheck(): Promise<BruteForceCheckResponse> {
 
 // 失败计数与成功重置的记录接口已上移服务端口令类命令入口（unlock /
 // verify_global_key）权威执行，前端不再提供记录封装，防止同一失败
-// 被前后端各计一次。此处仅保留查询与清除类纯读操作。
-
-/** 清除熔断状态（PurgeRequired 处理完成后调用） */
-export async function securityBruteClearPurge(): Promise<void> {
-  await ipc<void>("security_brute_clear_purge");
-}
+// 被前后端各计一次。此处仅保留查询类纯读操作。
 
 /** 获取暴力拦截状态快照 */
 export async function securityBruteStatus(): Promise<BruteForceStatus> {

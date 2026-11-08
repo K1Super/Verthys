@@ -1,5 +1,5 @@
 <!--
-  ModuleDangerZone.vue — v4 模块不可逆删除 · 引力谱系子分区
+  ModuleDangerZone.vue — 模块不可逆删除 · 引力谱系子分区
   设计：与「奇点锚定」同一维度 —— 无底板、坐标头、左星座 + 右数据与端子：
     左：裂解星座（断裂开放弧 + 开放菱形核心 + 漂散碎片 + 衰减系链终端）
     右：数据基准（存活 / 已销毁计数）+ 三条轨道条目（模块状态光谱刻度 +
@@ -126,7 +126,7 @@
             <div class="sf-orbit-actions">
               <SfActionNode
                 :label="`${m.label} · 删除模块`"
-                :tip="statuses[m.id]?.deleted ? '模块已销毁' : '删除模块（不可逆）'"
+                :tip="statuses[m.id]?.deleted ? '模块已销毁' : '永久删除模块，不可恢复'"
                 tone="danger"
                 :disabled="busy || loading || statuses[m.id]?.deleted === true"
                 @click="openDelete(m.id, m.label)"

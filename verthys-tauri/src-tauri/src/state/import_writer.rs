@@ -98,9 +98,11 @@ pub enum WriterCommand {
         reply: tokio::sync::oneshot::Sender<Result<ChunkAppendOutcome, String>>,
     },
     /// 追加删除墓碑（释放去重锁）：经会话写者句柄落盘，与会话批量写入
-    /// 共用同一文件句柄，避免命令层直接以第二句柄并发追加 WAL
+    /// 共用同一文件句柄，避免命令层直接以第二句柄并发追加 WAL。
+    /// `record_ids` 供 meta 不可解密时按记录 ID 解析条目键。
     AppendRemoved {
         keys: Vec<String>,
+        record_ids: Vec<u64>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
 }
@@ -313,8 +315,12 @@ fn writer_loop(
             WriterCommand::AppendChunks { chunks, reply } => {
                 let _ = reply.send(process_append_chunks(&state, chunks, &heartbeat));
             }
-            WriterCommand::AppendRemoved { keys, reply } => {
-                let _ = reply.send(process_append_removed(&state, &keys));
+            WriterCommand::AppendRemoved {
+                keys,
+                record_ids,
+                reply,
+            } => {
+                let _ = reply.send(process_append_removed(&state, &keys, &record_ids));
             }
         }
         heartbeat.store(now_ms(), Ordering::SeqCst);
@@ -722,7 +728,7 @@ fn process_append_pending(
         // 结果回填：ID / 幂等集合 / 外置块 owner / 进度
         for (offset, item) in slice.iter().enumerate() {
             if let Some(verthys_id) = results[offset] {
-                session.mark_committed(&item.entry_key);
+                session.mark_committed(&item.entry_key, verthys_id);
                 ids[item.idx as usize] = verthys_id;
                 committed_in_batch += 1;
                 if let Some(chunk_ids) = item.record.chunk_ids.as_deref() {
@@ -1067,26 +1073,44 @@ fn process_append_chunks(
 /// 与会话批量写入共用同一 WAL 文件句柄（FIFO 串行），杜绝命令层直开
 /// 第二句柄并发追加导致的 JSON 行交错损坏。无活跃会话时调用方走
 /// 直接追加路径（此时不存在并发写者）。
-fn process_append_removed(state: &AppState, keys: &[String]) -> Result<(), String> {
+fn process_append_removed(
+    state: &AppState,
+    keys: &[String],
+    record_ids: &[u64],
+) -> Result<(), String> {
     let mut session_guard = state.lock_import_session();
     let session = session_guard
         .as_mut()
         .ok_or_else(|| format!("无活跃导入会话，请先调用 {}", cmd::IMPORT_BEGIN))?;
 
+    /* 记录 ID 解析条目键：删除时 meta 不可解密（或历史条目缺键）仍能
+     * 凭 WAL committed 映射释放续传幂等锁。 */
+    let mut resolved: Vec<String> = keys.to_vec();
+    for id in record_ids {
+        if let Some(key) = session.key_for_id(*id) {
+            resolved.push(key.to_string());
+        }
+    }
+    resolved.sort_unstable();
+    resolved.dedup();
+    if resolved.is_empty() {
+        return Ok(());
+    }
+
     session.writer.append(&WalEntry::Removed {
-        keys: keys.to_vec(),
+        keys: resolved.clone(),
         at: now_ms(),
     })?;
 
     let mut removed = 0u64;
-    for key in keys {
+    for key in &resolved {
         if session.forget_committed(key) {
             removed += 1;
         }
     }
     log::info!(
         "[import_writer] 墓碑已落盘: {} 条目键（会话内即时移除 {}）",
-        keys.len(),
+        resolved.len(),
         removed
     );
     Ok(())
@@ -1207,7 +1231,7 @@ mod tests {
         {
             let mut guard = state.lock_import_session();
             let session = guard.as_mut().unwrap();
-            session.mark_committed("h1");
+            session.mark_committed("h1", 42);
             session
                 .writer
                 .append(&WalEntry::Committed {
@@ -1310,7 +1334,7 @@ mod tests {
         let (state, _verthys_path, _dir) = state_with_session();
         {
             let mut guard = state.lock_import_session();
-            guard.as_mut().unwrap().mark_committed("h1");
+            guard.as_mut().unwrap().mark_committed("h1", 1);
         }
 
         let outcome =

@@ -4,29 +4,26 @@
 >
 > Last updated: 2026-11-03 · 维护人：K1Super
 
-C 核心测试为单一聚合可执行文件 `verthys_tests`（`core/tests/CMakeLists.txt` 的 `add_executable` 编译 73 个测试源文件），与两个独立进程的 ACG 专项共注册为 3 个 ctest 测试项（主测试 + `verthys_scd_acg` + `verthys_scd_dll_acg`）；主测试内含 472 个 `TEST()` 用例（`test_runner.c` 中 472 个 `RUN_TEST` 与之一一对应）。
+C 核心测试为单一聚合可执行文件 `verthys_tests`（`core/tests/CMakeLists.txt` 的 `add_executable` 汇总当前测试源文件），与两个独立进程的 ACG 专项共注册为 3 个 ctest 测试项（主测试 + `verthys_scd_acg` + `verthys_scd_dll_acg`）；主测试当前 270 个 `TEST()` 用例。
 
 ## 1. 测试分层（按 `core/tests/` 实际目录）
 
-| 目录 | 目的（对应 core/CMakeLists.txt 的业务分层注释） | 代表用例 |
+| 目录 | 目的 | 代表用例 |
 |---|---|---|
-| `api/` | L5 公共 C ABI：lifecycle/unlock/scan/transfer | `api_full_roundtrip`、`v3life_full_chain_roundtrip` |
-| `crypto/` | L0 密码学原语：AEAD/HMAC/密钥派生/CNG | `aead_roundtrip`、`master_key_derive_deterministic`、`cng_aead_roundtrip` |
-| `container/` | L1 容器格式：format/superblock/partition/extent | `v3sb_serialize_parse_roundtrip`、`v3part_encrypt_decrypt_roundtrip`、`v3ext_put_get_roundtrip` |
-| `index/` | L2 索引：LSM（MemTable+SSTable+Compaction） | `v3lsm_put_get_roundtrip`、`v3lsm_wal_crash_recovery` |
-| `transaction/` | L3 事务一致：WAL 环形双区 + 六阶段事务 | `inject_sb_ciphertext_bitflip_rejected` |
-| `security/` | L6 深度安全：预设/完整性/反调试/内存/应急/六层防御/休眠/挂钩扫描 | `keysep_install_consumes_and_reports`、`rhat_virtualprotect_patch_detected`、`dcl_facts_locked_matrix`、`hook_scan_evaluate_hook_two_strikes`、`hibernation_state_parse_map` |
-| `property/` | 属性测试（自研 harness，无外部框架）：随机序列 + 不变式断言 | `prop_lsm_insert_find_delete`、`prop_txn_commit_rollback_consistency` |
-| `perf/` | 性能基准与回归 | `perf_baseline_unlock_write_read`、`perf_warm_cache_hit_on_second_unlock` |
-| `regression/` | 缺陷回归（最终修复方案 §6.1） | `repair_pool_extend_boundary` |
-| `schema/` | vendored flatcc 工具链全链路 | `flatcc_demo_roundtrip` |
+| `api/` | 公共 C ABI：容器创建/解锁/扫描/导出导入/轮换 | `api_*`、`transfer_*`、`rotate_*` |
+| `crypto/` | 密码学原语、胡椒、keyfile | `aead_roundtrip`、`pepper_*`、`keyfile_*` |
+| `container/` | 容器格式、模块槽、分片 | `container_*`、`modules_*`、`chunks_*` |
+| `index/` | 记录/存储/仓库 | `records_*`、`store_*`、`repo_*` |
+| `security/` | 预设/完整性/反调试/内存/应急/六层防御/熔断/回滚/见证 | `lockout_*`、`rollback_*`、`witness_*`、`rhat_*`、`dcl_*` |
+| `perf/` | 性能基准与回归 | `perf_*` |
+| `schema/` | vendored flatcc 工具链全链路 | `flatcc_demo_*` |
 
-前端全量：`Set-Location verthys-tauri; npx vitest run`（当前 74 文件 / 788 用例）。
+前端全量：`Set-Location verthys-tauri; npx vitest run`（当前 74 文件 / 795 用例）。
 
 ## 2. 如何跑全部测试
 
 ```powershell
-# 生产构建目录（Release）：3 个 ctest 测试项（主测试 472 用例 + 两个 ACG 专项）
+# 生产构建目录（Release）：3 个 ctest 测试项（主测试 270 用例 + 两个 ACG 专项）
 ctest --test-dir build -C Release --output-on-failure
 
 # 或直接运行测试 exe（Release 配置，输出以 "=== Summary: N passed, M failed ===" 结尾）
@@ -47,7 +44,7 @@ CI（`.github/workflows/core.yml`）用 `ctest --test-dir build_ci -C Debug --ou
 & ".\build\core\tests\Release\verthys_tests.exe" aead
 
 # 多组联合（OR）
-& ".\build\core\tests\Release\verthys_tests.exe" v3sb quorum
+& ".\build\core\tests\Release\verthys_tests.exe" repo lockout
 ```
 
 ctest 层级仅能按注册名过滤（主测试 1 项 + 两个 ACG 专项）：
@@ -56,9 +53,10 @@ ctest 层级仅能按注册名过滤（主测试 1 项 + 两个 ACG 专项）：
 ctest --test-dir build -C Release -R verthys_tests
 ```
 
-## 4. property 说明
+## 4. 已删除的旧代测试
 
-- property（`core/tests/property/test_v3_property.c:1-39`）：自研 harness（splitmix64 确定性 PRNG + 不变式断言 + 失败种子/步号可复现），覆盖 LSM“插入后必可找到”、Extent 引用计数守恒、事务 commit/rollback 后超级块与 WAL 一致、回滚耐久性（复活窗口回归）四类不变式。
+旧代容器、LSM、WAL、事务、超级块、温缓存与属性测试已随旧实现整体删除；
+当前测试只覆盖容器与共享安全/密码学能力。历史用例清单已随旧代审计文档删除。
 
 ## 5. 覆盖率要求
 
@@ -70,20 +68,19 @@ ctest --test-dir build -C Release -R verthys_tests
 
 | 场景 | 用例 |
 |---|---|
-| 解锁（成功/失败/锁定/温缓存） | `api_wrong_password`、`api_lock_unlock_same_file`、`v3life_unlock_minimal_first`、`v3life_warmcache_hit_miss_tamper` |
-| 加解密（AEAD/CNG/密钥派生/篡改） | `aead_roundtrip`、`aead_tamper_fails`、`cng_aead_roundtrip`、`keysep_install_consumes_and_reports`、`master_key_derive_deterministic` |
-| 事务提交/回滚 | `v3sb_txn_commit_rollback`、`prop_txn_commit_rollback_consistency` |
-| WAL 重放 | `v3lsm_wal_crash_recovery`、`v3life_crash_committed_replayed`、`v3life_crash_uncommitted_discarded` |
-| 容器魔数/schema 校验 | `format_bad_magic_rejected`、`v3sb_parse_garbage_rejected`、`inject_bad_magic_rejected` |
-| 完整性/防篡改 | `integrity_verify_unconfigured_passes`、`v3life_verify_integrity_tamper`、`rhat_virtualprotect_patch_detected` |
-| 七路径事实判定 | `dcl_facts_locked_matrix`、`dcl_facts_suspend_and_mem_matrix`、`dcl_facts_hibernation_matrix`、`dcl_facts_hook_scan_matrix`、`dcl_facts_sandbox_matrix`、`dcl_facts_cross_device_matrix`、`dcl_facts_limited_count` |
-| Hook 扫描状态机 | `hook_scan_evaluate_clean`、`hook_scan_evaluate_baseline_unavailable`、`hook_scan_evaluate_stale_stub`、`hook_scan_evaluate_hook_two_strikes`、`hook_scan_real_baseline_smoke` |
+| 解锁（成功/失败/锁定） | `api_*`、`lockout_*`、`security_state_*` |
+| 加解密（AEAD/胡椒/keyfile/密钥派生） | `aead_roundtrip`、`aead_tamper_fails`、`pepper_*`、`keyfile_*` |
+| 容器格式/模块/分片 | `container_*`、`modules_*`、`chunks_*`、`fuzz_*` |
+| 仓库读写/扫描 | `repo_*`、`store_*`、`records_*` |
+| 完整性/防篡改 | `integrity_*`、`rhat_*`、`rollback_*`、`witness_*` |
+| 七路径事实判定 | `dcl_facts_*` |
+| Hook 扫描状态机 | `hook_scan_*` |
 | 挂起看门狗 | `suspend_watchdog_terminates_suspended_worker`（A18S，需 `VERTHYS_A18=1`） |
 
 ## 7. Rust 侧测试
 
 ```powershell
-# 主应用 crate（src-tauri）：569 个测试（567 通过 + 2 ignored），分布于 controller/*、service/*、util/* 等
+# 主应用 crate（src-tauri）：555 个测试通过 + 2 ignored，分布于 controller/*、service/*、util/* 等
 Set-Location .\verthys-tauri\src-tauri
 cargo test
 ```
@@ -126,10 +123,40 @@ node scripts/gates/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local
 ## 9. 攻击回归
 
 ```powershell
-# 全量攻击回归（A1/A2/A3/A4/A5/A6b/A7/A8/A9/A10~A19/A20/A20b/A18S），输出机器可读证据
+# 全量攻击回归（A1/A2/A3/A4/A5/A6b/A7/A8/A9/A10~A18/A20/A20b/A18S），输出机器可读证据
 pwsh -NoProfile -File tests/attack/run.ps1 -OutJson build/attack-final.json
 ```
 
 - `A18` 为 keyfile 因子绕过，`A18S` 为 worker 挂起处置；两者编号独立，避免覆盖。
 - `A18S` 使用真实 worker + 心跳 + 挂起看门狗，健康期误杀与 3s 级处置均纳入判定。
 - `A6`（离机 + 已知模块口令）只有绑定当前 DLL/worker 哈希的合格报告才计 PASS，否则保持 SKELETON。
+
+## 10. P2 机器级安全服务测试
+
+```powershell
+# 独立工程单元测试（U1–U12；需测试钩子构建）
+pwsh -NoProfile -File scripts/build/build_security_service.ps1 `
+  -BuildDir build_security_service_ci -Profile local -TestHooks -RunTests -NoSign
+
+# 控制台集成 I0–I12（不安装 SCM，不触碰真实 ProgramData/HKLM）
+pwsh -NoProfile -File tests/service/integration.ps1 -BuildDir build_security_service_ci
+
+# P2 攻击回归控制台子集（S-A3/A4/A5/A6/A8/A9）
+pwsh -NoProfile -File tests/service/attack.ps1 -BuildDir build_security_service_ci
+
+# 干净 VM 提权 E2E（默认 SKIP；需 -AllowElevatedE2E）
+pwsh -NoProfile -File tests/service/e2e-install.ps1 -Artifacts build_security_service_ci\Debug -AllowElevatedE2E
+```
+
+- 服务安装/卸载通过 `VerthysSecuritySvc.exe /install /quiet`、`/uninstall /quiet` 子命令执行；独立 `VerthysSecurityServiceSetup.exe` 已淘汰。
+- 应用安装包 E2E：干净 VM 标准用户双击 perMachine 安装包 → 一次 UAC → 安装器 POSTINSTALL 安装服务并 Running；取消 UAC 后无 Program Files 目录、服务、注册表、根 CA；卸载后服务、CA、事件源、ProgramData、卸载项全部清除且用户加密库保留。
+
+- core 客户端 C1–C8 与 V4 接入级用例在 `VERTHYS_TEST_HOOKS=ON` 构建中注册；默认测试钩子构建不访问真实服务，未显式注入 `VERTHYS_TEST_SERVICE_INSTALLED` 时按“未安装”fail-closed。P1 回归由 `test_runner` 显式设置测试旁路；进入机器预算用例组时撤销旁路，验证服务未安装、管道不可达、预算耗尽三种情况下 V4 解锁与模块解锁均返回 RATE，组结束后恢复旁路。产品构建不包含旁路。
+- `tests/e2e/worker-smoke.ps1` 与 `tests/e2e/rotate-host.ps1` 使用测试钩子 DLL，显式设置 `VERTHYS_TEST_MACHINE_LIMITER_BYPASS=1` 与 `VERTHYS_TEST_STATE_DIR`；熔断/回滚状态走 KnownFolder，仅覆盖 `LOCALAPPDATA` 不足以隔离。
+- 服务单元测试含事件日志消息表校验：10 个事件 ID 通过 `FormatMessage` 解析，共 446 断言通过。
+- 生产 OFF 钩子测试可执行文件链接缺陷已修复（`test_witness.c` 仅在测试钩子构建调用派生函数）；执行仍需要已安装服务或测试夹具。
+- 本机实测（测试钩子构建）：机器预算客户端 8/8、V4 解锁/模块解锁接入 2/2、`api_` 15/15、`format_` 15/15、`module_` 15/15；生产 OFF 钩子 core DLL 与测试 exe 构建/链接通过，生产 DLL 不含测试钩子字符串。
+- P1 全量 + 新增接入用例实测 280 passed / 0 failed（测试钩子构建，Release）。lockout 用例对测试机 CNG 见证键累积与残留线程敏感，复跑异常时先用 `tests/gate.ps1` 的 hygiene 流程回收见证键，再复核全量。
+- P1 攻击回归以当前测试钩子构建执行：PASS=20、FAIL=4（A2/A8/A18S，依赖签名宿主/内存转储/worker 产物）、SKIP=1；属于 P1 既有门禁环境，不是 P2 回归。
+- 正向 Authenticode 认证需要把测试证书导入 `CurrentUser\Root`；无交互桌面环境无法完成信任导入，本机只执行了未签名拒绝与伪造服务端拒绝的负向用例。正向签名探针与模块校验在干净 VM E2E 中验证。
+- S-A1/S-A2/S-A7/S-A10 与 E1–E8 需要真实 SCM 安装、管理员权限或第二台机器，只在干净 VM 执行并保存 `sc query`、`icacls`、事件日志与探针输出证据。

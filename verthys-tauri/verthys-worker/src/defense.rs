@@ -383,7 +383,4 @@ pub fn get_active_attrs() -> u32 {
     ACTIVE_ATTRS.load(Ordering::SeqCst)
 }
 
-/// 查询指定沙盒属性是否已应用。
-pub fn has_attr(attr: u32) -> bool {
-    (get_active_attrs() & attr) != 0
-}
+

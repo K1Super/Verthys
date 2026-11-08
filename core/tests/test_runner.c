@@ -4,9 +4,7 @@
  */
 #include "verthys_test.h"
 #include "verthys_crypto.h"
-#include "verthys_container_lock.h"
-#include "verthys_container_v3.h"
-#include "verthys_api_utils.h"
+#include "vty_lockout.h"
 #include "vty_device_root.h"
 #include "vty_rollback.h"
 #include <string.h>
@@ -25,33 +23,6 @@
 
 int g_tests_passed = 0;
 int g_tests_failed = 0;
-
-/*
- * 双进程容器锁测试的持锁子进程入口（test_container_lock.c 配套）。
- * 在沙箱初始化之前调用：子进程继承父进程已切换的沙箱 CWD，
- * 相对路径参数与父进程语义一致。独占打开成功后落盘握手文件并
- * 驻留 15s（正常由父进程 TerminateProcess 终止）。
- */
-static int container_lock_child_main(const char *path, const char *handshake)
-{
-    FILE *f = NULL;
-    HANDLE h;
-
-    if (verthys_container_open_exclusive(path, 0, &f) != VERTHYS_OK) {
-        return 1;
-    }
-    h = CreateFileA(handshake, GENERIC_WRITE, FILE_SHARE_READ,
-                    NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) {
-        verthys_container_close_exclusive(f, path);
-        return 1;
-    }
-    CloseHandle(h);
-
-    Sleep(15000);
-    verthys_container_close_exclusive(f, path);
-    return 0;
-}
 
 /* test_init.c */
 TEST(init_deinit_roundtrip);
@@ -99,42 +70,7 @@ TEST(format_tampered_mac_fails);
 TEST(format_write_rejects_null);
 TEST(format_data_size_guard_rejects);
 
-/* test_verthys_api.c */
-TEST(api_full_roundtrip);
-TEST(api_delete_record);
-TEST(api_get_not_found);
-TEST(api_wrong_password);
-TEST(api_rate_limit_exponential);
-TEST(api_operations_require_unlock);
-TEST(api_locked_after_lock);
-TEST(api_invalid_params);
-TEST(api_add_delete_add_cycle);
-TEST(api_empty_password);
-TEST(api_lock_unlock_same_file);
-TEST(api_double_deinit_rejected);
-TEST(api_clear_record_cache);
-TEST(api_add_record_oversize_rejected);
-TEST(api_create_with_preset_balanced);
-TEST(api_create_with_preset_secure);
-TEST(api_create_with_preset_exists);
-TEST(api_create_with_preset_invalid);
-TEST(api_create_with_preset_survives_cp);
 
-/* test_verthys_export.c */
-TEST(cp_then_unlock_new);
-TEST(cp_wrong_old);
-TEST(cp_preserves_records);
-TEST(cp_invalid_params);
-TEST(cp_requires_unlock);
-TEST(export_import_roundtrip);
-TEST(export_separate_password);
-TEST(export_invalid_params);
-TEST(export_requires_unlock);
-TEST(import_merges_records);
-TEST(import_wrong_password);
-TEST(import_bad_file);
-TEST(import_invalid_params);
-TEST(import_requires_unlock);
 
 /* test_export_path_guard.c — Export/Import 路径纵深防御（C 层） */
 TEST(pg_export_rejects_dotdot_path);
@@ -150,24 +86,6 @@ TEST(join_bounded_timeout_then_release);
 TEST(join_bounded_exited_thread);
 TEST(join_bounded_null_handle);
 
-/* test_memory_safety.c */
-TEST(mem_lock_zeroes_keys);
-TEST(mem_lock_frees_records);
-TEST(mem_lock_retains_file_path);
-TEST(mem_failed_unlock_keeps_locked);
-TEST(mem_failed_unlock_bad_format);
-TEST(mem_deinit_from_unlocked);
-TEST(mem_deinit_from_locked);
-TEST(mem_deinit_from_uninit);
-/* UAF 回归测试（8 项） */
-TEST(mem_uaf_getrecord_populates_borrow_cache);
-TEST(mem_uaf_addrecord_invalidates_cache);
-TEST(mem_uaf_deleterecord_invalidates_cache);
-TEST(mem_uaf_deleterecords_invalidates_cache);
-TEST(mem_uaf_flush_invalidates_cache);
-TEST(mem_uaf_import_invalidates_cache);
-TEST(mem_uaf_changepassword_invalidates_cache);
-TEST(mem_uaf_getrecord_overwrites_previous_borrow);
 
 /* test_format_fuzz.c */
 TEST(fuzz_empty_file);
@@ -175,7 +93,6 @@ TEST(fuzz_too_small);
 TEST(fuzz_all_zero_file);
 TEST(fuzz_random_garbage);
 TEST(fuzz_bit_flip_magic);
-TEST(fuzz_bit_flip_version);
 TEST(fuzz_truncated_header);
 TEST(fuzz_truncated_metadata);
 TEST(fuzz_bit_flip_metadata);
@@ -184,9 +101,6 @@ TEST(fuzz_bit_flip_index);
 TEST(fuzz_bit_flip_data_block);
 TEST(fuzz_extended_file);
 
-/* test_key_separation.c — CNG 内核托管密钥（2 项） */
-TEST(keysep_install_consumes_and_reports);
-TEST(keysep_commit_sleep_enforced);
 
 /* test_security_preset.c — 三档预设配置与快照读取（3 项） */
 TEST(preset_feature_bits_matrix);
@@ -198,79 +112,17 @@ TEST(emergency_telemetry_no_trigger);
 TEST(emergency_degrade_requires_window_threshold);
 TEST(emergency_handler_swap_and_null);
 
-/* test_integrity_verify.c — 构建期签名验签 + 锚点校验三态（4 项） */
+/* test_integrity_verify.c — 构建期签名验签（2 项） */
 TEST(integrity_verify_unconfigured_passes);
-TEST(integrity_init_idempotent);
-TEST(integrity_anchor_incomplete_not_pass);
 TEST(integrity_verify_startup_cache_replay_invalidate);
 
-/* test_txn_recovery_inject.c — 事务半写/损坏故障注入（4 项） */
-TEST(inject_sb_ciphertext_bitflip_rejected);
-TEST(inject_taillog_overwrite_still_unlockable);
-TEST(inject_bad_magic_rejected);
-TEST(inject_wal_third_round_residual_not_replayed);
 
-/* test_txn_delete_retry.c — DELETE 中途失败的引用完好性（1 项） */
-TEST(txn_delete_failure_keeps_extent_ref);
 
-/* test_txn_force_abort.c — 写入失败后的会话级恢复（1 项） */
-TEST(txn_add_failure_session_recovery);
-
-/* test_txn_extent_reloc.c — Extent 容量三级链审计搬迁集成验收（2 项） */
-TEST(txn_extent_reloc_chain_two_rounds);
-TEST(txn_extent_reloc_same_txn_compact_floor);
-
-/* test_perf_prefetch.c — 性能回归测试（8 项） */
-TEST(perf_balanced_enables_warm_cache);
-TEST(perf_secure_disables_warm_cache);
-TEST(perf_warm_cache_hit_on_second_unlock);
-TEST(perf_corrupt_cache_falls_back_to_disk);
-TEST(perf_corrupt_cache_header_skips_cache);
-TEST(perf_diagnostics_metrics_complete);
-TEST(perf_no_cache_cold_start);
-TEST(perf_argon2_drift_metrics_collected);
-TEST(perf_baseline_unlock_write_read);
-
-/* test_final_repair.c — 回归测试（12 项） */
-TEST(repair_pool_extend_boundary);
-TEST(repair_lsm_large_insert);
-TEST(repair_changepw_fail_rollback);
-TEST(repair_large_file_offset);
-TEST(repair_v1_mac_offset_overflow);
-TEST(repair_vfmt_write_fail_cleanup);
-TEST(repair_vsb_txn_v3_rollback);
-TEST(repair_tail_log_commit_regression);
-TEST(repair_export_too_many);
-TEST(repair_name_len_clamp);
-TEST(repair_thread_shutdown_cycles);
 
 /* test_flatcc_demo.c — 验收：vendored flatcc 工具链全链路（demo schema） */
 TEST(flatcc_demo_roundtrip);
 TEST(flatcc_demo_tamper_rejected);
 
-/* test_cng_kernel.c — 验收：CNG 内核托管全量接线 */
-TEST(cng_aead_roundtrip);
-TEST(cng_aead_init_contract);
-TEST(cng_aead_empty_plaintext);
-TEST(cng_aead_nonce_unique_monotonic);
-TEST(cng_aead_nonce_counter_restore);
-TEST(cng_aead_import_auto_restores_counter);
-TEST(cng_aead_nonce_exhausted_rejected);
-TEST(cng_aead_nonce_decode_layout);
-TEST(cng_aead_tamper_rejected);
-TEST(cng_aead_wrong_key_rejected);
-TEST(cng_aead_destroy_invalidates);
-TEST(cng_aead_null_params_rejected);
-TEST(km_batch_import_roundtrip);
-TEST(km_import_wrong_mek_rolls_back);
-TEST(km_wrapped_role_binding);
-TEST(km_reimport_replaces_handles);
-TEST(km_null_params_rejected);
-TEST(km_global_handle_tracking);
-TEST(cng_aead_import_failure_zeroes_key);
-TEST(cng_aead_length_domain_guards);
-TEST(km_rotate_mek_failure_keeps_old_slot);
-TEST(cng_provider_concurrent_init_deinit);
 
 /* test_secure_allocator.c — 验收：安全分配器 + 全局内存预算记账 */
 TEST(sec_alloc_basic_roundtrip);
@@ -281,327 +133,230 @@ TEST(sec_alloc_error_paths);
 TEST(sec_alloc_destroy_releases_all);
 TEST(sec_alloc_shared_lifecycle);
 
-/* test_backoff_process_wide.c — 暴力破解退避进程级聚合语义 */
-TEST(backoff_process_wide_aggregation);
 
-/* test_container_lock.c — 容器跨进程互斥（单写者 + 超级块独占锁） */
-TEST(container_lock_dual_process_exclusive);
 
-/* test_v3_container.c — 验收：V3 超级块（多副本 + 法定人数 + 事务） */
-TEST(v3sb_init_new_defaults);
-TEST(v3sb_init_rejects_null);
-TEST(v3sb_serialize_parse_roundtrip);
-TEST(v3sb_parse_idempotent);
-TEST(v3sb_hmac_tamper_rejected);
-TEST(v3sb_hmac_wrong_key_rejected);
-TEST(v3sb_parse_garbage_rejected);
-TEST(v3sb_serialize_null_and_overflow_rejected);
-TEST(v3sb_replica_io_roundtrip);
-TEST(v3sb_replica_bad_frame_rejected);
-TEST(v3sb_commit_quorum_roundtrip);
-TEST(v3sb_quorum_txid_advances);
-TEST(v3sb_quorum_one_replica_corrupt);
-TEST(v3sb_quorum_two_replicas_corrupt);
-TEST(v3sb_quorum_three_replicas_corrupt);
-TEST(v3sb_quorum_zero_replicas_written);
-TEST(v3sb_quorum_valid_but_split);
-TEST(v3sb_quorum_txid_majority_wins);
-TEST(v3sb_quorum_same_txid_divergent_content);
-TEST(v3sb_commit_fail_injection);
-TEST(v3sb_txn_commit_rollback);
 
-/* test_v3_partition.c — 验收：V3 分区管理（独立 AEAD 密钥 + 分区表持久化） */
-TEST(v3part_create_defaults);
-TEST(v3part_create_rejects_invalid);
-TEST(v3part_encrypt_decrypt_roundtrip);
-TEST(v3part_decrypt_txid_binding_rejected);
-TEST(v3part_tamper_rejected);
-TEST(v3part_key_isolation);
-TEST(v3part_null_params_rejected);
-TEST(v3part_grow_strategy);
-TEST(v3part_load_nonce_no_reuse);
-TEST(v3part_load_rejects_invalid);
-TEST(v3part_table_add_find_limits);
-TEST(v3part_table_save_load_roundtrip);
-TEST(v3part_table_load_tamper_rejected);
-TEST(v3part_table_load_empty_region_rejected);
-TEST(v3part_table_save_rejects_invalid);
 
-/* test_v3_lsm.c — 验收：V3 LSM 索引（MemTable + SSTable + Compaction） */
-TEST(v3lsm_open_close_roundtrip);
-TEST(v3lsm_put_get_roundtrip);
-TEST(v3lsm_put_overwrite);
-TEST(v3lsm_delete_tombstone);
-TEST(v3lsm_flush_to_sstable);
-TEST(v3lsm_flush_rebuild_fail_readonly);
-TEST(v3lsm_close_failure_reopens_complete);
-TEST(v3lsm_reopen_persistence);
-TEST(v3lsm_wal_crash_recovery);
-TEST(v3lsm_compaction_l0_merge);
-TEST(v3lsm_compaction_shadowing);
-TEST(v3lsm_compaction_tombstone);
-TEST(v3lsm_manifest_tamper_rejected);
-TEST(v3lsm_get_notfound_and_invalid);
-TEST(v3lsm_null_params_rejected);
-TEST(v3lsm_flush_manifest_save_fail_rollback);
-TEST(v3lsm_compact_manifest_save_fail_rollback);
-TEST(v3lsm_large_insert_find);
 
-/* test_sstable_budget.c — SSTable 写前预算（越界字节不落盘） */
-TEST(sstb_budget_rejects_before_physical_write);
-TEST(sstb_budget_normal_write_unaffected);
 
-/* test_warmcache_v3.c — V3 温缓存（保存/加载/段布局矩形校验） */
-TEST(v3ic_roundtrip_and_layout_fuzz);
-TEST(v3ic_sidecar_dir_contract);
 
-/* test_v3_extent.c — 验收：V3 内容寻址 Extent（去重 + 完整性） */
-TEST(v3ext_hash_basics);
-TEST(v3ext_index_init_and_find);
-TEST(v3ext_put_get_roundtrip);
-TEST(v3ext_put_empty_plaintext);
-TEST(v3ext_put_size_guard_rejects);
-TEST(v3ext_dedup_no_rewrite);
-TEST(v3ext_release_refcount_and_gc);
-TEST(v3ext_resource_limit_rejected);
-TEST(v3ext_locked_rejected);
-TEST(v3ext_data_tamper_rejected);
-TEST(v3ext_block_move_rejected);
-TEST(v3ext_wrong_partition_key_rejected);
-TEST(v3ext_index_save_load_roundtrip);
-TEST(v3ext_index_load_nonce_rollback_rejected);
-TEST(v3ext_index_tamper_rejected);
-TEST(v3ext_index_load_empty_region_rejected);
-TEST(v3ext_null_params_rejected);
-TEST(v3ext_compact_reclaims_dead_blocks);
-TEST(v3ext_compact_noop_and_empty);
-TEST(v3ext_put_beyond_capacity_rejected);
 
-/* test_v3_lifecycle.c — 验收：V3 生命周期全链路 + 流水线 + 温缓存 + WAL 崩溃恢复 */
-TEST(v3life_full_chain_roundtrip);
-TEST(v3life_cp_old_password_rejected);
-TEST(v3life_container_info_v3);
-TEST(v3life_verify_integrity_tamper);
-TEST(v3life_scan_family_v3);
-TEST(v3life_scan_projection);
-TEST(v3life_pipeline_fail_mask_stages);
-TEST(v3life_unlock_minimal_first);
-TEST(v3life_preheat_interrupt_and_join);
-TEST(v3life_warmcache_hit_miss_tamper);
-TEST(v3life_crash_uncommitted_discarded);
-TEST(v3life_crash_committed_replayed);
-TEST(v3life_crash_prepare_only_replayed);
-TEST(arekey_trigger_matrix);
-TEST(arekey_rotate_full_cycle);
-TEST(arekey_degrade_force_persist);
-TEST(arekey_crash_orphan_frame);
-TEST(arekey_crash_after_commit);
-TEST(arekey_inflight_guard_rejects);
-TEST(arekey_prep_failure_restores_state);
-TEST(v3life_verify_persist_selfcheck);
 
-/* test_v3_property.c — 属性测试（自研 harness：
- * 随机序列 + 不变式断言，种子可复现）+ 回滚耐久定向回归 */
-TEST(prop_lsm_insert_find_delete);
-TEST(prop_extent_refcount_conservation);
-TEST(prop_txn_commit_rollback_consistency);
-TEST(prop_txn_crash_no_resurrection);
-TEST(prop_txn_rollback_delete_restores_original);
-TEST(prop_txn_crash_discard_delete_restores_original);
+/* 密钥体系 —— 原语 / 恢复码（test_primitives.c） */
+TEST(blake3_known_vectors);
+TEST(hkdf_rfc5869_case1);
+TEST(hmac_deterministic_and_key_sensitive);
+TEST(argon2id_deterministic_and_salt_sensitive);
+TEST(kdf_param_floor_rejected);
+TEST(wrap_key32_roundtrip_and_tamper);
+TEST(recovery_code_roundtrip);
+TEST(recovery_checksum_error_rejected);
+TEST(recovery_suffix_rejected);
+TEST(keyring_serialize_parse_roundtrip);
+TEST(keyring_parse_invalid_rejected);
+TEST(recovery_slot_seal_open);
 
-/* v4 密钥体系 —— 原语 / 恢复码（test_v4_primitives.c） */
-TEST(v4_blake3_known_vectors);
-TEST(v4_hkdf_rfc5869_case1);
-TEST(v4_hmac_deterministic_and_key_sensitive);
-TEST(v4_argon2id_deterministic_and_salt_sensitive);
-TEST(v4_kdf_param_floor_rejected);
-TEST(v4_wrap_key32_roundtrip_and_tamper);
-TEST(v4_recovery_code_roundtrip);
-TEST(v4_recovery_checksum_error_rejected);
-TEST(v4_recovery_suffix_rejected);
-TEST(v4_keyring_serialize_parse_roundtrip);
-TEST(v4_keyring_parse_invalid_rejected);
-TEST(v4_recovery_slot_seal_open);
+/* keyfile 因子（test_keyfile.c） */
+TEST(keyfile_generate_parse_roundtrip);
+TEST(keyfile_tamper_rejected);
+TEST(keyfile_vault_create_open_and_rotate);
 
-/* v4 keyfile 因子（test_v4_keyfile.c） */
-TEST(v4_keyfile_generate_parse_roundtrip);
-TEST(v4_keyfile_tamper_rejected);
-TEST(v4_keyfile_vault_create_open_and_rotate);
+/* 容器 —— 头部与密钥槽（test_container.c） */
+TEST(header_write_parse_roundtrip);
+TEST(header_tamper_rejected);
+TEST(slot_seal_serialize_parse);
+TEST(slots_parse_all_roundtrip);
+TEST(slot_policy_check);
+TEST(header_generation_and_minor_frozen);
+TEST(data_root_locator_codec);
+TEST(segment_header_codec);
 
-/* v4 容器 —— 头部与密钥槽（test_v4_container.c） */
-TEST(v4_header_write_parse_roundtrip);
-TEST(v4_header_tamper_rejected);
-TEST(v4_slot_seal_serialize_parse);
-TEST(v4_slots_parse_all_roundtrip);
-TEST(v4_slot_policy_check);
-TEST(v4_header_generation_and_minor_frozen);
-TEST(v4_data_root_locator_codec);
-TEST(v4_segment_header_codec);
+/* 公共 API 会话（test_api.c） */
+TEST(api_create_save_lock_unlock_roundtrip);
+TEST(api_recovery_unlock_roundtrip);
+TEST(api_keyfile_create_unlock_disable_roundtrip);
+TEST(api_keyfile_recovery_rebind);
+TEST(api_keyfile_create_rejects_existing_targets);
 
-/* v4 公共 API 会话（test_v4_api.c） */
-TEST(v4_api_create_save_lock_unlock_roundtrip);
-TEST(v4_api_recovery_unlock_roundtrip);
-TEST(v4_api_rejects_v3_file);
-TEST(v4_api_keyfile_create_unlock_disable_roundtrip);
-TEST(v4_api_keyfile_recovery_rebind);
-TEST(v4_api_keyfile_create_rejects_existing_targets);
+/* 数据区与目录树（test_store.c） */
+TEST(store_empty_root_binds_uuid_epoch);
+TEST(store_put_get_and_cow_snapshot);
+TEST(store_split_and_verify);
+TEST(store_segment_append_read_and_cursor);
+TEST(store_tamper_and_truncate_rejected);
 
-/* v4 数据区与目录树（test_v4_store.c） */
-TEST(v4_store_empty_root_binds_uuid_epoch);
-TEST(v4_store_put_get_and_cow_snapshot);
-TEST(v4_store_split_and_verify);
-TEST(v4_store_segment_append_read_and_cursor);
-TEST(v4_store_tamper_and_truncate_rejected);
+/* 记录仓库（test_repo.c） */
+TEST(repo_add_get_delete_and_id_monotonic);
+TEST(repo_file_chunk_manifest);
+TEST(repo_empty_name_and_tombstone_count);
+TEST(repo_system_domain_survives_module_enable_and_delete);
+TEST(repo_legacy_security_record_migrates_on_module_enable);
 
-/* v4 记录仓库（test_v4_repo.c） */
-TEST(v4_repo_add_get_delete_and_id_monotonic);
-TEST(v4_repo_file_chunk_manifest);
-TEST(v4_repo_empty_name_and_tombstone_count);
-TEST(v4_repo_system_domain_survives_module_enable_and_delete);
-TEST(v4_repo_legacy_security_record_migrates_on_module_enable);
+/* 仓库扫描与类型索引（test_repo_scan.c） */
+TEST(repo_scan_cursor_and_start_id);
+TEST(repo_scan_skips_tombstone_and_type_index);
 
-/* v4 仓库扫描与类型索引（test_v4_repo_scan.c） */
-TEST(v4_repo_scan_cursor_and_start_id);
-TEST(v4_repo_scan_skips_tombstone_and_type_index);
+/* 公共 API 记录链路（test_api_container.c） */
+TEST(api_records_roundtrip_and_scan);
+TEST(api_list_ids_by_type_and_verify_persist);
+TEST(api_add_records_batch_roundtrip);
+TEST(api_records_require_unlock);
 
-/* v4 公共 API 记录链路（test_v4_api_v4.c） */
-TEST(v4_api_records_roundtrip_and_scan);
-TEST(v4_api_list_ids_by_type_and_verify_persist);
-TEST(v4_api_add_records_batch_roundtrip);
-TEST(v4_api_records_require_unlock);
+/* 公共 API 模块 M1（test_api_modules.c） */
+TEST(api_modules_roundtrip_and_policy);
+TEST(api_module_delete);
+TEST(api_recovery_rotate);
 
-/* v4 公共 API 模块 M1（test_v4_api_modules.c） */
-TEST(v4_api_modules_roundtrip_and_policy);
-TEST(v4_api_module_delete);
-TEST(v4_api_recovery_rotate);
+/* 公共 API PCR 策略（test_api_pcr.c） */
+TEST(api_pcr_policy_roundtrip);
+/* 恢复会话容器槽重绑（test_reseal_device.c） */
+TEST(reseal_device_roundtrip_restores_normal_unlock);
+TEST(reseal_device_rejects_normal_session);
+TEST(reseal_device_keyfile_required_and_roundtrip);
+/* 公共 API 分片（test_api_content.c） */
+TEST(api_content_chunk);
+TEST(api_product_e2e);
+/* 内部错误码映射（test_error_map.c） */
+TEST(error_map_d9_codes_are_distinct);
+TEST(error_map_r10_slot_errors_lock_format_policy);
 
-/* v4 公共 API PCR 策略（test_v4_api_pcr.c） */
-TEST(v4_api_pcr_policy_roundtrip);
-/* v4 恢复会话容器槽重绑（test_v4_reseal_device.c） */
-TEST(v4_reseal_device_roundtrip_restores_normal_unlock);
-TEST(v4_reseal_device_rejects_normal_session);
-TEST(v4_reseal_device_keyfile_required_and_roundtrip);
-/* v4 公共 API 分片（test_v4_api_content.c） */
-TEST(v4_api_content_chunk);
-TEST(v4_api_product_e2e);
-/* v4 内部错误码映射（test_v4_error_map.c） */
-TEST(v4_error_map_d9_codes_are_distinct);
-TEST(v4_error_map_r10_slot_errors_lock_format_policy);
+/* 记录 —— 加密与盲索引（test_records.c） */
+TEST(record_roundtrip);
+TEST(record_aad_binding);
+TEST(record_size_guard_rejected);
+TEST(name_index_nfkc_and_separation);
+TEST(record_plaintext_fallback_forbidden);
 
-/* v4 记录 —— 加密与盲索引（test_v4_records.c） */
-TEST(v4_record_roundtrip);
-TEST(v4_record_aad_binding);
-TEST(v4_record_size_guard_rejected);
-TEST(v4_name_index_nfkc_and_separation);
-TEST(v4_record_plaintext_fallback_forbidden);
+/* 分片与清单（test_chunks.c） */
+TEST(chunk_roundtrip);
+TEST(chunk_aad_binding);
+TEST(chunk_id_unlinkable);
+TEST(manifest_roundtrip);
+TEST(manifest_tamper_rejected);
+TEST(large_file_1gb_roundtrip);
 
-/* v4 分片与清单（test_v4_chunks.c） */
-TEST(v4_chunk_roundtrip);
-TEST(v4_chunk_aad_binding);
-TEST(v4_chunk_id_unlinkable);
-TEST(v4_manifest_roundtrip);
-TEST(v4_manifest_tamper_rejected);
-TEST(v4_large_file_1gb_roundtrip);
+/* 库与模块（test_modules.c） */
+TEST(vault_create_open_e2e);
+TEST(vault_wrong_recovery_rejected);
+TEST(vault_rotate_password);
+TEST(vault_header_tamper_rejected);
+TEST(module_table_create_and_tamper);
+TEST(module_m1_enable_rewrite_and_policy);
+TEST(module_m1_chunks_rekey);
+TEST(module_delete_purge_and_recreate);
+TEST(module_lifecycle_disable_then_delete);
+TEST(module_recovery_bind_rotate_reseal);
+TEST(module_crash_rekey_rollback);
+TEST(module_enable_rewraps_sealed_record_content);
 
-/* v4 库与模块（test_v4_modules.c） */
-TEST(v4_vault_create_open_e2e);
-TEST(v4_vault_wrong_recovery_rejected);
-TEST(v4_vault_rotate_password);
-TEST(v4_vault_header_tamper_rejected);
-TEST(v4_module_table_create_and_tamper);
-TEST(v4_module_m1_enable_rewrite_and_policy);
-TEST(v4_module_m1_chunks_rekey);
-TEST(v4_module_delete_purge_and_recreate);
-TEST(v4_module_lifecycle_disable_then_delete);
-TEST(v4_module_recovery_bind_rotate_reseal);
-TEST(v4_module_crash_rekey_rollback);
+/* 熔断（test_lockout.c） */
+TEST(secure_state_paths_and_identity);
+TEST(secure_state_preflight_and_handle_budget);
+TEST(secure_state_rejects_object_ace_grant);
+TEST(lockout_first_run_and_counting);
+TEST(lockout_backoff_window);
+TEST(lockout_tampered_state_locked);
+TEST(lockout_state_replay_rejected);
+TEST(lockout_path_change_locked);
+TEST(lockout_begin_attempt_min_interval);
+TEST(lockout_module_isolation);
+TEST(lockout_pipeline_persistent);
 
-/* v4 熔断（test_v4_lockout.c） */
-TEST(v4_lockout_first_run_and_counting);
-TEST(v4_lockout_backoff_window);
-TEST(v4_lockout_tampered_state_locked);
-TEST(v4_lockout_state_replay_rejected);
-TEST(v4_lockout_path_isolation);
-TEST(v4_lockout_pipeline_persistent);
+/* 机器级预算客户端（test_machine_limiter.c，仅测试钩子构建） */
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+TEST(machine_limiter_uninstalled_fail_closed);
+TEST(machine_limiter_test_default_fail_closed);
+TEST(machine_limiter_pipe_unreachable);
+TEST(machine_limiter_pubkey_missing);
+TEST(machine_limiter_bad_signature);
+TEST(machine_limiter_nonce_mismatch);
+TEST(machine_limiter_status_mapping);
+TEST(machine_limiter_timeout);
+TEST(v4_unlock_machine_gate_fail_closed);
+TEST(v4_module_unlock_machine_gate_fail_closed);
+#endif
 
-/* v4 库文件回退（test_v4_rollback.c） */
-TEST(v4_create_failure_removes_partial_and_keeps_error);
-TEST(v4_rollback_module_monotonic_anchor);
-TEST(v4_rollback_restored_old_copy_rejected);
-TEST(v4_rollback_rotated_copy_rejected);
-TEST(v4_rollback_tampered_anchor_fails_closed);
-TEST(v4_rollback_recovery_resets_anchor);
-TEST(v4_rollback_forged_generation_rejected);
-TEST(v4_rollback_state_replay_rejected);
-TEST(v4_rollback_disabled_allows_old_copy);
+/* 库文件回退（test_rollback.c） */
+TEST(create_failure_removes_partial_and_keeps_error);
+TEST(rollback_module_monotonic_anchor);
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+TEST(rollback_env_hook_vault_flow);
+TEST(rollback_env_hook_isolated);
+#endif
+TEST(rollback_restored_old_copy_rejected);
+TEST(rollback_rotated_copy_rejected);
+TEST(rollback_tampered_anchor_fails_closed);
+TEST(rollback_recovery_resets_anchor);
+TEST(rollback_forged_generation_rejected);
+TEST(rollback_state_replay_rejected);
+TEST(rollback_missing_state_anchor_fail_closed);
+TEST(rollback_disabled_allows_old_copy);
 
-/* v4 PCR 槽与解锁策略（test_v4_pcr.c） */
-TEST(v4_pcr_select_validation);
-TEST(v4_pcr_slot_codec);
-TEST(v4_tpm_pcr_key_roundtrip);
-TEST(v4_tpm_pcr_key_wrong_digest_rejected);
-TEST(v4_pcr_create_open_roundtrip);
-TEST(v4_pcr_tampered_digest_fails_closed);
-TEST(v4_pcr_wrong_tpm_key_fails_closed);
-TEST(v4_pcr_foreign_ciphertext_rejected);
-TEST(v4_pcr_recovery_reseal);
-TEST(v4_pcr_enable_disable);
+/* PCR 槽与解锁策略（test_pcr.c） */
+TEST(pcr_select_validation);
+TEST(pcr_slot_codec);
+TEST(tpm_pcr_key_roundtrip);
+TEST(tpm_pcr_key_wrong_digest_rejected);
+TEST(pcr_create_open_roundtrip);
+TEST(pcr_tampered_digest_fails_closed);
+TEST(pcr_wrong_tpm_key_fails_closed);
+TEST(pcr_foreign_ciphertext_rejected);
+TEST(pcr_recovery_reseal);
+TEST(pcr_enable_disable);
 
-/* TPM 持久化密钥见证（test_v4_witness.c） */
-TEST(v4_witness_rotation_and_verify);
+/* TPM 持久化密钥见证（test_witness.c） */
+TEST(witness_rotation_and_verify);
 
-/* v4 崩溃注入（test_v4_crash.c） */
-TEST(v4_crash_injection_100_cuts);
-TEST(v4_crash_keyfile_create_truncation);
-TEST(v4_crash_keyfile_file_tamper);
-TEST(v4_crash_keyfile_enable_rollback);
-TEST(v4_crash_keyfile_disable_rollback);
-TEST(v4_crash_record_data_truncation_rejected);
+/* 崩溃注入（test_crash.c） */
+TEST(crash_injection_100_cuts);
+TEST(crash_keyfile_create_truncation);
+TEST(crash_keyfile_file_tamper);
+TEST(crash_keyfile_enable_rollback);
+TEST(crash_keyfile_disable_rollback);
+TEST(crash_record_data_truncation_rejected);
 
-/* v4 导出/导入（test_v4_transfer.c） */
-TEST(v4_transfer_export_import_roundtrip);
+/* 导出/导入（test_transfer.c） */
+TEST(transfer_export_import_roundtrip);
 
-/* v4 全库 DEK 轮换 D9（test_v4_rotate.c） */
-TEST(v4_rotate_recovery_gate_and_readonly);
-TEST(v4_rotate_full_roundtrip_preserves_records_and_files);
-TEST(v4_rotate_modules_require_password_and_rebind_recovery);
-TEST(v4_rotate_create_from_kc_never_deletes_foreign_target);
-TEST(v4_rotate_rollback_anchor_advances);
-TEST(v4_rotate_keyfile_session_rejected);
-TEST(v4_rotate_run_cancel_callback);
-TEST(v4_rotate_pcr_binding_preserved);
-TEST(v4_rotate_pcr_journal_crash_recovery);
-TEST(v4_rotate_keep_old_pcr_backup_requires_recovery);
-TEST(v4_rotate_keep_old_preserves_backup);
-TEST(v4_rotate_cancel_during_chunk_copy);
-TEST(v4_rotate_password_attempts_follow_lockout);
-TEST(v4_rotate_with_deleted_file_module);
-TEST(v4_module_recreate_and_delete_tolerates_tombstones);
-TEST(v4_rotate_preserves_id_allocator_watermark);
+/* 全库 DEK 轮换（test_rotate.c） */
+TEST(rotate_recovery_gate_and_readonly);
+TEST(rotate_full_roundtrip_preserves_records_and_files);
+TEST(rotate_modules_require_password_and_rebind_recovery);
+TEST(rotate_create_from_kc_never_deletes_foreign_target);
+TEST(rotate_rollback_anchor_advances);
+TEST(rotate_keyfile_session_rejected);
+TEST(rotate_run_cancel_callback);
+TEST(rotate_pcr_binding_preserved);
+TEST(rotate_pcr_journal_crash_recovery);
+TEST(rotate_keep_old_pcr_backup_requires_recovery);
+TEST(rotate_keep_old_preserves_backup);
+TEST(rotate_cancel_during_chunk_copy);
+TEST(rotate_password_attempts_follow_lockout);
+TEST(rotate_with_deleted_file_module);
+TEST(module_recreate_and_delete_tolerates_tombstones);
+TEST(rotate_preserves_id_allocator_watermark);
 
-/* v4 解析器模糊（test_v4_fuzz.c） */
-TEST(v4_fuzz_header_parsers_never_crash);
-TEST(v4_fuzz_keyfile_parser_never_crash);
-TEST(v4_fuzz_slot_keyring_parsers_never_crash);
-TEST(v4_fuzz_recovery_and_manifest_never_crash);
-TEST(v4_fuzz_header_bitflip_always_rejected);
+/* 解析器模糊（test_fuzz.c） */
+TEST(fuzz_header_parsers_never_crash);
+TEST(fuzz_keyfile_parser_never_crash);
+TEST(fuzz_slot_keyring_parsers_never_crash);
+TEST(fuzz_recovery_and_manifest_never_crash);
+TEST(fuzz_header_bitflip_always_rejected);
 
-/* v4 性能基准（test_v4_perf.c） */
-TEST(v4_perf_chunk_throughput);
-TEST(v4_perf_vault_unlock_latency);
-TEST(v4_perf_module_switch_latency);
+/* 性能基准（test_perf.c） */
+TEST(perf_chunk_throughput);
+TEST(perf_vault_unlock_latency);
+TEST(perf_module_switch_latency);
 
-/* test_auto_rekey.c — 自动密钥轮换（并入 test_v3_lifecycle 组） */
-
-/* test_pepper_v3.c — 胡椒持久化格式与密钥槽闭环 */
-TEST(pepper_v3_first_seal_roundtrip);
-TEST(pepper_v3_cipher_tamper_rejected);
-TEST(pepper_v3_fingerprint_tamper_rejected);
-TEST(pepper_v3_level_forgery_rejected);
-TEST(pepper_v3_foreign_size_rejected);
-TEST(pepper_v3_bad_magic_rejected);
-TEST(pepper_v3_inject_bypasses_os);
-TEST(pepper_v3_no_compiled_fallback);
+/* test_pepper.c — 胡椒持久化格式与密钥槽闭环 */
+TEST(pepper_first_seal_roundtrip);
+TEST(pepper_cipher_tamper_rejected);
+TEST(pepper_fingerprint_tamper_rejected);
+TEST(pepper_level_forgery_rejected);
+TEST(pepper_foreign_size_rejected);
+TEST(pepper_bad_magic_rejected);
+TEST(pepper_inject_bypasses_os);
+TEST(pepper_no_compiled_fallback);
 
 /* test_runtime_hash.c — 运行时函数级哈希校验（.rhat 真表） */
 TEST(rhat_table_configured);
@@ -634,10 +389,10 @@ TEST(dcl_facts_sandbox_matrix);
 TEST(dcl_facts_cross_device_matrix);
 TEST(dcl_facts_limited_count);
 TEST(dcl_sandbox_self_report_not_trusted);
-TEST(dcl_v4_session_count_lifecycle);
-TEST(dcl_v4_secure_alloc_lifecycle);
-TEST(dcl_v4_secure_alloc_failure);
-TEST(dcl_emergency_purge_v4);
+TEST(dcl_session_count_lifecycle);
+TEST(dcl_secure_alloc_lifecycle);
+TEST(dcl_secure_alloc_failure);
+TEST(dcl_emergency_purge);
 TEST(dcl_status_abi_layout);
 TEST(dcl_runtime_guards_flag);
 TEST(dcl_status_concurrent_lock);
@@ -696,7 +451,7 @@ static void test_filter_save(int argc, char **argv)
  * 测试文件沙箱（测试残留文件统一管理与自动清除）
  *
  * 问题：各测试用相对路径创建临时文件（test_*.verthys / 附属数据目录
- * <base>.d/（idx_cache 等） / WAL / manifest 等），测试进程的 CWD 决定落盘位置——从项目根直接运行
+ * <base>.d/（state.json / import.wal / 台账等）等），测试进程的 CWD 决定落盘位置——从项目根直接运行
  * verthys_tests.exe 时，残留文件散落源码树根目录。
  *
  * 做法：main() 入口将 CWD 切换到构建树内专属沙箱目录
@@ -811,7 +566,7 @@ static void scratch_setup(void)
         return;
 
     /* 清掉同 PID 复用的历史残留，确保沙箱内无过期状态：
-     * 陈旧 idx_cache 会污染温缓存命中类用例的冷启动前提 */
+     * 陈旧附属文件会污染首次创建/锁定类用例的前提 */
     scratch_rm_rf(g_scratch_dir);
     if (!CreateDirectoryA(g_scratch_dir, NULL)) {
         printf("[sandbox] !! scratch create failed (fall back to CWD, "
@@ -828,6 +583,9 @@ static void scratch_setup(void)
         return;
     }
     atexit(scratch_cleanup);
+    /* 测试构建的熔断/回滚状态覆盖到沙箱目录；生产构建不编译该钩子，
+     * 此处设置的环境变量被忽略。 */
+    (void)SetEnvironmentVariableA("VERTHYS_TEST_STATE_DIR", g_scratch_dir);
     printf("[sandbox] test scratch dir: %s\n", g_scratch_dir);
     fflush(stdout);
 }
@@ -921,17 +679,16 @@ void test_state_checkpoint(const char *group_label)
 
 int main(int argc, char **argv)
 {
-    /* 持锁子进程模式：先于沙箱初始化处理——子进程继承父进程已切换的
-     * 沙箱 CWD，相对路径参数（容器/握手文件）语义与父进程一致。
-     * 该模式不执行任何测试，仅提供跨进程互斥测试所需的独立进程句柄。 */
-    if (argc >= 4 && argv[1] != NULL &&
-        strcmp(argv[1], "child-hold-container") == 0) {
-        return container_lock_child_main(argv[2], argv[3]);
-    }
-
     /* 沙箱先行：CWD 切换必须先于任何测试执行（含过滤参数解析输出），
      * 保证所有相对路径临时文件统一落入构建树内沙箱并在结束时清除 */
     scratch_setup();
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    /*
+     * 本地熔断与持久化回归测试不启动真实服务；测试构建显式旁路机器预算调用。
+     * 产品构建不编译该分支，生产路径始终 fail-closed。
+     */
+    SetEnvironmentVariableW(L"VERTHYS_TEST_MACHINE_LIMITER_BYPASS", L"1");
+#endif
 
     test_filter_save(argc, argv);
     if (argc > 1 && argv[1] != NULL && argv[1][0] != '\0') {
@@ -959,12 +716,12 @@ int main(int argc, char **argv)
     /* 持久化熔断的默认状态文件位于真实用户目录，而全套用例包含大量
      * 错误口令路径；测试进程默认关闭持久化，仅专用用例显式开启并
      * 注入沙箱状态路径，避免污染本机状态。 */
-    verthys_backoff_set_persistent(0);
+    vty_lockout_set_enabled(0);
     /* 回退锚点同理会写入用户目录：默认关闭，专用用例开启并注入路径 */
     vty_rollback_set_enabled(0);
 
     /* rhat 组置于全量首组——真表等价性（构建期文件哈希 ≡ 运行期
-     * 内存哈希）若断裂，此处先出显式 CHECK 失败，早于任何 Verthys_Unlock
+     * 内存哈希）若断裂，此处先出显式 CHECK 失败，早于任何 Verthys_V4Unlock
      * 解锁路径的 KILL 应急（进程存活，诊断信息完整）。 */
     RUN_TEST(rhat_table_configured);
     RUN_TEST(rhat_real_table_scan_clean);
@@ -1003,10 +760,10 @@ int main(int argc, char **argv)
     RUN_TEST(dcl_facts_cross_device_matrix);
     RUN_TEST(dcl_facts_limited_count);
     RUN_TEST(dcl_sandbox_self_report_not_trusted);
-    RUN_TEST(dcl_v4_session_count_lifecycle);
-    RUN_TEST(dcl_v4_secure_alloc_lifecycle);
-    RUN_TEST(dcl_v4_secure_alloc_failure);
-    RUN_TEST(dcl_emergency_purge_v4);
+    RUN_TEST(dcl_session_count_lifecycle);
+    RUN_TEST(dcl_secure_alloc_lifecycle);
+    RUN_TEST(dcl_secure_alloc_failure);
+    RUN_TEST(dcl_emergency_purge);
     RUN_TEST(dcl_status_abi_layout);
     RUN_TEST(dcl_runtime_guards_flag);
     RUN_TEST(dcl_status_concurrent_lock);
@@ -1062,15 +819,15 @@ int main(int argc, char **argv)
     test_state_checkpoint("keymanager");
 
     /* 胡椒持久化格式与密钥槽闭环（含存储路径覆盖隔离） */
-    RUN_TEST(pepper_v3_first_seal_roundtrip);
-    RUN_TEST(pepper_v3_cipher_tamper_rejected);
-    RUN_TEST(pepper_v3_fingerprint_tamper_rejected);
-    RUN_TEST(pepper_v3_level_forgery_rejected);
-    RUN_TEST(pepper_v3_foreign_size_rejected);
-    RUN_TEST(pepper_v3_bad_magic_rejected);
-    RUN_TEST(pepper_v3_inject_bypasses_os);
-    RUN_TEST(pepper_v3_no_compiled_fallback);
-    test_state_checkpoint("pepper_v3");
+    RUN_TEST(pepper_first_seal_roundtrip);
+    RUN_TEST(pepper_cipher_tamper_rejected);
+    RUN_TEST(pepper_fingerprint_tamper_rejected);
+    RUN_TEST(pepper_level_forgery_rejected);
+    RUN_TEST(pepper_foreign_size_rejected);
+    RUN_TEST(pepper_bad_magic_rejected);
+    RUN_TEST(pepper_inject_bypasses_os);
+    RUN_TEST(pepper_no_compiled_fallback);
+    test_state_checkpoint("pepper");
 
     RUN_TEST(format_roundtrip_single);
     RUN_TEST(format_roundtrip_empty);
@@ -1088,44 +845,6 @@ int main(int argc, char **argv)
     RUN_TEST(format_data_size_guard_rejects);
     test_state_checkpoint("format");
 
-    /* verthys_api 测试含 Argon2id 64MiB/3iter，单次约 0.5–1s */
-    RUN_TEST(api_full_roundtrip);
-    RUN_TEST(api_delete_record);
-    RUN_TEST(api_get_not_found);
-    RUN_TEST(api_wrong_password);
-    RUN_TEST(api_rate_limit_exponential);
-    RUN_TEST(api_operations_require_unlock);
-    RUN_TEST(api_locked_after_lock);
-    RUN_TEST(api_invalid_params);
-    RUN_TEST(api_add_delete_add_cycle);
-    RUN_TEST(api_empty_password);
-    RUN_TEST(api_lock_unlock_same_file);
-    RUN_TEST(api_double_deinit_rejected);
-    RUN_TEST(api_clear_record_cache);
-    RUN_TEST(api_add_record_oversize_rejected);
-    RUN_TEST(api_create_with_preset_balanced);
-    RUN_TEST(api_create_with_preset_secure);
-    RUN_TEST(api_create_with_preset_exists);
-    RUN_TEST(api_create_with_preset_invalid);
-    RUN_TEST(api_create_with_preset_survives_cp);
-    test_state_checkpoint("verthys_api");
-
-    /* Export/Import/ChangePassword 测试含 Argon2id 64MiB/3iter */
-    RUN_TEST(cp_then_unlock_new);
-    RUN_TEST(cp_wrong_old);
-    RUN_TEST(cp_preserves_records);
-    RUN_TEST(cp_invalid_params);
-    RUN_TEST(cp_requires_unlock);
-    RUN_TEST(export_import_roundtrip);
-    RUN_TEST(export_separate_password);
-    RUN_TEST(export_invalid_params);
-    RUN_TEST(export_requires_unlock);
-    RUN_TEST(import_merges_records);
-    RUN_TEST(import_wrong_password);
-    RUN_TEST(import_bad_file);
-    RUN_TEST(import_invalid_params);
-    RUN_TEST(import_requires_unlock);
-    test_state_checkpoint("export_import");
 
     /* Export/Import 路径纵深防御（目录穿越 / 系统目录 / 临时目录） */
     RUN_TEST(pg_export_rejects_dotdot_path);
@@ -1144,26 +863,6 @@ int main(int argc, char **argv)
     RUN_TEST(join_bounded_null_handle);
     test_state_checkpoint("join_bounded");
 
-    /* 内存安全测试 */
-    RUN_TEST(mem_lock_zeroes_keys);
-    RUN_TEST(mem_lock_frees_records);
-    RUN_TEST(mem_lock_retains_file_path);
-    RUN_TEST(mem_failed_unlock_keeps_locked);
-    RUN_TEST(mem_failed_unlock_bad_format);
-    RUN_TEST(mem_deinit_from_unlocked);
-    RUN_TEST(mem_deinit_from_locked);
-    RUN_TEST(mem_deinit_from_uninit);
-
-    /* UAF 回归测试（查询→修改→旧指针失效） */
-    RUN_TEST(mem_uaf_getrecord_populates_borrow_cache);
-    RUN_TEST(mem_uaf_addrecord_invalidates_cache);
-    RUN_TEST(mem_uaf_deleterecord_invalidates_cache);
-    RUN_TEST(mem_uaf_deleterecords_invalidates_cache);
-    RUN_TEST(mem_uaf_flush_invalidates_cache);
-    RUN_TEST(mem_uaf_import_invalidates_cache);
-    RUN_TEST(mem_uaf_changepassword_invalidates_cache);
-    RUN_TEST(mem_uaf_getrecord_overwrites_previous_borrow);
-    test_state_checkpoint("memory_safety");
 
     /* 文件格式变异 / 篡改检测测试 */
     RUN_TEST(fuzz_empty_file);
@@ -1171,7 +870,6 @@ int main(int argc, char **argv)
     RUN_TEST(fuzz_all_zero_file);
     RUN_TEST(fuzz_random_garbage);
     RUN_TEST(fuzz_bit_flip_magic);
-    RUN_TEST(fuzz_bit_flip_version);
     RUN_TEST(fuzz_truncated_header);
     RUN_TEST(fuzz_truncated_metadata);
     RUN_TEST(fuzz_bit_flip_metadata);
@@ -1181,22 +879,7 @@ int main(int argc, char **argv)
     RUN_TEST(fuzz_extended_file);
     test_state_checkpoint("format_fuzz");
 
-    /* 性能回归测试（缓存命中/损坏/慢IO/温启动） */
-    RUN_TEST(perf_balanced_enables_warm_cache);
-    RUN_TEST(perf_secure_disables_warm_cache);
-    RUN_TEST(perf_warm_cache_hit_on_second_unlock);
-    RUN_TEST(perf_corrupt_cache_falls_back_to_disk);
-    RUN_TEST(perf_corrupt_cache_header_skips_cache);
-    RUN_TEST(perf_diagnostics_metrics_complete);
-    RUN_TEST(perf_no_cache_cold_start);
-    RUN_TEST(perf_argon2_drift_metrics_collected);
-    RUN_TEST(perf_baseline_unlock_write_read);
-    test_state_checkpoint("perf");
 
-    /* CNG 内核托管密钥测试 */
-    RUN_TEST(keysep_install_consumes_and_reports);
-    RUN_TEST(keysep_commit_sleep_enforced);
-    test_state_checkpoint("key_separation");
 
     /* 应急响应分级测试 */
     RUN_TEST(emergency_telemetry_no_trigger);
@@ -1206,74 +889,16 @@ int main(int argc, char **argv)
 
     /* 构建期签名验签测试 */
     RUN_TEST(integrity_verify_unconfigured_passes);
-    RUN_TEST(integrity_init_idempotent);
-    RUN_TEST(integrity_anchor_incomplete_not_pass);
     RUN_TEST(integrity_verify_startup_cache_replay_invalidate);
     test_state_checkpoint("integrity");
 
-    /* 事务半写/损坏故障注入测试 */
-    RUN_TEST(inject_sb_ciphertext_bitflip_rejected);
-    RUN_TEST(inject_taillog_overwrite_still_unlockable);
-    RUN_TEST(inject_bad_magic_rejected);
-    RUN_TEST(inject_wal_third_round_residual_not_replayed);
-    test_state_checkpoint("txn_inject");
 
-    /* DELETE 中途失败的引用完好性测试 */
-    RUN_TEST(txn_delete_failure_keeps_extent_ref);
-    test_state_checkpoint("txn_delete_retry");
-
-    /* 写入失败后的会话级恢复测试 */
-    RUN_TEST(txn_add_failure_session_recovery);
-    test_state_checkpoint("txn_force_abort");
-
-    /* Extent 容量三级链审计搬迁集成测试 */
-    RUN_TEST(txn_extent_reloc_chain_two_rounds);
-    RUN_TEST(txn_extent_reloc_same_txn_compact_floor);
-    test_state_checkpoint("txn_extent_reloc");
-
-    /* 回归测试（12 项） */
-    RUN_TEST(repair_pool_extend_boundary);
-    RUN_TEST(repair_lsm_large_insert);
-    RUN_TEST(repair_changepw_fail_rollback);
-    RUN_TEST(repair_large_file_offset);
-    RUN_TEST(repair_v1_mac_offset_overflow);
-    RUN_TEST(repair_vfmt_write_fail_cleanup);
-    RUN_TEST(repair_vsb_txn_v3_rollback);
-    RUN_TEST(repair_tail_log_commit_regression);
-    RUN_TEST(repair_export_too_many);
-    RUN_TEST(repair_name_len_clamp);
-    RUN_TEST(repair_thread_shutdown_cycles);
-    test_state_checkpoint("final_repair");
 
     /* 验收：vendored flatcc 工具链（schema codegen + flatccrt 编解码闭环） */
     RUN_TEST(flatcc_demo_roundtrip);
     RUN_TEST(flatcc_demo_tamper_rejected);
     test_state_checkpoint("flatcc_demo");
 
-    /* 验收：CNG 内核托管（AEAD 封装层 + 密钥组生命周期） */
-    RUN_TEST(cng_aead_roundtrip);
-    RUN_TEST(cng_aead_init_contract);
-    RUN_TEST(cng_aead_empty_plaintext);
-    RUN_TEST(cng_aead_nonce_unique_monotonic);
-    RUN_TEST(cng_aead_nonce_counter_restore);
-    RUN_TEST(cng_aead_import_auto_restores_counter);
-    RUN_TEST(cng_aead_nonce_exhausted_rejected);
-    RUN_TEST(cng_aead_nonce_decode_layout);
-    RUN_TEST(cng_aead_tamper_rejected);
-    RUN_TEST(cng_aead_wrong_key_rejected);
-    RUN_TEST(cng_aead_destroy_invalidates);
-    RUN_TEST(cng_aead_null_params_rejected);
-    RUN_TEST(km_batch_import_roundtrip);
-    RUN_TEST(km_import_wrong_mek_rolls_back);
-    RUN_TEST(km_wrapped_role_binding);
-    RUN_TEST(km_reimport_replaces_handles);
-    RUN_TEST(km_null_params_rejected);
-    RUN_TEST(km_global_handle_tracking);
-    RUN_TEST(cng_aead_import_failure_zeroes_key);
-    RUN_TEST(cng_aead_length_domain_guards);
-    RUN_TEST(km_rotate_mek_failure_keeps_old_slot);
-    RUN_TEST(cng_provider_concurrent_init_deinit);
-    test_state_checkpoint("cng_kernel");
 
     /* 验收：安全分配器（隔离堆 + PAGE_GUARD 边界页 + 锁页 + 预算记账） */
     RUN_TEST(sec_alloc_basic_roundtrip);
@@ -1285,194 +910,53 @@ int main(int argc, char **argv)
     RUN_TEST(sec_alloc_shared_lifecycle);
     test_state_checkpoint("secure_allocator");
 
-    /* 暴力破解退避进程级聚合 */
-    RUN_TEST(backoff_process_wide_aggregation);
-    test_state_checkpoint("backoff_process_wide");
 
-    /* 容器跨进程互斥：双进程单写者拒绝 + 诊断旁路 + 锁释放（独立于
-     * 超级块组前端——锁定语义不依赖任何加密结构） */
-    RUN_TEST(container_lock_dual_process_exclusive);
 
-    /* 验收：V3 超级块（flatcc 序列化 + HMAC + 三副本法定人数 + 事务） */
-    RUN_TEST(v3sb_init_new_defaults);
-    RUN_TEST(v3sb_init_rejects_null);
-    RUN_TEST(v3sb_serialize_parse_roundtrip);
-    RUN_TEST(v3sb_parse_idempotent);
-    RUN_TEST(v3sb_hmac_tamper_rejected);
-    RUN_TEST(v3sb_hmac_wrong_key_rejected);
-    RUN_TEST(v3sb_parse_garbage_rejected);
-    RUN_TEST(v3sb_serialize_null_and_overflow_rejected);
-    RUN_TEST(v3sb_replica_io_roundtrip);
-    RUN_TEST(v3sb_replica_bad_frame_rejected);
-    RUN_TEST(v3sb_commit_quorum_roundtrip);
-    RUN_TEST(v3sb_quorum_txid_advances);
-    RUN_TEST(v3sb_quorum_one_replica_corrupt);
-    RUN_TEST(v3sb_quorum_two_replicas_corrupt);
-    RUN_TEST(v3sb_quorum_three_replicas_corrupt);
-    RUN_TEST(v3sb_quorum_zero_replicas_written);
-    RUN_TEST(v3sb_quorum_valid_but_split);
-    RUN_TEST(v3sb_quorum_txid_majority_wins);
-    RUN_TEST(v3sb_quorum_same_txid_divergent_content);
-    RUN_TEST(v3sb_commit_fail_injection);
-    RUN_TEST(v3sb_txn_commit_rollback);
-    test_state_checkpoint("v3_superblock");
+    /* 密钥体系：原语与恢复码 → 容器槽 → 记录/分片 → 库与模块 → 熔断 */
+    RUN_TEST(blake3_known_vectors);
+    RUN_TEST(hkdf_rfc5869_case1);
+    RUN_TEST(hmac_deterministic_and_key_sensitive);
+    RUN_TEST(argon2id_deterministic_and_salt_sensitive);
+    RUN_TEST(kdf_param_floor_rejected);
+    RUN_TEST(wrap_key32_roundtrip_and_tamper);
+    RUN_TEST(recovery_code_roundtrip);
+    RUN_TEST(recovery_checksum_error_rejected);
+    RUN_TEST(recovery_suffix_rejected);
+    RUN_TEST(keyring_serialize_parse_roundtrip);
+    RUN_TEST(keyring_parse_invalid_rejected);
+    RUN_TEST(recovery_slot_seal_open);
+    RUN_TEST(keyfile_generate_parse_roundtrip);
+    RUN_TEST(keyfile_tamper_rejected);
+    RUN_TEST(keyfile_vault_create_open_and_rotate);
+    test_state_checkpoint("primitives");
 
-    /* 验收：V3 分区管理（独立 AEAD 密钥 + nonce 防回退 + 分区表持久化） */
-    RUN_TEST(v3part_create_defaults);
-    RUN_TEST(v3part_create_rejects_invalid);
-    RUN_TEST(v3part_encrypt_decrypt_roundtrip);
-    RUN_TEST(v3part_decrypt_txid_binding_rejected);
-    RUN_TEST(v3part_tamper_rejected);
-    RUN_TEST(v3part_key_isolation);
-    RUN_TEST(v3part_null_params_rejected);
-    RUN_TEST(v3part_grow_strategy);
-    RUN_TEST(v3part_load_nonce_no_reuse);
-    RUN_TEST(v3part_load_rejects_invalid);
-    RUN_TEST(v3part_table_add_find_limits);
-    RUN_TEST(v3part_table_save_load_roundtrip);
-    RUN_TEST(v3part_table_load_tamper_rejected);
-    RUN_TEST(v3part_table_load_empty_region_rejected);
-    RUN_TEST(v3part_table_save_rejects_invalid);
-    test_state_checkpoint("v3_partition");
+    RUN_TEST(header_write_parse_roundtrip);
+    RUN_TEST(header_tamper_rejected);
+    RUN_TEST(slot_seal_serialize_parse);
+    RUN_TEST(slots_parse_all_roundtrip);
+    RUN_TEST(slot_policy_check);
+    RUN_TEST(header_generation_and_minor_frozen);
+    RUN_TEST(data_root_locator_codec);
+    RUN_TEST(segment_header_codec);
+    test_state_checkpoint("container");
 
-    /* 验收：V3 内容寻址 Extent（去重 + 引用计数 + GC 标记 +
-     * 双重完整性 + 索引持久化 + nonce 防回退） */
-    RUN_TEST(v3ext_hash_basics);
-    RUN_TEST(v3ext_index_init_and_find);
-    RUN_TEST(v3ext_put_get_roundtrip);
-    RUN_TEST(v3ext_put_empty_plaintext);
-    RUN_TEST(v3ext_put_size_guard_rejects);
-    RUN_TEST(v3ext_dedup_no_rewrite);
-    RUN_TEST(v3ext_release_refcount_and_gc);
-    RUN_TEST(v3ext_resource_limit_rejected);
-    RUN_TEST(v3ext_locked_rejected);
-    RUN_TEST(v3ext_data_tamper_rejected);
-    RUN_TEST(v3ext_block_move_rejected);
-    RUN_TEST(v3ext_wrong_partition_key_rejected);
-    RUN_TEST(v3ext_index_save_load_roundtrip);
-    RUN_TEST(v3ext_index_load_nonce_rollback_rejected);
-    RUN_TEST(v3ext_index_tamper_rejected);
-    RUN_TEST(v3ext_index_load_empty_region_rejected);
-    RUN_TEST(v3ext_null_params_rejected);
-    RUN_TEST(v3ext_compact_reclaims_dead_blocks);
-    RUN_TEST(v3ext_compact_noop_and_empty);
-    RUN_TEST(v3ext_put_beyond_capacity_rejected);
-    test_state_checkpoint("v3_extent");
+    RUN_TEST(record_roundtrip);
+    RUN_TEST(record_aad_binding);
+    RUN_TEST(record_size_guard_rejected);
+    RUN_TEST(name_index_nfkc_and_separation);
+    RUN_TEST(record_plaintext_fallback_forbidden);
+    test_state_checkpoint("records");
 
-    /* 验收：V3 LSM 索引（MemTable 跳表 + SSTable + Bloom +
-     * WAL 崩溃恢复 + Manifest 原子提交 + 分级 Compaction） */
-    RUN_TEST(v3lsm_open_close_roundtrip);
-    RUN_TEST(v3lsm_put_get_roundtrip);
-    RUN_TEST(v3lsm_put_overwrite);
-    RUN_TEST(v3lsm_delete_tombstone);
-    RUN_TEST(v3lsm_flush_to_sstable);
-    RUN_TEST(v3lsm_flush_rebuild_fail_readonly);
-    RUN_TEST(v3lsm_close_failure_reopens_complete);
-    RUN_TEST(v3lsm_reopen_persistence);
-    RUN_TEST(v3lsm_wal_crash_recovery);
-    RUN_TEST(v3lsm_compaction_l0_merge);
-    RUN_TEST(v3lsm_compaction_shadowing);
-    RUN_TEST(v3lsm_compaction_tombstone);
-    RUN_TEST(v3lsm_manifest_tamper_rejected);
-    RUN_TEST(v3lsm_get_notfound_and_invalid);
-    RUN_TEST(v3lsm_null_params_rejected);
-    RUN_TEST(v3lsm_flush_manifest_save_fail_rollback);
-    RUN_TEST(v3lsm_compact_manifest_save_fail_rollback);
-    /* 大规模插入 + 全量查找（跳表 / 多表 flush / compaction 归并 / Bloom 全路径） */
-    RUN_TEST(v3lsm_large_insert_find);
-    test_state_checkpoint("v3_lsm");
-
-    /* SSTable 写前预算（越界字节不落盘 + 正常路径行为不变） */
-    RUN_TEST(sstb_budget_rejects_before_physical_write);
-    RUN_TEST(sstb_budget_normal_write_unaffected);
-    test_state_checkpoint("sstable_budget");
-
-    /* V3 温缓存（保存/加载/段布局矩形校验：非法布局判 miss） */
-    RUN_TEST(v3ic_roundtrip_and_layout_fuzz);
-    /* 附属目录命名契约：写入落点 / 旧布局回退 / 双清 */
-    RUN_TEST(v3ic_sidecar_dir_contract);
-    test_state_checkpoint("warmcache_v3");
-
-    /* 验收：V3 生命周期全链路（创建→写→读→删→改密→导出→导入重开）
-     * + 解锁流水线（fail_mask 逐阶段注入 / MINIMAL_FIRST 渐进式）
-     * + 温缓存（命中/未命中/篡改回退）+ WAL 崩溃恢复矩阵（三分支回放规则） */
-    RUN_TEST(v3life_full_chain_roundtrip);
-    RUN_TEST(v3life_cp_old_password_rejected);
-    RUN_TEST(v3life_container_info_v3);
-    RUN_TEST(v3life_verify_integrity_tamper);
-    RUN_TEST(v3life_scan_family_v3);
-    RUN_TEST(v3life_scan_projection);
-    RUN_TEST(v3life_pipeline_fail_mask_stages);
-    RUN_TEST(v3life_unlock_minimal_first);
-    RUN_TEST(v3life_preheat_interrupt_and_join);
-    RUN_TEST(v3life_warmcache_hit_miss_tamper);
-    RUN_TEST(v3life_crash_uncommitted_discarded);
-    RUN_TEST(v3life_crash_committed_replayed);
-    RUN_TEST(v3life_crash_prepare_only_replayed);
-    RUN_TEST(arekey_trigger_matrix);
-    RUN_TEST(arekey_rotate_full_cycle);
-    RUN_TEST(arekey_degrade_force_persist);
-    RUN_TEST(arekey_crash_orphan_frame);
-    RUN_TEST(arekey_crash_after_commit);
-    RUN_TEST(arekey_inflight_guard_rejects);
-    RUN_TEST(arekey_prep_failure_restores_state);
-    RUN_TEST(v3life_verify_persist_selfcheck);
-    test_state_checkpoint("v3_lifecycle");
-
-    /* 验收：属性测试（LSM/Extent/事务三大不变式族 + 回滚耐久性回归） */
-    RUN_TEST(prop_lsm_insert_find_delete);
-    RUN_TEST(prop_extent_refcount_conservation);
-    RUN_TEST(prop_txn_commit_rollback_consistency);
-    RUN_TEST(prop_txn_crash_no_resurrection);
-    RUN_TEST(prop_txn_rollback_delete_restores_original);
-    RUN_TEST(prop_txn_crash_discard_delete_restores_original);
-    test_state_checkpoint("v3_property");
-
-    /* v4 密钥体系：原语与恢复码 → 容器槽 → 记录/分片 → 库与模块 → 熔断 */
-    RUN_TEST(v4_blake3_known_vectors);
-    RUN_TEST(v4_hkdf_rfc5869_case1);
-    RUN_TEST(v4_hmac_deterministic_and_key_sensitive);
-    RUN_TEST(v4_argon2id_deterministic_and_salt_sensitive);
-    RUN_TEST(v4_kdf_param_floor_rejected);
-    RUN_TEST(v4_wrap_key32_roundtrip_and_tamper);
-    RUN_TEST(v4_recovery_code_roundtrip);
-    RUN_TEST(v4_recovery_checksum_error_rejected);
-    RUN_TEST(v4_recovery_suffix_rejected);
-    RUN_TEST(v4_keyring_serialize_parse_roundtrip);
-    RUN_TEST(v4_keyring_parse_invalid_rejected);
-    RUN_TEST(v4_recovery_slot_seal_open);
-    RUN_TEST(v4_keyfile_generate_parse_roundtrip);
-    RUN_TEST(v4_keyfile_tamper_rejected);
-    RUN_TEST(v4_keyfile_vault_create_open_and_rotate);
-    test_state_checkpoint("v4_primitives");
-
-    RUN_TEST(v4_header_write_parse_roundtrip);
-    RUN_TEST(v4_header_tamper_rejected);
-    RUN_TEST(v4_slot_seal_serialize_parse);
-    RUN_TEST(v4_slots_parse_all_roundtrip);
-    RUN_TEST(v4_slot_policy_check);
-    RUN_TEST(v4_header_generation_and_minor_frozen);
-    RUN_TEST(v4_data_root_locator_codec);
-    RUN_TEST(v4_segment_header_codec);
-    test_state_checkpoint("v4_container");
-
-    RUN_TEST(v4_record_roundtrip);
-    RUN_TEST(v4_record_aad_binding);
-    RUN_TEST(v4_record_size_guard_rejected);
-    RUN_TEST(v4_name_index_nfkc_and_separation);
-    RUN_TEST(v4_record_plaintext_fallback_forbidden);
-    test_state_checkpoint("v4_records");
-
-    RUN_TEST(v4_chunk_roundtrip);
-    RUN_TEST(v4_chunk_aad_binding);
-    RUN_TEST(v4_chunk_id_unlinkable);
-    RUN_TEST(v4_manifest_roundtrip);
-    RUN_TEST(v4_manifest_tamper_rejected);
-    RUN_TEST(v4_large_file_1gb_roundtrip);
-    test_state_checkpoint("v4_chunks");
+    RUN_TEST(chunk_roundtrip);
+    RUN_TEST(chunk_aad_binding);
+    RUN_TEST(chunk_id_unlinkable);
+    RUN_TEST(manifest_roundtrip);
+    RUN_TEST(manifest_tamper_rejected);
+    RUN_TEST(large_file_1gb_roundtrip);
+    test_state_checkpoint("chunks");
 
     /* 设备根封装会在进程内建立持久的 CNG 密钥句柄（进程级、一次性）：
-     * 先预热，避免首个 v4 用例把这次初始化误报成句柄泄漏。 */
+     * 先预热，避免首个 用例把这次初始化误报成句柄泄漏。 */
     (void)vty_device_root_init();
     if (vty_device_root_available()) {
         uint8_t probe[VTY_KEY_BYTES];
@@ -1483,128 +967,157 @@ int main(int argc, char **argv)
             (void)vty_device_key_unseal(probe_blob, probe_len, probe);
         }
     }
-    RUN_TEST(v4_vault_create_open_e2e);
-    RUN_TEST(v4_vault_wrong_recovery_rejected);
-    RUN_TEST(v4_vault_rotate_password);
-    RUN_TEST(v4_vault_header_tamper_rejected);
-    RUN_TEST(v4_module_table_create_and_tamper);
-    RUN_TEST(v4_module_m1_enable_rewrite_and_policy);
-    RUN_TEST(v4_module_m1_chunks_rekey);
-    RUN_TEST(v4_module_delete_purge_and_recreate);
-    RUN_TEST(v4_module_lifecycle_disable_then_delete);
-    RUN_TEST(v4_module_recovery_bind_rotate_reseal);
-    RUN_TEST(v4_module_crash_rekey_rollback);
-    test_state_checkpoint("v4_vault_module");
+    RUN_TEST(vault_create_open_e2e);
+    RUN_TEST(vault_wrong_recovery_rejected);
+    RUN_TEST(vault_rotate_password);
+    RUN_TEST(vault_header_tamper_rejected);
+    RUN_TEST(module_table_create_and_tamper);
+    RUN_TEST(module_m1_enable_rewrite_and_policy);
+    RUN_TEST(module_m1_chunks_rekey);
+    RUN_TEST(module_delete_purge_and_recreate);
+    RUN_TEST(module_lifecycle_disable_then_delete);
+    RUN_TEST(module_recovery_bind_rotate_reseal);
+    RUN_TEST(module_crash_rekey_rollback);
+    RUN_TEST(module_enable_rewraps_sealed_record_content);
+    test_state_checkpoint("vault_module");
 
-    RUN_TEST(v4_api_create_save_lock_unlock_roundtrip);
-    RUN_TEST(v4_api_recovery_unlock_roundtrip);
-    RUN_TEST(v4_api_rejects_v3_file);
-    RUN_TEST(v4_api_keyfile_create_unlock_disable_roundtrip);
-    RUN_TEST(v4_api_keyfile_recovery_rebind);
-    RUN_TEST(v4_api_keyfile_create_rejects_existing_targets);
+    RUN_TEST(api_create_save_lock_unlock_roundtrip);
+    RUN_TEST(api_recovery_unlock_roundtrip);
+    RUN_TEST(api_keyfile_create_unlock_disable_roundtrip);
+    RUN_TEST(api_keyfile_recovery_rebind);
+    RUN_TEST(api_keyfile_create_rejects_existing_targets);
 
-    RUN_TEST(v4_store_empty_root_binds_uuid_epoch);
-    RUN_TEST(v4_store_put_get_and_cow_snapshot);
-    RUN_TEST(v4_store_split_and_verify);
-    RUN_TEST(v4_store_segment_append_read_and_cursor);
-    RUN_TEST(v4_store_tamper_and_truncate_rejected);
-    test_state_checkpoint("v4_store");
+    RUN_TEST(store_empty_root_binds_uuid_epoch);
+    RUN_TEST(store_put_get_and_cow_snapshot);
+    RUN_TEST(store_split_and_verify);
+    RUN_TEST(store_segment_append_read_and_cursor);
+    RUN_TEST(store_tamper_and_truncate_rejected);
+    test_state_checkpoint("store");
 
-    /* v4 记录仓库 / 扫描 / 公共 API / 导出导入（V4-PI-2） */
-    RUN_TEST(v4_repo_add_get_delete_and_id_monotonic);
-    RUN_TEST(v4_repo_file_chunk_manifest);
-    RUN_TEST(v4_repo_empty_name_and_tombstone_count);
-    RUN_TEST(v4_repo_system_domain_survives_module_enable_and_delete);
-    RUN_TEST(v4_repo_legacy_security_record_migrates_on_module_enable);
-    RUN_TEST(v4_repo_scan_cursor_and_start_id);
-    RUN_TEST(v4_repo_scan_skips_tombstone_and_type_index);
-    RUN_TEST(v4_api_records_roundtrip_and_scan);
-    RUN_TEST(v4_api_list_ids_by_type_and_verify_persist);
-    RUN_TEST(v4_api_add_records_batch_roundtrip);
-    RUN_TEST(v4_api_records_require_unlock);
-    RUN_TEST(v4_api_modules_roundtrip_and_policy);
-    RUN_TEST(v4_api_module_delete);
-    RUN_TEST(v4_api_recovery_rotate);
-    RUN_TEST(v4_api_pcr_policy_roundtrip);
-    RUN_TEST(v4_reseal_device_roundtrip_restores_normal_unlock);
-    RUN_TEST(v4_reseal_device_rejects_normal_session);
-    RUN_TEST(v4_reseal_device_keyfile_required_and_roundtrip);
-    RUN_TEST(v4_api_content_chunk);
-    RUN_TEST(v4_api_product_e2e);
-    RUN_TEST(v4_error_map_d9_codes_are_distinct);
-    RUN_TEST(v4_error_map_r10_slot_errors_lock_format_policy);
-    RUN_TEST(v4_transfer_export_import_roundtrip);
-    RUN_TEST(v4_rotate_recovery_gate_and_readonly);
-    RUN_TEST(v4_rotate_full_roundtrip_preserves_records_and_files);
-    RUN_TEST(v4_rotate_modules_require_password_and_rebind_recovery);
-    RUN_TEST(v4_rotate_create_from_kc_never_deletes_foreign_target);
-    RUN_TEST(v4_rotate_rollback_anchor_advances);
-    RUN_TEST(v4_rotate_keyfile_session_rejected);
-    RUN_TEST(v4_rotate_run_cancel_callback);
-    RUN_TEST(v4_rotate_pcr_binding_preserved);
-    RUN_TEST(v4_rotate_pcr_journal_crash_recovery);
-    RUN_TEST(v4_rotate_keep_old_pcr_backup_requires_recovery);
-    RUN_TEST(v4_rotate_keep_old_preserves_backup);
-    RUN_TEST(v4_rotate_cancel_during_chunk_copy);
-    RUN_TEST(v4_rotate_password_attempts_follow_lockout);
-    RUN_TEST(v4_rotate_with_deleted_file_module);
-    RUN_TEST(v4_module_recreate_and_delete_tolerates_tombstones);
-    RUN_TEST(v4_rotate_preserves_id_allocator_watermark);
-    test_state_checkpoint("v4_rotate");
+    /* 记录仓库 / 扫描 / 公共 API / 导出导入 */
+    RUN_TEST(repo_add_get_delete_and_id_monotonic);
+    RUN_TEST(repo_file_chunk_manifest);
+    RUN_TEST(repo_empty_name_and_tombstone_count);
+    RUN_TEST(repo_system_domain_survives_module_enable_and_delete);
+    RUN_TEST(repo_legacy_security_record_migrates_on_module_enable);
+    RUN_TEST(repo_scan_cursor_and_start_id);
+    RUN_TEST(repo_scan_skips_tombstone_and_type_index);
+    RUN_TEST(api_records_roundtrip_and_scan);
+    RUN_TEST(api_list_ids_by_type_and_verify_persist);
+    RUN_TEST(api_add_records_batch_roundtrip);
+    RUN_TEST(api_records_require_unlock);
+    RUN_TEST(api_modules_roundtrip_and_policy);
+    RUN_TEST(api_module_delete);
+    RUN_TEST(api_recovery_rotate);
+    RUN_TEST(api_pcr_policy_roundtrip);
+    RUN_TEST(reseal_device_roundtrip_restores_normal_unlock);
+    RUN_TEST(reseal_device_rejects_normal_session);
+    RUN_TEST(reseal_device_keyfile_required_and_roundtrip);
+    RUN_TEST(api_content_chunk);
+    RUN_TEST(api_product_e2e);
+    RUN_TEST(error_map_d9_codes_are_distinct);
+    RUN_TEST(error_map_r10_slot_errors_lock_format_policy);
+    RUN_TEST(transfer_export_import_roundtrip);
+    RUN_TEST(rotate_recovery_gate_and_readonly);
+    RUN_TEST(rotate_full_roundtrip_preserves_records_and_files);
+    RUN_TEST(rotate_modules_require_password_and_rebind_recovery);
+    RUN_TEST(rotate_create_from_kc_never_deletes_foreign_target);
+    RUN_TEST(rotate_rollback_anchor_advances);
+    RUN_TEST(rotate_keyfile_session_rejected);
+    RUN_TEST(rotate_run_cancel_callback);
+    RUN_TEST(rotate_pcr_binding_preserved);
+    RUN_TEST(rotate_pcr_journal_crash_recovery);
+    RUN_TEST(rotate_keep_old_pcr_backup_requires_recovery);
+    RUN_TEST(rotate_keep_old_preserves_backup);
+    RUN_TEST(rotate_cancel_during_chunk_copy);
+    RUN_TEST(rotate_password_attempts_follow_lockout);
+    RUN_TEST(rotate_with_deleted_file_module);
+    RUN_TEST(module_recreate_and_delete_tolerates_tombstones);
+    RUN_TEST(rotate_preserves_id_allocator_watermark);
+    test_state_checkpoint("rotate");
 
-    RUN_TEST(v4_lockout_first_run_and_counting);
-    RUN_TEST(v4_lockout_backoff_window);
-    RUN_TEST(v4_lockout_tampered_state_locked);
-    RUN_TEST(v4_lockout_state_replay_rejected);
-    RUN_TEST(v4_lockout_path_isolation);
-    RUN_TEST(v4_lockout_pipeline_persistent);
-    test_state_checkpoint("v4_lockout");
+    RUN_TEST(secure_state_paths_and_identity);
+    RUN_TEST(secure_state_preflight_and_handle_budget);
+    RUN_TEST(secure_state_rejects_object_ace_grant);
+    RUN_TEST(lockout_first_run_and_counting);
+    RUN_TEST(lockout_backoff_window);
+    RUN_TEST(lockout_tampered_state_locked);
+    RUN_TEST(lockout_state_replay_rejected);
+    RUN_TEST(lockout_path_change_locked);
+    RUN_TEST(lockout_begin_attempt_min_interval);
+    RUN_TEST(lockout_module_isolation);
+    RUN_TEST(lockout_pipeline_persistent);
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    /* 进入机器预算客户端用例前撤销旁路，验证服务缺失时强制 fail-closed。 */
+    SetEnvironmentVariableW(L"VERTHYS_TEST_MACHINE_LIMITER_BYPASS", NULL);
+    RUN_TEST(machine_limiter_uninstalled_fail_closed);
+    RUN_TEST(machine_limiter_test_default_fail_closed);
+    RUN_TEST(machine_limiter_pipe_unreachable);
+    RUN_TEST(machine_limiter_pubkey_missing);
+    RUN_TEST(machine_limiter_bad_signature);
+    RUN_TEST(machine_limiter_nonce_mismatch);
+    RUN_TEST(machine_limiter_status_mapping);
+    RUN_TEST(machine_limiter_timeout);
+    RUN_TEST(v4_unlock_machine_gate_fail_closed);
+    RUN_TEST(v4_module_unlock_machine_gate_fail_closed);
+    /* 机器预算客户端用例组结束，恢复其余用例的测试旁路并清空服务钩子。 */
+    SetEnvironmentVariableW(L"VERTHYS_TEST_SERVICE_INSTALLED", NULL);
+    SetEnvironmentVariableW(L"VERTHYS_TEST_SERVICE_PIPE", NULL);
+    SetEnvironmentVariableW(L"VERTHYS_TEST_SERVICE_PUBKEY_PATH", NULL);
+    SetEnvironmentVariableW(L"VERTHYS_TEST_MACHINE_LIMITER_BYPASS", L"1");
+#endif
+    test_state_checkpoint("lockout");
 
-    RUN_TEST(v4_create_failure_removes_partial_and_keeps_error);
-    RUN_TEST(v4_rollback_module_monotonic_anchor);
-    RUN_TEST(v4_rollback_restored_old_copy_rejected);
-    RUN_TEST(v4_rollback_rotated_copy_rejected);
-    RUN_TEST(v4_rollback_tampered_anchor_fails_closed);
-    RUN_TEST(v4_rollback_recovery_resets_anchor);
-    RUN_TEST(v4_rollback_forged_generation_rejected);
-    RUN_TEST(v4_rollback_state_replay_rejected);
-    RUN_TEST(v4_rollback_disabled_allows_old_copy);
+    RUN_TEST(create_failure_removes_partial_and_keeps_error);
+    RUN_TEST(rollback_module_monotonic_anchor);
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    RUN_TEST(rollback_env_hook_vault_flow);
+    RUN_TEST(rollback_env_hook_isolated);
+#endif
+    RUN_TEST(rollback_restored_old_copy_rejected);
+    RUN_TEST(rollback_rotated_copy_rejected);
+    RUN_TEST(rollback_tampered_anchor_fails_closed);
+    RUN_TEST(rollback_recovery_resets_anchor);
+    RUN_TEST(rollback_forged_generation_rejected);
+    RUN_TEST(rollback_state_replay_rejected);
+    RUN_TEST(rollback_missing_state_anchor_fail_closed);
+    RUN_TEST(rollback_disabled_allows_old_copy);
     /* 组内用例会开启回退检测；显式恢复默认关闭，避免影响后续用例 */
     vty_rollback_set_enabled(0);
-    test_state_checkpoint("v4_rollback");
+    test_state_checkpoint("rollback");
 
-    RUN_TEST(v4_pcr_select_validation);
-    RUN_TEST(v4_pcr_slot_codec);
-    RUN_TEST(v4_tpm_pcr_key_roundtrip);
-    RUN_TEST(v4_tpm_pcr_key_wrong_digest_rejected);
-    RUN_TEST(v4_pcr_create_open_roundtrip);
-    RUN_TEST(v4_pcr_tampered_digest_fails_closed);
-    RUN_TEST(v4_pcr_wrong_tpm_key_fails_closed);
-    RUN_TEST(v4_pcr_foreign_ciphertext_rejected);
-    RUN_TEST(v4_pcr_recovery_reseal);
-    RUN_TEST(v4_pcr_enable_disable);
-    RUN_TEST(v4_witness_rotation_and_verify);
-    test_state_checkpoint("v4_pcr");
+    RUN_TEST(pcr_select_validation);
+    RUN_TEST(pcr_slot_codec);
+    RUN_TEST(tpm_pcr_key_roundtrip);
+    RUN_TEST(tpm_pcr_key_wrong_digest_rejected);
+    RUN_TEST(pcr_create_open_roundtrip);
+    RUN_TEST(pcr_tampered_digest_fails_closed);
+    RUN_TEST(pcr_wrong_tpm_key_fails_closed);
+    RUN_TEST(pcr_foreign_ciphertext_rejected);
+    RUN_TEST(pcr_recovery_reseal);
+    RUN_TEST(pcr_enable_disable);
+    RUN_TEST(witness_rotation_and_verify);
+    test_state_checkpoint("pcr");
 
-    RUN_TEST(v4_crash_injection_100_cuts);
-    RUN_TEST(v4_crash_keyfile_create_truncation);
-    RUN_TEST(v4_crash_keyfile_file_tamper);
-    RUN_TEST(v4_crash_keyfile_enable_rollback);
-    RUN_TEST(v4_crash_keyfile_disable_rollback);
-    RUN_TEST(v4_crash_record_data_truncation_rejected);
-    test_state_checkpoint("v4_crash");
+    RUN_TEST(crash_injection_100_cuts);
+    RUN_TEST(crash_keyfile_create_truncation);
+    RUN_TEST(crash_keyfile_file_tamper);
+    RUN_TEST(crash_keyfile_enable_rollback);
+    RUN_TEST(crash_keyfile_disable_rollback);
+    RUN_TEST(crash_record_data_truncation_rejected);
+    test_state_checkpoint("crash");
 
-    RUN_TEST(v4_fuzz_header_parsers_never_crash);
-    RUN_TEST(v4_fuzz_keyfile_parser_never_crash);
-    RUN_TEST(v4_fuzz_slot_keyring_parsers_never_crash);
-    RUN_TEST(v4_fuzz_recovery_and_manifest_never_crash);
-    RUN_TEST(v4_fuzz_header_bitflip_always_rejected);
-    test_state_checkpoint("v4_fuzz");
+    RUN_TEST(fuzz_header_parsers_never_crash);
+    RUN_TEST(fuzz_keyfile_parser_never_crash);
+    RUN_TEST(fuzz_slot_keyring_parsers_never_crash);
+    RUN_TEST(fuzz_recovery_and_manifest_never_crash);
+    RUN_TEST(fuzz_header_bitflip_always_rejected);
+    test_state_checkpoint("fuzz");
 
-    RUN_TEST(v4_perf_chunk_throughput);
-    RUN_TEST(v4_perf_vault_unlock_latency);
-    RUN_TEST(v4_perf_module_switch_latency);
-    test_state_checkpoint("v4_perf");
+    RUN_TEST(perf_chunk_throughput);
+    RUN_TEST(perf_vault_unlock_latency);
+    RUN_TEST(perf_module_switch_latency);
+    test_state_checkpoint("perf");
 
     TEST_SUMMARY();
     return g_tests_failed > 0 ? 1 : 0;

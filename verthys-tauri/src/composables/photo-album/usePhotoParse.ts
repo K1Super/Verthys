@@ -102,7 +102,7 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
   const {
     photos, isTauri, ensurePhotoKey, showError, showToast,
     /* Parsed Import：复用 usePhotoImport 的流水线 + 导入状态 refs */
-    getPipeline, importing, importProgress, importStatus, importElapsed,
+    getPipeline, importProgress, importStatus, importElapsed,
     parseWorkerFactory = defaultParseWorkerFactory,
   } = deps;
 

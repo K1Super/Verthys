@@ -338,4 +338,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside_dir);
     }
+
+    #[test]
+    fn save_rejects_missing_keyfile_with_field_label() {
+        let root = unique_temp_dir("verthys-devfixture-missing");
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+        let missing_vkf = root.join("Missing.vkf");
+        let profile = DevFixtureProfile {
+            schema_version: PROFILE_SCHEMA_VERSION,
+            container_keyfile_path: display_path(&missing_vkf),
+            ..DevFixtureProfile::default()
+        };
+        let error = save_profile(&config_dir, profile).expect_err("missing keyfile must be rejected");
+        assert!(
+            error.contains("容器 keyfile不存在或不可访问"),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

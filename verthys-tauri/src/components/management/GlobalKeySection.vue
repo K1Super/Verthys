@@ -88,7 +88,6 @@
             desc="更换全局访问密钥与密钥文件口令"
             icon="key"
             :disabled="!globalKeyReady"
-            v-tip="'修改全局访问密钥和密钥文件'"
             @action="$emit('openChangeKeyDialog')"
           />
           <ActionTerminal
@@ -96,7 +95,6 @@
             desc="导出当前密钥文件至本地安全备份"
             icon="download"
             :disabled="!globalKeyReady"
-            v-tip="'导出当前密钥文件备份'"
             @action="$emit('exportBin')"
           />
         </div>
@@ -105,9 +103,9 @@
 
     <!-- 设备与 PCR / 恢复码策略（数据自包含；新恢复码交给 SecurityCenter 统一展示） -->
     <DevicePcrPanel @recovery-rotated="onRecoveryRotated" />
-    <!-- keyfile 因子（D3）：启用/轮换/关闭，自包含数据与文件对话框 -->
+    <!-- keyfile 因子：启用/轮换/关闭，自包含数据与文件对话框 -->
     <KeyfilePanel />
-    <!-- v4 模块不可逆删除（状态查询 + 二次确认） -->
+    <!-- 模块不可逆删除（状态查询 + 二次确认） -->
     <ModuleDangerZone />
   </div>
 </template>

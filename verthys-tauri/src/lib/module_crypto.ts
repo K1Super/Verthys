@@ -14,7 +14,6 @@
  */
 import {
   verthysModuleKeyLock,
-  verthysModuleKeyUnlock,
   verthysModuleOpen,
   verthysModuleSeal,
   type ModuleCryptParams,
@@ -27,14 +26,11 @@ import { bytesToBase64 } from "../utils/binary_codec";
 export type CryptoModule = "photo" | "file";
 
 /** worker 错误码：认证失败（口令/密钥不匹配或数据被篡改） */
-export const MODULE_ERR_AUTH = "ERR_00000002";
+const MODULE_ERR_AUTH = "ERR_00000002";
 /** worker 错误码：模块密钥未解锁或已清除 */
 export const MODULE_ERR_LOCKED = "ERR_00000007";
-/** worker 错误码：参数非法 */
-export const MODULE_ERR_INVALID = "ERR_00000001";
-
 /** 文件块 v2 的 KDF 公开参数（与记录同形，可落盘） */
-export interface FileKdfV2 {
+export interface FileKdf {
   /** KDF 版本标识 */
   version: number;
   /** 文件盐 base64 */
@@ -54,16 +50,6 @@ export class ModuleCryptoError extends Error {
   }
 }
 
-/** 判断是否为认证失败（密文损坏/密钥不匹配） */
-export function isModuleAuthError(e: unknown): boolean {
-  return e instanceof ModuleCryptoError && e.code === MODULE_ERR_AUTH;
-}
-
-/** 判断是否需要重新解锁模块（worker 重启或锁定后） */
-export function isModuleLockedError(e: unknown): boolean {
-  return e instanceof ModuleCryptoError && e.code === MODULE_ERR_LOCKED;
-}
-
 function ensureOk(resp: VerthysResponse, action: string): VerthysResponse {
   if (!resp.ok) {
     const code = resp.error_code ?? resp.error ?? "";
@@ -72,18 +58,13 @@ function ensureOk(resp: VerthysResponse, action: string): VerthysResponse {
   return resp;
 }
 
-/** 把模块口令一次性交付 C 层解封 MDEK user 槽；前端不再持有该口令 */
-export async function unlockModuleKey(module: CryptoModule, key: string): Promise<void> {
-  ensureOk(await verthysModuleKeyUnlock(module, key), "解锁模块密钥");
-}
-
 /** 清除模块密钥（不传 module 表示全部清除） */
 export async function lockModuleKey(module?: CryptoModule): Promise<void> {
   ensureOk(await verthysModuleKeyLock(module), "清除模块密钥");
 }
 
 /** 生成文件块 v2 的随机 KDF 参数（盐是公开数据） */
-export function createFileKdfV2(): FileKdfV2 {
+export function createFileKdf(): FileKdf {
   const salt = crypto.getRandomValues(new Uint8Array(SALT_LEN));
   return { version: 2, saltB64: bytesToBase64(salt), iterations: PBKDF2_ITER };
 }
@@ -120,9 +101,9 @@ export async function openRecord(
 }
 
 /** 生成文件块 v2 的口令校验块（口令是每个文件独立的用户输入） */
-export async function buildV2Check(
+export async function buildModuleCheck(
   module: CryptoModule,
-  kdf: FileKdfV2,
+  kdf: FileKdf,
   password: string,
 ): Promise<string> {
   return sealRecord(module, "v2_check", "", {
@@ -133,9 +114,9 @@ export async function buildV2Check(
 }
 
 /** 校验文件块 v2 口令校验块；认证失败返回 false，其余故障抛出 */
-export async function verifyV2Check(
+export async function verifyModuleCheck(
   module: CryptoModule,
-  kdf: FileKdfV2,
+  kdf: FileKdf,
   password: string,
   checkB64: string,
 ): Promise<boolean> {

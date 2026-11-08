@@ -6,33 +6,33 @@
  *   pwsh tests/gate.ps1 -Stage P0-G -Full
  *   pwsh tests/gate.ps1 -Stage P0-C -SkipBuild
  *   pwsh tests/gate.ps1 -Stage P2
- *   pwsh tests/gate.ps1 -Stage V4-PI
- *   pwsh tests/gate.ps1 -Stage V4-PI-2
- *   pwsh tests/gate.ps1 -Stage V4-PI-3
- *   pwsh tests/gate.ps1 -Stage V4-PI-4
- *   pwsh tests/gate.ps1 -Stage V4-PI-5
+ *   pwsh tests/gate.ps1 -Stage PI
+ *   pwsh tests/gate.ps1 -Stage PI-2
+ *   pwsh tests/gate.ps1 -Stage PI-3
+ *   pwsh tests/gate.ps1 -Stage PI-4
+ *   pwsh tests/gate.ps1 -Stage PI-5
  *
- * P2 额外要求：PCR 读取、PCR 绑定密钥的正控与负控必须同时成立；
+ * PCR 能力阶段额外要求：PCR 读取、PCR 绑定密钥的正控与负控必须同时成立；
  * TBS 授权会话与 TPM NV 的可用性写入报告（平台不支持时记录为能力边界）。
- * V4-PI 要求：v4 数据区/目录/DataRoot、公共会话入口与 v3 拒绝用例
- * （A16）通过；现有 P0/P2 用例不得回退。
- * V4-PI-2 要求：记录仓库/扫描/摘要/删除/导出导入与公共 API v4 分支
- * （A4/A5/A9/A11/A13）全绿；V4-PI 的格式与会话用例不得回退。
- * V4-PI-3 要求：模块表/启用重写/分片/恢复/回滚/API 用例全绿；
- * A6b/A8/A14/A15 与 A4/A5/A9/A11/A12/A13 通过；Rust worker 与前端
- * vitest 必须同时零失败；旧 V4-PI-2/V4-PI/P0-B/P0-F/P2 不得回退。
+ * PI 要求：数据区/目录/DataRoot、公共会话入口与异种格式拒绝用例通过；
+ * 既有阶段用例不得回退。
+ * 记录仓库阶段要求：记录仓库/扫描/摘要/删除/导出导入与公共 API 分支
+ * 用例全绿；格式与会话用例不得回退。
+ * 模块事务阶段要求：模块表/启用重写/分片/恢复/回滚/API 用例全绿；
+ * 对应攻击用例通过；Rust worker 与前端 vitest 必须同时零失败；
+ * 既有阶段用例不得回退。
  *
  * 判定口径：
  *   - 全量单元/集成测试必须 0 失败；
  *   - 该阶段对应的攻击用例必须 PASS（SKELETON/KNOWN_GAP 视为未达标）；
  *   - 任一不满足则退出码 1。
  *
- * 说明：仓库没有独立的 v4 产品库样本，攻击用例由自建随机口令容器与
- * vty_probe 直接驱动 v4 原语生成证据；工件全部落在临时目录。
+ * 说明：仓库没有独立的 产品库样本，攻击用例由自建随机口令容器与
+ * vty_probe 直接驱动 原语生成证据；工件全部落在临时目录。
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('P0-B', 'P0-C', 'P0-D', 'P0-E', 'P0-F', 'P0-G', 'P2', 'V4-PI', 'V4-PI-2', 'V4-PI-3', 'V4-PI-4', 'V4-PI-5')]
+    [ValidateSet('P0-B', 'P0-C', 'P0-D', 'P0-E', 'P0-F', 'P0-G', 'P2', 'PI', 'PI-2', 'PI-3', 'PI-4', 'PI-5')]
     [string]$Stage = 'P0-G',
     [switch]$Full,
     [switch]$SkipBuild,
@@ -76,18 +76,19 @@ if (-not $cmake) {
 }
 
 $stageChecks = @{
-    'P0-B' = @{ Tests = @('v4_blake3', 'v4_hkdf', 'v4_hmac', 'v4_argon2', 'v4_kdf', 'v4_wrap', 'v4_recovery', 'v4_keyring', 'v4_header', 'v4_slot', 'v4_vault'); Attacks = @('PC-1', 'A1', 'A1b', 'A2', 'A3', 'A12', 'A15') }
-    'P0-C' = @{ Tests = @('v4_record', 'v4_name_index'); Attacks = @('A4', 'A9', 'A13') }
-    'P0-D' = @{ Tests = @('v4_chunk', 'v4_manifest'); Attacks = @('A5') }
-    'P0-E' = @{ Tests = @('v4_module'); Attacks = @('A6', 'A6b') }
-    'P0-F' = @{ Tests = @('v4_lockout'); Attacks = @('A7', 'A8') }
-    'P0-G' = @{ Tests = @('v4_'); Attacks = @('PC-1', 'A1', 'A1b', 'A2', 'A3', 'A4', 'A5', 'A6', 'A6b', 'A7', 'A8', 'A9', 'A10', 'A11', 'A12', 'A13', 'A14', 'A15', 'A16', 'A17', 'A19') }
-    'P2'   = @{ Tests = @('v4_pcr', 'v4_tpm_pcr', 'v4_witness'); Attacks = @('PC-1', 'A7', 'A8', 'A12', 'A14') }
-    'V4-PI' = @{ Tests = @('v4_store_', 'v4_api_', 'v4_header_', 'v4_slot_', 'v4_data_root_', 'v4_segment_', 'v4_rollback', 'v4_witness'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A12', 'A14', 'A15', 'A16') }
-    'V4-PI-2' = @{ Tests = @('v4_repo', 'v4_api_records', 'v4_transfer', 'v4_store_', 'v4_crash_record'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A11', 'A13') }
-    'V4-PI-3' = @{ Tests = @('v4_module_table', 'v4_module_m1', 'v4_module_delete', 'v4_module_recovery', 'v4_module_crash', 'v4_api_modules', 'v4_api_module_delete', 'v4_api_recovery_rotate', 'v4_repo', 'v4_store_'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A11', 'A12', 'A13', 'A6b', 'A8', 'A14', 'A15') }
-    'V4-PI-4' = @{ Tests = @('v4_api_pcr', 'v4_pcr_', 'v4_api_product', 'v4_api_module', 'v4_recovery', 'v4_api_records', 'v4_module_', 'v4_store_', 'v4_reseal_device_'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A11', 'A12', 'A13', 'A6b', 'A8', 'A14', 'A15', 'A16', 'A17', 'A19', 'A20', 'A20b') }
-    'V4-PI-5' = @{ Tests = @('v4_repo_system_', 'v4_api_', 'v4_module_'); Attacks = @('PC-1', 'A4', 'A9', 'A11', 'A13', 'A20', 'A20b') }
+    'P0-B' = @{ Tests = @('blake3_', 'hkdf_', 'hmac_', 'argon2id_', 'kdf_', 'wrap_key32_', 'recovery_', 'keyring_', 'header_', 'slot_', 'vault_create'); Attacks = @('PC-1', 'A1', 'A1b', 'A2', 'A3', 'A12', 'A15') }
+    'P0-C' = @{ Tests = @('record_', 'name_index_'); Attacks = @('A4', 'A9', 'A13') }
+    'P0-D' = @{ Tests = @('chunk_', 'manifest_', 'large_file_'); Attacks = @('A5') }
+    'P0-E' = @{ Tests = @('module_'); Attacks = @('A6', 'A6b') }
+    'P0-F' = @{ Tests = @('lockout_'); Attacks = @('A7', 'A8') }
+    # 全量阶段：空前缀匹配全部已通过用例，汇总行另行校验 0 失败
+    'P0-G' = @{ Tests = @(''); Attacks = @('PC-1', 'A1', 'A1b', 'A2', 'A3', 'A4', 'A5', 'A6', 'A6b', 'A7', 'A8', 'A9', 'A10', 'A11', 'A12', 'A13', 'A14', 'A15', 'A16', 'A17') }
+    'P2'   = @{ Tests = @('pcr_', 'tpm_pcr_', 'witness_'); Attacks = @('PC-1', 'A7', 'A8', 'A12', 'A14') }
+    'PI' = @{ Tests = @('store_', 'api_', 'header_', 'slot_', 'data_root_', 'segment_', 'rollback_', 'witness_'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A12', 'A14', 'A15', 'A16') }
+    'PI-2' = @{ Tests = @('repo_', 'api_records_', 'transfer_', 'store_', 'crash_record_'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A11', 'A13') }
+    'PI-3' = @{ Tests = @('module_table_', 'module_m1_', 'module_delete_', 'module_recovery_', 'module_crash_', 'api_modules_', 'api_module_delete', 'api_recovery_rotate', 'repo_', 'store_'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A11', 'A12', 'A13', 'A6b', 'A8', 'A14', 'A15') }
+    'PI-4' = @{ Tests = @('api_pcr_', 'pcr_', 'api_product_', 'api_module', 'recovery_', 'api_records_', 'module_', 'store_', 'reseal_device_'); Attacks = @('PC-1', 'A4', 'A5', 'A9', 'A11', 'A12', 'A13', 'A6b', 'A8', 'A14', 'A15', 'A16', 'A17', 'A20', 'A20b') }
+    'PI-5' = @{ Tests = @('repo_system_', 'api_', 'module_'); Attacks = @('PC-1', 'A4', 'A9', 'A11', 'A13', 'A20', 'A20b') }
 }
 
 $checks = $stageChecks[$Stage]
@@ -96,9 +97,9 @@ $checks = $stageChecks[$Stage]
 # 抛错，都会走统一回收，避免半途退出把见证密钥留在机器上。
 try {
 
-# V4-PI-5 的验收证据固定落到 reports/（可由 -OutJson 覆盖）
-if ($Stage -eq 'V4-PI-5' -and -not $OutJson) {
-    $OutJson = Join-Path $repoRoot 'reports/gate-v4-pi-5.json'
+# 验收证据固定落到 reports/（可由 -OutJson 覆盖）
+if ($Stage -eq 'PI-5' -and -not $OutJson) {
+    $OutJson = Join-Path $repoRoot 'reports/gate-pi-5.json'
 }
 
 if (-not $SkipBuild) {
@@ -109,7 +110,7 @@ if (-not $SkipBuild) {
     }
 
     # worker 在构建期把 verthys.dll 的全文件摘要固化为常量：核心 DLL 每次
-    # 重建后必须同步重建 worker，否则 A8 的 worker 侧会因摘要不匹配拒绝加载。
+    # 重建后必须同步重建 worker，否则 worker 侧会因摘要不匹配拒绝加载。
     $workerDir = Join-Path $repoRoot 'verthys-tauri/verthys-worker'
     $workerExe = Join-Path $workerDir 'target/release/verthys-worker.exe'
     if (Test-Path -LiteralPath $workerExe) {
@@ -187,7 +188,7 @@ foreach ($id in $checks.Attacks) {
     }
 }
 
-# 3) P2 能力门：PCR 读取与 PCR 绑定正/负控必须在真实 TPM 上成立；
+# 3) PCR 能力门：PCR 读取与 PCR 绑定正/负控必须在真实 TPM 上成立；
 #    TBS 授权会话与 TPM NV 的可用性只记录，由偏差登记说明平台边界。
 $p2Caps = $null
 if ($Stage -eq 'P2') {
@@ -212,9 +213,9 @@ if ($Stage -eq 'P2') {
     }
 }
 
-# 3b) V4-PI-3：模块事务涉及 worker 会话与渲染层密钥面移除，
+# 3b) 模块事务涉及 worker 会话与渲染层密钥面移除，
 #     该阶段必须同时跑 Rust worker 单测与前端 vitest（零失败）。
-if ($Stage -in @('V4-PI-3', 'V4-PI-4')) {
+if ($Stage -in @('PI-3', 'PI-4')) {
     $workerDir = Join-Path $repoRoot 'verthys-tauri/verthys-worker'
     Push-Location $workerDir
     try { & cargo test --release | Out-Null; $workerTestExit = $LASTEXITCODE }
@@ -227,32 +228,32 @@ if ($Stage -in @('V4-PI-3', 'V4-PI-4')) {
     finally { Pop-Location }
     if ($frontTestExit -ne 0) { $testFailures.Add('前端 vitest 失败') }
 
-    if ($Stage -eq 'V4-PI-4') {
+    if ($Stage -eq 'PI-4') {
         Push-Location $frontDir
         try { & npx vue-tsc --noEmit | Out-Null; $tscExit = $LASTEXITCODE }
         finally { Pop-Location }
         if ($tscExit -ne 0) { $testFailures.Add('前端类型检查失败') }
 
-        $e2eScript = Join-Path $PSScriptRoot 'e2e/v4-product.ps1'
+        $e2eScript = Join-Path $PSScriptRoot 'e2e/product.ps1'
         & pwsh -NoProfile -File $e2eScript -SkipBuild | Out-Null
-        if ($LASTEXITCODE -ne 0) { $testFailures.Add('v4 产品链 e2e 失败') }
+        if ($LASTEXITCODE -ne 0) { $testFailures.Add('产品链 e2e 失败') }
 
-        $workerE2e = Join-Path $PSScriptRoot 'e2e/v4-worker-smoke.ps1'
+        $workerE2e = Join-Path $PSScriptRoot 'e2e/worker-smoke.ps1'
         & pwsh -NoProfile -File $workerE2e | Out-Null
-        if ($LASTEXITCODE -ne 0) { $testFailures.Add('v4 worker IPC e2e 失败') }
+        if ($LASTEXITCODE -ne 0) { $testFailures.Add('worker IPC e2e 失败') }
 
         # 宿主层全库轮换：真实 AppHandle/AppState/worker/DLL，覆盖
         # Begin→UnlockModule→Run→Abort/Commit 与提交后记录读回。
         # 依赖可用的 Windows 桌面会话（WebView2）；以隐藏窗口运行。
-        $rotateHostE2e = Join-Path $PSScriptRoot 'e2e/v4-rotate-host.ps1'
+        $rotateHostE2e = Join-Path $PSScriptRoot 'e2e/rotate-host.ps1'
         & pwsh -NoProfile -File $rotateHostE2e | Out-Null
-        if ($LASTEXITCODE -ne 0) { $testFailures.Add('v4 全库轮换宿主层 e2e 失败') }
+        if ($LASTEXITCODE -ne 0) { $testFailures.Add('全库轮换宿主层 e2e 失败') }
     }
 }
 
-# 3c) V4-PI-4/V4-PI-5：P1-1 身份键门禁 —— 生产代码禁止内容哈希作为去重/寻址键。
-#     旧字段名（已删除）不得复活；A20/A20b 回归用例必须在场（由全量 vitest 执行）。
-if ($Stage -in @('V4-PI-4', 'V4-PI-5')) {
+# 3c) 身份键门禁 —— 生产代码禁止内容哈希作为去重/寻址键。
+#     旧字段名（已删除）不得复活；去内容化回归用例必须在场（由全量 vitest 执行）。
+if ($Stage -in @('PI-4', 'PI-5')) {
     $idKeyRoots = @(
         (Join-Path $repoRoot 'verthys-tauri/src'),
         (Join-Path $repoRoot 'verthys-tauri/src-tauri/src')

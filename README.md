@@ -40,41 +40,38 @@
 <ul style="margin:0 0 4px;padding-left:22px">
   <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">L4 UI 交互层</span> — Tauri + Vue 3，纯渲染，口令、密钥不出前端。</li>
   <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">L3 应用调度层</span> — Rust 控制器 + worker 子进程，进程编排 / 会话策略 / 安全命令，零密钥接触。</li>
-  <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">L2 核心 DLL 层</span> — C11 编写的 verthys.dll，六大子域：api / crypto / container / index / transaction / security，对外黑盒。</li>
-  <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">L1 持久化层</span> — .verthys 加密容器、pepper.bin、附属数据目录（&lt;容器&gt;.d：状态 / 预设 / WAL / 台账 / idx_cache 温缓存）。</li>
+  <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">L2 核心 DLL 层</span> — C11 编写的 verthys.dll，五大子域：api / crypto / container / index / security，对外黑盒。</li>
+  <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">L1 持久化层</span> — .verthys 加密容器、pepper.bin、附属数据目录（&lt;容器&gt;.d：状态 / 预设 / 导入日志 / 台账 / 容器锁）。</li>
 </ul>
 
 <div style="display:flex;align-items:baseline;gap:16px;border-bottom:1px solid #1E2733;padding-bottom:10px;margin:44px 0 16px">
   <span style="font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;color:#D9A94E;letter-spacing:2px">§ 02</span>
   <span style="font-family:Georgia,'Palatino Linotype','Times New Roman',serif;font-size:26px;color:#E7EBF0">容器格式</span>
-  <span style="font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#5D6B80;letter-spacing:3px;margin-left:auto">CONTAINER / V3</span>
+  <span style="font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#5D6B80;letter-spacing:3px;margin-left:auto">CONTAINER FORMAT</span>
 </div>
 
 <p style="color:#A8B2C0;margin:0 0 14px">一个 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">.verthys</code> 容器就是一套自洽的小型存储引擎：</p>
 
 <table style="width:100%;border-collapse:collapse;font-size:14px;margin:0 0 6px">
   <tr>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E;width:22%">SUPERBLOCK</td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:12px 16px;color:#A8B2C0">超级块三副本 + 2/3 法定人数提交与读取；副本损坏可触发恢复，而非丢失。</td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E;width:22%">HEADER</td>
+    <td style="border:1px solid #1E2733;background:#0A0D12;padding:12px 16px;color:#A8B2C0"><code>VRTY</code> 固定头 + A/B 元数据双副本；单副本损坏不阻断打开。</td>
   </tr>
   <tr>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E">PARTITION</td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:12px 16px;color:#A8B2C0">分区管理，每个分区持有独立 AEAD 密钥。</td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E">DATA</td>
+    <td style="border:1px solid #1E2733;background:#0A0D12;padding:12px 16px;color:#A8B2C0">追加数据区 + COW 目录树 + DataRoot 快照；提交按代际原子切换。</td>
   </tr>
   <tr>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E">EXTENT</td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:12px 16px;color:#A8B2C0">内容寻址存储：去重 + 引用计数，垃圾随事务回收。</td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E">RECORD</td>
+    <td style="border:1px solid #1E2733;background:#0A0D12;padding:12px 16px;color:#A8B2C0">记录段 AEAD 加密 + 名称/类型盲索引 + 墓碑删除；单条记录独立密钥。</td>
   </tr>
   <tr>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E">INDEX</td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:12px 16px;color:#A8B2C0">LSM 索引：MemTable 跳表 + SSTable + 布隆过滤器 + 分级 Compaction。</td>
-  </tr>
-  <tr>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E">TXN</td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:12px 16px;color:#A8B2C0">WAL 环形双区预写日志，六阶段事务：BEGIN → WRITE_EXTENT → UPDATE_INDEX → PREPARE → COMMIT → CONFIRM；崩溃后按序回放恢复。</td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E">MODULE</td>
+    <td style="border:1px solid #1E2733;background:#0A0D12;padding:12px 16px;color:#A8B2C0">口令 + 设备根双包裹 AND；恢复码 + keyfile 因子；模块 MDEK 独立槽。</td>
   </tr>
   <tr>
     <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E">COMPAT</td>
+    <td style="border:1px solid #1E2733;background:#0A0D12;padding:12px 16px;color:#A8B2C0">只认当前格式；异种 magic/版本 fail-closed，不提供旧格式迁移。</td>
   </tr>
 </table>
 
@@ -218,7 +215,7 @@ ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
   </tr>
   <tr>
     <td style="border:1px solid #1E2733;background:#0E131B;padding:11px 16px;color:#E7EBF0">密码学与编解码</td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:11px 16px;color:#A8B2C0">libsodium（vendored 静态链入）· Windows CNG · flatcc · xxHash</td>
+    <td style="border:1px solid #1E2733;background:#0A0D12;padding:11px 16px;color:#A8B2C0">libsodium（vendored 静态链入）· Windows CNG · flatcc</td>
     <td style="border:1px solid #1E2733;background:#0A0D12;padding:11px 16px;color:#5D6B80">AEAD / Argon2id / 容器编解码</td>
   </tr>
   <tr>
