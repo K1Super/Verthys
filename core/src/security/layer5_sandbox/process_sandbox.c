@@ -73,8 +73,7 @@
 
 /* ProcessMitigationPolicy 枚举值（与 winnt.h / PROCESS_MITIGATION_POLICY 一致）。
  * 数值错位会把结构体传给另一策略：轻则 ERROR_INVALID_PARAMETER，重则
- * 启用了完全不同的策略（历史上此处曾把 ChildProcess 写成 6、ImageLoad
- * 写成 8，实际对应 ExtensionPointDisable 与 SignaturePolicy）。 */
+ * 启用完全不同的策略（6 对应 ExtensionPointDisable，8 对应 SignaturePolicy）。 */
 typedef enum _PROCESS_MITIGATION_POLICY_VERTHYS {
     ProcessDynamicCodePolicy_VERTHYS        = 2,
     ProcessStrictHandleCheckPolicy_VERTHYS  = 3,

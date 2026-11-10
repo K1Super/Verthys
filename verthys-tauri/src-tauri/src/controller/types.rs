@@ -1,15 +1,14 @@
 /*
  * controller/types.rs — 控制器层共享类型定义
  *
- *
  * 架构定位：控制器层数据契约（与前端 verthys.ts 对齐）
  *   - VerthysRecordEntry: 批量枚举返回的单条记录
  *   - VerthysSummaryEntry: 摘要扫描返回的单条记录
- *   - VerthysResponse: 统一 JSON 响应结构（过渡兼容别名，待移除）
- *   - PreflightResult: 路径预检结果（删除 dir 字段）
+ *   - VerthysResponse: 统一 JSON 响应结构（遗留兼容，新代码不得使用）
+ *   - PreflightResult: 路径预检结果（仅错误码，不携带路径）
  *   - InitStatusResult: 初始化状态查询结果
- *   - DiagInfo: 诊断信息（删除路径字段，改存在性/哈希标识）
- *   - EnumerateBatch: 流式分页批次（增加 error 字段）
+ *   - DiagInfo: 诊断信息（仅存在性/哈希标识，不含路径）
+ *   - EnumerateBatch: 流式分页批次（可携带批次错误）
  *   - InitStatus / DeviceBindingStatus: 枚举
  *   - RecordType / RecordId: newtype
  *
@@ -29,12 +28,10 @@ use zeroize::Zeroize;
 // ===== RecordType / RecordId newtype =====
 //
 // 当前仅定义 newtype，现有结构体继续使用 u32/u64 原始类型。
-// 后续统一迁移至 newtype 后启用 ts-rs 生成。
 
 /// 记录类型 newtype
 ///
 /// 替代裸 u32，提供类型安全防止与其他 u32 字段混淆。
-/// 后续统一迁移后，VerthysRecordEntry.rtype 将改为 RecordType。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, TS)]
 #[repr(transparent)]
 #[ts(export, export_to = "bindings/", type = "number")]
@@ -344,17 +341,16 @@ pub struct PrivacyStatusResult {
 ///
 /// Base64 字段附 original_size:u64（原始字节数，base64 解码后长度）
 ///
-/// name / data 改为 SecuredString（Zeroizing<String>）：
-///   - Drop 时自动 zeroize 堆内存，消除 secure_zero_records 中 ptr::write_bytes
-///     对 String 的 UB 覆写
+/// name / data 使用 SecuredString（Zeroizing<String>）：
+///   - Drop 时自动 zeroize 堆内存
 ///   - 透明 serde（序列化为普通 JSON 字符串），前端契约无感
-///   - Deref<Target=str> 兼容现有 as_str()/len()/is_empty()/as_ptr() 调用
+///   - Deref<Target=str> 兼容 as_str()/len()/is_empty()/as_ptr() 调用
 #[derive(Debug, Serialize, Deserialize, Clone, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct VerthysRecordEntry {
     #[ts(type = "number")]
     pub id: u64,
-    /// 记录类型（后续迁移至 RecordType newtype）
+    /// 记录类型
     pub rtype: u32,
     /// 记录名称（SecuredString，Drop 时零化擦除）
     pub name: SecuredString,
@@ -376,7 +372,7 @@ pub struct VerthysRecordEntry {
 /// id / rtype / original_size 非敏感，不擦除（保留以便崩溃诊断）。
 ///
 /// 支持泛型 `ScanRecord: Zeroize` 约束，使 `<[VerthysRecordEntry]>::zeroize()`
-/// 可直接对整批记录就地擦除，替代 secure_zero_records 自由函数。
+/// 可直接对整批记录就地擦除。
 impl Zeroize for VerthysRecordEntry {
     fn zeroize(&mut self) {
         self.name.zeroize();
@@ -388,13 +384,12 @@ impl Zeroize for VerthysRecordEntry {
 ///
 /// 与 VerthysRecordEntry 的区别：
 ///   - 无 data 字段（不解密数据块，解锁后 1-2 秒内完成列表渲染）
-///   - 新增 data_size / physical_offset / merkle_leaf（供按需加载定位 + 完整性校验）
-///   - 新增 created_time（创建时间戳，解锁后立即展示在列表中）
+///   - 携带 data_size / physical_offset / merkle_leaf（供按需加载定位 + 完整性校验）
+///   - 携带 created_time（创建时间戳，解锁后立即展示在列表中）
 ///
 /// merkle_leaf 以 base64 传输（32 字节 → 44 字符），前端用于全盘完整性巡检。
 ///
-/// name / merkle_leaf 改为 SecuredString（Zeroizing<String>）：
-///   Drop 时自动零化堆内存，消除 secure_zero_summary_records 中 ptr::write_bytes UB。
+/// name / merkle_leaf 使用 SecuredString（Zeroizing<String>）：Drop 时自动零化堆内存。
 #[derive(Serialize, Deserialize, Clone, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct VerthysSummaryEntry {
@@ -426,13 +421,11 @@ impl Zeroize for VerthysSummaryEntry {
     }
 }
 
-// ===== VerthysResponse（标记 deprecated，增量迁移中）=====
+// ===== VerthysResponse（遗留兼容结构）=====
 //
 // ApiResponse<T> 泛型信封 + 操作特化响应类型已定义在 api_error.rs。
-// 新增控制器已直接使用结构化响应类型（SecurityResult / ClipboardResult /
-// PrivacyModeResult / DeviceBindingResult / PreflightResult 等），不再使用 VerthysResponse。
-// 现有遗留控制器（verthys_controller / key_controller / file_controller 等）仍使用
-// VerthysResponse，后续增量迁移至 ApiResponse<T>。新代码禁止使用 VerthysResponse。
+// 新代码禁止使用 VerthysResponse，应使用 ApiResponse<T> 或结构化响应类型；
+// 现有控制器仍有使用，迁移完成前保留本结构。
 
 /* 防御闭环状态报告（主进程侧镜像）
  * 与 worker protocol.rs SecurityStatusReport 字段一一对应（serde 名称对齐）；
@@ -455,10 +448,9 @@ pub struct SecurityStatusReport {
     pub checked_at_unix_ms: u64,
 }
 
-/// 统一 JSON 响应结构（已废弃，新代码使用 ApiResponse<T> 或结构化响应类型）
+/// 统一 JSON 响应结构（遗留兼容，新代码使用 ApiResponse<T> 或结构化响应类型）
 ///
-/// 新增 ApiResponse<T> 泛型信封替代此结构。
-/// 新增控制器已使用结构化响应类型。遗留控制器增量迁移中。
+/// 新控制器使用结构化响应类型；本结构仅供尚未迁移的控制器使用。
 #[derive(Serialize, Deserialize)]
 pub struct VerthysResponse {
     pub ok: bool,
@@ -492,7 +484,6 @@ pub struct VerthysResponse {
     /// 共享内存名称（scan_open 返回，Tauri 主进程据此打开共享内存）
     ///
     /// shm_name 不透传前端，仅主进程内部使用。
-    /// 控制器层改造时剥离此字段，改由主进程内部传递。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shm_name: Option<String>,
     /// 共享内存总大小（字节）
@@ -509,7 +500,7 @@ pub struct VerthysResponse {
     pub failed_ids: Option<Vec<u64>>,
     /* 解锁响应内联全局主密钥探测结果
      *   worker 解锁成功后进程内一次性完成 has_record + find_lid + get_record，
-     *   结果内联到 unlock 响应三字段，彻底消除前端 IPC 链路与 v1 假阴性死锁。
+     *   结果内联到 unlock 响应三字段，前端无需再发起额外 IPC 查询。
      *   后端仅做透传反序列化 → 前端直接消费。 */
     /// 是否存在全局主密钥记录（仅 unlock 操作返回）
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -780,11 +771,10 @@ impl VerthysResponse {
     }
 }
 
-// ===== PreflightResult（删除 dir 字段 + 错误码脱敏）=====
+// ===== PreflightResult（错误码脱敏，不携带路径）=====
 
-/// 路径预检结果（删除 dir 字段；错误码脱敏）
+/// 路径预检结果（错误码脱敏，不携带路径）
 ///
-/// 删除 dir 字段，前端不再接收路径信息。
 /// 失败时仅返回标准化错误码 + 无路径提示，不泄露路径。
 ///   错误码取值：INVALID_PATH / PERMISSION_DENIED / DISK_SPACE_INSUFFICIENT
 ///   / DISK_SPACE_UNKNOWN / TEMPORARY_FAILURE
@@ -798,7 +788,7 @@ pub struct PreflightResult {
     #[ts(optional)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
-    /// 删除 dir 字段（不透传路径到前端）
+    /// 目标路径是否位于系统保护目录（不透传路径到前端）
     pub is_system_protected: bool,
     pub file_exists: bool,
     /// 磁盘剩余空间（MB）
@@ -808,17 +798,11 @@ pub struct PreflightResult {
     pub dir_created: bool,
 }
 
-// ===== DiagInfo（删除路径字段，改存在性/哈希标识）=====
+// ===== DiagInfo（仅存在性/哈希标识，不含路径）=====
 
-/// 诊断信息（删除 worker_path/dll_path/cwd，改存在性/哈希标识）
+/// 诊断信息（仅存在性与哈希标识，不含 worker/dll 路径与工作目录）
 ///
-/// 变更清单：
-///   - 删除 worker_path: String（不泄露路径）
-///   - 删除 dll_path: String（不泄露路径）
-///   - 删除 cwd: String（不泄露工作目录）
-///   - 新增 worker_exists: bool（保留，原已有）
-///   - 新增 dll_hash: String（DLL SHA-256 哈希前 16 字符，用于完整性诊断）
-///   - 新增 worker_pid: Option<u32>（worker 进程 PID，运行中时有值）
+/// 不返回路径字段，避免通过诊断接口泄露本地目录结构。
 #[derive(serde::Serialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct DiagInfo {
@@ -839,19 +823,17 @@ pub struct DiagInfo {
 
 // ===== InitStatusResult（使用 InitStatus 枚举）=====
 
-/// 初始化状态查询结果（使用 InitStatus 枚举）
+/// 初始化状态查询结果
 ///
-/// 当前保留 status: String 字段（向后兼容），
-/// 新增 status_enum: Option<InitStatus> 字段供前端渐进迁移。
-/// 后续移除 status 字段，统一使用 status_enum。
+/// status 为字符串形式，status_enum 为类型安全枚举，两者并存以保持兼容。
 #[derive(serde::Serialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct InitStatusResult {
-    /// 状态字符串（向后兼容，待移除）
+    /// 状态字符串（取值见下）
     ///
     /// 取值："none" | "ready" | "broken" | "initializing" | "maintenance"
     pub status: String,
-    /// 状态枚举（类型安全，后续替代 status 字段）
+    /// 状态枚举（类型安全形式）
     #[ts(optional)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_enum: Option<InitStatus>,
@@ -861,7 +843,7 @@ pub struct InitStatusResult {
     pub detail: String,
 }
 
-// ===== EnumerateBatch（增加 error 字段）=====
+// ===== EnumerateBatch（流式分页批次）=====
 
 /// 枚举记录流式分页批次（Tauri Channel 推送载荷）
 ///
@@ -869,8 +851,7 @@ pub struct InitStatusResult {
 /// 每批返回通过 on_batch Channel 推送到前端。前端收到一批即渲染一批，
 /// 用户感知为渐进式加载而非"瞬间冻结后爆发"，单批处理时间 < 5ms。
 ///
-/// 增加 error: Option<ApiError> 字段
-/// 批次失败时通过此字段返回错误信息，前端据此决定是否停止循环。
+/// 批次失败时通过 error 字段返回错误信息，前端据此决定是否停止循环。
 #[derive(serde::Serialize, Clone, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct EnumerateBatch {

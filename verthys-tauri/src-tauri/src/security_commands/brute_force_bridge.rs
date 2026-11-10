@@ -4,7 +4,7 @@
  *
  * 职责：
  *   为口令进入 FFI 的服务端命令（verthys_unlock / verthys_verify_global_key
- *   / 密钥派生）提供强制暴力熔断接入点，由服务端权威计数：前端不再承担
+ *   / 密钥派生）提供强制暴力熔断接入点，由服务端权威计数：前端不承担
  *   失败计数职责，仅查询展示锁定态。
  *
  *   - gate_check：入口闸门。锁定/尝试过频状态下，口令不进入任何
@@ -14,7 +14,7 @@
  *
  * 语义约定：
  *   - 计数、DPAPI 持久化与审计统一由本桥接层执行（同一守卫、同一持久化层）；
- *     记录命令已下线，前端不再直接触发失败/成功计数。
+ *     前端不直接触发失败/成功计数。
  *   - 每次认证失败都计数；认证成功无条件重置；累计计数仅审计。
  */
 
@@ -134,7 +134,7 @@ pub(crate) fn record_auth_failure(app: &AppHandle, state: &SecurityState) {
 /// 记录一次服务端观察到的口令验证成功：重置连续失败计数。
 ///
 /// 调用前提：响应 ok=true（服务端已在响应中确认成功，
-/// 无需会话授权检查——与前端命令版的授权要求不同）。
+/// 无需会话授权检查）。
 pub(crate) fn record_auth_success(app: &AppHandle, state: &SecurityState) {
     ensure_brute_force_loaded(app, state);
 

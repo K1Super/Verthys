@@ -2,7 +2,7 @@
  * state/import_writer.rs — 照片导入单写者通道
  *
  * 职责：把「批量写入 + 会话关闭」两类存储变更收敛到唯一写者线程，
- * 消除原先「命令线程内持会话锁 + 串行 worker IPC」模式的两个问题：
+ * 避免命令线程内持会话锁 + 串行 worker IPC 的两个问题：
  *   - 阻塞的 worker IPC 占用 Tauri 异步运行时线程；
  *   - 并发变更仅靠会话互斥锁兜底，缺乏端到端超时与饥饿观察。
  *
@@ -464,7 +464,7 @@ fn worker_add_records(
 /// 检查点。窗口内持会话锁。
 ///
 /// 性能契约：数据落盘按子批提交（每子批一次 C 层事务 + 一次 WAL fsync），
-/// 不再逐条 fsync；单条失败仍按条计入 failed_indices，不中止批次。
+/// 不做逐条 fsync；单条失败仍按条计入 failed_indices，不中止批次。
 fn process_append_pending(
     state: &AppState,
     records: Vec<BatchRecordInput>,
@@ -1324,7 +1324,7 @@ mod tests {
         let records = vec![rec("a.jpg", "h1"), rec("b.jpg", "h2")];
 
         /* worker 不可达属传输级失败：整批上抛供调用方按幂等条目键重试，
-         * 不再把一次超时放大成逐条 N 次超时。 */
+         * 避免把一次超时放大成逐条 N 次超时。 */
         let err = process_append_pending(&state, records, None, &hb()).unwrap_err();
         assert!(err.contains("worker"), "错误应标注 worker 不可用: {err}");
     }

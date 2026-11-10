@@ -4,9 +4,9 @@
  * 通过注入假时钟与假帧调度器实现确定性测试：
  * 不依赖真实 rAF / performance.now，动画推进由 frame() 显式驱动。
  *
- * 覆盖：状态机全路径、平滑与软上限、单调不变量、失败冻结与降级、
- * 收束中断、失败重试复位、并发启动单例锁、极快成功策略、
- * 直通降级（reduced-motion）、真实进度回退、输入越界钳制。
+ * 覆盖：状态机全路径、平滑与软上限、阶段密集/长停留的连续推进、
+ * 单调不变量、失败冻结与降级、收束中断、失败重试复位、并发启动单例锁、
+ * 极快成功策略、直通降级（reduced-motion）、真实进度回退、输入越界钳制。
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
@@ -112,7 +112,7 @@ describe('useVerifyRhythm — 状态机与成功收束', () => {
 
   it('极快成功（skipAnimation）：跳过收束动画，立即补满并触发完成事件', async () => {
     const { env, report, frame } = createFakeEnv();
-    /* 策略显式注入：生产默认已改 minStartPoint（验证再快也跑完收束），
+    /* 策略显式注入：生产默认 fullSeal（验证再快也跑完整段收束），
        本用例只覆盖 skipAnimation 这一可选策略本身 */
     const rhythm = useVerifyRhythm({
       env,
@@ -136,19 +136,24 @@ describe('useVerifyRhythm — 状态机与成功收束', () => {
     expect(rhythm.visualValue.value).toBe(before);
   });
 
-  it('极快成功（minStartPoint）：收束起点上抬至 minSealStart 再执行完整收束', async () => {
+  it('极快成功（fullSeal）：收束从当前视觉值连续起步，不瞬跳，并跑完整段收束', () => {
     const { env, frame } = createFakeEnv();
     const rhythm = useVerifyRhythm({
       env,
-      config: { fastSuccessStrategy: 'minStartPoint', minSealStart: 0.35, fastSuccessThreshold: 50 },
+      config: { fastSuccessStrategy: 'fullSeal', fastSuccessThreshold: 50 },
     });
 
     rhythm.start();
-    frame(10); // 160ms > 50ms 阈值，走 minStartPoint 收束
+    frame(10); // 160ms > 50ms 阈值，走完整收束
+    const before = rhythm.visualValue.value;
     rhythm.seal();
     expect(rhythm.phase.value).toBe('SEALING');
+
     frame(1);
-    expect(rhythm.visualValue.value).toBeGreaterThanOrEqual(0.35);
+    const after = rhythm.visualValue.value;
+    expect(after).toBeGreaterThanOrEqual(before);
+    expect(after - before).toBeLessThan(0.1); // 单帧不瞬跳（不得抬升至 0.35）
+
     frame(60);
     expect(rhythm.phase.value).toBe('DONE');
     expect(rhythm.visualValue.value).toBe(1);
@@ -254,6 +259,82 @@ describe('useVerifyRhythm — 活跃期平滑与不变量', () => {
     rhythm.pushRealProgress(Number.NaN); // 忽略，不崩溃
     frame(10);
     expect(rhythm.visualValue.value).toBeLessThanOrEqual(softCeiling);
+  });
+
+  it('阶段密集到达（5%→6%→8%）时视觉逐帧持续前进，不出现静止帧', () => {
+    const { env, frame } = createFakeEnv();
+    const rhythm = useVerifyRhythm({ env });
+
+    rhythm.start();
+    rhythm.pushRealProgress(0.05);
+    frame(1);
+    rhythm.pushRealProgress(0.06);
+    frame(1);
+    rhythm.pushRealProgress(0.08);
+
+    const samples: number[] = [];
+    for (let i = 0; i < 90; i++) {
+      frame(1);
+      samples.push(rhythm.visualValue.value);
+    }
+
+    for (let i = 1; i < samples.length; i++) {
+      expect(samples[i]).toBeGreaterThan(samples[i - 1]);
+    }
+  });
+
+  it('真实进度长时间不更新时保持保底推进：两阶段之间的空窗不静止', () => {
+    const { env, frame } = createFakeEnv();
+    const rhythm = useVerifyRhythm({ env });
+
+    rhythm.start();
+    rhythm.pushRealProgress(0.08); // 模拟「解锁加密库」停留，长时间无新阶段
+    frame(250); // 4s：假进度曲线已进入封顶期，若无保底推进将趋于静止
+    const before = rhythm.visualValue.value;
+    frame(60); // 960ms
+    const moved = rhythm.visualValue.value - before;
+
+    // 保底推进约 5%/s（180px 通道约 9px/s），形成可感知的连续位移
+    expect(moved).toBeGreaterThan(0.02);
+  });
+
+  it('无真实进度的长阶段速度平滑衰减：每秒仍有可感知推进，不出现平台期爬行', () => {
+    const { env, frame } = createFakeEnv();
+    const rhythm = useVerifyRhythm({ env });
+
+    rhythm.start();
+    const samples: number[] = [];
+    // 每段约 1.008s（63 帧），覆盖「冲高后平台期爬行」的时间窗
+    for (let second = 0; second < 6; second++) {
+      frame(63);
+      samples.push(rhythm.visualValue.value);
+    }
+
+    for (let i = 1; i < samples.length; i++) {
+      expect(samples[i] - samples[i - 1]).toBeGreaterThan(0.04);
+    }
+  });
+
+  it('收束保留起点速度：SEALING 每帧前进且不越界，完成后精确补满 100%', () => {
+    const { env, frame } = createFakeEnv();
+    const rhythm = useVerifyRhythm({ env });
+
+    rhythm.start();
+    rhythm.pushRealProgress(0.5);
+    frame(20);
+    const activeEnd = rhythm.visualValue.value;
+
+    rhythm.seal();
+    let prev = activeEnd;
+    for (let i = 0; i < 40; i++) {
+      frame(1);
+      const v = rhythm.visualValue.value;
+      expect(v).toBeGreaterThanOrEqual(prev);
+      expect(v).toBeLessThanOrEqual(1);
+      prev = v;
+    }
+    expect(rhythm.phase.value).toBe('DONE');
+    expect(rhythm.visualValue.value).toBe(1);
   });
 });
 

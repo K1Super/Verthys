@@ -63,13 +63,93 @@ pub fn load_or_create(dir: &Path) -> Result<Zeroizing<String>, String> {
     let sealed = crypto::dpapi_protect(&raw, Some(DPAPI_DESCRIPTION))?;
     raw.zeroize();
 
-    let tmp = temp_path(&path);
-    commit_atomically(&tmp, &path, &sealed)?;
+    write_sealed(dir, &sealed)
+}
 
+/// 只读探测既有容器口令；文件不存在返回 `Ok(None)`，绝不生成。
+///
+/// 解锁类操作必须使用本函数：把“密钥材料缺失”与“口令错误”区分开，
+/// 避免静默生成新密钥后让既有容器永久无法打开。
+pub fn load_existing(dir: &Path) -> Result<Option<Zeroizing<String>>, String> {
+    let path = dir.join(SECRET_FILE_NAME);
+    match fs::read(&path) {
+        Ok(sealed) => unseal(&sealed).map(Some),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("读取容器口令文件失败: {}", e)),
+    }
+}
+
+/// 密钥材料文件是否存在于指定目录
+pub fn exists(dir: &Path) -> bool {
+    dir.join(SECRET_FILE_NAME).is_file()
+}
+
+/// 把旧位置的密封口令迁移到主位置：校验来源 → 原子写入 → 回读校验。
+///
+/// 不删除旧文件：保留为只读兜底，避免迁移过程中的任何失败导致双方都不可用。
+/// 返回主位置实际生效的口令（并发场景以先提交者为准）。
+pub fn migrate_legacy(legacy_dir: &Path, primary_dir: &Path) -> Result<Zeroizing<String>, String> {
+    let sealed = fs::read(legacy_dir.join(SECRET_FILE_NAME))
+        .map_err(|e| format!("读取旧位置容器口令失败: {}", e))?;
+    let mut legacy_password = unseal(&sealed)?;
+    legacy_password.zeroize();
+    write_sealed(primary_dir, &sealed)
+}
+
+/// 用旧位置的有效副本原子替换主位置（仅当主位置不可解封时调用）。
+///
+/// 与迁移不同，本函数允许覆盖主位置；旧文件保留不动。
+pub fn restore_legacy(legacy_dir: &Path, primary_dir: &Path) -> Result<Zeroizing<String>, String> {
+    let sealed = fs::read(legacy_dir.join(SECRET_FILE_NAME))
+        .map_err(|e| format!("读取旧位置容器口令失败: {}", e))?;
+    let mut legacy_password = unseal(&sealed)?;
+    legacy_password.zeroize();
+
+    fs::create_dir_all(primary_dir).map_err(|e| format!("创建密钥材料目录失败: {}", e))?;
+    let target = primary_dir.join(SECRET_FILE_NAME);
+    let tmp = temp_path(&target);
+    write_temp_then_replace(&tmp, &target, &sealed)?;
+    let committed = fs::read(&target).map_err(|e| format!("读取容器口令文件失败: {}", e))?;
+    unseal(&committed)
+}
+
+/// 写入主位置并回读校验，返回盘面实际生效的口令。
+fn write_sealed(dir: &Path, sealed: &[u8]) -> Result<Zeroizing<String>, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("创建密钥材料目录失败: {}", e))?;
+    let target = dir.join(SECRET_FILE_NAME);
+    let tmp = temp_path(&target);
+    commit_atomically(&tmp, &target, sealed)?;
     // 提交后统一从盘面回读：并发首启时落败方也由此拿到先落盘的口令，
     // 不会把本地生成但未提交的口令当作有效口令使用。
-    let committed = fs::read(&path).map_err(|e| format!("读取容器口令文件失败: {}", e))?;
+    let committed = fs::read(&target).map_err(|e| format!("读取容器口令文件失败: {}", e))?;
     unseal(&committed)
+}
+
+/// 写临时文件并原子替换目标（允许覆盖既有文件），用于主位置恢复。
+fn write_temp_then_replace(tmp: &Path, target: &Path, sealed: &[u8]) -> Result<(), String> {
+    let write_result = (|| -> Result<(), String> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tmp)
+            .map_err(|e| format!("创建临时口令文件失败: {}", e))?;
+        file.write_all(sealed)
+            .map_err(|e| format!("写入临时口令文件失败: {}", e))?;
+        file.sync_all()
+            .map_err(|e| format!("临时口令文件落盘失败: {}", e))?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(tmp);
+        return Err(e);
+    }
+
+    // Windows 上 fs::rename 允许覆盖既有文件（MOVEFILE_REPLACE_EXISTING）
+    fs::rename(tmp, target).map_err(|e| {
+        let _ = fs::remove_file(tmp);
+        format!("提交容器口令文件失败: {}", e)
+    })
 }
 
 /// 临时文件路径：随机后缀避免并发进程相互覆盖；随机源不可用时退化为进程号
@@ -182,5 +262,70 @@ mod tests {
         let after = fs::read(dir.join(SECRET_FILE_NAME)).expect("原文件应保留");
         assert_eq!(after.as_slice(), b"not a sealed secret");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_load_existing_absent_does_not_create() {
+        let dir = temp_dir("absent");
+        let result = load_existing(&dir).expect("缺失应返回 None 而非错误");
+        assert!(result.is_none());
+        assert!(!dir.join(SECRET_FILE_NAME).exists(), "只读探测不得生成文件");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_migrate_legacy_copies_without_deleting_source() {
+        let legacy = temp_dir("legacy_src");
+        let primary = temp_dir("legacy_dst");
+        let original = load_or_create(&legacy).expect("旧位置生成应成功");
+
+        let migrated = migrate_legacy(&legacy, &primary).expect("迁移应成功");
+        assert_eq!(migrated.as_str(), original.as_str());
+        assert!(primary.join(SECRET_FILE_NAME).exists(), "主位置应已落盘");
+        assert!(
+            legacy.join(SECRET_FILE_NAME).exists(),
+            "迁移不得删除旧位置副本"
+        );
+
+        let loaded = load_existing(&primary).expect("主位置读取应成功");
+        assert_eq!(loaded.expect("主位置应有值").as_str(), original.as_str());
+        let _ = fs::remove_dir_all(&legacy);
+        let _ = fs::remove_dir_all(&primary);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_migrate_legacy_rejects_corrupt_source() {
+        let legacy = temp_dir("legacy_corrupt");
+        let primary = temp_dir("legacy_corrupt_dst");
+        fs::create_dir_all(&legacy).expect("目录应可创建");
+        fs::write(legacy.join(SECRET_FILE_NAME), b"broken").expect("写入应成功");
+
+        assert!(migrate_legacy(&legacy, &primary).is_err());
+        assert!(
+            !primary.join(SECRET_FILE_NAME).exists(),
+            "来源损坏时不得写入主位置"
+        );
+        let _ = fs::remove_dir_all(&legacy);
+        let _ = fs::remove_dir_all(&primary);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_restore_legacy_replaces_corrupt_primary() {
+        let legacy = temp_dir("restore_src");
+        let primary = temp_dir("restore_dst");
+        let original = load_or_create(&legacy).expect("旧位置生成应成功");
+        fs::create_dir_all(&primary).expect("目录应可创建");
+        fs::write(primary.join(SECRET_FILE_NAME), b"corrupted primary").expect("写入应成功");
+
+        let restored = restore_legacy(&legacy, &primary).expect("恢复应成功");
+        assert_eq!(restored.as_str(), original.as_str());
+        let after = load_existing(&primary).expect("主位置读取应成功");
+        assert_eq!(after.expect("主位置应有值").as_str(), original.as_str());
+        let _ = fs::remove_dir_all(&legacy);
+        let _ = fs::remove_dir_all(&primary);
     }
 }

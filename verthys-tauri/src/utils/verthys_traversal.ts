@@ -1,7 +1,7 @@
 /*
  * utils/verthys_traversal.ts — Verthys 记录遍历通用工具
  *
- * 消除 keyManager.ts 中 4 处重复的 for 循环：
+ * 收敛 keyManager.ts 中 4 处重复的 for 循环：
  *   - findGlobalKeyRecord
  *   - findModuleKeyRecord
  *   - loadModuleKeyStatus

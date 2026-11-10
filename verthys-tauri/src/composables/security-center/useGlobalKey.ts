@@ -1,10 +1,6 @@
 /**
  * useGlobalKey.ts — 全局密钥初始化/验证/修改/导出 Composable
  *
- * 来源：SecurityCenter.vue 原 L1000-L1007, L1030-L1072, L1081-L1140, L1196-L1256,
- *                 L1495-L1504, L1512-L1545, L1548-L1564, L1571-L1603, L1606-L1629
- *                 （零行为变更提取）
- *
  * 职责：
  *   1. 管理初始化/验证共享表单状态（initPassword / verifyPassword / binPassword
  *      / binFileName / binBytes / processing）
@@ -14,7 +10,7 @@
  *   3. 管理修改全局密钥弹窗状态（showChangeKeyDialog / changeKeyProcessing +
  *      旧/新密钥两组表单字段）
  *   4. 提供核心函数：
- *      - browseBin：选择 .bin 密钥文件（Tauri + 浏览器双路径，含错误反馈修复）
+ *      - browseBin：选择 .bin 密钥文件（Tauri + 浏览器双路径，含错误反馈）
  *      - onInitKey：初始化全局密钥（含密码长度前置校验 + 设备绑定解耦）
  *      - onVerify：验证全局密钥（含进度回调 + 验证后动画）
  *      - browseOldBin / browseNewBin：修改密钥弹窗的旧/新 .bin 文件选择
@@ -25,8 +21,8 @@
  *        导出验证弹窗两件套（取消 / 确认：选密钥文件 → 验证 → 另存为导出）
  *      - resetInitVerifyForm：复位初始化/验证表单（供 goBackToUnlock 调用）
  *
- * 修复（已内联，零行为变更）：
- *   - 静默返回 → 明确错误反馈（browseBin / onInitKey / onVerify 三处守卫拆分）
+ * 关键约束：
+ *   - 错误反馈明确：browseBin / onInitKey / onVerify 三处守卫拆分，不静默返回
  *   - 客户端密码长度前置校验（TextEncoder UTF-8 字节长度，与后端严格一致）
  *   - 验证进度由感知层（VerifyRhythm）驱动：成功路径等待收束完成事件后
  *     再切换视图，失败路径按感知层配置的错误最小展示时长保留冻结降级态，
@@ -229,15 +225,14 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
         binBytes.value = next;
       }
     } catch (e) {
-      // 修复：不再静默吞错（消除"按钮完全无反应"根因）
+      // 读取失败必须显式反馈，并复位 UI 状态
       //
-      // 原缺陷：catch { /* */ } 静默吞掉 readUserFile 沙箱校验失败等错误。
-      // binFileName 在 readUserFile 之前已设置，但 binBytes 因异常未设置。
-      // 按钮 :disabled 用 !binFileName 判断（通过，可点击），但 onVerify/
-      // onInitKey 函数守卫用 !binBytes.value 判断（失败，静默 return），
-      // 用户看到"按钮完全无反应"——无加载动画、无错误提示、无任何反馈。
+      // binFileName 在 readUserFile 之前已设置，而 binBytes 因异常未设置。
+      // 按钮 :disabled 用 !binFileName 判断（通过，可点击），但 onVerify /
+      // onInitKey 的函数守卫用 !binBytes.value 判断（静默 return），用户会看到
+      // "按钮完全无反应"——无加载动画、无错误提示。
       //
-      // 修复：显示错误提示 + 重置 binFileName/binBytes 保持 UI 状态一致，
+      // 故这里显示错误提示并重置 binFileName / binBytes，保持 UI 状态一致，
       // 让用户明确知道文件读取失败而非按钮失灵。
       binFileName.value = '';
       zeroBytes(binBytes.value);
@@ -288,28 +283,25 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
   const onInitKey = async () => {
     // 显式防重复：processing 期间拒绝再次触发
     if (processing.value) return;
-    // 修复：静默返回改为明确错误反馈
+    // 显式错误反馈：守卫拆分，不静默返回
     //
-    // 原缺陷：守卫 `if (!initPassword || !binBytes || !binPassword || processing) return`
-    // 在 binBytes 为 null 时静默返回。按钮 :disabled 用 !binFileName 判断，
-    // 若 binFileName 已设置但 binBytes 因读取异常为 null，按钮可点击但函数
-    // 静默返回，用户看到"按钮完全无反应"——无加载动画、无错误提示、无任何反馈。
-    //
-    // 修复：拆分守卫，binBytes 为 null 时显示错误提示并重置 binFileName，
-    // 保持 UI 状态一致，让用户明确知道需要重新选择密钥文件。
+    // 按钮 :disabled 用 !binFileName 判断；若 binFileName 已设置但 binBytes
+    // 因读取异常为 null，按钮可点击而函数静默返回，用户看到"按钮完全无反应"。
+    // 故 binBytes 为 null 时显示错误提示并重置 binFileName，保持 UI 状态一致，
+    // 让用户明确知道需要重新选择密钥文件。
     if (!initPassword.value || !binPassword.value) return;
     if (!binBytes.value) {
       binFileName.value = '';
       await presentPreCheckError('密钥文件未加载，请重新选择', options.postInitAnim);
       return;
     }
-    // 修复：客户端密码长度前置校验
+    // 客户端密码长度前置校验
     //
-    // 原缺陷：后端 validate_password_complexity 要求 ≥8 字节，但错误提示被
-    // "禁止输出错误的具体信息"约束刻意模糊为"初始化失败"。用户不知 8 位下限，
-    // 反复输入短密码均失败，误以为"无法初始化密钥"（日志三次密码复杂度校验失败）。
+    // 后端 validate_password_complexity 要求 ≥8 字节，但错误提示被
+    // "禁止输出错误的具体信息"约束刻意模糊为"初始化失败"，用户无法从提示
+    // 得知 8 位下限，反复输入短密码均失败。
     //
-    // 修复：提交前用 TextEncoder 精确计算 UTF-8 字节长度（与后端 password.len()
+    // 故提交前用 TextEncoder 精确计算 UTF-8 字节长度（与后端 password.len()
     // 严格一致），不足 8 字节直接顶部红色弹窗提示"访问密钥至少 8 位"。
     // 此为前置 UX 要求提示（非后端敏感错误披露），不违反模糊化约束。
     const initPwByteLen = new TextEncoder().encode(initPassword.value).length;
@@ -421,10 +413,10 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
   const onVerify = async () => {
     // 显式防重复：processing 期间拒绝再次触发
     if (processing.value) return;
-    // 修复：静默返回改为明确错误反馈（同 onInitKey 逻辑）
+    // 显式错误反馈：守卫拆分，不静默返回（同 onInitKey 逻辑）
     //
-    // 原缺陷：binBytes 为 null 时静默返回，用户看到"验证按钮完全无反应"。
-    // 修复：binBytes 为 null 时显示错误提示并重置 binFileName。
+    // binBytes 为 null 时若静默返回，用户看到"验证按钮完全无反应"；
+    // 故显示错误提示并重置 binFileName。
     if (!verifyPassword.value || !binPassword.value) return;
     if (!binBytes.value) {
       binFileName.value = '';
@@ -643,7 +635,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
   };
 
   /* ===== 导出密钥文件验证弹窗状态 =====
-   * 修复：导出密钥文件属高敏感操作，必须先验证全局密钥。
+   * 导出密钥文件属高敏感操作，必须先验证全局密钥。
    *   弹窗仅采集双要素凭据（访问密钥 + 密钥口令）— 密钥文件在确认后
    *   的导出流程中选择，验证与导出合一（文件一次选择，验证三要素
    *   完整不降级：访问密钥 + 密钥文件 + 密钥口令）。 */
@@ -662,7 +654,7 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
 
   /** 导出验证弹窗 — 确认（选择密钥文件 → 验证全局密钥 → 通过后另存为导出）
    * 密钥文件在本流程中选择（弹窗内无需选文件）：所选文件同时作为
-   * 验证要素与导出源，杜绝旧流程"验证选一次 + 导出再选一次"的冗余。 */
+   * 验证要素与导出源，避免"验证选一次 + 导出再选一次"的冗余。 */
   const onConfirmExportVerify = async () => {
     if (exportVerifyProcessing.value) return;
     if (!exportVerifyPassword.value || !exportVerifyBinPassword.value) return;

@@ -1,8 +1,6 @@
 /*
  * @file controller/verthys_batch_controller.rs
- * @brief 照片导入异步批处理流水线 — 后端批量控制器
- *
- * 异步批处理流水线 — 消费者阶段（主进程）
+ * @brief 照片导入异步批处理流水线 — 消费者阶段（主进程）
  *
  * =============================================================================
  * 架构定位
@@ -112,7 +110,7 @@ fn collect_live_record_ids(app: &tauri::AppHandle) -> Result<HashSet<u64>, Strin
 
 /// 收敛 WAL 去重集合：已 committed 记录 ID 已不在容器内即释放条目键。
 ///
-/// 删除流程在 meta 不可解密时无法提供条目键（历史缺陷），墓碑因此缺失；
+/// 删除流程在 meta 不可解密时无法提供条目键，墓碑因此缺失；
 /// 失效条目键会让重新导入同一来源文件被静默全部跳过。记录 ID 删除后不会
 /// 复用，「ID 不存在 ⇒ 去重键失效」是安全判据。
 fn reconcile_import_keys(app: &tauri::AppHandle, vpath: &str) -> Result<u64, String> {
@@ -218,7 +216,7 @@ pub async fn verthys_import_begin(
     let session_id = import_id.clone();
     let reconcile_app = app.clone();
     let session = match tauri::async_runtime::spawn_blocking(move || {
-        /* 自愈：先按记录存在性收敛失效去重键。删除墓碑缺失（历史缺陷）
+        /* 自愈：先按记录存在性收敛失效去重键。删除墓碑可能缺失，
          * 会让已删记录的条目键永久占用，重新导入被静默全部跳过。
          * 收敛失败不阻断导入：仍可凭墓碑正常续传。 */
         match reconcile_import_keys(&reconcile_app, &session_vpath) {
@@ -279,7 +277,7 @@ pub async fn verthys_import_begin(
 ///
 /// 发送在 spawn_blocking 中执行（有界通道背压时阻塞不影响异步线程）。
 /// 关键：发送超时由 `submit_timeout` 在通道内实现，超时即表示命令**未入队**，
-/// 调用方可按幂等键安全重试；不再用外层 timeout 包裹阻塞发送——那会把
+/// 调用方可按幂等键安全重试；外层 timeout 不能包裹阻塞发送——那会把
 /// 命令遗弃在仍被通道挂起的阻塞线程中，超时后仍可能被写入。
 ///
 /// 应答经 oneshot 等待；第三层（写者心跳看门狗）由 import_writer 独立
@@ -330,7 +328,7 @@ async fn submit_writer_cmd<T>(
 /// 落实「N 次加密，1 次 IPC 传输」：前端 Worker 池并行加密 N 条记录后，
 /// 单次 IPC 调用本命令写入。实际存储变更由唯一写者线程执行（worker
 /// 批量事务提交 + 子批一次 WAL fsync），本命令仅做闸门、投递与应答
-/// 组装，阻塞的存储 IO 不再占用异步运行时线程。
+/// 组装，阻塞的存储 IO 由写者线程承担，不占用异步运行时线程。
 ///
 /// 每条记录的语义（写者线程内）：
 ///   1. 条目键幂等：若 entry_key ∈ committed_keys → 跳过，ids[i]=0
@@ -560,7 +558,7 @@ pub async fn verthys_forget_import_keys(
         return Ok(resp);
     }
 
-    // 无活跃会话：不存在并发写者，直接以单句柄追加墓碑（原有快速路径）
+    // 无活跃会话：不存在并发写者，直接以单句柄追加墓碑
     let vpath = match state.verthys_session_path() {
         Some(p) => p,
         None => {

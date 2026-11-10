@@ -24,8 +24,8 @@ use crate::util::base64::base64_encode;
 use crate::util::random::fill_random_bytes;
 use crate::util::secured_string::SecuredString;
 
-/// 句柄/映射清理失败的观测：debug 构建记录失败码，release 与原先
-/// `let _=` 行为一致（清理尽力而为：失败不可恢复，不阻断主流程）。
+/// 句柄/映射清理失败的观测：debug 构建记录失败码，release 构建静默忽略
+/// （清理尽力而为：失败不可恢复，不阻断主流程）。
 #[cfg(windows)]
 fn note_cleanup_failure(op: &str, result: windows::core::Result<()>) {
     #[cfg(debug_assertions)]

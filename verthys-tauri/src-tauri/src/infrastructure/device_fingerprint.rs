@@ -4,7 +4,7 @@
  *
  * 模块强制约束、设计意图与风险边界：
  * 采集层约束
- * 1. Windows全量依赖系统原生API获取硬件标识，彻底摒弃PowerShell外部进程调用，消除执行依赖与性能损耗；跨平台做降级兼容，非Windows读取machine-id与主机名组合生成标识。
+ * 1. Windows全量依赖系统原生API获取硬件标识，不调用PowerShell等外部进程；跨平台做降级兼容，非Windows读取machine-id与主机名组合生成标识。
  * 2. CPU使用内嵌汇编指令直接读取厂商ID与功能特征位，主板读取SMBIOS规范固件UUID，磁盘读取系统分区卷序列号，三类硬件特征共同构成强绑定设备凭据。
  * 3. 硬件采集为同步阻塞逻辑，上层调用必须通过阻塞线程池+超时控制器包裹，避免阻塞异步运行时。
  *
@@ -231,7 +231,7 @@ pub fn get_device_components() -> Result<DeviceComponents, String> {
     }
 }
 
-/// 兼容历史调用的简化接口，直接返回设备整体组合哈希
+/// 简化接口：直接返回设备整体组合哈希
 pub fn get_device_fingerprint() -> Result<String, String> {
     let components = get_device_components()?;
     Ok(components.combined_hash)

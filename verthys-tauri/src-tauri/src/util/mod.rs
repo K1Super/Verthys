@@ -1,7 +1,7 @@
 /*
  * util/mod.rs — 工具层模块入口
  *
- * 分层架构（codebase-design 强制约束）：
+ * 分层架构（强制约束）：
  *   工具层是最底层，无日志权限，不引用上层模块。
  *   仅通过 pub 接口对外暴露纯函数与错误枚举。
  *
@@ -12,11 +12,11 @@
  *   - 任何 println! / eprintln! / log::* 调用
  *
  * 模块清单：
- *   - base64:    Base64 编解码（改用标准 base64 crate）
+ *   - base64:    Base64 编解码（标准 base64 crate）
  *   - disk:      磁盘空间查询
  *   - error:     项目统一错误枚举 VerthysError / VerthysResult
  *   - path:      路径处理（输入硬校验 + canonicalize 全解析）
- *   - random:    随机字节生成（改用 getrandom crate，系统 CSPRNG）
+ *   - random:    随机字节生成（getrandom crate，系统 CSPRNG）
  *   - crypto:    密码学工具（PBKDF2/DPAPI/HMAC/ct_eq）
  *   - container_secret: 本机容器口令生成与 DPAPI 密封保管
  *   - audit_log: 审计日志（HMAC 链式防篡改）

@@ -149,6 +149,28 @@ int vty_tpm_witness_verify(const uint8_t id[VTY_UUID_BYTES], uint8_t slot,
     return rc;
 }
 
+int vty_tpm_witness_exists(const uint8_t id[VTY_UUID_BYTES], uint8_t slot)
+{
+    NCRYPT_PROV_HANDLE prov = 0;
+    NCRYPT_KEY_HANDLE key = 0;
+    wchar_t name[WIT_NAME_CHARS];
+    SECURITY_STATUS st;
+
+    if (id == NULL || slot >= VTY_TPM_WITNESS_SLOTS) return -1;
+    wit_name(id, slot, name);
+    if (NCryptOpenStorageProvider(&prov, MS_PLATFORM_KEY_STORAGE_PROVIDER, 0) != 0) {
+        return -1;
+    }
+    st = NCryptOpenKey(prov, &key, name, 0, 0);
+    if (st == 0) {
+        NCryptFreeObject(key);
+        NCryptFreeObject(prov);
+        return 1;
+    }
+    NCryptFreeObject(prov);
+    return not_found_status(st) ? 0 : -1;
+}
+
 int vty_tpm_witness_delete(const uint8_t id[VTY_UUID_BYTES], uint8_t slot)
 {
     NCRYPT_PROV_HANDLE prov = 0;
@@ -168,7 +190,7 @@ int vty_tpm_witness_delete(const uint8_t id[VTY_UUID_BYTES], uint8_t slot)
     }
     if (NCryptDeleteKey(key, 0) == 0) {
         /* NCryptDeleteKey 删除持久化键但不释放调用方持有的 key 句柄，
-         * 必须显式 NCryptFreeObject，否则每次轮换泄漏一个句柄（N5）。 */
+         * 必须显式 NCryptFreeObject，否则每次轮换泄漏一个句柄。 */
         NCryptFreeObject(key);
         NCryptFreeObject(prov);
         return VTY_OK;

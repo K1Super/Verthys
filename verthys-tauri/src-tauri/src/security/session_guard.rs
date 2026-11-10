@@ -1,12 +1,11 @@
 /*
  * session_guard.rs — 智能会话自动锁屏
  *
- *
- * 重写要点：
- *   1. 使用 mpsc 消息通道替代全局裸指针，回调异步化
+ * 要点：
+ *   1. 使用 mpsc 消息通道传递事件，回调异步化
  *      - 窗口过程仅发送 SessionEvent 到通道，立即返回
  *      - 独立工作线程接收事件并安全执行用户回调
- *      - 消除 UAF 风险和阻塞消息循环的问题
+ *      - 避免 UAF 风险和阻塞消息循环
  *   2. 封装窗口为 RAII 类型，禁止全局状态
  *      - GuardWindow 持有 HWND、线程句柄、stop_flag
  *      - 实例数据通过 GWLP_USERDATA 存储在窗口上（非全局变量）
@@ -18,17 +17,17 @@
  *      - SessionGuardBackend trait 定义统一接口
  *      - Windows 实现基于隐藏窗口 + WTS 会话通知
  *      - 非 Windows 平台返回错误但不阻止应用启动
- *   5. 删除 set_high_security_mode 的全局状态
+ *   5. 高安全标志为实例级状态
  *      - 高安全标志为 Arc<AtomicBool>，在实例间共享
  *      - 窗口过程通过实例数据读取标志，不依赖全局变量
- *   6. 增加运行时健康监控与自动恢复
+ *   6. 运行时健康监控与自动恢复
  *      - 工作线程使用 recv_timeout 充当看门狗
  *      - 消息循环线程意外退出时自动重启
  *      - 重启次数上限防止无限循环
  *   7. 显示器关闭锁定（display-off 硬化）
  *      - RegisterPowerSettingNotification 注册 GUID_CONSOLE_DISPLAY_STATE；
  *        高安全模式下显示器关闭等同于 Lock 事件
- *      - 与挂起锁定同门控同语义；通知注册失败退化为既有挂起监听
+ *      - 与挂起锁定同门控同语义；通知注册失败退化为仅监听系统挂起
  */
 
 use std::sync::atomic::AtomicBool;
@@ -91,7 +90,7 @@ const MAX_RESTART_ATTEMPTS: u32 = 3;
  *  mpsc 消息通道事件类型                            *
  *                                                                        *
  *  窗口过程仅发送事件到通道，工作线程接收后执行用户回调。                  *
- *  完全消除全局裸指针和 UAF 风险。                                       *
+ *  不依赖全局裸指针，避免 UAF 风险。                                     *
  * ==================================================================== */
 
 /// 会话锁定原因（外部锁定事件载荷）
@@ -136,7 +135,7 @@ enum SessionEvent {
 }
 
 /* ==================================================================== *
- *  窗口实例数据（替代全局变量）            *
+ *  窗口实例数据                            *
  *                                                                        *
  *  每个窗口实例拥有独立的 WindowInstanceData，通过 GWLP_USERDATA 存储      *
  *  在窗口上。包含事件发送器和高安全模式标志。                              *
@@ -362,8 +361,8 @@ mod win_backend {
     /// 注册窗口类（进程级仅一次）
     ///
     /// 使用 std::sync::Once 保证窗口类仅注册一次，允许多个 SessionGuard 实例。
-    /// 不再在 Drop 中 UnregisterClassW — 类随进程退出自动清理，
-    /// 消除"类残留"和"多次注册"的竞态问题。
+    /// 不在 Drop 中 UnregisterClassW：类随进程退出自动清理，
+    /// 避免"类残留"和"多次注册"的竞态问题。
     fn register_window_class_once() {
         CLASS_REGISTERED.call_once(|| unsafe {
             let class_name = to_wide("VerthysSecGuard");
@@ -480,7 +479,7 @@ mod win_backend {
     /// 实例数据通过 GWLP_USERDATA 存储在窗口上。
     ///
     /// 返回 (HWND, WTS 注销函数, HPOWERNOTIFY 句柄)。显示器电源设置
-    /// 通知注册失败不视为致命（退化为仅监听系统挂起，既有能力保留）。
+    /// 通知注册失败不视为致命（退化为仅监听系统挂起）。
     fn create_guard_window(
         instance_data: &Arc<WindowInstanceData>,
     ) -> Result<(isize, WTSUnRegisterSessionNotification_t, isize), String> {
@@ -531,7 +530,7 @@ mod win_backend {
             }
 
             // 注册显示器开/关状态通知（display-off 锁定的信号源）。
-            // 注册失败仅告警降级：挂起监听（既有能力）不受影响。
+            // 注册失败仅告警降级：系统挂起监听不受影响。
             let power_notify = RegisterPowerSettingNotification(
                 hwnd,
                 &GUID_CONSOLE_DISPLAY_STATE,
@@ -1030,13 +1029,13 @@ mod noop_backend {
 }
 
 /* ==================================================================== *
- *  SessionGuard — 公共 API（保持向后兼容）                                *
+ *  SessionGuard — 公共 API                                            *
  * ==================================================================== */
 
 /// 智能会话自动锁屏守卫
 ///
 /// 设计要点：
-/// - mpsc 通道替代全局裸指针
+/// - mpsc 通道传递事件，不依赖全局裸指针
 /// - RAII 窗口封装，无全局状态
 /// - catch_unwind 防止 panic 跨 FFI
 /// - 平台抽象层 + 降级策略

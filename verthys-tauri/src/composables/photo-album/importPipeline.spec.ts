@@ -1,14 +1,13 @@
 /**
  * importPipeline.spec.ts — 导入流水线成功语义与批次可靠性回归测试
  *
- * 覆盖（故障注入，断言静默丢失路径被根治）：
+ * 覆盖（故障注入，断言静默丢失路径不成立）：
+ * - 备份还原：Worker 投递产物 → 外置块上传 → meta 加密 → 批量写入，内容身份去重
  * - 全成功：仅零失败路径以 verthysImportEnd(true) 压缩 WAL
- * - 致命错误（后端容量告罄 ERR_0000000F）：fatal 传播到返回结果并映射为
- *   存储空间不足文案，importEnd(false)
- * - 部分失败：只重试失败子集，成功项不回灌；重试耗尽按失败入账且 importEnd(false)
+ * - 致命错误（后端容量告罄 ERR_0000000F）：fatal 传播并映射为存储空间不足
+ * - 部分失败：只重试失败子集，成功项不回灌；重试耗尽按失败入账
  * - 后端去重跳过：计入 skipped，绝不重试
- * - 致命错误后停止后续批次写入（消费端短路）
- * - 三分类/四分类不变量：所有返回路径 imported+failed+skipped+undecryptable === total
+ * - 三分类不变量：imported+failed+skipped === total
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -54,7 +53,7 @@ vi.mock("../../lib/verthys", () => ({
 
 vi.mock("../../workers/photoWorkerPool", () => ({
   photoWorkerPool: {
-    // meta-only 路径（runParsed）：回显提交的 meta，hash 取 meta.fileHash
+    // meta 加密：本组用例只验证写入编排，密文以占位值回显
     submitMetaOnly: vi.fn(
       async (req: { meta: { fileHash: string; name: string; mime: string; size: number; thumbB64?: string }; recordName: string }) => {
         const meta = req.meta;
@@ -74,8 +73,6 @@ vi.mock("../../workers/photoWorkerPool", () => ({
     submit: vi.fn(async () => {
       throw new Error("run() 路径不在本组用例覆盖范围");
     }),
-    // 索引瘦身布局的记录加密（缩略图 / 块集）：本组用例只验证写入编排，
-    // 密文以占位值回显，真伪由 crypto-slim 与 worker 用例锁定
     submitEncryptSlimThumb: vi.fn(async () => ({
       id: 1, ok: true as const, thumbCipherB64: "thumb-b64", thumbHash: "thumb-hash",
     })),
@@ -98,45 +95,109 @@ vi.mock("../../cache/coordination/batch-cache-coordinator", () => ({
   },
 }));
 
-import { ImportPipeline, importedToPhotoEntries } from "./importPipeline";
+import {
+  ImportPipeline,
+  importedToPhotoEntries,
+  type ContainerImportWorkerLike,
+} from "./importPipeline";
 import type { ParsedPhotoPreview } from "./types";
 import type { PhotoMeta } from "../../lib/crypto";
-import { bytesToBase64, bytesToHex } from "../../utils/binary_codec";
-import { MAX_PHOTO_BYTES, PHOTO_FMT_SLIM } from "../../constants/crypto_const";
+import type {
+  ContainerImportPhoto,
+  ContainerImportRequest,
+} from "../../workers/container-import.worker";
+import { bytesToHex } from "../../utils/binary_codec";
+import { MAX_PHOTO_BYTES } from "../../constants/crypto_const";
 import { photoWorkerPool } from "../../workers/photoWorkerPool";
-import { reactive } from "vue";
 import { sha256 } from "@noble/hashes/sha2";
 
-/** 复算流水线口径的非内容条目键（域标识 + 各分量以 `|` 连接后 SHA-256） */
+/** 复算流水线口径的条目键（域标识 + 各分量以 `|` 连接后 SHA-256） */
 function entryKeyOf(...parts: Array<string | number>): string {
   return bytesToHex(sha256(new TextEncoder().encode(parts.join("|"))));
 }
 
-/** 解析导入条目键：展示名 + 大小 + 序号 */
-function parsedKeyOf(name: string, size: number, i: number): string {
-  return entryKeyOf("parsed", name, size, i);
+/** 备份还原条目键：内容身份（清单内文件哈希） */
+function containerKeyOf(fileHash: string): string {
+  return entryKeyOf("parsed", fileHash);
 }
 
-/** 构造最小可用的解析预览项（meta 非 null 即可被流水线选中） */
+/** 构造预览项（新契约：只含清单字段） */
 function makePreview(i: number, hash: string): ParsedPhotoPreview {
-  const meta: PhotoMeta = {
+  return {
+    name: `照片${i}.jpg`,
+    thumb: "",
+    size: 1024,
+    mime: "image/jpeg",
+    fileHash: hash,
+    chunkCount: 1,
+    createdAt: 1000 + i,
+  };
+}
+
+/** 构造 Worker 产物（与生产 Worker 投递结构一致） */
+function makePhoto(i: number, hash: string, chunkCount = 1): ContainerImportPhoto {
+  return {
+    id: 1,
+    type: "photo",
+    index: i,
     name: `照片${i}.jpg`,
     mime: "image/jpeg",
     size: 1024,
     thumbB64: "",
-    chunkIds: [],
-    chunkDataB64: ["Y2h1bms="],
     fileHash: hash,
     createdAt: 1000 + i,
+    chunkB64List: Array.from({ length: chunkCount }, () => "Y2h1bms="),
+    chunkHashes: Array.from({ length: chunkCount }, () => "a".repeat(64)),
   };
-  return {
-    name: meta.name,
-    thumb: "",
-    size: meta.size,
-    metaB64: `meta-b64-${i}`,
-    chunkB64List: ["Y2h1bms="],
-    meta,
-  };
+}
+
+/** 伪导入 Worker：按脚本逐张投递并等待 ack（复现生产背压协议） */
+class FakeContainerWorker implements ContainerImportWorkerLike {
+  onmessage: ((e: MessageEvent<unknown>) => void) | null = null;
+  onerror: ((e: ErrorEvent) => void) | null = null;
+  terminate = vi.fn();
+  private ackResolve: (() => void) | null = null;
+  private started = false;
+
+  constructor(private readonly script: { photos: ContainerImportPhoto[]; fail?: string }) {}
+
+  postMessage(message: ContainerImportRequest | { id: number; type: "ack"; index: number }): void {
+    if ((message as { type?: string }).type === "ack") {
+      const resolve = this.ackResolve;
+      this.ackResolve = null;
+      resolve?.();
+      return;
+    }
+    if (this.started) return;
+    this.started = true;
+    void this.run();
+  }
+
+  private async run(): Promise<void> {
+    if (this.script.fail) {
+      this.onmessage?.({
+        data: { id: 1, type: "failure", ok: false, error: this.script.fail },
+      } as MessageEvent<unknown>);
+      return;
+    }
+    for (const photo of this.script.photos) {
+      this.onmessage?.({ data: photo } as MessageEvent<unknown>);
+      await new Promise<void>((resolve) => { this.ackResolve = resolve; });
+    }
+    this.onmessage?.({
+      data: { id: 1, type: "done", ok: true, photos: this.script.photos.length },
+    } as MessageEvent<unknown>);
+  }
+}
+
+/** 构造 Worker 工厂（脚本注入） */
+function containerFactory(photos: ContainerImportPhoto[], fail?: string) {
+  return () => new FakeContainerWorker({ photos, fail });
+}
+
+/** 容器源数据 */
+function containerSource() {
+  return { bytes: new Uint8Array([1, 2, 3]), token: "a".repeat(64) };
 }
 
 /** 构造默认全成功的批量响应：按输入顺序分配递增 ID */
@@ -165,11 +226,11 @@ function makePipeline(overrides: Partial<ConstructorParameters<typeof ImportPipe
   });
 }
 
-describe("importPipeline — 会话结束成功语义守卫", () => {
+describe("importPipeline — 备份还原写入语义", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     importEndMock.mockResolvedValue({ ok: true, total_count: 0, import_id: "imp-test" });
-    // 恒定外置存储：解析导入的每张照片都先上传分块记录，默认返回成功 id
+    // 恒定外置存储：每张照片都先上传分块记录，默认返回成功 id
     let chunkIdSeed = 900;
     addChunkBatchMock.mockImplementation(async (chunks: Array<{ chunk_key: string }>) => ({
       ok: true,
@@ -182,11 +243,14 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
     }));
   });
 
-  it("恒定外置：小体积预览同样落分块记录，meta 只携带引用", async () => {
+  it("Worker 产物：块先落库，meta 只携带引用，内容身份键写入", async () => {
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1));
     const pipe = makePipeline();
+    const previews = [makePreview(0, "h1")];
 
-    const result = await pipe.runParsed([makePreview(0, "h1")]);
+    const result = await pipe.runContainer(
+      previews, containerSource(), containerFactory([makePhoto(0, "h1")]),
+    );
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(1);
@@ -194,43 +258,30 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
     expect(addChunkBatchMock).toHaveBeenCalledTimes(1);
     const record = addRecordsBatchMock.mock.calls[0][0][0] as {
       chunk_ids: number[];
+      entry_key: string;
       data_b64: string;
     };
     expect(record.chunk_ids.length).toBeGreaterThan(0);
     expect(record.data_b64).toBe("meta-b64");
-  });
+    // 去重键为清单内 BLAKE3 文件哈希（内容身份），不是名称/大小/序号
+    expect(record.entry_key).toBe(containerKeyOf("h1"));
 
-  it("索引瘦身布局且无缩略图：索引回填块集引用，认领列表不含占位 0", async () => {
-    addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1));
-    const pipe = makePipeline();
-    // 合法包裹态文件密钥（提供文件盐）；缩略图缺失（生成失败）走 thumbId=0 分支
-    // 包裹态文件密钥只用于提供公开盐：88 字节 = salt(16)+nonce(24)+密文(48)
-    const wrappedFileKey = bytesToBase64(new Uint8Array(88));
-    const preview = makePreview(0, "h1");
-    preview.meta = {
-      ...preview.meta!, fmt: PHOTO_FMT_SLIM, wrappedFileKey, thumbB64: "",
-    };
-
-    const result = await pipe.runParsed([preview]);
-
-    expect(result.ok).toBe(true);
-    // 缩略图缺失不阻断整张写入：索引以 thumbId=0 明确"无缩略图"
-    const submitted = vi.mocked(photoWorkerPool.submitMetaOnly).mock.calls[0][0] as {
-      meta: PhotoMeta;
-    };
-    expect(submitted.meta.thumbId).toBe(0);
-    expect(submitted.meta.chunkSetId).toBeGreaterThan(0);
-    expect(submitted.meta.chunkCount).toBe(1);
-    // 认领列表只含真实记录 ID：占位 0 若混入，后端会按"引用未上传"拒绝整条
-    const record = addRecordsBatchMock.mock.calls[0][0][0] as { chunk_ids: number[] };
-    expect(record.chunk_ids).toEqual([900, submitted.meta.chunkSetId]);
+    // 索引必须携带本次实际写入的逐块密文哈希与清单原始创建时间：
+    // 前者是后续导出的逐块诊断索引，后者是备份还原的数据保真要求。
+    const metaReq = (photoWorkerPool.submitMetaOnly as ReturnType<typeof vi.fn>)
+      .mock.calls[0][0] as { meta: PhotoMeta };
+    expect(metaReq.meta.chunkHashes).toEqual(["a".repeat(64)]);
+    expect(metaReq.meta.createdAt).toBe(1000);
   });
 
   it("全成功：仅零失败路径以 success=true 压缩 WAL", async () => {
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(2));
     const pipe = makePipeline();
+    const previews = [makePreview(0, "h1"), makePreview(1, "h2")];
 
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
+    const result = await pipe.runContainer(
+      previews, containerSource(), containerFactory([makePhoto(0, "h1"), makePhoto(1, "h2")]),
+    );
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(2);
@@ -240,7 +291,7 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
     expect(importEndMock).toHaveBeenCalledWith(true);
   });
 
-  it("致命错误（后端容量告罄）：fatal 传播到返回结果并映射为存储空间不足，WAL 以 false 保留", async () => {
+  it("致命错误（后端容量告罄）：fatal 传播并映射为存储空间不足，WAL 以 false 保留", async () => {
     addRecordsBatchMock.mockResolvedValue({
       ok: false,
       ids: [],
@@ -252,22 +303,22 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
       error: "写入失败 (ERR_0000000F)",
     });
     const pipe = makePipeline();
+    const previews = [makePreview(0, "h1"), makePreview(1, "h2")];
 
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
+    const result = await pipe.runContainer(
+      previews, containerSource(), containerFactory([makePhoto(0, "h1"), makePhoto(1, "h2")]),
+    );
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain("存储空间不足");
-    // 错误码映射：致命原因归类为 storage-full
     expect(result.failedRecords.length).toBeGreaterThan(0);
     expect(result.failedRecords.every((r) => r.reason === "storage-full")).toBe(true);
-    // 四分类不变量：致命路径下剩余条目全部入账失败
-    expect(result.imported.length + result.failedRecords.length + result.skipped + result.undecryptable)
-      .toBe(2);
+    // 三分类不变量：致命路径下剩余条目全部入账失败
+    expect(result.imported.length + result.failedRecords.length + result.skipped).toBe(2);
     expect(importEndMock).toHaveBeenCalledWith(false);
   });
 
   it("致命错误后停止写入：消费端短路，后续缓存批次不再发起 IPC", async () => {
-    // 每批 1 条：第一张触发 flush 并注入致命错误，第二张的 flush 应被短路
     const pipe = makePipeline({ consumerBatchSize: 1 });
     addRecordsBatchMock.mockResolvedValue({
       ok: false,
@@ -279,43 +330,60 @@ describe("importPipeline — 会话结束成功语义守卫", () => {
       skipped_count: 0,
       error: "写入失败 (ERR_0000000F)",
     });
+    const previews = [makePreview(0, "h1"), makePreview(1, "h2")];
 
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
+    const result = await pipe.runContainer(
+      previews, containerSource(), containerFactory([makePhoto(0, "h1"), makePhoto(1, "h2")]),
+    );
 
     expect(result.ok).toBe(false);
-    // 首条触发致命错误后，后端写入通道不再被第二张唤起
     expect(addRecordsBatchMock).toHaveBeenCalledTimes(1);
     expect(importEndMock).toHaveBeenCalledWith(false);
   });
 
-  it("部分失败且未达成功语义：WAL 以 false 保留，返回 ok=false", async () => {
-    const pipe = makePipeline();
-    // 请求 2 条：ids=[10,11] 全成功即 ok —— 这里改用单条重试耗尽场景由下一条用例覆盖
-    addRecordsBatchMock.mockImplementation(async () => okBatchResponse(2));
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
-    expect(result.ok).toBe(true);
-    expect(importEndMock).toHaveBeenCalledWith(true);
-  });
-
-  it("不可解密项：计入 undecryptable 不入失败，成功路径压缩 WAL 且 ok=true", async () => {
+  it("外置块上传失败：按 chunk-upload-failed 可重试入账，WAL 保留", async () => {
+    addChunkBatchMock.mockResolvedValue({
+      ok: false,
+      ids: [],
+      failed_indices: [0],
+      error: "块载荷超过上限",
+    });
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1));
     const pipe = makePipeline();
-    const undecryptablePreview: ParsedPhotoPreview = {
-      name: "加密照片",
-      thumb: "",
-      size: 0,
-      metaB64: "meta-enc",
-      chunkB64List: ["chunk"],
-      meta: null,
-    };
 
-    const result = await pipe.runParsed([makePreview(0, "h1"), undecryptablePreview]);
+    const result = await pipe.runContainer(
+      [makePreview(0, "h1")], containerSource(), containerFactory([makePhoto(0, "h1")]),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.imported).toHaveLength(0);
+    expect(addRecordsBatchMock).not.toHaveBeenCalled();
+    expect(result.failedRecords).toHaveLength(1);
+    expect(result.failedRecords[0].reason).toBe("chunk-upload-failed");
+    expect(result.failedRecords[0].retryable).toBe(true);
+    expect(importEndMock).toHaveBeenCalledWith(false);
+  });
+
+  it("已 committed 的内容身份：前置去重跳过，无块上传无加密提交", async () => {
+    // begin 返回的 entry_keys 含该文件的条目键 → 生产者直接跳过
+    const { verthysImportBegin } = await import("../../lib/verthys");
+    (verthysImportBegin as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      import_id: "imp-test",
+      entry_keys: [containerKeyOf("h1")],
+      total_count: 1,
+    });
+    addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1));
+    const pipe = makePipeline();
+
+    const result = await pipe.runContainer(
+      [makePreview(0, "h1")], containerSource(), containerFactory([makePhoto(0, "h1")]),
+    );
 
     expect(result.ok).toBe(true);
-    expect(result.imported).toHaveLength(1);
-    expect(result.undecryptable).toBe(1);
-    expect(result.failedRecords).toHaveLength(0);
-    expect(importEndMock).toHaveBeenCalledWith(true);
+    expect(result.skipped).toBe(1);
+    expect(addChunkBatchMock).not.toHaveBeenCalled();
+    expect(addRecordsBatchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -323,7 +391,6 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     importEndMock.mockResolvedValue({ ok: true, total_count: 0, import_id: "imp-test" });
-    // 恒定外置存储：解析导入的每张照片都先上传分块记录，默认返回成功 id
     let chunkIdSeed = 700;
     addChunkBatchMock.mockImplementation(async (chunks: Array<{ chunk_key: string }>) => ({
       ok: true,
@@ -338,8 +405,6 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
 
   it("部分失败重试成功：只重试失败子集，成功项不回灌，最终 ok=true", async () => {
     const pipe = makePipeline();
-    // 首次：ids=[10,0]，failed_indices=[1]（第 2 条待重试）
-    // 重试：单条成功 ids=[11]
     addRecordsBatchMock
       .mockResolvedValueOnce({
         ok: true,
@@ -359,7 +424,11 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
         total_count: 2,
         skipped_count: 0,
       });
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
+    const previews = [makePreview(0, "h1"), makePreview(1, "h2")];
+
+    const result = await pipe.runContainer(
+      previews, containerSource(), containerFactory([makePhoto(0, "h1"), makePhoto(1, "h2")]),
+    );
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(2);
@@ -367,13 +436,12 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
     // 重试子批次只含失败的那一条
     const retryPayload = addRecordsBatchMock.mock.calls[1][0] as Array<{ entry_key: string }>;
     expect(retryPayload).toHaveLength(1);
-    expect(retryPayload[0].entry_key).toBe(parsedKeyOf("照片1.jpg", 1024, 1));
+    expect(retryPayload[0].entry_key).toBe(containerKeyOf("h2"));
     expect(importEndMock).toHaveBeenCalledWith(true);
   });
 
   it("重试耗尽：失败项按服务端拒绝入账，整体 ok=false 且 WAL 保留", async () => {
-    // 只允许 1 次重试：两次尝试均对第 2 条返回失败（响应与请求等长，模拟真实后端逐条映射）
-    const failKey = parsedKeyOf("照片1.jpg", 1024, 1);
+    const failKey = containerKeyOf("h2");
     const pipe = makePipeline({ consumerMaxRetries: 1 });
     addRecordsBatchMock.mockImplementation(
       async (records: Array<{ entry_key: string }>) => ({
@@ -386,7 +454,11 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
         skipped_count: 0,
       }),
     );
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h2")]);
+    const previews = [makePreview(0, "h1"), makePreview(1, "h2")];
+
+    const result = await pipe.runContainer(
+      previews, containerSource(), containerFactory([makePhoto(0, "h1"), makePhoto(1, "h2")]),
+    );
 
     expect(result.ok).toBe(false);
     expect(result.imported).toHaveLength(1);
@@ -407,7 +479,12 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
       total_count: 1,
       skipped_count: 1,
     });
-    const result = await pipe.runParsed([makePreview(0, "h1"), makePreview(1, "h1")]);
+    // 同一内容哈希 → 同一内容身份键；后端按幂等语义只写入一条
+    const previews = [makePreview(0, "h1"), makePreview(1, "h1")];
+
+    const result = await pipe.runContainer(
+      previews, containerSource(), containerFactory([makePhoto(0, "h1"), makePhoto(1, "h1")]),
+    );
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(1);
@@ -417,10 +494,28 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
     expect(importEndMock).toHaveBeenCalledWith(true);
   });
 
+  it("容器在预览后被替换：产物哈希与预览不符 → 条目失败，不写入任何记录", async () => {
+    addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1));
+    const pipe = makePipeline();
+
+    const result = await pipe.runContainer(
+      [makePreview(0, "h1")], containerSource(), containerFactory([makePhoto(0, "h2")]),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.imported).toHaveLength(0);
+    expect(result.failedRecords).toHaveLength(1);
+    expect(addRecordsBatchMock).not.toHaveBeenCalled();
+    expect(addChunkBatchMock).not.toHaveBeenCalled();
+  });
+
   it("整批 IPC 异常且重试耗尽：按可重试失败入账，WAL 保留", async () => {
     const pipe = makePipeline({ consumerMaxRetries: 0 });
     addRecordsBatchMock.mockRejectedValue(new Error("ipc transport error"));
-    const result = await pipe.runParsed([makePreview(0, "h1")]);
+
+    const result = await pipe.runContainer(
+      [makePreview(0, "h1")], containerSource(), containerFactory([makePhoto(0, "h1")]),
+    );
 
     expect(result.ok).toBe(false);
     expect(result.imported).toHaveLength(0);
@@ -430,46 +525,24 @@ describe("importPipeline — 失败批次逐条回灌重试", () => {
   });
 });
 
-describe("importPipeline — 大文件外置块路径", () => {
+describe("importPipeline — 多块照片的外置编排", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     importEndMock.mockResolvedValue({ ok: true, total_count: 0, import_id: "imp-test" });
   });
 
-  /** 构造外置路径预览项：多块负载（恒定外置策略下所有照片都走该路径） */
-  function makeExternalPreview(i: number, hash: string, chunks = 9): ParsedPhotoPreview {
-    const big = "A".repeat(1_000_000);
-    const meta: PhotoMeta = {
-      name: `大图${i}.jpg`,
-      mime: "image/jpeg",
-      size: chunks * 750_000,
-      thumbB64: "",
-      chunkIds: [],
-      chunkDataB64: [],
-      chunkHashes: Array.from({ length: chunks }, (_, k) => `${k}`.padStart(64, "b")),
-      fileHash: hash,
-      createdAt: 1000 + i,
-    };
-    return {
-      name: meta.name,
-      thumb: "",
-      size: meta.size,
-      metaB64: `meta-b64-${i}`,
-      chunkB64List: Array.from({ length: chunks }, () => big),
-      meta,
-    };
-  }
-
-  it("外置：9 块在单批上限内一次上传 → meta 携带 chunkIds 引用提交", async () => {
+  it("9 块在单批上限内一次上传 → meta 携带完整 chunkIds 提交", async () => {
     addChunkBatchMock.mockResolvedValueOnce({
       ok: true,
       ids: [1, 2, 3, 4, 5, 6, 7, 8, 9],
       failed_indices: [],
     });
     addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1, 30));
-
     const pipe = makePipeline();
-    const result = await pipe.runParsed([makeExternalPreview(0, "h1")]);
+
+    const result = await pipe.runContainer(
+      [makePreview(0, "h1")], containerSource(), containerFactory([makePhoto(0, "h1", 9)]),
+    );
 
     expect(result.ok).toBe(true);
     expect(result.imported).toHaveLength(1);
@@ -477,56 +550,13 @@ describe("importPipeline — 大文件外置块路径", () => {
     expect(addChunkBatchMock).toHaveBeenCalledTimes(1);
     const firstBatch = addChunkBatchMock.mock.calls[0][0] as Array<{ hash: string; data_b64: string }>;
     expect(firstBatch).toHaveLength(9);
-    // meta 记录携带完整引用
     const record = addRecordsBatchMock.mock.calls[0][0][0] as {
       chunk_ids: number[];
       chunk_hashes: string[];
-      data_b64: string;
     };
     expect(record.chunk_ids).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(record.chunk_hashes).toHaveLength(9);
     expect(importEndMock).toHaveBeenCalledWith(true);
-  });
-
-  it("外置块上传失败：按 chunk-upload-failed 可重试入账，WAL 保留", async () => {
-    addChunkBatchMock.mockResolvedValue({
-      ok: false,
-      ids: [],
-      failed_indices: [0],
-      error: "块载荷超过上限",
-    });
-    addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1, 30));
-
-    const pipe = makePipeline();
-    const result = await pipe.runParsed([makeExternalPreview(0, "h1")]);
-
-    expect(result.ok).toBe(false);
-    expect(result.imported).toHaveLength(0);
-    expect(addRecordsBatchMock).not.toHaveBeenCalled();
-    expect(result.failedRecords).toHaveLength(1);
-    expect(result.failedRecords[0].reason).toBe("chunk-upload-failed");
-    expect(result.failedRecords[0].retryable).toBe(true);
-    expect(importEndMock).toHaveBeenCalledWith(false);
-  });
-
-  it("外置已 committed 文件：前置去重跳过，无块上传无加密提交", async () => {
-    // begin 返回的 entry_keys 含该文件的非内容条目键 → 生产者直接跳过
-    const { verthysImportBegin } = await import("../../lib/verthys");
-    (verthysImportBegin as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      ok: true,
-      import_id: "imp-test",
-      entry_keys: [parsedKeyOf("大图0.jpg", 9 * 750_000, 0)],
-      total_count: 1,
-    });
-    addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1, 30));
-
-    const pipe = makePipeline();
-    const result = await pipe.runParsed([makeExternalPreview(0, "h1")]);
-
-    expect(result.ok).toBe(true);
-    expect(result.skipped).toBe(1);
-    expect(addChunkBatchMock).not.toHaveBeenCalled();
-    expect(addRecordsBatchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -653,32 +683,25 @@ describe("importPipeline — 共享会话编排（两路一致的会话语义）
 
     const result = await pipe.run(files);
 
-    // 生产者异常不吞：会话按"条目未产出"兜底入账（按真实下标与文件名登记，
-    // 不再用计数差伪造 unknown 索引），WAL 保留以支持续传
     expect(result.ok).toBe(false);
     expect(result.failedRecords).toHaveLength(1);
     expect(result.failedRecords[0].index).toBe(0);
     expect(result.failedRecords[0].name).toBe("a.jpg");
     expect(result.failedRecords[0].reason).toBe("unknown");
     expect(result.failedRecords[0].retryable).toBe(true);
-    // WAL 保留（非成功语义）
     expect(importEndMock).toHaveBeenCalledWith(false);
   });
 
-  it("runParsed()：生产策略拒绝（池基础设施故障）→ 与 run() 同一套兜底入账", async () => {
-    // 拒绝态由策略 catch 入账（同步抛错则由编排层 allSettled 分支入账）：
-    // 两条异常通道都不得出现"既未成功也未失败"的条目
-    (photoWorkerPool.submitMetaOnly as ReturnType<typeof vi.fn>).mockImplementationOnce(
-      async () => { throw new Error("池基础设施故障"); },
-    );
+  it("runContainer()：Worker 失败 → 条目入账失败，不出现静默丢失", async () => {
     const pipe = makePipeline();
 
-    const result = await pipe.runParsed([makePreview(0, "h1")]);
+    const result = await pipe.runContainer(
+      [makePreview(0, "h1")], containerSource(), containerFactory([], "RPC 通道故障"),
+    );
 
     expect(result.ok).toBe(false);
     expect(result.failedRecords).toHaveLength(1);
     expect(result.failedRecords[0].name).toBe("照片0.jpg");
-    expect(result.failedRecords[0].reason).toBe("encrypt-failed");
     expect(importEndMock).toHaveBeenCalledWith(false);
   });
 
@@ -689,7 +712,9 @@ describe("importPipeline — 共享会话编排（两路一致的会话语义）
       [{ name: "hang.jpg", mime: "image/jpeg", readBytes: () => new Promise<Uint8Array>(() => {}) }],
     );
 
-    const busy = await pipe.runParsed([makePreview(0, "h1")]);
+    const busy = await pipe.runContainer(
+      [makePreview(0, "h1")], containerSource(), containerFactory([makePhoto(0, "h1")]),
+    );
 
     expect(busy.ok).toBe(false);
     expect(busy.error).toBe("已有导入任务进行中，请等待完成");
@@ -744,55 +769,5 @@ describe("importedToPhotoEntries — 导入后首帧条目投影", () => {
     // （node 环境无对象存储时安全退化为空串，渲染层按无缩略图处理）
     expect(entry.thumb.startsWith("data:")).toBe(false);
     if (entry.thumb) expect(entry.thumb).toMatch(/^url\("blob:/);
-  });
-});
-
-describe("importPipeline — 响应式代理载荷净化（解析导入 DataCloneError 根治）", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    importEndMock.mockResolvedValue({ ok: true, total_count: 0, import_id: "imp-test" });
-    // 恒定外置存储：解析导入的每张照片都先上传分块记录，默认返回成功 id
-    let chunkIdSeed = 900;
-    addChunkBatchMock.mockImplementation(async (chunks: Array<{ chunk_key: string }>) => ({
-      ok: true,
-      ids: chunks.map(() => chunkIdSeed++),
-      batch_id: 1,
-      failed_indices: [],
-      processed_count: chunks.length,
-      total_count: chunks.length,
-      skipped_count: 0,
-    }));
-  });
-
-  it("Vue 响应式污染的解析产物：meta 脱代理净化后提交（载荷可结构化克隆）", async () => {
-    addRecordsBatchMock.mockImplementation(async () => okBatchResponse(1));
-
-    // 还原真实污染形态：parsedPhotos 为 ref，元素与其 meta 经 Vue 深层响应式
-    // 代理；记录 meta 携带 chunkHashes 数组（完整加密产物恒含该字段，
-    // 经导出 → 解析链路原样保留——正是生产「加密任务失败×N」的触发载荷）
-    const base = makePreview(0, "h1");
-    const pollutedMeta = reactive({
-      ...base.meta,
-      chunkHashes: ["a".repeat(64)],
-    }) as PhotoMeta;
-    const polluted: ParsedPhotoPreview = { ...base, meta: pollutedMeta };
-
-    // 前提锁定：污染载荷浅层展开后仍不可结构化克隆（Proxy 嵌套数组在浅
-    // 展开中保留代理身份，与 Worker 池 postMessage 的失败形态一致；
-    // 该断言防用例随实现漂移而静默失效）
-    expect(() =>
-      structuredClone({ ...pollutedMeta, chunkDataB64: [], chunkIds: [] }),
-    ).toThrow();
-
-    const pipe = makePipeline();
-    const result = await pipe.runParsed([polluted]);
-
-    expect(result.ok).toBe(true);
-    expect(result.imported).toHaveLength(1);
-    // 净化契约：进入 Worker 的 meta（及整个请求体）必须完全脱离代理
-    const submitted = (photoWorkerPool.submitMetaOnly as ReturnType<typeof vi.fn>)
-      .mock.calls[0][0] as { meta: PhotoMeta };
-    expect(() => structuredClone(submitted.meta)).not.toThrow();
-    expect(() => structuredClone(submitted)).not.toThrow();
   });
 });

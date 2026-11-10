@@ -1,6 +1,6 @@
 <!--
   ActionButton.vue — 通用可复用按钮组件
-  复用全局 .btn 基础样式（与相册导出按钮一致），简洁不带渐变
+  复用全局 .btn 基础样式，简洁不带渐变
   变体：default（默认）/ danger（红色）
   尺寸：紧凑形态，几何由全局 .btn-icon 单源提供（正方形 32×32 + 图标口径）
   图标：默认加号；#icon 插槽可替换为其它图标（仍走同一套盒模型，
@@ -86,7 +86,7 @@ const iconOnly = computed(() => !props.label && !slots.default);
 }
 
 /* 加号图标：SVG 描边十字 —— 几何精确、粗细可控，与全应用图标语言一致
-   （替代此前的文本「+」，避免字体基线与字重差异导致的对不齐） */
+   （不使用文本「+」，避免字体基线与字重差异导致的对不齐） */
 .action-plus {
   width: 13px;
   height: 13px;
@@ -94,7 +94,7 @@ const iconOnly = computed(() => !props.label && !slots.default);
   display: block;
 }
 /* 纯图标按钮（无文案）：几何（正方形 + 图标口径）复用全局 .btn-icon，
-   本组件不再自带尺寸声明，避免与其它复用方出现两处来源 */
+   本组件不自带尺寸声明，避免与其它复用方出现两处来源 */
 
 /* 加载状态时隐藏加号 */
 .is-loading .action-plus {

@@ -7,8 +7,8 @@
  *
  * 【监控模型】
  *   - 采样：主渲染循环每执行帧记录「任务总耗时」（mustRun + throttled
- *     实际执行时长，主循环在调用任务前后计时）——独立 rAF 已根除，
- *     本模块不再持有任何帧调度句柄；
+ *     实际执行时长，主循环在调用任务前后计时）——本模块不持有任何
+ *     帧调度句柄；
  *   - 缓冲：固定长度 Float32Array 环形缓冲（60 样本），head 索引覆盖
  *     写入，O(1) 零分配；
  *   - 评估：每 60 帧（约 1s @60fps）执行一次 P95 排序与升降级决策
@@ -16,21 +16,21 @@
  *
  * 【预算基准】active 档任务总耗时 P95 预算 6ms（jsTimeMs），恢复线
  *   为预算 70%（4.2ms）——任务总耗时只含 JS 执行时间，不含 rAF 等待
- *   与 GPU 合成反压（帧间隔代理测量已废弃）。
+ *   与 GPU 合成反压（不以帧间隔代理测量）。
  *
  * 【降级档位】
  *   级别 | 粒子密度 | CSS 动画     | backdrop-filter
  *   0    | 100%     | 全部         | 保留
  *   1    | 80%      | 全部         | 保留
  *   2    | 50%      | 核心         | 减少
- *   3    | 20%      | 最少         | 移除
+ *   3    | 20%      | 最少         | 无
  *
  * 落地通道（策略注入 — 高内聚低耦合，监控器不感知实现细节）：
  *   - 粒子密度 → ParticleDensityController（ParticleBackground 注册，
  *     setDrawRange 等效 InstancedMesh.count）
  *   - CSS 治理 → body 挂载 reduced-motion（≥2）/ minimal-motion（=3）
  *     类，idle-governance.css 承载降级样式（暂停非核心动画 /
- *     移除 backdrop-filter）
+ *     关闭 backdrop-filter）
  *
  * 【采样守卫（防误判）】
  *   - 仅全局空闲档位为 active 时采样：settling/idle/deep-idle 的有意

@@ -257,9 +257,8 @@ void memory_guard_secure_zero(void *ptr, size_t len)
     if (ptr == NULL || len == 0) return;
 
     /*
-     * 单轮覆写（0x00）。
-     * 原实现的三轮覆写（0x00→0xFF→0x00）是磁盘擦除的民俗移植——
-     * 对易失性内存单轮覆盖已足够，多轮只增加成本无安全增益。
+     * 单轮覆写（0x00）：易失性内存不存在磁盘擦除的磁残留问题，
+     * 多轮只增加成本无安全增益。
      * volatile 限定指针确保编译器不优化掉写入。
      */
     volatile uint8_t *p = (volatile uint8_t *)ptr;
@@ -482,7 +481,7 @@ int memory_guard_unregister(void *ptr)
  *              防转储低频巡逻                              *
  * ===================================================================== *
  * 一次性定时器链（≥60s 间隔）：每次唤醒执行一次句柄表扫描后重排下一次。
- * 空闲期零唤醒成本（相对旧的 1s 周期定时器体系）；性能模式不启动。
+ * 空闲期零唤醒成本；性能模式不启动。
  */
 
 static HANDLE s_patrol_queue = NULL;

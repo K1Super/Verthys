@@ -6,6 +6,8 @@
 
 ### Added
 
+- 清藏新增批量损坏扫描与清理入口：只验证每个文件分块的内容外层（MDEK/epoch）能否解封，不要求输入每文件口令；结果经二次显式确认后批量删除，并复用批量事务、落盘校验、去重键释放与孤儿块回收链路。未设独立密码的文件与历史加密布局跳过探测，模块锁定/读取失败等不可判定结果绝不删除。新增 worker 命令 `module_probe_outer`（不校验种类标签、不派生口令、不返回明文）。
+- 拾光新增损坏记录清理入口：扫描全部照片元数据，只把内容层认证失败（`ERR_00000002` 且非历史明文布局）判定为损坏；结果需二次显式确认后才删除，删除复用台账级联、落盘校验与孤儿块回收链路，模块锁定/超时等不可判定记录一律跳过。
 - P2 SYSTEM 机器级安全服务：独立 `security-service/` 工程、命名管道 v1、令牌桶与每用户配额、HMAC 状态、ECDSA P-256 响应签名。
 - 单安装包随应用安装：应用安装器改为 perMachine，一次 UAC 内完成应用、服务与根 CA；服务安装/卸载/修复逻辑并入 `VerthysSecuritySvc.exe` 子命令，不再交付独立 `VerthysSecurityServiceSetup.exe`。取消 UAC 零残留；卸载清理服务、机器状态、事件源与根 CA。
 - core 机器级预算客户端接入 `vty_machine_limiter`；门禁/记账位于 V4 库解锁（口令/keyfile/恢复码）、模块解锁与口令复核收口；服务为强制依赖，未安装/不可达/状态损坏/验签失败一律 fail-closed，不保留旧版本兼容路径。旧 `Verthys_Unlock` 与 `verthys_backoff_*` 死路径已删除。
@@ -16,6 +18,9 @@
 
 ### Fixed
 
+- 修复后台模块巡检误报导致 Worker 被强制销毁、阻断解锁/重绑/轮换的问题：路径不在白名单不再直接判为注入，先做 Authenticode 核验；签名有效（含吊销状态离线不可达）的第三方注入模块（NVIDIA `nvui.dll`、Bonjour `mdnsNSP.dll`）降级为软告警，仅写日志与 `PATROL_SUSPECT` 审计；只有签名无效的未知模块与“哈希失配且签名无效”的系统模块才进入连续检测与应急熔断。系统更新导致的哈希失配与文件不可读同样降级为软告警。持久化状态升级到 schema v2，旧版误报计数/已触发集合整体丢弃。
+- 修复恢复码解锁后全库密钥轮换导致模块内容损坏的问题：轮换在重写记录外层的同时，把照片索引/块/缩略图/块集与文件保险箱内容的内层分片信封按旧 MDEK/旧 epoch 解封、新 MDEK/新 epoch 重封，并逐条回读验证；任一失败中止轮换且不替换源库。轮换向导默认保留 `.old-*` 旧库备份作为兜底。
+- 修复卸载时勾选“Delete the application data”删除本机密钥材料、重装后既有加密库永久无法普通解锁的问题：机器密钥材料迁移到 `%LOCALAPPDATA%\Verthys\KeyMaterial`（KnownFolder 模式），旧位置自动迁移且保留只读兜底，卸载器在删除应用数据前强制保留；解锁缺失密钥材料时 fail-closed 并返回 `E_KEY_MATERIAL_MISSING`，引导恢复码解锁与重绑本机设备槽，不再静默生成新密钥、不再误报通用认证失败。
 - 修复主程序在安装包内 Authenticode `HashMismatch`：签名改由 Tauri `bundle.windows.signCommand` 在 bundle type 补丁之后执行，覆盖主程序、NSIS 卸载器、安装包与 NSIS 插件副本。
 - NSIS 安装包签名后自动重新生成 updater `.sig`，构建收尾以钉扎指纹复核安装包 Authenticode。
 - 修复 Tauri 签名钩子在 Windows PowerShell 5.1 子进程中继承 PowerShell 7 `PSModulePath` 导致 `Cert:` 驱动器缺失、发布签名必然失败的问题。

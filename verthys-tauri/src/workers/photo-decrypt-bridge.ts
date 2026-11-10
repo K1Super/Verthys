@@ -36,9 +36,9 @@ export interface SlimChunkParams {
   chunkTotal: number;
 }
 
-/** 块解密任务的完整性权威值（缺省表示不校验：历史记录无权威值的兼容路径） */
+/** 块解密任务的校验参数（expectedFileHash 为权威值；缺省时逐块哈希失配即拒绝） */
 export interface ChunkVerifyOptions {
-  /** 逐块密文哈希（非空时在解密前逐块校验） */
+  /** 逐块密文哈希（诊断值；失配时由 expectedFileHash 兜底） */
   expectedHashes?: string[];
   /** 整图明文哈希（提供时对解密产物按序增量校验） */
   expectedFileHash?: string;
@@ -218,7 +218,7 @@ export async function decryptChunkSetPreferWorker(
  * @param fileHashHex 文件哈希 hex（块 AD 绑定）
  * @param label 定位标识（记录 ID 或照片名，用于日志与错误提示）
  * @param slim 索引瘦身布局参数（提供时按 nonce|密文 布局解密）
- * @param verify 完整性权威值：池路径随任务透传；直连路径在本函数内校验
+ * @param verify 完整性参数：expectedFileHash 为权威值，expectedHashes 仅作诊断
  * @returns 按输入顺序的明文块（长度与输入一致）
  */
 export async function decryptChunksPreferWorker(
@@ -258,7 +258,7 @@ export async function decryptChunksPreferWorker(
  * 主线程逐块解密（池不可用时的直连实现）。
  *
  * 语义与 Worker 路径一致：任一块失败即整体失败；错误信息携带块序号；
- * 密文哈希在解密前比对，整图明文哈希在拼接前按序增量比对。
+ * 密文哈希仅作诊断，整图明文哈希在拼接前按序增量比对并作为最终权威值。
  */
 async function decryptChunksDirect(
   chunksB64: string[],
@@ -283,6 +283,8 @@ async function decryptChunksDirect(
   const fileHasher = verify?.expectedFileHash
     ? blake3.create({ dkLen: FILE_HASH_LEN })
     : null;
+  let hashMismatchCount = 0;
+  let firstHashMismatch = -1;
   try {
     for (let c = 0; c < chunksB64.length; c++) {
       try {
@@ -291,7 +293,9 @@ async function decryptChunksDirect(
             blake3(base64ToBytes(chunksB64[c]), { dkLen: FILE_HASH_LEN }),
           );
           if (actual !== expectedHashes[c]) {
-            throw new Error(`块密文哈希校验失败（第 ${c + 1}/${chunksB64.length} 块）`);
+            // 与 Worker 路径一致：密文哈希仅作诊断，整图明文哈希才是权威值
+            hashMismatchCount += 1;
+            if (firstHashMismatch < 0) firstHashMismatch = c;
           }
         }
         const opened = wrappedFileKey !== undefined
@@ -323,6 +327,18 @@ async function decryptChunksDirect(
           `整图哈希校验失败（期望 ${verify.expectedFileHash}，实际 ${actualFileHash}）`,
         );
       }
+    }
+    if (hashMismatchCount > 0) {
+      if (!verify?.expectedFileHash) {
+        throw new Error(
+          `块密文哈希校验失败（第 ${firstHashMismatch + 1}/${chunksB64.length} 块），` +
+            "且调用方未提供整图哈希权威值",
+        );
+      }
+      log.warn(
+        `逐块密文哈希失配 ${hashMismatchCount} 块，已由整图明文哈希校验兜底` +
+          `（${chunksB64.length} 块）`,
+      );
     }
     return plaintexts;
   } catch (e) {

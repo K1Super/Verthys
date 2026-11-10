@@ -1,11 +1,11 @@
 /*
  * background_patrol.rs — 后台模块巡检线程
  *
- * 修复要点：
+ * 要点：
  *   1. 动态频率 + 无窗口随机巡检（10~40 秒随机抖动 + 系统空闲时间结合）
  *      - 消除固定 30 秒周期的规律性，攻击者无法在巡检间隙规避
  *      - 系统空闲时降低频率（省 CPU），活跃时提高频率（覆盖攻击窗口）
- *   2. 系统目录模块引入哈希基线库，杜绝位置信任
+ *   2. 系统目录模块使用哈希基线库，杜绝位置信任
  *      - 预计算 System32/SysWOW64 下所有合法 DLL 的 SHA-256 哈希
  *      - 巡检时对系统目录模块的哈希进行匹配，被替换的 DLL 即便在系统目录下也被检出
  *   3. 检测状态加密持久化（HMAC 保护 + DPAPI 加密），绑定设备与安装
@@ -23,7 +23,7 @@
  *      - SetProcessMitigationPolicy 启用 ProcessSignaturePolicy / ProcessImageLoadPolicy
  *   7. catch_unwind 包裹单次巡检，防 panic 退出
  *      - 单次扫描 panic 不会导致线程退出，看门狗仍可恢复
- *   8. 完整校验抽样复核（FEAT_INTEGRITY_CHECK 执行路径）
+ *   8. 完整校验抽样复核
  *      - 每轮随机抽样少量受信位置已加载模块做签名复核（部分
  *        Fisher-Yates 抽样，抽样期推进心跳），失效进入威胁管线
  */
@@ -40,7 +40,8 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::module_whitelist::{
-    self, build_system_baseline, verify_module_against_baseline, HashBaseline, UnknownModule,
+    self, build_system_baseline, check_module_against_baseline, module_signature_status,
+    BaselineCheck, HashBaseline, SignatureStatus, UnknownModule,
 };
 use crate::state::AppState;
 use crate::util::audit_log::{append_audit, AuditEvent, AuditEventType, AuditResult};
@@ -79,7 +80,7 @@ const HEARTBEAT_BEAT_SECS: u64 = 1;
 /// 看门狗连续重启失败上限：超过后强制触发应急熔断
 const WATCHDOG_MAX_RESTART_FAILURES: u32 = 3;
 
-/// 空闲治理 R5：状态指纹不变时跳过磁盘持久化的强制兜底周期。
+/// 空闲治理：状态指纹不变时跳过磁盘持久化的强制兜底周期。
 /// patrol_count 每次巡检 +1（不参与指纹），每 N 次巡检强制落盘一次，
 /// 确保计数的漂移丢失上界为 N 次巡检。
 const PATROL_FORCE_PERSIST_INTERVAL: u32 = 64;
@@ -94,6 +95,39 @@ pub const EMERGENCY_EVENT_NAME: &str = "verthys://security-emergency";
 
 /// HMAC 密钥派生盐值（公开常量，不增加安全性，仅防止与其它用途的 PBKDF2 派生冲突）
 const PATROL_HMAC_SALT: &[u8] = b"verthys_patrol_state_hmac_salt_v1";
+
+/// 巡检状态模式版本。
+///
+/// 当前语义下签名有效的第三方注入模块不计入 `counts`/`triggered`，
+/// 仅未签名模块进入应急管线。低于当前版本的状态按其旧语义记录，
+/// 加载时直接丢弃重建。
+const PATROL_STATE_SCHEMA_VERSION: u32 = 2;
+
+/// 巡检威胁分级。
+///
+/// - `Hard`：未签名/签名无效，或无可信签名的系统目录哈希失配 → 进入
+///   连续检测管线，达到阈值触发应急熔断；
+/// - `Soft`：签名链有效（含吊销状态暂不可达）但路径未知 / 哈希变化，
+///   或无法核验（文件不可读）→ 仅记录审计与日志，绝不销毁 Worker 会话。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThreatSeverity {
+    Hard,
+    Soft,
+}
+
+/// 依据签名结论分级：只有“签名无效”才构成注入/劫持的硬证据。
+fn severity_for_signature(status: SignatureStatus) -> ThreatSeverity {
+    if status.is_signed() {
+        ThreatSeverity::Soft
+    } else {
+        ThreatSeverity::Hard
+    }
+}
+
+/// 持久化状态模式是否受支持
+fn is_supported_state_schema(version: u32) -> bool {
+    version >= PATROL_STATE_SCHEMA_VERSION
+}
 
 /* ====================================================================== *
  *  应急事件载荷（序列化发送给前端）                                        *
@@ -134,10 +168,16 @@ struct EmergencyPayload {
 /// 可序列化的巡检状态（用于 DPAPI 持久化）
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct SerializablePatrolState {
-    /// 模块路径（规范化小写）→ 连续检测次数
+    /// 状态模式版本（默认 0 = 引入分级前的旧格式）
+    #[serde(default)]
+    schema_version: u32,
+    /// 模块路径（规范化小写）→ 连续检测次数（仅硬威胁）
     counts: HashMap<String, u32>,
-    /// 已触发过应急信号的模块路径集合
+    /// 已触发过应急信号的模块路径集合（仅硬威胁）
     triggered: HashSet<String>,
+    /// 已记录过审计的软告警模块路径（避免每轮巡检重复写审计）
+    #[serde(default)]
+    reported_soft: HashSet<String>,
     /// 已执行巡检总次数
     patrol_count: u64,
     /// 安装目录（白名单基准前缀）
@@ -150,8 +190,10 @@ impl SerializablePatrolState {
     #[allow(dead_code)]
     fn new(install_dir: String) -> Self {
         SerializablePatrolState {
+            schema_version: PATROL_STATE_SCHEMA_VERSION,
             counts: HashMap::new(),
             triggered: HashSet::new(),
+            reported_soft: HashSet::new(),
             patrol_count: 0,
             install_dir,
             baseline_version: 0,
@@ -217,11 +259,21 @@ impl PatrolPersistence {
         }
 
         let state: SerializablePatrolState = serde_json::from_str(&entry.state_json).ok()?;
+        if !is_supported_state_schema(state.schema_version) {
+            log::info!(
+                "[background_patrol] 持久化状态为旧语义（schema={} < {}），\
+                 丢弃并重建：旧版按“路径即威胁”记录的误报计数不再适用",
+                state.schema_version,
+                PATROL_STATE_SCHEMA_VERSION
+            );
+            return None;
+        }
         log::info!(
-            "[background_patrol] 持久化状态已加载（patrol_count={}, tracked={}, triggered={}）",
+            "[background_patrol] 持久化状态已加载（patrol_count={}, tracked={}, triggered={}, soft={}）",
             state.patrol_count,
             state.counts.len(),
-            state.triggered.len()
+            state.triggered.len(),
+            state.reported_soft.len()
         );
         Some(state)
     }
@@ -312,7 +364,7 @@ fn compute_hmac(key: &[u8], data: &str) -> Result<String, String> {
     Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
-/// 空闲治理 R5：计算巡检状态指纹（SHA-256 前 8 字节）
+/// 空闲治理：计算巡检状态指纹（SHA-256 前 8 字节）
 ///
 /// 指纹覆盖安全关键状态（counts / triggered / install_dir / baseline_version），
 /// 不含 patrol_count（每次巡检 +1，纳入则指纹永不匹配，跳过失效）。
@@ -330,6 +382,12 @@ fn compute_state_fingerprint(s: &SerializablePatrolState) -> u64 {
     let mut triggered: Vec<&String> = s.triggered.iter().collect();
     triggered.sort();
     for k in triggered {
+        hasher.update(k.as_bytes());
+    }
+
+    let mut reported_soft: Vec<&String> = s.reported_soft.iter().collect();
+    reported_soft.sort();
+    for k in reported_soft {
         hasher.update(k.as_bytes());
     }
 
@@ -352,15 +410,17 @@ struct PatrolState {
     order: VecDeque<String>,
     /// 已触发过应急信号的模块路径集合（避免同一模块重复触发）
     triggered: HashSet<String>,
+    /// 已记录过审计的软告警模块路径（签名有效但路径未知/哈希变化）
+    reported_soft: HashSet<String>,
     /// 安装目录（白名单基准前缀）
     install_dir: String,
     /// 已执行巡检总次数
     patrol_count: u64,
     /// 基线版本标识
     baseline_version: u64,
-    /// 空闲治理 R5：上次实际落盘的状态指纹（不变则跳过磁盘持久化）
+    /// 空闲治理：上次实际落盘的状态指纹（不变则跳过磁盘持久化）
     last_persist_fingerprint: u64,
-    /// 空闲治理 R5：自上次实际落盘以来的巡检次数（周期性强制落盘兜底）
+    /// 空闲治理：自上次实际落盘以来的巡检次数（周期性强制落盘兜底）
     patrols_since_persist: u32,
 }
 
@@ -370,6 +430,7 @@ impl PatrolState {
             counts: HashMap::new(),
             order: VecDeque::new(),
             triggered: HashSet::new(),
+            reported_soft: HashSet::new(),
             install_dir,
             patrol_count: 0,
             baseline_version: 0,
@@ -387,6 +448,7 @@ impl PatrolState {
             counts: s.counts,
             order,
             triggered: s.triggered,
+            reported_soft: s.reported_soft,
             install_dir: s.install_dir,
             patrol_count: s.patrol_count,
             baseline_version: s.baseline_version,
@@ -398,8 +460,10 @@ impl PatrolState {
     /// 转换为可序列化状态
     fn to_serialized(&self) -> SerializablePatrolState {
         SerializablePatrolState {
+            schema_version: PATROL_STATE_SCHEMA_VERSION,
             counts: self.counts.clone(),
             triggered: self.triggered.clone(),
+            reported_soft: self.reported_soft.clone(),
             patrol_count: self.patrol_count,
             install_dir: self.install_dir.clone(),
             baseline_version: self.baseline_version,
@@ -445,6 +509,28 @@ impl PatrolState {
         self.evict_if_needed();
 
         newly_triggered
+    }
+
+    /// 记录软告警模块，返回"首次出现、尚未审计过"的模块列表。
+    ///
+    /// 软告警不参与连续计数、不触发应急熔断；仅用于审计留痕。集合有界，
+    /// 超过容量后整体清空重建（软告警没有安全决策作用，允许重复记录）。
+    fn record_soft(&mut self, suspects: &[UnknownModule]) -> Vec<UnknownModule> {
+        if suspects.is_empty() {
+            return Vec::new();
+        }
+        if self.reported_soft.len() >= RING_BUFFER_MAX_ENTRIES {
+            self.reported_soft.clear();
+        }
+
+        let mut newly_reported: Vec<UnknownModule> = Vec::new();
+        for m in suspects {
+            let key = normalize_key(&m.path);
+            if self.reported_soft.insert(key) {
+                newly_reported.push(m.clone());
+            }
+        }
+        newly_reported
     }
 
     /// 环形缓冲淘汰
@@ -1072,21 +1158,39 @@ fn run_one_patrol(ctx: &PatrolContext) {
     let unknowns = module_whitelist::patrol_modules_paths_only(&ctx.install_dir);
 
     // 哈希基线验证
-    // 对系统目录下的模块进行哈希匹配，检测被替换的 DLL
-    let mut all_threats: Vec<UnknownModule> = unknowns;
+    /* 威胁分级：路径不在白名单只说明“来源未知”，不构成注入证据。
+     * 第三方软件（NVIDIA Overlay、Bonjour mDNS 命名空间提供程序等）会把
+     * 自身签名的 DLL 注入到所有进程；这些模块路径天然不在白名单内。
+     * 因此先做 Authenticode 核验：
+     *   - 签名有效（含吊销状态不可达）→ 软告警，仅审计，不熔断；
+     *   - 未签名/签名无效             → 硬威胁，进入连续检测管线。
+     * 硬威胁连续 3 轮才销毁 Worker 会话，避免用户在解锁/重绑/轮换
+     * 过程中被强制中断。 */
+    let mut hard_threats: Vec<UnknownModule> = Vec::new();
+    let mut soft_suspects: Vec<UnknownModule> = Vec::new();
 
-    if let Some(baseline) = ctx.baseline_manager.get_snapshot() {
-        let hash_threats = check_hash_baseline_violations(&baseline, &ctx.heartbeat);
-        if !hash_threats.is_empty() {
-            log::warn!(
-                "[background_patrol] 哈希基线检测到 {} 个被替换的系统模块",
-                hash_threats.len()
-            );
-            all_threats.extend(hash_threats);
+    for m in unknowns {
+        match severity_for_signature(module_signature_status(&m.path)) {
+            ThreatSeverity::Hard => hard_threats.push(m),
+            ThreatSeverity::Soft => soft_suspects.push(m),
         }
     }
 
-    // 完整校验抽样复核（FEAT_INTEGRITY_CHECK 执行路径）
+    if let Some(baseline) = ctx.baseline_manager.get_snapshot() {
+        let (mut hard_hash_threats, mut soft_hash_suspects) =
+            check_hash_baseline_violations(&baseline, &ctx.heartbeat);
+        if !hard_hash_threats.is_empty() || !soft_hash_suspects.is_empty() {
+            log::warn!(
+                "[background_patrol] 哈希基线核验：{} 个硬威胁，{} 个软告警",
+                hard_hash_threats.len(),
+                soft_hash_suspects.len()
+            );
+        }
+        hard_threats.append(&mut hard_hash_threats);
+        soft_suspects.append(&mut soft_hash_suspects);
+    }
+
+    // 完整校验抽样复核
     // 对受信位置（非系统目录）的已加载模块随机抽样做签名复核；
     // 签名失效与"未知路径 / 哈希基线不匹配"同为威胁类别，进入同一
     // 连续检测管线（去重 + 连续阈值后才升级应急，单轮失败仅记录）。
@@ -1103,7 +1207,7 @@ fn run_one_patrol(ctx: &PatrolContext) {
                     name,
                     sanitize_path(&path)
                 );
-                all_threats.push(UnknownModule {
+                hard_threats.push(UnknownModule {
                     name,
                     path,
                     reason: "签名失效（完整校验抽样）".to_string(),
@@ -1112,7 +1216,7 @@ fn run_one_patrol(ctx: &PatrolContext) {
         }
     }
 
-    let triggered = {
+    let (triggered, newly_soft) = {
         let mut st = match ctx.state.lock() {
             Ok(g) => g,
             Err(e) => {
@@ -1121,13 +1225,14 @@ fn run_one_patrol(ctx: &PatrolContext) {
             }
         };
 
-        if !all_threats.is_empty() {
+        if !hard_threats.is_empty() || !soft_suspects.is_empty() {
             log::warn!(
-                "[background_patrol] 巡检 #{} 发现 {} 个未知/可疑模块",
+                "[background_patrol] 巡检 #{} 发现 {} 个硬威胁、{} 个软告警",
                 st.patrol_count + 1,
-                all_threats.len()
+                hard_threats.len(),
+                soft_suspects.len()
             );
-            for m in &all_threats {
+            for m in hard_threats.iter().chain(soft_suspects.iter()) {
                 log::warn!(
                     "[background_patrol]   - {} [{}]: {}",
                     m.name,
@@ -1142,11 +1247,13 @@ fn run_one_patrol(ctx: &PatrolContext) {
             );
         }
 
-        st.record(&all_threats)
+        let triggered = st.record(&hard_threats);
+        let newly_soft = st.record_soft(&soft_suspects);
+        (triggered, newly_soft)
     };
 
     // 持久化状态
-    // 空闲治理 R5：状态指纹比对跳过 — 安全关键状态（counts/triggered/
+    // 空闲治理：状态指纹比对跳过 — 安全关键状态（counts/triggered/
     //   install_dir/baseline_version）未变化时跳过序列化 + DPAPI 加密 +
     //   临时文件写入 + rename 的完整持久化链路；每 FORCE_PERSIST_INTERVAL
     //   次巡检强制落盘一次，patrol_count 漂移丢失上界受控。
@@ -1170,24 +1277,57 @@ fn run_one_patrol(ctx: &PatrolContext) {
         }
     }
 
-    // 对本次新达阈值的模块逐个触发应急信号
+    // 对本次新达阈值的硬威胁模块逐个触发应急信号
     for m in &triggered {
         trigger_emergency_signal(ctx, m);
     }
+
+    // 软告警仅审计留痕（每个模块每个会话只记一次），绝不熔断
+    for m in &newly_soft {
+        report_soft_suspect(ctx, m);
+    }
 }
 
-/// 检查系统目录模块的哈希基线违规
+/// 记录软告警模块：签名有效但来源路径未知 / 系统哈希随更新变化。
+///
+/// 这类模块由第三方软件正常注入，属误报高发区；只写日志与审计，
+/// 不销毁 Worker 会话、不触发前端应急事件。
+fn report_soft_suspect(ctx: &PatrolContext, module: &UnknownModule) {
+    log::warn!(
+        "[background_patrol][软告警] 模块 {} 签名有效但来源未知（仅记录，不熔断）: {} 原因={}",
+        module.name,
+        sanitize_path(&module.path),
+        module.reason
+    );
+
+    write_patrol_audit(
+        &ctx.app,
+        AuditEventType::PatrolSuspect,
+        AuditResult::Success,
+        Some(format!(
+            "已签名第三方模块: 模块={} 原因={}（仅记录，不熔断）",
+            module.name, module.reason
+        )),
+    );
+}
+
+/// 检查系统目录模块的哈希基线违规，返回 (硬威胁, 软告警)。
 ///
 /// 枚举当前进程已加载的系统目录模块，对每个模块计算 SHA-256 并与基线比较。
-/// 哈希不匹配的模块视为威胁（可能被替换）。
+/// 失配不等于“被替换”：Windows Update 在进程运行期间替换磁盘文件同样会
+/// 造成失配，而进程内仍是旧映像。因此失配时再做一次 Authenticode 核验：
+///   - 签名有效 → 软告警（系统更新或多版本并存，仅审计）；
+///   - 签名无效 → 硬威胁（疑似被替换为同路径恶意模块）；
+///   - 文件不可读（已删除/权限不足）→ 软告警（无法判定，不制造误熔断）。
 ///
 /// 扫描期间按模块推进心跳（heartbeat）：整轮哈希扫描可能跨越看门狗静默
 /// 阈值，持续报告存活才能让看门狗区分"长扫描"与"真卡死"。
 fn check_hash_baseline_violations(
     baseline: &HashBaseline,
     heartbeat: &AtomicU64,
-) -> Vec<UnknownModule> {
-    let mut threats = Vec::new();
+) -> (Vec<UnknownModule>, Vec<UnknownModule>) {
+    let mut hard_threats = Vec::new();
+    let mut soft_suspects = Vec::new();
 
     // 获取当前进程模块列表（仅路径，不做白名单匹配）
     // 复用 module_whitelist 的枚举逻辑，但这里我们只需要路径
@@ -1196,29 +1336,48 @@ fn check_hash_baseline_violations(
     for (name, path) in modules {
         heartbeat.store(now_ms(), Ordering::SeqCst);
         // 仅验证系统目录下的模块（基线仅包含系统目录）
-        match verify_module_against_baseline(&path, baseline) {
-            Ok(true) => {
-                // 哈希匹配，模块合法
+        match check_module_against_baseline(&path, baseline) {
+            BaselineCheck::Match | BaselineCheck::NotInBaseline => {
+                // 哈希匹配 / 非系统目录模块，跳过
             }
-            Ok(false) => {
-                // 哈希不匹配，模块可能被替换
-                log::error!(
-                    "[background_patrol] 哈希基线违规：系统模块 {} 哈希不匹配（可能被替换）",
+            BaselineCheck::Mismatch => {
+                if severity_for_signature(module_signature_status(&path)) == ThreatSeverity::Hard {
+                    log::error!(
+                        "[background_patrol] 哈希基线违规：系统模块 {} 哈希不匹配且签名无效（疑似被替换）",
+                        sanitize_path(&path)
+                    );
+                    hard_threats.push(UnknownModule {
+                        name,
+                        path,
+                        reason: "哈希基线不匹配且签名无效（系统模块疑似被替换）".to_string(),
+                    });
+                } else {
+                    log::warn!(
+                        "[background_patrol] 系统模块 {} 哈希不匹配但签名有效（可能为系统更新），仅记录",
+                        sanitize_path(&path)
+                    );
+                    soft_suspects.push(UnknownModule {
+                        name,
+                        path,
+                        reason: "哈希基线不匹配（签名有效，可能为系统更新）".to_string(),
+                    });
+                }
+            }
+            BaselineCheck::Unreadable => {
+                log::warn!(
+                    "[background_patrol] 系统模块 {} 无法读取哈希（文件已删除或权限不足），仅记录",
                     sanitize_path(&path)
                 );
-                threats.push(UnknownModule {
+                soft_suspects.push(UnknownModule {
                     name,
                     path,
-                    reason: "哈希基线不匹配（系统模块被替换）".to_string(),
+                    reason: "无法计算哈希（文件不可读，可能已被更新）".to_string(),
                 });
-            }
-            Err(()) => {
-                // 不在基线中（非系统目录模块），跳过
             }
         }
     }
 
-    threats
+    (hard_threats, soft_suspects)
 }
 
 /// 枚举当前进程已加载模块的 (名称, 路径) 列表
@@ -1753,6 +1912,91 @@ mod tests {
         assert_eq!(restored.patrol_count, 42);
         assert_eq!(restored.counts.len(), 1);
         assert_eq!(restored.install_dir, "c:\\app");
+    }
+
+    /// 签名分级：只有签名无效才允许进入应急管线。
+    #[test]
+    fn test_signature_severity_only_invalid_is_hard() {
+        assert_eq!(
+            severity_for_signature(SignatureStatus::Invalid),
+            ThreatSeverity::Hard
+        );
+        assert_eq!(
+            severity_for_signature(SignatureStatus::Valid),
+            ThreatSeverity::Soft
+        );
+        assert_eq!(
+            severity_for_signature(SignatureStatus::ValidRevocationUnknown),
+            ThreatSeverity::Soft
+        );
+    }
+
+    /// 不支持的 schema 状态必须被丢弃：schema<2 的 counts/triggered 记录了
+    /// “路径即威胁”语义下的误报（如 mdnsNSP.dll），不可用于压制或触发。
+    #[test]
+    fn test_legacy_state_schema_is_rejected() {
+        assert!(!is_supported_state_schema(0));
+        assert!(!is_supported_state_schema(1));
+        assert!(is_supported_state_schema(PATROL_STATE_SCHEMA_VERSION));
+
+        // 无 schema_version / reported_soft 字段的 JSON 可反序列化，
+        // 默认 schema=0，从而走“丢弃重建”分支。
+        let legacy: SerializablePatrolState = serde_json::from_str(
+            r#"{"counts":{"c:\\temp\\evil.dll":3},"triggered":["c:\\temp\\evil.dll"],
+               "patrol_count":13,"install_dir":"c:\\app","baseline_version":0}"#,
+        )
+        .expect("旧状态 JSON 必须可解析");
+        assert_eq!(legacy.schema_version, 0);
+        assert!(legacy.reported_soft.is_empty());
+        assert!(!is_supported_state_schema(legacy.schema_version));
+    }
+
+    /// 软告警不进入连续计数、不触发熔断，且同一路径只审计一次。
+    #[test]
+    fn test_soft_suspects_do_not_count_or_trigger() {
+        let mut state = PatrolState::new("c:\\app".to_string());
+        let signed_module = UnknownModule {
+            name: "mdnsNSP.dll".to_string(),
+            path: "C:\\Program Files\\Bonjour\\mdnsNSP.dll".to_string(),
+            reason: "未知路径".to_string(),
+        };
+
+        // 连续多轮出现软告警：不得进入 counts/triggered
+        for _ in 0..(CONSECUTIVE_TRIGGER_THRESHOLD + 2) {
+            let newly = state.record_soft(std::slice::from_ref(&signed_module));
+            let expected_first = state.reported_soft.len() == 1 && newly.len() == 1;
+            assert!(
+                newly.is_empty() || expected_first,
+                "软告警只允许首次上报"
+            );
+        }
+        assert!(state.counts.is_empty(), "软告警不得进入硬威胁计数");
+        assert!(state.triggered.is_empty(), "软告警不得写入已触发集合");
+        assert_eq!(state.patrol_count, 0, "软告警不得推进巡检计数");
+
+        // 硬威胁计数不受软告警影响
+        let mut hard = signed_module.clone();
+        hard.reason = "未签名".to_string();
+        let triggered: Vec<UnknownModule> = (0..CONSECUTIVE_TRIGGER_THRESHOLD)
+            .flat_map(|_| state.record(std::slice::from_ref(&hard)))
+            .collect();
+        assert_eq!(triggered.len(), 1);
+        assert_eq!(state.counts.len(), 1);
+    }
+
+    /// 软告警集合必须有界，攻击者不能靠海量路径撑爆持久化状态。
+    #[test]
+    fn test_soft_suspect_set_is_bounded() {
+        let mut state = PatrolState::new("c:\\app".to_string());
+        for i in 0..(RING_BUFFER_MAX_ENTRIES + 40) {
+            let module = UnknownModule {
+                name: format!("signed_{}.dll", i),
+                path: format!("C:\\Vendor\\signed_{}.dll", i),
+                reason: "未知路径".to_string(),
+            };
+            state.record_soft(&[module]);
+        }
+        assert!(state.reported_soft.len() <= RING_BUFFER_MAX_ENTRIES);
     }
 
     #[test]

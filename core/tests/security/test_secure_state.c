@@ -80,7 +80,7 @@ TEST(secure_state_paths_and_identity)
     return 0;
 }
 
-/* N2 预检 + N5 句柄预算。 */
+/* 路径预检与句柄预算：路径生成不泄漏句柄。 */
 TEST(secure_state_preflight_and_handle_budget)
 {
     char path[VTY_SECURE_STATE_PATH_BYTES];

@@ -12,10 +12,10 @@
  *   （C 层跨进程互斥），本进程以 GENERIC_WRITE 打开同文件会被内核以
  *   SHARING_VIOLATION 拒绝——守卫只能挂共享读锁（GENERIC_READ），
  *   跨实例单写者互斥由 C 层容器句柄承担，本锁仅作进程内会话哨兵。
- *   原 verthys_unlock / verthys_lock 手工 file_lock 移入移出，异常路径可能遗漏释放。
- *   新设计：VerthysSessionGuard 构造时获取哨兵锁 + 记录会话路径，
+ *   守卫职责：VerthysSessionGuard 构造时获取哨兵锁 + 记录会话路径，
  *   Drop 时自动释放文件锁。AppState 持 Option<VerthysSessionGuard>，
- *   命令通过 with_session 访问。
+ *   命令通过该守卫访问会话。禁止在命令中手工移入移出 file_lock：
+ *   异常路径会遗漏释放。
  *
  * CI 红线：
  *   - 文件锁获取失败返回 Err，不降级
@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 ///   - verthys_lock / 进程退出时销毁（None）
 ///
 /// 所有需要访问 verthys 文件的命令通过此守卫获取会话路径，
-/// 不再直接操作 verthys_file_lock。
+/// 不得直接操作 verthys_file_lock。
 pub struct VerthysSessionGuard {
     /// .verthys 文件共享读哨兵锁（Drop 自动释放 LockFileEx）
     #[allow(dead_code)]

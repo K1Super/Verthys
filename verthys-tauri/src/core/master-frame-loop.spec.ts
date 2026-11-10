@@ -264,7 +264,7 @@ describe("MasterFrameLoop", () => {
     const loop = new MasterFrameLoop(host);
     loop.start();
     let calls = 0;
-    /* 模拟拖拽态无条件自重排（同帧排空旧语义下此结构会无限自旋） */
+    /* 模拟拖拽态无条件自重排（同帧排空时此结构会无限自旋） */
     const selfRequeue = () => {
       calls++;
       loop.once(selfRequeue);

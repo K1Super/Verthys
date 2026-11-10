@@ -3,10 +3,10 @@
  *
  * 架构原则（Windows 10/11 平台，禁止降级）：
  *
- *   放弃"保护句柄"与"复制句柄触发关闭"的无效组合
+ *   不使用"保护句柄"与"复制句柄触发关闭"组合
  *      PROTECT_FROM_CLOSE 仅阻止调用方进程关闭该句柄，但关闭副本并不减少
- *      原句柄的引用计数，因此无法触发 KILL_ON_JOB_CLOSE。本模块彻底摒弃
- *      此机制，仅依赖安全描述符（DACL）对外部访问进行拦截。
+ *      原句柄的引用计数，因此无法触发 KILL_ON_JOB_CLOSE。本模块仅依赖
+ *      安全描述符（DACL）对外部访问进行拦截。
  *
  *   DACL 白名单策略（默认拒绝 + 显式允许）
  *      - 不添加任何 Deny ACE（避免自毁：当前进程令牌含 Everyone SID，
@@ -16,9 +16,9 @@
  *      - 其余主体（含 Administrators/Everyone）默认无任何访问权限
  *        （甚至无 READ_CONTROL/SYNCHRONIZE）
  *
- *   移除 JobObjectSecurityLimitInformation（Windows 8+ 已废弃）
+ *   不使用 JobObjectSecurityLimitInformation（Windows 8+ 已废弃）
  *      该 Info Class 在 Windows 8 以后被内核废弃，SetInformationJobObject 会稳定
- *      返回 ERROR_NOT_SUPPORTED (50)。本模块完全移除该调用，不再做无效的重试或降级。
+ *      返回 ERROR_NOT_SUPPORTED (50)。本模块不调用该接口，也不做无效的重试或降级。
  *      令牌限制职责由 Worker 进程的 mitigation policy（apply_process_sandbox）承担，
  *      或通过 CreateProcessAsUser + CreateRestrictedToken / AdjustTokenPrivileges 实现。
  *
@@ -39,7 +39,7 @@
  *
  *   初始化并发安全与诊断能力
  *      - 使用 InitOnceExecuteOnce 保证初始化函数全局仅执行一次
- *      - 废弃 fprintf(stderr)，改用 OutputDebugStringA 输出调试信息供开发环境捕获
+ *      - 使用 OutputDebugStringA 输出调试信息供开发环境捕获（服务进程无控制台）
  *      - 正式发布版本写入 Windows 事件日志（Event Log），记录每一步 Win32 错误码
  *
  *   跨进程攻击面的终极考虑

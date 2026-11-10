@@ -8,9 +8,8 @@
  *   - 提供泛型 ScanPipelineState<T>，消除全量/摘要扫描的代码重复
  *
  *  泛型 ScanPipelineState<T: ScanRecord>：
- *   原 state.rs 中 ScanState（全量）与 ScanSummaryState（摘要）字段完全相同，
- *   仅 Vec<VerthysRecordEntry> vs Vec<VerthysSummaryEntry> 类型不同，导致 ~200 行
- *   逐字复制代码。泛型化后，全量与摘要实例化同一套状态机+双缓冲调度器。
+ *   全量与摘要扫描的字段集合相同，仅记录类型不同。泛型化后两种扫描实例化
+ *   同一套状态机 + 双缓冲调度器，避免逐字复制实现。
  *
  *   trait ScanRecord: Zeroize + VirtualLockable + Clone + Send + 'static
  *     - Zeroize: 支持 LockedBuffer<T> Drop 时擦除
@@ -18,21 +17,17 @@
  *     - Clone: 支持 records().to_vec() 克隆用于响应
  *     - Send + 'static: 支持跨线程传递（Mutex 内存储 + tokio::spawn）
  *
- *   删除重复自由函数：
- *     - secure_zero_records / secure_zero_summary_records（由 LockedBuffer Drop 替代）
- *     - virtual_lock_summary_records / virtual_unlock_summary_records（由 LockedBuffer 替代）
+ *   记录擦除与内存锁定统一由 LockedBuffer 承担，不提供独立的零化/锁定自由函数。
  *
- *  预取改长期 tokio::task + mpsc 控制 + CancellationToken：
- *   原 spawn_prefetch 每批创建新 spawn_blocking 任务，取消用 handle.abort()。
- *   abort 不会等待任务安全退出，可能在 I/O 中途被强制终止，导致共享内存状态不一致。
- *
- *   新设计：
- *     - scan_open 时创建一个长期 prefetch_task（tokio::spawn）
- *     - 任务通过 mpsc::Receiver<PrefetchCommand> 接收命令
- *     - 每条 Fetch 命令携带 oneshot::Sender 回复通道
- *     - 取消用 CancellationToken，任务在安全点（命令间隙）自行退出
- *     - cleanup_scan_on_failure 发送 cancel + 短超时等待 join
- *     - 删除 handle.abort() + handle.await
+ *  预取任务模型（长期 tokio::task + mpsc 控制 + CancellationToken）：
+ *    - scan_open 时创建一个长期 prefetch_task（tokio::spawn），不在每批数据上
+ *      新建 spawn_blocking 任务
+ *    - 任务通过 mpsc::Receiver<PrefetchCommand> 接收命令
+ *    - 每条 Fetch 命令携带 oneshot::Sender 回复通道
+ *    - 取消用 CancellationToken，任务在安全点（命令间隙）自行退出
+ *    - cleanup_scan_on_failure 发送 cancel + 短超时等待 join
+ *    - 禁止用 handle.abort()：abort 不等待任务安全退出，可能在 I/O 中途
+ *      强制终止，导致共享内存状态不一致
  *
  *  ScanSession 状态机：
  *   ScanPipelineState 本身即状态机，current_buffer: Option<LockedBuffer<T>>
@@ -448,7 +443,6 @@ impl ScanSessionState {
 /// 泛型扫描流水线状态
 ///
 /// 全量扫描（VerthysRecordEntry）与摘要扫描（VerthysSummaryEntry）共用此结构。
-/// 消除原 ScanState + ScanSummaryState 约 200 行重复代码。
 ///
 /// 字段说明：
 ///   - `shm_name`: scan_open 返回的共享内存名称，fetch 复用此段

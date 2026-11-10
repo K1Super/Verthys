@@ -8,8 +8,6 @@
  *   3. 主动修复：verthys_init_status 中校验 .verthys magic，合法则修复状态文件
  *   4. 修复失败可观测性：repair_fail_count 计数器
  *   5. 幂等性：内存缓存避免重复 I/O
- *   6. 旧布局懒迁移：<verthys_path>.state 首次读取时原子搬入附属目录，
- *      解析失败不搬移（保留现场），迁移失败不阻断读取
  *
  * 原子提交：先写 state.json.tmp，再 rename 覆盖
  *

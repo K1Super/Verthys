@@ -418,6 +418,153 @@ TEST(rotate_full_roundtrip_preserves_records_and_files)
     return 0;
 }
 
+/* 恢复码解锁后的全库轮换必须把模块内容信封从旧 MDEK/旧 epoch 换封到
+ * 新 MDEK/新 epoch；否则照片/文件内容在轮换后全部不可解。 */
+TEST(rotate_rewraps_module_content)
+{
+    VerthysHandle h = NULL;
+    char code[VTY_RECOVERY_TEXT_BUF];
+    VerthysRotateInfo info;
+    VerthysRecord rec;
+    VerthysRecord got;
+    uint64_t meta_id = 0;
+    uint64_t chunk_id = 0;
+    uint64_t file_chunk_id = 0;
+    uint8_t file_uuid[VTY_UUID_BYTES];
+    uint8_t chunk_uuid[VTY_UUID_BYTES];
+    uint8_t vault_file_uuid[VTY_UUID_BYTES];
+    uint8_t sealed[512];
+    uint8_t opened[512];
+    size_t sealed_len = 0;
+    size_t opened_len = 0;
+    const char *meta_pt = "{\"name\":\"p.jpg\",\"chunkDataB64\":[]}";
+    const char *chunk_pt = "photo-bytes-original";
+    const char *file_pt = "file-bytes-original";
+    size_t i;
+
+    vty_lockout_set_enabled(0);
+    vty_rollback_set_enabled(0);
+    rotate_cleanup_files("rotate_content.vty", "rotate_content.tmp.vty");
+    memset(code, 0, sizeof(code));
+    memset(&info, 0, sizeof(info));
+    memset(&rec, 0, sizeof(rec));
+    memset(&got, 0, sizeof(got));
+    memset(sealed, 0, sizeof(sealed));
+    memset(opened, 0, sizeof(opened));
+    for (i = 0; i < sizeof(file_uuid); i++) file_uuid[i] = (uint8_t)(0x11u + i);
+    for (i = 0; i < sizeof(chunk_uuid); i++) chunk_uuid[i] = (uint8_t)(0x71u + i);
+    for (i = 0; i < sizeof(vault_file_uuid); i++) {
+        vault_file_uuid[i] = (uint8_t)(0xD1u + i);
+    }
+
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4Create(h, "rotate_content.vty", "content-pw", 10,
+                              code, sizeof(code)), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4ModuleEnable(h, VERTHYS_MODULE_PHOTO,
+                                    "photo-pw", 8, code), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4ModuleEnable(h, VERTHYS_MODULE_FILEVERTHYS,
+                                    "file-pw", 7, code), VERTHYS_OK);
+
+    /* 照片索引：顶层内容信封。 */
+    sealed_len = 0;
+    CHECK_EQ(Verthys_V4ChunkSeal(h, VERTHYS_MODULE_PHOTO, file_uuid, 0u, 1u,
+                                 (const uint8_t *)meta_pt, strlen(meta_pt),
+                                 sealed, sizeof(sealed), &sealed_len),
+             VERTHYS_OK);
+    rec.type = VERTHYS_RECORD_PHOTO;
+    rec.name = "meta";
+    rec.name_len = 4;
+    rec.data = sealed;
+    rec.data_len = sealed_len;
+    CHECK_EQ(Verthys_AddRecord(h, &rec, &meta_id), VERTHYS_OK);
+
+    /* 照片数据块：独立的顶层内容信封。 */
+    memset(sealed, 0, sizeof(sealed));
+    sealed_len = 0;
+    CHECK_EQ(Verthys_V4ChunkSeal(h, VERTHYS_MODULE_PHOTO, chunk_uuid, 0u, 1u,
+                                 (const uint8_t *)chunk_pt, strlen(chunk_pt),
+                                 sealed, sizeof(sealed), &sealed_len),
+             VERTHYS_OK);
+    rec.type = (VerthysRecordType)0x05;   /* TYPE_PHOTO_CHUNK */
+    rec.name = "chunk";
+    rec.name_len = 5;
+    rec.data = sealed;
+    rec.data_len = sealed_len;
+    CHECK_EQ(Verthys_AddRecord(h, &rec, &chunk_id), VERTHYS_OK);
+
+    /* 文件保险箱数据块：模块 2 的顶层内容信封。 */
+    memset(sealed, 0, sizeof(sealed));
+    sealed_len = 0;
+    CHECK_EQ(Verthys_V4ChunkSeal(h, VERTHYS_MODULE_FILEVERTHYS, vault_file_uuid,
+                                 0u, 1u, (const uint8_t *)file_pt, strlen(file_pt),
+                                 sealed, sizeof(sealed), &sealed_len),
+             VERTHYS_OK);
+    rec.type = VERTHYS_RECORD_FILE_VERTHYS;
+    rec.name = "file";
+    rec.name_len = 4;
+    rec.data = sealed;
+    rec.data_len = sealed_len;
+    CHECK_EQ(Verthys_AddRecord(h, &rec, &file_chunk_id), VERTHYS_OK);
+
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4UnlockRecovery(h, "rotate_content.vty", code),
+             VERTHYS_OK);
+    CHECK_EQ(Verthys_V4RotateBegin(h, "rotate_content.tmp.vty",
+                                   "content-pw", 10, 0u, &info), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4RotateUnlockModule(h, VERTHYS_MODULE_PHOTO,
+                                          "photo-pw", 8, NULL), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4RotateUnlockModule(h, VERTHYS_MODULE_FILEVERTHYS,
+                                          "file-pw", 7, NULL), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4RotateRun(h, NULL, NULL), VERTHYS_OK);
+    /* 保留旧库备份：轮换后必须存在可独立打开的 .old-* 兜底。 */
+    CHECK_EQ(Verthys_V4RotateCommit(h, 1u), VERTHYS_OK);
+    CHECK(rotate_backup_exists("rotate_content.vty"));
+
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4Unlock(h, "rotate_content.vty", "content-pw", 10),
+             VERTHYS_OK);
+    CHECK_EQ(Verthys_V4ModuleUnlock(h, VERTHYS_MODULE_PHOTO, "photo-pw", 8),
+             VERTHYS_OK);
+    CHECK_EQ(Verthys_V4ModuleUnlock(h, VERTHYS_MODULE_FILEVERTHYS,
+                                    "file-pw", 7), VERTHYS_OK);
+
+    memset(&got, 0, sizeof(got));
+    CHECK_EQ(Verthys_GetRecord(h, meta_id, &got), VERTHYS_OK);
+    opened_len = 0;
+    CHECK_EQ(Verthys_V4ChunkOpen(h, VERTHYS_MODULE_PHOTO, file_uuid, 0u, 1u,
+                                 got.data, got.data_len, opened, sizeof(opened),
+                                 &opened_len), VERTHYS_OK);
+    CHECK(opened_len == strlen(meta_pt)
+          && memcmp(opened, meta_pt, opened_len) == 0);
+
+    memset(&got, 0, sizeof(got));
+    CHECK_EQ(Verthys_GetRecord(h, chunk_id, &got), VERTHYS_OK);
+    memset(opened, 0, sizeof(opened));
+    opened_len = 0;
+    CHECK_EQ(Verthys_V4ChunkOpen(h, VERTHYS_MODULE_PHOTO, chunk_uuid, 0u, 1u,
+                                 got.data, got.data_len, opened, sizeof(opened),
+                                 &opened_len), VERTHYS_OK);
+    CHECK(opened_len == strlen(chunk_pt)
+          && memcmp(opened, chunk_pt, opened_len) == 0);
+
+    memset(&got, 0, sizeof(got));
+    CHECK_EQ(Verthys_GetRecord(h, file_chunk_id, &got), VERTHYS_OK);
+    memset(opened, 0, sizeof(opened));
+    opened_len = 0;
+    CHECK_EQ(Verthys_V4ChunkOpen(h, VERTHYS_MODULE_FILEVERTHYS,
+                                 vault_file_uuid, 0u, 1u,
+                                 got.data, got.data_len, opened, sizeof(opened),
+                                 &opened_len), VERTHYS_OK);
+    CHECK(opened_len == strlen(file_pt)
+          && memcmp(opened, file_pt, opened_len) == 0);
+
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_Deinit(h), VERTHYS_OK);
+    rotate_remove_backups("rotate_content.vty");
+    rotate_cleanup_files("rotate_content.vty", "rotate_content.tmp.vty");
+    return 0;
+}
+
 TEST(rotate_modules_require_password_and_rebind_recovery)
 {
     VerthysHandle h = NULL;

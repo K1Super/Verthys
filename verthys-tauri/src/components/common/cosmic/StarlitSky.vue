@@ -2,7 +2,7 @@
   StarlitSky.vue — 星野装饰层（无框半透明导航带专用）
   职责：为承载方（.starlit-bar）铺一层「三缘溶解」的星野底板 ——
     - 底板：冷调半透明纵向渐变，下缘自然消失（不设边框 / 圆角 / 投影；
-      值单源 tokens.css --bar-surface，与模块卡片背景同源）
+      值单源 var(--bar-surface)，与模块卡片背景同源）
     - 星云：两块极淡径向（青 / 紫），非对称多相位漂移
     - 星点：确定性散布 + 复合谐波闪烁（去网格感、无辉光）
     - 遮罩：左右渐隐 —— 边界消隐于渐变即「无框」的关键
@@ -58,7 +58,7 @@ const stars = Array.from({ length: props.count }, (_, i) => {
   overflow: hidden;
   pointer-events: none;
   z-index: 0;
-  /* 底板值单源：tokens.css --bar-surface（模块卡片背景同源复用） */
+  /* 底板值单源：var(--bar-surface)（模块卡片背景同源复用） */
   background: var(--bar-surface);
   /* 左右渐隐：能感知到的边界是渐变而非线条 —— 无框的关键；
      遮罩静态定值，单次栅格化，不随内容变化重绘 */

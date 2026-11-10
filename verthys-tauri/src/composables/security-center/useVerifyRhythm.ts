@@ -8,20 +8,22 @@
  *   - 订阅信号层：真实进度与终结事件由业务层通过
  *     pushRealProgress / seal / halt 注入，本层不反向驱动业务
  *   - 维护验证进度状态机：IDLE / ACTIVE / SEALING / DONE / HALTED
- *   - 生成假进度曲线（爬升期 + 封顶期），对真实进度做软上限钳制，
- *     以指数趋近平滑输出视觉值（帧率无关、无过冲）
- *   - 成功收束（SEALING）：缓出曲线补满 100% 后转 DONE，完成事件由
- *     waitForComplete 以 Promise 形式交付业务层
+ *   - 维护导引前沿：假进度速度与保底速度取较大者后积分，真实进度作为硬下限；
+ *     前沿单调不减且持续前进，吸收离散阶段信号之间的空窗
+ *   - 以临界阻尼二阶跟随把前沿输出为视觉值：位置与速度均连续，
+ *     阶段密集到达时不会逐段减速归零再重新起步（帧率无关、无过冲）
+ *   - 成功收束（SEALING）：速度连续的三次 Hermite 补满 100% 后转 DONE，
+ *     完成事件由 waitForComplete 以 Promise 形式交付业务层
  *   - 失败冻结（HALTED）：视觉值冻结不回弹、输出降级标识 dimmed，
  *     并保证错误最小展示时长 —— 保留给中断/降级用途；生产验证与初始化
- *     流程统一改为「收束完成后呈现结果」（见 useGlobalKey），不以冻结
- *     打断进度与加载编排
+ *     流程统一采用「收束完成后呈现结果」，不以冻结打断进度与加载编排
  *   - 尊重 prefers-reduced-motion：整体切换为直通策略
  *     （无假进度、无平滑、收束瞬时完成），不留散落分支
  *
  * 关键约束：
  *   - ACTIVE 阶段视觉值严格小于 1（即使真实进度推送 100%）
  *   - 视觉值单调不减（失败重试复位除外）
+ *   - 视觉速度连续：阶段跳变只改变加速度，不产生速度跃变
  *   - 时间基准为单调时钟，dt 钳制 50ms，严禁按帧推进
  *   - 模块级单例锁：同一时刻仅一个实例处于 ACTIVE / SEALING，
  *     新实例启动时对旧活跃实例 halt 后接管
@@ -48,52 +50,48 @@ const log = createLogger('verify-rhythm');
  * 调整节奏只应修改本表，禁止在业务代码中散落动画时长常量。
  */
 export interface VerifyRhythmConfig {
-  /** 假进度爬升期目标值，取值域 (0, softCeiling) */
-  plateau: number;
   /** 假进度曲线的绝对软上限，严格小于 1，取值域 (0.9, 1) */
   softCeiling: number;
-  /** 爬升期指数衰减速率（/s），取值域 (0.5, 3) */
-  approachRate: number;
-  /** 进入封顶期的判定比例（相对 plateau），取值域 (0.8, 1) */
-  plateauReachRatio: number;
-  /** 封顶期蠕变速率（/s），取值域 (0.01, 0.2) */
-  creepRate: number;
-  /** 视觉值指数趋近速率（/s），取值域 (3, 10) */
-  visualDamping: number;
+  /** 假进度速度曲线的初始衰减时间常数（s），取值域 (3, 15)。
+   *  前沿速度按 softCeiling/tau * exp(-t/tau) 平滑衰减；降到保底速度后
+   *  由 floorRate 以同等速度接续，全段速度连续、无急停 */
+  fakeRiseTau: number;
+  /** 视觉跟随的临界阻尼固有角频率（rad/s），取值域 (5, 16)。
+   *  决定阶段跳变后视觉速度的建立与收敛快慢；越大越跟手，速度仍连续 */
+  followFrequency: number;
+  /** 阶段间保底推进速度（1/s），取值域 (0.01, 0.08)。
+   *  距软上限较远时保持该速度，保证 180px 通道上始终有可感知的连续位移 */
+  floorRate: number;
+  /** 保底推进在接近软上限时的指数衰减尺度（占进度比例），取值域 (0.005, 0.08)。
+   *  速度随剩余空间指数收敛，使前沿渐近逼近软上限而永不硬停 */
+  floorGapScale: number;
   /** 成功收束动画时长（ms），取值域 (300, 800) */
   sealDuration: number;
-  /** 成功收束缓出曲线（当前仅支持 easeOutCubic） */
-  sealCurve: 'easeOutCubic';
   /** 错误最小展示时长（ms），取值域 (200, 800) */
   errorMinDuration: number;
   /** 极快成功判定阈值（ms），取值域 (50, 300) — 仅 skipAnimation 策略消费 */
   fastSuccessThreshold: number;
   /**
-   * 极快成功处理策略（默认 minStartPoint）：
-   *   - minStartPoint：收束起点上抬至 minSealStart，再执行完整收束
-   *     —— 验证再快也必然跑完整段进度/加载编排后才交付结果
+   * 极快成功处理策略（默认 fullSeal）：
+   *   - fullSeal：无论多快都执行完整收束动画；收束从当前视觉值连续起步，
+   *     不以任何预设起点抬升制造瞬跳
    *   - skipAnimation：跳过收束动画，立即补满并触发完成事件（会令进度与
    *     加载编排在极快成功时整体消失，结果抢先落地）
    */
-  fastSuccessStrategy: 'skipAnimation' | 'minStartPoint';
-  /** 最小收束起点（minStartPoint 策略使用），取值域 (0, plateau) */
-  minSealStart: number;
+  fastSuccessStrategy: 'skipAnimation' | 'fullSeal';
 }
 
 /** 默认节奏配置（生产环境参数） */
 export const DEFAULT_VERIFY_RHYTHM_CONFIG: Readonly<VerifyRhythmConfig> = {
-  plateau: 0.62,
   softCeiling: 0.985,
-  approachRate: 1.2,
-  plateauReachRatio: 0.95,
-  creepRate: 0.05,
-  visualDamping: 5.5,
+  fakeRiseTau: 7.5,
+  followFrequency: 9.5,
+  floorRate: 0.05,
+  floorGapScale: 0.02,
   sealDuration: 520,
-  sealCurve: 'easeOutCubic',
   errorMinDuration: 400,
   fastSuccessThreshold: 150,
-  fastSuccessStrategy: 'minStartPoint',
-  minSealStart: 0.35,
+  fastSuccessStrategy: 'fullSeal',
 };
 
 /* ================================================================== *
@@ -175,28 +173,24 @@ const clamp01 = (v: number): number => Math.min(Math.max(v, 0), 1);
 
 const clampMs = (v: number): number => Math.min(Math.max(v, 0), DT_CLAMP_MS);
 
-/** 缓出三次曲线：0→0、1→1，前后端斜率趋零 */
-const easeOutCubic = (x: number): number => 1 - Math.pow(1 - x, 3);
-
 /**
- * 解析假进度曲线公式（时间基准为 ACTIVE 起点，单位 s）。
- * 爬升期用指数衰减逼近 plateau；达到 plateau * plateauReachRatio 后
- * 进入封顶期，以极缓蠕变向 softCeiling 逼近（永不到达）。
+ * 假进度速度曲线（时间基准为 ACTIVE 起点，单位 s）。
+ *
+ * Why 以速度而非位置建模：前沿需要在任意时刻都有非零推进速度；
+ * 位置曲线一旦进入平台期速度会衰减到 0，正是阶段空窗视觉停顿的根源。
+ * 这里输出指数衰减的速度，与保底速度取较大者后积分，交接点两者速度
+ * 相等，全段速度连续、无急停。
  */
-function createFakeCurve(config: VerifyRhythmConfig): (tSec: number) => number {
-  // 爬升到 plateau * plateauReachRatio 的时刻可解析求解，
-  // 无需在帧循环里做阶段切换判定
-  const switchAtSec = -Math.log(1 - config.plateauReachRatio) / config.approachRate;
-  const climbEnd = config.plateau * config.plateauReachRatio;
-  const creepSpan = config.softCeiling - climbEnd;
+function createFakeVelocity(config: VerifyRhythmConfig): (tSec: number) => number {
+  const tau = Math.max(0.001, config.fakeRiseTau);
+  const initial = config.softCeiling / tau;
+  return (tSec: number): number => initial * Math.exp(-Math.max(0, tSec) / tau);
+}
 
-  return (tSec: number): number => {
-    if (tSec < switchAtSec) {
-      return config.plateau * (1 - Math.exp(-config.approachRate * tSec));
-    }
-    const t2 = tSec - switchAtSec;
-    return climbEnd + creepSpan * (1 - Math.exp(-config.creepRate * t2));
-  };
+/** 纯假进度位置（仅用于遥测/诊断，不参与前沿推进） */
+function fakeProgressAt(config: VerifyRhythmConfig, tSec: number): number {
+  const tau = Math.max(0.001, config.fakeRiseTau);
+  return config.softCeiling * (1 - Math.exp(-Math.max(0, tSec) / tau));
 }
 
 /** 生产环境默认钩子 */
@@ -250,10 +244,15 @@ function createVerifyRhythm(env: VerifyRhythmEnv, config: VerifyRhythmConfig): V
 
   /* ---- 非响应式内部状态（动画帧热路径，避免响应式开销） ---- */
   let visual = 0;
+  /** 视觉速度（1/s）：与 visual 一起构成二阶状态，保证速度连续 */
+  let velocity = 0;
+  /** 导引前沿（0-1）：真实进度 / 假进度曲线 / 保底推进的上界，单调不减 */
+  let frontier = 0;
   let realDisplay = 0; // 显示真实进度（软上限钳制 + 回退忽略后的单调值）
   let lastReal = 0; // 最近一次真实进度（回退检测）
   let t0 = 0; // ACTIVE 起点（时钟 ms）
   let sealStart = 0; // 收束起点视觉值
+  let sealV0 = 0; // 收束起点视觉速度（1/s，已按单调约束钳制）
   let sealT0 = 0; // 收束起始时刻（时钟 ms）
   let haltT0 = 0; // HALTED 时刻（时钟 ms）
   let frameHandle: number | null = null;
@@ -263,7 +262,7 @@ function createVerifyRhythm(env: VerifyRhythmEnv, config: VerifyRhythmConfig): V
 
   // 直通策略：prefers-reduced-motion 时整体替换动画策略（无假进度/无平滑/瞬发收束）
   const reduced = env.prefersReducedMotion();
-  const fakeAt = createFakeCurve(config);
+  const fakeVelocityAt = createFakeVelocity(config);
 
   const setPhase = (p: VerifyRhythmPhase): void => {
     phaseRef.value = p;
@@ -288,29 +287,99 @@ function createVerifyRhythm(env: VerifyRhythmEnv, config: VerifyRhythmConfig): V
     frameHandle = env.scheduleFrame(tick);
   };
 
-  const stepActive = (now: number, dtMs: number): void => {
+  /**
+   * 推进导引前沿。
+   *
+   * 前沿速度取「假进度速度 / 保底速度」的较大者，再按帧积分；
+   * 真实进度作为硬下限（阶段信号到达时直接抬高前沿）。
+   *
+   * Why：假进度以速度而非位置建模，速度衰减到保底速度后由保底速度
+   * 等速接续；若沿用位置曲线，进入平台期后速度会衰减到接近 0，
+   * 视觉随之停顿，正是阶段空窗顿挫的根源。
+   */
+  const advanceFrontier = (now: number, dtSec: number): number => {
     const tSec = (now - t0) / 1000;
-    const target = Math.max(realDisplay, fakeAt(tSec));
-    const approach = 1 - Math.exp(-config.visualDamping * (dtMs / 1000));
-    visual += (target - visual) * approach;
+    const gap = Math.max(0, config.softCeiling - frontier);
+    /* 距软上限越近推进越克制：常见进度区间保持满速，末段指数收敛。
+     * 指数场使前沿渐近逼近软上限而永不硬停，避免长时间贴住满格。 */
+    const floorRate = config.floorRate * (1 - Math.exp(-gap / config.floorGapScale));
+    /* 速度域取上界后积分：假进度速度与保底速度在交接点相等，
+     * 前沿速度连续变化，不存在「先冲后停」的拐点。 */
+    const speed = Math.max(fakeVelocityAt(tSec), floorRate);
+    frontier = Math.min(
+      config.softCeiling,
+      Math.max(realDisplay, frontier + speed * dtSec),
+    );
+    return speed;
+  };
+
+  /**
+   * ACTIVE 期推进：先推进前沿，再以临界阻尼二阶跟随输出视觉值。
+   *
+   * 帧内把前沿视为常量，对 e'' + 2ωe' + ω²e = 0（e = visual - frontier）
+   * 解析求解：位置与速度都连续，阶段进度集中到达时速度不会逐段归零再
+   * 重建，而是一次连续滑行；同时临界阻尼无过冲，视觉始终不超越前沿。
+   */
+  const stepActive = (now: number, dtMs: number): void => {
+    const dtSec = dtMs / 1000;
+    const frontierSpeed = advanceFrontier(now, dtSec);
+    if (dtSec <= 0) return;
+
+    const w = config.followFrequency;
+    const e = visual - frontier; // 恒 ≤ 0
+    const decay = Math.exp(-w * dtSec);
+    const eNext = (e + (velocity + w * e) * dtSec) * decay;
+    const vNext = (velocity - w * (velocity + w * e) * dtSec) * decay;
+
+    visual = frontier + eNext;
+    velocity = vNext;
+
+    /* 落位保护：视觉抵达前沿后不得归零，跟上前沿速度继续前进
+     * （归零会形成一次可见停顿，正是阶段边界顿挫的来源）。 */
+    if (visual >= frontier) {
+      visual = frontier;
+      velocity = Math.min(velocity, frontierSpeed);
+    }
+    if (visual < 0) {
+      visual = 0;
+      velocity = 0;
+    }
     flushVisual();
   };
 
   const finishSeal = (now: number): void => {
     visual = 1;
+    velocity = 0;
     flushVisual();
     stopLoop();
     setPhase('DONE');
     const totalMs = now - t0;
     const sealMs = now - sealT0;
-    const ceilingTouched = fakeAt((sealT0 - t0) / 1000) >= config.softCeiling - CEILING_TOUCH_EPSILON;
+    const ceilingTouched = fakeProgressAt(config, (sealT0 - t0) / 1000) >= config.softCeiling - CEILING_TOUCH_EPSILON;
     env.report({ kind: 'done', totalMs, sealMs, fastSuccess: false, ceilingTouched });
     resolveComplete();
   };
 
+  /**
+   * 收束期推进：三次 Hermite 曲线。
+   *
+   * 约束：P(0)=sealStart、P'(0)=sealV0、P(1)=1、P'(1)=0。
+   * Why：普通缓出曲线在起点速度突变（视觉先顿一下再冲），而保留起点
+   * 速度的 Hermite 让收束与 ACTIVE 期速度衔接；斜率参数钳制在 [0,3]
+   * 内保证位移单调、不冲过 100%。
+   */
   const stepSealing = (now: number): void => {
+    const durationSec = config.sealDuration / 1000;
     const p = clamp01((now - sealT0) / config.sealDuration);
-    visual = sealStart + (1 - sealStart) * easeOutCubic(p);
+    const delta = Math.max(0, 1 - sealStart);
+    if (delta <= 0 || durationSec <= 0) {
+      finishSeal(now);
+      return;
+    }
+    const alpha = Math.min(3, Math.max(0, (sealV0 * durationSec) / delta));
+    const u2 = p * p;
+    const u3 = u2 * p;
+    visual = sealStart + delta * (3 * u2 - 2 * u3 + alpha * (u3 - 2 * u2 + p));
     flushVisual();
     if (p >= 1) {
       finishSeal(now);
@@ -367,6 +436,8 @@ function createVerifyRhythm(env: VerifyRhythmEnv, config: VerifyRhythmConfig): V
 
     stopLoop();
     visual = 0;
+    velocity = 0;
+    frontier = 0;
     flushVisual();
     realDisplay = 0;
     lastReal = 0;
@@ -399,6 +470,7 @@ function createVerifyRhythm(env: VerifyRhythmEnv, config: VerifyRhythmConfig): V
     if (reduced) {
       // 直通策略：视觉值直接等于显示真实进度，无平滑无假进度
       visual = realDisplay;
+      velocity = 0;
       flushVisual();
       return;
     }
@@ -415,6 +487,7 @@ function createVerifyRhythm(env: VerifyRhythmEnv, config: VerifyRhythmConfig): V
       // 直通策略 / 极快成功 skipAnimation：跳过收束动画，瞬时补满并完成
       stopLoop();
       visual = 1;
+      velocity = 0;
       flushVisual();
       setPhase('DONE');
       env.report({
@@ -422,16 +495,23 @@ function createVerifyRhythm(env: VerifyRhythmEnv, config: VerifyRhythmConfig): V
         totalMs,
         sealMs: 0,
         fastSuccess: fast,
-        ceilingTouched: fakeAt(totalMs / 1000) >= config.softCeiling - CEILING_TOUCH_EPSILON,
+        ceilingTouched: fakeProgressAt(config, totalMs / 1000) >= config.softCeiling - CEILING_TOUCH_EPSILON,
       });
       resolveComplete();
       return;
     }
 
-    sealStart =
-      config.fastSuccessStrategy === 'minStartPoint'
-        ? Math.max(visual, config.minSealStart)
-        : visual;
+    /* 收束从当前视觉值连续起步，不做任何瞬跳抬升：
+     * 快流程也由完整收束动画承担可见编排。 */
+    sealStart = visual;
+    /* 保留 ACTIVE 期末速度，让收束与前方滑行衔接；斜率按单调约束钳制，
+     * 避免过冲 100% 或收束反向。 */
+    const durationSec = config.sealDuration / 1000;
+    const delta = Math.max(0, 1 - sealStart);
+    sealV0 =
+      delta > 0 && durationSec > 0
+        ? Math.min(Math.max(0, velocity), (3 * delta) / durationSec)
+        : 0;
     sealT0 = now;
     setPhase('SEALING');
     maybeStartLoop();

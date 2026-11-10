@@ -117,7 +117,7 @@ int verthys_cng_encrypt(
     *ciphertext_len = encrypted_len;
     return VERTHYS_OK;
 #else
-    /* 非 Windows 平台：返回内部错误（实际项目使用 libsodium 替代） */
+    /* 非 Windows 平台：无 CNG 实现，返回内部错误 */
     (void)plaintext;
     (void)plaintext_len;
     (void)ciphertext;

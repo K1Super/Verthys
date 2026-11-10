@@ -4,8 +4,8 @@
  * 将 backgroundTasks 的启动/停止抽象到独立模块，
  *   供 global-verthys.ts 与 module-auth.ts 及未来组件共享使用。
  *
- * 核心改进（相对 verthys-cache.ts 旧实现）：
- *   1. stopBackgroundTasks 改为 async，await 所有任务实际终止后才返回，
+ * 停止/启动契约：
+ *   1. stopBackgroundTasks 为 async，await 所有任务实际终止后才返回，
  *      杜绝「重置后立即创建新会话，旧后台任务仍在运行访问已释放缓存」的竞态。
  *   2. 任务 Promise 追踪：startBackgroundTasks 记录全部任务 Promise 到
  *      taskPromises 数组，stopBackgroundTasks 通过 Promise.all 等待全部完成。
@@ -71,22 +71,16 @@ const BACKGROUND_SKIP_TYPES: ReadonlySet<number> = new Set([
 ]);
 
 /* ------------------------------------------------------------------ *
- * 项8：后台任务降级常量                                            *
+ * 后台任务降级常量                                                   *
  *                                                                    *
  *  BACKGROUND_START_DELAY_MS：                                       *
  *    解锁成功后等待 UI 完成首屏渲染 + 模块内容加载的延迟时间。        *
- *    性能根治：从 2500ms 提升到 12000ms                           *
  *                                                                    *
- *    原缺陷（2500ms）：                                              *
- *      解锁后 2.5s 即启动后台任务，但此时前端模块内容仍在加载中       *
+ *    约束：启动过早会与前端模块内容加载共用 worker 通道               *
  *      （verthysGetRecord / getRecordsDataB64Batch 等 IPC），           *
- *      后台任务与前端模块加载共用 worker 通道，                       *
  *      后台任务独占 worker 时前端请求排队等待 → 30s 卡顿。            *
  *                                                                    *
- *    修复（12000ms）：                                               *
- *      延迟 12s 启动后台任务，确保前端首屏 + 模块列表 + 模块内容      *
- *      全部加载完成后再启动全量扫描 / 巡检任务。                      *
- *      12s 覆盖：首屏渲染 1-2s + 摘要扫描 1-2s + 模块内容加载 2-3s    *
+ *    12000ms 覆盖：首屏渲染 1-2s + 摘要扫描 1-2s + 模块内容加载 2-3s  *
  *      + 用户浏览/切换模块的初始交互窗口 5-6s。                       *
  *      配合 yieldIfFrontendBusy 门控，前端活跃时后台任务主动让出。    *
  * ------------------------------------------------------------------ */
@@ -95,15 +89,12 @@ const BACKGROUND_START_DELAY_MS = 12000;
 /* ------------------------------------------------------------------ *
  * 后台任务状态与取消控制器                                              *
  *                                                                    *
- * stopBackgroundTasks 改为 async，等待所有任务完全终止           *
- *   旧实现 stopBackgroundTasks 为同步函数，仅设置取消标志不等待任务实际 *
- *   终止。重置后立即创建新会话，旧后台任务可能仍在运行，访问已释放的    *
- *   缓存或监听器，引发竞态。                                          *
- *                                                                    *
- * 新实现：                                                            *
- *   - taskPromises 追踪所有已启动任务的 Promise                       *
- *   - stopBackgroundTasks 设置取消标志后 await Promise.all(taskPromises)*
- *   - 确保所有任务检查 cancelled 标志后退出才返回                     *
+ * 异步停止契约：                                                      *
+ *   1. taskPromises 追踪所有已启动任务的 Promise                      *
+ *   2. stopBackgroundTasks 设置取消标志后 await Promise.all(taskPromises)
+ *   3. 所有任务检查 cancelled 标志后退出才返回                         *
+ *   不等待实际终止会让旧任务在新会话中访问已释放的缓存或监听器，      *
+ *   引发竞态。                                                        *
  * ------------------------------------------------------------------ */
 
 /** 后台任务运行状态（防止重复启动） */
@@ -118,10 +109,10 @@ let taskPromises: Promise<void>[] = [];
 /** 后台任务总体完成 Promise（stopBackgroundTasks await 此对象） */
 let allTasksCompletion: Promise<void> = Promise.resolve();
 
-/* 记录类型优先级已移至 constants/record_types.ts 统一管理
- * 修复：原硬编码 [0x01,0x02,0x04,0x03] 使用 C 层规范值，
- *   与前端实际存储类型不匹配，导致预加载永远查不到账户/证书/文件记录。
- *   现从 record_types.ts 导入 TYPE_PRIORITY（引用实际常量值）。
+/* 记录类型优先级由 constants/record_types.ts 统一管理：
+ * C 层规范值 [0x01,0x02,0x04,0x03] 与前端实际存储类型不匹配，
+ * 直接使用会导致预加载永远查不到账户/证书/文件记录，
+ * 故一律引用 TYPE_PRIORITY（实际常量值）。
  */
 
 /* ------------------------------------------------------------------ *
@@ -169,20 +160,19 @@ export async function startBackgroundTasks(): Promise<void> {
   taskPromises = [];
 
   /**
-   * 项8：延迟启动策略
+   * 延迟启动策略
    *
    * 解锁成功后立即启动后台任务会与 UI 首屏渲染争抢 CPU，
-   * 导致解锁后前 10 秒的间歇性卡顿（列表渲染 / 视差动画 / 交互反馈）。
+   * 导致解锁后前 10 秒的间歇性卡顿（列表渲染 / 动效 / 交互反馈）。
    *
-   * 延迟 2.5s 启动让首屏列表渲染 / 视差动画 / 交互反馈先完成，
+   * 延迟启动让首屏列表渲染与交互反馈先完成，
    * 用户感知为「解锁后立即流畅，后台默默工作」。
    *
    * 延迟期间若被取消（lockAll 触发），不再启动任何任务。
    *
-   * 修复：startGate 必须响应 cancelled 标志
-   *   原实现：纯 setTimeout，lockAll 时任务卡在 startGate 上 12s，
-   *   stopBackgroundTasks 的 3s 超时等不到任务退出
-   *   修复：用轮询检查 cancelled，检测到立即 resolve，startGate 立即放行
+   * 启动门必须响应 cancelled 标志：纯 setTimeout 会让 lockAll 时任务
+   * 卡在 startGate 上 12s，stopBackgroundTasks 的超时窗口等不到任务退出；
+   * 故以轮询检查 cancelled，检测到立即 resolve。
    */
   const startGate = new Promise<void>((resolve) => {
     const elapsed = { value: 0 };
@@ -197,10 +187,10 @@ export async function startBackgroundTasks(): Promise<void> {
   });
 
   /**
-   * 任务一：解析完整数据索引（旧 recordScanCache 作为长期加速兜底）
+   * 任务一：解析完整数据索引（作为长期加速兜底）
    * 不阻塞：失败静默，summaryCache 已支撑 UI。
-   * 项8：延迟 12s 启动，避免与首屏渲染 + 模块内容加载争抢 worker 通道。
-   * 性能根治：启动前 yieldIfFrontendBusy，前端活跃时让出 worker 通道。
+   * 延迟 12s 启动，避免与首屏渲染 + 模块内容加载争抢 worker 通道。
+   * 启动前经 yieldIfFrontendBusy 门控，前端活跃时让出 worker 通道。
    */
   if (!controller.cancelled) {
     const scanTask = startGate
@@ -218,8 +208,8 @@ export async function startBackgroundTasks(): Promise<void> {
   /**
    * 任务二：预加载可见区域记录（首批各类型前 20 条）
    * 从 summaryCache 取首批 ID，通过 prefetchFullRecords 后台解密填入 fullRecordCache。
-   * 项8：延迟 12s 启动，避免与首屏渲染 + 模块内容加载争抢 worker 通道。
-   * 性能根治：启动前 yieldIfFrontendBusy，前端活跃时让出 worker 通道。
+   * 延迟 12s 启动，避免与首屏渲染 + 模块内容加载争抢 worker 通道。
+   * 启动前经 yieldIfFrontendBusy 门控，前端活跃时让出 worker 通道。
    */
   if (!controller.cancelled) {
     const visibleIds = await collectVisibleRecordIds(20);
@@ -241,8 +231,8 @@ export async function startBackgroundTasks(): Promise<void> {
    * 任务三：完整性巡检（基于 merkle_leaf）
    * 遍历 summaryCache 中所有记录，校验可读性。
    * 发现损坏仅记录警告，不阻塞 UI（单条损坏不影响整体）。
-   * 项8：延迟 12s 启动，避免与首屏渲染 + 模块内容加载争抢 worker 通道。
-   * 性能根治：integrityPatrol 内部每条 verthysGetRecord 前 yieldIfFrontendBusy。
+   * 延迟 12s 启动，避免与首屏渲染 + 模块内容加载争抢 worker 通道。
+   * integrityPatrol 内部每条 verthysGetRecord 前经 yieldIfFrontendBusy 门控。
    */
   if (!controller.cancelled) {
     const patrolTask = startGate
@@ -270,34 +260,24 @@ export async function startBackgroundTasks(): Promise<void> {
 }
 
 /**
- * 停止后台任务并等待所有任务完全终止。
+ * 停止后台任务并等待所有任务终止。
  *
- * 旧实现为同步函数，仅设置取消标志不等待任务实际终止。
- * 重置后立即创建新会话，旧后台任务可能仍在运行，访问已释放的缓存或监听器，引发竞态。
- *
- * 新实现：
+ * 契约：
  *   1. 设置 controller.cancelled = true（通知所有任务在下一个检查点退出）
- *   2. await allTasksCompletion（等待所有任务 Promise 完成）
- *   3. 确保 taskPromises 已清空，杜绝残留
+ *   2. 最多等待 STOP_TIMEOUT_MS 让任务在检查点退出
+ *   3. 超时后强制清理状态（taskPromises / allTasksCompletion），不再等待
+ *   4. 残留任务 Promise 在后台继续运行，但 cancelled=true 确保它们在下个检查点退出
+ *   5. worker 销毁（verthysLock / workerDestroy）会强制终止所有在途 IPC，彻底清理残留
  *
- * 修复：限制最大等待时间，防止"正在停止后台任务"卡死
- *
- * 原缺陷：
- *   stopBackgroundTasks 无超时上限地 await allTasksCompletion。
- *   后台任务可能卡在以下位置，导致 stopBackgroundTasks 长时间不返回：
- *     a) startGate setTimeout(12000)：解锁后 12s 内 lockAll，任务卡在延迟启动门
+ * 超时上限的必要性：
+ *   任务可能卡在以下位置，导致本函数长时间不返回：
+ *     a) startGate（BACKGROUND_START_DELAY_MS）：解锁后 12s 内 lockAll，任务卡在延迟启动门
  *     b) yieldIfFrontendBusy：前端活跃时无限让出
  *     c) verthysGetRecord IPC：在途 IPC 无法中断
  *     d) setTimeout 片间让出（巡检 50ms）
  *   security-session.ts 的 withStepTimeout(stopBackgroundTasks(), 10000) 超时后
  *   Promise.race 仅 resolve 当前调用，后台任务 Promise 仍在运行，继续占用 worker
  *   通道，与后续 lockAll 步骤争抢资源，用户感知"停止后台任务时间过长"。
- *
- * 修复：
- *   1. 设置取消标志后，最多等待 1500ms 让任务在检查点退出
- *   2. 超时后强制清理状态（taskPromises/allTasksCompletion），不再等待
- *   3. 残留任务 Promise 在后台继续运行，但 cancelled=true 确保它们在下个检查点退出
- *   4. worker 销毁（verthysLock / workerDestroy）会强制终止所有在途 IPC，彻底清理残留任务
  *
  * @returns Promise<void>，resolve 时表示已尽力停止后台任务（不保证全部实际终止）
  */
@@ -309,8 +289,8 @@ export async function stopBackgroundTasks(): Promise<void> {
   //    任务在检查点（每次循环开始）校验 cancelled，正常在数十毫秒内退出；
   //    仅当某任务卡在不可中断的在途 IPC（verthysGetRecord / 扫描）时才等满上限。
   //    超时后强制清理状态，残留任务由随后的 verthysLock / workerDestroy
-  //    销毁 worker 强制终止在途 IPC——故上限无需留 3s，收紧至 1500ms
-  //    即可，避免退出路径被无谓拖长。
+  //    销毁 worker 强制终止在途 IPC——故上限取 1500ms，
+  //    避免退出路径被无谓拖长。
   const STOP_TIMEOUT_MS = 1500;
   try {
     await Promise.race([
@@ -347,7 +327,7 @@ export function isBackgroundTasksRunning(): boolean {
 /**
  * 收集各类型前 N 条记录 ID（用于预加载可见区域）。
  *
- * 只取轻量记录类型：MB 级载荷类记录（见 BACKGROUND_SKIP_TYPES）跳过，
+ * 只取轻量记录类型：MB 级载荷类记录（BACKGROUND_SKIP_TYPES）跳过，
  * 由各自的按需读取路径承担；其余类型按 TYPE_PRIORITY 顺序取前 N 条。
  *
  * @param perType 每种类型取前 N 条

@@ -56,9 +56,6 @@ $env:VERTHYS_E2E_ROTATE_RESULT = $resultPath
 
 # 隔离 C 层跨进程状态：lockout / rollback / 设备源状态位于
 # %LOCALAPPDATA%\Verthys，不隔离时连续门禁复跑与攻击回归会互相污染。
-# 实测根因：rollback.state 的锚点表写满 64 条后新库登记失败；create 失败
-# 路径曾先删文件后关句柄，DeleteFileW 失败并把错误改写为 IO，worker 再把
-# IO 统一成 AUTH（与 worker-smoke 的隔离口径一致）。
 $oldLocalAppData = $env:LOCALAPPDATA
 $isoLocalAppData = Join-Path $sandbox 'localappdata'
 New-Item -ItemType Directory -Path $isoLocalAppData -Force | Out-Null

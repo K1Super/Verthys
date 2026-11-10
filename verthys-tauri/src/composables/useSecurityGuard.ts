@@ -4,8 +4,6 @@
  * 职责：
  *   - 禁用右键菜单、文本选中、开发者工具快捷键
  *   - dev 环境自动关闭拦截，便于调试
- *
- *   全局前端安全拦截抽离，支持开发/生产环境开关
  */
 
 import { onMounted, onBeforeUnmount } from "vue";

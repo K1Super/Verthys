@@ -1,7 +1,7 @@
 /*
  * core/frontend-ipc-priority.ts — 前端 IPC 优先级门控
  *
- * 模块加载性能根治设计：消除 worker 单线程串行 FIFO 队头阻塞
+ * 模块加载性能设计：消除 worker 单线程串行 FIFO 队头阻塞
  *
  * 问题根因：
  *   worker 是单例常驻进程，Actor 单消费者 + mpsc FIFO 队列（容量 32），无优先级、无抢占。
@@ -90,14 +90,13 @@ function isFrontendIpcBusy(): boolean {
  *   - 前端活跃 → 循环 await setTimeout(200ms) 让出，直到前端空闲
  *   - 前端空闲 → 立即返回（零开销）
  *
- * 修复：限制最大让出次数，防止 lockAll 期间无限让出
+ * 让出次数上限：防止 lockAll 期间无限让出
  *
- * 原缺陷：
- *   lockAll 期间前端持续 IPC（waitForFlush / verthysClearGlobalKey / verthysLockPersist 等），
- *   isFrontendIpcBusy() 持续返回 true，yieldIfFrontendBusy 无限循环让出。
- *   stopBackgroundTasks 的 3s 超时等不到任务退出，用户感知"停止后台任务时间过长"。
+ * lockAll 期间前端持续 IPC（waitForFlush / verthysClearGlobalKey / verthysLockPersist 等），
+ * isFrontendIpcBusy() 持续返回 true，若无上限会无限循环让出，
+ * stopBackgroundTasks 的超时窗口等不到任务退出，用户感知"停止后台任务时间过长"。
  *
- * 修复：
+ * 上限约束：
  *   限制最大让出次数（MAX_YIELD_ROUNDS=10，即最多让出 2s），
  *   超过限制后强制返回，调用方在 yield 后检查 cancelled 会立即退出。
  *

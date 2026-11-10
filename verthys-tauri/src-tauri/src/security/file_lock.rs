@@ -1,13 +1,13 @@
 /*
  * file_lock.rs — 独占锁与防并发 + 私有目录 ACL 隔离
  *
- * 修复要点：
- *   1. 修正 ACL 策略：移除 Everyone Deny All 致命缺陷，改用仅允许 ACE 重置 DACL
+ * 要点：
+ *   1. ACL 策略：仅用允许 ACE 重置 DACL，不含 Everyone Deny All
  *   2. VerthysFileLock 手动实现 Send/Sync，确保 Windows 下编译通过
- *   3. Drop 中引入错误日志与备用解锁逻辑
- *   4. 使用安全包装的 SID 操作，消除指针类型强转隐患
+ *   3. Drop 中记录解锁/关闭错误并尝试备用解锁
+ *   4. 使用安全包装的 SID 操作，避免指针类型强转
  *   5. 设计锁管理器，支持原子锁升级（共享→独占）
- *   6. 全面引入审计日志，建立文件操作的可追溯性
+ *   6. 文件操作写入审计日志，保持可追溯性
  */
 
 use std::ptr;
@@ -205,7 +205,7 @@ fn last_error_str() -> String {
 /* ==================================================================== *
  *  安全 SID 包装类型                               *
  *                                                                        *
- *  消除 Vec<u8> 指针强转隐患，提供类型安全的 PSID 访问。                *
+ *  避免 Vec<u8> 指针强转，提供类型安全的 PSID 访问。                    *
  *  SidToken 持有连续内存，as_ptr() 返回 *const u8 供 Windows API 使用。 *
  * ==================================================================== */
 #[cfg(target_os = "windows")]
@@ -444,9 +444,8 @@ impl VerthysFileLock {
     }
 }
 
-/// Drop 中引入错误日志与备用解锁逻辑
+/// Drop 中的解锁与句柄关闭处理
 ///
-/// 修复原实现完全忽略解锁和句柄关闭错误的问题：
 /// - UnlockFile 失败时记录包含 GetLastError() 的错误日志
 /// - 无论解锁成功与否，都执行 CloseHandle 并记录错误
 /// - 日志不含明文路径（仅用句柄值标识）
@@ -525,15 +524,14 @@ impl Drop for VerthysFileLock {
 }
 
 /* ==================================================================== *
- *  修正 ACL 策略                                    *
+ *  ACL 策略                                          *
  *                                                                        *
- *  致命缺陷修复：移除 Everyone Deny All 条目                             *
+ *  不创建 Everyone Deny All 条目：                                       *
  *                                                                        *
- *  原实现构建了 Everyone 的 DENY_ACCESS 条目，Windows ACL 评估机制是     *
- *  拒绝优先于允许，导致所有用户（包括所有者）的所有访问被拒绝，          *
- *  目录变为不可恢复的"死目录"。                                         *
+ *  Windows ACL 评估机制是拒绝优先于允许，Everyone Deny All 会拒绝所有    *
+ *  用户（包括所有者）的全部访问，使目录变为不可恢复的"死目录"。         *
  *                                                                        *
- *  正确的加固逻辑：                                                      *
+ *  加固逻辑：                                                            *
  *  1. 获取目录当前的 DACL，备份它（以便失败回滚）                       *
  *  2. 构建仅包含所需主体的允许 ACE：                                    *
  *     - 当前用户完全控制                                                *
@@ -617,8 +615,7 @@ pub fn harden_private_dir(dir: &str) -> Result<(), String> {
         ea[2].trustee.trustee_form = TRUSTEE_IS_SID;
         ea[2].trustee.ptstr_name = system_sid.as_ptr() as *const u16;
 
-        /* 关键修复：
-         * 不再创建 Everyone Deny All 条目！
+        /* 不创建 Everyone Deny All 条目：
          * SetNamedSecurityInfoW 设置 DACL_SECURITY_INFORMATION 会替换整个 DACL，
          * 未在 ACL 中列出的主体隐式被拒绝（空白拒绝），无需显式 Deny 条目。 */
 

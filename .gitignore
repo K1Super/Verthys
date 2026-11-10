@@ -46,3 +46,10 @@ compile_commands.json
 *.idx_cache
 *.verthys.d/
 
+# 安装器资源由生产构建脚本生成
+verthys-tauri/src-tauri/service-payload/
+
+# Python 缓存
+__pycache__/
+*.pyc
+

@@ -29,7 +29,7 @@
  *
  * .vsec 节布局（128 字节，只读节，由构建脚本在链接后补丁）：
  *   [0..3]   magic   = 0x43534556 ('VESV' 小端)
- *   [4..5]   version = 0x0002（版本 2：新增 .rhat 第三槽）
+ *   [4..5]   version = 0x0002（版本 2：含 .rhat 第三槽）
  *   [6..7]   flags   = 0（预留）
  *   [8..39]  HMAC(.text 文件内容)
  *   [40..71] HMAC(.rdata 文件内容)
@@ -37,7 +37,7 @@
  *   [104..127] 保留全零
  *
  * 全零节 = 未配置（开发构建）→ 验签跳过。构建脚本以相同域密钥补丁本节。
- * 版本兼容：version==1 仅校验 text+rdata（旧脚本产物）；version>=2 追加
+ * 版本兼容：version==1 仅校验 text+rdata（版本 1 产物）；version>=2 追加
  * .rhat 槽——.rhat 节缺失（理论上不可达，runtime_hash.c 恒编入）按
  * 基础设施异常跳过该槽，text/rdata 槽照常校验。
  */
@@ -55,7 +55,7 @@
 __declspec(allocate(".vsec"))
 const uint8_t g_vsec_blob[VSEC_BLOB_BYTES] = { 0 };
 
-/* 域密钥：与 build_core.release.ps1 中的补丁密钥保持逐字节一致（非秘密） */
+/* 域密钥：与构建期补丁工具的密钥逐字节一致（非秘密） */
 static const uint8_t K_VSEC_DOMAIN_KEY[VERTHYS_KEY_BYTES] = {
     'v', 'e', 'r', 't', 'h', 'y', 's', '/', 'v', 's', 'e', 'c', '-', 'v', '1', '/',
     0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15,

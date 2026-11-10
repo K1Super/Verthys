@@ -70,6 +70,29 @@ Var VerthysFreshInstall
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  ; 机器密钥材料保护：container.secret 由 DPAPI 绑定当前用户，是打开既有
+  ; 加密库的设备槽密钥材料。应用数据目录会在勾选 “Delete the application
+  ; data” 时被整目录删除，因此必须在删除前把它转移到不受卸载影响的
+  ; %LOCALAPPDATA%\Verthys\KeyMaterial；复制失败即中止卸载，宁可保留安装，
+  ; 也不让用户的加密库永久无法打开。
+  SetShellVarContext current
+  ${IfNot} ${FileExists} "$LOCALAPPDATA\Verthys\KeyMaterial\container.secret"
+    ${If} ${FileExists} "$LOCALAPPDATA\com.verthys.app\container.secret"
+      CreateDirectory "$LOCALAPPDATA\Verthys\KeyMaterial"
+      CopyFiles /SILENT "$LOCALAPPDATA\com.verthys.app\container.secret" "$LOCALAPPDATA\Verthys\KeyMaterial\container.secret"
+      ${IfNot} ${FileExists} "$LOCALAPPDATA\Verthys\KeyMaterial\container.secret"
+        MessageBox MB_ICONSTOP|MB_OK "无法保留本机密钥材料，卸载已中止，以免已有加密库永久无法打开。请检查磁盘空间与权限后重试。" /SD IDOK
+        SetErrorLevel 5
+        Quit
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+
+  ; 勾选删除应用数据时明确告知：应用数据会删除，但密钥材料必须保留。
+  ${If} $DeleteAppDataCheckboxState = 1
+    MessageBox MB_ICONINFORMATION|MB_OK "应用数据将被删除；为保护已有加密库，本机密钥材料会保留在 %LOCALAPPDATA%\Verthys\KeyMaterial。" /SD IDOK
+  ${EndIf}
+
   ; 先停服务并清理机器状态；失败时立即中止，应用文件尚未删除。
   nsExec::ExecToStack '"$INSTDIR\service-payload\VerthysSecuritySvc.exe" /uninstall /quiet'
   Pop $0

@@ -1,5 +1,5 @@
 /*
- * test_machine_state.c — U3/U4/U5/U6/U6b/U10：令牌桶与每用户配额
+ * test_machine_state.c — 令牌桶与每用户配额
  */
 #include "test_common.h"
 #include "machine_state.h"

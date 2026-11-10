@@ -3,7 +3,7 @@
  *
  *
  * 职责：
- *   文件系统命令不再接收前端传入的路径，改为逻辑标识符：
+ *   文件系统命令只接受逻辑标识符，不接收前端传入的路径：
  *     "verthys_dir"  → app_config_dir（.verthys 文件所在目录）
  *     "temp_dir"   → app_config_dir/tmp（临时文件目录）
  *     "data_dir"   → app_config_dir（应用数据根目录）
@@ -14,16 +14,6 @@
  */
 
 use tauri::Manager;
-
-/* ====================================================================== *
- *  路径白名单解析                                           *
- *                                                                        *
- *  文件系统命令不再接收前端传入的路径，改为逻辑标识符：                    *
- *    "verthys_dir"  → app_config_dir（.verthys 文件所在目录）                 *
- *    "temp_dir"   → app_config_dir/tmp（临时文件目录）                    *
- *    "data_dir"   → app_config_dir（应用数据根目录）                      *
- *  install_dir 从 current_exe().parent() 获取，不信任前端输入。            *
- * ====================================================================== */
 
 /// 逻辑路径标识符
 pub(super) const LOGICAL_VERTHYS_DIR: &str = "verthys_dir";

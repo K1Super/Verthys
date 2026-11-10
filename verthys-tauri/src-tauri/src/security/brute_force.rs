@@ -2,11 +2,11 @@
  * brute_force.rs — 登录暴力拦截（熔断机制）
  *
  * 机制边界：
- *   1. 仅保留锁定级：连续失败达到阈值即锁定一段时间，无清空/索引销毁级。
+ *   1. 仅锁定级：连续失败达到阈值即锁定一段时间，无清空/索引销毁级。
  *   2. total_failures 是审计计数：只增不减（饱和），不参与任何闸门判定。
  *   3. 尝试门禁在认证之前执行：按口令域（unlock / global_key / derive）
  *      限制最小尝试间隔；check() 为纯查询，供前端展示，不消耗尝试额度。
- *   4. 每次认证失败都计数（不再有“限流吞掉计数”）；认证成功无条件重置
+ *   4. 每次认证失败都计数（限流不吞掉失败计数）；认证成功无条件重置
  *      连续失败与锁定，累计审计计数保留。
  *   5. 持久化由调用方（security_commands::persistence）用 DPAPI 加密完成，
  *      本模块只负责状态导入导出。
@@ -25,7 +25,7 @@ const DEFAULT_LOCK_JITTER_SECS: u64 = 120;
 /// 同一口令域的最小尝试间隔：1 秒
 const DEFAULT_RATE_LIMIT_MS: u64 = 1000;
 
-/// 持久化状态结构版本：2 = 取消清空级（旧文件缺省为 1）
+/// 持久化状态结构版本：2
 pub const STATE_SCHEMA_VERSION: u32 = 2;
 
 /* ==================================================================== *
@@ -332,7 +332,7 @@ impl BruteForceGuard {
 
     /// 导入暴力拦截状态（从 DPAPI 解密后恢复）
     ///
-    /// 只接受当前 schema：旧版本文件不再支持，反序列化失败时由上层丢弃。
+    /// 只接受当前 schema，其他版本反序列化失败时由上层丢弃。
     pub fn import_state(&self, persisted: &BruteForcePersistedState) {
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_every_failure_counts_despite_rate_limit() {
-        /* 尝试节流只限制调用入口，不再吞掉失败计数 */
+        /* 尝试节流只限制调用入口，不吞掉失败计数 */
         let guard = BruteForceGuard::with_config(BruteForceConfig {
             rate_limit_ms: 500,
             ..Default::default()

@@ -9,8 +9,8 @@
 # Consumers (build scripts, dev launcher) read this contract instead of
 # guessing generator-specific output layouts (Ninja single-config outputs
 # build\core\verthys.dll; Visual Studio multi-config outputs
-# build\core\Release\verthys.dll). Guessing wrong previously degraded the
-# DLL integrity hash to None and broke the material gates.
+# build\core\Release\verthys.dll). Guessing wrong degrades the DLL integrity
+# hash to None and breaks the material gates.
 #
 # Note: keep this file ASCII-only (no localized characters) so PowerShell 5.1
 # parses it under any ANSI code page.

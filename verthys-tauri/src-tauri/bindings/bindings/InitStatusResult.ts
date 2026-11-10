@@ -2,21 +2,19 @@
 import type { InitStatus } from "./InitStatus";
 
 /**
- * 初始化状态查询结果（使用 InitStatus 枚举）
+ * 初始化状态查询结果
  *
- * 当前保留 status: String 字段（向后兼容），
- * 新增 status_enum: Option<InitStatus> 字段供前端渐进迁移。
- * 后续移除 status 字段，统一使用 status_enum。
+ * status 为字符串形式，status_enum 为类型安全枚举，两者并存以保持兼容。
  */
 export type InitStatusResult = { 
 /**
- * 状态字符串（向后兼容，待移除）
+ * 状态字符串（取值见下）
  *
  * 取值："none" | "ready" | "broken" | "initializing" | "maintenance"
  */
 status: string, 
 /**
- * 状态枚举（类型安全，后续替代 status 字段）
+ * 状态枚举（类型安全形式）
  */
 status_enum?: InitStatus, 
 /**

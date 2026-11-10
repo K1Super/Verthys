@@ -4,7 +4,7 @@
  * 并把公开参数透传前端。分片密钥（MDEK）只存在于 C 层句柄内；本层
  * 请求/响应不含任何原始密钥。
  *
- * 模块解锁/锁定在 语义下是 C 层 M1 状态机操作：
+ * 模块解锁/锁定在 C 层是 M1 状态机操作：
  *   - 模块未启用 → MDEK 在 Keyring，内容路径可用，解锁为幂等空操作；
  *   - 模块已启用 → 必须把模块口令交给 C 层解锁 user 槽；
  *   - 锁定 → 清空 C 层模块会话缓存（不涉及口令）。
@@ -245,6 +245,35 @@ pub async fn verthys_module_open(
     module_seal_open(
         app, state, module, kind, data, salt, file_hash, seq, total, wrapped_key, password, false,
     )
+}
+
+/// 外层信封探测：只验证内容记录能否被当前模块密钥解封。
+///
+/// 供损坏扫描使用：不要求文件口令、不校验布局种类标签，因此
+/// “带独立密码的文件”也能在不输入口令的情况下判断外层是否损坏。
+/// 返回 ok 表示外层完整；AUTH 表示确定损坏；LOCKED/POLICY 表示不可判定。
+#[tauri::command]
+pub async fn verthys_module_probe_outer(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    module: String,
+    data: Option<String>,
+) -> Result<VerthysResponse, String> {
+    const OP: &str = "module_probe_outer";
+    if let Err(msg) = require_unlocked(&app, &state, OP) {
+        return Ok(VerthysResponse::err(OP, &msg));
+    }
+    ensure_module(&module)?;
+
+    let data = data.unwrap_or_default();
+    ensure_data_len(&data, false)?;
+
+    let req = json!({
+        "op": OP,
+        "module": module,
+        "data": data,
+    });
+    forward(&state, &req, CRYPT_OP_TIMEOUT)
 }
 
 #[allow(clippy::too_many_arguments)]

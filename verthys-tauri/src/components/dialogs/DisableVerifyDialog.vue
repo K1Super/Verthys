@@ -1,16 +1,11 @@
 ﻿<!--
   DisableVerifyDialog.vue — 关闭密钥保护验证弹窗
-  来源：SecurityCenter.vue 原 L166-L186（零行为变更提取）
 
   职责：
     1. 弹窗标题含模块名拼接（关闭「xxx」密钥保护）
     2. 提示文案（关闭后模块解除密钥访问限制，操作需核验独立密钥）
     3. 模块独立密钥输入框（disableVerifyKey，v-model 双向绑定）
     4. 确认关闭按钮（禁用条件：disableVerifyKey 为空 / 处理中）
-
-  Props: show / moduleLabel / disableVerifyProcessing
-  Model: disableVerifyKey
-  Emits: close / confirm
 -->
 <template>
   <CosmicOverlay :show="show" width="440px" :backdrop-close="!disableVerifyProcessing" @close="$emit('close')">

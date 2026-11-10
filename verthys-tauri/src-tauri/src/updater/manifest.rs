@@ -388,7 +388,7 @@ pub(crate) fn configured_channel(app: &AppHandle) -> Result<String, UpdaterError
 /// 是否显式允许明文更新传输。
 ///
 /// 该开关只影响非本机渠道能否使用 http；开启后仍需通过主机白名单、大小、
-/// 哈希、签名与 PE 版本校验，传输层加密不再是准入前提。
+/// 哈希、签名与 PE 版本校验，传输层加密不作为准入前提。
 pub(crate) fn insecure_transport(app: &AppHandle) -> bool {
     app.config()
         .plugins
@@ -532,7 +532,7 @@ pub fn audit_config(app: &AppHandle) -> Result<(), UpdaterError> {
                 return Err(config_invalid("本机 HTTP 端点未开启明文传输许可"));
             }
         } else {
-            // 默认仍要求 https；只有显式开启明文许可时才接受 http，允许零成本
+            // 默认要求 https；只有显式开启明文许可时才接受 http，允许零成本
             // 自建分发（公网 IP 或内网 IP）而不引入域名与证书成本。
             if url.scheme() != "https" && !(url.scheme() == "http" && insecure) {
                 return Err(config_invalid(
@@ -544,7 +544,7 @@ pub fn audit_config(app: &AppHandle) -> Result<(), UpdaterError> {
             }
         }
     }
-    // Authenticode 仅校验配置结构，不再作为生产准入条件：更新完整性由清单
+    // Authenticode 仅校验配置结构，不作为生产准入条件：更新完整性由清单
     // 签名、安装包签名、SHA256 与 PE 版本共同保证，系统签名按需开启。
     let _ = authenticode_config(app)?;
     Ok(())

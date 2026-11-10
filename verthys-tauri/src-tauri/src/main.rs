@@ -17,9 +17,9 @@
  * 严格禁止：在入口函数内编写加解密、文件I/O、网络通信、数据解析转换等具体算法实现
  *
  * 入口实现要点：
- *   - 删除 LOCALAPPDATA/APPDATA set_var，改用 Tauri app_data_dir + 受信 --data-dir
+ *   - 数据目录经 Tauri app_data_dir 与受信 --data-dir 解析，不写 LOCALAPPDATA/APPDATA
  *   - current_exe().parent() 取代 current_dir()
- *   - portable_mode Cargo feature + 删除 VERTHYS_SANDBOX_REDIRECT 读取
+ *   - portable_mode Cargo feature 启用时使用 <exe_dir>/data；不读取 VERTHYS_SANDBOX_REDIRECT
  *   - --mode worker|ui|inspector 派发
  *   - 第一行安装 install_minimal panic hook
  *   - run() 前打开 stderr 早期日志
@@ -60,7 +60,7 @@ fn main() {
     // Worker 模式跳过 WebView 初始化，仅分配必要的 IPC 资源，缩小受攻击面。
     let mode = parse_mode_from_args(&args);
 
-    // ===== 已删除 LOCALAPPDATA/APPDATA set_var =====
+    // ===== 数据目录解析：不写 LOCALAPPDATA/APPDATA =====
     // 数据目录解析由 lib.rs 内的 AppPaths::resolve() 完成：
     //   1. --data-dir 命令行参数（受信，已校验绝对路径）
     //   2. portable_mode Cargo feature → <exe_dir>/data

@@ -64,8 +64,8 @@ const onBackdrop = () => {
 };
 
 /* ===== 模态语义：焦点陷阱 + Esc 关闭 + 焦点归还 =====
- * 旧实现仅有视觉遮罩：键盘 Tab 可穿透到背景页面，Esc 无响应，
- * 关闭后焦点丢失到 body —— 读屏与键盘用户无法完成弹窗交互闭环。 */
+ * 仅视觉遮罩无法完成键盘与读屏交互闭环：Tab 会穿透到背景页面，Esc 无
+ * 响应，关闭后焦点丢失到 body。 */
 const hostRef = ref<HTMLElement | null>(null);
 let prevFocus: HTMLElement | null = null;
 

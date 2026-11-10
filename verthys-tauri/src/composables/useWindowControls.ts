@@ -6,15 +6,15 @@
  *   2. 关闭流程：后端隐藏窗口 + 前端异步清理 + exit(0)
  *   3. 窗口拖动：data-tauri-drag-region 的增强备用路径
  *
- * 关闭响应优化（根治"关闭按钮延迟数秒"）：
+ * 关闭响应优化（避免"关闭按钮延迟数秒"）：
  *
- *   旧实现根因：
+ *   延迟根因：
  *     前端 `await getCurrentWindow().hide()` 为 IPC 往返调用。
  *     后端事件循环繁忙（verthys 操作 / background_patrol / lock_monitor）时，
- *     hide() 的 IPC 消息被排队，窗口实际隐藏延迟数秒。
- *     用户点击关闭按钮后看到窗口迟迟不消失，体验极差。
+ *     hide() 的 IPC 消息被排队，窗口实际隐藏延迟数秒，
+ *     用户点击关闭按钮后看到窗口迟迟不消失。
  *
- *   新实现架构（窗口隐藏下沉至 Rust 后端，零 IPC 延迟）：
+ *   当前架构（窗口隐藏下沉至 Rust 后端，零 IPC 延迟）：
  *     1. 用户点击关闭按钮 / Alt+F4 → window.close() → 触发后端 CloseRequested
  *     2. 后端 on_window_event 直接调用 window.hide()（Rust 原生 Win32 调用，微秒级）
  *        + api.prevent_close()（阻止 WebView 销毁，保留 JS 引擎供 lockAll 执行）
@@ -48,7 +48,7 @@ let isClosing = false;
 
 /**
  * 统一退出策略：exit(0) 优先，3 秒超时或失败后降级 destroy。
- * 无论来源（按钮点击 / 系统事件），退出方式保持一致，确保进程彻底清理。
+ * 无论来源（按钮点击 / 系统事件），退出方式保持一致，确保进程完整清理。
  */
 async function exitWithFallback(): Promise<void> {
   try {

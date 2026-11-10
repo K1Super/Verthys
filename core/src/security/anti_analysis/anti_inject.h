@@ -61,10 +61,10 @@ int anti_inject_check_apc(void);
 int anti_inject_check_window_hook(void);
 
 /*
- * 模块白名单巡检。
+ * 模块信任巡检。
  * 遍历当前进程已加载的模块列表，验证：
- *   1. 模块路径在安装目录或系统目录下
- *   2. 模块具有有效数字签名（Authenticode）
+ *   1. 模块具有有效数字签名（Authenticode）即信任
+ *   2. 无签名时，模块路径必须位于安装目录或系统目录下
  * 发现未知模块时返回位掩码（INJECT_THREAT_UNKNOWN_DLL | INJECT_THREAT_UNSIGNED）。
  * 返回 0=全部可信，非 0=检测到威胁（位掩码）。
  */

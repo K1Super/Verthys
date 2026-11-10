@@ -70,7 +70,7 @@ static void put_u32le(uint8_t *p, uint32_t value)
     p[3] = (uint8_t)((value >> 24) & 0xffu);
 }
 
-/* 用户槽 KDF 输入：无 keyfile 时保持旧字节序（仅 password）；有 keyfile 时
+/* 用户槽 KDF 输入：无 keyfile 时直接使用 password 字节；有 keyfile 时
  * 用长度前缀把 password 与 keyfile_digest 拼成无歧义输入。 */
 static int make_user_secret(const char *password, const uint8_t *keyfile_digest,
                             uint8_t **owned, const uint8_t **secret, size_t *secret_len)
@@ -750,7 +750,7 @@ static int add_module_entries(VtyKeyring *kr)
     return VTY_OK;
 }
 
-/* 非 static：产品 .rhat X 清单需以外部符号哈希覆盖创建/解锁主路径；
+/* 非 static：发布构建需以外部符号哈希覆盖创建/解锁主路径；
  * 公开 wrapper 仅 16–49 字节，单独哈希无保护意义。本符号不导出
  *（verthys.def 白名单外），外部不可达。noinline 是"被哈希代码体 =
  * 实际执行代码体"的语义前提。 */
@@ -1083,8 +1083,8 @@ int vty_vault_create_from_kc(const VtyVault *src, const char *path,
     r_idx = vty_slot_find(src->slots, src->slot_count, VTY_SLOT_RECOVERY);
     if (u_idx < 0 || r_idx < 0) return VTY_E_SLOT_MISSING;
 
-    /* 用户槽 KDF 参数必须沿用源库实际槽值，而不是恢复槽参数：两者在
-     * 旧版策略下可能不同，沿用错误参数会让新库只能用另一个代价打开。 */
+    /* 用户槽 KDF 参数必须沿用源库实际槽值，而不是恢复槽参数：两者
+     * 可能不同，沿用错误参数会让新库只能用另一个代价打开。 */
     mem_kib = src->slots[u_idx].m_cost;
     iters = src->slots[u_idx].t_cost;
     parallel = src->slots[u_idx].p_cost;
@@ -1452,7 +1452,7 @@ static int adopt_copy(VtyVault *v, const VtyMetaCopy *c, const VtyKeyring *kr,
     return VTY_OK;
 }
 
-/* 非 static：产品 .rhat X 清单覆盖标准/keyfile 解锁主路径（wrapper 过薄） */
+/* 非 static：发布构建需覆盖标准/keyfile 解锁主路径（wrapper 过薄） */
 __declspec(noinline) int vty_vault_open_internal(const char *path,
                                const char *password,
                                const char *keyfile_path, VtyVault **out)

@@ -1,8 +1,5 @@
 /*
- * state/mod.rs — 进程私有状态管理（全量重写）
- *
- *   "资源与状态管理"
- *   进程私有状态、多进程隔离资源应抽离至独立 state 模块
+ * state/mod.rs — 进程私有状态管理
  *
  * 包含：
  *   - AppState: 主进程会话状态（worker IPC session + scan_state + init_lock）
@@ -14,16 +11,13 @@
  *   - spawn_lock_monitor: 锁持有时间监控
  *
  * 锁中毒处理：
- *   原：所有 Mutex/RwLock 的 lock()/read()/write() 用 unwrap_or_else(|e| e.into_inner())
- *   吞中毒——中毒时直接取出数据继续使用，可能操作不一致状态。
+ *   Mutex/RwLock 中毒时 into_inner() 取出后废弃（重置为 None/Default），
+ *   记录严重告警，通知 worker 关闭游标。统一通过 lock_scan_state/
+ *   lock_scan_summary_state/lock_verthys_file/read_session/write_session 访问。
  *
- *   新：中毒时 into_inner() 取出后废弃（重置为 None/Default），记录严重告警，
- *   通知 worker 关闭游标。通过 lock_scan_state/lock_scan_summary_state/
- *   lock_verthys_file/read_session/write_session 方法统一处理。
- *
- * wait_io_complete 改 Notify：
- *   原：100ms 轮询 pending_io_count，延迟高且浪费 CPU。
- *   新：tokio::sync::Notify，end_io 调 notify_one，wait_io_complete 调 notified().await。
+ * IO 屏障：
+ *   tokio::sync::Notify 驱动：end_io 调 notify_one，
+ *   wait_io_complete 调 notified().await 并带超时。
  *
  * 锁持有时间监控：
  *   AtomicU64 记录 scan_state/scan_summary_state 锁获取时间戳。
@@ -79,9 +73,6 @@ pub const SESSION_SUPERSEDED: &str = "E_LOCK_SUPERSEDED: 目标会话已被替�
 
 /* ------------------------------------------------------------------ *
  * TimedMutexGuard — 带时间戳的锁守卫                       *
- *                                                                    *
- * 包装 MutexGuard，构造时记录时间戳，Drop 时清除时间戳。               *
- * 后台任务通过时间戳检测锁持有时间，超 30s 告警 + 强制重置。            *
  * ------------------------------------------------------------------ */
 
 /// 带时间戳的 Mutex 守卫
@@ -141,7 +132,7 @@ fn now_ms() -> u64 {
 /// 字段可见性：
 ///   - `init_lock`：pub（AtomicBool，无中毒风险，直接访问）
 ///   - `session` / `scan_state` / `scan_summary_state` / `verthys_file_lock`：
-///     私有（通过锁中毒恢复方法访问
+///     私有（通过锁中毒恢复方法访问）
 ///   - `pending_io_count` / `io_notify` / `*_lock_acquired_ms`：
 ///     私有（通过 begin_io/end_io/wait_io_complete 等方法访问）
 pub struct AppState {
@@ -170,7 +161,7 @@ pub struct AppState {
     verthys_file_lock: Mutex<Option<VerthysFileLock>>,
     /// Worker IO 操作计数器（verthys_flush 屏障）
     pending_io_count: AtomicU64,
-    /// IO 完成通知（替代 100ms 轮询）
+    /// IO 完成通知（通知驱动，无轮询延迟）
     ///
     /// end_io 调 notify_one，wait_io_complete 调 notified().await。
     io_notify: Notify,
@@ -364,15 +355,12 @@ impl AppState {
     }
 
     /* ----------------------------------------------------------------
-     * Worker IO 屏障（Notify 替代轮询）                    *
+     * Worker IO 屏障（通知驱动，无轮询）                    *
      *                                                                *
      * begin_io / end_io 配对调用，包裹 verthys_flush 等 IO 操作。         *
      * wait_io_complete 在 verthys_lock 销毁 worker 前调用。               *
-     *                                                                *
-     * 变更：                                                *
-     *   原：wait_io_complete 用 100ms 轮询 pending_io_count             *
-     *   新：end_io 调 io_notify.notify_one()，                         *
-     *       wait_io_complete 调 io_notify.notified().await             *
+     * end_io 调 io_notify.notify_one()，                                *
+     * wait_io_complete 调 io_notify.notified().await。                  *
      * ---------------------------------------------------------------- */
 
     /// 标记 IO 操作开始（verthys_flush 入口调用）
@@ -394,13 +382,11 @@ impl AppState {
         self.pending_io_count.load(Ordering::SeqCst)
     }
 
-    /// 等待所有 IO 操作完成（Notify 替代 100ms 轮询）
+    /// 等待所有 IO 操作完成（通知驱动，无轮询延迟）
     ///
     /// verthys_lock 销毁 worker 前调用，防止持久化中途销毁 worker。
     ///
-    /// 变更：
-    ///   原：while + sleep(100ms) 轮询，最坏 100ms 延迟
-    ///   新：io_notify.notified().await + timeout，事件驱动零延迟
+    /// 以 io_notify.notified().await + timeout 等待，事件驱动。
     ///
     /// 返回 true 表示所有 IO 已完成，false 表示超时（仍有 IO 在执行）。
     pub async fn wait_io_complete(&self, timeout: Duration) -> bool {
@@ -432,7 +418,7 @@ impl AppState {
                 return false;
             }
 
-            // 等待通知或超时（Notify 替代 sleep）
+            // 等待通知或超时
             let remaining = deadline - now;
             let _ = tokio::time::timeout(remaining, self.io_notify.notified()).await;
             // 收到通知或超时后循环回检查计数
@@ -442,7 +428,7 @@ impl AppState {
     /* ----------------------------------------------------------------
      * Worker 通信方法                                                 *
      *                                                                *
-     * 所有 read()/write() 改用 read_session()/write_session()*
+     * 所有 read()/write() 统一通过 read_session()/write_session() 访问 *
      * ---------------------------------------------------------------- */
 
     /// 发送 JSON 请求到 worker，返回响应 JSON（默认 15s 超时）
@@ -814,8 +800,7 @@ impl<'a> Drop for InitLockGuard<'a> {
 
 /// 全量扫描熔断清理：停止预取 + 擦除缓冲 + 通知 worker 关闭游标
 ///
-/// cancel + 短超时等待退出（替代 handle.abort() + handle.await）
-/// 委托到泛型 cleanup_pipeline_on_failure
+/// cancel + 短超时等待退出，委托到泛型 cleanup_pipeline_on_failure
 pub async fn cleanup_scan_on_failure(state: &AppState) {
     cleanup_pipeline_on_failure::<VerthysRecordEntry>(
         &state.scan_state,

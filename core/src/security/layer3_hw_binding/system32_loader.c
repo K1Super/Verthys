@@ -26,11 +26,10 @@ static wchar_t s_system32_dir[MAX_PATH];
 
 /* System32 目录前缀匹配（带分隔符边界）。
  *
- * 原缺陷：_wcsnicmp(path, dir, wcslen(dir)) 无分隔符边界——
- * 与 System32 同前缀的旁路目录（如 "C:\Windows\System32Malware\evil.dll"）
- * 也能通过前缀检查。修复：前缀一致后，path 中紧随前缀的字符必须是路径
- * 分隔符或字符串结尾。dir 以 GetSystemDirectoryW 结果为准（无尾部
- * 分隔符），大小写不敏感（_wcsnicmp）。
+ * 前缀一致后，path 中紧随前缀的字符必须是路径分隔符或字符串结尾，
+ * 否则同前缀旁路目录（如 "C:\Windows\System32Malware\evil.dll"）也会
+ * 通过检查。dir 以 GetSystemDirectoryW 结果为准（无尾部分隔符），
+ * 大小写不敏感（_wcsnicmp）。
  */
 static int system32_dir_prefix(const wchar_t *path)
 {

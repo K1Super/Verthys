@@ -23,7 +23,7 @@
         <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
         </svg>
-        <!-- 项3：搜索输入防抖（300ms 尾部触发），连续快速输入仅触发一次过滤 -->
+        <!-- 搜索输入防抖（300ms 尾部触发），连续快速输入仅触发一次过滤 -->
         <input
           class="search-input"
           :value="searchKey"
@@ -37,6 +37,17 @@
            loading 时按钮为 disabled，原生不派发悬浮事件，故仅在可点击态呈现 -->
       <ActionButton
         primary
+        class="repair-top-btn"
+        v-tip="'检查损坏文件'"
+        aria-label="检查损坏文件"
+        @click="openFileRepair"
+      >
+        <template #icon>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        </template>
+      </ActionButton>
+      <ActionButton
+        primary
         v-tip="'导入文件'"
         aria-label="导入文件"
         :loading="importing"
@@ -44,7 +55,7 @@
       />
     </div>
 
-    <!-- 文件卡片网格：≥150 条启用虚拟滚动（项1），小列表保留原 v-for 路径零开销 -->
+    <!-- 文件卡片网格：≥150 条启用虚拟滚动，小列表保留 v-for 直渲染路径（零额外开销） -->
     <VirtualCardGrid
       v-if="filteredFiles.length >= 150"
       :items="filteredFiles"
@@ -265,6 +276,79 @@
       @cancel="showDeleteConfirm = false"
     />
 
+    <!-- 损坏清理对话框：扫描 → 结果 → 二次确认 → 删除（不可逆） -->
+    <div v-if="repairVisible" class="dialog-overlay" @click.self="closeRepair">
+      <div
+        class="dialog glass repair-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fv-repair-title"
+      >
+        <div class="dialog-title" id="fv-repair-title">清理无法打开的加密文件</div>
+        <p class="repair-desc">
+          扫描只验证每个文件的数据分块能否被当前模块密钥解封，不需要输入文件独立密码。
+          未设置独立密码或使用历史加密布局的文件将跳过检查。
+        </p>
+
+        <div class="repair-state" role="status" aria-live="polite">
+          <template v-if="repairStage === 'scanning'">正在检查文件分块…</template>
+          <template v-else-if="repairStage === 'cleaning'">正在删除损坏文件…</template>
+          <template v-else-if="repairStage === 'scanned'">
+            <p>
+              共检查 <b>{{ repairChecked }}</b> 个文件：外层完整
+              <b>{{ repairHealthy }}</b> 个，确定损坏
+              <b class="repair-warn">{{ repairDamaged.length }}</b> 个。
+            </p>
+            <p v-if="repairSkipped > 0" class="repair-muted">
+              {{ repairSkipped }} 个未设独立密码或历史布局的文件已跳过。
+            </p>
+            <p v-if="repairInconclusive > 0" class="repair-muted">
+              {{ repairInconclusive }} 个暂时无法判定，已跳过（不会删除）。
+            </p>
+            <p v-if="repairDamaged.length > 0" class="repair-warn">
+              删除不可恢复：这些文件的分块只能用已随旧库删除的旧模块密钥解开。
+            </p>
+            <p v-else class="repair-muted">未发现确定损坏的文件。</p>
+          </template>
+        </div>
+
+        <div class="dialog-actions repair-actions">
+          <button
+            class="btn kv-cancel"
+            :disabled="repairStage === 'scanning' || repairStage === 'cleaning'"
+            @click="rerunRepairScan"
+          >
+            重新扫描
+          </button>
+          <button
+            class="btn kv-cancel"
+            :disabled="repairStage === 'scanning' || repairStage === 'cleaning'"
+            @click="closeRepair"
+          >
+            关闭
+          </button>
+          <template v-if="repairConfirming">
+            <button class="btn kv-cancel" @click="cancelRepairConfirm">取消</button>
+            <button
+              class="btn repair-danger"
+              :disabled="repairStage !== 'scanned'"
+              @click="runRepairCleanup"
+            >
+              确认永久删除 {{ repairDamaged.length }} 个
+            </button>
+          </template>
+          <button
+            v-else
+            class="btn repair-danger"
+            :disabled="repairStage !== 'scanned' || repairDamaged.length === 0"
+            @click="requestRepairCleanup"
+          >
+            删除损坏文件{{ repairDamaged.length > 0 ? ` (${repairDamaged.length})` : '' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- 导入进度悬浮覆盖层（统一组件，复用量子能量导流通道）：
          悬浮模块内容区中央，不挤压下方文件网格；导入中可取消（断点状态保留）
          通道尺寸与模块子密钥验证态一致（非紧凑），不显示百分比/耗时与块计数 -->
@@ -339,8 +423,11 @@ import {
 } from "../../lib/verthys";
 import {
   createFileKdf, buildModuleCheck, verifyModuleCheck, sealRecord, openRecord,
+  probeOuterRecord,
   type FileKdf,
 } from "../../lib/module_crypto";
+import { useFileRepair } from "../../composables/file-verthys/useFileRepair";
+import type { FileRepairEntry } from "../../composables/file-verthys/damage";
 import { runFileExport } from "../../composables/file-verthys/useFileExport";
 import {
   runFileImport,
@@ -481,15 +568,15 @@ const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
 
 /* ===== 文件列表 ===== */
 const searchKey = ref("");
-/* 项2：shallowRef 替代 ref，避免 Vue 对 files 数组内每条记录深度代理
+/* shallowRef 替代 ref，避免 Vue 对 files 数组内每条记录深度代理
  * （每条记录含 metaId/chunks 等字段，万条记录深度代理开销 200-500ms） */
 const files = shallowRef<FileEntry[]>([]);
 
 /**
  * 列表条目本地 ID（单调递增，装载与导入共用同一序列）。
  *
- * 原实现装载用 `Date.now() + metaId`、导入用 `Date.now() + idx` 双源生成，
- * 同一毫秒内可产生相同 ID；而删除与状态全部按 ID 定位
+ * 装载与导入必须共用同一序列：双源生成（如各自取 `Date.now()`）会在同一
+ * 毫秒内产生相同 ID；而删除与状态全部按 ID 定位
  * （`removeShallowItems(x => x.id === f.id)`），碰撞会误删第二条。
  * 基址取会话启动时刻，与缓存中上一会话 ID（同量级时间戳）不会相交。
  */
@@ -506,7 +593,7 @@ const filteredFiles = computed(() => {
  *   数据落地批）—— 标记与首批卡片同一 patch 生效，见 useModuleEntrance 契约 */
 const { entering } = useModuleEntrance(() => filteredFiles.value.length > 0);
 
-/* 项3：搜索输入防抖（300ms 尾部触发）
+/* 搜索输入防抖（300ms 尾部触发）
  * 原问题：v-model 每次按键触发 filteredFiles computed 重新计算，
  *        连续快速输入时累加造成可感知延迟。
  * 优化后：用户停止输入 300ms 后才更新 searchKey 触发过滤，输入过程零卡顿。 */
@@ -586,7 +673,7 @@ const docPassword = ref("");
 const onImport = async () => {
   if (!isTauri) {
     // 浏览器模式：模拟导入
-    // 项2：shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
+    // shallowRef 下 push 需用 pushShallowItems 触发 triggerRef
     pushShallowItems(files, [{
       id: Date.now(), name: `demo_doc_${files.value.length + 1}.pdf`,
       size: 1024 * 1024 * (2 + files.value.length), mime: "application/pdf",
@@ -1118,7 +1205,7 @@ const toDeleteSource = (f: FileEntry): DeleteSourceEntry => ({
 
 /** 删除收口：移除列表条目 + 同步模块缓存（仅成功路径调用） */
 const applyDeleted = (f: FileEntry) => {
-  // 项2：shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
+  // shallowRef 下 filter 需用 removeShallowItems 触发 triggerRef
   removeShallowItems(files, x => x.id === f.id);
   syncModuleCache();
 };
@@ -1150,6 +1237,126 @@ const syncModuleCache = () => {
     "fileverthys",
     toCacheEntries(files.value.filter((x) => deleteStates.value.get(x.id) !== "persist-retry")),
   );
+};
+
+/* ===== 损坏清理（只验证内容外层，不要求每文件口令） ===== */
+
+/**
+ * 清理确定损坏的文件条目。
+ *
+ * 与单条删除共用同一条批量事务与收尾链路，但把全部损坏条目合并为
+ * 一次删除/落盘：条目的块引用与元数据 ID 去重后一次提交，避免逐个
+ * 文件触发 N 次落盘。删除未提交前列表与缓存零变化。
+ */
+const cleanupDamagedFiles = async (entries: FileRepairEntry[]): Promise<boolean> => {
+  const localIds = new Set<number>(entries.map((e) => e.id));
+  const victims = files.value.filter((f) => localIds.has(f.id));
+  const recordIds = new Set<number>();
+  for (const f of victims) {
+    const inline = Array.isArray(f.chunkDataB64) && f.chunkDataB64.length > 0;
+    if (!inline && Array.isArray(f.chunkIds)) {
+      for (const id of f.chunkIds) {
+        if (id > 0) recordIds.add(id);
+      }
+    }
+    if (typeof f.metaId === "number" && f.metaId > 0) recordIds.add(f.metaId);
+  }
+
+  if (recordIds.size === 0) {
+    // 演示/无后端记录的条目：仅从列表移除
+    removeShallowItems(files, (f) => localIds.has(f.id));
+    syncModuleCache();
+    return true;
+  }
+
+  const ids = [...recordIds];
+  let deleted = false;
+  try {
+    deleted = await deleteAndPersistBatch(ids);
+  } catch (e) {
+    console.warn("[cleanupDamagedFiles] 批量删除异常", e);
+  }
+  if (!deleted) {
+    showError("清理失败，数据仍保留，请重试");
+    return false;
+  }
+
+  try {
+    const persisted = await persistVerthys();
+    if (!persisted) {
+      showError("清理已提交但落盘校验失败，重启后文件可能恢复。");
+    }
+  } catch (e) {
+    console.warn("[cleanupDamagedFiles] 落盘校验异常", e);
+    showError("清理已提交但落盘校验失败，重启后文件可能恢复。");
+  }
+
+  for (const rid of ids) {
+    invalidateSummaryRecord(rid);
+    invalidateFullRecord(rid);
+    invalidateScannedRecord(rid);
+  }
+
+  const keys = victims
+    .map((f) => f.entryKey)
+    .filter((key): key is string => typeof key === "string" && key.length > 0);
+  const metaIds = victims
+    .map((f) => f.metaId)
+    .filter((id): id is number => typeof id === "number" && id > 0);
+  try {
+    await verthysForgetImportKeys(keys, metaIds);
+  } catch (e) {
+    console.warn("[cleanupDamagedFiles] 去重键释放失败（不改变删除结论）", e);
+  }
+
+  verthysGcOrphanChunks().catch(() => {
+    /* 孤儿回收为 best-effort，失败仅推迟到下次触发 */
+  });
+
+  removeShallowItems(files, (f) => localIds.has(f.id));
+  syncModuleCache();
+  showToast(`已清理 ${localIds.size} 个无法打开的文件`);
+  return true;
+};
+
+const {
+  visible: repairVisible,
+  stage: repairStage,
+  confirming: repairConfirming,
+  checked: repairChecked,
+  damaged: repairDamaged,
+  healthy: repairHealthy,
+  skipped: repairSkipped,
+  inconclusive: repairInconclusive,
+  open: openRepair,
+  runScan: rerunRepairScan,
+  requestCleanup: requestRepairCleanup,
+  cancelConfirm: cancelRepairConfirm,
+  cleanupDamaged: runRepairCleanup,
+  close: closeRepair,
+} = useFileRepair({
+  files,
+  isTauri,
+  fetchRecord: async (id) => {
+    try {
+      const r = await verthysGetRecord(id);
+      return r ? r.dataB64 : null;
+    } catch {
+      return null;
+    }
+  },
+  probeOuter: (payload) => probeOuterRecord("file", payload),
+  cleanup: cleanupDamagedFiles,
+  showError,
+});
+
+/** 打开清理对话框：导入/导出在途时拒绝，避免扫描与重负载任务并发 */
+const openFileRepair = () => {
+  if (importing.value || exporting.value) {
+    showError("当前有导入/导出任务进行中，请稍后再检查");
+    return;
+  }
+  void openRepair();
 };
 
 /** 删除结果 → 条目状态与提示：成功即移除；失败保留条目并留下重试入口 */
@@ -1227,7 +1434,7 @@ const retryPersistDelete = async (f: FileEntry) => {
   settleDeleteResult(f, result);
 };
 
-/* ===== 卡片光泽追踪（共享实现；3D 视差倾斜已按用户决策移除，Wave 53） ===== */
+/* ===== 卡片光泽追踪（共享实现；仅光泽层，不含 3D 视差倾斜） ===== */
 const { onCardMove, onCardLeave } = useCardShine();
 
 /** 元数据不可读的占位条目：名称退化为记录号，仅保留删除入口 */
@@ -1268,7 +1475,7 @@ const toFileEntry = (id: number, meta: Record<string, unknown>): FileEntry => ({
 /* ===== 加载已有文件 ===== */
 const loadFiles = async () => {
   if (!isTauri) {
-    // 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
+    // shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
     replaceShallowArray(files, [
       { id: 1, name: "project_report.pdf", size: 4521984, mime: "application/pdf", totalChunks: 2, encrypted: false },
       { id: 2, name: "financial_data.xlsx", size: 1234567, mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", totalChunks: 1, encrypted: true },
@@ -1280,7 +1487,7 @@ const loadFiles = async () => {
   const cached = getModuleCache<FileEntry[]>("fileverthys");
   let maxRecordId = 0;
   if (cached.data && cached.data.length > 0) {
-    // 项2：shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
+    // shallowRef 整体替换需用 replaceShallowArray 触发 triggerRef
     replaceShallowArray(files, cached.data);
     // 计算缓存中最大的 metaId，作为增量扫描起点
     maxRecordId = cached.data.reduce((max, f) => Math.max(max, f.metaId || 0), 0);
@@ -1292,7 +1499,7 @@ const loadFiles = async () => {
   let hasNewFiles = false;
   // 元数据不可读的条目不静默丢弃：显式占位 + 一次汇总告知
   let corruptCount = 0;
-  // 项2：批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
+  // 批量构建新条目后一次性 pushShallowItems，避免循环内多次触发响应式
   const newItems: FileEntry[] = [];
 
   // ID 来源：类型盲索引（权威、跨重启稳定）；枚举失败时
@@ -1306,13 +1513,13 @@ const loadFiles = async () => {
     loading.value = false;
     return;
   }
-  // 修复：旧类型 0x05 回退扫描（迁移失败的兜底）
+  // 旧类型 0x05 回退扫描（迁移失败的兜底）
   //
-  // 原缺陷：若 migrateRecordTypes 超时/失败，旧 FileVerthys 元数据仍停留在 0x05
-  //   （与 TYPE_PHOTO_CHUNK 冲突的旧值），FileVerthys 仅扫描 TYPE_FILEVERTHYS_META(0x08)
-  //   → 旧文件记录完全不可见 → "模块内容没有被加载出来"。
+  // 若 migrateRecordTypes 超时/失败，旧 FileVerthys 元数据仍停留在 0x05
+  //   （与 TYPE_PHOTO_CHUNK 冲突的旧值），而 FileVerthys 仅扫描
+  //   TYPE_FILEVERTHYS_META(0x08) → 旧文件记录完全不可见 → "模块内容没有被加载出来"。
   //
-  // 修复：若 0x08 无记录，追加扫描 0x05 记录。后续 JSON.parse 会自然过滤掉
+  // 故若 0x08 无记录，追加扫描 0x05 记录。后续 JSON.parse 会自然过滤掉
   //   照片数据块（二进制密文 parse 失败 → 跳过），仅保留 FileVerthys 元数据。
   //   该索引与照片块混编，解析失败属预期，不得记为"损坏条目"。
   const legacyFallback = metaIds.length === 0;
@@ -1374,7 +1581,7 @@ const loadFiles = async () => {
     }
   }
 
-  // 项2：循环外一次性 pushShallowItems 触发 triggerRef
+  // 循环外一次性 pushShallowItems 触发 triggerRef
   if (newItems.length > 0) {
     pushShallowItems(files, newItems);
   }
@@ -1393,7 +1600,7 @@ onMounted(() => {
   });
 });
 onUnmounted(() => {
-  /* 项3：取消未触发的防抖调用，防止内存泄漏 */
+  /* 取消未触发的防抖调用，防止内存泄漏 */
   debouncedUpdateSearch.cancel();
   /* 模态栈兜底出栈：卸载时若仍有窗开着，滚动锁与栈序必须归还 */
   importModal.release();
@@ -1401,7 +1608,7 @@ onUnmounted(() => {
   conflictModal.release();
 });
 
-/* 修复「页面覆盖」：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
+/* 页面覆盖防护：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
 import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
 useModuleDialogGuard("verthys", () => {
   showImportDialog.value = false;
@@ -1429,14 +1636,14 @@ useModuleDialogGuard("verthys", () => {
    .reveal-host.is-entering .reveal-item）：搜索栏与卡片都承载文字，
    入场一律只走不透明度（位移会让字形抗锯齿在合成层与主层之间跳变）。 */
 /* 悬浮反馈只走合成器路径（opacity）：阴影/边框全状态恒定（.glass 基线）。
-   原实现在 hover 上过渡 box-shadow（大半径模糊阴影是重绘型属性）并叠加
-   青色柔光——滚动中卡片掠过指针时逐帧重绘，且属禁用的大面积发光；
-   提亮改由 .card-shine 光层承担（Wave 54 收口），此处不得恢复。 */
+   不得让 hover 过渡 box-shadow（大半径模糊阴影是重绘型属性）或叠加青色柔光：
+   滚动中卡片掠过指针会逐帧重绘，且属禁用的大面积发光；
+   提亮由 .card-shine 光层承担，此处不得恢复。 */
 .acct-card { position: relative; padding: 14px 16px 14px 18px; background: var(--bar-surface); }
 .card-accent { position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; background: linear-gradient(180deg, transparent, var(--accent), transparent); opacity: 0; transition: opacity 0.3s; border-radius: 1px; }
 .acct-card:hover .card-accent { opacity: 1; }
 /* 光晕层几何/混合/强度统一由共享定义（styles/verthys-common.css .card-shine +
-   tokens.css --shine-alpha / --shine-reach）；本模块只需卡片自身的悬浮显隐（Wave 54 收口） */
+   tokens.css --shine-alpha / --shine-reach）；本模块只需卡片自身的悬浮显隐 */
 .acct-card:hover .card-shine { opacity: 1; }
 .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .file-icon-wrap { width: 18px; height: 18px; color: var(--accent); flex-shrink: 0; }
@@ -1512,4 +1719,15 @@ useModuleDialogGuard("verthys", () => {
 /* 密钥对话框 */
 .key-dialog { min-width: 360px; }
 .key-target { font-size: 12px; color: var(--text-secondary); font-family: var(--font); margin-bottom: 14px; }
+
+/* 损坏清理对话框 */
+.repair-dialog { width: min(520px, calc(100vw - 32px)); }
+.repair-desc { margin: 8px 0 0; font-size: 12px; line-height: 1.6; color: var(--text-secondary); font-family: var(--font); }
+.repair-state { margin-top: 14px; font-size: 13px; line-height: 1.7; color: var(--text-primary); font-family: var(--font); }
+.repair-state p { margin: 4px 0; }
+.repair-muted { color: var(--text-muted); font-size: 12px; }
+.repair-warn { color: var(--danger); font-size: 12px; }
+.repair-actions { flex-wrap: wrap; }
+.repair-danger { color: #fff; background: var(--danger); border-color: var(--danger); }
+.repair-danger:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>

@@ -251,7 +251,7 @@ describe("自定义档会话语义", () => {
     localStorage.setItem(CUSTOM_FEATURES_KEY, JSON.stringify({ ...allTrue(), session_lock_on_idle: false, clip_clear_on_lock: true }));
     await applySecurityPreset(3);
     expect(isSessionLockEnabled()).toBe(false);
-    // 关键断言：关闭空闲锁定不得同时关闭剪贴板监听（旧实现为单一布尔合并）
+    // 关键断言：关闭空闲锁定不得同时关闭剪贴板监听（两者不得合并为单一布尔）
     expect(mocks.securitySessionSetHardening).toHaveBeenCalledWith(false, true);
   });
 
@@ -388,7 +388,7 @@ describe("lockAll 重入与代际闸门", () => {
     const outcome = await lockAll();
     expect(outcome.clean).toBe(true);
 
-    // 旧实现 Promise.race 的超时定时器不会清除，60s 后会把干净缓存标脏，
+    // 超时定时器若未清除，60s 后会把干净缓存标脏，
     // 污染后续每次锁定结果（并可能让退出流程误判为脏数据）。
     await vi.advanceTimersByTimeAsync(60_000);
     expect(mocks.setCacheDirty).not.toHaveBeenCalled();

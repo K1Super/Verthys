@@ -667,12 +667,9 @@ pub async fn verthys_verify_global_key(
         );
         return Ok(VerthysResponse::err("verify_global_key", &e));
     }
-    // 修复：bin_password 是纯文本密码，不是 base64 数据（同 derive 修复）
-    //
-    // 原缺陷：decode_and_validate_b64(&bin_password) 将纯文本密码当作 base64
-    // 解码，含特殊字符或长度非 4 倍数的密码全部被拒，验证按钮必然失败。
-    //
-    // 修复：bin_password 按纯文本密码校验（非空 + 最大长度）。
+    // bin_password 是纯文本密码，不按 base64 解码：参与 PBKDF2 的是密码原始
+    // 字节，含特殊字符或长度非 4 倍数的密码会被 base64 校验误拒。
+    // 此处只做非空与最大长度校验。
     if bin_password.is_empty() {
         log::warn!("[verthys_verify_global_key] bin_password 为空");
         write_key_audit(
@@ -888,7 +885,7 @@ pub async fn verthys_clear_global_key(
 
 // ===== 命令：协调密钥存在状态（reconciliation） =====
 
-/// 修复：协调全局密钥存在状态（修正前端迁移后重新校验与后端状态机的不同步）
+/// 协调全局密钥存在状态（用前端重新校验的结果修正后端状态机）
 ///
 /// 场景：
 ///   verthys_unlock 时 worker 进程内 probe 通过 find_first_lid_by_type(0x10)

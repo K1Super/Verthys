@@ -22,15 +22,11 @@
     rgba(10, 13, 21, 0.08)
   );
 
-  /* 提示底板（单源）：玻璃体基面 —— 填充压至薄雾级（0.34→0.22），衬底
+  /* 提示底板（单源）：玻璃体基面 —— 填充压至薄雾级（0.34 / 0.22），衬底
      结构明确可辨，可读性由背衬折射（backdrop-filter）与上下光缝共同承担；
      斜向微光取自既有「光源偏左上」约定，语义色光晕与双平面星野
-     由 .clip-toast / .error-toast 叠加 */
+     由 .clip-toast / .error-toast / .notice-card 叠加 */
   --toast-surface: linear-gradient(168deg, rgba(16, 21, 33, 0.34), rgba(9, 12, 20, 0.22));
-
-  /* 常驻横幅玻璃基面（单源）：比瞬时提示更通透 —— 填充压到近无（0.10→0.05），
-     通透感由更强的背衬折射承担；横幅面积大且常驻，填充一浓即退化为实心色块 */
-  --banner-surface: linear-gradient(168deg, rgba(18, 24, 36, 0.10), rgba(8, 11, 18, 0.05));
 
   /* RGB 三元组：供 rgba(var(--xxx-rgb), alpha) 动态组合，消除重复色值 */
   --accent-rgb: 0, 212, 255;
@@ -52,7 +48,7 @@
   --accent-red: #ff2e63;
 
   /* 卡片指针光晕（.card-shine / .photo-shine）强度单源：透明度与扩散范围在此
-     定义一次（色相取 --accent-rgb）；各表面只保留几何与混合模式差异（Wave 54 收口） */
+     定义一次（色相取 --accent-rgb）；各表面只保留几何与混合模式差异 */
   --shine-alpha: 0.14;
   --shine-reach: 60%;
 
@@ -107,22 +103,24 @@
   --dur-sweep: 1.7s;
   --dur-page-enter: 1.9s;
   --dur-page-leave: 0.45s;
+  /* 直接进入（同一次开机内的后续启动）：主界面平滑淡入时长 — 无渡越叙事，
+     只承担解除冻结后的显影；主界面在淡入期间已可交互，不构成等待 */
+  --dur-direct-enter: 1s;
 
-  /* 模块步入编排时长（单一权威 — 关键帧与编排契约见
-   * styles/animations.css；JS 侧错峰与窗口参数见 app/constants.ts
+  /* 模块步入编排时长（单一权威 — 关键帧与编排契约由
+   * styles/animations.css 承载；JS 侧错峰与窗口参数由 app/constants.ts
    * MODULE_REVEAL，--reveal-dur 必须与 MODULE_REVEAL.durMs 一致）：
    *   --reveal-dur      内容元素单次显影时长
    *   --stage-reveal-dur 模块根渡越显影时长（短于内容显影 —
    *                     根先成形、内容随后逐级沉积，两层不互相掩盖）
    *   --stage-leave-dur 模块根离场时长（快于入场：让位新模块显影主体）
    *   --stage-leave-dur-hub 中枢模块离场时长（专属：先驻留后加速消散；
-   *                     量子面板圆环/三卫星的引力内缩编排与之共用同一时长
-   *                     —— 见 security/qd-panel.css，根动画 animationend
-   *                     判定卸载，子树编排必不被截断）
+   *                     量子面板圆环/三卫星的引力内缩编排与之共用同一时长，
+   *                     根动画 animationend 判定卸载，子树编排必不被截断）
    *   --mgmt-leave-dur  中枢管理视图离场时长（快于入场：让位新视图显影主体）
    *   --mgmt-enter-dur  中枢管理视图入场时长（专属：管理三态互切为用户高频
    *                     路径，转场只承担衔接；离场 0.20s + 入场 0.40s =
-   *                     每步 0.60s（用户裁定），全局 --reveal-dur 口径不变） */
+   *                     每步 0.60s，全局 --reveal-dur 口径不变） */
   --reveal-dur: 0.62s;
   --stage-reveal-dur: 0.4s;
   --stage-leave-dur: 0.18s;

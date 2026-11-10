@@ -1701,10 +1701,14 @@ static int index_key_expect_empty(VtyVault *v, uint8_t keyspace,
  *
  * 判据以内层信封可认证为准：结构自洽且能以旧 MDEK 打开才换封；普通
  * 记录载荷（账户明文、文件索引等）无法通过认证，原样保留。
+ * allow_embedded 仅对 meta 记录开启：旧版 meta 的 chunkDataB64 内还嵌着
+ * 一层分片信封，需要递归换封；普通数据块载荷禁止扫描，避免误改内容。
  */
 static int rewrap_content_envelope(const uint8_t old_mdek[VTY_KEY_BYTES],
                                    const uint8_t new_mdek[VTY_KEY_BYTES],
-                                   uint64_t epoch,
+                                   uint64_t old_epoch,
+                                   uint64_t new_epoch,
+                                   int allow_embedded,
                                    const uint8_t *in, size_t in_len,
                                    uint8_t **out, size_t *out_len,
                                    int *rewrapped)
@@ -1714,7 +1718,10 @@ static int rewrap_content_envelope(const uint8_t old_mdek[VTY_KEY_BYTES],
     uint8_t file_uuid[VTY_UUID_BYTES];
     uint32_t seq, total, pt_len;
     uint8_t *pt = NULL;
+    uint8_t *embedded = NULL;
     size_t pt_bytes = 0;
+    size_t embedded_len = 0;
+    int embedded_rewrapped = 0;
     int rc;
 
     *out = NULL;
@@ -1733,28 +1740,128 @@ static int rewrap_content_envelope(const uint8_t old_mdek[VTY_KEY_BYTES],
         return VTY_OK;
     }
 
-    rc = vty_chunk_open(old_mdek, file_uuid, seq, total, epoch, in, in_len,
+    rc = vty_chunk_open(old_mdek, file_uuid, seq, total, old_epoch, in, in_len,
                         &pt, &pt_bytes);
     if (rc == VTY_E_AEAD || rc == VTY_E_KEY_INVALID || rc == VTY_E_INVALID) {
         return VTY_OK; /* 不是分片信封：按普通记录载荷处理 */
     }
     if (rc != VTY_OK) return rc; /* 资源/IO 故障：不得静默跳过换封 */
 
-    rc = vty_chunk_seal(new_mdek, file_uuid, seq, total, epoch, pt, pt_bytes,
+    /* 旧版内联布局：meta JSON 的 chunkDataB64 内还嵌着一层分片信封，
+     * 顶层的 vty_chunk_open 无法触达。这里在重封 meta 明文前把其中
+     * 能以旧 MDEK 认证的内联分片一并换成新 MDEK。 */
+    if (allow_embedded && pt_bytes > 0u && pt[0] == (uint8_t)'{') {
+        rc = vty_chunk_rewrap_embedded(old_mdek, new_mdek, old_epoch, new_epoch,
+                                       pt, pt_bytes,
+                                       &embedded, &embedded_len,
+                                       &embedded_rewrapped);
+        if (rc != VTY_OK) {
+            vty_secure_zero(pt, pt_bytes);
+            vty_free(pt, pt_bytes);
+            return rc;
+        }
+        if (embedded_rewrapped) {
+            vty_secure_zero(pt, pt_bytes);
+            vty_free(pt, pt_bytes);
+            pt = embedded;
+            pt_bytes = embedded_len;
+            embedded = NULL;
+        }
+    }
+
+    rc = vty_chunk_seal(new_mdek, file_uuid, seq, total, new_epoch, pt, pt_bytes,
                         out, out_len);
     vty_secure_zero(pt, pt_bytes);
     vty_free(pt, pt_bytes != 0 ? pt_bytes : 1u);
+    if (embedded != NULL) {
+        vty_free(embedded, embedded_len);
+    }
     if (rc != VTY_OK) return rc;
     *rewrapped = 1;
     return VTY_OK;
 }
 
-/* 记录重写：保留 record_id/created_time/flags/plain_size，换 MDEK 与
- * 名称/类型盲索引；旧索引键必须存在，缺失即说明库已不一致。 */
+/* 全库轮换专用：按模块上下文换封单条内容记录的内层信封。
+ *
+ * 与 rekey_one_record 共用同一判定：仅非系统记录、且模块为 0/2 时尝试；
+ * allow_embedded 的模块/类型门槛保持一致。old_epoch/new_epoch 分离，
+ * 供全库轮换跨代使用（模块启用时二者相同）。 */
+int vty_repo_rewrap_content(uint8_t type, int module_index,
+                            const uint8_t old_mdek[VTY_KEY_BYTES],
+                            uint64_t old_epoch,
+                            const uint8_t new_mdek[VTY_KEY_BYTES],
+                            uint64_t new_epoch,
+                            const uint8_t *in, size_t in_len,
+                            uint8_t **out, size_t *out_len,
+                            int *rewrapped)
+{
+    int allow_embedded;
+
+    if (out == NULL || out_len == NULL || rewrapped == NULL) {
+        return VTY_E_INVALID;
+    }
+    *out = NULL;
+    *out_len = 0;
+    *rewrapped = 0;
+    if (repo_is_system_type(type)) return VTY_OK;
+    if (module_index != 0 && module_index != 2) return VTY_OK;
+    allow_embedded = (module_index == 0 && type == 0x01)
+                  || (module_index == 2 && (type == 0x08 || type == 0x05));
+    return rewrap_content_envelope(old_mdek, new_mdek, old_epoch, new_epoch,
+                                   allow_embedded, in, in_len, out, out_len,
+                                   rewrapped);
+}
+
+/* 内容信封自检：按给定 MDEK/epoch 尝试解封。
+ * 结构不符/认证失败返回 VTY_OK 且 *openable=0；资源或内部故障返回错误码，
+ * 避免把“无法判断”误当成“不可解封”而静默通过。 */
+int vty_repo_content_envelope_check(const uint8_t mdek[VTY_KEY_BYTES],
+                                    uint64_t epoch,
+                                    const uint8_t *in, size_t in_len,
+                                    int *openable)
+{
+    const size_t prefix = VTY_UUID_BYTES + 4u + 4u + 4u;
+    const size_t min_len = prefix + VTY_NONCE_BYTES + VTY_TAG_BYTES;
+    uint8_t file_uuid[VTY_UUID_BYTES];
+    uint32_t seq, total, pt_len;
+    uint8_t *pt = NULL;
+    size_t pt_bytes = 0;
+    int rc;
+
+    if (openable == NULL) return VTY_E_INVALID;
+    *openable = 0;
+    if (mdek == NULL || in == NULL || in_len < min_len) return VTY_OK;
+
+    seq = vty_get_u32(in + VTY_UUID_BYTES);
+    total = vty_get_u32(in + VTY_UUID_BYTES + 4u);
+    pt_len = vty_get_u32(in + VTY_UUID_BYTES + 8u);
+    if (total == 0u || seq >= total || (size_t)pt_len > VTY_CHUNK_MAX_PT) {
+        return VTY_OK;
+    }
+    if (in_len != prefix + VTY_NONCE_BYTES + (size_t)pt_len + VTY_TAG_BYTES) {
+        return VTY_OK;
+    }
+    memcpy(file_uuid, in, VTY_UUID_BYTES);
+    rc = vty_chunk_open(mdek, file_uuid, seq, total, epoch, in, in_len,
+                        &pt, &pt_bytes);
+    if (rc == VTY_E_AEAD || rc == VTY_E_KEY_INVALID || rc == VTY_E_INVALID) {
+        return VTY_OK;
+    }
+    if (rc != VTY_OK) return rc;
+    vty_secure_zero(pt, pt_bytes != 0 ? pt_bytes : 1u);
+    vty_free(pt, pt_bytes != 0 ? pt_bytes : 1u);
+    *openable = 1;
+    return VTY_OK;
+}
+
+/* 记录重写：保留 record_id/created_time/flags，按重写后的真实长度更新
+ * plain_size，换 MDEK 与名称/类型盲索引；旧索引键必须存在，缺失即说明
+ * 库已不一致。内联分片换封会改变记录明文长度，plain_size 必须同步。 */
 static int rekey_one_record(VtyVault *v, const VtyRepoLeaf *leaf,
                             const uint8_t old_mdek[VTY_KEY_BYTES],
                             const uint8_t new_mdek[VTY_KEY_BYTES],
                             const uint8_t module_uuid[VTY_UUID_BYTES],
+                            int module_index,
                             int rewrap_content)
 {
     VtyRepoRecord rec;
@@ -1781,9 +1888,15 @@ static int rekey_one_record(VtyVault *v, const VtyRepoLeaf *leaf,
     rc = repo_read_with_mdek(v, leaf, old_mdek, &rec);
     if (rc != VTY_OK) return rc;
 
-    /* 内容模块记录：内层分片信封必须随 MDEK 一并换封。 */
+    /* 内容模块记录：内层分片信封必须随 MDEK 一并换封。内联分片只存在于
+     * meta 类型（照片 0x01；文件元数据 0x08/旧 0x05），按模块限定类型，
+     * 避免把照片/文件块载荷中偶然出现的字节序列误当作内联分片。 */
     if (rewrap_content && !repo_is_system_type(rec.type)) {
-        rc = rewrap_content_envelope(old_mdek, new_mdek, v->header.epoch,
+        int allow_embedded = (module_index == 0 && rec.type == 0x01)
+                          || (module_index == 2 && (rec.type == 0x08 || rec.type == 0x05));
+        rc = rewrap_content_envelope(old_mdek, new_mdek,
+                                     v->header.epoch, v->header.epoch,
+                                     allow_embedded,
                                      rec.data, rec.data_len, &inner, &inner_len,
                                      &rewrapped);
         if (rc != VTY_OK) goto out;
@@ -1842,7 +1955,7 @@ static int rekey_one_record(VtyVault *v, const VtyRepoLeaf *leaf,
     raw.created_time = leaf->created_time;
     raw.data_offset = loc.offset;
     raw.data_len = loc.total_len;
-    raw.plain_size = leaf->plain_size;
+    raw.plain_size = (uint32_t)rec.data_len;
     memcpy(raw.data_hash, loc.hash, VTY_HASH_BYTES);
     rc = leaf_encode(&raw, leaf_buf);
     if (rc != VTY_OK) goto out;
@@ -2044,7 +2157,7 @@ int vty_repo_module_rekey(VtyVault *v, uint32_t index,
         if (rc != VTY_OK) break;
         if (done) break;
         if (memcmp(leaf.module_uuid, module_uuid, VTY_UUID_BYTES) != 0) continue;
-        rc = rekey_one_record(v, &leaf, old_mdek, new_mdek, module_uuid,
+        rc = rekey_one_record(v, &leaf, old_mdek, new_mdek, module_uuid, index,
                               index == 0u || index == 2u);
         if (rc != VTY_OK) break;
     }

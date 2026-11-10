@@ -14,7 +14,7 @@ static int b32_value(char c)
 {
     int i;
     if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-    /* 易混字符按规范归一：I/L→1，O→0 */
+    /* 易混字符归一：I/L→1，O→0 */
     if (c == 'I' || c == 'L') c = '1';
     if (c == 'O') c = '0';
     for (i = 0; i < 32; i++) {

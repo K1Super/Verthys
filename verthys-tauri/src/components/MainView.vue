@@ -115,8 +115,8 @@ const {
 } = useCosmicBackground();
 
 /* ===== 窗口控制 =====
- * 已提升至 App.vue 壳层（WindowControls 常驻组件内部注册关闭事件拦截），
- * 本视图不再重复注册监听。 */
+ * 由 App.vue 壳层统一承担（WindowControls 常驻组件内部注册关闭事件拦截），
+ * 本视图不注册监听。 */
 
 /* ===== 模块导航与密钥守卫 ===== */
 const {

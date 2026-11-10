@@ -1,4 +1,3 @@
-# .github/workflows/release-materials.yml
 # 发布物料复现流水线（手动触发）
 #
 # 目的：从源码完整构建 core / worker / Tauri，生成一份自洽的 local 更新物料，

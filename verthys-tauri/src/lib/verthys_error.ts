@@ -93,8 +93,8 @@ export function wrapAsVerthysError(e: unknown): VerthysError {
 /* ------------------------------------------------------------------ *
  * 结构化错误契约                                                   *
  *                                                                    *
- * 在保留现有 VerthysError/VerthysErrorKind（底层 IPC 异常）基础上，新增    *
- * VerthysErrorCode 业务错误码 + VerthysResult<T> 判别联合，使所有公共      *
+ * 在 VerthysError/VerthysErrorKind（底层 IPC 异常）之上提供             *
+ * VerthysErrorCode 业务错误码 + VerthysResult<T> 判别联合，使所有公共    *
  * 函数返回值统一为 Promise<VerthysResult<T>>，调用方通过 result.ok 和   *
  * result.code 获取细分错误原因，从而精确指引 UI 提示。                *
  *                                                                    *
@@ -137,6 +137,8 @@ export enum VerthysErrorCode {
   E_WORKER_INIT_FAILED = "E_WORKER_INIT_FAILED",
   E_VERTHYS_CREATE_FAILED = "E_VERTHYS_CREATE_FAILED",
   E_VERTHYS_UNLOCK_FAILED = "E_VERTHYS_UNLOCK_FAILED",
+  /** 本机密钥材料（container.secret）缺失：普通解锁永久不可用，需恢复码解锁并重绑 */
+  E_KEY_MATERIAL_MISSING = "E_KEY_MATERIAL_MISSING",
 
   // ===== 全局密钥 =====
   E_GLOBAL_KEY_DERIVE_FAILED = "E_GLOBAL_KEY_DERIVE_FAILED",
@@ -262,12 +264,6 @@ export function defaultCodeFromKind(kind: VerthysErrorKind): VerthysErrorCode {
  * 在 lib/verthys_error.ts 维护错误码→用户文案映射表，替换底层技术报错。  *
  * 每条文案附带下一步操作指引，降低用户咨询量。                         *
  *                                                                    *
- * 示例映射规则：                            *
- *   | 原始技术报错           | 面向用户提示文案     |                *
- *   | worker_init 失败       | 安全核心启动异常     |                *
- *   | superblock 校验错误    | 加密文件已损坏       |                *
- *   | 句柄打开失败           | 存储目录权限不足     |                *
- *                                                                    *
  * translateVerthysError 返回结构化用户文案：                             *
  *   - title：简短标题（用于 UI 弹窗标题）                              *
  *   - message：面向用户的描述（避免技术术语）                          *
@@ -368,6 +364,11 @@ const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
     title: "解锁加密库失败",
     message: "加密库解锁失败，可能因密码错误、文件损坏或连续超时触发熔断保护。",
     guidance: "1. 请确认密码输入正确；2. 若连续超时已触发熔断，请等待 30 分钟后重试或使用备份密钥恢复；3. 若文件已损坏，请使用备份文件恢复数据。",
+  },
+  [VerthysErrorCode.E_KEY_MATERIAL_MISSING]: {
+    title: "本机密钥材料缺失",
+    message: "用于打开加密库的本机密钥材料已丢失（常见于卸载时删除了应用数据），普通解锁已无法完成。",
+    guidance: "请使用创建加密库时保存的恢复码解锁，并在恢复会话中执行「重绑本机设备槽」，之后普通解锁即可恢复。",
   },
 
   // ===== 全局密钥 =====
@@ -520,7 +521,7 @@ export function translateVerthysError(
  * E_CNG_UNAVAILABLE / E_SECURITY_STATE）或 worker 十六进制码          *
  * （ERR_0000000A / ERR_0000001D / ERR_0000000E / ERR_00000020）。    *
  * 本函数把两者统一为 VerthysResult 失败值，并保留 retryAfterSecs 与  *
- * 后端动态文案（不再用固定“打开加密库失败/密钥错误”覆盖）。          *
+ * 后端动态文案。                                                      *
  * ------------------------------------------------------------------ */
 
 /** worker 十六进制码 → 语义错误码 */

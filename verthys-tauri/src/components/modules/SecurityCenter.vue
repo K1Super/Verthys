@@ -1,24 +1,37 @@
 <!--
   SecurityCenter.vue — 安全管理中心（密钥仓库中枢）
-  交互流程（四态严格互斥）：
+  交互流程（五态严格互斥）：
     unlock  → verthys 未解锁：显示解锁表单
     init    → 已解锁但无全局密钥记录：非全屏「初始化安全密钥」弹窗
     verify  → 已有全局密钥记录但未验证：验证表单
+    device_mismatch → 设备机器码不匹配：拦截视图
     management → 全局密钥已就绪（或只读模式）：管理主界面
   全局根密钥 = 用户密码 + .bin 密钥文件 + .bin 自定义密码（XChaCha20-Poly1305 加密 .verthys）
   模块独立密钥 = 每个模块独立的访问密钥（非派生，由本界面生成/修改）
 -->
 <template>
-  <div class="security-center">
+  <div
+    class="security-center"
+    :class="{ 'has-notice-rail': viewMode === 'management' && recoveryNotices.length > 0 }"
+  >
     <!-- 瞬时提示（错误/成功）统一由全局 ToastLayer 渲染（App 根节点单点挂载，--z-toast 最高层） -->
+
+    <!-- 恢复会话常驻状态轨：状态源在全局 keyState，进入中枢管理界面即恢复；
+         仅在中枢内提供处置入口，离开中枢不保留全局浮层 -->
+    <StatusRail
+      v-if="viewMode === 'management'"
+      :notices="recoveryNotices"
+      @action="onRecoveryNoticeAction"
+    />
 
     <!-- ===== 解锁视图 ===== -->
     <UnlockView
       v-if="viewMode === 'unlock'"
       :verthys-path="verthysPath"
       :unlocking="unlocking"
+      :progress-suppressed="recoveryUnlockOpen"
       :unlock-progress-msg="unlockProgressMsg"
-      :unlock-progress-percent="progressRhythm.visualPercent.value"
+      :progress-source="progressRhythm.visualPercent"
       :dimmed="progressRhythm.dimmed.value"
       :unlock-progress-elapsed="unlockProgressElapsed"
       :init-status-ref="initStatusRef"
@@ -41,7 +54,7 @@
       :bin-file-name="binFileName"
       :processing="processing"
       :unlock-progress-msg="unlockProgressMsg"
-      :visual-percent="progressRhythm.visualPercent.value"
+      :progress-source="progressRhythm.visualPercent"
       :dimmed="progressRhythm.dimmed.value"
       @init="onInitKey"
       @back="goBackToUnlock"
@@ -56,7 +69,7 @@
       :bin-file-name="binFileName"
       :processing="processing"
       :unlock-progress-msg="unlockProgressMsg"
-      :visual-percent="progressRhythm.visualPercent.value"
+      :progress-source="progressRhythm.visualPercent"
       :dimmed="progressRhythm.dimmed.value"
       @verify="onVerify"
       @back="goBackToUnlock"
@@ -91,8 +104,6 @@
       :has-module-key-record="hasModuleKeyRecordRef"
       :module-key-ready="moduleKeyReadyRef"
       :module-has-recovery="moduleHasRecoveryRef"
-      :recovery-reseal-needed="recoveryMode && !resealDone"
-      :recovery-mode="recoveryMode"
       :module-state-class="moduleStateClass"
       :module-state-text="moduleStateText"
       :preset-applying="presetApplying"
@@ -126,8 +137,6 @@
       @open-change-key-dialog="onOpenChangeKeyDialog"
       @export-bin="onExportBin"
       @recovery-rotated="onRotatedRecovery"
-      @reseal-device="onResealDevice"
-      @rotate-committed="onVaultRotateCommitted"
       @toggle-module-key-enabled="onToggleModuleKeyEnabled"
       @open-key-dialog="onOpenKeyDialog"
       @logout-module="onLogoutModule"
@@ -137,6 +146,15 @@
       @orbit-slider-input="onOrbitSliderInput"
       @orbit-slider-release="onOrbitSliderRelease"
       @snap-to-anchor="snapToAnchor"
+    />
+
+    <!-- 全库 DEK 轮换（仅恢复码会话可用；入口在中枢状态轨）
+         首次打开才装载，未使用时不占中枢挂载成本 -->
+    <VaultRotateDialog
+      v-if="rotateDialogMounted"
+      :show="rotateDialogOpen"
+      @close="rotateDialogOpen = false"
+      @committed="onRotateCommitted"
     />
 
     <!-- 密钥编辑弹窗 -->
@@ -284,12 +302,9 @@ import {
   verthysPcrStatus,
   verthysKeyfileStatus,
   verthysKeyfileEnable,
-  verthysResealDevice,
   preloadWorker, workerDestroy,
 } from "../../lib/verthys";
-import { open, save } from "@tauri-apps/plugin-dialog";
-import { bumpVerthysState } from "../../state/key_state";
-import { loadModuleKeyStatus } from "../../key/module-auth";
+import { save } from "@tauri-apps/plugin-dialog";
 import KeyEditDialog from "../dialogs/KeyEditDialog.vue";
 import DisableVerifyDialog from "../dialogs/DisableVerifyDialog.vue";
 import SecurePcrDialog from "../dialogs/SecurePcrDialog.vue";
@@ -297,6 +312,7 @@ import SecureKeyfileDialog from "../dialogs/SecureKeyfileDialog.vue";
 import RecoveryCodeDialog from "../dialogs/RecoveryCodeDialog.vue";
 import RecoveryUnlockDialog from "../dialogs/RecoveryUnlockDialog.vue";
 import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
+import StatusRail from "../common/feedback/StatusRail.vue";
 /* 视图级懒加载：拆分中枢首挂载成本 — 首次进入仅执行 UnlockView
  * （最常见入口视图，保持同步渲染零等待），其余视图/弹窗按需拉取
  * （本地分包，切换时微任务级就绪） */
@@ -308,7 +324,9 @@ const ManagementView = defineAsyncComponent(() => import("../views/ManagementVie
 const ChangeKeyDialog = defineAsyncComponent(() => import("../management/ChangeKeyDialog.vue"));
 const ExportVerifyDialog = defineAsyncComponent(() => import("../management/ExportVerifyDialog.vue"));
 const UpdaterAvailableDialog = defineAsyncComponent(() => import("../dialogs/UpdaterAvailableDialog.vue"));
+const VaultRotateDialog = defineAsyncComponent(() => import("../management/VaultRotateDialog.vue"));
 import { useToastCenter } from "../../composables/useToastCenter";
+import { useRecoveryNotices } from "../../composables/useRecoveryNotices";
 import { useViewMode } from "../../composables/security-center/useViewMode";
 // useDeviceBinding 必须在 useViewMode / useUnlockFlow 之前调用（提供 deviceCheckResult / checkDevice 注入）
 import { useDeviceBinding } from "../../composables/security-center/useDeviceBinding";
@@ -362,7 +380,6 @@ const {
   unlockProgressElapsed,
   unlockProgressDone,
   pendingRecoveryCode,
-  recoveryMode,
   clearRecoveryCode,
   usbRebindPrompt,
   usbRebindSaving,
@@ -381,7 +398,7 @@ const {
 });
 
 /* ===== 视图模式（五态严格互斥） =====
- *   移除 "loading" 态。worker 解锁成功后进程内即时完成
+ *   无 "loading" 态：worker 解锁成功后进程内即时完成
  *   全局密钥记录探测，结果内联到 unlock 响应，前端零异步扫描阶段。
  *   解锁完成即确定 hasGlobalKeyRecord，直接进入 init 或 verify，无中间态。
  *   unlockInProgress 保持位：解锁/创建在收束补满 100% 前锁定解锁视图，
@@ -395,6 +412,17 @@ const { viewMode } = useViewMode({
   postInitAnim,
   unlockInProgress: unlocking,
 });
+
+/* ===== 恢复会话常驻入口（中枢内） =====
+ * 状态源在全局 keyState：离开中枢不丢状态，重新进入管理界面即恢复入口；
+ * 界面载体与处置动作仅在中枢管理界面提供，不保留跨模块全局浮层。 */
+const {
+  notices: recoveryNotices,
+  rotateDialogOpen,
+  rotateDialogMounted,
+  onNoticeAction: onRecoveryNoticeAction,
+  onRotateCommitted,
+} = useRecoveryNotices();
 
 /* ===== 选中路径是否已有容器 =====
  * 恢复码只对“已存在的容器”有意义：新建模式或目标文件不存在时，
@@ -439,56 +467,6 @@ const canRecoverVault = computed(
  * 失败文案不区分“恢复码错/槽缺失/TPM 状态”，避免泄露细分原因。 */
 const recoveryUnlockOpen = ref(false);
 const recoveryUnlockError = ref("");
-/** 恢复会话已完成本机重绑：隐藏提示卡片（会话仍是恢复会话）。 */
-const resealDone = ref(false);
-
-watch(recoveryMode, (active) => {
-  if (!active) resealDone.value = false;
-});
-
-/**
- * 全库轮换提交成功：C 层已把新库会话的恢复标记清零，本会话不再需要
- * 重绑设备槽；前端同步收起恢复码会话提示，避免误导用户继续重绑。
- */
-const onVaultRotateCommitted = () => {
-  recoveryMode.value = false;
-  /* 面板各自持有恢复态/模块态：提交后必须重查权威状态，否则仍显示
-   * “恢复会话”并允许空码操作（C 层会拒绝，但提示错误）。 */
-  bumpVerthysState();
-  void loadModuleKeyStatus().catch((e) => {
-    console.warn("[rotate] 提交后刷新模块状态失败", e);
-  });
-};
-
-/**
- * 恢复会话重绑本机容器槽。
- * keyfile 启用时必须选择当前 keyfile；未启用时不传路径。
- * 是否恢复会话由 C 层判定，前端只负责收集可选路径。
- */
-const onResealDevice = async () => {
-  let kf: string | undefined;
-  try {
-    const status = await verthysKeyfileStatus();
-    if (status.ok && status.keyfile_enabled === true) {
-      const chosen = await open({
-        multiple: false,
-        directory: false,
-        filters: [{ name: "Keyfile", extensions: ["vkf"] }],
-      });
-      if (typeof chosen !== "string") return;
-      kf = chosen;
-    }
-  } catch {
-    // 状态查询失败时按无 keyfile 继续；C 层会以 KEYFILE_REQUIRED 拒绝并提示
-  }
-  const resp = await verthysResealDevice(kf);
-  if (resp.ok) {
-    resealDone.value = true;
-    showToast("本机普通解锁已恢复");
-  } else {
-    showError("重绑失败：请在恢复会话中操作，并确认 keyfile 与设备环境");
-  }
-};
 
 const openRecoveryUnlock = () => {
   /* 恢复码解锁只属于 unlock 视图且必须已有容器；init/新建下不得出现 */
@@ -514,8 +492,6 @@ const onRecoveryUnlockSubmit = async (code: string) => {
   recoveryUnlockError.value = "";
   const ok = await doRecoveryUnlock(verthysPath.value, code);
   if (ok) {
-    /* 每次恢复会话都要重新评估重绑状态，不能被上一轮隐藏标记残留。 */
-    resealDone.value = false;
     recoveryUnlockOpen.value = false;
   } else {
     recoveryUnlockError.value = "恢复码无效或当前设备环境不可用";
@@ -914,7 +890,7 @@ const goBackToUnlock = async () => {
   unlocking.value = true;
   const lockStart = Date.now();
   progressRhythm.start();
-  unlockProgressMsg.value = "清理会话";
+  unlockProgressMsg.value = "收敛当前会话";
   unlockProgressPercent.value = 0;
   unlockProgressElapsed.value = 0;
   // 阻止残留进度回调覆盖此消息（onUnlockProgress 守卫）
@@ -984,6 +960,51 @@ const goBack = () => {
   emit("back");
 };
 
+/* ===== 挂载期后台预热延后 =====
+ * 索引预读与 worker 子进程创建属于后台成本，不得与模块入场渲染争抢资源：
+ * 进场即同步触发会加厚“点击 → 画面出现”这一帧的负担，形成停顿观感。
+ * 两者都不是解锁的前置条件（解锁链路会自行确保 worker 就绪），因此推迟
+ * 到入场收束后的空闲窗口执行；用户提前离开则取消，避免为已离开的模块
+ * 启动后台任务。 */
+const VAULT_WARM_IDLE_TIMEOUT_MS = 1200;
+let vaultWarmIdleId: number | null = null;
+let vaultWarmTimerId: number | null = null;
+
+function cancelVaultWarm(): void {
+  if (vaultWarmIdleId !== null) {
+    window.cancelIdleCallback(vaultWarmIdleId);
+    vaultWarmIdleId = null;
+  }
+  if (vaultWarmTimerId !== null) {
+    window.clearTimeout(vaultWarmTimerId);
+    vaultWarmTimerId = null;
+  }
+}
+
+/** 入场收束后预热指定库：索引区预读 + worker 预启动 */
+function scheduleVaultWarm(path: string): void {
+  cancelVaultWarm();
+  const run = () => {
+    vaultWarmIdleId = null;
+    vaultWarmTimerId = null;
+    // 预热窗口内已解锁：worker 已在用，无须再预启动
+    if (verthysReadyRef.value) return;
+    // 第一层：索引区预读，与用户输入口令的时间重叠
+    void verthysPreheat(path).catch((e) => {
+      console.warn("[scheduleVaultWarm] 预热失败（不影响后续解锁）:", e);
+    });
+    // 第二层：预启动 worker 子进程
+    void preloadWorker().catch((e) => {
+      console.warn("[scheduleVaultWarm] worker 预启动失败:", e);
+    });
+  };
+  if (typeof window.requestIdleCallback === "function") {
+    vaultWarmIdleId = window.requestIdleCallback(run, { timeout: VAULT_WARM_IDLE_TIMEOUT_MS });
+  } else {
+    vaultWarmTimerId = window.setTimeout(run, 300);
+  }
+}
+
 /* ===== 会话计时（仅显示，实际超时由 keyManager 管理） ===== */
 onMounted(() => {
   // 不再调用 lockAll()：切换模块时保持 verthys 解锁状态，避免反复初始化和验证。
@@ -1010,15 +1031,9 @@ onMounted(() => {
           // 自动填充上次使用的 verthys 路径
           verthysPath.value = result.verthys_path;
           pendingIsCreate.value = false;
-          // 第一层：选择即预热 — 自动填充路径后也触发预热
-          //   与 openExistingVerthys 行为一致，用户点击确认时索引区已进页缓存
-          void verthysPreheat(result.verthys_path).catch((e) => {
-            console.warn("[onMounted] 预热失败（不影响后续解锁）:", e);
-          });
-          // 第二层：选择即预启动 Worker 子进程
-          void preloadWorker().catch((e) => {
-            console.warn("[onMounted] worker 预启动失败:", e);
-          });
+          // 索引预读与 worker 预启动延后到入场收束后（见 scheduleVaultWarm）：
+          // 与用户输入口令的时间仍有重叠，但不占用模块进场帧
+          scheduleVaultWarm(result.verthys_path);
         }
       })
       .catch((e) => {
@@ -1036,7 +1051,7 @@ const runPresetRestore = async (attempt: number): Promise<void> => {
     // loadPresetConfig 内部按真实结果置 presetSyncFailed（成功清除 / 失败置位）
     await loadPresetConfig();
     if (report.persistDirty) {
-      // 后端此前处于回滚失败状态：本次已按受信文件重新收敛，向用户可见告知
+      // 后端处于回滚失败状态：本次已按受信文件重新收敛，向用户可见告知
       showToast("预设持久化状态异常，已按受信配置重新同步");
     }
   } catch (e) {
@@ -1068,6 +1083,8 @@ watch(globalKeyReadyRef, (ready) => {
 
 onBeforeUnmount(() => {
   stopSessionTick();
+  // 取消尚未执行的后台预热，避免为已离开的模块启动索引预读/worker
+  cancelVaultWarm();
   // 清理感知层动画帧调度（中断策略：取消调度并冻结状态）
   progressRhythm.dispose();
   // 清理预启动但未使用的 worker，防止僵尸进程

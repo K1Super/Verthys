@@ -1926,7 +1926,7 @@ mod tests {
         assert_eq!(coordinator.status().slot, "active", "失败后槽位保留供重试");
         assert_eq!(ops.value_of(WIN_B), 0x11, "还原后引擎窗口仍受保护");
 
-        // 同一凭证立即重试成功（历史缺陷：校验即消费导致必须重启）
+        // 同一凭证立即重试成功（校验不消费凭证）
         ops.fail_set.lock().unwrap().clear();
         let outcome = coordinator
             .transition(false, Some(&token), &target)

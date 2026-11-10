@@ -1,5 +1,5 @@
 /*
- * test_state_store.c — U7/U8/U11：状态 HMAC、原子写入与 schema 校验
+ * test_state_store.c — 状态 HMAC、原子写入与 schema 校验
  */
 #include "test_common.h"
 #include "machine_state.h"

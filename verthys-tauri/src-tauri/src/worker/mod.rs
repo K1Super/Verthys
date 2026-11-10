@@ -1,27 +1,21 @@
 //! worker/ — 子进程会话管理（异步 Actor 模型）
 //!
-//!    "用异步 Actor 彻底消灭锁和阻塞"
-//!
-//! 本目录由原 `worker.rs`（1964 行）拆分为 7 个模块，零行为变更。
-//!
 //! 设计要点：
 //!   1. 异步 Actor 消灭锁与阻塞：
 //!       - WorkerSession 内部启动专用 tokio::task（Actor）
 //!       - tokio::process::Command 创建子进程，获取 ChildStdout/ChildStdin/ChildStderr 异步句柄
 //!       - Actor 通过 tokio::sync::mpsc<Request> 接收请求（每请求携带 oneshot 回复通道）
 //!       - tokio::select! 同时等待：新请求 / stdout 可读 / 超时 / stderr 可读
-//!       - 所有管道操作单任务内串行，无锁（死锁根本不可能发生）
+//!       - 所有管道操作单任务内串行，不使用锁
 //!
-//!   2. 异步超时替代轮询循环：
+//!   2. 异步超时与进度感知：
 //!       - tokio::time::timeout 包裹 read_line()
 //!       - 进度感知超时用 select! 循环每条进度行重置超时
-//!       - 删除 PeekNamedPipe + thread::sleep(50ms)
 //!
 //!   3. 只读诊断惰性清理：
 //!       - 子进程退出/管道断裂时，Actor 仅记录退出状态 + stderr 尾部构造错误
 //!       - stdin/stdout/stderr 句柄保持原样至 Actor 销毁
 //!       - 析构时 child.kill() + child.wait()
-//!       - 删除 diagnose_crash 清空句柄副作用
 //!
 //!   4. 流式响应处理：
 //!       - 内部 handle_streaming_progress_send 处理轮换进度流
@@ -44,13 +38,13 @@
 //!   - platform: 平台特定代码（Windows Job Object + 孤儿进程清理）
 //!   - graceful: 优雅退出与诊断
 //!   - actor:    Actor 主循环与请求处理
-//!   - session:  WorkerSession 公共 API（保留兼容签名）
+//!   - session:  WorkerSession 公共 API
 //!
-//! 公共 API 兼容策略：
-//!   保留 spawn/send_json/send_json_with_timeout/
+//! 公共 API：
+//!   spawn/send_json/send_json_with_timeout/
 //!   send_json_with_rotate_progress/wait_for_ready_signal/pid/elapsed_secs/
-//!   is_alive/kill/Clone/Drop 签名，内部通过 Handle::block_on + block_in_place
-//!   包装为同步返回，使 state.rs 与控制器无需立即改签名即可编译。
+//!   is_alive/kill/Clone/Drop 均为同步签名，内部通过 Handle::block_on +
+//!   block_in_place 驱动 async future。
 //!
 //! 安全：
 //!   - 主进程永远不加载 DLL，不持有 VerthysHandle

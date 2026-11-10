@@ -5,8 +5,8 @@
  *   数据只在地址类窗口实际渲染地区控件时按需加载（动态 import），
  *   不进入首屏主包，也不发起任何网络请求 —— 保险库内容与检索均不出本机。
  *
- * 数据来源：china-division 2.7.0（https://github.com/modood/Administrative-divisions-of-China，
- *   MIT License，Copyright (c) 2017 modood），原始数据取自国家统计局
+ * 数据来源：china-division 2.7.0（MIT License，Copyright (c) 2017 modood），
+ *   原始数据取自国家统计局
  *   中华人民共和国行政区划代码（数据截止 2023-06-30，发布 2023-09-11）；
  *   港澳台按同一三级结构补齐。仅保留展示所需的名称层级，不含代码与乡镇以下层级。
  *

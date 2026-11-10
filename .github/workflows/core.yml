@@ -1,7 +1,6 @@
-# .github/workflows/core.yml
 # core 构建与测试流水线
 #
-# Rust 测试与类型检查、前端 security-test.ts 由 rust-frontend.yml 承接；
+# Rust 测试、前端类型检查与单测由独立的前端/Rust 流水线承接；
 # 本文件聚焦 core DLL 质量门 + vendored 依赖供应链门。
 name: core-build-test
 

@@ -21,7 +21,7 @@
     - usePhotoParse        解析层（.venc 解密/导入）
     - usePhotoDelete       删除层（单删/批删/选择模式）
     -（卡片指针光晕复用共享 composables/useCardShine —— 与存签/钥域同一实现）
-    - useModuleDialogGuard 弹窗清理守卫（页面覆盖根治）
+    - useModuleDialogGuard 弹窗清理守卫（页面覆盖防护）
 
   防截屏保护不在本目录：它是应用级能力，状态与凭证由 session/privacy-session
   单例持有（模块挂载只做状态映射与提示，卸载不关闭保护）。
@@ -132,6 +132,20 @@
         {{ loadError || '首批解密已暂停，其余缩略图待补齐' }}
       </StatusBanner>
 
+      <!-- 损坏照片提示条：解密失败通常意味着内容层密钥不匹配（如轮换缺陷）。
+           只提供“扫描并清理”入口，真正删除仍需对话框内二次确认。 -->
+      <StatusBanner
+        v-if="!loadError && !decryptPaused && failedCount > 0 && !repairHintDismissed"
+        class="photo-recover-banner"
+        tone="danger"
+        :actions="[{ key: 'repair', label: '扫描并清理' }]"
+        dismissible
+        @action="openRepair"
+        @dismiss="repairHintDismissed = true"
+      >
+        检测到 {{ failedCount }} 张照片无法解密（可能已损坏）
+      </StatusBanner>
+
       <!-- Masonry 瀑布流（滚动容器与列布局分离，确保滚轮垂直滚动正常） -->
       <div class="masonry-scroll" ref="scrollRef" @scroll="onScroll">
         <!-- 导入进度悬浮覆盖层（统一组件）：悬浮照片区中央，不挤压网格布局
@@ -166,7 +180,7 @@
             @keydown.space.prevent="onPhotoClick(ph)"
           >
             <!-- 文字清晰度铁律：文字层（overlay）与图像层平级分离——
-                 图像层只保留静态滤镜（照片 3D 倾斜已移除），
+                 图像层只保留静态滤镜，
                  文字祖先链上无 filter / 3D 变换 / 缩放，恒走静态栅格化清晰路径。 -->
             <div class="photo-card glass reveal-item">
               <div class="photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
@@ -393,13 +407,6 @@
       <!-- 4. 解析结果区（有结果且非导入中）→ 预览 + 导入按钮（不显示文件选择行/密钥输入框） -->
       <div v-else-if="parsedPhotos.length > 0" class="parse-result">
         <div class="parse-result-title">已解析 {{ parsedPhotos.length }} 张照片</div>
-        <div v-if="parsedUndecryptable > 0" class="parse-undecryptable-hint">
-          {{ parsedUndecryptable }} 张无法用当前拾光密钥解密，将不会被导入
-        </div>
-        <!-- 空数据记录单独归因：容器内本就不含内容块，与"密钥不匹配"是两回事 -->
-        <div v-if="parsedEmpty > 0" class="parse-undecryptable-hint">
-          {{ parsedEmpty }} 张为空数据记录（无图像块），将不会被导入
-        </div>
         <div class="parse-preview-grid">
           <div v-for="(ph, i) in parsedPhotos" :key="i" class="parse-preview-item">
             <div class="parse-preview-thumb" :style="{ backgroundImage: ph.thumb }"></div>
@@ -462,6 +469,68 @@
       @cancel="cancelDeleteConfirm"
     />
 
+    <!-- 损坏清理对话框：扫描 → 结果 → 二次确认 → 删除（不可逆） -->
+    <CosmicOverlay :show="repairVisible" width="520px" @close="closeRepair">
+      <div class="repair-title">清理无法解密的照片</div>
+      <div class="repair-desc">
+        扫描会逐条校验照片元数据；只有内容层认证失败的记录才会被判定为损坏。
+        模块密钥未解锁、读取超时等无法判定的记录不会计入，也不会被删除。
+      </div>
+
+      <div class="repair-state" role="status" aria-live="polite">
+        <template v-if="repairStage === 'scanning'">正在扫描照片记录…</template>
+        <template v-else-if="repairStage === 'cleaning'">正在删除损坏记录…</template>
+        <template v-else-if="repairStage === 'scanned'">
+          <p>
+            共检查 <b>{{ repairChecked }}</b> 张照片，发现
+            <b>{{ repairDamagedIds.length }}</b> 条无法解密的记录。
+          </p>
+          <p v-if="repairInconclusive > 0" class="repair-muted">
+            另有 {{ repairInconclusive }} 条暂时无法判定，已跳过（不会删除）。
+          </p>
+          <p v-if="repairDamagedIds.length > 0" class="repair-warn">
+            删除不可恢复：这些记录的密文只能用已随旧库删除的旧模块密钥解开。
+          </p>
+          <p v-else class="repair-muted">未发现确定损坏的记录。</p>
+        </template>
+      </div>
+
+      <div class="repair-actions">
+        <button
+          class="btn"
+          :disabled="repairStage === 'scanning' || repairStage === 'cleaning'"
+          @click="rerunRepairScan"
+        >
+          重新扫描
+        </button>
+        <button
+          class="btn"
+          :disabled="repairStage === 'scanning' || repairStage === 'cleaning'"
+          @click="closeRepair"
+        >
+          关闭
+        </button>
+        <template v-if="repairConfirming">
+          <button class="btn" @click="cancelRepairConfirm">取消</button>
+          <button
+            class="btn repair-danger"
+            :disabled="repairStage !== 'scanned'"
+            @click="runRepairCleanup"
+          >
+            确认永久删除 {{ repairDamagedIds.length }} 条
+          </button>
+        </template>
+        <button
+          v-else
+          class="btn repair-danger"
+          :disabled="repairStage !== 'scanned' || repairDamagedIds.length === 0"
+          @click="requestRepairCleanup"
+        >
+          删除损坏记录{{ repairDamagedIds.length > 0 ? ` (${repairDamagedIds.length})` : '' }}
+        </button>
+      </div>
+    </CosmicOverlay>
+
     <!-- 防截屏保护恢复对话框（隔离态：修复是对账的唯一入口） -->
     <CosmicOverlay :show="showPrivacyRecovery" width="420px" @close="showPrivacyRecovery = false">
       <div class="kv-title">防截屏保护需要修复</div>
@@ -500,7 +569,7 @@ import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
 import type { PhotoEntry } from "../../composables/photo-album/types";
 // 大型弹窗组件级懒加载（遵循项目硬约束：大型弹窗使用 defineAsyncComponent）
 const CosmicOverlay = defineAsyncComponent(() => import("../common/cosmic/CosmicOverlay.vue"));
-// 量子能量导流通道进度条（全局统一进度条组件，替代已删除的 QuantumProgressBar）
+// 量子能量导流通道进度条（全局统一进度条组件）
 const QuantumProgressFlow = defineAsyncComponent(() => import("../common/cosmic/QuantumProgressFlow.vue"));
 // 导入进度悬浮覆盖层（全局统一遮挡层，悬浮内容区中央、不挤压布局）
 const ImportProgressOverlay = defineAsyncComponent(() => import("../common/cosmic/ImportProgressOverlay.vue"));
@@ -513,6 +582,7 @@ import { usePhotoExport } from "../../composables/photo-album/usePhotoExport";
 import { usePhotoViewer } from "../../composables/photo-album/usePhotoViewer";
 import { usePhotoParse } from "../../composables/photo-album/usePhotoParse";
 import { usePhotoDelete } from "../../composables/photo-album/usePhotoDelete";
+import { usePhotoRepair } from "../../composables/photo-album/usePhotoRepair";
 import { useCardShine } from "../../composables/useCardShine";
 import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
 import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
@@ -543,6 +613,7 @@ const {
   decryptPhotoMeta, loadPhotos, releaseThumbUrls, ensurePhotoKey,
   cancelPendingDecrypt,
   retryLoad, resumeLoad, decryptPaused,
+  scanDamagedPhotoMetaIds,
 } = usePhotoData();
 
 /* 步入窗口：以「照片列表首次非空」起算 —— 相册条目总是异步就绪，
@@ -555,7 +626,9 @@ const { entering } = useModuleEntrance(() => photos.value.length > 0);
  *  互斥第一道防线必须在 UI（前端先拦），后端拒绝（导入管线重入守卫）仅作兜底；
  *  解析导入期间若不拦，用户会付出"选文件/加密"成本后才被拒绝。 */
 const albumBusy = computed(() =>
-  importing.value || parsing.value || importingParsed.value || exporting.value || deleting.value,
+  importing.value || parsing.value || importingParsed.value || exporting.value || deleting.value
+  // 文件读取阶段同样属于解析流程：期间不得再发起导出/导入/再次选文件
+  || fileLoading.value,
 );
 /** 加载/暂停恢复条的动作入口（提示常驻到用户处置，不再依赖一次性 toast） */
 const onRetryLoad = () => retryLoad();
@@ -594,7 +667,7 @@ const {
 /* ---------- 4. 导入层 ---------- */
 const {
   importing, importProgress, importStatus,
-  /* Comprehensive_optimization：新增耗时（供 QuantumProgressFlow 使用） */
+  /* 新增耗时（供 QuantumProgressFlow 使用） */
   importElapsed,
   onImport,
   /* 卸载时取消进行中的导入（守护流水线：中止投喂并保留 WAL 续传） */
@@ -697,8 +770,7 @@ const onExportDialogKeydown = (e: KeyboardEvent) => {
 
 /* ---------- 6. 解析层 ---------- */
 const {
-  showParseDialog, parseFileName, parseFileData, parseToken, parsing, parsedPhotos, parsedUndecryptable,
-  parsedEmpty,
+  showParseDialog, parseFileName, parseFileData, parseToken, parsing, parsedPhotos,
   // 感知：进度条状态（复用中枢初始化窗口进度条样式，非量子动画）
   fileLoading, fileLoadingPercent, fileLoadingMsg,
   parsingPercent, parsingMsg,
@@ -709,7 +781,7 @@ const {
   photos, isTauri, ensurePhotoKey, showError, showToast,
   /* Parsed Import：复用 usePhotoImport 的流水线实例 + 导入状态 refs
      （对话框内复用 QuantumProgressFlow，导入进度实时反馈，UI 不卡死） */
-  getPipeline, importing, importProgress, importStatus, importElapsed,
+  getPipeline, importProgress, importStatus, importElapsed,
 });
 
 /* ---------- 7. 删除层（依赖 usePhotoViewer 的 onView 用于非选择模式下的照片点击） ---------- */
@@ -717,8 +789,33 @@ const {
   selectMode, selectedPhotoIds, allSelected, deleting,
   toggleSelectAll, cancelSelectMode, onDeleteBtn, onDeleteSelected, onPhotoClick,
   showDeleteConfirm, confirmDelete, cancelDeleteConfirm,
+  cleanupDamaged,
 } = usePhotoDelete({
   photos, isTauri, onView, showError, showToast,
+});
+
+/* ---------- 7b. 损坏清理层（只清理内容层确定无法解密的记录） ---------- */
+const {
+  visible: repairVisible,
+  stage: repairStage,
+  confirming: repairConfirming,
+  checked: repairChecked,
+  damagedIds: repairDamagedIds,
+  inconclusive: repairInconclusive,
+  open: openRepair,
+  runScan: rerunRepairScan,
+  requestCleanup: requestRepairCleanup,
+  cancelConfirm: cancelRepairConfirm,
+  cleanup: runRepairCleanup,
+  close: closeRepair,
+} = usePhotoRepair({
+  photos, isTauri, scanDamaged: scanDamagedPhotoMetaIds, cleanupDamaged, showError,
+});
+
+/** 解密失败提示条：用户可关闭；失败计数归零后重新允许提示 */
+const repairHintDismissed = ref(false);
+watch(failedCount, (n) => {
+  if (n === 0) repairHintDismissed.value = false;
 });
 
 /* ---------- 8. 防截屏保护层（应用级会话单例，界面只做状态映射与提示） ---------- */
@@ -885,7 +982,7 @@ const cleanupLifecycle = () => {
   // 释放缩略图 Blob URL（数据层统一遍历，与生成点成对）
   releaseThumbUrls();
 
-  // 项12：清空照片数组释放引用 + 主动触发 V8 Major GC
+  // 清空照片数组释放引用 + 主动触发 V8 Major GC
   // 数万照片记录在 Vue 响应式系统中持有大量依赖关系，仅清空数组才能让
   // GC 回收整条记录对象图（PhotoEntry + meta + rawBytes + thumb）。
   photos.value = [];
@@ -899,7 +996,7 @@ const cleanupLifecycle = () => {
 onMounted(initLifecycle);
 onUnmounted(cleanupLifecycle);
 
-/* ===== 弹窗清理守卫（页面覆盖根治） =====
+/* ===== 弹窗清理守卫（页面覆盖防护） =====
  * 切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖。
  * 各弹窗状态由对应 composable 管理，此处仅调用清理函数。 */
 useModuleDialogGuard("photos", () => {
@@ -1009,12 +1106,12 @@ useModuleDialogGuard("photos", () => {
 /* 键盘可达：条目不进入 tab 序列就无法在选择模式中操作；焦点框内嵌不改变布局 */
 .masonry-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius); }
 
-/* hover 悬浮光影层（滚动性能第 2 铁律的阴影落点）——
-   原实现让 box-shadow 参与 0.3s 过渡：大半径模糊阴影是重绘型属性，过渡期
-   逐帧重绘卡片；滚动中卡片掠过指针时连续触发，是滚动掉帧主因之一。
-   现改为"固定阴影纹理 + opacity/transform 过渡"（两者均走合成器）：
+/* hover 悬浮光影层（滚动性能约束的阴影落点）——
+   不得让 box-shadow 参与过渡：大半径模糊阴影是重绘型属性，过渡期逐帧
+   重绘卡片；滚动中卡片掠过指针时连续触发，是滚动掉帧主因之一。
+   故用"固定阴影纹理 + opacity/transform 过渡"（两者均走合成器）：
    层仅在 hover 时可见（visibility 门控，非 hover 态不参与栅格化），
-   translateY 与卡片抬升同步（视觉上与旧版悬浮阴影加深一致）。 */
+   translateY 与卡片抬升同步（形成悬浮阴影加深的观感）。 */
 .masonry-item::before {
   content: ''; position: absolute; inset: 0; z-index: 0; border-radius: var(--radius);
   pointer-events: none; visibility: hidden; opacity: 0;
@@ -1115,8 +1212,8 @@ useModuleDialogGuard("photos", () => {
 
 /* 照片指针光晕（图像层之上的独立表面，常规混合）；位置与强度口径与卡片
    .card-shine 一致：位置由共享 useCardShine 写入 --shine-x / --shine-y，
-   强度取 tokens.css --shine-alpha / --shine-reach（Wave 54 收口）；
-   z 4 使其位于提亮层（z 2）与文字遮罩（z 3）之上（沿用原树序层叠） */
+   强度取 tokens.css --shine-alpha / --shine-reach；
+   z 4 使其位于提亮层（z 2）与文字遮罩（z 3）之上（按树序层叠） */
 .photo-shine { position: absolute; inset: 0; z-index: 4; border-radius: var(--radius); pointer-events: none; opacity: 0; transition: opacity 0.3s; background: radial-gradient(circle at var(--shine-x, 50%) var(--shine-y, 50%), rgba(var(--accent-rgb), var(--shine-alpha)), transparent var(--shine-reach)); }
 .photo-card:hover .photo-shine { opacity: 1; }
 
@@ -1249,9 +1346,20 @@ useModuleDialogGuard("photos", () => {
 .parse-token-input { width: 100%; color: var(--accent); }
 .parse-result { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
 .parse-result-title { font-size: 12px; color: var(--accent); }
-.parse-undecryptable-hint { font-size: 11px; color: var(--warning, #e6a23c); line-height: 1.5; }
+
 .parse-preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 8px; max-height: 200px; overflow-y: auto; }
 .parse-preview-item { display: flex; flex-direction: column; gap: 4px; align-items: center; }
 .parse-preview-thumb { width: 70px; height: 70px; border-radius: 6px; background-size: cover; background-position: center; background-color: rgba(0,0,0,0.3); }
 .parse-preview-name { font-size: 10px; color: var(--text-muted); text-align: center; word-break: break-all; }
+
+/* ===== 损坏清理对话框（外壳复用 CosmicOverlay，仅保留清理特有元素） ===== */
+.repair-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.repair-desc { margin-top: 8px; font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
+.repair-state { margin-top: 14px; font-size: 13px; line-height: 1.7; color: var(--text-primary); }
+.repair-state p { margin: 4px 0; }
+.repair-muted { color: var(--text-muted); font-size: 12px; }
+.repair-warn { color: var(--danger); font-size: 12px; }
+.repair-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+.repair-danger { color: #fff; background: var(--danger); border-color: var(--danger); }
+.repair-danger:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>

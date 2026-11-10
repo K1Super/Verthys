@@ -59,13 +59,13 @@ int keymanager_derive_master(uint8_t master_key[VERTHYS_KEY_BYTES],
     return rc;
 }
 
-/* 优化：完全参数化的主密钥派生
+/* 完全参数化的主密钥派生
  *
  * 与 keymanager_derive_master 相同，但 Argon2id 参数由调用方传入，
  * 支持从超级块读取实际参数（BALANCED 32MiB/2/1 / SECURE 64MiB/3/1）。
  *
  * 安全下限兜底：防止损坏的超级块触发 DoS（参数过小或过大）。
- *   - mem_kib: 8 KiB ≤ mem_kib ≤ 4 GiB（Argon2id 规范范围）
+ *   - mem_kib: 8 KiB ≤ mem_kib ≤ 4 GiB
  *   - iters:   iters ≥ 1
  *   - parallel: 1 ≤ parallel ≤ 64
  * 越界参数返回 -1，不调用 libsodium。
@@ -80,7 +80,7 @@ int keymanager_derive_master_ex(uint8_t master_key[VERTHYS_KEY_BYTES],
     if (master_key == NULL || salt == NULL) return -1;
     if (password == NULL && pw_len != 0) return -1;
 
-    /* 安全下限校验（OWASP 2023 推荐 + Argon2id 规范范围） */
+    /* 安全下限校验（越界参数不调用 libsodium） */
     if (mem_kib < 8u || mem_kib > 4u * 1024u * 1024u) return -1;
     if (iters < 1u) return -1;
     if (parallel < 1u || parallel > 64u) return -1;

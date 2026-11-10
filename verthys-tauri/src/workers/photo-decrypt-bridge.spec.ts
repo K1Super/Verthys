@@ -7,11 +7,12 @@
  * - Worker 明确拒绝：确定性失败直接上抛，不回退主线程重算
  * - 直连失败：向上抛出原始错误（不吞异常、不伪造成功）
  * - 数据块路径：明文以视图返回且顺序与输入一致；池故障时逐块直连
- * - 完整性校验：逐块密文哈希不符在解密前拒绝
+ * - 完整性校验：整图明文哈希为权威值；逐块密文哈希失配仅在无整图哈希时拒绝
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { blake3 } from "@noble/hashes/blake3";
 import type { PhotoMeta } from "../types/crypto";
-import { bytesToBase64 } from "../utils/binary_codec";
+import { bytesToBase64, bytesToHex } from "../utils/binary_codec";
 
 vi.mock("./photoWorkerPool", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./photoWorkerPool")>();
@@ -161,8 +162,32 @@ describe("decryptChunksPreferWorker — Worker 优先与回退策略", () => {
     ).rejects.toThrow("数据块顺序校验失败");
   });
 
-  it("直连路径保持同等校验标准：逐块哈希不符即拒绝（不进入解密）", async () => {
+  it("直连路径：哈希失配但整图哈希匹配 -> 接受（轮换兼容）", async () => {
     vi.mocked(photoWorkerPool.submitDecryptChunks).mockRejectedValue(new TaskTimeoutError(8, 60_000));
+    vi.mocked(openRecord)
+      .mockResolvedValueOnce({ dataB64: "Bw==", seq: 0, total: 2 })
+      .mockResolvedValueOnce({ dataB64: "CA==", seq: 1, total: 2 });
+    const fileHash = bytesToHex(
+      blake3(new Uint8Array([7, 8]), { dkLen: 32 }),
+    );
+
+    const result = await decryptChunksPreferWorker(
+      ["Y2g=", "ZGU="], fileHash, "a.jpg", undefined,
+      {
+        expectedHashes: ["0".repeat(64), "0".repeat(64)],
+        expectedFileHash: fileHash,
+      },
+    );
+
+    expect(result.map((p) => Array.from(p))).toEqual([[7], [8]]);
+    expect(openRecord).toHaveBeenCalledTimes(2);
+  });
+
+  it("直连路径：哈希失配且无整图哈希 -> 拒绝", async () => {
+    vi.mocked(photoWorkerPool.submitDecryptChunks).mockRejectedValue(new TaskTimeoutError(9, 60_000));
+    vi.mocked(openRecord)
+      .mockResolvedValueOnce({ dataB64: "Bw==", seq: 0, total: 2 })
+      .mockResolvedValueOnce({ dataB64: "CA==", seq: 1, total: 2 });
 
     await expect(
       decryptChunksPreferWorker(
@@ -170,7 +195,8 @@ describe("decryptChunksPreferWorker — Worker 优先与回退策略", () => {
         { expectedHashes: ["0".repeat(64), "0".repeat(64)] },
       ),
     ).rejects.toThrow("块密文哈希校验失败");
-    expect(openRecord).not.toHaveBeenCalled();
+    // 哈希只是诊断信号：AEAD 解密已执行，最终因缺少整图哈希权威值拒绝
+    expect(openRecord).toHaveBeenCalledTimes(2);
   });
 
   it("瘦身布局：解密请求携带包裹态密钥而非句柄", async () => {

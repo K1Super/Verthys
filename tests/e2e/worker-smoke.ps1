@@ -1,4 +1,4 @@
-<#
+﻿<#
   tests/e2e/worker-smoke.ps1 — worker IPC 层的 产品链端到端
 
   覆盖：创建返回恢复码 → PCR 状态/启用/关闭 → 恢复码轮换 → 锁定 →
@@ -212,6 +212,18 @@ try {
     if ($v2Wrong.ok) { throw "错误文件口令仍可解密" }
     Write-Host "PASS file chunk password binding"
 
+    # 外层探测（清藏损坏扫描）：不提供文件口令，只验证模块密钥外层
+    $probeOk = Op @{ op = 'module_probe_outer'; module = 'file'; data = $v2Seal.data }
+    if (-not $probeOk.ok) { throw "外层探测：完整密文应通过: $($probeOk.error)" }
+    $tampered = [Convert]::FromBase64String($v2Seal.data)
+    $tampered[$tampered.Length - 1] = [byte]($tampered[$tampered.Length - 1] -bxor 0xFF)
+    $probeBad = Op @{
+        op = 'module_probe_outer'; module = 'file'
+        data = [Convert]::ToBase64String($tampered)
+    }
+    if ($probeBad.ok) { throw "外层探测：篡改密文未检出" }
+    Write-Host "PASS module outer probe (no password)"
+
     $checkSeal = Op @{
         op = 'module_seal'; module = 'file'; kind = 'v2_check'; data = ''
         salt = $saltB64; iterations = 150000; password = 'file-pass'
@@ -244,6 +256,10 @@ try {
     if ($unlockBad.ok -or $unlockBad.error -ne 'ERR_00000002') {
         throw "错误模块口令未被拒绝"
     }
+    # 模块级最小尝试间隔为 1 秒（LK_MIN_ATTEMPT_SECS）：失败后的立即重试会被
+    # 统一判为 MODULE_LOCKED（ERR_0000001D），这是防猜解的预期语义。
+    # 本用例验证口令正确性而非限流，故在重试前显式跨过该窗口。
+    Start-Sleep -Milliseconds 1200
     $unlockOk = Op @{ op = 'v4_module_unlock'; module_id = 0; password = 'content-mod-pw' }
     if (-not $unlockOk.ok -or $unlockOk.unlocked -ne $true) {
         throw "模块解锁失败或状态未标记 unlocked: $($unlockOk.error)"
@@ -282,6 +298,8 @@ try {
     if (-not $lockAgain.ok) { throw "轮换后锁定失败" }
     $oldUnlock = Op @{ op = 'v4_module_unlock'; module_id = 0; password = 'content-mod-pw' }
     if ($oldUnlock.ok) { throw "轮换后旧口令仍可解锁" }
+    # 同上：刚失败的解锁会开启 1 秒最小尝试间隔，直接重试新口令会被限流。
+    Start-Sleep -Milliseconds 1200
     $newUnlock = Op @{ op = 'v4_module_unlock'; module_id = 0; password = 'content-mod-pw-2' }
     if (-not $newUnlock.ok) { throw "轮换后新口令解锁失败: $($newUnlock.error)" }
     Write-Host "PASS module password rotation"
@@ -334,6 +352,9 @@ try {
 
     $old = Op @{ op = 'v4_unlock_recovery'; path = $work; recovery_code = $code }
     if ($old.ok) { throw "旧恢复码仍可解锁" }
+    # 容器解锁同样受 1 秒最小尝试间隔约束：旧码失败后立即用新码重试会命中
+    # 限流（ERR_0000000A），需显式跨过窗口。
+    Start-Sleep -Milliseconds 1200
     $auth = Op @{ op = 'authorize_path'; target_op = 'v4_unlock_recovery'; mode = 'read'; path = $work }
     if (-not $auth.ok) { throw "新恢复码解锁路径授权失败" }
     $new = Op @{ op = 'v4_unlock_recovery'; path = $work; recovery_code = $newCode }

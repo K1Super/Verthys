@@ -16,11 +16,31 @@ use tauri::State;
 use zeroize::Zeroizing;
 
 use crate::controller::types::VerthysResponse;
-use crate::controller::verthys_controller::{require_unlocked, write_verthys_audit};
+use crate::controller::verthys_controller::{
+    load_existing_container_password, require_unlocked, write_verthys_audit,
+    KEY_MATERIAL_MISSING_CODE, KEY_MATERIAL_MISSING_MESSAGE,
+};
 use crate::state::AppState;
 use crate::util::audit_log::{keyfile_path_tag, AuditEventType, AuditResult};
 
 const KEYFILE_OP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 会话内命令读取既有容器口令；缺失时返回结构化错误响应，绝不生成新密钥。
+/// 错误响应装箱：VerthysResponse 较大，避免撑大 Result 的 Err 分支。
+fn existing_password(
+    app: &tauri::AppHandle,
+    op: &str,
+) -> Result<Zeroizing<String>, Box<VerthysResponse>> {
+    match load_existing_container_password(app) {
+        Ok(Some(password)) => Ok(password),
+        Ok(None) => Err(Box::new(VerthysResponse::err_code(
+            op,
+            KEY_MATERIAL_MISSING_CODE,
+            KEY_MATERIAL_MISSING_MESSAGE,
+        ))),
+        Err(e) => Err(Box::new(VerthysResponse::err(op, &e))),
+    }
+}
 
 fn forward(
     state: &AppState,
@@ -68,7 +88,10 @@ pub async fn verthys_keyfile_enable(
     state
         .authorize_worker_path("v4_keyfile_enable", "write", &kf)
         .map_err(|e| format!("keyfile 路径未授权: {}", e))?;
-    let password = crate::controller::verthys_controller::load_container_password(&app)?;
+    let password = match existing_password(&app, "v4_keyfile_enable") {
+        Ok(password) => password,
+        Err(resp) => return Ok(*resp),
+    };
     let req = json!({
         "op": "v4_keyfile_enable",
         "password": password.as_str(),
@@ -119,7 +142,10 @@ pub async fn verthys_reseal_device(
             .authorize_worker_path("v4_reseal_device", "read", kf)
             .map_err(|e| format!("keyfile 路径未授权: {}", e))?;
     }
-    let password = crate::controller::verthys_controller::load_container_password(&app)?;
+    let password = match existing_password(&app, "v4_reseal_device") {
+        Ok(password) => password,
+        Err(resp) => return Ok(*resp),
+    };
     let req = json!({
         "op": "v4_reseal_device",
         "password": password.as_str(),
@@ -171,7 +197,10 @@ pub async fn verthys_keyfile_disable(
             .authorize_worker_path("v4_keyfile_disable", "read", kf)
             .map_err(|e| format!("keyfile 路径未授权: {}", e))?;
     }
-    let password = crate::controller::verthys_controller::load_container_password(&app)?;
+    let password = match existing_password(&app, "v4_keyfile_disable") {
+        Ok(password) => password,
+        Err(resp) => return Ok(*resp),
+    };
     let req = json!({
         "op": "v4_keyfile_disable",
         "password": password.as_str(),

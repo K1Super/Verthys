@@ -561,7 +561,7 @@ const fragments = Array.from({ length: 20 }, (_, i) => {
   opacity: 0;
 }
 /* 弹窗入场/离场：只走不透明度。
- * 原实现 transition: all + scale(0.7→1) 会把承载文字的整窗提升为合成层并按
+ * 若用 transition: all + scale(0.7→1)，承载文字的整窗会被提升为合成层并按
  * 非 1 比例光栅化，收束时再回落 —— 标题与描述在渡越窗口内发糊后骤然转锐。
  * 缩放带来的"弹入感"由光环/喷流等装饰层承担，文字层保持轴对齐清晰。 */
 .cd-pop-enter-active {

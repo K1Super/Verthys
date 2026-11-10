@@ -6,14 +6,12 @@
 #   执行之前，try/catch 与 Read-Host 暂停完全失效。保存后请确认文件头
 #   3 字节为 EF BB BF。
 #
-# 背景（根因修复）：
-#   项目目录从 Desktop\Project\ValtCore 迁移至 Desktop\Verthys 后，随目录
-#   携带的 build/ 与 build_dev/ 中 CMakeCache.txt 仍记录旧绝对路径：
-#     CMAKE_HOME_DIRECTORY:INTERNAL=c:/Users/.../ValtCore
-#   CMake 以源目录不匹配为由直接拒绝配置：
+# 背景：
+#   CMake 缓存按绝对路径寻址，项目根目录任何移动/重命名都会使 build/ 与
+#   build_dev/ 中的缓存整体失效：CMakeCache.txt 仍记录旧路径，CMake 以
+#   源目录不匹配为由直接拒绝配置：
 #     "The current CMakeCache.txt directory ... is different than the directory
 #      ... where CMakeCache.txt was created"
-#   CMake 缓存按绝对路径寻址，项目根目录任何移动/重命名都会使缓存整体失效。
 #   代码层面的品牌更名（project(Verthys)）不受影响——只要路径不变，缓存照常可用。
 #
 # 使用方式：在构建脚本顶部 dot-source 引入，于 cmake -S ... -B ... 之前调用

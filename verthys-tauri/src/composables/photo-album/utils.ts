@@ -39,11 +39,15 @@ const INVALID_FILENAME_CHARS = /[<>:"/\\|?*\u0000-\u001f]/g;
  * 空名占位项（重启后未解密）由调用方在净化前确保已解密，此处仅兜底。
  */
 export function sanitizeFileName(name: string, maxUtf8Bytes: number): string {
-  const cleaned = name
+  let cleaned = name
     .replace(INVALID_FILENAME_CHARS, " ")
     .replace(/^[\s.]+|[\s.]+$/g, "")
     .trim();
   if (!cleaned) return "photo";
+  // Windows 设备名不得直接作为文件主名（CON.venc 等会写入失败），前置下划线隔离
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(cleaned)) {
+    cleaned = `_${cleaned}`;
+  }
 
   const encoder = new TextEncoder();
   if (encoder.encode(cleaned).length <= maxUtf8Bytes) return cleaned;
@@ -188,7 +192,7 @@ export function stripMetaRecordPrefix(recordName: string): string {
 /**
  * 缩略图 base64 → Blob URL。
  *
- * Why：缩略图此前以 data URL 字符串形式随列表常驻（每张约数十 KB 且同时存在
+ * Why：缩略图若以 data URL 字符串形式随列表常驻（每张约数十 KB 且同时存在
  * 于 meta 与渲染字段两处），字符串常驻会持续占用 JS 堆并加重 GC；Blob 的数据
  * 不进 JS 字符串，渲染只持有 URL 引用。代价是 URL 需要显式释放，因此释放点
  * 与生成点必须成对（替换/淘汰/卸载/密钥失效）。
@@ -286,7 +290,7 @@ export function rehydrateEntries(
 /**
  * 模块缓存的列表投影：只保留跨会话仍然成立的展示字段。
  *
- * Why：缓存此前直接存入整份 PhotoEntry —— meta 含内联缩略图（旧布局）与
+ * Why：缓存若直接存入整份 PhotoEntry —— meta 含内联缩略图（旧布局）与
  * 块引用，thumb 是卸载即失效的 Blob URL；万张相册常驻可达数百 MB，且缓存
  * 只服务「重进模块的第一帧」。投影后名称即时可见，尺寸/缩略图由可视区
  * 按需解密回填；meta 一律不缓存（截断后的 meta 会让点击路径误判数据完整）。
@@ -307,8 +311,8 @@ export function toPhotoCacheEntries(entries: readonly PhotoEntry[]): PhotoEntry[
 /**
  * 增量差集：以已装载 ID 集合为准，返回全量 ID 中尚未装载的部分。
  *
- * Why：此前的增量过滤以"缓存中最大 ID"为界做单调判断，删掉中间 ID 后
- * 记录复用该 ID 时新照片永远不会出现在列表；集合差集与 ID 分配策略解耦。
+ * Why：以"缓存中最大 ID"为界做单调判断时，删掉中间 ID 后
+ * 记录复用该 ID，新照片永远不会出现在列表；集合差集与 ID 分配策略解耦。
  */
 export function diffNewIds(allIds: readonly number[], knownIds: ReadonlySet<number>): number[] {
   const out: number[] = [];

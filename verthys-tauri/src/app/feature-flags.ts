@@ -1,15 +1,15 @@
 /*
  * app/feature-flags.ts — 性能优化项独立回滚开关
  * =============================================================================
- * 【定位】性能根治设计五项优化的独立回滚体系：每项优化可经 flag 单独
+ * 【定位】性能优化五项优化的独立回滚体系：每项优化可经 flag 单独
  * 切换，发现问题时精确回滚单项，不影响其余优化项。
  *
  * 【回滚语义（按优化项的实际作用层）】
  *   - opaqueCanvas：运行时开关 — ParticleBackground 渲染器创建时消费
  *     （false → 回退 alpha:true 透明画布 + 透明清屏色，走 alpha 合成路径）；
  *   - instancedMesh / cssAnimations / backdropOptimized / cssAnimAlternatives：
- *     提交级回滚注册表 — 对应优化已深度融入渲染架构与样式表（无并存的
- *     旧代码路径），flag 为该项优化的权威启用标记与回滚锚点：回滚 =
+ *     提交级回滚注册表 — 对应优化已融入渲染架构与样式表，不存在
+ *     并行的实现路径；flag 为该项优化的权威启用标记与回滚锚点：回滚 =
  *     flag 置 false 并 revert 对应提交（git 层面精确单项回退）。
  *
  * 【覆盖机制】生产默认全启用；开发/诊断期可经 localStorage 注入覆盖
@@ -22,13 +22,13 @@
 export interface PerfFlags {
   /** 粒子 GPU 实例化（轨道参数预烘焙 + 顶点着色器内求值） */
   instancedMesh: boolean;
-  /** CosmicBackground CSS 合成器动画（163 元素 JS 驱动 → CSS keyframes） */
+  /** CosmicBackground CSS 合成器动画（keyframes 驱动，替代逐元素 JS 变换） */
   cssAnimations: boolean;
-  /** backdrop-filter 精确治理（大面积 → 半透明纯色 + 渐变） */
+  /** backdrop-filter 精确治理（面积改用半透明纯色 + 渐变） */
   backdropOptimized: boolean;
   /** 不透明画布（alpha:false 快速合成路径，运行时开关） */
   opaqueCanvas: boolean;
-  /** CSS 动画合成器友好替代（box-shadow/height/drop-shadow 治理） */
+  /** CSS 动画合成器友好写法（box-shadow/height/drop-shadow 治理） */
   cssAnimAlternatives: boolean;
 }
 

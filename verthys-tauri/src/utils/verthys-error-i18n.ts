@@ -48,6 +48,8 @@ const ERROR_CODE_MESSAGES: Record<VerthysErrorCode, string> = {
   [VerthysErrorCode.E_WORKER_INIT_FAILED]: "安全核心启动失败",
   [VerthysErrorCode.E_VERTHYS_CREATE_FAILED]: "创建加密库失败",
   [VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED]: "打开加密库失败",
+  [VerthysErrorCode.E_KEY_MATERIAL_MISSING]:
+    "本机密钥材料已丢失，请使用恢复码解锁，并在恢复会话中重绑本机设备槽",
 
   // ===== 全局密钥 =====
   [VerthysErrorCode.E_GLOBAL_KEY_DERIVE_FAILED]: "全局密钥派生失败",

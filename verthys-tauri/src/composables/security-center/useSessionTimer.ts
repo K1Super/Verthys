@@ -83,7 +83,7 @@ export function useSessionTimer(options: UseSessionTimerOptions) {
   });
 
   /** 启动会话计时器（1s 间隔，仅更新 UI 显示；低功耗档/锁定关闭时跳过更新）
-   *  幂等：重复调用不会叠加第二个 interval（旧实现会叠加，倒计时成倍加速） */
+   *  幂等：重复调用不会叠加第二个 interval（叠加会使倒计时成倍加速） */
   const startSessionTick = () => {
     if (sessionTick !== null) return;
     sessionTick = window.setInterval(() => {

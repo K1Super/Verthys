@@ -17,6 +17,7 @@
 #   - build\updater\releases\<release_id>\ produced by build_production.ps1
 #   - OpenSSH client (ssh.exe / scp.exe) available in PATH
 #   - the private key is authorized on the server (default: %USERPROFILE%\.ssh\k1super.pem)
+#   - every SSH/SCP call has a hard process timeout and fails fast with a diagnostic
 #
 # Exit codes: 0 success, 1 any validation, upload, publish or verification failure.
 
@@ -58,26 +59,115 @@ function Assert([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
-function Invoke-Remote([string]$Command, [string]$What) {
-    $exe = $script:SshExe
-    $sshArgs = $script:SshArgs
-    $output = & $exe @sshArgs $Command 2>&1
-    $code = $LASTEXITCODE
-    foreach ($line in $output) { Write-Info ([string]$line) }
-    if ($code -ne 0) { throw "$What failed (exit $code)" }
+# Quote a single Windows process argument. SSH/SCP arguments include paths and
+# remote commands with spaces; ProcessStartInfo.Arguments needs one correctly
+# escaped command line.
+function ConvertTo-ProcessArgument([string]$Argument) {
+    if ($null -eq $Argument) { $Argument = "" }
+    if ($Argument.Length -eq 0) { return '""' }
+    if ($Argument -notmatch '[\s"]') { return $Argument }
+
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($ch in $Argument.ToCharArray()) {
+        if ($ch -eq [char]'\') {
+            $backslashes++
+            continue
+        }
+        if ($ch -eq [char]'"') {
+            [void]$builder.Append(('\' * (2 * $backslashes + 1)))
+            [void]$builder.Append('"')
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$builder.Append(('\' * $backslashes))
+            $backslashes = 0
+        }
+        [void]$builder.Append($ch)
+    }
+    if ($backslashes -gt 0) {
+        [void]$builder.Append(('\' * (2 * $backslashes)))
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+# Run a child process with a hard timeout. SSH/SCP can still stall on DNS, a
+# half-open connection, an interactive prompt or a hung remote shell even when
+# ConnectTimeout/ServerAlive are set. The hard bound guarantees the release
+# script never waits forever; timeout kills the process and reports why.
+function Invoke-RemoteProcess {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$ArgList,
+        [Parameter(Mandatory = $true)][int]$TimeoutSec,
+        [Parameter(Mandatory = $true)][string]$What
+    )
+
+    if ($ArgList.Length -lt 1) { throw "empty process argument list for $What" }
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $ArgList[0]
+    if ($ArgList.Length -gt 1) {
+        $startInfo.Arguments = (($ArgList[1..($ArgList.Length - 1)] | ForEach-Object { ConvertTo-ProcessArgument ([string]$_) }) -join " ")
+    } else {
+        $startInfo.Arguments = ""
+    }
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+    $startInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $startInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+
+    $process = New-Object System.Diagnostics.Process
+    try {
+        $process.StartInfo = $startInfo
+        [void]$process.Start()
+        try { $process.StandardInput.Close() } catch { }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+
+        $timeoutMs = [Math]::Max(1, $TimeoutSec) * 1000
+        if (-not $process.WaitForExit($timeoutMs)) {
+            try { $process.Kill() } catch { }
+            [void]$process.WaitForExit(5000)
+            throw "$What timed out after ${TimeoutSec}s (process terminated); check DNS, network reachability, SSH host key and server load"
+        }
+        $process.WaitForExit()
+
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+        $lines = @()
+        if (-not [string]::IsNullOrEmpty($stdout)) { $lines += $stdout -split "`r`n|`n|`r" }
+        if (-not [string]::IsNullOrEmpty($stderr)) { $lines += $stderr -split "`r`n|`n|`r" }
+        return [pscustomobject]@{
+            Code = $process.ExitCode
+            Output = $lines
+        }
+    }
+    finally {
+        try { $process.Dispose() } catch { }
+    }
+}
+
+function Invoke-Remote([string]$Command, [string]$What, [int]$TimeoutSec = 30) {
+    $result = Invoke-RemoteProcess -ArgList (@($script:SshExe) + $script:SshArgs + $Command) -TimeoutSec $TimeoutSec -What $What
+    foreach ($line in $result.Output) { Write-Info ([string]$line) }
+    if ($result.Code -ne 0) { throw "$What failed (exit $($result.Code))" }
 }
 
 function Invoke-Upload([string]$LocalPath, [string]$RemoteDirectory) {
-    $exe = $script:ScpExe
-    $scpArgs = $script:ScpArgs
     $destination = "$($SshUser)@$($Server):$RemoteDirectory/"
     $name = Split-Path -Leaf $LocalPath
     $sizeMb = [math]::Round((Get-Item -LiteralPath $LocalPath).Length / 1MB, 2)
     Write-Info "uploading $name ($sizeMb MB)"
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    $output = & $exe @scpArgs $LocalPath $destination 2>&1
-    foreach ($line in $output) { Write-Info ([string]$line) }
-    if ($LASTEXITCODE -ne 0) { throw "upload failed: $LocalPath" }
+    $result = Invoke-RemoteProcess -ArgList (@($script:ScpExe) + $script:ScpArgs + $LocalPath + $destination) -TimeoutSec 600 -What "upload $name"
+    foreach ($line in $result.Output) { Write-Info ([string]$line) }
+    if ($result.Code -ne 0) { throw "upload failed: $LocalPath (exit $($result.Code))" }
     Write-Info "finished in $([math]::Round($watch.Elapsed.TotalSeconds,1))s"
 }
 
@@ -180,6 +270,9 @@ try {
         "-p", "$SshPort",
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "PreferredAuthentications=publickey",
+        "-o", "ConnectionAttempts=1",
         "-o", "ConnectTimeout=15",
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=4",
@@ -188,8 +281,12 @@ try {
     $script:ScpArgs = @(
         "-i", $KeyPath,
         "-P", "$SshPort",
+        "-q",
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "PreferredAuthentications=publickey",
+        "-o", "ConnectionAttempts=1",
         "-o", "ConnectTimeout=15",
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=4"
@@ -197,20 +294,22 @@ try {
 
     $sshExe = $script:SshExe
     $sshArgs = $script:SshArgs
-    $probe = & $sshExe @sshArgs "echo __VERTHYS_SSH_OK__" 2>&1
-    $probeCode = $LASTEXITCODE
-    foreach ($line in $probe) { Write-Info ([string]$line) }
-    Assert (($probeCode -eq 0) -and (($probe -join "`n") -match "__VERTHYS_SSH_OK__")) "ssh login failed for $SshUser@$Server`:$SshPort"
+    Write-Info "probing SSH login (timeout 30s)"
+    $probe = Invoke-RemoteProcess -ArgList (@($sshExe) + $sshArgs + "echo __VERTHYS_SSH_OK__") -TimeoutSec 30 -What "SSH login probe"
+    foreach ($line in $probe.Output) { Write-Info ([string]$line) }
+    Assert (($probe.Code -eq 0) -and (($probe.Output -join "`n") -match "__VERTHYS_SSH_OK__")) "SSH login failed for $SshUser@$Server`:$SshPort (exit $($probe.Code))"
     Write-Ok "ssh login: $SshUser@$Server`:$SshPort"
 
     Invoke-Remote "test -d '$RemoteRoot/releases' && test -d '$RemoteRoot/channels' && command -v verthys-publish >/dev/null" "remote layout and publish helper check"
 
     $remoteRelease = "$RemoteRoot/releases/$ReleaseId"
-    $existsProbe = & $sshExe @sshArgs "test ! -e '$remoteRelease'" 2>&1
-    $existsCode = $LASTEXITCODE
-    foreach ($line in $existsProbe) { Write-Info ([string]$line) }
-    if ($existsCode -ne 0) {
+    $existsProbe = Invoke-RemoteProcess -ArgList (@($sshExe) + $sshArgs + "test ! -e '$remoteRelease'") -TimeoutSec 30 -What "release immutability probe"
+    foreach ($line in $existsProbe.Output) { Write-Info ([string]$line) }
+    if ($existsProbe.Code -eq 1) {
         throw "release already exists on server and is immutable: $remoteRelease. Build a newer version or pass -ReleaseId for another local release."
+    }
+    if ($existsProbe.Code -ne 0) {
+        throw "release immutability probe failed (exit $($existsProbe.Code))"
     }
     Write-Ok "release path is free: $remoteRelease"
 
@@ -226,16 +325,10 @@ try {
     }
 
     Write-Stage "[5/6] Atomic publish"
-    $publishOutput = & $sshExe @sshArgs "verthys-publish '$incoming' '$Channel'" 2>&1
-    $publishCode = $LASTEXITCODE
-    foreach ($line in $publishOutput) { Write-Info ([string]$line) }
-    if ($publishCode -ne 0) {
-        throw "atomic publish failed (exit $publishCode); incoming directory kept for diagnosis"
-    }
+    Invoke-Remote "verthys-publish '$incoming' '$Channel'" "atomic publish (incoming directory kept for diagnosis)" 120
     Write-Ok "channel pointer switched: $Channel"
 
-    $cleanup = & $sshExe @sshArgs "rm -rf '$incoming'" 2>&1
-    foreach ($line in $cleanup) { Write-Info ([string]$line) }
+    Invoke-Remote "rm -rf '$incoming'" "cleanup incoming directory" 30
 
     Write-Stage "[6/6] Verify public endpoint"
     if ([string]::IsNullOrWhiteSpace($PublicBaseUrl)) { $PublicBaseUrl = "https://$Server" }

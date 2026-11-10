@@ -6,8 +6,6 @@
  *   2. 模块切换守卫：密码工具/安全管理直接进入，业务模块检查密钥状态
  *   3. 模块密钥登录对话框：确认/取消
  *   4. Verthys 未就绪提示：跳转安全管理
- *
- * 从 MainView.vue 抽离，功能 100% 保留。
  */
 
 import { getCurrentInstance, onBeforeUnmount, ref, computed, watch, type Ref } from "vue";
@@ -30,8 +28,9 @@ import {
   ensureRecordScan,
 } from "../cache/composition/verthys-cache";
 import { scheduleGc } from "../utils/gc";
+import { ensureModuleLoaded, isModuleNavId } from "../app/module-loaders";
 
-/* 安全守卫根治：等待布尔 Ref 变为 true（带超时兜底）
+/* 安全守卫：等待布尔 Ref 变为 true（带超时兜底）
  *
  * 用于 switchModule 防御性守卫——模块密钥状态未加载完（moduleKeyStatusLoaded=false）
  * 时，切换业务模块前必须等待 loadModuleKeyStatus 完成（loaded=true），
@@ -122,7 +121,7 @@ export function useModuleNavigation() {
   const onPanelActive = (val: boolean) => { dockCollapsed.value = val; };
   watch(currentModule, (m) => {
     if (m !== "security") { dockCollapsed.value = false; dockHovered.value = false; }
-    // 项12：模块切换后延迟 500ms 触发 V8 Major GC
+    // 模块切换后延迟 500ms 触发 V8 Major GC
     // 旧模块组件已通过 onUnmounted 释放 blobUrl/大对象引用，
     // 延迟 500ms 确保新模块首屏渲染完成后再触发 GC，
     // 避免在切换动画的关键帧中产生 Stop-The-World 暂停造成卡顿。
@@ -130,7 +129,7 @@ export function useModuleNavigation() {
   });
 
   /* 鼠标在导航栏区域时展开 Dock，离开区域时收缩（统一控制，避免 mouseleave 冲突）
-   * 性能根治：workspace 铺满视口 → 直接用视口坐标判定（去 getBoundingClientRect
+   * 性能：workspace 铺满视口 → 直接用视口坐标判定（去 getBoundingClientRect
    * 强制布局读取）；值未变化不写响应式 ref（省一次 Vue patch 调度） */
   const onDockEdgeHover = (e: MouseEvent) => {
     if (!dockCollapsed.value) return;
@@ -144,7 +143,7 @@ export function useModuleNavigation() {
   const pendingModule = ref("");
   const moduleKeyInput = ref("");
   const moduleKeyVerifying = ref(false);
-  /* 验证保持 1.5s 感知时长；不再维护进度百分比与提示词状态 */
+  /* 验证保持 1.5s 感知时长；不维护进度百分比与提示词状态 */
   /* 感知：验证错误状态标记（触发密码框抖动 + 红色边框，错误密码绝不放行） */
   const moduleKeyVerifyError = ref(false);
   /* 用户重新输入时清除错误状态（红色边框 + 抖动复位） */
@@ -179,8 +178,22 @@ export function useModuleNavigation() {
     });
   }
 
-  /** 统一应用模块切换：前置守卫 → touchSession → 写 currentModule */
-  function applySwitch(id: string): void {
+  /* 切换请求代次：等待分包期间可能有更新的点击，只有最新请求可提交 */
+  let switchGeneration = 0;
+
+  /** 统一应用模块切换：分包就绪 → 前置守卫 → touchSession → 写 currentModule */
+  async function applySwitch(id: string): Promise<void> {
+    const generation = ++switchGeneration;
+    /* 冷分包先就绪、后提交导航：加载/解析/样式注入期间旧模块保持在场，
+     * 避免舞台先卸载再空等（感知为“点一下、停一下、才进入”）。
+     * 预热或意图预取命中时，该等待在微任务级结束，不引入额外延迟。 */
+    if (isModuleNavId(id)) await ensureModuleLoaded(id);
+    if (generation !== switchGeneration) return;
+    /* 等待窗口内更新安装可能进入临界段，提交前复核同一道闸门 */
+    if (isUpdaterCritical()) {
+      showError("更新安装准备中，暂不能切换模块");
+      return;
+    }
     preSwitchFlush();
     touchSession();
     currentModule.value = id;
@@ -194,7 +207,7 @@ export function useModuleNavigation() {
     }
     // 密码工具、安全管理：直接进入，无需任何密钥
     if (id === "tools" || id === "security") {
-      applySwitch(id);
+      await applySwitch(id);
       return;
     }
     /* 业务模块必须命中白名单与 ID 映射：未知模块一律拒绝（fail-closed），
@@ -216,12 +229,11 @@ export function useModuleNavigation() {
       showVerthysNotReadyHint.value = true;
       return;
     }
-    // 安全守卫根治：模块密钥状态未加载完前，不允许进入业务模块
+    // 安全守卫：模块密钥状态未加载完前，不允许进入业务模块
     //
-    // 原缺陷：用 moduleKeyStatusLoading 等待，但 global-verthys 超时后重置 loading=false，
-    // 守卫误判"加载完成"→ 读 isModuleKeyEnabled=false → 放行，绕过密钥验证。
-    //
-    // 根治：改用 moduleKeyStatusLoaded 判断。
+    // 必须用 moduleKeyStatusLoaded 判断，不能用 moduleKeyStatusLoading：
+    // global-verthys 超时后会重置 loading=false，守卫会误判"加载完成"→
+    // 读 isModuleKeyEnabled=false → 放行，绕过密钥验证。
     //   - loaded=false 且未失败 → 等待 loadModuleKeyStatus 完成（最多 10s）
     //   - 加载已失败 → 不再空等，立即按安全兜底弹密钥框（fail-closed）
     //   - 等待期间 verthys 被锁定 → 提示前往安全管理
@@ -248,12 +260,12 @@ export function useModuleNavigation() {
     const keyEnabled = isModuleKeyEnabled(moduleId);
     // 1. 密钥保护已关闭 → 直接进入，无需任何密钥
     if (!keyEnabled) {
-      applySwitch(id);
+      await applySwitch(id);
       return;
     }
     // 2. 模块已设置密钥且本会话已登录 → 直接进入
     if (isModuleReady(moduleId)) {
-      applySwitch(id);
+      await applySwitch(id);
       return;
     }
     // 3. 未设置密钥或未登录 → 弹出密钥对话框（内部根据状态显示不同提示）
@@ -266,10 +278,10 @@ export function useModuleNavigation() {
   /* ===== 模块密钥登录对话框确认/取消 ===== */
   /* 1.5s 感知时长：验证期间以禁用态与输入框星轨应答，不渲染进度条；
    *   星轨单圈 1.4s，先完成一圈，再由结果接管
-   * 安全修复（刚性约束）：
+   * 安全约束（刚性）：
    *   - verifyModuleKey 返回 VerthysResult<void> 判别联合对象，必须用 result.ok 判断
-   *     旧代码 `const ok = await ...; if (!ok)` 判断对象引用（永远 truthy），
-   *     导致错误密码永远放行 —— 已彻底修复
+   *     直接判断返回值对象引用（`const ok = await ...; if (!ok)`）恒为 truthy，
+   *     会导致错误密码放行
    *   - 错误密码绝不放行：弹窗保持开启 + 密码框抖动 + 红色边框 + 清空密码 + 顶部红条
    *   - 无论成功/失败都保证 1.5s 最小感知时长，杜绝"无感知直接放行"
    */
@@ -306,8 +318,8 @@ export function useModuleNavigation() {
         await handleVerifyError("密钥错误，请重试");
         return;
       }
-      /* 核心安全修复：verifyModuleKey 返回 VerthysResult<void>
-       * 必须用 result.ok 判断成功/失败，旧代码 `if (!ok)` 判断对象引用永远为 false */
+      /* verifyModuleKey 返回 VerthysResult<void>
+       * 必须用 result.ok 判断成功/失败，直接判断返回值对象引用恒为真值 */
       const result = await verifyModuleKey(moduleId, moduleKeyInput.value);
       if (!result.ok) {
         /* 展示后端动态信息：模块锁定/限流时给出剩余秒数，口令错误时
@@ -324,7 +336,7 @@ export function useModuleNavigation() {
       showModuleKeyVerify.value = false;
       pendingModule.value = "";
       moduleKeyInput.value = "";
-      applySwitch(target);
+      await applySwitch(target);
     } catch {
       /* IPC/异常不等于"密钥错误"：如实区分会话已锁定与验证异常，
        * 避免把系统故障误导为用户口令错误。 */
@@ -345,7 +357,7 @@ export function useModuleNavigation() {
   const goToSecurityFromHint = () => {
     showVerthysNotReadyHint.value = false;
     pendingModule.value = "";
-    applySwitch("security");
+    void applySwitch("security");
   };
 
   /* 开发夹具填充：缓存整份模块密钥，弹窗每次打开或切换时按 pendingModuleId

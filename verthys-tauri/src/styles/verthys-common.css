@@ -3,7 +3,7 @@
  * 卡片、表单、空状态等通用样式
  *
  * 「凭证登记台」皮肤（reg-* 词汇：分区登记行 / 凭据舱 / 选项条 / 读数）
- * 已提升为全局共享层 — 见 styles/reg-desk.css（存签 / 中枢 共用）
+ * 位于全局共享层 styles/reg-desk.css（存签 / 中枢 共用）
  */
 
 /* ===== 模块根容器 ===== */
@@ -26,7 +26,7 @@
 /* ===== 卡片 ===== */
 .verthys-card {
   position: relative; padding: 14px 16px 14px 18px;
-  /* 悬浮效果只有阴影 + 光泽追踪（3D 视差倾斜已按用户决策移除，Wave 53） */
+  /* 悬浮效果只有阴影 + 光泽追踪 */
   transition: box-shadow 0.3s var(--ease);
 }
 .verthys-card:hover {
@@ -62,7 +62,7 @@
 }
 .verthys-card:hover .card-shine { opacity: 1; }
 
-/* 卡片入场：已收敛到全局「模块步入编排」（styles/animations.css —
+/* 卡片入场由全局「模块步入编排」承担（styles/animations.css —
    .reveal-host.is-entering .reveal-item，两段式包络 + 饱和错峰）；
    本文件只保留卡片的静置与悬浮皮肤。 */
 
@@ -186,5 +186,3 @@
   background: rgba(0,212,255,0.04);
   flex-shrink: 0;
 }
-
-/* 「凭证登记台」皮肤（reg-* 词汇）已迁出至全局共享层：styles/reg-desk.css */

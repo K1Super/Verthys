@@ -266,9 +266,9 @@ onBeforeUnmount(stopGate);
 }
 
 /* ===== 轨道（非同心倾斜椭圆 — dash 差速巡行 + 生长揭示） =====
- * 倾角根治：静态 rotate 写入基线规则（入场 reveal 结束后永久保留 —
- *   旧版倾角仅存在于 keyframes，backwards 填充在动画结束瞬间失效，
- *   transform 回落无旋转基线 → 轨道"突然变平整"的根因）；
+ * 倾角：静态 rotate 写入基线规则（入场 reveal 结束后永久保留）；
+ *   backwards 填充在动画结束瞬间失效，若倾角仅存在于 keyframes，
+ *   transform 会回落到无旋转基线 → 轨道"突然变平整"；
  *   keyframes to 帧与基线逐值一致 → 动画结束零跳变。 */
 .orbit {
   transform-box: fill-box;

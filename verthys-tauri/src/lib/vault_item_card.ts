@@ -58,7 +58,7 @@ export interface VaultCardLine {
   label: string;
   /** 字段取值 */
   value: string;
-  /** 是否敏感（次行只承载非敏感字段，恒为 false；保留字段以兼容既有视图契约） */
+  /** 是否敏感（次行只承载非敏感字段，恒为 false；保留该字段以符合视图契约） */
   sensitive: boolean;
 }
 

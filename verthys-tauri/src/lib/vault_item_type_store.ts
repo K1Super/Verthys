@@ -374,7 +374,7 @@ async function collectVaultTypeRecordIds(): Promise<number[]> {
   if (cached.recordId !== null) ids.add(cached.recordId);
 
   /* 权威来源：类型盲索引；失败时 resolveTypeIds 已回退全量扫描。
-   * 不再读摘要 type（摘要 type 恒为未知 0）。 */
+   * 摘要 type 恒为未知 0，不用于类型过滤。 */
   for (const id of await resolveTypeIds(TYPE_VAULT_TYPES)) ids.add(id);
 
   return [...ids].sort((a, b) => a - b);

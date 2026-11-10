@@ -11,12 +11,12 @@
  * - 模块密钥失效（闲置销毁/登出）必须联动：清除已解密内容并提示重新验证
  * - ensureVisiblePhotosDecrypted 并发上限 4，批量预取 meta dataB64
  *
- * 滚动性能三铁律（改动前先读）：
+ * 滚动性能：
  * 1. 滚动期间主线程不做 O(可见项) 的工作——行窗口状态模型把滚动事件降为
  *    O(行窗口变化)：像素级移动不产生任何重建，跨行时窗口交集内对象整体复用
- *    （见 visible-window.ts）；
+ *    （由独立行窗口模块统一计算）；
  * 2. hover 与滚动路径禁止重绘型属性参与过渡——卡片视觉全部由层 + opacity /
- *    transform 承担（见 PhotoAlbum.vue 样式区）；
+ *    transform 承担；
  * 3. 滚动期间冻结非必要动画与解码——滚动静默态（scrollQuiet）暂停解密取项、
  *    暂停背景氛围动画并暴露 data-scrolling 供样式层冻结，滚动停止后
  *    统一追帧（解密补齐 + 下一行图片预热）。
@@ -29,8 +29,9 @@ import {
   getRecordsDataB64Batch, ensureTypeIds, clearTypeIdCache,
   moduleKeyReadyRef,
 } from "../../lib/keyManager";
-import { lockModuleKey } from "../../lib/module_crypto";
+import { lockModuleKey, openRecord } from "../../lib/module_crypto";
 import { TYPE_PHOTO_META } from "../../lib/crypto";
+import { scanDamagedMetaIds } from "./damage";
 import { decryptMetaPreferWorker, decryptThumbPreferWorker } from "../../workers/photo-decrypt-bridge";
 import { isSlimPhotoMeta } from "../../constants/crypto_const";
 import { scrollPerf } from "../../config/scroll-perf";
@@ -62,7 +63,7 @@ const PREFETCH_TRAIL_ROWS = 1;
 
 export function usePhotoData() {
   /* ===== 状态 ===== */
-  /* 项2：shallowRef 替代 ref，避免 Vue 对 photos 数组内每条记录深度代理
+  /* shallowRef 替代 ref，避免 Vue 对 photos 数组内每条记录深度代理
    * （每条记录含 thumb/blobUrl/rawBytes 等大型字段，万条照片深度代理开销 200-500ms，
    *   内存暴涨且每次更新触发大量 watch/computed 重新计算） */
   const photos = shallowRef<PhotoEntry[]>([]);
@@ -108,7 +109,7 @@ export function usePhotoData() {
    *
    * 行窗口状态模型（滚动性能第 1 铁律）：滚动位置的唯一量化状态是行窗口
    * [winStart, winEnd)；同窗口内的像素级移动不产生任何状态写入，跨行时窗口
-   * 交集内的渲染对象整体复用（见 visible-window.ts），渲染数组引用保持稳定，
+   * 交集内的渲染对象整体复用，渲染数组引用保持稳定，
    * 下游 watch/patch 在绝大多数滚动帧零空转。
    */
   const scrollRef = ref<HTMLElement | null>(null);
@@ -318,8 +319,8 @@ export function usePhotoData() {
   };
 
   /* ===== 列表项定位索引（metaId → 数组下标） =====
-   * 按需解密逐批更新条目，旧实现每条都做 findIndex（O(n)），
-   * 万张相册下大批量解密退化为 O(n²)。此处以数组引用为失效键惰性重建。 */
+   * 按需解密逐批更新条目，若每条都做 findIndex（O(n)），
+   * 万张相册下大批量解密会退化为 O(n²)。此处以数组引用为失效键惰性重建。 */
   let indexSource: PhotoEntry[] | null = null;
   let indexByMetaId = new Map<number, number>();
 
@@ -354,9 +355,8 @@ export function usePhotoData() {
   /** 按需解密中标记集合（防止同一 vid 重复解密） */
   const decryptingMetaIds = new Set<number>();
 
-  /* 会话密钥失效联动：闲置销毁/登出后立即清空已解密内容并清除 worker 托管密钥。
-   * 旧实现只在组件卸载时清理；密钥销毁后本模块仍继续解密照片，
-   * 使"闲置自动锁定"形同虚设。 */
+  /* 会话密钥失效联动：闲置销毁/登出后立即清空已解密内容并清除 worker 托管密钥，
+   * 否则密钥销毁后本模块仍会继续解密照片，"闲置自动锁定"形同虚设。 */
   watch(() => moduleKeyReadyRef.value.photo, (ready) => {
     if (ready) return;
     decryptingMetaIds.clear();
@@ -381,16 +381,15 @@ export function usePhotoData() {
     }
   };
 
-  /** 解密单张照片完整元数据（含旧格式 chunkIds 迁移），返回渲染字段或 null。
-   *  性能修复：prefetchedMetaB64 由 ensureVisiblePhotosDecrypted 批量预取传入（零 IPC）；
-   *    未传入时单条批量获取（扫描缓存优先 + 并行 IPC 回退），消除旧 lastUseSummaryPath
-   *    分支的逐条 getFullRecord 串行 IPC。
-   *  性能修复：解密调度下沉 photo-crypto Worker 池，AEAD 与密钥派生再由
+  /** 解密单张照片完整元数据（含 chunkIds 回退），返回渲染字段或 null。
+   *  prefetchedMetaB64 由 ensureVisiblePhotosDecrypted 批量预取传入（零 IPC）；
+   *    未传入时单条批量获取（扫描缓存优先 + 并行 IPC 回退）。
+   *  解密调度下沉 photo-crypto Worker 池，AEAD 与密钥派生再由
    *    RPC 转交 Tauri worker；渲染主线程不做载荷解码与哈希。
    *    池基础设施不可用时由桥自动回退主线程直连，两条路径结果一致。 */
   const decryptPhotoMeta = async (vid: number, prefetchedMetaB64?: string): Promise<DecryptedPhotoMeta | null> => {
     if (!moduleKeyReadyRef.value.photo) return null;
-    // 性能修复：优先消费批量预取结果；未预取则单条批量获取（扫描缓存优先 + IPC 回退）
+    // 优先消费批量预取结果；未预取则单条批量获取（扫描缓存优先 + IPC 回退）
     let metaB64: string;
     if (prefetchedMetaB64 !== undefined) {
       metaB64 = prefetchedMetaB64;
@@ -446,9 +445,8 @@ export function usePhotoData() {
     if (metaIds.length === 0) return;
     for (const vid of metaIds) decryptingMetaIds.add(vid);
     try {
-      // 性能修复：批量预取所有待解密照片的 meta dataB64（扫描缓存优先，并行 IPC 回退）
-      //   原实现：并发池内每条 decryptPhotoMeta 各自 getFullRecord → 4 路串行 IPC 抢 worker
-      //   新实现：一次批量预取（命中缓存零 IPC），并发池直接消费预取结果，仅做 CPU 解密
+      // 批量预取所有待解密照片的 meta dataB64（扫描缓存优先，并行 IPC 回退）：
+      //   一次批量预取（命中缓存零 IPC），并发池直接消费预取结果，仅做 CPU 解密
       // 异常收敛：批量预取失败不得中断整批（否则全部项停在未加载态且无失败标记），
       //   留空映射让 decryptPhotoMeta 逐条按需取数；单条仍失败则由占位项标 failed 并计数。
       let metaB64Map = new Map<number, string>();
@@ -475,7 +473,7 @@ export function usePhotoData() {
                 // 覆盖前释放旧缩略图 Blob URL（重试/重进模块都会走到这里）
                 const old = photos.value[pidx];
                 if (old?.thumb) revokeThumbUrl(old.thumb);
-                // 项2：shallowRef 下整体替换元素需用 updateShallowItem 触发 triggerRef
+                // shallowRef 下整体替换元素需用 updateShallowItem 触发 triggerRef
                 updateShallowItem(photos, pidx, { ...data, loaded: true, failed: false });
               } else {
                 // 解密失败保留占位（临时原因可能是预取未命中、IPC 超时、密钥时序），
@@ -645,8 +643,8 @@ export function usePhotoData() {
    *  权威路径：类型盲索引（ensureTypeIds），不读记录密文、跨重启稳定；
    *  不可用时回退增量记录扫描并标记降级。摘要缓存不参与 ID 过滤。
    *
-   *  回退扫描的增量回调此前只服务于进度卡；进度卡移除后回调仅保留为
-   *  协作式取消的批次检查点（取消入口据此停止更重的后续阶段）。 */
+   *  回退扫描的增量回调仅作为协作式取消的批次检查点
+   *  （取消入口据此停止更重的后续阶段）。 */
   const loadIdList = async (): Promise<IdListResult> => {
     loadStage.value = "index";
     try {
@@ -672,7 +670,6 @@ export function usePhotoData() {
     }
     try {
       loadStage.value = "records";
-      // 扫描增量回调已无表现层消费者（进度卡已移除）；保留取消边界语义
       await ensureRecordScan(() => { /* 扫描批次仅作为协作式取消的检查点 */ });
       if (loadAbortRequested) {
         // 取消发生在记录扫描期间：已装载批次保留，不宣告"就绪"
@@ -838,6 +835,37 @@ export function usePhotoData() {
     setModuleCache("photos", toPhotoCacheEntries(photos.value));
   };
 
+  /**
+   * 扫描全部照片元数据，返回内容层认证失败（确定损坏）的 metaId 列表。
+   *
+   * 判定口径：只把 `openRecord("photo","meta",…)` 的 AUTH 失败计为损坏；
+   * 模块锁定 / IPC 超时 / 记录暂不可读等不可判定结果一律跳过，绝不误删。
+   * 历史明文 JSON 布局由 damage.ts 统一豁免。
+   */
+  const scanDamagedPhotoMetaIds = async (): Promise<{
+    checked: number;
+    damaged: number[];
+    inconclusive: number;
+  }> => {
+    if (!isTauri) return { checked: 0, damaged: [], inconclusive: 0 };
+    if (!moduleKeyReadyRef.value.photo) {
+      throw new Error("模块密钥已失效，请重新验证后重试");
+    }
+
+    const ids = photos.value
+      .map((p) => p.metaId)
+      .filter((id): id is number => typeof id === "number" && id > 0);
+
+    /* 批次预取 + 有限并发解密：元数据记录较小，批量取数避免逐条 IPC；
+     * 并发上限复用读取链路的 4，避免与可视区解密抢占通道。
+     * 判定与删除口径集中在 damage.ts（纯函数，可单测）。 */
+    return scanDamagedMetaIds(
+      ids,
+      (batch) => getRecordsDataB64Batch(batch),
+      (payload) => openRecord("photo", "meta", payload),
+    );
+  };
+
   return {
     // ===== 状态 =====
     photos,
@@ -858,6 +886,8 @@ export function usePhotoData() {
     cancelPendingDecrypt,
     // ===== 加载照片 =====
     loadPhotos,
+    /** 损坏清理：扫描全部照片元数据，返回确定损坏的 metaId 列表 */
+    scanDamagedPhotoMetaIds,
     /* 取消 / 重试 / 恢复：入口文件据此提供常驻恢复条（失败与暂停均可操作）。
        取消为协作式：已装载批次保留，重试入口可继续。 */
     retryLoad,

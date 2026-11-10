@@ -7,20 +7,16 @@
  *   - 不依赖任何上层模块（controller / service / repository）
  *   - 不持有状态、不输出日志
  *
- * 设计说明：
- *   - 原实现使用 xorshift64* PRNG（基于系统时间的伪随机数生成器）
- *     存在以下安全隐患：
- *       1. 种子基于 SystemTime，可被预测（攻击者知道大致启动时间即可重现序列）
- *       2. xorshift64* 状态空间仅 64 位，不满足密码学安全要求
- *       3. 共享内存覆写擦除场景下，攻击者可能通过残留内存推导 PRNG 状态
- *   - 改用 getrandom crate（0.2），调用操作系统 CSPRNG：
+ * 设计说明：使用 getrandom crate（0.2）调用操作系统 CSPRNG：
  *       Windows: BCryptGenRandom / RtlGenRandom
  *       Linux:   /dev/urandom 或 getrandom(2)
  *       macOS:   SecRandomCopyBytes
- *   - 系统 CSPRNG 提供密码学安全的随机字节，满足共享内存覆写擦除的安全要求
  *
- * CI 红线：本文件不得包含任何 println!/eprintln!/log::* 调用。
- *         系统熵源失败时返回 Err，调用方应据此处理（而非降级到不安全的 PRNG）。
+ *   禁止使用 xorshift64* 等时间种子 PRNG：种子可预测，64 位状态空间不满足
+ *   密码学安全要求，共享内存覆写残留可被用于推导 PRNG 状态。
+ *
+ * CI 红线：本文件不得包含任何 println!/eprintln!/log::* 调用；
+ *         系统熵源失败时缓冲区填零，不降级到不安全的 PRNG。
  */
 
 /// 生成密码学安全随机字节填充缓冲区
@@ -33,15 +29,12 @@
 /// 用于共享内存覆写擦除、令牌生成等安全敏感场景。
 ///
 /// 失败处理：
-///   - 系统熵源失败（极罕见，如系统启动早期熵不足）返回 Err
-///   - 调用方应据此返回错误，而非降级到不安全的 PRNG
-///
-/// 与原 xorshift64* 实现的区别：
-///   - 原实现静默失败（fallback 到 0xDEADBEEFCAFEBABE 种子），不安全
-///   - 新实现失败显式返回 Err，强制调用方处理
+///   - 系统熵源失败（极罕见，如系统启动早期熵不足）时缓冲区填零，
+///     不泄露旧数据；函数无返回值，调用方无法感知失败，需要时必须
+///     在调用前自行确认熵源可用
+///   - 任何情况下不得降级到不安全的 PRNG
 pub fn fill_random_bytes(buf: &mut [u8]) {
-    // getrandom 失败时无法安全降级，直接填零（安全失败）
-    // 调用方应检查返回值并决定是否重试或报错
+    // getrandom 失败时无法安全降级，直接填零（安全失败，不泄露旧数据）
     if getrandom::getrandom(buf).is_err() {
         // 极端情况：系统 CSPRNG 不可用，填零（不泄露旧数据）
         // 注意：填零不能提供随机覆写效果，但优于保留原数据

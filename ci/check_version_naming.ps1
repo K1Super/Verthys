@@ -1,4 +1,4 @@
-<#
+﻿<#
  * ci/check_version_naming.ps1 — 版本号工程化守卫
  *
  * 规则：

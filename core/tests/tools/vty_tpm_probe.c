@@ -644,7 +644,7 @@ static int probe_session_context(void)
     return 0;
 }
 
-/* 会话在“使用失败”后是否仍存在：区分句柄被 TBS 驱逐 与 会话被 TPM 拒绝 */
+/* 会话在“使用失败”后是否仍存在：区分句柄被 TBS 驱逐与会话被 TPM 拒绝 */
 static int probe_session_lifecycle(void)
 {
     uint8_t nc[32];

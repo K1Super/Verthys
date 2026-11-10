@@ -8,7 +8,7 @@
  *
  * 判定口径：
  *   PASS      = 实际结果符合该模式下的期望
- *   FAIL      = 实际结果不符合期望（修复后出现即回归）
+ *   FAIL      = 实际结果不符合期望（出现即回归）
  *   KNOWN_GAP = 当前阶段尚未实现的防护（登记目标阶段，不计入退出码）
  *   SKELETON  = 攻击用例骨架已登记，具体实现随对应阶段落地
  *
@@ -377,7 +377,7 @@ try {
     # 成功解锁本身允许写盘，先取基准，失败尝试的副作用相对此基准判定
     $hashAfterOpen = (Get-FileHash -LiteralPath $vaultPath -Algorithm SHA256).Hash
 
-    # 公开默认口令：基线模式期望攻击成功，修复后期望拒绝
+    # 公开默认口令：必须拒绝
     $probeCodes = [ordered]@{}
     foreach ($probe in @(
             @{ Label = 'public-constant'; Value = 'VERTHYS_DEFAULT_PASSWORD_v1' },

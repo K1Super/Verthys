@@ -7,8 +7,7 @@
  *   2. 模块登录（verifyModuleKey / logoutModule）
  *      —— 口令一次性交给 C 层解封 MDEK user 槽，本层只登记会话就绪标志。
  *   3. 模块状态查询（hasModuleKey / isModuleReady / isModuleKeyEnabled /
- *      loadModuleKeyStatus）——权威来源是 C 层 `v4_module_status`，
- *      不再读写 verthys 内的旧校验器/开关记录。
+ *      loadModuleKeyStatus）——权威来源是 C 层 `v4_module_status`。
  *
  * 语义：
  *   - 启用保护 = `v4_module_enable`：MDEK 从 Keyring 移入 user/device 槽，

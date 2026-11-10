@@ -1,8 +1,8 @@
 /**
  * verthys-getrecord.spec.ts — 单条记录读取的判别式语义测试
  *
- * 覆盖点：失败不再被折叠为空值——超出单条上限与通道异常可归类；
- * 兼容包装（原函数）行为保持不变。
+ * 覆盖点：失败可归类且不被折叠为空值——超出单条上限与通道异常均有明确原因；
+ * 兼容包装行为保持一致。
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 

@@ -742,7 +742,7 @@ const confirmDelete = async (): Promise<void> => {
   }
 };
 
-/* 修复「页面覆盖」：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
+/* 页面覆盖防护：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
 useModuleDialogGuard("accounts", () => {
   showPicker.value = false;
   showForm.value = false;
@@ -765,7 +765,7 @@ useModuleDialogGuard("accounts", () => {
    只能在该层内比较，故必须提升承载层本身；层级仍低于模块弹窗与加载遮罩。 */
 .search-layer { position: relative; z-index: 10; }
 
-/* 卡片网格：固定为旧版卡面实测的原始高度（148px = 原卡片自然高度上限），
+/* 卡片网格：固定行高 148px（卡片自然高度上限），
    卡片不随内容拉伸；完整信息由整卡点击的详情窗口承载。虚拟路径同高。 */
 .card-grid { grid-auto-rows: 148px; align-items: stretch; }
 

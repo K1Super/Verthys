@@ -1,4 +1,4 @@
-# 测试卫生：隔离真实熔断/回退状态，并回收测试创建的 TPM 见证密钥。
+﻿# 测试卫生：隔离真实熔断/回退状态，并回收测试创建的 TPM 见证密钥。
 #
 # 为什么需要回收见证密钥：状态文件位置（旧 LOCALAPPDATA 路径或
 # KnownFolder\Verthys\Security）不决定见证域；新代码的见证绑定设备根 +
@@ -217,6 +217,16 @@ function Complete-VerthysTestHygiene {
     }
     $Scope.Completed = $true
 
+    # 必须先核对真实锚点，再决定是否回收见证密钥。
+    # 若测试误改了真实熔断状态，它会同时轮换/新建见证；此时回收新见证会让
+    # 真实状态指向已删除的键，造成永久 fail-closed（无法创建/打开容器）。
+    # 因此一旦发现真实状态被改写，立即中止回收并保留全部见证。
+    $after = Get-VerthysRealAnchorFingerprint -LocalAppData $Scope.LocalAppData
+    if ($after -ne $Scope.AnchorFingerprint) {
+        throw ("测试污染了真实熔断/回退状态（已跳过见证回收以保护真实状态）：$($Scope.LocalAppData)`n" +
+            "before=$($Scope.AnchorFingerprint)`nafter=$after")
+    }
+
     $before = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($name in @($Scope.WitnessNames)) {
         if (-not [string]::IsNullOrEmpty($name)) { [void]$before.Add($name) }
@@ -240,11 +250,6 @@ function Complete-VerthysTestHygiene {
         Write-Host "[hygiene] 已回收测试见证密钥 $removed 个"
     }
 
-    $after = Get-VerthysRealAnchorFingerprint -LocalAppData $Scope.LocalAppData
-    if ($after -ne $Scope.AnchorFingerprint) {
-        throw ("测试污染了真实熔断/回退状态（旧路径或 Verthys\Security）：$($Scope.LocalAppData)`n" +
-            "before=$($Scope.AnchorFingerprint)`nafter=$after")
-    }
     if ($failures.Count -gt 0) {
         throw "见证密钥回收失败：$($failures -join '; ')"
     }

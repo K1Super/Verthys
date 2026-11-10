@@ -6,10 +6,6 @@
     2. 修改模式：验证原独立密钥（editingOldKeyValue，v-model 双向绑定）
     3. 新密钥输入框（内嵌显隐与随机生成端子，editingKeyValue，v-model 双向绑定）
     4. 确认保存按钮（禁用条件：editingKeyValue 为空 / 处理中 / 修改模式下原密钥为空）
-
-  Props: show / moduleLabel / hasRecord / keyDialogProcessing
-  Models: editingKeyValue / editingOldKeyValue
-  Emits: close / randomKey / confirm
 -->
 <template>
   <CosmicOverlay :show="show" width="460px" @close="$emit('close')">

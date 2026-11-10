@@ -2,6 +2,7 @@
  * app/bootstrap.ts — 应用启动控制器
  *
  * 职责：
+ *   - 在创建视图前判定启动展示形态（首映 / 直接进入）
  *   - 创建 Vue 应用实例
  *   - 挂载全局中间件（错误处理器、插件等）
  *   - 注册全局组件
@@ -14,6 +15,8 @@ import { createApp, type App as VueApp } from "vue";
 import App from "../App.vue";
 import { vueErrorHandler } from "./error-handler";
 import type { AppContext } from "./context";
+import type { LaunchPresentation } from "./launch-presentation";
+import { resolveLaunchPresentation } from "./launch-presentation-runtime";
 import { vTip } from "../directives/vTip";
 
 /**
@@ -22,8 +25,11 @@ import { vTip } from "../directives/vTip";
  * 接收上下文参数（注入式传递），创建应用实例并挂载中间件。
  * 入口层调用此函数后，控制权完全移交至此处。
  *
- * 缓存层组合根初始化（initVerthysCache）由 MainView.onBeforeMount 承担
- *   （懒加载架构修复）：本文件属静态入口图（index chunk），静态导入
+ * 启动展示判定必须先于 createApp：判定结果决定根组件渲染首映还是
+ * 直接进入，若先挂载再判定会出现引导页闪入。判定失败一律回退首映。
+ *
+ * 缓存层组合根初始化（initVerthysCache）由 MainView.onBeforeMount 承担：
+ *   本文件属静态入口图（index chunk），静态导入
  *   verthys-cache 会将 keyManager→verthys→crypto 整个业务层（~77KB）拖入
  *   主包，破坏「引导页轻首屏 + MainView 业务层异步分包」架构。
  *   MainView 为异步 chunk（已含 verthys-cache 全依赖树），其 onBeforeMount
@@ -31,9 +37,16 @@ import { vTip } from "../directives/vTip";
  *   domain 必已装配，initVerthysCache 契约（幂等 + ensureDomain fail-fast）
  *   保持不变。
  */
-export function bootstrap(ctx: AppContext): VueApp {
+export async function bootstrap(ctx: AppContext): Promise<VueApp> {
+  let launchPresentation: LaunchPresentation = "ceremony";
+  try {
+    launchPresentation = await resolveLaunchPresentation();
+  } catch {
+    // 判定边界兜底：任何异常都不得阻止应用挂载
+    launchPresentation = "ceremony";
+  }
 
-  const app = createApp(App);
+  const app = createApp(App, { launchPresentation });
 
   // ===== 挂载全局中间件 =====
 

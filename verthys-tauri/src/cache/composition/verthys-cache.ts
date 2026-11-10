@@ -1,21 +1,21 @@
 /*
  * cache/composition/verthys-cache.ts — Verthys 缓存层（对外 API 绑定层 / 组合根）
  *
- * 组合根增强设计落地：在并发重构基础上实施五项改进：
+ * 组合根：延迟初始化 domain，装配依赖并绑定对外 API：
  *   1. 延迟初始化：domain 的创建与依赖装配收拢进 initVerthysCache()，
  *      由应用启动流程（app/bootstrap.ts）显式调用，模块加载零副作用，
  *      杜绝"模块求值期依赖未就绪"的初始化时序隐患
- *   2. 打破循环依赖：不再 re-export background-tasks 的 start/stop，
+ *   2. 依赖单向：不 re-export background-tasks 的 start/stop，
  *      消费方直接从 core/background-tasks 导入；本文件仅保留对
  *      stopBackgroundTasks 的钩子注入（domain → core 依赖单向化）
- *   3. 类型安全绑定：全部对外 API 改为显式包装函数（含返回类型标注），
- *      彻底消除 .bind 的类型推断丢失（尤其泛型与重载签名）
+ *   3. 类型安全绑定：全部对外 API 为显式包装函数（含返回类型标注），
+ *      避免 .bind 的类型推断丢失（尤其泛型与重载签名）
  *   4. 接口隔离：领域层依赖 KeyStateForCache 最小接口，
- *      不再接收完整 keyState（含全部 Vue 响应式状态）
- *   5. 封装性增强：快照提供者注册经 domain.registerSnapshotProvider()
+ *      不接收完整 keyState（含全部 Vue 响应式状态）
+ *   5. 封装：快照提供者注册经 domain.registerSnapshotProvider()
  *      内部封装，组合根不直接触碰领域内部方法
  *
- * 五大缓存职责说明（与旧版一致，职责划分同 verthys-cache-domain.ts 头注）：
+ * 五大缓存职责：
  *   1. 模块数据缓存（跨路由/模块切换持久化，消除"先空后有"闪烁）
  *   2. 模块独立密钥会话缓存（明文，lockAll 时清零，Uint8Array 可零填充）
  *   3. 共享记录扫描缓存（LRU-5000 + 64KB 大体积管控，消除多模块重复扫描）
@@ -45,9 +45,9 @@
  *     消费方直接导入，不再经本文件转发。
  *
  * 初始化契约：
- *   - initVerthysCache() 幂等，由 MainView.onBeforeMount 调用（懒加载
- *     架构修复：bootstrap 静态导入会将业务层拖入 index 主包 — 已迁出；
- *     父先于子挂载时序保证先于全部子组件消费方）；
+ *   - initVerthysCache() 幂等，由 MainView.onBeforeMount 调用（bootstrap
+ *     静态导入会把业务层拖入 index 主包，故延迟到挂载期；父先于子挂载
+ *     的时序保证先于全部子组件消费方）；
  *   - 全部对外 API 经 ensureDomain() 守卫：未初始化时 fail-fast 抛出
  *     （可诊断的初始化顺序缺陷优于静默 undefined）。
  */
@@ -72,8 +72,7 @@ import {
   pendingDeletionIds,
   committedDeletionIds,
 } from "./verthys-flush";
-// 仅注入停止钩子（clearAllVerthysCaches 前置等待后台任务终止）；
-//   startBackgroundTasks 不再由本文件导入或转发
+// 仅注入停止钩子（clearAllVerthysCaches 前置等待后台任务终止）
 import { stopBackgroundTasks } from "../../core/background-tasks";
 import { verthysModuleKeyLock } from "../../lib/verthys";
 import { createLogger } from "../../utils/logger";
@@ -179,11 +178,11 @@ function ensureDomain(): VerthysCacheDomain {
 }
 
 /* ------------------------------------------------------------------ *
- * 对外 API 绑定（签名与旧版逐一对应）                                  *
+ * 对外 API 绑定                                                   *
  *                                                                    *
- * 全部导出改为显式包装函数并标注返回类型，                       *
- *   彻底避免 .bind 绑定造成的泛型擦除与重载签名类型推断丢失；         *
- *   每次调用经 ensureDomain() 守卫，未初始化 fail-fast。              *
+ * 全部导出为显式包装函数并标注返回类型，同时避免 .bind 绑定造成的     *
+ *   泛型擦除与重载签名类型推断丢失；每次调用经 ensureDomain() 守卫，    *
+ *   未初始化 fail-fast。                                              *
  * ------------------------------------------------------------------ */
 
 /* === 1. 模块数据缓存 === */

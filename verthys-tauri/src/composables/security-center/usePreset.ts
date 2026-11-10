@@ -24,9 +24,6 @@
  *   - 预设应用防重复：presetApplying 标志禁用按钮
  *   - 锚点播种：初始游标与激活锚点直接按后端权威档位推导（自定义档无锚点）
  *   - 氛围迟滞：阈值带 25/75 进入、31/69 退出，由 watch 收敛写 ref，computed 只读
- *
- * 设计：纯 Composable，所有外部依赖通过参数注入，状态和方法返回给调用方。
- *      loadPresetConfig 需由 SecurityCenter 在 onMounted / watch(globalKeyReadyRef) 中调用。
  */
 
 import { ref, computed, watch, onBeforeUnmount, type Ref } from 'vue';
@@ -99,10 +96,9 @@ export interface UsePresetOptions {
  */
 export function usePreset(options: UsePresetOptions) {
   /* ===== 预设特性列表（与 Rust PresetFeatures 字段对齐） =====
-   * 注意：`key_separation` 是 11 位契约中的遗留键名。产品构建不再
-   * 链接旧 CNG 三权分立实现，该位映射到真实生效的密钥隔离堆
-   * （secure_allocator + memory_guard + 锁定/应急清零），展示文案必须描述
-   * 实际能力，不得继续宣称三权分立。 */
+   * 注意：`key_separation` 是 11 位契约中的遗留键名，实际映射到真实生效的
+   * 密钥隔离堆（secure_allocator + memory_guard + 锁定/应急清零），展示文案
+   * 必须描述实际能力，不得宣称三权分立。 */
   const presetFeatureList: { key: keyof PresetFeatures; label: string; desc: string }[] = [
     { key: "anti_debug", label: "调试检测", desc: "检测调试器并阻断附加" },
     { key: "anti_inject", label: "注入拦截", desc: "拦截 DLL 注入并加固搜索顺序" },

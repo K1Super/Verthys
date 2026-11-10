@@ -74,7 +74,7 @@ impl ChunkLedger {
 
     /// 返回 owner==0（未被任何 meta 引用）的块记录 ID，升序
     ///
-    /// 冻结条目（{@link UNVERIFIABLE_OWNER}）不在此列：它们归属不可证明，
+    /// 冻结条目（`UNVERIFIABLE_OWNER`）不在此列：它们归属不可证明，
     /// 任何情况下都不得进入回收候选。
     pub fn garbage_ids(&self) -> Vec<u64> {
         let mut ids: Vec<u64> = self
@@ -207,7 +207,7 @@ pub fn load_chunk_ledger(verthys_path: &str) -> Result<ChunkLedger, String> {
 /// （`save_chunk_ledger`）负责真正持久化并清理日志，稳态文件数量有界。
 ///
 /// 不逐批刷盘同时消除了导入热路径上「每批块一次 FlushFileBuffers」的
-/// 分钟级磁盘停顿风险（慢盘/实时扫描下这是实测的首要卡顿来源）。
+/// 分钟级磁盘停顿风险（慢盘/实时扫描下是首要卡顿来源）。
 pub fn append_chunk_ledger_entries(
     verthys_path: &str,
     entries: &[(u64, u64)],

@@ -1,12 +1,11 @@
 <!--
   CosmicBackdrop.vue — 通用宇宙主题背景层（深空巡天场）
-  反大众化重构（与 CosmicBackground/HomeAtlas 同源引力视觉语法）：
-    - 根除：正中心 conic 光晕环（刻板圆环+辉光泛滥）、对称闪烁星点、
-      同轨迹模板流星
-    - 星云：预烘焙贴图 × 4，色板收敛深空冷调（青/紫/银/金），
+  视觉语法（与 CosmicBackground / HomeAtlas 同源）：
+    - 无中心 conic 光晕环（避免刻板圆环与辉光泛滥）、无对称闪烁星点、
+      无同轨迹模板流星
+    - 星云：预烘焙贴图 × 4，色板为深空冷调（青/紫/银/金），
       非对称多相位漂移（周期边界恒连续）
-    - 星点：复合谐波闪烁（多相位非等距关键帧 — 拒绝 0/50/100 对称模板），
-      无辉光 shadow（纯暗点）
+    - 星点：复合谐波闪烁（多相位非等距关键帧），无辉光 shadow（纯暗点）
     - 流星：双流星全参数差化（角度/轨迹矢量/周期/相位/长度各异 —
       非等比轨迹，非同步往复）
   用法：
@@ -18,7 +17,7 @@
 <template>
   <div
     class="cosmic-backdrop"
-    :class="{ fixed, 'view-layer': layer === 'view', 'veil-lucent': veil === 'lucent' }"
+    :class="{ fixed, 'view-layer': layer === 'view', 'veil-lucent': veil === 'lucent', 'cb-paused': paused }"
     :style="backdropStyle"
     @click.self="onBackdropClick"
   >
@@ -64,12 +63,15 @@ interface Props {
   veil?: "deep" | "lucent";
   /** 显式遮罩层级：仅高优先弹窗传入；不传时沿用样式表中的层级 */
   zIndex?: number;
+  /** 加载期降载：暂停星云/星点常驻动画，把合成带宽让给进度补间 */
+  paused?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   fixed: false,
   layer: "modal",
   veil: "deep",
+  paused: false,
 });
 
 const emit = defineEmits<{ (e: "backdrop"): void }>();
@@ -79,11 +81,9 @@ const onBackdropClick = () => emit("backdrop");
 /* ============================================================================
  * 预渲染贴图：SVG 位图（渐变 + feGaussianBlur 烘焙）
  * ============================================================================
- * 与 CosmicBackground 同手法：浏览器将 data-URI SVG 背景图栅格化一次并缓存
- * 为纹理，运行时不再执行实时重栅格化（星云 drift 动画只驱动
- * transform/opacity，纯合成）。
- * 色板收敛：粉 (255,110,180) → 金 (255,217,160)、薄荷 (0,255,200) →
- *   银 (205,224,244) — 与品牌谱线/引力星图同源深空冷调四色体系。
+ * 浏览器将 data-URI SVG 背景图栅格化一次并缓存为纹理，运行时不再实时
+ * 重栅格化（星云 drift 动画只驱动 transform/opacity，纯合成）。
+ * 色板：青 / 紫 / 银 / 金 — 与品牌谱线、引力星图同源深空冷调四色体系。
  */
 const svgUrl = (svg: string): string =>
   `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
@@ -164,11 +164,9 @@ const stars = Array.from({ length: 26 }, (_, i) => ({
   overflow: hidden;
 }
 /* 幕层：遮罩底色与星野装饰的唯一载体
- * 性能根治：全屏 backdrop-filter 叠在 60fps WebGL 粒子画布上 =
- * 合成器每帧对整个视口做 14px 模糊重采样（GPU 击穿主因）。
- * 去实时毛玻璃 → 遮罩底色加深补偿（背后本就是弥散星空，
- * 0.86 暗化层的视觉等效模糊后的景深压暗）；遮罩自身的
- * 星云/星点/流星装饰层（纯合成器 transform/opacity）不受影响 */
+ * 性能约束：不使用 backdrop-filter — 全屏模糊叠在 60fps WebGL 粒子画布
+ * 上会让合成器每帧重采样整个视口；改用 0.86 暗化层达到等效景深压暗。
+ * 星云/星点/流星装饰层只走合成器 transform/opacity，不受影响 */
 .cb-veil {
   position: absolute;
   inset: 0;
@@ -208,6 +206,15 @@ const stars = Array.from({ length: 26 }, (_, i) => ({
 @keyframes cb-fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+/* ===== 加载期降载 =====
+   解密/IPC 进行时，星云 mix-blend-mode 与 26 颗星点的常驻动画会和
+   进度补间争用合成带宽。暂停只作用于环境动画，不影响可见结构；
+   恢复时从暂停点继续，无跳变。 */
+.cosmic-backdrop.cb-paused .cb-nebula,
+.cosmic-backdrop.cb-paused .cb-star {
+  animation-play-state: paused;
 }
 
 /* ===== 动态星云背景层 ===== */

@@ -34,7 +34,7 @@ int verthys_crypto_init(void);
  *   SECURE  ：64MiB / 3 iters / 1 parallel（单次派生 6-15s）
  *             涉密/合规场景，沿用 VERTHYS_ARGON2_MEM_KIB/ITERS/PARALLEL
  *
- * 旧容器超级块已存 64MiB/3/1，解锁时按超级块实际参数派生，向后兼容。
+ * 超级块保存的实际参数优先于代码默认值，解锁时按超级块参数派生。
  * 新建 BALANCED 容器写入 32MiB/2/1，解锁 3s 目标的核心达标项。 */
 #define VERTHYS_ARGON2_BALANCED_MEM_KIB   32768u  /* 32 MiB */
 #define VERTHYS_ARGON2_BALANCED_ITERS     2u
@@ -43,7 +43,7 @@ int verthys_crypto_init(void);
 #define VERTHYS_ARGON2_CALIBRATE_TARGET_MS 1200u  /* 创建期目标派生耗时 */
 #define VERTHYS_ARGON2_BALANCED_ITERS_MAX   3u    /* 迭代上限（32MiB×3 ≈ 2.2s，守住 1~2s 预算） */
 
-/* Argon2id 规范范围（解锁时校验超级块参数，越界回退默认值） */
+/* Argon2id 参数硬边界（解锁时校验超级块参数，越界拒绝） */
 #define VERTHYS_ARGON2_MEM_KIB_MIN        8u                /* 8 KiB */
 #define VERTHYS_ARGON2_MEM_KIB_MAX        (4u * 1024u * 1024u)  /* 4 GiB */
 #define VERTHYS_ARGON2_ITERS_MIN          1u
@@ -101,7 +101,7 @@ int verthys_argon2id_derive_raw(uint8_t out[VERTHYS_KEY_BYTES],
  * 完全参数化的密钥派生接口
  *                                                                    *
  * 设计目标：                                                          *
- *   Argon2id 参数（内存、迭代、并行度）不再硬编码于代码常量，          *
+ *   Argon2id 参数（内存、迭代、并行度）不硬编码于代码常量，           *
  *   由调用方从超级块读取后传入，支持自定义预设容器（PERFORMANCE/      *
  *   SECURE/CUSTOM 各档参数不同），彻底解耦代码与固定强度。            *
  *                                                                    *

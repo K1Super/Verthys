@@ -27,7 +27,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* 沙盒属性位掩码（与 worker defense.rs 常量严格对齐） */
+/* 沙盒属性位掩码（与 Worker 端沙箱常量严格对齐） */
 #define SANDBOX_ATTR_WIN32K_SYS_DISABLE   0x01  /* 禁用 Win32k 系统调用 */
 #define SANDBOX_ATTR_PROCESS_CREATE_DISABLE 0x02  /* 禁止创建子进程 */
 #define SANDBOX_ATTR_IMAGE_PREFER_SYS32   0x04  /* System32 优先加载 */

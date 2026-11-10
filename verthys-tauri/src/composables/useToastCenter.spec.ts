@@ -1,13 +1,13 @@
 /**
  * useToastCenter.spec.ts — 全局 Toast 中心单例语义与通道行为回归
  *
- * 覆盖（Wave 56 收口约束的防回退门）：
+ * 覆盖（防回退约束）：
  * - 单例语义：任意调用方写入收敛到同一份状态（跨 composable 共享不丢失 —
- *   旧 useErrorToast 非单例导致提示丢失的问题不得复活）
+ *   各调用方另行持有状态会丢失提示）
  * - 各通道自动消失时长：error 2.5s / status 2.5s（可显式覆写）/
  *   copied 1.5s / exportDone 2.6s；重复触发重置计时
  * - 通道互不干扰：同屏并存时各通道独立计时与覆盖
- * - 剪贴板清空提示不再使用长驻通道（改由 status 轮番呈现，见 useClipToast.spec）
+ * - 剪贴板清空提示不使用长驻通道（改由 status 轮番呈现）
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { toastState, useToastCenter } from "./useToastCenter";

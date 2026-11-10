@@ -121,7 +121,7 @@ static int run_hold(const char *vault_path)
         return 3;
     }
     rc = vty_vault_save(v);
-    /* 改密不再轮换恢复码；原码继续作为独立凭据被内存扫描覆盖。 */
+    /* 改密只轮换口令槽，恢复码保持不变；恢复码作为独立凭据被内存扫描覆盖。 */
     if (rc == VTY_OK) rc = vty_vault_rotate_password(v, pw2);
     vty_vault_free(v);
     v = NULL;

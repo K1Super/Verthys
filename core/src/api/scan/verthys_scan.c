@@ -2,13 +2,12 @@
  * verthys_scan.c — 游标式批量数据扫描底层实现模块
  *
  * 三段式标准游标调用范式：打开游标 Open → 循环批量拉取 Fetch →
- * 关闭释放 Close。彻底规避单条记录循环查询带来的 LSM 重复查找开销，
+ * 关闭释放 Close。彻底规避单条记录循环查询带来的重复查找开销，
  * 大幅提升大批量列表遍历性能。
  *
  * 内置全链路安全防护体系：
- * 1. 游标绑定打开瞬间 LSM 快照（open 时深拷贝 MemTable 编码流 +
- *    SSTable 元数据/块迭代器），遍历过程不受并发写入事务数据变更干扰
- *    （快照隔离由 LSM 结构性保证）
+ * 1. 游标绑定打开瞬间的目录叶快照（COW 根固定），遍历过程不受并发写入
+ *    干扰，也不会看到打开后新提交的记录
  * 2. 每次数据拉取执行全局应急熔断状态检测，触发安全紧急机制时直接停止对外服务
  * 3. 游标内存对象托管至内存防护管理器，系统紧急清零指令下发时自动覆写销毁敏感内容
  * 4. 通过内存页锁定API将游标常驻物理内存，防止页面置换交换至磁盘引发内存数据泄露
@@ -460,7 +459,7 @@ VerthysResult Verthys_ScanClose(VerthysScanCursor *cursor)
 {
     if (cursor == NULL) return VERTHYS_ERR_INVALID;
 
-    /* 先释放 目录叶游标快照迭代器，再清零游标本身 */
+    /* 先释放目录叶游标快照迭代器，再清零游标本身 */
     if (cursor->vault_iter != NULL) {
         vty_repo_iter_close(cursor->vault_iter);
         cursor->vault_iter = NULL;
@@ -485,9 +484,8 @@ VerthysResult Verthys_ScanClose(VerthysScanCursor *cursor)
  * 轻量摘要扫描子模块（仅读取索引元数据，不加载解密实际文件数据块）      *
  *
  * 与全量扫描核心差异：
- * 1. 游标创建逻辑完全复用同一套 LSM 快照迭代器骨架，仅Fetch拉取实现不同
- * 2. 仅读取 LSM 条目元数据 + Extent 索引内存回查，不触发数据块 IO 与
- *    解密函数，遍历性能大幅提升
+ * 1. 游标创建复用同一套目录叶快照迭代骨架，仅 Fetch 拉取实现不同
+ * 2. 只读目录叶元数据，不触发记录段 IO 与解密函数，遍历性能大幅提升
  * 3. 仅拷贝名称字符串做堆深拷贝，其余数值字段直接赋值，内存开销极低
  * 4. 槽位状态完整透传给上层，用于前端区分正常、待回收、写入中条目展示样式
  * ================================================================== */
@@ -600,7 +598,7 @@ VerthysResult Verthys_ScanSummaryRecordFree(VerthysSummaryRecord *record)
 /* ------------------------------------------------------------------ *
  * 轻量级记录类型存在性检查                                             *
  *                                                                    *
- * LSM 快照迭代器仅检查 type 字段，不分配 name 堆内存，不访问数据区块。  *
+ * 目录叶游标仅检查 type 字段，不分配 name 堆内存，不访问数据区块。  *
  *                                                                    *
  * 相比 ScanSummaryOpen+Fetch 循环：                                    *
  *   - 消除多次 IPC 往返开销（C 层一次调用完成）                        *
@@ -654,12 +652,10 @@ VerthysResult Verthys_HasRecordByType(VerthysHandle handle,
  * 与 Verthys_HasRecordByType 的关键差异：                                *
  *   同时返回 found 标志与匹配记录的 lid（单次遍历，轻量探测无解密 IO）  *
  *                                                                    *
- * 历史背景：unlock 后 UI 卡死根因为早期容器调用                         *
- * Verthys_HasRecordByType 返回 VERTHYS_ERR_FORMAT → 前端 probe 抛异常 →   *
- * 进异步确认 loading 视图 → viewMode 永久卡 "loading"。本函数将       *
- * "是否存在全局密钥记录 + lid"下沉到 worker 进程内执行，彻底消除      *
- * unlock 后 probe IPC 链。未找到返回 VERTHYS_OK + out_found=0          *
- * （不报 FORMAT，避免前端 probe 抛异常）。                            *
+ * 语义：存在性判断与 lid 获取一次完成，供 unlock 路径内联使用，
+ * 避免调用方再发起“先探测、后取记录”的多轮调用。
+ * 未找到返回 VERTHYS_OK + out_found=0：类型不存在是正常状态，
+ * 报 FORMAT 会让调用方误判为格式故障。
  * ------------------------------------------------------------------ */
 VerthysResult Verthys_FindFirstLidByType(VerthysHandle handle,
                                      uint8_t rtype,
@@ -710,7 +706,7 @@ VerthysResult Verthys_FindFirstLidByType(VerthysHandle handle,
  *
  * 为什么不复用摘要扫描：摘要不读记录密文，type 恒为未知 0；
  * 业务类型在写入时已进入 VTY_KS_TYPE 盲索引，枚举该索引既准确
- * 又不需要解密记录段，且对历史 容器天然兼容。
+ * 又不需要解密记录段，对既有容器同样适用。
  * ------------------------------------------------------------------ */
 VerthysResult Verthys_ListIdsByType(VerthysHandle handle,
                                     uint8_t rtype,

@@ -63,11 +63,11 @@ pub async fn security_cleanup_recent(
 
 /// 安全删除文件
 ///
-/// path 参数改为 logical_id（"verthys_dir"/"temp_dir"/"data_dir"），
-///               由后端从受信上下文解析实际路径。
-/// 使用 spawn_blocking 执行 Gutmann/Simple 覆写（可能耗时数秒）。
+/// logical_id（"verthys_dir"/"temp_dir"/"data_dir"）由后端从受信上下文
+///               解析实际路径。
+/// 使用 spawn_blocking 执行覆写删除（可能耗时数秒）。
 ///
-/// mode: "gutmann"=35-pass(Gutmann 标准), "simple"=3-pass(随机覆写)
+/// mode: "ssd"=单遍覆写 + TRIM，其余值=单遍全零覆写（Standard）
 /// file_name: 相对于逻辑目录的文件名（不允许包含 .. 或绝对路径）
 #[tauri::command]
 pub async fn security_secure_delete(
@@ -102,7 +102,6 @@ pub async fn security_secure_delete(
         return Err("目标路径不在白名单基目录内（安全拒绝）".into());
     }
 
-    // 彻底移除 Gutmann 35 遍覆写模式
     // 仅提供 Standard（1 遍全零覆写）和 SSD（覆写 + TRIM）模式
     let delete_mode = match mode.as_str() {
         "ssd" => DeleteMode::Ssd,
@@ -144,7 +143,7 @@ pub async fn security_secure_delete(
 
 /// 清理崩溃残留临时文件
 ///
-/// 不再接收前端传入的 temp_dir，改用 app_config_dir/tmp。
+/// 临时目录取自 app_config_dir/tmp（逻辑标识符 temp_dir）。
 /// 使用 spawn_blocking 执行文件系统扫描和清理。
 #[tauri::command]
 pub async fn security_cleanup_crash_residue(

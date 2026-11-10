@@ -177,7 +177,9 @@ pub async fn verthys_rotate_commit(
     app: tauri::AppHandle,
     keep_old: Option<bool>,
 ) -> Result<VerthysResponse, String> {
-    let keep_old = keep_old.unwrap_or(false);
+    /* 默认保留旧库：轮换涉及全库密钥重建，旧库是唯一可独立打开的
+     * 兜底副本。用户显式传 false 才删除。 */
+    let keep_old = keep_old.unwrap_or(true);
     let resp = forward(vault_rotate::commit(&app, keep_old));
     let mut audit_detail = format!("keep_old={}", keep_old);
     if matches!(&resp, Ok(r) if r.ok) {

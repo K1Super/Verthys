@@ -15,8 +15,7 @@
  *      .rhat 只读节（复用 .vsec 的"构建后补丁"模式——避免两遍链接）。
  *   2. 运行期（本文件 scan）：解析自身内存映像的 .reloc，对每条表项
  *      复制函数字节并掩码重定位槽位（与构建期归一化方式逐字节一致，
- *      杜绝 ASLR 重定位导致的跨启动误报——.vsec 同类教训，见
- *      integrity.h 完整性设计注记），重算 BLAKE2b 与表内基准比对。
+ *      杜绝 ASLR 重定位导致的跨启动误报），重算 BLAKE2b 与表内基准比对。
  *   3. 失配 = 进程内存被篡改（高置信度）→ KILL 级应急响应
  *      （EMERG_SIG_PROCESS_TAMPER；.vsec 文件篡改走 INTEGRITY_FAIL，
  *      两者信号语义区分）。
@@ -122,7 +121,7 @@ typedef struct VerthysRhatBlob {
     uint32_t flags;       /* 预留 0 */
     uint32_t reserved;
     VerthysRhatEntry entry[VERTHYS_RUNTIME_HASH_MAX];
-} VerthysRhatBlob;          /* 16 + 48×40 = 1936 字节 */
+} VerthysRhatBlob;          /* 16 + 48×48 = 2320 字节 */
 
 #pragma pack(pop)
 

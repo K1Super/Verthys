@@ -7,20 +7,16 @@
     4. 确认按钮（解锁/创建）
     5. 脉冲星磁层辐射加载 + 解锁进度实时反馈
 
-  悬浮场重构（替代卡片式 CosmicDialog）：
+  悬浮场布局（零底板，不套用卡片式 CosmicDialog）：
     - 零底板：UI 组件直接悬浮于遮罩之上（LevitationField 透视舞台）
     - 节点协议：ff-node（深空定位入射 — 一次性，终态静态驻留；
-      指针视差/斥力/漂移体系已彻底移除，弹窗静态）
+      无指针视差/斥力/漂移，弹窗保持静态）
     - 排印：协议谱号（VERTHYS · STORAGE）+ 轨道基准线场域命名
-
-  Props: verthysPath / unlocking / pendingIsCreate / unlockProgressMsg /
-         unlockProgressPercent / unlockProgressElapsed / initStatusRef / initDetailRef
-  Emits: unlock / back / openExisting / createNew
 -->
 <template>
   <div class="view-unlock">
     <Teleport to="body">
-    <CosmicBackdrop fixed layer="view" @backdrop="$emit('back')">
+    <CosmicBackdrop fixed layer="view" :paused="unlocking" @backdrop="$emit('back')">
     <LevitationField width="330px" class="ff-field--stable">
 
       <div class="ff-node ff-node--brand">
@@ -39,7 +35,7 @@
         </div>
       </div>
 
-      <!-- ：修复失败告警 — repair_fail_count >= 3 时显示（左缘警示刻线） -->
+      <!-- 修复失败告警 — 初始化详情含 ⚠ 时显示（左缘警示刻线） -->
       <div v-if="initDetailRef && initDetailRef.includes('⚠')" class="ff-node ff-node--body">
         <div class="sc-repair-alert">{{ initDetailRef }}</div>
       </div>
@@ -48,7 +44,7 @@
         <div class="form-row">
           <div class="path-row">
             <div class="path-status" :class="{ active: verthysPath, 'path-status--recover': canRecover }">
-              <!-- 已选存储位置（文件名 + 完整路径悬停可见；旧实现完全不显示） -->
+              <!-- 已选存储位置（文件名 + 完整路径悬停可见） -->
               <span class="ps-path" :class="{ 'ps-path--empty': !verthysPath }" :title="verthysPath || '未选择存储位置'">{{ selectedPathDisplay }}</span>
               <!-- 锁定刻痕组（静态点亮 — 选中确认） -->
               <div class="ps-lock">
@@ -102,11 +98,10 @@
       </div>
 
       <!-- 确认按钮（轨道巡行提交 — 悬浮场锚点）
-           布局零位移根治：按钮常驻（未选路径时 disabled）—
-           checkInitStatus 异步自动填充 verthysPath 时仅切换可用态，
-           节点不再突然挂载（原 v-if="!unlocking && verthysPath" 会使
-           内容高度 +50px → justify-content: center 重新分布 →
-           全场内容瞬间下移 ~25px 的布局抖动） -->
+           布局零位移：按钮常驻（未选路径时 disabled）—
+           checkInitStatus 异步自动填充 verthysPath 时仅切换可用态；
+           若按 verthysPath 条件挂载该节点，内容高度 +50px 会使
+           justify-content: center 重新分布 → 全场内容瞬间下移 ~25px。 -->
       <div v-if="!unlocking" class="ff-node ff-node--action">
         <CosmicSubmit
           label="确认"
@@ -120,8 +115,8 @@
       <!-- 引力吸积加载 + 导流通道（按代码关键节点推进进度，精简提示词） -->
       <div class="ff-node ff-node--body">
         <QuantumProgressFlow
-          :loading="unlocking"
-          :percent="unlockProgressPercent"
+          :loading="unlocking && !progressSuppressed"
+          :percent-source="progressSource"
           :message="unlockProgressMsg"
           :dimmed="dimmed"
         />
@@ -134,7 +129,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, type Ref } from "vue";
 import CosmicBackdrop from "../common/cosmic/CosmicBackdrop.vue";
 import LevitationField from "../common/cosmic/LevitationField.vue";
 import CosmicSubmit from "../common/cosmic/CosmicSubmit.vue";
@@ -149,10 +144,15 @@ const props = defineProps<{
   verthysPath: string;
   /** 解锁处理中标志 */
   unlocking: boolean;
+  /** 抑制底层解锁进度显示
+   *
+   * 恢复码弹窗提交期间由弹窗内的验证态承载进度；底层进度仍按同一流程
+   * 推进，但不得同时渲染，否则同一操作出现两套进度叙事。 */
+  progressSuppressed?: boolean;
   /** 解锁进度消息（阶段描述） */
   unlockProgressMsg: string;
-  /** 解锁进度百分比（感知层输出的平滑视觉值，非后端离散跳变值） */
-  unlockProgressPercent: number;
+  /** 进度视觉值来源（感知层 ref；由进度条组件直接订阅，避免整视图逐帧重渲染） */
+  progressSource?: Readonly<Ref<number>>;
   /** 失败冻结降级标识（进度条降级呈现） */
   dimmed?: boolean;
   /** 解锁进度累计耗时 */
@@ -209,6 +209,6 @@ defineEmits<{
 .path-status--recover .ps-lock {
   padding-right: 84px;
 }
-/* 选择指示格（keyfile 保护）由全局共享层承载，本视图不再重复声明 */
+/* 选择指示格（keyfile 保护）由全局共享层承载，本视图无需声明 */
 </style>
 

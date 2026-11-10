@@ -43,12 +43,12 @@ const SCAN_INDEX_INLINE_MAX_BYTES: u64 = crate::runtime::budget::PB_SCAN_INDEX_I
 const VERTHYS_ERR_RATE: u32 = 0x0000000A;
 
 /// 解锁失败响应：库锁命中时附带剩余秒数，供 UI 展示“已锁定 X 秒”。
-fn unlock_error(worker: &Worker, rc: u32) -> Response {
+fn unlock_error(worker: &Worker, op: &str, rc: u32) -> Response {
     if rc == VERTHYS_ERR_RATE {
         let secs = worker.call_get_lib_lockout_remaining().unwrap_or(0);
-        return Response::err_with_retry("unlock", rc, secs);
+        return Response::err_with_retry(op, rc, secs);
     }
-    Response::err("unlock", rc)
+    Response::err(op, rc)
 }
 
 /// 解析扫描投影请求字段 → C 层 VerthysScanProject 取值
@@ -341,10 +341,10 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                                 ..Response::ok("unlock")
                             };
                         }
-                        return unlock_error(worker, r2);
+                        return unlock_error(worker, "unlock", r2);
                     }
                 }
-                unlock_error(worker, r)
+                unlock_error(worker, "unlock", r)
             }
         }
         "lock" => {
@@ -922,6 +922,8 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
         // 内容层加解密（分片密钥只在 C 层持有，worker 不缓存模块口令）
         "module_seal" => module_keys::handle_seal_v4(req, worker),
         "module_open" => module_keys::handle_open_v4(req, worker),
+        /* 损坏扫描专用：只验证模块密钥外层，不要求文件口令、不校验种类标签。 */
+        "module_probe_outer" => module_keys::handle_probe_outer(req, worker),
         // 模块 M1 会话（口令只转发 C，MDEK 不进入 worker）
         "v4_create" => {
             if let Some(denied) = require_path_grant("v4_create", "write", &req.path) {
@@ -1023,7 +1025,9 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                     ..Response::ok("v4_unlock_keyfile")
                 }
             } else {
-                Response::err("v4_unlock_keyfile", rc)
+                /* RATE 时与 unlock 一致附带本地退避剩余秒数；机器预算拒绝
+                 * 时秒数为 0，宿主据此区分“退避中”与“服务拒绝/不可用”。 */
+                unlock_error(worker, "v4_unlock_keyfile", rc)
             }
         }
         "v4_keyfile_status" => match worker.call_keyfile_status() {

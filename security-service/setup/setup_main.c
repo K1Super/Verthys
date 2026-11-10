@@ -2,8 +2,8 @@
  * setup_main.c — VerthysSecuritySvc.exe 的安装/卸载子命令实现
  *
  * 支持 /install（默认）、/uninstall、/repair、/reset-state、/repair-keys、
- * /status、/quiet、/keep-state。由服务 exe 的 wmain 依据首参分发；
- * 不再构建独立安装器可执行文件。降级一律拒绝，不保留旧版本兼容开关。
+ * /status、/quiet、/keep-state。由服务 exe 的 wmain 依据首参分发。
+ * 降级一律拒绝。
  *
  * 安全边界：
  *   - 安装逻辑不生成私钥；私钥只由服务首次启动生成。

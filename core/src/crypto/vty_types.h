@@ -52,8 +52,8 @@ typedef enum {
 /* 容器头部 */
 #define VTY_MAGIC         0x59545256u   /* 小端 0x56 'V' 0x52 'R' 0x54 'T' 0x59 'Y' */
 #define VTY_VERSION_MAJOR VERTHYS_CONTAINER_FORMAT_VERSION
-/* 数据区/数据根格式。1 是模块表之前的旧格式；只接受当前值，
- * 不提供双解析，否则攻击者可在同一文件里诱导解析器走不同语义。 */
+/* 数据区/数据根格式。只接受当前值，不提供双解析，
+ * 否则攻击者可在同一文件里诱导解析器走不同语义。 */
 #define VTY_VERSION_MINOR 2u
 #define VTY_HEADER_FIXED_BYTES 76u
 #define VTY_HEADER_HASH_BYTES  32u
@@ -122,7 +122,7 @@ typedef enum {
 #define VTY_DOMAIN_EMPTY_ROOT  "verthys/v4/empty-root"
 #define VTY_DOMAIN_SYSTEM_RECORD "verthys/v4/system-record"
 
-/* Keyring 条目种类。只保留 K_c、MDEK 与 DataRoot；GMK 不再生成，
+/* Keyring 条目种类：K_c、MDEK 与 DataRoot；GMK 不生成，
  * 以免在“口令 + 设备根”之外多出一条可被单独攻击的密钥层。 */
 #define VTY_KEYKIND_KC        1u
 #define VTY_KEYKIND_MDEK      3u
@@ -145,7 +145,7 @@ typedef enum {
 #define VTY_KS_MODULE 5u
 
 /* 模块表固定三槽；module_index 是公开枚举（photo/accounts/fileverthys），
- * 不再依赖 Keyring 条目顺序。 */
+ * 不依赖 Keyring 条目顺序。 */
 #define VTY_MODULE_COUNT 3u
 #define VTY_MODULE_DESC_FIXED 64u
 #define VTY_MODULE_RECOVERY_BYTES 76u

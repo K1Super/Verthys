@@ -149,8 +149,8 @@ pub fn lock_file_for(verthys_path: &str) -> PathBuf {
 ///   - 路径被同名文件占用：返回明确错误，由调用方决定拒绝或降级；
 ///   - 派生路径超出 MAX_PATH：返回明确错误（长路径前缀 `\\?\` / `\\.\` 不受限）。
 ///
-/// 长度口径：按容器路径的 UTF-8 字节数 + {@link MAX_DERIVED_EXTRA} 判定，
-/// 与 {@code util::path::validate_path_input} 的字节口径一致（含多字节字符时偏保守）。
+/// 长度口径：按容器路径的 UTF-8 字节数 + `MAX_DERIVED_EXTRA` 判定，
+/// 与 `util::path::validate_path_input` 的字节口径一致（含多字节字符时偏保守）。
 ///
 /// 返回：附属数据目录路径。
 pub fn ensure_sidecar_dir(verthys_path: &str) -> Result<PathBuf, String> {

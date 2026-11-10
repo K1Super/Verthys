@@ -1,5 +1,5 @@
 /*
- * test_acl.c — U9：目录 ACL 轮廓与重解析点拒绝
+ * test_acl.c — 目录 ACL 轮廓与重解析点拒绝
  *
  * 说明：设置 owner=SYSTEM 需要 SeRestorePrivilege；非管理员测试进程无法
  * 验证该路径。测试在非管理员环境跳过 ACL 施加，仅保留重解析点检查。

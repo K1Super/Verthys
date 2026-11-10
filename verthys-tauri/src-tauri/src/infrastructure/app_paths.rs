@@ -21,6 +21,13 @@ use std::path::{Path, PathBuf};
 /// 应用唯一标识，需与Tauri配置文件标识符保持一致
 const APP_IDENTIFIER: &str = "com.verthys.app";
 
+/// 机器安全状态目录名：与 `%APPDATA%\Verthys\pepper.bin` 的既有布局一致，
+/// 不属于应用数据目录（卸载器只删除 `com.verthys.app`）。
+const MACHINE_STATE_DIR: &str = "Verthys";
+
+/// 机器密钥材料子目录名（container.secret 主位置）
+const KEY_MATERIAL_SUBDIR: &str = "KeyMaterial";
+
 /// 应用全量路径集合结构体
 /// 所有输出路径均为绝对路径，Windows平台已完成长路径前缀兼容处理，source用于启动日志排查目录来源
 #[derive(Debug, Clone)]
@@ -33,6 +40,11 @@ pub struct AppPaths {
     pub tmp_dir: PathBuf,
     /// 目录解析来源标记，用于问题诊断
     pub source: PathSource,
+    /// 机器密钥材料主目录（container.secret）。
+    /// KnownFolder 模式下独立于应用数据目录，避免卸载删除应用数据时丢失密钥材料。
+    pub key_material_dir: PathBuf,
+    /// 旧位置密钥材料目录（应用数据目录）；仅在迁移时读取，不删除。
+    pub legacy_key_material_dir: Option<PathBuf>,
 }
 
 /// 数据目录判定来源枚举
@@ -79,15 +91,35 @@ impl AppPaths {
         Self::from_data_dir(data_dir, PathSource::ExeDirFallback)
     }
 
-    /// 基于根目录自动拼接日志、临时子目录，完成结构体实例构建
+    /// 基于根目录自动拼接日志、临时、密钥材料子目录，完成结构体实例构建
     fn from_data_dir(data_dir: PathBuf, source: PathSource) -> Self {
         let log_dir = data_dir.join("logs");
         let tmp_dir = data_dir.join("tmp");
+        /* 机器密钥材料必须与可删除的应用数据解耦：
+         * - KnownFolder 模式放在 %LOCALAPPDATA%\Verthys\KeyMaterial，
+         *   该位置与锁存/回滚状态同源，卸载器不会删除；
+         * - 便携/自定义数据目录模式仍保存在 data_dir 内，保证整体可搬移。 */
+        let (key_material_dir, legacy_key_material_dir) = match source {
+            PathSource::KnownFolder => match data_dir.parent() {
+                Some(local_app_data) => (
+                    normalize_long_path(
+                        &local_app_data
+                            .join(MACHINE_STATE_DIR)
+                            .join(KEY_MATERIAL_SUBDIR),
+                    ),
+                    Some(data_dir.clone()),
+                ),
+                None => (data_dir.clone(), None),
+            },
+            _ => (data_dir.clone(), None),
+        };
         AppPaths {
             data_dir,
             log_dir,
             tmp_dir,
             source,
+            key_material_dir,
+            legacy_key_material_dir,
         }
     }
 
@@ -203,7 +235,25 @@ mod tests {
         assert!(paths.data_dir.ends_with("verthys_test_app_paths"));
         assert!(paths.log_dir.ends_with("logs"));
         assert!(paths.tmp_dir.ends_with("tmp"));
+        /* 自定义数据目录必须自包含：密钥材料跟随数据目录，不做目录分流 */
+        assert_eq!(paths.key_material_dir, paths.data_dir);
+        assert!(paths.legacy_key_material_dir.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 校验 KnownFolder 模式把密钥材料放在应用数据目录之外
+    #[test]
+    fn test_known_folder_key_material_is_outside_app_data() {
+        let paths = AppPaths::resolve(None);
+        if paths.source != PathSource::KnownFolder {
+            return;
+        }
+        assert!(paths.key_material_dir.ends_with("Verthys\\KeyMaterial"));
+        assert!(!paths.key_material_dir.starts_with(&paths.data_dir));
+        assert_eq!(
+            paths.legacy_key_material_dir.as_deref(),
+            Some(paths.data_dir.as_path())
+        );
     }
 
     /// 校验无指定参数时兜底降级路径合法性

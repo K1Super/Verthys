@@ -1,5 +1,5 @@
 /*
- * test_protocol.c — U1：协议编码/解码与非法输入拒绝
+ * test_protocol.c — 协议编码/解码与非法输入拒绝
  */
 #include "test_common.h"
 #include "vty_svc_protocol.h"

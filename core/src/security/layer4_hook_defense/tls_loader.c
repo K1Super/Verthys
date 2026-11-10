@@ -1,11 +1,9 @@
 /*
  * tls_loader.c — TLS 加载标志验证实现
  *
- * IAT 基准校验与 15s 混淆种子定时器已删除（缺陷依据同头注）。
- *
- * 本文件仅保留一项职责：验证 TLS 回调（tls_callbacks.c，.CRT$XLB 注册）
+ * 本文件仅一项职责：验证 TLS 回调（tls_callbacks.c，.CRT$XLB 注册）
  * 确实在 DLL_PROCESS_ATTACH 阶段执行并置位 g_tls_init_marker。
- * 校验失败不再"自愈置位"——那等于替攻击者补票——而是上报 KILL 级
+ * 校验失败不得"自愈置位"——那等于替攻击者补票——必须上报 KILL 级
  * 完整性信号（TLS 目录被剥除/加载路径被劫持属于高置信度篡改）。
  */
 #include "tls_loader.h"
@@ -36,5 +34,5 @@ int tls_loader_init(void)
 
 void tls_loader_shutdown(void)
 {
-    /* 原定时器/种子体系已删除；保留空实现兼容 DllMain detach 路径 */
+    /* 空实现：保留 DllMain detach 调用路径兼容，无操作 */
 }

@@ -7,15 +7,12 @@ import type { ModuleId } from "../types/key_manager";
 
 /* Verthys 记录类型
  *
- * 修复：TYPE 常量统一到 constants/record_types.ts（单一真相源）
+ * 记录类型常量集中在 constants/record_types.ts 统一分配，确保全局唯一。
+ * 此处 re-export 既有的 TYPE_GLOBAL_KEY（module-auth.ts / global-verthys.ts /
+ * keyManager.ts 等 import 路径保持不变）。
  *
- * 原缺陷：TYPE_GLOBAL_KEY=0x10 与 AccountVerthys.vue 局部定义的 TYPE_ACCOUNT=0x10
- * 值相同，导致全局密钥记录与账户记录互相误识，引发设置遗忘/密钥验证无效/
- * 增删改异常/删除后复活等一系列致命故障。
- *
- * 修复：全部记录类型常量集中到 record_types.ts 统一分配，确保全局唯一。
- * 此处改为 re-export，保持现有 import 路径向后兼容（module-auth.ts /
- * global-verthys.ts / keyManager.ts 等无需修改 import 语句）。
+ * 约束：TYPE_GLOBAL_KEY 与 TYPE_ACCOUNT 必须不同值，否则全局密钥记录与
+ * 账户记录会互相误识，引发设置遗忘/密钥验证无效/增删改异常/删除后复活。
  */
 export { TYPE_GLOBAL_KEY } from "./record_types";
 
@@ -57,15 +54,15 @@ export const CREATE_TIMEOUT_MS = 120 * 1000;
 
 /* 分级超时熔断常量（前端调度层）
  *
- * 替代原固定 35s 单一超时阈值，区分可容忍的计算缓慢与不可容忍的 IO 卡死：
+ * 区分可容忍的计算缓慢与不可容忍的 IO 卡死：
  *   - 软超时 15s：Argon2id 派生耗时过长，前端提示「密钥计算较慢，请耐心等待」继续执行
  *   - 硬超时 120s：整体解锁未完成，触发降级校验，仅保障核心数据可读
  *   - 熔断阈值 3：连续 3 次硬超时自动锁定容器，引导用户使用备份密钥恢复
  *
- * 修复修复（硬超时 35s → 120s）：
- *   原硬超时 35s 对 SECURE 预设（Argon2id 64MiB/3/1）在大 verthys 或低端 CPU 上
- *   不足以完成解锁（Argon2id 6~15s + B+树解密 + 摘要加载可能 20~40s），
- *   导致正常解锁被误判为超时失败。
+ * 硬超时取 120s：
+ *   SECURE 预设（Argon2id 64MiB/3/1）在大 verthys 或低端 CPU 上解锁可能
+ *   耗时 20~40s（Argon2id 6~15s + B+树解密 + 摘要加载），35s 会把正常
+ *   解锁误判为超时失败。
  *
  *   真正的安全网是 worker 进程的进度感知空闲超时（60s 无进度 = 挂起）。
  *   C 层已添加 Argon2id 心跳进度（每 2s 推送）+ B+树中间进度回调，
@@ -103,7 +100,7 @@ export const CUSTOM_SESSION_MINUTES_KEY = "verthys_custom_session_minutes";
 export const SECURITY_PRESET_KEY = "verthys_security_preset";
 
 /** 核心防护特性（不随自定义模板逐项开关；各档位取值以 C 权威矩阵投影为准）
- *  注意：`key_separation` 为 11 位契约遗留键名，产品映射 密钥隔离堆。 */
+ *  注意：`key_separation` 为既有 11 位键名，产品映射「密钥隔离堆」。 */
 export const LOCKED_FEATURES: ReadonlySet<string> = new Set([
   "anti_debug",
   "anti_inject",

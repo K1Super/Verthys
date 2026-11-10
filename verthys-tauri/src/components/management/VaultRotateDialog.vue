@@ -5,7 +5,7 @@
     1. 仅在恢复码会话可用：配置新库位置、备份/PCR 选项与已启用模块口令；
     2. 依次调用 Begin → UnlockModule（每个启用模块）→ Run（流式进度）
        → Commit 或 Abort；
-    3. 展示阶段与复制统计；提交成功后通知父组件刷新恢复会话横幅。
+    3. 展示阶段与复制统计；提交成功后通知父组件收起恢复会话提示。
 
   安全边界：
     - 容器口令由宿主保管，本组件不读取、不传递；
@@ -66,7 +66,7 @@
             <label class="kf-toggle vr-toggle" :class="{ 'kf-toggle--on': keepOld }">
               <input v-model="keepOld" type="checkbox" />
               <span class="kf-box" aria-hidden="true"></span>
-              <span class="kf-text">保留旧库备份（.old-*）</span>
+              <span class="kf-text">保留旧库备份（.old-*，推荐）</span>
             </label>
             <label class="kf-toggle vr-toggle" :class="{ 'kf-toggle--on': dropPcr }">
               <input v-model="dropPcr" type="checkbox" />
@@ -211,7 +211,7 @@
 
       <!-- 完成 -->
       <template v-else-if="phase === 'done'">
-        <p class="vr-success">轮换已提交：新库已原子替换源库，当前恢复码继续有效。</p>
+        <p class="vr-success">轮换已提交：新库已原子替换源库，当前恢复码继续有效。{{ keepOld ? '旧库备份（.old-*）已保留，可用恢复码打开。' : '' }}</p>
         <p class="vr-stats">{{ statsText }}</p>
         <div class="kv-actions">
           <button class="btn btn-primary kv-confirm" type="button" @click="requestClose">完成</button>
@@ -323,7 +323,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "close"): void;
-  /** 提交成功：父组件据此隐藏“恢复码会话”横幅 */
+  /** 提交成功：父组件据此收起恢复会话提示 */
   (e: "committed"): void;
 }>();
 
@@ -332,7 +332,7 @@ const error = ref("");
 const blockReason = ref("");
 const targetPath = ref("");
 const keyfilePath = ref("");
-const keepOld = ref(false);
+const keepOld = ref(true);
 const dropPcr = ref(false);
 const pcrEnabled = ref(false);
 const keyfileEnabled = ref(false);
@@ -454,6 +454,7 @@ const ROTATE_ERROR_MESSAGES: Record<string, string> = {
   ERR_00000004: "新库位置已存在，请选择其他位置",
   ERR_00000007: "加密库已锁定，请重新解锁",
   ERR_00000008: "磁盘读写失败，请检查磁盘状态",
+  ERR_00000009: "数据完整性校验失败：轮换已中止，旧库未被替换；请保留现场并联系技术支持",
   ERR_0000000A: "尝试过于频繁：口令失败已触发退避，请稍后重试",
   ERR_00000017: "策略拒绝：仅恢复码会话可用，或 keyfile/恢复槽条件不满足",
   ERR_00000018: "TPM/PCR 不可用；如确认放弃 PCR 绑定，请勾选移除 PCR 后重试",
@@ -496,7 +497,7 @@ function resetState() {
   jobActive.value = false;
   processing.value = false;
   unlockIndex.value = 0;
-  keepOld.value = false;
+  keepOld.value = true;
   dropPcr.value = false;
   pcrEnabled.value = false;
   keyfileEnabled.value = false;

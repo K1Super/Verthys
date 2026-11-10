@@ -1,6 +1,6 @@
 # tests/attack/a8-worker.ps1 — Rust worker 内容层密钥内存零残留
 #
-# 覆盖内容层迁移后的行为：
+# 覆盖内容层行为：
 #   正控：worker 处理过的容器路径文本必须能在转储中命中（证明转储与扫描有效）；
 #   负控：解锁态转储中模块口令/文件口令/包裹密钥/文件块 v2 派生密钥 0 命中
 #         —— 内容层密钥已全部收敛到 C 层 MDEK，worker 不再缓存口令与派生密钥；
@@ -332,7 +332,7 @@ try {
         @{ Name = 'keyfile-secret/hex'; Bytes = [Text.Encoding]::ASCII.GetBytes((Hex $kfSecret)) },
         @{ Name = 'keyfile-secret/b64'; Bytes = [Text.Encoding]::ASCII.GetBytes([Convert]::ToBase64String($kfSecret)) }
     )
-    # INV-1：keyfile secret 不得写入容器（容器里只有口令槽密文与 flag）
+    # keyfile secret 不得写入容器（容器里只有口令槽密文与 flag）
     $containerKfHits = Measure-ListHits $work $kfSecretPatterns
     if ($containerKfHits -ne 0) {
         $pass = $false

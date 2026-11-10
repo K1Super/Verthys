@@ -6,13 +6,12 @@ import type { SecuredString } from "./SecuredString";
  *
  * 与 VerthysRecordEntry 的区别：
  *   - 无 data 字段（不解密数据块，解锁后 1-2 秒内完成列表渲染）
- *   - 新增 data_size / physical_offset / merkle_leaf（供按需加载定位 + 完整性校验）
- *   - 新增 created_time（创建时间戳，解锁后立即展示在列表中）
+ *   - 携带 data_size / physical_offset / merkle_leaf（供按需加载定位 + 完整性校验）
+ *   - 携带 created_time（创建时间戳，解锁后立即展示在列表中）
  *
  * merkle_leaf 以 base64 传输（32 字节 → 44 字符），前端用于全盘完整性巡检。
  *
- * name / merkle_leaf 改为 SecuredString（Zeroizing<String>）：
- *   Drop 时自动零化堆内存，消除 secure_zero_summary_records 中 ptr::write_bytes UB。
+ * name / merkle_leaf 使用 SecuredString（Zeroizing<String>）：Drop 时自动零化堆内存。
  */
 export type VerthysSummaryEntry = { id: number, rtype: number, 
 /**

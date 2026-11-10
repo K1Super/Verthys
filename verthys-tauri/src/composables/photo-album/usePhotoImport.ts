@@ -1,8 +1,6 @@
 /**
  * photo-album/usePhotoImport.ts — 拾光模块导入层 composable
  *
- * Comprehensive_optimization：异步批处理流水线重构
- *
  * 职责：管理照片导入（加密入库）逻辑。
  * - Tauri 模式：使用三阶段异步流水线（生产者 → 传输器 → 消费者）
  *   - 生产者：流式读取文件 → transferList 零拷贝到 Worker
@@ -49,10 +47,10 @@ const ACQUIRE_TIMEOUT_MS = 30_000;
 /**
  * 文件预检并发上限。
  *
- * 旧实现 `Promise.all(paths.map(stat))` 会对全部选中文件同时发起一次
- * Tauri 命令：1000 张即 1000 个并发 IPC + 阻塞线程池任务，在“准备导入”
- * 阶段形成数秒级排队，且与总张数线性增长。控制器是有界并发：固定
- * 16 路 worker 轮询取下标，顺序由结果数组保序，失败仍按未知大小继续。
+ * 无界并发（如对全部选中文件同时发起一次 stat）在 1000 张时会形成
+ * 1000 个并发 IPC + 阻塞线程池任务，在“准备导入”阶段形成数秒级排队，
+ * 且与总张数线性增长。控制器是有界并发：固定 16 路 worker 轮询取下标，
+ * 顺序由结果数组保序，失败仍按未知大小继续。
  */
 const STAT_PREFLIGHT_CONCURRENCY = 16;
 
@@ -83,10 +81,16 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
   /* ===== 导入流程阶段状态机（跨 await 边界的重入守卫权威） ===== */
   const phase = ref<ImportPhase>({ kind: "idle" });
   let epochCounter = 0;
+  /** 作用域已销毁：在途流水线返回后不得再写列表/缓存或弹提示 */
+  let disposed = false;
+  /* 进行中导入的取消控制器（组件卸载时中止投喂，已提交批次收尾保留 WAL） */
+  let activeAbort: AbortController | null = null;
   /** 完成清理定时器（句柄纳管：旧回调不允许污染新导入的视觉状态） */
   const importDoneTimer = useSingleTimer("photo-import-done");
   /** 文件选择阶段看门狗：对话框异常挂起时兜底回空闲态 */
   const acquireWatchdog = useSingleTimer("photo-import-acquire");
+  /** 流水线进度 watch 停止句柄（卸载时统一解绑，避免残留副作用） */
+  const progressWatchStops: Array<() => void> = [];
 
   /** 尝试取得导入发起权：仅空闲或收尾倒计时中可进入，进行中一律拒绝 */
   const tryEnterAcquiring = (): boolean => {
@@ -120,14 +124,17 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
   };
 
   onScopeDispose(() => {
+    disposed = true;
+    // 卸载即中止投喂：已提交批次由流水线收尾并保留 WAL，不丢已落库数据
+    activeAbort?.abort();
+    for (const stop of progressWatchStops) stop();
+    progressWatchStops.length = 0;
     importDoneTimer.dispose();
     acquireWatchdog.dispose();
   });
 
   /* ===== 流水线实例（惰性创建，复用） ===== */
   let pipeline: ImportPipeline | null = null;
-  /* ===== 进行中导入的取消控制器（组件卸载时中止，收尾保留 WAL） ===== */
-  let activeAbort: AbortController | null = null;
 
   /** 获取或创建流水线实例 */
   const getPipeline = (): ImportPipeline => {
@@ -135,15 +142,18 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
       pipeline = new ImportPipeline();
       // 将流水线进度状态机的响应式 ref 同步到本 composable 的 ref
       // 通过 watch 实现帧对齐刷新到组件层
-      watch(pipeline.progress.percent, (v) => { importProgress.value = v; });
-      watch(pipeline.progress.text, (v) => { importStatus.value = v; });
-      watch(pipeline.progress.elapsedMs, (v) => { importElapsed.value = v; });
+      progressWatchStops.push(
+        watch(pipeline.progress.percent, (v) => { importProgress.value = v; }),
+        watch(pipeline.progress.text, (v) => { importStatus.value = v; }),
+        watch(pipeline.progress.elapsedMs, (v) => { importElapsed.value = v; }),
+      );
     }
     return pipeline;
   };
 
   /* ===== 导入照片（异步批处理流水线） ===== */
   const onImport = async () => {
+    if (disposed) return;
     // 重入守卫：入口同步取到发起权（finishing 倒计时中允许接管），
     // 跨越后续 await 边界依然有效，杜绝对话框期间连点造成并发导入
     if (!tryEnterAcquiring()) return;
@@ -171,6 +181,7 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           multiple: true,
           filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }],
         });
+        if (disposed) return;
         if (!selected || (Array.isArray(selected) && selected.length === 0)) return;
         const paths = Array.isArray(selected) ? selected : [selected];
         // 读前预检：readUserFile 会整文件搬进内存，超限文件若「读后才拒」，
@@ -203,10 +214,19 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
             () => statWorker(),
           ),
         );
-        const accepted = checked.filter((f) => f.size === undefined || f.size <= MAX_PHOTO_BYTES);
-        const rejected = checked.length - accepted.length;
-        if (rejected > 0) {
-          showError(`${rejected} 个文件超过单文件大小上限，已跳过`);
+        // 空文件不可作为照片导入（无内容块，导入后也无法导出）：读取前剔除
+        const emptyCount = checked.filter((f) => f.size === 0).length;
+        const tooLargeCount = checked.filter(
+          (f) => f.size !== undefined && f.size > MAX_PHOTO_BYTES,
+        ).length;
+        const accepted = checked.filter(
+          (f) => f.size === undefined || (f.size > 0 && f.size <= MAX_PHOTO_BYTES),
+        );
+        if (tooLargeCount > 0) {
+          showError(`${tooLargeCount} 个文件超过单文件大小上限，已跳过`);
+        }
+        if (emptyCount > 0) {
+          showError(`${emptyCount} 个文件为空，已跳过`);
         }
         if (accepted.length === 0) return;
         filesToProcess = accepted.map(({ path, size, mtime }) => {
@@ -222,6 +242,7 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
       } else {
         // 浏览器模式：使用 File API
         browserFiles = await openBrowserFileDialog();
+        if (disposed) return;
         if (browserFiles.length === 0) return;
         filesToProcess = browserFiles.map((f) => ({
           name: f.name,
@@ -231,6 +252,9 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           readBytes: () => f.arrayBuffer().then((buf) => new Uint8Array(buf)),
         }));
       }
+
+      // 对话框期间组件已卸载：不再启动流水线
+      if (disposed) return;
 
       // 文件确认后正式进入运行态（代次递增供收尾归属校验）
       const epoch = ++epochCounter;
@@ -243,6 +267,19 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
         try {
           const pipe = getPipeline();
           const result = await pipe.run(filesToProcess, activeAbort.signal);
+
+          /* 组件已卸载：已提交批次仍须落盘（数据安全），但不得再回写
+           * 已清空的列表、缓存与全局提示。 */
+          if (disposed) {
+            if (result.imported.length > 0) {
+              try {
+                await persistVerthysDetailed();
+              } catch (e) {
+                console.error("[onImport] 卸载后落盘失败", e);
+              }
+            }
+            return;
+          }
 
           if (result.error === "ABORTED") {
             // 取消路径：静默收尾，不弹错误（组件卸载场景无 UI）；
@@ -295,16 +332,17 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           setModuleCache("photos", toPhotoCacheEntries(photos.value));
         } catch (e) {
           console.error("[onImport] 流水线异常", e);
-          showError("导入失败，请重试");
+          if (!disposed) showError("导入失败，请重试");
         } finally {
           activeAbort = null;
         }
       } else {
         // ===== 浏览器模式：保留原始字节到内存（用于后续导出） =====
-        // 浏览器模式不使用流水线（无 IPC），保持原有简单逻辑
+        // 浏览器模式不使用流水线（无 IPC）
         const importedItems: PhotoEntry[] = [];
 
         for (let i = 0; i < filesToProcess.length; i++) {
+          if (disposed) break;
           const { name: fileName, readBytes } = filesToProcess[i];
           const file = browserFiles[i];
           importProgress.value = Math.round((i / filesToProcess.length) * 100);
@@ -314,6 +352,10 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           // 越限文件不进入内存读取（输入全校验，Tauri/浏览器两路径口径一致）
           if (file.size > MAX_PHOTO_BYTES) {
             showError(`「${fileName}」超过单文件大小上限，已跳过`);
+            continue;
+          }
+          if (file.size === 0) {
+            showError(`「${fileName}」为空文件，已跳过`);
             continue;
           }
 
@@ -348,13 +390,14 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           await yieldToMain();
         }
 
+        if (disposed) return;
         if (importedItems.length > 0) {
           pushShallowItems(photos, importedItems);
         }
       }
 
       // 所有路径统一收尾（含进度 100% + 1.5s 后视觉清理）
-      finishImport(epoch);
+      if (!disposed) finishImport(epoch);
     } finally {
       acquireWatchdog.cancel();
       if (phase.value.kind === "acquiring") {

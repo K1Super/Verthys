@@ -8,17 +8,12 @@
  *   - 不引用上层模块（service / controller），仅被 state / controller::scan 使用
  *
  * VirtualLock RAII 守卫：
- *   原 state.rs 中 virtual_lock_records / virtual_unlock_records 为自由函数，
- *   无 RAII 保证：调用方可能遗忘 unlock、或 unlock 与 zero 顺序错误（先 unlock
- *   后 zero 导致零化内容被换出到 pagefile）。
- *
- *   修复：
  *   1. 定义 VirtualLockable trait，抽象"哪些内存区域需要锁定"
  *   2. 定义 LockedBuffer<T> RAII 守卫，拥有 Vec<T>：
  *      - 构造时 VirtualLock 所有敏感区域（检查返回值，失败回滚已锁定区域并返回 Err）
  *      - Drop 时强制先擦除（Zeroize trait）后解锁（VirtualUnlock）
- *   3. 删除自由函数 virtual_lock_records / virtual_unlock_records /
- *      virtual_lock_summary_records / virtual_unlock_summary_records
+ *   3. 不提供自由函数形式的 lock/unlock：绕过 RAII 会遗漏 unlock，或
+ *      unlock 与 zero 顺序颠倒（先 unlock 后 zero 使零化内容被换出到 pagefile）
  *
  * 安全保证：
  *   - 擦除在解锁之前完成：zeroize 期间内存仍被 VirtualLock 锁定在物理内存，
@@ -96,12 +91,12 @@ impl VirtualLockable for VerthysSummaryEntry {
  * 拥有 Vec<T>，构造时 VirtualLock 所有敏感区域，Drop 时先擦除后解锁。  *
  *                                                                    *
  * 设计决策（拥有 vs 借用）：                                           *
- *   原 spec 为 LockedBuffer<'a>（借用 &mut [T]）。但扫描流水线需要将   *
- *   锁定状态跨 async 函数调用存储于 ScanPipelineState，借用生命周期     *
- *   无法跨越函数边界。采用拥有设计 LockedBuffer<T>（拥有 Vec<T>），     *
- *   可存储于结构体字段，且保证记录在缓冲区整个生命周期内保持锁定。       *
+ *   采用拥有设计 LockedBuffer<T>（拥有 Vec<T>）：扫描流水线需将锁定状态  *
+ *   跨 async 函数调用存储于 ScanPipelineState，借用生命周期无法跨越函数  *
+ *   边界。拥有设计可存储于结构体字段，保证记录在缓冲区整个生命周期内     *
+ *   保持锁定。                                                          *
  *                                                                    *
- *   借用模式的问题：Drop 擦除借用数据后，原始 Vec 中数据已清空，         *
+ *   若改为借用 &mut [T]：Drop 擦除借用数据后，原始 Vec 中数据已清空，    *
  *   无法继续用于 ScanPipelineState 的双缓冲切换。拥有模式在 Drop 时      *
  *   连同 Vec 一起释放，语义更清晰。                                    *
  * ------------------------------------------------------------------ */
@@ -219,8 +214,7 @@ impl<T: VirtualLockable + Zeroize> LockedBuffer<T> {
 ///   2. 再 VirtualUnlock 所有锁定区域
 ///   3. Vec<T> 自身 Drop 释放堆内存（此时数据已零化）
 ///
-/// 这个顺序消除了原实现中"先 unlock 后 zero"的竞态窗口：
-/// 原实现在 unlock 与 zero 之间，如果 OS 恰好将该页换出到 pagefile，
+/// 顺序重要性：若先 unlock 后 zero，OS 可能在两者之间将该页换出到 pagefile，
 /// 则 zero 写入的是新页，旧页（含明文）已落盘。
 impl<T: VirtualLockable + Zeroize> Drop for LockedBuffer<T> {
     fn drop(&mut self) {

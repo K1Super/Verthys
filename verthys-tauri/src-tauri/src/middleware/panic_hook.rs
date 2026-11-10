@@ -1,8 +1,6 @@
 /*
  * middleware/panic_hook.rs — 全局异常处理器
  *
- *    "顶层（入口/主循环）行为约定"
- *
  * 职责（仅两项）：
  *   1. 构造 JSON 格式的致命错误日志（包含堆栈信息、当前进程ID、发生时间），
  *      通过日志管道发送。
@@ -62,10 +60,9 @@ pub fn upgrade(log_sender: LogSender) {
     });
 }
 
-/// 兼容旧接口：install(log_sender) 等同于 upgrade(log_sender)
+/// install(log_sender) 等同于 upgrade(log_sender)
 ///
-/// 保留以兼容现有 lib.rs 调用点。
-/// 注意：调用前必须先调用 install_minimal()。
+/// 调用前必须先调用 install_minimal()。
 pub fn install(log_sender: LogSender) {
     upgrade(log_sender);
 }

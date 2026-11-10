@@ -203,7 +203,7 @@ TEST(repo_file_chunk_manifest)
 }
 
 /*
- * 直接落一条“旧布局”安全记录：数据用模块 0 的 MDEK 与模块 UUID 封装，
+ * 直接落一条非系统域安全记录：数据用模块 0 的 MDEK 与模块 UUID 封装，
  * 索引也按模块令牌生成，用于验证启用事务中的原位迁移。
  * 叶编码与实现层一致：1B 版本 + 1B flags + 2B 保留 + id/uuid/名称索引/
  * 类型令牌/创建时间/偏移/长度/明文长度/哈希。
@@ -429,7 +429,7 @@ TEST(repo_legacy_security_record_migrates_on_module_enable)
     CHECK_EQ(vty_vault_create(REPO_PATH, "repo-pw", &v, code, sizeof(code)),
              VTY_OK);
 
-    /* 旧布局：模块未启用时按模块 0 密钥写入 */
+    /* 模块未启用时按模块 0 密钥写入 */
     CHECK_EQ(seed_legacy_security_record(v, 0x10, "global-key", "gk", &gid),
              VTY_OK);
     CHECK_EQ(vty_repo_find_by_type(v, 0x10, &found, &found_id), VTY_OK);

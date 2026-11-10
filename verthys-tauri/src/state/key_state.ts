@@ -32,16 +32,13 @@ export interface KeyState {
   globalKeyReady: Ref<boolean>;
   /** verthys 中存在全局密钥记录 */
   hasGlobalKeyRecord: Ref<boolean>;
-  /** 修复：全局密钥记录加载标志（恒 false，保留供防御性检查）
+  /** 全局密钥记录加载标志（恒 false，保留供防御性检查）
    *
-   * 原设计：快速试探未命中时设为 true，后台异步扫描完成后设为 false，
-   * UI 据此显示"加载中"状态。
-   *
-   * 根治后：worker 解锁成功后进程内即时完成全局密钥记录探测，
-   * 结果内联到 unlock 响应，前端零异步扫描阶段。此标志恒为 false，
+   * worker 解锁成功后进程内即时完成全局密钥记录探测，结果内联到
+   * unlock 响应，前端无异步扫描阶段，故该标志恒为 false；
    * 保留定义供 resetAllState 防御性重置与未来扩展使用。 */
   globalKeyRecordLoading: Ref<boolean>;
-  /** 修复2：全局密钥记录缓存（避免 verifyGlobalKey 重复扫描 40s）
+  /** 全局密钥记录缓存（避免 verifyGlobalKey 重复扫描 40s）
    *
    * initUnlock 找到全局密钥记录后，将 recordB64 和 id 缓存到此。
    * verifyGlobalKey 优先读取缓存，跳过重复的 findGlobalKeyRecord 扫描。
@@ -56,9 +53,10 @@ export interface KeyState {
   moduleKeyEnabled: Ref<Record<ModuleId, boolean>>;
   /** 各模块是否已绑定恢复槽（换机恢复该模块的前提） */
   moduleHasRecovery: Ref<Record<ModuleId, boolean>>;
-  /** 修复：模块密钥状态后台加载标志（修复4）
+  /** 模块密钥状态后台加载标志
    *
-   * initUnlock 将 loadModuleKeyStatus 移至后台非阻塞执行（根治"正在加载密钥配置…"卡慢）。
+   * initUnlock 将 loadModuleKeyStatus 置于后台非阻塞执行，
+   * 避免"正在加载密钥配置…"阻塞主流程。
    * 此标志在解锁后置 true，后台加载完成/被并发修改丢弃后置 false。
    *
    * 用途：
@@ -67,19 +65,19 @@ export interface KeyState {
    *      —— 后台加载期间若用户切换开关，版本号变化导致后台加载丢弃结果，
    *         杜绝"后台加载用旧 verthys 状态覆盖用户刚切换的开关"全局回滚缺陷 */
   moduleKeyStatusLoading: Ref<boolean>;
-  /** 安全守卫根治：模块密钥状态已加载完成标志
+  /** 模块密钥状态已加载完成标志
    *
    * 区分"未加载"（loaded=false，状态不确定，守卫必须等待/拦截）与
    * "已加载但无配置"（loaded=true + enabled=false，确实不需要验证，放行）。
    *
-   * 原缺陷：仅用 moduleKeyStatusLoading 判断，超时后被重置为 false，
-   * 守卫误判"加载完成"→ 读取默认 moduleKeyEnabled=false → 直接放行，绕过密钥验证。
-   *
-   * 修复：loaded 初始 false，仅 loadModuleKeyStatus 真正完成（含乐观并发丢弃）时设 true。
-   * switchModule 守卫据此判断：未加载完不允许进入业务模块。 */
+   * 约束：不可仅用 moduleKeyStatusLoading 判断——其超时后被重置为 false，
+   * 守卫会误判"加载完成"→ 读取默认 moduleKeyEnabled=false → 直接放行，
+   * 绕过密钥验证。故 loaded 初始 false，仅 loadModuleKeyStatus 真正完成
+   * （含乐观并发丢弃）时设 true：switchModule 守卫据此判断，
+   * 未加载完不允许进入业务模块。 */
   moduleKeyStatusLoaded: Ref<boolean>;
   /** 模块密钥状态加载失败标志（加载异常；守卫据此立即 fail-closed，
-   *  不再每次切换模块空等超时窗口） */
+   *  避免每次切换模块空等超时窗口） */
   moduleKeyStatusFailed: Ref<boolean>;
   /** 当前安全预设 */
   securityPreset: Ref<SecurityPresetCode>;
@@ -93,7 +91,7 @@ export interface KeyState {
   storedVerthysPath: Ref<string>;
   /** 最近一次初始化失败的错误信息 */
   lastInitError: Ref<string>;
-  /** ：初始化状态详情（含修复失败告警等可观测信息）
+  /** 初始化状态详情（含修复失败告警等可观测信息）
    *
    * verthys_init_status 返回的 detail 字段，由 SecurityCenter 显示给用户。
    * 当 repair_fail_count >= 3 时携带"状态文件写入异常"告警，
@@ -101,6 +99,18 @@ export interface KeyState {
   initDetail: Ref<string>;
   /** 会话级状态版本：轮换提交等全局状态变化后自增，面板据此重查权威状态 */
   verthysStateVersion: Ref<number>;
+  /** 当前会话是否由恢复码打开
+   *
+   * 权威来源 = C 层会话状态（恢复解锁成功后写入）；普通解锁、轮换提交与
+   * 锁库一律清零。必须跨模块存续：恢复会话存续期间，重绑设备槽与全库
+   * 轮换入口在中枢管理界面必须始终可恢复，不得随中枢组件卸载而丢失。 */
+  recoveryMode: Ref<boolean>;
+  /** 当前恢复会话是否已完成本机设备槽重绑
+   *
+   * 进程内会话状态：C 层不提供“重绑是否已完成”的读数，故由前端在重绑
+   * 成功后置位；锁库、新恢复会话与轮换提交一律清零。与 recoveryMode
+   * 分离：重绑成功只是消除设备槽风险，会话本身仍是恢复会话。 */
+  recoveryResealDone: Ref<boolean>;
 }
 
 export const keyState: KeyState = {
@@ -118,9 +128,9 @@ export const keyState: KeyState = {
    * moduleKeyStatusFailed fail-closed，不把"未知"当成"保护关闭"。 */
   moduleKeyEnabled: ref({ photo: false, accounts: false, fileverthys: false }),
   moduleHasRecovery: ref({ photo: false, accounts: false, fileverthys: false }),
-  // 修复修复4：模块密钥状态后台加载标志（初始 false，解锁后置 true）
+  // 模块密钥状态后台加载标志（初始 false，解锁后置 true）
   moduleKeyStatusLoading: ref(false),
-  // 安全守卫根治：模块密钥状态已加载完成标志（初始 false，loadModuleKeyStatus 完成时置 true）
+  // 模块密钥状态已加载完成标志（初始 false，loadModuleKeyStatus 完成时置 true）
   moduleKeyStatusLoaded: ref(false),
   // 模块密钥状态加载失败标志（初始 false；加载异常时置 true，守卫据此立即 fail-closed）
   moduleKeyStatusFailed: ref(false),
@@ -132,6 +142,8 @@ export const keyState: KeyState = {
   lastInitError: ref(""),
   initDetail: ref(""),
   verthysStateVersion: ref(0),
+  recoveryMode: ref(false),
+  recoveryResealDone: ref(false),
 };
 
 /* ------------------------------------------------------------------ *
@@ -173,15 +185,18 @@ export function resetAllState(): void {
   keyState.globalKeyRecordId.value = 0;
   _currentVerthysPath = "";
   keyState.moduleKeyReady.value = { photo: false, accounts: false, fileverthys: false };
-  // 修复修复：重置为安全默认 false（与初始化默认一致）
+  // 重置为安全默认 false（与初始化默认一致）
   keyState.moduleKeyEnabled.value = { photo: false, accounts: false, fileverthys: false };
   keyState.moduleHasRecovery.value = { photo: false, accounts: false, fileverthys: false };
   keyState.hasModuleKeyRecord.value = { photo: false, accounts: false, fileverthys: false };
-  // 修复修复4：重置后台加载标志
+  // 重置后台加载标志
   keyState.moduleKeyStatusLoading.value = false;
-  // 安全守卫根治：重置已加载标志
+  // 重置已加载标志
   keyState.moduleKeyStatusLoaded.value = false;
   keyState.moduleKeyStatusFailed.value = false;
+  // 恢复会话状态随会话销毁清零：锁库、外部锁定与初始化回滚后不得残留入口
+  keyState.recoveryMode.value = false;
+  keyState.recoveryResealDone.value = false;
 }
 
 /* ------------------------------------------------------------------ *

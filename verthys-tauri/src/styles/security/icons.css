@@ -1,16 +1,11 @@
 /* ============================================================
-   icons.css — 安全视图共享排印体系（v5：引力悬浮场适配）
-   v5 变更（无底板悬浮弹窗重构）：
-     - .sc-dialog / .sc-dialog--auto 已删（卡片式弹窗底板连同
-       CosmicDialog 一起被 LevitationField 悬浮场体系替代 —
-       尺寸/布局由 float-field.css .ff-field 承载）
-     - .sc-title 已删（场域命名由 float-field.css .ff-overline +
-       .ff-title 轨道基准线体系承载）
-     - .vd-compact 已删（紧凑间距由悬浮场排印自然承载）
-   保留：
+   icons.css — 安全视图共享排印体系（引力悬浮场适配）
+   承载：
      - .view-unlock / .view-verify / .view-init 视图容器基础
-     - .sc-desc / .sc-repair-alert 共享排印（悬浮场内覆写见
-       float-field.css）
+     - .sc-desc / .sc-repair-alert 共享排印（悬浮场内覆写由
+       float-field.css .ff-field 承载）
+   弹窗底板与场域命名不在本文件：尺寸/布局由 float-field.css
+   .ff-field 承载，标题由 .ff-overline + .ff-title 轨道基准线体系承载。
    ============================================================ */
 
 /* ===== 视图容器基础（三视图共享 — 布局占位，不承载弹窗尺寸） ===== */

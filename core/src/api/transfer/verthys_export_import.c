@@ -1,13 +1,12 @@
 /*
- * verthys_export_import.c — 导出 / 导入 / 修改主密码 模块
+ * verthys_export_import.c — 导出 / 导入 / 修改主密码模块
  *
- * 从 verthys_api.c 拆分而来（export / import / changepassword 模块）。
  * 包含以下公共 API 与其内部辅助函数：
  *   - Verthys_Export()        ：流式导出（v1 交换格式，跨设备兼容）
  *   - Verthys_Import()        ：导入合并到当前加密库
  *   - Verthys_ChangePassword()：修改主密码
  *
- * 三个 API 的 实现：
+ * 三个 API 的实现：
  *   - Export      ：记录 ID 快照 + 逐条记录段解密流式写入
  *                   （内存峰值与记录数解耦）；
  *   - Import      ：逐条写仓库，末尾一次 DataRoot/元数据提交；
@@ -141,26 +140,15 @@ static int verthys_validate_transfer_path(const char *path)
 
 /* 8. 导出（v1 交换格式，跨设备兼容） */
 /*
- * 流式分片写入
+ * 流式导出：元数据（type/名称/尺寸）单遍收集，数据不预载——get_data
+ * 回调按 record_id 重新读取并解密单条记录。
  *
- * 元数据快照（name/type/尺寸 + Extent 寻址字段）单遍收集，数据块明文
- * 不预载——get_data 回调逐条从 Extent 分区解密，release 回调清零释放。
- *
- * 内存峰值 = max(单条记录大小) + 16KB + 元数据数组大小，与记录总数
- * 解耦，万级照片库导出不 OOM。
+ * 内存峰值 = max(单条记录大小) + 固定缓冲 + 元数据数组大小，与记录
+ * 总数解耦，万级照片库导出不 OOM。
  *
  * 原子性：流式写入过程中任一步骤失败 → 关闭并删除半成品文件，返回错误。
  * 安全性：明文数据用完即刻 verthys_secure_zero 清零释放，最小化明文驻留窗口。
  */
-
-
-/* ------------------------------------------------------------------ *
- * 流式导出
- *
- * 元数据收集需要 type（记录密文首字节）与名称；数据本身不在收集阶段
- * 驻留，get_data 回调按 record_id 重新读取并解密单条记录，峰值内存
- * 与记录总数解耦。导出文件仍是 v1 交换格式（跨设备契约不变）。
- * ------------------------------------------------------------------ */
 typedef struct {
     VtyVault *v;
     const uint64_t *ids;
@@ -576,8 +564,8 @@ VerthysResult Verthys_ChangePassword(VerthysHandle handle,
 #endif
 
     /* 写操作入口统一失效查询缓存，防止 UAF
-     * 改密操作会重新加密超级块（KEK+DEK 双层结构），旧密钥下解密的数据
-     * 缓存必须立即失效，否则上层持有的旧借用指针将指向已释放的明文数据。 */
+     * 改密会重新派生口令槽并重包裹密钥环，旧密钥下解密的数据缓存
+     * 必须立即失效，否则上层持有的旧借用指针将指向已释放的明文数据。 */
     ctx_free_getrecord_cache(ctx);
     /* 写路径周期运行时哈希校验（30min 门控） */
     runtime_hash_verify_periodic();

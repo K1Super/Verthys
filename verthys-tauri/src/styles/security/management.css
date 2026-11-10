@@ -1,10 +1,10 @@
 /* ============================================================
-   management.css — 管理主界面容器 + 设备不匹配 + 修改密钥弹窗
-   分区内容样式已迁移至 section-field.css（引力谱系 · 无底板体系）：
-     - detail 三区（sf-zone）与会话谱线（sf-meridian）见 section-field.css
-     - 安全防护内部组件（∞双环/轨道滑块/蜂窝/护盾）见 dashboard.css
-   本文件保留：security-center / view-management / mgmt-detail 容器、
-     view-device-mismatch + dm-*、修改密钥弹窗 ck-*
+   management.css — 管理主界面容器 + 设备不匹配
+   分区内容样式位于 section-field.css（引力谱系 · 无底板体系）：
+     - detail 三区（sf-zone）与会话谱线（sf-meridian）由 section-field.css 承载
+     - 安全防护内部组件（∞双环/轨道滑块/蜂窝/护盾）由 dashboard.css 承载
+   本文件承载：security-center / view-management / mgmt-detail 容器、
+     view-device-mismatch + dm-*
    ============================================================ */
 
 /* ===== 顶层容器 ===== */
@@ -17,6 +17,12 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+/* 常驻状态轨存在时预留右侧通道：轨道固定于视口右缘、不随本容器滚动；
+ * 预留后分区内容（含右对齐的动作节点）不会滑入轨道覆盖范围 */
+.security-center.has-notice-rail {
+  padding-right: 76px;
 }
 
 /* ===== 初始化弹窗（复用 CosmicBackdrop/CosmicDialog，与验证视图同尺寸同风格） ===== */
@@ -36,14 +42,15 @@
   min-height: 0;
   /* 入场显影走全局「模块步入编排」关键帧（styles/animations.css）：
      本视图为常显元素（中枢各管理态共用同一容器，随就绪一次性显影）。
-     原 mgmt-in 于 --ease 下前 20% 时长即冲到约七成不透明度 —— 肉眼读作
-     「直接呈现」；且其 translateY(10px) 会让本视图承载的全部文字在动画期间
-     被提升到合成层改用灰度抗锯齿，收束时再子像素化。改为只走不透明度。 */
+     不用 --ease 承载入场（前 20% 时长即冲到约七成不透明度，肉眼读作
+     「直接呈现」），也不加 translateY(10px) —— 位移会让本视图承载的全部
+     文字在动画期间被提升到合成层改用灰度抗锯齿，收束时再子像素化。
+     故只走不透明度。 */
   animation: module-reveal var(--reveal-dur, 0.62s) linear backwards;
 }
 
 /* ===== 分区详情容器：收窄占局 + 制造可点击空白 =====
- * 占局收窄（引力谱系 · 无底板分区体系，样式见 section-field.css）：
+ * 占局收窄（引力谱系 · 无底板分区体系，样式由 section-field.css 承载）：
  *   - 会话谱线（sf-meridian）与分区（sf-zone）限宽 max-width 居中，两侧留出空白带
  *   - 两者之间 gap 留白；内容不足视口时下方自然留白
  * 这些空白区域由 ManagementView.onDetailBlankClick 几何判定识别

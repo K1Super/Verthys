@@ -1,7 +1,7 @@
 /*
  * test_error_map.c — 内部错误码到公共返回码的映射验收
  *
- * 覆盖轮换相关新增的 20–23 码：必须映射到独立的公共码，
+ * 覆盖轮换相关的 20–23 码：必须映射到独立的公共码，
  * 不得折叠为 INVALID（否则调用方无法按码分流）。
  */
 #include "verthys_test.h"
@@ -36,8 +36,8 @@ TEST(error_map_d9_codes_are_distinct)
 
 TEST(error_map_r10_slot_errors_lock_format_policy)
 {
-    /* R-10 策略偏差已接受：结构类错误统一 FORMAT，便于诊断；口令错误
-     * 走 AUTH。此处锁定现状，防止实现漂移后文档与行为脱节。 */
+    /* 结构类错误统一 FORMAT，便于诊断；口令错误走 AUTH。
+     * 此处锁定该映射，防止实现漂移。 */
     CHECK_EQ(verthys_api_container_map(VTY_E_SLOT_MISSING), VERTHYS_ERR_FORMAT);
     CHECK_EQ(verthys_api_container_map(VTY_E_SLOT_UNKNOWN), VERTHYS_ERR_FORMAT);
     CHECK_EQ(verthys_api_container_map(VTY_E_KDF_WEAK), VERTHYS_ERR_FORMAT);

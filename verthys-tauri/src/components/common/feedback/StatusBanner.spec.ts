@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 /*
- * StatusBanner.spec.ts — 全局常驻横幅契约
+ * StatusBanner.spec.ts — 上下文内常驻告知条契约
  *
  * 覆盖：
  *   1. 语义色类与 role 声明（读屏可感知状态）
@@ -10,6 +10,7 @@
  *   5. 关闭入口独立上报
  *   6. actions 插槽优先于内置动作
  *   7. 宿主类名透传到横幅根节点（版面约束由调用方承担）
+ *   8. 底板类名与 Toast 共用同一材质单源
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp, h, type App, type Slot } from "vue";
@@ -51,7 +52,7 @@ function mount(options: MountOptions = {}) {
   return container;
 }
 
-describe("常驻状态横幅", () => {
+describe("上下文内常驻告知条", () => {
   it("默认使用中性语义色并声明 status 角色", () => {
     const container = mount();
     const banner = container.querySelector(".status-banner");
@@ -69,12 +70,18 @@ describe("常驻状态横幅", () => {
     expect(banner?.classList.contains("is-info")).toBe(false);
   });
 
+  it("底板与 Toast 共用同一材质单源", () => {
+    const container = mount();
+
+    expect(container.querySelector(".status-banner.notice-card")).not.toBeNull();
+  });
+
   it("渲染动作并在点击时回传固定 key", () => {
     const onAction = vi.fn();
-    const container = mount({ actionLabel: "重绑本机设备", onAction });
+    const container = mount({ actionLabel: "重试", onAction });
     const action = container.querySelector<HTMLButtonElement>(".sb-action");
 
-    expect(action?.textContent?.trim()).toBe("重绑本机设备");
+    expect(action?.textContent?.trim()).toBe("重试");
     action?.click();
     expect(onAction).toHaveBeenCalledTimes(1);
     expect(onAction).toHaveBeenCalledWith("primary");
@@ -127,9 +134,9 @@ describe("常驻状态横幅", () => {
   });
 
   it("宿主类名透传到横幅根节点", () => {
-    const container = mount({ class: "recovery-banner" });
+    const container = mount({ class: "photo-recover-banner" });
 
-    expect(container.querySelector(".status-banner.recovery-banner")).not.toBeNull();
+    expect(container.querySelector(".status-banner.photo-recover-banner")).not.toBeNull();
   });
 
   it("actions 插槽优先于内置动作", () => {

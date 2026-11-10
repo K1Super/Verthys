@@ -2,13 +2,12 @@
  * photo-album/usePhotoExport.ts — 拾光模块导出层 composable
  *
  * 职责：管理照片导出对话框和三种导出格式（single/multiple/png）。
- * 从原 PhotoAlbum.vue 提取，保持 100% 功能不变。
  *
  * 设计要点：
  * - 接收 usePhotoData 返回值 + 全局 Toast 中心的 showError/showExportDone/showCopied（依赖注入）
  * - 三种导出格式：单个打包文件 / 多个独立文件 / PNG 明文图片
  * - Tauri 模式写入磁盘，浏览器模式触发下载
- * - 兼容新旧 verthys 格式（内联 chunkDataB64 / 旧 chunkIds）
+ * - 兼容两种容器格式（内联 chunkDataB64 / 外置 chunkIds）
  * - meta 缺失时按需解密回退（重启后占位项导出场景）
  * - copyExportToken 三级降级：Tauri clipboard → navigator.clipboard → textarea execCommand
  * - tokenCopied 为按钮 UI 状态（图标切换），独立于 copiedToast 提示
@@ -18,10 +17,9 @@
 import { ref, watch, onScopeDispose, type ShallowRef } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { verthysGetRecord, verthysGetRecordDetailed, bytesToBase64, writeUserFile, writeUserFileStream, appendUserFileChunk, finalizeUserFileStream, abortUserFileStream } from "../../lib/verthys";
-import { base64ToBytes } from "../../utils/binary_codec";
 import {
   packVenc, packVencStreamedLazy,
-  estimateVencTotalBytes, toLightMeta, computeChunkHashesForB64,
+  estimateVencTotalBytes, toLightMeta,
   generateRandomToken, VENC_CONTAINER_FIXED_BYTES, vencPhotoFramesBytes,
   type PhotoMeta, type VencPhotoSpec,
 } from "../../lib/crypto";
@@ -43,8 +41,7 @@ const log = createLogger("photo-export");
 /** 导出失败原因分类（跨格式统一，供 UI 汇总） */
 type ExportFailureReason =
   | "data-missing"    // 记录/元数据/块数据缺失（含占位项无法解密）
-  | "pack-failed"     // 容器打包失败
-  | "encrypt-failed"  // 外层令牌加密失败
+  | "pack-failed"     // 容器打包失败（清单越界/令牌加密失败）
   | "decrypt-failed"  // 明文导出解密失败
   | "convert-failed"  // 图片格式转换失败
   | "write-failed";   // 落盘/下载失败
@@ -132,8 +129,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   };
 
   /* ===== 写入 .venc 文件到磁盘（Tauri 模式） ===== */
-  /** 修复：走 writeUserFile（Raw body + x-path 头），
-   *   与 write_user_file 命令的真实协议一致；JSON+dataB64 旧写法与命令签名不符必失败。
+  /** 走 writeUserFile（Raw body + x-path 头），与 write_user_file 命令协议一致；
    *   导出路径由用户通过 save() 对话框显式选择，不应受沙箱白名单限制 */
   const writeVencFile = async (path: string, bytes: Uint8Array): Promise<void> => {
     await writeUserFile(path, bytes);
@@ -142,22 +138,18 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   /**
    * 读取单张照片的容器数据（惰性路径的唯一驻留单位）。
    *
-   * @returns 容器数据；元数据/块缺失返回 null（由调用方按 data-missing 记账并跳过）
-   *
-   * 只有当前这一张的块密文被解码为字节，帧写出后引用即失效 —— 这是单文件
+   * 只有当前这一张的明文块被解码为字节，帧写出后引用即失效 —— 这是单文件
    * 导出内存峰值与容器总字节解耦的关键。
    */
-  const loadPhotoSpec = async (ph: PhotoEntry): Promise<VencPhotoSpec | null> => {
-    const { metaB64, chunkB64List, meta, chunkHashesForExport } = await getPhotoVerthysData(ph);
-    if (!metaB64 || !meta || chunkB64List.length === 0) return null;
-    const chunkBytes = chunkB64List.map((cb) => base64ToBytes(cb));
-    // 块哈希优先取权威值（块集 / 索引给出；缺失时现场补算），保证容器逐块校验可用
-    const chunkHashes =
-      chunkHashesForExport.length === chunkBytes.length
-        ? chunkHashesForExport
-        : computeChunkHashesForB64(chunkB64List);
-    const lightMeta = toLightMeta({ ...meta, chunkDataB64: chunkB64List, chunkHashes });
-    return { lightMeta, chunkBytes };
+  const loadPhotoSpec = async (
+    ph: PhotoEntry,
+  ): Promise<
+    | { ok: true; spec: VencPhotoSpec }
+    | { ok: false; name: string; reason: ExportFailureReason }
+  > => {
+    const outcome = await loadPortableSpec(ph);
+    if (outcome.ok) return { ok: true, spec: outcome.spec };
+    return { ok: false, name: outcome.name, reason: outcome.reason };
   };
 
   /**
@@ -185,12 +177,13 @@ export function usePhotoExport(params: UsePhotoExportParams) {
         exportToken.value,
         async (index) => {
           const ph = selected[index];
-          const spec = await loadPhotoSpec(ph);
+          const outcome = await loadPhotoSpec(ph);
           onPhoto(index, selected.length);
-          if (!spec) {
-            failures.push({ name: ph.name || `#${ph.metaId ?? ph.id}`, reason: "data-missing" });
+          if (!outcome.ok) {
+            failures.push({ name: outcome.name, reason: outcome.reason });
             return null;
           }
+          const spec = outcome.spec;
           produced += vencPhotoFramesBytes(spec.lightMeta, spec.chunkBytes.map((c) => c.length));
           if (produced > MAX_EXPORT_SINGLE_BYTES) throw new ExportTooLargeError();
           packed += 1;
@@ -263,9 +256,15 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   };
 
   const regenerateExportToken = () => {
-    // 直接重新生成（用户决策：不再弹确认窗口）——令牌仅在本次导出窗口内
-    // 有效，尚未导出时不存在旧凭据失效风险
+    // 直接重新生成（不弹确认窗口）——令牌仅在本次导出窗口内
+    // 有效，尚未导出时不存在既有凭据失效风险
     exportToken.value = generateRandomToken(32);
+    // 新旧令牌已不同：复制成功态必须复位，不能继续显示上一枚令牌的对勾
+    tokenCopied.value = false;
+    if (tokenCopiedTimer) {
+      clearTimeout(tokenCopiedTimer);
+      tokenCopiedTimer = undefined;
+    }
   };
 
   const copyExportToken = async () => {
@@ -338,79 +337,121 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   };
 
   /**
-   * 从 verthys 读取单张照片的加密数据（兼容新旧两种格式）
-   * - 新格式：chunk 数据内联在 meta 记录的 chunkDataB64 字段中（推荐，避免 ID 漂移）
-   * - 旧格式：通过 chunkIds 单独查找 chunk 记录（向后兼容）
-   * 修复：meta 缺失时按需解密回填（重启后占位项 meta=undefined 的场景）
+   * 读取单张照片并产出可移植容器输入：本地解密为原始明文块。
+   *
+   * 容器不再携带模块密钥加密态；导出必须先在当前模块密钥下完成解密与
+   * 完整性校验，再由容器令牌密钥重新加密。失败按可归因分类返回，
+   * 不把「解密失败」误报为「数据缺失」。
    */
-  const getPhotoVerthysData = async (
+  const loadPortableSpec = async (
     ph: PhotoEntry,
-  ): Promise<{
-    metaB64: string;
-    chunkB64List: string[];
-    meta: PhotoMeta | null;
-    /** 逐块密文哈希（块集/索引给出的权威值；缺失时调用方现场补算） */
-    chunkHashesForExport: string[];
-  }> => {
+  ): Promise<
+    | { ok: true; spec: VencPhotoSpec }
+    | { ok: false; name: string; reason: ExportFailureReason }
+  > => {
+    const displayName = ph.meta?.name || ph.name || `记录 #${ph.metaId ?? ph.id}`;
     let metaB64 = "";
     if (ph.metaId) {
-      // 判别式读取：超出单条上限 / 通道异常与"记录不存在"分流留痕，
-      //   不再统一退化为"记录缺失"（旧返回值无法定位归因）。
-      const readOutcome = await verthysGetRecordDetailed(ph.metaId);
-      if (readOutcome.ok) {
-        metaB64 = readOutcome.record.dataB64;
-      } else {
-        console.warn(`[导出] 读取照片元数据失败（${readOutcome.code}）: ${readOutcome.error}`);
-      }
-    }
-    const chunkB64List: string[] = [];
-    let chunkHashesForExport: string[] = [];
-    // 修复：meta 缺失时按需解密（重启后 watch 解密未完成即导出的场景）
-    let meta: PhotoMeta | null = ph.meta ?? null;
-    if (!meta && ph.metaId && metaB64) {
       try {
-        const outcome = await decryptMetaPreferWorker(
-          metaB64, ph.name || `导出 #${ph.metaId}`,
-        );
-        meta = outcome.meta;
-      } catch {
-        // 解密失败：meta 置空，由调用方按 data-missing 记账并展示
-        meta = null;
+        const readOutcome = await verthysGetRecordDetailed(ph.metaId);
+        if (readOutcome.ok) {
+          metaB64 = readOutcome.record.dataB64;
+        } else {
+          log.warn(`[导出] 读取照片元数据失败（${readOutcome.code}）: ${readOutcome.error}`);
+        }
+      } catch (e) {
+        // 单条读取异常不得中断整批导出：按该张数据缺失记账，其余照常
+        log.warn(`[导出] 读取照片元数据异常（${displayName}）:`, e);
       }
     }
-    if (meta) {
-      // 索引瘦身布局：缩略图在独立记录中，导出容器需要明文缩略图
-      //   （容器轻量头带缩略图，由容器密钥保护）；解密经 Worker 池（与索引
-      //   同盐时命中池内派生缓存，不额外产生 PBKDF2），池不可用时由桥回退。
-      if (isSlimPhotoMeta(meta) && meta.thumbId && meta.wrappedFileKey && !meta.thumbB64) {
-        const thumbRecord = await verthysGetRecord(meta.thumbId);
-        if (!thumbRecord?.dataB64) {
-          // 缩略图记录缺失：按数据缺失记账（不产出无缩略图的容器）
-          return { metaB64, chunkB64List: [], meta: null, chunkHashesForExport: [] };
-        }
+    if (!ph.metaId || !metaB64) {
+      return { ok: false, name: displayName, reason: "data-missing" };
+    }
+
+    let meta: PhotoMeta | null = ph.meta ?? null;
+    if (!meta) {
+      try {
+        const outcome = await decryptMetaPreferWorker(metaB64, displayName);
+        meta = outcome.meta;
+      } catch (e) {
+        log.warn(`[导出] 元数据解密失败（${displayName}）:`, e);
+        return { ok: false, name: displayName, reason: "decrypt-failed" };
+      }
+    }
+    if (!meta) {
+      return { ok: false, name: displayName, reason: "data-missing" };
+    }
+
+    // 索引瘦身布局：缩略图在独立记录中，容器清单需要明文缩略图
+    if (isSlimPhotoMeta(meta) && meta.thumbId && meta.wrappedFileKey && !meta.thumbB64) {
+      let thumbRecord: { dataB64?: string } | null = null;
+      try {
+        thumbRecord = await verthysGetRecord(meta.thumbId);
+      } catch (e) {
+        log.warn(`[导出] 读取缩略图记录异常（${displayName}）:`, e);
+      }
+      if (!thumbRecord?.dataB64) {
+        return { ok: false, name: displayName, reason: "data-missing" };
+      }
+      try {
         const thumbBytes = await decryptThumbPreferWorker(
-          thumbRecord.dataB64, meta.wrappedFileKey, meta.fileHash,
-          meta.name || `导出 #${ph.metaId}`,
+          thumbRecord.dataB64, meta.wrappedFileKey, meta.fileHash, displayName,
         );
         meta = { ...meta, thumbB64: bytesToBase64(thumbBytes) };
-      }
-      // 逐块引用布局分流（瘦身布局取块集记录；既有布局取索引内联引用）
-      try {
-        const refs = await resolveChunkRefs(meta, meta.name || `记录 #${ph.metaId}`);
-        const { ciphers, missing } = await loadChunkCiphers(refs);
-        if (missing > 0) {
-          // 任一记录缺失即整体不可靠（块数将少于声明值），清空后由调用方记失败
-          return { metaB64, chunkB64List: [], meta: null, chunkHashesForExport: [] };
-        }
-        for (const cb of ciphers) chunkB64List.push(cb);
-        // 逐块权威哈希随引用一并带回（容器逐块校验与导出结果使用）
-        chunkHashesForExport = refs.hashes;
       } catch (e) {
-        log.warn(`导出读取块引用失败: ${e instanceof Error ? e.message : String(e)}`);
-        return { metaB64, chunkB64List: [], meta: null, chunkHashesForExport: [] };
+        log.warn(`[导出] 缩略图解密失败（${displayName}）:`, e);
+        return { ok: false, name: displayName, reason: "decrypt-failed" };
       }
     }
-    return { metaB64, chunkB64List, meta, chunkHashesForExport };
+
+    let ciphers: string[];
+    let hashes: string[];
+    try {
+      const refs = await resolveChunkRefs(meta, displayName);
+      const loaded = await loadChunkCiphers(refs);
+      if (loaded.missing > 0) {
+        return { ok: false, name: displayName, reason: "data-missing" };
+      }
+      ciphers = loaded.ciphers;
+      hashes = refs.hashes;
+    } catch (e) {
+      log.warn(`[导出] 读取块引用失败（${displayName}）:`, e);
+      return { ok: false, name: displayName, reason: "data-missing" };
+    }
+    if (ciphers.length === 0) {
+      return { ok: false, name: displayName, reason: "data-missing" };
+    }
+
+    const slim = isSlimLayout(meta) && meta.wrappedFileKey
+      ? { wrappedFileKey: meta.wrappedFileKey, chunkTotal: ciphers.length }
+      : undefined;
+    let chunkBytes: Uint8Array[];
+    try {
+      chunkBytes = await decryptChunksPreferWorker(
+        ciphers, meta.fileHash, displayName, slim,
+        {
+          expectedHashes: hashes.length > 0 ? hashes : undefined,
+          // 整图明文哈希是轮换后仍成立的权威值；逐块密文哈希仅作诊断
+          expectedFileHash: meta.fileHash,
+        },
+      );
+    } catch (e) {
+      log.warn(`[导出] 数据块解密失败（${displayName}）:`, e);
+      return { ok: false, name: displayName, reason: "decrypt-failed" };
+    }
+    const total = chunkBytes.reduce((sum, chunk) => sum + chunk.length, 0);
+    if (total !== meta.size) {
+      log.warn(`[导出] 明文块字节数与元数据不符（${displayName}）: ${total} ≠ ${meta.size}`);
+      return { ok: false, name: displayName, reason: "decrypt-failed" };
+    }
+    try {
+      return { ok: true, spec: { lightMeta: toLightMeta(meta, chunkBytes.length), chunkBytes } };
+    } catch (e) {
+      // 清单字段超出容器契约（历史数据可能携带超限缩略图/名称）：按该张失败记账，
+      // 不得让一条坏记录拖垮整批导出。
+      log.warn(`[导出] 照片清单字段非法（${displayName}）:`, e);
+      return { ok: false, name: displayName, reason: "pack-failed" };
+    }
   };
 
   /**
@@ -441,8 +482,8 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     const slim = isSlimLayout(meta) && meta.wrappedFileKey
       ? { wrappedFileKey: meta.wrappedFileKey, chunkTotal: expectedTotal }
       : undefined;
-    // 完整性校验随解密任务下沉：逐块密文哈希与整图明文哈希在 Worker 内比对，
-    //   主线程不再对兆字节级数据做同步哈希（回退路径保持同等校验标准）。
+    // 完整性校验随解密任务下沉：整图明文哈希为唯一权威值，逐块密文哈希仅作
+    //   诊断（密钥轮换会合法改变密文）；主线程不做兆字节级同步哈希。
     const chunks = await decryptChunksPreferWorker(
       chunkB64List, meta.fileHash, label, slim,
       {
@@ -476,12 +517,18 @@ export function usePhotoExport(params: UsePhotoExportParams) {
       return { bytes: ph.rawBytes, meta: ph.meta ?? null };
     }
 
-    // 修复：meta 缺失时按需解密（重启后 watch 解密未完成即导出的场景）
+    // meta 缺失时按需解密（重启后 watch 解密未完成即导出的场景）
     let meta = ph.meta;
     if (!meta) {
       if (!ph.metaId) return null;
       // 判别式读取：归因保留（超限/通道异常不再与"记录不存在"混同）
-      const readOutcome = await verthysGetRecordDetailed(ph.metaId);
+      let readOutcome: Awaited<ReturnType<typeof verthysGetRecordDetailed>>;
+      try {
+        readOutcome = await verthysGetRecordDetailed(ph.metaId);
+      } catch (e) {
+        console.warn(`[导出] 读取照片元数据异常（${ph.name || ph.metaId}）:`, e);
+        return null;
+      }
       if (!readOutcome.ok) {
         console.warn(`[导出] 读取照片元数据失败（${readOutcome.code}）: ${readOutcome.error}`);
         return null;
@@ -511,8 +558,8 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   };
 
   /**
-   * 收集选中照片的容器数据（单文件/多文件模式共用入口，v2 逐帧容器）。
-   * 逐张失败显式计入 failures；历史记录缺 chunkHashes 时现场补算（与块密文同源）。
+   * 收集选中照片的容器数据（浏览器/多文件共用入口）。
+   * 逐张失败显式计入 failures，并保留可归因原因。
    */
   const collectPhotoSpecs = async (
     selected: PhotoEntry[],
@@ -521,25 +568,16 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     const specs: VencPhotoSpec[] = [];
     for (const ph of selected) {
       if (isTauri && ph.metaId) {
-        // 修复：基于 metaId 判断（非 meta），重启后占位项也能导出
-        // Tauri 模式：从 verthys 读取（兼容新旧格式 + 按需解密回退）
-        const { metaB64, chunkB64List, meta, chunkHashesForExport } = await getPhotoVerthysData(ph);
-        if (!metaB64 || chunkB64List.length === 0 || !meta) {
-          failures.push({ name: meta?.name || ph.name || `记录 #${ph.metaId}`, reason: "data-missing" });
+        const outcome = await loadPortableSpec(ph);
+        if (!outcome.ok) {
+          failures.push({ name: outcome.name, reason: outcome.reason });
           continue;
         }
-        const chunkBytes = chunkB64List.map((cb) => base64ToBytes(cb));
-        // 块哈希优先取权威值（块集 / 索引给出；缺失时现场补算），保证容器逐块校验可用
-        const chunkHashes =
-          chunkHashesForExport.length === chunkBytes.length
-            ? chunkHashesForExport
-            : computeChunkHashesForB64(chunkB64List);
-        const lightMeta = toLightMeta({ ...meta, chunkDataB64: chunkB64List, chunkHashes });
-        specs.push({ lightMeta, chunkBytes });
+        specs.push(outcome.spec);
       } else {
         if (!isTauri && ph.rawBytes) {
           /* 浏览器模式没有 Tauri worker，无法在密钥不出渲染进程的前提下产出
-           * 密文帧；导出功能只在桌面运行时提供，不回退到在 JS 内派生模块密钥。 */
+           * 明文块；导出功能只在桌面运行时提供，不回退到在 JS 内派生模块密钥。 */
           log.warn(`浏览器模式不支持加密容器导出: ${ph.name}`);
         }
         failures.push({ name: ph.name || `照片 #${ph.id}`, reason: "data-missing" });
@@ -570,6 +608,12 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     if (exportSelectedIds.value.size === 0) return;
     // 浏览器模式自动满足路径条件
     if (isTauri && !exportPath.value) return;
+    // 对话框可能在模块密钥超时锁定后仍停留：执行前必须重新确认会话密钥可用，
+    // 否则会把「模块已锁定」误报为逐张解密/完整性失败。
+    if (!ensurePhotoKey()) {
+      showError("拾光模块已锁定，请返回重新解锁");
+      return;
+    }
     // 加密导出的令牌为必填且不低于最小长度（支持自定义编辑，可能被清空或
     // 过短）：前置拦截，避免读完照片数据才在打包层失败；PNG 为明文导出，
     // 不需要令牌
@@ -577,10 +621,20 @@ export function usePhotoExport(params: UsePhotoExportParams) {
       showError(`加密令牌至少 ${MIN_TOKEN_LENGTH} 位字符，请填写或重新生成`);
       return;
     }
+    if (exportFormat.value !== "png") {
+      // 与还原端归一化口径一致：令牌首尾空白不参与派生，否则导出可成功但
+      // 还原端按 trim 后的令牌派生会解封失败（备份不可恢复）
+      exportToken.value = exportToken.value.trim();
+    }
     exporting.value = true;
     exportProgress.value = 0;
 
     const selected = photos.value.filter(p => exportSelectedIds.value.has(p.id));
+    if (selected.length === 0) {
+      // 选片集合与当前列表脱节（列表被刷新/清空）：不得以「已导出 0 张」假成功收尾
+      exporting.value = false;
+      return;
+    }
     // 批次内输出名唯一化上下文：任何格式下同一名称不互相覆盖
     const usedNames = new Set<string>();
 
@@ -588,7 +642,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
       let outcome: ExportOutcome;
 
       if (exportFormat.value === "single") {
-        // === 单文件模式：全部选中照片打包为单个 .venc v2 容器 ===
+        // === 单文件模式：全部选中照片打包为单个 .venc 备份容器 ===
         const failures: ExportFailure[] = [];
         exportStatus.value = "读取照片数据…";
         exportProgress.value = 10;
@@ -738,29 +792,34 @@ export function usePhotoExport(params: UsePhotoExportParams) {
               exportStatus.value = `导出 ${ph.name || `#${ph.metaId ?? ph.id}`}（${i + 1}/${selected.length}）…`;
               exportProgress.value = Math.round((i / selected.length) * 100);
 
+              let outcome: Awaited<ReturnType<typeof loadPortableSpec>>;
               try {
-                const { metaB64, chunkB64List, meta, chunkHashesForExport } = await getPhotoVerthysData(ph);
-                if (!metaB64 || chunkB64List.length === 0 || !meta) {
-                  failures.push({
-                    name: meta?.name || ph.name || `记录 #${ph.metaId ?? ph.id}`,
-                    reason: "data-missing",
-                  });
-                  continue;
-                }
-                const chunkBytes = chunkB64List.map((cb) => base64ToBytes(cb));
-                const chunkHashes =
-                  chunkHashesForExport.length === chunkBytes.length
-                    ? chunkHashesForExport
-                    : computeChunkHashesForB64(chunkB64List);
-                const lightMeta = toLightMeta({ ...meta, chunkDataB64: chunkB64List, chunkHashes });
-                const vencBytes = await packVenc([{ lightMeta, chunkBytes }], exportToken.value);
-                const displayName = meta.name || ph.name;
-                const fileName = sanitizeWithExtension(displayName, ".venc");
+                outcome = await loadPortableSpec(ph);
+              } catch (e) {
+                console.error(`[多文件导出] ${ph.name} 读取失败:`, e);
+                failures.push({ name: ph.name || `#${ph.metaId ?? ph.id}`, reason: "data-missing" });
+                continue;
+              }
+              if (!outcome.ok) {
+                failures.push({ name: outcome.name, reason: outcome.reason });
+                continue;
+              }
+              let vencBytes: Uint8Array;
+              try {
+                vencBytes = await packVenc([outcome.spec], exportToken.value);
+              } catch (e) {
+                console.error(`[多文件导出] ${ph.name} 打包失败:`, e);
+                failures.push({ name: outcome.spec.lightMeta.name || ph.name, reason: "pack-failed" });
+                continue;
+              }
+              const displayName = outcome.spec.lightMeta.name || ph.name;
+              const fileName = sanitizeWithExtension(displayName, ".venc");
+              try {
                 await writeVencFile(`${dir}/${uniqueFileName(fileName, usedNames)}`, vencBytes);
                 successCount++;
               } catch (e) {
-                console.error(`[多文件导出] ${ph.name} 失败:`, e);
-                failures.push({ name: ph.name || `#${ph.metaId ?? ph.id}`, reason: "write-failed" });
+                console.error(`[多文件导出] ${ph.name} 写入失败:`, e);
+                failures.push({ name: displayName, reason: "write-failed" });
               }
             }
           } else {
@@ -772,11 +831,16 @@ export function usePhotoExport(params: UsePhotoExportParams) {
 
               const specs = await collectPhotoSpecs([ph], failures);
               if (specs.length > 0) {
-                const vencBytes = await packVenc(specs, exportToken.value);
-                downloadBlob(vencBytes, sanitizeWithExtension(ph.name, ".venc"));
-                successCount++;
-                // 防止浏览器拦截多下载
-                await new Promise(r => setTimeout(r, 500));
+                try {
+                  const vencBytes = await packVenc(specs, exportToken.value);
+                  downloadBlob(vencBytes, sanitizeWithExtension(ph.name, ".venc"));
+                  successCount++;
+                  // 防止浏览器拦截多下载
+                  await new Promise(r => setTimeout(r, 500));
+                } catch (e) {
+                  console.error(`[多文件导出] ${ph.name} 浏览器打包失败:`, e);
+                  failures.push({ name: ph.name, reason: "pack-failed" });
+                }
               }
             }
           }
@@ -796,7 +860,6 @@ export function usePhotoExport(params: UsePhotoExportParams) {
           ? {
               "data-missing": "照片数据缺失",
               "pack-failed": "容器打包失败",
-              "encrypt-failed": "加密失败",
               "decrypt-failed": "照片解密或完整性校验失败",
               "convert-failed": "图片转换失败",
               "write-failed": "写入失败",

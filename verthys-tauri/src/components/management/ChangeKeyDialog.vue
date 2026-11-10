@@ -175,7 +175,7 @@ const emit = defineEmits<{
   (e: "confirm"): void;
 }>();
 
-/** 确认禁用条件：处理中或任一凭据缺失（与原实现逐项一致） */
+/** 确认禁用条件：处理中或任一凭据缺失 */
 const confirmBlocked = computed(() =>
   props.changeKeyProcessing
   || !oldPassword.value || !props.oldBinFileName || !oldBinPassword.value

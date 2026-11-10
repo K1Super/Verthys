@@ -5,7 +5,7 @@
  *   1. 状态目录只由 KnownFolder 解析，禁止读取 LOCALAPPDATA 等可改写环境变量；
  *   2. 目录使用受保护 DACL，拒绝重解析点与非当前用户 owner；
  *   3. 见证域 ID 绑定设备根哈希与主体（熔断为用户 SID，回滚为容器 UUID），
- *      禁止再以状态文件路径作为身份；旧路径与旧路径见证 ID 已废弃。
+ *      禁止以状态文件路径作为身份。
  *
  * 约束：
  *   - 任何路径/ACL/身份解析失败都返回 VTY_E_POLICY / VTY_E_TPM，调用方必须
@@ -27,7 +27,7 @@ extern "C" {
  * name 只允许不含分隔符的固定文件名；目录不存在时创建并施加受保护 DACL。 */
 int vty_secure_state_file_path(const char *name, char *out, size_t cap);
 
-/* N2：安全状态目录预检（解析/创建/ACL 加固与复核，不写状态文件）。
+/* 安全状态目录预检（解析/创建/ACL 加固与复核，不写状态文件）。
  * 成功返回 VTY_OK；失败返回 VTY_E_POLICY / VTY_E_IO，调用方映射专用错误码。 */
 int vty_secure_state_preflight(void);
 

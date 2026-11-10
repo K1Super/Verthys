@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-/* 参数下限校验：满足 规范返回 VTY_OK，否则 VTY_E_KDF_WEAK */
+/* 参数区间校验：在 VTY_ARGON2_* 允许区间内返回 VTY_OK，否则 VTY_E_KDF_WEAK */
 int vty_kdf_params_valid(uint32_t mem_kib, uint32_t iters, uint32_t parallel);
 
 /* 槽位 KDF：32B 盐，输出 32B；参数低于下限拒绝（VTY_E_KDF_WEAK） */

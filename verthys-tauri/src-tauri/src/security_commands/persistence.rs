@@ -432,7 +432,7 @@ pub(super) fn ensure_usb_salt(
  *  USB 注册表 DPAPI 持久化                           *
  *                                                                        *
  *  USB 注册表内容加密持久化到状态文件，应用启动时加载，形成不可篡改的     *
- *  安全基线。废除"首次自动注册"逻辑，仅管理员预先授权的设备可用。        *
+ *  安全基线。仅管理员预先授权的设备可用，不做首次自动注册。              *
  *                                                                        *
  *  状态文件路径：app_config_dir/.usb_registry_state                       *
  *  格式：DPAPI( JSON Vec<(String, String)> )                              *

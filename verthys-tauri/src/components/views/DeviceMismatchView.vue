@@ -5,12 +5,9 @@
     2. 显示当前机器码短显示
     3. 提供返回按钮（通知父组件退出当前模块）
 
-  悬浮场重构：去除 dm-card glass 卡片底板 — 内容以 ff-node
-    悬浮于模块底景之上（inline 内嵌场，渐晕收敛适配）；警示图标改用
-    薄环容场（去填充盒），提示语改轨道分隔排印
-
-  Props: deviceFingerprintShort — 机器码短显示
-  Emits: back — 返回主页（通知父组件退出当前模块）
+  悬浮场布局：内容以 ff-node 悬浮于模块底景之上（inline 内嵌场，
+    渐晕收敛适配）；警示图标使用薄环容场（无填充盒），提示语采用
+    轨道分隔排印
 -->
 <template>
   <div class="view-device-mismatch">

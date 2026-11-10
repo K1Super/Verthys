@@ -38,13 +38,13 @@ function mountDialog(onSubmit: (code: string) => void = () => {}) {
   return state;
 }
 
-function input(): HTMLTextAreaElement {
-  const el = document.querySelector<HTMLTextAreaElement>(".ru-input");
+function input(): HTMLInputElement {
+  const el = document.querySelector<HTMLInputElement>(".vif-input");
   if (!el) throw new Error("缺少恢复码输入框");
   return el;
 }
 
-function setValue(el: HTMLTextAreaElement, value: string) {
+function setValue(el: HTMLInputElement, value: string) {
   el.value = value;
   el.dispatchEvent(new Event("input"));
 }

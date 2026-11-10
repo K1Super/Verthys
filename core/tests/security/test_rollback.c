@@ -161,7 +161,7 @@ TEST(rollback_module_monotonic_anchor)
     CHECK_EQ(rb_clean_witness(uuid), VTY_OK);
     CHECK_EQ(rb_enable("rb_m.state"), 0);
 
-    /* 首次运行 / 未登记库：0 版本放行（加计数器前的老库） */
+    /* 首次运行 / 未登记库：0 版本放行（未记录锚点的库） */
     CHECK_EQ(vty_rollback_check(uuid, 0), VTY_OK);
     CHECK_EQ(vty_rollback_commit(uuid, 1), VTY_OK);
     CHECK_EQ(vty_rollback_check(uuid, 1), VTY_OK);

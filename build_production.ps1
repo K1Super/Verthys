@@ -69,9 +69,7 @@ $VerthysTauriDir = Join-Path $ScriptRoot "verthys-tauri"
 $WorkerDir   = Join-Path $VerthysTauriDir "verthys-worker"
 # externalBin 基准目录：Tauri v2 将 tauri.conf.json 的 externalBin 路径
 #   相对该文件所在目录（src-tauri/）解析。副本必须落在 src-tauri\binaries\，
-#   否则 tauri-build 校验报 "resource path doesn't exist"（2026-09-18 修复：
-#   原先误复制到 verthys-tauri\binaries\，历史构建成功仅因 src-tauri\binaries\
-#   存在清理前的暂存副本）。
+#   否则 tauri-build 校验报 "resource path doesn't exist"。
 $BinariesDir = Join-Path $VerthysTauriDir "src-tauri\binaries"
 $CoreBuildDir = Join-Path $ScriptRoot "build"
 $WorkerReleaseExe = Join-Path $WorkerDir "target\release\verthys-worker.exe"
@@ -354,8 +352,8 @@ if (-not [string]::IsNullOrEmpty($env:VCToolsInstallDir) -and
 . (Join-Path $ScriptsLibDir "cmake.utils.ps1")
 
 # C 核心 DLL 产物路径：由构建产物契约提供（scripts/lib/artifacts.ps1 读取
-# CMake POST_BUILD 生成的 build/core/verthys.artifacts.json）——消除按
-# 生成器类型猜测子目录的历史分支（Ninja/VS 布局差异曾导致哈希退化为 None）。
+# CMake POST_BUILD 生成的 build/core/verthys.artifacts.json）——避免按
+# 生成器类型猜测子目录（Ninja/VS 布局差异会让哈希退化为 None）。
 # 契约在构建/跳过决策之后读取：首次构建不会因契约尚未生成而失败。
 # 注入器与契约写入器同样来自 scripts/lib，保证与 build_core.release.ps1
 # 使用完全相同的完整性基准口径。
@@ -455,7 +453,7 @@ if ($script:signing.Enabled -and $SkipWorker) {
 if (-not $SkipCore) {
     Write-Stage "阶段 1/4: 构建 C 核心安全 DLL（verthys.dll）"
 
-    # 陈旧缓存自愈（根因修复 2026-09-19）：项目目录迁移/重命名后，
+    # 陈旧缓存自愈：项目目录迁移/重命名后，
     # build/CMakeCache.txt 记录的绝对路径（CMAKE_HOME_DIRECTORY）失效，
     # CMake 报 "CMakeCache.txt directory ... is different than the directory
     # ... where CMakeCache.txt was created" 并拒绝配置。检测到不一致时
@@ -502,6 +500,19 @@ if (-not $SkipCore) {
     # 跳过构建：契约必须来自既有构建；缺失即给明确指引而非继续
     $script:actualCoreDll = Get-VerthysArtifactDll
     Assert-FileExists $script:actualCoreDll "verthys.dll (已有)"
+}
+
+# ========== 阶段 1.05: 预热签名宿主演练目标 ==========
+# vty_signed_host 是调用方认证门禁的输入。若缺失，CMake 会按依赖关系
+# 重新链接 verthys_core，从而覆盖刚注入的 .vsec 基准与 Authenticode 签名，
+# 并让打包副本与源 DLL 哈希漂移。必须在注入前确保该目标已构建：
+# 门禁阶段只签名临时副本，绝不再触发编译。
+if ($script:signing.Enabled) {
+    $prewarmManifest = Get-VerthysArtifactManifest
+    Get-VerthysSignedHostPath `
+        -BuildDir $CoreBuildDir `
+        -Manifest $prewarmManifest `
+        -CmakeExe $script:effectiveCmake | Out-Null
 }
 
 # ========== 阶段 1.1: .vsec 完整性基准注入 + 契约刷新 ==========
@@ -567,7 +578,7 @@ if (-not $SkipWorker) {
     # 纵深防御：禁用增量编译（defense-in-depth）
     # 根因：dev profile 增量编译与 raw-dylib 导入库生成存在竞态，导致
     # LNK1181: 无法打开输入文件 "windows.0.52.0.lib"。
-    # Cargo.toml [profile.dev] incremental=false 已是主修复；
+    # Cargo.toml [profile.dev] incremental=false 提供同一约束；
     # 此处额外设置环境变量确保即使 Cargo.toml 被修改也安全。
     $env:CARGO_INCREMENTAL = "0"
 
@@ -656,11 +667,10 @@ Write-OK "已复制: verthys.dll -> src-tauri/verthys.dll"
 Assert-FileExists $DllTarget "DLL 打包副本"
 
 # 3.2 同步到 Tauri target 目录（防止开发模式 dev 落入旧版 worker 副本）
-# 历史问题：src-tauri/target/{debug,release}/ 下存在旧版 verthys-worker.exe，
-# 旧的 resolve_worker_path 优先匹配 Tauri 资源路径，导致使用过期二进制，
-# 触发 "worker 就绪信号超时" 错误。即使新的 resolve_worker_path 已改为
-# 开发环境优先查找 ../../../verthys-worker/target/，仍需同步到 target 目录
-# 以保证 fallback 路径也能命中最新二进制（覆盖所有边界场景）。
+# src-tauri/target/{debug,release}/ 下可能残留旧版 verthys-worker.exe；
+# resolve_worker_path 在开发环境优先查找 ../../../verthys-worker/target/，
+# 但 fallback 会命中 target 目录，不同步会用到过期二进制并触发
+# "worker 就绪信号超时"。
 $tauriTargetRoot = Join-Path $VerthysTauriDir "src-tauri\target"
 $tauriDebugTarget = Join-Path $tauriTargetRoot "debug\verthys-worker.exe"
 $tauriReleaseTarget = Join-Path $tauriTargetRoot "release\verthys-worker.exe"
@@ -967,6 +977,15 @@ if (-not $SkipTauri) {
     }
     Write-OK "更新 profile 配置校验通过: $Profile"
 
+    # 本轮签名审计日志：构建前清空，签名入口在 Authenticode 复核通过后追加。
+    # 打包器是否对主程序执行 signCommand 只能由该审计判定：Tauri 日志为
+    # UTF-8，Windows PowerShell 5.1 按本地代码页解码，中文匹配不可靠。
+    $signJournalPath = Join-Path $CoreBuildDir "tauri_sign_journal.jsonl"
+    if (Test-Path -LiteralPath $signJournalPath) {
+        Remove-Item -LiteralPath $signJournalPath -Force
+    }
+    $env:VERTHYS_SIGN_JOURNAL = $signJournalPath
+
     Write-Step "npm run tauri build (profile=$Profile)"
     Push-Location $VerthysTauriDir
     try {
@@ -996,21 +1015,38 @@ if (-not $SkipTauri) {
         throw "Tauri 构建失败 (exit=$tauriExit)"
     }
 
-    # 打包器 signCommand 的签名输出会进入构建日志。主程序必须在 bundle type
-    # 补丁之后重签，否则安装包内嵌的是未签名或签名失效的主程序，运行期
-    # 调用方认证会拒绝启动。signCommand 被忽略时构建必须在此终止。
+    # 打包器 signCommand 只有在 bundle type 补丁之后执行，安装包内嵌的才是
+    # 有效签名的主程序；被忽略时运行期调用方认证会拒绝启动，构建必须在此终止。
+    # 判定依据是签名入口写入的审计记录，而不是构建日志文本：日志编码受运行
+    # 环境代码页影响，中文标记在 PowerShell 5.1 下会失真。
     if ($script:signing.Enabled) {
-        $mainSigned = $output | Where-Object {
-            $text = $_.ToString()
-            ($text -match '\[sign\]') -and
-            ($text -match '已签名并复核|已由目标发布者签名') -and
-            ($text -match 'Verthys\.exe')
-        } | Select-Object -First 1
+        $mainExePath = [System.IO.Path]::GetFullPath((Join-Path $SrcTauriDir "target\release\Verthys.exe"))
+        $mainSigned = $null
+        if (Test-Path -LiteralPath $signJournalPath -PathType Leaf) {
+            $entries = foreach ($line in [System.IO.File]::ReadAllLines($signJournalPath, [System.Text.Encoding]::UTF8)) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                try {
+                    $entry = $line | ConvertFrom-Json
+                    if ([string]::IsNullOrWhiteSpace([string]$entry.path) -or
+                        [string]::IsNullOrWhiteSpace([string]$entry.publisher)) {
+                        throw "字段缺失"
+                    }
+                    $entry
+                } catch {
+                    throw "签名审计日志损坏，无法确认主程序签名状态: $signJournalPath"
+                }
+            }
+            $mainSigned = $entries | Where-Object {
+                $_.publisher -eq $script:signing.PublisherSha256 -and
+                ([System.IO.Path]::GetFullPath([string]$_.path)) -ieq $mainExePath
+            } | Select-Object -First 1
+        }
         if ($null -eq $mainSigned) {
             throw "打包器未对主程序执行签名：signCommand 未生效或被跳过"
         }
         Write-OK "主程序已在 bundle type 补丁后签名"
     }
+    Remove-Item Env:VERTHYS_SIGN_JOURNAL -ErrorAction SilentlyContinue
 } else {
     Write-Stage "阶段 4/4: 跳过 Tauri 打包（-SkipTauri）"
 }
@@ -1089,8 +1125,8 @@ if ($LASTEXITCODE -ne 0) {
 Write-OK "SBOM 已生成: build\sbom.cdx.json"
 
 # ========== 阶段 4.6: 独立安全服务 ==========
-# P2 独立安全服务的构建已前移到 Tauri 打包阶段之前，确保安装包携带
-# 本次构建的安装器/服务二进制/根 CA，而不是上一轮残留产物。
+# P2 独立安全服务在 Tauri 打包阶段之前构建，确保安装包携带本次构建的
+# 安装器/服务二进制/根 CA，而不是上一轮残留产物。
 
 # ========== 阶段 5: 产物校验 ==========
 Write-Stage "构建完成 — 产物校验"

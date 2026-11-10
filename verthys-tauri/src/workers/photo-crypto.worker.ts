@@ -1,7 +1,7 @@
 /**
  * workers/photo-crypto.worker.ts — 照片加密 Web Worker
  *
- * Comprehensive_optimization：异步批处理流水线 — 传输器阶段（Web Worker 池）
+ * 异步批处理流水线 — 传输器阶段（Web Worker 池）
  *
  * =============================================================================
  * 职责
@@ -63,10 +63,10 @@
 import { blake3 } from "@noble/hashes/blake3";
 import type { PhotoMeta, SlimChunkSet } from "../types/crypto";
 import {
-  FILE_HASH_LEN, MAX_INLINE_META_BYTES, SALT_LEN, CHUNK_SIZE,
+  FILE_HASH_LEN, MAX_INLINE_META_BYTES, CHUNK_SIZE,
   PHOTO_FMT_SLIM,
 } from "../constants/crypto_const";
-import { PHOTO_THUMB_MAX_CHARS } from "../constants/photo_budget.generated";
+import { PHOTO_INDEX_MAX_BYTES, PHOTO_THUMB_MAX_CHARS } from "../constants/photo_budget.generated";
 import { bytesToBase64, base64ToBytes, bytesToHex } from "../utils/binary_codec";
 import { WorkerRpcClient } from "./worker-rpc";
 
@@ -252,6 +252,10 @@ async function processPhoto(
 ): Promise<PhotoProcessResult> {
   const origBytes = new Uint8Array(fileBytes);
   const size = origBytes.length;
+  if (size === 0) {
+    // 空文件无内容块：写入后会成为永远无法导出/查看的坏记录
+    throw new Error("文件为空，无法作为照片导入");
+  }
 
   // 1. 计算 BLAKE3 文件哈希（去重 + AD 绑定）
   const fileHashHex = bytesToHex(blake3(origBytes, { dkLen: FILE_HASH_LEN }));
@@ -265,9 +269,8 @@ async function processPhoto(
   const chunkHashes: string[] = [];
   let encryptedBytesTotal = 0;
   const slimLayout = slim !== undefined;
-  // 既有布局一次派生覆盖全文件块：盐由 worker 生成后随每块密文携带
-  const fileSaltB64 = slim?.fileSaltB64
-    ?? bytesToBase64(crypto.getRandomValues(new Uint8Array(SALT_LEN)));
+  // 分片域标识由文件哈希派生（Tauri worker 侧），块密文自带位置，
+  //   无需额外文件盐；瘦身布局的密钥材料由包裹态文件密钥承载。
 
   for (let c = 0; c < totalChunks; c++) {
     const start = c * CHUNK_SIZE;
@@ -279,7 +282,6 @@ async function processPhoto(
         module: "photo",
         kind: slimLayout ? "slim_chunk" : "chunk",
         data: bytesToBase64(chunkPlain),
-        salt: slimLayout ? undefined : fileSaltB64,
         fileHash: fileHashHex,
         seq: c,
         total: totalChunks,
@@ -321,7 +323,7 @@ async function processPhoto(
   origBytes.fill(0);
 
   if (!external) {
-    // 内联路径：元数据即刻加密回传（与旧行为一致）
+    // 内联路径：元数据即刻加密回传
     const metaPlain = new TextEncoder().encode(JSON.stringify(metaTemplate));
     try {
       const sealed = await workerRpc.request({
@@ -394,6 +396,15 @@ async function processPhotoMetaOnly(
     ? { ...meta, thumbB64: "", ...(entryKey ? { entryKey } : {}) }
     : { ...meta, ...(entryKey ? { entryKey } : {}) };
   const metaPlain = new TextEncoder().encode(JSON.stringify(payload));
+  /* 瘦身布局的索引必须能被扫描缓存承载：超出上界时写入会让列表每次
+   * 渲染都重新搬运整条记录，缓存对索引永远失效。读取侧无此约束，
+   * 因此只在写入入口拒绝，避免存量数据被误判。 */
+  if (slim && metaPlain.length > PHOTO_INDEX_MAX_BYTES) {
+    metaPlain.fill(0);
+    throw new Error(
+      `索引超出瘦身布局上限（${metaPlain.length} > ${PHOTO_INDEX_MAX_BYTES}）`,
+    );
+  }
   try {
     const sealed = await workerRpc.request({
       op: "seal",
@@ -672,8 +683,12 @@ async function processDecryptSlimSet(
  * @param wrappedFileKey 瘦身布局的包裹态文件密钥：提供时按 nonce|密文
  *   布局逐块解密（AD 绑定由序号位置给出）
  * @param chunkTotal 瘦身布局声明的块总数（必须与密文列表长度一致）
- * @param verify 完整性权威值：逐块密文哈希在解密前比对；
- *   整图明文哈希在解密后按序增量比对。任一不符即拒绝该任务。
+ * @param verify 完整性权威值：
+ *   - `expectedFileHash` 是整图明文的 BLAKE3，密码学上与存储布局/密钥轮换
+ *     无关，是真正的权威值；
+ *   - `expectedHashes` 是逐块**密文**哈希，模块启用/全库轮换会换封密文，
+ *     该值可能合法失效，因此只作为诊断信号：失配时继续解密，最终必须由
+ *     整图明文哈希证明内容真实性；缺少整图哈希时仍按失败处理。
  */
 async function processDecryptChunks(
   chunksB64: string[],
@@ -703,14 +718,18 @@ async function processDecryptChunks(
     const fileHasher = verify?.expectedFileHash
       ? blake3.create({ dkLen: FILE_HASH_LEN })
       : null;
+    let hashMismatchCount = 0;
+    let firstHashMismatch = -1;
     for (let c = 0; c < chunksB64.length; c++) {
       try {
         if (expectedHashes && expectedHashes.length > 0) {
-          // 逐块密文哈希在解密前校验：先证密文与权威值一致，再解明文；
-          // 不一致即拒绝该任务（确定性失败，主线程不重算）。
+          /* 逐块密文哈希仅作诊断：密钥轮换后密文被重新封装，旧哈希必然
+           * 失配，但 AEAD 标签仍证明密文由当前模块密钥生成；最终以整图
+           * 明文哈希作为唯一内容权威值。 */
           const actual = bytesToHex(blake3(base64ToBytes(chunksB64[c]), { dkLen: FILE_HASH_LEN }));
           if (actual !== expectedHashes[c]) {
-            throw new Error(`块密文哈希校验失败（第 ${c + 1}/${chunksB64.length} 块）`);
+            hashMismatchCount += 1;
+            if (firstHashMismatch < 0) firstHashMismatch = c;
           }
         }
         const opened = await workerRpc.request(
@@ -758,6 +777,20 @@ async function processDecryptChunks(
           `整图哈希校验失败（期望 ${verify.expectedFileHash}，实际 ${actualFileHash}）`,
         );
       }
+    }
+    if (hashMismatchCount > 0) {
+      if (!verify?.expectedFileHash) {
+        // 没有整图明文哈希就无法区分“轮换导致的合法失配”与真实损坏，必须拒绝
+        throw new Error(
+          `块密文哈希校验失败（第 ${firstHashMismatch + 1}/${chunksB64.length} 块），` +
+            "且调用方未提供整图哈希权威值",
+        );
+      }
+      console.warn(
+        `[photo-crypto.worker] 逐块密文哈希失配 ${hashMismatchCount} 块` +
+          `（首块 ${firstHashMismatch + 1}/${chunksB64.length}）；` +
+          "已由整图明文哈希校验兜底（通常来自模块密钥轮换）",
+      );
     }
     return plaintexts;
   } catch (e) {
@@ -959,6 +992,12 @@ self.onmessage = async (e: MessageEvent<PhotoCryptoRequestEnvelope>) => {
     const response = assemblePhotoCryptoSuccess(id, result);
     workerScope.postMessage(response);
   } catch (e) {
+    // 失败路径兜底清零源明文（成功路径由 processPhoto 内部负责）
+    try {
+      new Uint8Array(fileBytes).fill(0);
+    } catch {
+      /* 缓冲已分离或不可写：无残留可清 */
+    }
     const error = e instanceof Error ? e.message : String(e);
     console.error(`[photo-crypto.worker] 加密失败: ${fileName}`, e);
 

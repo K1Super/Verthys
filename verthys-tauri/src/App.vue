@@ -14,10 +14,16 @@
       { 'glass-calm': idleLevel === 'deep-idle', 'reduce-motion': prefersReducedMotion },
     ]"
   >
-    <ParticleBackground :phase="phase" :reduced-motion="prefersReducedMotion" />
+    <ParticleBackground
+      :phase="phase"
+      :reduced-motion="prefersReducedMotion"
+      :skip-intro="isDirectLaunch"
+      :particles-hidden="isDirectLaunch && !entered"
+    />
     <div class="app-shell">
-      <!-- 引导页层（上层 — 淡出离场） -->
-      <div class="intro-layer">
+      <!-- 引导页层（上层 — 淡出离场）：仅首映启动挂载；直接进入不渲染，
+           杜绝一帧引导页闪入 -->
+      <div v-if="!isDirectLaunch" class="intro-layer">
         <transition name="page-glitch">
           <UnlockView v-if="!entered" key="intro" @enter="onEnter" />
         </transition>
@@ -26,8 +32,9 @@
       <!-- 主界面层（双缓冲预挂载 — 下层，交接帧零成本浮现）：
            PREWARM_MOUNT（1100ms）挂载进 prewarm 冻结层（隐藏 + 动画
            暂停 + 免交互）；PAGE_HANDOFF（3100ms）解除冻结 → materialize
-           过渡启动 + 全部子入场动画从 0 同步播放 -->
-      <div class="main-layer" :class="{ prewarm: !entered }">
+           过渡启动 + 全部子入场动画从 0 同步播放。
+           直接进入：启动即预挂载，分包与首帧就绪后以短淡入解除冻结。 -->
+      <div class="main-layer" :class="{ prewarm: !entered, 'direct-enter': isDirectLaunch }">
         <MainView v-if="mainPrewarmed" />
       </div>
 
@@ -67,16 +74,32 @@
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { defineAsyncComponent, ref, computed, onMounted, onBeforeUnmount, nextTick } from "vue";
 import ParticleBackground from "./components/ParticleBackground.vue";
 import UnlockView from "./components/UnlockView.vue";
 import WindowControls from "./components/main-view/WindowControls.vue";
 import SecurityServiceGate from "./components/SecurityServiceGate.vue";
 // 全局 Toast 渲染层（唯一渲染通道；静态导入：提示须在任何阶段随时可用）
 import ToastLayer from "./components/common/feedback/ToastLayer.vue";
+import type { LaunchPresentation } from "./app/launch-presentation";
+
+/* 根组件启动展示形态：bootstrap 在创建视图前判定后注入（静态值） */
+const props = withDefaults(
+  defineProps<{ launchPresentation?: LaunchPresentation }>(),
+  { launchPresentation: "ceremony" },
+);
+/** 本次启动是否直接进入主界面（同一次开机内的后续启动） */
+const isDirectLaunch = props.launchPresentation === "direct";
+
 // 主界面懒加载：MainView 静态导入会拉入 keyManager.ts → verthys.ts 整个业务层，
 // 改为 defineAsyncComponent 后，业务层代码移至独立 chunk，主包体积大幅下降。
-const MainView = defineAsyncComponent(() => import("./components/MainView.vue"));
+// 加载 Promise 同时供“直接进入”等待分包就绪 —— 与异步组件共享同一说明符，
+// 命中同一 ESM 模块缓存，不产生二次加载。
+const loadMainViewChunk = () => import("./components/MainView.vue");
+const MainView = defineAsyncComponent(loadMainViewChunk);
+let mainViewChunkPromise: ReturnType<typeof loadMainViewChunk> | null = null;
+const ensureMainViewChunk = (): ReturnType<typeof loadMainViewChunk> =>
+  (mainViewChunkPromise ??= loadMainViewChunk());
 // 修复入口只在异常启动时出现，按需加载以免进入首屏主包
 const UpdaterRepairDialog = defineAsyncComponent(
   () => import("./components/dialogs/UpdaterRepairDialog.vue"),
@@ -103,7 +126,40 @@ const prefersReducedMotion = ref(
 
 /* 页面流转 + 星河阶段编排（双缓冲预挂载：预挂载冻结层 → 交接零成本
  * 切换 → materialize 与渡越消散同步收束；无障碍偏好下压缩为短流程） */
-const { entered, mainPrewarmed, phase, onEnter } = useAppTransition(prefersReducedMotion);
+const {
+  entered,
+  mainPrewarmed,
+  phase,
+  onEnter,
+  prepareDirect,
+  revealDirect,
+} = useAppTransition(prefersReducedMotion);
+
+/* 直接进入：跳过首映，主界面启动即隐藏预挂载；分包与首帧就绪后解除冻结。
+ * 双 rAF 确保 MainView 已完成首次布局与绘制；窗口最小化时 rAF 可能暂停，
+ * 以 120ms 短超时兜底，绝不让主界面永久停在冻结层。 */
+async function enterDirect(): Promise<void> {
+  prepareDirect();
+  try {
+    await ensureMainViewChunk();
+  } catch {
+    // 分包失败由异步组件自身的错误路径呈现；此处只保证解除冻结不被阻塞
+  }
+  await nextTick();
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
+    window.setTimeout(finish, 120);
+  });
+  revealDirect();
+}
+
+if (isDirectLaunch) void enterDirect();
 
 /* 全局前端安全拦截（dev 环境自动关闭） */
 useSecurityGuard();
@@ -211,16 +267,19 @@ onMounted(() => {
   }, 10_000);
   void runUpdaterStartupHealth();
 
-  /* MainView chunk 空闲预取（双缓冲预挂载前置条件）：
+  /* MainView chunk 空闲预取（仅首映启动需要）：
    * MainView 为懒加载 chunk，PREWARM_MOUNT（1100ms）预挂载时才触发
    * "加载+解析"，若未就绪则挂载延后（交接前 2s 余量兜底）。
    * 引导页展示期间的空闲时段后台完成加载与解析，预挂载时刻
-   * defineAsyncComponent 命中模块缓存瞬时就绪（仅剩挂载）。 */
-  const prefetchMainView = () => { void import("./components/MainView.vue"); };
-  if (typeof window.requestIdleCallback === "function") {
-    window.requestIdleCallback(prefetchMainView, { timeout: 3000 });
-  } else {
-    window.setTimeout(prefetchMainView, 300);
+   * defineAsyncComponent 命中模块缓存瞬时就绪（仅剩挂载）。
+   * 直接进入路径已在 enterDirect 中立即加载，不重复调度。 */
+  if (!isDirectLaunch) {
+    const prefetchMainView = () => { void ensureMainViewChunk(); };
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(prefetchMainView, { timeout: 3000 });
+    } else {
+      window.setTimeout(prefetchMainView, 300);
+    }
   }
 
   /* 全局唯一主渲染循环启动：全应用 rAF 单一入口（帧门控 / 豁免 /
@@ -264,9 +323,9 @@ onBeforeUnmount(() => {
   height: 100%;
 }
 
-/* ===== 双缓冲页面层（「突然跳转」根治架构） =====
+/* ===== 双缓冲页面层 =====
  * 两层绝对叠放：intro-layer（上）淡出 / main-layer（下）浮现。
- * 旧 v-if 同帧「卸载+挂载」= 交接帧主线程停帧 → 星系跳越（已根除）。 */
+ * 不得退回单层同帧「卸载+挂载」：交接帧主线程停帧会导致星系跳越。 */
 .intro-layer {
   position: absolute;
   inset: 0;
@@ -292,17 +351,24 @@ onBeforeUnmount(() => {
  * prewarm 态 = 静态 from 样式（非动画）；解除 prewarm（entered=true）
  * 触发 transition 插值回基线 — 渡越结束即终态，全链无残留变换
  * （MainView 树不进 3D 渲染上下文，文字栅格化路径恒定）。
- * 合成器铁律：过渡目标仅 opacity。原 blur(14px)+brightness 是实时滤镜的
- * 全屏重采样；原 scale(1.045)→none 是整层以非整数比例光栅化、收束时再
- * 回落整数比例 —— 两者都会让细亮笔画（品牌字标）在渡越窗口内糊化、
- * 结束帧又骤然转锐，即所见「模糊闪现」。故整层缩放一并移除：不缩放
- * 即不重栅格化，字标全程以最终整数尺寸渲染。
+ * 合成器铁律：过渡目标仅 opacity。blur/brightness 是实时滤镜的全屏重采样；
+ * 整层 scale 会以非整数比例光栅化、收束时再回落整数比例 —— 两者都会让
+ * 细亮笔画（品牌字标）在渡越窗口内糊化、结束帧又骤然转锐，即所见「模糊
+ * 闪现」。故整层不设缩放与滤镜：不缩放即不重栅格化，字标全程以最终整数
+ * 尺寸渲染。
  * 浮现的柔性由内部元素自身的入场编排承担（字标逐字凝聚 / 星图揭示 /
  * 谱线生长各有错峰时序），不依赖外层缩放。
  * 时长 --dur-page-enter(1.9s) = 渡越消散段等长（3100→5000ms）：
  * 引擎包络归零时刻「星系落定 = 界面清晰」同步收束。 */
 .main-layer {
   transition: opacity var(--dur-page-enter) var(--ease);
+}
+/* 直接进入：无渡越叙事，以平滑淡入完成交接（首映仍用 1.9s materialize）。
+ * --home-entrance-delay 归零：主界面的品牌/谱线/副标与整层淡入同刻起笔，
+ * 避免整层淡入完成后内容再单独登场造成割裂 */
+.main-layer.direct-enter {
+  --home-entrance-delay: 0ms;
+  transition-duration: var(--dur-direct-enter, 1s);
 }
 .main-layer.prewarm {
   visibility: hidden;
@@ -329,9 +395,9 @@ onBeforeUnmount(() => {
 /* ===== UnlockView 离场（page-glitch leave） =====
  * 交接时刻（3100ms）UnlockView 内容早已离场清空（逐字弹射/谱线塌缩/
  * 丝线收回，或入场未完成组的软离场淡出 — 均于 ~1000ms 内完成，全子树
- * opacity=0）——离场仅需容器残余淡出。旧实现的 blur(8px)+hue-rotate+scale 在交接窗口
- * 与 materialize 的 blur(14px) 形成双全屏重采样叠加（渡越帧节奏
- * 被挤占）→ 简化为纯 opacity（视觉等效：无可视内容可模糊）。 */
+ * opacity=0）——离场仅需容器残余淡出。离场只用 opacity：blur/hue-rotate/scale
+ * 会在交接窗口与 materialize 的滤镜形成双全屏重采样叠加、挤占渡越帧节奏
+ * （视觉等效：无可视内容可模糊）。 */
 .page-glitch-leave-active {
   transition: opacity var(--dur-page-leave) var(--ease);
   position: absolute;

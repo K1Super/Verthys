@@ -1,8 +1,6 @@
 /*
  * security/cleanup.rs — 程序痕迹、缓存与卸载残留防护
  *
- *
- *
  * 设计要点：
  *   - 全部 Windows API 调用置于 #[cfg(target_os="windows")]，非 Windows 空实现。
  *   - 随机数首选 BCryptGenRandom，失败时降级为 SystemTime 混淆的 xorshift64。
@@ -10,12 +8,12 @@
  */
 
 /* ================================================================== *
- * DeleteMode：安全删除模式（移除 Gutmann）       *
+ * DeleteMode：安全删除模式                    *
  * ================================================================== */
 
 /// 安全删除模式
 ///
-/// 彻底移除 Gutmann 35 遍覆写模式
+/// 不做 Gutmann 35 遍覆写
 ///   - Standard：HDD 1 遍全零覆写（满足常规安全需求）
 ///   - SSD：1 遍全零覆写 + FSCTL_FILE_LEVEL_TRIM 通知 FTL 标记物理页无效
 ///
@@ -45,8 +43,8 @@ pub fn clear_recent_records() -> Result<(), String> {
 
 /// 安全删除文件（覆写 + 重命名 + 删除）
 ///
-/// 修复要点：
-///   - 仅 1 遍全零覆写，移除 Gutmann 35 遍
+/// 要点：
+///   - 仅 1 遍全零覆写，不做 Gutmann 35 遍覆写
 ///   - 稀疏文件检测 + 30 秒总时间上限
 ///   - 使用 Zeroizing<Vec<u8>> 缓冲区
 #[cfg(target_os = "windows")]

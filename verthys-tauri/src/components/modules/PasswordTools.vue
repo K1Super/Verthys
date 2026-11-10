@@ -185,7 +185,7 @@
           <div v-else class="ctrl-hint">标准 UUIDv4：版本位与变体位固定，随机位 122 bit</div>
         </div>
 
-        <!-- 强度指示：仅口令模式；令牌模式改为熵与长度信息，保持卡片内部节奏一致 -->
+        <!-- 强度指示：仅口令模式；令牌模式展示熵与长度信息，保持卡片内部节奏一致 -->
         <template v-if="genMode === 'password'">
           <div
             class="strength-bar"
@@ -450,7 +450,7 @@ const randomSource: RandomSource = (out) => {
 /**
  * 降级写入（Clipboard API 不可用时）：textarea + execCommand。
  *
- * 明文节点必须在 finally 中回收 —— 早期实现在 execCommand 抛错时跳过
+ * 明文节点必须在 finally 中回收 —— 若 execCommand 抛错时跳过
  * removeChild，含完整密钥的 textarea 会永久留在 document 中。
  */
 const writeViaTextarea = async (content: string): Promise<boolean> => {

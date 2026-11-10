@@ -166,7 +166,7 @@ fn snapshot_path_for(wal_path: &Path) -> PathBuf {
 /// 增量条目；恢复 = 快照基线 + WAL 增量重放，加载成本 O(1) + O(增量)。
 #[derive(Serialize, Deserialize, Default)]
 struct WalSetSnapshot {
-    /// v1 快照中的旧去重字段被忽略：内容哈希不得再作为去重键。
+    /// 快照中的额外字段由 serde 忽略：内容哈希不得作为去重键。
     #[serde(default)]
     committed_keys: Vec<String>,
     #[serde(default)]
@@ -829,7 +829,7 @@ mod tests {
         p
     }
 
-    /// 新布局 WAL 路径（测试直读写用；先确保附属目录存在）
+    /// WAL 路径（测试直读写用；先确保附属目录存在）
     fn wal_file(verthys_path: &str) -> PathBuf {
         let _ = container_layout::ensure_sidecar_dir(verthys_path);
         container_layout::wal_file_for(verthys_path)

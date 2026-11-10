@@ -325,7 +325,7 @@ mod tests {
         assert_eq!(loaded.bin_password, "fixture-bin-2");
         assert!(loaded.module_keys.is_empty());
 
-        /* 任意位置的容器路径都应被接受，不再要求位于配置目录内。 */
+        /* 任意位置的容器路径都应被接受。 */
         assert!(
             validate_file_path(&display_path(&outside_container), "verthys", "容器").is_ok()
         );

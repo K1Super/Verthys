@@ -6,7 +6,7 @@
  *   - verthys_preflight: 路径预检（安全版）
  *
  * 预检：
- *   1. 白名单基目录集合：canonicalize 父目录后必须以白名单为前缀；删黑名单。
+ *   1. 白名单基目录集合：canonicalize 父目录后必须以白名单为前缀。
  *        白名单动态构建：用户目录（Profile/Documents/AppData）+ EXE 目录 + 非系统盘根。
  *   2. 先校验后操作：输入校验 → 解析父目录绝对路径 → 白名单检查（拒绝则不任何 FS 操作）
  *        → 才创建目录；失败回滚仅当本次新建。
@@ -353,11 +353,10 @@ fn is_system_protected_dir(canonical: &Path) -> bool {
 /// 精确匹配或为子路径（path 以 base + 分隔符开头）。
 /// 路径与白名单基目录均经 canonicalize，防止符号链接绕过。
 ///
-/// 修复修复：trim 尾部分隔符
-///   根因：Windows 驱动器根目录（如 D:\）canonicalize 后为 \\?\D:\，
-///   规范化为 //?/d:/（含尾部 /）。原 format!("{}/", base_str) 产生
-///   //?/d://（双斜杠），无法匹配 //?/d:/test，导致 D 盘路径被误拒。
-///   修复：先 trim_end_matches('/') 消除尾部斜杠，再拼接分隔符。
+/// 尾部分隔符处理：
+///   Windows 驱动器根目录（如 D:\）canonicalize 后为 \\?\D:\，
+///   规范化为 //?/d:/（含尾部 /）。拼接白名单前缀前须先 trim_end_matches('/')
+///   消除尾部斜杠，否则得到 //?/d://（双斜杠），无法匹配 //?/d:/test。
 fn is_within_whitelist(path: &Path, whitelist: &[PathBuf]) -> bool {
     let path_str = path.to_string_lossy().to_lowercase().replace('\\', "/");
     let path_str = path_str.trim_end_matches('/');

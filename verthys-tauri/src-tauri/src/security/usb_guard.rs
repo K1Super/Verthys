@@ -5,7 +5,7 @@
  *   - 仅存储序列号的 HMAC-SHA256 哈希（加盐），永不保存原始序列号
  *   - 盘符 → 物理磁盘号映射（IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS），
  *     再打开 \\.\PhysicalDriveN 查询 STORAGE_DEVICE_DESCRIPTOR
- *   - SecuredBuffer 使用 zeroize crate 自动安全擦除，替代手动 volatile 覆写
+ *   - SecuredBuffer 使用 zeroize crate 自动安全擦除，无需手动 volatile 覆写
  *   - ShadowSleep 内部启动专用定时器线程，到期自动 purge
  *   - 非 Windows 平台空实现（返回错误），保证跨平台编译通过
  */
@@ -100,8 +100,8 @@ struct VolumeDiskExtentsHeader {
 /* ================================================================== *
  * SecuredBuffer — RAII 安全擦除容器                  *
  *                                                                        *
- *  封装 Zeroizing<Vec<u8>>，Drop 时自动 zeroize，消除 purge 窗口期。     *
- *  替代手动 volatile 覆写循环，无论正常退出还是 panic 展开，敏感数据     *
+ *  封装 Zeroizing<Vec<u8>>，Drop 时自动 zeroize，不存在 purge 窗口期。     *
+ *  无需手动 volatile 覆写循环，无论正常退出还是 panic 展开，敏感数据      *
  *  都在内存被释放前已不可读。                                            *
  * ================================================================== */
 
@@ -136,7 +136,7 @@ impl SecuredBuffer {
 
     /// 消费 SecuredBuffer，返回内部的 Vec<u8>
     ///
-    /// 注意：返回的 Vec 不再受 Zeroizing 保护，调用方应自行确保安全擦除，
+    /// 注意：返回的 Vec 不受 Zeroizing 保护，调用方应自行确保安全擦除，
     /// 或尽快编码后丢弃。原始 Zeroizing 在 Drop 时仍会 zeroize 其内部内存。
     pub fn into_vec(self) -> Vec<u8> {
         // Zeroizing 实现 Deref<Target=Vec<u8>>，clone 后原始 Zeroizing 在 Drop 时 zeroize
@@ -150,10 +150,10 @@ impl SecuredBuffer {
 
 /// 读取磁盘序列号并计算加盐 HMAC-SHA256 哈希
 ///
-/// 修复要点：
+/// 要点：
 ///   - 仅 trim_end 空格和 null 字符，保留前导字符
 ///   - 两步 IOCTL 动态分配缓冲区（先查询所需大小再分配）
-///   - 使用 HMAC-SHA256(salt, serial) 替代纯 SHA-256，
+///   - 使用 HMAC-SHA256(salt, serial) 作为序列号哈希，
 ///     盐值由调用方传入（DPAPI 加密存储于应用配置目录）
 ///
 /// 流程：
@@ -413,7 +413,7 @@ pub fn read_device_serial(_drive_letter: char, _salt: &[u8]) -> Result<String, S
 /* ================================================================== *
  * 2. 克隆外设检测                               *
  *                                                                        *
- *  废除"首次自动注册"逻辑                            *
+ *  仅显式信任：                                      *
  *    - UsbRegistry 仅包含管理员预先授权的卷标-哈希对                      *
  *    - 未注册设备一律拒绝（返回 Unknown），触发安全审计事件              *
  *  注册表容量限制（默认 100 条）                     *
@@ -423,9 +423,9 @@ pub fn read_device_serial(_drive_letter: char, _salt: &[u8]) -> Result<String, S
 /// USB 注册表容量上限
 const USB_REGISTRY_MAX_ENTRIES: usize = 100;
 
-/// 克隆检测结果（废除"首次自动注册"）
+/// 克隆检测结果
 ///
-/// 替代原 bool 返回值，明确区分三种状态：
+/// 明确区分三种状态：
 ///   - Trusted：卷标已知且序列号哈希匹配 → 合法设备
 ///   - Clone：卷标已知但序列号哈希不匹配 → 克隆外设
 ///   - Unknown：卷标未知 → 未注册设备，拒绝访问并触发审计
@@ -525,13 +525,12 @@ pub fn resolve_volume_for_path(_path: &str) -> Result<Option<VolumeInfo>, String
 /// USB 设备注册表：维护"卷标 → 序列号哈希"映射，用于克隆外设检测
 ///
 /// 基于持久化白名单的显式信任模型
-///   - 废除"首次自动注册"逻辑
+///   - 仅采用显式信任：不做首次自动注册
 ///   - 仅包含管理员预先授权的卷标-哈希对
 ///   - 未注册设备一律拒绝（返回 CloneCheckResult::Unknown）
 ///   - 所有注册表内容从 DPAPI 加密的持久化存储加载
 ///
-/// /// 注册表容量限制
-///   - 最大 100 条，达到上限时拒绝新注册并记录告警
+/// 容量限制：最大 100 条，达到上限时拒绝新注册并记录告警
 pub struct UsbRegistry {
     /// 卷标 → 序列号哈希（HMAC-SHA256 hex）
     known_devices: HashMap<String, String>,
@@ -550,7 +549,6 @@ impl UsbRegistry {
 
     /// 注册已知设备（卷标 + 序列号哈希）
     ///
-    /// 注册表容量限制
     /// 返回 Ok(()) 表示注册成功，Err(msg) 表示已达容量上限。
     pub fn register_device(&mut self, volume_label: &str, serial_hash: &str) -> Result<(), String> {
         if self.known_devices.len() >= self.max_entries
@@ -574,7 +572,7 @@ impl UsbRegistry {
 
     /// 检测克隆外设
     ///
-    /// 废除"首次自动注册"逻辑
+    /// 仅采用显式信任：不做首次自动注册
     ///   - 卷标已知且序列号哈希匹配 → CloneCheckResult::Trusted
     ///   - 卷标已知但序列号哈希不匹配 → CloneCheckResult::Clone
     ///   - 卷标未知 → CloneCheckResult::Unknown（拒绝访问，不自动注册）
@@ -659,11 +657,11 @@ impl Default for UsbRegistry {
  *  使用 RAII 安全擦除容器                            *
  *    - 加密索引封装在 SecuredBuffer（Zeroizing<Vec<u8>>）中              *
  *    - purge 仅需丢弃容器，Drop 时自动 zeroize                           *
- *    - 移除手动 volatile 覆写循环                                       *
+ *    - 无需手动 volatile 覆写循环                                        *
  *                                                                        *
- *  影子休眠增加自动定时器                            *
+ *  影子休眠自动定时器                                *
  *    - 内部启动专用线程，到期自动执行 purge                              *
- *    - 不再依赖外部调用 try_recover 检查超时                             *
+ *    - 不依赖外部调用 try_recover 检查超时                               *
  * ================================================================== */
 
 /// 影子休眠内部状态（受 Arc<Mutex> 保护，供定时器线程访问）
@@ -678,7 +676,7 @@ struct ShadowSleepInner {
 
 /// 影子休眠：外设强制拔出后，加密索引驻留内存一段时间，支持毫秒级无缝恢复
 ///
-/// 修复要点：
+/// 要点：
 ///   - 加密索引使用 SecuredBuffer（Zeroizing），Drop 时自动 zeroize
 ///   - 内部专用线程到期自动 purge，不依赖外部轮询
 ///
@@ -750,7 +748,7 @@ impl ShadowSleep {
     ///   - Some(Vec<u8>)：txid 匹配且未超时 → 返回加密索引，清除休眠状态
     ///   - None：已超时（已 purge）/ txid 不匹配 / 未处于影子休眠
     pub fn try_recover(&mut self, txid: u64) -> Option<Vec<u8>> {
-        // 停止定时器（恢复成功或失败都不再需要定时器）
+        // 停止定时器（恢复成功或失败都不需要定时器）
         self.stop_timer_and_join();
 
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -783,7 +781,7 @@ impl ShadowSleep {
     /// 安全擦除加密索引
     ///
     /// 使用 SecuredBuffer（Zeroizing），Drop 时自动 zeroize
-    /// 移除手动 volatile 覆写循环，消除 take() 与覆写之间的窗口期
+    /// 无需手动 volatile 覆写，不存在 take() 与覆写之间的窗口期
     pub fn purge(&mut self) {
         self.stop_timer_and_join();
         self.purge_internal();
@@ -876,7 +874,7 @@ impl Drop for ShadowSleep {
  *  影子休眠自动定时器线程                            *
  *                                                                        *
  *  专用线程定期检查截止时间，到期自动锁定 inner 并执行 purge。            *
- *  不再依赖外部调用 try_recover 检查超时，避免敏感数据驻留超时。          *
+ *  不依赖外部调用 try_recover 检查超时，避免敏感数据驻留超时。          *
  * ================================================================== */
 
 /// 定时器线程主循环（从 inner 中读取 deadline）

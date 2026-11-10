@@ -35,10 +35,8 @@ import ActionButton from "./ActionButton.vue";
 import StarlitSky from "../cosmic/StarlitSky.vue";
 import { debounce } from "../../../utils/debounce";
 
-/* 项3：搜索输入防抖（300ms 尾部触发）
- * 原问题：v-model 每次按键触发 update:modelValue → 父组件 computed filter
- *        连续快速输入时累加造成可感知延迟（每按键卡顿 50ms）。
- * 优化后：用户停止输入 300ms 后才触发过滤，输入过程零卡顿。 */
+/* 搜索输入防抖（300ms 尾部触发）：停止输入后才向上抛出 update:modelValue，
+ * 避免逐键触发父组件 computed filter —— 连续快速输入时按键延迟会累加。 */
 defineProps<{
   modelValue: string;
   placeholder?: string;

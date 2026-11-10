@@ -70,7 +70,7 @@ P2 服务是应用的强制依赖。应用安装器为 perMachine：标准用户
 - 安装：安装器 POSTINSTALL 从 `service-payload\VerthysSecuritySvc.exe` 执行 `/install /quiet`；服务 Running、`Installed=1` 后才完成安装。任一失败：全新安装回滚并清理，升级安装恢复旧服务并提示重跑安装器。
 - 应用内只保留只读服务状态检测；服务缺失时 Gate 提示重新运行安装程序，不再执行用户可写二进制或 UAC 安装。
 - 自签名发布链：构建期从证书链导出根 CA 并把 DER SHA-256 编入服务 exe；`/install` 先按固定指纹校验随包 `VerthysRootCA.cer` 并写入 `LocalMachine\Root`，再校验服务 exe 发布者签名。服务以 LocalSystem 运行，WinVerifyTrust 只认机器根；缺少该步骤会因 Event 3003“self signature verification failed”拒绝启动。
-- 卸载：应用卸载器 PREUNINSTALL 调 `service-payload\VerthysSecuritySvc.exe /uninstall /quiet`，失败即中止（此时尚未删除应用文件）；成功后清理服务、安装目录、`.bak`、HKLM 锚点、事件源、`%ProgramData%\Verthys` 与根 CA。用户加密库默认保留；卸载器“Delete app data”仅在显式勾选时删除执行卸载的管理员用户自身数据。
+- 卸载：应用卸载器 PREUNINSTALL 调 `service-payload\VerthysSecuritySvc.exe /uninstall /quiet`，失败即中止（此时尚未删除应用文件）；成功后清理服务、安装目录、`.bak`、HKLM 锚点、事件源、`%ProgramData%\Verthys` 与根 CA。用户加密库默认保留；卸载器“Delete app data”仅在显式勾选时删除执行卸载的管理员用户自身数据。机器密钥材料 `container.secret` 在删除应用数据前转移到 `%LOCALAPPDATA%\Verthys\KeyMaterial` 并保留：它是打开既有加密库的必要材料，删除会使库永久无法普通解锁；复制失败时卸载中止。
 - 手动维护：管理员可从 `%ProgramFiles%\Verthys\service-payload\VerthysSecuritySvc.exe` 执行 `/repair`、`/reset-state`、`/repair-keys`、`/status`；不要把 `/install` 从已安装服务目录（`SecurityService`）执行。
 - 退出码：0 成功、2 参数、3 非管理员、4 签名/根 CA 指纹校验失败、5 安装失败、6 启动失败、7 就绪检查失败、8 回滚失败。
 - 服务状态目录 `%ProgramData%\Verthys\Security` 与安装目录 `%ProgramFiles%\Verthys\SecurityService` 不得手工放宽 ACL；服务每次启动复核，放宽即拒绝启动。

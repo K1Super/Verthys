@@ -54,6 +54,22 @@ try {
         -Path $ExePath `
         -ExpectedSha256 $signing.PublisherSha256 | Out-Null
 
+    # 构建审计：Tauri 以 UTF-8 输出构建日志，Windows PowerShell 5.1 按本地
+    # 代码页解码，中文判定不可靠。签名入口在 Authenticode 复核通过后追加
+    # 审计记录，构建脚本据此判定主程序是否真的执行了 signCommand。
+    $journalPath = $env:VERTHYS_SIGN_JOURNAL
+    if (-not [string]::IsNullOrWhiteSpace($journalPath)) {
+        $entry = [pscustomobject]@{
+            path        = [System.IO.Path]::GetFullPath($ExePath)
+            publisher   = $signing.PublisherSha256
+            verified_at = (Get-Date).ToUniversalTime().ToString("o")
+        }
+        [System.IO.File]::AppendAllText(
+            $journalPath,
+            ($entry | ConvertTo-Json -Compress) + [Environment]::NewLine,
+            [System.Text.UTF8Encoding]::new($false))
+    }
+
     Write-Host "[sign] 签名完成，发布者指纹=$($signing.PublisherSha256)" -ForegroundColor Green
     exit 0
 } catch {

@@ -54,9 +54,8 @@ pub enum AuditEventType {
     FileDelete,
     // 剪贴板操作
     ClipboardClear,
-    /// 历史事件：隐私与剪贴板联动时期，隐私模式变更曾记入该事件名。
-    /// 保留变体使旧日志的反序列化与 HMAC 链验证可字节级复原；
-    /// 新代码不得再用该事件名记录隐私变更（改用 PrivacyModeChange）。
+    /// 兼容变体：不得用于写入新事件（隐私变更改用 PrivacyModeChange）。
+    /// 保留变体使既有日志的反序列化与 HMAC 链验证可字节级复原。
     ClipboardModeChange,
     ClipboardMonitorEvent,
     // 隐私模式（窗口亲和性）操作
@@ -85,9 +84,8 @@ pub enum AuditEventType {
     /// keyfile 因子操作（创建/解锁/启用/轮换/关闭/恢复会话重绑）
     /// 审计只记录路径哈希，不记录路径明文
     KeyfileFactor,
-    /// 历史审计数据反序列化兼容位：旧版本曾写入该事件，现版本已无产生路径。
-    /// 保留变体使旧日志文件的反序列化与 HMAC 链验证可字节级复原，
-    /// 删除会导致含该事件的历史行链验证误报篡改。不得用于写入新事件。
+    /// 反序列化兼容位：当前无写入路径，删除会使含该事件的既有日志行在链验证中误报篡改。
+    /// 不得用于写入新事件。
     ContainerIdMismatch,
     // 设备绑定
     DeviceBind,
@@ -102,9 +100,11 @@ pub enum AuditEventType {
     ScanClose,
     ScanAbort,
     ScanCircuitBreaker,
-    // 后台巡检（巡检改进）
+    // 后台巡检
     /// 巡检测到威胁（未知模块连续达到阈值）
     PatrolThreat,
+    /// 巡检发现“已签名但路径未知/哈希变化”的可疑模块（仅记录，不熔断）
+    PatrolSuspect,
     /// 巡检触发应急熔断（直接销毁 worker 会话）
     PatrolEmergency,
     /// 巡检看门狗事件（线程重启 / 重启失败强制熔断）
@@ -154,6 +154,7 @@ impl AuditEventType {
             AuditEventType::ScanAbort => "SCAN_ABORT",
             AuditEventType::ScanCircuitBreaker => "SCAN_CIRCUIT_BREAKER",
             AuditEventType::PatrolThreat => "PATROL_THREAT",
+            AuditEventType::PatrolSuspect => "PATROL_SUSPECT",
             AuditEventType::PatrolEmergency => "PATROL_EMERGENCY",
             AuditEventType::PatrolWatchdog => "PATROL_WATCHDOG",
             AuditEventType::IntegrityCheck => "INTEGRITY_CHECK",
@@ -224,10 +225,10 @@ pub struct AuditEvent {
     /// 可选详情（错误码、参数摘要，不含密码/密钥/明文）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// 结构化扩展信息（新增记录可选，历史记录无此字段）
+    /// 结构化扩展信息（可选字段，既有日志记录无此字段）
     ///
-    /// 为空时跳过序列化：历史记录重新序列化后字节不变，
-    /// HMAC 链的逐条验证保持与旧版本完全一致。
+    /// 为空时跳过序列化：既有记录重新序列化后字节不变，
+    /// HMAC 链的逐条验证保持一致。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extensions: Option<AuditExtensions>,
 }
@@ -636,14 +637,14 @@ mod tests {
         let _ = std::fs::remove_file(&log_path);
     }
 
-    /// 历史条目（无扩展块字段）必须与新版本写入的条目共存于同一条链
+    /// 无扩展块字段的条目必须与当前写入的条目共存于同一条链
     ///
-    /// 事件内新增可选字段若破坏历史序列化字节序，本用例会因验签不匹配而失败。
+    /// 事件的可选字段若破坏既有序列化字节序，本用例会因验签不匹配而失败。
     #[test]
     fn test_legacy_entry_without_extensions_still_verifies() {
         let hmac_key = b"legacy_chain_key";
         let zeros = "0".repeat(64);
-        // 历史格式事件 JSON：字段与顺序为旧版本序列化产物（无 extensions 字段）
+        // 固定格式事件 JSON：字段与顺序与既有日志一致（无 extensions 字段）
         let event_json = concat!(
             r#"{"event_type":"KeyDerive","timestamp":"2026-01-01T00:00:00+00:00","#,
             r#""session_id":"pid-1","source":"user","resource_hash":"","#,

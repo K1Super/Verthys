@@ -119,7 +119,7 @@ use middleware::context::ProcessMode;
 use middleware::panic_hook;
 
 /* ------------------------------------------------------------------ *
- * 关闭流程硬超时（数据安全优先，根治"退出后数据丢失"）            *
+ * 关闭流程硬超时（数据安全优先，避免退出后数据丢失）                 *
  * ------------------------------------------------------------------ *
  * 45000ms 是关闭流程的强制退出上限：正常路径 lockAll 完成即前端
  * exit(0)，本值只决定 "worker 卡死" 时隐藏窗口的最长等待：
@@ -355,10 +355,9 @@ fn run_main_ui(
         .manage(updater::UpdaterState::default())
         /* ===== 关闭响应优化：窗口级事件处理器 =====
          *
-         * 根因：旧实现前端 `await getCurrentWindow().hide()` 为 IPC 往返，
-         *   后端事件循环繁忙时 hide() 的 IPC 被排队 → 窗口实际隐藏延迟数秒。
-         *
-         * 做法：CloseRequested 在 Rust 后端直接处理（零 IPC 延迟）：
+         * 前端 `await getCurrentWindow().hide()` 需一次 IPC 往返，后端事件
+         *   循环繁忙时 hide() 会被排队 → 窗口实际隐藏延迟数秒。故改为在
+         *   Rust 后端直接处理 CloseRequested（零 IPC 延迟）：
          *   1. api.prevent_close() — 阻止默认关闭（窗口销毁会终止 WebView JS 引擎）
          *   2. window.hide() — Rust 原生调用 Win32 ShowWindow(SW_HIDE)，微秒级
          *   3. emit("verthys://cleanup-and-exit") — 通知前端 JS 执行 lockAll 异步清理
@@ -631,6 +630,8 @@ fn run_main_ui(
             verthys_security_status,
             // 系统运行指标采样（CPU 占用率真实差分，安全防护面板数据源）
             security_commands::verthys_system_snapshot,
+            // 系统启动时刻（每次开机一次首映、其余启动直接进入的判定信号）
+            security_commands::verthys_boot_epoch,
             verthys_derive_global_key,
             verthys_derive_and_store_global_key,
             verthys_verify_global_key,
@@ -640,6 +641,7 @@ fn run_main_ui(
             controller::module_crypto_controller::verthys_module_key_lock,
             controller::module_crypto_controller::verthys_module_seal,
             controller::module_crypto_controller::verthys_module_open,
+            controller::module_crypto_controller::verthys_module_probe_outer,
             verthys_reconcile_key_presence,
             verthys_reset_global_key_state,
             set_privacy_mode,
