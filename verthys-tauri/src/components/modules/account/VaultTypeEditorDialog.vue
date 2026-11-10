@@ -1,6 +1,6 @@
 <!--
   VaultTypeEditorDialog.vue — 自定义条目类型管理（类型 + 字段构建器）
-  形态：复用 VerthysDialog + 「凭证登记台」皮肤；顶部为自定义类型标签条（含新建），
+  形态：复用全局弹窗外壳 CosmicOverlay + kv-* 内容词汇；顶部为自定义类型标签条（含新建），
         下方为当前类型的声明编辑区（标识 / 字段 / 展示与搜索）。
   语义：类型集合作为单条设置记录整体保存（先写新记录、再删除被替换的旧记录）；
         删除类型不删除条目——既有条目按未知类型兜底展示并可在之后重新指派类型。
@@ -8,212 +8,180 @@
     <VaultTypeEditorDialog v-model="showEditor" :types="customTypes" @saved="reloadTypes" />
 -->
 <template>
-  <VerthysDialog
-    v-model="open"
-    title="自定义类型"
-    layout="plain"
-    class="reg-panel type-editor"
-    save-label="保存类型"
-    :saving="saving"
-    @save="onSave"
+  <CosmicOverlay
+    :show="open"
+    width="min(680px, 94vw)"
+    :persistent="saving"
+    aria-labelledby="vte-title"
+    @close="open = false"
   >
-    <template #header>
-      <header class="reg-head">
-        <span class="reg-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
-            <circle cx="12" cy="12" r="5.4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-dasharray="25.5 8.4" transform="rotate(38 12 12)" opacity="0.8" />
-            <circle cx="12" cy="12" r="8.6" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-dasharray="38.6 15.4" transform="rotate(-76 12 12)" opacity="0.45" />
-          </svg>
-        </span>
-        <span class="reg-heading">
-          <span class="reg-kicker">存签</span>
-          <span class="reg-title">自定义类型</span>
-        </span>
-        <button class="reg-close" type="button" @click="open = false" aria-label="关闭窗口" v-tip="'关闭'">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-      </header>
-    </template>
+    <div class="kv-title" id="vte-title">自定义类型</div>
 
-    <div class="reg-body">
-      <!-- 01 类型集：切换当前编辑的类型，或新建一个类型 -->
-      <section class="reg-section" :style="{ '--rs': '0' }">
-        <div class="reg-sec-head">
-          <span class="reg-sec-no">01</span>
-          <span class="reg-sec-name">类型集</span>
-          <span class="reg-rule"></span>
+    <!-- 01 类型集：切换当前编辑的类型，或新建一个类型 -->
+    <section class="kv-section">
+      <div class="kv-section-label">01 类型集</div>
+      <div class="editor-tabs">
+        <button
+          v-for="(item, index) in draft"
+          :key="item.id"
+          type="button"
+          class="editor-tab"
+          :aria-pressed="index === activeIndex"
+          :data-on="index === activeIndex ? '1' : '0'"
+          @click="activeIndex = index"
+        >{{ item.label || "未命名类型" }}</button>
+        <button type="button" class="editor-tab editor-tab-add" @click="addType">＋ 新建类型</button>
+      </div>
+    </section>
+
+    <template v-if="active">
+      <!-- 02 标识：名称 / 图标 / 色调 -->
+      <section class="kv-section">
+        <div class="kv-section-label">02 标识</div>
+        <div class="kv-field">
+          <label class="kv-label" for="vt-f-label">名称</label>
+          <input id="vt-f-label" class="kv-input" v-model="active.label" />
         </div>
-        <div class="editor-tabs">
-          <button
-            v-for="(item, index) in draft"
-            :key="item.id"
-            type="button"
-            class="editor-tab"
-            :aria-pressed="index === activeIndex"
-            :data-on="index === activeIndex ? '1' : '0'"
-            @click="activeIndex = index"
-          >{{ item.label || "未命名类型" }}</button>
-          <button type="button" class="editor-tab editor-tab-add" @click="addType">＋ 新建类型</button>
+        <div class="kv-field">
+          <span class="kv-label">图标</span>
+          <div class="editor-chips">
+            <button
+              v-for="iconId in iconIds"
+              :key="iconId"
+              type="button"
+              class="icon-chip"
+              :aria-pressed="active.icon === iconId"
+              :data-on="active.icon === iconId ? '1' : '0'"
+              :aria-label="iconId"
+              v-tip="iconId"
+              @click="active.icon = iconId"
+            >
+              <SafeSvgIcon class="icon-chip-mark" :source="resolveVaultIcon(iconId)" />
+            </button>
+          </div>
+        </div>
+        <div class="kv-field">
+          <span class="kv-label">色调</span>
+          <div class="editor-chips">
+            <button
+              v-for="tone in toneIds"
+              :key="tone"
+              type="button"
+              class="tone-chip"
+              :aria-pressed="active.tone === tone"
+              :data-on="active.tone === tone ? '1' : '0'"
+              :style="{ '--tone-rgb': `var(${VAULT_TONE_RGB_VARS[tone]})` }"
+              @click="active.tone = tone"
+            >{{ toneLabels[tone] }}</button>
+          </div>
         </div>
       </section>
 
-      <template v-if="active">
-        <!-- 02 标识：名称 / 图标 / 色调 -->
-        <section class="reg-section" :style="{ '--rs': '1' }">
-          <div class="reg-sec-head">
-            <span class="reg-sec-no">02</span>
-            <span class="reg-sec-name">标识</span>
-            <span class="reg-rule"></span>
-          </div>
-          <div class="reg-row">
-            <label class="reg-key" for="vt-f-label">名称</label>
-            <input id="vt-f-label" class="reg-input" v-model="active.label" />
-          </div>
-          <div class="reg-row">
-            <span class="reg-key">图标</span>
-            <div class="editor-chips">
-              <button
-                v-for="iconId in iconIds"
-                :key="iconId"
-                type="button"
-                class="icon-chip"
-                :aria-pressed="active.icon === iconId"
-                :data-on="active.icon === iconId ? '1' : '0'"
-                :aria-label="iconId"
-                v-tip="iconId"
-                @click="active.icon = iconId"
-              >
-                <SafeSvgIcon class="icon-chip-mark" :source="resolveVaultIcon(iconId)" />
+      <!-- 03 字段：字段清单构建（增删、排序、控件种类与属性） -->
+      <section class="kv-section">
+        <div class="kv-section-label">03 字段</div>
+        <div v-for="(field, index) in active.fields" :key="field.id" class="field-row">
+          <div class="field-row-head">
+            <span class="field-index">{{ index + 1 }}</span>
+            <input class="kv-input field-label" v-model="field.label" aria-label="字段名" />
+            <select class="kv-input kv-select field-kind" :value="field.kind" aria-label="控件种类" @change="onFieldKindChange(field, $event)">
+              <option v-for="kind in fieldKinds" :key="kind.id" :value="kind.id">{{ kind.label }}</option>
+            </select>
+            <div class="field-tools">
+              <button type="button" class="icon-btn" :disabled="index === 0" aria-label="上移" v-tip="'上移'" @click="moveField(index, -1)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="6 15 12 9 18 15"/></svg>
+              </button>
+              <button type="button" class="icon-btn" :disabled="index === active.fields.length - 1" aria-label="下移" v-tip="'下移'" @click="moveField(index, 1)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <button type="button" class="icon-btn" aria-label="删除字段" v-tip="'删除字段'" @click="removeField(index)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
               </button>
             </div>
           </div>
-          <div class="reg-row">
-            <span class="reg-key">色调</span>
-            <div class="editor-chips">
-              <button
-                v-for="tone in toneIds"
-                :key="tone"
-                type="button"
-                class="tone-chip"
-                :aria-pressed="active.tone === tone"
-                :data-on="active.tone === tone ? '1' : '0'"
-                :style="{ '--tone-rgb': `var(${VAULT_TONE_RGB_VARS[tone]})` }"
-                @click="active.tone = tone"
-              >{{ toneLabels[tone] }}</button>
-            </div>
+          <div class="field-row-body">
+            <label class="field-flag">
+              <input type="checkbox" v-model="field.required" /> 必填
+            </label>
+            <label class="field-flag">
+              <input type="checkbox" v-model="field.sensitive" /> 敏感
+            </label>
+            <label class="field-flag">
+              <input type="checkbox" v-model="field.carrier" /> 内容舱
+            </label>
+            <input
+              v-if="field.kind === 'select'"
+              class="kv-input field-options"
+              :value="(field.options ?? []).join(' | ')"
+              placeholder="候选项，以 | 分隔"
+              aria-label="候选项"
+              @change="onOptionsChange(field, $event)"
+            />
           </div>
-        </section>
-
-        <!-- 03 字段：字段清单构建（增删、排序、控件种类与属性） -->
-        <section class="reg-section" :style="{ '--rs': '2' }">
-          <div class="reg-sec-head">
-            <span class="reg-sec-no">03</span>
-            <span class="reg-sec-name">字段</span>
-            <span class="reg-rule"></span>
-          </div>
-          <div v-for="(field, index) in active.fields" :key="field.id" class="field-row">
-            <div class="field-row-head">
-              <span class="field-index">{{ index + 1 }}</span>
-              <input class="reg-input field-label" v-model="field.label" aria-label="字段名" />
-              <select class="reg-input reg-select field-kind" :value="field.kind" aria-label="控件种类" @change="onFieldKindChange(field, $event)">
-                <option v-for="kind in fieldKinds" :key="kind.id" :value="kind.id">{{ kind.label }}</option>
-              </select>
-              <div class="field-tools">
-                <button type="button" class="icon-btn" :disabled="index === 0" aria-label="上移" v-tip="'上移'" @click="moveField(index, -1)">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="6 15 12 9 18 15"/></svg>
-                </button>
-                <button type="button" class="icon-btn" :disabled="index === active.fields.length - 1" aria-label="下移" v-tip="'下移'" @click="moveField(index, 1)">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="6 9 12 15 18 9"/></svg>
-                </button>
-                <button type="button" class="icon-btn" aria-label="删除字段" v-tip="'删除字段'" @click="removeField(index)">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                </button>
-              </div>
-            </div>
-            <div class="field-row-body">
-              <label class="field-flag">
-                <input type="checkbox" v-model="field.required" /> 必填
-              </label>
-              <label class="field-flag">
-                <input type="checkbox" v-model="field.sensitive" /> 敏感
-              </label>
-              <label class="field-flag">
-                <input type="checkbox" v-model="field.carrier" /> 内容舱
-              </label>
-              <input
-                v-if="field.kind === 'select'"
-                class="reg-input field-options"
-                :value="(field.options ?? []).join(' | ')"
-                placeholder="候选项，以 | 分隔"
-                aria-label="候选项"
-                @change="onOptionsChange(field, $event)"
-              />
-            </div>
-          </div>
-          <button type="button" class="editor-add" @click="addField">＋ 添加字段</button>
-        </section>
-
-        <!-- 04 展示：主标题 / 卡片次行 / 搜索字段 -->
-        <section class="reg-section" :style="{ '--rs': '3' }">
-          <div class="reg-sec-head">
-            <span class="reg-sec-no">04</span>
-            <span class="reg-sec-name">展示</span>
-            <span class="reg-rule"></span>
-          </div>
-          <div class="reg-row">
-            <label class="reg-key" for="vt-f-title">主标题</label>
-            <select id="vt-f-title" class="reg-input reg-select" v-model="active.titleField">
-              <option value="">未指定</option>
-              <option v-for="field in active.fields" :key="field.id" :value="field.id">{{ field.label }}</option>
-            </select>
-          </div>
-          <div class="reg-row">
-            <span class="reg-key">卡片次行</span>
-            <div class="editor-chips">
-              <button
-                v-for="field in active.fields"
-                :key="field.id"
-                type="button"
-                class="filter-chip"
-                :aria-pressed="active.cardFields.includes(field.id)"
-                :data-on="active.cardFields.includes(field.id) ? '1' : '0'"
-                @click="toggleCardField(field.id)"
-              >{{ field.label }}</button>
-            </div>
-          </div>
-          <div class="reg-row">
-            <span class="reg-key">搜索字段</span>
-            <div class="editor-chips">
-              <button
-                v-for="field in active.fields"
-                :key="field.id"
-                type="button"
-                class="filter-chip"
-                :aria-pressed="active.searchFields.includes(field.id)"
-                :data-on="active.searchFields.includes(field.id) ? '1' : '0'"
-                @click="toggleSearchField(field.id)"
-              >{{ field.label }}</button>
-            </div>
-          </div>
-        </section>
-
-        <div class="editor-danger">
-          <button type="button" class="editor-delete" @click="askRemoveType">删除该类型</button>
-          <span class="editor-hint">删除类型不会删除条目；既有条目将按未知类型展示</span>
         </div>
-      </template>
+        <button type="button" class="editor-add" @click="addField">＋ 添加字段</button>
+      </section>
 
-      <p v-else class="editor-empty">暂无自定义类型，点击上方「新建类型」开始创建</p>
-    </div>
+      <!-- 04 展示：主标题 / 卡片次行 / 搜索字段 -->
+      <section class="kv-section">
+        <div class="kv-section-label">04 展示</div>
+        <div class="kv-field">
+          <label class="kv-label" for="vt-f-title">主标题</label>
+          <select id="vt-f-title" class="kv-input kv-select" v-model="active.titleField">
+            <option value="">未指定</option>
+            <option v-for="field in active.fields" :key="field.id" :value="field.id">{{ field.label }}</option>
+          </select>
+        </div>
+        <div class="kv-field">
+          <span class="kv-label">卡片次行</span>
+          <div class="editor-chips">
+            <button
+              v-for="field in active.fields"
+              :key="field.id"
+              type="button"
+              class="filter-chip"
+              :aria-pressed="active.cardFields.includes(field.id)"
+              :data-on="active.cardFields.includes(field.id) ? '1' : '0'"
+              @click="toggleCardField(field.id)"
+            >{{ field.label }}</button>
+          </div>
+        </div>
+        <div class="kv-field">
+          <span class="kv-label">搜索字段</span>
+          <div class="editor-chips">
+            <button
+              v-for="field in active.fields"
+              :key="field.id"
+              type="button"
+              class="filter-chip"
+              :aria-pressed="active.searchFields.includes(field.id)"
+              :data-on="active.searchFields.includes(field.id) ? '1' : '0'"
+              @click="toggleSearchField(field.id)"
+            >{{ field.label }}</button>
+          </div>
+        </div>
+      </section>
 
-    <template #error v-if="errorText">
-      <div class="reg-error">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        {{ errorText }}
+      <div class="editor-danger">
+        <button type="button" class="editor-delete" @click="askRemoveType">删除该类型</button>
+        <span class="editor-hint">删除类型不会删除条目；既有条目将按未知类型展示</span>
       </div>
     </template>
-  </VerthysDialog>
+
+    <p v-else class="kv-note">暂无自定义类型，点击上方「新建类型」开始创建</p>
+
+    <p v-if="errorText" class="kv-error editor-error">{{ errorText }}</p>
+
+    <div class="kv-actions">
+      <button class="btn kv-cancel" type="button" :disabled="saving" @click="open = false">取消</button>
+      <button
+        class="btn btn-primary kv-confirm"
+        type="button"
+        :disabled="saving"
+        @click="onSave"
+      >{{ saving ? "保存中…" : "保存类型" }}</button>
+    </div>
+  </CosmicOverlay>
 
   <!-- 删除类型二次确认：条目保留规则已在编辑区就地说明 -->
   <ConfirmDelete
@@ -246,7 +214,7 @@ import {
 import { VAULT_ICON_LIBRARY } from "../../../constants/vault_item_types";
 import { VAULT_TONE_RGB_VARS } from "../../../lib/vault_item_card";
 import { saveCustomVaultTypes, validateVaultTypeDefs } from "../../../lib/vault_item_type_store";
-import VerthysDialog from "../../common/verthys-ui/VerthysDialog.vue";
+import CosmicOverlay from "../../common/cosmic/CosmicOverlay.vue";
 import ConfirmDelete from "../../common/verthys-ui/ConfirmDelete.vue";
 import SafeSvgIcon from "../../common/SafeSvgIcon.vue";
 
@@ -492,14 +460,17 @@ const onSave = async (): Promise<void> => {
 </script>
 
 <style scoped>
-.type-editor { min-width: 640px; }
+/* ===== 类型编辑器业务结构 =====
+   标题、分区、字段与动作区由 kv-* 承担；本文件只保留类型标签条、
+   图标/色调选择条与字段构建行 */
 
 /* 类型集标签条 */
 .editor-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
 .editor-tab {
   padding: 4px 10px;
-  background: rgba(var(--white-rgb), 0.02);
-  border: 1px solid var(--border-glass); border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(205, 224, 244, 0.12);
+  border-radius: 10px;
   color: var(--text-secondary); font-size: 11px; letter-spacing: 0.5px; font-family: var(--font);
   cursor: pointer;
   transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
@@ -513,8 +484,8 @@ const onSave = async (): Promise<void> => {
 .icon-chip {
   display: flex; align-items: center; justify-content: center;
   width: 26px; height: 26px; padding: 0;
-  background: rgba(var(--white-rgb), 0.02);
-  border: 1px solid var(--border-glass); border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(205, 224, 244, 0.12); border-radius: 6px;
   color: var(--text-secondary); cursor: pointer;
 }
 .icon-chip-mark { width: 14px; height: 14px; }
@@ -532,8 +503,8 @@ const onSave = async (): Promise<void> => {
 /* 字段构建行 */
 .field-row {
   margin-top: 10px; padding: 9px 10px;
-  background: rgba(var(--white-rgb), 0.015);
-  border: 1px solid var(--border-glass); border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.015);
+  border: 1px solid rgba(205, 224, 244, 0.10); border-radius: 7px;
 }
 .field-row-head { display: flex; align-items: center; gap: 8px; }
 .field-index {
@@ -556,7 +527,7 @@ const onSave = async (): Promise<void> => {
 
 .editor-add {
   margin-top: 10px; padding: 5px 12px;
-  background: none; border: 1px dashed var(--border-glass); border-radius: 6px;
+  background: none; border: 1px dashed rgba(205, 224, 244, 0.14); border-radius: 6px;
   color: var(--text-secondary); font-size: 11px; font-family: var(--font);
   cursor: pointer;
   transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
@@ -566,7 +537,7 @@ const onSave = async (): Promise<void> => {
 .editor-danger {
   display: flex; align-items: center; gap: 12px;
   margin-top: 18px; padding-top: 12px;
-  border-top: 1px solid var(--border-glass);
+  border-top: 1px solid rgba(205, 224, 244, 0.07);
 }
 .editor-delete {
   padding: 4px 12px;
@@ -576,5 +547,5 @@ const onSave = async (): Promise<void> => {
 .editor-delete:hover { border-color: var(--danger); }
 .editor-hint { font-size: 10.5px; color: var(--text-muted); font-family: var(--font); }
 
-.editor-empty { font-size: 12px; color: var(--text-muted); font-family: var(--font); }
+.editor-error { margin-top: 14px; }
 </style>

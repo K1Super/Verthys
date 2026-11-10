@@ -8,7 +8,7 @@
  *   接上 —— 观感即「扫过后突变」。故根节点只登记过渡时长，底色与装饰归幕层。
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { createApp, h, type App } from "vue";
+import { createApp, h, nextTick, type App } from "vue";
 import { readFileSync } from "node:fs";
 import CosmicOverlay from "./CosmicOverlay.vue";
 
@@ -106,5 +106,60 @@ describe("宇宙弹窗 · 背衬折射边界", () => {
       ruleBody(source, ".cosmic-enter-active :deep(.cosmic-dialog)"),
       "底板入场只允许不透明度",
     ).not.toMatch(/(?:^|[;\s])transform\s*:/);
+  });
+});
+
+describe("宇宙弹窗 · 模态行为", () => {
+  it("嵌套窗口只有栈顶响应 Esc，底层窗口不得被一并关闭", async () => {
+    const closed: string[] = [];
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp({
+      render: () =>
+        h("div", [
+          h(
+            CosmicOverlay,
+            { show: true, teleport: true, onClose: () => closed.push("bottom") },
+            { default: () => h("button", { class: "bottom-action" }, "底层") },
+          ),
+          h(
+            CosmicOverlay,
+            { show: true, teleport: true, onClose: () => closed.push("top") },
+            { default: () => h("button", { class: "top-action" }, "顶层") },
+          ),
+        ]),
+    });
+    app.mount(container);
+    mounted.push({ app, container });
+    await nextTick();
+    await nextTick();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    expect(closed).toEqual(["top"]);
+  });
+
+  it("initialFocus 把初始焦点交给指定控件（破坏性确认落在取消键）", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp({
+      render: () =>
+        h(
+          CosmicOverlay,
+          { show: true, teleport: true, initialFocus: ".danger-cancel" },
+          {
+            default: () => [
+              h("button", { class: "danger-confirm" }, "确认删除"),
+              h("button", { class: "danger-cancel" }, "取消"),
+            ],
+          },
+        ),
+    });
+    app.mount(container);
+    mounted.push({ app, container });
+    await nextTick();
+    await nextTick();
+
+    expect(document.activeElement?.className).toContain("danger-cancel");
   });
 });

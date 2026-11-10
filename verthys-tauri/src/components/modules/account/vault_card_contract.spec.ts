@@ -21,7 +21,7 @@ const detailSource = read("./VaultItemDetailDialog.vue");
 const editorSource = read("./VaultTypeEditorDialog.vue");
 const searchBarSource = read("../../common/verthys-ui/VerthysSearchBar.vue");
 const confirmSource = read("../../common/verthys-ui/ConfirmDelete.vue");
-const dialogSource = read("../../common/verthys-ui/VerthysDialog.vue");
+const dialogSource = read("../../common/cosmic/CosmicOverlay.vue");
 
 describe("卡片渲染单源", () => {
   it("虚拟滚动与普通网格两条路径都使用同一卡片组件", () => {
@@ -67,7 +67,7 @@ describe("损坏记录不得静默丢弃", () => {
 describe("不可逆操作的可读性", () => {
   it("确认删除窗声明模态语义，且不渲染删除对象提示行", () => {
     expect(confirmSource).toContain('role="alertdialog"');
-    expect(confirmSource).toContain('aria-modal="true"');
+    expect(confirmSource).toContain("<CosmicOverlay");
     expect(confirmSource).not.toContain("cd-target");
     expect(confirmSource).not.toContain("itemName");
     expect(moduleSource).not.toContain(":item-name");
@@ -97,34 +97,30 @@ describe("卡片尺寸与详情入口", () => {
     expect(cardSource).toContain('@click.stop="$emit(\'copy\', view.secret.fieldId)"');
   });
 
-  it("详情窗口只读复用 VerthysDialog，并由模块在卡片 detail 事件中打开", () => {
-    expect(detailSource).toContain("<VerthysDialog");
-    expect(detailSource).toContain("hide-actions");
+  it("详情窗口只读复用 CosmicOverlay，并由模块在卡片 detail 事件中打开", () => {
+    expect(detailSource).toContain("<CosmicOverlay");
     expect(detailSource).toContain("buildVaultDetailSections");
     expect(moduleSource).toContain("<VaultItemDetailDialog");
     expect(moduleSource).toContain('@detail="onDetail(entry)"');
   });
 
-  it("点击遮罩空白与 Esc 关闭由 VerthysDialog 统一承担（详情窗口不重复实现）", () => {
-    expect(dialogSource).toContain('@click.self="onOverlayClick"');
-    expect(dialogSource).toContain("function onOverlayClick");
-    expect(dialogSource).toContain('e.key === "Escape"');
+  it("点击遮罩空白与 Esc 关闭由 CosmicOverlay 统一承担（详情窗口不重复实现）", () => {
+    expect(dialogSource).toContain("@backdrop=\"onBackdrop\"");
+    expect(dialogSource).toContain("const onBackdrop");
+    expect(dialogSource).toContain("e.key === 'Escape'");
   });
 });
 
 describe("对话框模态规范", () => {
   it("外壳声明模态语义、面板可聚焦，并按模态栈只让顶层响应 Esc", () => {
-    expect(dialogSource).toContain('role="dialog"');
-    expect(dialogSource).toContain('aria-modal="true"');
+    expect(dialogSource).toContain("aria-modal=\"true\"");
     expect(dialogSource).toContain('tabindex="-1"');
-    expect(dialogSource).toContain("isTopModal()");
-    expect(dialogSource).toContain('e.key === "Escape"');
+    expect(dialogSource).toContain("isTopModal(modalId)");
+    expect(dialogSource).toContain("e.key === 'Escape'");
   });
 
   it("请求在途或强制窗口不得由 Esc 或点击遮罩关闭（否则提交结果无处落点）", () => {
-    expect(
-      dialogSource.match(/if \(props\.saving \|\| props\.persistent\) return;/g)?.length,
-    ).toBe(2);
+    expect(dialogSource).toContain("props.backdropClose && !props.persistent");
   });
 });
 

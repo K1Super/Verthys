@@ -1,7 +1,8 @@
 /**
- * useFileRepair.spec.ts — 清藏损坏清理交互契约
+ * useFileRepair.spec.ts — 清藏检查结果 Toast 契约
  *
- * 锁定：打开即扫描；删除必须二次确认；失败保持结果页；成功后关闭。
+ * 锁定：检查结果只走统一 Toast（有损坏 → 顶部红；通过/不适用 → 底部状态），
+ * 损坏列表供模块内常驻告知条使用；清理成功后才清空。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shallowRef } from "vue";
@@ -28,6 +29,7 @@ function setup(overrides: Partial<Parameters<typeof useFileRepair>[0]> = {}) {
   const probeOuter = vi.fn(async (payload: string) => payload !== "payload-201");
   const cleanup = vi.fn(async (_entries: FileRepairEntry[]) => true);
   const showError = vi.fn();
+  const showStatus = vi.fn();
   const api = useFileRepair({
     files,
     isTauri: true,
@@ -35,102 +37,99 @@ function setup(overrides: Partial<Parameters<typeof useFileRepair>[0]> = {}) {
     probeOuter,
     cleanup,
     showError,
+    showStatus,
     ...overrides,
   });
-  return { files, fetchRecord, probeOuter, cleanup, showError, ...api };
+  return { files, fetchRecord, probeOuter, cleanup, showError, showStatus, ...api };
 }
 
-describe("useFileRepair 损坏清理", () => {
+describe("useFileRepair 检查与清理", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("打开即扫描并呈现完整/损坏/跳过计数", async () => {
-    const { open, visible, stage, checked, healthy, damaged, skipped, inconclusive } = setup();
+  it("发现损坏时走顶部错误 Toast，并记录损坏列表", async () => {
+    const { scan, scanning, damaged, showError, showStatus } = setup();
 
-    await open();
+    await scan();
 
-    expect(visible.value).toBe(true);
-    expect(stage.value).toBe("scanned");
-    expect(checked.value).toBe(2);
+    expect(scanning.value).toBe(false);
     expect(damaged.value.map((e) => e.id)).toEqual([1]);
-    expect(healthy.value).toBe(1);
-    expect(skipped.value).toBe(0);
-    expect(inconclusive.value).toBe(0);
+    expect(showError).toHaveBeenCalledWith("完整性检查：1 个文件无法解密");
+    expect(showStatus).not.toHaveBeenCalled();
   });
 
-  it("第一次点击只进入二次确认，不删除", async () => {
-    const { open, requestCleanup, confirming, cleanup } = setup();
-    await open();
-
-    requestCleanup();
-
-    expect(confirming.value).toBe(true);
-    expect(cleanup).not.toHaveBeenCalled();
-  });
-
-  it("二次确认后批量删除并关闭", async () => {
-    const { open, requestCleanup, cleanupDamaged, cleanup, visible, stage } = setup();
-    await open();
-    requestCleanup();
-
-    await cleanupDamaged();
-
-    expect(cleanup).toHaveBeenCalledTimes(1);
-    expect(cleanup.mock.calls[0][0].map((e) => e.id)).toEqual([1]);
-    expect(visible.value).toBe(false);
-    expect(stage.value).toBe("idle");
-  });
-
-  it("删除失败保持结果页可重试", async () => {
-    const cleanup = vi.fn(async () => false);
-    const { open, requestCleanup, cleanupDamaged, visible, stage } = setup({ cleanup });
-    await open();
-    requestCleanup();
-
-    await cleanupDamaged();
-
-    expect(visible.value).toBe(true);
-    expect(stage.value).toBe("scanned");
-  });
-
-  it("单条读取异常按不可判定处理，扫描不中断也不误删", async () => {
-    const { open, stage, showError, damaged, inconclusive } = setup({
-      fetchRecord: async () => { throw new Error("ipc down"); },
+  it("全部完整时走底部状态 Toast", async () => {
+    const { scan, damaged, showError, showStatus } = setup({
+      probeOuter: async () => true,
     });
 
-    await open();
+    await scan();
 
-    expect(stage.value).toBe("scanned");
     expect(damaged.value).toEqual([]);
-    expect(inconclusive.value).toBe(2);
+    expect(showStatus).toHaveBeenCalledWith("完整性检查通过");
     expect(showError).not.toHaveBeenCalled();
   });
 
-  it("扫描中禁止关闭", async () => {
-    let resolveProbe!: (v: boolean) => void;
-    let probeCalls = 0;
-    const probeOuter = vi.fn(() => {
-      probeCalls += 1;
-      if (probeCalls === 1) {
-        return new Promise<boolean>((resolve) => { resolveProbe = resolve; });
-      }
-      return Promise.resolve(true);
+  it("不可判定数量并入结果文案，不误报为损坏", async () => {
+    const { scan, damaged, showError } = setup({
+      fetchRecord: async () => null,
     });
-    const { open, close, visible, stage } = setup({ probeOuter });
 
-    const opening = open();
-    expect(stage.value).toBe("scanning");
-    close();
-    expect(visible.value).toBe(true);
-    expect(stage.value).toBe("scanning");
+    await scan();
 
-    // 等扫描推进到 probeOuter（此前有一次记录读取的微任务）
-    for (let i = 0; i < 10 && !resolveProbe; i += 1) {
-      await Promise.resolve();
-    }
-    resolveProbe(true);
-    await opening;
-    expect(stage.value).toBe("scanned");
+    expect(damaged.value).toEqual([]);
+    expect(showError).not.toHaveBeenCalled();
+  });
+
+  it("无可校验文件时明确说明原因", async () => {
+    const files = shallowRef<FileRepairEntry[]>([
+      { ...file(1), kdf: undefined, passwordCheck: undefined },
+    ]);
+    const { scan, showStatus } = setup({
+      files,
+      fetchRecord: vi.fn(),
+      probeOuter: vi.fn(),
+    });
+
+    await scan();
+
+    expect(showStatus).toHaveBeenCalledWith(
+      "完整性检查：无独立密码或历史布局，跳过校验",
+    );
+  });
+
+  it("清理成功后清空损坏列表并给出状态提示", async () => {
+    const { scan, damaged, cleanupDamaged, cleanup, showStatus } = setup();
+    await scan();
+    expect(damaged.value.length).toBe(1);
+
+    const ok = await cleanupDamaged();
+
+    expect(ok).toBe(true);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(cleanup.mock.calls[0][0].map((e) => e.id)).toEqual([1]);
+    expect(damaged.value).toEqual([]);
+    expect(showStatus).toHaveBeenCalledWith("已清理 1 个无法打开的文件");
+  });
+
+  it("清理失败保留损坏列表，等待重试", async () => {
+    const cleanup = vi.fn(async (_entries: FileRepairEntry[]) => false);
+    const { scan, damaged, cleanupDamaged } = setup({ cleanup });
+    await scan();
+
+    const ok = await cleanupDamaged();
+
+    expect(ok).toBe(false);
+    expect(damaged.value.map((e) => e.id)).toEqual([1]);
+  });
+
+  it("非桌面端直接提示，不执行扫描", async () => {
+    const { scan, showError, fetchRecord } = setup({ isTauri: false });
+
+    await scan();
+
+    expect(showError).toHaveBeenCalledWith("完整性检查仅在桌面端可用");
+    expect(fetchRecord).not.toHaveBeenCalled();
   });
 });

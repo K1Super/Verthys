@@ -1,7 +1,7 @@
 <!--
   VaultRegionPicker.vue — 全国省 / 市 / 区三级联动控件（存签「地区」字段唯一渲染源）
 
-  形态：三枚并置下拉框（省 → 市 → 区），与登记台其它控件同一凹槽皮肤；
+  形态：三枚并置下拉框（省 → 市 → 区），与弹窗输入控件同一凹槽皮肤；
         历史自由文本无法回解时降级为一行提示，三个下拉框留空。
 
   为什么按需加载区划数据：全国三级区划是约 70KB 的静态数据，只有地址类
@@ -18,7 +18,7 @@
   <div class="region-picker">
     <div class="region-selects">
       <select
-        class="reg-input reg-select region-select"
+        class="kv-input kv-select region-select"
         v-model="selectedProvince"
         :disabled="loading || loadFailed"
         aria-label="省份"
@@ -31,7 +31,7 @@
       </select>
 
       <select
-        class="reg-input reg-select region-select"
+        class="kv-input kv-select region-select"
         v-model="selectedCity"
         :disabled="loading || loadFailed || !selectedProvince"
         aria-label="城市"
@@ -44,7 +44,7 @@
       </select>
 
       <select
-        class="reg-input reg-select region-select"
+        class="kv-input kv-select region-select"
         v-model="selectedDistrict"
         :disabled="loading || loadFailed || !selectedCity"
         aria-label="区县"
@@ -58,8 +58,8 @@
     </div>
 
     <!-- 不可回解的历史值：原样提示，不伪造选中项（保存时原值保持不变） -->
-    <p v-if="legacyText" class="region-hint is-legacy">已存：{{ legacyText }} · 重新选择后生效</p>
-    <p v-else-if="loadFailed" class="region-hint">
+    <p v-if="legacyText" class="kv-hint region-hint is-legacy">已存：{{ legacyText }} · 重新选择后生效</p>
+    <p v-else-if="loadFailed" class="kv-hint region-hint">
       地区数据加载失败
       <button type="button" class="region-retry" @click="loadRegions">重试</button>
     </p>
@@ -189,11 +189,6 @@ const onDistrictChange = (event: Event): void => {
 }
 .region-select:disabled { cursor: not-allowed; opacity: 0.55; }
 
-.region-hint {
-  margin-top: 7px;
-  font-size: 10.5px; letter-spacing: 0.3px; line-height: 1.5;
-  color: var(--text-muted); font-family: var(--font);
-}
 /* 历史值与区划更名同属「需要用户确认」的状态：只用警示色文字，不加底色框 */
 .region-hint.is-legacy { color: var(--warning); }
 

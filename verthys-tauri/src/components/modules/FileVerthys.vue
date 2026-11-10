@@ -37,10 +37,10 @@
            loading 时按钮为 disabled，原生不派发悬浮事件，故仅在可点击态呈现 -->
       <ActionButton
         primary
-        class="repair-top-btn"
-        v-tip="'检查损坏文件'"
-        aria-label="检查损坏文件"
-        @click="openFileRepair"
+        v-tip="'检查文件完整性'"
+        aria-label="检查文件完整性"
+        :loading="repairScanning"
+        @click="runDamageScan"
       >
         <template #icon>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
@@ -54,6 +54,20 @@
         @click="onImport"
       />
     </div>
+
+    <!-- 损坏文件常驻告知条：检查结果本身只走 Toast；本条承接需要跟进的状态，
+         绝对定位浮于列表上方，出现/消失不改变网格高度与滚动位置 -->
+    <StatusBanner
+      v-if="repairDamaged.length > 0 && !repairBannerDismissed"
+      class="file-repair-banner"
+      tone="danger"
+      :actions="[{ key: 'cleanup', label: '清理' }]"
+      dismissible
+      @action="requestRepairCleanup"
+      @dismiss="dismissRepairBanner"
+    >
+      {{ repairDamaged.length }} 个文件无法解密，可清理后重新导入
+    </StatusBanner>
 
     <!-- 文件卡片网格：≥150 条启用虚拟滚动，小列表保留 v-for 直渲染路径（零额外开销） -->
     <VirtualCardGrid
@@ -76,6 +90,7 @@
           <span v-if="f.encrypted" class="lock-badge" v-tip="'独立加密'">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
           </span>
+          <span v-if="isDamagedFile(f)" class="damage-badge" v-tip="'内容层无法解密'">损坏</span>
         </div>
         <div class="file-info">
           <!-- 元数据不可读：如实直陈（状态红文字，不加底色框/图标），只留删除入口 -->
@@ -121,6 +136,7 @@
           <span v-if="f.encrypted" class="lock-badge" v-tip="'独立加密'">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
           </span>
+          <span v-if="isDamagedFile(f)" class="damage-badge" v-tip="'内容层无法解密'">损坏</span>
         </div>
         <div class="file-info">
           <!-- 元数据不可读：如实直陈（状态红文字，不加底色框/图标），只留删除入口 -->
@@ -160,111 +176,89 @@
       :hint="files.length === 0 ? '点击「导入文件」添加' : '换个关键词试试'"
     />
 
-    <!-- 导入对话框（含独立密码选项） -->
-    <!-- 导入窗口：底板（背景/描边/圆角/收边投影/入场）与头部·登记区·动作区
-         结构直接复用凭证登记台共享皮肤（styles/reg-desk.css，与存签登记
-         窗口同一来源）—— 面板类与两窗完全同形（dialog + glass + reg-panel），
-         本组件只挂类与结构，不复制任何 reg-* 规则 -->
-    <div v-if="showImportDialog" class="dialog-overlay" @click.self="showImportDialog = false">
-      <div
-        ref="importDialogRef"
-        class="dialog glass reg-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="fv-import-title"
-        tabindex="-1"
-        @keydown="onImportDialogKeydown"
-      >
-        <header class="reg-head">
-          <span class="reg-heading">
-            <span class="reg-kicker">钥域 · 加密入库</span>
-            <span class="reg-title" id="fv-import-title">导入文件到加密库</span>
-          </span>
-          <button class="reg-close" type="button" @click="showImportDialog = false" aria-label="关闭窗口" v-tip="'关闭'">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-        </header>
+    <!-- 导入窗口：复用全局弹窗外壳与 kv-* 内容词汇，只保留导入摘要与口令选项 -->
+    <CosmicOverlay
+      :show="showImportDialog"
+      width="480px"
+      aria-labelledby="fv-import-title"
+      @close="showImportDialog = false"
+    >
+      <div class="kv-title" id="fv-import-title">导入文件到加密库</div>
 
-        <div class="reg-body">
-          <div class="import-file-info">
-            <SafeSvgIcon class="file-icon-lg" :source="getFileIcon(pendingMime)" />
-            <div class="file-meta">
-              <div class="file-name">{{ pendingName }}</div>
-              <template v-if="pendingFiles.length === 1">
-                <div class="file-size">{{ pendingSize === null ? "—" : formatSize(pendingSize) }}</div>
-                <div class="file-chunks">分块加密存储</div>
-              </template>
-              <template v-else>
-                <div class="file-size">
-                  共 {{ pendingFiles.length }} 个文件 ·
-                  {{ pendingSize === null ? "—" : formatSize(pendingSize) }}
-                </div>
-                <div class="file-chunks">逐个加密导入</div>
-              </template>
+      <div class="import-summary">
+        <SafeSvgIcon class="file-icon-lg" :source="getFileIcon(pendingMime)" />
+        <div class="file-meta">
+          <div class="file-name">{{ pendingName }}</div>
+          <template v-if="pendingFiles.length === 1">
+            <div class="file-size">{{ pendingSize === null ? "—" : formatSize(pendingSize) }}</div>
+            <div class="file-chunks">分块加密存储</div>
+          </template>
+          <template v-else>
+            <div class="file-size">
+              共 {{ pendingFiles.length }} 个文件 ·
+              {{ pendingSize === null ? "—" : formatSize(pendingSize) }}
             </div>
-          </div>
-          <div class="encrypt-row" :class="{ on: usePassword }">
-            <label class="encrypt-toggle">
-              <input type="checkbox" v-model="usePassword" />
-              <span class="encrypt-check"></span>
-              <span class="encrypt-label">设置独立访问密码（细粒度权限隔离）</span>
-            </label>
-            <div v-if="usePassword" class="encrypt-key-input">
-              <input
-                class="input"
-                v-model="docPassword"
-                type="password"
-                placeholder="文档独立访问密码"
-                :aria-invalid="docPassword.length > 0 && docPassword.length < MIN_TOKEN_LENGTH"
-              />
-              <!-- 口令强度下限（仅设置侧强制；解锁侧不设限，避免历史短口令被锁在门外） -->
-              <p
-                v-if="docPassword.length > 0 && docPassword.length < MIN_TOKEN_LENGTH"
-                class="field-hint is-error"
-              >访问密码至少 {{ MIN_TOKEN_LENGTH }} 位字符</p>
-            </div>
-          </div>
-        </div>
-
-        <div class="dialog-actions">
-          <button class="btn kv-cancel" @click="showImportDialog = false">取消</button>
-          <button
-            class="btn btn-primary kv-confirm"
-            :disabled="usePassword && docPassword.length < MIN_TOKEN_LENGTH"
-            @click="startImport"
-          >开始加密导入</button>
+            <div class="file-chunks">逐个加密导入</div>
+          </template>
         </div>
       </div>
-    </div>
+
+      <label class="kv-option import-option" :class="{ 'is-on': usePassword }">
+        <input type="checkbox" v-model="usePassword" />
+        <span class="kv-option-check"></span>
+        <span class="kv-option-text">独立访问密码</span>
+        <span class="kv-option-hint">细粒度权限隔离</span>
+      </label>
+
+      <div v-if="usePassword" class="kv-field import-key-field">
+        <label class="kv-label" for="fv-doc-password">文档独立访问密码</label>
+        <input
+          id="fv-doc-password"
+          class="kv-input"
+          v-model="docPassword"
+          type="password"
+          :aria-invalid="docPassword.length > 0 && docPassword.length < MIN_TOKEN_LENGTH"
+        />
+        <!-- 口令强度下限（仅设置侧强制；解锁侧不设限，避免历史短口令被锁在门外） -->
+        <p
+          v-if="docPassword.length > 0 && docPassword.length < MIN_TOKEN_LENGTH"
+          class="kv-hint is-error"
+        >访问密码至少 {{ MIN_TOKEN_LENGTH }} 位字符</p>
+      </div>
+
+      <div class="kv-actions">
+        <button class="btn kv-cancel" type="button" @click="showImportDialog = false">取消</button>
+        <button
+          class="btn btn-primary kv-confirm"
+          type="button"
+          :disabled="usePassword && docPassword.length < MIN_TOKEN_LENGTH"
+          @click="startImport"
+        >开始加密导入</button>
+      </div>
+    </CosmicOverlay>
 
     <!-- 保存密钥输入框（加密文档保存到本地前需解密）
          解锁侧不设最小长度：历史上用短口令加密的文件必须仍能导出 -->
-    <div v-if="showKeyDialog" class="dialog-overlay" @click.self="closeKeyDialog">
-      <div
-        ref="keyDialogRef"
-        class="dialog glass key-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="fv-key-title"
-        tabindex="-1"
-        @keydown="onKeyDialogKeydown"
-      >
-        <div class="dialog-title" id="fv-key-title">输入文档访问密码</div>
-        <div class="key-target">{{ saveTarget?.name }}</div>
-        <input
-          class="input"
-          v-model="keyInput"
-          type="password"
-          placeholder="独立访问密码"
-          aria-label="文档独立访问密码"
-          @keydown.enter="confirmSaveKey"
-        />
-        <div class="dialog-actions">
-          <button class="btn kv-cancel" @click="closeKeyDialog">取消</button>
-          <button class="btn btn-primary kv-confirm" :disabled="!keyInput" @click="confirmSaveKey">解密保存</button>
-        </div>
+    <CosmicOverlay
+      :show="showKeyDialog"
+      width="400px"
+      aria-labelledby="fv-key-title"
+      @close="closeKeyDialog"
+    >
+      <div class="kv-title" id="fv-key-title">输入文档访问密码</div>
+      <div class="kv-desc key-target">{{ saveTarget?.name }}</div>
+      <input
+        class="kv-input"
+        v-model="keyInput"
+        type="password"
+        aria-label="文档独立访问密码"
+        @keydown.enter="confirmSaveKey"
+      />
+      <div class="kv-actions">
+        <button class="btn kv-cancel" type="button" @click="closeKeyDialog">取消</button>
+        <button class="btn btn-primary kv-confirm" type="button" :disabled="!keyInput" @click="confirmSaveKey">解密保存</button>
       </div>
-    </div>
+    </CosmicOverlay>
 
     <!-- 非阻塞加载：无底板居中展示，加载完成自动消失 -->
     <CosmicRingLoader :overlay="true" :show="loading" text="正在加载文件数据…" />
@@ -276,78 +270,14 @@
       @cancel="showDeleteConfirm = false"
     />
 
-    <!-- 损坏清理对话框：扫描 → 结果 → 二次确认 → 删除（不可逆） -->
-    <div v-if="repairVisible" class="dialog-overlay" @click.self="closeRepair">
-      <div
-        class="dialog glass repair-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="fv-repair-title"
-      >
-        <div class="dialog-title" id="fv-repair-title">清理无法打开的加密文件</div>
-        <p class="repair-desc">
-          扫描只验证每个文件的数据分块能否被当前模块密钥解封，不需要输入文件独立密码。
-          未设置独立密码或使用历史加密布局的文件将跳过检查。
-        </p>
-
-        <div class="repair-state" role="status" aria-live="polite">
-          <template v-if="repairStage === 'scanning'">正在检查文件分块…</template>
-          <template v-else-if="repairStage === 'cleaning'">正在删除损坏文件…</template>
-          <template v-else-if="repairStage === 'scanned'">
-            <p>
-              共检查 <b>{{ repairChecked }}</b> 个文件：外层完整
-              <b>{{ repairHealthy }}</b> 个，确定损坏
-              <b class="repair-warn">{{ repairDamaged.length }}</b> 个。
-            </p>
-            <p v-if="repairSkipped > 0" class="repair-muted">
-              {{ repairSkipped }} 个未设独立密码或历史布局的文件已跳过。
-            </p>
-            <p v-if="repairInconclusive > 0" class="repair-muted">
-              {{ repairInconclusive }} 个暂时无法判定，已跳过（不会删除）。
-            </p>
-            <p v-if="repairDamaged.length > 0" class="repair-warn">
-              删除不可恢复：这些文件的分块只能用已随旧库删除的旧模块密钥解开。
-            </p>
-            <p v-else class="repair-muted">未发现确定损坏的文件。</p>
-          </template>
-        </div>
-
-        <div class="dialog-actions repair-actions">
-          <button
-            class="btn kv-cancel"
-            :disabled="repairStage === 'scanning' || repairStage === 'cleaning'"
-            @click="rerunRepairScan"
-          >
-            重新扫描
-          </button>
-          <button
-            class="btn kv-cancel"
-            :disabled="repairStage === 'scanning' || repairStage === 'cleaning'"
-            @click="closeRepair"
-          >
-            关闭
-          </button>
-          <template v-if="repairConfirming">
-            <button class="btn kv-cancel" @click="cancelRepairConfirm">取消</button>
-            <button
-              class="btn repair-danger"
-              :disabled="repairStage !== 'scanned'"
-              @click="runRepairCleanup"
-            >
-              确认永久删除 {{ repairDamaged.length }} 个
-            </button>
-          </template>
-          <button
-            v-else
-            class="btn repair-danger"
-            :disabled="repairStage !== 'scanned' || repairDamaged.length === 0"
-            @click="requestRepairCleanup"
-          >
-            删除损坏文件{{ repairDamaged.length > 0 ? ` (${repairDamaged.length})` : '' }}
-          </button>
-        </div>
-      </div>
-    </div>
+    <!-- 损坏文件清理确认：检查结果走 Toast，不可逆删除仍走统一二次确认 -->
+    <ConfirmDelete
+      :show="repairConfirmVisible"
+      title="清理无法解密的文件"
+      desc="这些文件的分块已无法由当前模块密钥解封，删除后不可恢复。"
+      @confirm="confirmRepairCleanup"
+      @cancel="repairConfirmVisible = false"
+    />
 
     <!-- 导入进度悬浮覆盖层（统一组件，复用量子能量导流通道）：
          悬浮模块内容区中央，不挤压下方文件网格；导入中可取消（断点状态保留）
@@ -377,40 +307,36 @@
     />
 
     <!-- 并发导入互斥：存在活跃导入会话时的显式确认（结束上一会话保留其断点状态） -->
-    <div v-if="showSessionConflict" class="dialog-overlay" @click.self="resolveSessionConflict(false)">
-      <div
-        ref="conflictDialogRef"
-        class="dialog glass"
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="fv-conflict-title"
-        aria-describedby="fv-conflict-desc"
-        tabindex="-1"
-        @keydown="onConflictDialogKeydown"
-      >
-        <div class="dialog-title" id="fv-conflict-title">已有导入会话进行中</div>
-        <div class="session-conflict-text" id="fv-conflict-desc">
-          检测到未结束的导入会话（可能是上次导入中断或另一模块正在导入）。
-          继续将先结束该会话并保留其断点状态，之后可续传。
-        </div>
-        <div class="dialog-actions">
-          <button class="btn kv-cancel" @click="resolveSessionConflict(false)">取消导入</button>
-          <button class="btn btn-primary kv-confirm" @click="resolveSessionConflict(true)">结束并继续</button>
-        </div>
+    <CosmicOverlay
+      :show="showSessionConflict"
+      width="440px"
+      aria-labelledby="fv-conflict-title"
+      @close="resolveSessionConflict(false)"
+    >
+      <div class="kv-title" id="fv-conflict-title">已有导入会话进行中</div>
+      <div class="kv-desc">
+        检测到未结束的导入会话（可能是上次导入中断或另一模块正在导入）。
+        继续将先结束该会话并保留其断点状态，之后可续传。
       </div>
-    </div>
+      <div class="kv-actions">
+        <button class="btn kv-cancel" type="button" @click="resolveSessionConflict(false)">取消导入</button>
+        <button class="btn btn-primary kv-confirm" type="button" @click="resolveSessionConflict(true)">结束并继续</button>
+      </div>
+    </CosmicOverlay>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, shallowRef, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
+import { ref, shallowRef, computed, onMounted, onUnmounted, watch } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import ActionButton from "../common/verthys-ui/ActionButton.vue";
 import StarlitSky from "../common/cosmic/StarlitSky.vue";
+import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
 import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ImportProgressOverlay from "../common/cosmic/ImportProgressOverlay.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
+import StatusBanner from "../common/feedback/StatusBanner.vue";
 import SafeSvgIcon from "../common/SafeSvgIcon.vue";
 import { useCardShine } from "../../composables/useCardShine";
 import {
@@ -453,7 +379,6 @@ import {
   pushShallowItems, replaceShallowArray, updateShallowItem,
   removeShallowItems,
 } from "../../utils/shallow-array";
-import { isTopModal, popModal, pushModal } from "../../utils/modal_stack";
 import { debounce } from "../../utils/debounce";
 import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
 
@@ -461,75 +386,6 @@ import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
 const { showError, showStatus } = useToastCenter();
 /* 状态提示口径（模块内沿用 showToast 命名，指向标准状态通道，2.5s 自动消失） */
 const showToast = showStatus;
-
-/**
- * 模块自绘弹窗的模态契约（与全局模态栈共用栈序与滚动锁）。
- *
- * 导入窗 / 口令窗 / 会话冲突窗都不是 Teleport（不存在跨模块残留覆盖），
- * 但同样必须是真正的模态：入栈后锁定页面滚动、Esc 只由栈顶响应、
- * 打开时焦点移入、关闭时归还到打开前的元素、Tab 在窗内循环不逃逸。
- * 收敛为单一工厂，避免三处实现漂移（ConfirmDelete 为同款语义的既有实现）。
- */
-function createModalBinding(opts: {
-  close: () => void;
-  root: () => HTMLElement | null;
-}) {
-  const id = Symbol("file-verthys-modal");
-  let engaged = false;
-  let returnFocus: HTMLElement | null = null;
-
-  const focusablesOf = (root: HTMLElement): HTMLElement[] =>
-    Array.from(root.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
-    )).filter((el) => el.offsetParent !== null);
-
-  const engage = async (): Promise<void> => {
-    if (engaged) return;
-    engaged = true;
-    returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    pushModal(id);
-    await nextTick();
-    opts.root()?.focus();
-  };
-
-  const release = (): void => {
-    if (!engaged) return;
-    engaged = false;
-    popModal(id);
-    returnFocus?.focus?.();
-    returnFocus = null;
-  };
-
-  const keydown = (e: KeyboardEvent): void => {
-    if (!isTopModal(id)) return;
-    if (e.key === "Escape") {
-      e.preventDefault();
-      opts.close();
-      return;
-    }
-    if (e.key !== "Tab") return;
-    const root = opts.root();
-    if (!root) return;
-    const items = focusablesOf(root);
-    if (items.length === 0) {
-      e.preventDefault();
-      root.focus();
-      return;
-    }
-    const first = items[0];
-    const last = items[items.length - 1];
-    const active = document.activeElement;
-    if (!e.shiftKey && (active === last || !root.contains(active))) {
-      e.preventDefault();
-      first.focus();
-    } else if (e.shiftKey && (active === first || !root.contains(active))) {
-      e.preventDefault();
-      last.focus();
-    }
-  };
-
-  return { engage, release, keydown };
-}
 
 /* ===== 类型 ===== */
 interface FileEntry {
@@ -997,41 +853,6 @@ const requestExportCancel = () => {
   exportCancelPending.value = true;
 };
 
-/* ===== 三个自绘弹窗的模态绑定（滚动锁 / Esc 栈序 / 焦点归还 / Tab 循环） ===== */
-const importDialogRef = ref<HTMLElement | null>(null);
-const keyDialogRef = ref<HTMLElement | null>(null);
-const conflictDialogRef = ref<HTMLElement | null>(null);
-
-const importModal = createModalBinding({
-  close: () => { showImportDialog.value = false; },
-  root: () => importDialogRef.value,
-});
-const keyModal = createModalBinding({
-  close: closeKeyDialog,
-  root: () => keyDialogRef.value,
-});
-const conflictModal = createModalBinding({
-  close: () => resolveSessionConflict(false),
-  root: () => conflictDialogRef.value,
-});
-
-watch(showImportDialog, (open) => {
-  if (open) void importModal.engage();
-  else importModal.release();
-});
-watch(showKeyDialog, (open) => {
-  if (open) void keyModal.engage();
-  else keyModal.release();
-});
-watch(showSessionConflict, (open) => {
-  if (open) void conflictModal.engage();
-  else conflictModal.release();
-});
-
-const onImportDialogKeydown = (e: KeyboardEvent): void => importModal.keydown(e);
-const onKeyDialogKeydown = (e: KeyboardEvent): void => keyModal.keydown(e);
-const onConflictDialogKeydown = (e: KeyboardEvent): void => conflictModal.keydown(e);
-
 const onSave = (f: FileEntry) => {
   if (f.corrupt) {
     showError("该条目元数据已损坏，无法保存；如需清理请删除该条目");
@@ -1315,25 +1136,15 @@ const cleanupDamagedFiles = async (entries: FileRepairEntry[]): Promise<boolean>
 
   removeShallowItems(files, (f) => localIds.has(f.id));
   syncModuleCache();
-  showToast(`已清理 ${localIds.size} 个无法打开的文件`);
   return true;
 };
 
 const {
-  visible: repairVisible,
-  stage: repairStage,
-  confirming: repairConfirming,
-  checked: repairChecked,
+  scanning: repairScanning,
   damaged: repairDamaged,
-  healthy: repairHealthy,
-  skipped: repairSkipped,
-  inconclusive: repairInconclusive,
-  open: openRepair,
-  runScan: rerunRepairScan,
-  requestCleanup: requestRepairCleanup,
-  cancelConfirm: cancelRepairConfirm,
+  scan: scanRepair,
   cleanupDamaged: runRepairCleanup,
-  close: closeRepair,
+  clearResult: clearRepairResult,
 } = useFileRepair({
   files,
   isTauri,
@@ -1348,16 +1159,48 @@ const {
   probeOuter: (payload) => probeOuterRecord("file", payload),
   cleanup: cleanupDamagedFiles,
   showError,
+  showStatus: showToast,
 });
 
-/** 打开清理对话框：导入/导出在途时拒绝，避免扫描与重负载任务并发 */
-const openFileRepair = () => {
+/** 损坏清理确认窗（不可逆必须二次确认；检查结果本身只走 Toast） */
+const repairConfirmVisible = ref(false);
+/** 用户可主动关闭损坏告知条；下次检查重新计算 */
+const repairBannerDismissed = ref(false);
+
+/** 检查文件完整性：结果只走 Toast；有损坏时由常驻告知条承接 */
+const runDamageScan = () => {
   if (importing.value || exporting.value) {
     showError("当前有导入/导出任务进行中，请稍后再检查");
     return;
   }
-  void openRepair();
+  repairBannerDismissed.value = false;
+  void scanRepair();
 };
+
+const requestRepairCleanup = () => {
+  if (repairDamaged.value.length === 0) return;
+  repairConfirmVisible.value = true;
+};
+
+const confirmRepairCleanup = async () => {
+  repairConfirmVisible.value = false;
+  await runRepairCleanup();
+};
+
+const dismissRepairBanner = () => {
+  repairBannerDismissed.value = true;
+  clearRepairResult();
+};
+
+/** 损坏元数据 ID 集合：供卡片状态标记（避免逐卡 includes 扫描） */
+const repairDamagedMetaIds = computed(() => new Set(
+  repairDamaged.value
+    .map((e) => e.metaId)
+    .filter((id): id is number => typeof id === "number"),
+));
+
+const isDamagedFile = (f: FileEntry): boolean =>
+  typeof f.metaId === "number" && repairDamagedMetaIds.value.has(f.metaId);
 
 /** 删除结果 → 条目状态与提示：成功即移除；失败保留条目并留下重试入口 */
 const settleDeleteResult = (f: FileEntry, result: FileDeleteResult) => {
@@ -1602,10 +1445,6 @@ onMounted(() => {
 onUnmounted(() => {
   /* 取消未触发的防抖调用，防止内存泄漏 */
   debouncedUpdateSearch.cancel();
-  /* 模态栈兜底出栈：卸载时若仍有窗开着，滚动锁与栈序必须归还 */
-  importModal.release();
-  keyModal.release();
-  conflictModal.release();
 });
 
 /* 页面覆盖防护：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
@@ -1651,6 +1490,17 @@ useModuleDialogGuard("verthys", () => {
 .platform { font-size: 14px; font-weight: 600; color: var(--text-primary); letter-spacing: 0.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .lock-badge { width: 14px; height: 14px; color: var(--warning); flex-shrink: 0; }
 .lock-badge svg { width: 100%; height: 100%; }
+/* 损坏标记：只标记本次检查确认无法解密的条目，不改变卡片布局 */
+.damage-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-family: var(--font);
+}
 .file-info { display: flex; flex-direction: column; gap: 3px; margin-bottom: 6px; }
 .info-item { font-size: 11px; color: var(--text-secondary); font-family: var(--font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .info-label { color: var(--text-muted); margin-right: 4px; }
@@ -1671,63 +1521,40 @@ useModuleDialogGuard("verthys", () => {
 .mini-btn:disabled { cursor: not-allowed; opacity: 0.45; }
 .mini-btn:disabled:hover { background: none; }
 
-/* 对话框 */
-.dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.74); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-.dialog { padding: 28px; min-width: 440px; max-width: 90vw; animation: dialog-in 0.4s var(--ease); }
-/* 模态根以 tabindex="-1" 承接程序化焦点：不绘制焦点框（焦点语义由模态本身承担） */
-.dialog:focus, .dialog:focus-visible { outline: none; }
-@keyframes dialog-in { from { opacity: 0; } to { opacity: 1; } }
-.dialog-title { font-size: 14px; margin-bottom: 20px; color: var(--accent); letter-spacing: 2px; font-family: var(--font); }
-
-/* 导入文件信息 */
-.import-file-info { display: flex; gap: 14px; padding: 14px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-glass); border-radius: var(--radius); margin-bottom: 16px; }
-.file-icon-lg { width: 36px; height: 36px; color: var(--accent); flex-shrink: 0; }
+/* ===== 导入窗口内容 =====
+ * 外壳与标题/动作区由 CosmicOverlay 与 kv-* 承担；本模块只保留导入摘要
+ * 的业务结构 —— 左缘一道刻度线标识目标文件，不加底板与外框 */
+.import-summary {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 4px 0 4px 14px;
+  margin-bottom: 14px;
+  border-left: 2px solid rgba(var(--accent-rgb), 0.35);
+}
+.file-icon-lg { width: 32px; height: 32px; color: var(--accent); flex-shrink: 0; }
 .file-icon-lg svg { width: 100%; height: 100%; }
 .file-meta { flex: 1; min-width: 0; }
 .file-name { font-size: 13px; color: var(--text-primary); font-family: var(--font); margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-size { font-size: 11px; color: var(--accent); font-family: var(--font); margin-bottom: 2px; }
 .file-chunks { font-size: 10px; color: var(--text-muted); }
 
-/* 加密选项 */
-.encrypt-row { padding: 10px 12px; border: 1px solid var(--border-glass); border-radius: var(--radius-sm); transition: border-color 0.2s var(--ease), background-color 0.2s var(--ease); margin-bottom: 16px; }
-.encrypt-row.on { border-color: rgba(0,212,255,0.25); background: rgba(0,212,255,0.03); }
-.encrypt-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
-/* 视觉隐藏但保留可聚焦：display:none 会让复选框退出焦点序列，
-   键盘用户无法开启「独立访问密码」 */
-.encrypt-toggle input {
-  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
-  border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+.import-option { margin-bottom: 14px; }
+.import-key-field { margin-top: 0; }
+
+/* 密钥对话框：目标文件名独占一行，长名称允许换行 */
+.key-target { margin-bottom: 14px; word-break: break-all; }
+
+/* 损坏告知条浮层：绝对定位在模块顶部（搜索栏下缘），宽度随内容收敛；
+   出现/消失不改变网格高度与滚动位置，也不挤压任何文件卡片 */
+.file-repair-banner {
+  position: absolute;
+  top: 52px;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  width: fit-content;
+  max-width: calc(100% - 20px);
+  margin-inline: auto;
 }
-.encrypt-toggle input:focus-visible + .encrypt-check {
-  outline: 1px solid rgba(var(--accent-rgb), 0.55); outline-offset: 2px;
-}
-.encrypt-check { width: 14px; height: 14px; border: 1px solid var(--border-glass); border-radius: 3px; position: relative; transition: border-color 0.2s var(--ease), background-color 0.2s var(--ease); flex-shrink: 0; }
-.encrypt-row.on .encrypt-check { background: var(--accent); border-color: var(--accent); }
-.encrypt-row.on .encrypt-check::after { content: ""; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px; border: solid #000; border-width: 0 2px 2px 0; transform: rotate(45deg); }
-.encrypt-label { font-size: 11px; color: var(--text-secondary); }
-.encrypt-key-input { margin-top: 8px; }
-.encrypt-key-input .input { width: 100%; }
-/* 字段级校验提示：错误语义用状态红文字直陈（不加底色框、不加图标） */
-.field-hint { margin: 6px 0 0; font-size: 10px; line-height: 1.5; font-family: var(--font); }
-.field-hint.is-error { color: var(--danger); }
-
-.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; padding-top: 14px; border-top: 1px solid var(--border-glass); }
-
-/* 并发导入互斥确认 */
-.session-conflict-text { font-size: 12px; line-height: 1.7; color: var(--text-secondary); font-family: var(--font); margin-bottom: 6px; }
-
-/* 密钥对话框 */
-.key-dialog { min-width: 360px; }
-.key-target { font-size: 12px; color: var(--text-secondary); font-family: var(--font); margin-bottom: 14px; }
-
-/* 损坏清理对话框 */
-.repair-dialog { width: min(520px, calc(100vw - 32px)); }
-.repair-desc { margin: 8px 0 0; font-size: 12px; line-height: 1.6; color: var(--text-secondary); font-family: var(--font); }
-.repair-state { margin-top: 14px; font-size: 13px; line-height: 1.7; color: var(--text-primary); font-family: var(--font); }
-.repair-state p { margin: 4px 0; }
-.repair-muted { color: var(--text-muted); font-size: 12px; }
-.repair-warn { color: var(--danger); font-size: 12px; }
-.repair-actions { flex-wrap: wrap; }
-.repair-danger { color: #fff; background: var(--danger); border-color: var(--danger); }
-.repair-danger:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>

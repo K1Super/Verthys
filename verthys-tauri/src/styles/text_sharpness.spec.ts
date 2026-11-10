@@ -30,14 +30,9 @@ const TEXT_BEARING_ENTRANCES: readonly { file: string; name: string }[] = [
    * 均承载文字 —— 只允许不透明度；运动交给同期的装饰层内缩关键帧 */
   { file: "../components/main-view/ModuleStage.vue", name: "hub-dissolve-out" },
   { file: "./security/qd-panel.css", name: "qd-core-dissolve" },
-  { file: "./reg-desk.css", name: "reg-panel-in" },
-  { file: "./reg-desk.css", name: "reg-sec-in" },
-  { file: "./reg-desk.css", name: "reg-row-in" },
-  { file: "./reg-desk.css", name: "reg-error-in" },
-  { file: "./animations.css", name: "dialog-in" },
   { file: "../components/common/verthys-ui/VaultCardFilter.vue", name: "filter-panel-in" },
+  { file: "../components/management/ChangeKeyDialog.vue", name: "ck-axis-in" },
   { file: "../components/modules/PhotoAlbum.vue", name: "select-bar-enter" },
-  { file: "../components/modules/PhotoAlbum.vue", name: "dialog-in" },
 ];
 
 /** 已登记的「承载文字的揭示/过渡规则」：文件 + 选择器。

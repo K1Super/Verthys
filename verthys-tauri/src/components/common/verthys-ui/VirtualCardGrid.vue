@@ -211,9 +211,10 @@ let resizeObserver: ResizeObserver | null = null;
 
 const updateContainerSize = () => {
   if (containerRef.value) {
-    const rect = containerRef.value.getBoundingClientRect();
-    viewportHeight.value = rect.height;
-    containerWidth.value = rect.width;
+    // 必须用 client* 而非 getBoundingClientRect：外框宽度含滚动条占位，
+    // 按外框算列宽会让末列卡片压进滚动条区域并被 overflow 裁切
+    viewportHeight.value = containerRef.value.clientHeight;
+    containerWidth.value = containerRef.value.clientWidth;
   }
 };
 
@@ -263,6 +264,8 @@ watch(
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
+  /* 滚动条占位恒定：滚动条出现/消失不改变可用列宽，避免列宽与实际宽度脱节 */
+  scrollbar-gutter: stable;
   /* 平滑滚动（兼容性：部分浏览器支持，不支持时回退为瞬时滚动） */
   scroll-behavior: auto; /* 虚拟滚动场景禁用 smooth，避免与 rAF 节流冲突 */
   /* 隐藏滚动条美化（保留滚动功能） */

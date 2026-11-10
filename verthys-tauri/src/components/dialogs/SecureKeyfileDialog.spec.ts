@@ -31,7 +31,7 @@ function mountDialog(handlers: Record<string, unknown> = {}) {
   });
   app.mount(container);
   mounted.push({ app, container });
-  /* VerthysDialog 默认 teleport 到 body，查询根同步为 body */
+  /* CosmicOverlay 默认 teleport 到 body，查询根同步为 body */
   return document.body;
 }
 

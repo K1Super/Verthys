@@ -86,7 +86,7 @@
             <span class="vr-index">03</span>
             <span class="vr-section-title">模块口令</span>
           </div>
-          <p class="vr-section-note">已启用模块需要提供模块口令（不是容器口令）</p>
+          <p class="vr-section-note">已启用模块需要提供该模块独立密钥</p>
           <div class="vr-modules">
             <div v-for="row in modules" :key="row.mid" class="vr-module-row">
               <span class="vr-module-name">{{ row.label }}</span>
