@@ -9,9 +9,6 @@
 
     第一级仅输出警告，不阻断构建。
     第二级任何违规将直接导致构建失败。
-
-.NOTES
-    "CI静态校验双引擎实现策略"
 #>
 
 param(
@@ -40,8 +37,8 @@ Write-Host "[版本门禁] 通过：全仓版本一致"
 
 # ===== 零容忍锚点门（防回退） =====
 # 三条文本级精确锚点，命中即红，成本毫秒级、零误报：
-#   1. 已删除的负数错误码体系不得复活（单一定义源为 verthys.h 正数枚举）；
-#   2. worker 主循环禁止 .unwrap()（panic 与 abort 语义冲突，见受控错误路径约定）；
+#   1. 负数错误码体系不得复活（单一定义源为 verthys.h 正数枚举）；
+#   2. worker 主循环禁止 .unwrap()（panic 与 abort 语义冲突）；
 #   3. 容器格式版本禁止字面量赋值（必须经 VERTHYS_FMT_* 枚举）。
 Write-Host ""
 Write-Host "[锚点门] 零容忍防回退检查..."
@@ -61,7 +58,7 @@ if ($hits) {
 
 # 锚点 2：worker 主循环 unwrap 清零（受控错误路径红线）。
 # 扫描范围排除 #[cfg(test)] 测试模块：测试内 unwrap 作用于确定性
-# Cursor<&[u8]> 输入（模块头注释已标注理由），不属于生产 panic 源。
+# Cursor<&[u8]> 输入，不属于生产 panic 源。
 $mainLoop = Join-Path $projectRoot "verthys-tauri\verthys-worker\src\runtime\main_loop.rs"
 if (Test-Path $mainLoop) {
     $uwHits = Select-String -Path $mainLoop -Pattern '\.unwrap\(\)' -AllMatches -ErrorAction SilentlyContinue
@@ -133,9 +130,9 @@ if (Test-Path $fvImport) {
     }
 }
 
-# 锚点 8（C）：旧格式写保护字符串分支禁止复活（T-1 收口，判定范围为全前端）。
+# 锚点 8（C）：旧格式写保护字符串分支禁止复活（判定范围为全前端）。
 # 该字符串在核心与进程间层无生产者（非当前格式容器在解锁即被格式门禁拒绝，
-# 不存在"已解锁但格式需升级"的状态），前端消费分支属死代码，已全量删除；
+# 不存在"已解锁但格式需升级"的状态），前端消费分支属死代码，
 # 按整串禁入以覆盖等式 / 包含 / 变量判等等全部复活形态。
 $srcRoot = Join-Path $projectRoot "verthys-tauri\src"
 $srcFiles = @(Get-ChildItem -Path $srcRoot -Recurse -Include *.ts,*.vue -ErrorAction SilentlyContinue |
@@ -195,8 +192,7 @@ Write-Host "[常量门] 通过：生成物与权威来源一致"
 $exitCode = 0
 
 # ===== 常量消费门 =====
-# 跨层行为常量必须有真实消费点：生成常量失去消费者时，权威来源即失效
-# （历史发生过硬编码与生成值并存的静默漂移）。
+# 跨层行为常量必须有真实消费点：生成常量失去消费者时，权威来源即失效。
 Write-Host ""
 Write-Host "[常量消费门] 校验跨层常量的消费点..."
 $tsSrc = Join-Path $projectRoot "verthys-tauri\src"
@@ -241,7 +237,7 @@ if ($consumerRed) { $exitCode = 1 } else { Write-Host "[常量消费门] 通过�
 
 # ===== 导出契约门 =====
 # verthys.def 为导出符号权威清单，export_baseline 为验收快照；
-# 集合不相等即红（历史发生过新增导出未同步基线）。
+# 集合不相等即红。
 Write-Host ""
 Write-Host "[导出契约门] 校验导出符号与基线一致..."
 $defSyms = (Select-String -Path (Join-Path $projectRoot "core\verthys.def") -Pattern '^\s*Verthys_\w+' |

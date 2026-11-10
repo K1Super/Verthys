@@ -1,11 +1,9 @@
 /*
  * key/type-migration.ts — Verthys 记录类型冲突迁移引擎
  *
- * 修复：TYPE 常量冲突数据迁移 
- *
  * 背景：
- *   原 TYPE_GLOBAL_KEY (0x10) 与 TYPE_ACCOUNT (0x10) 值相同，导致已存储的
- *   verthys 文件中全局密钥记录与账户记录共享同一类型值，无法区分。
+ *   TYPE_GLOBAL_KEY (0x10) 与 TYPE_ACCOUNT (0x10) 值相同，已存储的
+ *   verthys 文件中全局密钥记录与账户记录可能共享同一类型值，无法区分。
  *   同理 TYPE_PHOTO_CHUNK (0x05) 与旧 TYPE_META (FileVerthys 0x05) 冲突。
  *
  * 迁移策略（内容嗅探 + 先添后删）：
@@ -77,7 +75,7 @@ export interface MigrationResult {
  * AccountFields 结构：{ platform, username, password, note, ... }
  * 全局密钥记录为二进制格式，JSON.parse 必然失败。
  *
- * 修复：导出供 initUnlock 校验缓存的全局密钥记录
+ * 导出供 initUnlock 校验缓存的全局密钥记录
  *
  * 用途：worker 内联 probe 在迁移前搜 0x10 记录，可能误拾旧账户记录（同为 0x10）
  * 并将其作为 global_key_record 缓存。迁移后需用本函数嗅探缓存值——若为账户记录
@@ -192,20 +190,14 @@ const FILEVERTHYS_META_MAX_SIZE = 65536;
  * 扫描所有 type=0x10 和 type=0x05 的记录，通过内容嗅探确定正确类型，
  * 需要迁移的记录以"先添后删"方式重写为新类型。
  *
- * 修复：摘要预过滤 + 单条超时（根治"正在加载密钥配置"卡死）
+ * 性能保护：摘要预过滤 + 单条超时
  *
- * 原缺陷：
- *   迁移对每条 0x10/0x05 记录调用 getFullRecord（完整解密数据块）。
- *   若 verthys 有大量记录或某条记录损坏导致 IPC 挂起，迁移总耗时可达数分钟
- *   → initUnlock 永远停在"正在加载密钥配置…"阶段。
- *
- * 修复：
  *   1. 摘要预过滤：用 getSummaryRecord(id) 获取 name/dataSize（纯索引查询，
  *      不解密数据块），跳过明确无需迁移的记录（全局密钥 name="global-key"，
  *      照片块 dataSize > 64KB），仅对候选记录调用 getFullRecord + 内容嗅探。
  *   2. 单条超时：每条 getFullRecord + 迁移操作包裹 withTimeout(5s)，
  *      单条超时不阻断后续记录，计入 errors 继续。
- *   3. 去冗余：不再内部调用 ensureSummaryScan（调用方 initUnlock 已调用）。
+ *   3. 不内部调用 ensureSummaryScan（调用方 initUnlock 已调用）。
  *
  * 性能：
  *   - 首次迁移（有冲突数据）：仅候选记录 × 3 IPC（通常 <3s）
@@ -218,7 +210,7 @@ export async function migrateRecordTypes(): Promise<MigrationResult> {
   const result: MigrationResult = { migrated: 0, skipped: 0, errors: 0 };
 
   // 1. 收集需要检查的记录 ID（type=0x10 和 type=0x05）
-  //    不再内部调用 ensureSummaryScan——调用方 initUnlock 已在迁移前调用
+  //    不内部调用 ensureSummaryScan——调用方 initUnlock 已在迁移前调用
   let type10Ids: number[] = [];
   let type05Ids: number[] = [];
   try {

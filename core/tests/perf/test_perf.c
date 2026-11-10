@@ -6,8 +6,8 @@
  *   - 库解锁耗时（含 Argon2id 口令派生 + 设备根解封）
  *   - 模块切换耗时（模块口令派生 + 设备根解封 + MDEK 校验）
  *
- * 断言采用宽松上界（与既有 perf_baseline 一致）：CI 仅在明显退化时
- * 失败，精确阈值由阶段门禁采集 stdout 后单独判定。
+ * 断言采用宽松上界：仅在明显退化时失败；精确阈值由持续集成
+ * 采集 stdout 后判定。
  */
 #include "verthys_test.h"
 #include "vty_types.h"
@@ -129,7 +129,7 @@ TEST(perf_module_switch_latency)
 
     printf("  [PERF] module switch max=%llu ms over 5 runs\n",
            (unsigned long long)max_ms);
-    /* 性能目标 <=200ms；给出 2 倍环境余量，精确门禁由 CI 采集判定 */
+    /* 性能目标 <=200ms；给出 2 倍环境余量，精确阈值由持续集成采集判定 */
     CHECK(max_ms < 400);
 
     vty_vault_free(v);

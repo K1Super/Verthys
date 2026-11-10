@@ -480,7 +480,7 @@ const props = defineProps<{
   hardeningFailed: boolean;
 }>();
 
-/** 降级 / 未同步警示：仅异常时出现（常规摘要文案已移除） */
+/** 降级 / 未同步警示：仅异常时出现 */
 const digestWarn = computed(() =>
   props.presetSyncFailed || props.hardeningFailed,
 );
@@ -727,7 +727,7 @@ const onTimeoutKeydown = (e: KeyboardEvent) => {
  *  - on：后端权威快照明确为启用；
  *  - off：后端权威快照明确为关闭；
  *  - unknown：快照未加载 / 同步失败 / 缺失该键 —— 不得缺省点亮
- *    （旧实现 `!== false` 把缺失当启用，配置未加载时全绿属虚假声明）。 */
+ *    （`!== false` 会把缺失当启用，配置未加载时全绿属虚假声明）。 */
 const capFeatState = (key: string): 'on' | 'off' | 'unknown' => {
   if (props.presetSyncFailed) return 'unknown';
   const v = props.presetFeatures[key];

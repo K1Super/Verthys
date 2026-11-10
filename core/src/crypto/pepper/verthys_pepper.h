@@ -13,8 +13,8 @@
  *      通道获取。最高优先级，部署首选。
  *   2. OS 托管胡椒：verthys_pepper_load_from_os() 从 CNG 持久化密钥
  *      读取（用户级优先、机器级兜底），首次使用时自动生成并持久化。
- *   3. 编译内嵌胡椒：keymanager.c 中的 static 常量，作为兜底默认值，
- *      保证零配置开箱即用（向后兼容）。
+ *   3. 编译内嵌胡椒：仅显式定义 VERTHYS_ENABLE_COMPILED_PEPPER 的构建内编入
+ *      的固定常量；默认构建不含此来源。
  *
  * 胡椒恢复卡（Shamir 秘密共享分片）：
  *   verthys_pepper_export_shamir() 将胡椒拆分为 N 份分片（threshold k-of-n），
@@ -28,7 +28,7 @@
  *   - 进程退出/Deinit 时安全清零
  *   - Shamir 分片不含原始胡椒，单份分片无意义
  *
- * 深模块：对外仅暴露 7 个函数，隐藏胡椒存储/派生/分片细节。
+ * 深模块：对外只暴露生命周期、OS 托管、分片与来源查询接口，隐藏胡椒存储/派生/分片细节。
  */
 #ifndef VERTHYS_PEPPER_H
 #define VERTHYS_PEPPER_H
@@ -50,9 +50,9 @@ extern "C" {
  * 按优先级尝试加载胡椒：
  *   1. 已注入的胡椒（verthys_pepper_inject 优先）
  *   2. OS 托管胡椒（CNG 持久化机器密钥）
- *   3. 编译内嵌胡椒（兜底默认值）
+ *   3. 编译内嵌胡椒（仅显式定义 VERTHYS_ENABLE_COMPILED_PEPPER 的构建）
  *
- * 返回 0 成功，非 0 失败（仅当所有来源均失败时）。
+ * 返回 0 成功，非 0 失败（所有可用来源均失败时）。
  */
 int verthys_pepper_init(void);
 
@@ -87,8 +87,8 @@ void verthys_pepper_deinit(void);
 
 /*
  * 从 OS 密钥存储加载胡椒。
- * Windows：使用 CNG 持久化密钥（layer3_hw_binding 模块，4 槽位；
- *   用户级优先、机器级兜底，文件头记录封装级别，加载直达解包）。
+ * Windows：使用 CNG 持久化密钥（用户级优先、机器级兜底，
+ *   文件头记录封装级别，加载直达解包）。
  *   - 首次调用：生成随机胡椒，用 CNG 密钥加密后持久化到 %APPDATA%
  *   - 后续调用：从持久化存储读取并解密
  *
@@ -126,7 +126,7 @@ int pepper_file_fingerprint(const uint8_t meta[8],
  * 将 32 字节胡椒拆分为 N 份分片，任意 threshold 份可重建。
  * 分片格式：index(1B) || share(32B) = 33 字节/份
  *
- * 算法：基于 GF(2^8) 的 Shamir 秘密共享，与 layer3_hw_binding 一致。
+ * 算法：基于 GF(2^8) 的 Shamir 秘密共享。
  *   - 生成 threshold-1 个随机系数，构造多项式 f(x)
  *   - f(0) = pepper（秘密）
  *   - 第 i 份分片 = (i, f(i))
@@ -171,7 +171,7 @@ int verthys_pepper_reconstruct_shamir(const VerthysPepperShard *shards,
  *                        胡椒来源查询（诊断）                            *
  * ===================================================================== */
 
-/* 胡椒来源枚举（诊断用，不暴露胡椒本身；取值同时用于容器超级块 flags[5]） */
+/* 胡椒来源枚举（诊断用，不暴露胡椒本身） */
 typedef enum {
     VERTHYS_PEPPER_SOURCE_NONE     = 0,  /* 未初始化 */
     VERTHYS_PEPPER_SOURCE_INJECTED = 1,  /* 外部注入 */

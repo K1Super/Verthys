@@ -39,10 +39,10 @@ import { installGcHelper } from "./utils/gc";
  */
 function main(): void {
   // ===== 步骤 1: 全局执行环境初始化 =====
-  // 全局CSS已在文件顶部引入（tokens → components → animations）
+  // 全局CSS已在文件顶部引入（tokens → components → reg-desk → animations → idle-governance）
   // Vue 运行时由 Vite 自动初始化，无需手动设置
 
-  // ===== 项12：V8 GC 辅助工具安装 =====
+  // ===== V8 GC 辅助工具安装 =====
   // 桥接 --expose-gc 暴露的原生 gc() 到 window.gc，
   // 供模块卸载/切换时主动触发 Major GC，减少 Stop-The-World 暂停。
   // 必须在 Vue 应用创建之前调用，确保后续 onUnmounted/watch 可用。
@@ -61,7 +61,8 @@ function main(): void {
   // （前端无数据库连接池/CNG句柄等资源，上下文即为唯一资源）
 
   // ===== 步骤 5: 调用控制器入口方法，移交控制权 =====
-  bootstrap(ctx);
+  // 启动展示判定（首映 / 直接进入）在 bootstrap 内先于视图创建完成
+  void bootstrap(ctx);
 }
 
 main();

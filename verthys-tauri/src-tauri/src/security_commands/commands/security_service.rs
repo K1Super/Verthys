@@ -1,9 +1,9 @@
 /*
- * security_service.rs — P2 安全服务只读状态
+ * security_service.rs — 安全服务只读状态
  *
- * 服务由 perMachine 应用安装器在同一提权流程内随应用安装，应用运行时
- * 不再执行任何安装器或用户可写二进制。这里只读取 HKLM 锚点用于启动
- * fail-closed 判定。
+ * 服务由 perMachine 应用安装器在同一提权流程内随应用安装，应用运行时不执行
+ * 任何安装器或用户可写二进制。这里只读取 HKLM 锚点用于启动 fail-closed
+ * 判定。
  */
 
 use serde::Serialize;

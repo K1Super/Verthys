@@ -103,7 +103,7 @@ pub fn hmac_verify(key: &[u8], message: &[u8], expected_tag: &[u8]) -> bool {
 
 /// PBKDF2 迭代次数（满足当前安全强度要求）
 ///
-/// NIST SP 800-132 建议 ≥ 10000 次，此处使用 100000 次提供更高安全余量。
+/// 迭代次数取 100000 次，提供较高安全余量。
 /// 性能影响：在典型 CPU 上 100000 次 SHA-256 约 50-100ms，可接受。
 pub const PBKDF2_ITERATIONS: u32 = 100_000;
 

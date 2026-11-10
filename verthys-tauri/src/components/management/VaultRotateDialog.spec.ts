@@ -142,6 +142,13 @@ describe("全库 DEK 轮换向导", () => {
     const keepOldCheckbox = Array.from(
       body.querySelectorAll<HTMLInputElement>("input[type=checkbox]"),
     ).find((box) => box.parentElement?.textContent?.includes("保留旧库备份"))!;
+    /* 默认保留旧库：PCR 绑定时必须立即提示旧备份只能用恢复码打开。 */
+    expect(keepOldCheckbox.checked).toBe(true);
+    expect(body.textContent).toContain("旧备份只能用恢复码打开");
+
+    keepOldCheckbox.checked = false;
+    keepOldCheckbox.dispatchEvent(new Event("change"));
+    await settle();
     expect(body.textContent).not.toContain("旧备份只能用恢复码打开");
 
     keepOldCheckbox.checked = true;
@@ -204,7 +211,8 @@ describe("全库 DEK 轮换向导", () => {
 
     buttonByText(body, "提交并替换源库")!.click();
     await settle();
-    expect(mocks.commit).toHaveBeenCalledWith(false);
+    /* 默认保留旧库备份：提交必须携带 keepOld=true。 */
+    expect(mocks.commit).toHaveBeenCalledWith(true);
     expect(onCommitted).toHaveBeenCalledTimes(1);
     expect(body.textContent).toContain("轮换已提交");
   });

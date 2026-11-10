@@ -1,7 +1,7 @@
 /*
  * key/global-verthys.spec.ts — 全局密钥编排回归测试
  *
- * 覆盖全局密钥落地失败根治后的三条路径与收口项：
+ * 覆盖全局密钥落地的三条路径与收口项：
  *   1. initGlobalKey：成功推进、AddRecord 失败、读回不一致、
  *      reconcile 失败、补偿动作自身失败（强制复位兜底）、重入互斥锁
  *   2. changeGlobalKey：先新后旧成功、删旧失败回滚、derive 失败补偿、

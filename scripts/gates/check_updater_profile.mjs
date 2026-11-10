@@ -1,7 +1,7 @@
 /**
  * 校验 Tauri 更新有效配置（基础配置 + profile 覆盖层）是否合规。
  *
- * production 要求全链路 HTTPS、非回环、非占位主机且禁止明文开关；local 只允许回环。
+ * production 要求全链路 HTTPS、非回环、非占位主机，明文传输须显式开启；local 只允许回环。
  * 只解析 plugins.updater，不解释其余配置；合并语义与 Tauri 的覆盖层一致：对象深合并、
  * 数组整体替换。
  */

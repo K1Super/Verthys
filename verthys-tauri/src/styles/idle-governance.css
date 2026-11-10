@@ -123,9 +123,6 @@ body.reduced-motion :is(
   animation-play-state: running !important;
 }
 
-/* backdrop-filter「减少」档已无消费者（常态动效无实时
- * backdrop-filter，此档无对应规则，编号仅保留层级连续性） */
-
 /* ===== 3.1 idle：一次性入场动画豁免（内容语义不失真） =====
  *   入场动画为一次性成形（0.5-1.3s）：冻结在起始帧（opacity 0 + 位移）
  *   等于内容整体不可见 —— 空闲期间挂载的品牌字标即整体缺失，须等下一次
@@ -220,7 +217,7 @@ body.minimal-motion * {
  *   带宽给滚动合成；滚动停止即恢复（animation-play-state 暂停无相位跳变，
  *   与 idle 治理同款实现；未使用 duration 降频）。
  *
- *   失效范围红线（第三轮处置）：禁止使用 `html.app-scrolling .ambient-bg *`
+ *   失效范围红线：禁止使用 `html.app-scrolling .ambient-bg *`
  *   这类"通配最右端"——html 上切换类时，通配最右端会把文档内全部元素标记为
  *   可能失效（全文档样式重算），低频切换尚可、滚动节奏（120ms 级）将成为
  *   顿挫源；此处枚举全部动画元素（含伪元素），失效范围收敛到约 200 个节点。

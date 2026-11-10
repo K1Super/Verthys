@@ -58,6 +58,7 @@ use crate::state::AppState;
 use crate::util::audit_log::{append_audit, keyfile_path_tag, AuditEvent, AuditEventType, AuditResult};
 use crate::util::path::{normalize_path, sanitize_path};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use tauri::State;
 use zeroize::Zeroizing;
 
@@ -127,23 +128,128 @@ struct PathPasswordReq<'a> {
 
 // ===== 容器口令来源 =====
 
-/// 读取本机容器口令（首次使用时生成并密封落盘）。
-///
-/// 容器口令不再经过前端，也不再是编译期常量：口令在本机生成、由 DPAPI
-/// 绑定当前用户保管。存放目录必须与容器一致地遵循应用数据目录规则
-/// （便携模式、--data-dir、只读介质兜底），否则容器与口令分处不同卷，
-/// 便携介质移机后容器将永久无法打开。
-/// 失败必须拒绝操作——把“取不到口令”误当成“口令错误”会让用户反复重试
-/// 并触发熔断。
-pub(crate) fn load_container_password(app: &tauri::AppHandle) -> Result<Zeroizing<String>, String> {
+/// 容器口令读取策略
+#[derive(Clone, Copy)]
+enum ContainerPasswordPolicy {
+    /// 仅接受既有密钥材料：缺失返回 None（解锁与会话内操作）
+    ExistingOnly,
+    /// 允许生成新密钥材料（仅创建新库）
+    CreateIfMissing,
+}
+
+/// 本机密钥材料缺失的稳定错误码（前端按码分支，不按文案匹配）
+pub(crate) const KEY_MATERIAL_MISSING_CODE: &str = "E_KEY_MATERIAL_MISSING";
+
+/// 本机密钥材料缺失的用户文案（跨命令复用）
+pub(crate) const KEY_MATERIAL_MISSING_MESSAGE: &str =
+    "本机密钥材料已丢失，无法用普通方式打开该库；请使用恢复码解锁，并在恢复会话中重绑本机设备槽";
+
+/// 读取机器密钥材料主目录与旧位置目录（旧位置仅在迁移/恢复时读取）。
+fn container_password_dirs(app: &tauri::AppHandle) -> Result<(PathBuf, Option<PathBuf>), String> {
     use tauri::Manager;
     let paths = app
         .try_state::<crate::infrastructure::app_paths::AppPaths>()
         .ok_or_else(|| "应用数据目录未初始化".to_string())?;
-    crate::util::container_secret::load_or_create(&paths.data_dir).map_err(|e| {
-        log::error!("[container_secret] 容器口令不可用: {}", e);
-        "安全存储不可用，无法访问加密库".to_string()
-    })
+    Ok((
+        paths.key_material_dir.clone(),
+        paths.legacy_key_material_dir.clone(),
+    ))
+}
+
+/// 按策略从指定目录读取容器口令（与 Tauri 解耦，便于单元测试）。
+///
+/// 读取顺序：主位置 → 旧位置迁移 → （仅创建）生成。
+/// 主位置损坏时先用旧位置有效副本恢复主位置；两者都不可用则失败关闭，
+/// 绝不静默生成新密钥，避免既有容器永久无法打开。
+/// 密钥材料不写日志、不进审计，返回值由调用方以 Zeroizing 持有并在使用后擦除。
+fn load_container_password_from_dirs(
+    primary_dir: &std::path::Path,
+    legacy_dir: Option<&std::path::Path>,
+    allow_create: bool,
+) -> Result<Option<Zeroizing<String>>, String> {
+    use crate::util::container_secret;
+
+    match container_secret::load_existing(primary_dir) {
+        Ok(Some(password)) => return Ok(Some(password)),
+        Ok(None) => {}
+        Err(e) => {
+            log::error!("[container_secret] 主位置密钥材料不可用: {}", e);
+            if let Some(legacy) = legacy_dir {
+                if container_secret::exists(legacy) {
+                    match container_secret::restore_legacy(legacy, primary_dir) {
+                        Ok(password) => {
+                            log::warn!("[container_secret] 已从旧位置恢复主密钥材料");
+                            return Ok(Some(password));
+                        }
+                        Err(e2) => {
+                            log::error!("[container_secret] 旧位置恢复失败: {}", e2);
+                        }
+                    }
+                }
+            }
+            return Err("安全存储不可用，无法访问加密库".to_string());
+        }
+    }
+
+    if let Some(legacy) = legacy_dir {
+        if legacy != primary_dir {
+            match container_secret::load_existing(legacy) {
+                Ok(Some(_)) => match container_secret::migrate_legacy(legacy, primary_dir) {
+                    Ok(password) => {
+                        log::info!("[container_secret] 旧位置密钥材料已迁移到主位置");
+                        return Ok(Some(password));
+                    }
+                    Err(e) => {
+                        log::error!("[container_secret] 密钥材料迁移失败: {}", e);
+                        return Err("安全存储不可用，无法访问加密库".to_string());
+                    }
+                },
+                Ok(None) => {}
+                Err(e) => {
+                    log::error!("[container_secret] 旧位置密钥材料不可用: {}", e);
+                    return Err("安全存储不可用，无法访问加密库".to_string());
+                }
+            }
+        }
+    }
+
+    if !allow_create {
+        return Ok(None);
+    }
+    container_secret::load_or_create(primary_dir)
+        .map(Some)
+        .map_err(|e| {
+            log::error!("[container_secret] 容器口令不可用: {}", e);
+            "安全存储不可用，无法访问加密库".to_string()
+        })
+}
+
+/// 按策略读取容器口令（宿主入口）。
+fn load_container_password_by_policy(
+    app: &tauri::AppHandle,
+    policy: ContainerPasswordPolicy,
+) -> Result<Option<Zeroizing<String>>, String> {
+    let (primary_dir, legacy_dir) = container_password_dirs(app)?;
+    load_container_password_from_dirs(
+        &primary_dir,
+        legacy_dir.as_deref(),
+        matches!(policy, ContainerPasswordPolicy::CreateIfMissing),
+    )
+}
+
+/// 读取既有容器口令（解锁/会话内操作）：缺失返回 None，绝不生成。
+pub(crate) fn load_existing_container_password(
+    app: &tauri::AppHandle,
+) -> Result<Option<Zeroizing<String>>, String> {
+    load_container_password_by_policy(app, ContainerPasswordPolicy::ExistingOnly)
+}
+
+/// 读取或创建容器口令（仅创建新库）。
+pub(crate) fn load_or_create_container_password(
+    app: &tauri::AppHandle,
+) -> Result<Zeroizing<String>, String> {
+    load_container_password_by_policy(app, ContainerPasswordPolicy::CreateIfMissing)?
+        .ok_or_else(|| "安全存储不可用，无法访问加密库".to_string())
 }
 
 /// add_record 请求体（name 与 data 为用户记录明文，一并借用序列化）
@@ -646,7 +752,26 @@ pub async fn verthys_unlock(
     }
 
     // 口令在文件存在性确认之后才读取：空路径/误选路径不应触发口令生成。
-    let password = load_container_password(&app)?;
+    // 普通解锁只接受既有密钥材料：缺失时 fail-closed，绝不生成新密钥；
+    // 该失败不属于口令认证失败，不进入熔断计数。
+    let password = match load_existing_container_password(&app)? {
+        Some(password) => password,
+        None => {
+            log::warn!("[verthys_unlock] 本机密钥材料缺失，拒绝普通解锁");
+            write_verthys_audit(
+                &app,
+                AuditEventType::VerthysUnlock,
+                &verthys_path,
+                AuditResult::Denied,
+                Some("本机密钥材料缺失，需恢复码解锁".into()),
+            );
+            return Ok(VerthysResponse::err_code(
+                "unlock",
+                KEY_MATERIAL_MISSING_CODE,
+                KEY_MATERIAL_MISSING_MESSAGE,
+            ));
+        }
+    };
 
     if let Err(e) = validate_password_complexity(&password) {
         log::warn!("[verthys_unlock] 容器口令复杂度校验失败");
@@ -742,15 +867,14 @@ pub async fn verthys_unlock(
             Ok(json) => json,
             Err(e) => {
                 log::error!("[verthys_unlock] send 失败: {}", e);
-                /* 修复（D-WORKER-RESET）：通信失败时销毁 worker 子进程
+                /* 通信失败时销毁 worker 子进程
                  *
-                 * 场景：FFI 调用超时或通信失败后，父进程放弃等待但 worker
-                 * 子进程仍在运行。解锁 FFI 可能已成功完成
-                 * （ctx->state = UNLOCKED），但响应未被父进程接收。
-                 * 若不销毁 worker，后续 unlock/create 请求会命中 stale UNLOCKED
-                 * 状态，返回 VERTHYS_ERR_INVALID 级联失败。
+                 * FFI 调用超时或通信失败后，父进程放弃等待但 worker 子进程
+                 * 仍在运行。解锁 FFI 可能已成功完成（ctx->state = UNLOCKED），
+                 * 但响应未被父进程接收。不销毁 worker 会让后续 unlock/create
+                 * 命中 stale UNLOCKED 状态，返回 VERTHYS_ERR_INVALID 级联失败。
                  *
-                 * 修复：通信失败时立即销毁 worker（set_session(None) 触发 Drop →
+                 * 因此通信失败时立即销毁 worker（set_session(None) 触发 Drop →
                  * kill 子进程），确保下次操作从全新 worker 进程开始。 */
                 log::warn!("[verthys_unlock] 销毁 worker 子进程（超时/通信失败后清除脏状态）");
                 state.set_session(None);
@@ -841,13 +965,11 @@ pub async fn verthys_unlock(
         // 失败只审计，不影响已完成的解锁（加固层，不制造数据不可达）。
         crate::service::usb_binding::post_unlock_commit(&app, &verthys_path, usb_bind_action);
 
-        // 修复：同步 key_lifecycle 状态机与 verthys 生命周期
+        // 同步 key_lifecycle 状态机与 verthys 生命周期
         //
-        // 原缺陷：verthys_unlock 成功后不触碰 key_lifecycle，状态永远停留在
-        // 初始值 NoKey。但 verthys_verify_global_key 要求 Locked 状态 →
-        // 验证按钮必然失败："状态不匹配：当前 NoKey，仅 Locked 允许验证"。
-        //
-        // 修复：根据 worker 进程内探测结果 has_global_key 设置状态：
+        // verthys_verify_global_key 要求 Locked 状态，状态停在 NoKey 会让
+        // 验证必然失败（"状态不匹配：当前 NoKey，仅 Locked 允许验证"）。
+        // 故按 worker 进程内探测结果 has_global_key 设置状态：
         // - Some(true)  → reset_to_no_key + transition_to_locked = Locked
         //   （有全局密钥记录，用户需验证 GMK）
         // - Some(false)/None → reset_to_no_key = NoKey
@@ -1163,7 +1285,19 @@ pub async fn verthys_recovery_rotate(
             "旧恢复码格式非法",
         ));
     }
-    let password = load_container_password(&app)?;
+    // 恢复码轮换必须使用既有密钥材料：会话已解锁，密钥材料不应缺失；
+    // 缺失说明外部破坏了本机状态，fail-closed，不得生成新密钥。
+    let password = match load_existing_container_password(&app)? {
+        Some(password) => password,
+        None => {
+            log::warn!("[verthys_recovery_rotate] 本机密钥材料缺失，拒绝轮换");
+            return Ok(VerthysResponse::err_code(
+                "v4_recovery_rotate",
+                KEY_MATERIAL_MISSING_CODE,
+                KEY_MATERIAL_MISSING_MESSAGE,
+            ));
+        }
+    };
     let old_code = Zeroizing::new(old_recovery_code);
     let req_str = Zeroizing::new(
         serde_json::to_string(&RecoveryRotateReq {
@@ -1273,8 +1407,8 @@ pub async fn verthys_create(
     }
 
     // 首次创建时由本模块生成口令：必须在文件存在性校验之后，
-    // 避免重复创建请求产生无用口令文件。
-    let password = load_container_password(&app)?;
+    // 避免重复创建请求产生无用口令文件。仅此路径允许生成新密钥材料。
+    let password = load_or_create_container_password(&app)?;
 
     if let Err(e) = validate_password_complexity(&password) {
         log::warn!("[verthys_create] 容器口令复杂度校验失败");
@@ -1480,13 +1614,24 @@ pub async fn verthys_create(
             .map_err(|e| format!("创建加密库失败（步骤3响应解析失败）: {}", e))?;
         if !unlock_resp2.ok {
             let detail = unlock_resp2.error.unwrap_or_else(|| "未知错误".to_string());
-            log::error!("[verthys_create] 步骤 3/3 失败: error={}", detail);
-            /* 0x0A = VERTHYS_ERR_RATE：机器预算服务不可用（未安装/不可达/
-             * fail-closed）或本机持久熔断处于指数退避窗口。创建本身已成功，
-             * 这里失败的是紧随其后的自检解锁；直接透出错误码会让用户误以为
-             * 文件没建成并反复重试。 */
+            let retry_secs = unlock_resp2.retry_after_secs.unwrap_or(0);
+            log::error!(
+                "[verthys_create] 步骤 3/3 失败: error={} retry_after_secs={}",
+                detail,
+                retry_secs
+            );
+            /* 0x0A = VERTHYS_ERR_RATE：本地持久熔断处于指数退避窗口，
+             * 或机器预算服务拒绝/不可用（未安装、不可达、客户端签名未通过，
+             * fail-closed）。创建本身已成功，这里失败的是紧随其后的自检
+             * 解锁；直接透出错误码会让用户误以为文件没建成并反复重试。 */
             if detail == "ERR_0000000A" {
-                return Err("创建加密库失败（步骤3重开失败）：本机安全服务不可用或处于安全熔断退避窗口。请确认 VerthysSecuritySvc 已安装并运行，或稍后重试；也可用恢复码解锁任一已有库以清零计数".into());
+                if retry_secs > 0 {
+                    return Err(format!(
+                        "创建加密库失败（步骤3重开失败）：本机安全退避中，请 {} 秒后重试；本次未保留库文件",
+                        retry_secs
+                    ));
+                }
+                return Err("创建加密库失败（步骤3重开失败）：本机安全服务拒绝或不可用。未签名的开发构建请使用 build_dev.ps1 启动；已安装服务时请确认客户端签名与 VerthysSecuritySvc 状态".into());
             }
             return Err(format!("创建加密库失败（步骤3重开失败）: {}", detail));
         }
@@ -1599,7 +1744,7 @@ pub async fn verthys_create(
     );
 
     // verthys_create 通过 raw worker IPC 完成 create→lock→unlock，
-    // 绕过了 verthys_unlock Tauri 命令的 key_lifecycle 状态管理代码（843-851 行）。
+    // 不经过 verthys_unlock 命令的 key_lifecycle 状态管理。
     // 新建 verthys 无全局密钥记录，后端状态必须为 NoKey，
     // 否则 verthys_derive_global_key（要求 NoKey）会因状态不匹配而失败。
     state.key_lifecycle.reset_to_no_key();
@@ -1853,9 +1998,7 @@ pub async fn verthys_flush(
         return Ok(VerthysResponse::err("flush", &msg));
     }
 
-
-    // 【新实现】
-    //   直接发送 {"op":"flush"} → worker call_flush → C Verthys_Flush
+    // 直接发送 {"op":"flush"} → worker call_flush → C Verthys_Flush
     //   - commit 未完成事务（add_record 已 vtxn_commit，通常 no-op）
     //   - 不清零密钥、不改变 state（始终保持 UNLOCKED）
     //   - 不重新加载索引（避免大 verthys 的索引加载超时）
@@ -1900,11 +2043,11 @@ pub async fn verthys_flush(
 /// 为什么不走主进程直接读盘：Windows 字节范围锁为强制锁——容器会话在
 /// C 层子进程内以独占方式持有超级块区 [0,64KB)。主进程以
 /// `std::fs::File::open` 新开句柄读取该区间恒被 ERROR_LOCK_VIOLATION
-/// （os error 33）拒绝，旧实现因此恒判失败，是"持久化失败"误报与
-/// 解析导入被阻断的根因。故校验必须下沉到持有会话句柄的 worker 子进程，
+/// （os error 33）拒绝，主进程直读必然失败，产生"持久化失败"误报并阻断
+/// 解析导入。故校验必须下沉到持有会话句柄的 worker 子进程，
 /// 由该进程用 C 层会话持锁句柄完成自查（Verthys_VerifyPersist）。
 ///
-/// 命令名保持不变（前端契约）；新增结构化字段（status_code/file_size/
+/// 命令名保持不变（前端契约）；结构化字段（status_code/file_size/
 /// mtime_ms/header_magic/header_version）随响应同名字段透传，前端据此做
 /// 三态判定（OK / 可重试 IO / 结构性失败）。
 #[tauri::command]
@@ -2738,5 +2881,88 @@ mod tests {
             .expect("本次创建的文件必须可删除");
         assert!(!kf.exists(), "keyfile_created=true 时应删除本次产物");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* ===== 机器密钥材料目录策略 ===== */
+
+    fn unique_key_material_dir(tag: &str) -> std::path::PathBuf {
+        let mut buf = [0u8; 8];
+        let _ = getrandom::getrandom(&mut buf);
+        let suffix: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+        std::env::temp_dir().join(format!("verthys_keymat_{}_{}", tag, suffix))
+    }
+
+    #[test]
+    fn container_password_existing_only_returns_none_without_generating() {
+        let root = unique_key_material_dir("existing_none");
+        let primary = root.join("primary");
+        let legacy = root.join("legacy");
+
+        let result = load_container_password_from_dirs(&primary, Some(&legacy), false)
+            .expect("缺失应返回 None 而非错误");
+        assert!(result.is_none());
+        assert!(
+            !crate::util::container_secret::exists(&primary),
+            "只读策略不得生成新密钥材料"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn container_password_create_generates_at_primary() {
+        let root = unique_key_material_dir("create");
+        let primary = root.join("primary");
+
+        let created = load_container_password_from_dirs(&primary, None, true)
+            .expect("创建策略应成功")
+            .expect("创建策略应生成密钥材料");
+        assert!(crate::util::container_secret::exists(&primary));
+        let loaded = crate::util::container_secret::load_existing(&primary)
+            .expect("读取应成功")
+            .expect("主位置应有值");
+        assert_eq!(loaded.as_str(), created.as_str());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn container_password_migrates_legacy_and_keeps_source() {
+        let root = unique_key_material_dir("migrate");
+        let primary = root.join("primary");
+        let legacy = root.join("legacy");
+        let original = crate::util::container_secret::load_or_create(&legacy)
+            .expect("旧位置生成应成功");
+
+        let migrated = load_container_password_from_dirs(&primary, Some(&legacy), false)
+            .expect("迁移应成功")
+            .expect("迁移后应返回值");
+        assert_eq!(migrated.as_str(), original.as_str());
+        assert!(crate::util::container_secret::exists(&primary));
+        assert!(
+            crate::util::container_secret::exists(&legacy),
+            "迁移不得删除旧位置副本"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn container_password_restores_corrupt_primary_from_legacy() {
+        let root = unique_key_material_dir("restore");
+        let primary = root.join("primary");
+        let legacy = root.join("legacy");
+        let original = crate::util::container_secret::load_or_create(&legacy)
+            .expect("旧位置生成应成功");
+        std::fs::create_dir_all(&primary).expect("主位置目录应可创建");
+        std::fs::write(primary.join("container.secret"), b"corrupted")
+            .expect("写入损坏副本应成功");
+
+        let restored = load_container_password_from_dirs(&primary, Some(&legacy), false)
+            .expect("主位置损坏时应由旧位置恢复")
+            .expect("恢复后应返回值");
+        assert_eq!(restored.as_str(), original.as_str());
+        let after = crate::util::container_secret::load_existing(&primary)
+            .expect("读取应成功")
+            .expect("主位置应有值");
+        assert_eq!(after.as_str(), original.as_str());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

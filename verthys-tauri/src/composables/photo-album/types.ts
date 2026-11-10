@@ -44,12 +44,20 @@ export interface DecryptedPhotoMeta {
 /** 导出格式 */
 export type ExportFormat = "single" | "multiple" | "png";
 
-/** 解析预览项 */
+/** 解析预览项（只含清单字段，不携带块载荷） */
 export interface ParsedPhotoPreview {
+  /** 显示名 */
   name: string;
+  /** 缩略图 CSS 值（无缩略图为空串） */
   thumb: string;
+  /** 原始文件大小（字节） */
   size: number;
-  metaB64: string;
-  chunkB64List: string[];
-  meta: PhotoMeta | null;
+  /** MIME 类型 */
+  mime: string;
+  /** BLAKE3 文件哈希（内容身份，导入去重使用） */
+  fileHash: string;
+  /** 数据块总数 */
+  chunkCount: number;
+  /** 创建时间戳（毫秒） */
+  createdAt: number;
 }

@@ -249,9 +249,9 @@ pub async fn worker_init(
     // 确保锁在函数退出时释放
     let _guard = InitLockGuard { state: &state };
 
-    // 修复：启动新 worker 前杀死所有残留孤儿 verthys-worker 进程
-    //   根因：上次应用异常退出（强杀/崩溃）遗留的孤儿 worker 持有 verthys 文件锁/
-    //   共享内存/状态文件锁 → 状态文件损坏 → 新 worker 启动后 scan 操作崩溃。
+    // 启动新 worker 前杀死所有残留孤儿 verthys-worker 进程。
+    //   上次应用异常退出（强杀/崩溃）遗留的孤儿 worker 会持有 verthys 文件锁/
+    //   共享内存/状态文件锁，导致状态文件损坏、新 worker 启动后 scan 操作崩溃。
     //   在初始化锁保护下执行，确保仅一次清理。
     kill_orphan_workers();
 
@@ -565,18 +565,16 @@ pub async fn worker_destroy(state: State<'_, AppState>) -> Result<VerthysRespons
         })
         .await;
 
-    // 修复：worker 销毁后 GMK 已从内存消失，重置密钥生命周期为 NoKey
+    // worker 销毁后 GMK 已从内存消失，必须重置密钥生命周期为 NoKey。
     //
-    // 原缺陷：worker_destroy 仅销毁子进程会话，不触碰 key_lifecycle 状态机。
-    // 若销毁前状态为 Locked/Unlocked，销毁后状态仍残留。后续若不经过
-    // verthys_unlock（其内部已有 reset_to_no_key 逻辑）而直接调用
-    // verthys_derive_global_key / verthys_verify_global_key，状态机校验将基于
-    // 已失效的旧状态做出错误判定：
+    // 若销毁前状态为 Locked/Unlocked 并残留，后续不经过 verthys_unlock
+    // 而直接调用 verthys_derive_global_key / verthys_verify_global_key 时，
+    // 状态机校验会基于失效状态做出错误判定：
     //   - 残留 Locked → derive_global_key 拒绝（要求 NoKey）→ 初始化按钮失效
     //   - 残留 Unlocked → verify_global_key 拒绝（要求 Locked）→ 验证按钮失效
     //   - 残留 NoKey → verify_global_key 拒绝（要求 Locked）→ 验证按钮失效
     //
-    // 修复：worker 销毁即重置为 NoKey，与"worker 内存无 GMK"的物理事实一致。
+    // 重置为 NoKey 与"worker 内存无 GMK"的物理事实一致；
     // 后续 verthys_unlock 会根据 has_global_key 再次设置正确状态。
     state.key_lifecycle.reset_to_no_key();
 

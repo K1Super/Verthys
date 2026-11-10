@@ -15,10 +15,10 @@
 int memory_guard_init(void);
 
 /*
- * 安全多轮覆写零化（0x00 → 0xFF → 0x00）。
+ * 单轮覆写零化（0x00）。
  *   ptr: 内存区域起始地址
  *   len: 区域长度
- * 使用 SecureZeroMemory 确保编译器不会优化掉写入操作。
+ * 使用 volatile 写入确保编译器不会优化掉写入操作。
  * 不依赖 GC / 延迟释放。
  */
 void memory_guard_secure_zero(void *ptr, size_t len);
@@ -32,7 +32,7 @@ int memory_guard_check_remote_read(void);
 
 /*
  * 触发紧急内存零化。
- * 对所有已注册的敏感内存区域执行多轮覆写清零。
+ * 对所有已注册的敏感内存区域执行单轮覆写清零。
  * 应急响应时调用（同 emergency.h）。
  */
 void memory_guard_emergency_purge(void);

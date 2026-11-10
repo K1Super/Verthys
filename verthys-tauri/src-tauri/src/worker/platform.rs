@@ -228,7 +228,7 @@ pub(crate) fn verify_install_paths(worker_exe: &str, dll_path: &str) -> Result<(
     }
 }
 
-/// 根治：杀死所有残留的孤儿 verthys-worker 进程。
+/// 杀死所有残留的孤儿 verthys-worker 进程。
 ///
 /// 在 worker_init 启动新 worker 之前调用，清理上次异常退出遗留的孤儿进程。
 /// 使用 Toolhelp32 枚举进程，按名称匹配 "verthys-worker.exe" 并 TerminateProcess。

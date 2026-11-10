@@ -23,7 +23,7 @@ use crate::security_commands::state::SecurityState;
 
 /// 加固私有目录 ACL（当前用户完全控制，其他用户拒绝访问）
 ///
-/// dir 参数改为 logical_id，由后端从受信上下文解析。
+/// logical_id 由后端从受信上下文解析为实际目录。
 /// 使用 spawn_blocking 执行 ACL 操作（可能耗时）。
 #[tauri::command]
 pub async fn security_harden_private_dir(

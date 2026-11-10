@@ -1,14 +1,14 @@
 /*
  * constants/crypto_const.ts — 加密层统一常量
  *
- * 设计原则（codebase-design 深模块）：
+ * 设计原则：
  *   - 所有长度、迭代次数、AD 文本标识、VENC 魔数/版本集中定义
  *   - 前端加密层（crypto.ts）唯一常量入口，消除散落的魔术数字
  *   - 常量值与后端 C 层协议严格对齐，禁止单独修改
  *   - 跨层共享的载荷/分片预算由预算常量生成物提供（单一定义）
  *
  */
-import { PAYLOAD_CHUNK_SIZE_BYTES } from "./photo_budget.generated";
+import { MAX_EXPORT_SINGLE_BYTES, PAYLOAD_CHUNK_SIZE_BYTES } from "./photo_budget.generated";
 
 /* 跨层预算再导出：导入链路（批量记录与分块上传）按此约束单次 IPC 载荷 */
 export { MAX_IPC_PAYLOAD_BYTES, MAX_CHUNKS_PER_IPC } from "./photo_budget.generated";
@@ -114,18 +114,23 @@ export function isSlimLayout(meta: { fmt?: number }): boolean {
 /* ------------------------------------------------------------------ *
  * VENC 打包格式常量                                                   *
  *                                                                    *
- * .venc v2 文件结构（自描述信封 + 内容密钥封装 + 逐帧 AEAD）：         *
+ * 可移植备份文件结构（自描述信封 + 内容密钥封装 + 逐帧 AEAD）：       *
  *   [Outer Header 明文 42B] [Wrapped Content Key 48B]                 *
  *   [Frame]* [Trailer 帧]                                            *
  *   帧头：[type 1B] [seq 4B 大端] [len 4B 大端]                       *
  *   帧体：[nonce 24B] [ciphertext+tag 变长]                           *
+ *   帧 AD：[帧头 9B] [salt 16B]                                       *
+ *   块帧负载为原始明文字节，不依赖任何模块密钥。                       *
  * ------------------------------------------------------------------ */
 
-/** VENC v2 文件魔数文本（4 字节 ASCII） */
+/** VENC 文件魔数文本（4 字节 ASCII） */
 export const VENC_MAGIC_TEXT = "VENC";
 
-/** VENC 当前版本（v2：自描述信封 + 逐帧 AEAD） */
-export const VENC_VERSION = 2;
+/** 导出协议格式版本：可移植明文块载荷 */
+export const VENC_VERSION = 3;
+
+/** 导出令牌派生迭代次数（WebCrypto PBKDF2-SHA256，写入头部自描述） */
+export const VENC_KDF_ITERATIONS = 600_000;
 
 /** 外层头部固定字节数（magic4 + version2 + flags2 + kdfId2 + iterations4 + salt16 + iv12） */
 export const VENC_OUTER_HEADER_BYTES = 42;
@@ -154,8 +159,8 @@ export const PARSE_MAX_FRAME_COUNT = 100_000;
 /** 解析容器单帧负载字节上限 */
 export const PARSE_MAX_FRAME_BYTES = 64 * 1024 * 1024;
 
-/** 解析容器总字节上限 */
-export const PARSE_MAX_CONTAINER_BYTES = 1 * 1024 * 1024 * 1024;
+/** 解析容器总字节上限：与单文件导出口径一致，避免产出无法导入的备份 */
+export const PARSE_MAX_CONTAINER_BYTES = MAX_EXPORT_SINGLE_BYTES;
 
 /** 令牌最小长度（字符数）：自定义令牌与解析导入共用的下限 */
 export const MIN_TOKEN_LENGTH = 8;
@@ -172,13 +177,11 @@ export const VENC_TRAILER_PAYLOAD_BYTES = 12;
 /* ------------------------------------------------------------------ *
  * Verthys 记录类型常量
  *
- * 修复：TYPE 常量统一到 constants/record_types.ts（单一真相源）
+ * 记录类型常量集中在 constants/record_types.ts 统一分配，确保全局唯一。
+ * 此处 re-export 既有常量，import 路径保持不变。
  *
- * 原缺陷：TYPE_PHOTO_CHUNK=0x05 与 FileVerthys.vue 局部定义的 TYPE_META=0x05
- * 值相同，导致照片数据块与文件保险箱元数据互相误识。
- *
- * 修复：全部记录类型常量集中到 record_types.ts 统一分配，确保全局唯一。
- * 此处改为 re-export，保持现有 import 路径向后兼容。
+ * 约束：TYPE_PHOTO_CHUNK 与 TYPE_FILEVERTHYS_META 必须不同值，否则照片
+ * 数据块与文件保险箱元数据会互相误识。
  * ------------------------------------------------------------------ */
 
 export {

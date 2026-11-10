@@ -1,12 +1,12 @@
 /*
- * clipboard_guard.rs — 剪贴板保护升级模块
+ * clipboard_guard.rs — 剪贴板保护模块
  *
- * 修复要点：
+ * 要点：
  *   1. 分离写入与清空策略，使用延迟清空模式
  *      - SetClipboardData 后绝不清空，敏感内容正常驻留供用户粘贴
  *      - 清空仅在以下条件触发：30 秒自动过期、高安全模式下检测到外部
  *        SetClipboardData（而非读取）、显式调用 clear/transactional_clear
- *   2. 废弃序列号检测读取，改用外部 SetClipboardData 检测
+ *   2. 以外部 SetClipboardData 检测代替单纯的序列号读取
  *      - GetClipboardSequenceNumber 仅在 SetClipboardData 成功时递增
  *      - OpenClipboard / GetClipboardData 不改变序列号
  *      - 因此"序列号递增 = 外部写入"才是正确判定
@@ -14,12 +14,12 @@
  *      - clipboard_window_proc 收到 WM_CLIPBOARDUPDATE 时仅设置 AtomicBool
  *      - 消息循环轮询检测到标志后在主循环上下文执行检查和处理
  *      - 完全避免窗口过程内的重入风险
- *   4. 将分散的原子变量重构为单一的状态枚举与锁保护
- *      - 用 Mutex<ClipboardStateData> 替换所有松散原子变量
+ *   4. 使用单一的状态枚举与锁保护
+ *      - 状态由 Mutex<ClipboardStateData> 保护
  *      - 状态结构体包含 stage、last_seq、expire_at 等字段
  *      - 所有状态读取和修改都在获取锁后原子完成
- *   5. 清空操作优先使用 EmptyClipboard，放弃无意义的垃圾覆写
- *      - 移除"写入随机数据再清空"逻辑
+ *   5. 清空操作使用 EmptyClipboard
+ *      - 不写入随机数据再清空
  *      - 直接调用 EmptyClipboard 并广播 WM_DESTROYCLIPBOARD
  *      - 写入敏感内容时通过 CF_PRIVATEFIRST 标记防止进入历史记录
  *   6. 监听线程内进行 OLE 初始化与剪贴板能力检查
@@ -79,8 +79,8 @@ const RETRY_INTERVAL_MS: u64 = 50;
 /* ==================================================================== *
  *  统一状态枚举与锁保护                               *
  *                                                                        *
- *  用单一 Mutex<ClipboardStateData> 替换所有松散原子变量。                *
- *  所有状态读取和修改都在获取锁后原子完成，消除瞬时不一致窗口。            *
+ *  全部状态由单一 Mutex<ClipboardStateData> 保护。                       *
+ *  所有状态读取和修改都在获取锁后原子完成，避免瞬时不一致窗口。            *
  * ==================================================================== */
 
 /// 剪贴板状态阶段枚举
@@ -108,7 +108,7 @@ struct ClipboardStateData {
     monitoring: bool,
 }
 
-/// 全局统一剪贴板状态（替代所有松散原子变量）
+/// 全局统一剪贴板状态
 static CLIPBOARD_STATE: Mutex<ClipboardStateData> = Mutex::new(ClipboardStateData {
     stage: ClipboardStage::Idle,
     last_seq: 0,
@@ -255,7 +255,7 @@ fn now_ms() -> u64 {
 /* ==================================================================== *
  *  窗口过程仅标记事件                                *
  *                                                                        *
- *  clipboard_window_proc 中不再直接调用任何剪贴板 API。                   *
+ *  clipboard_window_proc 不直接调用任何剪贴板 API。                       *
  *  收到 WM_CLIPBOARDUPDATE / WM_DESTROYCLIPBOARD 时，仅设置 PENDING_UPDATE *
  *  标志。消息循环中的轮询检测到该标志后，在主循环上下文中执行检查和处理。  *
  *  这完全避免了窗口过程内的重入风险。                                     *
@@ -403,19 +403,17 @@ fn check_sensitive_expire() {
  *  统一剪贴板清空入口（公共接口）                    *
  *                                                                        *
  *  所有剪贴板清空操作均通过此入口，包括：                                 *
- *    - mod.rs 的 clear_clipboard() 向后兼容封装                          *
+ *    - mod.rs 的 clear_clipboard() 封装                                *
  *    - ClipboardGuard 的 clear() 方法                                    *
  *    - 审计日志的 clear_clipboard 命令                                   *
  *                                                                        *
  *  直接调用 EmptyClipboard + 广播 WM_DESTROYCLIPBOARD。                   *
- *  移除"写入随机数据再清空"的无意义逻辑。                                 *
  * ==================================================================== */
 
 /// 统一剪贴板清空入口
 ///
 /// 直接调用 EmptyClipboard 并广播 WM_DESTROYCLIPBOARD，
 /// 强制系统清除云剪贴板缓存。
-/// 移除了旧版"写入随机数据再清空"的自相矛盾逻辑。
 pub fn clear() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -431,7 +429,6 @@ pub fn clear() -> Result<(), String> {
  *  内部清空实现                                      *
  *                                                                        *
  *  直接调用 EmptyClipboard 并广播 WM_DESTROYCLIPBOARD。                   *
- *  移除"写入随机数据再清空"的无意义逻辑。                                 *
  *  EmptyClipboard 本身已足够保护残留。                                    *
  * ==================================================================== */
 #[cfg(target_os = "windows")]
@@ -467,7 +464,7 @@ fn do_clear_internal() -> Result<(), String> {
             return Err(last_err);
         }
 
-        // 直接 EmptyClipboard，放弃无意义的垃圾覆写
+        // 直接调用 EmptyClipboard 清空
         let empty_ok = EmptyClipboard().is_ok();
 
         // 广播 WM_DESTROYCLIPBOARD，强制系统清除云剪贴板缓存
@@ -528,10 +525,8 @@ fn create_listener_window() -> Result<isize, String> {
 
 /// 注册监听窗口类（进程内严格一次）。
 ///
-/// 旧实现每次 `start_monitoring` 都调用 `RegisterClassExW`，第二次返回 1410
-/// （ERROR_CLASS_ALREADY_EXISTS）并被误判为启动失败，导致安全档位恢复链重复
-/// 下发开关时误报“会话硬化未完全生效”。此处以 `OnceLock` 保证仅注册一次；
-/// 并发或历史注册返回 1410 时按“同名同类已存在”处理，不视为失败。
+/// 以 `OnceLock` 保证仅注册一次；并发或历史注册返回 1410
+/// （ERROR_CLASS_ALREADY_EXISTS）时按“同名同类已存在”处理，不视为失败。
 #[cfg(target_os = "windows")]
 fn ensure_listener_class() -> Result<(), String> {
     static CLASS_READY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -568,8 +563,8 @@ fn ensure_listener_class() -> Result<(), String> {
  *  监听线程（窗口创建 + 监听注册 + 消息泵 / 序列号轮询）                 *
  *                                                                        *
  *  关键约束：隐藏窗口必须由运行消息循环的线程创建。Win32 窗口消息只投递  *
- *  到创建该窗口的线程队列；旧实现在命令线程创建窗口、在另一线程跑消息    *
- *  循环，WM_CLIPBOARDUPDATE 永远无法被监听线程读取，外部写入检测形同虚设。*
+ *  到创建该窗口的线程队列；若在命令线程创建窗口、在另一线程跑消息        *
+ *  循环，WM_CLIPBOARDUPDATE 无法被监听线程读取，外部写入检测失效。        *
  * ==================================================================== */
 
 /// 创建窗口并注册剪贴板格式监听。
@@ -916,7 +911,7 @@ impl ClipboardGuard {
     /* ---------------- 事务式剪贴板安全清空 ---------------- */
     /// 事务式剪贴板安全清空
     ///
-    /// 移除垃圾覆写轮次，改为直接 EmptyClipboard。
+    /// 不进行垃圾覆写，直接调用 EmptyClipboard。
     /// 事务性体现在 OpenClipboard 重试 + 最终广播 WM_DESTROYCLIPBOARD。
     ///
     /// 完整事务序列：
@@ -926,7 +921,7 @@ impl ClipboardGuard {
     ///   4. CloseClipboard
     ///
     /// 重试机制：OpenClipboard 失败（剪贴板被占用）时等待 50ms 重试，最多 3 次。
-    /// 全部失败返回 Err（不再静默返回 Ok）。
+    /// 全部失败返回 Err，不静默返回 Ok。
     #[cfg(target_os = "windows")]
     pub fn transactional_clear() -> Result<(), String> {
         // 标记为 Writing 以忽略清空操作自身产生的通知
@@ -1014,7 +1009,7 @@ impl ClipboardGuard {
     /// 停止监听：置停止信号 → 有界等待线程自行销毁窗口并退出。
     ///
     /// 窗口由监听线程创建，必须由其自身销毁（Win32 跨线程 DestroyWindow 会
-    /// 失败），因此这里不再持有或操作窗口句柄。
+    /// 失败），因此这里不持有也不操作窗口句柄。
     #[cfg(target_os = "windows")]
     pub fn stop_monitoring(&mut self) {
         let was_monitoring = lock_state().monitoring;
@@ -1037,7 +1032,7 @@ impl ClipboardGuard {
 
     /* ---------------- 高安全模式开关 ---------------- */
     /// 启用 / 禁用「外部写入即清空」行为。
-    /// 高安全标志仅作为状态字段，不再依赖全局原子变量。
+    /// 高安全标志仅作为状态字段，不依赖全局原子变量。
     pub fn set_high_security_mode(&mut self, enabled: bool) {
         let mut state = lock_state();
         state.high_security = enabled;
@@ -1069,9 +1064,8 @@ mod tests {
 
     /// 回归：重复启动必须幂等成功，停止后重启必须成功。
     ///
-    /// 旧实现每次启动都重复 RegisterClassExW，第二次返回 1410
-    /// （ERROR_CLASS_ALREADY_EXISTS）被误判为“剪贴板监听启动失败”，
-    /// 导致中枢误报“会话硬化未完全生效”。
+    /// 同一窗口类重复注册返回 1410（ERROR_CLASS_ALREADY_EXISTS）时，
+    /// 不得被当作启动失败。
     #[test]
     fn clipboard_monitor_start_is_idempotent_and_restartable() {
         let mut guard = ClipboardGuard::new();

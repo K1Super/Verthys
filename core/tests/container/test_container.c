@@ -256,7 +256,7 @@ TEST(slot_policy_check)
              VTY_E_SLOT_UNKNOWN);
     CHECK_EQ(vty_slot_policy_check(slots, 4,
                                    VTY_FLAG_HIGH_SECURITY | VTY_FLAG_PCR), VTY_OK);
-    /* keyfile 是用户槽 KDF 第二输入，不再写独立槽；出现 type 5 槽
+    /* keyfile 是用户槽 KDF 第二输入，不写独立槽；出现 type 5 槽
      * 一律拒绝。高安全由 KEYFILE flag 或 PCR 槽满足。 */
     slots[3].slot_type = VTY_SLOT_KEYFILE;
     CHECK_EQ(vty_slot_policy_check(slots, 4, VTY_FLAG_HIGH_SECURITY),

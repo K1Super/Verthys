@@ -37,6 +37,10 @@ int vty_tpm_witness_create(const uint8_t id[VTY_UUID_BYTES], uint8_t slot,
 int vty_tpm_witness_verify(const uint8_t id[VTY_UUID_BYTES], uint8_t slot,
                            const uint8_t expected[VTY_TPM_WITNESS_FP_BYTES]);
 
+/* 查询指定槽密钥是否存在：1=存在，0=不存在，-1=平台错误。
+ * 仅用于区分“见证丢失（可重建）”与“指纹不符（必须 fail-closed）”。 */
+int vty_tpm_witness_exists(const uint8_t id[VTY_UUID_BYTES], uint8_t slot);
+
 /* 删除指定槽；不存在视为成功 */
 int vty_tpm_witness_delete(const uint8_t id[VTY_UUID_BYTES], uint8_t slot);
 

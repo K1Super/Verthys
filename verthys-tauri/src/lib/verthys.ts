@@ -18,8 +18,7 @@
  *   lib/crypto.ts             ← encryptPasswordField/decryptPasswordField
  *   lib/verthys.ts              ← 纯 IPC 调用（本文件）
  *
- * 重构后 verthys.ts 仅保留纯 IPC 调用，不再包含任何加密实现。
- * 所有 Tauri 调用逻辑、前后端字段映射、批量游标逻辑 100% 不变。
+ * 本文件仅保留纯 IPC 调用，不包含加密实现。
  */
 
 import { invokeWithTimeout } from "../utils/invoke_wrapper";
@@ -70,10 +69,10 @@ import {
 } from "../constants/verthys_const";
 
 /* ------------------------------------------------------------------ *
- * 再导出（保持对外 API 完全不变）                                      *
+ * 再导出                                                              *
  *                                                                    *
  * 上层组件和 keyManager 分层通过 `from "../../lib/verthys"` 导入       *
- * 类型、常量、加密函数，此处再导出确保页面零改动。                     *
+ * 类型、常量、加密函数。                                              *
  * ------------------------------------------------------------------ */
 
 // 类型再导出
@@ -121,7 +120,7 @@ export {
   SECURITY_PRESET_CUSTOM,
 } from "../constants/verthys_const";
 
-// 加密函数再导出（从 crypto.ts 迁移，verthys.ts 不再包含加密实现）
+// 加密函数再导出（实现位于 crypto.ts）
 export { encryptPasswordField, decryptPasswordField } from "./crypto";
 
 /* ------------------------------------------------------------------ *
@@ -130,7 +129,6 @@ export { encryptPasswordField, decryptPasswordField } from "./crypto";
  * 所有 Tauri invoke 调用经由 ipc() 包装：                             *
  *   - invoke 抛出的原生错误自动包装为 VerthysError                      *
  *   - VerthysError extends Error，与全局 error-handler 兼容              *
- *   - 调用逻辑、参数、返回值处理 100% 不变                             *
  * ------------------------------------------------------------------ */
 
 async function ipc<T>(
@@ -161,7 +159,7 @@ export function deserializeAccount(b64: string): AccountFields {
 }
 
 /* ------------------------------------------------------------------ *
- * base64 编解码（从 utils/binary_codec 再导出，保持 API 不变）        *
+ * base64 编解码（由 utils/binary_codec 再导出）                      *
  * ------------------------------------------------------------------ */
 
 export { bytesToBase64, base64ToBytes } from "../utils/binary_codec";
@@ -171,7 +169,7 @@ export { bytesToBase64, base64ToBytes } from "../utils/binary_codec";
  * ------------------------------------------------------------------ */
 
 /** 初始化 worker 子进程（加载 DLL，创建上下文）
- *  dllPath 参数已废弃：后端强制自动解析 DLL 绝对路径，前端传空即可
+ *  dllPath 参数不生效：后端强制自动解析 DLL 绝对路径，前端传空即可
  *
  *  注意：调用方应优先使用 ensureWorkerReady() / preloadWorker() 以复用预启动会话，
  *  避免重复 spawn 子进程。直接调用本函数会绕过 memoization 缓存。
@@ -203,9 +201,9 @@ export async function workerDestroy(): Promise<boolean> {
     const r = await ipc<VerthysResponse>("worker_destroy");
     return r.ok;
   } finally {
-    // 修复：无论 worker_destroy 成功/失败/超时，都作废预启动缓存
-    //   原缺陷：invalidateWorkerPreload 在 await 之后，若 IPC 超时/异常则永不执行
-    //   → workerReadyPromise 残留指向已销毁 worker → 下次 ensureWorkerReady 复用死 worker
+    // 无论 worker_destroy 成功/失败/超时，都作废预启动缓存：
+    //   若 IPC 超时/异常后跳过作废，workerReadyPromise 会残留指向已销毁 worker，
+    //   下次 ensureWorkerReady 复用死 worker。
     invalidateWorkerPreload();
   }
 }
@@ -256,16 +254,13 @@ export function invalidateWorkerPreload(): void {
 }
 
 /* ------------------------------------------------------------------ *
- * 修复：确保解锁前 worker 处于干净状态                         *
+ * 确保解锁前 worker 处于干净状态                                       *
  *                                                                    *
- * 根治"回退重选 verthys 卡死"和"安全核心启动失败"根因：                   *
- *   用户回退 → goBackToUnlock → lockAll → doLockAll 同步置            *
- *   verthysReady=false → UI 立即显示解锁视图 → 用户重选 verthys →          *
- *   doUnlock → initUnlock → ensureWorkerReady 复用旧 workerReadyPromise *
- *   → verthysUnlock IPC 发往正在被 lockAll 销毁的 worker → 永久卡死。    *
- *                                                                    *
- *   以及：lockAll 的 verthysLock 仅销毁 VerthysSessionGuard，不销毁 worker  *
- *   子进程，worker 状态仍为 Ready。下次 worker_init 因状态不匹配失败。  *
+ * 背景：lockAll 的 verthysLock 仅销毁 VerthysSessionGuard，不销毁 worker *
+ * 子进程，worker 状态仍为 Ready；且 lockAll 会在 finally 调用           *
+ * invalidateWorkerPreload() 清空预启动缓存。若此时直接 ensureWorkerReady，*
+ * 会 spawn 新 worker 而旧 worker 仍存活，worker_init 因状态不匹配失败，  *
+ * 或 IPC 发往正在被销毁的 worker 而卡死。                              *
  *                                                                    *
  * 本函数在 initUnlock/initCreate 起始处调用，确保：                     *
  *   1. 无条件调用 worker_destroy（后端对不存在的 worker 为空操作）      *
@@ -277,13 +272,8 @@ export function invalidateWorkerPreload(): void {
  *   被彻底清理，消除"状态仍为 Ready"导致的 worker_init 失败。          *
  * ------------------------------------------------------------------ */
 export async function ensureCleanWorkerState(): Promise<void> {
-  // 修复：无条件销毁 worker，消除"状态仍为 Ready"导致的 worker_init 失败
-  //
-  // 原实现仅在预启动缓存非空且 worker 曾解锁过时销毁；lockAll 会在 finally
-  // 调用 invalidateWorkerPreload() 清空缓存，使该条件不满足，无法兜底销毁。
-  //
-  // 新实现无条件调用 worker_destroy（5s 超时兜底），后端对不存在的 worker 为空操作。
-  // 这确保任何路径下（包括 lockAll 超时/失败/部分完成）worker 都被彻底清理。
+  // 无条件销毁 worker（5s 超时兜底）：lockAll 超时/失败/部分完成、
+  // 预启动缓存已被清空等路径都必须清理 worker，不能以缓存状态作为判断条件。
   try {
     await withTimeout(ipc<VerthysResponse>("worker_destroy"), 5000, "worker_destroy");
   } catch {
@@ -364,9 +354,9 @@ export async function verthysUnlock(
   recoveryCode?: string,
   keyfilePath?: string,
 ): Promise<VerthysResponse> {
-  /* 修复：返回完整 VerthysResponse，含 worker 进程内探测的
+  /* 返回完整 VerthysResponse，含 worker 进程内探测的
    * has_global_key/global_key_id/global_key_record 三字段。
-   * 调用方 initUnlock 直接消费，消除解锁后 probe IPC 链。 */
+   * 调用方 initUnlock 直接消费，无需解锁后 probe IPC 链。 */
   const resp = await ipc<VerthysResponse>("verthys_unlock", {
     verthysPath,
     ...(usbRebindConfirmed ? { usbRebindConfirmed: true } : {}),
@@ -547,8 +537,8 @@ export async function verthysV4RotateRun(
   }
 }
 
-/** 原子替换源库并推进回退锚点；keepOld=true 保留 .old-* 备份 */
-export async function verthysV4RotateCommit(keepOld = false): Promise<VerthysResponse> {
+/** 原子替换源库并推进回退锚点；keepOld 默认 true，保留 .old-* 兜底备份 */
+export async function verthysV4RotateCommit(keepOld = true): Promise<VerthysResponse> {
   return await ipc<VerthysResponse>("verthys_rotate_commit", { keepOld });
 }
 
@@ -570,7 +560,7 @@ export async function verthysV4RotateAbort(): Promise<VerthysResponse> {
   return await ipc<VerthysResponse>("verthys_rotate_abort", {});
 }
 
-/** 持久化落盘（发送 lock 指令并等待响应，不销毁 worker）— 7步流程步骤4+5 */
+/** 持久化落盘（发送 lock 指令并等待响应，不销毁 worker） */
 export async function verthysLockPersist(): Promise<boolean> {
   const r = await ipc<VerthysResponse>("verthys_lock_persist");
   return r.ok;
@@ -586,10 +576,9 @@ export async function verthysPrepareLock(): Promise<boolean> {
   return r.ok;
 }
 
-/** 销毁 worker 并清理资源（剪贴板+文件锁）— 7步流程步骤7
- *  注意：verthys_lock 会销毁 worker 子进程，因此同步作废预启动缓存
- *  修复：invalidateWorkerPreload 移至 finally 块，
- *    确保 IPC 超时/异常时也作废缓存（根治 workerReadyPromise 残留指向死 worker） */
+/** 销毁 worker 并清理资源（剪贴板+文件锁）
+ *  注意：verthys_lock 会销毁 worker 子进程，因此必须在 finally 作废预启动缓存，
+ *    确保 IPC 超时/异常时也不残留指向死 worker 的 workerReadyPromise */
 export async function verthysLock(): Promise<boolean> {
   try {
     const r = await ipc<VerthysResponse>("verthys_lock");
@@ -683,7 +672,7 @@ export async function verthysAddRecord(
 }
 
 /* ================================================================== *
- * Comprehensive_optimization：照片导入异步批处理流水线 IPC 封装      *
+ * 照片导入异步批处理流水线 IPC 封装                                 *
  *                                                                  *
  * 五个命令对应后端 controller::verthys_batch_controller：             *
  *   - verthysImportBegin：创建导入会话（WAL + 续传去重哈希集）         *
@@ -817,8 +806,7 @@ export async function verthysForgetImportKeys(
 ): Promise<void> {
   if (entryKeys.length === 0 && recordIds.length === 0) return;
   // 幂等锁释放失败会让被删文件在重新导入时被静默跳过（用户只看到"导入 0 张"
-  // 且无任何失败提示）：失败重试一次，仍失败则上抛，由调用方记录或提示，
-  // 不再吞掉返回值。
+  // 且无任何失败提示）：失败重试一次，仍失败则上抛，由调用方记录或提示。
   for (let attempt = 1; attempt <= 2; attempt++) {
     const r = await ipc<VerthysResponse>("verthys_forget_import_keys", {
       entryKeys,
@@ -959,9 +947,8 @@ export async function verthysGetRecordDetailed(id: number): Promise<GetRecordOut
   const r = await ipc<VerthysResponse>("verthys_get_record", { id });
   if (!r.ok) {
     const error = r.error ?? "unknown error";
-    // 失败必须留痕：记录过大（record_too_large）、通道异常与"记录不存在"
-    // 在旧返回值上不可区分，历史实现静默返回 null 使结构性问题退化为
-    // "记录缺失"而无法定位（调用方只看到空数据）。
+    // 失败必须留痕：记录过大（record_too_large）、通道异常与"记录不存在"若
+    // 静默返回 null，会使结构性问题退化为"记录缺失"而无法定位（调用方只看到空数据）。
     console.warn(`[verthysGetRecord] 读取记录 ${id} 失败: ${error}`);
     return { ok: false, error, code: classifyGetRecordError(error) };
   }
@@ -1056,7 +1043,7 @@ export async function verthysEnumerateRecordsStream(
  *   await verthysScanClose();                                          *
  * ------------------------------------------------------------------ */
 
-/** 记录扫描投影选项（缺省 = 全量解密，既有调用方语义不变） */
+/** 记录扫描投影选项（缺省 = 全量解密） */
 export interface ScanProjectOptions {
   /**
    * 投影选择：
@@ -1157,7 +1144,7 @@ export async function verthysScanClose(): Promise<boolean> {
  * ------------------------------------------------------------------ */
 
 /** 摘要记录（前端简化类型，供 verthys-cache.ts 两层缓存使用）
- * 新增 createdTime（创建时间戳，列表展示用）
+ *  createdTime 为创建时间戳，列表展示用
  */
 export interface SummaryRecord {
   id: number;
@@ -1242,9 +1229,9 @@ export async function verthysDeleteRecords(ids: number[]): Promise<boolean> {
  *  返回解锁时从 summary_index_off 加载的摘要记录数。
  *  >0 表示摘要索引可用，前端可直接渲染列表无需 B+ 树扫描。
  *
- *  修复：worker 返回 ok=false 时抛出异常而非返回 0
- *    原 bug：worker 失败时返回 0，调用方误判"verthys 为空"→ UI 显示"初始化密钥"
- *    修复：worker 失败时抛异常，调用方 catch 后走"计数未知"路径，继续第一批扫描
+ *  worker 返回 ok=false 时抛出异常而非返回 0：
+ *    返回 0 会被调用方误判"verthys 为空"→ UI 显示"初始化密钥"；
+ *    抛异常后调用方 catch 走"计数未知"路径，继续第一批扫描
  */
 export async function verthysGetSummaryCount(): Promise<number> {
   const r = await ipc<VerthysResponse & { record_count?: number }>(
@@ -1257,12 +1244,12 @@ export async function verthysGetSummaryCount(): Promise<number> {
   return r.record_count ?? 0;
 }
 
-/** ：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）
+/** 轻量级记录类型存在性检查（只扫摘要索引，不读数据块）
  *
  *  C 层 Verthys_HasRecordByType 直接遍历 B+ 树叶子节点检查 type 字段，
  *  不分配 name 堆内存，不访问数据区块，典型耗时 < 100ms。
  *
- *  用于启动阶段快速判断是否有全局密钥记录，消除"猜超时"设计缺陷。
+ *  用于启动阶段快速判断是否有全局密钥记录。
  *
  *  @param rtype 目标记录类型（如 TYPE_GLOBAL_KEY = 0x10）
  *  @returns true=存在匹配类型的记录，false=不存在
@@ -1279,10 +1266,10 @@ export async function verthysHasRecordByType(rtype: number): Promise<boolean> {
   return (r.record_count ?? 0) > 0;
 }
 
-/** 按类型分页枚举记录 ID（API 0x0012）
+/** 按类型分页枚举记录 ID
  *
  *  权威来源：类型盲索引（VTY_KS_TYPE），不读取记录密文，跨重启稳定。
- *  摘要扫描的 type 在 恒为未知 0，禁止用它过滤业务类型。
+ *  摘要扫描的 type 恒为未知 0，禁止用它过滤业务类型。
  *
  *  @param rtype 记录业务类型
  *  @param afterId 上一页最后一个 ID；首页传 0
@@ -1372,7 +1359,7 @@ export async function verthysGetSystemSnapshot(): Promise<SystemSnapshot> {
 }
 
 /* ------------------------------------------------------------------ *
- * GMK 派生 IPC 封装（#2 敏感操作下沉）                                *
+ * GMK 派生 IPC 封装（敏感操作下沉）                                  *
  *                                                                    *
  * 主进程仅转发，GMK 派生/验证全部在 worker 子进程内完成               *
  * 前端不持有 GMK，模块独立密钥由前端 AES-GCM 直接加密验证器           *
@@ -1380,16 +1367,10 @@ export async function verthysGetSystemSnapshot(): Promise<SystemSnapshot> {
 
 /** 派生全局主密钥 GMK（首次设置）
  *
- * 修复：失败时抛出 Error（含后端错误消息），而非返回 null。
- *
- * 原缺陷：返回 null 丢失后端 VerthysResponse.error 中的具体错误信息
- * （状态不匹配 / 密码长度不足 / bin 数据校验失败等）。调用方
- * initGlobalKey 仅能返回泛化的 E_GLOBAL_KEY_DERIVE_FAILED，用户看到
- * "全局密钥派生失败"却不知具体原因，且 catch 分支无法区分超时与业务失败。
- *
- * 修复：r.ok=false 时抛出 Error(r.error)，errFromUnknown 捕获后保留
- * 后端原始消息于 VerthysResult.message / cause 中，便于 console 诊断。
- * 调用方 initGlobalKey 的 try-catch 已正确处理此抛出路径。
+ * 失败时抛出 Error（含后端错误消息），而非返回 null：
+ * 调用方 initGlobalKey 需要具体原因区分超时与业务失败（状态不匹配 /
+ * 密码长度不足 / bin 数据校验失败等），errFromUnknown 捕获后把后端
+ * 原始消息保留在 VerthysResult.message / cause 中，便于诊断。
  *
  * @returns record(base64) — 前端写入 verthys 持久化，worker 内存持有 GMK
  * @throws Error 后端返回 ok=false 时抛出，message 为后端错误描述
@@ -1441,15 +1422,10 @@ export async function verthysDeriveAndStoreGlobalKey(
 
 /** 验证全局密钥（后续进入时）
  *
- * 修复：失败时抛出 Error（含后端错误消息），而非返回 false。
- *
- * 原缺陷：返回 false 丢失后端 VerthysResponse.error 中的具体错误信息
- * （状态不匹配 / 冷却中 / 密码长度不足 / bin 数据校验失败等）。
- * 调用方 verifyGlobalKey 仅能返回泛化的 E_GLOBAL_KEY_VERIFY_FAILED。
- *
- * 修复：r.ok=false 时抛出 Error(r.error)，errFromUnknown 捕获后保留
- * 后端原始消息于 VerthysResult.message / cause 中，便于 console 诊断。
- * 调用方 verifyGlobalKey 的 try-catch 已正确处理此抛出路径。
+ * 失败时抛出 Error（含后端错误消息），而非返回 false：
+ * 调用方 verifyGlobalKey 需要区分状态不匹配 / 冷却中 / 密码长度不足 /
+ * bin 数据校验失败等具体原因；errFromUnknown 捕获后把后端原始消息保留
+ * 在 VerthysResult.message / cause 中，便于诊断。
  *
  * @param recordB64 verthys 中存储的全局密钥记录（base64）
  * @returns true 验证成功，worker 内存持有 GMK
@@ -1469,7 +1445,7 @@ export async function verthysVerifyGlobalKey(
   });
   if (!r.ok) {
     /* 保留结构化错误码与锁定秒数：调用方据此展示“已锁定 X 秒”或门禁
-     * 不可用提示，不再折叠为布尔值。 */
+     * 不可用提示，而非仅得到一个布尔值。 */
     const e = new Error(r.error || "验证全局密钥失败") as Error & {
       errorCode?: string;
       retryAfterSecs?: number;
@@ -1498,7 +1474,7 @@ export async function verthysResetGlobalKeyState(): Promise<boolean> {
   return r.ok;
 }
 
-/** 修复：协调全局密钥存在状态（修正 probe 竞态导致的前后端状态不同步）
+/** 协调全局密钥存在状态（修正 probe 冲突导致的前后端状态不同步）
  *
  * 场景：
  *   verthys_unlock 时 worker 进程内 probe 通过 find_first_lid_by_type(0x10)
@@ -1595,6 +1571,22 @@ export async function verthysModuleOpen(
 }
 
 /**
+ * 外层信封探测（损坏扫描专用）
+ *
+ * 只验证记录能否被当前模块密钥解封，不要求文件口令、不校验布局种类标签。
+ * 返回 ok=true 表示外层完整；AUTH 表示确定损坏；LOCKED/POLICY 表示不可判定。
+ */
+export async function verthysModuleProbeOuter(params: {
+  module: string;
+  data: string;
+}): Promise<VerthysResponse> {
+  return ipc<VerthysResponse>("verthys_module_probe_outer", {
+    module: params.module,
+    data: params.data,
+  });
+}
+
+/**
  * 设置防截屏保护（窗口捕获排除）
  *
  * 开启（enabled=true）整体成功或整体失败，成功后返回一次性会话凭证
@@ -1604,8 +1596,6 @@ export async function verthysModuleOpen(
  *   - ok=true, enabled=true：保护已启用（session_token 存在）
  *   - ok=true, enabled=false：保护已关闭（凭证已消费）
  *   - ok=false：按 error_code 分支（PRIVACY_* 系列 / RATE_LIMITED）
- *
- * 向后兼容：返回值同时包含 ok 字段，旧代码 r.ok 仍可用。
  */
 export async function setPrivacyMode(
   enabled: boolean,
@@ -1658,8 +1648,6 @@ export async function reconcilePrivacy(): Promise<PrivacyModeResult> {
  *   - ok=true：剪贴板已安全擦除
  *   - ok=false, error_code=CLIPBOARD_LOCKED：剪贴板被占用，重试后仍失败
  *   - ok=false, error_code=RATE_LIMITED：频率超限（>10次/分钟）
- *
- * 向后兼容：返回值包含 ok 字段，旧代码 r.ok 仍可用。
  */
 export async function clearClipboard(): Promise<ClipboardResult> {
   return await ipc<ClipboardResult>("clear_clipboard");
@@ -1668,7 +1656,7 @@ export async function clearClipboard(): Promise<ClipboardResult> {
 /** 读取文件字节（二进制 IPC：返回原始 Uint8Array，去 base64 化）
  *
  *  后端返回 tauri::ipc::Response → invoke 直接收到 ArrayBuffer，
- *  内存峰值 ×1（原 base64 路径 ×2.66：Rust b64 串 + JSON 串 + 前端解码）。
+ *  内存峰值 ×1（base64 路径为 ×2.66：Rust b64 串 + JSON 串 + 前端解码）。
  *
  *  ⚠ 白名单限制：仅允许 app_data / app_config / Documents / Pictures /
  *    Downloads / home_dir / desktop_dir 内的文件。非用户主目录路径
@@ -1714,14 +1702,10 @@ export async function writeFileBytes(path: string, data: Uint8Array): Promise<vo
  *  - 超时控制（10s）+ 审计日志
  *
  *  适用场景：拾光解析功能导入 .venc 文件、导入照片、读取 .bin 密钥文件等
- *  用户通过文件对话框显式选择的文件。
- *
- *  根治缺陷：原 chooseParseFile 使用 readFileBytes，用户选择的 .venc 文件
- *  若位于 D:\ 等非 home_dir 路径，沙箱返回 PermissionDenied，
- *  前端 catch 块仅显示"读取文件失败"。 */
+ *  用户通过文件对话框显式选择的文件。 */
 export async function readUserFile(path: string): Promise<Uint8Array> {
   // 分片参数显式置空：后端按"双缺省 = 整文件读取"判定；显式传 null 使
-  // 调用面不依赖"参数缺省"的解析差异（各调用方行为与历史完全一致）
+  // 调用面不依赖"参数缺省"的解析差异。
   const buf = await ipc<ArrayBuffer>("read_user_file", { path, offset: null, length: null });
   return new Uint8Array(buf);
 }
@@ -1802,7 +1786,7 @@ export async function writeUserFile(path: string, data: Uint8Array): Promise<voi
 /* ------------------------------------------------------------------ *
  * 单文件导出流式写入（暂存 + 原子替换）                                *
  *                                                                    *
- * 大文件导出不再整包直传（峰值内存 = 容器体积），改为：                 *
+ * 大文件导出不整包直传，按以下流程写入（峰值内存与容器体积无关）： *
  *   writeUserFileStream 建会话（后端独占创建暂存）→                   *
  *   appendUserFileChunk 逐帧追加原始字节 →                            *
  *   finalizeUserFileStream 后端 fsync + rename 原子替换目标。         *
@@ -1872,14 +1856,8 @@ export async function setDeviceBinding(): Promise<void> {
 /**
  * 校验当前设备机器码是否匹配（返回结构化结果）
  *
- * 修复修复：原实现错误声明返回纯字符串 "match"|"mismatch"|"unbound"，
- *   但后端 #[tauri::command] check_device_binding 返回的是 DeviceBindingResult
- *   结构体（JSON 对象：{status, detail, error_code?, match_score?}），导致前端
- *   拿到对象后与字符串比较永远不等 → device_mismatch 拦截视图永久失效 +
- *   deviceCheckResult 状态机紊乱。
- *
- *   现返回 types/verthys.ts 的 DeviceBindingResult 规范类型（单一数据源，
- *   与后端 controller/types.rs serde 序列化严格一致）。 */
+ * 返回 types/verthys.ts 的 DeviceBindingResult 规范类型（单一数据源，
+ * 与后端 controller/types.rs serde 序列化严格一致）。 */
 export async function checkDeviceBinding(): Promise<DeviceBindingResult> {
   return await ipc<DeviceBindingResult>("check_device_binding");
 }

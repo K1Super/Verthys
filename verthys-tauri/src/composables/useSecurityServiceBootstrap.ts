@@ -1,5 +1,5 @@
 /*
- * useSecurityServiceBootstrap.ts — P2 安全服务状态检测
+ * useSecurityServiceBootstrap.ts — 安全服务状态检测
  *
  * 服务由 perMachine 应用安装器随应用安装，应用内不再触发任何提权安装。
  * 这里只检测服务锚点；缺失时由 Gate 提示重新运行安装程序修复。

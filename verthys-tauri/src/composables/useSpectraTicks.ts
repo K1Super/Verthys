@@ -6,9 +6,9 @@
  *   UnlockView（intro 变体 — 充能/驻留/塌缩三态编排）
  *   HomeView  （echo 变体  — 静默回声：入场生长 + 驻留微脉动 + 微跳）
  *
- * 两组件此前各自内联一份参数生成（hash/光谱色/时序）— 本 composable
- * 消除该重复；确定性 hash 域（salt/区间）与原实现逐值一致，视觉形态
- * 恒定（非随机漂移）。
+ * 本 composable 为两组件共享单一参数生成源（hash/光谱色/时序），消除
+ * 重复实现；确定性 hash 域（salt/区间）为定值，视觉形态恒定
+ * （非随机漂移）。
  *
  * 样式层同步共享（styles/animations.css）：
  *   .spectra-tick 基础 + spectra-breathe（呼吸）+ spectra-jitter（微跳）

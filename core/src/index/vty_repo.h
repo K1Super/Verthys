@@ -169,6 +169,27 @@ int vty_repo_module_rekey(VtyVault *v, uint32_t index,
                           const uint8_t old_mdek[VTY_KEY_BYTES],
                           const uint8_t new_mdek[VTY_KEY_BYTES]);
 
+/* 全库轮换专用：把单条内容记录的内层分片信封从旧 MDEK/旧 epoch 换封到
+ * 新 MDEK/新 epoch。仅对非系统记录、且模块为 photo(0)/fileverthys(2) 生效；
+ * 普通明文载荷认证失败时保持 *rewrapped=0 且不分配输出。
+ * 调用方必须对 *rewrapped=1 的结果做 vty_repo_content_envelope_check 自检。 */
+int vty_repo_rewrap_content(uint8_t type, int module_index,
+                            const uint8_t old_mdek[VTY_KEY_BYTES],
+                            uint64_t old_epoch,
+                            const uint8_t new_mdek[VTY_KEY_BYTES],
+                            uint64_t new_epoch,
+                            const uint8_t *in, size_t in_len,
+                            uint8_t **out, size_t *out_len,
+                            int *rewrapped);
+
+/* 内容信封自检：按给定 MDEK/epoch 解封并校验结构。
+ * *openable=1 表示可解封；结构不符/认证失败时为 0；资源/内部错误返回
+ * 对应错误码（不得当作“不可解封”静默吞掉）。 */
+int vty_repo_content_envelope_check(const uint8_t mdek[VTY_KEY_BYTES],
+                                    uint64_t epoch,
+                                    const uint8_t *in, size_t in_len,
+                                    int *openable);
+
 /* 估算模块重写需要追加的字节数（含叶与索引开销，不含 10% 余量）。 */
 int vty_repo_module_rekey_bytes(VtyVault *v, uint32_t index, uint64_t *out);
 

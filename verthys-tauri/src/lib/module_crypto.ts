@@ -15,6 +15,7 @@
 import {
   verthysModuleKeyLock,
   verthysModuleOpen,
+  verthysModuleProbeOuter,
   verthysModuleSeal,
   type ModuleCryptParams,
   type VerthysResponse,
@@ -26,7 +27,7 @@ import { bytesToBase64 } from "../utils/binary_codec";
 export type CryptoModule = "photo" | "file";
 
 /** worker 错误码：认证失败（口令/密钥不匹配或数据被篡改） */
-const MODULE_ERR_AUTH = "ERR_00000002";
+export const MODULE_ERR_AUTH = "ERR_00000002";
 /** worker 错误码：模块密钥未解锁或已清除 */
 export const MODULE_ERR_LOCKED = "ERR_00000007";
 /** 文件块 v2 的 KDF 公开参数（与记录同形，可落盘） */
@@ -98,6 +99,24 @@ export async function openRecord(
     `解密记录(${kind})`,
   );
   return { dataB64: r.data ?? "", seq: r.seq, total: r.total };
+}
+
+/**
+ * 探测内容记录的外层信封（模块密钥层）是否完整。
+ *
+ * 供损坏扫描使用：不需要文件口令、不校验布局种类标签。
+ * 返回 true=外层可解封；false=外层认证失败（确定损坏）；
+ * 模块锁定/超时等无法判定的情况抛出 `ModuleCryptoError`，由调用方跳过。
+ */
+export async function probeOuterRecord(
+  module: CryptoModule,
+  dataB64: string,
+): Promise<boolean> {
+  const resp = await verthysModuleProbeOuter({ module, data: dataB64 });
+  if (resp.ok) return true;
+  const code = resp.error_code ?? resp.error ?? "";
+  if (code === MODULE_ERR_AUTH) return false;
+  throw new ModuleCryptoError("探测内容外层失败", code);
 }
 
 /** 生成文件块 v2 的口令校验块（口令是每个文件独立的用户输入） */

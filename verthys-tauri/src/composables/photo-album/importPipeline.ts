@@ -1,8 +1,6 @@
 /**
  * composables/photo-album/importPipeline.ts — 照片导入三阶段异步流水线
  *
- * Comprehensive_optimization：异步批处理流水线 — 核心编排器
- *
  * =============================================================================
  * 架构：三阶段完全解耦流水线
  * =============================================================================
@@ -70,31 +68,36 @@ import {
   TYPE_PHOTO_META,
   TYPE_PHOTO_THUMB,
   TYPE_PHOTO_CHUNK_SET,
-  MAX_INLINE_META_BYTES,
   MAX_CHUNKS_PER_IPC,
   MAX_IPC_PAYLOAD_BYTES,
   MAX_PHOTO_BYTES,
   PHOTO_FMT_SLIM,
 } from "../../constants/crypto_const";
 import { estimateBase64Size } from "../../cache/shared/base64-size";
-import { isProxy } from "vue";
 import {
   ChunkUploadCoordinator,
   ChunkUploadError,
 } from "./chunkUploadCoordinator";
-import type { PhotoCryptoSuccess, PhotoMetaCryptoSuccess } from "../../workers/photo-crypto.worker";
+import type { PhotoCryptoSuccess } from "../../workers/photo-crypto.worker";
 import type { SlimWorkerKeys } from "../../workers/photo-crypto-protocol";
-import { computeChunkHashesForB64, extractSlimFileSalt, type PhotoMeta } from "../../lib/crypto";
+import { extractSlimFileSalt, type PhotoMeta } from "../../lib/crypto";
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToBase64, bytesToHex } from "../../utils/binary_codec";
 import type { PhotoEntry, ParsedPhotoPreview } from "./types";
+import type {
+  ContainerImportAck,
+  ContainerImportPhoto,
+  ContainerImportRequest,
+  ContainerImportResponse,
+} from "../../workers/container-import.worker";
+import { handleWorkerRpc, isWorkerRpcRequest } from "../../workers/rpc-bridge";
 import { formatSize, makeThumbCssValue } from "./utils";
 import { createLogger } from "../../utils/logger";
 import { yieldToMain } from "../../utils/promise_utils";
 
 const log = createLogger("import-pipeline");
 
-/** 解析导入批次时间戳序：单调递增保证 createdAt 与 recordName 跨批次唯一 */
+/** 备份还原批次时间戳序：单调递增保证 recordName 跨批次唯一 */
 let lastImportTimestamp = 0;
 function nextImportTimestamp(): number {
   const now = Date.now();
@@ -149,6 +152,150 @@ function makeEntryKey(...parts: Array<string | number>): string {
 /** 由条目键与块序号派生非内容块键（同一导入项重试稳定，不跨文件复用）。 */
 function makeChunkKey(entryKey: string, seq: number | string): string {
   return bytesToHex(sha256(new TextEncoder().encode(`chunk|${entryKey}|${seq}`)));
+}
+
+/** 备份容器导入 Worker 最小接口（依赖注入：测试以伪实现替代真实 Worker） */
+export interface ContainerImportWorkerLike {
+  postMessage(
+    message: ContainerImportRequest | ContainerImportAck,
+    transfer?: Transferable[],
+  ): void;
+  onmessage: ((e: MessageEvent<unknown>) => void) | null;
+  onerror: ((e: ErrorEvent) => void) | null;
+  terminate(): void;
+}
+
+/** 默认导入 Worker 工厂：一次导入一个实例，会话结束即终止 */
+function defaultContainerImportWorkerFactory(): ContainerImportWorkerLike {
+  return new Worker(
+    new URL("../../workers/container-import.worker.ts", import.meta.url),
+    { type: "module" },
+  );
+}
+
+/** 容器导入的源数据（Tauri 模式：主线程按路径重读后转让给 Worker） */
+export interface ContainerImportSource {
+  /** 容器完整字节（转让后主线程不可再用） */
+  bytes: Uint8Array;
+  /** 导出令牌 */
+  token: string;
+}
+
+/**
+ * 容器导入通道：主线程与 Worker 的照片级交接。
+ *
+ * Worker 逐张解密并重封装，投递后等待 `ack`；主线程按序号取用（背压窗口 1）。
+ */
+interface ContainerImportBridge {
+  /** 等待指定序号的封装产物（Worker 失败时拒绝） */
+  acquire(index: number): Promise<ContainerImportPhoto>;
+  /** 确认该张已消费，允许 Worker 处理下一张 */
+  ack(index: number): void;
+  /** 终止 Worker 并拒绝所有等待者 */
+  dispose(): void;
+}
+
+/** 启动容器导入 Worker，建立序号级交接队列 */
+function startContainerImportWorker(
+  source: ContainerImportSource,
+  factory: () => ContainerImportWorkerLike,
+  total: number,
+): ContainerImportBridge {
+  const worker = factory();
+  /** 已投递但尚未被取用的照片（正常情况下最多 1 张） */
+  const ready = new Map<number, ContainerImportPhoto>();
+  const waiters = new Map<
+    number,
+    { resolve: (photo: ContainerImportPhoto) => void; reject: (error: Error) => void }
+  >();
+  let failure: Error | null = null;
+  let disposed = false;
+
+  const failAll = (error: Error): void => {
+    failure = error;
+    for (const waiter of waiters.values()) waiter.reject(error);
+    waiters.clear();
+    ready.clear();
+  };
+
+  worker.onmessage = (e: MessageEvent<unknown>) => {
+    if (isWorkerRpcRequest(e.data)) {
+      void handleWorkerRpc(worker, e.data);
+      return;
+    }
+    const message = e.data as ContainerImportResponse;
+    if (message.type === "photo") {
+      const waiter = waiters.get(message.index);
+      if (waiter) {
+        waiters.delete(message.index);
+        waiter.resolve(message);
+      } else {
+        ready.set(message.index, message);
+      }
+      return;
+    }
+    if (message.type === "failure") {
+      failAll(new Error(message.error));
+      return;
+    }
+    if (message.type === "done") {
+      // 完成后不得再有取用请求：残留等待或迟到的 acquire 都会永久挂起，
+      // 统一置为失败（正常情况下此刻已无等待者，不会误伤）
+      failAll(new Error("容器照片数量与解析结果不一致"));
+    }
+  };
+  worker.onerror = (e: ErrorEvent) => {
+    failAll(new Error(e.message || "导入 Worker 异常终止"));
+  };
+
+  // ArrayBuffer 精确覆盖时直接转让；存在视图偏移时先复制，避免连带转让无关内存
+  const buffer = source.bytes.buffer as ArrayBuffer;
+  const transfer =
+    source.bytes.byteOffset === 0 && source.bytes.byteLength === buffer.byteLength
+      ? buffer
+      : (source.bytes.slice().buffer as ArrayBuffer);
+  try {
+    worker.postMessage(
+      { id: 1, fileBytes: transfer, token: source.token, expectedPhotos: total },
+      [transfer],
+    );
+  } catch (e) {
+    // 转让失败（缓冲区已分离等）：必须终止刚创建的 Worker，避免后台实例泄漏
+    try {
+      worker.terminate();
+    } catch {
+      /* 终止失败随引用释放回收 */
+    }
+    throw e;
+  }
+
+  return {
+    acquire(index: number): Promise<ContainerImportPhoto> {
+      if (failure) return Promise.reject(failure);
+      const photo = ready.get(index);
+      if (photo) {
+        ready.delete(index);
+        return Promise.resolve(photo);
+      }
+      return new Promise<ContainerImportPhoto>((resolve, reject) => {
+        waiters.set(index, { resolve, reject });
+      });
+    },
+    ack(index: number): void {
+      if (disposed) return;
+      worker.postMessage({ id: 1, type: "ack", index });
+    },
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      failAll(new Error("导入会话已结束"));
+      try {
+        worker.terminate();
+      } catch {
+        /* 终止失败不影响会话收尾 */
+      }
+    },
+  };
 }
 
 /** 单个照片导入结果（用于构建 PhotoEntry） */
@@ -234,9 +381,9 @@ const WORKER_INFRA_ERROR_NAMES = new Set([
 /**
  * 组装「部分失败」会话错误文案：保留稳定的语义前缀，附失败构成摘要。
  *
- * 历史实现只透出固定文案「部分记录写入失败」，调用方无法区分加密失败、
- * 写入被拒、工作线程异常等成因，线上问题只能靠复现定位；此处按失败原因
- * 聚合计数，并对工作线程类故障追加自愈提示（可重试语义）。
+ * 固定文案「部分记录写入失败」无法区分加密失败、写入被拒、工作线程异常
+ * 等成因，线上问题只能靠复现定位；此处按失败原因聚合计数，并对工作线程类
+ * 故障追加自愈提示（可重试语义）。
  */
 function partialFailureError(
   failedRecords: FailedRecord[],
@@ -338,6 +485,12 @@ async function uploadExternalChunks(
     if (!resp.ok || resp.failed_indices.length > 0) {
       throw new ChunkUploadError(
         resp.error ?? `外置块上传失败（${resp.failed_indices.length} 块被拒绝）`,
+      );
+    }
+    // 响应必须与请求一一对应：缺陷响应若被放行，索引会引用缺失/错位的块 ID
+    if (resp.ids.length !== batch.length) {
+      throw new ChunkUploadError(
+        `外置块上传响应不完整（请求 ${batch.length} 块，返回 ${resp.ids.length} 个 ID）`,
       );
     }
     for (const id of resp.ids) ids.push(id);
@@ -450,16 +603,14 @@ async function uploadSlimChunkSet(
 
 /** 流水线执行结果 */
 export interface ImportPipelineResult {
-  /** 是否成功完成（无任何失败记录且无不可解密项） */
+  /** 是否成功完成（无任何失败记录） */
   ok: boolean;
   /** 成功导入的照片列表（用于构建 PhotoEntry） */
   imported: ImportedPhotoResult[];
-  /** 失败记录明细（imported + failedRecords + skipped + undecryptable === total 恒成立） */
+  /** 失败记录明细（imported + failedRecords + skipped === total 恒成立） */
   failedRecords: FailedRecord[];
   /** 去重跳过的照片数（前端哈希命中 + 后端已提交） */
   skipped: number;
-  /** 无法用当前模块密钥解密的照片数（解析导入专属；非失败、不可重试、不入列） */
-  undecryptable: number;
   /** 提交总数（输入文件数） */
   total: number;
   /** 总耗时（毫秒） */
@@ -469,8 +620,8 @@ export interface ImportPipelineResult {
 }
 
 /**
- * 导入结果四分类不变量校验：
- * imported + failedRecords + skipped + undecryptable 必须与总提交数一致，四分类互斥。
+ * 导入结果三分类不变量校验：
+ * imported + failedRecords + skipped 必须与总提交数一致，三类互斥。
  * 违约时记录错误日志但不中断流程（所有环境均记录，保证生产可观测）。
  */
 function assertResultInvariant(
@@ -479,14 +630,13 @@ function assertResultInvariant(
   skippedCount: number,
   total: number,
   logger: { error: (msg: string, ...args: unknown[]) => void },
-  undecryptableCount = 0,
 ): void {
-  // 四分类记账不变量：任何环境都记录违约——历史实现仅在 DEV 校验，生产静默，
+  // 记账不变量：任何环境都记录违约——若仅在 DEV 校验、生产静默，
   // 分类错位会以"导入数量对不上"的形式暴露却无日志可查，故障不可定位。
-  if (importedCount + failedCount + skippedCount + undecryptableCount !== total) {
+  if (importedCount + failedCount + skippedCount !== total) {
     logger.error(
       `导入结果不变量违约: imported=${importedCount} failed=${failedCount} ` +
-        `skipped=${skippedCount} undecryptable=${undecryptableCount} total=${total}`,
+        `skipped=${skippedCount} total=${total}`,
     );
   }
 }
@@ -509,8 +659,6 @@ interface ProduceContext {
   recordSkipped(index: number, elapsedMs: number): void;
   /** 推进一个条目的处理进度（读取/加密完成即推进；幂等） */
   recordProgress(index: number, elapsedMs: number): void;
-  /** 记一个不可解密条目（非失败、不重试、不写入列表；解析导入专用） */
-  recordUndecryptable(index: number): void;
   /** 记一个条目写入/加密失败：按错误类型分类，并完成致命错误收集与归因采集 */
   recordProduceError(error: Error, index: number, name: string): void;
   /** 记一个条目本地拒绝（读取失败 / 超限）：显式原因分类，不进致命集合 */
@@ -616,7 +764,7 @@ export class ImportPipeline {
     exec: () => Promise<ImportPipelineResult>,
   ): Promise<ImportPipelineResult> {
     if (total === 0) {
-      return { ok: true, imported: [], failedRecords: [], skipped: 0, undecryptable: 0, total: 0, elapsedMs: 0 };
+      return { ok: true, imported: [], failedRecords: [], skipped: 0, total: 0, elapsedMs: 0 };
     }
     if (this.running) {
       return {
@@ -626,7 +774,6 @@ export class ImportPipeline {
           index: i, name: nameOf(i), reason: "unknown", retryable: false,
         })),
         skipped: 0,
-        undecryptable: 0,
         total,
         elapsedMs: 0,
         error: "已有导入任务进行中，请等待完成",
@@ -642,6 +789,9 @@ export class ImportPipeline {
 
   /** 导入会话期间的外置块协调器（跨照片聚合提交；非会话路径为 null） */
   private chunkUploads: ChunkUploadCoordinator | null = null;
+
+  /** 备份还原会话的 Worker 交接通道（非还原路径为 null） */
+  private containerImport: ContainerImportBridge | null = null;
 
   /**
    * 导入会话编排骨架（文件导入与解析导入共享）。
@@ -677,7 +827,6 @@ export class ImportPipeline {
         imported: [],
         failedRecords: allFailed("unknown", false),
         skipped: 0,
-        undecryptable: 0,
         total,
         elapsedMs: performance.now() - startAt,
         error: `导入会话初始化失败: ${error}`,
@@ -695,7 +844,6 @@ export class ImportPipeline {
         imported: [],
         failedRecords: allFailed("unknown", true),
         skipped: 0,
-        undecryptable: 0,
         total,
         elapsedMs: performance.now() - startAt,
         error: classifyBeginFailure(beginResult.error, beginResult.error_code),
@@ -720,8 +868,6 @@ export class ImportPipeline {
     const imported: ImportedPhotoResult[] = [];
     const failedRecords: FailedRecord[] = [];
     let skipped = 0;
-    /** 不可解密条目数（解析导入专用：非失败、不重试、不写入列表；文件导入恒为 0） */
-    let undecryptable = 0;
     /** 取消标志：signal 中止后停止投喂新条目，进行收尾 */
     let aborted = false;
     /** 会话级致命错误收集器：后端容量告罄等不可恢复错误在此集合 */
@@ -730,9 +876,9 @@ export class ImportPipeline {
     let firstErrorName: string | undefined;
 
     /**
-     * 逐条目记账位图：每个输入下标只能落入 imported / failed / skipped /
-     * undecryptable 四类之一。以真实下标为准，未入账兜底不再用计数差推算
-     * 下标（计数差在批量去重跳过时会把失败记录标到错误文件上）。
+     * 逐条目记账位图：每个输入下标只能落入 imported / failed / skipped
+     * 三类之一。以真实下标为准，未入账兜底不再用计数差推算下标
+     * （计数差在批量去重跳过时会把失败记录标到错误文件上）。
      */
     const accounted = new Uint8Array(total);
     /**
@@ -925,11 +1071,6 @@ export class ImportPipeline {
           advanceProgress(index, elapsedMs, 1);
         },
         recordProgress: (index, elapsedMs) => { advanceProgress(index, elapsedMs); },
-        recordUndecryptable: (index) => {
-          accounted[index] = 1;
-          undecryptable++;
-          advanceProgress(index, 0);
-        },
         recordProduceError: (error, index, name) => {
           accounted[index] = 1;
           failedRecords.push({
@@ -953,12 +1094,12 @@ export class ImportPipeline {
         abort: () => { aborted = true; },
       };
 
-      // 导入性能修复：生产者并行化 + yieldToMain 让出主线程
+      // 生产者并行化 + yieldToMain 让出主线程
       //
-      // 根因：旧实现 for 循环内 await 逐条串行处理，主线程被永久阻塞，
+      // 串行处理（for 循环内 await 逐条）会让主线程被永久占用，
       //       requestAnimationFrame 回调被挤压在任务队列末尾，进度条冻结。
       //
-      // 修复：
+      // 要点：
       //   1. 并发生产：N 个并发生产者（默认核心数折半并钳制在 2..8），并行读取与提交；
       //      读取并发不按 2×核心数放大：磁盘与单写者吞吐是瓶颈，过量读取
       //      只会放大内存驻留与命令队列压力
@@ -1040,8 +1181,8 @@ export class ImportPipeline {
       await this.batchCache.end();
 
       /* 未入账兜底：生产异常 / 取消 / 消费者异常导致的未产出条目按真实下标
-       * 补记，保证 imported + failed + skipped + undecryptable === total
-       * 在取消、致命、部分失败与成功四条返回路径上恒成立。 */
+       * 补记，保证 imported + failed + skipped === total 在取消、致命、
+       * 部分失败与成功四条返回路径上恒成立。 */
       if (fatalErrors.length > 0) {
         padUnaccounted(fatalReason(fatalErrors), false);
       } else {
@@ -1053,15 +1194,12 @@ export class ImportPipeline {
         // 以 importEnd(false) 保留 WAL 检查点，下次导入自动续传去重
         await this.endSessionSafely(false, "import");
         this.progress.end(false);
-        assertResultInvariant(
-          imported.length, failedRecords.length, skipped, total, log, undecryptable,
-        );
+        assertResultInvariant(imported.length, failedRecords.length, skipped, total, log);
         return {
           ok: false,
           imported,
           failedRecords,
           skipped,
-          undecryptable,
           total,
           elapsedMs: performance.now() - startAt,
           error: "ABORTED",
@@ -1080,7 +1218,6 @@ export class ImportPipeline {
           imported,
           failedRecords,
           skipped,
-          undecryptable,
           total,
           elapsedMs: performance.now() - startAt,
           error: fatalReason(fatalErrors) === "storage-full"
@@ -1093,16 +1230,13 @@ export class ImportPipeline {
         // 部分失败：保留 WAL 供续传，向下游透出错误语义而非成功
         await this.endSessionSafely(false, "import");
         this.progress.end(false);
-        assertResultInvariant(
-          imported.length, failedRecords.length, skipped, total, log, undecryptable,
-        );
+        assertResultInvariant(imported.length, failedRecords.length, skipped, total, log);
         const allStorageFailed = failedRecords.every((r) => r.reason === "storage-full");
         return {
           ok: false,
           imported,
           failedRecords,
           skipped,
-          undecryptable,
           total,
           elapsedMs: performance.now() - startAt,
           error: allStorageFailed
@@ -1115,20 +1249,18 @@ export class ImportPipeline {
       await this.endSessionSafely(true, "import");
 
       // 会话成功收敛后触发孤儿块 GC（崩溃残留块清理；best-effort，失败不阻断成功语义）
-      verthysGcOrphanChunks().catch(() => {});
+      verthysGcOrphanChunks().catch((e) => {
+        log.warn(`${label}孤儿块清理失败（不影响已完成的导入）:`, e);
+      });
 
       // ===== 结束进度追踪 =====
       this.progress.end(true);
 
       const elapsedMs = performance.now() - startAt;
-      assertResultInvariant(
-        imported.length, failedRecords.length, skipped, total, log, undecryptable,
-      );
+      assertResultInvariant(imported.length, failedRecords.length, skipped, total, log);
       log.info(
         `${label}流水线完成: imported=${imported.length}, failed=${failedRecords.length}, ` +
-          `skipped=${skipped}` +
-          (undecryptable > 0 ? `, undecryptable=${undecryptable}` : "") +
-          `, elapsed=${elapsedMs.toFixed(0)}ms`,
+          `skipped=${skipped}, elapsed=${elapsedMs.toFixed(0)}ms`,
       );
 
       return {
@@ -1136,7 +1268,6 @@ export class ImportPipeline {
         imported,
         failedRecords,
         skipped,
-        undecryptable,
         total,
         elapsedMs,
       };
@@ -1158,7 +1289,7 @@ export class ImportPipeline {
       this.progress.end(false);
 
       // 异常路径：未入账条目（既未成功也未跳过也无失败记录）统一记为未知失败，
-      // 保证四分类不变量在任何返回路径成立
+      // 保证三分类不变量在任何返回路径成立
       padUnaccounted("unknown", true);
 
       return {
@@ -1166,7 +1297,6 @@ export class ImportPipeline {
         imported,
         failedRecords,
         skipped,
-        undecryptable,
         total,
         elapsedMs: performance.now() - startAt,
         error,
@@ -1331,223 +1461,159 @@ export class ImportPipeline {
         log.error(`加密失败: ${fileInput.name}`, e);
         ctx.recordProduceError(e, i, fileInput.name);
       })
-      // 加密任务 settle 后才释放源字节预算（读取结果此前一直被任务引用）
+      // 加密任务 settle 后才释放源字节预算（读取结果在 settle 前一直被任务引用）
       .finally(releaseBytes);
 
     ctx.addSubmit(submitPromise);
   }
 
   /**
-   * Parsed Import：执行 .venc 解析照片的导入流水线
+   * 备份还原：执行 .venc 容器的正式导入流水线
    *
-   * 与 run() 的区别（全部收敛在 produceParsedItem 一处）：
-   *   - 输入：ParsedPhotoPreview[]（已解密的 meta + 已加密的 chunks）
-   *   - 加密：仅重新加密 meta（chunks 已加密；瘦身布局沿用来源包裹密钥）
-   *   - 传输器：使用 submitMetaOnly() 而非 submit()
-   *   - 无文件读取、无缩略图生成、无 chunk 加密、无取消信号
+   * 与文件导入的区别（全部收敛在 produceContainerItem 一处）：
+   *   - 输入：预览列表（已校验结构的清单）+ 容器字节（转让给导入 Worker）
+   *   - 解密/校验/重封装：Worker 内逐帧完成，主线程只消费单张产物
+   *   - 传输器：复用外置块上传（块已用当前模块 MDEK 重新加密）
+   *   - 无文件读取、无缩略图生成、无取消信号
    *
    * 共享基础设施：会话编排（runSession）统一承担——WAL 断点续传、批量 IPC、
    * 背压队列、生产者调度与让出、进度状态机、哈希去重、失败归因与结束分支、
    * 批量三层缓存同步。
    *
-   * @param parsedPhotos 解析预览列表（doParse 阶段产出）
+   * @param previews 预览列表（doParse 阶段产出，按容器顺序）
+   * @param source 容器字节与令牌（字节所有权转让给 Worker）
+   * @param workerFactory 导入 Worker 工厂（测试注入点；默认真实 Worker）
    * @returns 导入结果（含成功列表 / 跳过数 / 失败数 / 耗时）
    */
-  async runParsed(
-    parsedPhotos: ParsedPhotoPreview[],
+  async runContainer(
+    previews: ParsedPhotoPreview[],
+    source: ContainerImportSource,
+    workerFactory: () => ContainerImportWorkerLike = defaultContainerImportWorkerFactory,
   ): Promise<ImportPipelineResult> {
-    const nameOf = (i: number): string => parsedPhotos[i].name;
-    // 会话级批次时间戳：createdAt 与记录名同源，跨条目共享同一基准
+    if (previews.length === 0) {
+      return {
+        ok: true, imported: [], failedRecords: [], skipped: 0, total: 0, elapsedMs: 0,
+      };
+    }
+    const nameOf = (i: number): string => previews[i].name;
+    // 会话级批次时间戳：仅用于生成跨批次唯一的记录名；照片创建时间保留清单原值
     const importTimestamp = nextImportTimestamp();
-    return await this.runExclusive(parsedPhotos.length, nameOf, () =>
-      this.runSession({
-        label: "解析导入",
-        total: parsedPhotos.length,
-        nameOf,
-        produce: (i, ctx) => this.produceParsedItem(parsedPhotos, i, importTimestamp, ctx),
-      }),
-    );
+    return await this.runExclusive(previews.length, nameOf, async () => {
+      // 互斥通过后才启动 Worker 并挂载通道：并发调用不得改写正在运行会话的
+      // 通道引用，否则先到的会话会因通道被置空而整批失败
+      const b = startContainerImportWorker(source, workerFactory, previews.length);
+      this.containerImport = b;
+      try {
+        return await this.runSession({
+          label: "备份还原",
+          total: previews.length,
+          nameOf,
+          produce: (i, ctx) => this.produceContainerItem(previews, i, importTimestamp, ctx),
+        });
+      } finally {
+        this.containerImport = null;
+        b.dispose();
+      }
+    });
   }
 
   /**
-   * 解析导入的单条生产策略：外置判定 → 块上传 / 内联 → meta-only 加密 → 入列。
+   * 备份还原的单条生产策略：取 Worker 产物 → 外置块上传 → meta 加密 → 入列。
    *
-   * 与文件导入的差异：输入是已解密 meta + 已加密块（无需读文件与缩略图生成），
-   * 加密只重写 meta；meta 缺失（来源模块密钥不匹配）计入不可解密分类。
-   * 会话编排（取消 / 背压 / 去重 / 进度 / 结束分支）由 runSession 统一承担。
+   * 去重键为清单内 BLAKE3 文件哈希（内容身份）：同一内容在任意备份文件、
+   * 任意设备上重导都会命中同一条目键。Worker 的块级 AEAD 与整图哈希校验
+   * 已在产物投递前完成，本方法不再重复校验载荷。
    *
-   * @param parsedPhotos 解析预览列表（会话内共享，按索引取用）
-   * @param i 条目下标（编排层保证唯一）
-   * @param importTimestamp 会话级批次时间戳（createdAt 与记录名同源）
+   * @param previews 预览列表（会话内共享，按索引取用）
+   * @param i 条目下标（与 Worker 投递序号一致）
+   * @param importTimestamp 会话级批次时间戳（记录名唯一化；照片 createdAt 保留清单原值）
    * @param ctx 生产上下文（记账与入列的唯一通道）
    */
-  private async produceParsedItem(
-    parsedPhotos: ParsedPhotoPreview[],
+  private async produceContainerItem(
+    previews: ParsedPhotoPreview[],
     i: number,
     importTimestamp: number,
     ctx: ProduceContext,
   ): Promise<void> {
-
-    const ph = parsedPhotos[i];
-
-    // 仅处理 meta 非 null 的照片（同设备导入：chunks 已用当前模块密钥加密）
-    //   meta 为 null 的照片（模块密钥不匹配）计入不可解密分类：
-    //   非失败（不可重试也无重试意义）、不写入列表，由调用方展示原因
-    if (!ph.meta) {
-      ctx.recordUndecryptable(i);
-      await yieldToMain();
+    const ph = previews[i];
+    const bridge = this.containerImport;
+    if (!bridge) {
+      ctx.recordProduceError(new Error("导入通道未就绪"), i, ph.name);
       return;
     }
 
-    /* 解析导入没有源文件路径，使用展示名/大小/序号派生非内容键；
-     * 不是内容哈希，不用于内容存在性判断。 */
-    const entryKey = makeEntryKey("parsed", ph.name, ph.meta.size, i);
-    if (ctx.isCommitted(entryKey)) {
-      ctx.recordSkipped(i, 0);
-      await yieldToMain();
-      return;
+    try {
+      // 背压：Worker 逐张投递并等待 ack，主线程按序号取用
+      const photo = await bridge.acquire(i);
+
+      // 预览与产物必须指向同一内容：容器在预览后被替换时显式失败，
+      // 否则条目键与落库内容会指向不同照片（静默错位）
+      if (photo.fileHash !== ph.fileHash) {
+        throw new Error("备份文件在预览后已变更，请重新选择文件");
+      }
+
+      // 内容身份键：与备份文件、来源设备、导出批次均无关
+      const entryKey = makeEntryKey("parsed", photo.fileHash);
+
+      if (ctx.isCommitted(entryKey)) {
+        ctx.recordSkipped(i, 0);
+        return;
+      }
+
+      const recordName = `parsed_${importTimestamp}_${i}`;
+      const submitTime = performance.now();
+      const metaTemplate: PhotoMeta = {
+        name: photo.name,
+        mime: photo.mime,
+        size: photo.size,
+        thumbB64: photo.thumbB64,
+        chunkIds: [],
+        chunkDataB64: [],
+        chunkHashes: photo.chunkHashes,
+        fileHash: photo.fileHash,
+        // 备份是数据迁移而非新建：创建时间按容器清单还原，不从导入时刻重造
+        createdAt: photo.createdAt,
+      };
+
+      ctx.recordProgress(i, performance.now() - submitTime);
+      const record = await this.finalizeExternalRecord(
+        photo.chunkB64List,
+        photo.chunkHashes,
+        metaTemplate,
+        photo.thumbB64,
+        recordName,
+        entryKey,
+      );
+      // 前置幂等检查后此处必然未命中；保留复核兜底
+      if (ctx.isCommitted(record.entry_key)) {
+        ctx.recordSkipped(i, 0);
+        return;
+      }
+      await ctx.enqueue({
+        index: i,
+        record,
+        name: photo.name,
+        displayName: photo.name,
+        thumbB64: photo.thumbB64,
+        size: photo.size,
+        mime: photo.mime,
+      });
+    } catch (e) {
+      const error = e instanceof Error ? e : new Error(String(e));
+      log.error(`备份还原失败: ${ph.name}`, error);
+      ctx.recordProduceError(error, i, ph.name);
+    } finally {
+      bridge.ack(i);
     }
-    // 提升为 const 局部：闭包内保留非空收窄（属性级收窄不进嵌套函数）。
-    //   解析产物由 usePhotoParse 以 shallowRef 承载（不建立深层代理），
-    //   meta 及其嵌套数组本就是 Worker 结构化克隆出的纯数据 —— 常规路径
-    //   直接引用，不再做整包复制。
-    //   防御式净化：若调用方传入 Vue 响应式 meta（深层代理），Worker 池
-    //   postMessage 会抛 DataCloneError，整张照片被误计为加密失败；此路径
-    //   极少发生，故仅在此做一次 JSON 往返脱代理（不在热路径复制整包密文）。
-    const meta: PhotoMeta = isProxy(ph.meta)
-      ? (JSON.parse(JSON.stringify(ph.meta)) as PhotoMeta)
-      : ph.meta;
-
-    // 外置判定（按块密文总量：b64 长度 × 3/4 ≈ 原始字节）
-    const b64Total = ph.chunkB64List.reduce((s, c) => s + c.length, 0);
-    const approximateRawBytes = Math.floor((b64Total * 3) / 4);
-    const external = approximateRawBytes > MAX_INLINE_META_BYTES;
-
-    // 外置路径先去重：避免为已 committed 文件做块上传与加密
-    if (external && ctx.isCommitted(entryKey)) {
-      ctx.recordSkipped(i, 0);
-      await yieldToMain();
-      return;
-    }
-
-    // 逐块密文哈希（仅外置路径使用）：优先取解析产物（doParse 阶段与
-    // 块负载同步计算），缺失时现场补算（与块密文同源）
-    let parsedChunkHashes: string[] | null = null;
-    if (external) {
-      parsedChunkHashes =
-        meta.chunkHashes && meta.chunkHashes.length === ph.chunkB64List.length
-          ? meta.chunkHashes
-          : computeChunkHashesForB64(ph.chunkB64List);
-    }
-
-    // 记录名（与旧实现一致：`parsed_${timestamp}_${index}`）
-    const recordName = `parsed_${importTimestamp}_${i}`;
-
-    // 来源为瘦身布局时，索引重加密需要同盐与包裹密钥（都是公开数据）
-    const slim: SlimWorkerKeys | undefined =
-      meta.fmt === PHOTO_FMT_SLIM && meta.wrappedFileKey
-        ? {
-            fileSaltB64: bytesToBase64(extractSlimFileSalt(meta.wrappedFileKey)),
-            wrappedFileKey: meta.wrappedFileKey,
-          }
-        : undefined;
-
-    // 记录提交时间（用于计算单文件加密耗时）
-    const submitTime = performance.now();
-
-    // 构造写入记录：外置路径经块上传 + meta-only 加密；内联原路径
-    // 不 await：让加密/上传与下一次构造并行（真正的流水线）
-    const submitPromise: Promise<void> = external
-      ? (async () => {
-          if (!parsedChunkHashes) {
-            throw new ChunkUploadError("外置块哈希缺失，无法上传块");
-          }
-          /* 加密已完成：立即推进进度，块上传/落盘在后台继续 */
-          const fileElapsed = performance.now() - submitTime;
-          ctx.recordProgress(i, fileElapsed);
-          const record = await this.finalizeExternalRecord(
-            ph.chunkB64List,
-            parsedChunkHashes,
-            // 缩略图引用由本次写入的记录决定：清空来源设备的记录 ID，
-            // 由流水线在缩略图记录落库后回填（来源 ID 在本地无意义）
-            { ...meta, chunkDataB64: [], chunkIds: [], thumbId: undefined, createdAt: importTimestamp + i },
-            meta.thumbB64 || "",
-            recordName,
-            entryKey,
-          );
-          // 前置幂等检查后此处必然未命中；保留复核兜底
-          if (ctx.isCommitted(record.entry_key)) {
-            ctx.recordSkipped(i, fileElapsed);
-            return;
-          }
-          await ctx.enqueue({
-            index: i,
-            record,
-            name: ph.name,
-            displayName: meta.name,
-            thumbB64: meta.thumbB64 || "",
-            size: meta.size,
-            mime: meta.mime,
-          });
-        })()
-      : photoWorkerPool
-          .submitMetaOnly({
-            meta: {
-              ...meta,
-              entryKey,
-              chunkIds: [],                       // 内联存储，不使用单独块记录
-              chunkDataB64: [...ph.chunkB64List], // 内联已加密块
-              createdAt: importTimestamp + i,     // 保证唯一性
-            },
-            recordName,
-            entryKey,
-            ...(slim ? { slim } : {}),
-          })
-          .then(async (success: PhotoMetaCryptoSuccess) => {
-            // 计算单文件加密耗时（提交 → 完成）
-            const fileElapsed = performance.now() - submitTime;
-
-            // ===== 生产者幂等（断点续传；键不是内容哈希） =====
-            if (ctx.isCommitted(entryKey)) {
-              ctx.recordSkipped(i, fileElapsed);
-              return;
-            }
-
-            // 构造 BatchRecordInput
-            const record: BatchRecordInput = {
-              rtype: TYPE_PHOTO_META,
-              name: success.recordName,
-              entry_key: entryKey,
-              data_b64: success.metaB64,
-            };
-
-            /* 加密完成即推进进度；入列与落盘在后台继续 */
-            ctx.recordProgress(i, fileElapsed);
-            await ctx.enqueue({
-              index: i,
-              record,
-              name: success.name,
-              displayName: meta.name,
-              thumbB64: success.thumbB64,
-              size: success.size,
-              mime: success.mime,
-            });
-          });
-
-    const guarded = submitPromise.catch((e: Error) => {
-      log.error(`meta-only 加密失败: ${recordName}`, e);
-      ctx.recordProduceError(e, i, ph.name);
-    });
-    ctx.addSubmit(guarded);
   }
 
   /**
    * 初始化导入会话（含断点续传恢复）。
    *
    * `verthysImportBegin` 本身会在创建会话时加载遗留 WAL 快照并返回
-   * committed 条目键；此前额外调用 `verthysWalRecover` 仅用于日志，
-   * 会让同一份 WAL 被完整解析两次。大 WAL（多次中断后的续传）下这是
-   * “准备导入”阶段的可观开销，已删除该冗余扫描。
+   * committed 条目键；额外调用 `verthysWalRecover` 会让同一份 WAL 被
+   * 完整解析两次，大 WAL（多次中断后的续传）下是“准备导入”阶段的可观
+   * 开销，故此处不再重复扫描。
    */
   private async beginImportSession(): Promise<ImportBeginResult> {
     return await verthysImportBegin();
@@ -1574,6 +1640,17 @@ export class ImportPipeline {
     recordName: string,
     entryKey: string,
   ): Promise<BatchRecordInput> {
+    // 分块产物结构校验：块为空或哈希项数与块数不符时，写出的索引会携带
+    //   无法一一对应的逐块诊断值，后续读取/导出无法按块定位，必须在写入前拒绝。
+    if (chunkB64List.length === 0) {
+      throw new Error(`照片 "${recordName}" 无可写入数据块`);
+    }
+    if (chunkHashes.length > 0 && chunkHashes.length !== chunkB64List.length) {
+      throw new Error(
+        `照片 "${recordName}" 块哈希项数与块数不一致（哈希 ${chunkHashes.length} ≠ 块 ${chunkB64List.length}）`,
+      );
+    }
+
     // 索引瘦身布局：缩略图与块集先落独立记录（获得 ID 后回填索引），
     //   索引随后按同一文件盐加密；既有布局维持"块 + 索引"两步。
     const slimLayout = metaTemplate.fmt === PHOTO_FMT_SLIM && !!metaTemplate.wrappedFileKey;
@@ -1603,7 +1680,9 @@ export class ImportPipeline {
       : 0;
 
     // 瘦身索引只保留聚合引用：逐块 ID 与逐块哈希移入块集记录
-    //   （内联数组会让索引体积随照片大小线性增长）
+    //   （内联数组会让索引体积随照片大小线性增长）；既有布局必须把本次
+    //   实际写入的块哈希同步进索引，保证后续导出可做逐块密文校验。
+    const hashesForMeta = chunkHashes.length > 0 ? chunkHashes : metaTemplate.chunkHashes;
     const metaForWrite: PhotoMeta = slimLayout
       ? {
           ...metaTemplate,
@@ -1616,7 +1695,12 @@ export class ImportPipeline {
           chunkSetId,
           chunkCount: chunkIds.length,
         }
-      : { ...metaTemplate, entryKey, chunkIds };
+      : {
+          ...metaTemplate,
+          entryKey,
+          chunkIds,
+          ...(hashesForMeta ? { chunkHashes: hashesForMeta } : {}),
+        };
 
     const metaFinal = await photoWorkerPool.submitMetaOnly({
       meta: metaForWrite,

@@ -1,8 +1,8 @@
 /*
- * verthys_api_utils.h — 共享工具模块头（从 verthys_api.c 拆分）
+ * verthys_api_utils.h — 共享工具模块头
  *
- * 收录从 verthys_api.c 抽离的纯工具/辅助函数原型、宏与全局变量声明，
- * 供 verthys_api.c 及其他内部翻译单元复用。
+ * 纯工具/辅助函数原型、宏与全局变量声明，供 verthys_api.c 及其他
+ * 内部翻译单元复用。
  *
  */
 #ifndef VERTHYS_API_UTILS_H
@@ -12,7 +12,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* ---------- 宏定义（自 verthys_api.c 迁移） ---------- */
+/* ---------- 宏定义 ---------- */
 #define VERTHYS_READ_FILE_MAX_BYTES ((size_t)4u * 1024u * 1024u * 1024u)
 
 /* 工作线程汇合超时（毫秒）：Deinit/Lock 等待后台线程退出（预热/进度消费）
@@ -20,7 +20,7 @@
  * 回收——避免阻塞点被外部卡死时 Deinit/Lock 永久挂起。 */
 #define VERTHYS_JOIN_TIMEOUT_MS 3000u
 
-/* ---------- 全局变量（自 verthys_api.c 迁移） ---------- */
+/* ---------- 全局变量 ---------- */
 extern int g_has_avx2;
 
 /* ---------- 单调时钟 ---------- */
@@ -50,7 +50,7 @@ void ctx_free_getrecord_cache(struct VerthysContext *ctx);
  *   detach                       v→NULL 释放并计数 −1。
  *   replace_externally_freed     仅用于 Verthys_V4RotateCommit：vty_rotate_commit
  *                                已释放旧库并返回新库，只赋值、计数不变。
- * 计数口径 = 进程内持有存活 会话的上下文数，供防御状态查询读取；
+ * 计数口径 = 进程内持有存活会话的上下文数，供防御状态查询读取；
  * 不遍历上下文、不读裸指针。 */
 void vault_session_attach(struct VerthysContext *ctx, struct VtyVault *v);
 void vault_session_detach(struct VerthysContext *ctx);
@@ -63,7 +63,7 @@ uint32_t vault_session_resident_count(void);
 void ctx_zero_sensitive(struct VerthysContext *ctx);
 
 /* ---------- 格式检测 ----------
- * 读取文件头 8 字节判断格式：仅识别 固定头 "VRTY"。
+ * 读取文件头 8 字节判断格式：仅识别固定头 "VRTY"。
  * 未知格式返回 VERTHYS_FMT_NONE，由调用方拒绝。 */
 VerthysContainerVersion detect_format(const uint8_t *buf, size_t size);
 

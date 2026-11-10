@@ -11,8 +11,8 @@
  *   1. 注入胡椒（verthys_pepper_inject）
  *   2. OS 托管胡椒（CNG 持久化机器密钥）
  *
- * OS 托管不可用且未注入时直接失败（禁止静默降级）：零熵兜底常量
- * 已从默认构建移除——常量随源码公开，任何拿到二进制的人都能还原，
+ * OS 托管不可用且未注入时直接失败（禁止静默降级）：默认构建不含
+ * 零熵兜底常量——常量随源码公开，任何拿到二进制的人都能还原，
  * 走该来源的容器离线爆破退化为纯口令熵。
  */
 #include "verthys_pepper.h"
@@ -141,7 +141,7 @@ int pepper_file_fingerprint(const uint8_t meta[8],
  *   - source_type：生成时的胡椒来源（VerthysPepperSource 取值）
  *   - key_level / key_provider：实际封装所用密钥的级别与 KSP
  *     （CmkKeyLevel / CmkKeyProvider 取值），加载时据此直达解包，
- *     密钥级别不再随运行权限上下文漂移
+ *     密钥级别不随运行权限上下文漂移
  *   - fingerprint：HMAC-SHA256(域分离密钥, meta||label||cipher) 前 8 字节，
  *     头部与载荷共同绑定，检测文件损坏/篡改/错拿
  */
@@ -511,7 +511,7 @@ int verthys_pepper_inject(const uint8_t pepper[VERTHYS_KEY_BYTES])
     memcpy(g_pepper, pepper, VERTHYS_KEY_BYTES);
     pepper_lock_memory();
     g_pepper_source = VERTHYS_PEPPER_SOURCE_INJECTED;
-    g_pepper_source_error = 0;  /* 审查修正：注入解除历史来源错误态 */
+    g_pepper_source_error = 0;  /* 注入后清除来源错误态 */
     g_pepper_initialized = 1;
     return 0;
 }
@@ -533,12 +533,9 @@ int verthys_pepper_init(void)
         return 0;
     }
     if (rc == VERTHYS_PEPPER_LOAD_SOURCE_ERR) {
-        /* 来源失败禁止静默兜底。
-         * 原缺陷：解包失败静默回退编译内嵌常量 → 解锁以错误 pepper 派生
-         * MEK → key_a/b 解包失败 → 用户看到"密码错误"，无从诊断。
-         * 现行为：置来源错误标志（verthys_pepper_source_error 查询），
-         * 解锁路径返回 VERTHYS_ERR_PEPPER_SOURCE，前端提示"保险库安全源
-         * 已变更"。 */
+        /* 来源失败禁止静默兜底：置来源错误标志（verthys_pepper_source_error
+         * 查询），解锁路径返回 VERTHYS_ERR_PEPPER_SOURCE，前端提示"保险库
+         * 安全源已变更"，而非以错误 pepper 派生 MEK 后误报"密码错误"。 */
         g_pepper_source_error = 1;
         return -1;
     }
@@ -676,7 +673,7 @@ int verthys_pepper_reconstruct_shamir(const VerthysPepperShard *shards,
     verthys_secure_zero(pepper, sizeof(pepper));
     pepper_lock_memory();
     g_pepper_source = VERTHYS_PEPPER_SOURCE_SHAMIR;
-    g_pepper_source_error = 0;  /* 审查修正：重建解除历史来源错误态 */
+    g_pepper_source_error = 0;  /* 重建后清除来源错误态 */
     g_pepper_initialized = 1;
     return 0;
 }

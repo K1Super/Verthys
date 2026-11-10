@@ -118,7 +118,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
   };
 
   /**
-   * 执行批量删除（不含确认交互，由 confirmDelete 调用）。
+   * 按 metaId 批量删除（选择删除与损坏清理共用）。
    *
    * 响应链路：
    *   1. 同步启动删除（deleteAndPersistBatch 同步登记 pendingDeletionIds 与
@@ -131,23 +131,25 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
    *
    * 级联权威来源：外置块台账（chunk id → owner meta id）。前端只提交
    * metaId，后端单次事务删除 meta + 其全部外置块（含瘦身缩略图/块集）。
+   *
+   * @returns true=删除已提交；false=删除未发生（卡片与缓存已恢复）
    */
-  const executeBatchDelete = async () => {
-    if (deleting.value) return;
-    const ids = Array.from(selectedPhotoIds.value);
-    if (ids.length === 0) return;
-    // 集合命中代替 includes：万张相册全选时避免 O(n·m)
-    const idSet = new Set(ids);
-    const photosToRemove = photos.value.filter(p => idSet.has(p.id));
+  const deleteByMetaIds = async (
+    metaIdsInput: number[],
+    successMessage: (count: number) => string,
+  ): Promise<boolean> => {
+    if (deleting.value) return false;
     const metaIds = [...new Set(
-      photosToRemove
-        .map(p => p.metaId)
-        .filter((id): id is number => typeof id === "number" && id > 0),
+      metaIdsInput.filter((id): id is number => typeof id === "number" && id > 0),
     )];
+    if (metaIds.length === 0) return true;
+
+    const metaIdSet = new Set(metaIds);
+    const photosToRemove = photos.value.filter(
+      (p) => typeof p.metaId === "number" && metaIdSet.has(p.metaId),
+    );
 
     deleting.value = true;
-    selectedPhotoIds.value = new Set();
-    selectMode.value = false;
 
     // 先启动删除再移除卡片：异步函数同步段会立即登记待删过滤集合与快照
     const deletePromise: Promise<boolean> = isTauri && metaIds.length > 0
@@ -155,7 +157,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
       : Promise.resolve(true);
 
     // 即刻响应：卡片立即消失，缓存同步为当前视图
-    removeShallowItems(photos, p => idSet.has(p.id));
+    removeShallowItems(photos, p => typeof p.metaId === "number" && metaIdSet.has(p.metaId));
     setModuleCache("photos", toPhotoCacheEntries(photos.value));
 
     try {
@@ -163,14 +165,14 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
       try {
         deleted = await deletePromise;
       } catch (e) {
-        console.warn("[executeBatchDelete] deleteAndPersistBatch 失败", e);
+        console.warn("[deleteByMetaIds] deleteAndPersistBatch 失败", e);
       }
       if (!deleted) {
         // 删除未发生：恢复卡片与缓存（保持记录 ID 升序）
         replaceShallowArray(photos, sortByMetaId([...photos.value, ...photosToRemove]));
         setModuleCache("photos", toPhotoCacheEntries(photos.value));
         showError("删除未生效（数据仍保留），请重试");
-        return;
+        return false;
       }
 
       // 删除已在 worker 单事务内提交并落盘；此处确认缓存落盘并释放续传锁。
@@ -179,7 +181,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
         try {
           outcome = await persistVerthysDetailed();
         } catch (e) {
-          console.error("[executeBatchDelete] persistVerthysDetailed 异常", e);
+          console.error("[deleteByMetaIds] persistVerthysDetailed 异常", e);
           outcome = { kind: "not_persisted", reason: String(e) };
         }
 
@@ -192,7 +194,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
         try {
           await verthysForgetImportKeys(forgetKeys, metaIds);
         } catch (e) {
-          console.warn("[executeBatchDelete] 续传幂等锁释放失败（不影响删除结果）", e);
+          console.warn("[deleteByMetaIds] 续传幂等锁释放失败（不影响删除结果）", e);
         }
 
         // 失效三层缓存（摘要 + 全量 + 扫描回退），杜绝删除复活
@@ -206,10 +208,10 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
         verthysGcOrphanChunks()
           .then((collected) => {
             if (collected > 0) {
-              console.info(`[executeBatchDelete] 孤儿块 GC 清理 ${collected} 条残留块记录`);
+              console.info(`[deleteByMetaIds] 孤儿块 GC 清理 ${collected} 条残留块记录`);
             }
           })
-          .catch((e) => console.warn("[executeBatchDelete] 孤儿块 GC 失败（可下次再触发）", e));
+          .catch((e) => console.warn("[deleteByMetaIds] 孤儿块 GC 失败（可下次再触发）", e));
       }
 
       // 删除成功后才回收缩略图 Blob URL；失败恢复时 URL 仍然有效
@@ -221,14 +223,42 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
       if (outcome.kind === "not_persisted") {
         showError("删除已执行但落盘校验失败，重启后照片可能恢复。请重试。");
       } else if (outcome.kind === "partial_persisted") {
-        showToast(`已删除 ${ids.length} 张照片（落盘校验警告）：${outcome.reason}`);
+        showToast(`${successMessage(metaIds.length)}（落盘校验警告）：${outcome.reason}`);
       } else {
-        showToast(`已删除 ${ids.length} 张照片`);
+        showToast(successMessage(metaIds.length));
       }
+      return true;
     } finally {
       deleting.value = false;
     }
   };
+
+  /** 执行批量删除（不含确认交互，由 confirmDelete 调用） */
+  const executeBatchDelete = async () => {
+    if (deleting.value) return;
+    const photoIds = Array.from(selectedPhotoIds.value);
+    if (photoIds.length === 0) return;
+    // 集合命中代替 includes：万张相册全选时避免 O(n·m)
+    const idSet = new Set(photoIds);
+    const metaIds = photos.value
+      .filter((p) => idSet.has(p.id))
+      .map((p) => p.metaId)
+      .filter((id): id is number => typeof id === "number" && id > 0);
+
+    selectedPhotoIds.value = new Set();
+    selectMode.value = false;
+
+    await deleteByMetaIds(metaIds, (count) => `已删除 ${count} 张照片`);
+  };
+
+  /**
+   * 清理确定损坏（内容层认证失败）的照片记录。
+   *
+   * 仅接受调用方经扫描确认的 metaId；删除走与手动删除相同的台账级联、
+   * 落盘校验与孤儿块回收链路。调用方必须先取得用户显式确认。
+   */
+  const cleanupDamaged = async (metaIds: number[]): Promise<boolean> =>
+    deleteByMetaIds(metaIds, (count) => `已清理 ${count} 条无法解密的记录`);
 
   /** 照片点击：选择模式下切换选中，非选择模式下打开查看器 */
   const onPhotoClick = (ph: PhotoEntry) => {
@@ -255,5 +285,7 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
     confirmDelete,
     cancelDeleteConfirm,
     onPhotoClick,
+    /** 损坏清理：按扫描确认的 metaId 删除（不可逆，调用方先取用户确认） */
+    cleanupDamaged,
   };
 }

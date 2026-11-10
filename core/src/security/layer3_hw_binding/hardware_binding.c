@@ -1,7 +1,7 @@
 /*
  * hardware_binding.c — MachineGuid 机器实例指纹实现
  *
- * 弃用 CPUID/SMBIOS/UEFI 路径（缺陷依据同头注）。
+ * 绑定源为 MachineGuid（不依赖 CPUID/SMBIOS/UEFI）。
  *
  * 指纹构造：
  *   1. RegGetValueW 读取 HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid
@@ -52,7 +52,7 @@ static int read_machine_guid(char *out, size_t cap)
                               NULL,
                               NULL,
                               NULL);
-    /* RegGetValueW 第一次调用探测大小失败并不必要：直接按固定容量读取 */
+    /* 首次调用只为探测所需大小，结果不参与判定；随后按固定容量读取 */
     (void)st;
 
     wchar_t guid_w[128];

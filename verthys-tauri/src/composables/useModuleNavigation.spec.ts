@@ -1,12 +1,24 @@
 // @vitest-environment happy-dom
 /*
- * useModuleNavigation.spec.ts — 开发填充按模块弹窗分发
+ * useModuleNavigation.spec.ts — 导航守卫与分包就绪
  *
- * 覆盖：模块密钥在弹窗打开前缓存，弹窗打开或切换时按 pendingModuleId 填入，
- * 不再出现“只填第一个模块”的行为；未派发填充事件时不写入。
+ * 覆盖：
+ *   1. 开发填充按模块弹窗分发：模块密钥在弹窗打开前缓存，打开或切换时
+ *      按 pendingModuleId 填入；未派发填充事件时不写入。
+ *   2. 分包就绪先于导航提交：冷包未完成前不切换；后发请求不被先发慢包覆盖。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
+
+const loaderMock = vi.hoisted(() => ({
+  ensureModuleLoaded: vi.fn(async (_id: string) => {}),
+}));
+
+vi.mock("../app/module-loaders", () => ({
+  ensureModuleLoaded: loaderMock.ensureModuleLoaded,
+  isModuleNavId: (id: string) =>
+    ["accounts", "photos", "verthys", "tools", "security"].includes(id),
+}));
 
 vi.mock("../lib/keyManager", async () => {
   const { ref } = await import("vue");
@@ -21,6 +33,7 @@ vi.mock("../lib/keyManager", async () => {
     moduleKeyStatusFailedRef: ref(false),
     moduleKeyEnabledRef: ref({ photo: true, accounts: true, fileverthys: true }),
     MODULE_LABELS: { photo: "拾光", accounts: "存签", fileverthys: "清藏" },
+    touchSession: vi.fn(),
   };
 });
 
@@ -59,6 +72,8 @@ let host: HTMLDivElement | null = null;
 let api: NavigationApi;
 
 beforeEach(() => {
+  loaderMock.ensureModuleLoaded.mockReset();
+  loaderMock.ensureModuleLoaded.mockImplementation(async () => {});
   host = document.createElement("div");
   document.body.appendChild(host);
   const Comp = defineComponent({
@@ -108,5 +123,37 @@ describe("useModuleNavigation 开发填充", () => {
     await api.switchModule("accounts");
     await nextTick();
     expect(api.moduleKeyInput.value).toBe("");
+  });
+});
+
+describe("useModuleNavigation 分包就绪", () => {
+  it("分包未就绪前不提交导航，就绪后提交", async () => {
+    let release!: () => void;
+    loaderMock.ensureModuleLoaded.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+
+    const switching = api.switchModule("security");
+    await Promise.resolve();
+    expect(api.currentModule.value).toBe("");
+
+    release();
+    await switching;
+    expect(api.currentModule.value).toBe("security");
+  });
+
+  it("后发切换优先，先发慢包完成后不得覆盖", async () => {
+    let releaseSlow!: () => void;
+    loaderMock.ensureModuleLoaded.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { releaseSlow = resolve; }),
+    );
+
+    const slowSwitch = api.switchModule("tools");
+    await api.switchModule("security");
+    expect(api.currentModule.value).toBe("security");
+
+    releaseSlow();
+    await slowSwitch;
+    expect(api.currentModule.value).toBe("security");
   });
 });

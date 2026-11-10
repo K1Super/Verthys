@@ -117,9 +117,14 @@ flowchart TB
   当日志与当前文件代、位图、策略摘要完全一致且平台 PCR 仍等于策略摘要时，
   才用口令解出的 `K_c` 重封并重新验证。平台状态变化时绝不自动重绑，否则
   等于用一次崩溃恢复绕过 PCR 策略。
+- **内容一致性**：模块 MDEK 轮换时，每条内容记录的内层分片信封必须按旧
+  MDEK/旧 epoch 解封、按新 MDEK/新 epoch 重封；照片索引的内联 `chunkDataB64`
+  递归换封。逐条回读并验证新库可解封，任一失败返回完整性错误并中止作业，
+  源库不替换（`rot_copy_records` + `vty_repo_rewrap_content`）。
 - **keep_old + PCR**：保留的 `.old-*` 备份与源库同时被新密钥覆盖，其普通
   口令解锁会被 PCR 门拒绝，只能用恢复码打开；UI 在勾选保留备份且容器启用
-  PCR 时给出该警示。
+  PCR 时给出该警示。宿主默认 `keep_old=true`：轮换是全库密钥重建，
+  旧库是唯一可独立打开的兜底副本，用户显式取消才删除。
 - **口令复核与熔断**：Begin / AttachKeyfile 的 user 槽验证与普通解锁共用
   持久化失败计数与退避窗口；失败按认证失败记账，成功清零。
 - **只读与失败态**：作业期间源库 `rotate_pending=1`，所有写入口返回
@@ -158,6 +163,26 @@ flowchart TB
 - **缺失状态**：任一见证域仍有密钥即 fail-closed；回滚额外要求容器 `generation >= 2`（成功创建至少一次 `save_meta`）也 fail-closed。只有状态、两套见证都不存在且 `generation < 2` 才视为首次运行；恢复码是显式逃生通道。
 - **升级迁移**：旧路径见证（熔断）与裸 UUID 见证（回滚）只允许迁移期验证；验证通过后轮换到新 ID 并删除旧键。旧键的指纹是特定 TPM 密钥的公钥，删除后无法重建同一指纹，旧状态不可重放。迁移失败不静默清零。
 - **残余边界**：同一用户进程仍可删除状态与见证，形成首次运行；ACL 只能隔离其它用户。TPM NV 在当前 Windows 平台被驱动阻断（实测 `0x80280400`），不作为方案依赖；严格机器级隔离预留在 `vty_machine_limiter` 接口，由后续 SYSTEM 服务在 ProgramData 维护机器级预算。
+
+### 2.8 本机容器口令（`container.secret`）的位置与生命周期
+
+- **用途**：安装版默认容器口令由本机生成（32 字节 CSPRNG，Base64 注入 C 层），以 DPAPI 绑定当前用户密封落盘；它参与 user 槽 KDF，是打开既有库的必要材料。
+- **主位置**：`SHGetKnownFolderPath(FOLDERID_LocalAppData)\Verthys\KeyMaterial\container.secret`。该目录与熔断/回滚状态同源，不属于应用数据目录，卸载器“Delete the application data”不会删除。
+- **便携/自定义数据目录**：口令保存在 `data_dir\container.secret`，保证数据目录整体可搬移；卸载器不处理自定义目录。
+- **旧位置迁移**：修复前版本位于 `%LOCALAPPDATA%\com.verthys.app\container.secret`；首次读取时校验并原子复制到主位置，旧副本保留为只读兜底，不删除。
+- **解锁语义**：普通解锁只接受既有密钥材料；主/旧位置都不存在时返回 `E_KEY_MATERIAL_MISSING`，不生成新密钥、不计入口令熔断。主位置损坏时可用旧位置有效副本恢复。
+- **卸载保护**：`installer-hooks.nsh` 的 PREUNINSTALL 在删除应用数据前把旧位置副本转移到主位置；复制失败即中止卸载。
+- **恢复通道**：恢复码不依赖该文件；恢复码解锁后需重绑本机设备槽（`reseal_device`），以当前密钥材料重封 device 槽。
+
+### 2.9 内容外层探测（损坏扫描）
+
+- **命令**：worker `module_probe_outer` 只验证分片外层（MDEK/epoch）能否解封：
+  不校验布局种类标签（历史布局可能没有）、不派生每文件口令、不向前端返回明文，
+  仅返回布尔结论。C 层接口仍是既有的 `Verthys_V4ChunkOpen`，不新增 ABI。
+- **用途**：清藏损坏扫描在用户不提供每文件口令的前提下，判断分块是否已无法
+  由当前模块密钥解封；照片损坏扫描复用同一能力但走 `module_open`（需要解析 meta）。
+- **边界**：外层通过不代表内层口令密文正确；未设独立密码的文件（无内容层
+  信封）与历史加密布局（缺 KDF/口令校验块）不参与探测，扫描结果中单独计数。
 
 ## 3. 解锁流程数据流
 
@@ -213,6 +238,15 @@ flowchart TB
 - **何时执行**：A 在容器解锁入口（`Verthys_V4Unlock` / `Verthys_V4UnlockKeyfile` / `Verthys_V4UnlockRecovery` / `Verthys_V4Create`，`integrity_verify_startup`）；B 在解锁成功后一次 + 之后每次写路径 API（Add/Delete/Import/ChangePassword/Flush）经 `runtime_hash_verify_periodic` 时间门控重算（30 分钟间隔）。
 - **惩罚**：失配即 `emergency_report(KILL, ...)` → 内存绝育 + 终止进程；`.rhat` 表自身纳入 `.vsec` HMAC（防文件级改表）。
 - 构建闭环：`core/tools/rhash_gen.c --patch <dll|exe> [--xlist core|full]` 解析 map 文件（符号 RVA）+ `.pdata`（函数边界）+ `.reloc`（重定位表），对所选 X 清单函数计算 BLAKE2b 补丁 `.rhat`；清单以 X-macro 单源定义，删改任一符号即构建失败（禁静默降级）。
+
+### 4.1 后台模块巡检的威胁分级（误报边界）
+
+后台巡检（`security/background_patrol.rs` + `security/module_whitelist.rs`）对已加载模块做路径白名单与系统目录哈希基线校验，但“路径不在白名单”本身不是注入证据：NVIDIA App 的 `nvui.dll`、Bonjour 的 `mdnsNSP.dll` 等签名有效的第三方组件会正常注入所有进程。
+
+- **硬威胁（可触发应急熔断）**：未知路径且 Authenticode 签名无效；系统目录哈希失配且签名无效；受信位置抽样签名失效。
+- **软告警（仅日志与 `PATROL_SUSPECT` 审计，绝不销毁 Worker）**：未知路径但签名有效；系统哈希失配但签名有效（Windows Update 运行期换文件）；文件不可读导致哈希无法核验。
+- **签名结论容忍离线**：先做整链吊销检查；失败时以“不检查吊销”复核一次，通过则记为 `ValidRevocationUnknown`（离线/CRL 不可达不等于未签名）。
+- **持久化状态模式升级**：旧版按“路径即威胁”记录的计数与已触发集合在 schema < 2 时整体丢弃，避免历史误报继续压制或触发熔断。
 
 ## 5. 威胁建模（STRIDE 摘要）
 

@@ -37,10 +37,7 @@ const PUSH_CHUNK_SIZE = 4096;
  * @param trigger 可选的触发函数（默认 triggerRef(arr)）
  *
  * @example
- * // 旧代码（深度响应式）：
- * accounts.value[idx].pwdVisible = true;
- *
- * // 新代码（shallowRef）：
+ * // 替代直接修改元素属性：
  * updateShallowItem(accounts, idx, { pwdVisible: true });
  */
 export function updateShallowItem<T extends object>(

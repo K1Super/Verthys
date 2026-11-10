@@ -6,15 +6,14 @@ import type { SecuredString } from "./SecuredString";
  *
  * Base64 字段附 original_size:u64（原始字节数，base64 解码后长度）
  *
- * name / data 改为 SecuredString（Zeroizing<String>）：
- *   - Drop 时自动 zeroize 堆内存，消除 secure_zero_records 中 ptr::write_bytes
- *     对 String 的 UB 覆写
+ * name / data 使用 SecuredString（Zeroizing<String>）：
+ *   - Drop 时自动 zeroize 堆内存
  *   - 透明 serde（序列化为普通 JSON 字符串），前端契约无感
- *   - Deref<Target=str> 兼容现有 as_str()/len()/is_empty()/as_ptr() 调用
+ *   - Deref<Target=str> 兼容 as_str()/len()/is_empty()/as_ptr() 调用
  */
 export type VerthysRecordEntry = { id: number, 
 /**
- * 记录类型（后续迁移至 RecordType newtype）
+ * 记录类型
  */
 rtype: number, 
 /**

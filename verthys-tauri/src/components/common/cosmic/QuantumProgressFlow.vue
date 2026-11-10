@@ -1,36 +1,15 @@
 <!--
   QuantumProgressFlow.vue — 量子能量导流通道进度条
 
-  设计哲学：
-    - 量子能量导流通道作为独立的进度条组件，用于全局复用
-    - 进度严格控制：percent 严格对应后端代码关键节点 emit 的值（非纯动画）
-    - 提示词单一数据源：直接显示后端 emit 的 message（global-verthys.ts 中精简映射）
-      前端不再维护预设映射表，消除前后端提示词不一致问题
-    - 淡雅美学：低饱和度青/紫/粉，禁止浓厚原色
-    - 顶级动态：粒子流、节点脉动、能量呼吸、扫光
+  职责：渲染导流通道 DOM 与节点状态，纯展示组件，单向数据流，零业务逻辑。
+
+  设计约束：
+    - 进度来源单一：percent 完全由上游提供（安全中心为感知层输出的按帧
+      连续视觉值，其它导入场景为真实进度），组件不做时间平滑
+    - 提示词单一数据源：直接显示上游 emit 的 message，前端不维护预设映射
+    - 淡雅美学：低饱和度青/紫/粉，不使用浓厚原色
+    - 动态构成：粒子流、节点脉动、能量呼吸、扫光
     - 防跳变：固定高度槽位（min-height），加载/隐藏零抖动
-
-  组成：
-    1. 量子核心加载动画（可选，showLoader=true 时复用 QuantumCoreLoader 组件）
-    2. 量子能量导流通道进度条（按代码关键节点推进 percent）
-
-
-  Props:
-    - loading: boolean              是否显示（true 时显示导流通道，可选量子核心动画）
-    - percent?: number              进度百分比（0-100，严格按代码节点推进）
-    - message?: string              后端 emit 的精简提示词（单一数据源）
-    - showMeta?: boolean            是否显示百分比/耗时（默认 false，解锁/验证不显示）
-    - compact?: boolean             紧凑模式（缩小通道尺寸）
-    - showLoader?: boolean          是否显示量子核心加载动画（默认 true，复用 QuantumCoreLoader）
-    - dimmed?: boolean              失败冻结降级样式标识（仅样式，无判断逻辑）
-
-  Emits: 无
-  用法：
-    <QuantumProgressFlow
-      :loading="unlocking"
-      :percent="unlockProgressPercent"
-      :message="unlockProgressMsg"
-    />
 -->
 <template>
   <div
@@ -40,10 +19,11 @@
       compact,
       'no-text': !displayText,
       'no-loader': !showLoader,
+      'qf-complete': safePercent >= 99.9,
       'qf-dimmed': dimmed,
     }"
   >
-    <!-- ===== 量子核心加载动画（复用 QuantumCoreLoader 组件，消除重复代码） ===== -->
+    <!-- ===== 量子核心加载动画（复用 QuantumCoreLoader） ===== -->
     <QuantumCoreLoader v-if="showLoader" :loading="true" />
 
     <!-- ===== 量子能量导流通道进度条 ===== -->
@@ -53,8 +33,14 @@
       <div class="qf-port qf-port-in"></div>
       <div class="qf-port qf-port-out"></div>
 
-      <!-- 能量填充（进度推进） -->
-      <div class="qf-fill" :style="{ width: safePercent + '%' }">
+      <!-- 能量填充（进度推进）
+           合成器驱动：只改 transform: scaleX，不动 width —
+           width 每帧触发布局与渐变重绘，主线程被解密/IPC 占用时必然掉帧；
+           transform 由合成线程补间，主线程繁忙时仍保持连续。 -->
+      <div
+        class="qf-fill"
+        :style="{ transform: `scaleX(${safePercent / 100})` }"
+      >
         <!-- 能量流粒子（填充内流动） -->
         <div class="qf-stream"></div>
         <div class="qf-stream qf-stream-2"></div>
@@ -73,33 +59,17 @@
 </template>
 
 <script setup lang="ts">
-/**
- * QuantumProgressFlow — 量子能量导流通道进度条（全局复用）
- *
- * 职责：仅渲染导流通道 DOM 与节点状态，纯展示组件，单向数据流，零业务逻辑
- *
- * 重构说明：
- *   - 删除内置 7 层量子核心加载动画（与 QuantumCoreLoader.vue 重复）
- *   - 通过 <QuantumCoreLoader> 组件化复用，单一数据源
- *   - 本组件作为全局进度条复用基准（替代已删除的 QuantumProgressBar）
- *
- * 提示词策略（根治）：
- *   - 后端 emit 的 message 作为单一数据源（global-verthys.ts 中精简映射）
- *   - 前端直接显示 message prop，不再维护预设映射表
- *   - 消除前端预设阈值与后端实际 emit percent 不一致导致的提示词提前/滞后
- *
- * 防跳变机制：
- *   - 固定 min-height 槽位（230px），loading 切换时窗口零抖动
- */
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue';
 import QuantumCoreLoader from './QuantumCoreLoader.vue';
 
 interface Props {
   /** 是否显示（true 时显示导流通道，可选量子核心动画） */
   loading: boolean;
-  /** 进度百分比（0-100，严格按后端代码节点推进） */
+  /** 进度百分比（0-100，上游连续视觉值或真实进度） */
   percent?: number;
-  /** 后端 emit 的精简提示词（单一数据源，来自 global-verthys.ts emit message） */
+  /** 进度来源（感知层 ref）：传入后本组件直接订阅，父视图不再逐帧重渲染 */
+  percentSource?: Readonly<Ref<number>>;
+  /** 后端 emit 的精简提示词（单一数据源） */
   message?: string;
   /** 已用时间（毫秒，仅 showMeta=true 时显示） */
   elapsed?: number;
@@ -125,44 +95,70 @@ const props = withDefaults(defineProps<Props>(), {
 
 /* ===== 计算属性 ===== */
 
-/**
- * 当前显示的提示词
- *
- * 根治：直接使用后端 emit 的 message（单一数据源）
- * 后端在 global-verthys.ts / security-session.ts 中已统一为精简高级文案：
- *   - initCreate: 清理上一会话/检查存储路径/启动安全核心/创建加密库/
- *                 检查全局密钥记录/建立摘要索引/加载模块密钥/启动会话守卫/创建完成
- *   - initUnlock: 清理上一会话/检查存储路径/启动安全核心/检查安全门禁/
- *                 解锁加密库/派生密钥并解锁/建立摘要索引/同步密钥状态/
- *                 加载模块密钥/启动会话守卫/解锁完成
- *   - verifyGlobalKey: 定位密钥记录/扫描密钥记录/验证全局密钥/激活安全会话/验证完成
- *   - initGlobalKey: 准备派生安全密钥/派生安全密钥/确认密钥落盘/推进密钥状态/初始化完成
- *   - lockAll: 清理会话/等待轮换作业收敛/等待数据落盘/停止后台任务/
- *              清除内存密钥/安全落盘/停止安全会话/销毁安全核心/清理完成
- * 百分比仅由安全中心进度感知层输出（离散阶段间的平滑与收束在感知层完成）
- */
+/** 当前显示的提示词（直接取上游 emit 的 message — 单一数据源） */
 const displayText = computed<string>(() => props.message || '');
 
-/**
- * 表现层钳制防御：percent 收束至 0..100，NaN/Infinity/负值按 0 处理。
- * 上游信号均已各自钳制，此层兜底保证异常输入不会造成宽度溢出。
- */
-const safePercent = computed<number>(() => {
-  const p = Number(props.percent) || 0;
-  if (!Number.isFinite(p)) return 0;
-  return Math.min(100, Math.max(0, p));
+/* ===== 30fps 显示采样 =====
+   感知层以 60fps 输出视觉值；呈现层按 30fps 采样并交给合成器过渡，
+   视觉等价，主线程样式写入减半。 */
+const sourceValue = (): number => {
+  const p = props.percentSource ? props.percentSource.value : props.percent;
+  const n = Number(p) || 0;
+  return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0;
+};
+
+const displayPercent = ref(sourceValue());
+let hasSampled = false;
+let lastSampleAt = 0;
+let pendingSample: number | null = null;
+let sampleTimer: ReturnType<typeof setTimeout> | null = null;
+
+const nowMs = (): number =>
+  typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+const applySample = (value: number): void => {
+  displayPercent.value = value;
+  lastSampleAt = nowMs();
+  hasSampled = true;
+};
+
+watch(sourceValue, (value) => {
+  if (!hasSampled || nowMs() - lastSampleAt >= 33) {
+    if (sampleTimer !== null) {
+      clearTimeout(sampleTimer);
+      sampleTimer = null;
+    }
+    pendingSample = null;
+    applySample(value);
+    return;
+  }
+  pendingSample = value;
+  if (sampleTimer === null) {
+    sampleTimer = setTimeout(() => {
+      sampleTimer = null;
+      if (pendingSample !== null) {
+        applySample(pendingSample);
+        pendingSample = null;
+      }
+    }, 33);
+  }
 });
+
+onBeforeUnmount(() => {
+  if (sampleTimer !== null) {
+    clearTimeout(sampleTimer);
+    sampleTimer = null;
+  }
+});
+
+/** 呈现层显示值（0..100，已在 sourceValue 中钳制，30fps 采样） */
+const safePercent = computed<number>(() => displayPercent.value);
 </script>
 
 <style scoped>
-/* ============================================================
-   quantum-flow.css — 量子能量导流通道进度条（scoped 引入）
-   min-height 已在 quantum-flow.css 中定义，禁止在此覆盖
-     原因：Vite 会将 <style scoped> 中 @import 内容与自定义样式拆分到
-     不同 CSS chunk，使用不同 data-v 属性，导致自定义 min-height 无法
-     匹配元素（data-v 不一致），量子加载动画被压缩
-   ql-loader.css 由 QuantumCoreLoader 组件自行 scoped 引入管理
-     （本组件不直接渲染 .ql-loader 元素，通过 <QuantumCoreLoader> 复用）
-   ============================================================ */
+/* 导流通道样式经 @import 引入。
+ * 禁止在此覆盖 min-height：Vite 会将 @import 内容与自定义样式拆到不同
+ * CSS chunk，data-v 属性不一致，覆盖值无法命中元素，量子加载动画被压缩。
+ * .ql-loader 样式由 QuantumCoreLoader 自行 scoped 引入（本组件不直接渲染）。 */
 @import '../../../styles/security/quantum-flow.css';
 </style>

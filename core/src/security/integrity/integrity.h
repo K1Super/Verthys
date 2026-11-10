@@ -26,7 +26,7 @@ void integrity_verify_cache_reset(void);
 /*
  * 启动时一次性验签（Verthys_V4Unlock 入口调用）。
  *
- * 机制：构建脚本（build_core.release.ps1）在链接完成后计算 .text 与
+ * 机制：构建脚本在链接完成后计算 .text 与
  * .rdata 节的文件内容 HMAC-SHA256（固定域密钥，同时编译进 DLL 与脚本），
  * 写入 DLL 新增只读节 .vsec。运行时从磁盘读取自身 PE 文件，重算两节
  * HMAC 并与 .vsec 基准做常量时间比对。

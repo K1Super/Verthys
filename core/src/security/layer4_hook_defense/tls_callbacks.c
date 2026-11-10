@@ -1,8 +1,7 @@
 /*
  * tls_callbacks.c — TLS 回调注册（仅写入 TLS_INIT_MARKER）
  *
- *
- *   完整 IAT 校验逻辑在 tls_loader_init()（DLL_PROCESS_ATTACH 中）执行。
+ *   TLS 加载标志由 tls_loader_init()（Verthys_Init 中、LoaderLock 释放后）校验。
  *
  * 注册方式：
  *   通过 #pragma alloc_text 将 tls_callback 注册到 .CRT$XLB 节，

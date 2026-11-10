@@ -8,8 +8,6 @@
  *   3. 宇宙尘埃微粒（50 颗缓慢漂移）
  *   4. 星座连线（9 颗主星 + 10 条连线）
  *
- * 从 MainView.vue 抽离，功能 100% 保留。
- *
  * 性能优化（CosmicBackground 统一帧驱动）：
  *   星点/尘埃不再携带 CSS animationDelay / animationDuration，
  *   改为输出数值相位（phase ∈ [0,1) 归一化相位偏移）与周期（dur，秒），
@@ -24,9 +22,9 @@ import { masterFrameLoop } from "../core/master-frame-loop";
 export interface CosmicStar {
   id: string;
   style: Record<string, string>;
-  /** 归一化相位偏移 ∈ [0,1)，等效原 animationDelay */
+  /** 归一化相位偏移 ∈ [0,1)，对应 animationDelay 语义 */
   phase: number;
-  /** 闪烁周期（秒），等效原 animationDuration */
+  /** 闪烁周期（秒），对应 animationDuration 语义 */
   dur: number;
 }
 
@@ -56,7 +54,7 @@ export function useCosmicBackground() {
   let parallaxCurrentX = 0;
   let parallaxCurrentY = 0;
 
-  /* 性能根治：main-view 铺满视口 → 用缓存的视口尺寸归一化，
+  /* 性能：main-view 铺满视口 → 用缓存的视口尺寸归一化，
    * 去掉每次 mousemove 的 getBoundingClientRect 强制布局读取
    * （布局读取会打断渲染流水线，高频移动 = 每帧强制 reflow） */
   let vw = window.innerWidth;

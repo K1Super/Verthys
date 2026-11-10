@@ -210,6 +210,20 @@ describe("TransitionEngine", () => {
     expect(e.warpEnv).toBeGreaterThan(0);
   });
 
+  it("直接进入：skipIntro 跳过启动逆渡，不产生包络与符号积分", () => {
+    const e = new TransitionEngine();
+    e.skipIntro();
+    advance(e, 3);
+    expect(e.warpEnv).toBe(0);
+    expect(e.dirW).toBe(0);
+    expect(e.swirl).toBe(0);
+    expect(e.warpDist).toBe(0);
+    /* 跳过只针对启动逆渡：后续正渡仍可从零启动 */
+    e.triggerEnter();
+    advance(e, 1);
+    expect(e.warpEnv).toBeGreaterThan(0);
+  });
+
   it("积分历史环形覆盖：早于最早保留样本 → 0", () => {
     const e = makeEntering();
     const records = pushFrames(e, 80, 0.1, 0.05);

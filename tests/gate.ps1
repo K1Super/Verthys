@@ -189,7 +189,7 @@ foreach ($id in $checks.Attacks) {
 }
 
 # 3) PCR 能力门：PCR 读取与 PCR 绑定正/负控必须在真实 TPM 上成立；
-#    TBS 授权会话与 TPM NV 的可用性只记录，由偏差登记说明平台边界。
+#    TBS 授权会话与 TPM NV 的可用性只记录为平台能力边界。
 $p2Caps = $null
 if ($Stage -eq 'P2') {
     $probeExe = Join-Path $buildDir 'core/tests/Release/vty_tpm_probe.exe'
@@ -252,7 +252,7 @@ if ($Stage -in @('PI-3', 'PI-4')) {
 }
 
 # 3c) 身份键门禁 —— 生产代码禁止内容哈希作为去重/寻址键。
-#     旧字段名（已删除）不得复活；去内容化回归用例必须在场（由全量 vitest 执行）。
+#     旧字段名不得复活；去内容化回归用例必须在场（由全量 vitest 执行）。
 if ($Stage -in @('PI-4', 'PI-5')) {
     $idKeyRoots = @(
         (Join-Path $repoRoot 'verthys-tauri/src'),

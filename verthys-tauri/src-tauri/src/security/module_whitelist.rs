@@ -27,6 +27,41 @@ pub struct UnknownModule {
     pub reason: String,
 }
 
+/// 模块 Authenticode 签名核验结论。
+///
+/// 后台巡检据此区分「第三方软件主动注入（NVIDIA Overlay、Bonjour mDNS
+/// 命名空间提供程序等）」与「未签名注入」：前者签名链有效，属合法软件
+/// 行为；后者才是真正的注入/劫持信号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureStatus {
+    /// 签名链有效，吊销检查通过
+    Valid,
+    /// 签名链有效，但吊销状态未知（离线 / CRL/OCSP 不可达）
+    ValidRevocationUnknown,
+    /// 未签名或签名无效
+    Invalid,
+}
+
+impl SignatureStatus {
+    /// 是否可认定为有效签名（吊销状态未知仍视为已签署）
+    pub fn is_signed(self) -> bool {
+        !matches!(self, SignatureStatus::Invalid)
+    }
+}
+
+/// 系统目录模块哈希基线核验结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaselineCheck {
+    /// 哈希与基线一致
+    Match,
+    /// 哈希与基线不一致（可能是替换，也可能是系统更新）
+    Mismatch,
+    /// 无法读取文件计算哈希（文件已删除 / 权限不足）
+    Unreadable,
+    /// 模块不在基线中（非系统目录模块）
+    NotInBaseline,
+}
+
 /// 全局受信任路径白名单（用户可通过 add_trusted_path 添加）
 /// 用 Mutex 保护以支持多线程主循环巡检
 static TRUSTED_PATHS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -34,7 +69,7 @@ static TRUSTED_PATHS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /* ====================================================================== *
  *  路径真实化（GetLongPathNameW）                     *
  *                                                                        *
- *  放弃纯字符串 normalize_path，改为调用 Windows 原生 GetLongPathNameW     *
+ *  调用 Windows 原生 GetLongPathNameW                       *
  *  解析短文件名（8.3 格式）和符号链接/目录挂载点，确保白名单前缀匹配       *
  *  基于完全规范化的"真实路径"进行。                                        *
  * ====================================================================== */
@@ -107,6 +142,32 @@ fn realize_path(_path: &str) -> String {
 #[allow(dead_code)]
 fn normalize_string_path(_path: &str) -> String {
     String::new()
+}
+
+/// 开发构建下当前进程主模块的真实化路径；发布构建恒为 None。
+///
+/// 只用于豁免“主程序自身”的签名复核：未签名的 dev 主程序位于安装目录内，
+/// 会被完整校验误判为未签名模块，连续命中后触发应急销毁 Worker。
+/// 发布构建不编译该豁免，主程序仍按原有签名规则校验。
+fn dev_self_module_path() -> Option<String> {
+    #[cfg(debug_assertions)]
+    {
+        std::env::current_exe()
+            .ok()
+            .map(|p| realize_path(&p.to_string_lossy()))
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
+}
+
+/// 主模块豁免判定：必须与当前进程主模块的真实化路径完全相等。
+///
+/// 精确比较而非前缀匹配：同目录下的其他未签名模块仍按原规则处理，
+/// 避免把“开发主程序豁免”扩散成整个目录的签名豁免。
+fn is_dev_self_module(path_norm: &str, self_norm: Option<&str>) -> bool {
+    self_norm.map_or(false, |s| !s.is_empty() && s == path_norm)
 }
 
 /* ====================================================================== *
@@ -195,17 +256,21 @@ mod win_impl {
     use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
     use windows::Win32::System::Threading::GetCurrentProcessId;
 
-    use super::{realize_path, UnknownModule, TRUSTED_PATHS};
+    use super::{
+        dev_self_module_path, is_dev_self_module, realize_path, SignatureStatus, UnknownModule,
+        TRUSTED_PATHS,
+    };
 
     /* ---------------- 签名验证结果缓存 ----------------
-     * 以文件路径为键，缓存 WinVerifyTrust 结果（含吊销检查），TTL 1 小时。
+     * 以文件路径为键，缓存 WinVerifyTrust 结论（含吊销检查），TTL 1 小时。
      * 首次验证需联网检查吊销，成功后缓存，后续巡检直接使用缓存结果，
      * 避免重复网络开销和离线阻断。
      */
-    static SIG_CACHE: OnceLock<Mutex<HashMap<String, (bool, Instant)>>> = OnceLock::new();
+    static SIG_CACHE: OnceLock<Mutex<HashMap<String, (SignatureStatus, Instant)>>> =
+        OnceLock::new();
     const SIG_CACHE_TTL_SECS: u64 = 3600; // 1 小时
 
-    fn sig_cache() -> &'static Mutex<HashMap<String, (bool, Instant)>> {
+    fn sig_cache() -> &'static Mutex<HashMap<String, (SignatureStatus, Instant)>> {
         SIG_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
@@ -270,8 +335,9 @@ mod win_impl {
 
     // WinVerifyTrust 常量（来自 wintrust.h）
     const WTD_UI_NONE: u32 = 2;
+    /// 不检查吊销（仅验证签名链本身；用于离线时区分“签名无效”与“吊销不可达”）
+    const WTD_REVOKE_NONE: u32 = 0;
     /// 启用整条证书链的吊销检查
-    /// WTD_REVOKE_NONE = 0（旧值，已废弃）
     /// WTD_REVOKE_WHOLECHAIN = 2（检查整条链的吊销状态）
     const WTD_REVOKE_WHOLECHAIN: u32 = 2;
     const WTD_CHOICE_FILE: u32 = 1;
@@ -420,7 +486,8 @@ mod win_impl {
             Ok(g) => g.iter().cloned().collect(),
             Err(_) => Vec::new(),
         };
-
+        // 开发主程序自身豁免（发布构建为 None）
+        let dev_self = dev_self_module_path();
         // 取当前进程模块快照
         // TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32：枚举当前进程的 32 位 + 64 位模块
         let pid = unsafe { GetCurrentProcessId() };
@@ -475,7 +542,10 @@ mod win_impl {
                         path: path.clone(),
                         reason: "未知路径".to_string(),
                     });
-                } else if verify_sigs && !in_system_dir {
+                } else if verify_sigs
+                    && !in_system_dir
+                    && !is_dev_self_module(&path_norm, dev_self.as_deref())
+                {
                     // 受信任位置但非系统目录：必须通过 Authenticode 签名验证
                     // 系统目录模块跳过签名验证（catalog 签名，按位置信任）
                     // Microsoft 运行时目录（Edge WebView2 等）需验证签名（Authenticode 内嵌签名）
@@ -527,6 +597,9 @@ mod win_impl {
             Ok(g) => g.iter().cloned().collect(),
             Err(_) => Vec::new(),
         };
+        // 开发主程序自身豁免：未签名 dev 主程序不进入完整校验候选，
+        // 避免后台抽样把自身误判为“签名失效”并升级应急。发布构建为 None。
+        let dev_self = dev_self_module_path();
 
         let pid = unsafe { GetCurrentProcessId() };
         let snapshot =
@@ -560,7 +633,10 @@ mod win_impl {
                         .iter()
                         .any(|t| !t.is_empty() && path_norm.starts_with(t));
 
-                if !in_system_dir && in_trusted {
+                if !in_system_dir
+                    && in_trusted
+                    && !is_dev_self_module(&path_norm, dev_self.as_deref())
+                {
                     result.push((name, path));
                 }
             }
@@ -589,33 +665,50 @@ mod win_impl {
     ///
     /// 返回：true=签名有效，false=未签名或签名无效
     pub(super) fn verify_signature(module_path: &str) -> bool {
+        signature_status(module_path).is_signed()
+    }
+
+    /// 签名核验结论（含吊销状态未知的容忍态），结果缓存 1 小时。
+    ///
+    /// 判定顺序：先做整链吊销检查；失败时再在“不检查吊销”的模式下复核一次。
+    /// 第二次通过说明签名链本身有效、只是吊销状态不可达（离线/CRL 不可用），
+    /// 归为 `ValidRevocationUnknown`，避免离线环境把合法模块误判为未签名。
+    pub(super) fn signature_status(module_path: &str) -> SignatureStatus {
         if module_path.is_empty() {
-            return false;
+            return SignatureStatus::Invalid;
         }
 
         // 检查缓存
         let cache_key = realize_path(module_path);
         if let Ok(cache) = sig_cache().lock() {
-            if let Some((result, timestamp)) = cache.get(&cache_key) {
+            if let Some((status, timestamp)) = cache.get(&cache_key) {
                 if timestamp.elapsed().as_secs() < SIG_CACHE_TTL_SECS {
-                    return *result;
+                    return *status;
                 }
             }
         }
 
-        // 执行实际验证（含吊销检查）
-        let result = verify_signature_uncached(module_path);
+        let status = if verify_signature_uncached(module_path, true) {
+            SignatureStatus::Valid
+        } else if verify_signature_uncached(module_path, false) {
+            SignatureStatus::ValidRevocationUnknown
+        } else {
+            SignatureStatus::Invalid
+        };
 
         // 更新缓存
         if let Ok(mut cache) = sig_cache().lock() {
-            cache.insert(cache_key, (result, Instant::now()));
+            cache.insert(cache_key, (status, Instant::now()));
         }
 
-        result
+        status
     }
 
     /// 实际调用 WinVerifyTrust 执行签名验证（无缓存）
-    fn verify_signature_uncached(module_path: &str) -> bool {
+    ///
+    /// revoke=true 时检查整条证书链的吊销状态；false 时跳过吊销检查，
+    /// 仅验证签名链与文件摘要。
+    fn verify_signature_uncached(module_path: &str, revoke: bool) -> bool {
         // 路径转 UTF-16（含 null 终止符，供 PCWSTR 使用）
         let wide: Vec<u16> = module_path
             .encode_utf16()
@@ -636,8 +729,12 @@ mod win_impl {
             p_policy_callback_data: ptr::null_mut(),
             p_sip_client_data: ptr::null_mut(),
             dw_ui_choice: WTD_UI_NONE,
-            // 启用整条证书链的吊销检查
-            fdw_revocation_checks: WTD_REVOKE_WHOLECHAIN,
+            // 按调用方策略决定是否检查整条证书链的吊销状态
+            fdw_revocation_checks: if revoke {
+                WTD_REVOKE_WHOLECHAIN
+            } else {
+                WTD_REVOKE_NONE
+            },
             dw_union_choice: WTD_CHOICE_FILE,
             p_file: &mut file_info,
             dw_state_action: WTD_STATEACTION_VERIFY,
@@ -707,6 +804,23 @@ pub fn verify_signature(module_path: &str) -> bool {
     win_impl::verify_signature(module_path)
 }
 
+/// 查询模块签名核验结论（后台巡检威胁分级用）
+///
+/// 与 `verify_signature` 共用同一缓存；额外区分“签名有效但吊销状态
+/// 不可达”，使离线环境下的合法第三方模块不被误判为未签名。
+/// 非 Windows：恒为 `Invalid`（平台无 Authenticode 语义）。
+pub fn module_signature_status(module_path: &str) -> SignatureStatus {
+    #[cfg(target_os = "windows")]
+    {
+        win_impl::signature_status(module_path)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = module_path;
+        SignatureStatus::Invalid
+    }
+}
+
 /// 枚举当前进程已加载模块中"位于受信位置且签名核验被轻量巡检跳过"的模块
 ///
 /// 返回 (模块名, 完整路径) 列表，路径为原始形态（未规范化），供调用方
@@ -714,7 +828,7 @@ pub fn verify_signature(module_path: &str) -> bool {
 /// 一致：安装目录 / Microsoft 运行时目录 / 用户受信白名单下的模块，
 /// 排除系统目录（System32/SysWOW64/WinSxS，catalog 签名，由哈希基线负责）。
 ///
-/// 供后台巡检线程做完整校验抽样（FEAT_INTEGRITY_CHECK 执行路径）。
+/// 供后台巡检线程做完整校验抽样。
 /// 非 Windows 平台返回空列表。
 pub fn trusted_signable_module_paths(install_dir: &str) -> Vec<(String, String)> {
     #[cfg(target_os = "windows")]
@@ -820,49 +934,53 @@ pub fn build_system_baseline() -> HashBaseline {
     HashBaseline::new()
 }
 
-/// 验证模块哈希是否匹配基线
+/// 核验模块哈希与基线的匹配结论
 ///
-/// 返回值：
-///   - `Ok(true)`：哈希匹配，模块合法
-///   - `Ok(false)`：哈希不匹配，模块可能被替换（威胁）
-///   - `Err(())`：模块路径不在基线中（非系统目录模块，调用方应使用其他验证方式）
+/// 把“哈希不匹配（可能被替换，也可能是
+/// 系统更新换文件）”和“无法读取文件计算哈希（文件已删除/权限不足）”
+/// 分开返回，供调用方按签名结论分级，避免把系统更新误判为注入。
 ///
 /// 注意：此函数仅对系统目录模块有意义。非系统目录模块应通过签名验证判断。
 #[cfg(target_os = "windows")]
-#[allow(clippy::result_unit_err)]
-pub fn verify_module_against_baseline(
+pub fn check_module_against_baseline(
     module_path: &str,
     baseline: &HashBaseline,
-) -> Result<bool, ()> {
+) -> BaselineCheck {
     let normalized = realize_path(module_path);
     if normalized.is_empty() {
-        return Err(());
+        return BaselineCheck::NotInBaseline;
     }
 
     let expected_hash = match baseline.get(&normalized) {
         Some(h) => h,
-        None => return Err(()), // 不在基线中
+        None => return BaselineCheck::NotInBaseline,
     };
 
     match compute_file_hash(module_path) {
-        Some(actual_hash) => Ok(&actual_hash == expected_hash),
+        Some(actual_hash) => {
+            if &actual_hash == expected_hash {
+                BaselineCheck::Match
+            } else {
+                BaselineCheck::Mismatch
+            }
+        }
         None => {
             log::warn!(
                 "[module_whitelist] 无法计算模块哈希（文件可能已删除）: {}",
                 sanitize_path_for_hash(module_path)
             );
-            Ok(false) // 无法计算哈希视为不匹配（保守策略）
+            BaselineCheck::Unreadable
         }
     }
 }
 
-/// 非 Windows 平台：验证模块哈希（空实现，始终返回 Err）
+/// 非 Windows 平台：无系统目录哈希基线
 #[cfg(not(target_os = "windows"))]
-pub fn verify_module_against_baseline(
+pub fn check_module_against_baseline(
     _module_path: &str,
     _baseline: &HashBaseline,
-) -> Result<bool, ()> {
-    Err(())
+) -> BaselineCheck {
+    BaselineCheck::NotInBaseline
 }
 
 /// 枚举目录下所有 .dll/.sys 文件并计算哈希
@@ -940,4 +1058,73 @@ pub fn patrol_modules_paths_only(_install_dir: &str) -> Vec<UnknownModule> {
 #[allow(dead_code)]
 pub fn verify_signature(_module_path: &str) -> bool {
     false
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    /// debug（测试）构建必须能取得主模块真实化路径，且格式与白名单比较一致。
+    #[test]
+    fn dev_self_module_path_matches_current_exe() {
+        let self_norm = dev_self_module_path().expect("debug 构建应返回主模块路径");
+        assert!(!self_norm.is_empty(), "主模块路径不得为空");
+        assert_eq!(self_norm, self_norm.to_lowercase(), "路径应已规范化为小写");
+        assert!(!self_norm.contains("\\\\?\\"), "路径不应保留扩展长度前缀");
+
+        let exe = std::env::current_exe().expect("current_exe 失败");
+        let file_name = exe
+            .file_name()
+            .expect("主模块应有文件名")
+            .to_string_lossy()
+            .to_lowercase();
+        assert!(self_norm.ends_with(&file_name), "主模块路径应与当前进程一致");
+    }
+
+    /// 豁免只允许“完全相等”的主模块路径，不得通过前缀/同目录扩散。
+    #[test]
+    fn dev_self_module_exemption_is_exact_path_only() {
+        let self_norm = dev_self_module_path().expect("debug 构建应返回主模块路径");
+
+        assert!(is_dev_self_module(&self_norm, Some(&self_norm)));
+        assert!(
+            !is_dev_self_module(&format!("{}.bak", self_norm), Some(&self_norm)),
+            "带后缀的同前缀路径不得豁免"
+        );
+
+        let dir = self_norm
+            .rsplit_once('\\')
+            .map(|(d, _)| d)
+            .unwrap_or_default();
+        let sibling = format!("{}\\\\unsigned-other.dll", dir);
+        assert!(
+            !is_dev_self_module(&sibling, Some(&self_norm)),
+            "同目录其他模块不得豁免"
+        );
+        assert!(!is_dev_self_module("", Some(&self_norm)), "空路径不得豁免");
+        assert!(!is_dev_self_module(&self_norm, None), "发布构建不得豁免");
+    }
+
+    /// 后台完整校验候选必须排除开发主程序自身。
+    ///
+    /// 测试进程位于 target/debug/deps；若把该目录当作安装目录，未签名的主
+    /// 模块会进入候选并随机抽样失败。豁免后不得再出现。
+    #[test]
+    fn trusted_signable_candidates_exclude_dev_self_exe() {
+        let exe = std::env::current_exe().expect("current_exe 失败");
+        let dir = exe
+            .parent()
+            .expect("主模块应有父目录")
+            .to_string_lossy()
+            .to_string();
+        let self_norm = realize_path(&exe.to_string_lossy());
+
+        let candidates = super::win_impl::trusted_signable_module_paths(&dir);
+        assert!(
+            !candidates
+                .iter()
+                .any(|(_, path)| realize_path(path) == self_norm),
+            "开发主程序自身不得进入完整校验抽样候选"
+        );
+    }
 }

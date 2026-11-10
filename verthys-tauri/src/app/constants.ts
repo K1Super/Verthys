@@ -69,8 +69,8 @@ export const TRANSITION_REDUCED = {
 } as const;
 
 /** 模块步入编排参数（毫秒）— 前端唯一权威源。
- *  CSS 侧的显影时长令牌与包络关键帧见 styles/tokens.css 与
- *  styles/animations.css；本表承载需要 JS 参与的错峰延迟与窗口时长。 */
+ *  CSS 侧的显影时长令牌与包络关键帧由 styles/tokens.css 与
+ *  styles/animations.css 承载；本表承载需要 JS 参与的错峰延迟与窗口时长。 */
 export const MODULE_REVEAL = {
   /** 单元素显影时长 — 必须与 tokens.css --reveal-dur 保持一致 */
   durMs: 620,

@@ -18,6 +18,63 @@
 #include <stdio.h>
 #include <string.h>
 
+static const char MOD_B64_ALPHABET[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int mod_b64(const uint8_t *bin, size_t bin_len, char *out, size_t cap)
+{
+    size_t i, j = 0;
+    size_t need = ((bin_len + 2u) / 3u) * 4u;
+    if (cap <= need) return 1;
+    for (i = 0; i < bin_len; i += 3u) {
+        uint32_t v = (uint32_t)bin[i] << 16;
+        if (i + 1u < bin_len) v |= (uint32_t)bin[i + 1u] << 8;
+        if (i + 2u < bin_len) v |= (uint32_t)bin[i + 2u];
+        out[j++] = MOD_B64_ALPHABET[(v >> 18) & 63u];
+        out[j++] = MOD_B64_ALPHABET[(v >> 12) & 63u];
+        out[j++] = i + 1u < bin_len ? MOD_B64_ALPHABET[(v >> 6) & 63u] : '=';
+        out[j++] = i + 2u < bin_len ? MOD_B64_ALPHABET[v & 63u] : '=';
+    }
+    out[j] = '\0';
+    return 0;
+}
+
+static int mod_b64_value(char c)
+{
+    const char *p = strchr(MOD_B64_ALPHABET, c);
+    return p != NULL ? (int)(p - MOD_B64_ALPHABET) : -1;
+}
+
+static int mod_b64_decode(const char *s, size_t n, uint8_t *out, size_t cap,
+                          size_t *out_len)
+{
+    size_t i, o = 0;
+    if (n == 0 || (n % 4u) != 0) return 1;
+    for (i = 0; i < n; i += 4u) {
+        int a = mod_b64_value(s[i]);
+        int b = mod_b64_value(s[i + 1u]);
+        int c = s[i + 2u] == '=' ? -2 : mod_b64_value(s[i + 2u]);
+        int d = s[i + 3u] == '=' ? -2 : mod_b64_value(s[i + 3u]);
+        uint32_t v;
+        if (a < 0 || b < 0 || c == -1 || d == -1) return 1;
+        if ((c < 0 || d < 0) && i + 4u != n) return 1;
+        v = ((uint32_t)a << 18) | ((uint32_t)b << 12)
+          | ((c > 0 ? (uint32_t)c : 0u) << 6) | (d > 0 ? (uint32_t)d : 0u);
+        if (o >= cap) return 1;
+        out[o++] = (uint8_t)(v >> 16);
+        if (c >= 0) {
+            if (o >= cap) return 1;
+            out[o++] = (uint8_t)(v >> 8);
+        }
+        if (d >= 0) {
+            if (o >= cap) return 1;
+            out[o++] = (uint8_t)v;
+        }
+    }
+    *out_len = o;
+    return 0;
+}
+
 #define T_MOD_HASH_BYTES 32u
 
 static int mod_read_file(const char *path, uint8_t *buf, size_t cap,
@@ -654,8 +711,12 @@ TEST(module_enable_rewraps_sealed_record_content)
     char code[VTY_RECOVERY_TEXT_BUF];
     uint8_t photo_uuid[VTY_UUID_BYTES];
     uint8_t file_uuid[VTY_UUID_BYTES];
+    uint8_t meta_uuid[VTY_UUID_BYTES];
+    uint8_t inline_uuid[VTY_UUID_BYTES];
     uint8_t photo_pt[] = {0x41, 0x42, 0x43, 0x44};
     uint8_t file_pt[] = {0x51, 0x52, 0x53};
+    uint8_t inline_pt0[] = {0x69, 0x6E, 0x6C, 0x69, 0x6E, 0x65, 0x30};
+    uint8_t inline_pt1[] = {0x69, 0x6E, 0x6C, 0x69, 0x6E, 0x65, 0x31};
     uint8_t plain[] = {0x7B, 0x22, 0x6E, 0x61, 0x6D, 0x65, 0x22, 0x7D};
     /* 结构吻合但无法认证的伪信封：不得被误判为内容而改写 */
     uint8_t fake[16 + 12 + 24 + 4 + 16];
@@ -664,7 +725,10 @@ TEST(module_enable_rewraps_sealed_record_content)
     size_t sealed_len = 0;
     uint8_t *opened = NULL;
     size_t opened_len = 0;
-    uint64_t photo_id = 0, file_id = 0, plain_id = 0, fake_id = 0;
+    char b64_0[256];
+    char b64_1[256];
+    char inline_json[2048];
+    uint64_t photo_id = 0, file_id = 0, plain_id = 0, fake_id = 0, inline_id = 0;
     VtyRepoRecord rec;
 
     vty_lockout_set_enabled(0);
@@ -690,6 +754,39 @@ TEST(module_enable_rewraps_sealed_record_content)
              VTY_OK);
     CHECK_EQ(vty_repo_add(v, 0x04, (const uint8_t *)"f", 1,
                           sealed, sealed_len, &file_id), VTY_OK);
+    vty_secure_zero(sealed, sealed_len);
+    vty_free(sealed, sealed_len);
+    sealed = NULL;
+
+    /* 内联 meta 布局：meta JSON 内嵌两块分片。
+     * 启用轮换后必须连内联分片一并换封，且缩略图 base64 原样保留。 */
+    memset(inline_uuid, 0x62, sizeof(inline_uuid));
+    memset(meta_uuid, 0x63, sizeof(meta_uuid));
+    CHECK_EQ(vty_vault_module_key_index(v, 0u, mdek), VTY_OK);
+    CHECK_EQ(vty_chunk_seal(mdek, inline_uuid, 0u, 2u, v->header.epoch,
+                            inline_pt0, sizeof(inline_pt0), &sealed, &sealed_len),
+             VTY_OK);
+    CHECK_EQ(mod_b64(sealed, sealed_len, b64_0, sizeof(b64_0)), 0);
+    vty_secure_zero(sealed, sealed_len);
+    vty_free(sealed, sealed_len);
+    sealed = NULL;
+    CHECK_EQ(vty_chunk_seal(mdek, inline_uuid, 1u, 2u, v->header.epoch,
+                            inline_pt1, sizeof(inline_pt1), &sealed, &sealed_len),
+             VTY_OK);
+    CHECK_EQ(mod_b64(sealed, sealed_len, b64_1, sizeof(b64_1)), 0);
+    vty_secure_zero(sealed, sealed_len);
+    vty_free(sealed, sealed_len);
+    sealed = NULL;
+    CHECK(snprintf(inline_json, sizeof(inline_json),
+                   "{\"name\":\"inline\",\"thumbB64\":\"dGh1bWI=\","
+                   "\"chunkDataB64\":[\"%s\",\"%s\"],\"fileHash\":\"abcd\"}",
+                   b64_0, b64_1) > 0);
+    CHECK_EQ(vty_chunk_seal(mdek, meta_uuid, 0u, 1u, v->header.epoch,
+                            (const uint8_t *)inline_json, strlen(inline_json),
+                            &sealed, &sealed_len),
+             VTY_OK);
+    CHECK_EQ(vty_repo_add(v, 0x01, (const uint8_t *)"i", 1,
+                          sealed, sealed_len, &inline_id), VTY_OK);
     vty_secure_zero(sealed, sealed_len);
     vty_free(sealed, sealed_len);
     sealed = NULL;
@@ -734,6 +831,68 @@ TEST(module_enable_rewraps_sealed_record_content)
     CHECK(memcmp(opened, file_pt, sizeof(file_pt)) == 0);
     vty_secure_zero(opened, opened_len);
     vty_free(opened, opened_len);
+    opened = NULL;
+    vty_free(rec.name, rec.name_len != 0 ? rec.name_len : 1u);
+    vty_free(rec.data, rec.data_len != 0 ? rec.data_len : 1u);
+
+    /* 内联 meta：顶层信封与内部两块分片都必须换封到新 MDEK */
+    memset(&rec, 0, sizeof(rec));
+    CHECK_EQ(vty_repo_get(v, inline_id, &rec), VTY_OK);
+    CHECK_EQ(vty_vault_module_key_index(v, 0u, mdek), VTY_OK);
+    CHECK_EQ(vty_chunk_open(mdek, meta_uuid, 0u, 1u, v->header.epoch,
+                            rec.data, rec.data_len, &opened, &opened_len),
+             VTY_OK);
+    {
+        char json_view[4096];
+        const char *p;
+        int k;
+        CHECK(opened_len < sizeof(json_view));
+        memcpy(json_view, opened, opened_len);
+        json_view[opened_len] = '\0';
+        CHECK(strstr(json_view, "\"thumbB64\":\"dGh1bWI=\"") != NULL);
+        p = strstr(json_view, "\"chunkDataB64\":[\"");
+        CHECK(p != NULL);
+        if (p != NULL) p += strlen("\"chunkDataB64\":[\"");
+        for (k = 0; k < 2; k++) {
+            const char *e = p != NULL ? strchr(p, '"') : NULL;
+            char tmp[256];
+            uint8_t bin[256];
+            size_t bin_len = 0;
+            uint8_t *ipt = NULL;
+            size_t ipt_len = 0;
+            size_t b64_len;
+            const uint8_t *expect;
+            size_t expect_len;
+
+            CHECK(e != NULL);
+            if (e == NULL) break;
+            b64_len = (size_t)(e - p);
+            CHECK(b64_len < sizeof(tmp));
+            memcpy(tmp, p, b64_len);
+            tmp[b64_len] = '\0';
+            CHECK_EQ(mod_b64_decode(tmp, b64_len, bin, sizeof(bin), &bin_len), 0);
+            CHECK_EQ(vty_chunk_open(mdek, inline_uuid, (uint32_t)k, 2u,
+                                    v->header.epoch, bin, bin_len,
+                                    &ipt, &ipt_len),
+                     VTY_OK);
+            expect = k == 0 ? inline_pt0 : inline_pt1;
+            expect_len = k == 0 ? sizeof(inline_pt0) : sizeof(inline_pt1);
+            CHECK_EQ(ipt_len, expect_len);
+            CHECK(memcmp(ipt, expect, expect_len) == 0);
+            vty_secure_zero(ipt, ipt_len);
+            vty_free(ipt, ipt_len != 0 ? ipt_len : 1u);
+
+            p = e + 1;
+            if (k == 0 && p != NULL) {
+                CHECK(*p == ',');
+                p++;
+                CHECK(*p == '"');
+                p++;
+            }
+        }
+    }
+    vty_secure_zero(opened, opened_len);
+    vty_free(opened, opened_len != 0 ? opened_len : 1u);
     opened = NULL;
     vty_free(rec.name, rec.name_len != 0 ? rec.name_len : 1u);
     vty_free(rec.data, rec.data_len != 0 ? rec.data_len : 1u);

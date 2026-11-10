@@ -1,19 +1,18 @@
-# .github/workflows/rust-frontend.yml
 # Rust / 前端 CI 质量门
 #
-# 覆盖（对应 core.yml 注释中"由本工作流承接"的承诺）：
+# 覆盖：
 #   1. Rust 单元测试（src-tauri + verthys-worker 全部用例）
 #   2. cargo clippy 静态检查（--all-targets -D warnings，零告警门）
 #   3. 前端单元测试（vitest，验证进度感知层状态机核心路径）
 #   4. 前端 TypeScript 类型检查（vue-tsc --noEmit）
 #   5. 前端生产构建（vite build，验证打包链完整性）
 #
-# 素材前置（2026-09-19 隔离实证）：tauri 编译期强制要求
+# 素材前置：tauri 编译期强制要求
 #   resources（verthys.dll）与 externalBin（binaries/verthys-worker-*.exe）
 #   存在，缺失即 "resource path ... doesn't exist" 编译失败。
 #   二者均为 gitignore 的构建产物，故本工作流先从源码构建并就位：
-#   - C 核心 DLL：Ninja Release 构建（仅满足编译期依赖，不做 .vsec 注入——
-#     发布级 DLL 由 core.yml 的 scripts/build/build_core.release.ps1 产出并上传工件）
+#   - C 核心 DLL：Ninja Release 构建（仅满足编译期依赖，不做 .vsec 注入；
+#     发布级 DLL 由发布流水线注入 .vsec 后上传工件）
 #   - worker：cargo build --release 后复制至 binaries/
 #   dist/ 在 dev profile 下不参与编译（cfg=dev 走 devUrl），无需前置。
 #

@@ -80,13 +80,11 @@ async function startSessionGuard(): Promise<void> {
 /** 在 verthys 中查找全局密钥记录
  *  返回 { id, recordB64 } — 不解析内部结构，由 worker 验证
  *
+ *  两级查找，关键路径不做全量解密：
+ *    1. findLidByTypeEarlyStop 按类型索引直达目标记录（O(1)）；
+ *    2. 索引异常或无结果时回退 verthysEnumerateRecords（单次 IPC）。
  *
- *  原实现调用 ensureRecordScan() 全量解密所有记录（含照片数据块），
- *  仅为查找一条全局密钥记录 → 数千条记录的 verthys 耗时 20-30s。
- *
- *  新实现分两级查找，将关键路径上的数据解密从 O(N) 降至 O(1)：
- *
- *  全量扫描（ensureRecordScan）仍由 startBackgroundTasks 后台执行，不阻塞关键路径。
+ *  全量扫描（ensureRecordScan）由 startBackgroundTasks 后台执行，不阻塞关键路径。
  */
 async function findGlobalKeyRecord(): Promise<{ id: number; recordB64: string } | null> {
   try {
@@ -118,25 +116,16 @@ async function findGlobalKeyRecord(): Promise<{ id: number; recordB64: string } 
 }
 
 /* ------------------------------------------------------------------ *
- * 修复：解锁响应内联探测结果（已废弃前端 probe 链路）       *
+ * 解锁响应内联全局密钥探测结果                                        *
  *                                                                    *
- * 原缺陷（已根治）：解锁成功后前端需发起 3~4 次 IPC 往返              *
- *   (verthysHasRecordByType → findLidByTypeEarlyStop → verthysGetRecord)  *
- * 才能判断是否存在全局主密钥记录并取回数据。该链路存在两类致命问题：   *
- *   1. v1 容器：Verthys_HasRecordByType 返回 VERTHYS_ERR_FORMAT 假阴性，  *
- *      前端 probe 抛异常 → globalKeyRecordLoading 永驻 true           *
- *      → UI 卡死在 "loading" 视图，无法进入身份验证窗口               *
- *   2. IPC 竞态：多次往返任意一环超时/失败均导致 initUnlock 永不完成   *
+ * worker 在 Verthys_V4Unlock 成功分支进程内一次性完成                 *
+ *   has_record(Verthys_FindFirstLidByType) + get_record(Verthys_GetRecord)，*
+ * 结果内联到 unlock 响应的 has_global_key / global_key_id /           *
+ * global_key_record 三字段。initUnlock 直接消费，零 IPC 往返。         *
  *                                                                    *
- * 根治策略：worker 解锁成功分支进程内一次性完成                       *
- *   has_record(Verthys_FindFirstLidByType) + get_record(Verthys_GetRecord) *
- *   结果内联到 unlock 响应的 has_global_key/global_key_id/             *
- *   global_key_record 三字段。前端 initUnlock 直接消费，零 IPC 往返。  *
- *                                                                    *
- * 原 probeGlobalKeyRecord / confirmGlobalKeyRecordAsync / ProbeResult  *
- * 三件套已整体移除。globalKeyRecordLoading 状态不再被设置（恒 false）。*
- * findGlobalKeyRecord 保留，仅供 initCreate / changeGlobalKey /        *
- * verifyGlobalKey 缓存未命中回退使用（单函数调用，非多步 IPC 链路）。  *
+ * globalKeyRecordLoading 恒为 false（探测即时完成，无异步确认阶段）。 *
+ * findGlobalKeyRecord 保留，仅供 initCreate / changeGlobalKey /       *
+ * verifyGlobalKey 缓存未命中回退使用（单函数调用，非多步 IPC 链路）。 *
  * ------------------------------------------------------------------ */
 
 /**
@@ -155,12 +144,12 @@ async function findGlobalKeyRecord(): Promise<{ id: number; recordB64: string } 
  *   8. resetFlushChain() — 重置 flush 队列
  *   9. clearSessionTimer() — 清零会话空闲计时器
  *
- * 关键修复：
- *   - 旧实现 clearSessionTimer 未解除系统锁屏监听 → 监听器残留
- *   - 旧实现 stopBackgroundTasks 仅置取消标志 → 旧任务可能仍在运行访问已释放缓存
+ * 顺序约束：
+ *   - 解除系统锁屏监听必须先于状态重置，否则监听器残留；
+ *   - stopBackgroundTasks 必须 await 到后台任务实际终止，否则任务可能访问已释放缓存。
  */
 async function resetKeyManagerState(): Promise<void> {
-  // 1. 解除系统锁屏监听（旧实现遗漏，异步冲刷核心修复）
+  // 1. 解除系统锁屏监听（必须在状态重置前完成，避免监听器残留）
   try {
     await withTimeout(securitySessionStop(), 5000, "securitySessionStop");
   } catch (e) {
@@ -246,14 +235,7 @@ export async function initCreate(
   onProgress?: (progress: UnlockProgress) => void,
   keyfilePath?: string,
 ): Promise<VerthysResult<string>> {
-  // 修复（Issue 2：新建 verthys 进度条无响应）
-  //
-  // 原缺陷：initCreate 完全不接受 onProgress，也不推送任何进度。创建流程
-  //   （路径预检→worker_init→create→lock→unlock→findGlobalKeyRecord→
-  //    ensureSummaryScan→loadModuleKeyStatus）期间 UI 进度条恒停留在
-  //   "正在启动安全核心…" 0%，用户误以为"创建卡死/按钮无反应/无法创建"。
-  //
-  // 修复：与 initUnlock 一致的 emit 单调递增闸门，在各阶段推送进度。
+  // 进度反馈：与 initUnlock 一致的 emit 单调递增闸门，在各阶段推送进度。
   //   后端 verthys_create 内部 create→lock→unlock 三步为单次 IPC（无 Channel
   //   流式进度），故采用阶段式离散推送（非连续），覆盖关键节点即可。
   const t0 = Date.now();
@@ -272,14 +254,8 @@ export async function initCreate(
   };
 
   try {
-    // 修复D：确保创建前 worker 处于干净状态
-    //
-    // 根治"回退重选 verthys 卡死"根因：
-    //   用户回退 → goBackToUnlock → lockAll（异步，后台收敛，不设提前返回）→
-    //   doLockAll 同步置 verthysReady=false → UI 立即显示解锁视图 →
-    //   用户重选 verthys → doUnlock → initCreate → ensureWorkerReady
-    //   复用旧 workerReadyPromise → verthys_create IPC 发往正在被 lockAll
-    //   销毁的 worker → 永久卡死。
+    // 创建前必须确保 worker 处于干净状态，否则 ensureWorkerReady 会复用
+    // 旧 workerReadyPromise，IPC 发往正在被 lockAll 销毁的 worker 而永久卡死。
     //
     // 双重防护：
     //   1. awaitLockAllIfInProgress：等待正在进行的 lockAll 真正完成
@@ -287,14 +263,13 @@ export async function initCreate(
     //      确保 worker 销毁、缓存清空、状态重置全部落地
     //   2. ensureCleanWorkerState：兜底清理 — 即使 lockAll 超时未完成，
     //      若 workerHasBeenUsed=true 且预启动缓存残留，强制销毁旧 worker
-    /* 收敛旧会话：等待在途锁定真正结束并清理预启动缓存，
-     *  这是用户可见的真实阶段，必须先于路径检查呈现 */
-    emit(0, 1, "清理上一会话");
+    /* 用户态只呈现 4 个核心节点：准备 → 创建 → 索引/密钥 → 守卫；
+     * 其余内部步骤仍以 log.info 完整留痕，节点之间由进度感知层连续推进 */
+    emit(0, 1, "准备安全环境");
     await awaitLockAllIfInProgress();
     await ensureCleanWorkerState();
 
     // 1. 路径预检
-    emit(1, 2, "检查存储路径");
     let preflight: PreflightResult;
     if (preflightResult) {
       preflight = preflightResult;
@@ -317,7 +292,6 @@ export async function initCreate(
     }
 
     // 2. ensureWorkerReady
-    emit(2, 5, "启动安全核心");
     log.info("步骤 2/4：启动 worker 子进程");
     let ok1: boolean;
     try {
@@ -328,7 +302,7 @@ export async function initCreate(
     }
     if (!ok1) {
       await resetKeyManagerState();
-      /* N2：安全状态目录预检失败给出专用码与修复指引；其余启动失败保持原语义。 */
+      /* 安全状态目录预检失败给出专用码与修复指引；其余启动失败保持原语义。 */
       const failure = getWorkerInitFailure();
       if (failure?.code === VerthysErrorCode.E_SECURITY_STATE) {
         return err(
@@ -340,7 +314,7 @@ export async function initCreate(
     }
 
     // 3. verthys_create（容器 + 一次性恢复码）
-    emit(3, 10, "创建加密库");
+    emit(1, 10, "创建加密库");
     log.info("步骤 3/4：创建加密库并写盘");
     let recoveryCode: string;
     try {
@@ -371,18 +345,18 @@ export async function initCreate(
     }
 
     // 4. 检查全局密钥记录 + 更新状态
-    emit(4, 70, "检查全局密钥记录");
+    emit(2, 70, "建立索引与加载密钥");
     log.info("步骤 4/4：检查全局密钥记录");
     setCurrentVerthysPath(verthysPath);
     const existing = await findGlobalKeyRecord();
     keyState.hasGlobalKeyRecord.value = existing !== null;
 
-    // 修复：同步后端 key_lifecycle 状态（与 initUnlock 一致）
+    // 同步后端 key_lifecycle 状态（与 initUnlock 一致）
     //
     // verthys_create 通过 raw worker IPC 完成 create→lock→unlock，
     // 绕过了 verthys_unlock Tauri 命令的 key_lifecycle 状态管理代码。
-    // 新建 verthys 无全局密钥记录，后端状态应为 NoKey。
-    // 若不显式重置，可能残留上次会话的 Locked/Unlocked 状态 → derive/verify 失败。
+    // 新建 verthys 无全局密钥记录，后端状态必须显式收敛为 NoKey；
+    // 否则残留上次会话的 Locked/Unlocked 状态会导致 derive/verify 失败。
     try {
       await verthysReconcileKeyPresence(keyState.hasGlobalKeyRecord.value);
       log.info(`initCreate: 后端 key_lifecycle 已同步（hasGlobalKeyRecord=${keyState.hasGlobalKeyRecord.value}）`);
@@ -390,31 +364,25 @@ export async function initCreate(
       log.warn("initCreate: 后端 key_lifecycle 同步失败（非致命，可能影响派生/验证）", e);
     }
 
-    // 修复修复：始终调用 ensureSummaryScan + loadModuleKeyStatus
+    // 与 initUnlock 一致：始终填充摘要缓存并加载模块密钥状态（即使为空也写入默认值）。
     //
-    // 原缺陷：仅在 existing（有全局密钥记录）时才调用 loadModuleKeyStatus。
-    // 新建 verthys 无全局密钥记录 → loadModuleKeyStatus 不被调用 →
-    // moduleKeyEnabled/hasModuleKeyRecord 保持初始默认值。
-    // 虽然新 verthys 通常无模块密钥，但确保状态一致性仍需调用。
-    //
-    // 修复：始终填充摘要缓存 + 加载模块状态（即使为空也写入默认值）。
-    emit(5, 80, "建立摘要索引");
+    // 若仅在存在全局密钥记录时才调用 loadModuleKeyStatus，
+    // 新建库的 moduleKeyEnabled/hasModuleKeyRecord 会停留在初始默认值。
     try {
       await ensureSummaryScan();
     } catch (e) {
       log.warn("initCreate: 摘要扫描失败（非致命）", e);
     }
-    emit(6, 90, "加载模块密钥");
     try {
       await loadModuleKeyStatus();
     } catch (e) {
       log.warn("initCreate: 加载模块密钥状态失败（非致命）", e);
     }
 
-    emit(7, 99, "启动会话守卫");
+    emit(3, 99, "启动会话守卫");
     keyState.verthysReady.value = true;
     await startSessionGuard();
-    emit(8, 100, "创建完成");
+    emit(4, 100, "创建完成");
     startBackgroundTasks().catch(() => { /* 后台任务失败不影响创建 */ });
     log.info("创建成功");
     return ok(recoveryCode);
@@ -446,19 +414,13 @@ export async function initUnlock(
   recoveryCode?: string,
   keyfilePath?: string,
 ): Promise<VerthysResult<void>> {
-  // 修复6：全流程进度反馈 — 前端各阶段直接调用 onProgress 推送进度
+  // 全流程进度反馈：前端各阶段直接调用 onProgress 推送进度。
   // verthys_unlock 为单次 IPC（内部无子阶段回调），阶段之间的连续推进
   // 由前端感知层负责平滑；本层只保证阶段节点与文案真实准确。
   const t0 = Date.now();
-  // 修复：进度条单调递增，防止阶段进度回退
-  //
-  // 原缺陷：
-  //   解锁阶段先推送接近完成的进度，verthysUnlock 返回后前端
-  //   emit(5, 88, "建立摘要索引") 会将进度条从高位回退到 88%，造成视觉"倒退"。
-  //
-  // 修复：
-  //   记录已推送的最大百分比，后续 emit 的百分比不得低于已推送值。
-  //   消息内容正常更新（用户能看到阶段切换），但百分比只增不减。
+  // 进度条单调递增，防止阶段进度回退：
+  //   记录已推送的最大百分比，后续 emit 的百分比不得低于已推送值；
+  //   消息内容正常更新（用户能看到阶段切换）。
   let lastEmittedPercent = 0;
   const emit = (stage: number, percent: number, message: string) => {
     const clamped = Math.max(percent, lastEmittedPercent);
@@ -474,14 +436,8 @@ export async function initUnlock(
   };
 
   try {
-    // 修复D：确保解锁前 worker 处于干净状态
-    //
-    // 根治"回退重选 verthys 卡死"根因：
-    //   用户回退 → goBackToUnlock → lockAll（异步，后台收敛，不设提前返回）→
-    //   doLockAll 同步置 verthysReady=false → UI 立即显示解锁视图 →
-    //   用户重选 verthys → doUnlock → initUnlock → ensureWorkerReady
-    //   复用旧 workerReadyPromise → verthys_unlock IPC 发往正在被 lockAll
-    //   销毁的 worker → 永久卡死在"解锁加密库"。
+    // 解锁前必须确保 worker 处于干净状态，否则 ensureWorkerReady 会复用
+    // 旧 workerReadyPromise，IPC 发往正在被 lockAll 销毁的 worker 而永久卡死。
     //
     // 双重防护：
     //   1. awaitLockAllIfInProgress：等待正在进行的 lockAll 真正完成
@@ -489,14 +445,13 @@ export async function initUnlock(
     //      确保 worker 销毁、缓存清空、状态重置全部落地
     //   2. ensureCleanWorkerState：兜底清理 — 即使 lockAll 超时未完成，
     //      若 workerHasBeenUsed=true 且预启动缓存残留，强制销毁旧 worker
-    /* 收敛旧会话：等待在途锁定真正结束并清理预启动缓存，
-     *  这是用户可见的真实阶段，必须先于路径检查呈现 */
-    emit(0, 1, "清理上一会话");
+    /* 用户态只呈现 4 个核心节点：准备 → 解锁 → 索引/同步 → 密钥/守卫；
+     * 其余内部步骤仍以 log.info 完整留痕，节点之间由进度感知层连续推进 */
+    emit(0, 1, "准备安全环境");
     await awaitLockAllIfInProgress();
     await ensureCleanWorkerState();
 
     // 1. 路径预检
-    emit(1, 2, "检查存储路径");
     let preflight: PreflightResult;
     if (preflightResult) {
       preflight = preflightResult;
@@ -518,7 +473,6 @@ export async function initUnlock(
     }
 
     // 2. ensureWorkerReady
-    emit(2, 5, "启动安全核心");
     let ok1: boolean;
     try {
       ok1 = await withTimeout(ensureWorkerReady(), INIT_TIMEOUT_MS, "worker_init");
@@ -528,7 +482,7 @@ export async function initUnlock(
     }
     if (!ok1) {
       await resetKeyManagerState();
-      /* N2：安全状态目录预检失败给出专用码与修复指引；其余启动失败保持原语义。 */
+      /* 安全状态目录预检失败给出专用码与修复指引；其余启动失败保持原语义。 */
       const failure = getWorkerInitFailure();
       if (failure?.code === VerthysErrorCode.E_SECURITY_STATE) {
         return err(
@@ -544,7 +498,6 @@ export async function initUnlock(
     // 服务端在 unlock 入口已强制熔断（fail-closed）；此处仅提前拦截，
     // 避免锁定态进入 Argon2id 长运算流程浪费用户等待。Tauri 环境下查询
     // 失败按 fail-closed 拒绝（无法确认门禁状态不得进入认证流程）。
-    emit(3, 6, "检查安全门禁");
     const unlockGate = await checkBruteForceGate();
     if (!unlockGate.allowed) {
       await resetKeyManagerState();
@@ -560,7 +513,7 @@ export async function initUnlock(
       return err(VerthysErrorCode.E_CNG_UNAVAILABLE, "无法确认安全门禁状态，请稍后重试");
     }
 
-    // 3. verthys_unlock — 修复：返回完整 VerthysResponse
+    // 3. verthys_unlock — 返回完整 VerthysResponse
     //
     // 解锁进度由本层 emit 闸门直接推送（单调递增）
     // 分级超时熔断（软 15s 提示 / 硬 35s 降级 / 连续 3 次熔断锁定）
@@ -568,11 +521,11 @@ export async function initUnlock(
     //   - 硬超时 35s：整体解锁未完成，触发降级校验，仅保障核心数据可读
     //   - 连续 3 次硬超时自动锁定容器 30 分钟（withGradedTimeout 内部处理）
     //
-    // 修复：worker 在 Verthys_V4Unlock 成功后进程内一次性完成
+    // worker 在 Verthys_V4Unlock 成功后进程内一次性完成
     //   Verthys_FindFirstLidByType(0x10) + Verthys_GetRecord(lid)，
     //   结果内联到响应 has_global_key/global_key_id/global_key_record 三字段。
     //   前端直接消费，零解锁后 IPC 往返，消除 probe 链竞态与 v1 假阴性死锁。
-    emit(4, 8, "解锁加密库");
+    emit(1, 8, "解锁加密库");
     let unlockResp;
     try {
       unlockResp = await withGradedTimeout(
@@ -582,7 +535,7 @@ export async function initUnlock(
         "verthys_unlock",
         () => {
           /* 软超时回调：Argon2id 派生耗时较长，提示用户耐心等待，不中断解锁 */
-          emit(4, 30, "派生密钥并解锁");
+          emit(1, 30, "派生密钥并解锁");
           log.warn("verthys_unlock 软超时（15s）：Argon2id 派生耗时较长，已提示用户耐心等待");
         },
       );
@@ -608,6 +561,14 @@ export async function initUnlock(
         unlockResp.error,
       );
       if (gateResult) return gateResult;
+      /* 本机密钥材料缺失：普通解锁永久不可用，不得折叠为通用“打开加密库失败”。
+       * 该错误不计入口令失败次数（后端未调用 record_auth_failure）。 */
+      if (unlockResp.error_code === VerthysErrorCode.E_KEY_MATERIAL_MISSING) {
+        return err(
+          VerthysErrorCode.E_KEY_MATERIAL_MISSING,
+          "本机密钥材料已丢失，无法用普通方式打开该库；请使用恢复码解锁，并在恢复会话中重绑本机设备槽",
+        );
+      }
       const raw = unlockResp.error ?? "";
       /* keyfile 缺失/无效不属于认证失败：保留 worker 进程与会话状态，
        * 直接引导用户重选 keyfile 后重试（不得折叠为 AUTH）。 */
@@ -633,7 +594,7 @@ export async function initUnlock(
       return err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, "打开加密库失败");
     }
 
-    // 4. 消费进程内探测结果 — 修复
+    // 4. 消费进程内探测结果
     //
     // worker 解锁成功后已进程内完成 has_record + find_lid + get_record，
     // 结果内联到 unlockResp 三字段。前端零 IPC 往返直接决策 UI 路径：
@@ -675,44 +636,37 @@ export async function initUnlock(
     // globalKeyRecordLoading 永不设置为 true（进程内探测即时完成，无异步确认阶段）
     keyState.globalKeyRecordLoading.value = false;
 
-    // 解锁后关键路径 — 仅填充摘要缓存（模块密钥状态移至后台）
+    // 解锁后关键路径 — 填充摘要缓存 + 加载模块密钥状态
     //
-    // 原缺陷（致命回归 + 卡慢）：
-    //   1. 早期版本解锁后不调用 loadModuleKeyStatus → moduleKeyEnabled 保持默认值
-    //      → "全部模块被自动开启密钥" / "原有密钥记录被遗忘"
-    //   2. 后续修复将 loadModuleKeyStatus 放入关键路径同步 await（10s 超时兜底）
-    //      → 阻塞 verthysReady=true → "建立摘要索引…时间太久"
-    //
-    // 当前处理：
     //   步骤 A（关键路径）：await ensureSummaryScan() — 填充摘要缓存
     //     为模块组件列表渲染提供 O(1) 索引，必须在 verthysReady=true 之前完成
-    //   步骤 B（后台非阻塞）：loadModuleKeyStatus() — verthysReady=true 后后台执行
+    //   步骤 B（关键路径）：await loadModuleKeyStatus()（8s 超时兜底）——
+    //     必须在 verthysReady=true 之前完成，否则守卫读到默认 false 会放行模块
     //     - moduleKeyStatusLoading 标志供模块组件守卫
     //     - 乐观并发控制防止与用户开关操作竞态
     //     - 安全权衡：加载窗口内 moduleKeyEnabled 为安全默认 false，模块列表可见但
     //       加密项仍需独立密钥解密；用户刚通过全局密钥认证，风险可接受
     //
-    // 时序保证：ensureSummaryScan 在 verthysReady=true 之前完成（列表渲染依赖）；
-    //           loadModuleKeyStatus 在后台异步完成，状态响应式更新。
-    emit(5, 88, "建立摘要索引");
+    // 时序保证：ensureSummaryScan 与 loadModuleKeyStatus 均在 verthysReady=true
+    //           之前完成（列表渲染与模块守卫依赖）。
+    emit(2, 88, "建立索引与同步状态");
     try {
-      // 修复：摘要扫描超时兜底（10s），防止 IPC 挂起导致卡死
+      // 摘要扫描超时兜底（10s），防止 IPC 挂起导致卡死
       await withTimeout(ensureSummaryScan(), 10000, "摘要扫描");
     } catch (e) {
       log.warn("initUnlock: 摘要扫描失败/超时（v1 格式或异常），模块加载将回退到全量扫描", e);
     }
 
-    // 修复：TYPE 常量冲突数据迁移 
+    // TYPE 常量冲突数据迁移
     //
-    // 原缺陷（致命根因）：
-    //   TYPE_GLOBAL_KEY (0x10) 与 TYPE_ACCOUNT (0x10) 值相同，已存储的 verthys
-    //   文件中全局密钥记录与账户记录共享同一类型值，导致：
+    // TYPE_GLOBAL_KEY (0x10) 与 TYPE_ACCOUNT (0x10) 值相同，已存储的 verthys
+    // 文件中全局密钥记录与账户记录可能共享同一类型值，导致：
     //   - AccountVerthys 扫描 TYPE_ACCOUNT=0x10 误拾全局密钥记录 → "设置遗忘"
     //   - findGlobalKeyRecord 扫描 TYPE_GLOBAL_KEY=0x10 误拾账户记录 → "密钥验证无效"
     //   - 删除"垃圾账户"实际删除全局密钥 → "增删改异常/删除后复活"
     //   同理 TYPE_PHOTO_CHUNK (0x05) 与旧 TYPE_META (FileVerthys 0x05) 冲突。
     //
-    // 修复（必须在 loadModuleKeyStatus 之前完成）：
+    // 迁移必须在 loadModuleKeyStatus 之前完成：
     //   migrateRecordTypes 通过内容嗅探区分冲突类型的记录，将旧账户记录
     //   (0x10) 重写为 TYPE_ACCOUNT (0x02)，旧 FileVerthys 元数据 (0x05) 重写为
     //   TYPE_FILEVERTHYS_META (0x08)。全局密钥记录和照片块保持原类型不变。
@@ -721,7 +675,7 @@ export async function initUnlock(
     // 性能：首次迁移 N 条 × 3 IPC；后续调用 O(1) 索引查询 <1ms。
     let migrationMigrated = 0;
     try {
-      // 修复：整体超时兜底（15s），防止单条记录 IPC 挂起导致
+      // 整体超时兜底（15s），防止单条记录 IPC 挂起导致
       //   initUnlock 永远停在"建立摘要索引"阶段。
       //   超时后继续加载（迁移幂等，下次解锁重试）
       const migrationResult = await withTimeout(
@@ -737,20 +691,19 @@ export async function initUnlock(
       log.error("initUnlock: 类型迁移异常/超时（非致命，继续加载，下次解锁重试）", e);
     }
 
-    // 修复：迁移后重新校验缓存的全局密钥记录（消除 probe 竞态） 
+    // 迁移后必须重新校验缓存的全局密钥记录
     //
-    // 原缺陷（竞态根因）：
-    //   worker 内联 probe 在 Verthys_V4Unlock 成功后立即调用
+    // 冲突来源：worker 内联 probe 在 Verthys_V4Unlock 成功后立即调用
     //   Verthys_FindFirstLidByType(0x10) 搜索全局密钥记录（同 worker runtime.rs
-    //   probe_global_key_inproc）。但类型迁移（migrateRecordTypes）在此之后
-    //   才执行——如果 verthys 中存在旧账户记录（type=0x10，与 TYPE_GLOBAL_KEY
+    //   probe_global_key_inproc），而类型迁移（migrateRecordTypes）在此之后
+    //   才执行。若 verthys 中存在旧账户记录（type=0x10，与 TYPE_GLOBAL_KEY
     //   冲突），probe 可能命中账户记录而非真正的全局密钥记录，将账户 JSON
     //   数据作为 global_key_record 缓存到 keyState.globalKeyRecordB64。
-    //   后果：verifyGlobalKey 使用错误的缓存数据 → "原先的密钥验证完全无效"。
+    //   后果：verifyGlobalKey 使用错误的缓存数据导致验证失效。
     //
-    // 修复（迁移后重新校验，两个触发条件满足任一即重新探测）：
+    // 两个触发条件满足任一即重新探测：
     //   条件 1：migrationMigrated > 0 — 有记录被迁移，旧 0x10 记录已重写为
-    //           0x02，缓存的 lid 可能指向已删除的旧记录 → 缓存必然过期
+    //           0x02，缓存的 lid 可能指向已重写的旧记录 → 缓存必然过期
     //   条件 2：isAccountRecordB64(cachedRecordB64) — 缓存值本身是账户记录
     //           （JSON 含 platform/username），说明 probe 命中了错误记录
     //           （兜底：即使迁移异常未执行，也能通过内容嗅探捕获错误缓存）
@@ -764,7 +717,7 @@ export async function initUnlock(
       (cachedRecordB64.length > 0 && isAccountRecordB64(cachedRecordB64));
     if (needRevalidate) {
       log.info("initUnlock: 迁移后重新校验全局密钥记录（消除 probe 竞态）");
-      // 修复：超时兜底（5s），防止 findGlobalKeyRecord 的 IPC 挂起
+      // 超时兜底（5s），防止 findGlobalKeyRecord 的 IPC 挂起
       let revalidated: { id: number; recordB64: string } | null = null;
       try {
         revalidated = await withTimeout(
@@ -789,27 +742,24 @@ export async function initUnlock(
       }
     }
 
-    // 修复：同步后端 key_lifecycle 状态（消除前后端状态不同步） 
+    // 同步后端 key_lifecycle 状态
     //
-    // 原缺陷（致命根因）：
+    // 冲突来源：
     //   verthys_unlock 时 worker 进程内 probe 通过 find_first_lid_by_type(0x10)
     //   搜索全局密钥记录，后端 key_lifecycle 据 probe 结果设为 Locked 或 NoKey。
-    //   但 TYPE_GLOBAL_KEY(0x10) 与旧 TYPE_ACCOUNT(0x10) 冲突，probe 可能误判。
+    //   TYPE_GLOBAL_KEY(0x10) 与旧 TYPE_ACCOUNT(0x10) 冲突，probe 可能误判。
     //
-    //   前端 migrateRecordTypes + 重新校验得到正确结果后，仅更新了前端
-    //   keyState.hasGlobalKeyRecord，未同步后端 key_lifecycle → 状态不同步：
+    //   前端 migrateRecordTypes + 重新校验得到正确结果后，必须同步后端
+    //   状态，否则状态不同步：
     //     - 前端 false + 后端 Locked → UI 显示"初始化密钥"但 derive 要求 NoKey → 失败
     //     - 前端 true  + 后端 NoKey   → UI 显示"身份验证"但 verify 要求 Locked → 失败
     //
-    // 根治：
-    //   将前端重新校验的最终结果同步到后端 key_lifecycle 状态机。
     //   verthys_reconcile_key_presence 在 NoKey↔Locked 之间安全转换（幂等）。
     //
     // 安全边界：
     //   - 不涉及密钥材料，不接触 worker，仅修正状态机
     //   - verthysReady=true 之前调用，此时 UI 未渲染，无用户交互竞态
     //   - 幂等：状态已匹配时后端无操作
-    emit(5, 92, "同步密钥状态");
     try {
       await verthysReconcileKeyPresence(keyState.hasGlobalKeyRecord.value);
       log.info(`initUnlock: 后端 key_lifecycle 已同步（hasGlobalKeyRecord=${keyState.hasGlobalKeyRecord.value}）`);
@@ -817,41 +767,28 @@ export async function initUnlock(
       log.warn("initUnlock: 后端 key_lifecycle 同步失败（非致命，可能影响派生/验证）", e);
     }
 
-    // 安全守卫修复：loadModuleKeyStatus 必须在 verthysReady=true 之前完成 
+    // 安全约束：loadModuleKeyStatus 必须在 verthysReady=true 之前完成
     //
-    // 原缺陷（致命安全漏洞）：
-    //   此前将 loadModuleKeyStatus 放到 verthysReady=true 之后的「后台非阻塞」执行。
-    //   由于 keyState.moduleKeyEnabled 默认 false，后台加载未完成期间，
-    //   useModuleNavigation.switchModule 守卫读 isModuleKeyEnabled → 返回 false →
-    //   误判「保护已关闭」→ 直接放行进入模块并加载内容，绕过模块独立密钥验证。
-    //   待后台加载完成（或用户切走再切回）才弹密钥框——与用户反馈完全吻合。
+    //   keyState.moduleKeyEnabled 默认 false。若模块状态尚未加载就置
+    //   verthysReady=true，useModuleNavigation.switchModule 守卫读
+    //   isModuleKeyEnabled → 返回 false → 误判「保护已关闭」→ 直接放行
+    //   进入模块并加载内容，绕过模块独立密钥验证。
     //
-    // 根治：
-    //   loadModuleKeyStatus 移回关键路径，在 verthysReady=true 之前同步完成。
-    //   此时 ensureSummaryScan 已就绪（558 行），loadModuleKeyStatus 内部用
-    //   三次 v4_module_status 查询（C 层 M1 状态，无记录读取/解密），
-    //   正常 <100ms，2s 超时兜底（非致命，失败 fail-closed + switchModule 守卫兜底）。
-    //   与 moduleKeyStatusVersion 乐观并发安全：关键路径 verthysReady=false，UI 不渲染，
-    //   用户无法触发 setModuleKey/disableModuleProtection，startVersion===current 必然成立。
+    //   loadModuleKeyStatus 内部为三次 v4_module_status 查询（C 层 M1 状态，
+    //   无记录读取/解密），正常 <100ms，2s 超时兜底（非致命，失败 fail-closed
+    //   + switchModule 守卫兜底）。
+    //   与 moduleKeyStatusVersion 乐观并发安全：关键路径 verthysReady=false，
+    //   UI 不渲染，用户无法触发 setModuleKey/disableModuleProtection，
+    //   startVersion===current 必然成立。
     //
-    // 模块内容即时预加载（修复5保留）：verthysReady=true 后立即后台启动 ensureRecordScan，
-    //   静默填充全量记录扫描缓存（含 dataB64，最多 64KB/条），用户进入模块时零 IPC 读取。
-    emit(6, 95, "加载模块密钥");
+    // 模块内容预加载：verthysReady=true 后由后台任务 ensureRecordScan 静默填充
+    //   全量记录扫描缓存（含 dataB64，最多 64KB/条），用户进入模块时零 IPC 读取。
+    emit(3, 95, "加载密钥并启动守卫");
     keyState.moduleKeyStatusLoading.value = true;
-    // 安全守卫根治：loadModuleKeyStatus 在 verthysReady=true 之前同步完成
-    //
-    // 原缺陷：withTimeout 2s 超时后 catch 块重置 moduleKeyStatusLoading=false，
-    // 但 loadModuleKeyStatus 的 Promise 仍在后台继续执行（v1 全量扫描 25s）。
-    // 守卫检查 moduleKeyStatusLoading=false → 跳过等待 → isModuleKeyEnabled 返回默认
-    // false → 直接放行，绕过模块独立密钥验证。
-    //
-    // 根治：
-    //   1. loadModuleKeyStatusFallback 已改用 verthysEnumerateRecords（v1 内存路径 1-3s），
-    //      整体 loadModuleKeyStatus <3s，8s 超时兜底足够覆盖
-    //   2. 超时后不重置 moduleKeyStatusLoading——让 loadModuleKeyStatus 内部完成时
-    //      自己设 false（module-auth.ts 第378/370/389行三处完成点均会重置）。
-    //      超时窗口内 moduleKeyStatusLoaded 保持 false，switchModule 守卫据此拦截
-    //   3. 被抛弃的 Promise 用 .catch 吞掉 unhandled rejection
+    // 超时处理：withTimeout 超时后不重置 moduleKeyStatusLoading——
+    // 由 loadModuleKeyStatus 内部完成时置 false；超时窗口内
+    // moduleKeyStatusLoaded=false，switchModule 守卫据此拦截业务模块。
+    // 被抛弃的 Promise 用 .catch 吞掉 unhandled rejection。
     const lmkPromise = loadModuleKeyStatus();
     try {
       await withTimeout(lmkPromise, 8000, "模块密钥状态加载");
@@ -863,24 +800,17 @@ export async function initUnlock(
       lmkPromise.catch(() => { /* loadModuleKeyStatus 内部已处理 moduleKeyStatusLoading/moduleKeyStatusLoaded */ });
     }
 
-    emit(7, 99, "启动会话守卫");
     keyState.verthysReady.value = true;
     await startSessionGuard();
-    emit(8, 100, "解锁完成");
+    emit(4, 100, "解锁完成");
 
-    // 性能根治：移除 verthysReady 后立即 ensureRecordScan（消除 worker 队头阻塞）
-    //
-    // 原缺陷：
-    //   verthysReady=true 后立即启动 ensureRecordScan()（非阻塞）+ startBackgroundTasks()
-    //   （2.5s 延迟后启动 Merkle 重建 / ensureRecordScan / prefetchFullRecords / integrityPatrol）。
+    // 不在 verthysReady=true 后立即发起 ensureRecordScan：
     //   后台任务的 IPC 请求与前端模块加载请求共用同一 worker 通道，
     //   后台任务独占 worker 时前端请求排队等待 → 30s 卡顿。
     //
-    // 修复：
     //   1. loadModuleKeyStatus（关键路径已调用）通过 ensureRecordScan 填充 recordScanCache
     //   2. 模块组件挂载时调用 ensureRecordScanSafe() 复用已填充的缓存（scanInProgress 去重，零 IPC）
-    //   3. startBackgroundTasks 延迟 12s 启动 + yieldIfFrontendBusy 让出 worker 通道
-    //   4. 移除此处的 ensureRecordScan 调用，避免 verthysReady 后立即发起全量扫描 IPC
+    //   3. startBackgroundTasks 延迟启动 + yieldIfFrontendBusy 让出 worker 通道
 
     // 启动后台任务（Merkle 重建 / 完整性巡检 / 可见区域预加载）
     startBackgroundTasks().catch(() => { /* 后台任务失败不影响解锁 */ });
@@ -1262,7 +1192,7 @@ export async function verifyGlobalKey(
   binPassword: string,
   onProgress?: (progress: UnlockProgress) => void,
 ): Promise<VerthysResult<void>> {
-  // 修复4：GMK 验证全流程进度反馈，消除用户面对空白动画 40s 的体验
+  // GMK 验证全流程进度反馈：各阶段推送进度，避免长时间无反馈。
   const t0 = Date.now();
   const emit = (stage: number, percent: number, message: string) => {
     if (onProgress) {
@@ -1279,7 +1209,7 @@ export async function verifyGlobalKey(
     return err(VerthysErrorCode.E_VERTHYS_NOT_READY, "verthys 未解锁");
   }
 
-  // 修复2：优先读取 initUnlock 阶段缓存的 recordB64，跳过重复扫描
+  // 优先读取 initUnlock 阶段缓存的 recordB64，跳过重复扫描
   //   缓存未命中时回退到 findGlobalKeyRecord（带 10s 超时保护）
   emit(1, 10, "定位密钥记录");
   let recordB64: string;
@@ -1306,7 +1236,7 @@ export async function verifyGlobalKey(
     keyState.globalKeyRecordId.value = found.id;
   }
 
-  // 修复4：验证阶段进度反馈
+  // 验证阶段进度反馈
   emit(3, 40, "验证全局密钥");
   const binDataB64 = bytesToBase64(binBytes);
   let verifyOk: boolean;
@@ -1333,20 +1263,15 @@ export async function verifyGlobalKey(
 
   // 内存状态更新
   keyState.globalKeyReady.value = true;
-  // 修复：移除冗余 loadModuleKeyStatus 调用（根治"正在初始化安全会话"卡慢）
-  //
-  // 原缺陷：verifyGlobalKey 中 await loadModuleKeyStatus() 是冗余调用——
-  //   initUnlock 已在解锁关键路径（verthysReady=true 之前）调用过 loadModuleKeyStatus，
-  //   模块密钥状态已加载完毕。此处重复调用会再次触发 ensureSummaryScan +
-  //   verthysGetRecord 链路，在摘要缓存未命中时回退全量扫描 → 20-30s 卡顿。
-  //   用户反馈"正在初始化安全会话…时间太久"。
-  //
-  // 修复：移除此冗余调用。initUnlock 已确保状态就绪，此处无需重载。
+  // 此处不调用 loadModuleKeyStatus：
+  //   initUnlock 已在解锁关键路径（verthysReady=true 之前）完成模块密钥状态加载。
+  //   重复调用会再次触发 ensureSummaryScan + verthysGetRecord 链路，
+  //   摘要缓存未命中时回退全量扫描 → 20-30s 卡顿。
   //   若用户在解锁后修改了模块保护（setModuleKey/disableModuleProtection），状态已由该函数
   //   原子更新（C 层事务成功后更新 keyState.moduleKeyEnabled），无需重载。
   resetSessionTimer();
   // 会话守卫已在 initCreate / initUnlock 启动；此处为幂等重试（首次启动
-  // 失败时给全局密钥验证路径一次修复机会）。
+  // 失败时在此路径重试一次）。
   await startSessionGuard();
   // 运行档位不在解锁收尾应用：恢复链以受信配置为唯一权威（读取→应用），
   // 本地缓存值禁止回写权威文件，此处的缓存 apply 会与恢复链竞态并覆盖受信副本。
@@ -1383,7 +1308,7 @@ export async function verifyGlobalKeyWithBruteForce(
     return { ok: false, reason: "gate_unavailable" };
   }
 
-  // 2. 实际验证（修复4：透传 onProgress 进度回调）
+  // 2. 实际验证（透传 onProgress 进度回调）
   const result = await verifyGlobalKey(globalPassword, binBytes, binPassword, onProgress);
   if (result.ok) {
     return { ok: true };
@@ -1415,11 +1340,10 @@ export async function verifyGlobalKeyWithBruteForce(
 /**
  * 绑定当前设备机器码（独立可控）
  *
- * 从 initGlobalKey 中移除，由调用方决定是否绑定。
+ * 由调用方决定是否绑定。
  * 绑定失败返回明确错误码，UI 层可展示提示并允许用户重试。
  *
- * 无 force 参数：setDeviceBinding 始终写入当前机器码（覆盖语义已是唯一行为，
- * 旧 force 参数两分支实现完全相同，属无效形参 —— 已移除避免误导调用方）。
+ * 无 force 参数：setDeviceBinding 始终写入当前机器码（覆盖语义是唯一行为）。
  * @returns VerthysResult<void>
  *   - ok：绑定成功
  *   - err(E_VERTHYS_NOT_READY)：verthys 未解锁
@@ -1445,13 +1369,12 @@ export async function bindDevice(): Promise<VerthysResult<void>> {
  *
  * 返回 VerthysResult<"match"|"mismatch"|"unbound">
  *
- * 修复修复：后端 check_device_binding 返回 DeviceBindingResult 结构体
- *   （{status, detail, error_code?, match_score?}），原实现直接把对象当字符串
- *   包装进 ok() 返回，导致 deviceCheckResult 被赋值为对象 →
- *   useViewMode 的 === 'mismatch' 字符串比较永远为 false →
- *   device_mismatch 拦截视图永久失效（安全功能失守）。
+ * 后端 check_device_binding 返回 DeviceBindingResult 结构体
+ *   （{status, detail, error_code?, match_score?}），必须按 status 显式映射
+ *   为前端联合类型：直接透传对象会使 useViewMode 的 === 'mismatch'
+ *   字符串比较恒为 false，导致 device_mismatch 拦截视图失效。
  *
- *   现基于后端结构化 status 字段显式映射为前端联合类型：
+ *   映射规则：
  *     - "match"         → ok("match")     完全匹配
  *     - "partial_match" → ok("match")     部分匹配（权重 ≥80%，允许有限恢复）
  *     - "mismatch"      → ok("mismatch")  不匹配（触发拦截视图）

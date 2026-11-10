@@ -2,7 +2,7 @@
   VaultItemFormDialog.vue — 类型化条目编辑窗口（schema 驱动）
   形态：复用 VerthysDialog + 「凭证登记台」皮肤（分区登记行 + 刻度轴 + 选项条 + 内容舱）。
   驱动：字段清单来自 VaultTypeDef.fields，六类控件按 kind 渲染，不按类型名分支。
-  特化：账号类型保留既有窗口结构与行为（标识 / 凭据 / 加密 / 附注四段 + 独立密钥行），
+  特化：账号类型使用固定窗口结构（标识 / 凭据 / 加密 / 附注四段 + 独立密钥行），
         独立加密的落盘判定交由 lib/vault_item_codec 的保存决策完成。
   用法:
     <VaultItemFormDialog
@@ -40,7 +40,7 @@
       </header>
     </template>
 
-    <!-- 账号窗口：与既有实现逐段一致（标识 / 凭据 / 加密 / 附注） -->
+    <!-- 账号窗口：分段为标识 / 凭据 / 加密 / 附注 -->
     <div v-if="def && isAccount" class="reg-body">
       <section class="reg-section" :style="{ '--rs': '0' }">
         <div class="reg-sec-head">
@@ -412,9 +412,9 @@ const missingRequired = computed<string[]>(() => {
 /* 保存可用性必须与落盘决策同源：
  *   - 通用类型：必填项是否填满；
  *   - 账号类型：必填项 + 独立加密的保存决策（resolveSecretSaveAction）。
- * 反例（原实现）：以「已开启加密但未输入密钥」直接禁用保存 ——
+ * 不得以「已开启加密但未输入密钥」直接禁用保存 ——
  * 既有已加密条目由于开关被锁定、密钥框恒为空，改一个备注也会被永久禁用；
- * 而落盘决策本身支持 unchanged→reuse（无需密钥）。两套判断必然互相打脸。 */
+ * 而落盘决策本身支持 unchanged→reuse（无需密钥）。两套判断必然互相冲突。 */
 const secretPlan = computed(() =>
   resolveSecretSaveAction({
     previousEncrypted: initialEncrypted.value,

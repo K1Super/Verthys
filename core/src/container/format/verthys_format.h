@@ -14,7 +14,7 @@
  *   [8..11]  算法标识 0x00000001 (Argon2id + XChaCha20-Poly1305)
  *   [12..15] 元数据区偏移 (uint32 LE)
  *   [16..23] 文件 MAC 偏移 (uint64 LE)
- *   [24..39] 盐值 (16B, 随机) ← spec 保留区，盐本即 CSPRNG
+ *   [24..39] 盐值 (16B, CSPRNG 生成)
  *   [40..55] 随机填充 (16B)
  *
  * 元数据区（512 字节）：
@@ -95,9 +95,9 @@ int vfmt_write(const uint8_t salt[VERTHYS_SALT_BYTES],
                const VerthysFmtRecord *records, uint16_t record_count,
                uint8_t **out_blob, size_t *out_size);
 
-/* ---------- 流式写入修复：分片写，避免大库导出 OOM ----------
+/* ---------- 流式写入：分片写，避免大库导出 OOM ----------
  *
- * 原实现 vfmt_write 一次性分配 blob_size 连续内存，万级照片库导出直接 OOM。
+ * vfmt_write 一次性分配 blob_size 连续内存，万级照片库导出会 OOM。
  *
  * 流式处理：
  *   - records 数组仅含元数据（name/type/data_size），data 指针可为 NULL

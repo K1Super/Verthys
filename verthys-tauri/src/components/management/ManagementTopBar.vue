@@ -7,7 +7,8 @@
     1. 全局密钥状态脉动点（on=青绿呼吸 / 琥珀静止）
     2. 状态文本（标题 + 子标题含会话空闲倒计时，mono 微文）
     3. 动作节点（更新 / 立即锁定）：纯图标机械刻度键，
-       语义全部由悬浮提示与 aria-label 承载
+       语义全部由悬浮提示与 aria-label 承载；更新节点悬浮提示首列当前版本
+       （构建期由根 VERSION 注入，发布新版本或应用更新后随构建自然同步）
     4. 更新进行中：图标旋转 + 环形刻度量表按格点亮，
        不可取消阶段保持量表可读
     5. 立即锁定节点（sf-act--warn，禁用条件：!globalKeyReady）
@@ -34,7 +35,8 @@
     </div>
     <div class="sf-meridian-actions">
       <SfActionNode
-        :label="updateTooltip"
+        :label="updateAction"
+        :tip="updateTip"
         tone="update"
         :disabled="updateChecking || (updateInstalling && !updateCancellable)"
         :busy="updateChecking || (updateInstalling && !updateCancellable)"
@@ -135,9 +137,12 @@ const emit = defineEmits<{
   (e: "cancelUpdate"): void;
 }>();
 
-/** 纯图标节点的语义入口：覆盖检查 / 下载 / 安装 / 取消全阶段，
- * 同时作为 aria-label 与悬浮提示，避免图标在不可取消阶段失去可解释性 */
-const updateTooltip = computed(() => {
+/** 当前运行版本：构建期由根 VERSION 注入，不在前端保留任何版本常量；
+ * 发布新版本或应用完成更新后，新构建产物内的注入值即为新版本。 */
+const appVersion = (import.meta.env.VITE_APP_VERSION ?? "").trim();
+
+/** 更新节点的动作语义：仅描述按钮将执行什么，作为无障碍名称与提示的动作段 */
+const updateAction = computed(() => {
   if (props.updateCancellable) return "取消下载并清理已接收数据";
   if (props.updateInstalling) {
     return props.updatePercent > 0 ? `正在更新 ${props.updatePercent}%` : "正在更新";
@@ -146,6 +151,16 @@ const updateTooltip = computed(() => {
   return props.updateAvailable
     ? `更新到 ${props.updateVersion}，安装前自动落盘并锁定`
     : "检查是否有可用更新";
+});
+
+/** 悬浮提示：当前版本是判断是否需要更新的第一信息，置于动作描述之前；
+ * 有可安装版本时用箭头建立「当前 → 目标」的版本对照 */
+const updateTip = computed(() => {
+  if (!appVersion) return updateAction.value;
+  if (props.updateAvailable && !props.updateInstalling && !props.updateCancellable) {
+    return `当前 v${appVersion} → ${updateAction.value}`;
+  }
+  return `当前 v${appVersion} · ${updateAction.value}`;
 });
 
 /** 单一入口按当前状态分流，避免按钮文案与动作不一致 */

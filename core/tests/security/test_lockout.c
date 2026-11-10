@@ -48,6 +48,21 @@ static int lk_write_raw(const char *path, const uint8_t *buf, size_t len)
     return (n == len) ? 0 : 1;
 }
 
+/* 读取状态文件记录的见证槽位（header 24 + MAC 32 + 设备 blob 290 之后）。 */
+static int lk_read_slot(const char *path, uint8_t *slot_out)
+{
+    FILE *f = fopen(path, "rb");
+    uint8_t buf[LK_FILE_BYTES];
+    size_t n;
+
+    if (f == NULL) return 1;
+    n = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    if (n != sizeof(buf)) return 1;
+    *slot_out = buf[24u + 32u + 290u];
+    return 0;
+}
+
 TEST(lockout_first_run_and_counting)
 {
     uint32_t i;
@@ -333,5 +348,60 @@ TEST(lockout_module_isolation)
 
     lk_clean_witness();
     remove("lockout_module.state");
+    return 0;
+}
+
+/* 见证密钥丢失（TPM 清理/系统维护/测试回收）不得永久锁死合法用户：
+ * 状态无法认证但见证确实不存在 → 隔离旧状态并重建，后续计数照常。 */
+TEST(lockout_missing_witness_recovers)
+{
+    uint8_t id[VTY_UUID_BYTES];
+
+    CHECK_EQ(vty_device_root_init(), VTY_OK);
+    lk_clean_witness();
+    CHECK_EQ(vty_lockout_set_path_for_test("lockout_missing.state"), VTY_OK);
+    CHECK_EQ(vty_lockout_init(), VTY_OK);
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 1u);
+
+    CHECK_EQ(vty_secure_state_identity_lockout(id), VTY_OK);
+    CHECK_EQ(vty_tpm_witness_delete_all(id), VTY_OK);
+
+    /* 见证缺失：应重建而不是返回 LOCKED */
+    CHECK_EQ(vty_lockout_begin_attempt(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 0u);
+
+    /* 重建后的状态仍可正常写入新计数 */
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    CHECK_EQ(vty_lockout_failures(), 1u);
+
+    lk_clean_witness();
+    remove("lockout_missing.state");
+    return 0;
+}
+
+/* 见证存在但指纹不符（跨机复制/状态回退）仍必须 fail-closed。 */
+TEST(lockout_witness_mismatch_stays_locked)
+{
+    uint8_t id[VTY_UUID_BYTES];
+    uint8_t slot = 0;
+    uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
+
+    CHECK_EQ(vty_device_root_init(), VTY_OK);
+    lk_clean_witness();
+    CHECK_EQ(vty_lockout_set_path_for_test("lockout_mismatch.state"), VTY_OK);
+    CHECK_EQ(vty_lockout_init(), VTY_OK);
+    CHECK_EQ(vty_lockout_record_failure(), VTY_OK);
+    CHECK_EQ(lk_read_slot("lockout_mismatch.state", &slot), 0);
+
+    CHECK_EQ(vty_secure_state_identity_lockout(id), VTY_OK);
+    /* 覆盖同一槽：新公钥与状态记录指纹不符 */
+    CHECK_EQ(vty_tpm_witness_create(id, slot, fp), VTY_OK);
+
+    CHECK_EQ(vty_lockout_begin_attempt(), VTY_E_LOCKED);
+    CHECK_EQ(vty_lockout_failures(), VTY_LOCKOUT_MAX_FAILURES);
+
+    lk_clean_witness();
+    remove("lockout_mismatch.state");
     return 0;
 }

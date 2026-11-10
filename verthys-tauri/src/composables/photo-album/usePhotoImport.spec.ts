@@ -12,13 +12,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { effectScope, ref, shallowRef } from "vue";
 
 // vi.mock 工厂在模块顶部执行，实例方法 mock 需经 vi.hoisted 提升
-const { runMock, runParsedMock } = vi.hoisted(() => ({
+const { runMock } = vi.hoisted(() => ({
   runMock: vi.fn(),
-  runParsedMock: vi.fn(),
 }));
 
 vi.mock("../../lib/verthys", () => ({
   readUserFile: vi.fn(async (_p: string) => new Uint8Array([1, 2, 3])),
+  // 读前预检：默认给出合法大小，避免预检异常掩盖被测状态机路径
+  userFileStat: vi.fn(async (_p: string) => ({ size: 3, mtime_ms: 0 })),
 }));
 vi.mock("../../lib/keyManager", () => ({
   persistVerthysDetailed: vi.fn(async () => ({ kind: "ok" })),
@@ -36,6 +37,9 @@ vi.mock("./utils", () => {
     nextMemoryPhotoId: () => ++memId,
     openBrowserFileDialog: vi.fn(),
     toArrayBuffer: vi.fn((bytes: Uint8Array) => bytes.buffer),
+    // 导入收尾依赖：缺失会让成功路径落入异常分支，测试将失去覆盖意义
+    sortByMetaId: vi.fn((list: PhotoEntry[]) => [...list]),
+    toPhotoCacheEntries: vi.fn(() => []),
   };
 });
 vi.mock("./importPipeline", () => {
@@ -47,7 +51,6 @@ vi.mock("./importPipeline", () => {
       etaMs: ref(0),
     };
     run = runMock;
-    runParsed = runParsedMock;
   }
   return {
     ImportPipeline,

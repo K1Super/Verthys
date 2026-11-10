@@ -6,12 +6,11 @@
  *      → 仅执行状态标记原子赋值操作，不执行任何IAT导入表与镜像文件相关操作
  *   2. DllMain 进程附加事件（加载锁仍处于占用状态）
  *      → 关闭线程库回调通知，降低线程回调性能开销与潜在攻击面
- *      → 执行内嵌CRC校验初始化，仅完成内部状态表赋值，不创建任何线程
  *      → 不在此处执行TLS加载器初始化，避免内部定时器接口在加载锁环境下引发死锁
  *   3. Verthys_Init 模块初始化（加载锁释放后执行业务层初始化）
- *      → TLS加载器初始化：包含IAT合法性校验、混淆数据表构建、定时器对象创建
+ *      → TLS加载器初始化：仅验证 TLS 回调标志（加载路径完整性）
  *      → 依次调用所有安全防御模块的初始化接口
- *      → 启动启动阶段防御闭环检测，校验全部攻击路径拦截有效性
+ *      → 执行启动阶段防御闭环检测，校验全部攻击路径拦截有效性
  *
  * 安全执行约束：
  *   - DllMain 内部禁止调用 LoadLibrary、LdrGetProcedureAddress 等会触发模块递归加载的接口
@@ -46,9 +45,8 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD dwReason, LPVOID lpvReserved)
         DisableThreadLibraryCalls(hinstDLL);
 
         /*
-         * 原 inline_crc_init 随 inline_crc 模块删除；
-         * TLS 回调（tls_callbacks.c）已在此前的加载阶段置位
-         * g_tls_init_marker，无其他加载锁内工作。
+         * TLS 回调（tls_callbacks.c）已在加载阶段置位 g_tls_init_marker；
+         * 此处无其他加载锁内工作。
          */
         break;
     }
@@ -58,7 +56,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD dwReason, LPVOID lpvReserved)
          * lpvReserved != NULL：进程强制终止，操作系统已回收堆内存，不可访问内部资源
          * lpvReserved == NULL：主动调用FreeLibrary卸载模块，可安全执行自定义资源释放
          *
-         * 加载锁约束核查结论（固化）：本分支实际调用链为
+         * 加载锁约束：本分支调用链为
          *   tls_loader_shutdown（空实现）+ verthys_pepper_deinit
          *   （VirtualUnlock 内核接口 + 进程内内存清零 + 状态标志赋值，
          *   无锁获取、无堆分配、无 CRT 依赖）——

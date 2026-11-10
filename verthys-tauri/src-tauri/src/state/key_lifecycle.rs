@@ -280,7 +280,7 @@ impl KeyLifecycle {
         inner.cooldown_until = None;
     }
 
-    /// 修复：协调密钥存在状态（reconciliation）
+    /// 协调密钥存在状态（reconciliation）
     ///
     /// 用于修正 worker 进程内 probe 与前端迁移后重新校验之间的状态不同步。
     ///

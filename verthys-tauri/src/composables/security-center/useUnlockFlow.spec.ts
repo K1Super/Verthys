@@ -232,9 +232,9 @@ describe("useUnlockFlow 进度感知层集成", () => {
         _pre: unknown,
         onProgress?: (p: Progress) => void,
       ) => {
-        onProgress?.({ stage: 1, percent: 2, elapsed_ms: 5, message: "检查存储路径" });
-        onProgress?.({ stage: 5, percent: 88, elapsed_ms: 20, message: "建立摘要索引" });
-        onProgress?.({ stage: 8, percent: 100, elapsed_ms: 30, message: "解锁完成" });
+        onProgress?.({ stage: 1, percent: 8, elapsed_ms: 5, message: "解锁加密库" });
+        onProgress?.({ stage: 2, percent: 88, elapsed_ms: 20, message: "建立索引与同步状态" });
+        onProgress?.({ stage: 4, percent: 100, elapsed_ms: 30, message: "解锁完成" });
         return okResult();
       },
     );
@@ -246,7 +246,7 @@ describe("useUnlockFlow 进度感知层集成", () => {
     expect(options.rhythm.start).toHaveBeenCalledTimes(1);
     // 终值 100 不推送：进度补满由收束事件负责
     expect(options.rhythm.pushRealProgress.mock.calls.map(([v]) => v)).toEqual([
-      0.02,
+      0.08,
       0.88,
     ]);
     expect(options.rhythm.seal).toHaveBeenCalledTimes(1);

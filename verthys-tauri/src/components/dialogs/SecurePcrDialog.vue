@@ -66,7 +66,7 @@ const stateClass = computed(() =>
 <style scoped>
 /* ===== 单段读数 =====
  * 影响、前提与当前状态压在同一段叙述里：状态以细竖线收在句末，
- * 不再拆成独立的读数行与事实表，弹窗只保留一条信息轴。 */
+ * 不拆成独立读数行与事实表，弹窗只保留一条信息轴。 */
 .pcr-notice {
   font-size: 12px;
   line-height: 1.8;

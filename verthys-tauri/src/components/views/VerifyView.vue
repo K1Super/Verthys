@@ -7,23 +7,21 @@
     4. 量子核心加载动画 + 验证进度反馈（阶段描述 + 平滑视觉进度）
     5. 提交验证（emit verify）
 
-  悬浮场重构：光谱底轨输入（去盒化）+ 标注式标签 + 深空定位入射
+  悬浮场布局：光谱底轨输入（去盒化）+ 标注式标签 + 深空定位入射
   尺寸稳定模式（ff-field--stable）：表单态↔加载态切换高度零抖动
 
   呈现层契约：本组件无状态、无判断、无计时。
-    - 进度数值绑定感知层输出的视觉值（visualPercent，0-100 平滑值），
-      不直接绑定后端离散跳变的真实进度
+    - 进度来源以 ref 透传给进度条组件（progressSource），本视图不读取数值，
+      因此进度逐帧变化不会触发整视图重渲染
     - 失败冻结期间接收 dimmed 样式标识，仅做样式降级
     - 提示词仍为后端 emit 的阶段描述（单一数据源）
 
   Models: verifyPassword / binPassword — 访问密钥 / 密钥口令
-  Props: binFileName / processing / unlockProgressMsg / visualPercent / dimmed
-  Emits: verify / back / browseBin
 -->
 <template>
   <div class="view-verify">
     <Teleport to="body">
-    <CosmicBackdrop fixed layer="view" @backdrop="$emit('back')">
+    <CosmicBackdrop fixed layer="view" :paused="processing" @backdrop="$emit('back')">
     <LevitationField width="330px" class="ff-field--stable">
 
       <div class="ff-node ff-node--brand">
@@ -73,7 +71,7 @@
       <div class="ff-node ff-node--body">
         <QuantumProgressFlow
           :loading="processing"
-          :percent="visualPercent"
+          :percent-source="progressSource"
           :message="unlockProgressMsg"
           :dimmed="dimmed"
         />
@@ -96,6 +94,7 @@
 </template>
 
 <script setup lang="ts">
+import type { Ref } from "vue";
 import CosmicBackdrop from "../common/cosmic/CosmicBackdrop.vue";
 import LevitationField from "../common/cosmic/LevitationField.vue";
 import CosmicSubmit from "../common/cosmic/CosmicSubmit.vue";
@@ -113,8 +112,8 @@ defineProps<{
   processing: boolean;
   /** 后端验证阶段提示词（单一数据源，感知层不重写文案） */
   unlockProgressMsg: string;
-  /** 感知层输出的视觉进度（0-100，平滑值，非后端离散跳变值） */
-  visualPercent: number;
+  /** 感知层进度来源（ref；由进度条组件直接订阅，避免整视图逐帧重渲染） */
+  progressSource?: Readonly<Ref<number>>;
   /** 失败冻结降级标识（进度条降级呈现，错误提示取得视觉重心） */
   dimmed: boolean;
 }>();

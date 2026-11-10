@@ -118,4 +118,27 @@ describe("usePhotoDelete 批量删除", () => {
     expect(forgetMock).not.toHaveBeenCalled();
     expect(deleting.value).toBe(false);
   });
+
+  it("损坏清理按 metaId 删除并复用台账级联链路", async () => {
+    deleteMock.mockResolvedValue(true);
+
+    const { photos, cleanupDamaged, showToast } = setup();
+
+    const ok = await cleanupDamaged([11, 12]);
+
+    expect(ok).toBe(true);
+    expect(deleteMock).toHaveBeenCalledWith([11, 12]);
+    expect(photos.value.map((p) => p.id)).toEqual([103]);
+    expect(forgetMock).toHaveBeenCalledWith([], [11, 12]);
+    expect(showToast).toHaveBeenCalledWith("已清理 2 条无法解密的记录");
+  });
+
+  it("空 metaId 列表直接视为成功且不触发后端删除", async () => {
+    const { cleanupDamaged } = setup();
+
+    const ok = await cleanupDamaged([]);
+
+    expect(ok).toBe(true);
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
 });

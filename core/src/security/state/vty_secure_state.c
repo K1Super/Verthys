@@ -7,8 +7,8 @@
  *   - 目录 DACL 设置为 protected（阻断父目录继承），只授予当前用户与
  *     SYSTEM 完全控制、Administrators 只读；同用户进程仍可删除文件，
  *     这是本层的残余边界，严格机器级隔离由后续特权组件承担。
- *   - 见证身份不再包含状态文件路径：熔断绑定设备根 + 用户 SID，回滚
- *     绑定设备根 + 容器 UUID。
+ *   - 见证身份只绑定设备根 + 用户 SID（熔断）或设备根 + 容器 UUID
+ *     （回滚），不得包含状态文件路径。
  *
  * 编码约定：本文件为 Windows 专用实现，路径统一用 UTF-8 入参、W 系列
  * API 执行，避免 ANSI 代码页把非 ASCII 目录名截断。
@@ -325,7 +325,7 @@ static int ensure_secure_dir(const char *path)
     if (!well_known_sid(WinLocalSystemSid, system_buf, &system)) return 0;
     if (!well_known_sid(WinBuiltinAdministratorsSid, admins_buf, &admins)) return 0;
 
-    /* N2：既有目录已验证安全则直接通过，不再重复设置 ACL（避免企业环境
+    /* 既有目录已验证安全则直接通过，不重复设置 ACL（避免企业环境
      * 中 WRITE_DAC 受限时把已安全目录判为不可用）。 */
     if (validate_secure_dir(path, user, system, admins)) return 1;
 
@@ -391,7 +391,7 @@ int vty_secure_state_file_path(const char *name, char *out, size_t cap)
     return VTY_OK;
 }
 
-/* N2：安全状态目录预检。只做目录解析/创建/ACL 加固与复核，不写状态文件；
+/* 安全状态目录预检。只做目录解析/创建/ACL 加固与复核，不写状态文件；
  * 供 Verthys_Init 与安装期预检工具复用。失败返回 VTY_E_POLICY/VTY_E_IO。 */
 int vty_secure_state_preflight(void)
 {

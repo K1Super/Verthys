@@ -152,7 +152,7 @@ pub fn security_usb_register_device(
 
 /// 检测克隆外设
 ///
-/// 废除"首次自动注册"逻辑
+/// 未登记卷标不自动注册，按未知设备拒绝：
 ///   - Trusted：卷标已知且序列号哈希匹配 → 合法设备
 ///   - Clone：卷标已知但序列号哈希不匹配 → 克隆外设
 ///   - Unknown：卷标未知 → 未注册设备，拒绝访问并触发审计事件
@@ -402,13 +402,11 @@ pub fn security_usb_rebind_device(
 /// 进入影子休眠（外设拔出后加密索引驻留内存）
 ///
 /// encrypted_index_b64: 加密的内存索引快照（base64）
-/// txid: 事务 ID（恢复时需匹配）
+/// txid: 事务 ID（恢复时需匹配，由后端生成）
 /// timeout_min: 休眠超时（分钟），超时自动 purge
 ///
 /// 加密索引使用 SecuredBuffer（Zeroizing）封装
 /// 内部自动定时器到期自动 purge
-/// 使用 base64 crate 替换自编 base64_decode
-/// txid 由后端生成真实值（非硬编码 0）
 #[tauri::command]
 pub fn security_usb_shadow_sleep(
     app: tauri::AppHandle,
@@ -454,7 +452,6 @@ pub fn security_usb_shadow_sleep(
 /// 返回 base64 编码的加密索引，若恢复失败返回 null
 ///
 /// 恢复的数据使用 Zeroizing 包装，编码后自动擦除
-/// 使用 base64 crate 替换自编 base64_encode
 #[tauri::command]
 pub fn security_usb_try_recover(
     app: tauri::AppHandle,
@@ -501,7 +498,6 @@ pub fn security_usb_try_recover(
 /// 清除影子休眠中的加密索引
 ///
 /// 使用 SecuredBuffer（Zeroizing），Drop 时自动 zeroize
-/// 移除手动 volatile 覆写循环，消除 take() 与覆写之间的窗口期
 #[tauri::command]
 pub fn security_usb_purge(
     app: tauri::AppHandle,
@@ -527,7 +523,7 @@ pub fn security_usb_purge(
 
 /// 查询影子休眠状态
 ///
-/// 修复：返回真实 txid（原硬编码为 0）
+/// 返回真实 txid
 #[tauri::command]
 pub fn security_usb_shadow_status(
     state: State<SecurityState>,
@@ -535,7 +531,7 @@ pub fn security_usb_shadow_status(
     let guard = lock_shadow_sleep_or_recover(&state)?;
     Ok(ShadowSleepStatus {
         in_shadow_sleep: guard.is_in_shadow_sleep(),
-        // 返回真实 txid（修复原硬编码 0）
+        // 返回真实 txid
         txid: guard.current_txid(),
     })
 }

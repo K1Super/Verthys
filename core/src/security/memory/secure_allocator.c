@@ -341,9 +341,9 @@ VerthysResult secure_allocator_alloc(SecureAllocator *alloc, size_t size,
         return VERTHYS_ERR_INTERNAL;
     }
 
-    /* 3. 边界页显式固定为 PAGE_NOACCESS（永久访问违例语义，见文件头
-     * 实现注记；数据页改 RW 后边界页本已 NOACCESS，此处显式重设以
-     * 固化区段完整性，冗余但确定）。 */
+    /* 3. 边界页显式固定为 PAGE_NOACCESS（永久访问违例语义；数据页改
+     * RW 后边界页本已 NOACCESS，此处显式重设以固化区段完整性，冗余但
+     * 确定）。 */
     if (!VirtualProtect(base, ps, PAGE_NOACCESS, &old_prot) ||
         !VirtualProtect(base + ps + data_bytes, ps, PAGE_NOACCESS, &old_prot)) {
         VirtualFree(region, 0, MEM_RELEASE);

@@ -1,14 +1,15 @@
-               /*
+/*
  * job_isolation.c — 双层 Job Object 嵌套 + DACL 白名单隔离实现
  *
  * 严格遵守 Windows 10/11 平台规范，禁止降级。
  *
  * 实现要点：
- *   放弃 PROTECT_FROM_CLOSE + DuplicateHandle（已彻底移除）
+ *   不使用 PROTECT_FROM_CLOSE + DuplicateHandle 组合：关闭副本不减少原
+ *   句柄引用计数，无法触发 KILL_ON_JOB_CLOSE
  *   DACL 白名单策略（默认拒绝 + 显式允许，无 Deny ACE）
  *       - ALLOW SYSTEM：JOB_OBJECT_ALL_ACCESS
  *       - ALLOW 当前进程用户 SID：JOB_OBJECT_ALL_ACCESS | JOB_OBJECT_ASSIGN_PROCESS
- *   完全移除 JobObjectSecurityLimitInformation（Windows 8+ 已废弃）
+ *   不使用 JobObjectSecurityLimitInformation（Windows 8+ 已废弃）
  *   资源释放采用 TerminateJobObject（非 DuplicateHandle）
  *   严格 5 步嵌套挂载流程，任一步失败触发立即回滚
  *   InitOnceExecuteOnce 并发安全 + OutputDebugStringA/Event Log 诊断
@@ -42,7 +43,7 @@ static int    s_init_result = 0;        /* 0=未初始化, 正数=成功, 负数
  *   生产构建对调试器/DebugView 静默
  * - 同时写入 Windows 事件日志（Event Log），供正式发布版本远程排查
  * - 记录每一步的 Win32 错误码（GetLastError）
- * - 废弃 fprintf(stderr) —— 服务进程通常无控制台窗口
+ * - 不使用 fprintf(stderr)：服务进程通常无控制台窗口
  */
 static void job_diag(const char *msg, DWORD gle)
 {
@@ -264,8 +265,8 @@ static int step2_assign_to_inner(void)
  *   外层 Job 必须设置 BREAKAWAY_OK，否则内核拒绝嵌套挂入。
  *   KILL_ON_JOB_CLOSE 保证外层句柄关闭时强制终止所有子进程。
  *
- * 不设置 PROTECT_FROM_CLOSE（已证明无效）。
- * 不设置 PROTECT_FROM_CLOSE 的副本触发机制（DuplicateHandle 无效）。
+ * 不设置 PROTECT_FROM_CLOSE：关闭副本不减少原句柄引用计数，无法触发
+ * KILL_ON_JOB_CLOSE。
  */
 static int step3_create_outer_job(void)
 {
@@ -355,7 +356,7 @@ static void step5_rollback(void)
 
 /*
  * InitOnceExecuteOnce 回调函数，保证全局仅执行一次初始化。
- * 线程安全，防止未来可能的并发调用导致的状态不一致。
+ * 线程安全：InitOnceExecuteOnce 保证并发调用下初始化只执行一次。
  *
  * 严格 5 步挂载流程，任一步失败触发立即回滚：
  *   step1 → step2 → step3 → step4 → (失败则 step5 回滚)

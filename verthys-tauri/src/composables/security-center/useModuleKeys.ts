@@ -1,8 +1,6 @@
 /**
  * useModuleKeys.ts — 模块独立密钥管理 Composable
  *
- * 来源：SecurityCenter.vue 原 L1110-L1299（零行为变更提取）
- *
  * 职责：
  *   1. 模块状态指示条样式/文字计算（moduleStateClass / moduleStateText）
  *      —— 读取 keyManager 单例 ref：moduleKeyEnabledRef / hasModuleKeyRecordRef / moduleKeyReadyRef
@@ -21,17 +19,15 @@
  *
  * 设计：
  *   - keyManager 单例 ref（moduleKeyEnabledRef / hasModuleKeyRecordRef / moduleKeyReadyRef /
- *     globalKeyReadyRef）直接从 keyManager 导入，与 SecurityCenter.vue 原实现一致
+ *     globalKeyReadyRef）直接从 keyManager 导入
  *   - 外部依赖通过参数注入：showError / showToast / onCopyText（剪贴板工具，
- *     由 SecurityCenter 顶层持有，含 toast 反馈；未来可提取为 useClipboard）
+ *     由 SecurityCenter 顶层持有，含 toast 反馈）
  *   - 乐观更新策略：UI 立即响应，后台 模块事务失败时回滚
  *
  * 返回契约（模块状态由 C 层 M1 承担）：
  *   - setModuleKey（启用/轮换口令）返回 VerthysResult<void>
  *   - verifyModuleKey（解锁 MDEK user 槽）返回 VerthysResult<void>
  *   - disableModuleProtection（关闭保护，需模块口令）返回 VerthysResult<void>
- *
- * 设计：纯 Composable，所有外部依赖通过参数注入，状态和方法返回给调用方。
  */
 
 import { ref } from 'vue';
@@ -119,7 +115,7 @@ export function useModuleKeys(options: UseModuleKeysOptions) {
   const keyDialogProcessing = ref(false);
 
   /* ===== 待启用模块（前置密钥校验流程状态） =====
-   * 修复：开启模块保护前必须先设置该模块独立密钥。
+   * 约束：开启模块保护前必须先设置该模块独立密钥。
    *   未设置密钥时点击开关 → 拉起密钥设置弹窗并记录 pendingEnableModuleId；
    *   密钥设置成功 → 自动开启该模块保护（持久化，失败回滚）；
    *   中途退出（取消/遮罩关闭）→ 保护保持关闭，checkbox 回滚为关闭态。 */

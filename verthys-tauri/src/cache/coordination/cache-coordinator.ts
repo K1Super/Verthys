@@ -1,20 +1,20 @@
 /*
  * cache/coordination/cache-coordinator.ts — 缓存协调器（事件驱动单例）
  *
- * cache-coordinator 重构设计落地：
- *   采用观察者模式 + 依赖注入重构，通过领域事件（record:add/record:remove/
+ * 事件驱动单例：
+ *   采用观察者模式 + 依赖注入，通过领域事件（record:add/record:remove/
  *   record:update）解耦缓存更新逻辑，缓存层实现可注入、可替换、可测试。
  *
- * 根治的五项缺陷（逐条对应）：
- *   1. updateRecord 覆盖 createdTime → 更新前自动从摘要缓存读取旧
- *      createdTime 保留（调用方未显式传入时）
- *   2. RecordUpdate 缺少元数据字段 → 扩展 createdTime?/physicalOffset?/
- *      merkleLeaf?，调用方可传入完整摘要信息，消除占位值失真
- *   3. removeRecord 未同步清理 pendingDeletionIds → 提供 configure() 注入
- *      onRecordDeleted 回调（默认不注入，安全警示示于下方）
- *   4. dataSize 估算不精确 → estimateBase64Size 处理填充字符
+ * 关键行为：
+ *   1. updateRecord 更新前自动从摘要缓存读取旧 createdTime 保留
+ *      （调用方未显式传入时）
+ *   2. RecordUpdate 支持 createdTime?/physicalOffset?/merkleLeaf?，
+ *      调用方可传入完整摘要信息，避免占位值失真
+ *   3. removeRecord 不同步清理 pendingDeletionIds，由 configure() 注入
+ *      onRecordDeleted 回调处理（默认不注入，安全警示示于下方）
+ *   4. dataSize 估算使用 estimateBase64Size 处理填充字符
  *      （共享实现位于 cache/shared/base64-size.ts）
- *   5. 单例缺少可测试性 → 提供 configure()/resetInstance()
+ *   5. 提供 configure()/resetInstance() 支持测试
  *
  * onRecordDeleted 安全警示：
  *   正常删除路径【禁止】将 onRecordDeleted 接线为"从 pendingDeletionIds
@@ -23,18 +23,14 @@
  *   若在缓存同步阶段提前移除，磁盘旧数据会被扫描回填 → 删除复活。
  *   该回调仅用于特殊场景（如独立于冲刷队列的显式确认删除）。
  *
- * 构建约束与设计对齐（与 verthys-cache-domain 重构同源决策）：
+ * 构建约束：
  *   - Node 'events' 的 EventEmitter 在本 Vite 浏览器 bundle 不可解析
  *     （无 events 包、无 polyfill），以零依赖 TypedEventEmitter 等价替代，
- *     事件名与监听器参数由事件表静态类型化（比 Node 版更安全）
- *   - 单例身份稳定性：原 configure() 以新实例替换 CacheCoordinator.instance，
- *     而模块底部导出的 cacheCoordinator 常量在模块求值时绑定，替换后
- *     消费方持有旧实例（ES live binding 指向导出时的对象）。本实现将
- *     configure()/resetInstance() 改为对既有单例的就地重配置/出厂重置，
- *     保持导出绑定与 getInstance() 返回值永远同一实例（原 API 与用途
- *     完整保留，身份漂移缺陷根治）
- *   - 默认处理器保留现网逐层 try/catch 失败包容（原头注声称
- *     "单层缓存失败不影响其他层"，逐层隔离是该承诺的落实）
+ *     事件名与监听器参数由事件表静态类型化
+ *   - 单例身份稳定：configure()/resetInstance() 对既有单例就地重配置/出厂
+ *     重置，不替换实例、不置空，保证模块底部导出的 cacheCoordinator 常量
+ *     与 getInstance() 返回值始终同一实例（ES live binding 语义）
+ *   - 默认处理器逐层 try/catch：单层缓存失败不影响其他层
  *
  * 使用示例：
  *   import { cacheCoordinator } from "../cache/coordination/cache-coordinator";
@@ -154,10 +150,9 @@ function createDefaultHandlers(): Required<CacheHandlers> {
       }
     },
     onUpdate: (rec) => {
-      // 评审修复：旧缓存失效逐层独立容错（与 onRemove 一致）——
-      //   原实现三层失效合并在单个 try/catch 内，若 invalidateScannedRecord
-      //   抛出异常，摘要/全量两层失效将被跳过，旧记录残留缓存产生数据
-      //   不一致；逐层隔离后单层失败不影响其他层的失效
+      // 旧缓存失效逐层独立容错（与 onRemove 一致）：
+      //   三层失效若合并在单个 try/catch 内，invalidateScannedRecord 抛出异常时
+      //   摘要/全量两层失效会被跳过，旧记录残留缓存造成数据不一致。
       try {
         invalidateScannedRecord(rec.id);
       } catch (e) {
@@ -255,8 +250,8 @@ export class CacheCoordinator extends TypedEventEmitter<CacheCoordinatorEventMap
    * 重置单例（测试用）：恢复默认处理器、清除注入回调、
    * 移除全部自定义监听器并重建默认订阅（出厂状态）。
    *
-   * 同样保持单例身份不变（原实现将 instance 置 null 会导致
-   *   已导出的 cacheCoordinator 常量与后续 getInstance() 脱钩）。
+   * 同样保持单例身份不变（若将 instance 置 null，已导出的
+   *   cacheCoordinator 常量会与后续 getInstance() 脱钩）。
    */
   static resetInstance(): void {
     CacheCoordinator.getInstance().applyFactoryReset();
@@ -347,5 +342,5 @@ export class CacheCoordinator extends TypedEventEmitter<CacheCoordinatorEventMap
   }
 }
 
-/** 导出单例便捷实例（业务代码直接使用，无需 getInstance()；身份恒定，同文件头注） */
+/** 导出单例便捷实例（业务代码直接使用，无需 getInstance()；身份恒定） */
 export const cacheCoordinator = CacheCoordinator.getInstance();

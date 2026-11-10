@@ -1,8 +1,6 @@
 /*
  * CI 第二级：AST 深度分析工具
  *
- *    "CI静态校验双引擎实现策略"第二级
- *
  * 目标 < 10 秒，Pull Request 合并时触发。
  * 此阶段任何违规将直接导致构建失败，PR 无法合并。
  *
@@ -147,10 +145,9 @@ impl DangerCallVisitor {
 
 impl<'ast> Visit<'ast> for DangerCallVisitor {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        // 检查函数体内的调用
         let func_name = node.sig.ident.to_string();
 
-        // 提取函数源代码文本（简化版：检查函数名）
+        // 仅按函数名匹配；函数体内路径由 visit_path 覆盖
         for pattern in DANGER_CALL_PATTERNS {
             if func_name.contains(pattern) {
                 let line = node.sig.ident.span().start().line;
@@ -164,7 +161,6 @@ impl<'ast> Visit<'ast> for DangerCallVisitor {
 
     fn visit_path(&mut self, node: &'ast syn::Path) {
         if self.is_entry {
-            // 将路径转换为字符串进行匹配
             let path_str = node
                 .segments
                 .iter()
@@ -221,10 +217,8 @@ impl<'ast> Visit<'ast> for SwallowVisitor {
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
         // 检查 match 分支是否吞掉 Err
         for arm in &node.arms {
-            // 将 arm 的 pat 转换为字符串
             let pat_str = quote::quote!(#(&arm.pat)).to_string();
 
-            // 检查是否是 Err(_) 模式
             if pat_str.contains("Err") && pat_str.contains("_") {
                 // 检查 match body 是否为空或返回默认值
                 let body_str = match arm.body.as_ref() {
@@ -311,7 +305,6 @@ impl DependencyAnalyzer {
 
         let allowed = Self::allowed_deps(layer);
 
-        // 匹配 use crate::xxx:: 语句
         let use_re = Regex::new(r"use\s+crate::(\w+)::").unwrap();
         for cap in use_re.captures_iter(content) {
             let imported_layer = cap.get(1).unwrap().as_str();
@@ -323,7 +316,6 @@ impl DependencyAnalyzer {
 
             // 检查是否在允许列表中
             if !allowed.contains(&imported_layer) {
-                // 计算行号
                 let pos = cap.get(0).unwrap().start();
                 let line = content[..pos].lines().count() + 1;
 

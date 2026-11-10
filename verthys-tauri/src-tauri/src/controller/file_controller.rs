@@ -9,8 +9,9 @@
  * =============================================================================
  * 核心设计
  * =============================================================================
- * - 沙箱白名单：以应用数据目录、配置目录、文档/图片/下载目录为基，
- *   所有路径经 canonicalize 解析并验证是否在基目录内，阻断目录遍历和符号链接绕过。
+ * - 沙箱白名单：以应用数据目录、配置目录、文档/图片/下载目录、
+ *   用户主目录与桌面为基，所有路径经 canonicalize 解析并验证是否在基目录内，
+ *   阻断目录遍历和符号链接绕过。
  * - 流式读取：分块（64KB）读取文件，避免一次性加载大文件，上限 50MB。
  * - 原子写入：先写临时文件（同目录、随机后缀），fsync 刷盘后 rename 替换，
  *   中途失败自动清理临时文件。
@@ -182,8 +183,8 @@ fn write_file_audit(
 
 /// 构建文件操作白名单基目录列表。
 ///
-/// 包含应用数据、配置、文档、图片和下载目录，所有文件操作必须
-/// 位于这些目录内。若白名单为空，则所有操作均被拒绝。
+/// 包含应用数据、配置、文档、图片、下载、用户主目录和桌面目录，所有文件
+/// 操作必须位于这些目录内。若白名单为空，则所有操作均被拒绝。
 fn build_whitelist(app: &tauri::AppHandle) -> Vec<String> {
     let mut whitelist = Vec::new();
 
@@ -213,19 +214,11 @@ fn build_whitelist(app: &tauri::AppHandle) -> Vec<String> {
         }
     }
 
-    // 修复：扩展白名单至用户主目录与桌面
-    //
-    // 原缺陷：白名单仅含 app_data/app_config/Documents/Pictures/Downloads，
-    // 不含 Desktop 及用户主目录。用户通过 Tauri 文件对话框选择的 .bin 密钥文件
-    // 若位于桌面（最常见场景），readFileBytes 沙箱校验失败返回 PermissionDenied，
-    // 前端 browseBin 静默吞错导致 binBytes=null。按钮 :disabled 用 !binFileName
-    // 判断（通过，可点击），但 onVerify/onInitKey 函数守卫用 !binBytes.value
-    // 判断（失败，静默返回），用户看到"按钮完全无反应"。
-    //
-    // 修复：新增 home_dir（覆盖桌面/文档/下载等全部用户子目录）+ desktop_dir
-    // （显式桌面，兼容 home_dir 获取失败的情况）。用户通过 dialog open() 显式
-    // 选择的文件已获得用户授权，白名单应信任用户主目录范围内的路径。沙箱仍
-    // 拒绝系统目录（C:\Windows 等）和路径遍历攻击（../），安全边界不变。
+    // 用户主目录与桌面同为白名单基目录：
+    //   - home_dir 覆盖桌面/文档/下载等全部用户子目录
+    //   - desktop_dir 显式覆盖桌面（home_dir 获取失败时仍可用）
+    // 用户通过 dialog open() 显式选择的文件已获得授权，白名单信任主目录
+    // 范围内的路径；系统目录（C:\Windows 等）与路径遍历（../）仍被拒绝。
     if let Ok(home_dir) = app.path().home_dir() {
         if let Some(s) = home_dir.to_str() {
             whitelist.push(s.to_string());
@@ -620,7 +613,7 @@ pub async fn write_file_bytes(app: tauri::AppHandle, request: Request<'_>) -> Re
     let path_clone = path.clone();
     let whitelist_clone = whitelist.clone();
     // 从请求体提取原始字节（Request 为借用类型，clone 一次后 move 进 'static 闭包；
-    // 相比原 base64 路径仍省一次 1.33× 字符串分配 + 解码）
+    // 原始字节直传，省去 base64 字符串分配与解码）
     let data: Vec<u8> = match request.body() {
         InvokeBody::Raw(bytes) => bytes.clone(),
         _ => {
@@ -692,26 +685,16 @@ pub async fn write_file_bytes(app: tauri::AppHandle, request: Request<'_>) -> Re
 
 // ===== 用户授权文件操作（跳过白名单，拒绝系统关键目录） =====
 //
-// 修复：拾光解析功能无法导入本地文件
-//
-// 原缺陷：
-//   read_file_bytes / write_file_bytes 强制执行沙箱白名单校验，
-//   白名单仅含 app_data / app_config / Documents / Pictures / Downloads /
-//   home_dir / desktop_dir。用户通过 Tauri 文件对话框 open() 显式选择的
-//   .venc 文件若位于其他磁盘（D:\、E:\）或网络位置，沙箱校验返回
-//   NotInWhitelist → PermissionDenied，前端 chooseParseFile catch 块
-//   仅显示"读取文件失败"，用户看到"无法导入本地文件"。
-//
-// 根治方式：
-//   用户通过原生文件对话框显式选择的文件已获得用户明确授权，
-//   白名单校验不再适用。新增 read_user_file / write_user_file 命令：
+// 用户通过原生文件对话框 open() 显式选择的文件已获得明确授权，白名单
+// 不适用于这类路径（可能位于 D:\、E:\ 或网络位置）。read_user_file /
+// write_user_file 的校验链：
 //   - 跳过白名单校验（用户已通过对话框授权）
-//   - 保留 validate_path_input 字符级校验（防路径注入、目录遍历、保留设备名）
-//   - 保留 canonicalize（解析符号链接，确保路径真实）
-//   - 新增系统关键目录拒绝（C:\Windows、C:\Program Files 等）
-//   - 保留文件大小限制（2GB）
-//   - 保留超时控制（整文件读取 120s；分片读取按分片超时）
-//   - 保留审计日志
+//   - validate_path_input 字符级校验（防路径注入、目录遍历、保留设备名）
+//   - canonicalize（解析符号链接，确保路径真实）
+//   - 系统关键目录拒绝（C:\Windows、C:\Program Files 等）
+//   - 文件大小限制（2GB）
+//   - 超时控制（整文件读取 120s；分片读取按分片超时）
+//   - 审计日志
 
 /// 系统关键目录前缀列表（canonicalize 后规范化为小写 + 正斜杠比较）。
 ///
@@ -773,7 +756,7 @@ fn is_system_critical_path(canonical: &std::path::Path) -> bool {
 /// 同步读取用户通过对话框选择的文件（跳过白名单，拒绝系统关键目录）。
 ///
 /// 读取形态由参数决定：
-///   - `offset` / `length` 均缺省：整文件读取（历史调用路径，行为不变）；
+///   - `offset` / `length` 均缺省：整文件读取（行为不变）；
 ///   - 两者同时给出：读取 `[offset, offset + length)` 分片。
 ///
 /// 分片形态的契约（越界即报错，禁止静默截断）：
@@ -783,10 +766,10 @@ fn is_system_critical_path(canonical: &std::path::Path) -> bool {
 ///   - `offset` 不得越过文件长度，`offset + length` 不得越过文件末尾；
 ///   - 实际读出字节数必须恰为 `length`（读取期间源文件被截断即报错）。
 ///
-/// 与 `read_file_blocking` 的区别：
+/// 与 `read_file_blocking` 的差异：
 ///   - 跳过白名单校验（用户已通过对话框显式授权）
-///   - 新增系统关键目录拒绝（防止读取 C:\Windows 等系统文件）
-///   - 保留 validate_path_input 字符级校验、canonicalize 与文件大小限制
+///   - 增加系统关键目录拒绝（防止读取 C:\Windows 等系统文件）
+///   - 同样执行 validate_path_input 字符级校验、canonicalize 与文件大小限制
 fn read_user_file_range_blocking(
     path: &str,
     offset: Option<u64>,
@@ -1075,12 +1058,11 @@ fn resolve_user_file_target(path: &str, log_tag: &str) -> Result<PathBuf, String
 
 /// 同步执行用户授权的原子写入（跳过白名单，拒绝系统关键目录）。
 ///
-/// 与 `write_file_blocking` 的区别：
+/// 与 `write_file_blocking` 的差异：
 ///   - 跳过白名单校验（用户已通过对话框显式授权保存位置）
-///   - 新增系统关键目录拒绝（防止覆盖 C:\Windows 等系统文件）
-///   - 保留 validate_path_input 字符级校验
-///   - 保留 canonicalize（解析父目录符号链接）
-///   - 保留原子写入、fsync、全局写互斥
+///   - 增加系统关键目录拒绝（防止覆盖 C:\Windows 等系统文件）
+///   - 同样执行 validate_path_input 字符级校验、canonicalize（解析父目录符号链接）、
+///     原子写入、fsync 与全局写互斥
 fn write_user_file_blocking(path: &str, data: &[u8]) -> Result<u64, String> {
     // 全局写互斥
     let _write_guard = WRITE_MUTEX.lock().map_err(|e| {
@@ -1160,9 +1142,9 @@ fn write_user_file_blocking(path: &str, data: &[u8]) -> Result<u64, String> {
 
 /// 读取用户通过对话框显式选择的文件并返回原始二进制内容（二进制 IPC）。
 ///
-/// 修复：用户通过 Tauri 文件对话框 open() 选择的文件已获得用户明确授权，
-///   白名单校验不再适用（用户可能选择 D:\、E:\、网络位置等非 home_dir 路径）。
-///   本命令跳过白名单校验，但仍保留：
+/// 用户通过 Tauri 文件对话框 open() 选择的文件已获得明确授权，白名单不适用
+///   （用户可能选择 D:\、E:\、网络位置等非 home_dir 路径）。
+///   本命令跳过白名单校验，但仍执行：
 ///   - validate_path_input 字符级校验（防路径注入、目录遍历、保留设备名）
 ///   - canonicalize（解析符号链接，确保路径真实）
 ///   - 系统关键目录拒绝（C:\Windows、C:\Program Files 等）
@@ -1175,7 +1157,7 @@ fn write_user_file_blocking(path: &str, data: &[u8]) -> Result<u64, String> {
 ///   - 两者同时给出 → 读取分片，越界/长度不符即报错，不静默截断。
 ///
 /// 返回 `tauri::ipc::Response` → 前端 invoke 直接收到 ArrayBuffer，
-/// 消除 base64 编码 1.33× 内存放大与编解码 CPU（原单张照片峰值 ×2.66 → ×1）。
+/// 消除 base64 编码 1.33× 内存放大与编解码 CPU 开销。
 ///
 /// 安全边界：调用方必须确保 path 来自用户通过 Tauri dialog open() 显式选择的路径。
 #[tauri::command]
@@ -1465,7 +1447,7 @@ pub async fn check_disk_space(
 
 /// 将原始二进制数据原子写入用户通过对话框选择的位置（二进制 IPC）。
 ///
-/// 修复：与 read_user_file 配套，用于导出功能写入用户选择的保存位置。
+/// 与 read_user_file 配套，用于导出功能写入用户选择的保存位置。
 ///   安全策略与 read_user_file 一致（跳过白名单 + 拒绝系统关键目录 + 其他安全检查）。
 ///
 /// 二进制传输协议（Tauri v2 raw IPC）：
@@ -1483,7 +1465,7 @@ pub async fn write_user_file(app: tauri::AppHandle, request: Request<'_>) -> Res
 
     let path_in = path.clone();
     // 从请求体提取原始字节（Request 为借用类型，clone 一次后 move 进 'static 闭包；
-    // 相比原 base64 路径仍省一次 1.33× 字符串分配 + 解码）
+    // 原始字节直传，省去 base64 字符串分配与解码）
     let data: Vec<u8> = match request.body() {
         InvokeBody::Raw(bytes) => bytes.clone(),
         _ => {
@@ -2426,7 +2408,7 @@ mod tests {
         let data: Vec<u8> = (0..=99u8).collect();
         let (dir, path) = make_range_test_file("default_mode", &data);
 
-        // 缺省参数与整文件读取历史行为一致（返回全部字节）
+        // 缺省参数按整文件读取处理（返回全部字节）
         let all = read_user_file_range_blocking(&path, None, None).unwrap();
         assert_eq!(all, data);
 

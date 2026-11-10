@@ -295,9 +295,9 @@ export interface PhotoDecryptChunksRequest {
   /** 索引瘦身布局：块总数（密文不携带总数，AD 绑定由调用方给出） */
   chunkTotal?: number;
   /**
-   * 逐块密文哈希（完整性权威值）：非空时在解密前于 Worker 内逐块校验，
-   * 不一致即拒绝该任务（确定性失败，不回退主线程重算）。
-   * 缺省或空数组表示不校验（历史记录无权威值的兼容路径）。
+   * 逐块密文哈希（诊断值，密钥轮换后可能合法失配）：非空时在 Worker 内逐块比对；
+   * 失配时继续 AEAD 解密，最终由 expectedFileHash 证明内容。缺少整图哈希时拒绝。
+   * 缺省或空数组表示不比对该诊断值（历史记录兼容路径）。
    */
   expectedHashes?: string[];
   /**

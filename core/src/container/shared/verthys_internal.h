@@ -144,7 +144,7 @@ int  verthys_unlock_memory(void *ptr, size_t len);
  *   2. free 释放堆内存                                                *
  *   3. 置 ptr = NULL（防 use-after-free / double-free）               *
  *                                                                    *
- * 使用 volatile 函数指针调用 memset，确保编译器不会将清零优化消除。   *
+ * 清零由 verthys_secure_zero 完成（SecureZeroMemory），编译器不会优化消除。   *
  * 静态分析工具可通过此宏统一审计所有敏感内存释放路径。                 *
  *                                                                    *
  * 用法：                                                              *

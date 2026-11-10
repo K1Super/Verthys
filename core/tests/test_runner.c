@@ -260,6 +260,8 @@ TEST(lockout_state_replay_rejected);
 TEST(lockout_path_change_locked);
 TEST(lockout_begin_attempt_min_interval);
 TEST(lockout_module_isolation);
+TEST(lockout_missing_witness_recovers);
+TEST(lockout_witness_mismatch_stays_locked);
 TEST(lockout_pipeline_persistent);
 
 /* 机器级预算客户端（test_machine_limiter.c，仅测试钩子构建） */
@@ -321,6 +323,7 @@ TEST(transfer_export_import_roundtrip);
 /* 全库 DEK 轮换（test_rotate.c） */
 TEST(rotate_recovery_gate_and_readonly);
 TEST(rotate_full_roundtrip_preserves_records_and_files);
+TEST(rotate_rewraps_module_content);
 TEST(rotate_modules_require_password_and_rebind_recovery);
 TEST(rotate_create_from_kc_never_deletes_foreign_target);
 TEST(rotate_rollback_anchor_advances);
@@ -450,9 +453,9 @@ static void test_filter_save(int argc, char **argv)
 /* ------------------------------------------------------------------ *
  * 测试文件沙箱（测试残留文件统一管理与自动清除）
  *
- * 问题：各测试用相对路径创建临时文件（test_*.verthys / 附属数据目录
- * <base>.d/（state.json / import.wal / 台账等）等），测试进程的 CWD 决定落盘位置——从项目根直接运行
- * verthys_tests.exe 时，残留文件散落源码树根目录。
+ * 理由：各测试以相对路径创建临时文件与附属目录（test_*.verthys、
+ * <base>.d/ 等），落盘位置由测试进程的 CWD 决定——从项目根直接运行
+ * 测试可执行文件时，残留文件会散落源码树根目录。
  *
  * 做法：main() 入口将 CWD 切换到构建树内专属沙箱目录
  *   <exe_dir>\test_scratch_<pid>
@@ -461,8 +464,8 @@ static void test_filter_save(int argc, char **argv)
  * 目录下 test_scratch_<pid> 前缀沙箱，pid 已不存在的整目录删除——残留
  * 最多暂留到下一次测试运行，不随运行次数无限累积。
  *
- * 安全性：已核实全部测试无运行期源码树相对路径读取（fopen("../..")）
- * 与子进程派生，切换 CWD 不影响任何现有用例。
+ * 安全性：全部测试只用相对路径创建自有工件，不读取源码树相对路径，
+ * 也不派生进程，切换 CWD 不影响任何现有用例。
  * ------------------------------------------------------------------ */
 static char g_scratch_cwd_backup[MAX_PATH];
 static char g_scratch_dir[MAX_PATH];
@@ -545,7 +548,7 @@ static void scratch_sweep_stale(const char *exe_dir)
     FindClose(h);
 }
 
-/* 建立沙箱并切换 CWD；失败回退旧行为（绝不阻断测试本身） */
+/* 建立沙箱并切换 CWD；失败时保留原 CWD（绝不阻断测试本身） */
 static void scratch_setup(void)
 {
     char exe[MAX_PATH];
@@ -697,14 +700,8 @@ int main(int argc, char **argv)
         printf("=== filter: '%s' ===\n", g_filter);
     }
     /*
-     * 入口文件单一职责
-     *
-     * 本入口仅涉及 3 项允许职责：
-     *   1. 环境初始化 — verthys_crypto_init() 初始化密码库运行时
-     *   2. 控制器派发 — RUN_TEST 宏调用各测试函数
-     *   3. 结果汇总 — TEST_SUMMARY 宏输出统计
-     *
-     * 红线遵守：无直接 printf/fprintf（通过 verthys_test.h 宏封装输出）
+     * 入口单一职责：环境初始化（verthys_crypto_init）、RUN_TEST 派发、
+     * TEST_SUMMARY 汇总；用例输出经 verthys_test.h 宏封装。
      */
     TEST_LOG("=== Verthys Phase 1 Tests ===\n\n");
 
@@ -956,7 +953,7 @@ int main(int argc, char **argv)
     test_state_checkpoint("chunks");
 
     /* 设备根封装会在进程内建立持久的 CNG 密钥句柄（进程级、一次性）：
-     * 先预热，避免首个 用例把这次初始化误报成句柄泄漏。 */
+     * 先预热，避免首个用例把这次初始化误报成句柄泄漏。 */
     (void)vty_device_root_init();
     if (vty_device_root_available()) {
         uint8_t probe[VTY_KEY_BYTES];
@@ -1020,6 +1017,7 @@ int main(int argc, char **argv)
     RUN_TEST(transfer_export_import_roundtrip);
     RUN_TEST(rotate_recovery_gate_and_readonly);
     RUN_TEST(rotate_full_roundtrip_preserves_records_and_files);
+    RUN_TEST(rotate_rewraps_module_content);
     RUN_TEST(rotate_modules_require_password_and_rebind_recovery);
     RUN_TEST(rotate_create_from_kc_never_deletes_foreign_target);
     RUN_TEST(rotate_rollback_anchor_advances);
@@ -1046,6 +1044,8 @@ int main(int argc, char **argv)
     RUN_TEST(lockout_path_change_locked);
     RUN_TEST(lockout_begin_attempt_min_interval);
     RUN_TEST(lockout_module_isolation);
+    RUN_TEST(lockout_missing_witness_recovers);
+    RUN_TEST(lockout_witness_mismatch_stays_locked);
     RUN_TEST(lockout_pipeline_persistent);
 #if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
     /* 进入机器预算客户端用例前撤销旁路，验证服务缺失时强制 fail-closed。 */

@@ -1,8 +1,6 @@
 <!--
   PasswordInput.vue — 密码输入框（含显隐切换）
-  来源：SecurityCenter.vue 原 template 中所有 pw-row 密码输入实例
   用途：初始化/验证视图的密码输入（访问密钥 / 密钥口令）
-  显隐切换：纯图标（无文字），符合用户偏好
 -->
 <template>
   <div class="form-row">

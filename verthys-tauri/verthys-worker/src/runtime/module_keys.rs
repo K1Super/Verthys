@@ -311,6 +311,36 @@ fn open_inner(req: &Request, worker: &Worker) -> Result<OpenedContent, VencError
     }
 }
 
+/// 外层信封探测入口：只验证 C 层模块密钥外层（MDEK/epoch）。
+///
+/// 与 `module_open` 的边界：
+///   - 不校验布局种类标签（VT4C）——历史布局没有该标签，不能因此误判损坏；
+///   - 不派生文件口令、不做内层解密——扫描不可能持有每文件口令。
+///
+/// 语义：返回 ok 表示外层 AEAD/结构完整（记录仍可由当前模块密钥解封）；
+/// AUTH/CORRUPT 表示外层已无法解封（确定损坏）。模块锁定/策略拒绝仍按
+/// 各自错误码返回，调用方据此归类为“不可判定”而不是损坏。
+pub(crate) fn handle_probe_outer(req: &Request, worker: &Worker) -> Response {
+    let resp = match probe_outer_inner(req, worker) {
+        Ok(()) => Response::ok("module_probe_outer"),
+        Err(e) => fail("module_probe_outer", e),
+    };
+    scrub_stack();
+    resp
+}
+
+fn probe_outer_inner(req: &Request, worker: &Worker) -> Result<(), VencError> {
+    let module = ModuleId::parse(&req.module)?;
+    let combined = decode_payload(&req.data)?;
+    let (uuid, seq, total) = parse_chunk_header(&combined)?;
+    // 解出的明文只用于证明外层可解封；立即随 Zeroizing 释放，不向前端返回。
+    let opened = worker
+        .call_chunk_open(module_index(module), &uuid, seq, total, &combined)
+        .map_err(map_ffi_error)?;
+    drop(Zeroizing::new(opened));
+    Ok(())
+}
+
 fn map_ffi_error(rc: u32) -> VencError {
     match rc {
         /* AUTH 与 KEY_INVALID 统一为认证失败：不区分口令错误、密钥不匹配

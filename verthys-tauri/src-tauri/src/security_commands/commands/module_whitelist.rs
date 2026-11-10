@@ -27,7 +27,7 @@ use crate::security_commands::state::SecurityState;
 
 /// 巡检当前进程已加载模块，返回未知/可疑模块列表
 ///
-/// 修复：install_dir 从 current_exe 推导，不信任前端输入。
+/// install_dir 从 current_exe 推导，不信任前端输入。
 /// 使用 spawn_blocking 执行巡检（可能耗时）。
 #[tauri::command]
 pub async fn security_module_patrol(

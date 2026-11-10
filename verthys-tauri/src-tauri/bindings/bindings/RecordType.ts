@@ -4,6 +4,5 @@
  * 记录类型 newtype
  *
  * 替代裸 u32，提供类型安全防止与其他 u32 字段混淆。
- * 后续统一迁移后，VerthysRecordEntry.rtype 将改为 RecordType。
  */
 export type RecordType = number;

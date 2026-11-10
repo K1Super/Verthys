@@ -1,6 +1,6 @@
 ﻿# Verthys Dev Launcher
 # Clean residual processes, verify dependencies, then start Tauri dev mode
-# Usage: .\dev.ps1
+# Usage: .\build_dev.ps1
 
 $ErrorActionPreference = "SilentlyContinue"
 $projectDir = Join-Path $PSScriptRoot "verthys-tauri"
@@ -23,8 +23,8 @@ $coreDllPath = $null
 try {
     $coreDllPath = Get-VerthysArtifactDll
 } catch {
-    # Not built yet: leave null; the pre-flight below delegates to
-    # build_production.ps1 which builds the core and regenerates the contract.
+    # Not built yet: leave null; the pre-flight below rebuilds the core via
+    # build_core.release.ps1 and regenerates the contract.
     $coreDllPath = $null
 }
 $workerDir        = Join-Path $projectDir "verthys-worker"
@@ -40,8 +40,8 @@ Write-Host "  Verthys Dev Launcher" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Step 0: Load MSVC build environment (root-cause fix for vswhom LNK2019)
-# 根因：build_dev.ps1 原未加载 MSVC 环境 → cl.exe 不在 PATH → cc crate 无法编译
+# Step 0: Load MSVC build environment (vswhom-sys needs cl.exe in PATH)
+# 未加载 MSVC 环境时 cl.exe 不在 PATH → cc crate 无法编译
 # vswhom-sys 的 vswhom.cpp（C++ 源） → 链接时 LNK2019:
 # vswhom_find_visual_studio_and_windows_sdk 未解析。
 #
@@ -65,7 +65,7 @@ if (-not [string]::IsNullOrEmpty($env:VCToolsInstallDir) -and
     }
     # env.load.ps1 内部设置 EAP=Stop + Set-StrictMode -Version 3.0，dot-source 会污染当前
     # 作用域。保存本脚本 EAP（SilentlyContinue），加载后恢复；StrictMode 重置为 Off
-    # （本脚本原无严格模式，避免后续 Get-Process/Get-NetTCPConnection 等误报未定义变量）。
+    # （本脚本不使用严格模式，避免后续 Get-Process/Get-NetTCPConnection 等误报未定义变量）。
     $prevEAP = $ErrorActionPreference
     . $envLoadScript
     $ErrorActionPreference = $prevEAP
@@ -201,24 +201,38 @@ $needsTestHooksCore = $false
 # Tauri resources 在 cargo build 时校验文件存在：P2 服务载荷（服务 exe + 根证书）
 # 必须已同步到 src-tauri\service-payload。生产构建脚本会刷新它们；
 # 首次开发可先从 build\security-service 复制，缺失则提示先跑一次服务构建。
-$serviceResourceDir = Join-Path $projectDir "verthys-tauri\src-tauri\service-payload"
-$legacyServiceResourceDir = Join-Path $projectDir "verthys-tauri\src-tauri\security-service"
+$serviceResourceDir = Join-Path $projectDir "src-tauri\service-payload"
+$legacyServiceResourceDir = Join-Path $projectDir "src-tauri\security-service"
 if (Test-Path -LiteralPath $legacyServiceResourceDir) {
     Remove-Item -LiteralPath $legacyServiceResourceDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-$serviceSourceDir = Join-Path $projectDir "build\security-service"
+$serviceSourceDir = Join-Path $PSScriptRoot "build\security-service"
 foreach ($name in @("VerthysSecuritySvc.exe", "VerthysRootCA.cer")) {
     $target = Join-Path $serviceResourceDir $name
-    if (-not (Test-Path -LiteralPath $target)) {
-        $source = Join-Path $serviceSourceDir $name
-        if (Test-Path -LiteralPath $source) {
-            New-Item -ItemType Directory -Path $serviceResourceDir -Force | Out-Null
-            Copy-Item -LiteralPath $source -Destination $target -Force
-            Write-Host ("  -> 已同步 P2 服务资源: {0}" -f $name) -ForegroundColor DarkYellow
-        } else {
-            Write-Host ("  !! 缺少 P2 服务资源 {0}；请先运行 build_production.ps1 -Profile local -AllowLocal -SkipTauri 一次" -f $name) -ForegroundColor Red
-            exit 1
+    $source = Join-Path $serviceSourceDir $name
+    $targetExists = Test-Path -LiteralPath $target
+    if (Test-Path -LiteralPath $source) {
+        $srcHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        $needCopy = -not $targetExists
+        if (-not $needCopy) {
+            $dstHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+            $needCopy = $srcHash -ne $dstHash
         }
+        if ($needCopy) {
+            try {
+                New-Item -ItemType Directory -Path $serviceResourceDir -Force -ErrorAction Stop | Out-Null
+                Copy-Item -LiteralPath $source -Destination $target -Force -ErrorAction Stop
+                $copiedHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+                if ($copiedHash -ne $srcHash) { throw "service payload hash mismatch" }
+                Write-Host ("  -> Synced P2 service asset: {0}" -f $name) -ForegroundColor DarkYellow
+            } catch {
+                Write-Host ("  !! Failed to stage P2 service asset {0}: {1}" -f $name, $_) -ForegroundColor Red
+                exit 1
+            }
+        }
+    } elseif (-not $targetExists) {
+        Write-Host ("  !! Missing P2 service payload {0}; run build_production.ps1 -Profile local -AllowLocal -SkipTauri once" -f $name) -ForegroundColor Red
+        exit 1
     }
 }
 
@@ -303,6 +317,60 @@ if ($dllMissing -or $workerMissing -or $needsTestHooksCore) {
     Write-Host "  Core binaries built and verified (test hooks)" -ForegroundColor Green
 } else {
     Write-Host "  Core binaries ready (test hooks, no rebuild needed)" -ForegroundColor Green
+}
+
+# Step 4.1: Sync Tauri staged resources (avoid stale DLL/worker in dev runtime)
+# Tauri dev packages resources from src-tauri\verthys.dll and externalBin from
+# src-tauri\binaries. Rebuilding core/worker without refreshing these staging
+# copies makes dev run an old DLL or a worker with a mismatched hash baseline.
+if ($null -ne $coreDllPath -and (Test-Path -LiteralPath $coreDllPath)) {
+    $stagedDll = Join-Path $srcTauriDir "verthys.dll"
+    try {
+        $srcHash = (Get-FileHash -LiteralPath $coreDllPath -Algorithm SHA256).Hash
+        $dstHash = if (Test-Path -LiteralPath $stagedDll) {
+            (Get-FileHash -LiteralPath $stagedDll -Algorithm SHA256).Hash
+        } else {
+            ""
+        }
+        if ($srcHash -ne $dstHash) {
+            Copy-Item -LiteralPath $coreDllPath -Destination $stagedDll -Force -ErrorAction Stop
+            $dstHash = (Get-FileHash -LiteralPath $stagedDll -Algorithm SHA256).Hash
+            if ($srcHash -ne $dstHash) { throw "staged DLL hash mismatch" }
+            Write-Host "  -> Synced Tauri asset: src-tauri\verthys.dll" -ForegroundColor DarkYellow
+        }
+    } catch {
+        Write-Host "  !! Failed to stage verthys.dll: $_" -ForegroundColor Red
+        exit 1
+    }
+}
+$stagedWorkerExe = if (Test-Path -LiteralPath $workerReleaseExe) {
+    $workerReleaseExe
+} elseif (Test-Path -LiteralPath $workerDebugExe) {
+    $workerDebugExe
+} else {
+    $null
+}
+if ($null -ne $stagedWorkerExe) {
+    $binariesDir = Join-Path $srcTauriDir "binaries"
+    $stagedWorker = Join-Path $binariesDir "verthys-worker-x86_64-pc-windows-msvc.exe"
+    try {
+        $srcHash = (Get-FileHash -LiteralPath $stagedWorkerExe -Algorithm SHA256).Hash
+        $dstHash = if (Test-Path -LiteralPath $stagedWorker) {
+            (Get-FileHash -LiteralPath $stagedWorker -Algorithm SHA256).Hash
+        } else {
+            ""
+        }
+        if ($srcHash -ne $dstHash) {
+            New-Item -ItemType Directory -Path $binariesDir -Force -ErrorAction Stop | Out-Null
+            Copy-Item -LiteralPath $stagedWorkerExe -Destination $stagedWorker -Force -ErrorAction Stop
+            $dstHash = (Get-FileHash -LiteralPath $stagedWorker -Algorithm SHA256).Hash
+            if ($srcHash -ne $dstHash) { throw "staged worker hash mismatch" }
+            Write-Host "  -> Synced Tauri asset: src-tauri\binaries\verthys-worker-x86_64-pc-windows-msvc.exe" -ForegroundColor DarkYellow
+        }
+    } catch {
+        Write-Host "  !! Failed to stage verthys-worker.exe: $_" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # Step 5: Start dev mode

@@ -124,7 +124,7 @@ pub(crate) async fn perform_external_lock(app: tauri::AppHandle, reason: &'stati
         log::warn!("[session_guard] 外部锁定清空剪贴板失败");
     }
 
-    /* 4. 通知前端重置密钥状态与视图（前端不再调用锁库命令，避免与
+    /* 4. 通知前端重置密钥状态与视图（前端不调用锁库命令，避免与
      *    已销毁 worker 竞态）。 */
     let _ = app.emit(
         "verthys://external-lock",
@@ -140,7 +140,7 @@ pub(crate) async fn perform_external_lock(app: tauri::AppHandle, reason: &'stati
 
 /// 启动会话守卫（监听系统锁屏/解锁事件）
 ///
-/// 修复：获取主窗口 HWND 作为必须参数，获取失败则命令失败，绝不静默。
+/// 获取主窗口 HWND 作为必须参数，获取失败则命令失败，绝不静默。
 /// HWND 用于 SetWindowDisplayAffinity 等关联操作。
 #[tauri::command]
 pub fn security_session_start(

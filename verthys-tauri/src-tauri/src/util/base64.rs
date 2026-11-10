@@ -8,16 +8,13 @@
  *   - 不持有状态、不执行 I/O、不输出日志
  *   - 仅对外暴露确定性的编解码接口
  *
- * 改用标准 base64 crate：
- *   原自编实现存在以下隐患：
- *     - 无 URL-safe 字母表支持
- *     - 无流式编解码接口
- *     - 错误信息不够精细（统一返回 "invalid base64 character"）
- *     - 未经过密码学审计（虽然 Base64 本身非加密，但实现 bug 可能导致数据损坏）
- *   改用社区维护的 base64 crate（0.22），经广泛审计，支持多种字母表与配置。
+ * 实现选型：使用标准 base64 crate（0.22）：
+ *   - 支持多种字母表与配置，覆盖流式与一次性编解码
+ *   - 错误信息精细，社区维护并经广泛审计
+ *   - 不自行实现编码表：自编实现易缺 URL-safe 字母表与流式接口，
+ *     且实现 bug 可能导致数据损坏
  *
- * 签名兼容：保留原 base64_encode / base64_decode 函数签名，
- * 内部委托至 base64 crate，现有调用方无需修改。
+ * 接口：base64_encode / base64_decode 保持现有签名，内部委托至 base64 crate。
  *
  * CI 红线：本文件不得包含任何 println!/eprintln!/log::* 调用。
  */
@@ -28,7 +25,7 @@ use base64::Engine;
 /// base64 编码（标准字母表 + padding）
 ///
 /// 内部委托至 base64 crate STANDARD engine。
-/// 与原自编实现行为一致，确保跨进程数据互通。
+/// 标准字母表 + padding，跨进程可达同一编码结果。
 pub fn base64_encode(input: &[u8]) -> String {
     STANDARD.encode(input)
 }
@@ -36,12 +33,12 @@ pub fn base64_encode(input: &[u8]) -> String {
 /// base64 解码（标准字母表，支持 padding 与空白字符过滤）
 ///
 /// 内部委托至 base64 crate STANDARD engine。
-/// 行为兼容原自编实现：
+/// 行为约定：
 ///   - 过滤 \n \r 空白字符
 ///   - 非法字符返回 Err
 ///   - padding 处理由 base64 crate 内部完成
 pub fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    // 过滤空白字符（与原实现一致）
+    // 过滤空白字符
     let filtered: String = input
         .chars()
         .filter(|&c| c != '\n' && c != '\r' && c != ' ')

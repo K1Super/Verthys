@@ -93,7 +93,7 @@ describe("useSessionTimer 倒计时", () => {
     t.startSessionTick();
     await vi.advanceTimersByTimeAsync(1000);
     expect(t.sessionRemaining.value).toBe(0);
-    // 旧实现会在归零后复位为完整超时，导致显示与实际锁定完全脱节
+    // 归零后不得复位为完整超时：显示会与实际锁定脱节
     await vi.advanceTimersByTimeAsync(2000);
     expect(t.sessionRemaining.value).toBe(0);
     t.stopSessionTick();

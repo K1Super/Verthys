@@ -182,7 +182,7 @@ TEST(pepper_foreign_size_rejected)
     CHECK(cng_machine_key_init() == 0);
     verthys_pepper_set_storage_path_override(K_PP_PATH);
 
-    /* 写入 304B 历史尺寸文件：尺寸门必须拒绝 */
+    /* 写入 304B 其他尺寸文件：尺寸门必须拒绝 */
     uint8_t foreign[304];
     memset(foreign, 0, sizeof(foreign));
     foreign[0] = (uint8_t)(PEP_MAGIC & 0xFF);

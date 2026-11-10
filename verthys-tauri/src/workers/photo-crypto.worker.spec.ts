@@ -7,7 +7,7 @@
  * - decrypt_meta / decrypt_chunks 的分发与响应装箱（字段、id、明文顺序）
  * - decrypt_chunks 的明文以 transferList 零拷贝回传
  * - 失败路径收敛为失败响应（携带定位标识），不向消息入口外抛异常
- * - 完整性校验（逐块密文哈希、整图明文哈希）在 Worker 侧先行生效
+ * - 完整性校验：整图明文哈希为权威值，逐块密文哈希仅作诊断（轮换兼容）
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { bytesToBase64, bytesToHex } from "../utils/binary_codec";
@@ -115,6 +115,26 @@ function hashOf(text: string): string {
   return bytesToHex(blake3(new TextEncoder().encode(text), { dkLen: 32 }));
 }
 
+function hashBytes(bytes: Uint8Array): string {
+  return bytesToHex(blake3(bytes, { dkLen: 32 }));
+}
+
+describe("photo-crypto.worker — 导入边界", () => {
+  it("空文件：直接拒绝，不进入缩略图与分块加密", async () => {
+    await dispatch({
+      id: 21,
+      fileName: "empty.jpg",
+      mime: "image/jpeg",
+      fileBytes: new ArrayBuffer(0),
+    });
+
+    const { response } = lastPost();
+    expect(response.id).toBe(21);
+    expect(response.ok).toBe(false);
+    expect(String(response.error)).toContain("文件为空");
+  });
+});
+
 describe("photo-crypto.worker — 解密路径", () => {
   it("decrypt_meta：经主线程 RPC 解出元数据并原样装箱", async () => {
     await dispatch({ id: 11, op: "decrypt_meta", metaB64: "meta-cipher", label: "42" });
@@ -189,9 +209,27 @@ describe("photo-crypto.worker — 解密路径", () => {
     expect(String(response.error)).toContain("数据块顺序校验失败");
   });
 
-  it("逐块密文哈希与权威值不符：解密前拒绝并标注块序号", async () => {
+  it("逐块密文哈希失配但整图哈希匹配：接受解密（轮换兼容）", async () => {
     await dispatch({
       id: 16,
+      op: "decrypt_chunks",
+      chunksB64: ["c1"],
+      fileHashHex: "f".repeat(64),
+      label: "照片.png",
+      expectedHashes: ["0".repeat(64)],
+      expectedFileHash: hashBytes(new Uint8Array([1, 2])),
+    });
+
+    const { response } = lastPost();
+    expect(response.id).toBe(16);
+    expect(response.ok).toBe(true);
+    const buffers = response.plaintexts as ArrayBuffer[];
+    expect(Array.from(new Uint8Array(buffers[0]))).toEqual([1, 2]);
+  });
+
+  it("逐块密文哈希失配且无整图哈希权威值：拒绝，不接受无证明的明文", async () => {
+    await dispatch({
+      id: 18,
       op: "decrypt_chunks",
       chunksB64: ["c1"],
       fileHashHex: "f".repeat(64),
@@ -200,9 +238,10 @@ describe("photo-crypto.worker — 解密路径", () => {
     });
 
     const { response } = lastPost();
-    expect(response.id).toBe(16);
+    expect(response.id).toBe(18);
     expect(response.ok).toBe(false);
     expect(String(response.error)).toContain("块密文哈希校验失败");
+    expect(String(response.error)).toContain("未提供整图哈希权威值");
   });
 
   it("整图明文哈希与权威值不符：整体失败（解密产物被拒绝）", async () => {

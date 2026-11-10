@@ -8,7 +8,7 @@
  *   - 解锁中隐藏存储框（含恢复入口）
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { createApp, h, type App } from "vue";
+import { createApp, h, nextTick, ref, type App } from "vue";
 import UnlockView from "./UnlockView.vue";
 
 const mounted: Array<{ app: App; container: HTMLDivElement }> = [];
@@ -30,7 +30,6 @@ function mountView(overrides: Record<string, unknown> = {}) {
         verthysPath: "C:\\Vault.verthys",
         unlocking: false,
         unlockProgressMsg: "",
-        unlockProgressPercent: 0,
         unlockProgressElapsed: 0,
         initStatusRef: "ready",
         initDetailRef: "",
@@ -68,5 +67,24 @@ describe("解锁页恢复码入口", () => {
   it("解锁中隐藏恢复码入口", () => {
     const root = mountView({ unlocking: true });
     expect(findRecoveryEntry(root)).toBeNull();
+  });
+
+  it("恢复码弹窗提交期间抑制底层解锁进度", () => {
+    const root = mountView({ unlocking: true, progressSuppressed: true });
+
+    expect(root.querySelector(".qf-slot")).toBeNull();
+    expect(root.querySelector(".qf-fill")).toBeNull();
+  });
+
+  it("进度来源 ref 更新直接驱动合成器 transform（不触发布局）", async () => {
+    const source = ref(0);
+    const root = mountView({ unlocking: true, progressSource: source });
+    const fill = root.querySelector(".qf-fill") as HTMLElement | null;
+    expect(fill).not.toBeNull();
+    expect(fill?.style.transform).toBe("scaleX(0)");
+
+    source.value = 42.5;
+    await nextTick();
+    expect(fill?.style.transform).toBe("scaleX(0.425)");
   });
 });

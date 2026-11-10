@@ -14,7 +14,9 @@
 
 use tauri::{AppHandle, Manager};
 
-use crate::controller::verthys_controller::{load_container_password, require_unlocked};
+use crate::controller::verthys_controller::{
+    load_existing_container_password, require_unlocked, KEY_MATERIAL_MISSING_MESSAGE,
+};
 use crate::infrastructure::handle_factory;
 use crate::service::vault_rotate::{self, HostHooks, RotateCancelSignal, RotateProgress};
 use crate::state::{AppState, VerthysSessionGuard};
@@ -42,7 +44,8 @@ fn adapter_require_unlocked(app: &AppHandle, op: &str) -> Result<(), String> {
 }
 
 fn adapter_load_password(app: &AppHandle) -> Result<zeroize::Zeroizing<String>, String> {
-    load_container_password(app)
+    load_existing_container_password(app)?
+        .ok_or_else(|| KEY_MATERIAL_MISSING_MESSAGE.to_string())
 }
 
 fn adapter_authorize_path(

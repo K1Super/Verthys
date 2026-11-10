@@ -1,6 +1,5 @@
 <!--
   DockNav.vue — 浮动宇宙 Dock（下坠光瀑动态背景）
-  从 MainView.vue 抽离，功能 100% 保留
 -->
 <template>
   <nav
@@ -24,6 +23,9 @@
       :key="m.id"
       class="dock-item"
       :class="{ active: currentModule === m.id }"
+      @pointerenter="preload(m.id)"
+      @focus="preload(m.id)"
+      @pointerdown="preload(m.id)"
       @click="$emit('switch', m.id)"
     >
       <SafeSvgIcon class="dock-icon" :source="m.icon" />
@@ -34,6 +36,7 @@
 
 <script setup lang="ts">
 import { modules } from "../../composables/useModuleNavigation";
+import { ensureModuleLoaded, isModuleNavId } from "../../app/module-loaders";
 import SafeSvgIcon from "../common/SafeSvgIcon.vue";
 
 defineProps<{
@@ -44,6 +47,14 @@ defineProps<{
 defineEmits<{
   (e: "switch", id: string): void;
 }>();
+
+/* 意图预取：指针进入、键盘聚焦或按下即启动分包加载。
+ * Why：预热若因磁盘或安全软件扫描未在交接前完成，点击仍会承担分包
+ *   成本；悬停/聚焦通常先于点击数十至数百毫秒，用这段意图窗口吸收
+ *   加载与解析，点击时组件已可即时解析。重复调用命中同一 Promise。 */
+function preload(id: string): void {
+  if (isModuleNavId(id)) void ensureModuleLoaded(id);
+}
 </script>
 
 <style scoped>
@@ -353,10 +364,8 @@ defineEmits<{
  * 揭示只走不透明度：本标签承载提示文字，任何位移/缩放都会把字形提升为
  * 合成层（改用灰度抗锯齿）并按亚像素偏移重采样，过渡结束释放合成层时
  * 再子像素化 —— 观感即「忽然模糊、随即清晰」。
- * 原实现以 transform: translateY(-50%) translateX(-8px)→translateX(0)
- * 配越位回弹曲线（cubic-bezier(0.34,1.56,0.64,1)）承担滑入：位移全程为
- * 亚像素且越位折返，模糊最重。滑入动感改由装饰层承担（::before/::after
- * 两道能量光轨以 scaleX 生长），文字层只淡入。
+ * 滑入动感由装饰层承担（::before/::after 两道能量光轨以 scaleX 生长），
+ * 文字层只淡入。
  * 垂直居中改用显式行盒：line-height 定高（16px）+ 上下内边距 3px × 2
  * = 22px 盒高，故 top = 50% − 11px 为整数偏移 —— 不依赖 translateY(-50%)
  * 这类百分比位移（其结果为亚像素，且使标签恒带 transform）。 */

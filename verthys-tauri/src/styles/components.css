@@ -70,11 +70,14 @@
 .clip-toast--success .toast-dot { --mark-c: #00ffaa; }
 .clip-toast--error { --mark-c: var(--danger); color: var(--danger); }
 .clip-toast--error .toast-dot { --mark-c: var(--danger); }
-/* 状态提示出入场过渡（全局唯一定义，模块 scoped 变体已全部收编） */
+/* 状态提示出入场过渡（全局唯一定义，模块 scoped 不得重复声明） */
 .toast-enter-active, .toast-leave-active { transition: opacity 0.3s var(--ease), transform 0.3s var(--ease); }
 .toast-enter-from, .toast-leave-to { opacity: 0; transform: translate(-50%, 10px); }
 
-/* ===== 全局复用：提示底板 · 星野场（clip-toast / error-toast 共用）=====
+/* ===== 全局复用：提示底板 · 星野场（clip-toast / error-toast / notice-card 共用）=====
+ * notice-card 为常驻告知的材质单源（右侧状态轨面板与上下文恢复条共用）：
+ * 常驻与瞬时提示共用同一套玻璃基面与星野，只去掉极光立标（常驻告知靠
+ * 文字承载语义），保证两类告知读作同一套语言。
  * 材质：通透玻璃体 —— 薄雾级填充让衬底结构明确可辨，可读性由背衬折射与
  * 上下光缝承担：看得清轮廓是通透，被抹平是哑光，本皮肤取前者。
  * 构图自下而上：
@@ -98,7 +101,8 @@
  * 性能：仅动 transform（合成器属性），渐变与描边静态一次栅格化；
  * 氛围动画随空闲治理自动暂停，reduced-motion 下静态呈现完整底板。 */
 .clip-toast,
-.error-toast {
+.error-toast,
+.notice-card {
   isolation: isolate;
   overflow: hidden;
   border-radius: var(--radius);
@@ -137,14 +141,17 @@
 /* 星野平铺宽（单源）：层宽、平铺宽与漂移位移共用同一定义，
  * 三处不会漂移失配 */
 .clip-toast,
-.error-toast {
+.error-toast,
+.notice-card {
   --toast-tile-far: 240px;
   --toast-tile-near: 320px;
 }
 .clip-toast::before,
 .clip-toast::after,
 .error-toast::before,
-.error-toast::after {
+.error-toast::after,
+.notice-card::before,
+.notice-card::after {
   content: "";
   position: absolute;
   top: 0; bottom: 0; left: 0;
@@ -156,7 +163,8 @@
 /* 远平面：颗粒细 / 亮度低 / 96s 缓漂（深度最远）—— 薄雾底板上取低亮，
  * 星点只作空间暗示，不与文字争噪 */
 .clip-toast::before,
-.error-toast::before {
+.error-toast::before,
+.notice-card::before {
   width: calc(100% + var(--toast-tile-far));
   background-size: var(--toast-tile-far) 100%;
   background-image:
@@ -169,7 +177,8 @@
 }
 /* 近平面：颗粒略大 / 亮度略高 / 61s 缓漂（与远平面周期互质，免机械同步） */
 .clip-toast::after,
-.error-toast::after {
+.error-toast::after,
+.notice-card::after {
   width: calc(100% + var(--toast-tile-near));
   background-size: var(--toast-tile-near) 100%;
   background-image:
@@ -181,8 +190,7 @@
 }
 /* 极光幕立标（原创 3D 动态立标 — 极地光学现象）：
  *   取「极点之上」的原型：前景光幕 + 后景纱幕（纯光幕，不设立柱）——
- *   与星野场（星点）、登记台徽记（环轨）、已弃用的黑洞语言（环形 /
- *   辉光球）全无重合。
+ *   与星野场（星点）、登记台徽记（环轨）全无重合。
  *   双幕（真实极光解剖，非装饰飘带）：
  *     前景幕 = 三根不等高幕肋 + 幕体薄雾 + 亮下沿（真实极光的下边界最亮）
  *       —— 以软椭圆包络遮罩收形，杜绝读成条形码；
@@ -249,7 +257,9 @@
   .clip-toast::before,
   .clip-toast::after,
   .error-toast::before,
-  .error-toast::after {
+  .error-toast::after,
+  .notice-card::before,
+  .notice-card::after {
     animation: none;
   }
 }
@@ -273,10 +283,10 @@
 .err-toast-enter-from, .err-toast-leave-to { opacity: 0; transform: translate(-50%, -10px); }
 
 /* ===== 玻璃质感卡片 ===== */
-/* 性能根治：.glass 被模块视图大量卡片复用（文件库/相册网格可达数十张），
+/* 性能约束：.glass 被模块视图大量卡片复用（文件库/相册网格可达数十张），
  * 每张卡的 backdrop-filter 都要在 60fps 动态深空背景上逐帧重采样 —
  * N 张卡 = N 个全时模糊区域，GPU 合成器过载（模块视图卡顿主因）。
- * 去实时毛玻璃 → 底色不透明度 0.75→0.88 补偿景深压暗视觉等效 */
+ * 故不用实时毛玻璃，改以 0.88 不透明度底色补偿景深压暗的视觉等效 */
 .glass {
   background: rgba(14, 18, 28, 0.88);
   border: 1px solid var(--border-glass);
@@ -340,8 +350,8 @@
   padding: 8px 18px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  /* 性能根治：按钮数量多（工具栏+卡片内），逐个 backdrop-filter
-   * 在动态背景上全时重采样 → 去实时毛玻璃，底色加深补偿 */
+  /* 性能约束：按钮数量多（工具栏+卡片内），逐个 backdrop-filter
+   * 在动态背景上全时重采样 → 不用实时毛玻璃，底色加深补偿 */
   background: rgba(var(--bg-tertiary-rgb), 0.62);
   color: var(--text-secondary);
   font-size: 13px;
@@ -387,7 +397,7 @@
  *      文字恒为最上层）；全程零阴影（不予任何态叠加投影，
  *      光标/边框承担状态反馈）
  *   3. 按下 = 压强回馈：整体下沉 1px + 势隙收缩
- *      （快压 0.12s / 慢回 0.22s 非对称曲线，顶替旧通用缩放）
+ *      （快压 0.12s / 慢回 0.22s 非对称曲线，不用通用缩放）
  *   4. 键盘焦点 = 注能等价（无鼠标依赖的可达性等价呈现）
  *   5. 禁用休眠：沉降调暗 + 势隙呼吸冻结 + 光标
  *      not-allowed 区分可点击态
@@ -525,7 +535,7 @@
   font-size: 13px;
   font-family: var(--font);
   outline: none;
-  /* 精确属性过渡（禁 transition: all — 防御性根治：任何几何/
+  /* 精确属性过渡（禁 transition: all — 任何几何/
    * transform 类属性永不进过渡链，文字渲染路径恒定） */
   transition:
     border-color var(--dur-fast) var(--ease),
@@ -673,7 +683,7 @@ input[type="password"]::-ms-reveal {
   /* 表单控件不继承祖先字体，显式对齐项目主字体（含占位文本） */
   font-family: var(--font);
   outline: none;
-  /* 精确属性过渡（禁 transition: all — 同 .input 防御性根治） */
+  /* 精确属性过渡（禁 transition: all — 同 .input 的过渡约束） */
   transition:
     border-color var(--dur-fast) var(--ease),
     background-color var(--dur-fast) var(--ease);
@@ -776,7 +786,7 @@ input[type="password"]::-ms-reveal {
 .dialog-overlay {
   position: fixed;
   inset: 0;
-  /* 性能根治：全屏 backdrop-filter 每帧全屏重采样 → 去实时毛玻璃，
+  /* 性能约束：全屏 backdrop-filter 每帧全屏重采样 → 不用实时毛玻璃，
    * 底色加深补偿视觉 */
   background: rgba(var(--black-rgb), 0.72);
   display: flex;
@@ -786,8 +796,8 @@ input[type="password"]::-ms-reveal {
   animation: overlay-in var(--dur) var(--ease);
 }
 .dialog {
-  /* 性能根治：去实时毛玻璃（弹窗叠在动态深空背景上逐帧重采样），
-   * 底色不透明度补偿 */
+  /* 性能约束：不用实时毛玻璃（弹窗叠在动态深空背景上逐帧重采样），
+   * 以底色不透明度补偿 */
   background: rgba(14, 18, 28, 0.92);
   border: 1px solid var(--border-glass);
   border-radius: var(--radius);
@@ -816,8 +826,8 @@ input[type="password"]::-ms-reveal {
  * 用法：v-tip="'提示文字'" 或 v-tip="动态变量"
  */
 .cosmic-tip {
-  /* 性能根治：去实时毛玻璃（悬停出现即触发背景重采样），
-   * 底色 0.88→0.94 补偿 */
+  /* 性能约束：不用实时毛玻璃（悬停出现即触发背景重采样），
+   * 以 0.94 底色补偿 */
   background: rgba(14, 18, 28, 0.94);
   border: 1px solid rgba(var(--accent-rgb), 0.18);
   border-radius: var(--radius-sm);

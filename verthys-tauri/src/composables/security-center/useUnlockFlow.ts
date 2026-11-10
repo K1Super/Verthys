@@ -21,7 +21,7 @@
  * 设计约束与安全策略
  * =============================================================================
  * 1. 进程内探测即时完成：hasGlobalKeyRecord 在解锁响应中内联返回，
- *    无需前端额外扫描，彻底移除原 "loading" 中间态。
+ *    无需前端额外扫描，也不存在独立的 "loading" 中间态。
  * 2. 进度单调闸门：unlockProgressDone 标志阻止残留进度回调
  *    在 Promise resolve 后覆盖 UI 最终状态（如 "解锁完成" 被旧阶段覆盖）。
  * 3. 三层超时防护：前端超时 > 后端硬超时，确保前端永不早于后端完成，
@@ -40,7 +40,7 @@
  * - FRONTEND_TIMEOUT_MS (35s)：通用 IPC 操作的前端兜底。
  * - CREATE_FRONTEND_TIMEOUT_MS (150s)：覆盖创建操作的长时间流程。
  * - UNLOCK_FRONTEND_TIMEOUT_MS (200s)：专为解锁设计，大于后端 120s 硬超时，
- *   确保前端永远不会在后端完成前触发超时，根治状态不一致风险。
+ *   确保前端永远不会在后端完成前触发超时，避免状态不一致。
  *
  * =============================================================================
  * 依赖注入
@@ -67,6 +67,7 @@ import {
   type UnlockProgress,
 } from '../../lib/verthys';
 import type { VerifyRhythm } from './useVerifyRhythm';
+import { keyState } from '../../state/key_state';
 
 /* ===== 前端超时兜底常量 ===== */
 
@@ -86,9 +87,8 @@ const CREATE_FRONTEND_TIMEOUT_MS = 150 * 1000;
  * 解锁操作前端超时（200s）。
  *
  * 必须大于后端 UNLOCK_HARD_TIMEOUT_MS (120s)，并计入 worker 冷启动、
- * 进度回调等额外开销。原 35s 过短，导致前端超时后后端继续执行，
- * 造成 verthysReady 状态突变。现留出充足余量，确保前端超时永不先于
- * 后端完成触发。
+ * 进度回调等额外开销。留出充足余量，确保前端超时永不先于后端完成触发
+ * ——前端先超时而后端继续执行，会造成 verthysReady 状态突变。
  */
 const UNLOCK_FRONTEND_TIMEOUT_MS = 200 * 1000;
 
@@ -153,8 +153,8 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
   const verthysPath = ref('');
   const unlocking = ref(false);
   const pendingIsCreate = ref(false);
-  /** 当前会话是否由恢复码打开：恢复会话必须重绑本机设备槽后才能日常解锁 */
-  const recoveryMode = ref(false);
+  /** 当前会话是否由恢复码打开：状态源在全局 keyState，跨中枢卸载存续 */
+  const recoveryMode = keyState.recoveryMode;
 
   /** 进度反馈：当前阶段描述 */
   const unlockProgressMsg = ref('');
@@ -175,7 +175,7 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
   const usbRebindSaving = ref(false);
 
   /**
-   * 进度完成标志（根治修复）。
+   * 进度完成标志。
    *
    * 目的：阻止 Tauri Channel 残留消息在 Promise resolve 后覆盖最终 UI 状态。
    * 原因：Channel 回调异步，当 initUnlock resolve 时，队列中可能仍有
@@ -419,6 +419,7 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
         }
         /* 普通口令解锁：会话不是恢复会话；清除可能残留的重绑提示状态。 */
         recoveryMode.value = false;
+        keyState.recoveryResealDone.value = false;
         if (createdRecoveryCode) pendingRecoveryCode.value = createdRecoveryCode;
         // 提示必须与实际路径一致：创建回退到「打开已有文件」时不得宣称已创建
         options.showToast(createdNew ? '文件已创建' : '文件已加载');
@@ -488,7 +489,9 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
           console.warn('[doRecoveryUnlock] 收束等待被中断，按已完成处理', e);
         }
         /* 恢复会话必须提示重绑；以 C 层 status 为权威，查询失败时按恢复
-         * 会话展示（误提示可被 C 层 POLICY 拒绝，不会造成数据变更）。 */
+         * 会话展示（误提示可被 C 层 POLICY 拒绝，不会造成数据变更）。
+         * 新恢复会话尚未重绑，上一次会话的重绑结果不得沿用。 */
+        keyState.recoveryResealDone.value = false;
         try {
           const status = await verthysKeyfileStatus();
           recoveryMode.value = status.ok && status.recovery_mode === true;
@@ -574,7 +577,6 @@ export function useUnlockFlow(options: UseUnlockFlowOptions) {
     unlockProgressElapsed,
     unlockProgressDone,
     pendingRecoveryCode,
-    recoveryMode,
     clearRecoveryCode,
     usbRebindPrompt,
     usbRebindSaving,

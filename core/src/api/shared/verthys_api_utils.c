@@ -1,9 +1,8 @@
 /*
- * verthys_api_utils.c — 共享工具模块（从 verthys_api.c 拆分）
+ * verthys_api_utils.c — 共享工具模块
  *
- * 本文件收录从 verthys_api.c 抽离的纯工具/辅助函数，供 verthys_api.c 及其他内部
- * 模块复用。所有函数已移除 static 限定符以便跨翻译单元调用，声明见
- * verthys_api_utils.h。
+ * 纯工具/辅助函数实现，供 verthys_api.c 及其他内部模块复用；
+ * 函数为跨翻译单元可见（非 static），声明见 verthys_api_utils.h。
  *
  */
 #include "verthys_api_utils.h"
@@ -15,15 +14,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
-#include <time.h>   /* Verthys_VerifyIntegrity 使用 time() 记录校验时间戳 */
+#include <time.h>   /* clock_gettime（非 Windows 单调时钟） */
 
 #ifdef _WIN32
 #include <windows.h>
-#include <io.h>    /* _chsize_s, _fileno */
+#include <io.h>    /* _fileno */
 #include <intrin.h> /* __cpuid, __cpuidex, _xgetbv — 第三层 AVX2 运行时检测 */
-#include <malloc.h> /* _aligned_malloc, _aligned_free — 第二层缓存行对齐 */
+#include <malloc.h>
 #else
-#include <unistd.h> /* ftruncate, fileno */
+#include <unistd.h> /* fileno */
 #endif
 
 /* ---------- 单调时钟 ---------- */
@@ -51,11 +50,10 @@ DWORD verthys_join_thread_bounded(HANDLE thread)
 /*
  * 读取文件体积上限管控
  *
- * 原实现未限制读取最大文件体积，恶意超大文件可直接耗尽进程内存触发 DoS。
- * 新增全局可配置最大读取上限 VERTHYS_READ_FILE_MAX_BYTES（4GB），
- * 超大文件直接返回错误，防御内存耗尽攻击。
+ * 读取前校验文件大小，超过 VERTHYS_READ_FILE_MAX_BYTES（4GB）直接拒绝，
+ * 避免超大文件耗尽进程内存。
  *
- * 同时使用 64 位文件定位（_fseeki64/_ftelli64），正确处理 >2GB 文件
+ * 定位使用 64 位接口（_fseeki64/_ftelli64），正确处理 >2GB 文件
  * （Windows long 为 32 位，ftell 在 2GB+ 文件上溢出返回负值）。
  */
 #define VERTHYS_READ_FILE_MAX_BYTES  ((size_t)4u * 1024u * 1024u * 1024u)  /* 4GB 上限 */
@@ -107,15 +105,9 @@ int write_file(const char *path, const uint8_t *buf, size_t size)
      * 成功才能删源或写清单，静默失败会造成“清单在、数据无”。 */
     if (fflush(f) != 0) { fclose(f); return -1; }
 #ifdef _WIN32
-    /* 修复：write_file 后强制 fsync，确保物理落盘
-     *
-     * 原缺陷：仅 fwrite + fclose，数据停留在 OS page cache，未真正写入物理磁盘。
-     * 容器导出/迁移中间文件依赖此函数落盘，未 fsync 导致进程异常终止
-     * 或系统繁忙时数据丢失风险极高。
-     *
-     * "数据不丢"刚性要求：所有持久化写入必须 fsync 物理落盘，
-     * 不能依赖 OS 异步刷盘的"最终一致性"——那是数据丢失的温床。
-     * _commit 等同 FlushFileBuffers，强制将文件所有缓冲数据写入磁盘。 */
+    /* 强制物理落盘：仅 fwrite + fclose 会让数据停留在 OS page cache，
+     * 容器导出/迁移中间文件依赖本函数落盘，进程异常终止或系统繁忙时
+     * 会丢失数据。_commit 等同 FlushFileBuffers。 */
     if (_commit(_fileno(f)) != 0) { fclose(f); return -1; }
 #else
     if (fsync(fileno(f)) != 0) { fclose(f); return -1; }
@@ -202,7 +194,7 @@ void ctx_free_getrecord_cache(struct VerthysContext *ctx)
  * 亦不在本函数清零范围。 */
 void ctx_zero_sensitive(struct VerthysContext *ctx)
 {
-    /* 轮换作业持有源/新库引用，必须先释放，避免 被释放后悬空。 */
+    /* 轮换作业持有源/新库引用，必须先释放，避免库被释放后悬空。 */
     if (ctx->rotate != NULL) {
         (void)vty_rotate_abort(ctx->rotate);
         ctx->rotate = NULL;
@@ -219,8 +211,8 @@ void ctx_zero_sensitive(struct VerthysContext *ctx)
 }
 
 /* ---------- 格式检测 ----------
- * 读取文件头判断格式：仅接受 固定头 magic "VRTY" (0x56 0x52 0x54 0x59)。
- * 本函数只做路由，版本/槽区/头哈希的深度校验归 解锁路径。 */
+ * 读取文件头判断格式：仅接受固定头 magic "VRTY" (0x56 0x52 0x54 0x59)。
+ * 本函数只做路由，版本/槽区/头哈希的深度校验归解锁路径。 */
 VerthysContainerVersion detect_format(const uint8_t *buf, size_t size)
 {
     if (buf == NULL || size < 8) return VERTHYS_FMT_NONE;

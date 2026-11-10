@@ -1,6 +1,6 @@
 <!--
   ManagementView.vue — 管理主界面入口视图（薄容器）
-  由 SecurityCenter.vue 拆分为 6 个管理子组件
+  编排 6 个管理子组件
 
   职责：
     1. 量子态势面板（mgmtView=dashboard）：委托 QuantumDashboard 渲染
@@ -13,48 +13,9 @@
        面板模块节点点击直达 moduleKeys 分区；hub 点击空白处返回 dashboard，
        detail 点击空白处返回 hub（无返回按钮/图标）
     5. panel-active 状态同步给父组件（管理三态均收起导航坞，悬浮才展开）
-
-  Props: 从 SecurityCenter 顶层 Composable 注入的只读状态 + 函数（透传至子组件）
-  defineModel: orbitSliderPos（透传至 SecurityDashboard）
-  Emits: lock-all / check-update / install-update / open-change-key-dialog / export-bin /
-         toggle-module-key-enabled / open-key-dialog / logout-module /
-         toggle-custom-feature / reset-custom / set-custom-session-minutes /
-         orbit-slider-input / orbit-slider-release / snap-to-anchor / panel-active
 -->
 <template>
   <div class="view-management">
-    <!-- 恢复码会话提示浮层：绝对定位在管理视图之上，不参与布局 ——
-         横幅出现/消失绝不挤压视图内容；浮层本身不拦截指针，仅横幅实体可交互 -->
-    <div
-      v-if="recoveryResealNeeded || (recoveryMode && !rotateCommitted)"
-      class="recovery-banner-float"
-    >
-      <!-- 恢复码会话必须重绑本机设备槽，否则下次普通解锁失败 -->
-      <StatusBanner
-        v-if="recoveryResealNeeded"
-        tone="warning"
-        action-label="重绑本机设备"
-        @action="$emit('reseal-device')"
-      >
-        当前为恢复码会话：尚未重绑本机设备槽，下次普通解锁将失败。
-      </StatusBanner>
-
-      <!-- 恢复码会话可执行全库 DEK 轮换（提交后本会话不再是恢复态，横幅隐藏） -->
-      <StatusBanner
-        v-if="recoveryMode && !rotateCommitted"
-        action-label="全库密钥轮换"
-        @action="showRotateDialog = true"
-      >
-        恢复码会话可执行全库密钥轮换：重建容器 DEK，当前恢复码继续有效。
-      </StatusBanner>
-    </div>
-
-    <VaultRotateDialog
-      :show="showRotateDialog"
-      @close="showRotateDialog = false"
-      @committed="onRotateCommitted"
-    />
-
     <!-- ===== 单一编排控制器：三态视图共用同一 Transition（out-in 严格串行）
        ===== 离场动画完成前入场不挂载 — 离场 Canvas / 入场挂载 / 模糊重绘
        ===== 绝不并行争抢主线程与合成器。key 保证三态间过渡触发。 -->
@@ -171,30 +132,20 @@ import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { ModuleId } from "../../lib/keyManager";
 import type { DeviceCheckResult } from "../../composables/security-center/useViewMode";
 import type { DefensePathView, DefenseMetaView } from "../../composables/security-center/useDefenseStatus";
-import StatusBanner from "../common/feedback/StatusBanner.vue";
 import QuantumDashboard from "../management/QuantumDashboard.vue";
 import ManagementHub from "../management/ManagementHub.vue";
 import ManagementTopBar from "../management/ManagementTopBar.vue";
 import GlobalKeySection from "../management/GlobalKeySection.vue";
 import ModuleKeyList from "../management/ModuleKeyList.vue";
 import SecurityDashboard from "../management/SecurityDashboard.vue";
-import VaultRotateDialog from "../management/VaultRotateDialog.vue";
 
-/** 全库轮换弹窗可见性；提交成功后隐藏恢复会话横幅（本会话已非恢复态） */
-const showRotateDialog = ref(false);
-const rotateCommitted = ref(false);
-const onRotateCommitted = () => {
-  rotateCommitted.value = true;
-  showRotateDialog.value = false;
-  emit("rotateCommitted");
-};
-
+/** 恢复码轮换出的新码交由 SecurityCenter 顶层统一展示 */
 const onRecoveryRotated = (code: string) => {
   emit("recoveryRotated", code);
 };
 
 /* ===== Props 接口定义（从 SecurityCenter 顶层 Composable 注入，透传至子组件） ===== */
-const props = defineProps<{
+defineProps<{
   /** 全局密钥就绪状态 */
   globalKeyReady: boolean;
   /** 会话剩余时间（毫秒，UI 倒计时显示） */
@@ -229,10 +180,6 @@ const props = defineProps<{
   moduleKeyReady: Record<string, boolean>;
   /** 各模块恢复槽绑定状态 */
   moduleHasRecovery: Record<string, boolean>;
-  /** 当前为恢复码会话且尚未重绑本机设备槽 */
-  recoveryResealNeeded: boolean;
-  /** 当前会话是否由恢复码打开（全库轮换仅在恢复码会话可用） */
-  recoveryMode: boolean;
   /** 模块状态指示条样式类（函数） */
   moduleStateClass: (mid: ModuleId) => string;
   /** 模块状态文本（函数） */
@@ -288,10 +235,6 @@ const orbitSliderPos = defineModel<number>("orbitSliderPos", { default: 50 });
 
 /* ===== Emits 定义（所有用户操作转发至 SecurityCenter，由 Composable 处理） ===== */
 const emit = defineEmits<{
-  /** 恢复码会话请求重绑本机容器设备槽 */
-  (e: "reseal-device"): void;
-  /** 全库轮换提交成功：C 层已把会话恢复标记清零 */
-  (e: "rotateCommitted"): void;
   /** 面板激活状态变化（dashboard=true / detail=false） */
   (e: "panel-active", val: boolean): void;
   /** 立即锁定全部并清零内存密钥 */
@@ -356,7 +299,7 @@ const enterHubSection = (section: "globalKey" | "moduleKeys" | "security") => {
 /* ============================================================
  * 分区详情「点击空白处返回引导区」— 几何命中判定（健壮设计）
  * ============================================================
- * 旧实现（e.target === e.currentTarget）的结构性缺陷：
+ * 仅比较 e.target === e.currentTarget 的结构性缺陷：
  *   判定依赖点击落点的 DOM 归属 —— 分区根元素透明铺满、祖先容器
  *   padding、高度链塌陷等任何一种布局状况都会让空白点击落在
  *   非容器元素上，判定永不成立。
@@ -439,13 +382,13 @@ const onDetailBlankClick = (e: MouseEvent) => {
    *    （遮罩点击=关弹窗），严禁同时触发返回引导 */
   if (e.target.closest(".cosmic-backdrop")) return;
 
-  /* 0.1 常驻横幅浮层豁免：浮层横跨三种管理视图，动作点击归横幅自身；
-   *     不加此豁免会被判为「分区外空白」，点一次动作即被带回引导区 */
-  if (e.target.closest(".recovery-banner-float")) return;
-
   /* 1. 外壳包含判定：仅响应管理外壳内的点击（导航 dock 等外部元素忽略） */
   const shell = root.closest(".security-center") ?? root;
   if (!isWithin(e.target, shell)) return;
+
+  /* 1.1 常驻状态轨豁免：轨固定于视口右缘、横跨全部管理视图 ——
+   *     轨内的点击属于告知交互，不得被判为「分区外空白」带回引导区 */
+  if (e.target.closest(".status-rail")) return;
 
   /* 2. 几何包围盒判定：落在会话谱线或分区（引力谱系无底板体系）内的
    *    点击为内容点击 */
@@ -466,42 +409,8 @@ const onDetailBlankClick = (e: MouseEvent) => {
 onMounted(() => document.addEventListener("click", onDetailBlankClick, true));
 onBeforeUnmount(() => document.removeEventListener("click", onDetailBlankClick, true));
 
-/* 新恢复会话重新允许轮换（提交后同一会话不再显示横幅） */
-watch(
-  () => props.recoveryMode,
-  (mode) => {
-    if (mode) rotateCommitted.value = false;
-  },
-);
-
 /* 面板激活状态同步给父组件（收起导航坞）：管理三态均视为面板激活，
  * 导航坞悬浮 Dock 区域才展开 —— 与首屏量子面板行为一致，
  * 避免进入引导区/分区详情后导航坞常驻弹出 */
 watch(mgmtView, () => emit("panel-active", true), { immediate: true });
 </script>
-
-<style scoped>
-/* 常驻横幅浮层：脱离文档流（position: absolute），管理三态内容始终保持
-   完整可用高度，横幅出现/消失不产生任何布局位移。
-   纵向坐标三态统一（不随 dashboard / hub / detail 变化）—— 位置漂移会让
-   常驻告知读作另一个层级的元素；64px 落在会话谱线（实测 52px）之下，
-   分区详情里不遮挡顶栏右侧动作，仪表盘与引导区同样只压住内容顶缘。
-   居中用左右偏移 + 自动外边距，不用 transform —— 文字承载层不得进入
-   合成层，否则字体抗锯齿会在主层与合成层之间切换。
-   浮层整体不拦截指针，避免两个横幅宽度差形成的空白区吃掉底层点击 */
-.recovery-banner-float {
-  position: absolute;
-  top: 64px;
-  left: 0;
-  right: 0;
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  width: fit-content;
-  max-width: calc(100% - 32px);
-  margin-inline: auto;
-  pointer-events: none;
-}
-</style>

@@ -59,8 +59,8 @@ const { onMinimize, onToggleMax, onClose, onDragRegionMouseDown } = useWindowCon
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
-  /* 静息态须清晰可辨：原 --text-muted(#3d4452) 与深空底色几乎同值，
-     实际观感等同按钮被隐藏（用户报告「按钮没有显示」的根因） */
+  /* 静息态须清晰可辨：--text-muted(#3d4452) 与深空底色几乎同值，
+     观感等同按钮被隐藏，故取 --text-secondary */
   color: var(--text-secondary);
   cursor: pointer;
   transition: all var(--dur-fast) var(--ease);

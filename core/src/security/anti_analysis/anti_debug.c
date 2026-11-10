@@ -56,7 +56,7 @@ static int check_software_debugger(void)
 
     /* 2. NtQueryInformationProcess：三种调试器探测
      * 经 syscall_direct 包装——优先直接 stub（绕过
-     * 用户态 Hook），降级时回退 GetProcAddress（行为与旧版一致）；
+     * 用户态 Hook），降级时回退 GetProcAddress；
      * 包装内部彻底失联返回非 SUCCESS，各探测按"无信号"跳过。 */
     HANDLE proc = GetCurrentProcess();
 
@@ -195,7 +195,7 @@ DebugThreatLevel anti_debug_check(void)
 
 void anti_debug_emergency_exit(void)
 {
-    /* 清零本模块内部状态（单轮覆写足够，废除多轮民俗） */
+    /* 清零本模块内部状态（单轮覆写足够） */
     verthys_secure_zero(&s_initialized, sizeof(s_initialized));
 
     /* 终止进程：不生成 dump、不弹窗 */

@@ -182,7 +182,7 @@ withDefaults(
   50% { opacity: 1; }
 }
 
-/* 淡入淡出（与旧加载层同款手感） */
+/* 淡入淡出（透明度 + 轻微缩放） */
 .crl-fade-enter-active,
 .crl-fade-leave-active {
   transition: opacity 0.4s var(--ease, ease), transform 0.4s var(--ease, ease);

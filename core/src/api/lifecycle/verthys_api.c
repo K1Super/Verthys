@@ -10,12 +10,12 @@
  *
  * 内存安全：
  *   - 三密钥仅在 UNLOCKED 时驻留，Lock/Deinit 即刻 verthys_secure_zero
- *   - B+ 树/数据块管理器/Merkle 树同理
+ *   - 目录树/记录段/Merkle 树同理
  *   - 局部密钥变量用后即擦
  */
 #include "verthys_internal.h"
 
-/* 拆分后的内部模块头 */
+/* 内部模块头 */
 #include "verthys_api_utils.h"      /* 共享底层工具 */
 #include "vty_lockout.h"            /* 库级熔断只读查询 */
 #include "vty_secure_state.h"       /* N2：安全状态目录预检 */
@@ -224,7 +224,7 @@ static void verthys_emergency_lock_all(void)
 #include <unistd.h>
 #endif
 
-/* 并行索引读取开关（原定义于 verthys_api.c L699，拆分后由本文件保留） */
+/* 并行索引读取开关 */
 #define USE_PARALLEL_INDEX_READ 1
 
 /* 1. 创建未初始化的加密库上下文 */
@@ -242,8 +242,8 @@ VerthysResult Verthys_Init(VerthysHandle *out_handle)
      * 避免运行期把“目录不可加固”折叠成通用的“安全模块不可用”。 */
     if (vty_secure_state_preflight() != VTY_OK) return VERTHYS_ERR_SECURITY_STATE;
 
-    /* 阻塞 4 修复：AVX2 软性检测 — 设置全局标志，不拒绝启动
-     * libsodium 内部自动选择最优指令集路径，无需项目层硬性要求 */
+    /* AVX2 软性检测：仅设置全局标志，不拒绝启动。
+     * 密码库内部自动选择最优指令集路径，项目层不做硬性要求。 */
 #ifdef _WIN32
     g_has_avx2 = verthys_check_avx2_support();
     if (g_has_avx2) {
@@ -260,10 +260,9 @@ VerthysResult Verthys_Init(VerthysHandle *out_handle)
     }
 
     /*
-     * TLS 标志验证从 DllMain 移至此处
-     *（tls_loader_init 在 LoaderLock 释放后调用，避免加载锁死锁）。
-     * IAT 校验与 15s 种子定时器已删除，
-     *   本调用现仅验证 TLS 回调标志（加载路径完整性）。
+     * TLS 标志验证必须在 LoaderLock 释放后执行（tls_loader_init 不进入
+     * DllMain，避免加载锁死锁）；本调用仅验证 TLS 回调标志（加载路径
+     * 完整性）。
      */
     if (tls_loader_init() != 0) {
         return VERTHYS_ERR_INTERNAL;
@@ -357,7 +356,7 @@ VerthysResult Verthys_Init(VerthysHandle *out_handle)
     verthys_pepper_init();
 
     /* 密钥相关结构专用安全分配器的进程级预算。
-     * 分配器实例由 密钥对象经 secure_allocator_shared 懒创建：
+     * 分配器实例由密钥对象经 secure_allocator_shared 懒创建：
      * 会话生命周期可能跨越 Deinit，不能绑定到单个上下文。 */
     (void)secure_allocator_budget_init(SECURE_ALLOC_DEFAULT_BUDGET_BYTES,
                                        NULL, NULL);
@@ -611,7 +610,7 @@ static void verthys_api_unlock_post_hooks(void)
     memory_guard_patrol_start();
 }
 
-/* 新建：只创建 容器。恢复码在创建响应里
+/* 新建：只创建容器。恢复码在创建响应里
  * 一次性返回，调用方确认后必须清零自己的副本。 */
 VerthysResult Verthys_V4Create(VerthysHandle handle,
                                const char *verthys_path,
@@ -642,7 +641,7 @@ VerthysResult Verthys_V4Create(VerthysHandle handle,
         return VERTHYS_ERR_EXISTS;
     }
 
-    /* 同 Unlock：显式长度参数不保证 NUL 终结，统一复制后再进入 层。 */
+    /* 同 Unlock：显式长度参数不保证 NUL 终结，统一复制后再进入下层。 */
     pw = password_copy(password, password_len);
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
     rc = vty_vault_create(verthys_path, pw, &v, recovery_text, recovery_cap);
@@ -890,14 +889,9 @@ VerthysResult Verthys_GetPresetFeatureBits(VerthysHandle handle,
 
 /* 4. 锁定 */
 /*
- * Lock 同步路径的必要操作：
- *   1. 释放轮换作业（其持有库引用）；
- *   2. 会话释放（密钥与明文清零——安全，必须同步）；
- *   3. 借用指针缓存释放。
- *
- * 耗时任务（全盘校验）不在 Lock 同步路径——经 Verthys_VerifyIntegrity 按需执行。
- *
- * 关闭响应指标：窗口隐藏≤100ms，后台完整退出≤1.5s（UI 层配合 window.hide()）
+ * Lock 同步路径只做必要操作：释放轮换作业、会话释放（密钥与明文清零）、
+ * 借用指针缓存释放。耗时任务（全盘校验）不在此路径，由
+ * Verthys_VerifyIntegrity 按需执行。
  */
 VerthysResult Verthys_Lock(VerthysHandle handle)
 {
@@ -976,7 +970,7 @@ VerthysResult Verthys_AddRecord(VerthysHandle handle,
 
     /* 写操作入口统一失效查询缓存，防止 UAF
      * 所有写入操作（增/删/改/导入/改密/刷盘）在持锁后立即清空 getrecord_cache，
-     * 消除外部借用指针在 GC 回收旧数据块后变为野指针的 UAF 窗口。
+     * 消除外部借用指针在缓存销毁后变为野指针的 UAF 窗口。
      * 统一收口缓存销毁，写入事务提交前强制清空历史查询缓存。 */
     ctx_free_getrecord_cache(ctx);
 
@@ -1193,7 +1187,7 @@ VerthysResult Verthys_GetSummaryCount(VerthysHandle handle, uint64_t *out_count)
 /* ================================================================== *
  * 内建诊断接口             *
  *                                                                    *
- * 返回 运行时采集的结构化状态指标（扫描游标/锁等待/预热状态），   *
+ * 返回运行时采集的结构化状态指标（扫描游标打开次数/锁等待/胡椒来源），   *
  * 供安全中心展示和问题定位。所有指标均为非敏感数据。                  *
  *                                                                    *
  * 线程安全：MT-Const（只读操作，可与其它只读操作并发）               *
@@ -1317,7 +1311,7 @@ VerthysResult Verthys_GetSecurityStatus(VerthysHandle handle,
     /* 快照锁序：registry → ctx。
      *
      * registry 共享锁保证 Verthys_Deinit 的注销与释放不会发生在复制期间
-     *（注销本身持 registry 独占锁）；ctx 共享锁保证 会话指针与绑定
+     *（注销本身持 registry 独占锁）；ctx 共享锁保证会话指针与绑定
      * 事实一致。复制完成后立即释放两把锁，随后才获取 defense_closure
      * 的检查锁——禁止嵌套 ctx 锁与检查锁。
      *
@@ -1558,12 +1552,12 @@ VerthysResult Verthys_VerifyIntegrity(VerthysHandle handle,
 /* ================================================================== *
  * Verthys_VerifyPersist 落盘自查接口
  *
- * 会话在解锁态持有 库句柄；自查读取 DataRoot 指向的根段并复核摘要，
+ * 会话在解锁态持有库句柄；自查读取 DataRoot 指向的根段并复核摘要，
  * 不改会话状态、不写盘、无副作用。
  * ================================================================== */
-/* 写入静态错误文案：last_error 仅承载稳定短文案（no printf family——
+/* 写入静态错误文案：last_error 仅承载稳定短文案（不引入 printf 族——
  * 数值细节由结构体的 header_magic / header_version / file_size /
- * wal_offset 字段承载，避免命中输出函数红线） */
+ * wal_offset 字段承载） */
 static void ver_persist_set_error(VerPersistVerifyResult *out, const char *msg)
 {
     size_t n;
@@ -1591,8 +1585,7 @@ VerPersistStatus Verthys_VerifyPersist(VerthysHandle handle,
         return out_result->status;
     }
 
-    /* 校验会话 DataRoot 指向的根段仍在盘上且摘要一致。
-     * 旧实现以 WAL/超级块自查达成同语义，当前持久化对象为 DataRoot。 */
+    /* 校验会话 DataRoot 指向的根段仍在盘上且摘要一致。 */
     if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
         VtyPersistCheck chk;
         int rc;

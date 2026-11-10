@@ -131,7 +131,7 @@ int verthys_argon2id_derive_ex(uint8_t out[VERTHYS_KEY_BYTES],
      *
      * 注意：libsodium 的 opslimit 与 Argon2id 的 t（iterations）参数对应，
      *       memlimit 与 m（memory）参数对应（单位字节）。
-     *       Argon2id 规范要求 parallelism ≤ lanes，libsodium 固定 lanes=1，
+     *       Argon2id 要求 parallelism ≤ lanes，libsodium 固定 lanes=1，
      *       因此 parallel>1 时实际并行度仍受限，但参数透传保留语义正确性。 */
     int rc = crypto_pwhash_argon2id(
         out, VERTHYS_KEY_BYTES,

@@ -77,7 +77,7 @@ int vfmt_write(const uint8_t salt[VERTHYS_SALT_BYTES],
                const VerthysFmtRecord *records, uint16_t record_count,
                uint8_t **out_blob, size_t *out_size)
 {
-    /* blob 提升至函数顶部声明——早期 goto fail 路径（blob 分配前）
+    /* blob 在函数顶部声明——早期 goto fail 路径（blob 分配前）
      * 需要可见性；NULL 守卫保证分配前跳转安全。 */
     uint8_t *blob = NULL;
 
@@ -263,9 +263,8 @@ int vfmt_write(const uint8_t salt[VERTHYS_SALT_BYTES],
     return 0;
 
 fail:
-    /* 失败路径必须释放整容器镜像 blob——
-     * 原实现仅释放 block_nonces，每次失败导出泄漏 MB 级含 wrapped DEK
-     * 密文的堆块（且从未 zero，密文材料残留于 freed 堆）。 */
+    /* 失败路径必须释放整容器镜像 blob，否则每次失败导出泄漏 MB 级含
+     * wrapped DEK 密文的堆块（且从未 zero，密文材料残留于 freed 堆）。 */
     if (blob) {
         verthys_secure_zero(blob, blob_size);
         free(blob);
@@ -280,7 +279,7 @@ fail:
 /* ===================================================================== *
  *          流式写入：分片写，避免大库导出 OOM  *
  *                                                                     *
- *  核心改进：                                                          *
+ *  实现要点：                                                          *
  *  1. 不分配 blob_size 连续内存，直接写文件                            *
  *  2. 通过回调按需获取明文数据，一次一条记录，用完即释放               *
  *  3. 增量 HMAC-SHA256 计算，避免全文件回读                            *
@@ -636,8 +635,7 @@ int vfmt_parse_header(const uint8_t *blob, size_t size, VerthysFmtMeta *out_meta
     uint64_t meta_offset = get_u32le(blob + 12);
     uint64_t mac_offset  = get_u64le(blob + 16);
 
-    /* 边界校验
-     * 回绕安全形式。原 `mac_offset + 32 > size`
+    /* 边界校验采用回绕安全形式：朴素 `mac_offset + 32 > size`
      * 在 mac_offset ≈ UINT64_MAX 时加法回绕为小值而通过校验，
      * 后续按 mac_offset 做 HMAC/遍历导致巨量 OOB 读（恶意 v1 文件可投递）。
      * 无回绕形式：先保证 size 足够，再做减法比较。 */
@@ -778,7 +776,7 @@ int vfmt_decrypt_records(const uint8_t *blob, size_t size,
         memcpy(block_nonce, idx_pt + off, VERTHYS_AEAD_NONCE_BYTES); off += VERTHYS_AEAD_NONCE_BYTES;
 
         /* ---- 4. 解密数据块 ---- */
-        /* 尺寸钳制（回绕安全分解，同 extent/sstable 索引解析纪律）：
+        /* 尺寸钳制（回绕安全分解）：
          * data_offset 为盘面 u64，朴素 data_offset+4 在 uint64 溢出时
          * 回绕为小值绕过比较 → blob+data_offset 野指针读；先钳
          * data_offset ≤ size 且剩余 ≥ 4，再以差值钳块总长 */

@@ -46,14 +46,19 @@
 }
 
 /* ===== 能量填充（进度推进） =====
-   淡雅青紫渐变，低饱和度，禁止浓厚 */
+   淡雅青紫渐变，低饱和度，禁止浓厚。
+   合成器驱动：宽度恒为 100%，进度只改 transform: scaleX ——
+   transform 不触发布局，可由合成线程补间；主线程被解密/IPC 占用时
+   仍能连续推进，不在阶段边界或慢速段掉帧。 */
 .qf-fill {
   position: absolute;
   top: 0;
   left: 0;
+  width: 100%;
   height: 100%;
   border-radius: 6px;
-  /* 三段淡雅渐变：青 → 紫 → 粉（极低饱和度） */
+  /* 三段淡雅渐变：青 → 紫 → 粉（极低饱和度）
+     缩放整层时渐变随之压缩，与按 width 收缩的视觉分布一致 */
   background: linear-gradient(
     90deg,
     rgba(0, 212, 255, 0.55) 0%,
@@ -64,10 +69,20 @@
   box-shadow:
     0 0 8px rgba(0, 212, 255, 0.25),
     inset 0 1px 0 rgba(255, 255, 255, 0.15);
-  /* 感知层已按帧平滑输出，短线性过渡只吸收离散采样间隙；
-     过长过渡会让收束补满滞后于视图切换 */
-  transition: width 0.22s linear;
+  transform-origin: left center;
+  transform: scaleX(0);
+  will-change: transform;
+  /* 短线性过渡只吸收采样间隙；实际进度曲线由感知层负责，
+     这里不引入长延迟，也不产生「先停再追」 */
+  transition: transform 0.18s linear;
   overflow: hidden;
+}
+
+/* ===== 收束终点：跳到精确 100% =====
+   过渡会把最后 1-2% 拖到视图切换之后；终点直接落位，
+   差异小于 1px，视觉不可察 */
+.qf-slot.qf-complete .qf-fill {
+  transition: none;
 }
 
 /* ===== 能量流粒子（填充内流动） =====
@@ -102,12 +117,13 @@
   100% { transform: translateX(180px); opacity: 0; }
 }
 
-/* ===== 通道扫光（顶部光带掠过） ===== */
+/* ===== 通道扫光（顶部光带掠过） =====
+   只动 transform：left 动画会逐帧触发布局与重绘，是加载期掉帧源 */
 .qf-channel::before {
   content: "";
   position: absolute;
   top: 0;
-  left: -40%;
+  left: 0;
   width: 40%;
   height: 100%;
   background: linear-gradient(
@@ -117,19 +133,17 @@
     rgba(139, 92, 246, 0.12),
     transparent
   );
+  transform: translateX(-100%);
+  will-change: transform;
   animation: qf-sweep 3.5s ease-in-out infinite;
   z-index: 2;
   pointer-events: none;
 }
 
 @keyframes qf-sweep {
-  0% { left: -40%; }
-  100% { left: 100%; }
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
 }
-
-/* ===== 关键节点光点已移除（用户要求：进度条上方不要阶段的点样式） =====
-   原 .qf-markers / .qf-marker / .qf-marker.reached / @keyframes qf-marker-pulse
-   均已删除，进度条仅保留导流通道 + 能量填充 + 提示词 */
 
 /* ===== 精简提示词 =====
    单行短文字，淡青色，字间距宽松，高级感 */
@@ -249,7 +263,7 @@
 }
 
 /* ===== 无加载动画模式（仅导流通道，缩小槽位） =====
-   showLoader=false 时使用，不影响有 loader 的默认 230px */
+   showLoader=false 时使用，不影响有 loader 的默认 160px */
 .qf-slot.no-loader {
   min-height: 78px;
 }

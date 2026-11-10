@@ -16,9 +16,9 @@
  *      扫描结果通过 addRecordToScan 写入缓存，后续 getRecordIdsByType /
  *      getRecordFromScan 可正常工作
  *
- * 新增 ensureSummaryScanSafe()
+ * ensureSummaryScanSafe()
  *   包装 ensureSummaryScan()，失败时回退到 ensureRecordScanSafe()
- *   （旧全量扫描兜底）。用于 Vue 组件的列表渲染路径，1-2 秒内完成。
+ *   （全量扫描兜底）。用于 Vue 组件的列表渲染路径，1-2 秒内完成。
  *
  * 依赖关系（无循环）：
  *   verthys_scan_safe.ts → verthys-cache.ts（clearRecordScanCache / addRecordToScan）
@@ -75,7 +75,7 @@ export async function ensureRecordScanSafe(): Promise<void> {
  *
  * 调用链：
  *   1. ensureSummaryScan() — 摘要游标批量扫描（v2，仅元数据，1-2 秒内完成）
- *   2. 若失败 → ensureRecordScanSafe() 旧全量扫描兜底
+ *   2. 若失败 → ensureRecordScanSafe() 全量扫描兜底
  *      （内部已处理所有回退路径，将结果写入 recordScanCache）
  *
  * 调用方（Vue 组件）只需：
@@ -97,7 +97,7 @@ export async function ensureSummaryScanSafe(): Promise<void> {
   }
 
   // 回退路径：清空可能不一致的摘要缓存，使用全量扫描兜底
-  // 全量扫描会将结果写入 recordScanCache（旧缓存），
+  // 全量扫描会将结果写入 recordScanCache，
   // Vue 组件应优先使用 summaryCache，若为空则回退到 recordScanCache
   clearSummaryCache();
   try {
@@ -111,4 +111,4 @@ export async function ensureSummaryScanSafe(): Promise<void> {
 
 /* 业务列表 ID 解析已收敛到 cache/composition 的 resolveTypeIds：
  * 权威类型盲索引优先，失败回退全量扫描。摘要缓存只承担名称/元数据，
- * 不再作为类型 ID 来源（摘要 type 恒为未知 0）。 */
+ * 不作为类型 ID 来源（摘要 type 恒为未知 0）。 */

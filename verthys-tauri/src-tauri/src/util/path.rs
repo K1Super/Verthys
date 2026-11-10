@@ -283,8 +283,7 @@ pub fn is_within_whitelist(path: &Path, whitelist: &[PathBuf]) -> bool {
 ///   - Ok(canonical_path): 路径合法且在白名单内
 ///   - Err(msg): 路径非法或不在白名单内
 ///
-/// 注意：本函数已迁移至 util::sandbox::resolve_and_validate，
-/// 此处保留作为薄包装，便于现有调用方平滑迁移。
+/// 注意：本函数是 util::sandbox::resolve_and_validate 的薄包装。
 pub fn resolve_and_validate(path: &str, whitelist: &[&str]) -> Result<PathBuf, String> {
     crate::util::sandbox::resolve_and_validate(path, whitelist)
 }

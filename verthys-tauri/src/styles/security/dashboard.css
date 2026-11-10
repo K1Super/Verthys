@@ -6,7 +6,7 @@
      - .bs-track       预设谱轨（裸能量丝线 + 菱形锚点 + 渡越体）
      - .cus-board      自定义防护（常驻分区：端子排开关 + 时长拖拽虚线）
      - .cap-board      安全防护栏（核心防护清单 · 双列错位端子排）
-     - .def-board      动态防护端子排诊断（WP-11 · 7 攻击路径 × 四态语义色）
+     - .def-board      动态防护端子排诊断（7 攻击路径 × 四态语义色）
      - .flow-rail      数据流转轨道（磁盘→内存 · 电路走线 + 数据包流 + 运行状态）
      - .kd-* 密钥编辑弹窗特定布局
      - .derive-* / .custom-derive-area / .result-* 自定义派生区域
@@ -117,7 +117,7 @@
   transform: rotate(-90deg);
   transform-origin: 70px 70px;
   transform-box: view-box;
-  /* 仪表落值过渡：0.8s（用户裁定）—— 与 mgmt-x 入场（0.40s）重叠后收束，
+  /* 仪表落值过渡：0.8s —— 与 mgmt-x 入场（0.40s）重叠后收束，
      读数扫掠保持可读的仪式感 */
   transition: stroke-dashoffset 0.8s var(--ease);
   filter: drop-shadow(0 0 3px rgba(0, 212, 255, 0.3));
@@ -780,7 +780,7 @@
 .def-item:nth-child(n + 5) {
   transform: translateY(13px);
 }
-/* 圆点状态位：四态形态语义（见区段头注释） */
+/* 圆点状态位：四态形态语义（blocked / degraded / failed / unchecked） */
 .def-dot {
   flex: none;
   width: 5px;

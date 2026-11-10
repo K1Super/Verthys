@@ -1,4 +1,3 @@
-# .github/workflows/security-service.yml
 # SYSTEM 安全服务独立构建、单元测试、控制台集成与攻击回归。
 name: security-service
 

@@ -2,7 +2,6 @@
  * photo-album/usePhotoViewer.ts — 拾光模块查看器层 composable
  *
  * 职责：管理内存预览（解密后 Blob URL，不落地）。
- * 从原 PhotoAlbum.vue 提取，保持 100% 功能不变。
  *
  * 设计要点：
  * - 接收 usePhotoData 返回值 + 全局 Toast 中心的 showError（依赖注入）
@@ -136,10 +135,9 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
     // 打开查看器：不使用缩略图占位。原图本身即解密产物 —— 点击时磁盘上仍是
     //   密文，解密完成前不存在可显示的原图；故此处立即打开覆盖层并给出真实
     //   阶段文案（读取块 / 解密中），解密在后台进行，完成后由 commitViewer
-    //   设置原图 Blob URL 无缝呈现。
-    //   原实现把 viewer.value 门控在整条链路（块引用解析 → 密文块读取 →
-    //   Worker 解密 → Blob 构造）之后：解密完成前覆盖层不渲染，用户看到的
-    //   不是「加载中」而是「点了没反应」，感知为延迟一会才放大。
+    //   设置原图 Blob URL 无缝呈现。覆盖层不得门控在整条链路（块引用解析 →
+    //   密文块读取 → Worker 解密 → Blob 构造）之后：解密完成前不渲染覆盖层，
+    //   用户看到的不是「加载中」而是「点了没反应」。
     viewerSrc.value = "";
     setViewerProgress("读取原图…");
     viewer.value = true;
@@ -199,9 +197,9 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
       }
 
       // 渲染前完整性判定（主线程只做常数级校验）：块数与哈希项数必须与
-      //   元数据声明一致；逐块密文哈希比对下沉到解密任务内（Worker 侧先校验
-      //   再解密），避免对兆字节级密文在主线程做同步哈希。
-      //   空哈希数组属历史记录（无权威值），保持兼容不比对。
+      //   元数据声明一致；逐块密文哈希（仅诊断）与整图明文哈希（权威值）
+      //   比对下沉到解密任务内，避免主线程对兆字节级密文做同步哈希。
+      //   空哈希数组属历史记录（无诊断值），保持兼容不比对。
       const hashesPartial = refs.hashes.length > 0 && refs.hashes.length !== cipherB64.length;
       if (cipherB64.length !== expected || hashesPartial) {
         const detail = notFound > 0
@@ -217,7 +215,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
 
       // 逐块解密：优先在 photo-crypto Worker 池执行（主线程不做派生与 AEAD），
       //   池基础设施不可用时由桥回退主线程实现；任一块失败即整体失败，
-      //   与旧实现"逐块尝试后统计失败"的可见行为一致（都拒绝渲染残缺图）。
+      //   拒绝渲染残缺图。
       //   解密在 Worker 内一次任务完成（同文件复用同一子密钥），
       //   阶段反馈按"整批解密"如实呈现，不做无法对应的逐块假进度。
       //   索引瘦身布局：先解封包裹态文件密钥，再按 nonce|密文 布局逐块解密。
@@ -229,7 +227,11 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
           : undefined;
         plaintexts = await decryptChunksPreferWorker(
           cipherB64, meta.fileHash, ph.name, slim,
-          refs.hashes.length > 0 ? { expectedHashes: refs.hashes } : undefined,
+          {
+            expectedHashes: refs.hashes.length > 0 ? refs.hashes : undefined,
+            // 整图明文哈希是密钥轮换后仍然成立的权威值：密文哈希失配时由它兜底
+            expectedFileHash: meta.fileHash,
+          },
         );
         setViewerProgress("");
       } catch (e) {
@@ -244,11 +246,10 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
 
       // 直接以解密块数组构造 Blob：Blob 构造按规范即复制字节，
       //   省去「逐块拼接到新 Uint8Array + ArrayBuffer 再切片」两次主线程
-      //   整图拷贝 —— 拷贝量与图大小成正比，大图曾因此在打开瞬间明显卡顿。
+      //   整图拷贝 —— 拷贝量与图大小成正比，大图会在打开瞬间明显卡顿。
       const blob = new Blob(plaintexts as BlobPart[], { type: meta.mime });
       const url = URL.createObjectURL(blob);
       // 明文块清零：Blob 已复制字节，此后解密产物不在堆中驻留
-      //   （旧实现只清了拼接缓冲，未清解密块本体）
       for (const c of plaintexts) c.fill(0);
       if (seq !== viewRequestSeq) {
         URL.revokeObjectURL(url);   // 过期请求：本次产出的 Blob 立即释放

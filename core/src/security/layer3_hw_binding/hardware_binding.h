@@ -1,16 +1,14 @@
 /*
  * hardware_binding.h — 机器实例指纹绑定（内部模块，不导出）
  *
- * 弃用 CPUID/SMBIOS/UEFI 变量，改用 MachineGuid。
-
- * 原实现缺陷：
+ * 绑定源为 MachineGuid，不使用 CPUID/SMBIOS/UEFI 变量：
  *   - CPUID leaf 1 是 family/model/stepping + feature flags，同型号所有
- *     CPU 完全相同，不构成任何唯一性（"硬件绑定"名不符实）；
- *   - SMBIOS UUID 在大量主板/虚拟机上为全 0/全 FF，此时绑定退化为静态盐；
+ *     CPU 完全相同，不构成唯一性；
+ *   - SMBIOS UUID 在大量主板/虚拟机上为全 0/全 FF，绑定会退化为静态盐；
  *   - UEFI 变量读取需要 SE_SYSTEM_ENVIRONMENT_PRIVILEGE，普通用户进程
- *     必然失败，UEFI 分支在现实中几乎不生效。
+ *     必然失败。
  *
- * 新实现：
+ * 指纹：
  *   MachineGuid = HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid
  *   （OS 安装时生成、随系统持久、克隆检测友好），指纹 =
  *   HMAC-SHA256(domain_key, MachineGuid)，跨同型号机器区分度由

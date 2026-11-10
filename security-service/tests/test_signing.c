@@ -1,5 +1,5 @@
 /*
- * test_signing.c — U2：SHA-256 / HMAC / ECDSA P-256 响应签名
+ * test_signing.c — SHA-256 / HMAC / ECDSA P-256 响应签名
  */
 #include "test_common.h"
 #include "state_crypto.h"

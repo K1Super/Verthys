@@ -11,7 +11,10 @@ use tauri::State;
 use zeroize::Zeroizing;
 
 use crate::controller::types::VerthysResponse;
-use crate::controller::verthys_controller::{load_container_password, require_unlocked};
+use crate::controller::verthys_controller::{
+    load_existing_container_password, require_unlocked, KEY_MATERIAL_MISSING_CODE,
+    KEY_MATERIAL_MISSING_MESSAGE,
+};
 use crate::state::AppState;
 
 const MODULE_COUNT: u32 = 3;
@@ -247,7 +250,16 @@ pub async fn verthys_module_delete(
     if confirm != "DELETE" {
         return Ok(VerthysResponse::err("v4_module_delete", "确认字面量非法"));
     }
-    let password = load_container_password(&app)?;
+    let password = match load_existing_container_password(&app)? {
+        Some(password) => password,
+        None => {
+            return Ok(VerthysResponse::err_code(
+                "v4_module_delete",
+                KEY_MATERIAL_MISSING_CODE,
+                KEY_MATERIAL_MISSING_MESSAGE,
+            ));
+        }
+    };
     let req = json!({
         "op": "v4_module_delete",
         "module_id": module_id,

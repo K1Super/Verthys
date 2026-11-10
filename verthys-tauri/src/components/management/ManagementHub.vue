@@ -201,7 +201,7 @@ const FILAMENTS: Array<[number, number, number, number]> = [
 ];
 
 /* ===== 传播仪式节奏配置（单一数据源） =====
- * 传播 + 落定 = 600ms 总仪式时长（用户裁定）；点击的即时反馈由光包起爆承担，
+ * 传播 + 落定 = 600ms 总仪式时长；点击的即时反馈由光包起爆承担，
  * 转场观感交由 mgmt-x 显影，仪式只需完成「已接收」的确认。
  * 视图切换由传播完成事件驱动，引擎内禁止任何固定延时等待动画。 */
 const RITUAL_DURATION = {
@@ -307,7 +307,7 @@ let ctx: CanvasRenderingContext2D | null = null;
 /** 引擎墙钟：未钳制门控 dt 累积（秒），供相位与进度计算，时间流速恒为 1× */
 let clockSec = 0;
 let introTime = 0;
-/* 入场编排总窗（秒）：用户裁定 1s。单元错峰起势、约 0.94s 内全部落位；
+/* 入场编排总窗（秒）：1s。单元错峰起势、约 0.94s 内全部落位；
  * 与 mgmt-x 入场（0.40s）部分重叠，不额外增加路径等待。 */
 const INTRO_TOTAL = 1.0;
 let frameCount = 0;
@@ -715,7 +715,7 @@ function frame(frameStep: number, wallClock: number): void {
     completePending = true;
   }
 
-  /* ---- SVG 丝线 dashoffset rAF 驱动（原 CSS infinite 动画迁移） ----
+  /* ---- SVG 丝线 dashoffset rAF 驱动 ----
      状态语义流动随全局空闲档位自动降频；
      相位由墙钟累积时间计算，跳帧不产生相位跳变。 */
   const tetherOwner = unitEls[0];

@@ -12,7 +12,7 @@
  *
  * 降级写入：WebView 无 Clipboard API（非安全上下文 / 被占用）时，
  *   调用方可注入 write 兜底（如 textarea + execCommand）；不注入即维持
- *   "写不进去就如实返回失败"的原语义。
+ *   "写不进去就如实返回失败"的语义。
  */
 
 import { onBeforeUnmount } from "vue";

@@ -7,8 +7,7 @@
 #
 # 实现边界：看门狗与心跳均为产品代码（src-tauri worker/session.rs +
 # worker runtime）。脚本只负责设置环境、驱动受门控的 Rust 用例并核对结果，
-# 不在 PowerShell 中模拟产品逻辑。UI 锁定路径由 security-session.spec 与
-# M2 手工锁屏/挂起验证覆盖。
+# 不在 PowerShell 中模拟产品逻辑。UI 锁定路径由 security-session.spec 覆盖。
 #
 # 输出契约：单行 RESULT PASS|FAIL <detail>
 param(

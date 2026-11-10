@@ -1,7 +1,7 @@
 /*
  * keyManager.ts — 密钥管理中枢聚合导出入口（无业务实现）
  *
- * 重构后的分层架构：
+ * 分层架构：
  *   Layer 0: types/key_manager.ts + constants/key_manager_const.ts + lib/key_error.ts
  *   Layer 1: utils/verthys_traversal.ts + utils/promise_utils.ts + state/key_state.ts
  *   Layer 2: cache/composition/verthys-cache.ts（模块缓存 + 扫描缓存 + flush 队列）
@@ -9,8 +9,6 @@
  *   Layer 3b: key/global-verthys.ts（加密库 init + GMK CRUD + 设备绑定）
  *   Layer 3c: key/module-auth.ts（模块密钥 CRUD + 登录登出）
  *   Layer 4: lib/keyManager.ts（本文件，纯聚合导出）
- *
- * 对外 API 入参返回完全不变，页面无需修改调用代码。
  */
 
 /* ===== 常量再导出 ===== */
@@ -21,8 +19,8 @@ export {
   SESSION_PRESET_MINUTES,
 } from "../constants/key_manager_const";
 
-/* 修复：全部记录类型常量统一从 record_types.ts 再导出
- *   消除各模块本地定义 TYPE_* 的冲突风险（原 TYPE_GLOBAL_KEY==TYPE_ACCOUNT==0x10 等）
+/* 全部记录类型常量统一从 record_types.ts 再导出，
+ *   避免各模块本地定义 TYPE_* 的冲突
  */
 export {
   TYPE_PHOTO_META,
@@ -42,7 +40,7 @@ export type {
   VerifyGlobalKeyResult,
 } from "../types/key_manager";
 
-/* ===== 响应式状态再导出（保持独立 ref 命名兼容） ===== */
+/* ===== 响应式状态再导出（独立 ref 命名） ===== */
 import { keyState } from "../state/key_state";
 
 export const verthysReadyRef = keyState.verthysReady;
@@ -54,15 +52,15 @@ export const moduleKeyReadyRef = keyState.moduleKeyReady;
 export const hasModuleKeyRecordRef = keyState.hasModuleKeyRecord;
 export const moduleKeyEnabledRef = keyState.moduleKeyEnabled;
 export const moduleHasRecoveryRef = keyState.moduleHasRecovery;
-/* 安全守卫修复：导出 moduleKeyStatusLoadingRef，供 useModuleNavigation.switchModule
+/* 导出 moduleKeyStatusLoadingRef，供 useModuleNavigation.switchModule
  *   防御性守卫消费——解锁关键路径若仍在加载模块密钥状态，切换模块前需等待完成，
- *   杜绝"加载窗口内 moduleKeyEnabled 为默认 false → 守卫误判保护已关闭 → 直接放行"漏洞 */
+ *   否则 moduleKeyEnabled 默认为 false，守卫会误判保护已关闭而直接放行 */
 export const moduleKeyStatusLoadingRef = keyState.moduleKeyStatusLoading;
-/* 安全守卫根治：导出 moduleKeyStatusLoadedRef，供 useModuleNavigation.switchModule
+/* 导出 moduleKeyStatusLoadedRef，供 useModuleNavigation.switchModule
  *   判断模块密钥状态是否已加载完成。仅 loadModuleKeyStatus 真正完成时为 true，
- *   未加载完前守卫拦截业务模块进入，杜绝"超时后默认 false 放行"绕过漏洞。 */
+ *   未加载完前守卫拦截业务模块进入。 */
 export const moduleKeyStatusLoadedRef = keyState.moduleKeyStatusLoaded;
-/* 模块密钥状态加载失败标志：守卫据此立即 fail-closed（不再空等超时窗口） */
+/* 模块密钥状态加载失败标志：守卫据此立即 fail-closed */
 export const moduleKeyStatusFailedRef = keyState.moduleKeyStatusFailed;
 export const initStatusRef = keyState.initStatus;
 export const initDetailRef = keyState.initDetail;
@@ -113,10 +111,9 @@ export {
   addFullRecord,
   clearFullRecordCache,
   getFullRecordCacheSize,
-  /* 性能修复：批量获取多条记录 dataB64（扫描缓存优先 + 并行 IPC 回退）。
-   *   供 4 个业务模块列表加载使用，替代旧 summary 路径对每条记录串行 getFullRecord
-   *   （N 条 = N 次串行 IPC，与后台 ensureRecordScan 抢同一常驻 worker → 30s）。
-   *   新实现总耗时 < 2.5s。 */
+  /* 批量获取多条记录 dataB64（扫描缓存优先 + 并行 IPC 回退）。
+   *   供 4 个业务模块列表加载使用，避免逐条 getFullRecord 串行 IPC
+   *   与后台 ensureRecordScan 争用同一常驻 worker。 */
   getRecordsDataB64Batch,
   clearAllVerthysCaches,
   ensureTypeIds,
@@ -183,10 +180,10 @@ export {
 } from "../key/module-auth";
 
 /* ================================================================== *
- * 架构优化再导出                                       *
+ * 基础库 API 再导出                                                   *
  *                                                                    *
- * 将新增的基础库 API 通过 keyManager 门面统一再导出，供 Vue 组件与     *
- * 上层模块使用，保持单一导入入口。                                    *
+ * 通过 keyManager 门面统一再导出，供 Vue 组件与上层模块使用，          *
+ * 保持单一导入入口。                                                  *
  * ================================================================== */
 
 /* ===== VerthysResult 结构化错误契约 API =====
@@ -249,16 +246,14 @@ export {
  * stopBackgroundTasks 为 async，等待所有任务实际终止后再返回，
  * 防止 resetKeyManagerState 后旧任务访问已释放缓存。
  *
- * 注意：startBackgroundTasks / stopBackgroundTasks 现直连
- *   "../core/background-tasks" 再导出（单向化，不再经 verthys-cache 转发），
- *   此处仅补导 isBackgroundTasksRunning，
- *   避免重复导出冲突。
+ * 注意：startBackgroundTasks / stopBackgroundTasks 直连
+ *   "../core/background-tasks" 再导出，此处补导 isBackgroundTasksRunning。
  */
 export { isBackgroundTasksRunning } from "../core/background-tasks";
 
 /* ===== 设备绑定独立 API =====
  *
- * 从 initGlobalKey 中解耦，由调用方显式控制。
+ * 由调用方显式控制。
  * SecurityCenter.vue 在 initGlobalKey 成功后调用 bindDevice()，
  * 失败仅 Toast 提示不阻塞主流程（始终写入当前机器码）。
  */

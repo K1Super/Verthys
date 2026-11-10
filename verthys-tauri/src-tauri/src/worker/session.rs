@@ -1,25 +1,6 @@
-//! worker/session.rs — WorkerSession 公共 API（保留兼容签名）
+//! worker/session.rs — WorkerSession 公共 API
 //!
-//! WorkerSession 改为异步 Actor 模型
-//!
-//! 内部通过 Arc<SessionInner> 共享状态：
-//!   - request_tx: mpsc 通道发送请求到 Actor 任务
-//!   - actor_handle: Actor 任务句柄（Drop 时等待退出）
-//!   - runtime_handle: tokio 运行时句柄（sync 方法驱动 async future）
-//!   - child_alive: 子进程存活标志（AtomicBool，is_alive() 读取）
-//!   - pid / started_at: 看门狗元数据
-//!
-//! derive(Clone) 使其可被廉价克隆（Arc 引用计数 +1）。
-//! AppState.session 为 RwLock<Option<WorkerSession>>，send 方法仅用 read()
-//! 锁获取克隆后立即释放，多个 IPC 命令可并发获取 session 引用。
-//! 实际的 stdin/stdout 串行化由 Actor 单任务保证（管道本质串行），
-//! 但 RwLock 层不再阻塞 set_session 等写操作。
-//!
-//! 公共 API 兼容策略：
-//!   保留 spawn/send_json/send_json_with_timeout/
-//!   send_json_with_rotate_progress/wait_for_ready_signal/pid/elapsed_secs/
-//!   is_alive/kill/Clone/Drop 签名，内部通过 Handle::block_on + block_in_place
-//!   包装为同步返回，使 state.rs 与控制器无需立即改签名即可编译。
+//! 对外暴露同步方法，内部由异步 Actor 单任务串行处理全部管道操作。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -153,7 +134,7 @@ fn worker_all_threads_suspended(pid: u32) -> bool {
     found && !any_running
 }
 
-/// WorkerSession 改为异步 Actor 模型
+/// WorkerSession：异步 Actor 模型的同步门面
 ///
 /// 内部通过 Arc<SessionInner> 共享状态：
 ///   - request_tx: mpsc 通道发送请求到 Actor 任务
@@ -166,7 +147,7 @@ fn worker_all_threads_suspended(pid: u32) -> bool {
 /// AppState.session 为 RwLock<Option<WorkerSession>>，send 方法仅用 read()
 /// 锁获取克隆后立即释放，多个 IPC 命令可并发获取 session 引用。
 /// 实际的 stdin/stdout 串行化由 Actor 单任务保证（管道本质串行），
-/// 但 RwLock 层不再阻塞 set_session 等写操作。
+/// RwLock 层不阻塞 set_session 等写操作。
 #[derive(Clone)]
 pub struct WorkerSession {
     pub(crate) inner: Arc<SessionInner>,
@@ -192,7 +173,7 @@ pub(crate) struct SessionInner {
     started_at: Instant,
     /// 子进程存活标志（Actor 更新，is_alive() 读取）
     child_alive: Arc<AtomicBool>,
-    /// 修复：Windows Job Object 句柄（KILL_ON_JOB_CLOSE）
+    /// Windows Job Object 句柄（KILL_ON_JOB_CLOSE）
     ///   父进程退出时内核自动关闭此句柄 → 自动终止 Job 内所有子进程
     ///   None 表示 Job Object 创建失败，回退到 kill_on_drop 兜底
     #[cfg(target_os = "windows")]
@@ -227,6 +208,20 @@ impl SessionInner {
     }
 }
 
+/// 开发构建向 worker 注入 P2 机器预算测试旁路。
+///
+/// 仅 debug 构建注入；生产构建返回 None，生产 DLL 也不包含该旁路分支。
+/// 作用：未签名开发客户端会被已安装的 VerthysSecuritySvc 以 image-auth
+/// 拒绝，C 层据此 fail-closed 返回 VTY_E_LOCKED；注入后测试钩子 DLL 在
+/// 本机预算检查处直接放行，使创建/打开不依赖启动方式。
+fn dev_machine_limiter_bypass() -> Option<(&'static str, &'static str)> {
+    if cfg!(debug_assertions) {
+        Some(("VERTHYS_TEST_MACHINE_LIMITER_BYPASS", "1"))
+    } else {
+        None
+    }
+}
+
 impl WorkerSession {
     /// 启动子进程：verthys-worker.exe <dll_path>
     ///
@@ -254,6 +249,9 @@ impl WorkerSession {
 
         // 构建 tokio::process::Command
         let mut cmd = Command::new(worker_exe);
+        if let Some((key, value)) = dev_machine_limiter_bypass() {
+            cmd.env(key, value);
+        }
         cmd.arg(dll_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -508,8 +506,7 @@ impl WorkerSession {
 
     /// 发送 JSON 请求并等待 JSON 响应（自定义超时）
     ///
-    /// 使用 tokio::time::timeout 包裹 read_line()，
-    /// 替代 PeekNamedPipe + thread::sleep(50ms) 轮询。
+    /// 使用 tokio::time::timeout 包裹 read_line()，不轮询管道状态。
     pub fn send_json_with_timeout(&self, json: &str, timeout: Duration) -> Result<String, String> {
         let json_owned = json.to_string();
         let request_tx = self
@@ -734,7 +731,7 @@ impl Drop for SessionInner {
         //    若 Actor 未能正常退出（超时/panic），kill_on_drop(true) 仍会回收子进程
         self.child_alive.store(false, Ordering::SeqCst);
 
-        // 修复：显式关闭 Job Object 句柄
+        // 显式关闭 Job Object 句柄
         //   KILL_ON_JOB_CLOSE 在句柄关闭时自动终止 Job 内子进程（双保险）
         //   即使 Drop 链正常执行也释放内核资源，杜绝句柄泄漏
         #[cfg(target_os = "windows")]
@@ -754,7 +751,7 @@ impl Drop for SessionInner {
 
 /// 在 tokio 运行时上下文中同步驱动 async future
 ///
-/// 公共 API 兼容策略：sync 方法内部通过 Handle::block_on + block_in_place 包装。
+/// sync 方法内部通过 Handle::block_on + block_in_place 驱动 async future。
 ///
 /// 策略：
 ///   - 若当前线程在 tokio 运行时上下文中（Handle::try_current 成功）：
@@ -787,7 +784,7 @@ mod tests {
     fn test_spawn_requires_runtime() {
         // 不在 tokio 运行时上下文中
         let result = WorkerSession::spawn("nonexistent.exe", "nonexistent.dll");
-        // 用 match 替代 unwrap_err()，避免要求 WorkerSession: Debug
+        // 用 match 避免 unwrap_err() 要求 WorkerSession: Debug
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("spawn 应在无运行时上下文时失败"),
@@ -796,6 +793,35 @@ mod tests {
             err.contains("tokio runtime"),
             "错误信息应提及 tokio runtime，实际: {}",
             err
+        );
+    }
+
+    /// 验证 debug（测试）构建会向 worker 子进程注入机器预算旁路。
+    ///
+    /// 未签名开发客户端会被已安装的 VerthysSecuritySvc 以 image-auth 拒绝，
+    /// 若旁路未进环境块，创建自检解锁会 fail-closed 并回滚整个创建。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn dev_machine_limiter_bypass_is_injected_into_child_env() {
+        let (key, value) = dev_machine_limiter_bypass().expect("debug 构建必须注入旁路变量");
+        assert_eq!(key, "VERTHYS_TEST_MACHINE_LIMITER_BYPASS");
+        assert_eq!(value, "1");
+
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.arg("/C").arg(format!("echo %{}%", key));
+        cmd.env(key, value);
+        let output = cmd.output().expect("spawn cmd 失败");
+        assert!(
+            output.status.success(),
+            "cmd 退出异常: {:?}",
+            output.status
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.trim(),
+            "1",
+            "子进程未读到旁路变量，stdout={:?}",
+            stdout
         );
     }
 

@@ -31,15 +31,15 @@ export interface VerthysResponse {
   record_count?: number;
   /** 扫描批内解密失败/索引不一致的记录 ID（仅 scan_open / scan_next 返回） */
   failed_ids?: number[];
-  /* 修复：解锁响应内联全局主密钥探测结果
+  /* 解锁响应内联全局主密钥探测结果
    *   worker 解锁成功后进程内一次性完成 has_record + find_lid + get_record，
-   *   结果内联到 unlock 响应三字段，彻底消除前端 IPC 链路与 v1 假阴性死锁。
+   *   结果内联到 unlock 响应三字段，避免前端多次 IPC 往返。
    *
-   * 健壮性契约（前端据此决策，无需再发 probe）：
+   * 健壮性契约（前端据此决策）：
    *   - has_global_key=true + global_key_id + global_key_record → 命中且读取成功
    *   - has_global_key=true + global_key_id（无 record）        → 命中 lid 但读取失败
    *   - has_global_key=false                                    → 确认无全局密钥记录
-   *   - has_global_key 缺失（undefined）                        → 探测异常，前端回退 probe */
+   *   - has_global_key 缺失（undefined）                        → 探测异常，前端回退 findGlobalKeyRecord */
   /** 是否存在全局主密钥记录（仅 unlock 操作返回） */
   has_global_key?: boolean;
   /** 全局主密钥记录的 lid（仅 unlock 操作且 has_global_key=true 时返回） */
@@ -212,7 +212,7 @@ export interface VerthysRecordEntry {
 }
 
 /**
- * 项5：枚举记录流式分页批次（Tauri Channel 推送载荷）
+ * 枚举记录流式分页批次（Tauri Channel 推送载荷）
  *
  * 与后端 Rust controller::types::EnumerateBatch 严格对齐（字段名保持 snake_case）。
  * verthys_enumerate_records_stream 命令循环调用 worker，每批通过 Channel 推送到前端。
@@ -308,13 +308,13 @@ export interface RecordEntry {
   name: string;
 }
 
-/** 路径预检结果（错误码脱敏，dir 字段已废弃不再透传） */
+/** 路径预检结果（错误码脱敏，dir 字段不承载路径） */
 export interface PreflightResult {
   ok: boolean;
   error: string | null;
   /** 标准化错误码（INVALID_PATH/PERMISSION_DENIED/DISK_SPACE_INSUFFICIENT/DISK_SPACE_UNKNOWN/TEMPORARY_FAILURE） */
   error_code?: string | null;
-  /** @deprecated dir 字段已删除，后端不再透传路径，保留仅为类型兼容 */
+  /** @deprecated 后端不透传路径，字段仅保留占位 */
   dir: string;
   is_system_protected: boolean;
   file_exists: boolean;
@@ -456,7 +456,7 @@ export interface PresetConfig {
 }
 
 /* ================================================================== *
- * Comprehensive_optimization：照片导入异步批处理流水线类型           *
+ * 照片导入异步批处理流水线类型                                       *
  *                                                                  *
  * 与后端 Rust controller::verthys_batch_controller 严格对齐            *
  * （字段名保持 snake_case，Tauri 自动映射）                          *

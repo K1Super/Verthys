@@ -3,7 +3,7 @@
  *
  * 覆盖：
  *   - BLAKE3 已知向量（空串 / "abc"）
- *   - HKDF-SHA256 RFC 5869 用例 1（32B PRK → 32B 输出）
+ *   - HKDF-SHA256 已知向量（32B PRK → 32B 输出）
  *   - HMAC-SHA256 确定性、密钥敏感性与密钥长度门
  *   - Argon2id 确定性与盐敏感性、参数下限拒绝
  *   - XChaCha20-Poly1305 密钥包裹往返与篡改拒绝
@@ -59,7 +59,7 @@ TEST(blake3_known_vectors)
 
 TEST(hkdf_rfc5869_case1)
 {
-    /* RFC 5869 A.1：PRK 与 OKM 前 32 字节 */
+    /* PRK 与 OKM 前 32 字节的已知值 */
     uint8_t prk[VTY_KEY_BYTES];
     uint8_t info[10];
     uint8_t out[VTY_KEY_BYTES];

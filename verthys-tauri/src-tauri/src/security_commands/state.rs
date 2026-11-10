@@ -4,7 +4,7 @@
  *
  * 职责：
  *   1. 定义 SecurityState 结构体（跨命令共享的单例状态）
- *   2. 实现锁中毒自愈辅助函数（lock_*_or_recover）
+ *   2. 实现锁中毒处理辅助函数（lock_*_or_recover）
  *   3. 管理各状态的"已加载"原子标志
  */
 
@@ -107,7 +107,7 @@ impl SecurityState {
 
     /// 启停剪贴板监听与"外部写入即清空"标志
     ///
-    /// 由安全档位命令显式驱动：剪贴板能力不再随隐私模式（窗口捕获排除）启停。
+    /// 由安全档位命令显式驱动：剪贴板能力不随隐私模式（窗口捕获排除）启停。
     /// 启动监听失败如实返回错误（调用方据实回报并写审计），
     /// 不回滚已经设置的高安全标志——两项能力相互独立。
     pub(crate) fn set_clipboard_guard(&self, enabled: bool) -> Result<(), String> {
@@ -127,50 +127,41 @@ impl SecurityState {
 }
 
 /* ====================================================================== *
- *  锁中毒自愈辅助                                           *
+ *  锁中毒处理辅助                                           *
  *                                                                        *
- *  获取锁时检测中毒：若中毒，into_inner() 取出后废弃，重置为新实例，     *
- *  记录严重告警。关键安全状态从持久化存储重新加载。                       *
+ *  获取锁时检测中毒：若中毒，into_inner() 取出后废弃，记录严重告警并     *
+ *  返回错误，由调用方按失败路径处理。                                     *
  * ====================================================================== */
 
-/// 获取 BruteForceGuard 锁，中毒时自愈
+/// 获取 BruteForceGuard 锁，中毒时告警并返回错误
 ///
 /// 中毒处理策略：
 ///   1. 检测 lock() 返回 PoisonError
 ///   2. into_inner() 取出旧状态（废弃不使用）
-///   3. 重置为新 BruteForceGuard 实例
-///   4. 记录严重告警（log::error）
-///   5. 返回新实例的锁守卫
+///   3. 记录严重告警（log::error）
+///   4. 返回 Err 由调用方处理（fail-closed，不静默放行）
 ///
-/// 注意：调用方需在操作完成后调用 persist_brute_force_state 持久化新状态。
+/// 中毒后守卫状态不可恢复，失败计数随之丢失。
 pub(super) fn lock_brute_force_or_recover(
     state: &SecurityState,
 ) -> Result<std::sync::MutexGuard<'_, BruteForceGuard>, String> {
     match state.brute_force.lock() {
         Ok(guard) => Ok(guard),
         Err(poisoned) => {
-            // 锁中毒 — 取出旧状态废弃，重置为新实例
+            // 锁中毒：取出旧状态并废弃
             let _old = poisoned.into_inner();
             log::error!(
                 "[security] 第 13.2.4 项：brute_force 锁中毒！已重置为新实例。\
                  这可能由前序 panic 导致，暴力拦截计数已丢失。"
             );
 
-            // 替换为新实例（通过再次 lock 获取已重置的锁）
-            // Rust 的 Mutex 中毒后，into_inner() 已取出数据，
-            // 但 Mutex 本身仍可用（下次 lock 返回 Ok）
-            // 需要手动重置内部状态
-            // 由于 BruteForceGuard 的 inner 是私有的，无法在原位重建
-            // 实际上 into_inner() 已经拿走了 BruteForceGuard，Mutex 现在是空的
-            // 这是一个边界情况：Mutex 中毒后数据已被取出，需要重新放入新实例
-
-            // 安全策略：记录严重告警，返回错误让调用方处理
+            // 记录严重告警后返回错误，由调用方按失败路径处理
             Err("暴力拦截模块锁中毒，已记录告警。请重启应用以恢复安全防护。".into())
         }
     }
 }
 
-/// 获取 SessionGuard 锁，中毒时自愈
+/// 获取 SessionGuard 锁，中毒时告警并返回错误
 pub(super) fn lock_session_guard_or_recover(
     state: &SecurityState,
 ) -> Result<std::sync::MutexGuard<'_, SessionGuard>, String> {
@@ -184,7 +175,7 @@ pub(super) fn lock_session_guard_or_recover(
     }
 }
 
-/// 获取 UsbRegistry 锁，中毒时自愈
+/// 获取 UsbRegistry 锁，中毒时告警并返回错误
 pub(super) fn lock_usb_registry_or_recover(
     state: &SecurityState,
 ) -> Result<std::sync::MutexGuard<'_, UsbRegistry>, String> {
@@ -198,7 +189,7 @@ pub(super) fn lock_usb_registry_or_recover(
     }
 }
 
-/// 获取 ShadowSleep 锁，中毒时自愈
+/// 获取 ShadowSleep 锁，中毒时告警并返回错误
 pub(super) fn lock_shadow_sleep_or_recover(
     state: &SecurityState,
 ) -> Result<std::sync::MutexGuard<'_, ShadowSleep>, String> {

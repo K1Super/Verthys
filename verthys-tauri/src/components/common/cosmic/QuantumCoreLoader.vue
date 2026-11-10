@@ -1,7 +1,5 @@
 <!--
-  QuantumCoreLoader.vue — 脉冲星磁层辐射加载动画（当前视觉体系）
-  与被否决的轨道旋转族（同心环七层 / 倾斜椭圆 dash 差速流）
-    完全不同的构造机制 — 零轨道、零圆环、零 dash 巡行、零旋转 transform：
+  QuantumCoreLoader.vue — 脉冲星磁层辐射加载动画
 
     构造：脉冲双星系统（lighthouse 灯塔效应）
       1. 磁轴偶极（斜置 24° 双极线 — 脉冲星磁轴几何，静态骨架）
@@ -60,10 +58,9 @@ import { onBeforeUnmount, onMounted, ref } from "vue";
 import { masterFrameLoop, type FrameStep } from "../../../core/master-frame-loop";
 
 /**
- * QuantumCoreLoader — 脉冲星磁层辐射加载动画（当前视觉体系）
+ * QuantumCoreLoader — 脉冲星磁层辐射加载动画
  *
- * 早期方案（同心环七层 / 倾斜椭圆 dash 差速流）均被否决 — 本版
- * 彻底更换构造机制：脉冲星灯塔效应，主循环帧任务逐帧驱动 SVG 几何实时重算。
+ * 构造机制：脉冲星灯塔效应，主循环帧任务逐帧驱动 SVG 几何实时重算。
  *
  * 几何模型（viewBox 96×96，中心 48,48）：
  *   - 磁轴：斜置 24° 过中心的直线（两极点 ±23 单位距离）
@@ -116,6 +113,8 @@ let standingEls: SVGPathElement[] = [];
 let unregister: (() => void) | null = null;
 /** 进度墙钟基准（首个许可帧的 real time，秒） */
 let t0Sec = 0;
+/** 上一次几何重写的墙钟时刻（秒）：加载动画限帧 30fps */
+let lastRenderedAt = -1;
 
 /* ===== 几何常量 ===== */
 const CX = 48;
@@ -172,6 +171,12 @@ const angDiff = (a: number, b: number): number => {
 
 /* ===== 帧任务（主循环 throttled 注册 — 页面隐藏自动停帧 / 空闲档降频） ===== */
 function tick(ctx: FrameStep): void {
+  /* 30fps 限帧：本动画每帧要重写 6 条 SVG 路径与 8 粒微尘坐标，
+   * 60fps 下会与解密/IPC 主线程工作争用，造成整屏掉帧；
+   * 加载指示器 30fps 视觉无差别，主线程预算留给进度与交互。 */
+  if (lastRenderedAt >= 0 && ctx.wallClock - lastRenderedAt < 1 / 30) return;
+  lastRenderedAt = ctx.wallClock;
+
   const t = Math.max(ctx.wallClock - t0Sec, 0);
 
   /* 自转相位：匀速 + 非对称谐波修正（速度周期性加减速 — 拒绝匀速旋转） */
@@ -270,9 +275,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* ============================================================
-   QuantumCoreLoader.vue 样式引用（ql-loader.css — 脉冲星磁层辐射）
-   ============================================================ */
 @import '../../../styles/security/ql-loader.css';
 
 /* 容器布局 — 居中对齐，固定尺寸消除跳变 */

@@ -388,7 +388,7 @@ impl LogSender {
         }
     }
 
-    /// 旧版阻塞发送兼容方法，用于panic钩子等存量调用点
+    /// 阻塞发送兼容方法，用于panic钩子等存量调用点
     pub fn send(&self, entry: LogEntry) -> Result<(), crossbeam_channel::SendError<LogEntry>> {
         match self.sender.try_send(entry.clone()) {
             Ok(()) => Ok(()),

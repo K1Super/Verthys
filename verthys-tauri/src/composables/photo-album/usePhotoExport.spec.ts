@@ -6,7 +6,7 @@
  * - 占位项（meta 未加载）导出：按需解密后成功计入，不再静默跳过
  * - 文件名净化 + 批次内唯一化：非法字符被隔离，同名不互相覆盖
  * - 结果文案仅由成功/失败计数派生：全失败时明确报错，不谎报「已导出 N 张」
- * - 令牌重新生成必须经用户二次确认，未确认不失效
+ * - 令牌重新生成直接生效（无确认弹窗），并复位复制成功态
  * - 明文导出解密下沉 Worker 桥：逐块密文与瘦身参数透传，
  *   解密/完整性失败归因为 decrypt-failed（不与格式转换失败混淆）
  */
@@ -14,7 +14,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { effectScope, shallowRef, type EffectScope } from "vue";
 import { installBase64Polyfill } from "../../test-utils/base64-polyfill";
 
-// node 环境无 atob/btoa：base64 编解码（v2 容器块转换）依赖，测试时补齐
+// node 环境无 atob/btoa：base64 编解码（容器块转换）依赖，测试时补齐
 installBase64Polyfill();
 
 const { askMock } = vi.hoisted(() => ({ askMock: vi.fn() }));
@@ -58,7 +58,6 @@ vi.mock("../../lib/crypto", () => ({
   encryptMeta: vi.fn(async () => "meta-b64"),
   encryptChunk: vi.fn(async () => new Uint8Array(8)),
   decryptChunk: vi.fn(async () => ({ plaintext: new Uint8Array([1, 2, 3]), seq: 0, total: 1 })),
-  computeFileHash: vi.fn(() => new Uint8Array(32).fill(1)),
   bytesToHex: vi.fn(() => "1".repeat(64)),
   packVenc: vi.fn(async () => new Uint8Array([9, 9])),
   // 惰性逐张供给：逐条取规格并产出帧段（真实实现由 lib/crypto 契约测试锁定，
@@ -84,7 +83,7 @@ vi.mock("../../lib/crypto", () => ({
   toLightMeta: vi.fn(
     (local: {
       name: string; mime: string; size: number; thumbB64: string;
-      fileHash: string; createdAt: number; chunkDataB64?: string[]; chunkHashes?: string[];
+      fileHash: string; createdAt: number; chunkDataB64?: string[];
     }) => ({
       name: local.name,
       mime: local.mime,
@@ -93,10 +92,8 @@ vi.mock("../../lib/crypto", () => ({
       fileHash: local.fileHash,
       createdAt: local.createdAt,
       chunkCount: local.chunkDataB64?.length ?? 0,
-      chunkHashes: local.chunkHashes ?? [],
     }),
   ),
-  computeChunkHashesForB64: vi.fn(() => ["2".repeat(64)]),
   generateRandomToken: vi.fn(() => "a".repeat(64)),
   CHUNK_SIZE: 1024 * 1024,
 }));
@@ -108,7 +105,7 @@ vi.mock("../../workers/photo-decrypt-bridge", () => ({
     meta: {
       name: "占位.jpg",
       mime: "image/jpeg",
-      size: 123,
+      size: 3,
       thumbB64: "",
       chunkIds: [],
       chunkDataB64: ["Y2g="],
@@ -146,11 +143,11 @@ import { PHOTO_FMT_SLIM } from "../../constants/crypto_const";
 import { decryptChunksPreferWorker } from "../../workers/photo-decrypt-bridge";
 import type { PhotoEntry } from "./types";
 
-/** 派生可编程的占位 meta（各用例可覆写工厂）；块数据使用合法 base64 负载 */
+/** 派生可编程的占位 meta（各用例可覆写工厂）；size 与解密产物 [1,2,3] 对齐 */
 const fakeMetaFactory = (): PhotoMeta => ({
   name: "占位.jpg",
   mime: "image/jpeg",
-  size: 123,
+  size: 3,
   thumbB64: "",
   chunkIds: [],
   chunkDataB64: ["Y2g="],
@@ -266,7 +263,7 @@ describe("usePhotoExport — 多文件导出的一致性与结果契约", () => 
       meta: {
         name: "a/b.jpg",
         mime: "image/jpeg",
-        size: 1,
+        size: 3,
         thumbB64: "",
         chunkIds: [],
         chunkDataB64: ["Y2g="],
@@ -390,6 +387,25 @@ describe("usePhotoExport — 单文件流式写出协议", () => {
     expect(made.api.exportStatus.value).toContain("超过单文件上限 2 GB");
   });
 
+  it("单张读取异常：按该张失败记账，不中断整批导出", async () => {
+    (verthysGetRecord as ReturnType<typeof vi.fn>).mockImplementation(async (id: number) => {
+      if (id === 50) throw new Error("ipc transport error");
+      return { type: 1, name: "meta_ok.jpg", dataB64: "meta-b64" };
+    });
+    const made = makeExport([makePlaceholder(50), makePlaceholder(51)]);
+    scope = made.scope;
+    made.api.exportSelectedIds.value = new Set([50, 51]);
+    made.api.exportFormat.value = "single";
+    made.api.exportPath.value = "C:\\out\\photo.venc";
+
+    await made.api.doExport();
+
+    expect(writeUserFileStream).toHaveBeenCalledTimes(1);
+    expect(finalizeUserFileStream).toHaveBeenCalledWith("stream-1");
+    expect(abortUserFileStream).not.toHaveBeenCalled();
+    expect(made.api.exportStatus.value).toBe("已导出 1 张，失败 1 张");
+  });
+
   it("追加中途失败：中止会话清理暂存，未 finalize，错误显式呈现", async () => {
     (appendUserFileChunk as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error("disk full"),
@@ -432,6 +448,11 @@ describe("usePhotoExport — PNG 明文导出：解密下沉 Worker 桥", () => 
   let scope: EffectScope | null = null;
   beforeEach(() => {
     vi.clearAllMocks();
+    // 逐块解密 mock 的 once 队列必须清空：否则前一个用例的返回值会泄漏到下一用例
+    vi.mocked(decryptChunksPreferWorker).mockReset();
+    vi.mocked(decryptChunksPreferWorker).mockImplementation(
+      async (chunksB64: string[]) => chunksB64.map(() => new Uint8Array([1, 2, 3])),
+    );
     (verthysGetRecord as ReturnType<typeof vi.fn>).mockResolvedValue({
       type: 1,
       name: "meta_占位.jpg",
@@ -463,7 +484,7 @@ describe("usePhotoExport — PNG 明文导出：解密下沉 Worker 桥", () => 
     await made.api.doExport();
 
     expect(decryptChunksPreferWorker).toHaveBeenCalledTimes(1);
-    // 完整性权威值随解密任务透传：逐块哈希（历史记录可为空）与整图明文哈希
+    // 完整性参数随解密任务透传：逐块哈希（历史记录可为空，仅诊断）与整图明文哈希
     expect(decryptChunksPreferWorker).toHaveBeenCalledWith(
       ["Y2g="], "1".repeat(64), "占位.jpg", undefined,
       { expectedHashes: undefined, expectedFileHash: "1".repeat(64) },

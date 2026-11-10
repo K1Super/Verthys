@@ -5,8 +5,8 @@
  * 本模块负责解析 verthys-worker.exe 和 verthys.dll 的运行时路径，
  * 并提供 DLL 完整性校验能力（SHA-256 比对编译时嵌入哈希）。
  * 路径解析策略优先使用开发环境最新构建产物，生产环境回退至 Tauri 资源目录。
- * 完整性校验为非阻塞性安全审计手段，哈希不匹配仅记录警告而不阻断启动，
- * 以规避因构建顺序、代码签名等导致的误报。
+ * 完整性校验为失败关闭门禁：Release 构建缺少嵌入哈希或哈希不匹配即拒绝加载；
+ * 开发构建允许未构建 C 核心时跳过，仅记录警告。
  *
  * 依赖：
  *   - dll_hash：编译时由 build.rs 嵌入的 DLL 哈希
@@ -14,7 +14,7 @@
  *   - tauri::AppHandle：用于资源路径解析
  *
  * 安全约束：
- *   - DLL 校验仅用于日志审计，不作为严格安全门禁
+ *   - DLL 哈希不匹配即拒绝加载，不降级
  *   - 路径解析结果需经 sanitize_path 脱敏后记录日志，避免泄露本地文件结构
  */
 
@@ -703,25 +703,17 @@ pub fn resolve_worker_path(app: &tauri::AppHandle) -> Result<String, String> {
 ///
 /// 路径匹配成功后将通过 `sanitize_path` 脱敏后记录日志。
 ///
-/// 修复：dev-env 相对路径深度修正（根治 worker 0xC0000005 崩溃）
+/// 上溯深度约束：
+///   开发环境 exe 位于 `verthys-tauri/src-tauri/target/{debug,release}`，
+///   `build/` 位于仓库根 `Verthys/build/`，故需上溯 4 级；
+///   `resolve_worker_path` 上溯 3 级即可命中，因为 `verthys-worker/` 挂在
+///   `verthys-tauri/` 下。
 ///
-/// 原缺陷：原路径 `../../../build/core/Release/verthys.dll` 仅上溯 3 级，
-///   从 `verthys-tauri/src-tauri/target/{debug,release}` 出发落到
-///   `verthys-tauri/build/`（不存在）。build/ 实际位于仓库根 `Verthys/build/`，
-///   需上溯 4 级。对比 resolve_worker_path 用 `../../../verthys-worker/...` 是
-///   正确的——因为 verthys-worker/ 挂在 verthys-tauri/ 下（3 级即可命中），而
-///   build/ 挂在 Verthys/ 下（需 4 级）。
-///
-///   步骤 1 因深度错误失败后，回退到步骤 2（Tauri 资源目录），命中
-///   `src-tauri/target/debug/verthys.dll` 或 `src-tauri/verthys.dll` ——
-///   这两份是 7/30 的过期拷贝，早于 C 端 VerthysSummaryRecord 引入 slot_state
-///   字段。固定后的 Rust worker（sizeof=88）读取旧 DLL 写入的 80 字节记录，
-///   name 指针字段错位读到垃圾值 → 解引用空指针 → worker 0xC0000005 at 0x0
-///   崩溃 → 后续 verthys_derive_global_key/verthys_verify_global_key 报
-///   "worker 子进程已退出" → 用户看到"无法初始化密钥/无法身份验证"。
-///
-/// 修复：上溯深度 3→4，确保 dev 环境优先命中 build/core/Release/verthys.dll
-///   （与 worker 同源、与 Rust FFI 布局严格对齐的 Release 构建）。
+///   深度不足会回退到 Tauri 资源目录，命中 `src-tauri/target/debug/verthys.dll`
+///   或 `src-tauri/verthys.dll` 等旧拷贝。旧 DLL 早于 C 端 VerthysSummaryRecord
+///   的 slot_state 字段，Rust worker 按 88 字节读取旧 DLL 写入的 80 字节记录
+///   会读到错位的 name 指针，解引用空指针导致 worker 0xC0000005 崩溃，
+///   上游表现为"worker 子进程已退出"。
 pub fn resolve_dll_path(app: &tauri::AppHandle) -> Result<String, String> {
     // 1. 开发环境优先
     if let Ok(exe_path) = std::env::current_exe() {
@@ -731,10 +723,10 @@ pub fn resolve_dll_path(app: &tauri::AppHandle) -> Result<String, String> {
                 || exe_dir_str.ends_with("\\target\\release");
 
             if is_dev {
-                // 修复：4 级上溯抵达仓库根 Verthys/build/core/Release/
+                // 4 级上溯抵达仓库根 Verthys/build/core/Release/
                 //   exe_dir = Verthys/verthys-tauri/src-tauri/target/{debug,release}
                 //   ../../../../ → Verthys/  → build/core/Release/verthys.dll ✓
-                //   （原 ../../../ 仅到 verthys-tauri/，build/ 不在此层 → 回退到过期 DLL）
+                //   深度不足仅到 verthys-tauri/，build/ 不在此层 → 回退到旧 DLL
                 let p = exe_dir.join("../../../../build/core/Release/verthys.dll");
                 if p.exists() {
                     let abs = p.canonicalize().map_err(|e| e.to_string())?;

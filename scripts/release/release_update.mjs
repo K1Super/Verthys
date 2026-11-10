@@ -124,7 +124,7 @@ function main() {
   if (channel !== "local") {
     const status = authenticodeStatus(installer);
     if (status !== "Valid") {
-      // Authenticode 是可选的系统信任层，不再阻断发布；未签名安装包仍可通过
+      // Authenticode 是可选的系统信任层，不阻断发布；未签名安装包仍可通过
       // 清单签名、安装包签名、SHA256 与 PE 版本校验。
       console.warn(
         `[WARN] 安装包未通过 Authenticode 系统信任校验（允许发布）: ${status || "<未知>"}`,

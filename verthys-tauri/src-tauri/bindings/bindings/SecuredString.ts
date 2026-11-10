@@ -10,7 +10,7 @@
  *   - 实现 `Zeroize` trait 供泛型 `ScanRecord: Zeroize` 约束使用
  *
  * 用于 VerthysRecordEntry.name / data 与 VerthysSummaryEntry.name / merkle_leaf 字段，
- * 替代裸 String，消除 secure_zero_records 中 ptr::write_bytes 对 String 的 UB 覆写。
+ * 不得换回裸 String：裸 String 无法在 Drop 时零化擦除，而手写缓冲覆写属于 UB。
  *
  * 注意：不 derive Hash（Zeroizing<String> 未实现 Hash）。
  */

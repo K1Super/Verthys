@@ -37,15 +37,11 @@
  *
  * 导出面唯一由 verthys.def 白名单管控。
  *
- * 原缺陷：VERTHYS_EXPORTS 使本头文件内所有 VERTHYS_API 声明展开为
- * __declspec(dllexport)，/DEF: 仅追加导出而非白名单——实际导出面 =
- * .def ∪ 全部头文件声明，"最小导出面"承诺失效。
- *
- * 修复：VERTHYS_API 不再携带任何 dllexport/dllimport 语义（恒为空），
- * 符号导出唯一由链接器 /DEF:verthys.def 白名单决定；未列入 .def 的
- * 内部接口（如 Verthys_HasRecordByType 之外的新增内部函数）一律不可达。
- * 消费方（verthys-worker）经 libloading 按名运行时解析，不依赖导入库。
- * 测试目标直接链接对象库，同样不受影响。
+ * VERTHYS_API 恒为空，不携带 dllexport/dllimport 语义：/DEF: 只追加导出，
+ * 若由头文件声明展开 dllexport，实际导出面会变成 .def ∪ 全部头文件声明，
+ * “最小导出面”即失效。符号导出唯一由链接器 /DEF:verthys.def 白名单决定，
+ * 未列入 .def 的内部接口一律不可达。消费方经 libloading 按名运行时解析，
+ * 不依赖导入库；测试目标直接链接对象库。
  * ================================================================== */
 #if defined(_WIN32) || defined(__CYGWIN__)
   #define VERTHYS_CALL __cdecl
@@ -103,6 +99,7 @@ typedef enum {
  * 统一32位调用返回状态码
  * 安全设计规则：各类认证失败、数据篡改、密码错误对外返回同一类错误标识，
  * 不在错误码粒度上区分具体失败原因，仅内部日志记录详情，防止攻击者枚举探测。
+ * ABI 规则：新错误码只允许在枚举尾部追加，禁止插入或复用已分配值。
  */
 typedef enum {
     VERTHYS_OK           = 0x00000000u,
@@ -120,99 +117,96 @@ typedef enum {
      * OS 托管 pepper 解包失败、或容器记录的 pepper 来源与
      * 当前生效来源不一致时返回——区别于 VERTHYS_ERR_AUTH（密码错误），
      * 上层应提示"保险库安全源已变更，可能由于系统硬件或安全策略改变"，
-     * 而非引导用户重试密码。
-     * 注：原拟 0x0000000B 与既有 VERTHYS_ERR_SNAPSHOT 冲突，
-     *     依 ABI 向后兼容原则顺延至 0x0C。 */
+     * 而非引导用户重试密码。 */
     VERTHYS_ERR_PEPPER_SOURCE = 0x0000000Cu,
     /* 导出记录数超限（API 版本 0x0006 扩展）：
-     * 导出记录数超出 v1 导出格式容量上限（65535），导出被拒绝。
-     * 原行为：静默截断并返回 VERTHYS_OK——导出不完整且用户不知情。 */
+     * 导出记录数超出 v1 导出格式容量上限（65535），导出被拒绝，
+     * 不得静默截断后返回 VERTHYS_OK。 */
     VERTHYS_ERR_EXPORT_TOO_MANY = 0x0000000Du,
-    /* 历史扩展（API 版本 0x0007 扩展）：
+    /* （API 版本 0x0007 扩展）：
      * CNG 内核态密码服务不可用（BCrypt 算法提供者打开/密钥导入失败）。
      * 上层按 cng_machine_key 三级降级链处理；此码为降级链耗尽后的
      * 显式顶层错误，区别于 VERTHYS_ERR_INTERNAL 的未归类内部异常。
-     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+     */
     VERTHYS_ERR_CNG_UNAVAILABLE = 0x0000000Eu,
-    /* 历史扩展（API 版本 0x0007 扩展）：
+    /* （API 版本 0x0007 扩展）：
      * 全局内存预算耗尽（用量达到硬上限 512MB 的 95%）时新操作被拒绝，
      * 避免 OOM。区别于 VERTHYS_ERR_INTERNAL：调用方可触发内存回收后重试。
-     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+     */
     VERTHYS_ERR_RESOURCE_LIMIT = 0x0000000Fu,
-    /* 历史扩展（API 版本 0x0008 扩展）：
-     * 超级块法定人数不满足——3 副本中 HMAC 有效副本 < 2（仅 1 副本有效），
-     * 容器一致性无法由法定人数保证，须触发恢复流程（WAL 回放）。
-     * 区别于 VERTHYS_ERR_CORRUPT（0 有效副本，全量损坏）。
-     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+    /* （API 版本 0x0008 扩展）：
+     * 元数据多副本一致性不满足——有效副本数不足，容器一致性无法由
+     * 副本多数保证，须触发恢复流程。
+     * 区别于 VERTHYS_ERR_CORRUPT（无有效副本，全量损坏）。
+     */
     VERTHYS_ERR_QUORUM_FAILED = 0x00000010u,
-    /* 历史扩展（API 版本 0x0009 扩展）：
-     * 渐进式解锁——容器已进入最小可操作状态（超级块验证 + 密钥导入 +
-     * 分区表加载完成），但索引尚未完全预热（后台预热进行中）。
-     * 上层可正常发起读写（LSM 按需加载 SSTable），或等待预热完成回调。
-     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+    /* （API 版本 0x0009 扩展）：
+     * 渐进式解锁——容器已进入最小可操作状态（元数据验证 + 密钥导入 +
+     * 目录加载完成），但索引尚未完全预热（后台预热进行中）。
+     * 上层可正常发起读写，或等待预热完成回调。 */
     VERTHYS_ERR_PARTIAL_UNLOCK = 0x00000011u,
-    /* 历史扩展（API 版本 0x0009 扩展）：
-     * 解锁流水线总超时（预算 10s）——S0-S6 任一阶段未在预算内完成。
+    /* （API 版本 0x0009 扩展）：
+     * 解锁流水线总超时（预算 10s）——任一阶段未在预算内完成。
      * 区别于 VERTHYS_ERR_INTERNAL：调用方可安全重试（无部分写入副作用，
-     * 事务原子性由 WAL + 法定人数保证）。 */
+     * 事务原子性由提交点保证）。 */
     VERTHYS_ERR_TIMEOUT = 0x00000012u,
-    /* 历史扩展接线（API 版本 0x000A 扩展）：
+    /* （API 版本 0x000A 扩展）：
      * 保留码：当前容器格式不支持调用方请求的操作时使用，
      * 区别于 INTERNAL（未归类异常）与 INVALID（参数非法）。
-     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+     */
     VERTHYS_ERR_UNSUPPORTED = 0x00000013u,
-    /* 历史扩展（API 版本 0x000C 扩展）：
+    /* （API 版本 0x000C 扩展）：
      * 加密层 nonce 计数器耗尽——同一密钥已消耗全部 2^64 计数空间，
      * 继续加密必然导致 GCM nonce 重用（机密性与真实性双重破坏），
      * 加密操作被拒绝。区别于 VERTHYS_ERR_INTERNAL：此为确定性、
      * 可识别的密钥生命周期终点，上层应触发密钥轮换而非重试。
-     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+     */
     VERTHYS_ERR_NONCE_EXHAUSTED = 0x00000014u,
-    /* 历史扩展（API 版本 0x000C 扩展）：
+    /* （API 版本 0x000C 扩展）：
      * 容器正被其他进程独占占用——单写者语义下第二个写者被拒绝
-     * （文件句柄共享模式或超级块区独占锁任一判定命中）。区别于
+     * （文件句柄共享模式或容器元数据区独占锁任一判定命中）。区别于
      * VERTHYS_ERR_IO：不是设备/文件系统故障，等待持有进程退出后重试
      * 即可成功；区别于 VERTHYS_ERR_LOCKED：后者是容器自身密码学锁定态。
-     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+     */
     VERTHYS_ERR_CONTAINER_BUSY = 0x00000015u,
     /* 调用方未被授权加载本 DLL（API 版本 0x000E 扩展）：
      * 宿主进程主模块或 verthys.dll 本身缺少有效的发布者 Authenticode
      * 签名，Verthys_Init 在任何密钥/文件操作之前即拒绝。
-     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+     */
     VERTHYS_ERR_UNAUTHORIZED = 0x00000016u,
     /* 策略拒绝：模块未启用、模块未解锁、恢复会话缺少 recovery 槽等。
      * 与 AUTH 区分，调用方可给出“先解锁模块/先绑定恢复码”的指引。 */
     VERTHYS_ERR_POLICY = 0x00000017u,
-    /*/* TPM/PCR 不可用或 PCR 策略不匹配。与 AUTH 区分，供调用方
+    /* TPM/PCR 不可用或 PCR 策略不匹配。与 AUTH 区分，供调用方
      * 引导恢复码重密封；仍不区分具体槽/TPM 内部状态。 */
     VERTHYS_ERR_TPM = 0x00000018u,
-    /*/* 回退锚点拒绝旧副本。与 CORRUPT 区分，供调用方提示文件回退。 */
+    /* 回退锚点拒绝旧副本。与 CORRUPT 区分，供调用方提示文件回退。 */
     VERTHYS_ERR_ROLLBACK = 0x00000019u,
     /* API 版本 0x000F 扩展：
      * KEYFILE 标志置位但调用方未提供 keyfile（或该操作要求 keyfile）。
      * 与 AUTH 区分：此时口令尚未参与判定，调用方应引导用户选择
      * keyfile 文件后重试，而不是提示“口令错误”。
-     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+     */
     VERTHYS_ERR_KEYFILE_REQUIRED = 0x0000001Au,
     /* API 版本 0x000F 扩展：
      * 提供的 keyfile 不是合法 VKFL v1（长度/magic/version/flags/checksum
      * 任一不符）。注意“VKFL 合法但 secret 不对”仍统一返回
      * VERTHYS_ERR_AUTH，不泄露口令/密钥判定细节。
-     * 依 ABI 向后兼容原则在枚举尾部顺延追加。 */
+     */
     VERTHYS_ERR_KEYFILE_INVALID = 0x0000001Bu,
     /* API 版本 0x0010 扩展：DEK 全库轮换仍在进行，调用方可稍后重试。
      * 与 CONTAINER_BUSY（外部进程占用）区分：此处是库内轮换事务未收敛。 */
     VERTHYS_ERR_ROTATE_PENDING = 0x0000001Cu,
-    /*/* 目标模块未解锁（模块保护已启用且当前会话未持有该模块密钥）。
+    /* 目标模块未解锁（模块保护已启用且当前会话未持有该模块密钥）。
      * 与 POLICY 区分：调用方可直接引导“先解锁模块”，而不是检查策略配置。 */
     VERTHYS_ERR_MODULE_LOCKED = 0x0000001Du,
-    /*/* 数据区/文件系统空间不足。与 RESOURCE_LIMIT（内存预算）区分，
+    /* 数据区/文件系统空间不足。与 RESOURCE_LIMIT（内存预算）区分，
      * 调用方可引导用户清理磁盘后重试。 */
     VERTHYS_ERR_NO_SPACE = 0x0000001Eu,
-    /*/* 完整性复核失败（Merkle/摘要不一致）。与 AUTH（AEAD 认证失败）
+    /* 完整性复核失败（Merkle/摘要不一致）。与 AUTH（AEAD 认证失败）
      * 区分：前者表示结构完整性受损，后者表示密钥/密文不匹配。 */
     VERTHYS_ERR_VERIFY = 0x0000001Fu,
-    /* 安全状态目录预检失败（N2）：目录/ACL 不可加固、位置不受支持或
+    /* 安全状态目录预检失败：目录/ACL 不可加固、位置不受支持或
      * 重解析点。Init 阶段返回，提示可执行的修复指引而非通用“安全模块不可用”。 */
     VERTHYS_ERR_SECURITY_STATE = 0x00000020u,
     VERTHYS_ERR_INTERNAL = 0xFFFFFFFFu   /* 未归类的底层内部异常 */
@@ -290,20 +284,16 @@ typedef struct {
     uint8_t  container_id[16];      /* 容器唯一标识ID（非敏感标识） */
     uint8_t  warm_cache_enabled;    /* 保留字段；当前容器恒为 0 */
     uint8_t  merkle_pending;        /* Merkle树是否等待后台重建完成 */
-    uint8_t  has_keyfile;           /*/* keyfile 因子已启用（仅解锁态可读） */
+    uint8_t  has_keyfile;           /* keyfile 因子已启用（仅解锁态可读） */
     uint8_t  reserved[6];           /* 预留字节，用于后续版本结构体对齐与扩展 */
 } VerthysContainerInfo;
 
 /* ================================================================== *
  * 运行时性能诊断指标结构体
  *
- * 仅保留 运行时实际采集的指标：扫描游标打开次数、读写锁等待耗时、
- * 预热状态与胡椒来源分类标记。旧代专属指标（解锁耗时分解、
- * 温缓存命中、GC/事务计数、Argon2id 漂移、索引映射回退）不再存在。
+ * 仅包含运行时实际采集的指标：扫描游标打开次数、胡椒来源分类标记、
+ * 读写锁平均等待耗时。其余字段为预留，恒为 0。
  *
- * 可观测性指标增强（API 版本 0x0005）：
- *   - 读写锁平均等待耗时
- *   - 预热状态枚举（0=未预热 /1=预热中 /2=预热完成 /3=预热失败）
  * 通过 Verthys_GetDiagnostics() 对外暴露，运维平台可实时采集做瓶颈分析。
  * ================================================================== */
 typedef struct {
@@ -332,9 +322,9 @@ typedef struct {
  *   MT-Unsafe — 非线程安全，同一操作句柄不可多线程并发执行
  *   MT-Const  — 只读安全，只读接口可并发调用，禁止与写操作并行执行
  *   MT-Handle — 句柄级别安全，不同句柄可并发，同一句柄禁止并发
- * 并发度注记（与实现对齐）：索引读路径（单记录读取、类型探测）因
- * SSTable 元数据惰性加载需互斥，内部以独占锁串行化读者——调用安全
- * 但读者不并行；扫描游标类只读遍历持共享锁，读者可真正并行。
+ * 并发度注记（与实现对齐）：索引读路径（单记录读取、类型探测）内部
+ * 以互斥锁串行化读者——调用安全但读者不并行；扫描游标类只读遍历持
+ * 共享锁，读者可真正并行。
  * ------------------------------------------------------------------ */
 
 /* ================================================================== *
@@ -368,7 +358,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_Deinit(VerthysHandle handle);
  * 调用方展示并确认后必须自行清零缓冲。
  * ================================================================== */
 
-/* 创建 容器；recovery_text 容量必须 >= 80 字节。 */
+/* 创建容器；recovery_text 容量必须 >= 80 字节。 */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4Create(VerthysHandle handle,
                                     const char *verthys_path,
                                     const char *password,
@@ -376,7 +366,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4Create(VerthysHandle handle,
                                     char       *recovery_text,
                                     size_t      recovery_cap);
 
-/* 标准解锁：口令 + 设备根（AND）。仅接受 文件。 */
+/* 标准解锁：口令 + 设备根（AND）。仅接受 VRTY 容器文件。 */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4Unlock(VerthysHandle handle,
                                     const char *verthys_path,
                                     const char *password,
@@ -403,7 +393,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4UnlockRecovery(
  *   - 文件合法但 secret 不对：VERTHYS_ERR_AUTH（与口令错不可区分）
  * ================================================================== */
 
-/* 创建 容器并生成 VKFL keyfile 到 keyfile_path（目标必须不存在）。
+/* 创建容器并生成 VKFL keyfile 到 keyfile_path（目标必须不存在）。
  * 库创建失败时不留下 keyfile 文件；恢复码只在本次调用返回，处理规则
  * 同 Verthys_V4Create。 */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_V4CreateKeyfile(
@@ -763,7 +753,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetSecurityPreset(VerthysHandle h
  *
  * 位序（禁止重排）：
  *   0 anti_debug / 1 anti_inject / 2 integrity_check / 3 memory_guard /
- *   4 key_separation（历史遗留位；产品映射密钥隔离堆）/ 5 emergency_response /
+ *   4 key_separation（与密钥隔离堆对应的兼容位）/ 5 emergency_response /
  *   6 session_lock_on_idle / 7 module_patrol / 8 clipboard_guard / 9 usb_clone_detect /
  *   10 trace_cleanup
  * 其中 2/6/7/8/9/10 为应用侧策略位（宿主按位执行），其余为 C 层消费能力。
@@ -817,7 +807,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_AddRecord(VerthysHandle handle,
  *   - count ∈ [1, VERTHYS_ADD_RECORDS_MAX]，records 与 out_ids 必须非 NULL；
  *   - 每条记录按 Verthys_AddRecord 同一规则校验（名称/数据指针、长度上限、
  *     单条 IPC 预算），任一非法即整批拒绝且不产生任何写入；
- *   - 仅 容器可用；非 返回 VERTHYS_ERR_FORMAT；
+ *   - 仅当前格式容器可用；其他格式返回 VERTHYS_ERR_FORMAT；
  *   - out_ids[i] 与 records[i] 一一对应，成功时均 > 0；
  *   - 写操作使既有 GetRecord 借用指针失效（与 AddRecord 同一纪律）。
  *
@@ -952,7 +942,7 @@ typedef enum {
 
 /*
  * 创建数据全量扫描游标
- * 指定起始遍历ID与单次批量读取条数，初始化B+树遍历迭代器并绑定只读事务快照。
+ * 指定起始遍历ID与单次批量读取条数，初始化目录树游标并绑定只读快照。
  * 线程安全：MT-Unsafe，同一容器句柄不可并发创建多个扫描游标
  * 等价于 Verthys_ScanOpenEx(handle, start_lid, batch_size, VERTHYS_SCAN_PROJECT_FULL, 0, 0, out_cursor)。
  */
@@ -1048,53 +1038,49 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ScanSummaryRecordFree(VerthysSumm
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetSummaryCount(VerthysHandle handle, uint64_t *out_count);
 
 /* ================================================================== *
- * 设计：轻量级记录类型存在性检查（只扫摘要索引，不读数据块）     *
- *                                                                    *
- * 用途：快速判断 verthys 中是否存在指定类型的记录（如 TYPE_GLOBAL_KEY），  *
- * 用于启动阶段决定 UI 路径（"初始化密钥" vs "身份验证"）。              *
- *                                                                    *
- * 性能：仅遍历 B+ 树索引节点读取 type 字段，不访问数据区块，            *
- *       不分配 name 字符串堆内存，典型耗时 < 100ms。          *
- *       相比 ScanSummaryOpen+Fetch 循环，消除多次 IPC 往返开销。       *
- *                                                                    *
- * 参数：                                                              *
- *   handle     : 已解锁的 Verthys 句柄                                  *
- *   rtype      : 目标记录类型（如 0x10 = TYPE_GLOBAL_KEY）             *
- *   out_found  : 输出，1=存在匹配类型的记录，0=不存在                   *
- *                                                                    *
- * 返回值：                                                            *
- *   VERTHYS_OK          — 检查完成（查看 out_found 判断是否存在）         *
- *   VERTHYS_ERR_INVALID — 参数错误（handle/out_found 为 NULL）            *
- *   VERTHYS_ERR_LOCKED  — 容器未解锁或应急熔断触发                       *
- *   VERTHYS_ERR_FORMAT  — v1 容器不支持摘要索引（out_found=0，前端回退）  *
- *                                                                    *
- * 线程安全：MT-Const（只读操作，与其他只读操作并发安全）               *
+ * 轻量级记录类型存在性检查（只查类型盲索引，不读数据块）
+ *
+ * 用途：快速判断容器中是否存在指定类型的记录，供启动阶段选择 UI 路径。
+ *
+ * 性能：只遍历类型盲索引，不访问记录段，不分配 name 堆内存；相比
+ * ScanSummaryOpen + Fetch 循环，消除多次 IPC 往返与结构体拷贝开销。
+ *
+ * 参数：
+ *   handle     : 已解锁的 Verthys 句柄
+ *   rtype      : 目标记录类型
+ *   out_found  : 输出，1=存在匹配类型的记录，0=不存在
+ *
+ * 返回值：
+ *   VERTHYS_OK          — 检查完成（查看 out_found 判断是否存在）
+ *   VERTHYS_ERR_INVALID — 参数错误（handle/out_found 为 NULL）
+ *   VERTHYS_ERR_LOCKED  — 容器未解锁或应急熔断触发
+ *   VERTHYS_ERR_FORMAT  — 非容器格式（out_found=0，调用方回退）
+ *
+ * 线程安全：MT-Const（只读操作，与其他只读操作并发安全）
  * ================================================================== */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_HasRecordByType(VerthysHandle handle,
                                               uint8_t rtype,
                                               uint8_t *out_found);
 
-/* ================================================================== *                                                                *
- * 设计目的：将"是否存在全局密钥记录 + 获取 lid"下沉到 worker 的        *
- * verthys_unlock 处理器内进程内执行，结果内联到 unlock 响应，            *
- * 彻底消除 unlock 后 probe IPC 链（verthysHasRecordByType →              *
- * findLidByTypeEarlyStop → verthysGetRecord）及其导致的 UI 卡死。        *
- *                                                                    *
- * 参数：                                                              *
- *   handle     : 已解锁的 Verthys 句柄                                  *
- *   rtype      : 目标记录类型（如 0x10 = TYPE_GLOBAL_KEY）             *
- *   out_found  : 输出，1=存在匹配类型的记录，0=不存在                   *
- *   out_lid    : 输出，匹配记录的逻辑 ID（found=1 时有效）             *
- *                                                                    *
- * 返回值：                                                            *
- *   VERTHYS_OK          — 检查完成（查看 out_found 判断是否存在）         *
- *   VERTHYS_ERR_INVALID — 参数错误（handle/out_found/out_lid 为 NULL）   *
- *   VERTHYS_ERR_LOCKED  — 容器未解锁或应急熔断触发                       *
- *                                                                    *
- * 注意：v1 容器返回 VERTHYS_OK + out_found（绝不返回 VERTHYS_ERR_FORMAT）， *
- *       这是 v1 假阴性 bug 的根治点。                                 *
- *                                                                    *
- * 线程安全：MT-Const（只读操作，与其他只读操作并发安全）               *
+/* ================================================================== *
+ * 按类型查找首条记录的逻辑 ID
+ *
+ * 与 Verthys_HasRecordByType 的差异：单次遍历同时返回 found 标志与匹配
+ * 记录的 lid，轻量探测、无解密 IO。未找到返回 VERTHYS_OK + out_found=0；
+ * 非容器格式返回 VERTHYS_ERR_FORMAT。
+ *
+ * 参数：
+ *   handle     : 已解锁的 Verthys 句柄
+ *   rtype      : 目标记录类型
+ *   out_found  : 输出，1=存在匹配类型的记录，0=不存在
+ *   out_lid    : 输出，匹配记录的逻辑 ID（found=1 时有效）
+ *
+ * 返回值：
+ *   VERTHYS_OK          — 检查完成（查看 out_found 判断是否存在）
+ *   VERTHYS_ERR_INVALID — 参数错误（handle/out_found/out_lid 为 NULL）
+ *   VERTHYS_ERR_LOCKED  — 容器未解锁或应急熔断触发
+ *
+ * 线程安全：MT-Const（只读操作，与其他只读操作并发安全）
  * ================================================================== */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_FindFirstLidByType(VerthysHandle handle,
                                                   uint8_t rtype,
@@ -1137,14 +1123,14 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ListIdsByType(VerthysHandle handl
 /* ================================================================== *
  * 运行时性能诊断数据获取接口
  *
- * 读取容器运行过程中缓存、耗时、GC、事务等全量性能指标，用于后台监控与问题定位。
+ * 读取容器运行期实际采集的诊断指标，用于后台监控与问题定位。
  * 线程安全：MT-Const
  * ================================================================== */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetDiagnostics(VerthysHandle handle,
                                   VerthysDiagnostics *out_diag);
 
 /* ================================================================== *
- * 历史扩展（API 版本 0x000B）：
+ * （API 版本 0x000B）：
  * 动态防护状态查询接口
  *
  * 防御攻击路径枚举（7 项）。
@@ -1262,7 +1248,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_NotifyRuntimeGuards(uint32_t flag
  * 落盘持久化自查接口（API 版本 0x000C）
  *
  * 背景：Windows 字节范围锁为强制锁——会话期内 C 层以独占方式
- * 持有超级块区 [0,64KB) 锁。同进程内只有持锁句柄本身可自由读写该
+ * 持有容器元数据区 [0,64KB) 锁。同进程内只有持锁句柄本身可自由读写该
  * 区间，任何"外部新开句柄"（含 Tauri 主进程 std::fs::File::open）
  * 读取该区间都会得到 ERROR_LOCK_VIOLATION。因此落盘校验必须由
  * 持锁进程用持锁句柄自查，不能经外部读路径实现。
@@ -1282,7 +1268,7 @@ typedef enum {
     VERTHYS_PERSIST_OK               = 0,  /* 结构完整，落盘有效 */
     VERTHYS_PERSIST_E_HEADER_INVALID = 1,  /* 头部结构校验失败（帧头/长度非法） */
     VERTHYS_PERSIST_E_SIZE_MISMATCH  = 2,  /* 文件大小低于合法容器下限 */
-    VERTHYS_PERSIST_E_WAL_REGION     = 3,  /* WAL 区不可读 */
+    VERTHYS_PERSIST_E_WAL_REGION     = 3,  /* 保留状态码（无 WAL 区，当前不产生） */
     VERTHYS_PERSIST_E_IO             = 4,  /* 文件读写 IO 异常 */
     VERTHYS_PERSIST_E_INTERNAL       = 5   /* 无可用会话上下文/内部错误 */
 } VerPersistStatus;
@@ -1301,7 +1287,7 @@ typedef struct {
 /*
  * 校验当前会话持锁句柄对应的磁盘持久化结构。
  *
- *   handle     : 已解锁的 Verthys 句柄（内部读取 会话 DataRoot）
+ *   handle     : 已解锁的 Verthys 句柄（内部读取会话 DataRoot）
  *   out_result : 输出结果载体（必填，NULL 直接返回 INTERNAL）
  *
  * 返回值：VerPersistStatus（同时写入 out_result->status）。

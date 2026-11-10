@@ -9,18 +9,18 @@
  *   - 提供 Drop 时自动擦除堆内存的 String 包装类型
  *
  * 安全擦除：
- *   原 state.rs 中 secure_zero_records 用 ptr::write_bytes 覆写 String 内部缓冲，
- *   属于未定义行为（UB）：String 的堆布局由分配器管理，直接覆写后 Drop 会
- *   向分配器报告错误的布局/长度，可能触发 double-free / heap corruption。
+ *   不得用 ptr::write_bytes 覆写 String 内部缓冲：String 的堆布局由分配器管理，
+ *   直接覆写后 Drop 会向分配器报告错误的布局/长度，属于未定义行为（UB），
+ *   可能触发 double-free / heap corruption。
  *
- *   修复：VerthysRecordEntry.name / data 与 VerthysSummaryEntry.name / merkle_leaf
- *   改为 SecuredString（Zeroizing<String>）。Drop 时由 Zeroize trait 通过
+ *   VerthysRecordEntry.name / data 与 VerthysSummaryEntry.name / merkle_leaf
+ *   统一使用 SecuredString（Zeroizing<String>）。Drop 时由 Zeroize trait 通过
  *   String::zeroize() 先以 volatile 写零覆盖堆字节再 clear()，无 UB。
- *   所有显式擦除通过 Zeroize trait 调用，删 ptr::write_bytes。
+ *   所有显式擦除通过 Zeroize trait 调用，禁用手写缓冲覆写。
  *
  * 透明 serde（前端契约无感）：
  *   SecuredString 序列化为普通 JSON 字符串，反序列化从 JSON 字符串构造。
- *   前端 verthys.ts 类型不变（仍是 string），迁移零成本。
+ *   前端契约不变：仍序列化为普通 string。
  *
  * CI 红线：
  *   - 本文件不输出 log::* 调用（不泄露字符串内容）
@@ -42,7 +42,7 @@ use zeroize::{Zeroize, Zeroizing};
 ///   - 实现 `Zeroize` trait 供泛型 `ScanRecord: Zeroize` 约束使用
 ///
 /// 用于 VerthysRecordEntry.name / data 与 VerthysSummaryEntry.name / merkle_leaf 字段，
-/// 替代裸 String，消除 secure_zero_records 中 ptr::write_bytes 对 String 的 UB 覆写。
+/// 不得换回裸 String：裸 String 无法在 Drop 时零化擦除，而手写缓冲覆写属于 UB。
 ///
 /// 注意：不 derive Hash（Zeroizing<String> 未实现 Hash）。
 #[derive(Default, Clone, PartialEq, Eq, TS)]

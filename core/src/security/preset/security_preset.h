@@ -44,7 +44,7 @@ typedef struct {
     uint8_t anti_debug_aggressive; /* 高安全档：检测到即零化退出 */
     uint8_t memory_lock;           /* VirtualLock 锁页 */
     uint8_t anti_dump;             /* 防内存转储与句柄巡检 */
-    uint8_t anti_inject;           /* 防注入 + 模块白名单 */
+    uint8_t anti_inject;           /* 防注入 + 模块信任巡检 */
 
     /* 应用侧策略位（跨层特性契约；宿主按位执行，C 层不消费） */
     uint32_t app_features;

@@ -646,8 +646,8 @@ export class PhotoWorkerPool {
     if (this.slots.length > 0 && this.slots.every((s) => s.terminated)) {
       // 全部槽位永久失效：在位任务已由崩溃路径逐任务收敛（重投或判毒丸）。
       // 此处必须立即自愈并继续调度——在队任务若无人触发调度将永久悬挂；
-      // 历史实现改为 drainAll 拒绝全部任务并把池钉死为永久失效，使一次
-      // 崩溃风暴后「导入照片」在本次会话内彻底不可用（须重启应用）。
+      // 不能以 drainAll 拒绝全部任务并钉死池：一次崩溃风暴后「导入照片」
+      // 将在本次会话内彻底不可用（须重启应用）。
       log.warn("全部槽位永久失效，触发池自愈重建");
       this.reviveExhaustedPool();
       this.dispatchNextTask();
@@ -875,10 +875,10 @@ export class PhotoWorkerPool {
    * 并发提交会在 await 恢复间隙同时通过检查，导致 pending 超出上限。
    * 预占后任何提前失败路径必须经 releaseAdmission() 归还配额。
    *
-   * 池自愈：全部槽位永久失效时废弃旧槽位（下次调度冷启动新 Worker）。历史实现
-   * 在提交时直接抛 PoolExhaustedError，使一次崩溃风暴后导入功能在本次会话内
-   * 永久不可用；自愈后新 Worker 为全新实例，任务级尝试上限仍然生效，不引入
-   * 无限重试。二次终止检查收敛"等待背压期间池被终止"的竞态。
+   * 池自愈：全部槽位永久失效时废弃旧槽位（下次调度冷启动新 Worker），
+   * 避免崩溃风暴后导入功能在本次会话内永久不可用。新 Worker 为全新实例，
+   * 任务级尝试上限仍然生效，不引入无限重试。二次终止检查收敛"等待背压
+   * 期间池被终止"的竞态。
    */
   private async awaitAdmission(): Promise<void> {
     if (this.terminated) {

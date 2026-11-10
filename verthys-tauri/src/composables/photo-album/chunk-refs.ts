@@ -57,7 +57,7 @@ export async function resolveChunkSet(
 export interface ChunkRefs {
   /** 逐块记录 ID（需按序取记录；内联密文形态为空数组） */
   ids: number[];
-  /** 逐块密文哈希（完整性校验权威值；缺失时为空数组，由调用方现场补算） */
+  /** 逐块密文哈希（诊断值；密钥轮换后可能失配，整图明文哈希才是权威值） */
   hashes: string[];
   /** 内联逐块密文 base64（非空时无需按 ID 取记录） */
   inlineCipher: string[];

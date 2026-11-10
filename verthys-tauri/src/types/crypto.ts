@@ -24,11 +24,14 @@ export interface PhotoMeta {
   size: number;
   /** 缩略图 base64（JPEG 0.85 质量）；索引瘦身布局下为空串（缩略图在独立记录） */
   thumbB64: string;
-  /** 旧格式：数据块在 verthys 中的记录 ID（向后兼容） */
+  /** 块引用：数据块在 verthys 中的记录 ID（旧格式密文使用） */
   chunkIds: number[];
-  /** 新格式：内联存储加密 chunk 数据（base64），避免 ID 漂移导致数据丢失 */
+  /** 内联存储：加密 chunk 数据（base64），避免 ID 漂移导致数据丢失 */
   chunkDataB64?: string[];
-  /** 各加密块密文的 BLAKE3 hex（与 chunkDataB64 顺序一致，容器导出与完整性校验用） */
+  /**
+   * 各加密块密文的 BLAKE3 hex（与 chunkDataB64 顺序一致）。
+   * 仅作诊断：模块密钥轮换会换封密文并使其合法失配；内容权威值是 fileHash。
+   */
   chunkHashes?: string[];
   /** 非内容续传条目键（可选；不参与内容寻址，仅用于 WAL 幂等） */
   entryKey?: string;
@@ -56,15 +59,15 @@ export interface PhotoMeta {
 }
 
 /* ------------------------------------------------------------------ *
- * .venc v2 容器类型                                                    *
+ * 可移植备份容器类型                                                  *
  *                                                                    *
  * 自描述信封 + 内容密钥封装 + 逐帧 AEAD：                              *
- *   - LightMeta：容器内的轻量头（明文结构，经内容密钥逐帧加密传输），  *
- *     不含内联块负载，块负载以独立 Chunk 帧承载                        *
- *   - VencPhotoSpec：单张照片在容器内的轻量头 + 块帧字节              *
+ *   - LightMeta：容器内的清单（明文结构，经内容密钥逐帧加密传输），    *
+ *     不携带任何模块密钥或布局信息                                    *
+ *   - VencPhotoSpec：单张照片的清单 + 原始明文块字节                   *
  * ------------------------------------------------------------------ */
 
-/** 容器内的轻量元数据头（明文结构）：与本地存储 PhotoMeta 的分体投影 */
+/** 容器内的清单（明文结构）：与本地存储 PhotoMeta 的分体投影 */
 export interface LightMeta {
   /** 原始文件名 */
   name: string;
@@ -72,24 +75,22 @@ export interface LightMeta {
   mime: string;
   /** 文件字节数 */
   size: number;
-  /** 缩略图 base64（JPEG 0.85 质量） */
+  /** 缩略图 base64（JPEG 0.85 质量）；可为空串 */
   thumbB64: string;
-  /** BLAKE3 文件哈希（hex 编码） */
+  /** BLAKE3 文件哈希（hex 编码，完整明文） */
   fileHash: string;
   /** 创建时间戳（毫秒） */
   createdAt: number;
   /** 数据块总数 */
   chunkCount: number;
-  /** 各加密块密文的 BLAKE3 hex（顺序与块帧一致，逐块完整性校验用） */
-  chunkHashes: string[];
-  /**
-   * 来源布局标记（缺省 = 既有布局）。
-   * 接收端据此按同一布局分流：块帧密文的构造方式由来源决定，
-   * 缺少来源密钥时无法重写，保留布局是数据保真的前提。
-   */
-  fmt?: number;
-  /** 索引瘦身布局：包裹态文件密钥（接收端解块与可导入性预检用） */
-  wrappedFileKey?: string;
+}
+
+/** 单张照片的容器数据：清单 + 原始明文块字节 */
+export interface VencPhotoSpec {
+  /** 容器清单（明文） */
+  lightMeta: LightMeta;
+  /** 原始明文块（每块对应一个块帧负载） */
+  chunkBytes: Uint8Array[];
 }
 
 /** 块集记录载荷（解密后）：逐块记录 ID 与逐块密文哈希，按序一一对应 */
@@ -98,12 +99,4 @@ export interface SlimChunkSet {
   ids: number[];
   /** 各块密文的 BLAKE3 hex（顺序与 ids 一致） */
   hashes: string[];
-}
-
-/** 单张照片的容器数据：轻量头 + 已加密的块密文字节（保持导出端模块密钥加密态） */
-export interface VencPhotoSpec {
-  /** 轻量元数据头（明文） */
-  lightMeta: LightMeta;
-  /** 加密块密文字节（每块对应一个 Chunk 帧负载） */
-  chunkBytes: Uint8Array[];
 }

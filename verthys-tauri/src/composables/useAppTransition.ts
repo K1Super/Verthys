@@ -4,17 +4,18 @@
  * 职责：
  *   - 管理 entered / mainPrewarmed / phase 三态
  *   - 编排 onEnter 转场（渡越 → 双缓冲预挂载 → 页面交接 → 星河流动）
+ *   - 直接进入路径（每次开机仅首映一次）：跳过渡越，主界面就绪后短淡入
  *   - 统一调度 setTimeout 并在卸载时清理
  *
- *   双缓冲预挂载（「突然跳转」根治）：
- *   旧实现交接帧（v-if 切换）同一帧内同步执行 UnlockView 整树卸载 +
- *   MainView 巨树挂载（组件构建 / 首次布局 / composable 初始化）+
- *   双全屏 blur 滤镜启动 → 主线程停帧 → 星系渡越冻结跳越 +
- *   MainView 跳过淡入前段直接出现 = 用户感知的突兀跳变。
- *   chunk 预取只解决「加载解析」，未解决「挂载布局」。
- *   根治 = 预挂载双缓冲：MainView 提前挂载进 prewarm 冻结层
+ *   双缓冲预挂载（消除页面交接时的「突然跳转」）：
+ *   v-if 交接会在同一帧内同步执行 UnlockView 整树卸载 + MainView 巨树挂载
+ *   （组件构建 / 首次布局 / composable 初始化）+ 双全屏 blur 滤镜启动 →
+ *   主线程停帧 → 星系渡越冻结跳越 + MainView 跳过淡入前段直接出现 =
+ *   用户感知的突兀跳变。chunk 预取只解决「加载解析」，未解决「挂载布局」。
+ *   预挂载双缓冲：MainView 提前挂载进 prewarm 冻结层
  *   （visibility:hidden + 动画 paused + pointer-events:none），
  *   挂载尖峰在蓄能平缓段消化，交接帧只剩一次 class 切换。
+ *   直接进入复用同一冻结层：主界面分包与首帧就绪后再解除冻结。
  */
 
 import { ref, onBeforeUnmount, type Ref } from "vue";
@@ -82,6 +83,23 @@ export function useAppTransition(reducedMotion?: Ref<boolean>) {
     }, reduced ? TRANSITION_REDUCED.GALAXY_PHASE : TRANSITION.GALAXY_PHASE);
   };
 
+  /**
+   * 直接进入：跳过首映，把主界面挂进冻结层并切到主界面取景位。
+   *
+   * 调用时机：根组件 setup 内、首次渲染之前 —— 与首映共用同一套隐藏
+   * 预挂载机制，只把解除冻结的时机从渡越编排改为“分包与首帧就绪”。
+   */
+  const prepareDirect = (): void => {
+    clearAllTimers();
+    phase.value = "galaxy";
+    mainPrewarmed.value = true;
+  };
+
+  /** 直接进入：主界面分包与首帧就绪后解除冻结（短淡入由样式层承担） */
+  const revealDirect = (): void => {
+    entered.value = true;
+  };
+
   onBeforeUnmount(() => {
     clearAllTimers();
   });
@@ -91,5 +109,7 @@ export function useAppTransition(reducedMotion?: Ref<boolean>) {
     mainPrewarmed,
     phase,
     onEnter,
+    prepareDirect,
+    revealDirect,
   };
 }

@@ -7,13 +7,13 @@
  *   verthys_scan_close → 取消预取、安全擦除、关闭游标
  *   （打开新扫描时内部发 scan_abort 回滚旧游标，见 open 流程注释）
  *
- * 状态层变更要点：
- *   - LockedBuffer RAII 替代 virtual_lock/unlock + secure_zero 自由函数
- *   - PrefetchTaskHandle 长期任务 + mpsc + CancellationToken 替代 spawn_blocking + abort
- *   - state.lock_scan_state() 替代 state.scan_state.lock().unwrap_or_else(...)
- *   - ScanPipelineState<T> 替代 ScanState / ScanSummaryState
+ * 状态层要点：
+ *   - LockedBuffer RAII 负责缓冲区锁定与擦除
+ *   - PrefetchTaskHandle 长期任务 + mpsc + CancellationToken 管理后台预取
+ *   - state.lock_scan_state() 处理扫描状态锁中毒
+ *   - ScanPipelineState<T> 统一承载全量与摘要扫描状态
  *
- * 扫描流程变更要点：
+ * 扫描流程要点：
  *   - CancellationToken + scan_abort 回滚游标；scan_close 触发 cancel + 等待退出
  *   - 擦除顺序由 LockedBuffer Drop 保证（先 zeroize while VirtualLock'd → 再 VirtualUnlock）
  *   - ScanSessionState 状态机（Active/Failed/Closed），操作经状态转移
@@ -217,7 +217,7 @@ fn gen_shm_batch_key() -> (zeroize::Zeroizing<[u8; 32]>, String) {
 ///
 /// project / inline_max_bytes 为扫描投影参数（可选，缺省 = FULL 全量解密）：
 /// 索引/列表类调用传 project="index" 与内联阈值，超过阈值的记录只回索引
-/// 条目（不解密、不搬运数据），大批量数据集的扫描因此不再整批失败。
+/// 条目（不解密、不搬运数据），避免大批量数据集的扫描整批失败。
 #[tauri::command]
 pub async fn verthys_scan_open(
     app: tauri::AppHandle,
@@ -434,7 +434,7 @@ pub async fn verthys_scan_next(
     }
 
     // 3. Drop 旧 current_buffer（LockedBuffer Drop: 先 zeroize 后 VirtualUnlock）
-    // RAII 保证擦除顺序，替代 virtual_unlock + secure_zero
+    // RAII 保证擦除顺序
     scan.current_buffer.take();
 
     let shm_name = scan.shm_name.clone();
@@ -1009,7 +1009,7 @@ pub async fn verthys_scan_summary_close(
 }
 
 /* ------------------------------------------------------------------ *
- * 命令：verthys_list_ids_by_type（API 0x0012）                          *
+ * 命令：verthys_list_ids_by_type                                     *
  *                                                                    *
  * 权威类型 ID 来源：类型盲索引，不读记录密文。前端按类型加载列表时  *
  * 必须使用本命令，不得依赖摘要扫描的 type（摘要恒为未知 0）。       *

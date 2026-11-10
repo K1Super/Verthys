@@ -1,9 +1,6 @@
 /*
  * middleware/context.rs — 进程级上下文容器
  *
- *    "入口文件单一职责约束"
- *             "标准化日志分层输出规范"（注入式传递）
- *
  * 设计原则：
  *   - Context 在入口层创建，持有日志管道发送端、全局配置等横切关注点
  *   - 通过构造函数参数或方法参数逐层注入至控制器、服务、工具
@@ -111,7 +108,7 @@ impl Default for StartupConfig {
     }
 }
 
-/// 日志级别（强类型，替代字符串配置）
+/// 日志级别（强类型）
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LogLevel {
     Trace,
@@ -149,10 +146,9 @@ impl LogLevel {
     }
 }
 
-/// 兼容旧接口：上下文配置（键值对形式）
+/// 上下文配置（键值对形式）
 ///
-/// 保留 ContextConfig 作为 StartupConfig 的兼容包装，
-/// 后续统一迁移至 StartupConfig。
+/// ContextConfig 是 StartupConfig 的兼容包装。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ContextConfig {
     /// 加密库路径
@@ -164,7 +160,7 @@ pub struct ContextConfig {
 }
 
 impl ContextConfig {
-    /// 从 StartupConfig 构造 ContextConfig（兼容旧调用点）
+    /// 从 StartupConfig 构造 ContextConfig
     pub fn from_startup(config: &StartupConfig) -> Self {
         ContextConfig {
             verthys_path: config

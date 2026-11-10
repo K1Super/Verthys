@@ -6,7 +6,7 @@
  *   机制：任何 transform（位移或缩放）或 filter（模糊）都会把该层提升为合成层，
  *   合成层使用灰度抗锯齿；动画结束、transform 归零回落主层时字形重新子像素化 ——
  *   观感即"忽然模糊、随即变清晰"。故承载文字的入场动画一律只走 opacity；
- *   确需运动感时，把位移/缩放交给不承载文字的装饰层（见 cosmic-tip 的光晕层）。
+ *   确需运动感时，把位移/缩放交给不承载文字的装饰层（如 cosmic-tip 的光晕层）。
  *
  * 维护约定：新增承载文字的入场动画，必须在本文件的登记表中补一行；
  *   新增承载文字的揭示/过渡规则（非关键帧形态，如 hover 揭示标签），
@@ -58,7 +58,7 @@ const TEXT_BEARING_REVEALS: readonly { file: string; selector: string }[] = [
   /* 量子态势面板承载文字的静态层：不得自带 transform / filter ——
    * 缩放归装饰环（引擎逐帧写入），两层 DOM 与圆环、三个模块、三条连线
    * 同为零视差组（引擎不写任何层位移）。
-   * 注：模块节点已改为无文字（图标 + 刻度环），故本条只登记核心文字簇 */
+   * 注：模块节点为无文字形态（图标 + 刻度环），故本条只登记核心文字簇 */
   { file: "./security/qd-panel.css", selector: ".qd-core-cluster" },
   { file: "./security/qd-panel.css", selector: ".qd-core-text" },
   { file: "./security/qd-panel.css", selector: ".qd-core-label" },
@@ -66,6 +66,15 @@ const TEXT_BEARING_REVEALS: readonly { file: string; selector: string }[] = [
   /* 中枢离场：核心文字簇（承载文字）只走不透明度；
    * 圆环/卫星的内缩归画布与节点图标层（无文字） */
   { file: "./security/qd-panel.css", selector: ".security-center.module-switch-leave-active .qd-layer-near" },
+  /* 常驻状态轨的面板与轨体揭示：承载告知文字，只走不透明度 */
+  { file: "../components/common/feedback/StatusRail.vue", selector: ".sr-panel-enter-active" },
+  { file: "../components/common/feedback/StatusRail.vue", selector: ".sr-panel-leave-active" },
+  { file: "../components/common/feedback/StatusRail.vue", selector: ".sr-panel-enter-from" },
+  { file: "../components/common/feedback/StatusRail.vue", selector: ".sr-panel-leave-to" },
+  { file: "../components/common/feedback/StatusRail.vue", selector: ".sr-rail-enter-active" },
+  { file: "../components/common/feedback/StatusRail.vue", selector: ".sr-rail-leave-active" },
+  { file: "../components/common/feedback/StatusRail.vue", selector: ".sr-rail-enter-from" },
+  { file: "../components/common/feedback/StatusRail.vue", selector: ".sr-rail-leave-to" },
 ];
 
 /** 去注释：断言只针对声明本身 —— 注释里的措辞（如「严禁过渡 transform」）
@@ -196,9 +205,9 @@ describe("文字清晰度：入场动画只走 opacity", () => {
     expect(writes[0], "唯一的逐帧变换须作用于装饰环热区（.qd-node-orb）").toMatch(/orb/i);
     /* 零视差组（有意设计，圆环 + 三个模块 + 三条连线一体静态）：
      *  - 圆环整组恒绘于面板静态中心（吸积弧直接取 cx, cy）；
-     *  - 方位偏移量不得残留（nearOx / nearOy、midOx / midOy 均为历史遗留）；
+     *  - 方位偏移量不得出现（nearOx / nearOy、midOx / midOy）；
      *  - 三条连线起点 = 静态中心，终点 = 静态节点像素坐标；
-     *  - 三个模块节点所在 DOM 层无位移写入（引擎不再持有该层引用）。
+     *  - 三个模块节点所在 DOM 层无位移写入（引擎不持有该层引用）。
      * 圆环「背后」的氛围视差（Canvas 尘埃 / 数据碎片）不受本条约束。 */
     expect(src, "吸积弧须绘于静态中心").toMatch(/ctx\.arc\(cx, cy,/);
     expect(src, "不得残留 nearOx / nearOy").not.toMatch(/nearOx|nearOy/);

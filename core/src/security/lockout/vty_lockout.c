@@ -351,14 +351,17 @@ static void compute_mac(const uint8_t key[LK_KEY_BYTES],
     vty_secure_zero(msg, sizeof(msg));
 }
 
-/* 校验状态文件（magic/版本/MAC/见证/模块表）。 */
-static int verify_state(uint8_t buf[LK_TOTAL_BYTES])
+/* 校验状态文件（magic/版本/MAC/见证/模块表）。
+ * witness_missing 仅在“MAC/结构均有效、仅见证密钥被删除”时置 1：
+ * 这是唯一允许隔离重建的路径；MAC 篡改/跨机复制/指纹不符一律 fail-closed。 */
+static int verify_state(uint8_t buf[LK_TOTAL_BYTES], int *witness_missing)
 {
     uint8_t key[LK_KEY_BYTES];
     uint8_t mac[LK_MAC_BYTES];
     int rc = VTY_E_LOCKED;
     size_t i;
 
+    if (witness_missing != NULL) *witness_missing = 0;
     if (vty_get_u32(buf) != LK_MAGIC || vty_get_u32(buf + 4) != LK_VERSION) {
         return VTY_E_LOCKED;
     }
@@ -372,6 +375,14 @@ static int verify_state(uint8_t buf[LK_TOTAL_BYTES])
     if (buf[LK_WITNESS_OFFSET] >= VTY_TPM_WITNESS_SLOTS) goto out;
     if (vty_tpm_witness_verify(g_witness_id, buf[LK_WITNESS_OFFSET],
                                buf + LK_WITNESS_OFFSET + 1u) != VTY_OK) {
+        /* 仅当该见证域两槽均不存在时才视为“见证整体丢失”。
+         * 若另一槽仍在（状态回放/轮换中途），必须 fail-closed：旧状态
+         * 指向的槽被轮换删除，但当前槽仍存在，属于可检测的回放。 */
+        if (witness_missing != NULL &&
+            vty_tpm_witness_exists(g_witness_id, buf[LK_WITNESS_OFFSET]) == 0 &&
+            vty_tpm_witness_any(g_witness_id) == 0) {
+            *witness_missing = 1;
+        }
         goto out;
     }
     {
@@ -391,8 +402,49 @@ out:
     return (rc == VTY_OK) ? VTY_OK : VTY_E_LOCKED;
 }
 
-/* 读取并认证。状态缺失时：当前见证仍存在 → 按删除/回滚锁定；否则首次运行。 */
-static int load_authenticated(uint8_t buf[LK_TOTAL_BYTES], int *is_new)
+/* 状态无法验证且见证密钥确实不存在时，把旧状态移入隔离名后重建。
+ *
+ * 安全边界：仅在“见证缺失”时允许重建——TPM 清理/系统维护/测试回收都会
+ * 造成这种不可恢复的状态；若见证仍存在（指纹不符、MAC 篡改、文件删除），
+ * 仍由 load_authenticated 维持 fail-closed，避免通过复制/篡改重置计数。
+ * 隔离而非删除，便于事后取证。 */
+static int quarantine_state(void)
+{
+    wchar_t *w = NULL;
+    wchar_t *wq = NULL;
+    char qpath[1200];
+    DWORD err;
+    int rc = VTY_E_LOCKED;
+
+    if (!g_initialized) return VTY_E_POLICY;
+    if (strlen(g_state_path) + 48 >= sizeof(qpath)) return VTY_E_INVALID;
+    sprintf_s(qpath, sizeof(qpath), "%s.invalid%08lx%08lx", g_state_path,
+              (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount());
+    w = to_wide(g_state_path);
+    wq = to_wide(qpath);
+    if (w == NULL || wq == NULL) goto done;
+    if (MoveFileExW(w, wq, MOVEFILE_WRITE_THROUGH)) {
+        rc = VTY_OK;
+        goto done;
+    }
+    err = GetLastError();
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+        rc = VTY_OK;
+    }
+
+done:
+    if (w != NULL) free(w);
+    if (wq != NULL) free(wq);
+    return rc;
+}
+
+/* 读取并认证。
+ * allow_recover=0：纯查询，任何认证失败都返回 LOCKED，不产生副作用；
+ * allow_recover=1：认证入口（begin_attempt/record_failure）在“状态本体
+ * 可认证、仅见证整体丢失”时隔离旧状态并重建，避免 TPM 清理导致永久锁死。
+ * 状态缺失时：当前见证仍存在 → 按删除/回滚锁定；否则首次运行。 */
+static int load_authenticated_ex(uint8_t buf[LK_TOTAL_BYTES], int *is_new,
+                                 int allow_recover)
 {
     int missing = 0;
     int rc;
@@ -408,8 +460,24 @@ static int load_authenticated(uint8_t buf[LK_TOTAL_BYTES], int *is_new)
         return VTY_OK;
     }
     if (rc != VTY_OK) return VTY_E_LOCKED;
-    rc = verify_state(buf);
-    return (rc == VTY_OK) ? VTY_OK : VTY_E_LOCKED;
+    {
+        int witness_missing = 0;
+        rc = verify_state(buf, &witness_missing);
+        if (rc == VTY_OK) return VTY_OK;
+        /* 只有认证入口才允许隔离重建；纯查询保持无副作用并 fail-closed。 */
+        if (allow_recover && witness_missing && quarantine_state() == VTY_OK) {
+            memset(buf, 0, LK_TOTAL_BYTES);
+            *is_new = 1;
+            return VTY_OK;
+        }
+    }
+    return VTY_E_LOCKED;
+}
+
+/* 纯查询包装：check/remaining/failures 不改变状态。 */
+static int load_authenticated(uint8_t buf[LK_TOTAL_BYTES], int *is_new)
+{
+    return load_authenticated_ex(buf, is_new, 0);
 }
 
 static int store(uint8_t buf[LK_TOTAL_BYTES])
@@ -524,7 +592,7 @@ static int evaluate_library(int rate_limit)
 {
     uint8_t buf[LK_TOTAL_BYTES];
     int is_new = 0;
-    int rc = load_authenticated(buf, &is_new);
+    int rc = load_authenticated_ex(buf, &is_new, rate_limit);
     uint32_t remaining;
 
     if (rc != VTY_OK) return VTY_E_LOCKED;
@@ -582,7 +650,7 @@ int vty_lockout_record_failure(void)
     lock = lock_state();
     if (lock == NULL) return VTY_E_LOCKED;
 
-    rc = load_authenticated(buf, &is_new);
+    rc = load_authenticated_ex(buf, &is_new, 1);
     if (rc != VTY_OK) {
         unlock_state(lock);
         return VTY_E_LOCKED;
@@ -775,7 +843,7 @@ int vty_lockout_module_begin_attempt(const uint8_t vault_uuid[VTY_UUID_BYTES],
 
     if (vault_uuid == NULL || module_index >= 32u) return VTY_E_INVALID;
     if (ensure_witness_id() != VTY_OK) return VTY_E_MODULE_LOCKED;
-    if (load_authenticated(buf, &is_new) != VTY_OK) return VTY_E_MODULE_LOCKED;
+    if (load_authenticated_ex(buf, &is_new, 1) != VTY_OK) return VTY_E_MODULE_LOCKED;
     if (is_new) return VTY_OK;
     module_scope_id(vault_uuid, module_index, scope);
     idx = module_find(buf, scope);
@@ -821,7 +889,7 @@ int vty_lockout_module_record_failure(const uint8_t vault_uuid[VTY_UUID_BYTES],
     lock = lock_state();
     if (lock == NULL) return VTY_E_MODULE_LOCKED;
 
-    rc = load_authenticated(buf, &is_new);
+    rc = load_authenticated_ex(buf, &is_new, 1);
     if (rc != VTY_OK) {
         unlock_state(lock);
         return VTY_E_MODULE_LOCKED;
@@ -876,7 +944,7 @@ int vty_lockout_module_reset(const uint8_t vault_uuid[VTY_UUID_BYTES],
     lock = lock_state();
     if (lock == NULL) return VTY_E_MODULE_LOCKED;
 
-    rc = load_authenticated(buf, &is_new);
+    rc = load_authenticated_ex(buf, &is_new, 1);
     if (rc != VTY_OK) {
         unlock_state(lock);
         return VTY_E_MODULE_LOCKED;

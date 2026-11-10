@@ -3,9 +3,9 @@
 //! 异步 Actor 消灭锁与阻塞
 //!   - Actor 通过 tokio::sync::mpsc<Request> 接收请求（每请求携带 oneshot 回复通道）
 //!   - tokio::select! 同时等待：新请求 / stdout 可读 / 超时 / stderr 可读
-//!   - 所有管道操作单任务内串行，无锁（死锁根本不可能发生）
+//!   - 所有管道操作单任务内串行，不使用锁
 //!
-//! 异步超时替代轮询循环
+//! 异步超时与进度感知
 //!   - tokio::time::timeout 包裹 read_line()
 //!   - 进度感知超时用 select! 循环每条进度行重置超时
 //!
@@ -190,10 +190,9 @@ pub(crate) async fn actor_loop(
 
 /// 处理普通 IPC 请求
 ///
-/// tokio::time::timeout 包裹 read_line()，
-///   替代 PeekNamedPipe + thread::sleep(50ms) 轮询。
+/// tokio::time::timeout 包裹 read_line()，不轮询管道状态。
 /// 只读诊断，不清空句柄。
-/// 修复：跳过进度行，防止协议污染
+/// 跳过进度行，防止协议污染：
 ///   上一轮流式请求可能残留进度行；handle_send 必须跳过
 ///   Progress 通道的行，只返回真正的最终响应，否则响应解析失败。
 // 说明：IPC 管道操作所需的完整上下文（句柄/超时/存活标志），参数语义独立，
@@ -218,7 +217,7 @@ async fn handle_send(
     }
     signed.zeroize();
 
-    // 修复：使用 deadline 循环读取，跳过进度行
+    // 使用 deadline 循环读取，跳过进度行
     // 总超时不变（deadline 固定），每行读取使用剩余时间
     let deadline = Instant::now() + timeout;
 

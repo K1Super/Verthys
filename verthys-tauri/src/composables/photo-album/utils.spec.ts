@@ -1,7 +1,7 @@
 /**
  * utils.spec.ts — 拾光模块列表装载纯函数单元测试
  *
- * 覆盖三类此前导致用户可见缺陷的纯逻辑：
+ * 覆盖三类会导致用户可见缺陷的纯逻辑：
  *   - 缓存回灌必须保留"未解密 = 待解密"语义（否则缩略图永久空白）
  *   - 增量过滤必须与 ID 分配策略解耦（否则复用 ID 的新照片不出现）
  *   - 方向感知预取行窗口的边界与去重
@@ -10,6 +10,7 @@ import { describe, it, expect } from "vitest";
 import {
   rehydrateEntries, diffNewIds, stripMetaRecordPrefix, sortByMetaId, prefetchRowIndices,
   makeThumbBlobUrl, makeThumbCssValue, thumbUrlOf, revokeThumbUrl, toPhotoCacheEntries,
+  sanitizeFileName, uniqueFileName,
 } from "./utils";
 import type { PhotoEntry } from "./types";
 import type { PhotoMeta } from "../../lib/crypto";
@@ -188,6 +189,25 @@ describe("sortByMetaId", () => {
   it("无 metaId 的项排在末尾", () => {
     const sorted = sortByMetaId([{ id: 99, name: "demo", thumb: "", size: "", height: 0 }, placeholder(2)]);
     expect(sorted.map(e => e.metaId)).toEqual([2, undefined]);
+  });
+});
+
+describe("导出文件名净化与唯一化", () => {
+  it("路径分隔符与 Windows 非法字符被隔离，空名回退占位", () => {
+    expect(sanitizeFileName("a/b\\c:d*e?.jpg", 200)).toBe("a b c d e .jpg");
+    expect(sanitizeFileName("   ", 200)).toBe("photo");
+  });
+
+  it("Windows 设备名前置下划线，避免 CON/LPT1 等写盘失败", () => {
+    expect(sanitizeFileName("CON.venc", 200)).toBe("_CON.venc");
+    expect(sanitizeFileName("lpt1.jpg", 200)).toBe("_lpt1.jpg");
+    expect(sanitizeFileName("CONSOLE.jpg", 200)).toBe("CONSOLE.jpg");
+  });
+
+  it("批次内唯一化大小写不敏感，扩展名保持在末尾", () => {
+    const used = new Set<string>();
+    expect(uniqueFileName("A.jpg.venc", used)).toBe("A.jpg.venc");
+    expect(uniqueFileName("a.JPG.venc", used)).toBe("a.JPG_1.venc");
   });
 });
 

@@ -61,7 +61,7 @@
   pointer-events: none;
 }
 
-/* 主字体分区（用户裁定）：本分区内坐标、序号与状态一律使用项目主字体，
+/* 主字体分区：本分区内坐标、序号与状态一律使用项目主字体，
  * 仅标记分区生效；其余分区保留既有 mono 数据语义 */
 .sf-zone--main-font :is(.sf-ghost, .sf-coord, .sf-orbit-idx, .sf-orbit-status) {
   font-family: var(--font);
@@ -524,7 +524,7 @@
   transition: color 0.3s var(--ease);
 }
 .sf-orbit:hover .sf-orbit-idx { color: rgba(0, 212, 255, 0.82); }
-/* 双行标识：名称 + 状态读数（不再用竖标切分名称与状态） */
+/* 双行标识：名称 + 状态读数 */
 .sf-orbit-id {
   display: flex;
   flex-direction: column;
@@ -900,7 +900,7 @@
    星座氛围弧 — 四面板共享（单一来源）
    ============================================================
    仅保留 2 组关键帧；各面板只声明 --sf-spin-duration / --sf-spin-origin，
-   不再各自复制 keyframes。空闲/降级治理由 animation-play-state 与下方
+   不复制 keyframes。空闲/降级治理由 animation-play-state 与下方
    reduced-motion 规则统一接管。 */
 .sf-constellation-arc {
   fill: none;

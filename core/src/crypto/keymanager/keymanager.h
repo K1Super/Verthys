@@ -11,11 +11,12 @@
  * 记录级密钥：HKDF-Expand(DEK, "verthys/record-v1" || record_id) → 32B
  *             细粒度隔离，防批量解密；每条记录独立。
  *
- * 胡椒：编译进 DLL 的 32 字节常量，文件内 static，不存储、不导出、不通过任何
- *      函数返回。主密码遗忘即永久丢失，与“无后门”设计完全兼容。胡椒仅提升
- *      离线暴力破解成本（攻击者即便拿到 .verthys 与盐，仍需枚举 DLL 内胡椒）。
+ * 胡椒：32 字节应用级常量，由 pepper 模块托管（注入 / OS 托管 / 受控构建内嵌），
+ *      不存储、不导出、不通过任何函数返回。主密码遗忘即永久丢失，与“无后门”
+ *      设计完全兼容。胡椒仅提升离线暴力破解成本（攻击者即便拿到 .verthys 与
+ *      盐，仍需取得胡椒来源）。
  *
- * 深模块（codebase-design）：本模块对外仅暴露 5 个函数，隐藏胡椒常量、
+ * 深模块：本模块对外只暴露派生、包裹、解包接口，隐藏胡椒来源、
  * Argon2id 参数、HKDF info 标签、AEAD AD 等内部细节。
  */
 #ifndef VERTHYS_KEYMANAGER_H
@@ -44,7 +45,7 @@ int keymanager_derive_master(uint8_t master_key[VERTHYS_KEY_BYTES],
                              const uint8_t salt[VERTHYS_SALT_BYTES]);
 
 /* ===================================================================== *
- * 优化：完全参数化的主密钥派生                                    *
+ * 完全参数化的主密钥派生                                              *
  *                                                                    *
  * 与 keymanager_derive_master 相同，但 Argon2id 参数由调用方传入，      *
  * 支持从超级块读取实际参数（BALANCED 32MiB/2/1 / SECURE 64MiB/3/1）。   *
@@ -58,10 +59,10 @@ int keymanager_derive_master(uint8_t master_key[VERTHYS_KEY_BYTES],
  *   iters       : Argon2id 迭代次数，如 2                             *
  *   parallel    : Argon2id 并行度，如 1                               *
  *                                                                    *
- * 安全下限（OWASP 2023 推荐）：                                        *
- *   - mem_kib  >= 19 * 1024（19 MiB）                                *
- *   - iters    >= 2                                                  *
- *   - parallel >= 1                                                  *
+ * 参数区间（越界不调用 libsodium）：                                  *
+ *   - mem_kib  : 8 ≤ mem_kib ≤ 4 * 1024 * 1024（8 KiB–4 GiB）       *
+ *   - iters    : iters ≥ 1                                           *
+ *   - parallel : 1 ≤ parallel ≤ 64                                   *
  *                                                                    *
  * 返回 0 成功，非 0 失败。                                            *
  * ===================================================================== */

@@ -1,12 +1,11 @@
 <!--
-  ParticleBackground.vue — 偏轴旋涡星系 · 引力坠渡引擎
+  ParticleBackground.vue — 偏轴旋涡星系粒子背景
   层级：远景幕布星点 + 双臂旋涡银河盘（含核心棒）+ 近景偏置轨道尘埃
-  转场状态：启动逆渡 3s（intro：镜像弧线 + 反向缠绕，星系倒卷成型）
-            → ambient（引导页静旋）→ warping（正渡 5s：缠绕收紧 + 掠翼弧线）
-            → galaxy（主界面星系差速流转）
-  冲突编排：逆渡期间点击 → 强度沿抬升剖面续走（不回退）+ 方向以动量匹配换向曲线一次穿越零点后并入正渡剖面，符号积分恒连续
-  镜头微颤体系全量移除（加载期画面恒稳定 — 渡越动感全部由包络积分承担）
-  鼠标视差（渡越期间按包络压制）+ 噪点纹理
+  状态机：intro（启动逆渡 3s）→ ambient（引导页静旋）
+          → warping（正渡 5s）→ galaxy（主界面星系差速流转）
+  冲突编排：逆渡期间点击 → 强度沿抬升剖面续走 + 方向以动量匹配换向
+            曲线穿越零点后并入正渡剖面；缠绕角为符号积分，全程连续
+  视差：鼠标视差按渡越包络压制
 -->
 <template>
   <div class="cosmos">
@@ -14,70 +13,48 @@
     <div class="layer-base"></div>
 
     <!-- Three.js 粒子容器 -->
-    <div ref="container" class="layer-particles"></div>
+    <div
+      ref="container"
+      class="layer-particles"
+      :class="{ 'layer-particles--hidden': particlesHidden }"
+    ></div>
   </div>
 </template>
 
 <script setup lang="ts">
 /**
- * 引力坠渡引擎（偏轴旋涡星系 — 模块化架构）：
+ * 引力坠渡引擎（偏轴旋涡星系）：
  *
- * 架构重构要点（健壮性 / 可维护性）：
- *   - 渡越序列引擎抽离为纯数学状态机（composables/useTransitionEngine，
- *     零 THREE 依赖）— 时钟无条件单调推进 + 效果由 introDone 门控；
- *     微颤体系全量删除（envelopeShiver / SHIVER 常量 / introAlive）—
- *     加载期镜头高频抖动根除，画面恒稳定
- *   - onBeforeCompile 注入全面替换为自定义 ShaderMaterial（components/
- *     particleShaders.ts — 着色器全文显式声明，根除 three 内部 chunk
- *     模板耦合；uniform 引用显式保存，调试/调参路径完全显式）
- *   - 着色器参数全部具名（components/shaderParams.ts — 模板字符串注入，
- *     GLSL 内零魔法数字）；轨道层构建返回 OrbitLayer 接口（元组根除）
- *   - 显式资源登记释放：构建即登记（场景对象/几何/材质/纹理分册）→
- *     卸载逐类目 dispose — GPU 显存不归 JS 堆管，杜绝 scene=null 的
- *     GC 兜底假设
- *   - currentPhase 初始自 props.phase 同步（相位基线/相机 Z 随之初始化）
+ * 职责：构建三层粒子（远景幕布 / 银河盘 / 近景尘埃）、驱动渡越状态机、
+ * 落地相机与材质响应，并管理 GPU 资源生命周期。
  *
- * 旧范式根除清单（对应五大历史问题）：
- *   ✗ CPU 每帧遍历 4100 粒子写 buffer → ✓ 轨道参数预烘焙（aOrbit vec4），
- *     静止/渡越位置全部在顶点着色器内确定性求值，CPU 每帧仅写 3 个
- *     uniform，全生命周期零 buffer 上传
- *   ✗ 单一指数缓动 → ✓ 三段 smootherstep 复合包络（段内与段间 C2 连续：
- *     值/速度/加速度零跳变；物理场恒纯净 — 镜头层亦零微颤），
- *     轨道缠绕/收缩为包络的确定性函数（可逆：env
- *     归零即自动复位，无状态残留）
- *   ✗ 粒子硬重置闪现 → ✓ 无环绕无重置：渡越 = 半径收缩 + 角度缠绕
- *     （引力井收紧），内圈粒子 smoothstep 淡入核心（引力吞没），
- *     env 归零全部粒子沿轨道精确归位 —— 零闪现零跳变
- *   ✗ 无噪声扰动 → ✓ 双频复合正弦扰动（当前轨道角驱动 → 拖尾层噪声
- *     随弧线弯曲）+ 静止态逐粒子独立相位漂移
- *   ✗ 无分层差异 → ✓ 三层独立物理：银河盘（差速缠绕 + 半径收缩）、
- *     近景偏置轨道（大半径弧线掠过 + 强噪声）、远景幕布（收缩 + 微漂）
- *   ✗ 盘面姿态随包络可逆滚转（消散段原路回退 = 正逆旋转）→ ✓ 姿态全程
- *     锁定（41° 斜视，旋臂完整可辨），渡越旋转全部由缠绕积分驱动
- *     （uSwirl = ∫env·dt 单调递增不回退，每帧写入本体+残影 uniform）
+ * 关键约束：
+ *   - 渡越序列由 useTransitionEngine 承载（纯数学状态机，零 THREE 依赖）：
+ *     时钟单调推进，效果由 introDone 门控，本组件只消费引擎结果
+ *   - 着色器全文声明于 particleShaders（自定义 ShaderMaterial，不注入
+ *     three 内部 chunk）；参数集中 shaderParams，GLSL 内无魔法数字
+ *   - 粒子位置全部在顶点着色器内按轨道参数（aOrbit：半径/初角/角速度/
+ *     高度）确定性求值；CPU 每帧仅写 uniform，全生命周期零 buffer 上传
+ *   - 时间双参数：进度时钟走墙钟（低档位不失速），物理积分走帧步进
+ *     （受主循环钳制）— 降档跳帧不产生累计误差
+ *   - 资源显式登记：场景对象与 GPU 资源（geometry/material/texture）构建
+ *     即登记，卸载逐类目 dispose；共享 geometry 仅登记一次（dispose 幂等）
+ *   - currentPhase 自 props.phase 初始化，相位基线与相机 Z 随之就位
  *
- * 反大众化设计（非"星轨推进"范式）：
- *   - 粒子运动全部是轨道角运动（θ 微分）+ 引力径向收缩，无 Z 轴直线冲刺
- *   - 盘面倾斜姿态（斜视椭圆透视，非正对中心放射）
- *   - 渡越拖尾 = 轨道弧线残影（同 geometry 多层绘制，uLag 相位滞后
- *     采样历史位置 → 弧形拖尾，非直线星轨）
- *   - 相机掠翼弧线：侧摆 + 前推 + 视线锚点滑向臂端（非直线推进）
- *   - 双臂非对称（缠绕度/散布/色相差异）+ 核心棒（中心厚边薄）
+ * 视觉与物理：
+ *   - 运动 = 轨道角运动 + 引力径向收缩（无 Z 轴直线冲刺）；拖尾 = 同
+ *     geometry 多层残影，uLag 相位滞后采样历史位置 → 弧形拖尾
+ *   - 渡越 = 半径收缩 + 角度缠绕 + 内圈淡入核心吞没；包络为三段
+ *     smootherstep（C2 连续，env 归零粒子沿轨道精确归位，无重置闪现）
+ *   - 盘面姿态全程锁定（41° 斜视），旋转感全部由单调缠绕积分承担
+ *     （uSwirl = ∫env·dt，序列内不回退）
+ *   - 双臂非镜像非对称（缠绕度/散布/色相差异）+ 核心棒（中心厚边薄）
+ *   - 相机：幅度分量驱动 Z 冲程与 FOV；方向分量（dirSmooth）驱动侧摆/
+ *     俯仰/lookAt — 正逆渡镜像，重叠换向期连续穿轴
+ *   - 渡越时长唯一权威源 = constants ENTER_T_MS，编排节点等比派生
  *
- * 方向性渡越序列（全屏样式双向复用 — 单一旋转权威源；引擎独立模块）：
- *   - 启动 0-3s 逆渡（intro）：与正渡同形的全屏样式（相机镜像弧线 + 抬升、
- *     反向缠绕、拖尾、FOV 拉伸、微颤）— 星系倒卷成型，累计约 -2.6 rad
- *   - 点击进入正渡（enter）5s：原引力坠渡全屏样式（时长 = constants
- *     ENTER_T_MS 唯一权威源，编排节点等比派生）；缠绕为包络积分，
- *     每帧速率剖面与 3s 标定一致，累计角度随 T 线性缩放（~+4.3 rad）
- *   - 缠绕角为符号积分（方向权重 · dt）— 角度恒连续；
- *     逆渡期间点击 → 强度以打断时刻幅度为起点沿抬升剖面单调升档、
- *     方向以动量匹配换向曲线穿越零点（无驻停）并入正渡剖面，无失力谷值无接缝顿挫
- *   - 相机方向分量（弧线侧摆/lookAt/俯仰）由 dirSmooth（阻尼符号权重）
- *     驱动：逆渡镜像掠翼 + 抬升，正渡原掠翼 + 俯冲，重叠期连续穿轴
- *
- * 保留架构：自适应抗锯齿（DPR≥1.5 关 MSAA）/ 统一帧门控（60/30/5/1fps）/
- * 失焦 deep-idle / 贴图烘焙 / 全部资源清理（升级为显式登记制）
+ * 保留能力：自适应抗锯齿（DPR≥1.5 关 MSAA）/ 统一帧门控（60/30/5/1fps）/
+ * 失焦 deep-idle / 贴图烘焙 / 双通道密度降级 / 显式资源释放
  */
 import { ref, onMounted, onBeforeUnmount, watch } from "vue";
 import * as THREE from "three";
@@ -118,6 +95,12 @@ const props = defineProps<{
   phase?: "ambient" | "warping" | "galaxy";
   /** 无障碍：偏好减少动态 — 跳过启动逆渡并停用正渡（无大幅运动） */
   reducedMotion?: boolean;
+  /** 直接进入：跳过启动逆渡，星系以主界面取景位直接驻留 */
+  skipIntro?: boolean;
+  /** 直接进入预挂载期：隐藏动态粒子层，只保留静态深空底。
+   *  Why：主界面尚未解除冻结时若星系已在运动，会先被读成开场动画，
+   *  随后主界面淡入形成视觉冲突；与主界面同步淡入即可消除。 */
+  particlesHidden?: boolean;
 }>();
 
 const container = ref<HTMLElement | null>(null);
@@ -125,10 +108,10 @@ let renderer: THREE.WebGLRenderer | null = null;
 let scene: THREE.Scene | null = null;
 let camera: THREE.PerspectiveCamera | null = null;
 
-/* 显式资源登记表（构建即登记 → 卸载逐类目释放）
+/* 显式资源登记表（构建即登记 → 卸载逐类目释放）：
  * GPU 侧资源（geometry/material/texture）不归 JS 堆管，必须显式 dispose；
- * 场景对象卸载时先逐个从 scene 移除 — 不再依赖 scene=null 的 GC 兜底假设。
- * 共享 geometry（本体+残影）仅登记一次（dispose 幂等，登记去重更明确） */
+ * 场景对象卸载时先逐个从 scene 移除，不依赖 GC 兜底。
+ * 共享 geometry（本体+残影）仅登记一次（dispose 幂等）。 */
 type GpuDisposable = THREE.BufferGeometry | THREE.Material | THREE.Texture;
 const sceneObjects: THREE.Object3D[] = [];
 const gpuDisposables: GpuDisposable[] = [];
@@ -137,7 +120,7 @@ const trackGpu = <T extends GpuDisposable>(d: T): T => {
   return d;
 };
 
-/* 监听器清理收敛为闭包变量（移除 `(el as any)._cleanup` DOM 挂载模式） */
+/* 监听器清理入口（挂载期赋值，卸载时调用 — 不挂载到 DOM 节点） */
 let cleanupListeners: (() => void) | null = null;
 
 /* ===== 渡越序列引擎（独立模块 — 唯一权威源，零 THREE 依赖） =====
@@ -145,6 +128,8 @@ let cleanupListeners: (() => void) | null = null;
  * 无障碍偏好下由引擎门控跳过逆渡并停用正渡 */
 const engine = useTransitionEngine();
 engine.setReducedMotion(props.reducedMotion ?? false);
+/* 直接进入：首帧渲染前跳过启动逆渡，暖机帧与首帧均保持静止姿态 */
+if (props.skipIntro) engine.skipIntro();
 watch(
   () => props.reducedMotion,
   (on) => engine.setReducedMotion(on ?? false),
@@ -167,7 +152,7 @@ const sharedWarp: SharedWarpUniforms = {
   uScale: uScaleUniform,
 };
 
-/* ===== 三层粒子系统（层记录对象化，元组返回根除） ===== */
+/* ===== 三层粒子系统（层记录对象化） ===== */
 /** 幕布层句柄：Points + 帧循环动画 uniform（尺寸/透明度） */
 let distantStars: THREE.Points | null = null;
 let curtain: { points: THREE.Points; uniforms: CurtainShaderUniforms } | null = null;
@@ -179,7 +164,7 @@ let orbitMembers: OrbitLayerMember[] = [];
 /** 残影成员扁平表（帧循环透明度响应） */
 let trailMembers: OrbitLayerMember[] = [];
 
-/** 包络的相机级阻尼副本（相机弧线/盘面倾转用它驱动，避免包络微颤直传） */
+/** 包络的相机级阻尼副本（相机弧线/盘面倾转用它驱动，避免包络突变直传） */
 let envSmooth = 0;
 /** 方向权重的阻尼副本（相机方向分量：侧摆侧/俯仰/lookAt — 与 envSmooth 分离） */
 let dirSmooth = 0;
@@ -188,17 +173,16 @@ let mouseX = 0;
 let mouseY = 0;
 let smoothMouseX = 0;
 let smoothMouseY = 0;
-/** 当前相位（初始自 props.phase 同步 — onMounted，守卫说明附于下方） */
+/** 当前相位（onMounted 时自 props.phase 同步） */
 let currentPhase: "ambient" | "warping" | "galaxy" = "ambient";
 let cameraZ = 880;
 let cameraFov = 60;
-/* 相位基线 Z 平滑值：galaxy 切换（TRANSITION.GALAXY_PHASE = 包络
- * x=5/6 派生，5s 正渡即 4167ms）时基线 880→760 瞬跳 120
- * units，旧实现直接改 target → cameraZ 速度阶跃（可感知顿挫）；
- * 现基线本身经 kCam 平滑，切换全程速度连续。 */
+/* 相位基线 Z 平滑值：galaxy 切换（TRANSITION.GALAXY_PHASE 派生，5s
+ * 正渡即 4167ms）时基线 880→760 瞬跳 120 units；基线本身经 kCam
+ * 平滑，cameraZ 速度连续，切换无顿挫。 */
 let phaseZ = 880;
-/* 相机基准位（纯平滑值）：微颤叠加其上但不进入平滑自回归
- * （若微颤混入自回归会逐帧残留 → 低频漂移 + 放大，镜头失稳） */
+/* 相机基准位（纯平滑值）：视差与运镜偏置在此累积，不混入高频扰动
+ * （混入会随自回归逐帧残留 → 低频漂移，镜头失稳） */
 let camBaseX = 0;
 let camBaseY = 0;
 
@@ -233,9 +217,9 @@ onMounted(() => {
   const w = el.clientWidth;
   const h = el.clientHeight;
 
-  /* 相位初始同步：currentPhase 自 props.phase 初始化（旧实现硬编码
-   * "ambient" — 若父组件挂载时 phase 已非 ambient，相位基线/相机 Z 全错），
-   * 相位基线 Z 与相机 Z 随之就位；后续变化由 watch 承接 */
+  /* 相位初始同步：currentPhase 自 props.phase 初始化 — 父组件挂载时
+   * phase 可能已非 ambient，直接取 ambient 会使相位基线与相机 Z 失配；
+   * 相位基线 Z 与相机 Z 随之就位，后续变化由 watch 承接 */
   currentPhase = props.phase ?? "ambient";
   /* 无障碍：跳过逆渡时直接取用主界面取景位 — 后续相位切换零运镜 */
   phaseZ = props.reducedMotion || currentPhase === "galaxy" ? 760 : 880;
@@ -256,18 +240,17 @@ onMounted(() => {
   if (opaqueCanvas) {
     renderer.setClearColor(0x0a0e1a, 1.0); // 深空色（不透明）
   } else {
-    renderer.setClearColor(0x000000, 0.0); // 回滚路径：透明画布
+    renderer.setClearColor(0x000000, 0.0); // 透明画布（perfFlags 关闭时）
   }
-  /* 深空径向渐变在模板层以 CSS 叠加（.particle-canvas::after），模拟原
-   * 透明画布下的背景深度——视觉等效，合成走不透明快速路径 */
+  /* 深空径向渐变在样式层叠加（.layer-particles::after）补回背景深度 —
+   * 与透明画布视觉等效，合成仍走不透明快速路径 */
   /* 点尺寸透视衰减标尺（等效 three 内部 scale=height×0.5 × size×pixelRatio） */
   uScaleUniform.value = h * 0.5 * renderer.getPixelRatio();
 
-  /* 启动频闪根治：canvas 延迟挂载 — 全部层构建完成后先预编译着色器
-   * 并暖机渲染一帧再挂载（衔接下方 buildOrbitLayer 全部完成处）。
-   * 旧序（频闪根因）：canvas 先挂载（透明空帧）→ 首帧 render 时同步
-   * 编译多个材质的着色器程序（WebView2 下卡顿数十至数百毫秒）→
-   * 多层粒子因编译完成先后不同逐帧浮现 = 启动频闪一下。 */
+  /* canvas 延迟挂载：全部层构建完成后先预编译着色器并暖机渲染一帧，
+   * 再挂载到 DOM。若先挂载，首帧 render 会同步编译多个材质程序
+   * （WebView2 下可达数十至数百毫秒），透明空帧后多层粒子按编译完成
+   * 先后逐帧浮现，形成启动频闪。 */
 
   /* ===== 圆形软光点纹理（避免方块状粒子） ===== */
   const makeParticleTexture = () => {
@@ -383,9 +366,7 @@ onMounted(() => {
         r0 = R_MIN + t * (R_MAX - R_MIN) + gauss() * (30 + t * 90);
         th0 = arm * Math.PI + armOff + t * wind * Math.PI * 2 + gauss() * (0.22 + t * 0.5);
         z0 = gauss() * (10 + (1 - t) * 16);
-        // 臂 A 偏青、臂 B 偏紫（色相分化），少量品红/白点缀
-        // 静息亮度二次提升：亮度分布 0.62-1.0 → 0.72-1.0（均值再
-        //   +7%，全状态生效 — 含渡越峰值，用户校正「还是太暗」）
+        // 臂 A 偏青、臂 B 偏紫（色相分化），少量品红/白点缀；亮度 0.72-1.0
         const rr = Math.random();
         if (rr < 0.02) c = colorMagenta.clone();
         else if (rr < 0.08) c = colorWhite.clone();
@@ -433,16 +414,16 @@ onMounted(() => {
     );
 
     /* 斜视姿态（椭圆透视）：X 倾 41°（-0.72 rad）— 旋臂结构完整可辨的
-     * 最佳斜视角（旧 -1.05/60° 过侧致星系画面不明显）；Y/Z 微扭非正对非正侧。
-     * 姿态全程锁定：渡越旋转感全部由缠绕积分（单调）承担 */
+     * 最佳斜视角；Y/Z 微扭，非正对非正侧。姿态全程锁定，渡越旋转感
+     * 全部由缠绕积分（单调）承担 */
     galaxyLayer.group.rotation.set(-0.72, 0.15, 0.12);
     scene.add(galaxyLayer.group);
     sceneObjects.push(galaxyLayer.group);
   }
 
   /* ===== 3. 近景尘埃（600 颗 — 偏置大半径轨道，渡越时弧线掠过相机） =====
-   * 范式根除：非 Z 轴直线冲刺，而是绕画面外偏置中心（-260,-90）的大半径
-   * 轨道差速运动 — 渡越时缠绕相位大（弧线横扫画面）+ 最强噪声扰动。
+   * 运动范式：绕画面外偏置中心（-260,-90）的大半径轨道差速运动（非 Z 轴
+   * 直线冲刺）— 渡越时缠绕相位大（弧线横扫画面）+ 最强噪声扰动。
    * 静止态：慢速漂浮旋转（ω 极小）+ 独立相位漂移（近景飞尘感） */
   {
     const count = CLOSE_LAYER.count;
@@ -558,15 +539,15 @@ onMounted(() => {
   };
   window.addEventListener("mousemove", onMouseMove);
 
-  /* ===== 动画循环（引力坠渡 — CPU 每帧仅更新 uniform/相机/材质参数） =====
+  /* ===== 动画循环（引力坠渡 — CPU 每帧仅更新 uniform / 相机 / 材质参数） =====
    * 档位：active 60fps / settling 30fps / idle 5fps / deep-idle 1fps；
-   * dt 由门控按真实帧距累积供给（跳帧不推进基准 → 物理时间连续）。
-   * 引擎侧 DT_CLAMP = 0.08s：保护渡越积分与平滑系数。
-   * 粒子轨道位置全部在顶点着色器求值（uTime/uWarp/uWarpDist/uSwirl 驱动），
-   * 全生命周期零 position buffer 上传 —— 长时间运行无性能衰减。
-   * CPU 每帧工作：引擎单步 + 3 个共享 uniform + 8 个轨道层 uSwirl（银河盘/
-   * 近景各本体+3 残影）+ 相机双向运镜 + ~10 个 uniform 参数（引擎内含
-   * 符号缠绕积分与历史缓冲）。转场经 watch(phase) → resetIdle 强制满帧。
+   * dt 由门控按真实帧距累积供给（跳帧不推进基准 → 物理时间连续），
+   * 引擎侧再以 DT_CLAMP 保护渡越积分与平滑系数。
+   * 粒子轨道位置全部在顶点着色器求值（uTime/uWarp/uWarpDist/uSwirl），
+   * 全生命周期零 position buffer 上传 — 长时间运行无性能衰减。
+   * CPU 每帧工作：引擎单步 + 3 个共享 uniform + 8 个轨道层 uSwirl（两层
+   * 各本体 + 3 残影）+ 相机运镜 + 约 10 个材质 uniform；转场经
+   * watch(phase) → resetIdle 强制满帧。
    * 页面隐藏/失焦：调度器置 deep-idle + rAF 天然停帧。 */
   const ENGINE_DT_CLAMP = 0.08;
   /* 幕布漂移基准角（rotation 改时间绝对式：f(t) 与帧率解耦，
@@ -714,9 +695,7 @@ onMounted(() => {
      *     方向分量（dirSmooth）：侧摆弧线（正渡 −120 掠左翼 / 逆渡 +120
      *       镜像掠右翼）+ 俯仰（正渡俯冲 −55 / 逆渡抬升 +55）+ lookAt
      *       锚点（正渡滑向臂端 / 逆渡滑向镜像侧）— 重叠换向期连续穿轴
-     *     加载微颤根除：镜头高频微颤（engine.shiver）全量移除 —
-     *       相机位置 = 纯平滑基准位（阻尼自回归收敛），启动/进入渡越
-     *       全程画面恒稳定，渡越动感全部由包络积分承担 --- */
+     *     相机位置仅由平滑基准位构成，渡越动感全部由包络积分承担 --- */
     phaseZ += ((currentPhase === "galaxy" ? 760 : 880) - phaseZ) * kFraming;
     const targetCameraZ = phaseZ - 330 * envSmooth;
     cameraZ += (targetCameraZ - cameraZ) * kFraming;
@@ -735,17 +714,14 @@ onMounted(() => {
       camera.updateProjectionMatrix();
     }
 
-    /* --- 5. 银河盘姿态：全程锁定（正逆旋转第二根因根除）
-     *     旧实现 X/Z 欧拉角随包络可逆滚转：蓄能/峰驻段转过去、消散段
-     *     原路转回来 = 视觉上的"正转后逆转"。现姿态恒定（构建时已定标），
-     *     仅保留极慢 Y 向漂摆（120s 级正弦，无方向感知）；
-     *     渡越的全部旋转感由符号缠绕积分承担（积分量，序列内绝不回退）。 --- */
+    /* --- 5. 银河盘姿态：全程锁定（构建时已定标），仅保留极慢 Y 向漂摆
+     *     （120s 级正弦，无方向感知）；渡越的全部旋转感由符号缠绕积分
+     *     承担（积分量，序列内绝不回退） --- */
     galaxyLayer.group.rotation.y = 0.15 + Math.sin(t * 0.04) * 0.015;
 
     /* --- 6. 分层材质响应（独立参数 = 空间纵深；uniform 写入） --- */
     // 银河盘本体：渡越尺寸增幅 + 色调偏冷青（加性混合自然过渡）
-    // 基线 5.0/1.0（静息亮度二次提升 — 峰值 6.2/1.0 恒定；历史：
-    // 4.0/0.95 仍偏暗，旧 2.2/0.7 在 880 距离下仅 ~1.25px）
+    // 基线 5.0/1.0（880 距离下保证静息亮度），渡越峰值 6.2/1.0
     /* 静态相：envSmooth 已收敛（<0.0005）时 env 联动 uniform
      *   恒为基线值——跳过写（值已在收敛期写入基线）；渡越期全量写。 */
     if (transitionActive) {
@@ -753,7 +729,7 @@ onMounted(() => {
       u.uSize.value = GALAXY_LAYER.size + envSmooth * GALAXY_LAYER.warpSizeGain;
       u.uOpacity.value = GALAXY_LAYER.opacity + envSmooth * GALAXY_LAYER.warpOpacityGain;
       u.uTint.value.setRGB(1 - envSmooth * 0.18, 1 - envSmooth * 0.02, 1 + envSmooth * 0.08);
-      // 残影拖尾：随包络增强（静息基底 0.55 — 暗相位残光再提升，峰值 1.0 不变）
+      // 残影拖尾：随包络增强（静息基底 0.55，渡越峰值 1.0）
       const trailVis = TRAIL_RESPONSE.base + TRAIL_RESPONSE.gain * envSmooth;
       for (const m of trailMembers) {
         m.uniforms.uOpacity.value = m.baseOpacity * trailVis;
@@ -788,15 +764,13 @@ onMounted(() => {
     }
   };
 
-  /* 启动频闪根治（承接 canvas 延迟挂载）：预编译全部着色器程序 +
-   * 暖机渲染一帧 → canvas 挂载即完整画面（零空帧、零逐层浮现）。
-   * 时间 uniform 以渲染域时钟（=0）为基准：暖机帧即 t=0 轨道
-   * 位置（逆渡 intro 包络(0)=0，相机位于基线），挂载后首帧 t=dt ——
-   * 粒子相位与逆渡起始连续无跳变。 */
-  /* 暖机帧材质参数同步（与首帧 t=0/env=0 求值逐参数一致）：
-   * 构建默认值 ≠ 帧循环初值（近景尘埃 opacity 0.5→0.4、残影拖尾
-   * ×0.32 骤降至约 1/3）— 暖机帧会先以构建值显示一帧再跳到帧循环值
-   * = 启动瞬间一次单帧亮度闪变。此处预写 t=0 帧值（uniform 写入）。 */
+  /* 预编译全部着色器程序 + 暖机渲染一帧，再挂载 canvas：挂载即完整
+   * 画面，零空帧、零逐层浮现。时间 uniform 以渲染域时钟（=0）为基准，
+   * 暖机帧即 t=0 轨道位置（intro 包络(0)=0，相机位于基线），挂载后
+   * 首帧 t=dt — 粒子相位与逆渡起始连续无跳变。 */
+  /* 暖机帧材质参数对齐首帧（t=0/env=0）求值：构建默认值与帧循环初值
+   * 不同（近景尘埃透明度、残影拖尾透明度），不预写会先显示一帧构建值
+   * 再跳到帧循环值，形成启动瞬间的单帧亮度闪变。 */
   if (closeLayer) {
     closeLayer.body.uniforms.uOpacity.value = CLOSE_BREATH.base;
   }
@@ -826,9 +800,9 @@ onMounted(() => {
   };
   window.addEventListener("resize", handleResize);
 
-  /* 监听器清理收敛为闭包变量（替代原 `(el as any)._cleanup` DOM 挂载，
-     不再绕过 Vue 类型系统，onBeforeUnmount 直接调用）。
-     失焦/隐藏暂停已由全局调度器（deep-idle）+ rAF 天然停帧承接，无本组件监听。 */
+  /* 监听器清理入口（卸载时直接调用，不挂载到 DOM 节点，不绕过 Vue
+   * 类型系统）。失焦/隐藏暂停已由全局调度器（deep-idle）+ rAF 天然
+   * 停帧承接，本组件无需监听。 */
   cleanupListeners = () => {
     stopGate();
     window.removeEventListener("mousemove", onMouseMove);
@@ -843,9 +817,8 @@ watch(
       currentPhase = newPhase;
       // 正渡触发：enter 时钟归零启动（蓄能 → 峰驻 → 消散全程重放）
       if (newPhase === "warping") {
-        /* 渡越序列冲突处理（启动逆渡期间点击）：引擎接管 — 冻结打断
-         * 锚点（复合强度改走抬升剖面，方向权重改走动量匹配换向曲线），
-         * 正渡时钟归零启动；缠绕角为积分量，全程无跳变 */
+        /* 渡越期间点击由引擎接管：强度改走抬升剖面，方向权重改走动量
+         * 匹配换向曲线；缠绕角为积分量，全程无跳变 */
         engine.triggerEnter();
       }
       resetIdle(); // 转场为交互信号：门控立即恢复满帧（渡越强制 60fps）
@@ -874,9 +847,9 @@ onBeforeUnmount(() => {
   frameBudgetMonitor.setParticleController(null);
 
   /* 显式资源释放（登记制）：场景对象逐个移除 + GPU 侧
-   * geometry/material/texture 逐类目 dispose — 不再依赖 scene=null 的
-   * GC 兜底假设（GPU 显存不归 JS 堆管，必须显式释放）。
-   * 轨道层本体+残影共享 geometry 仅登记一次（dispose 幂等 + 登记去重） */
+   * geometry/material/texture 逐类目 dispose — GPU 显存不归 JS 堆管，
+   * 不依赖 GC 兜底。轨道层本体+残影共享 geometry 仅登记一次（dispose
+   * 幂等）。 */
   if (scene) {
     for (const obj of sceneObjects) scene.remove(obj);
   }
@@ -931,15 +904,23 @@ onBeforeUnmount(() => {
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-/* 粒子容器 */
 .layer-particles {
   position: absolute;
   inset: 0;
   z-index: 1; /* 不透明画布层 */
+  /* 直接进入：预挂载期隐藏，解除冻结时与主界面同节奏平滑淡入 */
+  transition: opacity var(--dur-direct-enter, 1s) var(--ease);
+}
+.layer-particles--hidden {
+  opacity: 0;
+}
+/* 无障碍：减少动态 — 直接进入不做过场淡入 */
+:global(.reduce-motion) .layer-particles {
+  transition: none;
 }
 
-/* 深空径向渐变叠加——原透明画布下 layer-base 的背景深度，
- *   移到不透明画布之上（pointer-events 穿透，纯合成层） */
+/* 深空径向渐变叠加：在不透明画布之上补回背景深度
+ * （pointer-events 穿透，纯合成层） */
 .layer-particles::after {
   content: "";
   position: absolute;

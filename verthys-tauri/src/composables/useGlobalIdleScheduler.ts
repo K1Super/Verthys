@@ -2,7 +2,7 @@
  * useGlobalIdleScheduler — 全局空闲状态机（唯一权威源）
  *
  * =============================================================================
- * 【设计定位】第二轮空闲 CPU 治理核心基础设施
+ * 【设计定位】空闲 CPU 治理核心基础设施
  *
  * 四档空闲状态（由无交互时长驱动）：
  *   active    <3s      → 60fps，全部动画正常
@@ -16,7 +16,7 @@
  *   - 键盘事件（keydown）→ 立即 active（可达性语义要求即时满响应）
  *   - 页面隐藏（visibilitychange → hidden）→ 直接 deep-idle（rAF 天然停帧）
  *   - 窗口失焦（blur）→ deep-idle；重新聚焦（focus）→ active
- *     （保留原各引擎的 blur 暂停行为，收归唯一权威源统一管理）
+ *     （blur 暂停行为收归唯一权威源统一管理）
  *   - prefers-reduced-motion: reduce → 永久 idle（无障碍偏好，动画静止）
  *
  * 消费方：

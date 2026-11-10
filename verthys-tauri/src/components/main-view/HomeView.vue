@@ -8,7 +8,7 @@
   视差策略：本层内容（品牌/星图）不参与指针视差 — 深度感全部
     由 CosmicBackground 三层星场视差承担；内容层恒定静止保证
     品牌文字始终物理像素对齐（零亚像素栅格化 → 恒定锐利）。
- 统一入场编排（三元素同刻起笔、一笔书写 — 单一权威见 animations.css 编排段）：
+ 统一入场编排（三元素同刻起笔、一笔书写 — 单一权威在样式编排段）：
     品牌逐字凝聚（2D 平移 + 不透明度，递减加速扫掠）
     ‖ 谱线逐条自各自基线下升起（同通道同缓动）
     ‖ 副标显影（同通道同缓动）
@@ -52,7 +52,7 @@
         ></i>
       </div>
 
-      <p class="hub-sub" :style="{ '--sub-d': subDelay + 'ms' }">选择模块</p>
+      <p class="hub-sub" :style="{ '--sub-d': subDelay }">选择模块</p>
     </div>
   </div>
 </template>
@@ -74,9 +74,12 @@ const ticks = useSpectraTicks("echo");
 /* 三元素统一起笔时刻（单一权威 = TRANSITION.HUB_ENTRANCE_AT）：
  * 与整层浮现（materialize 组不透明度）的可辨度对齐，使入场动作全程
  * 落在整层已可辨的窗口内 —— 早于此刻动作会被整层淡入掩盖，观感为
- * 「直接出现」。品牌侧经 --hub-t0 注入 CSS；谱线/副标由各自数据派生。 */
-const hubT0 = TRANSITION.HUB_ENTRANCE_AT + "ms";
-const subDelay = TRANSITION.HUB_ENTRANCE_AT;
+ * 「直接出现」。品牌侧经 --hub-t0 注入 CSS；谱线/副标由各自数据派生。
+ * 直接进入路径由外层把 --home-entrance-delay 置 0：无 long-form 渡越时，
+ * 品牌/谱线/副标与整层淡入同刻起笔。 */
+const entranceDelay = `var(--home-entrance-delay, ${TRANSITION.HUB_ENTRANCE_AT}ms)`;
+const hubT0 = entranceDelay;
+const subDelay = entranceDelay;
 
 /* 视差策略：品牌区/星图静态锚定（无指针视差）— 深度感由
  * CosmicBackground 三层星场视差承担；内容层零位移 = 品牌文字

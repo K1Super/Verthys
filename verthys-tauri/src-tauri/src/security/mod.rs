@@ -7,11 +7,11 @@
  *   - file_lock:        独占锁与防并发 + 私有目录 ACL 隔离
  *   - usb_guard:        移动存储安全强化（DPAPI 持久化 + 加盐哈希 + 影子休眠）
  *   - module_whitelist: 模块白名单实时巡检（路径真实化 + 吊销检查 + 缓存）
- *   - cleanup:          程序痕迹、缓存与卸载残留防护（移除 Gutmann + TRIM）
+ *   - cleanup:          程序痕迹、缓存与卸载残留防护（1 遍全零覆写 + TRIM）
  *   - brute_force:      登录暴力拦截（DPAPI 持久化 + 不可逆计数 + 速率限制）
  *   - background_patrol:后台模块巡检线程（动态频率 + 看门狗 + 独立熔断
  *                       + 完整校验抽样复核）
- *   - clipboard_guard:  剪贴板保护升级（延迟清空 + 外部写入检测 + 统一入口）
+ *   - clipboard_guard:  剪贴板保护（延迟清空 + 外部写入检测 + 统一入口）
  *   - window_affinity:  窗口显示亲和性原语（原始取值读写 + OS 能力降级）
  *   - app_feature_gate: 应用侧档位特性位镜像（11 位契约，单写多读）
  *   - integrity_check:  程序自完整性签名核验（启动主镜像 + 巡检抽样口径）
@@ -19,7 +19,7 @@
  *   - command_names:    安全命令名登记
  *
  * 剪贴板清空实现要点：
- *   - 废弃"写入随机数据再清空"模式，直接调用 EmptyClipboard 清空剪贴板
+ *   - 直接调用 EmptyClipboard 清空剪贴板，不写入随机数据
  *   - 清空后广播 WM_DESTROYCLIPBOARD 通知系统清除云剪贴板缓存
  *   - 清空操作保持 CLIPBOARD_LOCK 串行化
  *   - 统一剪贴板操作入口，所有剪贴板相关操作均通过 clipboard_guard 模块暴露
@@ -82,14 +82,13 @@ pub fn harden_process_environment() {
  *  统一剪贴板清空入口                                *
  *                                                                        *
  *  clear_clipboard() 委托到 clipboard_guard::clear() 统一入口。           *
- *  移除了旧版"写入随机数据再清空"的自相矛盾逻辑。                         *
- *  向后兼容：保持 () -> bool 签名供现有调用方使用。                       *
+ *  保持 () -> bool 签名供现有调用方使用。                                 *
  * ====================================================================== */
 
-/// 清空剪贴板（向后兼容接口）
+/// 清空剪贴板
 ///
 /// 统一剪贴板清空入口：
-///   - 废弃"写入随机数据再清空"模式，改为直接清空并广播
+///   - 直接清空并广播，不写入随机数据
 ///   - 统一通过 clipboard_guard::clear() 实现
 ///   - 清空后广播 WM_DESTROYCLIPBOARD，强制系统清除云剪贴板缓存
 ///

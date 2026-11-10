@@ -1,14 +1,13 @@
 /*
  * particleShaders.ts — 粒子层自定义着色器材质工厂（幕布 / 轨道）
  *
- * 迁移到完整自定义 ShaderMaterial
- *   旧实现向 THREE.PointsMaterial 的内部 chunk（common/color_vertex/
- *   begin_vertex）做字符串替换注入 — 与 three 内部着色器模板强耦合，
- *   版本升级即脆弱。现以完整顶点/片元着色器字符串显式声明全部
- *   attribute/uniform，材质工厂持有全部引用 — 零模板依赖、零隐藏
- *   注入点，调试与调参路径完全显式。
+ * 使用完整自定义 ShaderMaterial：以完整顶点/片元着色器字符串显式声明
+ * 全部 attribute/uniform，材质工厂持有全部引用 — 零模板依赖、零隐藏
+ * 注入点，调试与调参路径完全显式。不得向 THREE.PointsMaterial 的内部
+ * chunk（common/color_vertex/begin_vertex）做字符串替换注入 —— 与 three
+ * 内部着色器模板强耦合，版本升级即脆弱。
  *
- * 顶点着色器数学（与旧注入逐项等价 — 语义零变化）：
+ * 顶点着色器数学：
  *   幕布层：差速推进 mod 环绕 + 边界消散 + 螺旋卷积 + 消失点收缩 +
  *           双频噪声 + 静止漂移（uWarp/uWarpDist 驱动，静止态恒等）
  *   轨道层：位置 = 轨道参数（aOrbit: r0/θ0/ω/z0）的确定性函数 —
@@ -148,12 +147,11 @@ void main() {
   /* 4) 静止态低强度连续漂移（逐粒子独立相位，杜绝机械静止） */
   oP.x += sin(oT * ${f(ORBIT_GLSL.idleFreqX)} + aSeed * ${f(ORBIT_GLSL.tau)}) * ${f(o.idleDrift)};
   oP.y += cos(oT * ${f(ORBIT_GLSL.idleFreqY)} + aSeed * ${f(ORBIT_GLSL.idlePhaseB)}) * ${f(o.idleDrift)} * ${f(ORBIT_GLSL.idleAmpRatio)};
-  /* 5) 核心吞没（星团消失根治）：内圈粒子随渡越 smoothstep 压暗
+  /* 5) 核心吞没：内圈粒子随渡越 smoothstep 压暗
    *    可见度下限 0.34：吞没深度映射至 [0.34, 1] 而非 [0, 1] —
-   *    旧实现核心棒整团（~360 粒）渡越期亮度归零 = 星系中心星团
-   *    突然消失、渡越结束整团复现。下限保留星团轮廓恒可辨（压暗至
-   *    ~46%，含 ×1.35 吸积补偿），吞没语义仍在：内圈深吞、外圈渐亮，
-   *    全程连续无跳变 */
+   *    下限保留星团轮廓恒可辨（压暗至 ~46%，含 ×1.35 吸积补偿），
+   *    避免核心棒整团渡越期亮度归零、结束后整团突现；
+   *    吞没语义仍在：内圈深吞、外圈渐亮，全程连续无跳变 */
   float oCoreRaw = ${f(o.coreFadeR)} > 0.5 ? smoothstep(${f(o.coreFadeR)} * ${f(ORBIT_GLSL.coreEdge)}, ${f(o.coreFadeR)}, oR) : 1.0;
   float oCore = ${f(ORBIT_GLSL.coreFloor)} + ${f(ORBIT_GLSL.coreSpan)} * oCoreRaw;
   vColor = color * mix(1.0, oCore * ${f(ORBIT_GLSL.coreBoost)}, clamp(uWarp * ${f(ORBIT_GLSL.coreRamp)}, 0.0, 1.0));

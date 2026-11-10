@@ -4,12 +4,10 @@
  * 验证目标：加载位置校验的前缀比较必须带分隔符边界——与 System32 目录
  * 字符串同前缀但非其子目录的旁路路径（"…\System32Malware\evil.dll"）必须
  * 被判定为不在 System32；真实 System32 子路径、大小写变体与目录本身
- * （尾分隔符/结尾边界）必须通过。修复前 _wcsnicmp 纯前缀比较会使旁路
- * 路径误通过（该路径加载的 DLL 被当作可信 System32 模块接受）。
+ * （尾分隔符/结尾边界）必须通过。纯前缀比较会使旁路路径误通过（该路径
+ * 加载的 DLL 被当作可信 System32 模块接受）。
  *
  * 测试经 system32_loader_dir_prefix_test 白盒直取判定函数（初始化后）。
- * 加载函数 system32_loader_load 无生产调用点，已随 WP-12 删除，
- * 对应完整链路用例一并移除。
  */
 #include "verthys_test.h"
 #include "system32_loader.h"
@@ -60,7 +58,7 @@ TEST(sys32_prefix_boundary_rejects_sibling)
     r_null    = system32_loader_dir_prefix_test(NULL);
 
     CHECK_EQ(r_real, 1);      /* 真实子路径：通过 */
-    CHECK_EQ(r_sibling, 0);   /* 旁路目录：拒绝（修复点） */
+    CHECK_EQ(r_sibling, 0);   /* 旁路目录：拒绝 */
     CHECK_EQ(r_tail, 1);      /* 尾分隔符：通过 */
     CHECK_EQ(r_upper, 1);     /* 大小写变体：通过 */
     CHECK_EQ(r_trunc, 0);     /* 截断前缀：拒绝 */
@@ -68,5 +66,3 @@ TEST(sys32_prefix_boundary_rejects_sibling)
     CHECK_EQ(r_null, 0);      /* NULL：拒绝 */
     return 0;
 }
-
-/* 完整加载链路与参数校验用例随 system32_loader_load 删除一并移除。 */

@@ -1,34 +1,28 @@
 <!--
-  StatusBanner.vue — 全局常驻状态横幅（唯一实现）
+  StatusBanner.vue — 上下文内常驻告知条（唯一实现）
 
-  职责边界（与 Toast 严格分工，两者不得互相替代）：
-    - Toast  = 事件结果反馈：瞬时、自动消失、不可交互；
-    - 横幅   = 状态告知：存续到状态消除、允许挂载处理动作。
-  常驻状态若交给 Toast，会随计时消失而丢失关键告知；事件结果若做成横幅，
-  会永久占据版面。两类信息由载体区分，用户无需再判断哪种提示会留下。
+  职责边界（与 Toast / StatusRail 严格分工）：
+    - Toast  = 瞬时事件结果：自动消失、不可交互；
+    - 本组件 = 模块上下文内的存续告知：跟随所在区域定位，允许挂载处理动作
+      （如拾光照片区的加载恢复条）；
+    - StatusRail = 跨视图存续状态：收敛到视口右缘，点击展开告知面板。
+  常驻状态若交给 Toast，会随计时消失而丢失关键告知；事件结果若做成常驻条，
+  会永久占据版面。载体由信息存续范围决定，用户无需判断哪种提示会留下。
 
   布局（硬约束）：
-    组件不自带定位，宽度随内容收敛（fit-content）。常驻使用必须由调用方
-    挂进浮层（position: absolute）—— 横幅只覆盖自身所占区域，出现与消失
-    都不得改变视图布局；任何把横幅放进文档流、挤压视图内容的用法都不属于
-    本组件的支持范围。
+    组件不自带定位，宽度随内容收敛（fit-content）。调用方必须把它放进
+    绝对定位浮层或上下文锚点 —— 出现与消失都不得改变视图布局。
 
-  视觉（通透玻璃带）：
-    基面取 tokens.css --banner-surface —— 填充压到近无色，通透感由更强的
-    背衬折射（blur 26px + 高饱和）承担。瞬时 Toast 的 --toast-surface 更浓，
-    用于只存续一两秒的小面积提示合适；同样的浓度放大到常驻横幅会退化为
-    一块实心色板，因此两者共用材质语言但不共用浓度。
-    无描边：轮廓仅由上下两道随圆角淡出的光缝与内缘顶光界定，不落外投影。
-    语义色只落在文字与动作键上，整面保持中性玻璃；不设左缘图标、不设竖向
-    隔线 —— 文字与动作由留白分区，任何装饰线都会把通透面重新切回「框」。
-    动作是透明玻璃键：细描边 + 极低填充，悬浮只提亮边界与填充，
-    无阴影、无渐变、无发光。
+  视觉（Toast 同源玻璃带）：
+    底板直接复用 .notice-card 材质单源（与 Toast 完全同一套
+    玻璃基面与星野），不维护独立横幅皮肤；本组件只负责排印与动作键。
+    无描边、无外投影、无左缘图标：语义色只落在文字与动作键上。
+    动作是透明玻璃键：细描边 + 极低填充，悬浮只提亮边界与填充。
 
   入场：
     只走不透明度 —— 文字承载元素不做位移，位移会把文字层提升为合成层
-    并改用灰度抗锯齿，收束时再切回子像素，淡入期间文字会发虚。
-    用 transition 而非 animation —— 全局空闲治理以 animation-play-state
-    暂停动画，animation 入场在深空闲态下会冻结在首帧（横幅直接不可见）。
+    并改用灰度抗锯齿。用 transition 而非 animation：全局空闲治理以
+    animation-play-state 暂停动画，animation 入场在深空闲态下会冻结首帧。
 
   Props:
     - tone           语义色：info（默认）/ warning / danger / success
@@ -46,7 +40,7 @@
 <template>
   <Transition name="sb-reveal" appear>
     <div
-      class="status-banner"
+      class="status-banner notice-card"
       :class="`is-${tone}`"
       role="status"
     >
@@ -137,9 +131,11 @@ const hasActions = computed(
 </script>
 
 <style scoped>
-/* ===== 胎体：中性玻璃带（无描边）===== */
+/* ===== 排印与动作端：底板材质由 .notice-card 单源提供 ===== */
 .status-banner {
   --sb-tone: var(--accent);
+  /* 语义色同时注入玻璃基面的光晕单源，文字与底板反射同色系 */
+  --mark-c: var(--accent);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -152,39 +148,27 @@ const hasActions = computed(
   /* 浮层宿主可整体设为 pointer-events: none 让空白穿透，
      横幅实体在此重新获得指针事件，动作始终可点 */
   pointer-events: auto;
-  border-radius: var(--radius);
   /* 文字取语义色与冷白的混合：保留语义辨识，又不让大面积常驻文字持续刺眼 */
   color: color-mix(in srgb, var(--sb-tone) 44%, #e6eef8);
   font-size: 13px;
   line-height: 1.5;
   letter-spacing: 0.2px;
   text-shadow: 0 1px 1px rgba(var(--black-rgb), 0.34);
-  /* 通透度由背衬折射承担：模糊提到 26px、饱和度与亮度微提 ——
-     填充近乎无色的玻璃仍能折射出衬底的结构与色温 */
-  -webkit-backdrop-filter: blur(26px) saturate(185%) brightness(1.12);
-  backdrop-filter: blur(26px) saturate(185%) brightness(1.12);
-  background:
-    /* 上缘主光缝 / 下缘副光缝：两端随圆角淡出，读作玻璃棱线而非画线成框 */
-    linear-gradient(90deg, transparent, rgba(var(--white-rgb), 0.22) 10%, rgba(var(--white-rgb), 0.22) 90%, transparent) top / 100% 1px no-repeat,
-    linear-gradient(90deg, transparent, rgba(var(--white-rgb), 0.07) 16%, rgba(var(--white-rgb), 0.07) 84%, transparent) bottom / 100% 1px no-repeat,
-    /* 镜面转折反光：光源偏左上的斜掠高光，只在玻璃表面掠过，不参与底色 */
-    linear-gradient(108deg, rgba(var(--white-rgb), 0.09), rgba(var(--white-rgb), 0.02) 34%, transparent 62%),
-    /* 语义微晕：极低强度，仅让语义色在左端有一层空气感，不构成铺底 */
-    radial-gradient(
-      ellipse 120% 220% at 0% 50%,
-      color-mix(in srgb, var(--sb-tone) 5%, transparent),
-      transparent 62%
-    ),
-    /* 玻璃基面（单源 tokens.css --banner-surface，填充近无） */
-    var(--banner-surface);
-  /* 通透体只保留内缘顶光；不落外投影，避免被读成一块悬浮的实心板 */
-  box-shadow: inset 0 1px 0 rgba(var(--white-rgb), 0.07);
 }
 
-/* 语义变体：只改 --sb-tone 单源，文字与动作键随之同色 */
-.status-banner.is-warning { --sb-tone: rgb(var(--warning-rgb)); }
-.status-banner.is-danger { --sb-tone: var(--danger); }
-.status-banner.is-success { --sb-tone: rgb(var(--success-rgb)); }
+/* 语义变体：只改单源变量，文字、动作键与底板微晕随之同色 */
+.status-banner.is-warning {
+  --sb-tone: rgb(var(--warning-rgb));
+  --mark-c: rgb(var(--warning-rgb));
+}
+.status-banner.is-danger {
+  --sb-tone: var(--danger);
+  --mark-c: var(--danger);
+}
+.status-banner.is-success {
+  --sb-tone: rgb(var(--success-rgb));
+  --mark-c: rgb(var(--success-rgb));
+}
 
 /* ===== 文案 ===== */
 /* flex-basis 取 auto：短文案不被固定基准撑长，横幅宽度严格随内容收敛 */

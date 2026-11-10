@@ -116,8 +116,7 @@ VerthysResult secure_allocator_alloc(SecureAllocator *alloc, size_t size,
 /*
  * 安全释放：数据页 SecureZeroMemory → VirtualUnlock → VirtualFree，
  * 全局用量原子递减，注册表条目移除。
- *   VERTHYS_ERR_INVALID — 参数非法 / 指针非本分配器数据页基址（含魔数
- *   校验失败——元数据独立存储，双重防伪造）。
+ *   VERTHYS_ERR_INVALID — 参数非法 / 指针非本分配器数据页基址。
  */
 VerthysResult secure_allocator_free(SecureAllocator *alloc, void *ptr);
 

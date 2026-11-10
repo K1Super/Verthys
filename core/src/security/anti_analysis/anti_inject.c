@@ -14,14 +14,14 @@
  *   4. 窗口钩子注入检测（anti_inject_check_window_hook）：
  *      - 检测 SetWindowsHookEx 全局钩子（WH_CBT/WH_GETMESSAGE/WH_KEYBOARD/WH_MOUSE/WH_DEBUG）
  *      - 遍历线程 Win32ThreadInfo 钩子链 + 已知 hook 库模块扫描
- *   5. 模块白名单巡检（anti_inject_check_modules）：
+ *   5. 模块信任巡检（anti_inject_check_modules）：
  *      - CreateToolhelp32Snapshot 遍历已加载模块
- *      - 路径必须在安装目录 / System32 / SysWOW64 / 受信任白名单下
- *      - 非系统模块必须具有有效 Authenticode 数字签名（WinVerifyTrust）
+ *      - 有效 Authenticode 签名优先；无签名时路径必须位于安装目录 /
+ *        System32 / SysWOW64
+ *      - 其余模块按低置信度上报
  *
  * 安全策略：
  *   - 模块状态 static 变量，幂等初始化
- *   - 受信任路径白名单 static 数组存储（最大 64 路径）
  *   - 所有临时缓冲区用毕 verthys_secure_zero 清零
  *   - 检测到威胁时上报 emergency_report 触发连锁应急响应
  *   - 性能模式（anti_inject=1）下仍执行模块巡检
@@ -262,9 +262,8 @@ static int safe_read_memory(const void *addr, void *buf, size_t len)
 
 /* 目录前缀匹配（带分隔符边界）。
  *
- * 原缺陷：_wcsnicmp(path, dir, wcslen(dir)) 无分隔符边界——
- * "C:\Windows\System32Malware\evil.dll" 也能通过 System32 前缀检查。
- * 修复：前缀一致后，path 中紧随前缀的字符必须是路径分隔符或字符串结尾。
+ * 前缀一致后，path 中紧随前缀的字符必须是路径分隔符或字符串结尾，
+ * 否则 "C:\Windows\System32Malware\evil.dll" 也能通过 System32 前缀检查。
  * dir 传入前已规范化为大写、无尾部分隔符。
  */
 static int dir_prefix_matches(const wchar_t *dir, const wchar_t *path)
@@ -387,8 +386,8 @@ static int verify_module_signature(const wchar_t *file_path)
  * 测试 exe）内的线程。自身模块内起始的线程为合法内部线程（preheat / 进度
  * 消费等），不计入可疑增长。失败返回 -1。
  *
- * 与原实现（仅按总数计数）的差异：需逐个查询线程 Win32 起始地址并做模块
- * 归属判定。原总数计数无法区分内部线程，解锁期合法线程增长会被误判为注入。
+ * 必须逐个查询线程 Win32 起始地址并做模块归属判定：只按总数计数无法区分
+ * 内部线程，解锁期合法线程增长会被误判为注入。
  */
 static int count_external_threads(DWORD pid)
 {
@@ -741,20 +740,19 @@ int anti_inject_check_window_hook(void)
 }
 
 /* ===================================================================== *
- *                       4. 模块白名单巡检                                *
+ *                       4. 模块信任巡检                                  *
  * ===================================================================== */
 
 /*
  * 遍历当前进程已加载模块，验证模块信任：
  *   a) 有效 Authenticode 签名（WinVerifyTrust）→ 信任（签名优先）；
- *   b) 无签名但位于 System32 / SysWOW64 / 安装目录 / 白名单路径 →
+ *   b) 无签名但位于 System32 / SysWOW64 / 安装目录 →
  *      按位置信任（系统目录模块使用目录签名/catalog，非内嵌 Authenticode）；
  *   c) 其余（无签名且路径不受信任）→ TELEMETRY 上报 UNKNOWN_DLL。
  *
- * 与原实现的差异：
- *   - 签名优先于位置：第三方合法签名 DLL 不再因安装目录外而误报；
- *   - 目录前缀匹配带分隔符边界（dir_prefix_matches）；
- *   - 威胁上报统一为 TELEMETRY 级（低置信度启发式）。
+ * 签名优先于位置：第三方合法签名 DLL 不因安装目录外而误报；
+ * 目录前缀匹配带分隔符边界（dir_prefix_matches）；
+ * 威胁上报统一为 TELEMETRY 级（低置信度启发式）。
  */
 int anti_inject_check_modules(void)
 {

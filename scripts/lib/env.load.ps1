@@ -146,7 +146,7 @@ if ($customReady) {
     $script:VERTHYS_LIB         = $env:LIB
     $script:VERTHYS_PATH_PREFIX = ""
 } else {
-    # ---------- 两种来源均不可用：逐项 fail-fast（保留原有可操作提示） ----------
+    # ---------- 两种来源均不可用：逐项 fail-fast（给出可操作提示） ----------
     $script:VERTHYS_ENV_SOURCE     = "缺少环境"
     $script:VERTHYS_VS_ROOT      = Assert-EnvVar "VERTHYS_VS_ROOT"   "Visual Studio 安装根目录"
     $script:VERTHYS_MSVC_VER     = Assert-EnvVar "VERTHYS_MSVC_VER"  "MSVC 工具链版本号"

@@ -36,7 +36,7 @@ export const customSessionMinutesRef = keyState.customSessionMinutes;
 /** 会话硬化 / 会话守卫是否处于降级状态
  *
  * 安全档位宣称的「挂起锁定 / 剪贴板监听 / 系统锁屏会话守卫」若启停失败，
- * 旧实现仅 console.warn —— 界面仍显示已启用，属不可见的安全降级。
+ * 仅 console.warn 会使界面仍显示已启用，属不可见的安全降级。
  * 本 ref 供管理面板如实标注「部分安全硬化未生效」。 */
 export const securityHardeningFailedRef = ref(false);
 
@@ -257,8 +257,8 @@ export async function applySecurityPreset(
     // 先后端落盘 + 返回权威配置；失败抛错，前端状态不变
     const config = await securityApplyPreset(3, custom, customMinutes);
 
-    // 会话层硬化：剪贴板监听由专用开关独立控制（不再与空闲锁定合并为
-    // 单一布尔——两能力互不牵连）；挂起锁定不向自定义档暴露。
+    // 会话层硬化：剪贴板监听由专用开关独立控制（与空闲锁定互不牵连）；
+    //   挂起锁定不向自定义档暴露。
     try {
       // 3s 超时兜底：后端会话守卫命令阻塞时不得卡死预设应用流程
       const ok = await withTimeout(
@@ -474,7 +474,7 @@ export async function getBruteForceStatus() {
 /* ------------------------------------------------------------------ *
  * lockAll 锁定全部                                                    *
  *                                                                    *
- * 四层根治设计·第四层（全局应用生命周期兜底）— 8 步流程：           *
+ * 全局应用生命周期兜底 — 8 步流程：                                  *
  *                                                                    *
  *   步骤 0：等待全库轮换 Run 收敛（verthysPrepareLock，后端 30s 闸门）*
  *   步骤 1：取消防抖定时器（在 waitForFlush 内部完成）                *
@@ -528,12 +528,12 @@ let lockAllInProgress = false;
 /** 当前 lockAll 的"真实工作"Promise（null 表示无 lockAll 进行中）
  *
  * 与等待上限分离（关键治理）：
- *   旧实现以 40s `Promise.race` 结束等待并释放闸门，但 doLockAll 仍在后台
+ *   若以 Promise.race 在 40s 处结束等待并释放闸门，doLockAll 仍在后台
  *   继续执行；40s 后用户可立即解锁，残留的「清 GMK / 锁库 / 销毁 worker」
  *   会打在**新会话**上（新 worker 被销毁、新状态被 resetAllState 抹掉），
  *   窗口期内还可并发启动第二个 lockAll。
  *
- * 现语义：
+ * 语义：
  *   - 闸门（lockAllInProgress）只在 doLockAll 真正结束后释放；
  *   - 等待方 await 的是真实工作（各步均有超时包裹，总时长有界）；
  *   - 破坏性步骤执行前校验代际，任何强制换代都会让旧步骤立即自弃。
@@ -575,8 +575,8 @@ function withStepTimeout<T>(promise: Promise<T>, ms: number, label: string): Pro
  * 用户操作（关闭按钮/手动锁定）并发触发；已在执行时本调用只等待真实
  * 工作完成，绝不并行启动第二套销毁步骤。
  *
- * 时长治理：不再使用「40s 总超时后释放闸门」的竞速收口 —— 各步骤均有
- * 独立超时包裹，真实工作总时长有界；闸门只在真实工作结束后释放。
+ * 时长治理：不使用「总超时后释放闸门」的竞速收口——各步骤均有独立超时
+ * 包裹，真实工作总时长有界；闸门只在真实工作结束后释放。
  */
 export async function lockAll(onProgress?: (percent: number, message: string) => void): Promise<LockOutcome> {
   // 重入：等待在途真实工作完成（不重复启动销毁链）
@@ -609,7 +609,7 @@ export async function lockAll(onProgress?: (percent: number, message: string) =>
  *   - doUnlock/initUnlock/initCreate 起始处：确保旧的 lockAll 完成后再解锁
  *   - goBackToUnlock 调用 lockAll 后：确保锁定完成后再允许用户操作
  *
- * 为何不再设 45s 提前返回：提前返回会让解锁与残留销毁步骤并行，
+ * 不设提前返回：提前返回会让解锁与残留销毁步骤并行，
  * 新会话会被旧 lockAll 的清 GMK / 锁库 / 销毁 worker 命中。各步均有
  * 超时包裹，真实工作不会无限阻塞。
  *
@@ -623,7 +623,7 @@ export async function awaitLockAllIfInProgress(): Promise<void> {
 
 /** 8 步流程实际实现
  *
- * 修复：接受 onProgress 回调，每步推送进度
+ * 接受 onProgress 回调，每步推送进度
  *
  * 代际仲裁：每个破坏性步骤执行前校验 generation —— 若在等待期间被
  *   强制换代（新锁定序列接管），旧序列立即自弃，绝不污染新会话。
@@ -653,9 +653,11 @@ async function doLockAll(
   // 步骤 0：锁定前置闸门 —— 轮换 Run 收敛前不得执行任何破坏性步骤
   //
   // 后端 verthys_lock / worker_destroy 也有同一闸门，但前端必须先行收敛：
-  // 若等销毁命令内部等待 30s 而前端按旧超时（8s/5s）提前放弃，延迟命令
+  // 若等销毁命令内部等待 30s 而前端按更短超时（8s/5s）提前放弃，延迟命令
   // 会落在新会话上。此处失败即整体放弃，会话/密钥/空闲计时全部保持原状。
-  onProgress?.(5, "等待轮换作业收敛");
+  /* 用户态只呈现 4 个核心节点：收敛 → 清密钥 → 落盘 → 销毁；
+   * 其余内部步骤仍逐项执行，节点之间由进度感知层连续推进 */
+  onProgress?.(5, "收敛当前会话");
   try {
     const ready = await withTimeout(verthysPrepareLock(), 35000, "等待轮换作业收敛");
     if (!ready) {
@@ -683,7 +685,6 @@ async function doLockAll(
   keyState.moduleKeyReady.value = { photo: false, accounts: false, fileverthys: false };
 
   // 步骤 1+2：取消防抖定时器 + 阻塞等待全部删除、落盘队列执行完成
-  onProgress?.(15, "等待数据落盘");
   try { await waitForFlush(); } catch (error) {
     flushed = false;
     errors.push(`waitForFlush: ${error instanceof Error ? error.message : String(error)}`);
@@ -694,10 +695,9 @@ async function doLockAll(
   clearAllCacheTimers();
 
   // 步骤 3：停止后台任务 + 清空所有内存缓存
-  // 修复：stopBackgroundTasks 内部已有 3s 超时，外层 withStepTimeout 5s 兜底
-  //    原缺陷：withStepTimeout 10s 超时过长，用户感知"停止后台任务时间过长"
-  //    修复：缩短至 5s（stopBackgroundTasks 3s + 余量），超时后继续后续步骤
-  onProgress?.(20, "停止后台任务");
+  // stopBackgroundTasks 内部已有 3s 超时，外层 withStepTimeout 5s 兜底
+  //    （3s + 余量）；超时后继续后续步骤。外层超时若取 10s，
+  //    会让「停止后台任务」阶段明显变长。
   try { await withStepTimeout(stopBackgroundTasks(), 5000, "stopBackgroundTasks"); } catch (error) {
     errors.push(`stopBackgroundTasks: ${String(error)}`);
   }
@@ -723,31 +723,21 @@ async function doLockAll(
   if (!current()) return snapshot();
 
   // 步骤 6：停止 C 消息线程
-  onProgress?.(70, "停止安全会话");
   try { await withStepTimeout(securitySessionStop(), 5000, "securitySessionStop"); } catch (error) {
     errors.push(`securitySessionStop: ${String(error)}`);
   }
   if (!current()) return snapshot();
 
-  // 步骤 7：销毁 worker（根治：verthysLock + workerDestroy 双重销毁）
+  // 步骤 7：销毁 worker（verthysLock + workerDestroy 双重销毁）
   //
-  // 原缺陷（"安全核心启动失败"根因）：
-  //   doLockAll 步骤 7 仅调用 verthysLock()，后端 verthys_lock 只销毁 VerthysSessionGuard
-  //   （释放文件锁），不销毁 worker 子进程，worker 状态仍为 Ready。
-  //   前端 verthysLock() 的 finally 调用 invalidateWorkerPreload() 仅清空前端缓存，
-  //   后端 worker 子进程仍存活且状态为 Ready。
-  //   下次 doUnlock → initUnlock → ensureWorkerReady → workerInit("") →
-  //   后端 worker_init → transition_to_initializing() →
-  //   状态为 Ready → 返回 Err("worker 已就绪") → worker_init 返回 err →
-  //   initUnlock 返回 E_WORKER_INIT_FAILED → 用户看到"安全核心启动失败"。
-  //
-  //   用户"回到主界面再拉取窗口"之所以能成功：SecurityCenter 组件卸载/重新挂载
-  //   的时间差让 worker 状态发生变化（或触发了其他清理路径），非确定性修复。
-  //
-  // 修复：
-  //   1. verthysLock()：持久化 + 释放文件锁 + 重置 key_lifecycle（后端 verthys_lock 已做）
+  // 两个命令职责不同，缺一不可：
+  //   1. verthysLock()：持久化 + 释放文件锁 + 重置 key_lifecycle
   //   2. workerDestroy()：销毁 worker 子进程 + transition_to_uninitialized()
-  //      （后端 worker_destroy 已做）→ 下次 worker_init 可从 Uninitialized 成功转移
+  //      下次 worker_init 才能从 Uninitialized 成功转移
+  //   仅调用 verthysLock 只会销毁 VerthysSessionGuard（释放文件锁），
+  //   worker 子进程仍存活且状态为 Ready；下次 worker_init 会因
+  //   transition_to_initializing() 失败而返回「worker 已就绪」，
+  //   最终表现为「安全核心启动失败」。
   //
   // 安全性：worker_destroy 后端对不存在的 worker 为空操作（WorkerState=None 时跳过），
   //   不会误报错误。workerDestroy 前端 finally 调用 invalidateWorkerPreload()，
@@ -780,15 +770,15 @@ async function doLockAll(
   }
   if (!current()) return snapshot();
 
-  // 修复修复：步骤 7.5 — 补全状态重置
+  // 步骤 7.5 — 补全状态重置
   //
-  // 原缺陷：doLockAll 仅重置 verthysReady/globalKeyReady/moduleKeyReady 三个状态，
-  // 遗漏 hasModuleKeyRecord/moduleKeyEnabled/hasGlobalKeyRecord/globalKeyRecordB64/
+  // 仅重置 verthysReady/globalKeyReady/moduleKeyReady 三个状态，会遗漏
+  // hasModuleKeyRecord/moduleKeyEnabled/hasGlobalKeyRecord/globalKeyRecordB64/
   // globalKeyRecordId/storedVerthysPath 等关键状态。
   // 锁定后这些状态残留，下次解锁时若 loadModuleKeyStatus 未及时完成，
   // UI 会显示上一会话的旧状态（如"全部模块已开启密钥"）。
   //
-  // 修复：调用 resetAllState() 统一重置全部 keyState 为安全默认值。
+  // resetAllState() 统一重置全部 keyState 为安全默认值。
   // 必须在 verthysLock 之后（worker 已销毁）、setCurrentVerthysPath("") 之前调用，
   // 因为 resetAllState 内部会清空 _currentVerthysPath，与后续 setCurrentVerthysPath("") 一致。
   // 注意：clearModuleKeyCache/clearModuleCache/clearRecordScanCache 等已在步骤 3 执行，

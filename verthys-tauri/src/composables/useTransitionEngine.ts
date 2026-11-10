@@ -1,10 +1,9 @@
 /*
  * useTransitionEngine.ts — 方向性渡越序列引擎（启动逆渡 / 点击正渡）
  *
- * 从 ParticleBackground.vue 抽离的纯数学状态机（零 THREE 依赖 — 可独立
- * 推演与测试）：复合强度与方向权重双通道求值、符号缠绕积分、幕布位移
- * 积分。ParticleBackground 每帧仅调用 update(dt) 并读取结果，
- * renderFrame 不持有任何序列状态。
+ * 纯数学状态机（零 THREE 依赖 — 可独立推演与测试）：复合强度与方向权重
+ * 双通道求值、符号缠绕积分、幕布位移积分。ParticleBackground 每帧仅调用
+ * update(dt) 并读取结果，renderFrame 不持有任何序列状态。
  *
  * 打断路径设计（启动逆渡期间点击）：
  *   逆渡残余与正渡序列不做独立叠加 —— 叠加会使总强度先跌后升（失力
@@ -220,6 +219,13 @@ export class TransitionEngine {
     if (on && !this.introDone && this.introInterruptedAt === null && this.enterClock === null) {
       this.introDone = true;
     }
+  }
+
+  /** 直接进入：跳过启动逆渡（仅置完成位，不追溯已开始的序列）。
+   *  用于每次开机仅首映一次、其余启动直接进入主界面的展示策略。 */
+  skipIntro(): void {
+    if (this.introDone || this.introInterruptedAt !== null || this.enterClock !== null) return;
+    this.introDone = true;
   }
 
   /**
