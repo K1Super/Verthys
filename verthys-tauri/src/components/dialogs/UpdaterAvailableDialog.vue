@@ -5,55 +5,54 @@
   重试。说明正文保持纯文本与原始换行，不在界面渲染任何富文本或外部链接。
 -->
 <template>
-  <VerthysDialog
-    v-model="open"
-    title="发现新版本"
-    layout="plain"
-    hide-actions
-    :persistent="forceUpdate"
+  <CosmicOverlay
+    :show="open"
     width="520px"
+    :persistent="forceUpdate"
+    aria-labelledby="upd-title"
+    @close="open = false"
   >
-    <div class="update-body">
-      <div class="update-line">
-        <span class="update-caption">版本</span>
-        <span class="update-version">{{ currentVersion }} → {{ version }}</span>
-        <span v-if="forceUpdate" class="update-required">必须安装</span>
-      </div>
+    <div class="kv-title" id="upd-title">发现新版本</div>
 
-      <div class="update-notes">
-        <p v-if="notes.trim()">{{ notes }}</p>
-        <p v-else class="update-empty">本次更新未提供说明</p>
-      </div>
-
-      <p v-if="installing" class="update-state">
-        {{ percent > 0 ? `正在下载并校验，${percent}%` : "正在准备更新…" }}
-      </p>
-      <p v-if="errorMessage" class="update-error">{{ errorMessage }}</p>
-
-      <div class="update-actions">
-        <button v-if="!forceUpdate" class="btn kv-cancel" type="button" @click="open = false">
-          稍后
-        </button>
-        <button v-if="cancellable" class="btn" type="button" @click="$emit('cancel')">
-          取消更新
-        </button>
-        <button
-          v-else
-          class="btn btn-primary"
-          type="button"
-          :disabled="installing"
-          @click="$emit('install')"
-        >
-          {{ installing ? "正在更新…" : "安装更新" }}
-        </button>
-      </div>
+    <div class="kv-row update-version-row">
+      <span class="kv-row-label">版本</span>
+      <span class="kv-row-value">{{ currentVersion }} → {{ version }}</span>
+      <span v-if="forceUpdate" class="kv-error update-required">必须安装</span>
     </div>
-  </VerthysDialog>
+
+    <div class="update-notes">
+      <p v-if="notes.trim()">{{ notes }}</p>
+      <p v-else class="kv-note">本次更新未提供说明</p>
+    </div>
+
+    <p v-if="installing" class="kv-note update-state">
+      {{ percent > 0 ? `正在下载并校验，${percent}%` : "正在准备更新…" }}
+    </p>
+    <p v-if="errorMessage" class="kv-error">{{ errorMessage }}</p>
+
+    <div class="kv-actions">
+      <button v-if="!forceUpdate" class="btn kv-cancel" type="button" @click="open = false">
+        稍后
+      </button>
+      <button v-if="cancellable" class="btn" type="button" @click="$emit('cancel')">
+        取消更新
+      </button>
+      <button
+        v-else
+        class="btn btn-primary kv-confirm"
+        type="button"
+        :disabled="installing"
+        @click="$emit('install')"
+      >
+        {{ installing ? "正在更新…" : "安装更新" }}
+      </button>
+    </div>
+  </CosmicOverlay>
 </template>
 
 <script setup lang="ts">
 import { computed } from "vue";
-import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
+import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -92,39 +91,16 @@ const open = computed({
 </script>
 
 <style scoped>
-.update-body {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  min-width: 440px;
-}
-
-.update-line {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 10px;
-}
-
-.update-caption {
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.update-version {
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 14px;
-  letter-spacing: 0.02em;
+.update-version-row {
+  margin-bottom: 14px;
 }
 
 .update-required {
-  color: var(--danger);
-  font-size: 12px;
+  margin: 0;
   letter-spacing: 0.08em;
 }
 
+/* 发布说明：保留原始换行；滚动收敛在说明区，不挤压动作区 */
 .update-notes {
   max-height: 220px;
   overflow-y: auto;
@@ -140,31 +116,16 @@ const open = computed({
   overflow-wrap: anywhere;
 }
 
-.update-notes .update-empty {
-  color: var(--text-secondary);
-}
-
 .update-state {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
+  margin-top: 12px;
   font-variant-numeric: tabular-nums;
 }
 
-.update-error {
-  margin: 0;
-  color: var(--danger);
-  font-size: 12px;
-  line-height: 1.7;
+.update-state + .kv-error {
+  margin-top: 8px;
 }
 
-.update-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.update-actions .btn {
-  box-shadow: none;
+.update-notes + .update-state {
+  margin-top: 12px;
 }
 </style>

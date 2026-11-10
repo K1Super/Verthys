@@ -146,41 +146,47 @@
       </template>
 
       <template #tail>
-        <VerthysDialog
-          :model-value="deleteTarget !== null"
-          layout="plain"
+        <CosmicOverlay
+          :show="deleteTarget !== null"
           width="500px"
-          title="删除模块（不可逆）"
-          save-label="永久删除"
-          :save-disabled="confirmText !== 'DELETE' || busy"
-          :saving="busy"
-          @update:model-value="(v) => { if (!v && !busy) closeDelete(); }"
-          @save="onDelete"
+          :persistent="busy"
+          aria-labelledby="mdz-title"
+          @close="!busy && closeDelete()"
         >
-          <div class="mdz-dialog">
-            <p class="mdz-warn">
-              将永久删除「{{ deleteLabel }}」模块的全部记录、文件与分片，并销毁其模块密钥。
-              之后只能重建空模块，旧数据不可恢复。
-            </p>
-            <p class="mdz-note">
-              旧段、低代副本与备份中的旧密文不做物理擦除；请确认已完成必要备份。
-            </p>
-            <p class="mdz-note">
-              删除会逐条清除记录/文件/分片引用，数据量大时可能持续数分钟；
-              期间请勿关闭应用。
-            </p>
-            <p v-if="busy" class="mdz-elapsed" role="status">正在删除，已耗时 {{ busyElapsed }} 秒…</p>
-            <p v-if="error" class="mdz-error">{{ error }}</p>
-            <label class="mdz-label" for="mdz-confirm">输入 <code>DELETE</code> 确认</label>
+          <div class="kv-title" id="mdz-title">删除模块（不可逆）</div>
+          <p class="kv-desc">
+            将永久删除「{{ deleteLabel }}」模块的全部记录、文件与分片，并销毁其模块密钥。
+            之后只能重建空模块，旧数据不可恢复。
+          </p>
+          <p class="kv-warn">
+            旧段、低代副本与备份中的旧密文不做物理擦除；请确认已完成必要备份。
+          </p>
+          <p class="kv-note">
+            删除会逐条清除记录/文件/分片引用，数据量大时可能持续数分钟；
+            期间请勿关闭应用。
+          </p>
+          <p v-if="busy" class="kv-note mdz-elapsed" role="status">正在删除，已耗时 {{ busyElapsed }} 秒…</p>
+          <p v-if="error" class="kv-error">{{ error }}</p>
+          <div class="kv-field mdz-confirm-field">
+            <label class="kv-label" for="mdz-confirm">输入 <code class="kv-code">DELETE</code> 确认</label>
             <input
               id="mdz-confirm"
               v-model="confirmText"
-              class="mdz-input"
+              class="kv-input"
               autocomplete="off"
               spellcheck="false"
             />
           </div>
-        </VerthysDialog>
+          <div class="kv-actions">
+            <button class="btn kv-cancel" type="button" :disabled="busy" @click="closeDelete">取消</button>
+            <button
+              class="btn kv-danger"
+              type="button"
+              :disabled="confirmText !== 'DELETE' || busy"
+              @click="onDelete"
+            >{{ busy ? "删除中…" : "永久删除" }}</button>
+          </div>
+        </CosmicOverlay>
       </template>
     </SpectrumSubPanel>
   </template>
@@ -189,7 +195,7 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import SfActionNode from "./SfActionNode.vue";
 import SpectrumSubPanel from "./SpectrumSubPanel.vue";
-import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
+import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
 import {
   verthysV4ModuleDelete,
   verthysV4ModuleStatus,
@@ -376,68 +382,11 @@ onMounted(() => {
 .mdz-orbit.state-deleted .sf-orbit-state-word {
   color: rgba(255, 120, 120, 0.85);
 }
-/* 二次确认弹窗：危险语义红字直陈，不加底色与图标 */
-.mdz-dialog {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.mdz-warn {
-  margin: 0;
-  color: rgba(255, 140, 140, 0.92);
-  line-height: 1.7;
-  font-size: 13px;
-  letter-spacing: 0.02em;
-}
-.mdz-note {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-secondary);
-}
+/* 二次确认：危险语义红字直陈，不加底色与图标；输入字段与动作区由 kv-* 承担 */
 .mdz-elapsed {
-  margin: 0;
-  font-size: 12px;
   color: rgba(0, 255, 190, 0.85);
 }
-/* 删除失败：红字直陈（对话框内可见，不加底色、不加图标） */
-.mdz-error {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
-  letter-spacing: 0.03em;
-  color: var(--danger);
-}
-.mdz-label {
-  font-family: var(--font);
-  font-size: 10px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-.mdz-label code {
-  font-family: var(--font);
-  color: rgba(255, 140, 140, 0.85);
-  letter-spacing: 0.12em;
-}
-.mdz-input {
-  width: 100%;
-  padding: 3px 0 7px;
-  border: none;
-  border-bottom: 1px solid rgba(148, 160, 178, 0.22);
-  border-radius: 0;
-  background: none;
-  color: #e0f4ff;
-  font-family: var(--font);
-  font-size: 12px;
-  letter-spacing: 0.16em;
-  outline: none;
-  transition: border-color 0.3s var(--ease), color 0.3s var(--ease);
-}
-.mdz-input:focus {
-  border-bottom-color: rgba(255, 71, 87, 0.55);
-}
-.mdz-input::placeholder {
-  color: transparent;
+.mdz-confirm-field {
+  margin-top: 14px;
 }
 </style>

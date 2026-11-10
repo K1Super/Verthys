@@ -14,7 +14,7 @@
  * - 结果契约：成功计数 / 失败明细，完成文案仅由成功计数派生
  * - 导出文件名经 sanitizeFileName 净化 + uniqueFileName 批次内唯一化
  */
-import { ref, watch, onScopeDispose, type ShallowRef } from "vue";
+import { ref, computed, watch, onScopeDispose, type ShallowRef } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { verthysGetRecord, verthysGetRecordDetailed, bytesToBase64, writeUserFile, writeUserFileStream, appendUserFileChunk, finalizeUserFileStream, abortUserFileStream } from "../../lib/verthys";
 import {
@@ -253,6 +253,17 @@ export function usePhotoExport(params: UsePhotoExportParams) {
 
   const deselectAllPhotos = () => {
     exportSelectedIds.value = new Set();
+  };
+
+  /** 是否已全选：全选/取消全选单键的派生状态（相册为空时不成立） */
+  const allPhotosSelected = computed(
+    () => photos.value.length > 0 && exportSelectedIds.value.size === photos.value.length,
+  );
+
+  /** 单键全选切换：已全选则清空，否则全选 */
+  const toggleSelectAllPhotos = () => {
+    if (allPhotosSelected.value) deselectAllPhotos();
+    else selectAllPhotos();
   };
 
   const regenerateExportToken = () => {
@@ -899,8 +910,8 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     openExportDialog,
     closeExportDialog,
     togglePhotoSelect,
-    selectAllPhotos,
-    deselectAllPhotos,
+    allPhotosSelected,
+    toggleSelectAllPhotos,
     regenerateExportToken,
     copyExportToken,
     chooseExportPath,

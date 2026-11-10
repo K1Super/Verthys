@@ -40,7 +40,7 @@ function mountPanel() {
   app.directive("tip", {});
   app.mount(container);
   mounted.push({ app, container });
-  /* 删除确认弹窗由 VerthysDialog 渲染（默认 teleport 到 body），
+  /* 删除确认弹窗由 CosmicOverlay 渲染（默认 teleport 到 body），
    * 查询根统一为 body；面板本体仍在 container 内。 */
   return document.body;
 }

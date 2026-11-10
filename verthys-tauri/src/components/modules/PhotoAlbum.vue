@@ -235,144 +235,137 @@
       </div>
     </div>
 
-    <!-- 导出对话框：两栏工作台（左选片 / 右配置；计数融入头部、摘要融入底栏） -->
-    <div v-if="showExportDialog" class="export-dialog-overlay" @click.self="closeExportDialog">
-      <div
-        ref="exportDialogRef"
-        class="export-dialog glass"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="photo-export-title"
-        tabindex="-1"
-        @keydown="onExportDialogKeydown"
-      >
-        <div class="ed-header">
-          <span class="ed-title" id="photo-export-title">导出加密照片</span>
-          <div class="ed-header-right">
-            <span class="ed-count">已选 <b>{{ exportSelectedIds.size }}</b> / {{ photos.length }}</span>
-            <button class="ed-close" @click="closeExportDialog" :disabled="exporting">×</button>
-          </div>
-        </div>
+    <!-- 导出对话框：复用全局弹窗外壳与 kv-* 内容词汇；
+         两栏工作台只保留选片网格与配置分组这类业务结构 -->
+    <CosmicOverlay
+      :show="showExportDialog"
+      width="min(880px, calc(100vw - 48px))"
+      :backdrop-close="!exporting"
+      aria-labelledby="photo-export-title"
+      @close="closeExportDialog"
+    >
+      <div class="ed-head">
+        <div class="kv-title" id="photo-export-title">导出加密照片</div>
+        <span class="ed-count">已选 <b>{{ exportSelectedIds.size }}</b> / {{ photos.length }}</span>
+      </div>
 
-        <div class="ed-body">
-          <!-- 左栏：选片（工具条 + 自适应网格，滚动收敛在栏内） -->
-          <div class="ed-pane ed-pane--gallery">
-            <div class="ed-gallery-bar">
-              <button class="ed-mini-btn" @click="selectAllPhotos" :disabled="exporting">全选</button>
-              <button class="ed-mini-btn" @click="deselectAllPhotos" :disabled="exporting">清空</button>
-            </div>
-            <!-- 选片网格：虚拟滚动（万张相册打开面板也不铺满 DOM）。
-                 容器与主网格同款行窗口模型：只渲染可视区 + 缓冲行。 -->
-            <VirtualCardGrid
-              class="ed-photo-grid"
-              :items="photos"
-              :item-height="92"
-              :min-column-width="92"
-              :gap="8"
-              :buffer-rows="3"
-              :item-key="photoIdKey"
-            >
-              <template #default="{ item: ph }">
-                <div
-                  class="ed-photo-item"
-                  :class="{ selected: exportSelectedIds.has(ph.id) }"
-                  role="button"
-                  tabindex="0"
-                  :aria-pressed="exportSelectedIds.has(ph.id)"
-                  :aria-label="ph.name || '照片'"
-                  @click="togglePhotoSelect(ph.id)"
-                  @keydown.enter.prevent="togglePhotoSelect(ph.id)"
-                  @keydown.space.prevent="togglePhotoSelect(ph.id)"
-                  v-tip="`${ph.name}，${ph.size}`"
-                >
-                  <div class="ed-photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
-                  <span class="ed-photo-name">{{ ph.name }}</span>
-                </div>
-              </template>
-            </VirtualCardGrid>
+      <div class="ed-body">
+        <!-- 左栏：选片（工具条 + 自适应网格，滚动收敛在栏内） -->
+        <div class="ed-pane ed-pane--gallery">
+          <div class="ed-gallery-bar">
+            <button class="ed-mini-btn" @click="toggleSelectAllPhotos" :disabled="exporting">
+              {{ allPhotosSelected ? '取消全选' : '全选' }}
+            </button>
           </div>
-
-          <!-- 右栏：配置（格式 / 令牌 / 保存位置） -->
-          <div class="ed-pane ed-pane--config">
-            <div class="ed-group">
-              <span class="ed-group-label">格式</span>
-              <div class="ed-seg">
-                <label class="ed-seg-item" :class="{ active: exportFormat === 'single' }">
-                  <input type="radio" v-model="exportFormat" value="single" :disabled="exporting" />
-                  <span>单文件</span>
-                </label>
-                <label class="ed-seg-item" :class="{ active: exportFormat === 'multiple' }">
-                  <input type="radio" v-model="exportFormat" value="multiple" :disabled="exporting" />
-                  <span>多文件</span>
-                </label>
-                <label class="ed-seg-item" :class="{ active: exportFormat === 'png' }">
-                  <input type="radio" v-model="exportFormat" value="png" :disabled="exporting" />
-                  <span>PNG</span>
-                </label>
+          <!-- 选片网格：虚拟滚动（万张相册打开面板也不铺满 DOM）。
+               容器与主网格同款行窗口模型：只渲染可视区 + 缓冲行。 -->
+          <VirtualCardGrid
+            class="ed-photo-grid"
+            :items="photos"
+            :item-height="92"
+            :min-column-width="92"
+            :gap="8"
+            :buffer-rows="3"
+            :item-key="photoIdKey"
+          >
+            <template #default="{ item: ph }">
+              <div
+                class="ed-photo-item"
+                :class="{ selected: exportSelectedIds.has(ph.id) }"
+                role="button"
+                tabindex="0"
+                :aria-pressed="exportSelectedIds.has(ph.id)"
+                :aria-label="ph.name || '照片'"
+                @click="togglePhotoSelect(ph.id)"
+                @keydown.enter.prevent="togglePhotoSelect(ph.id)"
+                @keydown.space.prevent="togglePhotoSelect(ph.id)"
+                v-tip="`${ph.name}，${ph.size}`"
+              >
+                <div class="ed-photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
+                <span class="ed-photo-name">{{ ph.name }}</span>
               </div>
-              <p class="ed-hint">{{ exportFormat === 'single' ? '全部照片打包为一个 .venc 文件' : exportFormat === 'multiple' ? '每张照片导出为独立 .venc 文件' : '导出为 .png 图片，其他格式自动转码' }}</p>
-            </div>
+            </template>
+          </VirtualCardGrid>
+        </div>
 
-            <!-- 令牌（PNG 明文导出不需要） -->
-            <div v-if="exportFormat !== 'png'" class="ed-group">
-              <span class="ed-group-label">令牌</span>
-              <div class="ed-token-display">
-                <input
-                  class="ed-token-code"
-                  v-model="exportToken"
-                  :disabled="exporting"
-                  spellcheck="false"
-                  autocomplete="off"
-                  aria-label="导出令牌（可编辑自定义）"
-                  v-tip="'可直接编辑为自定义令牌'"
-                />
-                <div class="ed-token-actions">
-                  <button class="ed-token-btn ed-token-btn--spin" @click="regenerateExportToken" :disabled="exporting" v-tip="'重新生成'">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-                  </button>
-                  <button class="ed-token-btn" :class="{ 'is-copied': tokenCopied }" @click="copyExportToken" v-tip="'复制'">
-                    <svg v-if="tokenCopied" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                    <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                  </button>
-                </div>
-              </div>
-              <p class="ed-hint">256-bit · 无此令牌无法解密导出文件</p>
+        <!-- 右栏：配置（格式 / 令牌 / 保存位置） -->
+        <div class="ed-pane ed-pane--config">
+          <div class="ed-group">
+            <span class="kv-section-label">格式</span>
+            <div class="ed-seg">
+              <label class="ed-seg-item" :class="{ active: exportFormat === 'single' }">
+                <input type="radio" v-model="exportFormat" value="single" :disabled="exporting" />
+                <span>单文件</span>
+              </label>
+              <label class="ed-seg-item" :class="{ active: exportFormat === 'multiple' }">
+                <input type="radio" v-model="exportFormat" value="multiple" :disabled="exporting" />
+                <span>多文件</span>
+              </label>
+              <label class="ed-seg-item" :class="{ active: exportFormat === 'png' }">
+                <input type="radio" v-model="exportFormat" value="png" :disabled="exporting" />
+                <span>PNG</span>
+              </label>
             </div>
-
-            <div class="ed-group">
-              <span class="ed-group-label">保存到</span>
-              <button class="ed-path" type="button" @click="chooseExportPath" :disabled="exporting">
-                <span class="ed-path-text">{{ exportPath }}</span>
-                <svg class="ed-path-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-              </button>
-            </div>
+            <p class="kv-hint">{{ exportFormat === 'single' ? '全部照片打包为一个 .venc 文件' : exportFormat === 'multiple' ? '每张照片导出为独立 .venc 文件' : '导出为 .png 图片，其他格式自动转码' }}</p>
           </div>
-        </div>
 
-        <!-- 进度线：底栏顶缘细线，导出中点亮 -->
-        <div class="ed-progress-line" :class="{ live: exporting }">
-          <i :style="{ width: exporting ? exportProgress + '%' : '0%' }"></i>
-        </div>
+          <!-- 令牌（PNG 明文导出不需要） -->
+          <div v-if="exportFormat !== 'png'" class="ed-group">
+            <span class="kv-section-label">令牌</span>
+            <div class="ed-token-display">
+              <input
+                class="ed-token-code"
+                v-model="exportToken"
+                :disabled="exporting"
+                spellcheck="false"
+                autocomplete="off"
+                aria-label="导出令牌（可编辑自定义）"
+                v-tip="'可直接编辑为自定义令牌'"
+              />
+              <div class="ed-token-actions">
+                <button class="ed-token-btn ed-token-btn--spin" @click="regenerateExportToken" :disabled="exporting" v-tip="'重新生成'">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
+                <button class="ed-token-btn" :class="{ 'is-copied': tokenCopied }" @click="copyExportToken" v-tip="'复制'">
+                  <svg v-if="tokenCopied" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+              </div>
+            </div>
+            <p class="kv-hint">256-bit · 无此令牌无法解密导出文件</p>
+          </div>
 
-        <div class="ed-footer">
-          <span class="ed-summary-line">
-            <template v-if="exporting">{{ exportStatus }}</template>
-            <template v-else-if="!exportPath">尚未选择保存位置</template>
-            <template v-else>{{ exportSelectedIds.size }} 张 · {{ exportFormat === 'single' ? '单文件' : exportFormat === 'multiple' ? '多文件' : 'PNG' }} · {{ exportFormat === 'png' ? '明文' : 'AES-256' }}</template>
-          </span>
-          <div class="ed-footer-actions">
-            <button class="btn btn-sm" @click="closeExportDialog" :disabled="exporting">取消</button>
-            <button
-              class="btn btn-sm ed-confirm"
-              @click="doExport"
-              :disabled="exporting || exportSelectedIds.size === 0 || !exportPath"
-            >
-              {{ exporting ? '导出中…' : '开始导出' }}
+          <div class="ed-group">
+            <span class="kv-section-label">保存到</span>
+            <button class="ed-path" type="button" @click="chooseExportPath" :disabled="exporting">
+              <span class="ed-path-text">{{ exportPath }}</span>
+              <svg class="ed-path-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
             </button>
           </div>
         </div>
       </div>
-    </div>
+
+      <!-- 进度线：动作区顶缘细线，导出中点亮 -->
+      <div class="ed-progress-line" :class="{ live: exporting }">
+        <i :style="{ width: exporting ? exportProgress + '%' : '0%' }"></i>
+      </div>
+
+      <div class="kv-actions ed-actions">
+        <span class="kv-summary">
+          <template v-if="exporting">{{ exportStatus }}</template>
+          <template v-else-if="!exportPath">尚未选择保存位置</template>
+          <template v-else>{{ exportSelectedIds.size }} 张 · {{ exportFormat === 'single' ? '单文件' : exportFormat === 'multiple' ? '多文件' : 'PNG' }} · {{ exportFormat === 'png' ? '明文' : 'AES-256' }}</template>
+        </span>
+        <button class="btn kv-cancel" @click="closeExportDialog" :disabled="exporting">取消</button>
+        <button
+          class="btn btn-primary kv-confirm"
+          @click="doExport"
+          :disabled="exporting || exportSelectedIds.size === 0 || !exportPath"
+        >
+          {{ exporting ? '导出中…' : '开始导出' }}
+        </button>
+      </div>
+    </CosmicOverlay>
 
     <!-- 解析对话框（复用子密钥验证窗口 CosmicOverlay + kv-* 样式） -->
     <!-- 单一 v-if/v-else-if 链：互斥状态机，避免多链导致元素同时显示
@@ -470,9 +463,9 @@
     />
 
     <!-- 损坏清理对话框：扫描 → 结果 → 二次确认 → 删除（不可逆） -->
-    <CosmicOverlay :show="repairVisible" width="520px" @close="closeRepair">
-      <div class="repair-title">清理无法解密的照片</div>
-      <div class="repair-desc">
+    <CosmicOverlay :show="repairVisible" width="520px" aria-labelledby="pa-repair-title" @close="closeRepair">
+      <div class="kv-title" id="pa-repair-title">清理无法解密的照片</div>
+      <div class="kv-desc">
         扫描会逐条校验照片元数据；只有内容层认证失败的记录才会被判定为损坏。
         模块密钥未解锁、读取超时等无法判定的记录不会计入，也不会被删除。
       </div>
@@ -485,17 +478,17 @@
             共检查 <b>{{ repairChecked }}</b> 张照片，发现
             <b>{{ repairDamagedIds.length }}</b> 条无法解密的记录。
           </p>
-          <p v-if="repairInconclusive > 0" class="repair-muted">
+          <p v-if="repairInconclusive > 0" class="kv-note">
             另有 {{ repairInconclusive }} 条暂时无法判定，已跳过（不会删除）。
           </p>
-          <p v-if="repairDamagedIds.length > 0" class="repair-warn">
+          <p v-if="repairDamagedIds.length > 0" class="kv-error">
             删除不可恢复：这些记录的密文只能用已随旧库删除的旧模块密钥解开。
           </p>
-          <p v-else class="repair-muted">未发现确定损坏的记录。</p>
+          <p v-else class="kv-note">未发现确定损坏的记录。</p>
         </template>
       </div>
 
-      <div class="repair-actions">
+      <div class="kv-actions">
         <button
           class="btn"
           :disabled="repairStage === 'scanning' || repairStage === 'cleaning'"
@@ -504,16 +497,16 @@
           重新扫描
         </button>
         <button
-          class="btn"
+          class="btn kv-cancel"
           :disabled="repairStage === 'scanning' || repairStage === 'cleaning'"
           @click="closeRepair"
         >
           关闭
         </button>
         <template v-if="repairConfirming">
-          <button class="btn" @click="cancelRepairConfirm">取消</button>
+          <button class="btn kv-cancel" @click="cancelRepairConfirm">取消</button>
           <button
-            class="btn repair-danger"
+            class="btn kv-danger"
             :disabled="repairStage !== 'scanned'"
             @click="runRepairCleanup"
           >
@@ -522,7 +515,7 @@
         </template>
         <button
           v-else
-          class="btn repair-danger"
+          class="btn kv-danger"
           :disabled="repairStage !== 'scanned' || repairDamagedIds.length === 0"
           @click="requestRepairCleanup"
         >
@@ -682,23 +675,20 @@ const {
 const {
   showExportDialog, exportSelectedIds, exportToken, exportFormat, exportPath,
   exporting, exportProgress, exportStatus, tokenCopied,
-  openExportDialog, closeExportDialog, togglePhotoSelect, selectAllPhotos,
-  deselectAllPhotos, regenerateExportToken, copyExportToken, chooseExportPath,
+  openExportDialog, closeExportDialog, togglePhotoSelect, allPhotosSelected,
+  toggleSelectAllPhotos, regenerateExportToken, copyExportToken, chooseExportPath,
   doExport,
 } = usePhotoExport({
   photos, isTauri, ensurePhotoKey,
   showError, showExportDone, showCopied,
 });
 
-/* ---------- 5b. 模态可访问性（查看器 / 导出面板） ----------
- * 焦点契约：打开时把焦点移入模态根，关闭时归还给打开前的焦点元素；
- * Esc 只由持有焦点的模态响应（栈序由 utils/modal_stack 的滚动锁保证）。
- * 导出面板额外做 Tab 循环，防止焦点逃逸到背景网格。 */
+/* ---------- 5b. 查看器模态可访问性 ----------
+ * 焦点契约：打开时把焦点移入查看器，关闭时归还给打开前的焦点元素；
+ * 导出面板的焦点陷阱、Esc 与滚动锁由 CosmicOverlay 统一承担。 */
 const viewerRef = ref<HTMLElement | null>(null);
-const exportDialogRef = ref<HTMLElement | null>(null);
 /** 打开前的焦点元素（关闭时归还；元素可能已被虚拟滚动回收，focus 失败静默） */
 let viewerReturnFocus: HTMLElement | null = null;
-let exportReturnFocus: HTMLElement | null = null;
 
 watch(viewer, async (open) => {
   if (open) {
@@ -714,58 +704,12 @@ watch(viewer, async (open) => {
   }
 });
 
-watch(showExportDialog, async (open) => {
-  if (open) {
-    const active = document.activeElement;
-    exportReturnFocus = active instanceof HTMLElement ? active : null;
-    await nextTick();
-    exportDialogRef.value?.focus();
-    return;
-  }
-  if (exportReturnFocus) {
-    exportReturnFocus.focus();
-    exportReturnFocus = null;
-  }
-});
-
 /** 查看器 Esc 关闭（焦点在查看器内才会触发；不误伤其它层） */
 const onViewerKeydown = (e: KeyboardEvent) => {
   if (e.key !== "Escape") return;
   e.preventDefault();
   e.stopPropagation();
   closeViewer();
-};
-
-/** 导出面板键盘契约：Esc 关闭（导出中禁关，与关闭按钮一致）；Tab 在面板内循环 */
-const onExportDialogKeydown = (e: KeyboardEvent) => {
-  if (e.key === "Escape") {
-    if (exporting.value) return;
-    e.preventDefault();
-    e.stopPropagation();
-    closeExportDialog();
-    return;
-  }
-  if (e.key !== "Tab") return;
-  const root = exportDialogRef.value;
-  if (!root) return;
-  const focusables = Array.from(root.querySelectorAll<HTMLElement>(
-    'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
-  )).filter((el) => el.offsetParent !== null || el === document.activeElement);
-  if (focusables.length === 0) {
-    e.preventDefault();
-    root.focus();
-    return;
-  }
-  const first = focusables[0];
-  const last = focusables[focusables.length - 1];
-  const active = document.activeElement;
-  if (e.shiftKey && (active === first || active === root)) {
-    e.preventDefault();
-    last.focus();
-  } else if (!e.shiftKey && (active === last || active === root)) {
-    e.preventDefault();
-    first.focus();
-  }
 };
 
 /* ---------- 6. 解析层 ---------- */
@@ -1016,7 +960,7 @@ useModuleDialogGuard("photos", () => {
 /* 入场编排已收敛到全局「模块步入编排」（入口根为步入窗口宿主：顶栏为
    常显元素 [.module-reveal]、照片卡片为内容条目 [.reveal-item]）；
    入场一律只走不透明度 —— 顶栏/选择栏/弹窗都承载文字，位移会让字形抗锯齿
-   在合成层与主层之间跳变（观感为"模糊再变清晰"）。本文件不再定义入场关键帧。 */
+   在合成层与主层之间跳变（观感为"模糊再变清晰"）。本文件不得定义入场关键帧。 */
 .top-left { display: flex; align-items: center; gap: 8px; }
 .album-title { font-size: 13px; color: var(--text-primary); letter-spacing: 1px; }
 .album-count { font-size: 10px; color: var(--text-muted); font-family: var(--font); }
@@ -1024,7 +968,7 @@ useModuleDialogGuard("photos", () => {
 .enc-badge svg { width: 10px; height: 10px; }
 .top-right { display: flex; gap: 8px; align-items: center; }
 /* 顶栏图标键的状态与色相：几何（正方形 + 图标口径）与皮肤（实心主色 + 势隙线）
-   全部来自全局 .btn-icon / .btn-primary 与共享 ActionButton，本节不再声明尺寸与肤色 */
+   全部来自全局 .btn-icon / .btn-primary 与共享 ActionButton，本节不得声明尺寸与肤色 */
 /* 双状态图标叠放容器：两枚图标绝对定位交叉淡入，切换不产生布局抖动 */
 .privacy-ico { position: relative; display: block; width: 13px; height: 13px; }
 .privacy-ico svg { position: absolute; inset: 0; width: 13px; height: 13px; }
@@ -1227,34 +1171,21 @@ useModuleDialogGuard("photos", () => {
 .viewer-image { max-width: 90vw; max-height: 80vh; object-fit: contain; border-radius: var(--radius); transform-origin: center center; transition: transform 0.12s ease-out; animation: photo-in 0.6s var(--ease); user-select: none; -webkit-user-drag: none; }
 .viewer-image.dragging { transition: none; }
 @keyframes photo-in { from { opacity: 0; } to { opacity: 1; } }
-/* 动画关键帧（被导出对话框等复用） */
-@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes dialog-in { from { opacity: 0; } to { opacity: 1; } }
-
-/* ===== 导出对话框：两栏工作台（左选片 / 右配置） ===== */
-.export-dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.84); display: flex; align-items: center; justify-content: center; z-index: 4000; animation: fade-in 0.2s var(--ease); }
-.export-dialog { width: min(860px, calc(100vw - 48px)); height: min(560px, calc(100vh - 96px)); display: flex; flex-direction: column; border-radius: var(--radius); animation: dialog-in 0.3s var(--ease); overflow: hidden; }
-.export-dialog:focus, .export-dialog:focus-visible { outline: none; }
-
-/* 头部：标题 + 实时计数 + 关闭（计数常驻头部，滚动区不再重复） */
-.ed-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px 14px; flex-shrink: 0; }
-.ed-title { font-size: 15px; color: var(--text-primary); font-weight: 500; letter-spacing: 2px; }
-.ed-header-right { display: flex; align-items: center; gap: 16px; }
-.ed-count { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); letter-spacing: 0.5px; }
+/* ===== 导出对话框：两栏工作台（外壳、标题与动作区由全局弹窗承担） ===== */
+.ed-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.ed-head .kv-title { margin-bottom: 0; }
+.ed-count { flex-shrink: 0; font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); letter-spacing: 0.5px; }
 .ed-count b { color: var(--accent); font-weight: 600; font-size: 13px; }
-.ed-close { width: 28px; height: 28px; border: none; background: transparent; color: var(--text-muted); font-size: 18px; cursor: pointer; transition: color 0.2s; border-radius: var(--radius-sm); }
-.ed-close:hover { color: var(--danger); }
-.ed-close:disabled { opacity: 0.3; cursor: not-allowed; }
 
-/* 主体：左选片（弹性）/ 右配置（固定栏 + 细分隔线）；单行 1fr 撑满固定窗高 */
-.ed-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 296px; grid-template-rows: minmax(0, 1fr); }
+/* 主体：左选片（弹性）/ 右配置（固定栏 + 细分隔线）；固定工作区高度，滚动收敛在栏内 */
+.ed-body { height: min(520px, 56vh); min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 286px; grid-template-rows: minmax(0, 1fr); }
 .ed-pane { min-height: 0; }
-.ed-pane--gallery { display: flex; flex-direction: column; padding: 0 18px 0 22px; }
-.ed-pane--config { display: flex; flex-direction: column; gap: 20px; padding: 2px 22px 10px 20px; border-left: 1px solid var(--border-glass); overflow-y: auto; }
+.ed-pane--gallery { display: flex; flex-direction: column; padding-right: 18px; }
+.ed-pane--config { display: flex; flex-direction: column; gap: 20px; padding: 2px 2px 10px 20px; border-left: 1px solid rgba(205, 224, 244, 0.07); overflow-y: auto; }
 
-/* 选片工具条 */
-.ed-gallery-bar { display: flex; gap: 8px; padding-bottom: 10px; flex-shrink: 0; }
-.ed-mini-btn { display: flex; align-items: center; gap: 3px; padding: 4px 10px; font-size: 10px; border: 1px solid var(--border-glass); border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease); font-family: var(--font); white-space: nowrap; }
+/* 选片工具条：单键全选切换，贴右对齐 */
+.ed-gallery-bar { display: flex; justify-content: flex-end; gap: 8px; padding-bottom: 10px; flex-shrink: 0; }
+.ed-mini-btn { display: flex; align-items: center; gap: 3px; padding: 4px 10px; font-size: 10px; border: 1px solid rgba(205, 224, 244, 0.10); border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease); font-family: var(--font); white-space: nowrap; }
 .ed-mini-btn:hover:not(:disabled) { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.3); background: rgba(var(--accent-rgb), 0.06); }
 .ed-mini-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
@@ -1263,20 +1194,18 @@ useModuleDialogGuard("photos", () => {
 .ed-pane--gallery .ed-photo-grid { flex: 1 1 0; min-height: 0; padding: 1px 0 14px 0; }
 .ed-photo-item { position: relative; width: 100%; height: 100%; border-radius: var(--radius-sm); overflow: hidden; cursor: pointer; background: rgba(0,0,0,0.35); outline: 1px solid transparent; outline-offset: -1px; transition: outline-color 0.18s var(--ease); }
 .ed-photo-item:hover { outline-color: rgba(var(--accent-rgb), 0.3); }
-.ed-photo-item:focus-visible { outline: 2px solid var(--accent); }
-.ed-photo-item.selected { outline: 2px solid var(--accent); }
+.ed-photo-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* 选中描边内收 2px：完全落在卡片盒内，避免虚拟项容器裁剪描边 */
+.ed-photo-item.selected { outline: 2px solid var(--accent); outline-offset: -2px; }
 .ed-photo-thumb { position: absolute; inset: 0 0 18px 0; background-size: cover; background-position: center; }
 .ed-photo-name { position: absolute; left: 0; right: 0; bottom: 0; height: 18px; line-height: 18px; padding: 0 6px; font-size: 9px; color: var(--text-secondary); background: rgba(0,0,0,0.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* 配置组：微标签 + 延伸细线（编辑式分组，替代大写下标题堆叠） */
+/* 配置组：微标签 + 延伸细线（kv-section-label 统一承担） */
 .ed-group { display: flex; flex-direction: column; gap: 9px; }
-.ed-group-label { display: flex; align-items: center; gap: 10px; font-size: 10px; letter-spacing: 2px; color: var(--text-muted); }
-.ed-group-label::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--border-glass), transparent); }
-.ed-hint { margin: 0; font-size: 10px; line-height: 1.6; color: var(--text-muted); opacity: 0.75; }
 
 /* 格式分段控件：与令牌 / 保存位置行同宽同高（40px 整行） */
-.ed-seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; height: 40px; padding: 2px; background: rgba(0,0,0,0.35); border: 1px solid var(--border-glass); border-radius: var(--radius); }
-.ed-seg-item { position: relative; display: grid; place-items: center; border-radius: calc(var(--radius) - 3px); font-size: 11px; color: var(--text-muted); cursor: pointer; transition: color 0.18s var(--ease), background 0.18s var(--ease), box-shadow 0.18s var(--ease); }
+.ed-seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; height: 40px; padding: 2px; background: linear-gradient(180deg, rgba(2, 5, 10, 0.34), rgba(2, 5, 10, 0.18)); border-radius: 8px; box-shadow: inset 0 1px 0 rgba(var(--black-rgb), 0.5), inset 0 -1px 0 rgba(205, 224, 244, 0.055); }
+.ed-seg-item { position: relative; display: grid; place-items: center; border-radius: 6px; font-size: 11px; color: var(--text-muted); cursor: pointer; transition: color 0.18s var(--ease), background 0.18s var(--ease), box-shadow 0.18s var(--ease); }
 .ed-seg-item input { position: absolute; opacity: 0; pointer-events: none; }
 .ed-seg-item:hover { color: var(--text-secondary); }
 .ed-seg-item.active { color: var(--accent); background: rgba(var(--accent-rgb), 0.1); box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.28); }
@@ -1285,46 +1214,40 @@ useModuleDialogGuard("photos", () => {
 .ed-seg-item:has(input:disabled) { opacity: 0.45; cursor: not-allowed; }
 
 /* 令牌：与「保存到」行同宽同高（40px 整行）的文本框 + 操作钮（复制态转对勾） */
-.ed-token-display { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; background: rgba(0,0,0,0.4); border: 1px solid rgba(var(--accent-rgb), 0.14); border-radius: var(--radius); }
+.ed-token-display { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; background: linear-gradient(180deg, rgba(2, 5, 10, 0.34), rgba(2, 5, 10, 0.18)); border-radius: 8px; box-shadow: inset 0 1px 0 rgba(var(--black-rgb), 0.5), inset 0 -1px 0 rgba(205, 224, 244, 0.055); }
 /* 令牌输入：单行（超长省略）+ 可直接编辑为自定义令牌 */
 .ed-token-code { flex: 1; min-width: 0; background: transparent; border: none; outline: none; padding: 0; font-family: var(--font-mono); font-size: 11px; color: var(--accent); letter-spacing: 0.8px; text-overflow: ellipsis; cursor: text; transition: color 0.2s var(--ease); }
 .ed-token-code::selection { background: rgba(var(--accent-rgb), 0.3); }
 .ed-token-code:hover:not(:disabled), .ed-token-code:focus { color: #00ffaa; }
 .ed-token-code:disabled { color: var(--text-muted); cursor: not-allowed; }
 .ed-token-actions { display: flex; gap: 6px; flex-shrink: 0; }
-.ed-token-btn { display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 1px solid var(--border-glass); border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease); }
+.ed-token-btn { display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 1px solid rgba(205, 224, 244, 0.10); border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease); }
 .ed-token-btn svg { width: 12px; height: 12px; transition: transform 0.4s var(--ease); }
 .ed-token-btn:hover:not(:disabled) { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.3); background: rgba(var(--accent-rgb), 0.06); }
 .ed-token-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .ed-token-btn--spin:hover:not(:disabled) svg { transform: rotate(180deg); }
 .ed-token-btn.is-copied { color: #00ffaa; border-color: rgba(0,255,170,0.4); background: rgba(0,255,170,0.08); }
 
-/* 保存位置：整行可选（未选择时为空文本框，仅保留文件夹图标作选择入口）；
-   与令牌行同宽同高（40px 整行） */
-.ed-path { display: flex; align-items: center; gap: 10px; width: 100%; height: 40px; padding: 0 12px; border: 1px solid var(--border-glass); border-radius: var(--radius); background: rgba(0,0,0,0.3); cursor: pointer; transition: border-color 0.2s var(--ease), background 0.2s var(--ease); text-align: left; }
+/* 保存位置：整行可选（未选择时为空文本框，仅保留文件夹图标作选择入口） */
+.ed-path { display: flex; align-items: center; gap: 10px; width: 100%; height: 40px; padding: 0 12px; border: 1px solid rgba(205, 224, 244, 0.10); border-radius: 8px; background: rgba(2, 5, 10, 0.24); cursor: pointer; transition: border-color 0.2s var(--ease), background 0.2s var(--ease); text-align: left; }
 .ed-path:hover:not(:disabled) { border-color: rgba(var(--accent-rgb), 0.35); background: rgba(var(--accent-rgb), 0.04); }
 .ed-path:disabled { opacity: 0.45; cursor: not-allowed; }
 .ed-path-text { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ed-path-icon { width: 14px; height: 14px; color: var(--text-muted); flex-shrink: 0; transition: color 0.2s var(--ease); }
 .ed-path:hover:not(:disabled) .ed-path-icon { color: var(--accent); }
 
-/* 进度线：底栏顶缘 2px 细线（导出中点亮，替代独立进度条区块） */
-.ed-progress-line { position: relative; height: 2px; flex-shrink: 0; background: rgba(255,255,255,0.04); }
+/* 进度线：动作区顶缘 2px 细线（导出中点亮，替代独立进度条区块） */
+.ed-progress-line { position: relative; height: 2px; flex-shrink: 0; margin-top: 12px; background: rgba(255,255,255,0.04); }
 .ed-progress-line i { position: absolute; inset: 0 auto 0 0; width: 0; background: linear-gradient(90deg, var(--accent), #00ffaa); transition: width 0.25s var(--ease); }
 .ed-progress-line.live { background: rgba(var(--accent-rgb), 0.08); }
 
-/* 底栏：单行摘要（并入原汇总三项）+ 动作 */
-.ed-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 22px 16px; flex-shrink: 0; }
-.ed-summary-line { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ed-footer-actions { display: flex; gap: 10px; flex-shrink: 0; }
-.ed-confirm { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.3); background: rgba(var(--accent-rgb), 0.08); padding: 6px 16px; }
-.ed-confirm:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.15); }
-.ed-confirm:disabled { opacity: 0.4; cursor: not-allowed; }
+/* 动作区：摘要贴左、按钮贴右（几何由 kv-actions 统一） */
+.ed-actions { margin-top: 0; padding-top: 12px; }
 
 /* 窄窗兜底：单列堆叠（配置栏移至网格下方） */
 @media (max-width: 760px) {
-  .ed-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
-  .ed-pane--config { border-left: none; border-top: 1px solid var(--border-glass); padding: 14px 22px 6px; }
+  .ed-body { height: min(560px, 66vh); grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .ed-pane--config { border-left: none; border-top: 1px solid rgba(205, 224, 244, 0.07); padding: 14px 2px 6px; }
 }
 
 /* ===== 解析对话框（外壳复用 CosmicOverlay + kv-* 全局样式，仅保留解析特有元素） ===== */
@@ -1352,14 +1275,7 @@ useModuleDialogGuard("photos", () => {
 .parse-preview-thumb { width: 70px; height: 70px; border-radius: 6px; background-size: cover; background-position: center; background-color: rgba(0,0,0,0.3); }
 .parse-preview-name { font-size: 10px; color: var(--text-muted); text-align: center; word-break: break-all; }
 
-/* ===== 损坏清理对话框（外壳复用 CosmicOverlay，仅保留清理特有元素） ===== */
-.repair-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
-.repair-desc { margin-top: 8px; font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
-.repair-state { margin-top: 14px; font-size: 13px; line-height: 1.7; color: var(--text-primary); }
+/* ===== 损坏清理对话框（外壳与标题/动作区复用全局弹窗，仅保留清理读数） ===== */
+.repair-state { margin: 14px 0 0; font-size: 13px; line-height: 1.7; color: var(--text-primary); }
 .repair-state p { margin: 4px 0; }
-.repair-muted { color: var(--text-muted); font-size: 12px; }
-.repair-warn { color: var(--danger); font-size: 12px; }
-.repair-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
-.repair-danger { color: #fff; background: var(--danger); border-color: var(--danger); }
-.repair-danger:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>

@@ -16,12 +16,13 @@
         :z-index="overlayZ"
         @backdrop="onBackdrop"
       >
-        <div ref="hostRef" class="cosmic-overlay-host">
+        <div ref="hostRef" class="cosmic-overlay-host" tabindex="-1">
           <CosmicDialog
             :width="width"
-            role="dialog"
+            :role="role"
             aria-modal="true"
-            :aria-label="ariaLabel"
+            :aria-label="ariaLabelledby ? undefined : ariaLabel"
+            :aria-labelledby="ariaLabelledby || undefined"
           >
             <slot />
           </CosmicDialog>
@@ -35,15 +36,26 @@
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 import CosmicBackdrop from "./CosmicBackdrop.vue";
 import CosmicDialog from "./CosmicDialog.vue";
+/* 模态栈与滚动锁由 utils/modal_stack 统一维护：多层窗口并存时只有栈顶
+ * 响应 Esc；滚动锁按层计数，内层关闭不会提前解锁页面 */
+import { isTopModal, popModal, pushModal } from "../../../utils/modal_stack";
 
 interface Props {
   show: boolean;
   width?: string;
-  /** 点击遮罩背景是否关闭（默认 true） */
+  /** 面板语义：普通窗口为 dialog；不可逆确认窗为 alertdialog */
+  role?: "dialog" | "alertdialog";
+  /** 点击遮罩背景是否关闭（默认 true）；与 persistent 取与 */
   backdropClose?: boolean;
-  /** 弹窗无障碍名称（读屏播报；无可见标题关联时的兜底） */
+  /** 强制窗口：Esc 与遮罩点击均不得关闭，只能由业务动作结束 */
+  persistent?: boolean;
+  /** 弹窗无障碍名称（无可见标题关联时使用；ariaLabelledby 优先） */
   ariaLabel?: string;
-  /** 是否将遮罩 teleport 到 body：高优先窗口需逃离应用堆叠上下文 */
+  /** 标题元素 id：存在时以关联标题作为无障碍名称 */
+  ariaLabelledby?: string;
+  /** 打开时的初始焦点选择器（如 ".kv-cancel"）；缺省落到首个可聚焦元素 */
+  initialFocus?: string;
+  /** 是否将遮罩 teleport 到 body：保证模态始终覆盖应用堆叠上下文 */
   teleport?: boolean;
   /** 遮罩层级（默认沿用 Cosmic 弹窗层 9999；高优先窗口可提升到 10000） */
   overlayZ?: number;
@@ -51,16 +63,27 @@ interface Props {
 
 const props = withDefaults(defineProps<Props>(), {
   width: "400px",
+  role: "dialog",
   backdropClose: true,
+  persistent: false,
   ariaLabel: "对话框",
-  teleport: false,
+  ariaLabelledby: "",
+  initialFocus: "",
+  teleport: true,
   overlayZ: 9999,
 });
 
 const emit = defineEmits<{ (e: "close"): void }>();
 
+/** 本实例在模态栈中的身份：嵌套窗口只允许栈顶响应 Esc 与遮罩关闭 */
+const modalId = Symbol("cosmic-overlay");
+
+/** 关闭请求的唯一判定：强制窗口与禁用遮罩关闭时，Esc 同样不得放行 */
+const canDismiss = (): boolean =>
+  isTopModal(modalId) && props.backdropClose && !props.persistent;
+
 const onBackdrop = () => {
-  if (props.backdropClose) emit("close");
+  if (canDismiss()) emit("close");
 };
 
 /* ===== 模态语义：焦点陷阱 + Esc 关闭 + 焦点归还 =====
@@ -87,10 +110,10 @@ const collectFocusables = (): HTMLElement[] => {
 };
 
 const onKeydown = (e: KeyboardEvent) => {
-  if (!props.show) return;
+  if (!props.show || !isTopModal(modalId)) return;
   if (e.key === 'Escape') {
     e.preventDefault();
-    emit('close');
+    if (canDismiss()) emit('close');
     return;
   }
   if (e.key !== 'Tab') return;
@@ -99,6 +122,7 @@ const onKeydown = (e: KeyboardEvent) => {
   if (!host) return;
   if (list.length === 0) {
     e.preventDefault();
+    host.focus();
     return;
   }
   const first = list[0];
@@ -116,18 +140,35 @@ const onKeydown = (e: KeyboardEvent) => {
   }
 };
 
+/* 初始焦点：破坏性窗口用 initialFocus 指定取消键，避免误按回车执行；
+ * 其余窗口落到首个可聚焦控件，无控件时落到模态宿主承接键盘事件 */
+const focusInitial = (): void => {
+  const host = hostRef.value;
+  if (!host) return;
+  if (props.initialFocus) {
+    const target = host.querySelector<HTMLElement>(props.initialFocus);
+    if (target) {
+      target.focus();
+      return;
+    }
+  }
+  const list = collectFocusables();
+  (list[0] ?? host).focus();
+};
+
 watch(
   () => props.show,
   async (show) => {
     if (show) {
       prevFocus =
         document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      pushModal(modalId);
       document.addEventListener('keydown', onKeydown, true);
       await nextTick();
-      const list = collectFocusables();
-      (list[0] ?? hostRef.value)?.focus?.();
+      focusInitial();
     } else {
       document.removeEventListener('keydown', onKeydown, true);
+      popModal(modalId);
       if (prevFocus && prevFocus.isConnected) prevFocus.focus();
       prevFocus = null;
     }
@@ -137,6 +178,7 @@ watch(
 
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKeydown, true);
+  popModal(modalId);
 });
 </script>
 
@@ -144,6 +186,11 @@ onBeforeUnmount(() => {
 /* display: contents —— 语义包装不参与布局（弹窗仍是遮罩的居中子项） */
 .cosmic-overlay-host {
   display: contents;
+}
+/* 焦点兜底落在宿主：宿主本身不是可交互目标，不绘制焦点框 */
+.cosmic-overlay-host:focus,
+.cosmic-overlay-host:focus-visible {
+  outline: none;
 }
 </style>
 

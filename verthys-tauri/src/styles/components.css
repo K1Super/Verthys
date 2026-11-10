@@ -627,80 +627,421 @@ input[type="password"]::-ms-reveal {
   outline-offset: 2px;
 }
 
-/* ===== 通用弹窗内部元素样式（kv-* = key verify）=====
- * 统一 MainView 模块密钥登录弹窗与 SecurityCenter 密钥编辑弹窗的内部视觉
- * 外壳（遮罩层 + 弹窗底板）由 CosmicOverlay.vue 提供
- * 内部元素（标题/描述/输入/按钮等）使用以下全局类
+/* ===== 通用弹窗内容词汇（kv-* · 全局单一来源）=====
+ * 所有弹窗的内容排版只使用本组类。外壳（遮罩、底板、焦点陷阱、Esc 与
+ * 滚动锁）由 CosmicOverlay / CosmicDialog 承担；本组只定义标题、说明、
+ * 字段、控件、选项、反馈与动作区，模块内不得重写这些外观。
  */
 .kv-title {
-  font-size: 16px;
+  margin-bottom: 10px;
+  font-size: 17px;
   font-weight: 600;
-  margin-bottom: 8px;
-  color: var(--text-primary);
-  letter-spacing: 1px;
+  line-height: 1.35;
+  letter-spacing: 0.04em;
+  color: #e8f1fa;
 }
 .kv-desc {
+  margin-bottom: 18px;
   font-size: 12px;
-  color: var(--text-muted);
-  margin-bottom: 16px;
-  line-height: 1.6;
+  line-height: 1.72;
+  letter-spacing: 0.01em;
+  color: rgba(155, 171, 194, 0.82);
 }
+/* 警告语义只留文字与色相：去底色、去围框、去图标，避免与弹窗底板争夺注意力 */
 .kv-warn {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--warning);
-  margin-bottom: 12px;
-  padding: 8px 10px;
-  border: 1px solid rgba(var(--warning-rgb), 0.2);
-  border-radius: 6px;
-  background: rgba(var(--warning-rgb), 0.05);
-  font-family: var(--font);
-  line-height: 1.5;
+  display: block;
+  margin: 0 0 14px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 11.5px;
+  line-height: 1.66;
+  color: rgba(255, 184, 108, 0.92);
 }
-.kv-warn svg {
+/* 错误语义与警告同构：状态红文字直陈，不加底色框与图标 */
+.kv-error {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.66;
+  color: var(--danger);
+}
+.kv-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: rgba(132, 148, 168, 0.9);
+}
+.kv-hint {
+  margin: 6px 0 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.kv-hint.is-error {
+  color: var(--danger);
+}
+
+/* ===== 结构：分区 / 字段 ===== */
+.kv-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.kv-section {
+  padding-top: 16px;
+  margin-top: 16px;
+  border-top: 1px solid rgba(205, 224, 244, 0.07);
+}
+.kv-section:first-child {
+  padding-top: 0;
+  margin-top: 0;
+  border-top: 0;
+}
+.kv-section-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: rgba(132, 148, 168, 0.85);
+}
+.kv-section-label::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(205, 224, 244, 0.10), transparent 82%);
+}
+.kv-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.kv-field + .kv-field {
+  margin-top: 12px;
+}
+/* 选项条之后接字段：开关与其附属输入保持同一分区间距 */
+.kv-option + .kv-field {
+  margin-top: 12px;
+}
+.kv-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: rgba(155, 171, 194, 0.82);
+}
+.kv-req {
+  font-style: normal;
+  color: rgba(var(--danger-rgb), 0.78);
+}
+
+/* ===== 控件：凹槽通道（无包围描边，深度由内顶暗缝与底缘细光定义）===== */
+.kv-input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  padding: 11px var(--kv-input-pad-right, 13px) 11px 13px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font);
+  caret-color: var(--accent);
+  outline: none;
+  background: linear-gradient(180deg, rgba(2, 5, 10, 0.38), rgba(2, 5, 10, 0.20));
+  box-shadow:
+    inset 0 1px 0 rgba(var(--black-rgb), 0.50),
+    inset 0 -1px 0 rgba(205, 224, 244, 0.055);
+  transition: box-shadow 0.25s var(--ease), background-color 0.25s var(--ease);
+}
+.kv-input::placeholder {
+  color: rgba(122, 138, 160, 0.55);
+}
+.kv-input:focus {
+  background: linear-gradient(180deg, rgba(2, 5, 10, 0.30), rgba(var(--accent-rgb), 0.030));
+  box-shadow:
+    inset 0 1px 0 rgba(var(--black-rgb), 0.45),
+    inset 0 -1px 0 rgba(var(--accent-rgb), 0.60);
+}
+.kv-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.kv-textarea {
+  resize: vertical;
+  min-height: 64px;
+  max-height: 240px;
+  line-height: 1.65;
+}
+.kv-select {
+  appearance: none;
+  padding-right: 32px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236c7689' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+}
+.kv-select option {
+  background: rgba(20, 22, 30, 0.95);
+  color: var(--text-primary);
+}
+/* 输入框内嵌端子：图标即控件，不占输入框外的水平槽位 */
+.kv-input-group {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.kv-input-group .kv-input {
+  flex: 1;
+  padding-right: 38px;
+}
+/* 内嵌端子去底板：与输入框共用同一凹槽边界，只保留图标本身 */
+.kv-input-group .icon-btn {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  width: 26px;
+  height: 26px;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.kv-input-group .icon-btn:hover {
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent);
+}
+.kv-input-group .icon-btn:focus-visible {
+  outline: 1px solid var(--border-hover);
+  outline-offset: 1px;
+}
+.kv-input-group .icon-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* ===== 选项条：整行可点的开关（原生复选框视觉隐藏但保留焦点路径）===== */
+.kv-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  border: 1px solid rgba(205, 224, 244, 0.07);
+  border-radius: 8px;
+  background-color: rgba(2, 5, 10, 0.20);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
+}
+.kv-option:hover {
+  border-color: rgba(205, 224, 244, 0.14);
+}
+.kv-option.is-on {
+  border-color: rgba(var(--accent-rgb), 0.35);
+  background-color: rgba(var(--accent-rgb), 0.05);
+}
+.kv-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.kv-option-check {
+  position: relative;
+  flex-shrink: 0;
   width: 14px;
   height: 14px;
+  box-sizing: border-box;
+  border: 1px solid rgba(205, 224, 244, 0.16);
+  border-radius: 3px;
+  transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
+}
+.kv-option.is-on .kv-option-check {
+  background-color: var(--accent);
+  border-color: var(--accent);
+}
+.kv-option.is-on .kv-option-check::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid #04121a;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.kv-option input:focus-visible + .kv-option-check {
+  outline: 1px solid rgba(var(--accent-rgb), 0.55);
+  outline-offset: 2px;
+}
+.kv-option-text {
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+}
+.kv-option.is-on .kv-option-text {
+  color: var(--text-primary);
+}
+.kv-option-hint {
+  margin-left: auto;
+  font-size: 10.5px;
+  letter-spacing: 0.3px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.kv-option:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* ===== 读数 / 值 / 代码 ===== */
+.kv-readout {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   flex-shrink: 0;
-  margin-top: 1px;
-  opacity: 0.8;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+.kv-readout-dot {
+  position: relative;
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+.kv-readout.is-valid {
+  color: var(--success);
+}
+.kv-readout.is-valid .kv-readout-dot::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.kv-readout.is-expiring {
+  color: var(--warning);
+}
+.kv-readout.is-expiring .kv-readout-dot::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+.kv-readout.is-expired {
+  color: var(--danger);
+}
+.kv-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(205, 224, 244, 0.06);
+}
+.kv-row + .kv-row {
+  margin-top: 8px;
+}
+.kv-row-label {
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: rgba(155, 171, 194, 0.82);
+}
+.kv-row-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.kv-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.kv-value.is-multiline {
+  white-space: pre-wrap;
+}
+.kv-secret {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  letter-spacing: 1px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.kv-code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+}
+
+/* ===== 动作区 ===== */
+.kv-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+.kv-actions-center {
+  justify-content: center;
+}
+.kv-summary {
+  margin-right: auto;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 破坏性确认：与主确认钮同几何，只以危险色相区分（零阴影） */
+.kv-danger {
+  color: var(--danger);
+  border-color: rgba(var(--danger-rgb), 0.32);
+  background: rgba(var(--danger-rgb), 0.05);
+}
+.kv-danger:hover:not(:disabled) {
+  color: #ffd9df;
+  border-color: rgba(var(--danger-rgb), 0.55);
+  background: rgba(var(--danger-rgb), 0.12);
+}
+.kv-danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 /* 长事务已耗时：不可逆/耗时操作必须让用户看到进度仍在推进 */
 .kd-elapsed {
   margin: 0 0 12px;
   font-size: 11px;
   color: var(--accent);
-}
-.kv-input {
-  width: 100%;
-  background: rgba(var(--black-rgb), 0.3);
-  border: 1px solid rgba(var(--white-rgb), 0.1);
-  border-radius: 8px;
-  padding: 10px 12px;
-  color: var(--text-primary);
-  font-size: 13px;
-  /* 表单控件不继承祖先字体，显式对齐项目主字体（含占位文本） */
-  font-family: var(--font);
-  outline: none;
-  /* 精确属性过渡（禁 transition: all — 同 .input 的过渡约束） */
-  transition:
-    border-color var(--dur-fast) var(--ease),
-    background-color var(--dur-fast) var(--ease);
-  min-width: 0;
-}
-/* 聚焦：仅边框应答（无辉光阴影） */
-.kv-input:focus {
-  border-color: var(--accent);
-}
-.kv-actions {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-  margin-top: 16px;
-}
-.kv-actions-center {
-  justify-content: center;
 }
 /* ===== 次确认按钮（kv-cancel）：静谧退潮风 =====
  * 确认/取消搭档中的退让侧：与主确认钮（潮汐注能）同材质语言、
@@ -780,44 +1121,6 @@ input[type="password"]::-ms-reveal {
 .kv-confirm {
   padding: 6px 16px;
   font-size: 12px;
-}
-
-/* ===== 通用对话框：从虚化凝聚成型 ===== */
-.dialog-overlay {
-  position: fixed;
-  inset: 0;
-  /* 性能约束：全屏 backdrop-filter 每帧全屏重采样 → 不用实时毛玻璃，
-   * 底色加深补偿视觉 */
-  background: rgba(var(--black-rgb), 0.72);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  animation: overlay-in var(--dur) var(--ease);
-}
-.dialog {
-  /* 性能约束：不用实时毛玻璃（弹窗叠在动态深空背景上逐帧重采样），
-   * 以底色不透明度补偿 */
-  background: rgba(14, 18, 28, 0.92);
-  border: 1px solid var(--border-glass);
-  border-radius: var(--radius);
-  padding: 28px;
-  min-width: 380px;
-  max-width: 90vw;
-  max-height: 85vh;
-  overflow-y: auto;
-  box-shadow:
-    0 16px 48px rgba(var(--black-rgb), 0.6),
-    0 0 1px rgba(var(--accent-rgb), 0.1),
-    inset 0 1px 0 rgba(var(--white-rgb), 0.05);
-  animation: dialog-in var(--dur) var(--ease);
-}
-.dialog-title {
-  font-size: 15px;
-  margin-bottom: 20px;
-  color: var(--accent);
-  letter-spacing: 1px;
-  font-weight: 500;
 }
 
 /* ===== 全局复用：量子悬浮提示（cosmic-tip）=====

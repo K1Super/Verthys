@@ -59,7 +59,10 @@ const scaleTicks = [8, 4, 11, 5, 9, 4, 7];
   position: relative;
   z-index: 1;
   isolation: isolate;
+  display: flex;
+  flex-direction: column;
   max-width: 90vw;
+  max-height: 86vh;
   overflow: hidden;
   padding: 26px 28px 24px;
   border: 0;
@@ -197,78 +200,22 @@ const scaleTicks = [8, 4, 11, 5, 9, 4, 7];
   to { opacity: 1; transform: scaleX(1); }
 }
 
-/* 内容层：文字与控件恒在装饰层之上，装饰永不覆盖可读信息 */
+/* 内容层：文字与控件恒在装饰层之上，装饰永不覆盖可读信息。
+ * 独立滚动：长表单不撑破视口；滚动只发生在内容区，上缘过光缝与
+ * 左缘刻度保持在底板原位，不随内容滚走 */
 .cd-content {
   position: relative;
   z-index: 1;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
 }
 
-/* ===== 内容体系（只作用于本折射体内部） =====
- * 标题与说明沿用项目字体；输入改「凹槽通道」——无包围描边，
- * 由内顶暗缝与底缘细光定义深度，焦点只点亮底缘刻度缝。
- * 右内距经 --kv-input-pad-right 预留：内嵌端子不挤占输入文本。 */
-.cosmic-dialog :deep(.kv-title) {
-  margin-bottom: 10px;
-  font-size: 17px;
-  font-weight: 600;
-  line-height: 1.35;
-  letter-spacing: 0.04em;
-  color: #e8f1fa;
-}
-.cosmic-dialog :deep(.kv-desc) {
-  margin-bottom: 18px;
-  font-size: 12px;
-  line-height: 1.72;
-  letter-spacing: 0.01em;
-  color: rgba(155, 171, 194, 0.82);
-}
-/* 警告语义只留文字与色相：去底色、去围框、去图标，避免与折射体争夺注意力 */
-.cosmic-dialog :deep(.kv-warn) {
-  display: block;
-  margin-bottom: 14px;
-  padding: 0;
-  border: 0;
-  background: none;
-  font-size: 11.5px;
-  line-height: 1.66;
-  color: rgba(255, 184, 108, 0.92);
-}
-.cosmic-dialog :deep(.kv-input) {
-  -webkit-appearance: none;
-  appearance: none;
-  border: 0 !important;
-  outline: none !important;
-  border-radius: 8px;
-  padding: 11px var(--kv-input-pad-right, 13px) 11px 13px;
-  color: var(--text-primary);
-  caret-color: var(--accent);
-  background: linear-gradient(180deg, rgba(2, 5, 10, 0.38), rgba(2, 5, 10, 0.20));
-  box-shadow:
-    inset 0 1px 0 rgba(var(--black-rgb), 0.50),
-    inset 0 -1px 0 rgba(205, 224, 244, 0.055);
-  transition: box-shadow 0.25s var(--ease);
-}
-.cosmic-dialog :deep(.kv-input::placeholder) {
-  color: rgba(122, 138, 160, 0.55);
-}
-.cosmic-dialog :deep(.kv-input:focus) {
-  border: 0 !important;
-  outline: none !important;
-  background: linear-gradient(180deg, rgba(2, 5, 10, 0.30), rgba(var(--accent-rgb), 0.030));
-  box-shadow:
-    inset 0 1px 0 rgba(var(--black-rgb), 0.45),
-    inset 0 -1px 0 rgba(var(--accent-rgb), 0.60);
-}
-.cosmic-dialog :deep(.kv-actions) {
-  gap: 10px;
-  margin-top: 20px;
-}
-.cosmic-dialog :deep(.kd-old-key-label) {
-  margin-bottom: 8px;
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  color: rgba(132, 148, 168, 0.85);
-}
+/* 内容词汇（kv-*）由全局 styles/components.css 单源定义：
+ * 标题、字段、控件、选项与动作区不得在外壳内二次声明，
+ * 否则同一视觉会出现两套规则来源 */
 
 @media (prefers-reduced-motion: reduce) {
   .cd-aperture,

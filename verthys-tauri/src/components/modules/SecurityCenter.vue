@@ -227,27 +227,31 @@
 
     <!-- 介质标识变化确认（克隆嫌疑阻断后的自助重绑定；
          确认参数只放行阻断，重绑定以本次密码验证通过为前提） -->
-    <VerthysDialog
-      :model-value="usbRebindPrompt !== null"
-      layout="plain"
+    <CosmicOverlay
+      :show="usbRebindPrompt !== null"
       width="480px"
-      title="介质标识变化"
-      save-label="确认更换介质"
-      saving-label="重试解锁中…"
-      :saving="usbRebindSaving"
-      :save-disabled="unlocking"
+      :persistent="usbRebindSaving"
       :overlay-z="10000"
-      teleport
-      @update:model-value="onUsbRebindDialogToggle"
-      @save="confirmUsbRebind"
+      aria-labelledby="usb-rebind-title"
+      @close="onUsbRebindDialogToggle(false)"
     >
-      <p class="usb-rebind-text">
+      <div class="kv-title" id="usb-rebind-title">介质标识变化</div>
+      <p class="kv-desc">
         检测到加密库所在可移动介质的标识与登记记录不一致（可能为更换介质，或介质被克隆）。
       </p>
-      <p class="usb-rebind-text">
+      <p class="kv-desc">
         如确为本人更换介质，可确认后重试：本次仍须通过密码验证，验证通过后才会更新绑定记录。
       </p>
-    </VerthysDialog>
+      <div class="kv-actions">
+        <button class="btn kv-cancel" type="button" :disabled="usbRebindSaving" @click="onUsbRebindDialogToggle(false)">取消</button>
+        <button
+          class="btn btn-primary kv-confirm"
+          type="button"
+          :disabled="unlocking"
+          @click="confirmUsbRebind"
+        >{{ usbRebindSaving ? "重试解锁中…" : "确认更换介质" }}</button>
+      </div>
+    </CosmicOverlay>
 
     <!-- 一次性恢复码展示与确认（新建 / 轮换共用；确认/关闭即清零） -->
     <RecoveryCodeDialog
@@ -311,7 +315,7 @@ import SecurePcrDialog from "../dialogs/SecurePcrDialog.vue";
 import SecureKeyfileDialog from "../dialogs/SecureKeyfileDialog.vue";
 import RecoveryCodeDialog from "../dialogs/RecoveryCodeDialog.vue";
 import RecoveryUnlockDialog from "../dialogs/RecoveryUnlockDialog.vue";
-import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
+import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
 import StatusRail from "../common/feedback/StatusRail.vue";
 /* 视图级懒加载：拆分中枢首挂载成本 — 首次进入仅执行 UnlockView
  * （最常见入口视图，保持同步渲染零等待），其余视图/弹窗按需拉取
@@ -1114,16 +1118,4 @@ onBeforeUnmount(() => {
 @import '../../styles/security/dashboard.css';
 @import '../../styles/security/qd-panel.css';
 @import '../../styles/security/mgmt-hub.css';
-
-/* ===== 介质标识变化确认弹层（说明文案：纯文本、零阴影） ===== */
-.usb-rebind-text {
-  margin: 0 0 10px;
-  font-size: 13px;
-  line-height: 1.8;
-  letter-spacing: 0.02em;
-  color: var(--text-muted);
-}
-.usb-rebind-text:last-child {
-  margin-bottom: 0;
-}
 </style>

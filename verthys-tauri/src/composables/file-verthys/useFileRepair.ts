@@ -1,9 +1,11 @@
 /**
- * file-verthys/useFileRepair.ts — 清藏损坏文件清理交互层
+ * file-verthys/useFileRepair.ts — 清藏损坏文件检查与清理
  *
- * 职责：扫描（只验证内容外层）→ 结果呈现 → 二次显式确认 → 删除。
- * 删除由调用方注入（复用清藏既有批量删除 / 落盘 / 缓存失效 / 孤儿回收
- * 链路），本层只负责状态机，不直接触碰记录。
+ * 交互口径：
+ *   - 检查结果是瞬时事件，只走统一 Toast（顶部红/底部状态），不弹窗；
+ *   - 若存在损坏文件，由调用方在模块内常驻告知条呈现数量与清理入口，
+ *     告知条承担存续状态，Toast 只承担一次性结果；
+ *   - 删除不可逆，执行前必须由调用方走统一二次确认。
  */
 
 import { ref } from "vue";
@@ -14,8 +16,6 @@ import {
   type FileRepairEntry,
 } from "./damage";
 
-export type FileRepairStage = "idle" | "scanning" | "scanned" | "cleaning";
-
 export interface UseFileRepairParams extends FileDamageDeps {
   /** 清藏列表条目 */
   files: ShallowRef<FileRepairEntry[]>;
@@ -23,110 +23,95 @@ export interface UseFileRepairParams extends FileDamageDeps {
   isTauri: boolean;
   /** 删除确定损坏的条目（含落盘/缓存/回收）；成功返回 true */
   cleanup: (entries: FileRepairEntry[]) => Promise<boolean>;
-  /** 错误提示 */
+  /** 错误提示（顶部红色 Toast） */
   showError: (msg: string) => void;
+  /** 状态提示（底部中性 Toast） */
+  showStatus: (msg: string) => void;
+}
+
+/** 检查结果文案：宁可少一个字，也不堆砌形容词 */
+function buildSummary(result: {
+  damaged: FileRepairEntry[];
+  healthy: number;
+  skipped: number;
+  inconclusive: number;
+}): { text: string; danger: boolean } {
+  const pending = result.inconclusive > 0 ? `，${result.inconclusive} 个待确认` : "";
+  if (result.damaged.length > 0) {
+    return {
+      text: `完整性检查：${result.damaged.length} 个文件无法解密${pending}`,
+      danger: true,
+    };
+  }
+  if (result.healthy > 0) {
+    return {
+      text: "完整性检查通过",
+      danger: false,
+    };
+  }
+  if (result.skipped > 0) {
+    return {
+      text: "完整性检查：无独立密码或历史布局，跳过校验",
+      danger: false,
+    };
+  }
+  return { text: "完整性检查：无可检查的文件", danger: false };
 }
 
 export function useFileRepair(params: UseFileRepairParams) {
-  const { files, isTauri, fetchRecord, probeOuter, cleanup, showError } = params;
+  const { files, isTauri, fetchRecord, probeOuter, cleanup, showError, showStatus } = params;
 
-  const visible = ref(false);
-  const stage = ref<FileRepairStage>("idle");
-  const confirming = ref(false);
-  const checked = ref(0);
+  const scanning = ref(false);
   const damaged = ref<FileRepairEntry[]>([]);
-  const healthy = ref(0);
-  const skipped = ref(0);
-  const inconclusive = ref(0);
 
-  const resetResult = () => {
-    confirming.value = false;
-    checked.value = 0;
-    damaged.value = [];
-    healthy.value = 0;
-    skipped.value = 0;
-    inconclusive.value = 0;
-  };
-
-  const runScan = async (): Promise<void> => {
-    if (stage.value === "scanning" || stage.value === "cleaning") return;
-    resetResult();
-    stage.value = "scanning";
-    try {
-      const result = await scanDamagedFiles(files.value, { fetchRecord, probeOuter });
-      checked.value = result.checked;
-      damaged.value = result.damaged;
-      healthy.value = result.healthy;
-      skipped.value = result.skipped;
-      inconclusive.value = result.inconclusive;
-      stage.value = "scanned";
-    } catch (e) {
-      stage.value = "idle";
-      showError(e instanceof Error ? e.message : "扫描失败，请重试");
-    }
-  };
-
-  const open = async (): Promise<void> => {
+  /** 执行检查，结果只走 Toast；损坏列表供常驻告知条消费 */
+  const scan = async (): Promise<void> => {
+    if (scanning.value) return;
     if (!isTauri) {
-      showError("损坏清理仅在桌面端可用");
+      showError("完整性检查仅在桌面端可用");
       return;
     }
     if (files.value.length === 0) {
-      showError("暂无文件可检查");
+      showStatus("完整性检查：暂无文件可检查");
       return;
     }
-    if (stage.value === "scanning" || stage.value === "cleaning") return;
-    visible.value = true;
-    await runScan();
+
+    scanning.value = true;
+    damaged.value = [];
+    try {
+      const result = await scanDamagedFiles(files.value, { fetchRecord, probeOuter });
+      damaged.value = result.damaged;
+      const summary = buildSummary(result);
+      if (summary.danger) showError(summary.text);
+      else showStatus(summary.text);
+    } catch (e) {
+      showError(e instanceof Error ? e.message : "完整性检查失败，请重试");
+    } finally {
+      scanning.value = false;
+    }
   };
 
-  /** 第一次点击“删除损坏文件”：进入二次确认，不执行删除 */
-  const requestCleanup = (): void => {
-    if (stage.value !== "scanned" || damaged.value.length === 0) return;
-    confirming.value = true;
-  };
-
-  const cancelConfirm = (): void => {
-    confirming.value = false;
-  };
-
-  const cleanupDamaged = async (): Promise<void> => {
-    if (stage.value !== "scanned" || damaged.value.length === 0) return;
-    stage.value = "cleaning";
-    confirming.value = false;
+  /** 清理已确认损坏的条目；成功后才清空告知条 */
+  const cleanupDamaged = async (): Promise<boolean> => {
+    if (damaged.value.length === 0) return true;
     const entries = [...damaged.value];
     const ok = await cleanup(entries);
-    if (!ok) {
-      // 删除未发生：保留结果页供重试或关闭
-      stage.value = "scanned";
-      return;
-    }
-    resetResult();
-    stage.value = "idle";
-    visible.value = false;
+    if (!ok) return false;
+    damaged.value = [];
+    showStatus(`已清理 ${entries.length} 个无法打开的文件`);
+    return true;
   };
 
-  const close = (): void => {
-    if (stage.value === "scanning" || stage.value === "cleaning") return;
-    visible.value = false;
-    stage.value = "idle";
-    resetResult();
+  /** 用户关闭告知条（保留列表数据，下次检查重新计算） */
+  const clearResult = (): void => {
+    damaged.value = [];
   };
 
   return {
-    visible,
-    stage,
-    confirming,
-    checked,
+    scanning,
     damaged,
-    healthy,
-    skipped,
-    inconclusive,
-    open,
-    runScan,
-    requestCleanup,
-    cancelConfirm,
+    scan,
     cleanupDamaged,
-    close,
+    clearResult,
   };
 }

@@ -40,7 +40,7 @@ function mountDialog(
   const app = createApp({ render: () => h(UpdaterAvailableDialog, props) });
   app.mount(container);
   mounted.push({ app, container });
-  /* VerthysDialog 默认 teleport 到 body，查询根同步为 body */
+  /* CosmicOverlay 默认 teleport 到 body，查询根同步为 body */
   return document.body;
 }
 
@@ -85,7 +85,7 @@ describe("更新说明窗口", () => {
     );
 
     expect(buttonByText(container, "稍后")).toBeUndefined();
-    container.querySelector<HTMLElement>(".dialog-overlay")?.click();
+    container.querySelector<HTMLElement>(".cosmic-backdrop")?.click();
     await nextTick();
 
     expect(closed).toBe(false);

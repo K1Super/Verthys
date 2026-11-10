@@ -114,24 +114,23 @@
       @copy="onDetailCopy"
     />
 
-    <!-- 解密密钥输入框（显隐切换与表单同语言；显隐只为核对输入，不落盘） -->
-    <VerthysDialog
-      v-model="showKeyDialog"
-      title="输入密钥以查看密码"
-      save-label="解密查看"
-      :saving="keyBusy"
-      @save="confirmKey"
+    <!-- 解密密钥输入框（外壳与内容词汇统一复用全局弹窗；显隐只为核对输入，不落盘） -->
+    <CosmicOverlay
+      :show="showKeyDialog"
+      width="400px"
+      :persistent="keyBusy"
+      aria-labelledby="vault-key-title"
+      @close="showKeyDialog = false"
     >
-      <div class="key-target">{{ keyTargetName }}</div>
-      <div class="form-field full key-field">
+      <div class="kv-title" id="vault-key-title">输入密钥以查看密码</div>
+      <div class="kv-desc key-target">{{ keyTargetName }}</div>
+      <div class="kv-input-group">
         <input
           id="vault-key-input"
-          class="input"
+          class="kv-input"
           v-model="keyInput"
           :type="keyInputVisible ? 'text' : 'password'"
-          placeholder="独立密钥"
           aria-label="独立密钥"
-          autofocus
           @keydown.enter="confirmKey"
         />
         <button
@@ -145,10 +144,17 @@
           <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
         </button>
       </div>
-      <template #error v-if="keyError">
-        <div class="key-error">密钥错误或密码已损坏</div>
-      </template>
-    </VerthysDialog>
+      <p v-if="keyError" class="kv-error key-error">密钥错误或密码已损坏</p>
+      <div class="kv-actions">
+        <button class="btn kv-cancel" type="button" :disabled="keyBusy" @click="showKeyDialog = false">取消</button>
+        <button
+          class="btn btn-primary kv-confirm"
+          type="button"
+          :disabled="keyBusy || !keyInput"
+          @click="confirmKey"
+        >{{ keyBusy ? "解密中…" : "解密查看" }}</button>
+      </div>
+    </CosmicOverlay>
 
     <!-- 非阻塞加载：无底板居中展示，加载完成自动消失 -->
     <CosmicRingLoader :overlay="true" :show="loading" text="正在加载存签数据…" />
@@ -193,7 +199,7 @@ import { useToastCenter } from "../../composables/useToastCenter";
 import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
 import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
 import VerthysSearchBar from "../common/verthys-ui/VerthysSearchBar.vue";
-import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
+import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
 import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
@@ -782,16 +788,7 @@ useModuleDialogGuard("accounts", () => {
 .empty-clear:hover { color: var(--accent); border-color: var(--border-hover); }
 .empty-clear:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 1px; }
 
-/* 解密密钥对话框：显隐端子内嵌输入框右侧，图标即控件 */
-.key-target { font-size: 12px; color: var(--text-secondary); font-family: var(--font); margin-bottom: 14px; }
-.key-field { position: relative; }
-.key-field .input { width: 100%; min-width: 0; padding-right: 36px; }
-.key-field .icon-btn {
-  position: absolute; right: 4px; top: 50%;
-  width: 24px; height: 24px; transform: translateY(-50%);
-  border: 0; border-radius: 0; background: transparent;
-}
-.key-field .icon-btn:hover { border-color: transparent; background: transparent; color: var(--accent); }
-.key-field .icon-btn:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 1px; }
-.key-error { font-size: 11px; color: var(--danger); margin-top: 6px; }
+/* 解密窗口：目标条目独占一行（外壳与输入材质由全局弹窗词汇承担） */
+.key-target { margin-bottom: 14px; word-break: break-all; }
+.key-error { margin-top: 10px; }
 </style>

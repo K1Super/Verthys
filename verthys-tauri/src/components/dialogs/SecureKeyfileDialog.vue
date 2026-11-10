@@ -6,24 +6,22 @@
   用恢复码解锁（恢复会话中可重绑）。用户可稍后到「全局密钥」面板手动启用。
 -->
 <template>
-  <VerthysDialog
-    :model-value="show"
-    layout="plain"
+  <CosmicOverlay
+    :show="show"
     width="460px"
-    title="高安全模式 · keyfile 第二因子"
-    hide-actions
-    :saving="busy"
     :persistent="busy"
-    @update:model-value="(v: boolean) => { if (!v) $emit('close'); }"
+    aria-labelledby="skf-title"
+    @close="$emit('close')"
   >
+    <div class="kv-title" id="skf-title">高安全模式 · keyfile 第二因子</div>
     <div class="kv-desc">
       安全预设默认建议启用 keyfile：解锁需要口令 + keyfile 文件双因子。
       请把 keyfile 保存在与容器不同的目录或介质，不要和容器一起备份。
     </div>
-    <p class="kv-desc kv-desc-note">
+    <p class="kv-note">
       点击“选择位置并启用”后会生成新的 .vkf 文件；关闭本弹窗不会改变当前库。
     </p>
-    <p v-if="error" class="kd-error">{{ error }}</p>
+    <p v-if="error" class="kv-error skf-error">{{ error }}</p>
     <div class="kv-actions">
       <button class="btn kv-cancel" type="button" :disabled="busy" @click="$emit('close')">
         稍后
@@ -32,12 +30,12 @@
         {{ busy ? "启用中…" : "选择位置并启用" }}
       </button>
     </div>
-  </VerthysDialog>
+  </CosmicOverlay>
 </template>
 
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
+import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
 
 const props = defineProps<{
   show: boolean;
@@ -64,3 +62,9 @@ const onConfirm = () => {
   emit("confirm");
 };
 </script>
+
+<style scoped>
+.skf-error {
+  margin-top: 12px;
+}
+</style>

@@ -2,50 +2,44 @@
   UpdaterRepairDialog — 更新健康自检失败后的恢复入口
 
   只在启动自检失败或安装未完成时出现；修复物料存在时允许一键运行旧版安装器，
-  缺失时如实说明。视觉沿用既有对话框外壳与按钮语言，不新增阴影。
+  缺失时如实说明。外壳与内容词汇统一复用全局弹窗组件。
 -->
 <template>
-  <VerthysDialog
-    v-model="open"
-    title="更新自检未通过"
-    layout="plain"
-    hide-actions
-  >
-    <div class="repair-body">
-      <p class="repair-lead">{{ state?.reason ?? "新版本健康自检未通过" }}</p>
+  <CosmicOverlay :show="open" width="460px" aria-labelledby="repair-title" @close="open = false">
+    <div class="kv-title" id="repair-title">更新自检未通过</div>
+    <p class="kv-desc">{{ state?.reason ?? "新版本健康自检未通过" }}</p>
 
-      <div v-if="state?.version" class="repair-meta">
-        <div class="repair-row">
-          <span class="repair-label">可修复版本</span>
-          <span class="repair-value">{{ state.version }}</span>
-        </div>
-        <div v-if="state?.releaseId" class="repair-row">
-          <span class="repair-label">发布标识</span>
-          <span class="repair-value">{{ state.releaseId }}</span>
-        </div>
+    <div v-if="state?.version" class="kv-form">
+      <div class="kv-row">
+        <span class="kv-row-label">可修复版本</span>
+        <span class="kv-row-value">{{ state.version }}</span>
       </div>
-      <p v-else class="repair-missing">
-        未找到可用的旧版安装包。请重新安装旧版或联系维护人。
-      </p>
-
-      <div class="repair-actions">
-        <button class="btn kv-cancel" type="button" @click="open = false">关闭</button>
-        <button
-          class="btn btn-primary"
-          type="button"
-          :disabled="!state?.available"
-          @click="$emit('repair')"
-        >
-          运行修复
-        </button>
+      <div v-if="state?.releaseId" class="kv-row">
+        <span class="kv-row-label">发布标识</span>
+        <span class="kv-row-value">{{ state.releaseId }}</span>
       </div>
     </div>
-  </VerthysDialog>
+    <p v-else class="kv-error">
+      未找到可用的旧版安装包。请重新安装旧版或联系维护人。
+    </p>
+
+    <div class="kv-actions">
+      <button class="btn kv-cancel" type="button" @click="open = false">关闭</button>
+      <button
+        class="btn btn-primary kv-confirm"
+        type="button"
+        :disabled="!state?.available"
+        @click="$emit('repair')"
+      >
+        运行修复
+      </button>
+    </div>
+  </CosmicOverlay>
 </template>
 
 <script setup lang="ts">
 import { computed } from "vue";
-import VerthysDialog from "../common/verthys-ui/VerthysDialog.vue";
+import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
 import type { RepairState } from "../../composables/useAppUpdater";
 
 const props = defineProps<{
@@ -63,61 +57,3 @@ const open = computed({
   set: (value: boolean) => emit("update:modelValue", value),
 });
 </script>
-
-<style scoped>
-.repair-body {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  min-width: 420px;
-  max-width: 520px;
-}
-
-.repair-lead {
-  margin: 0;
-  color: var(--text-primary);
-  line-height: 1.7;
-  font-size: 13px;
-}
-
-.repair-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.repair-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 18px;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 6px;
-}
-
-.repair-label {
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.repair-value {
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  text-align: right;
-  overflow-wrap: anywhere;
-}
-
-.repair-missing {
-  margin: 0;
-  color: var(--danger);
-  font-size: 12px;
-  line-height: 1.7;
-}
-
-.repair-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-</style>

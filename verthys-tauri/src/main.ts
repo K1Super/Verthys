@@ -20,8 +20,6 @@
 // 全局CSS统一引入（设计令牌 → 复用组件 → 动画关键帧 → 空闲治理）
 import "./styles/tokens.css";
 import "./styles/components.css";
-// 凭证登记台共享皮肤（存签 / 中枢 窗口共用 · 单一来源 styles/reg-desk.css）
-import "./styles/reg-desk.css";
 import "./styles/animations.css";
 // 空闲 CSS 动画治理（idle-*/glass-calm/reduce-motion 根类规则，置于最后覆盖）
 import "./styles/idle-governance.css";
@@ -39,7 +37,7 @@ import { installGcHelper } from "./utils/gc";
  */
 function main(): void {
   // ===== 步骤 1: 全局执行环境初始化 =====
-  // 全局CSS已在文件顶部引入（tokens → components → reg-desk → animations → idle-governance）
+  // 全局CSS已在文件顶部引入（tokens → components → animations → idle-governance）
   // Vue 运行时由 Vite 自动初始化，无需手动设置
 
   // ===== V8 GC 辅助工具安装 =====

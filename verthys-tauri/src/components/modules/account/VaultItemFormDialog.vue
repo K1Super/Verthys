@@ -1,6 +1,6 @@
 <!--
   VaultItemFormDialog.vue — 类型化条目编辑窗口（schema 驱动）
-  形态：复用 VerthysDialog + 「凭证登记台」皮肤（分区登记行 + 刻度轴 + 选项条 + 内容舱）。
+  形态：复用全局弹窗外壳 CosmicOverlay + kv-* 内容词汇（分区字段 + 选项条 + 内容舱）。
   驱动：字段清单来自 VaultTypeDef.fields，六类控件按 kind 渲染，不按类型名分支。
   特化：账号类型使用固定窗口结构（标识 / 凭据 / 加密 / 附注四段 + 独立密钥行），
         独立加密的落盘判定交由 lib/vault_item_codec 的保存决策完成。
@@ -11,63 +11,34 @@
     />
 -->
 <template>
-  <VerthysDialog
-    v-model="open"
-    :title="panelTitle"
-    layout="plain"
-    class="reg-panel"
-    :save-label="isEdit ? '保存修改' : '确认'"
-    :save-disabled="saveDisabled"
-    :saving="saving"
-    @save="onSubmit"
+  <CosmicOverlay
+    :show="open"
+    width="560px"
+    :persistent="saving"
+    aria-labelledby="vault-form-title"
+    @close="open = false"
   >
-    <template #header>
-      <header class="reg-head">
-        <span class="reg-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
-            <circle cx="12" cy="12" r="5.4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-dasharray="25.5 8.4" transform="rotate(38 12 12)" opacity="0.8" />
-            <circle cx="12" cy="12" r="8.6" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-dasharray="38.6 15.4" transform="rotate(-76 12 12)" opacity="0.45" />
-          </svg>
-        </span>
-        <span class="reg-heading">
-          <span class="reg-kicker">存签</span>
-          <span class="reg-title">{{ panelTitle }}</span>
-        </span>
-        <button class="reg-close" type="button" @click="open = false" aria-label="关闭窗口" v-tip="'关闭'">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-      </header>
-    </template>
+    <div class="kv-title" id="vault-form-title">{{ panelTitle }}</div>
 
-    <!-- 账号窗口：分段为标识 / 凭据 / 加密 / 附注 -->
-    <div v-if="def && isAccount" class="reg-body">
-      <section class="reg-section" :style="{ '--rs': '0' }">
-        <div class="reg-sec-head">
-          <span class="reg-sec-no">01</span>
-          <span class="reg-sec-name">标识</span>
-          <span class="reg-rule"></span>
+    <div v-if="def && isAccount" class="kv-form">
+      <section class="kv-section">
+        <div class="kv-section-label">01 标识</div>
+        <div class="kv-field">
+          <label class="kv-label" for="acc-f-platform"><i class="kv-req" aria-hidden="true">*</i>平台</label>
+          <input id="acc-f-platform" class="kv-input" v-model="values.platform" aria-required="true" />
         </div>
-        <div class="reg-row">
-          <label class="reg-key" for="acc-f-platform"><i class="reg-req" aria-hidden="true">*</i>平台</label>
-          <input id="acc-f-platform" class="reg-input" v-model="values.platform" aria-required="true" />
-        </div>
-        <div class="reg-row">
-          <label class="reg-key" for="acc-f-username"><i class="reg-req" aria-hidden="true">*</i>账户</label>
-          <input id="acc-f-username" class="reg-input" v-model="values.username" aria-required="true" />
+        <div class="kv-field">
+          <label class="kv-label" for="acc-f-username"><i class="kv-req" aria-hidden="true">*</i>账户</label>
+          <input id="acc-f-username" class="kv-input" v-model="values.username" aria-required="true" />
         </div>
       </section>
 
-      <section class="reg-section" :style="{ '--rs': '1' }">
-        <div class="reg-sec-head">
-          <span class="reg-sec-no">02</span>
-          <span class="reg-sec-name">凭据<i class="reg-req" aria-hidden="true">*</i></span>
-          <span class="reg-rule"></span>
-        </div>
-        <div class="reg-row">
-          <label class="reg-key" for="acc-f-password">密码</label>
-          <div class="reg-input-group">
-            <input id="acc-f-password" class="reg-input" v-model="values.password" :type="pwdVisible.password ? 'text' : 'password'" aria-required="true" />
+      <section class="kv-section">
+        <div class="kv-section-label">02 凭据</div>
+        <div class="kv-field">
+          <label class="kv-label" for="acc-f-password">密码</label>
+          <div class="kv-input-group">
+            <input id="acc-f-password" class="kv-input" v-model="values.password" :type="pwdVisible.password ? 'text' : 'password'" aria-required="true" />
             <button
               class="icon-btn"
               type="button"
@@ -82,24 +53,20 @@
         </div>
       </section>
 
-      <section class="reg-section" :style="{ '--rs': '2' }">
-        <div class="reg-sec-head">
-          <span class="reg-sec-no">03</span>
-          <span class="reg-sec-name">加密</span>
-          <span class="reg-rule"></span>
-        </div>
-        <label class="reg-option" :class="{ on: accountEncrypted }">
-          <input class="reg-option-input" type="checkbox" v-model="accountEncrypted" :disabled="initialEncrypted" />
-          <span class="reg-option-check"></span>
-          <span class="reg-option-text">独立加密</span>
-          <span class="reg-option-hint">查看时需二次输入独立密钥</span>
+      <section class="kv-section">
+        <div class="kv-section-label">03 加密</div>
+        <label class="kv-option" :class="{ 'is-on': accountEncrypted }">
+          <input type="checkbox" v-model="accountEncrypted" :disabled="initialEncrypted" />
+          <span class="kv-option-check"></span>
+          <span class="kv-option-text">独立加密</span>
+          <span class="kv-option-hint">查看时需二次输入独立密钥</span>
         </label>
-        <div v-if="accountEncrypted" class="reg-row reg-option-row">
-          <label class="reg-key" for="acc-f-encKey">密钥</label>
-          <div class="reg-input-group">
+        <div v-if="accountEncrypted" class="kv-field">
+          <label class="kv-label" for="acc-f-encKey">密钥</label>
+          <div class="kv-input-group">
             <input
               id="acc-f-encKey"
-              class="reg-input"
+              class="kv-input"
               v-model="accountEncKey"
               :type="encKeyVisible ? 'text' : 'password'"
               aria-required="true"
@@ -117,55 +84,45 @@
           </div>
         </div>
         <!-- 已开启独立加密却未提供密钥：窗口内联提示，替代静默放弃 -->
-        <p v-if="accountEncrypted && !accountEncKey" class="reg-hint-inline">请输入独立密钥后保存</p>
+        <p v-if="accountEncrypted && !accountEncKey" class="kv-hint is-error">请输入独立密钥后保存</p>
       </section>
 
-      <section class="reg-section" :style="{ '--rs': '3' }">
-        <div class="reg-sec-head">
-          <span class="reg-sec-no">04</span>
-          <span class="reg-sec-name">附注</span>
-          <span class="reg-rule"></span>
-        </div>
-        <div class="reg-row">
-          <label class="reg-key" for="acc-f-note">备注</label>
-          <textarea id="acc-f-note" class="reg-input reg-textarea" v-model="values.note" rows="2"></textarea>
+      <section class="kv-section">
+        <div class="kv-section-label">04 附注</div>
+        <div class="kv-field">
+          <label class="kv-label" for="acc-f-note">备注</label>
+          <textarea id="acc-f-note" class="kv-input kv-textarea" v-model="values.note" rows="2"></textarea>
         </div>
       </section>
     </div>
 
     <!-- 通用窗口：字段按 kind 渲染；相邻同组字段合为一个分区 -->
-    <div v-else-if="def" class="reg-body">
+    <div v-else-if="def" class="kv-form">
       <section
         v-for="(section, sectionIndex) in formSections"
         :key="`${sectionIndex}-${section.name}`"
-        class="reg-section"
-        :style="{ '--rs': String(sectionIndex) }"
+        class="kv-section"
       >
-        <div class="reg-sec-head">
-          <span class="reg-sec-no">{{ sectionNo(sectionIndex) }}</span>
-          <span class="reg-sec-name">{{ section.name }}</span>
-          <span class="reg-rule"></span>
-        </div>
+        <div class="kv-section-label">{{ sectionNo(sectionIndex) }} {{ section.name }}</div>
         <div class="form-fields">
           <template v-for="field in section.fields" :key="field.id">
             <!-- 选项条：整行可点的开关（用户自定义类型可能声明） -->
-            <label v-if="field.kind === 'switch'" class="reg-option" :class="{ on: values[field.id] === '1' }">
+            <label v-if="field.kind === 'switch'" class="kv-option" :class="{ 'is-on': values[field.id] === '1' }">
               <input
-                class="reg-option-input"
                 type="checkbox"
                 :checked="values[field.id] === '1'"
                 @change="onSwitchChange(field.id, $event)"
               />
-              <span class="reg-option-check"></span>
-              <span class="reg-option-text">{{ field.label }}</span>
-              <span v-if="field.hint" class="reg-option-hint">{{ field.hint }}</span>
+              <span class="kv-option-check"></span>
+              <span class="kv-option-text">{{ field.label }}</span>
+              <span v-if="field.hint" class="kv-option-hint">{{ field.hint }}</span>
             </label>
 
             <!-- 内容舱：长文本凭据，支持拖拽与文件导入 -->
-            <div v-else-if="field.carrier" class="reg-row reg-row-vault">
-              <label class="reg-key" :for="domId(field)"><i v-if="field.required" class="reg-req" aria-hidden="true">*</i>{{ field.label }}</label>
+            <div v-else-if="field.carrier" class="kv-field">
+              <label class="kv-label" :for="domId(field)"><i v-if="field.required" class="kv-req" aria-hidden="true">*</i>{{ field.label }}</label>
               <div
-                class="reg-vault reg-vault-inline"
+                class="carrier"
                 :class="{ 'is-drag': dragFieldId === field.id }"
                 @dragover.prevent="onDragOver(field.id)"
                 @dragleave.prevent="onDragLeave($event, field.id)"
@@ -173,103 +130,103 @@
               >
                 <textarea
                   :id="domId(field)"
-                  class="reg-vault-input"
+                  class="kv-input kv-textarea carrier-input"
                   :rows="field.multilineRows ?? 5"
                   v-model="values[field.id]"
                 ></textarea>
-                <div class="reg-vault-bar">
-                  <button class="reg-vault-import" type="button" @click="triggerFilePick(field.id)">
+                <div class="carrier-bar">
+                  <button class="carrier-import" type="button" @click="triggerFilePick(field.id)">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                     <span>导入文件</span>
                   </button>
-                  <span v-if="pickedFileName[field.id]" class="reg-vault-file" v-tip="pickedFileName[field.id]">{{ pickedFileName[field.id] }}</span>
-                  <span class="reg-vault-readout">{{ dragFieldId === field.id ? '松开即导入' : charStats(field.id) }}</span>
+                  <span v-if="pickedFileName[field.id]" class="carrier-file" v-tip="pickedFileName[field.id]">{{ pickedFileName[field.id] }}</span>
+                  <span class="carrier-readout">{{ dragFieldId === field.id ? '松开即导入' : charStats(field.id) }}</span>
                 </div>
               </div>
             </div>
 
             <!-- 日期：日期控件 + 到期读数 -->
-            <div v-else-if="field.kind === 'date'" class="reg-row">
-              <label class="reg-key" :for="domId(field)"><i v-if="field.required" class="reg-req" aria-hidden="true">*</i>{{ field.label }}</label>
-              <div class="reg-expiry">
-                <div class="reg-date-wrap" @click="openDatePicker($event)">
-                  <input :id="domId(field)" class="reg-input reg-date" :class="{ 'has-value': values[field.id] }" type="date" v-model="values[field.id]" />
-                  <span v-if="!values[field.id]" class="reg-date-ph">未设置</span>
+            <div v-else-if="field.kind === 'date'" class="kv-field">
+              <label class="kv-label" :for="domId(field)"><i v-if="field.required" class="kv-req" aria-hidden="true">*</i>{{ field.label }}</label>
+              <div class="date-line">
+                <div class="date-wrap" @click="openDatePicker($event)">
+                  <input :id="domId(field)" class="kv-input date-input" :class="{ 'has-value': values[field.id] }" type="date" v-model="values[field.id]" />
+                  <span v-if="!values[field.id]" class="date-ph">未设置</span>
                 </div>
                 <!-- 到期读数只属于到期字段：出生日期等普通日期不产生「距到期」语义 -->
-                <span v-if="field.id === expiryFieldId" class="reg-readout" :class="`is-${readoutFor(field.id).tone}`">
-                  <i class="reg-readout-dot"></i>{{ readoutFor(field.id).text }}
+                <span v-if="field.id === expiryFieldId" class="kv-readout" :class="`is-${readoutFor(field.id).tone}`">
+                  <i class="kv-readout-dot"></i>{{ readoutFor(field.id).text }}
                 </span>
               </div>
             </div>
 
             <!-- 日期区间：起止成对呈现（结束日仍是字段 id，到期读数口径不变） -->
-            <div v-else-if="field.kind === 'dateRange'" class="reg-row reg-row-range">
-              <span class="reg-key"><i v-if="field.required" class="reg-req" aria-hidden="true">*</i>{{ field.label }}</span>
-              <div class="reg-range">
-                <div class="reg-range-line">
-                  <span class="reg-range-tag">{{ rangeStartLabelOf(field) }}</span>
-                  <div class="reg-date-wrap" @click="openDatePicker($event)">
+            <div v-else-if="field.kind === 'dateRange'" class="kv-field">
+              <span class="kv-label"><i v-if="field.required" class="kv-req" aria-hidden="true">*</i>{{ field.label }}</span>
+              <div class="range">
+                <div class="range-line">
+                  <span class="range-tag">{{ rangeStartLabelOf(field) }}</span>
+                  <div class="date-wrap" @click="openDatePicker($event)">
                     <input
                       :id="`${domId(field)}-start`"
-                      class="reg-input reg-date"
+                      class="kv-input date-input"
                       :class="{ 'has-value': values[rangeStartIdOf(field)] }"
                       type="date"
                       v-model="values[rangeStartIdOf(field)]"
                       :max="values[field.id] || undefined"
                       :aria-label="`${field.label}${rangeStartLabelOf(field)}`"
                     />
-                    <span v-if="!values[rangeStartIdOf(field)]" class="reg-date-ph">未设置</span>
+                    <span v-if="!values[rangeStartIdOf(field)]" class="date-ph">未设置</span>
                   </div>
-                  <span class="reg-range-sep" aria-hidden="true"></span>
-                  <span class="reg-range-tag">{{ rangeEndLabelOf(field) }}</span>
-                  <div class="reg-date-wrap" @click="openDatePicker($event)">
+                  <span class="range-sep" aria-hidden="true"></span>
+                  <span class="range-tag">{{ rangeEndLabelOf(field) }}</span>
+                  <div class="date-wrap" @click="openDatePicker($event)">
                     <input
                       :id="domId(field)"
-                      class="reg-input reg-date"
+                      class="kv-input date-input"
                       :class="{ 'has-value': values[field.id] }"
                       type="date"
                       v-model="values[field.id]"
                       :min="values[rangeStartIdOf(field)] || undefined"
                       :aria-label="`${field.label}${rangeEndLabelOf(field)}`"
                     />
-                    <span v-if="!values[field.id]" class="reg-date-ph">未设置</span>
+                    <span v-if="!values[field.id]" class="date-ph">未设置</span>
                   </div>
                 </div>
-                <span v-if="field.id === expiryFieldId" class="reg-readout" :class="`is-${readoutFor(field.id).tone}`">
-                  <i class="reg-readout-dot"></i>{{ readoutFor(field.id).text }}
+                <span v-if="field.id === expiryFieldId" class="kv-readout" :class="`is-${readoutFor(field.id).tone}`">
+                  <i class="kv-readout-dot"></i>{{ readoutFor(field.id).text }}
                 </span>
               </div>
             </div>
 
             <!-- 选择：下拉候选项 -->
-            <div v-else-if="field.kind === 'select'" class="reg-row">
-              <label class="reg-key" :for="domId(field)"><i v-if="field.required" class="reg-req" aria-hidden="true">*</i>{{ field.label }}</label>
-              <select :id="domId(field)" class="reg-input reg-select" v-model="values[field.id]">
+            <div v-else-if="field.kind === 'select'" class="kv-field">
+              <label class="kv-label" :for="domId(field)"><i v-if="field.required" class="kv-req" aria-hidden="true">*</i>{{ field.label }}</label>
+              <select :id="domId(field)" class="kv-input kv-select" v-model="values[field.id]">
                 <option value="">未指定</option>
                 <option v-for="opt in field.options ?? []" :key="opt" :value="opt">{{ opt }}</option>
               </select>
             </div>
 
             <!-- 地区：全国省 / 市 / 区三级联动 -->
-            <div v-else-if="field.kind === 'region'" class="reg-row reg-row-region">
-              <span class="reg-key"><i v-if="field.required" class="reg-req" aria-hidden="true">*</i>{{ field.label }}</span>
+            <div v-else-if="field.kind === 'region'" class="kv-field">
+              <span class="kv-label"><i v-if="field.required" class="kv-req" aria-hidden="true">*</i>{{ field.label }}</span>
               <VaultRegionPicker v-model="values[field.id]" />
             </div>
 
             <!-- 多行文本 -->
-            <div v-else-if="field.kind === 'multiline'" class="reg-row">
-              <label class="reg-key" :for="domId(field)"><i v-if="field.required" class="reg-req" aria-hidden="true">*</i>{{ field.label }}</label>
-              <textarea :id="domId(field)" class="reg-input reg-textarea" :rows="field.multilineRows ?? 2" v-model="values[field.id]"></textarea>
+            <div v-else-if="field.kind === 'multiline'" class="kv-field">
+              <label class="kv-label" :for="domId(field)"><i v-if="field.required" class="kv-req" aria-hidden="true">*</i>{{ field.label }}</label>
+              <textarea :id="domId(field)" class="kv-input kv-textarea" :rows="field.multilineRows ?? 2" v-model="values[field.id]"></textarea>
             </div>
 
             <!-- 文本 / 密码：密码带显隐切换 -->
-            <div v-else class="reg-row">
-              <label class="reg-key" :for="domId(field)"><i v-if="field.required" class="reg-req" aria-hidden="true">*</i>{{ field.label }}</label>
-              <div v-if="field.kind === 'password'" class="reg-input-group">
+            <div v-else class="kv-field">
+              <label class="kv-label" :for="domId(field)"><i v-if="field.required" class="kv-req" aria-hidden="true">*</i>{{ field.label }}</label>
+              <div v-if="field.kind === 'password'" class="kv-input-group">
                 <input
                   :id="domId(field)"
-                  class="reg-input"
+                  class="kv-input"
                   v-model="values[field.id]"
                   :type="pwdVisible[field.id] ? 'text' : 'password'"
                 />
@@ -284,21 +241,26 @@
                   <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
                 </button>
               </div>
-              <input v-else :id="domId(field)" class="reg-input" v-model="values[field.id]" />
+              <input v-else :id="domId(field)" class="kv-input" v-model="values[field.id]" />
             </div>
           </template>
         </div>
       </section>
-      <input ref="fileInputRef" type="file" class="reg-file-input" :accept="CARRIER_FILE_ACCEPT" @change="onFilePicked" />
+      <input ref="fileInputRef" type="file" class="carrier-file-input" :accept="CARRIER_FILE_ACCEPT" @change="onFilePicked" />
     </div>
 
-    <template #error v-if="formError">
-      <div class="reg-error">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        {{ formError }}
-      </div>
-    </template>
-  </VerthysDialog>
+    <p v-if="formError" class="kv-error form-error">{{ formError }}</p>
+
+    <div class="kv-actions">
+      <button class="btn kv-cancel" type="button" :disabled="saving" @click="open = false">取消</button>
+      <button
+        class="btn btn-primary kv-confirm"
+        type="button"
+        :disabled="saveDisabled || saving"
+        @click="onSubmit"
+      >{{ saving ? "保存中…" : isEdit ? "保存修改" : "确认" }}</button>
+    </div>
+  </CosmicOverlay>
 </template>
 
 <script setup lang="ts">
@@ -311,7 +273,7 @@ import {
 } from "../../../lib/vault_item_codec";
 import { vaultExpiryReadout, vaultExpiryTimestamp } from "../../../lib/vault_item_card";
 import { encryptPasswordField } from "../../../lib/verthys";
-import VerthysDialog from "../../common/verthys-ui/VerthysDialog.vue";
+import CosmicOverlay from "../../common/cosmic/CosmicOverlay.vue";
 import VaultRegionPicker from "./VaultRegionPicker.vue";
 
 /** 内容舱可导入的文件类型（凭据与配置文本，覆盖证书、密钥与文本材料） */
@@ -606,43 +568,139 @@ const onSubmit = async (): Promise<void> => {
 </script>
 
 <style scoped>
-/* 通用窗口的字段间距：所有直系字段块统一上间距 10px，首块不留空 */
-.form-fields > .reg-row,
-.form-fields > .reg-option { margin-top: 10px; }
-.form-fields > :first-child { margin-top: 0; }
+/* ===== 业务结构 =====
+   标题、分区、字段、输入、选项与动作区全部由 kv-* 承担；
+   本文件只保留内容舱与日期区间这两类专属排版 */
 
-/* 内容舱所在行：标签与舱顶对齐；舱位刻度与登记行刻度重合，避免双刻度错位 */
-.reg-row-vault { align-items: start; }
-.reg-row-vault .reg-key { padding-top: 9px; }
-.reg-vault-inline::before { content: none; }
+/* 分区内字段间距：kv-field 负责相邻字段，开关与字段之间由本规则补足 */
+.form-fields > * + * { margin-top: 12px; }
 
-/* 日期区间：起止两枚日期控件同排，到期读数另起一行（宽度不足以并排回显） */
-.reg-row-range { align-items: start; }
-.reg-row-range .reg-key { padding-top: 9px; }
-.reg-range { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
-.reg-range-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.reg-range-tag {
+/* 内容舱：文本域 + 底部工具条共用一道凹槽，导入端子只在条内应答 */
+.carrier {
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(2, 5, 10, 0.38), rgba(2, 5, 10, 0.20));
+  box-shadow:
+    inset 0 1px 0 rgba(var(--black-rgb), 0.50),
+    inset 0 -1px 0 rgba(205, 224, 244, 0.055);
+  overflow: hidden;
+  transition: box-shadow 0.25s var(--ease);
+}
+.carrier.is-drag {
+  box-shadow:
+    inset 0 1px 0 rgba(var(--black-rgb), 0.45),
+    inset 0 -1px 0 rgba(var(--accent-rgb), 0.60);
+}
+.carrier-input {
+  display: block;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 8px 8px 0 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.3px;
+}
+.carrier-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-top: 1px solid rgba(205, 224, 244, 0.06);
+}
+.carrier-import {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font);
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
+}
+.carrier-import svg { width: 12px; height: 12px; opacity: 0.85; }
+.carrier-import:hover {
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.24);
+  background-color: rgba(var(--accent-rgb), 0.06);
+}
+.carrier-import:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 1px; }
+.carrier-file {
+  min-width: 0;
+  max-width: 200px;
+  flex-shrink: 1;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.3px;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.carrier-readout {
+  margin-left: auto;
   flex-shrink: 0;
-  font-size: 10px; letter-spacing: 1px;
-  color: var(--text-muted); font-family: var(--font);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
   transition: color var(--dur-fast) var(--ease);
 }
-.reg-row:focus-within .reg-range-tag { color: var(--accent); }
-.reg-range-sep {
+.carrier.is-drag .carrier-readout { color: var(--accent); }
+.carrier-file-input { display: none; }
+
+/* 日期：单枚日期控件 + 到期读数；日期占位由本地覆盖层承担（原生透明文字不可读） */
+.date-line { display: flex; align-items: center; gap: 12px; min-width: 0; flex-wrap: wrap; }
+.date-wrap {
+  position: relative;
+  flex: 0 0 132px;
+  width: 132px;
+  max-width: 132px;
+  min-width: 0;
+  cursor: pointer;
+}
+.date-input {
+  color: transparent;
+  padding-right: 30px;
+  max-width: 100%;
+  cursor: pointer;
+}
+.date-input.has-value { color: var(--text-primary); }
+.date-input::-webkit-calendar-picker-indicator {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0.55;
+  filter: invert(0.75);
+  cursor: pointer;
+}
+.date-input::-webkit-calendar-picker-indicator:hover { opacity: 0.9; }
+.date-ph {
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 13px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+/* 日期区间：起止成对同排，到期读数另起一行 */
+.range { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.range-line { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.range-tag {
   flex-shrink: 0;
-  width: 10px; height: 1px;
-  background: var(--border-glass);
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  font-family: var(--font);
 }
-.reg-row-range .reg-readout { margin-left: 1px; }
+.range-sep { flex-shrink: 0; width: 10px; height: 1px; background: rgba(205, 224, 244, 0.14); }
 
-/* 地区联动行：标签与三列下拉顶部对齐 */
-.reg-row-region { align-items: start; }
-.reg-row-region .reg-key { padding-top: 9px; }
-
-/* 独立加密缺密钥的内联提示 */
-.reg-hint-inline {
-  margin-top: 8px;
-  font-size: 11px; letter-spacing: 0.3px;
-  color: var(--warning); font-family: var(--font);
-}
+.form-error { margin-top: 14px; }
 </style>

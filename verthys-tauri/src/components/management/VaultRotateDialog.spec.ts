@@ -74,7 +74,7 @@ function mountDialog(onClose = vi.fn(), onCommitted = vi.fn()) {
   });
   app.mount(container);
   mounted.push({ app, container });
-  /* VerthysDialog 默认 teleport 到 body */
+  /* CosmicOverlay 默认 teleport 到 body */
   return document.body;
 }
 
@@ -174,7 +174,7 @@ describe("全库 DEK 轮换向导", () => {
     setupRecoverySession(true);
     const body = mountDialog();
     await settle();
-    expect(body.textContent).toContain("已启用模块需要提供模块口令");
+    expect(body.textContent).toContain("已启用模块需要提供该模块独立密钥");
     const start = buttonByText(body, "开始轮换")!;
     expect(start.disabled).toBe(true);
 
