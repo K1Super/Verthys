@@ -35,6 +35,17 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[版本门禁] 通过：全仓版本一致"
 
+# ===== 文档门禁 =====
+# 链接、索引覆盖、元数据与版本/ABI/容器声明漂移即红；与 docs.yml 共用同一脚本。
+Write-Host ""
+Write-Host "[文档门] 校验文档链接、索引、元数据与版本声明..."
+& (Join-Path $PSScriptRoot "check_docs.ps1")
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[文档门] 失败"
+    exit 1
+}
+Write-Host "[文档门] 通过"
+
 # ===== 零容忍锚点门（防回退） =====
 # 三条文本级精确锚点，命中即红，成本毫秒级、零误报：
 #   1. 负数错误码体系不得复活（单一定义源为 verthys.h 正数枚举）；

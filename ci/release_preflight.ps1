@@ -136,7 +136,6 @@ if ($Profile -eq "production") {
 # ---- 文档与构建脚本 ----
 $requiredDocs = @(
     "docs\updater\UPDATER_MASTER_PLAN.md",
-    "docs\updater\UPDATER_LOCAL_VERIFICATION.md",
     "CHANGELOG.md"
 )
 foreach ($doc in $requiredDocs) {

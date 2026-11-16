@@ -2,9 +2,9 @@
 
 > 测试分层、全量/单项跑法、覆盖率现状与要求、关键场景用例与 Rust 侧测试。
 >
-> Last updated: 2026-11-03 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
-C 核心测试为单一聚合可执行文件 `verthys_tests`（`core/tests/CMakeLists.txt` 的 `add_executable` 汇总当前测试源文件），与两个独立进程的 ACG 专项共注册为 3 个 ctest 测试项（主测试 + `verthys_scd_acg` + `verthys_scd_dll_acg`）；主测试当前 270 个 `TEST()` 用例。
+C 核心测试为单一聚合可执行文件 `verthys_tests`（`core/tests/CMakeLists.txt` 的 `add_executable` 汇总当前测试源文件），与两个独立进程的 ACG 专项共注册为 3 个 ctest 测试项（主测试 + `verthys_scd_acg` + `verthys_scd_dll_acg`）。用例数量随代码变化，以实际运行输出为准，不在文档中抄录固定值。
 
 ## 1. 测试分层（按 `core/tests/` 实际目录）
 
@@ -18,12 +18,12 @@ C 核心测试为单一聚合可执行文件 `verthys_tests`（`core/tests/CMake
 | `perf/` | 性能基准与回归 | `perf_*` |
 | `schema/` | vendored flatcc 工具链全链路 | `flatcc_demo_*` |
 
-前端全量：`Set-Location verthys-tauri; npx vitest run`（当前 74 文件 / 795 用例）。
+前端全量：`Set-Location verthys-tauri; npx vitest run`（用例数量以实际输出为准）。
 
 ## 2. 如何跑全部测试
 
 ```powershell
-# 生产构建目录（Release）：3 个 ctest 测试项（主测试 270 用例 + 两个 ACG 专项）
+# 生产构建目录（Release）：3 个 ctest 测试项（主测试 + 两个 ACG 专项）
 ctest --test-dir build -C Release --output-on-failure
 
 # 或直接运行测试 exe（Release 配置，输出以 "=== Summary: N passed, M failed ===" 结尾）
@@ -80,15 +80,15 @@ ctest --test-dir build -C Release -R verthys_tests
 ## 7. Rust 侧测试
 
 ```powershell
-# 主应用 crate（src-tauri）：555 个测试通过 + 2 ignored，分布于 controller/*、service/*、util/* 等
+# 主应用 crate（src-tauri）：测试数量以实际输出为准，含 2 个 ignored
 Set-Location .\verthys-tauri\src-tauri
 cargo test
 ```
 
-主应用 Rust 单元测试含 `verthys_wal.rs` 断点续传/压缩/续传去重（需 `[dev-dependencies] tempfile`，`src-tauri/Cargo.toml:196-199`）。
+主应用 Rust 单元测试含 `verthys_wal.rs` 断点续传/压缩/续传去重（需 `[dev-dependencies] tempfile`，见 `src-tauri/Cargo.toml`）。
 
 ```powershell
-# verthys-worker：68 个测试用例（#[cfg(test)] mod tests，分布于 runtime/gmk、main_loop、scan_shm、worker）
+# verthys-worker：测试数量以实际输出为准（#[cfg(test)] mod tests，分布于 runtime/gmk、main_loop、scan_shm、worker）
 Set-Location .\verthys-tauri\verthys-worker
 cargo test
 ```
@@ -156,7 +156,7 @@ pwsh -NoProfile -File tests/service/e2e-install.ps1 -Artifacts build_security_se
 - 服务单元测试含事件日志消息表校验：10 个事件 ID 通过 `FormatMessage` 解析，共 446 断言通过。
 - 生产 OFF 钩子测试可执行文件链接缺陷已修复（`test_witness.c` 仅在测试钩子构建调用派生函数）；执行仍需要已安装服务或测试夹具。
 - 本机实测（测试钩子构建）：机器预算客户端 8/8、V4 解锁/模块解锁接入 2/2、`api_` 15/15、`format_` 15/15、`module_` 15/15；生产 OFF 钩子 core DLL 与测试 exe 构建/链接通过，生产 DLL 不含测试钩子字符串。
-- P1 全量 + 新增接入用例实测 280 passed / 0 failed（测试钩子构建，Release）。lockout 用例对测试机 CNG 见证键累积与残留线程敏感，复跑异常时先用 `tests/gate.ps1` 的 hygiene 流程回收见证键，再复核全量。
+- P1 全量 + 新增接入用例实测 280 passed / 0 failed（2026-11-11 快照，测试钩子构建，Release）。lockout 用例对测试机 CNG 见证键累积与残留线程敏感，复跑异常时先用 `tests/gate.ps1` 的 hygiene 流程回收见证键，再复核全量。
 - P1 攻击回归以当前测试钩子构建执行：PASS=20、FAIL=4（A2/A8/A18S，依赖签名宿主/内存转储/worker 产物）、SKIP=1；属于 P1 既有门禁环境，不是 P2 回归。
 - 正向 Authenticode 认证需要把测试证书导入 `CurrentUser\Root`；无交互桌面环境无法完成信任导入，本机只执行了未签名拒绝与伪造服务端拒绝的负向用例。正向签名探针与模块校验在干净 VM E2E 中验证。
 - S-A1/S-A2/S-A7/S-A10 与 E1–E8 需要真实 SCM 安装、管理员权限或第二台机器，只在干净 VM 执行并保存 `sc query`、`icacls`、事件日志与探针输出证据。

@@ -2,11 +2,13 @@
 
 > 文档编号：VUP-001
 > 状态：**唯一实施契约**（v1.6，2026-10-23）
-> 适用版本：当前 `4.1.7`
+> 适用版本：当前根 `VERSION`
 > 适用平台：Windows 10/11 x64；Tauri 2.11.5 + Rust 主进程 / verthys-worker + C11 `verthys.dll` + Vue 3.5
 > 服务器阶段：[UPDATER_SERVER_DEPLOYMENT_PLAN.md](UPDATER_SERVER_DEPLOYMENT_PLAN.md)
 >
-> Last updated: 2026-10-23 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
+>
+> 说明：文中 `4.1.x` 版本号与 `release_id` 为 2026-10 的实施快照或协议示例，不代表当前版本；版本以根 `VERSION` 为准。
 
 ---
 
@@ -46,7 +48,9 @@
 
 ## 1. 现状基线与设计约束
 
-### 1.1 现状基线
+### 1.1 初始现状基线（2026-10-23 快照，仅用于追溯）
+
+> 下表是立项时的代码/产物核验快照。其中第 7、8、12、13、14、17、18 项已随实施收口；当前行为以正文、代码与产物为准，不再逐条回填。
 
 当前更新链路已具备插件注册、前端三段式状态、回环夹具、安装包 minisign 签名、清单生成、版本单源、worker 副本哈希门与 SBOM。以下是代码 / 产物核验得到的事实，作为方案硬约束。
 
@@ -61,17 +65,17 @@
 | 7 | 当前 Tauri CLI `2.11.4` 生成的签名 trusted comment 不含版本 | 解码 `build/updater/Verthys_4.1.3_x64-setup.exe.sig`，内容为 `timestamp:... file:...` | 现状 `requireSignedVersion` 不可用；需升级 CLI 或改用 PE 版本兜底 |
 | 8 | 安装包 PE `FileVersion` / `ProductVersion` 为 `4.1.3` | `Get-Item build/updater/Verthys_4.1.3_x64-setup.exe` 的 VersionInfo | PE 版本身份校验可行，可阻断“清单说新装旧” |
 | 9 | WebView 未获得任何 updater 插件命令权限 | `verthys-tauri/src-tauri/capabilities/default.json` 无 `updater:` 权限 | 前端不能下载或安装；哈希 / PE 校验只能在 Rust 完成 |
-| 10 | 当前安装闸门在 `verthysReadyRef` 为假时跳过 `lockAll` | `SecurityCenter.vue:527-533` | 禁止任何跳过锁库的分支 |
-| 11 | `lockAll` 对 `waitForFlush()` 异常使用空 catch | `security-session.ts:580` | 闸门不能只依赖“调用未抛错”；需要结构化结果 |
-| 12 | 发布配置为回环 HTTP + 明文许可 | `tauri.conf.json:55-65` | 必须拆 profile；production 禁止 |
-| 13 | 清单生成脚本只写 `version / notes / pub_date / platforms.{signature,url}` | `scripts/release/make_updater_manifest.mjs:100-111` | `sha256`、`size`、`compatibility` 等字段尚未落地 |
-| 14 | 当前 `latest.json` 无 `sha256`、`channel`、`compatibility`、`force_update` | `build/updater/latest.json` | 现状不能支撑哈希 / 版本身份校验 |
-| 15 | 本机夹具服务不处理 HTTP Range | `scripts/updater/updater_server.mjs:145-163` 直接整文件流式返回 | 断点续传在 Phase L 不可用；P1 需服务端与客户端同时支持 |
+| 10 | 安装闸门在 `verthysReadyRef` 为假时跳过 `lockAll` | `SecurityCenter.vue` 的安装闸门 | 禁止任何跳过锁库的分支 |
+| 11 | `lockAll` 对 `waitForFlush()` 异常使用空 catch | `security-session.ts` 的锁库异常路径 | 闸门不能只依赖“调用未抛错”；需要结构化结果 |
+| 12 | 初始基线：发布配置为回环 HTTP + 明文许可 | `tauri.conf.json` 的 updater 节点 | 已拆 local / production profile；production 禁止回环与明文 |
+| 13 | 初始基线：清单生成脚本只写 `version / notes / pub_date / platforms.{signature,url}` | `scripts/release/make_updater_manifest.mjs` | 现已写入 `sha256`、`size`、`compatibility` 等字段 |
+| 14 | 初始基线：`latest.json` 无 `sha256`、`channel`、`compatibility`、`force_update` | `build/updater/latest.json` | 现已包含哈希、渠道、兼容区间与强制更新字段 |
+| 15 | 本机夹具服务不处理 HTTP Range | `scripts/updater/updater_server.mjs` 的响应处理 | 断点续传在 Phase L 不可用；P1 需服务端与客户端同时支持 |
 | 16 | 无 single-instance 插件 | `verthys-tauri/src-tauri/Cargo.toml` 无 `tauri-plugin-single-instance` | 单实例预检需新增实现 |
-| 17 | `CHANGELOG.md`、`docs/MIGRATION.md` 不存在；`docs/README.md` 已引用 | 文件系统核验 | 文档漂移真实存在 |
-| 18 | 仅有 `core.yml`、`rust-frontend.yml` 两个工作流 | `.github/workflows/` 目录 | 无 release 工作流 |
-| 19 | worker 在初始化后主动发送 `{"ok":true,"op":"ready"}` | `verthys-worker/src/runtime/main_loop.rs:136-160`；父进程 `wait_for_ready_signal` | 健康自检可复用该协议，不需要新增握手 |
-| 20 | 错误文案映射表已存在，可承载 `E_UPDATER_*` | `verthys_error.ts:266` `VERTHYS_ERROR_TEXT_MAP` | 更新错误码应复用，不另起体系 |
+| 17 | 初始基线：`CHANGELOG.md`、`docs/MIGRATION.md` 不存在 | 文件系统核验 | 均已补齐；文档门禁防止再次漂移 |
+| 18 | 初始基线：仅有 `core.yml`、`rust-frontend.yml` | `.github/workflows/` 目录 | 现另有 `release-materials.yml`、`security-service.yml`、`docs.yml` |
+| 19 | worker 在初始化后主动发送 `{"ok":true,"op":"ready"}` | `verthys-worker/src/runtime/main_loop.rs` 的 ready 信号；父进程 `wait_for_ready_signal` | 健康自检可复用该协议，不需要新增握手 |
+| 20 | 错误文案映射表已存在，可承载 `E_UPDATER_*` | `verthys_error.ts` 的 `VERTHYS_ERROR_TEXT_MAP` | 更新错误码应复用，不另起体系 |
 
 ### 1.2 设计约束
 
@@ -830,7 +834,7 @@ Prepared + Verifying 通过
 |---|---|---|---|
 | DLL 完整性 | `verthys.dll` SHA-256 与编译基线一致 | `path_resolver::verify_dll_integrity` | 10 s |
 | worker 就绪 | 收到 `{"ok":true,"op":"ready"}` 且进程存活 | `worker_controller::worker_init` | 30 s |
-| ABI 协商 | worker 预检通过 DLL API / 容器格式版本 | `VERTHYS_API_VERSION 0x000E` | 随 worker |
+| ABI 协商 | worker 预检通过 DLL API / 容器格式版本 | `VERTHYS_API_VERSION`（以 `core/include/verthys_version.h` 为准） | 随 worker |
 | 只读探测 | 模块列表 / 只读元数据可获取（可选） | 现有只读初始化路径 | 5 s |
 
 规则：
@@ -980,7 +984,7 @@ UI 不得使用“已自动回退”这类与 R0/R1 能力不符的表述；不�
 | T11 | 本地日志：事件 schema、JSONL、滚动、脱敏、导出 | `updater/log.rs`、`src/utils/logger.ts` | T07 | 事件字段白名单；导出脱敏；7 天 / 5 MB 规则 |
 | T12 | 单元 / 集成测试：Rust 解析 / 验签 / PE / marker / gate；Vue 状态机；脚本契约 | 对应 `*.spec.ts` / `#[cfg(test)]` / Node test | T04 ~ T11 | 新增用例全绿；现有测试全绿 |
 | T13 | CI 质量门：配置静态检查、清单契约、文档存在性、测试执行 | `.github/workflows/rust-frontend.yml`、`ci/*` | T02、T03、T12 | 违规即红；PR 可复现 |
-| T14 | 本机运行时回归矩阵：正向升级 + 十类负向注入 + 证据表 | `scripts/updater/updater_e2e_matrix.mjs`、`docs/updater/UPDATER_LOCAL_VERIFICATION.md` | T04 ~ T11 | 矩阵通过并记录证据；旧版 / 容器完好 |
+| T14 | 本机运行时回归矩阵：正向升级 + 十类负向注入 + 证据表 | `scripts/updater/updater_e2e_matrix.mjs`；证据随发布物料归档 | T04 ~ T11 | 矩阵通过并记录证据；旧版 / 容器完好 |
 | T15 | 文档纠偏：`DEPLOYMENT.md` §3-4、`RELEASE.md`、`CONFIGURATION.md`、`SECURITY_DESIGN.md`、`TESTING.md`、`CHANGELOG.md`、`MIGRATION.md` | `docs/*`、根 `CHANGELOG.md` | T01 ~ T14 | 文档与代码一致；不再出现“无自动更新”漂移；参数全部登记 |
 | T16 | 物料账本：release manifest、SBOM 绑定、安装包 / `.sig` / DLL / worker 哈希归档 | `build_production.ps1`、`scripts/release/generate_release_manifest.mjs` | T02、T03 | 归档目录含 manifest；哈希可复核；SBOM 与安装包同目录 |
 
@@ -1382,32 +1386,34 @@ Phase S 由服务端事件聚合生成；Phase L 由 `scripts/updater/updater_re
 
 ## 附录 A：证据锚点
 
+> 只记录文件与符号，不记录行号；行号随代码演进必然漂移。
+
 | 类别 | 路径 / 事实 |
 |---|---|
-| 更新配置 | `verthys-tauri/src-tauri/tauri.conf.json`（回环端点、明文许可、公钥、禁止降级、passive） |
-| 插件注册 | `verthys-tauri/src-tauri/src/lib.rs:322` |
-| 插件依赖 | `verthys-tauri/src-tauri/Cargo.toml:184`；`Cargo.lock:3530-3533`（2.12.0） |
-| 权限 | `verthys-tauri/src-tauri/capabilities/default.json:16` |
+| 更新配置 | `verthys-tauri/src-tauri/tauri.conf.json`（更新插件、公钥、禁止降级、passive） |
+| 插件注册 | `verthys-tauri/src-tauri/src/lib.rs` 的 updater 插件注册 |
+| 插件依赖 | `verthys-tauri/src-tauri/Cargo.toml` 与 `Cargo.lock` 的 `tauri-plugin-updater` 条目 |
+| 权限 | `verthys-tauri/src-tauri/capabilities/default.json` 的更新权限声明 |
 | 前端状态层 | `verthys-tauri/src/composables/useAppUpdater.ts` |
-| 前端测试 | `verthys-tauri/src/composables/useAppUpdater.spec.ts`（7 条） |
-| 安装闸门 | `verthys-tauri/src/components/modules/SecurityCenter.vue:471-542` |
-| 锁库实现 | `verthys-tauri/src/session/security-session.ts:513`、`:580` |
-| 错误契约 | `verthys-tauri/src/lib/verthys_error.ts:266` |
+| 前端测试 | `verthys-tauri/src/composables/useAppUpdater.spec.ts` |
+| 安装闸门 | `verthys-tauri/src/components/modules/SecurityCenter.vue` 的安装闸门 |
+| 锁库实现 | `verthys-tauri/src/session/security-session.ts` 的锁库路径 |
+| 错误契约 | `verthys-tauri/src/lib/verthys_error.ts` 的错误文案映射 |
 | 日志工具 | `verthys-tauri/src/utils/logger.ts` |
-| 清单生成 | `scripts/release/make_updater_manifest.mjs:100-111` |
-| 本机夹具 | `scripts/updater/updater_server.mjs:145-163` |
-| 构建脚本 | `build_production.ps1:427-638` |
+| 清单生成 | `scripts/release/make_updater_manifest.mjs` |
+| 本机夹具 | `scripts/updater/updater_server.mjs` |
+| 构建脚本 | `build_production.ps1` 的更新物料阶段 |
 | SBOM | `scripts/release/generate_sbom.mjs` |
 | 版本同步 | `ci/sync_version.ps1` |
-| 供应链门 | `ci/verify_vendor_hashes.ps1`、`.github/workflows/core.yml:81-85` |
-| worker 就绪 | `verthys-tauri/verthys-worker/src/runtime/main_loop.rs:136-160` |
-| 父进程等待 | `verthys-tauri/src-tauri/src/worker/session.rs:405`、`controller/worker_controller.rs:384-391` |
-| 部署文档 | `docs/DEPLOYMENT.md:38-41`（漂移） |
-| 发布文档 | `docs/RELEASE.md:7`（版本漂移） |
-| 文档索引 | `docs/README.md:36-38`（引用缺失） |
-| 依赖源码 | `tauri-plugin-updater 2.12.0` 的 `updater.rs` / `error.rs` / `config.rs` |
-| 实际签名 | `build/updater/Verthys_4.1.3_x64-setup.exe.sig`（trusted comment 无版本） |
-| 实际 PE 版本 | `Verthys_4.1.3_x64-setup.exe` FileVersion / ProductVersion = 4.1.3 |
+| 供应链门 | `ci/verify_vendor_hashes.ps1`、`.github/workflows/core.yml` 的供应链步骤 |
+| worker 就绪 | `verthys-tauri/verthys-worker/src/runtime/main_loop.rs` 的 ready 信号 |
+| 父进程等待 | `verthys-tauri/src-tauri/src/worker/session.rs`、`controller/worker_controller.rs` 的就绪等待 |
+| 部署文档 | `docs/DEPLOYMENT.md` 的签名与安装章节 |
+| 发布文档 | `docs/RELEASE.md` |
+| 文档索引 | `docs/README.md` |
+| 依赖源码 | `tauri-plugin-updater` 的 `updater.rs` / `error.rs` / `config.rs` |
+| 初始签名样本 | 2026-10-23 的 `Verthys_4.1.3_x64-setup.exe.sig`（trusted comment 无版本，属历史快照） |
+| 初始 PE 版本 | 2026-10-23 的 `Verthys_4.1.3_x64-setup.exe` FileVersion / ProductVersion = 4.1.3（历史快照） |
 
 ## 附录 B：服务器 readiness 清单
 

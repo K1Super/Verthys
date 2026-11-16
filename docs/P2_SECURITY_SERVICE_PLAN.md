@@ -2,11 +2,13 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | 已实现（2026-11-08）：单安装包 perMachine 集成；D1 已修订为随应用安装；生产构建/安装/卸载实测通过 |
+| 状态 | 已实现（2026-11-08）：单安装包 perMachine 集成；D1 已修订为随应用安装；生产构建/安装/卸载实测通过；干净 VM SCM/安装 E2E 仍待执行 |
 | 范围 | P2 独立立项：SYSTEM 安全服务、机器级节流、随应用单包安装与回滚 |
 | 依赖前置 | P1 已完成（固定状态路径、ACL、设备绑定见证、迁移与 fail-closed） |
 | 边界 | P2 不修改 P1 熔断/回滚语义，不混入 P1 代码；服务是强制依赖，未安装/不可达即 fail-closed |
 | 编码规范 | 遵循仓库根 `.trae/rules/project_rules.md`；代码注释中文，符号与标准术语原文 |
+
+> Last updated: 2026-11-17 · 维护人：K1Super
 
 ---
 
@@ -51,6 +53,8 @@ P2 以**独立项目**形式引入 SYSTEM 特权服务，解决 P1 无法解决�
 ---
 
 ## 2. 威胁模型与残余边界
+
+> 威胁模型的权威版本已并入 [SECURITY_DESIGN.md](SECURITY_DESIGN.md) §9；本节保留实施期攻击面清单与原始决策记录。
 
 ### 2.1 防护对象
 
@@ -679,7 +683,7 @@ SCM 安装 E2E 不在普通 CI 运行，只在一次性 Windows VM 上由 `tests
 | S-A9 | 伪造 `Installed` 注册表（普通用户） | HKLM 写入被拒 |
 | S-A10 | 替换服务 exe 为未签名文件 | 服务启动自检失败；安装器拒绝安装 |
 
-**执行环境**：S-A3/S-A4/S-A5/S-A6/S-A8/S-A9 可在控制台模式 CI 执行；S-A1/S-A2/S-A7/S-A10 需要真实 SCM 安装、管理员或第二台机器，只在干净 VM 的 E2E 中执行。测试客户端使用 `tests/attack/signing/New-TestCert.ps1` 生成测试证书并安装到 `CurrentUser\Root`，服务测试构建以该证书指纹为钉扎值；测试结束清理证书与信任。
+**执行环境**：S-A3/S-A4/S-A5/S-A6/S-A8/S-A9 可在控制台模式 CI 执行；S-A1/S-A2/S-A7/S-A10 需要真实 SCM 安装、管理员或第二台机器，只在干净 VM 的 E2E 中执行。测试客户端证书需预先安装到 `CurrentUser\Root`，签发流程参见 `scripts/signing/New-VerthysCodeSigningCert.ps1`；仓库当前未包含 `tests/attack/signing/New-TestCert.ps1`，S-A1/S-A2 的自动证书准备需在干净 VM 上补齐。
 
 ### 11.5 SCM / 安装 E2E（干净 VM）
 

@@ -2,7 +2,7 @@
 
 > 整合 C 层编码规范并对齐代码现状，给出 C/Rust/TypeScript 的命名、目录、格式、静态检查与提交约定。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
 本规范整合历史 C 层编码规范并对齐当前代码现状；命名与目录以代码实际符号为准（规范与代码冲突时以代码为事实，差异在文中标注）。提交规范见 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)。
 
@@ -33,7 +33,7 @@
 
 > 说明：任务线索中曾拟「`模块_组件_名称_t` 类型」命名法，但 `core/include/verthys.h` 与 `core/src` 实际未使用 `_t` 后缀——公开类型统一 `Verthys` 前缀 PascalCase，内部类型组件语义 PascalCase。本规范以代码现状为准，不引入 `_t` 后缀。
 
-命名附加约束（承 `archive/c_layer_coding_spec.md` §4.2）：避免下划线开头标识符（保留给编译器）；循环索引 `i`/`j` 允许，复杂逻辑用有意义名称；全局变量需描述性命名。
+命名附加约束：避免下划线开头标识符（保留给编译器）；循环索引 `i`/`j` 允许，复杂逻辑用有意义名称；全局变量需描述性命名。
 
 ### 2.2 目录硬约束（以 core 现状验证）
 
@@ -51,13 +51,13 @@
 - 导出标记：`VERTHYS_API` 为**空宏**（不携带 dllexport/dllimport），导出唯一由 `core/verthys.def` 白名单决定——禁止重新启用 `VERTHYS_EXPORTS` 全量导出（红线，见 [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md) ADR-011）。
 - C++ 互操作用 `extern "C"` 包裹（`verthys.h` 已有）。
 
-### 2.4 格式化（承 c_layer_coding_spec §4）
+### 2.4 格式化
 
 - 缩进 4 空格，禁 Tab；行宽建议 ≤80、上限 120；大括号风格 Allman/K&R 二选一且项目内统一（现状以 K&R 为主，见 `verthys_crypto.h`）。
 - 二元运算符两侧空格；逗号/分号后空格；关键字后空格（`if (`）；函数名与括号间无空格；指针 `*` 紧贴变量名（`int *ptr`）。
 - 每条语句独占一行；空行分隔逻辑块。
 
-### 2.5 内存与错误处理（承 c_layer_coding_spec §5）
+### 2.5 内存与错误处理
 
 - 用 `<stdint.h>` 定宽类型 + `size_t`/`ptrdiff_t`；禁止隐式窄化/符号混算。
 - `malloc/calloc/realloc` 与 `free` 成对；`realloc` 结果先赋临时指针；错误路径 `goto cleanup` 释放。
@@ -66,9 +66,11 @@
 
 ---
 
-## 3. 注释规范（为何而非如何）
+## 3. 注释规范（C 语言特有约定）
 
-- 注释解释「为什么」而非复述「做什么」，拒绝无脑逐行注释（刚性条款 3.7）。
+> 完整规则见 [references/comment-standards.md](references/comment-standards.md) 与 [references/comment-vocabulary.md](references/comment-vocabulary.md)；本节只保留 C 语言特有约定，不重复通用条款。
+
+- 注释解释「为什么」而非复述「做什么」，拒绝无脑逐行注释。
 - 复杂算法/核心路径/对外接口必须注释意图与设计；公共函数建议 Doxygen 风格标注参数方向（`[in]/[out]/[in,out]`）、返回/错误码、线程安全、内存所有权。
 - 线程安全用统一标注：`MT-Safe / MT-Unsafe / MT-Const / MT-Handle`（`verthys.h` 头部定义）。
 - 偏差必须磁盘留痕：无法按规范/方案执行时，在代码头注 + 执行文档记录偏差编号与证据（先例 D-1 `/guard:longjmp`、D-2 `/wd4996`，见 `cmake/VerthysHardening.cmake`）。

@@ -2,9 +2,9 @@
 
 > 定义 Verthys 私密数据管理器的功能需求（可验收）、非功能需求与范围外事项，作为验收与测试的唯一依据。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
-本文档依据 `DOCUMENTATION_CHECKLIST.md` 的 P0 需求层要求整合，素材来自 `archive/PROJECT_DOCUMENTATION.md` 与 `archive/应用功能全量核验报告.md`；每条功能需求均以代码实现位置佐证，可被命令或可观察现象验收。约定：版本 4.1.3；品牌仅 Verthys；容器扩展名 `.verthys`；公开符号前缀 `Verthys_`；环境变量前缀 `VERTHYS_`。
+本文档依据当前代码与测试实况整理；每条功能需求均以代码实现位置佐证，可被命令或可观察现象验收。约定：版本以根 `VERSION` 为准；品牌仅 Verthys；容器扩展名 `.verthys`；公开符号前缀 `Verthys_`；环境变量前缀 `VERTHYS_`。
 
 ---
 
@@ -18,7 +18,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 |---|---|
 | 技术栈 | 核心 C11 DLL（MSVC）+ Tauri(Rust) + Vue3/TypeScript |
 | 容器格式 | 当前格式（A/B 元数据 + 追加数据区 + 模块槽；交换信封使用 FlatBuffers schema），`.verthys` |
-| 版本 | 4.1.3 |
+| 版本 | 根 `VERSION` |
 | 威胁模型 | 同机非特权用户态攻击者（严于普通桌面应用） |
 
 ---
@@ -35,7 +35,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 
 1. **普通用户**：首次新建保险库（`verthys_create`）→ 录入账号/照片 → 锁定/解锁 → 导出备份。
 2. **安全管理员**：配置 SECURE 预设 + 设备绑定 → 观察 SecurityDashboard 防御闭环 7 路径 → 启用剪贴板隔离与 USB 影子。
-3. **开发者**：本地构建 `scripts/build/build_core.dev.ps1` → 跑 `verthys_tests.exe` 全量 → 对照 `CORE_API.md` 调用 35 个导出符号（以 `core/verthys.def` 白名单为准）。
+3. **开发者**：本地构建 `scripts/build/build_core.dev.ps1` → 跑 `verthys_tests.exe` 全量 → 对照 `CORE_API.md` 调用 68 个导出符号（以 `core/verthys.def` 白名单为准）。
 
 ---## 3. 功能需求清单
 
@@ -183,14 +183,14 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 ### NFR-01 密码学算法安全（刚性条款 2.1）
 
 - **要求**：禁止 MD5（作为密码哈希）、SHA-1（签名）、明文存储密码等已废弃算法。
-- **现状佐证**：口令派生 Argon2id；AEAD XChaCha20-Poly1305 / CNG AES-256-GCM；完整性 HMAC-SHA256 + BLAKE2b-256；设备指纹 SHA-256（`device_fingerprint.rs:79-84`）。全库无 MD5/SHA-1 密码学用途。
+- **现状佐证**：口令派生 Argon2id；AEAD XChaCha20-Poly1305（AES-256-GCM 槽位枚举保留但不写入）；完整性 HMAC-SHA256 + BLAKE2b-256；设备指纹 SHA-256（`device_fingerprint.rs` 的设备指纹函数）。全库无 MD5/SHA-1 密码学用途。
 - **验收**：`grep -ri "md5\|sha1" core/src` 无密码学调用点（仅注释/第三方宏名）。
 
 ### NFR-02 敏感信息禁止硬编码（刚性条款 2.1）
 
 - **要求**：密钥、口令、令牌不硬编码于代码/配置；域分离标签唯一、校验。
 - **现状佐证**：CNG 内核托管密钥（用户态仅句柄）；GMK 以 `Zeroizing` 持有；`verthys_secure_zero` 全库贯彻。
-- **验收**：审计代码无明文密钥常量（pepper 内嵌为已声明兜底取舍，见 `archive/PROJECT_DOCUMENTATION.md` §17.3）。
+- **验收**：审计代码无明文密钥常量（pepper 内嵌为已声明兜底取舍，见 [SECURITY_DESIGN.md](SECURITY_DESIGN.md) §2.2）。
 
 ### NFR-03 全链路入参校验（刚性条款 2.1 / 3.4）
 
@@ -208,7 +208,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面私密�
 
 - **要求**：关键接口常规负载 P95 延迟 ≤ 200ms（允许显式定义阈值）。
 - **现状佐证**：持久化缓存/预取/扫描摘要路径；`Verthys_GetDiagnostics` 暴露耗时指标。
-- **验收**：`core/tests/perf/test_perf_baseline.c` 通过；解锁整体 ≤ 2.5s（M2 基准）。
+- **验收**：`core/tests/perf/test_perf.c` 通过；解锁整体 ≤ 2.5s（M2 基准）。
 
 ### NFR-06 无 OWASP Top 10 高危 / 并发无竞争（刚性条款 1.4）
 

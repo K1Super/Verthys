@@ -1,8 +1,8 @@
 # 构建指南（BUILD）
 
-> 全量/增量构建矩阵、四阶段构建流程、产物落点与常见构建错误的排查修复。
+> 全量/增量构建矩阵、分阶段构建流程、产物落点与常见构建错误的排查修复。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
 构建由根目录 `build_production.ps1`（生产）与 `build_dev.ps1`（开发）驱动，另有两支 core 专用脚本：`scripts/build/build_core.dev.ps1`、`scripts/build/build_core.release.ps1`。本文件聚焦生产构建链路，依赖安装见 [GETTING_STARTED.md](GETTING_STARTED.md)。
 
@@ -21,14 +21,15 @@ Verthys 仅支持 Windows / MSVC / x64。工具链来源有两种：本地 `VERT
 | `-SkipTauri` | 仅构建组件、不打包（`build_dev.ps1` 预检回调即用此参数） |
 | `-NoPause` | 失败/成功后不暂停等待 Enter（CI 场景；双击运行不传以查看输出） |
 
-## 3. 四阶段流程
+## 3. 分阶段流程
 
-### 前置步骤（阶段 0 / 0.1 / 0.5 / 0.6）
+### 前置步骤（阶段 0 / 0.1 / 0.2 / 0.5 / 0.6）
 
 1. `阶段 0`：清理僵尸进程（`cargo/rustc/Verthys/verthys-worker`）与 `.cargo-lock` 锁文件。
 2. `阶段 0.1`：更新域边界门（`ci/check_updater_boundary.ps1`）：WebView 不得获得安装类命令权限。
-3. `阶段 0.5`：探测已注入的 MSVC 环境（`VCToolsInstallDir` + `INCLUDE` + `LIB` + PATH 中的 `cl.exe`）。已注入则沿用并选 Ninja；未注入时 dot-source `scripts/lib/env.load.ps1`（`VERTHYS_*` 四变量，选 Visual Studio 生成器）。
-4. `阶段 0.6`：清理旧 `build_err.log`、校验 `node_modules`（缺失时以 `package-lock.json` 为唯一事实源执行 `npm ci`）、校验 `keyboard-types-patched` 本地补丁、只读校验 Cargo 锁文件中的本地补丁条目。
+3. `阶段 0.2`：版本载体同步（`ci/sync_version.ps1`），根 `VERSION` 与各载体漂移即失败。
+4. `阶段 0.5`：探测已注入的 MSVC 环境（`VCToolsInstallDir` + `INCLUDE` + `LIB` + PATH 中的 `cl.exe`）。已注入则沿用并选 Ninja；未注入时 dot-source `scripts/lib/env.load.ps1`（`VERTHYS_*` 四变量，选 Visual Studio 生成器）。
+5. `阶段 0.6`：清理旧 `build_err.log`、校验 `node_modules`（缺失时以 `package-lock.json` 为唯一事实源执行 `npm ci`）、校验 `keyboard-types-patched` 本地补丁、只读校验 Cargo 锁文件中的本地补丁条目。
 
 ### 阶段 1：C 核心安全 DLL（CMake Release）
 
@@ -77,6 +78,8 @@ cargo build                # debug（开发环境用，失败仅告警不影响�
 - `Get-FileSha256` 比对 binaries/ 与 target 副本，哈希漂移即失败。
 
 ### 阶段 4：Tauri 打包（NSIS 安装包，含两个前置门）
+
+> 阶段 3.6 先构建并分发 P2 服务载荷，详见 §7。
 
 1. 前端类型检查：`npx vue-tsc --noEmit`。
 2. Rust 编译检查：`cargo check`（在 `src-tauri/`）。

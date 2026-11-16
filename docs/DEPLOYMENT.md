@@ -2,29 +2,30 @@
 
 > 打包流程、产物清单与命名、签名现状、分发升级方式与安装后验证清单。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
-Verthys 2.6.1 仅 Windows（x64）。打包统一由 `build_production.ps1` 阶段 4 完成，产出 NSIS 安装包；本文件描述产物、签名现状、分发与安装验证。构建细节与错误排查见 [BUILD.md](BUILD.md)。
+Verthys 仅支持 Windows（x64），当前版本以根 `VERSION` 为准。打包统一由 `build_production.ps1` 阶段 4 完成，产出 perMachine NSIS 安装包；本文件描述产物、签名现状、分发与安装验证。构建细节与错误排查见 [BUILD.md](BUILD.md)。
 
 ## 1. 打包流程（阶段 4 全貌）
 
-`build_production.ps1` 阶段 4（`build_production.ps1:394-471`）按序执行三个步骤：
+`build_production.ps1` 阶段 4 按序执行三个步骤：
 
 1. 前端类型检查：`npx vue-tsc --noEmit`（提前捕获 TypeScript 错误）。
 2. Rust 编译检查：`cargo check`（在 `verthys-tauri/src-tauri/`，提前捕获 Rust 错误）。
 3. Tauri 打包：`npm run tauri build` → NSIS 安装包。
 
-其中 `npm run build`（`package.json` 的 `build` 脚本）本身为 `vue-tsc --noEmit && vite build`；Tauri 的 `beforeBuildCommand` 即 `npm run build`，`bundle.targets` 仅 `["nsis"]`，`useLocalToolsDir: true`（`tauri.conf.json:32-49`）。
+其中 `npm run build`（`package.json` 的 `build` 脚本）本身为 `vue-tsc --noEmit && vite build`；Tauri 的 `beforeBuildCommand` 即 `npm run build`，`bundle.targets` 仅 `["nsis"]`，`useLocalToolsDir: true`（见 `tauri.conf.json` 的 `bundle` 节点）。
 
 ## 2. 产物清单与命名
 
 | 产物 | 路径 | 说明 |
 |---|---|---|
-| C 核心 DLL | `build/core/Release/verthys.dll` | 随安装包以 `resources: ["verthys.dll"]` 打包（副本在 `src-tauri/verthys.dll`） |
+| C 核心 DLL | `build/core/Release/verthys.dll` | 随安装包以 `resources` 打包（副本在 `src-tauri/verthys.dll`） |
+| P2 服务载荷 | `src-tauri/service-payload/VerthysSecuritySvc.exe`、`VerthysRootCA.cer` | 随 `resources` 打包，perMachine 安装器 POSTINSTALL 调用 `/install /quiet` |
 | worker | `verthys-tauri/src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe` | 随安装包以 `externalBin: ["binaries/verthys-worker"]` 打包（Tauri 自动追加目标三元组后缀） |
 | NSIS 安装包 | `verthys-tauri/src-tauri/target/release/bundle/nsis/*.exe` | 最终分发件 |
 
-说明：`tauri.conf.json` 中 `externalBin` 相对 `src-tauri/` 解析，副本必须落在 `src-tauri\binaries\`（`build_production.ps1` 的 `$BinariesDir`）；`resources` 从 `src-tauri/` 查找 `verthys.dll`（`$DllTarget`）。
+说明：`tauri.conf.json` 中 `externalBin` 相对 `src-tauri/` 解析，副本必须落在 `src-tauri\binaries\`（`build_production.ps1` 的 `$BinariesDir`）；`resources` 从 `src-tauri/` 查找 `verthys.dll` 与 `service-payload/*`（`$DllTarget`）。
 
 ## 3. 签名与调用方认证
 
@@ -50,7 +51,7 @@ production 发布链路要求发布者 Authenticode 代码签名证书，构建�
 
 安装后按以下顺序验证核心二进制已正确部署（命令在 PowerShell 执行）：
 
-1. 检查安装目录（默认 `%LOCALAPPDATA%\Verthys` 或安装时指定目录）下存在 `verthys.dll` 与 `verthys-worker-x86_64-pc-windows-msvc.exe`。
+1. 检查安装目录（默认 `%ProgramFiles%\Verthys`）下存在 `verthys.dll`、`verthys-worker-x86_64-pc-windows-msvc.exe` 与 `service-payload\VerthysSecuritySvc.exe`。
 2. 哈希一致性：以构建产物为基准比对安装副本。
 
 ```powershell

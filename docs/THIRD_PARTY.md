@@ -2,7 +2,7 @@
 
 > 第三方库清单、版本来源、引入理由、许可证、升级策略与供应链安全关联。
 >
-> Last updated: 2026-10-24 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
 本文档按“单一事实来源”原则：版本/依赖以 `dep-versions.txt`、`third_party/`
 下实际文件、`verthys-tauri/src-tauri/Cargo.toml`（及 Cargo.lock）、`verthys-tauri/package.json` 为准，
@@ -101,9 +101,5 @@
 - 依赖审查红线：工程刚性约束条款（见 `docs/REQUIREMENTS.md`）要求第三方依赖安全审查、禁引已知高危组件，
   详见 `SECURITY_DESIGN.md`。
 
-## 8. 已知观察（照实记录，未改代码）
-- `dep-versions.txt` 含 `name = "valt-tauri" version = "2.6.1"`（旧品牌残留），而 Cargo.toml 包名为
-  `verthys-tauri`；`verthys-tauri/node_modules/.package-lock.json` 亦有旧名痕迹（第三方生成物）。
-
-## 9. 交叉引用
-- C 接口：`CORE_API.md`；桥接：`TAURI_BRIDGE.md`；构建配置：`CONFIGURATION.md`；安全设计：`SECURITY_DESIGN.md`。
+## 8. 交叉引用
+- C 接口：`CORE_API.md`；桥接与进程模型：`ARCHITECTURE.md`；构建配置：`CONFIGURATION.md`；安全设计：`SECURITY_DESIGN.md`。

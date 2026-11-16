@@ -2,7 +2,7 @@
 
 > 定义四层信任边界、密钥派生链路、哈希校验机制与威胁建模，供安全审计与应急处置参考。
 >
-> Last updated: 2026-09-28 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
 ---
 
@@ -333,7 +333,7 @@ flowchart TB
 |---|---|---|
 | 安装包 minisign | 证明安装包字节来自发布者 | 内置更新公钥；插件下载阶段与 Rust 复验共用 |
 | 清单签名 | 证明版本、兼容、下载地址与哈希未被篡改 | 清单公钥；production profile 强制 |
-| Authenticode | 建立 Windows 系统信任与 SmartScreen 声誉（可选） | 开启时使用系统证书链；默认关闭，不依赖付费证书 |
+| Authenticode | 更新器对安装包的附加身份校验层（与构建发布签名是两层） | 默认不强制；开启时校验系统证书链与吊销状态 |
 | HTTPS | 保护清单与下载通道（默认） | 系统 TLS 信任链；零成本自建可显式放行 HTTP + IP |
 
 本机 `local` profile 只使用回环 HTTP 与安装包签名；它防网络、其他账户、误替换与损坏，不防同账户任意写入。production profile 通过 HTTPS、清单签名与鉴权提高门槛。
@@ -342,16 +342,89 @@ flowchart TB
 
 ## 9. P2 机器级安全服务
 
-P2 以独立 SYSTEM 服务提供机器级失败预算；服务是强制依赖，未安装、不可达、状态损坏或验签失败一律 fail-closed，不保留仅本地熔断的兼容路径。
+P2 以独立 SYSTEM 服务提供机器级失败预算；服务是强制依赖，未安装、不可达、状态损坏或验签失败一律 fail-closed，不保留仅本地熔断的兼容路径。本节是 P2 的威胁模型与安全契约；IPC 字段布局、状态二进制布局与测试矩阵见 [P2_SECURITY_SERVICE_PLAN.md](P2_SECURITY_SERVICE_PLAN.md)。
 
-| 组件 | 信任边界 | 关键约束 |
+### 9.1 防护对象与信任边界
+
+| 主体 | 能力假设 | 是否覆盖 |
 |---|---|---|
-| `VerthysSecuritySvc.exe` | LocalSystem | 只在 `%ProgramData%\Verthys\Security` 维护令牌桶；不接触口令、容器或用户密钥 |
-| `verthys.dll` P2 客户端 | 当前用户 | 只读 HKLM 公钥、连接命名管道、校验 ECDSA 响应签名；不持有私钥 |
-| `VerthysSecuritySvc.exe`（`/install` 等子命令） | 应用安装器提升管理员上下文 | 只做安装/升级/卸载/修复；不生成私钥 |
+| 同机其他普通用户 | 可运行任意用户态代码、创建命名管道、读写自己可写目录 | 覆盖 |
+| 当前用户本人 | 可运行任意用户态代码、可 patch 自己进程内的 DLL | 部分覆盖（见 §9.6） |
+| 管理员 / SYSTEM / 内核攻击者 | 可改 ACL、停服务、改注册表、调试进程 | 不覆盖 |
+| 远程网络攻击者 | 只能访问网络，不能访问本地命名管道 | 覆盖（管道拒绝远程客户端） |
 
-协议为定长 64 字节请求 / 128 字节响应，小端二进制；服务端校验客户端映像与已加载 `verthys.dll` 的 Authenticode 发布者指纹，客户端校验服务端 ECDSA P-256 响应签名。服务已安装但不可达、状态缺失/损坏、签名失败一律 fail-closed；`reset` 只记录成功审计，不恢复机器预算。
+| 组件 | 运行身份 | 职责 | 不做什么 |
+|---|---|---|---|
+| `VerthysSecuritySvc.exe` | LocalSystem | 认证客户端、维护令牌桶、原子持久化、签名响应 | 不接触口令/容器/用户密钥；不执行客户端输入 |
+| `verthys.dll` P2 客户端 | 当前用户 | 读取 `Installed`、连接管道、发请求、验响应签名 | 不读机器状态文件、不持有私钥 |
+| `VerthysSecuritySvc.exe`（`/install` 等子命令） | 应用安装器提权上下文 | 安装/升级/卸载/修复/状态查询 | 不生成私钥；私钥由服务首次启动生成 |
 
-客户端门禁位于认证收口：`vty_vault_open_internal`（V4 口令/keyfile 解锁）、`vty_vault_open_recovery`（恢复码解锁）、`vty_vault_verify_user_password` / `vty_vault_attach_keyfile`（改密、轮换、keyfile 复核）与 `desc_open_shares`（全部模块口令认证）。`check` 先于 P1 熔断与 Argon2id；失败同时记账 P1 与机器预算，成功同时 reset。
+### 9.2 攻击面与对策
 
-状态目录 ACL 为 SYSTEM 完全控制、Administrators 只读、Users 无权限；状态文件带 HMAC-SHA256，容量与 schema 不匹配按损坏拒绝。明确残余边界：同一用户拥有代码执行能力时仍可 patch 客户端跳过调用；管理员/内核攻击者超出威胁模型。完整威胁模型与决策见 `docs/P2_SECURITY_SERVICE_PLAN.md`。
+| 攻击面 | 对策 |
+|---|---|
+| 删除/篡改机器状态 | 状态目录 ACL 仅 SYSTEM 完全控制；HMAC-SHA256 状态完整性；注册表锚点独立检测缺失 |
+| 伪造命名管道服务端 | 客户端校验 ECDSA P-256 响应签名；私钥仅 SYSTEM 可读；公钥存 HKLM（普通用户只读） |
+| 未授权进程调用服务 | 服务端校验客户端进程 Authenticode 发布者指纹与已加载 `verthys.dll` 签名 |
+| 单用户刷失败拖垮全机器 | 每用户滑动窗口配额，单用户每分钟最多 6 次失败记账 |
+| 通过 reset 洗预算 | `reset` 只做成功计数审计，不恢复令牌；预算只随时间恢复 |
+| 服务停机绕过 | 注册表 `Installed=1` 且管道不可达 → 客户端 fail-closed |
+| 时钟回拨 | 记录 UTC 单调推进；`now < last_refill` 时不补充令牌并记录事件 |
+| 远程管道连接 | `PIPE_REJECT_REMOTE_CLIENTS` |
+| 服务进程被替换 | 服务启动前校验自身 Authenticode 发布者指纹；安装器校验待安装文件签名 |
+
+### 9.3 认证与协议
+
+- 协议为定长 64 字节请求 / 128 字节响应，小端二进制；命令为 `Ping`、`Check`、`RecordFailure`、`Reset`。
+- `Reset` 只累加成功审计计数，不恢复令牌：任何能运行签名客户端的用户都能调用 reset，若 reset 能恢复预算，机器级节流可被任意用户洗掉。
+- 服务端认证客户端：取客户端 PID 并拒绝服务自身；持有进程句柄防止 PID 复用；校验客户端映像 Authenticode 发布者指纹；预算类命令额外校验已加载 `verthys.dll` 的发布者指纹。`Ping` 允许签名安装器用于安装就绪检查，不改变任何状态。
+- 客户端认证服务端：从 `HKLM\SOFTWARE\Verthys\SecurityService` 读取 `Installed` 与 `ServerPubKey`（P-256）；校验响应签名与 magic/version/request_id/nonce；任一不符按服务不可信处理并返回 `VTY_E_LOCKED`。
+- 私钥只存于 SYSTEM 可读目录，客户端只持有公钥；不使用共享密钥/HMAC，避免客户端持有可被同用户进程读取的秘密。
+- 服务无法加载签名私钥时不返回未签名响应，直接关闭管道连接；客户端按服务不可达 fail-closed。
+
+### 9.4 状态与限流
+
+- 状态目录 `%ProgramData%\Verthys\Security`：protected DACL，SYSTEM 完全控制、Administrators 只读、Users 无权限；拒绝重解析点。
+- 状态文件 `machine_rate.bin`、HMAC 密钥 `machine_state.key`、签名私钥 `service_signing.key` 均位于该目录；HMAC-SHA256 覆盖状态字段；magic/版本/文件长度/容量不匹配一律 fail-closed，不自动重置。
+- 写入采用同目录临时文件 + `FlushFileBuffers` + `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`；失败回滚内存中的令牌与计数修改，禁止“内存已扣减、磁盘仍为旧值”的不一致窗口。
+- 注册表 `HKLM\SOFTWARE\Verthys\SecurityService` 保存 `Installed`、`StateInitialized`、`ServerPubKey`、`ProtocolVersion` 等锚点；`StateInitialized=1` 但状态文件/密钥缺失时 fail-closed，只有管理员 `/reset-state` 可重建。
+- 全局容量 10 个令牌，恢复速率 1 令牌/60 秒；每用户 6 次失败/60 秒，每用户 6 个令牌/10 分钟。每用户窗口只存内存、服务重启清零；全局令牌与持久化状态跨重启保留。
+- 时钟回拨时不补充令牌并记录事件；`Check` 不预留令牌，预算语义是速率上限而非严格线性化的并发闸门，这是避免“预留-归还”重新引入洗预算路径的刻意取舍。
+
+### 9.5 安装、升级与回滚安全
+
+- 应用安装器为 perMachine，一次 UAC 内完成应用、SYSTEM 服务与根 CA；取消 UAC 时安装器进程不启动，零写入。
+- 安装器在提权上下文调用 `service-payload\VerthysSecuritySvc.exe /install /quiet`；服务 `Running` 且 `Installed=1` 后才完成安装。
+- 安装前校验服务 exe 的发布者 Authenticode 指纹与版本资源；根 CA 的 DER SHA-256 在构建期钉扎，安装时校验后导入 `LocalMachine\Root`，再让服务执行自身签名校验。
+- 升级：停止旧服务，旧 exe 备份为 `.bak`，新 exe 先写临时文件、校验哈希后原子替换；失败恢复 `.bak` 并重启上一已安装版本。降级一律拒绝；协议只支持当前 v1，不保留 N-1 兼容，客户端与服务必须同版部署。
+- 卸载：先停止并删除服务，再清理安装目录、注册表锚点、机器状态、事件源与根 CA；用户加密库与 `%LOCALAPPDATA%\Verthys\KeyMaterial` 默认保留。删除状态失败时保留现场并返回非零退出码，不静默吞错。
+
+### 9.6 明确残余边界
+
+1. **同用户代码执行**：当前用户可以 patch `verthys-worker.exe` / `verthys.dll` 跳过 `vty_machine_limiter_*` 调用。P2 阻止的是删状态、换服务、伪造响应与跨用户重置，不阻止同用户自我 patch；彻底解决需把口令校验与密钥释放下沉到服务，属于新立项。
+2. **管理员 / SYSTEM / 内核攻击者**：可停止服务、改 ACL、改注册表、替换已签名二进制，P2 不承诺对抗。
+3. **离线容器**：攻击者拿到容器文件后可在另一台机器离线爆破；P2 只约束本机在线尝试，不改变离线威胁模型。
+4. **应用目录**：perMachine 安装到 Program Files 后非管理员无法替换主程序；同用户内存注入仍属残余边界。
+
+### 9.7 风险登记
+
+| 编号 | 风险 | 影响 | 对策 |
+|---|---|---|---|
+| R1 | 同用户 patch 客户端绕过机器节流 | 安全边界有限 | 明确写入文档；完整修复需下沉口令校验，另立项 |
+| R2 | 服务停机导致应用解锁 fail-closed | 可用性 | 自动启动、SCM 恢复、快速升级、`/repair`、事件日志 |
+| R3 | 状态/密钥损坏导致永久 fail-closed | 可用性 | `/reset-state`、`/repair-keys`；重建需管理员且留痕 |
+| R4 | 管理员恶意操作 | 超出模型 | 文档声明；不依赖 ACL 对抗管理员 |
+| R5 | 杀软/EDR 拦截服务安装 | 部署失败 | 安装器明确错误码；企业白名单；独立签名 |
+| R6 | 升级期间协议不兼容 | 解锁失败 | 只支持当前 v1；不保留 N-1 兼容，必须同版部署 |
+| R7 | 注册表公钥被管理员替换 | 可伪造服务端 | 管理员超出模型；客户端仍校验响应签名，替换需同时控制私钥 ACL |
+| R8 | 机器时钟被管理员回拨 | 预算恢复 | 管理员超出模型；非管理员无 `SeSystemtimePrivilege` |
+| R9 | 应用目录被非管理员替换 | 程序完整性 | perMachine 装入 Program Files；同用户内存注入仍属 R1 |
+
+### 9.8 验收门禁（缺一不可）
+
+1. **构建**：服务生产 OFF 钩子构建、测试 ON 钩子构建、core 生产 OFF 构建全部通过，附命令与产物路径。
+2. **测试**：服务单元/集成、core 全量、P2 攻击回归全部 0 失败，附 ctest/脚本输出摘要。
+3. **关键路径**：干净 VM 上 E1–E8 实际执行并保留证据（日志、`sc query`、`icacls`、事件日志）。
+4. **签名**：服务与安装器均为发布者证书签名；未签名/错误指纹被拒绝的正负对照通过。
+5. **P1 不回退**：P1 攻击回归结果不得低于当前证据基线，P1 状态目录与语义未被修改。
+6. **无测试钩子泄漏**：生产服务与 core 二进制不含 `--test-*` 分支、测试环境变量读取与测试公钥路径。

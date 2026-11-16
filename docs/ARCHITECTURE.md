@@ -2,7 +2,7 @@
 
 > 梳理 Verthys 四层架构、core 五大子域职责、进程模型与 core/前端边界，作为全仓技术蓝图。
 >
-> Last updated: 2026-09-28 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
 ---
 
@@ -30,7 +30,7 @@ flowchart TB
 
 ## 2. core 五大子域职责
 
-> 以实际目录 `core/src/*` 为准。代码采用模块化镜像子目录（如 `api/lifecycle/`），非扁平单文件；与源稿《TARGET_ARCHITECTURE_V5.md》的扁平布局不同。
+> 以实际目录 `core/src/*` 为准。代码采用模块化镜像子目录（如 `api/lifecycle/`），非扁平单文件。
 
 ### 2.1 api/ — 公共 ABI 门面
 `lifecycle/verthys_api.c` 承载通用 `Verthys_*` 导出与状态机分发；`verthys_api_container.c` 实现容器创建/解锁/恢复、keyfile、PCR、模块与全库轮换入口；`transfer/verthys_export_import.c` 负责导出/导入/改密；`scan/verthys_scan.c` 提供扫描游标；`lifecycle/dllmain.c` 维护 TLS 标志。
@@ -128,7 +128,7 @@ flowchart LR
 
 | 编号 | 一句话结论 |
 |---|---|
-| D-1 | 派生密钥经 CNG 内核托管，用户态仅持不可导出句柄，密钥明文不在用户态常驻 |
+| D-1 | 派生密钥在用户态受限栈帧瞬态存在并即时清零；CNG/TPM 仅用于胡椒与机器绑定托管（V3 CNG 密钥组已退役） |
 | D-2 | 采用当前容器（双包裹 AND + A/B 元数据 + 追加数据区 + 模块槽），无历史格式兼容包袱 |
 | D-3 | A/B 元数据双副本原子提交，单副本损坏不阻断打开 |
 | D-4 | 关键防御检测器走 `Nt*` 直接系统调用（syscall_direct）绕过用户态 Hook |

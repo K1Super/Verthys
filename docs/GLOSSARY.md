@@ -2,7 +2,7 @@
 
 > 统一 Verthys 全项目专有名词与标识符的中英文对照与定义，术语均来自真实代码标识符并附出处。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
 约定：本表术语以代码真实命名为准；「主要出处」以 `core/`、`verthys-tauri/` 为相对根。已废弃旧名（`.vault`、`valt://`、`VALTCORE_*`、`Vault_*`、valtcore.dll）仅允许出现在历史/迁移语境，见 [MIGRATION.md](MIGRATION.md)。
 
@@ -27,15 +27,15 @@
 
 | 中文术语 | 英文/标识符 | 定义 | 主要出处 |
 |---|---|---|---|
-| 密钥守卫 / CNG 内核托管 | key_separation / CNG | A/B/C 密钥导 CNG 内核句柄，用户态仅瞬态栈帧 | `core/src/security/memory/key_separation.c` |
+| 密钥守卫 / CNG 内核托管 | key_separation / CNG | 密钥隔离堆 + CNG 句柄托管；用户态不常驻密钥明文 | `core/src/security/memory/secure_allocator.c`、`core/src/crypto/keymanager/keymanager.c` |
 | 胡椒 | pepper（`verthys_pepper` / `VERTHYS_ERR_PEPPER_SOURCE`） | Argon2id 混入的应用级胡椒，三层来源 + 来源指纹 + 禁兜底 | `core/src/crypto/pepper/verthys_pepper.c` |
 | 域密钥 | domain key（`K_VSEC_DOMAIN_KEY`） | 构建期 `.vsec` 签名域密钥，双侧逐字节一致 | `core/src/security/integrity/integrity.c` |
 | 机器绑定 | machine binding / `MachineGuid` | 容器跨设备不可解，CNG RSA-OAEP 包装 + MachineGuid 指纹 | `core/src/security/layer3_hw_binding/hardware_binding.c` |
 | 全局主密钥 | GMK（`VERTHYS_GLOBAL_KEY_VERIFIER_v2__`） | 全局主密钥，worker 子进程内 `Zeroizing` 持有，永不出 worker | `verthys-tauri/verthys-worker/src/runtime/gmk.rs` |
 | 域分离 | domain separation / HKDF info | 用唯一标签隔离各派生用途，如 `verthys/master-key-v1`、`verthys/module/` | `core/src/crypto/cipher/verthys_crypto.h` |
 | Argon2id | Argon2id（校准 `argon2_calibrate`） | 内存硬口令派生，创建期两段式校准选参（目标 ~1.2s） | `core/src/crypto/cipher/verthys_crypto.c` |
-| XChaCha20-Poly1305 | XChaCha20-Poly1305（24B nonce） | libsodium AEAD，用于交换信封/兼容路径 | `verthys_crypto.c` |
-| CNG | Cryptography Next Generation | Windows 内核态密码服务 API（BCrypt AES-GCM，12B nonce） | `core/src/crypto/cipher/verthys_crypto_cng.c` |
+| XChaCha20-Poly1305 | XChaCha20-Poly1305（24B nonce） | libsodium AEAD，用于容器记录、密钥包裹与交换信封 | `core/src/crypto/cipher/verthys_crypto.c` |
+| CNG | Cryptography Next Generation | Windows 密码服务 API，用于机器密钥/TPM 托管与签名校验 | `core/src/security/layer3_hw_binding/cng_machine_key.c` |
 | 恢复卡 | Shamir 分片 | pepper 恢复的 k-of-n 分片方案 | `verthys_pepper.c` |
 
 ## 3. 安全防御
@@ -45,7 +45,7 @@
 | .vsec | 构建期签名节（magic `'VESC'`） | `.text`/`.rdata` 文件内容 HMAC-SHA256 构建期签名（128B），启动验签 | `core/src/security/integrity/integrity.c` |
 | .rhat 运行时哈希 | runtime hash（magic `'VRHT'`） | 关键函数 BLAKE2b-256 运行时哈希（产品 15 项 / 全量 40 项），失配 = KILL | `core/src/security/integrity/runtime_hash.c` + `core/tools/rhash_gen.c` |
 | 容器解锁 | vty_vault_open | 单阶段原子解锁：口令 + 设备根双槽解封 `K_c` → 元数据与 DataRoot 挂载；全部成功才进入 UNLOCKED | `core/src/crypto/vty_keymanager.c` |
-| 层 1-6 防御 | layer1..6 | 进程守卫/硬件绑定/钩子防御/沙箱/闭环的分层纵深防御 | `core/src/security/layer*_*` |
+| 分层纵深防御 | layer1/3/4/5/6 | 进程守卫/硬件绑定/钩子防御/沙箱/闭环的分层纵深防御 | `core/src/security/layer*_*` |
 | 防御闭环 | defense closure / 7 路径 | 7 条攻击路径状态机（BLOCKED/DEGRADED/FAILED） | `core/src/security/layer6_closure/defense_closure.c` |
 | 应急分级响应 | emergency / TELEMETRY·DEGRADE·KILL | 三级信号模型，检测与响应解耦 | `core/src/security/emergency/emergency.c` |
 | 直接系统调用 | syscall_direct / SSN | SSN 排序法提取 + W^X stub 页，失败优雅降级 | `core/src/security/anti_analysis/syscall_direct.c` |
@@ -57,7 +57,7 @@
 | 中文术语 | 英文/标识符 | 定义 | 主要出处 |
 |---|---|---|---|
 | worker 子进程 | verthys-worker | 加载 DLL + 单线程 FFI 转发，BELOW_NORMAL 优先级 | `verthys-tauri/verthys-worker/src/main.rs` |
-| FFI | C ABI / libloading | C DLL 与 Rust 的边界，libloading 按名解析 29 白名单符号 | `verthys-tauri/verthys-worker/Cargo.toml` |
+| FFI | C ABI / libloading | C DLL 与 Rust 的边界，libloading 按名解析 `verthys.def` 白名单符号 | `verthys-tauri/verthys-worker/Cargo.toml` |
 | NSIS | nsis | Tauri Windows 安装包目标 | `verthys-tauri/src-tauri/tauri.conf.json` |
 | keyboard-types | keyboard-types（本地补丁） | Rust 键盘事件类型 crate，项目以本地补丁修复 serde 兼容 | `verthys-tauri/src-tauri/Cargo.toml`（[patch.crates-io]） |
 | 状态魔法数 | `STATE_MAGIC`（`VERTHYS_STATE`） | 状态文件 magic 前缀（与版本号分离） | `verthys-tauri/src-tauri/src/constants.rs` |

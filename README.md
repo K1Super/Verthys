@@ -14,16 +14,16 @@
 
 <table style="width:100%;border-collapse:collapse;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:14px;margin:20px 0 6px">
   <tr>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80;width:25%">ABI&nbsp;&nbsp;<span style="color:#D9A94E">0x000B</span></td>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80;width:25%">容器&nbsp;&nbsp;<span style="color:#A8B2C0">V3</span></td>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80;width:25%">超级块&nbsp;&nbsp;<span style="color:#A8B2C0">3 副本 · 2/3 法定</span></td>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80;width:25%">解锁&nbsp;&nbsp;<span style="color:#A8B2C0">S0–S6</span></td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80;width:25%">ABI&nbsp;&nbsp;<span style="color:#D9A94E">0x0014</span></td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80;width:25%">容器&nbsp;&nbsp;<span style="color:#A8B2C0">V4</span></td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80;width:25%">元数据&nbsp;&nbsp;<span style="color:#A8B2C0">A/B 双副本 · 原子提交</span></td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80;width:25%">解锁&nbsp;&nbsp;<span style="color:#A8B2C0">单阶段原子</span></td>
   </tr>
   <tr>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">事务&nbsp;&nbsp;<span style="color:#A8B2C0">6 阶段</span></td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">导入&nbsp;&nbsp;<span style="color:#A8B2C0">WAL · 断点续传</span></td>
     <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">密钥&nbsp;&nbsp;<span style="color:#A8B2C0">4 级</span></td>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">轮换&nbsp;&nbsp;<span style="color:#A8B2C0">90d / 10k ops</span></td>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">产品&nbsp;&nbsp;<span style="color:#A8B2C0">4.1.3</span></td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">轮换&nbsp;&nbsp;<span style="color:#A8B2C0">全库 DEK · 原子替换</span></td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:12px 16px;color:#5D6B80">产品&nbsp;&nbsp;<span style="color:#A8B2C0">见根 VERSION</span></td>
   </tr>
 </table>
 
@@ -92,16 +92,16 @@
   <span style="color:#D9A94E">→</span>
   <span style="background:#0E131B;border:1px solid #2A3442;border-radius:8px;padding:8px 14px;color:#A8B2C0">DKM</span>
   <span style="color:#D9A94E">→</span>
-  <span style="background:#0E131B;border:1px solid #2A3442;border-radius:8px;padding:8px 14px;color:#A8B2C0">CNG · MEK</span>
+  <span style="background:#0E131B;border:1px solid #2A3442;border-radius:8px;padding:8px 14px;color:#A8B2C0">HKDF · MEK</span>
   <span style="color:#D9A94E">→</span>
-  <span style="background:#161309;border:1px solid #8A6D2F;border-radius:8px;padding:8px 14px;color:#E7EBF0">KeyA / KeyB / KeyC<span style="color:#5D6B80"> · 三权分立</span></span>
+  <span style="background:#161309;border:1px solid #8A6D2F;border-radius:8px;padding:8px 14px;color:#E7EBF0">DEK / 记录密钥<span style="color:#5D6B80"> · 域分离</span></span>
 </div>
 
 <ul style="margin:0 0 4px;padding-left:22px">
   <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">胡椒三源派生</span> — OS 托管 / 恢复卡 / 编译内嵌，恢复卡走 Shamir 分片。</li>
   <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">机器绑定</span> — CNG 机器密钥硬件绑定（machine key / system32 加载器），防克隆迁移。</li>
-  <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">自动轮换</span> — 90 天 / 10k ops / DEGRADE 三类触发；V3 改密走 CNG 内核态轮换原语。</li>
-  <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">解锁流水线</span> — S0–S6 分阶段 + 预热缓存；渐进式解锁（MINIMAL_FIRST）最小可操作优先，索引预热转入后台，总超时 10s。</li>
+  <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">密钥轮换</span> — 全库 DEK 重建 + 原子替换；轮换期间源库只读，旧库备份保留。</li>
+  <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">解锁原子性</span> — 密钥校验、元数据提交与仓库挂载全部成功后才进入 UNLOCKED；不存在部分解锁中间态（PARTIAL_UNLOCK 为冻结保留码）。</li>
   <li style="color:#A8B2C0;margin:6px 0"><span style="color:#E7EBF0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">零残留</span> — 密码与密钥内存自动清零（zeroize），不落盘、不留痕。</li>
 </ul>
 
@@ -127,7 +127,7 @@
   <tr>
     <td style="border:1px solid #1E2733;background:#0E131B;padding:10px 14px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E">03</td>
     <td style="border:1px solid #1E2733;background:#0A0D12;padding:10px 14px;color:#E7EBF0">Hook 防御</td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:10px 14px;color:#A8B2C0">TLS 回调校验 · 篡改即销毁</td>
+    <td style="border:1px solid #1E2733;background:#0A0D12;padding:10px 14px;color:#A8B2C0">TLS 回调校验 · Hook 扫描熔断</td>
   </tr>
   <tr>
     <td style="border:1px solid #1E2733;background:#0E131B;padding:10px 14px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#D9A94E">04</td>
@@ -197,7 +197,7 @@
 <p style="color:#A8B2C0;margin:0 0 10px">仅构建核心 DLL（Release，跳过测试），并运行核心测试：</p>
 
 <pre style="background:#0E131B;border:1px solid #1E2733;border-radius:10px;padding:14px 18px;color:#C9D4E0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13.5px;line-height:1.7;overflow-x:auto;margin:0 0 16px"><code>powershell -ExecutionPolicy Bypass -File scripts\build\build_core.release.ps1
-ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
+ctest --test-dir build -C Release --output-on-failure</code></pre>
 
 <p style="color:#5D6B80;font-size:13px;margin:0 0 4px">完整流程见 <a href="docs/GETTING_STARTED.md" style="color:#D9A94E;text-decoration:none">docs/GETTING_STARTED.md</a> 与 <a href="docs/BUILD.md" style="color:#D9A94E;text-decoration:none">docs/BUILD.md</a>。</p>
 
@@ -225,7 +225,7 @@ ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
   </tr>
   <tr>
     <td style="border:1px solid #1E2733;background:#0E131B;padding:11px 16px;color:#E7EBF0">前端</td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:11px 16px;color:#A8B2C0">Vue 3.5.13 · TypeScript 5.6.2 · Vite 6.0.3</td>
+    <td style="border:1px solid #1E2733;background:#0A0D12;padding:11px 16px;color:#A8B2C0">Vue 3.5 · TypeScript 5.6 · Vite 7（精确版本以 package-lock.json 为准）</td>
     <td style="border:1px solid #1E2733;background:#0A0D12;padding:11px 16px;color:#5D6B80">纯渲染，零密钥接触</td>
   </tr>
   <tr>
@@ -275,8 +275,8 @@ ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
     <td style="border:1px solid #1E2733;background:#0A0D12;padding:10px 16px;color:#A8B2C0">版本变更记录</td>
   </tr>
   <tr>
-    <td style="border:1px solid #1E2733;background:#0E131B;padding:10px 16px;color:#E7EBF0"><a href="SECURITY.md" style="color:#D9A94E;text-decoration:none">SECURITY</a></td>
-    <td style="border:1px solid #1E2733;background:#0A0D12;padding:10px 16px;color:#A8B2C0">漏洞上报与安全策略</td>
+    <td style="border:1px solid #1E2733;background:#0E131B;padding:10px 16px;color:#E7EBF0"><a href="docs/README.md" style="color:#D9A94E;text-decoration:none">DOCS</a></td>
+    <td style="border:1px solid #1E2733;background:#0A0D12;padding:10px 16px;color:#A8B2C0">全量文档索引与维护约定</td>
   </tr>
 </table>
 
@@ -289,9 +289,9 @@ ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
 </div>
 
 <ul style="margin:0 0 4px;padding-left:22px">
-  <li style="color:#A8B2C0;margin:6px 0">单分支开发：<code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">v3-upgrade</code> 为当前工作分支，<code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">master</code> 为保留基线。</li>
+  <li style="color:#A8B2C0;margin:6px 0">单分支开发：<code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">security/v4-hardening</code> 为当前工作分支，<code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">master</code> 为保留基线。</li>
   <li style="color:#A8B2C0;margin:6px 0">提交规范：Conventional Commits 中文格式 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">type(scope): 摘要</code>。</li>
-  <li style="color:#A8B2C0;margin:6px 0">CI 质量门：core 构建 + 全部 C 测试 · 导出面白名单比对，任一不过即门红。</li>
+  <li style="color:#A8B2C0;margin:6px 0">CI 质量门：core 构建与全部 C 测试、Rust/前端检查、P2 服务测试、导出面白名单、AST 架构门与文档一致性门，任一不过即门红。</li>
   <li style="color:#A8B2C0;margin:6px 0">许可：专有软件，© 2026 K1Super（<a href="LICENSE" style="color:#D9A94E;text-decoration:none">LICENSE</a>）；第三方组件清单见 <a href="docs/THIRD_PARTY.md" style="color:#D9A94E;text-decoration:none">docs/THIRD_PARTY.md</a>。</li>
   <li style="color:#A8B2C0;margin:6px 0">贡献与评审流程：<a href="CONTRIBUTING.md" style="color:#D9A94E;text-decoration:none">CONTRIBUTING.md</a>。</li>
 </ul>
@@ -304,11 +304,11 @@ ctest --test-dir build_dev -C Debug --output-on-failure</code></pre>
 
 <ul style="margin:0 0 4px;padding-left:22px">
   <li style="color:#A8B2C0;margin:6px 0">品牌名仅 <b style="color:#E7EBF0">Verthys</b>；容器扩展名 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">.verthys</code>；事件 scheme <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">verthys://</code>；环境变量前缀 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">VERTHYS_</code>；核心 DLL <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">verthys.dll</code>；公开 API 前缀 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">Verthys_</code>。</li>
-  <li style="color:#A8B2C0;margin:6px 0">产品版本 <b style="color:#E7EBF0">4.1.3</b>，唯一手改点为根 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">VERSION</code> 文件，其余载体由 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">ci/sync_version.ps1</code> 自动同步，CI 门禁校验漂移。</li>
+  <li style="color:#A8B2C0;margin:6px 0">产品版本以根 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">VERSION</code> 为唯一手改点，其余载体由 <code style="background:#0E131B;border:1px solid #1E2733;border-radius:5px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.92em;color:#C9D4E0">ci/sync_version.ps1</code> 自动同步，CI 门禁校验漂移。</li>
 </ul>
 
 <div style="border-top:1px solid #1E2733;margin-top:44px;padding-top:14px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;color:#5D6B80;letter-spacing:1px">
-  <span>LAST UPDATED 2026-09-19 · 维护人 K1SUPER</span>
+  <span>LAST UPDATED 2026-11-17 · 维护人 K1SUPER</span>
   <span>© 2026 K1SUPER · PROPRIETARY</span>
 </div>
 

@@ -2,9 +2,9 @@
 
 > 版本号规则、发版检查清单、tag 与发布物流程、回滚方案。
 >
-> Last updated: 2026-10-23 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
-当前版本 4.1.7（唯一手改点：仓库根 `VERSION` 文件）。本机更新物料由 `scripts/release/release_update.mjs` 生成；production 默认使用 HTTPS 端点，也可通过 `-AllowInsecureUpdater` 放行 HTTP + IP 自建分发。production 发布要求发布者 Authenticode 证书：构建期把证书 SHA-256 钉扎进 DLL，并对三个可执行产物签名；安装包自身签名仍为可选层。
+当前版本以仓库根 `VERSION` 为准。本机更新物料由 `scripts/release/release_update.mjs` 生成；production 默认使用 HTTPS 端点，也可通过 `-AllowInsecureUpdater` 放行 HTTP + IP 自建分发。production 发布要求发布者 Authenticode 证书：构建期把证书 SHA-256 钉扎进 DLL，并对 DLL、worker、主程序与安装包链路统一签名复核。
 
 ## 1. 版本号规则
 
@@ -29,7 +29,7 @@
 4. 测试全绿：`ctest --test-dir build -C Release --output-on-failure`；`cargo test`、`npx vitest run`、`npx vue-tsc --noEmit` 全部通过。
 5. 更新物料：确认 `build/updater/releases/<release_id>/` 下 `latest.json`、安装包、`.sig`、`release-manifest.json` 与 `channel-pointer.json` 五件齐全，清单版本与 PE `FileVersion` 一致。
 6. 回环与回源验证：本机启动 `scripts/updater/updater_server.mjs`，执行 `check_updater_origin.mjs`；需要边缘回源时执行 `check_cdn_edge.mjs`；需要真实升级时按 `updater_e2e_matrix.mjs` 执行。
-7. 签名复核：production 必须确认 `verthys.dll`、`verthys-worker.exe`、`Verthys.exe` 三件 Authenticode 状态为 Valid 且签名者证书 SHA-256 与钉扎值一致；构建期功能门禁已覆盖未签名进程返回 `UNAUTHORIZED` 与签名宿主放行。安装包自身未签仅告警，不影响上传。
+7. 签名复核：production 必须确认 `verthys.dll`、`verthys-worker.exe`、`Verthys.exe` 三件 Authenticode 状态为 Valid 且签名者证书 SHA-256 与钉扎值一致；构建期功能门禁已覆盖未签名进程返回 `UNAUTHORIZED` 与签名宿主放行。安装包、卸载器与随包插件副本同样由 `bundle.windows.signCommand` 签名并复核。
 8. NSIS 包冒烟：在干净机器安装 `src-tauri/target/release/bundle/nsis/*.exe`，按 [DEPLOYMENT.md](DEPLOYMENT.md) 第 5 节做安装后验证。
 9. 打 tag：`git tag -a v<version> -m "Release <version>"` 并推送远端（命令须与当次版本号一致）。
 10. 更新 CHANGELOG：按 Keep a Changelog（Added/Changed/Fixed/Security）追加版本段，与 tag 对应。
@@ -53,13 +53,13 @@
 - 签发与校验：`scripts/signing/New-VerthysRootCA.ps1`、`New-VerthysCodeSigningCert.ps1`、`Install-VerthysRootTrust.ps1`、`Set-VerthysBuildSigningEnv.ps1`、`Test-VerthysCodeSigningCert.ps1`
 - 根私钥不进证书库常驻，只以加密 PFX 离线保存；口令由维护人单独保管
 - 换证书会改变 DLL 钉扎值，必须整体重建三件产物
-- 安装包自身未做 Authenticode 签名（发布策略允许层），更新签名仍由 Tauri 更新密钥生成
+- 安装包、卸载器与随包 NSIS 插件副本由 Tauri `bundle.windows.signCommand` 统一签名并复核；更新签名仍由 Tauri 更新密钥对最终安装包生成 `.sig`
 
 ## 3. tag 与发布物流程
 
 ```powershell
-git tag -a v4.1.7 -m "Release 4.1.7"
-git push origin v4.1.7
+git tag -a v<version> -m "Release <version>"
+git push origin v<version>
 ```
 
 发布物 = `release_update.mjs` 生成的更新物料目录。`.github/workflows/release-materials.yml` 可手动触发，从源码复现 local 物料并上传工件；production 由维护人在受控密钥的发布机执行，HTTPS 或显式放行的 HTTP + IP 端点均可。tag 为本地仓库标签，产出物由维护人手动分发。

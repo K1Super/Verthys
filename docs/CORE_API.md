@@ -1,7 +1,7 @@
 # C 核心公开 API（verthys.h）
 > C 核心 DLL（verthys.dll）对外标准 C ABI 接口规范，函数签名与语义逐一照源码编写。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
 本文档是 C 核心动态库对外接口的唯一契约文件，与 `core/include/verthys.h`（公开头文件）、
 `core/verthys.def`（导出符号白名单）逐条对齐。所有签名、枚举值、成员语义均照源码编写；
@@ -83,7 +83,7 @@ if (r != VERTHYS_OK) {
 | `VERTHYS_ERR_EXPORT_TOO_MANY` | `0x0000000D` | 导出记录数超 v1 格式上限（65535），拒绝导出 |
 | `VERTHYS_ERR_CNG_UNAVAILABLE` | `0x0000000E` | CNG 内核态密码服务不可用（降级链耗尽） |
 | `VERTHYS_ERR_RESOURCE_LIMIT` | `0x0000000F` | 全局内存预算耗尽（≈512MB 的 95%） |
-| `VERTHYS_ERR_QUORUM_FAILED` | `0x00000010` | 超级块法定人数不满足（3 副本有效 < 2） |
+| `VERTHYS_ERR_QUORUM_FAILED` | `0x00000010` | 冻结 ABI 保留码；当前 A/B 元数据提交模型不产生该返回 |
 | `VERTHYS_ERR_PARTIAL_UNLOCK` | `0x00000011` | 渐进式解锁：最小可操作态，索引未完全预热 |
 | `VERTHYS_ERR_TIMEOUT` | `0x00000012` | 解锁流水线总超时（预算 10s） |
 | `VERTHYS_ERR_UNSUPPORTED` | `0x00000013` | 容器格式不支持该操作（显式拒绝） |
@@ -434,7 +434,7 @@ if (r != VERTHYS_OK) {
 
 ## 17. 交叉引用
 
-- 桥接层命令：见 `TAURI_BRIDGE.md`（Rust 侧经 worker 子进程调用本 DLL）。
+- 桥接层命令：见 [ARCHITECTURE.md](ARCHITECTURE.md) §3（Rust 侧经 worker 子进程调用本 DLL）。
 - 设计与信任模型：见 `SECURITY_DESIGN.md`。
 - 构建/配置：见 `CONFIGURATION.md` 与根 `build_production.ps1`。
 - 术语：见 `GLOSSARY.md`。

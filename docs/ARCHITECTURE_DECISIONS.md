@@ -2,10 +2,10 @@
 
 > 按编号索引 Verthys 已核实的真实架构决策，每条含上下文/备选项/结论/后果四段式。
 >
-> Last updated: 2026-11-07 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 >
 > 历史说明：ADR-001/006/007/008/010/014 描述的是已删除的 V3 代际；
-> 当前实现由 ADR-015 取代。历史条目保留原貌，不作为当前架构依据。
+> 当前实现由 ADR-015 取代。历史条目保留决策结论，其佐证文件已随 V3 删除，不作为当前架构依据。
 
 本文档只记录**能从代码或注释中核实的决策**，无依据的决策不收录。佐证以 `core/`、`verthys-tauri/`、`third_party/` 为相对根。当前架构以 [ARCHITECTURE.md](ARCHITECTURE.md) 为准。
 
@@ -36,7 +36,7 @@
 - **上下文**：V2 容器（B+ 树 + 槽位池 + 迁移引擎）历史包袱重，V1/V2 迁移链路为失效死路径（核验报告 P1-1）。V3 以分区认证 + 内容寻址 + LSM 取代。
 - **备选项**：① 保留 V2 并存 + 引导迁移；② 彻底删除 V1/V2，只认 V3。
 - **结论**：选 ②。删除清单移除 btree/datablock/migration/v2_lifecycle/V2 超级块等；`verthys_format.c` 裁剪为 V3 交换信封专用；非 V3 文件 C 层 open 即拒绝。
-- **后果**：无旧容器迁移路径；磁盘旧 `.vault`/旧魔数文件不可打开（见 [MIGRATION.md](MIGRATION.md)）。佐证：`core/src/container/shared/verthys_container_v3.h`、`archive/应用功能全量核验报告.md` §7。
+- **后果**：无旧容器迁移路径；磁盘旧 `.vault`/旧魔数文件不可打开（见 [MIGRATION.md](MIGRATION.md)）。历史佐证文件已随 V3 删除，本条仅保留决策记录。
 
 ### ADR-002 依赖 vendored 而非 vcpkg
 
@@ -78,7 +78,7 @@
 - **上下文**：目标态要求密钥明文"永不出现在用户态可寻址内存"。
 - **备选项**：① 用户态数组持有 A/B/C；② CNG `BCryptGenerateSymmetricKey` 导入内核句柄。
 - **结论**：选 ②，`verthys_cng_aead_import_key` 是唯一允许明文瞬态的函数（栈上即清）。
-- **后果**：密钥仅在栈帧瞬态；防内存转储依赖 MEM_DUMP 判据。佐证：`core/src/crypto/cipher/verthys_crypto_cng.c`、`keymanager_cng.c`。
+- **后果**：密钥仅在栈帧瞬态；防内存转储依赖 MEM_DUMP 判据。历史 CNG 实现文件已随 V3 删除。
 
 ### ADR-008 内容寻址 Extent + BLAKE2b 零新依赖（E-3）
 
@@ -99,7 +99,7 @@
 - **上下文**：限制单密钥生命周期内的密文暴露量。
 - **备选项**：① 仅手动改密轮换；② 时间/操作计数/DEGRADE 自动触发。
 - **结论**：选 ②。90 天 / 10,000 ops / DEGRADE + 24h 防震荡，轮换在 CNG 内核态新旧切换。
-- **后果**：轮换透明；崩溃一致性靠 ping-pong 槽位 + VsbTxnV3。佐证：`core/src/crypto/rekey/verthys_rekey_auto.c`。
+- **后果**：轮换透明；崩溃一致性靠 ping-pong 槽位 + VsbTxnV3。历史自动轮换实现已删除，当前由全库 DEK 轮换取代。
 
 ### ADR-011 导出面唯一由 .def 白名单（P0-A）
 
@@ -127,7 +127,7 @@
 - **上下文**：V3 收口后 core/src 仍同级平铺 50+ 文件，公共头与实现混放。
 - **备选项**：① 平铺；② 子域→功能组件两级拆分，公共头 `include/` 物理隔离。
 - **结论**：选 ②。六顶层域 + 31 组件目录，`VERTHYS_SRC_SUBDIRS` 单一事实源；目录全小写蛇形、无空泛名。
-- **后果**：公共/私有物理隔离；单组件 3-10 文件、层级 ≤4。佐证：`core/CMakeLists.txt`、`archive/V3_UPGRADE_PLAYBOOK.md` §1.6。
+- **后果**：公共/私有物理隔离；单组件 3-10 文件、层级 ≤4。佐证：`core/CMakeLists.txt`；历史 playbook 已删除。
 
 ### ADR-015 V4-only 与版本号工程化
 

@@ -2,12 +2,14 @@
 
 > 文档编号：VUP-002
 > 状态：**待启用执行方案**（Phase S；本机阶段不执行）
-> 成本口径：支持两种形态——HTTPS（自有域名或免费子域，TLS 免费）与 HTTP + IP（`-AllowInsecureUpdater` 显式放行，无需域名）。Authenticode 为可选层，不再要求购买代码签名证书。
+> 成本口径：支持两种形态——HTTPS（自有域名或免费子域，TLS 免费）与 HTTP + IP（`-AllowInsecureUpdater` 显式放行，无需域名）。Authenticode 在更新器附加校验层为可选；构建发布签名仍按 [../RELEASE.md](../RELEASE.md) 强制。
 > 适用对象：Windows x64 客户端；Linux 服务器 / 对象存储 / CDN
 > 前置条件：[UPDATER_MASTER_PLAN.md](UPDATER_MASTER_PLAN.md) Phase L0 退出，且客户端 readiness C01 ~ C12 完成
 > 关联文档：[UPDATER_MASTER_PLAN.md](UPDATER_MASTER_PLAN.md) §8、[../SECURITY_DESIGN.md](../SECURITY_DESIGN.md)、[../DEPLOYMENT.md](../DEPLOYMENT.md)、[../RELEASE.md](../RELEASE.md)
 >
-> Last updated: 2026-10-22 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
+>
+> 说明：文中 `4.1.x` 版本号与 `release_id` 为协议示例，不代表当前版本；版本以根 `VERSION` 为准。
 
 ---
 

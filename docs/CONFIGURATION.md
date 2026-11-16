@@ -1,7 +1,7 @@
 # 配置项说明（构建 / 运行 / 打包）
 > 全部构建环境变量、脚本参数、Tauri 配置与运行时开关的含义、默认值与影响。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
 本文档覆盖 `scripts/lib/env.load.ps1`（环境变量唯一来源）、根 `build_production.ps1` /
 `build_dev.ps1`（参数）、`verthys-tauri/src-tauri/tauri.conf.json`、`verthys-tauri/package.json`
@@ -73,18 +73,24 @@ production 构建必须能解析发布者证书，否则在 CMake 配置前 fail
 ## 2. 构建脚本参数
 
 ### 2.1 `build_production.ps1`（生产一键构建，构建期）
-用法：`powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-NoPause] [-Profile local|production]`
+用法：`powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-SkipService] [-NoPause] [-Profile local|production] [-UpdaterEndpoint <url>] [-AllowInsecureUpdater] [-AllowLocal] [-ReleaseNotes <text>] [-CompatAbiMin <hex>] [-CompatAbiMax <hex>]`
 | 参数 | 含义 |
 |---|---|
 | `-Clean` | 构建前清理所有构建目录（build/、worker target/、src-tauri/target/） |
 | `-SkipCore` | 跳过 C 核心 DLL 构建（DLL 已存在时） |
 | `-SkipWorker` | 跳过 worker 构建（二进制已存在时）；启用发布签名时禁止使用 |
 | `-SkipTauri` | 跳过 Tauri 打包（仅构建组件时） |
+| `-SkipService` | 跳过阶段 3.6 的 P2 服务构建与分发 |
 | `-NoPause` | 失败/成功不暂停等待 Enter（CI 场景） |
 | `-Profile production` | 默认值；要求发布者证书，启用调用方认证与三件签名 |
 | `-Profile local` | 本机复现；未提供证书时显式关闭调用方认证并告警 |
+| `-UpdaterEndpoint` | 更新清单端点覆盖；默认读取 `VERTHYS_UPDATER_ENDPOINT` |
+| `-AllowInsecureUpdater` | 放行 HTTP + IP 自建更新端点 |
+| `-AllowLocal` | 允许 local profile 的回环明文端点 |
+| `-ReleaseNotes` | 写入发布物料的版本说明 |
+| `-CompatAbiMin` / `-CompatAbiMax` | 清单兼容 ABI 区间，默认 min `0x000B`、max 取当前 ABI |
 
-流程：阶段 0 清进程 → 0.5 加载 env → 0.6 依赖/补丁校验 → 1 C 核心 DLL → 1.1 `.vsec` 注入 + DLL 签名 + 契约刷新 → 1.2 调用方认证功能门禁 → 2 worker（基线绑定签名后 DLL，构建后签名）→ 3 部署二进制 + 哈希校验 → 4 Tauri（打包前签名主程序 + NSIS）→ 5 产物校验。构建期额外设置 `$env:CARGO_INCREMENTAL="0"`（纵深防御 LNK1181）与 `$env:VERTHYS_DLL_PATH`（worker 完整性基线唯一来源）。
+流程：阶段 0 清进程 → 0.1 更新域边界门 → 0.2 版本载体同步 → 0.5 加载 env → 0.6 依赖/补丁校验 → 1 C 核心 DLL → 1.1 `.vsec` 注入 + DLL 签名 + 契约刷新 → 1.2 调用方认证功能门禁 → 2 worker（基线绑定签名后 DLL，构建后签名）→ 3 部署二进制 + 哈希校验 → 3.6 P2 服务构建与分发 → 4 Tauri（打包前签名主程序 + NSIS）→ 5 产物校验。构建期额外设置 `$env:CARGO_INCREMENTAL="0"`（纵深防御 LNK1181）与 `$env:VERTHYS_DLL_PATH`（worker 完整性基线唯一来源）。
 
 ### 2.2 `build_dev.ps1`（开发启动器，构建期 + 运行期）
 无命令行参数。步骤：加载 env → 清残留进程 → 检查端口 1420 → 校验依赖/补丁 → 校验核心二进制
@@ -108,13 +114,16 @@ production 构建必须能解析发布者证书，否则在 CMake 配置前 fail
 | `build.beforeDevCommand` | `npm run dev` | 开发前命令 |
 | `build.beforeBuildCommand` | `npm run build` | 打包前命令 |
 | `app.windows[0]` | 1100×720，min 900×600，`decorations:false`，`transparent:true`，`resizable:true`，`center:true`，`devtools:false` | 主窗口（无边框透明） |
-| `app.windows[0].additionalBrowserArgs` | `--enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist --js-flags="--max-old-space-size=1024 --expose-gc"` | WebView2 渲染参数 |
 | `app.security.csp` | `default-src 'self'` 等（见源码） | 内容安全策略，仅 Windows WebView2 |
 | `bundle.active` | `true` | 启用打包 |
 | `bundle.targets` | `["nsis"]` | 仅 NSIS 安装包（Windows） |
+| `bundle.createUpdaterArtifacts` | `true` | 生成更新签名与物料 |
+| `bundle.windows.allowDowngrades` | `true` | 允许安装器降级（更新清单另有闸门） |
+| `bundle.windows.nsis.installMode` | `perMachine` | 全机安装到 `%ProgramFiles%\Verthys`，一次 UAC |
+| `bundle.windows.nsis.installerHooks` | `./installer-hooks.nsh` | POSTINSTALL/PREUNINSTALL 服务安装与卸载 |
 | `bundle.useLocalToolsDir` | `true` | 使用本地工具目录 |
 | `bundle.icon` | 32/128/128@2x PNG + icns + ico | 图标 |
-| `bundle.resources` | `["verthys.dll"]` | 打包 DLL（从 src-tauri/ 查找） |
+| `bundle.resources` | `verthys.dll` + `service-payload/VerthysSecuritySvc.exe` + `service-payload/VerthysRootCA.cer` | 打包核心 DLL 与 P2 服务载荷（从 src-tauri/ 查找） |
 | `bundle.externalBin` | `["binaries/verthys-worker"]` | 外部 worker 二进制（src-tauri/binaries/） |
 
 ## 4. 前端脚本（`verthys-tauri/package.json`，构建期/开发期）
@@ -127,14 +136,12 @@ production 构建必须能解析发布者证书，否则在 CMake 配置前 fail
 
 ## 5. 运行时环境变量（运行期）
 
-**结论：代码中不读取任何 `VERTHYS_` 前缀的运行时环境变量**（经对 `core/` 与 `src-tauri/`
-C/Rust 源码的 `getenv` / `std::env::var` 检索确认），也不对 WebView2 / GPU 参数做任何
-运行时环境变量写出。运行时读取的环境变量仅有以下事实：
+**结论：产品运行路径不读取任何 `VERTHYS_` 前缀的运行时环境变量**；仅测试钩子构建读取 `VERTHYS_TEST_*`（如 `VERTHYS_TEST_STATE_DIR`、`VERTHYS_TEST_MACHINE_LIMITER_BYPASS`、`VERTHYS_TEST_SERVICE_*`），生产构建不包含这些分支。也不对 WebView2 / GPU 参数做任何运行时环境变量写出。运行时读取的环境变量仅有以下事实：
 
 - 运行期**读取**的标准系统变量（仅 Windows 相关路径/指纹逻辑，非 VERTHYS_ 前缀）：
   `HOME` / `XDG_DATA_HOME`（非 Windows 路径分支）、`USERPROFILE`、`APPDATA`、`ProgramFiles`、
   `ProgramFiles(x86)`、`HOSTNAME`、`SystemRoot`、`PATH`、`TEMP`（`std::env::temp_dir`）。
-- `core/src/crypto/pepper/verthys_pepper.c:212` 读取 `HOME`（POSIX pepper 来源回退分支，Windows 不使用）。
+- `core/src/crypto/pepper/verthys_pepper.c` 的 POSIX 路径分支读取 `HOME`（Windows 不使用）。
 - 便携模式：数据目录由 Cargo feature `portable_mode`（编译期固化，**禁用**运行时环境变量切换 `%LOCALAPPDATA%`），
   仅接受受信命令行参数 `--data-dir`（入口层校验）。命令行参数解析见 `src/main.rs` / `middleware/context.rs`。
 
@@ -145,7 +152,7 @@ C/Rust 源码的 `getenv` / `std::env::var` 检索确认），也不对 WebView2
 | 构建 profile | `production` | 默认 production，端点默认 HTTPS；`-AllowInsecureUpdater` 可放行 HTTP + IP；local 需显式 `-AllowLocal`，允许回环明文 |
 | 更新渠道 | 配置值 | 基础配置 `stable`，local 覆盖为 `local`；运行时从配置读取，前端不传参 |
 | 清单端点 | 无（基础配置） | `tauri.local.conf.json` 与 production 注入配置分别提供；运行期审计协议与主机 |
-| Authenticode | 关闭 | 默认 `require=false`；显式开启时校验系统信任链与吊销状态，不依赖付费证书 |
+| Authenticode | 关闭 | 更新器侧附加校验默认 `require=false`；构建发布签名由 `build_production.ps1 -Profile production` 强制 |
 | 证书钉扎 | 可选 | `authenticode.subject` 与 `authenticode.thumbprint`（40 位十六进制）同时支持 |
 | 下载重试 | 最多 3 次重试（2 / 5 / 10 秒） | 由 Rust 更新服务执行，失败归 `E_UPDATER_NETWORK` |
 | 检查超时 | 30 秒 | 插件检查清单 |
@@ -155,8 +162,8 @@ C/Rust 源码的 `getenv` / `std::env::var` 检索确认），也不对 WebView2
 | 健康自检超时 | 20 秒 | worker 就绪；DLL 与 ABI 由 worker 初始化覆盖 |
 | 最大安装包 | 512 MB | 超过即拒绝，避免内存耗尽 |
 | 日志保留 | 7 天 / 单文件 5 MB | 更新事件 JSONL |
-| 发布前置 | `ci/release_preflight.ps1` | production 要求端点可达与干净工作区；HTTP + IP 需 `-AllowInsecureUpdater`，不再要求证书指纹 |
-| 兼容 ABI | `0x000B ~ 0x000E` | 清单 `compatibility.abi` 必须覆盖当前值 |
+| 发布前置 | `ci/release_preflight.ps1` | production 要求端点可达与干净工作区；HTTP + IP 需 `-AllowInsecureUpdater`；发布前置不校验代码签名证书，构建签名由 `build_production.ps1` 强制 |
+| 兼容 ABI | 默认 min `0x000B`，max 取当前 ABI `0x0014` | 清单 `compatibility.abi` 必须覆盖当前值 |
 | 兼容容器 | 当前格式（`VERTHYS_CONTAINER_FORMAT_VERSION=4`） | 清单 `compatibility.container` 必须覆盖当前值 |
 
 ## 7. 交叉引用

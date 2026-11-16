@@ -2,7 +2,7 @@
 
 > 说明环境准备、分支与提交规范、评审流程，以及测试构建与文档同步义务。
 >
-> Last updated: 2026-09-19 · 维护人：K1Super
+> Last updated: 2026-11-17 · 维护人：K1Super
 
 ## 环境准备
 
@@ -15,8 +15,8 @@ MSVC 环境的获取顺序（本地一键脚本与 CI 同语义）：
 
 ## 分支策略
 
-- 当前为单分支开发：`v3-upgrade` 为当前工作分支，`master` 为保留基线；无多分支并行协作约定。
-- 日常改动直接在 `v3-upgrade` 上提交；提交前必须本地自检（构建 + 测试 + 静态校验，见下文）。
+- 当前为单分支开发：`security/v4-hardening` 为当前工作分支，`master` 为保留基线；无多分支并行协作约定。
+- 日常改动直接在 `security/v4-hardening` 上提交；提交前必须本地自检（构建 + 测试 + 静态校验，见下文）。
 
 ## Commit 规范
 
@@ -80,6 +80,6 @@ powershell -ExecutionPolicy Bypass -File ci\run_ci.ps1
 改动接口 / 目录 / 构建 / 配置 / 安全边界时，必须同 PR 更新对应文档（作为完成定义 DoD 之一）：
 
 1. 接口、目录、构建、配置、安全边界变更 → 同 PR 更新对应文档。
-2. 每文档末尾 `Last updated` 超过两个版本未更新需复核。
+2. 每文档头部 `Last updated` 超过两个版本未更新需复核。
 3. 需求与测试条目必须可被测试或运行命令验证。
-4. 版本号、依赖版本以 `Cargo.toml` / `package.json` / `dep-versions.txt` 为准（三者分别为 Rust、前端与依赖快照的单一事实来源），文档只引用不抄录。
+4. 版本号以根 `VERSION` 为唯一手改点；依赖版本以 `Cargo.toml` / `package.json` / `dep-versions.txt` 为准（三者分别为 Rust、前端与依赖快照的单一事实来源），文档只引用不抄录。
