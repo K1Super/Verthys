@@ -30,6 +30,8 @@ pub mod base64;
 pub mod crypto;
 /// 本机容器口令生成与 DPAPI 密封保管
 pub mod container_secret;
+/// 跨层共享数据契约（记录条目、批量协议与响应结构）
+pub mod contracts;
 pub mod disk;
 pub mod error;
 /// 日志敏感负载脱敏（白名单字段保留，其余值只留类型与规模）

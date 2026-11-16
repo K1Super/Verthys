@@ -50,7 +50,7 @@ fn create_heartbeat_event(
     let event = crate::infrastructure::handle_factory::create_non_inheritable_event(false, false)
         .ok()?;
     let raw = child.raw_handle()?;
-    let child_handle = HANDLE(raw as *mut core::ffi::c_void);
+    let child_handle = HANDLE(raw);
     let mut worker_handle = HANDLE::default();
     let dup = unsafe {
         DuplicateHandle(
@@ -375,11 +375,11 @@ impl WorkerSession {
             if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
                 return Ok(());
             }
-            return Err(value
+            Err(value
                 .get("error")
                 .and_then(|v| v.as_str())
                 .unwrap_or("worker 拒绝启用心跳")
-                .to_string());
+                .to_string())
         }
         #[cfg(not(target_os = "windows"))]
         {

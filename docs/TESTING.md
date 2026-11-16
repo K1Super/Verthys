@@ -160,3 +160,19 @@ pwsh -NoProfile -File tests/service/e2e-install.ps1 -Artifacts build_security_se
 - P1 攻击回归以当前测试钩子构建执行：PASS=20、FAIL=4（A2/A8/A18S，依赖签名宿主/内存转储/worker 产物）、SKIP=1；属于 P1 既有门禁环境，不是 P2 回归。
 - 正向 Authenticode 认证需要把测试证书导入 `CurrentUser\Root`；无交互桌面环境无法完成信任导入，本机只执行了未签名拒绝与伪造服务端拒绝的负向用例。正向签名探针与模块校验在干净 VM E2E 中验证。
 - S-A1/S-A2/S-A7/S-A10 与 E1–E8 需要真实 SCM 安装、管理员权限或第二台机器，只在干净 VM 执行并保存 `sc query`、`icacls`、事件日志与探针输出证据。
+
+## 11. AST 架构门禁与基线治理
+
+`ci/run_ci.ps1` 第二级执行 `ci/ast_analyze`，按分层契约阻断反向导入、入口危险调用、静默吞错与 C 输出函数。
+
+- 基线格式：`category|file|detail|count`，指纹不含行号；行号漂移不会产生新违规。
+- 新增违规阻断；基线条目已不存在时按 `STALE` 阻断，避免豁免腐烂。
+- 重写基线：`cargo run --release --manifest-path ci\ast_analyze\Cargo.toml -- --write-baseline ci\ast_baseline.txt`；命令会打印新增/移除条目，必须在评审中逐条说明。
+- 当前基线为 0 条豁免；新增豁免必须同时说明原因与退出条件。
+
+## 12. 第一级文本门禁
+
+`ci/regex_scan.py` 先剥离注释、字符串与字符字面量，并整体屏蔽 `#[cfg(test)]` 代码，再检查入口危险关键词、Rust 直写 stdout/stderr 与 C 输出函数。
+
+- `run_ci.ps1` 先执行 `python ci\regex_scan.py --self-test`，自检失败按 CI 失败处理。
+- 扫描结果仍只告警、不阻断；依赖方向由第二级 AST 统一判定，第一级不重复实现。

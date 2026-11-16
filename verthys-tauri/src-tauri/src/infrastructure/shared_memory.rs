@@ -11,14 +11,14 @@
  * - 返回记录数与 worker 头部报告数不一致时视为数据损坏，由上层熔断。
  * - 名称和数据使用 SecuredString 包装，确保 Drop 时内存清零。
  *
- * 依赖 util::base64、util::random、controller::types。
+ * 依赖 util::base64、util::random、util::contracts。
  */
 
 use crate::constants::{
     SHM_ENTRY_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_MAX_SIZE, SHM_SUMMARY_ENTRY_SIZE,
     SHM_SUMMARY_MAGIC, SHM_SUMMARY_MAX_SIZE,
 };
-use crate::controller::types::{VerthysRecordEntry, VerthysSummaryEntry};
+use crate::util::contracts::{VerthysRecordEntry, VerthysSummaryEntry};
 use crate::infrastructure::ipc_secure::{shm_auth_verify, SHM_AUTH_BLOCK_LEN};
 use crate::util::base64::base64_encode;
 use crate::util::random::fill_random_bytes;

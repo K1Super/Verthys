@@ -1,6 +1,6 @@
 [package]
 name = "verthys-ci-ast"
-version = "2.6.1"
+version = "2.7.0"
 edition = "2021"
 description = "CI 第二级：AST 深度分析工具 — \"CI静态校验双引擎实现策略\"第二级"
 

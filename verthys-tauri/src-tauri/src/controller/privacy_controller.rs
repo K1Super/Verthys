@@ -379,7 +379,7 @@ impl AuditSink for AppAuditSink {
         detail: String,
         extensions: AuditExtensions,
     ) {
-        crate::security_commands::audit::write_audit_with_extensions(
+        crate::infrastructure::audit::write_audit_with_extensions(
             &self.app,
             &format!("pid-{}", std::process::id()),
             event,

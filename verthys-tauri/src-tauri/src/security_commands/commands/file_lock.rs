@@ -10,7 +10,7 @@
 
 use tauri::State;
 
-use crate::security::file_lock::harden_private_dir;
+use crate::infrastructure::file_lock::harden_private_dir;
 use crate::util::audit_log::{AuditEventType, AuditResult};
 
 use crate::security_commands::audit::write_security_audit;

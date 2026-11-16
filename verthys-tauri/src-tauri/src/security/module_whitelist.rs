@@ -167,7 +167,7 @@ fn dev_self_module_path() -> Option<String> {
 /// 精确比较而非前缀匹配：同目录下的其他未签名模块仍按原规则处理，
 /// 避免把“开发主程序豁免”扩散成整个目录的签名豁免。
 fn is_dev_self_module(path_norm: &str, self_norm: Option<&str>) -> bool {
-    self_norm.map_or(false, |s| !s.is_empty() && s == path_norm)
+    self_norm.is_some_and(|s| !s.is_empty() && s == path_norm)
 }
 
 /* ====================================================================== *

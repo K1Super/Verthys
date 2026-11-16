@@ -228,6 +228,40 @@ pub mod export_stream {
     pub const STALE_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 }
 
+// ===== 数据域命令名常量 =====
+
+/// verthys 数据域命令名常量
+///
+/// 命令名是审计与授权闸门共享的稳定字符串契约；集中在此避免命令入口
+/// 与审计点散落字面量。本模块零依赖，任何分层均可引用。
+pub mod command_names {
+    /// verthys 数据域 IPC 命令名常量
+    pub mod cmd {
+        /// 批量导入：创建导入会话
+        pub const IMPORT_BEGIN: &str = "verthys_import_begin";
+        /// 批量导入：写入加密记录
+        pub const ADD_RECORDS_BATCH: &str = "verthys_add_records_batch";
+        /// 批量导入：上传外置加密块
+        pub const ADD_CHUNK_BATCH: &str = "verthys_add_chunk_batch";
+        /// 批量导入：查询检查点
+        pub const IMPORT_CHECKPOINT: &str = "verthys_import_checkpoint";
+        /// 批量导入：结束导入会话
+        pub const IMPORT_END: &str = "verthys_import_end";
+        /// 删除后释放续传幂等锁（WAL 删除墓碑）
+        pub const FORGET_IMPORT_KEYS: &str = "verthys_forget_import_keys";
+        /// 孤儿外置块 GC：删除台账中未被任何 meta 引用（owner=0）的块记录
+        pub const GC_ORPHAN_CHUNKS: &str = "verthys_gc_orphan_chunks";
+        /// 流式导出：创建写入会话（暂存文件）
+        pub const WRITE_USER_FILE_STREAM: &str = "write_user_file_stream";
+        /// 流式导出：追加原始数据块
+        pub const APPEND_USER_FILE_CHUNK: &str = "append_user_file_chunk";
+        /// 流式导出：同步落盘并原子替换目标
+        pub const FINALIZE_USER_FILE_STREAM: &str = "finalize_user_file_stream";
+        /// 流式导出：中止会话并清理暂存
+        pub const ABORT_USER_FILE_STREAM: &str = "abort_user_file_stream";
+    }
+}
+
 // ===== 顶层重导出 =====
 
 // 保持常用导入路径有效；新代码应直接引用对应子模块。

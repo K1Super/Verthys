@@ -281,7 +281,7 @@ if ($rustDeadRed) { $exitCode = 1 } else { Write-Host "[死代码门] 通过：R
 # ===== 第一级：快速正则过滤 =====
 if (-not $Level2Only) {
     Write-Host ""
-    Write-Host "[第一级] 快速正则过滤..."
+    Write-Host "[第一级] 快速文本过滤..."
     # 探测可实际运行的 Python：Windows 上 python3 常为商店存根（Get-Command
     # 命中但执行失败），Get-Command 存在性不可信，须实测 --version 退出码
     $pythonExe = $null
@@ -300,15 +300,20 @@ if (-not $Level2Only) {
         Write-Host "[第一级] Python 不可用（python/python3 均无法执行），跳过"
     } elseif (Test-Path $scanScript) {
         Push-Location $projectRoot
-        & $pythonExe $scanScript
-        $level1Exit = $LASTEXITCODE
-        Pop-Location
-
-        if ($level1Exit -ne 0) {
-            Write-Host "[第一级] 扫描异常，退出码: $level1Exit"
+        & $pythonExe $scanScript --self-test
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[第一级] 自检失败，扫描规则不可信"
+            $exitCode = 1
         } else {
-            Write-Host "[第一级] 扫描完成（仅警告，不阻断）"
+            & $pythonExe $scanScript
+            $level1Exit = $LASTEXITCODE
+            if ($level1Exit -ne 0) {
+                Write-Host "[第一级] 扫描异常，退出码: $level1Exit"
+            } else {
+                Write-Host "[第一级] 扫描完成（仅警告，不阻断）"
+            }
         }
+        Pop-Location
     } else {
         Write-Host "[第一级] 脚本不存在: $scanScript"
     }

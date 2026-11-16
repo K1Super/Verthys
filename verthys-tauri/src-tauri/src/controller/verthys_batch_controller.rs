@@ -40,14 +40,14 @@
  * - WAL 文件位于容器附属数据目录 <verthys_path>.d（受 VerthysFileLock 独占锁保护）
  * - 所有 IO 失败向上传播为 Err，由前端决定降级策略
  *
- * 依赖方向：controller → state / repository / controller::types / worker（单向）
+ * 依赖方向：controller → state / repository / constants / controller::types / worker（单向）
  */
 
 use crate::constants::import_writer::{WRITER_CMD_TIMEOUT, WRITER_SEND_TIMEOUT};
 use crate::controller::types::{BatchRecordInput, ChunkBlob, ImportBatchProgress, VerthysResponse};
 use crate::controller::verthys_controller::{delete_batch_timeout, require_unlocked};
 use crate::repository::verthys_wal::{self, ImportSession};
-use crate::security::command_names::cmd;
+use crate::constants::command_names::cmd;
 use crate::state::import_writer::{
     self, BatchAppendOutcome, ChunkAppendOutcome, EndOutcome, WriterCommand,
 };

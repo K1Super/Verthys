@@ -3,7 +3,7 @@
  *
  *
  * 架构定位：状态层（state）会话管理模块
- *   - 依赖 security::file_lock（VerthysFileLock 跨进程独占锁）
+ *   - 依赖 infrastructure::file_lock（VerthysFileLock 跨进程独占锁）
  *   - 提供 VerthysSessionGuard RAII
  *
  * VerthysSessionGuard RAII：
@@ -21,7 +21,7 @@
  *   - 文件锁获取失败返回 Err，不降级
  */
 
-use crate::security::file_lock::VerthysFileLock;
+use crate::infrastructure::file_lock::VerthysFileLock;
 use std::time::{Duration, Instant};
 
 /* ------------------------------------------------------------------ *

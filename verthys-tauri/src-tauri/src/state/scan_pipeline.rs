@@ -3,7 +3,7 @@
  *
  *
  * 架构定位：状态层（state）扫描流水线模块
- *   - 依赖 controller::types（记录类型）+ infrastructure::shared_memory（SHM 读取）
+ *   - 依赖 util::contracts（记录类型）+ infrastructure::shared_memory（SHM 读取）
  *   - 依赖 state::locked_buffer（LockedBuffer RAII）+ state::AppState（worker IPC）
  *   - 提供泛型 ScanPipelineState<T>，消除全量/摘要扫描的代码重复
  *
@@ -38,15 +38,28 @@
  *   - 擦除顺序由 LockedBuffer Drop 保证（先 zeroize 后 VirtualUnlock）
  */
 
-use crate::controller::types::{VerthysRecordEntry, VerthysResponse, VerthysSummaryEntry};
 use crate::infrastructure::shared_memory::{read_shm_records, read_shm_summary_records};
 use crate::state::locked_buffer::{LockedBuffer, VirtualLockable};
 use crate::state::AppState;
+use crate::util::contracts::{VerthysRecordEntry, VerthysSummaryEntry};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::Manager;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+
+/// worker 扫描响应的最小投影。
+///
+/// 只承载预取需要的成功标志、错误文本与失败记录 ID，避免共享状态模块
+/// 反向依赖控制器层的完整响应信封。
+#[derive(serde::Deserialize)]
+struct WorkerScanReply {
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    failed_ids: Option<Vec<u64>>,
+}
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -391,7 +404,7 @@ fn do_prefetch_blocking<T: ScanRecord>(
     // 预取内部二级超时（使用 TimeoutConfig.scan_prefetch）
     let prefetch_timeout = crate::constants::timeout::DEFAULT.scan_prefetch;
     let resp_json = state.send_with_timeout(&req.to_string(), prefetch_timeout)?;
-    let resp: VerthysResponse =
+    let resp: WorkerScanReply =
         serde_json::from_str(&resp_json).map_err(|e| format!("parse response: {}", e))?;
     if !resp.ok {
         return Err(format!("{} failed: {:?}", T::FETCH_OP, resp.error));

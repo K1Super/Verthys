@@ -142,7 +142,7 @@ pub fn pbkdf2_derive_default(password: &[u8], salt: &[u8]) -> Result<[u8; PBKDF2
 
 // windows-rs 0.58 未导出 LocalFree（仅导出 LocalSize/LocalAlloc 等），
 // DPAPI 使用 LocalAlloc 分配输出缓冲区，需用 LocalFree 释放。
-// 通过 extern "system" 声明直接链接 kernel32，与 security/file_lock.rs 同模式。
+// 通过 extern "system" 声明直接链接 kernel32，与 infrastructure/file_lock.rs 同模式。
 #[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {

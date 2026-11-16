@@ -39,7 +39,7 @@ fn write_clipboard_audit(
     detail: Option<String>,
 ) {
     // 全限定路径调用（分层单向依赖约束：引用不落 use 声明）
-    crate::security_commands::audit::write_audit_with_extensions(
+    crate::infrastructure::audit::write_audit_with_extensions(
         app,
         &format!("pid-{}", std::process::id()),
         event_type,

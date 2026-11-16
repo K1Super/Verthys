@@ -3,7 +3,7 @@
  *
  *
  * 架构定位：状态层（state）资源守卫模块
- *   - 依赖 controller::types（记录类型）与 zeroize crate
+ *   - 依赖 util::contracts（记录类型）与 zeroize crate
  *   - 提供 VirtualLockable trait 抽象 + LockedBuffer<T> RAII 守卫
  *   - 不引用上层模块（service / controller），仅被 state / controller::scan 使用
  *
@@ -30,7 +30,7 @@
  *   - 不提供 records_mut()——防止调用方修改 String 导致指针失效
  */
 
-use crate::controller::types::{VerthysRecordEntry, VerthysSummaryEntry};
+use crate::util::contracts::{VerthysRecordEntry, VerthysSummaryEntry};
 use zeroize::Zeroize;
 
 /* ------------------------------------------------------------------ *

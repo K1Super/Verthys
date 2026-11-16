@@ -24,9 +24,9 @@ use serde_json::json;
 use tauri::State;
 use zeroize::Zeroizing;
 
+use crate::constants::import_writer::MAX_IPC_PAYLOAD_BYTES;
 use crate::controller::types::VerthysResponse;
 use crate::controller::verthys_controller::require_unlocked;
-use crate::infrastructure::shm_schema::PB_IPC_MAX_PAYLOAD_BYTES;
 use crate::state::AppState;
 
 /// 模块口令上限（UTF-8 字节）：模块密钥是短口令，超长输入按非法处理
@@ -36,7 +36,7 @@ const MAX_WRAPPED_KEY_CHARS: usize = 4096;
 /// 盐字段上限（字符）：base64(16B) 为 24 字符
 const MAX_SALT_CHARS: usize = 64;
 /// 单次内容载荷的 base64 字符上限：跨层预算常量即字符口径，直接对齐
-const MAX_DATA_CHARS: usize = PB_IPC_MAX_PAYLOAD_BYTES as usize;
+const MAX_DATA_CHARS: usize = MAX_IPC_PAYLOAD_BYTES;
 
 /// 模块索引通配值（C 层 VERTHYS_MODULE_ALL）：仅锁定命令接受
 const MODULE_ALL: u32 = 0xFFFF_FFFF;

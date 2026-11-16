@@ -40,7 +40,7 @@
  * =============================================================================
  * 依赖方向
  * =============================================================================
- * controller → state / repository / controller::types / util / security / worker
+ * controller → state / repository / controller::types / util / infrastructure / security / worker
  */
 
 use crate::constants::import_writer as wconst;
@@ -52,7 +52,8 @@ use crate::repository::verthys_state::{
     delete_state_file, read_last_verthys_path, read_state_file, try_repair_state_file,
     validate_verthys_file, write_state_file_atomic, VerthysState,
 };
-use crate::security::file_lock::VerthysFileLock;
+use crate::infrastructure::file_lock::VerthysFileLock;
+use crate::infrastructure::audit::get_audit_hmac_key;
 use crate::state::verthys_session::VerthysSessionGuard;
 use crate::state::AppState;
 use crate::util::audit_log::{append_audit, keyfile_path_tag, AuditEvent, AuditEventType, AuditResult};
@@ -271,43 +272,6 @@ fn get_audit_log_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
         Ok(dir) => Some(dir.join("audit.log")),
         Err(e) => {
             log::warn!("[audit] 获取配置目录失败，跳过审计写入: {}", e);
-            None
-        }
-    }
-}
-
-/// 审计 HMAC 密钥的进程内缓存（仅缓存成功结果：采集/派生瞬时失败不占缓存，
-/// 下次写入仍可自愈重试）。
-static AUDIT_HMAC_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-
-/// 从设备指纹派生审计 HMAC 密钥（进程内派生一次后复用）。
-///
-/// 派生含 10 万次 PBKDF2；逐次重派生会让连续审计操作产生可感延迟，
-/// 故与其余审计调用点统一走进程内缓存。失败时返回 None，调用方跳过审计写入。
-fn get_audit_hmac_key() -> Option<[u8; 32]> {
-    use crate::infrastructure::device_fingerprint::get_device_fingerprint;
-    use crate::util::crypto::pbkdf2_derive_default;
-
-    if let Some(key) = AUDIT_HMAC_KEY.get() {
-        return Some(*key);
-    }
-
-    match get_device_fingerprint() {
-        Ok(fingerprint) => {
-            const AUDIT_SALT: &[u8] = b"verthys_audit_log_hmac_salt_v1";
-            match pbkdf2_derive_default(fingerprint.as_bytes(), AUDIT_SALT) {
-                Ok(key) => {
-                    let _ = AUDIT_HMAC_KEY.set(key);
-                    Some(key)
-                }
-                Err(e) => {
-                    log::warn!("[audit] 派生 HMAC 密钥失败，跳过审计写入: {}", e);
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            log::warn!("[audit] 获取设备指纹失败，跳过审计写入: {}", e);
             None
         }
     }
@@ -2008,7 +1972,7 @@ pub async fn verthys_flush(
     //   目录脏状态一致；flush op 失败或 IPC 失败时必须返回 err，
     //   让上层区分“已确认落盘”与“未确认落盘”，不得吞错报成功。
     state.begin_io();
-    let result = (|| {
+    let result = {
         let req = serde_json::json!({"op": "flush"}).to_string();
         match state.send_with_timeout(&req, std::time::Duration::from_secs(15)) {
             Ok(resp_json) => match serde_json::from_str::<VerthysResponse>(&resp_json) {
@@ -2031,7 +1995,7 @@ pub async fn verthys_flush(
                 Ok(VerthysResponse::err("flush", "flush ipc failed"))
             }
         }
-    })();
+    };
     state.end_io();
     result
 }

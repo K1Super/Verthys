@@ -19,7 +19,7 @@
  *   是唯一释放者），形成双写者死锁。该情形一律返回可重试的繁忙错误。
  *   确认退出后置死旧句柄并孵化新写者；旧线程已无任何未完成变更。
  *
- * 依赖方向：state → worker / repository::verthys_wal / controller::types /
+ * 依赖方向：state → worker / repository::verthys_wal / util::contracts /
  *            constants（本模块与 import_session 同层，属会话级流程编排）
  */
 
@@ -33,11 +33,26 @@ use crate::constants::import_writer as wconst;
 use crate::constants::record_types::{
     TYPE_FILEVERTHYS_CHUNK, TYPE_PHOTO_CHUNK, TYPE_PHOTO_CHUNK_SET, TYPE_PHOTO_THUMB,
 };
-use crate::controller::types::{BatchRecordInput, ChunkBlob, ImportBatchProgress};
+use crate::util::contracts::{BatchRecordInput, ChunkBlob, ImportBatchProgress};
 use crate::repository::verthys_chunks::{append_chunk_ledger_entries, save_chunk_ledger};
 use crate::repository::verthys_wal::{ImportSession, WalEntry};
-use crate::security::command_names::cmd;
+use crate::constants::command_names::cmd;
 use crate::state::AppState;
+
+/// worker 单条/批量写入响应的最小投影。
+///
+/// state 只需要成功标志、分配的 ID 与错误文本；直接复用控制器层的完整
+/// 响应结构会把共享状态模块反向绑定到控制器层。
+#[derive(serde::Deserialize)]
+struct WorkerWriteReply {
+    ok: bool,
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    ids: Option<Vec<u64>>,
+    #[serde(default)]
+    error: Option<String>,
+}
 
 /// 单批追加结果（命令应答负载）
 #[derive(Debug)]
@@ -421,10 +436,10 @@ fn worker_add_records(
         .map_err(|e| WorkerAddError::Transport(format!("请求序列化失败: {}", e)))?;
     match state.send(&json) {
         Ok(resp_json) => {
-            match serde_json::from_str::<crate::controller::types::VerthysResponse>(&resp_json) {
+            match serde_json::from_str::<WorkerWriteReply>(&resp_json) {
                 Ok(resp) if resp.ok => {
                     let ids = resp.ids.unwrap_or_default();
-                    if ids.len() != items.len() || ids.iter().any(|id| *id == 0) {
+                    if ids.len() != items.len() || ids.contains(&0) {
                         log::warn!(
                             "[import_writer] worker add_records 返回 ID 列表非法: got={} expected={}",
                             ids.len(),
@@ -819,7 +834,7 @@ fn worker_add_record(
     });
     match state.send(&req.to_string()) {
         Ok(resp_json) => {
-            match serde_json::from_str::<crate::controller::types::VerthysResponse>(&resp_json) {
+            match serde_json::from_str::<WorkerWriteReply>(&resp_json) {
                 Ok(resp) if resp.ok => match resp.id {
                     Some(id) if id > 0 => Ok(id),
                     _ => {

@@ -660,7 +660,8 @@ Tauri 命令：
 | `E_UPDATER_PACKAGE_MISSING` | Precheck / Verifying | 物料缺失 / 为空 / 超过大小上限 | 更新物料缺失 | 否 |
 | `E_UPDATER_PRECHECK_SPACE` | Precheck | 空间低于 `size * 2 + 100 MB` | 磁盘空间不足 | 是 |
 | `E_UPDATER_PRECHECK_SINGLE_INSTANCE` | Precheck | 第二实例持有程序目录 | 程序已在运行 | 是 |
-| `E_UPDATER_PRECHECK_DIR_WRITABLE` | Precheck | 探针创建 / 写入 / 删除失败 | 安装目录无写入权限 | 是 |
+| `E_UPDATER_PRECHECK_DIR_WRITABLE` | Precheck | 已提权进程的探针创建 / 写入 / 删除失败 | 安装目录无写入权限 | 是 |
+| `E_UPDATER_ELEVATION_DENIED` | Installing / Repair | 用户取消安装器提权（ShellExecute 返回 1223） | 需要管理员权限 | 是 |
 | `E_UPDATER_HASH_MISMATCH` | Verifying | SHA256 不一致 | 安装包校验失败 | 否 |
 | `E_UPDATER_SIZE_MISMATCH` | Verifying | 字节数不一致 | 安装包大小异常 | 否 |
 | `E_UPDATER_PE_VERSION_MISMATCH` | Verifying | PE 版本缺失 / 不等于清单 | 安装包版本不一致 | 否 |

@@ -54,9 +54,13 @@
  */
 /// 应用数据目录解析（使用 SHGetKnownFolderPath，支持便携模式与长路径）
 pub mod app_paths;
+/// 审计日志落盘与 HMAC 密钥单例
+pub mod audit;
 /// Windows 控制台信号处理（SetConsoleCtrlHandler → CancellationToken）
 pub mod console_handler;
 pub mod device_fingerprint;
+/// 独占文件锁与私有目录 ACL 隔离
+pub mod file_lock;
 pub mod handle_factory;
 /// 主进程 ↔ Worker 安全 IPC 与 SHM 载荷认证（会话密钥 + HMAC 信封 + SHM 认证标签）
 pub mod ipc_secure;

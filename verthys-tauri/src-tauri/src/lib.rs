@@ -243,7 +243,7 @@ fn run_process(mode: ProcessMode) {
      * 当前用户、SYSTEM 与内置管理员访问。数据根目录可能由 --data-dir 指向
      * 用户共享/便携路径，不在启动期改写其 ACL，避免越权影响用户既有权限。 */
     for dir in [&app_paths.log_dir, &app_paths.tmp_dir] {
-        if let Err(e) = crate::security::file_lock::harden_private_dir(
+        if let Err(e) = crate::infrastructure::file_lock::harden_private_dir(
             &dir.to_string_lossy(),
         ) {
             eprintln!(

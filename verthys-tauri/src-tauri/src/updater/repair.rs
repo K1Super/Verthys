@@ -13,8 +13,14 @@ use super::UpdaterError;
 use crate::state::AppState;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
+use windows::core::{HRESULT, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED};
+use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 const REPAIR_FILE: &str = "repair.json";
 
@@ -132,7 +138,7 @@ pub fn view_from_marker(marker: &PendingMarker) -> RepairStateView {
     }
 }
 
-/// 执行修复：复验物料、销毁 worker、启动旧版安装器并退出当前进程。
+/// 执行修复：复验物料、销毁 worker、以管理员权限启动旧版安装器并退出当前进程。
 pub fn run(app: &AppHandle) -> Result<(), UpdaterError> {
     // 用户可能在健康结论落盘前直接触发修复；先把仍在等待的标记归档，
     // 否则修复后的下一次启动会把旧标记误判为“安装进行中”。
@@ -187,34 +193,74 @@ pub fn run(app: &AppHandle) -> Result<(), UpdaterError> {
     app_state.set_session(None);
     std::thread::sleep(std::time::Duration::from_millis(300));
 
-    let spawned = std::process::Command::new(&record.path)
-        .arg("/UPDATE")
-        .arg("/P")
-        .arg("/R")
-        .spawn();
-    match spawned {
-        Ok(_) => {
-            std::process::exit(0);
-        }
+    match launch_installer_elevated(Path::new(&record.path), "/UPDATE /P /R") {
+        Ok(()) => std::process::exit(0),
         Err(error) => {
             state.state = "repair_failed".to_string();
-            state.reason = format!("无法启动旧版安装器: {error}");
+            state.reason = format!("无法启动旧版安装器: {}", error.message);
             let _ = write_state(app, &state);
             log::append(
                 app,
                 "repair_failed",
                 "Repair",
-                Some("E_UPDATER_INSTALL_FAILED"),
+                Some(&error.code),
                 "error",
                 serde_json::json!({}),
             );
+            Err(error)
+        }
+    }
+}
+
+/// 以管理员权限启动安装器：机器级安装必须提权，确认后安装器接管进程。
+/// 用户取消提权时安装器从未启动，按专用错误码返回，不能记作安装失败。
+fn launch_installer_elevated(path: &Path, parameters: &str) -> Result<(), UpdaterError> {
+    let verb = wide("runas");
+    let file = wide(path.as_os_str());
+    let arguments = wide(parameters);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(arguments.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: 结构体中的指针均指向本函数局部持有的 NUL 结尾 UTF-16 缓冲区，
+    // 调用期间保持有效；cbSize 已按结构体类型填写。
+    match unsafe { ShellExecuteExW(&mut info) } {
+        Ok(()) => {
+            if !info.hProcess.is_invalid() {
+                // SAFETY: hProcess 是 ShellExecuteExW 返回且尚未关闭的进程句柄。
+                unsafe {
+                    let _ = CloseHandle(info.hProcess);
+                }
+            }
+            Ok(())
+        }
+        Err(error) if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => {
             Err(UpdaterError::new(
-                "E_UPDATER_INSTALL_FAILED",
-                "无法启动旧版安装器",
+                "E_UPDATER_ELEVATION_DENIED",
+                "用户未允许管理员权限，安装器未启动",
                 true,
             ))
         }
+        Err(error) => Err(UpdaterError::new(
+            "E_UPDATER_INSTALL_FAILED",
+            format!("无法启动旧版安装器: {error}"),
+            true,
+        )),
     }
+}
+
+/// 转为以 NUL 结尾的 UTF-16 字符串，Shell API 要求指针在调用期间有效。
+fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
+    value
+        .as_ref()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// 启动时确认上一次修复是否已完成；版本已回到回退物料即算成功。

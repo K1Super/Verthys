@@ -89,7 +89,7 @@ pub(crate) fn gate_check(
         BruteForceCheck::Allow => UnlockGate::Allowed,
         BruteForceCheck::Locked(secs) => UnlockGate::Locked(secs),
         BruteForceCheck::RateLimited { retry_after_ms } => UnlockGate::RateLimited {
-            retry_after_secs: ((retry_after_ms + 999) / 1000).max(1),
+            retry_after_secs: retry_after_ms.div_ceil(1000).max(1),
         },
     }
 }

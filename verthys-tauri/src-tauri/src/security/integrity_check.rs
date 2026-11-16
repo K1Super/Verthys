@@ -113,7 +113,7 @@ fn report_result(app: &tauri::AppHandle, ok: bool, detail: String) {
         .map(|d| d.join("audit.log"));
     let written = match log_path {
         Some(p) => {
-            let key = crate::security_commands::audit::get_audit_hmac_key();
+            let key = crate::infrastructure::audit::get_audit_hmac_key();
             match key {
                 Some(k) => crate::util::audit_log::append_audit(&p, &k, event).is_ok(),
                 None => false,

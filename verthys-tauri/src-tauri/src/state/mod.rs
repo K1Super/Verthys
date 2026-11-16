@@ -23,7 +23,7 @@
  *   AtomicU64 记录 scan_state/scan_summary_state 锁获取时间戳。
  *   后台任务每 5s 检查，持有超 30s 告警 + try_lock 强制重置。
  *
- * 分层依赖方向：state → worker / infrastructure / controller::types / util
+ * 分层依赖方向：state → worker / infrastructure / repository / util
  */
 
 pub mod file_streams;
@@ -53,8 +53,8 @@ pub use worker_lifecycle::{
     spawn_health_checker, SetupCache, WorkerLifecycle, WorkerLifecycleHandle, WorkerLifecycleState,
 };
 
-use crate::controller::types::{VerthysRecordEntry, VerthysSummaryEntry};
-use crate::security::file_lock::VerthysFileLock;
+use crate::util::contracts::{VerthysRecordEntry, VerthysSummaryEntry};
+use crate::infrastructure::file_lock::VerthysFileLock;
 // 注意：VerthysSessionGuard 已通过上方 pub use 重导出，
 // 此处不再重复 use，避免 E0252 重复定义错误。
 use crate::worker::WorkerSession;

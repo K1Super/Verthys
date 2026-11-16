@@ -4,7 +4,6 @@
  * 子模块：
  *   - session_guard:    智能会话自动锁屏（mpsc 通道 + RAII 窗口 + 看门狗
  *                       + WTS 会话通知 + 显示器电源设置通知）
- *   - file_lock:        独占锁与防并发 + 私有目录 ACL 隔离
  *   - usb_guard:        移动存储安全强化（DPAPI 持久化 + 加盐哈希 + 影子休眠）
  *   - module_whitelist: 模块白名单实时巡检（路径真实化 + 吊销检查 + 缓存）
  *   - cleanup:          程序痕迹、缓存与卸载残留防护（1 遍全零覆写 + TRIM）
@@ -16,7 +15,6 @@
  *   - app_feature_gate: 应用侧档位特性位镜像（11 位契约，单写多读）
  *   - integrity_check:  程序自完整性签名核验（启动主镜像 + 巡检抽样口径）
  *   - trace_cleanup:    应用自身痕迹清理（最近记录精确清理，锁定/退出触发）
- *   - command_names:    安全命令名登记
  *
  * 剪贴板清空实现要点：
  *   - 直接调用 EmptyClipboard 清空剪贴板，不写入随机数据
@@ -30,8 +28,6 @@ pub mod background_patrol;
 pub mod brute_force;
 pub mod cleanup;
 pub mod clipboard_guard;
-pub mod command_names;
-pub mod file_lock;
 pub mod integrity_check;
 pub mod module_whitelist;
 pub mod session_guard;

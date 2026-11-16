@@ -243,6 +243,15 @@ impl Drop for CancelSlotGuard<'_> {
     }
 }
 
+/// ShellExecute 在用户取消提权时以 ERROR_CANCELLED 返回，安装器没有真正启动。
+fn elevation_denied(error: &tauri_plugin_updater::Error) -> bool {
+    matches!(
+        error,
+        tauri_plugin_updater::Error::Io(source)
+            if source.raw_os_error() == Some(windows::Win32::Foundation::ERROR_CANCELLED.0 as i32)
+    )
+}
+
 fn plugin_error(error: tauri_plugin_updater::Error) -> UpdaterError {
     let text = error.to_string();
     let lower = text.to_lowercase();
@@ -1138,7 +1147,20 @@ pub fn updater_install(
     match update.install(&prepared.bytes) {
         Ok(()) => Ok(()),
         Err(error) => {
-            let mapped = plugin_error(error);
+            // 安装器未启动时回滚标记：否则下次启动会把未发生的安装误判为
+            // “安装进行中”，用户取消提权后尤其明显。
+            if let Ok(path) = marker::pending_path(&app) {
+                let _ = std::fs::remove_file(path);
+            }
+            let mapped = if elevation_denied(&error) {
+                UpdaterError::new(
+                    "E_UPDATER_ELEVATION_DENIED",
+                    "用户未允许管理员权限，安装器未启动",
+                    true,
+                )
+            } else {
+                plugin_error(error)
+            };
             log::append(
                 &app,
                 "install_failed",
@@ -1530,8 +1552,8 @@ impl From<UpdaterError> for String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_release_unchanged, plugin_error, validate_downloaded, verification_event,
-        UpdaterError,
+        elevation_denied, ensure_release_unchanged, plugin_error, validate_downloaded,
+        verification_event, UpdaterError,
     };
     use crate::updater::manifest::ValidatedManifest;
 
@@ -1579,6 +1601,16 @@ mod tests {
 
     fn plugin_minisign(error: minisign_verify::Error) -> tauri_plugin_updater::Error {
         tauri_plugin_updater::Error::Minisign(error)
+    }
+
+    #[test]
+    fn elevation_cancel_is_distinguished_from_other_launch_errors() {
+        let cancelled = tauri_plugin_updater::Error::Io(std::io::Error::from_raw_os_error(
+            windows::Win32::Foundation::ERROR_CANCELLED.0 as i32,
+        ));
+        assert!(elevation_denied(&cancelled));
+        let other = tauri_plugin_updater::Error::Io(std::io::Error::from_raw_os_error(5));
+        assert!(!elevation_denied(&other));
     }
 
     #[test]

@@ -18,6 +18,7 @@ export const UPDATER_ERROR_CODES = [
   "E_UPDATER_PRECHECK_SPACE",
   "E_UPDATER_PRECHECK_SINGLE_INSTANCE",
   "E_UPDATER_PRECHECK_DIR_WRITABLE",
+  "E_UPDATER_ELEVATION_DENIED",
   "E_UPDATER_SIZE_MISMATCH",
   "E_UPDATER_HASH_MISMATCH",
   "E_UPDATER_PE_VERSION_MISMATCH",
@@ -105,6 +106,11 @@ export const UPDATER_ERROR_COPY: Record<UpdaterErrorCode, UpdaterErrorCopy> = {
   E_UPDATER_PRECHECK_DIR_WRITABLE: {
     title: "安装目录不可写",
     guidance: "请检查目录权限后重试",
+    retryable: true,
+  },
+  E_UPDATER_ELEVATION_DENIED: {
+    title: "需要管理员权限",
+    guidance: "请在系统提权窗口中允许后重试",
     retryable: true,
   },
   E_UPDATER_SIZE_MISMATCH: {

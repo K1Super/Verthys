@@ -119,7 +119,7 @@ fn collect_owned_dirs(app: &tauri::AppHandle) -> Vec<std::path::PathBuf> {
 
 /// 上报清理结果（应用日志 + 审计事件）
 fn report_cleanup_result(app: &tauri::AppHandle, result: &Result<usize, String>) {
-    use crate::security_commands::audit::write_audit_with_extensions;
+    use crate::infrastructure::audit::write_audit_with_extensions;
     use crate::util::audit_log::{AuditEventType, AuditExtensions, AuditResult};
 
     let session_id = format!("pid-{}", std::process::id());

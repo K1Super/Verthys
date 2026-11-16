@@ -1,8 +1,10 @@
 /*
  * updater/precheck.rs — 安装前环境预检
  *
- * 预检必须在下载前完成，避免把大文件下载完才发现磁盘不足、目录不可写或
- * 已有第二个实例占用程序目录。任一失败都返回稳定错误码，由前端给出可执行指引。
+ * 预检必须在下载前完成，避免把大文件下载完才发现磁盘不足或已有第二个实例
+ * 占用程序目录。安装目录写权限不足时不在预检阶段阻断：机器级安装由安装器在
+ * 移交阶段请求管理员权限，提前拦截会让更新永远走不到提权窗口。任一失败都
+ * 返回稳定错误码，由前端给出可执行指引。
  */
 
 use super::manifest::ValidatedManifest;
@@ -13,11 +15,12 @@ use std::path::Path;
 use tauri::AppHandle;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, TRUE};
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
 
 const SPACE_MARGIN_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -139,14 +142,42 @@ fn ensure_dir_writable(install_dir: &Path) -> Result<(), UpdaterError> {
     let result = std::fs::write(&probe, b"probe")
         .and_then(|_| std::fs::read(&probe))
         .and_then(|_| std::fs::remove_file(&probe));
-    if let Err(error) = result {
-        return Err(UpdaterError::new(
-            "E_UPDATER_PRECHECK_DIR_WRITABLE",
-            format!("安装目录不可写: {error}"),
-            true,
-        ));
+    let Err(error) = result else {
+        return Ok(());
+    };
+    // 机器级安装目录归管理员所有，未提权时探测必然失败；安装器移交阶段会
+    // 请求管理员权限后取得写权限，预检不能把它当作阻断条件。
+    if !is_process_elevated() {
+        return Ok(());
     }
-    Ok(())
+    Err(UpdaterError::new(
+        "E_UPDATER_PRECHECK_DIR_WRITABLE",
+        format!("安装目录不可写: {error}"),
+        true,
+    ))
+}
+
+/// 当前进程是否已提权；仅在写权限探测失败后调用。
+fn is_process_elevated() -> bool {
+    // SAFETY: 令牌句柄由 OpenProcessToken 返回；GetTokenInformation 只写入
+    // 栈上的 TOKEN_ELEVATION 且长度按类型声明，句柄在返回前关闭。
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut length = 0u32;
+        let result = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut std::ffi::c_void),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut length,
+        );
+        let _ = CloseHandle(token);
+        result.is_ok() && elevation.TokenIsElevated != 0
+    }
 }
 
 fn ensure_no_other_instance(current_exe: &Path) -> Result<(), UpdaterError> {
