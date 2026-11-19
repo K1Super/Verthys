@@ -245,13 +245,13 @@ pub(crate) fn handle_finish(worker: &Worker, req: &Request) -> Response {
             }) {
             Ok(preview_sealed) => match preview::record_name(Some(&cursor.entry_key), 0) {
                 Ok(name) => (Some(base64_encode(&preview_sealed)), Some(name)),
-                Err(e) => {
-                    diag!("[photo_import] 预览记录名生成失败，跳过预览: {}", e);
+                Err(_e) => {
+                    diag!("[photo_import] 预览记录名生成失败，跳过预览: {}", _e);
                     (None, None)
                 }
             },
-            Err(e) => {
-                diag!("[photo_import] 预览封装失败，跳过预览: {}", e);
+            Err(_e) => {
+                diag!("[photo_import] 预览封装失败，跳过预览: {}", _e);
                 (None, None)
             }
         },
