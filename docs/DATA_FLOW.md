@@ -1,8 +1,8 @@
 # DATA_FLOW — Verthys 关键数据流
 
-> 用时序图说明解锁、加解密、导出、更新/完整性校验、导入域与全库 DEK 轮换六类跨层数据流，标注各方参与模块。
+> 用时序图说明解锁、加解密、导出、更新/完整性校验、导入域、全库 DEK 轮换与照片原生数据流七类跨层数据流，标注各方参与模块。
 >
-> Last updated: 2026-11-17 · 维护人：K1Super
+> Last updated: 2026-11-19 · 维护人：K1Super
 
 ---
 
@@ -224,3 +224,67 @@ sequenceDiagram
   源库保持原状。
 - **提交后状态**：C 句柄指向新会话、恢复标记清零；宿主重建会话哨兵锁，前端同步
   收起恢复会话提示。
+## 7. 照片原生数据流（Phase 4 收口后）
+
+### 7.1 导入
+
+```mermaid
+sequenceDiagram
+    participant FE as Vue（拾光）
+    participant TC as Tauri（photo_media_controller）
+    participant WK as verthys-worker
+    participant DLL as verthys.dll
+    participant IW as ImportWriter/WAL
+    FE->>TC: photo_import_start(paths)
+    TC->>TC: 会话 + 路径批量授权
+    TC->>WK: photo_import_job_begin/next
+    WK->>WK: 读盘 / BLAKE3 / 4MiB 分块 / 缩略图 / 2048px 预览
+    WK->>DLL: V4ChunkSeal（块、meta、preview）
+    WK-->>TC: 密文块 + 块哈希 + meta/preview 密文
+    TC->>IW: AppendChunks → AppendPending
+    IW->>DLL: AddRecords / Flush
+    TC-->>FE: 进度 / 结果（仅 ID、名称、缩略图）
+```
+
+### 7.2 网格与查看
+
+```mermaid
+sequenceDiagram
+    participant FE as Vue（拾光）
+    participant TC as Tauri
+    participant WK as verthys-worker
+    participant DLL as verthys.dll
+    FE->>TC: photo_meta_get(ids)
+    TC->>WK: photo_meta_get
+    WK->>DLL: GetRecord + 模块解封（meta/slim_meta、thumb）
+    WK-->>TC: 展示字段 + 缩略图
+    FE->>TC: photo_preview_get(metaId)
+    TC->>WK: photo_read_job_begin(mode=preview)
+    WK->>DLL: 预览记录命中或逐块 ChunkOpen
+    WK-->>TC: 2048px JPEG
+    FE->>TC: photo_full_begin/next(metaId)
+    WK->>DLL: 逐块 ChunkOpen
+    WK-->>TC: 4MiB 明文块（末块整图 BLAKE3）
+```
+
+### 7.3 导出与备份还原
+
+```mermaid
+sequenceDiagram
+    participant FE as Vue
+    participant TC as Tauri
+    participant WK as verthys-worker
+    participant DLL as verthys.dll
+    FE->>TC: photo_export_start(ids, format, dest, token)
+    TC->>WK: photo_export_job_begin/next
+    WK->>DLL: 逐块 ChunkOpen
+    WK->>WK: original / VENC / PNG 流式产出
+    WK-->>TC: segment（≤4MiB）
+    TC->>TC: 暂存 + fsync + rename
+    FE->>TC: photo_parse_start(path, token)
+    TC->>WK: photo_venc_inspect（流式清单）
+    WK-->>TC: 预览清单
+    FE->>TC: photo_restore_start(path, token, hashes)
+    WK->>WK: 逐帧认证 + 重封装
+    TC->>DLL: AddRecords（经单写者）
+```

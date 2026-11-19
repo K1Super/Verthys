@@ -124,6 +124,16 @@ fn now_ms() -> u64 {
  * AppState — 应用主状态                                                *
  * ------------------------------------------------------------------ */
 
+/// 照片重型任务槽位（导入 / 导出 / 还原，单 job 串行）
+///
+/// 仅保存宿主侧 job 标识与取消标志；worker 侧 job 状态由 worker 自持。
+/// 槽位存在的语义是「已有一个照片任务占用数据面」，用于拒绝并发任务，
+/// 不做任何 worker 状态镜像。
+pub struct PhotoImportJob {
+    pub job_id: String,
+    pub cancel: std::sync::Arc<AtomicBool>,
+}
+
 /// 应用主状态
 ///
 /// 通过 `tauri::Builder::manage(AppState::new())` 注册。
@@ -192,6 +202,11 @@ pub struct AppState {
     /// verthys_import_end 关闭。单 verthys 同一时刻仅一个活跃会话（Mutex 串行化保证）。
     /// 中毒处理：into_inner() 取出废弃 → 重置为 None → 告警。
     import_session: Mutex<Option<crate::repository::verthys_wal::ImportSession>>,
+    /// 批量导入锚点推迟会话是否已由底层 DLL 确认生效（G0-A2 原型）。
+    ///
+    /// 旧 DLL 缺 Verthys_BulkImportBegin/Commit 时保持 false，导入按现状
+    /// 逐次提交锚点；只有 Begin 明确成功才置位，Commit 后清零。
+    bulk_defer_on: AtomicBool,
     /// 流式文件写入会话表（导出流式落盘）
     ///
     /// 通过 lock_file_streams() 访问；finalize/abort 一次性消费会话。
@@ -203,6 +218,11 @@ pub struct AppState {
     /// 原地重建。中毒处理：置死旧写者（防其继续变更存储）→ 重置为
     /// None → 告警。
     writer: Mutex<Option<import_writer::ImportWriterHandle>>,
+    /// 照片导入任务槽位（单 job 串行）
+    ///
+    /// 通过 try_begin_photo_import / photo_import_cancel_flag /
+    /// finish_photo_import 访问；中毒处理：重置为 None → 告警。
+    photo_import_job: Mutex<Option<PhotoImportJob>>,
 }
 
 impl AppState {
@@ -222,8 +242,10 @@ impl AppState {
             verthys_session: Mutex::new(None),
             key_lifecycle: KeyLifecycle::new(),
             import_session: Mutex::new(None),
+            bulk_defer_on: AtomicBool::new(false),
             file_streams: Mutex::new(std::collections::HashMap::new()),
             writer: Mutex::new(None),
+            photo_import_job: Mutex::new(None),
         }
     }
 
@@ -598,6 +620,16 @@ impl AppState {
         guard.is_some()
     }
 
+    /// 记录底层 DLL 是否已确认进入锚点推迟会话（仅导入生命周期使用）。
+    pub fn set_bulk_defer(&self, on: bool) {
+        self.bulk_defer_on.store(on, Ordering::SeqCst);
+    }
+
+    /// 查询锚点推迟会话是否生效。
+    pub fn bulk_defer_active(&self) -> bool {
+        self.bulk_defer_on.load(Ordering::SeqCst)
+    }
+
     /* ----------------------------------------------------------------
      * 流式文件写入会话表访问方法                         *
      *                                                                *
@@ -670,6 +702,83 @@ impl AppState {
             Some(handle) => !handle.is_alive(),
             None => false,
         }
+    }
+
+    /* ----------------------------------------------------------------
+     * 照片重型任务槽位访问方法（导入/导出/还原单 job 串行）          *
+     *                                                                *
+     * 槽位用于拒绝并发任务与投递取消标志；worker 侧 job 状态不在宿主 *
+     * 镜像。中毒处理：重置为 None 后告警。                            *
+     * ---------------------------------------------------------------- */
+
+    /// 锁定照片任务槽位
+    ///
+    /// 中毒处理：into_inner() 取出废弃 → 重置为 None → 告警。
+    fn lock_photo_import_job(&self) -> std::sync::MutexGuard<'_, Option<PhotoImportJob>> {
+        match self.photo_import_job.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                log::error!("[POISON][photo_import_job] Mutex 中毒，废弃旧任务槽位并重置为 None");
+                let mut g = poisoned.into_inner();
+                *g = None;
+                g
+            }
+        }
+    }
+
+    /// 尝试占用照片任务槽位。
+    ///
+    /// 已有任务时拒绝（并发任务会争夺同一数据面/导入会话）；成功返回取消
+    /// 标志，调用方在收尾时必须调用 `finish_photo_import` 释放槽位。
+    pub fn try_begin_photo_import(
+        &self,
+        job_id: &str,
+    ) -> Result<std::sync::Arc<AtomicBool>, String> {
+        if job_id.trim().is_empty() {
+            return Err("job_id 不能为空".to_string());
+        }
+        let mut guard = self.lock_photo_import_job();
+        if guard.is_some() {
+            return Err("已有照片任务进行中".to_string());
+        }
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        *guard = Some(PhotoImportJob {
+            job_id: job_id.to_string(),
+            cancel: cancel.clone(),
+        });
+        Ok(cancel)
+    }
+
+    /// 取指定任务的取消标志（job_id 不匹配返回 None）
+    ///
+    /// 仅匹配当前槽位，避免旧任务的延迟取消请求命中新任务。
+    pub fn photo_import_cancel_flag(&self, job_id: &str) -> Option<std::sync::Arc<AtomicBool>> {
+        let guard = self.lock_photo_import_job();
+        guard
+            .as_ref()
+            .filter(|job| job.job_id == job_id)
+            .map(|job| job.cancel.clone())
+    }
+
+    /// 释放照片导入槽位（仅当 job_id 匹配）
+    ///
+    /// 按 job_id 比对，防止旧任务的收尾路径清掉后来者新建的任务。
+    pub fn finish_photo_import(&self, job_id: &str) {
+        let mut guard = self.lock_photo_import_job();
+        if guard
+            .as_ref()
+            .map(|job| job.job_id == job_id)
+            .unwrap_or(false)
+        {
+            *guard = None;
+        }
+    }
+
+    /// 当前照片导入任务 ID（无任务返回 None）
+    pub fn photo_import_job_id(&self) -> Option<String> {
+        self.lock_photo_import_job()
+            .as_ref()
+            .map(|job| job.job_id.clone())
     }
 
     /* ----------------------------------------------------------------
@@ -1088,5 +1197,39 @@ mod tests {
             assert_eq!(scan.shm_name, "deref_test");
             assert!(!scan.exhausted);
         }
+    }
+
+    #[test]
+    fn test_photo_import_job_serial_cancel_and_stale_cleanup() {
+        let state = AppState::new();
+
+        // 空 job_id 直接被拒
+        assert!(state.try_begin_photo_import("").is_err());
+
+        let cancel = state
+            .try_begin_photo_import("job-a")
+            .expect("首个任务应占用成功");
+        assert!(!cancel.load(Ordering::SeqCst));
+
+        // 已有任务时串行拒绝，不得覆盖原槽位
+        assert!(state.try_begin_photo_import("job-b").is_err());
+        assert_eq!(state.photo_import_job_id().as_deref(), Some("job-a"));
+
+        // job_id 不匹配时取不到取消标志
+        assert!(state.photo_import_cancel_flag("job-b").is_none());
+        let same = state
+            .photo_import_cancel_flag("job-a")
+            .expect("当前任务标志应可达");
+        same.store(true, Ordering::SeqCst);
+        assert!(cancel.load(Ordering::SeqCst), "取消标志应共享同一原子位");
+
+        // 旧 job 的收尾不得清掉当前任务的槽位
+        state.finish_photo_import("job-b");
+        assert_eq!(state.photo_import_job_id().as_deref(), Some("job-a"));
+
+        // 匹配的 job_id 才能释放槽位
+        state.finish_photo_import("job-a");
+        assert!(state.photo_import_job_id().is_none());
+        assert!(state.try_begin_photo_import("job-c").is_ok());
     }
 }

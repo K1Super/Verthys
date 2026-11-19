@@ -47,6 +47,11 @@ int vty_tpm_witness_delete(const uint8_t id[VTY_UUID_BYTES], uint8_t slot);
 /* 两槽任一存在返回 1，均不存在返回 0，查询失败返回 -1 */
 int vty_tpm_witness_any(const uint8_t id[VTY_UUID_BYTES]);
 
+/* 两槽任一存在“可用见证”返回 1：键可打开且能导出公钥。
+ * 仅存在 create 与 finalize 之间崩溃留下的残留键时返回 0；
+ * 用于区分“可恢复的半完成键”与“有效见证已存在”。 */
+int vty_tpm_witness_any_usable(const uint8_t id[VTY_UUID_BYTES]);
+
 /* 删除两个槽（测试清理/状态重建） */
 int vty_tpm_witness_delete_all(const uint8_t id[VTY_UUID_BYTES]);
 
@@ -55,6 +60,15 @@ int vty_tpm_witness_delete_all(const uint8_t id[VTY_UUID_BYTES]);
 #if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
 int vty_tpm_witness_id_from_string(const char *text,
                                    uint8_t id[VTY_UUID_BYTES]);
+
+/* 故障注入：让接下来 count 次删除/创建返回 VTY_E_TPM（不触碰真实键）。
+ * 仅测试构建提供；用于验证删除失败撤销与 fail-closed 路径。 */
+void vty_tpm_witness_set_delete_fail_for_test(int count);
+void vty_tpm_witness_set_create_fail_for_test(int count);
+
+/* 崩溃注入：下一次创建在 NCryptCreatePersistedKey 成功后立即终止进程，
+ * 模拟 create 与 finalize 之间断电。仅测试构建提供。 */
+void vty_tpm_witness_set_crash_after_create_for_test(int enable);
 #endif
 
 #ifdef __cplusplus

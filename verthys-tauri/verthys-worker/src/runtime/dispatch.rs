@@ -14,10 +14,11 @@ use crate::runtime::worker::clamp_enum_count;
 use crate::runtime::protocol::{Request, Response, RecordEntry, base64_encode, base64_decode};
 use crate::runtime::ffi_types::{
     VerthysRecordC, VERTHYS_OK, VERTHYS_PERSIST_OK, VERTHYS_SCAN_PROJECT_FULL,
-    VERTHYS_SCAN_PROJECT_INDEX,
+    VERTHYS_SCAN_PROJECT_INDEX, VERTHYS_SYMBOL_UNSUPPORTED,
 };
 use crate::runtime::budget::PB_ENUM_RESPONSE_DATA_BUDGET_BYTES;
 use crate::runtime::path_grants;
+use crate::runtime::media;
 use crate::runtime::module_keys;
 use crate::runtime::module_session;
 use crate::runtime::pcr_session;
@@ -291,6 +292,55 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 ..Response::ok("authorize_path")
             },
         },
+        "authorize_path_batch" => {
+            let target_op = if req.target_op.is_empty() {
+                "photo_import"
+            } else {
+                req.target_op.as_str()
+            };
+            match path_grants::authorize_job_target(target_op, &req.job_id, &req.paths) {
+                Ok(()) => Response::ok("authorize_path_batch"),
+                Err(e) => Response {
+                    ok: false,
+                    op: "authorize_path_batch".into(),
+                    error: Some(e),
+                    ..Response::ok("authorize_path_batch")
+                },
+            }
+        }
+        "photo_import_job_begin" => media::handle_begin(req),
+        "photo_import_job_next" => media::handle_next(worker, req),
+        "photo_import_job_finish" => media::handle_finish(worker, req),
+        "photo_import_job_cancel" => media::handle_cancel(req),
+        "photo_import_job_end" => media::handle_end(req),
+        "photo_read_job_begin" => media::handle_read_begin(worker, req),
+        "photo_read_job_next" => media::handle_read_next(worker, req),
+        "photo_read_job_cancel" => media::handle_read_cancel(req),
+        "photo_read_job_end" => media::handle_read_end(req),
+        "photo_preview_ids" => media::handle_preview_ids(worker, req),
+        "photo_meta_get" => media::handle_meta_get(worker, req),
+        "photo_meta_probe" => media::handle_meta_probe(worker, req),
+        "photo_venc_inspect" => media::handle_restore_inspect(req),
+        "photo_export_job_begin" => media::handle_export_begin(req),
+        "photo_export_job_next" => media::handle_export_next(worker, req),
+        "photo_export_job_cancel" => media::handle_export_cancel(req),
+        "photo_export_job_end" => media::handle_export_end(req),
+        "photo_restore_job_begin" => media::handle_restore_begin(req),
+        "photo_restore_job_next" => media::handle_restore_next(worker, req),
+        "photo_restore_photo_finish" => media::handle_restore_finish(worker, req),
+        "photo_restore_job_cancel" => media::handle_restore_cancel(req),
+        "photo_restore_job_end" => media::handle_restore_end(req),
+        "find_lid_by_name" => match worker.call_find_lid_by_name(&req.name) {
+            Ok((found, lid)) => {
+                let mut resp = Response::ok("find_lid_by_name");
+                resp.found = Some(found);
+                if found {
+                    resp.id = Some(lid);
+                }
+                resp
+            }
+            Err(rc) => Response::err("find_lid_by_name", rc),
+        },
         "unlock" => {
             if let Some(denied) = require_path_grant("unlock", "read", &req.path) {
                 return denied;
@@ -404,6 +454,29 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("flush", r)
             }
         }
+        /* 批量导入锚点推迟（API 0x0015，仅隔离原型 DLL）。
+         * 旧 DLL 缺符号时返回 unsupported，宿主按现状逐次提交，不得
+         * 把“Begin 未生效”当成已进入推迟会话。 */
+        "bulk_import_begin" => match worker.call_bulk_import_begin() {
+            Ok(()) => Response::ok("bulk_import_begin"),
+            Err(VERTHYS_SYMBOL_UNSUPPORTED) => Response {
+                ok: false,
+                op: "bulk_import_begin".into(),
+                error: Some("unsupported: Verthys_BulkImportBegin".into()),
+                ..Response::ok("bulk_import_begin")
+            },
+            Err(code) => Response::err("bulk_import_begin", code),
+        },
+        "bulk_import_commit" => match worker.call_bulk_import_commit() {
+            Ok(()) => Response::ok("bulk_import_commit"),
+            Err(VERTHYS_SYMBOL_UNSUPPORTED) => Response {
+                ok: false,
+                op: "bulk_import_commit".into(),
+                error: Some("unsupported: Verthys_BulkImportCommit".into()),
+                ..Response::ok("bulk_import_commit")
+            },
+            Err(code) => Response::err("bulk_import_commit", code),
+        },
         /* 落盘自查：flush 成功后由本进程 C 层持锁句柄自查盘面结构。
          * 主进程外部读路径在 Windows 强制字节范围锁下恒失败（os error
          * 33），故校验必须落在持有会话句柄的子进程内。ok = (status==OK)；

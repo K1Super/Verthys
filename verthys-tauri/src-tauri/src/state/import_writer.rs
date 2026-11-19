@@ -31,7 +31,8 @@ use tauri::Manager;
 
 use crate::constants::import_writer as wconst;
 use crate::constants::record_types::{
-    TYPE_FILEVERTHYS_CHUNK, TYPE_PHOTO_CHUNK, TYPE_PHOTO_CHUNK_SET, TYPE_PHOTO_THUMB,
+    TYPE_FILEVERTHYS_CHUNK, TYPE_PHOTO_CHUNK, TYPE_PHOTO_CHUNK_SET, TYPE_PHOTO_PREVIEW,
+    TYPE_PHOTO_THUMB,
 };
 use crate::util::contracts::{BatchRecordInput, ChunkBlob, ImportBatchProgress};
 use crate::repository::verthys_chunks::{append_chunk_ledger_entries, save_chunk_ledger};
@@ -119,6 +120,13 @@ pub enum WriterCommand {
         keys: Vec<String>,
         record_ids: Vec<u64>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    /// 写入派生缓存记录（当前仅照片预览）：不依赖导入会话，按记录名
+    /// 幂等（已存在则复用），不进入 WAL/去重集合。
+    AppendDerived {
+        record: BatchRecordInput,
+        /// 返回记录 ID（已存在时为既有 ID）
+        reply: tokio::sync::oneshot::Sender<Result<u64, String>>,
     },
 }
 
@@ -310,6 +318,9 @@ fn writer_loop(
                 WriterCommand::AppendRemoved { reply, .. } => {
                     let _ = reply.send(Err("写者已被重建，请重试释放去重锁".to_string()));
                 }
+                WriterCommand::AppendDerived { reply, .. } => {
+                    let _ = reply.send(Err("写者已被重建，请重试写入预览".to_string()));
+                }
             }
             continue;
         }
@@ -336,6 +347,9 @@ fn writer_loop(
                 reply,
             } => {
                 let _ = reply.send(process_append_removed(&state, &keys, &record_ids));
+            }
+            WriterCommand::AppendDerived { record, reply } => {
+                let _ = reply.send(process_append_derived(&state, record));
             }
         }
         heartbeat.store(now_ms(), Ordering::SeqCst);
@@ -1081,6 +1095,51 @@ fn process_append_chunks(
         ids,
         failed_indices,
     })
+}
+
+/// worker 名称查找响应投影。
+#[derive(serde::Deserialize)]
+struct WorkerFindReply {
+    ok: bool,
+    #[serde(default)]
+    found: Option<bool>,
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// 按名称查记录 ID（名称盲索引）；未命中返回 None。
+fn worker_find_lid_by_name(state: &AppState, name: &str) -> Result<Option<u64>, String> {
+    let req = serde_json::json!({ "op": "find_lid_by_name", "name": name });
+    match state.send(&req.to_string()) {
+        Ok(raw) => match serde_json::from_str::<WorkerFindReply>(&raw) {
+            Ok(r) if r.ok => Ok(if r.found.unwrap_or(false) { r.id } else { None }),
+            Ok(r) => Err(format!("worker find_lid_by_name 失败: {:?}", r.error)),
+            Err(e) => Err(format!("find_lid_by_name 响应解析失败: {}", e)),
+        },
+        Err(e) => Err(format!("worker 通信失败: {}", e)),
+    }
+}
+
+/// 派生缓存写入：不依赖导入会话；同名记录已存在时直接复用。
+///
+/// 名称幂等与写入在同一写者线程内完成，避免并发懒生成产生重复预览。
+fn process_append_derived(state: &AppState, record: BatchRecordInput) -> Result<u64, String> {
+    if record.rtype != TYPE_PHOTO_PREVIEW {
+        return Err("派生记录类型不被支持".to_string());
+    }
+    if record.name.is_empty()
+        || record.name.len() > wconst::MAX_RECORD_NAME_LEN
+        || record.data_b64.is_empty()
+        || record.data_b64.len() > wconst::MAX_IPC_PAYLOAD_BYTES
+    {
+        return Err("派生记录名称或载荷非法".to_string());
+    }
+    if let Some(existing) = worker_find_lid_by_name(state, &record.name)? {
+        return Ok(existing);
+    }
+    worker_add_record(state, record.rtype, &record.name, &record.data_b64)
 }
 
 /// 追加删除墓碑（写者线程内）：经会话写者句柄落盘 + 会话内存集合即时释放。

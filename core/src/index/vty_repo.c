@@ -1364,6 +1364,70 @@ int vty_repo_find_by_type(VtyVault *v, uint8_t type,
     return repo_find_by_token(v, token, out_found, out_id);
 }
 
+int vty_repo_find_by_name(VtyVault *v, uint8_t type,
+                          const uint8_t *name, size_t name_len,
+                          uint8_t *out_found, uint64_t *out_id)
+{
+    uint8_t module_uuid[VTY_UUID_BYTES];
+    uint8_t mdek[VTY_KEY_BYTES];
+    uint8_t token[VTY_HASH_BYTES];
+    VtyStoreCursor *c = NULL;
+    int rc;
+
+    if (out_found == NULL || name == NULL || name_len == 0u) {
+        return VTY_E_INVALID;
+    }
+    *out_found = 0;
+    rc = repo_ready(v);
+    if (rc != VTY_OK) return rc;
+
+    rc = repo_module_for_type(v, type, module_uuid, mdek);
+    if (rc != VTY_OK) return rc;
+    rc = vty_name_index(mdek, module_uuid, name, name_len, token);
+    vty_secure_zero(mdek, sizeof(mdek));
+    if (rc != VTY_OK) return rc;
+
+    /* 名称索引键 = token(32) || id(8)，游标从 token 前缀起点顺序扫描；
+     * 前缀不匹配即说明该名称已无更多候选。 */
+    rc = vty_store_cursor_open(v->store, VTY_KS_NAME, token, VTY_HASH_BYTES, &c);
+    if (rc != VTY_OK) {
+        vty_secure_zero(token, sizeof(token));
+        return rc;
+    }
+
+    for (;;) {
+        int done = 0;
+        uint8_t *k = NULL, *val = NULL;
+        size_t klen = 0, vlen = 0;
+
+        rc = vty_store_cursor_next(c, &done, &k, &klen, &val, &vlen);
+        if (rc == VTY_OK && !done) {
+            if (klen < VTY_HASH_BYTES || memcmp(k, token, VTY_HASH_BYTES) != 0) {
+                rc = VTY_OK;
+                done = 1;
+            } else if (klen != VTY_HASH_BYTES + 8u) {
+                rc = VTY_E_CORRUPT;
+            } else if (vlen != 0u) {
+                if (vlen != 1u || val == NULL ||
+                    val[0] != VTY_STORE_TOMBSTONE_BYTE) {
+                    rc = VTY_E_CORRUPT;
+                }
+            } else {
+                *out_found = 1;
+                if (out_id != NULL) *out_id = get_be64(k + VTY_HASH_BYTES);
+                done = 1;
+            }
+        }
+        if (k != NULL) vty_free(k, klen);
+        if (val != NULL) vty_free(val, vlen);
+        if (rc != VTY_OK || done) break;
+    }
+
+    vty_store_cursor_close(c);
+    vty_secure_zero(token, sizeof(token));
+    return rc;
+}
+
 int vty_repo_list_ids_by_type(VtyVault *v, uint8_t type,
                               uint64_t after_id, uint64_t max_count,
                               uint64_t *out_ids, uint64_t *out_count,

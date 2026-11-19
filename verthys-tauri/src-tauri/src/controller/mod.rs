@@ -27,6 +27,8 @@ pub mod pcr_controller;
 pub mod keyfile_controller;
 /// 模块状态与不可逆删除
 pub mod module_controller;
+/// 宿主侧原生照片导入（worker job 拉取 + 单写者落库 + 进度推送）
+pub mod photo_media_controller;
 pub mod vault_rotate_controller;
 pub mod preflight_controller;
 /// 防截屏隐私保护（窗口捕获排除）：凭证槽位 / 原子应用与还原 / 隔离与对账 / 启动序列

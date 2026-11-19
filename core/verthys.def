@@ -69,6 +69,7 @@ EXPORTS
     Verthys_GetSummaryCount
     Verthys_HasRecordByType
     Verthys_FindFirstLidByType
+    Verthys_FindLidByName
     Verthys_ListIdsByType
     Verthys_Flush
     Verthys_GetContainerInfo

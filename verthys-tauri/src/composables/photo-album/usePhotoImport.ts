@@ -2,11 +2,9 @@
  * photo-album/usePhotoImport.ts — 拾光模块导入层 composable
  *
  * 职责：管理照片导入（加密入库）逻辑。
- * - Tauri 模式：使用三阶段异步流水线（生产者 → 传输器 → 消费者）
- *   - 生产者：流式读取文件 → transferList 零拷贝到 Worker
- *   - 传输器：Worker 池并行加密（hardwareConcurrency-1）
- *   - 消费者：批量 IPC 写入（N 次加密 1 次 IPC）+ 批量三层缓存同步 + WAL
- * - 浏览器模式：保留原始字节到内存（用于后续导出），不使用流水线
+ * - Tauri 模式：worker 原生导入（读取/哈希/缩略图/分块封装全部在 worker
+ *   内完成，宿主只拉取密文块并落库）；桌面旧 JS 流水线已删除。
+ * - 浏览器模式：保留原始字节到内存（用于后续导出），不使用 IPC
  *
  * 保持 ref 兼容：importing / importProgress / importStatus
  * 新增 ref：importElapsed（供 QuantumProgressFlow 使用）
@@ -16,17 +14,25 @@
  * - 批量构建 importedItems 后一次性 pushShallowItems，避免循环内多次触发响应式
  * - persistVerthys + 返回值检查 + setModuleCache 更新缓存
  */
-import { ref, watch, onScopeDispose, type ShallowRef } from "vue";
+import { ref, onScopeDispose, type ShallowRef } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import { readUserFile, userFileStat } from "../../lib/verthys";
+import {
+  photoImportCancel,
+  photoImportStart,
+  userFileStat,
+  type PhotoImportProgress,
+} from "../../lib/verthys";
 import { persistVerthysDetailed, setModuleCache } from "../../lib/keyManager";
 import { pushShallowItems, replaceShallowArray } from "../../utils/shallow-array";
 import { yieldToMain } from "../../utils/promise_utils";
 import type { PhotoEntry } from "./types";
-import { formatSize, generateThumbnail, guessMime, nextMemoryPhotoId, openBrowserFileDialog, sortByMetaId, toArrayBuffer, toPhotoCacheEntries } from "./utils";
+import {
+  formatSize, generateThumbnail, guessMime, importedToPhotoEntries,
+  nextMemoryPhotoId, openBrowserFileDialog, sortByMetaId, toArrayBuffer, toPhotoCacheEntries,
+} from "./utils";
 import { useSingleTimer } from "./utils/timer";
-import { ImportPipeline, importedToPhotoEntries, type ImportFileInput } from "./importPipeline";
 import { MAX_PHOTO_BYTES } from "../../constants/crypto_const";
+import { detectAnimatedImage, isAnimatedImageCandidate } from "../../utils/animated-image";
 
 /**
  * 导入流程阶段状态机：
@@ -81,16 +87,14 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
   /* ===== 导入流程阶段状态机（跨 await 边界的重入守卫权威） ===== */
   const phase = ref<ImportPhase>({ kind: "idle" });
   let epochCounter = 0;
-  /** 作用域已销毁：在途流水线返回后不得再写列表/缓存或弹提示 */
+  /** 作用域已销毁：在途导入返回后不得再写列表/缓存或弹提示 */
   let disposed = false;
-  /* 进行中导入的取消控制器（组件卸载时中止投喂，已提交批次收尾保留 WAL） */
-  let activeAbort: AbortController | null = null;
+  /* 原生导入进行中标记：取消走 photoImportCancel */
+  let nativeActive = false;
   /** 完成清理定时器（句柄纳管：旧回调不允许污染新导入的视觉状态） */
   const importDoneTimer = useSingleTimer("photo-import-done");
   /** 文件选择阶段看门狗：对话框异常挂起时兜底回空闲态 */
   const acquireWatchdog = useSingleTimer("photo-import-acquire");
-  /** 流水线进度 watch 停止句柄（卸载时统一解绑，避免残留副作用） */
-  const progressWatchStops: Array<() => void> = [];
 
   /** 尝试取得导入发起权：仅空闲或收尾倒计时中可进入，进行中一律拒绝 */
   const tryEnterAcquiring = (): boolean => {
@@ -125,33 +129,15 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
 
   onScopeDispose(() => {
     disposed = true;
-    // 卸载即中止投喂：已提交批次由流水线收尾并保留 WAL，不丢已落库数据
-    activeAbort?.abort();
-    for (const stop of progressWatchStops) stop();
-    progressWatchStops.length = 0;
+    if (nativeActive) {
+      nativeActive = false;
+      void photoImportCancel().catch((e) => console.warn("[onScopeDispose] 原生导入取消失败", e));
+    }
     importDoneTimer.dispose();
     acquireWatchdog.dispose();
   });
 
-  /* ===== 流水线实例（惰性创建，复用） ===== */
-  let pipeline: ImportPipeline | null = null;
-
-  /** 获取或创建流水线实例 */
-  const getPipeline = (): ImportPipeline => {
-    if (!pipeline) {
-      pipeline = new ImportPipeline();
-      // 将流水线进度状态机的响应式 ref 同步到本 composable 的 ref
-      // 通过 watch 实现帧对齐刷新到组件层
-      progressWatchStops.push(
-        watch(pipeline.progress.percent, (v) => { importProgress.value = v; }),
-        watch(pipeline.progress.text, (v) => { importStatus.value = v; }),
-        watch(pipeline.progress.elapsedMs, (v) => { importElapsed.value = v; }),
-      );
-    }
-    return pipeline;
-  };
-
-  /* ===== 导入照片（异步批处理流水线） ===== */
+  /* ===== 导入照片 ===== */
   const onImport = async () => {
     if (disposed) return;
     // 重入守卫：入口同步取到发起权（finishing 倒计时中允许接管），
@@ -173,21 +159,26 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
       }
 
       // 获取文件列表（Tauri 或浏览器）
-      let filesToProcess: ImportFileInput[] = [];
+      let filesToProcess: Array<{
+        name: string;
+        mime: string;
+        size: number;
+        lastModified: number;
+        readBytes: () => Promise<Uint8Array>;
+      }> = [];
+      let acceptedPaths: string[] = [];
       let browserFiles: File[] = []; // 浏览器模式保留 File 引用（用于 blobUrl）
 
       if (isTauri) {
         const selected = await open({
           multiple: true,
-          filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }],
+          filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "apng"] }],
         });
         if (disposed) return;
         if (!selected || (Array.isArray(selected) && selected.length === 0)) return;
         const paths = Array.isArray(selected) ? selected : [selected];
-        // 读前预检：readUserFile 会整文件搬进内存，超限文件若「读后才拒」，
-        //   内存峰值与读取耗时已经付出。stat 失败不影响导入（按未知大小继续，
-        //   后续仍受流水线的单文件上限与字节预算双重约束）。
-        //   有界并发：避免 1000 张选择一次性压入 1000 个 stat IPC。
+        // 读前预检：超限/空文件在读盘前剔除；stat 失败不影响导入（worker
+        //   仍会按单文件上限拒绝）。有界并发避免 1000 张一次性压入 IPC。
         const checked: Array<{
           path: string;
           size: number | undefined;
@@ -229,16 +220,7 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           showError(`${emptyCount} 个文件为空，已跳过`);
         }
         if (accepted.length === 0) return;
-        filesToProcess = accepted.map(({ path, size, mtime }) => {
-          const fileName = path.split(/[\\/]/).pop() || "photo";
-          return {
-            name: fileName,
-            mime: guessMime(fileName),
-            size,
-            lastModified: mtime,
-            readBytes: () => readUserFile(path),
-          };
-        });
+        acceptedPaths = accepted.map((c) => c.path);
       } else {
         // 浏览器模式：使用 File API
         browserFiles = await openBrowserFileDialog();
@@ -262,11 +244,26 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
       importing.value = true;
 
       if (isTauri) {
-        activeAbort = new AbortController();
-        // ===== Tauri 模式：使用三阶段异步流水线 =====
+        // ===== Tauri 模式：worker 原生导入 =====
+        let result: Awaited<ReturnType<typeof photoImportStart>>;
         try {
-          const pipe = getPipeline();
-          const result = await pipe.run(filesToProcess, activeAbort.signal);
+          nativeActive = true;
+          try {
+            result = await photoImportStart(acceptedPaths, (p: PhotoImportProgress) => {
+              if (disposed) return;
+              importProgress.value = p.percent;
+              importElapsed.value = p.elapsedMs;
+              if (p.phase === "scanning") importStatus.value = "正在读取并加密照片…";
+              else if (p.phase === "importing") {
+                const chunk = p.totalChunks > 0 ? `（${p.currentChunk}/${p.totalChunks}）` : "";
+                importStatus.value = `正在导入 ${p.currentName}${chunk} · ${p.doneFiles}/${p.totalFiles}`;
+              } else if (p.phase === "finishing") importStatus.value = "正在写入剩余记录…";
+            });
+          } finally {
+            nativeActive = false;
+          }
+          // 取消路径统一标记 ABORTED，复用既有取消收尾分支
+          if (result.cancelled && !result.error) result.error = "ABORTED";
 
           /* 组件已卸载：已提交批次仍须落盘（数据安全），但不得再回写
            * 已清空的列表、缓存与全局提示。 */
@@ -331,10 +328,8 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           // 同步模块缓存：导入后立即更新缓存，防止切走再切回时 loadPhotos 用旧缓存覆盖
           setModuleCache("photos", toPhotoCacheEntries(photos.value));
         } catch (e) {
-          console.error("[onImport] 流水线异常", e);
+          console.error("[onImport] 原生导入异常", e);
           if (!disposed) showError("导入失败，请重试");
-        } finally {
-          activeAbort = null;
         }
       } else {
         // ===== 浏览器模式：保留原始字节到内存（用于后续导出） =====
@@ -362,6 +357,10 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           try {
             const origBytes = await readBytes();
             const mime = guessMime(fileName);
+            // 浏览器模式没有加密 Worker：在原始字节仍在内存时完成动图判定
+            const animated = isAnimatedImageCandidate(mime)
+              ? detectAnimatedImage(mime, origBytes)
+              : undefined;
 
             // 生成缩略图
             const dataB64 = arrayBufferToBase64(origBytes.buffer.slice(
@@ -381,6 +380,7 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
               height: 180 + ((i * 23) % 100),
               blobUrl,
               rawBytes: origBytes,
+              animated,
             });
           } catch (e) {
             console.error("[importPhotos] 导入失败", e);
@@ -406,9 +406,11 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
     }
   };
 
-  /** 取消进行中的导入（组件卸载时调用）：中止投喂新文件，已提交批次收尾并保留 WAL 续传 */
+  /** 取消进行中的导入（组件卸载时调用）：已提交批次保留 WAL 续传 */
   const abortImport = () => {
-    activeAbort?.abort();
+    if (nativeActive) {
+      void photoImportCancel().catch((e) => console.warn("[abortImport] 原生导入取消失败", e));
+    }
   };
 
   return {
@@ -419,9 +421,6 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
     importElapsed,
     onImport,
     abortImport,
-    /* Parsed Import：导出流水线获取函数，供 usePhotoParse 复用同一实例
-       （共享进度状态机，已通过 watch 绑定到 importing/importProgress/importStatus refs） */
-    getPipeline,
   };
 }
 

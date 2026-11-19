@@ -1,7 +1,7 @@
 # C 核心公开 API（verthys.h）
 > C 核心 DLL（verthys.dll）对外标准 C ABI 接口规范，函数签名与语义逐一照源码编写。
 >
-> Last updated: 2026-11-17 · 维护人：K1Super
+> Last updated: 2026-11-19 · 维护人：K1Super
 
 本文档是 C 核心动态库对外接口的唯一契约文件，与 `core/include/verthys.h`（公开头文件）、
 `core/verthys.def`（导出符号白名单）逐条对齐。所有签名、枚举值、成员语义均照源码编写；
@@ -25,9 +25,10 @@
 - 导出宏：`VERTHYS_API` 在 Windows 下**恒为空**（不再携带 `__declspec(dllexport/dllimport)`）。
   符号导出**唯一**由链接器 `/DEF:verthys.def` 白名单管控；未列入 `.def` 的接口一律不可达。
   消费方（verthys-worker）经 `libloading` 按名运行时解析，不依赖导入库。
-- 版本宏：`VERTHYS_API_VERSION = 0x0014u`，调用方可用 `#if` 做编译期能力判断。
+- 版本宏：`VERTHYS_API_VERSION = 0x0015u`，调用方可用 `#if` 做编译期能力判断。
   0x0014 追加：`VerthysSecurityStatus` 原因码/已加固的用户态上限计数/策略位/采样时间，
   以及进程级运行时守卫通知接口 `Verthys_NotifyRuntimeGuards`。
+  0x0015 追加：`Verthys_FindLidByName`（名称盲索引精确查 ID）。
 
 ## 3. 不透明句柄 `VerthysHandle`
 
@@ -403,6 +404,13 @@ if (r != VERTHYS_OK) {
 - 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID`（handle/out_found/out_lid 任一 NULL）/ `VERTHYS_ERR_LOCKED`。
 - 语义：与 `HasRecordByType` 差异：同时返回 found 标志与 lid（单次遍历）；v1 容器返回 `VERTHYS_OK` + out_found（绝不返回 FORMAT）。线程安全：MT-Const。
 
+### Verthys_FindLidByName（API 0x0015）
+`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_FindLidByName(VerthysHandle handle, const char *name, size_t name_len, uint8_t *out_found, uint64_t *out_lid);`
+- 参数：`name` / `name_len` — 精确名称（不要求 NUL 结尾，`name_len > 0`）；`out_found` — 1=存在；`out_lid` — 匹配记录 lid（found=1 时有效，可为 NULL）。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID`（handle/name/out_found 任一 NULL，或 name_len=0）/ `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_FORMAT` / `VERTHYS_ERR_CORRUPT`。
+- 语义：名称经 NFKC 归一化后用模块 MDEK 计算名称盲索引（`VTY_KS_NAME`），以 token 前缀游标定位并跳过墓碑，返回首个存活记录 ID；不读取记录密文。名称不存在返回 `VERTHYS_OK + out_found=0`。模块按照片 → 账户 → 文件保险箱顺序查找。线程安全：MT-Const。
+- 照片数据面用途：worker 以该接口定位确定性预览记录 `preview_<entryKey>`（历史照片回退 `preview_<metaId>`），并用于删除级联的预览 ID 解析。Phase 4 收口未新增 C API，照片元数据/缩略图/预览/导出/还原均复用既有记录读写与 `V4ChunkSeal/Open`。
+
 ### Verthys_ListIdsByType（API 0x0012）
 `VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ListIdsByType(VerthysHandle handle, uint8_t rtype, uint64_t after_id, uint64_t max_count, uint64_t *out_ids, uint64_t *out_count, uint8_t *out_exhausted);`
 - 参数：`after_id` — 上一页最后一个 ID，首页传 0；`max_count` — 1..`VERTHYS_TYPE_ID_BATCH_MAX`（4096）。
@@ -427,8 +435,8 @@ if (r != VERTHYS_OK) {
 
 - 所有公开符号前缀均为 `Verthys_`。全仓源码/头文件中**未发现**旧 `Vault_` 前缀残留
   （历史归档报告中出现 4 处历史记录，非代码）。
-- 导出白名单 `core/verthys.def` 共 68 个符号（模块/轮换（含 keyfile 补录）/PCR/keyfile 等扩展已并入，
-  0x0014 追加 `Verthys_NotifyRuntimeGuards`），与头文件声明一一对应。
+- 导出白名单 `core/verthys.def` 共 69 个符号（模块/轮换（含 keyfile 补录）/PCR/keyfile 等扩展已并入，
+  0x0014 追加 `Verthys_NotifyRuntimeGuards`，0x0015 追加 `Verthys_FindLidByName`），与头文件声明一一对应。
 - 名称遗留（供整改参考）：`VerthysRecordType` 中 `VERTHYS_RECORD_FILE_VERTHYS` 语义为“文件保险箱类数据”，
   命名冗余但属源码现状，本文档照实记录，未改代码。
 

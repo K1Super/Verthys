@@ -19,6 +19,7 @@
 #include "verthys_diag.h"
 /* 扫描：目录叶游标 + 记录段解密/名称解密。 */
 #include "vty_repo.h"
+#include "vty_record.h"
 #include "verthys_api_container.h"
 
 #include <stdlib.h>
@@ -694,6 +695,80 @@ VerthysResult Verthys_FindFirstLidByType(VerthysHandle handle,
         VerthysResult rc;
         rc = verthys_api_container_map(
             vty_repo_find_by_type(ctx->vault, rtype, out_found, out_lid));
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#endif
+        return rc;
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * 按名称查找记录 ID（名称盲索引，API 版本 0x0015）
+ *
+ * 语义：名称经 NFKC 归一化后以模块 MDEK 计算盲索引 token，在
+ * VTY_KS_NAME 中按 token 前缀游标定位；跳过墓碑，返回首个存活记录。
+ * 不读取记录密文，也不校验记录内容。
+ *
+ * 模块顺序：照片 → 账户 → 文件保险箱。名称盲索引按模块密钥计算，
+ * 同一名称在不同模块互不可见；调用方不提供类型，故按固定顺序返回
+ * 首个命中。未命中返回 VERTHYS_OK + out_found=0（不存在不是错误）。
+ * ------------------------------------------------------------------ */
+VerthysResult Verthys_FindLidByName(VerthysHandle handle,
+                                    const char *name, size_t name_len,
+                                    uint8_t *out_found, uint64_t *out_lid)
+{
+    static const uint8_t kModuleTypes[] = {
+        VERTHYS_RECORD_PHOTO,
+        VERTHYS_RECORD_ACCOUNT,
+        VERTHYS_RECORD_FILE_VERTHYS,
+    };
+    struct VerthysContext *ctx;
+    size_t i;
+
+    if (handle == NULL || name == NULL || name_len == 0u ||
+        name_len > VTY_RECORD_MAX_NAME ||
+        out_found == NULL || out_lid == NULL) {
+        return VERTHYS_ERR_INVALID;
+    }
+
+    *out_found = 0;
+    *out_lid   = 0;
+
+    ctx = (struct VerthysContext *)handle;
+    if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
+    if (emergency_is_triggered()) return VERTHYS_ERR_LOCKED;
+    if (ctx->fmt_version != VERTHYS_FMT_CONTAINER) return VERTHYS_ERR_FORMAT;
+    if (ctx->vault == NULL || !ctx->vault->unlocked || ctx->vault->store == NULL) {
+        return VERTHYS_ERR_LOCKED;
+    }
+
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
+#endif
+    {
+        VtyVault *vault = (ctx->state == VERTHYS_STATE_UNLOCKED &&
+                        ctx->fmt_version == VERTHYS_FMT_CONTAINER)
+            ? ctx->vault : NULL;
+        VerthysResult rc;
+        if (emergency_is_triggered() || vault == NULL ||
+            !vault->unlocked || vault->store == NULL) {
+            rc = VERTHYS_ERR_LOCKED;
+        } else {
+            rc = VERTHYS_OK;
+            for (i = 0; i < sizeof(kModuleTypes) / sizeof(kModuleTypes[0]); i++) {
+                rc = verthys_api_container_map(
+                    vty_repo_find_by_name(vault, kModuleTypes[i],
+                                          (const uint8_t *)name, name_len,
+                                          out_found, out_lid));
+                /* 模块已启用但未解锁：该模块的名称索引不可读，跳过并继续
+                 * 查询其余模块，与按类型查找的回退语义一致。 */
+                if (rc == VERTHYS_ERR_POLICY) {
+                    rc = VERTHYS_OK;
+                    continue;
+                }
+                if (rc != VERTHYS_OK || *out_found) break;
+            }
+        }
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
 #endif

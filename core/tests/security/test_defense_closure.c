@@ -534,7 +534,7 @@ TEST(dcl_status_abi_layout)
     /* 追加式布局：既有 48 字节前缀不变，新字段偏移与总大小锁定。
      * C 编译期断言已覆盖，此处在运行期再验一次，防止测试构建与
      * 产品构建的宏差异掩盖漂移。 */
-    CHECK_EQ(VERTHYS_API_VERSION, 0x0014u);
+    CHECK_EQ(VERTHYS_API_VERSION, 0x0015u);
     CHECK_EQ(offsetof(VerthysSecurityStatus, path_reason), 48u);
     CHECK_EQ(offsetof(VerthysSecurityStatus, limited_count), 76u);
     CHECK_EQ(offsetof(VerthysSecurityStatus, policy_flags), 80u);

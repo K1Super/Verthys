@@ -10,6 +10,22 @@ if(VERTHYS_TEST_HOOKS)
     list(APPEND VERTHYS_P2_CLIENT_TEST_SOURCES security/test_machine_limiter.c)
 endif()
 
+# G0-A 隔离原型用例：仅原型 + 测试钩子构建编译与注册。
+# 用例依赖故障注入接口；缺少测试钩子时整个原型测试组不构建。
+set(VERTHYS_G0A_TEST_SOURCES "")
+if(VERTHYS_G0A_PROTOTYPE AND VERTHYS_TEST_HOOKS)
+    list(APPEND VERTHYS_G0A_TEST_SOURCES
+        security/test_g0a_prototype.c
+        security/test_g0a_crash.c)
+endif()
+
+# G0-A2 隔离原型用例：推迟锚点需要故障/崩溃注入，同样要求测试钩子。
+set(VERTHYS_G0A2_TEST_SOURCES "")
+if(VERTHYS_G0A2_PROTOTYPE AND VERTHYS_TEST_HOOKS)
+    list(APPEND VERTHYS_G0A2_TEST_SOURCES
+        security/test_g0a2_defer.c)
+endif()
+
 add_executable(verthys_tests
     test_runner.c
     api/test_init.c
@@ -62,6 +78,8 @@ add_executable(verthys_tests
     security/test_system32_loader.c
     container/test_format_fuzz.c
     ${VERTHYS_P2_CLIENT_TEST_SOURCES}
+    ${VERTHYS_G0A_TEST_SOURCES}
+    ${VERTHYS_G0A2_TEST_SOURCES}
 )
 target_link_libraries(verthys_tests PRIVATE
     verthys_core_shared_obj
@@ -114,6 +132,61 @@ add_test(NAME verthys_tests COMMAND verthys_tests)
 # 依赖 VERTHYS_TEST_STATE_DIR 的用例，避免误触真实用户状态。
 if(VERTHYS_TEST_HOOKS)
     target_compile_definitions(verthys_tests PRIVATE VERTHYS_TEST_HOOKS=1)
+endif()
+if(VERTHYS_G0A_PROTOTYPE)
+    target_compile_definitions(verthys_tests PRIVATE VERTHYS_G0A_PROTOTYPE=1)
+endif()
+if(VERTHYS_G0A2_PROTOTYPE)
+    target_compile_definitions(verthys_tests PRIVATE VERTHYS_G0A2_PROTOTYPE=1)
+endif()
+
+# G0-A 崩溃注入宿主：在指定提交阶段 TerminateProcess，供父测试进程
+# 验证崩溃矩阵。仅原型 + 测试钩子构建产出，不进入生产 DLL。
+if(VERTHYS_G0A_PROTOTYPE AND VERTHYS_TEST_HOOKS)
+    add_executable(vty_g0a_crash
+        tools/vty_g0a_crash.c
+    )
+    target_link_libraries(vty_g0a_crash PRIVATE
+        verthys_core_shared_obj verthys_core_obj
+        flatccrt user32)
+    target_include_directories(vty_g0a_crash PRIVATE
+        ${CMAKE_SOURCE_DIR}/core/include
+        ${CMAKE_SOURCE_DIR}/core/src
+        ${VERTHYS_SRC_SUBDIRS}
+    )
+    target_compile_definitions(vty_g0a_crash PRIVATE
+        VERTHYS_G0A_PROTOTYPE=1
+        VERTHYS_TEST_HOOKS=1)
+    if(MSVC)
+        target_compile_options(vty_g0a_crash PRIVATE /utf-8)
+        target_link_options(vty_g0a_crash PRIVATE /STACK:16777216)
+    endif()
+    add_dependencies(verthys_tests vty_g0a_crash)
+endif()
+
+# G0-A2 崩溃注入宿主：真实容器 + 批量导入会话，在导入中/上限提交/
+# Commit 阶段 TerminateProcess。仅原型 + 测试钩子构建产出。
+if(VERTHYS_G0A2_PROTOTYPE AND VERTHYS_TEST_HOOKS)
+    add_executable(vty_g0a2_crash
+        tools/vty_g0a2_crash.c
+    )
+    target_link_libraries(vty_g0a2_crash PRIVATE
+        verthys_core_shared_obj verthys_core_obj
+        flatccrt user32)
+    target_include_directories(vty_g0a2_crash PRIVATE
+        ${CMAKE_SOURCE_DIR}/core/include
+        ${CMAKE_SOURCE_DIR}/core/src
+        ${VERTHYS_SRC_SUBDIRS}
+    )
+    target_compile_definitions(vty_g0a2_crash PRIVATE
+        VERTHYS_G0A_PROTOTYPE=1
+        VERTHYS_G0A2_PROTOTYPE=1
+        VERTHYS_TEST_HOOKS=1)
+    if(MSVC)
+        target_compile_options(vty_g0a2_crash PRIVATE /utf-8)
+        target_link_options(vty_g0a2_crash PRIVATE /STACK:16777216)
+    endif()
+    add_dependencies(verthys_tests vty_g0a2_crash)
 endif()
 
 # ACG 专项验证：策略为进程级且不可撤销，必须使用独立进程。

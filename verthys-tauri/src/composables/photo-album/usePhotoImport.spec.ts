@@ -1,89 +1,61 @@
 /**
- * usePhotoImport.spec.ts — 导入发起权状态机回归测试
+ * usePhotoImport.spec.ts — 原生导入路径回归
  *
- * 覆盖：
- * - 文件对话框挂起期间连点导入：第二次调用立即返回（发起权互斥）
- * - 取消选择/看门狗超时后状态机回空闲态，可再次发起
- * - 流水线运行中重入被拒（importing 为 true 时入口不可达）
- * - 完成清理定时器纳管：旧代次回调不污染新一轮导入；正常倒计时清理
- * - 浏览器模式连点：只产生一个导入批次
+ * 覆盖：桌面只调用 photoImportStart；进度/取消/错误收尾；浏览器内存导入。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { effectScope, ref, shallowRef } from "vue";
+import { effectScope, shallowRef } from "vue";
 
-// vi.mock 工厂在模块顶部执行，实例方法 mock 需经 vi.hoisted 提升
-const { runMock } = vi.hoisted(() => ({
-  runMock: vi.fn(),
+const { importStartMock, importCancelMock } = vi.hoisted(() => ({
+  importStartMock: vi.fn(),
+  importCancelMock: vi.fn(async () => {}),
 }));
 
 vi.mock("../../lib/verthys", () => ({
-  readUserFile: vi.fn(async (_p: string) => new Uint8Array([1, 2, 3])),
-  // 读前预检：默认给出合法大小，避免预检异常掩盖被测状态机路径
-  userFileStat: vi.fn(async (_p: string) => ({ size: 3, mtime_ms: 0 })),
+  userFileStat: vi.fn(async () => ({ size: 3, mtime_ms: 0 })),
+  photoImportStart: importStartMock,
+  photoImportCancel: importCancelMock,
 }));
 vi.mock("../../lib/keyManager", () => ({
   persistVerthysDetailed: vi.fn(async () => ({ kind: "ok" })),
   setModuleCache: vi.fn(),
 }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: vi.fn(),
-}));
-vi.mock("./utils", () => {
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("./utils", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./utils")>();
   let memId = 1000;
   return {
-    formatSize: vi.fn((n: number) => `${n}B`),
+    ...actual,
     generateThumbnail: vi.fn(async () => "thumb-b64"),
-    guessMime: vi.fn(() => "image/jpeg"),
     nextMemoryPhotoId: () => ++memId,
     openBrowserFileDialog: vi.fn(),
-    toArrayBuffer: vi.fn((bytes: Uint8Array) => bytes.buffer),
-    // 导入收尾依赖：缺失会让成功路径落入异常分支，测试将失去覆盖意义
-    sortByMetaId: vi.fn((list: PhotoEntry[]) => [...list]),
-    toPhotoCacheEntries: vi.fn(() => []),
-  };
-});
-vi.mock("./importPipeline", () => {
-  class ImportPipeline {
-    progress = {
-      percent: ref(0),
-      text: ref(""),
-      elapsedMs: ref(0),
-      etaMs: ref(0),
-    };
-    run = runMock;
-  }
-  return {
-    ImportPipeline,
-    importedToPhotoEntries: vi.fn((items: Array<{ metaId: number; name: string }>) =>
-      items.map((it, i) => ({
+    importedToPhotoEntries: vi.fn((items: Array<{ metaId: number; displayName: string }>) =>
+      items.map((it) => ({
         id: it.metaId,
         metaId: it.metaId,
-        name: it.name,
+        name: it.displayName,
         thumb: "",
         size: "0B",
-        height: 180 + i,
-      }))),
+        height: 180,
+      })),
+    ),
   };
 });
 
 import { usePhotoImport } from "./usePhotoImport";
-import type { PhotoEntry } from "./types";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openBrowserFileDialog, generateThumbnail } from "./utils";
-import { importedToPhotoEntries } from "./importPipeline";
-import { MAX_PHOTO_BYTES } from "../../constants/crypto_const";
+import { openBrowserFileDialog } from "./utils";
+import { photoImportStart } from "../../lib/verthys";
 
-type RunResult = {
-  ok: boolean;
-  imported: Array<{ metaId: number; name: string; thumbB64: string; size: number; mime: string }>;
-  skipped: number;
-  failed: number;
-  elapsedMs: number;
-  error?: string;
-};
-
-const okResult = (): RunResult => ({
-  ok: true, imported: [], skipped: 0, failed: 0, elapsedMs: 1,
+const okResult = (overrides: Record<string, unknown> = {}) => ({
+  ok: true,
+  imported: [],
+  failedRecords: [],
+  skipped: 0,
+  total: 1,
+  elapsedMs: 1,
+  cancelled: false,
+  ...overrides,
 });
 
 function makeTauri() {
@@ -95,32 +67,13 @@ function makeTauri() {
   });
 }
 
-function makeBrowser() {
-  return usePhotoImport({
-    photos: shallowRef([]),
-    isTauri: false,
-    ensurePhotoKey: () => true,
-    showError: vi.fn(),
-  });
-}
-
-// node 环境可能缺 URL.createObjectURL（浏览器分支依赖）：存在则保留原生实现，缺失则打桩
-try {
-  if (typeof URL.createObjectURL !== "function") {
-    URL.createObjectURL = vi.fn(() => "blob:fake") as unknown as typeof URL.createObjectURL;
-  }
-} catch {
-  /* 属性只读时保留现状，后续用例若触发会显式失败而非静默通过 */
-}
-
-describe("usePhotoImport — 导入发起权状态机", () => {
+describe("usePhotoImport — 原生导入", () => {
   let scope: ReturnType<typeof effectScope>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     scope = effectScope();
-    // pipeline 默认成功返回，避免各用例重复设置
-    runMock.mockImplementation(async () => okResult());
+    importStartMock.mockImplementation(async () => okResult());
   });
 
   afterEach(() => {
@@ -128,160 +81,84 @@ describe("usePhotoImport — 导入发起权状态机", () => {
     vi.useRealTimers();
   });
 
-  it("文件对话框挂起期间连点导入：第二次调用立即返回，对话框只打开一次", async () => {
-    const api = scope.run(() => makeTauri())!;
-    (open as ReturnType<typeof vi.fn>).mockImplementation(
-      () => new Promise(() => { /* 挂起：模拟用户停留在系统文件对话框中 */ }),
-    );
-
-    const p1 = api.onImport();
-    const p2 = api.onImport();
-    // 第二次入口同步返回（无任何 await 前即被发起权互斥拒绝）
-    expect(open).toHaveBeenCalledTimes(1);
-    // acquiring 期间不置 importing：进度条不出现假启动
-    expect(api.importing.value).toBe(false);
-    p1.catch(() => { /* 挂起 promise 永远不会 settle，测试不等待它 */ });
-    p2.catch(() => { /* 同上 */ });
-  });
-
-  it("用户取消文件选择：状态机回空闲态，可再次发起", async () => {
-    const api = scope.run(() => makeTauri())!;
-    (open as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null).mockResolvedValueOnce(null);
-
-    await api.onImport(); // 第一次：取消
-    await api.onImport(); // 第二次：状态机若未复位则此处会被静默拒绝
-
-    expect(open).toHaveBeenCalledTimes(2);
-    expect(api.importing.value).toBe(false);
-  });
-
-  it("文件选择阶段看门狗超时后回空闲态，可再次发起", async () => {
-    vi.useFakeTimers();
-    const api = scope.run(() => makeTauri())!;
-    (open as ReturnType<typeof vi.fn>).mockImplementationOnce(
-      () => new Promise(() => { /* 永久挂起 */ }),
-    );
-
-    const p1 = api.onImport();
-    // 30s 看门狗推进：acquiring 回 idle
-    await vi.advanceTimersByTimeAsync(30_100);
-    // 状态机已复位：新导入可以进入（open 第二次调用）
-    (open as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
-    await api.onImport();
-    expect(open).toHaveBeenCalledTimes(2);
-    p1.catch(() => { /* 挂起 promise 不等待 */ });
-  });
-
-  it("流水线运行中连点：导入入口被拒，run 仅调用一次", async () => {
-    const api = scope.run(() => makeTauri())!;
-    (open as ReturnType<typeof vi.fn>).mockResolvedValueOnce(["C:\\p\\a.jpg"]);
-    let settleRun!: (v: RunResult) => void;
-    runMock.mockImplementationOnce(
-      () => new Promise<RunResult>((res) => { settleRun = res; }),
-    );
-
-    const p1 = api.onImport();
-    await vi.waitFor(() => expect(api.importing.value).toBe(true));
-    const p2 = api.onImport(); // running 中：立即返回
-    expect(runMock).toHaveBeenCalledTimes(1);
-    expect(open).toHaveBeenCalledTimes(1);
-
-    settleRun(okResult());
-    await p1;
-    await p2;
-    expect(api.importing.value).toBe(false);
-  });
-
-  it("完成倒计时期间旧回调被接管：新一轮导入的视觉状态不被旧回调清空", async () => {
-    vi.useFakeTimers();
-    const api = scope.run(() => makeTauri())!;
-    (open as ReturnType<typeof vi.fn>).mockResolvedValue(["C:\\p\\a.jpg"]);
-
-    // 第一轮完成：进度 100，1.5s 清理回调进入挂起
-    await api.onImport();
-    expect(api.importProgress.value).toBe(100);
-
-    // 600ms 后第二轮开始（收尾倒计时中接管：旧回调被 cancel）
-    await vi.advanceTimersByTimeAsync(600);
-    await api.onImport();
-    expect(api.importProgress.value).toBe(100);
-    api.importStatus.value = "完成：导入 0 张，去重跳过 0 张";
-    await vi.advanceTimersByTimeAsync(400); // 累计 1000ms：超过旧回调原触发点
-    // 旧回调已被取消：第二轮的视觉状态保持
-    expect(api.importStatus.value).toBe("完成：导入 0 张，去重跳过 0 张");
-
-    // 第二轮自己的回调在完成 1.5s 后正常清理
-    await vi.advanceTimersByTimeAsync(1100);
-    expect(api.importStatus.value).toBe("");
-    expect(api.importProgress.value).toBe(0);
-  });
-
-  it("浏览器模式连点：只产生一个导入批次", async () => {
-    const api = scope.run(() => makeBrowser())!;
-    let settleRead!: (v: ArrayBuffer) => void;
-    const fakeFile = {
-      name: "a.jpg",
-      arrayBuffer: () => new Promise<ArrayBuffer>((res) => { settleRead = res; }),
-    };
-    (openBrowserFileDialog as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce([fakeFile as unknown as File]);
-
-    const p1 = api.onImport();
-    await vi.waitFor(() => expect(api.importing.value).toBe(true));
-    const p2 = api.onImport(); // 运行中：立即返回
-    expect(openBrowserFileDialog).toHaveBeenCalledTimes(1);
-
-    settleRead(new Uint8Array([1, 2, 3]).buffer);
-    await p1;
-    await p2;
-    expect(importedToPhotoEntries).toHaveBeenCalledTimes(0);
-    expect(api.importing.value).toBe(false);
-  });
-
-  it("浏览器模式完整导入：缩略图生成被调用且列表被填充", async () => {
-    const photos = shallowRef<PhotoEntry[]>([]);
-    const make = () => usePhotoImport({
-      photos,
-      isTauri: false,
-      ensurePhotoKey: () => true,
-      showError: vi.fn(),
+  it("桌面端只调用 photoImportStart，并把进度映射到 ref", async () => {
+    (open as ReturnType<typeof vi.fn>).mockResolvedValue(["C:/a.jpg"]);
+    importStartMock.mockImplementation(async (_paths: string[], onProgress: (p: unknown) => void) => {
+      onProgress({
+        percent: 42,
+        elapsedMs: 10,
+        phase: "importing",
+        totalChunks: 2,
+        currentChunk: 1,
+        currentName: "a.jpg",
+        doneFiles: 0,
+        totalFiles: 1,
+      });
+      return okResult({
+        imported: [{
+          metaId: 7, name: "meta_a.jpg", displayName: "a.jpg",
+          thumbB64: "", size: 3, mime: "image/jpeg",
+        }],
+      });
     });
-    const api = scope.run(make)!;
-    const fakeFile = {
-      name: "b.jpg",
-      arrayBuffer: async () => new Uint8Array([4, 5, 6]).buffer,
-    };
-    (openBrowserFileDialog as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce([fakeFile as unknown as File]);
 
+    const api = scope.run(() => makeTauri())!;
     await api.onImport();
-    expect(generateThumbnail).toHaveBeenCalledTimes(1);
-    expect(photos.value.length).toBe(1);
+
+    expect(photoImportStart).toHaveBeenCalledTimes(1);
+    expect(importStartMock.mock.calls[0][0]).toEqual(["C:/a.jpg"]);
+    expect(api.importing.value).toBe(false);
   });
 
-  it("浏览器模式超限文件：读前按 size 拒绝，字节不进入内存读取", async () => {
-    const showError = vi.fn();
-    const photos = shallowRef<PhotoEntry[]>([]);
-    const api = scope.run(() => usePhotoImport({
-      photos,
-      isTauri: false,
-      ensurePhotoKey: () => true,
-      showError,
-    }))!;
-    const arrayBuffer = vi.fn();
-    const fakeFile = {
-      name: "huge.jpg",
-      size: MAX_PHOTO_BYTES + 1,
-      arrayBuffer,
-    } as unknown as File;
-    (openBrowserFileDialog as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce([fakeFile]);
+  it("取消结果标记为 ABORTED 并显示已导入数量", async () => {
+    (open as ReturnType<typeof vi.fn>).mockResolvedValue(["C:/a.jpg"]);
+    importStartMock.mockResolvedValue(okResult({ cancelled: true }));
 
+    const api = scope.run(() => makeTauri())!;
     await api.onImport();
 
-    expect(arrayBuffer).not.toHaveBeenCalled();
-    expect(generateThumbnail).not.toHaveBeenCalled();
-    expect(photos.value.length).toBe(0);
-    expect(showError).toHaveBeenCalled();
+    expect(api.importStatus.value).toContain("导入已取消");
+  });
+
+  it("会话级错误透传 showError", async () => {
+    (open as ReturnType<typeof vi.fn>).mockResolvedValue(["C:/a.jpg"]);
+    importStartMock.mockResolvedValue(okResult({ ok: false, error: "E_BOOM" }));
+    const showError = vi.fn();
+    const api = scope.run(() =>
+      usePhotoImport({
+        photos: shallowRef([]), isTauri: true,
+        ensurePhotoKey: () => true, showError,
+      }),
+    )!;
+    await api.onImport();
+    expect(showError).toHaveBeenCalledWith("导入失败: E_BOOM");
+  });
+
+  it("文件对话框连点只发起一次导入", async () => {
+    (open as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise(() => { /* 挂起 */ }),
+    );
+    const api = scope.run(() => makeTauri())!;
+    void api.onImport();
+    await api.onImport();
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("usePhotoImport — 浏览器内存导入", () => {
+  it("不调用 IPC，直接生成内存条目", async () => {
+    const file = new File([new Uint8Array([1, 2, 3])], "a.jpg", { type: "image/jpeg" });
+    (openBrowserFileDialog as ReturnType<typeof vi.fn>).mockResolvedValue([file]);
+    const scope = effectScope();
+    const api = scope.run(() =>
+      usePhotoImport({
+        photos: shallowRef([]), isTauri: false,
+        ensurePhotoKey: () => true, showError: vi.fn(),
+      }),
+    )!;
+    await api.onImport();
+    expect(photoImportStart).not.toHaveBeenCalled();
+    expect(api.importing.value).toBe(false);
+    scope.stop();
   });
 });

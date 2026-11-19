@@ -22,6 +22,11 @@ import {
 import { removeShallowItems, replaceShallowArray } from "../../utils/shallow-array";
 import type { PhotoEntry } from "./types";
 import { revokeThumbUrl, sortByMetaId, toPhotoCacheEntries } from "./utils";
+import {
+  photoViewerCache,
+  previewCacheKey,
+  fullCacheKey,
+} from "./photoBlobCache";
 
 /** usePhotoDelete 参数接口 */
 export interface UsePhotoDeleteParams {
@@ -214,10 +219,14 @@ export function usePhotoDelete(params: UsePhotoDeleteParams) {
           .catch((e) => console.warn("[deleteByMetaIds] 孤儿块 GC 失败（可下次再触发）", e));
       }
 
-      // 删除成功后才回收缩略图 Blob URL；失败恢复时 URL 仍然有效
+      // 删除成功后才回收缩略图/预览 Blob URL；失败恢复时 URL 仍然有效
       for (const ph of photosToRemove) {
         if (ph.blobUrl) URL.revokeObjectURL(ph.blobUrl);
         if (ph.thumb) revokeThumbUrl(ph.thumb);
+        if (typeof ph.metaId === "number" && ph.metaId > 0) {
+          photoViewerCache.delete(previewCacheKey(ph.metaId));
+          photoViewerCache.delete(fullCacheKey(ph.metaId));
+        }
       }
 
       if (outcome.kind === "not_persisted") {

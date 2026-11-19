@@ -189,7 +189,6 @@ void ctx_free_getrecord_cache(struct VerthysContext *ctx)
 /* 清除上下文中的所有敏感材料（会话），不动 file_path
  *
  * 前置条件无：会话的释放经 vty_vault_free 内部清零。
- *
  * 暴力破解退避记账为进程级模块全局（跨句柄聚合），与本上下文无关，
  * 亦不在本函数清零范围。 */
 void ctx_zero_sensitive(struct VerthysContext *ctx)
@@ -209,6 +208,14 @@ void ctx_zero_sensitive(struct VerthysContext *ctx)
     /* 格式版本复位：上下文回归 Init 零态（fmt 待下次 Unlock 重新裁决） */
     ctx->fmt_version = VERTHYS_FMT_NONE;
 }
+
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+int verthys_bulk_defer_active(const struct VerthysContext *ctx)
+{
+    if (ctx == NULL || ctx->vault == NULL) return 0;
+    return vty_vault_bulk_active(ctx->vault);
+}
+#endif
 
 /* ---------- 格式检测 ----------
  * 读取文件头判断格式：仅接受固定头 magic "VRTY" (0x56 0x52 0x54 0x59)。

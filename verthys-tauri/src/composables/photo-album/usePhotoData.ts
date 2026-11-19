@@ -26,14 +26,13 @@ import {
   getModuleCache, setModuleCache,
   ensureRecordScan, cancelRecordScan,
   getSummaryRecord, getRecordIdsByType,
-  getRecordsDataB64Batch, ensureTypeIds, clearTypeIdCache,
+  ensureTypeIds, clearTypeIdCache,
   moduleKeyReadyRef,
 } from "../../lib/keyManager";
-import { lockModuleKey, openRecord } from "../../lib/module_crypto";
+import { lockModuleKey } from "../../lib/module_crypto";
+import { photoViewerCache } from "./photoBlobCache";
 import { TYPE_PHOTO_META } from "../../lib/crypto";
-import { scanDamagedMetaIds } from "./damage";
-import { decryptMetaPreferWorker, decryptThumbPreferWorker } from "../../workers/photo-decrypt-bridge";
-import { isSlimPhotoMeta } from "../../constants/crypto_const";
+import { photoMetaGet, photoMetaProbe } from "../../lib/verthys";
 import { scrollPerf } from "../../config/scroll-perf";
 import { rafThrottle } from "../../utils/debounce";
 import {
@@ -43,7 +42,7 @@ import type { PhotoEntry, VisiblePhoto, DecryptedPhotoMeta } from "./types";
 import {
   formatSize, rehydrateEntries, diffNewIds, sortByMetaId,
   stripMetaRecordPrefix, prefetchRowIndices, thumbUrlOf,
-  makeThumbCssValue, makeThumbCssValueFromBytes, revokeThumbUrl,
+  makeThumbCssValue, revokeThumbUrl,
   toPhotoCacheEntries,
 } from "./utils";
 import {
@@ -363,9 +362,13 @@ export function usePhotoData() {
     // 会话密钥失效：清除 worker 内模块密钥与派生缓存；已解密内容同步释放
     void lockModuleKey("photo").catch(() => { /* 锁定失败不阻断界面释放 */ });
     releaseThumbUrls();
+    // 预览/原图 Blob 缓存随密钥失效统一释放，不得跨会话复用
+    photoViewerCache.clear();
     replaceShallowArray(photos, photos.value.map(p => ({
       id: p.id, metaId: p.metaId, name: p.name, thumb: "", size: "", height: 0,
       loaded: false, failed: false,
+      // 动图标记是格式属性、不涉密：锁定后保留，重进模块时角标无需二次探测
+      animated: p.animated,
     })));
     setModuleCache("photos", toPhotoCacheEntries(photos.value));
     failedCount.value = 0;
@@ -381,60 +384,40 @@ export function usePhotoData() {
     }
   };
 
-  /** 解密单张照片完整元数据（含 chunkIds 回退），返回渲染字段或 null。
-   *  prefetchedMetaB64 由 ensureVisiblePhotosDecrypted 批量预取传入（零 IPC）；
-   *    未传入时单条批量获取（扫描缓存优先 + 并行 IPC 回退）。
-   *  解密调度下沉 photo-crypto Worker 池，AEAD 与密钥派生再由
-   *    RPC 转交 Tauri worker；渲染主线程不做载荷解码与哈希。
-   *    池基础设施不可用时由桥自动回退主线程直连，两条路径结果一致。 */
-  const decryptPhotoMeta = async (vid: number, prefetchedMetaB64?: string): Promise<DecryptedPhotoMeta | null> => {
+  /** 读取单张照片展示元数据：worker 内解密索引与缩略图记录，只回传展示字段。
+   *
+   * 列表渲染不再接触记录密文；缩略图以 Blob URL 呈现，释放点见
+   * releaseThumbUrls。chunkIds 不在此预取：查看/导出/删除均走原生命令。 */
+  const decryptPhotoMeta = async (vid: number): Promise<DecryptedPhotoMeta | null> => {
     if (!moduleKeyReadyRef.value.photo) return null;
-    // 优先消费批量预取结果；未预取则单条批量获取（扫描缓存优先 + IPC 回退）
-    let metaB64: string;
-    if (prefetchedMetaB64 !== undefined) {
-      metaB64 = prefetchedMetaB64;
-      if (!metaB64) return null;
-    } else {
-      const map = await getRecordsDataB64Batch([vid]);
-      metaB64 = map.get(vid) || "";
-      if (!metaB64) return null;
-    }
-
     try {
-      const { meta, thumbBytes } = await decryptMetaPreferWorker(metaB64, String(vid));
-
-      // 缩略图归一：索引瘦身布局的缩略图在独立记录中，需按其记录 ID 取密文
-      // 再解密（扫描缓存命中则零 IPC）；既有布局仍取索引内联的缩略图数据。
-      let thumbCss = "";
-      if (thumbBytes) {
-        thumbCss = makeThumbCssValueFromBytes(new Uint8Array(thumbBytes));
-      } else if (isSlimPhotoMeta(meta) && meta.thumbId && meta.wrappedFileKey) {
-        const thumbMap = await getRecordsDataB64Batch([meta.thumbId]);
-        const thumbCipher = thumbMap.get(meta.thumbId) ?? "";
-        if (thumbCipher) {
-          const bytes = await decryptThumbPreferWorker(
-            thumbCipher, meta.wrappedFileKey, meta.fileHash, `${vid}:thumb`,
-          );
-          thumbCss = makeThumbCssValueFromBytes(bytes);
-        }
-      } else {
-        thumbCss = makeThumbCssValue(meta.thumbB64);
+      const batch = await photoMetaGet([vid]);
+      const item = batch.items.find((it) => it.metaId === vid);
+      if (!item) {
+        console.warn("[decryptPhotoMeta] 元数据缺失或解密失败", { metaId: vid });
+        return null;
       }
-
-      // 不再把 chunkIds 预取内联：列表渲染只需要缩略图/名称/尺寸，而分块密文是
-      //   MB 级载荷（单张照片可达数十条记录），内联会把"渲染一张缩略图"退化成
-      //   "搬运整张照片"。查看原图、导出、删除级联三条路径都已各自按 chunkIds
-      //   按需读取，无需在此处预取。
-
+      const meta = {
+        name: item.name,
+        mime: item.mime,
+        size: item.size,
+        thumbB64: item.thumbB64 ?? "",
+        chunkIds: [] as number[],
+        entryKey: item.entryKey,
+        fileHash: item.fileHash,
+        createdAt: item.createdAt,
+        animated: item.animated,
+        ...(item.slim ? { fmt: 2 } : {}),
+      };
       return {
         name: meta.name,
-        // 缩略图以 Blob URL 呈现：数据不进 JS 字符串，释放点见 releaseThumbUrls
-        thumb: thumbCss,
+        thumb: makeThumbCssValue(meta.thumbB64),
         size: formatSize(meta.size),
         meta,
+        animated: meta.animated,
       };
     } catch (e) {
-      console.warn("[decryptPhotoMeta] 元数据解密失败", { metaId: vid, reason: e instanceof Error ? e.message : "unknown" });
+      console.warn("[decryptPhotoMeta] 元数据读取失败", { metaId: vid, reason: e instanceof Error ? e.message : "unknown" });
       return null;
     }
   };
@@ -445,17 +428,6 @@ export function usePhotoData() {
     if (metaIds.length === 0) return;
     for (const vid of metaIds) decryptingMetaIds.add(vid);
     try {
-      // 批量预取所有待解密照片的 meta dataB64（扫描缓存优先，并行 IPC 回退）：
-      //   一次批量预取（命中缓存零 IPC），并发池直接消费预取结果，仅做 CPU 解密
-      // 异常收敛：批量预取失败不得中断整批（否则全部项停在未加载态且无失败标记），
-      //   留空映射让 decryptPhotoMeta 逐条按需取数；单条仍失败则由占位项标 failed 并计数。
-      let metaB64Map = new Map<number, string>();
-      try {
-        metaB64Map = await getRecordsDataB64Batch(metaIds);
-      } catch (e) {
-        console.warn("[decryptBatch] 批量预取失败，降级逐条取数", e);
-      }
-
       let cursor = 0;
       const runNext = async (): Promise<void> => {
         while (cursor < metaIds.length) {
@@ -466,7 +438,7 @@ export function usePhotoData() {
           if (decryptPaused.value || scrollQuiet.value) return;
           const vid = metaIds[cursor++];
           try {
-            const data = await decryptPhotoMeta(vid, metaB64Map.get(vid));
+            const data = await decryptPhotoMeta(vid);
             const pidx = entryIndexOf(vid);
             if (pidx >= 0) {
               if (data) {
@@ -838,9 +810,8 @@ export function usePhotoData() {
   /**
    * 扫描全部照片元数据，返回内容层认证失败（确定损坏）的 metaId 列表。
    *
-   * 判定口径：只把 `openRecord("photo","meta",…)` 的 AUTH 失败计为损坏；
-   * 模块锁定 / IPC 超时 / 记录暂不可读等不可判定结果一律跳过，绝不误删。
-   * 历史明文 JSON 布局由 damage.ts 统一豁免。
+   * 判定在 worker 内完成：只有内容层认证失败且非历史明文 JSON 才计为
+   * 损坏；模块锁定、超时、读取失败一律不可判定，绝不误删。
    */
   const scanDamagedPhotoMetaIds = async (): Promise<{
     checked: number;
@@ -856,14 +827,7 @@ export function usePhotoData() {
       .map((p) => p.metaId)
       .filter((id): id is number => typeof id === "number" && id > 0);
 
-    /* 批次预取 + 有限并发解密：元数据记录较小，批量取数避免逐条 IPC；
-     * 并发上限复用读取链路的 4，避免与可视区解密抢占通道。
-     * 判定与删除口径集中在 damage.ts（纯函数，可单测）。 */
-    return scanDamagedMetaIds(
-      ids,
-      (batch) => getRecordsDataB64Batch(batch),
-      (payload) => openRecord("photo", "meta", payload),
-    );
+    return photoMetaProbe(ids);
   };
 
   return {

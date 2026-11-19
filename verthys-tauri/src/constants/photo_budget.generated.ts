@@ -16,8 +16,11 @@ export const MAX_IPC_PAYLOAD_BYTES = 12582912;
 /** 单次块上传的块数上限 */
 export const MAX_CHUNKS_PER_IPC = 32;
 
-/** 数据块明文分片大小（字节） */
+/** VENC 容器帧与旧路径兼容的数据分片大小（字节），不是照片存储分块 */
 export const PAYLOAD_CHUNK_SIZE_BYTES = 1048576;
+
+/** 照片存储分块大小（字节）：导入分块与块记录上限的唯一口径 */
+export const PHOTO_CHUNK_SIZE_BYTES = 4194304;
 
 /** 索引瘦身布局的索引明文上界（字节）：展示字段与聚合引用（逐块项已移入块集记录） */
 export const PHOTO_INDEX_MAX_BYTES = 2656;

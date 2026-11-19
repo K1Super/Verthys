@@ -56,6 +56,14 @@ export interface PhotoMeta {
   chunkSetId?: number;
   /** 索引瘦身布局：块总数（与块集内容交叉校验；列表路径不取块集即可展示） */
   chunkCount?: number;
+  /**
+   * 动图标记（三态）：true = 已确认含多帧；false = 已确认静态；
+   * 缺省 = 未探测（历史记录）。
+   *
+   * 仅对 GIF / WebP / PNG(APNG) 候选格式写入 true/false；其他格式不写。
+   * 读取侧不得把缺省当成静态依据，否则历史动图会丢失角标。
+   */
+  animated?: boolean;
 }
 
 /* ------------------------------------------------------------------ *

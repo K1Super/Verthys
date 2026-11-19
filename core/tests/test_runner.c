@@ -199,6 +199,7 @@ TEST(repo_scan_skips_tombstone_and_type_index);
 /* 公共 API 记录链路（test_api_container.c） */
 TEST(api_records_roundtrip_and_scan);
 TEST(api_list_ids_by_type_and_verify_persist);
+TEST(api_find_lid_by_name);
 TEST(api_add_records_batch_roundtrip);
 TEST(api_records_require_unlock);
 
@@ -293,6 +294,45 @@ TEST(rollback_forged_generation_rejected);
 TEST(rollback_state_replay_rejected);
 TEST(rollback_missing_state_anchor_fail_closed);
 TEST(rollback_disabled_allows_old_copy);
+
+/* G0-A 生产化原型（test_g0a_prototype.c，仅原型构建） */
+#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
+TEST(g0a_commit_fast_path_uses_preset);
+TEST(g0a_commit_waits_for_background_creation);
+TEST(g0a_delete_failure_revokes_old_key);
+TEST(g0a_delete_and_revoke_failure_fails_closed);
+TEST(g0a_cached_verify_rejects_state_replay);
+TEST(g0a_new_vault_has_no_preset_before_first_commit);
+TEST(g0a_cache_never_bypasses_state_mac);
+TEST(g0a_shutdown_stops_and_restarts_pool);
+TEST(g0a_concurrent_vaults_commit);
+TEST(g0a_vault_save_fast_path);
+TEST(g0a_crash_sync_after_new_key);
+TEST(g0a_crash_sync_after_store);
+TEST(g0a_crash_sync_after_retire);
+TEST(g0a_crash_preset_before_take);
+TEST(g0a_crash_preset_after_take);
+TEST(g0a_crash_preset_after_store);
+TEST(g0a_crash_halfkey_existing_state);
+TEST(g0a_crash_halfkey_first_commit);
+#endif
+
+/* G0-A2 批量导入锚点推迟（test_g0a2_defer.c，仅原型构建） */
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+TEST(g0a2_api_version_and_unlock_guard);
+TEST(g0a2_begin_commit_idempotent);
+TEST(g0a2_flush_keeps_session);
+TEST(g0a2_non_import_writes_rejected);
+TEST(g0a2_begin_precommits_and_saves_defer);
+TEST(g0a2_generation_limit_forces_commit);
+TEST(g0a2_time_limit_forces_commit);
+TEST(g0a2_commit_failure_locks_session);
+TEST(g0a2_lock_commits_open_window);
+TEST(g0a2_concurrent_add_records_with_session);
+TEST(g0a2_crash_during_import_recovers);
+TEST(g0a2_crash_during_limit_commit_recovers);
+TEST(g0a2_crash_during_commit_recovers);
+#endif
 
 /* PCR 槽与解锁策略（test_pcr.c） */
 TEST(pcr_select_validation);
@@ -1001,6 +1041,7 @@ int main(int argc, char **argv)
     RUN_TEST(repo_scan_skips_tombstone_and_type_index);
     RUN_TEST(api_records_roundtrip_and_scan);
     RUN_TEST(api_list_ids_by_type_and_verify_persist);
+    RUN_TEST(api_find_lid_by_name);
     RUN_TEST(api_add_records_batch_roundtrip);
     RUN_TEST(api_records_require_unlock);
     RUN_TEST(api_modules_roundtrip_and_policy);
@@ -1082,9 +1123,52 @@ int main(int argc, char **argv)
     RUN_TEST(rollback_state_replay_rejected);
     RUN_TEST(rollback_missing_state_anchor_fail_closed);
     RUN_TEST(rollback_disabled_allows_old_copy);
+#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
+    /* G0-A 隔离原型：预置快路径、撤销/fail-closed、缓存与并发 */
+    RUN_TEST(g0a_commit_fast_path_uses_preset);
+    RUN_TEST(g0a_commit_waits_for_background_creation);
+    RUN_TEST(g0a_delete_failure_revokes_old_key);
+    RUN_TEST(g0a_delete_and_revoke_failure_fails_closed);
+    RUN_TEST(g0a_cached_verify_rejects_state_replay);
+    RUN_TEST(g0a_new_vault_has_no_preset_before_first_commit);
+    RUN_TEST(g0a_cache_never_bypasses_state_mac);
+    RUN_TEST(g0a_shutdown_stops_and_restarts_pool);
+    RUN_TEST(g0a_concurrent_vaults_commit);
+    RUN_TEST(g0a_vault_save_fast_path);
+    /* 进程级崩溃注入：状态写入前后、旧键退役前后、预置取用前后 */
+    RUN_TEST(g0a_crash_sync_after_new_key);
+    RUN_TEST(g0a_crash_sync_after_store);
+    RUN_TEST(g0a_crash_sync_after_retire);
+    RUN_TEST(g0a_crash_preset_before_take);
+    RUN_TEST(g0a_crash_preset_after_take);
+    RUN_TEST(g0a_crash_preset_after_store);
+    /* create 与 finalize 之间崩溃：残留键不得永久锁死提交 */
+    RUN_TEST(g0a_crash_halfkey_existing_state);
+    RUN_TEST(g0a_crash_halfkey_first_commit);
+#endif
     /* 组内用例会开启回退检测；显式恢复默认关闭，避免影响后续用例 */
     vty_rollback_set_enabled(0);
     test_state_checkpoint("rollback");
+
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+    /* G0-A2 隔离原型：推迟窗口、上限、拒绝清单、失败锁定与崩溃恢复 */
+    RUN_TEST(g0a2_api_version_and_unlock_guard);
+    RUN_TEST(g0a2_begin_commit_idempotent);
+    RUN_TEST(g0a2_flush_keeps_session);
+    RUN_TEST(g0a2_non_import_writes_rejected);
+    RUN_TEST(g0a2_begin_precommits_and_saves_defer);
+    RUN_TEST(g0a2_generation_limit_forces_commit);
+    RUN_TEST(g0a2_time_limit_forces_commit);
+    RUN_TEST(g0a2_commit_failure_locks_session);
+    RUN_TEST(g0a2_lock_commits_open_window);
+    RUN_TEST(g0a2_concurrent_add_records_with_session);
+    RUN_TEST(g0a2_crash_during_import_recovers);
+    RUN_TEST(g0a2_crash_during_limit_commit_recovers);
+    RUN_TEST(g0a2_crash_during_commit_recovers);
+    /* 组内用例会按需开启回退检测；恢复默认关闭。 */
+    vty_rollback_set_enabled(0);
+    test_state_checkpoint("g0a2");
+#endif
 
     RUN_TEST(pcr_select_validation);
     RUN_TEST(pcr_slot_codec);

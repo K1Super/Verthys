@@ -13,12 +13,16 @@
  * 线程安全：Mutex 保护；路径规范化在锁外完成，避免持锁做文件系统调用。
  */
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const GRANT_TTL: Duration = Duration::from_secs(30);
 const MAX_GRANTS: usize = 32;
+/// 批量导入 job 授权：与单路径授权分离，避免把 10,000 条路径塞进 32 条表。
+const JOB_GRANT_TTL: Duration = Duration::from_secs(600);
+const MAX_JOB_PATHS: usize = 10_000;
 const MODE_READ: &str = "read";
 const MODE_WRITE: &str = "write";
 
@@ -29,7 +33,14 @@ struct Grant {
     expires_at: Instant,
 }
 
+struct JobGrant {
+    target_op: String,
+    paths: HashSet<String>,
+    expires_at: Instant,
+}
+
 static GRANTS: Mutex<Vec<Grant>> = Mutex::new(Vec::new());
+static JOB_GRANTS: Mutex<Vec<(String, JobGrant)>> = Mutex::new(Vec::new());
 
 /// 签发一次性路径授权。
 ///
@@ -78,12 +89,101 @@ pub(crate) fn consume(target_op: &str, mode: &str, raw_path: &str) -> bool {
     }
 }
 
+/// 按目标操作签发批量 job 授权（照片导入 / 备份还原）。
+pub(crate) fn authorize_job_target(
+    target_op: &str,
+    job_id: &str,
+    raw_paths: &[String],
+) -> Result<(), String> {
+    if job_id.is_empty() {
+        return Err("job_id 不能为空".to_string());
+    }
+    if !is_allowed_pair(target_op, MODE_READ) {
+        return Err("照片导入授权组合非法".to_string());
+    }
+    if raw_paths.is_empty() {
+        return Err("路径列表为空".to_string());
+    }
+    if raw_paths.len() > MAX_JOB_PATHS {
+        return Err(format!(
+            "单 job 路径数超过上限: {} > {}",
+            raw_paths.len(),
+            MAX_JOB_PATHS
+        ));
+    }
+
+    let mut paths = HashSet::with_capacity(raw_paths.len());
+    for raw in raw_paths {
+        paths.insert(normalize_path(raw)?);
+    }
+
+    let now = Instant::now();
+    let mut grants = JOB_GRANTS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    grants.retain(|(_, grant)| grant.expires_at > now);
+    grants.retain(|(id, _)| id != job_id);
+    grants.push((
+        job_id.to_string(),
+        JobGrant {
+            target_op: target_op.to_string(),
+            paths,
+            expires_at: now + JOB_GRANT_TTL,
+        },
+    ));
+    Ok(())
+}
+
+/// 成员校验：只判断路径是否属于该 job 且操作匹配，不消费授权。
+pub(crate) fn job_contains_for(target_op: &str, job_id: &str, raw_path: &str) -> bool {
+    let path = match normalize_path(raw_path) {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+    let now = Instant::now();
+    let mut grants = JOB_GRANTS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    grants.retain(|(_, grant)| grant.expires_at > now);
+    grants.iter().any(|(id, grant)| {
+        id == job_id && grant.target_op == target_op && grant.paths.contains(&path)
+    })
+}
+
+/// 成员校验：只判断路径是否属于该 job，不消费授权（测试用）。
+#[cfg(test)]
+pub(crate) fn job_contains(job_id: &str, raw_path: &str) -> bool {
+    let path = match normalize_path(raw_path) {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+    let now = Instant::now();
+    let mut grants = JOB_GRANTS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    grants.retain(|(_, grant)| grant.expires_at > now);
+    grants
+        .iter()
+        .find(|(id, _)| id == job_id)
+        .map(|(_, grant)| grant.paths.contains(&path))
+        .unwrap_or(false)
+}
+
+/// job 结束/取消时立即销毁授权。
+pub(crate) fn revoke_job(job_id: &str) {
+    let mut grants = JOB_GRANTS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    grants.retain(|(id, _)| id != job_id);
+}
+
 /// 预定义操作与模式组合。
 fn is_allowed_pair(target_op: &str, mode: &str) -> bool {
     match target_op {
         "unlock" | "import" | "v4_unlock_recovery" | "v4_unlock_keyfile"
         | "v4_keyfile_disable" | "v4_reseal_device"
-        | "v4_rotate_attach_keyfile" => mode == MODE_READ,
+        | "v4_rotate_attach_keyfile" | "photo_import" | "photo_restore"
+        | "photo_parse" => mode == MODE_READ,
         "v4_create" | "v4_create_keyfile"
         | "v4_keyfile_enable" | "export"
         | "v4_rotate_begin" => mode == MODE_WRITE,
@@ -172,5 +272,61 @@ mod tests {
         assert!(authorize("export", MODE_READ, &temp_target("x.tmp")).is_err());
         assert!(authorize("unlock", MODE_READ, "relative.tmp").is_err());
         assert!(authorize("unlock", MODE_READ, "").is_err());
+    }
+
+    #[test]
+    fn job_grant_is_bound_to_job_and_not_consumed() {
+        let a = temp_target("verthys-job-a.jpg");
+        let b = temp_target("verthys-job-b.jpg");
+        authorize_job_target("photo_import", "job-1", &[a.clone(), b.clone()]).unwrap();
+
+        assert!(job_contains("job-1", &a));
+        assert!(job_contains("job-1", &a), "成员校验不得消费授权");
+        assert!(!job_contains("job-2", &a), "跨 job 必须拒绝");
+        assert!(!job_contains("job-1", &temp_target("other.jpg")));
+
+        revoke_job("job-1");
+        assert!(!job_contains("job-1", &a), "结束后授权必须销毁");
+    }
+
+    #[test]
+    fn job_grant_rejects_empty_oversize_and_relative_paths() {
+        assert!(authorize_job_target("photo_import", "", &[temp_target("x.jpg")]).is_err());
+        assert!(authorize_job_target("photo_import", "job-empty", &[]).is_err());
+        assert!(
+            authorize_job_target("photo_import", "job-rel", &["relative.jpg".to_string()]).is_err()
+        );
+
+        let too_many: Vec<String> = (0..10_001)
+            .map(|i| temp_target(&format!("verthys-many-{}.jpg", i)))
+            .collect();
+        assert!(authorize_job_target("photo_import", "job-many", &too_many).is_err());
+    }
+
+    /// 备份还原使用同一 job 授权通道，但只允许读模式。
+    #[test]
+    fn restore_and_parse_grants_are_read_only() {
+        let path = temp_target("verthys-restore.venc");
+        authorize_job_target("photo_restore", "job-restore", &[path.clone()]).unwrap();
+        assert!(job_contains("job-restore", &path));
+        assert!(authorize_job_target("photo_restore", "job-x", &["rel.venc".to_string()]).is_err());
+
+        authorize_job_target("photo_parse", "job-parse", &[path.clone()]).unwrap();
+        assert!(job_contains("job-parse", &path));
+        assert!(!job_contains_for("photo_restore", "job-parse", &path), "跨操作不得复用授权");
+        assert!(!job_contains_for("photo_import", "job-parse", &path), "跨操作不得复用授权");
+        assert!(authorize_job_target("photo_parse", "job-y", &["rel.venc".to_string()]).is_err());
+    }
+
+    /// 大批量导入的常规规模必须被接受：1,000 条路径一次授权，成员校验可用。
+    #[test]
+    fn job_grant_accepts_thousand_paths() {
+        let paths: Vec<String> = (0..1_000)
+            .map(|i| temp_target(&format!("verthys-bulk-{}.jpg", i)))
+            .collect();
+        authorize_job_target("photo_import", "job-bulk", &paths).expect("1,000 条路径应被接受");
+        assert!(job_contains("job-bulk", &paths[0]));
+        assert!(job_contains("job-bulk", &paths[999]));
+        revoke_job("job-bulk");
     }
 }

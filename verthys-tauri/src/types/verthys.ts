@@ -576,6 +576,209 @@ export interface AddRecordsBatchResult {
   error?: string;
 }
 
+/* ================================================================== *
+ * 原生照片导入类型（photo_import_start / photo_import_cancel）       *
+ *                                                                    *
+ * 与后端 photo_media_controller 的序列化契约严格对齐（camelCase）。   *
+ * ================================================================== */
+
+/** 单张失败照片的原因分类（与后端 reason 字符串取值一致） */
+export type PhotoImportFailureReason =
+  | "read-failed"
+  | "file-too-large"
+  | "encrypt-failed"
+  | "chunk-upload-failed"
+  | "server-rejected"
+  | "storage-full"
+  | "unknown";
+
+/** 原生导入进度（Tauri Channel 流式推送） */
+export interface PhotoImportProgress {
+  /** 本次导入的文件总数 */
+  totalFiles: number;
+  /** 已处理完成（成功）的文件数 */
+  doneFiles: number;
+  /** 去重跳过的文件数 */
+  skipped: number;
+  /** 失败的文件数 */
+  failed: number;
+  /** 当前处理的文件名 */
+  currentName: string;
+  /** 当前文件已上传的块序号 */
+  currentChunk: number;
+  /** 当前文件的总块数 */
+  totalChunks: number;
+  /** 累计进度百分比（0–100） */
+  percent: number;
+  /** 自导入开始累计耗时（毫秒） */
+  elapsedMs: number;
+  /** 阶段：scanning / importing / finishing / done / cancelled */
+  phase: "scanning" | "importing" | "finishing" | "done" | "cancelled";
+}
+
+/** 单张成功导入的照片 */
+export interface PhotoImportItem {
+  /** verthys 记录 ID（metaId） */
+  metaId: number;
+  /** 记录名（meta_<文件名>） */
+  name: string;
+  /** 真实文件名（展示名） */
+  displayName: string;
+  /** 缩略图 base64 */
+  thumbB64: string;
+  /** 文件大小（字节） */
+  size: number;
+  /** MIME 类型 */
+  mime: string;
+  /** 动图标记（候选格式携带 true/false；其他格式缺省） */
+  animated?: boolean;
+}
+
+/** 单张失败照片 */
+export interface PhotoImportFailure {
+  /** 输入文件列表下标 */
+  index: number;
+  /** 文件名 */
+  name: string;
+  /** 失败原因分类 */
+  reason: PhotoImportFailureReason;
+  /** 是否可通过重试恢复 */
+  retryable: boolean;
+}
+
+/** 预览读取结果（photo_preview_get） */
+export interface PhotoPreviewResult {
+  /** 预览 JPEG（base64） */
+  dataB64: string;
+  name: string;
+  mime: string;
+  size: number;
+  /** true=命中已落库预览记录；false=本次懒生成 */
+  cached: boolean;
+  elapsedMs: number;
+}
+
+/** 网格展示元数据（photo_meta_get） */
+export interface PhotoMetaItem {
+  metaId: number;
+  name: string;
+  mime: string;
+  size: number;
+  fileHash: string;
+  entryKey: string;
+  thumbB64?: string;
+  animated?: boolean;
+  createdAt: number;
+  slim: boolean;
+}
+
+export interface PhotoMetaBatch {
+  items: PhotoMetaItem[];
+  failedIds: number[];
+}
+
+/** 元数据损坏扫描（photo_meta_probe） */
+export interface PhotoDamageScan {
+  checked: number;
+  damaged: number[];
+  inconclusive: number;
+}
+
+/** 备份清单预览（photo_parse_start） */
+export interface PhotoParsePreviewResult {
+  name: string;
+  mime: string;
+  size: number;
+  fileHash: string;
+  thumbB64: string;
+  chunkCount: number;
+  createdAt: number;
+}
+
+/** 原图读取 job 起始信息（photo_full_begin） */
+export interface PhotoFullBegin {
+  jobId: string;
+  name: string;
+  mime: string;
+  size: number;
+  chunkTotal: number;
+}
+
+/** 原图分块（photo_full_next） */
+export interface PhotoFullChunk {
+  dataB64?: string;
+  chunkIndex: number;
+  chunkTotal: number;
+  done: boolean;
+}
+
+/** 原生导入结果 */
+export interface PhotoImportResult {
+  /** 是否成功完成（无会话级错误且无失败记录） */
+  ok: boolean;
+  /** 成功导入的照片列表 */
+  imported: PhotoImportItem[];
+  /** 失败记录明细 */
+  failedRecords: PhotoImportFailure[];
+  /** 去重跳过的照片数 */
+  skipped: number;
+  /** 提交总数（输入文件数） */
+  total: number;
+  /** 总耗时（毫秒） */
+  elapsedMs: number;
+  /** 错误信息（会话级失败时有值） */
+  error?: string;
+  /** 结构化错误码 */
+  errorCode?: string;
+  /** 是否被用户取消 */
+  cancelled: boolean;
+}
+
+/* ------------------------------------------------------------------ *
+ * 原生导出（photo_export_start）                                      *
+ * ------------------------------------------------------------------ */
+
+/** 原生导出进度（Tauri Channel 流式推送） */
+export interface PhotoExportProgress {
+  totalFiles: number;
+  doneFiles: number;
+  failed: number;
+  exported: number;
+  currentName: string;
+  percent: number;
+  elapsedMs: number;
+  phase: "scanning" | "exporting" | "finishing" | "done" | "cancelled";
+}
+
+/** 单张导出失败原因（与宿主/worker 契约一致） */
+export type PhotoExportFailureReason =
+  | "data-missing"
+  | "pack-failed"
+  | "decrypt-failed"
+  | "convert-failed"
+  | "write-failed"
+  | "animated-unsupported"
+  | "unknown";
+
+/** 单张导出失败明细 */
+export interface PhotoExportFailure {
+  index: number;
+  name: string;
+  reason: PhotoExportFailureReason;
+}
+
+/** 原生导出结果 */
+export interface PhotoExportResult {
+  ok: boolean;
+  exported: number;
+  failed: PhotoExportFailure[];
+  total: number;
+  elapsedMs: number;
+  cancelled: boolean;
+  error?: string;
+  errorCode?: string;
+}
+
 /**
  * verthys_wal_recover 返回结果（断点续传条目键集）
  */

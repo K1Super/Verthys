@@ -11,7 +11,9 @@
 #ifndef VERTHYS_VERSION_H
 #define VERTHYS_VERSION_H
 
-#define VERTHYS_API_VERSION 0x0014u
+/* 0x0015：新增 Verthys_FindLidByName（名称盲索引精确查 ID）。
+ * 隔离原型构建的 BulkImportBegin/Commit 不改变接口集版本号。 */
+#define VERTHYS_API_VERSION 0x0015u
 #define VERTHYS_CONTAINER_FORMAT_VERSION 4u
 
 #endif /* VERTHYS_VERSION_H */

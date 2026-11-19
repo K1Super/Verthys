@@ -23,6 +23,10 @@
 #include "vty_rotate.h"           /* 全库 DEK 轮换作业 */
 #include "verthys_api_container.h"          /* 记录/计数/校验/改密适配 */
 
+#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
+#include "vty_rollback.h"         /* G0-A：最后一个上下文注销时停止预置线程 */
+#endif
+
 /* 项目头 */
 #include "verthys_crypto.h"
 #include "verthys_pepper.h"
@@ -170,6 +174,23 @@ static int verthys_ctx_registry_has_capacity(void)
     ReleaseSRWLockShared(&s_ctx_registry_lock);
     return has;
 }
+
+#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
+/* 最后一个上下文是否已注销（G0-A：此时才可停止进程级预置线程）。 */
+static int verthys_ctx_registry_empty(void)
+{
+    int empty = 1;
+    AcquireSRWLockShared(&s_ctx_registry_lock);
+    for (int i = 0; i < VERTHYS_MAX_CTXS; i++) {
+        if (s_ctx_registry[i] != NULL) {
+            empty = 0;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&s_ctx_registry_lock);
+    return empty;
+}
+#endif
 
 /*
  * 应急 DEGRADE 降级处理器（emergency_set_degrade_handler 注入）。
@@ -441,6 +462,15 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
         vty_rotate_abort(ctx->rotate);
         ctx->rotate = NULL;
     }
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+    /* Deinit 无法返回错误：尽力推进锚点，失败只输出固定诊断串
+     * （不含路径/UUID/密钥），下次解锁补推进。 */
+    if (ctx->vault != NULL && vty_vault_bulk_active(ctx->vault)) {
+        if (vty_vault_bulk_commit(ctx->vault) != VTY_OK) {
+            OutputDebugStringA("verthys: bulk anchor commit failed on deinit\n");
+        }
+    }
+#endif
     vault_session_detach(ctx);
 
     if (ctx->state == VERTHYS_STATE_UNLOCKED) {
@@ -460,6 +490,14 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
 
     verthys_secure_zero(ctx, sizeof(*ctx));
     free(ctx);
+
+#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
+    /* 最后一个上下文已注销：停止预置线程并清空进程内缓存，
+     * 保证 DLL 卸载后不再有 TPM 调用。 */
+    if (verthys_ctx_registry_empty()) {
+        vty_rollback_shutdown();
+    }
+#endif
     return VERTHYS_OK;
 }
 /* 内部错误码 → 公共返回码。对外不区分“口令错/缺槽/TPM 状态”，
@@ -914,6 +952,26 @@ VerthysResult Verthys_Lock(VerthysHandle handle)
             vty_rotate_abort(ctx->rotate);
             ctx->rotate = NULL;
         }
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+        {
+            VerthysResult commit_rc = VERTHYS_OK;
+            if (verthys_bulk_defer_active(ctx)) {
+                int rc = vty_vault_bulk_commit(ctx->vault);
+                if (rc != VTY_OK) commit_rc = verthys_container_map(rc);
+            }
+            vault_session_detach(ctx);
+            ctx_free_getrecord_cache(ctx);
+            ctx->state = VERTHYS_STATE_LOCKED;
+#ifdef _WIN32
+            if (ctx->api_mutex != NULL) {
+                ReleaseSRWLockExclusive(ctx->api_mutex);
+            }
+#endif
+            /* 锚点提交失败不影响密钥清零；返回错误让调用方提示
+             * “回退锚点未推进”，下次解锁会补推进。 */
+            return commit_rc;
+        }
+#else
         vault_session_detach(ctx);
         ctx_free_getrecord_cache(ctx);
         ctx->state = VERTHYS_STATE_LOCKED;
@@ -923,6 +981,7 @@ VerthysResult Verthys_Lock(VerthysHandle handle)
         }
 #endif
         return VERTHYS_OK;
+#endif
     }
 
     return VERTHYS_ERR_FORMAT;
@@ -1039,6 +1098,64 @@ VerthysResult Verthys_AddRecords(VerthysHandle handle,
     return VERTHYS_ERR_FORMAT;
 }
 
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+/* 5.2 批量导入锚点推迟（API 版本 0x0015，仅隔离原型构建）
+ *
+ * Begin/Commit 自身不做数据写入，但会改变会话的锚点提交策略，
+ * 因此与写路径同锁串行，并使既有 GetRecord 借用指针失效
+ * （避免调用方把跨会话的借用指针当作仍然有效）。 */
+VerthysResult Verthys_BulkImportBegin(VerthysHandle handle)
+{
+    struct VerthysContext *ctx;
+    VerthysResult rc;
+
+    if (handle == NULL) return VERTHYS_ERR_INVALID;
+    ctx = (struct VerthysContext *)handle;
+    if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
+    if (ctx->fmt_version != VERTHYS_FMT_CONTAINER || ctx->vault == NULL) {
+        return VERTHYS_ERR_FORMAT;
+    }
+
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
+#endif
+    ctx_free_getrecord_cache(ctx);
+    if (ctx->rotate != NULL) {
+        /* 轮换作业持有源库只读语义，推迟窗口不能与轮换叠加。 */
+        rc = VERTHYS_ERR_POLICY;
+    } else {
+        rc = verthys_container_map(vty_vault_bulk_begin(ctx->vault));
+    }
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
+#endif
+    return rc;
+}
+
+VerthysResult Verthys_BulkImportCommit(VerthysHandle handle)
+{
+    struct VerthysContext *ctx;
+    VerthysResult rc;
+
+    if (handle == NULL) return VERTHYS_ERR_INVALID;
+    ctx = (struct VerthysContext *)handle;
+    if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
+    if (ctx->fmt_version != VERTHYS_FMT_CONTAINER || ctx->vault == NULL) {
+        return VERTHYS_ERR_FORMAT;
+    }
+
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
+#endif
+    ctx_free_getrecord_cache(ctx);
+    rc = verthys_container_map(vty_vault_bulk_commit(ctx->vault));
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
+#endif
+    return rc;
+}
+#endif
+
 /* 6. 读取记录 */
 VerthysResult Verthys_GetRecord(VerthysHandle handle,
                             uint64_t id,
@@ -1100,6 +1217,16 @@ VerthysResult Verthys_DeleteRecord(VerthysHandle handle, uint64_t id)
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
 
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+    /* 推迟窗口只覆盖新增记录：删除会把“数据复活”纳入回退影响。 */
+    if (verthys_bulk_defer_active(ctx)) {
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
+#endif
+        return VERTHYS_ERR_POLICY;
+    }
+#endif
+
     /* 写操作入口统一失效查询缓存，防止 UAF */
     ctx_free_getrecord_cache(ctx);
     /* 写路径周期运行时哈希校验（30min 门控） */
@@ -1139,6 +1266,15 @@ VerthysResult Verthys_DeleteRecords(VerthysHandle handle, const uint64_t *ids, s
     /* 递归互斥锁保护 */
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
+#endif
+
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+    if (verthys_bulk_defer_active(ctx)) {
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
+#endif
+        return VERTHYS_ERR_POLICY;
+    }
 #endif
 
     /* 写操作入口统一失效查询缓存，防止 UAF */

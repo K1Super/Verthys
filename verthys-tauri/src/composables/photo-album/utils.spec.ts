@@ -98,6 +98,14 @@ describe("rehydrateEntries", () => {
     expect(restored.loaded).toBe(true);
     expect(restored.thumb).toBe("");
   });
+
+  it("动图标记随缓存投影保留，回灌后角标不丢失", () => {
+    const entry: PhotoEntry = { ...decrypted(15), animated: true };
+    const [cached] = toPhotoCacheEntries([entry]);
+    expect(cached.animated).toBe(true);
+    const [restored] = rehydrateEntries([cached]);
+    expect(restored.animated).toBe(true);
+  });
 });
 
 describe("缩略图 URL 助手", () => {

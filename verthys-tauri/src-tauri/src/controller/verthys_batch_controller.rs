@@ -61,12 +61,45 @@ use tauri::{Manager, State};
  * 辅助函数                                                            *
  * ------------------------------------------------------------------ */
 
+/// 发送批量导入锚点推迟 op（G0-A2 原型）。
+///
+/// 返回：
+///   Some(true)  — DLL 导出符号存在且 Begin/Commit 成功
+///   Some(false) — 旧 DLL 缺符号（unsupported）或 C 层明确拒绝
+///   None        — IPC/解析失败
+/// 除 Some(true) 外一律回退“逐次锚点提交”，不得假设推迟已生效。
+fn send_bulk_op(state: &AppState, op: &'static str) -> Option<bool> {
+    let req = serde_json::json!({ "op": op }).to_string();
+    match state.send_with_timeout(&req, std::time::Duration::from_secs(30)) {
+        Ok(resp) => match serde_json::from_str::<serde_json::Value>(&resp) {
+            Ok(v) if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) => Some(true),
+            Ok(v) => {
+                let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                if err.starts_with("unsupported") {
+                    log::info!("[verthys_import] DLL 不支持 {}，回退逐次锚点提交", op);
+                } else {
+                    log::warn!("[verthys_import] {} 失败，回退逐次锚点提交: {}", op, err);
+                }
+                Some(false)
+            }
+            Err(e) => {
+                log::warn!("[verthys_import] {} 响应解析失败: {}", op, e);
+                None
+            }
+        },
+        Err(e) => {
+            log::warn!("[verthys_import] {} IPC 失败: {}", op, e);
+            None
+        }
+    }
+}
+
 /// 结构化错误码：已有活跃导入会话（前端据此唤起会话冲突确认，不做文案判定）。
 /// 两个消费方（清藏导入管线与照片导入流水线）以本码为控制流契约。
-const IMPORT_SESSION_BUSY_CODE: &str = "E_IMPORT_SESSION_BUSY";
+pub(crate) const IMPORT_SESSION_BUSY_CODE: &str = "E_IMPORT_SESSION_BUSY";
 
 /// 结构化错误码：加密库未就绪（未解锁/路径缺失；前端据此给出重新解锁引导）
-const VERTHYS_NOT_READY_CODE: &str = "E_VERTHYS_NOT_READY";
+pub(crate) const VERTHYS_NOT_READY_CODE: &str = "E_VERTHYS_NOT_READY";
 
 /// 去重键存在性收敛时枚举的记录类型：照片索引、文件索引。
 /// 导入会话的 committed 记录只可能是索引型记录（块记录不入 WAL）；
@@ -181,6 +214,8 @@ pub async fn verthys_import_begin(
     }
 
     log::info!("[verthys_import_begin] 开始创建导入会话");
+    /* 新会话开始前清除上一轮可能残留的推迟标记。 */
+    state.set_bulk_defer(false);
 
     // 防重入：单 verthys 同一时刻仅一个活跃会话
     if state.has_import_session() {
@@ -262,6 +297,27 @@ pub async fn verthys_import_begin(
         *guard = Some(session);
     }
 
+    /* G0-A2：导入开始先提交当前锚点并进入推迟会话。失败或旧 DLL 不
+     * 支持时保持逐次提交，不阻断导入。 */
+    if send_bulk_op(&state, "bulk_import_begin") == Some(true) {
+        state.set_bulk_defer(true);
+        log::info!("[verthys_import_begin] 锚点推迟会话已生效");
+        /* 看门狗：空闲超过 60s 的会话由宿主强制提交一次，避免
+         * “已解锁但锚点长期滞后”跨越整个空闲期。 */
+        let watchdog_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let st = watchdog_app.state::<AppState>();
+            if st.bulk_defer_active() && st.has_import_session() {
+                let _ = send_bulk_op(&st, "bulk_import_commit");
+                st.set_bulk_defer(false);
+                log::warn!("[verthys_import_begin] 导入超过 60s，看门狗已强制提交锚点");
+            }
+        });
+    } else {
+        state.set_bulk_defer(false);
+    }
+
     let mut resp = VerthysResponse::ok("verthys_import_begin");
     resp.import_id = Some(import_id);
     resp.entry_keys = Some(entry_keys);
@@ -282,7 +338,7 @@ pub async fn verthys_import_begin(
 ///
 /// 应答经 oneshot 等待；第三层（写者心跳看门狗）由 import_writer 独立
 /// 巡检，此处只把两类超时映射为可读错误供调用方组装响应。
-async fn submit_writer_cmd<T>(
+pub(crate) async fn submit_writer_cmd<T>(
     writer: &import_writer::ImportWriterHandle,
     cmd: WriterCommand,
     reply_rx: tokio::sync::oneshot::Receiver<Result<T, String>>,
@@ -781,6 +837,7 @@ pub async fn verthys_import_end(
     // 快速失败：无活跃会话（权威判定在写者线程内持会话锁复核）
     if !state.has_import_session() {
         log::warn!("[verthys_import_end] 无活跃导入会话");
+        state.set_bulk_defer(false);
         return Ok(VerthysResponse::err(cmd::IMPORT_END, "无活跃导入会话"));
     }
 
@@ -805,6 +862,19 @@ pub async fn verthys_import_end(
         Ok(o) => o,
         Err(e) => return Ok(VerthysResponse::err(cmd::IMPORT_END, &e)),
     };
+
+    /* 正常/取消/失败路径都收口锚点：只要 Begin 成功过，就必须 Commit。
+     * 提交失败返回错误让上层提示“重新解锁补推进”，不得假装导入完全成功。 */
+    if state.bulk_defer_active() {
+        state.set_bulk_defer(false);
+        if send_bulk_op(&state, "bulk_import_commit") != Some(true) {
+            log::error!("[verthys_import_end] 锚点提交未成功");
+            return Ok(VerthysResponse::err(
+                cmd::IMPORT_END,
+                "导入已结束但回退锚点提交失败，请重新解锁以补推进",
+            ));
+        }
+    }
 
     let mut resp = VerthysResponse::ok(cmd::IMPORT_END);
     resp.total_count = Some(outcome.total_committed);

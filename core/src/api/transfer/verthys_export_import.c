@@ -451,6 +451,16 @@ VerthysResult Verthys_Import(VerthysHandle handle,
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
 
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+    /* 导入会写入既有记录域，必须先把批量导入会话收口。 */
+    if (verthys_bulk_defer_active(ctx)) {
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
+#endif
+        return VERTHYS_ERR_POLICY;
+    }
+#endif
+
     /* 写操作入口统一失效查询缓存，防止 UAF */
     ctx_free_getrecord_cache(ctx);
     /* 写路径周期运行时哈希校验（30min 门控） */
@@ -560,6 +570,18 @@ VerthysResult Verthys_ChangePassword(VerthysHandle handle,
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) {
         AcquireSRWLockExclusive(ctx->api_mutex);
+    }
+#endif
+
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+    /* 改密重封全部槽位，不能落在锚点推迟窗口内。 */
+    if (verthys_bulk_defer_active(ctx)) {
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) {
+            ReleaseSRWLockExclusive(ctx->api_mutex);
+        }
+#endif
+        return VERTHYS_ERR_POLICY;
     }
 #endif
 

@@ -11,6 +11,23 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=VERTHYS_DLL_PATH");
+    println!("cargo:rerun-if-env-changed=VERTHYS_WORKER_API_VERSION");
+
+    /* 默认与 core/include/verthys_version.h 的 VERTHYS_API_VERSION 对齐；
+     * 环境变量仅用于加载更高接口集的诊断构建。 */
+    let api_version_text = std::env::var("VERTHYS_WORKER_API_VERSION")
+        .unwrap_or_else(|_| "0x0015".to_string());
+    let api_version = api_version_text
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| api_version_text.trim().strip_prefix("0X"))
+        .map(|hex| u32::from_str_radix(hex, 16))
+        .unwrap_or_else(|| api_version_text.trim().parse::<u32>())
+        .unwrap_or_else(|_| panic!("VERTHYS_WORKER_API_VERSION 非法: {}", api_version_text));
+    let version_line = format!(
+        "pub(crate) const WORKER_KNOWN_API_VERSION: u32 = 0x{:04X};\n",
+        api_version
+    );
 
     let manifest = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR 缺失"),
@@ -39,8 +56,11 @@ fn main() {
     if profile != "release" {
         std::fs::write(
             &target,
-            "pub(crate) const EXPECTED_DLL_SHA256: [u8; 32] = [0u8; 32];\n\
-             pub(crate) const HAS_EXPECTED_DLL_HASH: bool = false;\n",
+            format!(
+                "{}pub(crate) const EXPECTED_DLL_SHA256: [u8; 32] = [0u8; 32];\n\
+                 pub(crate) const HAS_EXPECTED_DLL_HASH: bool = false;\n",
+                version_line
+            ),
         )
         .expect("写入 DLL 哈希占位失败");
         println!("cargo:warning=Debug 构建跳过 verthys.dll 哈希基线");
@@ -61,9 +81,9 @@ fn main() {
             std::fs::write(
                 &target,
                 format!(
-                    "pub(crate) const EXPECTED_DLL_SHA256: [u8; 32] = [{}];\n\
+                    "{}pub(crate) const EXPECTED_DLL_SHA256: [u8; 32] = [{}];\n\
                      pub(crate) const HAS_EXPECTED_DLL_HASH: bool = true;\n",
-                    literal
+                    version_line, literal
                 ),
             )
             .expect("写入 DLL 哈希基线失败");

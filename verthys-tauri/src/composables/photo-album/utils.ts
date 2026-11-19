@@ -4,6 +4,7 @@
  * 零业务依赖：纯函数与仅含模块级单调计数器的辅助工具，可独立测试
  */
 import { isSlimPhotoMeta } from "../../constants/crypto_const";
+import type { PhotoImportItem } from "../../types/verthys";
 import type { PhotoEntry } from "./types";
 
 /** Uint8Array → ArrayBuffer（类型安全转换） */
@@ -23,7 +24,7 @@ export const guessMime = (name: string): string => {
   const ext = name.split(".").pop()?.toLowerCase() || "";
   const map: Record<string, string> = {
     png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-    webp: "image/webp", gif: "image/gif", bmp: "image/bmp",
+    webp: "image/webp", gif: "image/gif", bmp: "image/bmp", apng: "image/apng",
   };
   return map[ext] || "application/octet-stream";
 };
@@ -154,7 +155,7 @@ export const openBrowserFileDialog = (): Promise<File[]> => {
     const input = document.createElement("input");
     input.type = "file";
     input.multiple = true;
-    input.accept = "image/png,image/jpeg,image/webp,image/gif,image/bmp";
+    input.accept = "image/png,image/jpeg,image/webp,image/gif,image/bmp,image/apng";
     input.style.display = "none";
     document.body.appendChild(input);
     input.onchange = () => {
@@ -305,6 +306,7 @@ export function toPhotoCacheEntries(entries: readonly PhotoEntry[]): PhotoEntry[
     height: p.height,
     loaded: false,
     failed: false,
+    animated: p.animated,
   }));
 }
 
@@ -361,4 +363,21 @@ export function prefetchRowIndices(
     pushRange(visible.endRow, visible.endRow + trail);
   }
   return [...new Set(rows)];
+}
+
+/** 导入结果 → 列表条目：id 复用后端记录 ID，缩略图走 Blob URL。 */
+export function importedToPhotoEntries(
+  imported: PhotoImportItem[],
+): PhotoEntry[] {
+  return imported.map((item, i) => ({
+    id: item.metaId,
+    metaId: item.metaId,
+    name: item.displayName || item.name.replace(/^meta_/, ""),
+    thumb: makeThumbCssValue(item.thumbB64),
+    size: formatSize(item.size),
+    height: 180 + ((i * 23) % 100),
+    animated: item.animated,
+    loaded: true,
+    failed: false,
+  }));
 }

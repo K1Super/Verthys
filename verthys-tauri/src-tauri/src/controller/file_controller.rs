@@ -1555,12 +1555,37 @@ fn cleanup_stale_stream_temps(dir: &std::path::Path) {
     }
 }
 
+/// 导出写盘审计：与流式写入命令共用同一写审计口径。
+///
+/// 原生导出直接复用阻塞核心，不经过 `write_user_file_stream` 命令层，
+/// 因此由调用方在 create/finalize/abort 边界显式记账。
+pub(crate) fn audit_export_event(
+    app: &tauri::AppHandle,
+    path: &str,
+    ok: bool,
+    size: Option<u64>,
+    detail: Option<String>,
+) {
+    write_file_audit(
+        app,
+        AuditEventType::FileWrite,
+        path,
+        if ok {
+            AuditResult::Success
+        } else {
+            AuditResult::Failure
+        },
+        size,
+        detail,
+    );
+}
+
 /// 创建流式写入会话（阻塞核心）：目标校验 + 暂存独占创建。
 ///
 /// 返回会话标识与会话状态（尚未注册进会话表，由命令层在短临界区内
 /// 完成注册）。暂存文件使用 create_new 独占创建：同目标并发的第二个
 /// 会话创建必然失败，从根上排除双写同一暂存路径。
-fn stream_create_blocking(target: &str) -> Result<(String, Arc<Mutex<FileStreamState>>), String> {
+pub(crate) fn stream_create_blocking(target: &str) -> Result<(String, Arc<Mutex<FileStreamState>>), String> {
     let canonical = resolve_user_file_target(target, "stream_create")?;
 
     // 暂存路径：与目标同级、固定后缀，finalize rename 后即消失
@@ -1600,7 +1625,7 @@ fn stream_create_blocking(target: &str) -> Result<(String, Arc<Mutex<FileStreamS
 ///
 /// 会话指针由调用方从会话表克隆取得；会话状态锁覆盖「句柄写入 + 计数
 /// 更新」，保证同会话追加严格串行。
-fn stream_append_blocking(entry: &Arc<Mutex<FileStreamState>>, data: &[u8]) -> Result<(), String> {
+pub(crate) fn stream_append_blocking(entry: &Arc<Mutex<FileStreamState>>, data: &[u8]) -> Result<(), String> {
     if data.len() > WRITE_FILE_CHUNK_BYTES {
         log::warn!(
             "[append_user_file_chunk] 单块超限: {} bytes > {}",
@@ -1644,7 +1669,7 @@ fn stream_append_blocking(entry: &Arc<Mutex<FileStreamState>>, data: &[u8]) -> R
 /// 调用方已从会话表移除会话取得独占所有权；持有全局写互斥执行，与
 /// 原子写入路径互斥避免 rename 交错。rename 失败时清理暂存并报错，
 /// 目标文件保持旧完整版不变。
-fn stream_finalize_blocking(entry: Arc<Mutex<FileStreamState>>) -> Result<u64, String> {
+pub(crate) fn stream_finalize_blocking(entry: Arc<Mutex<FileStreamState>>) -> Result<u64, String> {
     let _write_guard = WRITE_MUTEX.lock().map_err(|e| {
         log::error!("[finalize_user_file_stream] 写互斥锁中毒: {}", e);
         ErrorCode::Internal.default_message().to_string()
@@ -1693,7 +1718,7 @@ fn stream_finalize_blocking(entry: Arc<Mutex<FileStreamState>>) -> Result<u64, S
 ///
 /// 暂存不存在（NotFound）视为清理已完成；其余删除失败上报，
 /// 残留交由下次创建流时的按龄清理兜底。
-fn stream_abort_blocking(entry: Arc<Mutex<FileStreamState>>) -> Result<(), String> {
+pub(crate) fn stream_abort_blocking(entry: Arc<Mutex<FileStreamState>>) -> Result<(), String> {
     let temp = {
         let state = match entry.lock() {
             Ok(s) => s,

@@ -45,7 +45,7 @@ const KEY_OP_TIMEOUT: Duration = Duration::from_secs(30);
 /// 内容加解密超时：单块上限 1MiB，30 秒覆盖极端机器抖动
 const CRYPT_OP_TIMEOUT: Duration = Duration::from_secs(30);
 
-const CRYPT_KINDS: [&str; 8] = [
+const CRYPT_KINDS: [&str; 9] = [
     "meta",
     "chunk",
     "slim_meta",
@@ -54,6 +54,7 @@ const CRYPT_KINDS: [&str; 8] = [
     "chunkset",
     "v2_chunk",
     "v2_check",
+    "preview",
 ];
 
 /// 内容模块 → 模块索引（0=photo，2=fileverthys）。

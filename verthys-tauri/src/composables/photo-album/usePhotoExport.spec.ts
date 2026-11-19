@@ -1,533 +1,172 @@
 /**
- * usePhotoExport.spec.ts — 导出写盘协议与一致性问题回归测试
+ * usePhotoExport.spec.ts — 桌面原生导出回归
  *
- * 覆盖：
- * - writeVencFile 必须经 writeUserFile（Raw body + x-path 头协议）直传原始字节
- * - 占位项（meta 未加载）导出：按需解密后成功计入，不再静默跳过
- * - 文件名净化 + 批次内唯一化：非法字符被隔离，同名不互相覆盖
- * - 结果文案仅由成功/失败计数派生：全失败时明确报错，不谎报「已导出 N 张」
- * - 令牌重新生成直接生效（无确认弹窗），并复位复制成功态
- * - 明文导出解密下沉 Worker 桥：逐块密文与瘦身参数透传，
- *   解密/完整性失败归因为 decrypt-failed（不与格式转换失败混淆）
+ * 覆盖：四种格式映射、错误码文案、取消、浏览器 PNG 下载路径。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { effectScope, shallowRef, type EffectScope } from "vue";
-import { installBase64Polyfill } from "../../test-utils/base64-polyfill";
 
-// node 环境无 atob/btoa：base64 编解码（容器块转换）依赖，测试时补齐
-installBase64Polyfill();
+const { exportStartMock, saveMock, openMock } = vi.hoisted(() => ({
+  exportStartMock: vi.fn(),
+  saveMock: vi.fn(),
+  openMock: vi.fn(),
+}));
 
-const { askMock } = vi.hoisted(() => ({ askMock: vi.fn() }));
-
-vi.mock("../../lib/verthys", () => {
-  const verthysGetRecord = vi.fn();
-  return {
-    verthysGetRecord,
-    // 判别式读取委托到同一 mock：既有用例只设置 verthysGetRecord 的返回值
-    verthysGetRecordDetailed: vi.fn(async (id: number) => {
-      const record = (await verthysGetRecord(id)) as
-        | { type: number; name: string; dataB64: string }
-        | null;
-      return record
-        ? { ok: true as const, record }
-        : { ok: false as const, error: "record not found", code: "not_found" as const };
-    }),
-    bytesToBase64: vi.fn((bytes: Uint8Array) => `b64(${bytes.length})`),
-    writeUserFile: vi.fn(async (_path: string, _data: Uint8Array): Promise<void> => {
-      /* 由各用例断言调用形态 */
-    }),
-    writeUserFileStream: vi.fn(async (_path: string): Promise<string> => "stream-1"),
-    appendUserFileChunk: vi.fn(async (_streamId: string, _data: Uint8Array): Promise<void> => {
-      /* 由各用例断言调用形态 */
-    }),
-    finalizeUserFileStream: vi.fn(async (_streamId: string): Promise<void> => {
-      /* 由各用例断言调用形态 */
-    }),
-    abortUserFileStream: vi.fn(async (_streamId: string): Promise<void> => {
-      /* 由各用例断言调用形态 */
-    }),
-  };
-});
+vi.mock("../../lib/verthys", () => ({
+  photoExportStart: exportStartMock,
+}));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: vi.fn(),
-  save: vi.fn(),
-  ask: askMock,
+  open: openMock,
+  save: saveMock,
 }));
-vi.mock("../../lib/crypto", () => ({
-  decryptMeta: vi.fn(async () => fakeMetaFactory()),
-  encryptMeta: vi.fn(async () => "meta-b64"),
-  encryptChunk: vi.fn(async () => new Uint8Array(8)),
-  decryptChunk: vi.fn(async () => ({ plaintext: new Uint8Array([1, 2, 3]), seq: 0, total: 1 })),
-  bytesToHex: vi.fn(() => "1".repeat(64)),
-  packVenc: vi.fn(async () => new Uint8Array([9, 9])),
-  // 惰性逐张供给：逐条取规格并产出帧段（真实实现由 lib/crypto 契约测试锁定，
-  // 本层用例只验证「建会话 → 逐段追加 → finalize / abort」的编排）
-  packVencStreamedLazy: vi.fn(
-    async (
-      count: number,
-      _token: string,
-      loadPhoto: (index: number) => Promise<unknown>,
-      emit: (part: Uint8Array) => Promise<void>,
-    ): Promise<void> => {
-      for (let i = 0; i < count; i++) {
-        const spec = await loadPhoto(i);
-        if (!spec) continue;
-        await emit(new Uint8Array([1, 2, 3]));
-        await emit(new Uint8Array([4, 5]));
-      }
-    },
-  ),
-  estimateVencTotalBytes: vi.fn(() => 100),
-  VENC_CONTAINER_FIXED_BYTES: 0,
-  vencPhotoFramesBytes: vi.fn(() => 100),
-  toLightMeta: vi.fn(
-    (local: {
-      name: string; mime: string; size: number; thumbB64: string;
-      fileHash: string; createdAt: number; chunkDataB64?: string[];
-    }) => ({
-      name: local.name,
-      mime: local.mime,
-      size: local.size,
-      thumbB64: local.thumbB64,
-      fileHash: local.fileHash,
-      createdAt: local.createdAt,
-      chunkCount: local.chunkDataB64?.length ?? 0,
-    }),
-  ),
-  generateRandomToken: vi.fn(() => "a".repeat(64)),
-  CHUNK_SIZE: 1024 * 1024,
-}));
-
-vi.mock("../../workers/photo-decrypt-bridge", () => ({
-  // 导出层的职责是"把解密交给桥"：本组用例以固定元数据替代桥产物，
-  // 桥自身的回退/直连策略由 photo-decrypt-bridge.spec 锁定
-  decryptMetaPreferWorker: vi.fn(async () => ({
-    meta: {
-      name: "占位.jpg",
-      mime: "image/jpeg",
-      size: 3,
-      thumbB64: "",
-      chunkIds: [],
-      chunkDataB64: ["Y2g="],
-      fileHash: "2".repeat(64),
-      createdAt: 1,
-    },
-  })),
-  decryptThumbPreferWorker: vi.fn(async () => new Uint8Array([0xff, 0xd8, 0xff])),
-  decryptChunksPreferWorker: vi.fn(async (chunksB64: string[]) =>
-    chunksB64.map(() => new Uint8Array([1, 2, 3])),
-  ),
-}));
-
 vi.mock("./utils", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./utils")>();
   return {
     ...actual,
-    // 画布转换依赖 DOM：测试环境给出确定性产物，其余工具（净化/唯一化）保持真实
     convertToPngBytes: vi.fn(async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47])),
+    downloadBlob: vi.fn(),
   };
 });
 
 import { usePhotoExport } from "./usePhotoExport";
-import {
-  writeUserFile,
-  writeUserFileStream,
-  appendUserFileChunk,
-  finalizeUserFileStream,
-  abortUserFileStream,
-  verthysGetRecord,
-} from "../../lib/verthys";
-import type { PhotoMeta } from "../../lib/crypto";
-import { vencPhotoFramesBytes } from "../../lib/crypto";
-import { PHOTO_FMT_SLIM } from "../../constants/crypto_const";
-import { decryptChunksPreferWorker } from "../../workers/photo-decrypt-bridge";
+import { convertToPngBytes, downloadBlob } from "./utils";
 import type { PhotoEntry } from "./types";
 
-/** 派生可编程的占位 meta（各用例可覆写工厂）；size 与解密产物 [1,2,3] 对齐 */
-const fakeMetaFactory = (): PhotoMeta => ({
-  name: "占位.jpg",
-  mime: "image/jpeg",
-  size: 3,
-  thumbB64: "",
-  chunkIds: [],
-  chunkDataB64: ["Y2g="],
-  fileHash: "2".repeat(64),
-  createdAt: 1,
+const photo = (id: number): PhotoEntry => ({
+  id,
+  metaId: id,
+  name: `p${id}.jpg`,
+  thumb: "",
+  size: "3B",
+  height: 180,
+  loaded: true,
 });
 
-function makeExport(
-  photos: PhotoEntry[] = [],
-): { api: ReturnType<typeof usePhotoExport>; scope: EffectScope } {
+function makeExport(photos: PhotoEntry[], isTauri = true): {
+  api: ReturnType<typeof usePhotoExport>;
+  scope: EffectScope;
+} {
   const scope = effectScope();
   const api = scope.run(() =>
     usePhotoExport({
       photos: shallowRef(photos),
-      isTauri: true,
+      isTauri,
       ensurePhotoKey: () => true,
-      showError: () => {},
-      showExportDone: () => {},
-      showCopied: () => {},
+      showError: vi.fn(),
+      showExportDone: vi.fn(),
+      showCopied: vi.fn(),
     }),
   )!;
-  // 导出令牌默认预置：真实路径由 openExportDialog 生成随机令牌，用例直接
-  // 驱动 doExport 时需满足「加密导出令牌非空」的入口前置校验
-  api.exportToken.value = "unit-test-token";
+  api.showExportDialog.value = true;
+  api.exportPath.value = isTauri ? "C:/out" : "browser_download";
+  api.exportToken.value = "token-12345678";
   return { api, scope };
 }
 
-/** 构造一个未解密占位项（metaId 有效、meta/名称/缩略图为空） */
-function makePlaceholder(metaId: number): PhotoEntry {
-  return { id: metaId, metaId, name: "", thumb: "", size: "", height: 180 };
-}
-
-describe("usePhotoExport — writeVencFile 写盘协议", () => {
-  let scope: EffectScope | null = null;
-  beforeEach(() => vi.clearAllMocks());
-  afterEach(() => {
-    scope?.stop();
-    scope = null;
-  });
-
-  it("直传 (path, bytes) 给 writeUserFile：原始 Uint8Array 引用不变", async () => {
-    const made = makeExport();
-    scope = made.scope;
-    const bytes = new Uint8Array([0x56, 0x45, 0x4e, 0x43]);
-    await made.api.writeVencFile("C:\\out\\photo.venc", bytes);
-
-    expect(writeUserFile).toHaveBeenCalledTimes(1);
-    const [path, data] = (writeUserFile as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(path).toBe("C:\\out\\photo.venc");
-    // 同一引用直传：写盘字节与调用方字节完全一致，不做任何转换
-    expect(data).toBe(bytes);
-  });
-
-  it("writeUserFile 的异常原样上抛（失败不被吞掉）", async () => {
-    (writeUserFile as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("EPERM: 权限不足"),
-    );
-    const made = makeExport();
-    scope = made.scope;
-    await expect(
-      made.api.writeVencFile("C:\\Windows\\System32\\photo.venc", new Uint8Array(4)),
-    ).rejects.toThrow("EPERM: 权限不足");
-  });
+const nativeOk = (exported: number) => ({
+  ok: true,
+  exported,
+  failed: [],
+  total: exported,
+  elapsedMs: 1,
+  cancelled: false,
 });
 
-describe("usePhotoExport — 多文件导出的一致性与结果契约", () => {
-  let scope: EffectScope | null = null;
+describe("usePhotoExport — 桌面原生链路", () => {
+  let scope: EffectScope;
+
   beforeEach(() => {
     vi.clearAllMocks();
-    // 默认：meta 记录存在且含内联块，支持占位项按需解密
-    (verthysGetRecord as ReturnType<typeof vi.fn>).mockResolvedValue({
-      type: 1,
-      name: "meta_占位.jpg",
-      dataB64: "meta-b64",
-    });
   });
+
   afterEach(() => {
     scope?.stop();
-    scope = null;
     vi.useRealTimers();
   });
 
-  it("占位项导出：meta 未加载时按需解密回填，成功计入并且不再静默跳过", async () => {
-    const made = makeExport([makePlaceholder(10)]);
-    scope = made.scope;
-    made.api.exportSelectedIds.value = new Set([10]);
-    made.api.exportFormat.value = "multiple";
-    made.api.exportPath.value = "C:\\out";
+  it.each([
+    ["single", "venc-single"],
+    ["multiple", "venc-multiple"],
+    ["original", "original"],
+    ["png", "png"],
+  ] as const)("格式 %s 映射到原生 %s", async (uiFormat, nativeFormat) => {
+    exportStartMock.mockResolvedValue(nativeOk(1));
+    const ctx = makeExport([photo(1)]);
+    scope = ctx.scope;
+    ctx.api.exportFormat.value = uiFormat;
+    ctx.api.exportSelectedIds.value = new Set([1]);
 
-    await made.api.doExport();
+    await ctx.api.doExport();
 
-    expect(writeUserFile).toHaveBeenCalledTimes(1);
-    const [path] = (writeUserFile as ReturnType<typeof vi.fn>).mock.calls[0];
-    // 目录拼接沿用导出实现的分隔符约定；断言文件名本体与净化结果一致
-    expect(path).toMatch(/^C:\\out[/\\]占位\.jpg\.venc$/);
-    expect(made.api.exportStatus.value).toBe("已导出 1 张照片");
+    expect(exportStartMock).toHaveBeenCalledTimes(1);
+    expect(exportStartMock.mock.calls[0][1]).toBe(nativeFormat);
+    expect(exportStartMock.mock.calls[0][0]).toEqual([1]);
   });
 
-  it("同名照片净化 + 唯一化：非法字符被隔离，同名不互相覆盖", async () => {
-    // 两张照片解密名均为 "a/b.jpg"（含路径分隔符，未净化会造成写失败/覆盖）
-    const p1 = makePlaceholder(11);
-    const p2 = makePlaceholder(12);
-    const made = makeExport([p1, p2]);
-    scope = made.scope;
-    let call = 0;
-    (verthysGetRecord as ReturnType<typeof vi.fn>).mockImplementation(async () => {
-      // 两次解密返回同名的元数据
-      return { type: 1, name: `meta_${call++}.jpg`, dataB64: "meta-b64" };
+  it("E_EXPORT_TOO_LARGE 给出多文件模式提示", async () => {
+    exportStartMock.mockResolvedValue({
+      ok: false, exported: 0, failed: [], total: 1, elapsedMs: 1,
+      cancelled: false, errorCode: "E_EXPORT_TOO_LARGE", error: "too large",
     });
-    const fileHashHex = "3".repeat(64);
-    const { decryptMetaPreferWorker } = await import("../../workers/photo-decrypt-bridge");
-    (decryptMetaPreferWorker as ReturnType<typeof vi.fn>).mockResolvedValue({
-      meta: {
-        name: "a/b.jpg",
-        mime: "image/jpeg",
-        size: 3,
-        thumbB64: "",
-        chunkIds: [],
-        chunkDataB64: ["Y2g="],
-        fileHash: fileHashHex,
-        createdAt: 1,
-      },
+    const ctx = makeExport([photo(1)]);
+    scope = ctx.scope;
+    ctx.api.exportFormat.value = "single";
+    ctx.api.exportSelectedIds.value = new Set([1]);
+
+    await ctx.api.doExport();
+
+    expect(ctx.api.exportStatus.value).toContain("请改用多文件模式");
+  });
+
+  it("取消时状态如实显示已导出数量", async () => {
+    exportStartMock.mockResolvedValue({
+      ok: false, exported: 2, failed: [], total: 3, elapsedMs: 1,
+      cancelled: true,
     });
+    const ctx = makeExport([photo(1), photo(2), photo(3)]);
+    scope = ctx.scope;
+    ctx.api.exportFormat.value = "multiple";
+    ctx.api.exportSelectedIds.value = new Set([1, 2, 3]);
 
-    made.api.exportSelectedIds.value = new Set([11, 12]);
-    made.api.exportFormat.value = "multiple";
-    made.api.exportPath.value = "C:\\out";
+    await ctx.api.doExport();
 
-    await made.api.doExport();
-
-    const paths = (writeUserFile as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0] as string);
-    expect(paths).toHaveLength(2);
-    // 非法分隔符被净化为空格（sanitizeFileName），且第二张不覆盖第一张
-    expect(paths[0]).toMatch(/^C:\\out[/\\]a b.*\.venc$/);
-    expect(paths[1]).toMatch(/^C:\\out[/\\]a b.*_1\.venc$/);
-    expect(new Set(paths).size).toBe(2);
-    expect(made.api.exportStatus.value).toBe("已导出 2 张照片");
+    expect(ctx.api.exportStatus.value).toContain("已导出 2 张");
   });
 
-  it("全失败：结果文案报失败而非「已导出 N 张」，不触发任何写出", async () => {
-    (verthysGetRecord as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-    const made = makeExport([makePlaceholder(20)]);
-    scope = made.scope;
+  it("原生失败明细按原因分类计入结果", async () => {
+    exportStartMock.mockResolvedValue({
+      ok: false, exported: 1, total: 2, elapsedMs: 1, cancelled: false,
+      failed: [{ index: 1, name: "p2.jpg", reason: "decrypt-failed" }],
+    });
+    const ctx = makeExport([photo(1), photo(2)]);
+    scope = ctx.scope;
+    ctx.api.exportFormat.value = "multiple";
+    ctx.api.exportSelectedIds.value = new Set([1, 2]);
 
-    made.api.exportSelectedIds.value = new Set([20]);
-    made.api.exportFormat.value = "multiple";
-    made.api.exportPath.value = "C:\\out";
+    await ctx.api.doExport();
 
-    await made.api.doExport();
-
-    expect(writeUserFile).not.toHaveBeenCalled();
-    expect(made.api.exportStatus.value).toContain("失败");
-    expect(made.api.exportStatus.value).not.toMatch(/已导出 \d+ 张照片$/);
-  });
-
-  it("令牌重新生成：直接更换且不再与旧值相同（无确认弹窗）", () => {
-    const made = makeExport([]);
-    scope = made.scope;
-    const before = made.api.exportToken.value;
-
-    made.api.regenerateExportToken();
-
-    expect(made.api.exportToken.value).not.toBe(before);
-    expect(askMock).not.toHaveBeenCalled();
+    expect(ctx.api.exportStatus.value).toContain("失败 1 张");
   });
 });
 
-describe("usePhotoExport — 单文件流式写出协议", () => {
-  let scope: EffectScope | null = null;
+describe("usePhotoExport — 浏览器 PNG", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (verthysGetRecord as ReturnType<typeof vi.fn>).mockResolvedValue({
-      type: 1,
-      name: "meta_占位.jpg",
-      dataB64: "meta-b64",
-    });
-  });
-  afterEach(() => {
-    scope?.stop();
-    scope = null;
-    vi.useRealTimers();
   });
 
-  it("单文件导出走流式：建会话 → 逐帧追加 → finalize，不再整包直传", async () => {
-    const made = makeExport([makePlaceholder(30)]);
-    scope = made.scope;
-    made.api.exportSelectedIds.value = new Set([30]);
-    made.api.exportFormat.value = "single";
-    made.api.exportPath.value = "C:\\out\\photo.venc";
-
-    await made.api.doExport();
-
-    expect(writeUserFileStream).toHaveBeenCalledTimes(1);
-    expect(writeUserFileStream).toHaveBeenCalledWith("C:\\out\\photo.venc");
-    // 两段产出（首段前缀 + 帧序列）逐段追加，同一会话标识贯穿始终
-    expect(appendUserFileChunk).toHaveBeenCalledTimes(2);
-    const [appendStream1] = (appendUserFileChunk as ReturnType<typeof vi.fn>).mock.calls[0];
-    const [appendStream2] = (appendUserFileChunk as ReturnType<typeof vi.fn>).mock.calls[1];
-    expect(appendStream1).toBe("stream-1");
-    expect(appendStream2).toBe("stream-1");
-    expect(finalizeUserFileStream).toHaveBeenCalledWith("stream-1");
-    expect(abortUserFileStream).not.toHaveBeenCalled();
-    // 单文件模式不再走整包 writeUserFile
-    expect(writeUserFile).not.toHaveBeenCalled();
-    expect(made.api.exportStatus.value).toBe("已导出 1 张照片");
-  });
-
-  it("单文件上限放宽回归：512MiB 以上且在上限之内不再被前置拦截", async () => {
-    vi.mocked(vencPhotoFramesBytes).mockReturnValueOnce(600 * 1024 * 1024);
-    const made = makeExport([makePlaceholder(31)]);
-    scope = made.scope;
-    made.api.exportSelectedIds.value = new Set([31]);
-    made.api.exportFormat.value = "single";
-    made.api.exportPath.value = "C:\\out\\photo.venc";
-
-    await made.api.doExport();
-
-    expect(writeUserFileStream).toHaveBeenCalledTimes(1);
-    expect(made.api.exportStatus.value).toBe("已导出 1 张照片");
-  });
-
-  it("单文件上限拦截：写出前累计超限即中止暂存会话（GB 读数文案）", async () => {
-    // 惰性路径无法在「读数据前」知道真实体积：预算在写出该张之前累计，
-    //   超限即中止会话（不留超限产物），并以专用文案引导改用多文件模式
-    vi.mocked(vencPhotoFramesBytes).mockReturnValueOnce(3 * 1024 * 1024 * 1024);
-    const made = makeExport([makePlaceholder(32)]);
-    scope = made.scope;
-    made.api.exportSelectedIds.value = new Set([32]);
-    made.api.exportFormat.value = "single";
-    made.api.exportPath.value = "C:\\out\\photo.venc";
-
-    await made.api.doExport();
-
-    expect(writeUserFileStream).toHaveBeenCalledWith("C:\\out\\photo.venc");
-    expect(abortUserFileStream).toHaveBeenCalledWith("stream-1");
-    expect(finalizeUserFileStream).not.toHaveBeenCalled();
-    expect(made.api.exportStatus.value).toContain("超过单文件上限 2 GB");
-  });
-
-  it("单张读取异常：按该张失败记账，不中断整批导出", async () => {
-    (verthysGetRecord as ReturnType<typeof vi.fn>).mockImplementation(async (id: number) => {
-      if (id === 50) throw new Error("ipc transport error");
-      return { type: 1, name: "meta_ok.jpg", dataB64: "meta-b64" };
-    });
-    const made = makeExport([makePlaceholder(50), makePlaceholder(51)]);
-    scope = made.scope;
-    made.api.exportSelectedIds.value = new Set([50, 51]);
-    made.api.exportFormat.value = "single";
-    made.api.exportPath.value = "C:\\out\\photo.venc";
-
-    await made.api.doExport();
-
-    expect(writeUserFileStream).toHaveBeenCalledTimes(1);
-    expect(finalizeUserFileStream).toHaveBeenCalledWith("stream-1");
-    expect(abortUserFileStream).not.toHaveBeenCalled();
-    expect(made.api.exportStatus.value).toBe("已导出 1 张，失败 1 张");
-  });
-
-  it("追加中途失败：中止会话清理暂存，未 finalize，错误显式呈现", async () => {
-    (appendUserFileChunk as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("disk full"),
-    );
-    const made = makeExport([makePlaceholder(31)]);
-    scope = made.scope;
-    made.api.exportSelectedIds.value = new Set([31]);
-    made.api.exportFormat.value = "single";
-    made.api.exportPath.value = "C:\\out\\photo.venc";
-
-    await made.api.doExport();
-
-    expect(abortUserFileStream).toHaveBeenCalledWith("stream-1");
-    expect(finalizeUserFileStream).not.toHaveBeenCalled();
-    expect(made.api.exportStatus.value).toBe("导出失败，请重试");
-  });
-
-  it("清理暂存失败不影响原始错误上抛（中止失败不被吞掉）", async () => {
-    (appendUserFileChunk as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("disk full"),
-    );
-    (abortUserFileStream as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("cleanup failed"),
-    );
-    const made = makeExport([makePlaceholder(32)]);
-    scope = made.scope;
-    made.api.exportSelectedIds.value = new Set([32]);
-    made.api.exportFormat.value = "single";
-    made.api.exportPath.value = "C:\\out\\photo.venc";
-
-    await made.api.doExport();
-
-    expect(abortUserFileStream).toHaveBeenCalledWith("stream-1");
-    // 原始失败是「写盘失败」，清理失败仅是日志级信息
-    expect(made.api.exportStatus.value).toBe("导出失败，请重试");
-  });
-});
-
-describe("usePhotoExport — PNG 明文导出：解密下沉 Worker 桥", () => {
-  let scope: EffectScope | null = null;
-  beforeEach(() => {
-    vi.clearAllMocks();
-    // 逐块解密 mock 的 once 队列必须清空：否则前一个用例的返回值会泄漏到下一用例
-    vi.mocked(decryptChunksPreferWorker).mockReset();
-    vi.mocked(decryptChunksPreferWorker).mockImplementation(
-      async (chunksB64: string[]) => chunksB64.map(() => new Uint8Array([1, 2, 3])),
-    );
-    (verthysGetRecord as ReturnType<typeof vi.fn>).mockResolvedValue({
-      type: 1,
-      name: "meta_占位.jpg",
-      dataB64: "meta-b64",
-    });
-  });
-  afterEach(() => {
-    scope?.stop();
-    scope = null;
-    vi.useRealTimers();
-  });
-
-  /** 覆写解密产物（fileHash 与 bytesToHex mock 的 "1"×64 对齐，保证内容校验通过） */
-  async function setMeta(meta: Partial<PhotoMeta> = {}): Promise<void> {
-    const { decryptMetaPreferWorker } = await import("../../workers/photo-decrypt-bridge");
-    (decryptMetaPreferWorker as ReturnType<typeof vi.fn>).mockResolvedValue({
-      meta: { ...fakeMetaFactory(), fileHash: "1".repeat(64), ...meta },
-    });
-  }
-
-  it("既有布局：整图解密经桥（逐块密文与校验参数透传），转换产物正常写出", async () => {
-    await setMeta();
-    const made = makeExport([makePlaceholder(40)]);
-    scope = made.scope;
-    made.api.exportSelectedIds.value = new Set([40]);
-    made.api.exportFormat.value = "png";
-    made.api.exportPath.value = "C:\\out";
-
-    await made.api.doExport();
-
-    expect(decryptChunksPreferWorker).toHaveBeenCalledTimes(1);
-    // 完整性参数随解密任务透传：逐块哈希（历史记录可为空，仅诊断）与整图明文哈希
-    expect(decryptChunksPreferWorker).toHaveBeenCalledWith(
-      ["Y2g="], "1".repeat(64), "占位.jpg", undefined,
-      { expectedHashes: undefined, expectedFileHash: "1".repeat(64) },
-    );
-    expect(writeUserFile).toHaveBeenCalledTimes(1);
-    expect(made.api.exportStatus.value).toBe("已导出 1 张照片");
-  });
-
-  it("索引瘦身布局：包裹密钥与块总数随桥透传（块密文无自描述序号）", async () => {
-    await setMeta({ fmt: PHOTO_FMT_SLIM, wrappedFileKey: "wrapped-key" });
-    const made = makeExport([makePlaceholder(41)]);
-    scope = made.scope;
-    made.api.exportSelectedIds.value = new Set([41]);
-    made.api.exportFormat.value = "png";
-    made.api.exportPath.value = "C:\\out";
-
-    await made.api.doExport();
-
-    expect(decryptChunksPreferWorker).toHaveBeenCalledWith(
-      ["Y2g="], "1".repeat(64), "占位.jpg",
-      { wrappedFileKey: "wrapped-key", chunkTotal: 1 },
-      { expectedHashes: undefined, expectedFileHash: "1".repeat(64) },
-    );
-    expect(made.api.exportStatus.value).toBe("已导出 1 张照片");
-  });
-
-  it("解密/完整性校验失败：归因为 decrypt-failed，不写出且不标为转换失败", async () => {
-    // 完整性校验已随解密任务下沉：在桥边界注入确定性失败（与 Worker 内
-    // 校验失败的可见语义一致——拒绝产出、不写出、归因为解密失败）
-    vi.mocked(decryptChunksPreferWorker).mockRejectedValueOnce(
-      new Error("整图哈希校验失败（内容与声明不符）"),
-    );
-    await setMeta({ fileHash: "9".repeat(64) });
-    const made = makeExport([makePlaceholder(42)]);
-    scope = made.scope;
-    made.api.exportSelectedIds.value = new Set([42]);
-    made.api.exportFormat.value = "png";
-    made.api.exportPath.value = "C:\\out";
-
-    await made.api.doExport();
-
-    expect(writeUserFile).not.toHaveBeenCalled();
-    expect(made.api.exportStatus.value).toContain("照片解密或完整性校验失败");
-    expect(made.api.exportStatus.value).not.toContain("图片转换失败");
+  it("使用内存字节转换并下载", async () => {
+    const ph = photo(9);
+    ph.rawBytes = new Uint8Array([1, 2, 3]);
+    const ctx = makeExport([ph], false);
+    try {
+      ctx.api.exportFormat.value = "png";
+      ctx.api.exportSelectedIds.value = new Set([9]);
+      await ctx.api.doExport();
+      expect(exportStartMock).not.toHaveBeenCalled();
+      expect(convertToPngBytes).toHaveBeenCalledTimes(1);
+      expect(downloadBlob).toHaveBeenCalledTimes(1);
+    } finally {
+      ctx.scope.stop();
+    }
   });
 });

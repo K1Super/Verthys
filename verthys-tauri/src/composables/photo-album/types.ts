@@ -22,6 +22,8 @@ export interface PhotoEntry {
   blobUrl?: string;
   /** 浏览器模式下缓存原始字节（用于加密导出） */
   rawBytes?: Uint8Array;
+  /** 动图标记（三态）：true/false 为已探测结果；缺省为未探测（历史记录） */
+  animated?: boolean;
 }
 
 /** 可视区域项目（带定位坐标，用于虚拟滚动绝对定位） */
@@ -39,10 +41,12 @@ export interface DecryptedPhotoMeta {
   thumb: string;
   size: string;
   meta: PhotoMeta;
+  /** 动图标记（true 才显示角标；false 表示已确认为静态） */
+  animated?: boolean;
 }
 
 /** 导出格式 */
-export type ExportFormat = "single" | "multiple" | "png";
+export type ExportFormat = "single" | "multiple" | "original" | "png";
 
 /** 解析预览项（只含清单字段，不携带块载荷） */
 export interface ParsedPhotoPreview {

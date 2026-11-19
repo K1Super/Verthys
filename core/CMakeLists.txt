@@ -74,6 +74,36 @@ if(VERTHYS_ENABLE_COMPILED_PEPPER)
     add_compile_definitions(VERTHYS_ENABLE_COMPILED_PEPPER)
 endif()
 
+# G0-A 生产化原型开关（-DVERTHYS_G0A_PROTOTYPE=ON）
+#   默认 OFF：TPM 见证密钥预置池、已验证条目缓存、旧键撤销路径全部
+#   不参与编译，默认构建的行为与二进制路径保持原样。
+#   仅允许在独立构建目录中与测试钩子一起打开，用于隔离验证。
+option(VERTHYS_G0A_PROTOTYPE
+       "Enable G0-A witness preset prototype (isolated, never for production)" OFF)
+
+# G0-A2 隔离原型开关：批量导入锚点推迟。
+#   依赖 G0-A 预置池——推迟提交让后台建键有足够时间，缺预置池的
+#   “推迟但每次仍同步建键”构建没有验证意义，配置期直接失败。
+option(VERTHYS_G0A2_PROTOTYPE
+       "Enable G0-A2 deferred anchor prototype (requires G0-A, isolated)" OFF)
+if(VERTHYS_G0A2_PROTOTYPE AND NOT VERTHYS_G0A_PROTOTYPE)
+    message(FATAL_ERROR
+        "VERTHYS_G0A2_PROTOTYPE requires VERTHYS_G0A_PROTOTYPE=ON")
+endif()
+if(VERTHYS_G0A2_PROTOTYPE)
+    message(STATUS "[g0a2] deferred anchor prototype enabled (isolated build only)")
+endif()
+
+# 导出白名单：G0-A2 构建在原始 .def 末尾追加两个原型导出，
+# 默认构建仍使用仓库内 verthys.def，导出面与二进制路径不变。
+set(VERTHYS_DEF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/verthys.def)
+if(VERTHYS_G0A2_PROTOTYPE)
+    set(VERTHYS_DEF_FILE ${CMAKE_CURRENT_BINARY_DIR}/verthys_g0a2.def)
+    file(READ ${CMAKE_CURRENT_SOURCE_DIR}/verthys.def _vty_def_body)
+    file(WRITE ${VERTHYS_DEF_FILE}
+        "${_vty_def_body}\n    Verthys_BulkImportBegin\n    Verthys_BulkImportCommit\n")
+endif()
+
 # ---------- 分层源文件 ----------
 #   src/ 各子域内按功能组件拆分子目录（组件实现 + 私有头同目录），
 #   模块内子目录不再平铺源文件；公共接口唯一保留 include/verthys.h。
@@ -168,6 +198,13 @@ set(VERTHYS_API_SOURCES
     src/api/scan/verthys_scan.c
 )
 
+# G0-A 隔离原型：见证密钥预置池只在开关打开时参与编译。
+if(VERTHYS_G0A_PROTOTYPE)
+    list(APPEND VERTHYS_SHARED_SOURCES
+        src/security/rollback/vty_witness_pool.c)
+    message(STATUS "[g0a] witness preset prototype enabled (isolated build only)")
+endif()
+
 # 直连系统调用 thunk：ACG 兼容实现依赖映像内固定的 syscall 指令序列。
 # 仅 MSVC 工具链提供 MASM；其他工具链不生成 thunk，模块保持 GetProcAddress 回退。
 if(MSVC)
@@ -260,6 +297,14 @@ foreach(_verthys_obj
     if(MSVC)
         target_compile_definitions(${_verthys_obj} PRIVATE VERTHYS_SCD_INLINE_THUNK)
     endif()
+    # G0-A 隔离原型：与源文件清单同一开关，默认构建不定义该宏。
+    if(VERTHYS_G0A_PROTOTYPE)
+        target_compile_definitions(${_verthys_obj} PRIVATE VERTHYS_G0A_PROTOTYPE=1)
+    endif()
+    # G0-A2 隔离原型：与源文件清单同一开关，默认构建不定义该宏。
+    if(VERTHYS_G0A2_PROTOTYPE)
+        target_compile_definitions(${_verthys_obj} PRIVATE VERTHYS_G0A2_PROTOTYPE=1)
+    endif()
     # schema 生成头（sstable_builder.h 等）→ 编译前必须完成 codegen
     add_dependencies(${_verthys_obj} flatcc_generate)
     # 不定义 VERTHYS_EXPORTS：VERTHYS_API 为空宏，
@@ -341,7 +386,7 @@ if(WIN32)
     target_link_libraries(verthys_core PRIVATE user32 wintrust crypt32 shlwapi psapi bcrypt ncrypt tbs)
 endif()
 target_link_options(verthys_core PRIVATE
-    /DEF:${CMAKE_CURRENT_SOURCE_DIR}/verthys.def
+    /DEF:${VERTHYS_DEF_FILE}
 )
 verthys_apply_hardening(verthys_core)
 # .rhat 生成仅覆盖产品实际保留的共享关键函数（--xlist core）。

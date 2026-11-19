@@ -76,6 +76,14 @@ export const TYPE_PHOTO_THUMB = 0x07;
  */
 export const TYPE_PHOTO_CHUNK_SET = 0x09;
 
+/**
+ * 照片预览记录（2048px 派生缓存）。
+ *
+ * 确定性名称 `preview_<metaId>`，独立加密；明文头携带 metaId 与 fileHash，
+ * 读取侧不匹配即视为缺失并重新生成。预览不进入 VENC 备份清单。
+ */
+export const TYPE_PHOTO_PREVIEW = 0x0b;
+
 /* === 账户模块 === */
 
 /**

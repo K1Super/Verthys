@@ -102,6 +102,15 @@ int vty_repo_count(VtyVault *v, uint64_t *out_count);
 int vty_repo_find_by_type(VtyVault *v, uint8_t type,
                           uint8_t *out_found, uint64_t *out_id);
 
+/* 名称存在性：按类型路由模块，名称盲索引前缀游标精确匹配。
+ *
+ * 名称索引键为 name_index(32) + record_id(8)，同名前缀内按 ID 升序；
+ * 跳过墓碑后返回首个存活记录。不读取记录密文。名称归一化（NFKC）由
+ * vty_name_index 内部完成，调用方传入原始名称字节即可。 */
+int vty_repo_find_by_name(VtyVault *v, uint8_t type,
+                          const uint8_t *name, size_t name_len,
+                          uint8_t *out_found, uint64_t *out_id);
+
 /* 单页类型枚举上限：调用方一次最多取 4096 个 ID（32 KiB），
  * 分页由 after_id 推进，避免无界响应。 */
 #define VTY_REPO_TYPE_ID_BATCH_MAX 4096u

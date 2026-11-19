@@ -192,6 +192,8 @@ pub mod record_types {
     pub const TYPE_PHOTO_THUMB: u32 = 7;
     /// 照片块集记录类型值（索引瘦身布局：逐块引用与逐块哈希）
     pub const TYPE_PHOTO_CHUNK_SET: u32 = 9;
+    /// 照片预览记录类型值（2048px 派生缓存，名称 `preview_<metaId>`）
+    pub const TYPE_PHOTO_PREVIEW: u32 = 11;
     /// 文件保险箱数据块记录类型值（清藏外置分块记录）
     ///
     /// 与前端记录类型分配表同值：清藏的文件块经同一单写者通道上传，

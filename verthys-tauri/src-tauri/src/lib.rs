@@ -97,6 +97,7 @@ use controller::key_controller::*;
 use controller::pcr_controller::*;
 use controller::keyfile_controller::*;
 use controller::module_controller::*;
+use controller::photo_media_controller::*;
 use controller::vault_rotate_controller::*;
 use controller::preflight_controller::*;
 use controller::scan_controller::*;
@@ -613,6 +614,23 @@ fn run_main_ui(
             verthys_wal_recover,
             verthys_forget_import_keys,
             verthys_gc_orphan_chunks,
+            // 原生照片导入（worker job 拉取 + 单写者落库 + 进度推送）
+            photo_import_start,
+            photo_import_cancel,
+            // 原生照片查看（预览优先 + 原图分块）
+            photo_preview_get,
+            photo_full_begin,
+            photo_full_next,
+            photo_full_cancel,
+            // 原生导出与备份还原（worker 产出字节，宿主原子写盘）
+            photo_export_start,
+            photo_export_cancel,
+            photo_restore_start,
+            photo_restore_cancel,
+            // 原生网格元数据、损坏探测与备份预览（桌面 JS 数据面已删除）
+            photo_meta_get,
+            photo_meta_probe,
+            photo_parse_start,
             verthys_scan_open,
             verthys_scan_next,
             verthys_scan_close,

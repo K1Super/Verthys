@@ -2,7 +2,7 @@
 
 > 梳理 Verthys 四层架构、core 五大子域职责、进程模型与 core/前端边界，作为全仓技术蓝图。
 >
-> Last updated: 2026-11-17 · 维护人：K1Super
+> Last updated: 2026-11-19 · 维护人：K1Super
 
 ---
 
@@ -163,3 +163,35 @@ verthys-tauri/src-tauri/src/
 verthys-tauri/verthys-worker/
 └── src/                    main.rs · runtime/（worker/dispatch/protocol/scan_shm/gmk/...）· defense.rs · log.rs
 ```
+## 8. 照片原生数据面（Phase 4 收口后）
+
+### 8.1 职责边界
+
+| 层 | 负责 | 不负责 |
+|---|---|---|
+| L4 Vue | 选路径、进度、网格渲染、预览/原图展示、导出参数 | 不读照片字节、不做哈希/加密/解码、不持有密钥 |
+| L3a Tauri 主进程 | `photo_*` 命令编排、路径授权、导入会话、单写者/WAL/台账、原子写盘 | 不做照片解码、不做块/meta 加解密 |
+| L3b verthys-worker | 流式读盘、BLAKE3、缩略图/预览、块封装、记录读取与解密、VENC 打包/解析 | 不直接写用户目标文件、不决定 UI |
+| L2 verthys.dll | 容器事务、块/记录 AEAD、名称/类型盲索引、扫描 | 文件调度与 UI |
+
+### 8.2 命令面
+
+- 导入：`photo_import_start / photo_import_cancel`
+- 网格：`photo_meta_get / photo_meta_probe`
+- 查看：`photo_preview_get / photo_full_begin / photo_full_next / photo_full_cancel`
+- 导出：`photo_export_start / photo_export_cancel`
+- 备份：`photo_parse_start / photo_restore_start / photo_restore_cancel`
+
+### 8.3 已删除的桌面 JS 数据面
+
+`importPipeline`、`photoWorkerPool`、`photo-crypto.worker`、`container-import.worker`、
+`photo-decrypt-bridge`、`chunk-refs`、照片 `module_crypto` 逐记录调用与运行时
+`photo.native*` 开关均已删除。浏览器开发模式保留独立回退：内存导入、
+`parse-crypto.worker` 的 VENC 预览、`lib/crypto.ts` 的 VENC 打包/解析与 Canvas PNG。
+
+### 8.4 回滚边界
+
+桌面端不再提供运行时旧链路切换；回滚单位为上一版本安装包。新数据仍写入
+标准 `TYPE_PHOTO_META` 与 `TYPE_PHOTO_CHUNK`（4MiB 块），旧版本按 `chunkIds`
+数量读取，不依赖固定块长；`TYPE_PHOTO_PREVIEW` 对旧版本是未知类型，不参与
+列表/删除/导出枚举。

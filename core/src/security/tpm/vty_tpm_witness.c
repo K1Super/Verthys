@@ -38,6 +38,38 @@ static int not_found_status(SECURITY_STATUS st)
     return code == 0x80090011u || code == 0x80090016u || code == 0x80090026u;
 }
 
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+static volatile LONG g_test_fail_delete = 0;
+static volatile LONG g_test_fail_create = 0;
+static volatile LONG g_test_crash_after_create = 0;
+
+/* 原子取走一次注入；count<=0 表示不注入。 */
+static int test_take_fail(volatile LONG *counter)
+{
+    for (;;) {
+        LONG v = *counter;
+
+        if (v <= 0) return 0;
+        if (InterlockedCompareExchange(counter, v - 1, v) == v) return 1;
+    }
+}
+
+void vty_tpm_witness_set_delete_fail_for_test(int count)
+{
+    InterlockedExchange(&g_test_fail_delete, (LONG)count);
+}
+
+void vty_tpm_witness_set_create_fail_for_test(int count)
+{
+    InterlockedExchange(&g_test_fail_create, (LONG)count);
+}
+
+void vty_tpm_witness_set_crash_after_create_for_test(int enable)
+{
+    InterlockedExchange(&g_test_crash_after_create, (LONG)enable);
+}
+#endif
+
 static void wit_name(const uint8_t id[VTY_UUID_BYTES], uint8_t slot,
                      wchar_t out[WIT_NAME_CHARS])
 {
@@ -95,26 +127,54 @@ int vty_tpm_witness_create(const uint8_t id[VTY_UUID_BYTES], uint8_t slot,
     if (id == NULL || fp == NULL || slot >= VTY_TPM_WITNESS_SLOTS) {
         return VTY_E_INVALID;
     }
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    if (test_take_fail(&g_test_fail_create)) return VTY_E_TPM;
+#endif
     wit_name(id, slot, name);
     if (NCryptOpenStorageProvider(&prov, MS_PLATFORM_KEY_STORAGE_PROVIDER, 0) != 0) {
         return VTY_E_TPM;
     }
 
-    if (NCryptCreatePersistedKey(prov, &key, BCRYPT_ECDSA_P256_ALGORITHM,
-                                 name, 0, NCRYPT_OVERWRITE_KEY_FLAG) == 0) {
-        if (NCryptSetProperty(key, NCRYPT_PCP_KEY_USAGE_POLICY_PROPERTY,
-                              (PBYTE)&usage, sizeof(usage), 0) == 0 &&
-            NCryptFinalizeKey(key, 0) == 0) {
-            rc = witness_fp(key, fp);
+    {
+        SECURITY_STATUS create_st = NCryptCreatePersistedKey(
+            prov, &key, BCRYPT_ECDSA_P256_ALGORITHM, name, 0,
+            NCRYPT_OVERWRITE_KEY_FLAG);
+
+        /* create 与 finalize 之间崩溃会留下不可导出的残留键；OVERWRITE 在
+         * 部分 PCP 实现上不足以覆盖该状态，失败后清理同槽再重试一次。 */
+        if (create_st != 0) {
+            if (key != 0) {
+                NCryptFreeObject(key);
+                key = 0;
+            }
+            (void)vty_tpm_witness_delete(id, slot);
+            create_st = NCryptCreatePersistedKey(
+                prov, &key, BCRYPT_ECDSA_P256_ALGORITHM, name, 0,
+                NCRYPT_OVERWRITE_KEY_FLAG);
+        }
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+        if (create_st == 0 &&
+            InterlockedCompareExchange(&g_test_crash_after_create, 0, 0) != 0) {
+            /* 故意不释放 key：模拟进程在 finalize 前被杀，残留键留在 TPM。 */
+            TerminateProcess(GetCurrentProcess(), 0xC0DE1001u);
+        }
+#endif
+        if (create_st == 0) {
+            if (NCryptSetProperty(key, NCRYPT_PCP_KEY_USAGE_POLICY_PROPERTY,
+                                  (PBYTE)&usage, sizeof(usage), 0) == 0 &&
+                NCryptFinalizeKey(key, 0) == 0) {
+                rc = witness_fp(key, fp);
+            }
         }
     }
     if (key != 0) {
         if (rc != VTY_OK) {
             (void)NCryptDeleteKey(key, 0);
             vty_secure_zero(fp, VTY_TPM_WITNESS_FP_BYTES);
-        } else {
-            NCryptFreeObject(key);
         }
+        /* 删除成功或失败都必须释放句柄；删除失败时键仍可能存在，
+         * 由下一次 OVERWRITE 建键覆盖，但句柄不能泄漏。 */
+        NCryptFreeObject(key);
     }
     NCryptFreeObject(prov);
     return rc;
@@ -179,6 +239,9 @@ int vty_tpm_witness_delete(const uint8_t id[VTY_UUID_BYTES], uint8_t slot)
     SECURITY_STATUS st;
 
     if (id == NULL || slot >= VTY_TPM_WITNESS_SLOTS) return VTY_E_INVALID;
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    if (test_take_fail(&g_test_fail_delete)) return VTY_E_TPM;
+#endif
     wit_name(id, slot, name);
     if (NCryptOpenStorageProvider(&prov, MS_PLATFORM_KEY_STORAGE_PROVIDER, 0) != 0) {
         return VTY_E_TPM;
@@ -226,6 +289,47 @@ int vty_tpm_witness_any(const uint8_t id[VTY_UUID_BYTES])
             return -1;
         }
     }
+    NCryptFreeObject(prov);
+    return found;
+}
+
+int vty_tpm_witness_any_usable(const uint8_t id[VTY_UUID_BYTES])
+{
+    NCRYPT_PROV_HANDLE prov = 0;
+    NCRYPT_KEY_HANDLE key = 0;
+    wchar_t name[WIT_NAME_CHARS];
+    uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
+    uint8_t slot;
+    int found = 0;
+
+    if (id == NULL) return -1;
+    if (NCryptOpenStorageProvider(&prov, MS_PLATFORM_KEY_STORAGE_PROVIDER, 0) != 0) {
+        return -1;
+    }
+    memset(fp, 0, sizeof(fp));
+    for (slot = 0; slot < VTY_TPM_WITNESS_SLOTS; slot++) {
+        SECURITY_STATUS st;
+
+        wit_name(id, slot, name);
+        st = NCryptOpenKey(prov, &key, name, 0, 0);
+        if (st == 0) {
+            if (witness_fp(key, fp) == VTY_OK) {
+                NCryptFreeObject(key);
+                found = 1;
+                break;
+            }
+            /* 打开成功但不能导出公钥：create/finalize 之间的残留键，
+             * 不具备见证能力，不计为有效见证。 */
+            NCryptFreeObject(key);
+            continue;
+        }
+        if (!not_found_status(st)) {
+            vty_secure_zero(fp, sizeof(fp));
+            NCryptFreeObject(prov);
+            return -1;
+        }
+    }
+    vty_secure_zero(fp, sizeof(fp));
     NCryptFreeObject(prov);
     return found;
 }

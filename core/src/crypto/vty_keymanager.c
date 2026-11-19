@@ -1613,6 +1613,10 @@ __declspec(noinline) int vty_vault_open_internal(const char *path,
             rc = vty_rollback_commit(v->header.vault_uuid, v->header.generation);
             if (rc != VTY_OK) goto fail;
         }
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+        /* 打开路径已把锚点推进到当前代，推迟窗口基线同步。 */
+        v->anchor_floor_gen = v->header.generation;
+#endif
 
         rc = vty_store_open(v->path, v->kc, v->header.vault_uuid,
                             v->header.epoch, &v->data_root, v->data_root_hash,
@@ -2487,10 +2491,35 @@ static int save_internal(VtyVault *v, int commit_store)
 
     /* 轮换临时库构建期间不推进锚点：提交前的新库代可能低于源库锚点，
      * 提前推进会让源库在回滚路径上被锚点拒绝。 */
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+    if (!v->no_rollback_anchor) {
+        uint64_t now_ms = (uint64_t)GetTickCount64();
+        int commit_anchor = 1;
+
+        /* 批量导入会话中只在越过硬上限（代数或时长）时提交；
+         * 上限编译进本层，调用方无法放大窗口。 */
+        if (v->defer_anchor) {
+            uint64_t lag = v->header.generation - v->anchor_floor_gen;
+            uint64_t elapsed = now_ms - v->anchor_defer_since_ms;
+            commit_anchor = (lag >= (uint64_t)VTY_ANCHOR_DEFER_MAX_GENS ||
+                             elapsed >= (uint64_t)VTY_ANCHOR_DEFER_MAX_MS) ? 1 : 0;
+        }
+        if (commit_anchor) {
+            if (vty_rollback_enabled()) {
+                rc = vty_rollback_commit(v->header.vault_uuid,
+                                         v->header.generation);
+                if (rc != VTY_OK) goto fail;
+            }
+            v->anchor_floor_gen = v->header.generation;
+            if (v->defer_anchor) v->anchor_defer_since_ms = now_ms;
+        }
+    }
+#else
     if (vty_rollback_enabled() && !v->no_rollback_anchor) {
         rc = vty_rollback_commit(v->header.vault_uuid, v->header.generation);
         if (rc != VTY_OK) goto fail;
     }
+#endif
 
     /* 回读副本是本次提交的权威头：把长度/槽数/Keyring 长度同步回会话，
      * 避免后续 PCR 开关等操作沿用上一次保存的旧预算。 */
@@ -2551,6 +2580,76 @@ int vty_vault_save_meta(VtyVault *v)
 {
     return save_internal(v, 0);
 }
+
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+int vty_vault_bulk_active(const VtyVault *v)
+{
+    return (v != NULL && v->unlocked && v->defer_anchor) ? 1 : 0;
+}
+
+int vty_vault_bulk_begin(VtyVault *v)
+{
+    int rc;
+
+    if (v == NULL || !v->unlocked) return VTY_E_POLICY;
+    if (v->rotate_pending || v->no_rollback_anchor) return VTY_E_POLICY;
+    if (v->defer_anchor) return VTY_OK;
+
+    /* 先提交当前锚点：窗口不得覆盖导入开始前的任何写入。 */
+    if (vty_rollback_enabled()) {
+        rc = vty_rollback_commit(v->header.vault_uuid, v->header.generation);
+        if (rc != VTY_OK) return rc;
+    }
+    v->defer_anchor = 1;
+    v->anchor_floor_gen = v->header.generation;
+    v->anchor_defer_since_ms = (uint64_t)GetTickCount64();
+    return VTY_OK;
+}
+
+int vty_vault_bulk_commit(VtyVault *v)
+{
+    int rc;
+
+    if (v == NULL || !v->unlocked) return VTY_E_POLICY;
+    if (!v->defer_anchor) return VTY_OK;
+
+    if (vty_rollback_enabled() && !v->no_rollback_anchor) {
+        rc = vty_rollback_commit(v->header.vault_uuid, v->header.generation);
+        if (rc != VTY_OK) {
+            /* 提交失败不得继续接受写入：清除会话并锁定，由下次解锁
+             * 检查容器代并按“容器代 >= 锚点”补推进。 */
+            v->defer_anchor = 0;
+            v->unlocked = 0;
+            return rc;
+        }
+    }
+    v->defer_anchor = 0;
+    v->anchor_floor_gen = v->header.generation;
+    return VTY_OK;
+}
+
+int vty_vault_bulk_flush(VtyVault *v)
+{
+    int rc;
+
+    if (v == NULL || !v->unlocked) return VTY_E_POLICY;
+    if (!v->defer_anchor) return VTY_OK;
+    if (v->anchor_floor_gen != v->header.generation) {
+        if (vty_rollback_enabled() && !v->no_rollback_anchor) {
+            rc = vty_rollback_commit(v->header.vault_uuid,
+                                     v->header.generation);
+            if (rc != VTY_OK) {
+                v->defer_anchor = 0;
+                v->unlocked = 0;
+                return rc;
+            }
+        }
+        v->anchor_floor_gen = v->header.generation;
+    }
+    v->anchor_defer_since_ms = (uint64_t)GetTickCount64();
+    return VTY_OK;
+}
+#endif
 
 int vty_vault_pcr_slot_prepare(VtyVault *v, uint32_t select, VtySlot *slot)
 {
@@ -2798,6 +2897,11 @@ void vty_vault_lock(VtyVault *v)
     v->recovery_mode = 0;
     v->no_rollback_anchor = 0;
     v->rotate_pending = 0;
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+    v->defer_anchor = 0;
+    v->anchor_floor_gen = 0;
+    v->anchor_defer_since_ms = 0;
+#endif
     v->unlocked = 0;
     /* Keyring 的 32 字节条目会被编译器溢出到栈槽位，缓冲区清零无法覆盖 */
     vty_wipe_stack();

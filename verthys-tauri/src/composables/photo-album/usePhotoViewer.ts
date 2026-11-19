@@ -19,12 +19,21 @@
  * - 窗口失焦/聚焦时 viewer 模糊控制（隐私保护）
  */
 import { ref, type ShallowRef } from "vue";
-import { decryptChunksPreferWorker } from "../../workers/photo-decrypt-bridge";
-import { isSlimLayout } from "../../constants/crypto_const";
-import { updateShallowItem } from "../../utils/shallow-array";
-import type { PhotoEntry, DecryptedPhotoMeta } from "./types";
-import { resolveChunkRefs, loadChunkCiphers, type ChunkRefs } from "./chunk-refs";
+import { isAnimatedImageCandidate } from "../../utils/animated-image";
+import type { PhotoEntry } from "./types";
 import { pushModal, popModal } from "../../utils/modal_stack";
+import {
+  photoPreviewGet,
+  photoFullBegin,
+  photoFullNext,
+  photoFullCancel,
+} from "../../lib/verthys";
+import { thumbUrlOf } from "./utils";
+import {
+  photoViewerCache,
+  previewCacheKey,
+  fullCacheKey,
+} from "./photoBlobCache";
 
 /**
  * usePhotoViewer 依赖注入接口。
@@ -38,14 +47,12 @@ export interface UsePhotoViewerOptions {
   isTauri: boolean;
   /** 恢复模块密钥（从 keyManager 会话缓存） */
   ensurePhotoKey: () => boolean;
-  /** 解密单张照片完整元数据（来自 usePhotoData） */
-  decryptPhotoMeta: (vid: number, prefetchedMetaB64?: string) => Promise<DecryptedPhotoMeta | null>;
   /** 显示错误提示（来自全局 Toast 中心） */
   showError: (msg: string) => void;
 }
 
 export function usePhotoViewer(options: UsePhotoViewerOptions) {
-  const { photos, isTauri, ensurePhotoKey, decryptPhotoMeta, showError } = options;
+  const { isTauri, ensurePhotoKey, showError } = options;
 
   /* ===== 内存预览（解密后 Blob URL，不落地） ===== */
   const viewer = ref<boolean>(false);
@@ -60,6 +67,39 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
   const viewerLoading = ref(false);
   const viewerProgressMsg = ref("");
   let viewerBlobUrl: string | null = null;
+
+  /* ===== 原生查看状态（预览优先 + 原图按需） =====
+   * viewerBlobUrl 仅跟踪旧 JS 链路自建的 URL；原生路径的 URL 归
+   * photoViewerCache 所有，关闭查看器不得 revoke。 */
+  /** 静态照片自动加载原图的体积上限：超过则等放大再拉取 */
+  const FULL_AUTO_MAX_BYTES = 32 * 1024 * 1024;
+  let viewerFullJobId: string | null = null;
+  let viewerFullLoading = false;
+  let viewerFullPending = false;
+  let viewerFullLoaded = false;
+  /** 原图请求代际：取消/切换后递增，丢弃过期分块结果 */
+  let viewerFullSeq = 0;
+  let viewerPhoto: PhotoEntry | null = null;
+  let viewerNativeSize = 0;
+  let viewerNativeMime = "";
+
+  const decodeBase64Bytes = (b64: string): Uint8Array => {
+    const binary = atob(b64);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  };
+
+  /** 取消在途原图读取（关闭查看器/切换照片） */
+  const cancelFullLoad = () => {
+    viewerFullSeq++;
+    viewerFullLoading = false;
+    if (viewerFullJobId) {
+      const jobId = viewerFullJobId;
+      viewerFullJobId = null;
+      void photoFullCancel(jobId);
+    }
+  };
 
   /* ===== 模态层身份（与导出面板/确认窗共用栈：滚动锁计数 + Esc 栈序） ===== */
   const viewerModalId = Symbol("photo-viewer");
@@ -102,6 +142,170 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
     return true;
   };
 
+  /** 提交缓存所有的 URL：关闭时不由查看器 revoke */
+  const commitCachedViewer = (seq: number, url: string): boolean => {
+    if (seq !== viewRequestSeq) return false;
+    disposeViewerBlob();
+    viewerBlobUrl = null;
+    setViewerProgress("");
+    viewerSrc.value = url;
+    viewer.value = true;
+    engageViewerModal();
+    return true;
+  };
+
+  /**
+   * 原生预览：命中缓存直接出图；否则请求 worker 预览，期间用缩略图占位。
+   *
+   * @returns true=已处理（成功或已被更新请求取代）；false=布局不支持或
+   *          预览失败，调用方继续旧 JS 解密链路。
+   */
+  const tryNativePreview = async (ph: PhotoEntry, seq: number): Promise<boolean> => {
+    if (!ph.metaId) return false;
+
+    const key = previewCacheKey(ph.metaId);
+    const cached = photoViewerCache.get(key);
+    if (cached) {
+      /* 缓存命中不经过 worker 响应，必须从已解密的 meta 恢复尺寸与 MIME；
+       * 否则体积被判为 0，大图会被误当作小图自动拉取原图。 */
+      if (ph.meta?.size) viewerNativeSize = ph.meta.size;
+      if (ph.meta?.mime) viewerNativeMime = ph.meta.mime;
+      commitCachedViewer(seq, cached);
+      return true;
+    }
+
+    const thumbUrl = ph.thumb ? thumbUrlOf(ph.thumb) : "";
+    if (thumbUrl) {
+      viewerSrc.value = thumbUrl;
+      viewer.value = true;
+      engageViewerModal();
+    }
+    setViewerProgress("读取预览…");
+
+    let result;
+    try {
+      result = await photoPreviewGet(ph.metaId);
+    } catch (e) {
+      setViewerProgress("");
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`[onView] 原生预览失败: ${msg}`);
+      return false;
+    }
+
+    if (seq !== viewRequestSeq) return true;
+    if (!result.dataB64) {
+      setViewerProgress("");
+      return false;
+    }
+
+    const bytes = decodeBase64Bytes(result.dataB64);
+    if (bytes.length === 0) {
+      setViewerProgress("");
+      return false;
+    }
+    const url = URL.createObjectURL(
+      new Blob([bytes as BlobPart], { type: result.mime || "image/jpeg" }),
+    );
+    photoViewerCache.put(key, url, bytes.length);
+    if (seq !== viewRequestSeq) {
+      photoViewerCache.delete(key);
+      return true;
+    }
+    viewerNativeSize = result.size;
+    viewerNativeMime = result.mime;
+    commitCachedViewer(seq, url);
+    return true;
+  };
+
+  /** 读取原图并替换预览：分块拉取 → Blob → LRU 缓存 */
+  const loadFullNative = async (ph: PhotoEntry, seq: number): Promise<void> => {
+    if (!ph.metaId || viewerFullLoading || viewerFullLoaded) return;
+    const key = fullCacheKey(ph.metaId);
+    const cached = photoViewerCache.get(key);
+    if (cached) {
+      if (commitCachedViewer(seq, cached)) {
+        viewerFullLoaded = true;
+        viewerFullPending = false;
+      }
+      return;
+    }
+
+    const loadSeq = ++viewerFullSeq;
+    viewerFullLoading = true;
+    viewerFullPending = false;
+    setViewerProgress("读取原图…");
+    /* jobId 必须是本次调用的局部值：共享变量会被后发请求覆盖，
+     * 旧请求的 catch/finally 误取消新任务并清掉新任务的加载态。 */
+    let jobId: string | null = null;
+    try {
+      const begin = await photoFullBegin(ph.metaId);
+      if (!begin.jobId) throw new Error("原图读取任务创建失败");
+      jobId = begin.jobId;
+      viewerFullJobId = jobId;
+
+      const parts: Uint8Array[] = [];
+      let total = 0;
+      for (;;) {
+        const chunk = await photoFullNext(jobId);
+        if (loadSeq !== viewerFullSeq || seq !== viewRequestSeq) return;
+        if (chunk.dataB64) {
+          const bytes = decodeBase64Bytes(chunk.dataB64);
+          parts.push(bytes);
+          total += bytes.length;
+        }
+        if (chunk.done) break;
+      }
+      if (viewerFullJobId === jobId) viewerFullJobId = null;
+      if (loadSeq !== viewerFullSeq || seq !== viewRequestSeq) return;
+
+      const url = URL.createObjectURL(
+        new Blob(parts as BlobPart[], {
+          type: begin.mime || viewerNativeMime || "application/octet-stream",
+        }),
+      );
+      photoViewerCache.put(key, url, total);
+      if (loadSeq !== viewerFullSeq || seq !== viewRequestSeq) {
+        photoViewerCache.delete(key);
+        return;
+      }
+      viewerBlobUrl = null;
+      viewerSrc.value = url;
+      viewerFullLoaded = true;
+      setViewerProgress("");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.includes("E_PHOTO_READ_CANCELLED")) {
+        console.warn(`[onView] 原图读取失败（保留预览）: ${msg}`);
+      }
+      if (jobId && viewerFullJobId === jobId) {
+        viewerFullJobId = null;
+        void photoFullCancel(jobId);
+      }
+      setViewerProgress("");
+    } finally {
+      // 只有当前代次的请求才能清加载态；旧请求不得覆盖新请求
+      if (loadSeq === viewerFullSeq) viewerFullLoading = false;
+    }
+  };
+
+  /** 预览已显示后决定是否拉原图：动图必拉；大静态图等放大 */
+  const maybeAutoLoadFull = (ph: PhotoEntry, seq: number) => {
+    const mime = viewerNativeMime || ph.meta?.mime || "";
+    const animated = ph.animated;
+    const animatedCandidate = isAnimatedImageCandidate(mime);
+    if (animated === true || (animatedCandidate && animated !== false)) {
+      void loadFullNative(ph, seq);
+      return;
+    }
+    /* 体积未知时不自动拉原图：预览已可看，等用户放大再取，避免
+     * 元数据未解密时对超大照片发起整图读取。 */
+    if (viewerNativeSize === 0 || viewerNativeSize > FULL_AUTO_MAX_BYTES) {
+      viewerFullPending = true;
+      return;
+    }
+    void loadFullNative(ph, seq);
+  };
+
   /* ===== 拖拽平移状态（非响应式闭包变量） ===== */
   let dragStartX = 0;
   let dragStartY = 0;
@@ -132,145 +336,39 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
       return;
     }
 
-    // 打开查看器：不使用缩略图占位。原图本身即解密产物 —— 点击时磁盘上仍是
-    //   密文，解密完成前不存在可显示的原图；故此处立即打开覆盖层并给出真实
-    //   阶段文案（读取块 / 解密中），解密在后台进行，完成后由 commitViewer
-    //   设置原图 Blob URL 无缝呈现。覆盖层不得门控在整条链路（块引用解析 →
-    //   密文块读取 → Worker 解密 → Blob 构造）之后：解密完成前不渲染覆盖层，
-    //   用户看到的不是「加载中」而是「点了没反应」。
-    viewerSrc.value = "";
-    setViewerProgress("读取原图…");
-    viewer.value = true;
-    engageViewerModal();
-
-    // meta 缺失时按需解密回退
-    //    场景：摘要首屏与重启后的占位项（loaded=false、meta 未解密），
-    //    若用户在可视区按需解密完成前点击照片，ph.meta 为 undefined。
-    //    此处直接调用 decryptPhotoMeta 按需解密，成功后回填列表（后续点击直接命中）。
-    let meta = ph.meta;
-    if (!meta) {
-      if (!ph.metaId) {
-        // 无 metaId（演示数据等）→ 显示缩略图 + 警告
-        showError("照片元数据缺失，无法预览原图");
-        closeViewer();
-        return;
-      }
-      setViewerProgress("读取照片元数据…");
-      const data = await decryptPhotoMeta(ph.metaId);
-      if (seq !== viewRequestSeq) return;   // 已被更新的点击取代，丢弃过期结果
-      setViewerProgress("");
-      if (!data) {
-        showError("照片元数据解密失败，可能密钥已变更或数据损坏");
-        closeViewer();
-        return;
-      }
-      // 回填到 photos 数组（后续点击直接命中，无需重复解密）
-      const pidx = photos.value.findIndex(p => p.metaId === ph.metaId);
-      if (pidx >= 0) {
-        updateShallowItem(photos, pidx, { ...data, loaded: true, failed: false });
-      }
-      meta = data.meta;
+    /* 原生查看：预览记录优先，原图按需。桌面端不再保留 JS 解密回退：
+     * 瘦身布局与既有布局都由 worker 原生读取。 */
+    if (!isTauri) {
+      showError("照片数据不可用，请重新导入");
+      return;
+    }
+    if (!ph.metaId) {
+      showError("照片元数据缺失，无法预览原图");
+      return;
     }
 
-    try {
-      // 逐块引用布局分流：瘦身布局取块集记录，既有布局取索引内联引用
-      //   （口径统一收敛在 chunk-refs，查看器/导出/删除共用）
-      let refs: ChunkRefs;
-      try {
-        refs = await resolveChunkRefs(meta, ph.name);
-      } catch (e) {
-        console.error(`[onView] 块集解析失败: ${e instanceof Error ? e.message : String(e)}`);
-        showError("照片索引数据不完整，无法读取原图");
-        closeViewer();
-        return;
-      }
-      if (seq !== viewRequestSeq) return;
-
-      const { ciphers: cipherB64, missing: notFound } = await loadChunkCiphers(refs);
-      const expected = refs.inlineCipher.length > 0 ? refs.inlineCipher.length : refs.ids.length;
-      if (seq !== viewRequestSeq) return;
-
-      if (expected === 0) {
-        showError("未找到照片数据");
-        closeViewer();
-        return;
-      }
-
-      // 渲染前完整性判定（主线程只做常数级校验）：块数与哈希项数必须与
-      //   元数据声明一致；逐块密文哈希（仅诊断）与整图明文哈希（权威值）
-      //   比对下沉到解密任务内，避免主线程对兆字节级密文做同步哈希。
-      //   空哈希数组属历史记录（无诊断值），保持兼容不比对。
-      const hashesPartial = refs.hashes.length > 0 && refs.hashes.length !== cipherB64.length;
-      if (cipherB64.length !== expected || hashesPartial) {
-        const detail = notFound > 0
-          ? `缺失 ${notFound} 块`
-          : hashesPartial
-            ? `哈希项数不一致（${refs.hashes.length} ≠ ${cipherB64.length}）`
-            : "块数不一致";
-        console.error(`[onView] 照片数据不完整：${detail}`);
-        showError("此照片数据已损坏，请删除后重新导入");
-        closeViewer();
-        return;
-      }
-
-      // 逐块解密：优先在 photo-crypto Worker 池执行（主线程不做派生与 AEAD），
-      //   池基础设施不可用时由桥回退主线程实现；任一块失败即整体失败，
-      //   拒绝渲染残缺图。
-      //   解密在 Worker 内一次任务完成（同文件复用同一子密钥），
-      //   阶段反馈按"整批解密"如实呈现，不做无法对应的逐块假进度。
-      //   索引瘦身布局：先解封包裹态文件密钥，再按 nonce|密文 布局逐块解密。
-      let plaintexts: Uint8Array[];
-      try {
-        setViewerProgress(`解密中（${cipherB64.length} 块）`);
-        const slim = isSlimLayout(meta) && meta.wrappedFileKey
-          ? { wrappedFileKey: meta.wrappedFileKey, chunkTotal: cipherB64.length }
-          : undefined;
-        plaintexts = await decryptChunksPreferWorker(
-          cipherB64, meta.fileHash, ph.name, slim,
-          {
-            expectedHashes: refs.hashes.length > 0 ? refs.hashes : undefined,
-            // 整图明文哈希是密钥轮换后仍然成立的权威值：密文哈希失配时由它兜底
-            expectedFileHash: meta.fileHash,
-          },
-        );
-        setViewerProgress("");
-      } catch (e) {
-        console.error(`[onView] 照片数据解密失败: ${e instanceof Error ? e.message : String(e)}`);
-        if (seq !== viewRequestSeq) return;
-        setViewerProgress("");
-        showError("照片数据无法读取，可能密钥已变更");
-        closeViewer();
-        return;
-      }
-      if (seq !== viewRequestSeq) return;
-
-      // 直接以解密块数组构造 Blob：Blob 构造按规范即复制字节，
-      //   省去「逐块拼接到新 Uint8Array + ArrayBuffer 再切片」两次主线程
-      //   整图拷贝 —— 拷贝量与图大小成正比，大图会在打开瞬间明显卡顿。
-      const blob = new Blob(plaintexts as BlobPart[], { type: meta.mime });
-      const url = URL.createObjectURL(blob);
-      // 明文块清零：Blob 已复制字节，此后解密产物不在堆中驻留
-      for (const c of plaintexts) c.fill(0);
-      if (seq !== viewRequestSeq) {
-        URL.revokeObjectURL(url);   // 过期请求：本次产出的 Blob 立即释放
-        return;
-      }
-      disposeViewerBlob();          // 覆盖前释放上一次的 Blob URL
-      viewerBlobUrl = url;
-      commitViewer(seq, url);
-
-      // 防截屏保护是应用级能力：保护生效时已覆盖全部窗口，
-      // viewer 覆盖层不影响其生效，打开查看器无需任何额外命令
-    } catch (e) {
-      console.error("预览失败:", e);
-      setViewerProgress("");
-      showError("预览失败，请重试");
+    viewerPhoto = ph;
+    viewerFullLoaded = false;
+    viewerFullPending = false;
+    viewerNativeSize = 0;
+    viewerNativeMime = "";
+    cancelFullLoad();
+    const handled = await tryNativePreview(ph, seq);
+    if (seq !== viewRequestSeq) return;
+    if (!handled) {
+      showError("照片数据无法读取，可能密钥已变更或记录损坏");
       closeViewer();
+      return;
     }
+    maybeAutoLoadFull(ph, seq);
   };
 
   const closeViewer = () => {
     viewRequestSeq++;   // 作废在途请求，防止关闭后又被旧结果重新打开
+    cancelFullLoad();
+    viewerFullLoaded = false;
+    viewerFullPending = false;
+    viewerPhoto = null;
     disposeViewerBlob();
     setViewerProgress("");
     viewer.value = false;
@@ -358,6 +456,16 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
     }
 
     viewerScale.value = newScale;
+
+    /* 大图放大即按需读取原图：预览仍保持显示，原图到达后原地替换。 */
+    if (
+      newScale > 1.01 &&
+      viewerFullPending &&
+      !viewerFullLoading &&
+      viewerPhoto
+    ) {
+      void loadFullNative(viewerPhoto, viewRequestSeq);
+    }
   };
 
   /* ===== 鼠标拖拽平移（mousedown 在图像上，mousemove/mouseup 委托 window） ===== */
@@ -411,6 +519,7 @@ export function usePhotoViewer(options: UsePhotoViewerOptions) {
    */
   const cleanup = () => {
     viewRequestSeq++;   // 作废在途请求，防止卸载后旧结果落地
+    cancelFullLoad();
     disposeViewerBlob();
     setViewerProgress("");
     releaseViewerModal();

@@ -8,7 +8,10 @@
  *   - 跨层共享的载荷/分片预算由预算常量生成物提供（单一定义）
  *
  */
-import { MAX_EXPORT_SINGLE_BYTES, PAYLOAD_CHUNK_SIZE_BYTES } from "./photo_budget.generated";
+import {
+  MAX_EXPORT_SINGLE_BYTES,
+  PHOTO_CHUNK_SIZE_BYTES,
+} from "./photo_budget.generated";
 
 /* 跨层预算再导出：导入链路（批量记录与分块上传）按此约束单次 IPC 载荷 */
 export { MAX_IPC_PAYLOAD_BYTES, MAX_CHUNKS_PER_IPC } from "./photo_budget.generated";
@@ -43,8 +46,17 @@ export const TAG_LEN = 16;
  * 数据块结构长度                                                      *
  * ------------------------------------------------------------------ */
 
-/** 单块大小（1 MiB，取跨层预算常量：写入侧分片口径与解析侧一致） */
-export const CHUNK_SIZE = PAYLOAD_CHUNK_SIZE_BYTES;
+/** 照片存储分块大小（4 MiB，跨层预算唯一口径）：
+ *  导入切片、块记录上限与记录数公式均按此值计算。 */
+export const PHOTO_CHUNK_SIZE = PHOTO_CHUNK_SIZE_BYTES;
+
+/** VENC 容器帧上限（与照片存储分块同源，4 MiB）。
+ *
+ *  Why 与存储分块同源：导出直接把存储块作为容器帧打包，若容器上限小于
+ *  存储块，新导入的 4MiB 照片会在导出时被拒绝。旧容器仍按 1MiB 帧写入，
+ *  读取侧按帧长解析，因此 4MiB 上限向后兼容存量容器。
+ */
+export const CHUNK_SIZE = PHOTO_CHUNK_SIZE;
 
 /** BLAKE3 文件哈希长度（256 位） */
 export const FILE_HASH_LEN = 32;

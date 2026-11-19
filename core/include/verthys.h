@@ -819,6 +819,25 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_AddRecords(VerthysHandle handle,
                             uint32_t count,
                             uint64_t *out_ids);
 
+#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+/* ================================================================== *
+ * 批量导入锚点推迟（API 版本 0x0015，仅隔离原型构建）
+ *
+ * 语义：Begin 先把当前容器代提交到回退锚点，随后会话内的 AddRecord(s)
+ * 不逐次推进锚点；C 层强制上限为 32 代 / 30 秒，任一越限的下一次保存
+ * 立即提交。Commit 提交锚点到当前代并结束会话。
+ *
+ * 会话内仅允许新增与读取；删除/导入/改密/PCR/keyfile/模块/轮换返回
+ * VERTHYS_ERR_POLICY，调用方必须先 Commit。重复 Begin/Commit 幂等。
+ *
+ * 失败语义：Begin 锚点提交失败则返回错误且不进入会话；Commit 或上限
+ * 触发的提交失败会锁定会话（后续调用返回 VERTHYS_ERR_LOCKED），容器
+ * 数据已落盘，下次解锁按“容器代 >= 锚点”补推进。
+ * ================================================================== */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_BulkImportBegin(VerthysHandle handle);
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_BulkImportCommit(VerthysHandle handle);
+#endif
+
 /* 按ID读取完整记录数据，返回结构体指针为内部借用内存
  *
  * API 契约加固：指针生命周期契约
@@ -1086,6 +1105,27 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_FindFirstLidByType(VerthysHandle 
                                                   uint8_t rtype,
                                                   uint8_t *out_found,
                                                   uint64_t *out_lid);
+
+/* ================================================================== *
+ * 按名称精确查找记录 ID（API 版本 0x0015）                             *
+ *                                                                    *
+ * 语义：名称经 NFKC 归一化后以模块 MDEK 计算名称盲索引，在名称索引   *
+ * 中按 token 前缀游标定位；跳过墓碑，返回首个存活记录 ID。            *
+ * 不读取记录密文；名称不存在是正常状态，返回 VERTHYS_OK +            *
+ * out_found=0。                                                      *
+ *                                                                    *
+ * 模块顺序：照片 → 账户 → 文件保险箱；同一名称在不同模块互不可见，  *
+ * 调用方不提供类型时按该固定顺序返回首个命中。                        *
+ *                                                                    *
+ * 返回值：VERTHYS_OK / VERTHYS_ERR_INVALID / VERTHYS_ERR_LOCKED /    *
+ *         VERTHYS_ERR_FORMAT / VERTHYS_ERR_CORRUPT                   *
+ * 线程安全：MT-Const（只读索引游标）                                  *
+ * ================================================================== */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_FindLidByName(VerthysHandle handle,
+                                             const char *name,
+                                             size_t name_len,
+                                             uint8_t *out_found,
+                                             uint64_t *out_lid);
 
 /* ================================================================== *
  * 按类型分页枚举记录 ID（API 版本 0x0012）                             *

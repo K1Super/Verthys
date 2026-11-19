@@ -171,7 +171,7 @@
             :style="[ph._style, { '--reveal-delay': revealDelayOf(vi) + 'ms' }]"
             role="button"
             tabindex="0"
-            :aria-label="ph.name || '照片'"
+            :aria-label="ph.animated ? `${ph.name || '照片'}，动图` : (ph.name || '照片')"
             :aria-pressed="selectMode ? selectedPhotoIds.has(ph.id) : undefined"
             @mousemove="onCardMove($event)"
             @mouseleave="onCardLeave($event)"
@@ -184,6 +184,7 @@
                  文字祖先链上无 filter / 3D 变换 / 缩放，恒走静态栅格化清晰路径。 -->
             <div class="photo-card glass reveal-item">
               <div class="photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
+              <span v-if="ph.animated" class="photo-anim-badge">动图</span>
               <div class="photo-overlay">
                 <span class="photo-name">{{ ph.name }}</span>
                 <span class="photo-size">{{ ph.size }}</span>
@@ -282,6 +283,7 @@
                 v-tip="`${ph.name}，${ph.size}`"
               >
                 <div class="ed-photo-thumb" :style="{ backgroundImage: ph.thumb }"></div>
+                <span v-if="ph.animated" class="photo-anim-badge ed-anim-badge">动图</span>
                 <span class="ed-photo-name">{{ ph.name }}</span>
               </div>
             </template>
@@ -301,16 +303,20 @@
                 <input type="radio" v-model="exportFormat" value="multiple" :disabled="exporting" />
                 <span>多文件</span>
               </label>
+              <label v-if="nativeExportAvailable" class="ed-seg-item" :class="{ active: exportFormat === 'original' }">
+                <input type="radio" v-model="exportFormat" value="original" :disabled="exporting" />
+                <span>原始文件</span>
+              </label>
               <label class="ed-seg-item" :class="{ active: exportFormat === 'png' }">
                 <input type="radio" v-model="exportFormat" value="png" :disabled="exporting" />
                 <span>PNG</span>
               </label>
             </div>
-            <p class="kv-hint">{{ exportFormat === 'single' ? '全部照片打包为一个 .venc 文件' : exportFormat === 'multiple' ? '每张照片导出为独立 .venc 文件' : '导出为 .png 图片，其他格式自动转码' }}</p>
+            <p class="kv-hint">{{ exportFormat === 'single' ? '全部照片打包为一个 .venc 文件' : exportFormat === 'multiple' ? '每张照片导出为独立 .venc 文件' : exportFormat === 'original' ? '导出解密后的原始文件；请确认目标位置安全' : '导出为 .png 图片，其他格式自动转码；动图将跳过' }}</p>
           </div>
 
-          <!-- 令牌（PNG 明文导出不需要） -->
-          <div v-if="exportFormat !== 'png'" class="ed-group">
+          <!-- 令牌（PNG / 原始文件明文导出不需要） -->
+          <div v-if="exportFormat !== 'png' && exportFormat !== 'original'" class="ed-group">
             <span class="kv-section-label">令牌</span>
             <div class="ed-token-display">
               <input
@@ -354,7 +360,7 @@
         <span class="kv-summary">
           <template v-if="exporting">{{ exportStatus }}</template>
           <template v-else-if="!exportPath">尚未选择保存位置</template>
-          <template v-else>{{ exportSelectedIds.size }} 张 · {{ exportFormat === 'single' ? '单文件' : exportFormat === 'multiple' ? '多文件' : 'PNG' }} · {{ exportFormat === 'png' ? '明文' : 'AES-256' }}</template>
+          <template v-else>{{ exportSelectedIds.size }} 张 · {{ exportFormat === 'single' ? '单文件' : exportFormat === 'multiple' ? '多文件' : exportFormat === 'original' ? '原始文件' : 'PNG' }} · {{ exportFormat === 'png' || exportFormat === 'original' ? '明文' : 'AES-256' }}</template>
         </span>
         <button class="btn kv-cancel" @click="closeExportDialog" :disabled="exporting">取消</button>
         <button
@@ -421,7 +427,7 @@
         <div style="height: 12px;"></div>
         <input class="kv-input parse-token-input" v-model="parseToken" placeholder="请输入密钥" />
         <div class="kv-actions">
-          <button class="btn btn-primary kv-confirm" @click="doParse" :disabled="!parseFileData || !parseToken">
+          <button class="btn btn-primary kv-confirm" @click="doParse" :disabled="(isTauri ? !parseFilePath : !parseFileData) || !parseToken">
             开始解析
           </button>
         </div>
@@ -646,7 +652,7 @@ watch(failedCount, (n, prev) => {
   }
 });
 
-/* ---------- 3. 查看器层（依赖 usePhotoData 的 photos/decryptPhotoMeta） ---------- */
+/* ---------- 3. 查看器层（原生预览/原图） ---------- */
 const {
   viewer, viewerSrc, viewerName, viewerBlurred, viewerScale,
   viewerOffsetX, viewerOffsetY, viewerDragging, viewerLoading,
@@ -654,7 +660,7 @@ const {
   onBlur, onFocus,
   cleanup: cleanupViewer,
 } = usePhotoViewer({
-  photos, isTauri, ensurePhotoKey, decryptPhotoMeta, showError,
+  photos, isTauri, ensurePhotoKey, showError,
 });
 
 /* ---------- 4. 导入层 ---------- */
@@ -663,10 +669,8 @@ const {
   /* 新增耗时（供 QuantumProgressFlow 使用） */
   importElapsed,
   onImport,
-  /* 卸载时取消进行中的导入（守护流水线：中止投喂并保留 WAL 续传） */
+  /* 卸载时取消进行中的原生导入（保留 WAL 续传） */
   abortImport,
-  /* Parsed Import：导出 getPipeline 供 usePhotoParse 复用同一流水线实例 */
-  getPipeline,
 } = usePhotoImport({
   photos, isTauri, ensurePhotoKey, showError, showToast,
 });
@@ -674,7 +678,7 @@ const {
 /* ---------- 5. 导出层 ---------- */
 const {
   showExportDialog, exportSelectedIds, exportToken, exportFormat, exportPath,
-  exporting, exportProgress, exportStatus, tokenCopied,
+  exporting, exportProgress, exportStatus, tokenCopied, nativeExportAvailable,
   openExportDialog, closeExportDialog, togglePhotoSelect, allPhotosSelected,
   toggleSelectAllPhotos, regenerateExportToken, copyExportToken, chooseExportPath,
   doExport,
@@ -714,7 +718,7 @@ const onViewerKeydown = (e: KeyboardEvent) => {
 
 /* ---------- 6. 解析层 ---------- */
 const {
-  showParseDialog, parseFileName, parseFileData, parseToken, parsing, parsedPhotos,
+  showParseDialog, parseFileName, parseFileData, parseFilePath, parseToken, parsing, parsedPhotos,
   // 感知：进度条状态（复用中枢初始化窗口进度条样式，非量子动画）
   fileLoading, fileLoadingPercent, fileLoadingMsg,
   parsingPercent, parsingMsg,
@@ -723,9 +727,8 @@ const {
   openParseDialog, closeParseDialog, chooseParseFile, doParse, importParsedPhotos,
 } = usePhotoParse({
   photos, isTauri, ensurePhotoKey, showError, showToast,
-  /* Parsed Import：复用 usePhotoImport 的流水线实例 + 导入状态 refs
-     （对话框内复用 QuantumProgressFlow，导入进度实时反馈，UI 不卡死） */
-  getPipeline, importProgress, importStatus, importElapsed,
+  /* Parsed Import：复用导入状态 refs（对话框内实时反馈进度） */
+  importProgress, importStatus, importElapsed,
 });
 
 /* ---------- 7. 删除层（依赖 usePhotoViewer 的 onView 用于非选择模式下的照片点击） ---------- */
@@ -1119,6 +1122,16 @@ useModuleDialogGuard("photos", () => {
 }
 .photo-name { font-size: 11px; color: var(--text-primary); font-family: var(--font); }
 .photo-size { font-size: 9px; color: var(--accent); font-family: var(--font); letter-spacing: 0.5px; }
+/* 动图角标：静态标记，无阴影/渐变/发光；层序高于光晕层与文字遮罩，
+   不参与 hover 与滚动过渡，避免滚动帧产生额外重绘 */
+.photo-anim-badge {
+  position: absolute; top: 8px; right: 8px; z-index: 5;
+  padding: 1px 5px; border: 1px solid rgba(var(--accent-rgb), 0.28);
+  border-radius: 4px; background: rgba(0, 0, 0, 0.55);
+  color: var(--accent); font-family: var(--font); font-size: 9px;
+  line-height: 1.4; letter-spacing: 0.5px; pointer-events: none;
+}
+.ed-anim-badge { top: 5px; right: 5px; padding: 0 4px; font-size: 8px; }
 
 /* 滚动静默态（滚动性能第 3 铁律）：滚动期间冻结本网格的一切 hover 过渡与
    入场动画（data-scrolling 由 usePhotoData 静默态挂载在滚动容器上）——
@@ -1204,7 +1217,7 @@ useModuleDialogGuard("photos", () => {
 .ed-group { display: flex; flex-direction: column; gap: 9px; }
 
 /* 格式分段控件：与令牌 / 保存位置行同宽同高（40px 整行） */
-.ed-seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; height: 40px; padding: 2px; background: linear-gradient(180deg, rgba(2, 5, 10, 0.34), rgba(2, 5, 10, 0.18)); border-radius: 8px; box-shadow: inset 0 1px 0 rgba(var(--black-rgb), 0.5), inset 0 -1px 0 rgba(205, 224, 244, 0.055); }
+.ed-seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 2px; height: 40px; padding: 2px; background: linear-gradient(180deg, rgba(2, 5, 10, 0.34), rgba(2, 5, 10, 0.18)); border-radius: 8px; box-shadow: inset 0 1px 0 rgba(var(--black-rgb), 0.5), inset 0 -1px 0 rgba(205, 224, 244, 0.055); }
 .ed-seg-item { position: relative; display: grid; place-items: center; border-radius: 6px; font-size: 11px; color: var(--text-muted); cursor: pointer; transition: color 0.18s var(--ease), background 0.18s var(--ease), box-shadow 0.18s var(--ease); }
 .ed-seg-item input { position: absolute; opacity: 0; pointer-events: none; }
 .ed-seg-item:hover { color: var(--text-secondary); }

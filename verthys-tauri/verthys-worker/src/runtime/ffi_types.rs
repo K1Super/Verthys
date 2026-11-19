@@ -72,6 +72,11 @@ pub(crate) type VerthysAddRecordsFn =
 pub(crate) type VerthysGetRecordFn =
     unsafe extern "C" fn(VerthysHandle, u64, *mut VerthysRecordC) -> u32;
 pub(crate) type VerthysClearRecordCacheFn = unsafe extern "C" fn(VerthysHandle) -> u32;
+/// 批量导入锚点推迟（API 0x0015，仅隔离原型 DLL 导出）。
+/// 宿主按可选符号解析：缺失时回退逐次锚点提交。
+pub(crate) type VerthysBulkImportFn = unsafe extern "C" fn(VerthysHandle) -> u32;
+/// 可选符号缺失：与真实 C 层错误码区分，宿主据此走兼容路径。
+pub(crate) const VERTHYS_SYMBOL_UNSUPPORTED: u32 = 0xFFFF_FFFE;
 pub(crate) type VerthysDeleteRecordFn = unsafe extern "C" fn(VerthysHandle, u64) -> u32;
 pub(crate) type VerthysDeleteRecordsFn = unsafe extern "C" fn(VerthysHandle, *const u64, usize) -> u32;
 pub(crate) type VerthysExportFn =
@@ -398,6 +403,18 @@ pub(crate) type VerthysHasRecordByTypeFn = unsafe extern "C" fn(VerthysHandle, u
  *   （不报 FORMAT，避免前端 probe 抛异常）
  *   用于解锁成功后进程内探测全局主密钥记录，消除解锁后 3~4 次 IPC 往返 */
 pub(crate) type VerthysFindFirstLidByTypeFn = unsafe extern "C" fn(VerthysHandle, u8, *mut u8, *mut u64) -> u32;
+
+/* 按名称精确查找记录 ID FFI 绑定（API 0x0015）
+ * 签名：VerthysResult Verthys_FindLidByName(
+ *   handle, name, name_len, uint8_t *out_found, uint64_t *out_lid)
+ * 名称盲索引前缀游标；未找到返回 OK + found=0。 */
+pub(crate) type VerthysFindLidByNameFn = unsafe extern "C" fn(
+    VerthysHandle,
+    *const std::os::raw::c_char,
+    usize,
+    *mut u8,
+    *mut u64,
+) -> u32;
 
 /* 按类型分页枚举记录 ID FFI 绑定（API 0x0012）
  * 签名：VerthysResult Verthys_ListIdsByType(

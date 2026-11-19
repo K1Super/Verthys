@@ -50,6 +50,30 @@ int vty_rollback_commit(const uint8_t vault_uuid[VTY_UUID_BYTES], uint64_t gener
 int vty_rollback_reset_anchor(const uint8_t vault_uuid[VTY_UUID_BYTES],
                               uint64_t generation);
 
+#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
+/* G0-A 隔离原型：停止后台预置线程、清空已验证条目缓存与脏锚点标记。
+ * 由核心 Deinit 在最后一个上下文注销后调用；可重复调用。 */
+void vty_rollback_shutdown(void);
+
+/* 跨进程 RollbackState 互斥量：供预置池后台建键与提交串行化。
+ * 调用方必须按 RollbackState → pool lock 顺序加锁。 */
+void *vty_rollback_lock_state(void);
+void vty_rollback_unlock_state(void *mutex);
+#endif
+
+#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE && \
+    defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+/* 崩溃注入：在指定提交阶段直接 TerminateProcess，模拟断电/进程被杀。
+ * 仅隔离原型 + 测试钩子构建提供；进程退出码为 0xC0DE0000 | point。 */
+enum {
+    VTY_RB_CRASH_COMMIT_ENTER = 1,   /* 已加载状态、尚未取/建新键 */
+    VTY_RB_CRASH_AFTER_NEW_KEY = 2,  /* 新键已存在、状态未写 */
+    VTY_RB_CRASH_AFTER_STORE = 3,    /* 状态已写、旧键未退役 */
+    VTY_RB_CRASH_AFTER_RETIRE = 4    /* 旧键已退役、未补池 */
+};
+void vty_rollback_set_crash_point_for_test(int point);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

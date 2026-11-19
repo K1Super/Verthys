@@ -2,7 +2,7 @@
 
 > 第三方库清单、版本来源、引入理由、许可证、升级策略与供应链安全关联。
 >
-> Last updated: 2026-11-17 · 维护人：K1Super
+> Last updated: 2026-11-19 · 维护人：K1Super
 
 本文档按“单一事实来源”原则：版本/依赖以 `dep-versions.txt`、`third_party/`
 下实际文件、`verthys-tauri/src-tauri/Cargo.toml`（及 Cargo.lock）、`verthys-tauri/package.json` 为准，
@@ -35,6 +35,34 @@
 | 异步/并发 | tokio `1`、tokio-util `0.7`、crossbeam-channel `0.5` | IPC/后台任务/日志管道 |
 | 其它 | chrono、regex、percent-encoding、log、tempfile（dev） | 时间/校验/路径头解码/日志/测试 |
 | 本地补丁 | `keyboard-types`（`[patch.crates-io]` → `../keyboard-types-patched`） | 修复 0.7.0 bitflags! serde 语法；`proc-macro2 =1.0.106` 经 rustflags 强制 `span_locations` |
+
+### 3.1 verthys-worker 直接依赖（`verthys-tauri/verthys-worker/Cargo.toml`）
+
+照片数据面下沉后新增/使用的原生媒体依赖；许可证取自各 crate 元数据
+（`cargo metadata --format-version 1`）。
+
+| 依赖 | 版本 | 许可证 | 引入理由 | 用途模块 |
+|---|---|---|---|---|
+| aes | 0.8.4 | MIT OR Apache-2.0 | VENC 外层包裹密钥 AES-256-GCM | `runtime/media/venc.rs` |
+| aes-gcm | 0.10.3 | Apache-2.0 OR MIT | 同上（AEAD 实现） | `runtime/media/venc.rs` |
+| chacha20poly1305 | 0.10.1 | Apache-2.0 OR MIT | VENC 帧 XChaCha20-Poly1305 | `runtime/media/venc.rs` |
+| blake3 | 1.8.7 | CC0-1.0 OR Apache-2.0 | 文件哈希、导入去重与完整性 | `runtime/media/*` |
+| hkdf | 0.12.4 | MIT OR Apache-2.0 | 既有内容层派生链 | `runtime/content_crypto.rs` |
+| image | 0.25.10 | MIT OR Apache-2.0 | 缩略图/预览/PNG 原生编解码（jpeg/png/gif/webp） | `runtime/media/decoder.rs` |
+| pbkdf2 | 0.12.2 | MIT OR Apache-2.0 | VENC 令牌 KDF（PBKDF2-SHA256）与文件块 v2 | `runtime/media/venc.rs`、`runtime/content_crypto.rs` |
+| rand | 0.8.6 | MIT OR Apache-2.0 | 令牌/盐/内容密钥随机源封装 | `runtime/content_crypto.rs` |
+| libloading | 0.8.9 | ISC | 运行时解析 `verthys.dll` 导出符号 | `runtime/worker.rs` |
+| windows-sys | 0.59.0 | MIT OR Apache-2.0 | Windows 句柄/共享内存/进程 API | `runtime/scan_shm.rs` 等 |
+
+审计结论：
+
+- 新增依赖均为 RustCrypto / image-rs / BLAKE3 官方 crate，注册表来源，
+  `Cargo.lock` 锁定；未引入 Git 依赖、未使用 `unsafe` 包装的第三方二进制。
+- `image` 默认启用 jpeg/png/gif/webp 解码；未启用 TIFF/AVIF 等未使用格式。
+- `cargo tree -d` 仅见同一 crate 的 feature 合并与 `miniz_oxide` 0.8/0.9 双版本
+  （`png` 与 `flate2` 各自依赖），无重复功能栈冲突。
+- 调试构建 `verthys-worker.exe` 约 6.7MB（未剥离）；发布构建由构建脚本另行
+  记录，不以调试体积作为发布指标。
 
 ## 4. 前端依赖（`verthys-tauri/package.json`，节选大类）
 | 类别 | 依赖 |

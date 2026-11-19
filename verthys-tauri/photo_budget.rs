@@ -51,14 +51,20 @@ pub const PB_IPC_MAX_PAYLOAD_BYTES: u64 = 12_582_912;
 /// 单次块上传的块数上限
 pub const PB_MAX_CHUNKS_PER_IPC: u64 = 32;
 
-/// 数据块明文分片大小（字节）
+/// VENC 容器帧与旧路径兼容的数据分片大小（字节）
 pub const PB_PAYLOAD_CHUNK_SIZE_BYTES: u64 = 1_048_576;
+
+/// 照片存储分块大小（字节）：导入分块与块记录上限的唯一口径
+pub const PB_PHOTO_CHUNK_SIZE_BYTES: u64 = 4_194_304;
+
+/// 照片单文件上限（字节）：产品边界，不是样本尺寸
+pub const PB_PHOTO_MAX_BYTES: u64 = 104_857_600;
 
 /// 单批块上传载荷上限（字节，base64 口径）
 pub const PB_MAX_CHUNK_BATCH_B64: u64 = 12_578_816;
 
 /// 单条记录 chunk 密文 base64 长度上限
-pub const PB_CHUNK_RECORD_B64_MAX: u64 = 1_398_188;
+pub const PB_CHUNK_RECORD_B64_MAX: u64 = 5_592_504;
 
 /// 最大合法响应行（字节）：单条载荷上限再编码一次 + JSON 头
 pub const PB_MAX_LEGAL_RESPONSE_LINE: u64 = 16_781_312;
@@ -120,6 +126,9 @@ const _: () = {
         PB_ENUM_RESPONSE_DATA_BUDGET_BYTES + PB_JSON_FRAME_OVERHEAD_BYTES
             <= PB_IPC_MAX_RESPONSE_LINE_BYTES,
     );
+    pb_assert(PB_PHOTO_CHUNK_SIZE_BYTES <= 16 * 1024 * 1024);
+    pb_assert(PB_CHUNK_RECORD_B64_MAX + PB_JSON_FRAME_OVERHEAD_BYTES <= PB_IPC_MAX_PAYLOAD_BYTES);
+    pb_assert(PB_CHUNK_RECORD_B64_MAX * 2 + PB_JSON_FRAME_OVERHEAD_BYTES <= PB_IPC_MAX_PAYLOAD_BYTES);
     pb_assert(PB_MAX_FILE_CHUNK_SIZE_BYTES <= PB_IPC_MAX_PAYLOAD_BYTES / 2);
     pb_assert(PB_WRITE_FILE_CHUNK_BYTES <= PB_IPC_MAX_PAYLOAD_BYTES / 2);
     pb_assert(PB_MAX_EXPORT_SINGLE_BYTES >= PB_WRITE_FILE_CHUNK_BYTES);

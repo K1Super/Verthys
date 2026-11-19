@@ -47,13 +47,19 @@ const derived = {
     C.photo_thumb_max_chars + C.meta_index_overhead_chars,
     L.meta_crypto_overhead,
   ),
-  chunk_record_b64_max: recordB64(C.payload_chunk_size, L.chunk_crypto_overhead),
+  // 照片存储分块口径：记录密文上限必须按实际写入的 4MiB 块推导，
+  // 不能沿用 VENC 帧/旧路径的 1MiB 分片口径。
+  // chunk_crypto_overhead 是整条分片密文的附加长度，不是单一 AEAD 认证标签：
+  // 内容域标签 6 + 分片头 28 + nonce 24 + 认证标签 16 = 74 字节。
+  chunk_record_b64_max: recordB64(C.photo_chunk_size, L.chunk_crypto_overhead),
   max_legal_response_line: Math.floor((C.ipc_max_payload / L.base64_den) * L.base64_num) + L.json_frame_overhead,
   // 索引瘦身布局的索引明文上界：逐块项已移入块集记录，索引只含展示字段与聚合引用
   // （名称最坏 JSON 转义 + 固定字段 + 缩略图/块集引用与包裹密钥）
   photo_index_plain_max:
     C.max_record_name_bytes * 2 + C.meta_fixed_plain_bytes + C.meta_ref_bytes,
-  // 块集记录明文上界：按最大照片的分块数推导（逐块引用 + 逐块哈希）
+  // 块集记录明文上界：按最大照片的最坏分块数推导（逐块引用 + 逐块哈希）。
+  // 这里刻意使用 1MiB 兼容口径而不是 4MiB 写入口径：存量 1MiB 块集的项数
+  // 是新写入的 4 倍，上界必须同时容纳两类数据，不能把写入口径当成读取上界。
   chunk_set_plain_max: (() => {
     const chunks = Math.ceil(C.photo_max_bytes / C.payload_chunk_size);
     return chunks * (C.chunk_ref_bytes + C.chunk_hash_bytes) + C.chunk_set_fixed_plain_bytes;
@@ -131,6 +137,22 @@ const checks = [
       <= C.ipc_max_response_line,
   },
   {
+    name: "照片存储分块 不超过 C 层单块明文上限",
+    ok: C.photo_chunk_size <= C.chunk_plain_max,
+  },
+  {
+    name: "单条 4MiB 块密文 + JSON 头 不超过单次载荷上限",
+    ok:
+      derived.chunk_record_b64_max + L.json_frame_overhead
+      <= C.ipc_max_payload,
+  },
+  {
+    name: "至少两块 4MiB 块密文可同批装入单次载荷",
+    ok:
+      derived.chunk_record_b64_max * 2 + L.json_frame_overhead
+      <= C.ipc_max_payload,
+  },
+  {
     name: "单文件块大小 不超过单条载荷上限一半",
     ok: C.max_file_chunk_size <= Math.floor(C.ipc_max_payload / 2),
   },
@@ -183,8 +205,11 @@ export const MAX_IPC_PAYLOAD_BYTES = ${C.ipc_max_payload};
 /** 单次块上传的块数上限 */
 export const MAX_CHUNKS_PER_IPC = ${C.max_chunks_per_ipc};
 
-/** 数据块明文分片大小（字节） */
+/** VENC 容器帧与旧路径兼容的数据分片大小（字节），不是照片存储分块 */
 export const PAYLOAD_CHUNK_SIZE_BYTES = ${C.payload_chunk_size};
+
+/** 照片存储分块大小（字节）：导入分块与块记录上限的唯一口径 */
+export const PHOTO_CHUNK_SIZE_BYTES = ${C.photo_chunk_size};
 
 /** 索引瘦身布局的索引明文上界（字节）：展示字段与聚合引用（逐块项已移入块集记录） */
 export const PHOTO_INDEX_MAX_BYTES = ${derived.photo_index_plain_max};
@@ -273,8 +298,14 @@ pub const PB_IPC_MAX_PAYLOAD_BYTES: u64 = ${rs(C.ipc_max_payload)};
 /// 单次块上传的块数上限
 pub const PB_MAX_CHUNKS_PER_IPC: u64 = ${rs(C.max_chunks_per_ipc)};
 
-/// 数据块明文分片大小（字节）
+/// VENC 容器帧与旧路径兼容的数据分片大小（字节）
 pub const PB_PAYLOAD_CHUNK_SIZE_BYTES: u64 = ${rs(C.payload_chunk_size)};
+
+/// 照片存储分块大小（字节）：导入分块与块记录上限的唯一口径
+pub const PB_PHOTO_CHUNK_SIZE_BYTES: u64 = ${rs(C.photo_chunk_size)};
+
+/// 照片单文件上限（字节）：产品边界，不是样本尺寸
+pub const PB_PHOTO_MAX_BYTES: u64 = ${rs(C.photo_max_bytes)};
 
 /// 单批块上传载荷上限（字节，base64 口径）
 pub const PB_MAX_CHUNK_BATCH_B64: u64 = ${rs(derived.chunk_batch_b64_max)};
@@ -342,6 +373,9 @@ const _: () = {
         PB_ENUM_RESPONSE_DATA_BUDGET_BYTES + PB_JSON_FRAME_OVERHEAD_BYTES
             <= PB_IPC_MAX_RESPONSE_LINE_BYTES,
     );
+    pb_assert(PB_PHOTO_CHUNK_SIZE_BYTES <= 16 * 1024 * 1024);
+    pb_assert(PB_CHUNK_RECORD_B64_MAX + PB_JSON_FRAME_OVERHEAD_BYTES <= PB_IPC_MAX_PAYLOAD_BYTES);
+    pb_assert(PB_CHUNK_RECORD_B64_MAX * 2 + PB_JSON_FRAME_OVERHEAD_BYTES <= PB_IPC_MAX_PAYLOAD_BYTES);
     pb_assert(PB_MAX_FILE_CHUNK_SIZE_BYTES <= PB_IPC_MAX_PAYLOAD_BYTES / 2);
     pb_assert(PB_WRITE_FILE_CHUNK_BYTES <= PB_IPC_MAX_PAYLOAD_BYTES / 2);
     pb_assert(PB_MAX_EXPORT_SINGLE_BYTES >= PB_WRITE_FILE_CHUNK_BYTES);

@@ -1,5 +1,5 @@
 {
-  "description": "跨层预算常量单一权威来源。所有取值必须与当前实现一致：任一改动都要同步重新生成 TS / Rust 常量，并由 CI 校验生成物与本源一致。派生量（scan_batch_max_bytes / enum_response_data_budget）由生成器按公式计算，禁止在本文件里手填。",
+  "description": "跨层预算常量单一权威来源。所有取值必须与当前实现一致：任一改动都要同步重新生成 TS / Rust 常量，并由 CI 校验生成物与本源一致。派生量（scan_batch_max_bytes / enum_response_data_budget）由生成器按公式计算，禁止在本文件里手填。边界口径：photo_max_bytes 是唯一照片产品上限；photo_chunk_size 是照片存储分块参数；payload_chunk_size 仅用于 VENC 容器帧与旧路径兼容，不是照片存储分块。",
   "unit": "混合口径：多数为字节；*_ms 为毫秒；*_retries 为次数；见各常量键名与生成物注释",
   "constants": {
     "shm_default_size": 8388608,
@@ -13,6 +13,8 @@
     "ipc_max_payload": 12582912,
     "max_chunks_per_ipc": 32,
     "payload_chunk_size": 1048576,
+    "photo_chunk_size": 4194304,
+    "chunk_plain_max": 16777216,
     "ipc_max_request_line": 16777216,
     "ipc_max_response_line": 25165824,
     "ipc_max_line": 33554432,
@@ -35,7 +37,7 @@
   },
   "layouts": {
     "meta_crypto_overhead": 56,
-    "chunk_crypto_overhead": 64,
+    "chunk_crypto_overhead": 74,
     "json_frame_overhead": 4096,
     "base64_num": 4,
     "base64_den": 3

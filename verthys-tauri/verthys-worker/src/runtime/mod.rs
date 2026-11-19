@@ -41,6 +41,7 @@ pub(crate) mod module_session;
 pub(crate) mod pcr_session;
 pub(crate) mod ipc_auth;
 pub(crate) mod path_grants;
+pub(crate) mod media;
 
 /// 跨层预算常量（与主进程同源）
 ///

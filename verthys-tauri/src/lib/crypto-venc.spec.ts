@@ -114,6 +114,22 @@ describe("venc — 往返等价", () => {
     expect(decoded[1].chunkBytes).toHaveLength(3);
   });
 
+  it("1MiB 旧帧与 4MiB 新帧均可在同一容器解析", async () => {
+    const oldChunk = new Uint8Array(1024 * 1024).fill(0x11);
+    const newChunk = new Uint8Array(CHUNK_SIZE).fill(0x22);
+    const specs = [
+      makeSpec("旧1MiB.jpg", [oldChunk]),
+      makeSpec("新4MiB.jpg", [newChunk]),
+    ];
+
+    const encoded = await packVenc(specs, TOKEN);
+    const decoded = await unpackVenc(encoded, TOKEN);
+
+    expect(decoded).toHaveLength(2);
+    expect(decoded[0].chunkBytes[0].length).toBe(oldChunk.length);
+    expect(decoded[1].chunkBytes[0].length).toBe(newChunk.length);
+  });
+
   it("打包结果头部自描述：魔数、版本与迭代次数按规范写入", async () => {
     const encoded = await packVenc([makeSpec("头.jpg", [CHUNK_A])], TOKEN);
     const view = new DataView(encoded.buffer, encoded.byteOffset, encoded.byteLength);

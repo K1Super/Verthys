@@ -263,6 +263,88 @@ TEST(api_list_ids_by_type_and_verify_persist)
     return 0;
 }
 
+#define NAME_PATH "api_find_name.vty"
+
+TEST(api_find_lid_by_name)
+{
+    VerthysHandle h = NULL;
+    uint64_t p1 = 0, a1 = 0, q1 = 0, d1 = 0, d2 = 0;
+    uint8_t found = 0;
+    uint64_t lid = 0;
+    char code[VTY_RECOVERY_TEXT_BUF];
+
+    remove(NAME_PATH);
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4Create(h, NAME_PATH, REC_PW, strlen(REC_PW),
+                              code, sizeof(code)), VERTHYS_OK);
+
+    CHECK_EQ(rec_add(h, VERTHYS_RECORD_PHOTO, "preview_42", "p", &p1), VERTHYS_OK);
+    CHECK_EQ(rec_add(h, VERTHYS_RECORD_ACCOUNT, "alpha", "a", &a1), VERTHYS_OK);
+    /* 0x0B 走照片模块路由：名称索引必须与照片记录同域可查 */
+    CHECK_EQ(rec_add(h, 0x0Bu, "preview_43", "q", &q1), VERTHYS_OK);
+
+    CHECK_EQ(Verthys_FindLidByName(h, "preview_42", 10, &found, &lid),
+             VERTHYS_OK);
+    CHECK_EQ(found, 1u);
+    CHECK_EQ(lid, p1);
+
+    CHECK_EQ(Verthys_FindLidByName(h, "preview_43", 10, &found, &lid),
+             VERTHYS_OK);
+    CHECK_EQ(found, 1u);
+    CHECK_EQ(lid, q1);
+
+    CHECK_EQ(Verthys_FindLidByName(h, "alpha", 5, &found, &lid), VERTHYS_OK);
+    CHECK_EQ(found, 1u);
+    CHECK_EQ(lid, a1);
+
+    /* 未命中：正常状态，不报格式错误 */
+    CHECK_EQ(Verthys_FindLidByName(h, "absent", 6, &found, &lid), VERTHYS_OK);
+    CHECK_EQ(found, 0u);
+    CHECK_EQ(lid, 0u);
+
+    /* 非法参数 */
+    CHECK_EQ(Verthys_FindLidByName(h, NULL, 0, &found, &lid),
+             VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_FindLidByName(h, "", 0, &found, &lid),
+             VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_FindLidByName(h, "x", 1, NULL, &lid),
+             VERTHYS_ERR_INVALID);
+
+    /* 删除后名称索引写墓碑：查找跳过 */
+    CHECK_EQ(Verthys_DeleteRecord(h, p1), VERTHYS_OK);
+    CHECK_EQ(Verthys_FindLidByName(h, "preview_42", 10, &found, &lid),
+             VERTHYS_OK);
+    CHECK_EQ(found, 0u);
+
+    /* 同名多条：返回首个存活；前一条删除后命中后一条 */
+    CHECK_EQ(rec_add(h, VERTHYS_RECORD_PHOTO, "dup", "1", &d1), VERTHYS_OK);
+    CHECK_EQ(rec_add(h, VERTHYS_RECORD_PHOTO, "dup", "2", &d2), VERTHYS_OK);
+    CHECK_EQ(Verthys_FindLidByName(h, "dup", 3, &found, &lid), VERTHYS_OK);
+    CHECK_EQ(found, 1u);
+    CHECK_EQ(lid, d1);
+    CHECK_EQ(Verthys_DeleteRecord(h, d1), VERTHYS_OK);
+    CHECK_EQ(Verthys_FindLidByName(h, "dup", 3, &found, &lid), VERTHYS_OK);
+    CHECK_EQ(found, 1u);
+    CHECK_EQ(lid, d2);
+
+    /* 跨重启稳定：重开后名称索引仍可查 */
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4Unlock(h, NAME_PATH, REC_PW, strlen(REC_PW)),
+             VERTHYS_OK);
+    CHECK_EQ(Verthys_FindLidByName(h, "preview_43", 10, &found, &lid),
+             VERTHYS_OK);
+    CHECK_EQ(found, 1u);
+    CHECK_EQ(lid, q1);
+
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_FindLidByName(h, "preview_43", 10, &found, &lid),
+             VERTHYS_ERR_LOCKED);
+
+    CHECK_EQ(Verthys_Deinit(h), VERTHYS_OK);
+    remove(NAME_PATH);
+    return 0;
+}
+
 TEST(api_records_require_unlock)
 {
     VerthysHandle h = NULL;

@@ -82,6 +82,7 @@ fn kind_code(kind: &str) -> Option<u8> {
         "chunkset" => Some(6),
         "v2_chunk" => Some(7),
         "v2_check" => Some(8),
+        "preview" => Some(9),
         _ => None,
     }
 }
@@ -104,6 +105,10 @@ fn untag_content(kind: u8, opened: &mut Zeroizing<Vec<u8>>) -> Result<(), VencEr
     }
     let rest = opened.len() - CONTENT_TAG_LEN;
     opened.copy_within(CONTENT_TAG_LEN.., 0);
+    // 截断前清零尾部残留，避免已剥离的明文在堆缓冲尾部继续驻留
+    for byte in opened.iter_mut().skip(rest) {
+        *byte = 0;
+    }
     opened.truncate(rest);
     Ok(())
 }
@@ -132,23 +137,120 @@ fn parse_chunk_header(bytes: &[u8]) -> Result<([u8; 16], u32, u32), VencError> {
     Ok((uuid, seq, total))
 }
 
+/// 由 BLAKE3 文件哈希派生照片分片域标识。
+fn photo_uuid_from_hash(file_hash: &str) -> Result<[u8; 16], VencError> {
+    let hash = content_crypto::parse_hash_hex(file_hash)?;
+    let mut h = Sha256::new();
+    h.update(b"verthys/v4/file-uuid/photo");
+    h.update(hash);
+    let d = h.finalize();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&d[..16]);
+    Ok(out)
+}
+
 /// 照片内容的分片域标识：优先键控文件哈希，其次文件盐，最后随机。
 /// 域标识不是寻址键；读取侧从 分片头解析，不依赖调用方重复提供。
 fn photo_file_uuid(req: &Request) -> Result<[u8; 16], VencError> {
     if !req.file_hash.is_empty() {
-        let hash = content_crypto::parse_hash_hex(&req.file_hash)?;
-        let mut h = Sha256::new();
-        h.update(b"verthys/v4/file-uuid/photo");
-        h.update(hash);
-        let d = h.finalize();
-        let mut out = [0u8; 16];
-        out.copy_from_slice(&d[..16]);
-        return Ok(out);
+        return photo_uuid_from_hash(&req.file_hash);
     }
     if !req.salt.is_empty() {
         return required_salt(&req.salt);
     }
     content_crypto::random_bytes()
+}
+
+/// 原生导入：按文件哈希封装一个照片数据块。
+pub(crate) fn seal_photo_chunk(
+    worker: &Worker,
+    file_hash: &str,
+    seq: u32,
+    total: u32,
+    payload: &[u8],
+) -> Result<Vec<u8>, VencError> {
+    if payload.is_empty() {
+        return Err(VencError::Invalid);
+    }
+    validate_position(seq, total)?;
+    let code = kind_code("chunk").ok_or(VencError::Invalid)?;
+    let uuid = photo_uuid_from_hash(file_hash)?;
+    let inner = tag_content(code, payload);
+    worker
+        .call_chunk_seal(0, &uuid, seq, total, &inner)
+        .map_err(map_ffi_error)
+}
+
+/// 原生导入：封装照片索引。索引使用随机分片域，与任何文件内容解耦。
+pub(crate) fn seal_photo_meta(worker: &Worker, payload: &[u8]) -> Result<Vec<u8>, VencError> {
+    seal_random_domain(worker, "meta", payload)
+}
+
+/// 派生缓存：封装 2048px 预览。预览与 meta/chunk 使用不同种类标签，
+/// 读取侧种类错配一律认证失败。
+pub(crate) fn seal_photo_preview(worker: &Worker, payload: &[u8]) -> Result<Vec<u8>, VencError> {
+    seal_random_domain(worker, "preview", payload)
+}
+
+fn seal_random_domain(worker: &Worker, kind: &str, payload: &[u8]) -> Result<Vec<u8>, VencError> {
+    if payload.is_empty() {
+        return Err(VencError::Invalid);
+    }
+    let code = kind_code(kind).ok_or(VencError::Invalid)?;
+    let uuid: [u8; 16] = content_crypto::random_bytes()?;
+    let inner = tag_content(code, payload);
+    worker
+        .call_chunk_seal(0, &uuid, 0, 1, &inner)
+        .map_err(map_ffi_error)
+}
+
+/// 原生读取：按种类解封已落库记录密文（meta / preview 等单段布局）。
+///
+/// 与 base64 入口的区别：输入输出均为裸字节，避免大块密文在 worker 内
+/// 再做一次 base64 往返；种类标签仍由本函数校验，不跳过统一封装规则。
+pub(crate) fn open_photo_record(
+    worker: &Worker,
+    kind: &str,
+    sealed: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, VencError> {
+    let code = kind_code(kind).ok_or(VencError::Invalid)?;
+    let (uuid, seq, total) = parse_chunk_header(sealed)?;
+    let opened = worker
+        .call_chunk_open(0, &uuid, seq, total, sealed)
+        .map_err(map_ffi_error)?;
+    let mut opened = Zeroizing::new(opened);
+    untag_content(code, &mut opened)?;
+    Ok(opened)
+}
+
+/// 原生读取：解封照片数据块，并返回密文头声明的 (seq, total)。
+///
+/// 既有布局与索引瘦身布局使用不同的内容种类标签；C 层只校验分片层，
+/// 种类标签由本函数试解。两种标签都失败时返回首次错误，保持错误分类。
+pub(crate) fn open_photo_chunk_any(
+    worker: &Worker,
+    sealed: &[u8],
+) -> Result<(Zeroizing<Vec<u8>>, u32, u32), VencError> {
+    let (uuid, seq, total) = parse_chunk_header(sealed)?;
+    let opened = worker
+        .call_chunk_open(0, &uuid, seq, total, sealed)
+        .map_err(map_ffi_error)?;
+    let mut first_err: Option<VencError> = None;
+    for kind in ["chunk", "slim_chunk"] {
+        let code = kind_code(kind).ok_or(VencError::Invalid)?;
+        let mut candidate = Zeroizing::new(opened.clone());
+        match untag_content(code, &mut candidate) {
+            Ok(()) => return Ok((candidate, seq, total)),
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+    // 明文已在候选缓冲中随 Zeroizing 释放；不再保留第二份副本
+    drop(Zeroizing::new(opened));
+    Err(first_err.unwrap_or(VencError::Corrupt))
 }
 
 /// 文件块 v2 的分片域标识：文件盐即域标识（公开参数）。
@@ -306,7 +408,9 @@ fn open_inner(req: &Request, worker: &Worker) -> Result<OpenedContent, VencError
             }
             Ok((Zeroizing::new(Vec::new()), None))
         }
-        "meta" | "slim_meta" | "slim_chunk" | "thumb" | "chunkset" => Ok((opened, None)),
+        "meta" | "slim_meta" | "slim_chunk" | "thumb" | "chunkset" | "preview" => {
+            Ok((opened, None))
+        }
         _ => Err(VencError::Invalid),
     }
 }
@@ -457,7 +561,7 @@ mod tests {
     fn kind_codes_cover_every_layout_once() {
         let kinds = [
             "meta", "slim_meta", "chunk", "slim_chunk", "thumb", "chunkset", "v2_chunk",
-            "v2_check",
+            "v2_check", "preview",
         ];
         let mut codes = Vec::new();
         for kind in kinds {

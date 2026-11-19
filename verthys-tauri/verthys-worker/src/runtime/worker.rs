@@ -421,8 +421,9 @@ impl Worker {
              * 而不是在后续 FFI 结构体解析时以栈损坏形式崩溃。预检读取的是
              * VerthysContainerInfo 前 8 字节——该头部在任何容器状态均可读，
              * stateless 且无副作用。预检失败时进程随即退出，已初始化句柄
-             * 由进程回收，无驻留窗口。 */
-            const WORKER_KNOWN_API_VERSION: u32 = 0x0014;
+             * 由进程回收，无驻留窗口。
+             * 版本常量由 build.rs 生成：默认 0x0015，可用
+             * VERTHYS_WORKER_API_VERSION 显式抬高。 */
             let get_info: Symbol<VerthysGetContainerInfoFn> =
                 lib.get(b"Verthys_GetContainerInfo").map_err(|e| {
                     init_diag!("[worker] DLL 缺少 Verthys_GetContainerInfo 导出（版本过旧），拒绝加载: {}", e);
@@ -598,6 +599,28 @@ impl Worker {
                 Err(_) => return 0xFFFFFFFF,
             };
             ffi_call(|| { func(self.handle) }).unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    /// 批量导入锚点推迟（API 0x0015）：旧 DLL 缺符号时返回
+    /// `VERTHYS_SYMBOL_UNSUPPORTED`，由宿主回退逐次提交。
+    pub(crate) fn call_bulk_import_begin(&self) -> Result<(), u32> {
+        self.call_bulk_import_symbol(b"Verthys_BulkImportBegin")
+    }
+
+    pub(crate) fn call_bulk_import_commit(&self) -> Result<(), u32> {
+        self.call_bulk_import_symbol(b"Verthys_BulkImportCommit")
+    }
+
+    fn call_bulk_import_symbol(&self, name: &[u8]) -> Result<(), u32> {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysBulkImportFn> = match lib.get(name) {
+                Ok(f) => f,
+                Err(_) => return Err(VERTHYS_SYMBOL_UNSUPPORTED),
+            };
+            let r = ffi_call(|| { func(self.handle) }).unwrap_or(0xFFFFFFFF);
+            if r == VERTHYS_OK { Ok(()) } else { Err(r) }
         }
     }
 
@@ -1143,6 +1166,44 @@ impl Worker {
                 };
             let rc = ffi_call(|| { func(self.handle, rtype, &mut found as *mut u8, &mut lid as *mut u64) }).unwrap_or(0xFFFFFFFF);
             (rc, found != 0, lid)
+        }
+    }
+
+    /// 按名称精确查找记录 ID（名称盲索引，API 0x0015）。
+    ///
+    /// 未命中返回 Ok((false, 0))；符号缺失或 C 层错误返回 Err(rc)。
+    pub(crate) fn call_find_lid_by_name(&self, name: &str) -> Result<(bool, u64), u32> {
+        if name.is_empty() {
+            return Err(0x00000001);
+        }
+        let c_name = match std::ffi::CString::new(name) {
+            Ok(c) => c,
+            Err(_) => return Err(0x00000001),
+        };
+        let mut found: u8 = 0;
+        let mut lid: u64 = 0;
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysFindLidByNameFn> =
+                match lib.get(b"Verthys_FindLidByName") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let rc = ffi_call(|| {
+                func(
+                    self.handle,
+                    c_name.as_ptr(),
+                    name.len(),
+                    &mut found as *mut u8,
+                    &mut lid as *mut u64,
+                )
+            })
+            .unwrap_or(0xFFFFFFFF);
+            if rc != 0 {
+                Err(rc)
+            } else {
+                Ok((found != 0, lid))
+            }
         }
     }
 

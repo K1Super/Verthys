@@ -1901,6 +1901,23 @@ pub async fn verthys_lock(
         return Err(crate::state::SESSION_SUPERSEDED.to_string());
     }
 
+    /* 锁库即终止照片任务：本地取消标志为权威信号，worker 已随会话销毁。
+     * 残留导入会话必须在这里丢弃，否则下一次解锁后 import_begin 恒
+     * E_IMPORT_SESSION_BUSY，且删除级联会误用旧库内存台账。丢弃会话
+     * 不执行 end/压缩，磁盘 WAL 保留断点续传状态。 */
+    if let Some(job_id) = state.photo_import_job_id() {
+        if let Some(flag) = state.photo_import_cancel_flag(&job_id) {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    if let Some(session) = state.lock_import_session().take() {
+        log::warn!(
+            "[verthys_lock] 丢弃锁库前残留导入会话 import_id={}（保留磁盘 WAL）",
+            session.import_id
+        );
+    }
+    state.set_bulk_defer(false);
+
     /* C 层会话销毁会中止轮换作业；宿主侧的取消事件与“可取消”状态
      * 必须同步释放，不能跨会话残留。 */
     crate::service::vault_rotate::reset_on_lock();
@@ -2468,6 +2485,31 @@ pub async fn verthys_delete_records(
                     e
                 ),
             }
+        }
+        all_ids.sort_unstable();
+        all_ids.dedup();
+    }
+
+    /* 预览记录不进块台账：按 meta 名称索引定位后并入同一次删除事务。
+     * 查找失败只影响派生缓存，不阻断照片删除。 */
+    if !all_ids.is_empty() {
+        let req = serde_json::json!({"op": "photo_preview_ids", "ids": all_ids});
+        match state.send(&req.to_string()) {
+            Ok(raw) => match serde_json::from_str::<VerthysResponse>(&raw) {
+                Ok(resp) if resp.ok => all_ids.extend(resp.ids.unwrap_or_default()),
+                Ok(resp) => log::warn!(
+                    "[verthys_delete_records] 预览记录定位失败（继续删除）: {:?}",
+                    resp.error
+                ),
+                Err(e) => log::warn!(
+                    "[verthys_delete_records] 预览定位响应解析失败（继续删除）: {}",
+                    e
+                ),
+            },
+            Err(e) => log::warn!(
+                "[verthys_delete_records] 预览定位 worker 通信失败（继续删除）: {}",
+                e
+            ),
         }
         all_ids.sort_unstable();
         all_ids.dedup();

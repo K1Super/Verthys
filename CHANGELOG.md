@@ -2,10 +2,13 @@
 
 本文件记录 Verthys 的可发布变更。版本号以仓库根 `VERSION` 为准，条目不替代该文件。
 
-## [Unreleased]
+## [4.6.0] - 2026-11-19
 
 ### Added
 
+- 拾光照片数据面全面下沉 Rust/C：导入、网格元数据/缩略图、预览、原图、原始/`.venc`/PNG 导出、备份预览与还原全部由 worker 完成，桌面 JS 不再解密照片记录或打包 VENC。新增 `photo_meta_get`、`photo_meta_probe`、`photo_parse_start` 命令。
+- 原生读取覆盖索引瘦身布局：`meta`/`slim_meta` 双标签、`chunkSetId` 块集、`chunk`/`slim_chunk` 双标签、独立 `thumb` 记录；移除桌面旧 JS 查看回退。
+- 删除桌面旧照片数据面：`importPipeline`、`photoWorkerPool`、`photo-crypto.worker`、`container-import.worker`、`photo-decrypt-bridge`、`chunk-refs`、照片 `damage` 与运行时 `photo.native*` 开关；浏览器开发模式保留独立回退。
 - 清藏新增批量损坏扫描与清理入口：只验证每个文件分块的内容外层（MDEK/epoch）能否解封，不要求输入每文件口令；检查结果只走统一 Toast（不弹窗），发现损坏时以模块内常驻告知条呈现数量与清理入口，并在对应卡片标记“损坏”；删除经统一二次确认后批量执行，复用批量事务、落盘校验、去重键释放与孤儿块回收链路。未设独立密码的文件与历史加密布局跳过探测，模块锁定/读取失败等不可判定结果绝不删除。新增 worker 命令 `module_probe_outer`（不校验种类标签、不派生口令、不返回明文）。
 - 拾光新增损坏记录清理入口：扫描全部照片元数据，只把内容层认证失败（`ERR_00000002` 且非历史明文布局）判定为损坏；结果需二次显式确认后才删除，删除复用台账级联、落盘校验与孤儿块回收链路，模块锁定/超时等不可判定记录一律跳过。
 - P2 SYSTEM 机器级安全服务：独立 `security-service/` 工程、命名管道 v1、令牌桶与每用户配额、HMAC 状态、ECDSA P-256 响应签名。
@@ -18,6 +21,11 @@
 
 ### Fixed
 
+- 修复锁库未清理照片导入会话导致解锁后导入恒 `E_IMPORT_SESSION_BUSY`、删除级联误用旧库台账的问题；照片导入/还原遇跨容器残留会话时丢弃并重试。
+- 修复桌面备份预览入口因只保留路径而被永久禁用、原图加载共享 job 变量导致旧请求误取消新任务、超大原图被 Blob LRU 自我淘汰、浏览器还原缺少 `blobUrl` 等问题。
+- 修复 `venc-single` 取消/会话错误仍报告已导出张数、取消/失败不回收孤儿块、导入 job 无空闲回收、GIF 动图探测无解码限额、缩略图损坏导致整条元数据失败、末块哈希失败后仍返回 done、尾部帧后接受尾随字节、路径授权可跨操作复用等问题。
+- 修复 witness pool 目标槽失效时自旋导致 Deinit 挂死、TPM 建键失败泄漏 NCRYPT 句柄、`FindLidByName` 遇模块锁定中止且返回未声明错误码、C ABI 测试仍断言 0x0014 的问题。
+- E2E 使用临时 `VERTHYS_TEST_STATE_DIR`，不再消耗真实 `rollback.state` 槽位。
 - 重构第一级文本门禁：剥离注释/字符串、屏蔽 `#[cfg(test)]`、修正 `println!` 命中 `eprintln!` 的子串误报；移除与 AST 重复的反向导入规则，警告由 892 条降至 0 条，并接入自检。
 - 重构 AST 架构门禁：基线指纹去除行号、过期豁免直接阻断、重写基线输出增删差异；修正注释与结构化错误分支误报，依赖契约覆盖 `state`/`security`/`worker` 等模块，基线收敛为 0 条豁免。
 - 修复机器级安装下的更新移交：预检不再对未提权进程误报安装目录不可写；安装器未启动时回滚 pending 标记，用户取消提权返回 `E_UPDATER_ELEVATION_DENIED`；修复流程改用 `ShellExecuteExW` 以管理员权限启动旧版安装器。

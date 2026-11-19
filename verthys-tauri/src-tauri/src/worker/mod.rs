@@ -58,6 +58,17 @@ pub mod protocol;
 pub mod session;
 pub mod stderr;
 
+/* 导入数据面端到端测量：仅测试构建编译，VERTHYS_WORKER_E2E=1 时执行。 */
+#[cfg(test)]
+mod e2e_measure;
+
+/* 跨层预算常量：测量代码必须与生产导入共用同一分块口径，
+   避免测试用 4MiB、生产用 1MiB 的静默漂移。仅测试构建引入。 */
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../../photo_budget.rs"]
+mod budget;
+
 pub use platform::kill_orphan_workers;
 pub use protocol::RotateProgress;
 pub use session::WorkerSession;

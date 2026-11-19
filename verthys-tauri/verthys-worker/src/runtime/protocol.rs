@@ -132,6 +132,30 @@ pub(crate) struct Request {
     // BLAKE3 文件哈希（64 字符十六进制）
     #[serde(default)]
     pub(crate) file_hash: String,
+    /// 照片导入/读取 job 标识（仅 photo_import_job_* / photo_read_job_* 消费）
+    #[serde(default)]
+    pub(crate) job_id: String,
+    /// 照片 meta 记录 ID（仅 photo_read_job_begin 消费）
+    #[serde(default)]
+    pub(crate) meta_id: u64,
+    /// 批量路径授权列表（仅 authorize_path_batch 消费）
+    #[serde(default)]
+    pub(crate) paths: Vec<String>,
+    /// 照片导入完成时回填的块记录 ID（仅 photo_import_job_finish 消费）
+    #[serde(default)]
+    pub(crate) chunk_ids: Vec<u64>,
+    /// 导出格式（original / venc-single / venc-multiple / png）
+    #[serde(default)]
+    pub(crate) format: String,
+    /// 导出/还原令牌（VENC 外层 KDF 凭据；不落日志）
+    #[serde(default)]
+    pub(crate) token: Zeroizing<String>,
+    /// 预览扫描得到的逐张 fileHash（仅 photo_restore_job_begin 消费）
+    #[serde(default)]
+    pub(crate) expected_hashes: Vec<String>,
+    /// 还原时跳过该张落库（仅 photo_restore_photo_finish 消费）
+    #[serde(default)]
+    pub(crate) skip_photo: bool,
     // 块序号（0 起）与块总数；seq < total 且 total > 0
     #[serde(default)]
     pub(crate) seq: u32,
@@ -183,6 +207,168 @@ pub(crate) struct SecurityStatusReport {
     pub(crate) checked_at_unix_ms: u64,
 }
 
+/// 照片导入单步结果：chunk / skipped / done / cancelled。
+#[derive(Serialize)]
+pub(crate) struct MediaNextPayload {
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) entry_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chunk_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chunk_total: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chunk_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chunk_b64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chunk_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) file_done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thumb_b64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) animated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) created_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
+/// 照片导入收尾结果：已封装的 meta 密文与记录名，可选预览密文。
+#[derive(Serialize)]
+pub(crate) struct MediaFinishPayload {
+    pub(crate) meta_b64: String,
+    pub(crate) record_name: String,
+    /// 预览记录密文（base64）；预览生成/封装失败时缺省
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) preview_b64: Option<String>,
+    /// 预览记录名（preview_<entry_key>）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) preview_record_name: Option<String>,
+    /// 还原产物的动图三态（仅 photo_restore_photo_finish 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) animated: Option<bool>,
+}
+
+/// 预览记录写回负载（仅 photo_read_job_begin 懒生成时返回）。
+#[derive(Serialize)]
+pub(crate) struct MediaPreviewRecord {
+    pub(crate) name: String,
+    pub(crate) data_b64: String,
+}
+
+/// 网格展示用的照片元数据（仅 photo_meta_get 返回）。
+#[derive(Serialize)]
+pub(crate) struct MediaMetaItem {
+    pub(crate) meta_id: u64,
+    pub(crate) name: String,
+    pub(crate) mime: String,
+    pub(crate) size: u64,
+    pub(crate) file_hash: String,
+    pub(crate) entry_key: String,
+    /// 展示用缩略图（base64；既有布局内联，瘦身布局读独立记录）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thumb_b64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) animated: Option<bool>,
+    pub(crate) created_at: i64,
+    /// 索引瘦身布局标记
+    pub(crate) slim: bool,
+}
+
+/// 照片元数据损坏扫描结果（仅 photo_meta_probe 返回）。
+#[derive(Serialize)]
+pub(crate) struct MediaDamageScan {
+    pub(crate) checked: u64,
+    pub(crate) damaged: Vec<u64>,
+    pub(crate) inconclusive: u64,
+}
+
+/// VENC 预览清单（仅 photo_venc_inspect 返回）。
+#[derive(Serialize)]
+pub(crate) struct MediaVencPreview {
+    pub(crate) name: String,
+    pub(crate) mime: String,
+    pub(crate) size: u64,
+    pub(crate) file_hash: String,
+    pub(crate) thumb_b64: String,
+    pub(crate) chunk_count: u32,
+    pub(crate) created_at: i64,
+}
+
+/// 照片读取结果：preview（一次返回整张预览）/ chunk（原图分块）/ done / cancelled。
+#[derive(Serialize)]
+pub(crate) struct MediaReadPayload {
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) meta_id: Option<u64>,
+    /// 照片显示名（来自 meta）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chunk_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chunk_total: Option<u32>,
+    /// 展示字节（预览 JPEG 或原图明文块，base64）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) data_b64: Option<String>,
+    /// 预览是否直接命中已落库记录（false/缺省表示本次新生成）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) preview_cached: Option<bool>,
+}
+
+/// 照片导出单事件：file_begin / segment / file_end / photo / done。
+#[derive(Serialize)]
+pub(crate) struct MediaExportPayload {
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_index: Option<u32>,
+    /// 建议文件名（宿主净化与唯一化后落盘）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) size: Option<u64>,
+    /// 当前文件的一段字节（base64，解码后 ≤4MiB）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) data_b64: Option<String>,
+    /// file_end 的成败：false 表示该文件必须中止
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_ok: Option<bool>,
+    /// 照片结果（status=photo）的名称与原因
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<String>,
+    /// 失败原因分类（ok/failed/skipped）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) photo_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
+}
+
 #[derive(Serialize)]
 pub(crate) struct Response {
     pub(crate) ok: bool,
@@ -197,6 +383,9 @@ pub(crate) struct Response {
     pub(crate) data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+    /// 结构化错误码（可选；如照片布局不支持原生读取）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
     /// 锁定/限流的建议等待秒数（0x0A RATE / 0x1D MODULE_LOCKED 响应携带）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) retry_after_secs: Option<u64>,
@@ -309,6 +498,33 @@ pub(crate) struct Response {
     pub(crate) rotate_chunks: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rotate_bytes: Option<u64>,
+    /// 照片导入单步结果（仅 photo_import_job_next 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) photo: Option<MediaNextPayload>,
+    /// 照片导入收尾结果（仅 photo_import_job_finish 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) photo_finish: Option<MediaFinishPayload>,
+    /// 照片读取结果（仅 photo_read_job_* 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) photo_read: Option<MediaReadPayload>,
+    /// 懒生成预览的待写回记录（仅 photo_read_job_begin 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) photo_record: Option<MediaPreviewRecord>,
+    /// 照片导出单事件（仅 photo_export_job_next 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) photo_export: Option<MediaExportPayload>,
+    /// 网格展示元数据（仅 photo_meta_get 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) photo_meta: Option<Vec<MediaMetaItem>>,
+    /// 元数据损坏扫描结果（仅 photo_meta_probe 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) photo_damage: Option<MediaDamageScan>,
+    /// VENC 清单预览（仅 photo_venc_inspect 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) photo_previews: Option<Vec<MediaVencPreview>>,
+    /// 名称查找是否命中（仅 find_lid_by_name 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) found: Option<bool>,
 }
 
 impl Response {
@@ -330,6 +546,45 @@ impl Response {
         if let Some(code) = self.recovery_code.as_mut() {
             code.zeroize();
         }
+        if let Some(read) = self.photo_read.as_mut() {
+            if let Some(data) = read.data_b64.as_mut() {
+                data.zeroize();
+            }
+        }
+        if let Some(record) = self.photo_record.as_mut() {
+            record.data_b64.zeroize();
+        }
+        if let Some(photo) = self.photo.as_mut() {
+            if let Some(data) = photo.chunk_b64.as_mut() {
+                data.zeroize();
+            }
+            if let Some(thumb) = photo.thumb_b64.as_mut() {
+                thumb.zeroize();
+            }
+        }
+        if let Some(finish) = self.photo_finish.as_mut() {
+            finish.meta_b64.zeroize();
+            if let Some(preview) = finish.preview_b64.as_mut() {
+                preview.zeroize();
+            }
+        }
+        if let Some(export) = self.photo_export.as_mut() {
+            if let Some(data) = export.data_b64.as_mut() {
+                data.zeroize();
+            }
+        }
+        if let Some(items) = self.photo_meta.as_mut() {
+            for item in items {
+                if let Some(thumb) = item.thumb_b64.as_mut() {
+                    thumb.zeroize();
+                }
+            }
+        }
+        if let Some(previews) = self.photo_previews.as_mut() {
+            for preview in previews {
+                preview.thumb_b64.zeroize();
+            }
+        }
     }
 
     pub(crate) fn ok(op: &str) -> Self {
@@ -341,6 +596,7 @@ impl Response {
             name: None,
             data: None,
             error: None,
+            error_code: None,
             retry_after_secs: None,
             records: None,
             exhausted: None,
@@ -376,6 +632,15 @@ impl Response {
             rotate_files: None,
             rotate_chunks: None,
             rotate_bytes: None,
+            photo: None,
+            photo_finish: None,
+            photo_read: None,
+            photo_record: None,
+            photo_export: None,
+            photo_meta: None,
+            photo_damage: None,
+            photo_previews: None,
+            found: None,
         }
     }
     pub(crate) fn err(op: &str, code: u32) -> Self {
@@ -465,6 +730,7 @@ impl Response {
             name: None,
             data: None,
             error: Some(format!("ERR_{:08X}", unified_code)),
+            error_code: None,
             retry_after_secs: None,
             records: None,
             exhausted: None,
@@ -500,6 +766,15 @@ impl Response {
             rotate_files: None,
             rotate_chunks: None,
             rotate_bytes: None,
+            photo: None,
+            photo_finish: None,
+            photo_read: None,
+            photo_record: None,
+            photo_export: None,
+            photo_meta: None,
+            photo_damage: None,
+            photo_previews: None,
+            found: None,
         }
     }
 
