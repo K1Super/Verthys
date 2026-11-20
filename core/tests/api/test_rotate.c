@@ -723,6 +723,11 @@ TEST(rotate_rollback_anchor_advances)
     uint64_t gen_after;
 
     vty_lockout_set_enabled(0);
+    if (!vty_tpm_witness_available()) {
+        printf("  [SKIP] PCP witness backend unavailable\n");
+        vty_rollback_set_enabled(0);
+        return 0;
+    }
     rotate_cleanup_files("rotate_rb.vty", "rotate_rb.tmp.vty");
     remove("rotate_rb.state");
     memset(code, 0, sizeof(code));
@@ -1223,10 +1228,11 @@ TEST(rotate_password_attempts_follow_lockout)
 
     remove("rotate_lock.state");
     vty_lockout_set_enabled(1);
-    if (vty_device_root_init() != VTY_OK ||
+    if (!vty_tpm_witness_available() ||
+        vty_device_root_init() != VTY_OK ||
         vty_lockout_set_path_for_test("rotate_lock.state") != VTY_OK ||
         vty_lockout_init() != VTY_OK) {
-        printf("  [SKIP] 设备根/熔断状态不可用\n");
+        printf("  [SKIP] 设备根/熔断见证不可用\n");
         vty_lockout_set_enabled(0);
         return 0;
     }

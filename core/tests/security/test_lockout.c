@@ -63,10 +63,20 @@ static int lk_read_slot(const char *path, uint8_t *slot_out)
     return 0;
 }
 
+/* 熔断状态以 PCP 持久化见证绑定设备；无 TPM 的 runner 无法建立或校验
+ * 见证，依赖真实见证的用例显式跳过，避免把硬件缺失误报为状态损坏。 */
+static int lk_skip_without_witness(void)
+{
+    if (vty_tpm_witness_available()) return 0;
+    printf("  [SKIP] PCP witness backend unavailable\n");
+    return 1;
+}
+
 TEST(lockout_first_run_and_counting)
 {
     uint32_t i;
 
+    if (lk_skip_without_witness()) return 0;
     CHECK_EQ(vty_device_root_init(), VTY_OK);
     lk_clean_witness();
     CHECK_EQ(vty_lockout_set_path_for_test("lockout_a.state"), VTY_OK);
@@ -114,6 +124,7 @@ TEST(lockout_backoff_window)
 {
     const uint64_t base = 1700000000u;
 
+    if (lk_skip_without_witness()) return 0;
     CHECK_EQ(vty_device_root_init(), VTY_OK);
     lk_clean_witness();
     CHECK_EQ(vty_lockout_set_path_for_test("lockout_w.state"), VTY_OK);
@@ -162,6 +173,7 @@ TEST(lockout_tampered_state_locked)
 {
     uint8_t buf[LK_FILE_BYTES];
 
+    if (lk_skip_without_witness()) return 0;
     CHECK_EQ(vty_device_root_init(), VTY_OK);
     lk_clean_witness();
     CHECK_EQ(vty_lockout_set_path_for_test("lockout_t.state"), VTY_OK);
@@ -205,6 +217,7 @@ TEST(lockout_state_replay_rejected)
     FILE *f;
     uint8_t id[VTY_UUID_BYTES];
 
+    if (lk_skip_without_witness()) return 0;
     CHECK_EQ(vty_device_root_init(), VTY_OK);
     lk_clean_witness();
     CHECK_EQ(vty_lockout_set_path_for_test("lockout_replay.state"), VTY_OK);
@@ -251,6 +264,7 @@ TEST(lockout_state_replay_rejected)
 
 TEST(lockout_path_change_locked)
 {
+    if (lk_skip_without_witness()) return 0;
     CHECK_EQ(vty_device_root_init(), VTY_OK);
 
     lk_clean_witness();
@@ -280,6 +294,7 @@ TEST(lockout_begin_attempt_min_interval)
 {
     const uint64_t base = 1700000100u;
 
+    if (lk_skip_without_witness()) return 0;
     CHECK_EQ(vty_device_root_init(), VTY_OK);
     lk_clean_witness();
     CHECK_EQ(vty_lockout_set_path_for_test("lockout_attempt.state"), VTY_OK);
@@ -306,6 +321,7 @@ TEST(lockout_module_isolation)
 
     for (i = 0; i < VTY_UUID_BYTES; i++) vault_uuid[i] = (uint8_t)(i + 1u);
 
+    if (lk_skip_without_witness()) return 0;
     CHECK_EQ(vty_device_root_init(), VTY_OK);
     lk_clean_witness();
     CHECK_EQ(vty_lockout_set_path_for_test("lockout_module.state"), VTY_OK);
@@ -357,6 +373,7 @@ TEST(lockout_missing_witness_recovers)
 {
     uint8_t id[VTY_UUID_BYTES];
 
+    if (lk_skip_without_witness()) return 0;
     CHECK_EQ(vty_device_root_init(), VTY_OK);
     lk_clean_witness();
     CHECK_EQ(vty_lockout_set_path_for_test("lockout_missing.state"), VTY_OK);
@@ -387,6 +404,7 @@ TEST(lockout_witness_mismatch_stays_locked)
     uint8_t slot = 0;
     uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
 
+    if (lk_skip_without_witness()) return 0;
     CHECK_EQ(vty_device_root_init(), VTY_OK);
     lk_clean_witness();
     CHECK_EQ(vty_lockout_set_path_for_test("lockout_mismatch.state"), VTY_OK);
