@@ -26,10 +26,6 @@ configure_file(
 file(GLOB_RECURSE LIBSODIUM_SOURCES CONFIGURE_DEPENDS ${_ls_src}/*.c)
 
 add_library(libsodium STATIC ${LIBSODIUM_SOURCES})
-# 第三方源码不参与项目 clang-tidy 规则；门禁只检查 core 自有源码。
-if(VERTHYS_ENABLE_CLANG_TIDY)
-    set_target_properties(libsodium PROPERTIES C_CLANG_TIDY "")
-endif()
 
 # 公共头路径：
 #   include          —— 伞头 <sodium.h>

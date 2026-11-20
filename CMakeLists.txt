@@ -43,9 +43,19 @@ endif()
 # 编译加固选项（见 cmake/VerthysHardening.cmake）
 include(${CMAKE_SOURCE_DIR}/cmake/VerthysHardening.cmake)
 
+#   vendored libsodium（静态库，链入核心 DLL）
+include(${CMAKE_SOURCE_DIR}/third_party/Libsodium.cmake)
+
+#   vendored flatcc（运行时 flatccrt + flatc 编译器）与 xxHash 单头文件
+#   - flatccrt 链入核心 DLL（V3 容器 FlatBuffers 编解码运行时）
+#   - flatcc_cli（flatc）为构建宿主工具，仅用于 schema codegen
+include(${CMAKE_SOURCE_DIR}/third_party/Flatcc.cmake)
+
 # clang-tidy 静态检测前置（默认关；仅 CI 独立 job 开启，避免拖慢主构建）
 # 启用后将 clang-tidy 插入每个 C 编译命令之前，按仓库根 .clang-tidy 配置
 # 运行，其中 UAF/栈地址逃逸/Malloc 配对三类设为 WarningsAsErrors 阻断构建。
+# 必须置于 third_party 目标创建之后：CMAKE_C_CLANG_TIDY 只对随后创建的
+# target 生效，vendored 静态库不进入项目静态检查，core 自有源码与测试仍全覆盖。
 option(VERTHYS_ENABLE_CLANG_TIDY "Run clang-tidy on C sources with WarningsAsErrors" OFF)
 if(VERTHYS_ENABLE_CLANG_TIDY)
     find_program(VERTHYS_CLANG_TIDY_EXE NAMES clang-tidy)
@@ -56,14 +66,6 @@ if(VERTHYS_ENABLE_CLANG_TIDY)
         message(STATUS "clang-tidy 门禁已启用: ${VERTHYS_CLANG_TIDY_EXE}")
     endif()
 endif()
-
-#   vendored libsodium（静态库，链入核心 DLL）
-include(${CMAKE_SOURCE_DIR}/third_party/Libsodium.cmake)
-
-#   vendored flatcc（运行时 flatccrt + flatc 编译器）与 xxHash 单头文件
-#   - flatccrt 链入核心 DLL（V3 容器 FlatBuffers 编解码运行时）
-#   - flatcc_cli（flatc）为构建宿主工具，仅用于 schema codegen
-include(${CMAKE_SOURCE_DIR}/third_party/Flatcc.cmake)
 
 #   测试注册上提至根（原在 core/CMakeLists.txt 内）——
 #   enable_testing() 所在目录才生成 CTestTestfile.cmake；置于子目录时
