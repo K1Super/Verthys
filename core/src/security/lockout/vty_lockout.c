@@ -167,6 +167,8 @@ int vty_lockout_set_path_for_test(const char *path)
     memcpy(g_state_path, path, len + 1);
     g_test_path = 1;
     g_witness_ready = 0;
+    /* 切换状态文件时清除注入时钟，避免退避窗口泄漏到后续用例。 */
+    g_test_now_secs = 0;
 #if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
     g_test_env_hook = 0;
     g_test_state_dir[0] = '\0';

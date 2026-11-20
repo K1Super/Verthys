@@ -61,6 +61,7 @@ static int g_enabled = 1;
 
 #if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
 static uint32_t g_test_max_entries = 0;
+static int g_crash_point = 0;
 #endif
 
 /* 逻辑容量：生产固定 64；测试构建可缩小以覆盖容量分支。
@@ -152,6 +153,9 @@ int vty_rollback_set_path_for_test(const char *path)
     memcpy(g_state_path, path, len + 1);
     g_test_path = 1;
     g_test_env_hook = 0;
+    /* 切换状态文件时清除测试注入，避免容量/崩溃点泄漏到后续用例。 */
+    g_test_max_entries = 0;
+    g_crash_point = 0;
     return VTY_OK;
 }
 #else
@@ -894,8 +898,6 @@ out:
 }
 
 #if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
-static int g_crash_point = 0;
-
 void vty_rollback_set_crash_point_for_test(int point)
 {
     g_crash_point = point;
