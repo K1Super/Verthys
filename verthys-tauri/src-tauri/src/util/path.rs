@@ -169,9 +169,12 @@ pub fn validate_path_input(path: &str) -> Result<(), PathValidationError> {
     }
 
     // 7. 家目录展开符 `~`
-    //    路径中任何位置出现 `~` 都拒绝（应由应用层解析 HOME 环境变量）
-    if normalized.contains('~') {
-        return Err(PathValidationError::ContainsHomeTilde);
+    //    Windows 8.3 短名（如 RUNNER~1）中的 `~` 是合法字面量；
+    //    其余 `~` 仍按家目录展开符拒绝（应由应用层解析 HOME 环境变量）。
+    for component in normalized.split(['/', '\\']) {
+        if component.contains('~') && !is_windows_short_name_component(component) {
+            return Err(PathValidationError::ContainsHomeTilde);
+        }
     }
 
     // 8. Windows 保留设备名
@@ -180,6 +183,21 @@ pub fn validate_path_input(path: &str) -> Result<(), PathValidationError> {
     }
 
     Ok(())
+}
+
+/// 检测 Windows 8.3 短名组件（最多 6 字符 + `~` + 数字尾缀）
+fn is_windows_short_name_component(component: &str) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let base = component.split('.').next().unwrap_or(component);
+    let Some((stem, tail)) = base.rsplit_once('~') else {
+        return false;
+    };
+    !stem.is_empty()
+        && stem.len() <= 6
+        && !tail.is_empty()
+        && tail.chars().all(|c| c.is_ascii_digit())
 }
 
 /// 检测 Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）
@@ -327,6 +345,14 @@ mod tests {
             validate_path_input("C:\\~user\\data"),
             Err(PathValidationError::ContainsHomeTilde)
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_validate_path_input_windows_short_name_tilde() {
+        // GitHub Windows runner 的 TEMP 常含 8.3 短名（RUNNER~1）；
+        // 其中的 `~` 是合法字面量，不是家目录展开。
+        assert!(validate_path_input("C:\\Users\\RUNNER~1\\AppData\\Local\\Temp").is_ok());
     }
 
     #[test]
