@@ -44,13 +44,26 @@ TEST(lockout_pipeline_persistent)
 
     remove(LP_VAULT);
     remove(LP_STATE);
+    vty_lockout_set_enabled(1);
+    /* 先启用再清理见证：关闭态下身份/见证 API 可能拒绝操作，
+     * 残留见证会让后续 reset 返回 LOCKED。 */
     lp_clean_witness();
 
-    vty_lockout_set_enabled(1);
-    if (vty_lockout_set_path_for_test(LP_STATE) != VTY_OK ||
-        vty_lockout_init() != VTY_OK ||
-        vty_lockout_reset() != VTY_OK) {
-        printf("  [FAIL] lockout sandbox init\n");
+    rc = vty_lockout_set_path_for_test(LP_STATE);
+    if (rc != VTY_OK) {
+        printf("  [FAIL] lockout sandbox path rc=%d\n", rc);
+        failed = 1;
+        goto done;
+    }
+    rc = vty_lockout_init();
+    if (rc != VTY_OK) {
+        printf("  [FAIL] lockout sandbox init rc=%d\n", rc);
+        failed = 1;
+        goto done;
+    }
+    rc = vty_lockout_reset();
+    if (rc != VTY_OK) {
+        printf("  [FAIL] lockout sandbox reset rc=%d\n", rc);
         failed = 1;
         goto done;
     }
@@ -137,9 +150,10 @@ TEST(lockout_pipeline_persistent)
 done:
     if (h != NULL) Verthys_Deinit(h);
     (void)vty_lockout_reset();
+    /* 关闭前清理见证，避免残留污染后续用例。 */
+    lp_clean_witness();
     vty_lockout_set_enabled(0);
     remove(LP_VAULT);
     remove(LP_STATE);
-    lp_clean_witness();
     return failed ? 1 : 0;
 }
