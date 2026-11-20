@@ -62,6 +62,8 @@ static int g_enabled = 1;
 #if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
 static uint32_t g_test_max_entries = 0;
 static int g_crash_point = 0;
+static int g_test_env_checked = 0;
+static int g_test_explicit_enable = 0;
 #endif
 
 /* 逻辑容量：生产固定 64；测试构建可缩小以覆盖容量分支。
@@ -77,9 +79,32 @@ static uint32_t rb_max_entries(void)
     return VTY_ROLLBACK_MAX_ENTRIES;
 }
 
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+/* 攻击回归在没有 PCP 见证的 runner 上仍需验证非见证攻击面：允许测试
+ * 入口显式关闭回滚锚点。只编译进测试钩子构建，生产 DLL 不识别该变量；
+ * 调用方显式 set_enabled(1) 优先于环境开关。 */
+static void apply_test_disable(void)
+{
+    char value[8];
+    DWORD n;
+
+    if (g_test_env_checked) return;
+    g_test_env_checked = 1;
+    if (g_test_explicit_enable) return;
+    n = GetEnvironmentVariableA("VERTHYS_TEST_ROLLBACK_DISABLED", value,
+                                sizeof(value));
+    if (n == 1 && value[0] == '1') g_enabled = 0;
+}
+#else
+#define apply_test_disable() ((void)0)
+#endif
+
 void vty_rollback_set_enabled(int enabled)
 {
     g_enabled = enabled ? 1 : 0;
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    if (enabled) g_test_explicit_enable = 1;
+#endif
 }
 
 int vty_rollback_enabled(void)
@@ -189,6 +214,7 @@ int vty_rollback_init(void)
     int rc = vty_device_root_init();
 
     if (rc != VTY_OK) return rc;
+    apply_test_disable();
 #if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
     maybe_apply_test_dir();
 #endif
@@ -826,6 +852,7 @@ int vty_rollback_check(const uint8_t vault_uuid[VTY_UUID_BYTES],
     int rc = VTY_OK;
     int any_new;
     HANDLE lock;
+    apply_test_disable();
     if (!g_enabled) return VTY_OK;
     if (vault_uuid == NULL) return VTY_E_INVALID;
     if (witness_id(vault_uuid, wid) != VTY_OK) return VTY_E_ROLLBACK;
@@ -937,6 +964,7 @@ static int rb_commit_with_preset(const uint8_t vault_uuid[VTY_UUID_BYTES],
     rb_dead_list dead;
     uint32_t cleanup_failed = 0;
 
+    apply_test_disable();
     if (!g_enabled) return VTY_OK;
     if (vault_uuid == NULL) return VTY_E_INVALID;
     if (witness_id(vault_uuid, wid) != VTY_OK) return VTY_E_ROLLBACK;
@@ -1136,6 +1164,7 @@ int vty_rollback_reset_anchor(const uint8_t vault_uuid[VTY_UUID_BYTES],
     rb_dead_list dead;
     uint32_t cleanup_failed = 0;
 
+    apply_test_disable();
     if (!g_enabled) return VTY_OK;
     if (vault_uuid == NULL) return VTY_E_INVALID;
     if (witness_id(vault_uuid, wid) != VTY_OK) return VTY_E_ROLLBACK;
@@ -1237,6 +1266,7 @@ int vty_rollback_anchor_list(VtyAnchorInfo *out, uint32_t capacity,
     *out_count = 0;
     *out_state_missing = 0;
     if (capacity > 0 && out == NULL) return VTY_E_INVALID;
+    apply_test_disable();
     if (!g_enabled) {
         *out_state_missing = 1;
         return VTY_OK;
@@ -1329,6 +1359,7 @@ int vty_rollback_anchor_release(const uint8_t vault_uuid[VTY_UUID_BYTES],
     if ((flags & VTY_ROLLBACK_ANCHOR_CONFIRM) == 0) return VTY_E_INVALID;
     *out_released = 0;
     *out_cleanup_failed = 0;
+    apply_test_disable();
     if (!g_enabled) return VTY_E_POLICY;
     if (witness_id(vault_uuid, wid) != VTY_OK) return VTY_E_INVALID;
     if (vty_rollback_init() != VTY_OK) return VTY_E_TPM;
@@ -1393,6 +1424,7 @@ int vty_rollback_anchor_reclaim(uint32_t flags, uint32_t *out_removed,
     if ((flags & VTY_ROLLBACK_ANCHOR_CONFIRM) == 0) return VTY_E_INVALID;
     *out_removed = 0;
     *out_cleanup_failed = 0;
+    apply_test_disable();
     if (!g_enabled) return VTY_E_POLICY;
     if (vty_rollback_init() != VTY_OK) return VTY_E_TPM;
 

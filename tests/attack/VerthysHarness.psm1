@@ -63,6 +63,27 @@ public static class VerthysAttackNative
     [DllImport("kernel32")]
     private static extern bool FreeLibrary(IntPtr module);
 
+    [DllImport("ncrypt.dll", CharSet = CharSet.Unicode)]
+    private static extern int NCryptOpenStorageProvider(
+        out IntPtr provider, string providerName, uint flags);
+
+    [DllImport("ncrypt.dll")]
+    private static extern int NCryptFreeObject(IntPtr obj);
+
+    /// 与核心判定一致：Platform Crypto Provider 能打开即视为见证后端可用。
+    /// 该检查只决定测试用例是否具备硬件前置，不改变产品行为。
+    public static bool PlatformWitnessAvailable()
+    {
+        IntPtr provider;
+        if (NCryptOpenStorageProvider(
+                out provider, "Microsoft Platform Crypto Provider", 0) != 0)
+        {
+            return false;
+        }
+        NCryptFreeObject(provider);
+        return true;
+    }
+
     /// 查询当前加载 DLL 是否导出指定符号（用于验证旧代入口已从产品 DLL 移除）。
     public static bool HasExport(string name)
     {

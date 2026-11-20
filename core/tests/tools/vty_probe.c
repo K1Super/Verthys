@@ -4,7 +4,7 @@
  * 用途：以独立进程直接驱动容器原语，
  * 为分片、熔断、封装、重放、恢复码与格式边界等攻击面生成可复核证据。
  *
- * 输出契约：单行 `RESULT <id> PASS|FAIL <detail>`，退出码 0=PASS。
+ * 输出契约：单行 `RESULT <id> PASS|FAIL|SKIP <detail>`，退出码 0=PASS/SKIP。
  * 所有工件写入调用方给出的临时目录，绝不触碰活动库。
  */
 #include "verthys_crypto.h"
@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static void mkpath(char *out, size_t cap, const char *dir, const char *name)
 {
@@ -71,6 +72,13 @@ static int report(const char *id, int pass, const char *detail)
 {
     printf("RESULT %s %s %s\n", id, pass ? "PASS" : "FAIL", detail);
     return pass ? 0 : 1;
+}
+
+/* 硬件前置不满足时显式跳过：不计入失败，也不伪装为通过。 */
+static int report_skip(const char *id, const char *detail)
+{
+    printf("RESULT %s SKIP %s\n", id, detail);
+    return 0;
 }
 
 /* 分片文件不得泄露明文，且不能按旧格式解析成功 */
@@ -187,16 +195,31 @@ static int cmd_a6b(const char *dir, int break_device)
     VtyVault *v = NULL;
     char code[VTY_RECOVERY_TEXT_BUF];
     char vpath[1024], spath[1024];
-    int rc, pass = 1;
+    int rc;
     int i;
+    char detail[96];
+    uint64_t base = (uint64_t)time(NULL);
 
     mkpath(vpath, sizeof(vpath), dir, "a6b.verthys");
     mkpath(spath, sizeof(spath), dir, "a6b.state");
     remove(vpath); remove(spath);
 
-    vty_lockout_set_enabled(1);
-    if (vty_lockout_set_path_for_test(spath) != VTY_OK || vty_lockout_init() != VTY_OK ||
-        vty_lockout_reset() != VTY_OK) return report("A6b", 0, "lockout init");
+    if (break_device) {
+        /* A14 只验证设备槽破坏，不依赖熔断状态；关闭熔断避免把
+         * 无 TPM 环境的状态初始化失败混入设备根结论。 */
+        vty_lockout_set_enabled(0);
+    } else {
+        if (!vty_tpm_witness_available()) {
+            return report_skip("A6b", "PCP witness unavailable");
+        }
+        vty_lockout_set_enabled(1);
+        if (vty_lockout_set_path_for_test(spath) != VTY_OK ||
+            vty_lockout_init() != VTY_OK ||
+            vty_lockout_reset() != VTY_OK) {
+            vty_lockout_set_enabled(0);
+            return report("A6b", 0, "lockout init");
+        }
+    }
 
     if (vty_vault_create(vpath, "probe-vault-pass", &v, code, sizeof(code)) != VTY_OK)
         return report("A6b", 0, "vault create");
@@ -215,21 +238,36 @@ static int cmd_a6b(const char *dir, int break_device)
                                       : "设备槽破坏后仍返回成功");
     }
 
+    /* 每次失败会刷新 1 秒最小尝试间隔；用测试时钟按秒推进，
+     * 确保第 2 次起仍进入认证而不是被门禁拒绝。 */
     for (i = 0; i < 5; i++) {
+        (void)vty_lockout_set_test_clock(base + (uint64_t)i);
         rc = vty_module_unlock(v, 0u, "wrong-pass");
         if (rc != VTY_E_KEY_INVALID) {
-            pass = 0;
-            break;
+            snprintf(detail, sizeof(detail),
+                     "第 %d 次错误口令 rc=%d（期望 %d）", i + 1, rc,
+                     (int)VTY_E_KEY_INVALID);
+            vty_vault_free(v);
+            vty_lockout_set_test_clock(0);
+            vty_lockout_set_enabled(0);
+            return report("A6b", 0, detail);
         }
     }
-    if (pass) {
-        rc = vty_module_unlock(v, 0u, "module-pass");
-        pass = (rc == VTY_E_LOCKED);
+    (void)vty_lockout_set_test_clock(base + 5u);
+    rc = vty_module_unlock(v, 0u, "module-pass");
+    vty_lockout_set_test_clock(0);
+    /* 模块锁与库锁是不同作用域：模块达到阈值返回 MODULE_LOCKED。 */
+    if (rc != VTY_E_MODULE_LOCKED) {
+        snprintf(detail, sizeof(detail),
+                 "5 次错误后正确口令 rc=%d（期望 %d）", rc,
+                 (int)VTY_E_MODULE_LOCKED);
+        vty_vault_free(v);
+        vty_lockout_set_enabled(0);
+        return report("A6b", 0, detail);
     }
     vty_vault_free(v);
     vty_lockout_set_enabled(0);
-    return report("A6b", pass, pass ? "5 次错误后正确口令仍被熔断"
-                                     : "未按阈值熔断");
+    return report("A6b", 1, "5 次错误后正确口令仍被熔断");
 }
 
 /* 跨进程持久化熔断（phase1 制造锁定，phase2 新进程复核） */
@@ -238,6 +276,9 @@ static int cmd_a7(const char *state, const char *phase)
     int locked;
     int i;
 
+    if (!vty_tpm_witness_available()) {
+        return report_skip("A7", "PCP witness unavailable");
+    }
     vty_lockout_set_enabled(1);
     if (vty_lockout_set_path_for_test(state) != VTY_OK || vty_lockout_init() != VTY_OK)
         return report("A7", 0, "lockout init");
@@ -439,6 +480,9 @@ static int cmd_a12(const char *dir)
     mkpath(spath, sizeof(spath), dir, "a12.state");
     remove(vpath); remove(opath); remove(spath);
 
+    if (!vty_tpm_witness_available()) {
+        return report_skip("A12", "PCP witness unavailable");
+    }
     /* 该探针只用正确口令：关掉熔断，避免任何失败路径写状态 */
     vty_lockout_set_enabled(0);
     vty_rollback_set_enabled(1);

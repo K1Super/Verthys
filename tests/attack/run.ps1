@@ -4,6 +4,7 @@
  * 用法：
  *   pwsh tests/attack/run.ps1                          # 期望：默认口令/未解锁枚举/明文扫描全部拒绝
  *   pwsh tests/attack/run.ps1 -OutJson <路径>            # 输出机器可读证据
+ *   pwsh tests/attack/run.ps1 -Baseline                # 正控：公开常量必须被识别为可解锁
  *   pwsh tests/attack/run.ps1 -A6EvidenceDir <目录>      # 离机报告目录（默认自动查找）
  *
  * 判定口径：
@@ -24,6 +25,7 @@ param(
     [string]$DllPath,
     [string]$OutJson,
     [switch]$KeepWork,
+    [switch]$Baseline,
     # 离机证据目录（默认 <repo>/reports 与同级 AttackTest/reports）；仅接受合格报告
     [string]$A6EvidenceDir
 )
@@ -61,6 +63,20 @@ $DllPath = Initialize-VerthysNative -DllPath $DllPath
 # 构建目标 verthys_tests 依赖 vty_probe，正常构建后必然存在。
 $probePath = Join-Path $repoRoot 'build/core/tests/Release/vty_probe.exe'
 
+# 无 PCP 见证的 runner（GitHub 托管 Windows 无 TPM）无法建立回滚锚点：
+# 仅在该环境关闭回滚以便其余攻击面继续执行；见证相关探针由 vty_probe
+# 自行输出 SKIP。VERTHYS_TEST_FORCE_NO_WITNESS=1 用于在具备 TPM 的
+# 开发机上复现该环境，不改变产品行为。
+$witnessAvailable = if ($env:VERTHYS_TEST_FORCE_NO_WITNESS -eq '1') {
+    $false
+} else {
+    [VerthysAttackNative]::PlatformWitnessAvailable()
+}
+if (-not $witnessAvailable) {
+    $env:VERTHYS_TEST_ROLLBACK_DISABLED = '1'
+    Write-Host '[env] PCP witness backend unavailable: rollback disabled for harness vaults'
+}
+
 $vaultPath = Join-Path $workDir 'attack.verthys'
 
 $runId = [guid]::NewGuid().ToString('N')
@@ -69,7 +85,7 @@ $dataMarker = "A4_SECRET_MARKER_$runId"
 $accountJson = "{`"account`":`"attack-probe`",`"secret`":`"$dataMarker`",`"note`":`"plaintext-canary`"}"
 
 $results = New-Object System.Collections.Generic.List[object]
-$mode = 'PostFix'
+$mode = if ($Baseline) { 'Baseline' } else { 'PostFix' }
 $vaultOrigin = 'generated'
 
 function Add-Result {
@@ -101,17 +117,22 @@ function Invoke-ProbeRaw {
     }
     $lines = @(& $probePath @Arguments 2>&1 | ForEach-Object { "$_" })
     $exitCode = $LASTEXITCODE
-    $pattern = '^RESULT ' + [regex]::Escape($Id) + ' (PASS|FAIL) (.*)$'
-    $pass = $false
+    $pattern = '^RESULT ' + [regex]::Escape($Id) + ' (PASS|FAIL|SKIP) (.*)$'
+    $verdict = 'FAIL'
     $detail = if ($lines.Count -gt 0) { $lines -join ' | ' } else { '无输出' }
     foreach ($line in $lines) {
         if ($line -match $pattern) {
-            $pass = ($Matches[1] -eq 'PASS')
+            $verdict = $Matches[1]
             $detail = $Matches[2]
             break
         }
     }
-    return [pscustomobject]@{ Pass = $pass; Detail = $detail; Exit = $exitCode }
+    return [pscustomobject]@{
+        Pass    = ($verdict -eq 'PASS')
+        Verdict = $verdict
+        Detail  = $detail
+        Exit    = $exitCode
+    }
 }
 
 function Invoke-ResultScript {
@@ -122,17 +143,22 @@ function Invoke-ResultScript {
     }
     $lines = @(& pwsh -NoProfile -File $scriptPath 2>&1 | ForEach-Object { "$_" })
     $exitCode = $LASTEXITCODE
-    $pass = $false
+    $verdict = 'FAIL'
     $detail = '未返回结果'
-    $pattern = '^RESULT ' + [regex]::Escape($Tag) + ' (PASS|FAIL) (.*)$'
+    $pattern = '^RESULT ' + [regex]::Escape($Tag) + ' (PASS|FAIL|SKIP) (.*)$'
     foreach ($line in $lines) {
         if ($line -match $pattern) {
-            $pass = ($Matches[1] -eq 'PASS')
+            $verdict = $Matches[1]
             $detail = $Matches[2]
             break
         }
     }
-    return [pscustomobject]@{ Pass = $pass; Detail = $detail; Exit = $exitCode }
+    return [pscustomobject]@{
+        Pass    = ($verdict -eq 'PASS')
+        Verdict = $verdict
+        Detail  = $detail
+        Exit    = $exitCode
+    }
 }
 
 function Invoke-A8Probe {
@@ -360,6 +386,19 @@ function Invoke-UnlockAfterCooldown {
 }
 
 try {
+    if ($Baseline) {
+        # 正控：证明 harness 能把“已知口令成功解锁”识别为攻击成功，
+        # 排除 unlock/结果映射恒为拒绝导致的假阴性。
+        $baselineSecret = 'VERTHYS_DEFAULT_PASSWORD_v1'
+        $baselinePath = Join-Path $workDir 'baseline.verthys'
+        New-TestVault -Path $baselinePath -Password (New-Utf8Bytes -Text $baselineSecret)
+        $rc = Test-VaultUnlock -Path $baselinePath -Password (New-Utf8Bytes -Text $baselineSecret)
+        Add-Result -Id 'BC-1' -Name '正控：公开常量被识别为解锁成功' `
+            -Expected 'OK' -Observed (ConvertTo-VerthysResultName $rc) `
+            -Verdict $(if ($rc -eq 0) { 'PASS' } else { 'FAIL' }) `
+            -Evidence "rc=$rc"
+    }
+    else {
     $containerSecret = New-ContainerSecret
     New-TestVault -Path $vaultPath -Password (New-Utf8Bytes -Text $containerSecret) -Records @(
         @{ Name = $nameMarker; Data = $accountJson; Type = 2 }
@@ -500,12 +539,22 @@ try {
     $a7State = Join-Path $probeRoot 'a7.state'
     $a7Phase1 = Invoke-ProbeRaw -Id 'A7' -Arguments @('a7', $a7State, 'phase1')
     $a7Phase2 = Invoke-ProbeRaw -Id 'A7' -Arguments @('a7', $a7State, 'phase2')
-    $a7Pass = [bool]$a7Phase1.Pass -and [int]$a7Phase1.Exit -eq 0 -and
-              [bool]$a7Phase2.Pass -and [int]$a7Phase2.Exit -eq 0
-    Add-Result -Id 'A7' -Name '熔断绕过' -Expected '锁定（跨进程持久）' `
-        -Observed $(if ($a7Pass) { 'PASS' } else { 'FAIL' }) `
-        -Verdict $(if ($a7Pass) { 'PASS' } else { 'FAIL' }) `
-        -Evidence "phase1(exit=$($a7Phase1.Exit): $($a7Phase1.Detail)); phase2(exit=$($a7Phase2.Exit): $($a7Phase2.Detail))"
+    $a7Skip = @(@($a7Phase1, $a7Phase2) | Where-Object {
+            $_.PSObject.Properties['Verdict'] -and $_.Verdict -eq 'SKIP'
+        })
+    if ($a7Skip.Count -gt 0) {
+        Add-Result -Id 'A7' -Name '熔断绕过' -Expected '锁定（跨进程持久）' `
+            -Observed '跳过' -Verdict 'SKIP' `
+            -Evidence "phase1(exit=$($a7Phase1.Exit): $($a7Phase1.Detail)); phase2(exit=$($a7Phase2.Exit): $($a7Phase2.Detail))"
+    }
+    else {
+        $a7Pass = [bool]$a7Phase1.Pass -and [int]$a7Phase1.Exit -eq 0 -and
+                  [bool]$a7Phase2.Pass -and [int]$a7Phase2.Exit -eq 0
+        Add-Result -Id 'A7' -Name '熔断绕过' -Expected '锁定（跨进程持久）' `
+            -Observed $(if ($a7Pass) { 'PASS' } else { 'FAIL' }) `
+            -Verdict $(if ($a7Pass) { 'PASS' } else { 'FAIL' }) `
+            -Evidence "phase1(exit=$($a7Phase1.Exit): $($a7Phase1.Detail)); phase2(exit=$($a7Phase2.Exit): $($a7Phase2.Detail))"
+    }
 
     Add-ProbeResult -Id 'A10' -Name 'nonce 复用' -Expected '无重复' `
         -Probe (Invoke-ProbeRaw -Id 'A10' -Arguments @('a10', (Join-Path $probeRoot 'a10')))
@@ -558,6 +607,7 @@ try {
         -EvidencePrefix 'tests/attack/a18-suspend.ps1'
     Add-ProbeResult -Id 'A12' -Name '回滚旧副本' -Expected '旧副本被锚点拒绝；恢复码可重设；锚点篡改 fail-closed' `
         -Probe (Invoke-ProbeRaw -Id 'A12' -Arguments @('a12', (Join-Path $probeRoot 'a12')))
+    }
 }
 catch {
     Add-Result -Id 'HARNESS' -Name '执行异常' -Expected '无异常' -Observed $_.Exception.Message `

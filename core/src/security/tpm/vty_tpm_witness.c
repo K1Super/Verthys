@@ -104,6 +104,16 @@ int vty_tpm_witness_available(void)
 {
     NCRYPT_PROV_HANDLE prov = 0;
 
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    /* 仅测试钩子构建：在具备 TPM 的开发机上复现无 PCP 的 CI 环境。
+     * 生产 DLL 不编译此分支。 */
+    {
+        char forced[8];
+        DWORD n = GetEnvironmentVariableA("VERTHYS_TEST_FORCE_NO_WITNESS",
+                                          forced, sizeof(forced));
+        if (n == 1 && forced[0] == '1') return 0;
+    }
+#endif
     if (NCryptOpenStorageProvider(&prov, MS_PLATFORM_KEY_STORAGE_PROVIDER, 0) != 0) {
         return 0;
     }

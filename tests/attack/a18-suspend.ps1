@@ -23,8 +23,10 @@ if (-not $Dll) { $Dll = Join-Path $repoRoot 'build/core/Release/verthys.dll' }
 $srcTauri = Join-Path $repoRoot 'verthys-tauri/src-tauri'
 
 if (-not (Test-Path -LiteralPath $Worker)) {
-    Write-Output 'RESULT A18S FAIL release worker 缺失'
-    exit 1
+    # worker 不属于核心 C 构建通道的产物；该通道显式跳过，由构建
+    # worker 的通道负责本用例，避免把“未构建”误报为看门狗失效。
+    Write-Output 'RESULT A18S SKIP release worker 缺失'
+    exit 0
 }
 if (-not (Test-Path -LiteralPath $Dll)) {
     Write-Output 'RESULT A18S FAIL verthys.dll 缺失'
