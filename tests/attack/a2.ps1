@@ -21,7 +21,16 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts/lib/env.load.ps1')
 . (Join-Path $repoRoot 'scripts/lib/cmake.utils.ps1')
 $cmake = $VERTHYS_CMAKE_EXE
-$generator = $VERTHYS_VS_GENERATOR
+# 单配置 Ninja：A2 只构建 core + 签名宿主，MSBuild 在共享 runner 上
+# 会因项目级串行与 LTCG 长时间占用攻击门禁预算。
+$generator = 'Ninja'
+if (-not (Get-Command ninja.exe -ErrorAction SilentlyContinue)) {
+    # VS 自带 Ninja；CI 的注入环境不保证 PATH 里已有 ninja。
+    $bundledNinja = Join-Path $VERTHYS_VS_ROOT 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja'
+    if (Test-Path -LiteralPath (Join-Path $bundledNinja 'ninja.exe')) {
+        $env:PATH = "$bundledNinja;$env:PATH"
+    }
+}
 if (-not (Test-Path -LiteralPath $cmake -PathType Leaf)) {
     throw "找不到 cmake（env.load 解析结果: $cmake）"
 }
@@ -61,6 +70,7 @@ function Invoke-HostExe([string]$dir) {
 
 try {
     # ---------- 证书 + 独立构建 ----------
+    Write-Host '[a2] create test certificates'
     $certOut = & (Join-Path $PSScriptRoot 'signing/New-TestCert.ps1') -Install
     $publisherLine = @($certOut | Where-Object { $_ -like 'CERT CN=Verthys-Test-Publisher *' })
     if ($publisherLine.Count -ne 1) { throw '测试证书创建失败' }
@@ -79,10 +89,13 @@ try {
             Clear-StaleCMakeCache -BuildDir $a2Build -SourceDir $repoRoot
         }
     }
-    & $cmake -S $repoRoot -B $a2Build -G $generator -A x64 `
+    Write-Host '[a2] configure caller-signature build'
+    & $cmake -S $repoRoot -B $a2Build -G $generator `
+        -DCMAKE_BUILD_TYPE=Release "-DCMAKE_C_COMPILER=$VERTHYS_CL_EXE" `
         '-DVERTHYS_REQUIRE_CALLER_SIG=ON' "-DVERTHYS_PUBLISHER_SHA256=$publisherSha" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'A2 构建配置失败' }
-    & $cmake --build $a2Build --config Release --target verthys_core vty_signed_host | Out-Null
+    Write-Host '[a2] build core + signed host'
+    & $cmake --build $a2Build --target verthys_core vty_signed_host | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'A2 构建失败' }
 
     # 产物路径以本轮构建契约与固定候选为准，不再假设单一生成器布局。
@@ -107,6 +120,7 @@ try {
     }
 
     # 先签名（同时留下未签名副本供负向用例）
+    Write-Host '[a2] sign dll and host'
     $signScript = Join-Path $repoRoot 'scripts/build/sign.ps1'
     & $signScript -Files @($dll, $hostExe) | Out-Null
 
@@ -145,6 +159,7 @@ try {
     Copy-Item -LiteralPath $dll -Destination (Join-Path $dirs['a2'] 'verthys.dll')
 
     # ---------- 执行矩阵 ----------
+    Write-Host '[a2] run allow/reject matrix'
     $r4 = Invoke-HostExe $dirs['a4']
     $observed['A2-4'] = [ordered]@{ exit = $r4.Code; output = $r4.Out; expected = 'Init 成功' }
     if ($r4.Code -ne 0 -or $r4.Out -notlike '*INIT result=0x00000000*') {
