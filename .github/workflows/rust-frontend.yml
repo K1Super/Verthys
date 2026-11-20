@@ -228,15 +228,17 @@ jobs:
       - name: SBOM (CycloneDX, Rust)
         shell: pwsh
         run: |
-          cargo cyclonedx -f json --spec-version 1.4 --output-file ../../sbom-cargo.json
+          cargo cyclonedx -f json --spec-version 1.4 --override-filename sbom-cargo
           if ($LASTEXITCODE -ne 0) { throw "cargo cyclonedx failed" }
+          Move-Item -Force sbom-cargo.json ../../sbom-cargo.json
         working-directory: verthys-tauri/src-tauri
 
       - name: SBOM (CycloneDX, Rust worker)
         shell: pwsh
         run: |
-          cargo cyclonedx -f json --spec-version 1.4 --output-file ../../sbom-worker.json
+          cargo cyclonedx -f json --spec-version 1.4 --override-filename sbom-worker
           if ($LASTEXITCODE -ne 0) { throw "worker cyclonedx failed" }
+          Move-Item -Force sbom-worker.json ../../sbom-worker.json
         working-directory: verthys-tauri/verthys-worker
 
       - name: Upload SBOM artifacts
