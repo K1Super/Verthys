@@ -190,17 +190,16 @@ fn import_one(
     }
 
     let started = Instant::now();
-    let flush_ms;
-    if flush {
+    let flush_ms = if flush {
         let response = session.send_json(r#"{"op":"flush"}"#)?;
         if !json_ok(&response) {
             return Err(format!("flush 失败: round={} resp={}", round, response));
         }
-        flush_ms = started.elapsed().as_millis();
+        started.elapsed().as_millis()
     } else {
         /* add_records 自身已提交容器；跳过 flush 用于测量“每轮一次提交”路径。 */
-        flush_ms = 0;
-    }
+        0
+    };
 
     Ok((add_ms, flush_ms))
 }
@@ -512,7 +511,7 @@ fn worker_dedupe_skips_before_open()
     };
 
     let started = Instant::now();
-    let hit = run_job("dedupe-hit", &[key.clone()]);
+    let hit = run_job("dedupe-hit", std::slice::from_ref(&key));
     let hit_job_ms = started.elapsed().as_millis();
     assert!(
         hit_job_ms <= 2000,

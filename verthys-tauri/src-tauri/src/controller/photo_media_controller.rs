@@ -498,7 +498,7 @@ async fn flush_chunk_buffer(
     if !outcome.failed_indices.is_empty() || outcome.ids.len() != expected {
         return Err("照片块写入被拒绝".to_string());
     }
-    if outcome.ids.iter().any(|id| *id == 0) {
+    if outcome.ids.contains(&0) {
         return Err("照片块未分配记录 ID".to_string());
     }
     file.chunk_ids.extend(outcome.ids);
@@ -710,10 +710,12 @@ fn emit_progress(
 ) {
     let percent = if phase == PHASE_FINISHING || phase == PHASE_DONE {
         100
-    } else if totals.total == 0 {
-        0
     } else {
-        (totals.done.saturating_mul(100) / totals.total).min(99) as u8
+        totals
+            .done
+            .saturating_mul(100)
+            .checked_div(totals.total)
+            .map_or(0, |value| value.min(99) as u8)
     };
     // 进度只是展示，Channel 断开不应阻断存储路径
     let _ = channel.send(PhotoImportProgress {
@@ -1498,7 +1500,7 @@ pub async fn photo_parse_start(
         return Err("令牌格式不正确（至少 8 位字符）".to_string());
     }
     let job_id = format!("parse-{}", generate_job_id());
-    authorize_batch_for(&app, &job_id, &[path.clone()], "photo_parse").await?;
+    authorize_batch_for(&app, &job_id, std::slice::from_ref(&path), "photo_parse").await?;
     let result = send_worker(
         &app,
         serde_json::json!({
@@ -1973,22 +1975,34 @@ async fn stream_abort_async(entry: Arc<Mutex<FileStreamState>>) {
     .await;
 }
 
-fn emit_export_progress(
-    channel: &Channel<PhotoExportProgress>,
+#[derive(Clone, Copy)]
+struct ExportCounts {
     total: u64,
     done: u64,
     failed: u64,
     exported: u64,
+}
+
+fn emit_export_progress(
+    channel: &Channel<PhotoExportProgress>,
+    counts: ExportCounts,
     current_name: &str,
     phase: &str,
     started: Instant,
 ) {
+    let ExportCounts {
+        total,
+        done,
+        failed,
+        exported,
+    } = counts;
     let percent = if matches!(phase, EXPORT_PHASE_FINISHING | EXPORT_PHASE_DONE) {
         100
-    } else if total == 0 {
-        0
     } else {
-        (done.saturating_mul(100) / total).min(99) as u8
+        done
+            .saturating_mul(100)
+            .checked_div(total)
+            .map_or(0, |value| value.min(99) as u8)
     };
     let _ = channel.send(PhotoExportProgress {
         total_files: total,
@@ -2263,10 +2277,12 @@ async fn run_export(
 
     emit_export_progress(
         &channel,
-        total,
-        0,
-        0,
-        0,
+        ExportCounts {
+            total,
+            done: 0,
+            failed: 0,
+            exported: 0,
+        },
         "",
         EXPORT_PHASE_SCANNING,
         started,
@@ -2524,24 +2540,24 @@ async fn run_export(
                             exported += 1;
                         }
                     }
-                    Some("failed") => {
-                        if failed_indices.insert(index) {
-                            failures.push(PhotoExportFailure {
-                                index,
-                                name: name.clone(),
-                                reason: event.reason.unwrap_or_else(|| "unknown".to_string()),
-                            });
-                        }
+                    Some("failed") if failed_indices.insert(index) => {
+                        failures.push(PhotoExportFailure {
+                            index,
+                            name: name.clone(),
+                            reason: event.reason.unwrap_or_else(|| "unknown".to_string()),
+                        });
                     }
                     _ => {}
                 }
                 done += 1;
                 emit_export_progress(
                     &channel,
-                    total,
-                    done,
-                    failures.len() as u64,
-                    exported,
+                    ExportCounts {
+                        total,
+                        done,
+                        failed: failures.len() as u64,
+                        exported,
+                    },
                     &name,
                     EXPORT_PHASE_EXPORTING,
                     started,
@@ -2581,10 +2597,12 @@ async fn run_export(
 
     emit_export_progress(
         &channel,
-        total,
-        done,
-        failures.len() as u64,
-        exported,
+        ExportCounts {
+            total,
+            done,
+            failed: failures.len() as u64,
+            exported,
+        },
         "",
         if cancelled {
             EXPORT_PHASE_CANCELLED
@@ -2868,7 +2886,9 @@ async fn run_restore(
 
     emit_progress(&channel, &totals, PHASE_SCANNING, "", 0, 0, started.elapsed());
 
-    if let Err(e) = authorize_batch_for(app, job_id, &[path.clone()], "photo_restore").await {
+    if let Err(e) =
+        authorize_batch_for(app, job_id, std::slice::from_ref(&path), "photo_restore").await
+    {
         return PhotoImportResult {
             ok: false,
             imported,
@@ -3009,7 +3029,7 @@ async fn run_restore(
             if let Err(e) = authorize_batch_for(
                 app,
                 job_id,
-                &[path_for_grant.clone()],
+                std::slice::from_ref(&path_for_grant),
                 "photo_restore",
             )
             .await

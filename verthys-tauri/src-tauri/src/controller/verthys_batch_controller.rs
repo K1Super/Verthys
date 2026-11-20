@@ -853,10 +853,10 @@ pub async fn verthys_import_end(
         log::warn!("[verthys_import_end] 无活跃导入会话");
         /* 宿主侧会话丢失但 C 层推迟可能仍在：先收口锚点再清标记，
          * 否则会话会一直挂到 30s 硬上限。 */
-        if state.bulk_defer_active() {
-            if send_bulk_op(&state, "bulk_import_commit") != Some(true) {
-                log::error!("[verthys_import_end] 残留推迟会话的锚点提交未成功");
-            }
+        if state.bulk_defer_active()
+            && send_bulk_op(&state, "bulk_import_commit") != Some(true)
+        {
+            log::error!("[verthys_import_end] 残留推迟会话的锚点提交未成功");
         }
         state.set_bulk_defer(false);
         return Ok(VerthysResponse::err(cmd::IMPORT_END, "无活跃导入会话"));
