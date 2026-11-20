@@ -153,17 +153,54 @@ function Invoke-ProbeRaw {
     }
 }
 
+function Invoke-ScriptCapture {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [int]$TimeoutSeconds = 600
+    )
+    Write-Host "[probe] $Label"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'pwsh'
+    $psi.ArgumentList.Add('-NoProfile')
+    $psi.ArgumentList.Add('-File')
+    $psi.ArgumentList.Add($ScriptPath)
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    $timedOut = $false
+    if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+        $timedOut = $true
+        try { $proc.Kill() } catch { }
+    }
+    $text = ''
+    try { $text = (@($outTask.Result, $errTask.Result) -join "`n") } catch { }
+    $lines = @($text -split "`r?`n" | Where-Object { $_ -ne '' })
+    # 子脚本输出实时回放到门禁日志，超时也能看到最后执行到的阶段。
+    foreach ($line in $lines) { Write-Host $line }
+    return [pscustomobject]@{
+        Lines    = $lines
+        Exit     = $(if ($timedOut) { -1 } else { $proc.ExitCode })
+        TimedOut = $timedOut
+    }
+}
+
 function Invoke-ResultScript {
     param([string]$File, [string]$Tag)
     $scriptPath = Join-Path $PSScriptRoot $File
     if (-not (Test-Path -LiteralPath $scriptPath)) {
         return [pscustomobject]@{ Pass = $false; Detail = "$File 缺失"; Exit = -1 }
     }
-    Write-Host "[probe] $File"
-    $lines = @(& pwsh -NoProfile -File $scriptPath 2>&1 | ForEach-Object { "$_" })
-    $exitCode = $LASTEXITCODE
+    $run = Invoke-ScriptCapture -ScriptPath $scriptPath -Label $File -TimeoutSeconds 600
+    $lines = $run.Lines
+    $exitCode = $run.Exit
     $verdict = 'FAIL'
     $detail = '未返回结果'
+    if ($run.TimedOut) { $detail = '脚本超时 600s' }
     $pattern = '^RESULT ' + [regex]::Escape($Tag) + ' (PASS|FAIL|SKIP) (.*)$'
     foreach ($line in $lines) {
         if ($line -match $pattern) {
@@ -207,10 +244,11 @@ function Invoke-A2Probe {
     if (-not (Test-Path -LiteralPath $scriptPath)) {
         return [pscustomobject]@{ Pass = $false; Detail = 'a2.ps1 缺失'; Exit = -1 }
     }
-    $lines = @(& pwsh -NoProfile -File $scriptPath 2>&1 | ForEach-Object { "$_" })
-    $exitCode = $LASTEXITCODE
+    $run = Invoke-ScriptCapture -ScriptPath $scriptPath -Label 'a2.ps1' -TimeoutSeconds 300
+    $lines = $run.Lines
+    $exitCode = $run.Exit
     $pass = $false
-    $detail = '未返回结果'
+    $detail = if ($run.TimedOut) { 'a2.ps1 超时 300s' } else { '未返回结果' }
     foreach ($line in $lines) {
         if ($line -match '^RESULT A2 (PASS|FAIL) (.*)$') {
             $pass = ($Matches[1] -eq 'PASS')
