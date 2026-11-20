@@ -139,6 +139,20 @@ jobs:
             "verthys-tauri/src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe" -Force
           Write-Host "staged verthys-worker.exe"
 
+          # tauri-build 还会校验 service-payload 资源；CI 只做编译/测试，
+          # 服务不签名，根 CA 使用临时自签名证书满足资源校验。
+          & ".\scripts\build\build_security_service.ps1" -Profile local -NoSign
+          if ($LASTEXITCODE -ne 0) { throw "security service build failed" }
+          New-Item -ItemType Directory -Force -Path "verthys-tauri/src-tauri/service-payload" | Out-Null
+          Copy-Item "build_security_service\artifacts\VerthysSecuritySvc.exe" `
+            "verthys-tauri/src-tauri/service-payload/VerthysSecuritySvc.exe" -Force
+          $rootCa = New-SelfSignedCertificate -Type Custom -Subject "CN=Verthys CI Test Root" `
+            -KeyUsage CertSign -CertStoreLocation Cert:\CurrentUser\My
+          [System.IO.File]::WriteAllBytes(
+            (Join-Path $PWD "verthys-tauri/src-tauri/service-payload/VerthysRootCA.cer"),
+            $rootCa.RawData)
+          Write-Host "staged service-payload"
+
       - name: Rust tests (src-tauri)
         run: |
           cargo test --manifest-path verthys-tauri/src-tauri/Cargo.toml

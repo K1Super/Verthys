@@ -62,6 +62,19 @@ jobs:
           Copy-Item "verthys-tauri/verthys-worker/target/release/verthys-worker.exe" `
             "verthys-tauri/src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe" -Force
 
+          # tauri-build 还会校验 service-payload 资源；CI 只做静态检查，
+          # 服务不签名，根 CA 使用临时自签名证书满足资源校验。
+          & ".\scripts\build\build_security_service.ps1" -Profile local -NoSign
+          if ($LASTEXITCODE -ne 0) { throw "security service build failed" }
+          New-Item -ItemType Directory -Force -Path "verthys-tauri/src-tauri/service-payload" | Out-Null
+          Copy-Item "build_security_service\artifacts\VerthysSecuritySvc.exe" `
+            "verthys-tauri/src-tauri/service-payload/VerthysSecuritySvc.exe" -Force
+          $rootCa = New-SelfSignedCertificate -Type Custom -Subject "CN=Verthys CI Test Root" `
+            -KeyUsage CertSign -CertStoreLocation Cert:\CurrentUser\My
+          [System.IO.File]::WriteAllBytes(
+            (Join-Path $PWD "verthys-tauri/src-tauri/service-payload/VerthysRootCA.cer"),
+            $rootCa.RawData)
+
       - name: AST red-line gate (level 2, baseline-exempted)
         shell: pwsh
         run: |
@@ -95,12 +108,14 @@ jobs:
             choco install llvm -y --no-progress
             $found = "C:\Program Files\LLVM\bin\clang-tidy.exe"
           }
-          Add-Content $env:GITHUB_PATH (Split-Path $found)
+          # 只把 clang-tidy 路径传给 CMake；不要加入 PATH，否则 CMake 可能把
+          # clang.exe 选为 C 编译器，导致 vendored AVX-512 源码编译失败。
+          Add-Content $env:GITHUB_ENV "VERTHYS_CLANG_TIDY_EXE=$found"
           Write-Host "clang-tidy: $found"
 
       - name: Configure (Ninja + clang-tidy gate)
         run: |
-          cmake -S . -B build_tidy -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVERTHYS_ENABLE_CLANG_TIDY=ON
+          cmake -S . -B build_tidy -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVERTHYS_ENABLE_CLANG_TIDY=ON -DVERTHYS_CLANG_TIDY_EXE="$env:VERTHYS_CLANG_TIDY_EXE" -DCMAKE_C_COMPILER=cl.exe
 
       - name: "Build under clang-tidy (WarningsAsErrors: UAF/StackAddressEscape/Malloc)"
         run: |
