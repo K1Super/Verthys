@@ -133,6 +133,8 @@ jobs:
 
           cargo build --release --manifest-path verthys-tauri/verthys-worker/Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw "worker release build failed" }
+          # binaries/ 是 gitignore 的构建产物目录，clean checkout 中不存在。
+          New-Item -ItemType Directory -Force -Path "verthys-tauri/src-tauri/binaries" | Out-Null
           Copy-Item "verthys-tauri/verthys-worker/target/release/verthys-worker.exe" `
             "verthys-tauri/src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe" -Force
           Write-Host "staged verthys-worker.exe"

@@ -26,9 +26,6 @@
 # 仅校验项目自有头文件，跳过 third_party / 系统库 / MSVC 头
 HeaderFilterRegex: 'core/(src|include)/.*\.h$'
 
-# 仅对项目源文件生效，第三方代码（libsodium 等）不检查
-HeaderFilter: 'core/(src|include)/.*\.h$'
-
 Checks:
   # --------------------------------------------------------------------------
   # 一、Use-After-Free 与悬挂指针检测（直接拦截 UAF 模式）
@@ -168,4 +165,3 @@ CheckOptions:
     value: 'lower_case'
   - key:   bugprone-use-after-free.StrictMode
     value: '1'
-...

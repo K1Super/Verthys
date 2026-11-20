@@ -392,7 +392,9 @@ if (process.argv.includes("--check")) {
     } catch {
       current = null;
     }
-    if (current !== out.content) {
+    // Windows 检出可能应用 CRLF；行尾差异不构成生成物漂移。
+    const normalized = current === null ? null : current.replace(/\r\n/g, "\n");
+    if (normalized !== out.content) {
       drift = true;
       console.error(
         `[常量生成] 生成物与权威来源不一致：${out.label}（${relative(projectRoot, out.path)}）`,

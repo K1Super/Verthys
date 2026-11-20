@@ -2,3 +2,7 @@
 # ci/vendor_hashes.txt 记录的是原始字节哈希，任何 EOL 转换都会造成跨机器误报。
 third_party/flatcc/** -text
 third_party/libsodium/** -text
+
+# 跨层常量生成物由生成器以 LF 写出；固定 LF，避免 Windows 检出后门禁误报。
+verthys-tauri/photo_budget.rs text eol=lf
+verthys-tauri/src/constants/photo_budget.generated.ts text eol=lf
