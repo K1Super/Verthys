@@ -36,6 +36,32 @@ jobs:
           toolchain: "1.98.1"
           components: clippy, rustfmt
 
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build core DLL (Release, Ninja)
+        shell: pwsh
+        run: |
+          cmake -S . -B build_ci_ast -G Ninja -DCMAKE_BUILD_TYPE=Release
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
+          cmake --build build_ci_ast --target verthys_core
+          if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
+
+      - name: Stage packaging assets (verthys.dll + verthys-worker.exe)
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path build_ci_ast -Recurse -Filter verthys.dll |
+                 Select-Object -First 1
+          if (-not $dll) { throw "verthys.dll not found under build_ci_ast" }
+          Copy-Item $dll.FullName "verthys-tauri/src-tauri/verthys.dll" -Force
+          cargo build --release --manifest-path verthys-tauri/verthys-worker/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "worker release build failed" }
+          New-Item -ItemType Directory -Force -Path "verthys-tauri/src-tauri/binaries" | Out-Null
+          Copy-Item "verthys-tauri/verthys-worker/target/release/verthys-worker.exe" `
+            "verthys-tauri/src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe" -Force
+
       - name: AST red-line gate (level 2, baseline-exempted)
         shell: pwsh
         run: |
