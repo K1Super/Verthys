@@ -263,13 +263,30 @@ async function main() {
   if (!appArg) fail("缺少参数 --app <Verthys.exe>");
   const app = resolve(appArg);
   const root = resolve(args.root ?? join(REPO_ROOT, "build", "updater"));
-  const basePath = resolve(args.base ?? join(root, "latest.json"));
+  let basePath = resolve(args.base ?? join(root, "latest.json"));
   if (!existsSync(app)) fail(`客户端不存在: ${app}`);
   if (!existsSync(basePath)) fail(`基准清单不存在: ${basePath}`);
+
+  // 未显式指定 --base 时基准路径就是服务中的 latest.json；先快照，
+  // 否则前一个变体会覆盖它，导致后续正向用例读到错误清单。
+  const liveManifestPath = resolve(join(root, "latest.json"));
+  if (basePath === liveManifestPath) {
+    const snapshotDir = join(REPO_ROOT, "build", "e2e-variants");
+    mkdirSync(snapshotDir, { recursive: true });
+    const snapshotPath = join(snapshotDir, "base-manifest.json");
+    copyFileSync(liveManifestPath, snapshotPath);
+    basePath = snapshotPath;
+  }
 
   const base = JSON.parse(readFileSync(basePath, "utf8"));
   const version = String(base.version ?? "");
   if (!version) fail("基准清单缺少 version");
+  const baseVersion = normalizeVersion(version);
+  if (!baseVersion) fail(`基准清单版本无法解析: ${version}`);
+  const [baseMajor, baseMinor, basePatch] = baseVersion.split(".").map(Number);
+  // 基线版本随发布推进；取下一补丁版本，保证清单版本高于已安装版本，
+  // 使用例在 PE 身份校验处命中，而不是被版本闸门提前拒绝。
+  const peMismatchVersion = `${baseMajor}.${baseMinor}.${basePatch + 1}`;
   const newInstaller = join(root, installerNameFromUrl(platformEntries(base)[0].url));
   if (!existsSync(newInstaller)) fail(`新安装包不存在: ${newInstaller}`);
   const newSignature = `${newInstaller}.sig`;
@@ -325,12 +342,12 @@ async function main() {
     });
   });
 
-  // 复用同一安装包，只把清单版本抬到 4.1.6；验签、哈希与大小都真实，
+  // 复用同一安装包，只把清单版本抬到基线下一补丁版本；验签、哈希与大小都真实，
   // 唯一不一致的是 PE 文件版本，从而精确命中准备阶段的版本身份校验。
   register("pe-version-mismatch", (manifest) => {
-    manifest.version = "4.1.6";
+    manifest.version = peMismatchVersion;
     mutatePlatforms(manifest, (platform) => {
-      platform.file_version = "4.1.6";
+      platform.file_version = peMismatchVersion;
     });
   });
 
