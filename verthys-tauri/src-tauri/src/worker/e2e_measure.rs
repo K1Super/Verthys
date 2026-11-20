@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 use crate::worker::WorkerSession;
-use super::budget::{PB_CHUNK_RECORD_B64_MAX, PB_PHOTO_CHUNK_SIZE_BYTES};
+use super::budget::{PB_PHOTO_CHUNK_SIZE_BYTES};
 
 /// 照片分块大小：取跨层预算单一权威值，不再保留本地副本。
 const PHOTO_CHUNK_BYTES: usize = PB_PHOTO_CHUNK_SIZE_BYTES as usize;
@@ -395,6 +395,150 @@ fn worker_import_e2e_measure()
 }
 
 /* ================================================================== *
+ * 去重前置端到端：命中已提交条目键时必须在打开文件前跳过               *
+ *                                                                    *
+ * 用无效 JPEG 作为探针：若去重未前置，worker 必然因解码失败返回         *
+ * skipped；返回 deduped 即证明命中发生在 open_file 之前。              *
+ * ================================================================== */
+
+fn dedupe_entry_key(name: &str, size: u64, mtime_ms: u64) -> String
+{
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(format!("file|{}|{}|{}", name, size, mtime_ms).as_bytes());
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
+#[test]
+fn worker_dedupe_skips_before_open()
+{
+    if std::env::var("VERTHYS_WORKER_E2E").ok().as_deref() != Some("1") {
+        eprintln!("worker dedupe e2e 跳过：未设置 VERTHYS_WORKER_E2E=1");
+        return;
+    }
+
+    let worker = std::env::var("VERTHYS_WORKER_E2E_WORKER")
+        .expect("缺少 VERTHYS_WORKER_E2E_WORKER");
+    let dll = std::env::var("VERTHYS_WORKER_E2E_DLL")
+        .expect("缺少 VERTHYS_WORKER_E2E_DLL");
+    assert!(std::path::Path::new(&worker).is_file(), "worker 不存在: {worker}");
+    assert!(std::path::Path::new(&dll).is_file(), "DLL 不存在: {dll}");
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("创建 tokio runtime 失败");
+    let _guard = runtime.enter();
+
+    let dir = tempfile::tempdir().expect("创建去重测量临时目录失败");
+    /* 故意写入非 JPEG 内容：只有去重前置才能让本次导入返回 deduped。 */
+    let probe = dir.path().join("dedupe_probe.jpg");
+    std::fs::write(&probe, vec![0x5Au8; 64 * 1024]).expect("写去重探针失败");
+    let meta = std::fs::metadata(&probe).expect("读取探针元数据失败");
+    let size = meta.len();
+    let mtime_ms = meta
+        .modified()
+        .expect("读取探针 mtime 失败")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("探针 mtime 早于 Unix 纪元")
+        .as_millis() as u64;
+    let key = dedupe_entry_key("dedupe_probe.jpg", size, mtime_ms);
+
+    let vault = dir.path().join("dedupe.verthys").to_string_lossy().to_string();
+    let password = "worker-dedupe-e2e-pass";
+
+    let session = WorkerSession::spawn(&worker, &dll).expect("启动 worker 失败");
+    session.wait_for_ready_signal().expect("worker 就绪失败");
+    session
+        .authorize_path("v4_create", "write", &vault)
+        .expect("v4_create 路径授权失败");
+    let response = session
+        .send_json(&serde_json::json!({
+            "op": "v4_create",
+            "path": vault,
+            "password": password,
+        }).to_string())
+        .expect("v4_create 请求失败");
+    assert!(json_ok(&response), "v4_create 失败: {response}");
+    session
+        .authorize_path("unlock", "read", &vault)
+        .expect("unlock 路径授权失败");
+    let response = session
+        .send_json(&serde_json::json!({
+            "op": "unlock",
+            "path": vault,
+            "password": password,
+        }).to_string())
+        .expect("unlock 请求失败");
+    assert!(json_ok(&response), "unlock 失败: {response}");
+
+    let path_text = probe.to_string_lossy().to_string();
+    let run_job = |job_id: &str, committed: &[String]| -> serde_json::Value {
+        session
+            .send_json(&serde_json::json!({
+                "op": "authorize_path_batch",
+                "job_id": job_id,
+                "paths": [path_text],
+            }).to_string())
+            .expect("authorize_path_batch 请求失败");
+        let begin = session
+            .send_json(&serde_json::json!({
+                "op": "photo_import_job_begin",
+                "job_id": job_id,
+                "paths": [path_text],
+                "committed_entry_keys": committed,
+            }).to_string())
+            .expect("photo_import_job_begin 请求失败");
+        assert!(json_ok(&begin), "job_begin 失败: {begin}");
+        let next = session
+            .send_json(&serde_json::json!({
+                "op": "photo_import_job_next",
+                "job_id": job_id,
+            }).to_string())
+            .expect("photo_import_job_next 请求失败");
+        let end = session
+            .send_json(&serde_json::json!({
+                "op": "photo_import_job_end",
+                "job_id": job_id,
+            }).to_string())
+            .expect("photo_import_job_end 请求失败");
+        assert!(json_ok(&end), "job_end 失败: {end}");
+        serde_json::from_str(&next).expect("next 响应解析失败")
+    };
+
+    let started = Instant::now();
+    let hit = run_job("dedupe-hit", &[key.clone()]);
+    let hit_job_ms = started.elapsed().as_millis();
+    assert!(
+        hit_job_ms <= 2000,
+        "单文件去重命中耗时 {}ms 超过 2s",
+        hit_job_ms
+    );
+    let status = hit
+        .get("photo")
+        .and_then(|p| p.get("status"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("?");
+    assert_eq!(status, "deduped", "命中已提交键时必须前置跳过: {hit}");
+
+    let miss = run_job("dedupe-miss", &[]);
+    let status = miss
+        .get("photo")
+        .and_then(|p| p.get("status"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("?");
+    assert_ne!(status, "deduped", "无已提交键时不得被去重: {miss}");
+    assert_eq!(status, "skipped", "无效 JPEG 未命中时应由打开/解码失败跳过: {miss}");
+
+    println!("[worker-dedupe] hit=deduped hit_job_ms={hit_job_ms} miss={status} key={key}");
+}
+
+/* ================================================================== *
  * 原生照片导入协议端到端（真实 worker + 真实 DLL）                    *
  *                                                                    *
  * 由 VERTHYS_NATIVE_E2E=1 启用；走 worker 的 photo_import_job_* 原生  *
@@ -403,7 +547,6 @@ fn worker_import_e2e_measure()
 
 const NATIVE_MIB: u64 = 1024 * 1024;
 const NATIVE_CHUNK_BYTES: usize = PB_PHOTO_CHUNK_SIZE_BYTES as usize;
-const NATIVE_CHUNK_RECORD_B64_MAX: usize = PB_CHUNK_RECORD_B64_MAX as usize;
 /// 单个协议请求的超时：一次 next/add_records 可能承载整块 4MiB 密文。
 const NATIVE_OP_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -492,6 +635,48 @@ fn native_add_record(
     Ok(id)
 }
 
+/// 提交一块 worker 暂存密文（引用提交，不携带密文）。
+fn native_add_staged(
+    session: &WorkerSession,
+    job_id: &str,
+    rtype: u32,
+    name: &str,
+    chunk_key: &str,
+    chunk_hash: &str,
+) -> Result<u64, String>
+{
+    let value = native_send_ok(
+        session,
+        serde_json::json!({
+            "op": "add_records_staged",
+            "staged_records": [{
+                "rtype": rtype,
+                "name": name,
+                "job_id": job_id,
+                "chunk_key": chunk_key,
+                "chunk_hash": chunk_hash,
+            }],
+        }),
+    )?;
+    let ids = value
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("add_records_staged 响应缺少 ids: name={name}"))?;
+    if ids.len() != 1 {
+        return Err(format!(
+            "add_records_staged 返回 {} 个 id（期望 1）: name={name}",
+            ids.len()
+        ));
+    }
+    let id = ids[0]
+        .as_u64()
+        .ok_or_else(|| format!("add_records_staged id 非法: name={name}"))?;
+    if id == 0 {
+        return Err(format!("add_records_staged 返回 id=0: name={name}"));
+    }
+    Ok(id)
+}
+
 #[derive(Default)]
 struct NativeTotals {
     files: usize,
@@ -506,7 +691,6 @@ struct PendingFile {
     size: u64,
     total: usize,
     ids: Vec<u64>,
-    max_chunk_b64: usize,
     started: Instant,
 }
 
@@ -641,7 +825,7 @@ fn native_import_job(
     paths: &[String],
     totals: &mut NativeTotals,
     reports: &mut Vec<serde_json::Value>,
-    violations: &mut Vec<String>,
+    _violations: &mut Vec<String>,
 ) -> Result<(), String>
 {
     native_send_ok(
@@ -710,24 +894,24 @@ fn native_import_job(
                         .get("chunk_key")
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| format!("{name}: chunk 缺少 chunk_key"))?;
-                    let chunk_b64 = photo
-                        .get("chunk_b64")
+                    let chunk_hash = photo
+                        .get("chunk_hash")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                        .ok_or_else(|| format!("{name}: chunk 缺少 chunk_hash"))?;
+                    let staged = photo
+                        .get("chunk_staged")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     let file_done = photo
                         .get("file_done")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
 
-                    if chunk_b64.is_empty() {
-                        return Err(format!("{name}: chunk_b64 为空 (seq={seq})"));
+                    if !staged {
+                        return Err(format!("{name}: 未启用块暂存 (seq={seq})"));
                     }
-                    if chunk_b64.len() > NATIVE_CHUNK_RECORD_B64_MAX {
-                        violations.push(format!(
-                            "{name}: chunk_b64 长度 {} 超过 PB_CHUNK_RECORD_B64_MAX {} (seq={seq})",
-                            chunk_b64.len(),
-                            NATIVE_CHUNK_RECORD_B64_MAX
-                        ));
+                    if photo.get("chunk_b64").is_some() {
+                        return Err(format!("{name}: 暂存块仍携带 chunk_b64 (seq={seq})"));
                     }
                     let expected_total = native_chunk_total(size);
                     if total != expected_total {
@@ -763,17 +947,21 @@ fn native_import_job(
                                 size,
                                 total,
                                 ids: Vec::new(),
-                                max_chunk_b64: 0,
                                 started: Instant::now(),
                             }
                         }
                     };
 
                     let record = format!("chunk_{chunk_key}");
-                    let id =
-                        native_add_record(session, TYPE_PHOTO_CHUNK, &record, chunk_b64)?;
+                    let id = native_add_staged(
+                        session,
+                        job_id,
+                        TYPE_PHOTO_CHUNK,
+                        &record,
+                        chunk_key,
+                        chunk_hash,
+                    )?;
                     file.ids.push(id);
-                    file.max_chunk_b64 = file.max_chunk_b64.max(chunk_b64.len());
 
                     if file_done {
                         if file.ids.len() != file.total {
@@ -800,7 +988,7 @@ fn native_import_job(
                             "mime": file.mime,
                             "bytes": file.size,
                             "chunks": file.ids.len(),
-                            "chunk_b64_max": file.max_chunk_b64,
+                            "chunk_staged": true,
                             "ms": ms,
                             "record_name": record_name,
                         }));
@@ -1014,7 +1202,7 @@ fn native_run_cancel_job(
 static E2E_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct E2eStateGuard {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
@@ -1028,10 +1216,15 @@ impl E2eStateGuard {
         let previous = std::env::var_os("VERTHYS_TEST_STATE_DIR");
         std::env::set_var("VERTHYS_TEST_STATE_DIR", dir.path());
         Self {
-            _dir: dir,
+            dir,
             previous,
             _lock: lock,
         }
+    }
+
+    /// 隔离目录中的回退状态文件路径；用于断言测试构建确实使用了该目录。
+    fn rollback_state_path(&self) -> std::path::PathBuf {
+        self.dir.path().join("rollback.state")
     }
 }
 
@@ -1042,6 +1235,22 @@ impl Drop for E2eStateGuard {
             None => std::env::remove_var("VERTHYS_TEST_STATE_DIR"),
         }
     }
+}
+
+#[test]
+fn e2e_state_guard_sets_and_restores_isolated_dir() {
+    let previous = std::env::var_os("VERTHYS_TEST_STATE_DIR");
+    let isolated;
+    {
+        let guard = E2eStateGuard::new();
+        isolated = guard.dir.path().to_path_buf();
+        assert_eq!(
+            std::env::var_os("VERTHYS_TEST_STATE_DIR"),
+            Some(isolated.clone().into_os_string())
+        );
+        assert!(!guard.rollback_state_path().exists());
+    }
+    assert_eq!(std::env::var_os("VERTHYS_TEST_STATE_DIR"), previous);
 }
 
 #[test]
@@ -1339,6 +1548,109 @@ struct ReadE2ePhoto {
     file_hash: String,
 }
 
+/// 小样本暂存链路冒烟：真实 worker + DLL，验证「密文不出 worker、
+/// 引用提交、跨块分组」全链路。由 VERTHYS_NATIVE_STAGED_E2E=1 启用。
+#[test]
+fn worker_native_staged_smoke_e2e()
+{
+    if std::env::var("VERTHYS_NATIVE_STAGED_E2E").ok().as_deref() != Some("1") {
+        eprintln!("native staged smoke 跳过：未设置 VERTHYS_NATIVE_STAGED_E2E=1");
+        return;
+    }
+    let _state_guard = E2eStateGuard::new();
+    let worker = std::env::var("VERTHYS_WORKER_E2E_WORKER")
+        .expect("缺少 VERTHYS_WORKER_E2E_WORKER");
+    let dll = std::env::var("VERTHYS_WORKER_E2E_DLL")
+        .expect("缺少 VERTHYS_WORKER_E2E_DLL");
+    assert!(std::path::Path::new(&worker).is_file(), "worker 不存在: {worker}");
+    assert!(std::path::Path::new(&dll).is_file(), "DLL 不存在: {dll}");
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("创建 tokio runtime 失败");
+    let _guard = runtime.enter();
+
+    let dir = tempfile::tempdir().expect("创建暂存冒烟临时目录失败");
+    let fixture = dir.path().join("staged_smoke.jpg");
+    /* 1x1 有效 JPEG + 尾部填充：跨过 4MiB 分块边界，覆盖 2 块暂存。
+     * 尾部字节只参与整文件哈希，不影响 JPEG 解码。 */
+    const ONE_PX_JPEG_B64: &str = "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPDs0NDP/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==";
+    let mut bytes = STANDARD
+        .decode(ONE_PX_JPEG_B64)
+        .expect("内置 JPEG 解码失败");
+    let target = NATIVE_CHUNK_BYTES + 12345;
+    bytes.resize(target, 0);
+    std::fs::write(&fixture, &bytes).expect("写入暂存冒烟样本失败");
+
+    let vault = dir
+        .path()
+        .join("staged_smoke.verthys")
+        .to_string_lossy()
+        .to_string();
+    let password = "staged-smoke-pass";
+    let session = WorkerSession::spawn(&worker, &dll).expect("启动 worker 失败");
+    session.wait_for_ready_signal().expect("worker 就绪失败");
+    session
+        .authorize_path("v4_create", "write", &vault)
+        .expect("v4_create 路径授权失败");
+    let response = session
+        .send_json(
+            &serde_json::json!({
+                "op": "v4_create",
+                "path": vault,
+                "password": password,
+            })
+            .to_string(),
+        )
+        .expect("v4_create 请求失败");
+    assert!(json_ok(&response), "v4_create 失败: {response}");
+    /* 隔离目录必须真实生效：v4_create 收尾提交会在该目录写入 rollback.state。
+     * 若缺失，说明 DLL 未识别测试钩子或回落到了生产状态目录。 */
+    assert!(
+        _state_guard.rollback_state_path().is_file(),
+        "E2E 隔离目录未生成 rollback.state: {}",
+        _state_guard.rollback_state_path().display()
+    );
+    session
+        .authorize_path("unlock", "read", &vault)
+        .expect("unlock 路径授权失败");
+    let response = session
+        .send_json(
+            &serde_json::json!({
+                "op": "unlock",
+                "path": vault,
+                "password": password,
+            })
+            .to_string(),
+        )
+        .expect("unlock 请求失败");
+    assert!(json_ok(&response), "unlock 失败: {response}");
+
+    let mut totals = NativeTotals::default();
+    let mut reports = Vec::new();
+    let mut violations = Vec::new();
+    native_import_job(
+        &session,
+        "staged-smoke-1",
+        &[fixture.to_string_lossy().to_string()],
+        &mut totals,
+        &mut reports,
+        &mut violations,
+    )
+    .expect("暂存导入失败");
+
+    assert_eq!(totals.files, 1, "reports={reports:?}");
+    assert!(totals.chunks >= 2, "样本应跨块: chunks={}", totals.chunks);
+    assert_eq!(totals.bytes, target as u64);
+    assert!(violations.is_empty(), "violations={violations:?}");
+    println!(
+        "[native-staged-smoke] bytes={} chunks={} reports={reports:?}",
+        totals.bytes, totals.chunks
+    );
+}
+
 fn read_e2e_sizes_bytes() -> Vec<u64>
 {
     let mut sizes: Vec<u64> = Vec::new();
@@ -1413,10 +1725,16 @@ fn read_e2e_import(
                     .get("chunk_key")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| format!("{job_id}: chunk 缺少 chunk_key"))?;
-                let chunk_b64 = photo
-                    .get("chunk_b64")
+                let chunk_hash = photo
+                    .get("chunk_hash")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                    .ok_or_else(|| format!("{job_id}: chunk 缺少 chunk_hash"))?;
+                if photo.get("chunk_staged").and_then(|v| v.as_bool()) != Some(true) {
+                    return Err(format!("{job_id}: 未启用块暂存 (seq={seq})"));
+                }
+                if photo.get("chunk_b64").is_some() {
+                    return Err(format!("{job_id}: 暂存块仍携带 chunk_b64 (seq={seq})"));
+                }
                 if let Some(hash) = photo.get("file_hash").and_then(|v| v.as_str()) {
                     if !hash.is_empty() {
                         file_hash = hash.to_string();
@@ -1430,9 +1748,6 @@ fn read_e2e_import(
                     .get("size")
                     .and_then(|v| v.as_u64())
                     .ok_or_else(|| format!("{job_id}: chunk 缺少 size"))?;
-                if chunk_b64.is_empty() {
-                    return Err(format!("{job_id}: chunk_b64 为空 (seq={seq})"));
-                }
                 if seq != chunk_ids.len() {
                     return Err(format!(
                         "{job_id}: 块序号不连续 seq={seq} 期望={}",
@@ -1449,11 +1764,13 @@ fn read_e2e_import(
                         "{job_id}: 导入字节 {size} 与样本 {expected_size} 不一致"
                     ));
                 }
-                let id = native_add_record(
+                let id = native_add_staged(
                     session,
+                    job_id,
                     TYPE_PHOTO_CHUNK,
                     &format!("chunk_{chunk_key}"),
-                    chunk_b64,
+                    chunk_key,
+                    chunk_hash,
                 )?;
                 chunk_ids.push(id);
                 if file_done {
@@ -2264,15 +2581,23 @@ fn restore_e2e_run(
                         .get("chunk_key")
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| format!("{job_id}: chunk 缺少 chunk_key"))?;
-                    let chunk_b64 = photo
-                        .get("chunk_b64")
+                    let chunk_hash = photo
+                        .get("chunk_hash")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| format!("{job_id}: chunk 缺少 chunk_b64"))?;
-                    let id = native_add_record(
+                        .ok_or_else(|| format!("{job_id}: chunk 缺少 chunk_hash"))?;
+                    if photo.get("chunk_staged").and_then(|v| v.as_bool()) != Some(true) {
+                        return Err(format!("{job_id}: 还原块未启用暂存 (seq={seq})"));
+                    }
+                    if photo.get("chunk_b64").is_some() {
+                        return Err(format!("{job_id}: 还原暂存块仍携带 chunk_b64 (seq={seq})"));
+                    }
+                    let id = native_add_staged(
                         session,
+                        job_id,
                         TYPE_PHOTO_CHUNK,
                         &format!("chunk_{chunk_key}"),
-                        chunk_b64,
+                        chunk_key,
+                        chunk_hash,
                     )?;
                     chunk_ids.push(id);
 
@@ -2807,3 +3132,5 @@ fn worker_native_js_fixture_e2e() -> Result<(), String>
     );
     Ok(())
 }
+
+

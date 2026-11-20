@@ -1,5 +1,5 @@
 /*
- * test_g0a_prototype.c — G0-A 生产化原型验收（仅 VERTHYS_G0A_PROTOTYPE 构建）
+ * test_g0a_prototype.c — 见证预置提交快路径验收（测试钩子构建）
  *
  * 覆盖安全评审要求：
  *   - 预置快路径真的使用预置键，且显著快于同步建键
@@ -246,6 +246,45 @@ TEST(g0a_delete_and_revoke_failure_fails_closed)
     CHECK_EQ(vty_rollback_check(uuid, 1), VTY_OK);
 
     g0a_finish(uuid, "g0a_dirty.state");
+    return 0;
+}
+
+/* 脏标记只约束失败进程：重启后若当前见证可校验、陈旧槽可清理，
+ * 解锁检查必须放行并恢复提交，避免一次 TPM 抖动把库永久锁死。 */
+TEST(g0a_dirty_recovers_when_witness_verifies)
+{
+    uint8_t uuid[VTY_UUID_BYTES];
+    uint8_t wid[VTY_UUID_BYTES];
+
+    if (!vty_tpm_witness_available()) {
+        printf("  [SKIP] PCP 不可用\n");
+        return 0;
+    }
+    memset(uuid, 0x9A, sizeof(uuid));
+    CHECK_EQ(g0a_clean_witness(uuid), VTY_OK);
+    CHECK_EQ(g0a_enable("g0a_dirty_recover.state"), 0);
+    CHECK_EQ(g0a_wid(uuid, wid), VTY_OK);
+
+    CHECK_EQ(vty_rollback_commit(uuid, 1), VTY_OK);
+    CHECK(vty_witness_pool_test_wait_ready(wid, 5000));
+
+    /* 新状态已落盘、旧键删除与撤销都失败：提交失败并留下脏标记。 */
+    vty_tpm_witness_set_delete_fail_for_test(1);
+    vty_tpm_witness_set_create_fail_for_test(1);
+    CHECK_EQ(vty_rollback_commit(uuid, 2), VTY_E_TPM);
+    CHECK_EQ(vty_rollback_commit(uuid, 3), VTY_E_ROLLBACK);
+
+    /* 模拟进程重启：进程内状态清空，TPM 中仍残留旧槽密钥。 */
+    vty_rollback_shutdown();
+    vty_tpm_witness_set_delete_fail_for_test(0);
+    vty_tpm_witness_set_create_fail_for_test(0);
+    CHECK_EQ(vty_rollback_init(), VTY_OK);
+
+    CHECK_EQ(vty_rollback_check(uuid, 2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(uuid, 3), VTY_OK);
+    CHECK_EQ(vty_rollback_check(uuid, 3), VTY_OK);
+
+    g0a_finish(uuid, "g0a_dirty_recover.state");
     return 0;
 }
 

@@ -3,6 +3,7 @@
  *
  * 职责：
  *   1. 会话空闲计时（touchSession / resetSessionTimer / clearSessionTimer）
+ *      唯一空闲时钟：容器解锁即武装，模块层不维护独立计时器
  *   2. 三档安全预设适配（applySecurityPreset / setSessionTimeout / getSessionTimeout）
  *   3. 暴力拦截门禁（checkBruteForceGate / getBruteForceStatus）
  *   4. lockAll 锁定全部（清零缓存 + worker GMK + 重置状态）
@@ -44,8 +45,20 @@ export const securityHardeningFailedRef = ref(false);
  * 会话计时                                                            *
  * ------------------------------------------------------------------ */
 
-/** 会话空闲超时（毫秒），默认 30 分钟 */
-let sessionTimeoutMs = 30 * 60 * 1000;
+/** 会话空闲超时（毫秒）：唯一权威
+ *
+ * 覆盖容器会话与全部模块，模块层不维护独立超时。初值取已持久化预设，
+ * 保证全局密钥验证前后使用同一时长；受信配置恢复后由
+ * applySecurityPreset 覆盖。 */
+function resolveInitialSessionTimeoutMs(): number {
+  const preset = keyState.securityPreset.value;
+  if (preset === 3) {
+    return normalizeCustomSessionMinutes(keyState.customSessionMinutes.value) * 60_000;
+  }
+  return PRESET_SESSION_TIMEOUT_MS[preset];
+}
+
+let sessionTimeoutMs = resolveInitialSessionTimeoutMs();
 
 /** 在途定时器句柄（null = 未武装） */
 let sessionTimer: number | null = null;
@@ -111,6 +124,15 @@ function clearTimerHandle(): void {
   }
 }
 
+/** 会话是否处于可锁定状态
+ *
+ * 容器解锁即成立，不要求全局密钥已验证：模块口令只依赖 verthysReady，
+ * 若等到 globalKeyReady 才武装，已解锁模块但未验证全局密钥的会话
+ * 将没有任何空闲截止时间。 */
+function isSessionActive(): boolean {
+  return keyState.verthysReady.value;
+}
+
 /** 按当前截止时间武装定时器；到点复核真实空闲时长后再执行锁定
  *
  * 复核的意义：
@@ -120,6 +142,7 @@ function clearTimerHandle(): void {
  */
 function armSessionDeadline(): void {
   clearTimerHandle();
+  if (!keyState.sessionLockEnabled.value || !isSessionActive()) return;
   const armedDeadline = sessionDeadline.value;
   if (armedDeadline === 0) return;
   sessionTimer = window.setTimeout(() => {
@@ -148,7 +171,7 @@ function clearSessionTimer(): void {
 function resetSessionTimer(): void {
   if (typeof window === "undefined") return;
   // 空闲锁定关闭（自定义档显式关闭）或会话未激活时不武装计时器
-  if (!keyState.sessionLockEnabled.value || !keyState.globalKeyReady.value) {
+  if (!keyState.sessionLockEnabled.value || !isSessionActive()) {
     clearTimerHandle();
     if (sessionDeadline.value !== 0) sessionDeadline.value = 0;
     return;
@@ -181,7 +204,7 @@ export function setSessionTimeout(ms: number): void {
   const clamped = Math.max(60 * 1000, Math.min(ms, 24 * 60 * 60 * 1000)); // 1 分钟 ~ 24 小时
   sessionTimeoutMs = clamped;
   // 若会话已激活，立即按新时长重置计时
-  if (keyState.globalKeyReady.value) {
+  if (isSessionActive()) {
     resetSessionTimer();
   }
 }
@@ -202,7 +225,7 @@ export function setSessionLockEnabled(enabled: boolean): void {
     clearSessionTimer();
     return;
   }
-  if (keyState.globalKeyReady.value) {
+  if (isSessionActive()) {
     resetSessionTimer();
   }
 }

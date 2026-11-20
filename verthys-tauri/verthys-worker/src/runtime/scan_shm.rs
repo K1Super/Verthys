@@ -37,9 +37,10 @@ mod windows_impl {
         include!("../../../shm_schema.rs");
     }
     pub use shm_contract::{
-        SCAN_BATCH_MAX_BYTES, SHM_AUTH_BLOCK_LEN, SHM_DEFAULT_SIZE, SHM_ENTRY_SIZE,
-        SHM_HEADER_SIZE, SHM_MAGIC, SHM_SUMMARY_DEFAULT_SIZE, SHM_SUMMARY_ENTRY_SIZE,
-        SHM_SUMMARY_MAGIC, SHM_VERSION,
+        PHOTO_READ_SHM_HEADER_SIZE, PHOTO_READ_SHM_MAGIC, PHOTO_READ_SHM_SIZE,
+        PHOTO_READ_SHM_VERSION, SCAN_BATCH_MAX_BYTES, SHM_AUTH_BLOCK_LEN, SHM_DEFAULT_SIZE,
+        SHM_ENTRY_SIZE, SHM_HEADER_SIZE, SHM_MAGIC, SHM_SUMMARY_DEFAULT_SIZE,
+        SHM_SUMMARY_ENTRY_SIZE, SHM_SUMMARY_MAGIC, SHM_VERSION,
     };
 
     /// 摘要记录元组（writer 侧构造 → SHM 传输）：
@@ -77,6 +78,11 @@ mod windows_impl {
         name: String,
         locked: bool,
     }
+
+    /* SAFETY: ScanShm 只持有内核句柄与映射视图，句柄与映射本身不绑定线程；
+     * 所有读写都由持有它的容器（job 表 / 扫描状态）串行化，Drop 可在任意
+     * 线程执行（Unmap/CloseHandle 线程无关）。 */
+    unsafe impl Send for ScanShm {}
 
     impl ScanShm {
         /// 创建共享内存段，VirtualLock 锁定物理内存
@@ -190,7 +196,7 @@ mod windows_impl {
                 return Err("data exceeds shared memory size");
             }
 
-            // 认证块（可选）：提供密钥时须为尾部 32 字节 HMAC 标签预留空间
+            // 认证块（可选）：提供密钥时须为尾部 32 字节 BLAKE3 标签预留空间
             if auth_key.is_some()
                 && needed
                     .checked_add(SHM_AUTH_BLOCK_LEN)
@@ -252,10 +258,10 @@ mod windows_impl {
                 data_off_rel += data.len();
             }
 
-            // 认证块：对 [0, needed) 全部字节计算 HMAC-SHA256，把 32 字节标签写到 needed 偏移处
+            // 认证块：对 [0, needed) 全部字节计算 BLAKE3 keyed 标签，把 32 字节标签写到 needed 偏移处
             if let Some(key) = auth_key {
                 let data_slice = unsafe { std::slice::from_raw_parts(base, needed) };
-                let tag = hmac_sha256(key, data_slice);
+                let tag = blake3_keyed_tag(key, data_slice)?;
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         tag.as_ptr(),
@@ -306,7 +312,7 @@ mod windows_impl {
                 return Err("summary data exceeds shared memory size");
             }
 
-            // 认证块（可选）：提供密钥时须为尾部 32 字节 HMAC 标签预留空间
+            // 认证块（可选）：提供密钥时须为尾部 32 字节 BLAKE3 标签预留空间
             if auth_key.is_some()
                 && needed
                     .checked_add(SHM_AUTH_BLOCK_LEN)
@@ -364,10 +370,10 @@ mod windows_impl {
                 name_off_rel += name.len();
             }
 
-            // 认证块：对 [0, needed) 全部字节计算 HMAC-SHA256，把 32 字节标签写到 needed 偏移处
+            // 认证块：对 [0, needed) 全部字节计算 BLAKE3 keyed 标签，把 32 字节标签写到 needed 偏移处
             if let Some(key) = auth_key {
                 let data_slice = unsafe { std::slice::from_raw_parts(base, needed) };
-                let tag = hmac_sha256(key, data_slice);
+                let tag = blake3_keyed_tag(key, data_slice)?;
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         tag.as_ptr(),
@@ -380,19 +386,91 @@ mod windows_impl {
             Ok(records.len())
         }
 
-        /// 销毁：擦除 → 解锁 → 取消映射 → 关闭句柄
-        pub fn destroy(mut self) {
+        /// 写入单块原图明文（照片原图读取专用布局）。
+        ///
+        /// 头部字段与载荷一起参与 BLAKE3 keyed 认证；reserved 区显式清零
+        ///（wipe 填的是随机字节，不能省略），认证块追加在载荷之后。写入前
+        /// 整体擦除旧数据，保证上一块明文不会残留。
+        pub fn write_blob(
+            &mut self,
+            seq: u32,
+            total: u32,
+            done: bool,
+            payload: &[u8],
+            auth_key: Option<&[u8]>,
+        ) -> Result<(), &'static str> {
+            let needed = PHOTO_READ_SHM_HEADER_SIZE
+                .checked_add(payload.len())
+                .ok_or("blob size overflow")?;
+            if needed > self.size {
+                return Err("blob exceeds shared memory size");
+            }
+            if auth_key.is_some()
+                && needed
+                    .checked_add(SHM_AUTH_BLOCK_LEN)
+                    .ok_or("auth block overflow")?
+                    > self.size
+            {
+                return Err("auth block overflow");
+            }
+
+            self.wipe();
+            let base = self.ptr;
+            unsafe {
+                *(base as *mut u32) = PHOTO_READ_SHM_MAGIC;
+                *((base.add(4)) as *mut u32) = PHOTO_READ_SHM_VERSION;
+                *((base.add(8)) as *mut u32) = seq;
+                *((base.add(12)) as *mut u32) = total;
+                *((base.add(16)) as *mut u32) = if done { 1 } else { 0 };
+                *((base.add(20)) as *mut u32) = payload.len() as u32;
+                std::ptr::write_bytes(base.add(24), 0, 40);
+                if !payload.is_empty() {
+                    std::ptr::copy_nonoverlapping(
+                        payload.as_ptr(),
+                        base.add(PHOTO_READ_SHM_HEADER_SIZE),
+                        payload.len(),
+                    );
+                }
+            }
+
+            if let Some(key) = auth_key {
+                let data_slice = unsafe { std::slice::from_raw_parts(base, needed) };
+                let tag = blake3_keyed_tag(key, data_slice)?;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        tag.as_ptr(),
+                        base.add(needed),
+                        SHM_AUTH_BLOCK_LEN,
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        /// 销毁：实际清理统一由 Drop 执行（单一清理路径，杜绝双释放）
+        pub fn destroy(self) {}
+    }
+
+    /// Drop 统一清理：擦除 → 解锁 → 取消映射 → 关闭句柄。
+    ///
+    /// 读取 job 被取消/过期回收时也必须经由此路径擦除明文，因此把清理
+    /// 从显式 destroy 收敛到 Drop，任何提前退出都不会留下未擦除的映射。
+    impl Drop for ScanShm {
+        fn drop(&mut self) {
             self.wipe();
             if self.locked {
                 unsafe {
                     VirtualUnlock(self.ptr as *const std::ffi::c_void, self.size);
                 }
+                self.locked = false;
             }
             if !self.ptr.is_null() {
                 unsafe { UnmapViewOfFile(self.view) };
+                self.ptr = std::ptr::null_mut();
             }
             if !self.handle.is_null() {
                 unsafe { CloseHandle(self.handle) };
+                self.handle = std::ptr::null_mut();
             }
         }
     }
@@ -428,44 +506,14 @@ mod windows_impl {
         }
     }
 
-    /// 标准 HMAC-SHA256（用 sha2 原语手写 HMAC 结构）
+    /// 计算 BLAKE3 keyed 认证标签。
     ///
-    /// worker 未直接依赖 hmac crate，此处用 sha2 实现同一算法，输出与主进程
-    /// hmac crate 逐字节一致。密钥长度超过分组大小先哈希再使用，精确对齐
-    /// 标准 HMAC 密钥预处理。
+    /// 密钥长度必须恰好 32 字节：BLAKE3 keyed 模式要求固定长度密钥，
+    /// 截断或补齐会削弱认证强度，长度不符直接拒绝。
     /// pub(super)：供本模块测试重算认证标签比对。
-    pub(super) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-
-        const BLOCK: usize = 64;
-        let mut k = [0u8; BLOCK];
-        if key.len() > BLOCK {
-            let d = Sha256::digest(key);
-            k[..32].copy_from_slice(&d);
-        } else {
-            k[..key.len()].copy_from_slice(key);
-        }
-
-        let mut ipad = [0x36u8; BLOCK];
-        let mut opad = [0x5cu8; BLOCK];
-        for i in 0..BLOCK {
-            ipad[i] ^= k[i];
-            opad[i] ^= k[i];
-        }
-
-        let mut inner = Sha256::new();
-        inner.update(ipad);
-        inner.update(data);
-        let inner_hash = inner.finalize();
-
-        let mut outer = Sha256::new();
-        outer.update(opad);
-        outer.update(inner_hash);
-        let out = outer.finalize();
-
-        let mut tag = [0u8; 32];
-        tag.copy_from_slice(&out);
-        tag
+    pub(super) fn blake3_keyed_tag(key: &[u8], data: &[u8]) -> Result<[u8; 32], &'static str> {
+        let key: &[u8; 32] = key.try_into().map_err(|_| "auth key length invalid")?;
+        Ok(*blake3::keyed_hash(key, data).as_bytes())
     }
 
     /// 构建受限安全属性：仅当前用户 SID 可读写共享内存
@@ -583,7 +631,9 @@ pub(crate) struct ScanShm;
 mod tests {
     use super::windows_impl::{fill_random_bytes, random_hex_name};
     use super::windows_impl::{
-        hmac_sha256, ScanShm, SHM_AUTH_BLOCK_LEN, SHM_ENTRY_SIZE, SHM_HEADER_SIZE,
+        blake3_keyed_tag, ScanShm, PHOTO_READ_SHM_HEADER_SIZE, PHOTO_READ_SHM_MAGIC,
+        PHOTO_READ_SHM_SIZE, PHOTO_READ_SHM_VERSION, SHM_AUTH_BLOCK_LEN, SHM_ENTRY_SIZE,
+        SHM_HEADER_SIZE,
     };
 
     #[test]
@@ -625,10 +675,48 @@ mod tests {
         let base = shm.ptr();
         unsafe {
             let data = std::slice::from_raw_parts(base, needed);
-            let expected = hmac_sha256(&key, data);
+            let expected = blake3_keyed_tag(&key, data).expect("tag");
             let tag = std::slice::from_raw_parts(base.add(needed), SHM_AUTH_BLOCK_LEN);
-            assert_eq!(tag, &expected[..], "认证块应等于重算的 HMAC 标签");
+            assert_eq!(tag, &expected[..], "认证块应等于重算的 BLAKE3 标签");
         }
+        shm.destroy();
+    }
+
+    #[test]
+    fn write_blob_writes_header_payload_and_auth() {
+        let key = [0x24u8; 32];
+        let mut shm = ScanShm::create(PHOTO_READ_SHM_SIZE).expect("create");
+        let payload = vec![0x5Au8; 1024];
+        shm.write_blob(2, 5, true, &payload, Some(&key))
+            .expect("write blob");
+
+        let base = shm.ptr();
+        unsafe {
+            assert_eq!(*(base as *const u32), PHOTO_READ_SHM_MAGIC);
+            assert_eq!(*((base.add(4)) as *const u32), PHOTO_READ_SHM_VERSION);
+            assert_eq!(*((base.add(8)) as *const u32), 2);
+            assert_eq!(*((base.add(12)) as *const u32), 5);
+            assert_eq!(*((base.add(16)) as *const u32), 1, "done 标志");
+            assert_eq!(*((base.add(20)) as *const u32), 1024);
+            let data =
+                std::slice::from_raw_parts(base.add(PHOTO_READ_SHM_HEADER_SIZE), 1024);
+            assert!(data.iter().all(|b| *b == 0x5A));
+
+            let needed = PHOTO_READ_SHM_HEADER_SIZE + 1024;
+            let tag = std::slice::from_raw_parts(base.add(needed), SHM_AUTH_BLOCK_LEN);
+            let expected = blake3_keyed_tag(&key, std::slice::from_raw_parts(base, needed))
+                .expect("tag");
+            assert_eq!(tag, &expected[..], "认证块应覆盖头部与载荷");
+        }
+        shm.destroy();
+    }
+
+    #[test]
+    fn write_records_rejects_non_32_byte_auth_key() {
+        let mut shm = ScanShm::create(8 * 1024 * 1024).expect("create");
+        let records = [(1u64, 2u32, "name".to_string(), vec![0xAAu8])];
+        assert!(shm.write_records(&records, false, Some(&[0x42u8; 31])).is_err());
+        assert!(shm.write_records(&records, false, Some(&[0x42u8; 33])).is_err());
         shm.destroy();
     }
 
@@ -647,7 +735,7 @@ mod tests {
             // 篡改载荷区首字节（magic）
             *base ^= 0xFF;
             let data = std::slice::from_raw_parts(base, needed);
-            let recomputed = hmac_sha256(&key, data);
+            let recomputed = blake3_keyed_tag(&key, data).expect("tag");
             assert_ne!(recomputed.as_slice(), stored_tag.as_slice(), "篡改后重算标签应与原标签不同");
         }
         shm.destroy();

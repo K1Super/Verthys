@@ -38,7 +38,8 @@ typedef enum {
     VTY_E_ROTATE_PENDING     = 20,  /* DEK 全库轮换仍在进行（调用方应稍后重试） */
     VTY_E_MODULE_LOCKED      = 21,  /* 目标模块未解锁，操作被拒绝 */
     VTY_E_NO_SPACE           = 22,  /* 数据区/文件系统空间不足 */
-    VTY_E_VERIFY             = 23   /* 完整性复核失败（与 AEAD 认证失败区分） */
+    VTY_E_VERIFY             = 23,  /* 完整性复核失败（与 AEAD 认证失败区分） */
+    VTY_E_ANCHOR_FULL        = 24   /* 回退锚点表满且无可回收条目 */
 } VtyResult;
 
 /* 固定长度 */

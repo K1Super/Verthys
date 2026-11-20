@@ -85,9 +85,9 @@
       </div>
     </div>
     <div class="kv-actions">
-      <button class="btn kv-cancel" type="button" @click="$emit('close')">取消</button>
+      <button class="btn btn-neutral btn-compact" type="button" @click="$emit('close')">取消</button>
       <button
-        class="btn btn-primary kv-confirm"
+        class="btn btn-primary btn-compact"
         type="button"
         @click="$emit('confirm')"
         :disabled="!editingKeyValue || keyDialogProcessing || (hasRecord && !editingOldKeyValue) || (!hasRecord && !skipRecoveryBinding && !editingRecoveryCode)"

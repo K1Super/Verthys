@@ -62,11 +62,9 @@ uint32_t vault_session_resident_count(void);
  * 退避记账为进程级模块全局，与上下文生命周期无关。 */
 void ctx_zero_sensitive(struct VerthysContext *ctx);
 
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
 /* 批量导入推迟会话是否生效。读取 defer_anchor，调用方必须已持有
  * api_mutex（与 AddRecords/Lock 串行）；供非导入写入口拒绝判定。 */
 int verthys_bulk_defer_active(const struct VerthysContext *ctx);
-#endif
 
 /* ---------- 格式检测 ----------
  * 读取文件头 8 字节判断格式：仅识别固定头 "VRTY"。

@@ -150,7 +150,7 @@ pub(crate) fn resolve_chunk_refs(
     if set.ids.len() > MAX_PHOTO_CHUNKS {
         return Err("块集项数超出上限".to_string());
     }
-    if set.ids.iter().any(|id| *id == 0) {
+    if set.ids.contains(&0) {
         return Err("块集包含非法记录 ID".to_string());
     }
     if let Some(declared) = meta.chunk_count {

@@ -49,6 +49,7 @@
 ### 安全审计
 
 - 安全设计与信任模型：[SECURITY_DESIGN.md](SECURITY_DESIGN.md)
+- 回退锚点生命周期与淘汰治理：[ROLLBACK_ANCHOR_LIFECYCLE.md](ROLLBACK_ANCHOR_LIFECYCLE.md)
 - P2 SYSTEM 安全服务：[P2_SECURITY_SERVICE_PLAN.md](P2_SECURITY_SERVICE_PLAN.md)
 - 依赖与供应链：[THIRD_PARTY.md](THIRD_PARTY.md)
 
@@ -67,6 +68,7 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 总体设计与模块职责 | 现行 |
 | [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md) | ADR 索引与历史决策 | 现行（含历史条目） |
 | [SECURITY_DESIGN.md](SECURITY_DESIGN.md) | 信任模型、密钥链路、威胁建模 | 现行 |
+| [ROLLBACK_ANCHOR_LIFECYCLE.md](ROLLBACK_ANCHOR_LIFECYCLE.md) | 回退锚点生命周期、淘汰策略、容量错误与运维规程 | 现行（已实施） |
 | [P2_SECURITY_SERVICE_PLAN.md](P2_SECURITY_SERVICE_PLAN.md) | P2 机器级安全服务设计与实施状态 | 现行（干净 VM E2E 待执行） |
 | [CORE_API.md](CORE_API.md) | C core 对外接口规范 | 现行 |
 | [DATA_FLOW.md](DATA_FLOW.md) | 关键数据流时序 | 现行 |

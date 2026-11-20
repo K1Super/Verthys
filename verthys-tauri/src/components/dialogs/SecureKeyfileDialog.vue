@@ -23,10 +23,10 @@
     </p>
     <p v-if="error" class="kv-error skf-error">{{ error }}</p>
     <div class="kv-actions">
-      <button class="btn kv-cancel" type="button" :disabled="busy" @click="$emit('close')">
+      <button class="btn btn-neutral btn-compact" type="button" :disabled="busy" @click="$emit('close')">
         稍后
       </button>
-      <button class="btn btn-primary kv-confirm" type="button" :disabled="busy" @click="onConfirm">
+      <button class="btn btn-primary btn-compact" type="button" :disabled="busy" @click="onConfirm">
         {{ busy ? "启用中…" : "选择位置并启用" }}
       </button>
     </div>

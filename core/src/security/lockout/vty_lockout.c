@@ -143,6 +143,13 @@ static int resolve_paths(void)
             memcpy(g_test_state_dir, test_dir, (size_t)test_len + 1u);
             return VTY_OK;
         }
+#if defined(VERTHYS_TEST_REQUIRE_ISOLATION) && VERTHYS_TEST_REQUIRE_ISOLATION
+        /* 自动化测试构建缺少隔离目录时拒绝运行：绝不回落到生产状态目录。 */
+        return VTY_E_POLICY;
+#else
+        /* dev 构建的测试钩子只用于机器预算旁路，同时必须能操作用户真实
+         * 容器；测试入口自行注入隔离目录，因此这里允许回落到生产路径。 */
+#endif
     }
 #endif
     rc = vty_secure_state_file_path("lockout.state", g_state_path,

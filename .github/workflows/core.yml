@@ -100,7 +100,8 @@ jobs:
       - name: Configure (Ninja)
         run: |
           # 测试隔离钩子只影响测试构建；生产发布构建显式 OFF。
-          cmake -S . -B build_ci -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVERTHYS_TEST_HOOKS=ON
+          # 自动化测试构建同时强制隔离：缺少 VERTHYS_TEST_STATE_DIR 即拒绝运行。
+          cmake -S . -B build_ci -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVERTHYS_TEST_HOOKS=ON -DVERTHYS_TEST_REQUIRE_ISOLATION=ON
 
       - name: Build (Debug + tests)
         run: |
@@ -112,8 +113,8 @@ jobs:
       - name: Build (Release + .vsec integrity baseline injection)
         run: |
           # 攻击回归需要测试态路径钩子；生产发布构建（build_production.ps1）
-          # 显式 OFF，绝不带此钩子。
-          & ".\scripts\build\build_core.release.ps1" -TestHooks -NoPause
+          # 显式 OFF，绝不带此钩子。自动化测试产物强制隔离，dev 运行构建不传该开关。
+          & ".\scripts\build\build_core.release.ps1" -TestHooks -RequireTestIsolation -NoPause
           if ($LASTEXITCODE -ne 0) { throw "Release build failed" }
         shell: pwsh
 

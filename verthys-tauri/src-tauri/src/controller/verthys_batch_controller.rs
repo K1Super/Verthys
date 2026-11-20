@@ -61,7 +61,7 @@ use tauri::{Manager, State};
  * 辅助函数                                                            *
  * ------------------------------------------------------------------ */
 
-/// 发送批量导入锚点推迟 op（G0-A2 原型）。
+/// 发送批量导入锚点推迟 op。
 ///
 /// 返回：
 ///   Some(true)  — DLL 导出符号存在且 Begin/Commit 成功
@@ -101,41 +101,55 @@ pub(crate) const IMPORT_SESSION_BUSY_CODE: &str = "E_IMPORT_SESSION_BUSY";
 /// 结构化错误码：加密库未就绪（未解锁/路径缺失；前端据此给出重新解锁引导）
 pub(crate) const VERTHYS_NOT_READY_CODE: &str = "E_VERTHYS_NOT_READY";
 
-/// 去重键存在性收敛时枚举的记录类型：照片索引、文件索引。
-/// 导入会话的 committed 记录只可能是索引型记录（块记录不入 WAL）；
-/// 不枚举块类型，避免大批量相册在每次导入前扫描全部块 ID。
-const IMPORT_INDEX_RTYPES: [u32; 2] = [0x01u32, 0x08u32];
-/// 单次类型 ID 枚举上限（与 C 层同源）
-const TYPE_LIST_PAGE_MAX: u64 = 4096;
+/// 单次全量 ID 枚举页大小（与 C 层 VERTHYS_TYPE_ID_BATCH_MAX 同源）
+const LIVE_ID_PAGE_MAX: u64 = 4096;
+/// 存活 ID 枚举安全阀：超限视为异常容器，拒绝收敛（保守保留去重键）
+const LIVE_ID_HARD_LIMIT: usize = 5_000_000;
+/// 单页枚举超时：目录叶迭代不读记录段，正常为毫秒级
+const LIVE_ID_PAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// 枚举容器内仍然存活的索引型记录 ID（走类型盲索引，不读记录密文）。
+/// 枚举容器内全部存活记录 ID。
+///
+/// 走目录叶迭代（worker `list_all_lids`）：不读记录段、不解密名称，
+/// 因此与模块锁定状态无关——任一模块未解锁也不会让存活 ID 缺失，
+/// 不会把仍存活的记录误判为已删除而释放其去重键。
+/// 旧 DLL 缺该可选符号时返回错误，调用方跳过收敛（保留去重键）。
 fn collect_live_record_ids(app: &tauri::AppHandle) -> Result<HashSet<u64>, String> {
     let state = app.state::<AppState>();
     let mut live = HashSet::new();
-    for rtype in IMPORT_INDEX_RTYPES {
-        let mut after = 0u64;
-        loop {
-            let req = serde_json::json!({
-                "op": "list_ids_by_type",
-                "rtype": rtype,
-                "id": after,
-                "max_count": TYPE_LIST_PAGE_MAX,
-            });
-            let resp_json = state.send(&req.to_string())?;
-            let resp: VerthysResponse = serde_json::from_str(&resp_json)
-                .map_err(|e| format!("记录 ID 枚举响应解析失败: {}", e))?;
-            if !resp.ok {
-                return Err(resp.error.unwrap_or_else(|| "记录 ID 枚举失败".to_string()));
-            }
-            let ids = resp.ids.unwrap_or_default();
-            let Some(last) = ids.last().copied() else {
+    let mut after = 0u64;
+    loop {
+        let req = serde_json::json!({
+            "op": "list_all_lids",
+            "id": after,
+            "max_count": LIVE_ID_PAGE_MAX,
+        });
+        let resp_json = state.send_with_timeout(&req.to_string(), LIVE_ID_PAGE_TIMEOUT)?;
+        let resp: VerthysResponse = serde_json::from_str(&resp_json)
+            .map_err(|e| format!("存活记录 ID 枚举响应解析失败: {}", e))?;
+        if !resp.ok {
+            return Err(resp
+                .error
+                .unwrap_or_else(|| "存活记录 ID 枚举失败".to_string()));
+        }
+        let ids = resp.ids.unwrap_or_default();
+        let exhausted = resp.exhausted.unwrap_or(false);
+        let Some(last) = ids.last().copied() else {
+            if exhausted {
                 break;
-            };
-            live.extend(ids);
-            if last <= after {
-                break; // 防御：游标不前进即终止
             }
-            after = last;
+            return Err("存活记录 ID 枚举未推进".to_string());
+        };
+        if last <= after {
+            return Err("存活记录 ID 枚举游标未推进".to_string());
+        }
+        live.extend(ids);
+        if live.len() > LIVE_ID_HARD_LIMIT {
+            return Err("存活记录数量超过枚举安全阀".to_string());
+        }
+        after = last;
+        if exhausted {
+            break;
         }
     }
     Ok(live)
@@ -837,6 +851,13 @@ pub async fn verthys_import_end(
     // 快速失败：无活跃会话（权威判定在写者线程内持会话锁复核）
     if !state.has_import_session() {
         log::warn!("[verthys_import_end] 无活跃导入会话");
+        /* 宿主侧会话丢失但 C 层推迟可能仍在：先收口锚点再清标记，
+         * 否则会话会一直挂到 30s 硬上限。 */
+        if state.bulk_defer_active() {
+            if send_bulk_op(&state, "bulk_import_commit") != Some(true) {
+                log::error!("[verthys_import_end] 残留推迟会话的锚点提交未成功");
+            }
+        }
         state.set_bulk_defer(false);
         return Ok(VerthysResponse::err(cmd::IMPORT_END, "无活跃导入会话"));
     }
@@ -866,8 +887,11 @@ pub async fn verthys_import_end(
     /* 正常/取消/失败路径都收口锚点：只要 Begin 成功过，就必须 Commit。
      * 提交失败返回错误让上层提示“重新解锁补推进”，不得假装导入完全成功。 */
     if state.bulk_defer_active() {
+        let committed = send_bulk_op(&state, "bulk_import_commit") == Some(true);
+        /* C 层提交失败会清除会话并锁定库，宿主标记必须同步清除；
+         * 失败原因向上返回，由用户重新解锁触发检查补推进。 */
         state.set_bulk_defer(false);
-        if send_bulk_op(&state, "bulk_import_commit") != Some(true) {
+        if !committed {
             log::error!("[verthys_import_end] 锚点提交未成功");
             return Ok(VerthysResponse::err(
                 cmd::IMPORT_END,

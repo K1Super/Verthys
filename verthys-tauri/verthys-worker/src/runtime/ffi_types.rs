@@ -72,9 +72,19 @@ pub(crate) type VerthysAddRecordsFn =
 pub(crate) type VerthysGetRecordFn =
     unsafe extern "C" fn(VerthysHandle, u64, *mut VerthysRecordC) -> u32;
 pub(crate) type VerthysClearRecordCacheFn = unsafe extern "C" fn(VerthysHandle) -> u32;
-/// 批量导入锚点推迟（API 0x0015，仅隔离原型 DLL 导出）。
+/// 批量导入锚点推迟（API 0x0015 可选能力）。
 /// 宿主按可选符号解析：缺失时回退逐次锚点提交。
 pub(crate) type VerthysBulkImportFn = unsafe extern "C" fn(VerthysHandle) -> u32;
+/// 全量存活记录 ID 枚举（API 0x0015 可选能力）。
+/// 目录叶迭代，不读记录段、不解密名称，与模块锁定状态无关。
+pub(crate) type VerthysListAllLidsFn = unsafe extern "C" fn(
+    VerthysHandle,
+    u64,
+    u64,
+    *mut u64,
+    *mut u64,
+    *mut u8,
+) -> u32;
 /// 可选符号缺失：与真实 C 层错误码区分，宿主据此走兼容路径。
 pub(crate) const VERTHYS_SYMBOL_UNSUPPORTED: u32 = 0xFFFF_FFFE;
 pub(crate) type VerthysDeleteRecordFn = unsafe extern "C" fn(VerthysHandle, u64) -> u32;
@@ -457,6 +467,31 @@ pub(crate) struct VerPersistVerifyResultC {
 pub(crate) type VerthysVerifyPersistFn =
     unsafe extern "C" fn(VerthysHandle, *mut VerPersistVerifyResultC) -> i32;
 
+/* ---------------- 回退锚点维护（API 0x0016） ---------------- */
+
+#[repr(C)]
+pub(crate) struct VerthysAnchorInfoC {
+    pub(crate) struct_size: u32,
+    pub(crate) uuid: [u8; 16],
+    pub(crate) generation: u64,
+    pub(crate) witness_state: u32,
+    pub(crate) reserved: u32,
+}
+
+pub(crate) const VERTHYS_ANCHOR_FLAG_CONFIRM: u32 = 0x00000001;
+
+pub(crate) type VerthysRollbackAnchorListFn = unsafe extern "C" fn(
+    VerthysHandle,
+    *mut VerthysAnchorInfoC,
+    u32,
+    *mut u32,
+    *mut u32,
+) -> u32;
+pub(crate) type VerthysRollbackAnchorReclaimFn =
+    unsafe extern "C" fn(VerthysHandle, u32, *mut u32, *mut u32) -> u32;
+pub(crate) type VerthysRollbackAnchorReleaseFn =
+    unsafe extern "C" fn(VerthysHandle, *const u8, u32, *mut u32, *mut u32) -> u32;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,5 +501,14 @@ mod tests {
     fn security_status_c_layout_matches_c_abi() {
         assert_eq!(std::mem::size_of::<VerthysSecurityStatusC>(), 104);
         assert_eq!(std::mem::align_of::<VerthysSecurityStatusC>(), 8);
+    }
+
+    #[test]
+    fn anchor_info_c_layout_matches_c_abi() {
+        assert_eq!(std::mem::size_of::<VerthysAnchorInfoC>(), 40);
+        assert_eq!(std::mem::align_of::<VerthysAnchorInfoC>(), 8);
+        assert_eq!(std::mem::offset_of!(VerthysAnchorInfoC, uuid), 4);
+        assert_eq!(std::mem::offset_of!(VerthysAnchorInfoC, generation), 24);
+        assert_eq!(std::mem::offset_of!(VerthysAnchorInfoC, witness_state), 32);
     }
 }

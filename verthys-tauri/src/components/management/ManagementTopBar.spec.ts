@@ -7,7 +7,8 @@
  *   2. 下载态固定 30 刻度、首尾端桩与每五格主刻度，点亮数量按整格推进
  *   3. 100% 补满末格
  *   4. 颜色沿全量程固定映射，首格青色、末格青绿色
- *   5. 更新节点悬浮提示携带当前版本，版本值取自构建注入（禁止组件写死版本）
+ *   5. 更新节点悬浮提示只描述动作；版本取自构建注入，呈现为更新节点
+ *      左侧的常驻读数（禁止组件写死版本）
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, h, nextTick, reactive, type App } from "vue";
@@ -161,37 +162,46 @@ describe("更新节点环形机械量表", () => {
   });
 });
 
-describe("更新节点悬浮提示 · 当前版本", () => {
-  it("无可用更新时提示同时给出当前版本与检查动作", () => {
+describe("更新节点 · 版本读数与悬浮提示", () => {
+  it("无可用更新时提示与无障碍名称均为检查更新", () => {
     const { container } = mountTopBar(false, 0, { updateAvailable: false });
-    const tip = updateTipText(container);
+    const button = container.querySelector(".sf-act--update") as HTMLButtonElement;
 
-    expect(tip).toContain(`当前 v${INJECTED_VERSION}`);
-    expect(tip).toContain("检查是否有可用更新");
+    expect(updateTipText(container)).toBe("检查更新");
+    expect(button.getAttribute("aria-label")).toBe("检查更新");
   });
 
-  it("发现更新时以当前版本指向目标版本", () => {
+  it("发现更新时以目标版本描述安装动作", () => {
     const { container } = mountTopBar(false, 0, {
       updateAvailable: true,
       updateVersion: "9.9.9",
     });
 
-    expect(updateTipText(container)).toBe(
-      `当前 v${INJECTED_VERSION} → 更新到 9.9.9，安装前自动落盘并锁定`,
-    );
+    expect(updateTipText(container)).toBe("更新到 9.9.9，安装前自动落盘并锁定");
   });
 
-  it("下载中提示保持版本可见且不改变取消语义", () => {
+  it("下载中提示只描述进度，不改变取消语义", () => {
     const { container } = mountTopBar(true, 42, { updateAvailable: true });
 
-    expect(updateTipText(container)).toBe(`当前 v${INJECTED_VERSION} · 正在更新 42%`);
+    expect(updateTipText(container)).toBe("正在更新 42%");
   });
 
-  it("版本只进入提示，不进入无障碍名称", () => {
+  it("当前版本常驻于更新节点左侧，不进入悬浮提示", () => {
+    const { container } = mountTopBar(false, 0, { updateAvailable: false });
+    const actions = container.querySelector(".sf-meridian-actions") as HTMLElement;
+    const readout = actions.querySelector(".sf-version") as HTMLElement;
+
+    expect(readout.textContent?.trim()).toBe(`V${INJECTED_VERSION}`);
+    expect(readout.getAttribute("aria-label")).toBe(`当前版本 ${INJECTED_VERSION}`);
+    // 读数必须排在任何动作节点之前，与更新按钮紧邻
+    expect(actions.firstElementChild).toBe(readout);
+    expect(updateTipText(container)).not.toContain(INJECTED_VERSION);
+  });
+
+  it("版本读数不进入更新按钮的无障碍名称", () => {
     const { container } = mountTopBar(false, 0, { updateAvailable: false });
     const button = container.querySelector(".sf-act--update") as HTMLButtonElement;
 
-    expect(button.getAttribute("aria-label")).toBe("检查是否有可用更新");
     expect(button.getAttribute("aria-label")).not.toContain(INJECTED_VERSION);
   });
 });

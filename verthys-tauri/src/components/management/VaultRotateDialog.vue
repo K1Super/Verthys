@@ -146,11 +146,11 @@
         </section>
 
         <div class="kv-actions vr-actions">
-          <button class="btn kv-cancel" type="button" :disabled="processing" @click="requestClose">
+          <button class="btn btn-neutral btn-compact" type="button" :disabled="processing" @click="requestClose">
             取消
           </button>
           <button
-            class="btn btn-primary kv-confirm"
+            class="btn btn-primary btn-compact"
             type="button"
             :disabled="!canStart"
             @click="start"
@@ -180,7 +180,7 @@
         <p class="vr-hint">轮换期间源库只读；完成后可选择提交或中止。</p>
         <div v-if="phase === 'unlocking' || phase === 'running'" class="kv-actions">
           <button
-            class="btn kv-cancel"
+            class="btn btn-neutral btn-compact"
             type="button"
             :disabled="cancelPending"
             @click="cancelRotate"
@@ -195,11 +195,11 @@
         <p class="vr-success">复制与完整性复核已完成，源库尚未替换。</p>
         <p class="vr-stats">{{ statsText }}</p>
         <div class="kv-actions">
-          <button class="btn kv-cancel" type="button" :disabled="processing" @click="abort">
+          <button class="btn btn-destructive btn-compact" type="button" :disabled="processing" @click="abort">
             中止并丢弃新库
           </button>
           <button
-            class="btn btn-primary kv-confirm"
+            class="btn btn-primary btn-compact"
             type="button"
             :disabled="processing"
             @click="commit"
@@ -214,7 +214,7 @@
         <p class="vr-success">轮换已提交：新库已原子替换源库，当前恢复码继续有效。{{ keepOld ? '旧库备份（.old-*）已保留，可用恢复码打开。' : '' }}</p>
         <p class="vr-stats">{{ statsText }}</p>
         <div class="kv-actions">
-          <button class="btn btn-primary kv-confirm" type="button" @click="requestClose">完成</button>
+          <button class="btn btn-neutral btn-compact" type="button" @click="requestClose">完成</button>
         </div>
       </template>
 
@@ -222,7 +222,7 @@
       <template v-else-if="phase === 'aborted'">
         <p class="vr-phase">轮换已中止，临时库已丢弃，源库未改动。</p>
         <div class="kv-actions">
-          <button class="btn btn-primary kv-confirm" type="button" @click="requestClose">关闭</button>
+          <button class="btn btn-neutral btn-compact" type="button" @click="requestClose">关闭</button>
         </div>
       </template>
 
@@ -235,7 +235,7 @@
         <div class="kv-actions">
           <button
             v-if="jobActive"
-            class="btn btn-primary kv-confirm"
+            class="btn btn-destructive btn-compact"
             type="button"
             :disabled="processing"
             @click="abort"
@@ -244,7 +244,7 @@
           </button>
           <button
             v-else
-            class="btn btn-primary kv-confirm"
+            class="btn btn-neutral btn-compact"
             type="button"
             :disabled="processing"
             @click="reset"
@@ -252,7 +252,7 @@
             重新配置
           </button>
           <button
-            class="btn kv-cancel"
+            class="btn btn-neutral btn-compact"
             type="button"
             :disabled="processing || jobActive"
             @click="requestClose"

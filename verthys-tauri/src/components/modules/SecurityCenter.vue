@@ -243,9 +243,9 @@
         如确为本人更换介质，可确认后重试：本次仍须通过密码验证，验证通过后才会更新绑定记录。
       </p>
       <div class="kv-actions">
-        <button class="btn kv-cancel" type="button" :disabled="usbRebindSaving" @click="onUsbRebindDialogToggle(false)">取消</button>
+        <button class="btn btn-neutral btn-compact" type="button" :disabled="usbRebindSaving" @click="onUsbRebindDialogToggle(false)">取消</button>
         <button
-          class="btn btn-primary kv-confirm"
+          class="btn btn-primary btn-compact"
           type="button"
           :disabled="unlocking"
           @click="confirmUsbRebind"

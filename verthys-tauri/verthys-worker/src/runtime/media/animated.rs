@@ -118,7 +118,7 @@ fn webp_animated(data: &[u8]) -> Result<bool, String> {
 }
 
 fn png_animated(data: &[u8]) -> Result<bool, String> {
-    if data.len() < 8 || &data[..8] != &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
+    if data.len() < 8 || data[..8] != [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
         return Ok(false);
     }
     let mut off = 8usize;

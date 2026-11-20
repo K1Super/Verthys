@@ -82,6 +82,9 @@ $psi.RedirectStandardError = $true
 $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
 $p = [Diagnostics.Process]::Start($psi)
+# worker 每个请求都会写 stderr 日志；不持续排空会让 4KB 管道缓冲写满，
+# 子进程阻塞在 stderr 写入，后续请求永久无响应。
+$stderrTask = $p.StandardError.ReadToEndAsync()
 
 $work = Join-Path $env:TEMP ("smoke_" + [guid]::NewGuid().ToString('N') + ".vty")
 $password = "smoke-pw"
@@ -444,7 +447,8 @@ try {
     # 先终止进程再读管道，避免 ReadToEnd 阻塞在仍存活的子进程上。
     try {
         if (-not $p.HasExited) { $p.Kill(); $p.WaitForExit(3000) | Out-Null }
-        $err = $p.StandardError.ReadToEnd()
+        $stderrTask.Wait(3000) | Out-Null
+        $err = if ($stderrTask.IsCompleted) { $stderrTask.Result } else { "" }
         if (-not [string]::IsNullOrWhiteSpace($err)) {
             Write-Host "--- worker stderr ---"
             Write-Host $err

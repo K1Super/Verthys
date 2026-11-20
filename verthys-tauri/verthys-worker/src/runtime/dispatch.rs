@@ -43,6 +43,21 @@ const SCAN_INDEX_INLINE_MAX_BYTES: u64 = crate::runtime::budget::PB_SCAN_INDEX_I
 /// C 层库锁错误码（映射为 worker 0x0A RATE）
 const VERTHYS_ERR_RATE: u32 = 0x0000000A;
 
+/// 解析 32 位十六进制 UUID；长度或字符非法返回 None。
+fn parse_uuid_hex(text: &str) -> Option<[u8; 16]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        let hi = (bytes[i * 2] as char).to_digit(16)?;
+        let lo = (bytes[i * 2 + 1] as char).to_digit(16)?;
+        out[i] = ((hi as u8) << 4) | (lo as u8);
+    }
+    Some(out)
+}
+
 /// 解锁失败响应：库锁命中时附带剩余秒数，供 UI 展示“已锁定 X 秒”。
 fn unlock_error(worker: &Worker, op: &str, rc: u32) -> Response {
     if rc == VERTHYS_ERR_RATE {
@@ -313,7 +328,18 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
         "photo_import_job_finish" => media::handle_finish(worker, req),
         "photo_import_job_cancel" => media::handle_cancel(req),
         "photo_import_job_end" => media::handle_end(req),
-        "photo_read_job_begin" => media::handle_read_begin(worker, req),
+        "photo_read_job_begin" => {
+            /* 原图模式随 begin 下发一次性 SHM 认证密钥；预览不需要。 */
+            let auth_key = if req.mode == "full" {
+                match parse_shm_auth_key("photo_read_job_begin", &req.shm_key) {
+                    Ok(key) => key,
+                    Err(resp) => return *resp,
+                }
+            } else {
+                None
+            };
+            media::handle_read_begin(worker, req, auth_key)
+        }
         "photo_read_job_next" => media::handle_read_next(worker, req),
         "photo_read_job_cancel" => media::handle_read_cancel(req),
         "photo_read_job_end" => media::handle_read_end(req),
@@ -454,7 +480,7 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("flush", r)
             }
         }
-        /* 批量导入锚点推迟（API 0x0015，仅隔离原型 DLL）。
+        /* 批量导入锚点推迟（API 0x0015 可选能力）。
          * 旧 DLL 缺符号时返回 unsupported，宿主按现状逐次提交，不得
          * 把“Begin 未生效”当成已进入推迟会话。 */
         "bulk_import_begin" => match worker.call_bulk_import_begin() {
@@ -639,6 +665,8 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
             result
         }
+        /* 暂存块提交：照片导入块密文不出 worker，本分支只按引用取密文写入。 */
+        "add_records_staged" => media::handle_add_staged(worker, req),
         "get_record" => match worker.call_get_record(req.id) {
             Ok((rtype, mut name, mut data)) => {
                 // 协议安全护栏：单条返回同样受响应预算约束。写入侧 12MiB
@@ -929,6 +957,38 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 Response::err("list_ids_by_type", rc)
             }
         }
+        /* 全量存活记录 ID 枚举（可选符号）：目录叶迭代，不读记录段、
+         * 不解密名称，与模块锁定状态无关。用于导入前去重键收敛。 */
+        "list_all_lids" => {
+            const LIST_ALL_BATCH_MAX: u32 = 4096;
+            if req.max_count == 0u32 || req.max_count > LIST_ALL_BATCH_MAX {
+                return Response::err("list_all_lids", 0x00000001);
+            }
+            let max_count = req.max_count as u64;
+            let mut ids = vec![0u64; max_count as usize];
+            let mut out_count: u64 = 0;
+            let mut out_exhausted: u8 = 1;
+            let rc = worker.call_list_all_lids(
+                req.id,
+                max_count,
+                &mut ids,
+                &mut out_count,
+                &mut out_exhausted,
+            );
+            if rc == VERTHYS_OK {
+                let used = out_count as usize;
+                if used > ids.len() {
+                    return Response::err("list_all_lids", 0xFFFFFFFF);
+                }
+                ids.truncate(used);
+                let mut resp = Response::ok("list_all_lids");
+                resp.ids = ids;
+                resp.exhausted = Some(out_exhausted != 0);
+                resp
+            } else {
+                Response::err("list_all_lids", rc)
+            }
+        }
         "export" => {
             if let Some(denied) = require_path_grant("export", "write", &req.path) {
                 return denied;
@@ -970,6 +1030,53 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
             Err(code) => Response::err("security_status", code),
         },
+        // 回退锚点维护：列表只读；回收只处理 DEAD；释放必须显式 confirm。
+        "rollback_anchor_list" => match worker.call_anchor_list() {
+            Ok((anchors, state)) => {
+                let mut resp = Response::ok("rollback_anchor_list");
+                resp.anchors = Some(anchors);
+                resp.anchor_state = Some(state);
+                resp
+            }
+            Err(code) => Response::err_raw("rollback_anchor_list", code),
+        },
+        "rollback_anchor_reclaim" => {
+            const VERTHYS_ERR_INVALID: u32 = 0x00000001;
+            if !req.anchor_confirm {
+                return Response::err_raw("rollback_anchor_reclaim", VERTHYS_ERR_INVALID);
+            }
+            match worker.call_anchor_reclaim(crate::runtime::ffi_types::VERTHYS_ANCHOR_FLAG_CONFIRM) {
+                Ok((removed, cleanup_failed)) => {
+                    let mut resp = Response::ok("rollback_anchor_reclaim");
+                    resp.anchor_removed = Some(removed);
+                    resp.anchor_cleanup_failed = Some(cleanup_failed);
+                    resp
+                }
+                Err(code) => Response::err_raw("rollback_anchor_reclaim", code),
+            }
+        }
+        "rollback_anchor_release" => {
+            const VERTHYS_ERR_INVALID: u32 = 0x00000001;
+            let uuid = match parse_uuid_hex(&req.uuid) {
+                Some(v) => v,
+                None => return Response::err_raw("rollback_anchor_release", VERTHYS_ERR_INVALID),
+            };
+            if !req.anchor_confirm {
+                return Response::err_raw("rollback_anchor_release", VERTHYS_ERR_INVALID);
+            }
+            match worker.call_anchor_release(
+                &uuid,
+                crate::runtime::ffi_types::VERTHYS_ANCHOR_FLAG_CONFIRM,
+            ) {
+                Ok((released, cleanup_failed)) => {
+                    let mut resp = Response::ok("rollback_anchor_release");
+                    resp.anchor_released = Some(released);
+                    resp.anchor_cleanup_failed = Some(cleanup_failed);
+                    resp
+                }
+                Err(code) => Response::err_raw("rollback_anchor_release", code),
+            }
+        }
         // 运行时守卫位下发（API 0x0014）：主进程安装/停止挂起守卫时同步
         // bit1，worker 与心跳位合并后通知 C 层；flags=0 表示停止守卫。
         "runtime_guards" => {
@@ -1295,6 +1402,23 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn parse_uuid_hex_accepts_lower_and_upper() {
+        let lower = parse_uuid_hex("0123456789abcdef0123456789abcdef").unwrap();
+        let upper = parse_uuid_hex("0123456789ABCDEF0123456789ABCDEF").unwrap();
+        assert_eq!(lower, upper);
+        assert_eq!(lower[0], 0x01);
+        assert_eq!(lower[15], 0xEF);
+    }
+
+    #[test]
+    fn parse_uuid_hex_rejects_bad_input() {
+        assert!(parse_uuid_hex("").is_none());
+        assert!(parse_uuid_hex("0011").is_none());
+        assert!(parse_uuid_hex("zz23456789abcdef0123456789abcdef").is_none());
+        assert!(parse_uuid_hex("0123456789abcdef0123456789abcde").is_none());
+    }
 
     /// 构造记录源：仅存在给定 ID/长度的记录，其余返回未命中
     fn source_with(sizes: &[(u64, usize)]) -> impl Fn(u64) -> Result<(u32, String, Vec<u8>), u32> {

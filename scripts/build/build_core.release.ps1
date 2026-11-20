@@ -12,17 +12,20 @@
 #   - 所有工具路径来自系统环境变量（经 env.load.ps1 注入），脚本内零硬编码
 #   - Release 构建跳过测试（测试已在开发环境完成），仅产出加固后的 DLL
 #
-# 用法: powershell -ExecutionPolicy Bypass -File scripts\build\build_core.release.ps1 [-Clean] [-NoPause] [-ReleaseSigning] [-TestHooks]
+# 用法: powershell -ExecutionPolicy Bypass -File scripts\build\build_core.release.ps1 [-Clean] [-NoPause] [-ReleaseSigning] [-TestHooks] [-RequireTestIsolation]
 #   -Clean           构建前清理 build 目录
 #   -NoPause         失败/成功后不暂停等待 Enter（CI 场景使用；双击运行时不传此参数以便查看输出）
 #   -ReleaseSigning  启用调用方认证并对 DLL 做 Authenticode 签名（需要发布者证书环境变量）
 #   -TestHooks       仅攻击回归测试使用：允许 VERTHYS_TEST_STATE_DIR 覆盖熔断/回滚状态目录；
 #                    不可与 -ReleaseSigning 同时使用，生产构建禁止开启
+#   -RequireTestIsolation  仅自动化测试构建使用：缺少隔离目录即拒绝初始化；
+#                    必须与 -TestHooks 同时使用，dev 运行构建不得开启
 param(
     [switch]$Clean,
     [switch]$NoPause,
     [switch]$ReleaseSigning,
-    [switch]$TestHooks
+    [switch]$TestHooks,
+    [switch]$RequireTestIsolation
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +63,9 @@ $signing = [pscustomobject]@{
 if ($ReleaseSigning -and $TestHooks) {
     throw "-TestHooks 与 -ReleaseSigning 互斥：测试钩子构建不得带发布者签名"
 }
+if ($RequireTestIsolation -and -not $TestHooks) {
+    throw "-RequireTestIsolation 必须与 -TestHooks 同时使用"
+}
 if ($ReleaseSigning) {
     $signing = Resolve-VerthysReleaseSigning -Required
 } elseif (
@@ -90,10 +96,12 @@ Write-Host ("  调用方认证: {0}" -f $(if ($signing.Enabled) { "ON（发布�
 $callerSigState = if ($signing.Enabled) { "ON" } else { "OFF" }
 $publisherShaValue = if ($signing.Enabled) { $signing.PublisherSha256 } else { "" }
 $testHooksState = if ($TestHooks) { "ON" } else { "OFF" }
+$isolationState = if ($RequireTestIsolation) { "ON" } else { "OFF" }
 & $VERTHYS_CMAKE_EXE -S $root -B $buildDir -G $VERTHYS_VS_GENERATOR -A x64 `
     "-DVERTHYS_REQUIRE_CALLER_SIG=$callerSigState" `
     "-DVERTHYS_PUBLISHER_SHA256=$publisherShaValue" `
-    "-DVERTHYS_TEST_HOOKS=$testHooksState"
+    "-DVERTHYS_TEST_HOOKS=$testHooksState" `
+    "-DVERTHYS_TEST_REQUIRE_ISOLATION=$isolationState"
 if ($LASTEXITCODE -ne 0) { throw "configure 失败" }
 
 Write-Host "[build] $config（安全加固：/O2 /GL /GS /guard:cf，剥离符号）" -ForegroundColor Cyan

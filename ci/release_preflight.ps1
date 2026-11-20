@@ -158,6 +158,18 @@ if (Test-Path -LiteralPath $buildScript) {
     Add-Blocker "缺少 build_production.ps1"
 }
 
+# ---- 生产产物测试钩子字符串门 ----
+$releaseDll = Join-Path $Root "build\core\Release\verthys.dll"
+if (Test-Path -LiteralPath $releaseDll) {
+    $dllBytes = [System.IO.File]::ReadAllBytes($releaseDll)
+    $dllText = [System.Text.Encoding]::ASCII.GetString($dllBytes)
+    if ($dllText.Contains("VERTHYS_TEST_STATE_DIR")) {
+        Add-Blocker "生产 DLL 含测试状态注入字符串 VERTHYS_TEST_STATE_DIR"
+    }
+} else {
+    Add-Warning "未找到 Release DLL，跳过测试钩子字符串扫描（构建后由 build_production 阶段 1.01 复查）"
+}
+
 # ---- 结果 ----
 Write-Host ""
 Write-Host "发布前置检查（$Profile）："

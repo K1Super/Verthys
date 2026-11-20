@@ -362,6 +362,32 @@ pub struct SecurityStatusReport {
     pub checked_at_unix_ms: u64,
 }
 
+/// 回退锚点条目（与 worker AnchorEntry 一一对应）
+#[derive(Serialize, Deserialize)]
+pub struct AnchorInfo {
+    pub uuid: String,
+    pub generation: u64,
+    /// unknown / active / dead / tampered
+    pub witness: String,
+}
+
+/// 单个 UUID 的扫描证据：同一 UUID 可能对应多个容器路径。
+#[derive(Serialize, Deserialize)]
+pub struct AnchorScanEntry {
+    pub uuid: String,
+    pub paths: Vec<String>,
+}
+
+/// 容器扫描摘要（只读；路径仅在本次响应内展示，不写入审计）。
+#[derive(Serialize, Deserialize)]
+pub struct AnchorScanResult {
+    pub entries: Vec<AnchorScanEntry>,
+    pub files_seen: u64,
+    pub matched_count: u64,
+    pub truncated: bool,
+    pub permission_errors: u64,
+}
+
 /// 统一 JSON 响应结构（遗留兼容，新代码使用 ApiResponse<T> 或结构化响应类型）
 ///
 /// 新控制器使用结构化响应类型；本结构仅供尚未迁移的控制器使用。
@@ -430,6 +456,24 @@ pub struct VerthysResponse {
      * 主进程仅做透传反序列化 → 前端安全中心直接消费。 */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_status: Option<SecurityStatusReport>,
+    /// 回退锚点列表（仅 verthys_rollback_anchor_list 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchors: Option<Vec<AnchorInfo>>,
+    /// 状态文件整体状态（0=absent / 1=ok / 2=corrupt）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_state: Option<u32>,
+    /// 回收条数（仅 verthys_rollback_anchor_reclaim 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_removed: Option<u32>,
+    /// 释放条数（仅 verthys_rollback_anchor_release 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_released: Option<u32>,
+    /// 见证清理失败条数（释放/回收返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_cleanup_failed: Option<u32>,
+    /// 容器扫描结果（仅 verthys_rollback_anchor_scan 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_scan: Option<AnchorScanResult>,
     /* 异步批处理流水线 — 批量导入字段
      *
      * 落实「N 次加密，1 次 IPC 传输」：verthys_add_records_batch 单次 IPC 写入 N 条记录，
@@ -565,6 +609,12 @@ impl VerthysResponse {
             global_key_id: None,
             global_key_record: None,
             security_status: None,
+            anchors: None,
+            anchor_state: None,
+            anchor_removed: None,
+            anchor_released: None,
+            anchor_cleanup_failed: None,
+            anchor_scan: None,
             ids: None,
             batch_id: None,
             failed_indices: None,
@@ -648,6 +698,12 @@ impl VerthysResponse {
             global_key_id: None,
             global_key_record: None,
             security_status: None,
+            anchors: None,
+            anchor_state: None,
+            anchor_removed: None,
+            anchor_released: None,
+            anchor_cleanup_failed: None,
+            anchor_scan: None,
             ids: None,
             batch_id: None,
             failed_indices: None,

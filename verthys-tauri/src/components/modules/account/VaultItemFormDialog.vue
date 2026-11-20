@@ -199,13 +199,16 @@
               </div>
             </div>
 
-            <!-- 选择：下拉候选项 -->
+            <!-- 选择：自绘下拉（原生选项弹层无法贴合项目主题） -->
             <div v-else-if="field.kind === 'select'" class="kv-field">
               <label class="kv-label" :for="domId(field)"><i v-if="field.required" class="kv-req" aria-hidden="true">*</i>{{ field.label }}</label>
-              <select :id="domId(field)" class="kv-input kv-select" v-model="values[field.id]">
-                <option value="">未指定</option>
-                <option v-for="opt in field.options ?? []" :key="opt" :value="opt">{{ opt }}</option>
-              </select>
+              <VaultSelect
+                :id="domId(field)"
+                v-model="values[field.id]"
+                :options="field.options ?? []"
+                :aria-label="field.label"
+                :required="field.required === true"
+              />
             </div>
 
             <!-- 地区：全国省 / 市 / 区三级联动 -->
@@ -252,9 +255,9 @@
     <p v-if="formError" class="kv-error form-error">{{ formError }}</p>
 
     <div class="kv-actions">
-      <button class="btn kv-cancel" type="button" :disabled="saving" @click="open = false">取消</button>
+      <button class="btn btn-neutral btn-compact" type="button" :disabled="saving" @click="open = false">取消</button>
       <button
-        class="btn btn-primary kv-confirm"
+        class="btn btn-primary btn-compact"
         type="button"
         :disabled="saveDisabled || saving"
         @click="onSubmit"
@@ -275,6 +278,7 @@ import { vaultExpiryReadout, vaultExpiryTimestamp } from "../../../lib/vault_ite
 import { encryptPasswordField } from "../../../lib/verthys";
 import CosmicOverlay from "../../common/cosmic/CosmicOverlay.vue";
 import VaultRegionPicker from "./VaultRegionPicker.vue";
+import VaultSelect from "../../common/verthys-ui/VaultSelect.vue";
 
 /** 内容舱可导入的文件类型（凭据与配置文本，覆盖证书、密钥与文本材料） */
 const CARRIER_FILE_ACCEPT = ".pem,.crt,.cer,.der,.key,.pub,.json,.txt,.conf,.cfg,.ovpn";

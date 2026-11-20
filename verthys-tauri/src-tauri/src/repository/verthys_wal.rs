@@ -415,7 +415,13 @@ fn load_from_path(path: &Path) -> Result<WalSnapshot, String> {
             } => {
                 if !entry_key.is_empty() {
                     snapshot.committed_keys.insert(entry_key.clone());
-                    snapshot.committed_ids.insert(entry_key, verthys_id);
+                    /* 同一批次可写入共用条目键的多条记录（照片 meta 与预览）：
+                     * ID 映射只认首条索引记录，重放时不得让后写记录覆盖，
+                     * 否则删除流程按 meta ID 反查条目键会落空，去重锁永久残留。 */
+                    snapshot
+                        .committed_ids
+                        .entry(entry_key)
+                        .or_insert(verthys_id);
                 }
                 match chunk_ids {
                     Some(ids) => {
@@ -745,12 +751,18 @@ impl ImportSession {
     }
 
     /// 标记一条记录为已 committed（更新幂等集合 + 计数 + ID 映射）
+    ///
+    /// 同一批次可携带共用条目键的多条记录（照片 meta 与其预览共用键）：
+    /// ID 映射必须保留首条索引记录，删除流程按索引记录 ID 反查条目键才能
+    /// 命中；后写记录覆盖会让续传幂等锁永久残留，删除后重新导入被静默跳过。
     pub fn mark_committed(&mut self, entry_key: &str, verthys_id: u64) {
         if self.committed_keys.insert(entry_key.to_string()) {
             self.total_committed += 1;
         }
         if verthys_id != 0 {
-            self.committed_ids.insert(entry_key.to_string(), verthys_id);
+            self.committed_ids
+                .entry(entry_key.to_string())
+                .or_insert(verthys_id);
         }
     }
 
@@ -932,6 +944,52 @@ mod tests {
 
         let snap = load(&verthys_path).unwrap();
         assert!(snap.committed_keys.contains("h1"));
+    }
+
+    #[test]
+    fn test_mark_committed_keeps_first_index_id() {
+        // 照片 meta 与预览共用条目键：ID 映射必须指向首条索引记录，
+        // 删除流程按 meta 记录 ID 反查条目键才能释放续传幂等锁。
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+        let mut session = ImportSession::new(&verthys_path, "imp-dup").unwrap();
+
+        session.mark_committed("k1", 100);
+        session.mark_committed("k1", 101);
+
+        assert_eq!(session.committed_ids.get("k1"), Some(&100));
+        assert_eq!(session.total_committed, 1);
+        assert_eq!(session.key_for_id(100), Some("k1"));
+        assert_eq!(session.key_for_id(101), None);
+    }
+
+    #[test]
+    fn test_wal_replay_keeps_first_index_id_for_shared_key() {
+        // 历史 WAL 可能对同一条目键写入 meta 与预览两条 committed 行；
+        // 重放必须保留首条索引记录 ID，删除流程才能按 meta ID 释放去重锁。
+        let dir = tempdir().unwrap();
+        let verthys_path = make_verthys_path(dir.path());
+        let mut writer = WalWriter::create(&verthys_path, "imp-shared").unwrap();
+        for (name, verthys_id) in [("meta_a.jpg", 100u64), ("preview_a", 101u64)] {
+            writer
+                .append(&WalEntry::Committed {
+                    import_id: "imp-shared".into(),
+                    batch_id: 1,
+                    entry_key: "k-shared".into(),
+                    verthys_id,
+                    name: name.into(),
+                    chunk_ids: None,
+                })
+                .unwrap();
+        }
+        writer.finish("imp-shared", true).unwrap();
+
+        let snap = load(&verthys_path).unwrap();
+        assert_eq!(snap.committed_ids.get("k-shared"), Some(&100));
+        let by_meta = keys_for_ids(&verthys_path, &[100]).unwrap();
+        assert_eq!(by_meta, vec!["k-shared".to_string()]);
+        let by_preview = keys_for_ids(&verthys_path, &[101]).unwrap();
+        assert!(by_preview.is_empty());
     }
 
     #[test]

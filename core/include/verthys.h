@@ -209,6 +209,9 @@ typedef enum {
     /* 安全状态目录预检失败：目录/ACL 不可加固、位置不受支持或
      * 重解析点。Init 阶段返回，提示可执行的修复指引而非通用“安全模块不可用”。 */
     VERTHYS_ERR_SECURITY_STATE = 0x00000020u,
+    /* 回退锚点表已满且不存在可自动回收的失效条目。与 ROLLBACK 严格
+     * 区分：容量问题可维护，不是文件回退证据。 */
+    VERTHYS_ERR_ANCHOR_FULL = 0x00000021u,
     VERTHYS_ERR_INTERNAL = 0xFFFFFFFFu   /* 未归类的底层内部异常 */
 } VerthysResult;
 
@@ -819,9 +822,8 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_AddRecords(VerthysHandle handle,
                             uint32_t count,
                             uint64_t *out_ids);
 
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
 /* ================================================================== *
- * 批量导入锚点推迟（API 版本 0x0015，仅隔离原型构建）
+ * 批量导入锚点推迟（API 版本 0x0015）
  *
  * 语义：Begin 先把当前容器代提交到回退锚点，随后会话内的 AddRecord(s)
  * 不逐次推进锚点；C 层强制上限为 32 代 / 30 秒，任一越限的下一次保存
@@ -833,10 +835,12 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_AddRecords(VerthysHandle handle,
  * 失败语义：Begin 锚点提交失败则返回错误且不进入会话；Commit 或上限
  * 触发的提交失败会锁定会话（后续调用返回 VERTHYS_ERR_LOCKED），容器
  * 数据已落盘，下次解锁按“容器代 >= 锚点”补推进。
+ *
+ * 安全边界：推迟窗口内锚点可落后容器至多 32 代 / 30 秒；该窗口内恢复
+ * 导入前的容器快照不会被锚点拒绝。窗口外仍按容器代 < 锚点拒绝。
  * ================================================================== */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_BulkImportBegin(VerthysHandle handle);
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_BulkImportCommit(VerthysHandle handle);
-#endif
 
 /* 按ID读取完整记录数据，返回结构体指针为内部借用内存
  *
@@ -1158,6 +1162,34 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ListIdsByType(VerthysHandle handl
                                               uint64_t *out_count,
                                               uint8_t *out_exhausted);
 
+/* ================================================================== *
+ * 全量存活记录 ID 枚举（可选能力，非版本门）                            *
+ *                                                                    *
+ * 直接遍历记录目录叶（lid 升序），不读取记录段、不解密名称，因此与     *
+ * 模块锁定状态无关：任何已启用模块的记录只要存活即可枚举。用于导入前   *
+ * 收敛续传去重键——已删除记录不再出现在枚举结果中。                    *
+ *                                                                    *
+ * 参数：                                                              *
+ *   handle        : 已解锁的 Verthys 句柄                              *
+ *   after_id      : 上一页最后一个 ID；首页传 0                          *
+ *   max_count     : 本页上限（1..VERTHYS_TYPE_ID_BATCH_MAX）            *
+ *   out_ids       : 调用方缓冲区，至少 max_count 个 uint64              *
+ *   out_count     : 本页实际返回条数                                    *
+ *   out_exhausted : 1=已无更多记录；0=可能还有下一页                    *
+ *                                                                    *
+ * 返回值：                                                            *
+ *   VERTHYS_OK / VERTHYS_ERR_INVALID / VERTHYS_ERR_LOCKED /            *
+ *   VERTHYS_ERR_FORMAT（非容器格式）                                   *
+ *                                                                    *
+ * 线程安全：MT-Const（只读目录游标）                                    *
+ * ================================================================== */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ListAllLids(VerthysHandle handle,
+                                              uint64_t after_id,
+                                              uint64_t max_count,
+                                              uint64_t *out_ids,
+                                              uint64_t *out_count,
+                                              uint8_t *out_exhausted);
+
 
 
 /* ================================================================== *
@@ -1336,6 +1368,96 @@ typedef struct {
 VERTHYS_API VerPersistStatus VERTHYS_CALL Verthys_VerifyPersist(
     VerthysHandle handle,
     VerPersistVerifyResult *out_result);
+
+/* ================================================================== *
+ * 回退锚点维护接口（API 版本 0x0016）
+ *
+ * 用途：展示本机回退锚点、回收“见证确定不存在”的失效条目、显式释放
+ * 指定锚点。ACTIVE/TAMPERED/UNKNOWN 绝不会被自动回收；释放必须由调用方
+ * 置位 CONFIRM 位，并由 UI 完成二次确认与恢复码后果告知。
+ *
+ * 安全边界：接口不返回见证指纹、私钥、容器路径或任何密钥材料；UUID 是
+ * 容器头中的公开标识，仅用于定位锚点。生产构建若启用调用方签名校验，
+ * 本组接口与其他导出函数一样受发布者签名门约束。
+ * ================================================================== */
+
+#define VERTHYS_ANCHOR_UUID_BYTES 16u
+#define VERTHYS_ANCHOR_FLAG_CONFIRM 0x00000001u
+
+/* 单条锚点的见证状态 */
+typedef enum {
+    VERTHYS_ANCHOR_WITNESS_UNKNOWN  = 0,  /* TPM 查询失败、残留键或字段非法 */
+    VERTHYS_ANCHOR_WITNESS_ACTIVE   = 1,  /* 见证存在且公钥指纹匹配 */
+    VERTHYS_ANCHOR_WITNESS_DEAD     = 2,  /* 见证确定不存在，可自动回收 */
+    VERTHYS_ANCHOR_WITNESS_TAMPERED = 3   /* 见证存在但指纹不符，禁止自动回收 */
+} VerthysAnchorWitnessState;
+
+/* 状态文件整体状态（out_state） */
+typedef enum {
+    VERTHYS_ANCHOR_STATE_ABSENT  = 0,  /* 状态文件不存在：首次运行或被删除 */
+    VERTHYS_ANCHOR_STATE_OK      = 1,  /* 状态文件已认证加载 */
+    VERTHYS_ANCHOR_STATE_CORRUPT = 2,  /* 状态文件损坏/不可认证（返回 ERR_CORRUPT） */
+    VERTHYS_ANCHOR_STATE_UNKNOWN = 3   /* TPM/IO 等导致状态不可读（按返回码处置） */
+} VerthysAnchorState;
+
+typedef struct {
+    uint32_t struct_size;        /* 调用方初始化：sizeof(VerthysAnchorInfo) */
+    uint8_t  uuid[VERTHYS_ANCHOR_UUID_BYTES];
+    uint64_t generation;
+    uint32_t witness_state;      /* VerthysAnchorWitnessState */
+    uint32_t reserved;           /* 必须为 0 */
+} VerthysAnchorInfo;
+
+/*
+ * 列出本机回退锚点。
+ *
+ * 参数：
+ *   handle       — Verthys_Init 返回的句柄（不要求容器已解锁）
+ *   out_anchors  — 输出数组；可为 NULL 且 capacity=0 时仅查询数量
+ *   capacity     — 数组可容纳的条目数
+ *   out_count    — 实际条目数（缓冲区不足时也写出所需数量）
+ *   out_state    — VerthysAnchorState；状态文件损坏时置 CORRUPT
+ *
+ * 返回值：
+ *   VERTHYS_OK                   — 查询完成（可能为 0 条）
+ *   VERTHYS_ERR_INVALID          — 参数非法
+ *   VERTHYS_ERR_RESOURCE_LIMIT   — capacity 不足，out_count 已给出所需数量
+ *   VERTHYS_ERR_CORRUPT          — 状态文件损坏/不可认证
+ *   VERTHYS_ERR_TPM              — 设备安全模块不可用
+ */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorList(
+    VerthysHandle handle,
+    VerthysAnchorInfo *out_anchors,
+    uint32_t capacity,
+    uint32_t *out_count,
+    uint32_t *out_state);
+
+/*
+ * 回收所有 DEAD 锚点（见证确定不存在）。ACTIVE/TAMPERED/UNKNOWN 保留。
+ * flags 必须含 VERTHYS_ANCHOR_FLAG_CONFIRM。
+ * out_removed 返回删除条数；out_cleanup_failed 返回见证删除失败条数
+ * （调用方可对同一 UUID 重试释放，接口幂等）。
+ * 状态写失败返回 VERTHYS_ERR_IO，此时不会删除任何见证。
+ */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorReclaim(
+    VerthysHandle handle,
+    uint32_t flags,
+    uint32_t *out_removed,
+    uint32_t *out_cleanup_failed);
+
+/*
+ * 显式释放指定 UUID 的锚点并删除两槽见证。该操作会使仍存在的容器
+ * 在下次打开时被 fail-closed 拒绝，只能通过恢复码重设锚点。
+ * flags 必须含 VERTHYS_ANCHOR_FLAG_CONFIRM。
+ * 条目不存在时仍幂等清理见证；out_released=0。
+ * 状态写失败返回 VERTHYS_ERR_IO，此时不会删除见证。
+ */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
+    VerthysHandle handle,
+    const uint8_t uuid[VERTHYS_ANCHOR_UUID_BYTES],
+    uint32_t flags,
+    uint32_t *out_released,
+    uint32_t *out_cleanup_failed);
 
 #ifdef __cplusplus
 } /* extern "C" */

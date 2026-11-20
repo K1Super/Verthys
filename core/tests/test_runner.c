@@ -199,6 +199,7 @@ TEST(repo_scan_skips_tombstone_and_type_index);
 /* 公共 API 记录链路（test_api_container.c） */
 TEST(api_records_roundtrip_and_scan);
 TEST(api_list_ids_by_type_and_verify_persist);
+TEST(api_list_all_lids_tracks_live_records);
 TEST(api_find_lid_by_name);
 TEST(api_add_records_batch_roundtrip);
 TEST(api_records_require_unlock);
@@ -294,13 +295,29 @@ TEST(rollback_forged_generation_rejected);
 TEST(rollback_state_replay_rejected);
 TEST(rollback_missing_state_anchor_fail_closed);
 TEST(rollback_disabled_allows_old_copy);
+TEST(rollback_recovery_resets_dead_anchor);
+TEST(rollback_recovery_resets_tampered_anchor);
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+#if defined(VERTHYS_TEST_REQUIRE_ISOLATION) && VERTHYS_TEST_REQUIRE_ISOLATION
+TEST(rollback_test_build_requires_isolation);
+#endif
+TEST(rollback_anchor_capacity_preserves_active);
+TEST(rollback_anchor_capacity_preserves_tampered);
+TEST(rollback_anchor_capacity_preserves_unknown);
+TEST(rollback_anchor_list_classifies);
+TEST(rollback_anchor_release_preserves_other);
+TEST(rollback_anchor_reclaim_only_dead);
+TEST(rollback_anchor_release_cleanup_failure_reported);
+TEST(rollback_anchor_full_maps_to_public_error);
+#endif
 
-/* G0-A 生产化原型（test_g0a_prototype.c，仅原型构建） */
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
+/* 见证预置（test_g0a_prototype.c，测试钩子构建） */
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
 TEST(g0a_commit_fast_path_uses_preset);
 TEST(g0a_commit_waits_for_background_creation);
 TEST(g0a_delete_failure_revokes_old_key);
 TEST(g0a_delete_and_revoke_failure_fails_closed);
+TEST(g0a_dirty_recovers_when_witness_verifies);
 TEST(g0a_cached_verify_rejects_state_replay);
 TEST(g0a_new_vault_has_no_preset_before_first_commit);
 TEST(g0a_cache_never_bypasses_state_mac);
@@ -317,8 +334,8 @@ TEST(g0a_crash_halfkey_existing_state);
 TEST(g0a_crash_halfkey_first_commit);
 #endif
 
-/* G0-A2 批量导入锚点推迟（test_g0a2_defer.c，仅原型构建） */
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
+/* 批量导入锚点推迟（test_g0a2_defer.c，测试钩子构建） */
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
 TEST(g0a2_api_version_and_unlock_guard);
 TEST(g0a2_begin_commit_idempotent);
 TEST(g0a2_flush_keeps_session);
@@ -1041,6 +1058,7 @@ int main(int argc, char **argv)
     RUN_TEST(repo_scan_skips_tombstone_and_type_index);
     RUN_TEST(api_records_roundtrip_and_scan);
     RUN_TEST(api_list_ids_by_type_and_verify_persist);
+    RUN_TEST(api_list_all_lids_tracks_live_records);
     RUN_TEST(api_find_lid_by_name);
     RUN_TEST(api_add_records_batch_roundtrip);
     RUN_TEST(api_records_require_unlock);
@@ -1123,12 +1141,28 @@ int main(int argc, char **argv)
     RUN_TEST(rollback_state_replay_rejected);
     RUN_TEST(rollback_missing_state_anchor_fail_closed);
     RUN_TEST(rollback_disabled_allows_old_copy);
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
-    /* G0-A 隔离原型：预置快路径、撤销/fail-closed、缓存与并发 */
+    RUN_TEST(rollback_recovery_resets_dead_anchor);
+    RUN_TEST(rollback_recovery_resets_tampered_anchor);
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+#if defined(VERTHYS_TEST_REQUIRE_ISOLATION) && VERTHYS_TEST_REQUIRE_ISOLATION
+    RUN_TEST(rollback_test_build_requires_isolation);
+#endif
+    RUN_TEST(rollback_anchor_capacity_preserves_active);
+    RUN_TEST(rollback_anchor_capacity_preserves_tampered);
+    RUN_TEST(rollback_anchor_capacity_preserves_unknown);
+    RUN_TEST(rollback_anchor_list_classifies);
+    RUN_TEST(rollback_anchor_release_preserves_other);
+    RUN_TEST(rollback_anchor_reclaim_only_dead);
+    RUN_TEST(rollback_anchor_release_cleanup_failure_reported);
+    RUN_TEST(rollback_anchor_full_maps_to_public_error);
+#endif
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    /* 见证预置：快路径、撤销/fail-closed、缓存与并发 */
     RUN_TEST(g0a_commit_fast_path_uses_preset);
     RUN_TEST(g0a_commit_waits_for_background_creation);
     RUN_TEST(g0a_delete_failure_revokes_old_key);
     RUN_TEST(g0a_delete_and_revoke_failure_fails_closed);
+    RUN_TEST(g0a_dirty_recovers_when_witness_verifies);
     RUN_TEST(g0a_cached_verify_rejects_state_replay);
     RUN_TEST(g0a_new_vault_has_no_preset_before_first_commit);
     RUN_TEST(g0a_cache_never_bypasses_state_mac);
@@ -1150,8 +1184,8 @@ int main(int argc, char **argv)
     vty_rollback_set_enabled(0);
     test_state_checkpoint("rollback");
 
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
-    /* G0-A2 隔离原型：推迟窗口、上限、拒绝清单、失败锁定与崩溃恢复 */
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    /* 推迟窗口：上限、拒绝清单、失败锁定与崩溃恢复 */
     RUN_TEST(g0a2_api_version_and_unlock_guard);
     RUN_TEST(g0a2_begin_commit_idempotent);
     RUN_TEST(g0a2_flush_keeps_session);

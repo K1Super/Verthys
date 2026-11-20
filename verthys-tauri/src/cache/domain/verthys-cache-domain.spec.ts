@@ -9,6 +9,7 @@ import type { ScannedRecord } from "../../types/key_manager";
 import type { SummaryRecord } from "../../lib/verthys";
 import {
   VerthysCacheDomain,
+  type KeyStateForCache,
   type VerthysCacheApi,
 } from "./verthys-cache-domain";
 
@@ -45,13 +46,17 @@ describe("VerthysCacheDomain 权威类型 ID", () => {
   let api: VerthysCacheApi;
   let path: string;
   let domain: VerthysCacheDomain;
+  let keyState: KeyStateForCache;
 
   beforeEach(() => {
     api = createApi();
     path = "C:/vault/alpha.verthys";
+    keyState = {
+      moduleKeyReady: { value: { photo: false, accounts: false, fileverthys: false } },
+    };
     domain = new VerthysCacheDomain(
       api,
-      { moduleKeyReady: { value: { photo: false, accounts: false, fileverthys: false } } },
+      keyState,
       () => path,
       {
         pendingDeletionIds: new Set<number>(),
@@ -130,5 +135,19 @@ describe("VerthysCacheDomain 权威类型 ID", () => {
     };
     deps.pendingDeletionIds.add(2);
     await expect(domain.ensureTypeIds(0x01)).resolves.toEqual([1, 3]);
+  });
+
+  it("模块登录只登记状态，不创建模块级闲置计时器", async () => {
+    vi.useFakeTimers();
+    try {
+      domain.markModuleReady("photo");
+      expect(keyState.moduleKeyReady.value.photo).toBe(true);
+
+      // 模块锁定只由全局会话空闲锁定触发；本层不得存在任何独立到期逻辑
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+      expect(keyState.moduleKeyReady.value.photo).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

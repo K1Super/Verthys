@@ -96,11 +96,11 @@
     <div class="card-actions">
       <button
         v-if="!entry.corrupt"
-        class="mini-btn"
+        class="btn btn-neutral btn-mini"
         type="button"
         @click.stop="$emit('edit')"
       >{{ view.unknown ? "重新指派" : "编辑" }}</button>
-      <button class="mini-btn danger" type="button" @click.stop="$emit('remove')">删除</button>
+      <button class="btn btn-destructive btn-mini" type="button" @click.stop="$emit('remove')">删除</button>
     </div>
 
     <div class="card-shine"></div>
@@ -211,65 +211,9 @@ const readoutStyle = computed<Record<string, string>>(() => {
   outline-offset: 2px;
 }
 
-/* 操作区：贴底紧凑簇（贴底由 margin-top:auto 承担，间距显式收紧到 2px） */
-.card-actions { margin-top: auto; gap: 2px; justify-content: flex-start; }
-
-/* 卡片操作键：悬浮/按压的底色注能 + 内收边（登记台同族语言，零阴影） */
-.card-actions .mini-btn {
-  position: relative;
-  padding: 3px 6px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  transition:
-    color var(--dur-fast) var(--ease),
-    border-color var(--dur-fast) var(--ease),
-    background-color var(--dur-fast) var(--ease);
-}
-.card-actions .mini-btn:hover {
-  color: var(--text-primary);
-  border-color: rgba(var(--accent-rgb), 0.3);
-  background-color: rgba(var(--accent-rgb), 0.09);
-}
-.card-actions .mini-btn:active {
-  border-color: rgba(var(--accent-rgb), 0.42);
-  background-color: rgba(var(--accent-rgb), 0.14);
-}
-.card-actions .mini-btn:focus-visible { outline: 1px solid var(--border-hover); outline-offset: 1px; }
-.card-actions .mini-btn.danger:hover {
-  color: var(--danger);
-  border-color: rgba(var(--danger-rgb), 0.34);
-  background-color: rgba(var(--danger-rgb), 0.09);
-}
-.card-actions .mini-btn.danger:active {
-  border-color: rgba(var(--danger-rgb), 0.44);
-  background-color: rgba(var(--danger-rgb), 0.14);
-}
-
-/* 底缘微亮线：与主键皮肤的势隙线同族，只在悬浮/按压时出现（仅走 opacity） */
-.card-actions .mini-btn::after {
-  content: ""; position: absolute; left: 15%; right: 24%; bottom: 0; height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(var(--accent-rgb), 0.3) 34%,
-    rgba(var(--white-rgb), 0.5) 71%,
-    transparent
-  );
-  opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease);
-  pointer-events: none;
-}
-.card-actions .mini-btn:hover::after,
-.card-actions .mini-btn:active::after { opacity: 1; }
-.card-actions .mini-btn.danger::after {
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(var(--danger-rgb), 0.3) 34%,
-    rgba(var(--white-rgb), 0.5) 71%,
-    transparent
-  );
-}
+/* 操作区：贴底紧凑簇（贴底由 margin-top:auto 承担）；
+   按钮皮肤与三态全部来自星野键族（中性 / 赤势），本地零覆盖 */
+.card-actions { margin-top: auto; gap: 6px; justify-content: flex-start; }
 
 /* 类型化摘要行：标签 + 取值紧凑排布（每个字段占一行，超长截断） */
 .card-lines {

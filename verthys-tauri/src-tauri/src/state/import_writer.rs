@@ -23,6 +23,7 @@
  *            constants（本模块与 import_session 同层，属会话级流程编排）
  */
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -406,6 +407,7 @@ struct PreparedRecord {
 ///     放大成 N×15s（128 条即半小时级挂起），必须整体上抛交调用方重试；
 ///   - Rejected：worker 正常响应但 C 层拒绝。逐条回退可隔离单条坏记录，
 ///     其余记录继续落库。
+#[derive(Debug)]
 enum WorkerAddError {
     Transport(String),
     Rejected(String),
@@ -483,6 +485,81 @@ fn worker_add_records(
         }
         Err(e) => {
             log::warn!("[import_writer] add_records worker 通信失败: {}", e);
+            Err(WorkerAddError::Transport(format!("worker 通信失败: {}", e)))
+        }
+    }
+}
+
+/// 向 worker 发起一次暂存块提交并解析结果。
+///
+/// 请求只携带引用（job_id/chunk_key/chunk_hash），密文由 worker 从导入
+/// job 暂存区取出；宿主不再持有或传输块密文。
+fn worker_add_records_staged(
+    state: &AppState,
+    items: &[(u32, &str, &str, &str, &str)],
+) -> Result<Vec<u64>, WorkerAddError> {
+    #[derive(serde::Serialize)]
+    struct StagedAddItem<'a> {
+        rtype: u32,
+        name: &'a str,
+        job_id: &'a str,
+        chunk_key: &'a str,
+        chunk_hash: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct StagedAddRequest<'a> {
+        op: &'static str,
+        staged_records: Vec<StagedAddItem<'a>>,
+    }
+
+    let req = StagedAddRequest {
+        op: "add_records_staged",
+        staged_records: items
+            .iter()
+            .map(|(rtype, name, job_id, chunk_key, chunk_hash)| StagedAddItem {
+                rtype: *rtype,
+                name,
+                job_id,
+                chunk_key,
+                chunk_hash,
+            })
+            .collect(),
+    };
+    let json = serde_json::to_string(&req)
+        .map_err(|e| WorkerAddError::Transport(format!("请求序列化失败: {}", e)))?;
+    match state.send(&json) {
+        Ok(resp_json) => match serde_json::from_str::<WorkerWriteReply>(&resp_json) {
+            Ok(resp) if resp.ok => {
+                let ids = resp.ids.unwrap_or_default();
+                if ids.len() != items.len() || ids.contains(&0) {
+                    log::warn!(
+                        "[import_writer] worker add_records_staged 返回 ID 列表非法: got={} expected={}",
+                        ids.len(),
+                        items.len()
+                    );
+                    return Err(WorkerAddError::Transport(
+                        "worker add_records_staged 返回 ID 列表非法".to_string(),
+                    ));
+                }
+                Ok(ids)
+            }
+            Ok(resp) => {
+                log::warn!(
+                    "[import_writer] worker add_records_staged 返回失败: {:?}",
+                    resp.error
+                );
+                Err(WorkerAddError::Rejected(format!(
+                    "worker add_records_staged 失败: {:?}",
+                    resp.error
+                )))
+            }
+            Err(e) => {
+                log::warn!("[import_writer] add_records_staged 响应解析失败: {}", e);
+                Err(WorkerAddError::Transport(format!("响应解析失败: {}", e)))
+            }
+        },
+        Err(e) => {
+            log::warn!("[import_writer] add_records_staged worker 通信失败: {}", e);
             Err(WorkerAddError::Transport(format!("worker 通信失败: {}", e)))
         }
     }
@@ -728,17 +805,26 @@ fn process_append_pending(
         // 4. WAL committed 子批一次 fsync；携带外置块集合供崩溃后归属结算。
         //    落盘失败时数据已入库，本会话内存集合仍记账（best-effort 去重），
         //    极端场景下的跨会话重复由下次续传幂等破坏承担。
+        //    同一批次共用条目键的多条记录（meta 与预览）只落首条 committed 行：
+        //    WAL 的 ID 映射是删除释放去重锁的权威来源，重复行会让后写记录
+        //    覆盖索引记录 ID。
+        let mut wal_keys: HashSet<&str> = HashSet::new();
         let committed_entries: Vec<WalEntry> = slice
             .iter()
             .zip(results.iter())
             .filter_map(|(item, result)| {
-                result.map(|verthys_id| WalEntry::Committed {
-                    import_id: import_id.clone(),
-                    batch_id,
-                    entry_key: item.entry_key.clone(),
-                    verthys_id,
-                    name: item.record.name.clone(),
-                    chunk_ids: item.record.chunk_ids.clone(),
+                result.and_then(|verthys_id| {
+                    if !wal_keys.insert(item.entry_key.as_str()) {
+                        return None;
+                    }
+                    Some(WalEntry::Committed {
+                        import_id: import_id.clone(),
+                        batch_id,
+                        entry_key: item.entry_key.clone(),
+                        verthys_id,
+                        name: item.record.name.clone(),
+                        chunk_ids: item.record.chunk_ids.clone(),
+                    })
                 })
             })
             .collect();
@@ -898,6 +984,11 @@ fn is_valid_chunk_key(key: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// 暂存块内容哈希：固定 64 位小写十六进制 BLAKE3。
+fn is_valid_chunk_hash(hash: &str) -> bool {
+    hash.len() == 64 && is_valid_chunk_key(hash)
+}
+
 /// 由角色与调用方块键派生块记录名。
 ///
 /// `chunk_key` 是随机/来源元数据派生的非内容键，不是内容哈希：记录名
@@ -910,6 +1001,16 @@ fn chunk_record_name(rtype: u32, chunk_key: &str) -> String {
     }
 }
 
+/// 块载荷来源：inline=宿主持有 base64 密文；staged=密文驻留 worker 暂存区。
+enum ChunkPayload {
+    Inline(String),
+    Staged {
+        job_id: String,
+        chunk_key: String,
+        chunk_hash: String,
+    },
+}
+
 /// 已通过本地校验、待批量上传的外置块
 struct PreparedChunk {
     /// 输入下标
@@ -920,8 +1021,7 @@ struct PreparedChunk {
     rtype: u32,
     /// 派生记录名（进入容器索引，不含原始文件名）
     record_name: String,
-    /// 加密载荷 base64
-    data_b64: String,
+    payload: ChunkPayload,
 }
 
 /// 外置块上传（写者线程内）：校验 → 会话内幂等去重 → worker 批量 add_records。
@@ -955,7 +1055,12 @@ fn process_append_chunks(
     }
     let payload_bytes: usize = chunks
         .iter()
-        .map(|c| c.chunk_key.len() + c.data_b64.len())
+        .map(|c| {
+            c.chunk_key.len()
+                + c.data_b64.len()
+                + c.job_id.len()
+                + c.chunk_hash.len()
+        })
         .sum();
     if payload_bytes > wconst::MAX_IPC_PAYLOAD_BYTES {
         log::warn!(
@@ -967,6 +1072,13 @@ fn process_append_chunks(
             "块载荷超过上限 {} 字节",
             wconst::MAX_IPC_PAYLOAD_BYTES
         ));
+    }
+    /* 同一批次只允许一种载荷来源：inline 块带密文，staged 块只带引用。
+     * 混合会让批量提交无法选择单一 worker 协议，显式拒绝。 */
+    let staged_mode = chunks[0].staged;
+    if chunks.iter().any(|chunk| chunk.staged != staged_mode) {
+        log::warn!("[import_writer] 拒绝混合块批次（inline/staged）");
+        return Err("块批次不得混合 inline 与暂存模式".to_string());
     }
 
     let mut session_guard = state.lock_import_session();
@@ -985,11 +1097,24 @@ fn process_append_chunks(
         heartbeat.store(now_ms(), Ordering::SeqCst);
         let idx = i as u64;
 
-        // 输入校验：块键须为 16–64 位小写十六进制（进入记录名），载荷非空；
-        // 角色类型须为已知的外置载荷类型（未知类型拒绝该条，避免越界类型值
-        // 写入容器索引）。畸形输入按条失败而不中止整批。
-        if !is_valid_chunk_key(&chunk.chunk_key) || chunk.data_b64.is_empty() {
-            log::warn!("[import_writer] 块 {} 输入校验失败（块键/载荷非法）", idx);
+        // 输入校验：块键须为 16–64 位小写十六进制（进入记录名）；
+        // inline 块要求非空 base64 密文，staged 块要求 job_id/chunk_hash
+        // 完整且不得携带密文；角色类型须为已知外置载荷类型。畸形输入按条
+        // 失败而不中止整批。
+        let staged = chunk.staged;
+        let payload_ok = if staged {
+            chunk.data_b64.is_empty()
+                && !chunk.job_id.is_empty()
+                && chunk.job_id.len() <= 128
+                && is_valid_chunk_hash(&chunk.chunk_hash)
+        } else {
+            !chunk.data_b64.is_empty()
+        };
+        if !is_valid_chunk_key(&chunk.chunk_key) || !payload_ok {
+            log::warn!(
+                "[import_writer] 块 {} 输入校验失败（块键/载荷/暂存引用非法）",
+                idx
+            );
             failed_indices.push(idx);
             continue;
         }
@@ -1010,47 +1135,151 @@ fn process_append_chunks(
             continue;
         }
 
-        let record_name = chunk_record_name(rtype, &chunk.chunk_key);
+        let chunk_key = chunk.chunk_key;
+        let record_name = chunk_record_name(rtype, &chunk_key);
+        let payload = if staged {
+            ChunkPayload::Staged {
+                job_id: chunk.job_id,
+                chunk_key: chunk_key.clone(),
+                chunk_hash: chunk.chunk_hash,
+            }
+        } else {
+            ChunkPayload::Inline(chunk.data_b64)
+        };
         prepared.push(PreparedChunk {
             idx,
-            chunk_key: chunk.chunk_key,
+            chunk_key,
             rtype,
             record_name,
-            data_b64: chunk.data_b64,
+            payload,
         });
     }
 
     // ===== 阶段 2：批量写入（失败回退逐条） =====
     if !prepared.is_empty() {
         heartbeat.store(now_ms(), Ordering::SeqCst);
-        let batch_items: Vec<(u32, &str, &str)> = prepared
-            .iter()
-            .map(|item| (item.rtype, item.record_name.as_str(), item.data_b64.as_str()))
-            .collect();
-        let results: Vec<Option<u64>> = match worker_add_records(state, &batch_items) {
-            Ok(batch_ids) => batch_ids.into_iter().map(Some).collect(),
-            Err(WorkerAddError::Transport(e)) => {
-                log::error!("[import_writer] 块批量上传 worker 不可用，整批上抛重试: {}", e);
-                return Err(format!("worker 块写入不可用: {}", e));
-            }
-            Err(WorkerAddError::Rejected(batch_err)) => {
-                log::warn!(
-                    "[import_writer] 块批量上传被拒绝，回退逐条: {}",
-                    batch_err
-                );
-                let mut per_record: Vec<Option<u64>> = Vec::with_capacity(prepared.len());
-                for item in &prepared {
-                    heartbeat.store(now_ms(), Ordering::SeqCst);
-                    match worker_add_record(state, item.rtype, &item.record_name, &item.data_b64) {
-                        Ok(id) => per_record.push(Some(id)),
-                        Err(e) => {
-                            log::warn!("[import_writer] 块 {} 上传失败: {}", item.idx, e);
-                            failed_indices.push(item.idx);
-                            per_record.push(None);
+        let results: Vec<Option<u64>> = if staged_mode {
+            let batch_items: Vec<(u32, &str, &str, &str, &str)> = prepared
+                .iter()
+                .map(|item| match &item.payload {
+                    ChunkPayload::Staged {
+                        job_id,
+                        chunk_key,
+                        chunk_hash,
+                    } => (
+                        item.rtype,
+                        item.record_name.as_str(),
+                        job_id.as_str(),
+                        chunk_key.as_str(),
+                        chunk_hash.as_str(),
+                    ),
+                    ChunkPayload::Inline(_) => {
+                        unreachable!("staged 批次内不得出现 inline 块")
+                    }
+                })
+                .collect();
+            match worker_add_records_staged(state, &batch_items) {
+                Ok(batch_ids) => batch_ids.into_iter().map(Some).collect(),
+                Err(WorkerAddError::Transport(e)) => {
+                    log::error!(
+                        "[import_writer] 暂存块批量提交 worker 不可用，整批上抛重试: {}",
+                        e
+                    );
+                    return Err(format!("worker 暂存块写入不可用: {}", e));
+                }
+                Err(WorkerAddError::Rejected(batch_err)) => {
+                    log::warn!(
+                        "[import_writer] 暂存块批量提交被拒绝，回退逐条: {}",
+                        batch_err
+                    );
+                    let mut per_record: Vec<Option<u64>> = Vec::with_capacity(prepared.len());
+                    for item in &prepared {
+                        heartbeat.store(now_ms(), Ordering::SeqCst);
+                        let ChunkPayload::Staged {
+                            job_id,
+                            chunk_key,
+                            chunk_hash,
+                        } = &item.payload
+                        else {
+                            unreachable!("staged 批次内不得出现 inline 块");
+                        };
+                        let single = [(
+                            item.rtype,
+                            item.record_name.as_str(),
+                            job_id.as_str(),
+                            chunk_key.as_str(),
+                            chunk_hash.as_str(),
+                        )];
+                        match worker_add_records_staged(state, &single) {
+                            Ok(ids) if ids.len() == 1 => per_record.push(Some(ids[0])),
+                            Ok(_) => {
+                                log::warn!(
+                                    "[import_writer] 暂存块 {} 返回 ID 数量非法",
+                                    item.idx
+                                );
+                                failed_indices.push(item.idx);
+                                per_record.push(None);
+                            }
+                            Err(e) => {
+                                log::warn!("[import_writer] 暂存块 {} 上传失败: {:?}", item.idx, e);
+                                failed_indices.push(item.idx);
+                                per_record.push(None);
+                            }
                         }
                     }
+                    per_record
                 }
-                per_record
+            }
+        } else {
+            let batch_items: Vec<(u32, &str, &str)> = prepared
+                .iter()
+                .map(|item| match &item.payload {
+                    ChunkPayload::Inline(data_b64) => (
+                        item.rtype,
+                        item.record_name.as_str(),
+                        data_b64.as_str(),
+                    ),
+                    ChunkPayload::Staged { .. } => {
+                        unreachable!("inline 批次内不得出现暂存块")
+                    }
+                })
+                .collect();
+            match worker_add_records(state, &batch_items) {
+                Ok(batch_ids) => batch_ids.into_iter().map(Some).collect(),
+                Err(WorkerAddError::Transport(e)) => {
+                    log::error!(
+                        "[import_writer] 块批量上传 worker 不可用，整批上抛重试: {}",
+                        e
+                    );
+                    return Err(format!("worker 块写入不可用: {}", e));
+                }
+                Err(WorkerAddError::Rejected(batch_err)) => {
+                    log::warn!(
+                        "[import_writer] 块批量上传被拒绝，回退逐条: {}",
+                        batch_err
+                    );
+                    let mut per_record: Vec<Option<u64>> = Vec::with_capacity(prepared.len());
+                    for item in &prepared {
+                        heartbeat.store(now_ms(), Ordering::SeqCst);
+                        let ChunkPayload::Inline(data_b64) = &item.payload else {
+                            unreachable!("inline 批次内不得出现暂存块");
+                        };
+                        match worker_add_record(
+                            state,
+                            item.rtype,
+                            &item.record_name,
+                            data_b64,
+                        ) {
+                            Ok(id) => per_record.push(Some(id)),
+                            Err(e) => {
+                                log::warn!("[import_writer] 块 {} 上传失败: {}", item.idx, e);
+                                failed_indices.push(item.idx);
+                                per_record.push(None);
+                            }
+                        }
+                    }
+                    per_record
+                }
             }
         };
 
@@ -1480,16 +1709,68 @@ mod tests {
                 chunk_key: "a".repeat(64),
                 data_b64: "x".into(),
                 rtype: None,
+                ..Default::default()
             },
             ChunkBlob {
                 chunk_key: "b".repeat(64),
                 data_b64: "y".into(),
                 rtype: None,
+                ..Default::default()
             },
         ];
         /* 传输级失败整批上抛，由协调器重试（块键幂等，不会产生重复语义） */
         let err = process_append_chunks(&state, chunks, &hb()).unwrap_err();
         assert!(err.contains("worker"), "错误应标注 worker 不可用: {err}");
+    }
+
+    fn staged_chunk(key: &str, hash: &str) -> ChunkBlob {
+        ChunkBlob {
+            chunk_key: key.to_string(),
+            data_b64: String::new(),
+            rtype: Some(TYPE_PHOTO_CHUNK),
+            staged: true,
+            job_id: "job-1".to_string(),
+            chunk_hash: hash.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_process_append_chunks_accepts_staged_reference() {
+        let (state, _verthys_path, _dir) = state_with_session();
+        let key = "a".repeat(64);
+        let chunks = vec![staged_chunk(&key, &"b".repeat(64))];
+        let err = process_append_chunks(&state, chunks, &hb()).unwrap_err();
+        assert!(err.contains("暂存块"), "应进入暂存提交路径: {err}");
+    }
+
+    #[test]
+    fn test_process_append_chunks_rejects_mixed_modes() {
+        let (state, _verthys_path, _dir) = state_with_session();
+        let chunks = vec![
+            ChunkBlob {
+                chunk_key: "a".repeat(64),
+                data_b64: "x".into(),
+                rtype: None,
+                ..Default::default()
+            },
+            staged_chunk(&"b".repeat(64), &"c".repeat(64)),
+        ];
+        let err = process_append_chunks(&state, chunks, &hb()).unwrap_err();
+        assert!(err.contains("混合"), "{err}");
+    }
+
+    #[test]
+    fn test_process_append_chunks_rejects_invalid_staged_reference() {
+        let (state, _verthys_path, _dir) = state_with_session();
+        let key = "a".repeat(64);
+        let with_data = ChunkBlob {
+            data_b64: "x".into(),
+            ..staged_chunk(&key, &"b".repeat(64))
+        };
+        let bad_hash = staged_chunk(&key, "b");
+        let outcome = process_append_chunks(&state, vec![with_data, bad_hash], &hb()).unwrap();
+        assert_eq!(outcome.failed_indices, vec![0, 1]);
+        assert_eq!(outcome.ids, vec![0, 0]);
     }
 
     #[test]
@@ -1502,6 +1783,7 @@ mod tests {
                 chunk_key: format!("{i:064x}"),
                 data_b64: "x".into(),
                 rtype: None,
+                ..Default::default()
             })
             .collect();
         assert!(process_append_chunks(&state, many, &hb()).is_err());
@@ -1512,11 +1794,13 @@ mod tests {
                 chunk_key: "a".repeat(64),
                 data_b64: "x".into(),
                 rtype: Some(0x30), // 未知角色类型
+                ..Default::default()
             },
             ChunkBlob {
                 chunk_key: String::new(), // 空块键
                 data_b64: "y".into(),
                 rtype: None,
+                ..Default::default()
             },
         ];
         let outcome = process_append_chunks(&state, mixed, &hb()).unwrap();
@@ -1532,6 +1816,7 @@ mod tests {
             chunk_key: "c".repeat(64),
             data_b64: "z".into(),
             rtype: Some(0x30),
+            ..Default::default()
         }];
         let outcome = process_append_chunks(&state, chunks, &hb()).unwrap();
         assert_eq!(outcome.failed_indices, vec![0]);
@@ -1607,11 +1892,13 @@ mod tests {
                 chunk_key: "A".repeat(64),
                 data_b64: "x".into(),
                 rtype: None,
+                ..Default::default()
             },
             ChunkBlob {
                 chunk_key: "c".repeat(15),
                 data_b64: "y".into(),
                 rtype: None,
+                ..Default::default()
             },
         ];
         let outcome = process_append_chunks(&state, chunks, &hb()).unwrap();

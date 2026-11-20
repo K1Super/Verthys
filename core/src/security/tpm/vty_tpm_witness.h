@@ -41,6 +41,23 @@ int vty_tpm_witness_verify(const uint8_t id[VTY_UUID_BYTES], uint8_t slot,
  * 仅用于区分“见证丢失（可重建）”与“指纹不符（必须 fail-closed）”。 */
 int vty_tpm_witness_exists(const uint8_t id[VTY_UUID_BYTES], uint8_t slot);
 
+/* 单槽见证四态探测：缺失/匹配/不符/平台错误严格区分。
+ *
+ * 与 vty_tpm_witness_verify 的差异：verify 把“键缺失/打不开”和“指纹
+ * 不符”都折叠为 VTY_E_TPM，无法用于生命周期分类；本函数只在入参非法
+ * 时返回 VTY_E_INVALID，平台错误以 UNKNOWN 状态返回，供维护接口展示
+ * 与自动回收判定。 */
+typedef enum {
+    VTY_WITNESS_PROBE_UNKNOWN  = 0,  /* 平台错误、导出失败或残留键 */
+    VTY_WITNESS_PROBE_MISSING  = 1,  /* 键确定不存在 */
+    VTY_WITNESS_PROBE_ACTIVE   = 2,  /* 键存在且公钥指纹匹配 */
+    VTY_WITNESS_PROBE_TAMPERED = 3   /* 键存在但公钥指纹不符 */
+} VtyWitnessProbe;
+
+int vty_tpm_witness_probe(const uint8_t id[VTY_UUID_BYTES], uint8_t slot,
+                          const uint8_t expected[VTY_TPM_WITNESS_FP_BYTES],
+                          VtyWitnessProbe *out_state);
+
 /* 删除指定槽；不存在视为成功 */
 int vty_tpm_witness_delete(const uint8_t id[VTY_UUID_BYTES], uint8_t slot);
 
@@ -65,6 +82,12 @@ int vty_tpm_witness_id_from_string(const char *text,
  * 仅测试构建提供；用于验证删除失败撤销与 fail-closed 路径。 */
 void vty_tpm_witness_set_delete_fail_for_test(int count);
 void vty_tpm_witness_set_create_fail_for_test(int count);
+
+/* 状态注入：覆盖 exists 返回值（-2=关闭注入，-1/0/1=注入值）与
+ * probe 结果（-1=关闭注入，0..3=VtyWitnessProbe）。仅测试构建提供，
+ * 用于确定性地覆盖 DEAD/UNKNOWN/TAMPERED 分支。 */
+void vty_tpm_witness_set_exists_override_for_test(int value);
+void vty_tpm_witness_set_probe_override_for_test(int state);
 
 /* 崩溃注入：下一次创建在 NCryptCreatePersistedKey 成功后立即终止进程，
  * 模拟 create 与 finalize 之间断电。仅测试构建提供。 */

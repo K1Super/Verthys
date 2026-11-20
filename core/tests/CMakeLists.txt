@@ -10,18 +10,18 @@ if(VERTHYS_TEST_HOOKS)
     list(APPEND VERTHYS_P2_CLIENT_TEST_SOURCES security/test_machine_limiter.c)
 endif()
 
-# G0-A 隔离原型用例：仅原型 + 测试钩子构建编译与注册。
-# 用例依赖故障注入接口；缺少测试钩子时整个原型测试组不构建。
+# 见证预置/推迟锚点用例：生产功能，默认测试构建必须覆盖。
+# 用例依赖故障与崩溃注入接口，因此仅在测试钩子构建编译。
 set(VERTHYS_G0A_TEST_SOURCES "")
-if(VERTHYS_G0A_PROTOTYPE AND VERTHYS_TEST_HOOKS)
+if(VERTHYS_TEST_HOOKS)
     list(APPEND VERTHYS_G0A_TEST_SOURCES
         security/test_g0a_prototype.c
         security/test_g0a_crash.c)
 endif()
 
-# G0-A2 隔离原型用例：推迟锚点需要故障/崩溃注入，同样要求测试钩子。
+# 推迟锚点用例：同样依赖故障/崩溃注入。
 set(VERTHYS_G0A2_TEST_SOURCES "")
-if(VERTHYS_G0A2_PROTOTYPE AND VERTHYS_TEST_HOOKS)
+if(VERTHYS_TEST_HOOKS)
     list(APPEND VERTHYS_G0A2_TEST_SOURCES
         security/test_g0a2_defer.c)
 endif()
@@ -133,16 +133,16 @@ add_test(NAME verthys_tests COMMAND verthys_tests)
 if(VERTHYS_TEST_HOOKS)
     target_compile_definitions(verthys_tests PRIVATE VERTHYS_TEST_HOOKS=1)
 endif()
-if(VERTHYS_G0A_PROTOTYPE)
-    target_compile_definitions(verthys_tests PRIVATE VERTHYS_G0A_PROTOTYPE=1)
-endif()
-if(VERTHYS_G0A2_PROTOTYPE)
-    target_compile_definitions(verthys_tests PRIVATE VERTHYS_G0A2_PROTOTYPE=1)
+# 自动化测试构建必须携带强制隔离开关，才能注册“缺少隔离目录即拒绝”
+# 的回归用例；dev 构建只开测试钩子，不要求隔离。
+if(VERTHYS_TEST_REQUIRE_ISOLATION)
+    target_compile_definitions(verthys_tests PRIVATE
+        VERTHYS_TEST_REQUIRE_ISOLATION=1)
 endif()
 
-# G0-A 崩溃注入宿主：在指定提交阶段 TerminateProcess，供父测试进程
-# 验证崩溃矩阵。仅原型 + 测试钩子构建产出，不进入生产 DLL。
-if(VERTHYS_G0A_PROTOTYPE AND VERTHYS_TEST_HOOKS)
+# 崩溃注入宿主：在指定提交阶段 TerminateProcess，供父测试进程
+# 验证崩溃矩阵。仅测试钩子构建产出，不进入生产 DLL。
+if(VERTHYS_TEST_HOOKS)
     add_executable(vty_g0a_crash
         tools/vty_g0a_crash.c
     )
@@ -155,7 +155,6 @@ if(VERTHYS_G0A_PROTOTYPE AND VERTHYS_TEST_HOOKS)
         ${VERTHYS_SRC_SUBDIRS}
     )
     target_compile_definitions(vty_g0a_crash PRIVATE
-        VERTHYS_G0A_PROTOTYPE=1
         VERTHYS_TEST_HOOKS=1)
     if(MSVC)
         target_compile_options(vty_g0a_crash PRIVATE /utf-8)
@@ -164,9 +163,9 @@ if(VERTHYS_G0A_PROTOTYPE AND VERTHYS_TEST_HOOKS)
     add_dependencies(verthys_tests vty_g0a_crash)
 endif()
 
-# G0-A2 崩溃注入宿主：真实容器 + 批量导入会话，在导入中/上限提交/
-# Commit 阶段 TerminateProcess。仅原型 + 测试钩子构建产出。
-if(VERTHYS_G0A2_PROTOTYPE AND VERTHYS_TEST_HOOKS)
+# 批量导入崩溃注入宿主：真实容器 + 批量导入会话，在导入中/上限提交/
+# Commit 阶段 TerminateProcess。仅测试钩子构建产出。
+if(VERTHYS_TEST_HOOKS)
     add_executable(vty_g0a2_crash
         tools/vty_g0a2_crash.c
     )
@@ -179,8 +178,6 @@ if(VERTHYS_G0A2_PROTOTYPE AND VERTHYS_TEST_HOOKS)
         ${VERTHYS_SRC_SUBDIRS}
     )
     target_compile_definitions(vty_g0a2_crash PRIVATE
-        VERTHYS_G0A_PROTOTYPE=1
-        VERTHYS_G0A2_PROTOTYPE=1
         VERTHYS_TEST_HOOKS=1)
     if(MSVC)
         target_compile_options(vty_g0a2_crash PRIVATE /utf-8)

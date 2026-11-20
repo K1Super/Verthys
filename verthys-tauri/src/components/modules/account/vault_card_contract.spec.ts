@@ -19,6 +19,7 @@ const cardSource = read("./VaultItemCard.vue");
 const formSource = read("./VaultItemFormDialog.vue");
 const detailSource = read("./VaultItemDetailDialog.vue");
 const editorSource = read("./VaultTypeEditorDialog.vue");
+const regionSource = read("./VaultRegionPicker.vue");
 const searchBarSource = read("../../common/verthys-ui/VerthysSearchBar.vue");
 const confirmSource = read("../../common/verthys-ui/ConfirmDelete.vue");
 const dialogSource = read("../../common/cosmic/CosmicOverlay.vue");
@@ -79,6 +80,34 @@ describe("类型编辑器草稿隔离", () => {
     expect(editorSource).toContain("cardFields: [...item.cardFields]");
     expect(editorSource).toContain("searchFields: [...item.searchFields]");
     expect(editorSource).toContain("options: [...field.options]");
+  });
+
+  it("展示与检索使用本地矩阵与项目勾选格，不复用外部 scoped 芯片类", () => {
+    expect(editorSource).toContain("display-matrix");
+    expect(editorSource).toContain("kf-toggle display-cell");
+    expect(editorSource).not.toContain("filter-chip");
+  });
+
+  it("类型编辑器使用左右工作台与可展开字段面板，属性编辑不再堆叠成卡片", () => {
+    expect(editorSource).toContain("editor-shell");
+    expect(editorSource).toContain("type-rail");
+    expect(editorSource).toContain("field-table");
+    expect(editorSource).toContain("field-panel");
+    expect(editorSource).toContain("option-list");
+    expect(editorSource).toContain("field.group");
+    expect(editorSource).toContain("field.hint");
+    expect(editorSource).toContain("rangeStartLabel");
+    expect(editorSource).toContain("multilineRows");
+  });
+});
+
+describe("下拉选择器单源", () => {
+  it("表单、类型编辑器与地区联动统一走自绘选择器，不回落原生 select 弹层", () => {
+    const sources = [formSource, editorSource, regionSource];
+    for (const source of sources) {
+      expect(source).toContain("<VaultSelect");
+      expect(source).not.toContain("<select");
+    }
   });
 });
 

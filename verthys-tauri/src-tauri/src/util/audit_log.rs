@@ -81,6 +81,12 @@ pub enum AuditEventType {
     /// 全库 DEK 轮换作业（begin / run 失败 / commit / abort）
     /// 审计只记录结果与路径哈希，不记录口令、恢复码或临时库路径明文
     VerthysRotate,
+    /// 回退锚点显式释放（UUID 哈希 + 世代 + 见证状态 + 结果）
+    RollbackAnchorRelease,
+    /// 回退锚点回收（仅记录删除条数与清理失败数）
+    RollbackAnchorReclaim,
+    /// 回退锚点容器扫描（仅记录计数，不记录路径明文）
+    RollbackAnchorScan,
     /// keyfile 因子操作（创建/解锁/启用/轮换/关闭/恢复会话重绑）
     /// 审计只记录路径哈希，不记录路径明文
     KeyfileFactor,
@@ -141,6 +147,9 @@ impl AuditEventType {
             AuditEventType::VerthysUnlock => "VERTHYS_UNLOCK",
             AuditEventType::VerthysLock => "VERTHYS_LOCK",
             AuditEventType::VerthysRotate => "VERTHYS_ROTATE",
+            AuditEventType::RollbackAnchorRelease => "ROLLBACK_ANCHOR_RELEASE",
+            AuditEventType::RollbackAnchorReclaim => "ROLLBACK_ANCHOR_RECLAIM",
+            AuditEventType::RollbackAnchorScan => "ROLLBACK_ANCHOR_SCAN",
             AuditEventType::KeyfileFactor => "KEYFILE_FACTOR",
             AuditEventType::ContainerIdMismatch => "CONTAINER_ID_MISMATCH",
             AuditEventType::DeviceBind => "DEVICE_BIND",

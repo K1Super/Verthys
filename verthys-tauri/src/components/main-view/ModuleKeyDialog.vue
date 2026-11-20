@@ -29,11 +29,11 @@
       @submit="$emit('confirm')"
     />
     <div class="kv-actions">
-      <button class="btn kv-cancel" :disabled="moduleKeyVerifying" @click="$emit('close')">
+      <button class="btn btn-neutral btn-compact" :disabled="moduleKeyVerifying" @click="$emit('close')">
         取消
       </button>
       <button
-        class="btn btn-primary kv-confirm"
+        class="btn btn-primary btn-compact"
         @click="$emit('confirm')"
         :disabled="!moduleKeyInput || moduleKeyVerifying"
       >

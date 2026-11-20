@@ -15,7 +15,9 @@
  * 依赖方向：controller → state / util / controller::verthys_batch_controller
  */
 
+use crate::constants::is_valid_shm_name;
 use crate::constants::record_types::{TYPE_PHOTO_CHUNK, TYPE_PHOTO_PREVIEW};
+use crate::infrastructure::shared_memory::read_shm_blob;
 use crate::controller::file_controller::{
     audit_export_event, stream_abort_blocking, stream_append_blocking, stream_create_blocking,
     stream_finalize_blocking,
@@ -37,7 +39,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
+use tauri::ipc::Response as IpcResponse;
 use tauri::{Manager, State};
+use zeroize::Zeroizing;
 
 /// 单个 worker job 的路径上限（与 worker 侧 MAX_JOB_PATHS 一致）
 const MAX_JOB_PATHS: usize = 10_000;
@@ -54,8 +58,11 @@ const END_TIMEOUT: Duration = Duration::from_secs(30);
 /// 路径授权续期阈值：worker TTL 为 600s，取一半时间滚动续期
 const GRANT_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 
-/// 块缓冲上限：凑满 2 块（约 8MiB 明文）立即落库，压低内存驻留
-const CHUNK_BUFFER_LIMIT: usize = 2;
+/// 块缓冲上限：凑满 8 块（约 32MiB 明文）提交一组。
+///
+/// 块密文驻留 worker 暂存区，宿主只持有引用；增大分组只增加 worker
+/// 暂存峰值（上限 64MiB），不再放大宿主的 base64/JSON 峰值。
+const CHUNK_BUFFER_LIMIT: usize = 8;
 
 /// 照片 meta 记录类型（与前端 TYPE_PHOTO_META 同值）
 const PHOTO_META_RTYPE: u32 = 0x01;
@@ -221,6 +228,12 @@ struct PhotoReadPayload {
     chunk_total: Option<u32>,
     #[serde(default)]
     data_b64: Option<String>,
+    /// 原图明文块所在共享内存名称（存在时优先于 data_b64）
+    #[serde(default)]
+    shm_name: Option<String>,
+    /// 共享内存中的明文载荷长度
+    #[serde(default)]
+    shm_len: Option<u64>,
     #[serde(default)]
     preview_cached: Option<bool>,
 }
@@ -253,9 +266,10 @@ struct PhotoPayload {
     #[serde(default)]
     chunk_key: Option<String>,
     #[serde(default)]
-    chunk_b64: Option<String>,
-    #[serde(default)]
     chunk_hash: Option<String>,
+    /// true=密文在 worker 暂存区，响应不携带块密文
+    #[serde(default)]
+    chunk_staged: Option<bool>,
     #[serde(default)]
     file_done: bool,
     #[serde(default)]
@@ -392,6 +406,7 @@ async fn begin_job(
     app: &tauri::AppHandle,
     job_id: &str,
     paths: &[String],
+    committed_entry_keys: &[String],
 ) -> Result<(), String> {
     let raw = send_worker(
         app,
@@ -399,6 +414,7 @@ async fn begin_job(
             "op": "photo_import_job_begin",
             "job_id": job_id,
             "paths": paths,
+            "committed_entry_keys": committed_entry_keys,
         }),
         BEGIN_TIMEOUT,
     )
@@ -486,6 +502,35 @@ async fn flush_chunk_buffer(
         return Err("照片块未分配记录 ID".to_string());
     }
     file.chunk_ids.extend(outcome.ids);
+    Ok(())
+}
+
+/// 把 worker 返回的暂存块引用加入缓冲。
+///
+/// 照片导入只接受 worker 暂存通道：引用不完整或 worker 未启用暂存即失败，
+/// 绝不回退到内联块密文（回退会重新引入 base64 大字符串搬运）。
+fn buffer_staged_chunk(
+    file: &mut FileProgress,
+    job_id: &str,
+    photo: &PhotoPayload,
+) -> Result<(), String> {
+    if photo.chunk_staged != Some(true) {
+        return Err("worker 未启用块暂存通道".to_string());
+    }
+    let chunk_key = photo.chunk_key.clone().unwrap_or_default();
+    let chunk_hash = photo.chunk_hash.clone().unwrap_or_default();
+    if chunk_key.is_empty() || chunk_hash.is_empty() {
+        return Err("worker 返回的暂存块引用不完整".to_string());
+    }
+    file.chunk_hashes.push(chunk_hash.clone());
+    file.buffer.push(ChunkBlob {
+        chunk_key,
+        data_b64: String::new(),
+        rtype: Some(TYPE_PHOTO_CHUNK),
+        staged: true,
+        job_id: job_id.to_string(),
+        chunk_hash,
+    });
     Ok(())
 }
 
@@ -863,6 +908,10 @@ async fn run_import(
         };
     }
 
+    /* 会话已提交的条目键一次性交给 worker：命中在打开文件前跳过，
+     * 不读盘、不哈希、不解码。键集合在会话内不变（写入由本流程串行完成）。 */
+    let committed_entry_keys = begin.entry_keys.clone().unwrap_or_default();
+
     for (batch_index, batch_paths) in paths.chunks(MAX_JOB_PATHS).enumerate() {
         if cancel.load(Ordering::SeqCst) {
             cancelled = true;
@@ -883,7 +932,7 @@ async fn run_import(
             session_error = Some(e);
             break;
         }
-        if let Err(e) = begin_job(app, &job_id, batch_paths).await {
+        if let Err(e) = begin_job(app, &job_id, batch_paths, &committed_entry_keys).await {
             log::error!("[photo_import] 照片导入任务建立失败: {}", e);
             session_error = Some(e);
             let _ = end_job(app, &job_id).await;
@@ -983,14 +1032,22 @@ async fn run_import(
                     }
 
                     if !file.abandoned {
-                        file.chunk_hashes
-                            .push(photo.chunk_hash.clone().unwrap_or_default());
-                        file.buffer.push(ChunkBlob {
-                            chunk_key: photo.chunk_key.clone().unwrap_or_default(),
-                            data_b64: photo.chunk_b64.clone().unwrap_or_default(),
-                            rtype: Some(TYPE_PHOTO_CHUNK),
-                        });
-                        if file.buffer.len() >= CHUNK_BUFFER_LIMIT {
+                        if let Err(e) = buffer_staged_chunk(&mut file, &job_id, &photo) {
+                            log::warn!(
+                                "[photo_import] 文件 {} 块暂存引用非法: {}",
+                                file.file_name,
+                                e
+                            );
+                            file.abandoned = true;
+                            record_file_failure(
+                                &mut totals,
+                                &mut failed_records,
+                                &mut file,
+                                batch_offset,
+                                "chunk-upload-failed",
+                                true,
+                            );
+                        } else if file.buffer.len() >= CHUNK_BUFFER_LIMIT {
                             if let Err(e) = flush_chunk_buffer(app, &mut file).await {
                                 log::warn!(
                                     "[photo_import] 文件 {} 块写入失败: {}",
@@ -1120,6 +1177,21 @@ async fn run_import(
                         &totals,
                         PHASE_IMPORTING,
                         &current_name,
+                        current_chunk,
+                        total_chunks,
+                        started.elapsed(),
+                    );
+                }
+                "deduped" => {
+                    // 条目键命中宿主已提交集合：本次未新增记录，不是失败
+                    let source = photo.file_name.clone().unwrap_or_default();
+                    totals.skipped += 1;
+                    totals.done += 1;
+                    emit_progress(
+                        &channel,
+                        &totals,
+                        PHASE_IMPORTING,
+                        &source,
                         current_chunk,
                         total_chunks,
                         started.elapsed(),
@@ -1501,14 +1573,29 @@ pub struct PhotoFullBegin {
     pub chunk_total: u32,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PhotoFullChunk {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data_b64: Option<String>,
-    pub chunk_index: u32,
-    pub chunk_total: u32,
-    pub done: bool,
+/// 原图块一致性校验：序号/总数/结束标志/载荷长度任一不自洽即拒绝。
+///
+/// 前端按 begin.chunkTotal 精确拉取，最后一块必须且只能由 worker 标记 done；
+/// 空块在本协议中不合法（照片明文大小为 0 的元数据在 begin 阶段已被拒绝）。
+fn validate_full_chunk(
+    done: bool,
+    chunk_index: u32,
+    chunk_total: u32,
+    payload_len: usize,
+) -> Result<(), &'static str> {
+    if chunk_total == 0 {
+        return Err("chunk_total is zero");
+    }
+    if chunk_index >= chunk_total {
+        return Err("chunk_index out of range");
+    }
+    if done != (chunk_index + 1 == chunk_total) {
+        return Err("done flag inconsistent with chunk index/total");
+    }
+    if payload_len == 0 {
+        return Err("empty chunk payload");
+    }
+    Ok(())
 }
 
 fn read_error(reply: &WorkerReply) -> String {
@@ -1619,6 +1706,11 @@ pub async fn photo_full_begin(
         return Err("照片 ID 非法".to_string());
     }
     let job_id = format!("full-{}", generate_job_id());
+    /* 每 job 一次性 SHM 认证密钥：随 begin 请求经签名 IPC 下发 worker，
+     * 仅用于校验原图明文块，不落盘、不返回前端。 */
+    let mut shm_key = Zeroizing::new(vec![0u8; 32]);
+    crate::util::random::fill_random_bytes(&mut shm_key[..]);
+    let shm_key_b64 = crate::util::base64::base64_encode(&shm_key);
     let raw = send_worker(
         &app,
         serde_json::json!({
@@ -1626,6 +1718,7 @@ pub async fn photo_full_begin(
             "job_id": job_id,
             "mode": "full",
             "meta_id": meta_id,
+            "shm_key": shm_key_b64,
         }),
         READ_BEGIN_TIMEOUT,
     )
@@ -1637,22 +1730,33 @@ pub async fn photo_full_begin(
     let read = reply
         .photo_read
         .ok_or_else(|| "原图读取响应缺少结果".to_string())?;
+    let chunk_total = read.chunk_total.unwrap_or(0);
+    if chunk_total == 0 {
+        end_read_job(&app, &job_id).await;
+        return Err("原图分块数量非法".to_string());
+    }
+    state.set_photo_read_key(&job_id, shm_key);
     Ok(PhotoFullBegin {
         job_id,
         name: read.name.unwrap_or_default(),
         mime: read.mime.unwrap_or_default(),
         size: read.size.unwrap_or(0),
-        chunk_total: read.chunk_total.unwrap_or(0),
+        chunk_total,
     })
 }
 
-/// 拉取下一块原图明文；done=true 时 worker job 已自动结束。
+/// 拉取下一块原图明文。
+///
+/// 返回 `tauri::ipc::Response` 裸载荷：没有帧头、没有 base64 编解码、
+/// 没有 1.33× 体积放大。前端按 `photo_full_begin` 返回的 `chunkTotal`
+/// 精确拉取；宿主校验块序号/总数/done 一致性。worker 明文块经共享内存
+/// 传递，宿主读取后立即验签并覆写使用区。done=true 时 worker job 已自动结束。
 #[tauri::command]
 pub async fn photo_full_next(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     job_id: String,
-) -> Result<PhotoFullChunk, String> {
+) -> Result<IpcResponse, String> {
     require_unlocked(&app, &state, "photo_full_next")?;
     if job_id.is_empty() {
         return Err("读取 job 非法".to_string());
@@ -1665,6 +1769,7 @@ pub async fn photo_full_next(
     .await?;
     let reply = parse_reply("photo_read_job_next", &raw)?;
     if !reply.ok {
+        state.remove_photo_read_key(&job_id);
         return Err(read_error(&reply));
     }
     let read = reply
@@ -1673,25 +1778,74 @@ pub async fn photo_full_next(
     let done = match read.status.as_str() {
         "chunk" => false,
         "done" => true,
-        "cancelled" => return Err("E_PHOTO_READ_CANCELLED".to_string()),
-        other => return Err(format!("原图读取状态异常: {}", other)),
+        "cancelled" => {
+            state.remove_photo_read_key(&job_id);
+            return Err("E_PHOTO_READ_CANCELLED".to_string());
+        }
+        other => {
+            state.remove_photo_read_key(&job_id);
+            return Err(format!("原图读取状态异常: {}", other));
+        }
     };
+
+    let payload: Vec<u8> = match (read.shm_name.as_deref(), read.shm_len) {
+        (Some(shm_name), Some(shm_len)) => {
+            if !is_valid_shm_name(shm_name) || shm_len == 0 {
+                state.remove_photo_read_key(&job_id);
+                return Err("原图共享内存参数非法".to_string());
+            }
+            let key = state
+                .photo_read_key(&job_id)
+                .ok_or_else(|| "原图读取密钥缺失".to_string())?;
+            match read_shm_blob(shm_name, shm_len as usize, Some(&key[..])) {
+                Ok((bytes, shm_done)) => {
+                    if shm_done != done {
+                        state.remove_photo_read_key(&job_id);
+                        return Err("原图共享内存状态不一致".to_string());
+                    }
+                    bytes
+                }
+                Err(e) => {
+                    state.remove_photo_read_key(&job_id);
+                    return Err(e);
+                }
+            }
+        }
+        _ => match read.data_b64.as_deref() {
+            Some(data_b64) => BASE64
+                .decode(data_b64.as_bytes())
+                .map_err(|_| "原图块编码非法".to_string())?,
+            None => {
+                state.remove_photo_read_key(&job_id);
+                return Err("原图读取响应缺少数据".to_string());
+            }
+        },
+    };
+
+    let Some(chunk_index) = read.chunk_index else {
+        state.remove_photo_read_key(&job_id);
+        return Err("原图读取响应缺少块序号".to_string());
+    };
+    let Some(chunk_total) = read.chunk_total else {
+        state.remove_photo_read_key(&job_id);
+        return Err("原图读取响应缺少块总数".to_string());
+    };
+    if let Err(e) = validate_full_chunk(done, chunk_index, chunk_total, payload.len()) {
+        state.remove_photo_read_key(&job_id);
+        return Err(format!("原图分块状态非法: {}", e));
+    }
     if done {
+        state.remove_photo_read_key(&job_id);
         end_read_job(&app, &job_id).await;
     }
-    Ok(PhotoFullChunk {
-        data_b64: read.data_b64,
-        chunk_index: read.chunk_index.unwrap_or(0),
-        chunk_total: read.chunk_total.unwrap_or(0),
-        done,
-    })
+    Ok(IpcResponse::new(payload))
 }
 
 /// 取消原图读取：worker 停止后续产出并清理 job。
 #[tauri::command]
 pub async fn photo_full_cancel(
     app: tauri::AppHandle,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     job_id: String,
 ) -> Result<(), String> {
     if job_id.is_empty() {
@@ -1703,6 +1857,7 @@ pub async fn photo_full_cancel(
         READ_END_TIMEOUT,
     )
     .await;
+    state.remove_photo_read_key(&job_id);
     end_read_job(&app, &job_id).await;
     Ok(())
 }
@@ -2920,14 +3075,22 @@ async fn run_restore(
                     .map(|(index, total)| index.saturating_add(1) >= total)
                     .unwrap_or(false);
                 if !skip_current && !file.abandoned {
-                    file.chunk_hashes
-                        .push(photo.chunk_hash.clone().unwrap_or_default());
-                    file.buffer.push(ChunkBlob {
-                        chunk_key: photo.chunk_key.clone().unwrap_or_default(),
-                        data_b64: photo.chunk_b64.clone().unwrap_or_default(),
-                        rtype: Some(TYPE_PHOTO_CHUNK),
-                    });
-                    if file.buffer.len() >= CHUNK_BUFFER_LIMIT {
+                    if let Err(e) = buffer_staged_chunk(&mut file, job_id, &photo) {
+                        log::warn!(
+                            "[photo_restore] 文件 {} 块暂存引用非法: {}",
+                            file.file_name,
+                            e
+                        );
+                        file.abandoned = true;
+                        record_file_failure(
+                            &mut totals,
+                            &mut failed_records,
+                            &mut file,
+                            0,
+                            "chunk-upload-failed",
+                            true,
+                        );
+                    } else if file.buffer.len() >= CHUNK_BUFFER_LIMIT {
                         if let Err(e) = flush_chunk_buffer(app, &mut file).await {
                             log::warn!(
                                 "[photo_restore] 文件 {} 块写入失败: {}",
@@ -3169,6 +3332,24 @@ pub async fn photo_restore_cancel(
         .await;
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod phase2_tests {
+    use super::*;
+
+    #[test]
+    fn full_chunk_consistency_rules() {
+        assert!(validate_full_chunk(false, 0, 3, 1024).is_ok());
+        assert!(validate_full_chunk(true, 2, 3, 1024).is_ok());
+        assert!(validate_full_chunk(true, 0, 1, 1024).is_ok());
+
+        assert!(validate_full_chunk(false, 0, 0, 1024).is_err());
+        assert!(validate_full_chunk(false, 3, 3, 1024).is_err());
+        assert!(validate_full_chunk(true, 0, 3, 1024).is_err());
+        assert!(validate_full_chunk(false, 2, 3, 1024).is_err());
+        assert!(validate_full_chunk(true, 2, 3, 0).is_err());
+    }
 }
 
 #[cfg(test)]

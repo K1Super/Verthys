@@ -103,6 +103,10 @@ export interface UsePhotoParseDeps {
   importStatus: Ref<string>;
   /** 导入已耗时（毫秒，复用 usePhotoImport 的 ref） */
   importElapsed: Ref<number>;
+  /** 还原阶段当前序号（复用 usePhotoImport 的 ref） */
+  importCurrent: Ref<number>;
+  /** 还原阶段总数（复用 usePhotoImport 的 ref） */
+  importTotal: Ref<number>;
   /** 解析 Worker 工厂（测试注入点；默认真实 Worker） */
   parseWorkerFactory?: () => ParseWorkerLike;
 }
@@ -112,6 +116,7 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
     photos, isTauri, ensurePhotoKey, showError, showToast,
     /* Parsed Import：复用 usePhotoImport 的导入状态 refs */
     importProgress, importStatus, importElapsed,
+    importCurrent, importTotal,
     parseWorkerFactory = defaultParseWorkerFactory,
   } = deps;
 
@@ -260,6 +265,8 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
     importProgress.value = 0;
     importStatus.value = "";
     importElapsed.value = 0;
+    importCurrent.value = 0;
+    importTotal.value = 0;
   };
 
   const closeParseDialog = () => {
@@ -571,6 +578,8 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
 
     // 保持解析对话框开启，在对话框内复用 QuantumProgressFlow 显示导入进度
     importingParsed.value = true;
+    importCurrent.value = 0;
+    importTotal.value = 0;
 
     if (isTauri) {
       // ===== Tauri 模式：按原路径重读容器，交给导入 Worker + 三阶段流水线 =====
@@ -590,6 +599,8 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
           importProgress.value = 0;
           importStatus.value = "";
           importElapsed.value = 0;
+          importCurrent.value = 0;
+          importTotal.value = 0;
           showError(`容器超过解析上限（${containerLimitText()}），无法导入`);
           return;
         }
@@ -609,12 +620,18 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
             if (disposed) return;
             importProgress.value = p.percent;
             importElapsed.value = p.elapsedMs;
-            if (p.phase === "scanning") importStatus.value = "正在读取并还原备份…";
-            else if (p.phase === "importing") {
-              importStatus.value =
-                `正在还原 ${p.currentName || "照片"} · ${p.doneFiles}/${p.totalFiles}`;
+            if (p.phase === "scanning") {
+              importCurrent.value = 0;
+              importTotal.value = 0;
+              importStatus.value = "正在读取并还原备份";
+            } else if (p.phase === "importing") {
+              importTotal.value = p.totalFiles;
+              importCurrent.value =
+                p.totalFiles > 0 ? Math.min(p.doneFiles + 1, p.totalFiles) : 0;
+              importStatus.value = "正在还原";
             } else if (p.phase === "finishing") {
-              importStatus.value = "正在写入剩余记录…";
+              importCurrent.value = importTotal.value;
+              importStatus.value = "正在写入剩余记录";
             }
           },
         );
@@ -624,6 +641,8 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         importProgress.value = 0;
         importStatus.value = "";
         importElapsed.value = 0;
+        importCurrent.value = 0;
+        importTotal.value = 0;
 
         console.error("[importParsedPhotos] 流水线异常", e);
         if (!disposed) showError("导入失败，请重试");
@@ -648,6 +667,8 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
           importProgress.value = 0;
           importStatus.value = "";
           importElapsed.value = 0;
+          importCurrent.value = 0;
+          importTotal.value = 0;
           if (!disposed) showError("持久化失败，本次导入未生效，请重试");
           return;
         }
@@ -681,6 +702,8 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
           importProgress.value = 0;
           importStatus.value = "";
           importElapsed.value = 0;
+          importCurrent.value = 0;
+          importTotal.value = 0;
           if (result.error) {
             showError(`导入失败: ${result.error}`);
           } else {
@@ -727,6 +750,8 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
           importProgress.value = 0;
           importStatus.value = "";
           importElapsed.value = 0;
+          importCurrent.value = 0;
+          importTotal.value = 0;
           showParseDialog.value = false;      // 关闭对话框
         }, 1500);
       } catch (e) {
@@ -735,6 +760,8 @@ export function usePhotoParse(deps: UsePhotoParseDeps) {
         importProgress.value = 0;
         importStatus.value = "";
         importElapsed.value = 0;
+        importCurrent.value = 0;
+        importTotal.value = 0;
         console.error("[importParsedPhotos] 缓存同步异常", e);
         if (!disposed) showError("导入后处理失败，请重试");
       }

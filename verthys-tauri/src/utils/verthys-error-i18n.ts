@@ -78,6 +78,8 @@ const ERROR_CODE_MESSAGES: Record<VerthysErrorCode, string> = {
   // ===== 设备环境 / 回滚 =====
   [VerthysErrorCode.E_TPM]: "设备环境已变化，请使用恢复码解锁并重密封 PCR",
   [VerthysErrorCode.E_ROLLBACK]: "检测到文件回退，已拒绝打开",
+  [VerthysErrorCode.E_ANCHOR_FULL]:
+    "本机回退锚点表已满，请在安全防护中清理失效锚点",
   [VerthysErrorCode.E_KEYFILE_REQUIRED]: "该加密库已启用 keyfile，请选择 keyfile 文件后重试",
   [VerthysErrorCode.E_KEYFILE_INVALID]: "keyfile 文件无效，请选择创建时保存的 keyfile",
 };

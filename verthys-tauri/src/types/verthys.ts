@@ -4,6 +4,29 @@
  * 与后端 Rust 结构体严格对齐，字段名保持 snake_case（Tauri 自动映射）
  */
 
+/** 回退锚点条目（与宿主 AnchorInfo / worker AnchorEntry 对齐） */
+export interface AnchorInfo {
+  uuid: string;
+  generation: number;
+  /** unknown / active / dead / tampered */
+  witness: string;
+}
+
+/** 扫描到的单个 UUID 及其路径证据（同一 UUID 可对应多个容器副本） */
+export interface AnchorScanEntry {
+  uuid: string;
+  paths: string[];
+}
+
+/** 容器扫描摘要；路径仅用于本次展示，不进入审计 */
+export interface AnchorScanResult {
+  entries: AnchorScanEntry[];
+  files_seen: number;
+  matched_count: number;
+  truncated: boolean;
+  permission_errors: number;
+}
+
 /** 后端统一响应（脱敏：仅返回操作结果与必要数据，不含密钥/句柄） */
 export interface VerthysResponse {
   ok: boolean;
@@ -51,6 +74,18 @@ export interface VerthysResponse {
    * 与后端 Rust controller::types::SecurityStatusReport 严格对齐
    * （字段名保持 snake_case）。防御状态为进程级事实，锁定态亦可查询。 */
   security_status?: SecurityStatusReport;
+  /** 回退锚点列表（仅 verthys_rollback_anchor_list 返回） */
+  anchors?: AnchorInfo[];
+  /** 状态文件整体状态（0=absent / 1=ok / 2=corrupt） */
+  anchor_state?: number;
+  /** 回收条数（仅 verthys_rollback_anchor_reclaim 返回） */
+  anchor_removed?: number;
+  /** 释放条数（仅 verthys_rollback_anchor_release 返回） */
+  anchor_released?: number;
+  /** 见证清理失败条数 */
+  anchor_cleanup_failed?: number;
+  /** 容器扫描结果（仅 verthys_rollback_anchor_scan 返回） */
+  anchor_scan?: AnchorScanResult;
   /* 异步批处理流水线 — 批量导入字段
    *
    * 「N 次加密，1 次 IPC 传输」：verthys_add_records_batch 单次 IPC 写入 N 条记录，
@@ -702,14 +737,6 @@ export interface PhotoFullBegin {
   mime: string;
   size: number;
   chunkTotal: number;
-}
-
-/** 原图分块（photo_full_next） */
-export interface PhotoFullChunk {
-  dataB64?: string;
-  chunkIndex: number;
-  chunkTotal: number;
-  done: boolean;
 }
 
 /** 原生导入结果 */

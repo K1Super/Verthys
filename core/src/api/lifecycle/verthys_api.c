@@ -22,10 +22,9 @@
 #include "vty_keymanager.h"       /* 会话（A/B 元数据 + 数据区） */
 #include "vty_rotate.h"           /* 全库 DEK 轮换作业 */
 #include "verthys_api_container.h"          /* 记录/计数/校验/改密适配 */
+#include "vty_caller_auth.h"        /* 调用方签名门（锚点维护接口） */
 
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
-#include "vty_rollback.h"         /* G0-A：最后一个上下文注销时停止预置线程 */
-#endif
+#include "vty_rollback.h"         /* 最后一个上下文注销时停止预置线程 */
 
 /* 项目头 */
 #include "verthys_crypto.h"
@@ -175,8 +174,7 @@ static int verthys_ctx_registry_has_capacity(void)
     return has;
 }
 
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
-/* 最后一个上下文是否已注销（G0-A：此时才可停止进程级预置线程）。 */
+/* 最后一个上下文是否已注销（此时才可停止进程级预置线程）。 */
 static int verthys_ctx_registry_empty(void)
 {
     int empty = 1;
@@ -190,7 +188,6 @@ static int verthys_ctx_registry_empty(void)
     ReleaseSRWLockShared(&s_ctx_registry_lock);
     return empty;
 }
-#endif
 
 /*
  * 应急 DEGRADE 降级处理器（emergency_set_degrade_handler 注入）。
@@ -462,15 +459,13 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
         vty_rotate_abort(ctx->rotate);
         ctx->rotate = NULL;
     }
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     /* Deinit 无法返回错误：尽力推进锚点，失败只输出固定诊断串
      * （不含路径/UUID/密钥），下次解锁补推进。 */
     if (ctx->vault != NULL && vty_vault_bulk_active(ctx->vault)) {
         if (vty_vault_bulk_commit(ctx->vault) != VTY_OK) {
-            OutputDebugStringA("verthys: bulk anchor commit failed on deinit\n");
+            VERTHYS_DIAG_LOG("verthys: bulk anchor commit failed on deinit");
         }
     }
-#endif
     vault_session_detach(ctx);
 
     if (ctx->state == VERTHYS_STATE_UNLOCKED) {
@@ -491,13 +486,11 @@ VerthysResult Verthys_Deinit(VerthysHandle handle)
     verthys_secure_zero(ctx, sizeof(*ctx));
     free(ctx);
 
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
     /* 最后一个上下文已注销：停止预置线程并清空进程内缓存，
      * 保证 DLL 卸载后不再有 TPM 调用。 */
     if (verthys_ctx_registry_empty()) {
         vty_rollback_shutdown();
     }
-#endif
     return VERTHYS_OK;
 }
 /* 内部错误码 → 公共返回码。对外不区分“口令错/缺槽/TPM 状态”，
@@ -526,6 +519,8 @@ static VerthysResult verthys_container_map(int rc)
     case VTY_E_MODULE_LOCKED:     return VERTHYS_ERR_MODULE_LOCKED;
     case VTY_E_NO_SPACE:          return VERTHYS_ERR_NO_SPACE;
     case VTY_E_VERIFY:            return VERTHYS_ERR_VERIFY;
+    case VTY_E_ANCHOR_FULL:       return VERTHYS_ERR_ANCHOR_FULL;
+    case VTY_E_CALLER:            return VERTHYS_ERR_UNAUTHORIZED;
     default:                      return VERTHYS_ERR_INVALID;
     }
 }
@@ -952,7 +947,6 @@ VerthysResult Verthys_Lock(VerthysHandle handle)
             vty_rotate_abort(ctx->rotate);
             ctx->rotate = NULL;
         }
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
         {
             VerthysResult commit_rc = VERTHYS_OK;
             if (verthys_bulk_defer_active(ctx)) {
@@ -971,17 +965,6 @@ VerthysResult Verthys_Lock(VerthysHandle handle)
              * “回退锚点未推进”，下次解锁会补推进。 */
             return commit_rc;
         }
-#else
-        vault_session_detach(ctx);
-        ctx_free_getrecord_cache(ctx);
-        ctx->state = VERTHYS_STATE_LOCKED;
-#ifdef _WIN32
-        if (ctx->api_mutex != NULL) {
-            ReleaseSRWLockExclusive(ctx->api_mutex);
-        }
-#endif
-        return VERTHYS_OK;
-#endif
     }
 
     return VERTHYS_ERR_FORMAT;
@@ -1098,8 +1081,7 @@ VerthysResult Verthys_AddRecords(VerthysHandle handle,
     return VERTHYS_ERR_FORMAT;
 }
 
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
-/* 5.2 批量导入锚点推迟（API 版本 0x0015，仅隔离原型构建）
+/* 5.2 批量导入锚点推迟（API 版本 0x0015）
  *
  * Begin/Commit 自身不做数据写入，但会改变会话的锚点提交策略，
  * 因此与写路径同锁串行，并使既有 GetRecord 借用指针失效
@@ -1154,7 +1136,6 @@ VerthysResult Verthys_BulkImportCommit(VerthysHandle handle)
 #endif
     return rc;
 }
-#endif
 
 /* 6. 读取记录 */
 VerthysResult Verthys_GetRecord(VerthysHandle handle,
@@ -1217,7 +1198,6 @@ VerthysResult Verthys_DeleteRecord(VerthysHandle handle, uint64_t id)
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
 
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     /* 推迟窗口只覆盖新增记录：删除会把“数据复活”纳入回退影响。 */
     if (verthys_bulk_defer_active(ctx)) {
 #ifdef _WIN32
@@ -1225,7 +1205,6 @@ VerthysResult Verthys_DeleteRecord(VerthysHandle handle, uint64_t id)
 #endif
         return VERTHYS_ERR_POLICY;
     }
-#endif
 
     /* 写操作入口统一失效查询缓存，防止 UAF */
     ctx_free_getrecord_cache(ctx);
@@ -1268,14 +1247,12 @@ VerthysResult Verthys_DeleteRecords(VerthysHandle handle, const uint64_t *ids, s
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
 
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
 #ifdef _WIN32
         if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
 #endif
         return VERTHYS_ERR_POLICY;
     }
-#endif
 
     /* 写操作入口统一失效查询缓存，防止 UAF */
     ctx_free_getrecord_cache(ctx);
@@ -1513,6 +1490,147 @@ VerthysResult Verthys_GetSecurityStatus(VerthysHandle handle,
     out_status->reserved3[0]         = 0;
     out_status->reserved3[1]         = 0;
     return VERTHYS_OK;
+}
+
+/* ================================================================== *
+ * 回退锚点维护接口（API 版本 0x0016）
+ *
+ * 只做参数/句柄/调用方签名边界与内部类型到公共 ABI 的转换；状态判定、
+ * 回收与释放全部在 vty_rollback 内完成。任何自动回收都只处理 DEAD
+ * 条目，ACTIVE/TAMPERED/UNKNOWN 绝不会被本组接口删除（Release 是
+ * 用户显式确认的单独路径）。
+ * ================================================================== */
+
+static VerthysResult verthys_anchor_map(int rc)
+{
+    switch (rc) {
+    case VTY_OK:               return VERTHYS_OK;
+    case VTY_E_INVALID:        return VERTHYS_ERR_INVALID;
+    case VTY_E_ANCHOR_FULL:    return VERTHYS_ERR_ANCHOR_FULL;
+    case VTY_E_CORRUPT:        return VERTHYS_ERR_CORRUPT;
+    case VTY_E_IO:             return VERTHYS_ERR_IO;
+    case VTY_E_TPM:            return VERTHYS_ERR_TPM;
+    case VTY_E_POLICY:         return VERTHYS_ERR_POLICY;
+    case VTY_E_RESOURCE:       return VERTHYS_ERR_RESOURCE_LIMIT;
+    case VTY_E_CALLER:         return VERTHYS_ERR_UNAUTHORIZED;
+    default:                   return VERTHYS_ERR_INTERNAL;
+    }
+}
+
+static uint32_t verthys_anchor_state_of(uint32_t internal)
+{
+    switch (internal) {
+    case VTY_ANCHOR_ACTIVE:   return VERTHYS_ANCHOR_WITNESS_ACTIVE;
+    case VTY_ANCHOR_DEAD:     return VERTHYS_ANCHOR_WITNESS_DEAD;
+    case VTY_ANCHOR_TAMPERED: return VERTHYS_ANCHOR_WITNESS_TAMPERED;
+    default:                  return VERTHYS_ANCHOR_WITNESS_UNKNOWN;
+    }
+}
+
+VerthysResult Verthys_RollbackAnchorList(VerthysHandle handle,
+                                         VerthysAnchorInfo *out_anchors,
+                                         uint32_t capacity,
+                                         uint32_t *out_count,
+                                         uint32_t *out_state)
+{
+    struct VerthysContext *ctx = (struct VerthysContext *)handle;
+    VtyAnchorInfo tmp[VTY_ROLLBACK_MAX_ENTRIES];
+    uint32_t needed = 0;
+    uint32_t i;
+    int missing = 0;
+    int rc;
+
+    if (handle == NULL || out_count == NULL || out_state == NULL) {
+        return VERTHYS_ERR_INVALID;
+    }
+    if (!verthys_ctx_registry_contains(ctx)) return VERTHYS_ERR_INVALID;
+    if (capacity > 0 && out_anchors == NULL) return VERTHYS_ERR_INVALID;
+    if (vty_caller_auth_check() != VTY_OK) return VERTHYS_ERR_UNAUTHORIZED;
+
+    *out_count = 0;
+    *out_state = VERTHYS_ANCHOR_STATE_CORRUPT;
+
+    /* 先只查数量（不触发 64 次 TPM 探测），再按调用方容量决定是否
+     * 填充明细。 */
+    rc = vty_rollback_anchor_list(NULL, 0, &needed, &missing);
+    if (rc != VTY_OK) {
+        *out_state = (rc == VTY_E_CORRUPT)
+                         ? VERTHYS_ANCHOR_STATE_CORRUPT
+                         : (missing ? VERTHYS_ANCHOR_STATE_ABSENT
+                                    : VERTHYS_ANCHOR_STATE_UNKNOWN);
+        return verthys_anchor_map(rc);
+    }
+    *out_count = needed;
+    *out_state = missing ? VERTHYS_ANCHOR_STATE_ABSENT
+                         : VERTHYS_ANCHOR_STATE_OK;
+    if (needed == 0 || out_anchors == NULL || capacity == 0) {
+        return VERTHYS_OK;
+    }
+    if (capacity < needed) return VERTHYS_ERR_RESOURCE_LIMIT;
+
+    memset(tmp, 0, sizeof(tmp));
+    rc = vty_rollback_anchor_list(tmp, VTY_ROLLBACK_MAX_ENTRIES,
+                                  &needed, &missing);
+    if (rc != VTY_OK) return verthys_anchor_map(rc);
+    if (needed > capacity) {
+        *out_count = needed;
+        return VERTHYS_ERR_RESOURCE_LIMIT;
+    }
+    memset(out_anchors, 0, (size_t)needed * sizeof(*out_anchors));
+    for (i = 0; i < needed; i++) {
+        out_anchors[i].struct_size = (uint32_t)sizeof(VerthysAnchorInfo);
+        memcpy(out_anchors[i].uuid, tmp[i].uuid, VERTHYS_ANCHOR_UUID_BYTES);
+        out_anchors[i].generation = tmp[i].generation;
+        out_anchors[i].witness_state = verthys_anchor_state_of(tmp[i].state);
+    }
+    *out_count = needed;
+    *out_state = missing ? VERTHYS_ANCHOR_STATE_ABSENT
+                         : VERTHYS_ANCHOR_STATE_OK;
+    vty_secure_zero(tmp, sizeof(tmp));
+    return VERTHYS_OK;
+}
+
+VerthysResult Verthys_RollbackAnchorReclaim(VerthysHandle handle,
+                                            uint32_t flags,
+                                            uint32_t *out_removed,
+                                            uint32_t *out_cleanup_failed)
+{
+    struct VerthysContext *ctx = (struct VerthysContext *)handle;
+    int rc;
+
+    if (handle == NULL || out_removed == NULL ||
+        out_cleanup_failed == NULL) {
+        return VERTHYS_ERR_INVALID;
+    }
+    if (!verthys_ctx_registry_contains(ctx)) return VERTHYS_ERR_INVALID;
+    if (vty_caller_auth_check() != VTY_OK) return VERTHYS_ERR_UNAUTHORIZED;
+    *out_removed = 0;
+    *out_cleanup_failed = 0;
+    rc = vty_rollback_anchor_reclaim(flags, out_removed, out_cleanup_failed);
+    return verthys_anchor_map(rc);
+}
+
+VerthysResult Verthys_RollbackAnchorRelease(
+    VerthysHandle handle,
+    const uint8_t uuid[VERTHYS_ANCHOR_UUID_BYTES],
+    uint32_t flags,
+    uint32_t *out_released,
+    uint32_t *out_cleanup_failed)
+{
+    struct VerthysContext *ctx = (struct VerthysContext *)handle;
+    int rc;
+
+    if (handle == NULL || uuid == NULL || out_released == NULL ||
+        out_cleanup_failed == NULL) {
+        return VERTHYS_ERR_INVALID;
+    }
+    if (!verthys_ctx_registry_contains(ctx)) return VERTHYS_ERR_INVALID;
+    if (vty_caller_auth_check() != VTY_OK) return VERTHYS_ERR_UNAUTHORIZED;
+    *out_released = 0;
+    *out_cleanup_failed = 0;
+    rc = vty_rollback_anchor_release(uuid, flags, out_released,
+                                     out_cleanup_failed);
+    return verthys_anchor_map(rc);
 }
 
 /* ================================================================== *

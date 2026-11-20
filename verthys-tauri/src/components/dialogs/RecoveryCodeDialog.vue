@@ -64,11 +64,11 @@
     </p>
 
     <div class="kv-actions">
-      <button class="btn kv-cancel" type="button" @click="onDialogToggle(false)">
+      <button class="btn btn-neutral btn-compact" type="button" @click="onDialogToggle(false)">
         {{ closeWarning ? "放弃并关闭" : "取消" }}
       </button>
       <button
-        class="btn btn-primary kv-confirm"
+        class="btn btn-primary btn-compact"
         type="button"
         :disabled="!acknowledged"
         @click="onConfirm"

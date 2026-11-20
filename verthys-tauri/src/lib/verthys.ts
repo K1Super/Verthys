@@ -50,6 +50,8 @@ import type {
   PresetConfig,
   PresetFeatures,
   SecurityStatusReport,
+  AnchorInfo,
+  AnchorScanResult,
   RotateProgress,
   ClipboardResult,
   PrivacyModeResult,
@@ -68,7 +70,6 @@ import type {
   PhotoImportResult,
   PhotoPreviewResult,
   PhotoFullBegin,
-  PhotoFullChunk,
   PhotoExportProgress,
   PhotoExportResult,
   PhotoMetaItem,
@@ -126,7 +127,6 @@ export type {
   PhotoImportResult,
   PhotoPreviewResult,
   PhotoFullBegin,
-  PhotoFullChunk,
   PhotoExportProgress,
   PhotoExportResult,
   PhotoMetaItem,
@@ -952,16 +952,14 @@ export async function photoFullBegin(metaId: number): Promise<PhotoFullBegin> {
   };
 }
 
-/** 拉取下一块原图明文 */
-export async function photoFullNext(jobId: string): Promise<PhotoFullChunk> {
+/** 拉取下一块原图明文（二进制 IPC：直接返回原始字节，无帧头、无 base64） */
+export async function photoFullNext(jobId: string): Promise<Uint8Array> {
   markFrontendIpcActive();
-  const r = await ipc<PhotoFullChunk>("photo_full_next", { jobId });
-  return {
-    dataB64: r.dataB64,
-    chunkIndex: r.chunkIndex ?? 0,
-    chunkTotal: r.chunkTotal ?? 0,
-    done: r.done === true,
-  };
+  const raw = await ipc<ArrayBuffer>("photo_full_next", { jobId });
+  if (!(raw instanceof ArrayBuffer)) {
+    throw new Error("原图分块响应类型非法");
+  }
+  return new Uint8Array(raw);
 }
 
 /** 取消原图读取（失败只告警） */
@@ -1605,6 +1603,84 @@ export async function verthysGetSecurityStatus(): Promise<SecurityStatusReport> 
     throw new Error(`verthys_security_status 失败: ${r.error ?? "未知错误"}`);
   }
   return r.security_status;
+}
+
+/* ------------------------------------------------------------------ *
+ * 回退锚点维护                                                     *
+ *                                                                    *
+ * List 只读；Reclaim 只回收 DEAD；Release 必须 confirm=true。         *
+ * 前端不自行判断“哪些锚点可删”，只展示后端状态并要求用户显式确认。 *
+ * ------------------------------------------------------------------ */
+
+export interface AnchorListResult {
+  anchors: AnchorInfo[];
+  /** 0=absent / 1=ok / 2=corrupt */
+  state: number;
+}
+
+export interface AnchorMutationResult {
+  ok: boolean;
+  removed?: number;
+  released?: number;
+  cleanupFailed?: number;
+  error?: string;
+  errorCode?: string;
+}
+
+/** 列出本机回退锚点（不要求容器已解锁） */
+export async function verthysRollbackAnchorList(): Promise<AnchorListResult> {
+  const r = await ipc<VerthysResponse>("verthys_rollback_anchor_list", {});
+  if (!r.ok) {
+    throw new Error(`verthys_rollback_anchor_list 失败: ${r.error ?? "未知错误"}`);
+  }
+  return { anchors: r.anchors ?? [], state: r.anchor_state ?? 1 };
+}
+
+/** 回收所有 DEAD 锚点；ACTIVE/TAMPERED/UNKNOWN 由后端保留 */
+export async function verthysRollbackAnchorReclaim(
+  confirm: boolean,
+): Promise<AnchorMutationResult> {
+  const r = await ipc<VerthysResponse>("verthys_rollback_anchor_reclaim", {
+    confirm,
+  });
+  return {
+    ok: r.ok,
+    removed: r.anchor_removed,
+    cleanupFailed: r.anchor_cleanup_failed,
+    error: r.error,
+    errorCode: r.error_code ?? undefined,
+  };
+}
+
+/** 显式释放指定 UUID 的锚点；调用方必须先完成二次确认 */
+export async function verthysRollbackAnchorRelease(
+  uuid: string,
+  confirm: boolean,
+): Promise<AnchorMutationResult> {
+  const r = await ipc<VerthysResponse>("verthys_rollback_anchor_release", {
+    uuid,
+    confirm,
+  });
+  return {
+    ok: r.ok,
+    released: r.anchor_released,
+    cleanupFailed: r.anchor_cleanup_failed,
+    error: r.error,
+    errorCode: r.error_code ?? undefined,
+  };
+}
+
+/** 扫描用户选择的根目录，返回 UUID → 路径证据 */
+export async function verthysRollbackAnchorScan(
+  roots: string[],
+): Promise<AnchorScanResult> {
+  const r = await ipc<VerthysResponse>("verthys_rollback_anchor_scan", {
+    roots,
+  });
+  if (!r.ok || !r.anchor_scan) {
+    throw new Error(`verthys_rollback_anchor_scan 失败: ${r.error ?? "未知错误"}`);
+  }
+  return r.anchor_scan;
 }
 
 /** 系统运行指标快照（CPU 占用率真实差分采样；无基线时 cpu_usage=null） */

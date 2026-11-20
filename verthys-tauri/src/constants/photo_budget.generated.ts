@@ -7,9 +7,6 @@
 /** 扫描缓存 dataB64 管控阈值（字节）：超过仅缓存索引，数据置空按需 IPC 取回 */
 export const DATAB64_CACHE_MAX_BYTES = 65536;
 
-/** 缩略图 base64 字符上限：保证含缩略图的元数据记录可被扫描缓存承载 */
-export const PHOTO_THUMB_MAX_CHARS = 45000;
-
 /** 单次 IPC 载荷上限（字节，base64 编码后的字符数口径） */
 export const MAX_IPC_PAYLOAD_BYTES = 12582912;
 
@@ -21,9 +18,6 @@ export const PAYLOAD_CHUNK_SIZE_BYTES = 1048576;
 
 /** 照片存储分块大小（字节）：导入分块与块记录上限的唯一口径 */
 export const PHOTO_CHUNK_SIZE_BYTES = 4194304;
-
-/** 索引瘦身布局的索引明文上界（字节）：展示字段与聚合引用（逐块项已移入块集记录） */
-export const PHOTO_INDEX_MAX_BYTES = 2656;
 
 /** 批量枚举单批数据预算（字节，base64 长度合计）：worker 按此截批并以游标续批 */
 export const ENUM_RESPONSE_DATA_BUDGET_BYTES = 12582912;

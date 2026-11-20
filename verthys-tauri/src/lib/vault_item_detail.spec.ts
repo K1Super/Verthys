@@ -3,7 +3,7 @@
  *
  * 覆盖：主标题不在字段列表重复、全部已填写字段按声明顺序进入分区、空值不占行、
  * transient 字段不回显、敏感字段保留原始取值与加密标记、日期区间端点语义、
- * 到期读数与开关状态文案。
+ * 到期读数与开关开启态。
  */
 import { describe, it, expect } from "vitest";
 import { buildVaultDetailSections } from "./vault_item_detail";
@@ -24,10 +24,7 @@ describe("详情字段投影", () => {
       {
         name: "家",
         region: "广东省/深圳市/南山区",
-        recipient: "张三",
-        phone: "13800138000",
         detail: "科技园南区\n8 栋 801",
-        postalCode: "518000",
         note: "工作日送达",
       },
       address,
@@ -35,22 +32,10 @@ describe("详情字段投影", () => {
     expect(sections.map((section) => section.name)).toEqual(["地址", "附注"]);
     const fields = flatten(sections);
     expect(fields.map((field) => field.fieldId)).toEqual([
-      "recipient",
-      "phone",
       "region",
       "detail",
-      "postalCode",
       "note",
     ]);
-    expect(fields.find((field) => field.fieldId === "recipient")).toMatchObject({
-      label: "姓名",
-      value: "张三",
-      sensitive: false,
-    });
-    expect(fields.find((field) => field.fieldId === "phone")).toMatchObject({
-      label: "电话",
-      value: "13800138000",
-    });
     expect(fields.find((field) => field.fieldId === "detail")).toMatchObject({
       multiline: true,
       value: "科技园南区\n8 栋 801",
@@ -109,16 +94,15 @@ describe("详情字段投影", () => {
     expect(fields.find((field) => field.fieldId === "note")!.multiline).toBe(true);
   });
 
-  it("银行卡：卡号与安全码同为敏感行，主标题银行不重复", () => {
+  it("银行卡：卡号是唯一敏感行，主标题银行不重复", () => {
     const sections = buildVaultDetailSections(
-      { bank: "示例银行", number: "6222", type: "储蓄卡", holder: "张三", cvv: "123", note: "备注" },
+      { bank: "示例银行", number: "6222", type: "储蓄卡", note: "备注" },
       bankcard,
     );
     const fields = flatten(sections);
-    expect(fields.map((field) => field.fieldId)).toEqual(["number", "type", "holder", "cvv", "note"]);
+    expect(fields.map((field) => field.fieldId)).toEqual(["number", "type", "note"]);
     expect(fields.filter((field) => field.sensitive).map((field) => field.fieldId)).toEqual([
       "number",
-      "cvv",
     ]);
     expect(fields.some((field) => field.fieldId === "bank")).toBe(false);
   });
@@ -148,6 +132,22 @@ describe("详情字段投影", () => {
     });
     expect(fields.find((field) => field.fieldId === "encrypted")!.value).toBe("已开启");
     expect(fields.some((field) => field.fieldId === "encKey")).toBe(false);
+  });
+
+  it("开关关闭不占行：未启用独立加密时详情不出现该行", () => {
+    const fields = flatten(
+      buildVaultDetailSections(
+        {
+          platform: "示例平台",
+          username: "user",
+          password: "secret",
+          encrypted: "0",
+          note: "备注",
+        },
+        account,
+      ),
+    );
+    expect(fields.map((field) => field.fieldId)).toEqual(["username", "password", "note"]);
   });
 
   it("空值不占行：只填主标题的地址没有任何详情分区", () => {

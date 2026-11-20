@@ -1,5 +1,7 @@
 Verthys_AddRecord
 Verthys_AddRecords
+Verthys_BulkImportBegin
+Verthys_BulkImportCommit
 Verthys_ChangePassword
 Verthys_ClearRecordCache
 Verthys_Deinit
@@ -7,6 +9,7 @@ Verthys_DeleteRecord
 Verthys_DeleteRecords
 Verthys_Export
 Verthys_FindFirstLidByType
+Verthys_FindLidByName
 Verthys_Flush
 Verthys_GetContainerInfo
 Verthys_GetDiagnostics
@@ -19,10 +22,14 @@ Verthys_GetSummaryCount
 Verthys_HasRecordByType
 Verthys_Import
 Verthys_Init
+Verthys_ListAllLids
 Verthys_ListIdsByType
 Verthys_Lock
 Verthys_NotifyRuntimeGuards
 Verthys_NotifySandboxAttrs
+Verthys_RollbackAnchorList
+Verthys_RollbackAnchorReclaim
+Verthys_RollbackAnchorRelease
 Verthys_ScanClose
 Verthys_ScanFetch
 Verthys_ScanOpen

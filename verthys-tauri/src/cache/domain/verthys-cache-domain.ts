@@ -7,7 +7,7 @@
  * 五大缓存
  *   1. 模块数据缓存 moduleDataCache（跨路由/模块切换持久化）
  *   2. 模块登录状态（不缓存原始密钥；密钥只在 worker 内）
- *      闲置 15 分钟自动销毁，lockAll 时清零）
+ *      生命周期随全局会话空闲锁定与 lockAll 统一清零）
  *   3. 共享记录扫描缓存 recordScanCache（LRU-5000 + 64KB 大体积管控）
  *   4. 摘要缓存 summaryCache（第一层：常驻内存，永久存在，无淘汰）
  *   5. 全量记录缓存 fullRecordCache（第二层：LRU-50，按需加载，永不截断）
@@ -44,8 +44,8 @@
  *     注册，不直接触碰 getScanSnapshot 内部方法（封装性）
  *
  * 关键实现约定：
- *   1. clearAllVerthysCaches 首先清空模块密钥缓存（明文密钥零填充，
- *      lockAll 统一清空入口安全闭环）
+ *   1. clearAllVerthysCaches 首先清空模块登录状态，
+ *      lockAll 统一清空入口安全闭环
  *   2. addFullRecord 的 dataSize 回退估算使用 estimateBase64Size
  *      （cache/shared/base64-size.ts 单一权威源，处理填充字符，与批量协调器一致）
  *   3. 扫描令牌以属主保护（invalidateScanIfCurrent）收尾：
@@ -197,15 +197,11 @@ const SCAN_BATCH_SIZE = 200;
 const EARLY_STOP_MAX_BATCHES = 100;
 /** 类型 ID 分页大小：类型盲索引单页 1000 条，平衡 IPC 次数与单包体积 */
 const TYPE_ID_BATCH_SIZE = 1000;
-/** 模块密钥闲置超时：15 分钟（不依赖手动锁屏清空） */
-const MODULE_KEY_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 
 export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> {
   // === 缓存存储 ===
   /** 模块数据缓存（跨路由/模块切换持久化，消除"先空后有"闪烁） */
   private moduleDataCache = new Map<string, { data: unknown; recordId: number | null }>();
-  /** 每模块独立的闲置超时计时器 */
-  private moduleKeyTimers = new Map<ModuleId, ReturnType<typeof setTimeout>>();
   /** 记录扫描缓存（LRU-5000，淘汰时同步移除类型索引） */
   private recordScanCache: LRUCache<number, ScannedRecord>;
   /**
@@ -338,37 +334,18 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     else this.moduleDataCache.clear();
   }
 
-  /* ==================== 2. 模块独立密钥会话缓存 ==================== */
-  /* 密钥以 Uint8Array 存储，清空时零填充覆写内存，                   *
-   *   杜绝 V8 字符串 intern 导致明文残留堆内存。                        *
-   *   闲置 15 分钟自动销毁，每次访问重置计时器。                        */
-
-  /** 重置指定模块的闲置计时器（每次访问调用） */
-  private resetModuleKeyTimer(moduleId: ModuleId): void {
-    const existing = this.moduleKeyTimers.get(moduleId);
-    if (existing) clearTimeout(existing);
-    const timer = setTimeout(() => {
-      log.info(`模块 ${moduleId} 密钥闲置 15min，自动销毁`);
-      this.removeModuleKey(moduleId);
-    }, MODULE_KEY_IDLE_TIMEOUT_MS);
-    this.moduleKeyTimers.set(moduleId, timer);
-  }
+  /* ==================== 2. 模块独立密钥会话状态 ==================== */
+  /* 本层只保存"本会话是否已通过模块口令"的状态位，不保存任何密钥；
+   *   过期与锁定统一由全局会话空闲锁定触发，模块层不维护独立计时器。 */
 
   /** 标记模块已登录（口令已交付 worker；渲染层不保存原始密钥） */
   markModuleReady(moduleId: ModuleId): void {
     this.keyState.moduleKeyReady.value[moduleId] = true;
-    // 启动/重置闲置计时器
-    this.resetModuleKeyTimer(moduleId);
   }
 
-  /** 登出模块（清除登录状态、闲置计时器与该模块的全部明文缓存） */
+  /** 登出模块（清除登录状态与该模块的全部明文缓存） */
   removeModuleKey(moduleId: ModuleId): void {
     this.keyState.moduleKeyReady.value[moduleId] = false;
-    const timer = this.moduleKeyTimers.get(moduleId);
-    if (timer) {
-      clearTimeout(timer);
-      this.moduleKeyTimers.delete(moduleId);
-    }
     /* 模块锁定后其记录不再可解，渲染层不能继续持有任何明文副本：
      * 列表缓存、扫描/摘要/全量记录缓存都可能包含该模块条目。扫描游标
      * 一并重置，解锁后从零重扫，避免锁定窗口内的失败区段被增量跳过。
@@ -385,10 +362,6 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     for (const moduleId of MODULE_IDS) {
       this.keyState.moduleKeyReady.value[moduleId] = false;
     }
-    for (const timer of this.moduleKeyTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.moduleKeyTimers.clear();
   }
 
   /* ==================== 3. 记录扫描缓存（游标批量扫描） ==================== */
@@ -1447,8 +1420,7 @@ export class VerthysCacheDomain extends TypedEventEmitter<VerthysCacheEventMap> 
     // 先 await 后台任务完全终止（注入钩子），再清空缓存，
     // 杜绝「旧后台任务访问已释放缓存」的竞态
     await this.stopBackgroundTasksHook();
-    // 首先清零明文密钥（Uint8Array 安全零填充），
-    //   lockAll 统一清空入口的安全闭环（明文密钥不残留内存）
+    // 首先清空模块登录状态，lockAll 统一清空入口的安全闭环
     this.clearModuleKeyCache();
     this.clearSummaryCache();
     this.clearTypeIdCache();

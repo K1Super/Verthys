@@ -16,7 +16,7 @@ fn main() {
     /* 默认与 core/include/verthys_version.h 的 VERTHYS_API_VERSION 对齐；
      * 环境变量仅用于加载更高接口集的诊断构建。 */
     let api_version_text = std::env::var("VERTHYS_WORKER_API_VERSION")
-        .unwrap_or_else(|_| "0x0015".to_string());
+        .unwrap_or_else(|_| "0x0016".to_string());
     let api_version = api_version_text
         .trim()
         .strip_prefix("0x")

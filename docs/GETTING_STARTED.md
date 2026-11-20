@@ -84,8 +84,8 @@ Test-Path ".\verthys-tauri\src-tauri\target\release\bundle\nsis\*.exe"
 
 - 开发模式前端地址：`http://localhost:1420`（`verthys-tauri/src-tauri/tauri.conf.json` 的 `devUrl`）。
 - Vite 端口：`1420`，`strictPort: true`（`verthys-tauri/vite.config.ts`，HMR WebSocket 用 `1421`）。
-- 直接启动开发：在 `verthys-tauri/` 下执行 `npx tauri dev`（`build_dev.ps1` 末尾即此命令；它已处理残留进程与端口 1420 占用）。直接运行 `npx tauri dev` 不会设置 P2 开发旁路；本机未安装 `VerthysSecuritySvc` 时创建/解锁会按设计 fail-closed（`ERR_0000000A`）。生产 perMachine 安装包会随应用安装该服务。
-- 开发模式下核心二进制解析规则（`build_dev.ps1` 头注释）：`verthys.dll` 固定用 `build/core/Release/verthys.dll`（Release 测试钩子构建）；worker 优先用 `verthys-worker/target/{release,debug}/verthys-worker.exe`（release 优先）。
+- 直接启动开发：在 `verthys-tauri/` 下执行 `npx tauri dev`（`build_dev.ps1` 末尾即此命令；它已处理残留进程与端口 1420 占用）。Debug 宿主会向 worker 注入 `VERTHYS_TEST_MACHINE_LIMITER_BYPASS=1`，但该旁路只存在于 `VERTHYS_TEST_HOOKS=ON` 的核心产物中：dev 必须使用 `scripts/build/build_core.dev.ps1` 构建的 `build_dev` DLL，否则已安装的 `VerthysSecuritySvc` 会以 image-auth 拒绝未签名 dev worker，创建/解锁返回 `ERR_0000000A`。生产构建不包含该旁路，始终 fail-closed。
+- 开发模式下核心二进制解析规则（`path_resolver.rs`）：Debug 宿主优先 `build_dev/core/Debug/verthys.dll`（caller-auth OFF、test-hooks ON、强制隔离 OFF），缺失时回退 `build/core/Release/verthys.dll`；worker 优先 `verthys-worker/target/debug/verthys-worker.exe`。Release 宿主仍优先 `build/core/Release` 与 `target/release`。dev 构建不设置 `VERTHYS_TEST_STATE_DIR` 时使用真实用户状态，用于打开/创建实际容器；自动化测试构建（`-RequireTestIsolation`）缺少隔离目录会拒绝初始化。
 - P2 服务是生产强制依赖。开发机若残留旧版 P1 熔断状态（如 `%LOCALAPPDATA%\Verthys\Security\lockout.state` 为 v2/379 字节），当前 v3 代码按损坏 fail-closed；项目无旧版用户，直接归档该文件后重试，不提供迁移路径。
 
 ## 4. 常见首次构建问题

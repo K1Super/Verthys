@@ -22,6 +22,19 @@ pub(crate) struct BatchAddRecord {
     pub(crate) data: Zeroizing<String>,
 }
 
+/// 暂存块提交的单条引用（仅 add_records_staged 消费）。
+///
+/// 密文不出 worker：本结构只携带定位信息，worker 用 job_id + chunk_key
+/// 从导入 job 的暂存区取出密文，并以 chunk_hash 复核内容。
+#[derive(Deserialize)]
+pub(crate) struct StagedAddRecord {
+    pub(crate) rtype: u32,
+    pub(crate) name: String,
+    pub(crate) job_id: String,
+    pub(crate) chunk_key: String,
+    pub(crate) chunk_hash: String,
+}
+
 /// 口令/记录明文字段统一使用 Zeroizing<String>：
 /// Drop 时自动 volatile 清零堆缓冲，主循环 line 缓冲与请求字段
 /// 的口令明文在处理完成后不驻留内存。
@@ -60,6 +73,9 @@ pub(crate) struct Request {
     /// 批量写入记录列表（仅 add_records 消费；单次上限由 dispatch 校验）
     #[serde(default)]
     pub(crate) records: Vec<BatchAddRecord>,
+    /// 暂存块引用列表（仅 add_records_staged 消费；密文留在 worker 暂存区）
+    #[serde(default)]
+    pub(crate) staged_records: Vec<StagedAddRecord>,
     // 枚举/扫描批量上限（enumerate_records / scan_open / scan_summary_open）：
     // 0 = 使用各操作缺省值。与 rtype（记录类型）语义分离——曾共用 rtype
     // 字段承载"批量上限"，同名字段双语义导致调用点可读性差，现拆分。
@@ -85,6 +101,13 @@ pub(crate) struct Request {
     // 0x01 = 索引区已预热，0x02 = 允许加载持久化缓存
     #[serde(default)]
     pub(crate) flags: u32,
+    /// 回退锚点释放目标 UUID（32 位十六进制；仅 rollback_anchor_release 消费）
+    #[serde(default)]
+    pub(crate) uuid: String,
+    /// 回退锚点释放/回收的显式确认（仅 rollback_anchor_* 消费）。
+    /// 与模块删除的字符串 confirm 字段分离，避免类型与语义冲突。
+    #[serde(default)]
+    pub(crate) anchor_confirm: bool,
     /// 父进程心跳事件句柄值（仅 arm_heartbeat 消费；该句柄由父进程
     /// DuplicateHandle 注入 worker 进程，worker 只调用 SetEvent）。
     #[serde(default)]
@@ -141,6 +164,10 @@ pub(crate) struct Request {
     /// 批量路径授权列表（仅 authorize_path_batch 消费）
     #[serde(default)]
     pub(crate) paths: Vec<String>,
+    /// 宿主 WAL 已提交的条目键（仅 photo_import_job_begin 消费）。
+    /// 缺省为空集：旧宿主不传时退化为逐文件解码后去重。
+    #[serde(default)]
+    pub(crate) committed_entry_keys: Vec<String>,
     /// 照片导入完成时回填的块记录 ID（仅 photo_import_job_finish 消费）
     #[serde(default)]
     pub(crate) chunk_ids: Vec<u64>,
@@ -182,6 +209,16 @@ impl Drop for RecordEntry {
         self.name.zeroize();
         self.data.zeroize();
     }
+}
+
+/// 回退锚点条目（仅 rollback_anchor_list 返回）。
+/// 只含公开定位信息与见证状态，不含指纹、路径或任何密钥材料。
+#[derive(Serialize)]
+pub(crate) struct AnchorEntry {
+    pub(crate) uuid: String,
+    pub(crate) generation: u64,
+    /// unknown / active / dead / tampered
+    pub(crate) witness: String,
 }
 
 /* 防御闭环状态报告（与 verthys.h
@@ -232,9 +269,10 @@ pub(crate) struct MediaNextPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) chunk_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) chunk_b64: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) chunk_hash: Option<String>,
+    /// true=密文已进入 worker 暂存区，响应不携带块密文
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chunk_staged: Option<bool>,
     #[serde(default)]
     pub(crate) file_done: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -331,6 +369,12 @@ pub(crate) struct MediaReadPayload {
     /// 展示字节（预览 JPEG 或原图明文块，base64）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) data_b64: Option<String>,
+    /// 原图明文块的共享内存名称（存在时宿主改读 SHM，data_b64 为空）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shm_name: Option<String>,
+    /// 共享内存中的明文载荷长度（字节）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shm_len: Option<u64>,
     /// 预览是否直接命中已落库记录（false/缺省表示本次新生成）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) preview_cached: Option<bool>,
@@ -420,6 +464,21 @@ pub(crate) struct Response {
     /// 防御闭环 7 路径状态（仅 security_status 操作返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) security_status: Option<SecurityStatusReport>,
+    /// 回退锚点列表（仅 rollback_anchor_list 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) anchors: Option<Vec<AnchorEntry>>,
+    /// 状态文件整体状态（0=absent/1=ok/2=corrupt，仅 rollback_anchor_list 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) anchor_state: Option<u32>,
+    /// 回收条数（仅 rollback_anchor_reclaim 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) anchor_removed: Option<u32>,
+    /// 释放条数（仅 rollback_anchor_release 返回；1=删除，0=幂等未命中）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) anchor_released: Option<u32>,
+    /// 见证清理失败条数（仅 rollback_anchor_reclaim/release 返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) anchor_cleanup_failed: Option<u32>,
     /// 批内解密失败/索引不一致的记录 ID（仅 scan_open / scan_fetch 返回）
     ///
     /// C 层按 lid 记账失败条目（不静默丢弃），worker 以本字段透传；上游
@@ -555,9 +614,6 @@ impl Response {
             record.data_b64.zeroize();
         }
         if let Some(photo) = self.photo.as_mut() {
-            if let Some(data) = photo.chunk_b64.as_mut() {
-                data.zeroize();
-            }
             if let Some(thumb) = photo.thumb_b64.as_mut() {
                 thumb.zeroize();
             }
@@ -607,6 +663,11 @@ impl Response {
             global_key_id: None,
             global_key_record: None,
             security_status: None,
+            anchors: None,
+            anchor_state: None,
+            anchor_removed: None,
+            anchor_released: None,
+            anchor_cleanup_failed: None,
             failed_ids: None,
             ids: Vec::new(),
             status_code: None,
@@ -689,6 +750,7 @@ impl Response {
         const VERTHYS_ERR_NO_SPACE: u32 = 0x0000001E;
         const VERTHYS_ERR_VERIFY: u32 = 0x0000001F;
         const VERTHYS_ERR_SECURITY_STATE: u32 = 0x00000020;
+        const VERTHYS_ERR_ANCHOR_FULL: u32 = 0x00000021;
 
         let unified_code = match code {
             VERTHYS_ERR_INVALID
@@ -716,7 +778,8 @@ impl Response {
             | VERTHYS_ERR_MODULE_LOCKED
             | VERTHYS_ERR_NO_SPACE
             | VERTHYS_ERR_VERIFY
-            | VERTHYS_ERR_SECURITY_STATE => code,
+            | VERTHYS_ERR_SECURITY_STATE
+            | VERTHYS_ERR_ANCHOR_FULL => code,
             // AUTH(0x02)/FORMAT(0x05)/IO(0x08)/CORRUPT(0x09)/INTERNAL(0xFFFFFFFF)
             // 及未知码全部统一为 AUTH（反信息泄露）
             _ => VERTHYS_ERR_AUTH,
@@ -741,6 +804,11 @@ impl Response {
             global_key_id: None,
             global_key_record: None,
             security_status: None,
+            anchors: None,
+            anchor_state: None,
+            anchor_removed: None,
+            anchor_released: None,
+            anchor_cleanup_failed: None,
             failed_ids: None,
             ids: Vec::new(),
             status_code: None,
@@ -776,6 +844,17 @@ impl Response {
             photo_previews: None,
             found: None,
         }
+    }
+
+    /// 原样保留错误码的响应（仅用于锚点维护接口）。
+    ///
+    /// 容器解锁路径的反 Oracle 折叠不适用于维护面板：状态文件损坏(0x09)、
+    /// IO(0x08)、调用方未授权(0x16) 等都是可行动的维护错误，折叠为 AUTH
+    /// 会让 UI 无法区分“状态文件损坏”和“口令错误”。
+    pub(crate) fn err_raw(op: &str, code: u32) -> Self {
+        let mut resp = Self::err(op, code);
+        resp.error = Some(format!("ERR_{:08X}", code));
+        resp
     }
 
     /// 锁定/限流错误响应：附建议等待秒数（仅 0x0A / 0x1D 路径使用）。
@@ -1034,6 +1113,23 @@ mod tests {
         assert_eq!(tpm.error.as_deref(), Some("ERR_00000018"));
         let rollback = Response::err("unlock", 0x00000019);
         assert_eq!(rollback.error.as_deref(), Some("ERR_00000019"));
+    }
+
+    // 锚点表满必须保留 0x21：UI 需要展示容量与维护入口，不能误报为回退。
+    #[test]
+    fn anchor_full_error_not_collapsed_to_auth() {
+        let full = Response::err("v4_create", 0x00000021);
+        assert_eq!(full.error.as_deref(), Some("ERR_00000021"));
+    }
+
+    // 锚点维护接口的可行动错误（IO/损坏/未授权/TPM/容量）必须原样透传。
+    #[test]
+    fn anchor_admin_errors_preserve_actionable_codes() {
+        for code in [0x00000008u32, 0x00000009, 0x00000016, 0x00000018, 0x00000021] {
+            let resp = Response::err_raw("rollback_anchor_list", code);
+            let expected = format!("ERR_{:08X}", code);
+            assert_eq!(resp.error.as_deref(), Some(expected.as_str()));
+        }
     }
 
     // 轮换作业错误必须保留原码：调用方需要区分“作业进行中/模块未解锁/

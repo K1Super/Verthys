@@ -3,7 +3,7 @@
    包含：
      - .security-dashboard 容器 + 环境氛围层（performance/balanced/secure）
      - .bs-field       双星引力场（扫掠弧星体 + 质心节点）
-     - .bs-track       预设谱轨（裸能量丝线 + 菱形锚点 + 渡越体）
+     - .bs-track       预设谱轨（裸能量丝线 + 正方形锚点 + 渡越体）
      - .cus-board      自定义防护（常驻分区：端子排开关 + 时长拖拽虚线）
      - .cap-board      安全防护栏（核心防护清单 · 双列错位端子排）
      - .def-board      动态防护端子排诊断（7 攻击路径 × 四态语义色）
@@ -171,7 +171,7 @@
   color: var(--text-muted);
 }
 
-/* 质心：垂直丝线 + 菱形界标 + 综合评分 */
+/* 质心：垂直丝线 + 正方形界标 + 综合评分 */
 .bs-barycenter {
   position: relative;
   display: flex;
@@ -193,7 +193,7 @@
   gap: 3px;
   padding: 12px 16px;
 }
-/* 菱形界标（旋转 45° 细描边方块，非闭合圆环） */
+/* 正方形界标（旋转 45° 细描边方块，非闭合圆环） */
 .bs-bc-node::before {
   content: "";
   position: absolute;
@@ -619,7 +619,7 @@
   align-items: baseline;
   gap: 11px;
 }
-/* 空心菱形徽记 */
+/* 空心正方形徽记 */
 .cap-glyph {
   width: 6px;
   height: 6px;

@@ -11,9 +11,11 @@
 #ifndef VERTHYS_VERSION_H
 #define VERTHYS_VERSION_H
 
-/* 0x0015：新增 Verthys_FindLidByName（名称盲索引精确查 ID）。
- * 隔离原型构建的 BulkImportBegin/Commit 不改变接口集版本号。 */
-#define VERTHYS_API_VERSION 0x0015u
+/* 0x0016：新增回退锚点维护接口（List / Reclaim / Release）。
+ * 0x0015：新增 Verthys_FindLidByName（名称盲索引精确查 ID）。
+ * BulkImportBegin/Commit 与 ListAllLids 属于 0x0015 接口集的可选能力：
+ * 宿主按符号探测，缺失即回退既有路径，因此不参与版本门。 */
+#define VERTHYS_API_VERSION 0x0016u
 #define VERTHYS_CONTAINER_FORMAT_VERSION 4u
 
 #endif /* VERTHYS_VERSION_H */

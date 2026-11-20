@@ -18,15 +18,15 @@
     :show="show"
     width="400px"
     role="alertdialog"
-    initial-focus=".kv-cancel"
+    initial-focus=".btn-neutral"
     aria-labelledby="cd-confirm-title"
     @close="onCancel"
   >
     <div class="kv-title" id="cd-confirm-title">{{ title }}</div>
     <div class="kv-desc">{{ desc }}</div>
     <div class="kv-actions">
-      <button class="btn kv-cancel" type="button" @click="onCancel">取消</button>
-      <button class="btn kv-confirm kv-danger" type="button" @click="onConfirm">
+      <button class="btn btn-neutral btn-compact" type="button" @click="onCancel">取消</button>
+      <button class="btn btn-destructive btn-compact" type="button" @click="onConfirm">
         确认删除
       </button>
     </div>

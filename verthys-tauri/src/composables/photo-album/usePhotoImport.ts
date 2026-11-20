@@ -83,6 +83,9 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
   const importStatus = ref("");
   /* ===== 新增：耗时（供 QuantumProgressFlow 使用） ===== */
   const importElapsed = ref(0);
+  /** 当前正在处理的照片序号（1-based）与总数；仅导入阶段有值 */
+  const importCurrent = ref(0);
+  const importTotal = ref(0);
 
   /* ===== 导入流程阶段状态机（跨 await 边界的重入守卫权威） ===== */
   const phase = ref<ImportPhase>({ kind: "idle" });
@@ -123,6 +126,8 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
         importStatus.value = "";
         importProgress.value = 0;
         importElapsed.value = 0;
+        importCurrent.value = 0;
+        importTotal.value = 0;
       }
     }, 1500);
   };
@@ -152,7 +157,7 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
     }, ACQUIRE_TIMEOUT_MS);
 
     try {
-      // 模块密钥超时锁定后提示用户返回重新解锁（15min 内 ensurePhotoKey 从缓存恢复，不触发）
+      // 模块密钥随全局空闲锁定失效后提示重新解锁（锁定前 ensurePhotoKey 直接命中缓存）
       if (!ensurePhotoKey()) {
         showError("拾光模块已锁定，请返回重新解锁");
         return;
@@ -242,6 +247,11 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
       const epoch = ++epochCounter;
       phase.value = { kind: "running", epoch };
       importing.value = true;
+      importProgress.value = 0;
+      importElapsed.value = 0;
+      importCurrent.value = 0;
+      importTotal.value = 0;
+      importStatus.value = "正在准备导入";
 
       if (isTauri) {
         // ===== Tauri 模式：worker 原生导入 =====
@@ -253,11 +263,22 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
               if (disposed) return;
               importProgress.value = p.percent;
               importElapsed.value = p.elapsedMs;
-              if (p.phase === "scanning") importStatus.value = "正在读取并加密照片…";
-              else if (p.phase === "importing") {
-                const chunk = p.totalChunks > 0 ? `（${p.currentChunk}/${p.totalChunks}）` : "";
-                importStatus.value = `正在导入 ${p.currentName}${chunk} · ${p.doneFiles}/${p.totalFiles}`;
-              } else if (p.phase === "finishing") importStatus.value = "正在写入剩余记录…";
+              if (p.phase === "scanning") {
+                importCurrent.value = 0;
+                importTotal.value = 0;
+                importStatus.value = "正在读取并加密照片";
+              } else if (p.phase === "importing") {
+                /* 当前正在处理第 done+1 张，最多到总数；计数由专属排版承载，
+                 * importStatus 只保留阶段语义，避免重复拼接。 */
+                importTotal.value = p.totalFiles;
+                importCurrent.value =
+                  p.totalFiles > 0 ? Math.min(p.doneFiles + 1, p.totalFiles) : 0;
+                importStatus.value = "正在导入";
+              } else if (p.phase === "finishing") {
+                /* 保留最终计数（N/N），只切换阶段语义，避免布局突跳 */
+                importCurrent.value = importTotal.value;
+                importStatus.value = "正在写入剩余记录";
+              }
             });
           } finally {
             nativeActive = false;
@@ -321,8 +342,17 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
             replaceShallowArray(photos, sortByMetaId(photos.value));
           }
 
-          if (result.skipped > 0) {
-            importStatus.value = `完成：导入 ${result.imported.length} 张，去重跳过 ${result.skipped} 张`;
+          /* 去重跳过必须显式反馈：仅改写状态文案时用户会认为导入静默失效，
+           * 无法区分“已存在”与“功能损坏”。 */
+          if (result.skipped > 0 && !result.error && !result.cancelled) {
+            const importedCount = result.imported.length;
+            importStatus.value =
+              `完成：导入 ${importedCount} 张，重复跳过 ${result.skipped} 张`;
+            (showToast ?? showError)(
+              importedCount > 0
+                ? `导入完成：新增 ${importedCount} 张，${result.skipped} 张已在相册中（重复跳过）`
+                : `未导入新照片：所选 ${result.skipped} 张均已在相册中（重复跳过）`,
+            );
           }
 
           // 同步模块缓存：导入后立即更新缓存，防止切走再切回时 loadPhotos 用旧缓存覆盖
@@ -341,7 +371,9 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
           const { name: fileName, readBytes } = filesToProcess[i];
           const file = browserFiles[i];
           importProgress.value = Math.round((i / filesToProcess.length) * 100);
-          importStatus.value = `读取 ${fileName}…`;
+          importTotal.value = filesToProcess.length;
+          importCurrent.value = i + 1;
+          importStatus.value = "正在导入";
 
           // 单文件硬上限：与 Tauri 流水线同源常量，读前按 File.size 拒绝，
           // 越限文件不进入内存读取（输入全校验，Tauri/浏览器两路径口径一致）
@@ -419,6 +451,9 @@ export function usePhotoImport(deps: UsePhotoImportDeps) {
     importStatus,
     /* 新增：耗时（供 QuantumProgressFlow 使用） */
     importElapsed,
+    /* 新增：导入阶段当前序号/总数（供进度条下方遥测排版使用） */
+    importCurrent,
+    importTotal,
     onImport,
     abortImport,
   };

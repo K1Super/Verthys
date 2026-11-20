@@ -95,6 +95,7 @@ use controller::diag_controller::*;
 use controller::file_controller::*;
 use controller::key_controller::*;
 use controller::pcr_controller::*;
+use controller::rollback_anchor_controller::*;
 use controller::keyfile_controller::*;
 use controller::module_controller::*;
 use controller::photo_media_controller::*;
@@ -646,6 +647,11 @@ fn run_main_ui(
             verthys_import,
             // 防御闭环状态查询（7 路径 × 4 状态实时透传）
             verthys_security_status,
+            // 回退锚点维护：列表 / DEAD 回收 / 显式释放 / 容器扫描
+            verthys_rollback_anchor_list,
+            verthys_rollback_anchor_reclaim,
+            verthys_rollback_anchor_release,
+            verthys_rollback_anchor_scan,
             // 系统运行指标采样（CPU 占用率真实差分，安全防护面板数据源）
             security_commands::verthys_system_snapshot,
             // 系统启动时刻（每次开机一次首映、其余启动直接进入的判定信号）

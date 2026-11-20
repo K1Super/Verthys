@@ -53,7 +53,8 @@ export interface VaultDetailSection {
  * @param field 字段定义
  * @param data 条目数据
  * @param def 类型定义（取主标题与独立加密标记）
- * @returns 详情行；该字段不应出现在详情中（transient / 主标题 / 空值）时返回 null
+ * @returns 详情行；该字段不应出现在详情中（transient / 主标题 / 空值 /
+ *          关闭的开关）时返回 null
  *
  * 主标题由详情窗口头部承担，不在字段列表重复；transient 字段（独立密钥）
  * 只在编辑窗口采集，详情窗口不得回显。空值字段不占行 —— 详情展示的是
@@ -71,12 +72,14 @@ function buildDetailField(
   const encrypted = data.encrypted === "1";
   const isExpiry = field.id === VAULT_EXPIRY_FIELD_ID;
 
-  // 选项开关是状态而非文本：始终展示「已开启 / 未开启」
+  /* 开关只呈现开启态：关闭态是「未设置」，在只读详情里没有信息量，
+     不为其占一行；编辑窗口仍完整展示开关本身。 */
   if (field.kind === "switch") {
+    if (raw !== "1") return null;
     return {
       fieldId: field.id,
       label: field.label,
-      value: raw === "1" ? "已开启" : "未开启",
+      value: "已开启",
       sensitive: false,
       multiline: false,
       encrypted: false,

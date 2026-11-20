@@ -42,6 +42,8 @@ static int not_found_status(SECURITY_STATUS st)
 static volatile LONG g_test_fail_delete = 0;
 static volatile LONG g_test_fail_create = 0;
 static volatile LONG g_test_crash_after_create = 0;
+static volatile LONG g_test_exists_override = -2;
+static volatile LONG g_test_probe_override = -1;
 
 /* 原子取走一次注入；count<=0 表示不注入。 */
 static int test_take_fail(volatile LONG *counter)
@@ -62,6 +64,18 @@ void vty_tpm_witness_set_delete_fail_for_test(int count)
 void vty_tpm_witness_set_create_fail_for_test(int count)
 {
     InterlockedExchange(&g_test_fail_create, (LONG)count);
+}
+
+void vty_tpm_witness_set_exists_override_for_test(int value)
+{
+    if (value < -2 || value > 1) value = -2;
+    InterlockedExchange(&g_test_exists_override, (LONG)value);
+}
+
+void vty_tpm_witness_set_probe_override_for_test(int state)
+{
+    if (state < -1 || state > 3) state = -1;
+    InterlockedExchange(&g_test_probe_override, (LONG)state);
 }
 
 void vty_tpm_witness_set_crash_after_create_for_test(int enable)
@@ -209,6 +223,53 @@ int vty_tpm_witness_verify(const uint8_t id[VTY_UUID_BYTES], uint8_t slot,
     return rc;
 }
 
+int vty_tpm_witness_probe(const uint8_t id[VTY_UUID_BYTES], uint8_t slot,
+                          const uint8_t expected[VTY_TPM_WITNESS_FP_BYTES],
+                          VtyWitnessProbe *out_state)
+{
+    NCRYPT_PROV_HANDLE prov = 0;
+    NCRYPT_KEY_HANDLE key = 0;
+    wchar_t name[WIT_NAME_CHARS];
+    uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
+    SECURITY_STATUS st;
+    VtyWitnessProbe state = VTY_WITNESS_PROBE_UNKNOWN;
+
+    if (id == NULL || expected == NULL || out_state == NULL ||
+        slot >= VTY_TPM_WITNESS_SLOTS) {
+        return VTY_E_INVALID;
+    }
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    {
+        LONG override = InterlockedCompareExchange(&g_test_probe_override, 0, 0);
+        if (override >= 0 && override <= 3) {
+            *out_state = (VtyWitnessProbe)override;
+            return VTY_OK;
+        }
+    }
+#endif
+    wit_name(id, slot, name);
+    if (NCryptOpenStorageProvider(&prov, MS_PLATFORM_KEY_STORAGE_PROVIDER, 0) != 0) {
+        *out_state = VTY_WITNESS_PROBE_UNKNOWN;
+        return VTY_OK;
+    }
+    st = NCryptOpenKey(prov, &key, name, 0, 0);
+    if (st == 0) {
+        memset(fp, 0, sizeof(fp));
+        if (witness_fp(key, fp) == VTY_OK) {
+            state = (vty_ct_equal(fp, expected, VTY_TPM_WITNESS_FP_BYTES) == 0)
+                        ? VTY_WITNESS_PROBE_ACTIVE
+                        : VTY_WITNESS_PROBE_TAMPERED;
+        }
+        vty_secure_zero(fp, sizeof(fp));
+        NCryptFreeObject(key);
+    } else if (not_found_status(st)) {
+        state = VTY_WITNESS_PROBE_MISSING;
+    }
+    NCryptFreeObject(prov);
+    *out_state = state;
+    return VTY_OK;
+}
+
 int vty_tpm_witness_exists(const uint8_t id[VTY_UUID_BYTES], uint8_t slot)
 {
     NCRYPT_PROV_HANDLE prov = 0;
@@ -217,6 +278,12 @@ int vty_tpm_witness_exists(const uint8_t id[VTY_UUID_BYTES], uint8_t slot)
     SECURITY_STATUS st;
 
     if (id == NULL || slot >= VTY_TPM_WITNESS_SLOTS) return -1;
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    {
+        LONG override = InterlockedCompareExchange(&g_test_exists_override, 0, 0);
+        if (override >= -1 && override <= 1) return (int)override;
+    }
+#endif
     wit_name(id, slot, name);
     if (NCryptOpenStorageProvider(&prov, MS_PLATFORM_KEY_STORAGE_PROVIDER, 0) != 0) {
         return -1;

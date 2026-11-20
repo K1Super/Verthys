@@ -273,6 +273,15 @@ fn digest_hex(bytes: &[u8; 32]) -> String {
     out
 }
 
+/// UUID 转小写十六进制（32 字符，仅用于锚点列表展示）。
+fn uuid_hex(uuid: &[u8; 16]) -> String {
+    let mut out = String::with_capacity(32);
+    for byte in uuid {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    out
+}
+
 /// 在 `Library::new` 之前校验 DLL 的路径归属与全文件摘要。
 ///
 /// 契约：
@@ -422,7 +431,7 @@ impl Worker {
              * VerthysContainerInfo 前 8 字节——该头部在任何容器状态均可读，
              * stateless 且无副作用。预检失败时进程随即退出，已初始化句柄
              * 由进程回收，无驻留窗口。
-             * 版本常量由 build.rs 生成：默认 0x0015，可用
+             * 版本常量由 build.rs 生成：默认 0x0016，可用
              * VERTHYS_WORKER_API_VERSION 显式抬高。 */
             let get_info: Symbol<VerthysGetContainerInfoFn> =
                 lib.get(b"Verthys_GetContainerInfo").map_err(|e| {
@@ -1232,6 +1241,41 @@ impl Worker {
                 func(
                     self.handle,
                     rtype,
+                    after_id,
+                    max_count,
+                    out_ids.as_mut_ptr(),
+                    out_count as *mut u64,
+                    out_exhausted as *mut u8,
+                )
+            })
+            .unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    /// 全量存活记录 ID 枚举（目录叶迭代，可选符号）。
+    ///
+    /// 不读取记录段、不解密名称，与模块锁定状态无关；旧 DLL 缺符号时
+    /// 返回 VERTHYS_SYMBOL_UNSUPPORTED，由宿主跳过收敛（保守保留去重键）。
+    pub(crate) fn call_list_all_lids(
+        &self,
+        after_id: u64,
+        max_count: u64,
+        out_ids: &mut [u64],
+        out_count: &mut u64,
+        out_exhausted: &mut u8,
+    ) -> u32 {
+        if max_count == 0u64 || (out_ids.len() as u64) < max_count {
+            return 0xFFFFFFFF;
+        }
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysListAllLidsFn> = match lib.get(b"Verthys_ListAllLids") {
+                Ok(f) => f,
+                Err(_) => return VERTHYS_SYMBOL_UNSUPPORTED,
+            };
+            ffi_call(|| {
+                func(
+                    self.handle,
                     after_id,
                     max_count,
                     out_ids.as_mut_ptr(),
@@ -2264,6 +2308,124 @@ impl Worker {
             policy_flags: st.policy_flags,
             checked_at_unix_ms: st.checked_at_unix_ms,
         })
+    }
+
+    /* ================================================================ *
+     * 回退锚点维护（API 0x0016）                                       *
+     * ================================================================ */
+
+    /// 列出本机回退锚点。返回值：(条目, 状态文件状态)。
+    /// 状态：0=absent / 1=ok / 2=corrupt（corrupt 由 C 层返回错误码，
+    /// 不会走到 Ok 分支）。
+    pub(crate) fn call_anchor_list(
+        &self,
+    ) -> Result<(Vec<crate::runtime::protocol::AnchorEntry>, u32), u32> {
+        const CAP: usize = 64;
+        let mut raw: Vec<VerthysAnchorInfoC> = Vec::with_capacity(CAP);
+        for _ in 0..CAP {
+            raw.push(VerthysAnchorInfoC {
+                struct_size: std::mem::size_of::<VerthysAnchorInfoC>() as u32,
+                uuid: [0u8; 16],
+                generation: 0,
+                witness_state: 0,
+                reserved: 0,
+            });
+        }
+        let mut count: u32 = 0;
+        let mut state: u32 = 0;
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysRollbackAnchorListFn> =
+                match lib.get(b"Verthys_RollbackAnchorList") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let rc = ffi_call(|| {
+                func(
+                    self.handle,
+                    raw.as_mut_ptr(),
+                    CAP as u32,
+                    &mut count,
+                    &mut state,
+                )
+            })
+            .unwrap_or(0xFFFFFFFF);
+            if rc != VERTHYS_OK {
+                return Err(rc);
+            }
+        }
+        if count as usize > CAP {
+            return Err(0x0000000F); // RESOURCE_LIMIT：C 层保证不会发生
+        }
+        let mut entries = Vec::with_capacity(count as usize);
+        for entry in raw.iter().take(count as usize) {
+            let witness = match entry.witness_state {
+                1 => "active",
+                2 => "dead",
+                3 => "tampered",
+                _ => "unknown",
+            };
+            entries.push(crate::runtime::protocol::AnchorEntry {
+                uuid: uuid_hex(&entry.uuid),
+                generation: entry.generation,
+                witness: witness.to_string(),
+            });
+        }
+        Ok((entries, state))
+    }
+
+    /// 回收所有 DEAD 锚点。返回值：(删除条数, 见证清理失败条数)。
+    pub(crate) fn call_anchor_reclaim(&self, flags: u32) -> Result<(u32, u32), u32> {
+        let mut removed: u32 = 0;
+        let mut cleanup_failed: u32 = 0;
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysRollbackAnchorReclaimFn> =
+                match lib.get(b"Verthys_RollbackAnchorReclaim") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let rc = ffi_call(|| {
+                func(self.handle, flags, &mut removed, &mut cleanup_failed)
+            })
+            .unwrap_or(0xFFFFFFFF);
+            if rc != VERTHYS_OK {
+                return Err(rc);
+            }
+        }
+        Ok((removed, cleanup_failed))
+    }
+
+    /// 显式释放指定锚点。返回值：(是否删除, 见证清理失败条数)。
+    pub(crate) fn call_anchor_release(
+        &self,
+        uuid: &[u8; 16],
+        flags: u32,
+    ) -> Result<(u32, u32), u32> {
+        let mut released: u32 = 0;
+        let mut cleanup_failed: u32 = 0;
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysRollbackAnchorReleaseFn> =
+                match lib.get(b"Verthys_RollbackAnchorRelease") {
+                    Ok(f) => f,
+                    Err(_) => return Err(0xFFFFFFFF),
+                };
+            let rc = ffi_call(|| {
+                func(
+                    self.handle,
+                    uuid.as_ptr(),
+                    flags,
+                    &mut released,
+                    &mut cleanup_failed,
+                )
+            })
+            .unwrap_or(0xFFFFFFFF);
+            if rc != VERTHYS_OK {
+                return Err(rc);
+            }
+        }
+        Ok((released, cleanup_failed))
     }
 
     /// 合并并下发运行时守卫位（完整掩码语义）。

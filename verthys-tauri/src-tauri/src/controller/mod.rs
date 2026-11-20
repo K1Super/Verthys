@@ -33,6 +33,8 @@ pub mod vault_rotate_controller;
 pub mod preflight_controller;
 /// 防截屏隐私保护（窗口捕获排除）：凭证槽位 / 原子应用与还原 / 隔离与对账 / 启动序列
 pub mod privacy_controller;
+/// 回退锚点维护：列表 / 回收 / 释放 / 容器扫描
+pub mod rollback_anchor_controller;
 pub mod scan_controller;
 pub mod types;
 /// 照片导入异步批处理流水线 — 批量控制器

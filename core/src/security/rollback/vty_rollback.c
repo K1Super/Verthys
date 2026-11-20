@@ -20,10 +20,7 @@
 #include "vty_kdf.h"
 #include "vty_device_root.h"
 #include "vty_tpm_witness.h"
-
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
 #include "vty_witness_pool.h"
-#endif
 
 #include <windows.h>
 #include <string.h>
@@ -60,6 +57,23 @@ static char g_state_path[VTY_SECURE_STATE_PATH_BYTES];
 static int g_test_path = 0;
 static int g_initialized = 0;
 static int g_enabled = 1;
+
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+static uint32_t g_test_max_entries = 0;
+#endif
+
+/* 逻辑容量：生产固定 64；测试构建可缩小以覆盖容量分支。
+ * 状态文件的物理布局始终按 VTY_ROLLBACK_MAX_ENTRIES 解释。 */
+static uint32_t rb_max_entries(void)
+{
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    if (g_test_max_entries > 0 &&
+        g_test_max_entries <= VTY_ROLLBACK_MAX_ENTRIES) {
+        return g_test_max_entries;
+    }
+#endif
+    return VTY_ROLLBACK_MAX_ENTRIES;
+}
 
 void vty_rollback_set_enabled(int enabled)
 {
@@ -111,6 +125,13 @@ static int resolve_paths(void)
             g_test_env_hook = 1;
             return VTY_OK;
         }
+#if defined(VERTHYS_TEST_REQUIRE_ISOLATION) && VERTHYS_TEST_REQUIRE_ISOLATION
+        /* 自动化测试构建缺少隔离目录时拒绝运行：绝不回落到生产状态目录。 */
+        return VTY_E_POLICY;
+#else
+        /* dev 构建的测试钩子只用于机器预算旁路，同时必须能操作用户真实
+         * 容器；测试入口自行注入隔离目录，因此这里允许回落到生产路径。 */
+#endif
     }
 #endif
     rc = vty_secure_state_file_path("rollback.state", g_state_path,
@@ -119,6 +140,7 @@ static int resolve_paths(void)
     return VTY_OK;
 }
 
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
 int vty_rollback_set_path_for_test(const char *path)
 {
     size_t len;
@@ -128,11 +150,18 @@ int vty_rollback_set_path_for_test(const char *path)
     if (len == 0 || len >= sizeof(g_state_path)) return VTY_E_INVALID;
     memcpy(g_state_path, path, len + 1);
     g_test_path = 1;
-#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
     g_test_env_hook = 0;
-#endif
     return VTY_OK;
 }
+#else
+/* 生产构建保留同名桩：测试工具仍可链接，但任何路径覆盖都被拒绝，
+ * 生产 DLL 不能在运行期被改写状态目录。 */
+int vty_rollback_set_path_for_test(const char *path)
+{
+    (void)path;
+    return VTY_E_POLICY;
+}
+#endif
 
 #if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
 /* 若测试环境在首次默认解析之后才注入状态目录，把已解析的默认路径
@@ -332,8 +361,10 @@ static int load_authenticated(uint8_t buf[RB_TOTAL_BYTES], int *is_new)
     return (rc == VTY_OK) ? VTY_OK : VTY_E_ROLLBACK;
 }
 
-/* 按当前布局写入；调用前缓冲必须已是当前布局 */
-static int store(uint8_t buf[RB_TOTAL_BYTES])
+/* 按当前布局写入；返回底层原始错误码。commit/check 路径必须使用
+ * store() 包装，把任何写入失败折叠为 fail-closed 的 VTY_E_ROLLBACK；
+ * 维护接口使用本函数，以便把状态读写失败与“文件回退”区分开。 */
+static int store_state(uint8_t buf[RB_TOTAL_BYTES])
 {
     uint8_t key[RB_KEY_BYTES];
     uint8_t mac[RB_MAC_BYTES];
@@ -364,7 +395,12 @@ static int store(uint8_t buf[RB_TOTAL_BYTES])
     }
     vty_secure_zero(key, sizeof(key));
     vty_secure_zero(mac, sizeof(mac));
-    return rc == VTY_OK ? VTY_OK : VTY_E_ROLLBACK;
+    return rc;
+}
+
+static int store(uint8_t buf[RB_TOTAL_BYTES])
+{
+    return store_state(buf) == VTY_OK ? VTY_OK : VTY_E_ROLLBACK;
 }
 
 static int find_entry(const uint8_t buf[RB_TOTAL_BYTES],
@@ -393,6 +429,109 @@ static uint64_t entry_gen(const uint8_t *e)
 static int entry_witness_valid(const uint8_t *e)
 {
     return e[RB_ENTRY_WITNESS_OFFSET] < VTY_TPM_WITNESS_SLOTS;
+}
+
+/* 待清理的 DEAD 锚点 UUID 列表。只在持锁调用链内使用，容量固定 64，
+ * 不分配堆内存。 */
+typedef struct {
+    uint8_t uuids[VTY_ROLLBACK_MAX_ENTRIES][VTY_UUID_BYTES];
+    uint32_t count;
+} rb_dead_list;
+
+/* 分类快照：锁内只复制条目，解锁后再做 TPM 探测，避免维护列表
+ * 长时间占用跨进程状态互斥量。 */
+typedef struct {
+    uint8_t  uuid[VTY_UUID_BYTES];
+    uint64_t generation;
+    uint8_t  slot;
+    uint8_t  fp[VTY_TPM_WITNESS_FP_BYTES];
+} rb_probe_entry;
+
+/* 在已加载、已认证的状态缓冲内压缩 DEAD 条目。
+ *
+ * 只把“引用槽确定不存在（exists==0）”的条目移出；滚动查询返回 -1、
+ * 条目字段非法、或键存在但指纹不符（TAMPERED）一律保留。函数只修改
+ * 内存缓冲，不写盘、不删键；调用方必须在成功 store 后才清理见证，
+ * 从而保证“状态未落盘时绝不删除任何真实锚点”。 */
+static uint32_t collect_dead_locked(uint8_t buf[RB_TOTAL_BYTES],
+                                    rb_dead_list *dead)
+{
+    uint32_t count = vty_get_u32(buf + 8);
+    uint32_t keep = 0;
+    uint32_t i;
+
+    dead->count = 0;
+    for (i = 0; i < count; i++) {
+        uint8_t *e = entry_at(buf, i);
+        int is_dead = 0;
+
+        if (entry_witness_valid(e)) {
+            uint8_t wid[VTY_UUID_BYTES];
+
+            if (witness_id(e, wid) == VTY_OK &&
+                vty_tpm_witness_exists(wid,
+                                       e[RB_ENTRY_WITNESS_OFFSET]) == 0) {
+                is_dead = 1;
+            }
+        }
+        if (is_dead) {
+            if (dead->count < VTY_ROLLBACK_MAX_ENTRIES) {
+                memcpy(dead->uuids[dead->count], e, VTY_UUID_BYTES);
+                dead->count++;
+            }
+        } else {
+            if (keep != i) {
+                memmove(entry_at(buf, keep), e, RB_ENTRY_BYTES);
+            }
+            keep++;
+        }
+    }
+    if (dead->count > 0) {
+        vty_put_u32(buf + 8, keep);
+        memset(entry_at(buf, keep), 0,
+               (size_t)(count - keep) * RB_ENTRY_BYTES);
+    }
+    return dead->count;
+}
+
+/* 持状态锁作废预置池登记：池线程建键前必须取同一把状态锁，因此在
+ * 锁内作废后不可能再为这些 UUID 生成新键。 */
+static void invalidate_dead_pool_locked(const rb_dead_list *dead)
+{
+    uint32_t i;
+
+    for (i = 0; i < dead->count; i++) {
+        uint8_t wid[VTY_UUID_BYTES];
+
+        if (witness_id(dead->uuids[i], wid) != VTY_OK) continue;
+        vty_witness_pool_invalidate(wid, 0);
+        vty_witness_pool_invalidate(wid, 1);
+    }
+}
+
+/* 解锁后执行：删除 DEAD 条目的两槽残留键。失败计数返回给调用方审计，
+ * 不影响已经成功的状态压缩。 */
+static void delete_dead_witnesses(const rb_dead_list *dead,
+                                  uint32_t *out_failed)
+{
+    uint32_t i;
+
+    *out_failed = 0;
+    for (i = 0; i < dead->count; i++) {
+        uint8_t wid[VTY_UUID_BYTES];
+        int a;
+        int b;
+
+        if (witness_id(dead->uuids[i], wid) != VTY_OK) {
+            (*out_failed)++;
+            continue;
+        }
+        vty_witness_pool_invalidate(wid, 0);
+        vty_witness_pool_invalidate(wid, 1);
+        a = vty_tpm_witness_delete(wid, 0);
+        b = vty_tpm_witness_delete(wid, 1);
+        if (a != VTY_OK || b != VTY_OK) (*out_failed)++;
+    }
 }
 
 /* 登记或更新条目；witness 参数为 -1 表示保持原槽位 */
@@ -428,7 +567,7 @@ static int upsert(uint8_t buf[RB_TOTAL_BYTES],
     }
 
     count = vty_get_u32(buf + 8);
-    if (count >= VTY_ROLLBACK_MAX_ENTRIES) return VTY_E_RESOURCE;
+    if (count >= rb_max_entries()) return VTY_E_RESOURCE;
     e = entry_at(buf, count);
     memset(e, 0, RB_ENTRY_BYTES);
     memcpy(e, uuid, VTY_UUID_BYTES);
@@ -473,24 +612,11 @@ static int rotate_witness(const uint8_t wid[VTY_UUID_BYTES], int current_slot,
     return VTY_OK;
 }
 
-static void drop_stale_witness(const uint8_t wid[VTY_UUID_BYTES],
-                               int current_slot, int next_slot)
-{
-    int stale = 1 - next_slot;
-
-    if (stale != current_slot && stale >= 0) {
-        (void)vty_tpm_witness_delete(wid, (uint8_t)stale);
-    }
-    if (current_slot >= 0) {
-        (void)vty_tpm_witness_delete(wid, (uint8_t)current_slot);
-    }
-}
-
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
 /* ------------------------------------------------------------------ *
- * G0-A 隔离原型：预置池、已验证条目缓存、旧键撤销与 fail-closed。
+ * 提交快路径：预置见证键、已验证条目缓存、旧键撤销与 fail-closed。
  *
- * 默认构建不编译以下代码；生产行为由上方原有路径保持。
+ * 所有提交共用此路径；缓存只在状态 MAC 校验通过后生效，命中缓存
+ * 不跳过状态文件校验，旧状态回放不会命中旧缓存。
  * ------------------------------------------------------------------ */
 #define RB_G0A_VERIFIED_MAX 4
 #define RB_G0A_DIRTY_MAX 8
@@ -568,8 +694,9 @@ static void cache_clear(void)
     vty_secure_zero(g_verified, sizeof(g_verified));
 }
 
-/* 缓存命中时仍探测键是否存在：TPM 被清除后必须维持 fail-closed，
- * 不能因为进程内缓存把缺失的当前见证“补”回来。 */
+/* 缓存命中时仍探测键是否存在并复核公钥指纹：TPM 被清除后必须维持
+ * fail-closed；键被同槽覆盖为不同公钥时也必须识别为 TAMPERED，不能
+ * 因为进程内缓存把缺失或替换的当前见证“补”回来。 */
 static int verify_entry_cached(const uint8_t uuid[VTY_UUID_BYTES],
                                const uint8_t wid[VTY_UUID_BYTES],
                                const uint8_t *e)
@@ -578,6 +705,10 @@ static int verify_entry_cached(const uint8_t uuid[VTY_UUID_BYTES],
 
     if (cache_match(uuid, e)) {
         if (vty_tpm_witness_exists(wid, (uint8_t)slot) != 1) {
+            return VTY_E_ROLLBACK;
+        }
+        if (vty_tpm_witness_verify(wid, (uint8_t)slot,
+                                   e + RB_ENTRY_FP_OFFSET) != VTY_OK) {
             return VTY_E_ROLLBACK;
         }
         return VTY_OK;
@@ -678,7 +809,6 @@ static int cleanup_stale_witness(const uint8_t wid[VTY_UUID_BYTES],
     vty_secure_zero(junk, sizeof(junk));
     return VTY_E_TPM;
 }
-#endif /* VERTHYS_G0A_PROTOTYPE */
 
 int vty_rollback_check(const uint8_t vault_uuid[VTY_UUID_BYTES],
                        uint64_t generation)
@@ -715,21 +845,13 @@ int vty_rollback_check(const uint8_t vault_uuid[VTY_UUID_BYTES],
     idx = find_entry(buf, vault_uuid);
     if (idx >= 0) {
         const uint8_t *e = entry_at(buf, (uint32_t)idx);
-        if (entry_witness_valid(e)) {
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
-            if (verify_entry_cached(vault_uuid, wid, e) != VTY_OK) {
-                rc = VTY_E_ROLLBACK;
-                goto out;
-            }
-#else
-            if (vty_tpm_witness_verify(wid, e[RB_ENTRY_WITNESS_OFFSET],
-                                       e + RB_ENTRY_FP_OFFSET) != VTY_OK) {
-                rc = VTY_E_ROLLBACK;
-                goto out;
-            }
-#endif
-        } else if (any_new != 0) {
-            /* 条目尚未建立见证；出现密钥即拒绝 */
+        /* 条目必须引用合法见证槽；字段非法的条目一律拒绝，不能因为
+         * “当前没有任何见证键”就当作首次运行放行。 */
+        if (!entry_witness_valid(e)) {
+            rc = VTY_E_ROLLBACK;
+            goto out;
+        }
+        if (verify_entry_cached(vault_uuid, wid, e) != VTY_OK) {
             rc = VTY_E_ROLLBACK;
             goto out;
         }
@@ -746,7 +868,6 @@ int vty_rollback_check(const uint8_t vault_uuid[VTY_UUID_BYTES],
     stored = entry_gen(entry_at(buf, (uint32_t)idx));
     rc = (generation < stored) ? VTY_E_ROLLBACK : VTY_OK;
 
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
     if (rc == VTY_OK) {
         const uint8_t *e = entry_at(buf, (uint32_t)idx);
 
@@ -754,26 +875,24 @@ int vty_rollback_check(const uint8_t vault_uuid[VTY_UUID_BYTES],
         if (entry_witness_valid(e)) {
             int current_slot = (int)e[RB_ENTRY_WITNESS_OFFSET];
 
-            /* F6：启动/解锁清理非当前槽。清理失败不得继续，否则旧状态
+            /* 启动/解锁清理非当前槽。清理失败不得继续，否则旧状态
              * 仍可能持有匹配的旧键。 */
             if (cleanup_stale_witness(wid, current_slot) != VTY_OK) {
                 dirty_mark(wid);
                 rc = VTY_E_ROLLBACK;
             } else if (vty_witness_pool_start() == VTY_OK) {
-                /* 条目已存在，允许预置下一把（F2）。 */
+                /* 条目已存在，允许预置下一把（新库首次提交前不预置）。 */
                 vty_witness_pool_schedule(wid, current_slot);
             }
         }
     }
-#endif
 
 out:
     unlock_state(lock);
     return rc;
 }
 
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE && \
-    defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
 static int g_crash_point = 0;
 
 void vty_rollback_set_crash_point_for_test(int point)
@@ -794,8 +913,7 @@ static void rb_crash_if(int point)
 #define RB_CRASH(point) ((void)0)
 #endif
 
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
-/* G0-A 提交：优先取预置键；无预置时等待后台或同步回退。
+/* 提交：优先取预置键；无预置时等待后台或同步回退。
  * 旧键删除失败必须撤销；撤销也失败则标记锚点脏并 fail-closed。 */
 static int rb_commit_with_preset(const uint8_t vault_uuid[VTY_UUID_BYTES],
                                  uint64_t generation)
@@ -813,6 +931,8 @@ static int rb_commit_with_preset(const uint8_t vault_uuid[VTY_UUID_BYTES],
     int pool_ok;
     HANDLE lock;
     const uint8_t *e;
+    rb_dead_list dead;
+    uint32_t cleanup_failed = 0;
 
     if (!g_enabled) return VTY_OK;
     if (vault_uuid == NULL) return VTY_E_INVALID;
@@ -824,6 +944,7 @@ static int rb_commit_with_preset(const uint8_t vault_uuid[VTY_UUID_BYTES],
         next_slot = -1;
         changed = 0;
         memset(fp, 0, sizeof(fp));
+        dead.count = 0;
 
         lock = lock_state();
         if (lock == NULL) return VTY_E_ROLLBACK;
@@ -847,6 +968,16 @@ static int rb_commit_with_preset(const uint8_t vault_uuid[VTY_UUID_BYTES],
                 unlock_state(lock);
                 return VTY_E_ROLLBACK;
             }
+            /* 容量预检：只在需要新增条目、且逻辑表已满时回收 DEAD。
+             * 回收只修改内存缓冲；只有本次 store 成功后才删除其见证。
+             * ACTIVE/TAMPERED/UNKNOWN 一律保留，绝不自动淘汰。 */
+            if (vty_get_u32(buf + 8) >= rb_max_entries()) {
+                if (collect_dead_locked(buf, &dead) == 0) {
+                    unlock_state(lock);
+                    return VTY_E_ANCHOR_FULL;
+                }
+                invalidate_dead_pool_locked(&dead);
+            }
             pool_ok = (vty_witness_pool_start() == VTY_OK);
             if (pool_ok) {
                 vty_witness_pool_invalidate(wid, 0);
@@ -858,6 +989,11 @@ static int rb_commit_with_preset(const uint8_t vault_uuid[VTY_UUID_BYTES],
                 return rc;
             }
             rc = upsert(buf, vault_uuid, generation, 0, next_slot, fp, &changed);
+            if (rc == VTY_E_RESOURCE) {
+                (void)vty_tpm_witness_delete(wid, (uint8_t)next_slot);
+                unlock_state(lock);
+                return VTY_E_ANCHOR_FULL;
+            }
             if (rc == VTY_OK) rc = store(buf);
             if (rc != VTY_OK) {
                 (void)vty_tpm_witness_delete(wid, (uint8_t)next_slot);
@@ -868,11 +1004,13 @@ static int rb_commit_with_preset(const uint8_t vault_uuid[VTY_UUID_BYTES],
             if (rc != VTY_OK) {
                 dirty_mark(wid);
                 unlock_state(lock);
+                delete_dead_witnesses(&dead, &cleanup_failed);
                 return rc;
             }
             cache_store(vault_uuid, generation, next_slot, fp);
             if (pool_ok) vty_witness_pool_schedule(wid, next_slot);
             unlock_state(lock);
+            delete_dead_witnesses(&dead, &cleanup_failed);
             return VTY_OK;
         }
 
@@ -971,90 +1109,11 @@ static int rb_commit_with_preset(const uint8_t vault_uuid[VTY_UUID_BYTES],
     /* 连续三轮都被后台建键打断：不绕过锚点，fail-closed。 */
     return VTY_E_ROLLBACK;
 }
-#endif /* VERTHYS_G0A_PROTOTYPE */
 
 int vty_rollback_commit(const uint8_t vault_uuid[VTY_UUID_BYTES],
                         uint64_t generation)
 {
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
     return rb_commit_with_preset(vault_uuid, generation);
-#else
-    uint8_t buf[RB_TOTAL_BYTES];
-    uint8_t wid[VTY_UUID_BYTES];
-    int is_new = 0;
-    int changed = 0;
-    int idx;
-    int rc;
-    int current_slot = -1;
-    int next_slot = 0;
-    int had_witness = 0;
-    int any_new;
-    uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
-    HANDLE lock;
-
-    if (!g_enabled) return VTY_OK;
-    if (vault_uuid == NULL) return VTY_E_INVALID;
-    if (witness_id(vault_uuid, wid) != VTY_OK) return VTY_E_ROLLBACK;
-    if (vty_rollback_init() != VTY_OK) return VTY_E_ROLLBACK;
-
-    lock = lock_state();
-    if (lock == NULL) return VTY_E_ROLLBACK;
-
-    memset(fp, 0, sizeof(fp));
-    rc = load_authenticated(buf, &is_new);
-    if (rc != VTY_OK) {
-        unlock_state(lock);
-        return rc;
-    }
-
-    any_new = vty_tpm_witness_any_usable(wid);
-    idx = find_entry(buf, vault_uuid);
-    if (idx < 0) {
-        /* 新登记的库：不允许已有见证密钥（否则状态被删/回滚） */
-        if (any_new != 0) {
-            unlock_state(lock);
-            return VTY_E_ROLLBACK;
-        }
-    } else {
-        const uint8_t *e = entry_at(buf, (uint32_t)idx);
-        had_witness = entry_witness_valid(e);
-        if (had_witness) {
-            if (vty_tpm_witness_verify(wid, e[RB_ENTRY_WITNESS_OFFSET],
-                                       e + RB_ENTRY_FP_OFFSET) != VTY_OK) {
-                unlock_state(lock);
-                return VTY_E_ROLLBACK;
-            }
-            if (entry_gen(e) == generation) {
-                /* 已是最新且见证有效：无需轮换 */
-                unlock_state(lock);
-                return VTY_OK;
-            }
-        }
-        if (generation < entry_gen(e)) {
-            unlock_state(lock);
-            return VTY_E_ROLLBACK;
-        }
-        current_slot = had_witness ? (int)e[RB_ENTRY_WITNESS_OFFSET] : -1;
-    }
-
-    /* 先建新键，再写状态，最后删旧键：写失败时旧状态仍指向旧键，
-     * 不会把库永久锁死。 */
-    rc = rotate_witness(wid, current_slot, &next_slot, fp);
-    if (rc != VTY_OK) {
-        unlock_state(lock);
-        return rc;
-    }
-    rc = upsert(buf, vault_uuid, generation, 0, next_slot, fp, &changed);
-    if (rc == VTY_OK) rc = store(buf);
-    if (rc != VTY_OK) {
-        (void)vty_tpm_witness_delete(wid, (uint8_t)next_slot);
-        unlock_state(lock);
-        return VTY_E_ROLLBACK;
-    }
-    drop_stale_witness(wid, current_slot, next_slot);
-    unlock_state(lock);
-    return VTY_OK;
-#endif /* VERTHYS_G0A_PROTOTYPE */
 }
 
 int vty_rollback_reset_anchor(const uint8_t vault_uuid[VTY_UUID_BYTES],
@@ -1071,6 +1130,8 @@ int vty_rollback_reset_anchor(const uint8_t vault_uuid[VTY_UUID_BYTES],
     int had_witness = 0;
     uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
     HANDLE lock;
+    rb_dead_list dead;
+    uint32_t cleanup_failed = 0;
 
     if (!g_enabled) return VTY_OK;
     if (vault_uuid == NULL) return VTY_E_INVALID;
@@ -1081,6 +1142,7 @@ int vty_rollback_reset_anchor(const uint8_t vault_uuid[VTY_UUID_BYTES],
     if (lock == NULL) return VTY_E_ROLLBACK;
 
     memset(fp, 0, sizeof(fp));
+    dead.count = 0;
     rc = load_authenticated(buf, &is_new);
     if (rc != VTY_OK) {
         unlock_state(lock);
@@ -1092,38 +1154,58 @@ int vty_rollback_reset_anchor(const uint8_t vault_uuid[VTY_UUID_BYTES],
         const uint8_t *e = entry_at(buf, (uint32_t)idx);
         had_witness = entry_witness_valid(e);
         if (had_witness) {
+            current_slot = (int)e[RB_ENTRY_WITNESS_OFFSET];
+            /* 恢复码是显式逃生通道：见证缺失（DEAD）或指纹不符
+             * （TAMPERED）不得阻断重设。旧见证已无法证明任何东西，
+             * 拒绝重设只会让持有恢复码的用户永久失去访问权。 */
             if (vty_tpm_witness_verify(wid, e[RB_ENTRY_WITNESS_OFFSET],
                                        e + RB_ENTRY_FP_OFFSET) != VTY_OK) {
-                unlock_state(lock);
-                return VTY_E_ROLLBACK;
+                current_slot = -1;
             }
-            current_slot = (int)e[RB_ENTRY_WITNESS_OFFSET];
         }
+    } else if (vty_get_u32(buf + 8) >= rb_max_entries()) {
+        /* 恢复码新增条目同样受容量约束；先回收可证明失效的 DEAD，
+         * 绝不为腾位删除 ACTIVE/TAMPERED/UNKNOWN。 */
+        if (collect_dead_locked(buf, &dead) == 0) {
+            unlock_state(lock);
+            return VTY_E_ANCHOR_FULL;
+        }
+        invalidate_dead_pool_locked(&dead);
     }
 
     /* 恢复流程每次重设锚点都轮换见证，使此前所有状态副本失效 */
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
-    /* 同步建键会覆盖目标槽；先作废该槽的预置登记。 */
-    vty_witness_pool_invalidate(wid, (current_slot == 0) ? 1 : 0);
-#endif
+    /* 同步建键会覆盖目标槽；先作废两个槽的预置登记。 */
+    vty_witness_pool_invalidate(wid, 0);
+    vty_witness_pool_invalidate(wid, 1);
     rc = rotate_witness(wid, current_slot, &next_slot, fp);
     if (rc != VTY_OK) {
         unlock_state(lock);
         return rc;
     }
     rc = upsert(buf, vault_uuid, generation, 1, next_slot, fp, &changed);
+    if (rc == VTY_E_RESOURCE) {
+        (void)vty_tpm_witness_delete(wid, (uint8_t)next_slot);
+        unlock_state(lock);
+        return VTY_E_ANCHOR_FULL;
+    }
     if (rc == VTY_OK) rc = store(buf);
     if (rc != VTY_OK) {
         (void)vty_tpm_witness_delete(wid, (uint8_t)next_slot);
         unlock_state(lock);
         return VTY_E_ROLLBACK;
     }
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
-    rc = retire_witness(wid, current_slot, next_slot);
-    if (rc != VTY_OK) {
-        dirty_mark(wid);
-        unlock_state(lock);
-        return rc;
+    if (current_slot >= 0) {
+        rc = retire_witness(wid, current_slot, next_slot);
+        if (rc != VTY_OK) {
+            dirty_mark(wid);
+            unlock_state(lock);
+            delete_dead_witnesses(&dead, &cleanup_failed);
+            return rc;
+        }
+    } else {
+        /* 旧槽未知或不可用：状态已指向新槽，非当前槽的残留键按
+         * 启动清理同规则处理；失败不阻断恢复，后续 check 会重试。 */
+        (void)cleanup_stale_witness(wid, next_slot);
     }
     /* 恢复码是显式逃生通道：重设成功后清除脏标记并更新缓存。 */
     dirty_clear(wid);
@@ -1131,15 +1213,233 @@ int vty_rollback_reset_anchor(const uint8_t vault_uuid[VTY_UUID_BYTES],
     if (vty_witness_pool_start() == VTY_OK) {
         vty_witness_pool_schedule(wid, next_slot);
     }
-#else
-    drop_stale_witness(wid, current_slot, next_slot);
-#endif
     unlock_state(lock);
+    delete_dead_witnesses(&dead, &cleanup_failed);
     return VTY_OK;
 }
 
 
-#if defined(VERTHYS_G0A_PROTOTYPE) && VERTHYS_G0A_PROTOTYPE
+int vty_rollback_anchor_list(VtyAnchorInfo *out, uint32_t capacity,
+                             uint32_t *out_count, int *out_state_missing)
+{
+    uint8_t buf[RB_TOTAL_BYTES];
+    rb_probe_entry snap[VTY_ROLLBACK_MAX_ENTRIES];
+    uint32_t count;
+    uint32_t i;
+    int is_new = 0;
+    int rc;
+    HANDLE lock;
+
+    if (out_count == NULL || out_state_missing == NULL) return VTY_E_INVALID;
+    *out_count = 0;
+    *out_state_missing = 0;
+    if (capacity > 0 && out == NULL) return VTY_E_INVALID;
+    if (!g_enabled) {
+        *out_state_missing = 1;
+        return VTY_OK;
+    }
+    if (vty_rollback_init() != VTY_OK) return VTY_E_TPM;
+
+    lock = lock_state();
+    if (lock == NULL) return VTY_E_IO;
+
+    rc = load_authenticated(buf, &is_new);
+    if (rc != VTY_OK) {
+        unlock_state(lock);
+        return VTY_E_CORRUPT;
+    }
+    if (is_new) {
+        *out_state_missing = 1;
+        unlock_state(lock);
+        return VTY_OK;
+    }
+    count = vty_get_u32(buf + 8);
+    if (count > VTY_ROLLBACK_MAX_ENTRIES) {
+        unlock_state(lock);
+        return VTY_E_CORRUPT;
+    }
+    *out_count = count;
+    if (out == NULL || capacity == 0) {
+        unlock_state(lock);
+        return VTY_OK;
+    }
+    if (capacity < count) {
+        unlock_state(lock);
+        return VTY_E_RESOURCE;
+    }
+
+    memset(snap, 0, sizeof(snap));
+    for (i = 0; i < count; i++) {
+        const uint8_t *e = entry_at(buf, i);
+
+        memcpy(snap[i].uuid, e, VTY_UUID_BYTES);
+        snap[i].generation = entry_gen(e);
+        snap[i].slot = e[RB_ENTRY_WITNESS_OFFSET];
+        memcpy(snap[i].fp, e + RB_ENTRY_FP_OFFSET, VTY_TPM_WITNESS_FP_BYTES);
+        memset(&out[i], 0, sizeof(out[i]));
+        memcpy(out[i].uuid, snap[i].uuid, VTY_UUID_BYTES);
+        out[i].generation = snap[i].generation;
+        out[i].state = VTY_ANCHOR_UNKNOWN;
+    }
+    unlock_state(lock);
+
+    /* 分类在锁外执行：列表是快照，不参与状态推进；释放/回收仍按
+     * UUID 在锁内重新校验，因此这里的短暂过期不会造成误删。 */
+    for (i = 0; i < count; i++) {
+        uint8_t wid[VTY_UUID_BYTES];
+        VtyWitnessProbe probe = VTY_WITNESS_PROBE_UNKNOWN;
+
+        if (snap[i].slot >= VTY_TPM_WITNESS_SLOTS ||
+            witness_id(snap[i].uuid, wid) != VTY_OK) {
+            out[i].state = VTY_ANCHOR_UNKNOWN;
+            continue;
+        }
+        if (vty_tpm_witness_probe(wid, snap[i].slot, snap[i].fp, &probe) != VTY_OK) {
+            out[i].state = VTY_ANCHOR_UNKNOWN;
+            continue;
+        }
+        switch (probe) {
+        case VTY_WITNESS_PROBE_ACTIVE:   out[i].state = VTY_ANCHOR_ACTIVE; break;
+        case VTY_WITNESS_PROBE_MISSING:  out[i].state = VTY_ANCHOR_DEAD; break;
+        case VTY_WITNESS_PROBE_TAMPERED: out[i].state = VTY_ANCHOR_TAMPERED; break;
+        default:                         out[i].state = VTY_ANCHOR_UNKNOWN; break;
+        }
+    }
+    return VTY_OK;
+}
+
+int vty_rollback_anchor_release(const uint8_t vault_uuid[VTY_UUID_BYTES],
+                                uint32_t flags, uint32_t *out_released,
+                                uint32_t *out_cleanup_failed)
+{
+    uint8_t buf[RB_TOTAL_BYTES];
+    uint8_t wid[VTY_UUID_BYTES];
+    int is_new = 0;
+    int idx;
+    int rc;
+    HANDLE lock;
+
+    if (vault_uuid == NULL || out_released == NULL ||
+        out_cleanup_failed == NULL) {
+        return VTY_E_INVALID;
+    }
+    if ((flags & VTY_ROLLBACK_ANCHOR_CONFIRM) == 0) return VTY_E_INVALID;
+    *out_released = 0;
+    *out_cleanup_failed = 0;
+    if (!g_enabled) return VTY_E_POLICY;
+    if (witness_id(vault_uuid, wid) != VTY_OK) return VTY_E_INVALID;
+    if (vty_rollback_init() != VTY_OK) return VTY_E_TPM;
+
+    lock = lock_state();
+    if (lock == NULL) return VTY_E_IO;
+
+    rc = load_authenticated(buf, &is_new);
+    if (rc != VTY_OK) {
+        unlock_state(lock);
+        return VTY_E_CORRUPT;
+    }
+    if (!is_new) {
+        idx = find_entry(buf, vault_uuid);
+        if (idx >= 0) {
+            uint32_t count = vty_get_u32(buf + 8);
+
+            vty_witness_pool_invalidate(wid, 0);
+            vty_witness_pool_invalidate(wid, 1);
+            if (idx != (int)count - 1) {
+                memmove(entry_at(buf, (uint32_t)idx),
+                        entry_at(buf, count - 1u), RB_ENTRY_BYTES);
+            }
+            memset(entry_at(buf, count - 1u), 0, RB_ENTRY_BYTES);
+            vty_put_u32(buf + 8, count - 1u);
+            rc = store_state(buf);
+            if (rc != VTY_OK) {
+                /* 状态未成功落盘：条目仍在，见证不得删除。 */
+                unlock_state(lock);
+                return VTY_E_IO;
+            }
+            *out_released = 1;
+        }
+    }
+    if (*out_released == 0) {
+        vty_witness_pool_invalidate(wid, 0);
+        vty_witness_pool_invalidate(wid, 1);
+    }
+    unlock_state(lock);
+
+    /* 状态已不再引用该 UUID；两槽见证统一清理。删除失败不影响已完成的
+     * 释放，调用方可对同一 UUID 重试释放（幂等）。 */
+    {
+        int a = vty_tpm_witness_delete(wid, 0);
+        int b = vty_tpm_witness_delete(wid, 1);
+
+        *out_cleanup_failed = (a != VTY_OK || b != VTY_OK) ? 1u : 0u;
+    }
+    return VTY_OK;
+}
+
+int vty_rollback_anchor_reclaim(uint32_t flags, uint32_t *out_removed,
+                                uint32_t *out_cleanup_failed)
+{
+    uint8_t buf[RB_TOTAL_BYTES];
+    int is_new = 0;
+    int rc;
+    HANDLE lock;
+    rb_dead_list dead;
+
+    if (out_removed == NULL || out_cleanup_failed == NULL) return VTY_E_INVALID;
+    if ((flags & VTY_ROLLBACK_ANCHOR_CONFIRM) == 0) return VTY_E_INVALID;
+    *out_removed = 0;
+    *out_cleanup_failed = 0;
+    if (!g_enabled) return VTY_E_POLICY;
+    if (vty_rollback_init() != VTY_OK) return VTY_E_TPM;
+
+    lock = lock_state();
+    if (lock == NULL) return VTY_E_IO;
+
+    dead.count = 0;
+    rc = load_authenticated(buf, &is_new);
+    if (rc != VTY_OK) {
+        unlock_state(lock);
+        return VTY_E_CORRUPT;
+    }
+    if (is_new || vty_get_u32(buf + 8) == 0) {
+        unlock_state(lock);
+        return VTY_OK;
+    }
+    if (collect_dead_locked(buf, &dead) == 0) {
+        unlock_state(lock);
+        return VTY_OK;
+    }
+    invalidate_dead_pool_locked(&dead);
+    rc = store_state(buf);
+    unlock_state(lock);
+    if (rc != VTY_OK) {
+        /* 状态未落盘：不删除任何见证键。 */
+        return VTY_E_IO;
+    }
+    *out_removed = dead.count;
+    delete_dead_witnesses(&dead, out_cleanup_failed);
+    return VTY_OK;
+}
+
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+void vty_rollback_set_max_entries_for_test(uint32_t max_entries)
+{
+    g_test_max_entries =
+        (max_entries > 0 && max_entries <= VTY_ROLLBACK_MAX_ENTRIES)
+            ? max_entries
+            : 0;
+}
+
+void vty_rollback_reset_path_for_test(void)
+{
+    g_state_path[0] = '\0';
+    g_test_path = 0;
+    g_initialized = 0;
+    g_test_env_hook = 0;
+}
+#endif
+
 void vty_rollback_shutdown(void)
 {
     HANDLE lock;
@@ -1154,6 +1454,5 @@ void vty_rollback_shutdown(void)
     memset(g_dirty_used, 0, sizeof(g_dirty_used));
     if (lock != NULL) unlock_state(lock);
 }
-#endif
 
 

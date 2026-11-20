@@ -58,8 +58,10 @@ use crate::infrastructure::file_lock::VerthysFileLock;
 // 注意：VerthysSessionGuard 已通过上方 pub use 重导出，
 // 此处不再重复 use，避免 E0252 重复定义错误。
 use crate::worker::WorkerSession;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
+use zeroize::Zeroizing;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 use tokio::sync::Notify;
@@ -223,6 +225,11 @@ pub struct AppState {
     /// 通过 try_begin_photo_import / photo_import_cancel_flag /
     /// finish_photo_import 访问；中毒处理：重置为 None → 告警。
     photo_import_job: Mutex<Option<PhotoImportJob>>,
+    /// 照片原图读取的 SHM 认证密钥（job_id → 32 字节，随 job 结束清零移除）
+    ///
+    /// 密钥经主进程生成并随 begin 请求下发 worker，仅用于校验原图块的
+    /// 共享内存载荷；不落盘、不进日志、不返回前端。
+    photo_read_keys: Mutex<HashMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 impl AppState {
@@ -246,6 +253,7 @@ impl AppState {
             file_streams: Mutex::new(std::collections::HashMap::new()),
             writer: Mutex::new(None),
             photo_import_job: Mutex::new(None),
+            photo_read_keys: Mutex::new(HashMap::new()),
         }
     }
 
@@ -779,6 +787,46 @@ impl AppState {
         self.lock_photo_import_job()
             .as_ref()
             .map(|job| job.job_id.clone())
+    }
+
+    /* ----------------------------------------------------------------
+     * 原图读取 SHM 密钥表                                           *
+     *                                                                *
+     * 密钥只在宿主与 worker 之间流转：begin 时登记、逐块读取时取用、   *
+     * end/cancel 时移除；Zeroizing 保证离开容器即清零。               *
+     * ---------------------------------------------------------------- */
+
+    fn lock_photo_read_keys(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<String, Zeroizing<Vec<u8>>>> {
+        match self.photo_read_keys.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                log::error!("[POISON][photo_read_keys] Mutex 中毒，废弃全部读取密钥");
+                let mut g = poisoned.into_inner();
+                g.clear(); /* Drop 逐项清零 */
+                g
+            }
+        }
+    }
+
+    /// 登记原图读取密钥（同一 job_id 重复登记时旧密钥随覆盖清零）
+    pub fn set_photo_read_key(&self, job_id: &str, key: Zeroizing<Vec<u8>>) {
+        if job_id.is_empty() {
+            return;
+        }
+        let mut guard = self.lock_photo_read_keys();
+        guard.insert(job_id.to_string(), key);
+    }
+
+    /// 取指定读取任务的密钥副本（不存在返回 None）
+    pub fn photo_read_key(&self, job_id: &str) -> Option<Zeroizing<Vec<u8>>> {
+        self.lock_photo_read_keys().get(job_id).cloned()
+    }
+
+    /// 移除读取密钥（job 结束/取消/失败时调用，密钥随之清零）
+    pub fn remove_photo_read_key(&self, job_id: &str) {
+        self.lock_photo_read_keys().remove(job_id);
     }
 
     /* ----------------------------------------------------------------

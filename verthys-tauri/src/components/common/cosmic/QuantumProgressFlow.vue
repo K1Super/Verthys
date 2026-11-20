@@ -6,7 +6,8 @@
   设计约束：
     - 进度来源单一：percent 完全由上游提供（安全中心为感知层输出的按帧
       连续视觉值，其它导入场景为真实进度），组件不做时间平滑
-    - 提示词单一数据源：直接显示上游 emit 的 message，前端不维护预设映射
+    - 提示词单一数据源：默认显示上游 emit 的 message；需要分层排版时
+      由调用方通过 message 插槽提供，本组件不维护预设映射
     - 淡雅美学：低饱和度青/紫/粉，不使用浓厚原色
     - 动态构成：粒子流、节点脉动、能量呼吸、扫光
     - 防跳变：固定高度槽位（min-height），加载/隐藏零抖动
@@ -17,7 +18,7 @@
     class="qf-slot"
     :class="{
       compact,
-      'no-text': !displayText,
+      'no-text': !displayText && !$slots.message,
       'no-loader': !showLoader,
       'qf-complete': safePercent >= 99.9,
       'qf-dimmed': dimmed,
@@ -47,8 +48,10 @@
       </div>
     </div>
 
-    <!-- 精简提示词（单行短文字，来自后端 emit 的 message） -->
-    <div v-if="displayText" class="qf-text">{{ displayText }}</div>
+    <!-- 精简提示词（默认取 message；调用方可经 message 插槽提供结构化状态） -->
+    <div v-if="displayText || $slots.message" class="qf-text">
+      <slot name="message">{{ displayText }}</slot>
+    </div>
 
     <!-- 元信息（百分比/耗时，默认隐藏） -->
     <div v-if="showMeta" class="qf-meta">

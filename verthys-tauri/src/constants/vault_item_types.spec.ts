@@ -130,33 +130,37 @@ describe("内置类型注册表自洽性", () => {
     expect(expiry.rangeEndLabel).toBe("到期");
   });
 
-  it("银行卡：标准字段齐备且不含任何日期字段", () => {
+  it("银行卡：标准字段齐备，不含日期字段与持卡人 / 安全码", () => {
     const def = getBuiltinVaultType("bankcard")!;
     const ids = def.fields.map((field) => field.id);
     expect(ids).toEqual(
-      expect.arrayContaining(["bank", "number", "type", "holder", "cvv", "note"]),
+      expect.arrayContaining(["bank", "number", "type", "note"]),
     );
+    expect(ids).not.toContain("holder");
+    expect(ids).not.toContain("cvv");
     expect(ids).not.toContain(VAULT_EXPIRY_FIELD_ID);
     // 日期控件与日期区间都不得出现（银行卡模板按需求完全移除日期）
     expect(def.fields.some((field) => field.kind === "date" || field.kind === "dateRange")).toBe(false);
     expect(def.cardFields).not.toContain(VAULT_EXPIRY_FIELD_ID);
   });
 
-  it("地址：省市区使用全国三级联动的地区控件，姓名/电话为卡片摘要", () => {
+  it("地址：省市区使用全国三级联动的地区控件，卡片摘要只保留地区", () => {
     const def = getBuiltinVaultType("address")!;
     const region = def.fields.find((field) => field.id === "region")!;
     expect(region.kind).toBe("region");
 
-    expect(def.fields.find((field) => field.id === "recipient")!.label).toBe("姓名");
-    expect(def.fields.find((field) => field.id === "phone")!.label).toBe("电话");
-    expect(def.cardFields).toEqual(["region", "recipient", "phone"]);
+    const ids = def.fields.map((field) => field.id);
+    expect(ids).not.toContain("recipient");
+    expect(ids).not.toContain("phone");
+    expect(ids).not.toContain("postalCode");
+    expect(def.cardFields).toEqual(["region"]);
   });
 
   it("卡片摘要字段保持精简：完整字段由详情窗口承载", () => {
     const passport = getBuiltinVaultType("passport")!;
     expect(passport.cardFields).toEqual(["type"]);
     const address = getBuiltinVaultType("address")!;
-    expect(address.cardFields.length).toBe(3);
+    expect(address.cardFields).toEqual(["region"]);
   });
 });
 

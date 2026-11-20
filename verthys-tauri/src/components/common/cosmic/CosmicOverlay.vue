@@ -53,7 +53,7 @@ interface Props {
   ariaLabel?: string;
   /** 标题元素 id：存在时以关联标题作为无障碍名称 */
   ariaLabelledby?: string;
-  /** 打开时的初始焦点选择器（如 ".kv-cancel"）；缺省落到首个可聚焦元素 */
+  /** 打开时的初始焦点选择器（如 ".btn-neutral"）；缺省落到首个可聚焦元素 */
   initialFocus?: string;
   /** 是否将遮罩 teleport 到 body：保证模态始终覆盖应用堆叠上下文 */
   teleport?: boolean;

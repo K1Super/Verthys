@@ -1,12 +1,12 @@
 <!--
   ModuleKeyRow.vue — 模块密钥轨道条目（无行底色 · 双行标识 + 读数 + 动作节点组）
   设计：引力谱系 · sf-orbit —— 模块索引（坐标）+ 名称/状态双行标识，
-  状态以离散菱标 + 分段读数呈现，不再使用竖标分隔；
+  状态以离散四边形标记 + 分段读数呈现，不再使用竖标分隔；
   操作区：密钥保护开关 + 修改密钥 / 恢复槽 / 登出，全部复用 SfActionNode
   （开关开启时以 latched 常驻青色，悬浮与图标节点同一套双环校准）
 
   职责：
-    1. 模块名称 + 状态读数（stateClass 控制菱标与状态词色相）
+    1. 模块名称 + 状态读数（stateClass 控制标记与状态词色相）
     2. 密钥保护开关（禁用条件：!globalKeyReady）
     3. 生成/修改密钥节点（仅密钥保护开启时显示，禁用条件：!globalKeyReady）
     4. 恢复槽节点（仅启用且已设置时显示，已绑定常驻青绿）
@@ -23,7 +23,7 @@
     <div class="sf-orbit-id">
       <span class="sf-orbit-name">{{ label }}</span>
       <span class="sf-orbit-status">
-        <span class="sf-status-mark" aria-hidden="true"></span>
+        <span class="sf-status-mark sf-status-mark--orbit" aria-hidden="true"></span>
         <span class="sf-orbit-state-word">{{ stateWord }}</span>
         <span
           v-for="part in stateMeta"

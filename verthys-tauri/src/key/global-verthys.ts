@@ -381,6 +381,9 @@ export async function initCreate(
 
     emit(3, 99, "启动会话守卫");
     keyState.verthysReady.value = true;
+    /* 容器解锁即开始统一空闲计时：模块口令只依赖 verthysReady，
+     * 不能等到全局密钥验证后才武装，否则该会话没有任何自动锁定。 */
+    resetSessionTimer();
     await startSessionGuard();
     emit(4, 100, "创建完成");
     startBackgroundTasks().catch(() => { /* 后台任务失败不影响创建 */ });
@@ -590,6 +593,12 @@ export async function initUnlock(
       }
       if (raw.includes("00000019")) {
         return err(VerthysErrorCode.E_ROLLBACK, "检测到文件回退，已拒绝打开");
+      }
+      if (raw.includes("00000021")) {
+        return err(
+          VerthysErrorCode.E_ANCHOR_FULL,
+          "本机回退锚点表已满，请在安全防护中清理失效锚点",
+        );
       }
       return err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, "打开加密库失败");
     }
@@ -801,6 +810,9 @@ export async function initUnlock(
     }
 
     keyState.verthysReady.value = true;
+    /* 容器解锁即开始统一空闲计时：模块口令只依赖 verthysReady，
+     * 不能等到全局密钥验证后才武装，否则该会话没有任何自动锁定。 */
+    resetSessionTimer();
     await startSessionGuard();
     emit(4, 100, "解锁完成");
 

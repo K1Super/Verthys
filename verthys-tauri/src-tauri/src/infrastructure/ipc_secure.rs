@@ -441,24 +441,29 @@ pub(crate) fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
 // =============================================================================
 //
 // 命名共享内存仅绑定当前用户可读写，但同用户下其他进程仍可能打开并篡改
-// 映射内容。worker 写入数据后在数据区尾部追加 HMAC-SHA256 标签，主进程
-// 读回时用同一密钥核验。
+// 映射内容。worker 写入数据后在数据区尾部追加 BLAKE3 keyed 标签，主进程
+// 读回时用同一 32 字节密钥核验。
 
 /// SHM 载荷认证块长度（与 worker 端共用同一契约常量）
 pub use super::shm_schema::SHM_AUTH_BLOCK_LEN;
 
-/// 计算 SHM 载荷的 HMAC-SHA256 标签。
+/// SHM 载荷认证密钥长度：BLAKE3 keyed 固定 32 字节。
+pub const SHM_AUTH_KEY_LEN: usize = 32;
+
+/// 计算 SHM 载荷的 BLAKE3 keyed 标签。
 pub fn shm_auth_compute(key: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
-    let tag = hmac_sign(key, data)?;
-    Ok(tag.to_vec())
+    let key: &[u8; SHM_AUTH_KEY_LEN] = key
+        .try_into()
+        .map_err(|_| "SHM 认证密钥长度必须为 32 字节".to_string())?;
+    Ok(blake3::keyed_hash(key, data).as_bytes().to_vec())
 }
 
-/// 常量时间校验 SHM 载荷标签；长度不符直接拒绝。
+/// 常量时间校验 SHM 载荷标签；密钥或标签长度不符直接拒绝。
 pub fn shm_auth_verify(key: &[u8], data: &[u8], tag: &[u8]) -> bool {
-    if tag.len() != SHM_AUTH_BLOCK_LEN {
+    if key.len() != SHM_AUTH_KEY_LEN || tag.len() != SHM_AUTH_BLOCK_LEN {
         return false;
     }
-    match hmac_sign(key, data) {
+    match shm_auth_compute(key, data) {
         Ok(expected) => ct_eq(&expected, tag),
         Err(_) => false,
     }
@@ -781,5 +786,15 @@ mod tests {
         let key = [0x44u8; SHM_AUTH_BLOCK_LEN];
         assert!(!shm_auth_verify(&key, b"payload", b"short"));
         assert!(!shm_auth_verify(&key, b"payload", b""));
+    }
+
+    #[test]
+    fn test_shm_auth_reject_bad_key_len() {
+        assert!(shm_auth_compute(&[0x44u8; SHM_AUTH_KEY_LEN - 1], b"payload").is_err());
+        assert!(!shm_auth_verify(
+            &[0x44u8; SHM_AUTH_KEY_LEN - 1],
+            b"payload",
+            &[0u8; SHM_AUTH_BLOCK_LEN]
+        ));
     }
 }

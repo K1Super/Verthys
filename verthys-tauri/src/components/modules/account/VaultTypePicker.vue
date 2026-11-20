@@ -39,7 +39,7 @@
     </div>
 
     <div class="kv-actions">
-      <button class="btn kv-cancel" type="button" @click="open = false">关闭</button>
+      <button class="btn btn-neutral btn-compact" type="button" @click="open = false">关闭</button>
     </div>
   </CosmicOverlay>
 </template>

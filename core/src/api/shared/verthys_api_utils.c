@@ -209,13 +209,11 @@ void ctx_zero_sensitive(struct VerthysContext *ctx)
     ctx->fmt_version = VERTHYS_FMT_NONE;
 }
 
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
 int verthys_bulk_defer_active(const struct VerthysContext *ctx)
 {
     if (ctx == NULL || ctx->vault == NULL) return 0;
     return vty_vault_bulk_active(ctx->vault);
 }
-#endif
 
 /* ---------- 格式检测 ----------
  * 读取文件头判断格式：仅接受固定头 magic "VRTY" (0x56 0x52 0x54 0x59)。

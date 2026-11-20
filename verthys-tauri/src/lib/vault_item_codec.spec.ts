@@ -162,7 +162,7 @@ describe("条目数据投影与账号字段映射", () => {
     });
   });
 
-  it("银行卡模板不声明日期字段：历史 expiry 不会被模板带出", () => {
+  it("银行卡模板不声明日期与已移除字段：历史 expiry / 持卡人 / 安全码不会被模板带出", () => {
     const bankcard = getBuiltinVaultType("bankcard")!;
     const data = buildVaultItemData(bankcard, {
       bank: "示例银行",
@@ -177,11 +177,11 @@ describe("条目数据投影与账号字段映射", () => {
       bank: "示例银行",
       number: "6222",
       type: "储蓄卡",
-      holder: "张三",
-      cvv: "123",
       note: "",
     });
     expect(Object.keys(data)).not.toContain("expiry");
+    expect(Object.keys(data)).not.toContain("holder");
+    expect(Object.keys(data)).not.toContain("cvv");
   });
 
   it("账号字段还原：仅「1」视为已独立加密，缺失键回落空串", () => {

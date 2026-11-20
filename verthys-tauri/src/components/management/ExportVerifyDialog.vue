@@ -42,9 +42,9 @@
     <p class="kv-note ev-release">凭据核验 → 选择 .bin 密钥文件 → 导出本地备份</p>
 
     <div class="kv-actions">
-      <button class="btn kv-cancel" type="button" :disabled="processing" @click="$emit('close')">取消</button>
+      <button class="btn btn-neutral btn-compact" type="button" :disabled="processing" @click="$emit('close')">取消</button>
       <button
-        class="btn btn-primary kv-confirm"
+        class="btn btn-primary btn-compact"
         type="button"
         :disabled="processing || !password || !binPassword"
         @click="$emit('confirm')"

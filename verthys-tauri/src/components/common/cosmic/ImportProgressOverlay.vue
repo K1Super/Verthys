@@ -11,10 +11,13 @@
   Props:
     - visible:  boolean  是否显示（false 时无 DOM）
     - percent?: number   进度百分比（0-100，透传 QuantumProgressFlow）
-    - message?: string   阶段文案（透传 QuantumProgressFlow，单一数据源）
+    - message?: string   阶段文案（无结构化状态且无插槽时使用）
+    - statusLabel?: string  结构化状态标签（提供时渲染统一进度状态行）
+    - statusCurrent?: number 结构化当前序号
+    - statusTotal?: number   结构化总数（0 时仅显示标签）
+    - message 插槽        结构化状态内容（可选；优先级高于 statusLabel）
     - elapsed?: number   已用时间毫秒（showMeta=true 时显示）
-    - detail?:  string   附加明细行（如清藏 "12 / 48 块 · 36%"）
-    - showMeta?: boolean 是否显示百分比/耗时（默认 false，明细由 detail 承担）
+    - showMeta?: boolean 是否显示百分比/耗时（默认 false）
     - compact?: boolean  紧凑通道（默认 true，居中悬浮更轻量）
     - cancelable?: boolean 是否显示"取消"操作（默认 false）
     - cancelLabel?: string 取消按钮文案
@@ -33,9 +36,25 @@
         :show-meta="showMeta"
         :show-loader="false"
         :compact="compact"
-      />
-      <div v-if="detail" class="import-overlay-detail">{{ detail }}</div>
-      <button v-if="cancelable" type="button" class="import-overlay-cancel" @click="emit('cancel')">
+      >
+        <!-- 结构化状态：插槽优先；否则按标签/计数渲染统一状态行，
+             进度条与通道布局保持不变 -->
+        <template v-if="$slots.message || statusLabel" #message>
+          <slot name="message">
+            <ProgressStatusLine
+              :label="statusLabel || ''"
+              :current="statusCurrent"
+              :total="statusTotal"
+            />
+          </slot>
+        </template>
+      </QuantumProgressFlow>
+      <button
+        v-if="cancelable"
+        type="button"
+        class="import-overlay-cancel btn btn-neutral btn-compact"
+        @click="emit('cancel')"
+      >
         {{ cancelLabel }}
       </button>
     </div>
@@ -51,18 +70,23 @@
  * 取消操作只向调用方发出意图，任务收敛与状态复位由调用方负责。
  */
 import QuantumProgressFlow from './QuantumProgressFlow.vue';
+import ProgressStatusLine from './ProgressStatusLine.vue';
 
 interface Props {
   /** 是否显示（false 时无 DOM） */
   visible: boolean;
   /** 进度百分比（0-100） */
   percent?: number;
-  /** 阶段文案（单一数据源，来自导入层状态） */
+  /** 阶段文案（无结构化状态且无插槽时使用） */
   message?: string;
+  /** 结构化状态标签（提供时渲染统一进度状态行） */
+  statusLabel?: string;
+  /** 结构化当前序号 */
+  statusCurrent?: number;
+  /** 结构化总数（0 时仅显示标签） */
+  statusTotal?: number;
   /** 已用时间（毫秒，仅 showMeta=true 时显示） */
   elapsed?: number;
-  /** 附加明细行（替代或补充元信息） */
-  detail?: string;
   /** 是否显示百分比/耗时元信息 */
   showMeta?: boolean;
   /** 紧凑通道模式 */
@@ -76,8 +100,10 @@ interface Props {
 withDefaults(defineProps<Props>(), {
   percent: 0,
   message: '',
+  statusLabel: '',
+  statusCurrent: 0,
+  statusTotal: 0,
   elapsed: 0,
-  detail: '',
   showMeta: false,
   compact: true,
   cancelable: false,
@@ -105,41 +131,11 @@ const emit = defineEmits<{ cancel: [] }>();
   animation: overlay-enter 0.35s var(--ease, ease-out) both;
 }
 
-.import-overlay-detail {
-  margin-top: 2px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--text-muted, rgba(255, 255, 255, 0.5));
-  font-family: var(--font, inherit);
-}
-
-/* 取消操作：无阴影、状态仅走背景/描边变化；可点击态明确 pointer */
+/* 仅负责在进度卡内水平居中；键面、三态与禁用全部来自星野键族 */
 .import-overlay-cancel {
   display: block;
+  width: fit-content;
   margin: 12px auto 0;
-  padding: 6px 20px;
-  font-size: 12px;
-  font-family: var(--font, inherit);
-  color: var(--text-primary, #d4dae4);
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.2s ease, border-color 0.2s ease;
-}
-
-.import-overlay-cancel:hover {
-  background: rgba(255, 255, 255, 0.12);
-  border-color: var(--border-hover, rgba(0, 212, 255, 0.25));
-}
-
-.import-overlay-cancel:active {
-  background: rgba(255, 255, 255, 0.16);
-}
-
-.import-overlay-cancel:focus-visible {
-  outline: 1px solid var(--accent, #00d4ff);
-  outline-offset: 2px;
 }
 
 /* 入场只走 2D 平移与不透明度：覆盖层内含文字与矢量控件，

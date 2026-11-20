@@ -1,5 +1,5 @@
 /*
- * test_g0a2_defer.c — G0-A2 批量导入锚点推迟验收（仅原型 + 测试钩子构建）
+ * test_g0a2_defer.c — 批量导入锚点推迟验收（测试钩子构建）
  *
  * 覆盖安全评审前置条件：
  *   - Begin 先提交当前锚点，会话内保存不推进锚点
@@ -113,7 +113,7 @@ TEST(g0a2_api_version_and_unlock_guard)
     const char *path = "g0a2_guard.vty";
     char code[128];
 
-    CHECK_EQ(VERTHYS_API_VERSION, 0x0015u);
+    CHECK_EQ(VERTHYS_API_VERSION, 0x0016u);
 
     remove(path);
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);

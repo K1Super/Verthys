@@ -63,6 +63,8 @@ function makeParse(isTauri = true) {
       importProgress: ref(0),
       importStatus: ref(""),
       importElapsed: ref(0),
+      importCurrent: ref(0),
+      importTotal: ref(0),
     }),
   )!;
   return { api, photos, scope };

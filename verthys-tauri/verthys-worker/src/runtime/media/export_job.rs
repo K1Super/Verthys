@@ -141,14 +141,12 @@ pub(crate) fn handle_begin(req: &Request) -> Response {
     if req.ids.len() > MAX_EXPORT_IDS {
         return error(OP_BEGIN, "照片数量超过单次导出上限");
     }
-    if req.ids.iter().any(|id| *id == 0) {
+    if req.ids.contains(&0) {
         return error(OP_BEGIN, "照片 ID 非法");
     }
     let token = Zeroizing::new(req.token.trim().to_string());
-    if format.needs_token() {
-        if token.len() < MIN_TOKEN_LENGTH {
-            return error(OP_BEGIN, "加密令牌过短");
-        }
+    if format.needs_token() && token.len() < MIN_TOKEN_LENGTH {
+        return error(OP_BEGIN, "加密令牌过短");
     }
 
     let mut jobs = lock_jobs();

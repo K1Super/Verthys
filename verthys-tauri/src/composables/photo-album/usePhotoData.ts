@@ -8,7 +8,7 @@
  * - 列表装载走"类型盲索引优先"：按 TYPE_PHOTO_META 枚举记录 ID，不解密数据；
  *   摘要缓存仅补名称，缩略图与真实尺寸由可视区按需解密回填，避免进入模块即触发全量数据扫描
  * - 扫描失败必须可见：加载错误经 loadError 上报，禁止把失败折叠成"暂无照片"
- * - 模块密钥失效（闲置销毁/登出）必须联动：清除已解密内容并提示重新验证
+ * - 模块密钥失效（全局空闲锁定/手动登出）必须联动：清除已解密内容并提示重新验证
  * - ensureVisiblePhotosDecrypted 并发上限 4，批量预取 meta dataB64
  *
  * 滚动性能：
@@ -69,8 +69,8 @@ export function usePhotoData() {
   const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
   /* ===== 模块独立密钥（由 keyManager 会话状态提供，用户登录模块时输入） =====
-   *   会话内 15min 闲置超时自动锁定（verthys-cache.ts MODULE_KEY_IDLE_TIMEOUT_MS），
-   *   超时后模块密钥被销毁。模块密钥只交付 worker 托管，本组合式不保留副本；
+   *   模块密钥随全局会话空闲锁定统一失效，本层不维护独立计时；
+   *   密钥只交付 worker 托管，本组合式不保留副本；
    *   moduleKeyReady 一旦失效必须立即释放已解密内容。 */
 
   const photosLoading = ref(false);
@@ -354,8 +354,8 @@ export function usePhotoData() {
   /** 按需解密中标记集合（防止同一 vid 重复解密） */
   const decryptingMetaIds = new Set<number>();
 
-  /* 会话密钥失效联动：闲置销毁/登出后立即清空已解密内容并清除 worker 托管密钥，
-   * 否则密钥销毁后本模块仍会继续解密照片，"闲置自动锁定"形同虚设。 */
+  /* 会话密钥失效联动：全局空闲锁定/手动登出后立即清空已解密内容并清除
+   * worker 托管密钥，否则密钥销毁后本模块仍会继续解密照片。 */
   watch(() => moduleKeyReadyRef.value.photo, (ready) => {
     if (ready) return;
     decryptingMetaIds.clear();

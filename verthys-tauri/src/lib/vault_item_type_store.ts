@@ -25,6 +25,7 @@ import {
   CUSTOM_VAULT_TYPE_PREFIX,
   DEFAULT_VAULT_ICON_ID,
   MAX_VAULT_CARD_FIELDS,
+  VAULT_EXPIRY_FIELD_ID,
   VAULT_FIELD_KINDS,
   VAULT_TONES,
   isVaultIconId,
@@ -129,7 +130,6 @@ function sanitizeVaultField(raw: unknown): VaultFieldDef | null {
 
   const field: VaultFieldDef = { id, label, kind };
   if (raw.transient === true) field.transient = true;
-  if (raw.carrier === true) field.carrier = true;
   if (raw.required === true) field.required = true;
   if (raw.sensitive === true) field.sensitive = true;
   if (kind === "select" && options.length > 0) field.options = options;
@@ -141,6 +141,9 @@ function sanitizeVaultField(raw: unknown): VaultFieldDef | null {
     if (endLabel) field.rangeEndLabel = endLabel;
   }
   if (kind === "multiline") {
+    /* 内容舱只在多行文本上成立：其它控件的输入面由各自控件承担，
+       carrier 若残留会让表单用文本域顶掉日期/选项控件。 */
+    if (raw.carrier === true) field.carrier = true;
     const rows = typeof raw.multilineRows === "number" ? raw.multilineRows : 0;
     field.multilineRows = Number.isInteger(rows) && rows >= 1 && rows <= 12 ? rows : 2;
   }
@@ -195,11 +198,29 @@ export function sanitizeVaultTypeDef(raw: unknown): VaultTypeDef | null {
   const icon = typeof raw.icon === "string" && isVaultIconId(raw.icon) ? raw.icon : DEFAULT_VAULT_ICON_ID;
   const tone = VALID_TONES.includes(raw.tone as VaultTone) ? (raw.tone as VaultTone) : "accent";
 
+  const fieldById = new Map(fields.map((field) => [field.id, field]));
   const rawTitle = typeof raw.titleField === "string" ? raw.titleField : "";
-  const titleField = seenFieldIds.has(rawTitle) ? rawTitle : fields[0].id;
+  let titleField = seenFieldIds.has(rawTitle) ? rawTitle : fields[0].id;
+  /* 标题在卡面上直接明文渲染：敏感字段不得充当标题，回落到首个非敏感字段。
+     全部字段都敏感时标题留空，宁可没有标题也不把密文铺到卡面。 */
+  if (fieldById.get(titleField)?.sensitive === true) {
+    titleField = fields.find((field) => field.sensitive !== true)?.id ?? "";
+  }
 
-  const cardFields = pickExistingFieldIds(raw.cardFields, seenFieldIds).slice(0, MAX_CARD_FIELDS);
-  const searchFields = pickExistingFieldIds(raw.searchFields, seenFieldIds);
+  const cardFields = pickExistingFieldIds(raw.cardFields, seenFieldIds)
+    .filter((id) => id !== titleField)
+    .filter((id) => fieldById.get(id)?.sensitive !== true)
+    .filter((id) => id !== VAULT_EXPIRY_FIELD_ID)
+    .slice(0, MAX_CARD_FIELDS);
+
+  /* 搜索字段必须是明文可读字段：把敏感字段纳入检索等于提供了一条
+     绕过掩码的旁路（用关键字即可试探密码/证件号）。 */
+  let searchFields = pickExistingFieldIds(raw.searchFields, seenFieldIds)
+    .filter((id) => fieldById.get(id)?.sensitive !== true);
+  if (searchFields.length === 0) {
+    const fallback = fields.find((field) => field.sensitive !== true);
+    if (fallback) searchFields = [fallback.id];
+  }
 
   return {
     id,
@@ -208,7 +229,7 @@ export function sanitizeVaultTypeDef(raw: unknown): VaultTypeDef | null {
     tone,
     titleField,
     cardFields,
-    searchFields: searchFields.length > 0 ? searchFields : [titleField],
+    searchFields,
     fields,
     builtin: false,
   };
@@ -282,13 +303,16 @@ export function validateVaultTypeDefs(
 
     const fieldIds = new Set<string>();
     const fieldLabels = new Set<string>();
+    const fieldById = new Map<string, VaultFieldDef>();
     for (const field of fields) {
       const fieldId = typeof field.id === "string" ? field.id.trim() : "";
       const fieldLabel = typeof field.label === "string" ? field.label.trim() : "";
+      const fieldName = field.label || field.id;
       if (!fieldId) errors.push(`${who}：字段 id 不能为空`);
       else {
         if (fieldIds.has(fieldId)) errors.push(`${who}：字段 id 重复（${fieldId}）`);
         fieldIds.add(fieldId);
+        fieldById.set(fieldId, field);
       }
       if (!fieldLabel) errors.push(`${who}：字段名不能为空`);
       else {
@@ -296,10 +320,27 @@ export function validateVaultTypeDefs(
         fieldLabels.add(fieldLabel);
       }
       if (!VALID_FIELD_KINDS.includes(field.kind)) {
-        errors.push(`${who}：字段控件种类不合法（${field.label || field.id}）`);
+        errors.push(`${who}：字段控件种类不合法（${fieldName}）`);
       }
-      if (field.kind === "select" && (field.options ?? []).length === 0) {
-        errors.push(`${who}：选项字段必须提供候选项（${field.label || field.id}）`);
+      if (field.kind === "select") {
+        const options = field.options ?? [];
+        if (options.length === 0) {
+          errors.push(`${who}：选项字段必须提供候选项（${fieldName}）`);
+        } else {
+          const seenOptions = new Set<string>();
+          for (const option of options) {
+            const value = option.trim();
+            if (!value) errors.push(`${who}：候选项不能为空（${fieldName}）`);
+            else if (seenOptions.has(value)) {
+              errors.push(`${who}：候选项重复（${fieldName}：${value}）`);
+            } else {
+              seenOptions.add(value);
+            }
+          }
+        }
+      }
+      if (field.carrier === true && field.kind !== "multiline") {
+        errors.push(`${who}：内容舱仅用于多行文本（${fieldName}）`);
       }
     }
 
@@ -323,14 +364,35 @@ export function validateVaultTypeDefs(
     }
 
     if (!fieldIds.has(def.titleField)) errors.push(`${who}：主标题字段必须属于字段清单`);
+    if (fieldById.get(def.titleField)?.sensitive === true) {
+      errors.push(`${who}：主标题不能使用敏感字段`);
+    }
     for (const fieldId of def.cardFields ?? []) {
       if (!fieldIds.has(fieldId)) errors.push(`${who}：卡片展示字段必须属于字段清单（${fieldId}）`);
+      const field = fieldById.get(fieldId);
+      if (!field) continue;
+      if (fieldId === def.titleField) {
+        errors.push(`${who}：主标题已在卡面独占一行，不能重复进入次行（${field.label}）`);
+      }
+      if (field.sensitive === true) {
+        errors.push(`${who}：敏感字段不能进入卡片次行（${field.label}）`);
+      }
+      if (fieldId === VAULT_EXPIRY_FIELD_ID) {
+        errors.push(`${who}：到期字段不能进入卡片次行（${field.label}）`);
+      }
     }
     if ((def.cardFields ?? []).length > MAX_CARD_FIELDS) {
       errors.push(`${who}：卡片展示字段最多 ${MAX_CARD_FIELDS} 项`);
     }
     for (const fieldId of def.searchFields ?? []) {
       if (!fieldIds.has(fieldId)) errors.push(`${who}：搜索字段必须属于字段清单（${fieldId}）`);
+      const field = fieldById.get(fieldId);
+      if (field?.sensitive === true) {
+        errors.push(`${who}：敏感字段不能参与搜索（${field.label}）`);
+      }
+    }
+    if ((def.searchFields ?? []).length === 0) {
+      errors.push(`${who}：至少保留一个搜索字段`);
     }
   }
 

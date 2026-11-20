@@ -7,8 +7,8 @@
     1. 全局密钥状态脉动点（on=青绿呼吸 / 琥珀静止）
     2. 状态文本（标题 + 子标题含会话空闲倒计时，mono 微文）
     3. 动作节点（更新 / 立即锁定）：纯图标机械刻度键，
-       语义全部由悬浮提示与 aria-label 承载；更新节点悬浮提示首列当前版本
-       （构建期由根 VERSION 注入，发布新版本或应用更新后随构建自然同步）
+       语义全部由悬浮提示与 aria-label 承载；当前版本作为常驻读数
+       置于更新节点左侧（构建期由根 VERSION 注入，随构建自然同步）
     4. 更新进行中：图标旋转 + 环形刻度量表按格点亮，
        不可取消阶段保持量表可读
     5. 立即锁定节点（sf-act--warn，禁用条件：!globalKeyReady）
@@ -34,9 +34,16 @@
       </div>
     </div>
     <div class="sf-meridian-actions">
+      <span
+        v-if="appVersion"
+        class="sf-version"
+        role="note"
+        :aria-label="`当前版本 ${appVersion}`"
+      >
+        <span class="sf-version-prefix" aria-hidden="true">V</span>{{ appVersion }}
+      </span>
       <SfActionNode
         :label="updateAction"
-        :tip="updateTip"
         tone="update"
         :disabled="updateChecking || (updateInstalling && !updateCancellable)"
         :busy="updateChecking || (updateInstalling && !updateCancellable)"
@@ -138,10 +145,10 @@ const emit = defineEmits<{
 }>();
 
 /** 当前运行版本：构建期由根 VERSION 注入，不在前端保留任何版本常量；
- * 发布新版本或应用完成更新后，新构建产物内的注入值即为新版本。 */
+ * 渲染为动作区常驻读数，发布新版本或应用完成更新后随新构建自然同步。 */
 const appVersion = (import.meta.env.VITE_APP_VERSION ?? "").trim();
 
-/** 更新节点的动作语义：仅描述按钮将执行什么，作为无障碍名称与提示的动作段 */
+/** 更新节点的动作语义：仅描述按钮将执行什么，作为无障碍名称与悬浮提示 */
 const updateAction = computed(() => {
   if (props.updateCancellable) return "取消下载并清理已接收数据";
   if (props.updateInstalling) {
@@ -150,17 +157,7 @@ const updateAction = computed(() => {
   if (props.updateChecking) return "正在检查更新";
   return props.updateAvailable
     ? `更新到 ${props.updateVersion}，安装前自动落盘并锁定`
-    : "检查是否有可用更新";
-});
-
-/** 悬浮提示：当前版本是判断是否需要更新的第一信息，置于动作描述之前；
- * 有可安装版本时用箭头建立「当前 → 目标」的版本对照 */
-const updateTip = computed(() => {
-  if (!appVersion) return updateAction.value;
-  if (props.updateAvailable && !props.updateInstalling && !props.updateCancellable) {
-    return `当前 v${appVersion} → ${updateAction.value}`;
-  }
-  return `当前 v${appVersion} · ${updateAction.value}`;
+    : "检查更新";
 });
 
 /** 单一入口按当前状态分流，避免按钮文案与动作不一致 */

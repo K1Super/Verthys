@@ -104,6 +104,9 @@ export function usePhotoExport(params: UsePhotoExportParams) {
   const exporting = ref(false);
   const exportProgress = ref(0);
   const exportStatus = ref("");
+  /** 当前导出序号/总数：原生按文件、浏览器按选中照片；total=0 时只显示阶段标签 */
+  const exportCurrent = ref(0);
+  const exportTotal = ref(0);
   /** 复制按钮 UI 状态：true 时显示对勾图标（1.4s 后复位），独立于 copiedToast 提示 */
   const tokenCopied = ref(false);
   let tokenCopiedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -142,6 +145,8 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     exportPath.value = isTauri ? "" : "browser_download";
     exportProgress.value = 0;
     exportStatus.value = "";
+    exportCurrent.value = 0;
+    exportTotal.value = 0;
     showExportDialog.value = true;
     engageExportModal();
   };
@@ -344,11 +349,13 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     }
     // 原始文件导出只有桌面原生链路
     if (exportFormat.value === "original" && !isTauri) {
-      showError("原始文件导出仅在桌面端可用");
+      showError("原文件导出仅在桌面端可用");
       return;
     }
     exporting.value = true;
     exportProgress.value = 0;
+    exportCurrent.value = 0;
+    exportTotal.value = 0;
 
     const selected = photos.value.filter(p => exportSelectedIds.value.has(p.id));
     if (selected.length === 0) {
@@ -378,7 +385,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
             : exportFormat.value === "multiple" ? "venc-multiple"
               : exportFormat.value === "original" ? "original" : "png";
         const needsToken = nativeFormat === "venc-single" || nativeFormat === "venc-multiple";
-        exportStatus.value = "正在读取照片数据…";
+        exportStatus.value = "正在读取照片数据";
         const native = await photoExportStart(
           selected.map((p) => p.metaId as number),
           nativeFormat,
@@ -386,10 +393,19 @@ export function usePhotoExport(params: UsePhotoExportParams) {
           needsToken ? exportToken.value : undefined,
           (p) => {
             exportProgress.value = p.percent;
-            if (p.phase === "scanning") exportStatus.value = "正在读取照片数据…";
-            else if (p.phase === "exporting") {
-              exportStatus.value = `正在导出 ${p.currentName || "照片"}（${p.doneFiles}/${p.totalFiles}）…`;
-            } else if (p.phase === "finishing") exportStatus.value = "正在收尾…";
+            if (p.phase === "scanning") {
+              exportCurrent.value = 0;
+              exportTotal.value = 0;
+              exportStatus.value = "正在读取照片数据";
+            } else if (p.phase === "exporting") {
+              exportTotal.value = p.totalFiles;
+              exportCurrent.value =
+                p.totalFiles > 0 ? Math.min(p.doneFiles + 1, p.totalFiles) : 0;
+              exportStatus.value = "正在导出";
+            } else if (p.phase === "finishing") {
+              exportCurrent.value = exportTotal.value;
+              exportStatus.value = "正在收尾";
+            }
           },
         );
         if (native.errorCode === "E_EXPORT_TOO_LARGE") {
@@ -438,7 +454,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
         // ===== 浏览器模式：内存字节打包 / Canvas PNG / 直接下载 =====
         if (exportFormat.value === "single") {
           const failures: ExportFailure[] = [];
-          exportStatus.value = "读取照片数据…";
+          exportStatus.value = "正在读取照片数据";
           exportProgress.value = 10;
           const specs = collectPhotoSpecs(selected, failures);
           if (specs.length > 0) {
@@ -451,7 +467,7 @@ export function usePhotoExport(params: UsePhotoExportParams) {
               exporting.value = false;
               return;
             }
-            exportStatus.value = "逐帧加密打包…";
+            exportStatus.value = "正在打包";
             exportProgress.value = 50;
             const vencBytes = await packVenc(specs, exportToken.value);
             downloadBlob(vencBytes, `verthys_${Date.now()}.venc`);
@@ -464,7 +480,9 @@ export function usePhotoExport(params: UsePhotoExportParams) {
             const failures: ExportFailure[] = [];
             for (let i = 0; i < selected.length; i++) {
               const ph = selected[i];
-              exportStatus.value = `转换 ${ph.name}（${i + 1}/${selected.length}）…`;
+              exportStatus.value = "正在转换";
+              exportCurrent.value = i + 1;
+              exportTotal.value = selected.length;
               exportProgress.value = Math.round((i / selected.length) * 100);
 
               if (ph.animated === true) {
@@ -502,7 +520,9 @@ export function usePhotoExport(params: UsePhotoExportParams) {
             const failures: ExportFailure[] = [];
             for (let i = 0; i < selected.length; i++) {
               const ph = selected[i];
-              exportStatus.value = `导出 ${ph.name}（${i + 1}/${selected.length}）…`;
+              exportStatus.value = "正在导出";
+              exportCurrent.value = i + 1;
+              exportTotal.value = selected.length;
               exportProgress.value = Math.round((i / selected.length) * 100);
 
               const specs = collectPhotoSpecs([ph], failures);
@@ -584,6 +604,8 @@ export function usePhotoExport(params: UsePhotoExportParams) {
     exporting,
     exportProgress,
     exportStatus,
+    exportCurrent,
+    exportTotal,
     tokenCopied,
     nativeExportAvailable,
     // ===== 导出对话框方法 =====

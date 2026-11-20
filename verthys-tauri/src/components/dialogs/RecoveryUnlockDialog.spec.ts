@@ -77,7 +77,7 @@ describe("RecoveryUnlockDialog", () => {
     setValue(input(), "EEEE-FFFF-0000-1111");
     await settle();
 
-    const confirm = document.querySelector<HTMLButtonElement>(".kv-confirm");
+    const confirm = document.querySelector<HTMLButtonElement>(".btn-primary");
     if (!confirm) throw new Error("缺少提交按钮");
     confirm.click();
     await settle();

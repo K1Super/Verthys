@@ -1,7 +1,7 @@
 <!--
   ModuleDangerZone.vue — 模块不可逆删除 · 引力谱系子分区
   设计：与「奇点锚定」同一维度 —— 无底板、坐标头、左星座 + 右数据与端子：
-    左：裂解星座（断裂开放弧 + 开放菱形核心 + 漂散碎片 + 衰减系链终端）
+    左：裂解星座（断裂开放弧 + 开放四边形核心 + 漂散碎片 + 衰减系链终端）
     右：数据基准（存活 / 已销毁计数）+ 三条轨道条目（模块状态光谱刻度 +
         行尾危险端子）
     尾：错误红字直陈，不用提示盒
@@ -22,7 +22,7 @@
     :error="deleteTarget === null ? error : ''"
   >
     <template #field>
-      <!-- 裂解星座：断裂开放弧 + 开放菱形核心 + 漂散碎片 + 衰减系链 -->
+      <!-- 裂解星座：断裂开放弧 + 开放四边形核心 + 漂散碎片 + 衰减系链 -->
       <svg class="sf-sub-svg mdz-field" viewBox="0 0 208 168" aria-hidden="true">
         <defs>
           <linearGradient id="mdz-arc-a" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -45,7 +45,7 @@
             d="M 98 114 A 30 30 0 0 0 125 90" />
         </g>
 
-        <!-- 裂解核心：开放菱形（四边留缝）+ 衰变炽点 -->
+        <!-- 裂解核心：开放四边形（四边留缝）+ 衰变炽点 -->
         <path class="mdz-seal" fill="none" stroke-width="1.2" stroke-linecap="round"
           d="M 84 66 L 99 81 M 99 87 L 84 102 M 84 102 L 69 87 M 69 81 L 84 66" />
         <circle cx="84" cy="84" r="2" fill="rgba(255,150,150,0.85)" />
@@ -114,7 +114,7 @@
             <div class="sf-orbit-id">
               <span class="sf-orbit-name">{{ m.label }}</span>
               <span class="sf-orbit-status">
-                <span class="sf-status-mark" aria-hidden="true"></span>
+                <span class="sf-status-mark sf-status-mark--orbit" aria-hidden="true"></span>
                 <span class="sf-orbit-state-word">{{ stateParts(m.id)[0] }}</span>
                 <span
                   v-for="part in stateParts(m.id).slice(1)"
@@ -178,9 +178,9 @@
             />
           </div>
           <div class="kv-actions">
-            <button class="btn kv-cancel" type="button" :disabled="busy" @click="closeDelete">取消</button>
+            <button class="btn btn-neutral btn-compact" type="button" :disabled="busy" @click="closeDelete">取消</button>
             <button
-              class="btn kv-danger"
+              class="btn btn-destructive btn-compact"
               type="button"
               :disabled="confirmText !== 'DELETE' || busy"
               @click="onDelete"
@@ -375,9 +375,10 @@ onMounted(() => {
 .mdz-orbit:hover .sf-orbit-idx {
   color: rgba(255, 120, 120, 0.85);
 }
-/* 已销毁：状态菱标与文字转危险红 */
-.mdz-orbit.state-deleted .sf-status-mark {
-  background: rgba(255, 71, 87, 0.75);
+/* 已销毁：描边四边形转危险红（状态色落在描边，不再实心填充） */
+.mdz-orbit.state-deleted .sf-status-mark--orbit {
+  --sf-mark-rgb: 255, 71, 87;
+  --sf-mark-top-rgb: 255, 150, 160;
 }
 .mdz-orbit.state-deleted .sf-orbit-state-word {
   color: rgba(255, 120, 120, 0.85);

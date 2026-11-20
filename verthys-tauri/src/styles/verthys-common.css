@@ -130,20 +130,6 @@
   background: rgba(0, 212, 255, 0.06);
 }
 
-/* ===== 迷你文字按钮 ===== */
-.mini-btn {
-  background: none; border: none;
-  color: var(--accent); font-size: 11px;
-  cursor: pointer; padding: 2px 8px;
-  border-radius: 3px;
-  /* 精确属性过渡（禁 transition: all — 仅悬浮底色变化） */
-  transition: background-color 0.2s;
-  letter-spacing: 0.5px;
-}
-.mini-btn:hover { background: rgba(0,212,255,0.1); }
-.mini-btn.danger { color: var(--danger); }
-.mini-btn.danger:hover { background: rgba(255,46,99,0.1); }
-
 /* ===== 空状态 ===== */
 .empty {
   grid-column: 1 / -1;

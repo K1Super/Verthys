@@ -110,6 +110,41 @@ describe("usePhotoImport — 原生导入", () => {
     expect(api.importing.value).toBe(false);
   });
 
+  it("导入阶段提供阶段标签与计数，不显示文件名", async () => {
+    (open as ReturnType<typeof vi.fn>).mockResolvedValue(["C:/a.jpg"]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    importStartMock.mockImplementation(
+      async (_paths: string[], onProgress: (p: unknown) => void) => {
+        onProgress({
+          percent: 42,
+          elapsedMs: 10,
+          phase: "importing",
+          totalChunks: 2,
+          currentChunk: 1,
+          currentName: "a.jpg",
+          doneFiles: 0,
+          totalFiles: 100,
+        });
+        await gate;
+        return okResult();
+      },
+    );
+
+    const api = scope.run(() => makeTauri())!;
+    const pending = api.onImport();
+
+    await vi.waitFor(() => expect(api.importStatus.value).toBe("正在导入"));
+    expect(api.importCurrent.value).toBe(1);
+    expect(api.importTotal.value).toBe(100);
+    expect(api.importStatus.value).not.toContain("a.jpg");
+
+    release();
+    await pending;
+  });
+
   it("取消结果标记为 ABORTED 并显示已导入数量", async () => {
     (open as ReturnType<typeof vi.fn>).mockResolvedValue(["C:/a.jpg"]);
     importStartMock.mockResolvedValue(okResult({ cancelled: true }));
@@ -132,6 +167,22 @@ describe("usePhotoImport — 原生导入", () => {
     )!;
     await api.onImport();
     expect(showError).toHaveBeenCalledWith("导入失败: E_BOOM");
+  });
+
+  it("去重跳过显式提示，不静默", async () => {
+    (open as ReturnType<typeof vi.fn>).mockResolvedValue(["C:/a.jpg"]);
+    importStartMock.mockResolvedValue(okResult({ skipped: 2 }));
+    const showToast = vi.fn();
+    const api = scope.run(() =>
+      usePhotoImport({
+        photos: shallowRef([]), isTauri: true,
+        ensurePhotoKey: () => true, showError: vi.fn(), showToast,
+      }),
+    )!;
+    await api.onImport();
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast.mock.calls[0][0]).toContain("重复跳过");
+    expect(api.importStatus.value).toContain("重复跳过 2 张");
   });
 
   it("文件对话框连点只发起一次导入", async () => {

@@ -368,6 +368,9 @@
         </div>
       </div>
 
+      <!-- ===== 5b. 回退锚点（生命周期维护入口） ===== -->
+      <AnchorManagementPanel />
+
       <!-- ===== 6. 数据流转轨道（磁盘 → 内存 · 电路走线 + 站点 + 数据包流） ===== -->
       <div class="flow-rail" :class="`flow--${presetAmbienceMode}`">
         <div class="flow-stage">
@@ -427,6 +430,7 @@ import {
   CUSTOM_SESSION_MINUTES_MAX,
 } from "../../constants/key_manager_const";
 import SfActionNode from "./SfActionNode.vue";
+import AnchorManagementPanel from "./AnchorManagementPanel.vue";
 
 /**
  * SecurityDashboard Props

@@ -1,7 +1,8 @@
 <!--
   ActionButton.vue — 通用可复用按钮组件
   复用全局 .btn 基础样式，简洁不带渐变
-  变体：default（默认）/ danger（红色）
+  变体：neutral（默认：取消 / 次要操作，中性星野键）/
+        destructive（删除等破坏性操作，赤势星野键）
   尺寸：紧凑形态，几何由全局 .btn-icon 单源提供（正方形 32×32 + 图标口径）
   图标：默认加号；#icon 插槽可替换为其它图标（仍走同一套盒模型，
         与默认形态等高等宽口径一致，避免同一行按钮尺寸不齐）
@@ -10,7 +11,14 @@
   <button
     type="button"
     class="btn action-btn"
-    :class="[primary ? 'btn-primary' : `action-${variant}`, { 'is-loading': loading, 'btn-icon': iconOnly, 'action-labeled': !iconOnly }]"
+    :class="[
+      primary
+        ? 'btn-primary'
+        : variant === 'destructive'
+          ? 'btn-destructive'
+          : 'btn-neutral',
+      { 'is-loading': loading, 'btn-icon': iconOnly, 'action-labeled': !iconOnly },
+    ]"
     :disabled="disabled || loading"
     @click="$emit('click', $event)"
   >
@@ -32,10 +40,15 @@ import CosmicRingLoader from "../cosmic/CosmicRingLoader.vue";
 
 interface Props {
   label?: string;
-  variant?: "default" | "danger";
+  /**
+   * 皮肤变体：neutral（默认：取消 / 次要）/ destructive（删除等破坏性
+   * 操作），均为星野键族色相；几何与圆角仍由 .btn / .btn-icon 单源提供。
+   */
+  variant?: "neutral" | "destructive";
   /**
    * 采用主按钮皮肤：直接复用全局 .btn-primary（与各窗口「确认」按钮
-   * 完全同一套样式：渐变面 + 势隙线三态呼吸，无白色幕布）。
+   * 完全同一套样式：半透明键面 + 势隙线（悬浮显影），
+   * 无白色幕布）。
    */
   primary?: boolean;
   disabled?: boolean;
@@ -45,7 +58,7 @@ interface Props {
 
 const props = withDefaults(defineProps<Props>(), {
   label: "",
-  variant: "default",
+  variant: "neutral",
   primary: false,
   disabled: false,
   loading: false,
@@ -73,16 +86,6 @@ const iconOnly = computed(() => !props.label && !slots.default);
 .action-labeled {
   padding: 6px 12px;
   font-size: 11px;
-}
-
-/* 变体：danger（红色，用于删除等危险操作） */
-.action-danger {
-  border-color: rgba(255, 46, 99, 0.15);
-  color: var(--accent-red);
-}
-.action-danger:hover:not(:disabled) {
-  background: rgba(255, 46, 99, 0.08);
-  border-color: var(--accent-red);
 }
 
 /* 加号图标：SVG 描边十字 —— 几何精确、粗细可控，与全应用图标语言一致

@@ -98,9 +98,10 @@ production 构建必须能解析发布者证书，否则在 CMake 配置前 fail
 开发运行期消费生产构建产物：`build/core/Release/verthys.dll` 与 `verthys-worker/target/{release,debug}`。
 
 ### 2.3 `scripts/build/build_core.release.ps1`（独立 Release DLL，构建期）
-用法：`powershell -ExecutionPolicy Bypass -File scripts/build/build_core.release.ps1 [-Clean] [-NoPause] [-ReleaseSigning] [-TestHooks]`
+用法：`powershell -ExecutionPolicy Bypass -File scripts/build/build_core.release.ps1 [-Clean] [-NoPause] [-ReleaseSigning] [-TestHooks] [-RequireTestIsolation]`
 `-ReleaseSigning` 启用调用方认证并对 DLL 做 Authenticode 签名，需要与 `build_production.ps1` 相同的证书环境变量；未传时始终产出未签名 DLL（即使环境里残留证书变量，也只提示不启用），保证 CI 质量门的未签名口径不漂移。
 `-TestHooks` 仅用于攻击回归测试：允许 `VERTHYS_TEST_STATE_DIR` 覆盖熔断/回滚状态目录，测试见证域按该目录派生；不可与 `-ReleaseSigning` 同时使用。生产构建（`build_production.ps1`）显式传 `VERTHYS_TEST_HOOKS=OFF`，生产 DLL 不含该代码。
+`-RequireTestIsolation` 必须与 `-TestHooks` 同时使用：缺少隔离目录时拒绝初始化，供自动化测试构建使用；dev 启动器构建不传，允许 dev 应用操作用户真实容器。
 
 ## 3. Tauri 配置（`src-tauri/tauri.conf.json`）
 
@@ -136,7 +137,7 @@ production 构建必须能解析发布者证书，否则在 CMake 配置前 fail
 
 ## 5. 运行时环境变量（运行期）
 
-**结论：产品运行路径不读取任何 `VERTHYS_` 前缀的运行时环境变量**；仅测试钩子构建读取 `VERTHYS_TEST_*`（如 `VERTHYS_TEST_STATE_DIR`、`VERTHYS_TEST_MACHINE_LIMITER_BYPASS`、`VERTHYS_TEST_SERVICE_*`），生产构建不包含这些分支。也不对 WebView2 / GPU 参数做任何运行时环境变量写出。运行时读取的环境变量仅有以下事实：
+**结论：产品运行路径不读取任何 `VERTHYS_` 前缀的运行时环境变量**；仅测试钩子构建读取 `VERTHYS_TEST_*`（如 `VERTHYS_TEST_STATE_DIR`、`VERTHYS_TEST_MACHINE_LIMITER_BYPASS`、`VERTHYS_TEST_SERVICE_*`），生产构建不包含这些分支。测试钩子构建分两种：dev 运行构建（`build_dev`）未设置隔离目录时回落生产状态路径，用于打开/创建真实容器；自动化测试构建（`VERTHYS_TEST_REQUIRE_ISOLATION=ON`）缺少隔离目录即拒绝初始化。也不对 WebView2 / GPU 参数做任何运行时环境变量写出。运行时读取的环境变量仅有以下事实：
 
 - 运行期**读取**的标准系统变量（仅 Windows 相关路径/指纹逻辑，非 VERTHYS_ 前缀）：
   `HOME` / `XDG_DATA_HOME`（非 Windows 路径分支）、`USERPROFILE`、`APPDATA`、`ProgramFiles`、

@@ -1,8 +1,8 @@
 <!--
   VaultRegionPicker.vue — 全国省 / 市 / 区三级联动控件（存签「地区」字段唯一渲染源）
 
-  形态：三枚并置下拉框（省 → 市 → 区），与弹窗输入控件同一凹槽皮肤；
-        历史自由文本无法回解时降级为一行提示，三个下拉框留空。
+  形态：三枚并置选择器（省 → 市 → 区），触发面与选项弹层统一由 VaultSelect 承担；
+        历史自由文本无法回解时降级为一行提示，三个选择器留空。
 
   为什么按需加载区划数据：全国三级区划是约 70KB 的静态数据，只有地址类
   条目真正打开登记窗口时才需要。动态 import 让它留在独立分块中，既不进入
@@ -17,44 +17,38 @@
 <template>
   <div class="region-picker">
     <div class="region-selects">
-      <select
-        class="kv-input kv-select region-select"
-        v-model="selectedProvince"
+      <VaultSelect
+        class="region-select"
+        compact
+        :model-value="selectedProvince"
+        :options="provinceNames"
+        :placeholder="loading ? '载入地区…' : '省份'"
         :disabled="loading || loadFailed"
         aria-label="省份"
-        @change="onProvinceChange"
-      >
-        <option value="">{{ loading ? "载入地区…" : "省份" }}</option>
-        <option v-for="province in provinces" :key="province.name" :value="province.name">
-          {{ province.name }}
-        </option>
-      </select>
+        @update:model-value="onProvinceChange"
+      />
 
-      <select
-        class="kv-input kv-select region-select"
-        v-model="selectedCity"
+      <VaultSelect
+        class="region-select"
+        compact
+        :model-value="selectedCity"
+        :options="cityNames"
+        :placeholder="selectedProvince ? '城市' : '—'"
         :disabled="loading || loadFailed || !selectedProvince"
         aria-label="城市"
-        @change="onCityChange"
-      >
-        <option value="">{{ selectedProvince ? "城市" : "—" }}</option>
-        <option v-for="city in cityOptions" :key="city.name" :value="city.name">
-          {{ city.name }}
-        </option>
-      </select>
+        @update:model-value="onCityChange"
+      />
 
-      <select
-        class="kv-input kv-select region-select"
-        v-model="selectedDistrict"
+      <VaultSelect
+        class="region-select"
+        compact
+        :model-value="selectedDistrict"
+        :options="districtNames"
+        :placeholder="selectedCity ? '区县' : '—'"
         :disabled="loading || loadFailed || !selectedCity"
         aria-label="区县"
-        @change="onDistrictChange"
-      >
-        <option value="">{{ selectedCity ? "区县" : "—" }}</option>
-        <option v-for="district in districtOptions" :key="district" :value="district">
-          {{ district }}
-        </option>
-      </select>
+        @update:model-value="onDistrictChange"
+      />
     </div>
 
     <!-- 不可回解的历史值：原样提示，不伪造选中项（保存时原值保持不变） -->
@@ -70,6 +64,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import type { ChinaRegionProvince } from "../../../constants/china_regions";
 import { joinChinaRegionPath, parseChinaRegionPath } from "../../../lib/china_region";
+import VaultSelect from "../../common/verthys-ui/VaultSelect.vue";
 
 const props = defineProps<{
   /** 落盘的「省/市/区」名称路径；历史自由文本原样传入 */
@@ -102,6 +97,11 @@ const cityOptions = computed(
 const districtOptions = computed(
   () => cityOptions.value.find((city) => city.name === selectedCity.value)?.districts ?? [],
 );
+
+/** 选择器候选项：只投影名称，值即落盘路径中的同名段 */
+const provinceNames = computed(() => provinces.value.map((province) => province.name));
+const cityNames = computed(() => cityOptions.value.map((city) => city.name));
+const districtNames = computed(() => districtOptions.value);
 
 /** 以落盘取值重建三个下拉框的选中态 */
 const syncFromValue = (): void => {
@@ -151,23 +151,23 @@ const emitPath = (province: string, city: string, district: string): void => {
 };
 
 /* 逐级联动：换省清空市与区，换市清空区 —— 避免留下不属于新父级的旧值。
-   以事件值重建本级选中项，不依赖 v-model 与显式监听器的触发顺序。 */
-const onProvinceChange = (event: Event): void => {
-  selectedProvince.value = (event.target as HTMLSelectElement).value;
+   选择器直接给出选中值，不再从原生 change 事件里取。 */
+const onProvinceChange = (province: string): void => {
+  selectedProvince.value = province;
   selectedCity.value = "";
   selectedDistrict.value = "";
-  emitPath(selectedProvince.value, "", "");
+  emitPath(province, "", "");
 };
 
-const onCityChange = (event: Event): void => {
-  selectedCity.value = (event.target as HTMLSelectElement).value;
+const onCityChange = (city: string): void => {
+  selectedCity.value = city;
   selectedDistrict.value = "";
-  emitPath(selectedProvince.value, selectedCity.value, "");
+  emitPath(selectedProvince.value, city, "");
 };
 
-const onDistrictChange = (event: Event): void => {
-  selectedDistrict.value = (event.target as HTMLSelectElement).value;
-  emitPath(selectedProvince.value, selectedCity.value, selectedDistrict.value);
+const onDistrictChange = (district: string): void => {
+  selectedDistrict.value = district;
+  emitPath(selectedProvince.value, selectedCity.value, district);
 };
 </script>
 
@@ -179,15 +179,10 @@ const onDistrictChange = (event: Event): void => {
   min-width: 0;
 }
 
-/* 三列等宽下的窄字号：省名最长（新疆维吾尔自治区），缩短内距换取可读宽度 */
+/* 三列并置：列宽在这里定义，触发面与弹层由 VaultSelect 统一承担 */
 .region-select {
   min-width: 0;
-  padding-left: 9px;
-  padding-right: 24px;
-  font-size: 12px;
-  background-position: right 8px center;
 }
-.region-select:disabled { cursor: not-allowed; opacity: 0.55; }
 
 /* 历史值与区划更名同属「需要用户确认」的状态：只用警示色文字，不加底色框 */
 .region-hint.is-legacy { color: var(--warning); }

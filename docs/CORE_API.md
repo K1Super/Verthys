@@ -25,10 +25,11 @@
 - 导出宏：`VERTHYS_API` 在 Windows 下**恒为空**（不再携带 `__declspec(dllexport/dllimport)`）。
   符号导出**唯一**由链接器 `/DEF:verthys.def` 白名单管控；未列入 `.def` 的接口一律不可达。
   消费方（verthys-worker）经 `libloading` 按名运行时解析，不依赖导入库。
-- 版本宏：`VERTHYS_API_VERSION = 0x0015u`，调用方可用 `#if` 做编译期能力判断。
+- 版本宏：`VERTHYS_API_VERSION = 0x0016u`，调用方可用 `#if` 做编译期能力判断。
   0x0014 追加：`VerthysSecurityStatus` 原因码/已加固的用户态上限计数/策略位/采样时间，
   以及进程级运行时守卫通知接口 `Verthys_NotifyRuntimeGuards`。
   0x0015 追加：`Verthys_FindLidByName`（名称盲索引精确查 ID）。
+  0x0016 追加：回退锚点维护接口 `Verthys_RollbackAnchorList/Reclaim/Release`。
 
 ## 3. 不透明句柄 `VerthysHandle`
 
@@ -417,6 +418,24 @@ if (r != VERTHYS_OK) {
 - 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_FORMAT`（非当前容器格式）。
 - 语义：走类型盲索引 `VTY_KS_TYPE` 分页枚举业务类型 ID，严格升序、跳过墓碑；不读取记录密文，不依赖摘要 `type`。`out_exhausted=1` 表示该类型无更多记录。线程安全：MT-Const。
 
+### Verthys_RollbackAnchorList（API 0x0016）
+`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorList(VerthysHandle handle, VerthysAnchorInfo *out_anchors, uint32_t capacity, uint32_t *out_count, uint32_t *out_state);`
+- 参数：`out_anchors` — 输出数组（可为 NULL 且 capacity=0 时仅查数量）；`out_count` — 实际条数（缓冲区不足时写出所需数量）；`out_state` — 0=状态文件不存在 / 1=已认证加载 / 2=损坏 / 3=TPM 或 IO 导致不可读。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_RESOURCE_LIMIT`（容量不足）/ `VERTHYS_ERR_CORRUPT` / `VERTHYS_ERR_TPM` / `VERTHYS_ERR_UNAUTHORIZED`（发布签名门拒绝）。
+- 语义：只读；不要求容器已解锁。每条记录携带 `struct_size`、UUID、generation 与见证状态（UNKNOWN/ACTIVE/DEAD/TAMPERED）。不返回指纹、路径或任何密钥材料。分类在状态锁外执行；平台错误保持 UNKNOWN，绝不参与自动回收。
+
+### Verthys_RollbackAnchorReclaim（API 0x0016）
+`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorReclaim(VerthysHandle handle, uint32_t flags, uint32_t *out_removed, uint32_t *out_cleanup_failed);`
+- 参数：`flags` 必须含 `VERTHYS_ANCHOR_FLAG_CONFIRM`；`out_cleanup_failed` — 状态已释放但见证键删除失败的条数。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_CORRUPT` / `VERTHYS_ERR_IO` / `VERTHYS_ERR_TPM` / `VERTHYS_ERR_UNAUTHORIZED`。
+- 语义：仅删除 `DEAD`（引用见证确定不存在）的锚点；`ACTIVE/TAMPERED/UNKNOWN` 原样保留。状态写失败返回 IO 且不删除任何见证。线程安全：MT-Safe（跨进程 RollbackState 互斥量）。
+
+### Verthys_RollbackAnchorRelease（API 0x0016）
+`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(VerthysHandle handle, const uint8_t uuid[16], uint32_t flags, uint32_t *out_released, uint32_t *out_cleanup_failed);`
+- 参数：`uuid` — 32 位十六进制 UUID 的二进制形式；`flags` 必须含 CONFIRM；`out_released` — 1=删除条目，0=条目不存在（幂等清理见证）。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_CORRUPT` / `VERTHYS_ERR_IO` / `VERTHYS_ERR_TPM` / `VERTHYS_ERR_UNAUTHORIZED`。
+- 语义：显式释放指定锚点并删除两槽见证。条目不存在时仍幂等清理见证；状态写失败返回 IO 且不删除见证。释放后若容器仍存在，普通解锁会被 fail-closed 拒绝，只能使用恢复码重设锚点。线程安全：MT-Safe。
+
 ---
 
 ## 15. 关键数据结构（节选）
@@ -430,13 +449,15 @@ if (r != VERTHYS_OK) {
 | `VerthysContainerInfo` | 容器只读统计 | 调用方结构体，库填充 |
 | `VerthysDiagnostics` | 运行时性能指标 | 调用方结构体，库填充 |
 | `VerthysSecurityStatus` | 防御闭环 7 路径状态（104 字节） | `path_state[7]` + 计数 + `path_reason[7]` + `limited_count` + `policy_flags` + `checked_at_unix_ms` |
+| `VerthysAnchorInfo` | 回退锚点条目（API 0x0016） | `struct_size` + UUID + generation + 见证状态 + reserved；不含指纹/路径 |
 
 ## 16. 符号前缀与旧符号残留
 
 - 所有公开符号前缀均为 `Verthys_`。全仓源码/头文件中**未发现**旧 `Vault_` 前缀残留
   （历史归档报告中出现 4 处历史记录，非代码）。
-- 导出白名单 `core/verthys.def` 共 69 个符号（模块/轮换（含 keyfile 补录）/PCR/keyfile 等扩展已并入，
-  0x0014 追加 `Verthys_NotifyRuntimeGuards`，0x0015 追加 `Verthys_FindLidByName`），与头文件声明一一对应。
+- 导出白名单 `core/verthys.def` 共 75 个符号（模块/轮换（含 keyfile 补录）/PCR/keyfile 等扩展已并入，
+  0x0014 追加 `Verthys_NotifyRuntimeGuards`，0x0015 追加 `Verthys_FindLidByName`，
+  0x0016 追加 `Verthys_RollbackAnchorList/Reclaim/Release`），与头文件声明一一对应。
 - 名称遗留（供整改参考）：`VerthysRecordType` 中 `VERTHYS_RECORD_FILE_VERTHYS` 语义为“文件保险箱类数据”，
   命名冗余但属源码现状，本文档照实记录，未改代码。
 

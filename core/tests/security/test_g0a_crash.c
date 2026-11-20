@@ -1,5 +1,5 @@
 /*
- * test_g0a_crash.c — G0-A 崩溃注入验收（仅 VERTHYS_G0A_PROTOTYPE 构建）
+ * test_g0a_crash.c — 提交崩溃一致性验收（测试钩子构建）
  *
  * 覆盖 G0-A-DESIGN §6 崩溃一致性矩阵中的关键窗口：
  *   - 新键已建、状态未写（同步路径与预置路径）

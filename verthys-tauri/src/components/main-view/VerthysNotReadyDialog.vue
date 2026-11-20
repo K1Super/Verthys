@@ -8,7 +8,7 @@
       {{ pendingModuleLabel }} · 需要先初始化数据存储才能访问
     </div>
     <div class="kv-actions kv-actions-center">
-      <button class="btn btn-primary kv-confirm" @click="$emit('go-to-security')">
+      <button class="btn btn-primary btn-compact" @click="$emit('go-to-security')">
         前往中枢
       </button>
     </div>

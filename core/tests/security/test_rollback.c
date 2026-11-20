@@ -12,6 +12,7 @@
  * 全部状态文件与库文件写在测试沙箱相对路径，绝不触碰 %LOCALAPPDATA%。
  */
 #include "verthys_test.h"
+#include "verthys.h"
 #include "vty_types.h"
 #include "vty_keymanager.h"
 #include "vty_rollback.h"
@@ -21,6 +22,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <windows.h>
 
 #include "vty_tpm_witness.h"
 #include "vty_secure_state.h"
@@ -508,4 +510,485 @@ TEST(rollback_disabled_allows_old_copy)
     vty_vault_free(v);
     return 0;
 }
+
+/* ------------------------------------------------------------------ *
+ * 生命周期与恢复逃生通道
+ * ------------------------------------------------------------------ */
+
+static uint32_t rb_u32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* 从状态文件定位 UUID 对应条目的见证槽；仅测试使用。 */
+static int rb_entry_slot(const char *state_path,
+                         const uint8_t uuid[VTY_UUID_BYTES], uint8_t *slot)
+{
+    uint8_t buf[RB_FILE_MAX];
+    size_t len = 0;
+    uint32_t count;
+    uint32_t i;
+
+    if (rb_read_file(state_path, buf, sizeof(buf), &len) != 0) return 1;
+    if (len < 16u) return 1;
+    count = rb_u32(buf + 8);
+    if (count > 64u) return 1;
+    for (i = 0; i < count; i++) {
+        const uint8_t *e = buf + 16u + (size_t)i * 57u;
+        if (memcmp(e, uuid, VTY_UUID_BYTES) == 0) {
+            *slot = e[24];
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int rb_find_info(const VtyAnchorInfo *info, uint32_t count,
+                        const uint8_t uuid[VTY_UUID_BYTES])
+{
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        if (memcmp(info[i].uuid, uuid, VTY_UUID_BYTES) == 0) return (int)i;
+    }
+    return -1;
+}
+
+TEST(rollback_recovery_resets_dead_anchor)
+{
+    VtyVault *v = NULL;
+    char code[VTY_RECOVERY_TEXT_BUF];
+    uint8_t uuid[VTY_UUID_BYTES];
+
+    CHECK_EQ(rb_enable("rb_dead_recovery.state"), 0);
+    remove("rb_dead_recovery.vty");
+
+    CHECK_EQ(vty_vault_create("rb_dead_recovery.vty", "rollback-pass", &v,
+                              code, sizeof(code)), VTY_OK);
+    memcpy(uuid, v->header.vault_uuid, VTY_UUID_BYTES);
+    CHECK_EQ(vty_vault_save(v), VTY_OK);
+    vty_vault_free(v);
+
+    /* 见证被删除：普通打开 fail-closed，恢复码必须仍能重设锚点。 */
+    CHECK_EQ(rb_clean_witness(uuid), VTY_OK);
+    v = NULL;
+    CHECK_EQ(vty_vault_open("rb_dead_recovery.vty", "rollback-pass", &v),
+             VTY_E_ROLLBACK);
+    CHECK(v == NULL);
+    CHECK_EQ(vty_vault_open_recovery("rb_dead_recovery.vty", code, &v),
+             VTY_OK);
+    vty_vault_free(v);
+
+    v = NULL;
+    CHECK_EQ(vty_vault_open("rb_dead_recovery.vty", "rollback-pass", &v),
+             VTY_OK);
+    vty_vault_free(v);
+
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(uuid), VTY_OK);
+    remove("rb_dead_recovery.state");
+    remove("rb_dead_recovery.vty");
+    return 0;
+}
+
+TEST(rollback_recovery_resets_tampered_anchor)
+{
+    VtyVault *v = NULL;
+    char code[VTY_RECOVERY_TEXT_BUF];
+    uint8_t uuid[VTY_UUID_BYTES];
+    uint8_t derived[VTY_UUID_BYTES];
+    uint8_t slot = 0;
+    uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
+
+    CHECK_EQ(rb_enable("rb_tamper_recovery.state"), 0);
+    remove("rb_tamper_recovery.vty");
+
+    CHECK_EQ(vty_vault_create("rb_tamper_recovery.vty", "rollback-pass", &v,
+                              code, sizeof(code)), VTY_OK);
+    memcpy(uuid, v->header.vault_uuid, VTY_UUID_BYTES);
+    CHECK_EQ(vty_vault_save(v), VTY_OK);
+    vty_vault_free(v);
+
+    CHECK_EQ(rb_entry_slot("rb_tamper_recovery.state", uuid, &slot), 0);
+    CHECK_EQ(vty_secure_state_identity_rollback(uuid, derived), VTY_OK);
+    CHECK_EQ(vty_tpm_witness_create(derived, slot, fp), VTY_OK);
+    CHECK_EQ(vty_tpm_witness_verify(derived, slot, fp), VTY_OK);
+
+    v = NULL;
+    CHECK_EQ(vty_vault_open("rb_tamper_recovery.vty", "rollback-pass", &v),
+             VTY_E_ROLLBACK);
+    CHECK(v == NULL);
+    CHECK_EQ(vty_vault_open_recovery("rb_tamper_recovery.vty", code, &v),
+             VTY_OK);
+    vty_vault_free(v);
+
+    v = NULL;
+    CHECK_EQ(vty_vault_open("rb_tamper_recovery.vty", "rollback-pass", &v),
+             VTY_OK);
+    vty_vault_free(v);
+
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(uuid), VTY_OK);
+    remove("rb_tamper_recovery.state");
+    remove("rb_tamper_recovery.vty");
+    return 0;
+}
+
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+#if defined(VERTHYS_TEST_REQUIRE_ISOLATION) && VERTHYS_TEST_REQUIRE_ISOLATION
+TEST(rollback_test_build_requires_isolation)
+{
+    char saved[512];
+    DWORD n;
+
+    memset(saved, 0, sizeof(saved));
+    n = GetEnvironmentVariableA("VERTHYS_TEST_STATE_DIR", saved,
+                                sizeof(saved));
+    vty_rollback_set_enabled(1);
+    vty_rollback_reset_path_for_test();
+    SetEnvironmentVariableA("VERTHYS_TEST_STATE_DIR", NULL);
+    /* 自动化测试构建缺少隔离目录时必须拒绝初始化，绝不回落生产目录。 */
+    CHECK_EQ(vty_rollback_init(), VTY_E_POLICY);
+    if (n > 0 && n < sizeof(saved)) {
+        SetEnvironmentVariableA("VERTHYS_TEST_STATE_DIR", saved);
+    }
+    vty_rollback_reset_path_for_test();
+    CHECK_EQ(vty_rollback_init(), VTY_OK);
+    vty_rollback_set_enabled(0);
+    return 0;
+}
+#endif
+
+TEST(rollback_anchor_capacity_preserves_active)
+{
+    uint8_t u1[VTY_UUID_BYTES];
+    uint8_t u2[VTY_UUID_BYTES];
+    uint8_t u3[VTY_UUID_BYTES];
+    VtyAnchorInfo info[8];
+    uint32_t count = 0;
+    int missing = 0;
+    int i;
+
+    memset(u1, 0x11, sizeof(u1));
+    memset(u2, 0x22, sizeof(u2));
+    memset(u3, 0x33, sizeof(u3));
+    CHECK_EQ(rb_enable("rb_cap.state"), 0);
+    vty_rollback_set_max_entries_for_test(2);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u3), VTY_OK);
+
+    CHECK_EQ(vty_rollback_commit(u1, 2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u2, 2), VTY_OK);
+    /* 表满且全是 ACTIVE：必须失败且不得删除任何条目/见证。 */
+    CHECK_EQ(vty_rollback_commit(u3, 2), VTY_E_ANCHOR_FULL);
+    CHECK_EQ(vty_rollback_anchor_list(info, 8, &count, &missing), VTY_OK);
+    CHECK_EQ(count, 2);
+    CHECK_EQ(missing, 0);
+    for (i = 0; i < (int)count; i++) {
+        CHECK_EQ(info[i].state, VTY_ANCHOR_ACTIVE);
+    }
+
+    /* 制造一个 DEAD：只回收它，另一个 ACTIVE 必须保留。 */
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u3, 2), VTY_OK);
+    CHECK_EQ(vty_rollback_anchor_list(info, 8, &count, &missing), VTY_OK);
+    CHECK_EQ(count, 2);
+    CHECK(rb_find_info(info, count, u1) < 0);
+    CHECK(rb_find_info(info, count, u2) >= 0);
+    CHECK(rb_find_info(info, count, u3) >= 0);
+
+    vty_rollback_set_max_entries_for_test(0);
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u3), VTY_OK);
+    remove("rb_cap.state");
+    return 0;
+}
+
+TEST(rollback_anchor_capacity_preserves_tampered)
+{
+    uint8_t u1[VTY_UUID_BYTES];
+    uint8_t u2[VTY_UUID_BYTES];
+    uint8_t u3[VTY_UUID_BYTES];
+    uint8_t derived[VTY_UUID_BYTES];
+    uint8_t slot = 0;
+    uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
+    VtyAnchorInfo info[8];
+    uint32_t count = 0;
+    int missing = 0;
+    int idx;
+
+    memset(u1, 0x44, sizeof(u1));
+    memset(u2, 0x55, sizeof(u2));
+    memset(u3, 0x66, sizeof(u3));
+    CHECK_EQ(rb_enable("rb_cap_t.state"), 0);
+    vty_rollback_set_max_entries_for_test(2);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u3), VTY_OK);
+
+    CHECK_EQ(vty_rollback_commit(u1, 2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u2, 2), VTY_OK);
+    CHECK_EQ(rb_entry_slot("rb_cap_t.state", u1, &slot), 0);
+    CHECK_EQ(vty_secure_state_identity_rollback(u1, derived), VTY_OK);
+    CHECK_EQ(vty_tpm_witness_create(derived, slot, fp), VTY_OK);
+
+    /* TAMPERED 不得被自动回收，容量错误必须独立返回。 */
+    CHECK_EQ(vty_rollback_commit(u3, 2), VTY_E_ANCHOR_FULL);
+    CHECK_EQ(vty_rollback_anchor_list(info, 8, &count, &missing), VTY_OK);
+    CHECK_EQ(count, 2);
+    idx = rb_find_info(info, count, u1);
+    CHECK(idx >= 0);
+    if (idx >= 0) CHECK_EQ(info[idx].state, VTY_ANCHOR_TAMPERED);
+
+    vty_rollback_set_max_entries_for_test(0);
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u3), VTY_OK);
+    remove("rb_cap_t.state");
+    return 0;
+}
+
+TEST(rollback_anchor_capacity_preserves_unknown)
+{
+    uint8_t u1[VTY_UUID_BYTES];
+    uint8_t u2[VTY_UUID_BYTES];
+    uint8_t u3[VTY_UUID_BYTES];
+
+    memset(u1, 0x77, sizeof(u1));
+    memset(u2, 0x88, sizeof(u2));
+    memset(u3, 0x99, sizeof(u3));
+    CHECK_EQ(rb_enable("rb_cap_u.state"), 0);
+    vty_rollback_set_max_entries_for_test(2);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u3), VTY_OK);
+
+    CHECK_EQ(vty_rollback_commit(u1, 2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u2, 2), VTY_OK);
+    vty_tpm_witness_set_exists_override_for_test(-1);
+    CHECK_EQ(vty_rollback_commit(u3, 2), VTY_E_ANCHOR_FULL);
+    vty_tpm_witness_set_exists_override_for_test(-2);
+
+    vty_rollback_set_max_entries_for_test(0);
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u3), VTY_OK);
+    remove("rb_cap_u.state");
+    return 0;
+}
+
+TEST(rollback_anchor_list_classifies)
+{
+    uint8_t u1[VTY_UUID_BYTES];
+    uint8_t u2[VTY_UUID_BYTES];
+    uint8_t u3[VTY_UUID_BYTES];
+    uint8_t derived[VTY_UUID_BYTES];
+    uint8_t slot = 0;
+    uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
+    VtyAnchorInfo info[8];
+    uint32_t count = 0;
+    int missing = 0;
+    int idx;
+
+    memset(u1, 0xA1, sizeof(u1));
+    memset(u2, 0xA2, sizeof(u2));
+    memset(u3, 0xA3, sizeof(u3));
+    CHECK_EQ(rb_enable("rb_list.state"), 0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u3), VTY_OK);
+
+    CHECK_EQ(vty_rollback_commit(u1, 2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u2, 2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u3, 2), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(rb_entry_slot("rb_list.state", u3, &slot), 0);
+    CHECK_EQ(vty_secure_state_identity_rollback(u3, derived), VTY_OK);
+    CHECK_EQ(vty_tpm_witness_create(derived, slot, fp), VTY_OK);
+
+    CHECK_EQ(vty_rollback_anchor_list(info, 8, &count, &missing), VTY_OK);
+    CHECK_EQ(count, 3);
+    idx = rb_find_info(info, count, u1);
+    CHECK(idx >= 0);
+    if (idx >= 0) CHECK_EQ(info[idx].state, VTY_ANCHOR_ACTIVE);
+    idx = rb_find_info(info, count, u2);
+    CHECK(idx >= 0);
+    if (idx >= 0) CHECK_EQ(info[idx].state, VTY_ANCHOR_DEAD);
+    idx = rb_find_info(info, count, u3);
+    CHECK(idx >= 0);
+    if (idx >= 0) CHECK_EQ(info[idx].state, VTY_ANCHOR_TAMPERED);
+
+    /* 平台错误必须保持 UNKNOWN，不能被列表折叠成 DEAD/TAMPERED。 */
+    vty_tpm_witness_set_probe_override_for_test(VTY_WITNESS_PROBE_UNKNOWN);
+    CHECK_EQ(vty_rollback_anchor_list(info, 8, &count, &missing), VTY_OK);
+    CHECK_EQ(count, 3);
+    for (idx = 0; idx < (int)count; idx++) {
+        CHECK_EQ(info[idx].state, VTY_ANCHOR_UNKNOWN);
+    }
+    vty_tpm_witness_set_probe_override_for_test(-1);
+
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u3), VTY_OK);
+    remove("rb_list.state");
+    return 0;
+}
+
+TEST(rollback_anchor_release_preserves_other)
+{
+    uint8_t u1[VTY_UUID_BYTES];
+    uint8_t u2[VTY_UUID_BYTES];
+    uint8_t wid[VTY_UUID_BYTES];
+    uint32_t released = 0;
+    uint32_t cleanup_failed = 0;
+    VtyAnchorInfo info[8];
+    uint32_t count = 0;
+    int missing = 0;
+
+    memset(u1, 0xB1, sizeof(u1));
+    memset(u2, 0xB2, sizeof(u2));
+    CHECK_EQ(rb_enable("rb_rel.state"), 0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u1, 2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u2, 2), VTY_OK);
+
+    CHECK_EQ(vty_rollback_anchor_release(u1, 0, &released, &cleanup_failed),
+             VTY_E_INVALID);
+    CHECK_EQ(vty_rollback_anchor_release(
+                 u1, VTY_ROLLBACK_ANCHOR_CONFIRM, &released, &cleanup_failed),
+             VTY_OK);
+    CHECK_EQ(released, 1);
+    CHECK_EQ(cleanup_failed, 0);
+
+    CHECK_EQ(vty_rollback_anchor_list(info, 8, &count, &missing), VTY_OK);
+    CHECK_EQ(count, 1);
+    CHECK(rb_find_info(info, count, u1) < 0);
+    CHECK(rb_find_info(info, count, u2) >= 0);
+
+    CHECK_EQ(vty_secure_state_identity_rollback(u1, wid), VTY_OK);
+    CHECK_EQ(vty_tpm_witness_exists(wid, 0), 0);
+    CHECK_EQ(vty_tpm_witness_exists(wid, 1), 0);
+    CHECK_EQ(vty_secure_state_identity_rollback(u2, wid), VTY_OK);
+    CHECK_EQ(vty_tpm_witness_exists(wid, 0) +
+             vty_tpm_witness_exists(wid, 1), 1);
+
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    remove("rb_rel.state");
+    return 0;
+}
+
+TEST(rollback_anchor_reclaim_only_dead)
+{
+    uint8_t u1[VTY_UUID_BYTES];
+    uint8_t u2[VTY_UUID_BYTES];
+    uint32_t removed = 0;
+    uint32_t cleanup_failed = 0;
+    VtyAnchorInfo info[8];
+    uint32_t count = 0;
+    int missing = 0;
+
+    memset(u1, 0xC1, sizeof(u1));
+    memset(u2, 0xC2, sizeof(u2));
+    CHECK_EQ(rb_enable("rb_rec.state"), 0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u1, 2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u2, 2), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+
+    CHECK_EQ(vty_rollback_anchor_reclaim(0, &removed, &cleanup_failed),
+             VTY_E_INVALID);
+    CHECK_EQ(vty_rollback_anchor_reclaim(
+                 VTY_ROLLBACK_ANCHOR_CONFIRM, &removed, &cleanup_failed),
+             VTY_OK);
+    CHECK_EQ(removed, 1);
+
+    CHECK_EQ(vty_rollback_anchor_list(info, 8, &count, &missing), VTY_OK);
+    CHECK_EQ(count, 1);
+    CHECK(rb_find_info(info, count, u1) >= 0);
+    CHECK(rb_find_info(info, count, u2) < 0);
+
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    remove("rb_rec.state");
+    return 0;
+}
+
+TEST(rollback_anchor_release_cleanup_failure_reported)
+{
+    uint8_t u1[VTY_UUID_BYTES];
+    uint32_t released = 0;
+    uint32_t cleanup_failed = 0;
+    VtyAnchorInfo info[8];
+    uint32_t count = 0;
+    int missing = 0;
+
+    memset(u1, 0xD1, sizeof(u1));
+    CHECK_EQ(rb_enable("rb_relfail.state"), 0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u1, 2), VTY_OK);
+
+    vty_tpm_witness_set_delete_fail_for_test(2);
+    CHECK_EQ(vty_rollback_anchor_release(
+                 u1, VTY_ROLLBACK_ANCHOR_CONFIRM, &released, &cleanup_failed),
+             VTY_OK);
+    vty_tpm_witness_set_delete_fail_for_test(0);
+    CHECK_EQ(released, 1);
+    CHECK_EQ(cleanup_failed, 1);
+
+    CHECK_EQ(vty_rollback_anchor_list(info, 8, &count, &missing), VTY_OK);
+    CHECK_EQ(count, 0);
+
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    remove("rb_relfail.state");
+    return 0;
+}
+
+TEST(rollback_anchor_full_maps_to_public_error)
+{
+    VerthysHandle h = NULL;
+    char code[VTY_RECOVERY_TEXT_BUF];
+    uint8_t header[28];
+    size_t len = 0;
+    uint8_t uuid[VTY_UUID_BYTES];
+
+    remove("rb_api1.vty");
+    remove("rb_api2.vty");
+    CHECK_EQ(rb_enable("rb_api.state"), 0);
+    vty_rollback_set_max_entries_for_test(1);
+
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4Create(h, "rb_api1.vty", "rb-api-pw", 9, code,
+                              sizeof(code)), VERTHYS_OK);
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4Create(h, "rb_api2.vty", "rb-api-pw", 9, code,
+                              sizeof(code)), VERTHYS_ERR_ANCHOR_FULL);
+    CHECK(fopen("rb_api2.vty", "rb") == NULL);
+    CHECK_EQ(Verthys_Deinit(h), VERTHYS_OK);
+
+    CHECK_EQ(rb_read_file("rb_api1.vty", header, sizeof(header), &len), 0);
+    CHECK(len >= 28u);
+    memcpy(uuid, header + 12, VTY_UUID_BYTES);
+
+    vty_rollback_set_max_entries_for_test(0);
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(uuid), VTY_OK);
+    remove("rb_api.state");
+    remove("rb_api1.vty");
+    remove("rb_api2.vty");
+    return 0;
+}
+#endif
 

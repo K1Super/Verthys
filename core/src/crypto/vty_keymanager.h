@@ -48,11 +48,9 @@ typedef struct VtyVault {
     uint32_t active_copy;          /* 已认证且代最高的副本下标 */
     uint8_t no_rollback_anchor;    /* 1=保存不推进回退锚点（轮换临时库构建） */
     uint8_t rotate_pending;        /* 1=本会话正作为轮换源库（拒绝写操作） */
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     uint8_t  defer_anchor;          /* 1=批量导入会话中，保存暂不推进锚点 */
     uint64_t anchor_floor_gen;      /* 最近一次已提交锚点的 generation */
     uint64_t anchor_defer_since_ms; /* 本次推迟窗口起点（单调毫秒） */
-#endif
     int unlocked;
     uint32_t mem_kib;
     uint32_t iters;
@@ -269,7 +267,6 @@ int vty_vault_verify_persist(const VtyVault *v, VtyPersistCheck *out);
  * 数据区；用于模块事务保证“一次数据提交 + 一次元数据提交”。 */
 int vty_vault_save_meta(VtyVault *v);
 
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
 /* 锚点推迟硬上限：编译进 C 层，不提供运行期放大接口。 */
 #define VTY_ANCHOR_DEFER_MAX_GENS 32u
 #define VTY_ANCHOR_DEFER_MAX_MS   30000u
@@ -289,7 +286,6 @@ int vty_vault_bulk_flush(VtyVault *v);
 
 /* 只读查询：供公共入口在持锁状态下判定是否拒绝非导入写入。 */
 int vty_vault_bulk_active(const VtyVault *v);
-#endif
 
 void vty_vault_lock(VtyVault *v);
 void vty_vault_free(VtyVault *v);

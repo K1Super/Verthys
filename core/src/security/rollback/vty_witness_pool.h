@@ -1,5 +1,5 @@
 /*
- * vty_witness_pool.h — TPM 见证密钥预置池（G0-A 隔离原型）
+ * vty_witness_pool.h — TPM 见证密钥预置池
  *
  * 前提：每次提交同步创建一把 TPM 持久化 ECDSA 密钥约 400–640ms，
  * 且该成本发生在跨进程回滚互斥量内。本模块在后台预创建“下一把”

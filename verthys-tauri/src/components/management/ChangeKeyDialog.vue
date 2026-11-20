@@ -90,9 +90,9 @@
     <p class="kv-warn ck-void">修改完成后，当前密钥与密钥文件将失效</p>
 
     <div class="kv-actions">
-      <button class="btn kv-cancel" type="button" :disabled="changeKeyProcessing" @click="$emit('close')">取消</button>
+      <button class="btn btn-neutral btn-compact" type="button" :disabled="changeKeyProcessing" @click="$emit('close')">取消</button>
       <button
-        class="btn btn-primary kv-confirm"
+        class="btn btn-primary btn-compact"
         type="button"
         :disabled="confirmBlocked"
         @click="$emit('confirm')"

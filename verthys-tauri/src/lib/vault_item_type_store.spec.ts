@@ -63,7 +63,7 @@ function makeDef(over: Partial<VaultTypeDef> = {}): VaultTypeDef {
     icon: "generic",
     tone: "accent",
     titleField: "f_a",
-    cardFields: ["f_a"],
+    cardFields: [],
     searchFields: ["f_a"],
     fields: [{ id: "f_a", label: "甲", kind: "text", required: true }],
     builtin: false,
@@ -157,6 +157,39 @@ describe("自定义类型校验", () => {
     expect(validateVaultTypeDefs([makeDef({ tone: "navy" as VaultTypeDef["tone"] })])).toContain(
       "演示：色调不合法",
     );
+  });
+
+  it("拒绝敏感字段充当标题、次行或搜索字段", () => {
+    const def = makeDef({
+      fields: [
+        { id: "f_a", label: "甲", kind: "text" },
+        { id: "f_b", label: "乙", kind: "password", sensitive: true },
+      ],
+      titleField: "f_b",
+      cardFields: ["f_b"],
+      searchFields: ["f_b"],
+    });
+    const errors = validateVaultTypeDefs([def]);
+    expect(errors).toContain("演示：主标题不能使用敏感字段");
+    expect(errors).toContain("演示：敏感字段不能进入卡片次行（乙）");
+    expect(errors).toContain("演示：敏感字段不能参与搜索（乙）");
+  });
+
+  it("拒绝空 / 重复候选项、非多行文本的内容舱与空搜索字段", () => {
+    const def = makeDef({
+      fields: [
+        { id: "f_a", label: "甲", kind: "select", options: ["同", "  ", "同"] },
+        { id: "f_b", label: "乙", kind: "text", carrier: true },
+      ],
+      titleField: "f_a",
+      cardFields: [],
+      searchFields: [],
+    });
+    const errors = validateVaultTypeDefs([def]);
+    expect(errors).toContain("演示：候选项不能为空（甲）");
+    expect(errors).toContain("演示：候选项重复（甲：同）");
+    expect(errors).toContain("演示：内容舱仅用于多行文本（乙）");
+    expect(errors).toContain("演示：至少保留一个搜索字段");
   });
 
   it("合法的日期区间与地区声明通过校验", () => {
@@ -262,8 +295,49 @@ describe("存储内容降级", () => {
     })!;
     expect(def.fields.map((f) => f.id)).toEqual(["f_a", "f_b"]);
     expect(def.titleField).toBe("f_a");
-    expect(def.cardFields).toEqual(["f_a", "f_b"]);
+    expect(def.cardFields).toEqual(["f_b"]);
     expect(def.searchFields).toEqual(["f_b"]);
+  });
+
+  it("敏感字段不进入标题 / 次行 / 搜索，非多行文本丢弃内容舱", () => {
+    const def = sanitizeVaultTypeDef({
+      id: "custom:x",
+      label: "甲",
+      icon: "note",
+      tone: "warning",
+      titleField: "f_secret",
+      cardFields: ["f_secret", "f_public"],
+      searchFields: ["f_secret", "f_public"],
+      fields: [
+        { id: "f_secret", label: "密", kind: "password", sensitive: true },
+        { id: "f_public", label: "公", kind: "text", carrier: true },
+        { id: "f_note", label: "注", kind: "multiline", carrier: true, multilineRows: 20 },
+      ],
+    })!;
+    expect(def.titleField).toBe("f_public");
+    expect(def.cardFields).toEqual([]);
+    expect(def.searchFields).toEqual(["f_public"]);
+    expect(def.fields.find((field) => field.id === "f_public")!.carrier).toBeUndefined();
+    expect(def.fields.find((field) => field.id === "f_note")).toMatchObject({
+      carrier: true,
+      multilineRows: 2,
+    });
+  });
+
+  it("全部字段敏感时标题留空，不把敏感值铺到卡面", () => {
+    const def = sanitizeVaultTypeDef({
+      id: "custom:x",
+      label: "甲",
+      icon: "note",
+      tone: "warning",
+      titleField: "f_a",
+      cardFields: ["f_a"],
+      searchFields: ["f_a"],
+      fields: [{ id: "f_a", label: "密", kind: "password", sensitive: true }],
+    })!;
+    expect(def.titleField).toBe("");
+    expect(def.cardFields).toEqual([]);
+    expect(def.searchFields).toEqual([]);
   });
 
   it("无候选项的选项字段回退为文本控件，未知控件种类回退为文本", () => {
@@ -376,6 +450,18 @@ describe("读取自定义类型", () => {
     expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, defs, 7);
   });
 
+  it("空类型集记录是有效结果，不回退到更早的非空记录", async () => {
+    typeIdsMock.mockResolvedValue([7, 9]);
+    batchMock.mockResolvedValue(
+      new Map([
+        [9, serializeToJsonB64([])],
+        [7, serializeToJsonB64([makeDef()])],
+      ]),
+    );
+    expect(await loadCustomVaultTypes()).toEqual({ types: [], failed: false });
+    expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, [], 9);
+  });
+
   it("类型盲索引返回多个候选 ID 时按大到小解析", async () => {
     const defs = [makeDef()];
     typeIdsMock.mockResolvedValue([5, 7]);
@@ -455,6 +541,21 @@ describe("写入自定义类型（缓存一致性契约）", () => {
     expect(result).toEqual({ ok: true, persisted: true });
     expect(deleteRecordMock).not.toHaveBeenCalled();
     expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, [makeDef()], 42);
+  });
+
+  it("删除全部类型：写入空记录并清理旧记录", async () => {
+    addRecordMock.mockResolvedValue(42);
+    typeIdsMock.mockResolvedValue([7, 42]);
+    const result = await saveCustomVaultTypes([]);
+
+    expect(result).toEqual({ ok: true, persisted: true });
+    expect(addRecordMock).toHaveBeenCalledWith(TYPE_VAULT_TYPES, "vault-types", expect.any(String));
+    expect(deleteRecordMock).toHaveBeenCalledWith(7);
+    expect(vi.mocked(invalidateSummaryRecord)).toHaveBeenCalledWith(7);
+    expect(vi.mocked(invalidateFullRecord)).toHaveBeenCalledWith(7);
+    expect(vi.mocked(invalidateScannedRecord)).toHaveBeenCalledWith(7);
+    expect(setCacheMock).toHaveBeenCalledWith(VAULT_TYPES_CACHE_KEY, [], 42);
+    expect(persistMock).toHaveBeenCalledTimes(1);
   });
 
   it("新记录写入失败时中止，不写缓存也不落盘", async () => {

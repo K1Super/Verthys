@@ -69,8 +69,10 @@ include!("photo_budget.rs");
 // ===== 全量扫描 SHM 常量 =====
 /// 共享内存魔数 "VSMM"（全量扫描，0x56='V' 0x53='S' 0x4D='M' 0x4D='M'）
 pub const SHM_MAGIC: u32 = 0x56534D4D;
-/// SHM 协议版本（修改布局时递增）
-pub const SHM_VERSION: u32 = 1;
+/// SHM 协议版本（修改布局或载荷认证原语时递增）
+///
+/// v2：载荷认证由 HMAC-SHA256 改为 BLAKE3 keyed，密钥固定 32 字节。
+pub const SHM_VERSION: u32 = 2;
 /// 头部 64 字节
 pub const SHM_HEADER_SIZE: usize = 64;
 /// 每条全量记录索引 40 字节
@@ -101,14 +103,30 @@ pub const SHM_SUMMARY_MAX_SIZE: usize = 4 * 1024 * 1024;
 pub const SCAN_BATCH_MAX_BYTES: u64 = PB_SCAN_BATCH_MAX_BYTES;
 
 // ===== 载荷认证块 =====
-/// SHM 载荷认证块长度：HMAC-SHA256 原始标签 32 字节。
+/// SHM 载荷认证块长度：BLAKE3 keyed 标签 32 字节。
 ///
-/// HMAC-SHA256 的输出标签固定为 32 字节，本常量即其原始长度。
-/// writer 写入记录后对使用区 [0, used) 计算 HMAC 并把标签写到
-/// used 偏移处；reader 以同批密钥验签。认证块不属于头部布局（头部
-/// reserved 区不动），随每批载荷附加在尾部——两端同源引用本常量，
+/// BLAKE3 keyed 的输出标签固定为 32 字节，本常量即其原始长度。
+/// writer 写入记录后对使用区 [0, used) 计算 keyed hash 并把标签写到
+/// used 偏移处；reader 以同批 32 字节密钥验签。认证块不属于头部布局
+///（头部 reserved 区不动），随每批载荷附加在尾部——两端同源引用本常量，
 /// 禁止各端自定义长度。
 pub const SHM_AUTH_BLOCK_LEN: usize = 32;
+
+// ===== 照片原图读取 SHM（单块明文传输） =====
+/// 原图读取共享内存魔数 "VPRM"（区别于扫描 VSMM / VSUM）
+pub const PHOTO_READ_SHM_MAGIC: u32 = 0x5650524D;
+/// 原图读取 SHM 协议版本（布局或认证原语变更时递增）
+///
+/// v2：载荷认证改为 BLAKE3 keyed，头部布局不变。
+pub const PHOTO_READ_SHM_VERSION: u32 = 2;
+/// 原图读取头部 64 字节
+///
+/// [0..4] magic / [4..8] version / [8..12] seq / [12..16] total
+/// [16..20] flags（bit0=done）/ [20..24] payload_len / [24..64] reserved
+pub const PHOTO_READ_SHM_HEADER_SIZE: usize = 64;
+/// 原图读取段容量：头部 + 单块明文上限 + 认证块
+pub const PHOTO_READ_SHM_SIZE: usize =
+    PHOTO_READ_SHM_HEADER_SIZE + PB_PHOTO_CHUNK_SIZE_BYTES as usize + SHM_AUTH_BLOCK_LEN;
 
 // ===== 编译期常量断言宏（等价 const_assert_eq!）=====
 /// 编译期常量相等断言（无需外部 crate）

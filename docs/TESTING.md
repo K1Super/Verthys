@@ -152,7 +152,7 @@ pwsh -NoProfile -File tests/service/e2e-install.ps1 -Artifacts build_security_se
 - 应用安装包 E2E：干净 VM 标准用户双击 perMachine 安装包 → 一次 UAC → 安装器 POSTINSTALL 安装服务并 Running；取消 UAC 后无 Program Files 目录、服务、注册表、根 CA；卸载后服务、CA、事件源、ProgramData、卸载项全部清除且用户加密库保留。
 
 - core 客户端 C1–C8 与 V4 接入级用例在 `VERTHYS_TEST_HOOKS=ON` 构建中注册；默认测试钩子构建不访问真实服务，未显式注入 `VERTHYS_TEST_SERVICE_INSTALLED` 时按“未安装”fail-closed。P1 回归由 `test_runner` 显式设置测试旁路；进入机器预算用例组时撤销旁路，验证服务未安装、管道不可达、预算耗尽三种情况下 V4 解锁与模块解锁均返回 RATE，组结束后恢复旁路。产品构建不包含旁路。
-- `tests/e2e/worker-smoke.ps1` 与 `tests/e2e/rotate-host.ps1` 使用测试钩子 DLL，显式设置 `VERTHYS_TEST_MACHINE_LIMITER_BYPASS=1` 与 `VERTHYS_TEST_STATE_DIR`；熔断/回滚状态走 KnownFolder，仅覆盖 `LOCALAPPDATA` 不足以隔离。
+- `tests/e2e/worker-smoke.ps1` 与 `tests/e2e/rotate-host.ps1` 使用测试钩子 DLL，显式设置 `VERTHYS_TEST_MACHINE_LIMITER_BYPASS=1` 与 `VERTHYS_TEST_STATE_DIR`；熔断/回滚状态走 KnownFolder，仅覆盖 `LOCALAPPDATA` 不足以隔离。自动化测试构建（`VERTHYS_TEST_REQUIRE_ISOLATION=ON`）缺少隔离目录会直接拒绝初始化；dev 运行构建不强制隔离，以便操作真实容器。
 - 服务单元测试含事件日志消息表校验：10 个事件 ID 通过 `FormatMessage` 解析，共 446 断言通过。
 - 生产 OFF 钩子测试可执行文件链接缺陷已修复（`test_witness.c` 仅在测试钩子构建调用派生函数）；执行仍需要已安装服务或测试夹具。
 - 本机实测（测试钩子构建）：机器预算客户端 8/8、V4 解锁/模块解锁接入 2/2、`api_` 15/15、`format_` 15/15、`module_` 15/15；生产 OFF 钩子 core DLL 与测试 exe 构建/链接通过，生产 DLL 不含测试钩子字符串。

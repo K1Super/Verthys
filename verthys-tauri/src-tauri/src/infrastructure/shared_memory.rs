@@ -236,6 +236,125 @@ pub fn read_shm_records(
 }
 
 /* ------------------------------------------------------------------ *
+ * 照片原图读取共享内存（单块明文）                                     *
+ * ------------------------------------------------------------------ */
+
+/// 读取照片原图共享内存中的单块明文。
+///
+/// 布局：[0..4] magic / [4..8] version / [8..12] seq / [12..16] total /
+/// [16..20] flags(bit0=done) / [20..24] payload_len / [24..64] reserved /
+/// [64..64+len] payload / [64+len..+32] BLAKE3 keyed 标签。
+///
+/// 安全约束：
+///   - 载荷长度必须与 worker 声明一致且不超过单块上限；
+///   - 头部 seq/total/done 必须自洽（total > 0、seq < total、done 仅在末块）；
+///   - 提供密钥时强制验签，失败即拒绝（同用户进程篡改防护）；
+///   - 消费完成后随机覆写使用区并解除映射，明文不驻留。
+#[cfg(windows)]
+pub fn read_shm_blob(
+    shm_name: &str,
+    payload_len: usize,
+    auth_key: Option<&[u8]>,
+) -> Result<(Vec<u8>, bool), String> {
+    use crate::infrastructure::shm_schema::{
+        PHOTO_READ_SHM_HEADER_SIZE, PHOTO_READ_SHM_MAGIC, PHOTO_READ_SHM_SIZE,
+        PHOTO_READ_SHM_VERSION,
+    };
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Memory::{
+        MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualLock, VirtualUnlock,
+        FILE_MAP_WRITE,
+    };
+
+    let needed = PHOTO_READ_SHM_HEADER_SIZE
+        .checked_add(payload_len)
+        .ok_or_else(|| "payload length overflow".to_string())?;
+    if payload_len == 0 || needed > PHOTO_READ_SHM_SIZE {
+        return Err("invalid payload length".to_string());
+    }
+    let auth_end = needed
+        .checked_add(SHM_AUTH_BLOCK_LEN)
+        .ok_or_else(|| "auth block overflow".to_string())?;
+    if auth_end > PHOTO_READ_SHM_SIZE {
+        return Err("auth block overflow".to_string());
+    }
+
+    let wide: Vec<u16> = shm_name
+        .encode_utf16()
+        .chain(std::iter::once(0u16))
+        .collect();
+
+    unsafe {
+        let handle = OpenFileMappingW(FILE_MAP_WRITE.0, false, PCWSTR::from_raw(wide.as_ptr()))
+            .map_err(|e| format!("OpenFileMappingW failed: {}", e))?;
+        let addr = MapViewOfFile(handle, FILE_MAP_WRITE, 0, 0, 0);
+        let base = addr.Value as *mut u8;
+        if base.is_null() {
+            note_cleanup_failure("CloseHandle", CloseHandle(handle));
+            return Err("MapViewOfFile failed: null pointer".into());
+        }
+        let lock_size = PHOTO_READ_SHM_SIZE;
+        note_cleanup_failure("VirtualLock", VirtualLock(base as *const _, lock_size));
+
+        let magic = *(base as *const u32);
+        let version = *((base.add(4)) as *const u32);
+        let seq = *((base.add(8)) as *const u32);
+        let total = *((base.add(12)) as *const u32);
+        let done = (*((base.add(16)) as *const u32) & 1) != 0;
+        let len = *((base.add(20)) as *const u32) as usize;
+        if magic != PHOTO_READ_SHM_MAGIC
+            || version != PHOTO_READ_SHM_VERSION
+            || len != payload_len
+            || total == 0
+            || seq >= total
+            || done != (seq.checked_add(1) == Some(total))
+        {
+            note_cleanup_failure("VirtualUnlock", VirtualUnlock(base as *const _, lock_size));
+            note_cleanup_failure("UnmapViewOfFile", UnmapViewOfFile(addr));
+            note_cleanup_failure("CloseHandle", CloseHandle(handle));
+            return Err("shared memory header invalid".to_string());
+        }
+
+        if let Some(key) = auth_key {
+            let data_slice = std::slice::from_raw_parts(base, needed);
+            let tag_slice = std::slice::from_raw_parts(base.add(needed), SHM_AUTH_BLOCK_LEN);
+            if !shm_auth_verify(key, data_slice, tag_slice) {
+                log::error!("[read_shm_blob] SHM 认证失败：载荷完整性校验未通过");
+                note_cleanup_failure("VirtualUnlock", VirtualUnlock(base as *const _, lock_size));
+                note_cleanup_failure("UnmapViewOfFile", UnmapViewOfFile(addr));
+                note_cleanup_failure("CloseHandle", CloseHandle(handle));
+                return Err("SHM 认证失败：载荷完整性校验未通过".to_string());
+            }
+        }
+
+        let payload = std::slice::from_raw_parts(
+            base.add(PHOTO_READ_SHM_HEADER_SIZE),
+            payload_len,
+        )
+        .to_vec();
+
+        /* 消费后立即覆写使用区（头部 + 载荷 + 认证块），明文不驻留段内 */
+        let used = std::slice::from_raw_parts_mut(base, auth_end);
+        fill_random_bytes(used);
+
+        note_cleanup_failure("VirtualUnlock", VirtualUnlock(base as *const _, lock_size));
+        note_cleanup_failure("UnmapViewOfFile", UnmapViewOfFile(addr));
+        note_cleanup_failure("CloseHandle", CloseHandle(handle));
+        Ok((payload, done))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn read_shm_blob(
+    _shm_name: &str,
+    _payload_len: usize,
+    _auth_key: Option<&[u8]>,
+) -> Result<(Vec<u8>, bool), String> {
+    Err("shared memory blob read not supported on non-Windows".into())
+}
+
+/* ------------------------------------------------------------------ *
  * 摘要扫描共享内存读取（轻量元数据，无数据块）              *
  * ------------------------------------------------------------------ */
 

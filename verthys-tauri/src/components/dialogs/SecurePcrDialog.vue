@@ -21,10 +21,10 @@
     </div>
 
     <div class="kv-actions">
-      <button class="btn kv-cancel" type="button" @click="$emit('close')">
+      <button class="btn btn-neutral btn-compact" type="button" @click="$emit('close')">
         确认
       </button>
-      <button class="btn btn-primary kv-confirm" type="button" @click="$emit('goto')">
+      <button class="btn btn-primary btn-compact" type="button" @click="$emit('goto')">
         前往
       </button>
     </div>

@@ -22,8 +22,8 @@
       />
     </div>
     <div class="kv-actions">
-      <button class="btn kv-cancel" @click="$emit('close')" :disabled="disableVerifyProcessing">取消</button>
-      <button class="btn btn-primary kv-confirm" @click="$emit('confirm')" :disabled="!disableVerifyKey || disableVerifyProcessing">
+      <button class="btn btn-neutral btn-compact" @click="$emit('close')" :disabled="disableVerifyProcessing">取消</button>
+      <button class="btn btn-primary btn-compact" @click="$emit('confirm')" :disabled="!disableVerifyKey || disableVerifyProcessing">
         {{ disableVerifyProcessing ? '验证中…' : '确认关闭' }}
       </button>
     </div>

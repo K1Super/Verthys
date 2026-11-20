@@ -777,6 +777,91 @@ VerthysResult Verthys_FindLidByName(VerthysHandle handle,
 }
 
 /* ------------------------------------------------------------------ *
+ * 全量存活记录 ID 枚举（目录叶迭代，可选能力）
+ *
+ * 只遍历记录目录叶并取 lid，不打开记录段、不解密名称，因此不受模块
+ * 锁定状态影响：任何已启用模块的记录只要存活即可枚举。导入前收敛
+ * 续传去重键只依赖“记录是否仍存在”，该枚举是唯一与模块密钥无关的
+ * 权威存活集合。
+ * ------------------------------------------------------------------ */
+VerthysResult Verthys_ListAllLids(VerthysHandle handle,
+                                  uint64_t after_id,
+                                  uint64_t max_count,
+                                  uint64_t *out_ids,
+                                  uint64_t *out_count,
+                                  uint8_t *out_exhausted)
+{
+    struct VerthysContext *ctx;
+    VtyRepoIter *iter = NULL;
+    uint64_t count = 0;
+    int exhausted = 0;
+    int rc;
+
+    if (handle == NULL || out_ids == NULL || out_count == NULL ||
+        out_exhausted == NULL) {
+        return VERTHYS_ERR_INVALID;
+    }
+    *out_count = 0;
+    *out_exhausted = 1;
+    if (max_count == 0u || max_count > VERTHYS_TYPE_ID_BATCH_MAX) {
+        return VERTHYS_ERR_INVALID;
+    }
+    if (after_id == UINT64_MAX) return VERTHYS_ERR_INVALID;
+
+    ctx = (struct VerthysContext *)handle;
+    if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
+    if (emergency_is_triggered()) return VERTHYS_ERR_LOCKED;
+    if (ctx->fmt_version != VERTHYS_FMT_CONTAINER) return VERTHYS_ERR_FORMAT;
+    if (ctx->vault == NULL || !ctx->vault->unlocked || ctx->vault->store == NULL) {
+        return VERTHYS_ERR_LOCKED;
+    }
+
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
+#endif
+    {
+        /* 锁内复检会话存活性：与 Verthys_ListIdsByType 同一纪律。 */
+        VtyVault *vault = (ctx->state == VERTHYS_STATE_UNLOCKED &&
+                        ctx->fmt_version == VERTHYS_FMT_CONTAINER)
+            ? ctx->vault : NULL;
+        if (emergency_is_triggered() || vault == NULL ||
+            !vault->unlocked || vault->store == NULL) {
+            rc = VERTHYS_ERR_LOCKED;
+        } else {
+            rc = vty_repo_iter_open(vault, after_id, &iter);
+            if (rc == VTY_OK) {
+                for (;;) {
+                    VtyRepoLeaf leaf;
+                    int done = 0;
+                    rc = vty_repo_iter_next(iter, &leaf, &done);
+                    if (rc != VTY_OK) break;
+                    if (done) {
+                        exhausted = 1;
+                        break;
+                    }
+                    if (leaf.record_id <= after_id) continue;
+                    out_ids[count++] = leaf.record_id;
+                    if (count == max_count) break;
+                }
+                vty_repo_iter_close(iter);
+                iter = NULL;
+            }
+            if (rc == VTY_OK) {
+                *out_count = count;
+                /* 页满且未遍历到底：明确标记还有下一页。 */
+                *out_exhausted = exhausted ? 1u : 0u;
+                if (count == max_count && !exhausted) *out_exhausted = 0u;
+            }
+            rc = verthys_api_container_map(rc);
+        }
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#endif
+        return rc;
+    }
+}
+
+/* ------------------------------------------------------------------ *
  * 按类型分页枚举记录 ID（类型盲索引，API 版本 0x0012）
  *
  * 为什么不复用摘要扫描：摘要不读记录密文，type 恒为未知 0；

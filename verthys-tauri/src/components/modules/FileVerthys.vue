@@ -43,7 +43,7 @@
         @click="runDamageScan"
       >
         <template #icon>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 9V5a1 1 0 0 1 1-1h4"/><path d="M15 4h4a1 1 0 0 1 1 1v4"/><path d="M20 15v4a1 1 0 0 1-1 1h-4"/><path d="M9 20H5a1 1 0 0 1-1-1v-4"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>
         </template>
       </ActionButton>
       <ActionButton
@@ -105,13 +105,13 @@
         </div>
         <div class="card-actions">
           <button
-            class="mini-btn"
+            class="btn btn-neutral btn-mini"
             :disabled="f.corrupt || deleteStateOf(f) !== undefined || exportingIds.has(f.id) || exporting"
             v-tip="f.corrupt ? '元数据损坏，无法保存' : ''"
             @click="onSave(f)"
           >{{ exportingIds.has(f.id) ? '保存中…' : '保存' }}</button>
           <button
-            class="mini-btn danger"
+            class="btn btn-destructive btn-mini"
             :disabled="deleteStateOf(f) === 'deleting' || exportingIds.has(f.id)"
             v-tip="deleteStateOf(f) === 'persist-retry' ? '删除已提交但落盘失败，点击重试完成落盘' : exportingIds.has(f.id) ? '保存进行中，结束后可删除' : ''"
             @click="onDelete(f)"
@@ -151,13 +151,13 @@
         </div>
         <div class="card-actions">
           <button
-            class="mini-btn"
+            class="btn btn-neutral btn-mini"
             :disabled="f.corrupt || deleteStateOf(f) !== undefined || exportingIds.has(f.id) || exporting"
             v-tip="f.corrupt ? '元数据损坏，无法保存' : ''"
             @click="onSave(f)"
           >{{ exportingIds.has(f.id) ? '保存中…' : '保存' }}</button>
           <button
-            class="mini-btn danger"
+            class="btn btn-destructive btn-mini"
             :disabled="deleteStateOf(f) === 'deleting' || exportingIds.has(f.id)"
             v-tip="deleteStateOf(f) === 'persist-retry' ? '删除已提交但落盘失败，点击重试完成落盘' : exportingIds.has(f.id) ? '保存进行中，结束后可删除' : ''"
             @click="onDelete(f)"
@@ -227,9 +227,9 @@
       </div>
 
       <div class="kv-actions">
-        <button class="btn kv-cancel" type="button" @click="showImportDialog = false">取消</button>
+        <button class="btn btn-neutral btn-compact" type="button" @click="showImportDialog = false">取消</button>
         <button
-          class="btn btn-primary kv-confirm"
+          class="btn btn-primary btn-compact"
           type="button"
           :disabled="usePassword && docPassword.length < MIN_TOKEN_LENGTH"
           @click="startImport"
@@ -255,8 +255,8 @@
         @keydown.enter="confirmSaveKey"
       />
       <div class="kv-actions">
-        <button class="btn kv-cancel" type="button" @click="closeKeyDialog">取消</button>
-        <button class="btn btn-primary kv-confirm" type="button" :disabled="!keyInput" @click="confirmSaveKey">解密保存</button>
+        <button class="btn btn-neutral btn-compact" type="button" @click="closeKeyDialog">取消</button>
+        <button class="btn btn-primary btn-compact" type="button" :disabled="!keyInput" @click="confirmSaveKey">解密保存</button>
       </div>
     </CosmicOverlay>
 
@@ -281,11 +281,13 @@
 
     <!-- 导入进度悬浮覆盖层（统一组件，复用量子能量导流通道）：
          悬浮模块内容区中央，不挤压下方文件网格；导入中可取消（断点状态保留）
-         通道尺寸与模块子密钥验证态一致（非紧凑），不显示百分比/耗时与块计数 -->
+         通道尺寸与模块子密钥验证态一致（非紧凑），不显示百分比/耗时 -->
     <ImportProgressOverlay
       :visible="importing"
       :percent="importPercent"
-      :message="importingFile"
+      status-label="正在导入"
+      :status-current="importCurrent"
+      :status-total="importTotal"
       :compact="false"
       :show-meta="false"
       :cancelable="!cancelPending"
@@ -298,8 +300,9 @@
     <ImportProgressOverlay
       :visible="exporting"
       :percent="exportPercent"
-      :message="exportingFile"
-      :detail="`${exportDone} / ${exportTotal} 块 · ${exportPercent}%`"
+      status-label="正在导出"
+      :status-current="exportDone"
+      :status-total="exportTotal"
       :show-meta="false"
       :cancelable="!exportCancelPending"
       cancel-label="取消保存"
@@ -319,8 +322,8 @@
         继续将先结束该会话并保留其断点状态，之后可续传。
       </div>
       <div class="kv-actions">
-        <button class="btn kv-cancel" type="button" @click="resolveSessionConflict(false)">取消导入</button>
-        <button class="btn btn-primary kv-confirm" type="button" @click="resolveSessionConflict(true)">结束并继续</button>
+        <button class="btn btn-neutral btn-compact" type="button" @click="resolveSessionConflict(false)">取消导入</button>
+        <button class="btn btn-primary btn-compact" type="button" @click="resolveSessionConflict(true)">结束并继续</button>
       </div>
     </CosmicOverlay>
   </div>
@@ -586,8 +589,10 @@ const onImport = async () => {
 };
 
 const importing = ref(false);
-const importingFile = ref("");
 const importPercent = ref(0);
+/** 当前导入文件序号/总数：由管道进度回填 */
+const importCurrent = ref(0);
+const importTotal = ref(0);
 
 /* 取消导入：置位后由管道在每个文件与块批边界检查；已提交文件保留，
    会话按"未成功"语义结束（断点状态保留，下次导入续传去重） */
@@ -617,9 +622,8 @@ const resolveSessionConflict = (allow: boolean) => {
 
 /* 管道进度 → 覆盖层状态（百分比按文件完成比例合并） */
 const applyImportProgress = (p: ImportProgress) => {
-  importingFile.value = p.fileCount === 1
-    ? p.fileName
-    : `${p.fileName}（${p.fileIndex + 1}/${p.fileCount}）`;
+  importCurrent.value = p.fileIndex + 1;
+  importTotal.value = p.fileCount;
   importPercent.value = Math.round(((p.fileIndex + p.fileFraction) / p.fileCount) * 100);
 };
 
@@ -668,6 +672,8 @@ const startImport = async () => {
   importCancelRequested.value = false;
   cancelPending.value = false;
   importPercent.value = 0;
+  importCurrent.value = 0;
+  importTotal.value = 0;
   // 先关窗再等补释放：补释放要走 IPC，若在关窗前 await，用户会看到
   // "点了开始导入但窗口没反应"的空档（与即时反馈铁律冲突）
   showImportDialog.value = false;
@@ -760,6 +766,8 @@ const startImport = async () => {
   } finally {
     importing.value = false;
     importPercent.value = 0;
+    importCurrent.value = 0;
+    importTotal.value = 0;
     importCancelRequested.value = false;
     cancelPending.value = false;
     pendingFiles.value = [];
@@ -832,7 +840,6 @@ const saveTarget = ref<FileEntry | null>(null);
    条目级集合用于把对应卡片的按钮切成「保存中…」并阻断删除 */
 const exportingIds = ref(new Set<number>());
 const exporting = computed(() => exportingIds.value.size > 0);
-const exportingFile = ref("");
 const exportDone = ref(0);
 const exportTotal = ref(0);
 const exportPercent = ref(0);
@@ -897,7 +904,6 @@ const doSave = async (f: FileEntry, password: string | null): Promise<boolean> =
   // 先占位再加锁：回填块载荷/选路径都是 await，若在加锁之后再 await，
   // 双击「保存」的第二次调用会在锁生效前穿过闸门（并发两条导出流）
   exportingIds.value.add(f.id);
-  exportingFile.value = f.name;
   exportDone.value = 0;
   exportTotal.value = f.totalChunks;
   exportPercent.value = f.totalChunks === 0 ? 100 : 0;
@@ -908,7 +914,6 @@ const doSave = async (f: FileEntry, password: string | null): Promise<boolean> =
   try {
     // 缓存命中/历史内联条目先回填块载荷（列表不驻留整份密文）
     source = await hydrateFilePayload(f);
-    exportingFile.value = source.name;
     exportTotal.value = source.totalChunks;
     exportPercent.value = source.totalChunks === 0 ? 100 : 0;
     const ext = extOf(source.name);
@@ -1508,18 +1513,10 @@ useModuleDialogGuard("verthys", () => {
 .info-item.is-error { color: var(--danger); }
 /* 动作区悬浮揭示；焦点进入卡片时同样揭示——否则 Tab 到按钮时
    opacity:0 让焦点位置完全不可见（键盘用户失去位置感） */
-.card-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.3s var(--ease); margin-top: 4px; }
+/* 动作区只用星野键族（中性 / 赤势），本地不声明任何键面皮肤 */
+.card-actions { display: flex; gap: 6px; opacity: 0; transition: opacity 0.3s var(--ease); margin-top: 4px; }
 .acct-card:hover .card-actions,
 .acct-card:focus-within .card-actions { opacity: 1; }
-.mini-btn { background: none; border: none; color: var(--accent); font-size: 11px; cursor: pointer; padding: 2px 8px; border-radius: 3px; transition: color 0.2s var(--ease), background 0.2s var(--ease); letter-spacing: 0.5px; }
-.mini-btn:hover { background: rgba(0,212,255,0.1); }
-.mini-btn:focus-visible { outline: 1px solid rgba(var(--accent-rgb), 0.55); outline-offset: 2px; }
-.mini-btn.danger { color: var(--danger); }
-.mini-btn.danger:hover { background: rgba(255,46,99,0.1); }
-.mini-btn.danger:focus-visible { outline-color: rgba(255,46,99,0.55); }
-/* 禁用态（删除中 / 删除已提交待落盘 / 保存中）：光标与可点击态明确区分 */
-.mini-btn:disabled { cursor: not-allowed; opacity: 0.45; }
-.mini-btn:disabled:hover { background: none; }
 
 /* ===== 导入窗口内容 =====
  * 外壳与标题/动作区由 CosmicOverlay 与 kv-* 承担；本模块只保留导入摘要

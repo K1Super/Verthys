@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 use crate::runtime::budget::PB_PHOTO_MAX_BYTES;
+#[cfg(windows)]
+use crate::runtime::scan_shm::{ScanShm, PHOTO_READ_SHM_SIZE};
 use crate::runtime::module_keys;
 use crate::runtime::protocol::{
     base64_encode, MediaPreviewRecord, MediaReadPayload, Request, Response,
@@ -47,6 +49,13 @@ struct FullJob {
     /// 终态失败（末块哈希不符/块顺序错乱）：后续 next 一律返回错误，
     /// 不得因哈希器已 finalize 而返回 done 掩盖完整性失败。
     failed: bool,
+    /// 原图块共享内存（单 job 一段，逐块覆写）：明文不经 base64/JSON 大行，
+    /// 由宿主直接读取并验签；Drop 时擦除映射。
+    #[cfg(windows)]
+    shm: Option<ScanShm>,
+    /// 与宿主共享的 SHM 载荷认证密钥（每 job 随机，随 job 销毁清零）
+    #[cfg(windows)]
+    shm_key: Option<Zeroizing<Vec<u8>>>,
     last_touch: Instant,
 }
 
@@ -58,7 +67,11 @@ static JOB_SEQ: AtomicU64 = AtomicU64::new(1);
  * 入口                                                                *
  * ------------------------------------------------------------------ */
 
-pub(crate) fn handle_begin(worker: &Worker, req: &Request) -> Response {
+pub(crate) fn handle_begin(
+    worker: &Worker,
+    req: &Request,
+    shm_key: Option<Zeroizing<Vec<u8>>>,
+) -> Response {
     const OP: &str = "photo_read_job_begin";
     if req.meta_id == 0 {
         return error(OP, "meta_id 不能为空");
@@ -97,6 +110,8 @@ pub(crate) fn handle_begin(worker: &Worker, req: &Request) -> Response {
                     chunk_index: None,
                     chunk_total: Some(total),
                     data_b64: Some(jpeg_b64),
+                    shm_name: None,
+                    shm_len: None,
                     preview_cached: Some(cached),
                 });
                 resp.photo_record = record;
@@ -122,6 +137,18 @@ pub(crate) fn handle_begin(worker: &Worker, req: &Request) -> Response {
         } else {
             req.job_id.clone()
         };
+        /* 原图块走共享内存：明文不经 base64/JSON 大行。密钥缺失或段创建
+         * 失败时回退既有 base64 响应，读取语义不变。 */
+        #[cfg(windows)]
+        let (shm, shm_key) = match shm_key {
+            Some(key) => match ScanShm::create(PHOTO_READ_SHM_SIZE) {
+                Ok(segment) => (Some(segment), Some(key)),
+                Err(_) => (None, None),
+            },
+            None => (None, None),
+        };
+        #[cfg(not(windows))]
+        let _ = shm_key;
         jobs.insert(
             job_id.clone(),
             FullJob {
@@ -133,6 +160,10 @@ pub(crate) fn handle_begin(worker: &Worker, req: &Request) -> Response {
                 hasher: blake3::Hasher::new(),
                 cancelled: false,
                 failed: false,
+                #[cfg(windows)]
+                shm,
+                #[cfg(windows)]
+                shm_key,
                 last_touch: Instant::now(),
             },
         );
@@ -147,6 +178,8 @@ pub(crate) fn handle_begin(worker: &Worker, req: &Request) -> Response {
             chunk_index: None,
             chunk_total: Some(total),
             data_b64: None,
+            shm_name: None,
+            shm_len: None,
             preview_cached: None,
         };
         let mut resp = Response::ok(OP);
@@ -200,6 +233,31 @@ pub(crate) fn handle_next(worker: &Worker, req: &Request) -> Response {
         return error(OP, "照片完整性校验失败");
     }
 
+    /* 共享内存路径：明文块写入单 job 段，宿主读取并验签后直接回传前端；
+     * 不生成 base64，不再复制进 5.6MB 级 JSON 行。 */
+    #[cfg(windows)]
+    if let (Some(shm), Some(key)) = (job.shm.as_mut(), job.shm_key.as_ref()) {
+        if let Err(e) = shm.write_blob(seq, job.total, done, &plain, Some(&key[..])) {
+            return error(OP, &format!("照片块共享内存写入失败: {}", e));
+        }
+        let mut resp = Response::ok(OP);
+        resp.photo_read = Some(MediaReadPayload {
+            status: if done { "done" } else { "chunk" }.to_string(),
+            job_id: Some(job.job_id.clone()),
+            meta_id: Some(job.meta_id),
+            name: Some(job.meta.name.clone()),
+            mime: Some(job.meta.mime.clone()),
+            size: Some(job.meta.size),
+            chunk_index: Some(seq),
+            chunk_total: Some(job.total),
+            data_b64: None,
+            shm_name: Some(shm.name().to_string()),
+            shm_len: Some(plain.len() as u64),
+            preview_cached: None,
+        });
+        return resp;
+    }
+
     let mut resp = Response::ok(OP);
     resp.photo_read = Some(MediaReadPayload {
         status: if done { "done" } else { "chunk" }.to_string(),
@@ -211,6 +269,8 @@ pub(crate) fn handle_next(worker: &Worker, req: &Request) -> Response {
         chunk_index: Some(seq),
         chunk_total: Some(job.total),
         data_b64: Some(base64_encode(&plain)),
+        shm_name: None,
+        shm_len: None,
         preview_cached: None,
     });
     resp
@@ -257,6 +317,12 @@ pub(crate) fn handle_cancel(req: &Request) -> Response {
     let mut jobs = lock_jobs();
     if let Some(job) = jobs.get_mut(&req.job_id) {
         job.cancelled = true;
+        /* 立即销毁 SHM：Drop 擦除明文并释放映射，不等空闲回收 */
+        #[cfg(windows)]
+        {
+            job.shm.take();
+            job.shm_key.take();
+        }
     }
     Response::ok(OP)
 }
@@ -369,6 +435,8 @@ fn finished_payload(job_id: &str, meta_id: u64, status: &str) -> MediaReadPayloa
         chunk_index: None,
         chunk_total: None,
         data_b64: None,
+        shm_name: None,
+        shm_len: None,
         preview_cached: None,
     }
 }
@@ -453,6 +521,10 @@ mod tests {
                 hasher: blake3::Hasher::new(),
                 cancelled: false,
                 failed: false,
+                #[cfg(windows)]
+                shm: None,
+                #[cfg(windows)]
+                shm_key: None,
                 last_touch: Instant::now() - JOB_IDLE_TTL - Duration::from_secs(1),
             },
         );

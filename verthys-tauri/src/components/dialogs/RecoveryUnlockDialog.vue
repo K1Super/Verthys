@@ -32,11 +32,11 @@
     <p v-if="error" class="ru-error">{{ error }}</p>
 
     <div class="kv-actions">
-      <button class="btn kv-cancel" type="button" :disabled="submitting" @click="requestClose">
+      <button class="btn btn-neutral btn-compact" type="button" :disabled="submitting" @click="requestClose">
         取消
       </button>
       <button
-        class="btn btn-primary kv-confirm"
+        class="btn btn-primary btn-compact"
         type="button"
         :disabled="submitting || code.trim().length < 16"
         @click="submit"

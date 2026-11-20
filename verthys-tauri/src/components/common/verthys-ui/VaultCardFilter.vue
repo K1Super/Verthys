@@ -191,6 +191,19 @@ watch(open, (value) => {
   }
 });
 
+/* 类型清单变化（例如自定义类型被删除）时收敛条件：已不存在的类型若继续
+   留在条件里，会把列表筛成空集，摘要还会回显原始类型 id。 */
+watch(
+  () => props.types,
+  (types) => {
+    const available = new Set(types.map((def) => def.id));
+    const kinds = criteria.value.kinds.filter((id) => available.has(id));
+    if (kinds.length !== criteria.value.kinds.length) {
+      emit("update:modelValue", { ...criteria.value, kinds });
+    }
+  },
+);
+
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", onDocumentPointerDown, true);
   document.removeEventListener("keydown", onDocumentKeydown);

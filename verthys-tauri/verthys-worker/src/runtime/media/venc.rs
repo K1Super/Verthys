@@ -651,7 +651,7 @@ mod tests {
             u32::from_be_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]),
             VENC_KDF_ITERATIONS
         );
-        assert_eq!(bytes.len() > VENC_PREFIX_BYTES, true);
+        assert!(bytes.len() > VENC_PREFIX_BYTES);
 
         // 第一帧头：type=1、seq=0、len=清单 JSON 长度
         let frame = &bytes[VENC_PREFIX_BYTES..];

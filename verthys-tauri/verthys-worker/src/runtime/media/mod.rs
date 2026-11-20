@@ -18,6 +18,7 @@ pub(crate) mod preview;
 pub(crate) mod read_job;
 pub(crate) mod restore_job;
 pub(crate) mod source;
+pub(crate) mod staged;
 pub(crate) mod venc;
 
 pub(crate) use export_job::{
@@ -29,6 +30,7 @@ pub(crate) use export_job::{
 pub(crate) use import_job::{
     handle_begin, handle_cancel, handle_end, handle_finish, handle_next,
 };
+pub(crate) use staged::handle_add_staged;
 pub(crate) use meta_job::{
     handle_meta_get, handle_meta_probe,
 };

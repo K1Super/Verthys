@@ -430,8 +430,8 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     icon: "bankcard",
     tone: "warning",
     titleField: "bank",
-    cardFields: ["type", "holder"],
-    searchFields: ["bank", "type", "holder"],
+    cardFields: ["type"],
+    searchFields: ["bank", "type"],
     fields: [
       { id: "bank", label: "银行", kind: "text", required: true, group: "账户" },
       { id: "number", label: "卡号", kind: "text", sensitive: true, group: "账户" },
@@ -442,10 +442,10 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
         options: ["储蓄卡", "信用卡", "预付卡", "其他"],
         group: "账户",
       },
-      { id: "holder", label: "持卡人", kind: "text", group: "账户" },
-      { id: "cvv", label: "安全码", kind: "password", sensitive: true, group: "凭据" },
       /* 银行卡不设日期字段：卡片有效期以卡面印字为准，且 MM/YY 形态无法由
-         日期控件无损承载；收藏卡号与安全码本身不依赖到期读数。 */
+         日期控件无损承载；卡号本身不依赖到期读数。
+         持卡人与安全码不采集：两者不参与账户识别，安全码又属于支付凭据，
+         越少留存越好。 */
       { id: "note", label: "备注", kind: "multiline", multilineRows: 2, group: "附注" },
     ],
     builtin: true,
@@ -496,19 +496,15 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     icon: "address",
     tone: "accent",
     titleField: "name",
-    cardFields: ["region", "recipient", "phone"],
-    searchFields: ["name", "region", "detail", "recipient"],
+    cardFields: ["region"],
+    searchFields: ["name", "region", "detail"],
     fields: [
       { id: "name", label: "名称", kind: "text", required: true, group: "地址" },
-      { id: "recipient", label: "姓名", kind: "text", group: "地址" },
-      { id: "phone", label: "电话", kind: "text", group: "地址" },
       /* 省市区取全国行政区划三级联动；落盘为「省/市/区」名称路径，
          历史自由文本原样保留，直到用户在联动框中显式重选。 */
       { id: "region", label: "省市区", kind: "region", group: "地址" },
       { id: "detail", label: "详细地址", kind: "multiline", multilineRows: 2, group: "地址" },
-      { id: "postalCode", label: "邮政编码", kind: "text", group: "地址" },
-      /* 备注与邮编同排半宽：地址卡要在有限高度内同时呈现邮编与备注，
-         备注只作两行摘要，完整内容在悬浮提示与编辑窗口中查看。 */
+      /* 备注只作两行摘要，完整内容在悬浮提示与编辑窗口中查看。 */
       { id: "note", label: "备注", kind: "multiline", multilineRows: 2, group: "附注" },
     ],
     builtin: true,
@@ -522,7 +518,7 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     cardFields: ["note"],
     searchFields: ["address", "note"],
     fields: [
-      { id: "address", label: "地址", kind: "text", required: true },
+      { id: "address", label: "邮箱地址", kind: "text", required: true },
       { id: "password", label: "密码", kind: "password", sensitive: true },
       { id: "note", label: "备注", kind: "multiline", multilineRows: 2 },
     ],

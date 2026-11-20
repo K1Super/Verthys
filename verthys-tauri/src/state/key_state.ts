@@ -81,7 +81,7 @@ export interface KeyState {
   moduleKeyStatusFailed: Ref<boolean>;
   /** 当前安全预设 */
   securityPreset: Ref<SecurityPresetCode>;
-  /** 会话空闲锁定开关（false = 不自动锁定；自定义档可关闭此项） */
+  /** 会话空闲锁定开关（false = 不自动锁定；覆盖容器与全部模块） */
   sessionLockEnabled: Ref<boolean>;
   /** 自定义档空闲锁定时长（分钟，仅自定义档生效；后端受信预设文件为权威） */
   customSessionMinutes: Ref<number>;
@@ -113,6 +113,14 @@ export interface KeyState {
   recoveryResealDone: Ref<boolean>;
 }
 
+/** 会话空闲锁定启动初值
+ *
+ * 容器解锁后、后端受信预设读取前仍可能进入模块，初值必须与 UI 展示的
+ * 持久化预设一致：自定义档按缓存特性决定，标准档恒启用。 */
+function loadInitialSessionLockEnabled(): boolean {
+  return loadSecurityPreset() === 3 ? loadCustomFeatures().session_lock_on_idle : true;
+}
+
 export const keyState: KeyState = {
   verthysReady: ref(false),
   globalKeyReady: ref(false),
@@ -135,7 +143,7 @@ export const keyState: KeyState = {
   // 模块密钥状态加载失败标志（初始 false；加载异常时置 true，守卫据此立即 fail-closed）
   moduleKeyStatusFailed: ref(false),
   securityPreset: ref<SecurityPresetCode>(loadSecurityPreset()),
-  sessionLockEnabled: ref(true),
+  sessionLockEnabled: ref(loadInitialSessionLockEnabled()),
   customSessionMinutes: ref(loadCustomSessionMinutes()),
   initStatus: ref("none"),
   storedVerthysPath: ref(""),

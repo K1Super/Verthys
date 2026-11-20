@@ -24,9 +24,9 @@
     </p>
 
     <div class="kv-actions">
-      <button class="btn kv-cancel" type="button" @click="open = false">关闭</button>
+      <button class="btn btn-neutral btn-compact" type="button" @click="open = false">关闭</button>
       <button
-        class="btn btn-primary kv-confirm"
+        class="btn btn-primary btn-compact"
         type="button"
         :disabled="!state?.available"
         @click="$emit('repair')"

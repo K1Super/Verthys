@@ -28,14 +28,32 @@ use tauri::Manager;
 /// Release 构建必须存在嵌入哈希：缺失即视为构建契约失效并拒绝启动；
 /// 开发构建允许未构建 C 核心时跳过，仅记录警告。
 ///
+/// Debug 宿主加载 `build_dev` / `build/core/Debug` 的 dev DLL 时跳过生产
+/// 基线：该基线来自生产 Release 产物，Debug 产物必然不同；此豁免仅限
+/// Debug 构建与明确的 dev 路径，Release 宿主仍强制校验生产 DLL。
+///
 /// # 参数
 /// - `dll_path`：DLL 文件绝对路径
 ///
 /// # 返回
-/// - `Ok(())`：摘要一致，或开发构建无可用基线
+/// - `Ok(())`：摘要一致，或 Debug 构建的 dev DLL
 /// - `Err(String)`：读取失败、Release 缺少基线或摘要不一致
 pub fn verify_dll_integrity(dll_path: &str) -> Result<(), String> {
     use sha2::{Digest, Sha256};
+
+    #[cfg(debug_assertions)]
+    {
+        let normalized = dll_path.replace('/', "\\").to_ascii_lowercase();
+        if normalized.contains("\\build_dev\\")
+            || normalized.contains("\\build\\core\\debug\\")
+        {
+            log::warn!(
+                "[DLL 校验] Debug 宿主加载 dev DLL，跳过生产哈希基线: {}",
+                sanitize_path(dll_path)
+            );
+            return Ok(());
+        }
+    }
 
     let embedded_hash = dll_hash::DLL_HASH;
     let Some(expected) = embedded_hash else {
@@ -607,7 +625,14 @@ pub fn resolve_worker_path(app: &tauri::AppHandle) -> Result<String, String> {
                 || exe_dir_str.ends_with("\\target\\release");
 
             if is_dev {
-                for profile in &["release", "debug"] {
+                // Debug 宿主优先 Debug worker：Debug worker 跳过 DLL 哈希基线，
+                // 与 build_dev 的 dev DLL 匹配；Release 宿主仍优先 Release worker。
+                let profiles: &[&str] = if cfg!(debug_assertions) {
+                    &["debug", "release"]
+                } else {
+                    &["release", "debug"]
+                };
+                for profile in profiles {
                     let p = exe_dir.join(format!(
                         "../../../verthys-worker/target/{}/{}",
                         profile, exe_name
@@ -723,6 +748,25 @@ pub fn resolve_dll_path(app: &tauri::AppHandle) -> Result<String, String> {
                 || exe_dir_str.ends_with("\\target\\release");
 
             if is_dev {
+                // Debug 宿主（dev 应用）优先使用 build_dev 的 Debug DLL：
+                // 该构建 caller-auth OFF、test-hooks OFF，未签名 dev worker 可正常
+                // 加载；Release 宿主或 build_dev 缺失时才回退到生产 Release DLL。
+                if cfg!(debug_assertions) {
+                    let debug_candidates = [
+                        exe_dir.join("../../../../build_dev/core/Debug/verthys.dll"),
+                        exe_dir.join("../../../../build/core/Debug/verthys.dll"),
+                    ];
+                    for p in &debug_candidates {
+                        if p.exists() {
+                            let abs = p.canonicalize().map_err(|e| e.to_string())?;
+                            log::info!(
+                                "[resolve_dll] 开发环境 Debug 命中: {}",
+                                sanitize_path(&abs.display().to_string())
+                            );
+                            return Ok(abs.display().to_string());
+                        }
+                    }
+                }
                 // 4 级上溯抵达仓库根 Verthys/build/core/Release/
                 //   exe_dir = Verthys/verthys-tauri/src-tauri/target/{debug,release}
                 //   ../../../../ → Verthys/  → build/core/Release/verthys.dll ✓
@@ -842,6 +886,23 @@ mod tests {
             "意外架构: {:?}",
             arch
         );
+    }
+
+    /// Debug 构建必须豁免 dev DLL 的生产哈希基线（Release 仍严格校验）。
+    #[cfg(debug_assertions)]
+    #[test]
+    fn dev_dll_path_skips_production_hash_baseline_in_debug() {
+        let dll = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("build_dev")
+            .join("core")
+            .join("Debug")
+            .join("verthys.dll");
+        if !dll.exists() {
+            return;
+        }
+        assert!(verify_dll_integrity(&dll.display().to_string()).is_ok());
     }
 
     /// 非 PE 文件应返回错误，绝不 panic

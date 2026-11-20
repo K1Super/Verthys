@@ -119,7 +119,10 @@ beforeEach(() => {
   mocks.isCacheDirty.mockReturnValue(false);
   localStorage.clear();
   keyState.securityPreset.value = 0;
+  keyState.verthysReady.value = true;
   keyState.globalKeyReady.value = true;
+  keyState.moduleKeyReady.value = { photo: false, accounts: false, fileverthys: false };
+  keyState.sessionLockEnabled.value = true;
   keyState.customSessionMinutes.value = CUSTOM_SESSION_MINUTES_DEFAULT;
   setSessionTimeout(PRESET_SESSION_TIMEOUT_MS[0]);
   clearSessionTimer();
@@ -418,6 +421,16 @@ describe("空闲锁定计时器武装", () => {
 
   it("启用状态下武装：计时器到点触发锁定链路", async () => {
     vi.useFakeTimers();
+    await applySecurityPreset(1);
+
+    resetSessionTimer();
+    await vi.advanceTimersByTimeAsync(PRESET_SESSION_TIMEOUT_MS[1] + 1000);
+    expect(mocks.waitForFlush).toHaveBeenCalled();
+  });
+
+  it("容器已解锁但全局密钥未验证：统一计时器照常武装并触发整库锁定", async () => {
+    vi.useFakeTimers();
+    keyState.globalKeyReady.value = false;
     await applySecurityPreset(1);
 
     resetSessionTimer();

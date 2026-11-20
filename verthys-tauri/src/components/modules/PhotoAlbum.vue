@@ -42,8 +42,9 @@
         </span>
       </div>
       <div class="top-right">
-        <!-- 顶栏图标键：全部走共享 ActionButton（几何 .btn-icon / 皮肤 .btn-primary /
-             三态 / 图标口径均来自全局单源），本地只挂状态类，不再重复声明尺寸与肤色 -->
+        <!-- 顶栏图标键：全部走共享 ActionButton（几何 .btn-icon 单源）；皮肤按语义分流 ——
+             常规操作为 .btn-primary，删除为 .btn-destructive（同族赤势皮肤）。
+             三态与图标口径均来自全局，本地只挂状态类，不再重复声明尺寸与肤色 -->
         <ActionButton
           primary
           class="privacy-btn"
@@ -99,8 +100,10 @@
           v-tip="importing ? `正在加密 ${importProgress}%` : '导入照片'"
           @click="onImport"
         />
+        <!-- 删除键与同排主键同出一体（同圆角 / 同半透明键面 / 同势隙线），
+             仅能量色相与势隙方向不同，静止即可读出「删除」语义 -->
         <ActionButton
-          primary
+          variant="destructive"
           class="del-top-btn"
           :disabled="albumBusy && !selectMode"
           :aria-label="selectMode ? '取消选择' : '选择删除'"
@@ -146,17 +149,22 @@
         检测到 {{ failedCount }} 张照片无法解密（可能已损坏）
       </StatusBanner>
 
+      <!-- 导入进度悬浮覆盖层（统一组件）：锚定在滚动容器之外的照片区外壳上。
+           若挂在 .masonry-scroll 内，绝对定位会随内容一起滚动，滚轮上滑即把
+           进度通道推出视口；锚定外壳后任何滚动位置都保持居中可见。
+           通道尺寸与模块子密钥验证态一致（非紧凑），不显示百分比/耗时 -->
+      <ImportProgressOverlay
+        :visible="importing"
+        :percent="importProgress"
+        :status-label="importStatus || '正在准备导入'"
+        :status-current="importCurrent"
+        :status-total="importTotal"
+        :compact="false"
+        :show-meta="false"
+      />
+
       <!-- Masonry 瀑布流（滚动容器与列布局分离，确保滚轮垂直滚动正常） -->
       <div class="masonry-scroll" ref="scrollRef" @scroll="onScroll">
-        <!-- 导入进度悬浮覆盖层（统一组件）：悬浮照片区中央，不挤压网格布局
-             通道尺寸与模块子密钥验证态一致（非紧凑），不显示百分比/耗时 -->
-        <ImportProgressOverlay
-          :visible="importing"
-          :percent="importProgress"
-          :message="importStatus"
-          :compact="false"
-          :show-meta="false"
-        />
 
         <!-- 虚拟滚动容器（相册列表强制采用虚拟滚动）：
              行窗口模型：滚动位置的唯一量化状态是行窗口，像素级移动不产生重建；
@@ -205,7 +213,7 @@
     <CosmicRingLoader :overlay="true" :show="photosLoading && photos.length === 0" text="正在加载照片列表…" />
     <CosmicEmpty v-if="!photosLoading && photos.length === 0 && !loadError" text="暂无照片" hint="点击「导入照片」添加" />
 
-    <!-- 沉浸式查看器（内存预览，不落地，滚轮缩放 + 拖拽平移 + 双击复位） -->
+    <!-- 沉浸式查看器（原图直读，不落地；加载期仅呈现统一加载环） -->
     <div
       v-if="viewer"
       ref="viewerRef"
@@ -305,14 +313,14 @@
               </label>
               <label v-if="nativeExportAvailable" class="ed-seg-item" :class="{ active: exportFormat === 'original' }">
                 <input type="radio" v-model="exportFormat" value="original" :disabled="exporting" />
-                <span>原始文件</span>
+                <span>原文件</span>
               </label>
               <label class="ed-seg-item" :class="{ active: exportFormat === 'png' }">
                 <input type="radio" v-model="exportFormat" value="png" :disabled="exporting" />
                 <span>PNG</span>
               </label>
             </div>
-            <p class="kv-hint">{{ exportFormat === 'single' ? '全部照片打包为一个 .venc 文件' : exportFormat === 'multiple' ? '每张照片导出为独立 .venc 文件' : exportFormat === 'original' ? '导出解密后的原始文件；请确认目标位置安全' : '导出为 .png 图片，其他格式自动转码；动图将跳过' }}</p>
+            <p class="kv-hint">{{ exportFormat === 'single' ? '全部照片打包为一个 .venc 文件' : exportFormat === 'multiple' ? '每张照片导出为独立 .venc 文件' : exportFormat === 'original' ? '导出解密后的原文件；请确认目标位置安全' : '导出为 .png 图片，其他格式自动转码；动图将跳过' }}</p>
           </div>
 
           <!-- 令牌（PNG / 原始文件明文导出不需要） -->
@@ -358,13 +366,19 @@
 
       <div class="kv-actions ed-actions">
         <span class="kv-summary">
-          <template v-if="exporting">{{ exportStatus }}</template>
+          <ProgressStatusLine
+            v-if="exporting && exportProgress < 100"
+            :label="exportStatus || '正在导出'"
+            :current="exportCurrent"
+            :total="exportTotal"
+          />
+          <template v-else-if="exporting">{{ exportStatus }}</template>
           <template v-else-if="!exportPath">尚未选择保存位置</template>
-          <template v-else>{{ exportSelectedIds.size }} 张 · {{ exportFormat === 'single' ? '单文件' : exportFormat === 'multiple' ? '多文件' : exportFormat === 'original' ? '原始文件' : 'PNG' }} · {{ exportFormat === 'png' || exportFormat === 'original' ? '明文' : 'AES-256' }}</template>
+          <template v-else>{{ exportSelectedIds.size }} 张 · {{ exportFormat === 'single' ? '单文件' : exportFormat === 'multiple' ? '多文件' : exportFormat === 'original' ? '原文件' : 'PNG' }} · {{ exportFormat === 'png' || exportFormat === 'original' ? '明文' : 'AES-256' }}</template>
         </span>
-        <button class="btn kv-cancel" @click="closeExportDialog" :disabled="exporting">取消</button>
+        <button class="btn btn-neutral btn-compact" @click="closeExportDialog" :disabled="exporting">取消</button>
         <button
-          class="btn btn-primary kv-confirm"
+          class="btn btn-primary btn-compact"
           @click="doExport"
           :disabled="exporting || exportSelectedIds.size === 0 || !exportPath"
         >
@@ -384,25 +398,40 @@
         v-if="fileLoading"
         :loading="fileLoading"
         :percent="fileLoadingPercent"
-        :message="fileLoadingMsg"
         :show-loader="false"
-      />
+      >
+        <template #message>
+          <ProgressStatusLine :label="fileLoadingMsg || '正在读取加密文件'" />
+        </template>
+      </QuantumProgressFlow>
       <!-- 2. 解析中 → 进度条（不显示文件选择行/密钥输入框） -->
       <QuantumProgressFlow
         v-else-if="parsing"
         :loading="parsing"
         :percent="parsingPercent"
-        :message="parsingMsg"
         :show-loader="false"
-      />
+      >
+        <template #message>
+          <ProgressStatusLine :label="parsingMsg || '正在解密加密文件'" />
+        </template>
+      </QuantumProgressFlow>
       <!-- 3. 导入到拾光中 → 进度条（不显示文件选择行/密钥输入框） -->
       <QuantumProgressFlow
         v-else-if="importingParsed"
         :loading="importingParsed"
         :percent="importProgress"
-        :message="importStatus"
         :show-loader="false"
-      />
+      >
+        <template #message>
+          <ProgressStatusLine
+            v-if="importProgress < 100"
+            :label="importStatus || '正在还原'"
+            :current="importCurrent"
+            :total="importTotal"
+          />
+          <span v-else>{{ importStatus }}</span>
+        </template>
+      </QuantumProgressFlow>
       <!-- 4. 解析结果区（有结果且非导入中）→ 预览 + 导入按钮（不显示文件选择行/密钥输入框） -->
       <div v-else-if="parsedPhotos.length > 0" class="parse-result">
         <div class="parse-result-title">已解析 {{ parsedPhotos.length }} 张照片</div>
@@ -413,7 +442,7 @@
           </div>
         </div>
         <div class="kv-actions">
-          <button class="btn btn-primary kv-confirm" @click="importParsedPhotos">导入到拾光</button>
+          <button class="btn btn-primary btn-compact" @click="importParsedPhotos">导入到拾光</button>
         </div>
       </div>
       <!-- 5. 初始态：文件选择行 + 令牌输入框 + 开始解析按钮 -->
@@ -427,37 +456,51 @@
         <div style="height: 12px;"></div>
         <input class="kv-input parse-token-input" v-model="parseToken" placeholder="请输入密钥" />
         <div class="kv-actions">
-          <button class="btn btn-primary kv-confirm" @click="doParse" :disabled="(isTauri ? !parseFilePath : !parseFileData) || !parseToken">
+          <button class="btn btn-primary btn-compact" @click="doParse" :disabled="(isTauri ? !parseFilePath : !parseFileData) || !parseToken">
             开始解析
           </button>
         </div>
       </template>
     </CosmicOverlay>
 
-    <!-- 选择模式操作栏（悬浮层）：绝对定位悬浮照片区底部中央，不占据文档流、不挤压网格 -->
-    <div v-if="selectMode" class="select-bar glass">
-      <div class="select-bar-left">
-        <button class="btn btn-sm select-all-btn" @click="toggleSelectAll">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <rect x="3" y="3" width="18" height="18" rx="2"/>
-            <polyline v-if="allSelected" points="20 6 9 17 4 12"/>
-          </svg>
-          {{ allSelected ? '取消全选' : '全选' }}
-        </button>
-        <span class="select-count">
-          已选 <strong>{{ selectedPhotoIds.size }}</strong> / {{ photos.length }} 张
+    <!-- 选择模式操作栏：固定宽度悬浮操作带 —— 内容整体居中，依次为
+         全选 / 已选计数 / 删除图标键 / 取消图标键；星野只作内部装饰 -->
+    <div v-if="selectMode" class="select-bar starlit-bar">
+      <StarlitSky :seed="23" />
+      <!-- 全选为纯文本开关：指示格承担选中态，不套按钮外框 -->
+      <button class="select-all" type="button" @click="toggleSelectAll">
+        <span class="select-all-box" :class="{ 'is-checked': allSelected }" aria-hidden="true">
+          <svg v-if="allSelected" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
         </span>
-      </div>
-      <div class="select-bar-right">
-        <button class="btn btn-sm select-cancel-btn" @click="cancelSelectMode">取消</button>
-        <button
-          class="btn btn-sm select-delete-btn"
+        {{ allSelected ? '取消全选' : '全选' }}
+      </button>
+      <span class="select-count">
+        已选 <strong>{{ selectedPhotoIds.size }}</strong> / {{ photos.length }} 张
+      </span>
+      <div class="select-bar-actions">
+        <ActionButton
+          class="select-delete-btn"
+          variant="destructive"
+          aria-label="删除选中照片"
+          v-tip="'删除'"
           :disabled="selectedPhotoIds.size === 0"
           @click="onDeleteSelected"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-          删除选中{{ selectedPhotoIds.size > 0 ? ` (${selectedPhotoIds.size})` : '' }}
-        </button>
+          <template #icon>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </template>
+        </ActionButton>
+        <ActionButton
+          class="select-cancel-btn"
+          variant="neutral"
+          aria-label="退出选择模式"
+          v-tip="'取消'"
+          @click="cancelSelectMode"
+        >
+          <template #icon>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </template>
+        </ActionButton>
       </div>
     </div>
 
@@ -496,23 +539,23 @@
 
       <div class="kv-actions">
         <button
-          class="btn"
+          class="btn btn-neutral btn-compact"
           :disabled="repairStage === 'scanning' || repairStage === 'cleaning'"
           @click="rerunRepairScan"
         >
           重新扫描
         </button>
         <button
-          class="btn kv-cancel"
+          class="btn btn-neutral btn-compact"
           :disabled="repairStage === 'scanning' || repairStage === 'cleaning'"
           @click="closeRepair"
         >
           关闭
         </button>
         <template v-if="repairConfirming">
-          <button class="btn kv-cancel" @click="cancelRepairConfirm">取消</button>
+          <button class="btn btn-neutral btn-compact" @click="cancelRepairConfirm">取消</button>
           <button
-            class="btn kv-danger"
+            class="btn btn-destructive btn-compact"
             :disabled="repairStage !== 'scanned'"
             @click="runRepairCleanup"
           >
@@ -521,7 +564,7 @@
         </template>
         <button
           v-else
-          class="btn kv-danger"
+          class="btn btn-destructive btn-compact"
           :disabled="repairStage !== 'scanned' || repairDamagedIds.length === 0"
           @click="requestRepairCleanup"
         >
@@ -538,8 +581,8 @@
         设置对全部窗口重新应用保护；在此之前请勿进行截图或录屏操作。
       </div>
       <div class="kv-actions">
-        <button class="btn kv-cancel" @click="showPrivacyRecovery = false">稍后处理</button>
-        <button class="btn btn-primary kv-confirm" @click="doPrivacyReconcile">立即修复</button>
+        <button class="btn btn-neutral btn-compact" @click="showPrivacyRecovery = false">稍后处理</button>
+        <button class="btn btn-primary btn-compact" @click="doPrivacyReconcile">立即修复</button>
       </div>
     </CosmicOverlay>
   </div>
@@ -565,6 +608,8 @@ import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 import StatusBanner, { type BannerAction } from "../common/feedback/StatusBanner.vue";
 import ActionButton from "../common/verthys-ui/ActionButton.vue";
 import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
+/* 统一进度状态行：导入/导出/解析共用同一套标签·四边形·计数排版 */
+import ProgressStatusLine from "../common/cosmic/ProgressStatusLine.vue";
 import type { PhotoEntry } from "../../composables/photo-album/types";
 // 大型弹窗组件级懒加载（遵循项目硬约束：大型弹窗使用 defineAsyncComponent）
 const CosmicOverlay = defineAsyncComponent(() => import("../common/cosmic/CosmicOverlay.vue"));
@@ -666,6 +711,7 @@ const {
 /* ---------- 4. 导入层 ---------- */
 const {
   importing, importProgress, importStatus,
+  importCurrent, importTotal,
   /* 新增耗时（供 QuantumProgressFlow 使用） */
   importElapsed,
   onImport,
@@ -678,7 +724,8 @@ const {
 /* ---------- 5. 导出层 ---------- */
 const {
   showExportDialog, exportSelectedIds, exportToken, exportFormat, exportPath,
-  exporting, exportProgress, exportStatus, tokenCopied, nativeExportAvailable,
+  exporting, exportProgress, exportStatus, exportCurrent, exportTotal,
+  tokenCopied, nativeExportAvailable,
   openExportDialog, closeExportDialog, togglePhotoSelect, allPhotosSelected,
   toggleSelectAllPhotos, regenerateExportToken, copyExportToken, chooseExportPath,
   doExport,
@@ -729,6 +776,7 @@ const {
   photos, isTauri, ensurePhotoKey, showError, showToast,
   /* Parsed Import：复用导入状态 refs（对话框内实时反馈进度） */
   importProgress, importStatus, importElapsed,
+  importCurrent, importTotal,
 });
 
 /* ---------- 7. 删除层（依赖 usePhotoViewer 的 onView 用于非选择模式下的照片点击） ---------- */
@@ -970,17 +1018,20 @@ useModuleDialogGuard("photos", () => {
 .enc-badge { display: flex; align-items: center; gap: 3px; font-size: 9px; color: var(--accent); font-family: var(--font); letter-spacing: 0.5px; padding: 2px 6px; border: 1px solid rgba(0,212,255,0.2); border-radius: 8px; background: rgba(0,212,255,0.05); }
 .enc-badge svg { width: 10px; height: 10px; }
 .top-right { display: flex; gap: 8px; align-items: center; }
-/* 顶栏图标键的状态与色相：几何（正方形 + 图标口径）与皮肤（实心主色 + 势隙线）
-   全部来自全局 .btn-icon / .btn-primary 与共享 ActionButton，本节不得声明尺寸与肤色 */
+/* 顶栏图标键的状态与色相：几何（正方形 + 图标口径）与皮肤（主键 / 破坏键同族
+   势隙线）全部来自全局 .btn-icon / .btn-primary / .btn-destructive 与共享
+   ActionButton，本节不得声明尺寸与肤色 */
 /* 双状态图标叠放容器：两枚图标绝对定位交叉淡入，切换不产生布局抖动 */
 .privacy-ico { position: relative; display: block; width: 13px; height: 13px; }
 .privacy-ico svg { position: absolute; inset: 0; width: 13px; height: 13px; }
 .privacy-ico-enter-active, .privacy-ico-leave-active { transition: opacity 0.18s var(--ease); }
 .privacy-ico-enter-from, .privacy-ico-leave-to { opacity: 0; }
-/* 顶栏六个图标键的样式一律来自全局 .btn-icon / .btn-primary：
-   本节只保留禁用态的视觉降级，不注入任何额外肤色、遮罩层或位移 ——
-   键与键之间的差异只有图标本身（隐私键的睁眼/闭眼、删除键的垃圾桶） */
-/* 禁用态：各键同口径；隐私键处理中（.is-busy）不降级，
+/* 顶栏图标键的样式一律来自全局：主键（.btn-primary）与删除键的破坏性皮肤
+   （.btn-destructive）同出一体，圆角/几何/三态全部单源；本节只保留整排
+   共用的禁用态降级，不注入任何额外肤色、遮罩层或位移 —— 键与键之间的
+   差异只有图标本身（隐私键的睁眼/闭眼、删除键的垃圾桶） */
+/* 禁用态：整排同口径（含破坏键 — 禁用时统一收敛为中性灰，
+   不让危险色在不可用状态下继续发声）；隐私键处理中（.is-busy）不降级，
    避免快速开关时按钮在禁用与可用之间闪烁（光标与悬浮提示已表达处理中） */
 .export-top-btn:disabled, .import-top-btn:disabled, .del-top-btn:disabled,
 .export-top-btn:disabled:hover, .import-top-btn:disabled:hover, .del-top-btn:disabled:hover,
@@ -1014,24 +1065,55 @@ useModuleDialogGuard("photos", () => {
   margin-inline: auto;
 }
 
-/* 选择模式操作栏：悬浮层——绝对定位在照片区底部中央，脱离文档流不挤压网格。
-   动画仅 opacity/transform（合成器友好）；玻璃底 + 零阴影与模块整体语言一致 */
-.select-bar { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 30; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; max-width: calc(100% - 28px); animation: select-bar-enter 0.3s var(--ease) both; }
+/* 选择模式操作栏：固定宽度悬浮操作带 —— 内容整体居中，依次为
+   全选 / 已选计数 / 删除图标键 / 取消图标键；左右两端由本栏圆角收束。
+   星野底板置空，只保留星点/星云 */
+.select-bar {
+  position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 30;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 308px; max-width: calc(100% - 28px);
+  padding: 6px 12px;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(13, 17, 27, 0.94), rgba(10, 13, 21, 0.9));
+  overflow: hidden;
+  --bar-surface: transparent;
+  animation: select-bar-enter 0.3s var(--ease) both;
+}
 /* 仅淡入：水平居中由元素自身的静态 transform 承担，动画不再叠加位移 */
 @keyframes select-bar-enter { from { opacity: 0; } to { opacity: 1; } }
-.select-bar-left { display: flex; align-items: center; gap: 12px; }
-.select-bar-right { display: flex; align-items: center; gap: 8px; }
-.select-all-btn { display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; }
-.select-all-btn svg { width: 13px; height: 13px; }
-.select-all-btn:hover { color: var(--accent); border-color: rgba(0,212,255,0.3); background: rgba(0,212,255,0.06); }
-.select-count { font-size: 11px; color: var(--text-secondary); font-family: var(--font); letter-spacing: 0.5px; white-space: nowrap; }
+
+/* 全选：纯文本开关（无外框），选中态由指示格承担 */
+.select-all {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 0; border: 0; background: none;
+  color: var(--text-secondary); font-size: 11px; font-family: var(--font); letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+}
+.select-all:hover, .select-all:focus-visible { color: var(--text-primary); }
+.select-all:focus-visible { outline: none; }
+.select-all-box {
+  flex: none; width: 14px; height: 14px; box-sizing: border-box;
+  display: grid; place-items: center;
+  border: 1px solid rgba(205, 224, 244, 0.22);
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--accent);
+  transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
+}
+.select-all-box.is-checked { border-color: rgba(var(--accent-rgb), 0.55); background: rgba(var(--accent-rgb), 0.1); }
+.select-all-box svg { display: block; width: 9px; height: 9px; }
+.select-all:focus-visible .select-all-box { border-color: rgba(var(--accent-rgb), 0.6); }
+
+/* 已选计数：位于内容组中段，数字走主色 */
+.select-count { font-size: 11px; color: var(--text-muted); font-family: var(--font); letter-spacing: 0.5px; white-space: nowrap; }
 .select-count strong { color: var(--accent); font-weight: 600; }
-.select-cancel-btn { font-size: 11px; color: var(--text-muted); cursor: pointer; }
-.select-cancel-btn:hover { color: var(--text-primary); }
-.select-delete-btn { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--danger); border-color: rgba(255,71,87,0.3); background: rgba(255,71,87,0.06); cursor: pointer; }
-.select-delete-btn svg { width: 13px; height: 13px; }
-.select-delete-btn:hover:not(:disabled) { background: rgba(255,71,87,0.12); border-color: rgba(255,71,87,0.5); }
-.select-delete-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* 右侧动作区：两枚同口径图标键（删除 / 取消），均为星野键族成员 ——
+   删除走赤势（.btn-destructive）、取消走中性（.btn-neutral），皮肤、
+   焦点与禁用态全部由全局单源承担，本节不声明任何键面视觉 */
+.select-bar-actions { display: flex; align-items: center; gap: 8px; }
 
 /* Masonry 瀑布流 — 滚动容器与列布局分离 */
 .masonry-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding-right: 4px; min-height: 0; position: relative; scrollbar-width: thin; scrollbar-color: transparent transparent; }
@@ -1050,7 +1132,10 @@ useModuleDialogGuard("photos", () => {
 /* 条目隔离为独立堆叠上下文：内部光影层（z 0）与卡片（z 1）的层级不外泄，
    跨条目遮挡由文档树序保证（后绘制者在上） */
 .masonry-item { position: absolute; top: 0; left: 0; cursor: pointer; isolation: isolate; }
-/* 键盘可达：条目不进入 tab 序列就无法在选择模式中操作；焦点框内嵌不改变布局 */
+/* 键盘可达：条目不进入 tab 序列就无法在选择模式中操作；焦点框内嵌不改变布局。
+   鼠标聚焦不保留系统默认白色焦点框（其下缘在照片底边处会被读作一条白线），
+   键盘焦点仍由下方的 :focus-visible 青色描边承担 */
+.masonry-item:focus:not(:focus-visible) { outline: none; }
 .masonry-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius); }
 
 /* hover 悬浮光影层（滚动性能约束的阴影落点）——
@@ -1099,7 +1184,11 @@ useModuleDialogGuard("photos", () => {
   border-color: var(--border-glass);
   box-shadow: 0 8px 32px rgba(var(--black-rgb), 0.4), 0 0 1px rgba(var(--white-rgb), 0.05), inset 0 1px 0 rgba(var(--white-rgb), 0.04);
 }
-.photo-card:hover { transform: translateY(-6px); }
+/* 悬浮命中锚在未变形的条目上（而非卡片自身）：
+   卡片向上抬升 6px 会同步移动自身命中区，指针若正落在卡片底缘 6px 内，
+   抬升即把命中区移出指针 → 悬浮态丢失 → 卡片落回 → 再次命中，形成高频
+   自激抖动。条目盒不参与位移，命中区恒定，抬升不会反过来取消悬浮 */
+.masonry-item:hover .photo-card { transform: translateY(-6px); }
 /* 提亮层（替代 hover 的 filter 提亮）：白色叠加层仅 opacity 过渡（合成器）。
    强度 0.08 ≈ 原 brightness(0.9→1) 的观感差；饱和度不随 hover 提升
    （合成器约束下无法等价实现 saturate 增益） */
@@ -1108,11 +1197,11 @@ useModuleDialogGuard("photos", () => {
   pointer-events: none; background: rgba(255,255,255,0.08); opacity: 0;
   transition: opacity 0.3s var(--ease);
 }
-.photo-card:hover::before { opacity: 1; }
+.masonry-item:hover .photo-card::before { opacity: 1; }
 /* 图像层：静态降饱和滤镜保留（未悬浮观的基色不变）；无 transform、无过渡 */
 .photo-thumb { background-size: cover; background-position: center; position: relative; z-index: 1; filter: saturate(0.85) brightness(0.9); aspect-ratio: 1 / 1; }
 .photo-overlay { position: absolute; bottom: 0; left: 0; right: 0; z-index: 3; padding: 10px 12px; background: linear-gradient(180deg, transparent, rgba(0,0,0,0.85)); opacity: 0; transition: opacity 0.3s; display: flex; justify-content: space-between; align-items: flex-end; }
-.photo-card:hover .photo-overlay { opacity: 1; }
+.masonry-item:hover .photo-overlay { opacity: 1; }
 /* 键盘进入同样揭示：焦距在条目上时用户必须读得到名称与尺寸 */
 .masonry-item:focus-within .photo-overlay { opacity: 1; }
 /* 触屏无 hover 态：文字层若仍依赖悬浮，将永远不可见 */
@@ -1152,10 +1241,10 @@ useModuleDialogGuard("photos", () => {
 .masonry-scroll[data-scrolling] .photo-card {
   animation-play-state: paused !important;
 }
-.masonry-scroll[data-scrolling] .photo-card:hover { transform: none; }
-.masonry-scroll[data-scrolling] .photo-card:hover::before { opacity: 0; }
-.masonry-scroll[data-scrolling] .photo-card:hover .photo-overlay { opacity: 0; }
-.masonry-scroll[data-scrolling] .photo-card:hover .photo-shine { opacity: 0; }
+.masonry-scroll[data-scrolling] .masonry-item:hover .photo-card { transform: none; }
+.masonry-scroll[data-scrolling] .masonry-item:hover .photo-card::before { opacity: 0; }
+.masonry-scroll[data-scrolling] .masonry-item:hover .photo-overlay { opacity: 0; }
+.masonry-scroll[data-scrolling] .masonry-item:hover .photo-shine { opacity: 0; }
 .masonry-scroll[data-scrolling] .masonry-item:hover::before { visibility: hidden; opacity: 0; transform: none; }
 
 /* 选择删除模式：仅红框选中。环形描边内嵌于缩略图内部渲染，不超出元素边界，
@@ -1172,7 +1261,7 @@ useModuleDialogGuard("photos", () => {
    强度取 tokens.css --shine-alpha / --shine-reach；
    z 4 使其位于提亮层（z 2）与文字遮罩（z 3）之上（按树序层叠） */
 .photo-shine { position: absolute; inset: 0; z-index: 4; border-radius: var(--radius); pointer-events: none; opacity: 0; transition: opacity 0.3s; background: radial-gradient(circle at var(--shine-x, 50%) var(--shine-y, 50%), rgba(var(--accent-rgb), var(--shine-alpha)), transparent var(--shine-reach)); }
-.photo-card:hover .photo-shine { opacity: 1; }
+.masonry-item:hover .photo-shine { opacity: 1; }
 
 /* 查看器 */
 .viewer { position: fixed; inset: 0; background: rgba(0,0,0,0.96); display: flex; align-items: center; justify-content: center; z-index: 2000; transition: filter 0.4s var(--ease); animation: viewer-in 0.4s var(--ease); }
@@ -1198,18 +1287,27 @@ useModuleDialogGuard("photos", () => {
 
 /* 选片工具条：单键全选切换，贴右对齐 */
 .ed-gallery-bar { display: flex; justify-content: flex-end; gap: 8px; padding-bottom: 10px; flex-shrink: 0; }
-.ed-mini-btn { display: flex; align-items: center; gap: 3px; padding: 4px 10px; font-size: 10px; border: 1px solid rgba(205, 224, 244, 0.10); border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease); font-family: var(--font); white-space: nowrap; }
+/* 选片全选开关：默认即保持可读对比（次级文字 + 清晰描边），悬浮再提亮为强调色 */
+.ed-mini-btn { display: flex; align-items: center; gap: 3px; padding: 4px 10px; font-size: 10px; border: 1px solid rgba(205, 224, 244, 0.18); border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease); font-family: var(--font); white-space: nowrap; }
 .ed-mini-btn:hover:not(:disabled) { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.3); background: rgba(var(--accent-rgb), 0.06); }
 .ed-mini-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* 选片网格：虚拟滚动容器（行窗口模型，与主网格同源）。
    flex-basis 归零保证高度由 flex 布局决定，滚动收敛在左栏内部。 */
 .ed-pane--gallery .ed-photo-grid { flex: 1 1 0; min-height: 0; padding: 1px 0 14px 0; }
-.ed-photo-item { position: relative; width: 100%; height: 100%; border-radius: var(--radius-sm); overflow: hidden; cursor: pointer; background: rgba(0,0,0,0.35); outline: 1px solid transparent; outline-offset: -1px; transition: outline-color 0.18s var(--ease); }
-.ed-photo-item:hover { outline-color: rgba(var(--accent-rgb), 0.3); }
-.ed-photo-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-/* 选中描边内收 2px：完全落在卡片盒内，避免虚拟项容器裁剪描边 */
-.ed-photo-item.selected { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ed-photo-item { position: relative; width: 100%; height: 100%; border-radius: var(--radius-sm); overflow: hidden; cursor: pointer; background: rgba(0,0,0,0.35); isolation: isolate; }
+/* 悬浮 / 键盘焦点 / 选中描边统一由内容之上的独立覆盖层绘制：
+   缩略图与底部文件名层不会再盖住描边；覆盖层不接收指针事件 */
+.ed-photo-item::after {
+  content: ''; position: absolute; inset: 0; z-index: 6;
+  border-radius: inherit; pointer-events: none;
+  box-shadow: inset 0 0 0 1px transparent;
+  transition: box-shadow 0.18s var(--ease);
+}
+.ed-photo-item:hover::after { box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.3); }
+.ed-photo-item:focus-visible::after { box-shadow: inset 0 0 0 2px var(--accent); }
+/* 选中描边内收 2px（覆盖层在圆角内绘制），完全落在卡片盒内 */
+.ed-photo-item.selected::after { box-shadow: inset 0 0 0 2px var(--accent); }
 .ed-photo-thumb { position: absolute; inset: 0 0 18px 0; background-size: cover; background-position: center; }
 .ed-photo-name { position: absolute; left: 0; right: 0; bottom: 0; height: 18px; line-height: 18px; padding: 0 6px; font-size: 9px; color: var(--text-secondary); background: rgba(0,0,0,0.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 

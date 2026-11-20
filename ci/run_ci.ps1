@@ -216,7 +216,7 @@ $rsGenerated = Join-Path $projectRoot "verthys-tauri\photo_budget.rs"
 $tsRequired = @(
     'FLUSH_MAX_RETRIES', 'FLUSH_RETRY_BACKOFF_MS', 'FLUSH_VERIFY_TIMEOUT_MS',
     'SESSION_BEGIN_TIMEOUT_MS', 'SESSION_END_TIMEOUT_MS', 'SESSION_FORCE_CLOSE_TIMEOUT_MS',
-    'DATAB64_CACHE_MAX_BYTES', 'PHOTO_INDEX_MAX_BYTES', 'PHOTO_THUMB_MAX_CHARS',
+    'DATAB64_CACHE_MAX_BYTES',
     'PHOTO_MAX_BYTES', 'MAX_EXPORT_SINGLE_BYTES'
 )
 $rsRequired = @(
@@ -280,8 +280,15 @@ if ($deadAllow) {
 }
 foreach ($crateDir in @("verthys-tauri\src-tauri", "verthys-tauri\verthys-worker")) {
     Push-Location (Join-Path $projectRoot $crateDir)
+    # clippy 的普通告警走 stderr；PS7 在 Stop 策略下会把原生 stderr 提升为
+    # 终止错误，导致"有告警即中断"而无法走到退出码判定。这里只在本段降级
+    # 为 Continue，退出码仍是唯一判据（-D dead_code 的失败依然为红）。
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & cargo clippy --all-targets --quiet -- -D dead_code 2>&1 | ForEach-Object { Write-Host $_ }
-    if ($LASTEXITCODE -ne 0) {
+    $clippyExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+    if ($clippyExit -ne 0) {
         Write-Host "[死代码门][RED] $crateDir 存在未使用项"
         $rustDeadRed = $true
     }

@@ -71,10 +71,16 @@ EXPORTS
     Verthys_FindFirstLidByType
     Verthys_FindLidByName
     Verthys_ListIdsByType
+    Verthys_ListAllLids
     Verthys_Flush
+    Verthys_BulkImportBegin
+    Verthys_BulkImportCommit
     Verthys_GetContainerInfo
     Verthys_VerifyIntegrity
     Verthys_GetDiagnostics
     Verthys_GetSecurityStatus
     Verthys_NotifyRuntimeGuards
     Verthys_VerifyPersist
+    Verthys_RollbackAnchorList
+    Verthys_RollbackAnchorReclaim
+    Verthys_RollbackAnchorRelease

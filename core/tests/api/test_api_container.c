@@ -263,6 +263,65 @@ TEST(api_list_ids_by_type_and_verify_persist)
     return 0;
 }
 
+#define ALL_LIDS_PATH "api_list_all_lids.vty"
+
+TEST(api_list_all_lids_tracks_live_records)
+{
+    VerthysHandle h = NULL;
+    uint64_t ids[8];
+    uint64_t count = 0;
+    uint64_t a1 = 0, p1 = 0, a2 = 0;
+    uint8_t exhausted = 0;
+    char code[VTY_RECOVERY_TEXT_BUF];
+
+    remove(ALL_LIDS_PATH);
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4Create(h, ALL_LIDS_PATH, REC_PW,
+                              strlen(REC_PW), code, sizeof(code)),
+             VERTHYS_OK);
+
+    CHECK_EQ(rec_add(h, VERTHYS_RECORD_ACCOUNT, "a1", "1", &a1), VERTHYS_OK);
+    CHECK_EQ(rec_add(h, VERTHYS_RECORD_PHOTO, "p1", "2", &p1), VERTHYS_OK);
+    CHECK_EQ(rec_add(h, VERTHYS_RECORD_ACCOUNT, "a2", "3", &a2), VERTHYS_OK);
+
+    /* 跨类型的全量存活 ID：升序、分页、末页耗尽 */
+    memset(ids, 0, sizeof(ids));
+    CHECK_EQ(Verthys_ListAllLids(h, 0, 2, ids, &count, &exhausted),
+             VERTHYS_OK);
+    CHECK_EQ(count, 2u);
+    CHECK_EQ(ids[0], a1);
+    CHECK_EQ(ids[1], p1);
+    CHECK_EQ(exhausted, 0u);
+
+    memset(ids, 0, sizeof(ids));
+    CHECK_EQ(Verthys_ListAllLids(h, p1, 2, ids, &count, &exhausted),
+             VERTHYS_OK);
+    CHECK_EQ(count, 1u);
+    CHECK_EQ(ids[0], a2);
+    CHECK_EQ(exhausted, 1u);
+
+    /* 删除后目录叶墓碑：全量枚举必须跳过该 ID */
+    CHECK_EQ(Verthys_DeleteRecord(h, p1), VERTHYS_OK);
+    memset(ids, 0, sizeof(ids));
+    CHECK_EQ(Verthys_ListAllLids(h, 0, 8, ids, &count, &exhausted),
+             VERTHYS_OK);
+    CHECK_EQ(count, 2u);
+    CHECK_EQ(ids[0], a1);
+    CHECK_EQ(ids[1], a2);
+    CHECK_EQ(exhausted, 1u);
+
+    /* 非法参数拒绝 */
+    CHECK_EQ(Verthys_ListAllLids(h, 0, 0, ids, &count, &exhausted),
+             VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_ListAllLids(h, 0, 8, NULL, &count, &exhausted),
+             VERTHYS_ERR_INVALID);
+
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_Deinit(h), VERTHYS_OK);
+    remove(ALL_LIDS_PATH);
+    return 0;
+}
+
 #define NAME_PATH "api_find_name.vty"
 
 TEST(api_find_lid_by_name)

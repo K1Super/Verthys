@@ -171,6 +171,8 @@ export enum VerthysErrorCode {
   E_TPM = "E_TPM",
   /** 回退锚点拒绝旧副本（文件回退） */
   E_ROLLBACK = "E_ROLLBACK",
+  /** 本机回退锚点表已满且无可自动回收条目（需维护清理） */
+  E_ANCHOR_FULL = "E_ANCHOR_FULL",
   /** 加密库已启用 keyfile 因子，但本次未提供 keyfile 文件 */
   E_KEYFILE_REQUIRED = "E_KEYFILE_REQUIRED",
   /** 提供的 keyfile 文件不是合法 VKFL（长度/magic/版本/校验和非法） */
@@ -469,6 +471,11 @@ const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
     title: "检测到文件回退",
     message: "当前加密库文件早于安全锚点记录，可能被替换为旧副本。",
     guidance: "请勿继续使用该副本；如确需恢复旧版本，请使用恢复码并确认数据丢失范围。",
+  },
+  [VerthysErrorCode.E_ANCHOR_FULL]: {
+    title: "回退锚点表已满",
+    message: "本机回退锚点已达到 64 条上限，且没有可自动回收的失效条目。",
+    guidance: "请进入「安全防护 → 回退锚点」扫描容器并释放已废弃条目的锚点；仍在使用中的锚点不会被自动删除。",
   },
   [VerthysErrorCode.E_KEYFILE_REQUIRED]: {
     title: "需要 keyfile 文件",

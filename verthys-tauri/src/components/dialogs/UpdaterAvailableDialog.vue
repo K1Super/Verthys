@@ -31,15 +31,15 @@
     <p v-if="errorMessage" class="kv-error">{{ errorMessage }}</p>
 
     <div class="kv-actions">
-      <button v-if="!forceUpdate" class="btn kv-cancel" type="button" @click="open = false">
+      <button v-if="!forceUpdate" class="btn btn-neutral btn-compact" type="button" @click="open = false">
         稍后
       </button>
-      <button v-if="cancellable" class="btn" type="button" @click="$emit('cancel')">
+      <button v-if="cancellable" class="btn btn-neutral btn-compact" type="button" @click="$emit('cancel')">
         取消更新
       </button>
       <button
         v-else
-        class="btn btn-primary kv-confirm"
+        class="btn btn-primary btn-compact"
         type="button"
         :disabled="installing"
         @click="$emit('install')"

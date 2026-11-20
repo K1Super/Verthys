@@ -307,11 +307,11 @@ mod tests {
     #[test]
     fn restore_and_parse_grants_are_read_only() {
         let path = temp_target("verthys-restore.venc");
-        authorize_job_target("photo_restore", "job-restore", &[path.clone()]).unwrap();
+        authorize_job_target("photo_restore", "job-restore", std::slice::from_ref(&path)).unwrap();
         assert!(job_contains("job-restore", &path));
         assert!(authorize_job_target("photo_restore", "job-x", &["rel.venc".to_string()]).is_err());
 
-        authorize_job_target("photo_parse", "job-parse", &[path.clone()]).unwrap();
+        authorize_job_target("photo_parse", "job-parse", std::slice::from_ref(&path)).unwrap();
         assert!(job_contains("job-parse", &path));
         assert!(!job_contains_for("photo_restore", "job-parse", &path), "跨操作不得复用授权");
         assert!(!job_contains_for("photo_import", "job-parse", &path), "跨操作不得复用授权");

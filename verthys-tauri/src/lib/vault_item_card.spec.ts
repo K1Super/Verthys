@@ -71,20 +71,19 @@ describe("卡片视图映射", () => {
     expect(JSON.stringify(view.lines)).not.toContain("110101");
   });
 
-  it("银行卡的敏感行包含卡号与安全码，且安全码不进入明文次行", () => {
+  it("银行卡：卡号是唯一敏感行，次行只保留卡类型", () => {
     const view = buildVaultCardView(
-      { bank: "示例银行", number: "6222", type: "储蓄卡", holder: "张三", cvv: "123", expiry: "2030-01-01" },
+      { bank: "示例银行", number: "6222", type: "储蓄卡", expiry: "2030-01-01" },
       bankcard,
     );
     expect(view.secret!.fieldId).toBe("number");
-    expect(view.secrets.map((secret) => secret.fieldId)).toEqual(["number", "cvv"]);
-    expect(view.secrets.map((secret) => secret.label)).toEqual(["卡号", "安全码"]);
+    expect(view.secrets.map((secret) => secret.fieldId)).toEqual(["number"]);
+    expect(view.secrets.map((secret) => secret.label)).toEqual(["卡号"]);
     expect(view.lines).toEqual([
       { fieldId: "type", label: "卡类型", value: "储蓄卡", sensitive: false },
-      { fieldId: "holder", label: "持卡人", value: "张三", sensitive: false },
     ]);
-    // 安全码只作为敏感行存在（默认掩码），绝不进入明文次行
-    expect(JSON.stringify(view.lines)).not.toContain("123");
+    // 卡号只作为敏感行存在（默认掩码），绝不进入明文次行
+    expect(JSON.stringify(view.lines)).not.toContain("6222");
     // 银行卡模板不声明日期字段：历史载荷即便带有 expiry，也不产生到期读数
     expect(view.expiry).toBeNull();
   });
@@ -131,7 +130,7 @@ describe("卡片视图映射", () => {
     expect(view.secrets.map((secret) => secret.fieldId)).toEqual(["number"]);
   });
 
-  it("地址卡片只保留省市区/姓名/电话摘要，其余字段由详情窗口承载", () => {
+  it("地址卡片只保留省市区摘要，姓名 / 电话 / 邮编不再进入卡面", () => {
     const view = buildVaultCardView(
       {
         name: "家",
@@ -144,19 +143,9 @@ describe("卡片视图映射", () => {
       },
       address,
     );
-    expect(view.lines.map((line) => line.fieldId)).toEqual([
-      "region",
-      "recipient",
-      "phone",
-    ]);
+    expect(view.lines.map((line) => line.fieldId)).toEqual(["region"]);
     expect(view.lines.find((line) => line.fieldId === "region")).toMatchObject({
       label: "省市区",
-    });
-    expect(view.lines.find((line) => line.fieldId === "recipient")).toMatchObject({
-      label: "姓名",
-    });
-    expect(view.lines.find((line) => line.fieldId === "phone")).toMatchObject({
-      label: "电话",
     });
     expect(view.secrets).toEqual([]);
   });

@@ -11,11 +11,13 @@
 #   - 与 build_core.release.ps1 完全独立，禁止互相调用或共享构建目录
 #   - 所有工具路径来自系统环境变量（经 env.load.ps1 注入），脚本内零硬编码
 #
-# 用法: powershell -ExecutionPolicy Bypass -File scripts\build\build_core.dev.ps1 [-Clean] [-NoPause]
-#   -Clean    构建前清理 build_dev 目录
-#   -NoPause  失败/成功后不暂停等待 Enter（CI 场景使用；双击运行时不传此参数以便查看输出）
+# 用法: powershell -ExecutionPolicy Bypass -File scripts\build\build_core.dev.ps1 [-Clean] [-TestHooks] [-NoPause]
+#   -Clean      构建前清理对应构建目录
+#   -TestHooks  使用独立 build_test 目录并运行完整测试（强制状态目录隔离）
+#   -NoPause    失败/成功后不暂停等待 Enter（CI 场景使用；双击运行时不传此参数以便查看输出）
 param(
     [switch]$Clean,
+    [switch]$TestHooks,
     [switch]$NoPause
 )
 
@@ -33,9 +35,17 @@ try {
 . (Join-Path $PSScriptRoot "..\lib\cmake.utils.ps1")
 
 $root       = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-# 开发环境独立构建目录，避免与 release 产物混淆
-$buildDir   = Join-Path $root "build_dev"
+# 开发环境独立构建目录，避免与 release 产物混淆。
+# dev 应用必须使用测试钩子构建：已安装的 P2 服务会以 image-auth 拒绝未签名
+# dev worker，唯一的开发旁路 VERTHYS_TEST_MACHINE_LIMITER_BYPASS 只在
+# VERTHYS_TEST_HOOKS=ON 的产物中存在；关闭钩子会让创建/解锁直接 fail-closed。
+# -TestHooks 额外使用 build_test 目录并运行完整测试。
+$buildDir   = if ($TestHooks) { Join-Path $root "build_test" } else { Join-Path $root "build_dev" }
 $config     = "Debug"
+$hooksState = "ON"
+# 隔离要求与测试钩子分离：dev 应用需要测试钩子的机器预算旁路，但必须
+# 操作用户真实容器；只有独立测试构建（build_test）强制要求隔离目录。
+$isolationState = if ($TestHooks) { "ON" } else { "OFF" }
 
 if ($Clean -and (Test-Path $buildDir)) {
     Write-Host "[clean] 移除 $buildDir" -ForegroundColor Yellow
@@ -53,29 +63,38 @@ Write-Host "[configure] 开发环境 Debug 构建" -ForegroundColor Cyan
 Write-Host "  生成器: $VERTHYS_VS_GENERATOR"
 Write-Host "  构建目录: $buildDir"
 
-& $VERTHYS_CMAKE_EXE -S $root -B $buildDir -G $VERTHYS_VS_GENERATOR -A x64
+& $VERTHYS_CMAKE_EXE -S $root -B $buildDir -G $VERTHYS_VS_GENERATOR -A x64 "-DVERTHYS_TEST_HOOKS=$hooksState" "-DVERTHYS_TEST_REQUIRE_ISOLATION=$isolationState" "-DVERTHYS_REQUIRE_CALLER_SIG=OFF"
 if ($LASTEXITCODE -ne 0) { throw "configure 失败" }
 
 Write-Host "[build] $config" -ForegroundColor Cyan
 & $VERTHYS_CMAKE_EXE --build $buildDir --config $config
 if ($LASTEXITCODE -ne 0) { throw "build 失败" }
 
-# 开发环境强制运行测试（安全核心不容许跳过测试的开发构建）
-Write-Host "[test] 运行单元测试" -ForegroundColor Cyan
-$testExe = Join-Path $buildDir "core\tests\$config\verthys_tests.exe"
-if (-not (Test-Path $testExe)) {
-    throw "测试可执行文件不存在: $testExe"
+# 测试隔离策略：
+#   - 默认 dev 构建（build_dev）仅供 dev 应用使用，不运行测试。
+#   - 需要跑完整测试时使用 -TestHooks：构建 build_test，
+#     test_runner 设置 VERTHYS_TEST_STATE_DIR 强制隔离。
+if ($TestHooks) {
+    Write-Host "[test] 运行单元测试（隔离状态目录）" -ForegroundColor Cyan
+    $testExe = Join-Path $buildDir "core\tests\$config\verthys_tests.exe"
+    if (-not (Test-Path $testExe)) {
+        throw "测试可执行文件不存在: $testExe"
+    }
+    & $testExe
+    if ($LASTEXITCODE -ne 0) { throw "测试失败" }
+} else {
+    Write-Host "[test] dev 应用构建：跳过测试（完整测试请使用 -TestHooks）" -ForegroundColor Yellow
 }
-& $testExe
-if ($LASTEXITCODE -ne 0) { throw "测试失败" }
 
 $dllPath = Join-Path $buildDir "core\$config\verthys.dll"
 if (-not (Test-Path -LiteralPath $dllPath)) {
     throw "DLL 产物缺失: $dllPath"
 }
-Write-Host "[done] 开发构建完成（Debug + 测试通过）" -ForegroundColor Green
+Write-Host "[done] 开发构建完成（Debug）" -ForegroundColor Green
 Write-Host "  产物: $dllPath"
 Write-Host "  构建目录: $buildDir"
+Write-Host "  测试钩子: $hooksState"
+Write-Host "  强制隔离: $isolationState"
 
 } catch {
     # 顶层错误捕获：防止任何未处理异常导致脚本直接闪退

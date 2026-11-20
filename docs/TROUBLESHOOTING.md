@@ -34,6 +34,8 @@
 | 容器无法打开 / 解锁失败 | 认证失败、数据损坏、回滚攻击检测等；**具体错误码以 `core/include/verthys.h` 的 VerthysResult 为准**（含 `VERTHYS_ERR_AUTH`、`VERTHYS_ERR_CORRUPT` 等），本文不编造错误码 | 从应用侧错误提示取值，对照 `verthys.h` 与 Rust 侧 `worker` 错误码映射 | 按错误码定位：认证类走 [SECURITY_DESIGN.md](SECURITY_DESIGN.md)；版本间数据迁移/降级走 [MIGRATION.md](MIGRATION.md) |
 | 启动即被完整性/反调试告警拦截 | `.vsec` / `.rhat` 运行时校验、反调试或应急响应触发 | 查看日志中 integrity/runtime_hash/emergency 相关记录 | 属于产品安全设计行为，处理原则见 [SECURITY_DESIGN.md](SECURITY_DESIGN.md)，勿绕过校验 |
 | 创建/解锁返回 `ERR_0000000A`（RATE）且 P2 服务未安装 | P2 机器级安全服务是强制依赖，未安装/不可达/验签失败一律 fail-closed | `sc query VerthysSecuritySvc`；查看应用日志 Event 3002/3003 | 重新运行 perMachine 安装包，一次 UAC 完成服务与根 CA 安装；不要从用户可写目录执行安装 |
+| dev 构建创建/解锁返回 `ERR_0000000A` 且服务已安装 | dev DLL 以 `VERTHYS_TEST_HOOKS=OFF` 构建，机器预算旁路分支不存在；服务以 image-auth 拒绝未签名 dev worker | 事件查看器 `VerthysSecuritySvc` 3002 `reason=image-auth`；DLL 是否包含 `VERTHYS_TEST_MACHINE_LIMITER_BYPASS` | 用 `scripts/build/build_core.dev.ps1` 重建 `build_dev`（test-hooks ON）；生产构建保持 fail-closed |
+| dev 构建创建/打开返回 `ERR_00000019`，生产应用正常 | dev DLL 以 `VERTHYS_TEST_REQUIRE_ISOLATION=ON` 构建，但 dev 宿主未设置 `VERTHYS_TEST_STATE_DIR`；回退锚点初始化返回 `VTY_E_POLICY` 并折叠为回退错误 | 检查 `build_dev` 的 `CMakeCache.txt` 中 `VERTHYS_TEST_REQUIRE_ISOLATION:BOOL=OFF`；确认 dev 构建未误用 `build_test` 或 CI 产物 | 用 `scripts/build/build_core.dev.ps1`（默认隔离 OFF）重建 `build_dev`；`build_test`/CI 才使用 `-TestHooks -RequireTestIsolation` |
 | 卸载勾选“Delete the application data”后既有加密库无法普通解锁 | 机器密钥材料缺失；卸载器本应保留 `%LOCALAPPDATA%\Verthys\KeyMaterial` | 检查该目录是否存在；错误码 `E_KEY_MATERIAL_MISSING` | 用恢复码解锁并重绑本机设备槽；不要删除 KeyMaterial 目录 |
 
 ## 4. 清理与卸载类

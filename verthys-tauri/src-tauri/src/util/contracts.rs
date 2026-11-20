@@ -130,17 +130,26 @@ pub struct BatchRecordInput {
 /// 字段语义：
 ///   - chunk_key：调用方生成的非内容块键（记录名与会话内幂等依据；
 ///     不得由内容哈希派生）
-///   - data_b64：块密文 base64（前端 XChaCha20-Poly1305 加密产物）
+///   - data_b64：块密文 base64（前端 XChaCha20-Poly1305 加密产物）；
+///     staged=true 时必须为空
 ///   - rtype：记录类型（外置载荷角色）。缺省为照片数据块；索引瘦身布局的
 ///     缩略图记录显式指定缩略图类型，写者据此分配记录名与类型，二者共用
 ///     同一上传通道、台账与幂等映射
-#[derive(Debug, Clone, Deserialize)]
+///   - staged/job_id/chunk_hash：照片导入暂存引用。staged=true 时密文留在
+///     worker 导入 job 暂存区，写者只把引用交给 worker 提交，宿主不持有密文
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ChunkBlob {
     #[serde(default)]
     pub chunk_key: String,
     pub data_b64: String,
     #[serde(default)]
     pub rtype: Option<u32>,
+    #[serde(default)]
+    pub staged: bool,
+    #[serde(default)]
+    pub job_id: String,
+    #[serde(default)]
+    pub chunk_hash: String,
 }
 
 /// 批量写入进度（通过 Tauri Channel 流式推送到前端）

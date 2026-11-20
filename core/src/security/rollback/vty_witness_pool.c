@@ -1,5 +1,5 @@
 /*
- * vty_witness_pool.c — TPM 见证密钥预置池实现（G0-A 隔离原型）
+ * vty_witness_pool.c — TPM 见证密钥预置池实现
  *
  * 单一后台线程串行建键；每个见证域至多一个预置键。
  * 后台建键持有跨进程 RollbackState 互斥量，避免同名 TPM 键并发覆盖。

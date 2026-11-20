@@ -146,9 +146,9 @@
       </div>
       <p v-if="keyError" class="kv-error key-error">密钥错误或密码已损坏</p>
       <div class="kv-actions">
-        <button class="btn kv-cancel" type="button" :disabled="keyBusy" @click="showKeyDialog = false">取消</button>
+        <button class="btn btn-neutral btn-compact" type="button" :disabled="keyBusy" @click="showKeyDialog = false">取消</button>
         <button
-          class="btn btn-primary kv-confirm"
+          class="btn btn-primary btn-compact"
           type="button"
           :disabled="keyBusy || !keyInput"
           @click="confirmKey"
@@ -576,6 +576,15 @@ const onDetail = (entry: VaultEntry): void => {
 /* 条目在详情打开期间被移除时关闭详情，避免窗口停留在空目标上 */
 watch(detailEntry, (entry) => {
   if (showDetail.value && !entry) {
+    showDetail.value = false;
+    detailEntryId.value = null;
+  }
+});
+
+/* 类型定义在详情打开期间被删除（类型管理是另一个入口）：关闭详情，
+   避免窗口停留在没有字段声明的空目标上 */
+watch(detailDef, (def) => {
+  if (showDetail.value && !def) {
     showDetail.value = false;
     detailEntryId.value = null;
   }

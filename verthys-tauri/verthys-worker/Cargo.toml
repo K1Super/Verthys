@@ -1,6 +1,6 @@
 [package]
 name = "verthys-worker"
-version = "4.6.0"
+version = "4.6.5"
 edition = "2021"
 build = "build.rs"
 
@@ -29,6 +29,8 @@ chacha20poly1305 = { version = "0.10", features = ["std"] }
 blake3 = "1"
 # 原生缩略图解码/编码：只启用照片导入实际需要的格式，避免拉入无关编解码器
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+# JPEG 缩放解码：按 1/2–1/8 降采样，避免为 400px 缩略图解码整张原图
+jpeg-decoder = { version = "=0.3.2", default-features = false }
 # 常量时间比较：会话标识与就绪证明校验
 subtle = "2"
 rand = "0.8"

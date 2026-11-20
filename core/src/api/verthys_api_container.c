@@ -42,6 +42,8 @@ VerthysResult verthys_api_container_map(int vty_rc)
     case VTY_E_MODULE_LOCKED:  return VERTHYS_ERR_MODULE_LOCKED;
     case VTY_E_NO_SPACE:       return VERTHYS_ERR_NO_SPACE;
     case VTY_E_VERIFY:         return VERTHYS_ERR_VERIFY;
+    case VTY_E_ANCHOR_FULL:    return VERTHYS_ERR_ANCHOR_FULL;
+    case VTY_E_CALLER:         return VERTHYS_ERR_UNAUTHORIZED;
     default:                   return VERTHYS_ERR_INVALID;
     }
 }
@@ -309,10 +311,9 @@ VerthysResult verthys_api_container_flush(struct VerthysContext *ctx)
     /* Flush 的持久化对象是“尚无记录变更但目录可能脏”的会话；仓库
      * 每次写已提交，此处再走一次 DataRoot/元数据保存保证幂等落盘。 */
     rc = vty_vault_save(v);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
-    /* 推迟会话中 Flush 强制推进锚点但保留会话，重置窗口计时。 */
+    /* 推迟会话中 Flush 强制推进锚点但保留会话，重置窗口计时；否则
+     * 与普通保存一样提交锚点。 */
     if (rc == VTY_OK) rc = vty_vault_bulk_flush(v);
-#endif
     return verthys_api_container_map(rc);
 }
 
@@ -374,12 +375,10 @@ VerthysResult Verthys_V4PcrEnable(VerthysHandle handle,
     }
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = VTY_OK;
     if (recovery_code != NULL && recovery_code[0] != '\0') {
         rc = vty_vault_verify_recovery(ctx->vault, recovery_code);
@@ -401,12 +400,10 @@ VerthysResult Verthys_V4PcrDisable(VerthysHandle handle,
     if (!pcr_recovery_ok(ctx, recovery_code)) return VERTHYS_ERR_INVALID;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = VTY_OK;
     if (recovery_code != NULL && recovery_code[0] != '\0') {
         rc = vty_vault_verify_recovery(ctx->vault, recovery_code);
@@ -428,12 +425,10 @@ VerthysResult Verthys_V4PcrReseal(VerthysHandle handle,
     if (!pcr_recovery_ok(ctx, recovery_code)) return VERTHYS_ERR_INVALID;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = VTY_OK;
     if (recovery_code != NULL && recovery_code[0] != '\0') {
         rc = vty_vault_verify_recovery(ctx->vault, recovery_code);
@@ -466,14 +461,12 @@ VerthysResult Verthys_V4KeyfileEnable(VerthysHandle handle,
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(pw, password_len);
         free(pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = vty_vault_keyfile_enable_file(ctx->vault, pw, new_keyfile_path);
     module_unlock_ctx(ctx);
 
@@ -501,14 +494,12 @@ VerthysResult Verthys_V4KeyfileDisable(VerthysHandle handle,
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(pw, password_len);
         free(pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = vty_vault_keyfile_disable(ctx->vault, pw,
                                    (keyfile_path != NULL && keyfile_path[0] != '\0')
                                        ? keyfile_path : NULL);
@@ -557,14 +548,12 @@ VerthysResult Verthys_V4ResealDevice(VerthysHandle handle,
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(pw, password_len);
         free(pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = vty_vault_reseal_device_file(
         ctx->vault, pw,
         (keyfile_path != NULL && keyfile_path[0] != '\0') ? keyfile_path : NULL);
@@ -755,14 +744,12 @@ VerthysResult Verthys_V4ModuleEnable(VerthysHandle handle,
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(pw, password_len);
         free(pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = vty_module_enable(ctx->vault, module_id, pw, recovery_code);
     module_unlock_ctx(ctx);
 
@@ -836,7 +823,6 @@ VerthysResult Verthys_V4ModuleRotatePassword(VerthysHandle handle,
     }
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(old_pw, old_len);
@@ -845,7 +831,6 @@ VerthysResult Verthys_V4ModuleRotatePassword(VerthysHandle handle,
         free(new_pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = vty_module_rotate_password(ctx->vault, module_id, old_pw, new_pw);
     module_unlock_ctx(ctx);
 
@@ -872,14 +857,12 @@ VerthysResult Verthys_V4ModuleDisable(VerthysHandle handle,
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(pw, password_len);
         free(pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = vty_module_disable(ctx->vault, module_id, pw);
     module_unlock_ctx(ctx);
 
@@ -911,7 +894,6 @@ VerthysResult Verthys_V4ModuleDelete(VerthysHandle handle,
     }
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         if (pw != NULL) {
@@ -920,7 +902,6 @@ VerthysResult Verthys_V4ModuleDelete(VerthysHandle handle,
         }
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = vty_module_delete(ctx->vault, module_id, pw, confirm);
     module_unlock_ctx(ctx);
 
@@ -949,14 +930,12 @@ VerthysResult Verthys_V4ModuleBindRecovery(VerthysHandle handle,
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(pw, password_len);
         free(pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = vty_module_bind_recovery(ctx->vault, module_id, pw, recovery_code);
     module_unlock_ctx(ctx);
 
@@ -981,14 +960,12 @@ VerthysResult Verthys_V4ModuleResealDevice(VerthysHandle handle,
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(pw, password_len);
         free(pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = vty_module_reseal_device(ctx->vault, module_id, pw);
     module_unlock_ctx(ctx);
 
@@ -1061,7 +1038,6 @@ VerthysResult Verthys_V4RecoveryRotate(VerthysHandle handle,
 
     memset(out_recovery, 0, out_cap);
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(pw, password_len);
@@ -1069,7 +1045,6 @@ VerthysResult Verthys_V4RecoveryRotate(VerthysHandle handle,
         free(pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = vty_vault_recovery_rotate(ctx->vault, pw, old_recovery,
                                    out_recovery, out_cap);
     module_unlock_ctx(ctx);
@@ -1142,14 +1117,12 @@ VerthysResult Verthys_V4RotateBegin(VerthysHandle handle,
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(pw, password_len);
         free(pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     if (ctx->rotate != NULL) {
         rc = VTY_E_ROTATE_PENDING;
     } else {
@@ -1185,14 +1158,12 @@ VerthysResult Verthys_V4RotateAttachKeyfile(VerthysHandle handle,
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(pw, password_len);
         free(pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     rc = vty_vault_attach_keyfile(ctx->vault, keyfile_path, pw);
     module_unlock_ctx(ctx);
 
@@ -1224,14 +1195,12 @@ VerthysResult Verthys_V4RotateUnlockModule(VerthysHandle handle,
     if (pw == NULL) return VERTHYS_ERR_RESOURCE_LIMIT;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         verthys_secure_zero(pw, password_len);
         free(pw);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     if (ctx->rotate == NULL) {
         rc = VTY_OK;
         no_job = 1;
@@ -1260,12 +1229,10 @@ VerthysResult Verthys_V4RotateRun(VerthysHandle handle,
     bridge.cb = progress;
     bridge.user = user;
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     if (ctx->rotate == NULL) {
         rc = VTY_OK;
         no_job = 1;
@@ -1288,12 +1255,10 @@ VerthysResult Verthys_V4RotateCommit(VerthysHandle handle,
     if (ctx == NULL) return VERTHYS_ERR_LOCKED;
 
     module_lock_ctx(ctx);
-#if defined(VERTHYS_G0A2_PROTOTYPE) && VERTHYS_G0A2_PROTOTYPE
     if (verthys_bulk_defer_active(ctx)) {
         module_unlock_ctx(ctx);
         return VERTHYS_ERR_POLICY;
     }
-#endif
     if (ctx->rotate == NULL) {
         rc = VTY_OK;
         no_job = 1;

@@ -21,7 +21,7 @@
   >
     <div class="kv-title">{{ moduleLabel }} · 恢复槽</div>
 
-    <!-- 状态读数：离散菱标 + 状态词 + 收束细线，不另设卡片或底色 -->
+    <!-- 状态读数：离散四边形标记 + 状态词 + 收束细线，不另设卡片或底色 -->
     <div class="mr-readout" :class="{ 'is-bound': hasRecovery }">
       <span class="mr-readout-mark" aria-hidden="true"></span>
       <span class="mr-readout-text">
@@ -100,7 +100,7 @@
       <div class="mr-deck">
         <div class="mr-channel">
           <button
-            class="btn mr-secondary"
+            class="btn btn-neutral btn-compact"
             type="button"
             :disabled="busy || !password"
             @click="onReseal"
@@ -110,11 +110,11 @@
           <span class="mr-channel-hint">仅恢复码解锁会话可用</span>
         </div>
         <div class="mr-footer">
-          <button class="btn kv-cancel" type="button" :disabled="busy" @click="close">
+          <button class="btn btn-neutral btn-compact" type="button" :disabled="busy" @click="close">
             关闭
           </button>
           <button
-            class="btn btn-primary kv-confirm"
+            class="btn btn-primary btn-compact"
             type="button"
             :disabled="busy || !password || !recoveryCode"
             @click="onBind"
@@ -358,10 +358,7 @@ const onReseal = async () => {
   gap: 10px;
   flex-wrap: wrap;
 }
-.mr-secondary {
-  padding: 6px 14px;
-  font-size: 12px;
-}
+
 .mr-channel-hint {
   font-size: 10px;
   line-height: 1.5;

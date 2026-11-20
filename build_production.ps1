@@ -468,7 +468,8 @@ if (-not $SkipCore) {
     $callerSigArgs = @(
         "-DVERTHYS_REQUIRE_CALLER_SIG=$callerSigState",
         "-DVERTHYS_PUBLISHER_SHA256=$publisherShaValue",
-        "-DVERTHYS_TEST_HOOKS=OFF"
+        "-DVERTHYS_TEST_HOOKS=OFF",
+        "-DVERTHYS_TEST_REQUIRE_ISOLATION=OFF"
     )
     if ($script:msvcInjected) {
         & $script:effectiveCmake -S $ScriptRoot -B $CoreBuildDir -G Ninja -DCMAKE_BUILD_TYPE=Release @callerSigArgs
@@ -501,6 +502,17 @@ if (-not $SkipCore) {
     $script:actualCoreDll = Get-VerthysArtifactDll
     Assert-FileExists $script:actualCoreDll "verthys.dll (已有)"
 }
+
+# ========== 阶段 1.01: 生产 DLL 测试钩子字符串门 ==========
+# 测试构建会编译 VERTHYS_TEST_STATE_DIR 覆盖入口；生产 DLL 绝不能包含
+# 该字符串（否则测试状态目录可能被环境变量注入生产进程）。构建后立即
+# 扫描产物，命中即拒绝继续打包。
+$dllBytes = [System.IO.File]::ReadAllBytes($script:actualCoreDll)
+$dllText = [System.Text.Encoding]::ASCII.GetString($dllBytes)
+if ($dllText.Contains("VERTHYS_TEST_STATE_DIR")) {
+    throw "生产 verthys.dll 含测试状态注入字符串 VERTHYS_TEST_STATE_DIR；拒绝继续打包"
+}
+Write-OK "生产 DLL 不含测试状态注入字符串"
 
 # ========== 阶段 1.05: 预热签名宿主演练目标 ==========
 # vty_signed_host 是调用方认证门禁的输入。若缺失，CMake 会按依赖关系

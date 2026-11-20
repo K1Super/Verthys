@@ -29,6 +29,7 @@ use crate::runtime::worker::Worker;
 
 use super::animated;
 use super::mime;
+use super::staged;
 use super::venc::{LightMeta, VencError, VencFrame, VencReader};
 
 const MAX_RESTORE_JOBS: usize = 2;
@@ -111,6 +112,7 @@ pub(crate) fn handle_begin(req: &Request) -> Response {
     if jobs.contains_key(job_id) {
         return error(OP_BEGIN, "job 已存在");
     }
+    staged::clear(job_id);
     jobs.insert(
         job_id.to_string(),
         Job {
@@ -234,7 +236,7 @@ pub(crate) fn handle_next(worker: &Worker, req: &Request) -> Response {
     }
 
     if job.current.is_some() {
-        return read_chunk(worker, job);
+        return read_chunk(worker, &req.job_id, job);
     }
 
     let frame = match job.reader.next_frame() {
@@ -250,6 +252,8 @@ pub(crate) fn handle_next(worker: &Worker, req: &Request) -> Response {
             } else if !job.expected_hashes.is_empty() {
                 return error(OP_NEXT, "容器照片数量与预览结果不一致");
             }
+            /* 新照片开始：上一张已收尾，残留暂存必须释放。 */
+            staged::clear(&req.job_id);
             let entry_key = parsed_entry_key(&meta.file_hash);
             let blob = if mime::is_animated_candidate(&meta.mime) {
                 Some(Zeroizing::new(Vec::new()))
@@ -308,7 +312,7 @@ pub(crate) fn handle_next(worker: &Worker, req: &Request) -> Response {
     }
 }
 
-fn read_chunk(worker: &Worker, job: &mut Job) -> Response {
+fn read_chunk(worker: &Worker, job_id: &str, job: &mut Job) -> Response {
     let mut photo = job.current.take().expect("current 已确认存在");
     let frame = match job.reader.next_frame() {
         Ok(frame) => frame,
@@ -335,6 +339,16 @@ fn read_chunk(worker: &Worker, job: &mut Job) -> Response {
         Err(e) => return error(OP_NEXT, &format!("加密照片块失败: {:?}", e)),
     };
     let chunk_hash = blake3::hash(&sealed).to_hex().to_string();
+    let chunk_key_value = chunk_key(&photo.entry_key, seq);
+    if let Err(e) = staged::stage(
+        job_id,
+        &chunk_key_value,
+        chunk_hash.clone(),
+        Zeroizing::new(sealed),
+    ) {
+        job.current = Some(photo);
+        return error(OP_NEXT, &e);
+    }
     photo.hasher.update(&plain);
     photo.size = photo.size.saturating_add(plain.len() as u64);
     if photo.size > photo.meta.size {
@@ -351,8 +365,8 @@ fn read_chunk(worker: &Worker, job: &mut Job) -> Response {
     payload.file_name = Some(photo.meta.name.clone());
     payload.chunk_index = Some(seq);
     payload.chunk_total = Some(photo.meta.chunk_count);
-    payload.chunk_key = Some(chunk_key(&photo.entry_key, seq));
-    payload.chunk_b64 = Some(base64_encode(&sealed));
+    payload.chunk_key = Some(chunk_key_value);
+    payload.chunk_staged = Some(true);
     payload.chunk_hash = Some(chunk_hash);
 
     if photo.next_chunk >= photo.meta.chunk_count {
@@ -387,6 +401,8 @@ pub(crate) fn handle_finish(worker: &Worker, req: &Request) -> Response {
     if digest != photo.meta.file_hash {
         return error(OP_FINISH, "照片完整性校验失败");
     }
+    /* 本张收尾成功：暂存与幂等映射立即释放。 */
+    staged::clear(&req.job_id);
 
     if req.skip_photo {
         job.awaiting_finish = false;
@@ -402,7 +418,7 @@ pub(crate) fn handle_finish(worker: &Worker, req: &Request) -> Response {
     if req.chunk_ids.len() != photo.meta.chunk_count as usize {
         return error(OP_FINISH, "块记录数与该照片块数不一致");
     }
-    if req.chunk_ids.iter().any(|id| *id == 0) {
+    if req.chunk_ids.contains(&0) {
         return error(OP_FINISH, "存在未分配的块记录 ID");
     }
 
@@ -449,11 +465,13 @@ pub(crate) fn handle_cancel(req: &Request) -> Response {
         job.cancelled = true;
         job.current = None;
     }
+    staged::clear(&req.job_id);
     Response::ok("photo_restore_job_cancel")
 }
 
 pub(crate) fn handle_end(req: &Request) -> Response {
     lock_jobs().remove(&req.job_id);
+    staged::clear(&req.job_id);
     path_grants::revoke_job(&req.job_id);
     Response::ok("photo_restore_job_end")
 }
@@ -509,8 +527,8 @@ fn next_payload(status: &str) -> MediaNextPayload {
         chunk_index: None,
         chunk_total: None,
         chunk_key: None,
-        chunk_b64: None,
         chunk_hash: None,
+        chunk_staged: None,
         file_done: false,
         thumb_b64: None,
         animated: None,
@@ -553,6 +571,7 @@ fn venc_message(err: VencError) -> String {
 fn prune_stale(jobs: &mut HashMap<String, Job>) {
     let now = Instant::now();
     jobs.retain(|_, job| now.saturating_duration_since(job.last_touch) < JOB_IDLE_TTL);
+    staged::prune_all();
 }
 
 fn lock_jobs() -> std::sync::MutexGuard<'static, HashMap<String, Job>> {
