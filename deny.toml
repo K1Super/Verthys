@@ -13,14 +13,6 @@ unsound = "all"
 # yanked 版本属瞬态状态（上游撤版后新解析可自愈），告警不阻断
 yanked = "warn"
 ignore = [
-    # zip 4.6.1 的解压类告警：更新包在解压前已完成 minisign 验签，
-    # 日志导出只写 ZIP，不提取不可信归档。升级 zip 需随 Tauri 栈整体推进。
-    { id = "RUSTSEC-2026-0367", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
-    { id = "RUSTSEC-2026-0368", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
-    { id = "RUSTSEC-2026-0369", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
-    { id = "RUSTSEC-2026-0429", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
-    { id = "RUSTSEC-2026-0545", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
-    { id = "RUSTSEC-2026-0548", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
     # AsyncFd 只在 tokio 的 unix 模块编译，本项目仅构建 Windows 目标。
     { id = "RUSTSEC-2026-0386", reason = "AsyncFd 仅存在于 tokio 的 unix 模块，本项目只构建 Windows 目标" },
     # ts-rs 依赖 chrono 的 chrono-impl；无安全升级版本，替换需迁移时间类型。

@@ -192,7 +192,12 @@ base64 = "0.22"                                      # Base64 编解码
 tokio-util = { version = "0.7", features = ["rt"] }  # CancellationToken
 regex = "1.10"                                       # shm_name 白名单校验
 ts-rs = { version = "10", features = ["chrono-impl", "no-serde-warnings"] } # TypeScript 绑定生成
-tauri-plugin-updater = "2"
+# 更新物料是原始 NSIS .exe，不消费 zip payload；关闭默认 zip feature，
+# 避免为未使用的解压路径引入额外依赖与攻击面。
+tauri-plugin-updater = { version = "=2.12.0", default-features = false, features = [
+    "rustls-tls",
+    "system-proxy",
+] }
 # 更新流水线的独立校验依赖：签名复验、语义化版本比较、灰度安装标识
 minisign-verify = "=0.2.5"
 semver = "=1.0.28"
@@ -207,7 +212,7 @@ reqwest = { version = "=0.13.4", default-features = false, features = [
 rustls = { version = "=0.23.46", default-features = false, features = ["ring"] }
 futures-util = "=0.3.32"
 # 日志导出使用标准 zip 容器；仅存储模式，不引入压缩算法依赖。
-zip = { version = "=4.6.1", default-features = false }
+zip = { version = "=9.8.1", default-features = false }
 
 # 修复 LNK1181: 无法打开输入文件 "windows.x.xx.x.lib"
 # 根因：dev profile 默认启用 incremental compilation，与 raw-dylib 导入库
