@@ -45,6 +45,9 @@ if(MSVC)
         /wd4146   # unsigned 的一元减
         /wd4334   # 32 位移位结果转换为 64 位
     )
+    # 静态库对象会链入 verthys.dll；核心链接启用 /guard:ehcont，
+    # 所有参与链接的对象必须带同一 EH 连续性元数据，否则 LNK2047。
+    target_compile_options(flatccrt PRIVATE /GS /guard:cf /guard:ehcont)
 endif()
 
 # ---------- flatc 编译器（构建宿主工具，仅用于 schema codegen） ----------
@@ -96,6 +99,11 @@ if(MSVC)
         /wd4146
         /wd4334
     )
+endif()
+
+# 第三方源码不参与项目 clang-tidy 规则；门禁只检查 core 自有源码。
+if(VERTHYS_ENABLE_CLANG_TIDY)
+    set_target_properties(flatccrt flatcc_cli PROPERTIES C_CLANG_TIDY "")
 endif()
 
 # 说明：早期的 vendored xxHash 单头已随 V3 LSM 实现删除；

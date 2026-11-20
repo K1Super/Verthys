@@ -26,6 +26,10 @@ configure_file(
 file(GLOB_RECURSE LIBSODIUM_SOURCES CONFIGURE_DEPENDS ${_ls_src}/*.c)
 
 add_library(libsodium STATIC ${LIBSODIUM_SOURCES})
+# 第三方源码不参与项目 clang-tidy 规则；门禁只检查 core 自有源码。
+if(VERTHYS_ENABLE_CLANG_TIDY)
+    set_target_properties(libsodium PROPERTIES C_CLANG_TIDY "")
+endif()
 
 # 公共头路径：
 #   include          —— 伞头 <sodium.h>
@@ -58,6 +62,9 @@ if(MSVC)
         /wd4018   # signed/unsigned 比较
         /wd4334   # 32 位移位
     )
+    # 静态库对象会链入 verthys.dll；核心链接启用 /guard:ehcont，
+    # 所有参与链接的对象必须带同一 EH 连续性元数据，否则 LNK2047。
+    target_compile_options(libsodium PRIVATE /GS /guard:cf /guard:ehcont)
     # 仅 SSE2，与官方一致；不开 /arch:AVX2
     target_compile_options(libsodium PRIVATE /arch:SSE2)
 endif()
