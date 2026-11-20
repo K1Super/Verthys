@@ -6,14 +6,26 @@
 # 仅检出实际会进入 Windows 产物的图谱，避免误报平台无关条目。
 
 [advisories]
-# 漏洞与 unsound 告警：阻断（默认）
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "deny"
+# unmaintained/unsound 只接受依赖范围枚举：all/workspace/transitive/none。
+# workspace 只约束直接依赖，避免传递依赖的 unmaintained 噪声淹没信号。
+unmaintained = "workspace"
+unsound = "all"
 # yanked 版本属瞬态状态（上游撤版后新解析可自愈），告警不阻断
 yanked = "warn"
-notice = "warn"
-ignore = []
+ignore = [
+    # zip 4.6.1 的解压类告警：更新包在解压前已完成 minisign 验签，
+    # 日志导出只写 ZIP，不提取不可信归档。升级 zip 需随 Tauri 栈整体推进。
+    { id = "RUSTSEC-2026-0367", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
+    { id = "RUSTSEC-2026-0368", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
+    { id = "RUSTSEC-2026-0369", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
+    { id = "RUSTSEC-2026-0429", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
+    { id = "RUSTSEC-2026-0545", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
+    { id = "RUSTSEC-2026-0548", reason = "更新包解压前已验签；日志导出只写 ZIP，不提取不可信归档" },
+    # AsyncFd 只在 tokio 的 unix 模块编译，本项目仅构建 Windows 目标。
+    { id = "RUSTSEC-2026-0386", reason = "AsyncFd 仅存在于 tokio 的 unix 模块，本项目只构建 Windows 目标" },
+    # ts-rs 依赖 chrono 的 chrono-impl；无安全升级版本，替换需迁移时间类型。
+    { id = "RUSTSEC-2026-0543", reason = "ts-rs 依赖 chrono 的 chrono-impl；无安全升级版本，替换需迁移时间类型" },
+]
 
 [licenses]
 # 允许的许可证集合（与当前依赖图谱实测对齐，增量收敛）
@@ -25,10 +37,12 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
+    "MPL-2.0",
 ]
-# 未声明许可证依赖：阻断（私有仓库内部 crate 以 exceptions 显式登记）
+# 未声明许可证依赖：阻断；工作区私有 crate（publish = false）由 private.ignore 跳过
 confidence-threshold = 0.8
 exceptions = []
+private = { ignore = true }
 
 [bans]
 # 版本通配符（"*" 依赖）：阻断——锁文件才是版本事实源

@@ -95,8 +95,8 @@ jobs:
           & ".\ci\verify_vendor_hashes.ps1"
           if ($LASTEXITCODE -ne 0) { throw "vendor hash gate failed" }
 
-      - name: Install cargo-deny (locked)
-        run: cargo install --locked cargo-deny
+      - name: Install cargo-deny 0.22.0 (locked)
+        run: cargo install --locked cargo-deny --version 0.22.0
 
       - name: "Supply-chain scan (cargo-deny: advisories/licenses/bans/sources)"
         shell: pwsh
