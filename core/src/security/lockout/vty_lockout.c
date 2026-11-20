@@ -28,6 +28,7 @@
 
 #include <windows.h>
 #include <string.h>
+#include <stdio.h>  /* sprintf_s */
 #include <stdlib.h>
 #include <time.h>
 

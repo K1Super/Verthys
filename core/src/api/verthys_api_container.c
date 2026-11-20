@@ -6,6 +6,7 @@
  */
 #include "verthys_api_container.h"
 #include "verthys_api_utils.h"
+#include "vty_util.h"                  /* vty_free / vty_secure_zero */
 #include "vty_repo.h"
 #include "vty_store.h"
 #include "vty_module.h"

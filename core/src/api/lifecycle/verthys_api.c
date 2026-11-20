@@ -28,6 +28,7 @@
 
 /* 项目头 */
 #include "verthys_crypto.h"
+#include "vty_util.h"            /* vty_secure_zero */
 #include "verthys_pepper.h"
 #include "anti_debug.h"
 #include "tls_loader.h"

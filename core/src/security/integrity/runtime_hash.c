@@ -136,7 +136,7 @@ static int collect_reloc_spots(const BYTE *base, const IMAGE_NT_HEADERS *nt,
             else if (type == IMAGE_REL_BASED_HIGHLOW) width = 4;
             else if (type == IMAGE_REL_BASED_HIGH ||
                      type == IMAGE_REL_BASED_LOW)      width = 2;
-            else return -1; /* 未知类型：无法归一化，放弃（不误报） */
+            else { free(spots); return -1; } /* 未知类型：无法归一化，放弃（不误报） */
 
             if (n == cap) {
                 size_t ncap = cap ? cap * 2 : 4096;

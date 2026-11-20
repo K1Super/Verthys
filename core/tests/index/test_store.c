@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>  /* _chsize_s */
+#endif
 
 #define ST_PATH "store.vty"
 

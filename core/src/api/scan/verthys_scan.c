@@ -14,6 +14,7 @@
  * 5. 堆上深拷贝的字符串与二进制数据，释放前执行多轮交替字节安全擦除再执行内存释放
  */
 #include "verthys_internal.h"
+#include "vty_util.h"                  /* vty_free / vty_secure_zero */
 #include "memory_guard.h"
 #include "emergency.h"
 #include "verthys_diag.h"

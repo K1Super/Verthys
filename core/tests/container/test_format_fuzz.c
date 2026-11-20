@@ -376,16 +376,20 @@ TEST(fuzz_extended_file)
 
     VerthysFmtMeta meta;
     /* parse_header 应成功（mac_offset 仍有效） */
-    CHECK_EQ(vfmt_parse_header(ext_blob, ext_size, &meta), 0);
-    CHECK_EQ(vfmt_decrypt_meta(ext_blob, ext_size, mek, &meta), 0);
-
+    int parse_rc = vfmt_parse_header(ext_blob, ext_size, &meta);
+    int meta_rc = parse_rc == 0 ? vfmt_decrypt_meta(ext_blob, ext_size, mek, &meta) : -1;
     /* decrypt_records 应成功（HMAC 覆盖 [0..mac_offset-1]，不含追加部分） */
     VerthysFmtRecord *recs = NULL;
     uint16_t count = 0;
-    CHECK_EQ(vfmt_decrypt_records(ext_blob, ext_size, &meta, dek, &recs, &count), 0);
-    CHECK_EQ(count, 1u);
-
+    int rec_rc = meta_rc == 0
+        ? vfmt_decrypt_records(ext_blob, ext_size, &meta, dek, &recs, &count)
+        : -1;
     vfmt_free_records(recs, count);
     free(ext_blob);
+
+    CHECK_EQ(parse_rc, 0);
+    CHECK_EQ(meta_rc, 0);
+    CHECK_EQ(rec_rc, 0);
+    CHECK_EQ(count, 1u);
     return 0;
 }

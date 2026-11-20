@@ -14,6 +14,7 @@
  * 注意：本测试直接用随机 MEK/DEK（不经 Argon2id），全程毫秒级。
  */
 #include "verthys_test.h"
+#include "verthys_internal.h"  /* verthys_secure_zero */
 #include "verthys_format.h"
 #include "keymanager.h"
 #include "verthys_crypto.h"

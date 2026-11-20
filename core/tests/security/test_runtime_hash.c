@@ -21,6 +21,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <process.h>             /* _beginthreadex */
 #include <stdint.h>             /* uintptr_t（_beginthreadex 返回值的句柄强转） */
 #include <string.h>
 #include <stdlib.h>
@@ -80,8 +81,12 @@ TEST(rhat_virtualprotect_patch_detected)
     memcpy(saved, base, len);
 
     DWORD oldp = 0;
-    CHECK(VirtualProtect((LPVOID)base, (SIZE_T)len,
-                         PAGE_EXECUTE_READWRITE, &oldp) != 0);
+    BOOL protected = VirtualProtect((LPVOID)base, (SIZE_T)len,
+                                    PAGE_EXECUTE_READWRITE, &oldp);
+    if (!protected) {
+        free(saved);
+        CHECK(protected != 0);
+    }
 
     /* 3 个不同偏移各翻 1 字节：x64 .text 以 RIP 相对寻址为主、重定位
      * 槽位稀疏，三处同时落入掩码槽的概率可忽略；任一未掩码差异即检出 */

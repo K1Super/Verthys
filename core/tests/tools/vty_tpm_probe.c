@@ -724,6 +724,9 @@ static int probe_policy_session(void)
     return 0;
 }
 
+/* 删除索引；NV 定义探针与索引段探针共用，须先于首个调用点声明。 */
+static int probe_nv_undefine(uint32_t index);
+
 /* HMAC 会话下的 NV 定义：判定会话是否被 TPM 接受，以及 owner auth 是否为空 */
 static int probe_nv_define_hmac(uint32_t index)
 {
@@ -1463,9 +1466,6 @@ static int probe_capabilities(void)
     }
     return 0;
 }
-
-/* 删除索引；前置声明供索引段探测复用 */
-static int probe_nv_undefine(uint32_t index);
 
 /* 读取 NV 公共区（不要求授权）：用于确认索引是否存在及属性 */
 static int probe_nv_read_public(uint32_t index)

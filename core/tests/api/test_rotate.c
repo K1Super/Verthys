@@ -8,6 +8,7 @@
 #include "verthys_test.h"
 #include "verthys.h"
 #include "verthys_internal.h"
+#include "vty_util.h"  /* vty_secure_zero / vty_free / vty_random */
 #include "vty_keyfile.h"
 #include "vty_keymanager.h"
 #include "vty_module.h"

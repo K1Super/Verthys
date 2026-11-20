@@ -6,6 +6,7 @@
  */
 #include "verthys_test.h"
 #include "vty_types.h"
+#include "vty_util.h"  /* vty_ct_equal */
 #include "vty_keyfile.h"
 #include "vty_keymanager.h"
 #include "vty_recovery.h"

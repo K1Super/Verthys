@@ -11,6 +11,7 @@
  * 注意：Argon2id 64MiB/3iter 每次约 0.5–1s，测试用例尽量减少调用次数。
  */
 #include "verthys_test.h"
+#include "verthys_internal.h"  /* verthys_secure_zero */
 #include "keymanager.h"
 #include "verthys_crypto.h"
 #include <string.h>

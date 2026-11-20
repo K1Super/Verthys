@@ -14,6 +14,7 @@
  */
 #include "verthys_api_utils.h"
 #include "verthys_internal.h"
+#include "vty_util.h"                  /* vty_free / vty_secure_zero */
 #include "verthys.h"
 #include "verthys_format.h"            /* v1 交换格式读写器（跨设备契约） */
 #include "verthys_crypto.h"

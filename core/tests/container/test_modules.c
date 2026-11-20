@@ -13,6 +13,7 @@
 #include "vty_recovery.h"
 #include "vty_blake3.h"
 #include "vty_chunk.h"
+#include "vty_lockout.h"  /* vty_lockout_set_enabled */
 #include "vty_util.h"
 
 #include <stdio.h>

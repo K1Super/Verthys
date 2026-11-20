@@ -30,6 +30,7 @@
 #endif
 #include <windows.h>
 #include <shlobj.h>  /* SHGetFolderPath */
+#include <io.h>      /* _commit */
 #endif
 
 /* ===================================================================== *

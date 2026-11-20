@@ -101,7 +101,7 @@ static size_t  s_sym_count = 0;
 
 /* ---------- 工具函数 ---------- */
 
-static void die(const char *fmt, ...)
+static __declspec(noreturn) void die(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);

@@ -25,6 +25,7 @@
 #include <windows.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>  /* sprintf_s */
 
 #define RB_MAGIC          0x42525456u   /* 'VTRB'（小端） */
 #define RB_VERSION        2u
