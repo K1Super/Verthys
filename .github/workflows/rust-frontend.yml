@@ -305,8 +305,9 @@ jobs:
       # 本地一键构建脚本在干净 runner 上的可跑性验证：
       # 覆盖"注入 MSVC 环境探测 + Ninja 单配置 + npm ci + 无写锁补丁断言"
       # 全链路（-SkipTauri：不执行 NSIS 打包，组件级验证）。
+      # 使用 local profile：production 要求发布者证书与更新端点，均由受控发布机提供，CI 不持有。
       - name: Local one-click build script smoke (-SkipTauri)
         shell: pwsh
         run: |
-          & ".\build_production.ps1" -SkipTauri -NoPause
+          & ".\build_production.ps1" -SkipTauri -NoPause -Profile local -AllowLocal
           if ($LASTEXITCODE -ne 0) { throw "build_production.ps1 -SkipTauri failed" }

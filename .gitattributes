@@ -1,0 +1,4 @@
+# vendored 第三方源码按入库字节检出，禁止换行转换。
+# ci/vendor_hashes.txt 记录的是原始字节哈希，任何 EOL 转换都会造成跨机器误报。
+third_party/flatcc/** -text
+third_party/libsodium/** -text
