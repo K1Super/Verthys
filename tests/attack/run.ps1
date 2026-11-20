@@ -115,8 +115,26 @@ function Invoke-ProbeRaw {
     if (-not (Test-Path -LiteralPath $probePath)) {
         return [pscustomobject]@{ Pass = $false; Detail = 'vty_probe.exe 未构建'; Exit = -1 }
     }
-    $lines = @(& $probePath @Arguments 2>&1 | ForEach-Object { "$_" })
-    $exitCode = $LASTEXITCODE
+    Write-Host "[probe] $Id"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $probePath
+    foreach ($arg in $Arguments) { $psi.ArgumentList.Add([string]$arg) }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    if (-not $proc.WaitForExit(180000)) {
+        try { $proc.Kill() } catch { }
+        return [pscustomobject]@{
+            Pass = $false; Verdict = 'FAIL'
+            Detail = 'probe timeout 180s'; Exit = -1
+        }
+    }
+    $lines = @((@($proc.StandardOutput.ReadToEnd(),
+                    $proc.StandardError.ReadToEnd()) -join "`n") -split "`r?`n" |
+            Where-Object { $_ -ne '' })
+    $exitCode = $proc.ExitCode
     $pattern = '^RESULT ' + [regex]::Escape($Id) + ' (PASS|FAIL|SKIP) (.*)$'
     $verdict = 'FAIL'
     $detail = if ($lines.Count -gt 0) { $lines -join ' | ' } else { '无输出' }
@@ -141,6 +159,7 @@ function Invoke-ResultScript {
     if (-not (Test-Path -LiteralPath $scriptPath)) {
         return [pscustomobject]@{ Pass = $false; Detail = "$File 缺失"; Exit = -1 }
     }
+    Write-Host "[probe] $File"
     $lines = @(& pwsh -NoProfile -File $scriptPath 2>&1 | ForEach-Object { "$_" })
     $exitCode = $LASTEXITCODE
     $verdict = 'FAIL'
@@ -391,7 +410,9 @@ try {
         # 排除 unlock/结果映射恒为拒绝导致的假阴性。
         $baselineSecret = 'VERTHYS_DEFAULT_PASSWORD_v1'
         $baselinePath = Join-Path $workDir 'baseline.verthys'
+        Write-Host '[setup] creating baseline vault'
         New-TestVault -Path $baselinePath -Password (New-Utf8Bytes -Text $baselineSecret)
+        Write-Host '[setup] baseline vault ready'
         $rc = Test-VaultUnlock -Path $baselinePath -Password (New-Utf8Bytes -Text $baselineSecret)
         Add-Result -Id 'BC-1' -Name '正控：公开常量被识别为解锁成功' `
             -Expected 'OK' -Observed (ConvertTo-VerthysResultName $rc) `
@@ -400,9 +421,12 @@ try {
     }
     else {
     $containerSecret = New-ContainerSecret
+    Write-Host '[setup] creating harness vault'
     New-TestVault -Path $vaultPath -Password (New-Utf8Bytes -Text $containerSecret) -Records @(
         @{ Name = $nameMarker; Data = $accountJson; Type = 2 }
     )
+    Write-Host '[setup] harness vault ready'
+    Write-Host '[check] built-in attack checks'
 
     $hashBefore = (Get-FileHash -LiteralPath $vaultPath -Algorithm SHA256).Hash
 
@@ -521,6 +545,8 @@ try {
         -Observed $(if ($nameHits.Count -eq 0) { '零命中' } else { "$($nameHits.Count) 个文件命中" }) `
         -Verdict $(if ($nameHits.Count -eq 0) { 'PASS' } else { 'FAIL' }) `
         -Evidence ($(if ($nameHits.Count -eq 0) { 'marker 未出现在任何文件' } else { ($nameHits | Select-Object -First 3) -join '; ' }))
+
+    Write-Host '[check] built-in attack checks done'
 
     # 攻击探针：分片、熔断、封装、重放、恢复码、回滚与 keyfile 各攻击面由独立进程直接驱动
     # 原语，工件全部写入临时目录，不触碰活动库。
