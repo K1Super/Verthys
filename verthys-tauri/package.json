@@ -1,7 +1,7 @@
 {
   "name": "verthys-tauri",
   "private": true,
-"version": "4.6.5",
+  "version": "4.6.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -27,7 +27,7 @@
     "@types/three": "^0.171.0",
     "@vitejs/plugin-vue": "^6.0.2",
     "esbuild-wasm": "^0.28.1",
-    "happy-dom": "20.14.5",
+    "happy-dom": "21.0.4",
     "javascript-obfuscator": "^4.1.1",
     "rollup-plugin-obfuscator": "^1.1.0",
     "rollup-plugin-visualizer": "^6.0.11",
