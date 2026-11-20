@@ -26,12 +26,14 @@
 #define LP_BAD   "pipeline-wrong"
 #define LP_BAD_LEN 14u
 
-static void lp_clean_witness(void)
+static int lp_clean_witness(void)
 {
     uint8_t id[VTY_UUID_BYTES];
-    if (vty_secure_state_identity_lockout(id) == VTY_OK) {
-        (void)vty_tpm_witness_delete_all(id);
+    int rc = vty_secure_state_identity_lockout(id);
+    if (rc != VTY_OK) {
+        return rc;
     }
+    return vty_tpm_witness_delete_all(id);
 }
 
 TEST(lockout_pipeline_persistent)
@@ -47,7 +49,16 @@ TEST(lockout_pipeline_persistent)
     vty_lockout_set_enabled(1);
     /* 先启用再清理见证：关闭态下身份/见证 API 可能拒绝操作，
      * 残留见证会让后续 reset 返回 LOCKED。 */
-    lp_clean_witness();
+    rc = lp_clean_witness();
+    if (rc == VTY_E_TPM) {
+        /* CI runner 没有可用的 CNG 平台密钥提供程序；本用例的持久化
+         * 语义依赖真实见证，硬件不可用时跳过而不是误报失败。 */
+        printf("  [SKIP] CNG witness backend unavailable\n");
+        vty_lockout_set_enabled(0);
+        remove(LP_VAULT);
+        remove(LP_STATE);
+        return 0;
+    }
 
     rc = vty_lockout_set_path_for_test(LP_STATE);
     if (rc != VTY_OK) {
@@ -151,7 +162,7 @@ done:
     if (h != NULL) Verthys_Deinit(h);
     (void)vty_lockout_reset();
     /* 关闭前清理见证，避免残留污染后续用例。 */
-    lp_clean_witness();
+    (void)lp_clean_witness();
     vty_lockout_set_enabled(0);
     remove(LP_VAULT);
     remove(LP_STATE);
