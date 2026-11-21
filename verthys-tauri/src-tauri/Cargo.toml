@@ -10,7 +10,7 @@
 # ==============================================================================
 # - 名称：verthys-tauri
 # - 版本：唯一手改点为仓库根 VERSION 文件，由 ci/sync_version.ps1 同步至本字段
-# - 描述：Verthys 私密数据管理器
+# - 描述：Verthys 加密数据管理器
 # - 版本号遵循语义化版本规范，与 Tauri 生态版本对齐。
 #
 # 二、库类型
@@ -85,7 +85,7 @@
 [package]
 name = "verthys-tauri"
 version = "4.6.5"
-description = "Verthys 私密数据管理器"
+description = "Verthys 加密数据管理器"
 authors = ["Verthys"]
 edition = "2021"
 publish = false

@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="460" viewBox="0 0 1600 460" font-family="ui-monospace,'Cascadia Code','JetBrains Mono',Consolas,monospace">
+  <rect width="1600" height="460" fill="#0A0D12"/>
+
+  <text x="64" y="46" font-size="16" fill="#5D6B80" letter-spacing="4">KEY HIERARCHY · 4 LEVELS</text>
+  <text x="1536" y="46" text-anchor="end" font-size="16" fill="#5D6B80" letter-spacing="3">K_c 仅驻留 L2 会话 · 锁定即清零</text>
+
+  <g>
+    <rect x="64" y="124" width="180" height="72" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
+    <text x="154" y="156" text-anchor="middle" font-size="22" fill="#E7EBF0">口令</text>
+    <text x="154" y="178" text-anchor="middle" font-size="15" fill="#5D6B80">用户输入</text>
+
+    <line x1="244" y1="160" x2="314" y2="160" stroke="#2A3442" stroke-width="1.5"/>
+    <path d="M312 154 L322 160 L312 166 Z" fill="#2A3442"/>
+    <text x="284" y="110" text-anchor="middle" font-size="15" fill="#5D6B80" letter-spacing="1">Argon2id · 胡椒</text>
+
+    <rect x="324" y="124" width="180" height="72" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
+    <text x="414" y="156" text-anchor="middle" font-size="22" fill="#E7EBF0">user 槽</text>
+    <text x="414" y="178" text-anchor="middle" font-size="15" fill="#5D6B80">口令派生解封</text>
+
+    <line x1="504" y1="160" x2="574" y2="160" stroke="#2A3442" stroke-width="1.5"/>
+    <path d="M572 154 L582 160 L572 166 Z" fill="#2A3442"/>
+    <text x="544" y="110" text-anchor="middle" font-size="14" fill="#D9A94E" letter-spacing="1">AND</text>
+
+    <rect x="584" y="116" width="200" height="88" fill="#161309" stroke="#8A6D2F" stroke-width="1.5"/>
+    <text x="684" y="156" text-anchor="middle" font-size="28" fill="#E7EBF0">K_c</text>
+    <text x="684" y="182" text-anchor="middle" font-size="15" fill="#A8B2C0">全库数据密钥</text>
+
+    <line x1="784" y1="160" x2="854" y2="160" stroke="#2A3442" stroke-width="1.5"/>
+    <path d="M852 154 L862 160 L852 166 Z" fill="#2A3442"/>
+    <text x="824" y="110" text-anchor="middle" font-size="15" fill="#5D6B80" letter-spacing="1">HKDF</text>
+
+    <rect x="864" y="124" width="220" height="72" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
+    <text x="974" y="156" text-anchor="middle" font-size="22" fill="#E7EBF0">域分离</text>
+    <text x="974" y="178" text-anchor="middle" font-size="15" fill="#5D6B80">索引 / 记录 / 系统记录</text>
+
+    <line x1="1084" y1="160" x2="1154" y2="160" stroke="#2A3442" stroke-width="1.5"/>
+    <path d="M1152 154 L1162 160 L1152 166 Z" fill="#2A3442"/>
+    <text x="1124" y="110" text-anchor="middle" font-size="15" fill="#5D6B80" letter-spacing="1">域密钥</text>
+
+    <rect x="1164" y="124" width="180" height="72" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
+    <text x="1254" y="156" text-anchor="middle" font-size="22" fill="#E7EBF0">记录密钥</text>
+    <text x="1254" y="178" text-anchor="middle" font-size="15" fill="#5D6B80">逐记录 AEAD</text>
+  </g>
+
+  <g>
+    <line x1="1376" y1="116" x2="1376" y2="204" stroke="#1E2733" stroke-width="1"/>
+    <text x="1396" y="142" font-size="11" fill="#5D6B80">DOMAIN</text>
+    <text x="1396" y="162" font-size="11" fill="#A8B2C0">verthys/v4/</text>
+    <text x="1396" y="180" font-size="11" fill="#A8B2C0">system-record</text>
+  </g>
+
+  <g>
+    <rect x="64" y="244" width="180" height="72" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
+    <text x="154" y="276" text-anchor="middle" font-size="22" fill="#E7EBF0">设备根</text>
+    <text x="154" y="298" text-anchor="middle" font-size="15" fill="#5D6B80">CNG 机器密钥</text>
+
+    <line x1="244" y1="280" x2="314" y2="280" stroke="#2A3442" stroke-width="1.5"/>
+    <path d="M312 274 L322 280 L312 286 Z" fill="#2A3442"/>
+    <text x="284" y="230" text-anchor="middle" font-size="15" fill="#5D6B80" letter-spacing="1">硬件绑定</text>
+
+    <rect x="324" y="244" width="180" height="72" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
+    <text x="414" y="276" text-anchor="middle" font-size="22" fill="#E7EBF0">device 槽</text>
+    <text x="414" y="298" text-anchor="middle" font-size="15" fill="#5D6B80">硬件指纹 OAEP</text>
+
+    <path d="M504 280 H684 V214" fill="none" stroke="#2A3442" stroke-width="1.5"/>
+    <path d="M678 216 L684 206 L690 216 Z" fill="#2A3442"/>
+    <text x="698" y="272" font-size="14" fill="#D9A94E" letter-spacing="1">AND</text>
+  </g>
+
+  <g>
+    <line x1="64" y1="350" x2="1536" y2="350" stroke="#1E2733" stroke-width="1"/>
+    <text x="64" y="376" font-size="11" fill="#5D6B80" letter-spacing="3">AUXILIARY CHANNELS</text>
+
+    <text x="64" y="404" font-size="18" fill="#E7EBF0">恢复码 → recovery 槽</text>
+    <text x="64" y="426" font-size="15" fill="#5D6B80">独立承载同一 K_c · 显式逃生通道</text>
+
+    <text x="560" y="404" font-size="18" fill="#E7EBF0">keyfile → user 槽</text>
+    <text x="560" y="426" font-size="15" fill="#5D6B80">可选因子 · 不改变 K_c 语义</text>
+
+    <text x="1056" y="404" font-size="18" fill="#E7EBF0">模块口令 → MDEK</text>
+    <text x="1056" y="426" font-size="15" fill="#5D6B80">独立于 K_c · 模块失败不污染库级密钥</text>
+
+    <line x1="520" y1="386" x2="520" y2="432" stroke="#1E2733" stroke-width="1"/>
+    <line x1="1016" y1="386" x2="1016" y2="432" stroke="#1E2733" stroke-width="1"/>
+  </g>
+</svg>

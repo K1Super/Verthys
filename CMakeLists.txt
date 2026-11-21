@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-# Verthys - 私密数据管理器
+# Verthys - 加密数据管理器
 # 四层架构：UI 交互层 / 应用调度层 / 核心 DLL 层 / 持久化存储层
 # 第一阶段：核心安全 DLL（本 CMake 构建 core 与其测试）
 # 产品版本唯一手改点为仓库根 VERSION 文件；此处读取并校验 semver 后注入项目。
@@ -13,7 +13,7 @@ endif()
 project(Verthys
     VERSION ${VERTHYS_VERSION_FILE}
     LANGUAGES C CXX
-    DESCRIPTION "Private data manager with encrypted .verthys container"
+    DESCRIPTION "Encrypted data manager with .verthys container"
 )
 
 # 直连系统调用 thunk 使用 MASM 编写；仅 MSVC 工具链提供该汇编器。
