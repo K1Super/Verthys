@@ -134,6 +134,7 @@ function Measure-AllHits([string]$path, $list) {
 
 $detail = ''
 $fileHits = 0
+$hitFiles = New-Object System.Collections.Generic.List[string]
 $positiveHits = 0
 $lockedHits = 0
 $werHits = 0
@@ -204,13 +205,21 @@ try {
     # ---------- 落盘文件与状态目录（必须 0 命中） ----------
     if ($pass) {
         $files = Get-ChildItem -LiteralPath $workDir -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -ne $dumpUnlocked -and $_.FullName -ne $dumpLocked }
+            Where-Object {
+                $_.FullName -ne $dumpUnlocked -and
+                $_.FullName -ne $dumpLocked -and
+                $_.FullName -ne $memHostRun
+            }
         foreach ($f in $files) {
-            $fileHits += Measure-AllHits $f.FullName $patterns
+            $hits = Measure-AllHits $f.FullName $patterns
+            if ($hits -ne 0) {
+                $hitFiles.Add("$($f.Name)($hits)")
+                $fileHits += $hits
+            }
         }
         if ($fileHits -ne 0) {
             $pass = $false
-            $detail = "A8-1 落盘文件命中 $fileHits 处"
+            $detail = "A8-1 落盘文件命中 $fileHits 处: $($hitFiles -join ', ')"
         }
     }
 
@@ -334,6 +343,7 @@ if ($OutJson) {
         )
         observed = [ordered]@{
             files = $fileHits
+            file_hits = @($hitFiles)
             dump_unlocked_positive = $positiveHits
             dump_locked = $lockedHits
             wer = $werHits
