@@ -160,31 +160,42 @@ function Invoke-ScriptCapture {
         [int]$TimeoutSeconds = 600
     )
     Write-Host "[probe] $Label"
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'pwsh'
-    $psi.ArgumentList.Add('-NoProfile')
-    $psi.ArgumentList.Add('-File')
-    $psi.ArgumentList.Add($ScriptPath)
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    $outTask = $proc.StandardOutput.ReadToEndAsync()
-    $errTask = $proc.StandardError.ReadToEndAsync()
+    $outFile = Join-Path $env:TEMP ('verthys_out_' + [guid]::NewGuid().ToString('N') + '.log')
+    $errFile = Join-Path $env:TEMP ('verthys_err_' + [guid]::NewGuid().ToString('N') + '.log')
     $timedOut = $false
-    if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
-        $timedOut = $true
-        try { $proc.Kill() } catch { }
+    $exitCode = -1
+    try {
+        # 文件重定向而非管道：子脚本可能派生 certutil/cmake 等孙进程，
+        # 管道句柄会被孙进程继承，超时后 ReadToEnd 无法返回。
+        $proc = Start-Process -FilePath 'pwsh' `
+            -ArgumentList @('-NoProfile', '-File', "`"$ScriptPath`"") `
+            -RedirectStandardOutput $outFile `
+            -RedirectStandardError $errFile `
+            -PassThru -NoNewWindow
+        if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+            $timedOut = $true
+            # 终止整棵进程树，避免孙进程继续占用构建目录或证书存储。
+            & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null
+            [void]$proc.WaitForExit(5000)
+        }
+        if (-not $timedOut) { $exitCode = $proc.ExitCode }
     }
-    $text = ''
-    try { $text = (@($outTask.Result, $errTask.Result) -join "`n") } catch { }
+    finally {
+        $text = ''
+        if (Test-Path -LiteralPath $outFile) {
+            $text += (Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)
+        }
+        if (Test-Path -LiteralPath $errFile) {
+            $text += (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+        }
+        Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
+    }
     $lines = @($text -split "`r?`n" | Where-Object { $_ -ne '' })
-    # 子脚本输出实时回放到门禁日志，超时也能看到最后执行到的阶段。
+    # 子脚本输出回放到门禁日志，超时也能看到最后执行到的阶段。
     foreach ($line in $lines) { Write-Host $line }
     return [pscustomobject]@{
         Lines    = $lines
-        Exit     = $(if ($timedOut) { -1 } else { $proc.ExitCode })
+        Exit     = $exitCode
         TimedOut = $timedOut
     }
 }
