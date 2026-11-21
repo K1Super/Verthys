@@ -62,6 +62,8 @@
 #if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
 static int g_test_env_hook = 0;
 static char g_test_state_dir[VTY_SECURE_STATE_PATH_BYTES];
+static int g_test_env_checked = 0;
+static int g_test_explicit_enable = 0;
 #endif
 
 static char g_state_path[VTY_SECURE_STATE_PATH_BYTES];
@@ -93,13 +95,36 @@ uint32_t vty_lockout_backoff_secs(uint32_t failures)
     return (secs > 3600u) ? 3600u : secs;
 }
 
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+/* 攻击回归在无 PCP 的 runner 上无法认证熔断状态：允许测试入口显式
+ * 关闭熔断。仅测试钩子构建编译；显式 set_enabled(1) 优先。 */
+static void lk_apply_test_disable(void)
+{
+    char value[8];
+    DWORD n;
+
+    if (g_test_env_checked) return;
+    g_test_env_checked = 1;
+    if (g_test_explicit_enable) return;
+    n = GetEnvironmentVariableA("VERTHYS_TEST_LOCKOUT_DISABLED", value,
+                                sizeof(value));
+    if (n == 1 && value[0] == '1') g_enabled = 0;
+}
+#else
+#define lk_apply_test_disable() ((void)0)
+#endif
+
 void vty_lockout_set_enabled(int enabled)
 {
     g_enabled = enabled ? 1 : 0;
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+    if (enabled) g_test_explicit_enable = 1;
+#endif
 }
 
 int vty_lockout_enabled(void)
 {
+    lk_apply_test_disable();
     return g_enabled;
 }
 

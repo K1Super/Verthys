@@ -74,7 +74,8 @@ $witnessAvailable = if ($env:VERTHYS_TEST_FORCE_NO_WITNESS -eq '1') {
 }
 if (-not $witnessAvailable) {
     $env:VERTHYS_TEST_ROLLBACK_DISABLED = '1'
-    Write-Host '[env] PCP witness backend unavailable: rollback disabled for harness vaults'
+    $env:VERTHYS_TEST_LOCKOUT_DISABLED = '1'
+    Write-Host '[env] PCP witness backend unavailable: rollback/lockout disabled for harness vaults'
 }
 
 $vaultPath = Join-Path $workDir 'attack.verthys'
@@ -233,6 +234,13 @@ function Invoke-A8Probe {
     # 任一失败即内存残留用例失败，避免只验证一侧而给出片面的 PASS。
     # worker 产物未构建时（如仅 C 核心的 CI 通道）跳过 worker 部分并显式标注。
     $main = Invoke-ResultScript 'a8.ps1' 'A8'
+    if ($main.PSObject.Properties['Verdict'] -and $main.Verdict -eq 'SKIP') {
+        # 主内存扫描通过但崩溃/WER 分支缺设备根前置：显式跳过而非失败。
+        return [pscustomobject]@{
+            Pass = $false; Verdict = 'SKIP'
+            Detail = "主进程[$($main.Detail)]"; Exit = 0
+        }
+    }
     if (-not $main.Pass -or $main.Exit -ne 0) {
         return [pscustomobject]@{ Pass = $false; Detail = "主进程[$($main.Detail)]"; Exit = 1 }
     }

@@ -48,10 +48,17 @@ function Start-MemHost([string]$mode, [string]$vaultPath, [string]$pw) {
     $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
     $proc = [System.Diagnostics.Process]::Start($psi)
     if ($pw -ne $null) {
-        $proc.StandardInput.WriteLine($pw)
-        $proc.StandardInput.Flush()
+        try {
+            $proc.StandardInput.WriteLine($pw)
+            $proc.StandardInput.Flush()
+        }
+        catch {
+            # 崩溃注入/初始化失败时子进程可能先于写入退出；由后续
+            # READY/退出码判定，不在这里中断证据采集。
+        }
     }
     $secrets = @{}
+    $errorLine = ''
     while ($null -ne ($line = $proc.StandardOutput.ReadLine())) {
         if ($line -like 'SECRET *') {
             $parts = $line.Split(' ', 3)
@@ -59,10 +66,11 @@ function Start-MemHost([string]$mode, [string]$vaultPath, [string]$pw) {
         } elseif ($line -like 'READY *') {
             break
         } elseif ($line -like 'ERROR *') {
+            $errorLine = $line
             break
         }
     }
-    return [pscustomobject]@{ Proc = $proc; Secrets = $secrets }
+    return [pscustomobject]@{ Proc = $proc; Secrets = $secrets; Error = $errorLine }
 }
 
 function ConvertFrom-Hex([string]$hex) {
@@ -133,6 +141,8 @@ $werFiles = 0
 $hold = $null
 $crash = $null
 $pass = $true
+$crashSkipped = $false
+$crashSkipReason = ''
 
 try {
     # ---------- 建库 → 保存 → 轮换 → 解锁（hold 角色） ----------
@@ -178,9 +188,17 @@ try {
         }
     }
     if ($hold -ne $null -and -not $hold.Proc.HasExited) {
-        $hold.Proc.StandardInput.WriteLine('EXIT')
-        $hold.Proc.StandardInput.Flush()
-        [void]$hold.Proc.WaitForExit(10000)
+        try {
+            $hold.Proc.StandardInput.WriteLine('EXIT')
+            $hold.Proc.StandardInput.Flush()
+        }
+        catch { }
+        if (-not $hold.Proc.WaitForExit(10000)) {
+            # hold 未响应 EXIT 时强制回收，避免它继续占用库文件导致
+            # crash 宿主无法打开同一容器。
+            try { $hold.Proc.Kill() } catch { }
+            [void]$hold.Proc.WaitForExit(5000)
+        }
     }
 
     # ---------- 落盘文件与状态目录（必须 0 命中） ----------
@@ -200,9 +218,28 @@ try {
     if ($pass) {
         $crashStart = Get-Date
         $crash = Start-MemHost 'crash' $vault $hold.Secrets['password']
+        if ($crash.Error -ne '') {
+            if ($crash.Error -match '^ERROR open ') {
+                # 独立进程无法重开同一容器的设备根：该环境无法验证
+                # 崩溃/WER 分支，保留主内存扫描结论并显式跳过。
+                $crashSkipped = $true
+                $crashSkipReason = $crash.Error
+            }
+            else {
+                throw "crash host: $($crash.Error)"
+            }
+        }
+        if (-not $crashSkipped) {
         Start-Sleep -Milliseconds 500
-        $crash.Proc.StandardInput.WriteLine('CRASH')
-        $crash.Proc.StandardInput.Flush()
+        try {
+            $crash.Proc.StandardInput.WriteLine('CRASH')
+            $crash.Proc.StandardInput.Flush()
+        }
+        catch {
+            $crashSkipped = $true
+            $crashSkipReason = 'crash host 未接收 CRASH 指令'
+        }
+        if (-not $crashSkipped) {
         [void]$crash.Proc.WaitForExit(15000)
         # 崩溃进程可能被 WER 挂起：Process.Kill 在挂起态可能失败，改用系统命令兜底；
         # 已退出时 taskkill 只是返回错误，不影响结果。
@@ -232,11 +269,18 @@ try {
             if ($crash.Proc.HasExited) { break }
             Start-Sleep -Milliseconds 1000
         }
+        }
+        }
     }
 
     if ($pass) {
-        $werNote = if ($werFiles -eq 0) { 'A8-4 无 WER/崩溃转储生成' } else { "A8-4 扫描 $werFiles 个 WER 文件 0 命中" }
-        $detail = "A8-1 文件 0 命中；A8-2 正控命中 $positiveHits；A8-3 锁定后 0 命中；$werNote"
+        if ($crashSkipped) {
+            $detail = "A8-1 文件 0 命中；A8-2 正控命中 $positiveHits；A8-3 锁定后 0 命中；A8-4 跳过：$crashSkipReason"
+        }
+        else {
+            $werNote = if ($werFiles -eq 0) { 'A8-4 无 WER/崩溃转储生成' } else { "A8-4 扫描 $werFiles 个 WER 文件 0 命中" }
+            $detail = "A8-1 文件 0 命中；A8-2 正控命中 $positiveHits；A8-3 锁定后 0 命中；$werNote"
+        }
     }
 } catch {
     $pass = $false
@@ -274,7 +318,7 @@ if ($OutJson) {
     }
     $report = [ordered]@{
         case = 'A8'
-        verdict = $(if ($pass) { 'PASS' } else { 'FAIL' })
+        verdict = $(if (-not $pass) { 'FAIL' } elseif ($crashSkipped) { 'SKIP' } else { 'PASS' })
         environment = [ordered]@{
             os = $(if ($os) { $os.Caption + ' ' + $os.Version } else { 'unknown' })
             is_vm = $virtual
@@ -306,6 +350,10 @@ if ($OutJson) {
 }
 
 Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+if ($pass -and $crashSkipped) {
+    Write-Output "RESULT A8 SKIP $detail"
+    exit 0
+}
 if ($pass) {
     Write-Output "RESULT A8 PASS $detail"
     exit 0

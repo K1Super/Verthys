@@ -104,20 +104,26 @@ foreach ($file in $sourceFiles) {
 }
 
 if (-not (Test-Path -LiteralPath $DistDir)) {
-    $findings.Add('dist-missing')
-}
-else {
-    $distFiles = @(Get-ChildItem -LiteralPath $DistDir -Recurse -File -Filter '*.js')
-    if ($distFiles.Count -eq 0) {
-        $findings.Add('dist-js-empty')
+    if ($findings.Count -gt 0) {
+        $detail = $findings | Select-Object -First 6
+        Write-Host ("RESULT A17 FAIL 源码={0} dist=0 命中: {1}" -f $sourceCount, ($detail -join ', '))
+        exit 1
     }
-    foreach ($file in $distFiles) {
-        $distCount++
-        $text = [System.IO.File]::ReadAllText($file.FullName)
-        foreach ($rule in $distForbidden) {
-            if ($text -match $rule.Pattern) {
-                $findings.Add("$($rule.Id)@dist/$($file.Name)")
-            }
+    # 核心 CI 通道不构建前端产物；dist 扫描由构建前端产物的通道覆盖。
+    Write-Host ("RESULT A17 SKIP 源码={0} dist 未构建（由前端通道覆盖）" -f $sourceCount)
+    exit 0
+}
+
+$distFiles = @(Get-ChildItem -LiteralPath $DistDir -Recurse -File -Filter '*.js')
+if ($distFiles.Count -eq 0) {
+    $findings.Add('dist-js-empty')
+}
+foreach ($file in $distFiles) {
+    $distCount++
+    $text = [System.IO.File]::ReadAllText($file.FullName)
+    foreach ($rule in $distForbidden) {
+        if ($text -match $rule.Pattern) {
+            $findings.Add("$($rule.Id)@dist/$($file.Name)")
         }
     }
 }
