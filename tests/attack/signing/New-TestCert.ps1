@@ -1,8 +1,8 @@
 # tests/attack/signing/New-TestCert.ps1 — 攻击回归专用自签发布者证书
 #
-# 只服务 A2（调用方签名校验）测试：生成可导出的代码签名证书，并把公钥
-# 加入 CurrentUser 的 Root/TrustedPeople，使 WinVerifyTrust 能验证签名链。
-# 私钥留在 CurrentUser\My 供 Set-AuthenticodeSignature 使用。
+# 只服务 A2（调用方签名校验）测试：生成可导出的代码签名证书，公钥写入
+# LocalMachine Root（管理员、无 UI）与 CurrentUser TrustedPeople，使
+# WinVerifyTrust 能验证签名链。私钥留在 CurrentUser\My 供签名使用。
 #
 # 输出契约：每个证书一行
 #   CERT CN=<subject> <thumbprint> <sha256-of-der>
@@ -14,7 +14,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (-not $Install) {
-    throw '需要 -Install：A2 要求证书已进入 CurrentUser 信任存储'
+    throw '需要 -Install：A2 要求测试证书已进入信任存储'
 }
 
 function Get-OrCreateCert {
@@ -42,6 +42,34 @@ function Get-OrCreateCert {
         -Provider 'Microsoft Software Key Storage Provider' `
         -CertStoreLocation 'Cert:\CurrentUser\My' `
         -NotAfter (Get-Date).AddYears(3)
+}
+
+function Add-RootCert {
+    param([Parameter(Mandatory = $true)]$Cert)
+
+    foreach ($store in @('Cert:\LocalMachine\Root', 'Cert:\CurrentUser\Root')) {
+        $present = Get-ChildItem $store -ErrorAction SilentlyContinue |
+            Where-Object { $_.Thumbprint -eq $Cert.Thumbprint }
+        if ($present) { return $false }
+    }
+
+    # 用户 Root 导入自签 CA 会触发安全确认 UI，无桌面会话的 runner 会永久
+    # 阻塞；改用本机 Root。CI runner 以管理员运行，certutil 写入无需 UI。
+    $tmp = Join-Path $env:TEMP ('verthys_root_' + [guid]::NewGuid().ToString('N') + '.cer')
+    try {
+        Write-Host "[cert] trust LocalMachine Root $($Cert.Thumbprint)"
+        [IO.File]::WriteAllBytes($tmp, $Cert.Export(
+                [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+        & certutil.exe -addstore -f Root $tmp 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw ('无法写入本机 Root 存储（需要管理员权限）；' +
+                   '请以管理员身份运行攻击回归')
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+    return $true
 }
 
 function Add-TrustedCert {
@@ -80,7 +108,9 @@ function Get-DerSha256 {
 
 foreach ($subject in $Subjects) {
     $cert = Get-OrCreateCert -Subject $subject
-    Add-TrustedCert -Cert $cert -StoreName 'Root'
+    # Root 写本机存储（管理员、无 UI）；TrustedPeople 写用户存储。
+    $added = Add-RootCert -Cert $cert
+    if ($added) { Write-Output "ROOT-ADDED $($cert.Thumbprint)" }
     Add-TrustedCert -Cert $cert -StoreName 'TrustedPeople'
     Write-Output ("CERT {0} {1} {2}" -f $cert.Subject, $cert.Thumbprint,
         (Get-DerSha256 -Cert $cert))

@@ -43,6 +43,7 @@ $detail = ''
 $pass = $true
 $observed = [ordered]@{}
 $artifacts = [ordered]@{}
+$rootAdded = @()
 
 function Invoke-HostExe([string]$dir) {
     $exe = Join-Path $dir 'vty_signed_host.exe'
@@ -75,6 +76,9 @@ try {
     $publisherLine = @($certOut | Where-Object { $_ -like 'CERT CN=Verthys-Test-Publisher *' })
     if ($publisherLine.Count -ne 1) { throw '测试证书创建失败' }
     $publisherSha = $publisherLine[0].Split(' ')[3]
+    # 记录本次新增的本机 Root 信任锚，结束时回收，避免污染开发机。
+    $rootAdded = @($certOut | Where-Object { $_ -like 'ROOT-ADDED *' } |
+            ForEach-Object { $_.Split(' ')[1] })
 
     $a2Build = Join-Path $repoRoot 'build/a2'
     # 生成器变更后缓存不可复用：不同生成器的产物布局与配置语义不同，
@@ -186,6 +190,9 @@ try {
     $pass = $false
     if ($detail -eq '') { $detail = 'A2 执行异常：' + $_.Exception.Message }
 } finally {
+    foreach ($thumbprint in $rootAdded) {
+        & certutil.exe -delstore Root $thumbprint 2>&1 | Out-Null
+    }
     Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
@@ -198,7 +205,7 @@ if ($OutJson) {
             os = $(if ($os) { $os.Caption + ' ' + $os.Version } else { 'unknown' })
             require_caller_sig = $true
             build_dir = 'build/a2'
-            certificate_store = 'CurrentUser (Root + TrustedPeople)'
+            certificate_store = 'LocalMachine Root + CurrentUser TrustedPeople'
         }
         steps = @(
             'New-TestCert.ps1 -Install (self-signed test publishers)',
