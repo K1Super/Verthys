@@ -204,10 +204,12 @@ try {
 
     # ---------- 落盘文件与状态目录（必须 0 命中） ----------
     if ($pass) {
+        # 按文件名排除转储：CI 的 %TEMP% 可能是 8.3 短名，绝对路径
+        # 字符串比较会因长短路径不一致而失效。
+        $dumpNames = @('a8_unlocked.dmp', 'a8_locked.dmp')
         $files = Get-ChildItem -LiteralPath $workDir -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object {
-                $_.FullName -ne $dumpUnlocked -and
-                $_.FullName -ne $dumpLocked -and
+                $_.Name -notin $dumpNames -and
                 $_.FullName -ne $memHostRun
             }
         foreach ($f in $files) {
