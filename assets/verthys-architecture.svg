@@ -6,7 +6,7 @@
 
   <line x1="200" y1="78" x2="200" y2="766" stroke="#1E2733" stroke-width="1.5"/>
 
-  <text x="140" y="128" text-anchor="middle" font-size="33" fill="#D9A94E">L4</text>
+  <text x="140" y="128" text-anchor="middle" font-size="33" fill="#F7941E">L4</text>
   <text x="140" y="152" text-anchor="middle" font-size="11" fill="#5D6B80" letter-spacing="2">INTERACTION</text>
   <rect x="220" y="78" width="1200" height="132" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
   <text x="250" y="122" font-family="-apple-system,'Segoe UI','Microsoft YaHei',sans-serif" font-size="29" fill="#E7EBF0">UI 交互层</text>
@@ -20,7 +20,7 @@
   <path d="M812 244 L820 254 L828 244 Z" fill="#2A3442"/>
   <text x="850" y="236" font-size="16" fill="#5D6B80">Tauri IPC · invoke + Channel</text>
 
-  <text x="140" y="308" text-anchor="middle" font-size="33" fill="#D9A94E">L3</text>
+  <text x="140" y="308" text-anchor="middle" font-size="33" fill="#F7941E">L3</text>
   <text x="140" y="332" text-anchor="middle" font-size="11" fill="#5D6B80" letter-spacing="2">ORCHESTRATION</text>
   <rect x="220" y="258" width="1200" height="132" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
   <text x="250" y="302" font-family="-apple-system,'Segoe UI','Microsoft YaHei',sans-serif" font-size="29" fill="#E7EBF0">应用调度层</text>
@@ -34,21 +34,21 @@
   <path d="M812 424 L820 434 L828 424 Z" fill="#2A3442"/>
   <text x="850" y="416" font-size="16" fill="#5D6B80">worker JSON-lines · SHM 零拷贝</text>
 
-  <text x="140" y="488" text-anchor="middle" font-size="33" fill="#D9A94E">L2</text>
-  <text x="140" y="512" text-anchor="middle" font-size="11" fill="#D9A94E" letter-spacing="2">KEY HOLDER</text>
-  <rect x="220" y="438" width="1200" height="132" fill="#161309" stroke="#8A6D2F" stroke-width="1.5"/>
+  <text x="140" y="488" text-anchor="middle" font-size="33" fill="#F7941E">L2</text>
+  <text x="140" y="512" text-anchor="middle" font-size="11" fill="#F7941E" letter-spacing="2">KEY HOLDER</text>
+  <rect x="220" y="438" width="1200" height="132" fill="#241607" stroke="#A85A12" stroke-width="1.5"/>
   <text x="250" y="482" font-family="-apple-system,'Segoe UI','Microsoft YaHei',sans-serif" font-size="29" fill="#E7EBF0">核心 DLL 层</text>
   <text x="1390" y="480" text-anchor="end" font-size="18" fill="#5D6B80">C11 · verthys.dll</text>
   <text x="250" y="522" font-size="20" fill="#A8B2C0">api / crypto / container / index / security</text>
   <text x="250" y="550" font-size="16" fill="#8B94A3">A/B 元数据 · 记录 AEAD · 密钥轮换 · 运行时完整性</text>
-  <rect x="1180" y="528" width="210" height="32" fill="#D9A94E" stroke="#D9A94E" stroke-width="1.5"/>
+  <rect x="1180" y="528" width="210" height="32" fill="#F7941E" stroke="#F7941E" stroke-width="1.5"/>
   <text x="1285" y="549" text-anchor="middle" font-size="13" fill="#0A0D12" letter-spacing="2">SOLE KEY HOLDER</text>
 
   <line x1="820" y1="570" x2="820" y2="606" stroke="#2A3442" stroke-width="2"/>
   <path d="M812 604 L820 614 L828 604 Z" fill="#2A3442"/>
   <text x="850" y="596" font-size="16" fill="#5D6B80">A/B 原子提交 · COW 目录 · 记录 AEAD</text>
 
-  <text x="140" y="668" text-anchor="middle" font-size="33" fill="#D9A94E">L1</text>
+  <text x="140" y="668" text-anchor="middle" font-size="33" fill="#F7941E">L1</text>
   <text x="140" y="692" text-anchor="middle" font-size="11" fill="#5D6B80" letter-spacing="2">PERSISTENCE</text>
   <rect x="220" y="618" width="1200" height="132" fill="#0E131B" stroke="#1E2733" stroke-width="1.5"/>
   <text x="250" y="662" font-family="-apple-system,'Segoe UI','Microsoft YaHei',sans-serif" font-size="29" fill="#E7EBF0">持久化层</text>
@@ -63,10 +63,10 @@
   </g>
   <text transform="translate(1494 234) rotate(-90)" text-anchor="middle" font-size="14" fill="#5D6B80" letter-spacing="3">NO KEY MATERIAL · 不接触密钥</text>
 
-  <g stroke="#8A6D2F" stroke-width="1.5">
+  <g stroke="#A85A12" stroke-width="1.5">
     <path d="M1460 438 V750 M1450 438 H1470 M1450 750 H1470"/>
   </g>
-  <text transform="translate(1494 594) rotate(-90)" text-anchor="middle" font-size="14" fill="#D9A94E" letter-spacing="3">KEY MATERIAL · 唯一密钥持有者</text>
+  <text transform="translate(1494 594) rotate(-90)" text-anchor="middle" font-size="14" fill="#F7941E" letter-spacing="3">KEY MATERIAL · 唯一密钥持有者</text>
 
   <line x1="64" y1="800" x2="1536" y2="800" stroke="#1E2733" stroke-width="1"/>
   <text x="64" y="832" font-size="16" fill="#5D6B80">单向依赖：上层只调用下层公开接口，密钥材料不跨层流动</text>

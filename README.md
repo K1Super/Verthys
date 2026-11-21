@@ -1,16 +1,16 @@
 <div align="center">
   <img src="assets/verthys-hero.svg" alt="Verthys — 加密数据管理器" width="100%">
-  <br><br>
-  <sub>ABI 0x0016 &nbsp;·&nbsp; CONTAINER V4 &nbsp;·&nbsp; WINDOWS X64 &nbsp;·&nbsp; LOCAL ONLY</sub>
+  <br>
+  <i>ABI 0x0016&nbsp;·&nbsp;CONTAINER V4&nbsp;·&nbsp;WINDOWS X64&nbsp;·&nbsp;LOCAL ONLY</i>
 </div>
 
 <br>
 
-> **加密不是一个开关，而是一条链路。**
+> **加密不是一个开关，而是一条链路**
 >
-> 上层看不见密钥，下层不信任上层。
+> 上层看不见密钥，下层不信任上层
 
-## 00 · 摘要 <sub>ABSTRACT</sub>
+## 00 · 摘要
 
 Verthys 是一个面向 Windows 的加密数据管理器。敏感数据被封装进加密容器 `.verthys`，由 C 编写的安全核心 `verthys.dll` 承担从密钥守卫、安全解锁，到运行时完整性校验与窃密防护的全部职责。
 
@@ -23,7 +23,7 @@ Verthys 是一个面向 Windows 的加密数据管理器。敏感数据被封装
 | 失败 | fail-closed | 不静默降级 |
 | 交付 | 本地单机 | 无云依赖 |
 
-## 01 · 系统分层 <sub>LAYERING</sub>
+## 01 · 系统分层
 
 <img src="assets/verthys-architecture.svg" alt="Verthys 四层架构" width="100%">
 
@@ -36,7 +36,7 @@ Verthys 是一个面向 Windows 的加密数据管理器。敏感数据被封装
 | **L2 核心层** | C11 `verthys.dll`，api / crypto / container / index / security | 唯一持有 |
 | **L1 持久化层** | `.verthys` 容器、`pepper.bin`、附属数据目录 `<容器>.d` | 仅密文 |
 
-## 02 · 容器格式 <sub>CONTAINER FORMAT</sub>
+## 02 · 容器格式
 
 一个 `.verthys` 容器就是一套自洽的小型存储引擎：
 
@@ -50,7 +50,7 @@ Verthys 是一个面向 Windows 的加密数据管理器。敏感数据被封装
 
 > 崩溃不是异常，是它要处理的常态。
 
-## 03 · 密钥体系 <sub>KEY CHAIN</sub>
+## 03 · 密钥体系
 
 <img src="assets/verthys-keychain.svg" alt="Verthys 密钥体系" width="100%">
 
@@ -60,7 +60,7 @@ Verthys 是一个面向 Windows 的加密数据管理器。敏感数据被封装
 - **解锁原子性** — 密钥校验、元数据提交与仓库挂载全部成功后才进入 UNLOCKED；不存在部分解锁中间态。
 - **零残留** — 密码与密钥内存自动清零（zeroize），不落盘、不留痕。
 
-## 04 · 纵深防御 <sub>DEFENSE</sub>
+## 04 · 纵深防御
 
 纵深防御不是堆功能，而是让任何一条单点突破都无法直达密钥。
 
@@ -75,7 +75,7 @@ Verthys 是一个面向 Windows 的加密数据管理器。敏感数据被封装
 | 07 | 窃密防护 | 剪贴板守卫 · USB 防护 · 模块白名单（恶意 DLL 巡检 + Authenticode）· 后台巡检 · 会话守卫 · 防暴力破解 |
 | 08 | 应急响应 | 分级响应：TELEMETRY / DEGRADE / KILL |
 
-## 05 · 外部边界 <sub>ABI SURFACE</sub>
+## 05 · 外部边界
 
 核心 DLL 对外的唯一契约是 `core/include/verthys.h`。加密算法、容器格式、内存防护与逆向对抗逻辑全部封装在内部，对外不可见。
 
@@ -87,7 +87,7 @@ Verthys 是一个面向 Windows 的加密数据管理器。敏感数据被封装
 
 > 未列入白名单的符号，一律不可达。
 
-## 06 · 构建 <sub>BUILD</sub>
+## 06 · 构建
 
 生产全量构建（C 核心 DLL → worker → Tauri NSIS 安装包 → 产物校验）：
 
@@ -116,7 +116,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 完整流程见 [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) 与 [docs/BUILD.md](docs/BUILD.md)。
 
-## 07 · 技术栈 <sub>STACK</sub>
+## 07 · 技术栈
 
 | 组件 | 技术 |
 | --- | --- |
@@ -126,7 +126,7 @@ ctest --test-dir build -C Release --output-on-failure
 | 前端 | Vue 3.5 · TypeScript 5.6 · Vite 7（精确版本以 package-lock.json 为准） |
 | 质量 | CTest · CI（windows-latest）· 全量 C 测试 + 两个 ACG 专项 + 导出面门 |
 
-## 08 · 文档 <sub>DOCS</sub>
+## 08 · 文档
 
 | 文档 | 内容 |
 | --- | --- |
@@ -141,7 +141,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 完整索引（按角色分组）：[docs/README.md](docs/README.md)。
 
-## 09 · 治理与许可 <sub>GOVERNANCE</sub>
+## 09 · 治理与许可
 
 - 主干开发：`main` 为唯一集成分支，发布以当前主干为准。
 - 提交规范：Conventional Commits 中文格式 `type(scope): 摘要`。
@@ -149,13 +149,8 @@ ctest --test-dir build -C Release --output-on-failure
 - 许可：专有软件，© 2026 K1Super（[LICENSE](LICENSE)）；第三方组件清单见 [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)。
 - 贡献与评审流程：[CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## 10 · 命名与版本 <sub>NAMING</sub>
-
-- 品牌名仅 **Verthys**；容器扩展名 `.verthys`；事件 scheme `verthys://`；环境变量前缀 `VERTHYS_`；核心 DLL `verthys.dll`；公开 API 前缀 `Verthys_`。
-- 产品版本以根 `VERSION` 为唯一手改点，其余载体由 `ci/sync_version.ps1` 自动同步，CI 门禁校验漂移。
-
 ---
 
 <div align="center">
-<sub>LAST UPDATED 2026-11-21 &nbsp;·&nbsp; MAINTAINED BY K1SUPER &nbsp;·&nbsp; © 2026 K1SUPER — PROPRIETARY</sub>
+<i>LAST UPDATED 2026-11-21&nbsp;·&nbsp;MAINTAINED BY K1SUPER&nbsp;·&nbsp;© 2026 K1SUPER — PROPRIETARY</i>
 </div>

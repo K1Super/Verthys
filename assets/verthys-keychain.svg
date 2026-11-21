@@ -19,9 +19,9 @@
 
     <line x1="504" y1="160" x2="574" y2="160" stroke="#2A3442" stroke-width="1.5"/>
     <path d="M572 154 L582 160 L572 166 Z" fill="#2A3442"/>
-    <text x="544" y="110" text-anchor="middle" font-size="14" fill="#D9A94E" letter-spacing="1">AND</text>
+    <text x="544" y="110" text-anchor="middle" font-size="14" fill="#F7941E" letter-spacing="1">AND</text>
 
-    <rect x="584" y="116" width="200" height="88" fill="#161309" stroke="#8A6D2F" stroke-width="1.5"/>
+    <rect x="584" y="116" width="200" height="88" fill="#241607" stroke="#A85A12" stroke-width="1.5"/>
     <text x="684" y="156" text-anchor="middle" font-size="28" fill="#E7EBF0">K_c</text>
     <text x="684" y="182" text-anchor="middle" font-size="15" fill="#A8B2C0">全库数据密钥</text>
 
@@ -64,7 +64,7 @@
 
     <path d="M504 280 H684 V214" fill="none" stroke="#2A3442" stroke-width="1.5"/>
     <path d="M678 216 L684 206 L690 216 Z" fill="#2A3442"/>
-    <text x="698" y="272" font-size="14" fill="#D9A94E" letter-spacing="1">AND</text>
+    <text x="698" y="272" font-size="14" fill="#F7941E" letter-spacing="1">AND</text>
   </g>
 
   <g>
