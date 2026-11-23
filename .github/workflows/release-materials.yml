@@ -162,7 +162,7 @@ jobs:
           Write-Host "[ OK ] release materials: $($release.Name)"
 
       - name: Upload release materials
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: verthys-release-materials
           path: build/updater/releases/*
