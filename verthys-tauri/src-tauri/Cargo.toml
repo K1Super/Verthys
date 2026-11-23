@@ -201,7 +201,7 @@ tauri-plugin-updater = { version = "=2.12.0", default-features = false, features
 # 更新流水线的独立校验依赖：签名复验、语义化版本比较、灰度安装标识
 minisign-verify = "=0.2.5"
 semver = "=1.0.28"
-uuid = { version = "=1.23.4", features = ["v4"] }
+uuid = { version = "=1.29.3", features = ["v4"] }
 # 安装包下载由本服务自行执行，以便统一超时、上限、取消与重定向策略；
 # TLS 后端与插件保持一致，避免同一进程出现两套证书根。
 reqwest = { version = "=0.13.4", default-features = false, features = [
