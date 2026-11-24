@@ -360,6 +360,17 @@ pub struct SecurityStatusReport {
     pub limited_count: u32,
     pub policy_flags: u32,
     pub checked_at_unix_ms: u64,
+    #[serde(default)]
+    pub kernel_status: Option<KernelStatusReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KernelStatusReport {
+    pub state: u32,
+    pub reason: u32,
+    pub capabilities: u32,
+    pub protocol_major: u16,
+    pub protocol_minor: u16,
 }
 
 /// 回退锚点条目（与 worker AnchorEntry 一一对应）
@@ -490,6 +501,10 @@ pub struct VerthysResponse {
      *   - skipped_count：本批次因条目键幂等跳过的记录数 */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ids: Option<Vec<u64>>,
+    /// 改钥清理结果：新记录已落盘但旧记录未删除干净（仅 change_global_key 返回）。
+    /// true 表示新钥已是权威（最新记录），旧记录将在下次解锁收敛时清除。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_pending: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -616,6 +631,7 @@ impl VerthysResponse {
             anchor_cleanup_failed: None,
             anchor_scan: None,
             ids: None,
+            cleanup_pending: None,
             batch_id: None,
             failed_indices: None,
             entry_keys: None,
@@ -705,6 +721,7 @@ impl VerthysResponse {
             anchor_cleanup_failed: None,
             anchor_scan: None,
             ids: None,
+            cleanup_pending: None,
             batch_id: None,
             failed_indices: None,
             entry_keys: None,

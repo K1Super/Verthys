@@ -112,6 +112,9 @@
           :custom-session-minutes="customSessionMinutes"
           :defense-paths="defensePaths"
           :defense-meta="defenseMeta"
+          :kernel-status="kernelStatus"
+          :kernel-policy-degraded="kernelPolicyDegraded"
+          :kernel-status-pending="kernelStatusPending"
           :preset-sync-failed="presetSyncFailed"
           :hardening-failed="hardeningFailed"
           v-model:orbit-slider-pos="orbitSliderPos"
@@ -132,6 +135,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { ModuleId } from "../../lib/keyManager";
 import type { DeviceCheckResult } from "../../composables/security-center/useViewMode";
 import type { DefensePathView, DefenseMetaView } from "../../composables/security-center/useDefenseStatus";
+import type { KernelStatusReport } from "../../types/verthys";
 import QuantumDashboard from "../management/QuantumDashboard.vue";
 import ManagementHub from "../management/ManagementHub.vue";
 import ManagementTopBar from "../management/ManagementTopBar.vue";
@@ -224,6 +228,12 @@ defineProps<{
   defensePaths: DefensePathView[];
   /** 动态防护汇总态势（计数 + 全阻断标志 + 总体态势） */
   defenseMeta: DefenseMetaView;
+  /** 内核加固状态（旧核心或查询失败时为 null） */
+  kernelStatus: KernelStatusReport | null;
+  /** SECURE preferred 下内核未 ACTIVE 的显式降级标记 */
+  kernelPolicyDegraded: boolean;
+  /** SECURE preferred 下内核状态报告尚未到达（显示确认中，不判降级） */
+  kernelStatusPending: boolean;
   /** 档位同步失败标志（恢复链失败时展示警示文案） */
   presetSyncFailed: boolean;
   /** 会话硬化/会话守卫降级标志（剪贴板监听、系统锁屏守卫未生效时如实提示） */

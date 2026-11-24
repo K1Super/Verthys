@@ -15,7 +15,8 @@
  *
  *   状态转移规则：
  *     - derive_global_key: 仅 NoKey → Locked（已存在密钥拒绝重复派生）
- *     - verify_global_key: 仅 Locked → Unlocked（未派生拒绝验证）
+ *     - verify_global_key: Locked → Unlocked；Unlocked 下为幂等重认证
+ *       （中枢内修改密钥/导出备份需要重新证明旧钥知识，不得降级会话）
  *     - clear_global_key:  Unlocked → Locked（lockAll 时调用）
  *     - worker_destroy:    Any → NoKey（worker 销毁，密钥随之消失）
  *
@@ -61,9 +62,9 @@ pub enum KeyLifecycleState {
     Locked,
     /// 已验证：worker 内存持有可用 GMK
     ///
-    /// 仅允许 clear_global_key（→ Locked）与 derive_subkey。
-    /// derive_global_key 拒绝（已存在密钥）。
-    /// verify_global_key 拒绝（已验证无需重复）。
+    /// 允许 clear_global_key（→ Locked）、重认证 verify（幂等保持 Unlocked）
+    /// 与改钥 change（保持 Unlocked）。
+    /// derive_global_key 拒绝（已存在密钥且未经本轮旧钥核验）。
     Unlocked,
 }
 
@@ -229,12 +230,16 @@ impl KeyLifecycle {
 
     /// 尝试转移到 Unlocked 状态（verify_global_key 成功时调用）
     ///
-    /// 仅 Locked → Unlocked 允许。
-    /// NoKey 拒绝（未派生），Unlocked 拒绝（已验证）。
+    /// Locked → Unlocked 允许；Unlocked 下幂等成功（重认证，重置计数与冷却）；
+    /// NoKey 拒绝（未派生）。
+    ///
+    /// 重认证语义：中枢管理界面只在 Unlocked 下可达，修改全局密钥与导出备份
+    /// 需要再次证明旧钥知识。该证明不改变会话状态——失败由记录方计数，
+    /// 成功保持 Unlocked，避免把已认证会话降级造成状态漂移。
     ///
     /// 返回：
-    ///   - Ok(()): 转移成功
-    ///   - Err(msg): 状态不匹配
+    ///   - Ok(()): 转移成功或幂等成功
+    ///   - Err(msg): 状态不匹配（当前状态为 NoKey）
     pub fn transition_to_unlocked(&self) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match inner.state {
@@ -245,12 +250,14 @@ impl KeyLifecycle {
                 inner.cooldown_until = None;
                 Ok(())
             }
+            KeyLifecycleState::Unlocked => {
+                // 重认证：状态不变，计数与冷却按一次成功证明重置
+                inner.consecutive_failures = 0;
+                inner.cooldown_until = None;
+                Ok(())
+            }
             KeyLifecycleState::NoKey => Err(
-                "密钥状态不匹配：verify_global_key 仅允许 Locked 状态，当前为 NoKey（未派生密钥）"
-                    .into(),
-            ),
-            KeyLifecycleState::Unlocked => Err(
-                "密钥状态不匹配：verify_global_key 仅允许 Locked 状态，当前为 Unlocked（已验证）"
+                "密钥状态不匹配：verify_global_key 仅允许 Locked/Unlocked 状态，当前为 NoKey（未派生密钥）"
                     .into(),
             ),
         }
@@ -458,14 +465,28 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_rejects_when_already_unlocked() {
+    fn test_verify_idempotent_when_already_unlocked() {
         let lifecycle = KeyLifecycle::new();
         lifecycle.transition_to_locked().unwrap();
         lifecycle.transition_to_unlocked().unwrap();
 
-        // Unlocked 状态拒绝重复 verify
+        // Unlocked 下重认证：幂等成功，状态保持 Unlocked
         let result = lifecycle.transition_to_unlocked();
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert_eq!(lifecycle.current_state(), KeyLifecycleState::Unlocked);
+    }
+
+    #[test]
+    fn test_verify_failure_keeps_unlocked() {
+        let lifecycle = KeyLifecycle::new();
+        lifecycle.transition_to_locked().unwrap();
+        lifecycle.transition_to_unlocked().unwrap();
+
+        // 重认证失败只计数，不改变已认证会话状态
+        let result = lifecycle.record_verify_failure();
+        assert_eq!(result, VerifyAttemptResult::Failure);
+        assert_eq!(lifecycle.current_state(), KeyLifecycleState::Unlocked);
+        assert_eq!(lifecycle.consecutive_failures(), 1);
     }
 
     #[test]

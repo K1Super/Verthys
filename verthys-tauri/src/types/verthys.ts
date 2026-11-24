@@ -42,6 +42,8 @@ export interface VerthysResponse {
   retry_after_secs?: number | null;
   /** 批量枚举记录列表（仅 enumerate_records 操作返回） */
   records?: VerthysRecordEntry[];
+  /** 改钥清理结果：新记录已落盘但旧记录未删除干净（仅 change_global_key 返回） */
+  cleanup_pending?: boolean;
   /** 摘要扫描记录列表（仅 scan_summary_open / scan_summary_next 操作返回） */
   summary_records?: VerthysSummaryEntry[];
   /** 游标是否已遍历结束（scan_open / scan_next 返回） */
@@ -236,6 +238,19 @@ export interface SecurityStatusReport {
   policy_flags: number;
   /** 快照采样时间（Unix 毫秒，用于标识证据新鲜度） */
   checked_at_unix_ms: number;
+  /** 内核加固状态（旧核心或查询失败时缺失） */
+  kernel_status?: KernelStatusReport;
+}
+
+/** 内核加固状态（与 Rust KernelStatusReport 对齐） */
+export interface KernelStatusReport {
+  /** 0=未知 1=未启用 2=待登记 3=生效 4=降级 5=丢失 6=未安装 7=未运行 8=版本不匹配 9=异常 10=不支持 */
+  state: number;
+  /** 原因码（与 C/服务契约一致） */
+  reason: number;
+  capabilities: number;
+  protocol_major: number;
+  protocol_minor: number;
 }
 
 /** 批量枚举返回的单条记录（与后端 VerthysRecordEntry 对齐） */

@@ -25,10 +25,11 @@
 - 导出宏：`VERTHYS_API` 在 Windows 下**恒为空**（不再携带 `__declspec(dllexport/dllimport)`）。
   符号导出**唯一**由链接器 `/DEF:verthys.def` 白名单管控；未列入 `.def` 的接口一律不可达。
   消费方（verthys-worker）经 `libloading` 按名运行时解析，不依赖导入库。
-- 版本宏：`VERTHYS_API_VERSION = 0x0016u`，调用方可用 `#if` 做编译期能力判断。
+- 版本宏：`VERTHYS_API_VERSION = 0x0017u`，调用方可用 `#if` 做编译期能力判断。
   0x0014 追加：`VerthysSecurityStatus` 原因码/已加固的用户态上限计数/策略位/采样时间，
   以及进程级运行时守卫通知接口 `Verthys_NotifyRuntimeGuards`。
   0x0015 追加：`Verthys_FindLidByName`（名称盲索引精确查 ID）。
+  0x0017 追加：`Verthys_ReplaceRecord`（同一次提交内原子替换单条记录）。
   0x0016 追加：回退锚点维护接口 `Verthys_RollbackAnchorList/Reclaim/Release`。
 
 ## 3. 不透明句柄 `VerthysHandle`
@@ -120,7 +121,7 @@ if (r != VERTHYS_OK) {
 | # | 功能域 | 函数 |
 |---|---|---|
 | 1 | 生命周期 | Verthys_Init / Verthys_NotifySandboxAttrs / Verthys_Deinit / Verthys_V4Create / Verthys_V4Unlock / Verthys_V4UnlockKeyfile / Verthys_V4UnlockRecovery / Verthys_Lock / Verthys_Flush |
-| 2 | 记录 CRUD | Verthys_AddRecord / Verthys_AddRecords / Verthys_GetRecord / Verthys_DeleteRecord / Verthys_DeleteRecords |
+| 2 | 记录 CRUD | Verthys_AddRecord / Verthys_AddRecords / Verthys_GetRecord / Verthys_DeleteRecord / Verthys_DeleteRecords / Verthys_ReplaceRecord |
 | 3 | 导入导出 / 改密 | Verthys_Export / Verthys_Import / Verthys_ChangePassword |
 | 4 | 容器诊断 | Verthys_GetContainerInfo / Verthys_VerifyIntegrity / Verthys_GetDiagnostics / Verthys_GetSecurityStatus |
 | 5 | 全量扫描游标 | Verthys_ScanOpen / Verthys_ScanFetch / Verthys_ScanRecordFree / Verthys_ScanClose |
@@ -215,7 +216,7 @@ if (r != VERTHYS_OK) {
 - 所有权模型：`out_record->data` 与 `out_record->name` 为**内部借用指针**（指向上下文私有缓存
   `last_getrecord_data` / `last_getrecord_name`）。调用方**不持有所有权**，禁止 `free()`、禁止长期保存。
 - 失效时机（写操作即失效，继续访问 = Use-After-Free）：`Verthys_AddRecord` / `Verthys_AddRecords` /
-  `Verthys_DeleteRecord` / `Verthys_DeleteRecords` / `Verthys_Import` / `Verthys_ChangePassword` / `Verthys_Flush` /
+  `Verthys_DeleteRecord` / `Verthys_DeleteRecords` / `Verthys_ReplaceRecord` / `Verthys_Import` / `Verthys_ChangePassword` / `Verthys_Flush` /
   `Verthys_Lock` / `Verthys_Deinit`；再次调用任意 `Verthys_GetRecord` 也会使上一次借用指针失效（同一时刻最多一组有效）。
 - 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_NOTFOUND` / `VERTHYS_ERR_INTERNAL`。（据实现推断，NOTFOUND 对应记录不存在）
 - 内存：如上述借用约定；跨写操作保留内容须先深拷贝。
@@ -231,6 +232,13 @@ if (r != VERTHYS_OK) {
 `VERTHYS_API VerthysResult VERTHYS_CALL Verthys_DeleteRecords(VerthysHandle handle, const uint64_t *ids, size_t count);`
 - 语义：多条合并为单次事务提交，仅一次磁盘刷盘，适合大批量清理。
 - 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_INTERNAL`。（据实现推断）
+- 线程安全：MT-Safe。
+
+### Verthys_ReplaceRecord（API 0x0017）
+`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ReplaceRecord(VerthysHandle handle, uint64_t old_id, const VerthysRecord *record, uint64_t *out_new_id);`
+- 语义：同一次事务提交内墓碑化 `old_id` 并写入新记录；崩溃不会出现"两条并存"或"旧已删、新未写"的中间态。
+- 旧记录不存在/已墓碑/模块不可用：`VERTHYS_ERR_NOTFOUND`，零副作用；任一步失败恢复到调用前的根，旧记录保持原状。
+- 分配器单调递增，新 ID 必大于 `old_id`，否则 `VERTHYS_ERR_VERIFY`。
 - 线程安全：MT-Safe。
 
 ---

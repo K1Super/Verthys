@@ -757,6 +757,57 @@ fail:
     return rc;
 }
 
+int vty_repo_replace(VtyVault *v, uint64_t old_id, uint8_t type,
+                     const uint8_t *name, size_t name_len,
+                     const uint8_t *data, size_t data_len,
+                     uint64_t *out_new_id)
+{
+    VtyStoreCheckpoint cp;
+    VtyRepoLeaf old_leaf;
+    int found = 0;
+    int rc;
+    uint64_t new_id = 0;
+
+    if (out_new_id == NULL || old_id == 0u) return VTY_E_INVALID;
+    *out_new_id = 0u;
+    rc = repo_add_check(type, name, name_len, data, data_len);
+    if (rc != VTY_OK) return rc;
+    rc = repo_write_ready(v);
+    if (rc != VTY_OK) return rc;
+    rc = vty_store_checkpoint(v->store, &cp);
+    if (rc != VTY_OK) return rc;
+
+    /* 先定位并校验旧记录：不存在/已墓碑/模块不可用 → 零副作用拒绝 */
+    rc = get_leaf_raw(v, old_id, &old_leaf, &found);
+    if (rc != VTY_OK) goto fail;
+    if (!found || (old_leaf.flags & VTY_REPO_FLAG_TOMBSTONE) != 0) {
+        rc = VTY_E_INVALID;
+        goto fail;
+    }
+    rc = repo_require_leaf_module(v, &old_leaf);
+    if (rc != VTY_OK) goto fail;
+
+    /* 新记录追加（含分配器推进），随后墓碑化旧记录；两者共用一次提交 */
+    rc = repo_add_one(v, type, name, name_len, data, data_len, 0u,
+                      UINT64_MAX, &new_id);
+    if (rc != VTY_OK) goto fail;
+    if (new_id <= old_id) {
+        rc = VTY_E_VERIFY;
+        goto fail;
+    }
+    rc = delete_one(v, &old_leaf);
+    if (rc != VTY_OK) goto fail;
+
+    rc = repo_commit(v);
+    if (rc != VTY_OK) goto fail;
+    *out_new_id = new_id;
+    return VTY_OK;
+
+fail:
+    vty_store_restore(v->store, &cp);
+    return rc;
+}
+
 static int file_leaf_encode(const VtyRepoFile *f,
                             uint8_t out[VTY_REPO_FILE_BYTES])
 {

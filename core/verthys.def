@@ -55,6 +55,7 @@ EXPORTS
     Verthys_ClearRecordCache
     Verthys_DeleteRecord
     Verthys_DeleteRecords
+    Verthys_ReplaceRecord
     Verthys_Export
     Verthys_Import
     Verthys_ChangePassword
@@ -79,6 +80,7 @@ EXPORTS
     Verthys_VerifyIntegrity
     Verthys_GetDiagnostics
     Verthys_GetSecurityStatus
+    Verthys_GetKernelStatus
     Verthys_NotifyRuntimeGuards
     Verthys_VerifyPersist
     Verthys_RollbackAnchorList

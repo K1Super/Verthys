@@ -55,7 +55,7 @@ fn get_audit_log_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     }
 }
 
-fn write_key_audit(
+pub(crate) fn write_key_audit(
     app: &tauri::AppHandle,
     event_type: AuditEventType,
     result: AuditResult,
@@ -87,12 +87,12 @@ fn write_key_audit(
 // ===== 输入校验 =====
 
 /// 密码最大字节数（512），防止内存超分配。
-const PASSWORD_MAX_BYTES: usize = 512;
+pub(crate) const PASSWORD_MAX_BYTES: usize = 512;
 
 /// Base64 解码后数据上限（4KB），防止 DoS。
-const BASE64_DECODED_MAX_BYTES: usize = 4 * 1024;
+pub(crate) const BASE64_DECODED_MAX_BYTES: usize = 4 * 1024;
 
-fn validate_password_length(password: &str) -> Result<(), String> {
+pub(crate) fn validate_password_length(password: &str) -> Result<(), String> {
     let len = password.len();
     if len > PASSWORD_MAX_BYTES {
         return Err(format!("密码过长（超过 {} 字节）", PASSWORD_MAX_BYTES));
@@ -100,7 +100,7 @@ fn validate_password_length(password: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_password_complexity(password: &str) -> Result<(), String> {
+pub(crate) fn validate_password_complexity(password: &str) -> Result<(), String> {
     let len = password.len();
     if len < 8 {
         return Err("密码长度不足（至少 8 位）".into());
@@ -111,7 +111,7 @@ fn validate_password_complexity(password: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn decode_and_validate_b64(b64: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn decode_and_validate_b64(b64: &str) -> Result<Vec<u8>, String> {
     let bytes = base64_decode(b64).map_err(|e| format!("Base64 解码失败: {}", e))?;
     if bytes.len() > BASE64_DECODED_MAX_BYTES {
         return Err(format!(
@@ -155,97 +155,7 @@ struct VerifyGlobalKeyReq<'a> {
     data: &'a str,
 }
 
-// ===== 命令：派生 GMK =====
-
-/// 派生全局主密钥（首次设置）
-///
-/// 状态要求：当前必须为 NoKey，派生成功后进入 Locked。
-/// 密码在序列化后立即擦除，不保留明文副本。
-/// 请求前校验密码长度、复杂度和 Base64 数据大小。
-/// 操作超时 15 秒，失败记录审计。
-#[tauri::command]
-pub async fn verthys_derive_global_key(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    password: String,
-    bin_data_b64: String,
-    bin_password: String,
-) -> Result<VerthysResponse, String> {
-    let password = Zeroizing::new(password);
-    let bin_data_b64 = Zeroizing::new(bin_data_b64);
-    let bin_password = Zeroizing::new(bin_password);
-    log::info!("[verthys_derive_global_key] 开始派生 GMK");
-
-    // 公共前置检查：熔断闸门 + 生命周期状态 + 输入校验 + 请求序列化。
-    // 状态允许集合：NoKey（首次初始化）与 Unlocked（身份验证通过后的
-    // 密钥更换）；Locked（有 GMK 未验证）拒绝重派生，防未授权覆盖。
-    let req_str = match precheck_derive_request(DerivePrecheckCtx {
-        app: &app,
-        state: &state,
-        op: "derive_global_key",
-        allowed_states: &[KeyLifecycleState::NoKey, KeyLifecycleState::Unlocked],
-        password: &password,
-        bin_data_b64: &bin_data_b64,
-        bin_password: &bin_password,
-    }) {
-        Ok(r) => r,
-        Err(msg) => return Ok(VerthysResponse::err("derive_global_key", &msg)),
-    };
-
-    let resp_json = state
-        .send_with_timeout(req_str.as_str(), DERIVE_VERIFY_TIMEOUT)
-        .map_err(|e| {
-            log::error!("[verthys_derive_global_key] send 失败: {}", e);
-            write_key_audit(
-                &app,
-                AuditEventType::KeyDerive,
-                AuditResult::Failure,
-                Some(format!("worker 通信失败: {}", e)),
-            );
-            "派生密钥失败".to_string()
-        })?;
-
-    // 发送完成：序列化副本与全部敏感原件在此统一销毁（Zeroizing 擦除堆缓冲）
-    drop(req_str);
-    drop(bin_password);
-    drop(bin_data_b64);
-    drop(password);
-
-    let resp: VerthysResponse = serde_json::from_str(&resp_json).map_err(|e| {
-        log::error!(
-            "[verthys_derive_global_key] 解析响应失败: {} | raw={}",
-            e,
-            crate::util::log_sanitizer::json_log_summary(&resp_json, &["op"])
-        );
-        write_key_audit(
-            &app,
-            AuditEventType::KeyDerive,
-            AuditResult::Failure,
-            Some(format!("响应解析失败: {}", e)),
-        );
-        "派生密钥失败".to_string()
-    })?;
-
-    if resp.ok {
-        // 状态推进不由本命令执行：GMK 已驻留 worker 内存，但全局密钥记录
-        // 尚未写入容器。前端在记录写入 + 读回验证成功后才经
-        // verthys_reconcile_key_presence(true) 推进 NoKey → Locked；
-        // 任一环节失败则清 GMK + reconcile(false) 复位 NoKey，保证
-        // 状态机始终与磁盘事实一致（杜绝"派生成功但记录丢失"的中间态死锁）。
-        log::info!("[verthys_derive_global_key] GMK 派生成功（状态推进待落盘确认）");
-        write_key_audit(&app, AuditEventType::KeyDerive, AuditResult::Success, None);
-    } else {
-        log::warn!("[verthys_derive_global_key] GMK 派生失败: {:?}", resp.error);
-        write_key_audit(
-            &app,
-            AuditEventType::KeyDerive,
-            AuditResult::Failure,
-            resp.error.clone(),
-        );
-    }
-
-    Ok(resp)
-}
+// ===== 命令：派生并持久化 GMK =====
 
 /// 派生类命令公共前置检查的输入上下文（聚合参数，避免长参数表）
 struct DerivePrecheckCtx<'a> {
@@ -573,24 +483,30 @@ pub async fn verthys_verify_global_key(
     }
 
     let current_state = state.key_lifecycle.current_state();
-    if current_state != KeyLifecycleState::Locked {
-        log::warn!(
-            "[verthys_verify_global_key] 状态不匹配：当前 {}，仅 Locked 允许验证",
-            current_state
-        );
-        write_key_audit(
-            &app,
-            AuditEventType::KeyVerify,
-            AuditResult::Denied,
-            Some(format!(
-                "状态不匹配：当前 {}，仅 Locked 允许验证",
+    match current_state {
+        // Locked：首次口令证明；Unlocked：中枢内重认证（改钥/导出核验）。
+        // 两种状态都允许验证；重认证成功由 record_verify_success 幂等保持
+        // Unlocked，失败不降级已认证会话。
+        KeyLifecycleState::Locked | KeyLifecycleState::Unlocked => {}
+        KeyLifecycleState::NoKey => {
+            log::warn!(
+                "[verthys_verify_global_key] 状态不匹配：当前 {}，仅 Locked/Unlocked 允许验证",
                 current_state
-            )),
-        );
-        return Ok(VerthysResponse::err(
-            "verify_global_key",
-            ErrorCode::KeyStateMismatch.default_message(),
-        ));
+            );
+            write_key_audit(
+                &app,
+                AuditEventType::KeyVerify,
+                AuditResult::Denied,
+                Some(format!(
+                    "状态不匹配：当前 {}，仅 Locked/Unlocked 允许验证",
+                    current_state
+                )),
+            );
+            return Ok(VerthysResponse::err(
+                "verify_global_key",
+                ErrorCode::KeyStateMismatch.default_message(),
+            ));
+        }
     }
 
     match state.key_lifecycle.check_verify_allowed() {
@@ -741,7 +657,15 @@ pub async fn verthys_verify_global_key(
                 Some(format!("状态转移失败: {}", e)),
             );
         } else {
-            log::info!("[verthys_verify_global_key] GMK 验证成功，状态已转移为 Unlocked");
+            let reauth = current_state == KeyLifecycleState::Unlocked;
+            log::info!(
+                "[verthys_verify_global_key] GMK 验证成功（{}）",
+                if reauth {
+                    "重认证，保持 Unlocked"
+                } else {
+                    "状态已转移为 Unlocked"
+                }
+            );
             write_key_audit(&app, AuditEventType::KeyVerify, AuditResult::Success, None);
         }
     } else {

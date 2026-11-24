@@ -118,6 +118,8 @@ const props = withDefaults(
     ariaLabel?: string;
     /** 紧凑规格：三列并置的窄控件使用 */
     compact?: boolean;
+    /** 弹层宽度覆盖（px，0 = 按触发面与可读下限自适应） */
+    panelWidth?: number;
   }>(),
   {
     placeholder: "未指定",
@@ -127,6 +129,7 @@ const props = withDefaults(
     id: "",
     ariaLabel: "",
     compact: false,
+    panelWidth: 0,
   },
 );
 
@@ -186,10 +189,11 @@ const updatePosition = (): void => {
     closePanel();
     return;
   }
-  const width = Math.min(
-    Math.max(Math.round(rect.width), PANEL_MIN_WIDTH),
-    PANEL_MAX_WIDTH,
-  );
+  const requestedWidth =
+    props.panelWidth > 0
+      ? Math.round(props.panelWidth)
+      : Math.max(Math.round(rect.width), PANEL_MIN_WIDTH);
+  const width = Math.min(Math.max(requestedWidth, 1), PANEL_MAX_WIDTH);
   const left = Math.max(
     8,
     Math.min(Math.round(rect.left), viewportWidth - width - 8),

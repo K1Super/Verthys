@@ -53,7 +53,7 @@
  *     俯仰/lookAt — 正逆渡镜像，重叠换向期连续穿轴
  *   - 渡越时长唯一权威源 = constants ENTER_T_MS，编排节点等比派生
  *
- * 保留能力：自适应抗锯齿（DPR≥1.5 关 MSAA）/ 统一帧门控（60/30/5/1fps）/
+ * 保留能力：自适应抗锯齿（DPR≥1.5 关 MSAA）/ 统一帧门控（默认 120/30/5/1fps，可配置）/
  * 失焦 deep-idle / 贴图烘焙 / 双通道密度降级 / 显式资源释放
  */
 import { ref, onMounted, onBeforeUnmount, watch } from "vue";
@@ -187,7 +187,7 @@ let camBaseX = 0;
 let camBaseY = 0;
 
 /* ===== 统一空闲调度接入 =====
- * 帧率档位（60/30/5/1fps）由全局唯一权威源 useGlobalIdleScheduler 驱动，
+ * 帧率档位（默认 120/30/5/1fps，可配置）由全局唯一权威源 useGlobalIdleScheduler 驱动，
  * 本组件不再维护私有门控状态；转场/尺寸变化经 resetIdle 强制 active。 */
 const { level: idleLevel, resetIdle } = useGlobalIdleScheduler();
 
@@ -540,14 +540,14 @@ onMounted(() => {
   window.addEventListener("mousemove", onMouseMove);
 
   /* ===== 动画循环（引力坠渡 — CPU 每帧仅更新 uniform / 相机 / 材质参数） =====
-   * 档位：active 60fps / settling 30fps / idle 5fps / deep-idle 1fps；
+   * 档位：active 交互态上限 / settling 30fps / idle 5fps / deep-idle 1fps（后三档为默认值，可配置）；
    * dt 由门控按真实帧距累积供给（跳帧不推进基准 → 物理时间连续），
    * 引擎侧再以 DT_CLAMP 保护渡越积分与平滑系数。
    * 粒子轨道位置全部在顶点着色器求值（uTime/uWarp/uWarpDist/uSwirl），
    * 全生命周期零 position buffer 上传 — 长时间运行无性能衰减。
    * CPU 每帧工作：引擎单步 + 3 个共享 uniform + 8 个轨道层 uSwirl（两层
    * 各本体 + 3 残影）+ 相机运镜 + 约 10 个材质 uniform；转场经
-   * watch(phase) → resetIdle 强制满帧。
+   * watch(phase) → resetIdle 强制至 active 上限。
    * 页面隐藏/失焦：调度器置 deep-idle + rAF 天然停帧。 */
   const ENGINE_DT_CLAMP = 0.08;
   /* 幕布漂移基准角（rotation 改时间绝对式：f(t) 与帧率解耦，
@@ -626,7 +626,7 @@ onMounted(() => {
      *     时钟进度走墙钟、物理积分走帧步进（双时间参数分离）） --- */
     const t = engine.update(dt, wStep);
 
-    /* --- 渡越进行中强制满帧（档位回落单帧内自愈 — 非每帧调用，
+    /* --- 渡越进行中强制至 active 上限（档位回落单帧内自愈 — 非每帧调用，
      *     零定时器 churn）：入场窗口（页面交接→包络归零）与主界面
      *     入场动画共享主线程/GPU，空闲降档会直接放大入场卡顿 --- */
     if (engine.warpEnv > 0 && idleLevel.value !== "active") {
@@ -796,7 +796,7 @@ onMounted(() => {
     renderer.setSize(nw, nh);
     /* 点尺寸透视衰减标尺随视口同步（gl_PointSize = uSize × uScale / −mvz） */
     uScaleUniform.value = nh * 0.5 * renderer.getPixelRatio();
-    resetIdle(); // 尺寸变化为交互信号：立即恢复满帧
+    resetIdle(); // 尺寸变化为交互信号：立即恢复 active 上限
   };
   window.addEventListener("resize", handleResize);
 
@@ -821,7 +821,7 @@ watch(
          * 匹配换向曲线；缠绕角为积分量，全程无跳变 */
         engine.triggerEnter();
       }
-      resetIdle(); // 转场为交互信号：门控立即恢复满帧（渡越强制 60fps）
+      resetIdle(); // 转场为交互信号：门控立即恢复交互态上限（渡越强制至上限）
     }
   }
 );

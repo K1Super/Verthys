@@ -16,10 +16,12 @@ add_executable(verthys_service_tests
     test_client_auth.c
     test_event_messages.c
     test_acl.c
+    test_kernel_guard.c
 )
 target_include_directories(verthys_service_tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../include"
     "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../kernel/include"
 )
 target_link_libraries(verthys_service_tests PRIVATE
     verthys_service_core

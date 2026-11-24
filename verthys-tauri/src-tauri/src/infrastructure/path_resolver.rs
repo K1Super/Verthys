@@ -598,9 +598,25 @@ pub fn check_binary_dependencies(worker_exe: &str, dll_path: &str) -> Result<(),
     Ok(())
 }
 
+/// Debug 专用：宿主同级文件优先。
+///
+/// 签名开发运行时把 `Verthys.exe`、`verthys-worker.exe` 与 `verthys.dll`
+/// 放在同一目录，服务预 ARM 只接受同目录 worker。Debug 宿主必须优先选择
+/// 该布局；Release 不编译此分支，安装目录解析顺序保持不变。
+#[cfg(debug_assertions)]
+fn debug_sibling_file(exe_dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let candidate = exe_dir.join(name);
+    if candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 /// 解析 verthys-worker.exe 的绝对路径
 ///
 /// 路径搜索顺序：
+/// 0. Debug 构建：宿主同级 `verthys-worker.exe` 优先（签名开发运行时）。
 /// 1. 开发环境：当前 exe 位于 `target/{debug,release}` 下时，
 ///    优先查找 `../../../verthys-worker/target/{release,debug}/verthys-worker.exe`
 ///    保证使用最新构建产物。
@@ -616,6 +632,22 @@ pub fn resolve_worker_path(app: &tauri::AppHandle) -> Result<String, String> {
     } else {
         "verthys-worker"
     };
+
+    // 0. Debug 构建优先宿主同级：签名开发运行时的 worker 与宿主同目录，
+    // 预 ARM 只在该布局下生效。
+    #[cfg(debug_assertions)]
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            if let Some(sibling) = debug_sibling_file(exe_dir, exe_name) {
+                let abs = sibling.canonicalize().map_err(|e| e.to_string())?;
+                log::info!(
+                    "[resolve_worker] 开发运行时同级命中: {}",
+                    sanitize_path(&abs.display().to_string())
+                );
+                return Ok(abs.display().to_string());
+            }
+        }
+    }
 
     // 1. 开发环境优先
     if let Ok(exe_path) = std::env::current_exe() {
@@ -721,6 +753,7 @@ pub fn resolve_worker_path(app: &tauri::AppHandle) -> Result<String, String> {
 /// 解析 verthys.dll 的绝对路径
 ///
 /// 搜索策略与 `resolve_worker_path` 类似，但针对 DLL 文件：
+/// 0. Debug 构建：宿主同级 `verthys.dll` 优先（签名开发运行时）。
 /// 1. 开发环境：当前 exe 在 `target/{debug,release}` 下时，
 ///    查找 `../../../../build/core/Release/verthys.dll`。
 /// 2. 生产环境：Tauri 资源目录、可执行文件同级（含 `resources/`、`_up_/` 嵌套路径）。
@@ -740,6 +773,22 @@ pub fn resolve_worker_path(app: &tauri::AppHandle) -> Result<String, String> {
 ///   会读到错位的 name 指针，解引用空指针导致 worker 0xC0000005 崩溃，
 ///   上游表现为"worker 子进程已退出"。
 pub fn resolve_dll_path(app: &tauri::AppHandle) -> Result<String, String> {
+    // 0. Debug 构建优先宿主同级：与签名宿主配套的 DLL 是开发运行时的
+    // 权威产物，避免回退到旧的 target 拷贝。
+    #[cfg(debug_assertions)]
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            if let Some(sibling) = debug_sibling_file(exe_dir, "verthys.dll") {
+                let abs = sibling.canonicalize().map_err(|e| e.to_string())?;
+                log::info!(
+                    "[resolve_dll] 开发运行时同级命中: {}",
+                    sanitize_path(&abs.display().to_string())
+                );
+                return Ok(abs.display().to_string());
+            }
+        }
+    }
+
     // 1. 开发环境优先
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
@@ -903,6 +952,26 @@ mod tests {
             return;
         }
         assert!(verify_dll_integrity(&dll.display().to_string()).is_ok());
+    }
+
+    /// Debug 宿主同级文件必须优先于外部 target 路径。
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_sibling_file_prefers_existing_sibling() {
+        let dir = std::env::temp_dir().join(format!(
+            "verthys_dev_sibling_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        assert!(debug_sibling_file(&dir, "verthys-worker.exe").is_none());
+
+        let file = dir.join("verthys-worker.exe");
+        std::fs::write(&file, b"stub").expect("write sibling");
+        let found = debug_sibling_file(&dir, "verthys-worker.exe");
+        assert_eq!(found.as_deref(), Some(file.as_path()));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 非 PE 文件应返回错误，绝不 panic

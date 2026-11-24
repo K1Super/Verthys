@@ -77,6 +77,38 @@ fn main() {
         .to_path_buf();
     let is_release = !cfg!(debug_assertions);
 
+    // Debug 专用开发 DLL 覆盖：开发运行时加载签名后的 build_dev DLL，
+    // 其哈希与生产契约不同。Release 明确禁止该变量，避免开发 DLL 进入
+    // 生产包；Debug 下变量缺失时保持生产契约逻辑。
+    println!("cargo:rerun-if-env-changed=VERTHYS_DEV_DLL_PATH");
+    let dev_dll_path = std::env::var("VERTHYS_DEV_DLL_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if is_release && dev_dll_path.is_some() {
+        panic!("VERTHYS_DEV_DLL_PATH 仅用于开发构建；Release 构建必须清除该变量");
+    }
+    let dev_dll_hash = match &dev_dll_path {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if !path.is_file() {
+                panic!(
+                    "VERTHYS_DEV_DLL_PATH 指向的 DLL 不存在：{}",
+                    path.display()
+                );
+            }
+            println!("cargo:rerun-if-changed={}", path.display());
+            let hash = sha256_file(&path);
+            if hash.len() != 64 {
+                panic!(
+                    "VERTHYS_DEV_DLL_PATH 指向的 DLL 不可读取：{}",
+                    path.display()
+                );
+            }
+            Some(hash)
+        }
+        None => None,
+    };
+
     let mut dll_hash_code = String::new();
     let dll_contract = match load_dll_contract(&repo_root) {
         Some(c) if !c.dll_path.exists() => {
@@ -118,8 +150,16 @@ fn main() {
         }
     };
 
-    match &dll_contract {
-        Some(c) => {
+    match (&dev_dll_hash, &dll_contract) {
+        (Some(hash), _) => {
+            dll_hash_code.push_str(&format!(
+                "/// 自动生成：开发签名运行时 verthys.dll SHA-256（VERTHYS_DEV_DLL_PATH）\n\
+                 /// 用于运行时 DLL 完整性校验，防止恶意 DLL 替换劫持\n\
+                 pub static DLL_HASH: Option<&str> = Some(\"{}\");\n",
+                hash
+            ));
+        }
+        (None, Some(c)) => {
             dll_hash_code.push_str(&format!(
                 "/// 自动生成：verthys.dll SHA-256 哈希（来自构建产物契约）\n\
                  /// 用于运行时 DLL 完整性校验，防止恶意 DLL 替换劫持\n\
@@ -127,7 +167,7 @@ fn main() {
                 c.sha256
             ));
         }
-        None => {
+        (None, None) => {
             dll_hash_code.push_str(
                 "/// verthys.dll 未在编译时定位（开发模式：未构建 C 核心或契约失效）\n\
                  pub static DLL_HASH: Option<&str> = None;\n",

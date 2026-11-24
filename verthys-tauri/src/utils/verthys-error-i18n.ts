@@ -56,6 +56,8 @@ const ERROR_CODE_MESSAGES: Record<VerthysErrorCode, string> = {
   [VerthysErrorCode.E_GLOBAL_KEY_VERIFY_FAILED]: "全局密钥验证失败",
   [VerthysErrorCode.E_GLOBAL_KEY_RECORD_NOT_FOUND]: "全局密钥记录未找到，请先初始化",
   [VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED]: "全局密钥落盘失败，请重试",
+  [VerthysErrorCode.E_GLOBAL_KEY_CHANGE_UNCONFIRMED]:
+    "修改结果未确认：请重启应用后以新密钥验证",
 
   // ===== 设备绑定 =====
   [VerthysErrorCode.E_DEVICE_BINDING]: "设备绑定异常",

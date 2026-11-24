@@ -27,6 +27,7 @@ Verthys_ListIdsByType
 Verthys_Lock
 Verthys_NotifyRuntimeGuards
 Verthys_NotifySandboxAttrs
+Verthys_ReplaceRecord
 Verthys_RollbackAnchorList
 Verthys_RollbackAnchorReclaim
 Verthys_RollbackAnchorRelease

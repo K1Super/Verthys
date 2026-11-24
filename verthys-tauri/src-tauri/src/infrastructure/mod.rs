@@ -70,6 +70,8 @@ pub mod log_pipe;
 pub mod path_resolver;
 pub mod process_guard;
 pub mod resource_guard;
+/// P2 安全服务内核生命周期 IPC 客户端（固定管道 + 签名响应校验）
+pub mod security_service_client;
 pub mod shared_memory;
 /// SHM 协议契约（通过 include! 引入共享源文件，保证主/子进程数据结构一致）
 pub mod shm_schema;

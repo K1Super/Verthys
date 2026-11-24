@@ -28,6 +28,7 @@
 #include "vty_kdf.h"
 #include "vty_util.h"
 #include "vty_svc_protocol.h"
+#include "security_preset.h"
 
 #define VTY_ML_PUBKEY_MAX 256u
 #define VTY_ML_PIPE_MAX 512u
@@ -341,7 +342,8 @@ done:
     return rc;
 }
 
-static int ml_request(uint16_t command)
+static int ml_request_fields(uint16_t command, int kernel_fields,
+                             VtySvcResponseFields *out_fields)
 {
     int installed = 0;
     uint8_t pub[VTY_ML_PUBKEY_MAX];
@@ -383,12 +385,21 @@ static int ml_request(uint16_t command)
         0) {
         goto done;
     }
-    if (vty_svc_response_decode(response, response_len, request_id, nonce_lo,
-                                nonce_hi, &fields) !=
-        (uint16_t)VTY_SVC_STATUS_OK) {
+    if (kernel_fields) {
+        if (vty_svc_response_decode_kernel(response, response_len, request_id,
+                                           nonce_lo, nonce_hi, &fields) !=
+            (uint16_t)VTY_SVC_STATUS_OK) {
+            goto done;
+        }
+    } else if (vty_svc_response_decode(response, response_len, request_id,
+                                       nonce_lo, nonce_hi, &fields) !=
+               (uint16_t)VTY_SVC_STATUS_OK) {
         goto done;
     }
     if (ml_verify_signature(pub, pub_len, response) != 0) goto done;
+    if (out_fields != NULL) {
+        *out_fields = fields;
+    }
     result = (fields.status == (uint16_t)VTY_SVC_STATUS_OK) ? VTY_OK
                                                             : VTY_E_LOCKED;
 
@@ -398,6 +409,11 @@ done:
     memset(request, 0, sizeof(request));
     memset(response, 0, sizeof(response));
     return result;
+}
+
+static int ml_request(uint16_t command)
+{
+    return ml_request_fields(command, 0, NULL);
 }
 
 int vty_machine_limiter_check(void)
@@ -413,4 +429,122 @@ int vty_machine_limiter_record_failure(void)
 int vty_machine_limiter_reset(void)
 {
     return ml_request((uint16_t)VTY_SVC_CMD_RESET);
+}
+
+int vty_machine_limiter_kernel_status(VtyKernelStatus *out)
+{
+    VtySvcResponseFields fields;
+    int installed = 0;
+    int rc;
+
+    if (out == NULL) return VTY_E_INVALID;
+    memset(out, 0, sizeof(*out));
+    out->state = (uint32_t)VTY_KERNEL_STATE_UNKNOWN;
+    out->reason = (uint32_t)VTY_KERNEL_REASON_INTERNAL;
+    memset(&fields, 0, sizeof(fields));
+
+    rc = ml_request_fields((uint16_t)VTY_SVC_CMD_KERNEL_STATUS, 1, &fields);
+    if (rc != VTY_OK) {
+        if (ml_svc_installed(&installed) == 0 && !installed) {
+            out->state = (uint32_t)VTY_KERNEL_STATE_NOT_INSTALLED;
+            out->reason = (uint32_t)VTY_KERNEL_REASON_NOT_INSTALLED;
+        } else {
+            out->state = (uint32_t)VTY_KERNEL_STATE_UNHEALTHY;
+            out->reason = (uint32_t)VTY_KERNEL_REASON_INTERNAL;
+        }
+        return VTY_OK;
+    }
+
+    out->state = fields.kernel_state;
+    out->reason = fields.kernel_reason;
+    out->capabilities = fields.kernel_capabilities;
+    out->protocol_major = fields.kernel_protocol_major;
+    out->protocol_minor = fields.kernel_protocol_minor;
+    return VTY_OK;
+}
+
+int vty_machine_limiter_kernel_arm(void)
+{
+    return ml_request_fields((uint16_t)VTY_SVC_CMD_KERNEL_ARM, 1, NULL);
+}
+
+int vty_machine_limiter_kernel_register(void)
+{
+    return ml_request_fields((uint16_t)VTY_SVC_CMD_KERNEL_REGISTER, 1, NULL);
+}
+
+int vty_machine_limiter_kernel_disarm(void)
+{
+    return ml_request_fields((uint16_t)VTY_SVC_CMD_KERNEL_DISARM, 1, NULL);
+}
+
+/*
+ * 进程级保护获取状态：仅在 arm+register 均成功后置位，避免每次解锁/切档
+ * 重复 ARM 造成受保护表被清空。服务重启或驱动丢失时该标志不会自动复位，
+ * 由锁定路径释放；运行中丢失的自动锁定属于后续健康检查范围。
+ */
+static volatile LONG g_kernel_guard_acquired;
+static SRWLOCK g_kernel_guard_lock = SRWLOCK_INIT;
+
+void vty_machine_limiter_kernel_guard_apply_preset(void)
+{
+    SecurityPreset preset = SEC_PRESET_BALANCED;
+
+    if (security_active_preset(&preset) != 0) {
+        /* 档位不可判定时不启用，也不拆除既有保护。 */
+        return;
+    }
+    if (preset != SEC_PRESET_SECURE) {
+        vty_machine_limiter_kernel_guard_release();
+        return;
+    }
+
+    AcquireSRWLockExclusive(&g_kernel_guard_lock);
+    if (InterlockedCompareExchange(&g_kernel_guard_acquired, 0, 0) == 0) {
+        VtyKernelStatus status;
+        int registered = 0;
+
+        memset(&status, 0, sizeof(status));
+        /*
+         * 宿主预 ARM 后，驱动在 worker 创建通知中已把本进程加入受保护表
+         * 并将状态置为 ARMED/ACTIVE。此时再次 ARM 会先执行 VtgStateDisarm，
+         * 清空宿主预登记，因此只补 REGISTER 确认自身表项。
+         * 状态查询或登记失败时回退完整 ARM+REGISTER（服务重启等场景）。
+         */
+        if (vty_machine_limiter_kernel_status(&status) == VTY_OK &&
+            (status.state == (uint32_t)VTY_KERNEL_STATE_ACTIVE ||
+             status.state == (uint32_t)VTY_KERNEL_STATE_ARMED) &&
+            vty_machine_limiter_kernel_register() == VTY_OK) {
+            registered = 1;
+        }
+        if (!registered &&
+            vty_machine_limiter_kernel_arm() == VTY_OK &&
+            vty_machine_limiter_kernel_register() == VTY_OK) {
+            registered = 1;
+        }
+
+        if (registered) {
+            InterlockedExchange(&g_kernel_guard_acquired, 1);
+        } else {
+            /* 未登记成功时回滚，避免留下半生效状态。 */
+            (void)vty_machine_limiter_kernel_disarm();
+        }
+    }
+    ReleaseSRWLockExclusive(&g_kernel_guard_lock);
+}
+
+void vty_machine_limiter_kernel_guard_release(void)
+{
+    LONG acquired;
+
+    /*
+     * 释放必须与获取串行：若在锁外发送 DISARM，另一个线程可能在本线程
+     * 清标志后立即 ARM，随后被本线程的 DISARM 误撤销。
+     */
+    AcquireSRWLockExclusive(&g_kernel_guard_lock);
+    acquired = InterlockedExchange(&g_kernel_guard_acquired, 0);
+    if (acquired != 0) {
+        (void)vty_machine_limiter_kernel_disarm();
+    }
+    ReleaseSRWLockExclusive(&g_kernel_guard_lock);
 }

@@ -202,6 +202,7 @@ TEST(api_list_ids_by_type_and_verify_persist);
 TEST(api_list_all_lids_tracks_live_records);
 TEST(api_find_lid_by_name);
 TEST(api_add_records_batch_roundtrip);
+TEST(api_replace_record_atomic);
 TEST(api_records_require_unlock);
 
 /* 公共 API 模块 M1（test_api_modules.c） */
@@ -276,6 +277,11 @@ TEST(machine_limiter_bad_signature);
 TEST(machine_limiter_nonce_mismatch);
 TEST(machine_limiter_status_mapping);
 TEST(machine_limiter_timeout);
+TEST(machine_limiter_kernel_lifecycle);
+TEST(machine_limiter_kernel_status_fields);
+TEST(machine_limiter_kernel_preset_register_only);
+TEST(machine_limiter_kernel_preset_fallback);
+TEST(machine_limiter_kernel_preset_register_fail_rolls_back);
 TEST(v4_unlock_machine_gate_fail_closed);
 TEST(v4_module_unlock_machine_gate_fail_closed);
 #endif
@@ -1061,6 +1067,7 @@ int main(int argc, char **argv)
     RUN_TEST(api_list_all_lids_tracks_live_records);
     RUN_TEST(api_find_lid_by_name);
     RUN_TEST(api_add_records_batch_roundtrip);
+    RUN_TEST(api_replace_record_atomic);
     RUN_TEST(api_records_require_unlock);
     RUN_TEST(api_modules_roundtrip_and_policy);
     RUN_TEST(api_module_delete);
@@ -1117,6 +1124,11 @@ int main(int argc, char **argv)
     RUN_TEST(machine_limiter_nonce_mismatch);
     RUN_TEST(machine_limiter_status_mapping);
     RUN_TEST(machine_limiter_timeout);
+    RUN_TEST(machine_limiter_kernel_lifecycle);
+    RUN_TEST(machine_limiter_kernel_status_fields);
+    RUN_TEST(machine_limiter_kernel_preset_register_only);
+    RUN_TEST(machine_limiter_kernel_preset_fallback);
+    RUN_TEST(machine_limiter_kernel_preset_register_fail_rolls_back);
     RUN_TEST(v4_unlock_machine_gate_fail_closed);
     RUN_TEST(v4_module_unlock_machine_gate_fail_closed);
     /* 机器预算客户端用例组结束，恢复其余用例的测试旁路并清空服务钩子。 */

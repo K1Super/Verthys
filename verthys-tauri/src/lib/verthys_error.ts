@@ -145,6 +145,8 @@ export enum VerthysErrorCode {
   E_GLOBAL_KEY_VERIFY_FAILED = "E_GLOBAL_KEY_VERIFY_FAILED",
   E_GLOBAL_KEY_RECORD_NOT_FOUND = "E_GLOBAL_KEY_RECORD_NOT_FOUND",
   E_GLOBAL_KEY_PERSIST_FAILED = "E_GLOBAL_KEY_PERSIST_FAILED",
+  /** 改钥通信超时：后端结果未确认，禁止自动重试，需重启后以新密钥验证 */
+  E_GLOBAL_KEY_CHANGE_UNCONFIRMED = "E_GLOBAL_KEY_CHANGE_UNCONFIRMED",
 
   // ===== 设备绑定 =====
   E_DEVICE_BINDING = "E_DEVICE_BINDING",
@@ -393,6 +395,11 @@ const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
     title: "密钥保存失败",
     message: "全局主密钥持久化到磁盘失败。",
     guidance: "请检查磁盘空间和写入权限后重试。切勿在保存完成前关闭应用。",
+  },
+  [VerthysErrorCode.E_GLOBAL_KEY_CHANGE_UNCONFIRMED]: {
+    title: "改钥结果未确认",
+    message: "修改全局密钥的响应超时，后端可能已完成写入，也可能未完成。",
+    guidance: "请重启应用后以新密钥验证；若新密钥不可用，请使用旧密钥验证并重试。",
   },
 
   // ===== 设备绑定 =====

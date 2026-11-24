@@ -113,7 +113,7 @@ TEST(g0a2_api_version_and_unlock_guard)
     const char *path = "g0a2_guard.vty";
     char code[128];
 
-    CHECK_EQ(VERTHYS_API_VERSION, 0x0016u);
+    CHECK_EQ(VERTHYS_API_VERSION, 0x0017u);
 
     remove(path);
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);

@@ -1605,6 +1605,41 @@ export async function verthysGetSecurityStatus(): Promise<SecurityStatusReport> 
   return r.security_status;
 }
 
+/**
+ * 记录内核防护降级审计（SECURE preferred 下的用户态降级事实）
+ *
+ * 只写审计链，不改变内核/服务/会话状态。模块级按 (state, reason) 去重，
+ * 组件重挂载不会重复写链；降级事实恢复后由调用方显式重置。
+ *
+ * @param kernelState 内核状态码（0..10，与 VtyKernelState 对齐）
+ * @param kernelReason 原因码（0..11，与 VtyKernelReason 对齐）
+ */
+let lastKernelDegradedAuditKey: string | null = null;
+
+export async function verthysAuditKernelDegraded(
+  kernelState: number,
+  kernelReason: number,
+): Promise<void> {
+  const key = `${kernelState}:${kernelReason}`;
+  if (key === lastKernelDegradedAuditKey) return;
+  lastKernelDegradedAuditKey = key;
+  try {
+    await ipc<void>("verthys_audit_kernel_degraded", {
+      kernelState,
+      kernelReason,
+    });
+  } catch (e) {
+    /* 写入失败允许下轮重试，不把失败键保留为已审计 */
+    lastKernelDegradedAuditKey = null;
+    throw e;
+  }
+}
+
+/** 重置内核降级审计去重键（观测到非降级事实后调用） */
+export function verthysResetKernelDegradedAudit(): void {
+  lastKernelDegradedAuditKey = null;
+}
+
 /* ------------------------------------------------------------------ *
  * 回退锚点维护                                                     *
  *                                                                    *
@@ -1694,36 +1729,60 @@ export async function verthysGetSystemSnapshot(): Promise<SystemSnapshot> {
 }
 
 /* ------------------------------------------------------------------ *
- * GMK 派生 IPC 封装（敏感操作下沉）                                  *
+ * GMK IPC 封装（敏感操作下沉）                                        *
  *                                                                    *
- * 主进程仅转发，GMK 派生/验证全部在 worker 子进程内完成               *
+ * 主进程仅转发，GMK 派生/验证/改钥全部在 worker 子进程内完成           *
  * 前端不持有 GMK，模块独立密钥由前端 AES-GCM 直接加密验证器           *
  * ------------------------------------------------------------------ */
 
-/** 派生全局主密钥 GMK（首次设置）
+/** 修改全局密钥结果（后端单命令已完成核验、落盘、清理与 GMK 换槽） */
+export interface ChangeGlobalKeyResult {
+  /** 新权威记录 id */
+  id: number;
+  /** 新权威记录 base64 */
+  recordB64: string;
+  /** 已确认删除的旧记录 id */
+  deletedIds: number[];
+  /** 新记录已落盘但旧记录未清理干净（下次解锁自动收敛） */
+  cleanupPending: boolean;
+}
+
+/** 修改全局密钥（单命令：旧钥核验 → 新钥派生 → 写新/删旧 → 换槽）
  *
- * 失败时抛出 Error（含后端错误消息），而非返回 null：
- * 调用方 initGlobalKey 需要具体原因区分超时与业务失败（状态不匹配 /
- * 密码长度不足 / bin 数据校验失败等），errFromUnknown 捕获后把后端
- * 原始消息保留在 VerthysResult.message / cause 中，便于诊断。
- *
- * @returns record(base64) — 前端写入 verthys 持久化，worker 内存持有 GMK
- * @throws Error 后端返回 ok=false 时抛出，message 为后端错误描述
+ * 失败时抛出 Error（含 errorCode / retryAfterSecs），由调用方按码映射提示；
+ * 不在此函数内折叠错误，避免把"旧钥错误"与"落盘失败"混为一谈。
  */
-export async function verthysDeriveGlobalKey(
-  password: string,
-  binDataB64: string,
-  binPassword: string
-): Promise<string> {
-  const r = await ipc<VerthysResponse>("verthys_derive_global_key", {
-    password,
-    binDataB64,
-    binPassword,
+export async function verthysChangeGlobalKey(
+  oldPassword: string,
+  oldBinDataB64: string,
+  oldBinPassword: string,
+  newPassword: string,
+  newBinDataB64: string,
+  newBinPassword: string
+): Promise<ChangeGlobalKeyResult> {
+  const r = await ipc<VerthysResponse>("verthys_change_global_key", {
+    oldPassword,
+    oldBinDataB64,
+    oldBinPassword,
+    newPassword,
+    newBinDataB64,
+    newBinPassword,
   });
-  if (!r.ok || !r.data) {
-    throw new Error(r.error || "派生全局密钥失败");
+  if (!r.ok || r.id == null || !r.data) {
+    const e = new Error(r.error || "修改全局密钥失败") as Error & {
+      errorCode?: string;
+      retryAfterSecs?: number;
+    };
+    e.errorCode = r.error_code ?? r.error ?? undefined;
+    e.retryAfterSecs = r.retry_after_secs ?? undefined;
+    throw e;
   }
-  return r.data;
+  return {
+    id: r.id,
+    recordB64: r.data,
+    deletedIds: r.ids ?? [],
+    cleanupPending: r.cleanup_pending ?? false,
+  };
 }
 
 /** 派生并持久化全局密钥（首次初始化专用，敏感操作下沉）

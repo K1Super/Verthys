@@ -1,21 +1,14 @@
 /*
- * frame-gate.ts — 帧门控全局配置（单一权威源）
+ * frame-gate.ts — 帧门控非用户配置（单一权威源）
  *
- * 四档帧率间隔 / 档位 DPR / 粒子密度 / 残影层可见性 / 帧步进钳制上限 /
- * 豁免时长上限 / DPR 切换防抖全部集中于此。
+ * 档位 DPR / 粒子密度 / 残影层可见性 / 帧步进钳制上限 / 豁免时长上限 /
+ * DPR 切换防抖集中于此；档位帧间隔由设置域派生（settings/display-settings），
+ * 用户可调参数不得在此重复定义。
  * 运行时模块（主循环 / 帧门控注册层 / 粒子背景）按需导入，
  * 禁止在组件内散落硬编码档位参数。
  */
 
-import type { IdleLevel } from "../composables/useGlobalIdleScheduler";
-
-/** 四档目标帧间隔（ms）；active = 0 表示每帧执行 */
-export const FRAME_INTERVAL_MS: Record<IdleLevel, number> = {
-  active: 0,
-  settling: 1000 / 30,
-  idle: 1000 / 5,
-  "deep-idle": 1000 / 1,
-};
+import type { IdleLevel } from "../settings/display-settings";
 
 /**
  * 四档 DPR（渲染分辨率倍率）。

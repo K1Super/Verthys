@@ -249,6 +249,12 @@ pub async fn worker_init(
     // 确保锁在函数退出时释放
     let _guard = InitLockGuard { state: &state };
 
+    // 已有 Ready 会话时直接复用：前端重复触发（双击/重试）不得替换受保护
+    // worker，否则旧 worker 会被挤出内核登记并留下受保护孤儿。
+    if state.worker_lifecycle.current_state().await.is_ready() && state.is_worker_alive() {
+        return Ok(VerthysResponse::ok("worker_init"));
+    }
+
     // 启动新 worker 前杀死所有残留孤儿 verthys-worker 进程。
     //   上次应用异常退出（强杀/崩溃）遗留的孤儿 worker 会持有 verthys 文件锁/
     //   共享内存/状态文件锁，导致状态文件损坏、新 worker 启动后 scan 操作崩溃。
@@ -423,7 +429,11 @@ pub async fn worker_init(
                 ),
             }
 
+            /* 运行中内核保护丢失看门狗：每个 worker 会话一个线程，
+             * 仅在 SECURE 且曾 ACTIVE 时连续两次非 ACTIVE 触发外部锁定。 */
+            let watchdog_session = session.clone();
             state.set_session(Some(session));
+            crate::worker::kernel_watchdog::start(watchdog_session, app.clone());
 
             // 转移到 Ready 状态
             state
@@ -568,11 +578,10 @@ pub async fn worker_destroy(state: State<'_, AppState>) -> Result<VerthysRespons
     // worker 销毁后 GMK 已从内存消失，必须重置密钥生命周期为 NoKey。
     //
     // 若销毁前状态为 Locked/Unlocked 并残留，后续不经过 verthys_unlock
-    // 而直接调用 verthys_derive_global_key / verthys_verify_global_key 时，
-    // 状态机校验会基于失效状态做出错误判定：
-    //   - 残留 Locked → derive_global_key 拒绝（要求 NoKey）→ 初始化按钮失效
-    //   - 残留 Unlocked → verify_global_key 拒绝（要求 Locked）→ 验证按钮失效
-    //   - 残留 NoKey → verify_global_key 拒绝（要求 Locked）→ 验证按钮失效
+    // 而直接调用 verthys_derive_and_store_global_key / verthys_verify_global_key
+    // / verthys_change_global_key 时，状态机校验会基于失效状态做出错误判定：
+    //   - 残留 Locked → derive_and_store 拒绝（要求 NoKey）→ 初始化按钮失效
+    //   - 残留 Locked/Unlocked → 容器已锁定，key 命令缺少 worker 会话，无法完成
     //
     // 重置为 NoKey 与"worker 内存无 GMK"的物理事实一致；
     // 后续 verthys_unlock 会根据 has_global_key 再次设置正确状态。

@@ -97,10 +97,10 @@ cargo test
 
 ```powershell
 # 真实 worker + 心跳 + 挂起看门狗；健康期不得误杀，挂起全部线程后 3s 级触发处置并终止 worker
-pwsh -NoProfile -File tests/attack/a18-suspend.ps1
+pwsh -NoProfile -File tests/security/run.ps1 -Suite vault -Profile standard -OutDir build/security-vault
 ```
 
-该脚本设置 `VERTHYS_A18=1` 后驱动 `suspend_watchdog_terminates_suspended_worker`，输出 `RESULT A18S PASS|FAIL <detail>` 与实测毫秒；常规 `cargo test` 不执行该进程级实验。
+统一入口的 `VAULT-A18S` 覆盖该用例。需要单独复现时仍可运行执行器 `tests/attack/a18-suspend.ps1`，但该脚本不作为 CI/门禁事实源。执行器设置 `VERTHYS_A18=1` 后驱动 `suspend_watchdog_terminates_suspended_worker`，输出 `RESULT A18S PASS|FAIL <detail>` 与实测毫秒；常规 `cargo test` 不执行该进程级实验。
 
 ## 8. 更新域测试
 
@@ -122,14 +122,35 @@ node scripts/gates/check_updater_profile.mjs verthys-tauri/src-tauri/tauri.local
 
 ## 9. 攻击回归
 
+非内核攻击回归统一走 `tests/security/run.ps1`，入口、profile、退出码与 ID 映射见 `tests/security/README.md`。`tests/attack/**` 与 `tests/service/attack.ps1` 仍是执行器，由 `tests/security/suites/*.ps1` 适配，不再直接作为 CI 事实源。
+
 ```powershell
-# 全量攻击回归（A1/A2/A3/A4/A5/A6b/A7/A8/A9/A10~A18/A20/A20b/A18S），输出机器可读证据
-pwsh -NoProfile -File tests/attack/run.ps1 -OutJson build/attack-final.json
+# 容器/核心全量（standard）
+pwsh -NoProfile -File tests/security/run.ps1 -Suite vault -Profile standard -OutDir build/security-vault
+
+# harness 正控（仅 CTRL-BC1）
+pwsh -NoProfile -File tests/security/run.ps1 -Suite vault -Profile baseline -OutDir build/security-baseline
+
+# P2 服务控制台子集（S-A3/A4/A5/A6/A8/A9）
+pwsh -NoProfile -File tests/security/run.ps1 -Suite service -Profile standard `
+  -OutDir build/security-service -ServiceBuildDir build_security_service_ci
+
+# vTPM 能力证据
+pwsh -NoProfile -File tests/security/run.ps1 -Suite tpm -Profile standard `
+  -OutDir build/security-tpm -TpmProbe build/core/tests/Release/vty_tpm_probe.exe
+
+# 离机证据：源机 prepare，目标机 verify
+pwsh -NoProfile -File tests/security/run.ps1 -Suite offmachine -OffmachineMode prepare -OffmachineDir C:\A6
+pwsh -NoProfile -File tests/security/run.ps1 -Suite offmachine -OffmachineMode verify -OffmachineDir C:\A6
 ```
 
+- 每次运行输出 `result.json`、`result.junit.xml`、`result.sarif`、`summary.md`；执行器原始 JSON 复制到 `evidence/<runId>/`。
+- `release` 下必需项必须 PASS；`VAULT-A06` 缺失离机报告为 `BLOCKED`，`VAULT-A08`/`VAULT-A18S` 不得 SKIP。CI 使用 `standard`，发布签署在具备离机证据与非提权会话的主机上执行 `release`。
+- `A17`/`A20`/`A20b` 注册为 `static`，只证明静态约束在场，不计入行为覆盖率。
 - `A18` 为 keyfile 因子绕过，`A18S` 为 worker 挂起处置；两者编号独立，避免覆盖。
 - `A18S` 使用真实 worker + 心跳 + 挂起看门狗，健康期误杀与 3s 级处置均纳入判定。
-- `A6`（离机 + 已知模块口令）只有绑定当前 DLL/worker 哈希的合格报告才计 PASS，否则保持 SKELETON。
+- `A6`（离机 + 已知模块口令）只有绑定当前 DLL/worker 哈希的合格报告才计 PASS，否则在统一模型中为 `BLOCKED`。
+- 桌面 `attack-forge` / `AttackTest` 是外部演练工具，不纳入 CI，也不作为发布证据。
 
 ## 10. P2 机器级安全服务测试
 
@@ -141,12 +162,15 @@ pwsh -NoProfile -File scripts/build/build_security_service.ps1 `
 # 控制台集成 I0–I12（不安装 SCM，不触碰真实 ProgramData/HKLM）
 pwsh -NoProfile -File tests/service/integration.ps1 -BuildDir build_security_service_ci
 
-# P2 攻击回归控制台子集（S-A3/A4/A5/A6/A8/A9）
-pwsh -NoProfile -File tests/service/attack.ps1 -BuildDir build_security_service_ci
+# P2 攻击回归控制台子集（统一入口）
+pwsh -NoProfile -File tests/security/run.ps1 -Suite service -Profile standard `
+  -OutDir build/security-service -ServiceBuildDir build_security_service_ci
 
 # 干净 VM 提权 E2E（默认 SKIP；需 -AllowElevatedE2E）
 pwsh -NoProfile -File tests/service/e2e-install.ps1 -Artifacts build_security_service_ci\Debug -AllowElevatedE2E
 ```
+
+`tests/service/attack.ps1` 仍可直接运行，支持 `-OutJson` 与 `-ResultIdPrefix`，但 CI 与门禁读取统一入口的结构化结果。
 
 - 服务安装/卸载通过 `VerthysSecuritySvc.exe /install /quiet`、`/uninstall /quiet` 子命令执行；独立 `VerthysSecurityServiceSetup.exe` 已淘汰。
 - 应用安装包 E2E：干净 VM 标准用户双击 perMachine 安装包 → 一次 UAC → 安装器 POSTINSTALL 安装服务并 Running；取消 UAC 后无 Program Files 目录、服务、注册表、根 CA；卸载后服务、CA、事件源、ProgramData、卸载项全部清除且用户加密库保留。
@@ -157,7 +181,7 @@ pwsh -NoProfile -File tests/service/e2e-install.ps1 -Artifacts build_security_se
 - 生产 OFF 钩子测试可执行文件链接缺陷已修复（`test_witness.c` 仅在测试钩子构建调用派生函数）；执行仍需要已安装服务或测试夹具。
 - 本机实测（测试钩子构建）：机器预算客户端 8/8、V4 解锁/模块解锁接入 2/2、`api_` 15/15、`format_` 15/15、`module_` 15/15；生产 OFF 钩子 core DLL 与测试 exe 构建/链接通过，生产 DLL 不含测试钩子字符串。
 - P1 全量 + 新增接入用例实测 280 passed / 0 failed（2026-11-11 快照，测试钩子构建，Release）。lockout 用例对测试机 CNG 见证键累积与残留线程敏感，复跑异常时先用 `tests/gate.ps1` 的 hygiene 流程回收见证键，再复核全量。
-- P1 攻击回归以当前测试钩子构建执行：PASS=20、FAIL=4（A2/A8/A18S，依赖签名宿主/内存转储/worker 产物）、SKIP=1；属于 P1 既有门禁环境，不是 P2 回归。
+- P1 攻击回归以当前测试钩子构建经统一入口执行：PASS=23、BLOCKED=2（A2 需要管理员写入 Root 存储；A6 缺少绑定当前构建的离机报告）、FAIL=0。standard 退出码 0；release 需在提权且具备离机证据的主机执行。
 - 正向 Authenticode 认证需要把测试证书导入 `CurrentUser\Root`；无交互桌面环境无法完成信任导入，本机只执行了未签名拒绝与伪造服务端拒绝的负向用例。正向签名探针与模块校验在干净 VM E2E 中验证。
 - S-A1/S-A2/S-A7/S-A10 与 E1–E8 需要真实 SCM 安装、管理员权限或第二台机器，只在干净 VM 执行并保存 `sc query`、`icacls`、事件日志与探针输出证据。
 

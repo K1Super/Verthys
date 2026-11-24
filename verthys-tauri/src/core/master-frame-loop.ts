@@ -28,10 +28,13 @@
 
 import {
   EXEMPT_DEGRADED_INTERVAL_MS,
-  FRAME_INTERVAL_MS,
   MAX_EXEMPT_DURATION_MS,
   MAX_FRAME_STEP_MS,
 } from "../config/frame-gate";
+import {
+  activeFrameIntervalMs,
+  frameIntervalMsForLevel,
+} from "../settings/display-settings";
 import { useGlobalIdleScheduler } from "../composables/useGlobalIdleScheduler";
 import { frameBudgetMonitor } from "./frame-budget";
 
@@ -182,7 +185,7 @@ export class MasterFrameLoop {
 
   /**
    * 申请关键动画帧率豁免。
-   * granted：帧率提升至每帧，计数 +1；
+   * granted：帧率提升至交互态上限（默认 120fps，可配置），计数 +1；
    * degraded：按降级档帧率执行，计数 +1（与 granted 混合取最严格）；
    * rejected：拒绝（页面隐藏——仅记录，不参与计数）。
    */
@@ -212,11 +215,12 @@ export class MasterFrameLoop {
     this.granted.delete(token.id);
   }
 
-  /** 当前生效帧间隔（ms）：degraded 优先，其次 granted 每帧，最后档位值 */
+  /** 当前生效帧间隔（ms）：degraded 优先，其次 granted 提升至交互态上限，
+   *  最后取当前空闲档位值；0 = 无限制（每个 rAF 帧执行） */
   private currentInterval(): number {
     if (this.degradedCount > 0) return EXEMPT_DEGRADED_INTERVAL_MS;
-    if (this.granted.size > 0) return 0;
-    return FRAME_INTERVAL_MS[this.idleLevel.value];
+    if (this.granted.size > 0) return activeFrameIntervalMs();
+    return frameIntervalMsForLevel(this.idleLevel.value);
   }
 
   /** 超时豁免强制释放（防御性兜底——正常路径由使用者主动释放） */
@@ -298,7 +302,7 @@ export class MasterFrameLoop {
     const mustDue = this.mustTasks.size > 0 || this.onceQueue.length > 0;
     const throttleDue =
       this.throttleTasks.size > 0 &&
-      (interval === 0 || now - this.lastThrottleTs >= interval / 1000);
+      (interval <= 0 || now - this.lastThrottleTs >= interval / 1000);
 
     /* 整帧跳过：无任何任务待执行时不推进基准时刻（帧步进语义核心） */
     if (!mustDue && !throttleDue) return;

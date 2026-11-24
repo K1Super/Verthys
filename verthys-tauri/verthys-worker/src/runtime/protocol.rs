@@ -90,6 +90,11 @@ pub(crate) struct Request {
     pub(crate) bin_data: Zeroizing<String>, // base64 .bin 文件内容
     #[serde(default)]
     pub(crate) bin_password: Zeroizing<String>,
+    /// 改钥：继任 .bin 文件内容（base64）与口令（仅 change_global_key 消费）
+    #[serde(default)]
+    pub(crate) new_bin_data: Zeroizing<String>,
+    #[serde(default)]
+    pub(crate) new_bin_password: Zeroizing<String>,
     // 安全预设选择（create_with_preset 操作）
     // 0 = BALANCED（日常推荐），1 = SECURE（涉密/合规）
     #[serde(default)]
@@ -242,6 +247,18 @@ pub(crate) struct SecurityStatusReport {
     pub(crate) policy_flags: u32,
     /// 快照采样时间（Unix 毫秒）
     pub(crate) checked_at_unix_ms: u64,
+    /// 内核加固状态（可选；旧核心或查询失败时为 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) kernel_status: Option<KernelStatusReport>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct KernelStatusReport {
+    pub(crate) state: u32,
+    pub(crate) reason: u32,
+    pub(crate) capabilities: u32,
+    pub(crate) protocol_major: u16,
+    pub(crate) protocol_minor: u16,
 }
 
 /// 照片导入单步结果：chunk / skipped / done / cancelled。
@@ -464,6 +481,9 @@ pub(crate) struct Response {
     /// 防御闭环 7 路径状态（仅 security_status 操作返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) security_status: Option<SecurityStatusReport>,
+    /// 内核加固状态（仅 kernel_status 轻量查询返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) kernel_status: Option<KernelStatusReport>,
     /// 回退锚点列表（仅 rollback_anchor_list 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) anchors: Option<Vec<AnchorEntry>>,
@@ -488,6 +508,10 @@ pub(crate) struct Response {
     /// 按类型枚举返回的记录 ID 列表（仅 list_ids_by_type 操作返回）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) ids: Vec<u64>,
+    /// 改钥清理结果：新记录已落盘但旧记录未删除干净（仅 change_global_key 返回）。
+    /// true 表示新钥已是权威（最新记录），旧记录将在下次解锁收敛时清除。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cleanup_pending: Option<bool>,
     /* 落盘自查结果（仅 verify_persist 操作返回）：
      * 主机侧命令消费这些字段做三态判定（OK / 可重试 IO / 结构性失败）。
      * 均为非敏感结构元数据，不含密钥或明文。 */
@@ -663,6 +687,7 @@ impl Response {
             global_key_id: None,
             global_key_record: None,
             security_status: None,
+            kernel_status: None,
             anchors: None,
             anchor_state: None,
             anchor_removed: None,
@@ -702,6 +727,7 @@ impl Response {
             photo_damage: None,
             photo_previews: None,
             found: None,
+            cleanup_pending: None,
         }
     }
     pub(crate) fn err(op: &str, code: u32) -> Self {
@@ -804,6 +830,7 @@ impl Response {
             global_key_id: None,
             global_key_record: None,
             security_status: None,
+            kernel_status: None,
             anchors: None,
             anchor_state: None,
             anchor_removed: None,
@@ -843,6 +870,7 @@ impl Response {
             photo_damage: None,
             photo_previews: None,
             found: None,
+            cleanup_pending: None,
         }
     }
 
@@ -987,9 +1015,25 @@ pub(crate) fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_decode, base64_encode, bound_response_line, Request, Response,
-        MAX_RESPONSE_LINE_BYTES,
+        base64_decode, base64_encode, bound_response_line, KernelStatusReport, Request,
+        Response, MAX_RESPONSE_LINE_BYTES,
     };
+
+    #[test]
+    fn kernel_status_response_serializes_state() {
+        let mut resp = Response::ok("kernel_status");
+        resp.kernel_status = Some(KernelStatusReport {
+            state: 3,
+            reason: 0,
+            capabilities: 3,
+            protocol_major: 1,
+            protocol_minor: 0,
+        });
+        let value = serde_json::to_value(&resp).expect("序列化响应");
+        assert_eq!(value["op"], "kernel_status");
+        assert_eq!(value["kernel_status"]["state"], 3);
+        assert_eq!(value["kernel_status"]["protocol_major"], 1);
+    }
 
     // 扫描投影请求字段：缺省（不传该字段的既有调用方）必须等价于
     // FULL 投影 + 无内联阈值，语义与历史行为一致

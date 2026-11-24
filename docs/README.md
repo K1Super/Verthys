@@ -51,6 +51,7 @@
 - 安全设计与信任模型：[SECURITY_DESIGN.md](SECURITY_DESIGN.md)
 - 回退锚点生命周期与淘汰治理：[ROLLBACK_ANCHOR_LIFECYCLE.md](ROLLBACK_ANCHOR_LIFECYCLE.md)
 - P2 SYSTEM 安全服务：[P2_SECURITY_SERVICE_PLAN.md](P2_SECURITY_SERVICE_PLAN.md)
+- 内核加固方案（评审中）：[kernel-guard/README.md](kernel-guard/README.md)
 - 依赖与供应链：[THIRD_PARTY.md](THIRD_PARTY.md)
 
 ### 问题排查
@@ -70,6 +71,17 @@
 | [SECURITY_DESIGN.md](SECURITY_DESIGN.md) | 信任模型、密钥链路、威胁建模 | 现行 |
 | [ROLLBACK_ANCHOR_LIFECYCLE.md](ROLLBACK_ANCHOR_LIFECYCLE.md) | 回退锚点生命周期、淘汰策略、容量错误与运维规程 | 现行（已实施） |
 | [P2_SECURITY_SERVICE_PLAN.md](P2_SECURITY_SERVICE_PLAN.md) | P2 机器级安全服务设计与实施状态 | 现行（干净 VM E2E 待执行） |
+| [kernel-guard/README.md](kernel-guard/README.md) | 内核加固总览、范围、冻结决策与审核门禁 | 评审中 |
+| [kernel-guard/01-threat-model.md](kernel-guard/01-threat-model.md) | 内核加固威胁模型、攻击路径与残余风险 | 评审中 |
+| [kernel-guard/02-architecture.md](kernel-guard/02-architecture.md) | 内核加固组件、信任边界、生命周期与失败语义 | 评审中 |
+| [kernel-guard/03-driver-design.md](kernel-guard/03-driver-design.md) | 驱动模型、IOCTL、受保护进程与句柄权限剥离 | 评审中 |
+| [kernel-guard/04-service-and-preset.md](kernel-guard/04-service-and-preset.md) | 服务托管、预设策略、状态机、UI 与审计 | 评审中 |
+| [kernel-guard/05-test-and-verification.md](kernel-guard/05-test-and-verification.md) | 测试矩阵、VM 验证、攻击回归与验收门禁 | 评审中 |
+| [kernel-guard/06-build-signing-release.md](kernel-guard/06-build-signing-release.md) | WDK 构建、测试签名、EV + attestation 与发布回滚 | 评审中 |
+| [kernel-guard/07-operations-maintenance.md](kernel-guard/07-operations-maintenance.md) | 监控、事故响应、兼容矩阵与长期维护 | 评审中 |
+| [kernel-guard/08-roadmap-adr.md](kernel-guard/08-roadmap-adr.md) | K0–K4 路线、ADR、开放问题与代码量预算 | 评审中 |
+| [kernel-guard/09-review-checklist.md](kernel-guard/09-review-checklist.md) | 维护人审核清单与编码门禁 | 评审中 |
+| [kernel-guard/10-execution-rounds.md](kernel-guard/10-execution-rounds.md) | 分轮执行、回归证据与产品断裂防护 | 执行中 |
 | [CORE_API.md](CORE_API.md) | C core 对外接口规范 | 现行 |
 | [DATA_FLOW.md](DATA_FLOW.md) | 关键数据流时序 | 现行 |
 | [GETTING_STARTED.md](GETTING_STARTED.md) | 首次构建与运行 | 现行 |

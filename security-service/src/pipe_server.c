@@ -7,6 +7,7 @@
  */
 #include "pipe_server.h"
 #include "client_auth.h"
+#include "kernel_guard.h"
 #include "protocol.h"
 #include "service_util.h"
 #include "state_crypto.h"
@@ -355,6 +356,65 @@ static int send_status(VtyServiceContext *ctx, HANDLE pipe,
     }
 }
 
+static int send_kernel_status(VtyServiceContext *ctx, HANDLE pipe,
+                              const VtySvcRequestFields *request)
+{
+    VtyKernelGuardStatus kernel;
+    uint8_t response[VTY_SVC_RESPONSE_BYTES];
+    uint16_t status;
+    int query_rc;
+
+    if (ctx == NULL || ctx->signing_key == NULL) return -1;
+
+    memset(&kernel, 0, sizeof(kernel));
+    kernel.state = VTY_KERNEL_STATE_UNKNOWN;
+    kernel.reason = VTY_KERNEL_REASON_INTERNAL;
+    query_rc = vty_kernel_guard_query(&kernel);
+    status = (query_rc == 0) ? (uint16_t)VTY_SVC_STATUS_OK
+                             : (uint16_t)VTY_SVC_STATUS_UNAVAILABLE;
+
+    memset(response, 0, sizeof(response));
+    if (vty_svc_build_signed_kernel_response(
+            ctx->signing_key, request, status, 0u, 0u,
+            vty_unix_seconds_now(), kernel.state, kernel.reason,
+            kernel.capabilities, kernel.protocol_major,
+            kernel.protocol_minor, response) != 0) {
+        VTY_PIPE_TEST_LOG("build kernel status response failed\n");
+        return -1;
+    }
+    return write_message(pipe, response, VTY_SVC_RESPONSE_BYTES,
+                         VTY_SVC_SERVER_WRITE_TIMEOUT_MS);
+}
+
+static int send_kernel_result(VtyServiceContext *ctx, HANDLE pipe,
+                              const VtySvcRequestFields *request,
+                              uint16_t status,
+                              const VtyKernelGuardStatus *kernel)
+{
+    VtyKernelGuardStatus empty;
+    uint8_t response[VTY_SVC_RESPONSE_BYTES];
+
+    if (ctx == NULL || ctx->signing_key == NULL) return -1;
+    if (kernel == NULL) {
+        memset(&empty, 0, sizeof(empty));
+        empty.state = VTY_KERNEL_STATE_UNKNOWN;
+        empty.reason = VTY_KERNEL_REASON_INTERNAL;
+        kernel = &empty;
+    }
+
+    memset(response, 0, sizeof(response));
+    if (vty_svc_build_signed_kernel_response(
+            ctx->signing_key, request, status, 0u, 0u,
+            vty_unix_seconds_now(), kernel->state, kernel->reason,
+            kernel->capabilities, kernel->protocol_major,
+            kernel->protocol_minor, response) != 0) {
+        VTY_PIPE_TEST_LOG("build kernel command response failed\n");
+        return -1;
+    }
+    return write_message(pipe, response, VTY_SVC_RESPONSE_BYTES,
+                         VTY_SVC_SERVER_WRITE_TIMEOUT_MS);
+}
+
 static void handle_connection(VtyServiceContext *ctx, HANDLE pipe,
                               ActiveUsers *active)
 {
@@ -364,6 +424,7 @@ static void handle_connection(VtyServiceContext *ctx, HANDLE pipe,
     DWORD raw_len = 0;
     VtySvcRequestFields request;
     VtySvcRequestFields empty_request;
+    VtySvcKernelPayload kernel_payload;
     VtyMachineDecision decision;
     VtyMachineStateFields fields;
     int auth_ok;
@@ -382,6 +443,7 @@ static void handle_connection(VtyServiceContext *ctx, HANDLE pipe,
     memset(&identity, 0, sizeof(identity));
     memset(&request, 0, sizeof(request));
     memset(&empty_request, 0, sizeof(empty_request));
+    memset(&kernel_payload, 0, sizeof(kernel_payload));
     memset(&decision, 0, sizeof(decision));
 
     auth_ok = vty_auth_client_process(pipe, ctx->cfg.publisher_sha256,
@@ -415,7 +477,23 @@ static void handle_connection(VtyServiceContext *ctx, HANDLE pipe,
         goto done;
     }
 
-    decode_status = vty_svc_request_decode(raw, raw_len, &request);
+    {
+        /*
+         * 内核生命周期命令允许 32..63 区携带固定宽度载荷，
+         * 其余命令仍走要求该区全 0 的通用解码。
+         */
+        uint16_t peek_command = (raw_len == VTY_SVC_REQUEST_BYTES)
+                                    ? vty_svc_get_u16le(raw + 6)
+                                    : 0u;
+        if (peek_command == (uint16_t)VTY_SVC_CMD_KERNEL_ARM ||
+            peek_command == (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER ||
+            peek_command == (uint16_t)VTY_SVC_CMD_KERNEL_DISARM) {
+            decode_status = vty_svc_request_decode_kernel(
+                raw, raw_len, &request, &kernel_payload);
+        } else {
+            decode_status = vty_svc_request_decode(raw, raw_len, &request);
+        }
+    }
     if (decode_status != (uint16_t)VTY_SVC_STATUS_OK) {
         VTY_PIPE_TEST_LOG("decode failed len=%lu\n",
                           (unsigned long)raw_len);
@@ -430,7 +508,18 @@ static void handle_connection(VtyServiceContext *ctx, HANDLE pipe,
     }
 
     if (request.command != (uint16_t)VTY_SVC_CMD_PING) {
-        if (!ignore_auth &&
+        /*
+         * 内核生命周期命令不依赖 verthys.dll 模块校验：服务重启后驱动仍
+         * 保留旧的受保护表项，新服务尚未被驱动信任，EnumProcessModules
+         * 可能因 VM_READ 被剥离而失败；宿主进程也不加载 verthys.dll。
+         * 这三个命令仍要求调用方通过映像发布者认证，并在服务侧校验
+         * worker 身份或 ARM owner 身份。
+         */
+        int module_auth_required =
+            request.command != (uint16_t)VTY_SVC_CMD_KERNEL_ARM &&
+            request.command != (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER &&
+            request.command != (uint16_t)VTY_SVC_CMD_KERNEL_DISARM;
+        if (module_auth_required && !ignore_auth &&
             vty_auth_check_module(process, ctx->cfg.publisher_sha256) != 0) {
             vty_auth_log_denied(&identity, L"module-auth");
             (void)send_status(ctx, pipe, &request,
@@ -439,9 +528,49 @@ static void handle_connection(VtyServiceContext *ctx, HANDLE pipe,
         }
     }
 
+    /*
+     * KernelStatus 是只读诊断查询，不参与解锁授权；在 P2 fail-closed 时
+     * 仍允许返回驱动状态，便于 UI 显示“内核不可用”的具体原因。
+     * 该命令仍要求客户端模块认证，不降低现有 fail-closed 语义。
+     */
+    if (request.command == (uint16_t)VTY_SVC_CMD_KERNEL_STATUS) {
+        (void)send_kernel_status(ctx, pipe, &request);
+        goto done;
+    }
+
     if (vty_service_context_is_fail_closed(ctx)) {
         (void)send_status(ctx, pipe, &request,
                           (uint16_t)VTY_SVC_STATUS_UNAVAILABLE, 0u, 0u);
+        goto done;
+    }
+
+    /*
+     * 内核生命周期命令以已认证客户端进程为唯一对象：
+     * 路径、PID、创建时间均由服务从客户端句柄读取，不接受客户端自报。
+     */
+    if (request.command == (uint16_t)VTY_SVC_CMD_KERNEL_ARM ||
+        request.command == (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER ||
+        request.command == (uint16_t)VTY_SVC_CMD_KERNEL_DISARM) {
+        VtyKernelGuardStatus kernel;
+        uint16_t kernel_status;
+
+        memset(&kernel, 0, sizeof(kernel));
+        kernel.state = VTY_KERNEL_STATE_UNKNOWN;
+        kernel.reason = VTY_KERNEL_REASON_INTERNAL;
+        if (request.command == (uint16_t)VTY_SVC_CMD_KERNEL_ARM) {
+            kernel_status = vty_kernel_guard_arm(
+                identity.pid, process, kernel_payload.mode,
+                kernel_payload.worker_image, &kernel);
+        } else if (request.command ==
+                   (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER) {
+            kernel_status = vty_kernel_guard_register(
+                identity.pid, process, kernel_payload.target_pid,
+                kernel_payload.target_creation, &kernel);
+        } else {
+            kernel_status = vty_kernel_guard_disarm(identity.pid, process,
+                                                    &kernel);
+        }
+        (void)send_kernel_result(ctx, pipe, &request, kernel_status, &kernel);
         goto done;
     }
 

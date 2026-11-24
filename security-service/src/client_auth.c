@@ -119,6 +119,34 @@ int vty_auth_verify_authenticode(const wchar_t *path,
     return ok ? 0 : -1;
 }
 
+int vty_auth_verify_trusted_signature(const wchar_t *path)
+{
+    WINTRUST_FILE_INFO file_info;
+    WINTRUST_DATA data;
+    GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    LONG status;
+
+    if (path == NULL || !vty_path_exists(path)) return -1;
+
+    memset(&file_info, 0, sizeof(file_info));
+    file_info.cbStruct = sizeof(file_info);
+    file_info.pcwszFilePath = path;
+
+    memset(&data, 0, sizeof(data));
+    data.cbStruct = sizeof(data);
+    data.dwUIChoice = WTD_UI_NONE;
+    data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    data.dwUnionChoice = WTD_CHOICE_FILE;
+    data.pFile = &file_info;
+    data.dwStateAction = WTD_STATEACTION_VERIFY;
+    data.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+
+    status = WinVerifyTrust(NULL, &action, &data);
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    (void)WinVerifyTrust(NULL, &action, &data);
+    return status == ERROR_SUCCESS ? 0 : -1;
+}
+
 int vty_auth_client_process(HANDLE pipe, const wchar_t *expected_sha256,
                             int verify_image, VtyClientIdentity *identity,
                             HANDLE *process)

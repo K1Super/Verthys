@@ -2,7 +2,7 @@
   <rect width="1600" height="860" fill="#0A0D12"/>
 
   <text x="64" y="46" font-size="16" fill="#5D6B80" letter-spacing="4">SYSTEM LAYERING · 四层单向依赖</text>
-  <text x="1536" y="46" text-anchor="end" font-size="16" fill="#5D6B80" letter-spacing="3">ABI 0x0016 · FORMAT V4</text>
+  <text x="1536" y="46" text-anchor="end" font-size="16" fill="#5D6B80" letter-spacing="3">ABI 0x0017 · FORMAT V4</text>
 
   <line x1="200" y1="78" x2="200" y2="766" stroke="#1E2733" stroke-width="1.5"/>
 

@@ -28,6 +28,24 @@ int vty_svc_build_signed_response(BCRYPT_KEY_HANDLE key,
                                   uint64_t server_time_sec,
                                   uint8_t raw[VTY_SVC_RESPONSE_BYTES]);
 
+/*
+ * KernelStatus 专用：在标准响应头的 48..63 区携带内核状态，
+ * 签名覆盖范围不变，仍为前 64 字节。
+ */
+int vty_svc_build_signed_kernel_response(
+    BCRYPT_KEY_HANDLE key,
+    const VtySvcRequestFields *request,
+    uint16_t status,
+    uint32_t retry_after_sec,
+    uint32_t remaining_tokens,
+    uint64_t server_time_sec,
+    uint32_t kernel_state,
+    uint32_t kernel_reason,
+    uint32_t kernel_capabilities,
+    uint16_t kernel_protocol_major,
+    uint16_t kernel_protocol_minor,
+    uint8_t raw[VTY_SVC_RESPONSE_BYTES]);
+
 /* 用已导入公钥校验响应签名；返回 0 成功。 */
 int vty_svc_verify_response_signature(BCRYPT_KEY_HANDLE key,
                                       const uint8_t raw[VTY_SVC_RESPONSE_BYTES]);

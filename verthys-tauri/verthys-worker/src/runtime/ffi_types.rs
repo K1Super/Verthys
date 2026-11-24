@@ -89,6 +89,10 @@ pub(crate) type VerthysListAllLidsFn = unsafe extern "C" fn(
 pub(crate) const VERTHYS_SYMBOL_UNSUPPORTED: u32 = 0xFFFF_FFFE;
 pub(crate) type VerthysDeleteRecordFn = unsafe extern "C" fn(VerthysHandle, u64) -> u32;
 pub(crate) type VerthysDeleteRecordsFn = unsafe extern "C" fn(VerthysHandle, *const u64, usize) -> u32;
+/// 原子替换（API 0x0017）：旧 id + 新记录 → 新 id；缺失时按
+/// `VERTHYS_SYMBOL_UNSUPPORTED` 处理，宿主回退写新/删旧路径。
+pub(crate) type VerthysReplaceRecordFn =
+    unsafe extern "C" fn(VerthysHandle, u64, *const VerthysRecordC, *mut u64) -> u32;
 pub(crate) type VerthysExportFn =
     unsafe extern "C" fn(VerthysHandle, *const c_char, *const c_char, usize) -> u32;
 pub(crate) type VerthysImportFn =
@@ -400,6 +404,21 @@ pub(crate) struct VerthysSecurityStatusC {
 
 pub(crate) type VerthysGetSecurityStatusFn =
     unsafe extern "C" fn(VerthysHandle, *mut VerthysSecurityStatusC) -> u32;
+
+/* 内核加固状态（可选符号；缺失时按不可用处理）
+ * 与 verthys.h VerthysKernelStatus 严格对齐：5 个字段 + reserved，20B。 */
+#[repr(C)]
+pub(crate) struct VerthysKernelStatusC {
+    pub(crate) state: u32,
+    pub(crate) reason: u32,
+    pub(crate) capabilities: u32,
+    pub(crate) protocol_major: u16,
+    pub(crate) protocol_minor: u16,
+    pub(crate) reserved: u32,
+}
+
+pub(crate) type VerthysGetKernelStatusFn =
+    unsafe extern "C" fn(VerthysHandle, *mut VerthysKernelStatusC) -> u32;
 /*   轻量级记录类型存在性检查 FFI 绑定
  *   与 verthys.h 中 Verthys_HasRecordByType 严格对齐
  *   签名：VerthysResult Verthys_HasRecordByType(VerthysHandle, uint8_t rtype, uint8_t *out_found)
@@ -501,6 +520,12 @@ mod tests {
     fn security_status_c_layout_matches_c_abi() {
         assert_eq!(std::mem::size_of::<VerthysSecurityStatusC>(), 104);
         assert_eq!(std::mem::align_of::<VerthysSecurityStatusC>(), 8);
+    }
+
+    #[test]
+    fn kernel_status_c_layout_matches_c_abi() {
+        assert_eq!(std::mem::size_of::<VerthysKernelStatusC>(), 20);
+        assert_eq!(std::mem::align_of::<VerthysKernelStatusC>(), 4);
     }
 
     #[test]

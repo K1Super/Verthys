@@ -53,6 +53,7 @@
 
 pub mod actor;
 pub mod graceful;
+pub mod kernel_watchdog;
 pub mod platform;
 pub mod protocol;
 pub mod session;

@@ -8,6 +8,7 @@ pub mod boot_marker;
 pub mod brute_force;
 pub mod cleanup;
 pub mod file_lock;
+pub mod kernel_guard;
 pub mod module_whitelist;
 pub mod preset;
 pub mod security_service;

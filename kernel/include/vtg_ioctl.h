@@ -1,0 +1,46 @@
+#ifndef VTG_IOCTL_H
+#define VTG_IOCTL_H
+
+/*
+ * 驱动设备名、符号链接与 IOCTL 控制码。
+ *
+ * 设备 ACL 只允许 LocalSystem；应用不得直接打开设备。
+ */
+
+#if defined(_KERNEL_MODE) || defined(_NTDDK_) || defined(_NTIFS_)
+#include <ntifs.h>
+#include <wdf.h>
+#else
+#include <windows.h>
+#endif
+
+#include "vtg_protocol.h"
+
+#define VTG_DEVICE_NAME L"\\Device\\VerthysGuard"
+#define VTG_SYMLINK_NAME L"\\DosDevices\\VerthysGuard"
+#define VTG_DEVICE_SDDL L"D:P(A;;GA;;;SY)"
+
+#define VTG_DEVICE_TYPE FILE_DEVICE_UNKNOWN
+
+#define VTG_IOCTL_PING \
+    CTL_CODE(VTG_DEVICE_TYPE, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define VTG_IOCTL_ARM \
+    CTL_CODE(VTG_DEVICE_TYPE, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define VTG_IOCTL_DISARM \
+    CTL_CODE(VTG_DEVICE_TYPE, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define VTG_IOCTL_REGISTER_PROCESS \
+    CTL_CODE(VTG_DEVICE_TYPE, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define VTG_IOCTL_UNREGISTER_PROCESS \
+    CTL_CODE(VTG_DEVICE_TYPE, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define VTG_IOCTL_QUERY_STATUS \
+    CTL_CODE(VTG_DEVICE_TYPE, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define VTG_IOCTL_QUERY_STATS \
+    CTL_CODE(VTG_DEVICE_TYPE, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define VTG_IOCTL_QUERY_EVENTS \
+    CTL_CODE(VTG_DEVICE_TYPE, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#if defined(_KERNEL_MODE) || defined(_NTDDK_)
+EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL VtgEvtIoDeviceControl;
+#endif
+
+#endif /* VTG_IOCTL_H */

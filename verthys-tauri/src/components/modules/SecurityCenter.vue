@@ -128,6 +128,9 @@
       :custom-session-minutes="customSessionMinutes"
       :defense-paths="defensePaths"
       :defense-meta="defenseMeta"
+      :kernel-status="kernelStatus"
+      :kernel-policy-degraded="kernelPolicyDegraded"
+      :kernel-status-pending="kernelStatusPending"
       v-model:orbit-slider-pos="orbitSliderPos"
       @panel-active="(v: boolean) => emit('panel-active', v)"
       @lock-all="onLockAll"
@@ -298,6 +301,7 @@ import {
   restoreSecurityPreset,
   sessionLockEnabledRef,
   securityHardeningFailedRef,
+  securityPresetRef,
   checkInitStatus,
 } from "../../lib/keyManager";
 import {
@@ -306,6 +310,8 @@ import {
   verthysPcrStatus,
   verthysKeyfileStatus,
   verthysKeyfileEnable,
+  verthysAuditKernelDegraded,
+  verthysResetKernelDegradedAudit,
   preloadWorker, workerDestroy,
 } from "../../lib/verthys";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -623,7 +629,44 @@ const {
 
 /* ===== 动态防护状态（消费出口：verthys 就绪即拉取 + 60s 轮询） =====
  * 先于 usePreset 装配：defenseMeta 作为真实信号注入预设指标合成 */
-const { defensePaths, defenseMeta } = useDefenseStatus();
+const { defensePaths, defenseMeta, defenseReport, kernelStatus } = useDefenseStatus();
+
+/* SECURE 默认 preferred：内核状态报告缺位时显示“确认中”，不判降级。
+ * 只有拿到明确的非 ACTIVE 状态才标记用户态降级；worker 自登记使驱动
+ * 实际 ACTIVE 时，标签必须与驱动一致，不能被缺失报告误判为降级。 */
+const kernelStatusPending = computed(() => {
+  return securityPresetRef.value === 1 && kernelStatus.value === null;
+});
+
+const kernelPolicyDegraded = computed(() => {
+  if (securityPresetRef.value !== 1) return false;
+  const status = kernelStatus.value;
+  return status !== null && status.state !== 3;
+});
+
+/* 内核降级审计：取得本轮会话报告后才判定，避免把“尚未采样”误写为降级。
+ * 去重键在 verthys.ts 模块级按 (state, reason) 维护，组件重挂载不会重复
+ * 写链；仅在观测到非降级事实时重置。报告缺失（未采样/已锁定）既不判定
+ * 也不重置，避免锁定瞬间清掉去重键导致重复审计。 */
+watch(
+  [defenseReport, kernelPolicyDegraded],
+  ([report, degraded]) => {
+    if (!report) return;
+    if (!degraded) {
+      /* 报告缺失（pending）不重置去重键，避免锁定/采样窗口导致重复审计；
+       * 仅在明确观测到 ACTIVE 后重置。 */
+      if (kernelStatus.value !== null) {
+        verthysResetKernelDegradedAudit();
+      }
+      return;
+    }
+    const status = report.kernel_status ?? null;
+    void verthysAuditKernelDegraded(status?.state ?? 0, status?.reason ?? 0).catch((e) => {
+      console.warn("[SecurityCenter] 内核降级审计写入失败", e);
+    });
+  },
+  { immediate: true },
+);
 
 /* ===== 系统运行指标（CPU 占用率真实采样，就绪期 2s 轮询） ===== */
 const { cpuUsage } = useSystemMetrics(globalKeyReadyRef);

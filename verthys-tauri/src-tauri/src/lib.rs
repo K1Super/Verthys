@@ -94,6 +94,7 @@ use controller::devfixture_controller::*;
 use controller::diag_controller::*;
 use controller::file_controller::*;
 use controller::key_controller::*;
+use controller::key_change_controller::verthys_change_global_key;
 use controller::pcr_controller::*;
 use controller::rollback_anchor_controller::*;
 use controller::keyfile_controller::*;
@@ -656,9 +657,9 @@ fn run_main_ui(
             security_commands::verthys_system_snapshot,
             // 系统启动时刻（每次开机一次首映、其余启动直接进入的判定信号）
             security_commands::verthys_boot_epoch,
-            verthys_derive_global_key,
             verthys_derive_and_store_global_key,
             verthys_verify_global_key,
+            verthys_change_global_key,
             verthys_clear_global_key,
             // 内容层加密：模块密钥与记录加解密（原始密钥留在 worker）
             controller::module_crypto_controller::verthys_module_key_unlock,
@@ -713,6 +714,8 @@ fn run_main_ui(
             security_commands::security_get_preset_config,
             security_commands::security_apply_preset,
             security_commands::security_load_preset_state,
+            // 内核防护降级审计（SECURE preferred 观测事实）
+            security_commands::verthys_audit_kernel_degraded,
             // 更新服务：检查 / 准备 / 闸门 / 安装 / 标记 / 日志
             updater::updater_check,
             updater::updater_prepare,

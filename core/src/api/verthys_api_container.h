@@ -30,6 +30,12 @@ VerthysResult verthys_api_container_get(struct VerthysContext *ctx, uint64_t id,
 
 VerthysResult verthys_api_container_delete(struct VerthysContext *ctx, uint64_t id);
 
+/* 原子替换：同一次提交内墓碑化旧记录并写入新记录（记录格式不变）。 */
+VerthysResult verthys_api_container_replace(struct VerthysContext *ctx,
+                                     uint64_t old_id,
+                                     const VerthysRecord *record,
+                                     uint64_t *out_new_id);
+
 VerthysResult verthys_api_container_delete_many(struct VerthysContext *ctx,
                                          const uint64_t *ids, size_t count);
 

@@ -579,16 +579,25 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
 
   /** 确认修改全局密钥
    *
-   * changeGlobalKey 返回 VerthysResult<void>
-   *   细分错误码：旧密钥错误 vs 落盘失败，提供精确 UI 提示
+   * 后端单命令完成核验/派生/落盘/清理/换槽；前端只做前置校验与错误映射。
+   * 失败时后端 GMK 槽保持原值，旧记录仍是权威，可直接重试。
    *
-   * 超时处理：changeGlobalKey 成功时会把 globalKeyRecordId 更新为新记录 id，
+   * 超时处理：changeGlobalKey 成功时会更新 globalKeyRecordId，
    *   前端兜底超时后以「记录 id 是否变化」判定真实结果，不直接断言失败。
    */
   const onConfirmChangeKey = async () => {
     // 重入闸门：处理中拒绝再次提交（按钮 disabled 之外的第二道防线）
     if (changeKeyProcessing.value) return;
-    if (!oldBinBytes.value || !newBinBytes.value) return;
+    if (!oldBinBytes.value || !newBinBytes.value) {
+      options.showError('密钥文件未加载，请重新选择');
+      return;
+    }
+    // 新钥长度前置校验（与后端 validate_password_complexity 的 8 字节下限一致）
+    const newPwByteLen = new TextEncoder().encode(newPassword.value).length;
+    if (newPwByteLen < 8) {
+      options.showError('访问密钥至少 8 位');
+      return;
+    }
     changeKeyProcessing.value = true;
     const recordIdBefore = globalKeyRecordIdRef.value;
     try {
@@ -601,17 +610,41 @@ export function useGlobalKey(options: UseGlobalKeyOptions) {
         CHANGE_KEY_FRONTEND_TIMEOUT_MS,
       );
       if (!result.ok) {
-        // 细分错误码：旧密钥错误 vs 落盘失败
-        if (result.code === VerthysErrorCode.E_GLOBAL_KEY_VERIFY_FAILED) {
-          options.showError('旧密钥验证失败，请检查');
-        } else if (result.code === VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED) {
-          options.showError('落盘失败，请重试');
-        } else {
-          options.showError(translateVerthysError(result));
+        switch (result.code) {
+          case VerthysErrorCode.E_GLOBAL_KEY_VERIFY_FAILED:
+            options.showError('旧密钥验证失败，请检查');
+            break;
+          case VerthysErrorCode.E_GLOBAL_KEY_RECORD_NOT_FOUND:
+            options.showError('未找到全局密钥记录');
+            break;
+          case VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED:
+            options.showError('新密钥写入失败，旧密钥仍有效');
+            break;
+          case VerthysErrorCode.E_GLOBAL_KEY_CHANGE_UNCONFIRMED:
+            options.showError('修改结果未确认：请重启应用后以新密钥验证');
+            break;
+          case VerthysErrorCode.E_RATE_LIMITED: {
+            const secs = result.retryAfterSecs ?? 0;
+            options.showError(
+              secs > 0
+                ? `尝试次数过多，请 ${secs} 秒后再试`
+                : '尝试次数过多，请稍后再试',
+            );
+            break;
+          }
+          case VerthysErrorCode.E_CNG_UNAVAILABLE:
+            options.showError('安全门禁暂时不可用，请重启应用后重试');
+            break;
+          default:
+            options.showError(translateVerthysError(result));
         }
         return;
       }
-      options.showToast('全局密钥修改成功');
+      if (result.value.cleanupPending) {
+        options.showToast('全局密钥已修改；旧记录将在下次解锁自动清理');
+      } else {
+        options.showToast('全局密钥修改成功');
+      }
       showChangeKeyDialog.value = false;
       clearChangeKeyFields();
     } catch (e) {

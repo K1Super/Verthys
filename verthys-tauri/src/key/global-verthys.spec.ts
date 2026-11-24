@@ -4,8 +4,8 @@
  * 覆盖全局密钥落地的三条路径与收口项：
  *   1. initGlobalKey：成功推进、AddRecord 失败、读回不一致、
  *      reconcile 失败、补偿动作自身失败（强制复位兜底）、重入互斥锁
- *   2. changeGlobalKey：先新后旧成功、删旧失败回滚、derive 失败补偿、
- *      旧密钥验证失败拦截、残留记录收敛、未预期异常兜底补偿
+ *   2. changeGlobalKey：后端单命令薄封装（成功/cleanup_pending/错误码映射/互斥）
+ *   3. verifyGlobalKey：全局密钥记录解析（最新有效记录权威/类型索引回退）
  *
  * 依赖隔离：lib/verthys（IPC 面）、verthys-cache（冲刷队列）、
  * security-session（会话门禁）、background-tasks、module-auth、
@@ -23,7 +23,6 @@ vi.mock("../lib/verthys", () => ({
   verthysAddRecord: vi.fn(),
   verthysDeleteRecord: vi.fn(),
   verthysInitStatus: vi.fn(),
-  verthysDeriveGlobalKey: vi.fn(),
   verthysDeriveAndStoreGlobalKey: vi.fn(),
   verthysVerifyGlobalKey: vi.fn(),
   verthysClearGlobalKey: vi.fn(),
@@ -31,6 +30,8 @@ vi.mock("../lib/verthys", () => ({
   verthysReconcileKeyPresence: vi.fn(),
   verthysGetRecord: vi.fn(),
   verthysEnumerateRecords: vi.fn(),
+  verthysListIdsByType: vi.fn(),
+  verthysChangeGlobalKey: vi.fn(),
   verthysScanSummaryOpen: vi.fn(),
   verthysScanSummaryNext: vi.fn(),
   verthysScanSummaryClose: vi.fn(),
@@ -53,6 +54,8 @@ vi.mock("../cache/composition/verthys-cache", () => ({
   resetFlushChain: vi.fn(),
   clearSummaryCache: vi.fn(),
   clearFullRecordCache: vi.fn(),
+  invalidateSummaryRecord: vi.fn(),
+  invalidateScannedRecord: vi.fn(),
   findLidByTypeEarlyStop: vi.fn(),
   enqueueFlush: vi.fn(),
   flushVerthysNow: vi.fn(),
@@ -98,7 +101,7 @@ vi.mock("../utils/logger", () => ({
 import * as verthysLib from "../lib/verthys";
 import * as cacheLib from "../cache/composition/verthys-cache";
 import * as sessionLib from "../session/security-session";
-import { initGlobalKey, changeGlobalKey } from "./global-verthys";
+import { initGlobalKey, changeGlobalKey, verifyGlobalKey } from "./global-verthys";
 import { keyState, resetAllState } from "../state/key_state";
 import { TYPE_GLOBAL_KEY } from "../constants/key_manager_const";
 import { VerthysErrorCode } from "../lib/verthys_error";
@@ -130,7 +133,6 @@ beforeEach(() => {
 
   // 默认成功配置（各用例按需覆盖）
   vi.mocked(verthysLib.bytesToBase64).mockReturnValue("BIN_B64");
-  vi.mocked(verthysLib.verthysDeriveGlobalKey).mockResolvedValue(RECORD_B64);
   vi.mocked(verthysLib.verthysDeriveAndStoreGlobalKey).mockResolvedValue({
     id: NEW_ID,
     recordB64: RECORD_B64,
@@ -147,6 +149,13 @@ beforeEach(() => {
   vi.mocked(verthysLib.verthysReconcileKeyPresence).mockResolvedValue(true);
   vi.mocked(verthysLib.verthysVerifyGlobalKey).mockResolvedValue(true);
   vi.mocked(verthysLib.verthysEnumerateRecords).mockResolvedValue([]);
+  vi.mocked(verthysLib.verthysListIdsByType).mockResolvedValue({ ids: [], exhausted: true });
+  vi.mocked(verthysLib.verthysChangeGlobalKey).mockResolvedValue({
+    id: NEW_ID,
+    recordB64: NEW_RECORD_B64,
+    deletedIds: [OLD_ID],
+    cleanupPending: false,
+  });
   vi.mocked(verthysLib.verthysScanSummaryOpen).mockResolvedValue({ records: [], exhausted: true });
   vi.mocked(verthysLib.verthysScanSummaryNext).mockResolvedValue({ records: [], exhausted: true });
   vi.mocked(verthysLib.verthysScanSummaryClose).mockResolvedValue(true);
@@ -269,35 +278,29 @@ describe("initGlobalKey — 状态推进后置与失败补偿", () => {
   });
 });
 
-describe("changeGlobalKey — 先新后旧与失败回滚", () => {
-  /** 布置旧密钥验证与旧记录定位共用的成功前置 */
-  function setupOldRecord(): void {
+describe("changeGlobalKey — 后端单命令薄封装", () => {
+  function setupOldState(): void {
     keyState.globalKeyRecordB64.value = OLD_RECORD_B64;
     keyState.globalKeyRecordId.value = OLD_ID;
-    vi.mocked(cacheLib.findLidByTypeEarlyStop).mockResolvedValue(OLD_ID);
-    let oldDeleted = false;
-    vi.mocked(verthysLib.verthysGetRecord).mockImplementation(async (id: number) => {
-      if (id === NEW_ID) {
-        return { type: TYPE_GLOBAL_KEY, name: "global-key", dataB64: NEW_RECORD_B64 };
-      }
-      if (id === OLD_ID) {
-        return oldDeleted
-          ? null
-          : { type: TYPE_GLOBAL_KEY, name: "global-key", dataB64: OLD_RECORD_B64 };
-      }
-      return null;
-    });
-    vi.mocked(verthysLib.verthysDeleteRecord).mockImplementation(async (id: number) => {
-      if (id === OLD_ID) {
-        oldDeleted = true;
-      }
-      return true;
+    keyState.hasGlobalKeyRecord.value = true;
+    keyState.globalKeyReady.value = true;
+  }
+
+  function expectMappedError(errorCode: string, expected: VerthysErrorCode) {
+    setupOldState();
+    const error = Object.assign(new Error("boom"), { errorCode });
+    vi.mocked(verthysLib.verthysChangeGlobalKey).mockRejectedValue(error);
+    return changeGlobalKey(
+      PWD, BIN_BYTES, BIN_PWD,
+      "new-p@ss-9", new Uint8Array([9]), "new-bin",
+    ).then((result) => {
+      expectErr(result, expected);
+      expect(keyState.globalKeyRecordId.value).toBe(OLD_ID);
     });
   }
 
-  it("成功路径：先写新记录读回确认，再删旧记录读回确认删除生效", async () => {
-    setupOldRecord();
-    vi.mocked(verthysLib.verthysDeriveGlobalKey).mockResolvedValue(NEW_RECORD_B64);
+  it("成功路径：单命令调用、状态同步、旧 id 缓存失效", async () => {
+    setupOldState();
 
     const result = await changeGlobalKey(
       PWD, BIN_BYTES, BIN_PWD,
@@ -305,88 +308,27 @@ describe("changeGlobalKey — 先新后旧与失败回滚", () => {
     );
 
     expect(result.ok).toBe(true);
-    // 先新后旧：AddRecord 先于旧记录删除
-    expect(verthysLib.verthysAddRecord).toHaveBeenCalledWith(TYPE_GLOBAL_KEY, "global-key", NEW_RECORD_B64);
-    expect(verthysLib.verthysDeleteRecord).toHaveBeenCalledWith(OLD_ID);
-    expect(verthysLib.verthysClearGlobalKey).not.toHaveBeenCalled();
+    if (result.ok) expect(result.value.cleanupPending).toBe(false);
+    expect(verthysLib.verthysChangeGlobalKey).toHaveBeenCalledWith(
+      PWD, "BIN_B64", BIN_PWD, "new-p@ss-9", "BIN_B64", "new-bin",
+    );
     expect(keyState.globalKeyRecordB64.value).toBe(NEW_RECORD_B64);
     expect(keyState.globalKeyRecordId.value).toBe(NEW_ID);
-  });
-
-  it("旧密钥验证失败：拦截在派生之前，不触碰记录", async () => {
-    keyState.globalKeyRecordB64.value = OLD_RECORD_B64;
-    vi.mocked(verthysLib.verthysVerifyGlobalKey).mockResolvedValue(false);
-
-    const result = await changeGlobalKey(
-      PWD, BIN_BYTES, BIN_PWD,
-      "new-p@ss-9", new Uint8Array([9]), "new-bin",
-    );
-
-    expectErr(result, VerthysErrorCode.E_GLOBAL_KEY_VERIFY_FAILED);
-    expect(verthysLib.verthysDeriveGlobalKey).not.toHaveBeenCalled();
+    expect(cacheLib.invalidateSummaryRecord).toHaveBeenCalledWith(OLD_ID);
+    expect(cacheLib.invalidateScannedRecord).toHaveBeenCalledWith(OLD_ID);
+    expect(sessionLib.resetSessionTimer).toHaveBeenCalled();
+    // 前端不再做多步编排
     expect(verthysLib.verthysAddRecord).not.toHaveBeenCalled();
     expect(verthysLib.verthysDeleteRecord).not.toHaveBeenCalled();
   });
 
-  it("删旧失败：回收新记录 + 清 GMK 回 Locked，磁盘回单条旧记录", async () => {
-    setupOldRecord();
-    vi.mocked(verthysLib.verthysDeriveGlobalKey).mockResolvedValue(NEW_RECORD_B64);
-    vi.mocked(verthysLib.verthysDeleteRecord).mockImplementation(async (id: number) => {
-      return id !== OLD_ID; // 新记录回收成功，旧记录删除失败
-    });
-
-    const result = await changeGlobalKey(
-      PWD, BIN_BYTES, BIN_PWD,
-      "new-p@ss-9", new Uint8Array([9]), "new-bin",
-    );
-
-    expectErr(result, VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED);
-    expect(verthysLib.verthysDeleteRecord).toHaveBeenCalledWith(NEW_ID);
-    expect(verthysLib.verthysClearGlobalKey).toHaveBeenCalled();
-    // 前端状态不推进
-    expect(keyState.globalKeyRecordId.value).toBe(OLD_ID);
-  });
-
-  it("derive 新密钥失败：仅清 GMK 补偿，不产生任何记录写入", async () => {
-    setupOldRecord();
-    // 真实签名返回 Promise<string>；mock 以 null 表达 worker 派生失败
-    vi.mocked(verthysLib.verthysDeriveGlobalKey).mockResolvedValue(null as unknown as string);
-
-    const result = await changeGlobalKey(
-      PWD, BIN_BYTES, BIN_PWD,
-      "new-p@ss-9", new Uint8Array([9]), "new-bin",
-    );
-
-    expectErr(result, VerthysErrorCode.E_GLOBAL_KEY_DERIVE_FAILED);
-    expect(verthysLib.verthysAddRecord).not.toHaveBeenCalled();
-    expect(verthysLib.verthysClearGlobalKey).toHaveBeenCalled();
-  });
-
-  it("收敛：历史中断残留的 global-key 记录被清除，目标记录保留", async () => {
-    setupOldRecord();
-    vi.mocked(verthysLib.verthysDeriveGlobalKey).mockResolvedValue(NEW_RECORD_B64);
-    vi.mocked(verthysLib.verthysScanSummaryOpen).mockResolvedValue({
-      records: [
-        {
-          id: 7,
-          type: TYPE_GLOBAL_KEY,
-          name: "global-key",
-          dataSize: 124,
-          physicalOffset: 65536,
-          merkleLeaf: "leaf7",
-          createdTime: 1,
-        },
-        {
-          id: OLD_ID,
-          type: TYPE_GLOBAL_KEY,
-          name: "global-key",
-          dataSize: 124,
-          physicalOffset: 65660,
-          merkleLeaf: "leaf42",
-          createdTime: 1,
-        },
-      ],
-      exhausted: true,
+  it("cleanup_pending=true：成功并携带清理标记", async () => {
+    setupOldState();
+    vi.mocked(verthysLib.verthysChangeGlobalKey).mockResolvedValue({
+      id: NEW_ID,
+      recordB64: NEW_RECORD_B64,
+      deletedIds: [],
+      cleanupPending: true,
     });
 
     const result = await changeGlobalKey(
@@ -395,22 +337,155 @@ describe("changeGlobalKey — 先新后旧与失败回滚", () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(verthysLib.verthysDeleteRecord).toHaveBeenCalledWith(7);
-    expect(verthysLib.verthysDeleteRecord).toHaveBeenCalledWith(OLD_ID);
-    expect(verthysLib.verthysScanSummaryClose).toHaveBeenCalled();
+    if (result.ok) expect(result.value.cleanupPending).toBe(true);
+    expect(keyState.globalKeyRecordId.value).toBe(NEW_ID);
   });
 
-  it("未预期异常：外层兜底补偿后按持久化失败上报", async () => {
-    setupOldRecord();
-    vi.mocked(verthysLib.verthysDeriveGlobalKey).mockResolvedValue(NEW_RECORD_B64);
-    vi.mocked(verthysLib.verthysAddRecord).mockRejectedValue(new Error("unexpected ipc"));
+  it("旧钥错误 → E_GLOBAL_KEY_VERIFY_FAILED", async () => {
+    await expectMappedError("E_GLOBAL_KEY_VERIFY_FAILED", VerthysErrorCode.E_GLOBAL_KEY_VERIFY_FAILED);
+  });
+
+  it("记录缺失 → E_GLOBAL_KEY_RECORD_NOT_FOUND", async () => {
+    await expectMappedError("E_GLOBAL_KEY_RECORD_NOT_FOUND", VerthysErrorCode.E_GLOBAL_KEY_RECORD_NOT_FOUND);
+  });
+
+  it("落盘失败 → E_GLOBAL_KEY_PERSIST_FAILED", async () => {
+    await expectMappedError("E_GLOBAL_KEY_PERSIST_FAILED", VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED);
+  });
+
+  it("结果未确认 → E_GLOBAL_KEY_CHANGE_UNCONFIRMED", async () => {
+    await expectMappedError(
+      "E_GLOBAL_KEY_CHANGE_UNCONFIRMED",
+      VerthysErrorCode.E_GLOBAL_KEY_CHANGE_UNCONFIRMED,
+    );
+  });
+
+  it("限流 → E_RATE_LIMITED 且保留 retryAfterSecs", async () => {
+    setupOldState();
+    const error = Object.assign(new Error("locked"), {
+      errorCode: "E_RATE_LIMITED",
+      retryAfterSecs: 7,
+    });
+    vi.mocked(verthysLib.verthysChangeGlobalKey).mockRejectedValue(error);
 
     const result = await changeGlobalKey(
       PWD, BIN_BYTES, BIN_PWD,
       "new-p@ss-9", new Uint8Array([9]), "new-bin",
     );
 
-    expectErr(result, VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED);
-    expect(verthysLib.verthysClearGlobalKey).toHaveBeenCalled();
+    expectErr(result, VerthysErrorCode.E_RATE_LIMITED);
+    if (!result.ok) expect(result.retryAfterSecs).toBe(7);
+  });
+
+  it("并发调用被互斥锁拒绝", async () => {
+    let releaseInner: ((v: {
+      id: number;
+      recordB64: string;
+      deletedIds: number[];
+      cleanupPending: boolean;
+    }) => void) | null = null;
+    vi.mocked(verthysLib.verthysChangeGlobalKey).mockImplementation(
+      () => new Promise((resolve) => {
+        releaseInner = resolve;
+      }),
+    );
+
+    const first = changeGlobalKey(
+      PWD, BIN_BYTES, BIN_PWD,
+      "new-p@ss-9", new Uint8Array([9]), "new-bin",
+    );
+    const second = await changeGlobalKey(
+      PWD, BIN_BYTES, BIN_PWD,
+      "new-p@ss-9", new Uint8Array([9]), "new-bin",
+    );
+    expectErr(second, VerthysErrorCode.E_VERTHYS_NOT_READY);
+
+    releaseInner!({
+      id: NEW_ID,
+      recordB64: NEW_RECORD_B64,
+      deletedIds: [],
+      cleanupPending: false,
+    });
+    const firstResult = await first;
+    expect(firstResult.ok).toBe(true);
+  });
+});
+
+describe("全局密钥记录解析 — 最新有效记录权威", () => {
+  const VALID_RECORD = btoa("x".repeat(124));
+
+  function setupVerify(): void {
+    keyState.verthysReady.value = true;
+    keyState.globalKeyRecordB64.value = "";
+    keyState.globalKeyRecordId.value = 0;
+  }
+
+  it("多记录取最大 id，并缓存最新记录", async () => {
+    setupVerify();
+    vi.mocked(verthysLib.verthysListIdsByType).mockResolvedValue({ ids: [3, 5], exhausted: true });
+    vi.mocked(verthysLib.verthysGetRecord).mockImplementation(async (id: number) => {
+      if (id === 3 || id === 5) {
+        return { type: TYPE_GLOBAL_KEY, name: "global-key", dataB64: VALID_RECORD };
+      }
+      return null;
+    });
+
+    const result = await verifyGlobalKey(PWD, BIN_BYTES, BIN_PWD);
+
+    expect(result.ok).toBe(true);
+    expect(verthysLib.verthysVerifyGlobalKey).toHaveBeenCalledWith(
+      PWD, "BIN_B64", BIN_PWD, VALID_RECORD,
+    );
+    expect(keyState.globalKeyRecordId.value).toBe(5);
+  });
+
+  it("忽略非全局密钥记录（名称/长度不符）", async () => {
+    setupVerify();
+    vi.mocked(verthysLib.verthysListIdsByType).mockResolvedValue({ ids: [1, 2, 3], exhausted: true });
+    vi.mocked(verthysLib.verthysGetRecord).mockImplementation(async (id: number) => {
+      if (id === 1) {
+        return { type: TYPE_GLOBAL_KEY, name: "account", dataB64: VALID_RECORD };
+      }
+      if (id === 2) {
+        return { type: TYPE_GLOBAL_KEY, name: "global-key", dataB64: btoa("short") };
+      }
+      if (id === 3) {
+        return { type: TYPE_GLOBAL_KEY, name: "global-key", dataB64: VALID_RECORD };
+      }
+      return null;
+    });
+
+    const result = await verifyGlobalKey(PWD, BIN_BYTES, BIN_PWD);
+
+    expect(result.ok).toBe(true);
+    expect(keyState.globalKeyRecordId.value).toBe(3);
+  });
+
+  it("类型索引不可用 → 回退全量枚举", async () => {
+    setupVerify();
+    vi.mocked(verthysLib.verthysListIdsByType).mockRejectedValue(new Error("index down"));
+    vi.mocked(verthysLib.verthysEnumerateRecords).mockResolvedValue([
+      { id: 9, type: TYPE_GLOBAL_KEY, name: "global-key", dataB64: VALID_RECORD },
+    ]);
+    vi.mocked(verthysLib.verthysGetRecord).mockImplementation(async (id: number) => {
+      if (id === 9) {
+        return { type: TYPE_GLOBAL_KEY, name: "global-key", dataB64: VALID_RECORD };
+      }
+      return null;
+    });
+
+    const result = await verifyGlobalKey(PWD, BIN_BYTES, BIN_PWD);
+
+    expect(result.ok).toBe(true);
+    expect(keyState.globalKeyRecordId.value).toBe(9);
+  });
+
+  it("无有效记录 → E_GLOBAL_KEY_RECORD_NOT_FOUND", async () => {
+    setupVerify();
+    vi.mocked(verthysLib.verthysListIdsByType).mockResolvedValue({ ids: [], exhausted: true });
+
+    const result = await verifyGlobalKey(PWD, BIN_BYTES, BIN_PWD);
+
+    expectErr(result, VerthysErrorCode.E_GLOBAL_KEY_RECORD_NOT_FOUND);
   });
 });

@@ -8,6 +8,7 @@ on:
       - "core/src/security/state/**"
       - "scripts/build/build_security_service.ps1"
       - "tests/service/**"
+      - "tests/security/**"
       - "ci/check_version_naming.ps1"
       - "docs/P2_SECURITY_SERVICE_PLAN.md"
       - ".github/workflows/security-service.yml"
@@ -17,6 +18,7 @@ on:
       - "core/src/security/state/**"
       - "scripts/build/build_security_service.ps1"
       - "tests/service/**"
+      - "tests/security/**"
       - "ci/check_version_naming.ps1"
       - "docs/P2_SECURITY_SERVICE_PLAN.md"
       - ".github/workflows/security-service.yml"
@@ -70,8 +72,22 @@ jobs:
       - name: Attack regression (console subset)
         shell: pwsh
         run: |
-          & .\tests\service\attack.ps1 -BuildDir build_security_service_ci
-          if ($LASTEXITCODE -ne 0) { throw "attack regression failed" }
+          & .\tests\security\run.ps1 -Suite service -Profile standard `
+            -OutDir build\security-service -ServiceBuildDir build_security_service_ci
+          if ($LASTEXITCODE -ne 0) { throw "attack regression failed: see build/security-service/result.json" }
+
+      - name: Upload attack evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-service-attack
+          path: |
+            build/security-service/result.json
+            build/security-service/result.junit.xml
+            build/security-service/result.sarif
+            build/security-service/summary.md
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Production build without test hooks
         shell: pwsh

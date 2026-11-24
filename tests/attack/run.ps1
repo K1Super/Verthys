@@ -266,16 +266,21 @@ function Invoke-A2Probe {
     $run = Invoke-ScriptCapture -ScriptPath $scriptPath -Label 'a2.ps1' -TimeoutSeconds 300
     $lines = $run.Lines
     $exitCode = $run.Exit
-    $pass = $false
+    $verdict = 'FAIL'
     $detail = if ($run.TimedOut) { 'a2.ps1 超时 300s' } else { '未返回结果' }
     foreach ($line in $lines) {
-        if ($line -match '^RESULT A2 (PASS|FAIL) (.*)$') {
-            $pass = ($Matches[1] -eq 'PASS')
+        if ($line -match '^RESULT A2 (PASS|FAIL|SKIP|BLOCKED) (.*)$') {
+            $verdict = $Matches[1]
             $detail = $Matches[2]
             break
         }
     }
-    return [pscustomobject]@{ Pass = $pass; Detail = $detail; Exit = $exitCode }
+    return [pscustomobject]@{
+        Pass    = ($verdict -eq 'PASS')
+        Verdict = $verdict
+        Detail  = $detail
+        Exit    = $exitCode
+    }
 }
 
 function Add-ProbeResult {
@@ -297,6 +302,7 @@ function Add-ProbeResult {
     $observed = switch ($verdict) {
         'PASS' { 'PASS' }
         'SKIP' { '跳过' }
+        'BLOCKED' { 'BLOCKED' }
         default { 'FAIL' }
     }
     Add-Result -Id $Id -Name $Name -Expected $Expected `
@@ -508,16 +514,17 @@ try {
         $probeCodes[$probe.Label] = $code
     }
 
-    $constantAttack = ($probeCodes['public-constant'] -eq 0)
-    $emptyAttack = ($probeCodes['empty'] -eq 0)
-    $weakAttack = ($probeCodes['weak-666666'] -eq 0)
-
     $a1Expected = '全部拒绝'
     $a1Observed = "constant=$(ConvertTo-VerthysResultName $probeCodes['public-constant']) " +
     "empty=$(ConvertTo-VerthysResultName $probeCodes['empty']) " +
     "weak=$(ConvertTo-VerthysResultName $probeCodes['weak-666666'])"
 
-    $a1Pass = (-not $constantAttack) -and (-not $emptyAttack) -and (-not $weakAttack)
+    # 精确错误码：公开常量必须走 AUTH；空口令必须在输入层 INVALID；
+    # 连续失败后的弱口令允许 AUTH 或 RATE。只判“非零”会把格式错误、
+    # 容器损坏等异常路径误当成防护生效。
+    $a1Pass = ($probeCodes['public-constant'] -eq 2) -and
+              ($probeCodes['empty'] -eq 1) -and
+              ($probeCodes['weak-666666'] -in @(2, 10))
     Add-Result -Id 'A1' -Name '公开默认口令解锁' -Expected $a1Expected -Observed $a1Observed `
         -Verdict $(if ($a1Pass) { 'PASS' } else { 'FAIL' }) `
         -Evidence "constant=$($probeCodes['public-constant']) empty=$($probeCodes['empty']) weak=$($probeCodes['weak-666666'])"
@@ -573,7 +580,7 @@ try {
     Add-Result -Id 'A3' -Name '未解锁枚举记录' -Expected 'LOCKED' `
         -Observed (ConvertTo-VerthysResultName $lockedCode) `
         -Verdict $(if ($lockedCode -eq 7) { 'PASS' } else { 'FAIL' }) `
-        -Evidence "GetRecord(1)=$lockedCode"
+        -Evidence "new handle; GetRecord(1)=$lockedCode (LOCKED)"
 
     # 明文扫描前先自检扫描器：避免“扫描失效”被误判为零命中
     $scannerControl = Join-Path $env:TEMP ('verthys_scan_control_' + [guid]::NewGuid().ToString('N') + '.bin')

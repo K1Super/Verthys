@@ -22,6 +22,7 @@
  *   - 剪贴板模式变更/清空/监听事件
  *   - 状态文件创建/修改/修复/删除
  *   - 安全命令执行
+ *   - 内核防护降级（SECURE preferred 且内核未 ACTIVE）
  *   - verthys 解锁/锁定
  *
  * CI 红线：
@@ -72,6 +73,8 @@ pub enum AuditEventType {
     StateDelete,
     // 安全命令
     SecurityCommand,
+    /// SECURE preferred 下内核保护未 ACTIVE，用户态降级
+    KernelGuardDegraded,
     SecureDelete,
     HardenPrivateDir,
     CleanupCrashResidue,
@@ -141,6 +144,7 @@ impl AuditEventType {
             AuditEventType::StateRepair => "STATE_REPAIR",
             AuditEventType::StateDelete => "STATE_DELETE",
             AuditEventType::SecurityCommand => "SECURITY_COMMAND",
+            AuditEventType::KernelGuardDegraded => "KERNEL_GUARD_DEGRADED",
             AuditEventType::SecureDelete => "SECURE_DELETE",
             AuditEventType::HardenPrivateDir => "HARDEN_PRIVATE_DIR",
             AuditEventType::CleanupCrashResidue => "CLEANUP_CRASH_RESIDUE",

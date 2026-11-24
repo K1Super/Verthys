@@ -92,6 +92,8 @@ pub mod timeout {
         pub ipc: Duration,
         /// 密钥派生/验证超时（PBKDF2/Argon2 计算密集）
         pub derive_verify: Duration,
+        /// 全局密钥修改超时（旧钥核验 + 新钥派生 + 记录写入/读回/删除）
+        pub change_global_key: Duration,
         /// 路径预检超时（磁盘空间/权限检查）
         pub preflight: Duration,
         /// 剪贴板清空/占用重试超时
@@ -120,6 +122,7 @@ pub mod timeout {
     /// - init: 30s（覆盖冷启动 + 加载器延迟）
     /// - ipc: 10s（正常网络/管道往返）
     /// - derive_verify: 15s（支持 Argon2id 安全预设）
+    /// - change_global_key: 40s（两次派生 + 记录写读删，余量覆盖慢盘）
     /// - preflight: 5s（磁盘 I/O 轻量检查）
     /// - clipboard_op: 2s（清空剪贴板重试）
     /// - scan_*: 60s/30s（扫描操作延迟敏感性低）
@@ -127,6 +130,7 @@ pub mod timeout {
         init: Duration::from_secs(30),
         ipc: Duration::from_secs(10),
         derive_verify: Duration::from_secs(15),
+        change_global_key: Duration::from_secs(40),
         preflight: Duration::from_secs(5),
         clipboard_op: Duration::from_secs(2),
         scan_open: Duration::from_secs(60),

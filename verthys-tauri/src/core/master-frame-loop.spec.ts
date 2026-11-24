@@ -6,15 +6,17 @@
  * 空闲档位经模块 mock 提供可变 level（覆盖节流档行为；node 环境
  * 无 window，真实调度器 install 为无操作）。
  *
- * 覆盖：注册/注销、mustRun 上限拒绝、空闲档节流间隔、整帧跳过后
- * frameStep 累积与钳制、豁免授予与释放、页面隐藏拒绝、引用计数、
- * 超时强制释放、常驻任务错误熔断、once 低档位逐帧执行、
+ * 覆盖：注册/注销、mustRun 上限拒绝、空闲档节流间隔、active/豁免
+ * 120fps 上限、整帧跳过后 frameStep 累积与钳制、豁免授予与释放、
+ * 页面隐藏拒绝、引用计数、超时强制释放、常驻任务错误熔断、
+ * once 低档位逐帧执行、
  * once 帧快照排空（同帧自重排仅每帧一次、新排入顺延下一帧）、
  * once 错误熔断冷却、任务耗时上报。
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { MasterFrameLoop, type LoopHost } from "./master-frame-loop";
 import { frameBudgetMonitor } from "./frame-budget";
+import { resetDisplaySettings, updateDisplaySettings } from "../settings/display-settings";
 
 /* 可变空闲档位（模块 mock 与测试共享同一引用） */
 const holst = vi.hoisted(() => ({
@@ -52,6 +54,7 @@ function makeHost() {
 describe("MasterFrameLoop", () => {
   afterEach(() => {
     holst.idleLevel.value = "active";
+    resetDisplaySettings();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -113,6 +116,78 @@ describe("MasterFrameLoop", () => {
     for (let i = 0; i < 8; i++) advance(50); // 执行于 t=200 / t=400
     advance(700); // t=1100：距上次 700ms → 钳制 50ms
     expect(steps).toEqual([0.05, 0.05, 0.05]);
+    loop.stop();
+  });
+
+  it("无限制上限：每个 rAF 帧都执行", () => {
+    updateDisplaySettings({ activeFps: "unlimited" });
+    const { host, advance } = makeHost();
+    const loop = new MasterFrameLoop(host);
+    loop.start();
+    let calls = 0;
+    loop.register(() => {
+      calls++;
+    });
+    for (let i = 0; i < 5; i++) advance(5);
+    expect(calls).toBe(5);
+    loop.stop();
+  });
+
+  it("交互态上限 30fps：200Hz 帧边界下按约 35ms 生效", () => {
+    updateDisplaySettings({ activeFps: 30 });
+    const { host, advance } = makeHost();
+    const loop = new MasterFrameLoop(host);
+    loop.start();
+    let calls = 0;
+    loop.register(() => {
+      calls++;
+    });
+    for (let i = 0; i < 14; i++) advance(5); // t = 5..70ms
+    expect(calls).toBe(2); // t=35 / t=70
+    loop.stop();
+  });
+
+  it("运行中修改上限：下一许可帧即按新间隔裁决", () => {
+    const { host, advance } = makeHost();
+    const loop = new MasterFrameLoop(host);
+    loop.start();
+    let calls = 0;
+    loop.register(() => {
+      calls++;
+    });
+    advance(5); // 默认 120fps：t=5 未到期
+    advance(5); // t=10 到期
+    expect(calls).toBe(1);
+    updateDisplaySettings({ activeFps: 30 });
+    for (let i = 0; i < 10; i++) advance(5); // t=15..60ms
+    expect(calls).toBe(2); // t=45 距上次执行 35ms
+    loop.stop();
+  });
+
+  it("active 上限 120fps：200Hz 帧边界下按 10ms 节流，不再逐帧执行", () => {
+    const { host, advance } = makeHost();
+    const loop = new MasterFrameLoop(host);
+    loop.start();
+    const stamps: number[] = [];
+    loop.register((ctx) => stamps.push(ctx.wallClock));
+    for (let i = 0; i < 6; i++) advance(5); // t = 5..30ms
+    /* 8.33ms 阈值只能落在 5ms 帧边界上 → t=10/20/30 执行 */
+    expect(stamps).toEqual([0.01, 0.02, 0.03]);
+    loop.stop();
+  });
+
+  it("豁免 granted 在 200Hz 帧边界下同样受 120fps 上限约束", () => {
+    holst.idleLevel.value = "idle";
+    const { host, advance } = makeHost();
+    const loop = new MasterFrameLoop(host);
+    loop.start();
+    let calls = 0;
+    loop.register(() => {
+      calls++;
+    });
+    loop.requestExemption("t");
+    for (let i = 0; i < 6; i++) advance(5); // t = 5..30ms
+    expect(calls).toBe(3);
     loop.stop();
   });
 

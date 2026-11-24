@@ -899,6 +899,20 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_DeleteRecord(VerthysHandle handle
  * 线程安全：MT-Safe */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_DeleteRecords(VerthysHandle handle, const uint64_t *ids, size_t count);
 
+/* 原子替换单条记录（API 版本 0x0017）
+ *
+ * 语义：同一次事务提交内墓碑化 old_id 并写入新记录，返回新分配 ID。
+ *   - old_id 不存在/已墓碑/模块不可用 → VERTHYS_ERR_NOTFOUND，零副作用；
+ *   - 成功时磁盘上恒为"旧记录已删、新记录已写"，崩溃不会出现两条并存；
+ *   - 失败恢复到调用前的根，旧记录保持原状；
+ *   - 分配器单调递增，新 ID 必大于 old_id，否则返回 VERTHYS_ERR_VERIFY。
+ * 适用场景：系统单例记录（如全局密钥）的换钥，避免"写新/删旧"跨两次事务。
+ * 线程安全：MT-Safe */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_ReplaceRecord(VerthysHandle handle,
+                            uint64_t old_id,
+                            const VerthysRecord *record,
+                            uint64_t *out_new_id);
+
 /* 导出当前容器为独立加密文件包，可设置独立访问密码，不继承应用层胡椒参数
  * 采用流式分片写入机制，大数量记录导出不会造成内存溢出
  * 线程安全：MT-Safe */
@@ -1304,6 +1318,30 @@ typedef struct {
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetSecurityStatus(
     VerthysHandle handle,
     VerthysSecurityStatus *out_status);
+
+/*
+ * 内核加固状态（可选能力，调用方按符号探测）
+ *
+ * 该接口不提升 VERTHYS_API_VERSION：缺失时调用方按“内核状态不可用”处理，
+ * 不改变既有 API 契约。状态/原因数值与安全服务 IPC 契约一致。
+ *
+ * 返回值：
+ *   VERTHYS_OK           — 查询完成（包括未安装/不可用状态）
+ *   VERTHYS_ERR_INVALID  — handle 或 out_status 为 NULL
+ *   VERTHYS_ERR_INTERNAL — 内部映射异常
+ */
+typedef struct VerthysKernelStatus {
+    uint32_t state;
+    uint32_t reason;
+    uint32_t capabilities;
+    uint16_t protocol_major;
+    uint16_t protocol_minor;
+    uint32_t reserved;
+} VerthysKernelStatus;
+
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetKernelStatus(
+    VerthysHandle handle,
+    VerthysKernelStatus *out_status);
 
 /*
  * 通知运行时守卫状态（API 版本 0x0014）

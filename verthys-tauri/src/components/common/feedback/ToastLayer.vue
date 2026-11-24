@@ -51,7 +51,7 @@
 
 <script setup lang="ts">
 import { toastState } from "../../../composables/useToastCenter";
-import type { IdleLevel } from "../../../composables/useGlobalIdleScheduler";
+import type { IdleLevel } from "../../../settings/display-settings";
 
 defineProps<{
   /** 全局空闲档位（唯一权威源 App.vue 透传；透传后空闲治理语义不因 Teleport 丢失） */

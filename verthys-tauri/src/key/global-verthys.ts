@@ -12,12 +12,12 @@ import {
   ensureWorkerReady,
   ensureCleanWorkerState,
   verthysUnlock, verthysCreate, verthysPreflight,
-  verthysAddRecord, verthysDeleteRecord, verthysInitStatus,
-  verthysDeriveGlobalKey, verthysDeriveAndStoreGlobalKey,
+  verthysDeleteRecord, verthysInitStatus,
+  verthysDeriveAndStoreGlobalKey,
+  verthysChangeGlobalKey,
   verthysVerifyGlobalKey, verthysClearGlobalKey,
   verthysResetGlobalKeyState, verthysReconcileKeyPresence,
-  verthysGetRecord, verthysEnumerateRecords,
-  verthysScanSummaryOpen, verthysScanSummaryNext, verthysScanSummaryClose,
+  verthysGetRecord, verthysEnumerateRecords, verthysListIdsByType,
   bytesToBase64, readUserFile,
   setDeviceBinding, checkDeviceBinding, getDeviceFingerprint,
   securityBruteCheck, getWorkerInitFailure,
@@ -36,7 +36,7 @@ import { isTauriEnvironment } from "../utils/tauri_env";
 import {
   persistVerthys, clearModuleKeyCache, clearRecordScanCache, resetFlushChain,
   clearSummaryCache, clearFullRecordCache,
-  findLidByTypeEarlyStop,
+  invalidateSummaryRecord, invalidateScannedRecord,
   flushVerthysNow,
   ensureSummaryScan,
 } from "../cache/composition/verthys-cache";
@@ -50,7 +50,7 @@ import {
 import { resetSessionTimer, clearSessionTimer, checkBruteForceGate, awaitLockAllIfInProgress, securityHardeningFailedRef } from "../session/security-session";
 import type { VerifyGlobalKeyResult } from "../types/key_manager";
 import { loadModuleKeyStatus } from "./module-auth";
-import { migrateRecordTypes, isAccountRecordB64 } from "./type-migration";
+import { migrateRecordTypes } from "./type-migration";
 import { createLogger } from "../utils/logger";
 
 const log = createLogger("global-verthys");
@@ -77,56 +77,132 @@ async function startSessionGuard(): Promise<void> {
  * 内部工具                                                            *
  * ------------------------------------------------------------------ */
 
-/** 在 verthys 中查找全局密钥记录
- *  返回 { id, recordB64 } — 不解析内部结构，由 worker 验证
- *
- *  两级查找，关键路径不做全量解密：
- *    1. findLidByTypeEarlyStop 按类型索引直达目标记录（O(1)）；
- *    2. 索引异常或无结果时回退 verthysEnumerateRecords（单次 IPC）。
- *
- *  全量扫描（ensureRecordScan）由 startBackgroundTasks 后台执行，不阻塞关键路径。
- */
-async function findGlobalKeyRecord(): Promise<{ id: number; recordB64: string } | null> {
-  try {
-    const lid = await findLidByTypeEarlyStop(TYPE_GLOBAL_KEY);
-    if (lid !== null) {
-      const record = await verthysGetRecord(lid);
-      if (record && record.dataB64) {
-        return { id: lid, recordB64: record.dataB64 };
-      }
-      return null;
-    }
-  } catch {
-    // findLidByTypeEarlyStop 异常 → 进入路径 2 回退
-  }
+/* ------------------------------------------------------------------ *
+ * 全局密钥记录解析（唯一权威）                                         *
+ * ------------------------------------------------------------------ */
 
-  // 路径 2：v1 回退路径 — verthysEnumerateRecords（单次 IPC）
-  try {
-    const records = await verthysEnumerateRecords(1);
-    for (const r of records) {
-      if (r.type === TYPE_GLOBAL_KEY) {
-        return { id: r.id, recordB64: r.dataB64 };
-      }
-    }
-  } catch {
-    // verthysEnumerateRecords 也失败 → 返回 null
-  }
+/** 记录识别常量（与 worker / 记录写入方一致） */
+const GLOBAL_KEY_NAME = "global-key";
+const GLOBAL_KEY_RECORD_BYTES = 124;
+const GLOBAL_KEY_PAGE_SIZE = 64;
+const GLOBAL_KEY_MAX_CANDIDATES = 256;
 
-  return null;
+interface GlobalKeyRecordRef {
+  id: number;
+  recordB64: string;
 }
 
-/* ------------------------------------------------------------------ *
- * 解锁响应内联全局密钥探测结果                                        *
- *                                                                    *
- * worker 在 Verthys_V4Unlock 成功分支进程内一次性完成                 *
- *   has_record(Verthys_FindFirstLidByType) + get_record(Verthys_GetRecord)，*
- * 结果内联到 unlock 响应的 has_global_key / global_key_id /           *
- * global_key_record 三字段。initUnlock 直接消费，零 IPC 往返。         *
- *                                                                    *
- * globalKeyRecordLoading 恒为 false（探测即时完成，无异步确认阶段）。 *
- * findGlobalKeyRecord 保留，仅供 initCreate / changeGlobalKey /       *
- * verifyGlobalKey 缓存未命中回退使用（单函数调用，非多步 IPC 链路）。 *
- * ------------------------------------------------------------------ */
+interface GlobalKeyResolution {
+  /** 最新有效记录；null 表示不存在 */
+  record: GlobalKeyRecordRef | null;
+  /** 比最新记录更旧的有效记录（历史中断残留，待收敛） */
+  duplicates: number[];
+}
+
+/** 判断记录是否为全局密钥记录：名称精确 + 解码后固定 124 字节 */
+function isGlobalKeyRecord(name: string, dataB64: string): boolean {
+  if (name !== GLOBAL_KEY_NAME) return false;
+  try {
+    return atob(dataB64.replace(/\s+/g, "")).length === GLOBAL_KEY_RECORD_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+/** 分页枚举 TYPE_GLOBAL_KEY 的全部候选 id（升序；跳过墓碑） */
+async function listGlobalKeyCandidateIds(): Promise<number[]> {
+  const ids: number[] = [];
+  let after = 0;
+  for (;;) {
+    const page = await verthysListIdsByType(TYPE_GLOBAL_KEY, after, GLOBAL_KEY_PAGE_SIZE);
+    if (page.ids.length === 0) break;
+    ids.push(...page.ids);
+    after = page.ids[page.ids.length - 1];
+    if (ids.length > GLOBAL_KEY_MAX_CANDIDATES) {
+      throw new Error("全局密钥候选记录过多，容器索引异常");
+    }
+    if (page.exhausted) break;
+  }
+  return ids;
+}
+
+/** 解析全局密钥记录：类型索引优先，取最新（最大 id）的有效记录。
+ *
+ * 不再依赖通用摘要缓存（其 first-id 语义与"最新权威"冲突）；类型索引不可用时
+ * 回退全量枚举。读取失败向上抛出，由调用方决定回退策略（fail-closed）。
+ */
+async function resolveGlobalKeyRecord(): Promise<GlobalKeyResolution> {
+  let ids: number[];
+  try {
+    ids = await listGlobalKeyCandidateIds();
+  } catch (e) {
+    log.warn("resolveGlobalKeyRecord: 类型索引不可用，回退全量枚举", e);
+    const records = await verthysEnumerateRecords(1);
+    ids = records.filter((r) => r.type === TYPE_GLOBAL_KEY).map((r) => r.id);
+  }
+
+  const valid: GlobalKeyRecordRef[] = [];
+  for (const id of ids.sort((a, b) => a - b)) {
+    const rec = await verthysGetRecord(id);
+    if (!rec || !rec.dataB64) continue;
+    if (!isGlobalKeyRecord(rec.name, rec.dataB64)) continue;
+    valid.push({ id, recordB64: rec.dataB64 });
+  }
+  if (valid.length === 0) return { record: null, duplicates: [] };
+  const record = valid[valid.length - 1];
+  return { record, duplicates: valid.slice(0, -1).map((v) => v.id) };
+}
+
+/** 收敛历史残留：保留最新有效记录，删除更旧的有效记录。
+ *
+ * 仅由解锁关键路径调用（容器已解锁、会话已建立）。失败只告警不阻断；
+ * 删除后逐条读回确认，并失效对应缓存条目。
+ */
+async function convergeGlobalKeyDuplicates(duplicateIds: number[]): Promise<void> {
+  if (duplicateIds.length === 0) return;
+  let deleted = 0;
+  for (const id of duplicateIds) {
+    try {
+      const removed = await verthysDeleteRecord(id);
+      if (!removed) {
+        log.warn(`收敛全局密钥残留失败（删除未确认） lid=${id}`);
+        continue;
+      }
+      const ghost = await verthysGetRecord(id).catch(() => null);
+      if (ghost !== null) {
+        log.warn(`收敛全局密钥残留失败（读回仍存在） lid=${id}`);
+        continue;
+      }
+      invalidateSummaryRecord(id);
+      invalidateScannedRecord(id);
+      deleted += 1;
+    } catch (e) {
+      log.warn(`收敛全局密钥残留异常 lid=${id}`, e);
+    }
+  }
+  if (deleted > 0) {
+    log.warn(`全局密钥历史残留已收敛 ${deleted} 条（最新记录为唯一权威）`);
+    try {
+      await flushVerthysNow();
+    } catch (e) {
+      log.warn("全局密钥残留收敛后 flush 失败（非阻断）", e);
+    }
+  }
+}
+
+/** 解析 + 收敛 + probe 回退：解锁路径专用 */
+async function resolveAndConvergeGlobalKey(
+  fallback: GlobalKeyRecordRef | null,
+): Promise<GlobalKeyResolution> {
+  try {
+    const resolution = await resolveGlobalKeyRecord();
+    await convergeGlobalKeyDuplicates(resolution.duplicates);
+    return resolution;
+  } catch (e) {
+    log.warn("resolveAndConvergeGlobalKey: 解析失败，回退解锁响应探测结果", e);
+    return { record: fallback, duplicates: [] };
+  }
+}
 
 /**
  * 重置密钥管理器全部状态（异步原子化版本）
@@ -348,8 +424,15 @@ export async function initCreate(
     emit(2, 70, "建立索引与加载密钥");
     log.info("步骤 4/4：检查全局密钥记录");
     setCurrentVerthysPath(verthysPath);
-    const existing = await findGlobalKeyRecord();
+    let existing: GlobalKeyRecordRef | null = null;
+    try {
+      existing = (await resolveGlobalKeyRecord()).record;
+    } catch (e) {
+      log.warn("initCreate: 全局密钥解析失败（按无记录处理）", e);
+    }
     keyState.hasGlobalKeyRecord.value = existing !== null;
+    keyState.globalKeyRecordB64.value = existing?.recordB64 ?? "";
+    keyState.globalKeyRecordId.value = existing?.id ?? 0;
 
     // 同步后端 key_lifecycle 状态（与 initUnlock 一致）
     //
@@ -603,46 +686,12 @@ export async function initUnlock(
       return err(VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED, "打开加密库失败");
     }
 
-    // 4. 消费进程内探测结果
+    // 4. 记录解析延后到类型迁移之后
     //
-    // worker 解锁成功后已进程内完成 has_record + find_lid + get_record，
-    // 结果内联到 unlockResp 三字段。前端零 IPC 往返直接决策 UI 路径：
-    //   has_global_key=true  + global_key_record → 显示"身份验证"，缓存 recordB64
-    //   has_global_key=true  + 无 record        → 显示"身份验证"，verifyGlobalKey 按 id 自取
-    //   has_global_key=false                   → 显示"初始化密钥"
-    //   has_global_key=undefined（探测异常）    → 回退 findGlobalKeyRecord（单函数，非 IPC 链）
+    // 解锁响应内的 probe 仅作提示：它按 first-lid 选取记录，且可能在类型迁移
+    // 之前命中旧账户记录（0x10 冲突）。权威记录由迁移后的 resolveGlobalKeyRecord
+    // 按"type + name + 124B + 最大 id"决定，避免 first-id 与陈旧缓存问题。
     setCurrentVerthysPath(verthysPath);
-
-    if (unlockResp.has_global_key === true) {
-      // 命中全局密钥记录
-      keyState.hasGlobalKeyRecord.value = true;
-      keyState.globalKeyRecordId.value = unlockResp.global_key_id ?? 0;
-      if (unlockResp.global_key_record) {
-        // record 读取成功 → 缓存 recordB64，verifyGlobalKey 直接读取（0ms）
-        keyState.globalKeyRecordB64.value = unlockResp.global_key_record;
-        log.info(`initUnlock: 进程内探测命中全局密钥记录 lid=${unlockResp.global_key_id}（record 已内联）`);
-      } else {
-        // 命中 lid 但 record 读取失败 → 清空缓存，verifyGlobalKey 按 id 自取
-        keyState.globalKeyRecordB64.value = "";
-        log.warn(`initUnlock: 进程内探测命中 lid=${unlockResp.global_key_id} 但 record 读取失败，verifyGlobalKey 将按 id 自取`);
-      }
-    } else if (unlockResp.has_global_key === false) {
-      // 确认无全局密钥记录（v1/v2 全遍历确认）
-      keyState.hasGlobalKeyRecord.value = false;
-      log.info("initUnlock: 进程内探测确认无全局密钥记录");
-    } else {
-      // 探测异常（worker 未导出 Verthys_FindFirstLidByType 或意外错误）
-      // 回退到 findGlobalKeyRecord（单函数调用，非多步 IPC 链，不会触发 loading 死锁）
-      log.warn("initUnlock: 进程内探测异常（has_global_key undefined），回退 findGlobalKeyRecord");
-      const existing = await findGlobalKeyRecord();
-      keyState.hasGlobalKeyRecord.value = existing !== null;
-      if (existing) {
-        keyState.globalKeyRecordB64.value = existing.recordB64;
-        keyState.globalKeyRecordId.value = existing.id;
-      }
-    }
-
-    // globalKeyRecordLoading 永不设置为 true（进程内探测即时完成，无异步确认阶段）
     keyState.globalKeyRecordLoading.value = false;
 
     // 解锁后关键路径 — 填充摘要缓存 + 加载模块密钥状态
@@ -671,7 +720,7 @@ export async function initUnlock(
     // TYPE_GLOBAL_KEY (0x10) 与 TYPE_ACCOUNT (0x10) 值相同，已存储的 verthys
     // 文件中全局密钥记录与账户记录可能共享同一类型值，导致：
     //   - AccountVerthys 扫描 TYPE_ACCOUNT=0x10 误拾全局密钥记录 → "设置遗忘"
-    //   - findGlobalKeyRecord 扫描 TYPE_GLOBAL_KEY=0x10 误拾账户记录 → "密钥验证无效"
+    //   - 旧记录解析扫描 TYPE_GLOBAL_KEY=0x10 误拾账户记录 → "密钥验证无效"
     //   - 删除"垃圾账户"实际删除全局密钥 → "增删改异常/删除后复活"
     //   同理 TYPE_PHOTO_CHUNK (0x05) 与旧 TYPE_META (FileVerthys 0x05) 冲突。
     //
@@ -700,55 +749,25 @@ export async function initUnlock(
       log.error("initUnlock: 类型迁移异常/超时（非致命，继续加载，下次解锁重试）", e);
     }
 
-    // 迁移后必须重新校验缓存的全局密钥记录
-    //
-    // 冲突来源：worker 内联 probe 在 Verthys_V4Unlock 成功后立即调用
-    //   Verthys_FindFirstLidByType(0x10) 搜索全局密钥记录（同 worker runtime.rs
-    //   probe_global_key_inproc），而类型迁移（migrateRecordTypes）在此之后
-    //   才执行。若 verthys 中存在旧账户记录（type=0x10，与 TYPE_GLOBAL_KEY
-    //   冲突），probe 可能命中账户记录而非真正的全局密钥记录，将账户 JSON
-    //   数据作为 global_key_record 缓存到 keyState.globalKeyRecordB64。
-    //   后果：verifyGlobalKey 使用错误的缓存数据导致验证失效。
-    //
-    // 两个触发条件满足任一即重新探测：
-    //   条件 1：migrationMigrated > 0 — 有记录被迁移，旧 0x10 记录已重写为
-    //           0x02，缓存的 lid 可能指向已重写的旧记录 → 缓存必然过期
-    //   条件 2：isAccountRecordB64(cachedRecordB64) — 缓存值本身是账户记录
-    //           （JSON 含 platform/username），说明 probe 命中了错误记录
-    //           （兜底：即使迁移异常未执行，也能通过内容嗅探捕获错误缓存）
-    //
-    //   两种结果均需正确处理：
-    //     - 找到真正的全局密钥 → 更新缓存（recordB64/Id），hasGlobalKeyRecord=true
-    //     - 未找到（verthys 无全局密钥，probe 命中的是纯账户记录，迁移后已无 0x10）
-    //       → hasGlobalKeyRecord=false（UI 应显示"初始化密钥"而非"身份验证"）
-    const cachedRecordB64 = keyState.globalKeyRecordB64.value;
-    const needRevalidate = migrationMigrated > 0 ||
-      (cachedRecordB64.length > 0 && isAccountRecordB64(cachedRecordB64));
-    if (needRevalidate) {
-      log.info("initUnlock: 迁移后重新校验全局密钥记录（消除 probe 竞态）");
-      // 超时兜底（5s），防止 findGlobalKeyRecord 的 IPC 挂起
-      let revalidated: { id: number; recordB64: string } | null = null;
-      try {
-        revalidated = await withTimeout(
-          findGlobalKeyRecord(),
-          5000,
-          "全局密钥重新校验",
-        );
-      } catch (e) {
-        log.warn("initUnlock: 全局密钥重新校验超时/异常（保留 unlock 响应缓存值）", e);
-      }
-      if (revalidated) {
-        keyState.globalKeyRecordB64.value = revalidated.recordB64;
-        keyState.globalKeyRecordId.value = revalidated.id;
-        keyState.hasGlobalKeyRecord.value = true;
-        log.info(`initUnlock: 重新校验命中全局密钥记录 lid=${revalidated.id}`);
-      } else {
-        // probe 命中的是旧账户记录，迁移后已无 0x10 记录 → 无全局密钥
-        keyState.hasGlobalKeyRecord.value = false;
-        keyState.globalKeyRecordB64.value = "";
-        keyState.globalKeyRecordId.value = 0;
-        log.info("initUnlock: 重新校验确认无全局密钥记录（probe 此前误拾账户记录）");
-      }
+    // 迁移后权威解析：类型索引 → 内容过滤 → 最新 id；并收敛历史残留。
+    // probe 结果仅在解析整体失败时作为回退，避免把旧记录当权威。
+    const probeFallback: GlobalKeyRecordRef | null =
+      unlockResp.has_global_key === true && unlockResp.global_key_record
+        ? { id: unlockResp.global_key_id ?? 0, recordB64: unlockResp.global_key_record }
+        : null;
+    const resolution = await resolveAndConvergeGlobalKey(probeFallback);
+    keyState.hasGlobalKeyRecord.value = resolution.record !== null;
+    keyState.globalKeyRecordB64.value = resolution.record?.recordB64 ?? "";
+    keyState.globalKeyRecordId.value = resolution.record?.id ?? 0;
+    if (resolution.record) {
+      log.info(
+        `initUnlock: 权威全局密钥记录 lid=${resolution.record.id}（残留 ${resolution.duplicates.length} 条）`,
+      );
+    } else {
+      log.info("initUnlock: 确认无全局密钥记录");
+    }
+    if (migrationMigrated > 0) {
+      log.info(`initUnlock: 类型迁移 ${migrationMigrated} 条（记录解析已按迁移后结果执行）`);
     }
 
     // 同步后端 key_lifecycle 状态
@@ -999,21 +1018,20 @@ async function initGlobalKeyInner(
 }
 
 /**
- * 修改全局密钥（需先验证旧密钥）
+ * 修改全局密钥（后端单命令）
  *
- * 编排契约（磁盘恒收敛为单条全局密钥记录）：
- *   1. 记录收敛：清除任一残留的 global-key 记录（历史中断产物），
- *      仅保留验证命中的目标记录；
- *   2. 先派生并写入新记录（读回验证内容一致）；
- *   3. 再删除旧记录（读回验证删除生效）；
- *   4. 任一步骤失败：回收新记录 + 清 GMK（后端回 Locked），磁盘回到
- *      "仅旧记录"，用户以旧密钥重新验证即可重试——杜绝两条并存、杜绝
- *      状态机中间态死锁。
+ * 前端只负责参数传递与状态同步；核验旧钥、派生新钥、写新记录、删旧记录、
+ * GMK 换槽全部由 worker 单次调用完成。任何失败都不会让前端与后端状态
+ * 分叉：失败时 GMK 槽保持原值，旧记录仍是权威。
  *
- * 落盘确认采用内容级读回验证（同 initGlobalKey：单调用即时落盘，
- * 读回命中即持久；flush 仅作归并兜底，失败不阻断）。
+ * 错误码：
+ *   - E_GLOBAL_KEY_VERIFY_FAILED：旧钥三要素错误
+ *   - E_GLOBAL_KEY_RECORD_NOT_FOUND：无有效记录
+ *   - E_GLOBAL_KEY_PERSIST_FAILED：新记录写入/读回失败（旧钥仍有效）
+ *   - E_GLOBAL_KEY_CHANGE_UNCONFIRMED：通信超时，结果未确认
+ *   - E_RATE_LIMITED / E_CNG_UNAVAILABLE：熔断/门禁
  *
- * @returns VerthysResult<void>
+ * @returns VerthysResult<{ cleanupPending: boolean }>
  */
 export async function changeGlobalKey(
   oldPassword: string,
@@ -1022,167 +1040,75 @@ export async function changeGlobalKey(
   newPassword: string,
   newBinBytes: Uint8Array,
   newBinPassword: string
-): Promise<VerthysResult<void>> {
+): Promise<VerthysResult<{ cleanupPending: boolean }>> {
   if (keyOpInFlight) {
     return err(VerthysErrorCode.E_VERTHYS_NOT_READY, "有进行中的密钥操作，请稍候再试");
   }
-  keyOpInFlight = true;
-  try {
-    return await changeGlobalKeyInner(
-      oldPassword, oldBinBytes, oldBinPassword,
-      newPassword, newBinBytes, newBinPassword,
-    );
-  } finally {
-    keyOpInFlight = false;
-  }
-}
-
-/** changeGlobalKey 编排主体（互斥锁内执行）；复用锁成功后进入 */
-async function changeGlobalKeyInner(
-  oldPassword: string,
-  oldBinBytes: Uint8Array,
-  oldBinPassword: string,
-  newPassword: string,
-  newBinBytes: Uint8Array,
-  newBinPassword: string
-): Promise<VerthysResult<void>> {
   if (!keyState.verthysReady.value) {
     return err(VerthysErrorCode.E_VERTHYS_NOT_READY, "verthys 未解锁");
   }
-
-  // 1. 验证旧密钥（成功后 GMK=旧值、后端 Unlocked）
-  const verifyResult = await verifyGlobalKey(oldPassword, oldBinBytes, oldBinPassword);
-  if (!verifyResult.ok) {
-    return err(VerthysErrorCode.E_GLOBAL_KEY_VERIFY_FAILED, "旧全局密钥验证失败");
-  }
-
-  // 失败统一补偿：回收新记录 + 清 GMK（Unlocked→Locked），补偿动作
-  // 连续失败时经强制复位命令兜底。磁盘收敛回"仅旧记录"，用户以旧密钥
-  // 重新验证即可重试。
-  const abortChange = async (writtenNewId: number | null): Promise<void> => {
-    if (writtenNewId !== null) {
-      const removed = await ipcRetry(() => verthysDeleteRecord(writtenNewId));
-      if (removed) {
-        await flushVerthysNow();
-      }
-    }
-    const cleared = await ipcRetry(() => verthysClearGlobalKey().catch(() => false));
-    if (!cleared) {
-      await verthysResetGlobalKeyState().catch(() => {});
-    }
-  };
-  let newId: number | null = null;
-
+  keyOpInFlight = true;
+  const oldId = keyState.globalKeyRecordId.value;
   try {
-    // 2. 查找旧记录 + 记录收敛：清除任何残留 global-key 记录（历史中断
-    //    产生的中间态），全局密钥记录恒为单条。摘要游标仅取索引元数据，
-    //    不解密业务数据块，收敛不扩大敏感数据读取面。
-    const oldRecord = await findGlobalKeyRecord();
-    const staleIds: number[] = [];
-    if (oldRecord) {
-      try {
-        let batch = await verthysScanSummaryOpen(0, 512);
-        const collect = (ids: { id: number; type: number; name: string }[]) => {
-          for (const r of ids) {
-            if (r.type === TYPE_GLOBAL_KEY && r.name === "global-key" && r.id !== oldRecord.id) {
-              staleIds.push(r.id);
-            }
-          }
-        };
-        collect(batch.records);
-        while (!batch.exhausted) {
-          batch = await verthysScanSummaryNext(512);
-          collect(batch.records);
-        }
-      } catch (e) {
-        log.warn("changeGlobalKey: 摘要收敛扫描异常（跳过收敛）", e);
-      } finally {
-        await verthysScanSummaryClose().catch(() => {});
-      }
-    }
-    for (const sid of staleIds) {
-      log.warn(`changeGlobalKey: 收敛残留全局密钥记录 lid=${sid}`);
-      await verthysDeleteRecord(sid);
-    }
-    if (staleIds.length > 0) {
-      await flushVerthysNow();
-    }
+    const result = await verthysChangeGlobalKey(
+      oldPassword,
+      bytesToBase64(oldBinBytes),
+      oldBinPassword,
+      newPassword,
+      bytesToBase64(newBinBytes),
+      newBinPassword,
+    );
 
-    // 3. 派生新 GMK
-    const newBinDataB64 = bytesToBase64(newBinBytes);
-    let newRecordB64: string | null;
-    try {
-      newRecordB64 = await withTimeout(
-        verthysDeriveGlobalKey(newPassword, newBinDataB64, newBinPassword),
-        INIT_TIMEOUT_MS,
-        "derive_global_key_change"
-      );
-    } catch (e) {
-      await abortChange(null);
-      return errFromUnknown(e, VerthysErrorCode.E_GLOBAL_KEY_DERIVE_FAILED);
-    }
-    if (!newRecordB64) {
-      await abortChange(null);
-      return err(VerthysErrorCode.E_GLOBAL_KEY_DERIVE_FAILED, "worker 派生新全局密钥失败");
-    }
-
-    // 4. 写入新记录 + 内容级读回验证
-    newId = await verthysAddRecord(TYPE_GLOBAL_KEY, "global-key", newRecordB64);
-    if (newId === null) {
-      await abortChange(null);
-      return err(VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED, "写入新全局密钥记录失败");
-    }
-    let newReadBack: { type: number; name: string; dataB64: string } | null = null;
-    try {
-      newReadBack = await withTimeout(verthysGetRecord(newId), INIT_TIMEOUT_MS, "readback_new_global_key");
-    } catch (e) {
-      log.warn("changeGlobalKey: 新记录读回验证异常", e);
-    }
-    if (!newReadBack || newReadBack.dataB64 !== newRecordB64) {
-      await abortChange(newId);
-      return err(VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED,
-        "新全局密钥记录落盘确认失败（已回滚，请以旧密钥重新验证后重试）");
-    }
-
-    // 5. 删除旧记录 + 读回验证删除生效
-    if (oldRecord) {
-      const delOk = await verthysDeleteRecord(oldRecord.id);
-      if (!delOk) {
-        await abortChange(newId);
-        return err(VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED,
-          "旧全局密钥记录删除失败（已回滚，请以旧密钥重新验证后重试）");
-      }
-      const ghost = await verthysGetRecord(oldRecord.id).catch(() => null);
-      if (ghost !== null) {
-        await abortChange(newId);
-        return err(VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED,
-          "旧全局密钥记录删除确认失败（已回滚，请以旧密钥重新验证后重试）");
-      }
-    }
-
-    // 6. 兜底 flush（LSM 归并；新记录已读回确认落盘，失败不阻断）
-    const flushResult = await flushVerthysNow();
-    if (!flushResult.ok) {
-      log.warn("changeGlobalKey: 兜底 flush 未确认（新记录已读回确认落盘，非阻断）");
-    }
-
-    // 7. 状态更新（后端已 Unlocked，GMK=新值）
+    // 后端已完成换槽与记录写入：同步前端权威状态
     keyState.globalKeyReady.value = true;
     keyState.hasGlobalKeyRecord.value = true;
-    keyState.globalKeyRecordB64.value = newRecordB64;
-    keyState.globalKeyRecordId.value = newId;
-    resetSessionTimer();
-    log.info("全局密钥修改成功");
-    return ok(undefined);
-  } catch (e) {
-    // 任一未预期异常：补偿回收后按持久化失败上报
-    try {
-      await abortChange(newId);
-    } catch (compErr) {
-      await verthysResetGlobalKeyState().catch(() => {});
-      log.error("changeGlobalKey: 失败补偿异常", compErr);
+    keyState.globalKeyRecordB64.value = result.recordB64;
+    keyState.globalKeyRecordId.value = result.id;
+    // 旧记录与后端确认删除的残留一并失效，避免通用缓存命中已删除 id
+    const affected = new Set<number>([oldId, ...result.deletedIds]);
+    for (const id of affected) {
+      if (id > 0) {
+        invalidateSummaryRecord(id);
+        invalidateScannedRecord(id);
+      }
     }
-    return errFromUnknown(e, VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED);
+    resetSessionTimer();
+    log.info(
+      `全局密钥修改成功（lid=${result.id}，cleanup_pending=${result.cleanupPending}）`,
+    );
+    return ok({ cleanupPending: result.cleanupPending });
+  } catch (e) {
+    const code = (e as { errorCode?: string } | null)?.errorCode;
+    const retryAfterSecs = (e as { retryAfterSecs?: number } | null)?.retryAfterSecs;
+    switch (code) {
+      case "E_GLOBAL_KEY_VERIFY_FAILED":
+        return err(VerthysErrorCode.E_GLOBAL_KEY_VERIFY_FAILED, "旧密钥验证失败，请检查");
+      case "E_GLOBAL_KEY_RECORD_NOT_FOUND":
+        return err(VerthysErrorCode.E_GLOBAL_KEY_RECORD_NOT_FOUND, "未找到全局密钥记录");
+      case "E_GLOBAL_KEY_PERSIST_FAILED":
+        return err(VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED, "新密钥写入失败，旧密钥仍有效");
+      case "E_GLOBAL_KEY_CHANGE_UNCONFIRMED":
+        return err(
+          VerthysErrorCode.E_GLOBAL_KEY_CHANGE_UNCONFIRMED,
+          "修改结果未确认：请重启应用后以新密钥验证",
+        );
+      case "E_RATE_LIMITED":
+        return err(
+          VerthysErrorCode.E_RATE_LIMITED,
+          "尝试次数过多，请稍后再试",
+          undefined,
+          retryAfterSecs,
+        );
+      case "E_CNG_UNAVAILABLE":
+        return err(
+          VerthysErrorCode.E_CNG_UNAVAILABLE,
+          "安全门禁暂时不可用，请重启应用后重试",
+        );
+      default:
+        return errFromUnknown(e, VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED);
+    }
+  } finally {
+    keyOpInFlight = false;
   }
 }
 
@@ -1221,22 +1147,25 @@ export async function verifyGlobalKey(
     return err(VerthysErrorCode.E_VERTHYS_NOT_READY, "verthys 未解锁");
   }
 
-  // 优先读取 initUnlock 阶段缓存的 recordB64，跳过重复扫描
-  //   缓存未命中时回退到 findGlobalKeyRecord（带 10s 超时保护）
+  // 优先读取 initUnlock 阶段缓存的 recordB64；未命中走权威解析器
   emit(1, 10, "定位密钥记录");
   let recordB64: string;
   if (keyState.globalKeyRecordB64.value) {
-    // 缓存命中：0ms 直接读取（initUnlock 已扫描过）
+    // 缓存命中：0ms 直接读取（initUnlock 已解析过）
     recordB64 = keyState.globalKeyRecordB64.value;
-    log.info("verifyGlobalKey: 缓存命中，跳过 findGlobalKeyRecord 扫描");
+    log.info("verifyGlobalKey: 缓存命中，跳过记录解析");
   } else {
-    // 缓存未命中：回退到扫描（带超时保护）
-    emit(2, 15, "扫描密钥记录");
-    let found: { id: number; recordB64: string } | null = null;
+    // 缓存未命中：权威解析（最新有效记录）
+    emit(2, 15, "解析密钥记录");
+    let found: GlobalKeyRecordRef | null = null;
     try {
-      found = await withTimeout(findGlobalKeyRecord(), 10000, "findGlobalKeyRecord");
+      found = await withTimeout(
+        resolveGlobalKeyRecord().then((r) => r.record),
+        10000,
+        "resolveGlobalKeyRecord",
+      );
     } catch (e) {
-      log.warn("findGlobalKeyRecord 超时或失败", e);
+      log.warn("resolveGlobalKeyRecord 超时或失败", e);
       found = null;
     }
     if (!found) {

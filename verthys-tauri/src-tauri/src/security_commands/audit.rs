@@ -11,7 +11,7 @@ use crate::util::audit_log::{AuditEventType, AuditExtensions, AuditResult};
 use super::state::SecurityState;
 
 /// 写入安全命令审计事件
-pub(super) fn write_security_audit(
+pub(crate) fn write_security_audit(
     app: &tauri::AppHandle,
     state: &SecurityState,
     event_type: AuditEventType,

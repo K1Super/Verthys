@@ -6,7 +6,8 @@
  *
  * 本模块是引擎接入主渲染循环的声明式封装：
  *   - 不自开 rAF —— start/stop 即向 master-frame-loop 注册 / 注销一个
- *     throttled 任务（跟随全局空闲档位 60 / 30 / 5 / 1 fps 节流）；
+ *     throttled 任务（跟随全局空闲档位节流，默认 120 / 30 / 5 / 1 fps，
+ *     具体间隔由 settings/display-settings 派生）；
  *   - 回调签名升级为双时间参数（引擎按需取用，可忽略其一）：
  *       frameStep —— 距上一许可帧的累积时长（钳制上限 50ms），物理积分专用；
  *       wallClock —— 真实经过时间（秒，不钳制），进度计算专用；
@@ -25,7 +26,7 @@
  */
 
 import { onScopeDispose, type Ref } from "vue";
-import type { IdleLevel } from "./useGlobalIdleScheduler";
+import type { IdleLevel } from "../settings/display-settings";
 import { masterFrameLoop } from "../core/master-frame-loop";
 
 /** 帧门控回调：双时间参数（帧步进 / 墙钟），单位均为秒 */

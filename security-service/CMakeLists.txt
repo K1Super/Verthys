@@ -111,12 +111,15 @@ set(VERTHYS_SERVICE_SOURCES
     src/protocol.c
     src/service_state.c
     src/client_auth.c
+    src/kernel_guard.c
 )
 
 add_library(verthys_service_core STATIC ${VERTHYS_SERVICE_SOURCES})
 target_include_directories(verthys_service_core
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
-    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../kernel/include"
 )
 target_compile_definitions(verthys_service_core PRIVATE
     _WIN32_WINNT=0x0A00

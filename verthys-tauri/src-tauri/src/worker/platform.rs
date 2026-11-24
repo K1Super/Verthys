@@ -5,7 +5,8 @@
 //!
 //! 本模块对外提供：
 //!   - JobHandle：Job Object 句柄的 newtype（实现 Send + Sync），仅 Windows
-//!   - harden_suspended_worker：对挂起态 worker 施加 Job/DACL 后恢复执行
+//!   - prepare_suspended_worker：对挂起态 worker 施加 Job/DACL，不恢复执行
+//!   - resume_and_close_suspended_worker：REGISTER 后恢复执行并关闭临时句柄
 //!   - verify_install_paths：Release 下校验 worker 与 DLL 位于安装目录内
 //!   - kill_orphan_workers：清理孤儿 verthys-worker 进程（非 Windows 为 no-op）
 
@@ -25,8 +26,8 @@ use windows::Win32::System::JobObjects::{
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME,
-    PROCESS_TERMINATE,
+    OpenProcess, TerminateProcess, PROCESS_ACCESS_RIGHTS, PROCESS_DUP_HANDLE, PROCESS_SET_QUOTA,
+    PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
 };
 
 /// worker 进程提交内存上限（2 GiB）。
@@ -117,12 +118,15 @@ fn apply_restricted_dacl(process: HANDLE) -> Result<(), String> {
     set_result.map_err(|e| format!("设置 worker 进程 DACL 失败: {}", e))
 }
 
-/// 对挂起态 worker 施加 Job Object 资源上限与进程 DACL，然后恢复执行。
+/// 对挂起态 worker 施加 Job Object 资源上限与受限 DACL，不恢复执行。
 ///
 /// 调用前提：子进程以 `CREATE_SUSPENDED` 创建，尚未执行任何指令。
+/// 必须在内核 REGISTER 之前调用：驱动进入 Confirmed 后会剥离宿主新句柄的
+/// `PROCESS_SET_QUOTA`/`PROCESS_TERMINATE`/`PROCESS_SUSPEND_RESUME`；
+/// 先拿到句柄再 REGISTER，句柄权限不会被追溯撤销，REGISTER 后仍可恢复。
 /// 失败关闭：任一步骤失败都终止子进程并返回 Err，不允许以弱化配置继续。
 #[cfg(target_os = "windows")]
-pub(crate) fn harden_suspended_worker(pid: u32) -> Result<JobHandle, String> {
+pub(crate) fn prepare_suspended_worker(pid: u32) -> Result<(JobHandle, HANDLE), String> {
     let job = match unsafe { CreateJobObjectW(None, PCWSTR::null()) } {
         Ok(handle) => handle,
         Err(e) => return Err(format!("创建 Job Object 失败: {}", e)),
@@ -148,6 +152,7 @@ pub(crate) fn harden_suspended_worker(pid: u32) -> Result<JobHandle, String> {
     let access = PROCESS_SET_QUOTA
         | PROCESS_TERMINATE
         | PROCESS_SUSPEND_RESUME
+        | PROCESS_DUP_HANDLE
         | PROCESS_ACCESS_RIGHTS(PROCESS_READ_CONTROL | PROCESS_WRITE_DAC);
     let process = match unsafe { OpenProcess(access, false, pid) } {
         Ok(handle) => handle,
@@ -161,6 +166,7 @@ pub(crate) fn harden_suspended_worker(pid: u32) -> Result<JobHandle, String> {
 
     if let Err(e) = apply_restricted_dacl(process) {
         unsafe {
+            let _ = TerminateProcess(process, 1);
             let _ = CloseHandle(process);
             let _ = CloseHandle(job);
         }
@@ -169,28 +175,55 @@ pub(crate) fn harden_suspended_worker(pid: u32) -> Result<JobHandle, String> {
 
     if let Err(e) = unsafe { AssignProcessToJobObject(job, process) } {
         unsafe {
+            let _ = TerminateProcess(process, 1);
             let _ = CloseHandle(process);
             let _ = CloseHandle(job);
         }
         return Err(format!("将 worker 绑定到 Job Object 失败: {}", e));
     }
 
+    Ok((JobHandle(job), process))
+}
+
+/// 恢复挂起态 worker 并关闭本次准备使用的进程句柄。
+///
+/// 句柄必须在 REGISTER 之前取得；REGISTER 后驱动不会追溯撤销已有句柄权限。
+#[cfg(target_os = "windows")]
+pub(crate) fn resume_and_close_suspended_worker(process: HANDLE) -> Result<(), String> {
     let status = unsafe { NtResumeProcess(process.0) };
     unsafe {
         let _ = CloseHandle(process);
     }
     if status < 0 {
-        unsafe {
-            let _ = CloseHandle(job);
-        }
         return Err(format!("恢复 worker 执行失败: NTSTATUS=0x{:08X}", status));
     }
+    Ok(())
+}
 
-    log::info!(
-        "[watchdog] worker PID={} 已加固并恢复：Job 单进程/2GiB 上限、受限 DACL",
-        pid
-    );
-    Ok(JobHandle(job))
+/// 读取进程创建时间（FILETIME 四字）。
+///
+/// 宿主在 worker 挂起态创建后立即读取，随 REGISTER 提交给服务；
+/// 服务与驱动会再次读取并比对，PID 不能单独作为身份。
+#[cfg(target_os = "windows")]
+pub(crate) fn process_creation_time_quad(process: HANDLE) -> Result<u64, String> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetProcessTimes;
+
+    let mut creation = FILETIME::default();
+    let mut exit_time = FILETIME::default();
+    let mut kernel_time = FILETIME::default();
+    let mut user_time = FILETIME::default();
+    unsafe {
+        GetProcessTimes(
+            process,
+            &mut creation,
+            &mut exit_time,
+            &mut kernel_time,
+            &mut user_time,
+        )
+    }
+    .map_err(|e| format!("读取 worker 创建时间失败: {}", e))?;
+    Ok(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
 }
 
 /// Release 下校验 worker 与 DLL 均位于宿主安装目录内。
@@ -240,7 +273,8 @@ pub fn kill_orphan_workers() {
         TH32CS_SNAPPROCESS,
     };
     use windows::Win32::System::Threading::{
-        OpenProcess as OpenProc2, TerminateProcess, PROCESS_TERMINATE as PT2,
+        GetCurrentProcessId, OpenProcess as OpenProc2, TerminateProcess,
+        PROCESS_TERMINATE as PT2,
     };
 
     // windows 0.58: CreateToolhelp32Snapshot 返回 Result<HANDLE, Error>
@@ -257,6 +291,7 @@ pub fn kill_orphan_workers() {
         ..Default::default()
     };
     let mut killed = 0u32;
+    let current_pid = unsafe { GetCurrentProcessId() };
 
     let ok = unsafe { Process32FirstW(snapshot, &mut entry) };
     if ok.is_err() {
@@ -278,7 +313,7 @@ pub fn kill_orphan_workers() {
             .take_while(|&&c| c != 0)
             .copied()
             .collect();
-        if exe_name == target_slice {
+        if exe_name == target_slice && entry.th32ParentProcessID != current_pid {
             let pid = entry.th32ProcessID;
             // 打开并终止
             let ph = unsafe { OpenProc2(PT2, false, pid) };

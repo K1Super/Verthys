@@ -57,7 +57,7 @@ cmake --build build
 
 ### 状态隔离与攻击回归
 
-熔断/回滚状态固定落在 `SHGetKnownFolderPath(FOLDERID_LocalAppData)\Verthys\Security`，生产构建不接受任何环境变量改写。攻击回归使用 `build_core.release.ps1 -TestHooks -RequireTestIsolation` 构建的测试 DLL，由 `tests/attack/run.ps1` 设置 `VERTHYS_TEST_STATE_DIR` 指向临时目录；缺少隔离目录时测试构建拒绝初始化。dev 启动器使用 `-TestHooks`（不加强制隔离），使 dev 应用可打开/创建真实容器。测试见证域按隔离目录派生，多个攻击子进程共享同一轮测试域、不同轮次互不影响。生产构建显式传 `-DVERTHYS_TEST_HOOKS=OFF`，生产 DLL 中不存在该代码路径（可用字符串扫描复核）。
+熔断/回滚状态固定落在 `SHGetKnownFolderPath(FOLDERID_LocalAppData)\Verthys\Security`，生产构建不接受任何环境变量改写。攻击回归使用 `build_core.release.ps1 -TestHooks -RequireTestIsolation` 构建的测试 DLL，由 `tests/security/run.ps1 -Suite vault -Profile standard` 调度的 `tests/attack/run.ps1` 设置 `VERTHYS_TEST_STATE_DIR` 指向临时目录；缺少隔离目录时测试构建拒绝初始化。dev 启动器使用 `-TestHooks`（不加强制隔离），使 dev 应用可打开/创建真实容器。测试见证域按隔离目录派生，多个攻击子进程共享同一轮测试域、不同轮次互不影响。生产构建显式传 `-DVERTHYS_TEST_HOOKS=OFF`，生产 DLL 中不存在该代码路径（可用字符串扫描复核）。
 
 ### 阶段 2：verthys-worker（Rust release + debug）
 

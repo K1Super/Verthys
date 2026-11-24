@@ -168,23 +168,37 @@ foreach ($prefix in $checks.Tests) {
 }
 
 # 2) 攻击回归：该阶段用例必须 PASS
-$attackJson = Join-Path $env:TEMP ('verthys_gate_' + [guid]::NewGuid().ToString('N') + '.json')
-$attackArgs = @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'attack/run.ps1'), '-OutJson', $attackJson)
+#    统一入口产出 result.json；门禁按 legacyId 索引，阶段矩阵语义保持不变。
+$attackOut = Join-Path $env:TEMP ('verthys_gate_sec_' + [guid]::NewGuid().ToString('N'))
+$attackArgs = @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'security/run.ps1'),
+    '-Suite', 'vault', '-Profile', 'standard', '-OutDir', $attackOut)
 if ($Stage -eq 'P0-G' -and $Full) {
     # -Full 保留给后续长时模糊/浸泡扩展；当前等价于标准全量门禁
     $attackArgs += '-KeepWork'
 }
 & pwsh @attackArgs | Out-Null
 $attackExit = $LASTEXITCODE
-$attack = Get-Content -LiteralPath $attackJson -Raw | ConvertFrom-Json
+$attackJson = Join-Path $attackOut 'result.json'
+$attack = $null
 $attackById = @{}
-foreach ($row in $attack.Results) { $attackById[$row.Id] = $row }
+if (Test-Path -LiteralPath $attackJson) {
+    $attack = Get-Content -LiteralPath $attackJson -Raw | ConvertFrom-Json
+    foreach ($row in @($attack.cases)) {
+        if ($null -ne $row.PSObject.Properties['legacyId'] -and
+            -not [string]::IsNullOrWhiteSpace([string]$row.legacyId)) {
+            $attackById[[string]$row.legacyId] = $row
+        }
+    }
+}
 
 $attackFailures = New-Object System.Collections.Generic.List[string]
+if ($null -eq $attack) {
+    $attackFailures.Add("攻击结果缺失（exit=$attackExit）")
+}
 foreach ($id in $checks.Attacks) {
     if (-not $attackById.ContainsKey($id)) { $attackFailures.Add("$id 未执行"); continue }
-    if ($attackById[$id].Verdict -ne 'PASS') {
-        $attackFailures.Add("$id=$($attackById[$id].Verdict)")
+    if ([string]$attackById[$id].status -ne 'PASS') {
+        $attackFailures.Add("$id=$($attackById[$id].status)")
     }
 }
 
@@ -286,7 +300,7 @@ Write-Host ""
 Write-Host "=== GATE $Stage ===" -ForegroundColor Cyan
 Write-Host ("单元/集成: {0} passed, {1} failed" -f $passedCount, $failedCount)
 Write-Host ("攻击用例: {0}" -f (($checks.Attacks | ForEach-Object {
-                if ($attackById.ContainsKey($_) ) { "$_=$($attackById[$_].Verdict)" } else { "$_=MISSING" }
+                if ($attackById.ContainsKey($_)) { "$_=$($attackById[$_].status)" } else { "$_=MISSING" }
             }) -join ' '))
 foreach ($msg in $testFailures) { Write-Host ("  [TEST] " + $msg) -ForegroundColor Red }
 foreach ($msg in $attackFailures) { Write-Host ("  [ATK ] " + $msg) -ForegroundColor Red }
@@ -312,7 +326,7 @@ if ($OutJson) {
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $OutJson -Encoding utf8
 }
 
-Remove-Item -LiteralPath $attackJson -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $attackOut -Recurse -Force -ErrorAction SilentlyContinue
 exit $(if ($verdict -eq 'PASS') { 0 } else { 1 })
 
 }

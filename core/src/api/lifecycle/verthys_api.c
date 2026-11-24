@@ -222,6 +222,7 @@ static void verthys_emergency_lock_all(void)
     }
     ReleaseSRWLockShared(&s_ctx_registry_lock);
 }
+#include "vty_machine_limiter.h"
 #include "process_sandbox.h"
 #include "defense_closure.h"
 #include "vty_caller_auth.h"
@@ -743,6 +744,9 @@ VerthysResult Verthys_V4Unlock(VerthysHandle handle,
     ir = verthys_api_unlock_integrity_precheck();
     if (ir != VERTHYS_OK) return ir;
 
+    /* SECURE = preferred：解锁前尝试内核保护，失败不阻断用户态解锁。 */
+    vty_machine_limiter_kernel_guard_apply_preset();
+
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
@@ -780,6 +784,9 @@ VerthysResult Verthys_V4UnlockKeyfile(VerthysHandle handle,
     ir = verthys_api_unlock_integrity_precheck();
     if (ir != VERTHYS_OK) return ir;
 
+    /* SECURE = preferred：解锁前尝试内核保护，失败不阻断用户态解锁。 */
+    vty_machine_limiter_kernel_guard_apply_preset();
+
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
 #endif
@@ -815,6 +822,9 @@ VerthysResult Verthys_V4UnlockRecovery(VerthysHandle handle,
 
     ir = verthys_api_unlock_integrity_precheck();
     if (ir != VERTHYS_OK) return ir;
+
+    /* SECURE = preferred：解锁前尝试内核保护，失败不阻断用户态解锁。 */
+    vty_machine_limiter_kernel_guard_apply_preset();
 
 #ifdef _WIN32
     if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
@@ -862,6 +872,8 @@ VerthysResult Verthys_SwitchSecurityPreset(VerthysHandle handle, VerthysPreset p
     if (security_preset_switch(sp) != 0) {
         return VERTHYS_ERR_INVALID;
     }
+    /* 切到 SECURE 立即尝试保护本进程；切出 SECURE 解除保护。 */
+    vty_machine_limiter_kernel_guard_apply_preset();
     return VERTHYS_OK;
 }
 
@@ -962,6 +974,8 @@ VerthysResult Verthys_Lock(VerthysHandle handle)
                 ReleaseSRWLockExclusive(ctx->api_mutex);
             }
 #endif
+            /* 密钥清零后解除内核保护；失败只影响耗时，不影响锁定结果。 */
+            vty_machine_limiter_kernel_guard_release();
             /* 锚点提交失败不影响密钥清零；返回错误让调用方提示
              * “回退锚点未推进”，下次解锁会补推进。 */
             return commit_rc;
@@ -1221,6 +1235,54 @@ VerthysResult Verthys_DeleteRecord(VerthysHandle handle, uint64_t id)
         return rc_vault;
     }
     /* 非容器格式无删除路径 */
+    return VERTHYS_ERR_FORMAT;
+}
+
+/* 7b. 原子替换记录（API 版本 0x0017）
+ *
+ * 同一次事务提交内墓碑化 old_id 并写入新记录；任一失败恢复到调用前的根。
+ * 适用于系统单例记录的换钥，避免"写新/删旧"跨两次事务的崩溃窗口。 */
+VerthysResult Verthys_ReplaceRecord(VerthysHandle handle, uint64_t old_id,
+                                    const VerthysRecord *record,
+                                    uint64_t *out_new_id)
+{
+    VerthysResult vrc;
+
+    if (handle == NULL || record == NULL || out_new_id == NULL || old_id == 0u) {
+        return VERTHYS_ERR_INVALID;
+    }
+    *out_new_id = 0u;
+    vrc = validate_record_write(record);
+    if (vrc != VERTHYS_OK) return vrc;
+
+    struct VerthysContext *ctx = (struct VerthysContext *)handle;
+    if (ctx->state != VERTHYS_STATE_UNLOCKED) return VERTHYS_ERR_LOCKED;
+
+    (void)anti_debug_check();
+
+#ifdef _WIN32
+    if (ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
+#endif
+
+    /* 推迟窗口只覆盖新增：替换含删除语义，必须先 Commit（与 DeleteRecord 同策略）。 */
+    if (verthys_bulk_defer_active(ctx)) {
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
+#endif
+        return VERTHYS_ERR_POLICY;
+    }
+
+    ctx_free_getrecord_cache(ctx);
+    runtime_hash_verify_periodic();
+
+    if (ctx->fmt_version == VERTHYS_FMT_CONTAINER) {
+        VerthysResult rc_vault = verthys_api_container_replace(ctx, old_id, record, out_new_id);
+#ifdef _WIN32
+        if (ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
+#endif
+        return rc_vault;
+    }
+    /* 非容器格式无替换路径 */
     return VERTHYS_ERR_FORMAT;
 }
 
@@ -1490,6 +1552,28 @@ VerthysResult Verthys_GetSecurityStatus(VerthysHandle handle,
     out_status->checked_at_unix_ms   = report.checked_at_unix_ms;
     out_status->reserved3[0]         = 0;
     out_status->reserved3[1]         = 0;
+    return VERTHYS_OK;
+}
+
+VerthysResult Verthys_GetKernelStatus(VerthysHandle handle,
+                                      VerthysKernelStatus *out_status)
+{
+    VtyKernelStatus status;
+    int rc;
+
+    if (handle == NULL || out_status == NULL) return VERTHYS_ERR_INVALID;
+
+    memset(out_status, 0, sizeof(*out_status));
+    memset(&status, 0, sizeof(status));
+    rc = vty_machine_limiter_kernel_status(&status);
+    if (rc != VTY_OK) return VERTHYS_ERR_INTERNAL;
+
+    out_status->state = status.state;
+    out_status->reason = status.reason;
+    out_status->capabilities = status.capabilities;
+    out_status->protocol_major = status.protocol_major;
+    out_status->protocol_minor = status.protocol_minor;
+    out_status->reserved = 0;
     return VERTHYS_OK;
 }
 

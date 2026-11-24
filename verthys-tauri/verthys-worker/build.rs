@@ -1,5 +1,6 @@
 /*
- * build.rs — 为 worker 生成 verthys.dll 的全文件 SHA-256 基线。
+ * build.rs — 为 verthys.dll 生成全文件 SHA-256 基线，并从核心版本头文件
+ * 派生 worker 默认接口集版本。
  *
  * 职责边界：只读取构建产物并生成常量，不修改 DLL。
  * 关键约束：Release 构建找不到 DLL 或无法计算基线时必须构建失败，
@@ -7,16 +8,51 @@
  */
 
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// 从核心版本头文件读取 `VERTHYS_API_VERSION`，避免硬编码值与 C ABI 脱节。
+fn read_core_api_version(path: &Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|error| {
+        panic!("无法读取核心版本头文件 {}: {}", path.display(), error)
+    });
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some("#define") {
+            continue;
+        }
+        if parts.next() != Some("VERTHYS_API_VERSION") {
+            continue;
+        }
+        let raw = parts
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(|c| c == 'u' || c == 'U');
+        if raw.is_empty() {
+            break;
+        }
+        return raw.to_string();
+    }
+    panic!(
+        "核心版本头文件缺少 VERTHYS_API_VERSION: {}",
+        path.display()
+    );
+}
 
 fn main() {
     println!("cargo:rerun-if-env-changed=VERTHYS_DLL_PATH");
     println!("cargo:rerun-if-env-changed=VERTHYS_WORKER_API_VERSION");
 
-    /* 默认与 core/include/verthys_version.h 的 VERTHYS_API_VERSION 对齐；
-     * 环境变量仅用于加载更高接口集的诊断构建。 */
+    let manifest = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR 缺失"),
+    );
+
+    /* 默认从核心版本头文件派生；硬编码默认值会在 C ABI 升级后让 worker
+     * 拒绝加载新 DLL。环境变量仅用于加载更高接口集的诊断构建。 */
+    let version_header = manifest.join("../../core/include/verthys_version.h");
+    println!("cargo:rerun-if-changed={}", version_header.display());
+    let default_api_version = read_core_api_version(&version_header);
     let api_version_text = std::env::var("VERTHYS_WORKER_API_VERSION")
-        .unwrap_or_else(|_| "0x0016".to_string());
+        .unwrap_or(default_api_version);
     let api_version = api_version_text
         .trim()
         .strip_prefix("0x")
@@ -29,9 +65,6 @@ fn main() {
         api_version
     );
 
-    let manifest = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR 缺失"),
-    );
     let mut candidates = Vec::new();
     if let Ok(path) = std::env::var("VERTHYS_DLL_PATH") {
         candidates.push(PathBuf::from(path));

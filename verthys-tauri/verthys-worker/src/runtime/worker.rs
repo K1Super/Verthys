@@ -27,7 +27,7 @@ use crate::runtime::format_os_error;
 use crate::runtime::progress_cb::vty_rotate_progress_cb;
 #[cfg(windows)]
 use crate::runtime::scan_shm;
-use crate::runtime::protocol::SecurityStatusReport;
+use crate::runtime::protocol::{KernelStatusReport, SecurityStatusReport};
 
 #[cfg(windows)]
 extern "system" {
@@ -431,7 +431,7 @@ impl Worker {
              * VerthysContainerInfo 前 8 字节——该头部在任何容器状态均可读，
              * stateless 且无副作用。预检失败时进程随即退出，已初始化句柄
              * 由进程回收，无驻留窗口。
-             * 版本常量由 build.rs 生成：默认 0x0016，可用
+             * 版本常量由 build.rs 生成：默认 0x0017，可用
              * VERTHYS_WORKER_API_VERSION 显式抬高。 */
             let get_info: Symbol<VerthysGetContainerInfoFn> =
                 lib.get(b"Verthys_GetContainerInfo").map_err(|e| {
@@ -1107,6 +1107,49 @@ impl Worker {
                 Err(_) => return 0xFFFFFFFF,
             };
             ffi_call(|| { func(self.handle, id) }).unwrap_or(0xFFFFFFFF)
+        }
+    }
+
+    /// 原子替换单条记录（API 0x0017）：同一次提交内墓碑化旧记录并写入新记录。
+    ///
+    /// 旧核心未导出该符号时返回 `VERTHYS_SYMBOL_UNSUPPORTED`，调用方回退
+    /// 到"写新 + 读回 + 删旧"路径；真实调用失败原样返回 C 层错误码。
+    pub(crate) fn call_replace_record(
+        &self,
+        old_id: u64,
+        rtype: u32,
+        name: &str,
+        data: &[u8],
+    ) -> Result<u64, u32> {
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysReplaceRecordFn> =
+                match lib.get(b"Verthys_ReplaceRecord") {
+                    Ok(f) => f,
+                    Err(_) => return Err(VERTHYS_SYMBOL_UNSUPPORTED),
+                };
+            let name_c = match std::ffi::CString::new(name) {
+                Ok(c) => c,
+                Err(_) => {
+                    diag!("[worker] replace_record: 名称含内嵌 NUL，length={}", name.len());
+                    return Err(0xFFFFFFFF);
+                }
+            };
+            let rec = VerthysRecordC {
+                rtype,
+                name: name_c.as_ptr(),
+                name_len: name.len(),
+                data: data.as_ptr(),
+                data_len: data.len(),
+            };
+            let mut new_id: u64 = 0;
+            let r = ffi_call(|| { func(self.handle, old_id, &rec, &mut new_id) })
+                .unwrap_or(0xFFFFFFFF);
+            if r == VERTHYS_OK {
+                Ok(new_id)
+            } else {
+                Err(r)
+            }
         }
     }
 
@@ -2307,6 +2350,34 @@ impl Worker {
             limited_count: st.limited_count,
             policy_flags: st.policy_flags,
             checked_at_unix_ms: st.checked_at_unix_ms,
+            kernel_status: self.call_kernel_status(),
+        })
+    }
+
+    /// 查询内核加固状态。符号缺失（旧核心）返回 None，不使 security_status 失败。
+    pub(crate) fn call_kernel_status(&self) -> Option<KernelStatusReport> {
+        let mut st: VerthysKernelStatusC = unsafe { std::mem::zeroed() };
+        unsafe {
+            let lib = &self._lib;
+            let func: Symbol<VerthysGetKernelStatusFn> =
+                match lib.get(b"Verthys_GetKernelStatus") {
+                    Ok(f) => f,
+                    Err(_) => return None,
+                };
+            let rc = ffi_call(|| {
+                func(self.handle, &mut st as *mut VerthysKernelStatusC)
+            })
+            .unwrap_or(0xFFFFFFFF);
+            if rc != VERTHYS_OK {
+                return None;
+            }
+        }
+        Some(KernelStatusReport {
+            state: st.state,
+            reason: st.reason,
+            capabilities: st.capabilities,
+            protocol_major: st.protocol_major,
+            protocol_minor: st.protocol_minor,
         })
     }
 

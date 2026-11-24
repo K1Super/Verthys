@@ -174,6 +174,24 @@ VerthysResult verthys_api_container_delete(struct VerthysContext *ctx, uint64_t 
     return verthys_api_container_map(rc);
 }
 
+VerthysResult verthys_api_container_replace(struct VerthysContext *ctx,
+                                     uint64_t old_id,
+                                     const VerthysRecord *record,
+                                     uint64_t *out_new_id)
+{
+    VtyVault *v;
+    int rc;
+
+    if (record == NULL || out_new_id == NULL) return VERTHYS_ERR_INVALID;
+    *out_new_id = 0u;
+    if (!vault_ready(ctx, &v)) return VERTHYS_ERR_LOCKED;
+
+    rc = vty_repo_replace(v, old_id, (uint8_t)record->type,
+                          (const uint8_t *)record->name, record->name_len,
+                          record->data, record->data_len, out_new_id);
+    return verthys_api_container_map(rc);
+}
+
 VerthysResult verthys_api_container_delete_many(struct VerthysContext *ctx,
                                          const uint64_t *ids, size_t count)
 {

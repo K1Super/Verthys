@@ -32,6 +32,13 @@ int vty_auth_verify_authenticode(const wchar_t *path,
                                  const wchar_t *expected_sha256);
 
 /*
+ * 校验 PE 文件的 Authenticode 签名是否受当前信任策略认可，不钉扎发布者。
+ * 用于签名链可能由平台（如驱动 attestation）签发的二进制；
+ * 离线可用：禁用吊销检查与在线 URL 检索。
+ */
+int vty_auth_verify_trusted_signature(const wchar_t *path);
+
+/*
  * 认证管道客户端进程：
  *   - 拒绝 PID 等于服务自身；
  *   - OpenProcess 保持句柄到请求结束；

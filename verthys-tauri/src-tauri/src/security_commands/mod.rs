@@ -48,6 +48,7 @@ pub use commands::boot_marker::*;
 pub use commands::brute_force::*;
 pub use commands::cleanup::*;
 pub use commands::file_lock::*;
+pub use commands::kernel_guard::*;
 pub use commands::module_whitelist::*;
 pub use commands::preset::*;
 pub use commands::security_service::*;

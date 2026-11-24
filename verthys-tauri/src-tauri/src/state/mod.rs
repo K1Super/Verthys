@@ -160,6 +160,12 @@ pub struct AppState {
     session_epoch: AtomicU64,
     /// 并发锁防重：初始化流程进行中拒绝并发请求
     pub init_lock: AtomicBool,
+    /// 密钥操作互斥：GMK 验证/派生/改钥串行化
+    ///
+    /// 前端编排已收口为单命令，但 IPC 仍可能被并发调用；改钥包含两次
+    /// PBKDF2 与多步记录写入，必须与验证/首次派生互斥，避免 GMK 槽
+    /// 被后写覆盖或记录出现两条权威记录。
+    pub key_op_lock: AtomicBool,
     /// 全量扫描状态（泛型 ScanPipelineState<VerthysRecordEntry>）
     ///
     /// 通过 lock_scan_state() 访问，中毒时重置为 None + 通知 worker。
@@ -238,6 +244,7 @@ impl AppState {
             session: RwLock::new(None),
             session_epoch: AtomicU64::new(0),
             init_lock: AtomicBool::new(false),
+            key_op_lock: AtomicBool::new(false),
             scan_state: Mutex::new(None),
             scan_summary_state: Mutex::new(None),
             verthys_file_lock: Mutex::new(None),
@@ -385,6 +392,22 @@ impl AppState {
     }
 
     /* ----------------------------------------------------------------
+     * 密钥操作互斥锁                                                  *
+     * ---------------------------------------------------------------- */
+
+    /// 尝试获取密钥操作锁（非阻塞，成功返回 true）
+    pub fn try_acquire_key_op_lock(&self) -> bool {
+        self.key_op_lock
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// 释放密钥操作锁
+    pub fn release_key_op_lock(&self) {
+        self.key_op_lock.store(false, Ordering::SeqCst);
+    }
+
+    /* ----------------------------------------------------------------
      * Worker IO 屏障（通知驱动，无轮询）                    *
      *                                                                *
      * begin_io / end_io 配对调用，包裹 verthys_flush 等 IO 操作。         *
@@ -514,6 +537,9 @@ impl AppState {
     /// 传 Some(session) 替换现有会话（旧会话 Drop 自动 kill）。
     pub fn set_session(&self, session: Option<WorkerSession>) {
         let mut guard = self.write_session();
+        if let Some(existing) = guard.as_ref() {
+            existing.request_stop();
+        }
         *guard = session;
         // 代际在写锁内递增：代际值与会话内容始终一致，等待方不会读到
         // “新会话 + 旧代际”的撕裂组合。
@@ -948,6 +974,20 @@ pub struct InitLockGuard<'a> {
 impl<'a> Drop for InitLockGuard<'a> {
     fn drop(&mut self) {
         self.state.release_init_lock();
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * KeyOpGuard — RAII 密钥操作锁守卫                                    *
+ * ------------------------------------------------------------------ */
+
+/// RAII 守卫：确保 key_op_lock 在函数退出（含超时/错误/panic）时释放
+pub struct KeyOpGuard<'a> {
+    pub state: &'a AppState,
+}
+impl<'a> Drop for KeyOpGuard<'a> {
+    fn drop(&mut self) {
+        self.state.release_key_op_lock();
     }
 }
 

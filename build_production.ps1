@@ -19,7 +19,7 @@
 #   - 任一阶段失败立即终止，不继续后续阶段
 #
 # 用法:
-#   powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-SkipService] [-NoPause] [-Profile local|production]
+#   powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-SkipService] [-IncludeDriver] [-NoPause] [-Profile local|production]
 #
 # 参数:
 #   -Clean       构建前清理所有构建目录
@@ -27,6 +27,7 @@
 #   -SkipWorker  跳过 worker 构建（二进制已存在时使用）
 #   -SkipTauri   跳过 Tauri 打包（仅构建组件时使用）
 #   -SkipService 跳过独立安全服务构建
+#   -IncludeDriver 将已签名并校验过的 VerthysGuard 驱动载荷打入安装包；默认不打包
 #   -NoPause     失败/成功后不暂停等待 Enter（CI 场景使用；双击运行时不传此参数以便查看输出）
 #   -Profile     更新端点配置：local 仅回环验证，production 默认 HTTPS
 #   -UpdaterEndpoint production 清单 URL；也可用 VERTHYS_UPDATER_ENDPOINT
@@ -44,6 +45,7 @@ param(
     [switch]$SkipWorker,
     [switch]$SkipTauri,
     [switch]$SkipService,
+    [switch]$IncludeDriver,
     [switch]$NoPause,
     [ValidateSet("local", "production")]
     [string]$Profile = "production",
@@ -79,6 +81,14 @@ $SrcTauriDir  = Join-Path $VerthysTauriDir "src-tauri"
 $NodeModulesDir = Join-Path $VerthysTauriDir "node_modules"
 $KbTypesPatchDir = Join-Path $VerthysTauriDir "keyboard-types-patched"
 $BuildErrLog = Join-Path $VerthysTauriDir "build_err.log"
+$DriverManifestPath = Join-Path $ScriptRoot "build_driver\driver.artifacts.json"
+
+if ($IncludeDriver -and $SkipService) {
+    throw "-IncludeDriver 需要服务载荷，不能与 -SkipService 同时使用"
+}
+if ($IncludeDriver -and -not (Test-Path -LiteralPath $DriverManifestPath -PathType Leaf)) {
+    throw "驱动载荷未找到: $DriverManifestPath（先构建并签名驱动）"
+}
 
 # ========== 辅助函数 ==========
 function Write-Stage {
@@ -807,6 +817,52 @@ if (-not $SkipService) {
         throw "P2 根 CA 载荷缺失: $rootCertSource"
     }
     Write-OK "P2 服务载荷: src-tauri\service-payload"
+
+    # 驱动载荷：仅显式 -IncludeDriver。哈希与签名双门禁，任一失败即终止构建；
+    # 未开启时移除旧载荷目录，避免上一轮残留被安装包误带。
+    $driverPayloadDir = Join-Path $serviceResourceDir "driver"
+    if ($IncludeDriver) {
+        $driverManifest = Get-Content -LiteralPath $DriverManifestPath -Raw | ConvertFrom-Json
+        $driverFiles = @(
+            @{ Name = 'VerthysGuard.sys'; Source = [string]$driverManifest.sysPath; Hash = [string]$driverManifest.sysSha256 },
+            @{ Name = 'VerthysGuard.cat'; Source = [string]$driverManifest.catPath; Hash = [string]$driverManifest.catSha256 },
+            @{ Name = 'VerthysGuard.inf'; Source = [string]$driverManifest.infPath; Hash = [string]$driverManifest.infSha256 }
+        )
+        New-Item -ItemType Directory -Path $driverPayloadDir -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path $driverPayloadDir '.keep') -Force | Out-Null
+        foreach ($item in $driverFiles) {
+            if ([string]::IsNullOrWhiteSpace($item.Source) -or
+                -not (Test-Path -LiteralPath $item.Source -PathType Leaf)) {
+                throw "驱动产物缺失: $($item.Name) ($($item.Source))"
+            }
+            $actual = (Get-FileHash -LiteralPath $item.Source -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $item.Hash.ToLowerInvariant()) {
+                throw "驱动产物哈希与 manifest 不一致: $($item.Name)"
+            }
+            Copy-Item -LiteralPath $item.Source -Destination (Join-Path $driverPayloadDir $item.Name) -Force
+        }
+        foreach ($name in @('VerthysGuard.sys', 'VerthysGuard.cat')) {
+            $sig = Get-AuthenticodeSignature -LiteralPath (Join-Path $driverPayloadDir $name)
+            if ($sig.Status -ne 'Valid') {
+                throw "驱动签名不受信: $name status=$($sig.Status)"
+            }
+            if ($Profile -eq 'production' -and
+                $null -ne $sig.SignerCertificate -and
+                [string]$sig.SignerCertificate.Subject -match 'WDKTestCert') {
+                throw "生产打包拒绝测试签名驱动: $name (WDKTestCert)"
+            }
+        }
+        Copy-Item -LiteralPath $DriverManifestPath `
+            -Destination (Join-Path $driverPayloadDir 'driver.artifacts.json') -Force
+        Write-OK "驱动载荷: src-tauri\service-payload\driver"
+    } else {
+        if (Test-Path -LiteralPath $driverPayloadDir) {
+            Remove-Item -LiteralPath $driverPayloadDir -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $driverPayloadDir -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path $driverPayloadDir '.keep') -Force | Out-Null
+        Write-OK "未启用驱动载荷（-IncludeDriver 未指定）"
+    }
 } else {
     Write-Stage "阶段 3.6: 跳过 P2 独立安全服务（-SkipService）"
 }
@@ -1057,6 +1113,18 @@ if (-not $SkipTauri) {
             throw "打包器未对主程序执行签名：signCommand 未生效或被跳过"
         }
         Write-OK "主程序已在 bundle type 补丁后签名"
+
+        # 打包器生成安装包后会恢复未打补丁的原始主程序，恢复副本不带签名。
+        # 未签名副本无法通过服务映像认证，本地暂存与冒烟会拿到错误二进制；
+        # 对最终落盘副本重新签名并复核，保证其与安装包内版本同一发布者。
+        Invoke-VerthysAuthenticodeSign `
+            -Path $mainExePath `
+            -Certificate $script:signing.Certificate `
+            -TimestampServer $script:signing.TimestampServer
+        Assert-VerthysAuthenticodeSignature `
+            -Path $mainExePath `
+            -ExpectedSha256 $script:signing.PublisherSha256 | Out-Null
+        Write-OK "主程序最终副本已签名"
     }
     Remove-Item Env:VERTHYS_SIGN_JOURNAL -ErrorAction SilentlyContinue
 } else {
@@ -1268,6 +1336,28 @@ if (-not $SkipService) {
             }
         }
         Write-OK "P2 载荷与 artifacts 哈希一致"
+    }
+
+    if ($IncludeDriver) {
+        foreach ($name in @('VerthysGuard.sys', 'VerthysGuard.cat', 'VerthysGuard.inf')) {
+            $driverFile = Join-Path $payloadDir "driver\$name"
+            if (-not (Test-Path -LiteralPath $driverFile -PathType Leaf)) {
+                Write-Fail "驱动载荷缺失: $driverFile"
+                $allOk = $false
+            }
+        }
+        $driverSys = Join-Path $payloadDir "driver\VerthysGuard.sys"
+        $driverCat = Join-Path $payloadDir "driver\VerthysGuard.cat"
+        foreach ($driverFile in @($driverSys, $driverCat)) {
+            if (Test-Path -LiteralPath $driverFile -PathType Leaf) {
+                $sig = Get-AuthenticodeSignature -LiteralPath $driverFile
+                if ($sig.Status -ne 'Valid') {
+                    Write-Fail "驱动载荷签名不受信: $driverFile status=$($sig.Status)"
+                    $allOk = $false
+                }
+            }
+        }
+        if ($allOk) { Write-OK "驱动载荷完整且签名受信" }
     }
 
     $legacySetup = @(

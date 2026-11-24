@@ -23,8 +23,8 @@ use crate::runtime::module_keys;
 use crate::runtime::module_session;
 use crate::runtime::pcr_session;
 use crate::runtime::gmk::{
-    handle_derive_global_key, handle_derive_and_store_global_key, handle_verify_global_key,
-    handle_clear_global_key,
+    handle_derive_and_store_global_key, handle_verify_global_key,
+    handle_change_global_key, handle_clear_global_key,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -1030,6 +1030,16 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             }
             Err(code) => Response::err("security_status", code),
         },
+        /* 轻量内核状态查询：只看驱动/服务回填的内核字段，
+         * 不计算 7 路径防御状态，供宿主看门狗 2s 级轮询。 */
+        "kernel_status" => match worker.call_kernel_status() {
+            Some(report) => {
+                let mut resp = Response::ok("kernel_status");
+                resp.kernel_status = Some(report);
+                resp
+            }
+            None => Response::err("kernel_status", 0x00000001),
+        },
         // 回退锚点维护：列表只读；回收只处理 DEAD；释放必须显式 confirm。
         "rollback_anchor_list" => match worker.call_anchor_list() {
             Ok((anchors, state)) => {
@@ -1093,11 +1103,12 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             Err(code) => Response::err("arm_heartbeat", code),
         },
         // GMK 派生命令（#2 敏感操作下沉）
-        "derive_global_key" => handle_derive_global_key(req),
         // 派生并持久化（首次初始化专用：存储+读回验证在 worker 进程内
         // 原子完成，无跨 IPC 中间态窗口）
         "derive_and_store_global_key" => handle_derive_and_store_global_key(req, worker),
         "verify_global_key" => handle_verify_global_key(req),
+        // 改钥：核验旧钥 → 派生新钥 → 写新/删旧 → 成功后换槽（单次 IPC）
+        "change_global_key" => handle_change_global_key(req, worker),
         "clear_global_key" => handle_clear_global_key(),
         // 内容层加解密（分片密钥只在 C 层持有，worker 不缓存模块口令）
         "module_seal" => module_keys::handle_seal_v4(req, worker),

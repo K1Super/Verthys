@@ -171,6 +171,9 @@ export function useDefenseStatus() {
   /** 轮询定时器句柄 */
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
+  /** 解锁/守卫事件后的短延迟重采样定时器（追赶 worker 自登记与报告生成） */
+  const refreshTimers = new Set<ReturnType<typeof setTimeout>>();
+
   /** 拉取防御状态（静默失败，保留旧报告并标记陈旧） */
   const refreshDefenseStatus = async () => {
     if (!verthysReadyRef.value) return;
@@ -183,6 +186,25 @@ export function useDefenseStatus() {
     }
   };
 
+  /** 取消尚未触发的短延迟重采样，避免事件密集时堆积 */
+  const clearScheduledRefreshes = () => {
+    for (const timer of refreshTimers) {
+      clearTimeout(timer);
+    }
+    refreshTimers.clear();
+  };
+
+  /** 在事件后追加一次短延迟重采样。
+   *  worker 自登记/内核状态报告可能晚于 runtime-guards 事件 1–3 秒；
+   *  只依赖 60s 轮询会让 UI 在这段时间内停留在“确认中/降级”。 */
+  const scheduleRefresh = (delayMs: number) => {
+    const timer = setTimeout(() => {
+      refreshTimers.delete(timer);
+      void refreshDefenseStatus();
+    }, delayMs);
+    refreshTimers.add(timer);
+  };
+
   /** 启动轮询（verthys 就绪期间，幂等） */
   const startPolling = () => {
     if (pollTimer !== null) return;
@@ -191,6 +213,7 @@ export function useDefenseStatus() {
 
   /** 停止轮询 + 清空报告（锁定时会话销毁，报告过期） */
   const stopPolling = () => {
+    clearScheduledRefreshes();
     if (pollTimer !== null) {
       clearInterval(pollTimer);
       pollTimer = null;
@@ -205,6 +228,8 @@ export function useDefenseStatus() {
     (ready) => {
       if (ready) {
         void refreshDefenseStatus();
+        scheduleRefresh(1000);
+        scheduleRefresh(3000);
         startPolling();
       } else {
         stopPolling();
@@ -215,11 +240,15 @@ export function useDefenseStatus() {
 
   /* 守卫位变更事件：session_start 完成 runtime_guards 下发后由后端发出。
    * 首次拉取可能早于该下发（verthysReady 先于 securitySessionStart），
-   * 若不重采样，首个 60s 周期会把已接线的挂起守卫显示为可修复降级。 */
+   * 若不重采样，首个 60s 周期会把已接线的挂起守卫显示为可修复降级。
+   * 内核自登记同样可能滞后于事件，追加 1s/3s 两次重采样。 */
   let unlistenRuntimeGuards: UnlistenFn | null = null;
   if (isTauriEnvironment()) {
     void listen('verthys://runtime-guards', () => {
+      clearScheduledRefreshes();
       void refreshDefenseStatus();
+      scheduleRefresh(1000);
+      scheduleRefresh(3000);
     })
       .then((unlisten) => {
         unlistenRuntimeGuards = unlisten;
@@ -338,6 +367,9 @@ export function useDefenseStatus() {
     return { ...base, stance: 'pending', stanceLabel: '待检测' };
   });
 
+  /** 内核加固状态（报告缺位或旧核心时 null） */
+  const kernelStatus = computed(() => defenseReport.value?.kernel_status ?? null);
+
   return {
     /** 原始报告（SecurityStatusReport | null） */
     defenseReport,
@@ -345,6 +377,8 @@ export function useDefenseStatus() {
     defensePaths,
     /** 汇总态势 */
     defenseMeta,
+    /** 内核加固状态 */
+    kernelStatus,
     /** 手动刷新（保留给显式刷新入口） */
     refreshDefenseStatus,
   };

@@ -8,6 +8,7 @@ int g_test_checks = 0;
 int g_test_skipped = 0;
 
 int test_protocol_run(void);
+int test_kernel_guard_run(void);
 int test_signing_run(void);
 int test_machine_state_run(void);
 int test_state_store_run(void);
@@ -20,6 +21,7 @@ int main(void)
 {
     printf("=== Verthys security service unit tests ===\n");
     test_protocol_run();
+    test_kernel_guard_run();
     test_signing_run();
     test_machine_state_run();
     test_state_store_run();

@@ -173,7 +173,8 @@ security-service/
 scripts/build/build_security_service.ps1    # 独立构建/签名/测试入口
 tests/service/integration.ps1               # 控制台模式集成测试
 tests/service/e2e-install.ps1               # 干净 VM 上的 SCM/安装 E2E
-tests/service/attack.ps1                     # P2 攻击回归
+tests/service/attack.ps1                     # P2 攻击回归执行器
+tests/security/run.ps1                       # 非内核安全测试统一入口（vault/service/tpm/offmachine）
 ```
 
 **P1 边界**：除以下文件外，不修改 `core/` 其他文件。
@@ -683,7 +684,7 @@ SCM 安装 E2E 不在普通 CI 运行，只在一次性 Windows VM 上由 `tests
 | S-A9 | 伪造 `Installed` 注册表（普通用户） | HKLM 写入被拒 |
 | S-A10 | 替换服务 exe 为未签名文件 | 服务启动自检失败；安装器拒绝安装 |
 
-**执行环境**：S-A3/S-A4/S-A5/S-A6/S-A8/S-A9 可在控制台模式 CI 执行；S-A1/S-A2/S-A7/S-A10 需要真实 SCM 安装、管理员或第二台机器，只在干净 VM 的 E2E 中执行。测试客户端证书需预先安装到 `CurrentUser\Root`，签发流程参见 `scripts/signing/New-VerthysCodeSigningCert.ps1`；仓库当前未包含 `tests/attack/signing/New-TestCert.ps1`，S-A1/S-A2 的自动证书准备需在干净 VM 上补齐。
+**执行环境**：S-A3/S-A4/S-A5/S-A6/S-A8/S-A9 可在控制台模式 CI 执行；S-A1/S-A2/S-A7/S-A10 需要真实 SCM 安装、管理员或第二台机器，只在干净 VM 的 E2E 中执行。CI 与门禁通过 `tests/security/run.ps1 -Suite service` 读取结构化结果，`S-A*` 映射为 `SVC-*` 且保留 legacyId。S-A9 需要非提权进程，提权 runner 记录为 SKIP 且不作为 release 必需项。测试客户端证书需预先安装到 `CurrentUser\Root`，签发流程参见 `scripts/signing/New-VerthysCodeSigningCert.ps1`；仓库当前未包含 `tests/attack/signing/New-TestCert.ps1`，S-A1/S-A2 的自动证书准备需在干净 VM 上补齐。
 
 ### 11.5 SCM / 安装 E2E（干净 VM）
 

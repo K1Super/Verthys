@@ -366,6 +366,9 @@
             阻断 {{ defenseMeta.blocked }} · 降级 {{ defenseMeta.degraded }} · 失败 {{ defenseMeta.failed }}{{ defenseMeta.checkedAtLabel ? ` · 采样 ${defenseMeta.checkedAtLabel}` : '' }}{{ defenseMeta.stale ? ' · 数据陈旧' : '' }}
           </span>
         </div>
+        <div v-if="kernelStatusText" class="def-stance">
+          <span class="def-stance-detail">{{ kernelStatusText }}</span>
+        </div>
       </div>
 
       <!-- ===== 5b. 回退锚点（生命周期维护入口） ===== -->
@@ -423,6 +426,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { DefensePathView, DefenseMetaView } from "../../composables/security-center/useDefenseStatus";
+import type { KernelStatusReport } from "../../types/verthys";
 import { masterFrameLoop } from "../../core/master-frame-loop";
 import { useToastCenter } from "../../composables/useToastCenter";
 import {
@@ -478,6 +482,12 @@ const props = defineProps<{
   defensePaths: DefensePathView[];
   /** 动态防护汇总态势（计数 + 全阻断标志 + 总体态势行） */
   defenseMeta: DefenseMetaView;
+  /** 内核加固状态（可选；旧核心或查询失败时为 null） */
+  kernelStatus: KernelStatusReport | null;
+  /** SECURE preferred 下内核未 ACTIVE 的显式降级标记 */
+  kernelPolicyDegraded: boolean;
+  /** SECURE preferred 下内核状态报告尚未到达（显示确认中，不判降级） */
+  kernelStatusPending: boolean;
   /** 档位同步失败标志（恢复链失败时展示警示文案） */
   presetSyncFailed: boolean;
   /** 会话硬化/会话守卫降级标志（部分安全能力未生效时如实提示） */
@@ -488,6 +498,63 @@ const props = defineProps<{
 const digestWarn = computed(() =>
   props.presetSyncFailed || props.hardeningFailed,
 );
+
+/* 内核加固状态文案：只做事实映射，不在前端推导安全结论 */
+const KERNEL_STATE_LABEL: Record<number, string> = {
+  0: '未知',
+  1: '未启用',
+  2: '待登记',
+  3: '已启用',
+  4: '降级',
+  5: '已丢失',
+  6: '未安装',
+  7: '未运行',
+  8: '版本不匹配',
+  9: '异常',
+  10: '不支持',
+};
+
+const KERNEL_REASON_LABEL: Record<number, string> = {
+  0: '',
+  1: '驱动未安装',
+  2: '驱动未运行',
+  3: '版本不匹配',
+  4: '不支持',
+  5: '登记失败',
+  6: '进程退出',
+  7: '驱动卸载',
+  8: '内部错误',
+  9: '访问被拒绝',
+  10: '响应超时',
+  11: '响应无效',
+};
+
+const kernelStatusText = computed(() => {
+  const status = props.kernelStatus;
+  if (!status) {
+    /* 报告尚未到达：显示确认中，不把“未知”误判成用户态降级。 */
+    return props.kernelStatusPending ? '内核加固 确认中' : '';
+  }
+  if (props.kernelPolicyDegraded) {
+    const reason = KERNEL_REASON_LABEL[status.reason] ?? '';
+    return reason
+      ? `高安全 用户态降级 ${reason}`
+      : '高安全 用户态降级';
+  }
+  /* 未安装/未运行/未知在未接入 SECURE 策略前不展示，避免普通用户看到
+   * 与当前档位无关的“缺失”提示；SECURE 策略接入后再按档位显式展示。 */
+  if (status.state === 0 || status.state === 6 || status.state === 7) {
+    return '';
+  }
+  /* 宿主 REGISTER 失败但 worker 已自登记：驱动实际 ACTIVE，如实标注
+   * “已启用 + 登记降级”，不再显示为用户态降级。 */
+  if (status.state === 3 && status.reason === 5) {
+    return '内核加固 已启用 登记降级';
+  }
+  const state = KERNEL_STATE_LABEL[status.state] ?? '未知';
+  const reason = KERNEL_REASON_LABEL[status.reason] ?? '';
+  return reason ? `内核加固 ${state} ${reason}` : `内核加固 ${state}`;
+});
 const digestText = computed(() => {
   if (props.presetSyncFailed) return "档位同步失败 · 当前显示可能与后端不一致";
   if (props.hardeningFailed) return "会话硬化未完全生效 · 剪贴板监听或系统锁屏守卫可能不可用";

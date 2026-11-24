@@ -13,7 +13,10 @@ use tokio::task::JoinHandle;
 use super::actor::actor_loop;
 use super::platform::verify_install_paths;
 #[cfg(target_os = "windows")]
-use super::platform::{harden_suspended_worker, JobHandle};
+use super::platform::{
+    prepare_suspended_worker, process_creation_time_quad, resume_and_close_suspended_worker,
+    JobHandle,
+};
 use super::protocol::{
     ActorRequest, RotateProgress, DEFAULT_IPC_TIMEOUT, DROP_ACTOR_JOIN_TIMEOUT, READY_CHECK_TIMEOUT,
 };
@@ -36,27 +39,35 @@ struct HeartbeatEvent(HANDLE);
 unsafe impl Send for HeartbeatEvent {}
 #[cfg(target_os = "windows")]
 unsafe impl Sync for HeartbeatEvent {}
+#[cfg(target_os = "windows")]
+impl Drop for HeartbeatEvent {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
 
 /// 创建匿名心跳事件并 DuplicateHandle 注入 worker 进程。
 ///
 /// 返回 (父进程事件句柄, worker 进程内句柄值)。句柄值仅在 worker 内有效，
 /// 父进程不得 CloseHandle 它；worker 退出时由其句柄表统一回收。
+/// `worker_process` 必须是 REGISTER 之前取得的句柄：驱动确认后会剥离
+/// 宿主新句柄的 `PROCESS_DUP_HANDLE`，已取得的句柄不受追溯影响。
 #[cfg(target_os = "windows")]
 fn create_heartbeat_event(
-    child: &tokio::process::Child,
+    worker_process: HANDLE,
 ) -> Option<(HeartbeatEvent, u64)> {
     use windows::Win32::System::Threading::GetCurrentProcess;
 
     let event = crate::infrastructure::handle_factory::create_non_inheritable_event(false, false)
         .ok()?;
-    let raw = child.raw_handle()?;
-    let child_handle = HANDLE(raw);
     let mut worker_handle = HANDLE::default();
     let dup = unsafe {
         DuplicateHandle(
             GetCurrentProcess(),
             event,
-            child_handle,
+            worker_process,
             &mut worker_handle,
             0,
             false,
@@ -187,6 +198,9 @@ pub(crate) struct SessionInner {
     /// 挂起看门狗停止标志与线程句柄
     suspend_stop: Arc<AtomicBool>,
     suspend_thread: StdMutex<Option<std::thread::JoinHandle<()>>>,
+    /// 会话正常停止标志：区分主动替换/销毁与 worker 异常退出。
+    /// 主动停止时内核看门狗直接退出，不触发 worker_exit 锁定。
+    stop: Arc<AtomicBool>,
 }
 
 impl SessionInner {
@@ -220,6 +234,53 @@ fn dev_machine_limiter_bypass() -> Option<(&'static str, &'static str)> {
     } else {
         None
     }
+}
+
+/// 测试构建专用：强制 REGISTER 失败，用于验证 preferred 降级路径。
+///
+/// 仅 `test_hooks` 特性编译；生产构建恒为 false。
+#[cfg(feature = "test_hooks")]
+fn test_register_failure() -> bool {
+    std::env::var("VERTHYS_TEST_KERNEL_REGISTER_FAIL").ok().as_deref() == Some("1")
+}
+
+#[cfg(not(feature = "test_hooks"))]
+fn test_register_failure() -> bool {
+    false
+}
+
+/// 按基名识别生产 worker 映像。
+///
+/// 只接受部署链实际产出的两个名称；其他文件名即使位于宿主目录也不预 ARM。
+#[cfg(target_os = "windows")]
+fn worker_image_for_name(name: &str) -> Option<crate::infrastructure::security_service_client::WorkerImage> {
+    use crate::infrastructure::security_service_client::WorkerImage;
+    if name.eq_ignore_ascii_case("verthys-worker.exe") {
+        Some(WorkerImage::Default)
+    } else if name.eq_ignore_ascii_case("verthys-worker-x86_64-pc-windows-msvc.exe") {
+        Some(WorkerImage::Sidecar)
+    } else {
+        None
+    }
+}
+
+/// 判定是否具备宿主预 ARM 条件：白名单 worker 基名且与宿主同目录。
+///
+/// 开发树中 worker 与宿主分处不同 target 目录，跳过预 ARM，
+/// 由 worker 解锁时自 ARM；生产安装目录中两者同根。
+#[cfg(target_os = "windows")]
+fn prearm_image(worker_exe: &str) -> Option<crate::infrastructure::security_service_client::WorkerImage> {
+    use std::path::Path;
+
+    let worker = Path::new(worker_exe);
+    let image = worker_image_for_name(worker.file_name()?.to_str()?)?;
+    let worker_dir = worker.parent()?.canonicalize().ok()?;
+    let host = std::env::current_exe().ok()?;
+    let host_dir = host.parent()?.canonicalize().ok()?;
+    if worker_dir != host_dir {
+        return None;
+    }
+    Some(image)
 }
 
 impl WorkerSession {
@@ -276,24 +337,100 @@ impl WorkerSession {
             cmd.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
         }
 
-        // 同步 spawn（tokio::process::Command::spawn 是同步方法，注册 I/O 驱动）
-        let mut child = cmd.spawn().map_err(|e| format!("spawn worker: {}", e))?;
-
-        let pid = child.id().ok_or_else(|| "无法获取子进程 PID".to_string())?;
-
-        // 加固失败即终止子进程：不允许以无 Job/DACL 保护的形态继续运行。
+        // A14：宿主在 worker 创建前 ARM 同目录 worker 路径，消除
+        // 「worker 已存在但尚未 ARM」的同用户预开句柄窗口。
+        // 失败按 preferred 降级为仅用户态防护，不伪造 ACTIVE。
         #[cfg(target_os = "windows")]
-        let hardened_job = match harden_suspended_worker(pid) {
-            Ok(job) => job,
+        let prearmed = match prearm_image(worker_exe) {
+            Some(image) => {
+                match crate::infrastructure::security_service_client::kernel_arm_host(image) {
+                    Ok(()) => {
+                        log::info!("[kernel-guard] 宿主预 ARM 已提交");
+                        true
+                    }
+                    Err(e) => {
+                        log::warn!("[kernel-guard] 宿主预 ARM 未生效（preferred）: {}", e);
+                        false
+                    }
+                }
+            }
+            None => false,
+        };
+        #[cfg(not(target_os = "windows"))]
+        let prearmed = false;
+
+        // 同步 spawn（tokio::process::Command::spawn 是同步方法，注册 I/O 驱动）
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                if prearmed {
+                    let _ = crate::infrastructure::security_service_client::kernel_disarm();
+                }
+                return Err(format!("spawn worker: {}", e));
+            }
+        };
+
+        let pid = match child.id() {
+            Some(pid) => pid,
+            None => {
+                if prearmed {
+                    let _ = crate::infrastructure::security_service_client::kernel_disarm();
+                }
+                let _ = child.start_kill();
+                return Err("无法获取子进程 PID".to_string());
+            }
+        };
+
+        // 必须在 REGISTER 之前取得进程句柄并施加 Job/DACL：驱动确认后
+        // 会剥离宿主新句柄的 SET_QUOTA/TERMINATE/SUSPEND_RESUME，已取得
+        // 的句柄权限不会被追溯撤销。此时 worker 仍挂起，未执行任何指令。
+        #[cfg(target_os = "windows")]
+        let (hardened_job, suspended_process) = match prepare_suspended_worker(pid) {
+            Ok(value) => value,
             Err(e) => {
                 let _ = child.start_kill();
+                if prearmed {
+                    let _ = crate::infrastructure::security_service_client::kernel_disarm();
+                }
                 return Err(format!("worker 进程加固失败: {}", e));
             }
         };
 
-        // 心跳事件必须在 child 移交给 Actor 之前创建并复制到 worker 进程。
+        // worker 仍处于挂起态：提交 PID 与创建时间，服务与驱动复核身份后登记。
         #[cfg(target_os = "windows")]
-        let heartbeat = create_heartbeat_event(&child);
+        if prearmed {
+            if test_register_failure() {
+                log::warn!("[kernel-guard] 测试注入：强制 REGISTER 失败（preferred）");
+                let _ = crate::infrastructure::security_service_client::kernel_disarm();
+            } else {
+                match child
+                    .raw_handle()
+                    .and_then(|raw| process_creation_time_quad(HANDLE(raw)).ok())
+                {
+                    Some(creation) => {
+                        match crate::infrastructure::security_service_client::kernel_register(
+                            pid, creation,
+                        ) {
+                            Ok(()) => log::info!("[kernel-guard] worker 已登记为受保护进程"),
+                            Err(e) => {
+                                log::warn!("[kernel-guard] worker 登记失败（preferred）: {}", e);
+                                // 不留半登记状态：撤销 ARM，回退到用户态加固。
+                                let _ = crate::infrastructure::security_service_client::kernel_disarm();
+                            }
+                        }
+                    }
+                    None => {
+                        log::warn!("[kernel-guard] 无法读取 worker 创建时间，撤销预 ARM");
+                        let _ = crate::infrastructure::security_service_client::kernel_disarm();
+                    }
+                }
+            }
+        }
+
+        // 心跳事件必须在恢复执行前复制到挂起态 worker：prepare 取得的
+        // 句柄仍保有 PROCESS_DUP_HANDLE，REGISTER 后再打开的新句柄会被剥离。
+        #[cfg(target_os = "windows")]
+        let heartbeat = create_heartbeat_event(suspended_process);
         #[cfg(target_os = "windows")]
         let (heartbeat_event, heartbeat_worker_handle) = match heartbeat {
             Some((event, handle)) => (Some(Arc::new(event)), handle),
@@ -302,6 +439,24 @@ impl WorkerSession {
                 (None, 0)
             }
         };
+
+        // REGISTER 完成后恢复执行；prepare 阶段取得的句柄仍保有恢复权限。
+        #[cfg(target_os = "windows")]
+        if let Err(e) = resume_and_close_suspended_worker(suspended_process) {
+            unsafe {
+                let _ = CloseHandle(hardened_job.0);
+            }
+            let _ = child.start_kill();
+            if prearmed {
+                let _ = crate::infrastructure::security_service_client::kernel_disarm();
+            }
+            return Err(format!("恢复 worker 执行失败: {}", e));
+        }
+        #[cfg(target_os = "windows")]
+        log::info!(
+            "[watchdog] worker PID={} 已加固并恢复：Job 单进程/2GiB 上限、受限 DACL",
+            pid
+        );
 
         let stdin = child.stdin.take().ok_or_else(|| "no stdin".to_string())?;
         let stdout = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
@@ -351,6 +506,7 @@ impl WorkerSession {
                 heartbeat_worker_handle,
                 suspend_stop: Arc::new(AtomicBool::new(false)),
                 suspend_thread: StdMutex::new(None),
+                stop: Arc::new(AtomicBool::new(false)),
             }),
         })
     }
@@ -471,6 +627,20 @@ impl WorkerSession {
     /// 通过 AtomicBool 标志判断（Actor 在子进程退出时设为 false）。
     pub fn is_alive(&self) -> bool {
         self.inner.child_alive.load(Ordering::SeqCst)
+    }
+
+    /// 标记会话正在正常停止（替换/销毁/应用退出）。
+    ///
+    /// 内核看门狗据此区分主动停止与 worker 异常退出；主动停止不再触发
+    /// worker_exit 锁定，避免关闭流程被重复锁定干扰。
+    pub(crate) fn request_stop(&self) {
+        self.inner.stop.store(true, Ordering::SeqCst);
+        self.inner.suspend_stop.store(true, Ordering::SeqCst);
+    }
+
+    /// 会话正常停止标志（内核看门狗持有同一原子）。
+    pub(crate) fn stop_flag(&self) -> Arc<AtomicBool> {
+        self.inner.stop.clone()
     }
 
     /// 发送 JSON 请求并等待 JSON 响应（默认 15 秒超时）
@@ -641,6 +811,9 @@ impl WorkerSession {
 
         log::info!("[watchdog] kill() 调用: PID={}", pid);
 
+        // 主动停止：看门狗直接退出，不把本次退出误判为 worker 异常。
+        self.request_stop();
+
         // 1. 关闭请求通道，触发 Actor 主循环退出并执行优雅关闭
         //    take() 取出 Sender 并 drop，所有 recv() 返回 None
         self.inner.close_request_channel();
@@ -690,6 +863,7 @@ impl Drop for SessionInner {
         // 0. 停止挂起看门狗（WaitForSingleObject 每秒醒来检查停止标志，
         //    join 最多等待约 1 秒，不阻塞锁定响应）
         self.suspend_stop.store(true, Ordering::SeqCst);
+        self.stop.store(true, Ordering::SeqCst);
         if let Ok(mut slot) = self.suspend_thread.lock() {
             if let Some(thread) = slot.take() {
                 let _ = thread.join();
@@ -778,6 +952,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn prearm_accepts_only_whitelisted_sibling_worker() {
+        use crate::infrastructure::security_service_client::WorkerImage;
+
+        assert_eq!(
+            worker_image_for_name("verthys-worker.exe"),
+            Some(WorkerImage::Default)
+        );
+        assert_eq!(
+            worker_image_for_name("Verthys-Worker.EXE"),
+            Some(WorkerImage::Default)
+        );
+        assert_eq!(
+            worker_image_for_name("verthys-worker-x86_64-pc-windows-msvc.exe"),
+            Some(WorkerImage::Sidecar)
+        );
+        assert_eq!(worker_image_for_name("other.exe"), None);
+        assert_eq!(worker_image_for_name("verthys-worker-other.exe"), None);
+
+        let host = std::env::current_exe().expect("current_exe");
+        let dir = host.parent().expect("host dir");
+        let sibling = dir.join("verthys-worker.exe");
+        assert_eq!(
+            prearm_image(&sibling.to_string_lossy()),
+            Some(WorkerImage::Default)
+        );
+        let foreign = dir.join("missing-subdir").join("verthys-worker.exe");
+        assert_eq!(prearm_image(&foreign.to_string_lossy()), None);
+        let other = dir.join("other.exe");
+        assert_eq!(prearm_image(&other.to_string_lossy()), None);
+    }
 
     /// 验证 WorkerSession::spawn 在无 tokio 运行时上下文时返回错误
     #[test]

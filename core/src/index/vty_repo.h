@@ -95,6 +95,19 @@ int vty_repo_read_name(VtyVault *v, const VtyRepoLeaf *leaf,
 int vty_repo_delete(VtyVault *v, uint64_t id);
 int vty_repo_delete_many(VtyVault *v, const uint64_t *ids, size_t count);
 
+/* 原子替换：同一次提交内墓碑化 old_id 并写入新记录，返回新 ID。
+ *
+ * 语义：
+ *   - old_id 不存在/已墓碑/模块不允许 → VTY_E_INVALID，零副作用；
+ *   - 新记录与旧记录墓碑在同一次 store 提交中落盘，崩溃不会出现"两条并存"
+ *     或"旧已删、新未写"的中间态；
+ *   - 失败恢复到调用前的根，旧记录保持原状；
+ *   - ID 分配器单调递增，新 ID 必大于 old_id（否则按 VTY_E_VERIFY 拒绝）。 */
+int vty_repo_replace(VtyVault *v, uint64_t old_id, uint8_t type,
+                     const uint8_t *name, size_t name_len,
+                     const uint8_t *data, size_t data_len,
+                     uint64_t *out_new_id);
+
 /* 存活记录数（跳过分配器与墓碑）。 */
 int vty_repo_count(VtyVault *v, uint64_t *out_count);
 

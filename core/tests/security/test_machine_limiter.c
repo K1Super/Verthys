@@ -11,6 +11,7 @@
 
 #include "verthys_test.h"
 #include "verthys.h"
+#include "security_preset.h"
 #include "vty_kdf.h"
 #include "vty_machine_limiter.h"
 #include "vty_recovery.h"
@@ -31,6 +32,9 @@ typedef struct FakePipeServer {
     DWORD wrong_priv_len;
     HANDLE thread;
     volatile LONG ready;
+    volatile LONG protocol_violations;
+    volatile LONG command_count;
+    uint16_t commands[8];
 } FakePipeServer;
 
 enum {
@@ -38,7 +42,12 @@ enum {
     FAKE_MODE_LOCKED = 1,
     FAKE_MODE_BAD_SIGNATURE = 2,
     FAKE_MODE_BAD_NONCE = 3,
-    FAKE_MODE_TIMEOUT = 4
+    FAKE_MODE_TIMEOUT = 4,
+    FAKE_MODE_KERNEL_LIFECYCLE = 5,
+    FAKE_MODE_KERNEL_STATUS = 6,
+    FAKE_MODE_KERNEL_PREARMED = 7,
+    FAKE_MODE_KERNEL_FALLBACK = 8,
+    FAKE_MODE_KERNEL_REGISTER_FAIL = 9
 };
 
 static LONG g_pipe_counter = 0;
@@ -176,6 +185,157 @@ static unsigned __stdcall fake_server_thread(void *arg)
     return 0;
 }
 
+/* 内核生命周期/状态伪服务端：每个连接一条命令，全部返回签名内核响应。 */
+static unsigned __stdcall fake_kernel_server_thread(void *arg)
+{
+    FakePipeServer *server = (FakePipeServer *)arg;
+    int connections;
+    uint16_t expected[6];
+    uint16_t statuses[6];
+    uint32_t states[6];
+    HANDLE current;
+    int index;
+
+    memset(expected, 0, sizeof(expected));
+    memset(statuses, 0, sizeof(statuses));
+    memset(states, 0, sizeof(states));
+
+    switch (server->mode) {
+    case FAKE_MODE_KERNEL_LIFECYCLE:
+        connections = 3;
+        expected[0] = (uint16_t)VTY_SVC_CMD_KERNEL_ARM;
+        expected[1] = (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER;
+        expected[2] = (uint16_t)VTY_SVC_CMD_KERNEL_DISARM;
+        statuses[0] = statuses[1] = statuses[2] = (uint16_t)VTY_SVC_STATUS_OK;
+        states[0] = states[1] = (uint32_t)VTY_KERNEL_STATE_ACTIVE;
+        states[2] = (uint32_t)VTY_KERNEL_STATE_UNARMED;
+        break;
+    case FAKE_MODE_KERNEL_STATUS:
+        connections = 1;
+        expected[0] = (uint16_t)VTY_SVC_CMD_KERNEL_STATUS;
+        statuses[0] = (uint16_t)VTY_SVC_STATUS_OK;
+        states[0] = (uint32_t)VTY_KERNEL_STATE_ACTIVE;
+        break;
+    case FAKE_MODE_KERNEL_PREARMED:
+        /* 宿主已预 ARM：只允许 REGISTER，不得再次 ARM。 */
+        connections = 2;
+        expected[0] = (uint16_t)VTY_SVC_CMD_KERNEL_STATUS;
+        expected[1] = (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER;
+        statuses[0] = statuses[1] = (uint16_t)VTY_SVC_STATUS_OK;
+        states[0] = states[1] = (uint32_t)VTY_KERNEL_STATE_ACTIVE;
+        break;
+    case FAKE_MODE_KERNEL_FALLBACK:
+        /* 无预 ARM：状态未武装后走完整 ARM -> REGISTER。 */
+        connections = 3;
+        expected[0] = (uint16_t)VTY_SVC_CMD_KERNEL_STATUS;
+        expected[1] = (uint16_t)VTY_SVC_CMD_KERNEL_ARM;
+        expected[2] = (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER;
+        statuses[0] = statuses[1] = statuses[2] = (uint16_t)VTY_SVC_STATUS_OK;
+        states[0] = (uint32_t)VTY_KERNEL_STATE_UNARMED;
+        states[1] = (uint32_t)VTY_KERNEL_STATE_ARMED;
+        states[2] = (uint32_t)VTY_KERNEL_STATE_ACTIVE;
+        break;
+    case FAKE_MODE_KERNEL_REGISTER_FAIL:
+        /* REGISTER 被拒后必须回滚 DISARM。 */
+        connections = 4;
+        expected[0] = (uint16_t)VTY_SVC_CMD_KERNEL_STATUS;
+        expected[1] = (uint16_t)VTY_SVC_CMD_KERNEL_ARM;
+        expected[2] = (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER;
+        expected[3] = (uint16_t)VTY_SVC_CMD_KERNEL_DISARM;
+        statuses[0] = (uint16_t)VTY_SVC_STATUS_OK;
+        statuses[1] = (uint16_t)VTY_SVC_STATUS_OK;
+        statuses[2] = (uint16_t)VTY_SVC_STATUS_DENIED;
+        statuses[3] = (uint16_t)VTY_SVC_STATUS_OK;
+        states[0] = (uint32_t)VTY_KERNEL_STATE_UNARMED;
+        states[1] = (uint32_t)VTY_KERNEL_STATE_ARMED;
+        states[2] = (uint32_t)VTY_KERNEL_STATE_ARMED;
+        states[3] = (uint32_t)VTY_KERNEL_STATE_UNARMED;
+        break;
+    default:
+        return 0;
+    }
+
+    current = CreateNamedPipeW(
+        server->pipe_name, PIPE_ACCESS_DUPLEX,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        PIPE_UNLIMITED_INSTANCES, 512, 512, 0, NULL);
+    if (current == INVALID_HANDLE_VALUE) {
+        InterlockedExchange(&server->ready, 1);
+        return 0;
+    }
+    InterlockedExchange(&server->ready, 1);
+
+    for (index = 0; index < connections; index++) {
+        uint8_t request[VTY_SVC_REQUEST_BYTES];
+        DWORD got = 0;
+        VtySvcRequestFields fields;
+        uint8_t response[VTY_SVC_RESPONSE_BYTES];
+        uint32_t state;
+        HANDLE next = INVALID_HANDLE_VALUE;
+
+        if (!ConnectNamedPipe(current, NULL) &&
+            GetLastError() != ERROR_PIPE_CONNECTED) {
+            CloseHandle(current);
+            return 0;
+        }
+
+        if (!ReadFile(current, request, sizeof(request), &got, NULL) ||
+            got != VTY_SVC_REQUEST_BYTES) {
+            CloseHandle(current);
+            return 0;
+        }
+
+        memset(&fields, 0, sizeof(fields));
+        if (vty_svc_request_decode(request, got, &fields) !=
+            (uint16_t)VTY_SVC_STATUS_OK) {
+            InterlockedIncrement(&server->protocol_violations);
+            CloseHandle(current);
+            return 0;
+        }
+        if (index < 8) {
+            server->commands[index] = fields.command;
+            InterlockedIncrement(&server->command_count);
+        }
+        if (index >= connections || fields.command != expected[index]) {
+            InterlockedIncrement(&server->protocol_violations);
+        }
+
+        /*
+         * 下一条命令的实例必须在响应写出前监听：客户端收到响应后会立即
+         * 发起下一次连接。创建失败不阻断当前响应，便于定位是实例创建
+         * 还是协议解析问题。
+         */
+        if (index + 1 < connections) {
+            next = CreateNamedPipeW(
+                server->pipe_name, PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                PIPE_UNLIMITED_INSTANCES, 512, 512, 0, NULL);
+            if (next == INVALID_HANDLE_VALUE) {
+                printf("  [kernel-server] next pipe create failed: %lu\n",
+                       (unsigned long)GetLastError());
+            }
+        }
+
+        state = (index < connections) ? states[index]
+                                      : (uint32_t)VTY_KERNEL_STATE_UNKNOWN;
+        vty_svc_response_encode_kernel(
+            response,
+            (index < connections) ? statuses[index]
+                                  : (uint16_t)VTY_SVC_STATUS_INTERNAL,
+            fields.request_id, 0u, fields.nonce_lo, fields.nonce_hi, 10u,
+            1700000000ULL, state, (uint32_t)VTY_KERNEL_REASON_NONE, 0x3u, 1u,
+            0u);
+        (void)sign_response(server->priv, server->priv_len, response);
+        (void)WriteFile(current, response, sizeof(response), &got, NULL);
+        Sleep(20);
+        (void)DisconnectNamedPipe(current);
+        CloseHandle(current);
+        current = next;
+        if (current == INVALID_HANDLE_VALUE) return 0;
+    }
+    return 0;
+}
+
 static int start_fake_server(FakePipeServer *server, int mode)
 {
     memset(server, 0, sizeof(*server));
@@ -213,8 +373,11 @@ static int start_fake_server(FakePipeServer *server, int mode)
         0) {
         return -1;
     }
-    server->thread = (HANDLE)_beginthreadex(NULL, 0, fake_server_thread, server,
-                                            0, NULL);
+    server->thread = (HANDLE)_beginthreadex(
+        NULL, 0,
+        (mode >= FAKE_MODE_KERNEL_LIFECYCLE) ? fake_kernel_server_thread
+                                             : fake_server_thread,
+        server, 0, NULL);
     if (server->thread == NULL) return -1;
     for (int i = 0; i < 100; i++) {
         if (InterlockedCompareExchange(&server->ready, 0, 0) != 0) break;
@@ -393,6 +556,111 @@ int machine_limiter_timeout(void)
     CHECK(elapsed < 1500u);
     clear_env();
     stop_fake_server(&server);
+    return 0;
+}
+
+int machine_limiter_kernel_lifecycle(void)
+{
+    FakePipeServer server;
+
+    if (start_fake_server(&server, FAKE_MODE_KERNEL_LIFECYCLE) != 0) {
+        clear_env();
+        CHECK(0);
+    }
+    set_env(L"1", server.pipe_name, server.pubkey_file);
+    CHECK_EQ(vty_machine_limiter_kernel_arm(), VTY_OK);
+    CHECK_EQ(vty_machine_limiter_kernel_register(), VTY_OK);
+    CHECK_EQ(vty_machine_limiter_kernel_disarm(), VTY_OK);
+    clear_env();
+    stop_fake_server(&server);
+    CHECK_EQ(server.protocol_violations, 0);
+    return 0;
+}
+
+int machine_limiter_kernel_status_fields(void)
+{
+    FakePipeServer server;
+    VtyKernelStatus status;
+
+    if (start_fake_server(&server, FAKE_MODE_KERNEL_STATUS) != 0) {
+        clear_env();
+        CHECK(0);
+    }
+    memset(&status, 0, sizeof(status));
+    set_env(L"1", server.pipe_name, server.pubkey_file);
+    CHECK_EQ(vty_machine_limiter_kernel_status(&status), VTY_OK);
+    CHECK_EQ(status.state, (uint32_t)VTY_KERNEL_STATE_ACTIVE);
+    CHECK_EQ(status.reason, (uint32_t)VTY_KERNEL_REASON_NONE);
+    CHECK_EQ(status.capabilities, 3u);
+    CHECK_EQ(status.protocol_major, 1u);
+    CHECK_EQ(status.protocol_minor, 0u);
+    clear_env();
+    stop_fake_server(&server);
+    CHECK_EQ(server.protocol_violations, 0);
+    return 0;
+}
+
+static void run_kernel_preset_case(int mode, const uint16_t *expected,
+                                   int expected_count)
+{
+    FakePipeServer server;
+    int index;
+
+    if (start_fake_server(&server, mode) != 0) {
+        clear_env();
+        CHECK(0);
+        return;
+    }
+    set_env(L"1", server.pipe_name, server.pubkey_file);
+    CHECK_EQ(security_preset_switch(SEC_PRESET_SECURE), 0);
+    vty_machine_limiter_kernel_guard_apply_preset();
+
+    /* 先撤环境并停服，再复位进程级获取状态，避免向已停止的伪服务端发 DISARM。 */
+    clear_env();
+    stop_fake_server(&server);
+    vty_machine_limiter_kernel_guard_release();
+    CHECK_EQ(security_preset_switch(SEC_PRESET_BALANCED), 0);
+
+    CHECK_EQ((int)server.command_count, expected_count);
+    for (index = 0; index < expected_count && index < 8; index++) {
+        CHECK_EQ(server.commands[index], expected[index]);
+    }
+    CHECK_EQ(server.protocol_violations, 0);
+}
+
+int machine_limiter_kernel_preset_register_only(void)
+{
+    static const uint16_t expected[2] = {
+        (uint16_t)VTY_SVC_CMD_KERNEL_STATUS,
+        (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER
+    };
+
+    run_kernel_preset_case(FAKE_MODE_KERNEL_PREARMED, expected, 2);
+    return 0;
+}
+
+int machine_limiter_kernel_preset_fallback(void)
+{
+    static const uint16_t expected[3] = {
+        (uint16_t)VTY_SVC_CMD_KERNEL_STATUS,
+        (uint16_t)VTY_SVC_CMD_KERNEL_ARM,
+        (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER
+    };
+
+    run_kernel_preset_case(FAKE_MODE_KERNEL_FALLBACK, expected, 3);
+    return 0;
+}
+
+int machine_limiter_kernel_preset_register_fail_rolls_back(void)
+{
+    static const uint16_t expected[4] = {
+        (uint16_t)VTY_SVC_CMD_KERNEL_STATUS,
+        (uint16_t)VTY_SVC_CMD_KERNEL_ARM,
+        (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER,
+        (uint16_t)VTY_SVC_CMD_KERNEL_DISARM
+    };
+
+    run_kernel_preset_case(FAKE_MODE_KERNEL_REGISTER_FAIL, expected, 4);
     return 0;
 }
 

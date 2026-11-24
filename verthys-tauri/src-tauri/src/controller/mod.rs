@@ -20,6 +20,8 @@ pub mod devfixture_controller;
 pub mod diag_controller;
 pub mod file_controller;
 pub mod key_controller;
+/// 全局密钥修改：单命令完成核验/派生/写入/清理与 GMK 换槽
+pub mod key_change_controller;
 /// 内容层加密命令：模块密钥托管、文件密钥句柄与记录加解密
 pub mod module_crypto_controller;
 /// PCR 策略命令：状态 / 启用 / 关闭 / 重密封

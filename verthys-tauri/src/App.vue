@@ -45,7 +45,7 @@
            .app-shell（z-index:1 堆叠上下文）内会让窗控被遮罩盖住。 -->
       <Teleport to="body">
         <div class="app-window-chrome">
-          <WindowControls />
+          <WindowControls :settings-open="settingsOpen" @settings="toggleSettings" />
         </div>
       </Teleport>
     </div>
@@ -56,6 +56,9 @@
       :error="serviceGateError"
       @retry="refreshSecurityServiceStatus"
     />
+
+    <!-- 全局显示与性能设置（窗控齿轮入口；解锁页同样可用） -->
+    <SettingsDialog :show="settingsOpen" @close="settingsOpen = false" />
 
     <!-- 全局 Toast 渲染层（唯一渲染通道）：单点挂载 + Teleport 至 body，
          层级 = --z-toast（全应用最高层）—— 任何界面不可覆盖提示 -->
@@ -78,6 +81,7 @@ import { defineAsyncComponent, ref, computed, onMounted, onBeforeUnmount, nextTi
 import ParticleBackground from "./components/ParticleBackground.vue";
 import UnlockView from "./components/UnlockView.vue";
 import WindowControls from "./components/main-view/WindowControls.vue";
+import SettingsDialog from "./components/settings/SettingsDialog.vue";
 import SecurityServiceGate from "./components/SecurityServiceGate.vue";
 // 全局 Toast 渲染层（唯一渲染通道；静态导入：提示须在任何阶段随时可用）
 import ToastLayer from "./components/common/feedback/ToastLayer.vue";
@@ -186,6 +190,11 @@ const {
 
 const repairState = ref<RepairState | null>(null);
 const showRepairDialog = ref(false);
+/** 全局显示设置面板开关（窗控齿轮入口） */
+const settingsOpen = ref(false);
+const toggleSettings = () => {
+  settingsOpen.value = !settingsOpen.value;
+};
 
 /** 打开修复入口并刷新可用物料；不阻断用户继续使用旧界面。 */
 const openRepairDialog = async () => {

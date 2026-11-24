@@ -41,6 +41,7 @@ New-Item -ItemType Directory -Path $workDir -Force | Out-Null
 
 $detail = ''
 $pass = $true
+$blocked = $false
 $observed = [ordered]@{}
 $artifacts = [ordered]@{}
 $rootAdded = @()
@@ -189,6 +190,11 @@ try {
 } catch {
     $pass = $false
     if ($detail -eq '') { $detail = 'A2 执行异常：' + $_.Exception.Message }
+    # Root 存储写入需要管理员权限：这是执行环境前置缺失，不是产品回归。
+    # 统一模型按 BLOCKED 上报，release 仍会因此失败并要求在提权环境复跑。
+    if ($detail -match '需要管理员权限|无法写入本机 Root') {
+        $blocked = $true
+    }
 } finally {
     foreach ($thumbprint in $rootAdded) {
         & certutil.exe -delstore Root $thumbprint 2>&1 | Out-Null
@@ -200,7 +206,7 @@ if ($OutJson) {
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
     $report = [ordered]@{
         case = 'A2'
-        verdict = $(if ($pass) { 'PASS' } else { 'FAIL' })
+        verdict = $(if ($pass) { 'PASS' } elseif ($blocked) { 'BLOCKED' } else { 'FAIL' })
         environment = [ordered]@{
             os = $(if ($os) { $os.Caption + ' ' + $os.Version } else { 'unknown' })
             require_caller_sig = $true
@@ -224,6 +230,10 @@ if ($OutJson) {
     $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $OutJson -Encoding utf8
 }
 
+if ($blocked) {
+    Write-Output "RESULT A2 BLOCKED $detail"
+    exit 0
+}
 if ($pass) {
     Write-Output "RESULT A2 PASS $detail"
     exit 0

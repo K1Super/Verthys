@@ -23,6 +23,8 @@ static void test_authenticode_rejects(void)
     CHECK(vty_auth_verify_authenticode(missing, bad_pin) != 0);
     CHECK(vty_auth_verify_authenticode(missing, empty_pin) != 0);
     CHECK(vty_auth_verify_authenticode(NULL, bad_pin) != 0);
+    CHECK(vty_auth_verify_trusted_signature(missing) != 0);
+    CHECK(vty_auth_verify_trusted_signature(NULL) != 0);
 }
 
 static void test_module_and_pipe_negative(void)

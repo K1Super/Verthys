@@ -12,20 +12,23 @@
 #   - 所有工具路径来自系统环境变量（经 env.load.ps1 注入），脚本内零硬编码
 #   - Release 构建跳过测试（测试已在开发环境完成），仅产出加固后的 DLL
 #
-# 用法: powershell -ExecutionPolicy Bypass -File scripts\build\build_core.release.ps1 [-Clean] [-NoPause] [-ReleaseSigning] [-TestHooks] [-RequireTestIsolation]
-#   -Clean           构建前清理 build 目录
+# 用法: powershell -ExecutionPolicy Bypass -File scripts\build\build_core.release.ps1 [-Clean] [-NoPause] [-ReleaseSigning] [-TestHooks] [-RequireTestIsolation] [-BuildDir <path>]
+#   -Clean           构建前清理构建目录
 #   -NoPause         失败/成功后不暂停等待 Enter（CI 场景使用；双击运行时不传此参数以便查看输出）
 #   -ReleaseSigning  启用调用方认证并对 DLL 做 Authenticode 签名（需要发布者证书环境变量）
 #   -TestHooks       仅攻击回归测试使用：允许 VERTHYS_TEST_STATE_DIR 覆盖熔断/回滚状态目录；
 #                    不可与 -ReleaseSigning 同时使用，生产构建禁止开启
 #   -RequireTestIsolation  仅自动化测试构建使用：缺少隔离目录即拒绝初始化；
 #                    必须与 -TestHooks 同时使用，dev 运行构建不得开启
+#   -BuildDir        隔离构建目录；默认 build\（生产）。开发运行时传入独立目录，
+#                    避免改写生产核心与生产产物契约
 param(
     [switch]$Clean,
     [switch]$NoPause,
     [switch]$ReleaseSigning,
     [switch]$TestHooks,
-    [switch]$RequireTestIsolation
+    [switch]$RequireTestIsolation,
+    [string]$BuildDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,8 +51,13 @@ try {
 . (Join-Path $PSScriptRoot "..\lib\release_signing.ps1")
 
 $root       = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-# 生产环境固定构建目录：build/（Tauri 打包配置消费 build/core/Release/verthys.dll）
-$buildDir   = Join-Path $root "build"
+# 默认构建目录 build/ 是 Tauri 打包配置消费的生产路径；-BuildDir 仅用于
+# 开发隔离构建，使开发签名 DLL 与生产产物、生产契约完全分离。
+$buildDir   = if ([string]::IsNullOrWhiteSpace($BuildDir)) {
+    Join-Path $root "build"
+} else {
+    [System.IO.Path]::GetFullPath($BuildDir)
+}
 $config     = "Release"
 
 # 签名上下文：只有显式 -ReleaseSigning 才启用；避免开发者环境中残留证书变量
@@ -148,7 +156,8 @@ $contract = Write-VerthysArtifactContract `
     -CmakeExe $VERTHYS_CMAKE_EXE `
     -Generator $VERTHYS_VS_GENERATOR `
     -Config $config `
-    -SourceDir $root
+    -SourceDir $root `
+    -OutPath (Join-Path $buildDir "core\verthys.artifacts.json")
 if ($null -eq $contract) { throw "artifact contract regeneration returned no manifest" }
 
 Write-Host "[done] 生产构建完成" -ForegroundColor Green

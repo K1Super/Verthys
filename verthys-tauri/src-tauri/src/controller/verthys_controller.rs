@@ -1710,7 +1710,7 @@ pub async fn verthys_create(
     // verthys_create 通过 raw worker IPC 完成 create→lock→unlock，
     // 不经过 verthys_unlock 命令的 key_lifecycle 状态管理。
     // 新建 verthys 无全局密钥记录，后端状态必须为 NoKey，
-    // 否则 verthys_derive_global_key（要求 NoKey）会因状态不匹配而失败。
+    // 否则 verthys_derive_and_store_global_key（要求 NoKey）会因状态不匹配而失败。
     state.key_lifecycle.reset_to_no_key();
     log::info!("[verthys_create] key_lifecycle → NoKey（新建 verthys 无全局密钥）");
 

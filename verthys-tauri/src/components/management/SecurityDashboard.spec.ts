@@ -67,6 +67,9 @@ const baseProps = {
     checkedAtMs: 1700000000000,
     checkedAtLabel: "12:00:00",
   },
+  kernelStatus: null,
+  kernelPolicyDegraded: false,
+  kernelStatusPending: false,
 };
 
 /** 挂载面板：以模型 ref 驱动 orbit-slider-pos 双向绑定 */
@@ -224,6 +227,87 @@ describe("SecurityDashboard 视觉状态契约", () => {
       expect(track?.getAttribute("aria-valuetext")).toBe("10 分钟");
     } finally {
       teardown();
+    }
+  });
+
+  it("内核加固：已启用状态显示，未安装状态不打扰用户", () => {
+    const model = ref(100);
+    const active = mountDashboard(model, {
+      kernelStatus: {
+        state: 3,
+        reason: 0,
+        capabilities: 3,
+        protocol_major: 1,
+        protocol_minor: 0,
+      },
+    });
+    try {
+      expect(active.container.textContent).toContain("内核加固 已启用");
+    } finally {
+      active.teardown();
+    }
+
+    const missing = mountDashboard(model, {
+      kernelStatus: {
+        state: 6,
+        reason: 1,
+        capabilities: 0,
+        protocol_major: 0,
+        protocol_minor: 0,
+      },
+    });
+    try {
+      expect(missing.container.textContent).not.toContain("内核加固");
+    } finally {
+      missing.teardown();
+    }
+
+    const degraded = mountDashboard(model, {
+      kernelStatus: {
+        state: 6,
+        reason: 1,
+        capabilities: 0,
+        protocol_major: 0,
+        protocol_minor: 0,
+      },
+      kernelPolicyDegraded: true,
+    });
+    try {
+      expect(degraded.container.textContent).toContain("高安全 用户态降级");
+      expect(degraded.container.textContent).toContain("驱动未安装");
+    } finally {
+      degraded.teardown();
+    }
+
+    /* 报告尚未到达：显示确认中，不得误报“用户态降级”。 */
+    const pending = mountDashboard(model, {
+      kernelStatus: null,
+      kernelStatusPending: true,
+    });
+    try {
+      expect(pending.container.textContent).toContain("内核加固 确认中");
+      expect(pending.container.textContent).not.toContain("用户态降级");
+    } finally {
+      pending.teardown();
+    }
+
+    /* 宿主 REGISTER 失败但 worker 已自登记：驱动 ACTIVE，标签必须一致。 */
+    const selfRegistered = mountDashboard(model, {
+      kernelStatus: {
+        state: 3,
+        reason: 5,
+        capabilities: 3,
+        protocol_major: 1,
+        protocol_minor: 0,
+      },
+      kernelPolicyDegraded: false,
+    });
+    try {
+      expect(selfRegistered.container.textContent).toContain("内核加固 已启用");
+      expect(selfRegistered.container.textContent).toContain("登记降级");
+      expect(selfRegistered.container.textContent).not.toContain("用户态降级");
+    } finally {
+      selfRegistered.teardown();
     }
   });
 

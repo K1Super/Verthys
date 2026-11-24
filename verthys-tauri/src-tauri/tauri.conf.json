@@ -51,7 +51,8 @@
     "resources": [
       "verthys.dll",
       "service-payload/VerthysSecuritySvc.exe",
-      "service-payload/VerthysRootCA.cer"
+      "service-payload/VerthysRootCA.cer",
+      "service-payload/driver/*"
     ],
     "externalBin": [
       "binaries/verthys-worker"

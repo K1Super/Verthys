@@ -48,6 +48,10 @@ function Get-OsName {
 
 if ($Mode -eq 'prepare') {
     if (-not (Test-Path -LiteralPath $Probe)) { throw "探针缺失: $Probe" }
+    # 源机正控只验证设备根绑定，不验证机器预算。开发机上真实服务预算
+    # 可能已被其他测试耗尽；测试构建探针旁路机器预算，避免把 RATE
+    # 误判为离机前置失败。生产探针不识别该变量，行为不变。
+    $env:VERTHYS_TEST_MACHINE_LIMITER_BYPASS = '1'
     New-Item -ItemType Directory -Path $Dir -Force | Out-Null
     $Dir = (Resolve-Path -LiteralPath $Dir).Path
     Copy-Item -LiteralPath $Probe -Destination (Join-Path $Dir 'vty_probe.exe') -Force

@@ -75,8 +75,8 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 ### FR-06 全局密钥初始化/验证/修改
 
 - **描述**：全局主密钥（GMK）生命周期——首次派生、验证、修改；GMK 永不出 worker 子进程。
-- **验收标准**：`verthys_derive_global_key`/`verthys_verify_global_key`/`verthys_change_password` 命令真实实现；验证器常量 `VERTHYS_GLOBAL_KEY_VERIFIER_v2__`（32B）。
-- **实现佐证**：`verthys-tauri/verthys-worker/src/runtime/gmk.rs` + `verthys-tauri/src-tauri/src/controller/key_controller.rs` + `core/src/api/transfer/verthys_export_import.c`(ChangePassword)。
+- **验收标准**：`verthys_derive_and_store_global_key`/`verthys_verify_global_key`/`verthys_change_global_key` 命令真实实现；验证器常量 `VERTHYS_GLOBAL_KEY_VERIFIER_v2__`（32B）。
+- **实现佐证**：`verthys-tauri/verthys-worker/src/runtime/gmk.rs` + `verthys-tauri/src-tauri/src/controller/key_controller.rs` + `verthys-tauri/src-tauri/src/controller/key_change_controller.rs`。
 
 ### FR-07 模块子密钥派发
 

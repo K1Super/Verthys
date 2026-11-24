@@ -1,0 +1,46 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%ProviderName%
+DriverVer=11/21/2026,1.0.0.0
+CatalogFile=VerthysGuard.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+VerthysGuard.sys = 1,,
+
+[Manufacturer]
+%ManufacturerName%=Verthys,NTamd64
+
+[Verthys.NTamd64]
+%DeviceName%=VerthysGuard_Install, root\VerthysGuard
+
+[VerthysGuard_Install]
+CopyFiles=VerthysGuard_CopyFiles
+
+[VerthysGuard_CopyFiles]
+VerthysGuard.sys
+
+[VerthysGuard_Install.Services]
+AddService=VerthysGuard,0x00000002,VerthysGuard_Service
+
+[VerthysGuard_Service]
+DisplayName=%ServiceName%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\VerthysGuard.sys
+
+[Strings]
+ProviderName="Verthys"
+ManufacturerName="Verthys"
+DeviceName="Verthys Kernel Guard"
+ServiceName="Verthys Kernel Guard"
+DiskName="Verthys Kernel Guard Installation Disk"

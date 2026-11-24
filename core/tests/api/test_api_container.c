@@ -518,3 +518,77 @@ TEST(api_add_records_batch_roundtrip)
     remove(path);
     return 0;
 }
+
+/* 原子替换：旧记录墓碑化与新记录写入同一次提交，重开仍单条。 */
+TEST(api_replace_record_atomic)
+{
+    static const char *path = "api_replace_record.vty";
+    VerthysHandle h = NULL;
+    VerthysRecord r;
+    VerthysRecord got;
+    uint64_t old_id = 0, new_id = 0, next_id = 0;
+    uint64_t count = 0;
+    char code[VTY_RECOVERY_TEXT_BUF];
+
+    remove(path);
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4Create(h, path, REC_PW, strlen(REC_PW),
+                              code, sizeof(code)), VERTHYS_OK);
+
+    CHECK_EQ(rec_add(h, VERTHYS_RECORD_ACCOUNT, "global-key",
+                     "old-payload", &old_id), VERTHYS_OK);
+
+    memset(&r, 0, sizeof(r));
+    r.type = VERTHYS_RECORD_ACCOUNT;
+    r.name = "global-key";
+    r.name_len = strlen(r.name);
+    r.data = (const uint8_t *)"new-payload";
+    r.data_len = strlen((const char *)r.data);
+
+    /* 参数边界：零 ID / 空记录 / 空输出均拒绝 */
+    CHECK_EQ(Verthys_ReplaceRecord(h, 0u, &r, &new_id), VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_ReplaceRecord(h, old_id, NULL, &new_id), VERTHYS_ERR_INVALID);
+    CHECK_EQ(Verthys_ReplaceRecord(h, old_id, &r, NULL), VERTHYS_ERR_INVALID);
+
+    /* 不存在的旧 ID：NOTFOUND 且零副作用 */
+    CHECK_EQ(Verthys_ReplaceRecord(h, old_id + 100u, &r, &new_id),
+             VERTHYS_ERR_NOTFOUND);
+    CHECK_EQ(new_id, 0u);
+
+    /* 成功：新 ID 单调，旧记录不可读，新记录内容正确，存活记录仍单条 */
+    CHECK_EQ(Verthys_ReplaceRecord(h, old_id, &r, &new_id), VERTHYS_OK);
+    CHECK(new_id > old_id);
+    memset(&got, 0, sizeof(got));
+    CHECK_EQ(Verthys_GetRecord(h, old_id, &got), VERTHYS_ERR_NOTFOUND);
+    CHECK_EQ(Verthys_ClearRecordCache(h), VERTHYS_OK);
+    memset(&got, 0, sizeof(got));
+    CHECK_EQ(Verthys_GetRecord(h, new_id, &got), VERTHYS_OK);
+    CHECK_EQ(got.data_len, r.data_len);
+    CHECK_EQ(memcmp(got.data, r.data, r.data_len), 0);
+    CHECK_EQ(got.name_len, r.name_len);
+    CHECK_EQ(memcmp(got.name, r.name, r.name_len), 0);
+    CHECK_EQ(Verthys_GetSummaryCount(h, &count), VERTHYS_OK);
+    CHECK_EQ(count, 1u);
+
+    /* 已墓碑化的旧 ID 不可再次替换 */
+    CHECK_EQ(Verthys_ReplaceRecord(h, old_id, &r, &next_id),
+             VERTHYS_ERR_NOTFOUND);
+
+    /* 关闭重开：仍仅一条，且新内容持久、旧 ID 永久不可读 */
+    CHECK_EQ(Verthys_ClearRecordCache(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4Unlock(h, path, REC_PW, strlen(REC_PW)), VERTHYS_OK);
+    CHECK_EQ(Verthys_GetSummaryCount(h, &count), VERTHYS_OK);
+    CHECK_EQ(count, 1u);
+    memset(&got, 0, sizeof(got));
+    CHECK_EQ(Verthys_GetRecord(h, new_id, &got), VERTHYS_OK);
+    CHECK_EQ(got.data_len, r.data_len);
+    CHECK_EQ(memcmp(got.data, r.data, r.data_len), 0);
+    CHECK_EQ(Verthys_GetRecord(h, old_id, &got), VERTHYS_ERR_NOTFOUND);
+
+    CHECK_EQ(Verthys_ClearRecordCache(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_Deinit(h), VERTHYS_OK);
+    remove(path);
+    return 0;
+}
