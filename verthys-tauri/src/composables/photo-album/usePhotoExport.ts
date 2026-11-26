@@ -23,7 +23,7 @@ import {
   type PhotoMeta, type VencPhotoSpec,
 } from "../../lib/crypto";
 import { MAX_EXPORT_FILENAME_BYTES, MAX_EXPORT_SINGLE_BYTES, MIN_TOKEN_LENGTH, FILE_HASH_LEN } from "../../constants/crypto_const";
-import { blake3 } from "@noble/hashes/blake3";
+import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "../../utils/binary_codec";
 import type { PhotoEntry, ExportFormat } from "./types";
 import {

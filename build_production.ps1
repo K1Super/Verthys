@@ -22,7 +22,7 @@
 #   powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-SkipService] [-IncludeDriver] [-NoPause] [-Profile local|production]
 #
 # 参数:
-#   -Clean       构建前清理所有构建目录
+#   -Clean       显式全量清理构建产物与打包暂存（发布构建时使用）
 #   -SkipCore    跳过 C 核心构建（DLL 已存在时使用）
 #   -SkipWorker  跳过 worker 构建（二进制已存在时使用）
 #   -SkipTauri   跳过 Tauri 打包（仅构建组件时使用）
@@ -77,6 +77,10 @@ $CoreBuildDir = Join-Path $ScriptRoot "build"
 $WorkerReleaseExe = Join-Path $WorkerDir "target\release\verthys-worker.exe"
 $WorkerDebugExe   = Join-Path $WorkerDir "target\debug\verthys-worker.exe"
 $WorkerBundledExe = Join-Path $BinariesDir "verthys-worker-x86_64-pc-windows-msvc.exe"
+# worker 与 DLL 的构建期绑定记录：worker 在编译期把 DLL 全文件摘要固化为常量，
+# 只凭当前文件哈希无法判断 release worker 是否为本次 DLL 编译。-SkipWorker
+# 复用既有产物时必须回读该记录，否则会把旧 worker 与新 DLL 打进同一个包。
+$WorkerStampPath = Join-Path $CoreBuildDir "core\worker.artifacts.json"
 $SrcTauriDir  = Join-Path $VerthysTauriDir "src-tauri"
 $NodeModulesDir = Join-Path $VerthysTauriDir "node_modules"
 $KbTypesPatchDir = Join-Path $VerthysTauriDir "keyboard-types-patched"
@@ -121,6 +125,48 @@ function Assert-FileExists {
     }
     $info = Get-Item $Path
     Write-OK ("{0}: {1} ({2} KB)" -f $Description, $info.LastWriteTime, [math]::Round($info.Length / 1KB, 1))
+}
+
+# 记录/复核锁文件哈希：构建期间任何 cargo/npm 命令都不得改写锁文件，
+# 否则产物与提交的依赖解析不一致，本地生产构建缺少 CI 快照门禁兜底。
+function Get-VerthysLockSnapshot {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $entries = @(
+        @{ Name = "verthys-tauri/src-tauri/Cargo.lock"; Path = (Join-Path $Root "verthys-tauri\src-tauri\Cargo.lock") },
+        @{ Name = "verthys-tauri/verthys-worker/Cargo.lock"; Path = (Join-Path $Root "verthys-tauri\verthys-worker\Cargo.lock") },
+        @{ Name = "verthys-tauri/package-lock.json"; Path = (Join-Path $Root "verthys-tauri\package-lock.json") }
+    )
+    foreach ($entry in $entries) {
+        if (-not (Test-Path -LiteralPath $entry.Path -PathType Leaf)) {
+            throw ("lock file missing: {0}" -f $entry.Path)
+        }
+        [pscustomobject]@{
+            Name   = $entry.Name
+            Path   = $entry.Path
+            Sha256 = (Get-FileHash -LiteralPath $entry.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+}
+
+# 构建摘要：机器可读地固化版本、通道、素材哈希、发布者与安装包信息。
+# 不含任何密钥材料；正常路径写入失败按构建失败处理，catch 中降级为警告。
+function Write-VerthysBuildSummary {
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Summary,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $summaryDir = Join-Path $Root "build"
+    if (-not (Test-Path -LiteralPath $summaryDir)) {
+        New-Item -ItemType Directory -Path $summaryDir -Force | Out-Null
+    }
+    $summaryPath = Join-Path $summaryDir "build-summary.json"
+    $tmpPath = "$summaryPath.tmp"
+    $json = $Summary | ConvertTo-Json -Depth 8
+    [System.IO.File]::WriteAllText($tmpPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $tmpPath -Destination $summaryPath -Force
+    return $summaryPath
 }
 
 # 以独立进程运行签名宿主并捕获输出。初始化可能写入用户态持久状态，
@@ -237,42 +283,86 @@ function Invoke-VerthysCallerAuthGate {
     }
 }
 
-# ========== 预清理 ==========
-if ($Clean) {
-    Write-Stage "预清理：移除所有构建目录"
-    if (Test-Path $CoreBuildDir) {
-        Remove-Item -Recurse -Force $CoreBuildDir
-        Write-Step "已清理: $CoreBuildDir"
-    }
-    $workerTarget = Join-Path $WorkerDir "target"
-    if (Test-Path $workerTarget) {
-        Remove-Item -Recurse -Force $workerTarget
-        Write-Step "已清理: $workerTarget"
-    }
-    $tauriTarget = Join-Path $VerthysTauriDir "src-tauri\target"
-    if (Test-Path $tauriTarget) {
-        Remove-Item -Recurse -Force $tauriTarget
-        Write-Step "已清理: $tauriTarget"
-    }
+# ========== 构建互斥锁 ==========
+# 生产流程与 dev staging 都会写打包路径；互斥锁保证两者不交叉。
+. (Join-Path $ScriptsLibDir "build_lock.ps1")
+$script:BuildLock = $null
+
+# ========== 构建摘要初始化 ==========
+$versionFile = Join-Path $ScriptRoot "VERSION"
+$buildVersion = if (Test-Path -LiteralPath $versionFile -PathType Leaf) {
+    ([System.IO.File]::ReadAllText($versionFile)).Trim()
+} else {
+    ""
+}
+$script:BuildSummary = [ordered]@{
+    schema           = 1
+    result           = "unknown"
+    version          = $buildVersion
+    profile          = $Profile
+    clean            = $false
+    started_at       = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    finished_at      = ""
+    dll              = $null
+    worker           = $null
+    publisher_sha256 = ""
+    installer        = $null
+    error            = ""
 }
 
 # ========== 主流程（try/catch 包裹防止闪退） ==========
 # 任何未捕获的错误都会进入 catch 块，显示错误信息并暂停（双击运行场景）
 # -NoPause 参数可禁用暂停（CI 场景）
 try {
-# ========== 杀死僵尸进程 ==========
-# 注意：必须用 Stop-Process -ErrorAction SilentlyContinue，不能用 taskkill。
-# 原因：taskkill 是 native command，将错误写入 stderr；PowerShell 在
-# $ErrorActionPreference="Stop" 下会把 stderr 包装为 ErrorRecord 并立即触发
-# 终止错误（2>$null 重定向来不及生效）。当多个进程存在父子关系时，杀第一个
-# 进程可能连带终止子进程，导致杀第二个时 taskkill 报 "process not found"，
-# 从而触发脚本闪退。Stop-Process 是 PowerShell 原生 cmdlet，
-# -ErrorAction SilentlyContinue 能正确抑制"进程不存在"错误。
-Write-Stage "阶段 0: 清理僵尸进程与锁文件"
+# ========== 构建互斥锁获取 ==========
+# 与 dev staging 共用同一把仓库级锁；抢不到说明另一端仍在运行，拒绝并发。
+try {
+    $script:BuildLock = Enter-VerthysBuildLock -Root $ScriptRoot -Role production
+} catch {
+    throw ("已有构建流程正在运行，拒绝并发：{0}" -f $_.Exception.Message)
+}
+Write-OK "构建互斥锁已获取（production）"
 
-$zombies = Get-Process -Name "cargo","rustc","Verthys","verthys-worker" -ErrorAction SilentlyContinue
-if ($zombies) {
-    Write-Step "发现僵尸进程: $($zombies.Name -join ', ') (PID: $($zombies.Id -join ', '))"
+# ========== 预检：清理语义与跳过阶段 ==========
+# 默认增量构建；发布时显式 -Clean 全量重建。全量清理与跳过阶段互斥，
+# 避免"清空了又跳过构建"的半成品状态。
+$effectiveClean = [bool]$Clean
+if ($effectiveClean) {
+    $conflicts = @()
+    if ($SkipCore) { $conflicts += "-SkipCore" }
+    if ($SkipWorker) { $conflicts += "-SkipWorker" }
+    if ($SkipService) { $conflicts += "-SkipService" }
+    if ($conflicts.Count -gt 0) {
+        throw ("全量清理与跳过阶段互斥：{0}。需要跳过阶段请去掉 -Clean" -f ($conflicts -join ", "))
+    }
+}
+$script:BuildSummary.clean = $effectiveClean
+Write-OK ("构建模式: {0}" -f $(if ($effectiveClean) { "全量清理" } else { "增量" }))
+
+# ========== 阶段 0: 清理本仓库进程 ==========
+# 只终止可执行文件位于本仓库内的进程：全局结束 cargo/rustc 会误伤本机其他
+# 项目与 IDE 的编译进程；已安装的 Verthys 若在运行也不属于本仓库产物。
+# 必须先于预清理：运行中的宿主会锁定 target 下的文件，先删目录必然失败。
+Write-Stage "阶段 0: 清理本仓库进程"
+$repoProcessPrefix = [System.IO.Path]::GetFullPath($ScriptRoot).TrimEnd('\') + '\'
+$candidates = @(Get-Process -Name "cargo","rustc","Verthys","verthys-worker" -ErrorAction SilentlyContinue)
+$zombies = @()
+foreach ($candidate in $candidates) {
+    $candidatePath = $null
+    try { $candidatePath = $candidate.Path } catch { $candidatePath = $null }
+    if ([string]::IsNullOrEmpty($candidatePath)) {
+        Write-Step ("跳过无法定位路径的进程: {0} (PID {1})" -f $candidate.Name, $candidate.Id)
+        continue
+    }
+    $candidateFull = [System.IO.Path]::GetFullPath($candidatePath)
+    if ($candidateFull.StartsWith($repoProcessPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $zombies += $candidate
+    } else {
+        Write-Step ("跳过非本仓库进程: {0} (PID {1}, {2})" -f $candidate.Name, $candidate.Id, $candidateFull)
+    }
+}
+if ($zombies.Count -gt 0) {
+    Write-Step ("发现本仓库进程: {0} (PID: {1})" -f (($zombies | ForEach-Object Name) -join ', '), (($zombies | ForEach-Object Id) -join ', '))
     foreach ($z in $zombies) {
         try {
             Stop-Process -Id $z.Id -Force -ErrorAction Stop
@@ -282,9 +372,38 @@ if ($zombies) {
         }
     }
     Start-Sleep -Seconds 2
-    Write-OK "僵尸进程已清理"
+    Write-OK "本仓库进程已清理"
 } else {
-    Write-OK "无僵尸进程"
+    Write-OK "无本仓库进程"
+}
+
+# ========== 预清理（全量模式） ==========
+if ($effectiveClean) {
+    Write-Stage "预清理：移除构建产物与打包暂存"
+    $cleanDirs = @(
+        $CoreBuildDir,
+        (Join-Path $WorkerDir "target"),
+        (Join-Path $VerthysTauriDir "src-tauri\target"),
+        (Join-Path $SrcTauriDir "service-payload"),
+        (Join-Path $ScriptRoot "build_security_service")
+    )
+    foreach ($dir in $cleanDirs) {
+        if (Test-Path -LiteralPath $dir) {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
+            Write-Step "已清理: $dir"
+        }
+    }
+    $cleanFiles = @(
+        (Join-Path $SrcTauriDir "verthys.dll"),
+        (Join-Path $BinariesDir "verthys-worker-x86_64-pc-windows-msvc.exe"),
+        (Join-Path $SrcTauriDir "bundle-assets.json")
+    )
+    foreach ($file in $cleanFiles) {
+        if (Test-Path -LiteralPath $file) {
+            Remove-Item -LiteralPath $file -Force -ErrorAction Stop
+            Write-Step "已清理: $file"
+        }
+    }
 }
 
 $tauriTargetDir = Join-Path $VerthysTauriDir "src-tauri\target"
@@ -326,6 +445,11 @@ if ($LASTEXITCODE -ne 0) {
     throw "Version carrier verification failed after sync"
 }
 Write-OK "版本载体已与根 VERSION 同步"
+
+# 锁文件基线：版本同步之后再测量，排除版本写入这一预期变更。
+# 构建期间 cargo/npm 若改写锁文件，产物将与提交的依赖解析不一致。
+$script:LockSnapshot = @(Get-VerthysLockSnapshot -Root $ScriptRoot)
+Write-OK ("锁文件基线已记录: {0}" -f (($script:LockSnapshot | ForEach-Object { $_.Name }) -join ", "))
 
 # ========== 加载构建环境 ==========
 Write-Stage "阶段 0.5: 加载构建环境"
@@ -452,6 +576,7 @@ Write-OK "Cargo.lock 补丁已确认（本地 path 补丁生效）"
 # production 必须有可用发布者证书；local 缺少证书时显式关闭调用方认证，
 # 产物标记为不可分发，禁止把未签名构建当成发布候选。
 $script:signing = Resolve-VerthysReleaseSigning -Required:($Profile -eq "production")
+$script:BuildSummary.publisher_sha256 = [string]$script:signing.PublisherSha256
 if (-not $script:signing.Enabled) {
     Write-Host "[sign] local profile 未提供签名证书：本次产物不启用调用方认证、不含 Authenticode，禁止分发" -ForegroundColor Yellow
 }
@@ -645,6 +770,26 @@ if (-not $SkipWorker) {
         Write-OK "verthys-worker.exe 已签名，发布者指纹=$($script:signing.PublisherSha256)"
     }
 
+    # 记录 worker 与 DLL 的构建期绑定（签名后字节）。
+    # -SkipWorker 路径回读该记录：任何一侧字节变化都拒绝复用既有 worker。
+    $boundDllHash = (Get-FileHash -LiteralPath $script:actualCoreDll -Algorithm SHA256).Hash.ToLowerInvariant()
+    $boundWorkerHash = (Get-FileHash -LiteralPath $WorkerReleaseExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    $workerStamp = [ordered]@{
+        schema        = 1
+        dll_sha256    = $boundDllHash
+        worker_sha256 = $boundWorkerHash
+        built_at      = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    }
+    $stampDir = Split-Path -Parent $WorkerStampPath
+    if (-not (Test-Path -LiteralPath $stampDir)) {
+        New-Item -ItemType Directory -Path $stampDir -Force | Out-Null
+    }
+    [System.IO.File]::WriteAllText(
+        $WorkerStampPath,
+        ($workerStamp | ConvertTo-Json -Depth 4),
+        (New-Object System.Text.UTF8Encoding($false)))
+    Write-OK "worker 绑定记录已刷新: $WorkerStampPath"
+
     # 同时构建 debug 版本（开发环境使用）
     Write-Step "cargo build (debug, 供开发环境)"
     Push-Location $WorkerDir
@@ -664,87 +809,49 @@ if (-not $SkipWorker) {
 } else {
     Write-Stage "阶段 2/4: 跳过 worker 构建（-SkipWorker）"
     Assert-FileExists $WorkerReleaseExe "verthys-worker.exe (已有)"
-}
-
-# ========== 阶段 3: 复制 worker 二进制与 DLL 到打包位置 ==========
-Write-Stage "阶段 3/4: 部署 worker 二进制与 DLL（binaries/ + src-tauri/ + Tauri target）"
-
-if (-not (Test-Path $BinariesDir)) {
-    New-Item -ItemType Directory -Path $BinariesDir -Force | Out-Null
-    Write-Step "创建 binaries/ 目录"
-}
-
-# 3.1 复制到 binaries/（供 Tauri externalBin 打包）
-Copy-Item -Path $WorkerReleaseExe -Destination $WorkerBundledExe -Force
-Write-OK "已复制: verthys-worker.exe -> binaries/verthys-worker-x86_64-pc-windows-msvc.exe"
-
-Assert-FileExists $WorkerBundledExe "worker 打包二进制"
-
-# 3.1.1 复制 DLL 到 src-tauri/（供 Tauri resources 打包）
-# tauri.conf.json 中 resources: ["verthys.dll"]，Tauri 从 src-tauri/ 目录查找
-# 如果不拷贝，Tauri 构建时会因找不到文件而失败
-$DllTarget = Join-Path $SrcTauriDir "verthys.dll"
-Copy-Item -Path $script:actualCoreDll -Destination $DllTarget -Force
-Write-OK "已复制: verthys.dll -> src-tauri/verthys.dll"
-Assert-FileExists $DllTarget "DLL 打包副本"
-
-# 3.2 同步到 Tauri target 目录（防止开发模式 dev 落入旧版 worker 副本）
-# src-tauri/target/{debug,release}/ 下可能残留旧版 verthys-worker.exe；
-# resolve_worker_path 在开发环境优先查找 ../../../verthys-worker/target/，
-# 但 fallback 会命中 target 目录，不同步会用到过期二进制并触发
-# "worker 就绪信号超时"。
-$tauriTargetRoot = Join-Path $VerthysTauriDir "src-tauri\target"
-$tauriDebugTarget = Join-Path $tauriTargetRoot "debug\verthys-worker.exe"
-$tauriReleaseTarget = Join-Path $tauriTargetRoot "release\verthys-worker.exe"
-
-# 同步 release 副本
-if (Test-Path (Split-Path $tauriReleaseTarget -Parent)) {
-    Copy-Item -Path $WorkerReleaseExe -Destination $tauriReleaseTarget -Force
-    Write-OK "已同步 release worker 到 Tauri target: $tauriReleaseTarget"
-}
-
-# 同步 debug 副本（若 debug 目录存在且 debug worker 也已构建）
-# 记录 debug target 实际使用的源文件，供哈希校验时比对
-$debugTargetSource = $null
-if (Test-Path (Split-Path $tauriDebugTarget -Parent)) {
-    if (Test-Path $WorkerDebugExe) {
-        Copy-Item -Path $WorkerDebugExe -Destination $tauriDebugTarget -Force
-        Write-OK "已同步 debug worker 到 Tauri target: $tauriDebugTarget"
-        $debugTargetSource = $WorkerDebugExe
-    } else {
-        # debug worker 未构建，使用 release 副本顶替（保证 dev 模式可用）
-        Copy-Item -Path $WorkerReleaseExe -Destination $tauriDebugTarget -Force
-        Write-OK "已用 release worker 顶替 Tauri target debug: $tauriDebugTarget"
-        $debugTargetSource = $WorkerReleaseExe
+    # 复用既有 worker 前必须证明它与当前 DLL 是同一轮构建：worker 在编译期
+    # 固化了 DLL 全文件摘要，旧 worker + 新 DLL 会在启动握手阶段直接失败。
+    if (-not (Test-Path -LiteralPath $WorkerStampPath -PathType Leaf)) {
+        throw "缺少 worker 绑定记录: $WorkerStampPath（去掉 -SkipWorker 重新构建 worker）"
     }
+    $skipStamp = Get-Content -LiteralPath $WorkerStampPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $skipDllHash = (Get-FileHash -LiteralPath $script:actualCoreDll -Algorithm SHA256).Hash.ToLowerInvariant()
+    $skipWorkerHash = (Get-FileHash -LiteralPath $WorkerReleaseExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ([string]$skipStamp.dll_sha256 -ne $skipDllHash) {
+        throw ("worker 绑定的 DLL 已变化（绑定={0} 当前={1}）：去掉 -SkipWorker 重新构建 worker" -f
+            ([string]$skipStamp.dll_sha256).Substring(0, 12), $skipDllHash.Substring(0, 12))
+    }
+    if ([string]$skipStamp.worker_sha256 -ne $skipWorkerHash) {
+        throw ("worker 产物已被改动（绑定={0} 当前={1}）：去掉 -SkipWorker 重新构建 worker" -f
+            ([string]$skipStamp.worker_sha256).Substring(0, 12), $skipWorkerHash.Substring(0, 12))
+    }
+    Write-OK "worker 绑定记录校验通过"
 }
 
-# 3.3 哈希校验：确认 binaries/ 与 Tauri target 副本一致（防止拷贝失败导致哈希漂移）
+# ========== 阶段 3: 部署打包素材（单一生产者） ==========
+# DLL、worker、Tauri target 同步与清单写入统一由
+# scripts/build/stage_bundle_assets.ps1 完成；build_production、build_dev 与
+# CI 共用同一实现，避免三条链路各自漂移。
+Write-Stage "阶段 3/4: 部署打包素材（binaries/ + src-tauri/ + Tauri target）"
+$debugWorkerSource = if (Test-Path -LiteralPath $WorkerDebugExe -PathType Leaf) { $WorkerDebugExe } else { "" }
+$stageResult = & (Join-Path $ScriptsDir "build\stage_bundle_assets.ps1") `
+    -Channel production `
+    -DllSource $script:actualCoreDll `
+    -WorkerSource $WorkerReleaseExe `
+    -ContractPath (Join-Path $CoreBuildDir "core\verthys.artifacts.json") `
+    -Producer "build_production.ps1" `
+    -SyncTargets production `
+    -WorkerDebugSource $debugWorkerSource `
+    -RepoRoot $ScriptRoot
+$DllTarget = $stageResult.DllPath
+Write-OK ("打包素材已部署: dll={0} worker={1}" -f $stageResult.DllSha256.Substring(0, 12), $stageResult.WorkerSha256.Substring(0, 12))
+$script:BuildSummary.dll = [ordered]@{ path = $stageResult.DllPath; sha256 = $stageResult.DllSha256 }
+$script:BuildSummary.worker = [ordered]@{ path = $stageResult.WorkerPath; sha256 = $stageResult.WorkerSha256 }
+
+# 供后续阶段复核使用
 function Get-FileSha256 {
     param([string]$Path)
-    $h = Get-FileHash -Algorithm SHA256 -Path $Path
-    return $h.Hash.ToLower()
-}
-
-$srcHash = Get-FileSha256 $WorkerReleaseExe
-foreach ($target in @($WorkerBundledExe, $tauriReleaseTarget, $tauriDebugTarget)) {
-    if (Test-Path $target) {
-        $tgtHash = Get-FileSha256 $target
-        # debug target 可能使用 debug 或 release 源，按实际拷贝源校验
-        $expectedHash = if ($target -eq $tauriDebugTarget -and $debugTargetSource) {
-            Get-FileSha256 $debugTargetSource
-        } else {
-            $srcHash
-        }
-        if ($tgtHash -eq $expectedHash) {
-            Write-OK ("哈希一致: {0}" -f (Split-Path $target -Leaf))
-        } else {
-            $leafName = Split-Path $target -Leaf
-            $failMsg = "哈希漂移: $leafName (expected=$($expectedHash.Substring(0,12)), actual=$($tgtHash.Substring(0,12)))"
-            Write-Fail $failMsg
-            throw "worker 二进制哈希不一致: $target"
-        }
-    }
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
 # ========== 阶段 3.6: 构建并分发 P2 独立安全服务 ==========
@@ -865,9 +972,36 @@ if (-not $SkipService) {
     }
 } else {
     Write-Stage "阶段 3.6: 跳过 P2 独立安全服务（-SkipService）"
+    # 复用既有载荷必须能证明它与服务产物一致；否则上一轮载荷会在无人察觉时
+    # 被打进安装包（该开关与 -Clean 互斥）。
+    $serviceArtifactDir = Join-Path $ScriptRoot "build\security-service"
+    $serviceArtifactsPath = Join-Path $serviceArtifactDir "security-service.artifacts.json"
+    $payloadDir = Join-Path $SrcTauriDir "service-payload"
+    $payloadService = Join-Path $payloadDir "VerthysSecuritySvc.exe"
+    if (-not (Test-Path -LiteralPath $serviceArtifactsPath -PathType Leaf)) {
+        throw "缺少服务产物记录: $serviceArtifactsPath（去掉 -SkipService 重新构建）"
+    }
+    if (-not (Test-Path -LiteralPath $payloadService -PathType Leaf)) {
+        throw "缺少服务载荷: $payloadService（去掉 -SkipService 重新构建）"
+    }
+    $serviceArtifacts = Get-Content -LiteralPath $serviceArtifactsPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $payloadHash = Get-FileSha256 $payloadService
+    $serviceRecordedHash = [string]$serviceArtifacts.service.sha256
+    if ($payloadHash -ne $serviceRecordedHash) {
+        throw ("服务载荷与产物记录不一致（载荷={0} 记录={1}）：去掉 -SkipService 重新构建" -f
+            $payloadHash.Substring(0, 12), $serviceRecordedHash.Substring(0, 12))
+    }
+    if ($script:signing.Enabled) {
+        $payloadCa = Join-Path $payloadDir "VerthysRootCA.cer"
+        if (-not (Test-Path -LiteralPath $payloadCa -PathType Leaf)) {
+            throw "缺少根 CA 载荷: $payloadCa（去掉 -SkipService 重新构建）"
+        }
+    }
+    Write-OK "复用既有服务载荷校验通过（与 security-service.artifacts.json 一致）"
 }
 
 # ========== 阶段 4: 构建 Tauri 应用 ==========
+$TauriBuilt = $false
 if (-not $SkipTauri) {
     Write-Stage "阶段 4/4: 构建 Tauri 应用（NSIS 安装包）"
 
@@ -1082,6 +1216,7 @@ if (-not $SkipTauri) {
         Write-Fail "Tauri 构建失败 (exit=$tauriExit)"
         throw "Tauri 构建失败 (exit=$tauriExit)"
     }
+    $TauriBuilt = $true
 
     # 打包器 signCommand 只有在 bundle type 补丁之后执行，安装包内嵌的才是
     # 有效签名的主程序；被忽略时运行期调用方认证会拒绝启动，构建必须在此终止。
@@ -1280,6 +1415,78 @@ if (Test-Path $WorkerBundledExe) {
     $allOk = $false
 }
 
+# 打包素材清单：证明打包路径上的字节属于生产通道，且 worker 与 DLL 配对。
+# build.rs 在编译期重复同一组校验；此处覆盖 -SkipTauri 场景并留下可见结论。
+$bundleManifestPath = Join-Path $SrcTauriDir "bundle-assets.json"
+if (Test-Path -LiteralPath $bundleManifestPath -PathType Leaf) {
+    $bundleManifest = Get-Content -LiteralPath $bundleManifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    # 契约文件由核心构建/签名链在 Tauri 阶段重新生成（时间戳与签名基准会
+    # 刷新），清单中的契约哈希必须在最终校验前同步；DLL 与 worker 的
+    # 字节配对仍按原清单严格比对。
+    $contractPath = Join-Path $CoreBuildDir "core\verthys.artifacts.json"
+    if (Test-Path -LiteralPath $contractPath -PathType Leaf) {
+        $bundleManifest.contract.sha256 = Get-FileSha256 $contractPath
+        ($bundleManifest | ConvertTo-Json -Depth 8) |
+            Set-Content -LiteralPath $bundleManifestPath -Encoding UTF8
+    }
+    $manifestDllHash = Get-FileSha256 $DllTarget
+    $manifestWorkerHash = Get-FileSha256 $WorkerBundledExe
+    $manifestContractHash = Get-FileSha256 (Join-Path $CoreBuildDir "core\verthys.artifacts.json")
+    $manifestProblems = @()
+    if ([string]$bundleManifest.channel -ne "production") {
+        $manifestProblems += ("channel={0} producer={1}" -f $bundleManifest.channel, $bundleManifest.producer)
+    }
+    if ([string]$bundleManifest.dll.sha256 -ne $manifestDllHash) {
+        $manifestProblems += ("dll 清单={0} 实际={1}" -f $bundleManifest.dll.sha256, $manifestDllHash)
+    }
+    if ([string]$bundleManifest.worker.sha256 -ne $manifestWorkerHash) {
+        $manifestProblems += ("worker 清单={0} 实际={1}" -f $bundleManifest.worker.sha256, $manifestWorkerHash)
+    }
+    if ([string]$bundleManifest.worker.dll_sha256 -ne $manifestDllHash) {
+        $manifestProblems += ("worker 绑定 DLL={0} 实际={1}" -f $bundleManifest.worker.dll_sha256, $manifestDllHash)
+    }
+    if ([string]$bundleManifest.contract.sha256 -ne $manifestContractHash) {
+        $manifestProblems += ("契约清单={0} 实际={1}" -f $bundleManifest.contract.sha256, $manifestContractHash)
+    }
+    if ($manifestProblems.Count -gt 0) {
+        Write-Fail ("打包素材清单与产物不一致: {0}" -f ($manifestProblems -join "; "))
+        Write-Step ("清单写入者={0}；清单时间={1}；DLL 时间={2}；worker 时间={3}" -f
+            $bundleManifest.producer,
+            (Get-Item -LiteralPath $bundleManifestPath).LastWriteTime,
+            (Get-Item -LiteralPath $DllTarget).LastWriteTime,
+            (Get-Item -LiteralPath $WorkerBundledExe).LastWriteTime)
+        $allOk = $false
+    } else {
+        Write-OK "打包素材清单校验通过（channel=production，worker 与 DLL 配对）"
+    }
+} else {
+    Write-Fail "打包素材清单缺失: $bundleManifestPath"
+    $allOk = $false
+}
+
+# 安装器输入核验：Tauri 生成的 NSIS 脚本按绝对路径嵌入打包素材。
+# 构建结束后确认脚本引用的正是清单校验过的两个路径，证明安装包编译期
+# 读取的是受门禁保护的字节，而不是其他残留副本。
+if ($TauriBuilt) {
+    $nsisScripts = @(Get-ChildItem -Path (Join-Path $SrcTauriDir "target\release\nsis") `
+            -Recurse -Filter "installer.nsi" -File -ErrorAction SilentlyContinue)
+    if ($nsisScripts.Count -eq 0) {
+        Write-Fail "未找到 NSIS 脚本，无法核验安装器输入"
+        $allOk = $false
+    } else {
+        $nsisText = Get-Content -LiteralPath $nsisScripts[0].FullName -Raw -ErrorAction Stop
+        $expectedDllPath = [System.IO.Path]::GetFullPath($DllTarget)
+        $expectedWorkerPath = [System.IO.Path]::GetFullPath($WorkerBundledExe)
+        if ($nsisText.IndexOf($expectedDllPath, [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+            $nsisText.IndexOf($expectedWorkerPath, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            Write-Fail "NSIS 脚本未引用打包素材清单对应的文件（安装器可能嵌入其他副本）"
+            $allOk = $false
+        } else {
+            Write-OK "NSIS 脚本引用路径与打包素材清单一致"
+        }
+    }
+}
+
 # 独立安全服务产物与载荷
 if (-not $SkipService) {
     $p2Dir = Join-Path $ScriptRoot "build\security-service"
@@ -1374,36 +1581,47 @@ if (-not $SkipService) {
     }
 }
 
-# NSIS 安装包
+# NSIS 安装包：只认根 VERSION 对应的精确文件名，历史残留不参与本次发布
 $nsisDir = Join-Path $VerthysTauriDir "src-tauri\target\release\bundle\nsis"
-if (Test-Path $nsisDir) {
-    $installers = Get-ChildItem $nsisDir -Filter "*.exe" -ErrorAction SilentlyContinue
-    if ($installers) {
-        foreach ($inst in $installers) {
-            Write-OK ("安装包: {0} ({1} MB)" -f $inst.Name, [math]::Round($inst.Length / 1MB, 2))
-        }
+$productVersion = ([System.IO.File]::ReadAllText((Join-Path $ScriptRoot "VERSION"))).Trim()
+$installerName = "Verthys_${productVersion}_x64-setup.exe"
+$expectedInstaller = Join-Path $nsisDir $installerName
+if ($TauriBuilt) {
+    if (-not (Test-Path $nsisDir)) {
+        Write-Fail "NSIS 输出目录不存在"
+        $allOk = $false
+    } elseif (Test-Path -LiteralPath $expectedInstaller -PathType Leaf) {
+        $expectedInfo = Get-Item -LiteralPath $expectedInstaller
+        Write-OK ("本次安装包: {0} ({1} MB)" -f $expectedInfo.Name, [math]::Round($expectedInfo.Length / 1MB, 2))
     } else {
-        Write-Fail "NSIS 安装包未生成"
+        Write-Fail ("未找到本次版本安装包: {0}" -f $installerName)
         $allOk = $false
     }
 } else {
-    if (-not $SkipTauri) {
-        Write-Fail "NSIS 输出目录不存在"
-        $allOk = $false
+    Write-Step "跳过安装包校验（-SkipTauri 未执行打包）"
+}
+if (Test-Path $nsisDir) {
+    $staleInstallers = @(Get-ChildItem $nsisDir -Filter "*.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne $installerName })
+    if ($staleInstallers.Count -gt 0) {
+        Write-Step ("历史安装包（未参与本次发布）: {0}" -f (($staleInstallers | ForEach-Object Name) -join ", "))
     }
 }
 
 # 更新发布物料：签名清单 + 安装包副本 + 账本
 if (-not $SkipTauri -and $allOk -and (Test-Path $nsisDir)) {
-    # 目录会残留历史安装包；必须按根 VERSION 精确选取，否则会把旧包当作新版本发布。
-    $productVersion = ([System.IO.File]::ReadAllText((Join-Path $ScriptRoot "VERSION"))).Trim()
-    $installerName = "Verthys_${productVersion}_x64-setup.exe"
+    # 安装包名已在阶段 5 按根 VERSION 精确计算，这里复用同一结果。
     $installer = Get-Item (Join-Path $nsisDir $installerName) -ErrorAction SilentlyContinue
     $signature = if ($installer) { Get-Item ("{0}.sig" -f $installer.FullName) -ErrorAction SilentlyContinue } else { $null }
     if (-not $installer -or -not $signature) {
         Write-Fail "missing installer or signature for release artifacts"
         $allOk = $false
     } else {
+        $script:BuildSummary.installer = [ordered]@{
+            path      = $installer.FullName
+            sha256    = (Get-FileSha256 $installer.FullName)
+            signature = $signature.FullName
+        }
         if ($Profile -eq "production") {
             try {
                 Assert-VerthysAuthenticodeSignature `
@@ -1448,11 +1666,31 @@ if (-not $SkipTauri -and $allOk -and (Test-Path $nsisDir)) {
     }
 }
 
+# 锁文件复核：构建期间 cargo/npm 不得改写锁文件
+$currentLocks = @(Get-VerthysLockSnapshot -Root $ScriptRoot)
+$lockDrift = @()
+foreach ($baseline in $script:LockSnapshot) {
+    $current = $currentLocks | Where-Object { $_.Name -eq $baseline.Name } | Select-Object -First 1
+    if ($null -eq $current -or $current.Sha256 -ne $baseline.Sha256) {
+        $lockDrift += $baseline.Name
+    }
+}
+if ($lockDrift.Count -gt 0) {
+    Write-Fail ("构建期间锁文件被改写: {0}" -f ($lockDrift -join ", "))
+    $allOk = $false
+} else {
+    Write-OK "锁文件在构建期间未变更"
+}
+
 # 清理锁文件
 Get-ChildItem $tauriTargetDir -Filter ".cargo-lock" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 if ($allOk) {
+    $script:BuildSummary.result = "success"
+    $script:BuildSummary.finished_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $summaryPath = Write-VerthysBuildSummary -Summary $script:BuildSummary -Root $ScriptRoot
+    Write-OK ("构建摘要: {0}" -f $summaryPath)
     Write-Host "========================================" -ForegroundColor Green
     Write-Host "  全部构建成功！" -ForegroundColor Green
     Write-Host "========================================" -ForegroundColor Green
@@ -1476,11 +1714,22 @@ if ($allOk) {
     Write-Host "完整错误信息：" -ForegroundColor Yellow
     Write-Host "  $_" -ForegroundColor Yellow
     Write-Host ""
+    $failureMessage = [string]$_.Exception.Message
+    try {
+        $script:BuildSummary.result = "failed"
+        $script:BuildSummary.error = $failureMessage
+        $script:BuildSummary.finished_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $null = Write-VerthysBuildSummary -Summary $script:BuildSummary -Root $ScriptRoot
+    } catch {
+        Write-Host "  [warn] 构建摘要写入失败: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
     if (-not $NoPause) {
         Write-Host "按 Enter 键退出..." -ForegroundColor Cyan
         Read-Host | Out-Null
     }
     exit 1
+} finally {
+    Exit-VerthysBuildLock -Lock $script:BuildLock
 }
 
 # 成功结束：双击运行场景下暂停以便查看结果，CI 场景（-NoPause）直接退出

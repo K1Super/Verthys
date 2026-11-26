@@ -49,6 +49,8 @@ add_executable(verthys_tests
     index/test_store.c
     index/test_repo.c
     index/test_repo_scan.c
+    index/test_compact.c
+    index/test_delete_scrub.c
     api/test_api_container.c
     api/test_api_modules.c
     api/test_api_pcr.c

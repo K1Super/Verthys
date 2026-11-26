@@ -109,6 +109,7 @@ typedef enum {
 #define VTY_DOMAIN_HEADER      "verthys/v4/header"
 #define VTY_DOMAIN_RECOVERY    "verthys/v4/recovery"
 #define VTY_DOMAIN_RECORD      "verthys/v4/record"
+#define VTY_DOMAIN_RECORD_KEY  "verthys/v4/record-key"
 #define VTY_DOMAIN_NAME        "verthys/v4/name"
 #define VTY_DOMAIN_NAME_INDEX  "verthys/v4/name-index"
 #define VTY_DOMAIN_TYPE_INDEX  "verthys/v4/type-index"
@@ -144,6 +145,8 @@ typedef enum {
 #define VTY_KS_FILE   3u
 #define VTY_KS_CHUNK  4u
 #define VTY_KS_MODULE 5u
+#define VTY_KS_SCRUB  6u   /* 待擦除记录 ID 队列（删除事务内入队） */
+#define VTY_KS_MAINT  7u   /* 维护标记（旧墓碑一次性迁移完成等） */
 
 /* 模块表固定三槽；module_index 是公开枚举（photo/accounts/fileverthys），
  * 不依赖 Keyring 条目顺序。 */

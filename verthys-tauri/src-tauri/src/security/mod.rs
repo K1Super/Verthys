@@ -5,6 +5,7 @@
  *   - session_guard:    智能会话自动锁屏（mpsc 通道 + RAII 窗口 + 看门狗
  *                       + WTS 会话通知 + 显示器电源设置通知）
  *   - usb_guard:        移动存储安全强化（DPAPI 持久化 + 加盐哈希 + 影子休眠）
+ *   - webview_privacy:  WebView2 表单自动填充关闭与存量数据清除
  *   - module_whitelist: 模块白名单实时巡检（路径真实化 + 吊销检查 + 缓存）
  *   - cleanup:          程序痕迹、缓存与卸载残留防护（1 遍全零覆写 + TRIM）
  *   - brute_force:      登录暴力拦截（DPAPI 持久化 + 不可逆计数 + 速率限制）
@@ -33,6 +34,7 @@ pub mod module_whitelist;
 pub mod session_guard;
 pub mod trace_cleanup;
 pub mod usb_guard;
+pub mod webview_privacy;
 pub mod window_affinity;
 
 /// 清除可被外部注入的 WebView2 启动环境变量。

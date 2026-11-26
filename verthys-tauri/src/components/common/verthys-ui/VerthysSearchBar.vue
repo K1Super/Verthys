@@ -18,6 +18,7 @@
       <input
         class="search-input"
         :value="modelValue"
+        autocomplete="off"
         @input="onInput"
         :placeholder="placeholder"
         :aria-label="placeholder || '搜索'"

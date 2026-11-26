@@ -11,7 +11,7 @@ import { environmentTools } from "./tools/environment";
 import { logTools } from "./tools/logs";
 import { runtimeTools } from "./tools/runtime";
 
-export type DevToolGroupId = "logs" | "runtime" | "environment" | "actions";
+export type DevToolGroupId = "logs" | "runtime" | "environment";
 
 export interface DevToolGroup {
   id: DevToolGroupId;
@@ -66,7 +66,6 @@ export const DEV_TOOL_GROUPS: readonly DevToolGroup[] = [
   { id: "logs", label: "日志与诊断" },
   { id: "runtime", label: "运行时观测" },
   { id: "environment", label: "环境信息" },
-  { id: "actions", label: "界面动作" },
 ];
 
 /**

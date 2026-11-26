@@ -1,8 +1,7 @@
 /*
  * verthys_api_utils.h — 共享工具模块头
  *
- * 纯工具/辅助函数原型、宏与全局变量声明，供 verthys_api.c 及其他
- * 内部翻译单元复用。
+ * 纯工具/辅助函数原型、宏与全局变量声明，供 API 门面各翻译单元复用。
  *
  */
 #ifndef VERTHYS_API_UTILS_H
@@ -65,6 +64,21 @@ void ctx_zero_sensitive(struct VerthysContext *ctx);
 /* 批量导入推迟会话是否生效。读取 defer_anchor，调用方必须已持有
  * api_mutex（与 AddRecords/Lock 串行）；供非导入写入口拒绝判定。 */
 int verthys_bulk_defer_active(const struct VerthysContext *ctx);
+
+/* ---------- 上下文锁助手 ----------
+ * 统一 api_mutex 的获取/释放形态，避免各门面文件重复 #ifdef 样板。
+ * 非 Windows 为空操作。shared 用于只读快照，exclusive 用于写与状态切换。
+ * 调用方必须先完成句柄/状态校验，再进入锁区；SRWLOCK 独占不可递归。 */
+void verthys_ctx_lock_shared(struct VerthysContext *ctx);
+void verthys_ctx_unlock_shared(struct VerthysContext *ctx);
+void verthys_ctx_lock_exclusive(struct VerthysContext *ctx);
+void verthys_ctx_unlock_exclusive(struct VerthysContext *ctx);
+
+/* ---------- 内部错误码映射 ----------
+ * 全 API 唯一底表：VTY_E_INVALID 映射为 VERTHYS_ERR_INVALID。
+ * 记录域“不存在/墓碑”语义由 verthys_api_container_map 覆盖为 NOTFOUND，
+ * 锚点域错误码独立映射，均不得改写本底表。 */
+VerthysResult verthys_api_map_vty(int vty_rc);
 
 /* ---------- 格式检测 ----------
  * 读取文件头 8 字节判断格式：仅识别固定头 "VRTY"。

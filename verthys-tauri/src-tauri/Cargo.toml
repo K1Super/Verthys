@@ -84,7 +84,7 @@
 
 [package]
 name = "verthys-tauri"
-version = "4.6.6"
+version = "4.7.0"
 description = "Verthys 加密数据管理器"
 authors = ["Verthys"]
 edition = "2021"
@@ -180,6 +180,11 @@ proc-macro2 = { version = "=1.0.106", features = ["span-locations"] }
 # 异步日志管道
 crossbeam-channel = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
+# WebView2 自动填充策略：直接使用 wry 依赖树中的同一份 COM 绑定，版本必须
+# 与 tauri 2.11.5 的 wry 依赖一致，避免同一接口出现两份类型定义。
+webview2-com = "=0.38.2"
+# webview2-com 接口 cast 所需的 trait 来源，版本与上述绑定保持同一来源。
+windows-core = "=0.61.2"
 
 # ===== 安全与加密依赖（阶段 1 引入） =====
 zeroize = { version = "1.4", features = ["alloc"] }   # 敏感内存自动清零

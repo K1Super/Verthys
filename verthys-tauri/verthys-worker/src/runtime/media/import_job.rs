@@ -7,7 +7,7 @@
  * 已写入的块由宿主台账/WAL 与孤儿 GC 结算。
  */
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -59,6 +59,11 @@ struct FileCursor {
 /// 挂起拖死导入循环（与宿主 next 超时同量级）。
 const PREFETCH_WAIT: Duration = Duration::from_secs(300);
 
+/// 预取深度：缩略图解码是单文件关键路径上最重的 CPU 项，
+/// 单项即可接近宿主处理一张照片的耗时；2 路并行让下一张的准备
+/// 时间被当前文件处理完全覆盖，而不是每张都等待缩略图完成。
+const PREFETCH_DEPTH: usize = 2;
+
 /// 预取槽：索引固定为启动预取时的待打开位置，结果经单向通道回传。
 struct PrefetchSlot {
     index: usize,
@@ -72,8 +77,9 @@ struct Job {
     committed: HashSet<String>,
     next_path: usize,
     current: Option<FileCursor>,
-    /// 下一个文件的预取结果：宿主处理当前文件期间提前完成读盘/哈希/缩略图
-    prefetch: Option<PrefetchSlot>,
+    /// 接下来若干文件的预取结果：宿主处理当前文件期间提前完成
+    /// 读盘/哈希/缩略图；按索引有序消费。
+    prefetch: VecDeque<PrefetchSlot>,
     cancelled: bool,
     last_touch: Instant,
 }
@@ -119,7 +125,7 @@ pub(crate) fn handle_begin(req: &Request) -> Response {
             committed: req.committed_entry_keys.iter().cloned().collect(),
             next_path: 0,
             current: None,
-            prefetch: None,
+            prefetch: VecDeque::new(),
             cancelled: false,
             last_touch: Instant::now(),
         },
@@ -316,8 +322,21 @@ pub(crate) fn handle_end(req: &Request) -> Response {
 /// 命中时本函数只剩一次通道接收。预取索引与待打开位置不一致（取消/重排）
 /// 时丢弃并回退同步打开，语义与未启用预取完全一致。
 fn open_next(job: &mut Job) -> Result<Option<MediaNextPayload>, String> {
-    if let Some(slot) = job.prefetch.take() {
-        if slot.index == job.next_path && slot.index < job.paths.len() {
+    /* 过期槽（取消/重排后索引不再匹配）直接丢弃，不阻塞后续推进。 */
+    while let Some(front) = job.prefetch.front() {
+        if front.index < job.next_path {
+            job.prefetch.pop_front();
+        } else {
+            break;
+        }
+    }
+    let front_matches = job
+        .prefetch
+        .front()
+        .map(|slot| slot.index == job.next_path && slot.index < job.paths.len())
+        .unwrap_or(false);
+    if front_matches {
+        if let Some(slot) = job.prefetch.pop_front() {
             let index = slot.index;
             job.next_path += 1;
             let path = job.paths[index].clone();
@@ -384,34 +403,58 @@ fn open_next(job: &mut Job) -> Result<Option<MediaNextPayload>, String> {
     Ok(Some(next_payload(&job.job_id, "done")))
 }
 
-/// 为下一个待打开文件启动预取。
+/// 为后续待打开文件填充预取队列。
 ///
 /// 只在当前文件已打开后调用：宿主随后写块/索引的时间窗口正好覆盖预取的
-/// 读盘与解码成本。路径授权与去重判定与同步路径同一规则；线程启动失败
-/// 时静默回退同步打开，不影响导入语义。
+/// 读盘与解码成本。缩略图解码单文件即可接近一张照片的处理耗时，
+/// 因此允许 2 路并行预取；路径授权与去重判定与同步路径同一规则，
+/// 线程启动失败时静默回退同步打开，不影响导入语义。
 fn start_prefetch(job: &mut Job) {
-    if job.prefetch.is_some() || job.next_path >= job.paths.len() {
-        return;
-    }
-    let index = job.next_path;
-    let path = job.paths[index].clone();
-    if !path_grants::job_contains_for("photo_import", &job.job_id, &path) {
-        return;
-    }
-    if let Some(key) = stat_entry_key(Path::new(&path)) {
-        if job.committed.contains(&key) {
-            return; /* 去重命中：无需读盘解码 */
+    while job.prefetch.len() < PREFETCH_DEPTH {
+        let index = job.next_path + job.prefetch.len();
+        if index >= job.paths.len() {
+            return;
         }
+        let path = job.paths[index].clone();
+        if !path_grants::job_contains_for("photo_import", &job.job_id, &path) {
+            return;
+        }
+        if let Some(key) = stat_entry_key(Path::new(&path)) {
+            if job.committed.contains(&key) {
+                return; /* 去重命中：无需读盘解码 */
+            }
+        }
+        /* JPEG 走缩放解码，驻留内存很小，可 2 路并行；
+         * 其他格式需要整图解码，串行预取以把峰值内存限制在单张预算内。 */
+        if !is_jpeg_path(Path::new(&path)) && !job.prefetch.is_empty() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("photo-import-prefetch".into())
+            .spawn(move || {
+                /* 预取线程 panic 必须转成显式失败：否则接收方会一直等到
+                 * PREFETCH_WAIT 超时才推进，单张异常会拖住整批导入。 */
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    open_file(Path::new(&path))
+                }))
+                .unwrap_or_else(|_| Err("照片预取线程异常".to_string()));
+                let _ = tx.send(result);
+            });
+        if spawned.is_err() {
+            return;
+        }
+        job.prefetch.push_back(PrefetchSlot { index, rx });
     }
-    let (tx, rx) = std::sync::mpsc::channel();
-    let spawned = std::thread::Builder::new()
-        .name("photo-import-prefetch".into())
-        .spawn(move || {
-            let _ = tx.send(open_file(Path::new(&path)));
-        });
-    if spawned.is_ok() {
-        job.prefetch = Some(PrefetchSlot { index, rx });
-    }
+}
+
+/// JPEG 魔数判定：只有 JPEG 走缩放解码，可安全并行预取。
+fn is_jpeg_path(path: &Path) -> bool {
+    let mut head = [0u8; 2];
+    File::open(path)
+        .and_then(|mut file| file.read_exact(&mut head))
+        .is_ok()
+        && head == [0xFF, 0xD8]
 }
 
 /// 仅用元数据计算条目键；文件不可 stat 或为空时返回 None。
@@ -672,18 +715,21 @@ mod tests {
     fn prefetch_serves_next_file_in_order() {
         let dir = std::env::temp_dir().join(format!("vty-prefetch-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let a = dir.join("a.png");
-        let b = dir.join("b.png");
+        let a = dir.join("a.jpg");
+        let b = dir.join("b.jpg");
+        let c = dir.join("c.jpg");
         let img = image::RgbImage::from_fn(8, 8, |x, y| {
             image::Rgb([(x * 20) as u8, (y * 20) as u8, 128])
         });
         img.save(&a).unwrap();
         img.save(&b).unwrap();
+        img.save(&c).unwrap();
 
         let job_id = format!("prefetch-test-{}", std::process::id());
         let paths = vec![
             a.to_string_lossy().to_string(),
             b.to_string_lossy().to_string(),
+            c.to_string_lossy().to_string(),
         ];
         path_grants::authorize_job_target("photo_import", &job_id, &paths).unwrap();
 
@@ -693,20 +739,25 @@ mod tests {
             committed: HashSet::new(),
             next_path: 0,
             current: None,
-            prefetch: None,
+            prefetch: VecDeque::new(),
             cancelled: false,
             last_touch: Instant::now(),
         };
 
         assert!(open_next(&mut job).unwrap().is_none(), "首个文件应打开成功");
-        assert_eq!(job.current.as_ref().unwrap().name, "a.png");
-        assert!(job.prefetch.is_some(), "打开首文件后应启动下一文件预取");
+        assert_eq!(job.current.as_ref().unwrap().name, "a.jpg");
+        assert_eq!(job.prefetch.len(), 2, "打开首文件后应填满 2 路预取");
 
         // 模拟宿主写完首文件后继续拉取：预取结果直接就绪，不重复读盘
         job.current = None;
         assert!(open_next(&mut job).unwrap().is_none(), "预取命中应直接就绪");
-        assert_eq!(job.current.as_ref().unwrap().name, "b.png");
-        assert!(job.prefetch.is_none(), "末文件不产生预取");
+        assert_eq!(job.current.as_ref().unwrap().name, "b.jpg");
+        assert_eq!(job.prefetch.len(), 1, "消费一个槽后应只剩末文件");
+
+        job.current = None;
+        assert!(open_next(&mut job).unwrap().is_none(), "末文件应正常打开");
+        assert_eq!(job.current.as_ref().unwrap().name, "c.jpg");
+        assert!(job.prefetch.is_empty(), "末文件不产生预取");
 
         path_grants::revoke_job(&job_id);
         let _ = std::fs::remove_dir_all(&dir);

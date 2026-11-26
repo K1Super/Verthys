@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use zeroize::Zeroize;
 
-use super::ffi_types::VerthysRotateInfoC;
+use super::ffi_types::{VerthysCompactStatsC, VerthysRotateInfoC};
 
 /* 全库 DEK 轮换进度回调（C → Rust → stdout JSON 行）
  *
@@ -129,6 +129,113 @@ unsafe fn vty_rotate_progress_cb_inner(info: *const VerthysRotateInfoC) -> i32 {
         Ok(line) => line,
         Err(e) => {
             crate::log::init_diag!("[worker] 轮换进度签名失败，丢弃本条进度: {}", e);
+            return 0;
+        }
+    };
+    let stdout = io::stdout();
+    let mut lock = stdout.lock();
+    let _ = writeln!(lock, "{}", sealed);
+    let _ = lock.flush();
+    sealed.zeroize();
+    0
+}
+
+/* 空间压缩进度回调（C → Rust → stdout JSON 行）
+ *
+ * 与轮换进度同构：节流 200ms、阶段变化必写、取消事件按 200ms 检查。
+ * 仅统计计数与阶段，不含记录名/明文/密钥。 */
+static STORAGE_PROGRESS_LAST_MS: AtomicU64 = AtomicU64::new(0);
+static STORAGE_PROGRESS_LAST_STAGE: AtomicU32 = AtomicU32::new(0);
+static STORAGE_PROGRESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+#[cfg(windows)]
+static STORAGE_CANCEL_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+#[cfg(windows)]
+static STORAGE_CANCEL_LAST_CHECK_MS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+pub(crate) fn set_storage_cancel_handle(handle: *mut c_void) {
+    STORAGE_CANCEL_LAST_CHECK_MS.store(0, Ordering::Relaxed);
+    STORAGE_CANCEL_HANDLE.store(handle, Ordering::Relaxed);
+}
+
+pub(crate) fn clear_storage_cancel_handle() {
+    #[cfg(windows)]
+    STORAGE_CANCEL_HANDLE.store(std::ptr::null_mut(), Ordering::Relaxed);
+}
+
+#[cfg(windows)]
+fn storage_cancel_requested() -> bool {
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+    let handle = STORAGE_CANCEL_HANDLE.load(Ordering::Relaxed);
+    if handle.is_null() {
+        return false;
+    }
+    let now = storage_now_ms();
+    let last = STORAGE_CANCEL_LAST_CHECK_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 200 {
+        return false;
+    }
+    STORAGE_CANCEL_LAST_CHECK_MS.store(now, Ordering::Relaxed);
+    unsafe { WaitForSingleObject(handle, 0) == 0 }
+}
+
+fn storage_now_ms() -> u64 {
+    STORAGE_PROGRESS_START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
+pub(crate) unsafe extern "C" fn vty_storage_compact_progress_cb(
+    _user: *mut c_void,
+    info: *const VerthysCompactStatsC,
+) -> i32 {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vty_storage_compact_progress_cb_inner(info)
+    }));
+    match result {
+        Ok(rc) => rc,
+        Err(_) => {
+            crate::log::mark_panic_flag();
+            crate::log::init_diag!(
+                "[worker] vty_storage_compact_progress_cb 内部 panic 已捕获"
+            );
+            0
+        }
+    }
+}
+
+unsafe fn vty_storage_compact_progress_cb_inner(info: *const VerthysCompactStatsC) -> i32 {
+    if info.is_null() {
+        return 0;
+    }
+    let i = &*info;
+
+    #[cfg(windows)]
+    if storage_cancel_requested() {
+        crate::log::init_diag!("[worker] 空间压缩收到取消信号，终止本次压缩");
+        return 1;
+    }
+
+    let now = storage_now_ms();
+    let last_stage = STORAGE_PROGRESS_LAST_STAGE.load(Ordering::Relaxed);
+    let last_ms = STORAGE_PROGRESS_LAST_MS.load(Ordering::Relaxed);
+    if i.stage == last_stage && now.saturating_sub(last_ms) < 200 {
+        return 0;
+    }
+    STORAGE_PROGRESS_LAST_STAGE.store(i.stage, Ordering::Relaxed);
+    STORAGE_PROGRESS_LAST_MS.store(now, Ordering::Relaxed);
+
+    let json = format!(
+        r#"{{"ok":true,"op":"storage_compact_progress","stage":{},"before_bytes":{},"after_bytes":{},"reclaimed_bytes":{},"records":{},"chunks":{},"bytes":{},"live_bytes":{}}}"#,
+        i.stage, i.before_bytes, i.after_bytes, i.reclaimed_bytes,
+        i.records, i.chunks, i.bytes, i.live_bytes,
+    );
+    let mut sealed = match super::ipc_auth::seal_progress(&json) {
+        Ok(line) => line,
+        Err(e) => {
+            crate::log::init_diag!("[worker] 压缩进度签名失败，丢弃本条进度: {}", e);
             return 0;
         }
     };

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tauri::{Emitter, Manager, State};
 
-use crate::controller::worker_controller;
+use crate::controller::vault::worker_controller;
 use crate::state::AppState;
 use crate::util::audit_log::{AuditEventType, AuditResult};
 

@@ -3,9 +3,15 @@
 
   职责：
     1. 展示全部锚点与见证状态（ACTIVE/DEAD/TAMPERED/UNKNOWN）
-    2. 展示宿主扫描到的 UUID → 路径证据；扫描结果只作为证据，不自动删除
+    2. 展示宿主自动扫描到的 UUID → 路径证据与每个位置的覆盖率；
+       扫描结果只作为证据，不自动删除
     3. 通过二次确认触发“释放选中”或“回收失效”
     4. 明确告知：释放 ACTIVE/TAMPERED 后，仍存在的容器必须用恢复码重建锚点
+
+  扫描边界：
+    - 打开弹窗自动扫描容器目录、最近容器目录与自定义位置；
+    - 深度扫描仅在用户显式确认后触发，耗时较长且允许关闭窗口；
+    - 扫描不完整时禁用批量“勾选缺失”，避免把未覆盖位置误判为不存在
 
   安全边界：
     - 组件不自行决定“哪些可以删”，只按后端状态展示并要求用户显式选择
@@ -19,6 +25,7 @@
     role="alertdialog"
     aria-labelledby="anchor-manager-title"
     :persistent="busy"
+    scrollbar-hidden
     @close="close"
   >
     <div class="anchor-dialog">
@@ -57,15 +64,24 @@
         <button
           class="btn btn-neutral btn-compact"
           type="button"
-          :disabled="busy"
-          @click="pickRoots"
+          :disabled="busy || scanning"
+          @click="$emit('scan', { force: true })"
         >
-          扫描容器
+          重新扫描
         </button>
         <button
           class="btn btn-neutral btn-compact"
           type="button"
-          :disabled="busy || !scan"
+          :disabled="busy || scanning"
+          @click="pickRoots"
+        >
+          添加位置
+        </button>
+        <button
+          class="btn btn-neutral btn-compact"
+          type="button"
+          :disabled="busy || scanning || !canBulkSelect"
+          :title="canBulkSelect ? '' : '扫描完整后才可批量勾选'"
           @click="selectNotFound"
         >
           勾选缺失
@@ -73,28 +89,84 @@
         <button
           class="btn btn-destructive btn-compact"
           type="button"
-          :disabled="busy || deadCount === 0"
+          :disabled="busy || scanning || deadCount === 0"
           @click="pending = 'reclaim'"
         >
           回收失效
         </button>
+        <button
+          class="btn btn-neutral btn-compact"
+          type="button"
+          :disabled="busy || scanning"
+          @click="pending = 'deep'"
+        >
+          深度扫描
+        </button>
       </div>
       <p class="kv-hint">
-        仅 DEAD 可回收，即见证确定不存在的锚点；ACTIVE、TAMPERED、UNKNOWN 永不自动删除。
+        仅 DEAD 可回收；勾选缺失只选择使用中且未找到的锚点，见证异常/未知请逐条核对。扫描只读取容器固定头，不会打开或修改容器。
       </p>
 
       <Transition name="anchor-reveal">
-        <div v-if="scan" class="anchor-reveal">
+        <div v-if="show" class="anchor-reveal">
           <div class="anchor-reveal-body">
             <section class="kv-section">
-              <div class="kv-section-label">扫描证据</div>
-              <div class="kv-readout">
-                文件 {{ scan.files_seen }} · 命中 {{ scan.matched_count }} · 权限错误
-                {{ scan.permission_errors }}{{ scan.truncated ? " · 结果已截断" : "" }}
+              <div class="kv-section-label">
+                扫描范围
+                <span v-if="scanning" class="anchor-scan-state">扫描中</span>
               </div>
-              <p class="kv-hint">
-                扫描结果只是证据，不作为自动删除依据；未覆盖目录中的容器可能被显示为“未在扫描范围内找到”。
-              </p>
+              <div v-if="scanning" class="anchor-scan-line">
+                <span class="kv-readout anchor-scan-progress">{{ progressText }}</span>
+                <button
+                  class="btn btn-neutral btn-compact"
+                  type="button"
+                  @click="$emit('cancel-scan')"
+                >
+                  停止扫描
+                </button>
+              </div>
+              <template v-else-if="scan">
+                <div class="kv-readout">
+                  已知位置 {{ autoDirRoots.length }} · 已知容器 {{ knownFileRoots.length
+                  }}{{ knownFileMissing ? `（缺失 ${knownFileMissing}）` : "" }} · 文件
+                  {{ scan.files_seen }} · 命中 {{ scan.matched_count }} · 更新 {{ formatTime(scan.scanned_at) }}
+                </div>
+                <p v-if="scan.partial" class="kv-error">
+                  本次扫描未完成：{{ partialReason }}。批量勾选已停用，请重新扫描或手动逐条选择。
+                </p>
+                <p v-if="deepRoots.length" class="kv-readout">
+                  深度扫描：{{ deepCompleted }}/{{ deepRoots.length }} 个目录{{ deepIncomplete ? " · 部分未完成，可再次扫描" : "" }}
+                </p>
+                <ul v-if="visibleDirRoots.length" class="anchor-coverage">
+                  <li
+                    v-for="root in visibleDirRoots"
+                    :key="`${root.source}:${root.path}`"
+                    class="anchor-coverage-row"
+                  >
+                    <span class="anchor-coverage-source">{{ sourceLabel(root.source) }}</span>
+                    <span class="anchor-coverage-path" v-tip="root.path">{{ root.path }}</span>
+                    <span class="anchor-coverage-state" :class="rootStateClass(root)">
+                      {{ rootStateText(root) }}
+                    </span>
+                    <button
+                      v-if="root.source === 'custom'"
+                      class="btn btn-neutral btn-compact anchor-root-remove"
+                      type="button"
+                      :disabled="busy || scanning"
+                      @click="$emit('forget-root', root.path)"
+                    >
+                      移除
+                    </button>
+                  </li>
+                </ul>
+                <p v-if="hiddenDirRootCount > 0" class="kv-readout">
+                  另有 {{ hiddenDirRootCount }} 个位置
+                </p>
+                <p class="kv-hint">
+                  扫描结果只是证据，不作为自动删除依据；未在扫描范围内找到的锚点仍需逐条确认。
+                </p>
+              </template>
+              <p v-else class="kv-readout">正在准备扫描…</p>
             </section>
           </div>
         </div>
@@ -106,10 +178,10 @@
             <section
               class="kv-section"
               role="alertdialog"
-              :aria-label="pending === 'release' ? '确认释放' : '确认回收'"
+              :aria-label="pendingTitle"
               aria-live="assertive"
             >
-              <div class="kv-section-label">{{ pending === "release" ? "确认释放" : "确认回收" }}</div>
+              <div class="kv-section-label">{{ pendingTitle }}</div>
               <p v-if="pending === 'release'" class="kv-warn">
                 将释放 {{ selectedCount }} 个锚点。若对应容器仍存在，普通解锁会被拒绝，必须使用恢复码重新建立锚点。
               </p>
@@ -128,25 +200,34 @@
               <p v-if="pending === 'release'" class="kv-note">
                 已解锁会话在下次保存时会重新登记锚点；释放前建议先锁定容器。
               </p>
-              <p v-else class="kv-warn">
+              <p v-else-if="pending === 'reclaim'" class="kv-warn">
                 将回收 {{ deadCount }} 个 DEAD 锚点。ACTIVE/TAMPERED/UNKNOWN 不会被删除，仍在使用中的容器不受影响。
               </p>
+              <template v-else>
+                <p class="kv-warn">
+                  将扫描所有固定磁盘的顶级目录与当前用户桌面/文档/下载，跳过系统目录；耗时较长，结果只作为证据，不会自动释放锚点。
+                </p>
+                <p class="kv-note">
+                  扫描期间可以关闭窗口；已完成位置的证据会自动保留，未完成位置下次优先。
+                </p>
+              </template>
               <div class="kv-actions">
                 <button
                   class="btn btn-neutral btn-compact"
                   type="button"
-                  :disabled="busy"
+                  :disabled="busy || scanning"
                   @click="pending = null"
                 >
                   取消
                 </button>
                 <button
-                  class="btn btn-destructive btn-compact"
+                  class="btn btn-compact"
+                  :class="pending === 'deep' ? 'btn-neutral' : 'btn-destructive'"
                   type="button"
-                  :disabled="busy"
+                  :disabled="busy || scanning"
                   @click="confirmPending"
                 >
-                  确认
+                  {{ pending === "deep" ? "开始扫描" : "确认" }}
                 </button>
               </div>
             </section>
@@ -182,7 +263,7 @@
                     <input
                       type="checkbox"
                       :checked="selected.includes(a.uuid)"
-                      :disabled="busy"
+                      :disabled="busy || scanning"
                       :aria-label="`选择锚点 ${a.uuid}`"
                       @change="toggle(a.uuid)"
                     />
@@ -211,11 +292,11 @@
                   <!-- td 必须是 table-cell：flex 只能放在内层，直接设在 td 上会
                        让它退出表格布局，导致最后一列的宽度/行高与表头错位 -->
                   <div class="anchor-paths-stack">
-                    <template v-if="scanMap.get(a.uuid)?.length">
-                      <span v-for="p in scanMap.get(a.uuid)" :key="p" class="anchor-path">{{ p }}</span>
+                    <template v-if="evidencePaths(a.uuid)?.length">
+                      <span v-for="p in evidencePaths(a.uuid)" :key="p" class="anchor-path">{{ p }}</span>
                     </template>
                     <span v-else class="anchor-path anchor-path--missing">
-                      {{ scan ? "未在扫描范围内找到" : "尚未扫描" }}
+                      {{ scanning ? "正在扫描…" : scan ? "未在扫描范围内找到" : "尚未扫描" }}
                     </span>
                   </div>
                 </td>
@@ -254,7 +335,7 @@
         <button
           class="btn btn-destructive btn-compact"
           type="button"
-          :disabled="busy || selectedCount === 0"
+          :disabled="busy || scanning || selectedCount === 0"
           @click="requestRelease"
         >
           释放选中
@@ -271,7 +352,13 @@ import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
 import SfActionNode from "./SfActionNode.vue";
 import { useClipToast } from "../../composables/useClipToast";
 import { useToastCenter } from "../../composables/useToastCenter";
-import type { AnchorInfo, AnchorScanResult } from "../../types/verthys";
+import type { AnchorScanOptions } from "../../lib/verthys";
+import type {
+  AnchorInfo,
+  AnchorScanProgress,
+  AnchorScanResult,
+  AnchorScanRootReport,
+} from "../../types/verthys";
 
 const props = defineProps<{
   show: boolean;
@@ -279,6 +366,8 @@ const props = defineProps<{
   state: number;
   scan: AnchorScanResult | null;
   busy: boolean;
+  scanning: boolean;
+  scanProgress: AnchorScanProgress | null;
   error: string;
   notice: string;
 }>();
@@ -286,13 +375,15 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "refresh"): void;
-  (e: "scan", roots: string[]): void;
+  (e: "scan", options: AnchorScanOptions): void;
+  (e: "cancel-scan"): void;
+  (e: "forget-root", path: string): void;
   (e: "reclaim"): void;
   (e: "release", uuids: string[]): void;
 }>();
 
 const selected = ref<string[]>([]);
-const pending = ref<"release" | "reclaim" | null>(null);
+const pending = ref<"release" | "reclaim" | "deep" | null>(null);
 
 /* 复制走全项目统一的安全剪贴板通道：成功后提示并按时清空 */
 const { copyWithTimeout } = useClipToast("锚点 UUID 已复制");
@@ -323,15 +414,145 @@ const tamperedSelected = computed(() =>
 const scanMap = computed(() => {
   const map = new Map<string, string[]>();
   for (const entry of props.scan?.entries ?? []) {
-    map.set(entry.uuid, entry.paths);
+    map.set(entry.uuid.toLowerCase(), entry.paths);
   }
   return map;
 });
 
+function evidencePaths(uuid: string): string[] | undefined {
+  return scanMap.value.get(uuid.toLowerCase());
+}
+
 const unregistered = computed(() => {
-  const known = new Set(props.anchors.map((a) => a.uuid));
-  return (props.scan?.entries ?? []).filter((e) => !known.has(e.uuid));
+  const known = new Set(props.anchors.map((a) => a.uuid.toLowerCase()));
+  return (props.scan?.entries ?? []).filter(
+    (entry) => !known.has(entry.uuid.toLowerCase()),
+  );
 });
+
+const autoDirRoots = computed(
+  () =>
+    (props.scan?.roots ?? []).filter(
+      (root) =>
+        root.kind === "dir" &&
+        root.source !== "deep" &&
+        root.source !== "deep_user",
+    ),
+);
+const knownFileRoots = computed(
+  () => (props.scan?.roots ?? []).filter((root) => root.kind === "file"),
+);
+const knownFileMissing = computed(
+  () => knownFileRoots.value.filter((root) => !root.available).length,
+);
+const deepRoots = computed(
+  () =>
+    (props.scan?.roots ?? []).filter(
+      (root) => root.source === "deep" || root.source === "deep_user",
+    ),
+);
+const visibleDirRoots = computed(() => autoDirRoots.value.slice(0, 8));
+const hiddenDirRootCount = computed(() =>
+  Math.max(0, autoDirRoots.value.length - visibleDirRoots.value.length),
+);
+const deepCompleted = computed(
+  () => deepRoots.value.filter((root) => root.last_success_at > 0).length,
+);
+const deepIncomplete = computed(() =>
+  deepRoots.value.some(
+    (root) => root.deferred || !root.available || root.truncated,
+  ),
+);
+const deferredRoots = computed(
+  () => (props.scan?.roots ?? []).filter((root) => root.deferred),
+);
+
+/** 只有完整扫描才允许“勾选缺失”：截断或预算用尽时“未找到”不可靠。 */
+const canBulkSelect = computed(
+  () => !!props.scan && !props.scan.partial && !props.scanning,
+);
+
+const partialReason = computed(() => {
+  const parts: string[] = [];
+  if (deferredRoots.value.length) {
+    parts.push(`${deferredRoots.value.length} 个位置未扫描`);
+  }
+  if (props.scan?.truncated) {
+    parts.push("遍历被截断");
+  }
+  if (props.scan?.permission_errors) {
+    parts.push(`权限受限 ${props.scan.permission_errors}`);
+  }
+  if (props.scan?.other_errors) {
+    parts.push(`读取错误 ${props.scan.other_errors}`);
+  }
+  return parts.join(" · ") || "覆盖不完整";
+});
+
+const progressText = computed(() => {
+  const progress = props.scanProgress;
+  if (!progress || progress.phase === "collecting") {
+    return "正在收集扫描位置…";
+  }
+  if (progress.phase === "done") {
+    return "扫描完成";
+  }
+  const current = progress.current_path ? ` · ${progress.current_path}` : "";
+  return `位置 ${progress.roots_done}/${progress.roots_total}${current} · 文件 ${progress.files_seen} · 命中 ${progress.matched_count}`;
+});
+
+const pendingTitle = computed(() => {
+  if (pending.value === "release") return "确认释放";
+  if (pending.value === "reclaim") return "确认回收";
+  return "深度扫描";
+});
+
+function formatTime(seconds: number): string {
+  if (!seconds) return "尚未完成";
+  return new Date(seconds * 1000).toLocaleTimeString("zh-CN", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function sourceLabel(source: string): string {
+  switch (source) {
+    case "container":
+      return "容器目录";
+    case "recent":
+      return "最近位置";
+    case "custom":
+      return "自定义";
+    case "deep":
+      return "深度扫描";
+    case "deep_user":
+      return "深度扫描";
+    default:
+      return "位置";
+  }
+}
+
+function rootStateText(root: AnchorScanRootReport): string {
+  if (root.deferred) return "本次未扫描";
+  if (!root.available) return "位置不可用";
+  const limited = root.permission_errors + root.other_errors;
+  if (limited > 0) return `受限 ${limited}`;
+  if (root.truncated) return "扫描未完成";
+  return "正常";
+}
+
+function rootStateClass(root: AnchorScanRootReport): string {
+  if (
+    root.deferred ||
+    !root.available ||
+    root.truncated ||
+    root.permission_errors + root.other_errors > 0
+  ) {
+    return "is-alert";
+  }
+  return "is-ok";
+}
 
 watch(
   () => props.show,
@@ -366,27 +587,30 @@ function witnessLabel(witness: string): string {
 }
 
 function toggle(uuid: string) {
-  if (props.busy) return;
+  if (props.busy || props.scanning) return;
   selected.value = selected.value.includes(uuid)
     ? selected.value.filter((item) => item !== uuid)
     : [...selected.value, uuid];
 }
 
 /**
- * 按扫描证据勾选“未在扫描范围内找到”的锚点。
+ * 按扫描证据勾选“未在扫描范围内找到”的使用中锚点。
  *
- * 只改变勾选，不执行释放；用户仍需阅读确认文案并二次确认。扫描结果可能
- * 不覆盖离线磁盘/网络盘，确认文案会明确提示这一限制。
+ * 只改变勾选，不执行释放；DEAD 交给“回收失效”，TAMPERED/UNKNOWN 不批量勾选，
+ * 必须逐条阅读确认文案后手动选择。
  */
 function selectNotFound() {
-  if (!props.scan || props.busy) return;
+  if (!canBulkSelect.value || props.busy) return;
   const found = new Set(
-    props.scan.entries
+    (props.scan?.entries ?? [])
       .filter((entry) => entry.paths.length > 0)
-      .map((entry) => entry.uuid),
+      .map((entry) => entry.uuid.toLowerCase()),
   );
   selected.value = props.anchors
-    .filter((anchor) => !found.has(anchor.uuid))
+    .filter(
+      (anchor) =>
+        anchor.witness === "active" && !found.has(anchor.uuid.toLowerCase()),
+    )
     .map((anchor) => anchor.uuid);
 }
 
@@ -400,6 +624,8 @@ function confirmPending() {
     emit("release", [...selected.value]);
   } else if (pending.value === "reclaim") {
     emit("reclaim");
+  } else if (pending.value === "deep") {
+    emit("scan", { deep: true, force: true });
   }
   pending.value = null;
 }
@@ -410,16 +636,16 @@ function close() {
 }
 
 async function pickRoots() {
-  if (props.busy) return;
+  if (props.busy || props.scanning) return;
   try {
     const picked = await open({
       directory: true,
       multiple: true,
-      title: "选择容器所在目录",
+      title: "添加容器所在目录",
     });
     if (!picked) return;
     const roots = Array.isArray(picked) ? picked : [picked];
-    if (roots.length > 0) emit("scan", roots);
+    if (roots.length > 0) emit("scan", { roots });
   } catch {
     // 目录选择取消或宿主不可用：由父组件展示扫描错误；此处不抛异常。
   }
@@ -467,6 +693,69 @@ async function pickRoots() {
   align-items: center;
   gap: 10px;
 }
+/* 扫描中状态：只作为分区标题后的文字读数，不加底色或发光 */
+.anchor-scan-state {
+  order: 1;
+  flex-shrink: 0;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: rgba(0, 212, 255, 0.75);
+}
+.anchor-scan-progress {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.anchor-scan-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* 覆盖范围清单：每行一个位置，路径单行省略，状态用纯文字颜色区分 */
+.anchor-coverage {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.anchor-coverage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-family: var(--font);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.anchor-coverage-source {
+  flex: none;
+  color: var(--text-muted);
+  letter-spacing: 0.08em;
+}
+.anchor-coverage-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.anchor-coverage-state {
+  flex: none;
+}
+.anchor-coverage-state.is-alert {
+  color: var(--danger);
+}
+.anchor-coverage-state.is-ok {
+  color: var(--text-muted);
+}
+.anchor-root-remove {
+  flex: none;
+}
 /* 动态分区揭示：高度与不透明度平滑展开，避免新面板把清单整体瞬移；
    文字层不做位移/缩放/滤镜，保持字形清晰 */
 .anchor-reveal {
@@ -499,8 +788,18 @@ async function pickRoots() {
   }
 }
 .anchor-table-wrap {
-  max-height: 320px;
+  /* 表格是独立滚动区：高度随视口收敛，阻止滚动链把父级内容一起带走；
+     滚动条完全隐藏，滚动仍由滚轮/触控板/键盘完成。 */
+  max-height: min(320px, 44vh);
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.anchor-table-wrap::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 .anchor-table {
   width: 100%;

@@ -454,7 +454,7 @@
           </button>
         </div>
         <div style="height: 12px;"></div>
-        <input class="kv-input parse-token-input" v-model="parseToken" placeholder="请输入密钥" />
+        <input class="kv-input parse-token-input" v-model="parseToken" autocomplete="off" spellcheck="false" placeholder="请输入密钥" />
         <div class="kv-actions">
           <button class="btn btn-primary btn-compact" @click="doParse" :disabled="(isTauri ? !parseFilePath : !parseFileData) || !parseToken">
             开始解析

@@ -50,6 +50,14 @@ export const VAULT_FIELD_KINDS = [
 export type VaultFieldKind = (typeof VAULT_FIELD_KINDS)[number];
 
 /**
+ * 字段值校验器（单一权威源）：决定编辑窗口在保存前按哪条规则校验取值。
+ * 集合封闭 —— 类型声明只能引用键名，不存在经由自定义类型注入任意校验逻辑的路径。
+ */
+export const VAULT_FIELD_VALIDATORS = ["cnIdNumber"] as const;
+
+export type VaultFieldValidator = (typeof VAULT_FIELD_VALIDATORS)[number];
+
+/**
  * 色调标识：取值对应既有设计令牌中的点缀色名。
  * 渲染侧据此外取实际颜色变量，未定义的色名一律落到 accent，不产生无效样式。
  * 同为常量数组派生：校验集合与类型声明单一来源。
@@ -138,6 +146,11 @@ export interface VaultFieldDef {
   multilineRows?: number;
   /** 字段说明（可选，编辑窗口提示语） */
   hint?: string;
+  /**
+   * 值校验器（保存前执行）：空值不校验，必填由 required 承担。
+   * 只允许声明表内的校验键，避免把任意校验逻辑塞进类型数据。
+   */
+  validator?: VaultFieldValidator;
   /**
    * 新增条目时的默认取值（编辑既有条目时不覆盖）。
    * 仅内置标准模板使用：让「护照类型 / 签发国家」这类常选项从可用状态开始，
@@ -359,20 +372,35 @@ export const BUILTIN_VAULT_TYPES: readonly VaultTypeDef[] = [
     cardFields: ["note"],
     searchFields: ["name", "number"],
     fields: [
+      /* 字段顺序与居民身份证卡面一致：姓名、性别、民族、出生日期、住址、
+         公民身份号码在前，签发机关与有效期限在后。 */
       { id: "name", label: "姓名", kind: "text", required: true, group: "证件" },
-      /* 身份号码是身份证的唯一定位依据：缺失即无法证明持证身份，故列为必填。
+      { id: "gender", label: "性别", kind: "select", options: ["男", "女"], group: "证件" },
+      { id: "ethnicity", label: "民族", kind: "text", group: "证件" },
+      { id: "birthDate", label: "出生日期", kind: "date", group: "证件" },
+      { id: "address", label: "住址", kind: "multiline", multilineRows: 2, group: "证件" },
+      /* 公民身份号码是身份证的唯一定位依据：缺失即无法证明持证身份，故列为必填。
          字段 id 保持 "number"（落盘键名不可改），只收敛显示名与校验。 */
-      { id: "number", label: "身份号码", kind: "text", required: true, sensitive: true, group: "证件" },
+      {
+        id: "number",
+        label: "公民身份号码",
+        kind: "text",
+        required: true,
+        sensitive: true,
+        validator: "cnIdNumber",
+        group: "证件",
+      },
+      { id: "authority", label: "签发机关", kind: "text", group: "签发" },
       /* 法定证件有效期为「签发日 → 到期日」区间：id 仍为 expiry（到期读数
          与筛选的固定取值键），rangeStartId 承载起始日。 */
       {
         id: VAULT_EXPIRY_FIELD_ID,
-        label: "有效期",
+        label: "有效期限",
         kind: "dateRange",
         rangeStartId: "validFrom",
         rangeStartLabel: "自",
         rangeEndLabel: "至",
-        group: "证件",
+        group: "签发",
       },
       { id: "note", label: "备注", kind: "multiline", multilineRows: 2, group: "附注" },
     ],

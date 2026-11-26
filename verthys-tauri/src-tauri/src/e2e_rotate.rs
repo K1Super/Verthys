@@ -22,17 +22,17 @@ use tauri::Manager;
 use zeroize::Zeroizing;
 
 use crate::controller::types::VerthysResponse;
-use crate::controller::module_controller::verthys_module_enable;
-use crate::controller::vault_rotate_controller::{
+use crate::controller::vault::module_controller::verthys_module_enable;
+use crate::controller::vault::vault_rotate_controller::{
     verthys_rotate_abort, verthys_rotate_attach_keyfile, verthys_rotate_begin,
     verthys_rotate_cancel, verthys_rotate_commit, verthys_rotate_run,
     verthys_rotate_unlock_module,
 };
-use crate::controller::verthys_controller::{
+use crate::controller::vault::verthys_controller::{
     verthys_add_record, verthys_create, verthys_get_record, verthys_lock, verthys_lock_persist,
     verthys_unlock_recovery,
 };
-use crate::controller::worker_controller::{worker_destroy, worker_init};
+use crate::controller::vault::worker_controller::{worker_destroy, worker_init};
 use crate::service::vault_rotate::RotateProgress;
 use crate::state::AppState;
 

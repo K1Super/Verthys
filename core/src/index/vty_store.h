@@ -92,6 +92,23 @@ int vty_store_append_segment(VtyStore *s, uint8_t type, uint64_t seq, uint64_t i
 int vty_store_read_segment(VtyStore *s, const VtySegmentLocator *loc,
                            uint8_t **payload, size_t *payload_len);
 
+/* 裸读：只做数据区边界校验，不做哈希/AEAD。仅供删除路径读取密钥头与
+ * 段前缀（密钥头随后由记录层 AEAD 认证），不得用于业务数据读取。 */
+int vty_store_read_raw(VtyStore *s, uint64_t offset, uint8_t *buf, size_t len);
+
+/* 原位擦除段内区间：先校验段头与边界，再零写。seg_off/seg_len 必须是
+ * 已提交的数据段；part_off 相对段起点。失败返回 IO/CORRUPT，调用方保留
+ * 待擦标记并重试。 */
+int vty_store_scrub_range(VtyStore *s, uint64_t seg_off, uint32_t seg_len,
+                          uint32_t part_off, uint32_t part_len);
+
+/* 兜底擦除：只做数据区边界校验，不解析段头。调用方必须已从 AEAD 认证
+ * 过的目录叶取得偏移/长度（删除路径）。段头被磁盘损坏时仍能完成擦除。 */
+int vty_store_scrub_raw(VtyStore *s, uint64_t offset, uint32_t len);
+
+/* 将脏页刷盘；失败返回 VTY_E_IO。 */
+int vty_store_flush(VtyStore *s);
+
 /* 写墓碑值（1 字节）；键不存在时也写入，删除语义幂等。 */
 int vty_store_delete(VtyStore *s, uint8_t keyspace,
                      const uint8_t *key, size_t key_len);
@@ -134,6 +151,34 @@ int vty_store_verify_data_root(VtyStore *s,
 
 /* 遍历全部节点与引用段，校验 hash/AEAD/偏移与 data_end。 */
 int vty_store_verify(VtyStore *s);
+
+/* 存储统计：文件高水位、活目录树字节与节点数。
+ *
+ * 只遍历当前 DataRoot 可达的活节点，不统计删除后遗留的旧节点；调用方
+ * 用 file_size - (tree_bytes + 活段字节) 得到可回收空间。 */
+typedef struct {
+    uint64_t file_size;
+    uint64_t data_end;
+    uint64_t tree_bytes;      /* 活目录节点段总长（含 32B 段头） */
+    uint64_t node_count;      /* 活目录节点数 */
+} VtyStoreStats;
+
+int vty_store_storage_stats(VtyStore *s, VtyStoreStats *out);
+
+/* 紧凑批量构建：只允许在空 store（root_node_id==0 且 data_end 为数据区
+ * 起点）上使用；键必须按 keyspace 升序且严格递增。构建过程直接写叶/
+ * 内节点，不产生 COW 旧节点，供容器压缩重建目录树。
+ *
+ * 失败后调用方必须丢弃该 store 所在文件；本 API 不提供回滚。 */
+typedef struct VtyStoreBulk VtyStoreBulk;
+
+int vty_store_bulk_begin(VtyStore *s, VtyStoreBulk **out);
+int vty_store_bulk_add(VtyStoreBulk *b, uint8_t keyspace,
+                       const uint8_t *key, size_t key_len,
+                       const uint8_t *value, size_t value_len);
+/* 设置 DataRoot 根指针；成功后调用 vty_store_commit 落盘。 */
+int vty_store_bulk_finish(VtyStoreBulk *b);
+void vty_store_bulk_abort(VtyStoreBulk *b);
 
 #ifdef __cplusplus
 }

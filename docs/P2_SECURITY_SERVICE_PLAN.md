@@ -187,7 +187,7 @@ tests/security/run.ps1                       # 非内核安全测试统一入口
 | `core/tests/CMakeLists.txt`、`core/tests/test_runner.c` | 注册 P2 客户端测试 |
 | `core/tests/security/test_machine_limiter.c` | 新增客户端映射/超时/签名拒绝测试 |
 
-不修改 `vty_lockout.c/.h`、`vty_rollback.c/.h`、`vty_secure_state.c/.h` 的任何行为。
+不修改 `vty_lockout.c/.h`、`vty_rollback*.c/.h`、`vty_secure_state.c/.h` 的任何行为。
 
 ---
 
@@ -287,7 +287,7 @@ tests/security/run.ps1                       # 非内核安全测试统一入口
 | 响应 `UNAVAILABLE` / `DENIED` / `BAD_REQUEST` / `INTERNAL` | `VTY_E_LOCKED` |
 | 连接失败、超时、签名失败、字段不符、注册表读取失败 | `VTY_E_LOCKED` |
 
-`record_failure` / `reset` 的返回值沿用同一映射；调用方（`vty_keymanager.c` / `vty_module.c`）不新增分支。
+`record_failure` / `reset` 的返回值沿用同一映射；调用方（`vty_keymanager_open.c` / `vty_module_*.c`）不新增分支。
 
 ### 5.8 服务端并发与停机模型
 
@@ -825,7 +825,7 @@ SCM 安装 E2E 不在普通 CI 运行，只在一次性 Windows VM 上由 `tests
 | --- | --- | --- |
 | P2-1 独立工程/协议/状态/密钥/令牌桶 | 已实现 | `security-service/`；U1–U12 共 446 断言通过；生产 OFF 钩子构建通过 |
 | P2-2 管道服务端/客户端认证/SCM 生命周期 | 已实现 | 8 实例消息管道、PID/SID/Authenticode/模块校验；I0–I12 49 检查通过 |
-| P2-3 core 客户端接入（V4 主路径） | 已实现 | `vty_machine_limiter.c`；`vty_keymanager.c` / `vty_module.c` 认证收口；C1–C8 与 V4 解锁/模块解锁接入用例通过；P1 全量 + 接入用例 280 passed / 0 failed；旧 `Verthys_Unlock` / `verthys_backoff_*` 已删除 |
+| P2-3 core 客户端接入（V4 主路径） | 已实现 | `vty_machine_limiter.c`；`vty_keymanager_open.c` / `vty_module_*.c` 认证收口；C1–C8 与 V4 解锁/模块解锁接入用例通过；P1 全量 + 接入用例 280 passed / 0 failed；旧 `Verthys_Unlock` / `verthys_backoff_*` 已删除 |
 | P2-4 安装器/ACL/注册表/升级/卸载/回滚 | 已实现，本机验证 | 服务 exe `/install /quiet` 退出 0、服务 Running、`Installed=1`；`/uninstall /quiet` 后服务/注册表/事件源/ProgramData/根 CA 全部清除；perMachine 应用安装器随包安装路径已接入，干净 VM E2E 未执行 |
 | P2-5 P2 攻击回归 | 控制台子集已通过 | S-A3/A4/A5/A6/A8/A9 共 10 检查通过；S-A1/A2/A7/A10 待 SCM/管理员/第二台机器 |
 | P2-6 构建/CI/签名/文档 | 已实现 | `build_security_service.ps1`、`build_production.ps1` 阶段 3.6、`security-service.yml`、五份文档更新；无测试钩子生产二进制验证通过。发布签名改由 Tauri `bundle.windows.signCommand` 在 bundle type 补丁之后执行，安装包/卸载器/NSIS 插件副本同证书签名，安装包签名后重新生成 updater `.sig` |
@@ -892,7 +892,7 @@ SCM 安装 E2E 不在普通 CI 运行，只在一次性 Windows VM 上由 `tests
 - `vty_lockout_*` 的状态路径、ACL、见证 ID、迁移、fail-closed、指数退避与重置条件。
 - `vty_rollback_*` 的设备+UUID 见证、generation 锚点、缺失状态语义。
 - `vty_secure_state_*` 的 KnownFolder 解析、目录 ACL、重解析点拒绝、身份派生。
-- `vty_keymanager.c` / `vty_module.c` 中 P1 熔断调用点与顺序：机器预算门在 P1 之前，口令认证后按结果记账；P1 自身语义不变。P2 只新增 `vty_machine_limiter_*` 调用，不改变 P1 状态与判定。
+- `vty_keymanager_open.c` / `vty_module_*.c` 中 P1 熔断调用点与顺序：机器预算门在 P1 之前，口令认证后按结果记账；P1 自身语义不变。P2 只新增 `vty_machine_limiter_*` 调用，不改变 P1 状态与判定。
 - P1 攻击回归 A7/A12 等探针与判定口径。
 
 ## 附录 C：评审检查表

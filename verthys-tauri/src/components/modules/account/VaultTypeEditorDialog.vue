@@ -91,6 +91,7 @@
             ref="typeTitleRef"
             v-model="active.label"
             class="type-title-input"
+            autocomplete="off"
             placeholder="未命名类型"
             aria-label="类型名"
           />
@@ -151,6 +152,7 @@
                   <input
                     class="kv-input field-label-input"
                     v-model="field.label"
+                    autocomplete="off"
                     placeholder="字段名"
                     aria-label="字段名"
                   />
@@ -245,6 +247,7 @@
                       <input
                         class="kv-input"
                         v-model="field.group"
+                        autocomplete="off"
                         placeholder="留空则归入类型分区"
                         aria-label="分区"
                       />
@@ -256,6 +259,7 @@
                       <input
                         class="kv-input"
                         type="number"
+                        autocomplete="off"
                         min="1"
                         max="12"
                         :value="field.multilineRows ?? 2"
@@ -272,6 +276,7 @@
                       <input
                         class="kv-input"
                         v-model="field.hint"
+                        autocomplete="off"
                         placeholder="留空不显示"
                         aria-label="开关说明"
                       />
@@ -283,6 +288,7 @@
                         <input
                           class="kv-input"
                           v-model="field.rangeStartLabel"
+                          autocomplete="off"
                           placeholder="自"
                           aria-label="起始标签"
                         />
@@ -292,6 +298,7 @@
                         <input
                           class="kv-input"
                           v-model="field.rangeEndLabel"
+                          autocomplete="off"
                           placeholder="至"
                           aria-label="结束标签"
                         />
@@ -311,6 +318,7 @@
                         <input
                           class="kv-input option-input"
                           :value="option"
+                          autocomplete="off"
                           aria-label="候选项"
                           @input="onOptionInput(field, optionIndex, $event)"
                         />

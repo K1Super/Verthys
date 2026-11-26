@@ -53,6 +53,21 @@ if ($LASTEXITCODE -ne 0) {
     Add-Blocker "版本命名守卫失败（代际文件名/退役 V3 构建/版本常量非单一来源）"
 }
 
+# ---- Tauri 插件版本一致性门 ----
+# Tauri CLI 只在构建时打印版本不匹配警告；跨 minor 的插件协议差异会在运行时
+# 才暴露。发布前置必须与 npm predev/prebuild 使用同一份门禁脚本。
+$toolchainGate = Join-Path $Root "verthys-tauri\scripts\verify-tauri-plugin-versions.mjs"
+if (-not (Test-Path -LiteralPath $toolchainGate)) {
+    Add-Blocker "缺少 Tauri 插件版本门脚本: $toolchainGate"
+} elseif (-not (Test-CommandExists "node")) {
+    Add-Blocker "node 不在 PATH，无法校验 Tauri 插件版本"
+} else {
+    & node $toolchainGate 2>&1 | ForEach-Object { Write-Host "  $_" }
+    if ($LASTEXITCODE -ne 0) {
+        Add-Blocker "Tauri 插件版本不一致（Cargo.lock / package-lock.json / node_modules）"
+    }
+}
+
 # ---- 工作区状态 ----
 $dirty = (& git -C $Root status --porcelain 2>$null)
 if ($dirty) {

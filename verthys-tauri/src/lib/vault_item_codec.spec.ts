@@ -155,7 +155,12 @@ describe("条目数据投影与账号字段映射", () => {
     });
     expect(data).toEqual({
       name: "张三",
+      gender: "",
+      ethnicity: "",
+      birthDate: "",
+      address: "",
       number: "110101199001010011",
+      authority: "",
       validFrom: "2015-01-01",
       expiry: "2035-01-01",
       note: "",

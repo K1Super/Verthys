@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 单个流式写入会话的运行状态
@@ -32,6 +33,10 @@ pub struct FileStreamState {
     target_path: PathBuf,
     /// 已接受写入的累计字节数（用于总量上限校验与审计）
     bytes_written: u64,
+    /// 追加入口已关闭：finalize / abort / 追加超时后置位。
+    /// 追加命令超时后结果不可确认，必须禁止后续块与落盘，避免把
+    /// 未知尾部字节写进最终文件。
+    appends_closed: AtomicBool,
 }
 
 impl FileStreamState {
@@ -42,6 +47,7 @@ impl FileStreamState {
             temp_path,
             target_path,
             bytes_written: 0,
+            appends_closed: AtomicBool::new(false),
         }
     }
 
@@ -52,6 +58,12 @@ impl FileStreamState {
     /// 状态不变量被破坏时可达。
     pub fn append(&mut self, data: &[u8]) -> std::io::Result<()> {
         use std::io::Write;
+        if self.appends_closed() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "追加入口已关闭",
+            ));
+        }
         let file = self
             .file
             .as_mut()
@@ -94,6 +106,16 @@ impl FileStreamState {
     /// 会话是否仍持有活跃句柄（中毒恢复时区分「未终结」与「已终结」）
     pub fn is_active(&self) -> bool {
         self.file.is_some()
+    }
+
+    /// 关闭追加入口（幂等）：此后 append 一律拒绝，finalize 据此拒绝落盘
+    pub fn close_appends(&self) {
+        self.appends_closed.store(true, Ordering::SeqCst);
+    }
+
+    /// 追加入口是否已关闭
+    pub fn appends_closed(&self) -> bool {
+        self.appends_closed.load(Ordering::SeqCst)
     }
 }
 

@@ -4,6 +4,7 @@ Verthys_BulkImportBegin
 Verthys_BulkImportCommit
 Verthys_ChangePassword
 Verthys_ClearRecordCache
+Verthys_CompactStorage
 Verthys_Deinit
 Verthys_DeleteRecord
 Verthys_DeleteRecords
@@ -13,11 +14,13 @@ Verthys_FindLidByName
 Verthys_Flush
 Verthys_GetContainerInfo
 Verthys_GetDiagnostics
+Verthys_GetKernelStatus
 Verthys_GetLibLockoutRemaining
 Verthys_GetPresetFeatureBits
 Verthys_GetRecord
 Verthys_GetSecurityPreset
 Verthys_GetSecurityStatus
+Verthys_GetStorageStats
 Verthys_GetSummaryCount
 Verthys_HasRecordByType
 Verthys_Import

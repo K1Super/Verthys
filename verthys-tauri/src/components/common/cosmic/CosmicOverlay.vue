@@ -20,6 +20,7 @@
           <CosmicDialog
             :width="width"
             :role="role"
+            :scrollbar-hidden="scrollbarHidden"
             aria-modal="true"
             :aria-label="ariaLabelledby ? undefined : ariaLabel"
             :aria-labelledby="ariaLabelledby || undefined"
@@ -59,6 +60,8 @@ interface Props {
   teleport?: boolean;
   /** 遮罩层级（默认沿用 Cosmic 弹窗层 9999；高优先窗口可提升到 10000） */
   overlayZ?: number;
+  /** 隐藏内容区滚动条（保留滚动能力）；用于需要完全隐形的长内容弹窗 */
+  scrollbarHidden?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -71,6 +74,7 @@ const props = withDefaults(defineProps<Props>(), {
   initialFocus: "",
   teleport: true,
   overlayZ: 9999,
+  scrollbarHidden: false,
 });
 
 const emit = defineEmits<{ (e: "close"): void }>();

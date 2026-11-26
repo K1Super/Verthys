@@ -15,7 +15,10 @@ const forbiddenText = [
   marker,
   "DevDock",
   "verthys:devfixture-fill",
+  "verthys:devfixture:auto-fill",
+  "diagnostics_tail_logs",
   "FixturePanel",
+  "DevLogPanel",
   "fixture-panel",
 ];
 const textExtensions = new Set([".js", ".mjs", ".cjs", ".css", ".html", ".json", ".map"]);

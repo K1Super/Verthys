@@ -482,7 +482,7 @@ const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
   [VerthysErrorCode.E_ANCHOR_FULL]: {
     title: "回退锚点表已满",
     message: "本机回退锚点已达到 64 条上限，且没有可自动回收的失效条目。",
-    guidance: "请进入「安全防护 → 回退锚点」扫描容器并释放已废弃条目的锚点；仍在使用中的锚点不会被自动删除。",
+    guidance: "请进入「安全防护 → 回退锚点」打开管理面板，核对扫描证据后释放已废弃条目；仍在使用中的锚点不会被自动删除。",
   },
   [VerthysErrorCode.E_KEYFILE_REQUIRED]: {
     title: "需要 keyfile 文件",

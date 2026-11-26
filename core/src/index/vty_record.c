@@ -64,12 +64,12 @@ static int record_aad(const uint8_t module_uuid[VTY_UUID_BYTES],
     return VTY_OK;
 }
 
-int vty_record_seal(const uint8_t mdek[VTY_KEY_BYTES],
-                    const uint8_t module_uuid[VTY_UUID_BYTES],
-                    uint64_t record_id, uint64_t epoch,
-                    const uint8_t *name, size_t name_len,
-                    const uint8_t *data, size_t data_len,
-                    uint8_t **out, size_t *out_len)
+static int record_seal_root(const uint8_t mdek[VTY_KEY_BYTES],
+                            const uint8_t module_uuid[VTY_UUID_BYTES],
+                            uint64_t record_id, uint64_t epoch,
+                            const uint8_t *name, size_t name_len,
+                            const uint8_t *data, size_t data_len,
+                            uint8_t **out, size_t *out_len)
 {
     uint8_t nk[VTY_KEY_BYTES];
     uint8_t dk[VTY_KEY_BYTES];
@@ -171,12 +171,12 @@ done:
     return rc;
 }
 
-int vty_record_open(const uint8_t mdek[VTY_KEY_BYTES],
-                    const uint8_t module_uuid[VTY_UUID_BYTES],
-                    uint64_t epoch,
-                    const uint8_t *in, size_t in_len,
-                    uint8_t **name, size_t *name_len,
-                    uint8_t **data, size_t *data_len)
+static int record_open_root(const uint8_t mdek[VTY_KEY_BYTES],
+                            const uint8_t module_uuid[VTY_UUID_BYTES],
+                            uint64_t epoch,
+                            const uint8_t *in, size_t in_len,
+                            uint8_t **name, size_t *name_len,
+                            uint8_t **data, size_t *data_len)
 {
     uint8_t nk[VTY_KEY_BYTES];
     uint8_t dk[VTY_KEY_BYTES];
@@ -303,11 +303,11 @@ done:
     return rc;
 }
 
-int vty_record_open_name(const uint8_t mdek[VTY_KEY_BYTES],
-                         const uint8_t module_uuid[VTY_UUID_BYTES],
-                         uint64_t epoch,
-                         const uint8_t *in, size_t in_len,
-                         uint8_t **name, size_t *name_len)
+static int record_open_name_root(const uint8_t mdek[VTY_KEY_BYTES],
+                                 const uint8_t module_uuid[VTY_UUID_BYTES],
+                                 uint64_t epoch,
+                                 const uint8_t *in, size_t in_len,
+                                 uint8_t **name, size_t *name_len)
 {
     uint8_t nk[VTY_KEY_BYTES];
     uint8_t nonce[VTY_NONCE_BYTES];
@@ -396,6 +396,281 @@ done:
     vty_secure_zero(aad, sizeof(aad));
     return rc;
 }
+
+/* ------------------------------------------------------------------ *
+ * 记录密钥头（RKH）与键化记录
+ * ------------------------------------------------------------------ */
+
+#define RKH_PREV_OFF   0u
+#define RKH_WRAP_OFF  16u
+
+static void rkh_aad(const uint8_t module_uuid[VTY_UUID_BYTES],
+                    uint64_t record_id, uint64_t epoch, uint64_t prev_id,
+                    uint8_t out[128], size_t *out_len)
+{
+    const char *domain = VTY_DOMAIN_RECORD_KEY;
+    size_t dlen = strlen(domain);
+
+    memcpy(out, domain, dlen);
+    memcpy(out + dlen, module_uuid, VTY_UUID_BYTES);
+    vty_put_u64(out + dlen + VTY_UUID_BYTES, record_id);
+    vty_put_u64(out + dlen + VTY_UUID_BYTES + 8u, epoch);
+    vty_put_u64(out + dlen + VTY_UUID_BYTES + 16u, prev_id);
+    *out_len = dlen + VTY_UUID_BYTES + 24u;
+}
+
+static int rkh_derive(const uint8_t mdek[VTY_KEY_BYTES],
+                      const uint8_t module_uuid[VTY_UUID_BYTES],
+                      uint64_t record_id, uint64_t epoch,
+                      uint8_t out[VTY_KEY_BYTES])
+{
+    uint8_t tail[16];
+
+    vty_put_u64(tail, record_id);
+    vty_put_u64(tail + 8u, epoch);
+    return derive_key(mdek, VTY_DOMAIN_RECORD_KEY, module_uuid,
+                      tail, sizeof(tail), out);
+}
+
+static int rkh_all_zero(const uint8_t in[VTY_RECORD_KEY_HEADER_BYTES])
+{
+    size_t i;
+
+    for (i = 0; i < VTY_RECORD_KEY_HEADER_BYTES; i++) {
+        if (in[i] != 0u) return 0;
+    }
+    return 1;
+}
+
+static int rkh_open(const uint8_t mdek[VTY_KEY_BYTES],
+                    const uint8_t module_uuid[VTY_UUID_BYTES],
+                    uint64_t record_id, uint64_t epoch,
+                    const uint8_t in[VTY_RECORD_KEY_HEADER_BYTES],
+                    uint8_t out_rdk[VTY_KEY_BYTES],
+                    uint64_t *out_prev_id)
+{
+    uint8_t rk[VTY_KEY_BYTES];
+    uint8_t nonce[VTY_NONCE_BYTES];
+    uint8_t aad[128];
+    size_t aad_len = 0;
+    size_t pt_len = 0;
+    uint64_t prev_id;
+    int rc;
+
+    if (mdek == NULL || module_uuid == NULL || in == NULL ||
+        out_rdk == NULL) {
+        return VTY_E_INVALID;
+    }
+    if (rkh_all_zero(in)) return VTY_E_INVALID;
+
+    prev_id = vty_get_u64(in + RKH_PREV_OFF);
+    memset(nonce, 0, sizeof(nonce));
+    rc = rkh_derive(mdek, module_uuid, record_id, epoch, rk);
+    if (rc != VTY_OK) return rc;
+    rkh_aad(module_uuid, record_id, epoch, prev_id, aad, &aad_len);
+    rc = vty_aead_open(rk, nonce, aad, aad_len,
+                       in + RKH_WRAP_OFF,
+                       VTY_RECORD_KEY_HEADER_BYTES - RKH_WRAP_OFF,
+                       out_rdk, VTY_KEY_BYTES, &pt_len);
+    vty_secure_zero(rk, sizeof(rk));
+    if (rc != VTY_OK || pt_len != VTY_KEY_BYTES) {
+        vty_secure_zero(out_rdk, VTY_KEY_BYTES);
+        return VTY_E_KEY_INVALID;
+    }
+    if (out_prev_id != NULL) *out_prev_id = prev_id;
+    return VTY_OK;
+}
+
+int vty_record_key_header_parse(const uint8_t mdek[VTY_KEY_BYTES],
+                                const uint8_t module_uuid[VTY_UUID_BYTES],
+                                uint64_t record_id, uint64_t epoch,
+                                const uint8_t in[VTY_RECORD_KEY_HEADER_BYTES],
+                                uint64_t *out_prev_id)
+{
+    uint8_t rdk[VTY_KEY_BYTES];
+    int rc;
+
+    rc = rkh_open(mdek, module_uuid, record_id, epoch, in, rdk, out_prev_id);
+    vty_secure_zero(rdk, sizeof(rdk));
+    return rc;
+}
+
+int vty_record_seal_keyed(const uint8_t root_key[VTY_KEY_BYTES],
+                          const uint8_t module_uuid[VTY_UUID_BYTES],
+                          uint64_t record_id, uint64_t epoch,
+                          uint64_t prev_id,
+                          const uint8_t *name, size_t name_len,
+                          const uint8_t *data, size_t data_len,
+                          uint8_t **out, size_t *out_len)
+{
+    uint8_t rdk[VTY_KEY_BYTES];
+    uint8_t rk[VTY_KEY_BYTES];
+    uint8_t nonce[VTY_NONCE_BYTES];
+    uint8_t aad[128];
+    size_t aad_len = 0;
+    size_t wrapped_len = 0;
+    uint8_t *body = NULL;
+    size_t body_len = 0;
+    uint8_t *buf = NULL;
+    size_t total;
+    int rc;
+
+    if (root_key == NULL || module_uuid == NULL || out == NULL || out_len == NULL) {
+        return VTY_E_INVALID;
+    }
+    *out = NULL;
+    *out_len = 0;
+    if (name == NULL && name_len != 0) return VTY_E_INVALID;
+    if (data == NULL && data_len != 0) return VTY_E_INVALID;
+
+    vty_random(rdk, sizeof(rdk));
+    rc = rkh_derive(root_key, module_uuid, record_id, epoch, rk);
+    if (rc != VTY_OK) {
+        vty_secure_zero(rdk, sizeof(rdk));
+        return rc;
+    }
+    memset(nonce, 0, sizeof(nonce));
+    rkh_aad(module_uuid, record_id, epoch, prev_id, aad, &aad_len);
+
+    buf = (uint8_t *)vty_alloc(VTY_RECORD_KEY_HEADER_BYTES);
+    if (buf == NULL) {
+        vty_secure_zero(rdk, sizeof(rdk));
+        vty_secure_zero(rk, sizeof(rk));
+        return VTY_E_RESOURCE;
+    }
+    memset(buf, 0, VTY_RECORD_KEY_HEADER_BYTES);
+    vty_put_u64(buf + RKH_PREV_OFF, prev_id);
+    rc = vty_aead_seal(rk, nonce, aad, aad_len, rdk, sizeof(rdk),
+                       buf + RKH_WRAP_OFF,
+                       VTY_RECORD_KEY_HEADER_BYTES - RKH_WRAP_OFF,
+                       &wrapped_len);
+    vty_secure_zero(rk, sizeof(rk));
+    if (rc != VTY_OK ||
+        wrapped_len != VTY_RECORD_KEY_HEADER_BYTES - RKH_WRAP_OFF) {
+        vty_secure_zero(rdk, sizeof(rdk));
+        vty_free(buf, VTY_RECORD_KEY_HEADER_BYTES);
+        return (rc == VTY_OK) ? VTY_E_AEAD : rc;
+    }
+
+    rc = record_seal_root(rdk, module_uuid, record_id, epoch,
+                          name, name_len, data, data_len, &body, &body_len);
+    vty_secure_zero(rdk, sizeof(rdk));
+    if (rc != VTY_OK) {
+        vty_free(buf, VTY_RECORD_KEY_HEADER_BYTES);
+        return rc;
+    }
+
+    total = VTY_RECORD_KEY_HEADER_BYTES + body_len;
+    if (total < body_len) {
+        vty_secure_zero(body, body_len);
+        vty_free(body, body_len);
+        vty_free(buf, VTY_RECORD_KEY_HEADER_BYTES);
+        return VTY_E_RESOURCE;
+    }
+    {
+        uint8_t *joined = (uint8_t *)vty_alloc(total);
+        if (joined == NULL) {
+            vty_secure_zero(body, body_len);
+            vty_free(body, body_len);
+            vty_free(buf, VTY_RECORD_KEY_HEADER_BYTES);
+            return VTY_E_RESOURCE;
+        }
+        memcpy(joined, buf, VTY_RECORD_KEY_HEADER_BYTES);
+        memcpy(joined + VTY_RECORD_KEY_HEADER_BYTES, body, body_len);
+        vty_free(buf, VTY_RECORD_KEY_HEADER_BYTES);
+        buf = joined;
+    }
+    vty_secure_zero(body, body_len);
+    vty_free(body, body_len);
+
+    *out = buf;
+    *out_len = total;
+    return VTY_OK;
+}
+
+int vty_record_open_keyed(const uint8_t root_key[VTY_KEY_BYTES],
+                          const uint8_t module_uuid[VTY_UUID_BYTES],
+                          uint64_t epoch,
+                          const uint8_t *in, size_t in_len,
+                          uint8_t **name, size_t *name_len,
+                          uint8_t **data, size_t *data_len)
+{
+    uint8_t rdk[VTY_KEY_BYTES];
+    uint64_t record_id;
+    int rc;
+
+    if (root_key == NULL || module_uuid == NULL || in == NULL ||
+        in_len < VTY_RECORD_KEY_HEADER_BYTES + 8u) {
+        return VTY_E_INVALID;
+    }
+    record_id = vty_get_u64(in + VTY_RECORD_KEY_HEADER_BYTES);
+    rc = rkh_open(root_key, module_uuid, record_id, epoch, in, rdk, NULL);
+    if (rc != VTY_OK) return rc;
+    rc = record_open_root(rdk, module_uuid, epoch,
+                          in + VTY_RECORD_KEY_HEADER_BYTES,
+                          in_len - VTY_RECORD_KEY_HEADER_BYTES,
+                          name, name_len, data, data_len);
+    vty_secure_zero(rdk, sizeof(rdk));
+    return rc;
+}
+
+int vty_record_open_name_keyed(const uint8_t root_key[VTY_KEY_BYTES],
+                               const uint8_t module_uuid[VTY_UUID_BYTES],
+                               uint64_t epoch,
+                               const uint8_t *in, size_t in_len,
+                               uint8_t **name, size_t *name_len)
+{
+    uint8_t rdk[VTY_KEY_BYTES];
+    uint64_t record_id;
+    int rc;
+
+    if (root_key == NULL || module_uuid == NULL || in == NULL ||
+        in_len < VTY_RECORD_KEY_HEADER_BYTES + 8u) {
+        return VTY_E_INVALID;
+    }
+    record_id = vty_get_u64(in + VTY_RECORD_KEY_HEADER_BYTES);
+    rc = rkh_open(root_key, module_uuid, record_id, epoch, in, rdk, NULL);
+    if (rc != VTY_OK) return rc;
+    rc = record_open_name_root(rdk, module_uuid, epoch,
+                               in + VTY_RECORD_KEY_HEADER_BYTES,
+                               in_len - VTY_RECORD_KEY_HEADER_BYTES,
+                               name, name_len);
+    vty_secure_zero(rdk, sizeof(rdk));
+    return rc;
+}
+
+int vty_record_seal(const uint8_t mdek[VTY_KEY_BYTES],
+                    const uint8_t module_uuid[VTY_UUID_BYTES],
+                    uint64_t record_id, uint64_t epoch,
+                    const uint8_t *name, size_t name_len,
+                    const uint8_t *data, size_t data_len,
+                    uint8_t **out, size_t *out_len)
+{
+    return record_seal_root(mdek, module_uuid, record_id, epoch,
+                            name, name_len, data, data_len, out, out_len);
+}
+
+int vty_record_open(const uint8_t mdek[VTY_KEY_BYTES],
+                    const uint8_t module_uuid[VTY_UUID_BYTES],
+                    uint64_t epoch,
+                    const uint8_t *in, size_t in_len,
+                    uint8_t **name, size_t *name_len,
+                    uint8_t **data, size_t *data_len)
+{
+    return record_open_root(mdek, module_uuid, epoch, in, in_len,
+                            name, name_len, data, data_len);
+}
+
+int vty_record_open_name(const uint8_t mdek[VTY_KEY_BYTES],
+                         const uint8_t module_uuid[VTY_UUID_BYTES],
+                         uint64_t epoch,
+                         const uint8_t *in, size_t in_len,
+                         uint8_t **name, size_t *name_len)
+{
+    return record_open_name_root(mdek, module_uuid, epoch, in, in_len,
+                                 name, name_len);
+}
+
 
 int vty_type_token(const uint8_t mdek[VTY_KEY_BYTES],
                    const uint8_t module_uuid[VTY_UUID_BYTES],

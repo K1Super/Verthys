@@ -280,8 +280,10 @@ mod imp {
         let event = unsafe { CreateEventW(None, true, false, None) }
             .map_err(|_| "安全服务 I/O 事件创建失败".to_string())?;
         let event = OwnedHandle(event);
-        let mut ov = OVERLAPPED::default();
-        ov.hEvent = event.0;
+        let mut ov = OVERLAPPED {
+            hEvent: event.0,
+            ..Default::default()
+        };
         let mut transferred: u32 = 0;
         let result = unsafe {
             if write {
@@ -515,7 +517,7 @@ mod imp {
             assert_eq!(get_u32(&raw, 8), 0x11223344);
             assert_eq!(get_u32(&raw, 32), ARM_MODE_HOST_PREARM);
             assert_eq!(get_u32(&raw, 36), 1);
-            assert_eq!(raw[40..].iter().all(|b| *b == 0), true);
+            assert!(raw[40..].iter().all(|b| *b == 0));
         }
 
         #[test]
@@ -529,13 +531,13 @@ mod imp {
             );
             assert_eq!(get_u32(&raw, 32), 0x1234);
             assert_eq!(get_u64(&raw, 36), 0x0102030405060708);
-            assert_eq!(raw[44..].iter().all(|b| *b == 0), true);
+            assert!(raw[44..].iter().all(|b| *b == 0));
         }
 
         #[test]
         fn disarm_request_has_no_payload() {
             let raw = build_kernel_request(CMD_KERNEL_DISARM, None, 1, 2, 3);
-            assert_eq!(raw[32..].iter().all(|b| *b == 0), true);
+            assert!(raw[32..].iter().all(|b| *b == 0));
         }
 
         #[test]

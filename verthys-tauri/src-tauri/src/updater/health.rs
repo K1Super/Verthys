@@ -10,7 +10,7 @@ use super::log;
 use super::marker::{self, PendingMarker};
 use super::repair;
 use super::UpdaterError;
-use crate::controller::worker_controller;
+use crate::controller::vault::worker_controller;
 use crate::infrastructure::path_resolver;
 use crate::state::{AppState, WorkerLifecycleState};
 use serde::Serialize;

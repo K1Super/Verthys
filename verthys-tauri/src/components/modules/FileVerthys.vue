@@ -27,6 +27,7 @@
         <input
           class="search-input"
           :value="searchKey"
+          autocomplete="off"
           @input="onSearchInput"
           placeholder="搜索"
           aria-label="搜索加密文件"
@@ -217,6 +218,7 @@
           class="kv-input"
           v-model="docPassword"
           type="password"
+          autocomplete="off"
           :aria-invalid="docPassword.length > 0 && docPassword.length < MIN_TOKEN_LENGTH"
         />
         <!-- 口令强度下限（仅设置侧强制；解锁侧不设限，避免历史短口令被锁在门外） -->
@@ -251,6 +253,7 @@
         class="kv-input"
         v-model="keyInput"
         type="password"
+        autocomplete="off"
         aria-label="文档独立访问密码"
         @keydown.enter="confirmSaveKey"
       />
@@ -343,27 +346,22 @@ import StatusBanner from "../common/feedback/StatusBanner.vue";
 import SafeSvgIcon from "../common/SafeSvgIcon.vue";
 import { useCardShine } from "../../composables/useCardShine";
 import {
-  verthysGetRecord, verthysForgetImportKeys,
-  verthysWalRecover, verthysImportBegin, verthysImportEnd, verthysForceCloseImportSession,
-  verthysAddChunkBatch, verthysAddRecordsBatch, verthysGcOrphanChunks,
-  userFileStat, readUserFileChunked, checkDiskSpace, base64ToBytes, bytesToBase64,
+  verthysGetRecord, verthysForgetImportKeys, verthysGcOrphanChunks,
+  userFileStat, checkDiskSpace, base64ToBytes,
   decryptPasswordField,
   writeUserFileStream, appendUserFileChunk, finalizeUserFileStream, abortUserFileStream,
+  fileImportStart, fileImportCancel,
+  type FileImportProgress,
 } from "../../lib/verthys";
 import {
-  createFileKdf, buildModuleCheck, verifyModuleCheck, sealRecord, openRecord,
+  verifyModuleCheck, openRecord,
   probeOuterRecord,
   type FileKdf,
 } from "../../lib/module_crypto";
 import { useFileRepair } from "../../composables/file-verthys/useFileRepair";
 import type { FileRepairEntry } from "../../composables/file-verthys/damage";
 import { runFileExport } from "../../composables/file-verthys/useFileExport";
-import {
-  runFileImport,
-  fileImportErrorMessage,
-  type FileImportDeps,
-  type ImportProgress,
-} from "../../composables/file-verthys/useFileImport";
+import { fileImportErrorMessage } from "../../composables/file-verthys/import_contract";
 import {
   runFileDelete,
   retryFileDeletePersist,
@@ -594,18 +592,19 @@ const importPercent = ref(0);
 const importCurrent = ref(0);
 const importTotal = ref(0);
 
-/* 取消导入：置位后由管道在每个文件与块批边界检查；已提交文件保留，
+/* 取消导入：请求发往宿主，由宿主在每个块边界收敛；已提交文件保留，
    会话按"未成功"语义结束（断点状态保留，下次导入续传去重） */
 const importCancelRequested = ref(false);
-/* 取消请求已发出但管道尚未收敛：按钮先隐藏，避免重复点击 */
+/* 取消请求已发出但导入调用尚未返回：按钮先隐藏，避免重复点击 */
 const cancelPending = ref(false);
 const requestImportCancel = () => {
   if (!importing.value || importCancelRequested.value) return;
   importCancelRequested.value = true;
   cancelPending.value = true;
+  void fileImportCancel();
 };
 
-/* 并发导入互斥确认：存在活跃导入会话时由管道回调唤起，用户抉择驱动后续动作 */
+/* 并发导入互斥确认：宿主返回结构化 BUSY 时唤起，用户抉择驱动重试 */
 const showSessionConflict = ref(false);
 let sessionConflictResolver: ((allow: boolean) => void) | null = null;
 const askSessionConflict = (): Promise<boolean> =>
@@ -620,45 +619,15 @@ const resolveSessionConflict = (allow: boolean) => {
   resolve?.(allow);
 };
 
-/* 管道进度 → 覆盖层状态（百分比按文件完成比例合并） */
-const applyImportProgress = (p: ImportProgress) => {
-  importCurrent.value = p.fileIndex + 1;
-  importTotal.value = p.fileCount;
-  importPercent.value = Math.round(((p.fileIndex + p.fileFraction) / p.fileCount) * 100);
-};
-
-/* 导入管道依赖装配：全部经导入会话单写者通道落库 */
-const importDeps: FileImportDeps = {
-  statFile: userFileStat,
-  readChunk: readUserFileChunked,
-  v2: {
-    createFileKdf: async () => createFileKdf(),
-    encryptChunk: async (plain: Uint8Array, kdf: FileKdf, password: string) => {
-      const cipherB64 = await sealRecord("file", "v2_chunk", bytesToBase64(plain), {
-        salt: kdf.saltB64,
-        iterations: kdf.iterations,
-        password,
-      });
-      return base64ToBytes(cipherB64);
-    },
-    buildPasswordCheck: (kdf: FileKdf, password: string) =>
-      buildModuleCheck("file", kdf, password),
-  },
-  // 容器卷空间预检：path 缺省 = 当前会话容器所在卷
-  freeSpaceBytes: async (path) => (await checkDiskSpace(path ?? undefined)).free_bytes,
-  walRecover: verthysWalRecover,
-  importBegin: () => verthysImportBegin(),
-  importEnd: async (success) => {
-    const r = await verthysImportEnd(success);
-    return { ok: r.ok, error: r.error };
-  },
-  forceCloseSession: verthysForceCloseImportSession,
-  chunkBatch: verthysAddChunkBatch,
-  recordsBatch: (records) => verthysAddRecordsBatch(records),
-  gcOrphanChunks: verthysGcOrphanChunks,
-  onSessionBusy: askSessionConflict,
-  isCancelled: () => importCancelRequested.value,
-  onProgress: applyImportProgress,
+/* 宿主进度 → 覆盖层状态（百分比与文件序号均以宿主为准） */
+const applyImportProgress = (p: FileImportProgress) => {
+  importTotal.value = p.totalFiles;
+  importCurrent.value = p.phase === "importing"
+    ? Math.min(p.doneFiles + 1, p.totalFiles)
+    : p.phase === "scanning"
+      ? 0
+      : p.totalFiles;
+  importPercent.value = p.percent;
 };
 
 const startImport = async () => {
@@ -689,11 +658,19 @@ const startImport = async () => {
   }
 
   try {
-    const result = await runFileImport(
-      list.map((f) => ({ path: f.path, name: f.name, mime: getMimeFromName(f.name) })),
-      password,
-      importDeps,
-    );
+    const sources = list.map((f) => ({
+      path: f.path,
+      name: f.name,
+      mime: getMimeFromName(f.name),
+    }));
+    let result = await fileImportStart(sources, password, false, applyImportProgress);
+    // 会话冲突：宿主未建立会话、未处理任何文件，确认后可安全重试接管
+    if (!result.ok && result.errorCode === "E_IMPORT_SESSION_BUSY" && !importCancelRequested.value) {
+      const allow = await askSessionConflict();
+      if (allow) {
+        result = await fileImportStart(sources, password, true, applyImportProgress);
+      }
+    }
 
     // 列表提交：仅 meta 记录已确认（metaId > 0）的条目进入列表与缓存；
     // 失败文件的块留在台账中由孤儿回收处理，不做前端补偿删除
@@ -709,6 +686,7 @@ const startImport = async () => {
       chunkHashes: e.chunkHashes,
       chunkSize: e.chunkSize,
       fileHash: e.fileHash,
+      entryKey: e.entryKey,
       kdf: e.kdf,
       passwordCheck: e.passwordCheck,
     }));
@@ -734,7 +712,7 @@ const startImport = async () => {
     }
 
     if (result.error) {
-      showError(`导入初始化失败：${result.error}`);
+      showError(`导入未完成：${result.error}`);
     } else {
       if (result.failCount > 0) {
         const head = result.failures[0];

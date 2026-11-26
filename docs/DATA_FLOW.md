@@ -109,14 +109,16 @@ sequenceDiagram
 
 ## 5. 导入域数据流（会话 · 台账 · 去重跳过与结算）
 
-图片（拾光）与文件（清藏）两条导入链路共用同一写入通道：全部写入经单写者
-串行，块归属由台账记账，孤儿块回收前先与会话日志结算。
+图片（拾光）与文件（清藏）两条导入链路共用同一写入通道与数据面独占槽位：
+全部写入经单写者串行，块归属由台账记账，孤儿块回收前先与会话日志结算。
+两条链路各自拥有独立的 worker job（`photo_import_job_*` / `file_import_job_*`），
+块由 worker 生成并经暂存区按引用提交，块载荷不经过前端。
 
 ### 5.1 导入会话与台账结算（含 GC 守卫）
 
 ```mermaid
 sequenceDiagram
-    participant FE as 前端管道（useFileImport / importPipeline）
+    participant FE as 前端入口（file_import_start / photo_import_start）
     participant TC as Tauri command（verthys_batch_controller.rs）
     participant IW as 单写者通道（state/import_writer.rs）
     participant LG as 块台账（repository/verthys_chunks.rs）
@@ -124,10 +126,10 @@ sequenceDiagram
     FE->>TC: import_begin
     TC->>WL: 载入快照 → 结算（committed chunk_ids → 台账 owner）并落盘
     Note over TC: 结算落盘失败即拒绝创建会话（防未结算引用被回收）
-    FE->>TC: add_chunk_batch（块上传）
+    FE->>TC: 块引用提交（worker 暂存）
     IW->>LG: 块入账 owner=0（上传中）
     IW->>WL: 追加 pending
-    FE->>TC: add_records_batch（元数据）
+    FE->>TC: 元数据提交（含块引用）
     IW->>LG: owner 改写为元数据 ID
     IW->>WL: 追加 committed（含 verthys_id + chunk_ids）
     FE->>TC: import_end（success=true）

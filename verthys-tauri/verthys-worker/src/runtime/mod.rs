@@ -42,6 +42,8 @@ pub(crate) mod pcr_session;
 pub(crate) mod ipc_auth;
 pub(crate) mod path_grants;
 pub(crate) mod media;
+/// 清藏原生导入数据面（与拾光 media 数据面并列，互不依赖）
+pub(crate) mod file_import;
 
 /// 跨层预算常量（与主进程同源）
 ///

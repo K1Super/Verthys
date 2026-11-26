@@ -281,66 +281,27 @@ function Test-VerthysDevWorkerUpToDate {
     return ((Get-VerthysDevSignerSha256 -Path $WorkerPath) -eq $Signing.PublisherSha256)
 }
 
-function Copy-VerthysDevFile {
-    param(
-        [Parameter(Mandatory = $true)][string]$Source,
-        [Parameter(Mandatory = $true)][string]$Destination
-    )
-
-    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
-        throw ("Source file missing: {0}" -f $Source)
-    }
-
-    $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
-    $destinationHash = ""
-    if (Test-Path -LiteralPath $Destination -PathType Leaf) {
-        $destinationHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
-    }
-    if ($sourceHash -eq $destinationHash) {
-        return
-    }
-
-    for ($attempt = 0; $attempt -lt 10; $attempt++) {
-        try {
-            Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
-            break
-        } catch {
-            if ($attempt -eq 9) {
-                throw ("Failed to stage {0} -> {1}: {2}" -f $Source, $Destination, $_.Exception.Message)
-            }
-            Start-Sleep -Milliseconds 300
-        }
-    }
-
-    $copiedHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($copiedHash -ne $sourceHash) {
-        throw ("Staged file hash mismatch: {0}" -f $Destination)
-    }
-}
-
 function Sync-VerthysDevStage {
     param(
         [Parameter(Mandatory = $true)][string]$DllPath,
         [Parameter(Mandatory = $true)][string]$WorkerPath
     )
 
-    $srcTauri = Join-Path $script:DevRepoRoot "verthys-tauri\src-tauri"
-    $debugDir = Join-Path $srcTauri "target\debug"
-    $binariesDir = Join-Path $srcTauri "binaries"
-
-    foreach ($dir in @($srcTauri, $binariesDir, $debugDir)) {
-        if (-not (Test-Path -LiteralPath $dir)) {
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
-        }
-    }
-
-    Copy-VerthysDevFile -Source $DllPath -Destination (Join-Path $srcTauri "verthys.dll")
-    Copy-VerthysDevFile -Source $DllPath -Destination (Join-Path $debugDir "verthys.dll")
-    Copy-VerthysDevFile -Source $WorkerPath -Destination (Join-Path $binariesDir "verthys-worker-x86_64-pc-windows-msvc.exe")
-    Copy-VerthysDevFile -Source $WorkerPath -Destination (Join-Path $debugDir "verthys-worker.exe")
+    # Single producer shared with build_production and CI. It stages the DLL,
+    # the worker, syncs target\debug, verifies byte identity, and writes the
+    # bundle manifest consumed by the Rust build gate.
+    $stage = & (Join-Path $script:DevRepoRoot "scripts\build\stage_bundle_assets.ps1") `
+        -Channel dev `
+        -DllSource $DllPath `
+        -WorkerSource $WorkerPath `
+        -ContractPath (Join-Path $script:DevRepoRoot "build_dev\core\verthys.artifacts.json") `
+        -Producer "build_dev.ps1" `
+        -SyncTargets dev `
+        -RepoRoot $script:DevRepoRoot
 
     return [pscustomobject]@{
-        HostDir = $debugDir
+        HostDir  = (Join-Path $script:DevRepoRoot "verthys-tauri\src-tauri\target\debug")
+        Manifest = $stage.Manifest
     }
 }
 
@@ -427,6 +388,8 @@ function Initialize-VerthysDevRuntime {
         -WorkerSha256 $workerHash
 
     $stage = Sync-VerthysDevStage -DllPath $dllPath -WorkerPath $workerPath
+    Write-Host ("[dev] Packaging assets staged (channel=dev, dll={0}, worker={1})" -f $dllHash.Substring(0, 12), $workerHash.Substring(0, 12)) -ForegroundColor Gray
+
     return [pscustomobject]@{
         DllPath         = $dllPath
         WorkerPath      = $workerPath

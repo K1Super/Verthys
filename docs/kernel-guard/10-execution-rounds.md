@@ -258,7 +258,7 @@ Round 3 **服务侧编译/单测通过**；应用侧接入未开始，K1 完整�
 | `core/src/security/state/vty_machine_limiter.h/.c` | 服务 KernelStatus 客户端与状态映射 |
 | `core/include/verthys.h` | 可选 `VerthysKernelStatus` 与接口声明 |
 | `core/verthys.def` | 导出 `Verthys_GetKernelStatus` |
-| `core/src/api/lifecycle/verthys_api.c` | 公共 API 映射 |
+| `core/src/api/security/verthys_api_security.c` | 公共 API 映射 |
 | `verthys-worker/src/runtime/ffi_types.rs` | C 结构体/符号绑定与 20 字节布局测试 |
 | `verthys-worker/src/runtime/worker.rs` | 符号探测与 `kernel_status` 填充 |
 | `verthys-worker/src/runtime/protocol.rs` | `KernelStatusReport` 序列化 |
@@ -462,7 +462,7 @@ Round 6 **审计链路与生命周期脚本完成构建、类型、负向与语�
 | `security-service/tests/test_protocol.c` | 新命令白名单与 64 字节无载荷契约 |
 | `security-service/tests/test_kernel_guard.c` | DOS→NT、worker 基名、生命周期边界与拒绝路径 |
 | `core/src/security/state/vty_machine_limiter.h/.c` | 生命周期命令与进程级获取/释放 |
-| `core/src/api/lifecycle/verthys_api.c` | 解锁前获取、切档联动、锁定释放 |
+| `core/src/api/lifecycle/verthys_api.c`、`core/src/api/security/verthys_api_security.c` | 解锁前获取、切档联动、锁定释放 |
 
 ### 9.3 构建与验证
 

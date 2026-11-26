@@ -30,7 +30,10 @@
       ></span>
     </div>
 
-    <div class="cd-content">
+    <div
+      class="cd-content"
+      :class="{ 'cd-content--no-scrollbar': scrollbarHidden }"
+    >
       <slot />
     </div>
   </div>
@@ -39,10 +42,13 @@
 <script setup lang="ts">
 interface Props {
   width?: string;
+  /** 隐藏内容区滚动条：仍保留滚轮/键盘滚动，只移除可见轨道与滑块 */
+  scrollbarHidden?: boolean;
 }
 
 withDefaults(defineProps<Props>(), {
   width: "400px",
+  scrollbarHidden: false,
 });
 
 /* 刻度长度序列：长短错落（非等距模板），第三根为暖色基准刻度 */
@@ -211,6 +217,20 @@ const scaleTicks = [8, 4, 11, 5, 9, 4, 7];
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-gutter: stable;
+}
+
+/* 无滚动条模式：Chromium 用伪元素，Firefox 用 scrollbar-width。
+ * 同时取消 scrollbar-gutter，避免滚动条已隐藏却仍预留空白槽。 */
+.cd-content--no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  scrollbar-gutter: auto;
+}
+
+.cd-content--no-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 /* 内容词汇（kv-*）由全局 styles/components.css 单源定义：

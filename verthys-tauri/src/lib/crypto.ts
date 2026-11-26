@@ -14,7 +14,7 @@
  *   帧 AD = type(1) || seq(4 大端) || len(4 大端) || salt(16)
  */
 import { xchacha20poly1305 } from "@noble/ciphers/chacha";
-import { blake3 } from "@noble/hashes/blake3";
+import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToBase64, base64ToBytes, bytesToHex, isValidHex, toArrayBuffer } from "../utils/binary_codec";
 
 import {

@@ -18,13 +18,87 @@ export interface AnchorScanEntry {
   paths: string[];
 }
 
+/** 单个扫描位置的覆盖率与状态 */
+export interface AnchorScanRootReport {
+  path: string;
+  /** file / dir */
+  kind: string;
+  /** container / recent / custom / deep / deep_user */
+  source: string;
+  available: boolean;
+  last_success_at: number;
+  last_attempt_at: number;
+  files_seen: number;
+  matched_count: number;
+  permission_errors: number;
+  other_errors: number;
+  truncated: boolean;
+  /** 本次扫描因预算用尽未尝试该位置，证据沿用上次快照 */
+  deferred: boolean;
+  entry_count: number;
+}
+
 /** 容器扫描摘要；路径仅用于本次展示，不进入审计 */
 export interface AnchorScanResult {
   entries: AnchorScanEntry[];
+  roots: AnchorScanRootReport[];
   files_seen: number;
   matched_count: number;
   truncated: boolean;
+  /** 本次扫描不完整：预算用尽、位置未尝试或遍历被截断 */
+  partial: boolean;
   permission_errors: number;
+  other_errors: number;
+  scanned_at: number;
+  deep: boolean;
+}
+
+/** 扫描进度（深度扫描等长任务逐位置推送） */
+export interface AnchorScanProgress {
+  phase: string;
+  roots_total: number;
+  roots_done: number;
+  current_path: string;
+  files_seen: number;
+  matched_count: number;
+  partial: boolean;
+}
+
+/** 存储统计（非敏感计数；与后端 StorageStatsEntry 对齐） */
+export interface StorageStats {
+  file_size: number;
+  data_end: number;
+  live_tree_bytes: number;
+  live_segment_bytes: number;
+  live_bytes: number;
+  reclaimable_bytes: number;
+  record_count: number;
+  file_count: number;
+  chunk_count: number;
+}
+
+/** 空间压缩结果（非敏感计数；与后端 CompactResultEntry 对齐） */
+export interface StorageCompactResult {
+  stage: number;
+  before_bytes: number;
+  after_bytes: number;
+  reclaimed_bytes: number;
+  records: number;
+  chunks: number;
+  bytes: number;
+  live_bytes: number;
+}
+
+/** 空间压缩进度（storage://compact-progress 事件载荷） */
+export interface StorageCompactProgress {
+  stage: number;
+  before_bytes: number;
+  after_bytes: number;
+  reclaimed_bytes: number;
+  records: number;
+  chunks: number;
+  bytes: number;
+  live_bytes: number;
 }
 
 /** 后端统一响应（脱敏：仅返回操作结果与必要数据，不含密钥/句柄） */
@@ -163,6 +237,10 @@ export interface VerthysResponse {
   rotate_files?: number;
   rotate_chunks?: number;
   rotate_bytes?: number;
+  /** 存储统计（仅 verthys_storage_stats / verthys_storage_compact 返回） */
+  storage_stats?: StorageStats;
+  /** 压缩结果（仅 verthys_storage_compact 返回） */
+  compact_result?: StorageCompactResult;
 }
 
 /**
@@ -774,6 +852,94 @@ export interface PhotoImportResult {
   errorCode?: string;
   /** 是否被用户取消 */
   cancelled: boolean;
+}
+
+/* ------------------------------------------------------------------ *
+ * 原生清藏导入（file_import_start）                                   *
+ *                                                                  *
+ * 与照片导入完全独立的命令与进度契约：文件内容由 worker 读取、哈希与   *
+ * 加密，前端只传路径/展示名/MIME 与进度 Channel。                     *
+ * ------------------------------------------------------------------ */
+
+/** 清藏导入的单文件输入 */
+export interface FileImportSource {
+  /** 绝对路径（来自用户对话框选择） */
+  path: string;
+  /** 展示名与元数据名称 */
+  name: string;
+  /** MIME 类型（展示用；由调用方按扩展名解析） */
+  mime: string;
+}
+
+/** 清藏原生导入进度（Tauri Channel 流式推送） */
+export interface FileImportProgress {
+  totalFiles: number;
+  doneFiles: number;
+  skipped: number;
+  failed: number;
+  currentName: string;
+  /** 当前文件已完成块数 */
+  currentChunk: number;
+  /** 当前文件块总数 */
+  totalChunks: number;
+  /** 累计进度百分比（0–100） */
+  percent: number;
+  elapsedMs: number;
+  phase: "scanning" | "importing" | "finishing" | "done" | "cancelled";
+}
+
+/** 文件级密钥派生参数（与 module_crypto.FileKdf 同形） */
+export interface FileImportKdf {
+  version: number;
+  saltB64: string;
+  iterations: number;
+}
+
+/** 单个成功导入的清藏条目 */
+export interface FileImportEntry {
+  metaId: number;
+  name: string;
+  mime: string;
+  size: number;
+  totalChunks: number;
+  encrypted: boolean;
+  metaName: string;
+  metaB64: string;
+  chunkIds: number[];
+  chunkHashes: string[];
+  chunkSize: number;
+  fileHash: string;
+  entryKey: string;
+  kdf?: FileImportKdf;
+  passwordCheck?: string;
+}
+
+/** 单文件失败明细 */
+export interface FileImportFailure {
+  index: number;
+  name: string;
+  /** 结构化原因码（前端按既有分类表映射文案） */
+  code: string;
+  /** 诊断文本（不直接展示） */
+  message: string;
+}
+
+/** 清藏原生导入结果 */
+export interface FileImportResult {
+  ok: boolean;
+  entries: FileImportEntry[];
+  failures: FileImportFailure[];
+  /** 去重跳过的文件名 */
+  skipped: string[];
+  successCount: number;
+  skippedCount: number;
+  failCount: number;
+  total: number;
+  elapsedMs: number;
+  cancelled: boolean;
+  error?: string;
+  errorCode?: string;
+  sessionWarning?: string;
 }
 
 /* ------------------------------------------------------------------ *

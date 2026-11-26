@@ -25,11 +25,13 @@
 - 导出宏：`VERTHYS_API` 在 Windows 下**恒为空**（不再携带 `__declspec(dllexport/dllimport)`）。
   符号导出**唯一**由链接器 `/DEF:verthys.def` 白名单管控；未列入 `.def` 的接口一律不可达。
   消费方（verthys-worker）经 `libloading` 按名运行时解析，不依赖导入库。
-- 版本宏：`VERTHYS_API_VERSION = 0x0017u`，调用方可用 `#if` 做编译期能力判断。
+- 版本宏：`VERTHYS_API_VERSION = 0x0018u`，调用方可用 `#if` 做编译期能力判断。
   0x0014 追加：`VerthysSecurityStatus` 原因码/已加固的用户态上限计数/策略位/采样时间，
   以及进程级运行时守卫通知接口 `Verthys_NotifyRuntimeGuards`。
   0x0015 追加：`Verthys_FindLidByName`（名称盲索引精确查 ID）。
   0x0017 追加：`Verthys_ReplaceRecord`（同一次提交内原子替换单条记录）。
+  0x0018 追加：`Verthys_GetStorageStats` / `Verthys_CompactStorage`（活数据统计与
+  原样密文空间压缩）。
   0x0016 追加：回退锚点维护接口 `Verthys_RollbackAnchorList/Reclaim/Release`。
 
 ## 3. 不透明句柄 `VerthysHandle`
@@ -276,6 +278,25 @@ if (r != VERTHYS_OK) {
 - 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_INTERNAL`。（据实现推断）
 - 内存：调用方提供结构体，库填充。
 - 线程安全：MT-Const。
+
+### Verthys_GetStorageStats（API 0x0018）
+`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetStorageStats(VerthysHandle handle, VerthysStorageStats *out_stats);`
+- 语义：返回当前解锁会话的 `file_size`、`data_end`、活目录树/活段/活数据字节、`reclaimable_bytes`
+  （文件大小扣除固定元数据区与活数据后的不可回收余量）、活记录/文件/分片计数；不含密钥/明文/路径。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_CORRUPT` / `VERTHYS_ERR_INTERNAL`。
+- 内存：调用方提供结构体，库填充。
+- 线程安全：MT-Unsafe（内部持会话互斥量）。
+
+### Verthys_CompactStorage（API 0x0018）
+`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_CompactStorage(VerthysHandle handle, VerthysCompactProgress progress, void *user);`
+- 语义：对当前容器做空间压缩：同一 `vault_uuid`/`epoch`/`K_c`/slots/keyring，原样搬运活记录与分片密文，
+  重建紧凑目录树，再用 `ReplaceFileW` 原子替换；删除遗留的墓碑、旧 COW 节点与旧段在替换后消失。
+  不换密钥、不重加密、不需要口令；成功返回时句柄仍为解锁态，内部会话已切换到新文件。
+- `progress`：可为 NULL；返回非 0 取消本次压缩，取消时原容器保持不变。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_LOCKED` / `VERTHYS_ERR_POLICY`（取消/导入窗口）/
+  `VERTHYS_ERR_ROTATE_PENDING` / `VERTHYS_ERR_NO_SPACE` / `VERTHYS_ERR_IO` / `VERTHYS_ERR_CORRUPT` / `VERTHYS_ERR_VERIFY`。
+- 内存：调用方提供进度回调；库内部流式处理，不整文件载入内存。
+- 线程安全：MT-Unsafe（压缩期间独占会话）。
 
 ### Verthys_VerifyIntegrity
 `VERTHYS_API VerthysResult VERTHYS_CALL Verthys_VerifyIntegrity(VerthysHandle handle, uint64_t *out_failed_lids, uint64_t max_failed, uint64_t *out_failed_count);`

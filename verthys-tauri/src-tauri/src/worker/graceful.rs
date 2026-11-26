@@ -34,7 +34,8 @@ pub(crate) fn reject_request_after_exit(req: ActorRequest, pid: u32) {
     let err = Err(format!("worker 子进程 PID={} 已退出", pid));
     match req {
         ActorRequest::Send { reply, .. }
-        | ActorRequest::SendStreamingRotate { reply, .. } => {
+        | ActorRequest::SendStreamingRotate { reply, .. }
+        | ActorRequest::SendStreamingStorage { reply, .. } => {
             let _ = reply.send(err);
         }
         ActorRequest::WaitReady { reply, .. } => {

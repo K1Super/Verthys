@@ -24,7 +24,7 @@ export const environmentTools: DevTool[] = [
   },
   {
     id: "actions.reload",
-    group: "actions",
+    group: "environment",
     kind: "action",
     label: "重载界面",
     hint: "丢弃未保存的界面状态并重新加载",

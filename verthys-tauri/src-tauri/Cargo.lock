@@ -4335,7 +4335,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "verthys-tauri"
-version = "4.6.6"
+version = "4.7.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -4369,7 +4369,9 @@ dependencies = [
  "ts-rs",
  "uuid",
  "walkdir",
+ "webview2-com",
  "windows 0.58.0",
+ "windows-core 0.61.2",
  "zeroize",
  "zip",
 ]

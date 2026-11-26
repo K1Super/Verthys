@@ -129,6 +129,7 @@
           id="vault-key-input"
           class="kv-input"
           v-model="keyInput"
+          autocomplete="off"
           :type="keyInputVisible ? 'text' : 'password'"
           aria-label="独立密钥"
           @keydown.enter="confirmKey"

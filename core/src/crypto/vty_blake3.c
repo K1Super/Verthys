@@ -1,16 +1,36 @@
 /*
- * vty_blake3.c — BLAKE3 一次性 32B 摘要（便携实现）
+ * vty_blake3.c — BLAKE3 一次性 32B 摘要（标量 + AVX2 分派）
  *
  * 结构：1024 字节为一个 chunk；chunk 内 64 字节为一个 block；
  * 每个 chunk 产出 8 个 32 位字的 CV，再按二叉 Merkle 树两两合并。
  * 只有根节点的最终压缩带 ROOT 标志，因此单 chunk 消息直接在
  * chunk 的末块上带 ROOT，多 chunk 消息在最后一次合并时带 ROOT。
+ *
+ * 多 chunk 输入在支持 AVX2 的 x64 平台按 8 个完整 chunk 并行计算 CV；
+ * 标量路径始终保留，负责单 chunk、末块不完整与不支持 AVX2 的平台。
  */
 #include "vty_blake3.h"
 #include "vty_util.h"
+#include "vty_blake3_avx2.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
+#include <windows.h>
+#ifndef PF_AVX2_INSTRUCTIONS_AVAILABLE
+#define PF_AVX2_INSTRUCTIONS_AVAILABLE 40
+#endif
+#define B3_HAVE_AVX2_DISPATCH 1
+#else
+#define B3_HAVE_AVX2_DISPATCH 0
+#endif
+
+/* 显式降级开关：用于交叉验证或 AVX2 实现需要临时停用的场景。 */
+#if defined(VERTHYS_BLAKE3_FORCE_SCALAR)
+#undef B3_HAVE_AVX2_DISPATCH
+#define B3_HAVE_AVX2_DISPATCH 0
+#endif
 
 #define B3_BLOCK_LEN 64u
 #define B3_CHUNK_LEN 1024u
@@ -104,6 +124,17 @@ static void b3_compress(const uint32_t cv[8], const uint32_t block[16],
     vty_secure_zero(tmp, sizeof(tmp));
 }
 
+/* AVX2 8 路 chunk 并行：仅当运行平台支持 AVX2 时启用，
+ * 结果必须与标量路径逐字节一致；不支持时完整回退标量。 */
+static int b3_avx2_ready(void)
+{
+#if B3_HAVE_AVX2_DISPATCH
+    return IsProcessorFeaturePresent(PF_AVX2_INSTRUCTIONS_AVAILABLE) ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
 /* 单 chunk 的 CV；root=1 表示该 chunk 即整条消息 */
 static void b3_chunk_cv(const uint8_t *data, size_t len, uint32_t chunk_index,
                         int root, uint8_t out[32])
@@ -121,9 +152,14 @@ static void b3_chunk_cv(const uint8_t *data, size_t len, uint32_t chunk_index,
         size_t blen = remain > B3_BLOCK_LEN ? B3_BLOCK_LEN : remain;
         uint32_t flags = 0;
 
-        memset(block, 0, sizeof(block));
-        if (blen != 0) {
-            memcpy(block, data + off, blen);
+        /* 满块直接装载，只有末块需要零填充。 */
+        if (blen == B3_BLOCK_LEN) {
+            memcpy(block, data + off, B3_BLOCK_LEN);
+        } else {
+            memset(block, 0, sizeof(block));
+            if (blen != 0) {
+                memcpy(block, data + off, blen);
+            }
         }
         if (i == 0) flags |= B3_CHUNK_START;
         if (i == nblocks - 1) flags |= B3_CHUNK_END;
@@ -176,11 +212,44 @@ int vty_blake3_32(const uint8_t *data, size_t len, uint8_t out[VTY_HASH_BYTES])
     cvs = (uint8_t *)malloc(nchunks * 32u);
     if (cvs == NULL) return VTY_E_RESOURCE;
 
-    for (i = 0; i < nchunks; i++) {
-        size_t off = i * B3_CHUNK_LEN;
-        size_t remain = len - off;
-        size_t clen = remain > B3_CHUNK_LEN ? B3_CHUNK_LEN : remain;
-        b3_chunk_cv(data + off, clen, (uint32_t)i, 0, cvs + i * 32u);
+    {
+        size_t done = 0;
+
+#if B3_HAVE_AVX2_DISPATCH
+        if (nchunks >= 8u && b3_avx2_ready()) {
+            size_t full_chunks = nchunks;
+            size_t groups;
+            size_t gidx;
+
+            /* 末块不完整时该 chunk 交给标量路径，8 路组只处理完整 chunk。 */
+            if ((len % B3_CHUNK_LEN) != 0u) {
+                full_chunks = nchunks - 1u;
+            }
+            groups = full_chunks / 8u;
+            for (gidx = 0; gidx < groups; gidx++) {
+                size_t base = gidx * 8u;
+                int rc = vty_blake3_chunk_cv8_avx2(
+                    data + base * B3_CHUNK_LEN, (uint32_t)base,
+                    (uint8_t (*)[32])(void *)(cvs + base * 32u));
+                if (rc != 0) {
+                    size_t j;
+                    for (j = 0; j < 8u; j++) {
+                        b3_chunk_cv(data + (base + j) * B3_CHUNK_LEN,
+                                    B3_CHUNK_LEN, (uint32_t)(base + j), 0,
+                                    cvs + (base + j) * 32u);
+                    }
+                }
+            }
+            done = groups * 8u;
+        }
+#endif
+
+        for (i = done; i < nchunks; i++) {
+            size_t off = i * B3_CHUNK_LEN;
+            size_t remain = len - off;
+            size_t clen = remain > B3_CHUNK_LEN ? B3_CHUNK_LEN : remain;
+            b3_chunk_cv(data + off, clen, (uint32_t)i, 0, cvs + i * 32u);
+        }
     }
 
     n = nchunks;

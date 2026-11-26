@@ -212,9 +212,18 @@ foreach ($name in @("VerthysSecuritySvc.exe", "VerthysRootCA.cer")) {
     }
 }
 
+. (Join-Path $PSScriptRoot "scripts\lib\build_lock.ps1")
+$devLock = $null
 $previousEap = $ErrorActionPreference
 $ErrorActionPreference = "Stop"
 try {
+    # Dev staging writes the same packaging paths as the production pipeline.
+    # Failing to take the lock means a production build is still running.
+    try {
+        $devLock = Enter-VerthysBuildLock -Root $PSScriptRoot -Role dev
+    } catch {
+        throw ("Production build is running; dev staging aborted: {0}" -f $_.Exception.Message)
+    }
     $signing = Resolve-VerthysDevSigning
     $devRuntime = Initialize-VerthysDevRuntime -Signing $signing
     $cargoRunner = Set-VerthysDevCargoRunner
@@ -233,6 +242,7 @@ try {
     Write-Host ""
     exit 1
 } finally {
+    Exit-VerthysBuildLock -Lock $devLock
     $ErrorActionPreference = $previousEap
 }
 

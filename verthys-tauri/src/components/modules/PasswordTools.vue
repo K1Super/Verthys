@@ -395,7 +395,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from "vue";
 import { save } from "@tauri-apps/plugin-dialog";
-import { sha256 } from "@noble/hashes/sha2";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { argon2id } from "hash-wasm";
 import { writeUserFile } from "../../lib/verthys";
 import { useToastCenter } from "../../composables/useToastCenter";

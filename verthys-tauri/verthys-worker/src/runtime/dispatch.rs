@@ -11,7 +11,10 @@
 use crate::log::diag;
 use crate::runtime::worker::Worker;
 use crate::runtime::worker::clamp_enum_count;
-use crate::runtime::protocol::{Request, Response, RecordEntry, base64_encode, base64_decode};
+use crate::runtime::protocol::{
+    base64_decode, base64_encode, CompactResultEntry, RecordEntry, Request, Response,
+    StorageStatsEntry,
+};
 use crate::runtime::ffi_types::{
     VerthysRecordC, VERTHYS_OK, VERTHYS_PERSIST_OK, VERTHYS_SCAN_PROJECT_FULL,
     VERTHYS_SCAN_PROJECT_INDEX, VERTHYS_SYMBOL_UNSUPPORTED,
@@ -19,6 +22,7 @@ use crate::runtime::ffi_types::{
 use crate::runtime::budget::PB_ENUM_RESPONSE_DATA_BUDGET_BYTES;
 use crate::runtime::path_grants;
 use crate::runtime::media;
+use crate::runtime::file_import;
 use crate::runtime::module_keys;
 use crate::runtime::module_session;
 use crate::runtime::pcr_session;
@@ -323,6 +327,11 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
                 },
             }
         }
+        "file_import_job_begin" => file_import::handle_begin(req),
+        "file_import_job_next" => file_import::handle_next(worker, req),
+        "file_import_job_finish" => file_import::handle_finish(req),
+        "file_import_job_cancel" => file_import::handle_cancel(req),
+        "file_import_job_end" => file_import::handle_end(req),
         "photo_import_job_begin" => media::handle_begin(req),
         "photo_import_job_next" => media::handle_next(worker, req),
         "photo_import_job_finish" => media::handle_finish(worker, req),
@@ -1395,6 +1404,58 @@ pub(crate) fn handle_request(worker: &mut Worker, req: &Request) -> Response {
             } else {
                 Response::err("v4_rotate_abort", rc)
             }
+        }
+        "storage_stats" => match worker.call_get_storage_stats() {
+            Ok(s) => {
+                let mut resp = Response::ok("storage_stats");
+                resp.storage_stats = Some(StorageStatsEntry {
+                    file_size: s.file_size,
+                    data_end: s.data_end,
+                    live_tree_bytes: s.live_tree_bytes,
+                    live_segment_bytes: s.live_segment_bytes,
+                    live_bytes: s.live_bytes,
+                    reclaimable_bytes: s.reclaimable_bytes,
+                    record_count: s.record_count,
+                    file_count: s.file_count,
+                    chunk_count: s.chunk_count,
+                });
+                resp
+            }
+            Err(rc) => Response::err("storage_stats", rc),
+        },
+        "storage_compact" => {
+            let cancel_event = if req.cancel_event.is_empty() {
+                None
+            } else {
+                Some(req.cancel_event.as_str())
+            };
+            let before = worker.call_get_storage_stats().ok();
+            let rc = worker.call_compact_storage(cancel_event);
+            if rc != VERTHYS_OK {
+                return Response::err("storage_compact", rc);
+            }
+            let after = worker.call_get_storage_stats().ok();
+            let mut resp = Response::ok("storage_compact");
+            let mut result = CompactResultEntry {
+                stage: 3,
+                ..CompactResultEntry::default()
+            };
+            if let Some(b) = before {
+                result.before_bytes = b.file_size;
+                result.live_bytes = b.live_bytes;
+            }
+            if let Some(a) = after {
+                result.after_bytes = a.file_size;
+                result.records = a.record_count;
+                result.chunks = a.chunk_count;
+                result.bytes = a.live_segment_bytes;
+                result.live_bytes = a.live_bytes;
+            }
+            if result.before_bytes > result.after_bytes {
+                result.reclaimed_bytes = result.before_bytes - result.after_bytes;
+            }
+            resp.compact_result = Some(result);
+            resp
         }
         _ => Response {
             ok: false,

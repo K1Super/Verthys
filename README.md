@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/verthys-hero.svg" alt="Verthys — 加密数据管理器" width="100%">
   <br>
-  <i>ABI 0x0017&nbsp;·&nbsp;CONTAINER V4&nbsp;·&nbsp;WINDOWS X64&nbsp;·&nbsp;LOCAL ONLY</i>
+  <i>ABI 0x0018&nbsp;·&nbsp;CONTAINER V4&nbsp;·&nbsp;WINDOWS X64&nbsp;·&nbsp;LOCAL ONLY</i>
 </div>
 
 <br>
@@ -82,7 +82,7 @@ Verthys 是一个面向 Windows 的加密数据管理器。敏感数据被封装
 - 不透明句柄 `VerthysHandle` 隔离内部上下文，密钥与运行状态对上层不可见。
 - 统一 32 位状态码，不对外输出内部调试信息与异常详情。
 - 导出面唯一由 `verthys.def` 白名单管控；CI 以 dumpbin 导出面清单比对基线，任何新增符号都会让门变红。
-- `VERTHYS_API_VERSION 0x0017`，调用方编译期按宏版本协商能力。
+- `VERTHYS_API_VERSION 0x0018`，调用方编译期按宏版本协商能力。
 - 消费方 `verthys-worker` 经 libloading 按名运行时解析，不依赖导入库。
 
 > 未列入白名单的符号，一律不可达。

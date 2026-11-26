@@ -284,7 +284,9 @@ if ($Stage -in @('PI-4', 'PI-5')) {
             Write-Host ("  [KEY ] {0}:{1}" -f $hit.Path, $hit.LineNumber) -ForegroundColor Red
         }
     }
-    $a20File = Join-Path $repoRoot 'verthys-tauri/src/composables/file-verthys/useFileImport.spec.ts'
+    # 清藏导入已收敛到 worker 原生 job：去重语义用例随之迁移到数据面本体，
+    # 门禁改为检查该文件中的等价用例（不再依赖前端管线文件）。
+    $a20File = Join-Path $repoRoot 'verthys-tauri/verthys-worker/src/runtime/file_import.rs'
     $a20Text = if (Test-Path -LiteralPath $a20File) { Get-Content -LiteralPath $a20File -Raw } else { '' }
     if ($a20Text -notmatch '同内容不同路径' -or $a20Text -notmatch '同一会话内同路径') {
         $testFailures.Add('A20/A20b 回归用例缺失（同内容不同路径 / 同条目键重试）')

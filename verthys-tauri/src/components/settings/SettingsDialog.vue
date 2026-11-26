@@ -46,6 +46,7 @@
               <input
                 class="kv-input settings-input"
                 type="number"
+                autocomplete="off"
                 inputmode="numeric"
                 step="1"
                 :min="TIER_AFTER_RANGE[row.key][0]"
@@ -76,6 +77,33 @@
         </div>
       </section>
 
+      <section class="kv-section settings-section">
+        <div class="kv-section-label">存储</div>
+        <div class="settings-row">
+          <span class="settings-row-name">可回收</span>
+          <div class="settings-controls">
+            <span class="settings-storage-readout">{{ storageReadout }}</span>
+            <ActionButton
+              v-if="storageBusy"
+              label="取消"
+              :show-plus="false"
+              @click="cancelStorage"
+            />
+            <ActionButton
+              v-else
+              label="立即回收"
+              :show-plus="false"
+              :disabled="!storageStats || storageStats.reclaimable_bytes === 0"
+              @click="compactStorage"
+            />
+          </div>
+        </div>
+        <div v-if="storageProgress" class="settings-storage-progress">
+          {{ storageProgressText }}
+        </div>
+        <div v-if="storageError" class="settings-storage-error">{{ storageError }}</div>
+      </section>
+
       <div class="settings-actions">
         <ActionButton label="恢复默认" :show-plus="false" @click="restoreDefaults" />
         <ActionButton
@@ -91,11 +119,20 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
 import ActionButton from "../common/verthys-ui/ActionButton.vue";
 import VaultSelect from "../common/verthys-ui/VaultSelect.vue";
 import { useGlobalIdleScheduler } from "../../composables/useGlobalIdleScheduler";
+import {
+  verthysStorageCompact,
+  verthysStorageCompactCancel,
+  verthysStorageStats,
+} from "../../lib/verthys";
+import type {
+  StorageStats,
+  StorageCompactProgress,
+} from "../../types/verthys";
 import {
   ACTIVE_FPS_VALUES,
   IDLE_TIERS,
@@ -115,6 +152,85 @@ const props = defineProps<{ show: boolean }>();
 const emit = defineEmits<{ (e: "close"): void }>();
 
 const { resetIdle } = useGlobalIdleScheduler();
+
+/* ===== 存储维护（即时操作，不进入显示设置草稿） ===== */
+const storageStats = ref<StorageStats | null>(null);
+const storageBusy = ref(false);
+const storageError = ref("");
+const storageProgress = ref<StorageCompactProgress | null>(null);
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let n = value;
+  let unit = 0;
+  while (n >= 1024 && unit < units.length - 1) {
+    n /= 1024;
+    unit++;
+  }
+  return `${n >= 100 ? n.toFixed(0) : n.toFixed(1)} ${units[unit]}`;
+}
+
+const storageReadout = computed(() => {
+  const s = storageStats.value;
+  if (!s) return "—";
+  return `文件 ${formatBytes(s.file_size)} · 有效 ${formatBytes(s.live_bytes)} · 可回收 ${formatBytes(s.reclaimable_bytes)}`;
+});
+
+const storageProgressText = computed(() => {
+  const p = storageProgress.value;
+  if (!p) return "";
+  return `已复制 ${formatBytes(p.bytes)} · 记录 ${p.records} · 分片 ${p.chunks}`;
+});
+
+async function refreshStorage(): Promise<void> {
+  try {
+    storageStats.value = await verthysStorageStats();
+    storageError.value = "";
+  } catch (e) {
+    storageStats.value = null;
+    storageError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function cancelStorage(): Promise<void> {
+  try {
+    await verthysStorageCompactCancel();
+  } catch (e) {
+    storageError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function compactStorage(): Promise<void> {
+  if (storageBusy.value) return;
+  storageBusy.value = true;
+  storageError.value = "";
+  storageProgress.value = null;
+  try {
+    await verthysStorageCompact((p) => {
+      storageProgress.value = p;
+    });
+    await refreshStorage();
+  } catch (e) {
+    storageError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    storageBusy.value = false;
+    storageProgress.value = null;
+  }
+}
+
+watch(
+  () => props.show,
+  (show) => {
+    if (show) {
+      void refreshStorage();
+    } else {
+      storageProgress.value = null;
+      storageError.value = "";
+    }
+  },
+  { immediate: true },
+);
 
 /** 交互态上限选项：值与文案分离，无限制使用文字值“无” */
 const ACTIVE_OPTIONS = ACTIVE_FPS_VALUES.map((value) => ({
@@ -364,6 +480,27 @@ function save(): void {
   right: 3px;
   top: 50%;
   margin-top: -5px;
+}
+
+.settings-storage-readout {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.settings-storage-progress {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.settings-storage-error {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--danger);
 }
 
 .settings-actions {

@@ -49,6 +49,9 @@ compile_commands.json
 # 安装器资源由生产构建脚本生成
 verthys-tauri/src-tauri/service-payload/
 
+# 打包素材清单由 build_dev.ps1 / build_production.ps1 生成
+/verthys-tauri/src-tauri/bundle-assets.json
+
 # Python 缓存
 __pycache__/
 *.pyc

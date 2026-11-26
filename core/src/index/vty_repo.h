@@ -18,7 +18,10 @@ extern "C" {
 #define VTY_REPO_LEAF_BYTES     148u
 #define VTY_REPO_FLAG_TOMBSTONE 0x01u
 #define VTY_REPO_FLAG_FILE      0x02u
-#define VTY_REPO_FLAG_KNOWN     (VTY_REPO_FLAG_TOMBSTONE | VTY_REPO_FLAG_FILE)
+#define VTY_REPO_FLAG_KEYED     0x04u  /* 记录段载荷带 64B 密钥头（RKH） */
+#define VTY_REPO_FLAG_SCRUB_PENDING 0x08u /* 已删除，密钥擦除尚未确认落盘 */
+#define VTY_REPO_FLAG_KNOWN     (VTY_REPO_FLAG_TOMBSTONE | VTY_REPO_FLAG_FILE | \
+                                 VTY_REPO_FLAG_KEYED | VTY_REPO_FLAG_SCRUB_PENDING)
 
 /* 文件/分片叶：清单不单独存 blob，由 (4,file_uuid) 范围扫描重建；
  * 这里只提供仓库 API，不暴露公共文件命令。 */
@@ -95,6 +98,17 @@ int vty_repo_read_name(VtyVault *v, const VtyRepoLeaf *leaf,
 int vty_repo_delete(VtyVault *v, uint64_t id);
 int vty_repo_delete_many(VtyVault *v, const uint64_t *ids, size_t count);
 
+/* 补偿擦除：扫描带 SCRUB_PENDING 的墓碑，沿密钥头版本链擦除密钥材料，
+ * 成功后清除定位符与待擦标志。预算到达即停止，剩余项留给下次解锁。
+ * 幂等：密钥头已全零的条目直接清定位符。 */
+int vty_repo_maintain_pending_scrub(VtyVault *v, uint64_t max_records,
+                                    uint64_t *out_scrubbed,
+                                    uint64_t *out_pending);
+
+/* 测试钩子：跳过删除后的即时擦除，用于验证 PENDING 补偿路径。
+ * 仅在 VERTHYS_TEST_HOOKS 构建中存在实现。 */
+void vty_repo_set_skip_scrub_for_test(int skip);
+
 /* 原子替换：同一次提交内墓碑化 old_id 并写入新记录，返回新 ID。
  *
  * 语义：
@@ -110,6 +124,38 @@ int vty_repo_replace(VtyVault *v, uint64_t old_id, uint8_t type,
 
 /* 存活记录数（跳过分配器与墓碑）。 */
 int vty_repo_count(VtyVault *v, uint64_t *out_count);
+
+/* 存储统计：活目录树字节 + 活记录/分片段字节；reclaimable 为文件大小
+ * 与活字节之差，包含墓碑、旧 COW 节点、已删段和崩溃尾部。
+ * 统计只读，不修改容器。 */
+typedef struct {
+    uint64_t file_size;
+    uint64_t data_end;
+    uint64_t live_tree_bytes;
+    uint64_t live_segment_bytes;
+    uint64_t live_bytes;
+    uint64_t reclaimable_bytes;
+    uint64_t record_count;
+    uint64_t file_count;
+    uint64_t chunk_count;
+} VtyStorageStats;
+
+int vty_repo_storage_stats(VtyVault *v, VtyStorageStats *out);
+
+/* 压缩复制进度回调：返回非 0 即取消。records/chunks/bytes 为已完成量。 */
+typedef int (*VtyRepoCompactProgressFn)(void *user, uint64_t records,
+                                        uint64_t chunks, uint64_t bytes);
+
+/* 把 src 的全部活条目原样复制到空 dst：记录/分片段按密文搬运，只重写
+ * 目录叶中的偏移与哈希；保留 ID、创建时间、模块 UUID、索引、文件叶、
+ * 模块表与 ID 分配器。不读取模块密钥，不做重加密。
+ *
+ * 前置：src/dst 均已解锁，dst 为空库（bulk_begin 的前置）。
+ * 失败时 dst 内容不可用，调用方必须删除 dst 所在临时文件。 */
+int vty_repo_compact_copy(VtyVault *src, VtyVault *dst,
+                          VtyRepoCompactProgressFn cb, void *user,
+                          uint64_t *out_records, uint64_t *out_chunks,
+                          uint64_t *out_bytes);
 
 /* 类型存在性：走类型盲索引，不解析记录段。 */
 int vty_repo_find_by_type(VtyVault *v, uint8_t type,

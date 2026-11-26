@@ -19,10 +19,10 @@
 | ADR-004 | worker 子进程隔离模型 | 密钥/明文隔离到独立子进程，锁库即杀进程 | `verthys-worker/src/main.rs` |
 | ADR-005 | FlatBuffers/flatcc 选型（E-2） | 纯 C11 flatcc，禁手写序列化 | `third_party/Flatcc.cmake`、`core/schema/` |
 | ADR-006 | 超级块法定人数提交（D-3） | **已退役**：V4 使用 A/B 元数据双副本 | ADR-015 |
-| ADR-007 | CNG 内核密钥托管（D-1） | **部分退役**：V3 CNG 密钥组已删除；V4 密钥由 vty_keymanager 管理 | `core/src/crypto/vty_keymanager.c` |
-| ADR-008 | 内容寻址 Extent + BLAKE2b（E-3） | **已退役**：V4 使用分片记录 + 类型盲索引 | `vty_chunk.c`、`vty_repo.c` |
+| ADR-007 | CNG 内核密钥托管（D-1） | **部分退役**：V3 CNG 密钥组已删除；V4 密钥由 vty_keymanager 管理 | `core/src/crypto/vty_keymanager_*.c` |
+| ADR-008 | 内容寻址 Extent + BLAKE2b（E-3） | **已退役**：V4 使用分片记录 + 类型盲索引 | `vty_chunk.c`、`vty_repo_record.c` |
 | ADR-009 | 直接系统调用（D-4） | SSN 排序法 + W^X stub，失败降级 | `syscall_direct.c` |
-| ADR-010 | 密钥自动轮换（D-5） | **已退役**：由 V4 全库 DEK 轮换作业取代 | `vty_rotate.c` |
+| ADR-010 | 密钥自动轮换（D-5） | **已退役**：由 V4 全库 DEK 轮换作业取代 | `vty_rotate_*.c` |
 | ADR-011 | 导出面唯一由 .def 白名单（P0-A） | `VERTHYS_API` 为空宏，导出唯一管控 | `verthys.h`、`verthys.def` |
 | ADR-012 | 反 Oracle 错误码统一化（E-8） | 功能码透传、AUTH/FORMAT/IO/CORRUPT 统一 AUTH | `dispatch.rs`、`protocol.rs` |
 | ADR-013 | 测试注册上提根目录（WP-10） | enable_testing 置于根，避免 ctest 假绿 | 根 `CMakeLists.txt` |

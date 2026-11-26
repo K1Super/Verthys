@@ -124,3 +124,147 @@ function Write-VerthysArtifactContract {
     }
     return $m
 }
+
+# Converts an absolute path to a repo-relative path with forward slashes.
+# Rejects paths outside the repository so the manifest can never reference
+# arbitrary host files.
+function ConvertTo-VerthysRepoRelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    if (-not $full.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "path outside repository root: $Path"
+    }
+    return $full.Substring($rootFull.Length + 1).Replace('\', '/')
+}
+
+# Writes the packaging bundle manifest consumed by the Tauri build gate.
+#
+# The packaging paths (src-tauri\verthys.dll and
+# src-tauri\binaries\verthys-worker-x86_64-pc-windows-msvc.exe) are shared by
+# two channels: the isolated dev runtime (dev-signed DLL + dev worker) and the
+# production pipeline (release-signed DLL + release worker). Identical paths
+# with different bytes mean a single-channel hash baseline can never tell
+# "fresh" from "wrong channel"; the manifest records which channel the staged
+# bytes belong to.
+#
+# Recorded fields: channel, artifact contract, both file hashes, and the DLL
+# hash the worker was compiled against (pair binding). The worker hash is the
+# only invariant that prevents "new DLL + old worker" from reaching packaging:
+# the worker verifies the DLL digest at runtime and aborts on mismatch.
+#
+# Callers must prove the worker binding before calling:
+#   - dev: build_dev\dev-runtime.json (workerDllSha256 / workerSha256)
+#   - production: build\core\worker.artifacts.json (dll_sha256 / worker_sha256)
+# The write is atomic (temp file + replace) and verified by reading it back.
+function Write-VerthysBundleManifest {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet("dev", "production")][string]$Channel,
+        [Parameter(Mandatory = $true)][string]$DllPath,
+        [Parameter(Mandatory = $true)][string]$DllSource,
+        [Parameter(Mandatory = $true)][string]$WorkerPath,
+        [Parameter(Mandatory = $true)][string]$WorkerSource,
+        [Parameter(Mandatory = $true)][string]$ContractPath,
+        [Parameter(Mandatory = $true)][string]$WorkerDllSha256,
+        [Parameter(Mandatory = $true)][string]$WorkerSha256,
+        [Parameter(Mandatory = $true)][string]$Producer,
+        [string]$OutPath = "",
+        [string]$RepoRoot = ""
+    )
+
+    if ([string]::IsNullOrEmpty($RepoRoot)) { $RepoRoot = $script:ArtifactsRepoRoot }
+    $repoFull = [System.IO.Path]::GetFullPath($RepoRoot).TrimEnd('\')
+    if ([string]::IsNullOrEmpty($OutPath)) {
+        $OutPath = Join-Path $repoFull "verthys-tauri\src-tauri\bundle-assets.json"
+    }
+
+    $stagedDll = Join-Path $repoFull "verthys-tauri\src-tauri\verthys.dll"
+    $stagedWorker = Join-Path $repoFull "verthys-tauri\src-tauri\binaries\verthys-worker-x86_64-pc-windows-msvc.exe"
+    if (-not [System.IO.Path]::GetFullPath($DllPath).Equals(
+            [System.IO.Path]::GetFullPath($stagedDll), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "bundle manifest: DLL must be staged at $stagedDll (got $DllPath)"
+    }
+    if (-not [System.IO.Path]::GetFullPath($WorkerPath).Equals(
+            [System.IO.Path]::GetFullPath($stagedWorker), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "bundle manifest: worker must be staged at $stagedWorker (got $WorkerPath)"
+    }
+    foreach ($required in @($DllPath, $WorkerPath, $ContractPath, $DllSource, $WorkerSource)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "bundle manifest: required file missing: $required"
+        }
+    }
+
+    $dllHash = (Get-FileHash -LiteralPath $DllPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $workerHash = (Get-FileHash -LiteralPath $WorkerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $contractFileHash = (Get-FileHash -LiteralPath $ContractPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($WorkerSha256.ToLowerInvariant() -ne $workerHash) {
+        throw "bundle manifest: worker hash drift (declared=$WorkerSha256 staged=$workerHash)"
+    }
+    if ($WorkerDllSha256.ToLowerInvariant() -ne $dllHash) {
+        throw "bundle manifest: worker was built against a different DLL (bound=$WorkerDllSha256 staged=$dllHash)"
+    }
+
+    $contract = Get-Content -LiteralPath $ContractPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([string]$contract.sha256 -ne $dllHash) {
+        throw "bundle manifest: DLL does not match its artifact contract (contract=$($contract.sha256) dll=$dllHash)"
+    }
+    $versionPath = Join-Path $repoFull "VERSION"
+    if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) {
+        throw "bundle manifest: VERSION file missing: $versionPath"
+    }
+    $version = ([System.IO.File]::ReadAllText($versionPath)).Trim()
+    if ([string]$contract.version -ne $version) {
+        throw "bundle manifest: contract version $($contract.version) != VERSION $version"
+    }
+
+    $dllInfo = Get-Item -LiteralPath $DllPath
+    $workerInfo = Get-Item -LiteralPath $WorkerPath
+    $manifest = [ordered]@{
+        schema      = 1
+        channel     = $Channel
+        version     = $version
+        fmt_version = [int]$contract.fmt_version
+        producer    = $Producer
+        dll         = [ordered]@{
+            path     = "verthys.dll"
+            source   = (ConvertTo-VerthysRepoRelativePath -Path $DllSource -Root $repoFull)
+            sha256   = $dllHash
+            built_at = $dllInfo.LastWriteTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
+        }
+        worker      = [ordered]@{
+            path       = "binaries/verthys-worker-x86_64-pc-windows-msvc.exe"
+            source     = (ConvertTo-VerthysRepoRelativePath -Path $WorkerSource -Root $repoFull)
+            sha256     = $workerHash
+            built_at   = $workerInfo.LastWriteTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            dll_sha256 = $dllHash
+        }
+        contract    = [ordered]@{
+            path   = (ConvertTo-VerthysRepoRelativePath -Path $ContractPath -Root $repoFull)
+            sha256 = $contractFileHash
+        }
+    }
+
+    $outDir = Split-Path -Parent $OutPath
+    if (-not (Test-Path -LiteralPath $outDir)) {
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+    }
+    $json = $manifest | ConvertTo-Json -Depth 6
+    $tmpPath = "$OutPath.tmp"
+    [System.IO.File]::WriteAllText($tmpPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $tmpPath -Destination $OutPath -Force
+
+    $written = Get-Content -LiteralPath $OutPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([int]$written.schema -ne 1 -or
+        [string]$written.channel -ne $Channel -or
+        [string]$written.dll.sha256 -ne $dllHash -or
+        [string]$written.worker.sha256 -ne $workerHash -or
+        [string]$written.worker.dll_sha256 -ne $dllHash -or
+        [string]$written.contract.sha256 -ne $contractFileHash) {
+        throw "bundle manifest: read-back verification failed: $OutPath"
+    }
+    return $written
+}

@@ -2,7 +2,7 @@
 /*
  * SecurePcrDialog.spec.ts — 高安全预设 PCR 提示契约
  *
- * 覆盖：提示不收集恢复码、影响与前提收在同一段读数、当前绑定状态随句末展示、
+ * 覆盖：提示不收集恢复码、绑定状态独立于提示正文展示、
  *       确认关闭与「前往」分别向上抛出。
  */
 import { afterEach, describe, expect, it } from "vitest";
@@ -47,13 +47,15 @@ function buttonByText(container: HTMLElement, text: string): HTMLButtonElement |
 }
 
 describe("高安全 PCR 提示弹窗", () => {
-  it("不提供恢复码输入，提示与绑定状态收在同一段读数", async () => {
+  it("不提供恢复码输入，绑定状态独立于提示正文", async () => {
     const container = await mountDialog();
     expect(container.querySelector("input")).toBeNull();
     expect(container.textContent).toContain(
       "固件或启动状态变更将导致解锁失效，需恢复码重密封密钥，启用前请确认恢复码已保存",
     );
-    expect(container.textContent).toContain("当前未绑定");
+    const state = container.querySelector(".pcr-state");
+    expect(state?.textContent?.trim()).toBe("当前未绑定");
+    expect(state?.closest(".pcr-notice")).toBeNull();
   });
 
   it("状态读取失败时如实显示未确认", async () => {

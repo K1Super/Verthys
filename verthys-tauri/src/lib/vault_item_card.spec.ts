@@ -55,13 +55,13 @@ describe("卡片视图映射", () => {
     const view = buildVaultCardView({ name: "张三", number: "110101199001010011" }, idcard);
     expect(view.secret).toEqual({
       fieldId: "number",
-      label: "身份号码",
+      label: "公民身份号码",
       encrypted: false,
       raw: "110101199001010011",
     });
-    // 号码与有效期分别由敏感行、到期读数承载，次行不再重复
+    // 号码与有效期限分别由敏感行、到期读数承载，次行不再重复
     expect(view.lines).toEqual([]);
-    expect(view.expiry).toMatchObject({ label: "有效期", tone: "none" });
+    expect(view.expiry).toMatchObject({ label: "有效期限", tone: "none" });
   });
 
   it("敏感行的原始取值可解，且次行不含任何明文敏感值", () => {

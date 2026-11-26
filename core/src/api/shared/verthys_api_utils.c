@@ -1,7 +1,7 @@
 /*
  * verthys_api_utils.c — 共享工具模块
  *
- * 纯工具/辅助函数实现，供 verthys_api.c 及其他内部模块复用；
+ * 纯工具/辅助函数实现，供 API 门面各翻译单元复用；
  * 函数为跨翻译单元可见（非 static），声明见 verthys_api_utils.h。
  *
  */
@@ -122,6 +122,76 @@ char *dup_string(const char *s)
     char *copy = malloc(len);
     if (copy != NULL) memcpy(copy, s, len);
     return copy;
+}
+
+/* ---------- 上下文锁助手 ---------- */
+void verthys_ctx_lock_shared(struct VerthysContext *ctx)
+{
+#ifdef _WIN32
+    if (ctx != NULL && ctx->api_mutex != NULL) AcquireSRWLockShared(ctx->api_mutex);
+#else
+    (void)ctx;
+#endif
+}
+
+void verthys_ctx_unlock_shared(struct VerthysContext *ctx)
+{
+#ifdef _WIN32
+    if (ctx != NULL && ctx->api_mutex != NULL) ReleaseSRWLockShared(ctx->api_mutex);
+#else
+    (void)ctx;
+#endif
+}
+
+void verthys_ctx_lock_exclusive(struct VerthysContext *ctx)
+{
+#ifdef _WIN32
+    if (ctx != NULL && ctx->api_mutex != NULL) AcquireSRWLockExclusive(ctx->api_mutex);
+#else
+    (void)ctx;
+#endif
+}
+
+void verthys_ctx_unlock_exclusive(struct VerthysContext *ctx)
+{
+#ifdef _WIN32
+    if (ctx != NULL && ctx->api_mutex != NULL) ReleaseSRWLockExclusive(ctx->api_mutex);
+#else
+    (void)ctx;
+#endif
+}
+
+/* ---------- 内部错误码映射（唯一底表） ----------
+ * 只暴露可行动的类别；口令错/缺槽/TPM 状态不对外细分。
+ * VTY_E_INVALID 保持 INVALID：记录域缺失语义由容器适配层覆盖。 */
+VerthysResult verthys_api_map_vty(int rc)
+{
+    switch (rc) {
+    case VTY_OK:                  return VERTHYS_OK;
+    case VTY_E_VERSION:           return VERTHYS_ERR_FORMAT;
+    case VTY_E_SLOT_UNKNOWN:      return VERTHYS_ERR_FORMAT;
+    case VTY_E_SLOT_MISSING:      return VERTHYS_ERR_FORMAT;
+    case VTY_E_KDF_WEAK:          return VERTHYS_ERR_FORMAT;
+    case VTY_E_KEY_INVALID:       return VERTHYS_ERR_AUTH;
+    case VTY_E_AEAD:              return VERTHYS_ERR_AUTH;
+    case VTY_E_TPM:               return VERTHYS_ERR_TPM;
+    case VTY_E_POLICY:            return VERTHYS_ERR_POLICY;
+    case VTY_E_LOCKED:            return VERTHYS_ERR_RATE;
+    case VTY_E_CORRUPT:           return VERTHYS_ERR_CORRUPT;
+    case VTY_E_ROLLBACK:          return VERTHYS_ERR_ROLLBACK;
+    case VTY_E_IO:                return VERTHYS_ERR_IO;
+    case VTY_E_RESOURCE:          return VERTHYS_ERR_RESOURCE_LIMIT;
+    case VTY_E_KEYFILE_REQUIRED:  return VERTHYS_ERR_KEYFILE_REQUIRED;
+    case VTY_E_KEYFILE_INVALID:   return VERTHYS_ERR_KEYFILE_INVALID;
+    case VTY_E_EXISTS:            return VERTHYS_ERR_EXISTS;
+    case VTY_E_ROTATE_PENDING:    return VERTHYS_ERR_ROTATE_PENDING;
+    case VTY_E_MODULE_LOCKED:     return VERTHYS_ERR_MODULE_LOCKED;
+    case VTY_E_NO_SPACE:          return VERTHYS_ERR_NO_SPACE;
+    case VTY_E_VERIFY:            return VERTHYS_ERR_VERIFY;
+    case VTY_E_ANCHOR_FULL:       return VERTHYS_ERR_ANCHOR_FULL;
+    case VTY_E_CALLER:            return VERTHYS_ERR_UNAUTHORIZED;
+    default:                      return VERTHYS_ERR_INVALID;
+    }
 }
 
 /* ---------- 会话生命周期（进程级原子计数） ---------- */

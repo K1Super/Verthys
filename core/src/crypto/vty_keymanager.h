@@ -113,6 +113,14 @@ int vty_vault_create_from_kc(const VtyVault *src, const char *path,
                              const uint8_t *keyfile_digest_or_null,
                              VtyVault **out);
 
+/* 压缩专用：以已解锁会话的 K_c、UUID、epoch、slots、keyring 与模块会话
+ * 状态克隆一个同格式新库文件（generation+1，空数据区）。
+ *
+ * 不要求口令、不更换 epoch、不重封槽；仅用于原样密文压缩。目标路径必须
+ * 不存在。构建期间不推进回退锚点，失败时不留下半成品文件。 */
+int vty_vault_clone_for_compaction(const VtyVault *src, const char *path,
+                                   VtyVault **out);
+
 /* 构造 PCR 槽：创建/覆盖该库 PCR 密钥 → measure → 用当前 K_c 密封。
  * 只构造槽，不改会话与磁盘；失败时删除刚创建的密钥。供 PCR 启用与
  * 轮换提交阶段复用，避免两处实现漂移。 */

@@ -16,6 +16,7 @@
 
 use crate::constants::{STATE_MAGIC, STATE_VERSION};
 use crate::repository::container_layout;
+use crate::repository::recent_paths;
 use crate::util::path::normalize_path;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -78,11 +79,19 @@ pub fn get_state_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, Strin
     Ok(dir)
 }
 
+/// 路径指针文件名（app_config_dir 下）
+pub const LAST_PATH_POINTER: &str = ".verthys_last_path";
+
+/// 路径指针文件路径
+pub fn last_path_pointer_file(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join(LAST_PATH_POINTER)
+}
+
 /// 读取路径指针（app_config_dir/.verthys_last_path）
 /// 返回上次使用的 verthys 文件路径，None 表示全新用户
 pub fn read_last_verthys_path(app: &tauri::AppHandle) -> Result<Option<String>, String> {
     let dir = get_state_dir(app)?;
-    let pointer = dir.join(".verthys_last_path");
+    let pointer = last_path_pointer_file(&dir);
     if !pointer.exists() {
         return Ok(None);
     }
@@ -97,7 +106,7 @@ pub fn read_last_verthys_path(app: &tauri::AppHandle) -> Result<Option<String>, 
 /// 写入路径指针（app_config_dir/.verthys_last_path）
 fn write_last_verthys_path(app: &tauri::AppHandle, verthys_path: &str) -> Result<(), String> {
     let dir = get_state_dir(app)?;
-    let pointer = dir.join(".verthys_last_path");
+    let pointer = last_path_pointer_file(&dir);
     std::fs::write(&pointer, verthys_path).map_err(|e| format!("写入路径指针失败: {}", e))
 }
 
@@ -236,7 +245,30 @@ pub fn write_state_file_atomic(app: &tauri::AppHandle, state: &VerthysState) -> 
         format!("原子重命名状态文件失败: {}", e)
     })?;
 
-    // 3. 更新路径指针（失败不阻塞状态文件已写入）
+    // 3. 登记最近容器路径：必须在更新路径指针之前执行。
+    //    首次登记且历史文件不存在时，record 会从旧指针播种，保证切换容器
+    //    时上一个容器路径不会因指针先被覆盖而丢失。
+    //    失败只记录告警，不影响状态文件已提交的事实。
+    match get_state_dir(app) {
+        Ok(dir) => {
+            /* 先把切换前指针登记一次：即使最近路径文件已存在但不含上一容器，
+             * 切换容器也不会丢失上一位置。重复路径由 record 去重。 */
+            if let Ok(previous) = std::fs::read_to_string(last_path_pointer_file(&dir)) {
+                let previous = previous.trim();
+                if !previous.is_empty() {
+                    if let Err(e) = recent_paths::record(&dir, previous) {
+                        log::warn!("[state] 上一容器路径登记失败（状态文件已写入）: {}", e);
+                    }
+                }
+            }
+            if let Err(e) = recent_paths::record(&dir, &state.verthys_path) {
+                log::warn!("[state] 最近容器路径登记失败（状态文件已写入）: {}", e);
+            }
+        }
+        Err(e) => log::warn!("[state] 最近容器路径登记跳过: {}", e),
+    }
+
+    // 4. 更新路径指针（失败不阻塞状态文件已写入）
     if let Err(e) = write_last_verthys_path(app, &state.verthys_path) {
         log::warn!("[state] 路径指针更新失败（状态文件已写入）: {}", e);
     }
@@ -268,7 +300,7 @@ pub fn delete_state_file(app: &tauri::AppHandle) {
     }
     // 删除路径指针
     if let Ok(dir) = get_state_dir(app) {
-        let pointer = dir.join(".verthys_last_path");
+        let pointer = last_path_pointer_file(&dir);
         let _ = std::fs::remove_file(&pointer);
     }
 }

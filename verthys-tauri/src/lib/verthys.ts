@@ -31,6 +31,7 @@ import { wrapAsVerthysError, ipcFailed } from "./verthys_error";
 import { serializeToJsonB64, deserializeFromJsonB64 } from "../utils/json_codec";
 import { withTimeout } from "../utils/promise_utils";
 import { Channel } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 // 前端 IPC 优先级门控：关键 IPC 调用标记前端活跃，后台任务据此让出 worker 通道
 import { markFrontendIpcActive } from "../core/frontend-ipc-priority";
 
@@ -52,6 +53,7 @@ import type {
   SecurityStatusReport,
   AnchorInfo,
   AnchorScanResult,
+  AnchorScanProgress,
   RotateProgress,
   ClipboardResult,
   PrivacyModeResult,
@@ -68,6 +70,11 @@ import type {
   PhotoImportItem,
   PhotoImportFailure,
   PhotoImportResult,
+  FileImportSource,
+  FileImportProgress,
+  FileImportEntry,
+  FileImportFailure,
+  FileImportResult,
   PhotoPreviewResult,
   PhotoFullBegin,
   PhotoExportProgress,
@@ -76,6 +83,9 @@ import type {
   PhotoMetaBatch,
   PhotoDamageScan,
   PhotoParsePreviewResult,
+  StorageStats,
+  StorageCompactResult,
+  StorageCompactProgress,
 } from "../types/verthys";
 
 import {
@@ -125,6 +135,11 @@ export type {
   PhotoImportItem,
   PhotoImportFailure,
   PhotoImportResult,
+  FileImportSource,
+  FileImportProgress,
+  FileImportEntry,
+  FileImportFailure,
+  FileImportResult,
   PhotoPreviewResult,
   PhotoFullBegin,
   PhotoExportProgress,
@@ -134,7 +149,13 @@ export type {
   PhotoDamageScan,
   PhotoParsePreviewResult,
 } from "../types/verthys";
-export type { PresetFeatures, VaultEntry } from "../types/verthys";
+export type {
+  PresetFeatures,
+  VaultEntry,
+  StorageStats,
+  StorageCompactResult,
+  StorageCompactProgress,
+} from "../types/verthys";
 
 // 常量再导出
 export {
@@ -861,6 +882,57 @@ export async function verthysGcOrphanChunks(): Promise<number> {
   return r.ok ? (r.processed_count ?? 0) : 0;
 }
 
+/**
+ * 读取容器存储统计（活数据 / 可回收字节）。
+ */
+export async function verthysStorageStats(): Promise<StorageStats> {
+  const r = await ipc<VerthysResponse>("verthys_storage_stats");
+  if (!r.ok || !r.storage_stats) {
+    throw new Error(r.error ?? "存储统计失败");
+  }
+  return r.storage_stats;
+}
+
+/**
+ * 空间压缩：原样密文重建 + 原子替换，不换密钥、不需要口令。
+ *
+ * @param onProgress 进度回调（storage://compact-progress 事件）
+ */
+export async function verthysStorageCompact(
+  onProgress?: (progress: StorageCompactProgress) => void,
+): Promise<StorageCompactResult> {
+  let unlisten: UnlistenFn | null = null;
+  if (onProgress) {
+    unlisten = await listen<StorageCompactProgress>(
+      "storage://compact-progress",
+      (event) => onProgress(event.payload),
+    );
+  }
+  try {
+    const r = await ipc<VerthysResponse>("verthys_storage_compact");
+    if (!r.ok) {
+      throw new Error(r.error ?? "空间回收失败");
+    }
+    return r.compact_result ?? {
+      stage: 3,
+      before_bytes: 0,
+      after_bytes: 0,
+      reclaimed_bytes: 0,
+      records: 0,
+      chunks: 0,
+      bytes: 0,
+      live_bytes: 0,
+    };
+  } finally {
+    unlisten?.();
+  }
+}
+
+/** 请求取消正在进行的空间压缩。 */
+export async function verthysStorageCompactCancel(): Promise<void> {
+  await ipc<VerthysResponse>("verthys_storage_compact_cancel");
+}
+
 /* ================================================================== *
  * 原生照片导入 IPC 封装                                              *
  *                                                                  *
@@ -914,6 +986,66 @@ export async function photoImportCancel(): Promise<void> {
     await ipc("photo_import_cancel");
   } catch (e) {
     console.warn("[photoImportCancel] 取消失败", e);
+  }
+}
+
+/* ================================================================== *
+ * 原生清藏导入 IPC 封装                                              *
+ *                                                                  *
+ * 读取、哈希、KDF、加密与分块暂存全部在 worker 内完成；前端只传路径与  *
+ * 展示字段，不接触任何块字节。不设 IPC 超时：单次调用可能持续数分钟。  *
+ * ================================================================== */
+
+/**
+ * 启动原生清藏导入（阻塞至整批结束或取消）。
+ *
+ * @param files 待导入文件（路径 + 展示名 + MIME）
+ * @param password 独立访问密码；不加密传 null
+ * @param allowSessionTakeover 用户已确认结束上一导入会话（保留其断点）
+ * @param onProgress 进度回调
+ */
+export async function fileImportStart(
+  files: FileImportSource[],
+  password: string | null,
+  allowSessionTakeover: boolean,
+  onProgress?: (progress: FileImportProgress) => void,
+): Promise<FileImportResult> {
+  const channel = new Channel<FileImportProgress>();
+  if (onProgress) {
+    channel.onmessage = onProgress;
+  }
+
+  markFrontendIpcActive();
+
+  const r = await ipc<FileImportResult>("file_import_start", {
+    files,
+    password,
+    allowSessionTakeover,
+    onProgress: channel,
+  });
+  return {
+    ok: r.ok === true,
+    entries: r.entries ?? [],
+    failures: r.failures ?? [],
+    skipped: r.skipped ?? [],
+    successCount: r.successCount ?? 0,
+    skippedCount: r.skippedCount ?? 0,
+    failCount: r.failCount ?? 0,
+    total: r.total ?? 0,
+    elapsedMs: r.elapsedMs ?? 0,
+    cancelled: r.cancelled === true,
+    error: r.error,
+    errorCode: r.errorCode,
+    sessionWarning: r.sessionWarning,
+  };
+}
+
+/** 请求取消进行中的清藏导入（尽力而为；失败只告警）。 */
+export async function fileImportCancel(): Promise<void> {
+  try {
+    await ipc("file_import_cancel");
+  } catch (e) {
+    console.warn("[fileImportCancel] 取消失败", e);
   }
 }
 
@@ -1705,15 +1837,55 @@ export async function verthysRollbackAnchorRelease(
   };
 }
 
-/** 扫描用户选择的根目录，返回 UUID → 路径证据 */
+/** 扫描选项：roots 添加自定义位置，force 强制重扫，deep 触发全盘深度扫描 */
+export interface AnchorScanOptions {
+  roots?: string[];
+  force?: boolean;
+  deep?: boolean;
+}
+
+/** 自动扫描已知容器位置，返回 UUID → 路径证据与覆盖范围 */
 export async function verthysRollbackAnchorScan(
-  roots: string[],
+  options: AnchorScanOptions = {},
+  onProgress?: (progress: AnchorScanProgress) => void,
 ): Promise<AnchorScanResult> {
+  const channel = new Channel<AnchorScanProgress>();
+  if (onProgress) {
+    channel.onmessage = onProgress;
+  }
   const r = await ipc<VerthysResponse>("verthys_rollback_anchor_scan", {
-    roots,
+    roots: options.roots ?? [],
+    force: options.force ?? false,
+    deep: options.deep ?? false,
+    onProgress: channel,
   });
   if (!r.ok || !r.anchor_scan) {
     throw new Error(`verthys_rollback_anchor_scan 失败: ${r.error ?? "未知错误"}`);
+  }
+  return r.anchor_scan;
+}
+
+/** 请求停止正在进行的扫描；已完成的证据照常保留 */
+export async function verthysRollbackAnchorScanCancel(): Promise<void> {
+  const r = await ipc<VerthysResponse>("verthys_rollback_anchor_scan_cancel", {});
+  if (!r.ok) {
+    throw new Error(
+      `verthys_rollback_anchor_scan_cancel 失败: ${r.error ?? "未知错误"}`,
+    );
+  }
+}
+
+/** 移除一个自定义扫描位置，返回移除后的持久化证据 */
+export async function verthysRollbackAnchorForgetRoot(
+  path: string,
+): Promise<AnchorScanResult> {
+  const r = await ipc<VerthysResponse>("verthys_rollback_anchor_scan_forget_root", {
+    path,
+  });
+  if (!r.ok || !r.anchor_scan) {
+    throw new Error(
+      `verthys_rollback_anchor_scan_forget_root 失败: ${r.error ?? "未知错误"}`,
+    );
   }
   return r.anchor_scan;
 }

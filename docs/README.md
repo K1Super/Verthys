@@ -1,6 +1,6 @@
 # docs — 文档导航与治理
 
-> 状态：现行 · 最后核验：2026-11-19 · 维护人：K1Super
+> 状态：现行 · 最后核验：2026-11-26 · 维护人：K1Super
 >
 > 本目录只索引仓库中实际存在的文档；被索引的每份文档都必须是现行契约、操作规程或仍在生效的规范。
 
@@ -35,7 +35,6 @@
 - 密钥与解锁数据流：[DATA_FLOW.md](DATA_FLOW.md)
 - 配置项与环境变量：[CONFIGURATION.md](CONFIGURATION.md)
 - 架构决策索引：[ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md)
-- 拾光照片数据面重构（评审中）：[photo-engine/README.md](photo-engine/README.md)
 
 ### 发布者
 
@@ -82,6 +81,10 @@
 | [kernel-guard/08-roadmap-adr.md](kernel-guard/08-roadmap-adr.md) | K0–K4 路线、ADR、开放问题与代码量预算 | 评审中 |
 | [kernel-guard/09-review-checklist.md](kernel-guard/09-review-checklist.md) | 维护人审核清单与编码门禁 | 评审中 |
 | [kernel-guard/10-execution-rounds.md](kernel-guard/10-execution-rounds.md) | 分轮执行、回归证据与产品断裂防护 | 执行中 |
+| [kernel-guard/specs/round-8/spec.md](kernel-guard/specs/round-8/spec.md) | Round 8 宿主预创建 ARM 与运行中丢失自动锁定规格 | 已批准（运行期门禁待验证） |
+| [kernel-guard/specs/round-8/tasks.md](kernel-guard/specs/round-8/tasks.md) | Round 8 文件级任务、验收与证据清单 | 已批准（T1–T7 完成） |
+| [security-testing/00-spec.md](security-testing/00-spec.md) | 非内核安全测试治理规格与统一门禁 | 已交付 |
+| [security-testing/01-tasks.md](security-testing/01-tasks.md) | 非内核安全测试治理任务清单 | 已交付 |
 | [CORE_API.md](CORE_API.md) | C core 对外接口规范 | 现行 |
 | [DATA_FLOW.md](DATA_FLOW.md) | 关键数据流时序 | 现行 |
 | [GETTING_STARTED.md](GETTING_STARTED.md) | 首次构建与运行 | 现行 |
@@ -98,26 +101,6 @@
 | [updater/README.md](updater/README.md) | 更新系统实施入口 | 现行 |
 | [updater/UPDATER_MASTER_PLAN.md](updater/UPDATER_MASTER_PLAN.md) | 本机更新实施契约 | 现行 |
 | [updater/UPDATER_SERVER_DEPLOYMENT_PLAN.md](updater/UPDATER_SERVER_DEPLOYMENT_PLAN.md) | 服务器阶段部署方案 | 待启用 |
-| [photo-engine/README.md](photo-engine/README.md) | 拾光照片数据面重构总览与决策 | 评审中 |
-| [photo-engine/PHASE4-5-REPORT.md](photo-engine/PHASE4-5-REPORT.md) | Phase 4/5 改动、验证证据、未验证项与回滚边界 | 已完成 |
-| [photo-engine/G0-REPORT.md](photo-engine/G0-REPORT.md) | G0 可行性实测与 go/no-go 结论 | 已完成 |
-| [photo-engine/G0-A-DESIGN.md](photo-engine/G0-A-DESIGN.md) | TPM 见证密钥预置 C 层设计 | 评审中 |
-| [photo-engine/G0-A-SECURITY-REVIEW.md](photo-engine/G0-A-SECURITY-REVIEW.md) | TPM 见证密钥预置安全评审 | 有条件通过原型 |
-| [photo-engine/G0-A-PROTOTYPE-REPORT.md](photo-engine/G0-A-PROTOTYPE-REPORT.md) | TPM 见证密钥预置隔离原型实测 | 有条件通过 |
-| [photo-engine/G0-A2-DEFERRED-ANCHOR-DESIGN.md](photo-engine/G0-A2-DEFERRED-ANCHOR-DESIGN.md) | 批量导入锚点推迟 C 层设计 | 原型完成（隔离） |
-| [photo-engine/G0-A2-SECURITY-REVIEW.md](photo-engine/G0-A2-SECURITY-REVIEW.md) | 批量导入锚点推迟安全评审 | 有条件通过原型 |
-| [photo-engine/G0-A2-PROTOTYPE-REPORT.md](photo-engine/G0-A2-PROTOTYPE-REPORT.md) | 批量导入锚点推迟隔离原型实测（含 10/17.73/24.43/50MiB 矩阵） | 原型完成（隔离） |
-| [photo-engine/01-architecture.md](photo-engine/01-architecture.md) | 目标进程/线程模型、数据流与安全不变量 | 评审中 |
-| [photo-engine/02-data-model.md](photo-engine/02-data-model.md) | 记录类型、元数据、预览、分块与兼容 | 评审中 |
-| [photo-engine/03-import.md](photo-engine/03-import.md) | 原生批量导入、并发、WAL/台账与恢复 | 评审中 |
-| [photo-engine/04-view-export.md](photo-engine/04-view-export.md) | 预览优先查看、缩略图、导出与备份还原 | 评审中 |
-| [photo-engine/05-implementation.md](photo-engine/05-implementation.md) | 阶段、文件级改动、删除清单、回滚与风险 | 评审中 |
-| [photo-engine/06-verification.md](photo-engine/06-verification.md) | 性能基线、测试矩阵、安全验收与门禁 | 评审中 |
-| [photo-engine/BOUNDARY-AUDIT.md](photo-engine/BOUNDARY-AUDIT.md) | 产品上限、协议预算、安全限制与样本边界审计 | 执行中 |
-| [photo-engine/PHASE1-SPEC.md](photo-engine/PHASE1-SPEC.md) | Phase 1 原生批量导入执行规格与权威决策 | 执行中 |
-| [photo-engine/PHASE1-TASKS.md](photo-engine/PHASE1-TASKS.md) | Phase 1 文件级任务、验收与证据清单 | 执行中 |
-| [photo-engine/PHASE2-SPEC.md](photo-engine/PHASE2-SPEC.md) | Phase 2 预览优先查看执行规格与权威决策 | 执行中 |
-| [photo-engine/PHASE3-SPEC.md](photo-engine/PHASE3-SPEC.md) | Phase 3 原生导出与备份还原执行规格与权威决策 | 执行中 |
 | [references/engineering-standards.md](references/engineering-standards.md) | 工程规范附录 | 规范附录 |
 | [references/comment-standards.md](references/comment-standards.md) | 注释规范附录 | 规范附录 |
 | [references/comment-vocabulary.md](references/comment-vocabulary.md) | 注释约束词表 | 规范附录 |

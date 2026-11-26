@@ -10,7 +10,9 @@
 #include "vty_types.h"
 #include "vty_recovery.h"
 
+#include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define REC_PATH "api_records.vty"
@@ -416,6 +418,97 @@ TEST(api_records_require_unlock)
     CHECK_EQ(Verthys_AddRecord(h, &r, &id), VERTHYS_ERR_LOCKED);
     CHECK_EQ(Verthys_GetSummaryCount(h, &id), VERTHYS_ERR_LOCKED);
     CHECK_EQ(Verthys_Deinit(h), VERTHYS_OK);
+    return 0;
+}
+
+#define COMPACT_API_PATH "api_compact.vty"
+#define COMPACT_API_REC_BYTES (32u * 1024u)
+
+static uint64_t api_compact_file_size(const char *path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA data;
+
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &data)) return 0;
+    return ((uint64_t)data.nFileSizeHigh << 32) | (uint64_t)data.nFileSizeLow;
+}
+
+TEST(api_storage_stats_and_compact)
+{
+    VerthysHandle h = NULL;
+    VerthysStorageStats st;
+    VerthysRecord rec;
+    VerthysRecord *records = NULL;
+    char code[VTY_RECOVERY_TEXT_BUF];
+    uint8_t *payload = NULL;
+    uint64_t ids[30];
+    uint64_t live_count = 0;
+    uint64_t before_size = 0, after_size = 0;
+    uint64_t i;
+
+    remove(COMPACT_API_PATH);
+    remove(COMPACT_API_PATH ".vtycompact.tmp");
+    remove(COMPACT_API_PATH ".vtycompact.bak");
+    payload = (uint8_t *)malloc(COMPACT_API_REC_BYTES);
+    records = (VerthysRecord *)calloc(1, sizeof(VerthysRecord));
+    CHECK(payload != NULL);
+    CHECK(records != NULL);
+    memset(payload, 0xA7, COMPACT_API_REC_BYTES);
+
+    CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4Create(h, COMPACT_API_PATH, REC_PW, strlen(REC_PW),
+                              code, sizeof(code)), VERTHYS_OK);
+    for (i = 0; i < 30u; i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "compact-%02llu",
+                 (unsigned long long)i);
+        memset(records, 0, sizeof(*records));
+        records->type = VERTHYS_RECORD_ACCOUNT;
+        records->name = name;
+        records->name_len = strlen(name);
+        records->data = payload;
+        records->data_len = COMPACT_API_REC_BYTES;
+        CHECK_EQ(Verthys_AddRecord(h, records, &ids[i]), VERTHYS_OK);
+    }
+    for (i = 0; i < 30u; i += 2u) {
+        CHECK_EQ(Verthys_DeleteRecord(h, ids[i]), VERTHYS_OK);
+    }
+    CHECK_EQ(Verthys_GetSummaryCount(h, &live_count), VERTHYS_OK);
+    CHECK_EQ(live_count, 15u);
+    memset(&st, 0, sizeof(st));
+    CHECK_EQ(Verthys_GetStorageStats(h, &st), VERTHYS_OK);
+    CHECK(st.file_size > 0u);
+    CHECK(st.reclaimable_bytes > 0u);
+    before_size = api_compact_file_size(COMPACT_API_PATH);
+    CHECK(before_size > 0u);
+
+    CHECK_EQ(Verthys_CompactStorage(h, NULL, NULL), VERTHYS_OK);
+    after_size = api_compact_file_size(COMPACT_API_PATH);
+    CHECK(after_size > 0u);
+    CHECK(after_size < before_size);
+    memset(&st, 0, sizeof(st));
+    CHECK_EQ(Verthys_GetStorageStats(h, &st), VERTHYS_OK);
+    CHECK(st.record_count == 15u);
+    CHECK(st.reclaimable_bytes < 64u * 1024u);
+
+    memset(&rec, 0, sizeof(rec));
+    CHECK_EQ(Verthys_GetRecord(h, ids[1], &rec), VERTHYS_OK);
+    CHECK_EQ(rec.data_len, COMPACT_API_REC_BYTES);
+    CHECK_EQ(rec.data[0], 0xA7u);
+    CHECK_EQ(Verthys_GetRecord(h, ids[0], &rec), VERTHYS_ERR_NOTFOUND);
+
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_V4Unlock(h, COMPACT_API_PATH, REC_PW, strlen(REC_PW)),
+             VERTHYS_OK);
+    CHECK_EQ(Verthys_GetSummaryCount(h, &live_count), VERTHYS_OK);
+    CHECK_EQ(live_count, 15u);
+    CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
+    CHECK_EQ(Verthys_Deinit(h), VERTHYS_OK);
+
+    free(records);
+    free(payload);
+    remove(COMPACT_API_PATH);
+    remove(COMPACT_API_PATH ".vtycompact.tmp");
+    remove(COMPACT_API_PATH ".vtycompact.bak");
     return 0;
 }
 

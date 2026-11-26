@@ -37,7 +37,7 @@ flowchart TB
 
 ## 2. 密钥存储与派生链路
 
-### 2.1 密钥层级（以 `vty_keymanager.c` / `vty_keyslot.c` / `vty_module.c` 为准）
+### 2.1 密钥层级（以 `vty_keymanager_*.c` / `vty_keyslot.c` / `vty_module_*.c` 为准）
 
 - **全库数据密钥 `K_c`**：口令经 Argon2id 派生后解封 user 槽；设备根参与 device 槽；两个槽同时通过才得到 `K_c`（AND 语义）。
 - **恢复通道**：恢复码经独立 KDF 解封 recovery 槽，承载同一 `K_c`；恢复码是显式逃生通道。
@@ -186,7 +186,7 @@ flowchart TB
 
 ## 3. 解锁流程数据流
 
-以 `vty_vault_open`（`core/src/crypto/vty_keymanager.c`）为准。
+以 `vty_vault_open`（`core/src/crypto/vty_keymanager_open.c`）为准。
 
 ```mermaid
 sequenceDiagram
@@ -288,7 +288,7 @@ flowchart TB
 | 导出 | `Verthys_Export`（流式、明文经用户态缓冲，用后清零）；导出密码不混胡椒 |
 | 完整性校验 | `integrity_verify_startup`、`runtime_hash_verify(_periodic)`、`Verthys_VerifyIntegrity` |
 | 应急自毁 | `emergency_report / emergency_trigger`（TELEMETRY/DEGRADE/KILL 三级） |
-| 提交一致性 | A/B 元数据双副本原子提交；`index/vty_store.c` 数据区游标推进 |
+| 提交一致性 | A/B 元数据双副本原子提交；`index/vty_store_*.c` 数据区游标推进 |
 | 预设切档 | `security_apply_preset`（授权 → 原子落盘 → worker 切档 → C 投影回读，不一致回滚并报 `E_PRESET_VERIFY`）；落盘失败回滚置 `preset_persist_dirty` 阻断后续切档 |
 | 自完整性核验 | `integrity_check::verify_self_image_async`（启动主镜像 WinVerifyTrust）+ 后台巡检抽样复核；结果写 `INTEGRITY_CHECK` 审计事件 |
 | 痕迹清理 | `trace_cleanup::run_locked_cleanup_async`（锁定/退出触发）；仅删除指向应用自身痕迹域（`.verthys`/`.venc` 扩展名 + 应用自有目录前缀）的最近记录条目，写 `TRACE_CLEANUP` 审计事件 |

@@ -7,6 +7,8 @@
 | 依据 | `docs/kernel-guard/10-execution-rounds.md` Round 8、`05-test-and-verification.md` A14/S6 |
 | 状态 | 已批准，代码与单测完成（运行期门禁未验证） |
 
+> 最后更新：2026-11-26
+
 ---
 
 ## 1. 目标与验收判据

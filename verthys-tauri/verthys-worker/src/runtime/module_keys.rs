@@ -253,6 +253,62 @@ pub(crate) fn open_photo_chunk_any(
     Err(first_err.unwrap_or(VencError::Corrupt))
 }
 
+/// 文件级口令密钥派生：一次派生的结果由同一文件的全部块复用。
+///
+/// 旧入口按请求逐次派生（每块一次 PBKDF2）；原生导入在同一文件内只派生
+/// 一次，派生参数与旧入口完全一致，落盘布局不变。
+pub(crate) fn derive_file_password_key(
+    password: &str,
+    salt: &[u8; SALT_LEN],
+    iterations: u32,
+) -> Result<Zeroizing<[u8; KEY_LEN]>, VencError> {
+    let password = password.as_bytes();
+    if password.is_empty() || password.len() > MAX_SECRET_BYTES {
+        return Err(VencError::Invalid);
+    }
+    let iterations = if iterations == 0 {
+        PBKDF2_ITER
+    } else {
+        iterations
+    };
+    if !(V2_MIN_ITERATIONS..=V2_MAX_ITERATIONS).contains(&iterations) {
+        return Err(VencError::Invalid);
+    }
+    content_crypto::derive_master_key(password, salt, iterations).map_err(|_| VencError::Invalid)
+}
+
+/// 原生导入：用已派生的文件密钥封装一块 `v2_chunk`。
+pub(crate) fn seal_file_v2_chunk(
+    worker: &Worker,
+    key: &[u8],
+    salt: &[u8; SALT_LEN],
+    payload: &[u8],
+) -> Result<Vec<u8>, VencError> {
+    if payload.is_empty() {
+        return Err(VencError::Invalid);
+    }
+    let code = kind_code("v2_chunk").ok_or(VencError::Invalid)?;
+    let sealed = content_crypto::seal_v2_chunk(key, &content_crypto::random_bytes()?, payload)?;
+    let inner = tag_content(code, &sealed);
+    worker
+        .call_chunk_seal(module_index(ModuleId::File), salt, 0, 1, &inner)
+        .map_err(map_ffi_error)
+}
+
+/// 原生导入：用已派生的文件密钥生成口令校验块（`v2_check`）。
+pub(crate) fn seal_file_v2_check(
+    worker: &Worker,
+    key: &[u8],
+    salt: &[u8; SALT_LEN],
+) -> Result<Vec<u8>, VencError> {
+    let code = kind_code("v2_check").ok_or(VencError::Invalid)?;
+    let sealed = content_crypto::build_v2_check(key, &content_crypto::random_bytes()?)?;
+    let inner = tag_content(code, &sealed);
+    worker
+        .call_chunk_seal(module_index(ModuleId::File), salt, 0, 1, &inner)
+        .map_err(map_ffi_error)
+}
+
 /// 文件块 v2 的分片域标识：文件盐即域标识（公开参数）。
 fn v2_password_key(req: &Request) -> Result<Zeroizing<[u8; KEY_LEN]>, VencError> {
     let salt = required_salt(&req.salt)?;

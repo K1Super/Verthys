@@ -25,11 +25,11 @@
         <div class="kv-section-label">01 标识</div>
         <div class="kv-field">
           <label class="kv-label" for="acc-f-platform"><i class="kv-req" aria-hidden="true">*</i>平台</label>
-          <input id="acc-f-platform" class="kv-input" v-model="values.platform" aria-required="true" />
+          <input id="acc-f-platform" class="kv-input" v-model="values.platform" autocomplete="off" aria-required="true" />
         </div>
         <div class="kv-field">
           <label class="kv-label" for="acc-f-username"><i class="kv-req" aria-hidden="true">*</i>账户</label>
-          <input id="acc-f-username" class="kv-input" v-model="values.username" aria-required="true" />
+          <input id="acc-f-username" class="kv-input" v-model="values.username" autocomplete="off" aria-required="true" />
         </div>
       </section>
 
@@ -38,7 +38,7 @@
         <div class="kv-field">
           <label class="kv-label" for="acc-f-password">密码</label>
           <div class="kv-input-group">
-            <input id="acc-f-password" class="kv-input" v-model="values.password" :type="pwdVisible.password ? 'text' : 'password'" aria-required="true" />
+            <input id="acc-f-password" class="kv-input" v-model="values.password" autocomplete="off" :type="pwdVisible.password ? 'text' : 'password'" aria-required="true" />
             <button
               class="icon-btn"
               type="button"
@@ -68,6 +68,7 @@
               id="acc-f-encKey"
               class="kv-input"
               v-model="accountEncKey"
+              autocomplete="off"
               :type="encKeyVisible ? 'text' : 'password'"
               aria-required="true"
             />
@@ -91,7 +92,7 @@
         <div class="kv-section-label">04 附注</div>
         <div class="kv-field">
           <label class="kv-label" for="acc-f-note">备注</label>
-          <textarea id="acc-f-note" class="kv-input kv-textarea" v-model="values.note" rows="2"></textarea>
+          <textarea id="acc-f-note" class="kv-input kv-textarea" v-model="values.note" autocomplete="off" rows="2"></textarea>
         </div>
       </section>
     </div>
@@ -131,6 +132,7 @@
                 <textarea
                   :id="domId(field)"
                   class="kv-input kv-textarea carrier-input"
+                  autocomplete="off"
                   :rows="field.multilineRows ?? 5"
                   v-model="values[field.id]"
                 ></textarea>
@@ -145,13 +147,17 @@
               </div>
             </div>
 
-            <!-- 日期：日期控件 + 到期读数 -->
+            <!-- 日期：自绘日历控件 + 到期读数 -->
             <div v-else-if="field.kind === 'date'" class="kv-field">
               <label class="kv-label" :for="domId(field)"><i v-if="field.required" class="kv-req" aria-hidden="true">*</i>{{ field.label }}</label>
               <div class="date-line">
-                <div class="date-wrap" @click="openDatePicker($event)">
-                  <input :id="domId(field)" class="kv-input date-input" :class="{ 'has-value': values[field.id] }" type="date" v-model="values[field.id]" />
-                  <span v-if="!values[field.id]" class="date-ph">未设置</span>
+                <div class="date-wrap">
+                  <VaultDatePicker
+                    :id="domId(field)"
+                    v-model="values[field.id]"
+                    :aria-label="field.label"
+                    :required="field.required === true"
+                  />
                 </div>
                 <!-- 到期读数只属于到期字段：出生日期等普通日期不产生「距到期」语义 -->
                 <span v-if="field.id === expiryFieldId" class="kv-readout" :class="`is-${readoutFor(field.id).tone}`">
@@ -166,31 +172,23 @@
               <div class="range">
                 <div class="range-line">
                   <span class="range-tag">{{ rangeStartLabelOf(field) }}</span>
-                  <div class="date-wrap" @click="openDatePicker($event)">
-                    <input
+                  <div class="date-wrap">
+                    <VaultDatePicker
                       :id="`${domId(field)}-start`"
-                      class="kv-input date-input"
-                      :class="{ 'has-value': values[rangeStartIdOf(field)] }"
-                      type="date"
                       v-model="values[rangeStartIdOf(field)]"
                       :max="values[field.id] || undefined"
                       :aria-label="`${field.label}${rangeStartLabelOf(field)}`"
                     />
-                    <span v-if="!values[rangeStartIdOf(field)]" class="date-ph">未设置</span>
                   </div>
                   <span class="range-sep" aria-hidden="true"></span>
                   <span class="range-tag">{{ rangeEndLabelOf(field) }}</span>
-                  <div class="date-wrap" @click="openDatePicker($event)">
-                    <input
+                  <div class="date-wrap">
+                    <VaultDatePicker
                       :id="domId(field)"
-                      class="kv-input date-input"
-                      :class="{ 'has-value': values[field.id] }"
-                      type="date"
                       v-model="values[field.id]"
                       :min="values[rangeStartIdOf(field)] || undefined"
                       :aria-label="`${field.label}${rangeEndLabelOf(field)}`"
                     />
-                    <span v-if="!values[field.id]" class="date-ph">未设置</span>
                   </div>
                 </div>
                 <span v-if="field.id === expiryFieldId" class="kv-readout" :class="`is-${readoutFor(field.id).tone}`">
@@ -220,7 +218,7 @@
             <!-- 多行文本 -->
             <div v-else-if="field.kind === 'multiline'" class="kv-field">
               <label class="kv-label" :for="domId(field)"><i v-if="field.required" class="kv-req" aria-hidden="true">*</i>{{ field.label }}</label>
-              <textarea :id="domId(field)" class="kv-input kv-textarea" :rows="field.multilineRows ?? 2" v-model="values[field.id]"></textarea>
+              <textarea :id="domId(field)" class="kv-input kv-textarea" autocomplete="off" :rows="field.multilineRows ?? 2" v-model="values[field.id]"></textarea>
             </div>
 
             <!-- 文本 / 密码：密码带显隐切换 -->
@@ -231,6 +229,7 @@
                   :id="domId(field)"
                   class="kv-input"
                   v-model="values[field.id]"
+                  autocomplete="off"
                   :type="pwdVisible[field.id] ? 'text' : 'password'"
                 />
                 <button
@@ -244,7 +243,7 @@
                   <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
                 </button>
               </div>
-              <input v-else :id="domId(field)" class="kv-input" v-model="values[field.id]" />
+              <input v-else :id="domId(field)" class="kv-input" v-model="values[field.id]" autocomplete="off" />
             </div>
           </template>
         </div>
@@ -275,10 +274,12 @@ import {
   resolveSecretSaveAction,
 } from "../../../lib/vault_item_codec";
 import { vaultExpiryReadout, vaultExpiryTimestamp } from "../../../lib/vault_item_card";
+import { validateIdCardNumber } from "../../../lib/id_card_number";
 import { encryptPasswordField } from "../../../lib/verthys";
 import CosmicOverlay from "../../common/cosmic/CosmicOverlay.vue";
 import VaultRegionPicker from "./VaultRegionPicker.vue";
 import VaultSelect from "../../common/verthys-ui/VaultSelect.vue";
+import VaultDatePicker from "../../common/verthys-ui/VaultDatePicker.vue";
 
 /** 内容舱可导入的文件类型（凭据与配置文本，覆盖证书、密钥与文本材料） */
 const CARRIER_FILE_ACCEPT = ".pem,.crt,.cer,.der,.key,.pub,.json,.txt,.conf,.cfg,.ovpn";
@@ -449,18 +450,6 @@ const onSwitchChange = (fieldId: string, e: Event): void => {
   values.value = { ...values.value, [fieldId]: checked ? "1" : "0" };
 };
 
-/** 日期控件：点击整行即唤起系统日期选择（不支持则该输入框自行聚焦） */
-const openDatePicker = (e: MouseEvent): void => {
-  const wrap = e.currentTarget as HTMLElement | null;
-  const input = wrap?.querySelector("input") as (HTMLInputElement & { showPicker?: () => void }) | null;
-  if (!input) return;
-  try {
-    input.showPicker?.();
-  } catch {
-    input.focus();
-  }
-};
-
 const triggerFilePick = (fieldId: string): void => {
   pendingCarrierField.value = fieldId;
   fileInputRef.value?.click();
@@ -544,6 +533,22 @@ const submitAccount = async (current: VaultTypeDef): Promise<void> => {
   });
 };
 
+/** 字段级校验：按声明执行，返回第一条未通过的提示；全部通过或空值返回空串 */
+const firstFieldError = (current: VaultTypeDef): string => {
+  for (const field of current.fields) {
+    if (field.validator !== "cnIdNumber") continue;
+    const raw = (values.value[field.id] ?? "").trim();
+    // 必填由 missingRequired 承担，这里只校验已填写的取值
+    if (!raw) continue;
+    const check = validateIdCardNumber(raw);
+    if (check.ok) continue;
+    return check.reason === "format"
+      ? `「${field.label}」应为 18 位号码（前 17 位为数字，末位可为 X）`
+      : `「${field.label}」校验位不正确，请核对`;
+  }
+  return "";
+};
+
 const onSubmit = async (): Promise<void> => {
   const current = def.value;
   if (!current) return;
@@ -564,6 +569,12 @@ const onSubmit = async (): Promise<void> => {
   const reversed = current.fields.find((field) => isRangeReversed(field));
   if (reversed) {
     formError.value = `「${reversed.label}」的起始日不能晚于到期日`;
+    return;
+  }
+
+  const fieldError = firstFieldError(current);
+  if (fieldError) {
+    formError.value = fieldError;
     return;
   }
 
@@ -657,41 +668,14 @@ const onSubmit = async (): Promise<void> => {
 .carrier.is-drag .carrier-readout { color: var(--accent); }
 .carrier-file-input { display: none; }
 
-/* 日期：单枚日期控件 + 到期读数；日期占位由本地覆盖层承担（原生透明文字不可读） */
+/* 日期：自绘日历控件 + 到期读数；宽度按「YYYY-MM-DD + 日历图标」定尺，
+   区间两端同宽，起止读数不随月份位数变化而抖动 */
 .date-line { display: flex; align-items: center; gap: 12px; min-width: 0; flex-wrap: wrap; }
 .date-wrap {
-  position: relative;
-  flex: 0 0 132px;
-  width: 132px;
-  max-width: 132px;
+  flex: 0 0 140px;
+  width: 140px;
+  max-width: 140px;
   min-width: 0;
-  cursor: pointer;
-}
-.date-input {
-  color: transparent;
-  padding-right: 30px;
-  max-width: 100%;
-  cursor: pointer;
-}
-.date-input.has-value { color: var(--text-primary); }
-.date-input::-webkit-calendar-picker-indicator {
-  position: absolute;
-  right: 9px;
-  top: 50%;
-  transform: translateY(-50%);
-  opacity: 0.55;
-  filter: invert(0.75);
-  cursor: pointer;
-}
-.date-input::-webkit-calendar-picker-indicator:hover { opacity: 0.9; }
-.date-ph {
-  position: absolute;
-  left: 13px;
-  top: 50%;
-  transform: translateY(-50%);
-  font-size: 13px;
-  color: var(--text-muted);
-  pointer-events: none;
 }
 
 /* 日期区间：起止成对同排，到期读数另起一行 */

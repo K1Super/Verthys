@@ -88,27 +88,31 @@ use state::AppState;
 use tauri::{Emitter, Manager};
 
 // 控制器命令引用
-use controller::clipboard_controller::*;
-use controller::device_controller::*;
-use controller::devfixture_controller::*;
-use controller::diag_controller::*;
-use controller::file_controller::*;
-use controller::key_controller::*;
-use controller::key_change_controller::verthys_change_global_key;
-use controller::pcr_controller::*;
-use controller::rollback_anchor_controller::*;
-use controller::keyfile_controller::*;
-use controller::module_controller::*;
-use controller::photo_media_controller::*;
-use controller::vault_rotate_controller::*;
-use controller::preflight_controller::*;
-use controller::scan_controller::*;
-use controller::verthys_batch_controller::*;
-use controller::verthys_controller::*;
-use controller::worker_controller::*;
+use controller::protection::clipboard_controller::*;
+use controller::keys::device_controller::*;
+use controller::ops::devfixture_controller::*;
+use controller::ops::diag_controller::*;
+use controller::files::file_controller::*;
+use controller::keys::key_controller::*;
+use controller::keys::key_change_controller::verthys_change_global_key;
+use controller::keys::pcr_controller::*;
+use controller::vault::rollback_anchor_controller::*;
+use controller::keys::keyfile_controller::*;
+use controller::vault::module_controller::*;
+use controller::media::photo_media_controller::*;
+use controller::filevault::file_import_controller::{file_import_cancel, file_import_start};
+use controller::vault::vault_rotate_controller::*;
+use controller::vault::preflight_controller::*;
+use controller::vault::scan_controller::*;
+use controller::vault::storage_controller::{
+    verthys_storage_compact, verthys_storage_compact_cancel, verthys_storage_stats,
+};
+use controller::vault::verthys_batch_controller::*;
+use controller::vault::verthys_controller::*;
+use controller::vault::worker_controller::*;
 
 // 防截屏隐私保护：命令与启动序列引用
-use controller::privacy_controller::{
+use controller::protection::privacy_controller::{
     adopt_privacy_session, get_privacy_status, reconcile_privacy, run_startup_recovery_dialog,
     set_privacy_mode, startup_engage, AppAuditSink, PrivacyCoordinator, StartupOutcome,
 };
@@ -425,6 +429,11 @@ fn run_main_ui(
                 ));
                 app.manage(std::sync::Arc::clone(&coordinator));
 
+                /* WebView2 自动填充默认开启：输入内容会明文落盘并在后续输入时
+                 * 弹出历史值下拉。主窗口在 setup 阶段已创建且仍不可见，此处关闭
+                 * 自动填充并清除存量，确保用户首次输入之前策略已生效。 */
+                security::webview_privacy::harden_main_webview(&app_handle);
+
                 let show_main_window = match startup_engage(&app_handle, &coordinator) {
                     StartupOutcome::Protected { generation } => {
                         log::info!("[privacy] 启动保护已生效（世代 {}）", generation);
@@ -616,9 +625,15 @@ fn run_main_ui(
             verthys_wal_recover,
             verthys_forget_import_keys,
             verthys_gc_orphan_chunks,
+            verthys_storage_stats,
+            verthys_storage_compact,
+            verthys_storage_compact_cancel,
             // 原生照片导入（worker job 拉取 + 单写者落库 + 进度推送）
             photo_import_start,
             photo_import_cancel,
+            // 原生清藏导入（文件保险箱；worker 侧读/哈希/加密，宿主只提交引用）
+            file_import_start,
+            file_import_cancel,
             // 原生照片查看（预览优先 + 原图分块）
             photo_preview_get,
             photo_full_begin,
@@ -648,11 +663,13 @@ fn run_main_ui(
             verthys_import,
             // 防御闭环状态查询（7 路径 × 4 状态实时透传）
             verthys_security_status,
-            // 回退锚点维护：列表 / DEAD 回收 / 显式释放 / 容器扫描
+            // 回退锚点维护：列表 / DEAD 回收 / 显式释放 / 自动扫描 / 移除自定义位置
             verthys_rollback_anchor_list,
             verthys_rollback_anchor_reclaim,
             verthys_rollback_anchor_release,
             verthys_rollback_anchor_scan,
+            verthys_rollback_anchor_scan_cancel,
+            verthys_rollback_anchor_scan_forget_root,
             // 系统运行指标采样（CPU 占用率真实差分，安全防护面板数据源）
             security_commands::verthys_system_snapshot,
             // 系统启动时刻（每次开机一次首映、其余启动直接进入的判定信号）
@@ -662,11 +679,11 @@ fn run_main_ui(
             verthys_change_global_key,
             verthys_clear_global_key,
             // 内容层加密：模块密钥与记录加解密（原始密钥留在 worker）
-            controller::module_crypto_controller::verthys_module_key_unlock,
-            controller::module_crypto_controller::verthys_module_key_lock,
-            controller::module_crypto_controller::verthys_module_seal,
-            controller::module_crypto_controller::verthys_module_open,
-            controller::module_crypto_controller::verthys_module_probe_outer,
+            controller::vault::module_crypto_controller::verthys_module_key_unlock,
+            controller::vault::module_crypto_controller::verthys_module_key_lock,
+            controller::vault::module_crypto_controller::verthys_module_seal,
+            controller::vault::module_crypto_controller::verthys_module_open,
+            controller::vault::module_crypto_controller::verthys_module_probe_outer,
             verthys_reconcile_key_presence,
             verthys_reset_global_key_state,
             set_privacy_mode,
@@ -731,7 +748,9 @@ fn run_main_ui(
             updater::updater_run_repair,
             updater::updater_export_logs,
             // 应用诊断日志导出（脱敏 zip；不含审计 HMAC 链）
-            controller::diag_controller::diagnostics_export_logs,
+            controller::ops::diag_controller::diagnostics_export_logs,
+            // 开发悬浮球：读取当前构建日志尾部（发布构建调用必败）
+            controller::ops::diag_controller::diagnostics_tail_logs,
             // 开发夹具配置：状态 / 读取 / 保存 / 清空（发布构建调用必败）
             devfixture_status,
             devfixture_profile_get,

@@ -62,14 +62,16 @@ fn main() {
         println!("cargo:rerun-if-changed=../dist");
     }
 
-    // ===== 2. DLL 哈希校验（防恶意 DLL 劫持） =====
-    // 编译时从构建产物契约（CMake 构建 C 核心后生成）读取 DLL 路径与
-    // SHA-256，生成 dll_hash.rs。不再按生成器类型猜测 DLL 子目录——历史
-    // 候选路径（Release 子目录）在 Ninja 单配置构建下全部落空，哈希退化为
-    // None，运行时完整性校验静默失效。
-    // 契约缺失/失效时：release 构建直接编译失败（阻断无校验产物进入生产），
-    // dev 构建仅警告并生成 None（dev 允许未构建 C 核心时进行编译检查）。
-    let repo_root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+    // ===== 2. 打包素材清单校验（通道 + 契约 + 配对） =====
+    // 打包路径（src-tauri/verthys.dll、src-tauri/binaries/verthys-worker-*.exe）
+    // 由两条通道写入：build_dev.ps1（开发签名 DLL + 开发 worker）与
+    // build_production.ps1（生产签名 DLL + release worker）。路径相同、字节不同，
+    // 因此不能用"与某一通道的最新产物比较"判断新鲜度——那会把另一条通道的
+    // 合法产物误报为过期。清单（bundle-assets.json）记录通道、契约与哈希，
+    // 门禁按清单校验：通道与构建语义匹配、文件哈希与清单一致、DLL 与契约一致、
+    // worker 与 DLL 配对（worker 在编译期固化 DLL 全文件摘要）。
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let repo_root = manifest_dir
         .parent()
         .expect("无法定位 verthys-tauri 目录")
         .parent()
@@ -77,9 +79,8 @@ fn main() {
         .to_path_buf();
     let is_release = !cfg!(debug_assertions);
 
-    // Debug 专用开发 DLL 覆盖：开发运行时加载签名后的 build_dev DLL，
-    // 其哈希与生产契约不同。Release 明确禁止该变量，避免开发 DLL 进入
-    // 生产包；Debug 下变量缺失时保持生产契约逻辑。
+    // Debug 专用开发 DLL 覆盖：开发运行时加载 build_dev 的签名 DLL，其哈希与
+    // 生产契约不同。Release 明确禁止该变量，避免开发 DLL 进入生产包。
     println!("cargo:rerun-if-env-changed=VERTHYS_DEV_DLL_PATH");
     let dev_dll_path = std::env::var("VERTHYS_DEV_DLL_PATH")
         .ok()
@@ -109,92 +110,87 @@ fn main() {
         None => None,
     };
 
-    let mut dll_hash_code = String::new();
-    let dll_contract = match load_dll_contract(&repo_root) {
-        Some(c) if !c.dll_path.exists() => {
-            gate_contract_failure(
-                is_release,
-                &format!(
-                    "❌ 构建产物契约指向的 DLL 不存在：{}\n\
-                     修复：先运行 build_production.ps1 构建 C 核心（契约由 CMake 构建完成后自动生成）",
-                    c.dll_path.display()
-                ),
-            );
-            None
-        }
-        Some(c) => {
-            let actual_hash = sha256_file(&c.dll_path);
-            if actual_hash != c.sha256 {
+    let bundle = load_bundle_manifest(&manifest_dir);
+
+    // 先校验清单与素材本体，再决定是否需要生产契约：
+    // 通道/清单错误必须在读取任何构建产物之前给出最准确的失败原因。
+    verify_bundle_assets(
+        &manifest_dir,
+        &repo_root,
+        dev_dll_hash.as_deref(),
+        is_release,
+        bundle.as_ref(),
+    );
+
+    // 生产契约只在清单声明 production 通道时才是必需输入；
+    // dev 通道不需要生产契约，避免"从未构建生产核心"的工作区产生噪音。
+    let need_prod_contract = bundle.as_ref().is_none_or(|b| b.channel == "production");
+    let dll_contract = if need_prod_contract {
+        match load_dll_contract(&repo_root) {
+            Some(c) if !c.dll_path.exists() => {
                 gate_contract_failure(
                     is_release,
                     &format!(
-                        "❌ 构建产物契约已过期：DLL 实际哈希（{}…）与契约记录（{}…）不一致\n\
-                         修复：重新构建 C 核心以刷新契约（build_production.ps1 或 cmake --build build）",
-                        &actual_hash[..16.min(actual_hash.len())],
-                        &c.sha256[..16.min(c.sha256.len())]
+                        "❌ 构建产物契约指向的 DLL 不存在：{}\n\
+                         修复：先运行 build_production.ps1 构建 C 核心（契约由 CMake 构建完成后自动生成）",
+                        c.dll_path.display()
                     ),
                 );
                 None
-            } else {
-                println!("cargo:rerun-if-changed={}", c.dll_path.display());
-                Some(c)
+            }
+            Some(c) => {
+                let actual_hash = sha256_file(&c.dll_path);
+                if actual_hash != c.sha256 {
+                    gate_contract_failure(
+                        is_release,
+                        &format!(
+                            "❌ 构建产物契约已过期：DLL 实际哈希（{}…）与契约记录（{}…）不一致\n\
+                             修复：重新构建 C 核心以刷新契约（build_production.ps1 或 cmake --build build）",
+                            &actual_hash[..16.min(actual_hash.len())],
+                            &c.sha256[..16.min(c.sha256.len())]
+                        ),
+                    );
+                    None
+                } else {
+                    println!("cargo:rerun-if-changed={}", c.dll_path.display());
+                    Some(c)
+                }
+            }
+            None => {
+                gate_contract_failure(
+                    is_release,
+                    "❌ 构建产物契约缺失或无效：build/core/verthys.artifacts.json\n\
+                     修复：先运行 build_production.ps1 构建 C 核心（契约由 CMake 构建完成后自动生成）",
+                );
+                None
             }
         }
-        None => {
-            gate_contract_failure(
-                is_release,
-                "❌ 构建产物契约缺失或无效：build/core/verthys.artifacts.json\n\
-                 修复：先运行 build_production.ps1 构建 C 核心（契约由 CMake 构建完成后自动生成）",
-            );
-            None
-        }
+    } else {
+        None
     };
 
-    match (&dev_dll_hash, &dll_contract) {
-        (Some(hash), _) => {
-            dll_hash_code.push_str(&format!(
-                "/// 自动生成：开发签名运行时 verthys.dll SHA-256（VERTHYS_DEV_DLL_PATH）\n\
-                 /// 用于运行时 DLL 完整性校验，防止恶意 DLL 替换劫持\n\
-                 pub static DLL_HASH: Option<&str> = Some(\"{}\");\n",
-                hash
-            ));
-        }
-        (None, Some(c)) => {
-            dll_hash_code.push_str(&format!(
-                "/// 自动生成：verthys.dll SHA-256 哈希（来自构建产物契约）\n\
-                 /// 用于运行时 DLL 完整性校验，防止恶意 DLL 替换劫持\n\
-                 pub static DLL_HASH: Option<&str> = Some(\"{}\");\n",
-                c.sha256
-            ));
-        }
-        (None, None) => {
-            dll_hash_code.push_str(
-                "/// verthys.dll 未在编译时定位（开发模式：未构建 C 核心或契约失效）\n\
-                 pub static DLL_HASH: Option<&str> = None;\n",
-            );
-        }
-    }
+    // 运行时 DLL 完整性哈希必须与磁盘上实际会被加载的 DLL 一致：
+    // 开发覆盖优先（build_dev.ps1 显式指定），其次打包素材清单（已绑定契约），
+    // 最后才是生产契约（清单缺失时的过渡状态）。
+    let runtime_dll_hash = dev_dll_hash
+        .clone()
+        .or_else(|| bundle.as_ref().map(|b| b.dll.sha256.clone()))
+        .or_else(|| dll_contract.as_ref().map(|c| c.sha256.clone()));
+    let dll_hash_code = match &runtime_dll_hash {
+        Some(hash) => format!(
+            "/// 自动生成：verthys.dll SHA-256（开发覆盖或打包素材清单）\n\
+             /// 用于运行时 DLL 完整性校验，防止恶意 DLL 替换劫持\n\
+             pub static DLL_HASH: Option<&str> = Some(\"{}\");\n",
+            hash
+        ),
+        None => "/// verthys.dll 未在编译时定位（开发模式：尚未生成打包素材清单）\n\
+                 pub static DLL_HASH: Option<&str> = None;\n"
+            .to_string(),
+    };
     let dll_dest = PathBuf::from(&out_dir).join("dll_hash.rs");
     fs::write(&dll_dest, dll_hash_code).expect("写入 dll_hash.rs 失败");
 
-    // ===== 3. 打包素材门禁（：阻断过期素材进入生产包） =====
-    //
-    // 根治"生产包安全核心启动失败"根因：
-    //   打包素材（src-tauri/verthys.dll、src-tauri/binaries/verthys-worker-*.exe）
-    //   是手工同步的快照。若与最新构建产物脱节（旧 worker + 新 DLL + 新主程序），
-    //   FFI 布局 / 协议不匹配 → worker 子进程启动即崩溃 → 就绪握手失败 →
-    //   用户看到"安全核心启动失败"，且生产环境无日志可查，极难定位。
-    //
-    // 门禁规则（release 构建硬阻断，dev 仅警告）：
-    //   1. src-tauri/verthys.dll 必须与构建产物契约记录的 DLL 哈希一致
-    //      （契约在 C 核心构建完成后由 CMake 自动生成）
-    //   2. src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe 必须与
-    //      verthys-tauri/verthys-worker/target/release/verthys-worker.exe 哈希一致
-    //   3. worker 源码（src/**/*.rs、Cargo.toml）不得晚于 worker release 产物
-    //      （源码更新后必须重新 cargo build --release 并同步素材）
-    verify_bundle_assets(dll_contract.as_ref());
-
-    // ===== 4. 核心版本常量（清单兼容门的事实来源） =====
+    // ===== 3. 核心版本常量（清单兼容门的事实来源） =====
     // 兼容判定若与真实核心版本脱节，会表现为“不兼容也能安装”或“兼容却被拒绝”。
     // 版本常量在编译期直接来自 C 核心头文件；头文件缺失或格式变化时构建失败，
     // 不允许回退到任何手写数值。
@@ -356,125 +352,290 @@ fn newest_mtime(dir: &Path) -> Option<std::time::SystemTime> {
     newest
 }
 
-/// 打包素材门禁：校验 src-tauri 下的打包素材与最新构建产物严格一致。
+/// 打包素材清单 schema：字段语义变化时递增，旧清单直接拒绝。
+const BUNDLE_SCHEMA: u32 = 1;
+/// 打包素材清单文件名（位于 src-tauri/）。
+const BUNDLE_MANIFEST_FILE: &str = "bundle-assets.json";
+/// 打包路径是 Tauri 配置的固定入口，清单只能描述这两个文件。
+const CANONICAL_DLL: &str = "verthys.dll";
+const CANONICAL_WORKER: &str = "binaries/verthys-worker-x86_64-pc-windows-msvc.exe";
+const PROD_CONTRACT_REL: &str = "build/core/verthys.artifacts.json";
+const DEV_CONTRACT_REL: &str = "build_dev/core/verthys.artifacts.json";
+
+/// 打包素材清单：由 staging 脚本按实际字节生成，记录通道、契约与配对关系。
+#[derive(serde::Deserialize)]
+struct BundleManifest {
+    schema: u32,
+    channel: String,
+    version: String,
+    fmt_version: u32,
+    producer: String,
+    dll: BundleDll,
+    worker: BundleWorker,
+    contract: BundleContract,
+}
+
+#[derive(serde::Deserialize)]
+struct BundleDll {
+    path: String,
+    #[allow(dead_code)]
+    source: String,
+    sha256: String,
+    #[allow(dead_code)]
+    built_at: String,
+}
+
+#[derive(serde::Deserialize)]
+struct BundleWorker {
+    path: String,
+    #[allow(dead_code)]
+    source: String,
+    sha256: String,
+    #[allow(dead_code)]
+    built_at: String,
+    dll_sha256: String,
+}
+
+#[derive(serde::Deserialize)]
+struct BundleContract {
+    path: String,
+    sha256: String,
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// 读取打包素材清单。缺失返回 None，由门禁按构建模式决定警告或阻断；
+/// 存在但格式/字段非法一律 panic：清单只允许构建脚本生成，手工改坏没有合法场景。
+fn load_bundle_manifest(manifest_dir: &Path) -> Option<BundleManifest> {
+    let path = manifest_dir.join(BUNDLE_MANIFEST_FILE);
+    println!("cargo:rerun-if-changed={}", path.display());
+    let text = fs::read_to_string(&path).ok()?;
+    let manifest: BundleManifest = serde_json::from_str(&text).unwrap_or_else(|error| {
+        panic!(
+            "❌ 打包素材清单格式非法：{}\n{error}\n\
+             修复：重新运行 build_production.ps1 或 build_dev.ps1 生成清单",
+            path.display()
+        )
+    });
+    if manifest.schema != BUNDLE_SCHEMA {
+        panic!(
+            "❌ 打包素材清单 schema 不支持：{}（期望 {}）\n\
+             修复：重新运行 build_production.ps1 或 build_dev.ps1",
+            manifest.schema, BUNDLE_SCHEMA
+        );
+    }
+    if manifest.channel != "dev" && manifest.channel != "production" {
+        panic!(
+            "❌ 打包素材清单通道非法：{}\n修复：重新运行 build_production.ps1 或 build_dev.ps1",
+            manifest.channel
+        );
+    }
+    if manifest.dll.path != CANONICAL_DLL {
+        panic!(
+            "❌ 打包素材清单 DLL 路径非法：{}（期望 {}）",
+            manifest.dll.path, CANONICAL_DLL
+        );
+    }
+    if manifest.worker.path != CANONICAL_WORKER {
+        panic!(
+            "❌ 打包素材清单 worker 路径非法：{}（期望 {}）",
+            manifest.worker.path, CANONICAL_WORKER
+        );
+    }
+    let expected_contract = if manifest.channel == "production" {
+        PROD_CONTRACT_REL
+    } else {
+        DEV_CONTRACT_REL
+    };
+    if manifest.contract.path != expected_contract {
+        panic!(
+            "❌ 打包素材清单契约路径与通道不符：{}（channel={}，期望 {}）",
+            manifest.contract.path, manifest.channel, expected_contract
+        );
+    }
+    for (label, value) in [
+        ("dll.sha256", &manifest.dll.sha256),
+        ("worker.sha256", &manifest.worker.sha256),
+        ("worker.dll_sha256", &manifest.worker.dll_sha256),
+        ("contract.sha256", &manifest.contract.sha256),
+    ] {
+        if !is_sha256_hex(value) {
+            panic!("❌ 打包素材清单 {label} 不是 64 位十六进制哈希：{value}");
+        }
+    }
+    Some(manifest)
+}
+
+/// 打包素材门禁：按清单校验打包路径上的字节，而不是与某一条通道的最新产物比较。
 ///
-/// DLL 规则的最新产物路径取自构建产物契约；契约缺失时跳过 DLL 规则
-/// （仅 dev 可能发生，生成 DLL 哈希处已先行警告）。worker 规则独立于 DLL
-/// 规则执行，一方失效不抑制另一方。
-/// release 构建（tauri build / cargo build --release）时任一规则不满足即 panic 阻断，
-/// 错误信息包含明确的修复命令；dev 构建仅输出 cargo:warning 不阻断。
-fn verify_bundle_assets(dll_contract: Option<&DllContract>) {
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let verthys_tauri_dir = manifest_dir
-        .parent()
-        .expect("无法定位 verthys-tauri 目录")
-        .to_path_buf();
+/// 校验链（任一失配即阻断）：
+///   1. 通道与构建语义匹配：release 只能是 production；设置开发 DLL 覆盖时只能是 dev
+///   2. DLL / worker 实际哈希与清单一致
+///   3. worker 绑定哈希与 DLL 哈希一致（编译期固化的配对不变量）
+///   4. DLL 与契约记录的交付字节一致，契约文件本身未被刷新替换
+///   5. production 通道额外校验 worker 源码新鲜度
+///
+/// 清单缺失时：release 阻断；dev 仅警告（尚未部署打包素材的首次编译）。
+fn verify_bundle_assets(
+    manifest_dir: &Path,
+    repo_root: &Path,
+    dev_dll_hash: Option<&str>,
+    is_release: bool,
+    bundle: Option<&BundleManifest>,
+) {
+    let staged_dll = manifest_dir.join(CANONICAL_DLL);
+    let staged_worker = manifest_dir.join(CANONICAL_WORKER);
+    println!("cargo:rerun-if-changed={}", staged_dll.display());
+    println!("cargo:rerun-if-changed={}", staged_worker.display());
 
-    let is_release = !cfg!(debug_assertions);
-
-    // ---- 规则 1：DLL 素材同步校验 ----
-    if let Some(contract) = dll_contract {
-        let latest_dll = &contract.dll_path;
-        let staged_dll = manifest_dir.join("verthys.dll");
-        println!("cargo:rerun-if-changed={}", latest_dll.display());
-        println!("cargo:rerun-if-changed={}", staged_dll.display());
-        if !staged_dll.exists() {
-            let msg = format!(
-                "❌ 打包素材缺失：src-tauri/verthys.dll 不存在！\n\
-                 最新构建产物位于 {}。\n\
-                 修复：Copy-Item {} verthys-tauri/src-tauri/verthys.dll",
-                latest_dll.display(),
-                latest_dll.display()
+    let Some(bundle) = bundle else {
+        if is_release {
+            panic!(
+                "❌ 打包素材清单缺失：src-tauri/{BUNDLE_MANIFEST_FILE}\n\
+                 修复：生产打包先运行 build_production.ps1；开发环境运行 build_dev.ps1"
             );
-            if is_release {
-                panic!("{}", msg);
-            }
-            println!("cargo:warning={}", msg);
-        } else {
-            let h_latest = sha256_file(latest_dll);
-            let h_staged = sha256_file(&staged_dll);
-            if h_latest != h_staged {
-                let msg = format!(
-                    "❌ 打包素材过期：src-tauri/verthys.dll（{}…）与最新构建产物（{}…）哈希不一致！\n\
-                     修复：Copy-Item {} verthys-tauri/src-tauri/verthys.dll",
-                    h_staged.chars().take(16).collect::<String>(),
-                    h_latest.chars().take(16).collect::<String>(),
-                    latest_dll.display()
-                );
-                if is_release {
-                    panic!("{}", msg);
-                }
-                println!("cargo:warning={}", msg);
-            }
+        }
+        println!(
+            "cargo:warning=打包素材清单缺失（src-tauri/{BUNDLE_MANIFEST_FILE}），\
+             跳过素材一致性校验；运行 build_dev.ps1 或 build_production.ps1 生成"
+        );
+        return;
+    };
+
+    if is_release && bundle.channel != "production" {
+        panic!(
+            "❌ 打包素材通道错误：release 构建要求 channel=production，实际 channel={}（producer={}）\n\
+             修复：运行 build_production.ps1 重新部署打包素材",
+            bundle.channel, bundle.producer
+        );
+    }
+    if dev_dll_hash.is_some() && bundle.channel != "dev" {
+        panic!(
+            "❌ VERTHYS_DEV_DLL_PATH 已设置，但打包素材通道为 {}（producer={}）\n\
+             修复：运行 build_dev.ps1 重新部署开发素材",
+            bundle.channel, bundle.producer
+        );
+    }
+    if let Some(expected) = dev_dll_hash {
+        if expected != bundle.dll.sha256 {
+            panic!(
+                "❌ 开发 DLL 覆盖与打包素材不一致：VERTHYS_DEV_DLL_PATH={}…，清单={}…\n\
+                 修复：运行 build_dev.ps1 重新部署开发素材",
+                &expected[..16.min(expected.len())],
+                &bundle.dll.sha256[..16.min(bundle.dll.sha256.len())]
+            );
         }
     }
 
-    // ---- 规则 2 + 3：worker 素材同步 + 源码新鲜度校验 ----
-    let worker_dir = verthys_tauri_dir.join("verthys-worker");
-    let worker_release_exe = worker_dir.join("target/release/verthys-worker.exe");
-    let staged_worker = manifest_dir.join("binaries/verthys-worker-x86_64-pc-windows-msvc.exe");
-    let worker_src_dir = worker_dir.join("src");
+    for (label, path, expected) in [
+        ("verthys.dll", &staged_dll, &bundle.dll.sha256),
+        ("verthys-worker", &staged_worker, &bundle.worker.sha256),
+    ] {
+        if !path.is_file() {
+            panic!(
+                "❌ 打包素材缺失：{}\n修复：运行 build_production.ps1 或 build_dev.ps1 重新部署",
+                path.display()
+            );
+        }
+        let actual = sha256_file(path);
+        if &actual != expected {
+            panic!(
+                "❌ 打包素材与清单不一致：{}（清单={}… 实际={}…）\n\
+                 修复：重新运行 build_production.ps1 或 build_dev.ps1 生成素材与清单",
+                label,
+                &expected[..16.min(expected.len())],
+                &actual[..16.min(actual.len())]
+            );
+        }
+    }
 
-    if worker_src_dir.exists() {
-        println!("cargo:rerun-if-changed={}", staged_worker.display());
+    if bundle.worker.dll_sha256 != bundle.dll.sha256 {
+        panic!(
+            "❌ 打包素材未配对：worker 绑定 DLL={}…，打包 DLL={}…\n\
+             修复：重新构建 worker 与 DLL（build_production.ps1 或 build_dev.ps1）",
+            &bundle.worker.dll_sha256[..16.min(bundle.worker.dll_sha256.len())],
+            &bundle.dll.sha256[..16.min(bundle.dll.sha256.len())]
+        );
+    }
 
-        // 规则 3：worker 源码不得晚于 release 产物（源码更新未重编译）
-        if let Some(src_newest) = newest_mtime(&worker_src_dir) {
-            let cargo_toml = worker_dir.join("Cargo.toml");
-            let src_newest = match cargo_toml.metadata().and_then(|m| m.modified()) {
-                Ok(t) if t > src_newest => t,
-                _ => src_newest,
-            };
-            if let Ok(exe_meta) = worker_release_exe.metadata() {
-                if let Ok(exe_mtime) = exe_meta.modified() {
-                    if src_newest > exe_mtime {
-                        let msg = "❌ worker 源码已更新但未重新编译！\n\
-                                   修复：cd verthys-tauri/verthys-worker && cargo build --release，\n\
-                                   然后 Copy-Item verthys-worker/target/release/verthys-worker.exe \n\
-                                   src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe";
-                        if is_release {
-                            panic!("{}", msg);
+    let contract_path = repo_root.join(&bundle.contract.path);
+    println!("cargo:rerun-if-changed={}", contract_path.display());
+    if !contract_path.is_file() {
+        panic!(
+            "❌ 打包素材契约缺失：{}\n修复：重新构建 C 核心后重新部署打包素材",
+            contract_path.display()
+        );
+    }
+    let contract_file_hash = sha256_file(&contract_path);
+    if contract_file_hash != bundle.contract.sha256 {
+        panic!(
+            "❌ 打包素材契约已被刷新：{}（清单={}… 当前={}…）\n\
+             修复：重新运行 build_production.ps1 或 build_dev.ps1 让素材与契约同步",
+            contract_path.display(),
+            &bundle.contract.sha256[..16.min(bundle.contract.sha256.len())],
+            &contract_file_hash[..16.min(contract_file_hash.len())]
+        );
+    }
+    let contract_text = fs::read_to_string(&contract_path).unwrap_or_else(|error| {
+        panic!(
+            "❌ 无法读取打包素材契约 {}：{error}",
+            contract_path.display()
+        )
+    });
+    let contract: ArtifactContract = serde_json::from_str(&contract_text).unwrap_or_else(|error| {
+        panic!(
+            "❌ 打包素材契约格式非法 {}：{error}",
+            contract_path.display()
+        )
+    });
+    if contract.sha256 != bundle.dll.sha256 {
+        panic!(
+            "❌ 打包 DLL 与契约记录不一致（契约={}… 清单={}…）\n\
+             修复：重新运行 build_production.ps1 或 build_dev.ps1",
+            &contract.sha256[..16.min(contract.sha256.len())],
+            &bundle.dll.sha256[..16.min(bundle.dll.sha256.len())]
+        );
+    }
+    if contract.version != bundle.version || contract.fmt_version != bundle.fmt_version {
+        panic!(
+            "❌ 打包素材版本与契约不一致（契约={}/{}，清单={}/{}）",
+            contract.version, contract.fmt_version, bundle.version, bundle.fmt_version
+        );
+    }
+
+    // worker 源码新鲜度只在生产通道校验：dev worker 由独立 target 目录构建，
+    // 与 verthys-worker/target/release 无关。
+    if bundle.channel == "production" {
+        let worker_dir = manifest_dir
+            .parent()
+            .expect("无法定位 verthys-tauri 目录")
+            .join("verthys-worker");
+        let worker_release_exe = worker_dir.join("target/release/verthys-worker.exe");
+        let worker_src_dir = worker_dir.join("src");
+        println!("cargo:rerun-if-changed={}", worker_src_dir.display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            worker_dir.join("Cargo.toml").display()
+        );
+        if worker_src_dir.exists() {
+            if let Some(src_newest) = newest_mtime(&worker_src_dir) {
+                let cargo_toml = worker_dir.join("Cargo.toml");
+                let src_newest = match cargo_toml.metadata().and_then(|m| m.modified()) {
+                    Ok(t) if t > src_newest => t,
+                    _ => src_newest,
+                };
+                if let Ok(exe_meta) = worker_release_exe.metadata() {
+                    if let Ok(exe_mtime) = exe_meta.modified() {
+                        if src_newest > exe_mtime {
+                            panic!(
+                                "❌ worker 源码已更新但未重新编译！\n\
+                                 修复：运行 build_production.ps1（不要使用 -SkipWorker）"
+                            );
                         }
-                        println!("cargo:warning={}", msg);
                     }
                 }
-            }
-        }
-
-        // 规则 2：worker 素材哈希必须与 release 产物一致
-        if !worker_release_exe.exists() {
-            let msg = "❌ verthys-worker release 构建产物不存在！\n\
-                       修复：cd verthys-tauri/verthys-worker && cargo build --release，\n\
-                       然后 Copy-Item verthys-worker/target/release/verthys-worker.exe \n\
-                       src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe";
-            if is_release {
-                panic!("{}", msg);
-            }
-            println!("cargo:warning={}", msg);
-        } else if !staged_worker.exists() {
-            let msg = "❌ 打包素材缺失：src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe 不存在！\n\
-                       修复：Copy-Item verthys-tauri/verthys-worker/target/release/verthys-worker.exe \n\
-                       verthys-tauri/src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe";
-            if is_release {
-                panic!("{}", msg);
-            }
-            println!("cargo:warning={}", msg);
-        } else {
-            let h_release = sha256_file(&worker_release_exe);
-            let h_staged = sha256_file(&staged_worker);
-            if h_release != h_staged {
-                let msg = format!(
-                    "❌ 打包素材过期：src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe（{}…）\n\
-                     与 verthys-worker/target/release/verthys-worker.exe（{}…）哈希不一致！\n\
-                     修复：Copy-Item verthys-tauri/verthys-worker/target/release/verthys-worker.exe \n\
-                     verthys-tauri/src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe",
-                    h_staged.chars().take(16).collect::<String>(),
-                    h_release.chars().take(16).collect::<String>()
-                );
-                if is_release {
-                    panic!("{}", msg);
-                }
-                println!("cargo:warning={}", msg);
             }
         }
     }

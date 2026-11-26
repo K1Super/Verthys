@@ -15,7 +15,7 @@ Verthys 仅支持 Windows / MSVC / x64。工具链来源有两种：本地 `VERT
 | 参数组合 | 适用场景 |
 |---|---|
 | （无参数） | 全量：stage 0/0.5/0.6 前置 + C 核心 + worker(release+debug) + 部署复制与哈希校验 + 前端类型检查 + Rust 检查 + NSIS 打包 + 产物校验 |
-| `-Clean` | 构建前清理所有构建目录（`build/`、`verthys-worker/target`、`src-tauri/target`） |
+| `-Clean` | 显式全量清理构建产物与打包暂存（`build/`、worker `target/`、`src-tauri/target/`、`service-payload/`、`build_security_service/` 与 staging 三件）；发布构建时使用 |
 | `-SkipCore` | C DLL 已存在且无需重编（跳过阶段 1，仅校验 `verthys.dll` 存在） |
 | `-SkipWorker` | worker 二进制已存在（跳过阶段 2，仅校验 `verthys-worker.exe` 存在） |
 | `-SkipTauri` | 仅构建组件、不打包（`build_dev.ps1` 预检回调即用此参数） |
@@ -25,7 +25,7 @@ Verthys 仅支持 Windows / MSVC / x64。工具链来源有两种：本地 `VERT
 
 ### 前置步骤（阶段 0 / 0.1 / 0.2 / 0.5 / 0.6）
 
-1. `阶段 0`：清理僵尸进程（`cargo/rustc/Verthys/verthys-worker`）与 `.cargo-lock` 锁文件。
+1. `阶段 0`：仅终止可执行文件位于本仓库内的 `cargo/rustc/Verthys/verthys-worker` 进程（避免误伤其他项目与 IDE），并清理 `.cargo-lock` 锁文件。
 2. `阶段 0.1`：更新域边界门（`ci/check_updater_boundary.ps1`）：WebView 不得获得安装类命令权限。
 3. `阶段 0.2`：版本载体同步（`ci/sync_version.ps1`），根 `VERSION` 与各载体漂移即失败。
 4. `阶段 0.5`：探测已注入的 MSVC 环境（`VCToolsInstallDir` + `INCLUDE` + `LIB` + PATH 中的 `cl.exe`）。已注入则沿用并选 Ninja；未注入时 dot-source `scripts/lib/env.load.ps1`（`VERTHYS_*` 四变量，选 Visual Studio 生成器）。
@@ -70,12 +70,11 @@ cargo build                # debug（开发环境用，失败仅告警不影响�
 
 `$env:CARGO_INCREMENTAL = "0"` 为阶段 2 内的纵深防御，与 `Cargo.toml [profile.dev] incremental=false` 共同规避 LNK1181。`VERTHYS_DLL_PATH` 必须指向签名后的最终 DLL：worker 在 Release 下把该文件的 SHA-256 固化为加载前置校验，路径滞后会导致运行期拒绝加载。worker 构建完成后、复制打包前完成 Authenticode 签名。
 
-### 阶段 3：部署复制 + 哈希校验
+### 阶段 3：部署打包素材（单一生产者）
 
-- 复制已签名的 `verthys-worker.exe` → `src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe`（Tauri `externalBin` 基准目录）。
-- 复制已签名的 `verthys.dll` → `src-tauri/verthys.dll`：副本是已完成 `.vsec` 注入、Authenticode 签名与契约刷新的最终字节（Tauri `resources` 从 `src-tauri/` 查找）。
-- 同步 worker 到 Tauri `target/{release,debug}/`（防旧副本“worker 就绪超时”）。
-- `Get-FileSha256` 比对 binaries/ 与 target 副本，哈希漂移即失败。
+- 由 `scripts/build/stage_bundle_assets.ps1` 统一完成：复制已签名的 `verthys.dll` → `src-tauri/verthys.dll`、`verthys-worker.exe` → `src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe`，同步 worker 到 Tauri `target/{release,debug}/`，逐文件哈希复核后写入 `bundle-assets.json`。
+- 清单记录通道（dev/production）、契约哈希、DLL/worker 哈希与 worker 编译期绑定的 DLL 哈希；`build.rs` 据此拒绝通道错配、过期素材与未配对组合。
+- 同一脚本被 `build_dev.ps1` 与两个 CI 作业调用；禁止再手工 `Copy-Item` 部署打包素材。
 
 ### 阶段 4：Tauri 打包（NSIS 安装包，含两个前置门）
 

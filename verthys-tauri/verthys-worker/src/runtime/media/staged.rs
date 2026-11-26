@@ -1,9 +1,12 @@
 /*
- * media/staged.rs — 照片块密文暂存区
+ * media/staged.rs — 外置块密文暂存区（拾光 / 清藏共用）
  *
- * 导入与备份还原都在 worker 内生成块密文；本模块按 job_id 暂存密文，
- * 宿主只持 chunk_key/chunk_hash 引用并按组提交。密文不经过 IPC，
- * 提交成功后立即释放，失败时保留以便宿主逐条重试。
+ * 拾光导入、备份还原与清藏导入都在 worker 内生成块载荷；本模块按
+ * job_id 暂存，宿主只持 chunk_key/chunk_hash 引用并按组提交。载荷不经过
+ * IPC，提交成功后立即释放，失败时保留以便宿主逐条重试。
+ *
+ * 角色隔离由 job_id 命名空间与记录角色值共同保证：不同模块的 job 不共享
+ * 暂存集合，块角色（照片块 / 文件块）由宿主提交时显式携带。
  *
  * 安全约束：
  *   - 单 job 最多 16 块 / 64MiB，条目 TTL 120s，超限或过期显式失败；
@@ -18,13 +21,23 @@ use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
+use crate::runtime::budget::{PB_MAX_FILE_CHUNK_SIZE_BYTES, PB_PHOTO_CHUNK_SIZE_BYTES};
 use crate::runtime::ffi_types::VerthysRecordC;
 use crate::runtime::protocol::{Request, Response, StagedAddRecord};
 use crate::runtime::worker::Worker;
 
-/// 单 job 暂存块上限：正常分组提交（8 块/组）不会触顶。
+/// 单 job 暂存块上限：正常分组提交（16 块/组）不会触顶。
 const STAGED_MAX_CHUNKS: usize = 16;
-const STAGED_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// 两类内容分块口径的较大值：暂存上限必须同时覆盖照片块与文件块，
+/// 任一常量上调都不会让满批的最后一块被上限拒绝。
+const STAGED_CHUNK_PLAINTEXT: usize = if PB_PHOTO_CHUNK_SIZE_BYTES > PB_MAX_FILE_CHUNK_SIZE_BYTES {
+    PB_PHOTO_CHUNK_SIZE_BYTES as usize
+} else {
+    PB_MAX_FILE_CHUNK_SIZE_BYTES as usize
+};
+/// 暂存字节上限按最大块数 × 单块密文上界推导，避免块数上限与字节上限
+/// 互相矛盾。
+const STAGED_MAX_BYTES: usize = STAGED_MAX_CHUNKS * (STAGED_CHUNK_PLAINTEXT + 128);
 /// 暂存块存活窗口：提交延迟超过该值视为异常，拒绝继续。
 const STAGED_TTL: Duration = Duration::from_secs(120);
 /// 单次暂存提交的块数上限（与 add_records 对齐）。
@@ -122,10 +135,10 @@ pub(crate) fn stage(
     if set.chunks.len() >= STAGED_MAX_CHUNKS
         || set.bytes.saturating_add(sealed.len()) > STAGED_MAX_BYTES
     {
-        return Err("照片块暂存超出上限".to_string());
+        return Err("块暂存超出上限".to_string());
     }
     if set.chunks.contains_key(key) {
-        return Err("照片块键重复暂存".to_string());
+        return Err("块键重复暂存".to_string());
     }
     set.bytes += sealed.len();
     set.chunks.insert(
@@ -274,6 +287,14 @@ mod tests {
             chunk_key: key.to_string(),
             chunk_hash: hash.to_string(),
         }
+    }
+
+    #[test]
+    fn staged_capacity_covers_full_batch() {
+        /* 16 块 × (最大分块明文 + 分片头 28B + nonce 24B + tag 16B)
+         * 必须落在暂存字节上限内；否则凑满一批时最后一块会被拒绝。 */
+        let sealed_max = STAGED_CHUNK_PLAINTEXT + 28 + 24 + 16;
+        assert!(STAGED_MAX_CHUNKS * sealed_max <= STAGED_MAX_BYTES);
     }
 
     #[test]

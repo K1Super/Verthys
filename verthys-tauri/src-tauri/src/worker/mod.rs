@@ -71,5 +71,5 @@ mod e2e_measure;
 mod budget;
 
 pub use platform::kill_orphan_workers;
-pub use protocol::RotateProgress;
+pub use protocol::{RotateProgress, StorageCompactProgress};
 pub use session::WorkerSession;

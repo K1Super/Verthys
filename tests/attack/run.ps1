@@ -539,7 +539,7 @@ try {
     # 导入身份键去内容化：生产代码无内容哈希身份键，
     # 且同内容不同路径/同条目键重试的回归用例在场（行为由 vitest/宿主单测执行）。
     $typeFile = Join-Path $repoRoot 'verthys-tauri/src/types/verthys.ts'
-    $fvSpec = Join-Path $repoRoot 'verthys-tauri/src/composables/file-verthys/useFileImport.spec.ts'
+    $fvSpec = Join-Path $repoRoot 'verthys-tauri/verthys-worker/src/runtime/file_import.rs'
     $hostWriter = Join-Path $repoRoot 'verthys-tauri/src-tauri/src/state/import_writer.rs'
     $idKeyForbidden = @()
     foreach ($rel in @(
@@ -547,7 +547,8 @@ try {
             'verthys-tauri/src-tauri/src/repository/verthys_wal.rs',
             'verthys-tauri/src-tauri/src/state/import_writer.rs',
             'verthys-tauri/src/composables/photo-album/importPipeline.ts',
-            'verthys-tauri/src/composables/file-verthys/useFileImport.ts'
+            'verthys-tauri/verthys-worker/src/runtime/file_import.rs',
+            'verthys-tauri/src-tauri/src/controller/file_import_controller.rs'
         )) {
         $p = Join-Path $repoRoot $rel
         if (Test-Path -LiteralPath $p) {
@@ -573,7 +574,7 @@ try {
         -Expected '前端同内容不同路径/同键重试用例与宿主 dedup 用例在场' `
         -Observed $(if ($a20bPass) { 'PASS' } else { '用例缺失' }) `
         -Verdict $(if ($a20bPass) { 'PASS' } else { 'FAIL' }) `
-        -Evidence 'vitest useFileImport.spec.ts；host import_writer::test_process_append_pending_dedup_skips_committed'
+        -Evidence 'worker file_import.rs 去重用例；host import_writer::test_process_append_pending_dedup_skips_committed'
 
     # 未解锁枚举：新句柄直接读记录必须 LOCKED
     $lockedCode = Test-LockedRecordAccess -Path $vaultPath

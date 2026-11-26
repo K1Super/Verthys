@@ -39,15 +39,30 @@ impl SlidingWindowLimiter {
     ///
     /// 返回 false 时不记录，调用方可如实回报"频率受限"并可稍后重试。
     pub fn check_and_record(&mut self) -> bool {
+        self.check().is_some()
+    }
+
+    /// 检查并预留一次名额，返回可撤销的令牌
+    ///
+    /// 适用于"操作失败不应占用额度"的场景：调用方在失败后以 `cancel`
+    /// 撤销本次预留，成功则保留记录。
+    pub fn check(&mut self) -> Option<Instant> {
         let now = Instant::now();
         self.timestamps
             .retain(|&t| now.duration_since(t) < self.window);
 
         if self.timestamps.len() >= self.max_calls {
-            return false;
+            return None;
         }
         self.timestamps.push(now);
-        true
+        Some(now)
+    }
+
+    /// 撤销一次预留（仅移除对应令牌，不影响其他并发调用）
+    pub fn cancel(&mut self, token: Instant) {
+        if let Some(pos) = self.timestamps.iter().rposition(|&t| t == token) {
+            self.timestamps.remove(pos);
+        }
     }
 }
 
@@ -88,6 +103,15 @@ mod tests {
         let old = Instant::now() - Duration::from_secs(120);
         l.timestamps.iter_mut().for_each(|t| *t = old);
         assert!(l.check_and_record(), "过期时间戳清理后应允许新调用");
+    }
+
+    #[test]
+    fn test_cancel_releases_reserved_slot() {
+        let mut l = SlidingWindowLimiter::new(Duration::from_secs(60), 1);
+        let token = l.check().expect("首次预留应成功");
+        assert!(l.check().is_none(), "名额已占满");
+        l.cancel(token);
+        assert!(l.check().is_some(), "撤销后名额应恢复");
     }
 
     #[test]

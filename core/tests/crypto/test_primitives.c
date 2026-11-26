@@ -57,6 +57,46 @@ TEST(blake3_known_vectors)
     return 0;
 }
 
+/* 多 chunk 向量：覆盖 8 路并行组、跨组、末块不完整与树合并。
+ * 输入为确定性模式，期望值由标量实现生成后固定在测试中，
+ * 任何并行实现替换都必须逐字节一致。 */
+TEST(blake3_multichunk_vectors)
+{
+    static const struct {
+        size_t len;
+        const char *hex;
+    } cases[] = {
+        { 8192u,
+          "2299081e3d0a51bed5b31559ea8aa77739dfa05db03e343a670541b5dbf428d9" },
+        { 9216u,
+          "64df81b596e72a75f8ea64e17e4512cff4bea85409e355b68f12a495fe9ce5b1" },
+        { 16384u,
+          "7e7e4bdc16e1e40beba7b3b0180a181968859dbc9f0741eec57f1a1f55980cbd" },
+        { 32768u,
+          "3c0a4e4eb0b283c5a1a207ac3b5fd59ff77927ddefe55b58f6086b6440411fbd" },
+    };
+    uint8_t *buf;
+    uint8_t out[VTY_HASH_BYTES];
+    uint8_t expect[VTY_HASH_BYTES];
+    size_t i;
+    size_t c;
+
+    buf = (uint8_t *)vty_alloc(32768u);
+    CHECK(buf != NULL);
+    for (i = 0; i < 32768u; i++) {
+        buf[i] = (uint8_t)(i * 131u + 17u);
+    }
+
+    for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        CHECK_EQ(vty_blake3_32(buf, cases[c].len, out), VTY_OK);
+        CHECK_EQ(hex_to_bytes(cases[c].hex, expect, sizeof(expect)), 0);
+        CHECK_EQ(memcmp(out, expect, VTY_HASH_BYTES), 0);
+    }
+
+    vty_free(buf, 32768u);
+    return 0;
+}
+
 TEST(hkdf_rfc5869_case1)
 {
     /* PRK 与 OKM 前 32 字节的已知值 */

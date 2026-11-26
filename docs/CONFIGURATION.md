@@ -76,11 +76,11 @@ production 构建必须能解析发布者证书，否则在 CMake 配置前 fail
 用法：`powershell -ExecutionPolicy Bypass -File build_production.ps1 [-Clean] [-SkipCore] [-SkipWorker] [-SkipTauri] [-SkipService] [-NoPause] [-Profile local|production] [-UpdaterEndpoint <url>] [-AllowInsecureUpdater] [-AllowLocal] [-ReleaseNotes <text>] [-CompatAbiMin <hex>] [-CompatAbiMax <hex>]`
 | 参数 | 含义 |
 |---|---|
-| `-Clean` | 构建前清理所有构建目录（build/、worker target/、src-tauri/target/） |
+| `-Clean` | 显式全量清理构建产物与打包暂存（build/、worker target/、src-tauri/target/、service-payload/、build_security_service/ 与 staging 三件）；发布构建时使用 |
 | `-SkipCore` | 跳过 C 核心 DLL 构建（DLL 已存在时） |
 | `-SkipWorker` | 跳过 worker 构建（二进制已存在时）；启用发布签名时禁止使用 |
 | `-SkipTauri` | 跳过 Tauri 打包（仅构建组件时） |
-| `-SkipService` | 跳过阶段 3.6 的 P2 服务构建与分发 |
+| `-SkipService` | 跳过阶段 3.6 的 P2 服务构建与分发；与 `-Clean` 互斥，且复用载荷必须与服务产物记录一致 |
 | `-NoPause` | 失败/成功不暂停等待 Enter（CI 场景） |
 | `-Profile production` | 默认值；要求发布者证书，启用调用方认证与三件签名 |
 | `-Profile local` | 本机复现；未提供证书时显式关闭调用方认证并告警 |

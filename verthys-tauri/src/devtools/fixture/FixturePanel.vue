@@ -2,119 +2,217 @@
   开发夹具配置面板。
 
   只保存与填充测试参数；不自动创建容器、不自动打开、不自动提交。
-  配置经 Rust 侧 DPAPI 加密，前端不写 localStorage。
+  配置经 Rust 侧 DPAPI 加密，前端不写 localStorage 保存凭据。
 -->
 <template>
   <section class="fixture-panel" aria-label="填充配置">
     <div v-if="loading" class="fixture-loading">读取填充状态…</div>
 
     <div v-else-if="!status?.enabled" class="fixture-blocked">
-      <span class="fixture-blocked-title">FILL / DISABLED</span>
+      <span class="fixture-blocked-title">填充通道不可用</span>
       <span class="fixture-blocked-reason">{{ status?.reason || "无法读取填充状态" }}</span>
     </div>
 
     <template v-else>
       <header class="fixture-head">
+        <div class="fixture-id">
+          <h2 class="fixture-title">填充配置</h2>
+          <span class="fixture-sub">保存后由卫星或自动填充写入表单</span>
+        </div>
         <span class="fixture-state" :class="{ 'is-ready': status.profileExists }">
-          FILL / {{ status.profileExists ? "READY" : "EMPTY" }}
+          {{ status.profileExists ? "已保存" : "未保存" }}
         </span>
-        <span class="fixture-root">PROFILE {{ status.storeDir }}</span>
       </header>
 
-      <div class="fixture-groups">
-        <section class="fixture-group">
-          <h3 class="fixture-group-title">容器</h3>
-          <div class="fixture-grid">
-            <label class="fixture-field fixture-field--wide">
-              <span>容器路径</span>
-              <div class="fixture-path">
-                <input v-model="form.containerPath" type="text" autocomplete="off" spellcheck="false" />
-                <button type="button" class="fixture-browse" @click="browseContainer">选择</button>
-                <button type="button" class="fixture-browse fixture-browse--clear" @click="clearPath('containerPath')">清除</button>
-              </div>
-            </label>
-            <label class="fixture-field fixture-field--wide">
-              <span>容器 keyfile</span>
-              <div class="fixture-path">
-                <input v-model="form.containerKeyfilePath" type="text" autocomplete="off" spellcheck="false" />
-                <button type="button" class="fixture-browse" @click="browseContainerKeyfile">选择</button>
-                <button type="button" class="fixture-browse fixture-browse--clear" @click="clearPath('containerKeyfilePath')">清除</button>
-              </div>
-            </label>
-          </div>
-        </section>
+      <p class="fixture-store" :title="status.storeDir">{{ status.storeDir }}</p>
 
-        <section class="fixture-group">
-          <h3 class="fixture-group-title">全局密钥</h3>
-          <div class="fixture-grid">
-            <label class="fixture-field">
-              <span>访问密钥</span>
-              <input v-model="form.globalPassword" type="text" autocomplete="off" spellcheck="false" />
-            </label>
-            <label class="fixture-field">
-              <span>密钥口令</span>
-              <input v-model="form.binPassword" type="text" autocomplete="off" spellcheck="false" />
-            </label>
-            <label class="fixture-field fixture-field--wide">
-              <span>访问密钥文件</span>
-              <div class="fixture-path">
-                <input v-model="form.binKeyfilePath" type="text" autocomplete="off" spellcheck="false" />
-                <button type="button" class="fixture-browse" @click="browseBinKeyfile">选择</button>
-                <button type="button" class="fixture-browse fixture-browse--clear" @click="clearPath('binKeyfilePath')">清除</button>
-              </div>
-            </label>
-          </div>
-        </section>
+      <label class="kv-option fixture-auto" :class="{ 'is-on': autoFill }">
+        <input
+          type="checkbox"
+          :checked="autoFill"
+          :disabled="busy !== ''"
+          @change="toggleAutoFill"
+        />
+        <span class="kv-option-check" aria-hidden="true"></span>
+        <span class="kv-option-text">自动填充</span>
+        <span class="kv-option-hint">启用后自动写入已挂载表单</span>
+      </label>
 
-        <section class="fixture-group">
-          <h3 class="fixture-group-title">模块密钥</h3>
-          <div class="fixture-grid">
-            <label
-              v-for="[id, label] in moduleEntries"
-              :key="id"
-              class="fixture-field"
-            >
-              <span>{{ label }}</span>
-              <input v-model="form.moduleKeys[id]" type="text" autocomplete="off" spellcheck="false" />
-            </label>
-          </div>
-        </section>
+      <section class="kv-section fixture-section">
+        <div class="kv-section-label">容器</div>
+        <div class="fixture-grid">
+          <label class="kv-field fixture-field fixture-field--wide">
+            <span class="kv-label">容器路径</span>
+            <div class="fixture-path-row">
+              <input
+                v-model="form.containerPath"
+                class="kv-input fixture-input"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button type="button" class="btn btn-neutral btn-mini" @click="browseContainer">
+                选择
+              </button>
+              <button
+                type="button"
+                class="btn btn-neutral btn-mini"
+                @click="clearPath('containerPath')"
+              >
+                清除
+              </button>
+            </div>
+          </label>
 
-        <section class="fixture-group">
-          <h3 class="fixture-group-title">恢复码</h3>
-          <div class="fixture-grid">
-            <label class="fixture-field fixture-field--wide">
-              <textarea v-model="form.recoveryCode" rows="2" autocomplete="off" spellcheck="false"></textarea>
-            </label>
-          </div>
-        </section>
-      </div>
+          <label class="kv-field fixture-field fixture-field--wide">
+            <span class="kv-label">容器 keyfile</span>
+            <div class="fixture-path-row">
+              <input
+                v-model="form.containerKeyfilePath"
+                class="kv-input fixture-input"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button
+                type="button"
+                class="btn btn-neutral btn-mini"
+                @click="browseContainerKeyfile"
+              >
+                选择
+              </button>
+              <button
+                type="button"
+                class="btn btn-neutral btn-mini"
+                @click="clearPath('containerKeyfilePath')"
+              >
+                清除
+              </button>
+            </div>
+          </label>
+        </div>
+      </section>
+
+      <section class="kv-section fixture-section">
+        <div class="kv-section-label">全局密钥</div>
+        <div class="fixture-grid">
+          <label class="kv-field fixture-field">
+            <span class="kv-label">访问密钥</span>
+            <input
+              v-model="form.globalPassword"
+              class="kv-input fixture-input"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <label class="kv-field fixture-field">
+            <span class="kv-label">密钥口令</span>
+            <input
+              v-model="form.binPassword"
+              class="kv-input fixture-input"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <label class="kv-field fixture-field fixture-field--wide">
+            <span class="kv-label">密钥文件路径</span>
+            <div class="fixture-path-row">
+              <input
+                v-model="form.binKeyfilePath"
+                class="kv-input fixture-input"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button type="button" class="btn btn-neutral btn-mini" @click="browseBinKeyfile">
+                选择
+              </button>
+              <button
+                type="button"
+                class="btn btn-neutral btn-mini"
+                @click="clearPath('binKeyfilePath')"
+              >
+                清除
+              </button>
+            </div>
+          </label>
+        </div>
+      </section>
+
+      <section class="kv-section fixture-section">
+        <div class="kv-section-label">模块密钥</div>
+        <div class="fixture-grid">
+          <label
+            v-for="[id, label] in moduleEntries"
+            :key="id"
+            class="kv-field fixture-field"
+          >
+            <span class="kv-label">{{ label }}</span>
+            <input
+              v-model="form.moduleKeys[id]"
+              class="kv-input fixture-input"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+        </div>
+      </section>
+
+      <section class="kv-section fixture-section">
+        <div class="kv-section-label">恢复码</div>
+        <label class="kv-field fixture-field">
+          <textarea
+            v-model="form.recoveryCode"
+            class="kv-input kv-textarea fixture-input fixture-textarea"
+            rows="2"
+            autocomplete="off"
+            spellcheck="false"
+          ></textarea>
+        </label>
+      </section>
+
+      <p v-if="lastError" class="kv-error fixture-error">{{ lastError }}</p>
 
       <div class="fixture-actions">
-        <button type="button" class="fixture-key" :disabled="busy !== ''" @click="save">
-          {{ busy === "save" ? "保存中…" : "保存配置" }}
-        </button>
-        <button type="button" class="fixture-key fixture-key--accent" :disabled="busy !== ''" @click="fill">
-          填充当前表单
-        </button>
-        <button
-          type="button"
-          class="fixture-key fixture-key--danger"
-          :disabled="busy !== ''"
-          @click="clear"
-        >
-          {{ clearArmed ? "再次点击清空" : "清空配置" }}
-        </button>
-      </div>
-
-      <div v-if="lastError" class="fixture-error" role="alert">
-        {{ lastError }}
+        <span class="fixture-updated">
+          {{ lastSavedLabel ? `最近保存 ${lastSavedLabel}` : "尚未保存" }}
+        </span>
+        <div class="fixture-action-keys">
+          <ActionButton
+            :label="clearArmed ? '再次点击清空' : '清空配置'"
+            variant="destructive"
+            :show-plus="false"
+            :disabled="busy !== ''"
+            @click="clear"
+          />
+          <ActionButton
+            label="填充当前表单"
+            :show-plus="false"
+            :loading="busy === 'fill'"
+            :disabled="busy !== ''"
+            @click="fill"
+          />
+          <ActionButton
+            label="保存配置"
+            primary
+            :show-plus="false"
+            :loading="busy === 'save'"
+            :disabled="busy !== ''"
+            @click="save"
+          />
+        </div>
       </div>
 
       <footer class="fixture-meta">
-        <span>PROFILE {{ status.profileExists ? "SET" : "EMPTY" }}</span>
-        <span v-if="fingerprints.global !== '—'">FP {{ fingerprints.global }}</span>
-        <span v-if="lastSaved">SAVED {{ lastSavedLabel }}</span>
+        <span>全局 {{ fingerprints.global }}</span>
+        <span>口令 {{ fingerprints.bin }}</span>
+        <span>恢复 {{ fingerprints.recovery }}</span>
+        <span v-for="(value, key) in fingerprints.modules" :key="key">
+          {{ key }} {{ value }}
+        </span>
       </footer>
     </template>
   </section>
@@ -123,7 +221,8 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import { MODULE_LABELS } from "../../lib/keyManager";
+import ActionButton from "../../components/common/verthys-ui/ActionButton.vue";
+import { MODULE_LABELS } from "../../constants/key_manager_const";
 import { useToastCenter } from "../../composables/useToastCenter";
 import {
   clearFixtureProfile,
@@ -135,6 +234,7 @@ import {
   type DevFixtureStatus,
 } from "./profile_client";
 import { dispatchFill } from "./fill_action";
+import { readAutoFillPreference, writeAutoFillPreference } from "./preferences";
 
 const { showStatus, showError } = useToastCenter();
 
@@ -143,6 +243,7 @@ const moduleEntries = Object.entries(MODULE_LABELS) as Array<[string, string]>;
 const loading = ref(true);
 const busy = ref<"" | "save" | "fill" | "clear">("");
 const clearArmed = ref(false);
+const autoFill = ref(readAutoFillPreference());
 const status = ref<DevFixtureStatus | null>(null);
 const lastError = ref("");
 const lastSaved = ref("");
@@ -190,6 +291,10 @@ function describeError(error: unknown, fallback: string): string {
   return text || fallback;
 }
 
+function snapshot(): DevFixtureProfile {
+  return { ...form, moduleKeys: { ...form.moduleKeys } };
+}
+
 async function refresh(): Promise<void> {
   loading.value = true;
   lastError.value = "";
@@ -218,14 +323,18 @@ async function save(): Promise<void> {
   lastError.value = "";
   try {
     const outcome = await saveFixtureProfile({
-      ...form,
+      ...snapshot(),
       schemaVersion: 1,
-      moduleKeys: { ...form.moduleKeys },
     });
     fingerprints.value = outcome.fingerprints;
     lastSaved.value = outcome.updatedAt;
     if (status.value) status.value.profileExists = true;
-    showStatus("填充配置已加密保存");
+    if (autoFill.value) {
+      dispatchFill(snapshot());
+      showStatus("已保存并自动填充");
+    } else {
+      showStatus("填充配置已加密保存");
+    }
   } catch (error) {
     lastError.value = describeError(error, "保存配置失败");
     showError(lastError.value);
@@ -238,10 +347,23 @@ function fill(): void {
   if (busy.value) return;
   busy.value = "fill";
   try {
-    dispatchFill({ ...form, moduleKeys: { ...form.moduleKeys } });
+    dispatchFill(snapshot());
     showStatus("已填充表单");
   } finally {
     busy.value = "";
+  }
+}
+
+function toggleAutoFill(event: Event): void {
+  const enabled = (event.target as HTMLInputElement).checked;
+  autoFill.value = enabled;
+  writeAutoFillPreference(enabled);
+  if (!enabled) return;
+  if (status.value?.profileExists) {
+    dispatchFill(snapshot());
+    showStatus("已启用自动填充");
+  } else {
+    showStatus("已启用自动填充，保存配置后生效");
   }
 }
 
@@ -313,12 +435,10 @@ onMounted(() => {
 
 <style scoped>
 .fixture-panel {
-  --fixture-line: rgba(158, 184, 210, 0.14);
-  --fixture-line-soft: rgba(158, 184, 210, 0.08);
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 15px 16px 20px;
+  gap: 12px;
+  padding: 16px 16px 18px;
   font-family: var(--font);
   color: var(--text-primary);
 }
@@ -328,102 +448,81 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 7px;
-  padding: 14px 1px;
+  padding: 12px 0;
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.55;
 }
 
-.fixture-error {
-  padding: 8px 10px;
-  border: 1px solid rgba(255, 120, 120, 0.38);
-  border-radius: 2px;
-  background: rgba(255, 90, 90, 0.06);
-  color: rgba(255, 176, 176, 0.96);
-  font-size: 10px;
-  line-height: 1.55;
-  word-break: break-all;
-}
-
 .fixture-blocked-title {
-  font-family: var(--font);
-  font-size: 9px;
-  letter-spacing: 0.14em;
-  color: rgba(255, 146, 146, 0.92);
+  font-size: 11px;
+  color: var(--danger);
 }
 
 .fixture-blocked-reason {
-  line-height: 1.6;
   color: var(--text-secondary);
 }
 
 .fixture-head {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding-bottom: 11px;
-  border-bottom: 1px solid var(--fixture-line);
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fixture-id {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.fixture-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.03em;
+  color: #e8f1fa;
+}
+
+.fixture-sub {
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 
 .fixture-state {
-  font-family: var(--font);
-  font-size: 9px;
-  line-height: 1;
-  letter-spacing: 0.14em;
-  color: rgba(255, 176, 112, 0.9);
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  line-height: 1.6;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
 }
 
 .fixture-state.is-ready {
-  color: rgba(96, 224, 174, 0.9);
+  color: var(--text-primary);
 }
 
-.fixture-root {
-  flex-basis: 100%;
+.fixture-store {
+  margin: -4px 0 0;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font);
-  font-size: 9px;
-  line-height: 1.4;
-  color: var(--text-secondary);
-  opacity: 0.72;
+  font-size: 9.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 
-.fixture-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.fixture-group {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
-
-.fixture-group + .fixture-group {
-  padding-top: 14px;
-  border-top: 1px solid var(--fixture-line-soft);
-}
-
-.fixture-group-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.fixture-auto {
   margin: 0;
-  font-family: var(--font);
-  font-size: 9px;
-  font-weight: 500;
-  letter-spacing: 0.14em;
-  color: var(--text-secondary);
 }
 
-.fixture-group-title::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--fixture-line-soft);
+/* 分区沿用项目 kv 词汇，只压缩间距以适配窄面板 */
+.fixture-section {
+  padding-top: 12px;
+  margin-top: 0;
 }
 
 .fixture-grid {
@@ -433,178 +532,100 @@ onMounted(() => {
 }
 
 .fixture-field {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
   min-width: 0;
-  font-size: 10px;
-  color: var(--text-secondary);
+}
+
+.fixture-field + .fixture-field {
+  margin-top: 0;
 }
 
 .fixture-field--wide {
   grid-column: 1 / -1;
 }
 
-.fixture-path {
+.fixture-path-row {
   display: flex;
+  align-items: center;
   gap: 6px;
   min-width: 0;
 }
 
-.fixture-path input {
+.fixture-path-row .fixture-input {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-.fixture-browse {
-  flex: 0 0 auto;
-  min-height: 28px;
-  padding: 0 9px;
-  border: 1px solid rgba(148, 184, 220, 0.22);
-  border-radius: 2px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: var(--font);
-  font-size: 9.5px;
-  line-height: 1;
-  letter-spacing: 0.04em;
-  cursor: pointer;
-  transition:
-    border-color 0.2s var(--ease),
-    color 0.2s var(--ease);
-}
-
-.fixture-browse:hover {
-  border-color: rgba(172, 212, 246, 0.55);
-  color: var(--text-primary);
-}
-
-.fixture-browse:focus-visible {
-  outline: 1px solid rgba(172, 212, 246, 0.7);
-  outline-offset: 1px;
-}
-
-.fixture-browse--clear {
-  color: rgba(255, 156, 156, 0.9);
-  border-color: rgba(255, 120, 120, 0.3);
-}
-
-.fixture-browse--clear:hover {
-  border-color: rgba(255, 120, 120, 0.55);
-  color: rgba(255, 184, 184, 0.96);
-}
-
-.fixture-field input,
-.fixture-field textarea {
-  box-sizing: border-box;
-  padding: 6px 8px;
-  border: 1px solid rgba(148, 184, 220, 0.2);
-  border-radius: 2px;
-  background: rgba(4, 7, 11, 0.62);
-  color: var(--text-primary);
-  font-family: var(--font);
-  font-size: 10.5px;
+/* 输入视觉完全复用 kv-input；此处只收敛开发面板的几何与字号 */
+.fixture-input {
+  padding: 7px 10px;
+  font-size: 12px;
   line-height: 1.35;
-  outline: none;
-  transition: border-color 0.2s var(--ease);
 }
 
-.fixture-field > input,
-.fixture-field > textarea {
-  width: 100%;
-}
-
-.fixture-field textarea {
-  resize: vertical;
+.fixture-textarea {
   min-height: 48px;
+  max-height: 120px;
 }
 
-.fixture-field input:focus,
-.fixture-field textarea:focus {
-  border-color: rgba(172, 212, 246, 0.55);
+/* 星野键族的微缩规格已由全局 btn-mini 提供，这里只锁住不换行 */
+.fixture-path-row .btn {
+  flex: 0 0 auto;
+}
+
+.fixture-error {
+  margin: 0;
 }
 
 .fixture-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding-top: 2px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 2px;
 }
 
-.fixture-key {
-  min-height: 30px;
-  padding: 0 12px;
-  border: 1px solid rgba(148, 184, 220, 0.24);
-  border-radius: 2px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: var(--font);
+.fixture-updated {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 9.5px;
-  line-height: 1;
-  letter-spacing: 0.05em;
-  cursor: pointer;
-  transition:
-    border-color 0.2s var(--ease),
-    background-color 0.2s var(--ease),
-    color 0.2s var(--ease),
-    transform 0.12s var(--ease);
+  color: var(--text-muted);
 }
 
-.fixture-key--accent {
-  border-color: rgba(112, 205, 255, 0.42);
-  color: rgba(172, 225, 255, 0.94);
-}
-
-.fixture-key--danger {
-  border-color: rgba(255, 120, 120, 0.38);
-  color: rgba(255, 156, 156, 0.9);
-}
-
-.fixture-key:hover:not(:disabled) {
-  border-color: rgba(172, 212, 246, 0.58);
-  background: rgba(172, 212, 246, 0.05);
-  color: var(--text-primary);
-}
-
-.fixture-key--danger:hover:not(:disabled) {
-  border-color: rgba(255, 120, 120, 0.58);
-  background: rgba(255, 90, 90, 0.05);
-  color: rgba(255, 184, 184, 0.98);
-}
-
-.fixture-key:active:not(:disabled) {
-  transform: translateY(1px);
-}
-
-.fixture-key:focus-visible {
-  outline: 1px solid rgba(172, 212, 246, 0.72);
-  outline-offset: 1px;
-}
-
-.fixture-key:disabled {
-  cursor: not-allowed;
-  opacity: 0.42;
+.fixture-action-keys {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
 }
 
 .fixture-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  padding-top: 11px;
-  border-top: 1px solid var(--fixture-line-soft);
-  font-family: var(--font);
-  font-size: 8px;
-  letter-spacing: 0.06em;
-  color: var(--text-secondary);
-  opacity: 0.72;
+  gap: 4px 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(205, 224, 244, 0.07);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .fixture-browse,
-  .fixture-field input,
-  .fixture-field textarea,
-  .fixture-key {
-    transition: none;
+/* 控制台作为尺寸容器：面板变窄时字段改单列，不依赖窗口宽度 */
+@container (max-width: 360px) {
+  .fixture-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fixture-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .fixture-action-keys {
+    justify-content: flex-end;
+    flex-wrap: wrap;
   }
 }
 </style>

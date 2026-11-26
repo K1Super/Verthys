@@ -84,8 +84,9 @@ export default defineConfig(async ({ command }) => ({
           // 拆分后主包不含加密代码，首屏加载更快；同时加密库版本稳定，
           // 业务改动不会触发该 chunk 失效，提升浏览器缓存命中率。
           "crypto-vendor": [
-            "@noble/hashes",
-            "@noble/ciphers",
+            "@noble/hashes/blake3.js",
+            "@noble/hashes/sha2.js",
+            "@noble/ciphers/chacha",
             "hash-wasm",
           ],
           // 项13：Three.js 独立分包（仅 PhotoAlbum 相册模块使用）

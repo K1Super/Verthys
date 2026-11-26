@@ -4,7 +4,7 @@
  * 只赋值，不触发解锁、初始化、验证或提交。
  */
 import { publishFixtureFill } from "./fill_bus";
-import type { DevFixtureProfile } from "./profile_client";
+import { getFixtureProfile, type DevFixtureProfile } from "./profile_client";
 
 export function dispatchFill(profile: DevFixtureProfile): void {
   publishFixtureFill({
@@ -26,4 +26,12 @@ export function dispatchFill(profile: DevFixtureProfile): void {
     target: "recovery",
     recoveryCode: profile.recoveryCode,
   });
+}
+
+/** 读取已保存配置并派发填充；无配置返回 false，不弹错误。 */
+export async function fillFromSavedProfile(): Promise<boolean> {
+  const view = await getFixtureProfile();
+  if (!view.profile) return false;
+  dispatchFill(view.profile);
+  return true;
 }

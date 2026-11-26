@@ -11,7 +11,7 @@
  * - KDF 参数自描述：头部迭代次数参与派生并可被安全读取
  */
 import { describe, it, expect } from "vitest";
-import { blake3 } from "@noble/hashes/blake3";
+import { blake3 } from "@noble/hashes/blake3.js";
 import {
   packVenc,
   packVencStreamed,

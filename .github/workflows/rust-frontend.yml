@@ -131,13 +131,34 @@ jobs:
           Copy-Item $dll.FullName "verthys-tauri/src-tauri/verthys.dll" -Force
           Write-Host "staged verthys.dll <- $($dll.FullName)"
 
+          # 生产通道契约固定在 build/core/verthys.artifacts.json（build.rs 的
+          # 通道校验只接受该规范路径）。按最终字节重生成契约，避免依赖 CMake
+          # POST_BUILD 的产物目录布局猜测。
+          . (Join-Path $env:GITHUB_WORKSPACE "scripts\lib\artifacts.ps1")
+          New-Item -ItemType Directory -Force -Path "build/core" | Out-Null
+          $null = Write-VerthysArtifactContract `
+            -DllPath $dll.FullName `
+            -CmakeExe (Get-Command cmake.exe).Source `
+            -Generator "Ninja" `
+            -Config "Release" `
+            -SourceDir $env:GITHUB_WORKSPACE `
+            -OutPath (Join-Path $env:GITHUB_WORKSPACE "build/core/verthys.artifacts.json")
+
+          # worker 编译期固化 DLL 全文件摘要：必须以已就位的 DLL 为输入构建，
+          # 否则 worker 与 DLL 的配对不变量为假，打包素材清单会拒绝生成。
+          $env:VERTHYS_DLL_PATH = (Resolve-Path "verthys-tauri/src-tauri/verthys.dll").Path
           cargo build --release --manifest-path verthys-tauri/verthys-worker/Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw "worker release build failed" }
-          # binaries/ 是 gitignore 的构建产物目录，clean checkout 中不存在。
-          New-Item -ItemType Directory -Force -Path "verthys-tauri/src-tauri/binaries" | Out-Null
-          Copy-Item "verthys-tauri/verthys-worker/target/release/verthys-worker.exe" `
-            "verthys-tauri/src-tauri/binaries/verthys-worker-x86_64-pc-windows-msvc.exe" -Force
-          Write-Host "staged verthys-worker.exe"
+
+          # 打包素材的唯一生产者：拷贝、哈希复核与清单写入都在脚本内完成。
+          # CI 后续的 cargo test / clippy 因此不再输出"清单缺失"警告。
+          $null = & (Join-Path $env:GITHUB_WORKSPACE "scripts\build\stage_bundle_assets.ps1") `
+            -Channel production `
+            -DllSource $dll.FullName `
+            -WorkerSource (Join-Path $env:GITHUB_WORKSPACE "verthys-tauri\verthys-worker\target\release\verthys-worker.exe") `
+            -ContractPath (Join-Path $env:GITHUB_WORKSPACE "build\core\verthys.artifacts.json") `
+            -Producer "ci/rust-frontend.yml" `
+            -SyncTargets none
 
           # tauri-build 还会校验 service-payload 资源；CI 只做编译/测试，
           # 服务不签名，根 CA 使用临时自签名证书满足资源校验。

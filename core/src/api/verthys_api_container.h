@@ -54,6 +54,13 @@ VerthysResult verthys_api_container_change_password(struct VerthysContext *ctx,
 /* 添加/删除后由仓库内部保存；Flush 只需提交已写入的目录变更。 */
 VerthysResult verthys_api_container_flush(struct VerthysContext *ctx);
 
+/* 容器只读检查适配：调用方必须已持有 api_mutex 共享锁，且 ctx 非 NULL。
+ * 唯一允许读取 VtyVault 内部字段的 API 侧入口。 */
+VerthysResult verthys_api_container_info(struct VerthysContext *ctx,
+                                         VerthysContainerInfo *out_info);
+VerPersistStatus verthys_api_container_verify_persist(
+    struct VerthysContext *ctx, VerPersistVerifyResult *out_result);
+
 #ifdef __cplusplus
 }
 #endif

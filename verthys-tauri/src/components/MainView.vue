@@ -73,6 +73,9 @@
       @close="showVerthysNotReadyHint = false"
       @go-to-security="goToSecurityFromHint"
     />
+
+    <!-- 后台空间回收状态（不拦截交互，只做事实展示） -->
+    <div v-if="storageReclaimVisible" class="storage-reclaim">{{ storageReclaimText }}</div>
   </div>
 </template>
 
@@ -89,7 +92,17 @@ import { useCosmicBackground } from "../composables/useCosmicBackground";
 import { useModuleNavigation } from "../composables/useModuleNavigation";
 
 import { onBeforeMount, onBeforeUnmount, ref, watch } from "vue";
-import { initVerthysCache } from "../cache/composition/verthys-cache";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  clearFullRecordCache,
+  clearRecordScanCache,
+  clearSummaryCache,
+  initVerthysCache,
+} from "../cache/composition/verthys-cache";
+import type {
+  StorageCompactProgress,
+  StorageCompactResult,
+} from "../types/verthys";
 import { ensureAdopted as ensurePrivacyAdopted } from "../session/privacy-session";
 onBeforeMount(() => {
   initVerthysCache();
@@ -98,6 +111,7 @@ onBeforeMount(() => {
   ensurePrivacyAdopted().catch((e) => {
     console.warn("[privacy] 会话接管失败", e);
   });
+  void initStorageReclaimEvents();
 });
 
 /* ===== 宇宙背景数据与视差 ===== */
@@ -163,8 +177,72 @@ watch(currentModule, (m, prev) => {
     stageMarginInstant.value = false;
   }, 600);
 });
+/* ===== 后台空间回收状态 =====
+ * 删除后宿主按阈值自动压缩；这里只做事实展示与缓存失效，
+ * 不提供交互、不拦截点击。 */
+const storageReclaimVisible = ref(false);
+const storageReclaimText = ref("");
+let storageUnlisten: UnlistenFn[] = [];
+let storageHideTimer: number | undefined;
+
+function formatReclaimBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let n = value;
+  let unit = 0;
+  while (n >= 1024 && unit < units.length - 1) {
+    n /= 1024;
+    unit++;
+  }
+  return `${n >= 100 ? n.toFixed(0) : n.toFixed(1)} ${units[unit]}`;
+}
+
+async function initStorageReclaimEvents(): Promise<void> {
+  try {
+    storageUnlisten.push(
+      await listen<StorageCompactProgress>("storage://compact-progress", (event) => {
+        const p = event.payload;
+        storageReclaimVisible.value = true;
+        window.clearTimeout(storageHideTimer);
+        const pct = p.live_bytes > 0
+          ? Math.min(100, Math.floor((p.bytes / p.live_bytes) * 100))
+          : 0;
+        storageReclaimText.value = `空间回收 ${pct}% · ${formatReclaimBytes(p.bytes)}`;
+      }),
+    );
+    storageUnlisten.push(
+      await listen<StorageCompactResult>("storage://compacted", (event) => {
+        const r = event.payload;
+        storageReclaimVisible.value = true;
+        storageReclaimText.value = `空间回收完成 · 释放 ${formatReclaimBytes(r.reclaimed_bytes)}`;
+        // 物理偏移已变：失效扫描/摘要/全量缓存，按需重建。
+        clearRecordScanCache();
+        clearSummaryCache();
+        clearFullRecordCache();
+        window.clearTimeout(storageHideTimer);
+        storageHideTimer = window.setTimeout(() => {
+          storageReclaimVisible.value = false;
+        }, 2400);
+      }),
+    );
+    storageUnlisten.push(
+      await listen<{ error?: string }>("storage://compact-failed", () => {
+        window.clearTimeout(storageHideTimer);
+        storageHideTimer = window.setTimeout(() => {
+          storageReclaimVisible.value = false;
+        }, 1200);
+      }),
+    );
+  } catch (e) {
+    console.warn("[storage] 回收状态事件注册失败", e);
+  }
+}
+
 onBeforeUnmount(() => {
   window.clearTimeout(stageMarginTimer);
+  window.clearTimeout(storageHideTimer);
+  for (const unlisten of storageUnlisten) unlisten();
+  storageUnlisten = [];
 });
 </script>
 
@@ -198,5 +276,20 @@ onBeforeUnmount(() => {
    避免"中枢面板模式收展 Dock"与模块交叉淡入叠加成横向推移的方向感 */
 .workspace.stage-margin-instant :deep(.stage) {
   transition: none;
+}
+
+/* 后台空间回收状态：固定右下角纯文字，不拦截交互 */
+.storage-reclaim {
+  position: fixed;
+  right: 18px;
+  bottom: 16px;
+  z-index: 8;
+  pointer-events: none;
+  font-family: var(--font);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
 }
 </style>

@@ -121,19 +121,23 @@ if ($a1Hits) {
     $anchorRed = $true
 }
 
-# 锚点 6：清藏导入必须分片读取（禁整文件读载）。
-# 判定对象为导入管线本体：命名区分 readUserFileChunked，不会误伤分片读取。
-$fvImport = Join-Path $fvComp "useFileImport.ts"
-if (Test-Path $fvImport) {
-    $a2Hits = Select-String -Path $fvImport -Pattern 'readUserFile\s*\('
-    if ($a2Hits) {
-        Write-Host "[锚点门][RED] 清藏导入必须分片读取（整文件读载禁止出现在导入管线）："
-        $a2Hits | ForEach-Object { Write-Host ("  {0}:{1}" -f $_.Path, $_.LineNumber) }
+# 锚点 6/7：清藏导入已收敛到宿主 + worker 原生管线。
+#   - worker 必须以固定分块口径流式读取（禁整文件读载）；
+#   - 宿主导入控制器不得读取单条记录（记录读取仅限导出路径）。
+# 判定对象是导入数据面本体，不是展示层；缺失任一文件即视为锚点失效。
+$fvWorker = Join-Path $projectRoot "verthys-tauri\verthys-worker\src\runtime\file_import.rs"
+$fvHost = Join-Path $projectRoot "verthys-tauri\src-tauri\src\controller\file_import_controller.rs"
+if (-not (Test-Path $fvWorker) -or -not (Test-Path $fvHost)) {
+    Write-Host "[锚点门][RED] 清藏原生导入数据面缺失（worker/宿主控制器必须同时存在）"
+    $anchorRed = $true
+} else {
+    $workerText = Get-Content -LiteralPath $fvWorker -Raw
+    if ($workerText -notmatch 'PB_MAX_FILE_CHUNK_SIZE_BYTES' -or $workerText -notmatch 'read_exact') {
+        Write-Host "[锚点门][RED] 清藏导入必须按分块口径流式读取（缺少分块常量或 read_exact）"
         $anchorRed = $true
     }
 
-    # 锚点 7：清藏导入路径禁止读取单条记录（记录读取仅限导出路径）。
-    $bHits = Select-String -Path $fvImport -Pattern 'verthysGetRecord'
+    $bHits = Select-String -Path $fvHost -Pattern 'verthys_get_record|verthysGetRecord'
     if ($bHits) {
         Write-Host "[锚点门][RED] 导入路径禁止读取单条记录（记录读取仅限导出路径）："
         $bHits | ForEach-Object { Write-Host ("  {0}:{1}" -f $_.Path, $_.LineNumber) }

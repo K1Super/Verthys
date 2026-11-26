@@ -45,19 +45,19 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 
 - **描述**：通过安全预设创建新 `.verthys` 容器，路径不存在才允许，创建即完成解锁，Argon2id 参数按预设/校准写入元数据。
 - **验收标准**：前端 SecurityCenter 新建成功后进入 management 态；C 层对已存在路径返回 `VERTHYS_ERR_EXISTS`（0x4）。
-- **实现佐证**：前端 `src-tauri/src/controller/verthys_controller.rs`(verthys_create) → worker `verthys-tauri/verthys-worker/src/runtime/dispatch.rs`(`create`) → C `Verthys_V4Create` / `core/src/crypto/vty_keymanager.c`(`vty_vault_create`)。
+- **实现佐证**：前端 `src-tauri/src/controller/verthys_controller.rs`(verthys_create) → worker `verthys-tauri/verthys-worker/src/runtime/dispatch.rs`(`create`) → C `Verthys_V4Create` / `core/src/crypto/vty_keymanager_create.c`(`vty_vault_create`)。
 
 ### FR-02 打开/解锁保险库
 
 - **描述**：解锁已有容器，pepper 快速失败 → `.vsec` 验签 → worker 调 `Verthys_V4Unlock`；非当前格式文件在 worker magic 预检或 C 层格式门即拒绝（`VERTHYS_ERR_FORMAT`）。
 - **验收标准**：解锁成功进入 management 态并可读记录；非当前格式容器返回 `VERTHYS_ERR_FORMAT`（0x5）。
-- **实现佐证**：`core/src/api/lifecycle/verthys_api.c` + `core/src/crypto/vty_keymanager.c`(`vty_vault_open`) + `verthys-worker/src/runtime/worker.rs`(`check_container_magic`)。
+- **实现佐证**：`core/src/api/lifecycle/verthys_api.c` + `core/src/crypto/vty_keymanager_open.c`(`vty_vault_open`) + `verthys-worker/src/runtime/worker.rs`(`check_container_magic`)。
 
 ### FR-03 解锁原子性
 
 - **描述**：容器解锁为单阶段原子完成：密钥校验、元数据提交与仓库挂载全部成功后才进入 UNLOCKED；不存在部分解锁中间态。
 - **验收标准**：解锁失败时句柄保持 LOCKED，不暴露半初始化会话；成功后可立即读写。
-- **实现佐证**：`core/src/crypto/vty_keymanager.c`(`vty_vault_open`) + `core/src/api/lifecycle/verthys_api.c`。
+- **实现佐证**：`core/src/crypto/vty_keymanager_open.c`(`vty_vault_open`) + `core/src/api/lifecycle/verthys_api.c`。
 
 ### FR-04 解锁进度回传
 
@@ -132,13 +132,13 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 
 - **描述**：`Verthys_GetSecurityStatus` 每次调用 RUNTIME 级实时复检 7 条攻击路径，前端 SecurityDashboard 60s 轮询展示。
 - **验收标准**：worker `security_status` op → Rust `verthys_security_status` 命令 → 前端 `verthysGetSecurityStatus()` 四层接通；7 路径 × 4 态展示。
-- **实现佐证**：`core/src/security/layer6_closure/defense_closure.c` + `verthys_api.c`(GetSecurityStatus) + 前端 `useDefenseStatus.ts`。
+- **实现佐证**：`core/src/security/layer6_closure/defense_closure.c` + `core/src/api/security/verthys_api_security.c`(GetSecurityStatus) + 前端 `useDefenseStatus.ts`。
 
 ### FR-15 记录增删改（账号/证书/文件/照片）
 
 - **描述**：四类业务记录的增删改与上传，统一 AddRecord + persistVerthys 一致性模式。
 - **验收标准**：AccountVerthys/CertManager 增删改均立即落盘；FileVerthys 上传磁盘级验证；PhotoAlbum 解析后导入。
-- **实现佐证**：前端 `AccountVerthys.vue`、`CertManager.vue`、`FileVerthys.vue`、`PhotoAlbum.vue` → `verthys_add_record` → `core/src/api/lifecycle/verthys_api.c`(AddRecord)。
+- **实现佐证**：前端 `AccountVerthys.vue`、`CertManager.vue`、`FileVerthys.vue`、`PhotoAlbum.vue` → `verthys_add_record` → `core/src/api/records/verthys_api_records.c`(AddRecord)。
 
 ### FR-16 导出/导入
 
@@ -156,7 +156,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 
 - **描述**：全量遍历 AEAD 标签 + 哈希校验，输出损坏 lid 列表，禁止与写并发。
 - **验收标准**：`Verthys_VerifyIntegrity` 输出损坏计数；篡改容器后校验能识别。
-- **实现佐证**：`core/src/api/lifecycle/verthys_api.c`(VerifyIntegrity) + `core/src/index/vty_repo.c` / `vty_store.c`(读路径三重校验)。
+- **实现佐证**：`core/src/api/status/verthys_api_status.c`(VerifyIntegrity) + `core/src/index/vty_repo_*.c` / `vty_store_*.c`(读路径三重校验)。
 
 ### FR-19 全量/摘要扫描
 
@@ -195,7 +195,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 ### NFR-03 全链路入参校验（刚性条款 2.1 / 3.4）
 
 - **要求**：外部输入（文件、参数、网络）校验净化，防范注入/路径遍历/越界。
-- **现状佐证**：解析纪律 AEAD→结构校验→仓库层语义校验三层纵深 + 回绕安全分解（`core/src/container/vty_format.c`、`core/src/index/vty_repo.c`）。
+- **现状佐证**：解析纪律 AEAD→结构校验→仓库层语义校验三层纵深 + 回绕安全分解（`core/src/container/vty_format.c`、`core/src/index/vty_repo_record.c`）。
 - **验收**：单元与格式鲁棒性测试用例全量通过（`container/test_fuzz.c` 覆盖解析边界）。
 
 ### NFR-04 核心逻辑单元测试覆盖率 ≥ 80%（刚性条款 1.4）

@@ -89,7 +89,7 @@ pub(crate) fn consume(target_op: &str, mode: &str, raw_path: &str) -> bool {
     }
 }
 
-/// 按目标操作签发批量 job 授权（照片导入 / 备份还原）。
+/// 按目标操作签发批量 job 授权（拾光导入/还原、清藏导入）。
 pub(crate) fn authorize_job_target(
     target_op: &str,
     job_id: &str,
@@ -99,7 +99,7 @@ pub(crate) fn authorize_job_target(
         return Err("job_id 不能为空".to_string());
     }
     if !is_allowed_pair(target_op, MODE_READ) {
-        return Err("照片导入授权组合非法".to_string());
+        return Err("批量读授权组合非法".to_string());
     }
     if raw_paths.is_empty() {
         return Err("路径列表为空".to_string());
@@ -183,7 +183,7 @@ fn is_allowed_pair(target_op: &str, mode: &str) -> bool {
         "unlock" | "import" | "v4_unlock_recovery" | "v4_unlock_keyfile"
         | "v4_keyfile_disable" | "v4_reseal_device"
         | "v4_rotate_attach_keyfile" | "photo_import" | "photo_restore"
-        | "photo_parse" => mode == MODE_READ,
+        | "photo_parse" | "file_import" => mode == MODE_READ,
         "v4_create" | "v4_create_keyfile"
         | "v4_keyfile_enable" | "export"
         | "v4_rotate_begin" => mode == MODE_WRITE,

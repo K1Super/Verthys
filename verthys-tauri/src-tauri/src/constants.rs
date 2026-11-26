@@ -203,6 +203,8 @@ pub mod record_types {
     /// 与前端记录类型分配表同值：清藏的文件块经同一单写者通道上传，
     /// 由角色值决定记录名与类型，块归属纳入同一台账。
     pub const TYPE_FILEVERTHYS_CHUNK: u32 = 4;
+    /// 文件保险箱元数据记录类型值（清藏 meta，引用外置分块）
+    pub const TYPE_FILEVERTHYS_META: u32 = 8;
 }
 
 // ===== 导出流式写入常量 =====
@@ -257,6 +259,12 @@ pub mod command_names {
         pub const FORGET_IMPORT_KEYS: &str = "verthys_forget_import_keys";
         /// 孤儿外置块 GC：删除台账中未被任何 meta 引用（owner=0）的块记录
         pub const GC_ORPHAN_CHUNKS: &str = "verthys_gc_orphan_chunks";
+        /// 存储统计（活数据/可回收字节）
+        pub const STORAGE_STATS: &str = "verthys_storage_stats";
+        /// 空间压缩（原样密文重建 + 原子替换）
+        pub const STORAGE_COMPACT: &str = "verthys_storage_compact";
+        /// 取消空间压缩
+        pub const STORAGE_COMPACT_CANCEL: &str = "verthys_storage_compact_cancel";
         /// 流式导出：创建写入会话（暂存文件）
         pub const WRITE_USER_FILE_STREAM: &str = "write_user_file_stream";
         /// 流式导出：追加原始数据块

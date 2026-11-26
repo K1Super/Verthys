@@ -7,6 +7,7 @@
 #include "verthys_test.h"
 #include "verthys.h"
 #include "api/verthys_api_container.h"
+#include "api/shared/verthys_api_utils.h"
 #include "vty_types.h"
 
 TEST(error_map_d9_codes_are_distinct)
@@ -43,5 +44,10 @@ TEST(error_map_r10_slot_errors_lock_format_policy)
     CHECK_EQ(verthys_api_container_map(VTY_E_KDF_WEAK), VERTHYS_ERR_FORMAT);
     CHECK_EQ(verthys_api_container_map(VTY_E_KEY_INVALID), VERTHYS_ERR_AUTH);
     CHECK_EQ(verthys_api_container_map(VTY_E_AEAD), VERTHYS_ERR_AUTH);
+
+    /* 两域对 VTY_E_INVALID 的语义必须保持分离：
+     * 底表是 INVALID（解锁/事务参数错误），记录域覆盖为 NOTFOUND。 */
+    CHECK_EQ(verthys_api_map_vty(VTY_E_INVALID), VERTHYS_ERR_INVALID);
+    CHECK_EQ(verthys_api_container_map(VTY_E_INVALID), VERTHYS_ERR_NOTFOUND);
     return 0;
 }

@@ -4,8 +4,8 @@
   位置：嵌入 SecurityDashboard，位于“动态防护”之后、“数据流转轨道”之前。
   职责：
     1. 展示本机锚点占用与生命周期摘要（ACTIVE/DEAD/TAMPERED/UNKNOWN）
-    2. 提供刷新、扫描与释放入口；释放/回收必须进入 AnchorManagerDialog
-       完成证据核对与二次确认
+    2. 提供刷新、扫描与释放入口；打开管理弹窗时自动扫描已知位置，
+       释放/回收必须进入 AnchorManagerDialog 完成证据核对与二次确认
     3. 容量/状态异常时给出可行动提示，不把容量问题伪装成文件回退
 
   安全边界：
@@ -20,13 +20,13 @@
       <div class="cus-actions">
         <SfActionNode
           label="刷新回退锚点"
-          :disabled="busy"
-          :busy="busy"
+          :disabled="opBusy"
+          :busy="opBusy"
           @click="refresh"
         >
           <svg
             class="sf-act-icon"
-            :class="{ 'is-spinning-once': busy }"
+            :class="{ 'is-spinning-once': opBusy }"
             aria-hidden="true"
             viewBox="0 0 24 24"
             fill="none"
@@ -36,8 +36,8 @@
         </SfActionNode>
         <SfActionNode
           label="扫描与释放"
-          tip="扫描容器中的回退锚点，核对后释放"
-          :disabled="busy"
+          tip="自动扫描已知容器位置，核对后释放"
+          :disabled="opBusy"
           @click="dialogOpen = true"
         >
           <svg
@@ -52,7 +52,7 @@
         <SfActionNode
           label="回收失效"
           :tip="`打开回退锚点管理，回收 ${deadCount} 条失效锚点`"
-          :disabled="busy || deadCount === 0"
+          :disabled="opBusy || deadCount === 0"
           @click="dialogOpen = true"
         >
           <svg
@@ -106,12 +106,16 @@
       :anchors="anchors"
       :state="state"
       :scan="scan"
-      :busy="busy"
+      :busy="opBusy"
+      :scanning="scanBusy"
+      :scan-progress="scanProgress"
       :error="error"
       :notice="notice"
       @close="dialogOpen = false"
       @refresh="refresh"
       @scan="handleScan"
+      @cancel-scan="handleCancelScan"
+      @forget-root="handleForgetRoot"
       @reclaim="handleReclaim"
       @release="handleRelease"
     />
@@ -119,24 +123,35 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import AnchorManagerDialog from "./AnchorManagerDialog.vue";
 import SfActionNode from "./SfActionNode.vue";
 import {
+  verthysRollbackAnchorForgetRoot,
   verthysRollbackAnchorList,
   verthysRollbackAnchorReclaim,
   verthysRollbackAnchorRelease,
   verthysRollbackAnchorScan,
+  verthysRollbackAnchorScanCancel,
+  type AnchorScanOptions,
 } from "../../lib/verthys";
-import type { AnchorInfo, AnchorScanResult } from "../../types/verthys";
+import type {
+  AnchorInfo,
+  AnchorScanProgress,
+  AnchorScanResult,
+} from "../../types/verthys";
 
 const anchors = ref<AnchorInfo[]>([]);
 const state = ref(1);
 const scan = ref<AnchorScanResult | null>(null);
-const busy = ref(false);
+const opBusy = ref(false);
+const scanBusy = ref(false);
+const scanProgress = ref<AnchorScanProgress | null>(null);
 const error = ref("");
 const notice = ref("");
 const dialogOpen = ref(false);
+/** 扫描请求序号：关闭/重开弹窗后丢弃过期响应 */
+let scanSeq = 0;
 
 /** 刷新最短 busy 窗口：与一次性旋转时长对齐，避免请求瞬间返回时
     刷新图标只转几度就复位、相邻按钮的禁用态一闪而过。 */
@@ -224,8 +239,8 @@ function anchorErrorText(raw: string): string {
 }
 
 async function refresh() {
-  if (busy.value) return;
-  busy.value = true;
+  if (opBusy.value) return;
+  opBusy.value = true;
   error.value = "";
   const startedAt = performance.now();
   try {
@@ -239,25 +254,67 @@ async function refresh() {
     if (remaining > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, remaining));
     }
-    busy.value = false;
+    opBusy.value = false;
   }
 }
 
-async function handleScan(roots: string[]) {
-  busy.value = true;
+/**
+ * 扫描已知位置。
+ *
+ * 打开管理弹窗时自动触发一次；后端在缓存窗口内直接返回持久化证据。
+ * 扫描与刷新/释放互不阻塞：扫描只读容器头，不占用 worker。
+ */
+async function handleScan(options: AnchorScanOptions = {}) {
+  if (scanBusy.value) return;
+  scanBusy.value = true;
+  error.value = "";
+  const seq = ++scanSeq;
+  scanProgress.value = null;
+  try {
+    const result = await verthysRollbackAnchorScan(options, (progress) => {
+      if (seq === scanSeq) scanProgress.value = progress;
+    });
+    if (seq === scanSeq) scan.value = result;
+  } catch (e) {
+    if (seq === scanSeq) {
+      error.value = anchorErrorText(e instanceof Error ? e.message : String(e));
+    }
+  } finally {
+    if (seq === scanSeq) {
+      scanBusy.value = false;
+      scanProgress.value = null;
+    }
+  }
+}
+
+async function handleCancelScan() {
+  try {
+    await verthysRollbackAnchorScanCancel();
+  } catch (e) {
+    error.value = anchorErrorText(e instanceof Error ? e.message : String(e));
+  }
+}
+
+async function handleForgetRoot(path: string) {
+  if (opBusy.value || scanBusy.value) return;
+  opBusy.value = true;
   error.value = "";
   try {
-    scan.value = await verthysRollbackAnchorScan(roots);
+    scan.value = await verthysRollbackAnchorForgetRoot(path);
   } catch (e) {
     error.value = anchorErrorText(e instanceof Error ? e.message : String(e));
   } finally {
-    busy.value = false;
+    opBusy.value = false;
   }
 }
 
+watch(dialogOpen, (visible) => {
+  if (visible) void handleScan({ force: false });
+});
+
 async function handleRelease(uuids: string[]) {
   if (uuids.length === 0) return;
-  busy.value = true;
+  opBusy.value = true;
   error.value = "";
   notice.value = "";
   let released = 0;
@@ -284,13 +341,13 @@ async function handleRelease(uuids: string[]) {
       cleanupFailed > 0 ? `，见证清理失败 ${cleanupFailed} 条（可重试释放）` : ""
     }`;
   }
-  busy.value = false;
+  opBusy.value = false;
   await refresh();
   if (failure) error.value = failure;
 }
 
 async function handleReclaim() {
-  busy.value = true;
+  opBusy.value = true;
   error.value = "";
   notice.value = "";
   let failure = "";
@@ -308,7 +365,7 @@ async function handleReclaim() {
   } catch (e) {
     failure = anchorErrorText(e instanceof Error ? e.message : String(e));
   } finally {
-    busy.value = false;
+    opBusy.value = false;
     await refresh();
     if (failure) error.value = failure;
   }

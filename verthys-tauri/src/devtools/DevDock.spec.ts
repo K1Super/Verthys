@@ -203,6 +203,49 @@ describe("开发悬浮球", () => {
     expect(document.querySelector(".fixture-panel")).not.toBeNull();
   });
 
+  it("填充分区常驻挂载：停留在日志页也可直接切换且只有当前分区带分组标记", async () => {
+    const orb = document.querySelector(".devdock-orb") as HTMLButtonElement;
+    orb.click();
+    await nextTick();
+
+    expect(document.querySelector(".fixture-panel")).not.toBeNull();
+    expect(document.querySelectorAll("[data-devtool-group]").length).toBe(1);
+  });
+
+  it("点击 Teleport 到 body 的下拉选项不关闭控制台", async () => {
+    const orb = document.querySelector(".devdock-orb") as HTMLButtonElement;
+    orb.click();
+    await nextTick();
+    await nextTick();
+
+    const popup = document.createElement("div");
+    popup.className = "vs-panel";
+    const option = document.createElement("div");
+    option.className = "vs-option";
+    popup.appendChild(option);
+    document.body.appendChild(popup);
+
+    option.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    await nextTick();
+
+    expect(document.querySelector("#devdock-panel")).not.toBeNull();
+    popup.remove();
+  });
+
+  it("日志流位于工具行之后，滚动时先经过紧凑工具区", async () => {
+    const orb = document.querySelector(".devdock-orb") as HTMLButtonElement;
+    orb.click();
+    await nextTick();
+
+    const toolList = document.querySelector(".tool-list");
+    const logPanel = document.querySelector(".log-panel");
+    expect(toolList).not.toBeNull();
+    expect(logPanel).not.toBeNull();
+    expect(
+      toolList!.compareDocumentPosition(logPanel!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+  });
+
   it("Esc 关闭面板并把焦点还给球体", async () => {
     const orb = document.querySelector(".devdock-orb") as HTMLButtonElement;
     orb.click();

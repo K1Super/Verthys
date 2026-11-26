@@ -100,18 +100,51 @@ set(VERTHYS_SHARED_SOURCES
     src/crypto/vty_recovery.c
     src/crypto/vty_keyfile.c
     src/crypto/vty_keymanager.c
+    src/crypto/vty_keymanager_meta.c
+    src/crypto/vty_keymanager_create.c
+    src/crypto/vty_keymanager_open.c
+    src/crypto/vty_keymanager_journal.c
+    src/crypto/vty_keymanager_factor.c
+    src/crypto/vty_keymanager_persist.c
+    src/crypto/vty_keymanager_session.c
     # D9 全库 DEK 轮换作业（新文件全量重建 + 原子替换）
     src/crypto/vty_rotate.c
+    src/crypto/vty_rotate_io.c
+    src/crypto/vty_rotate_begin.c
+    src/crypto/vty_rotate_copy.c
+    src/crypto/vty_rotate_commit.c
+    # 空间压缩：原样密文重建 + 原子替换
+    src/container/vty_compact.c
+    # 代际文件安全删除：零写 + 刷盘 + 删除
+    src/container/vty_secure_delete.c
     src/container/vty_format.c
     src/container/vty_keyslot.c
     src/container/vty_chunk.c
     src/container/vty_module.c
+    src/container/vty_module_seal.c
+    src/container/vty_module_enable.c
+    src/container/vty_module_delete.c
+    src/container/vty_module_recovery.c
     src/index/vty_record.c
     src/index/vty_store.c
-    src/index/vty_repo.c
+    src/index/vty_store_node.c
+    src/index/vty_store_tree.c
+    src/index/vty_store_bulk.c
+    src/index/vty_store_segment.c
+    src/index/vty_store_cursor.c
+    src/index/vty_repo_leaf.c
+    src/index/vty_repo_record.c
+    src/index/vty_repo_scrub.c
+    src/index/vty_repo_file.c
+    src/index/vty_repo_query.c
+    src/index/vty_repo_rekey.c
+    src/index/vty_repo_storage.c
     src/security/lockout/vty_lockout.c
     # 库文件版本回退检测（外部单调锚点 + 设备根 MAC）
     src/security/rollback/vty_rollback.c
+    src/security/rollback/vty_rollback_state.c
+    src/security/rollback/vty_rollback_witness.c
+    src/security/rollback/vty_rollback_anchor.c
     # TPM 见证密钥预置池（提交快路径；旧键退役与崩溃后清理）
     src/security/rollback/vty_witness_pool.c
     # 安全状态固定位置/ACL/见证身份派生（KnownFolder + 设备根）
@@ -162,15 +195,26 @@ set(VERTHYS_SHARED_SOURCES
     src/security/caller_auth/vty_caller_auth.c
     # L5 api/ — 非容器格式相关的公共模块
     src/api/verthys_api_container.c
+    src/api/verthys_api_container_pcr.c
+    src/api/verthys_api_container_keyfile.c
+    src/api/verthys_api_container_module.c
+    src/api/verthys_api_container_rotate.c
+    src/api/verthys_api_container_storage.c
+    src/api/container/verthys_api_container_inspect.c
     src/api/lifecycle/dllmain.c
 )
 
 # API 门面（产品与测试共用同一编译定义）
 set(VERTHYS_API_SOURCES
     src/api/lifecycle/verthys_api.c
+    src/api/lifecycle/verthys_security_runtime.c
+    src/api/security/verthys_api_security.c
     src/api/shared/verthys_api_utils.c
     src/api/transfer/verthys_export_import.c
     src/api/scan/verthys_scan.c
+    src/api/rollback/verthys_api_rollback.c
+    src/api/status/verthys_api_status.c
+    src/api/records/verthys_api_records.c
 )
 
 # 直连系统调用 thunk：ACG 兼容实现依赖映像内固定的 syscall 指令序列。
@@ -179,6 +223,22 @@ if(MSVC)
     list(APPEND VERTHYS_SHARED_SOURCES
         src/security/anti_analysis/syscall_thunk_x64.asm
     )
+endif()
+
+# BLAKE3 8 路 AVX2 实现：仅 x64 编译，单独启用 AVX2 指令集；
+# 运行时由 CPU 特性检测决定是否调用，非 AVX2 平台走标量路径。
+if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
+    list(APPEND VERTHYS_SHARED_SOURCES
+        src/crypto/vty_blake3_avx2.c
+    )
+    if(MSVC)
+        set_source_files_properties(src/crypto/vty_blake3_avx2.c
+            PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    else()
+        set_source_files_properties(src/crypto/vty_blake3_avx2.c
+            PROPERTIES COMPILE_OPTIONS "-mavx2")
+    endif()
 endif()
 
 # 相对路径 → 绝对路径一次性转换：跨目录消费时按定义处目录解析，
@@ -207,6 +267,11 @@ set(VERTHYS_SRC_SUBDIRS
     src/api/scan
     src/api/transfer
     src/api/shared
+    src/api/rollback
+    src/api/security
+    src/api/status
+    src/api/container
+    src/api/records
     src/security
     src/security/preset
     src/security/integrity

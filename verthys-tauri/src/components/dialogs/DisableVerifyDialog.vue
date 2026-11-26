@@ -17,6 +17,7 @@
         class="kv-input"
         v-model="disableVerifyKey"
         type="password"
+        autocomplete="off"
         placeholder="请输入模块独立密钥以确认关闭"
         @keydown.enter="$emit('confirm')"
       />

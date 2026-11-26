@@ -14,7 +14,7 @@
 
 use tauri::{AppHandle, Manager};
 
-use crate::controller::verthys_controller::{
+use crate::controller::vault::verthys_controller::{
     load_existing_container_password, require_unlocked, KEY_MATERIAL_MISSING_MESSAGE,
 };
 use crate::infrastructure::handle_factory;

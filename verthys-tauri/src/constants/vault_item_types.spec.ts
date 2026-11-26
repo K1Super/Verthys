@@ -87,14 +87,32 @@ describe("内置类型注册表自洽性", () => {
     }
   });
 
-  it("身份证：身份号码必填，有效期为「自 → 至」区间", () => {
+  it("身份证：标准证件字段齐备，号码必填，有效期为「自 → 至」区间", () => {
     const def = getBuiltinVaultType("idcard")!;
+    expect(def.fields.map((field) => field.id)).toEqual([
+      "name",
+      "gender",
+      "ethnicity",
+      "birthDate",
+      "address",
+      "number",
+      "authority",
+      VAULT_EXPIRY_FIELD_ID,
+      "note",
+    ]);
+
     const number = def.fields.find((field) => field.id === "number")!;
-    expect(number.label).toBe("身份号码");
+    expect(number.label).toBe("公民身份号码");
     expect(number.required).toBe(true);
     expect(number.sensitive).toBe(true);
+    expect(number.validator).toBe("cnIdNumber");
+
+    expect(def.fields.find((field) => field.id === "gender")!.options).toEqual(["男", "女"]);
+    expect(def.fields.find((field) => field.id === "birthDate")!.kind).toBe("date");
+    expect(def.fields.find((field) => field.id === "address")!.kind).toBe("multiline");
 
     const expiry = def.fields.find((field) => field.id === VAULT_EXPIRY_FIELD_ID)!;
+    expect(expiry.label).toBe("有效期限");
     expect(expiry.kind).toBe("dateRange");
     expect(expiry.rangeStartId).toBe("validFrom");
     expect(expiry.rangeStartLabel).toBe("自");

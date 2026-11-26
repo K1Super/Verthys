@@ -144,6 +144,7 @@ TEST(sec_alloc_shared_lifecycle);
 
 /* 密钥体系 —— 原语 / 恢复码（test_primitives.c） */
 TEST(blake3_known_vectors);
+TEST(blake3_multichunk_vectors);
 TEST(hkdf_rfc5869_case1);
 TEST(hmac_deterministic_and_key_sensitive);
 TEST(argon2id_deterministic_and_salt_sensitive);
@@ -191,6 +192,18 @@ TEST(repo_file_chunk_manifest);
 TEST(repo_empty_name_and_tombstone_count);
 TEST(repo_system_domain_survives_module_enable_and_delete);
 TEST(repo_legacy_security_record_migrates_on_module_enable);
+TEST(compact_reclaims_deleted_space);
+TEST(compact_bulk_builder_many_records);
+TEST(compact_copies_live_file_chunks_and_drops_tombstones);
+
+/* 删除即密钥销毁（test_delete_scrub.c） */
+TEST(delete_zeroes_key_header_and_blocks_decrypt);
+TEST(replace_scrubs_previous_version);
+TEST(pending_scrub_is_compensated_on_maintain);
+TEST(legacy_record_delete_breaks_ciphertext);
+TEST(bulk_delete_scrubs_all_key_headers);
+TEST(maintenance_scrubs_legacy_tombstone);
+TEST(secure_delete_file_and_maintain);
 
 /* 仓库扫描与类型索引（test_repo_scan.c） */
 TEST(repo_scan_cursor_and_start_id);
@@ -204,6 +217,7 @@ TEST(api_find_lid_by_name);
 TEST(api_add_records_batch_roundtrip);
 TEST(api_replace_record_atomic);
 TEST(api_records_require_unlock);
+TEST(api_storage_stats_and_compact);
 
 /* 公共 API 模块 M1（test_api_modules.c） */
 TEST(api_modules_roundtrip_and_policy);
@@ -413,6 +427,8 @@ TEST(fuzz_header_bitflip_always_rejected);
 TEST(perf_chunk_throughput);
 TEST(perf_vault_unlock_latency);
 TEST(perf_module_switch_latency);
+TEST(perf_blake3_throughput);
+TEST(perf_import_commit_path);
 
 /* test_pepper.c — 胡椒持久化格式与密钥槽闭环 */
 TEST(pepper_first_seal_roundtrip);
@@ -974,6 +990,7 @@ int main(int argc, char **argv)
 
     /* 密钥体系：原语与恢复码 → 容器槽 → 记录/分片 → 库与模块 → 熔断 */
     RUN_TEST(blake3_known_vectors);
+    RUN_TEST(blake3_multichunk_vectors);
     RUN_TEST(hkdf_rfc5869_case1);
     RUN_TEST(hmac_deterministic_and_key_sensitive);
     RUN_TEST(argon2id_deterministic_and_salt_sensitive);
@@ -1060,6 +1077,16 @@ int main(int argc, char **argv)
     RUN_TEST(repo_empty_name_and_tombstone_count);
     RUN_TEST(repo_system_domain_survives_module_enable_and_delete);
     RUN_TEST(repo_legacy_security_record_migrates_on_module_enable);
+    RUN_TEST(compact_reclaims_deleted_space);
+    RUN_TEST(compact_bulk_builder_many_records);
+    RUN_TEST(compact_copies_live_file_chunks_and_drops_tombstones);
+    RUN_TEST(delete_zeroes_key_header_and_blocks_decrypt);
+    RUN_TEST(replace_scrubs_previous_version);
+    RUN_TEST(pending_scrub_is_compensated_on_maintain);
+    RUN_TEST(legacy_record_delete_breaks_ciphertext);
+    RUN_TEST(bulk_delete_scrubs_all_key_headers);
+    RUN_TEST(maintenance_scrubs_legacy_tombstone);
+    RUN_TEST(secure_delete_file_and_maintain);
     RUN_TEST(repo_scan_cursor_and_start_id);
     RUN_TEST(repo_scan_skips_tombstone_and_type_index);
     RUN_TEST(api_records_roundtrip_and_scan);
@@ -1069,6 +1096,7 @@ int main(int argc, char **argv)
     RUN_TEST(api_add_records_batch_roundtrip);
     RUN_TEST(api_replace_record_atomic);
     RUN_TEST(api_records_require_unlock);
+    RUN_TEST(api_storage_stats_and_compact);
     RUN_TEST(api_modules_roundtrip_and_policy);
     RUN_TEST(api_module_delete);
     RUN_TEST(api_recovery_rotate);
@@ -1247,6 +1275,8 @@ int main(int argc, char **argv)
     RUN_TEST(perf_chunk_throughput);
     RUN_TEST(perf_vault_unlock_latency);
     RUN_TEST(perf_module_switch_latency);
+    RUN_TEST(perf_blake3_throughput);
+    RUN_TEST(perf_import_commit_path);
     test_state_checkpoint("perf");
 
     TEST_SUMMARY();
