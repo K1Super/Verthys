@@ -12,6 +12,33 @@
 
 #include "vty_kdf.h"
 
+#if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
+static volatile LONG g_test_store_fail = 0;
+
+void vty_rb_set_store_fail_for_test(int count)
+{
+    InterlockedExchange(&g_test_store_fail, (LONG)count);
+}
+
+/* 原子取走一次落盘故障注入；count<=0 表示不注入。 */
+static int test_take_store_fail(void)
+{
+    for (;;) {
+        LONG v = g_test_store_fail;
+
+        if (v <= 0) return 0;
+        if (InterlockedCompareExchange(&g_test_store_fail, v - 1, v) == v) {
+            return 1;
+        }
+    }
+}
+#else
+static int test_take_store_fail(void)
+{
+    return 0;
+}
+#endif
+
 static wchar_t *to_wide(const char *s)
 {
     int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
@@ -203,6 +230,7 @@ int vty_rb_store_state(uint8_t buf[RB_TOTAL_BYTES])
     size_t blob_len = RB_BLOB_BYTES;
     int rc;
 
+    if (test_take_store_fail()) return VTY_E_IO;
     if (buf[0] == 0 && buf[RB_BLOB_OFFSET] == 0) {
         vty_random(key, sizeof(key));
         rc = vty_device_key_seal(key, buf + RB_BLOB_OFFSET, &blob_len);

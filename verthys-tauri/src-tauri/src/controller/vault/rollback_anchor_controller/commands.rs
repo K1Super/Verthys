@@ -1,8 +1,9 @@
 /*
  * 回退锚点 Tauri 命令
  *
- * 职责边界：列表/回收/释放只做参数边界、转发与审计；扫描与自定义位置
- * 管理为宿主侧只读操作。释放必须由前端二次确认传入 confirm=true。
+ * 职责边界：列表/批量释放只做参数边界、转发与审计；扫描与自定义位置
+ * 管理为宿主侧只读操作。批量释放必须由前端二次确认传入 confirm=true，
+ * 无论选中 1 条还是 64 条都只产生一次 IPC 与一次审计。
  */
 
 use std::sync::atomic::Ordering;
@@ -27,67 +28,48 @@ pub async fn verthys_rollback_anchor_list(
     forward(&state, &json!({ "op": "rollback_anchor_list" }))
 }
 
-/// 回收所有“见证确定不存在”的锚点。ACTIVE/TAMPERED/UNKNOWN 保留。
-#[tauri::command]
-pub async fn verthys_rollback_anchor_reclaim(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    confirm: bool,
-) -> Result<VerthysResponse, String> {
-    if !confirm {
-        let mut resp = VerthysResponse::err("rollback_anchor_reclaim", "缺少显式确认");
-        resp.error_code = Some("ERR_00000001".into());
-        return Ok(resp);
-    }
-    let resp = forward(
-        &state,
-        &json!({ "op": "rollback_anchor_reclaim", "anchor_confirm": true }),
-    )?;
-    let result = if resp.ok {
-        AuditResult::Success
-    } else {
-        AuditResult::Failure
-    };
-    audit_anchor(
-        &app,
-        AuditEventType::RollbackAnchorReclaim,
-        result,
-        None,
-        Some(format!(
-            "removed={} cleanup_failed={}",
-            resp.anchor_removed.unwrap_or(0),
-            resp.anchor_cleanup_failed.unwrap_or(0)
-        )),
-    );
-    Ok(resp)
-}
-
-/// 显式释放指定 UUID 的锚点并删除两槽见证。
+/// 批量释放指定 UUID 的锚点并删除各自两槽见证。
 ///
-/// 该操作会使仍存在的容器在下次打开时 fail-closed，只能使用恢复码
-/// 重设锚点；前端必须完成二次确认后才可传入 confirm=true。
+/// 一次 IPC、一次 C 调用完成全部条目（1..64）。该操作会使仍存在的容器
+/// 在下次打开时 fail-closed，只能使用恢复码重设锚点；前端必须完成二次
+/// 确认后才可传入 confirm=true。
 #[tauri::command]
-pub async fn verthys_rollback_anchor_release(
+pub async fn verthys_rollback_anchor_release_batch(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    uuid: String,
+    uuids: Vec<String>,
     confirm: bool,
 ) -> Result<VerthysResponse, String> {
+    const MAX_BATCH: usize = 64;
     if !confirm {
-        let mut resp = VerthysResponse::err("rollback_anchor_release", "缺少显式确认");
+        let mut resp =
+            VerthysResponse::err("rollback_anchor_release_batch", "缺少显式确认");
         resp.error_code = Some("ERR_00000001".into());
         return Ok(resp);
     }
-    if !is_uuid_hex(&uuid) {
-        let mut resp = VerthysResponse::err("rollback_anchor_release", "UUID 格式非法");
+    if uuids.is_empty() || uuids.len() > MAX_BATCH {
+        let mut resp =
+            VerthysResponse::err("rollback_anchor_release_batch", "UUID 数量非法");
         resp.error_code = Some("ERR_00000001".into());
         return Ok(resp);
     }
+    let mut seen = std::collections::HashSet::with_capacity(uuids.len());
+    for uuid in &uuids {
+        if !is_uuid_hex(uuid) || !seen.insert(uuid.to_ascii_lowercase()) {
+            let mut resp = VerthysResponse::err(
+                "rollback_anchor_release_batch",
+                "UUID 格式非法或重复",
+            );
+            resp.error_code = Some("ERR_00000001".into());
+            return Ok(resp);
+        }
+    }
+    let count = uuids.len();
     let resp = forward(
         &state,
         &json!({
-            "op": "rollback_anchor_release",
-            "uuid": uuid,
+            "op": "rollback_anchor_release_batch",
+            "uuids": uuids,
             "anchor_confirm": true,
         }),
     )?;
@@ -100,9 +82,10 @@ pub async fn verthys_rollback_anchor_release(
         &app,
         AuditEventType::RollbackAnchorRelease,
         result,
-        Some(&uuid),
+        None,
         Some(format!(
-            "released={} cleanup_failed={}",
+            "batch=true count={} released={} cleanup_failed={}",
+            count,
             resp.anchor_released.unwrap_or(0),
             resp.anchor_cleanup_failed.unwrap_or(0)
         )),

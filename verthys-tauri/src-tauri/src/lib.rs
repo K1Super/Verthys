@@ -416,6 +416,13 @@ fn run_main_ui(
             move |app| {
                 let app_handle = app.handle().clone();
 
+                /* ===== 系统指标采样：窗口显示前启动 =====
+                 * 采样节拍与 UI 生命周期解耦，命令只读最新发布值；
+                 * 进入中枢时已有可用样本，非 Windows 平台为空操作。 */
+                let metrics_state = security_commands::SystemMetricsState::default();
+                metrics_state.spawn_sampler();
+                app.manage(metrics_state);
+
                 /* ===== 防截屏保护：保护先于窗口可见 =====
                  *
                  * 主窗口在配置中声明为不可见，由本序列在保护就绪后显式显示：
@@ -661,10 +668,9 @@ fn run_main_ui(
             verthys_import,
             // 防御闭环状态查询（7 路径 × 4 状态实时透传）
             verthys_security_status,
-            // 回退锚点维护：列表 / DEAD 回收 / 显式释放 / 自动扫描 / 移除自定义位置
+            // 回退锚点维护：列表 / 批量清理释放 / 自动扫描 / 移除自定义位置
             verthys_rollback_anchor_list,
-            verthys_rollback_anchor_reclaim,
-            verthys_rollback_anchor_release,
+            verthys_rollback_anchor_release_batch,
             verthys_rollback_anchor_scan,
             verthys_rollback_anchor_scan_cancel,
             verthys_rollback_anchor_scan_forget_root,

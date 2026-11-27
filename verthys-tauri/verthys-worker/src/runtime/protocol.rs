@@ -26,7 +26,9 @@ pub(crate) use payloads::{
     MediaFinishPayload, MediaMetaItem, MediaNextPayload, MediaPreviewRecord, MediaReadPayload,
     MediaVencPreview, StorageStatsEntry,
 };
-pub(crate) use records::{AnchorEntry, KernelStatusReport, RecordEntry, SecurityStatusReport};
+pub(crate) use records::{
+    AnchorEntry, AnchorReleaseOutcome, KernelStatusReport, RecordEntry, SecurityStatusReport,
+};
 // BatchAddRecord 仅经 Request.records 的字段类型消费，MAX_RESPONSE_LINE_BYTES
 // 由写侧调用方与单元测试引用；模块根保留全部路径，非 test 构建无本地引用。
 #[allow(unused_imports)]

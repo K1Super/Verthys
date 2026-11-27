@@ -15,6 +15,16 @@ pub struct AnchorInfo {
     pub witness: String,
 }
 
+/// 批量释放的单条结果（仅 verthys_rollback_anchor_release_batch 返回）。
+#[derive(Serialize, Deserialize)]
+pub struct AnchorReleaseOutcome {
+    pub uuid: String,
+    /// true=本次删除条目；false=条目不存在（仍幂等清理见证）
+    pub released: bool,
+    /// true=该 UUID 的见证键删除失败
+    pub cleanup_failed: bool,
+}
+
 /// 单个 UUID 的扫描证据：同一 UUID 可能对应多个容器路径。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AnchorScanEntry {

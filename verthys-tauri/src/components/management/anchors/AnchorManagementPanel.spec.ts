@@ -10,7 +10,12 @@ import { createApp, h, nextTick, type App } from "vue";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import AnchorManagementPanel from "./AnchorManagementPanel.vue";
-import { verthysRollbackAnchorScan } from "../../../lib/verthys";
+import { toastState } from "../../../composables/ui/useToastCenter";
+import {
+  verthysRollbackAnchorList,
+  verthysRollbackAnchorReleaseBatch,
+  verthysRollbackAnchorScan,
+} from "../../../lib/verthys";
 
 vi.mock("../../../lib/verthys", () => ({
   verthysRollbackAnchorList: vi.fn(async () => ({ anchors: [], state: 1 })),
@@ -29,8 +34,12 @@ vi.mock("../../../lib/verthys", () => ({
   })),
   verthysRollbackAnchorForgetRoot: vi.fn(),
   verthysRollbackAnchorScanCancel: vi.fn(),
-  verthysRollbackAnchorReclaim: vi.fn(),
-  verthysRollbackAnchorRelease: vi.fn(),
+  verthysRollbackAnchorReleaseBatch: vi.fn(async () => ({
+    ok: true,
+    released: 0,
+    cleanupFailed: 0,
+    results: [],
+  })),
 }));
 
 const mounted: Array<{ app: App; container: HTMLDivElement }> = [];
@@ -42,6 +51,7 @@ afterEach(() => {
     entry?.container.remove();
   }
   document.body.innerHTML = "";
+  toastState.status.value = "";
   vi.clearAllMocks();
 });
 
@@ -120,5 +130,92 @@ describe("回退锚点刷新稳定性", () => {
     expect(css).toContain("transform-origin: center");
     expect(css).toContain("animation: sf-act-spin 1.5s linear infinite");
     expect(css).toContain("animation: sf-act-spin 0.44s linear");
+  });
+});
+
+function buttonByText(text: string): HTMLButtonElement | undefined {
+  return Array.from(document.querySelectorAll("button")).find(
+    (button) => button.textContent?.trim() === text,
+  ) as HTMLButtonElement | undefined;
+}
+
+describe("回退锚点单入口批量清理/释放", () => {
+  const uuid = "22222222222222222222222222222222";
+
+  afterEach(() => {
+    vi.mocked(verthysRollbackAnchorList).mockImplementation(async () => ({
+      anchors: [],
+      state: 1,
+    }));
+    vi.mocked(verthysRollbackAnchorReleaseBatch).mockImplementation(
+      async () => ({
+        ok: true,
+        released: 0,
+        cleanupFailed: 0,
+        results: [],
+      }),
+    );
+  });
+
+  async function openDialog(): Promise<void> {
+    mountPanel();
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 520));
+    await nextTick();
+    document.querySelector<HTMLButtonElement>('button[aria-label="扫描"]')!.click();
+    await nextTick();
+    await Promise.resolve();
+    await nextTick();
+  }
+
+  it("全 DEAD 选中时只发起一次批量清理", async () => {
+    vi.mocked(verthysRollbackAnchorList).mockResolvedValue({
+      anchors: [{ uuid, generation: 2, witness: "dead" }],
+      state: 1,
+    });
+    vi.mocked(verthysRollbackAnchorReleaseBatch).mockResolvedValue({
+      ok: true,
+      released: 1,
+      cleanupFailed: 0,
+      results: [{ uuid, released: true, cleanupFailed: false }],
+    });
+
+    await openDialog();
+    buttonByText("清理选中")!.click();
+    await nextTick();
+    buttonByText("确认清理")!.click();
+    await nextTick();
+    await Promise.resolve();
+    await nextTick();
+
+    const batch = vi.mocked(verthysRollbackAnchorReleaseBatch);
+    expect(batch).toHaveBeenCalledTimes(1);
+    expect(batch).toHaveBeenCalledWith([uuid], true);
+    expect(toastState.status.value).toContain("清理完成：1 条");
+  });
+
+  it("批量失败时展示可行动错误文案", async () => {
+    vi.mocked(verthysRollbackAnchorList).mockResolvedValue({
+      anchors: [{ uuid, generation: 2, witness: "dead" }],
+      state: 1,
+    });
+    vi.mocked(verthysRollbackAnchorReleaseBatch).mockResolvedValue({
+      ok: false,
+      results: [],
+      error: "ERR_00000008",
+    });
+
+    await openDialog();
+    buttonByText("清理选中")!.click();
+    await nextTick();
+    buttonByText("确认清理")!.click();
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 520));
+    await nextTick();
+
+    expect(vi.mocked(verthysRollbackAnchorReleaseBatch)).toHaveBeenCalledTimes(1);
+    const text = document.body.textContent ?? "";
+    const occurrences = text.split("回退状态文件读写失败").length - 1;
+    expect(occurrences).toBe(1);
   });
 });

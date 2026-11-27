@@ -36,6 +36,16 @@ pub(crate) struct AnchorEntry {
     pub(crate) witness: String,
 }
 
+/// 批量释放的单条结果（仅 rollback_anchor_release_batch 返回）。
+#[derive(Serialize)]
+pub(crate) struct AnchorReleaseOutcome {
+    pub(crate) uuid: String,
+    /// true=本次删除条目；false=条目不存在（仍幂等清理见证）
+    pub(crate) released: bool,
+    /// true=该 UUID 的见证键删除失败
+    pub(crate) cleanup_failed: bool,
+}
+
 /* 防御闭环状态报告（与 verthys.h
  * VerthysSecurityStatus 字段一一对应；path_state 下标 = VerthysDefensePath，
  * 值域 = VerthysDefenseState：0=未校验 1=已阻断 2=降级 3=失败）。

@@ -524,10 +524,29 @@ pub(crate) type VerthysRollbackAnchorListFn = unsafe extern "C" fn(
     *mut u32,
     *mut u32,
 ) -> u32;
-pub(crate) type VerthysRollbackAnchorReclaimFn =
-    unsafe extern "C" fn(VerthysHandle, u32, *mut u32, *mut u32) -> u32;
-pub(crate) type VerthysRollbackAnchorReleaseFn =
-    unsafe extern "C" fn(VerthysHandle, *const u8, u32, *mut u32, *mut u32) -> u32;
+
+/* 批量释放结果（与 verthys.h VerthysAnchorReleaseResult 严格对齐）：
+ * [u32 struct_size][u8 uuid;16][u32 released][u32 cleanup_failed][u32 reserved]
+ * sizeof = 32, align = 4。 */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct VerthysAnchorReleaseResultC {
+    pub(crate) struct_size: u32,
+    pub(crate) uuid: [u8; 16],
+    pub(crate) released: u32,
+    pub(crate) cleanup_failed: u32,
+    pub(crate) reserved: u32,
+}
+
+pub(crate) type VerthysRollbackAnchorReleaseBatchFn = unsafe extern "C" fn(
+    VerthysHandle,
+    *const u8,
+    u32,
+    u32,
+    *mut VerthysAnchorReleaseResultC,
+    u32,
+    *mut u32,
+) -> u32;
 
 #[cfg(test)]
 mod tests {
@@ -553,5 +572,27 @@ mod tests {
         assert_eq!(std::mem::offset_of!(VerthysAnchorInfoC, uuid), 4);
         assert_eq!(std::mem::offset_of!(VerthysAnchorInfoC, generation), 24);
         assert_eq!(std::mem::offset_of!(VerthysAnchorInfoC, witness_state), 32);
+    }
+
+    #[test]
+    fn anchor_release_result_c_layout_matches_c_abi() {
+        assert_eq!(std::mem::size_of::<VerthysAnchorReleaseResultC>(), 32);
+        assert_eq!(std::mem::align_of::<VerthysAnchorReleaseResultC>(), 4);
+        assert_eq!(
+            std::mem::offset_of!(VerthysAnchorReleaseResultC, uuid),
+            4
+        );
+        assert_eq!(
+            std::mem::offset_of!(VerthysAnchorReleaseResultC, released),
+            20
+        );
+        assert_eq!(
+            std::mem::offset_of!(VerthysAnchorReleaseResultC, cleanup_failed),
+            24
+        );
+        assert_eq!(
+            std::mem::offset_of!(VerthysAnchorReleaseResultC, reserved),
+            28
+        );
     }
 }

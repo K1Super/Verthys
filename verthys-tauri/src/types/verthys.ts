@@ -17,6 +17,15 @@ export interface AnchorInfo {
   witness: string;
 }
 
+/** 批量释放的单条结果（与宿主 AnchorReleaseOutcome 对齐） */
+export interface AnchorReleaseOutcome {
+  uuid: string;
+  /** true=本次删除条目；false=条目不存在（仍幂等清理见证） */
+  released: boolean;
+  /** true=该 UUID 的见证键删除失败 */
+  cleanup_failed: boolean;
+}
+
 /** 扫描到的单个 UUID 及其路径证据（同一 UUID 可对应多个容器副本） */
 export interface AnchorScanEntry {
   uuid: string;
@@ -145,11 +154,11 @@ export interface VerthysResponse {
   anchors?: AnchorInfo[];
   /** 状态文件整体状态（0=absent / 1=ok / 2=corrupt） */
   anchor_state?: number;
-  /** 回收条数（仅 verthys_rollback_anchor_reclaim 返回） */
-  anchor_removed?: number;
-  /** 释放条数（仅 verthys_rollback_anchor_release 返回） */
+  /** 批量释放逐条结果（仅 verthys_rollback_anchor_release_batch 返回） */
+  anchor_release_results?: AnchorReleaseOutcome[];
+  /** 释放条数汇总（批量释放：released=true 的数量） */
   anchor_released?: number;
-  /** 见证清理失败条数 */
+  /** 见证清理失败条数汇总（批量释放返回） */
   anchor_cleanup_failed?: number;
   /** 容器扫描结果（仅 verthys_rollback_anchor_scan 返回） */
   anchor_scan?: AnchorScanResult;

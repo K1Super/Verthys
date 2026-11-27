@@ -96,11 +96,17 @@ export interface AnchorListResult {
   state: number;
 }
 
-export interface AnchorMutationResult {
+export interface AnchorBatchOutcome {
+  uuid: string;
+  released: boolean;
+  cleanupFailed: boolean;
+}
+
+export interface AnchorBatchReleaseResult {
   ok: boolean;
-  removed?: number;
   released?: number;
   cleanupFailed?: number;
+  results: AnchorBatchOutcome[];
   error?: string;
   errorCode?: string;
 }
@@ -114,35 +120,28 @@ export async function verthysRollbackAnchorList(): Promise<AnchorListResult> {
   return { anchors: r.anchors ?? [], state: r.anchor_state ?? 1 };
 }
 
-/** 回收所有 DEAD 锚点；ACTIVE/TAMPERED/UNKNOWN 由后端保留 */
-export async function verthysRollbackAnchorReclaim(
+/**
+ * 批量释放指定 UUID 的锚点；调用方必须先完成二次确认。
+ *
+ * 单次 IPC 完成全部选中条目（1..64），不逐条往返；返回逐条结果与汇总。
+ */
+export async function verthysRollbackAnchorReleaseBatch(
+  uuids: string[],
   confirm: boolean,
-): Promise<AnchorMutationResult> {
-  const r = await ipc<VerthysResponse>("verthys_rollback_anchor_reclaim", {
-    confirm,
-  });
-  return {
-    ok: r.ok,
-    removed: r.anchor_removed,
-    cleanupFailed: r.anchor_cleanup_failed,
-    error: r.error,
-    errorCode: r.error_code ?? undefined,
-  };
-}
-
-/** 显式释放指定 UUID 的锚点；调用方必须先完成二次确认 */
-export async function verthysRollbackAnchorRelease(
-  uuid: string,
-  confirm: boolean,
-): Promise<AnchorMutationResult> {
-  const r = await ipc<VerthysResponse>("verthys_rollback_anchor_release", {
-    uuid,
+): Promise<AnchorBatchReleaseResult> {
+  const r = await ipc<VerthysResponse>("verthys_rollback_anchor_release_batch", {
+    uuids,
     confirm,
   });
   return {
     ok: r.ok,
     released: r.anchor_released,
     cleanupFailed: r.anchor_cleanup_failed,
+    results: (r.anchor_release_results ?? []).map((item) => ({
+      uuid: item.uuid,
+      released: item.released,
+      cleanupFailed: item.cleanup_failed,
+    })),
     error: r.error,
     errorCode: r.error_code ?? undefined,
   };

@@ -85,5 +85,5 @@ EXPORTS
     Verthys_NotifyRuntimeGuards
     Verthys_VerifyPersist
     Verthys_RollbackAnchorList
-    Verthys_RollbackAnchorReclaim
     Verthys_RollbackAnchorRelease
+    Verthys_RollbackAnchorReleaseBatch

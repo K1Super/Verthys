@@ -4,8 +4,8 @@
   位置：嵌入 SecurityDashboard，位于“动态防护”之后、“数据流转轨道”之前。
   职责：
     1. 展示本机锚点占用与生命周期摘要（ACTIVE/DEAD/TAMPERED/UNKNOWN）
-    2. 提供刷新、扫描与释放入口；打开管理弹窗时自动执行全量扫描，
-       释放/回收必须进入 AnchorManagerDialog 完成证据核对与二次确认
+    2. 提供刷新、扫描与清理/释放入口；打开管理弹窗时自动执行全量扫描，
+       清理/释放必须进入 AnchorManagerDialog 完成证据核对与二次确认
     3. 容量/状态异常时给出可行动提示，不把容量问题伪装成文件回退
 
   安全边界：
@@ -50,21 +50,6 @@
             stroke-width="1.5"
           ><circle cx="11" cy="11" r="6.2"/><path d="M20 20l-4.4-4.4"/></svg>
         </SfActionNode>
-        <SfActionNode
-          label="回收见证缺失"
-          :tip="`打开回退锚点管理，回收 ${deadCount} 条见证缺失锚点`"
-          :disabled="opBusy || deadCount === 0"
-          @click="dialogOpen = true"
-        >
-          <svg
-            class="sf-act-icon"
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-          ><path d="M4 7h16"/><path d="M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7"/><path d="M6.8 7l.7 11.1A2 2 0 0 0 9.5 20h5a2 2 0 0 0 2-1.9L17.2 7"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>
-        </SfActionNode>
       </div>
       <span class="def-count" :class="countClass">{{ anchors.length }}/64</span>
     </div>
@@ -88,13 +73,9 @@
       <span class="anchor-empty-lead" aria-hidden="true"></span>
     </p>
 
-    <p v-if="error" class="anchor-inline anchor-inline--danger">
+    <p v-if="!dialogOpen && error" class="anchor-inline anchor-inline--danger">
       <span class="anchor-inline-mark" aria-hidden="true"></span>
       <span>{{ error }}</span>
-    </p>
-    <p v-else-if="notice" class="anchor-inline anchor-inline--ok">
-      <span class="anchor-inline-mark" aria-hidden="true"></span>
-      <span>{{ notice }}</span>
     </p>
 
     <!-- 生命周期摘要：与动态防护总体态势行同款，右下对齐 -->
@@ -111,13 +92,11 @@
       :scanning="scanBusy"
       :scan-progress="scanProgress"
       :error="error"
-      :notice="notice"
       @close="dialogOpen = false"
       @refresh="refresh"
       @scan="handleScan"
       @cancel-scan="handleCancelScan"
       @forget-root="handleForgetRoot"
-      @reclaim="handleReclaim"
       @release="handleRelease"
     />
   </div>
@@ -127,11 +106,11 @@
 import { computed, onMounted, ref, watch } from "vue";
 import AnchorManagerDialog from "./AnchorManagerDialog.vue";
 import SfActionNode from "../security/SfActionNode.vue";
+import { useToastCenter } from "../../../composables/ui/useToastCenter";
 import {
   verthysRollbackAnchorForgetRoot,
   verthysRollbackAnchorList,
-  verthysRollbackAnchorReclaim,
-  verthysRollbackAnchorRelease,
+  verthysRollbackAnchorReleaseBatch,
   verthysRollbackAnchorScan,
   verthysRollbackAnchorScanCancel,
   type AnchorScanOptions,
@@ -149,8 +128,9 @@ const opBusy = ref(false);
 const scanBusy = ref(false);
 const scanProgress = ref<AnchorScanProgress | null>(null);
 const error = ref("");
-const notice = ref("");
 const dialogOpen = ref(false);
+/** 成功/清理结果统一走全局状态 toast，不占用面板或弹窗正文。 */
+const { showStatus } = useToastCenter();
 /** 扫描请求序号：关闭/重开弹窗后丢弃过期响应 */
 let scanSeq = 0;
 
@@ -231,7 +211,7 @@ function anchorErrorText(raw: string): string {
     case "ERR_00000018":
       return "设备安全模块不可用，请稍后重试";
     case "ERR_00000021":
-      return "回退锚点表已满，请先回收见证缺失锚点或释放废弃条目";
+      return "回退锚点表已满，请先清理见证缺失锚点或释放废弃条目";
     case "ERR_00000001":
       return "参数非法或缺少显式确认";
     default:
@@ -331,55 +311,34 @@ watch(dialogOpen, (visible) => {
   if (visible) void loadPersistedEvidence();
 });
 
+/**
+ * 批量释放/清理选中锚点：无论选中多少条都只发起一次 IPC。
+ *
+ * 选中集合全为 DEAD 时语义是“清理”（温和文案）；包含任何非 DEAD 时
+ * 语义是“释放”，确认区已给出恢复码警告。后端一次状态锁完成全部条目。
+ */
 async function handleRelease(uuids: string[]) {
   if (uuids.length === 0) return;
   opBusy.value = true;
   error.value = "";
-  notice.value = "";
-  let released = 0;
-  let failed = 0;
-  let cleanupFailed = 0;
   let failure = "";
-  for (const uuid of uuids) {
-    try {
-      const result = await verthysRollbackAnchorRelease(uuid, true);
-      if (result.ok) {
-        released += result.released ?? 0;
-        cleanupFailed += result.cleanupFailed ?? 0;
-      } else {
-        failed += 1;
-        failure = anchorErrorText(result.error ?? "释放失败");
-      }
-    } catch (e) {
-      failed += 1;
-      failure = anchorErrorText(e instanceof Error ? e.message : String(e));
-    }
-  }
-  if (failed === 0) {
-    notice.value = `释放完成：${released} 条${
-      cleanupFailed > 0 ? `，见证清理失败 ${cleanupFailed} 条（可重试释放）` : ""
-    }`;
-  }
-  opBusy.value = false;
-  await refresh();
-  if (failure) error.value = failure;
-}
-
-async function handleReclaim() {
-  opBusy.value = true;
-  error.value = "";
-  notice.value = "";
-  let failure = "";
+  const dead = new Set(
+    anchors.value.filter((anchor) => anchor.witness === "dead").map((anchor) => anchor.uuid),
+  );
+  const allDead = uuids.every((uuid) => dead.has(uuid));
   try {
-    const result = await verthysRollbackAnchorReclaim(true);
+    const result = await verthysRollbackAnchorReleaseBatch(uuids, true);
     if (result.ok) {
-      notice.value = `已回收 ${result.removed ?? 0} 条见证缺失锚点${
-        result.cleanupFailed
-          ? `，见证清理失败 ${result.cleanupFailed} 条（可重试释放）`
-          : ""
-      }`;
+      const action = allDead ? "清理" : "释放";
+      showStatus(
+        `${action}完成：${result.released ?? 0} 条${
+          (result.cleanupFailed ?? 0) > 0
+            ? `；见证清理失败 ${result.cleanupFailed} 条（残留键不影响其它锚点）`
+            : ""
+        }`,
+      );
     } else {
-      failure = anchorErrorText(result.error ?? "回收失败");
+      failure = anchorErrorText(result.error ?? "释放失败");
     }
   } catch (e) {
     failure = anchorErrorText(e instanceof Error ? e.message : String(e));

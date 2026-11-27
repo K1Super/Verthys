@@ -6,7 +6,7 @@
  *   2. 预设应用状态（presetApplying / currentPresetFeatures）
  *   3. 自定义模板配置（customFeatures / customSessionMinutes）
  *   4. 无极轨道滑块状态（orbitSliderPos / orbitAnchors / activeAnchorIdx / orbitDragging）
- *   5. 双环三指标计算（cpuOverhead 后端采样 / securityCoverage 与
+ *   5. 双环三指标计算（cpuUtilization 后端采样 / securityCoverage 与
  *      overallScore 真实信号双权重合成，纯函数层 presetMetrics）
  *   6. 特性列表分组（toggleableFeatures / lockedFeatures）
  *   7. 核心函数：
@@ -64,8 +64,8 @@ export interface UsePresetOptions {
   showToast: (msg: string) => void;
   /** 重置会话计时器（来自 useSessionTimer，预设切换后同步本地超时显示） */
   resetSession: () => void;
-  /** 系统 CPU 占用率（真实采样轮询值；-1 = 尚无基线） */
-  cpuUsage: Ref<number>;
+  /** 全机 CPU 时间占用率（真实采样轮询值；null = 无有效样本） */
+  cpuUsage: Ref<number | null>;
   /** 动态防护汇总态势（真实运行时报告） */
   defenseMeta: Ref<DefenseMetaView>;
   /** 切到安全（高安全）预设成功后触发：用于提示启用默认 PCR[7,11] */
@@ -84,7 +84,7 @@ export interface UsePresetOptions {
  *   presetFeatureList, presetApplying, currentPresetFeatures,
  *   customFeatures, customSessionMinutes,
  *   orbitSliderPos, orbitAnchors, nearestAnchorIdx, activeAnchorIdx, orbitDragging,
- *   cpuOverhead, securityCoverage, overallScore,
+ *   cpuUtilization, securityCoverage, overallScore,
  *   presetAmbienceMode,
  *   ringCircumference, ringDashOffset, orbitTrackGradient,
  *   toggleableFeatures, lockedFeatures,
@@ -164,8 +164,8 @@ export function usePreset(options: UsePresetOptions) {
   const orbitDragging = ref(false);
 
   /* ===== 双环三指标（真实数据合成，无随滑块摆动的模拟公式） ===== */
-  /** CPU 占用 — 后端系统采样真实值（-1 无基线时按 0 占位，2s 内更新） */
-  const cpuOverhead = computed(() => Math.max(0, options.cpuUsage.value));
+  /** CPU 占用 — 后端固定节拍采样真实值（null = 无有效样本，不做数值占位） */
+  const cpuUtilization = computed(() => options.cpuUsage.value);
   /** 当前档位已启用特性数（后端权威配置快照） */
   const enabledFeatureCount = computed(() =>
     Object.values(currentPresetFeatures.value).filter(Boolean).length,
@@ -660,7 +660,7 @@ const orbitTrackGradient = computed(() => ({
     activeAnchorIdx,
     orbitDragging,
     // 双环 + 蜂窝计算
-    cpuOverhead,
+    cpuUtilization,
     securityCoverage,
     overallScore,
     presetAmbienceMode,

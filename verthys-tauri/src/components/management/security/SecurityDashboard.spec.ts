@@ -19,7 +19,7 @@ const baseProps = {
   globalKeyReady: true,
   presetApplying: false,
   presetAmbienceMode: "secure",
-  cpuOverhead: 12,
+  cpuUtilization: 12,
   securityCoverage: 80,
   overallScore: 70,
   ringCircumference: 2 * Math.PI * 50,
@@ -345,6 +345,28 @@ describe("SecurityDashboard 视觉状态契约", () => {
       expect(minutes).toEqual([11]);
       track!.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
       expect(minutes).toEqual([11, 120]);
+    } finally {
+      teardown();
+    }
+  });
+
+  it("CPU 占用：无有效样本显示「—」，不以 0 冒充", () => {
+    const model = ref(100);
+    const { teardown, container } = mountDashboard(model, { cpuUtilization: null });
+    try {
+      const value = container.querySelector(".bs-star-value");
+      expect(value?.textContent?.trim()).toBe("—");
+      expect(value?.textContent).not.toContain("%");
+    } finally {
+      teardown();
+    }
+  });
+
+  it("CPU 占用：有样本显示数值与单位", () => {
+    const model = ref(100);
+    const { teardown, container } = mountDashboard(model, { cpuUtilization: 12 });
+    try {
+      expect(container.querySelector(".bs-star-value")?.textContent?.trim()).toBe("12%");
     } finally {
       teardown();
     }

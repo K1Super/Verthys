@@ -1,4 +1,4 @@
-﻿# 测试卫生：隔离真实熔断/回退状态，并回收测试创建的 TPM 见证密钥。
+# 测试卫生：隔离真实熔断/回退状态，并回收测试创建的 TPM 见证密钥。
 #
 # 为什么需要回收见证密钥：状态文件位置（旧 LOCALAPPDATA 路径或
 # KnownFolder\Verthys\Security）不决定见证域；新代码的见证绑定设备根 +
@@ -47,7 +47,8 @@ public static class VerthysWitnessStore
 
     private static bool IsMissing(uint status)
     {
-        return status == 0x80090011U || status == 0x80090016U || status == 0x80090026U;
+        // 与产品侧一致：只接受确定的缺失码；NTE_INVALID_HANDLE 属平台错误。
+        return status == 0x80090011U || status == 0x80090016U;
     }
 
     public static string[] List()

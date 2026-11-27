@@ -2,7 +2,7 @@
   SecurityDashboard.vue — 安全防护 · 双星系统分区（无底板）
   设计：引力谱系 · sf-zone--binary —— 谱系坐标头（BINARY SYSTEM / 03）+
   面板五组件全部重塑（零卡片底板/边框/阴影，直接悬浮于宇宙背景）：
-    1. bs-field   双星引力场：开销星（扫掠弧=CPU 占用）↔ 质心（综合评分）
+    1. bs-field   双星引力场：占用星（扫掠弧=CPU 占用）↔ 质心（综合评分）
                   ↔ 覆盖星（扫掠弧=安全覆盖），氛围弧差速旋转
     2. bs-track   引力测线：非均匀测绘残段刻度（暗层休眠/潮汐亮层连续
                   点亮=能量进程）+ 基准桩锚点（错落桩高，端点锚兼作
@@ -28,7 +28,7 @@
     6. 数据流转轨道（磁盘→内存走线 + 站点 + 运行状态文字）
 
   Props: globalKeyReady / presetApplying / presetAmbienceMode /
-         cpuOverhead / securityCoverage / overallScore / ringCircumference /
+         cpuUtilization / securityCoverage / overallScore / ringCircumference /
          ringDashOffset(fn) / orbitAnchors / nearestAnchorIdx / activeAnchorIdx /
          orbitTrackGradient / toggleableFeatures / lockedFeatures / customFeatures /
          customMode / presetIdleMinutes / customSessionMinutes / defensePaths / defenseMeta
@@ -81,18 +81,21 @@
               <path fill="none" stroke="rgba(0,212,255,0.18)" stroke-width="0.9" stroke-linecap="round"
                 d="M 98 106 A 28 28 0 0 0 118 76" />
             </g>
-            <!-- 能量扫掠弧（弧长 = 开销值，dasharray/dashoffset 由 props 驱动） -->
+            <!-- 能量扫掠弧（弧长 = 占用值，dasharray/dashoffset 由 props 驱动） -->
             <circle class="bs-sweep bs-sweep-left" cx="70" cy="70" r="52"
               :stroke-dasharray="ringCircumference"
-              :stroke-dashoffset="ringDashOffset(cpuOverhead)"
+              :stroke-dashoffset="ringDashOffset(cpuUtilization ?? 0)"
             />
             <!-- 弧端能量点 -->
             <circle class="bs-sweep-dot bs-dot-left" cx="70" cy="18" r="2.6"
-              :style="{ transform: `rotate(${cpuOverhead * 3.6}deg)`, transformOrigin: '70px 70px' }"
+              :style="{ transform: `rotate(${(cpuUtilization ?? 0) * 3.6}deg)`, transformOrigin: '70px 70px' }"
             />
           </svg>
           <div class="bs-star-info">
-            <div class="bs-star-value">{{ cpuOverhead }}<span class="bs-star-unit">%</span></div>
+            <div class="bs-star-value">
+              <template v-if="cpuUtilization !== null">{{ cpuUtilization }}<span class="bs-star-unit">%</span></template>
+              <template v-else>—</template>
+            </div>
             <div class="bs-star-label">CPU 占用</div>
           </div>
         </div>
@@ -448,8 +451,8 @@ const props = defineProps<{
   presetApplying: boolean;
   /** 预设环境光效模式 */
   presetAmbienceMode: string;
-  /** CPU 占用百分比（左星扫掠弧） */
-  cpuOverhead: number;
+  /** CPU 占用百分比（左星扫掠弧；null = 无有效样本，显示「—」） */
+  cpuUtilization: number | null;
   /** 安全覆盖度百分比（右星扫掠弧） */
   securityCoverage: number;
   /** 综合评分（质心节点） */

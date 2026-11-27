@@ -110,7 +110,7 @@
       :preset-ambience-mode="presetAmbienceMode"
       :preset-sync-failed="presetSyncFailed"
       :hardening-failed="securityHardeningFailedRef"
-      :cpu-overhead="cpuOverhead"
+      :cpu-utilization="cpuUtilization"
       :security-coverage="securityCoverage"
       :overall-score="overallScore"
       :ring-circumference="ringCircumference"
@@ -668,7 +668,7 @@ watch(
   { immediate: true },
 );
 
-/* ===== 系统运行指标（CPU 占用率真实采样，就绪期 2s 轮询） ===== */
+/* ===== 系统运行指标（CPU 占用率真实采样，就绪期 1s 轮询） ===== */
 const { cpuUsage } = useSystemMetrics(globalKeyReadyRef);
 
 /* ===== 高安全预设默认第二因子引导 =====
@@ -765,7 +765,7 @@ const {
   orbitAnchors,
   nearestAnchorIdx,
   activeAnchorIdx,
-  cpuOverhead,
+  cpuUtilization,
   securityCoverage,
   overallScore,
   presetAmbienceMode,

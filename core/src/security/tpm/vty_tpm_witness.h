@@ -89,6 +89,9 @@ void vty_tpm_witness_set_create_fail_for_test(int count);
 void vty_tpm_witness_set_exists_override_for_test(int value);
 void vty_tpm_witness_set_probe_override_for_test(int state);
 
+/* 状态码分类：仅用于验证“键缺失”与“平台错误”的判定边界。 */
+int vty_tpm_witness_status_is_missing_for_test(uint32_t status);
+
 /* 崩溃注入：下一次创建在 NCryptCreatePersistedKey 成功后立即终止进程，
  * 模拟 create 与 finalize 之间断电。仅测试构建提供。 */
 void vty_tpm_witness_set_crash_after_create_for_test(int enable);

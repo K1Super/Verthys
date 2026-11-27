@@ -25,13 +25,15 @@
 - 导出宏：`VERTHYS_API` 在 Windows 下**恒为空**（不再携带 `__declspec(dllexport/dllimport)`）。
   符号导出**唯一**由链接器 `/DEF:verthys.def` 白名单管控；未列入 `.def` 的接口一律不可达。
   消费方（verthys-worker）经 `libloading` 按名运行时解析，不依赖导入库。
-- 版本宏：`VERTHYS_API_VERSION = 0x0018u`，调用方可用 `#if` 做编译期能力判断。
+- 版本宏：`VERTHYS_API_VERSION = 0x0019u`，调用方可用 `#if` 做编译期能力判断。
   0x0014 追加：`VerthysSecurityStatus` 原因码/已加固的用户态上限计数/策略位/采样时间，
   以及进程级运行时守卫通知接口 `Verthys_NotifyRuntimeGuards`。
   0x0015 追加：`Verthys_FindLidByName`（名称盲索引精确查 ID）。
   0x0017 追加：`Verthys_ReplaceRecord`（同一次提交内原子替换单条记录）。
   0x0018 追加：`Verthys_GetStorageStats`（活数据统计）。
-  0x0016 追加：回退锚点维护接口 `Verthys_RollbackAnchorList/Reclaim/Release`。
+  0x0016 追加：回退锚点维护接口 `Verthys_RollbackAnchorList/Release`。
+  0x0019 追加：`Verthys_RollbackAnchorReleaseBatch`（一次落盘的批量释放），
+  并移除手动回收接口 `Verthys_RollbackAnchorReclaim`。
 
 ## 3. 不透明句柄 `VerthysHandle`
 
@@ -442,17 +444,17 @@ if (r != VERTHYS_OK) {
 - 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_RESOURCE_LIMIT`（容量不足）/ `VERTHYS_ERR_CORRUPT` / `VERTHYS_ERR_TPM` / `VERTHYS_ERR_UNAUTHORIZED`（发布签名门拒绝）。
 - 语义：只读；不要求容器已解锁。每条记录携带 `struct_size`、UUID、generation 与见证状态（UNKNOWN/ACTIVE/DEAD/TAMPERED）。不返回指纹、路径或任何密钥材料。分类在状态锁外执行；平台错误保持 UNKNOWN，绝不参与自动回收。
 
-### Verthys_RollbackAnchorReclaim（API 0x0016）
-`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorReclaim(VerthysHandle handle, uint32_t flags, uint32_t *out_removed, uint32_t *out_cleanup_failed);`
-- 参数：`flags` 必须含 `VERTHYS_ANCHOR_FLAG_CONFIRM`；`out_cleanup_failed` — 状态已释放但见证键删除失败的条数。
-- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_CORRUPT` / `VERTHYS_ERR_IO` / `VERTHYS_ERR_TPM` / `VERTHYS_ERR_UNAUTHORIZED`。
-- 语义：仅删除 `DEAD`（引用见证确定不存在）的锚点；`ACTIVE/TAMPERED/UNKNOWN` 原样保留。状态写失败返回 IO 且不删除任何见证。线程安全：MT-Safe（跨进程 RollbackState 互斥量）。
-
 ### Verthys_RollbackAnchorRelease（API 0x0016）
 `VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(VerthysHandle handle, const uint8_t uuid[16], uint32_t flags, uint32_t *out_released, uint32_t *out_cleanup_failed);`
 - 参数：`uuid` — 32 位十六进制 UUID 的二进制形式；`flags` 必须含 CONFIRM；`out_released` — 1=删除条目，0=条目不存在（幂等清理见证）。
-- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_CORRUPT` / `VERTHYS_ERR_IO` / `VERTHYS_ERR_TPM` / `VERTHYS_ERR_UNAUTHORIZED`。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID` / `VERTHYS_ERR_CORRUPT` / `VERTHYS_ERR_IO` / `VERTHYS_ERR_TPM` / `VERTHYS_ERR_UNAUTHORIZED` / `VERTHYS_ERR_POLICY`。
 - 语义：显式释放指定锚点并删除两槽见证。条目不存在时仍幂等清理见证；状态写失败返回 IO 且不删除见证。释放后若容器仍存在，普通解锁会被 fail-closed 拒绝，只能使用恢复码重设锚点。线程安全：MT-Safe。
+
+### Verthys_RollbackAnchorReleaseBatch（API 0x0019）
+`VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorReleaseBatch(VerthysHandle handle, const uint8_t *uuids, uint32_t count, uint32_t flags, VerthysAnchorReleaseResult *out_results, uint32_t capacity, uint32_t *out_count);`
+- 参数：`uuids` — `count * 16` 字节连续数组；`count` — 1..64；`flags` 必须含 `VERTHYS_ANCHOR_FLAG_CONFIRM`；`out_results` — 与输入顺序一致的结果数组，`capacity` 必须不小于 `count`。
+- 返回：`VERTHYS_OK` / `VERTHYS_ERR_INVALID`（参数非法、重复或全零 UUID）/ `VERTHYS_ERR_RESOURCE_LIMIT`（容量不足）/ `VERTHYS_ERR_CORRUPT` / `VERTHYS_ERR_IO` / `VERTHYS_ERR_TPM` / `VERTHYS_ERR_POLICY` / `VERTHYS_ERR_UNAUTHORIZED`。
+- 语义：一次状态锁、一次认证加载、一次压缩落盘处理全部选中条目；锁外逐条清理两槽见证。条目不存在时仍幂等清理见证（`released=0`）。状态写失败返回 IO，此时不删除任何条目或见证。`out_results[i].cleanup_failed=1` 表示该 UUID 的见证删除失败，可原样重试批量释放。线程安全：MT-Safe。
 
 ---
 
@@ -468,6 +470,7 @@ if (r != VERTHYS_OK) {
 | `VerthysDiagnostics` | 运行时性能指标 | 调用方结构体，库填充 |
 | `VerthysSecurityStatus` | 防御闭环 7 路径状态（104 字节） | `path_state[7]` + 计数 + `path_reason[7]` + `limited_count` + `policy_flags` + `checked_at_unix_ms` |
 | `VerthysAnchorInfo` | 回退锚点条目（API 0x0016） | `struct_size` + UUID + generation + 见证状态 + reserved；不含指纹/路径 |
+| `VerthysAnchorReleaseResult` | 批量释放单条结果（API 0x0019） | `struct_size` + UUID + released + cleanup_failed + reserved；固定 32 字节 |
 
 ## 16. 符号前缀与旧符号残留
 
@@ -475,7 +478,8 @@ if (r != VERTHYS_OK) {
   （历史归档报告中出现 4 处历史记录，非代码）。
 - 导出白名单 `core/verthys.def` 共 75 个符号（模块/轮换（含 keyfile 补录）/PCR/keyfile 等扩展已并入，
   0x0014 追加 `Verthys_NotifyRuntimeGuards`，0x0015 追加 `Verthys_FindLidByName`，
-  0x0016 追加 `Verthys_RollbackAnchorList/Reclaim/Release`），与头文件声明一一对应。
+  0x0016 追加 `Verthys_RollbackAnchorList/Release`，0x0019 追加
+  `Verthys_RollbackAnchorReleaseBatch`），与头文件声明一一对应。
 - 名称遗留（供整改参考）：`VerthysRecordType` 中 `VERTHYS_RECORD_FILE_VERTHYS` 语义为“文件保险箱类数据”，
   命名冗余但属源码现状，本文档照实记录，未改代码。
 

@@ -75,6 +75,12 @@ typedef struct {
     uint32_t state;              /* VtyAnchorState */
 } VtyAnchorInfo;
 
+typedef struct {
+    uint8_t  uuid[VTY_UUID_BYTES];
+    uint32_t released;
+    uint32_t cleanup_failed;
+} VtyAnchorReleaseResult;
+
 #define VTY_ROLLBACK_ANCHOR_CONFIRM 0x00000001u
 
 /* 列出锚点快照。out_state_missing=1 表示状态文件不存在（首次运行或被
@@ -85,15 +91,20 @@ int vty_rollback_anchor_list(VtyAnchorInfo *out, uint32_t capacity,
 
 /* 释放指定 UUID 的锚点并删除两槽见证。flags 必须含 CONFIRM。
  * 条目不存在时仍幂等清理两槽见证；状态写失败返回 VTY_E_IO 且不删见证。
- * out_cleanup_failed=1 表示状态已释放但见证删除失败，调用方可重试释放。 */
+ * out_cleanup_failed=1 表示状态已释放但见证删除失败；调用方在保留 UUID
+ * 的前提下可重试释放。 */
 int vty_rollback_anchor_release(const uint8_t vault_uuid[VTY_UUID_BYTES],
                                 uint32_t flags, uint32_t *out_released,
                                 uint32_t *out_cleanup_failed);
 
-/* 回收全部 DEAD 锚点。flags 必须含 CONFIRM。ACTIVE/TAMPERED/UNKNOWN
- * 原样保留。返回删除条数与见证清理失败条数。 */
-int vty_rollback_anchor_reclaim(uint32_t flags, uint32_t *out_removed,
-                                uint32_t *out_cleanup_failed);
+/* 批量释放指定 UUID 集合。flags 必须含 CONFIRM；count 1..64，重复或全零
+ * UUID 拒绝。一次状态锁、一次认证加载、一次压缩落盘；状态写失败返回
+ * VTY_E_IO 且不删除任何见证。条目不存在时仍幂等清理两槽见证，逐条结果
+ * 写入 out_results。 */
+int vty_rollback_anchor_release_batch(const uint8_t *uuids, uint32_t count,
+                                      uint32_t flags,
+                                      VtyAnchorReleaseResult *out_results,
+                                      uint32_t capacity, uint32_t *out_count);
 
 /* 提交快路径：维护 A/B 两个预置见证槽，后台线程提前建键；提交时切换
  * 已就绪的键，把 NCryptFinalizeKey 的约 400ms 移出关键路径。预置池空时
@@ -119,6 +130,10 @@ void vty_rollback_set_crash_point_for_test(int point);
 /* 逻辑容量注入：仅缩小“可登记条目数”上限，物理布局仍为 64 条。
  * 用于在少量真实 TPM 键下确定性地覆盖容量/回收分支。 */
 void vty_rollback_set_max_entries_for_test(uint32_t max_entries);
+
+/* 状态落盘故障注入：接下来 count 次维护写入返回 VTY_E_IO。
+ * 用于验证“状态未落盘时不得删除任何见证键”。 */
+void vty_rb_set_store_fail_for_test(int count);
 
 /* 重置路径解析状态：允许测试重新验证“缺少隔离目录必须拒绝初始化”。 */
 void vty_rollback_reset_path_for_test(void);

@@ -324,7 +324,12 @@ TEST(rollback_anchor_capacity_preserves_tampered);
 TEST(rollback_anchor_capacity_preserves_unknown);
 TEST(rollback_anchor_list_classifies);
 TEST(rollback_anchor_release_preserves_other);
-TEST(rollback_anchor_reclaim_only_dead);
+TEST(rollback_anchor_release_batch_mixed);
+TEST(rollback_witness_status_never_treats_platform_error_as_missing);
+TEST(rollback_anchor_release_batch_rejects_invalid_input);
+TEST(rollback_anchor_release_batch_cleanup_failure_per_uuid);
+TEST(rollback_anchor_release_batch_store_failure_keeps_all);
+TEST(rollback_anchor_release_batch_state_missing_is_idempotent);
 TEST(rollback_anchor_release_cleanup_failure_reported);
 TEST(rollback_anchor_full_maps_to_public_error);
 #endif
@@ -1188,7 +1193,12 @@ int main(int argc, char **argv)
     RUN_TEST(rollback_anchor_capacity_preserves_unknown);
     RUN_TEST(rollback_anchor_list_classifies);
     RUN_TEST(rollback_anchor_release_preserves_other);
-    RUN_TEST(rollback_anchor_reclaim_only_dead);
+    RUN_TEST(rollback_anchor_release_batch_mixed);
+    RUN_TEST(rollback_witness_status_never_treats_platform_error_as_missing);
+    RUN_TEST(rollback_anchor_release_batch_rejects_invalid_input);
+    RUN_TEST(rollback_anchor_release_batch_cleanup_failure_per_uuid);
+    RUN_TEST(rollback_anchor_release_batch_store_failure_keeps_all);
+    RUN_TEST(rollback_anchor_release_batch_state_missing_is_idempotent);
     RUN_TEST(rollback_anchor_release_cleanup_failure_reported);
     RUN_TEST(rollback_anchor_full_maps_to_public_error);
 #endif

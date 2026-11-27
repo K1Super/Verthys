@@ -34,8 +34,10 @@
 static int not_found_status(SECURITY_STATUS st)
 {
     uint32_t code = (uint32_t)st;
-    /* CNG/PCP 对“容器/键不存在”使用不同的 NTE 码 */
-    return code == 0x80090011u || code == 0x80090016u || code == 0x80090026u;
+    /* CNG/PCP 对“容器/键不存在”使用不同的 NTE 码；这里只接受确定的
+     * 缺失码。NTE_INVALID_HANDLE 等平台错误必须返回未知，禁止折叠为
+     * “键不存在”，否则维护列表与自动回收会把平台故障误判为 DEAD。 */
+    return code == 0x80090011u || code == 0x80090016u;
 }
 
 #if defined(VERTHYS_TEST_HOOKS) && VERTHYS_TEST_HOOKS
@@ -76,6 +78,11 @@ void vty_tpm_witness_set_probe_override_for_test(int state)
 {
     if (state < -1 || state > 3) state = -1;
     InterlockedExchange(&g_test_probe_override, (LONG)state);
+}
+
+int vty_tpm_witness_status_is_missing_for_test(uint32_t status)
+{
+    return not_found_status((SECURITY_STATUS)status);
 }
 
 void vty_tpm_witness_set_crash_after_create_for_test(int enable)

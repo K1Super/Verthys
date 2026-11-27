@@ -2,7 +2,7 @@
  * presetMetrics.spec.ts — 安全防护面板指标合成纯函数测试
  *
  * 覆盖：覆盖度双权重合成、防御无校验结果的特性兜底、综合评分
- * 双权重合成、CPU 无基线中性负载、0~100 钳制。
+ * 双权重合成、CPU 无有效样本的中性负载、0~100 钳制。
  * 口径：防御得分分母恒为全部 7 条路径（未校验计入分母），
  *       单路径权重 已阻断=1 / 降级=0.5 / 失败=0。
  */
@@ -88,14 +88,19 @@ describe("computeOverallScore", () => {
     expect(computeOverallScore(80, 30)).toBe(76);
   });
 
-  it("CPU 无基线按中性负载 50 计", () => {
+  it("CPU 无有效样本按中性负载 50 计", () => {
     // 80×0.6 + 50×0.4 = 48 + 20 = 68
-    expect(computeOverallScore(80, -1)).toBe(68);
+    expect(computeOverallScore(80, null)).toBe(68);
+  });
+
+  it("CPU 零占用按真实负载参与合成", () => {
+    // 80×0.6 + 100×0.4 = 48 + 40 = 88
+    expect(computeOverallScore(80, 0)).toBe(88);
   });
 
   it("极端输入钳制在 0~100", () => {
     expect(computeOverallScore(0, 100)).toBe(0);
     // 100×0.6 + 50×0.4 = 80
-    expect(computeOverallScore(100, -1)).toBe(80);
+    expect(computeOverallScore(100, null)).toBe(80);
   });
 });

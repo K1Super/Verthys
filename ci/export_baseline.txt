@@ -31,8 +31,8 @@ Verthys_NotifyRuntimeGuards
 Verthys_NotifySandboxAttrs
 Verthys_ReplaceRecord
 Verthys_RollbackAnchorList
-Verthys_RollbackAnchorReclaim
 Verthys_RollbackAnchorRelease
+Verthys_RollbackAnchorReleaseBatch
 Verthys_ScanClose
 Verthys_ScanFetch
 Verthys_ScanOpen

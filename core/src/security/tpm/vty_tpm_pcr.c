@@ -285,8 +285,9 @@ int vty_tpm_pcr_key_delete(const uint8_t vault_uuid[VTY_UUID_BYTES])
     if (st != 0) {
         uint32_t code = (uint32_t)st;
         NCryptFreeObject(prov);
-        /* 仅“键不存在”视为已删除；权限/设备故障必须向上报告 */
-        if (code == 0x80090011u || code == 0x80090016u || code == 0x80090026u) {
+        /* 仅确定的“键不存在”视为已删除；权限/设备故障必须向上报告。
+         * NTE_INVALID_HANDLE 是句柄/平台错误，不得折叠为缺失。 */
+        if (code == 0x80090011u || code == 0x80090016u) {
             return VTY_OK;
         }
         return VTY_E_TPM;

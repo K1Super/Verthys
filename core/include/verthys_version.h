@@ -11,12 +11,13 @@
 #ifndef VERTHYS_VERSION_H
 #define VERTHYS_VERSION_H
 
-/* 0x0017：新增 Verthys_ReplaceRecord（同一次提交内原子替换单条记录）。
- * 0x0016：新增回退锚点维护接口（List / Reclaim / Release）。
+/* 0x0019：回退锚点释放改为批量接口（ReleaseBatch），移除手动 Reclaim。
+ * 0x0017：新增 Verthys_ReplaceRecord（同一次提交内原子替换单条记录）。
+ * 0x0016：新增回退锚点维护接口（List / Release）。
  * 0x0015：新增 Verthys_FindLidByName（名称盲索引精确查 ID）。
  * BulkImportBegin/Commit 与 ListAllLids 属于 0x0015 接口集的可选能力：
  * 宿主按符号探测，缺失即回退既有路径，因此不参与版本门。 */
-#define VERTHYS_API_VERSION 0x0018u
+#define VERTHYS_API_VERSION 0x0019u
 #define VERTHYS_CONTAINER_FORMAT_VERSION 4u
 
 #endif /* VERTHYS_VERSION_H */

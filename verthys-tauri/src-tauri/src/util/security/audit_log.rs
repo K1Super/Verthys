@@ -86,7 +86,8 @@ pub enum AuditEventType {
     VerthysRotate,
     /// 回退锚点显式释放（UUID 哈希 + 世代 + 见证状态 + 结果）
     RollbackAnchorRelease,
-    /// 回退锚点回收（仅记录删除条数与清理失败数）
+    /// 反序列化兼容位：手动回收入口已移除，不再写入新事件。
+    /// 保留变体以免含该事件的既有日志行在链验证中误报篡改。
     RollbackAnchorReclaim,
     /// 回退锚点容器扫描（仅记录计数，不记录路径明文）
     RollbackAnchorScan,

@@ -109,7 +109,7 @@
 
 - 名称：`VerthysWit_<witnessId 32 hex>_A|B`；`witnessId = SHA-256(domain || 设备根哈希 || 容器 UUID)`。
 - 每次提交创建另一槽的新 ECC P-256 持久化密钥，写状态，再删除旧键；两槽交替保证崩溃窗口内仍可打开。
-- `vty_tpm_witness_exists` 明确区分“不存在（0）”与“平台错误（-1）”，这是本方案自动回收的判定基础。
+- `vty_tpm_witness_exists` 明确区分“不存在（0）”与“平台错误（-1）”，这是本方案自动回收的判定基础。只有 `NTE_NOT_FOUND` 与 `NTE_BAD_KEYSET` 视为不存在；`NTE_INVALID_HANDLE` 等其它平台错误一律返回 -1（UNKNOWN），禁止折叠为 DEAD。
 
 ### 2.5 错误映射链
 
@@ -258,7 +258,7 @@ classify(entry):
 
 **Tier 0：自动回收 `DEAD`（无用户交互）**
 
-- 触发点：`commit`/`reset_anchor` 需要新增条目且 `count == 64`；维护界面“回收见证缺失”调用 `Verthys_RollbackAnchorReclaim`。
+- 触发点：`commit`/`reset_anchor` 需要新增条目且 `count == 64`；维护界面不再提供独立回收入口，DEAD 清理与释放共用同一个批量入口。
 - 动作：在锁内压缩条目、`store()` 原子写回；解锁后再尽力删除残留见证键。
 - 安全性：`DEAD` 条目在任何情况下都无法通过校验，回收不改变任何容器的可用性。
 - 限制：单次最多检查 64 条；`UNKNOWN/TAMPERED` 原样保留。
@@ -266,11 +266,12 @@ classify(entry):
 
 **Tier 1：授权释放 `ACTIVE/TAMPERED`（显式用户操作）**
 
-- 入口：中枢 → 安全防护 → 回退锚点面板 → 扫描/选择条目 → 释放。
+- 入口：中枢 → 安全防护 → 回退锚点面板 → 扫描/选择条目 → 单一维护按钮。
+- 语义：选中项全为 `DEAD` 时按钮为“清理选中”，确认区为温和文案；包含任何非 `DEAD` 时为“释放选中”，确认区给出恢复码与 `TAMPERED` 警告。
 - 前提：用户已完成容器扫描；界面展示 UUID 短名、generation、见证状态、匹配路径。
 - 确认：必须二次确认，明确告知“若容器仍存在，之后打开需要恢复码重新建立锚点”。
-- 动作：锁内删除条目、`store()`、随后删除两个槽的见证键；写入审计。
-- 禁止：任何自动流程、后台任务、测试代码调用该路径。
+- 动作：一次批量调用完成状态锁、压缩与 `store()`，随后锁外逐条删除两槽见证键；写入一次审计。
+- 禁止：任何自动流程、后台任务、测试代码调用释放路径。
 
 **Tier 2：不自动淘汰 `ACTIVE`**
 
@@ -445,7 +446,7 @@ list():
 | 操作 | 崩溃点 | 磁盘结果 | 后续行为 |
 |---|---|---|---|
 | 回收 | `store` 前 | 旧状态 | 下次重试 |
-| 回收 | `store` 后、删键前 | 新状态，残留键 | 无害；可再次 Reclaim/Release 清理 |
+| 回收 | `store` 后、删键前 | 新状态，残留键 | 无害；条目已移出状态，Reclaim 不会再次命中；如需清理，使用按 UUID 的 Release 接口 |
 | 释放 | `store` 前 | 旧状态，见证未动 | 操作失败，可重试 |
 | 释放 | `store` 后、删键前 | 已释放，残留键 | `cleanup_failed=1`；对同一 UUID 重试释放 |
 | 提交 | 建新键后、写状态前 | 旧状态，孤儿新键 | 旧状态仍可打开；孤儿不影响任何锚点判定 |
@@ -473,24 +474,35 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorList(
     uint32_t *out_count,
     uint32_t *out_state);             /* 0=absent, 1=ok, 2=corrupt, 3=unknown */
 
-VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorReclaim(
-    VerthysHandle handle,
-    uint32_t flags,                   /* bit0=CONFIRM，必须置位 */
-    uint32_t *out_removed,
-    uint32_t *out_cleanup_failed);
-
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
     VerthysHandle handle,
     const uint8_t uuid[16],
     uint32_t flags,                   /* bit0=CONFIRM，必须置位 */
     uint32_t *out_released,           /* 1=删除，0=不存在（幂等） */
     uint32_t *out_cleanup_failed);
+
+typedef struct VerthysAnchorReleaseResult {
+    uint32_t struct_size;             /* 调用方初始化：sizeof */
+    uint8_t  uuid[16];
+    uint32_t released;                /* 1=本次删除，0=条目不存在 */
+    uint32_t cleanup_failed;          /* 1=该 UUID 见证删除失败 */
+    uint32_t reserved;
+} VerthysAnchorReleaseResult;
+
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorReleaseBatch(
+    VerthysHandle handle,
+    const uint8_t *uuids,             /* count * 16 连续数组 */
+    uint32_t count,                   /* 1..64，重复/全零拒绝 */
+    uint32_t flags,                   /* bit0=CONFIRM，必须置位 */
+    VerthysAnchorReleaseResult *out_results,
+    uint32_t capacity,                /* 必须 >= count */
+    uint32_t *out_count);
 ```
 
 要求：
 
 - 新符号必须加入 `core/verthys.def` 白名单；
-- API 版本递增到 `0x0016`；
+- 当前 API 版本为 `0x0019`（批量释放追加；手动 Reclaim 已移除）；
 - 新接口与其他导出函数一样受发布者签名门约束；未启用签名门的构建不提供虚假授权保证；
 - 旧调用方不受影响；新调用方按版本宏判断可用性。
 
@@ -511,8 +523,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
 
 ```json
 {"op":"rollback_anchor_list"}
-{"op":"rollback_anchor_reclaim","anchor_confirm":true}
-{"op":"rollback_anchor_release","uuid":"hex32","anchor_confirm":true}
+{"op":"rollback_anchor_release_batch","uuids":["hex32", "..."],"anchor_confirm":true}
 ```
 
 说明：锚点确认字段命名为 `anchor_confirm`，与模块删除的字符串 `confirm` 字段分离，避免类型/语义冲突。
@@ -521,13 +532,12 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
 
 ```json
 {"ok":true,"op":"rollback_anchor_list","anchors":[{"uuid":"...","generation":767,"witness":"active"}],"anchor_state":1}
-{"ok":true,"op":"rollback_anchor_reclaim","anchor_removed":1,"anchor_cleanup_failed":0}
-{"ok":true,"op":"rollback_anchor_release","anchor_released":1,"anchor_cleanup_failed":0}
+{"ok":true,"op":"rollback_anchor_release_batch","anchor_release_results":[{"uuid":"...","released":true,"cleanup_failed":false}],"anchor_released":1,"anchor_cleanup_failed":0}
 ```
 
 约束：
 
-- `uuid` 必须是 32 位十六进制；非法输入返回 `INVALID`；
+- `uuids` 数量必须为 1..64，每项为 32 位十六进制；重复、全零或非法输入返回 `INVALID`；
 - `anchor_confirm` 缺失或为 false 时返回 `INVALID`；
 - 响应不包含见证指纹、私钥、路径或任何密钥材料；
 - `ERR_00000021` 在 worker 错误码白名单中透传，不折叠为 AUTH。
@@ -537,8 +547,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
 命令（实际注册名）：
 
 - `verthys_rollback_anchor_list`：调用 worker，返回条目与状态；
-- `verthys_rollback_anchor_reclaim`：要求 `confirm=true`，调用 worker 回收 DEAD，写审计；
-- `verthys_rollback_anchor_release`：要求 `confirm=true` 且 UUID 为 32 位十六进制，调用 worker 释放，写审计；
+- `verthys_rollback_anchor_release_batch`：要求 `confirm=true`，UUID 数量 1..64 且不重复，一次 IPC 调用 worker 批量释放，写一次审计（detail 含 batch/count/released/cleanup_failed）；
 - `verthys_rollback_anchor_scan`：全量扫描本地容器位置，返回 `uuid -> paths`、每个位置的覆盖状态与新鲜度；
 - `verthys_rollback_anchor_scan_cancel`：请求停止正在进行的扫描，已完成位置的证据照常保留；
 - `verthys_rollback_anchor_scan_forget_root`：移除自定义扫描位置，返回移除后的持久化证据。

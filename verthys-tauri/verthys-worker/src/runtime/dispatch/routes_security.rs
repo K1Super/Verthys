@@ -194,7 +194,7 @@ pub(super) fn handle(worker: &mut Worker, req: &Request) -> Option<Response> {
             }
             None => Response::err("kernel_status", 0x00000001),
         },
-        // 回退锚点维护：列表只读；回收只处理 DEAD；释放必须显式 confirm。
+        // 回退锚点维护：列表只读；批量释放必须显式 confirm。
         "rollback_anchor_list" => match worker.call_anchor_list() {
             Ok((anchors, state)) => {
                 let mut resp = Response::ok("rollback_anchor_list");
@@ -204,41 +204,70 @@ pub(super) fn handle(worker: &mut Worker, req: &Request) -> Option<Response> {
             }
             Err(code) => Response::err_raw("rollback_anchor_list", code),
         },
-        "rollback_anchor_reclaim" => {
+        "rollback_anchor_release_batch" => {
             const VERTHYS_ERR_INVALID: u32 = 0x00000001;
+            const ANCHOR_BATCH_MAX: usize = 64;
+
             if !req.anchor_confirm {
-                return Some(Response::err_raw("rollback_anchor_reclaim", VERTHYS_ERR_INVALID));
+                return Some(Response::err_raw(
+                    "rollback_anchor_release_batch",
+                    VERTHYS_ERR_INVALID,
+                ));
             }
-            match worker.call_anchor_reclaim(crate::runtime::ffi_types::VERTHYS_ANCHOR_FLAG_CONFIRM) {
-                Ok((removed, cleanup_failed)) => {
-                    let mut resp = Response::ok("rollback_anchor_reclaim");
-                    resp.anchor_removed = Some(removed);
-                    resp.anchor_cleanup_failed = Some(cleanup_failed);
-                    resp
+            if req.uuids.is_empty() || req.uuids.len() > ANCHOR_BATCH_MAX {
+                return Some(Response::err_raw(
+                    "rollback_anchor_release_batch",
+                    VERTHYS_ERR_INVALID,
+                ));
+            }
+            let mut parsed: Vec<[u8; 16]> = Vec::with_capacity(req.uuids.len());
+            let mut seen = std::collections::HashSet::with_capacity(req.uuids.len());
+            for text in &req.uuids {
+                let uuid = match parse_uuid_hex(text) {
+                    Some(v) => v,
+                    None => {
+                        return Some(Response::err_raw(
+                            "rollback_anchor_release_batch",
+                            VERTHYS_ERR_INVALID,
+                        ))
+                    }
+                };
+                if uuid.iter().all(|byte| *byte == 0) || !seen.insert(uuid) {
+                    return Some(Response::err_raw(
+                        "rollback_anchor_release_batch",
+                        VERTHYS_ERR_INVALID,
+                    ));
                 }
-                Err(code) => Response::err_raw("rollback_anchor_reclaim", code),
+                parsed.push(uuid);
             }
-        }
-        "rollback_anchor_release" => {
-            const VERTHYS_ERR_INVALID: u32 = 0x00000001;
-            let uuid = match parse_uuid_hex(&req.uuid) {
-                Some(v) => v,
-                None => return Some(Response::err_raw("rollback_anchor_release", VERTHYS_ERR_INVALID)),
-            };
-            if !req.anchor_confirm {
-                return Some(Response::err_raw("rollback_anchor_release", VERTHYS_ERR_INVALID));
-            }
-            match worker.call_anchor_release(
-                &uuid,
+            match worker.call_anchor_release_batch(
+                &parsed,
                 crate::runtime::ffi_types::VERTHYS_ANCHOR_FLAG_CONFIRM,
             ) {
-                Ok((released, cleanup_failed)) => {
-                    let mut resp = Response::ok("rollback_anchor_release");
+                Ok(results) => {
+                    let mut resp = Response::ok("rollback_anchor_release_batch");
+                    let mut released = 0u32;
+                    let mut cleanup_failed = 0u32;
+                    let mut outcomes = Vec::with_capacity(results.len());
+                    for (index, (was_released, failed)) in results.iter().enumerate() {
+                        if *was_released != 0 {
+                            released += 1;
+                        }
+                        if *failed != 0 {
+                            cleanup_failed += 1;
+                        }
+                        outcomes.push(crate::runtime::protocol::AnchorReleaseOutcome {
+                            uuid: req.uuids[index].to_ascii_lowercase(),
+                            released: *was_released != 0,
+                            cleanup_failed: *failed != 0,
+                        });
+                    }
+                    resp.anchor_release_results = Some(outcomes);
                     resp.anchor_released = Some(released);
                     resp.anchor_cleanup_failed = Some(cleanup_failed);
                     resp
                 }
-                Err(code) => Response::err_raw("rollback_anchor_release", code),
+                Err(code) => Response::err_raw("rollback_anchor_release_batch", code),
             }
         }
         // 运行时守卫位下发（API 0x0014）：主进程安装/停止挂起守卫时同步

@@ -100,9 +100,10 @@ pub(crate) struct Request {
     // 0x01 = 索引区已预热，0x02 = 允许加载持久化缓存
     #[serde(default)]
     pub(crate) flags: u32,
-    /// 回退锚点释放目标 UUID（32 位十六进制；仅 rollback_anchor_release 消费）
+    /// 回退锚点批量释放目标 UUID 列表（32 位十六进制；仅
+    /// rollback_anchor_release_batch 消费）。数量与重复由 dispatch 校验。
     #[serde(default)]
-    pub(crate) uuid: String,
+    pub(crate) uuids: Vec<String>,
     /// 回退锚点释放/回收的显式确认（仅 rollback_anchor_* 消费）。
     /// 与模块删除的字符串 confirm 字段分离，避免类型与语义冲突。
     #[serde(default)]

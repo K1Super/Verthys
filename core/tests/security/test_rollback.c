@@ -914,42 +914,236 @@ TEST(rollback_anchor_release_preserves_other)
     return 0;
 }
 
-TEST(rollback_anchor_reclaim_only_dead)
+TEST(rollback_anchor_release_batch_mixed)
 {
     uint8_t u1[VTY_UUID_BYTES];
     uint8_t u2[VTY_UUID_BYTES];
-    uint32_t removed = 0;
-    uint32_t cleanup_failed = 0;
+    uint8_t u3[VTY_UUID_BYTES];
+    uint8_t ux[VTY_UUID_BYTES];
+    uint8_t req[3 * VTY_UUID_BYTES];
+    uint8_t wid[VTY_UUID_BYTES];
+    VtyAnchorReleaseResult out[3];
+    uint32_t produced = 0;
     VtyAnchorInfo info[8];
     uint32_t count = 0;
     int missing = 0;
 
     memset(u1, 0xC1, sizeof(u1));
     memset(u2, 0xC2, sizeof(u2));
+    memset(u3, 0xC3, sizeof(u3));
+    memset(ux, 0xC9, sizeof(ux));
     if (rb_skip_without_witness()) return 0;
-    CHECK_EQ(rb_enable("rb_rec.state"), 0);
+    CHECK_EQ(rb_enable("rb_batch.state"), 0);
     CHECK_EQ(rb_clean_witness(u1), VTY_OK);
     CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u3), VTY_OK);
+    CHECK_EQ(rb_clean_witness(ux), VTY_OK);
     CHECK_EQ(vty_rollback_commit(u1, 2), VTY_OK);
     CHECK_EQ(vty_rollback_commit(u2, 2), VTY_OK);
-    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u3, 2), VTY_OK);
 
-    CHECK_EQ(vty_rollback_anchor_reclaim(0, &removed, &cleanup_failed),
-             VTY_E_INVALID);
-    CHECK_EQ(vty_rollback_anchor_reclaim(
-                 VTY_ROLLBACK_ANCHOR_CONFIRM, &removed, &cleanup_failed),
+    memcpy(req, u1, VTY_UUID_BYTES);
+    memcpy(req + VTY_UUID_BYTES, ux, VTY_UUID_BYTES);
+    memcpy(req + 2 * VTY_UUID_BYTES, u2, VTY_UUID_BYTES);
+    memset(out, 0, sizeof(out));
+    CHECK_EQ(vty_rollback_anchor_release_batch(
+                 req, 3, VTY_ROLLBACK_ANCHOR_CONFIRM, out, 3, &produced),
              VTY_OK);
-    CHECK_EQ(removed, 1);
+    CHECK_EQ(produced, 3);
+    CHECK_EQ(out[0].released, 1);
+    CHECK_EQ(out[1].released, 0);
+    CHECK_EQ(out[2].released, 1);
+    CHECK_EQ(out[1].cleanup_failed, 0);
+    CHECK(memcmp(out[0].uuid, u1, VTY_UUID_BYTES) == 0);
+    CHECK(memcmp(out[1].uuid, ux, VTY_UUID_BYTES) == 0);
+    CHECK(memcmp(out[2].uuid, u2, VTY_UUID_BYTES) == 0);
 
     CHECK_EQ(vty_rollback_anchor_list(info, 8, &count, &missing), VTY_OK);
     CHECK_EQ(count, 1);
-    CHECK(rb_find_info(info, count, u1) >= 0);
+    CHECK(rb_find_info(info, count, u1) < 0);
     CHECK(rb_find_info(info, count, u2) < 0);
+    CHECK(rb_find_info(info, count, u3) >= 0);
+
+    CHECK_EQ(vty_secure_state_identity_rollback(u1, wid), VTY_OK);
+    CHECK_EQ(vty_tpm_witness_exists(wid, 0) + vty_tpm_witness_exists(wid, 1), 0);
+    CHECK_EQ(vty_secure_state_identity_rollback(u2, wid), VTY_OK);
+    CHECK_EQ(vty_tpm_witness_exists(wid, 0) + vty_tpm_witness_exists(wid, 1), 0);
+    CHECK_EQ(vty_secure_state_identity_rollback(u3, wid), VTY_OK);
+    CHECK(vty_tpm_witness_exists(wid, 0) + vty_tpm_witness_exists(wid, 1) >= 1);
 
     vty_rollback_set_enabled(0);
     CHECK_EQ(rb_clean_witness(u1), VTY_OK);
     CHECK_EQ(rb_clean_witness(u2), VTY_OK);
-    remove("rb_rec.state");
+    CHECK_EQ(rb_clean_witness(u3), VTY_OK);
+    CHECK_EQ(rb_clean_witness(ux), VTY_OK);
+    remove("rb_batch.state");
+    return 0;
+}
+
+TEST(rollback_witness_status_never_treats_platform_error_as_missing)
+{
+    CHECK_EQ(vty_tpm_witness_status_is_missing_for_test(0x80090011u), 1);
+    CHECK_EQ(vty_tpm_witness_status_is_missing_for_test(0x80090016u), 1);
+    CHECK_EQ(vty_tpm_witness_status_is_missing_for_test(0x80090026u), 0);
+    CHECK_EQ(vty_tpm_witness_status_is_missing_for_test(0x80090000u), 0);
+    return 0;
+}
+
+TEST(rollback_anchor_release_batch_rejects_invalid_input)
+{
+    uint8_t u1[VTY_UUID_BYTES];
+    uint8_t u2[VTY_UUID_BYTES];
+    uint8_t zero[VTY_UUID_BYTES];
+    uint8_t req[3 * VTY_UUID_BYTES];
+    VtyAnchorReleaseResult out[3];
+    uint32_t produced = 0;
+
+    memset(u1, 0xC4, sizeof(u1));
+    memset(u2, 0xC5, sizeof(u2));
+    memset(zero, 0, sizeof(zero));
+    memcpy(req, u1, VTY_UUID_BYTES);
+    memcpy(req + VTY_UUID_BYTES, u2, VTY_UUID_BYTES);
+    memcpy(req + 2 * VTY_UUID_BYTES, u1, VTY_UUID_BYTES);
+    if (rb_skip_without_witness()) return 0;
+
+    CHECK_EQ(vty_rollback_anchor_release_batch(
+                 req, 0, VTY_ROLLBACK_ANCHOR_CONFIRM, out, 3, &produced),
+             VTY_E_INVALID);
+    CHECK_EQ(vty_rollback_anchor_release_batch(
+                 req, 65, VTY_ROLLBACK_ANCHOR_CONFIRM, out, 65, &produced),
+             VTY_E_INVALID);
+    CHECK_EQ(vty_rollback_anchor_release_batch(req, 1, 0, out, 1, &produced),
+             VTY_E_INVALID);
+    CHECK_EQ(vty_rollback_anchor_release_batch(
+                 req, 2, VTY_ROLLBACK_ANCHOR_CONFIRM, out, 1, &produced),
+             VTY_E_INVALID);
+    CHECK_EQ(vty_rollback_anchor_release_batch(
+                 req, 3, VTY_ROLLBACK_ANCHOR_CONFIRM, out, 3, &produced),
+             VTY_E_INVALID);
+    CHECK_EQ(vty_rollback_anchor_release_batch(
+                 zero, 1, VTY_ROLLBACK_ANCHOR_CONFIRM, out, 1, &produced),
+             VTY_E_INVALID);
+    return 0;
+}
+
+TEST(rollback_anchor_release_batch_cleanup_failure_per_uuid)
+{
+    uint8_t u1[VTY_UUID_BYTES];
+    uint8_t u2[VTY_UUID_BYTES];
+    uint8_t req[2 * VTY_UUID_BYTES];
+    VtyAnchorReleaseResult out[2];
+    uint32_t produced = 0;
+    VtyAnchorInfo info[8];
+    uint32_t count = 0;
+    int missing = 0;
+
+    memset(u1, 0xD1, sizeof(u1));
+    memset(u2, 0xD2, sizeof(u2));
+    if (rb_skip_without_witness()) return 0;
+    CHECK_EQ(rb_enable("rb_batch_cleanup.state"), 0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u1, 2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u2, 2), VTY_OK);
+
+    memcpy(req, u1, VTY_UUID_BYTES);
+    memcpy(req + VTY_UUID_BYTES, u2, VTY_UUID_BYTES);
+    vty_tpm_witness_set_delete_fail_for_test(2);
+    CHECK_EQ(vty_rollback_anchor_release_batch(
+                 req, 2, VTY_ROLLBACK_ANCHOR_CONFIRM, out, 2, &produced),
+             VTY_OK);
+    vty_tpm_witness_set_delete_fail_for_test(0);
+    CHECK_EQ(produced, 2);
+    CHECK_EQ(out[0].released, 1);
+    CHECK_EQ(out[0].cleanup_failed, 1);
+    CHECK_EQ(out[1].released, 1);
+    CHECK_EQ(out[1].cleanup_failed, 0);
+
+    CHECK_EQ(vty_rollback_anchor_list(info, 8, &count, &missing), VTY_OK);
+    CHECK_EQ(count, 0);
+
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    remove("rb_batch_cleanup.state");
+    return 0;
+}
+
+TEST(rollback_anchor_release_batch_store_failure_keeps_all)
+{
+    uint8_t u1[VTY_UUID_BYTES];
+    uint8_t u2[VTY_UUID_BYTES];
+    uint8_t req[2 * VTY_UUID_BYTES];
+    uint8_t wid[VTY_UUID_BYTES];
+    VtyAnchorReleaseResult out[2];
+    uint32_t produced = 0;
+    VtyAnchorInfo info[8];
+    uint32_t count = 0;
+    int missing = 0;
+
+    memset(u1, 0xE3, sizeof(u1));
+    memset(u2, 0xE4, sizeof(u2));
+    if (rb_skip_without_witness()) return 0;
+    CHECK_EQ(rb_enable("rb_batch_store.state"), 0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u1, 2), VTY_OK);
+    CHECK_EQ(vty_rollback_commit(u2, 2), VTY_OK);
+
+    memcpy(req, u1, VTY_UUID_BYTES);
+    memcpy(req + VTY_UUID_BYTES, u2, VTY_UUID_BYTES);
+    vty_rb_set_store_fail_for_test(1);
+    CHECK_EQ(vty_rollback_anchor_release_batch(
+                 req, 2, VTY_ROLLBACK_ANCHOR_CONFIRM, out, 2, &produced),
+             VTY_E_IO);
+    vty_rb_set_store_fail_for_test(0);
+    CHECK_EQ(produced, 0);
+
+    CHECK_EQ(vty_rollback_anchor_list(info, 8, &count, &missing), VTY_OK);
+    CHECK_EQ(count, 2);
+    CHECK(rb_find_info(info, count, u1) >= 0);
+    CHECK(rb_find_info(info, count, u2) >= 0);
+
+    CHECK_EQ(vty_secure_state_identity_rollback(u1, wid), VTY_OK);
+    CHECK(vty_tpm_witness_exists(wid, 0) + vty_tpm_witness_exists(wid, 1) >= 1);
+    CHECK_EQ(vty_secure_state_identity_rollback(u2, wid), VTY_OK);
+    CHECK(vty_tpm_witness_exists(wid, 0) + vty_tpm_witness_exists(wid, 1) >= 1);
+
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(rb_clean_witness(u2), VTY_OK);
+    remove("rb_batch_store.state");
+    return 0;
+}
+
+TEST(rollback_anchor_release_batch_state_missing_is_idempotent)
+{
+    uint8_t u1[VTY_UUID_BYTES];
+    uint8_t wid[VTY_UUID_BYTES];
+    uint8_t fp[VTY_TPM_WITNESS_FP_BYTES];
+    VtyAnchorReleaseResult out[1];
+    uint32_t produced = 0;
+
+    memset(u1, 0xE5, sizeof(u1));
+    memset(fp, 0, sizeof(fp));
+    if (rb_skip_without_witness()) return 0;
+    CHECK_EQ(rb_enable("rb_batch_missing.state"), 0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    CHECK_EQ(vty_secure_state_identity_rollback(u1, wid), VTY_OK);
+    CHECK_EQ(vty_tpm_witness_create(wid, 0, fp), VTY_OK);
+
+    CHECK_EQ(vty_rollback_anchor_release_batch(
+                 u1, 1, VTY_ROLLBACK_ANCHOR_CONFIRM, out, 1, &produced),
+             VTY_OK);
+    CHECK_EQ(produced, 1);
+    CHECK_EQ(out[0].released, 0);
+    CHECK_EQ(out[0].cleanup_failed, 0);
+    CHECK_EQ(vty_tpm_witness_exists(wid, 0), 0);
+    CHECK_EQ(vty_tpm_witness_exists(wid, 1), 0);
+
+    vty_rollback_set_enabled(0);
+    CHECK_EQ(rb_clean_witness(u1), VTY_OK);
+    remove("rb_batch_missing.state");
     return 0;
 }
 

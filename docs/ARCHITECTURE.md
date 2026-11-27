@@ -120,7 +120,7 @@ flowchart LR
 
 ## 5. core 与前端边界
 
-- 唯一跨层契约：`core/include/verthys.h`（公共 C ABI，`VERTHYS_API_VERSION 0x0018`）与 Tauri command 清单。前者规范见 [CORE_API.md](CORE_API.md)，后者以 `verthys-tauri` 的 command 注册为准。
+- 唯一跨层契约：`core/include/verthys.h`（公共 C ABI，`VERTHYS_API_VERSION 0x0019`）与 Tauri command 清单。前者规范见 [CORE_API.md](CORE_API.md)，后者以 `verthys-tauri` 的 command 注册为准。
 - 数据流约定：前端只能 `invoke` 命令 → worker actor → FFI → C core；反向经 JSON 响应 / SHM / 轮换进度回调。不得绕过 worker 直接加载 DLL。
 - 密钥边界：口令经 worker 传入 `verthys.dll` 后即归属 L2，主进程不落盘、不缓存明文密钥（仅 Rust 侧 `locked_buffer` 短暂持有口令，用后清零）。
 

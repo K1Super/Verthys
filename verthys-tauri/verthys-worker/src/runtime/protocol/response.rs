@@ -14,7 +14,9 @@ use super::payloads::{
     MediaFinishPayload, MediaMetaItem, MediaNextPayload, MediaPreviewRecord, MediaReadPayload,
     MediaVencPreview, StorageStatsEntry,
 };
-use super::records::{AnchorEntry, KernelStatusReport, RecordEntry, SecurityStatusReport};
+use super::records::{
+    AnchorEntry, AnchorReleaseOutcome, KernelStatusReport, RecordEntry, SecurityStatusReport,
+};
 
 #[derive(Serialize)]
 pub(crate) struct Response {
@@ -76,13 +78,13 @@ pub(crate) struct Response {
     /// 状态文件整体状态（0=absent/1=ok/2=corrupt，仅 rollback_anchor_list 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) anchor_state: Option<u32>,
-    /// 回收条数（仅 rollback_anchor_reclaim 返回）
+    /// 批量释放逐条结果（仅 rollback_anchor_release_batch 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) anchor_removed: Option<u32>,
-    /// 释放条数（仅 rollback_anchor_release 返回；1=删除，0=幂等未命中）
+    pub(crate) anchor_release_results: Option<Vec<AnchorReleaseOutcome>>,
+    /// 释放条数汇总（批量释放：released=1 的数量）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) anchor_released: Option<u32>,
-    /// 见证清理失败条数（仅 rollback_anchor_reclaim/release 返回）
+    /// 见证清理失败条数汇总（批量释放返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) anchor_cleanup_failed: Option<u32>,
     /// 批内解密失败/索引不一致的记录 ID（仅 scan_open / scan_fetch 返回）
@@ -285,7 +287,7 @@ impl Response {
             kernel_status: None,
             anchors: None,
             anchor_state: None,
-            anchor_removed: None,
+            anchor_release_results: None,
             anchor_released: None,
             anchor_cleanup_failed: None,
             failed_ids: None,
@@ -431,7 +433,7 @@ impl Response {
             kernel_status: None,
             anchors: None,
             anchor_state: None,
-            anchor_removed: None,
+            anchor_release_results: None,
             anchor_released: None,
             anchor_cleanup_failed: None,
             failed_ids: None,

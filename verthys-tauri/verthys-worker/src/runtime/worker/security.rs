@@ -214,50 +214,52 @@ impl Worker {
         Ok((entries, state))
     }
 
-    /// 回收所有 DEAD 锚点。返回值：(删除条数, 见证清理失败条数)。
-    pub(crate) fn call_anchor_reclaim(&self, flags: u32) -> Result<(u32, u32), u32> {
-        let mut removed: u32 = 0;
-        let mut cleanup_failed: u32 = 0;
-        unsafe {
-            let lib = &self._lib;
-            let func: Symbol<VerthysRollbackAnchorReclaimFn> =
-                match lib.get(b"Verthys_RollbackAnchorReclaim") {
-                    Ok(f) => f,
-                    Err(_) => return Err(0xFFFFFFFF),
-                };
-            let rc = ffi_call(|| {
-                func(self.handle, flags, &mut removed, &mut cleanup_failed)
-            })
-            .unwrap_or(0xFFFFFFFF);
-            if rc != VERTHYS_OK {
-                return Err(rc);
-            }
-        }
-        Ok((removed, cleanup_failed))
-    }
-
-    /// 显式释放指定锚点。返回值：(是否删除, 见证清理失败条数)。
-    pub(crate) fn call_anchor_release(
+    /// 批量释放锚点：一次 FFI 调用完成状态加载、压缩与落盘。
+    ///
+    /// 返回按输入顺序的 `(released, cleanup_failed)`；任何 C 层错误原样
+    /// 返回。输入数量与 C 层上限一致（1..64），空集直接拒绝。
+    pub(crate) fn call_anchor_release_batch(
         &self,
-        uuid: &[u8; 16],
+        uuids: &[[u8; 16]],
         flags: u32,
-    ) -> Result<(u32, u32), u32> {
-        let mut released: u32 = 0;
-        let mut cleanup_failed: u32 = 0;
+    ) -> Result<Vec<(u32, u32)>, u32> {
+        const VERTHYS_ERR_INVALID: u32 = 0x00000001;
+        const ANCHOR_BATCH_MAX: usize = 64;
+
+        if uuids.is_empty() || uuids.len() > ANCHOR_BATCH_MAX {
+            return Err(VERTHYS_ERR_INVALID);
+        }
+        let mut flat = Vec::with_capacity(uuids.len() * 16);
+        for uuid in uuids {
+            flat.extend_from_slice(uuid);
+        }
+        let mut raw = vec![
+            VerthysAnchorReleaseResultC {
+                struct_size: std::mem::size_of::<VerthysAnchorReleaseResultC>() as u32,
+                uuid: [0u8; 16],
+                released: 0,
+                cleanup_failed: 0,
+                reserved: 0,
+            };
+            uuids.len()
+        ];
+        let mut produced: u32 = 0;
         unsafe {
             let lib = &self._lib;
-            let func: Symbol<VerthysRollbackAnchorReleaseFn> =
-                match lib.get(b"Verthys_RollbackAnchorRelease") {
+            let func: Symbol<VerthysRollbackAnchorReleaseBatchFn> =
+                match lib.get(b"Verthys_RollbackAnchorReleaseBatch") {
                     Ok(f) => f,
                     Err(_) => return Err(0xFFFFFFFF),
                 };
             let rc = ffi_call(|| {
                 func(
                     self.handle,
-                    uuid.as_ptr(),
+                    flat.as_ptr(),
+                    uuids.len() as u32,
                     flags,
-                    &mut released,
-                    &mut cleanup_failed,
+                    raw.as_mut_ptr(),
+                    raw.len() as u32,
+                    &mut produced,
                 )
             })
             .unwrap_or(0xFFFFFFFF);
@@ -265,7 +267,13 @@ impl Worker {
                 return Err(rc);
             }
         }
-        Ok((released, cleanup_failed))
+        if produced as usize != uuids.len() {
+            return Err(0xFFFFFFFF);
+        }
+        Ok(raw
+            .iter()
+            .map(|item| (item.released, item.cleanup_failed))
+            .collect())
     }
 
     /// 合并并下发运行时守卫位（完整掩码语义）。

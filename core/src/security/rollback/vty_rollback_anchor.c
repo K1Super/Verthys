@@ -1,5 +1,5 @@
 /*
- * vty_rollback_anchor.c — 锚点生命周期：校验、提交、重设、列举与回收
+ * vty_rollback_anchor.c — 锚点生命周期：校验、提交、重设、列举与批量释放
  *
  * 组织状态锁、状态读写与见证操作的顺序，保证先写状态后删旧键；任何
  * 失败路径都折叠为 fail-closed。
@@ -593,19 +593,56 @@ int vty_rollback_anchor_release(const uint8_t vault_uuid[VTY_UUID_BYTES],
     return VTY_OK;
 }
 
-int vty_rollback_anchor_reclaim(uint32_t flags, uint32_t *out_removed,
-                                uint32_t *out_cleanup_failed)
+int vty_rollback_anchor_release_batch(const uint8_t *uuids, uint32_t count,
+                                      uint32_t flags,
+                                      VtyAnchorReleaseResult *out_results,
+                                      uint32_t capacity, uint32_t *out_count)
 {
     uint8_t buf[RB_TOTAL_BYTES];
+    uint8_t wids[VTY_ROLLBACK_MAX_ENTRIES][VTY_UUID_BYTES];
+    uint8_t hit[VTY_ROLLBACK_MAX_ENTRIES];
+    uint32_t total = 0;
+    uint32_t write = 0;
+    uint32_t released_count = 0;
+    uint32_t i;
+    uint32_t j;
     int is_new = 0;
     int rc;
     HANDLE lock;
-    rb_dead_list dead;
 
-    if (out_removed == NULL || out_cleanup_failed == NULL) return VTY_E_INVALID;
+    if (uuids == NULL || out_results == NULL || out_count == NULL) {
+        return VTY_E_INVALID;
+    }
+    *out_count = 0;
     if ((flags & VTY_ROLLBACK_ANCHOR_CONFIRM) == 0) return VTY_E_INVALID;
-    *out_removed = 0;
-    *out_cleanup_failed = 0;
+    if (count == 0 || count > VTY_ROLLBACK_MAX_ENTRIES) return VTY_E_INVALID;
+    if (capacity < count) return VTY_E_INVALID;
+
+    /* 重复与全零 UUID 在入口一次拒绝：n<=64，O(n^2) 比较，无堆分配。
+     * 见证身份同样在入口一次派生，锁外清理不再重复访问设备根。 */
+    memset(hit, 0, sizeof(hit));
+    for (i = 0; i < count; i++) {
+        const uint8_t *u = uuids + (size_t)i * VTY_UUID_BYTES;
+        int all_zero = 1;
+
+        for (j = 0; j < VTY_UUID_BYTES; j++) {
+            if (u[j] != 0) {
+                all_zero = 0;
+                break;
+            }
+        }
+        if (all_zero) return VTY_E_INVALID;
+        for (j = 0; j < i; j++) {
+            if (memcmp(u, uuids + (size_t)j * VTY_UUID_BYTES,
+                       VTY_UUID_BYTES) == 0) {
+                return VTY_E_INVALID;
+            }
+        }
+        if (vty_rb_witness_id(u, wids[i]) != VTY_OK) return VTY_E_INVALID;
+        memset(&out_results[i], 0, sizeof(out_results[i]));
+        memcpy(out_results[i].uuid, u, VTY_UUID_BYTES);
+    }
+
     vty_rb_apply_test_disable();
     if (!g_enabled) return VTY_E_POLICY;
     if (vty_rollback_init() != VTY_OK) return VTY_E_TPM;
@@ -613,28 +650,74 @@ int vty_rollback_anchor_reclaim(uint32_t flags, uint32_t *out_removed,
     lock = vty_rb_lock_state();
     if (lock == NULL) return VTY_E_IO;
 
-    dead.count = 0;
     rc = vty_rb_load_authenticated(buf, &is_new);
     if (rc != VTY_OK) {
         vty_rb_unlock_state(lock);
         return VTY_E_CORRUPT;
     }
-    if (is_new || vty_get_u32(buf + 8) == 0) {
-        vty_rb_unlock_state(lock);
-        return VTY_OK;
+
+    if (!is_new) {
+        total = vty_get_u32(buf + 8);
+        if (total > VTY_ROLLBACK_MAX_ENTRIES) {
+            vty_rb_unlock_state(lock);
+            return VTY_E_CORRUPT;
+        }
+        /* 单次原地压缩：未命中条目写回前部，命中条目丢弃并标记。
+         * 请求集合与表条目均不超过 64，比较开销有界。 */
+        for (i = 0; i < total; i++) {
+            const uint8_t *e = vty_rb_entry_at(buf, i);
+            int matched = 0;
+
+            for (j = 0; j < count; j++) {
+                if (memcmp(e, uuids + (size_t)j * VTY_UUID_BYTES,
+                           VTY_UUID_BYTES) == 0) {
+                    hit[j] = 1;
+                    matched = 1;
+                    break;
+                }
+            }
+            if (matched) {
+                released_count++;
+                continue;
+            }
+            if (write != i) {
+                memmove(vty_rb_entry_at(buf, write), e, RB_ENTRY_BYTES);
+            }
+            write++;
+        }
+        if (released_count > 0) {
+            for (i = 0; i < count; i++) {
+                if (hit[i] == 0) continue;
+                vty_witness_pool_invalidate(wids[i], 0);
+                vty_witness_pool_invalidate(wids[i], 1);
+            }
+            for (i = write; i < total; i++) {
+                memset(vty_rb_entry_at(buf, i), 0, RB_ENTRY_BYTES);
+            }
+            vty_put_u32(buf + 8, write);
+            rc = vty_rb_store_state(buf);
+            if (rc != VTY_OK) {
+                /* 状态未成功落盘：条目与见证均保持原样。 */
+                vty_rb_unlock_state(lock);
+                return VTY_E_IO;
+            }
+        }
     }
-    if (vty_rb_collect_dead_locked(buf, &dead) == 0) {
-        vty_rb_unlock_state(lock);
-        return VTY_OK;
-    }
-    vty_rb_invalidate_dead_pool_locked(&dead);
-    rc = vty_rb_store_state(buf);
     vty_rb_unlock_state(lock);
-    if (rc != VTY_OK) {
-        /* 状态未落盘：不删除任何见证键。 */
-        return VTY_E_IO;
+
+    /* 状态已不再引用任何请求 UUID：锁外逐条清理两槽见证。未命中条目
+     * 同样清理，保证“重复释放”幂等。删除失败逐条记账，不影响其它条目。 */
+    for (i = 0; i < count; i++) {
+        int a;
+        int b;
+
+        vty_witness_pool_invalidate(wids[i], 0);
+        vty_witness_pool_invalidate(wids[i], 1);
+        a = vty_tpm_witness_delete(wids[i], 0);
+        b = vty_tpm_witness_delete(wids[i], 1);
+        out_results[i].released = hit[i];
+        out_results[i].cleanup_failed = (a != VTY_OK || b != VTY_OK) ? 1u : 0u;
     }
-    *out_removed = dead.count;
-    vty_rb_delete_dead_witnesses(&dead, out_cleanup_failed);
+    *out_count = count;
     return VTY_OK;
 }

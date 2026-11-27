@@ -34,7 +34,7 @@
   <text x="1160" y="138" font-size="15" fill="#5D6B80" letter-spacing="4">SYSTEM READOUT</text>
   <g font-size="20">
     <text x="1160" y="188" font-size="16" fill="#5D6B80">ABI</text>
-    <text x="1536" y="188" text-anchor="end" fill="#F7941E">0x0018</text>
+    <text x="1536" y="188" text-anchor="end" fill="#F7941E">0x0019</text>
     <text x="1160" y="238" font-size="16" fill="#5D6B80">FORMAT</text>
     <text x="1536" y="238" text-anchor="end" fill="#A8B2C0">V4 · A/B 元数据</text>
     <text x="1160" y="288" font-size="16" fill="#5D6B80">LAYERS</text>

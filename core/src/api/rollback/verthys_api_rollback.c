@@ -1,10 +1,9 @@
 /*
  * verthys_api_rollback.c — 回退锚点维护门面（内部实现，不新增导出）
  *
- * 只做参数/句柄/调用方签名边界与内部类型到公共 ABI 的转换；状态判定、
- * 回收与释放全部在 vty_rollback 内完成。任何自动回收都只处理 DEAD
- * 条目，ACTIVE/TAMPERED/UNKNOWN 绝不会被本组接口删除（Release 是
- * 用户显式确认的单独路径）。
+ * 只做参数/句柄/调用方签名边界与内部类型到公共 ABI 的转换；状态判定
+ * 与释放全部在 vty_rollback 内完成。本组接口不会自动删除任何条目，
+ * 释放必须由调用方显式确认；ACTIVE/TAMPERED/UNKNOWN 同样只能走该路径。
  */
 #include "verthys_api_utils.h"
 #include "verthys_security_runtime.h"   /* 句柄在册校验 */
@@ -103,24 +102,49 @@ VerthysResult Verthys_RollbackAnchorList(VerthysHandle handle,
     return VERTHYS_OK;
 }
 
-VerthysResult Verthys_RollbackAnchorReclaim(VerthysHandle handle,
-                                            uint32_t flags,
-                                            uint32_t *out_removed,
-                                            uint32_t *out_cleanup_failed)
+VerthysResult Verthys_RollbackAnchorReleaseBatch(
+    VerthysHandle handle,
+    const uint8_t *uuids,
+    uint32_t count,
+    uint32_t flags,
+    VerthysAnchorReleaseResult *out_results,
+    uint32_t capacity,
+    uint32_t *out_count)
 {
     struct VerthysContext *ctx = (struct VerthysContext *)handle;
+    VtyAnchorReleaseResult tmp[VTY_ROLLBACK_MAX_ENTRIES];
+    uint32_t produced = 0;
+    uint32_t i;
     int rc;
 
-    if (handle == NULL || out_removed == NULL ||
-        out_cleanup_failed == NULL) {
+    if (handle == NULL || uuids == NULL || out_results == NULL ||
+        out_count == NULL) {
         return VERTHYS_ERR_INVALID;
     }
     if (!verthys_ctx_registry_contains(ctx)) return VERTHYS_ERR_INVALID;
     if (vty_caller_auth_check() != VTY_OK) return VERTHYS_ERR_UNAUTHORIZED;
-    *out_removed = 0;
-    *out_cleanup_failed = 0;
-    rc = vty_rollback_anchor_reclaim(flags, out_removed, out_cleanup_failed);
-    return verthys_anchor_map(rc);
+    *out_count = 0;
+    if (count == 0 || count > VTY_ROLLBACK_MAX_ENTRIES) {
+        return VERTHYS_ERR_INVALID;
+    }
+    if (capacity < count) return VERTHYS_ERR_RESOURCE_LIMIT;
+
+    memset(tmp, 0, sizeof(tmp));
+    rc = vty_rollback_anchor_release_batch(uuids, count, flags, tmp,
+                                           VTY_ROLLBACK_MAX_ENTRIES,
+                                           &produced);
+    if (rc != VTY_OK) return verthys_anchor_map(rc);
+
+    for (i = 0; i < produced; i++) {
+        memset(&out_results[i], 0, sizeof(out_results[i]));
+        out_results[i].struct_size = (uint32_t)sizeof(VerthysAnchorReleaseResult);
+        memcpy(out_results[i].uuid, tmp[i].uuid, VERTHYS_ANCHOR_UUID_BYTES);
+        out_results[i].released = tmp[i].released;
+        out_results[i].cleanup_failed = tmp[i].cleanup_failed;
+    }
+    *out_count = produced;
+    vty_secure_zero(tmp, sizeof(tmp));
+    return VERTHYS_OK;
 }
 
 VerthysResult Verthys_RollbackAnchorRelease(

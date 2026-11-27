@@ -81,13 +81,13 @@ pub struct VerthysResponse {
     /// 状态文件整体状态（0=absent / 1=ok / 2=corrupt）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_state: Option<u32>,
-    /// 回收条数（仅 verthys_rollback_anchor_reclaim 返回）
+    /// 批量释放逐条结果（仅 verthys_rollback_anchor_release_batch 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub anchor_removed: Option<u32>,
-    /// 释放条数（仅 verthys_rollback_anchor_release 返回）
+    pub anchor_release_results: Option<Vec<AnchorReleaseOutcome>>,
+    /// 释放条数汇总（批量释放：released=1 的数量）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_released: Option<u32>,
-    /// 见证清理失败条数（释放/回收返回）
+    /// 见证清理失败条数汇总（批量释放返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_cleanup_failed: Option<u32>,
     /// 容器扫描结果（仅 verthys_rollback_anchor_scan 返回）
@@ -237,7 +237,7 @@ impl VerthysResponse {
             security_status: None,
             anchors: None,
             anchor_state: None,
-            anchor_removed: None,
+            anchor_release_results: None,
             anchor_released: None,
             anchor_cleanup_failed: None,
             anchor_scan: None,
@@ -329,7 +329,7 @@ impl VerthysResponse {
             security_status: None,
             anchors: None,
             anchor_state: None,
-            anchor_removed: None,
+            anchor_release_results: None,
             anchor_released: None,
             anchor_cleanup_failed: None,
             anchor_scan: None,

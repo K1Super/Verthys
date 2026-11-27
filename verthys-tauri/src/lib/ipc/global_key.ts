@@ -5,7 +5,7 @@
 import { ipc } from "./internal";
 import type { VerthysResponse } from "../../types/verthys";
 
-/** 系统运行指标快照（CPU 占用率真实差分采样；无基线时 cpu_usage=null） */
+/** 系统运行指标快照（全机 CPU 时间占用率；后端无新鲜样本时 cpu_usage=null） */
 export interface SystemSnapshot {
   cpu_usage: number | null;
 }

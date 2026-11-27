@@ -94,7 +94,7 @@
           :global-key-ready="globalKeyReady"
           :preset-applying="presetApplying"
           :preset-ambience-mode="presetAmbienceMode"
-          :cpu-overhead="cpuOverhead"
+          :cpu-utilization="cpuUtilization"
           :security-coverage="securityCoverage"
           :overall-score="overallScore"
           :ring-circumference="ringCircumference"
@@ -192,8 +192,8 @@ defineProps<{
   presetApplying: boolean;
   /** 预设环境光效模式 */
   presetAmbienceMode: string;
-  /** CPU 占用百分比 */
-  cpuOverhead: number;
+  /** CPU 占用百分比（null = 无有效样本） */
+  cpuUtilization: number | null;
   /** 安全覆盖度百分比 */
   securityCoverage: number;
   /** 综合评分 */

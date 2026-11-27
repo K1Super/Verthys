@@ -113,7 +113,7 @@ use support::*;
 use targets::*;
 
 pub use commands::{
-    verthys_rollback_anchor_list, verthys_rollback_anchor_reclaim, verthys_rollback_anchor_release,
+    verthys_rollback_anchor_list, verthys_rollback_anchor_release_batch,
     verthys_rollback_anchor_scan, verthys_rollback_anchor_scan_cancel,
     verthys_rollback_anchor_scan_forget_root,
 };

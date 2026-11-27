@@ -1433,11 +1433,11 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetStorageStats(
     VerthysStorageStats *out_stats);
 
 /* ================================================================== *
- * 回退锚点维护接口（API 版本 0x0016）
+ * 回退锚点维护接口（API 版本 0x0016，批量释放 0x0019）
  *
- * 用途：展示本机回退锚点、回收“见证确定不存在”的失效条目、显式释放
- * 指定锚点。ACTIVE/TAMPERED/UNKNOWN 绝不会被自动回收；释放必须由调用方
- * 置位 CONFIRM 位，并由 UI 完成二次确认与恢复码后果告知。
+ * 用途：展示本机回退锚点、批量显式释放指定锚点。ACTIVE/TAMPERED/UNKNOWN
+ * 绝不会被自动回收；释放必须由调用方置位 CONFIRM 位，并由 UI 完成二次
+ * 确认与恢复码后果告知。
  *
  * 安全边界：接口不返回见证指纹、私钥、容器路径或任何密钥材料；UUID 是
  * 容器头中的公开标识，仅用于定位锚点。生产构建若启用调用方签名校验，
@@ -1471,6 +1471,15 @@ typedef struct {
     uint32_t reserved;           /* 必须为 0 */
 } VerthysAnchorInfo;
 
+/* 批量释放的单条结果（API 0x0019） */
+typedef struct {
+    uint32_t struct_size;        /* 调用方初始化：sizeof(VerthysAnchorReleaseResult) */
+    uint8_t  uuid[VERTHYS_ANCHOR_UUID_BYTES];
+    uint32_t released;           /* 1=本次删除，0=条目不存在（仍幂等清理见证） */
+    uint32_t cleanup_failed;     /* 1=该 UUID 的两槽见证存在删除失败 */
+    uint32_t reserved;           /* 必须为 0 */
+} VerthysAnchorReleaseResult;
+
 /*
  * 列出本机回退锚点。
  *
@@ -1496,24 +1505,14 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorList(
     uint32_t *out_state);
 
 /*
- * 回收所有 DEAD 锚点（见证确定不存在）。ACTIVE/TAMPERED/UNKNOWN 保留。
- * flags 必须含 VERTHYS_ANCHOR_FLAG_CONFIRM。
- * out_removed 返回删除条数；out_cleanup_failed 返回见证删除失败条数
- * （调用方可对同一 UUID 重试释放，接口幂等）。
- * 状态写失败返回 VERTHYS_ERR_IO，此时不会删除任何见证。
- */
-VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorReclaim(
-    VerthysHandle handle,
-    uint32_t flags,
-    uint32_t *out_removed,
-    uint32_t *out_cleanup_failed);
-
-/*
  * 显式释放指定 UUID 的锚点并删除两槽见证。该操作会使仍存在的容器
  * 在下次打开时被 fail-closed 拒绝，只能通过恢复码重设锚点。
  * flags 必须含 VERTHYS_ANCHOR_FLAG_CONFIRM。
  * 条目不存在时仍幂等清理见证；out_released=0。
  * 状态写失败返回 VERTHYS_ERR_IO，此时不会删除见证。
+ *
+ * 单条接口保留用于 ABI 兼容；批量场景应使用
+ * Verthys_RollbackAnchorReleaseBatch，一次完成全部选中条目。
  */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
     VerthysHandle handle,
@@ -1521,6 +1520,39 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
     uint32_t flags,
     uint32_t *out_released,
     uint32_t *out_cleanup_failed);
+
+/*
+ * 批量释放指定 UUID 集合并删除各自两槽见证。
+ *
+ * 参数：
+ *   handle      — Verthys_Init 返回的句柄（不要求容器已解锁）
+ *   uuids       — count * VERTHYS_ANCHOR_UUID_BYTES 的连续数组
+ *   count       — 1..64；重复 UUID 或全零 UUID 直接拒绝
+ *   flags       — 必须含 VERTHYS_ANCHOR_FLAG_CONFIRM
+ *   out_results — 与输入顺序一致的结果数组，capacity 必须 >= count
+ *   capacity    — 结果数组容量
+ *   out_count   — 成功时返回 count；失败时为 0
+ *
+ * 返回值：
+ *   VERTHYS_OK                   — 全部条目完成（含幂等未命中）
+ *   VERTHYS_ERR_INVALID          — 参数非法、确认缺失、重复或全零 UUID
+ *   VERTHYS_ERR_RESOURCE_LIMIT   — capacity 小于 count
+ *   VERTHYS_ERR_CORRUPT          — 状态文件损坏/不可认证
+ *   VERTHYS_ERR_IO               — 状态写失败；此时不会删除任何见证
+ *   VERTHYS_ERR_TPM              — 设备安全模块不可用
+ *   VERTHYS_ERR_POLICY           — 回退锚点维护未启用
+ *
+ * 条目不存在时仍幂等清理见证；逐条 cleanup_failed 指示见证删除失败，
+ * 调用方可对同一 UUID 重试批量释放（幂等）。
+ */
+VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorReleaseBatch(
+    VerthysHandle handle,
+    const uint8_t *uuids,
+    uint32_t count,
+    uint32_t flags,
+    VerthysAnchorReleaseResult *out_results,
+    uint32_t capacity,
+    uint32_t *out_count);
 
 #ifdef __cplusplus
 } /* extern "C" */

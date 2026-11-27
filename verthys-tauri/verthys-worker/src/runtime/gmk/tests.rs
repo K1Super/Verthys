@@ -43,7 +43,7 @@ fn make_request(op: &str, password: &str, bin_password: &str, bin_data: &[u8], r
         preset: 0,
         ids: Vec::new(),
         flags: 0,
-        uuid: String::new(),
+        uuids: Vec::new(),
         anchor_confirm: false,
         hb_handle: 0,
         shm_key: String::new(),

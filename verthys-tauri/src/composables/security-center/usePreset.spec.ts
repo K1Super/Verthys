@@ -81,7 +81,7 @@ function stubOptions() {
     showError: vi.fn(),
     showToast: vi.fn(),
     resetSession: vi.fn(),
-    cpuUsage: ref(-1),
+    cpuUsage: ref<number | null>(null),
     defenseMeta: ref({
       blocked: 0,
       degraded: 0,

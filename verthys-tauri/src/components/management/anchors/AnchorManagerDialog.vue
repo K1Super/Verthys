@@ -6,7 +6,7 @@
        TAMPERED=见证异常 / UNKNOWN=见证未知）
     2. 展示全量扫描到的 UUID → 路径证据与每个位置的覆盖率；
        扫描结果只作为证据，不自动删除
-    3. 通过二次确认触发“释放选中”或“回收见证缺失”
+    3. 通过二次确认触发单一入口：选中项全为 DEAD 时清理，否则释放
     4. 明确告知：释放 ACTIVE/TAMPERED 后，仍存在的容器必须用恢复码重建锚点
 
   扫描边界：
@@ -22,7 +22,7 @@
 
   安全边界：
     - 组件不自行决定“哪些可以删”，只按后端状态展示并要求用户显式确认
-    - DEAD 才允许回收；释放选中必须由用户二次确认
+    - DEAD 只通过统一入口清理；包含其它状态时必须由用户显式确认释放
     - 不展示指纹、私钥或任何密钥材料
 -->
 <template>
@@ -65,7 +65,6 @@
         回退状态文件损坏或无法认证，维护接口已 fail-closed。请先修复状态文件，或使用恢复码重建锚点。
       </p>
       <p v-if="error" class="kv-error">{{ error }}</p>
-      <p v-if="notice" class="kv-note anchor-notice">{{ notice }}</p>
 
       <div class="anchor-toolbar">
         <button
@@ -87,131 +86,102 @@
         <button
           class="btn btn-destructive btn-compact"
           type="button"
-          :disabled="busy || scanning || deadCount === 0"
-          @click="pending = 'reclaim'"
+          :disabled="busy || scanning || selectedCount === 0"
+          @click="requestRelease"
         >
-          回收见证缺失
+          {{ selectedAllDead ? "清理选中" : "释放选中" }}
         </button>
       </div>
       <p class="kv-hint">
-        仅见证缺失（DEAD）可回收；扫描完整时自动勾选见证有效且未找到的锚点，见证异常请逐条核对。扫描只读取容器固定头，不会打开或修改容器。
+        打开时自动勾选见证缺失（DEAD）锚点；选中项全为 DEAD 时为清理，包含其它状态时为释放。扫描只读取容器固定头，不会打开或修改容器。
       </p>
 
-      <Transition name="anchor-reveal">
-        <div v-if="show" class="anchor-reveal">
-          <div class="anchor-reveal-body">
-            <section class="kv-section">
-              <div class="kv-section-label">
-                扫描范围
-                <span v-if="scanning" class="anchor-scan-state">扫描中</span>
-              </div>
-              <div v-if="scanning" class="anchor-scan-line">
-                <span class="kv-readout anchor-scan-progress">{{ progressText }}</span>
-                <button
-                  class="btn btn-neutral btn-compact"
-                  type="button"
-                  @click="$emit('cancel-scan')"
-                >
-                  停止扫描
-                </button>
-              </div>
-              <template v-else-if="scan && scan.scanned_at">
-                <div class="kv-readout">
-                  扫描位置 {{ autoDirRoots.length }} · 深度 {{ scan.depth }} · 文件
-                  {{ scan.files_seen }} · 命中 {{ scan.matched_count }} · 更新
-                  {{ formatTime(scan.scanned_at) }}
-                </div>
-                <p v-if="scan.partial" class="kv-error">
-                  本次扫描未完成：{{ partialReason }}。为避免误判，未自动勾选缺失锚点。
-                </p>
-                <ul v-if="visibleDirRoots.length" class="anchor-coverage">
-                  <li
-                    v-for="root in visibleDirRoots"
-                    :key="`${root.source}:${root.path}`"
-                    class="anchor-coverage-row"
-                  >
-                    <span class="anchor-coverage-source">{{ sourceLabel(root.source) }}</span>
-                    <span class="anchor-coverage-path" v-tip="root.path">{{ root.path }}</span>
-                    <span class="anchor-coverage-state" :class="rootStateClass(root)">
-                      {{ rootStateText(root) }}
-                    </span>
-                    <button
-                      v-if="root.source === 'custom'"
-                      class="btn btn-neutral btn-compact anchor-root-remove"
-                      type="button"
-                      :disabled="busy || scanning"
-                      @click="$emit('forget-root', root.path)"
-                    >
-                      移除
-                    </button>
-                  </li>
-                </ul>
-                <p v-if="hiddenDirRootCount > 0" class="kv-readout">
-                  另有 {{ hiddenDirRootCount }} 个位置
-                </p>
-                <p class="kv-hint">
-                  扫描结果只是证据，不作为自动删除依据；见证状态只反映 TPM 见证，不代表容器仍然存在；未在扫描范围内找到的锚点仍需逐条确认。
-                </p>
-              </template>
-              <p v-else class="kv-readout">尚未扫描</p>
-            </section>
-          </div>
+      <section class="kv-section anchor-scan-section">
+        <div class="kv-section-label">
+          扫描范围
+          <span v-if="scanning" class="anchor-scan-state">扫描中</span>
+          <span v-else-if="scan && scan.scanned_at" class="anchor-scan-updated">
+            更新 {{ formatTime(scan.scanned_at) }}
+          </span>
         </div>
-      </Transition>
 
-      <Transition name="anchor-reveal">
-        <div v-if="pending" class="anchor-reveal">
-          <div class="anchor-reveal-body">
-            <section
-              class="kv-section"
-              role="alertdialog"
-              :aria-label="pendingTitle"
-              aria-live="assertive"
-            >
-              <div class="kv-section-label">{{ pendingTitle }}</div>
-              <p v-if="pending === 'release'" class="kv-warn">
-                将释放 {{ selectedCount }} 个锚点。若对应容器仍存在，普通解锁会被拒绝，必须使用恢复码重新建立锚点。
-              </p>
-              <p
-                v-if="pending === 'release' && activeOrTamperedSelected.length"
-                class="kv-error"
-              >
-                其中 {{ activeOrTamperedSelected.length }} 个并非见证缺失（DEAD），见证状态仍可能有效。
-              </p>
-              <p
-                v-if="pending === 'release' && tamperedSelected.length"
-                class="kv-error"
-              >
-                其中 {{ tamperedSelected.length }} 个是“见证异常（TAMPERED）”；释放会删除其见证键并销毁篡改证据，建议先联系支持。
-              </p>
-              <p v-if="pending === 'release'" class="kv-note">
-                已解锁会话在下次保存时会重新登记锚点；释放前建议先锁定容器。
-              </p>
-              <p v-else-if="pending === 'reclaim'" class="kv-warn">
-                将回收 {{ deadCount }} 个见证缺失（DEAD）锚点。见证有效（ACTIVE）/见证异常（TAMPERED）/见证未知（UNKNOWN）不会被删除，容器文件不会被改动。
-              </p>
-              <div class="kv-actions">
-                <button
-                  class="btn btn-neutral btn-compact"
-                  type="button"
-                  :disabled="busy || scanning"
-                  @click="pending = null"
-                >
-                  取消
-                </button>
-                <button
-                  class="btn btn-destructive btn-compact"
-                  type="button"
-                  :disabled="busy || scanning"
-                  @click="confirmPending"
-                >
-                  确认
-                </button>
-              </div>
-            </section>
-          </div>
+        <div v-if="scanning" class="anchor-scan-line">
+          <span class="kv-readout anchor-scan-progress">{{ progressText }}</span>
+          <button
+            class="btn btn-neutral btn-compact"
+            type="button"
+            @click="$emit('cancel-scan')"
+          >
+            停止扫描
+          </button>
         </div>
-      </Transition>
+
+        <template v-else-if="scan && scan.scanned_at">
+          <div class="anchor-scan-metrics">
+            <span class="anchor-metric">
+              <span class="anchor-metric-label">位置</span>
+              <span class="anchor-metric-value">{{ scanRoots.length }}</span>
+            </span>
+            <span class="anchor-metric">
+              <span class="anchor-metric-label">深度</span>
+              <span class="anchor-metric-value">{{ scan.depth }}</span>
+            </span>
+            <span class="anchor-metric">
+              <span class="anchor-metric-label">文件</span>
+              <span class="anchor-metric-value">{{ scan.files_seen }}</span>
+            </span>
+            <span class="anchor-metric">
+              <span class="anchor-metric-label">命中</span>
+              <span class="anchor-metric-value">{{ scan.matched_count }}</span>
+            </span>
+          </div>
+          <p v-if="scan.partial" class="kv-error anchor-scan-partial">
+            本次扫描未完成：{{ partialReason }}。为避免误判，未自动勾选缺失锚点。
+          </p>
+        </template>
+        <p v-else class="kv-readout anchor-scan-empty">尚未扫描</p>
+
+        <Transition name="anchor-reveal">
+          <div v-if="!scanning && orderedRoots.length" class="anchor-reveal">
+            <div class="anchor-reveal-body">
+              <ul class="anchor-coverage">
+                <li
+                  v-for="root in orderedRoots"
+                  :key="`${root.source}:${root.path}`"
+                  class="anchor-coverage-row"
+                >
+                  <span class="anchor-coverage-source">{{ sourceShort(root.source) }}</span>
+                  <span class="anchor-coverage-path" v-tip="root.path">
+                    {{ coveragePath(root) }}
+                  </span>
+                  <span
+                    class="anchor-coverage-state"
+                    :class="rootStateClass(root)"
+                  >
+                    {{ rootStateText(root) }}
+                  </span>
+                  <button
+                    v-if="root.source === 'custom'"
+                    class="btn btn-neutral btn-mini anchor-root-remove"
+                    type="button"
+                    :disabled="busy || scanning"
+                    @click="$emit('forget-root', root.path)"
+                  >
+                    移除
+                  </button>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </Transition>
+
+        <p
+          v-if="!scanning && scan && scan.scanned_at"
+          class="kv-hint anchor-scan-hint"
+        >
+          见证状态只反映 TPM 见证，不代表容器仍然存在
+        </p>
+      </section>
 
       <section class="kv-section">
         <div class="kv-section-label">
@@ -289,25 +259,65 @@
           </table>
         </div>
       </section>
+    </div>
+  </CosmicOverlay>
 
-      <footer class="kv-actions">
-        <button
-          class="btn btn-neutral btn-compact"
-          type="button"
-          :disabled="busy"
-          @click="close"
-        >
-          关闭
-        </button>
-        <button
-          class="btn btn-destructive btn-compact"
-          type="button"
-          :disabled="busy || scanning || selectedCount === 0"
-          @click="requestRelease"
-        >
-          释放选中
-        </button>
-      </footer>
+  <!-- 二次确认：独立高优先弹窗，叠在管理面板之上；初始焦点在取消键，
+       误按回车不会执行不可逆操作 -->
+  <CosmicOverlay
+    :show="pending"
+    width="440px"
+    role="alertdialog"
+    aria-labelledby="anchor-pending-title"
+    initial-focus=".btn-neutral"
+    :overlay-z="10000"
+    :persistent="busy"
+    scrollbar-hidden
+    @close="pending = false"
+  >
+    <div class="kv-title" id="anchor-pending-title">{{ pendingTitle }}</div>
+    <template v-if="selectedAllDead">
+      <p class="kv-warn">
+        将清理 {{ selectedCount }} 个见证缺失（DEAD）锚点。见证有效/异常/未知不会受影响，容器文件不会被改动。
+      </p>
+      <p v-if="selectedCount" class="kv-readout anchor-dead-ids">
+        <span>待清理：</span>
+        <span v-for="uuid in visibleSelected" :key="uuid" class="anchor-dead-id">
+          {{ uuid }}
+        </span>
+        <span v-if="selectedCount > visibleSelected.length" class="anchor-dead-more">
+          另有 {{ selectedCount - visibleSelected.length }} 个
+        </span>
+      </p>
+    </template>
+    <template v-else>
+      <p class="kv-warn">
+        将释放 {{ selectedCount }} 个锚点。若对应容器仍存在，普通解锁会被拒绝，必须使用恢复码重新建立锚点。
+      </p>
+      <p v-if="activeOrTamperedSelected.length" class="kv-error">
+        其中 {{ activeOrTamperedSelected.length }} 个并非见证缺失（DEAD），见证状态仍可能有效。
+      </p>
+      <p v-if="tamperedSelected.length" class="kv-error">
+        其中 {{ tamperedSelected.length }} 个是“见证异常（TAMPERED）”；释放会删除其见证键并销毁篡改证据，建议先联系支持。
+      </p>
+    </template>
+    <div class="kv-actions">
+      <button
+        class="btn btn-neutral btn-compact"
+        type="button"
+        :disabled="busy"
+        @click="pending = false"
+      >
+        取消
+      </button>
+      <button
+        class="btn btn-destructive btn-compact"
+        type="button"
+        :disabled="busy"
+        @click="confirmPending"
+      >
+        {{ selectedAllDead ? "确认清理" : "确认释放" }}
+      </button>
     </div>
   </CosmicOverlay>
 </template>
@@ -337,7 +347,6 @@ const props = defineProps<{
   scanning: boolean;
   scanProgress: AnchorScanProgress | null;
   error: string;
-  notice: string;
 }>();
 
 const emit = defineEmits<{
@@ -346,12 +355,11 @@ const emit = defineEmits<{
   (e: "scan", options: AnchorScanOptions): void;
   (e: "cancel-scan"): void;
   (e: "forget-root", path: string): void;
-  (e: "reclaim"): void;
   (e: "release", uuids: string[]): void;
 }>();
 
 const selected = ref<string[]>([]);
-const pending = ref<"release" | "reclaim" | null>(null);
+const pending = ref(false);
 
 /* 复制走全项目统一的安全剪贴板通道：成功后提示并按时清空 */
 const { copyWithTimeout } = useClipToast("锚点 UUID 已复制");
@@ -363,9 +371,7 @@ const copyUuid = async (uuid: string): Promise<void> => {
 };
 
 const selectedCount = computed(() => selected.value.length);
-const deadCount = computed(
-  () => props.anchors.filter((a) => a.witness === "dead").length,
-);
+const visibleSelected = computed(() => selected.value.slice(0, 3));
 const activeOrTamperedSelected = computed(() =>
   selected.value.filter((uuid) => {
     const anchor = props.anchors.find((a) => a.uuid === uuid);
@@ -377,6 +383,10 @@ const tamperedSelected = computed(() =>
     (uuid) =>
       props.anchors.find((a) => a.uuid === uuid)?.witness === "tampered",
   ),
+);
+/** 选中集合非空且全部为 DEAD：语义为清理，不涉及恢复码风险。 */
+const selectedAllDead = computed(
+  () => selectedCount.value > 0 && activeOrTamperedSelected.value.length === 0,
 );
 
 const scanMap = computed(() => {
@@ -395,13 +405,42 @@ function evidenceCapped(uuid: string): boolean {
   return scanMap.value.get(uuid.toLowerCase())?.capped ?? false;
 }
 
-const autoDirRoots = computed(() =>
-  (props.scan?.roots ?? []).filter((root) => root.kind === "dir"),
-);
-const visibleDirRoots = computed(() => autoDirRoots.value.slice(0, 8));
-const hiddenDirRootCount = computed(() =>
-  Math.max(0, autoDirRoots.value.length - visibleDirRoots.value.length),
-);
+const scanRoots = computed(() => props.scan?.roots ?? []);
+
+const COVERAGE_SOURCE_ORDER = ["custom", "container", "recent", "volume"];
+
+/** 按来源优先级排序；来源在行内标注，不再单独占用组标题行。 */
+const orderedRoots = computed(() => {
+  const rank = new Map(
+    COVERAGE_SOURCE_ORDER.map((source, index) => [source, index]),
+  );
+  return [...scanRoots.value].sort(
+    (a, b) =>
+      (rank.get(a.source) ?? COVERAGE_SOURCE_ORDER.length) -
+      (rank.get(b.source) ?? COVERAGE_SOURCE_ORDER.length),
+  );
+});
+
+/** 文件探针只显示文件名，完整路径留给悬浮提示；目录保留完整路径。 */
+function coveragePath(root: AnchorScanRootReport): string {
+  if (root.kind !== "file") return root.path;
+  const parts = root.path.split(/[\\/]/);
+  return parts[parts.length - 1] || root.path;
+}
+
+/** 来源短标签：固定列宽，让每行路径起点对齐。 */
+function sourceShort(source: string): string {
+  switch (source) {
+    case "container":
+      return "当前";
+    case "recent":
+      return "最近";
+    case "custom":
+      return "自定义";
+    default:
+      return "磁盘";
+  }
+}
 const deferredRoots = computed(
   () => (props.scan?.roots ?? []).filter((root) => root.deferred),
 );
@@ -435,10 +474,9 @@ const progressText = computed(() => {
   return `位置 ${progress.roots_done}/${progress.roots_total}${current} · 文件 ${progress.files_seen} · 命中 ${progress.matched_count}`;
 });
 
-const pendingTitle = computed(() => {
-  if (pending.value === "release") return "确认释放";
-  return "确认回收";
-});
+const pendingTitle = computed(() =>
+  selectedAllDead.value ? "确认清理" : "确认释放",
+);
 
 function formatTime(seconds: number): string {
   if (!seconds) return "尚未完成";
@@ -447,21 +485,6 @@ function formatTime(seconds: number): string {
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-function sourceLabel(source: string): string {
-  switch (source) {
-    case "container":
-      return "当前容器";
-    case "recent":
-      return "最近容器";
-    case "custom":
-      return "自定义";
-    case "volume":
-      return "本地磁盘";
-    default:
-      return "位置";
-  }
 }
 
 function rootStateText(root: AnchorScanRootReport): string {
@@ -486,14 +509,27 @@ function rootStateClass(root: AnchorScanRootReport): string {
 }
 
 /**
- * 扫描完整时才自动勾选“见证有效且未找到”的锚点。
+ * 自动勾选全部见证缺失（DEAD）锚点。
  *
- * 只改变勾选，不执行释放；扫描不完整、截断或存在读取错误时保持清空，
- * 避免把未覆盖位置误判为不存在。TAMPERED/UNKNOWN 不批量勾选。
- * 单 UUID 证据超过展示上限只影响该条目的路径数，不改变“已找到”事实，
- * 因此不参与完整性门槛。
+ * DEAD 由 TPM 见证确定，与文件扫描证据无关；扫描不完整也不会改变该
+ * 判定。ACTIVE/TAMPERED/UNKNOWN 不自动勾选，避免默认动作波及不确定状态。
  */
-function autoSelectMissing(scan: AnchorScanResult | null): string[] {
+function autoSelectDead(anchors: AnchorInfo[]): string[] {
+  return anchors
+    .filter((anchor) => anchor.witness === "dead")
+    .map((anchor) => anchor.uuid);
+}
+
+/**
+ * 扫描完成后的默认勾选：始终包含全部 DEAD；仅当扫描完整时追加
+ * 「见证有效且未在扫描范围内找到」的锚点。缓存、部分、截断或读取
+ * 错误时只勾 DEAD，避免把未覆盖位置误判为不存在。
+ */
+function autoSelectAfterScan(
+  scan: AnchorScanResult | null,
+  anchors: AnchorInfo[],
+): string[] {
+  const selected = autoSelectDead(anchors);
   if (
     !scan ||
     scan.cached ||
@@ -502,52 +538,54 @@ function autoSelectMissing(scan: AnchorScanResult | null): string[] {
     scan.permission_errors > 0 ||
     scan.other_errors > 0
   ) {
-    return [];
+    return selected;
   }
   const found = new Set(
     scan.entries
       .filter((entry) => entry.paths.length > 0)
       .map((entry) => entry.uuid.toLowerCase()),
   );
-  return props.anchors
-    .filter(
-      (anchor) =>
-        anchor.witness === "active" && !found.has(anchor.uuid.toLowerCase()),
-    )
-    .map((anchor) => anchor.uuid);
+  const picked = new Set(selected);
+  for (const anchor of anchors) {
+    if (anchor.witness !== "active") continue;
+    if (found.has(anchor.uuid.toLowerCase())) continue;
+    if (picked.has(anchor.uuid)) continue;
+    picked.add(anchor.uuid);
+    selected.push(anchor.uuid);
+  }
+  return selected;
 }
-
-watch(
-  () => props.scan,
-  (scan) => {
-    selected.value = autoSelectMissing(scan);
-  },
-  { immediate: true },
-);
-
-watch(
-  () => props.scanning,
-  (scanning) => {
-    if (scanning) selected.value = [];
-  },
-);
 
 watch(
   () => props.show,
   (visible) => {
-    if (!visible) {
+    if (visible) {
+      selected.value = autoSelectDead(props.anchors);
+    } else {
       selected.value = [];
-      pending.value = null;
+      pending.value = false;
     }
   },
+  { immediate: true },
 );
 
-/* 释放/回收刷新后，勾选列表只保留仍存在的 UUID，避免对已删除条目再次确认。 */
+/* 释放/清理刷新后，弹窗可见时把勾选重置为剩余 DEAD；关闭时不改。 */
 watch(
   () => props.anchors,
   (anchors) => {
-    const alive = new Set(anchors.map((anchor) => anchor.uuid));
-    selected.value = selected.value.filter((uuid) => alive.has(uuid));
+    if (!props.show) return;
+    selected.value = autoSelectDead(anchors);
+  },
+);
+
+/* 扫描结束回到默认勾选：DEAD + 完整扫描下「见证有效且未找到」的锚点；
+   不勾 TAMPERED/UNKNOWN，也不在扫描不完整时按缺失推断。 */
+watch(
+  () => props.scanning,
+  (scanning, wasScanning) => {
+    if (wasScanning && !scanning && props.show) {
+      selected.value = autoSelectAfterScan(props.scan, props.anchors);
+    }
   },
 );
 
@@ -573,16 +611,12 @@ function toggle(uuid: string) {
 
 function requestRelease() {
   if (selectedCount.value === 0) return;
-  pending.value = "release";
+  pending.value = true;
 }
 
 function confirmPending() {
-  if (pending.value === "release") {
-    emit("release", [...selected.value]);
-  } else if (pending.value === "reclaim") {
-    emit("reclaim");
-  }
-  pending.value = null;
+  if (pending.value) emit("release", [...selected.value]);
+  pending.value = false;
 }
 
 function close() {
@@ -628,10 +662,6 @@ async function pickRoots() {
 .anchor-refresh {
   margin-left: auto;
 }
-/* 成功提示沿用 kv-note，仅补与下方工具条的间距 */
-.anchor-notice {
-  margin: 0 0 12px;
-}
 /* 清单标题尾的常驻勾选计数：分区分隔线之后靠右，字体口径同只读读数 */
 .anchor-selected {
   order: 1;
@@ -656,6 +686,13 @@ async function pickRoots() {
   letter-spacing: 0.16em;
   color: rgba(0, 212, 255, 0.75);
 }
+.anchor-scan-updated {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .anchor-scan-progress {
   flex: 1;
   min-width: 0;
@@ -668,39 +705,88 @@ async function pickRoots() {
   align-items: center;
   gap: 10px;
 }
-/* 覆盖范围清单：每行一个位置，路径单行省略，状态用纯文字颜色区分 */
+/* 扫描摘要：标签与数值紧邻成组，按内容宽度排列，不做等分留白 */
+.anchor-scan-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 18px;
+}
+.anchor-metric {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.anchor-metric-label {
+  flex: none;
+  font-size: 10px;
+  line-height: 1.2;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+.anchor-metric-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 1.2;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+.anchor-scan-partial {
+  margin-top: 10px;
+}
+.anchor-scan-empty {
+  margin-top: 2px;
+}
+/* 覆盖范围：一行一个位置，来源固定列宽，路径与状态紧邻；列表限高滚动 */
 .anchor-coverage {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 1px;
   margin: 8px 0 0;
   padding: 0;
   list-style: none;
+  max-height: 132px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.anchor-coverage::-webkit-scrollbar {
+  display: none;
 }
 .anchor-coverage-row {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  min-height: 22px;
   font-family: var(--font);
-  font-size: 10px;
+  font-size: 10.5px;
   line-height: 1.5;
   color: var(--text-secondary);
 }
 .anchor-coverage-source {
   flex: none;
+  min-width: 32px;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
   color: var(--text-muted);
-  letter-spacing: 0.08em;
 }
 .anchor-coverage-path {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 64%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .anchor-coverage-state {
   flex: none;
+  font-size: 10px;
 }
 .anchor-coverage-state.is-alert {
   color: var(--danger);
@@ -710,6 +796,10 @@ async function pickRoots() {
 }
 .anchor-root-remove {
   flex: none;
+  margin-left: 2px;
+}
+.anchor-scan-hint {
+  margin-top: 10px;
 }
 /* 动态分区揭示：高度与不透明度平滑展开，避免新面板把清单整体瞬移；
    文字层不做位移/缩放/滤镜，保持字形清晰 */
@@ -758,42 +848,44 @@ async function pickRoots() {
 }
 .anchor-table {
   width: 100%;
-  /* 表头要做成一枚独立的半透明圆角托板：必须用 separate 才能让首尾
-     单元格的圆角真正生效；border-spacing:0 保证列与行仍严丝合缝。 */
+  /* 表格保持 separate：sticky 表头与单元格边框不合并，滚动时不抖动 */
   border-collapse: separate;
   border-spacing: 0;
   font-family: var(--font);
   font-size: 12px;
 }
+/* 表头：无托板、无光缝，只保留薄线与圆角；透明材质负责压住滚动内容 */
 .anchor-table th {
   position: sticky;
   top: 0;
   z-index: 1;
-  padding: 9px 8px 7px;
-  /* 半透明冷光托板：不再向透明渐隐，读作一枚完整的圆角表头条；
-     背衬模糊负责压住滚动内容，文字保持在上层。 */
-  background: linear-gradient(
-    180deg,
-    rgba(205, 224, 244, 0.075) 0%,
-    rgba(205, 224, 244, 0.045) 100%
-  );
-  -webkit-backdrop-filter: blur(16px) saturate(150%);
-  backdrop-filter: blur(16px) saturate(150%);
-  box-shadow:
-    inset 0 1px 0 rgba(var(--white-rgb), 0.07),
-    inset 0 -1px 0 rgba(205, 224, 244, 0.12);
+  padding: 9px 8px 8px;
+  background: rgba(7, 11, 18, 0.55);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  backdrop-filter: blur(14px) saturate(140%);
+  box-shadow: none;
+  border-bottom: 1px solid rgba(205, 224, 244, 0.10);
   text-align: left;
   font-weight: 500;
   font-size: 10px;
   letter-spacing: 0.16em;
   color: rgba(212, 226, 241, 0.92);
-  text-shadow: 0 1px 2px rgba(var(--black-rgb), 0.55);
+  text-shadow: none;
+}
+/* 无背衬折射能力时加深底色，保证表头文字可读 */
+@supports not ((-webkit-backdrop-filter: blur(2px)) or (backdrop-filter: blur(2px))) {
+  .anchor-table th {
+    background: rgba(7, 11, 18, 0.92);
+  }
 }
 .anchor-table th:first-child {
-  border-radius: 8px 0 0 8px;
+  border-radius: 6px 0 0 6px;
 }
 .anchor-table th:last-child {
-  border-radius: 0 8px 8px 0;
+  border-radius: 0 6px 6px 0;
+}
+.anchor-table tbody tr:first-child td {
+  border-top: 0;
 }
 /* 列名与尾线：线从标签右侧起、向右渐隐；单元格之间留出自然断口，
    读作一排分区标题，而不是一根贯穿表头的横杠。 */
@@ -903,6 +995,19 @@ async function pickRoots() {
   color: var(--text-muted);
 }
 .anchor-path--capped {
+  color: var(--text-muted);
+}
+.anchor-dead-ids {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  word-break: break-all;
+}
+.anchor-dead-id {
+  font-family: var(--font);
+  color: var(--text-secondary);
+}
+.anchor-dead-more {
   color: var(--text-muted);
 }
 .anchor-empty {

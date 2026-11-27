@@ -2,7 +2,7 @@
  * presetMetrics.ts — 安全防护面板指标合成纯函数
  *
  * 职责：
- *   面板三个百分比（CPU 开销 / 安全覆盖 / 综合评分）的真实数据合成层。
+ *   面板三个百分比（CPU 占用 / 安全覆盖 / 综合评分）的真实数据合成层。
  *   输入全部来自真实来源（后端系统采样、后端权威配置快照、防御闭环
  *   运行时报告），不包含任何随滑块位置摆动的模拟公式；纯函数可单测。
  *
@@ -72,10 +72,13 @@ export function computeSecurityCoverage(inp: CoverageInputs): number {
 /**
  * 合成综合评分（0~100 整数）
  * @param coverage 安全覆盖度
- * @param cpuUsage CPU 占用率（-1 = 无基线，按 50 中性负载计）
+ * @param cpuUsage 全机 CPU 时间占用率（null = 无有效样本，按 50 中性负载计）
  */
-export function computeOverallScore(coverage: number, cpuUsage: number): number {
-  const load = cpuUsage >= 0 ? cpuUsage : 50;
+export function computeOverallScore(
+  coverage: number,
+  cpuUsage: number | null,
+): number {
+  const load = cpuUsage ?? 50;
   const pct =
     coverage * OVERALL_COVERAGE_WEIGHT + (100 - load) * OVERALL_LOAD_WEIGHT;
   return Math.round(Math.max(0, Math.min(100, pct)));
