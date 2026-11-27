@@ -40,7 +40,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
-import type { RepairState } from "../../composables/useAppUpdater";
+import type { RepairState } from "../../composables/app/useAppUpdater";
 
 const props = defineProps<{
   modelValue: boolean;

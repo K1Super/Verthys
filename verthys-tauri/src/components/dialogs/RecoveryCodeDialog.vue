@@ -82,8 +82,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
-import { useClipToast } from "../../composables/useClipToast";
-import { useToastCenter } from "../../composables/useToastCenter";
+import { useClipToast } from "../../composables/ui/useClipToast";
+import { useToastCenter } from "../../composables/ui/useToastCenter";
 
 const props = defineProps<{
   show: boolean;

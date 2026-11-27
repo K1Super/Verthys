@@ -19,7 +19,7 @@ vi.mock("../../lib/verthys", () => ({
   photoFullNext: fullNextMock,
   photoFullCancel: fullCancelMock,
 }));
-vi.mock("../../utils/modal_stack", () => ({
+vi.mock("../../utils/ui/modal_stack", () => ({
   pushModal: vi.fn(),
   popModal: vi.fn(),
 }));

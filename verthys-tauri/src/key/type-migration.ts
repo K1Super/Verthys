@@ -47,8 +47,8 @@ import {
   TYPE_ACCOUNT_OLD,
   TYPE_FILEVERTHYS_META_OLD,
 } from "../constants/record_types";
-import { withTimeout } from "../utils/promise_utils";
-import { createLogger } from "../utils/logger";
+import { withTimeout } from "../utils/ipc/promise_utils";
+import { createLogger } from "../utils/logging/logger";
 
 const log = createLogger("type-migration");
 

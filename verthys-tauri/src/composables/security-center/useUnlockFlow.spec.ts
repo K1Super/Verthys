@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ref } from "vue";
-import { VerthysErrorCode } from "../../lib/verthys_error";
+import { VerthysErrorCode } from "../../lib/util/verthys_error";
 import type { VerifyRhythm } from "./useVerifyRhythm";
 
 const mocks = vi.hoisted(() => ({
@@ -24,10 +24,10 @@ const mocks = vi.hoisted(() => ({
   preloadWorker: vi.fn(),
 }));
 
-vi.mock("../../lib/keyManager", async () => {
+vi.mock("../../lib/util/keyManager", async () => {
   const { ref } = await import("vue");
-  const actual = await vi.importActual<typeof import("../../lib/verthys_error")>(
-    "../../lib/verthys_error",
+  const actual = await vi.importActual<typeof import("../../lib/util/verthys_error")>(
+    "../../lib/util/verthys_error",
   );
   return {
     // 真实错误码与文案翻译：确认流程依赖错误码判别

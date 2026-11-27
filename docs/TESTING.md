@@ -111,7 +111,7 @@ cargo test updater
 
 # 前端更新状态机与锁库闸门
 Set-Location .\verthys-tauri
-npx vitest run src/composables/useAppUpdater.spec.ts src/session/security-session.spec.ts
+npx vitest run src/composables/app/useAppUpdater.spec.ts src/session/security-session.spec.ts
 
 # 清单生成脚本与 profile 静态门
 node --check scripts/release/make_updater_manifest.mjs

@@ -4,7 +4,7 @@
 
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
-import { sanitizeSvg } from "../../utils/safe_svg";
+import { sanitizeSvg } from "../../utils/ui/safe_svg";
 
 const props = defineProps<{ source: string }>();
 const host = ref<HTMLSpanElement | null>(null);

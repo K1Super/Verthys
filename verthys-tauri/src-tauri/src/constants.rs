@@ -262,9 +262,9 @@ pub mod command_names {
         /// 存储统计（活数据/可回收字节）
         pub const STORAGE_STATS: &str = "verthys_storage_stats";
         /// 空间压缩（原样密文重建 + 原子替换）
-        pub const STORAGE_COMPACT: &str = "verthys_storage_compact";
+
         /// 取消空间压缩
-        pub const STORAGE_COMPACT_CANCEL: &str = "verthys_storage_compact_cancel";
+
         /// 流式导出：创建写入会话（暂存文件）
         pub const WRITE_USER_FILE_STREAM: &str = "write_user_file_stream";
         /// 流式导出：追加原始数据块

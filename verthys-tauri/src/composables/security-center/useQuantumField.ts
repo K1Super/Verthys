@@ -72,8 +72,8 @@
  */
 
 import { onBeforeUnmount, watch, type Ref } from 'vue';
-import { useGlobalIdleScheduler } from '../useGlobalIdleScheduler';
-import { useFrameGate } from '../useFrameGate';
+import { useGlobalIdleScheduler } from '../app/useGlobalIdleScheduler';
+import { useFrameGate } from '../ui/useFrameGate';
 import { createPacketRitual, type PacketRitual } from '../management/packetRitual';
 import { drawWaterFlow, WATER_MAX_POINTS, type WaterStyle } from '../management/flowWater';
 

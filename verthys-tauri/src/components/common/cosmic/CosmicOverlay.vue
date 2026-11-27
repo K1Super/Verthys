@@ -39,7 +39,7 @@ import CosmicBackdrop from "./CosmicBackdrop.vue";
 import CosmicDialog from "./CosmicDialog.vue";
 /* 模态栈与滚动锁由 utils/modal_stack 统一维护：多层窗口并存时只有栈顶
  * 响应 Esc；滚动锁按层计数，内层关闭不会提前解锁页面 */
-import { isTopModal, popModal, pushModal } from "../../../utils/modal_stack";
+import { isTopModal, popModal, pushModal } from "../../../utils/ui/modal_stack";
 
 interface Props {
   show: boolean;

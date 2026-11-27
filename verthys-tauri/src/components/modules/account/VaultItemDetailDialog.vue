@@ -99,13 +99,13 @@ import { computed } from "vue";
 import type { VaultEntry } from "../../../types/verthys";
 import type { VaultTypeDef } from "../../../constants/vault_item_types";
 import { resolveVaultIcon } from "../../../constants/vault_item_types";
-import type { VaultDetailField } from "../../../lib/vault_item_detail";
-import { buildVaultDetailSections } from "../../../lib/vault_item_detail";
+import type { VaultDetailField } from "../../../lib/vault/vault_item_detail";
+import { buildVaultDetailSections } from "../../../lib/vault/vault_item_detail";
 import {
   VAULT_TONE_RGB_VARS,
   vaultItemTitle,
   vaultSecretText,
-} from "../../../lib/vault_item_card";
+} from "../../../lib/vault/vault_item_card";
 import CosmicOverlay from "../../common/cosmic/CosmicOverlay.vue";
 import SafeSvgIcon from "../../common/SafeSvgIcon.vue";
 

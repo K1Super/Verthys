@@ -398,8 +398,8 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { argon2id } from "hash-wasm";
 import { writeUserFile } from "../../lib/verthys";
-import { useToastCenter } from "../../composables/useToastCenter";
-import { useClipToast } from "../../composables/useClipToast";
+import { useToastCenter } from "../../composables/ui/useToastCenter";
+import { useClipToast } from "../../composables/ui/useClipToast";
 import { useFloatingCards } from "../../composables/key-tools/useFloatingCards";
 import {
   ARGON2_PARAMS,

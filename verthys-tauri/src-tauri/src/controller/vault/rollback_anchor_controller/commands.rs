@@ -11,9 +11,7 @@ use serde_json::json;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 
-use crate::controller::types::{
-    AnchorScanProgress, VerthysResponse,
-};
+use crate::controller::types::{AnchorScanProgress, VerthysResponse};
 use crate::repository::anchor_scan_store::{self};
 use crate::repository::verthys_state::get_state_dir;
 use crate::state::AppState;
@@ -112,26 +110,32 @@ pub async fn verthys_rollback_anchor_release(
     Ok(resp)
 }
 
-/// 自动扫描已知容器位置，返回 UUID → 路径证据。
+/// 扫描全部本地容器位置，返回 UUID → 路径证据。
 ///
+/// - peek=true：只读取上次持久化证据，不遍历磁盘（打开管理弹窗时使用）；
 /// - roots 非空：校验并持久化为自定义位置后参与扫描；
-/// - force=false：最近一次扫描在缓存窗口内直接返回持久化证据；
-/// - deep=true：额外枚举固定磁盘顶级目录（显式触发，结果可能不完整）。
+/// - force=false：最近一次完整扫描在缓存窗口内直接返回持久化证据；
+/// - 其余情况执行一次全量扫描（本地磁盘根 + 自定义位置 + 当前/最近探针）。
 #[tauri::command]
 pub async fn verthys_rollback_anchor_scan(
     app: AppHandle,
     roots: Option<Vec<String>>,
     force: Option<bool>,
-    deep: Option<bool>,
+    peek: Option<bool>,
     on_progress: Channel<AnchorScanProgress>,
 ) -> Result<VerthysResponse, String> {
     let config_dir = get_state_dir(&app)?;
+    if peek.unwrap_or(false) {
+        let _guard = SCAN_LOCK.lock().await;
+        let store = load_store(&config_dir);
+        let result = build_scan_result(&store, &PassOutcome::default());
+        return Ok(scan_response(result));
+    }
     let additions = match normalize_custom_roots(roots.unwrap_or_default()) {
         Ok(additions) => additions,
         Err(message) => return Ok(scan_invalid(message)),
     };
     let force = force.unwrap_or(false);
-    let deep = deep.unwrap_or(false);
 
     let _guard = SCAN_LOCK.lock().await;
     SCAN_CANCEL.store(false, Ordering::SeqCst);
@@ -144,24 +148,23 @@ pub async fn verthys_rollback_anchor_scan(
     }
 
     if !force
-        && !deep
         && additions.is_empty()
         && is_cache_fresh(&store)
         && cache_matches_current_container(&app, &store)
     {
         // 缓存命中只返回既有证据，不重复写扫描审计。
-        let result = build_scan_result(&store, &PassOutcome::default(), store.last_pass_deep);
+        let result = build_scan_result(&store, &PassOutcome::default());
         return Ok(scan_response(result));
     }
 
     let app_for_task = app.clone();
     let config_for_task = config_dir.clone();
     let (store, outcome) = tokio::task::spawn_blocking(move || {
-        run_scan_pass(app_for_task, config_for_task, store, deep, on_progress)
+        run_scan_pass(app_for_task, config_for_task, store, on_progress)
     })
     .await
     .map_err(|e| format!("scan task join: {}", e))??;
-    let result = build_scan_result(&store, &outcome, deep);
+    let result = build_scan_result(&store, &outcome);
     audit_scan(&app, &result);
     Ok(scan_response(result))
 }
@@ -185,6 +188,6 @@ pub async fn verthys_rollback_anchor_scan_forget_root(
     if anchor_scan_store::remove_custom(&mut store, &path) {
         anchor_scan_store::save(&config_dir, &store)?;
     }
-    let result = build_scan_result(&store, &PassOutcome::default(), store.last_pass_deep);
+    let result = build_scan_result(&store, &PassOutcome::default());
     Ok(scan_response(result))
 }

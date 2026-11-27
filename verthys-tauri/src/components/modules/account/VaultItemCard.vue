@@ -110,13 +110,13 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { VaultEntry } from "../../../types/verthys";
-import type { VaultCardSecret, VaultCardView } from "../../../lib/vault_item_card";
+import type { VaultCardSecret, VaultCardView } from "../../../lib/vault/vault_item_card";
 import {
   VAULT_TONE_RGB_VARS,
   vaultReadoutColorVar,
   vaultSecretText,
-} from "../../../lib/vault_item_card";
-import { useCardShine } from "../../../composables/useCardShine";
+} from "../../../lib/vault/vault_item_card";
+import { useCardShine } from "../../../composables/ui/useCardShine";
 import SafeSvgIcon from "../../common/SafeSvgIcon.vue";
 
 const props = defineProps<{

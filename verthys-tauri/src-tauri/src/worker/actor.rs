@@ -34,8 +34,7 @@ use super::graceful::{
 };
 use super::protocol::{
     bounded_read_line, ActorRequest, BoundedLineError, ProgressEvent, RotateProgress,
-    StorageCompactProgress, MAX_LINE_BYTES, ROTATE_PROGRESS_IDLE_TIMEOUT,
-    STDERR_DRAIN_FINAL_TIMEOUT, STORAGE_PROGRESS_IDLE_TIMEOUT,
+    MAX_LINE_BYTES, ROTATE_PROGRESS_IDLE_TIMEOUT, STDERR_DRAIN_FINAL_TIMEOUT,
 };
 use super::stderr::{snapshot_stderr, StderrRing};
 
@@ -140,27 +139,6 @@ pub(crate) async fn actor_loop(
                     &progress_tx,
                     "轮换",
                     ROTATE_PROGRESS_IDLE_TIMEOUT,
-                    pid,
-                    &mut child,
-                    &stderr_ring,
-                    &child_alive,
-                    &ipc,
-                )
-                .await;
-                let _ = reply.send(result);
-            }
-            ActorRequest::SendStreamingStorage {
-                json,
-                reply,
-                progress_tx,
-            } => {
-                let result = handle_streaming_progress_send::<StorageCompactProgress>(
-                    &mut stdin,
-                    &mut stdout_reader,
-                    &json,
-                    &progress_tx,
-                    "空间压缩",
-                    STORAGE_PROGRESS_IDLE_TIMEOUT,
                     pid,
                     &mut child,
                     &stderr_ring,

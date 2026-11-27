@@ -77,7 +77,7 @@ import {
   ref, computed, onMounted, onBeforeUnmount, watch,
   type PropType,
 } from "vue";
-import { rafThrottle } from "../../../utils/debounce";
+import { rafThrottle } from "../../../utils/ipc/debounce";
 
 const props = defineProps({
   /** 数据源（建议传入 shallowRef 的 .value 或 computed 结果） */

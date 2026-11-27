@@ -10,6 +10,8 @@ pub struct AnchorInfo {
     pub uuid: String,
     pub generation: u64,
     /// unknown / active / dead / tampered
+    ///
+    /// active 只表示 TPM 见证密钥存在且指纹匹配，不代表容器文件仍然存在。
     pub witness: String,
 }
 
@@ -18,17 +20,21 @@ pub struct AnchorInfo {
 pub struct AnchorScanEntry {
     pub uuid: String,
     pub paths: Vec<String>,
+    /// 路径数超过单锚点展示上限，列表只保留前若干条。
+    ///
+    /// 只描述证据展示完整性；该 UUID 已被找到，不代表目录遍历被截断。
+    pub capped: bool,
 }
 
 /// 单个扫描位置的覆盖率与状态。
 ///
-/// deferred 表示本次扫描因预算用尽没有尝试该位置；证据仍沿用上次快照。
+/// deferred 表示本次扫描因目标上限没有尝试该位置；证据仍沿用上次快照。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AnchorScanRootReport {
     pub path: String,
     /// file / dir
     pub kind: String,
-    /// container / recent / custom / deep
+    /// container / recent / custom / volume
     pub source: String,
     pub available: bool,
     pub last_success_at: u64,
@@ -50,16 +56,20 @@ pub struct AnchorScanResult {
     pub roots: Vec<AnchorScanRootReport>,
     pub files_seen: u64,
     pub matched_count: u64,
+    /// 目录遍历被预算、取消或读取错误截断；单 UUID 证据展示上限不计入
     pub truncated: bool,
-    /// 本次扫描是否不完整（预算用尽、位置未尝试或遍历截断）
+    /// 本次扫描是否不完整（预算用尽、位置不可用或遍历截断）
     pub partial: bool,
     pub permission_errors: u64,
     pub other_errors: u64,
     pub scanned_at: u64,
-    pub deep: bool,
+    /// 全盘扫描的最大目录层级（从盘符根算起；自定义位置更深）
+    pub depth: u64,
+    /// 本次结果是否来自持久化缓存（true 表示未实际遍历磁盘）
+    pub cached: bool,
 }
 
-/// 扫描进度（仅深度扫描等长任务逐位置推送）。
+/// 扫描进度（长时间全量扫描逐目标推送）。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AnchorScanProgress {
     pub phase: String,
@@ -70,5 +80,3 @@ pub struct AnchorScanProgress {
     pub matched_count: u64,
     pub partial: bool,
 }
-
-

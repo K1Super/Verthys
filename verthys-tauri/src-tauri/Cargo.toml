@@ -84,7 +84,7 @@
 
 [package]
 name = "verthys-tauri"
-version = "4.7.0"
+version = "4.7.2"
 description = "Verthys 加密数据管理器"
 authors = ["Verthys"]
 edition = "2021"

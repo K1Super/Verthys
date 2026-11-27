@@ -105,7 +105,7 @@ use controller::vault::vault_rotate_controller::*;
 use controller::vault::preflight_controller::*;
 use controller::vault::scan_controller::*;
 use controller::vault::storage_controller::{
-    verthys_storage_compact, verthys_storage_compact_cancel, verthys_storage_stats,
+    verthys_storage_stats,
 };
 use controller::vault::verthys_batch_controller::*;
 use controller::vault::verthys_controller::*;
@@ -626,8 +626,6 @@ fn run_main_ui(
             verthys_forget_import_keys,
             verthys_gc_orphan_chunks,
             verthys_storage_stats,
-            verthys_storage_compact,
-            verthys_storage_compact_cancel,
             // 原生照片导入（worker job 拉取 + 单写者落库 + 进度推送）
             photo_import_start,
             photo_import_cancel,

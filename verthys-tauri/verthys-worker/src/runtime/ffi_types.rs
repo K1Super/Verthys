@@ -231,30 +231,8 @@ pub(crate) struct VerthysStorageStatsC {
     pub(crate) chunk_count: u64,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub(crate) struct VerthysCompactStatsC {
-    pub(crate) stage: u32,
-    pub(crate) reserved: u32,
-    pub(crate) before_bytes: u64,
-    pub(crate) after_bytes: u64,
-    pub(crate) reclaimed_bytes: u64,
-    pub(crate) records: u64,
-    pub(crate) chunks: u64,
-    pub(crate) bytes: u64,
-    pub(crate) live_bytes: u64,
-}
-
-pub(crate) type VerthysStorageCompactProgressC =
-    unsafe extern "C" fn(*mut c_void, *const VerthysCompactStatsC) -> i32;
-
 pub(crate) type VerthysGetStorageStatsFn =
     unsafe extern "C" fn(VerthysHandle, *mut VerthysStorageStatsC) -> u32;
-pub(crate) type VerthysCompactStorageFn = unsafe extern "C" fn(
-    VerthysHandle,
-    Option<VerthysStorageCompactProgressC>,
-    *mut c_void,
-) -> u32;
 
 /* 容器创建/恢复与 PCR 策略（与 verthys.h 对应入口对齐） */
 pub(crate) type VerthysV4CreateFn = unsafe extern "C" fn(

@@ -8,12 +8,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, h, nextTick, type App } from "vue";
 import type { VaultTypeDef } from "../../../constants/vault_item_types";
-import { saveCustomVaultTypes } from "../../../lib/vault_item_type_store";
+import { saveCustomVaultTypes } from "../../../lib/vault/vault_item_type_store";
 import VaultTypeEditorDialog from "./VaultTypeEditorDialog.vue";
 
 /* 保存动作只验证组件交给持久化层的形态；真实落盘由 vault_item_type_store.spec 覆盖 */
-vi.mock("../../../lib/vault_item_type_store", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../lib/vault_item_type_store")>();
+vi.mock("../../../lib/vault/vault_item_type_store", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../lib/vault/vault_item_type_store")>();
   return {
     ...actual,
     saveCustomVaultTypes: vi.fn(async () => ({ ok: true, persisted: true })),

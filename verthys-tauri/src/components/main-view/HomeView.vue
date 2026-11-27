@@ -60,7 +60,7 @@
 <script setup lang="ts">
 import HomeAtlas from "./HomeAtlas.vue";
 import BrandMark from "../common/BrandMark.vue";
-import { useSpectraTicks } from "../../composables/useSpectraTicks";
+import { useSpectraTicks } from "../../composables/ui/useSpectraTicks";
 import { TRANSITION } from "../../app/constants";
 
 /* 品牌字标（common/BrandMark.vue — compact 级）：

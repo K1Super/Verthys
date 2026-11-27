@@ -1426,8 +1426,13 @@ if (Test-Path -LiteralPath $bundleManifestPath -PathType Leaf) {
     $contractPath = Join-Path $CoreBuildDir "core\verthys.artifacts.json"
     if (Test-Path -LiteralPath $contractPath -PathType Leaf) {
         $bundleManifest.contract.sha256 = Get-FileSha256 $contractPath
-        ($bundleManifest | ConvertTo-Json -Depth 8) |
-            Set-Content -LiteralPath $bundleManifestPath -Encoding UTF8
+        # Windows PowerShell 5.1 的 UTF8 编码会写入 BOM，build.rs 的
+        # serde_json 会拒绝带 BOM 的清单。显式用无 BOM UTF-8 写回。
+        $manifestJson = $bundleManifest | ConvertTo-Json -Depth 8
+        [System.IO.File]::WriteAllText(
+            $bundleManifestPath,
+            $manifestJson,
+            (New-Object System.Text.UTF8Encoding($false)))
     }
     $manifestDllHash = Get-FileSha256 $DllTarget
     $manifestWorkerHash = Get-FileSha256 $WorkerBundledExe

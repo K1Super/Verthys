@@ -599,8 +599,8 @@
  * composables/photo-album/ 分层目录，入口仅通过依赖注入装配。
  */
 import { onMounted, onUnmounted, computed, ref, watch, nextTick, defineAsyncComponent } from "vue";
-import { isModuleReady } from "../../lib/keyManager";
-import { tryGc } from "../../utils/gc";
+import { isModuleReady } from "../../lib/util/keyManager";
+import { tryGc } from "../../utils/fs/gc";
 import StarlitSky from "../common/cosmic/StarlitSky.vue";
 import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";
 import CosmicEmpty from "../common/cosmic/CosmicEmpty.vue";
@@ -619,7 +619,7 @@ const QuantumProgressFlow = defineAsyncComponent(() => import("../common/cosmic/
 const ImportProgressOverlay = defineAsyncComponent(() => import("../common/cosmic/ImportProgressOverlay.vue"));
 
 /* ===== 分层 composable 装配（依赖加载调度器） ===== */
-import { useToastCenter } from "../../composables/useToastCenter";
+import { useToastCenter } from "../../composables/ui/useToastCenter";
 import { usePhotoData } from "../../composables/photo-album/usePhotoData";
 import { usePhotoImport } from "../../composables/photo-album/usePhotoImport";
 import { usePhotoExport } from "../../composables/photo-album/usePhotoExport";
@@ -627,9 +627,9 @@ import { usePhotoViewer } from "../../composables/photo-album/usePhotoViewer";
 import { usePhotoParse } from "../../composables/photo-album/usePhotoParse";
 import { usePhotoDelete } from "../../composables/photo-album/usePhotoDelete";
 import { usePhotoRepair } from "../../composables/photo-album/usePhotoRepair";
-import { useCardShine } from "../../composables/useCardShine";
-import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
-import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
+import { useCardShine } from "../../composables/ui/useCardShine";
+import { useModuleDialogGuard } from "../../composables/app/useModuleDialogGuard";
+import { useModuleEntrance, revealDelayOf } from "../../composables/ui/useModuleEntrance";
 // 防截屏保护：应用级会话单例（能力归属应用而非组件，模块卸载不关闭保护）
 import {
   ensureAdopted as ensurePrivacyAdopted,

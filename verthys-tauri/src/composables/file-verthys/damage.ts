@@ -10,7 +10,7 @@
  *   - 模块锁定、IPC 超时、载荷暂不可读等一律计入不可判定，绝不删除。
  */
 
-import { base64ToBytes } from "../../utils/binary_codec";
+import { base64ToBytes } from "../../utils/codec/binary_codec";
 
 /** 扫描所需的最小条目字段（来自清藏列表条目） */
 export interface FileRepairEntry {

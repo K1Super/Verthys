@@ -1,0 +1,207 @@
+/*
+ * vty_store.h — 追加数据区、COW 目录树与 DataRoot（内部，不导出）
+ *
+ * 本实现以“追加段 + 加密目录 + 键控标识”为唯一寻址模型：分区/extent/
+ * 内容哈希寻址会把外部寻址假设带进来，破坏去重与完整性边界，不得引入。
+ */
+#ifndef VTY_STORE_H
+#define VTY_STORE_H
+
+#include "vty_types.h"
+#include "vty_format.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* 单节点目标大小：超过即分裂；节点载荷整体 AEAD 加密。 */
+#define VTY_STORE_NODE_BYTES 4096u
+#define VTY_STORE_ENTRY_MAX  (VTY_STORE_NODE_BYTES / 4u)
+#define VTY_STORE_KEY_MAX    64u
+#define VTY_STORE_VAL_MAX    (VTY_STORE_NODE_BYTES - 128u)
+#define VTY_STORE_MAX_LEVEL  8u
+
+/* 删除不重排 B+tree：写一个 1 字节墓碑值，由业务层解释。
+ * 空值（0 字节）是合法的“存在性条目”，与墓碑必须可区分。 */
+#define VTY_STORE_TOMBSTONE_BYTE 0x01u
+
+typedef struct VtyStore VtyStore;
+
+/* 追加段定位符：hash 覆盖段头与 payload，防止段被搬移/替换后仍被引用。 */
+typedef struct {
+    uint8_t  type;
+    uint64_t seq;
+    uint64_t id;
+    uint64_t offset;
+    uint32_t total_len;
+    uint8_t  hash[VTY_HASH_BYTES];
+} VtySegmentLocator;
+
+/* 会话内一致点：写失败时恢复根指针与退役登记，未提交节点保持不可达。
+ * retired_n 之前的退役区间属于更早的已提交事务，不随本次回退复活。 */
+typedef struct {
+    VtyDataRootLocator loc;
+    uint8_t hash[VTY_HASH_BYTES];
+    size_t retired_n;
+    int space_ready;
+} VtyStoreCheckpoint;
+
+/* 空树根与最终 DataRoot 的规范计算；创建库与打开库都必须用同一实现，
+ * 否则“空库”在两侧会得到不同的根摘要。 */
+int vty_store_empty_root(const uint8_t vault_uuid[VTY_UUID_BYTES], uint64_t epoch,
+                         uint8_t out[VTY_HASH_BYTES]);
+int vty_store_data_root(const uint8_t vault_uuid[VTY_UUID_BYTES], uint64_t epoch,
+                        const uint8_t root_hash[VTY_HASH_BYTES],
+                        uint8_t out[VTY_HASH_BYTES]);
+
+/* 打开既有数据区：校验 locator 边界、data_end 与根节点；
+ * 失败即 VTY_E_CORRUPT，不接受“先打开再修复”。 */
+int vty_store_open(const char *path,
+                   const uint8_t kc[VTY_KEY_BYTES],
+                   const uint8_t vault_uuid[VTY_UUID_BYTES],
+                   uint64_t epoch,
+                   const VtyDataRootLocator *loc,
+                   const uint8_t data_root_hash[VTY_HASH_BYTES],
+                   VtyStore **out);
+
+/* 空库 locator：root_node_id=0、data_end=数据区起点；
+ * 根摘要由 vty_store_empty_root 给出，创建路径不得自行拼摘要。 */
+int vty_store_empty_locator(const uint8_t vault_uuid[VTY_UUID_BYTES], uint64_t epoch,
+                            VtyDataRootLocator *out,
+                            uint8_t root_hash[VTY_HASH_BYTES]);
+
+void vty_store_close(VtyStore *s);
+
+/* put/get 的 key 只含业务键（调用方给出 keyspace）；内部编码加入
+ * keyspace 前缀，使跨空间键在字节层不可互换。空值表示删除。 */
+int vty_store_put(VtyStore *s, uint8_t keyspace,
+                  const uint8_t *key, size_t key_len,
+                  const uint8_t *value, size_t value_len);
+
+/* 空值（value_len==0）是合法条目：返回 VTY_OK 且 value=NULL/len=0。
+ * 键不存在返回 VTY_E_INVALID；调用方不得把“不存在”与“空值”混为一谈。 */
+int vty_store_get(VtyStore *s, uint8_t keyspace,
+                  const uint8_t *key, size_t key_len,
+                  uint8_t **value, size_t *value_len);
+
+/* 追加段只写数据区、不改目录；调用方取得 locator 后必须用 DataRoot
+ * 提交使其可达。type 仅接受 RECORD/CHUNK，目录段由内部写入。 */
+int vty_store_append_segment(VtyStore *s, uint8_t type, uint64_t seq, uint64_t id,
+                             const uint8_t *payload, size_t payload_len,
+                             VtySegmentLocator *out);
+
+/* 读取并校验段头字段与 BLAKE3(段头+payload)；失败返回 E_CORRUPT，绝不
+ * 返回未经完整性校验的 payload。 */
+int vty_store_read_segment(VtyStore *s, const VtySegmentLocator *loc,
+                           uint8_t **payload, size_t *payload_len);
+
+/* 裸读：只做数据区边界校验，不做哈希/AEAD。仅供删除路径读取密钥头与
+ * 段前缀（密钥头随后由记录层 AEAD 认证），不得用于业务数据读取。 */
+int vty_store_read_raw(VtyStore *s, uint64_t offset, uint8_t *buf, size_t len);
+
+/* 原位擦除段内区间：先校验段头与边界，再零写。seg_off/seg_len 必须是
+ * 已提交的数据段；part_off 相对段起点。失败返回 IO/CORRUPT，调用方保留
+ * 待擦标记并重试。 */
+int vty_store_scrub_range(VtyStore *s, uint64_t seg_off, uint32_t seg_len,
+                          uint32_t part_off, uint32_t part_len);
+
+/* 兜底擦除：只做数据区边界校验，不解析段头。调用方必须已从 AEAD 认证
+ * 过的目录叶取得偏移/长度（删除路径）。段头被磁盘损坏时仍能完成擦除。 */
+int vty_store_scrub_raw(VtyStore *s, uint64_t offset, uint32_t len);
+
+/* 将脏页刷盘；失败返回 VTY_E_IO。 */
+int vty_store_flush(VtyStore *s);
+
+/* 写墓碑值（1 字节）；键不存在时也写入，删除语义幂等。 */
+int vty_store_delete(VtyStore *s, uint8_t keyspace,
+                     const uint8_t *key, size_t key_len);
+
+/* keyspace 内全部键计数（含空值条目与墓碑，业务层自行过滤）。 */
+int vty_store_count(VtyStore *s, uint8_t keyspace, uint64_t *out_count);
+
+/* 空树判定（尚未提交任何目录节点）。 */
+int vty_store_is_empty(VtyStore *s);
+
+int vty_store_checkpoint(VtyStore *s, VtyStoreCheckpoint *out);
+int vty_store_restore(VtyStore *s, const VtyStoreCheckpoint *cp);
+
+/* 升序游标：打开时固定根节点，遍历期间新写入不改变已返回结果（COW）。
+ * start_key 可为 NULL；返回的 key 不含 keyspace 前缀。 */
+typedef struct VtyStoreCursor VtyStoreCursor;
+
+int vty_store_cursor_open(VtyStore *s, uint8_t keyspace,
+                          const uint8_t *start_key, size_t start_key_len,
+                          VtyStoreCursor **out);
+/* 取下一项。done=1 表示该 keyspace 已耗尽（本调用不返回条目）。 */
+int vty_store_cursor_next(VtyStoreCursor *c, int *done,
+                          uint8_t **key, size_t *key_len,
+                          uint8_t **value, size_t *value_len);
+void vty_store_cursor_close(VtyStoreCursor *c);
+
+/* 返回新的 DataRoot locator 与根摘要；调用方必须在同一次元数据提交里
+ * 写入 Keyring，不能先提交 locator 再补数据。 */
+int vty_store_commit(VtyStore *s, VtyDataRootLocator *out,
+                     uint8_t data_root_hash[VTY_HASH_BYTES]);
+
+/* 落盘自查（flush 后调用）：校验文件大小覆盖 DataRoot、根段哈希与
+ * DataRoot 摘要一致，并读取根节点 AEAD。不做全树遍历，供每次持久化
+ * 后快速确认“元数据指向的根确实在盘上”。 */
+int vty_store_verify_data_root(VtyStore *s,
+                               const VtyDataRootLocator *loc,
+                               const uint8_t data_root_hash[VTY_HASH_BYTES],
+                               uint64_t *out_file_size,
+                               uint64_t *out_mtime_ms);
+
+/* 遍历全部节点与引用段，校验 hash/AEAD/偏移与 data_end。 */
+int vty_store_verify(VtyStore *s);
+
+/* 存储统计：文件高水位、活目录树字节与节点数。
+ *
+ * 只遍历当前 DataRoot 可达的活节点，不统计删除后遗留的旧节点；调用方
+ * 用 file_size - (tree_bytes + 活段字节) 得到可回收空间。 */
+typedef struct {
+    uint64_t file_size;
+    uint64_t data_end;
+    uint64_t tree_bytes;      /* 活目录节点段总长（含 32B 段头） */
+    uint64_t node_count;      /* 活目录节点数 */
+} VtyStoreStats;
+
+int vty_store_storage_stats(VtyStore *s, VtyStoreStats *out);
+
+/* 空闲区重建（解锁期由仓库层调用）：
+ * begin 清空并关闭复用；reserve 登记仍被引用的区间；finish 把剩余空洞
+ * 标为 FREE 并启用复用。任何一步失败都应 disable，退回追加模式。 */
+int vty_store_space_begin(VtyStore *s);
+int vty_store_space_reserve(VtyStore *s, uint64_t off, uint64_t len);
+int vty_store_space_finish(VtyStore *s);
+int vty_store_space_scan_nodes(VtyStore *s);
+void vty_store_space_disable(VtyStore *s);
+
+/* 删除路径：墓碑标记已写入、本次提交会使其持久化后，登记段回收。
+ * 区间在提交前保持占用，崩溃回退时不会把仍被旧墓碑引用的数据复用。 */
+void vty_store_retire_segment(VtyStore *s, uint64_t off, uint32_t len);
+
+/* 物理截断 [durable_end, file_size)。durable_end 必须取自已落盘的
+ * DataRoot；打开时可用文件中读到的 locator.data_end 清理崩溃遗留尾部。 */
+int vty_store_trim_tail(VtyStore *s, uint64_t durable_end);
+
+/* 紧凑批量构建：只允许在空 store（root_node_id==0 且 data_end 为数据区
+ * 起点）上使用；键必须按 keyspace 升序且严格递增。构建过程直接写叶/
+ * 内节点，不产生 COW 旧节点，供容器压缩重建目录树。
+ *
+ * 失败后调用方必须丢弃该 store 所在文件；本 API 不提供回滚。 */
+typedef struct VtyStoreBulk VtyStoreBulk;
+
+int vty_store_bulk_begin(VtyStore *s, VtyStoreBulk **out);
+int vty_store_bulk_add(VtyStoreBulk *b, uint8_t keyspace,
+                       const uint8_t *key, size_t key_len,
+                       const uint8_t *value, size_t value_len);
+/* 设置 DataRoot 根指针；成功后调用 vty_store_commit 落盘。 */
+int vty_store_bulk_finish(VtyStoreBulk *b);
+void vty_store_bulk_abort(VtyStoreBulk *b);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* VTY_STORE_H */

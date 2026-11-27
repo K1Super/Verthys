@@ -6,7 +6,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp, h, nextTick, type App } from "vue";
-import { toastState } from "../../composables/useToastCenter";
+import { toastState } from "../../composables/ui/useToastCenter";
 import RecoveryCodeDialog from "./RecoveryCodeDialog.vue";
 
 const CODE = "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH-IIII-JJJJ-KKKK-LLLL-MMMM-NNNN";

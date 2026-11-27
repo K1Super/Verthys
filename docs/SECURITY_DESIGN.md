@@ -186,7 +186,7 @@ flowchart TB
 
 ## 3. 解锁流程数据流
 
-以 `vty_vault_open`（`core/src/crypto/vty_keymanager_open.c`）为准。
+以 `vty_vault_open`（`core/src/crypto/keyring/vty_keymanager_open.c`）为准。
 
 ```mermaid
 sequenceDiagram
@@ -241,7 +241,7 @@ flowchart TB
 
 ### 4.1 后台模块巡检的威胁分级（误报边界）
 
-后台巡检（`security/background_patrol.rs` + `security/module_whitelist.rs`）对已加载模块做路径白名单与系统目录哈希基线校验，但“路径不在白名单”本身不是注入证据：NVIDIA App 的 `nvui.dll`、Bonjour 的 `mdnsNSP.dll` 等签名有效的第三方组件会正常注入所有进程。
+后台巡检（`security/patrol/background_patrol/mod.rs` + `security/patrol/module_whitelist/mod.rs`）对已加载模块做路径白名单与系统目录哈希基线校验，但“路径不在白名单”本身不是注入证据：NVIDIA App 的 `nvui.dll`、Bonjour 的 `mdnsNSP.dll` 等签名有效的第三方组件会正常注入所有进程。
 
 - **硬威胁（可触发应急熔断）**：未知路径且 Authenticode 签名无效；系统目录哈希失配且签名无效；受信位置抽样签名失效。
 - **软告警（仅日志与 `PATROL_SUSPECT` 审计，绝不销毁 Worker）**：未知路径但签名有效；系统哈希失配但签名有效（Windows Update 运行期换文件）；文件不可读导致哈希无法核验。
@@ -254,7 +254,7 @@ flowchart TB
 |---|---|---|---|
 | Spoofing 欺骗 | 伪冒合法进程/调用方 | brute_force（限流 + 一次性 auth_token）、session 守卫 | 解锁尝试限流，敏感命令需令牌 |
 | Tampering 篡改 | 改 DLL/改 .verthys/内存补丁 | integrity（.vsec+.rhat）、容器元数据 HMAC、DataRoot 摘要、记录/分片 AEAD | 三类篡改各有信号（INTEGRITY_FAIL / PROCESS_TAMPER / CONTAINER_HMAC） |
-| Repudiation 抵赖 | 操作无痕 | util/audit_log.rs + security_commands/audit.rs | 安全命令写入审计日志（AEAD 保护） |
+| Repudiation 抵赖 | 操作无痕 | util/security/audit_log.rs + security_commands/audit.rs | 安全命令写入审计日志（AEAD 保护） |
 | Information Disclosure 泄露 | 读内存/转储/冷启动 | memory_guard + secure_allocator + 进程隔离 | 密钥驻留独立隔离堆并在锁定/应急时清零；内核态密钥托管暂缓（用户态加固已生效，见 5.1） |
 | Denial of Service 拒绝服务 | 资源耗尽/暴力爆破 | emergency（分级响应）+ 资源上限（512MB/句柄/线程）+ brute_force | 达到预算拒绝新操作、熔断 |
 | Elevation of Privilege 提权 | 注入/Hook/进程镂空 | layer1 job_isolation、layer4 tls_loader+syscall_direct、layer5 process_sandbox、anti_inject | 进程级 mitigation + Job ACL 等效 PPL |
@@ -288,7 +288,7 @@ flowchart TB
 | 导出 | `Verthys_Export`（流式、明文经用户态缓冲，用后清零）；导出密码不混胡椒 |
 | 完整性校验 | `integrity_verify_startup`、`runtime_hash_verify(_periodic)`、`Verthys_VerifyIntegrity` |
 | 应急自毁 | `emergency_report / emergency_trigger`（TELEMETRY/DEGRADE/KILL 三级） |
-| 提交一致性 | A/B 元数据双副本原子提交；`index/vty_store_*.c` 数据区游标推进 |
+| 提交一致性 | A/B 元数据双副本原子提交；`index/store/vty_store_*.c` 数据区游标推进 |
 | 预设切档 | `security_apply_preset`（授权 → 原子落盘 → worker 切档 → C 投影回读，不一致回滚并报 `E_PRESET_VERIFY`）；落盘失败回滚置 `preset_persist_dirty` 阻断后续切档 |
 | 自完整性核验 | `integrity_check::verify_self_image_async`（启动主镜像 WinVerifyTrust）+ 后台巡检抽样复核；结果写 `INTEGRITY_CHECK` 审计事件 |
 | 痕迹清理 | `trace_cleanup::run_locked_cleanup_async`（锁定/退出触发）；仅删除指向应用自身痕迹域（`.verthys`/`.venc` 扩展名 + 应用自有目录前缀）的最近记录条目，写 `TRACE_CLEANUP` 审计事件 |

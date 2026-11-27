@@ -178,27 +178,27 @@ import {
 import {
   updateShallowItem, pushShallowItems, replaceShallowArray,
   clearShallowArray, removeShallowItems,
-} from "../../utils/shallow-array";
-import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, resolveTypeIds, invalidateScannedRecord, getRecordsDataB64Batch } from "../../lib/keyManager";
+} from "../../utils/codec/shallow-array";
+import { persistVerthys, deleteAndPersist, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, resolveTypeIds, invalidateScannedRecord, getRecordsDataB64Batch } from "../../lib/util/keyManager";
 import { TYPE_ACCOUNT } from "../../constants/record_types";
 import {
   BUILTIN_VAULT_TYPES,
   buildVaultTypeIndex, type VaultItemPayload, type VaultTypeDef,
 } from "../../constants/vault_item_types";
-import { decodeVaultItem, serializeVaultItem } from "../../lib/vault_item_codec";
+import { decodeVaultItem, serializeVaultItem } from "../../lib/vault/vault_item_codec";
 import {
   buildVaultCardView, vaultSearchText,
   type VaultCardView,
-} from "../../lib/vault_item_card";
-import { loadCustomVaultTypes } from "../../lib/vault_item_type_store";
+} from "../../lib/vault/vault_item_card";
+import { loadCustomVaultTypes } from "../../lib/vault/vault_item_type_store";
 import {
   applyVaultFilter, createEmptyVaultFilter, isEmptyVaultFilter,
   type VaultFilterCriteria,
-} from "../../lib/vault_item_filter";
-import { useClipToast } from "../../composables/useClipToast";
-import { useToastCenter } from "../../composables/useToastCenter";
-import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
-import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
+} from "../../lib/vault/vault_item_filter";
+import { useClipToast } from "../../composables/ui/useClipToast";
+import { useToastCenter } from "../../composables/ui/useToastCenter";
+import { useModuleDialogGuard } from "../../composables/app/useModuleDialogGuard";
+import { useModuleEntrance, revealDelayOf } from "../../composables/ui/useModuleEntrance";
 import VerthysSearchBar from "../common/verthys-ui/VerthysSearchBar.vue";
 import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
 import CosmicRingLoader from "../common/cosmic/CosmicRingLoader.vue";

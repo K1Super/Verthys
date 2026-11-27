@@ -9,26 +9,45 @@
  * 安装只接受与当前会话绑定的有效回执；准备后的字节保存在内存，移交后进程退出。
  */
 
+#[path = "checks/authenticode.rs"]
 mod authenticode;
+#[path = "flow/check.rs"]
 mod check;
+#[path = "infra/error.rs"]
 mod error;
+#[path = "apply/gate.rs"]
 mod gate;
+#[path = "apply/health.rs"]
 mod health;
+#[path = "flow/lifecycle.rs"]
 mod lifecycle;
+#[path = "apply/lkg.rs"]
 mod lkg;
+#[path = "infra/log.rs"]
 mod log;
+#[path = "checks/manifest.rs"]
 mod manifest;
+#[path = "apply/marker.rs"]
 mod marker;
+#[path = "apply/native.rs"]
 mod native;
+#[path = "checks/pe.rs"]
 mod pe;
+#[path = "apply/precheck.rs"]
 mod precheck;
+#[path = "apply/repair.rs"]
 mod repair;
+#[path = "flow/startup.rs"]
 mod startup;
+#[path = "infra/transport.rs"]
 mod transport;
+#[path = "flow/types.rs"]
 mod types;
+#[path = "checks/verify.rs"]
 mod verify;
 
 #[cfg(test)]
+#[path = "flow/tests.rs"]
 mod tests;
 
 // 命令宏由 #[tauri::command] 生成并在子模块内以 pub use 暴露；glob 重导出

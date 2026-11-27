@@ -32,8 +32,14 @@ pub use read::read_user_file;
 pub use stat::{user_file_stat, UserFileStat};
 pub use write::write_user_file;
 
-pub(super) use disk::{check_disk_space_blocking, nearest_existing_ancestor};
+// 阻塞实现仅供 file_controller 单元测试直接调用；生产路径统一走上面的
+// 异步命令入口，故按测试构建门控，避免生产编译出现未使用导入
+#[cfg(test)]
+pub(super) use disk::check_disk_space_blocking;
 pub(super) use path_guard::resolve_user_file_target;
+#[cfg(test)]
 pub(super) use read::read_user_file_range_blocking;
+#[cfg(test)]
 pub(super) use stat::user_file_stat_blocking;
+#[cfg(test)]
 pub(super) use write::write_user_file_blocking;

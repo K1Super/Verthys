@@ -89,7 +89,7 @@ vi.mock("./type-migration", () => ({
   isAccountRecordB64: vi.fn(() => false),
 }));
 
-vi.mock("../utils/logger", () => ({
+vi.mock("../utils/logging/logger", () => ({
   createLogger: () => ({
     debug: vi.fn(),
     info: vi.fn(),
@@ -104,7 +104,7 @@ import * as sessionLib from "../session/security-session";
 import { initGlobalKey, changeGlobalKey, verifyGlobalKey } from "./global-verthys";
 import { keyState, resetAllState } from "../state/key_state";
 import { TYPE_GLOBAL_KEY } from "../constants/key_manager_const";
-import { VerthysErrorCode } from "../lib/verthys_error";
+import { VerthysErrorCode } from "../lib/util/verthys_error";
 
 const PWD = "p@ss-verthys-9";
 const BIN_PWD = "bin-pass";

@@ -272,9 +272,9 @@ import { ACCOUNT_VAULT_TYPE_ID, VAULT_EXPIRY_FIELD_ID, groupVaultFieldSections, 
 import {
   buildVaultItemData,
   resolveSecretSaveAction,
-} from "../../../lib/vault_item_codec";
-import { vaultExpiryReadout, vaultExpiryTimestamp } from "../../../lib/vault_item_card";
-import { validateIdCardNumber } from "../../../lib/id_card_number";
+} from "../../../lib/vault/vault_item_codec";
+import { vaultExpiryReadout, vaultExpiryTimestamp } from "../../../lib/vault/vault_item_card";
+import { validateIdCardNumber } from "../../../lib/util/id_card_number";
 import { encryptPasswordField } from "../../../lib/verthys";
 import CosmicOverlay from "../../common/cosmic/CosmicOverlay.vue";
 import VaultRegionPicker from "./VaultRegionPicker.vue";

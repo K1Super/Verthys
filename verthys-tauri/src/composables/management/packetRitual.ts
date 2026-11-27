@@ -18,7 +18,7 @@
  *   - 传播到达终点与进入落定发生在同一帧（到达帧即落定首帧）
  */
 
-import { createLogger } from '../../utils/logger';
+import { createLogger } from '../../utils/logging/logger';
 
 const log = createLogger('packet-ritual');
 

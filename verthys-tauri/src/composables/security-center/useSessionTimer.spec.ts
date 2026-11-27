@@ -21,7 +21,7 @@ const authority = vi.hoisted(() => ({
   idleLevel: null as unknown as { value: string },
 }));
 
-vi.mock("../../lib/keyManager", async () => {
+vi.mock("../../lib/util/keyManager", async () => {
   const { ref } = await import("vue");
   const deadline = ref(0);
   authority.deadline = deadline;
@@ -35,7 +35,7 @@ vi.mock("../../lib/keyManager", async () => {
   };
 });
 
-vi.mock("../useGlobalIdleScheduler", async () => {
+vi.mock("../app/useGlobalIdleScheduler", async () => {
   const { ref } = await import("vue");
   const level = ref("active");
   authority.idleLevel = level;

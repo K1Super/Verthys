@@ -303,7 +303,7 @@ import {
   securityHardeningFailedRef,
   securityPresetRef,
   checkInitStatus,
-} from "../../lib/keyManager";
+} from "../../lib/util/keyManager";
 import {
   verthysPreheat,
   verthysPreflight,
@@ -331,12 +331,12 @@ const InitKeyView = defineAsyncComponent(() => import("../views/InitKeyView.vue"
 const VerifyView = defineAsyncComponent(() => import("../views/VerifyView.vue"));
 const DeviceMismatchView = defineAsyncComponent(() => import("../views/DeviceMismatchView.vue"));
 const ManagementView = defineAsyncComponent(() => import("../views/ManagementView.vue"));
-const ChangeKeyDialog = defineAsyncComponent(() => import("../management/ChangeKeyDialog.vue"));
-const ExportVerifyDialog = defineAsyncComponent(() => import("../management/ExportVerifyDialog.vue"));
+const ChangeKeyDialog = defineAsyncComponent(() => import("../management/keys/ChangeKeyDialog.vue"));
+const ExportVerifyDialog = defineAsyncComponent(() => import("../management/transfer/ExportVerifyDialog.vue"));
 const UpdaterAvailableDialog = defineAsyncComponent(() => import("../dialogs/UpdaterAvailableDialog.vue"));
-const VaultRotateDialog = defineAsyncComponent(() => import("../management/VaultRotateDialog.vue"));
-import { useToastCenter } from "../../composables/useToastCenter";
-import { useRecoveryNotices } from "../../composables/useRecoveryNotices";
+const VaultRotateDialog = defineAsyncComponent(() => import("../management/keys/VaultRotateDialog.vue"));
+import { useToastCenter } from "../../composables/ui/useToastCenter";
+import { useRecoveryNotices } from "../../composables/app/useRecoveryNotices";
 import { useViewMode } from "../../composables/security-center/useViewMode";
 // useDeviceBinding 必须在 useViewMode / useUnlockFlow 之前调用（提供 deviceCheckResult / checkDevice 注入）
 import { useDeviceBinding } from "../../composables/security-center/useDeviceBinding";
@@ -348,8 +348,8 @@ import { useModuleKeys } from "../../composables/security-center/useModuleKeys";
 import { usePreset } from "../../composables/security-center/usePreset";
 import { useDefenseStatus } from "../../composables/security-center/useDefenseStatus";
 import { useSystemMetrics } from "../../composables/security-center/useSystemMetrics";
-import { useAppUpdater } from "../../composables/useAppUpdater";
-import { updaterErrorMessage } from "../../lib/updater_error";
+import { useAppUpdater } from "../../composables/app/useAppUpdater";
+import { updaterErrorMessage } from "../../lib/util/updater_error";
 
 const emit = defineEmits<{ (e: "back"): void; (e: "panel-active", val: boolean): void }>();
 

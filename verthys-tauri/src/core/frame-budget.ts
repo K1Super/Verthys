@@ -43,7 +43,7 @@
  * （任务耗时均值/P50/P95/P99/当前档位/样本数/draw call）供诊断与测试消费。
  * ========================================================================== */
 
-import { useGlobalIdleScheduler } from "../composables/useGlobalIdleScheduler";
+import { useGlobalIdleScheduler } from "../composables/app/useGlobalIdleScheduler";
 
 /** 帧指标快照 */
 export interface FrameMetrics {

@@ -39,7 +39,7 @@
 </template>
 
 <script setup lang="ts">
-import { useWindowControls } from "../../composables/useWindowControls";
+import { useWindowControls } from "../../composables/ui/useWindowControls";
 
 withDefaults(defineProps<{ settingsOpen?: boolean }>(), { settingsOpen: false });
 defineEmits<{ (e: "settings"): void }>();

@@ -35,7 +35,7 @@ import {
   activeFrameIntervalMs,
   frameIntervalMsForLevel,
 } from "../settings/display-settings";
-import { useGlobalIdleScheduler } from "../composables/useGlobalIdleScheduler";
+import { useGlobalIdleScheduler } from "../composables/app/useGlobalIdleScheduler";
 import { frameBudgetMonitor } from "./frame-budget";
 
 /** 任务上下文：双时间参数（帧步进 / 墙钟），单位均为秒 */

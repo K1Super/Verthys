@@ -979,11 +979,11 @@ UI 不得使用“已自动回退”这类与 R0/R1 能力不符的表述；不�
 | T04 | Rust 更新服务骨架与 `updater_check`：会话、单飞、渠道端点、`raw_json` 解析 | `src-tauri/src/updater/*`、`lib.rs` | T03 | 检查成功 / 失败 / 无更新 / 渠道不匹配均有单测 |
 | T05 | `updater_prepare`：插件下载 + 密钥集复验 + SHA256 / size + PE 版本 + 兼容 | `updater/mod.rs`、`verify.rs`、`pe.rs` | T04 | 正向准备成功；签名 / key id / 哈希 / size / PE 负向全部拒绝 |
 | T06 | `updater_install`：闸门校验、marker 原子写、`install(bytes)`、失败语义 | `updater/mod.rs`、`marker.rs` | T05、T09 | 未授权安装拒绝；marker 落盘；安装交接日志完整 |
-| T07 | Vue 状态机与错误码：显式状态、转移表、越态防护、文案映射 | `src/composables/useAppUpdater.ts`、`src/lib/verthys_error.ts` | T04 | 状态转移矩阵单测；27 个错误码文案齐全；现有 7 条行为保留 |
+| T07 | Vue 状态机与错误码：显式状态、转移表、越态防护、文案映射 | `src/composables/app/useAppUpdater.ts`、`src/lib/util/verthys_error.ts` | T04 | 状态转移矩阵单测；27 个错误码文案齐全；现有 7 条行为保留 |
 | T08 | 预检：空间、单实例（命名互斥量 + 进程路径）、目录可写、物料存在、兼容环境 | `updater/precheck.rs` / 前端预检模块 | T04 | 各检查项独立失败路径；错误码与事件完整 |
 | T09 | 锁库闸门：`LockOutcome`、统一 `lockAll`（空锁库受控路径）、脏数据、密钥清理、`updater_confirm_lock` | `security-session.ts`、`SecurityCenter.vue`、`updater/mod.rs` | T07 | 未就绪不跳过；脏缓存中止；锁库失败保持会话；G2 关闭 |
 | T10 | 更新标记与健康自检：`pending.json`、启动状态、DLL / worker / ABI、结果归档 | `updater/marker.rs`、`lib.rs`、启动初始化链路 | T06 | 正向 Confirmed；失败 RolledBack；自检不触发解锁 |
-| T11 | 本地日志：事件 schema、JSONL、滚动、脱敏、导出 | `updater/log.rs`、`src/utils/logger.ts` | T07 | 事件字段白名单；导出脱敏；7 天 / 5 MB 规则 |
+| T11 | 本地日志：事件 schema、JSONL、滚动、脱敏、导出 | `updater/log.rs`、`src/utils/logging/logger.ts` | T07 | 事件字段白名单；导出脱敏；7 天 / 5 MB 规则 |
 | T12 | 单元 / 集成测试：Rust 解析 / 验签 / PE / marker / gate；Vue 状态机；脚本契约 | 对应 `*.spec.ts` / `#[cfg(test)]` / Node test | T04 ~ T11 | 新增用例全绿；现有测试全绿 |
 | T13 | CI 质量门：配置静态检查、清单契约、文档存在性、测试执行 | `.github/workflows/rust-frontend.yml`、`ci/*` | T02、T03、T12 | 违规即红；PR 可复现 |
 | T14 | 本机运行时回归矩阵：正向升级 + 十类负向注入 + 证据表 | `scripts/updater/updater_e2e_matrix.mjs`；证据随发布物料归档 | T04 ~ T11 | 矩阵通过并记录证据；旧版 / 容器完好 |
@@ -1034,7 +1034,7 @@ UI 不得使用“已自动回退”这类与 R0/R1 能力不符的表述；不�
 | 发布物料 | `scripts/release/release_update.mjs`（新增） | 清单一站式生成：签名、安装包副本、账本、渠道指针 |
 | Rust 更新服务 | `src-tauri/src/updater/*`（新增） | 清单 / 验签 / PE / marker / gate / 日志 / 命令 |
 | Rust 注册 | `src-tauri/src/lib.rs` | 注册命令；启动早期读取 marker |
-| 前端状态 | `src/composables/useAppUpdater.ts`、`src/composables/updater/*` | 迁移到 IPC 状态机；错误码；取消；进度 |
+| 前端状态 | `src/composables/app/useAppUpdater.ts`、`src/composables/updater/*` | 迁移到 IPC 状态机；错误码；取消；进度 |
 | 闸门 | `src/components/modules/SecurityCenter.vue` | 消费 `LockOutcome`；预检；健康 / 修复入口 |
 | 会话 | `src/session/security-session.ts` | `lockAll` 返回结构化结果；不吞异常 |
 | 错误 | `src/lib/updater_error.ts`（新增） | `E_UPDATER_*` 穷尽文案、可重试标记、跨语言契约 |
@@ -1396,12 +1396,12 @@ Phase S 由服务端事件聚合生成；Phase L 由 `scripts/updater/updater_re
 | 插件注册 | `verthys-tauri/src-tauri/src/lib.rs` 的 updater 插件注册 |
 | 插件依赖 | `verthys-tauri/src-tauri/Cargo.toml` 与 `Cargo.lock` 的 `tauri-plugin-updater` 条目 |
 | 权限 | `verthys-tauri/src-tauri/capabilities/default.json` 的更新权限声明 |
-| 前端状态层 | `verthys-tauri/src/composables/useAppUpdater.ts` |
-| 前端测试 | `verthys-tauri/src/composables/useAppUpdater.spec.ts` |
+| 前端状态层 | `verthys-tauri/src/composables/app/useAppUpdater.ts` |
+| 前端测试 | `verthys-tauri/src/composables/app/useAppUpdater.spec.ts` |
 | 安装闸门 | `verthys-tauri/src/components/modules/SecurityCenter.vue` 的安装闸门 |
 | 锁库实现 | `verthys-tauri/src/session/security-session.ts` 的锁库路径 |
-| 错误契约 | `verthys-tauri/src/lib/verthys_error.ts` 的错误文案映射 |
-| 日志工具 | `verthys-tauri/src/utils/logger.ts` |
+| 错误契约 | `verthys-tauri/src/lib/util/verthys_error.ts` 的错误文案映射 |
+| 日志工具 | `verthys-tauri/src/utils/logging/logger.ts` |
 | 清单生成 | `scripts/release/make_updater_manifest.mjs` |
 | 本机夹具 | `scripts/updater/updater_server.mjs` |
 | 构建脚本 | `build_production.ps1` 的更新物料阶段 |

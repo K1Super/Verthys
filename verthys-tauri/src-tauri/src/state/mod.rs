@@ -34,11 +34,16 @@ pub mod scan_pipeline;
 pub mod verthys_session;
 pub mod worker_lifecycle;
 
+#[path = "app/app_state.rs"]
 mod app_state;
+#[path = "app/cleanup.rs"]
 mod cleanup;
+#[path = "app/guards.rs"]
 mod guards;
 #[cfg(test)]
+#[path = "app/tests.rs"]
 mod tests;
+#[path = "app/types.rs"]
 mod types;
 
 // 重导出常用类型，供控制器直接 use crate::state::{...}

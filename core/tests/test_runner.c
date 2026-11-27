@@ -192,9 +192,6 @@ TEST(repo_file_chunk_manifest);
 TEST(repo_empty_name_and_tombstone_count);
 TEST(repo_system_domain_survives_module_enable_and_delete);
 TEST(repo_legacy_security_record_migrates_on_module_enable);
-TEST(compact_reclaims_deleted_space);
-TEST(compact_bulk_builder_many_records);
-TEST(compact_copies_live_file_chunks_and_drops_tombstones);
 
 /* 删除即密钥销毁（test_delete_scrub.c） */
 TEST(delete_zeroes_key_header_and_blocks_decrypt);
@@ -203,6 +200,7 @@ TEST(pending_scrub_is_compensated_on_maintain);
 TEST(legacy_record_delete_breaks_ciphertext);
 TEST(bulk_delete_scrubs_all_key_headers);
 TEST(maintenance_scrubs_legacy_tombstone);
+TEST(scrub_queue_skips_tombstones_and_reaches_pending);
 TEST(secure_delete_file_and_maintain);
 
 /* 仓库扫描与类型索引（test_repo_scan.c） */
@@ -217,7 +215,7 @@ TEST(api_find_lid_by_name);
 TEST(api_add_records_batch_roundtrip);
 TEST(api_replace_record_atomic);
 TEST(api_records_require_unlock);
-TEST(api_storage_stats_and_compact);
+TEST(api_delete_reclaims_space);
 
 /* 公共 API 模块 M1（test_api_modules.c） */
 TEST(api_modules_roundtrip_and_policy);
@@ -1077,15 +1075,13 @@ int main(int argc, char **argv)
     RUN_TEST(repo_empty_name_and_tombstone_count);
     RUN_TEST(repo_system_domain_survives_module_enable_and_delete);
     RUN_TEST(repo_legacy_security_record_migrates_on_module_enable);
-    RUN_TEST(compact_reclaims_deleted_space);
-    RUN_TEST(compact_bulk_builder_many_records);
-    RUN_TEST(compact_copies_live_file_chunks_and_drops_tombstones);
     RUN_TEST(delete_zeroes_key_header_and_blocks_decrypt);
     RUN_TEST(replace_scrubs_previous_version);
     RUN_TEST(pending_scrub_is_compensated_on_maintain);
     RUN_TEST(legacy_record_delete_breaks_ciphertext);
     RUN_TEST(bulk_delete_scrubs_all_key_headers);
     RUN_TEST(maintenance_scrubs_legacy_tombstone);
+    RUN_TEST(scrub_queue_skips_tombstones_and_reaches_pending);
     RUN_TEST(secure_delete_file_and_maintain);
     RUN_TEST(repo_scan_cursor_and_start_id);
     RUN_TEST(repo_scan_skips_tombstone_and_type_index);
@@ -1096,7 +1092,7 @@ int main(int argc, char **argv)
     RUN_TEST(api_add_records_batch_roundtrip);
     RUN_TEST(api_replace_record_atomic);
     RUN_TEST(api_records_require_unlock);
-    RUN_TEST(api_storage_stats_and_compact);
+    RUN_TEST(api_delete_reclaims_space);
     RUN_TEST(api_modules_roundtrip_and_policy);
     RUN_TEST(api_module_delete);
     RUN_TEST(api_recovery_rotate);

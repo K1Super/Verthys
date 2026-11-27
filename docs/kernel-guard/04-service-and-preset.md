@@ -342,7 +342,7 @@ UNARMED
 | C 预设矩阵 | `core/src/security/preset/security_preset.c` | 不改变 11 位投影；新增独立策略查询（K1 设计阶段确定） |
 | Rust 预设命令 | `verthys-tauri/src-tauri/src/security_commands/commands/preset.rs` | 切档事务加入内核检查与补偿 |
 | 预设持久化 | `verthys-tauri/src-tauri/src/security_commands/preset_persistence.rs` | 增加可选 `kernelPolicy` 字段 |
-| 应用侧门控 | `verthys-tauri/src-tauri/src/security/app_feature_gate.rs` | 不变；内核状态独立模块 |
+| 应用侧门控 | `verthys-tauri/src-tauri/src/security/guard/app_feature_gate.rs` | 不变；内核状态独立模块 |
 | UI | `verthys-tauri/src/composables/security-center/useDefenseStatus.ts`、`SecurityCenter.vue`、`SecurityDashboard.vue` | 新增内核加固状态区；11 位列表不变；KernelStatus、SECURE preferred 降级展示与降级审计已接入 |
 | P2 服务 | `security-service/` | KernelStatus 查询、ARM/REGISTER/DISARM 与签名响应已落地；健康检查、安装托管未落地 |
 | 驱动脚本 | `scripts/kernel/` | 安装/升级/回滚/卸载与发布门禁取证；默认不进入主构建，需显式执行 |

@@ -344,7 +344,7 @@ import ImportProgressOverlay from "../common/cosmic/ImportProgressOverlay.vue";
 import ConfirmDelete from "../common/verthys-ui/ConfirmDelete.vue";
 import StatusBanner from "../common/feedback/StatusBanner.vue";
 import SafeSvgIcon from "../common/SafeSvgIcon.vue";
-import { useCardShine } from "../../composables/useCardShine";
+import { useCardShine } from "../../composables/ui/useCardShine";
 import {
   verthysGetRecord, verthysForgetImportKeys, verthysGcOrphanChunks,
   userFileStat, checkDiskSpace, base64ToBytes,
@@ -357,7 +357,7 @@ import {
   verifyModuleCheck, openRecord,
   probeOuterRecord,
   type FileKdf,
-} from "../../lib/module_crypto";
+} from "../../lib/util/module_crypto";
 import { useFileRepair } from "../../composables/file-verthys/useFileRepair";
 import type { FileRepairEntry } from "../../composables/file-verthys/damage";
 import { runFileExport } from "../../composables/file-verthys/useFileExport";
@@ -370,17 +370,17 @@ import {
   type FileDeleteDeps,
   type FileDeleteResult,
 } from "../../composables/file-verthys/useFileDelete";
-import { persistVerthys, persistVerthysDetailed, deleteAndPersistBatch, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, resolveTypeIds, invalidateScannedRecord, getRecordsDataB64Batch, getSummaryRecord } from "../../lib/keyManager";
+import { persistVerthys, persistVerthysDetailed, deleteAndPersistBatch, getModuleCache, setModuleCache, invalidateSummaryRecord, invalidateFullRecord, addFullRecord, resolveTypeIds, invalidateScannedRecord, getRecordsDataB64Batch, getSummaryRecord } from "../../lib/util/keyManager";
 import { TYPE_FILEVERTHYS_META, TYPE_FILEVERTHYS_META_OLD } from "../../constants/record_types";
 import { MIN_TOKEN_LENGTH } from "../../constants/crypto_const";
 import { estimateBase64Size } from "../../cache/shared/base64-size";
-import { useToastCenter } from "../../composables/useToastCenter";
-import { useModuleEntrance, revealDelayOf } from "../../composables/useModuleEntrance";
+import { useToastCenter } from "../../composables/ui/useToastCenter";
+import { useModuleEntrance, revealDelayOf } from "../../composables/ui/useModuleEntrance";
 import {
   pushShallowItems, replaceShallowArray, updateShallowItem,
   removeShallowItems,
-} from "../../utils/shallow-array";
-import { debounce } from "../../utils/debounce";
+} from "../../utils/codec/shallow-array";
+import { debounce } from "../../utils/ipc/debounce";
 import VirtualCardGrid from "../common/verthys-ui/VirtualCardGrid.vue";
 
 /* ===== 瞬时提示（错误 / 状态）— 全局 Toast 中心；渲染归 ToastLayer ===== */
@@ -1431,7 +1431,7 @@ onUnmounted(() => {
 });
 
 /* 页面覆盖防护：切换模块时同步关闭所有 Teleport 弹窗，杜绝残留覆盖 */
-import { useModuleDialogGuard } from "../../composables/useModuleDialogGuard";
+import { useModuleDialogGuard } from "../../composables/app/useModuleDialogGuard";
 useModuleDialogGuard("verthys", () => {
   showImportDialog.value = false;
   // 口令窗必须走 closeKeyDialog（同时清空口令引用），不能只置 false

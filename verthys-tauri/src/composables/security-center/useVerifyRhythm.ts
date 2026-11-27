@@ -36,7 +36,7 @@
  */
 
 import { computed, ref, type Ref } from 'vue';
-import { createLogger } from '../../utils/logger';
+import { createLogger } from '../../utils/logging/logger';
 
 const log = createLogger('verify-rhythm');
 

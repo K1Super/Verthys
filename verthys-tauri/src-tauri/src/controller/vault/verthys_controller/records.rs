@@ -12,7 +12,7 @@ use crate::controller::types::{EnumerateBatch, VerthysResponse};
 use crate::repository::verthys_chunks;
 use crate::state::AppState;
 use std::collections::HashSet;
-use tauri::{Manager, State};
+use tauri::State;
 use zeroize::Zeroizing;
 /// add_record 请求体（name 与 data 为用户记录明文，一并借用序列化）
 #[derive(serde::Serialize)]
@@ -477,19 +477,8 @@ pub async fn verthys_delete_records(
             }
         }
     }
-    /* 删除已提交且台账已收敛：按阈值后台回收容器空间，避免反复导入/
-     * 删除只增不减。删除响应不等待压缩；失败不改变删除结论。 */
-    if resp.ok {
-        let app_for_gc = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let state = app_for_gc.state::<AppState>();
-            crate::controller::vault::storage_controller::auto_compact_after_delete(
-                &app_for_gc,
-                state.inner(),
-            )
-            .await;
-        });
-    }
+    /* 删除已提交：空间回收由 C 存储引擎在事务提交时完成，本层不再
+     * 触发任何后台压缩，删除响应也不等待空间整理。 */
     Ok(resp)
 }
 

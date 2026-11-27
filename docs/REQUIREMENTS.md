@@ -45,19 +45,19 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 
 - **描述**：通过安全预设创建新 `.verthys` 容器，路径不存在才允许，创建即完成解锁，Argon2id 参数按预设/校准写入元数据。
 - **验收标准**：前端 SecurityCenter 新建成功后进入 management 态；C 层对已存在路径返回 `VERTHYS_ERR_EXISTS`（0x4）。
-- **实现佐证**：前端 `src-tauri/src/controller/verthys_controller.rs`(verthys_create) → worker `verthys-tauri/verthys-worker/src/runtime/dispatch.rs`(`create`) → C `Verthys_V4Create` / `core/src/crypto/vty_keymanager_create.c`(`vty_vault_create`)。
+- **实现佐证**：前端 `src-tauri/src/controller/verthys_controller.rs`(verthys_create) → worker `verthys-tauri/verthys-worker/src/runtime/dispatch.rs`(`create`) → C `Verthys_V4Create` / `core/src/crypto/keyring/vty_keymanager_create.c`(`vty_vault_create`)。
 
 ### FR-02 打开/解锁保险库
 
 - **描述**：解锁已有容器，pepper 快速失败 → `.vsec` 验签 → worker 调 `Verthys_V4Unlock`；非当前格式文件在 worker magic 预检或 C 层格式门即拒绝（`VERTHYS_ERR_FORMAT`）。
 - **验收标准**：解锁成功进入 management 态并可读记录；非当前格式容器返回 `VERTHYS_ERR_FORMAT`（0x5）。
-- **实现佐证**：`core/src/api/lifecycle/verthys_api.c` + `core/src/crypto/vty_keymanager_open.c`(`vty_vault_open`) + `verthys-worker/src/runtime/worker.rs`(`check_container_magic`)。
+- **实现佐证**：`core/src/api/lifecycle/verthys_api.c` + `core/src/crypto/keyring/vty_keymanager_open.c`(`vty_vault_open`) + `verthys-worker/src/runtime/worker.rs`(`check_container_magic`)。
 
 ### FR-03 解锁原子性
 
 - **描述**：容器解锁为单阶段原子完成：密钥校验、元数据提交与仓库挂载全部成功后才进入 UNLOCKED；不存在部分解锁中间态。
 - **验收标准**：解锁失败时句柄保持 LOCKED，不暴露半初始化会话；成功后可立即读写。
-- **实现佐证**：`core/src/crypto/vty_keymanager_open.c`(`vty_vault_open`) + `core/src/api/lifecycle/verthys_api.c`。
+- **实现佐证**：`core/src/crypto/keyring/vty_keymanager_open.c`(`vty_vault_open`) + `core/src/api/lifecycle/verthys_api.c`。
 
 ### FR-04 解锁进度回传
 
@@ -76,7 +76,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 
 - **描述**：全局主密钥（GMK）生命周期——首次派生、验证、修改；GMK 永不出 worker 子进程。
 - **验收标准**：`verthys_derive_and_store_global_key`/`verthys_verify_global_key`/`verthys_change_global_key` 命令真实实现；验证器常量 `VERTHYS_GLOBAL_KEY_VERIFIER_v2__`（32B）。
-- **实现佐证**：`verthys-tauri/verthys-worker/src/runtime/gmk.rs` + `verthys-tauri/src-tauri/src/controller/key_controller.rs` + `verthys-tauri/src-tauri/src/controller/key_change_controller.rs`。
+- **实现佐证**：`verthys-tauri/verthys-worker/src/runtime/gmk.rs` + `verthys-tauri/src-tauri/src/controller/keys/key_controller.rs` + `verthys-tauri/src-tauri/src/controller/keys/key_change_controller.rs`。
 
 ### FR-07 模块子密钥派发
 
@@ -88,7 +88,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 
 - **描述**：容器与机器绑定，指纹 = SHA-256(CPU+主板+磁盘 组合)，支持 partial_match 权重语义。
 - **验收标准**：换机打开返回设备不匹配状态；`check_device_binding` 按权重判定。
-- **实现佐证**：`verthys-tauri/src-tauri/src/infrastructure/device_fingerprint.rs` + `device_controller.rs` + `core/src/security/layer3_hw_binding/hardware_binding.c`(MachineGuid)。
+- **实现佐证**：`verthys-tauri/src-tauri/src/infrastructure/runtime/device_fingerprint.rs` + `device_controller.rs` + `core/src/security/layer3_hw_binding/hardware_binding.c`(MachineGuid)。
 
 ### FR-09 会话倒计时与立即锁定
 
@@ -117,10 +117,10 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 - **验收标准**：`set_privacy_mode`/`get_privacy_status`/`adopt_privacy_session`/`reconcile_privacy`/
   `clear_clipboard` 命令真实实现；启动一律默认开启（每次启动自动施加保护、无需手动操作；
   会话内关闭仅本次会话有效，不持久化关闭选择）；关闭需凭证（凭证只存摘要、可重试、单次消费）。
-- **实现佐证**：`verthys-tauri/src-tauri/src/controller/privacy_controller.rs` +
-  `verthys-tauri/src-tauri/src/security/window_affinity.rs` +
-  `verthys-tauri/src-tauri/src/controller/clipboard_controller.rs` +
-  `verthys-tauri/src-tauri/src/security/clipboard_guard.rs`。
+- **实现佐证**：`verthys-tauri/src-tauri/src/controller/protection/privacy_controller/mod.rs` +
+  `verthys-tauri/src-tauri/src/security/guard/window_affinity.rs` +
+  `verthys-tauri/src-tauri/src/controller/protection/clipboard_controller.rs` +
+  `verthys-tauri/src-tauri/src/security/guard/clipboard_guard/mod.rs`。
 
 ### FR-13 USB 安全影子
 
@@ -150,13 +150,13 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 
 - **描述**：仅重加密数据密钥（不重加密业务数据），改密经容器密钥槽与元数据原子提交保护。
 - **验收标准**：`verthys_change_password` 命令实现（command 2013、worker op 474）；改密后旧密码解锁失败、新密码成功。
-- **实现佐证**：`core/src/api/transfer/verthys_export_import.c`(Verthys_ChangePassword) + `core/src/container/vty_keyslot.c`。
+- **实现佐证**：`core/src/api/transfer/verthys_export_import.c`(Verthys_ChangePassword) + `core/src/container/chunk/vty_keyslot.c`。
 
 ### FR-18 完整性校验
 
 - **描述**：全量遍历 AEAD 标签 + 哈希校验，输出损坏 lid 列表，禁止与写并发。
 - **验收标准**：`Verthys_VerifyIntegrity` 输出损坏计数；篡改容器后校验能识别。
-- **实现佐证**：`core/src/api/status/verthys_api_status.c`(VerifyIntegrity) + `core/src/index/vty_repo_*.c` / `vty_store_*.c`(读路径三重校验)。
+- **实现佐证**：`core/src/api/status/verthys_api_status.c`(VerifyIntegrity) + `core/src/index/repo/vty_repo_*.c` / `core/src/index/store/vty_store_*.c`(读路径三重校验)。
 
 ### FR-19 全量/摘要扫描
 
@@ -168,7 +168,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 
 - **描述**：worker 子进程 init、健康检查、自动恢复、残留清理；启动时解析 worker/DLL、校验架构与依赖完整性。
 - **验收标准**：worker 异常退出后自动恢复；启动预检失败给出明确错误；陈旧 worker 被清理。
-- **实现佐证**：`verthys-tauri/src-tauri/src/controller/worker_controller.rs` + `verthys-tauri/src-tauri/src/state/worker_lifecycle.rs`。
+- **实现佐证**：`verthys-tauri/src-tauri/src/controller/vault/worker_controller.rs` + `verthys-tauri/src-tauri/src/state/worker_lifecycle.rs`。
 
 ### FR-21 密码工具
 
@@ -195,7 +195,7 @@ Verthys 是一款 **Windows 首发、可跨平台的本地高安全桌面加密�
 ### NFR-03 全链路入参校验（刚性条款 2.1 / 3.4）
 
 - **要求**：外部输入（文件、参数、网络）校验净化，防范注入/路径遍历/越界。
-- **现状佐证**：解析纪律 AEAD→结构校验→仓库层语义校验三层纵深 + 回绕安全分解（`core/src/container/vty_format.c`、`core/src/index/vty_repo_record.c`）。
+- **现状佐证**：解析纪律 AEAD→结构校验→仓库层语义校验三层纵深 + 回绕安全分解（`core/src/container/vty_format.c`、`core/src/index/repo/vty_repo_record.c`）。
 - **验收**：单元与格式鲁棒性测试用例全量通过（`container/test_fuzz.c` 覆盖解析边界）。
 
 ### NFR-04 核心逻辑单元测试覆盖率 ≥ 80%（刚性条款 1.4）

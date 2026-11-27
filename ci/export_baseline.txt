@@ -4,7 +4,6 @@ Verthys_BulkImportBegin
 Verthys_BulkImportCommit
 Verthys_ChangePassword
 Verthys_ClearRecordCache
-Verthys_CompactStorage
 Verthys_Deinit
 Verthys_DeleteRecord
 Verthys_DeleteRecords

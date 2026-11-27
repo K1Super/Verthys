@@ -23,10 +23,10 @@ const mocks = vi.hoisted(() => ({
   releaseExemption: vi.fn(),
 }));
 
-vi.mock("../../../composables/useGlobalIdleScheduler", () => ({
+vi.mock("../../../composables/app/useGlobalIdleScheduler", () => ({
   useGlobalIdleScheduler: () => ({ level: { value: "active" } }),
 }));
-vi.mock("../../../composables/useFrameGate", () => ({
+vi.mock("../../../composables/ui/useFrameGate", () => ({
   useFrameGate: () => ({ start: mocks.start, stop: mocks.stop }),
 }));
 vi.mock("../../../core/master-frame-loop", () => ({

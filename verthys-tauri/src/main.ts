@@ -28,7 +28,7 @@ import { validateConfig } from "./app/config";
 import { AppContext } from "./app/context";
 import { installGlobalErrorHandler } from "./app/error-handler";
 import { bootstrap } from "./app/bootstrap";
-import { installGcHelper } from "./utils/gc";
+import { installGcHelper } from "./utils/fs/gc";
 
 /**
  * 前端进程入口

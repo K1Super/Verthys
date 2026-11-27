@@ -31,6 +31,8 @@ pub(crate) struct AnchorEntry {
     pub(crate) uuid: String,
     pub(crate) generation: u64,
     /// unknown / active / dead / tampered
+    ///
+    /// active 只表示 TPM 见证密钥存在且指纹匹配，不代表容器文件仍然存在
     pub(crate) witness: String,
 }
 

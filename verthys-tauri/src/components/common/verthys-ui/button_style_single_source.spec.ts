@@ -232,7 +232,7 @@ describe("旧按钮族：全项目清除", () => {
 });
 
 describe("回退锚点管理弹窗：按钮族装配", () => {
-  const anchorDialog = read("../../management/AnchorManagerDialog.vue");
+  const anchorDialog = read("../../management/anchors/AnchorManagerDialog.vue");
 
   it("动作按钮全部使用星野键族色相，并统一紧凑规格", () => {
     const tags = anchorDialog.match(/<button[^>]*>/g) ?? [];

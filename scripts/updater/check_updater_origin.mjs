@@ -8,31 +8,10 @@
  * 用法:
  *   node scripts/updater/check_updater_origin.mjs [--url http://127.0.0.1:8765]
  */
+import { fail, parseArgs } from "../lib/cli_args.mjs";
+
 const DEFAULT_BASE = "http://127.0.0.1:8765";
 const TIMEOUT_MS = 20000;
-
-function fail(message) {
-  console.error(`[FAIL] ${message}`);
-  process.exit(1);
-}
-
-function parseArgs(argv) {
-  const args = {};
-  for (let i = 0; i < argv.length; i++) {
-    const raw = argv[i];
-    if (raw === "--help" || raw === "-h") {
-      args.help = "1";
-      continue;
-    }
-    if (!raw.startsWith("--")) fail(`无法识别的参数: ${raw}`);
-    const key = raw.slice(2);
-    const value = argv[i + 1];
-    if (value === undefined || value.startsWith("--")) fail(`参数缺少取值: ${raw}`);
-    args[key] = value;
-    i++;
-  }
-  return args;
-}
 
 function header(response, name) {
   return response.headers.get(name) ?? "";

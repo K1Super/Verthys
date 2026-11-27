@@ -8,6 +8,7 @@ import { createReadStream, existsSync, realpathSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fail, parseArgs } from "../lib/cli_args.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
@@ -20,29 +21,6 @@ const CONTENT_TYPE = {
   ".sig": "text/plain; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
 };
-
-function fail(message) {
-  console.error(`[FAIL] ${message}`);
-  process.exit(1);
-}
-
-function parseArgs(argv) {
-  const args = {};
-  for (let i = 0; i < argv.length; i++) {
-    const raw = argv[i];
-    if (raw === "--help" || raw === "-h") {
-      args.help = "1";
-      continue;
-    }
-    if (!raw.startsWith("--")) fail(`无法识别的参数: ${raw}`);
-    const key = raw.slice(2);
-    const value = argv[i + 1];
-    if (value === undefined || value.startsWith("--")) fail(`参数缺少取值: ${raw}`);
-    args[key] = value;
-    i++;
-  }
-  return args;
-}
 
 const args = parseArgs(process.argv.slice(2));
 

@@ -63,7 +63,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import type { ChinaRegionProvince } from "../../../constants/china_regions";
-import { joinChinaRegionPath, parseChinaRegionPath } from "../../../lib/china_region";
+import { joinChinaRegionPath, parseChinaRegionPath } from "../../../lib/util/china_region";
 import VaultSelect from "../../common/verthys-ui/VaultSelect.vue";
 
 const props = defineProps<{

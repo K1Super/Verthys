@@ -58,7 +58,7 @@ import {
   translateVerthysError,
   VerthysErrorCode,
   type VerthysResult,
-} from '../../lib/keyManager';
+} from '../../lib/util/keyManager';
 import {
   verthysPreheat,
   verthysPreflight,

@@ -470,8 +470,8 @@ import {
   resolveVaultIcon,
 } from "../../../constants/vault_item_types";
 import { VAULT_ICON_LIBRARY } from "../../../constants/vault_item_types";
-import { VAULT_TONE_RGB_VARS } from "../../../lib/vault_item_card";
-import { saveCustomVaultTypes, sanitizeVaultTypeDefs, validateVaultTypeDefs } from "../../../lib/vault_item_type_store";
+import { VAULT_TONE_RGB_VARS } from "../../../lib/vault/vault_item_card";
+import { saveCustomVaultTypes, sanitizeVaultTypeDefs, validateVaultTypeDefs } from "../../../lib/vault/vault_item_type_store";
 import CosmicOverlay from "../../common/cosmic/CosmicOverlay.vue";
 import ConfirmDelete from "../../common/verthys-ui/ConfirmDelete.vue";
 import VaultSelect from "../../common/verthys-ui/VaultSelect.vue";

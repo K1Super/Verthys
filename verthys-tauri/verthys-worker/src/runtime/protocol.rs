@@ -22,7 +22,7 @@ mod tests;
 
 pub(crate) use base64::{base64_decode, base64_encode};
 pub(crate) use payloads::{
-    CompactResultEntry, FileFinishPayload, FileNextPayload, MediaDamageScan, MediaExportPayload,
+    FileFinishPayload, FileNextPayload, MediaDamageScan, MediaExportPayload,
     MediaFinishPayload, MediaMetaItem, MediaNextPayload, MediaPreviewRecord, MediaReadPayload,
     MediaVencPreview, StorageStatsEntry,
 };

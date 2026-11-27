@@ -8,7 +8,12 @@
 export interface AnchorInfo {
   uuid: string;
   generation: number;
-  /** unknown / active / dead / tampered */
+  /**
+   * unknown / active / dead / tampered
+   *
+   * active 只表示 TPM 见证密钥存在且指纹匹配，不代表容器文件仍然存在；
+   * 容器是否存在以扫描证据为准。
+   */
   witness: string;
 }
 
@@ -16,6 +21,12 @@ export interface AnchorInfo {
 export interface AnchorScanEntry {
   uuid: string;
   paths: string[];
+  /**
+   * 路径数超过单锚点展示上限，列表只保留前若干条。
+   *
+   * 只描述证据展示完整性；该 UUID 已被找到，不代表目录遍历被截断。
+   */
+  capped: boolean;
 }
 
 /** 单个扫描位置的覆盖率与状态 */
@@ -23,7 +34,7 @@ export interface AnchorScanRootReport {
   path: string;
   /** file / dir */
   kind: string;
-  /** container / recent / custom / deep / deep_user */
+  /** container / recent / custom / volume */
   source: string;
   available: boolean;
   last_success_at: number;
@@ -44,16 +55,20 @@ export interface AnchorScanResult {
   roots: AnchorScanRootReport[];
   files_seen: number;
   matched_count: number;
+  /** 目录遍历被预算、取消或读取错误截断；单 UUID 证据展示上限不计入 */
   truncated: boolean;
-  /** 本次扫描不完整：预算用尽、位置未尝试或遍历被截断 */
+  /** 本次扫描不完整：预算用尽、位置不可用或遍历被截断 */
   partial: boolean;
   permission_errors: number;
   other_errors: number;
   scanned_at: number;
-  deep: boolean;
+  /** 全盘扫描的最大目录层级（从盘符根算起；自定义位置更深） */
+  depth: number;
+  /** 本次结果是否来自持久化缓存（true 表示未实际遍历磁盘） */
+  cached: boolean;
 }
 
-/** 扫描进度（深度扫描等长任务逐位置推送） */
+/** 扫描进度（长时间全量扫描逐目标推送） */
 export interface AnchorScanProgress {
   phase: string;
   roots_total: number;
@@ -75,30 +90,6 @@ export interface StorageStats {
   record_count: number;
   file_count: number;
   chunk_count: number;
-}
-
-/** 空间压缩结果（非敏感计数；与后端 CompactResultEntry 对齐） */
-export interface StorageCompactResult {
-  stage: number;
-  before_bytes: number;
-  after_bytes: number;
-  reclaimed_bytes: number;
-  records: number;
-  chunks: number;
-  bytes: number;
-  live_bytes: number;
-}
-
-/** 空间压缩进度（storage://compact-progress 事件载荷） */
-export interface StorageCompactProgress {
-  stage: number;
-  before_bytes: number;
-  after_bytes: number;
-  reclaimed_bytes: number;
-  records: number;
-  chunks: number;
-  bytes: number;
-  live_bytes: number;
 }
 
 /** 后端统一响应（脱敏：仅返回操作结果与必要数据，不含密钥/句柄） */
@@ -237,10 +228,8 @@ export interface VerthysResponse {
   rotate_files?: number;
   rotate_chunks?: number;
   rotate_bytes?: number;
-  /** 存储统计（仅 verthys_storage_stats / verthys_storage_compact 返回） */
+  /** 存储统计（仅 verthys_storage_stats 返回） */
   storage_stats?: StorageStats;
-  /** 压缩结果（仅 verthys_storage_compact 返回） */
-  compact_result?: StorageCompactResult;
 }
 
 /**

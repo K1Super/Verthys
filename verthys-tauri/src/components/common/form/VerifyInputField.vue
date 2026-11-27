@@ -60,8 +60,8 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { masterFrameLoop, type ExemptionToken } from "../../../core/master-frame-loop";
-import { useFrameGate } from "../../../composables/useFrameGate";
-import { useGlobalIdleScheduler } from "../../../composables/useGlobalIdleScheduler";
+import { useFrameGate } from "../../../composables/ui/useFrameGate";
+import { useGlobalIdleScheduler } from "../../../composables/app/useGlobalIdleScheduler";
 
 const props = withDefaults(
   defineProps<{

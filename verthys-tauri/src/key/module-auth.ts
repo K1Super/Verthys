@@ -47,9 +47,9 @@ import {
   errFromUnknown,
   VerthysErrorCode,
   type VerthysResult,
-} from "../lib/verthys_error";
-import { createLogger } from "../utils/logger";
-import { bytesToBase64 } from "../utils/binary_codec";
+} from "../lib/util/verthys_error";
+import { createLogger } from "../utils/logging/logger";
+import { bytesToBase64 } from "../utils/codec/binary_codec";
 
 const log = createLogger("module-auth");
 

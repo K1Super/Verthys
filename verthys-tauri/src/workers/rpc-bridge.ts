@@ -13,7 +13,7 @@ import {
   openRecord,
   sealRecord,
   type CryptoModule,
-} from "../lib/module_crypto";
+} from "../lib/util/module_crypto";
 import type {
   WorkerRpcRequestMessage,
   WorkerRpcResultMessage,

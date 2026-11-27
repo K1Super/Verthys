@@ -107,8 +107,8 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount } from "vue";
-import { useGlobalIdleScheduler } from "../../composables/useGlobalIdleScheduler";
-import { useFrameGate } from "../../composables/useFrameGate";
+import { useGlobalIdleScheduler } from "../../composables/app/useGlobalIdleScheduler";
+import { useFrameGate } from "../../composables/ui/useFrameGate";
 
 /* ============================================================================
  * 轨道系统参数（几何单一权威源 — 模板 ellipse 与脚本 point() 同源）：

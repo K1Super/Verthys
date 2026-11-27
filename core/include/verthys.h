@@ -1390,28 +1390,11 @@ typedef struct {
     uint64_t live_tree_bytes;    /* 活目录树字节 */
     uint64_t live_segment_bytes; /* 活记录/分片段字节 */
     uint64_t live_bytes;         /* 活数据总字节 */
-    uint64_t reclaimable_bytes;  /* 文件大小与活字节之差（可压缩回收） */
+    uint64_t reclaimable_bytes;  /* 文件大小与活字节之差（空闲区 + 碎片） */
     uint64_t record_count;       /* 活记录数（含照片分块记录） */
     uint64_t file_count;         /* 活文件模块文件数 */
     uint64_t chunk_count;        /* 活文件模块分片数 */
 } VerthysStorageStats;
-
-/* 压缩进度（非敏感计数） */
-typedef struct {
-    uint32_t stage;              /* 与内部 VTY_COMPACT_STAGE_* 对齐 */
-    uint32_t reserved;
-    uint64_t before_bytes;
-    uint64_t after_bytes;
-    uint64_t reclaimed_bytes;
-    uint64_t records;
-    uint64_t chunks;
-    uint64_t bytes;
-    uint64_t live_bytes;
-} VerthysCompactStats;
-
-/* 进度回调：返回非 0 取消压缩（取消后原容器保持不变）。 */
-typedef int (VERTHYS_CALL *VerthysCompactProgress)(void *user,
-                                                   const VerthysCompactStats *stats);
 
 /* 落盘自查结果（非敏感结构元数据，不含密钥/明文） */
 typedef struct {
@@ -1438,25 +1421,16 @@ VERTHYS_API VerPersistStatus VERTHYS_CALL Verthys_VerifyPersist(
     VerPersistVerifyResult *out_result);
 
 /* ================================================================== *
- * 存储统计与空间压缩（API 版本 0x0018）
+ * 存储统计（API 版本 0x0018）
  *
- * 压缩只重排活数据：不换密钥、不改 epoch、不重加密、不需要口令；删除
- * 后遗留的墓碑、旧 COW 节点与旧段在原子替换后从文件中消失。
- * 压缩期间同一句柄的其它写操作由 API 互斥量串行化；调用方不得并发。
+ * 删除后的记录/分片段与退役 COW 节点在提交时立即进入空闲区，后续写入
+ * 优先复用，尾部空洞随提交截断；调用方无需也不提供手动回收入口。
  * ================================================================== */
 
 /* 返回当前解锁会话的活数据/可回收字节统计。只读。 */
 VERTHYS_API VerthysResult VERTHYS_CALL Verthys_GetStorageStats(
     VerthysHandle handle,
     VerthysStorageStats *out_stats);
-
-/* 同步压缩当前容器；progress 可为 NULL。成功返回时句柄仍处于解锁态，
- * 内部会话已切换到压缩后的新文件。取消返回 VERTHYS_ERR_POLICY，原容器
- * 不被替换。 */
-VERTHYS_API VerthysResult VERTHYS_CALL Verthys_CompactStorage(
-    VerthysHandle handle,
-    VerthysCompactProgress progress,
-    void *user);
 
 /* ================================================================== *
  * 回退锚点维护接口（API 版本 0x0016）

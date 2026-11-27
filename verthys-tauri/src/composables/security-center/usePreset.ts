@@ -37,7 +37,7 @@ import {
   isLockedFeature,
   globalKeyReadyRef,
   customSessionMinutesRef,
-} from '../../lib/keyManager';
+} from '../../lib/util/keyManager';
 import { normalizeCustomSessionMinutes } from '../../state/key_state';
 import {
   CUSTOM_SESSION_MINUTES_DEFAULT,
@@ -49,7 +49,7 @@ import {
   type SecurityPresetCode,
   type PresetFeatures,
 } from '../../lib/verthys';
-import { withTimeout } from '../../utils/promise_utils';
+import { withTimeout } from '../../utils/ipc/promise_utils';
 import type { DefenseMetaView } from './useDefenseStatus';
 import { computeSecurityCoverage, computeOverallScore } from './presetMetrics';
 

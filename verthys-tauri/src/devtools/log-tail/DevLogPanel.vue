@@ -85,7 +85,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import ActionButton from "../../components/common/verthys-ui/ActionButton.vue";
 import VaultSelect from "../../components/common/verthys-ui/VaultSelect.vue";
-import { useToastCenter } from "../../composables/useToastCenter";
+import { useToastCenter } from "../../composables/ui/useToastCenter";
 import { tailDevLogs, type DevLogLine, type DevLogSource } from "./log_client";
 
 const AUTO_REFRESH_MS = 1500;

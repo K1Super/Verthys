@@ -132,16 +132,16 @@
 
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import type { ModuleId } from "../../lib/keyManager";
+import type { ModuleId } from "../../lib/util/keyManager";
 import type { DeviceCheckResult } from "../../composables/security-center/useViewMode";
 import type { DefensePathView, DefenseMetaView } from "../../composables/security-center/useDefenseStatus";
 import type { KernelStatusReport } from "../../types/verthys";
-import QuantumDashboard from "../management/QuantumDashboard.vue";
-import ManagementHub from "../management/ManagementHub.vue";
-import ManagementTopBar from "../management/ManagementTopBar.vue";
-import GlobalKeySection from "../management/GlobalKeySection.vue";
-import ModuleKeyList from "../management/ModuleKeyList.vue";
-import SecurityDashboard from "../management/SecurityDashboard.vue";
+import QuantumDashboard from "../management/security/QuantumDashboard.vue";
+import ManagementHub from "../management/layout/ManagementHub.vue";
+import ManagementTopBar from "../management/layout/ManagementTopBar.vue";
+import GlobalKeySection from "../management/keys/GlobalKeySection.vue";
+import ModuleKeyList from "../management/keys/ModuleKeyList.vue";
+import SecurityDashboard from "../management/security/SecurityDashboard.vue";
 
 /** 恢复码轮换出的新码交由 SecurityCenter 顶层统一展示 */
 const onRecoveryRotated = (code: string) => {

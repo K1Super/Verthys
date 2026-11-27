@@ -49,7 +49,7 @@ import {
   TYPE_PHOTO_CHUNK,
   TYPE_FILEVERTHYS_CHUNK,
 } from "../constants/record_types";
-import { createLogger } from "../utils/logger";
+import { createLogger } from "../utils/logging/logger";
 // 前端 IPC 优先级门控：后台任务在前端活跃时让出 worker 通道
 import { yieldIfFrontendBusy } from "./frontend-ipc-priority";
 

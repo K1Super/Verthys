@@ -10,6 +10,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { fail, parseArgs } from "../lib/cli_args.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
@@ -27,29 +28,6 @@ const RELEASE_ID_RE = /^[0-9a-hjkmnp-tv-z]{13}$/;
 const LEGACY_RELEASE_ID_RE = /^\d{8}-\d{6}-(\d+\.\d+\.\d+)-[0-9a-f]{8}$/;
 const CHANNELS = new Set(["local", "internal", "beta", "stable"]);
 const NOTES_SECTION_TYPES = new Set(["security", "changed", "fixed", "added"]);
-
-function fail(message) {
-  console.error(`[FAIL] ${message}`);
-  process.exit(1);
-}
-
-function parseArgs(argv) {
-  const args = {};
-  for (let i = 0; i < argv.length; i++) {
-    const raw = argv[i];
-    if (raw === "--help" || raw === "-h") {
-      args.help = "1";
-      continue;
-    }
-    if (!raw.startsWith("--")) fail(`无法识别的参数: ${raw}`);
-    const key = raw.slice(2);
-    const value = argv[i + 1];
-    if (value === undefined || value.startsWith("--")) fail(`参数缺少取值: ${raw}`);
-    args[key] = value;
-    i++;
-  }
-  return args;
-}
 
 function parseIntegerArg(value, name, min, max) {
   const parsed = Number(value);

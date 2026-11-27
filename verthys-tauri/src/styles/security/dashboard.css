@@ -470,7 +470,9 @@
 .cus-toggle:disabled {
   cursor: not-allowed;
 }
-.cus-toggle:disabled .cus-name {
+/* 仅未就绪时降色；在途应用只禁用交互，不改变视觉密度 ——
+   每次开关都触发一次应用回环，按 :disabled 降色会让整排端子闪一下 */
+.cus-item--locked .cus-name {
   opacity: 0.5;
 }
 .cus-dot {

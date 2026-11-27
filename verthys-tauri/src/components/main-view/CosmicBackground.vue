@@ -110,7 +110,7 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import type { CosmicStar, CosmicDust } from "../../composables/useCosmicBackground";
+import type { CosmicStar, CosmicDust } from "../../composables/ui/useCosmicBackground";
 
 defineProps<{
   parallaxFar: Record<string, string>;

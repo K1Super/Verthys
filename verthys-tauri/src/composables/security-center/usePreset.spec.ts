@@ -14,7 +14,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { nextTick, ref } from "vue";
-import { securityPresetRef, globalKeyReadyRef, customSessionMinutesRef } from "../../lib/keyManager";
+import { securityPresetRef, globalKeyReadyRef, customSessionMinutesRef } from "../../lib/util/keyManager";
 import { usePreset } from "./usePreset";
 
 const mocks = vi.hoisted(() => ({
@@ -28,7 +28,7 @@ const mocks = vi.hoisted(() => ({
   securityLoadPresetState: vi.fn(),
 }));
 
-vi.mock("../../lib/keyManager", async () => {
+vi.mock("../../lib/util/keyManager", async () => {
   const { ref } = await import("vue");
   return {
     securityPresetRef: ref(0),

@@ -262,12 +262,12 @@ Round 3 **服务侧编译/单测通过**；应用侧接入未开始，K1 完整�
 | `verthys-worker/src/runtime/ffi_types.rs` | C 结构体/符号绑定与 20 字节布局测试 |
 | `verthys-worker/src/runtime/worker.rs` | 符号探测与 `kernel_status` 填充 |
 | `verthys-worker/src/runtime/protocol.rs` | `KernelStatusReport` 序列化 |
-| `verthys-tauri/src-tauri/src/controller/types.rs` | 主进程类型镜 |
+| `verthys-tauri/src-tauri/src/controller/types/mod.rs` | 主进程类型镜 |
 | `verthys-tauri/src/types/verthys.ts` | 前端类型 |
 | `verthys-tauri/src/composables/security-center/useDefenseStatus.ts` | `kernelStatus` 视图出口 |
 | `verthys-tauri/src/components/modules/SecurityCenter.vue` | 透传 `kernel-status` |
 | `verthys-tauri/src/components/views/ManagementView.vue` | 透传 `kernel-status` |
-| `verthys-tauri/src/components/management/SecurityDashboard.vue` | 事实状态行与文案映射 |
+| `verthys-tauri/src/components/management/security/SecurityDashboard.vue` | 事实状态行与文案映射 |
 
 ### 6.3 构建与验证
 
@@ -375,7 +375,7 @@ Round 5 **仅完成 preferred 降级展示**；发布门禁仍未满足。
 
 | 文件 | 用途 |
 | --- | --- |
-| `verthys-tauri/src-tauri/src/util/audit_log.rs` | `KernelGuardDegraded` 事件与字符串 |
+| `verthys-tauri/src-tauri/src/util/security/audit_log.rs` | `KernelGuardDegraded` 事件与字符串 |
 | `verthys-tauri/src-tauri/src/security_commands/audit.rs` | 审计写入入口可见性提升 |
 | `verthys-tauri/src-tauri/src/security_commands/commands/kernel_guard.rs` | 降级审计命令与值域测试 |
 | `security_commands/commands/mod.rs`、`security_commands/mod.rs`、`src-tauri/src/lib.rs` | 模块与命令注册 |
@@ -534,11 +534,11 @@ Round 7 **服务侧生命周期命令与 C 核心激活链路完成，构建、�
 | `security-service/src/kernel_guard.h/.c` | 宿主/worker 识别、同目录路径派生、双主体生命周期 |
 | `security-service/tests/test_protocol.c` | 载荷线格式与非法输入 |
 | `security-service/tests/test_kernel_guard.c` | 宿主/worker 基名、路径派生、生命周期边界 |
-| `verthys-tauri/src-tauri/src/infrastructure/security_service_client.rs` | 宿主服务 IPC 与验签 |
+| `verthys-tauri/src-tauri/src/infrastructure/ipc/security_service_client.rs` | 宿主服务 IPC 与验签 |
 | `verthys-tauri/src-tauri/src/worker/session.rs` | 预 ARM/REGISTER 接入与同目录判定 |
 | `verthys-tauri/src-tauri/src/worker/platform.rs` | worker 创建时间读取 |
 | `verthys-tauri/src-tauri/src/worker/kernel_watchdog.rs` | 运行中丢失锁定决策与线程 |
-| `verthys-tauri/src-tauri/src/controller/worker_controller.rs` | 就绪后启动看门狗 |
+| `verthys-tauri/src-tauri/src/controller/vault/worker_controller.rs` | 就绪后启动看门狗 |
 | `core/src/security/state/vty_machine_limiter.c` | SECURE 激活顺序 |
 | `core/tests/security/test_machine_limiter.c` | 预 ARM/回退/登记失败回滚序列 |
 | `verthys-tauri/verthys-worker/src/runtime/{dispatch,protocol,worker}.rs` | `kernel_status` 操作与响应字段 |
@@ -616,7 +616,8 @@ Round 8 **宿主预创建 ARM 与运行中丢失自动锁定的代码链路完�
 | 文件 | 用途 |
 | --- | --- |
 | `security-service/src/client_auth.h/.c` | 不钉扎发布者的可信签名校验 |
-| `security-service/setup/setup_main.c` | 驱动载荷探测、签名校验、安装/升级/回滚/卸载、状态输出 |
+| `security-service/setup/setup_driver.c` | 驱动载荷探测、签名校验、安装/升级/回滚 |
+| `security-service/setup/setup_commands.c` | /install /uninstall /repair /reset-state /repair-keys /status 子命令与状态输出 |
 | `security-service/tests/test_client_auth.c` | 可信签名负向路径 |
 | `build_production.ps1` | `-IncludeDriver` 门禁、manifest/签名复核、载荷复制 |
 | `verthys-tauri/src-tauri/tauri.conf.json` | 驱动载荷资源 |

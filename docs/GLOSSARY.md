@@ -15,11 +15,11 @@
 | Verthys 容器 | .verthys / 当前容器格式（`VTY_MAGIC` `'VRTY'`） | 唯一现役的加密容器文件，A/B 元数据 + 追加数据区 + 双包裹密钥 + 模块槽 | `core/src/container/vty_format.c`、`core/include/verthys_version.h` |
 | 容器格式版本 | `VERTHYS_CONTAINER_FORMAT_VERSION` | 落盘格式身份，当前为 4；只作为常量/版本字段存在，不进入文件名 | `core/include/verthys_version.h` |
 | 元数据副本 | metadata A/B | 双副本原子提交的容器根元数据，单副本损坏不阻断打开 | `core/src/container/vty_format.c` |
-| 密钥槽 | key slot | 口令/恢复码/keyfile 等因子的包裹槽位 | `core/src/container/vty_keyslot.c` |
-| 模块槽 | module slot | 相册/账号/清藏模块的独立密钥与启用状态 | `core/src/container/vty_module_*.c` |
-| 内容分片 | chunk | 大对象切分后的加密数据块，经 Rust 单写者通道落盘 | `core/src/container/vty_chunk.c` |
+| 密钥槽 | key slot | 口令/恢复码/keyfile 等因子的包裹槽位 | `core/src/container/chunk/vty_keyslot.c` |
+| 模块槽 | module slot | 相册/账号/清藏模块的独立密钥与启用状态 | `core/src/container/module/vty_module_*.c` |
+| 内容分片 | chunk | 大对象切分后的加密数据块，经 Rust 单写者通道落盘 | `core/src/container/chunk/vty_chunk.c` |
 | 记录 | record | 容器内的类型化条目（账号、照片元数据等） | `core/src/index/vty_record.c` |
-| 仓库 | repo / store | 记录读写、类型盲索引与数据区存储 | `core/src/index/vty_repo_*.c`、`vty_store_*.c` |
+| 仓库 | repo / store | 记录读写、类型盲索引与数据区存储 | `core/src/index/repo/vty_repo_*.c`、`core/src/index/store/vty_store_*.c` |
 | 交换信封 | exchange envelope | 导出/导入用的独立加密文件包（不继承应用胡椒） | `core/src/container/format/verthys_format.c` |
 | 导入 WAL | import.wal | 导入断点续传日志（Rust 仓储层，附属目录内） | `verthys-tauri/src-tauri/src/repository/verthys_wal.rs` |
 
@@ -44,7 +44,7 @@
 |---|---|---|---|
 | .vsec | 构建期签名节（magic `'VESC'`） | `.text`/`.rdata` 文件内容 HMAC-SHA256 构建期签名（128B），启动验签 | `core/src/security/integrity/integrity.c` |
 | .rhat 运行时哈希 | runtime hash（magic `'VRHT'`） | 关键函数 BLAKE2b-256 运行时哈希（产品 15 项 / 全量 40 项），失配 = KILL | `core/src/security/integrity/runtime_hash.c` + `core/tools/rhash_gen.c` |
-| 容器解锁 | vty_vault_open | 单阶段原子解锁：口令 + 设备根双槽解封 `K_c` → 元数据与 DataRoot 挂载；全部成功才进入 UNLOCKED | `core/src/crypto/vty_keymanager_open.c` |
+| 容器解锁 | vty_vault_open | 单阶段原子解锁：口令 + 设备根双槽解封 `K_c` → 元数据与 DataRoot 挂载；全部成功才进入 UNLOCKED | `core/src/crypto/keyring/vty_keymanager_open.c` |
 | 分层纵深防御 | layer1/3/4/5/6 | 进程守卫/硬件绑定/钩子防御/沙箱/闭环的分层纵深防御 | `core/src/security/layer*_*` |
 | 防御闭环 | defense closure / 7 路径 | 7 条攻击路径状态机（BLOCKED/DEGRADED/FAILED） | `core/src/security/layer6_closure/defense_closure.c` |
 | 应急分级响应 | emergency / TELEMETRY·DEGRADE·KILL | 三级信号模型，检测与响应解耦 | `core/src/security/emergency/emergency.c` |

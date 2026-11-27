@@ -242,15 +242,3 @@ pub(crate) struct StorageStatsEntry {
     pub(crate) chunk_count: u64,
 }
 
-/// 压缩结果投影（仅 storage_compact 返回）
-#[derive(Serialize, Clone, Default)]
-pub(crate) struct CompactResultEntry {
-    pub(crate) stage: u32,
-    pub(crate) before_bytes: u64,
-    pub(crate) after_bytes: u64,
-    pub(crate) reclaimed_bytes: u64,
-    pub(crate) records: u64,
-    pub(crate) chunks: u64,
-    pub(crate) bytes: u64,
-    pub(crate) live_bytes: u64,
-}

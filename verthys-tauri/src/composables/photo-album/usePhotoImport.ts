@@ -22,9 +22,9 @@ import {
   userFileStat,
   type PhotoImportProgress,
 } from "../../lib/verthys";
-import { persistVerthysDetailed, setModuleCache } from "../../lib/keyManager";
-import { pushShallowItems, replaceShallowArray } from "../../utils/shallow-array";
-import { yieldToMain } from "../../utils/promise_utils";
+import { persistVerthysDetailed, setModuleCache } from "../../lib/util/keyManager";
+import { pushShallowItems, replaceShallowArray } from "../../utils/codec/shallow-array";
+import { yieldToMain } from "../../utils/ipc/promise_utils";
 import type { PhotoEntry } from "./types";
 import {
   formatSize, generateThumbnail, guessMime, importedToPhotoEntries,
@@ -32,7 +32,7 @@ import {
 } from "./utils";
 import { useSingleTimer } from "./utils/timer";
 import { MAX_PHOTO_BYTES } from "../../constants/crypto_const";
-import { detectAnimatedImage, isAnimatedImageCandidate } from "../../utils/animated-image";
+import { detectAnimatedImage, isAnimatedImageCandidate } from "../../utils/ui/animated-image";
 
 /**
  * 导入流程阶段状态机：

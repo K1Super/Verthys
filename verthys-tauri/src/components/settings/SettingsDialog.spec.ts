@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp, h, nextTick, type App } from "vue";
 import SettingsDialog from "./SettingsDialog.vue";
 import { displaySettings, resetDisplaySettings } from "../../settings/display-settings";
-import { disposeGlobalIdleScheduler } from "../../composables/useGlobalIdleScheduler";
+import { disposeGlobalIdleScheduler } from "../../composables/app/useGlobalIdleScheduler";
 
 let app: App | null = null;
 let host: HTMLElement | null = null;

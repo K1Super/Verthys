@@ -6,7 +6,7 @@
  */
 import { isTauri } from "@tauri-apps/api/core";
 import { PERF_FLAGS_STORAGE_KEY, perfFlags } from "../../app/feature-flags";
-import { useGlobalIdleScheduler } from "../../composables/useGlobalIdleScheduler";
+import { useGlobalIdleScheduler } from "../../composables/app/useGlobalIdleScheduler";
 import { frameBudgetMonitor } from "../../core/frame-budget";
 import type { DevTool } from "../registry";
 

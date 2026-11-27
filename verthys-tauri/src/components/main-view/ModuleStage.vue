@@ -21,7 +21,7 @@
 <script setup lang="ts">
 import { defineAsyncComponent, onBeforeUnmount, onMounted, provide, ref, toRef } from "vue";
 import HomeView from "./HomeView.vue";
-import { MODULE_DIALOG_GUARD_KEY } from "../../composables/useModuleDialogGuard";
+import { MODULE_DIALOG_GUARD_KEY } from "../../composables/app/useModuleDialogGuard";
 import { TRANSITION } from "../../app/constants";
 import { MODULE_LOADERS, MODULE_WARM_ORDER, loadModule } from "../../app/module-loaders";
 

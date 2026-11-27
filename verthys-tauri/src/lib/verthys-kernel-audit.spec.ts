@@ -6,10 +6,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../utils/invoke_wrapper", () => ({ invokeWithTimeout: vi.fn() }));
+vi.mock("../utils/ipc/invoke_wrapper", () => ({ invokeWithTimeout: vi.fn() }));
 vi.mock("../core/frontend-ipc-priority", () => ({ markFrontendIpcActive: vi.fn() }));
 
-import { invokeWithTimeout } from "../utils/invoke_wrapper";
+import { invokeWithTimeout } from "../utils/ipc/invoke_wrapper";
 import {
   verthysAuditKernelDegraded,
   verthysResetKernelDegradedAudit,

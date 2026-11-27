@@ -75,7 +75,7 @@ import {
 // 仅注入停止钩子（clearAllVerthysCaches 前置等待后台任务终止）
 import { stopBackgroundTasks } from "../../core/background-tasks";
 import { verthysModuleKeyLock } from "../../lib/verthys";
-import { createLogger } from "../../utils/logger";
+import { createLogger } from "../../utils/logging/logger";
 
 const log = createLogger("verthys-cache");
 

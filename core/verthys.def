@@ -78,7 +78,6 @@ EXPORTS
     Verthys_BulkImportCommit
     Verthys_GetContainerInfo
     Verthys_GetStorageStats
-    Verthys_CompactStorage
     Verthys_VerifyIntegrity
     Verthys_GetDiagnostics
     Verthys_GetSecurityStatus

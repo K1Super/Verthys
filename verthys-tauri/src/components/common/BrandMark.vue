@@ -104,7 +104,7 @@
 
 <script setup lang="ts">
 import { useId } from "vue";
-import { useBrandTitle, type BrandLevel } from "../../composables/useBrandTitle";
+import { useBrandTitle, type BrandLevel } from "../../composables/ui/useBrandTitle";
 
 const props = withDefaults(defineProps<{ level?: BrandLevel }>(), { level: "mini" });
 

@@ -23,7 +23,7 @@ import { ref } from 'vue';
 import {
   verifyDeviceBinding,
   getDeviceFingerprintShort,
-} from '../../lib/keyManager';
+} from '../../lib/util/keyManager';
 import { type DeviceCheckResult } from './useViewMode';
 
 /**

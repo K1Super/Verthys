@@ -20,6 +20,9 @@ test_out.txt
 tmp_*.ps1
 malware_hashes.txt
 
+# 依赖目录
+node_modules/
+
 # vcpkg
 vcpkg_installed/
 

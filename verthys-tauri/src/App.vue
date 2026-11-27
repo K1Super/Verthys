@@ -112,13 +112,13 @@ const UpdaterRepairDialog = defineAsyncComponent(
 const DevDock = import.meta.env.DEV
   ? defineAsyncComponent(() => import("./devtools/DevDock.vue"))
   : null;
-import { useAppTransition } from "./composables/useAppTransition";
-import { useSecurityGuard } from "./composables/useSecurityGuard";
-import { useGlobalIdleScheduler } from "./composables/useGlobalIdleScheduler";
-import { useAppUpdater, type RepairState } from "./composables/useAppUpdater";
-import { useToastCenter } from "./composables/useToastCenter";
-import { useSecurityServiceBootstrap } from "./composables/useSecurityServiceBootstrap";
-import { withTimeout } from "./utils/promise_utils";
+import { useAppTransition } from "./composables/ui/useAppTransition";
+import { useSecurityGuard } from "./composables/security/useSecurityGuard";
+import { useGlobalIdleScheduler } from "./composables/app/useGlobalIdleScheduler";
+import { useAppUpdater, type RepairState } from "./composables/app/useAppUpdater";
+import { useToastCenter } from "./composables/ui/useToastCenter";
+import { useSecurityServiceBootstrap } from "./composables/security/useSecurityServiceBootstrap";
+import { withTimeout } from "./utils/ipc/promise_utils";
 import { masterFrameLoop } from "./core/master-frame-loop";
 import { frameBudgetMonitor } from "./core/frame-budget";
 

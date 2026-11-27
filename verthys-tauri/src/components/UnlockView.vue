@@ -92,8 +92,8 @@
 import { ref, onMounted, onBeforeUnmount } from "vue";
 import { INTRO } from "../app/constants";
 import BrandMark from "./common/BrandMark.vue";
-import { useBrandTitle } from "../composables/useBrandTitle";
-import { useSpectraTicks } from "../composables/useSpectraTicks";
+import { useBrandTitle } from "../composables/ui/useBrandTitle";
+import { useSpectraTicks } from "../composables/ui/useSpectraTicks";
 import { masterFrameLoop } from "../core/master-frame-loop";
 
 const emit = defineEmits<{ (e: "enter"): void }>();

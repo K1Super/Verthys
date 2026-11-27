@@ -46,7 +46,7 @@
  *   progress.end(true);     // 成功；失败/中止传 false 保持真实进度
  */
 import { ref, type Ref } from "vue";
-import { createLogger } from "../../utils/logger";
+import { createLogger } from "../../utils/logging/logger";
 
 const log = createLogger("import-progress");
 

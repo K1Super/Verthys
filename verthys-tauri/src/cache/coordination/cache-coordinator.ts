@@ -50,7 +50,7 @@ import {
   getSummaryRecord,
 } from "../composition/verthys-cache";
 import type { SummaryRecord } from "../../lib/verthys";
-import { createLogger } from "../../utils/logger";
+import { createLogger } from "../../utils/logging/logger";
 
 const log = createLogger("cache-coordinator");
 

@@ -7,7 +7,7 @@
  *   - 元数据损坏的条目直接计入损坏（本身已不可用）。
  */
 import { describe, expect, it, vi } from "vitest";
-import { bytesToBase64 } from "../../utils/binary_codec";
+import { bytesToBase64 } from "../../utils/codec/binary_codec";
 import {
   MAX_INLINE_SCAN_BYTES,
   scanDamagedFiles,

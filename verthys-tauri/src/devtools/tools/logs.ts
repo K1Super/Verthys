@@ -5,9 +5,9 @@
  * 非 Tauri 环境（仅 vite dev）没有后端命令，直接提示而不静默返回。
  */
 import { isTauri } from "@tauri-apps/api/core";
-import { useAppUpdater } from "../../composables/useAppUpdater";
-import { exportAppLogs } from "../../lib/diagnostic_logs";
-import { updaterErrorMessage } from "../../lib/updater_error";
+import { useAppUpdater } from "../../composables/app/useAppUpdater";
+import { exportAppLogs } from "../../lib/util/diagnostic_logs";
+import { updaterErrorMessage } from "../../lib/util/updater_error";
 import type { DevTool, DevToolContext } from "../registry";
 
 function ensureTauri(ctx: DevToolContext): boolean {

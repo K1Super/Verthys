@@ -18,8 +18,8 @@ import { verthysForgetImportKeys, verthysGcOrphanChunks } from "../../lib/verthy
 import {
   persistVerthysDetailed, deleteAndPersistBatch, setModuleCache,
   invalidateSummaryRecord, invalidateFullRecord, invalidateScannedRecord,
-} from "../../lib/keyManager";
-import { removeShallowItems, replaceShallowArray } from "../../utils/shallow-array";
+} from "../../lib/util/keyManager";
+import { removeShallowItems, replaceShallowArray } from "../../utils/codec/shallow-array";
 import type { PhotoEntry } from "./types";
 import { revokeThumbUrl, sortByMetaId, toPhotoCacheEntries } from "./utils";
 import {

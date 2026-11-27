@@ -6,53 +6,78 @@
  */
 
 use std::collections::BTreeMap;
-
+use std::io::ErrorKind;
 
 use crate::repository::anchor_scan_store::{self, ScanStore, StoredScanEntry};
 
 use super::*;
 
-pub(super) fn merge_paths(map: &mut BTreeMap<String, CollectedPaths>, uuid: &str, path: &str) {
+pub(super) fn merge_paths(
+    map: &mut BTreeMap<String, CollectedPaths>,
+    uuid: &str,
+    path: &str,
+    capped: bool,
+) {
     let entry = map.entry(uuid.to_string()).or_default();
+    entry.capped |= capped;
     if entry.keys.insert(anchor_scan_store::path_key(path)) {
         if entry.paths.len() < SCAN_MAX_PATHS_PER_UUID {
             entry.paths.push(path.to_string());
+        } else {
+            /* 单锚点证据列表超出展示上限：只标记该条目，不影响遍历完整性。 */
+            entry.capped = true;
         }
     }
+}
+
+/// 截断扫描取并集后，逐条确认旧证据仍然存在。
+///
+/// 仅将“确定不存在（NotFound）”的路径移出证据；权限或暂时性错误保留原记录。
+/// 这样容器改名/移动后，即使本轮因某个目录受限而未能完整遍历，也不会把
+/// 旧路径永久留在证据列。
+fn drop_missing_paths(entries: &mut Vec<StoredScanEntry>) {
+    for entry in entries.iter_mut() {
+        entry.paths.retain(|path| match std::fs::metadata(path) {
+            Ok(metadata) => metadata.is_file(),
+            Err(e) => e.kind() != ErrorKind::NotFound,
+        });
+    }
+    entries.retain(|entry| !entry.paths.is_empty());
 }
 
 pub(super) fn union_entries(
     old_entries: Vec<StoredScanEntry>,
     new_entries: Vec<StoredScanEntry>,
-) -> (Vec<StoredScanEntry>, bool) {
+) -> Vec<StoredScanEntry> {
     let mut map: BTreeMap<String, CollectedPaths> = BTreeMap::new();
-    let mut overflow = false;
     for entry in old_entries.into_iter().chain(new_entries) {
-        for path in entry.paths {
-            let slot = map.entry(entry.uuid.clone()).or_default();
-            if slot.keys.insert(anchor_scan_store::path_key(&path)) {
-                if slot.paths.len() < SCAN_MAX_PATHS_PER_UUID {
-                    slot.paths.push(path);
-                } else {
-                    overflow = true;
-                }
-            }
+        let StoredScanEntry {
+            uuid,
+            paths,
+            capped,
+        } = entry;
+        for path in paths {
+            merge_paths(&mut map, &uuid, &path, capped);
         }
     }
-    let entries = map
-        .into_iter()
+    map.into_iter()
         .map(|(uuid, mut entry)| {
             entry.paths.sort();
             StoredScanEntry {
                 uuid,
                 paths: entry.paths,
+                capped: entry.capped,
             }
         })
-        .collect();
-    (entries, overflow)
+        .collect()
 }
 
-pub(super) fn apply_root_outcome(store: &mut ScanStore, target: &ScanTarget, outcome: RootOutcome, now: u64) {
+pub(super) fn apply_root_outcome(
+    store: &mut ScanStore,
+    target: &ScanTarget,
+    outcome: RootOutcome,
+    now: u64,
+) {
     let root = anchor_scan_store::get_or_insert(
         store,
         &target.path,
@@ -76,11 +101,10 @@ pub(super) fn apply_root_outcome(store: &mut ScanStore, target: &ScanTarget, out
     root.truncated = outcome.counters.truncated;
     if outcome.counters.truncated {
         // 截断扫描只能做并集：已覆盖到的既有路径可能本次没来得及走到。
-        let (entries, overflow) = union_entries(std::mem::take(&mut root.entries), outcome.entries);
+        // 并集后逐条确认旧路径仍存在，容器改名/移动不会留下失效证据。
+        let mut entries = union_entries(std::mem::take(&mut root.entries), outcome.entries);
+        drop_missing_paths(&mut entries);
         root.entries = entries;
-        if overflow {
-            root.truncated = true;
-        }
     } else {
         root.entries = outcome.entries;
         root.last_success_at = now;

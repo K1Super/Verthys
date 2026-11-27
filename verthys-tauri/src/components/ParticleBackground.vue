@@ -58,9 +58,9 @@
  */
 import { ref, onMounted, onBeforeUnmount, watch } from "vue";
 import * as THREE from "three";
-import { useGlobalIdleScheduler } from "../composables/useGlobalIdleScheduler";
-import { useFrameGate } from "../composables/useFrameGate";
-import { useTransitionEngine } from "../composables/useTransitionEngine";
+import { useGlobalIdleScheduler } from "../composables/app/useGlobalIdleScheduler";
+import { useFrameGate } from "../composables/ui/useFrameGate";
+import { useTransitionEngine } from "../composables/ui/useTransitionEngine";
 import { frameBudgetMonitor } from "../core/frame-budget";
 import { masterFrameLoop, type ExemptionToken } from "../core/master-frame-loop";
 import {

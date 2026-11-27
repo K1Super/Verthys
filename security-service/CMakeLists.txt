@@ -105,7 +105,13 @@ add_custom_command(
 )
 
 set(VERTHYS_SERVICE_SOURCES
-    src/service_util.c
+    src/util_fs.c
+    src/util_misc.c
+    src/util_identity.c
+    src/util_acl.c
+    src/util_registry.c
+    src/util_process.c
+    src/util_eventlog.c
     src/state_crypto.c
     src/machine_state.c
     src/protocol.c
@@ -152,6 +158,12 @@ add_executable(verthys_security_svc
     src/service_main.c
     src/pipe_server.c
     setup/setup_main.c
+    setup/setup_common.c
+    setup/setup_service.c
+    setup/setup_fs.c
+    setup/setup_ping.c
+    setup/setup_driver.c
+    setup/setup_commands.c
     "${CMAKE_CURRENT_BINARY_DIR}/service_version.rc"
     "${VERTHYS_MSG_BUILD_DIR}/messages.rc"
 )

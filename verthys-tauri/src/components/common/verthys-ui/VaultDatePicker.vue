@@ -126,7 +126,7 @@ import {
   shiftMonth,
   todayIso,
   toIsoDate,
-} from "../../../lib/calendar";
+} from "../../../lib/util/calendar";
 
 const props = withDefaults(
   defineProps<{

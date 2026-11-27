@@ -258,7 +258,7 @@ classify(entry):
 
 **Tier 0：自动回收 `DEAD`（无用户交互）**
 
-- 触发点：`commit`/`reset_anchor` 需要新增条目且 `count == 64`；维护界面“回收失效”调用 `Verthys_RollbackAnchorReclaim`。
+- 触发点：`commit`/`reset_anchor` 需要新增条目且 `count == 64`；维护界面“回收见证缺失”调用 `Verthys_RollbackAnchorReclaim`。
 - 动作：在锁内压缩条目、`store()` 原子写回；解锁后再尽力删除残留见证键。
 - 安全性：`DEAD` 条目在任何情况下都无法通过校验，回收不改变任何容器的可用性。
 - 限制：单次最多检查 64 条；`UNKNOWN/TAMPERED` 原样保留。
@@ -539,42 +539,47 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
 - `verthys_rollback_anchor_list`：调用 worker，返回条目与状态；
 - `verthys_rollback_anchor_reclaim`：要求 `confirm=true`，调用 worker 回收 DEAD，写审计；
 - `verthys_rollback_anchor_release`：要求 `confirm=true` 且 UUID 为 32 位十六进制，调用 worker 释放，写审计；
-- `verthys_rollback_anchor_scan`：自动扫描已知容器位置，返回 `uuid -> paths`、每个位置的覆盖状态与新鲜度；
+- `verthys_rollback_anchor_scan`：全量扫描本地容器位置，返回 `uuid -> paths`、每个位置的覆盖状态与新鲜度；
 - `verthys_rollback_anchor_scan_cancel`：请求停止正在进行的扫描，已完成位置的证据照常保留；
 - `verthys_rollback_anchor_scan_forget_root`：移除自定义扫描位置，返回移除后的持久化证据。
 
 扫描范围（已实现）：
 
-- 自动位置：当前/上次容器文件与所在目录、最近容器文件与所在目录（`app_config_dir/.verthys_recent_paths`，最多 16 条，路径指针播种）、用户自定义目录；
-- 深度扫描仅在用户显式触发时枚举固定磁盘顶级目录，跳过系统目录，并显式加入当前用户桌面/文档/下载；按目录保存快照并轮转，未完成位置下次优先，结果可能不完整；
-- 只读容器头前 76 字节，校验 magic、主版本、`header_len`，从偏移 12 读取 UUID；
+- 单一扫描模式：本地固定/可移动磁盘根 + 用户自定义目录 + 当前/最近容器文件探针；不再区分自动扫描与深度扫描；
+- 只有用户显式点击“扫描”才遍历磁盘；打开管理弹窗只读取上次持久化证据，不触发扫描；
+- 全盘扫描从盘符根算最多 8 层，容器文件所在目录到第 8 层；该深度是声明的覆盖边界，不视为扫描失败；自定义位置放宽到 32 层；当前/最近容器为精确文件探针，不受层数限制；
+- 当前/最近容器只做精确文件探针，不生成父目录目标；探针路径改名或移动后不会写入证据库；
+- 磁盘根遍历并行执行（有限工作线程共享同一目录队列），磁盘根一级只跳过系统与安装器独占目录（Windows、$Recycle.Bin、System Volume Information、Program Files、ProgramData 等），任意深度跳过依赖/构建缓存目录（node_modules、.git、target 等）与 AppData；
+- 自定义目录整体调度，磁盘根遍历遇到已覆盖子树时直接跳过，避免重复枚举；
+- 只读容器头前 76 字节，校验 magic、主版本、`header_len`，从偏移 12 读取 UUID；全零 UUID 视为无效容器，不进入证据；
 - 支持 `.verthys` 与 `.vty`，以文件头 magic 为准；
-- 跳过重解析点/符号链接；根目录本身允许解析一次，递归内部跳过，兼容 OneDrive 重定向目录；
+- 跳过重解析点/符号链接；候选容器本身为云占位/链接时标记覆盖不完整；
 - 限制深度、文件数与时间预算，返回截断、未尝试、权限受限与读取错误计数；
-- 证据按位置持久化到 `app_config_dir/.rollback_anchor_scan.json`：完整扫描替换该位置快照，截断扫描与旧证据取并集，位置不可用时保留上次证据并标记；证据与最近路径只落应用配置目录，不进入审计与日志；
-- 同一 UUID 多个路径时全部展示（每个 UUID 最多 32 条），不自动选择；
-- 扫描结果只是证据，不是删除依据；释放必须由用户显式确认。
+- 证据按位置持久化到 `app_config_dir/.rollback_anchor_scan.json`：完整扫描替换该位置快照，截断扫描与旧证据取并集；磁盘根每轮重新枚举，失效根与历史探针根自动清理；自定义位置不可用时保留历史证据并允许手动移除；
+- 同一 UUID 多个路径时全部展示（每个 UUID 最多 32 条）；扫描结果只是证据，不是删除依据；释放必须由用户显式确认。
 
 ### 9.5 UI 交互（已实现）
 
 **回退锚点面板（中枢 · 安全防护）**
 
 - 组件：`AnchorManagementPanel.vue` 嵌入 `SecurityDashboard.vue`，位于 `def-board`（动态防护）之后、`flow-rail`（数据流转）之前。
-- 顶部读数：`已用 X / 64`、可回收数、见证异常数、状态文件状态。
+- 顶部读数：`已用 X / 64`、见证缺失数、见证异常数、状态文件状态。
 - 列表：最多 8 条预览；完整列表在 `AnchorManagerDialog.vue`。
-- 操作：刷新、扫描与释放、回收失效；面板不直接删除任何锚点。
+- 操作：刷新、扫描、回收见证缺失；面板不直接删除任何锚点。
 - 空态：区分“状态文件不存在”“状态文件损坏”“暂无锚点”。
 
 **详情弹窗（`AnchorManagerDialog.vue`）**
 
-- 打开弹窗即自动扫描已知位置；5 分钟内复用持久化证据，切换容器后强制刷新，“重新扫描”强制刷新；
-- 展示全部锚点、UUID 短名、generation、见证状态、扫描证据；
-- 展示扫描范围：逐位置来源、路径、上次成功时间、文件数、可用性与受限状态；
-- 深度扫描需二次确认，只作为显式动作，不自动触发；覆盖固定磁盘顶级目录与当前用户桌面/文档/下载，扫描中可停止，已完成位置的证据保留；
-- 展示“扫描到但未登记 UUID”的独立区块；
-- 释放必须勾选条目并二次确认；确认文案明确“容器仍存在时需要恢复码重建锚点”；
-- 回收失效仅在存在 DEAD 时可用，并明确 ACTIVE/TAMPERED/UNKNOWN 不会被删除；
-- “勾选缺失”只在扫描完整时可用，且只选择使用中且未找到的锚点；TAMPERED/UNKNOWN 只能逐条手动选择。
+- 打开弹窗只读取上次持久化的扫描证据，不自动遍历磁盘；只有点击“扫描”才执行全量扫描；
+- 工具栏只保留“扫描”“添加位置”“回收见证缺失”；
+- 展示全部锚点、完整 UUID、generation、见证状态、扫描证据；
+- 见证状态只反映 TPM 见证密钥探测结果，不代表容器文件仍然存在；容器是否存在仅以扫描证据为准；
+- 展示扫描范围：逐位置来源、路径、上次成功时间、文件数、可用性、受限状态与全盘扫描深度；
+- 扫描完整且本次实际遍历磁盘时自动勾选“见证有效且未找到”的锚点；缓存视图、扫描不完整、截断或存在读取错误时保持清空，避免误判；8 层深度边界属于完整扫描，允许自动勾选；
+- 不展示未登记 UUID；
+- 释放必须二次确认；确认文案明确“容器仍存在时需要恢复码重建锚点”；
+- 回收见证缺失仅在存在 DEAD 时可用，并明确 ACTIVE/TAMPERED/UNKNOWN 不会被删除；
+- TAMPERED/UNKNOWN 只能逐条手动选择。
 
 **容量错误**
 
@@ -594,7 +599,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
 |---|---|
 | `RollbackAnchorRelease` | `uuid_hash`（resource_hash）、`released`、`cleanup_failed`、`result` |
 | `RollbackAnchorReclaim` | `removed`、`cleanup_failed`、`result` |
-| `RollbackAnchorScan` | `roots`、`deep`、`files_seen`、`matched`、`truncated`、`partial`、`permission_errors`、`other_errors`、`result` |
+| `RollbackAnchorScan` | `roots`、`files_seen`、`matched`、`truncated`、`partial`、`permission_errors`、`other_errors`、`result` |
 
 不记录：完整路径、见证指纹、恢复码、口令。
 
@@ -645,7 +650,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
 ### 11.3 残余风险
 
 1. 同一用户会话的恶意进程可删除容器或状态文件；现有 ACL 已记录该边界，本文不扩大。
-2. 扫描是有限范围证据；未扫描到的容器可能被误判为废弃。界面展示每个位置的可用性、上次成功时间与不完整原因，使用“未在扫描范围内找到”的措辞，并要求显式确认；扫描不完整时禁用批量勾选。
+2. 扫描是有限范围证据；未扫描到的容器可能被误判为废弃。全盘扫描声明为 8 层并跳过 AppData/系统/依赖目录；超过 8 层且未被当前/最近容器或自定义位置覆盖的容器可能不会被发现。界面展示每个位置的可用性、上次成功时间与不完整原因，使用“未在扫描范围内找到”的措辞；扫描完整时仅自动勾选、不自动释放，释放仍要求二次确认。
 3. 释放是不可逆的用户操作；恢复码丢失时容器无法恢复。文档与 UI 必须明确告知。
 4. TPM 平台错误会阻止自动回收；这是 fail-closed 的有意取舍。
 5. 自动回收（commit/reset 内部）的见证删除为 best-effort，失败只留下不被状态引用的孤儿键；用户主动 Reclaim/Release 会返回清理失败计数，可重试。
@@ -708,7 +713,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
 ### 13.4 UI 与门禁
 
 - 错误映射：`0x21` 不得显示为文件回退；
-- `AnchorManagerDialog.spec.ts` 覆盖四种见证状态、勾选 + 二次确认、DEAD 回收门槛、扫描证据与“未在扫描范围内找到”措辞；
+- `AnchorManagerDialog.spec.ts` 覆盖四种见证状态、勾选 + 二次确认、DEAD 回收门槛、扫描证据与“未在扫描范围内找到”措辞、完整扫描自动勾选与单一扫描入口；打开弹窗仅读取持久化证据，不触发扫描；
 - `vue-tsc --noEmit`、`vitest run`、宿主与 worker 全量测试、C 全量测试、文档门禁。
 - 构建后门禁：生产 DLL 不得包含 `VERTHYS_TEST_STATE_DIR`；自动化测试构建缺少隔离目录时拒绝初始化；dev 运行构建必须能访问真实状态且不改变生产校验口径。
 
@@ -747,7 +752,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
 - `core/src/crypto/vty_types.h`：追加 `VTY_E_ANCHOR_FULL`
 - `core/src/security/tpm/vty_tpm_witness.h/.c`：`vty_tpm_witness_probe` 四态探测、测试注入
 - `core/src/security/rollback/vty_rollback.h/.c`：`classify`、`collect_dead_locked`、`reclaim`、`release`、`list`、容量分支、DEAD/TAMPERED 恢复、池作废
-- `core/src/api/verthys_api_container_*.c`、`core/src/api/lifecycle/verthys_api.c`、`core/src/api/rollback/verthys_api_rollback.c`：公共 API 与错误映射
+- `core/src/api/container/verthys_api_container_*.c`、`core/src/api/lifecycle/verthys_api.c`、`core/src/api/rollback/verthys_api_rollback.c`：公共 API 与错误映射
 - `core/include/verthys.h`、`core/include/verthys_version.h`、`core/verthys.def`：新 API 与版本
 - `core/tests/security/test_rollback.c`、`core/tests/test_runner.c`：T-01..T-19 与故障注入
 
@@ -760,20 +765,20 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
 
 **host**
 
-- `verthys-tauri/src-tauri/src/controller/rollback_anchor_controller.rs`：命令、扫描、审计
-- `verthys-tauri/src-tauri/src/infrastructure/path_resolver.rs`：Debug 宿主优先 `build_dev/core/Debug` DLL、dev DLL 跳过生产哈希基线、Debug worker 优先
-- `verthys-tauri/src-tauri/src/controller/types.rs`：锚点响应结构
+- `verthys-tauri/src-tauri/src/controller/vault/rollback_anchor_controller/mod.rs`：命令、扫描、审计
+- `verthys-tauri/src-tauri/src/infrastructure/fs/path_resolver/mod.rs`：Debug 宿主优先 `build_dev/core/Debug` DLL、dev DLL 跳过生产哈希基线、Debug worker 优先
+- `verthys-tauri/src-tauri/src/controller/types/mod.rs`：锚点响应结构
 - `verthys-tauri/src-tauri/src/lib.rs`：命令注册
-- `verthys-tauri/src-tauri/src/util/audit_log.rs`：锚点审计事件
+- `verthys-tauri/src-tauri/src/util/security/audit_log.rs`：锚点审计事件
 
 **前端**
 
-- `verthys-tauri/src/components/management/AnchorManagementPanel.vue`：锚点面板
-- `verthys-tauri/src/components/management/AnchorManagerDialog.vue`：扫描、列表、释放/回收确认
-- `verthys-tauri/src/components/management/SecurityDashboard.vue`：面板挂载
+- `verthys-tauri/src/components/management/anchors/AnchorManagementPanel.vue`：锚点面板
+- `verthys-tauri/src/components/management/anchors/AnchorManagerDialog.vue`：扫描、列表、释放/回收确认
+- `verthys-tauri/src/components/management/security/SecurityDashboard.vue`：面板挂载
 - `verthys-tauri/src/lib/verthys.ts`、`src/types/verthys.ts`：IPC 包装与类型
-- `verthys-tauri/src/utils/verthys-error-i18n.ts`、`src/lib/verthys_error.ts`、`src/key/global-verthys.ts`：`E_ANCHOR_FULL` 与回退分流
-- `verthys-tauri/src/components/management/AnchorManagerDialog.spec.ts`：交互契约测试
+- `verthys-tauri/src/utils/logging/verthys-error-i18n.ts`、`src/lib/util/verthys_error.ts`、`src/key/global-verthys.ts`：`E_ANCHOR_FULL` 与回退分流
+- `verthys-tauri/src/components/management/anchors/AnchorManagerDialog.spec.ts`：交互契约测试
 
 **CI/发布**
 
@@ -810,11 +815,11 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
 
 1. 完全退出应用，备份 `%LOCALAPPDATA%\Verthys\Security\rollback.state`；
 2. 启动新版本，进入中枢 → 安全防护 → 回退锚点；
-3. 打开回退锚点管理，等待自动扫描完成；扫描范围覆盖容器所在目录与最近容器目录，必要时添加自定义位置或执行深度扫描；
+3. 打开回退锚点管理，点击“扫描”执行全量扫描；扫描范围覆盖本地磁盘、当前/最近容器与自定义位置，必要时添加自定义位置后再次扫描；
 4. 核对实际容器 UUID 与路径；其余条目确认“未在扫描范围内找到”；
-5. 先点击“回收失效”，清理所有 `DEAD` 条目；`ACTIVE/TAMPERED/UNKNOWN` 会保留；
+5. 先点击“回收见证缺失”，清理所有 `DEAD` 条目；`ACTIVE/TAMPERED/UNKNOWN` 会保留；
 6. 对确认废弃的 `ACTIVE` 条目，逐个勾选并阅读后果说明，完成二次确认；
-7. 确认状态为：仍在使用中的容器各有 1 条 `ACTIVE`，其余释放；
+7. 确认状态为：需要保留的容器各有 1 条 `ACTIVE`（见证有效）锚点，其余释放；
 8. 在临时目录新建一个测试容器（创建成功即验证容量已恢复）；
 9. 释放该测试容器锚点，确认计数回到原值；
 10. 保存操作前后状态文件副本与审计记录。
@@ -852,7 +857,7 @@ VERTHYS_API VerthysResult VERTHYS_CALL Verthys_RollbackAnchorRelease(
 | ADR-RB-01 | 保持 64 条上限 | 正常使用足够；压力来自泄漏 | 扩容到数百条 |
 | ADR-RB-02 | 不改变状态布局 | 避免迁移与安全回归 | 版本 3 + 时间戳 + LRU |
 | ADR-RB-03 | 不自动淘汰有效锚点 | 会把可用容器变为必须恢复码，可能造成数据丢失 | 自动 LRU/FIFO |
-| ADR-RB-04 | 自动回收仅限 `DEAD` | 失效锚点已无法通过任何校验，回收无可用性影响 | 按“未找到文件”自动回收 |
+| ADR-RB-04 | 自动回收仅限 `DEAD` | 见证缺失（DEAD）锚点已无法通过任何校验，回收无可用性影响 | 按“未找到文件”自动回收 |
 | ADR-RB-05 | 释放必须显式授权并审计 | 安全状态变更需要可追溯 | 后台静默清理 |
 | ADR-RB-06 | 容量错误独立于回退错误 | 两者根因与处置完全不同 | 继续折叠为 0x19 |
 | ADR-RB-07 | 保留恢复码逃生通道 | 释放、状态丢失、见证清除后的唯一受支持恢复路径 | 取消恢复码 |

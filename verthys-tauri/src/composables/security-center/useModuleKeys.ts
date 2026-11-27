@@ -47,7 +47,7 @@ import {
   MODULE_LABELS,
   touchSession,
   type ModuleId,
-} from '../../lib/keyManager';
+} from '../../lib/util/keyManager';
 
 /**
  * useModuleKeys 选项

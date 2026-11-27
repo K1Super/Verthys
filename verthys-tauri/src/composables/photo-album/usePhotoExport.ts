@@ -24,15 +24,15 @@ import {
 } from "../../lib/crypto";
 import { MAX_EXPORT_FILENAME_BYTES, MAX_EXPORT_SINGLE_BYTES, MIN_TOKEN_LENGTH, FILE_HASH_LEN } from "../../constants/crypto_const";
 import { blake3 } from "@noble/hashes/blake3.js";
-import { bytesToHex } from "../../utils/binary_codec";
+import { bytesToHex } from "../../utils/codec/binary_codec";
 import type { PhotoEntry, ExportFormat } from "./types";
 import {
   guessMime, downloadBlob, convertToPngBytes,
   sanitizeFileName,
 } from "./utils";
-import { detectAnimatedImage } from "../../utils/animated-image";
-import { createLogger } from "../../utils/logger";
-import { pushModal, popModal } from "../../utils/modal_stack";
+import { detectAnimatedImage } from "../../utils/ui/animated-image";
+import { createLogger } from "../../utils/logging/logger";
+import { pushModal, popModal } from "../../utils/ui/modal_stack";
 
 const log = createLogger("photo-export");
 

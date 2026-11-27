@@ -29,9 +29,9 @@
 
 import { ref, computed, watch, onBeforeUnmount } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { verthysReadyRef } from '../../lib/keyManager';
+import { verthysReadyRef } from '../../lib/util/keyManager';
 import { verthysGetSecurityStatus, type SecurityStatusReport } from '../../lib/verthys';
-import { isTauriEnvironment } from '../../utils/tauri_env';
+import { isTauriEnvironment } from '../../utils/ipc/tauri_env';
 
 /* ------------------------------------------------------------------ *
  * 常量：攻击路径定义 + 状态映射                                      *

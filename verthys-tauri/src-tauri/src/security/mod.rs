@@ -24,17 +24,29 @@
  *   - 统一剪贴板操作入口，所有剪贴板相关操作均通过 clipboard_guard 模块暴露
  */
 
+#[path = "guard/app_feature_gate.rs"]
 pub mod app_feature_gate;
+#[path = "patrol/background_patrol/mod.rs"]
 pub mod background_patrol;
+#[path = "response/brute_force.rs"]
 pub mod brute_force;
+#[path = "response/cleanup.rs"]
 pub mod cleanup;
+#[path = "guard/clipboard_guard/mod.rs"]
 pub mod clipboard_guard;
+#[path = "patrol/integrity_check.rs"]
 pub mod integrity_check;
+#[path = "patrol/module_whitelist/mod.rs"]
 pub mod module_whitelist;
+#[path = "guard/session_guard/mod.rs"]
 pub mod session_guard;
+#[path = "response/trace_cleanup.rs"]
 pub mod trace_cleanup;
+#[path = "guard/usb_guard.rs"]
 pub mod usb_guard;
+#[path = "guard/webview_privacy.rs"]
 pub mod webview_privacy;
+#[path = "guard/window_affinity.rs"]
 pub mod window_affinity;
 
 /// 清除可被外部注入的 WebView2 启动环境变量。

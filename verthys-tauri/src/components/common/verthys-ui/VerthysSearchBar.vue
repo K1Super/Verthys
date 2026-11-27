@@ -34,7 +34,7 @@
 import { onBeforeUnmount } from "vue";
 import ActionButton from "./ActionButton.vue";
 import StarlitSky from "../cosmic/StarlitSky.vue";
-import { debounce } from "../../../utils/debounce";
+import { debounce } from "../../../utils/ipc/debounce";
 
 /* 搜索输入防抖（300ms 尾部触发）：停止输入后才向上抛出 update:modelValue，
  * 避免逐键触发父组件 computed filter —— 连续快速输入时按键延迟会累加。 */

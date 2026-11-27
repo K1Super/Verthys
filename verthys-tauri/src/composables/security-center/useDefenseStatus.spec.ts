@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
   tauriEnv: vi.fn(),
 }));
 
-vi.mock("../../lib/keyManager", async () => {
+vi.mock("../../lib/util/keyManager", async () => {
   const { ref } = await import("vue");
   mocks.verthysReady = ref(true);
   return { verthysReadyRef: mocks.verthysReady };
@@ -31,7 +31,7 @@ vi.mock("../../lib/verthys", () => ({
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
-vi.mock("../../utils/tauri_env", () => ({
+vi.mock("../../utils/ipc/tauri_env", () => ({
   isTauriEnvironment: mocks.tauriEnv,
 }));
 

@@ -261,7 +261,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import ActionButton from "../components/common/verthys-ui/ActionButton.vue";
-import { useToastCenter } from "../composables/useToastCenter";
+import { useToastCenter } from "../composables/ui/useToastCenter";
 import FixturePanel from "./fixture/FixturePanel.vue";
 import DevLogPanel from "./log-tail/DevLogPanel.vue";
 import "./devdock.css";

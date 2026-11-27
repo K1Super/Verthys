@@ -46,7 +46,7 @@ import {
   globalKeyRecordIdRef,
   VerthysErrorCode,
   type VerthysResult,
-} from '../../lib/keyManager';
+} from '../../lib/util/keyManager';
 import {
   readUserFile,
   writeUserFile,

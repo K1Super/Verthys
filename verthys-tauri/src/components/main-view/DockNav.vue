@@ -35,7 +35,7 @@
 </template>
 
 <script setup lang="ts">
-import { modules } from "../../composables/useModuleNavigation";
+import { modules } from "../../composables/app/useModuleNavigation";
 import { ensureModuleLoaded, isModuleNavId } from "../../app/module-loaders";
 import SafeSvgIcon from "../common/SafeSvgIcon.vue";
 

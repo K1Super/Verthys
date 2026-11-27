@@ -13,10 +13,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
 
-vi.mock("../../lib/keyManager", async () => {
+vi.mock("../../lib/util/keyManager", async () => {
   const { ref: vueRef } = await import("vue");
-  const actual = await vi.importActual<typeof import("../../lib/verthys_error")>(
-    "../../lib/verthys_error",
+  const actual = await vi.importActual<typeof import("../../lib/util/verthys_error")>(
+    "../../lib/util/verthys_error",
   );
   return {
     initGlobalKey: vi.fn(),
@@ -46,9 +46,9 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 import { open } from "@tauri-apps/plugin-dialog";
-import * as keyManager from "../../lib/keyManager";
+import * as keyManager from "../../lib/util/keyManager";
 import * as verthysLib from "../../lib/verthys";
-import { VerthysErrorCode, ok, err } from "../../lib/verthys_error";
+import { VerthysErrorCode, ok, err } from "../../lib/util/verthys_error";
 import { useGlobalKey } from "./useGlobalKey";
 import type { VerifyRhythm } from "./useVerifyRhythm";
 

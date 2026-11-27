@@ -14,7 +14,7 @@ const holst = vi.hoisted(() => ({
   idleLevel: { value: "active" as "active" | "settling" | "idle" | "deep-idle" },
 }));
 
-vi.mock("../composables/useGlobalIdleScheduler", () => ({
+vi.mock("../composables/app/useGlobalIdleScheduler", () => ({
   useGlobalIdleScheduler: () => ({ level: holst.idleLevel }),
   disposeGlobalIdleScheduler: () => {},
 }));

@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../utils/invoke_wrapper", () => ({ invokeWithTimeout: vi.fn() }));
+vi.mock("../utils/ipc/invoke_wrapper", () => ({ invokeWithTimeout: vi.fn() }));
 vi.mock("../core/frontend-ipc-priority", () => ({ markFrontendIpcActive: vi.fn() }));
 
 const ISSUED_TOKEN = "issued-token-1";
@@ -30,7 +30,7 @@ interface BackendState {
 
 interface Harness {
   session: typeof import("./privacy-session");
-  invoke: ReturnType<typeof vi.mocked<(typeof import("../utils/invoke_wrapper"))["invokeWithTimeout"]>>;
+  invoke: ReturnType<typeof vi.mocked<(typeof import("../utils/ipc/invoke_wrapper"))["invokeWithTimeout"]>>;
   backend: BackendState;
 }
 
@@ -49,7 +49,7 @@ function newBackend(overrides: Partial<BackendState>): BackendState {
 /** 重新载入模块（隔离单例状态）并接上带状态的假后端 */
 async function loadSession(backend: BackendState): Promise<Harness> {
   vi.resetModules();
-  const wrapper = await import("../utils/invoke_wrapper");
+  const wrapper = await import("../utils/ipc/invoke_wrapper");
   const invoke = vi.mocked(wrapper.invokeWithTimeout);
   invoke.mockImplementation(
     async (

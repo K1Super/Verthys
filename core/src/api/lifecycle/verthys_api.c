@@ -20,7 +20,6 @@
 #include "vty_secure_state.h"       /* N2：安全状态目录预检 */
 #include "vty_keymanager.h"       /* 会话（A/B 元数据 + 数据区） */
 #include "vty_rotate.h"           /* 全库 DEK 轮换作业 */
-#include "vty_compact.h"          /* 空间压缩遗留文件清理 */
 #include "vty_secure_delete.h"    /* 代际派生文件零写删除 */
 #include "vty_repo.h"             /* 待擦墓碑补偿 */
 #include "verthys_api_container.h"          /* 记录/计数/校验/改密适配 */
@@ -300,17 +299,26 @@ static void password_free(char *copy, size_t len)
  * 因此派生文件清理与待擦墓碑补偿不会因解锁方式不同而遗漏。
  *
  * 维护有界且不阻断解锁：失败项保留，下次解锁重试。 */
-static void verthys_api_container_maintain(VtyVault *v, const char *path)
+static int verthys_api_container_maintain(VtyVault *v, const char *path)
 {
     uint64_t deleted = 0;
     uint64_t failed = 0;
 
     if (path != NULL) {
+        /* 维护内部有时间预算，残留文件不会阻断解锁。 */
         (void)vty_secure_delete_maintain(path, &deleted, &failed);
     }
     if (v != NULL && v->unlocked && v->store != NULL) {
         (void)vty_repo_maintain_pending_scrub(v, 4096u, NULL, NULL);
+        /* 待擦维护完成后再重建空闲区：仍带定位符的墓碑保持占用，
+         * 其余不可达字节标为空闲，后续写入即可复用。失败时退回追加
+         * 模式，不影响本次会话的可读性与删除语义。 */
+        (void)vty_repo_space_sync(v);
     }
+    /* 维护内的元数据提交失败会锁定会话；此时绝不能把句柄置为已解锁，
+     * 否则用户看到解锁成功但所有操作返回 LOCKED。 */
+    if (v != NULL && !v->unlocked) return VTY_E_POLICY;
+    return VTY_OK;
 }
 
 static VerthysResult verthys_api_container_adopt(struct VerthysContext *ctx,
@@ -329,7 +337,15 @@ static VerthysResult verthys_api_container_adopt(struct VerthysContext *ctx,
         vty_vault_free(v);
         return VERTHYS_ERR_RESOURCE_LIMIT;
     }
-    verthys_api_container_maintain(v, path);
+    {
+        int mrc = verthys_api_container_maintain(v, path);
+
+        if (mrc != VTY_OK || v == NULL || !v->unlocked) {
+            free(new_path);
+            if (v != NULL) vty_vault_free(v);
+            return verthys_api_map_vty(mrc != VTY_OK ? mrc : VTY_E_POLICY);
+        }
+    }
     free(ctx->file_path);
     ctx->file_path = new_path;
     vault_session_attach(ctx, v);

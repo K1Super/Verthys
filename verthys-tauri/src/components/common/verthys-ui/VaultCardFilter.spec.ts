@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp, h, nextTick, ref, type App } from "vue";
 import type { VaultTypeDef } from "../../../constants/vault_item_types";
-import { createEmptyVaultFilter, type VaultFilterCriteria } from "../../../lib/vault_item_filter";
+import { createEmptyVaultFilter, type VaultFilterCriteria } from "../../../lib/vault/vault_item_filter";
 import VaultCardFilter from "./VaultCardFilter.vue";
 
 const mounted: Array<{ app: App; container: HTMLDivElement }> = [];

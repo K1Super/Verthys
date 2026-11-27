@@ -600,8 +600,8 @@ int machine_limiter_kernel_status_fields(void)
     return 0;
 }
 
-static void run_kernel_preset_case(int mode, const uint16_t *expected,
-                                   int expected_count)
+static int run_kernel_preset_case(int mode, const uint16_t *expected,
+                                  int expected_count)
 {
     FakePipeServer server;
     int index;
@@ -609,7 +609,7 @@ static void run_kernel_preset_case(int mode, const uint16_t *expected,
     if (start_fake_server(&server, mode) != 0) {
         clear_env();
         CHECK(0);
-        return;
+        return 1;
     }
     set_env(L"1", server.pipe_name, server.pubkey_file);
     CHECK_EQ(security_preset_switch(SEC_PRESET_SECURE), 0);
@@ -626,6 +626,7 @@ static void run_kernel_preset_case(int mode, const uint16_t *expected,
         CHECK_EQ(server.commands[index], expected[index]);
     }
     CHECK_EQ(server.protocol_violations, 0);
+    return 0;
 }
 
 int machine_limiter_kernel_preset_register_only(void)
@@ -635,8 +636,7 @@ int machine_limiter_kernel_preset_register_only(void)
         (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER
     };
 
-    run_kernel_preset_case(FAKE_MODE_KERNEL_PREARMED, expected, 2);
-    return 0;
+    return run_kernel_preset_case(FAKE_MODE_KERNEL_PREARMED, expected, 2);
 }
 
 int machine_limiter_kernel_preset_fallback(void)
@@ -647,8 +647,7 @@ int machine_limiter_kernel_preset_fallback(void)
         (uint16_t)VTY_SVC_CMD_KERNEL_REGISTER
     };
 
-    run_kernel_preset_case(FAKE_MODE_KERNEL_FALLBACK, expected, 3);
-    return 0;
+    return run_kernel_preset_case(FAKE_MODE_KERNEL_FALLBACK, expected, 3);
 }
 
 int machine_limiter_kernel_preset_register_fail_rolls_back(void)
@@ -660,8 +659,7 @@ int machine_limiter_kernel_preset_register_fail_rolls_back(void)
         (uint16_t)VTY_SVC_CMD_KERNEL_DISARM
     };
 
-    run_kernel_preset_case(FAKE_MODE_KERNEL_REGISTER_FAIL, expected, 4);
-    return 0;
+    return run_kernel_preset_case(FAKE_MODE_KERNEL_REGISTER_FAIL, expected, 4);
 }
 
 /* ------------------------------------------------------------------ *

@@ -24,7 +24,7 @@ import {
   vencPhotoFramesBytes,
   VENC_CONTAINER_FIXED_BYTES,
 } from "./crypto";
-import { bytesToBase64, base64ToBytes, bytesToHex } from "../utils/binary_codec";
+import { bytesToBase64, base64ToBytes, bytesToHex } from "../utils/codec/binary_codec";
 import {
   CHUNK_SIZE,
   FILE_HASH_LEN,

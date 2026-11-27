@@ -45,8 +45,8 @@
  *     避免 verthys-flush ↔ verthys-cache 循环导入）
  */
 import { verthysFlush, verthysDeleteRecords, verthysVerifyDiskPersist } from "../../lib/verthys";
-import { createLogger } from "../../utils/logger";
-import { ok, err, VerthysErrorCode, type VerthysResult } from "../../lib/verthys_error";
+import { createLogger } from "../../utils/logging/logger";
+import { ok, err, VerthysErrorCode, type VerthysResult } from "../../lib/util/verthys_error";
 import { ref, type Ref } from "vue";
 import {
   FLUSH_MAX_RETRIES,

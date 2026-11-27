@@ -10,7 +10,7 @@ use zeroize::Zeroize;
 use crate::runtime::budget::PB_IPC_MAX_RESPONSE_LINE_BYTES;
 
 use super::payloads::{
-    CompactResultEntry, FileFinishPayload, FileNextPayload, MediaDamageScan, MediaExportPayload,
+    FileFinishPayload, FileNextPayload, MediaDamageScan, MediaExportPayload,
     MediaFinishPayload, MediaMetaItem, MediaNextPayload, MediaPreviewRecord, MediaReadPayload,
     MediaVencPreview, StorageStatsEntry,
 };
@@ -170,9 +170,6 @@ pub(crate) struct Response {
     /// 存储统计（仅 storage_stats 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) storage_stats: Option<StorageStatsEntry>,
-    /// 压缩结果（仅 storage_compact 返回）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) compact_result: Option<CompactResultEntry>,
     /// 照片导入单步结果（仅 photo_import_job_next 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) photo: Option<MediaNextPayload>,
@@ -317,7 +314,6 @@ impl Response {
             rotate_chunks: None,
             rotate_bytes: None,
             storage_stats: None,
-            compact_result: None,
             photo: None,
             file: None,
             file_finish: None,
@@ -464,7 +460,6 @@ impl Response {
             rotate_chunks: None,
             rotate_bytes: None,
             storage_stats: None,
-            compact_result: None,
             photo: None,
             file: None,
             file_finish: None,

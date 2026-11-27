@@ -10,7 +10,6 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-
 use crate::controller::types::VerthysResponse;
 use crate::infrastructure::audit::write_audit_with_extensions;
 use crate::state::AppState;
@@ -50,7 +49,10 @@ pub(super) fn audit_anchor(
     );
 }
 
-pub(super) fn forward(state: &AppState, req: &serde_json::Value) -> Result<VerthysResponse, String> {
+pub(super) fn forward(
+    state: &AppState,
+    req: &serde_json::Value,
+) -> Result<VerthysResponse, String> {
     let line = req.to_string();
     let resp_json = state.send_with_timeout(&line, ANCHOR_OP_TIMEOUT)?;
     let mut resp: VerthysResponse =
@@ -67,6 +69,9 @@ pub(super) fn is_uuid_hex(text: &str) -> bool {
 ///
 /// 只依赖 76 字节固定头：magic、主版本、header_len 与 UUID 偏移 12。
 /// 不校验尾哈希/槽区，因为扫描阶段不打开容器、也不需要证明其可解锁。
+///
+/// 全零 UUID 不是有效容器标识（创建路径使用 CSPRNG），测试夹具与损坏样本
+/// 常出现该值；纳入证据只会污染锚点映射。
 pub(crate) fn header_uuid(header: &[u8; CONTAINER_HEADER_BYTES]) -> Option<[u8; 16]> {
     if header[0..4] != CONTAINER_MAGIC {
         return None;
@@ -81,6 +86,9 @@ pub(crate) fn header_uuid(header: &[u8; CONTAINER_HEADER_BYTES]) -> Option<[u8; 
     }
     let mut uuid = [0u8; 16];
     uuid.copy_from_slice(&header[12..28]);
+    if uuid.iter().all(|byte| *byte == 0) {
+        return None;
+    }
     Some(uuid)
 }
 
@@ -108,10 +116,10 @@ pub(super) fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
 
 pub(super) fn is_container_candidate(path: &Path) -> bool {
     let ext = match path.extension().and_then(|e| e.to_str()) {
-        Some(e) => e.to_ascii_lowercase(),
+        Some(e) => e,
         None => return false,
     };
-    ext == "vty" || ext == "verthys"
+    ext.eq_ignore_ascii_case("vty") || ext.eq_ignore_ascii_case("verthys")
 }
 
 /// 统一展示为 Windows 原生分隔符；状态指针使用正斜杠，扫描证据使用反斜杠，

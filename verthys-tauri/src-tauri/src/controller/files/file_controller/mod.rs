@@ -26,6 +26,9 @@ mod user_io;
 mod tests;
 
 use audit::*;
+// sandbox 的自由函数只供单元测试经 super::* 调用；生产路径使用下方
+// 显式重导出的命令入口，故按测试构建门控
+#[cfg(test)]
 use sandbox::*;
 use user_io::*;
 

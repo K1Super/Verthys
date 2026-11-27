@@ -1,0 +1,602 @@
+/*
+ * lib/verthys_error.ts — Verthys IPC 通信标准化错误
+ *
+ * 所有 VerthysError 继承 Error，与全局 error-handler.ts 兼容
+ * 底层仅抛出标准化错误，不包含 console 输出
+ */
+
+/** IPC 通信错误细分类型 */
+export enum VerthysErrorKind {
+  /** 进程异常（worker 崩溃/未初始化/通信中断） */
+  PROCESS_ERROR = "PROCESS_ERROR",
+  /** 文件不存在（verthys 文件/bin 文件缺失） */
+  FILE_NOT_FOUND = "FILE_NOT_FOUND",
+  /** 权限不足（目录不可写/系统保护目录） */
+  PERMISSION_DENIED = "PERMISSION_DENIED",
+  /** 参数非法（入参校验失败/格式错误） */
+  INVALID_PARAM = "INVALID_PARAM",
+  /** IPC 调用失败（通用通信错误） */
+  IPC_FAILED = "IPC_FAILED",
+}
+
+/** Verthys IPC 标准化错误 */
+export class VerthysError extends Error {
+  readonly kind: VerthysErrorKind;
+  readonly cause?: unknown;
+
+  constructor(message: string, kind: VerthysErrorKind, cause?: unknown) {
+    super(message);
+    this.name = "VerthysError";
+    this.kind = kind;
+    this.cause = cause;
+  }
+}
+
+/** 进程异常（worker 崩溃/未初始化/通信中断） */
+function processError(message: string, cause?: unknown): VerthysError {
+  return new VerthysError(message, VerthysErrorKind.PROCESS_ERROR, cause);
+}
+
+/** 文件不存在（verthys 文件/bin 文件缺失） */
+function fileNotFound(message: string, cause?: unknown): VerthysError {
+  return new VerthysError(message, VerthysErrorKind.FILE_NOT_FOUND, cause);
+}
+
+/** 权限不足（目录不可写/系统保护目录） */
+function permissionDenied(message: string, cause?: unknown): VerthysError {
+  return new VerthysError(message, VerthysErrorKind.PERMISSION_DENIED, cause);
+}
+
+/** 参数非法（入参校验失败/格式错误） */
+function invalidParam(message: string, cause?: unknown): VerthysError {
+  return new VerthysError(message, VerthysErrorKind.INVALID_PARAM, cause);
+}
+
+/** IPC 调用失败（通用通信错误） */
+export function ipcFailed(message: string, cause?: unknown): VerthysError {
+  return new VerthysError(message, VerthysErrorKind.IPC_FAILED, cause);
+}
+
+/**
+ * 将未知错误包装为 VerthysError
+ * - 已是 VerthysError 则原样返回（防止双重包装）
+ * - 字符串匹配常见错误模式（文件不存在/权限/参数）
+ * - 其他错误统一归为 IPC_FAILED
+ */
+export function wrapAsVerthysError(e: unknown): VerthysError {
+  if (e instanceof VerthysError) return e;
+
+  const msg = e instanceof Error ? e.message : String(e);
+  const lower = msg.toLowerCase();
+
+  // 文件不存在
+  if (lower.includes("no such file") || lower.includes("not found") || lower.includes("文件不存在")) {
+    return fileNotFound(msg, e);
+  }
+  // 权限不足
+  if (lower.includes("permission denied") || lower.includes("access denied") || lower.includes("权限")) {
+    return permissionDenied(msg, e);
+  }
+  // 参数非法
+  if (lower.includes("invalid") || lower.includes("illegal") || lower.includes("参数") || lower.includes("invalid param")) {
+    return invalidParam(msg, e);
+  }
+  // 进程异常
+  if (lower.includes("process") || lower.includes("worker") || lower.includes("进程") || lower.includes("disconnected")) {
+    return processError(msg, e);
+  }
+
+  // 通用 IPC 失败
+  return ipcFailed(msg, e);
+}
+
+/* ------------------------------------------------------------------ *
+ * 结构化错误契约                                                   *
+ *                                                                    *
+ * 在 VerthysError/VerthysErrorKind（底层 IPC 异常）之上提供             *
+ * VerthysErrorCode 业务错误码 + VerthysResult<T> 判别联合，使所有公共    *
+ * 函数返回值统一为 Promise<VerthysResult<T>>，调用方通过 result.ok 和   *
+ * result.code 获取细分错误原因，从而精确指引 UI 提示。                *
+ *                                                                    *
+ * 共存关系：                                                          *
+ *   - VerthysError：底层 IPC 异常（lib/verthys.ts 内部抛出）              *
+ *   - VerthysErrorCode：业务层结构化错误码（key/*.ts 返回 VerthysResult）  *
+ *   - errFromUnknown：将底层异常包装为 VerthysResult 失败值              *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Verthys 业务错误码枚举（结构化错误契约）
+ *
+ * 命名规范：E_<DOMAIN>_<CAUSE>
+ *   - 通用：E_VERTHYS_*、E_INIT_*、E_PERSIST_*、E_RECORD_*、E_FLUSH_*
+ *   - 全局密钥：E_GLOBAL_KEY_*
+ *   - 设备绑定：E_DEVICE_*
+ *   - 模块密钥：E_MODULE_*
+ */
+export enum VerthysErrorCode {
+  // ===== 通用 =====
+  E_VERTHYS_NOT_READY = "E_VERTHYS_NOT_READY",
+  E_VERTHYS_LOCKED = "E_VERTHYS_LOCKED",
+  E_RECORD_NOT_FOUND = "E_RECORD_NOT_FOUND",
+  E_PERSIST_FAILED = "E_PERSIST_FAILED",
+  E_FLUSH_TIMEOUT = "E_FLUSH_TIMEOUT",
+  /** 暴力熔断锁定/尝试过频（message 或 retryAfterSecs 携带动态等待时间） */
+  E_RATE_LIMITED = "E_RATE_LIMITED",
+  /** 模块锁定（message 或 retryAfterSecs 携带动态等待时间） */
+  E_MODULE_LOCKED = "E_MODULE_LOCKED",
+  /** 安全门禁不可用（CNG/守卫内部异常，fail-closed） */
+  E_CNG_UNAVAILABLE = "E_CNG_UNAVAILABLE",
+  /** 安全状态目录预检失败（目录 ACL/位置不可用） */
+  E_SECURITY_STATE = "E_SECURITY_STATE",
+
+  // ===== 初始化 =====
+  E_INIT_FAILED = "E_INIT_FAILED",
+  E_PATH_INVALID = "E_PATH_INVALID",
+  E_PATH_EXISTS = "E_PATH_EXISTS",
+  E_PATH_NOT_EXISTS = "E_PATH_NOT_EXISTS",
+  E_WORKER_INIT_FAILED = "E_WORKER_INIT_FAILED",
+  E_VERTHYS_CREATE_FAILED = "E_VERTHYS_CREATE_FAILED",
+  E_VERTHYS_UNLOCK_FAILED = "E_VERTHYS_UNLOCK_FAILED",
+  /** 本机密钥材料（container.secret）缺失：普通解锁永久不可用，需恢复码解锁并重绑 */
+  E_KEY_MATERIAL_MISSING = "E_KEY_MATERIAL_MISSING",
+
+  // ===== 全局密钥 =====
+  E_GLOBAL_KEY_DERIVE_FAILED = "E_GLOBAL_KEY_DERIVE_FAILED",
+  E_GLOBAL_KEY_VERIFY_FAILED = "E_GLOBAL_KEY_VERIFY_FAILED",
+  E_GLOBAL_KEY_RECORD_NOT_FOUND = "E_GLOBAL_KEY_RECORD_NOT_FOUND",
+  E_GLOBAL_KEY_PERSIST_FAILED = "E_GLOBAL_KEY_PERSIST_FAILED",
+  /** 改钥通信超时：后端结果未确认，禁止自动重试，需重启后以新密钥验证 */
+  E_GLOBAL_KEY_CHANGE_UNCONFIRMED = "E_GLOBAL_KEY_CHANGE_UNCONFIRMED",
+
+  // ===== 设备绑定 =====
+  E_DEVICE_BINDING = "E_DEVICE_BINDING",
+  E_DEVICE_BIND_FAILED = "E_DEVICE_BIND_FAILED",
+  E_DEVICE_MISMATCH = "E_DEVICE_MISMATCH",
+  E_DEVICE_UNBOUND = "E_DEVICE_UNBOUND",
+
+  // ===== 模块密钥 =====
+  E_MODULE_KEY_NOT_FOUND = "E_MODULE_KEY_NOT_FOUND",
+  E_MODULE_VERIFY_FAILED = "E_MODULE_VERIFY_FAILED",
+  E_MODULE_KEY_SET_FAILED = "E_MODULE_KEY_SET_FAILED",
+  E_MODULE_CONFIG_SAVE_FAILED = "E_MODULE_CONFIG_SAVE_FAILED",
+  E_MODULE_NOT_READY = "E_MODULE_NOT_READY",
+  E_MODULE_VERTHYS_NOT_READY = "E_MODULE_VERTHYS_NOT_READY",
+  /** 当前会话或模块状态不允许该操作（如非恢复会话重密封设备槽） */
+  E_MODULE_POLICY = "E_MODULE_POLICY",
+
+  // ===== 可移动介质绑定 =====
+  /** 介质标识与登记记录不一致（克隆嫌疑），解锁被阻止；用户确认更换介质后可重试 */
+  E_USB_CLONE_SUSPECTED = "E_USB_CLONE_SUSPECTED",
+
+  // ===== 设备环境 / 回滚 =====
+  /** TPM/PCR 不可用或 PCR 策略不匹配（引导恢复码重密封） */
+  E_TPM = "E_TPM",
+  /** 回退锚点拒绝旧副本（文件回退） */
+  E_ROLLBACK = "E_ROLLBACK",
+  /** 本机回退锚点表已满且无可自动回收条目（需维护清理） */
+  E_ANCHOR_FULL = "E_ANCHOR_FULL",
+  /** 加密库已启用 keyfile 因子，但本次未提供 keyfile 文件 */
+  E_KEYFILE_REQUIRED = "E_KEYFILE_REQUIRED",
+  /** 提供的 keyfile 文件不是合法 VKFL（长度/magic/版本/校验和非法） */
+  E_KEYFILE_INVALID = "E_KEYFILE_INVALID",
+}
+
+/**
+ * VerthysResult<T> — 判别联合类型
+ *
+ * 所有公共函数返回值统一为 Promise<VerthysResult<T>>
+ * 调用方通过 result.ok 判断成功/失败，失败时通过 result.code 获取细分错误码
+ */
+export type VerthysResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; code: VerthysErrorCode; message: string; cause?: unknown; retryAfterSecs?: number };
+
+/** VerthysResult 失败值的具体类型（用于类型守卫返回值） */
+export type VerthysErrorResult = {
+  ok: false;
+  code: VerthysErrorCode;
+  message: string;
+  cause?: unknown;
+  retryAfterSecs?: number;
+};
+
+/** 成功构造器 */
+export function ok<T>(value: T): VerthysResult<T> {
+  return { ok: true, value };
+}
+
+/** 失败构造器（无值）；retryAfterSecs 仅锁定/限流类错误使用。 */
+export function err(
+  code: VerthysErrorCode,
+  message: string,
+  cause?: unknown,
+  retryAfterSecs?: number,
+): VerthysResult<never> {
+  return { ok: false, code, message, cause, retryAfterSecs };
+}
+
+/** 失败构造器（从 VerthysError 转换） */
+export function errFromVerthysError(
+  e: VerthysError,
+  fallbackCode: VerthysErrorCode,
+): VerthysResult<never> {
+  return { ok: false, code: fallbackCode, message: e.message, cause: e };
+}
+
+/** 失败构造器（从未知错误转换，使用 wrapAsVerthysError 推断） */
+export function errFromUnknown(
+  e: unknown,
+  fallbackCode: VerthysErrorCode,
+): VerthysResult<never> {
+  const ve = wrapAsVerthysError(e);
+  return { ok: false, code: fallbackCode, message: ve.message, cause: ve };
+}
+
+/** 类型守卫：判断值是否为 VerthysError */
+export function isVerthysError(e: unknown): e is VerthysError {
+  return e instanceof VerthysError;
+}
+
+/** 类型守卫：判断 VerthysResult 是否成功 */
+export function isOk<T>(r: VerthysResult<T>): r is { ok: true; value: T } {
+  return r.ok;
+}
+
+/** 类型守卫：判断 VerthysResult 是否失败 */
+export function isErr<T>(r: VerthysResult<T>): r is VerthysErrorResult {
+  return !r.ok;
+}
+
+/**
+ * 将 VerthysErrorKind 映射到默认的 VerthysErrorCode
+ * 用于在异常捕获路径下推断合适的错误码
+ */
+export function defaultCodeFromKind(kind: VerthysErrorKind): VerthysErrorCode {
+  switch (kind) {
+    case VerthysErrorKind.FILE_NOT_FOUND: return VerthysErrorCode.E_PATH_NOT_EXISTS;
+    case VerthysErrorKind.PERMISSION_DENIED: return VerthysErrorCode.E_PATH_INVALID;
+    case VerthysErrorKind.PROCESS_ERROR: return VerthysErrorCode.E_WORKER_INIT_FAILED;
+    case VerthysErrorKind.INVALID_PARAM: return VerthysErrorCode.E_INIT_FAILED;
+    case VerthysErrorKind.IPC_FAILED:
+    default: return VerthysErrorCode.E_PERSIST_FAILED;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 用户友好型错误文案映射                      *
+ *                                                                    *
+ * 在 lib/verthys_error.ts 维护错误码→用户文案映射表，替换底层技术报错。  *
+ * 每条文案附带下一步操作指引，降低用户咨询量。                         *
+ *                                                                    *
+ * translateVerthysError 返回结构化用户文案：                             *
+ *   - title：简短标题（用于 UI 弹窗标题）                              *
+ *   - message：面向用户的描述（避免技术术语）                          *
+ *   - guidance：下一步操作指引（具体可执行的恢复步骤）                  *
+ * ------------------------------------------------------------------ */
+
+/** 用户友好错误文案结构 */
+export interface VerthysUserErrorText {
+  /** 简短标题（用于 UI 弹窗标题） */
+  title: string;
+  /** 面向用户的描述（避免技术术语） */
+  message: string;
+  /** 下一步操作指引（具体可执行的恢复步骤） */
+  guidance: string;
+}
+
+/** 错误码→用户文案映射表（核心实现） */
+const VERTHYS_ERROR_TEXT_MAP: Record<VerthysErrorCode, VerthysUserErrorText> = {
+  // ===== 通用 =====
+  [VerthysErrorCode.E_VERTHYS_NOT_READY]: {
+    title: "加密库未就绪",
+    message: "加密库尚未初始化完成，暂时无法执行操作。",
+    guidance: "请等待几秒后重试。若问题持续，请重启应用。",
+  },
+  [VerthysErrorCode.E_VERTHYS_LOCKED]: {
+    title: "加密库已锁定",
+    message: "加密库当前处于锁定状态，需要重新解锁后才能操作。",
+    guidance: "请输入主密码重新解锁加密库。",
+  },
+  [VerthysErrorCode.E_RECORD_NOT_FOUND]: {
+    title: "记录不存在",
+    message: "指定的记录已被删除或不存在。",
+    guidance: "请刷新列表后重试。若仍找不到，该记录可能已被删除。",
+  },
+  [VerthysErrorCode.E_PERSIST_FAILED]: {
+    title: "数据保存失败",
+    message: "加密库数据写入磁盘失败，可能因磁盘空间不足或权限问题。",
+    guidance: "请检查磁盘剩余空间和目录写入权限，确保存储设备正常连接后重试。",
+  },
+  [VerthysErrorCode.E_FLUSH_TIMEOUT]: {
+    title: "数据同步超时",
+    message: "加密库数据同步到磁盘超时，可能因存储设备响应缓慢。",
+    guidance: "请关闭占用磁盘的其他程序后重试。若使用 USB 设备，请检查连接稳定性。",
+  },
+  [VerthysErrorCode.E_RATE_LIMITED]: {
+    title: "请稍后再试",
+    message: "尝试次数过多，已触发安全熔断。",
+    guidance: "请等待锁定时间结束后再重试；界面会显示剩余等待秒数。",
+  },
+  [VerthysErrorCode.E_MODULE_LOCKED]: {
+    title: "模块已锁定",
+    message: "该模块口令连续校验失败，已进入退避窗口。",
+    guidance: "请等待锁定结束后再输入模块口令；其它模块与加密库解锁不受影响。",
+  },
+  [VerthysErrorCode.E_CNG_UNAVAILABLE]: {
+    title: "安全门禁不可用",
+    message: "安全门禁（CNG/守卫）暂时不可用，已按安全策略拒绝操作。",
+    guidance: "请重启应用后重试；若持续出现，请检查系统密码服务是否正常。",
+  },
+  [VerthysErrorCode.E_SECURITY_STATE]: {
+    title: "安全状态目录不可用",
+    message: "无法加固安全状态目录，可能位于网络位置、非 NTFS 盘或权限受限目录。",
+    guidance: "请将用户数据放在本地 NTFS 目录，或联系管理员完成目录 ACL 预检后重试。",
+  },
+
+  // ===== 初始化 =====
+  [VerthysErrorCode.E_INIT_FAILED]: {
+    title: "初始化失败",
+    message: "加密库初始化过程中发生未知错误。",
+    guidance: "请重启应用。若问题持续，请检查系统资源是否充足。",
+  },
+  [VerthysErrorCode.E_PATH_INVALID]: {
+    title: "路径不可用",
+    message: "所选路径不可用，可能因目录不存在、权限不足或为系统保护目录。",
+    guidance: "请选择一个你有完整读写权限的普通目录（避免系统盘根目录、Program Files 等保护位置）。",
+  },
+  [VerthysErrorCode.E_PATH_EXISTS]: {
+    title: "文件已存在",
+    message: "目标位置已存在同名加密库文件。",
+    guidance: "请使用「打开已有加密库」而非「创建新加密库」，或选择其他路径。",
+  },
+  [VerthysErrorCode.E_PATH_NOT_EXISTS]: {
+    title: "文件不存在",
+    message: "指定的加密库文件不存在，可能已被移动或删除。",
+    guidance: "请确认文件路径正确，或使用「创建新加密库」新建一个文件。",
+  },
+  [VerthysErrorCode.E_WORKER_INIT_FAILED]: {
+    title: "安全核心启动异常",
+    message: "安全核心子进程启动失败，可能因系统资源不足或安全软件拦截。",
+    guidance: "1. 请将本应用添加到杀毒软件/安全卫士的白名单中；2. 关闭其他占用内存的程序后重启应用；3. 若问题持续，请以管理员身份运行。",
+  },
+  [VerthysErrorCode.E_VERTHYS_CREATE_FAILED]: {
+    title: "创建加密库失败",
+    message: "加密库文件创建失败，可能因磁盘空间不足或路径权限问题。",
+    guidance: "请检查目标磁盘剩余空间（至少需要 100MB）和目录写入权限后重试。",
+  },
+  [VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED]: {
+    title: "解锁加密库失败",
+    message: "加密库解锁失败，可能因密码错误、文件损坏或连续超时触发熔断保护。",
+    guidance: "1. 请确认密码输入正确；2. 若连续超时已触发熔断，请等待 30 分钟后重试或使用备份密钥恢复；3. 若文件已损坏，请使用备份文件恢复数据。",
+  },
+  [VerthysErrorCode.E_KEY_MATERIAL_MISSING]: {
+    title: "本机密钥材料缺失",
+    message: "用于打开加密库的本机密钥材料已丢失（常见于卸载时删除了应用数据），普通解锁已无法完成。",
+    guidance: "请使用创建加密库时保存的恢复码解锁，并在恢复会话中执行「重绑本机设备槽」，之后普通解锁即可恢复。",
+  },
+
+  // ===== 全局密钥 =====
+  [VerthysErrorCode.E_GLOBAL_KEY_DERIVE_FAILED]: {
+    title: "密钥派生失败",
+    message: "全局主密钥派生失败，可能因系统资源不足或密码格式异常。",
+    guidance: "请确保密码长度不少于 8 位，并关闭占用内存的程序后重试。",
+  },
+  [VerthysErrorCode.E_GLOBAL_KEY_VERIFY_FAILED]: {
+    title: "密钥验证失败",
+    message: "全局主密钥验证未通过，密码可能不正确。",
+    guidance: "请重新输入正确的全局主密码。若忘记密码，请使用备份密钥恢复。",
+  },
+  [VerthysErrorCode.E_GLOBAL_KEY_RECORD_NOT_FOUND]: {
+    title: "全局密钥记录缺失",
+    message: "加密库中未找到全局主密钥记录，可能因文件损坏或未完成初始化。",
+    guidance: "请重新初始化全局密钥。若已有数据，建议从备份恢复。",
+  },
+  [VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED]: {
+    title: "密钥保存失败",
+    message: "全局主密钥持久化到磁盘失败。",
+    guidance: "请检查磁盘空间和写入权限后重试。切勿在保存完成前关闭应用。",
+  },
+  [VerthysErrorCode.E_GLOBAL_KEY_CHANGE_UNCONFIRMED]: {
+    title: "改钥结果未确认",
+    message: "修改全局密钥的响应超时，后端可能已完成写入，也可能未完成。",
+    guidance: "请重启应用后以新密钥验证；若新密钥不可用，请使用旧密钥验证并重试。",
+  },
+
+  // ===== 设备绑定 =====
+  [VerthysErrorCode.E_DEVICE_BINDING]: {
+    title: "设备绑定异常",
+    message: "设备绑定校验过程中发生错误。",
+    guidance: "请重新进行设备绑定。若问题持续，请解除绑定后重新绑定。",
+  },
+  [VerthysErrorCode.E_DEVICE_BIND_FAILED]: {
+    title: "设备绑定失败",
+    message: "当前设备绑定到加密库失败。",
+    guidance: "请以管理员身份运行应用后重试。",
+  },
+  [VerthysErrorCode.E_DEVICE_MISMATCH]: {
+    title: "设备不匹配",
+    message: "当前设备与加密库绑定的设备不一致，已拒绝访问以保护数据安全。",
+    guidance: "如需在新设备上使用，请在原绑定设备上解除绑定，或使用备份密钥恢复数据。",
+  },
+  [VerthysErrorCode.E_DEVICE_UNBOUND]: {
+    title: "设备未绑定",
+    message: "当前加密库尚未绑定到任何设备。",
+    guidance: "请在安全中心完成设备绑定以启用设备级保护。",
+  },
+
+  // ===== 模块密钥 =====
+  [VerthysErrorCode.E_MODULE_KEY_NOT_FOUND]: {
+    title: "模块密钥不存在",
+    message: "指定模块的独立密钥尚未设置。",
+    guidance: "请先在对应模块中设置独立访问密钥。",
+  },
+  [VerthysErrorCode.E_MODULE_VERIFY_FAILED]: {
+    title: "模块验证失败",
+    message: "模块独立密钥验证未通过。",
+    guidance: "请输入正确的模块口令。若已忘记模块口令，只能在绑定过恢复码槽时通过恢复会话重密封设备槽；未绑定恢复槽的模块数据不可恢复。",
+  },
+  [VerthysErrorCode.E_MODULE_KEY_SET_FAILED]: {
+    title: "模块密钥设置失败",
+    message: "模块独立密钥设置过程中发生错误。",
+    guidance: "请确保加密库已解锁且全局密钥有效后重试。",
+  },
+  [VerthysErrorCode.E_MODULE_CONFIG_SAVE_FAILED]: {
+    title: "模块配置保存失败",
+    message: "模块安全配置持久化失败。",
+    guidance: "请检查磁盘空间和写入权限后重试。",
+  },
+  [VerthysErrorCode.E_MODULE_NOT_READY]: {
+    title: "模块未就绪",
+    message: "指定模块尚未完成初始化。",
+    guidance: "请等待模块初始化完成后再操作。",
+  },
+  [VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY]: {
+    title: "加密库未就绪",
+    message: "加密库尚未解锁，模块功能不可用。",
+    guidance: "请先解锁加密库后再使用模块功能。",
+  },
+  [VerthysErrorCode.E_MODULE_POLICY]: {
+    title: "当前会话不允许该操作",
+    message: "重密封设备槽只能在恢复码解锁的会话中执行。",
+    guidance: "请先在解锁页使用恢复码解锁，再回到模块恢复槽执行重密封。",
+  },
+
+  // ===== 可移动介质绑定 =====
+  [VerthysErrorCode.E_USB_CLONE_SUSPECTED]: {
+    title: "介质标识变化",
+    message: "加密库所在可移动介质的标识与登记记录不一致，已阻止解锁。",
+    guidance: "如确为本人更换介质，请确认更换介质后重试；否则请检查介质是否为克隆盘。",
+  },
+
+  // ===== 设备环境 / 回滚 =====
+  [VerthysErrorCode.E_TPM]: {
+    title: "设备环境已变化",
+    message: "TPM/PCR 策略与当前设备环境不匹配，已拒绝解锁。",
+    guidance: "请使用恢复码解锁后，在「设备与 PCR」中重密封；若设备硬件已更换，请确认恢复码可用。",
+  },
+  [VerthysErrorCode.E_ROLLBACK]: {
+    title: "检测到文件回退",
+    message: "当前加密库文件早于安全锚点记录，可能被替换为旧副本。",
+    guidance: "请勿继续使用该副本；如确需恢复旧版本，请使用恢复码并确认数据丢失范围。",
+  },
+  [VerthysErrorCode.E_ANCHOR_FULL]: {
+    title: "回退锚点表已满",
+    message: "本机回退锚点已达到 64 条上限，且没有可自动回收的见证缺失（DEAD）条目。",
+    guidance: "请进入「安全防护 → 回退锚点」打开管理面板，核对扫描证据后释放已废弃条目；见证有效（ACTIVE）的锚点不会被自动删除。",
+  },
+  [VerthysErrorCode.E_KEYFILE_REQUIRED]: {
+    title: "需要 keyfile 文件",
+    message: "该加密库已启用 keyfile 保护，解锁必须同时提供 keyfile 文件。",
+    guidance: "请选择创建时保存的 .vkf keyfile 文件后重试；若 keyfile 已丢失，只能用恢复码解锁后重新绑定。",
+  },
+  [VerthysErrorCode.E_KEYFILE_INVALID]: {
+    title: "keyfile 文件无效",
+    message: "所选文件不是 Verthys 生成的合法 keyfile（VKFL v1）。",
+    guidance: "请确认选择的是创建时由 Verthys 保存的 keyfile 文件，不要手工编辑或复制其他文件。",
+  },
+};
+
+/**
+ * 将 VerthysErrorCode 转换为用户友好文案
+ *
+ * @param code VerthysErrorCode 业务错误码
+ * @param originalMessage 可选的原始错误信息（用于日志，不展示给用户）
+ * @returns VerthysUserErrorText 结构化用户文案（title + message + guidance）
+ *
+ * 使用示例：
+ *   const result = await initUnlock(path);
+ *   if (!result.ok) {
+ *     const userText = translateVerthysError(result.code);
+ *     showErrorDialog(userText.title, userText.message, userText.guidance);
+ *   }
+ */
+export function translateVerthysError(
+  code: VerthysErrorCode,
+  originalMessage?: string,
+): VerthysUserErrorText {
+  const text = VERTHYS_ERROR_TEXT_MAP[code];
+  if (text) {
+    return text;
+  }
+  /* 未映射的错误码：返回通用文案，记录原始信息供排查 */
+  return {
+    title: "操作失败",
+    message: "操作过程中发生未知错误，请稍后重试。",
+    guidance: originalMessage
+      ? `错误详情（供技术支持参考）：${originalMessage}`
+      : "若问题持续，请联系技术支持并提供操作截图。",
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * 锁定/限流类错误统一映射                                            *
+ *                                                                    *
+ * 后端可能返回三类码：语义码（E_RATE_LIMITED / E_MODULE_LOCKED /  *
+ * E_CNG_UNAVAILABLE / E_SECURITY_STATE）或 worker 十六进制码          *
+ * （ERR_0000000A / ERR_0000001D / ERR_0000000E / ERR_00000020）。    *
+ * 本函数把两者统一为 VerthysResult 失败值，并保留 retryAfterSecs 与  *
+ * 后端动态文案。                                                      *
+ * ------------------------------------------------------------------ */
+
+/** worker 十六进制码 → 语义错误码 */
+const WORKER_GATE_CODES: Record<string, VerthysErrorCode> = {
+  ERR_0000000A: VerthysErrorCode.E_RATE_LIMITED,
+  ERR_0000001D: VerthysErrorCode.E_MODULE_LOCKED,
+  ERR_0000000E: VerthysErrorCode.E_CNG_UNAVAILABLE,
+  ERR_00000020: VerthysErrorCode.E_SECURITY_STATE,
+};
+
+/** 锁定类错误默认文案（后端未给出可读 message 时使用） */
+function gateFallbackMessage(code: VerthysErrorCode, secs: number): string {
+  switch (code) {
+    case VerthysErrorCode.E_RATE_LIMITED:
+      return secs > 0
+        ? `尝试次数过多，已锁定 ${secs} 秒，请稍后再试`
+        : "请求过于频繁，请稍后再试";
+    case VerthysErrorCode.E_MODULE_LOCKED:
+      return secs > 0
+        ? `模块已锁定 ${secs} 秒，请稍后再试`
+        : "模块已锁定，请稍后再试";
+    case VerthysErrorCode.E_CNG_UNAVAILABLE:
+      return "安全门禁暂时不可用，请重启应用后重试";
+    case VerthysErrorCode.E_SECURITY_STATE:
+      return "无法加固安全状态目录：请将用户数据放在本地 NTFS 目录，或联系管理员完成目录预检";
+    default:
+      return "操作失败";
+  }
+}
+
+/**
+ * 把后端锁定类错误映射为结构化失败值；非锁定类返回 null。
+ *
+ * @param rawCode 后端 error_code 或 worker error（可能为 ERR_XXXXXXXX）
+ * @param retryAfterSecs 后端建议等待秒数
+ * @param backendMessage 后端可读文案（是 ERR_ 码或空串时忽略）
+ */
+export function gateErrorResult(
+  rawCode: string | null | undefined,
+  retryAfterSecs?: number | null,
+  backendMessage?: string | null,
+): VerthysErrorResult | null {
+  if (!rawCode) return null;
+  const code = (WORKER_GATE_CODES[rawCode] ?? rawCode) as VerthysErrorCode;
+  if (
+    code !== VerthysErrorCode.E_RATE_LIMITED &&
+    code !== VerthysErrorCode.E_MODULE_LOCKED &&
+    code !== VerthysErrorCode.E_CNG_UNAVAILABLE &&
+    code !== VerthysErrorCode.E_SECURITY_STATE
+  ) {
+    return null;
+  }
+  const secs = Math.max(0, Math.ceil(retryAfterSecs ?? 0));
+  const readable =
+    backendMessage && !backendMessage.startsWith("ERR_") && backendMessage.trim().length > 0
+      ? backendMessage
+      : gateFallbackMessage(code, secs);
+  return {
+    ok: false,
+    code,
+    message: readable,
+    ...(secs > 0 ? { retryAfterSecs: secs } : {}),
+  };
+}

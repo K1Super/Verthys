@@ -50,7 +50,7 @@
 </template>
 
 <script setup lang="ts">
-import { toastState } from "../../../composables/useToastCenter";
+import { toastState } from "../../../composables/ui/useToastCenter";
 import type { IdleLevel } from "../../../settings/display-settings";
 
 defineProps<{

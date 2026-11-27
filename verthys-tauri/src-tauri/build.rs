@@ -296,7 +296,7 @@ fn load_dll_contract(repo_root: &Path) -> Option<DllContract> {
     let manifest_path = repo_root.join("build/core/verthys.artifacts.json");
     println!("cargo:rerun-if-changed={}", manifest_path.display());
     let text = fs::read_to_string(&manifest_path).ok()?;
-    let m: ArtifactContract = serde_json::from_str(&text).ok()?;
+    let m: ArtifactContract = serde_json::from_str(strip_utf8_bom(&text)).ok()?;
     if m.schema != CONTRACT_SCHEMA || m.fmt_version != CONTRACT_FMT_VERSION {
         println!("cargo:warning=构建产物契约 schema/fmt_version 不匹配，忽略该契约");
         return None;
@@ -402,6 +402,12 @@ struct BundleContract {
     sha256: String,
 }
 
+/// 构建脚本产出的 JSON 可能被 Windows PowerShell 以带 BOM 的 UTF-8 写回；
+/// serde_json 不接受 BOM，读取侧统一剥离，避免清单写入者差异阻断构建。
+fn strip_utf8_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -412,7 +418,7 @@ fn load_bundle_manifest(manifest_dir: &Path) -> Option<BundleManifest> {
     let path = manifest_dir.join(BUNDLE_MANIFEST_FILE);
     println!("cargo:rerun-if-changed={}", path.display());
     let text = fs::read_to_string(&path).ok()?;
-    let manifest: BundleManifest = serde_json::from_str(&text).unwrap_or_else(|error| {
+    let manifest: BundleManifest = serde_json::from_str(strip_utf8_bom(&text)).unwrap_or_else(|error| {
         panic!(
             "❌ 打包素材清单格式非法：{}\n{error}\n\
              修复：重新运行 build_production.ps1 或 build_dev.ps1 生成清单",
@@ -584,7 +590,7 @@ fn verify_bundle_assets(
             contract_path.display()
         )
     });
-    let contract: ArtifactContract = serde_json::from_str(&contract_text).unwrap_or_else(|error| {
+    let contract: ArtifactContract = serde_json::from_str(strip_utf8_bom(&contract_text)).unwrap_or_else(|error| {
         panic!(
             "❌ 打包素材契约格式非法 {}：{error}",
             contract_path.display()

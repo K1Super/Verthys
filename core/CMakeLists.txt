@@ -94,51 +94,50 @@ set(VERTHYS_SHARED_SOURCES
     src/container/format/verthys_format.c
     # 容器格式与密钥体系（双包裹 AND + 恢复码 + 模块 + 分片）
     src/crypto/vty_util.c
-    src/crypto/vty_blake3.c
+    src/crypto/hash/vty_blake3.c
     src/crypto/vty_kdf.c
     src/crypto/vty_device_root.c
-    src/crypto/vty_recovery.c
-    src/crypto/vty_keyfile.c
-    src/crypto/vty_keymanager.c
-    src/crypto/vty_keymanager_meta.c
-    src/crypto/vty_keymanager_create.c
-    src/crypto/vty_keymanager_open.c
-    src/crypto/vty_keymanager_journal.c
-    src/crypto/vty_keymanager_factor.c
-    src/crypto/vty_keymanager_persist.c
-    src/crypto/vty_keymanager_session.c
+    src/crypto/factors/vty_recovery.c
+    src/crypto/factors/vty_keyfile.c
+    src/crypto/keyring/vty_keymanager.c
+    src/crypto/keyring/vty_keymanager_meta.c
+    src/crypto/keyring/vty_keymanager_create.c
+    src/crypto/keyring/vty_keymanager_open.c
+    src/crypto/keyring/vty_keymanager_journal.c
+    src/crypto/keyring/vty_keymanager_factor.c
+    src/crypto/keyring/vty_keymanager_persist.c
+    src/crypto/keyring/vty_keymanager_session.c
     # D9 全库 DEK 轮换作业（新文件全量重建 + 原子替换）
-    src/crypto/vty_rotate.c
-    src/crypto/vty_rotate_io.c
-    src/crypto/vty_rotate_begin.c
-    src/crypto/vty_rotate_copy.c
-    src/crypto/vty_rotate_commit.c
-    # 空间压缩：原样密文重建 + 原子替换
-    src/container/vty_compact.c
+    src/crypto/rotate/vty_rotate.c
+    src/crypto/rotate/vty_rotate_io.c
+    src/crypto/rotate/vty_rotate_begin.c
+    src/crypto/rotate/vty_rotate_copy.c
+    src/crypto/rotate/vty_rotate_commit.c
     # 代际文件安全删除：零写 + 刷盘 + 删除
-    src/container/vty_secure_delete.c
+    src/container/maintenance/vty_secure_delete.c
     src/container/vty_format.c
-    src/container/vty_keyslot.c
-    src/container/vty_chunk.c
-    src/container/vty_module.c
-    src/container/vty_module_seal.c
-    src/container/vty_module_enable.c
-    src/container/vty_module_delete.c
-    src/container/vty_module_recovery.c
+    src/container/chunk/vty_keyslot.c
+    src/container/chunk/vty_chunk.c
+    src/container/module/vty_module.c
+    src/container/module/vty_module_seal.c
+    src/container/module/vty_module_enable.c
+    src/container/module/vty_module_delete.c
+    src/container/module/vty_module_recovery.c
     src/index/vty_record.c
-    src/index/vty_store.c
-    src/index/vty_store_node.c
-    src/index/vty_store_tree.c
-    src/index/vty_store_bulk.c
-    src/index/vty_store_segment.c
-    src/index/vty_store_cursor.c
-    src/index/vty_repo_leaf.c
-    src/index/vty_repo_record.c
-    src/index/vty_repo_scrub.c
-    src/index/vty_repo_file.c
-    src/index/vty_repo_query.c
-    src/index/vty_repo_rekey.c
-    src/index/vty_repo_storage.c
+    src/index/store/vty_store.c
+    src/index/store/vty_store_node.c
+    src/index/store/vty_store_tree.c
+    src/index/store/vty_store_bulk.c
+    src/index/store/vty_store_segment.c
+    src/index/store/vty_store_cursor.c
+    src/index/store/vty_store_space.c
+    src/index/repo/vty_repo_leaf.c
+    src/index/repo/vty_repo_record.c
+    src/index/repo/vty_repo_scrub.c
+    src/index/repo/vty_repo_file.c
+    src/index/repo/vty_repo_query.c
+    src/index/repo/vty_repo_rekey.c
+    src/index/repo/vty_repo_storage.c
     src/security/lockout/vty_lockout.c
     # 库文件版本回退检测（外部单调锚点 + 设备根 MAC）
     src/security/rollback/vty_rollback.c
@@ -194,12 +193,12 @@ set(VERTHYS_SHARED_SOURCES
     #   caller_auth/ — 调用方签名校验（Verthys_Init 前置门，A2）
     src/security/caller_auth/vty_caller_auth.c
     # L5 api/ — 非容器格式相关的公共模块
-    src/api/verthys_api_container.c
-    src/api/verthys_api_container_pcr.c
-    src/api/verthys_api_container_keyfile.c
-    src/api/verthys_api_container_module.c
-    src/api/verthys_api_container_rotate.c
-    src/api/verthys_api_container_storage.c
+    src/api/container/verthys_api_container.c
+    src/api/container/verthys_api_container_pcr.c
+    src/api/container/verthys_api_container_keyfile.c
+    src/api/container/verthys_api_container_module.c
+    src/api/container/verthys_api_container_rotate.c
+    src/api/container/verthys_api_container_storage.c
     src/api/container/verthys_api_container_inspect.c
     src/api/lifecycle/dllmain.c
 )
@@ -230,13 +229,13 @@ endif()
 if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND
    CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
     list(APPEND VERTHYS_SHARED_SOURCES
-        src/crypto/vty_blake3_avx2.c
+        src/crypto/hash/vty_blake3_avx2.c
     )
     if(MSVC)
-        set_source_files_properties(src/crypto/vty_blake3_avx2.c
+        set_source_files_properties(src/crypto/hash/vty_blake3_avx2.c
             PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     else()
-        set_source_files_properties(src/crypto/vty_blake3_avx2.c
+        set_source_files_properties(src/crypto/hash/vty_blake3_avx2.c
             PROPERTIES COMPILE_OPTIONS "-mavx2")
     endif()
 endif()
@@ -253,11 +252,20 @@ set(VERTHYS_SRC_SUBDIRS
     src/crypto
     src/crypto/cipher
     src/crypto/keymanager
+    src/crypto/keyring
+    src/crypto/rotate
+    src/crypto/hash
+    src/crypto/factors
     src/crypto/pepper
     src/container
     src/container/format
     src/container/shared
+    src/container/module
+    src/container/chunk
+    src/container/maintenance
     src/index
+    src/index/store
+    src/index/repo
     src/security/lockout
     src/security/rollback
     src/security/state

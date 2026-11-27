@@ -1,0 +1,139 @@
+/*
+ * utils/verthys-error-i18n.ts — Verthys 错误码国际化翻译工具
+ *
+ * 将 VerthysResult 错误码翻译为用户可读中文消息。
+ *
+ * 设计原则：
+ *   1. 单一映射表：所有 VerthysErrorCode → 中文消息映射集中于此文件
+ *   2. 零依赖：仅依赖 verthys_error.ts 的类型与枚举，无其他业务依赖
+ *   3. 兜底消息：未知错误码或未覆盖场景使用 result.message 兜底
+ *   4. 复用性：所有 Vue 组件通过 keyManager.ts 的再导出或直接导入使用
+ *
+ * 使用示例：
+ *   import { translateVerthysError } from "./verthys-error-i18n";
+ *   if (!result.ok) {
+ *     showError(translateVerthysError(result));
+ *   }
+ */
+import { VerthysErrorCode, type VerthysErrorResult } from "../../lib/util/verthys_error";
+
+/**
+ * VerthysResult 错误码 → 用户可读中文消息的完整映射表
+ *
+ * 命名规范与 VerthysErrorCode 一一对应：
+ *   - 通用：E_VERTHYS_*、E_INIT_*、E_PERSIST_*、E_RECORD_*、E_FLUSH_*
+ *   - 全局密钥：E_GLOBAL_KEY_*
+ *   - 设备绑定：E_DEVICE_*
+ *   - 模块密钥：E_MODULE_*
+ *
+ * 所有消息使用动词开头的简洁句式，避免技术术语泄露给最终用户。
+ */
+const ERROR_CODE_MESSAGES: Record<VerthysErrorCode, string> = {
+  // ===== 通用 =====
+  [VerthysErrorCode.E_VERTHYS_NOT_READY]: "加密库未解锁，请先解锁",
+  [VerthysErrorCode.E_VERTHYS_LOCKED]: "加密库已锁定",
+  [VerthysErrorCode.E_RECORD_NOT_FOUND]: "记录不存在",
+  [VerthysErrorCode.E_PERSIST_FAILED]: "持久化失败，请重试",
+  [VerthysErrorCode.E_FLUSH_TIMEOUT]: "落盘超时，请重试",
+  [VerthysErrorCode.E_RATE_LIMITED]: "尝试次数过多，请稍后再试",
+  [VerthysErrorCode.E_MODULE_LOCKED]: "模块已锁定，请稍后再试",
+  [VerthysErrorCode.E_CNG_UNAVAILABLE]: "安全门禁暂时不可用，请重启应用后重试",
+  [VerthysErrorCode.E_SECURITY_STATE]: "无法加固安全状态目录，请检查目录位置与权限",
+
+  // ===== 初始化 =====
+  [VerthysErrorCode.E_INIT_FAILED]: "初始化失败",
+  [VerthysErrorCode.E_PATH_INVALID]: "路径不可用，请检查权限或磁盘空间",
+  [VerthysErrorCode.E_PATH_EXISTS]: "文件已存在，请使用打开而非创建",
+  [VerthysErrorCode.E_PATH_NOT_EXISTS]: "文件不存在，请使用创建而非打开",
+  [VerthysErrorCode.E_WORKER_INIT_FAILED]: "安全核心启动失败",
+  [VerthysErrorCode.E_VERTHYS_CREATE_FAILED]: "创建加密库失败",
+  [VerthysErrorCode.E_VERTHYS_UNLOCK_FAILED]: "打开加密库失败",
+  [VerthysErrorCode.E_KEY_MATERIAL_MISSING]:
+    "本机密钥材料已丢失，请使用恢复码解锁，并在恢复会话中重绑本机设备槽",
+
+  // ===== 全局密钥 =====
+  [VerthysErrorCode.E_GLOBAL_KEY_DERIVE_FAILED]: "全局密钥派生失败",
+  [VerthysErrorCode.E_GLOBAL_KEY_VERIFY_FAILED]: "全局密钥验证失败",
+  [VerthysErrorCode.E_GLOBAL_KEY_RECORD_NOT_FOUND]: "全局密钥记录未找到，请先初始化",
+  [VerthysErrorCode.E_GLOBAL_KEY_PERSIST_FAILED]: "全局密钥落盘失败，请重试",
+  [VerthysErrorCode.E_GLOBAL_KEY_CHANGE_UNCONFIRMED]:
+    "修改结果未确认：请重启应用后以新密钥验证",
+
+  // ===== 设备绑定 =====
+  [VerthysErrorCode.E_DEVICE_BINDING]: "设备绑定异常",
+  [VerthysErrorCode.E_DEVICE_BIND_FAILED]: "设备绑定失败，请重试",
+  [VerthysErrorCode.E_DEVICE_MISMATCH]: "当前设备与绑定设备不匹配",
+  [VerthysErrorCode.E_DEVICE_UNBOUND]: "设备未绑定，请先绑定设备",
+
+  // ===== 模块密钥 =====
+  [VerthysErrorCode.E_MODULE_KEY_NOT_FOUND]: "模块密钥未设置",
+  [VerthysErrorCode.E_MODULE_VERIFY_FAILED]: "原独立密钥验证失败",
+  [VerthysErrorCode.E_MODULE_KEY_SET_FAILED]: "保存失败，请重试",
+  [VerthysErrorCode.E_MODULE_CONFIG_SAVE_FAILED]: "持久化失败，已回滚",
+  [VerthysErrorCode.E_MODULE_NOT_READY]: "模块未就绪，请先登录",
+  [VerthysErrorCode.E_MODULE_VERTHYS_NOT_READY]: "加密库未解锁",
+  [VerthysErrorCode.E_MODULE_POLICY]: "当前会话不允许该操作，请先用恢复码解锁",
+
+  // ===== 可移动介质绑定 =====
+  [VerthysErrorCode.E_USB_CLONE_SUSPECTED]: "介质标识与登记记录不一致，已阻止解锁（可确认更换介质后重试）",
+
+  // ===== 设备环境 / 回滚 =====
+  [VerthysErrorCode.E_TPM]: "设备环境已变化，请使用恢复码解锁并重密封 PCR",
+  [VerthysErrorCode.E_ROLLBACK]: "检测到文件回退，已拒绝打开",
+  [VerthysErrorCode.E_ANCHOR_FULL]:
+    "本机回退锚点表已满，请在安全防护中清理见证缺失锚点",
+  [VerthysErrorCode.E_KEYFILE_REQUIRED]: "该加密库已启用 keyfile，请选择 keyfile 文件后重试",
+  [VerthysErrorCode.E_KEYFILE_INVALID]: "keyfile 文件无效，请选择创建时保存的 keyfile",
+};
+
+/**
+ * 将 VerthysResult 失败值翻译为用户可读中文消息
+ *
+ * @param result VerthysResult 的失败分支（ok: false）
+ * @returns 用户可读中文消息（带兜底：未知错误码或空消息时返回通用提示）
+ *
+ * 使用示例：
+ *   const result = await initCreate(path);
+ *   if (!result.ok) {
+ *     showError(translateVerthysError(result));
+ *     return;
+ *   }
+ *
+ * 兜底策略：
+ *   1. 优先返回 ERROR_CODE_MESSAGES 中映射的消息
+ *   2. 若映射不存在（理论上不应发生，TypeScript 已穷举），返回 result.message
+ *   3. 若 result.message 为空，返回 "操作失败"
+ */
+export function translateVerthysError(result: VerthysErrorResult): string {
+  /* 锁定/限流类错误必须展示后端动态信息（“已锁定 X 秒”），不得被固定
+   * 文案覆盖，否则用户无法区分“口令错”与“正在熔断等待”。 */
+  if (
+    result.code === VerthysErrorCode.E_RATE_LIMITED ||
+    result.code === VerthysErrorCode.E_MODULE_LOCKED ||
+    result.code === VerthysErrorCode.E_CNG_UNAVAILABLE ||
+    result.code === VerthysErrorCode.E_SECURITY_STATE
+  ) {
+    if (result.message && result.message.trim().length > 0) {
+      return result.message;
+    }
+    const secs = Math.ceil(result.retryAfterSecs ?? 0);
+    if (result.code === VerthysErrorCode.E_RATE_LIMITED) {
+      return secs > 0 ? `尝试次数过多，已锁定 ${secs} 秒，请稍后再试` : "请求过于频繁，请稍后再试";
+    }
+    if (result.code === VerthysErrorCode.E_MODULE_LOCKED) {
+      return secs > 0 ? `模块已锁定 ${secs} 秒，请稍后再试` : "模块已锁定，请稍后再试";
+    }
+  }
+  // 优先使用映射表中的标准消息
+  const mapped = ERROR_CODE_MESSAGES[result.code];
+  if (mapped) {
+    return mapped;
+  }
+  // 兜底 1：使用 result.message
+  if (result.message && result.message.trim().length > 0) {
+    return result.message;
+  }
+  // 兜底 2：通用提示
+  return "操作失败";
+}
+

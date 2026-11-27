@@ -39,7 +39,7 @@ flowchart TB
 `cipher/verthys_crypto.c` 提供 AEAD / Argon2id / HKDF / HMAC 等原语；`cipher/secure_mem.c` 提供安全内存；`pepper/verthys_pepper.c` 维护胡椒三层来源与恢复卡；密钥管理按职责拆为 `vty_keymanager.c`（路径/编码、用户密钥、槽位封开、keyfile 与范围 IO）、`vty_keymanager_meta.c`（A/B 元数据副本与 Keyring DataRoot）、`vty_keymanager_create.c`（创建与恢复码重建）、`vty_keymanager_open.c`（解锁与核验）、`vty_keymanager_journal.c`（轮换恢复日志）、`vty_keymanager_factor.c`（keyfile 因子与设备重封）、`vty_keymanager_persist.c`（保存与批量提交）、`vty_keymanager_session.c`（PCR 槽位与模块密钥访问），跨文件契约见 `vty_keymanager_internal.h`；`vty_rotate.c` 与 `vty_rotate_{io,begin,copy,commit}.c` 实现全库 DEK 轮换作业，内部契约见 `vty_rotate_internal.h`；`vty_kdf.c` / `vty_device_root.c` / `vty_recovery.c` / `vty_keyfile.c` / `vty_blake3.c` / `vty_util.c` 提供派生、设备根、恢复码、keyfile、哈希与工具原语。
 
 ### 2.3 container/ — 容器格式
-`vty_format.c` 实现 A/B 元数据双副本与原子提交；`vty_keyslot.c` 管理密钥槽；`vty_chunk.c` 实现内容分片；`vty_module.c`（描述符、模块表与状态）与 `vty_module_{seal,enable,delete,recovery}.c`（封印/启用/删除/恢复槽）管理模块密钥与模块槽，跨文件契约见 `vty_module_internal.h`；`shared/verthys_internal.h` 定义运行时上下文；`format/verthys_format.c` 负责导出/导入交换信封。
+`vty_format.c` 实现 A/B 元数据双副本与原子提交；`chunk/vty_keyslot.c` 管理密钥槽；`chunk/vty_chunk.c` 实现内容分片；`module/vty_module.c`（描述符、模块表与状态）与 `module/vty_module_{seal,enable,delete,recovery}.c`（封印/启用/删除/恢复槽）管理模块密钥与模块槽，跨文件契约见 `module/vty_module_internal.h`；`maintenance/` 承载空间压缩与代际安全删除；`shared/verthys_internal.h` 定义运行时上下文；`format/verthys_format.c` 负责导出/导入交换信封。
 
 ### 2.4 index/ — 索引
 `vty_record.c` 记录编解码；存储层按职责拆为 `vty_store.c`（数据区打开/校验与空根）、`vty_store_node.c`（目录节点编解码与加密读写）、`vty_store_tree.c`（B+tree 读写/校验/统计/检查点）、`vty_store_bulk.c`（空库批量构建）、`vty_store_segment.c`（追加段读写与擦除）、`vty_store_cursor.c`（升序游标），跨文件契约见 `vty_store_internal.h`；仓库层按职责拆为 `vty_repo_leaf.c`（就绪守卫、模块路由、叶编解码、ID 分配器）、`vty_repo_record.c`（记录写入/读取/替换）、`vty_repo_scrub.c`（删除与擦除补偿）、`vty_repo_file.c`（文件叶与分片叶）、`vty_repo_query.c`（盲索引查询与迭代）、`vty_repo_rekey.c`（模块重写与清除）、`vty_repo_storage.c`（统计与压缩复制），跨文件契约见 `vty_repo_internal.h`。
@@ -48,7 +48,7 @@ flowchart TB
 六层防线：`layer1_process_guard/job_isolation.c`（Job Object 隔离）、`layer3_hw_binding/`（cng_machine_key / hardware_binding / system32_loader，机器绑定）、`layer4_hook_defense/`（tls_loader / tls_callbacks / hook_scan，防 Hook）、`layer5_sandbox/process_sandbox.c`（进程 mitigation policy + OS 回读）、`layer6_closure/defense_closure.c`（基于 `DefenseFacts` 的 7 路径事实校验）；另有 `anti_analysis/`（anti_debug / anti_inject / syscall_direct 直接系统调用）、`memory/`（memory_guard / secure_allocator / hibernation_state）、`integrity/`（.vsec 验签 + .rhat 运行时哈希）、`emergency/`（三级应急响应）、`preset/`（安全预设双缓冲切换）、`lockout/`、`rollback/`、`state/`、`tpm/`、`caller_auth/`。
 
 ### 2.6 事务与一致性
-C 层容器采用 A/B 元数据双副本 + 追加数据区，提交原子性由 `container/vty_format.c` 与 `index/vty_store_*.c` 保证。导入断点续传的 WAL、块归属台账与 GC 结算位于 Rust 仓储层（`repository/verthys_wal.rs` / `verthys_chunks.rs`），不进入 C 容器格式。
+C 层容器采用 A/B 元数据双副本 + 追加数据区，提交原子性由 `container/vty_format.c` 与 `index/store/vty_store_*.c` 保证。导入断点续传的 WAL、块归属台账与 GC 结算位于 Rust 仓储层（`repository/verthys_wal.rs` / `verthys_chunks.rs`），不进入 C 容器格式。
 
 ## 3. Tauri 调度层职责
 
@@ -146,9 +146,9 @@ core/
 ├── schema/                 FlatBuffers schema（flatcc 编译，generated/）
 ├── src/
 │   ├── api/                lifecycle/ transfer/ scan/ progress/ shared/ verthys_api_container_*.c
-│   ├── crypto/             cipher/ pepper/ vty_keymanager_* · vty_rotate_* · vty_kdf ...
+│   ├── crypto/             cipher/ pepper/ keyring/ rotate/ hash/ factors/ vty_kdf ...
 │   ├── container/          shared/ format/ vty_format · vty_keyslot · vty_chunk · vty_module_*
-│   ├── index/              vty_record · vty_store · vty_repo_{leaf,record,scrub,file,query,rekey,storage}
+│   ├── index/              store/ · repo/ · vty_record
 │   ├── security/           anti_analysis/ emergency/ integrity/ layer1_process_guard/
 │                           layer3_hw_binding/ layer4_hook_defense/ layer5_sandbox/
 │                           layer6_closure/ memory/ preset/

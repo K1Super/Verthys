@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { shallowRef } from "vue";
 import type { PhotoEntry } from "./types";
 
-vi.mock("../../lib/keyManager", () => ({
+vi.mock("../../lib/util/keyManager", () => ({
   deleteAndPersistBatch: vi.fn(),
   persistVerthysDetailed: vi.fn(),
   setModuleCache: vi.fn(),
@@ -28,7 +28,7 @@ import {
   deleteAndPersistBatch,
   persistVerthysDetailed,
   setModuleCache,
-} from "../../lib/keyManager";
+} from "../../lib/util/keyManager";
 import { verthysForgetImportKeys, verthysGcOrphanChunks } from "../../lib/verthys";
 import { usePhotoDelete } from "./usePhotoDelete";
 

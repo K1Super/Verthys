@@ -118,7 +118,7 @@ import {
   type VaultFilterCriteria,
   type VaultProtectionFilter,
   type VaultSortKey,
-} from "../../../lib/vault_item_filter";
+} from "../../../lib/vault/vault_item_filter";
 
 const props = defineProps<{
   modelValue: VaultFilterCriteria;

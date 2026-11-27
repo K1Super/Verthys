@@ -421,10 +421,11 @@ TEST(api_records_require_unlock)
     return 0;
 }
 
-#define COMPACT_API_PATH "api_compact.vty"
-#define COMPACT_API_REC_BYTES (32u * 1024u)
+#define RECLAIM_API_PATH "api_reclaim.vty"
+#define RECLAIM_API_REC_BYTES (32u * 1024u)
+#define RECLAIM_API_RECORDS 30u
 
-static uint64_t api_compact_file_size(const char *path)
+static uint64_t api_reclaim_file_size(const char *path)
 {
     WIN32_FILE_ATTRIBUTE_DATA data;
 
@@ -432,7 +433,31 @@ static uint64_t api_compact_file_size(const char *path)
     return ((uint64_t)data.nFileSizeHigh << 32) | (uint64_t)data.nFileSizeLow;
 }
 
-TEST(api_storage_stats_and_compact)
+static int api_reclaim_fill(VerthysHandle h, VerthysRecord *records,
+                            const uint8_t *payload, uint64_t *ids,
+                            uint64_t round)
+{
+    uint64_t i;
+
+    for (i = 0; i < RECLAIM_API_RECORDS; i++) {
+        char name[40];
+
+        snprintf(name, sizeof(name), "reclaim-%llu-%02llu",
+                 (unsigned long long)round, (unsigned long long)i);
+        memset(records, 0, sizeof(*records));
+        records->type = VERTHYS_RECORD_ACCOUNT;
+        records->name = name;
+        records->name_len = strlen(name);
+        records->data = payload;
+        records->data_len = RECLAIM_API_REC_BYTES;
+        CHECK_EQ(Verthys_AddRecord(h, records, &ids[i]), VERTHYS_OK);
+    }
+    return 0;
+}
+
+/* 删除即回收：删除返回后空间立即可复用，尾部落盘随提交截断；
+ * 重复「导入 → 全删」不得让容器大小随轮次线性增长。 */
+TEST(api_delete_reclaims_space)
 {
     VerthysHandle h = NULL;
     VerthysStorageStats st;
@@ -440,75 +465,63 @@ TEST(api_storage_stats_and_compact)
     VerthysRecord *records = NULL;
     char code[VTY_RECOVERY_TEXT_BUF];
     uint8_t *payload = NULL;
-    uint64_t ids[30];
+    uint64_t ids[RECLAIM_API_RECORDS];
     uint64_t live_count = 0;
-    uint64_t before_size = 0, after_size = 0;
+    uint64_t before_size = 0, after_size = 0, second_size = 0;
     uint64_t i;
 
-    remove(COMPACT_API_PATH);
-    remove(COMPACT_API_PATH ".vtycompact.tmp");
-    remove(COMPACT_API_PATH ".vtycompact.bak");
-    payload = (uint8_t *)malloc(COMPACT_API_REC_BYTES);
+    remove(RECLAIM_API_PATH);
+    payload = (uint8_t *)malloc(RECLAIM_API_REC_BYTES);
     records = (VerthysRecord *)calloc(1, sizeof(VerthysRecord));
     CHECK(payload != NULL);
     CHECK(records != NULL);
-    memset(payload, 0xA7, COMPACT_API_REC_BYTES);
+    memset(payload, 0xA7, RECLAIM_API_REC_BYTES);
 
     CHECK_EQ(Verthys_Init(&h), VERTHYS_OK);
-    CHECK_EQ(Verthys_V4Create(h, COMPACT_API_PATH, REC_PW, strlen(REC_PW),
+    CHECK_EQ(Verthys_V4Create(h, RECLAIM_API_PATH, REC_PW, strlen(REC_PW),
                               code, sizeof(code)), VERTHYS_OK);
-    for (i = 0; i < 30u; i++) {
-        char name[32];
-        snprintf(name, sizeof(name), "compact-%02llu",
-                 (unsigned long long)i);
-        memset(records, 0, sizeof(*records));
-        records->type = VERTHYS_RECORD_ACCOUNT;
-        records->name = name;
-        records->name_len = strlen(name);
-        records->data = payload;
-        records->data_len = COMPACT_API_REC_BYTES;
-        CHECK_EQ(Verthys_AddRecord(h, records, &ids[i]), VERTHYS_OK);
-    }
-    for (i = 0; i < 30u; i += 2u) {
+
+    CHECK_EQ(api_reclaim_fill(h, records, payload, ids, 1u), 0);
+    before_size = api_reclaim_file_size(RECLAIM_API_PATH);
+    CHECK(before_size > RECLAIM_API_RECORDS * RECLAIM_API_REC_BYTES);
+    for (i = 0; i < RECLAIM_API_RECORDS; i++) {
         CHECK_EQ(Verthys_DeleteRecord(h, ids[i]), VERTHYS_OK);
     }
-    CHECK_EQ(Verthys_GetSummaryCount(h, &live_count), VERTHYS_OK);
-    CHECK_EQ(live_count, 15u);
-    memset(&st, 0, sizeof(st));
-    CHECK_EQ(Verthys_GetStorageStats(h, &st), VERTHYS_OK);
-    CHECK(st.file_size > 0u);
-    CHECK(st.reclaimable_bytes > 0u);
-    before_size = api_compact_file_size(COMPACT_API_PATH);
-    CHECK(before_size > 0u);
-
-    CHECK_EQ(Verthys_CompactStorage(h, NULL, NULL), VERTHYS_OK);
-    after_size = api_compact_file_size(COMPACT_API_PATH);
+    after_size = api_reclaim_file_size(RECLAIM_API_PATH);
     CHECK(after_size > 0u);
-    CHECK(after_size < before_size);
+    /* 全部删除后活段与退役节点均已回收，文件应明显小于导入后大小。 */
+    CHECK(after_size + RECLAIM_API_RECORDS * RECLAIM_API_REC_BYTES / 2u <
+          before_size);
     memset(&st, 0, sizeof(st));
     CHECK_EQ(Verthys_GetStorageStats(h, &st), VERTHYS_OK);
-    CHECK(st.record_count == 15u);
-    CHECK(st.reclaimable_bytes < 64u * 1024u);
-
-    memset(&rec, 0, sizeof(rec));
-    CHECK_EQ(Verthys_GetRecord(h, ids[1], &rec), VERTHYS_OK);
-    CHECK_EQ(rec.data_len, COMPACT_API_REC_BYTES);
-    CHECK_EQ(rec.data[0], 0xA7u);
+    CHECK(st.record_count == 0u);
+    /* 非尾部空洞需由后续写入复用，不要求立即物理压实；这里只要求
+     * 文件整体已回落到导入前的量级。 */
+    CHECK(st.reclaimable_bytes < st.file_size);
+    CHECK_EQ(Verthys_GetSummaryCount(h, &live_count), VERTHYS_OK);
+    CHECK_EQ(live_count, 0u);
     CHECK_EQ(Verthys_GetRecord(h, ids[0], &rec), VERTHYS_ERR_NOTFOUND);
 
+    /* 第二轮：再次导入并全删，大小必须收敛而不是继续增长。 */
+    CHECK_EQ(api_reclaim_fill(h, records, payload, ids, 2u), 0);
+    for (i = 0; i < RECLAIM_API_RECORDS; i++) {
+        CHECK_EQ(Verthys_DeleteRecord(h, ids[i]), VERTHYS_OK);
+    }
+    second_size = api_reclaim_file_size(RECLAIM_API_PATH);
+    CHECK(second_size > 0u);
+    CHECK(second_size <= after_size + 64u * 1024u);
+
     CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
-    CHECK_EQ(Verthys_V4Unlock(h, COMPACT_API_PATH, REC_PW, strlen(REC_PW)),
+    CHECK_EQ(Verthys_V4Unlock(h, RECLAIM_API_PATH, REC_PW, strlen(REC_PW)),
              VERTHYS_OK);
     CHECK_EQ(Verthys_GetSummaryCount(h, &live_count), VERTHYS_OK);
-    CHECK_EQ(live_count, 15u);
+    CHECK_EQ(live_count, 0u);
     CHECK_EQ(Verthys_Lock(h), VERTHYS_OK);
     CHECK_EQ(Verthys_Deinit(h), VERTHYS_OK);
 
     free(records);
     free(payload);
-    remove(COMPACT_API_PATH);
-    remove(COMPACT_API_PATH ".vtycompact.tmp");
-    remove(COMPACT_API_PATH ".vtycompact.bak");
+    remove(RECLAIM_API_PATH);
     return 0;
 }
 

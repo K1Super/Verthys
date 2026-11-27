@@ -16,10 +16,10 @@ import {
   type SecurityPresetCode, type BruteForceCheckResponse, type PresetFeatures,
 } from "../lib/verthys";
 import { ref, readonly } from "vue";
-import { isTauriEnvironment } from "../utils/tauri_env";
+import { isTauriEnvironment } from "../utils/ipc/tauri_env";
 import { keyState, setCurrentVerthysPath, loadCustomFeatures, saveSecurityPreset, saveCustomFeatures, saveCustomSessionMinutes, normalizeCustomSessionMinutes, loadSecurityPreset, resetAllState } from "../state/key_state";
 import { PRESET_SESSION_TIMEOUT_MS, SECURITY_PRESET_KEY, CUSTOM_FEATURES_KEY } from "../constants/key_manager_const";
-import { withTimeout } from "../utils/promise_utils";
+import { withTimeout } from "../utils/ipc/promise_utils";
 import type { BruteForceGateResult } from "../types/key_manager";
 import { clearModuleKeyCache, clearModuleCache, clearRecordScanCache, resetFlushChain, waitForFlush, clearAllCacheTimers, setCacheDirty, isCacheDirty, clearSummaryCache, clearFullRecordCache } from "../cache/composition/verthys-cache";
 // 后台任务 API 直连 core 层（单向化：不再转发 start/stop）

@@ -20,7 +20,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// 证据文件版本；版本不匹配按不可用处理，由调用方重建。
-pub const STORE_VERSION: u32 = 1;
+///
+/// v2：只保留自定义位置与磁盘根；当前/最近容器探针不再持久化。
+/// v3：全盘扫描改为 8 层覆盖边界并跳过 AppData；旧证据的截断标记不再适用。
+pub const STORE_VERSION: u32 = 3;
 
 const STORE_FILE: &str = ".rollback_anchor_scan.json";
 const STORE_TMP_FILE: &str = ".rollback_anchor_scan.json.tmp";
@@ -30,6 +33,9 @@ const STORE_TMP_FILE: &str = ".rollback_anchor_scan.json.tmp";
 pub struct StoredScanEntry {
     pub uuid: String,
     pub paths: Vec<String>,
+    /// 路径数超过单锚点展示上限，列表不完整；不影响位置遍历完整性。
+    #[serde(default)]
+    pub capped: bool,
 }
 
 /// 单个扫描位置（文件或目录）的最近快照
@@ -38,7 +44,7 @@ pub struct StoredScanRoot {
     pub path: String,
     /// "file" / "dir"
     pub kind: String,
-    /// "container" / "recent" / "custom" / "deep"
+    /// "container" / "recent" / "custom" / "volume"
     pub source: String,
     pub available: bool,
     /// 最近一次完整扫描成功的时间（Unix 秒）；0 表示尚未完整成功
@@ -86,9 +92,6 @@ pub struct ScanStore {
     /// 最近一次扫描是否因为预算/错误而截断
     #[serde(default)]
     pub last_pass_truncated: bool,
-    /// 最近一次扫描是否为全盘深度扫描
-    #[serde(default)]
-    pub last_pass_deep: bool,
     #[serde(default)]
     pub last_pass_files_seen: u64,
     #[serde(default)]
@@ -114,7 +117,6 @@ impl Default for ScanStore {
             last_pass_at: 0,
             last_pass_partial: false,
             last_pass_truncated: false,
-            last_pass_deep: false,
             last_pass_files_seen: 0,
             last_pass_matched: 0,
             last_pass_permission_errors: 0,
@@ -220,6 +222,28 @@ pub fn remove_custom(store: &mut ScanStore, path: &str) -> bool {
     store.roots.len() != before
 }
 
+/// 清理非持久化来源与已不存在的磁盘根。
+///
+/// 自定义位置始终保留（由用户显式管理）；当前/最近探针与已移除磁盘的
+/// 历史根不得残留，否则容器改名或移动后会展示不可用的旧路径。
+pub fn retain_current_roots(
+    store: &mut ScanStore,
+    volume_keys: &std::collections::HashSet<String>,
+) {
+    if volume_keys.is_empty() {
+        /* 磁盘枚举失败时不能把已有磁盘证据当成失效数据清空；保留等待下轮。 */
+        store
+            .roots
+            .retain(|root| matches!(root.source.as_str(), "custom" | "volume"));
+        return;
+    }
+    store.roots.retain(|root| match root.source.as_str() {
+        "custom" => true,
+        "volume" => volume_keys.contains(&path_key(&root.path)),
+        _ => false,
+    });
+}
+
 /// 位置数量上限保护：优先淘汰最久未尝试的非自定义位置。
 pub fn prune(store: &mut ScanStore, max_roots: usize) {
     if store.roots.len() <= max_roots {
@@ -279,6 +303,7 @@ mod tests {
         store.roots[0].entries.push(StoredScanEntry {
             uuid: "0123456789abcdef0123456789abcdef".into(),
             paths: vec![r"D:\Vaults\Vault.verthys".into()],
+            capped: false,
         });
         store.last_pass_at = 100;
 
@@ -334,7 +359,7 @@ mod tests {
     fn prune_keeps_custom_roots() {
         let mut store = ScanStore::default();
         for index in 0..5 {
-            let mut root = StoredScanRoot::new(&format!(r"D:\vol{}", index), "dir", "deep");
+            let mut root = StoredScanRoot::new(&format!(r"D:\vol{}", index), "dir", "volume");
             root.last_attempt_at = index;
             store.roots.push(root);
         }
@@ -344,5 +369,63 @@ mod tests {
         prune(&mut store, 3);
         assert_eq!(store.roots.len(), 3);
         assert!(store.roots.iter().any(|root| root.source == "custom"));
+    }
+
+    #[test]
+    fn retain_current_roots_drops_stale_probe_and_absent_volume() {
+        let mut store = ScanStore::default();
+        store.roots.push(StoredScanRoot::new(
+            r"C:\Vaults\old.verthys",
+            "file",
+            "recent",
+        ));
+        store
+            .roots
+            .push(StoredScanRoot::new(r"C:\Vaults", "dir", "container"));
+        store
+            .roots
+            .push(StoredScanRoot::new(r"C:\", "dir", "volume"));
+        store
+            .roots
+            .push(StoredScanRoot::new(r"E:\", "dir", "volume"));
+        store
+            .roots
+            .push(StoredScanRoot::new(r"E:\Custom", "dir", "custom"));
+
+        let volumes: std::collections::HashSet<String> = [path_key(r"C:\")].into_iter().collect();
+        retain_current_roots(&mut store, &volumes);
+
+        assert_eq!(store.roots.len(), 2);
+        assert!(store
+            .roots
+            .iter()
+            .any(|root| root.source == "volume" && root.path == r"C:\"));
+        assert!(store
+            .roots
+            .iter()
+            .any(|root| root.source == "custom" && root.path == r"E:\Custom"));
+    }
+
+    #[test]
+    fn retain_current_roots_keeps_volume_evidence_when_enumeration_is_empty() {
+        let mut store = ScanStore::default();
+        store
+            .roots
+            .push(StoredScanRoot::new(r"C:\", "dir", "volume"));
+        store.roots.push(StoredScanRoot::new(
+            r"C:\Vaults\old.verthys",
+            "file",
+            "recent",
+        ));
+        retain_current_roots(&mut store, &std::collections::HashSet::new());
+        assert_eq!(store.roots.len(), 1);
+        assert_eq!(store.roots[0].source, "volume");
+    }
+
+    #[test]
+    fn old_store_version_is_rejected() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(store_file(dir.path()), br#"{"version":1,"roots":[]}"#).expect("write");
+        assert!(load(dir.path()).is_err());
     }
 }

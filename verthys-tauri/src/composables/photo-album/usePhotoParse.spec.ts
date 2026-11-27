@@ -16,7 +16,7 @@ vi.mock("../../lib/verthys", () => ({
   photoParseStart: parseStartMock,
   photoRestoreStart: restoreStartMock,
 }));
-vi.mock("../../lib/keyManager", () => ({
+vi.mock("../../lib/util/keyManager", () => ({
   persistVerthysDetailed: vi.fn(async () => ({ kind: "ok" })),
   setModuleCache: vi.fn(),
 }));

@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::block_on_with_handle;
 use crate::worker::protocol::{
-    ActorRequest, RotateProgress, StorageCompactProgress, DEFAULT_IPC_TIMEOUT, READY_CHECK_TIMEOUT,
+    ActorRequest, RotateProgress, DEFAULT_IPC_TIMEOUT, READY_CHECK_TIMEOUT,
 };
 use super::WorkerSession;
 
@@ -113,56 +113,6 @@ impl WorkerSession {
                     result = &mut reply_rx => {
                         /* 与解锁流一致：最终响应就绪后先排空已入队进度，
                          * 保证前端收到最后一条统计后再看到完成响应。 */
-                        while let Ok(p) = progress_rx.try_recv() {
-                            progress_cb(&p);
-                        }
-                        return match result {
-                            Ok(r) => r,
-                            Err(_) => Err("worker actor 通道关闭（任务已终止）".to_string()),
-                        };
-                    }
-                    progress = progress_rx.recv() => {
-                        if let Some(p) = progress {
-                            progress_cb(&p);
-                        }
-                    }
-                }
-            }
-        })
-    }
-
-    /// 发送空间压缩请求并流式接收进度。
-    ///
-    /// 协议与轮换流一致：worker 在 FFI 阻塞期间写多条
-    /// `{"op":"storage_compact_progress",...}`，返回后写最终响应行。
-    pub fn send_json_with_storage_progress(
-        &self,
-        json: &str,
-        progress_cb: &dyn Fn(&StorageCompactProgress),
-    ) -> Result<String, String> {
-        let json_owned = json.to_string();
-        let request_tx = self
-            .inner
-            .clone_sender()
-            .ok_or_else(|| "worker actor 已退出（通道已关闭）".to_string())?;
-        let runtime_handle = self.inner.runtime_handle.clone();
-
-        block_on_with_handle(&runtime_handle, async move {
-            let (reply_tx, mut reply_rx) = oneshot::channel();
-            let (progress_tx, mut progress_rx) = mpsc::channel::<StorageCompactProgress>(64);
-
-            request_tx
-                .send(ActorRequest::SendStreamingStorage {
-                    json: json_owned,
-                    reply: reply_tx,
-                    progress_tx,
-                })
-                .await
-                .map_err(|_| "worker actor 已退出（通道发送失败）".to_string())?;
-
-            loop {
-                tokio::select! {
-                    result = &mut reply_rx => {
                         while let Ok(p) = progress_rx.try_recv() {
                             progress_cb(&p);
                         }

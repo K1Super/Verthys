@@ -20,9 +20,9 @@ import { ref, shallowRef, onScopeDispose, type Ref, type ShallowRef } from "vue"
 import { open } from "@tauri-apps/plugin-dialog";
 import { photoParseStart, photoRestoreStart, userFileStat } from "../../lib/verthys";
 import { unpackVenc } from "../../lib/crypto";
-import { persistVerthysDetailed, setModuleCache } from "../../lib/keyManager";
+import { persistVerthysDetailed, setModuleCache } from "../../lib/util/keyManager";
 import { MAX_EXPORT_SINGLE_BYTES, MIN_TOKEN_LENGTH } from "../../constants/crypto_const";
-import { pushShallowItems, replaceShallowArray } from "../../utils/shallow-array";
+import { pushShallowItems, replaceShallowArray } from "../../utils/codec/shallow-array";
 import type { PhotoEntry, ParsedPhotoPreview } from "./types";
 import {
   formatSize, importedToPhotoEntries, nextMemoryPhotoId, sortByMetaId, toPhotoCacheEntries,

@@ -24,25 +24,39 @@
  *   - rate_limiter: 滑动窗口频率限制（共用实现，按用途分离实例）
  */
 /// HMAC 链式防篡改审计日志
+#[path = "security/audit_log.rs"]
 pub mod audit_log;
+#[path = "codec/base64.rs"]
 pub mod base64;
 /// 密码学工具（PBKDF2/DPAPI/HMAC/ct_eq）
+#[path = "security/crypto.rs"]
 pub mod crypto;
 /// 本机容器口令生成与 DPAPI 密封保管
+#[path = "fs/container_secret.rs"]
 pub mod container_secret;
 /// 跨层共享数据契约（记录条目、批量协议与响应结构）
+#[path = "types/contracts.rs"]
 pub mod contracts;
+#[path = "fs/disk.rs"]
 pub mod disk;
+#[path = "types/error.rs"]
 pub mod error;
 /// 日志敏感负载脱敏（白名单字段保留，其余值只留类型与规模）
+#[path = "security/log_sanitizer.rs"]
 pub mod log_sanitizer;
+#[path = "fs/path.rs"]
 pub mod path;
 /// 日志导出的路径与长哈希脱敏（应用日志/更新日志共用）
+#[path = "security/redaction.rs"]
 pub mod redaction;
+#[path = "security/random.rs"]
 pub mod random;
 /// 滑动窗口频率限制（共用实现，按用途分离实例）
+#[path = "security/rate_limiter.rs"]
 pub mod rate_limiter;
 /// 路径沙箱白名单 + resolve_and_validate
+#[path = "fs/sandbox.rs"]
 pub mod sandbox;
 /// 零化擦除的安全字符串包装（Zeroizing<String> + 透明 serde）
+#[path = "security/secured_string.rs"]
 pub mod secured_string;

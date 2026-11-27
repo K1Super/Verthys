@@ -21,7 +21,7 @@
  */
 import { ref, type ShallowRef } from "vue";
 import type { PhotoEntry } from "./types";
-import { pushModal, popModal } from "../../utils/modal_stack";
+import { pushModal, popModal } from "../../utils/ui/modal_stack";
 import {
   photoFullBegin,
   photoFullNext,

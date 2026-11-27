@@ -28,16 +28,16 @@ import {
   getSummaryRecord, getRecordIdsByType,
   ensureTypeIds, clearTypeIdCache,
   moduleKeyReadyRef,
-} from "../../lib/keyManager";
-import { lockModuleKey } from "../../lib/module_crypto";
+} from "../../lib/util/keyManager";
+import { lockModuleKey } from "../../lib/util/module_crypto";
 import { photoViewerCache } from "./photoBlobCache";
 import { TYPE_PHOTO_META } from "../../lib/crypto";
 import { photoMetaGet, photoMetaProbe } from "../../lib/verthys";
 import { scrollPerf } from "../../config/scroll-perf";
-import { rafThrottle } from "../../utils/debounce";
+import { rafThrottle } from "../../utils/ipc/debounce";
 import {
   updateShallowItem, pushShallowItems, replaceShallowArray, clearShallowArray,
-} from "../../utils/shallow-array";
+} from "../../utils/codec/shallow-array";
 import type { PhotoEntry, VisiblePhoto, DecryptedPhotoMeta } from "./types";
 import {
   formatSize, rehydrateEntries, diffNewIds, sortByMetaId,

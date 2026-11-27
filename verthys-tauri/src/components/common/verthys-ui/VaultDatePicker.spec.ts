@@ -9,7 +9,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp, h, nextTick, ref, type App } from "vue";
 import VaultDatePicker from "./VaultDatePicker.vue";
-import { todayIso } from "../../../lib/calendar";
+import { todayIso } from "../../../lib/util/calendar";
 
 const mounted: Array<{ app: App; container: HTMLDivElement }> = [];
 

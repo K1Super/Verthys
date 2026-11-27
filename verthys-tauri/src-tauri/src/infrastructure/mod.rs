@@ -53,25 +53,40 @@
  * - 平台支持：Windows 为一级目标，非Windows平台提供条件编译存根确保编译通过。
  */
 /// 应用数据目录解析（使用 SHGetKnownFolderPath，支持便携模式与长路径）
+#[path = "fs/app_paths.rs"]
 pub mod app_paths;
 /// 审计日志落盘与 HMAC 密钥单例
+#[path = "runtime/audit.rs"]
 pub mod audit;
 /// Windows 控制台信号处理（SetConsoleCtrlHandler → CancellationToken）
+#[path = "runtime/console_handler.rs"]
 pub mod console_handler;
+#[path = "runtime/device_fingerprint.rs"]
 pub mod device_fingerprint;
 /// 独占文件锁与私有目录 ACL 隔离
+#[path = "fs/file_lock.rs"]
 pub mod file_lock;
+#[path = "ipc/handle_factory.rs"]
 pub mod handle_factory;
 /// 主进程 ↔ Worker 安全 IPC 与 SHM 载荷认证（会话密钥 + HMAC 信封 + SHM 认证标签）
+#[path = "ipc/ipc_secure.rs"]
 pub mod ipc_secure;
 /// 应用诊断日志导出（脱敏 zip；审计 HMAC 链不在范围内）
+#[path = "fs/log_export.rs"]
 pub mod log_export;
+#[path = "ipc/log_pipe.rs"]
 pub mod log_pipe;
+#[path = "fs/path_resolver/mod.rs"]
 pub mod path_resolver;
+#[path = "runtime/process_guard.rs"]
 pub mod process_guard;
+#[path = "fs/resource_guard.rs"]
 pub mod resource_guard;
 /// P2 安全服务内核生命周期 IPC 客户端（固定管道 + 签名响应校验）
+#[path = "ipc/security_service_client.rs"]
 pub mod security_service_client;
+#[path = "ipc/shared_memory.rs"]
 pub mod shared_memory;
 /// SHM 协议契约（通过 include! 引入共享源文件，保证主/子进程数据结构一致）
+#[path = "ipc/shm_schema.rs"]
 pub mod shm_schema;

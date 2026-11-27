@@ -6,7 +6,7 @@
  */
 #include "verthys_test.h"
 #include "verthys.h"
-#include "api/verthys_api_container.h"
+#include "verthys_api_container.h"
 #include "api/shared/verthys_api_utils.h"
 #include "vty_types.h"
 

@@ -80,28 +80,11 @@
       <section class="kv-section settings-section">
         <div class="kv-section-label">存储</div>
         <div class="settings-row">
-          <span class="settings-row-name">可回收</span>
+          <span class="settings-row-name">占用</span>
           <div class="settings-controls">
             <span class="settings-storage-readout">{{ storageReadout }}</span>
-            <ActionButton
-              v-if="storageBusy"
-              label="取消"
-              :show-plus="false"
-              @click="cancelStorage"
-            />
-            <ActionButton
-              v-else
-              label="立即回收"
-              :show-plus="false"
-              :disabled="!storageStats || storageStats.reclaimable_bytes === 0"
-              @click="compactStorage"
-            />
           </div>
         </div>
-        <div v-if="storageProgress" class="settings-storage-progress">
-          {{ storageProgressText }}
-        </div>
-        <div v-if="storageError" class="settings-storage-error">{{ storageError }}</div>
       </section>
 
       <div class="settings-actions">
@@ -123,16 +106,9 @@ import { computed, reactive, ref, watch } from "vue";
 import CosmicOverlay from "../common/cosmic/CosmicOverlay.vue";
 import ActionButton from "../common/verthys-ui/ActionButton.vue";
 import VaultSelect from "../common/verthys-ui/VaultSelect.vue";
-import { useGlobalIdleScheduler } from "../../composables/useGlobalIdleScheduler";
-import {
-  verthysStorageCompact,
-  verthysStorageCompactCancel,
-  verthysStorageStats,
-} from "../../lib/verthys";
-import type {
-  StorageStats,
-  StorageCompactProgress,
-} from "../../types/verthys";
+import { useGlobalIdleScheduler } from "../../composables/app/useGlobalIdleScheduler";
+import { verthysStorageStats } from "../../lib/verthys";
+import type { StorageStats } from "../../types/verthys";
 import {
   ACTIVE_FPS_VALUES,
   IDLE_TIERS,
@@ -153,11 +129,8 @@ const emit = defineEmits<{ (e: "close"): void }>();
 
 const { resetIdle } = useGlobalIdleScheduler();
 
-/* ===== 存储维护（即时操作，不进入显示设置草稿） ===== */
+/* ===== 存储统计（只读；删除后的空间由存储引擎自动回收） ===== */
 const storageStats = ref<StorageStats | null>(null);
-const storageBusy = ref(false);
-const storageError = ref("");
-const storageProgress = ref<StorageCompactProgress | null>(null);
 
 function formatBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0 B";
@@ -174,48 +147,14 @@ function formatBytes(value: number): string {
 const storageReadout = computed(() => {
   const s = storageStats.value;
   if (!s) return "—";
-  return `文件 ${formatBytes(s.file_size)} · 有效 ${formatBytes(s.live_bytes)} · 可回收 ${formatBytes(s.reclaimable_bytes)}`;
-});
-
-const storageProgressText = computed(() => {
-  const p = storageProgress.value;
-  if (!p) return "";
-  return `已复制 ${formatBytes(p.bytes)} · 记录 ${p.records} · 分片 ${p.chunks}`;
+  return `文件 ${formatBytes(s.file_size)} · 有效 ${formatBytes(s.live_bytes)}`;
 });
 
 async function refreshStorage(): Promise<void> {
   try {
     storageStats.value = await verthysStorageStats();
-    storageError.value = "";
-  } catch (e) {
+  } catch {
     storageStats.value = null;
-    storageError.value = e instanceof Error ? e.message : String(e);
-  }
-}
-
-async function cancelStorage(): Promise<void> {
-  try {
-    await verthysStorageCompactCancel();
-  } catch (e) {
-    storageError.value = e instanceof Error ? e.message : String(e);
-  }
-}
-
-async function compactStorage(): Promise<void> {
-  if (storageBusy.value) return;
-  storageBusy.value = true;
-  storageError.value = "";
-  storageProgress.value = null;
-  try {
-    await verthysStorageCompact((p) => {
-      storageProgress.value = p;
-    });
-    await refreshStorage();
-  } catch (e) {
-    storageError.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    storageBusy.value = false;
-    storageProgress.value = null;
   }
 }
 
@@ -224,9 +163,6 @@ watch(
   (show) => {
     if (show) {
       void refreshStorage();
-    } else {
-      storageProgress.value = null;
-      storageError.value = "";
     }
   },
   { immediate: true },
@@ -491,18 +427,6 @@ function save(): void {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
-.settings-storage-progress {
-  margin-top: 6px;
-  font-size: 10px;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
-.settings-storage-error {
-  margin-top: 6px;
-  font-size: 10px;
-  color: var(--danger);
-}
-
 .settings-actions {
   display: flex;
   justify-content: flex-end;

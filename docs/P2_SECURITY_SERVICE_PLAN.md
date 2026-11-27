@@ -151,10 +151,24 @@ security-service/
 │   ├── pipe_server.c/.h            # 管道实例、连接、超时、并发上限
 │   ├── client_auth.c/.h            # 客户端 PID→映像→Authenticode→模块校验
 │   ├── protocol.c/.h               # 请求校验、响应构造与签名
-│   └── service_util.c/.h           # 宽字符/路径/事件日志/安全零化
+│   ├── service_util.h              # 工具层公开契约（实现按域拆分于 util_*.c）
+│   ├── util_fs.c                   # 宽字符路径、文件读写与原子替换
+│   ├── util_misc.c                 # 时间与安全清零
+│   ├── util_identity.c             # SID 查询/比较/哈希与特权启用
+│   ├── util_acl.c                  # 路径/注册表 ACL 应用与完整性校验
+│   ├── util_registry.c             # 注册表值读写与删除
+│   ├── util_process.c              # 进程映像路径查询
+│   └── util_eventlog.c             # 事件日志写入与重复抑制
 ├── setup/
 │   ├── setup_entry.h               # 服务 exe 子命令入口声明
-│   └── setup_main.c                # /install /uninstall /repair 等实现（编入服务 exe）
+│   ├── setup_internal.h            # 子命令跨文件契约
+│   ├── setup_main.c                # 参数分发与环境前置校验
+│   ├── setup_common.c              # 输出、管理员判定、版本与路径解析
+│   ├── setup_service.c             # 服务生命周期、事件源、exe 替换
+│   ├── setup_fs.c                  # 目录删除、SHA-256、根证书、目录归档
+│   ├── setup_ping.c                # 公钥读取、PING 往返与就绪探测
+│   ├── setup_driver.c              # 内核驱动载荷安装/移除与状态
+│   └── setup_commands.c            # /install /uninstall /repair 等子命令
 ├── tests/
 │   ├── CMakeLists.txt
 │   ├── test_protocol.c

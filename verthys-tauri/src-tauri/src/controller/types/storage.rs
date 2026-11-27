@@ -1,7 +1,7 @@
 /*
- * 存储统计与空间压缩 DTO
+ * 存储统计 DTO
  *
- * 职责边界：活数据/可回收字节统计与压缩结果。
+ * 职责边界：活数据/可回收字节统计。
  */
 
 use serde::{Deserialize, Serialize};
@@ -19,17 +19,5 @@ pub struct StorageStatsDto {
     pub chunk_count: u64,
 }
 
-/// 空间压缩结果投影
-#[derive(Serialize, Deserialize, Clone, Default)]
-pub struct CompactResultDto {
-    pub stage: u32,
-    pub before_bytes: u64,
-    pub after_bytes: u64,
-    pub reclaimed_bytes: u64,
-    pub records: u64,
-    pub chunks: u64,
-    pub bytes: u64,
-    pub live_bytes: u64,
-}
 
 

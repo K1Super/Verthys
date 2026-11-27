@@ -409,6 +409,11 @@ TEST(maintenance_scrubs_legacy_tombstone)
                           (const uint8_t *)"secret", 6u, &id), VTY_OK);
     CHECK_EQ(first_live_id(v, &leaf), id);
 
+    /* 新库创建事务已写入迁移完成标记；删除标记以模拟升级前旧库，
+     * 否则遗留墓碑扫描会被正确地跳过。 */
+    CHECK_EQ(vty_store_delete(v->store, VTY_KS_MAINT,
+                              (const uint8_t *)"legacy-scrub-v1",
+                              sizeof("legacy-scrub-v1") - 1u), VTY_OK);
     /* 构造升级前的遗留墓碑：无 KEYED、无 PENDING，但保留定位符。 */
     id_key(key, id);
     CHECK_EQ(vty_store_get(v->store, VTY_KS_RECORD, key, sizeof(key),
@@ -431,6 +436,62 @@ TEST(maintenance_scrubs_legacy_tombstone)
     CHECK_EQ(leaf_status(v, id, &flags, &off), VTY_OK);
     CHECK_EQ((flags & VTY_REPO_FLAG_SCRUB_PENDING) != 0u, 0);
     CHECK_EQ(off, 0u);
+
+    vty_vault_free(v);
+    remove(SCRUB_PATH);
+    return 0;
+}
+
+/* 待擦队列前部堆积大量已出队墓碑时，维护必须跳过墓碑并继续处理后面
+ * 的待擦项；否则累计删除超过单次预算后补偿擦除永久失效。 */
+TEST(scrub_queue_skips_tombstones_and_reaches_pending)
+{
+    VtyVault *v = NULL;
+    char code[VTY_RECOVERY_TEXT_BUF];
+    uint64_t id = 0;
+    uint64_t scrubbed = 0;
+    uint64_t pending = 0;
+    uint8_t flags = 0;
+    uint64_t off = 1;
+    uint64_t i;
+
+    remove(SCRUB_PATH);
+    CHECK_EQ(vty_vault_create(SCRUB_PATH, "scrub-pw", &v, code, sizeof(code)),
+             VTY_OK);
+    /* 把目标记录 ID 推到所有墓碑键之后，复现“前 4096 个键全是墓碑”。 */
+    CHECK_EQ(vty_repo_set_next_id(v, 4200u), VTY_OK);
+    CHECK_EQ(vty_repo_add(v, 7u, (const uint8_t *)"late", 4u,
+                          (const uint8_t *)"secret", 6u, &id), VTY_OK);
+    CHECK_EQ(id, 4200u);
+
+    for (i = 1u; i <= 4096u; i++) {
+        uint8_t k[8];
+
+        id_key(k, i);
+        CHECK_EQ(vty_store_delete(v->store, VTY_KS_SCRUB, k, sizeof(k)),
+                 VTY_OK);
+    }
+    CHECK_EQ(vty_vault_commit_store(v), VTY_OK);
+    CHECK_EQ(vty_vault_save_meta(v), VTY_OK);
+
+    vty_repo_set_skip_scrub_for_test(1);
+    CHECK_EQ(vty_repo_delete(v, id), VTY_OK);
+    vty_repo_set_skip_scrub_for_test(0);
+
+    CHECK_EQ(vty_repo_maintain_pending_scrub(v, 4096u, &scrubbed, &pending),
+             VTY_OK);
+    CHECK_EQ(scrubbed, 1u);
+    CHECK_EQ(pending, 0u);
+    /* 擦除完成后墓碑定位符必须清空；段区间随提交回收，不能再按旧偏移
+     * 读取（读得到反而说明空间没有参与回收）。 */
+    CHECK_EQ(leaf_status(v, id, &flags, &off), VTY_OK);
+    CHECK_EQ(off, 0u);
+    CHECK_EQ((flags & VTY_REPO_FLAG_SCRUB_PENDING) != 0u, 0);
+
+    /* 第二次维护不得重复擦除，也不得卡在同一批墓碑上。 */
+    CHECK_EQ(vty_repo_maintain_pending_scrub(v, 4096u, &scrubbed, &pending),
+             VTY_OK);
+    CHECK_EQ(scrubbed, 0u);
 
     vty_vault_free(v);
     remove(SCRUB_PATH);

@@ -207,12 +207,9 @@ pub struct VerthysResponse {
     pub rotate_chunks: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotate_bytes: Option<u64>,
-    /// 存储统计（仅 verthys_storage_stats / verthys_storage_compact 返回）
+    /// 存储统计（仅 verthys_storage_stats 返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_stats: Option<StorageStatsDto>,
-    /// 压缩结果（仅 verthys_storage_compact 返回）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compact_result: Option<CompactResultDto>,
 }
 
 impl VerthysResponse {
@@ -279,7 +276,7 @@ impl VerthysResponse {
             rotate_chunks: None,
             rotate_bytes: None,
             storage_stats: None,
-            compact_result: None,
+
         }
     }
     /// 结构化错误响应：携带稳定错误码（前端按码分支），文案仅作展示
@@ -371,7 +368,7 @@ impl VerthysResponse {
             rotate_chunks: None,
             rotate_bytes: None,
             storage_stats: None,
-            compact_result: None,
+
         }
     }
 }

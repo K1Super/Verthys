@@ -168,34 +168,6 @@ impl ProgressEvent for RotateProgress {
     }
 }
 
-/// 空间压缩进度（从 worker 的 storage_compact_progress JSON 行反序列化）
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-pub struct StorageCompactProgress {
-    pub stage: u32,
-    pub before_bytes: u64,
-    pub after_bytes: u64,
-    pub reclaimed_bytes: u64,
-    pub records: u64,
-    pub chunks: u64,
-    pub bytes: u64,
-    pub live_bytes: u64,
-}
-
-impl ProgressEvent for StorageCompactProgress {
-    fn log_summary(&self) -> String {
-        format!(
-            "stage={} before={} after={} reclaimed={} records={} chunks={} bytes={}",
-            self.stage,
-            self.before_bytes,
-            self.after_bytes,
-            self.reclaimed_bytes,
-            self.records,
-            self.chunks,
-            self.bytes
-        )
-    }
-}
-
 /* ------------------------------------------------------------------ *
  * Actor 请求/响应协议                                                  *
  *                                                                    *
@@ -221,12 +193,6 @@ pub(crate) enum ActorRequest {
         reply: oneshot::Sender<Result<String, String>>,
         progress_tx: mpsc::Sender<RotateProgress>,
     },
-    /// 空间压缩流式请求（send_json_with_storage_progress）
-    SendStreamingStorage {
-        json: String,
-        reply: oneshot::Sender<Result<String, String>>,
-        progress_tx: mpsc::Sender<StorageCompactProgress>,
-    },
     /// 就绪检测（wait_for_ready_signal）
     WaitReady {
         timeout: Duration,
@@ -243,9 +209,6 @@ pub(crate) enum ActorRequest {
 /// 可能持续数分钟且无进度事件（100GB 模块约 2 分钟量级）。空闲预算取
 /// 模块事务同样的 10 分钟，避免把健康的长任务误判为挂起。
 pub(crate) const ROTATE_PROGRESS_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// 空间压缩进度感知空闲超时（每收到一条进度行重置）。
-pub(crate) const STORAGE_PROGRESS_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[cfg(test)]
 mod tests {
@@ -278,31 +241,6 @@ mod tests {
         assert_eq!(p.files, 3);
         assert_eq!(p.chunks, 40);
         assert_eq!(p.bytes, 998877);
-    }
-
-    #[test]
-    fn test_storage_compact_progress_deserialize() {
-        let json = r#"{
-            "ok": true,
-            "op": "storage_compact_progress",
-            "stage": 2,
-            "before_bytes": 1000,
-            "after_bytes": 400,
-            "reclaimed_bytes": 600,
-            "records": 7,
-            "chunks": 3,
-            "bytes": 2048,
-            "live_bytes": 8192
-        }"#;
-        let p: StorageCompactProgress = serde_json::from_str(json).unwrap();
-        assert_eq!(p.stage, 2);
-        assert_eq!(p.before_bytes, 1000);
-        assert_eq!(p.after_bytes, 400);
-        assert_eq!(p.reclaimed_bytes, 600);
-        assert_eq!(p.records, 7);
-        assert_eq!(p.chunks, 3);
-        assert_eq!(p.bytes, 2048);
-        assert_eq!(p.live_bytes, 8192);
     }
 
     /// 跨层载荷预算：最大合法记录响应行必须落在读取上限内

@@ -223,7 +223,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import ActionButton from "../../components/common/verthys-ui/ActionButton.vue";
 import { MODULE_LABELS } from "../../constants/key_manager_const";
-import { useToastCenter } from "../../composables/useToastCenter";
+import { useToastCenter } from "../../composables/ui/useToastCenter";
 import {
   clearFixtureProfile,
   getFixtureProfile,

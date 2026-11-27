@@ -21,8 +21,8 @@ import {
   getSessionRemainingMs,
   getSessionTimeout,
   sessionIdleDeadlineRef,
-} from '../../lib/keyManager';
-import { useGlobalIdleScheduler } from '../useGlobalIdleScheduler';
+} from '../../lib/util/keyManager';
+import { useGlobalIdleScheduler } from '../app/useGlobalIdleScheduler';
 
 /**
  * useSessionTimer 选项

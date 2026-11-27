@@ -31,7 +31,7 @@ const TEXT_BEARING_ENTRANCES: readonly { file: string; name: string }[] = [
   { file: "../components/main-view/ModuleStage.vue", name: "hub-dissolve-out" },
   { file: "./security/qd-panel.css", name: "qd-core-dissolve" },
   { file: "../components/common/verthys-ui/VaultCardFilter.vue", name: "filter-panel-in" },
-  { file: "../components/management/ChangeKeyDialog.vue", name: "ck-axis-in" },
+  { file: "../components/management/keys/ChangeKeyDialog.vue", name: "ck-axis-in" },
   { file: "../components/modules/PhotoAlbum.vue", name: "select-bar-enter" },
 ];
 
@@ -70,12 +70,12 @@ const TEXT_BEARING_REVEALS: readonly { file: string; selector: string }[] = [
   { file: "../components/common/feedback/StatusRail.vue", selector: ".sr-rail-leave-active" },
   { file: "../components/common/feedback/StatusRail.vue", selector: ".sr-rail-enter-from" },
   { file: "../components/common/feedback/StatusRail.vue", selector: ".sr-rail-leave-to" },
-  /* 回退锚点弹窗的分区揭示：扫描证据 / 二次确认 / 未登记 UUID 承载文字，
+  /* 回退锚点弹窗的分区揭示：扫描证据 / 二次确认承载文字，
      展开只走高度与不透明度，文字层不做位移、缩放或滤镜 */
-  { file: "../components/management/AnchorManagerDialog.vue", selector: ".anchor-reveal-enter-active" },
-  { file: "../components/management/AnchorManagerDialog.vue", selector: ".anchor-reveal-leave-active" },
-  { file: "../components/management/AnchorManagerDialog.vue", selector: ".anchor-reveal-enter-from" },
-  { file: "../components/management/AnchorManagerDialog.vue", selector: ".anchor-reveal-leave-to" },
+  { file: "../components/management/anchors/AnchorManagerDialog.vue", selector: ".anchor-reveal-enter-active" },
+  { file: "../components/management/anchors/AnchorManagerDialog.vue", selector: ".anchor-reveal-leave-active" },
+  { file: "../components/management/anchors/AnchorManagerDialog.vue", selector: ".anchor-reveal-enter-from" },
+  { file: "../components/management/anchors/AnchorManagerDialog.vue", selector: ".anchor-reveal-leave-to" },
 ];
 
 /** 去注释：断言只针对声明本身 —— 注释里的措辞（如「严禁过渡 transform」）
